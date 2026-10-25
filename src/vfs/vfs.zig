@@ -199,6 +199,7 @@ pub const Vfs = struct {
         open: *const fn (ptr: *anyopaque, path: ?[]const u8, flags: OpenFlags) Error!File,
         delete: *const fn (ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void,
         access: *const fn (ptr: *anyopaque, path: []const u8, mode: AccessMode) Error!bool,
+        randomness: *const fn (ptr: *anyopaque, buf: []u8) void,
     };
 
     /// Opens `path`. A null path asks for an anonymous temporary file; the
@@ -226,6 +227,11 @@ pub const Vfs = struct {
 
     pub fn access(v: Vfs, path: []const u8, mode: AccessMode) Error!bool {
         return v.vtable.access(v.ptr, path, mode);
+    }
+
+    /// Fills `buf` with random bytes (xRandomness).
+    pub fn randomness(v: Vfs, buf: []u8) void {
+        v.vtable.randomness(v.ptr, buf);
     }
 };
 

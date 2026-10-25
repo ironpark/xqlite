@@ -205,7 +205,7 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall
 
 ## 로드맵
 
-- [ ] **Phase 0 · 기반**: VFS, Pager, Rollback Journal, 파일 헤더 파싱
+- [x] **Phase 0 · 기반**: VFS(POSIX·메모리), 페이지 캐시, Pager(롤백 저널), 파일 헤더 파싱 — Windows VFS·WAL·세이브포인트는 이후 단계
 - [ ] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기, 레코드 포맷, 기존 SQLite 파일 읽기
 - [ ] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
 - [ ] **Phase 3 · 완성도**: WAL, 인덱스 최적화, 윈도우 함수, JSON, sqllogictest 통과

@@ -43,6 +43,7 @@ pub const UnixVfs = struct {
         .open = open,
         .delete = delete,
         .access = access,
+        .randomness = randomness,
     };
 
     fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
@@ -112,6 +113,11 @@ pub const UnixVfs = struct {
             // that too.
             fsyncFd(d.handle, false) catch {};
         }
+    }
+
+    fn randomness(ptr: *anyopaque, buf: []u8) void {
+        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+        self.io.random(buf);
     }
 
     fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {

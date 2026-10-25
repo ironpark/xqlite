@@ -16,6 +16,15 @@ pub const MemVfs = struct {
     io: Io,
     mutex: Io.Mutex = .init,
     files: std.StringHashMapUnmanaged(*Node) = .empty,
+    /// What files report, so tests can simulate other kinds of storage.
+    sector_size: u32 = vfs.default_sector_size,
+    device_characteristics: vfs.DeviceCharacteristics = .{
+        .atomic = true,
+        .safe_append = true,
+        .sequential = true,
+        .powersafe_overwrite = true,
+        .subpage_read = true,
+    },
 
     /// Shared state of one named (or anonymous) file.
     const Node = struct {
@@ -55,6 +64,7 @@ pub const MemVfs = struct {
         .open = open,
         .delete = delete,
         .access = access,
+        .randomness = randomness,
     };
 
     fn destroyNode(self: *MemVfs, node: *Node) void {
@@ -116,6 +126,11 @@ pub const MemVfs = struct {
             // Like unlink(2): open handles keep the data alive.
             node.delete_on_close = true;
         }
+    }
+
+    fn randomness(ptr: *anyopaque, buf: []u8) void {
+        const self: *MemVfs = @ptrCast(@alignCast(ptr));
+        self.io.random(buf);
     }
 
     fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {
@@ -277,18 +292,12 @@ const MemFile = struct {
         return f.node.reserved;
     }
 
-    fn sectorSize(_: *anyopaque) u32 {
-        return vfs.default_sector_size;
+    fn sectorSize(ptr: *anyopaque) u32 {
+        return cast(ptr).owner.sector_size;
     }
 
-    fn deviceCharacteristics(_: *anyopaque) vfs.DeviceCharacteristics {
-        return .{
-            .atomic = true,
-            .safe_append = true,
-            .sequential = true,
-            .powersafe_overwrite = true,
-            .subpage_read = true,
-        };
+    fn deviceCharacteristics(ptr: *anyopaque) vfs.DeviceCharacteristics {
+        return cast(ptr).owner.device_characteristics;
     }
 };
 

@@ -10,6 +10,9 @@ pub const vfs = @import("vfs/vfs.zig");
 pub const MemVfs = @import("vfs/mem.zig").MemVfs;
 pub const UnixVfs = @import("vfs/unix.zig").UnixVfs;
 
+pub const pager = @import("pager/pager.zig");
+pub const pcache = @import("pager/pcache.zig");
+
 pub const btree = struct {
     pub const header = @import("btree/header.zig");
 };

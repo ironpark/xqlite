@@ -15,3 +15,6 @@ zig-out/
 *.dll
 *.exe
 coverage/
+
+# Porting reference (tools/fetch-sqlite.sh)
+ref/

@@ -1,18 +1,37 @@
-//! By convention, root.zig is the root source file when making a package.
+//! xqlite: an embedded SQL database ported from SQLite to Zig.
+//!
+//! Layers are ported bottom-up; see README.md for the roadmap.
+
 const std = @import("std");
-const Io = std.Io;
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
+pub const varint = @import("util/varint.zig");
+
+pub const vfs = @import("vfs/vfs.zig");
+pub const MemVfs = @import("vfs/mem.zig").MemVfs;
+pub const UnixVfs = @import("vfs/unix.zig").UnixVfs;
+
+pub const btree = struct {
+    pub const header = @import("btree/header.zig");
+};
+
+/// The SQLite release this port tracks (SQLITE_VERSION_NUMBER). Keep in sync
+/// with SQLITE_VERSION in tools/fetch-sqlite.sh.
+pub const sqlite_version_number = 3054001;
+
+test {
+    std.testing.refAllDecls(@This());
+    // refAllDecls does not descend into the `btree` namespace struct.
+    _ = btree.header;
 }
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+test "read header of a database written by sqlite3" {
+    const bytes = @embedFile("testdata/basic.db");
+    const h = try btree.header.Header.parse(bytes[0..btree.header.size]);
+    try std.testing.expectEqual(@as(u32, 1024), h.page_size);
+    try std.testing.expectEqual(@as(u32, 42), h.user_version);
+    try std.testing.expectEqual(@as(u32, 1481724236), h.application_id);
+    try std.testing.expectEqual(btree.header.TextEncoding.utf8, h.text_encoding);
+    try std.testing.expectEqual(@as(u32, 4), h.schema_format);
+    try std.testing.expect(h.inHeaderSizeValid());
+    try std.testing.expectEqual(@as(u32, bytes.len / 1024), h.database_size);
 }

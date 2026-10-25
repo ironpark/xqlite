@@ -180,6 +180,12 @@ zig build run          # CLI 실행
 zig build test         # 단위 테스트
 ```
 
+포팅 기준 SQLite 소스(현재 3.54.1)는 `ref/sqlite`에 받아 두고 참고합니다. 이 디렉토리는 git에서 제외됩니다.
+
+```sh
+./tools/fetch-sqlite.sh
+```
+
 크로스 컴파일:
 
 ```sh

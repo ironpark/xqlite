@@ -5,6 +5,7 @@
 const std = @import("std");
 const btree = @import("btree.zig");
 const page = @import("page.zig");
+const ptrmap = @import("ptrmap.zig");
 
 const Btree = btree.Btree;
 const Pgno = btree.Pgno;
@@ -27,13 +28,6 @@ pub const Report = struct {
         r.* = undefined;
     }
 };
-
-/// Pointer-map entry types (PTRMAP_*).
-const ptrmap_rootpage = 1;
-const ptrmap_freepage = 2;
-const ptrmap_overflow1 = 3;
-const ptrmap_overflow2 = 4;
-const ptrmap_btree = 5;
 
 const Prefix = enum { none, freelist, tree_page, tree_cell, tree_right_child };
 
@@ -101,7 +95,7 @@ const Check = struct {
 
     /// Port of checkPtrmap().
     fn checkPtrmap(c: *Check, child: Pgno, e_type: u8, parent: Pgno) void {
-        const entry = ptrmapGet(c.bt, child) catch |err| {
+        const entry = ptrmap.get(c.bt, child) catch |err| {
             if (err == error.OutOfMemory) c.oom = true;
             c.appendMsg("Failed to read ptrmap key={d}", .{child});
             return;
@@ -131,21 +125,21 @@ const Check = struct {
             const data = pg.data.ptr;
             if (is_freelist) {
                 const n_leaf = get4(data + 4);
-                if (bt.auto_vacuum) c.checkPtrmap(pgno, ptrmap_freepage, 0);
+                if (bt.auto_vacuum) c.checkPtrmap(pgno, ptrmap.free_page, 0);
                 if (n_leaf > bt.usable_size / 4 - 2) {
                     c.appendMsg("freelist leaf count too big on page {d}", .{pgno});
                     n -= 1;
                 } else {
                     for (0..n_leaf) |i| {
                         const free_page = get4(data + 8 + i * 4);
-                        if (bt.auto_vacuum) c.checkPtrmap(free_page, ptrmap_freepage, 0);
+                        if (bt.auto_vacuum) c.checkPtrmap(free_page, ptrmap.free_page, 0);
                         _ = c.checkRef(free_page);
                     }
                     n -= n_leaf;
                 }
             } else if (bt.auto_vacuum and n > 0) {
                 // The next page of the chain must point back here.
-                c.checkPtrmap(get4(data), ptrmap_overflow2, pgno);
+                c.checkPtrmap(get4(data), ptrmap.overflow2, pgno);
             }
             pgno = get4(data);
         }
@@ -227,7 +221,7 @@ const Check = struct {
             const right = get4(data + hdr + 8);
             if (bt.auto_vacuum) {
                 c.prefix = .tree_right_child;
-                c.checkPtrmap(right, ptrmap_btree, pgno);
+                c.checkPtrmap(right, ptrmap.btree_page, pgno);
             }
             depth = c.checkTreePage(right, &max_key, max_key);
             key_can_be_equal = false;
@@ -269,13 +263,13 @@ const Check = struct {
             if (info.n_payload > info.n_local) {
                 const n_page = (info.n_payload - info.n_local + usable - 5) / (usable - 4);
                 const ovfl = get4(cell + info.n_size - 4);
-                if (bt.auto_vacuum) c.checkPtrmap(ovfl, ptrmap_overflow1, pgno);
+                if (bt.auto_vacuum) c.checkPtrmap(ovfl, ptrmap.overflow1, pgno);
                 c.checkList(false, ovfl, n_page);
             }
 
             if (!pg.leaf) {
                 const child = get4(cell);
-                if (bt.auto_vacuum) c.checkPtrmap(child, ptrmap_btree, pgno);
+                if (bt.auto_vacuum) c.checkPtrmap(child, ptrmap.btree_page, pgno);
                 const d2 = c.checkTreePage(child, &max_key, max_key);
                 key_can_be_equal = false;
                 if (d2 != depth) {
@@ -376,33 +370,6 @@ fn heapPull(heap: []u32) ?u32 {
     return out;
 }
 
-/// Port of ptrmapPageno(): the pointer-map page holding the entry for
-/// `pgno` (`pgno` itself if it is a pointer-map page). 0 for page 1.
-pub fn ptrmapPageno(bt: *const Btree, pgno: Pgno) Pgno {
-    if (pgno < 2) return 0;
-    const per_page = bt.usable_size / 5 + 1;
-    const i_ptrmap = (pgno - 2) / per_page;
-    var ret = i_ptrmap * per_page + 2;
-    if (bt.pager.isLockPage(ret)) ret += 1;
-    return ret;
-}
-
-const PtrmapEntry = struct { e_type: u8, parent: Pgno };
-
-/// Port of ptrmapGet().
-fn ptrmapGet(bt: *Btree, key: Pgno) Error!PtrmapEntry {
-    const i_ptrmap = ptrmapPageno(bt, key);
-    const pg = try bt.pager.get(i_ptrmap, .{});
-    defer bt.pager.unref(pg);
-    if (key <= i_ptrmap) return error.Corrupt;
-    const offset = 5 * (key - i_ptrmap - 1);
-    if (offset > bt.usable_size - 5) return error.Corrupt;
-    const data = pg.data.ptr;
-    const e: PtrmapEntry = .{ .e_type = data[offset], .parent = get4(data + offset + 1) };
-    if (e.e_type < 1 or e.e_type > 5) return error.Corrupt;
-    return e;
-}
-
 /// Port of sqlite3BtreeIntegrityCheck(). `roots` lists the root pages of
 /// every b-tree. If roots[0] is 0 this is a partial check of the trees
 /// that follow: unreferenced pages are not reported, and the freelist is
@@ -462,7 +429,7 @@ pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u
             if (c.mx_err == 0) break;
             c.n_row = 0;
             if (root != 0) {
-                if (bt.auto_vacuum and root > 1 and !partial) c.checkPtrmap(root, ptrmap_rootpage, 0);
+                if (bt.auto_vacuum and root > 1 and !partial) c.checkPtrmap(root, ptrmap.root_page, 0);
                 c.v0 = root;
                 var not_used: i64 = undefined;
                 _ = c.checkTreePage(root, &not_used, std.math.maxInt(i64));
@@ -473,7 +440,7 @@ pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u
         if (!partial) {
             var i: Pgno = 1;
             while (i <= c.n_ck_page and c.mx_err != 0) : (i += 1) {
-                const is_ptrmap = bt.auto_vacuum and ptrmapPageno(bt, i) == i;
+                const is_ptrmap = bt.auto_vacuum and ptrmap.isPage(bt, i);
                 if (!c.pg_ref.isSet(i) and !is_ptrmap) c.appendMsg("Page {d}: never used", .{i});
                 if (c.pg_ref.isSet(i) and is_ptrmap) c.appendMsg("Page {d}: pointer map referenced", .{i});
             }

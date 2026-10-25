@@ -18,10 +18,13 @@ const usage =
     \\                            phase one, leaving a hot journal (testing aid)
     \\  check <file>              run the b-tree integrity check on every table
     \\                            and index listed in the schema
-    \\  bt-fill <file> <n>        create table t and index t_b with n rows, then
-    \\                            delete every 7th row (testing aid)
+    \\  bt-fill <file> <n> [av]   create table t and index t_b with n rows, then
+    \\                            delete every 7th row; av sets the auto-vacuum
+    \\                            mode of a new file: none, full or incremental
+    \\                            (testing aid)
     \\  bt-churn <file>           delete, update and insert rows of t and t_b
     \\                            (testing aid, see tools/interop-btree.sh)
+    \\  bt-vacuum <file>          run an incremental vacuum to completion
     \\
 ;
 
@@ -44,10 +47,16 @@ pub fn main(init: std.process.Init) !void {
         try crashWrite(arena, io, args[2], fill);
     } else if (args.len == 3 and std.mem.eql(u8, args[1], "check")) {
         try check(arena, io, args[2], out);
-    } else if (args.len == 4 and std.mem.eql(u8, args[1], "bt-fill")) {
-        try btFill(arena, io, args[2], try std.fmt.parseInt(u32, args[3], 10));
+    } else if ((args.len == 4 or args.len == 5) and std.mem.eql(u8, args[1], "bt-fill")) {
+        const av = if (args.len == 5)
+            std.meta.stringToEnum(xqlite.btree.AutoVacuum, args[4]) orelse return error.BadAutoVacuumMode
+        else
+            .none;
+        try btFill(arena, io, args[2], try std.fmt.parseInt(u32, args[3], 10), av);
     } else if (args.len == 3 and std.mem.eql(u8, args[1], "bt-churn")) {
         try btChurn(arena, io, args[2]);
+    } else if (args.len == 3 and std.mem.eql(u8, args[1], "bt-vacuum")) {
+        try btVacuum(arena, io, args[2]);
     } else {
         std.debug.print("{s}", .{usage});
         std.process.exit(2);
@@ -140,10 +149,10 @@ fn crashWrite(gpa: std.mem.Allocator, io: Io, path: []const u8, fill: u8) !void 
 
 // ============================================================= b-tree tools
 
-fn openBtree(gpa: std.mem.Allocator, io: Io, path: []const u8) !*Btree {
+fn openBtree(gpa: std.mem.Allocator, io: Io, path: []const u8, opts: xqlite.btree.Options) !*Btree {
     const unix = try gpa.create(xqlite.UnixVfs);
     unix.* = .init(gpa, io);
-    return Btree.open(gpa, unix.interface(), path, .{});
+    return Btree.open(gpa, unix.interface(), path, opts);
 }
 
 /// Root pages of the schema objects, by name.
@@ -163,7 +172,7 @@ fn schemaRoots(gpa: std.mem.Allocator, bt: *Btree) !std.StringArrayHashMapUnmana
 }
 
 fn check(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !void {
-    const bt = try openBtree(gpa, io, path);
+    const bt = try openBtree(gpa, io, path, .{});
     defer bt.close();
     try bt.beginTrans(.read);
     defer bt.commit() catch {};
@@ -223,8 +232,8 @@ fn deleteRow(gpa: std.mem.Allocator, tc: *Cursor, ic: *Cursor, rowid: i64) !void
     try tc.delete(.{ .save_position = true });
 }
 
-fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32) !void {
-    const bt = try openBtree(gpa, io, path);
+fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32, av: xqlite.btree.AutoVacuum) !void {
+    const bt = try openBtree(gpa, io, path, .{ .auto_vacuum = av });
     defer bt.close();
     try bt.beginTrans(.write);
     errdefer bt.rollback(null, false) catch {};
@@ -269,7 +278,7 @@ fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32) !void {
 }
 
 fn btChurn(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
-    const bt = try openBtree(gpa, io, path);
+    const bt = try openBtree(gpa, io, path, .{});
     defer bt.close();
     try bt.beginTrans(.write);
     errdefer bt.rollback(null, false) catch {};
@@ -315,5 +324,14 @@ fn btChurn(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
             try insertRecord(&ic, null, &.{ .{ .text = b }, .{ .int = rowid } });
         }
     }
+    try bt.commit();
+}
+
+fn btVacuum(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
+    const bt = try openBtree(gpa, io, path, .{});
+    defer bt.close();
+    try bt.beginTrans(.write);
+    errdefer bt.rollback(null, false) catch {};
+    while (try bt.incrVacuum()) {}
     try bt.commit();
 }

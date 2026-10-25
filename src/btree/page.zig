@@ -22,6 +22,7 @@ const std = @import("std");
 const pager_mod = @import("../pager/pager.zig");
 const varint = @import("../util/varint.zig");
 const btree = @import("btree.zig");
+const ptrmap = @import("ptrmap.zig");
 
 const Btree = btree.Btree;
 const Error = btree.Error;
@@ -620,6 +621,7 @@ pub const MemPage = extern struct {
         @memcpy(p.data[idx + 4 ..][0 .. sz - 4], cell[4..sz]);
         put4(p.data + idx, child);
         p.insertCellPointer(i, idx);
+        if (p.bt.auto_vacuum) try ptrmap.putOvflPtr(p, p, p.data + idx);
     }
 
     /// Port of insertCellFast(): `insertCell` for leaf cells built in a
@@ -635,6 +637,7 @@ pub const MemPage = extern struct {
         p.n_free -= @intCast(2 + sz);
         @memcpy(p.data[idx..][0..sz], cell[0..sz]);
         p.insertCellPointer(i, idx);
+        if (p.bt.auto_vacuum) try ptrmap.putOvflPtr(p, p, p.data + idx);
     }
 
     fn addOverflowCell(p: *MemPage, i: usize, cell: [*]u8) void {

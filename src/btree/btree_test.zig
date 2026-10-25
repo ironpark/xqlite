@@ -371,7 +371,7 @@ test "btree: clear and drop tables, meta values" {
         for (1..400) |k| try insertRow(&cur, @intCast(k));
     }
     try testing.expectEqual(@as(i64, 399), try bt.clearTable(t1));
-    try bt.dropTable(t2);
+    try testing.expectEqual(@as(Pgno, 0), try bt.dropTable(t2));
     try expectIntact(bt, &.{t1});
     try bt.updateMeta(.user_version, 42);
     try bt.updateMeta(.schema_version, 7);
@@ -590,23 +590,138 @@ test "btree: modifies a database written by sqlite3" {
     try bt.commit();
 }
 
-test "btree: auto-vacuum databases open read-only" {
+test "btree: modifies an auto-vacuum database written by sqlite3" {
     var env = Env.init();
     defer env.deinit();
     try env.load(@embedFile("../testdata/autovacuum.db"));
     const bt = try env.open(.{});
     defer bt.close();
+    try testing.expectEqual(btree.AutoVacuum.full, bt.getAutoVacuum());
 
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.write);
     const s = try readSchema(bt);
     // The pointer map is checked too.
     try expectIntact(bt, &.{ s.table, s.index });
+    const n_before = bt.lastPage();
     var cur: Cursor = undefined;
-    try bt.cursor(&cur, s.table, .{});
+    try bt.cursor(&cur, s.table, .{ .write = true });
     try testing.expectEqual(@as(i64, 704), try cur.count());
+    // Delete most rows (the index is left alone; only the b-tree level
+    // matters here), then grow one row into an overflow chain.
+    var ok = try cur.first();
+    while (ok) {
+        if (@mod(cur.integerKey(), 4) != 0) try cur.delete(.{ .save_position = true });
+        ok = try cur.next();
+    }
+    var big: [5000]u8 = undefined;
+    fillPayload(&big, 4);
+    try cur.insert(.{ .rowid = 4, .data = &big }, .{});
     cur.close();
     try bt.commit();
-    try testing.expectError(error.ReadOnly, bt.beginTrans(.write));
+
+    // Commit moved the free pages out of the file.
+    try bt.beginTrans(.read);
+    try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
+    try testing.expect(bt.lastPage() < n_before);
+    try expectIntact(bt, &.{ s.table, s.index });
+    try bt.cursor(&cur, s.table, .{});
+    try testing.expectEqual(@as(i64, 704 / 4), try cur.count());
+    try testing.expectEqual(std.math.Order.eq, try cur.tableMoveto(4, false));
+    var got: [5000]u8 = undefined;
+    try cur.payload(0, &got);
+    try testing.expectEqualSlices(u8, &big, &got);
+    cur.close();
+    try bt.commit();
+}
+
+test "btree: auto-vacuum keeps root pages packed" {
+    var env = Env.init();
+    defer env.deinit();
+    const bt = try env.open(.{ .page_size = 512, .auto_vacuum = .full });
+    defer bt.close();
+
+    try bt.beginTrans(.write);
+    var roots: [5]Pgno = undefined;
+    for (&roots) |*r| {
+        r.* = try bt.createTable(.intkey);
+        // Fill the table so the next root has to displace its pages.
+        var cur: Cursor = undefined;
+        try bt.cursor(&cur, r.*, .{ .write = true });
+        defer cur.close();
+        for (1..60) |k| try insertRow(&cur, @intCast(k));
+    }
+    // Roots follow page 1 and the first pointer-map page.
+    try testing.expectEqualSlices(Pgno, &.{ 3, 4, 5, 6, 7 }, &roots);
+    try testing.expectEqual(@as(u32, 7), bt.getMeta(.largest_root_page));
+    try expectIntact(bt, &roots);
+
+    // Dropping a middle table moves the last root into its place.
+    try testing.expectEqual(@as(Pgno, 7), try bt.dropTable(4));
+    roots = .{ 3, 4, 5, 6, 0 };
+    try testing.expectEqual(@as(u32, 6), bt.getMeta(.largest_root_page));
+    try expectIntact(bt, roots[0..4]);
+    // Dropping the last root just frees it.
+    try testing.expectEqual(@as(Pgno, 0), try bt.dropTable(6));
+    try expectIntact(bt, roots[0..3]);
+    try bt.commit();
+
+    try bt.beginTrans(.read);
+    try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
+    try expectIntact(bt, roots[0..3]);
+    var present: [61]bool = @splat(true);
+    present[0] = false;
+    present[60] = false;
+    for (roots[0..3]) |r| try expectTable(bt, r, &present);
+    try bt.commit();
+}
+
+test "btree: incremental vacuum frees pages on request" {
+    var env = Env.init();
+    defer env.deinit();
+    const bt = try env.open(.{ .page_size = 512, .auto_vacuum = .incremental });
+    defer bt.close();
+
+    try bt.beginTrans(.write);
+    const root = try bt.createTable(.intkey);
+    var cur: Cursor = undefined;
+    try bt.cursor(&cur, root, .{ .write = true });
+    for (1..300) |k| try insertRow(&cur, @intCast(k));
+    cur.close();
+    try bt.commit();
+
+    try bt.beginTrans(.write);
+    try bt.cursor(&cur, root, .{ .write = true });
+    for (1..300) |k| {
+        if (k % 3 == 0) continue;
+        try testing.expectEqual(std.math.Order.eq, try cur.tableMoveto(@intCast(k), false));
+        try cur.delete(.{});
+    }
+    cur.close();
+    try bt.commit();
+
+    // Commit leaves the free pages in place.
+    try bt.beginTrans(.write);
+    const n_free = bt.getMeta(.free_page_count);
+    const n_page = bt.lastPage();
+    try testing.expect(n_free > 10);
+    for (0..10) |_| try testing.expect(try bt.incrVacuum());
+    try testing.expectEqual(n_free - 10, bt.getMeta(.free_page_count));
+    try expectIntact(bt, &.{root});
+    try bt.commit();
+
+    try bt.beginTrans(.write);
+    try testing.expect(bt.lastPage() <= n_page - 10);
+    while (try bt.incrVacuum()) {}
+    try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
+    try bt.commit();
+
+    try bt.beginTrans(.read);
+    try expectIntact(bt, &.{root});
+    var present: [301]bool = @splat(false);
+    var k: usize = 3;
+    while (k < 300) : (k += 3) present[k] = true;
+    try expectTable(bt, root, &present);
+    try bt.commit();
 }
 
 test "btree: corrupt pages are reported, not trusted" {
@@ -635,10 +750,15 @@ test "btree: corrupt pages are reported, not trusted" {
 /// Random inserts, replacements and deletes on a table and an index of the
 /// same rows, checked against a model. Commits and rollbacks are mixed in,
 /// and a tiny cache forces the pager to spill pages mid-transaction.
-fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, seed: u64) !void {
+fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, av: btree.AutoVacuum, seed: u64) !void {
     var env = Env.init();
     defer env.deinit();
-    const bt = try env.open(.{ .page_size = page_size, .cache_size = 10, .secure_delete = secure_delete });
+    const bt = try env.open(.{
+        .page_size = page_size,
+        .cache_size = 10,
+        .secure_delete = secure_delete,
+        .auto_vacuum = av,
+    });
     defer bt.close();
     const ki: record.KeyInfo = .{ .gpa = gpa, .sort_orders = &.{ .asc, .asc } };
 
@@ -690,6 +810,9 @@ fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, seed: u64) !void
                 model[k] = len;
             }
         }
+        if (av == .incremental) {
+            for (0..rand.uintLessThan(u32, 20)) |_| _ = try bt.incrVacuum();
+        }
         if (round % 4 == 3) {
             try bt.rollback(null, false);
             model = committed;
@@ -701,6 +824,7 @@ fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, seed: u64) !void
         try bt.beginTrans(.read);
         defer bt.commit() catch unreachable;
         try expectIntact(bt, &.{ t_root, i_root });
+        if (av == .full) try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
         var tc: Cursor = undefined;
         try bt.cursor(&tc, t_root, .{});
         defer tc.close();
@@ -725,9 +849,16 @@ fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, seed: u64) !void
 }
 
 test "btree: random operations match a model" {
-    try randomOps(512, .off, 1);
-    try randomOps(1024, .on, 2);
-    try randomOps(4096, .fast, 3);
+    try randomOps(512, .off, .none, 1);
+    try randomOps(1024, .on, .none, 2);
+    try randomOps(4096, .fast, .none, 3);
+}
+
+test "btree: random operations match a model with auto-vacuum" {
+    try randomOps(512, .off, .full, 4);
+    try randomOps(1024, .on, .full, 5);
+    try randomOps(512, .fast, .incremental, 6);
+    try randomOps(4096, .off, .incremental, 7);
 }
 
 test "btree: page 1 as a table root grows and shrinks" {

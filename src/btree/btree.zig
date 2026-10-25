@@ -10,10 +10,13 @@
 //! `Btree` is one open database (BtShared and Btree merged: there is no
 //! shared cache). `Cursor` walks and modifies one b-tree.
 //!
-//! Not ported yet: writing auto-vacuum databases (they open read-only, as
-//! in a SQLITE_OMIT_AUTOVACUUM build), WAL databases (refused, as with
-//! SQLITE_OMIT_WAL), savepoints and statement transactions, shared cache,
-//! incremental blob I/O and BtreeTransferRow.
+//! In auto-vacuum databases every page move also updates the pointer map
+//! (ptrmap.zig), and commit relocates pages to drop free pages from the
+//! end of the file.
+//!
+//! Not ported yet: WAL databases (refused, as with SQLITE_OMIT_WAL),
+//! savepoints and statement transactions, shared cache, incremental blob
+//! I/O and BtreeTransferRow.
 
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
@@ -21,6 +24,7 @@ const pager_mod = @import("../pager/pager.zig");
 const varint = @import("../util/varint.zig");
 pub const header = @import("header.zig");
 const page = @import("page.zig");
+const ptrmap = @import("ptrmap.zig");
 
 const Allocator = std.mem.Allocator;
 const Order = std.math.Order;
@@ -90,6 +94,15 @@ pub const SecureDelete = enum {
     fast,
 };
 
+/// PRAGMA auto_vacuum (BTREE_AUTOVACUUM_*).
+pub const AutoVacuum = enum {
+    none,
+    /// Free pages are removed from the file at every commit.
+    full,
+    /// Free pages stay until PRAGMA incremental_vacuum.
+    incremental,
+};
+
 pub const Options = struct {
     /// Page size for a new database. Existing files use their own.
     page_size: u32 = header.default_page_size,
@@ -103,6 +116,10 @@ pub const Options = struct {
     /// PRAGMA cell_size_check.
     cell_size_check: bool = false,
     secure_delete: SecureDelete = .off,
+    /// Auto-vacuum mode for a new database. Existing files use their own.
+    auto_vacuum: AutoVacuum = .none,
+    /// An anonymous temporary database (ephemeral tables).
+    temp: bool = false,
 };
 
 /// Compares stored index keys against a search key.
@@ -157,6 +174,8 @@ pub const Btree = struct {
     cell_size_check: bool,
     auto_vacuum: bool = false,
     incr_vacuum: bool = false,
+    /// An incremental vacuum shrank `n_page`; truncate at commit.
+    do_truncate: bool = false,
 
     page_size: u32,
     usable_size: u32,
@@ -197,6 +216,7 @@ pub const Btree = struct {
             .cache_size = opts.cache_size,
             .busy_handler = opts.busy_handler,
             .reiniter = pageReinit,
+            .temp = opts.temp,
         });
         errdefer p.close();
 
@@ -211,6 +231,8 @@ pub const Btree = struct {
             .cell_size_check = opts.cell_size_check,
             .page_size = opts.page_size,
             .usable_size = opts.page_size,
+            .auto_vacuum = opts.auto_vacuum != .none,
+            .incr_vacuum = opts.auto_vacuum == .incremental,
         };
         var reserve: u8 = 0;
         if (header.pageSize(&hdr)) |page_size| {
@@ -282,6 +304,21 @@ pub const Btree = struct {
 
     pub fn txnState(bt: *const Btree) TransState {
         return bt.in_trans;
+    }
+
+    /// Port of sqlite3BtreeSetAutoVacuum(). Fails with ReadOnly if the
+    /// database exists and the change would turn auto-vacuum on or off.
+    pub fn setAutoVacuum(bt: *Btree, mode: AutoVacuum) Error!void {
+        const av = mode != .none;
+        if (bt.page_size_fixed and av != bt.auto_vacuum) return error.ReadOnly;
+        bt.auto_vacuum = av;
+        bt.incr_vacuum = mode == .incremental;
+    }
+
+    /// Port of sqlite3BtreeGetAutoVacuum().
+    pub fn getAutoVacuum(bt: *const Btree) AutoVacuum {
+        if (!bt.auto_vacuum) return .none;
+        return if (bt.incr_vacuum) .incremental else .full;
     }
 
     // ======================================================= page helpers
@@ -406,8 +443,6 @@ pub const Btree = struct {
             bt.usable_size = h.usableSize();
             bt.auto_vacuum = h.autoVacuum();
             bt.incr_vacuum = h.incrementalVacuum();
-            // Writing would require maintaining the pointer map.
-            if (bt.auto_vacuum) bt.read_only = true;
         }
 
         // A cell needs room for a 2-byte pointer, a header of up to 17
@@ -512,7 +547,10 @@ pub const Btree = struct {
     /// Port of sqlite3BtreeCommitPhaseOne(): write and sync everything. Only
     /// finalizing the journal remains.
     pub fn commitPhaseOne(bt: *Btree) Error!void {
-        if (bt.in_trans == .write) try bt.pager.commitPhaseOne(false);
+        if (bt.in_trans != .write) return;
+        if (bt.auto_vacuum) try bt.autoVacuumCommit();
+        if (bt.do_truncate) bt.pager.truncateImage(bt.n_page);
+        try bt.pager.commitPhaseOne(false);
     }
 
     /// Port of sqlite3BtreeCommitPhaseTwo(). Cursors must be closed. With
@@ -535,6 +573,7 @@ pub const Btree = struct {
 
     /// Port of btreeEndTransaction().
     fn endTransaction(bt: *Btree) void {
+        bt.do_truncate = false;
         bt.in_trans = .none;
         bt.unlockIfUnused();
     }
@@ -659,65 +698,154 @@ pub const Btree = struct {
 
     // ===================================================== page allocation
 
-    /// Port of allocateBtreePage() (BTALLOC_ANY). Takes a page from the
-    /// freelist, preferring one close to `nearby`, or appends one. The page
-    /// is writable and referenced, its content undefined.
-    fn allocatePage(bt: *Btree, nearby: Pgno) Error!*MemPage {
+    /// How `allocatePage` uses its `nearby` argument (BTALLOC_*).
+    const AllocMode = enum {
+        /// Prefer a page close to `nearby`.
+        any,
+        /// Return `nearby` itself if it is on the freelist.
+        exact,
+        /// Return a page no larger than `nearby` if there is one.
+        le,
+    };
+
+    /// Port of allocateBtreePage(): take a page from the freelist, or
+    /// append one. The page is writable and referenced, its content
+    /// undefined. Modes other than `any` are only for auto-vacuum.
+    fn allocatePage(bt: *Btree, nearby: Pgno, mode: AllocMode) Error!*MemPage {
+        std.debug.assert(mode == .any or (nearby > 0 and bt.auto_vacuum));
         const p1 = bt.page1.?;
         const mx_page = bt.n_page;
         const n_free = get4(p1.data + 36);
         if (n_free >= mx_page) return error.Corrupt;
+        if (n_free == 0) return bt.appendPage();
 
-        if (n_free == 0) {
-            // Append a page.
-            try bt.pager.write(p1.db_page);
-            bt.n_page += 1;
-            if (bt.pager.isLockPage(bt.n_page)) bt.n_page += 1;
-            put4(p1.data + 28, bt.n_page);
-            const pg = try bt.getUnusedPage(bt.n_page, .{ .no_content = true });
-            errdefer releasePage(pg);
-            try bt.pager.write(pg.db_page);
-            return pg;
-        }
+        // Searching walks every trunk until the wanted page turns up.
+        const search_list = switch (mode) {
+            .any => false,
+            .le => true,
+            .exact => nearby <= mx_page and (try ptrmap.get(bt, nearby)).e_type == ptrmap.free_page,
+        };
 
         try bt.pager.write(p1.db_page);
         put4(p1.data + 36, n_free - 1);
-        const i_trunk = get4(p1.data + 32);
-        if (i_trunk > mx_page) return error.Corrupt;
-        const trunk = try bt.getUnusedPage(i_trunk, .{});
-        const k = get4(trunk.data + 4);
-        if (k == 0) {
-            // A trunk without leaves: allocate the trunk itself.
-            errdefer releasePage(trunk);
-            try bt.pager.write(trunk.db_page);
-            p1.data[32..36].* = trunk.data[0..4].*;
-            return trunk;
-        }
-        defer releasePage(trunk);
-        if (k > bt.usable_size / 4 - 2) return error.Corrupt;
 
-        // Take the leaf closest to `nearby`.
-        const a = trunk.data;
-        var closest: u32 = 0;
-        if (nearby > 0) {
-            var dist = absInt32(get4(a + 8) -% nearby);
-            for (1..k) |i| {
-                const d2 = absInt32(get4(a + 8 + i * 4) -% nearby);
-                if (d2 < dist) {
-                    closest = @intCast(i);
-                    dist = d2;
+        var trunk: ?*MemPage = null;
+        var prev: ?*MemPage = null;
+        defer {
+            if (trunk) |t| releasePage(t);
+            if (prev) |t| releasePage(t);
+        }
+        var n_search: u32 = 0;
+        while (true) {
+            if (prev) |pt| releasePage(pt);
+            prev = trunk;
+            trunk = null;
+            const i_trunk = if (prev) |pt| get4(pt.data) else get4(p1.data + 32);
+            if (i_trunk > mx_page or n_search > n_free) return error.Corrupt;
+            n_search += 1;
+            trunk = try bt.getUnusedPage(i_trunk, .{});
+            const t = trunk.?;
+            const k = get4(t.data + 4);
+
+            if (k == 0 and !search_list) {
+                // A trunk without leaves: allocate the trunk itself.
+                std.debug.assert(prev == null);
+                try bt.pager.write(t.db_page);
+                p1.data[32..36].* = t.data[0..4].*;
+                trunk = null;
+                return t;
+            }
+            if (k > bt.usable_size / 4 - 2) return error.Corrupt;
+
+            if (search_list and (nearby == i_trunk or (i_trunk < nearby and mode == .le))) {
+                // The trunk itself is the page wanted. Unlink it, promoting
+                // its first leaf to trunk if it has leaves.
+                try bt.pager.write(t.db_page);
+                var next_trunk = t.data[0..4].*;
+                if (k > 0) {
+                    const i_new_trunk = get4(t.data + 8);
+                    if (i_new_trunk > mx_page) return error.Corrupt;
+                    const nt = try bt.getUnusedPage(i_new_trunk, .{});
+                    defer releasePage(nt);
+                    try bt.pager.write(nt.db_page);
+                    nt.data[0..4].* = t.data[0..4].*;
+                    put4(nt.data + 4, k - 1);
+                    @memcpy(nt.data[8..][0 .. (k - 1) * 4], t.data[12..][0 .. (k - 1) * 4]);
+                    put4(&next_trunk, i_new_trunk);
+                }
+                if (prev) |pt| {
+                    try bt.pager.write(pt.db_page);
+                    pt.data[0..4].* = next_trunk;
+                } else {
+                    p1.data[32..36].* = next_trunk;
+                }
+                trunk = null;
+                return t;
+            }
+
+            if (k > 0) {
+                // Take a leaf: the first one no larger than `nearby` (le),
+                // or the one closest to it.
+                const a = t.data;
+                var closest: u32 = 0;
+                if (nearby > 0) {
+                    if (mode == .le) {
+                        for (0..k) |i| {
+                            if (get4(a + 8 + i * 4) <= nearby) {
+                                closest = @intCast(i);
+                                break;
+                            }
+                        }
+                    } else {
+                        var dist = absInt32(get4(a + 8) -% nearby);
+                        for (1..k) |i| {
+                            const d2 = absInt32(get4(a + 8 + i * 4) -% nearby);
+                            if (d2 < dist) {
+                                closest = @intCast(i);
+                                dist = d2;
+                            }
+                        }
+                    }
+                }
+                const pgno = get4(a + 8 + closest * 4);
+                if (pgno > mx_page or pgno < 2) return error.Corrupt;
+                if (!search_list or pgno == nearby or (pgno < nearby and mode == .le)) {
+                    try bt.pager.write(t.db_page);
+                    if (closest < k - 1) a[8 + closest * 4 ..][0..4].* = a[4 + k * 4 ..][0..4].*;
+                    put4(a + 4, k - 1);
+                    // A page freed earlier in this transaction may still need
+                    // its old content journaled; others can skip the read.
+                    const no_content = !bt.has_content.contains(pgno);
+                    const pg = try bt.getUnusedPage(pgno, .{ .no_content = no_content });
+                    errdefer releasePage(pg);
+                    try bt.pager.write(pg.db_page);
+                    return pg;
                 }
             }
+            std.debug.assert(search_list);
         }
-        const pgno = get4(a + 8 + closest * 4);
-        if (pgno > mx_page or pgno < 2) return error.Corrupt;
-        try bt.pager.write(trunk.db_page);
-        if (closest < k - 1) a[8 + closest * 4 ..][0..4].* = a[4 + k * 4 ..][0..4].*;
-        put4(a + 4, k - 1);
-        // A page freed earlier in this transaction may still need its old
-        // content journaled; others can skip the read.
-        const no_content = !bt.has_content.contains(pgno);
-        const pg = try bt.getUnusedPage(pgno, .{ .no_content = no_content });
+    }
+
+    /// The append half of allocateBtreePage(): extend the database by one
+    /// page (two if the next one must be a pointer-map page).
+    fn appendPage(bt: *Btree) Error!*MemPage {
+        const p1 = bt.page1.?;
+        // After an incremental vacuum, pages between the image and the end
+        // of the file may hold content a rollback needs: read (and journal)
+        // them instead of assuming they are blank.
+        const flags: pager_mod.GetFlags = .{ .no_content = !bt.do_truncate };
+        try bt.pager.write(p1.db_page);
+        bt.n_page += 1;
+        if (bt.pager.isLockPage(bt.n_page)) bt.n_page += 1;
+        if (bt.auto_vacuum and ptrmap.isPage(bt, bt.n_page)) {
+            const map = try bt.getUnusedPage(bt.n_page, flags);
+            defer releasePage(map);
+            try bt.pager.write(map.db_page);
+            bt.n_page += 1;
+            if (bt.pager.isLockPage(bt.n_page)) bt.n_page += 1;
+        }
+        put4(p1.data + 28, bt.n_page);
+        const pg = try bt.getUnusedPage(bt.n_page, flags);
         errdefer releasePage(pg);
         try bt.pager.write(pg.db_page);
         return pg;
@@ -753,6 +881,7 @@ pub const Btree = struct {
             try bt.pager.write(pg.?.db_page);
             @memset(pg.?.data[0..bt.page_size], 0);
         }
+        if (bt.auto_vacuum) try ptrmap.put(bt, pgno, ptrmap.free_page, 0);
 
         var i_trunk: Pgno = 0;
         if (n_free != 0) {
@@ -788,12 +917,25 @@ pub const Btree = struct {
         return bt.freePage2(pg, pg.pgno);
     }
 
-    /// Port of getOverflowPage() without the auto-vacuum shortcut: the
-    /// overflow page after `ovfl`, or 0.
-    fn nextOverflowPage(bt: *Btree, ovfl: Pgno) Error!Pgno {
-        const pg = try bt.pager.get(ovfl, .{});
-        defer bt.pager.unref(pg);
-        return get4(pg.data.ptr);
+    /// Port of getOverflowPage(): the overflow page after `ovfl`, or 0.
+    /// `page` is `ovfl` itself, referenced, unless `want_page` is false or
+    /// the pointer map answered without reading it.
+    fn getOverflowPage(bt: *Btree, ovfl: Pgno, want_page: bool) Error!struct { next: Pgno, page: ?*MemPage } {
+        if (bt.auto_vacuum) {
+            // Guess that the chain continues on the next page and check
+            // the guess against the pointer map.
+            var guess = ovfl + 1;
+            while (ptrmap.isReserved(bt, guess)) guess += 1;
+            if (guess <= bt.n_page) {
+                const e = try ptrmap.get(bt, guess);
+                if (e.e_type == ptrmap.overflow2 and e.parent == ovfl) return .{ .next = guess, .page = null };
+            }
+        }
+        const pg = try bt.getPage(ovfl, .{});
+        const next = get4(pg.data);
+        if (want_page) return .{ .next = next, .page = pg };
+        releasePage(pg);
+        return .{ .next = next, .page = null };
     }
 
     /// Port of clearCellOverflow(): free the overflow chain of a cell.
@@ -807,11 +949,11 @@ pub const Btree = struct {
             var next: Pgno = 0;
             var op: ?*MemPage = null;
             if (n_ovfl > 1) {
-                op = try bt.getPage(ovfl, .{});
-                next = get4(op.?.data);
-            } else {
-                op = bt.lookupPage(ovfl);
+                const r = try bt.getOverflowPage(ovfl, true);
+                next = r.next;
+                op = r.page;
             }
+            if (op == null) op = bt.lookupPage(ovfl);
             defer if (op) |o| bt.pager.unref(o.db_page);
             // No cursor should be using an overflow page of a cell being
             // deleted. More references mean it is not an overflow page.
@@ -884,7 +1026,23 @@ pub const Btree = struct {
             src = src[@min(n, src.len)..];
             space_left -= n;
             if (space_left == 0) {
-                const ovfl = try bt.allocatePage(pgno_ovfl);
+                // The pointer-map entry of the previous page in the chain.
+                const pgno_ptrmap = pgno_ovfl;
+                if (bt.auto_vacuum) {
+                    pgno_ovfl += 1;
+                    while (ptrmap.isReserved(bt, pgno_ovfl)) pgno_ovfl += 1;
+                }
+                const ovfl = try bt.allocatePage(pgno_ovfl, .any);
+                if (bt.auto_vacuum) {
+                    // Even the first page gets an entry now (completed when
+                    // the cell is inserted), or getOverflowPage() could
+                    // misread a stale one while freeing the chain.
+                    const e_type = if (pgno_ptrmap != 0) ptrmap.overflow2 else ptrmap.overflow1;
+                    ptrmap.put(bt, ovfl.pgno, e_type, pgno_ptrmap) catch |err| {
+                        releasePage(ovfl);
+                        return err;
+                    };
+                }
                 put4(prior, ovfl.pgno);
                 if (to_release) |r| releasePage(r);
                 to_release = ovfl;
@@ -906,7 +1064,7 @@ pub const Btree = struct {
     fn balanceQuick(bt: *Btree, parent: *MemPage, pg: *MemPage, space: *[13]u8) Error!void {
         std.debug.assert(pg.n_overflow == 1);
         if (pg.n_cell == 0) return error.Corrupt;
-        const new = try bt.allocatePage(0);
+        const new = try bt.allocatePage(0, .any);
         defer releasePage(new);
 
         var cells = [1][*]u8{pg.ap_ovfl[0]};
@@ -917,6 +1075,10 @@ pub const Btree = struct {
         b.ix_nx[0] = 2;
         try rebuildPage(&b, 0, 1, new);
         new.n_free = @intCast(bt.usable_size - new.cell_offset - 2 - sizes[0]);
+        if (bt.auto_vacuum) {
+            try ptrmap.put(bt, new.pgno, ptrmap.btree_page, parent.pgno);
+            if (sizes[0] > new.min_local) try ptrmap.putOvflPtr(new, new, cells[0]);
+        }
 
         // The divider is the largest rowid on `pg`: skip the payload size
         // of its last cell and copy the rowid varint.
@@ -947,9 +1109,10 @@ pub const Btree = struct {
     fn balanceDeeper(bt: *Btree, root: *MemPage) Error!*MemPage {
         std.debug.assert(root.n_overflow > 0);
         try bt.pager.write(root.db_page);
-        const child = try bt.allocatePage(root.pgno);
+        const child = try bt.allocatePage(root.pgno, .any);
         errdefer releasePage(child);
         try copyNodeContent(root, child);
+        if (bt.auto_vacuum) try ptrmap.put(bt, child.pgno, ptrmap.btree_page, root.pgno);
 
         const n = root.n_overflow;
         @memcpy(child.ai_ovfl[0..n], root.ai_ovfl[0..n]);
@@ -1224,14 +1387,19 @@ pub const Btree = struct {
                 const expected = @as(u32, 1) + @intFromBool(@as(i64, @intCast(j)) == @as(i64, i_parent_idx) - nx_div);
                 if (new.db_page.n_ref != expected) return error.Corrupt;
             } else {
-                const new = try bt.allocatePage(if (bulk) 1 else pgno);
+                const new = try bt.allocatePage(if (bulk) 1 else pgno, .any);
                 pgno = new.pgno;
                 new.zero(page_flags);
                 ap_new[j] = new;
                 n_new += 1;
                 cnt_old[j] = n_cell_total;
+                if (bt.auto_vacuum) try ptrmap.put(bt, new.pgno, ptrmap.btree_page, parent.pgno);
             }
         }
+
+        // Page numbers before the swap below.
+        var a_pgno: [nb + 2]Pgno = undefined;
+        for (0..n_new) |j| a_pgno[j] = ap_new[j].?.pgno;
 
         // Swap page numbers so the new pages are in ascending order, which
         // keeps table scans close to sequential I/O. N is at most 5.
@@ -1254,6 +1422,38 @@ pub const Btree = struct {
         if (page_flags & page.ptf_leaf == 0 and n_old != n_new) {
             const old = if (n_new > n_old) ap_new[n_old - 1].? else ap_old[n_old - 1].?;
             ap_new[n_new - 1].?.data[8..12].* = old.data[8..12].*;
+        }
+
+        // Pointer-map entries for cells changing pages: their child (on
+        // interior pages) and the start of their overflow chain. Dividers
+        // inserted into the parent are handled by insertCell, the right
+        // children of the siblings after the siblings are filled.
+        if (bt.auto_vacuum) {
+            var old = ap_new[0].?;
+            var new = old;
+            var cnt_old_next: u32 = @as(u32, new.n_cell) + new.n_overflow;
+            var i_new: usize = 0;
+            var i_old: usize = 0;
+            for (0..b.n_cell) |ci| {
+                const cell = b.cells[ci];
+                while (ci == cnt_old_next) {
+                    i_old += 1;
+                    std.debug.assert(i_old < n_new or i_old < n_old);
+                    old = if (i_old < n_new) ap_new[i_old].? else ap_old[i_old].?;
+                    cnt_old_next += @as(u32, old.n_cell) + old.n_overflow + @intFromBool(!leaf_data);
+                }
+                if (ci == @as(usize, @intCast(cnt_new[i_new]))) {
+                    i_new += 1;
+                    new = ap_new[i_new].?;
+                    if (!leaf_data) continue;
+                }
+                // A cell that stays on the same page needs no update; a
+                // divider or overflow cell always does.
+                if (i_old >= n_new or new.pgno != a_pgno[i_old] or !within(cell, old.data, old.data_end)) {
+                    if (leaf_correction == 0) try ptrmap.put(bt, get4(cell), ptrmap.btree_page, new.pgno);
+                    if (b.cellSizeAt(@intCast(ci)) > new.min_local) try ptrmap.putOvflPtr(new, old, cell);
+                }
+            }
         }
 
         // Insert the new dividers into the parent.
@@ -1317,11 +1517,169 @@ pub const Btree = struct {
             try child.defragment(-1);
             try copyNodeContent(child, parent);
             try bt.freePage(child);
+        } else if (bt.auto_vacuum and leaf_correction == 0) {
+            // The right children of the siblings.
+            for (ap_new[0..n_new]) |new| try ptrmap.put(bt, get4(new.?.data + 8), ptrmap.btree_page, new.?.pgno);
         }
 
         // Free old pages that were not reused.
         if (n_new < n_old) {
             for (n_new..n_old) |j| try bt.freePage(ap_old[j].?);
+        }
+    }
+
+    // ========================================================= auto-vacuum
+
+    /// Port of invalidateAllOverflowCache(): pages are about to move, so
+    /// cached overflow page numbers may go stale.
+    fn invalidateAllOverflowCache(bt: *Btree) void {
+        var it = bt.cursors;
+        while (it) |c| : (it = c.next_cursor) c.flags.valid_ovfl = false;
+    }
+
+    /// Port of relocatePage(): move `pg` (whose pointer-map entry is
+    /// `e_type`/`ptr_page`) to the unused location `free_pgno`, fixing the
+    /// pointer to it and the pointer-map entries of the pages it points
+    /// to. `pg` stays referenced. See `Pager.movePage` for `is_commit`.
+    fn relocatePage(bt: *Btree, pg: *MemPage, e_type: u8, ptr_page: Pgno, free_pgno: Pgno, is_commit: bool) Error!void {
+        std.debug.assert(e_type == ptrmap.overflow2 or e_type == ptrmap.overflow1 or
+            e_type == ptrmap.btree_page or e_type == ptrmap.root_page);
+        const old_pgno = pg.pgno;
+        if (old_pgno < 3) return error.Corrupt;
+
+        try bt.pager.movePage(pg.db_page, free_pgno, is_commit);
+        pg.pgno = free_pgno;
+
+        if (e_type == ptrmap.btree_page or e_type == ptrmap.root_page) {
+            try setChildPtrmaps(pg);
+        } else {
+            const next_ovfl = get4(pg.data);
+            if (next_ovfl != 0) try ptrmap.put(bt, next_ovfl, ptrmap.overflow2, free_pgno);
+        }
+
+        if (e_type != ptrmap.root_page) {
+            const ptr_pg = try bt.getPage(ptr_page, .{});
+            defer releasePage(ptr_pg);
+            try bt.pager.write(ptr_pg.db_page);
+            try modifyPagePointer(ptr_pg, old_pgno, free_pgno, e_type);
+            try ptrmap.put(bt, free_pgno, e_type, ptr_page);
+        }
+    }
+
+    /// Port of incrVacuumStep(): make `last_pg` unused, moving its content
+    /// to a free page if it has any. `n_fin` is the size the database will
+    /// have when vacuuming is done. With `at_commit` the caller keeps calling
+    /// until the file is `n_fin` pages and then drops the whole freelist;
+    /// otherwise each call also shrinks `n_page`. Returns false when there
+    /// is nothing left to do.
+    fn incrVacuumStep(bt: *Btree, n_fin: Pgno, last_pg_arg: Pgno, at_commit: bool) Error!bool {
+        std.debug.assert(last_pg_arg > n_fin);
+        var last_pg = last_pg_arg;
+        if (!ptrmap.isReserved(bt, last_pg)) {
+            if (get4(bt.page1.?.data + 36) == 0) return false;
+            const e = try ptrmap.get(bt, last_pg);
+            if (e.e_type == ptrmap.root_page) return error.Corrupt;
+
+            if (e.e_type == ptrmap.free_page) {
+                // Take it off the freelist. Unneeded at commit: the whole
+                // freelist is dropped afterwards.
+                if (!at_commit) {
+                    const free_pg = try bt.allocatePage(last_pg, .exact);
+                    std.debug.assert(free_pg.pgno == last_pg);
+                    releasePage(free_pg);
+                }
+            } else {
+                const last = try bt.getPage(last_pg, .{});
+                defer releasePage(last);
+                // Without `at_commit`, swap with the first free page at or
+                // below `n_fin`; with it, keep allocating until one lands
+                // within the final size.
+                const mode: AllocMode = if (at_commit) .any else .le;
+                const near: Pgno = if (at_commit) 0 else n_fin;
+                var free_pgno: Pgno = undefined;
+                while (true) {
+                    const db_size = bt.n_page;
+                    const free_pg = try bt.allocatePage(near, mode);
+                    free_pgno = free_pg.pgno;
+                    releasePage(free_pg);
+                    if (free_pgno > db_size) return error.Corrupt;
+                    if (!at_commit or free_pgno <= n_fin) break;
+                }
+                std.debug.assert(free_pgno < last_pg);
+                try bt.relocatePage(last, e.e_type, e.parent, free_pgno, at_commit);
+            }
+        }
+
+        if (!at_commit) {
+            last_pg -= 1;
+            while (ptrmap.isReserved(bt, last_pg)) last_pg -= 1;
+            bt.do_truncate = true;
+            bt.n_page = last_pg;
+        }
+        return true;
+    }
+
+    /// Port of finalDbSize(): the size of a database of `n_orig` pages
+    /// after vacuuming away `n_free` free pages, along with the
+    /// pointer-map pages no longer needed.
+    fn finalDbSize(bt: *Btree, n_orig: Pgno, n_free: Pgno) Pgno {
+        const n_entry = bt.usable_size / 5;
+        const n_ptrmap = (n_free -% n_orig +% ptrmap.pageno(bt, n_orig) +% n_entry) / n_entry;
+        var n_fin = n_orig -% n_free -% n_ptrmap;
+        const lck = bt.pager.lockPage();
+        if (n_orig > lck and n_fin < lck) n_fin -%= 1;
+        while (ptrmap.isReserved(bt, n_fin)) n_fin -%= 1;
+        return n_fin;
+    }
+
+    /// Port of sqlite3BtreeIncrVacuum(): one step of PRAGMA
+    /// incremental_vacuum, freeing the last page of the file. Returns
+    /// false when there is nothing (left) to free. Requires a write
+    /// transaction.
+    pub fn incrVacuum(bt: *Btree) Error!bool {
+        std.debug.assert(bt.in_trans == .write);
+        if (!bt.auto_vacuum) return false;
+        const p1 = bt.page1.?;
+        const n_orig = bt.n_page;
+        const n_free = get4(p1.data + 36);
+        const n_fin = bt.finalDbSize(n_orig, n_free);
+        if (n_orig < n_fin or n_free >= n_orig) return error.Corrupt;
+        if (n_free == 0) return false;
+        try bt.saveAllCursors(0, null);
+        bt.invalidateAllOverflowCache();
+        if (!try bt.incrVacuumStep(n_fin, n_orig, false)) return false;
+        try bt.pager.write(p1.db_page);
+        put4(p1.data + 28, bt.n_page);
+        return true;
+    }
+
+    /// Port of autoVacuumCommit(): in full auto-vacuum mode, move pages
+    /// down into free slots so the file can be truncated to drop every
+    /// free page. Rolls the pager back on failure.
+    fn autoVacuumCommit(bt: *Btree) Error!void {
+        bt.invalidateAllOverflowCache();
+        if (bt.incr_vacuum) return;
+        const p1 = bt.page1.?;
+        const n_orig = bt.n_page;
+        // No database ends on a pointer-map page or the lock page.
+        if (ptrmap.isReserved(bt, n_orig)) return error.Corrupt;
+        const n_free = get4(p1.data + 36);
+        const n_fin = bt.finalDbSize(n_orig, n_free);
+        if (n_fin > n_orig) return error.Corrupt;
+
+        errdefer bt.pager.rollback() catch {};
+        if (n_fin < n_orig) try bt.saveAllCursors(0, null);
+        var i_free = n_orig;
+        while (i_free > n_fin) : (i_free -= 1) {
+            if (!try bt.incrVacuumStep(n_fin, i_free, true)) break;
+        }
+        if (n_free > 0) {
+            try bt.pager.write(p1.db_page);
+            put4(p1.data + 32, 0);
+            put4(p1.data + 36, 0);
+            put4(p1.data + 28, n_fin);
+            bt.do_truncate = true;
+            bt.n_page = n_fin;
         }
     }
 
@@ -1331,10 +1689,49 @@ pub const Btree = struct {
     /// root page.
     pub fn createTable(bt: *Btree, kind: TableKind) Error!Pgno {
         std.debug.assert(bt.in_trans == .write and !bt.read_only);
-        const root = try bt.allocatePage(1);
+        const root = if (bt.auto_vacuum) try bt.allocateRootPage() else try bt.allocatePage(1, .any);
         defer releasePage(root);
         root.zero(if (kind == .intkey) page.table_leaf else page.index_leaf);
         return root.pgno;
+    }
+
+    /// The auto-vacuum half of btreeCreateTable(). Root pages sit right
+    /// after page 1 (vacuuming never moves them), so the new root goes
+    /// after the largest one so far, moving any page already there.
+    /// Returns the root, writable and referenced.
+    fn allocateRootPage(bt: *Btree) Error!*MemPage {
+        // The page moved may be an overflow page.
+        bt.invalidateAllOverflowCache();
+        var pgno_root = bt.getMeta(.largest_root_page);
+        if (pgno_root > bt.n_page) return error.Corrupt;
+        pgno_root += 1;
+        while (ptrmap.isReserved(bt, pgno_root)) pgno_root += 1;
+        std.debug.assert(pgno_root >= 3);
+
+        const move = try bt.allocatePage(pgno_root, .exact);
+        var root = move;
+        if (move.pgno != pgno_root) {
+            // Got another page: move what is at pgno_root there.
+            const pgno_move = move.pgno;
+            const saved = bt.saveAllCursors(0, null);
+            releasePage(move);
+            try saved;
+
+            root = try bt.getPage(pgno_root, .{});
+            {
+                errdefer releasePage(root);
+                const e = try ptrmap.get(bt, pgno_root);
+                if (e.e_type == ptrmap.root_page or e.e_type == ptrmap.free_page) return error.Corrupt;
+                try bt.relocatePage(root, e.e_type, e.parent, pgno_move, false);
+            }
+            releasePage(root);
+            root = try bt.getPage(pgno_root, .{});
+        }
+        errdefer releasePage(root);
+        try bt.pager.write(root.db_page);
+        try ptrmap.put(bt, pgno_root, ptrmap.root_page, 0);
+        try bt.updateMeta(.largest_root_page, pgno_root);
+        return root;
     }
 
     /// Port of clearDatabasePage(): free every page below `pgno` and, if
@@ -1378,13 +1775,43 @@ pub const Btree = struct {
     }
 
     /// Port of sqlite3BtreeDropTable(): delete a b-tree and free its root.
-    pub fn dropTable(bt: *Btree, root: Pgno) Error!void {
+    /// In an auto-vacuum database the b-tree with the largest root page may
+    /// be moved into the freed root; its old root page number is returned
+    /// (else 0) so the schema can be updated.
+    pub fn dropTable(bt: *Btree, root: Pgno) Error!Pgno {
         std.debug.assert(bt.in_trans == .write and root >= 2);
         if (root > bt.n_page) return error.Corrupt;
         _ = try bt.clearTable(root);
         const pg = try bt.getPage(root, .{});
-        defer releasePage(pg);
-        try bt.freePage(pg);
+        if (!bt.auto_vacuum) {
+            defer releasePage(pg);
+            try bt.freePage(pg);
+            return 0;
+        }
+
+        var max_root = bt.getMeta(.largest_root_page);
+        var moved: Pgno = 0;
+        if (root == max_root) {
+            defer releasePage(pg);
+            try bt.freePage(pg);
+        } else {
+            // Keep the roots packed: move the last one into the gap.
+            releasePage(pg);
+            const move = try bt.getPage(max_root, .{});
+            {
+                defer releasePage(move);
+                try bt.relocatePage(move, ptrmap.root_page, 0, root, false);
+            }
+            const old = try bt.getPage(max_root, .{});
+            defer releasePage(old);
+            try bt.pager.write(old.db_page);
+            try bt.freePage(old);
+            moved = max_root;
+        }
+        max_root -= 1;
+        while (ptrmap.isReserved(bt, max_root)) max_root -= 1;
+        try bt.updateMeta(.largest_root_page, max_root);
+        return moved;
     }
 
     /// Port of sqlite3BtreeGetMeta().
@@ -1431,7 +1858,7 @@ fn absInt32(x: u32) u32 {
     return @intCast(-v);
 }
 
-fn orderToInt(o: Order) i32 {
+pub fn orderToInt(o: Order) i32 {
     return switch (o) {
         .lt => -1,
         .eq => 0,
@@ -1444,7 +1871,7 @@ fn within(p: [*]const u8, start: [*]const u8, end: [*]const u8) bool {
 }
 
 /// SQLITE_OVERFLOW(P,S,E): the range [S,E) crosses P.
-fn straddles(p: [*]const u8, start: [*]const u8, end: [*]const u8) bool {
+pub fn straddles(p: [*]const u8, start: [*]const u8, end: [*]const u8) bool {
     return @intFromPtr(start) < @intFromPtr(p) and @intFromPtr(end) > @intFromPtr(p);
 }
 
@@ -1702,6 +2129,56 @@ fn copyNodeContent(from: *MemPage, to: *MemPage) Error!void {
     to.is_init = false;
     try to.init();
     try to.computeFreeSpace();
+    // `to` now holds the pointers to the children and overflow chains.
+    if (to.bt.auto_vacuum) try setChildPtrmaps(to);
+}
+
+/// Port of setChildPtrmaps(): point the pointer-map entries of every
+/// child and overflow chain referenced from `pg` at `pg`.
+fn setChildPtrmaps(pg: *MemPage) Error!void {
+    if (!pg.is_init) try pg.init();
+    const bt = pg.bt;
+    for (0..pg.n_cell) |i| {
+        const cell = pg.findCell(i);
+        try ptrmap.putOvflPtr(pg, pg, cell);
+        if (!pg.leaf) try ptrmap.put(bt, get4(cell), ptrmap.btree_page, pg.pgno);
+    }
+    if (!pg.leaf) try ptrmap.put(bt, pg.rightChild(), ptrmap.btree_page, pg.pgno);
+}
+
+/// Port of modifyPagePointer(): change the pointer to `from` on `pg` to
+/// point at `to`. `e_type` says which pointer: a child (btree_page), the
+/// overflow chain of a cell (overflow1), or the next-page link of an
+/// overflow page (overflow2). `pg` must be writable.
+fn modifyPagePointer(pg: *MemPage, from: Pgno, to: Pgno, e_type: u8) Error!void {
+    if (e_type == ptrmap.overflow2) {
+        if (get4(pg.data) != from) return error.Corrupt;
+        put4(pg.data, to);
+        return;
+    }
+    if (!pg.is_init) try pg.init();
+    const usable_end = pg.data + pg.bt.usable_size;
+    for (0..pg.n_cell) |i| {
+        const cell = pg.findCell(i);
+        if (e_type == ptrmap.overflow1) {
+            const info = pg.parseCell(cell);
+            if (info.n_local < info.n_payload) {
+                if (@intFromPtr(cell + info.n_size) > @intFromPtr(usable_end)) return error.Corrupt;
+                if (get4(cell + info.n_size - 4) == from) {
+                    put4(cell + info.n_size - 4, to);
+                    return;
+                }
+            }
+        } else {
+            if (@intFromPtr(cell + 4) > @intFromPtr(usable_end)) return error.Corrupt;
+            if (get4(cell) == from) {
+                put4(cell, to);
+                return;
+            }
+        }
+    }
+    if (e_type != ptrmap.btree_page or pg.rightChild() != from) return error.Corrupt;
+    put4(pg.data + pg.hdr_offset + 8, to);
 }
 
 // ================================================================= cursor
@@ -1821,7 +2298,7 @@ pub const Cursor = struct {
     }
 
     /// Port of sqlite3BtreeClearCursor().
-    fn clear(cur: *Cursor) void {
+    pub fn clear(cur: *Cursor) void {
         if (cur.saved_key) |k| cur.bt.gpa.free(k);
         cur.saved_key = null;
         cur.state = .invalid;
@@ -2005,7 +2482,7 @@ pub const Cursor = struct {
                 next_page = if (cur.overflow[i_idx + 1] != 0)
                     cur.overflow[i_idx + 1]
                 else
-                    try bt.nextOverflowPage(next_page);
+                    (try bt.getOverflowPage(next_page, false)).next;
                 offset -= ovfl_size;
             } else {
                 const a = @min(buf.len, ovfl_size - offset);
@@ -2669,8 +3146,12 @@ pub const Cursor = struct {
             if (!pg.leaf) new_cell[0..4].* = old_cell[0..4].*;
             const info = try bt.clearCell(pg, old_cell);
             cur.flags.valid_ovfl = false;
-            if (info.n_size == sz_new and info.n_local == info.n_payload) {
-                // Same size: overwrite the old cell in place.
+            // Same size: overwrite the old cell in place. Not in auto-vacuum
+            // databases if the new cell might have an overflow chain, whose
+            // pointer-map entry insertCell would set.
+            if (info.n_size == sz_new and info.n_local == info.n_payload and
+                (!bt.auto_vacuum or sz_new < pg.min_local))
+            {
                 if (@intFromPtr(old_cell) < @intFromPtr(pg.data + pg.hdr_offset + 10)) return error.Corrupt;
                 if (@intFromPtr(old_cell) + sz_new > @intFromPtr(pg.data_end)) return error.Corrupt;
                 @memcpy(old_cell[0..sz_new], new_cell[0..sz_new]);

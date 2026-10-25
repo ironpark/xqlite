@@ -81,6 +81,9 @@ pub const Options = struct {
     busy_handler: ?BusyHandler = null,
     /// Called after a page's content is restored during rollback (xReiniter).
     reiniter: ?*const fn (page: *Page) void = null,
+    /// Open an anonymous temporary file instead of `path` (deleted on
+    /// close).
+    temp: bool = false,
 };
 
 pub const State = enum(u8) {
@@ -186,7 +189,7 @@ pub const Pager = struct {
         const journal_path = try std.mem.concat(gpa, u8, &.{ path, "-journal" });
         errdefer gpa.free(journal_path);
 
-        const fd = try v.open(path, .{
+        const fd = try v.open(if (opts.temp) null else path, .{
             .kind = .main_db,
             .read_write = !opts.read_only,
             .create = opts.create and !opts.read_only,
@@ -641,6 +644,43 @@ pub const Pager = struct {
         p.rekey(a, p.lck_pgno, flags_b);
         p.rekey(b, pgno_a, flags_a);
         p.rekey(a, pgno_b, flags_b);
+    }
+
+    /// Port of sqlite3PagerMovepage(): move the referenced page `pg` to
+    /// location `pgno`, discarding whatever was cached there (it must not
+    /// be referenced elsewhere). The page's extra data is the caller's to
+    /// update. `is_commit` promises the old location is not written again
+    /// in this transaction, so its pending journal sync can be forgotten.
+    pub fn movePage(p: *Pager, pg: *Page, pgno: Pgno, is_commit: bool) Error!void {
+        std.debug.assert(pg.n_ref > 0);
+        std.debug.assert(p.state == .writer_cachemod or p.state == .writer_dbmod);
+
+        // The journal must be synced before the old location is written:
+        // remember to keep that requirement on whatever lands there.
+        const need_sync_pgno: Pgno = if (pg.flags.need_sync and !is_commit) pg.pgno else 0;
+        pg.flags.need_sync = false;
+        if (p.lookup(pgno)) |old| {
+            if (old.n_ref > 1) {
+                p.unref(old);
+                return error.Corrupt;
+            }
+            pg.flags.need_sync = old.flags.need_sync;
+            p.cache.drop(old);
+        }
+        p.cache.move(pg, pgno);
+        p.cache.makeDirty(pg);
+
+        if (need_sync_pgno != 0) {
+            const moved = p.get(need_sync_pgno, .{}) catch |err| {
+                // Let a later write journal it again rather than reach the
+                // file before the journal is synced.
+                if (need_sync_pgno <= p.db_orig_size) _ = p.in_journal.remove(need_sync_pgno);
+                return err;
+            };
+            moved.flags.need_sync = true;
+            p.cache.makeDirty(moved);
+            p.unref(moved);
+        }
     }
 
     /// Port of sqlite3PagerRekey().

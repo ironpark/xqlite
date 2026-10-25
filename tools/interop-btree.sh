@@ -5,6 +5,8 @@
 #   2. xqlite deletes, updates and inserts rows in a database built by
 #      sqlite3; the result must match the same statements run by sqlite3.
 #   3. xqlite's integrity check agrees with sqlite3's on those files.
+#   4. 1 and 2 again on auto-vacuum databases (full and incremental): the
+#      pointer map must check out, and full mode must leave no free pages.
 # Requires sqlite3 on PATH and a prior `zig build`.
 set -eu
 
@@ -40,6 +42,7 @@ content() {
                   SELECT b, a FROM t INDEXED BY t_b WHERE b>'' ORDER BY b;" | shasum | cut -d' ' -f1
 }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+freelist() { sqlite3 "$1" 'PRAGMA freelist_count'; }
 intact() {
     [ "$(sqlite3 "$1" 'PRAGMA integrity_check')" = ok ] || fail "sqlite3 integrity_check on $1"
     [ "$("$xq" check "$1")" = ok ] || fail "xqlite check on $1"
@@ -80,4 +83,40 @@ got="$("$xq" check "$tmp/bad.db")"
 $want
 --- xqlite
 $got"
+echo "   ok"
+
+echo "4) the same on auto-vacuum databases"
+for av in full incremental; do
+    num=1; [ $av = incremental ] && num=2
+    av_sql="$(echo "$fill_sql" | sed "s/PRAGMA auto_vacuum=0/PRAGMA auto_vacuum=$num/")"
+    rm -f "$tmp/ref4.db" "$tmp/x4.db"
+    sqlite3 "$tmp/ref4.db" "$av_sql"
+    "$xq" bt-fill "$tmp/x4.db" $n $av
+    [ "$(sqlite3 "$tmp/x4.db" 'PRAGMA auto_vacuum')" = $num ] || fail "auto_vacuum mode of x4.db ($av)"
+    intact "$tmp/x4.db"
+    [ "$(content "$tmp/x4.db")" = "$(content "$tmp/ref4.db")" ] || fail "content differs ($av fill)"
+    [ $av = incremental ] || [ "$(freelist "$tmp/x4.db")" = 0 ] || fail "free pages left ($av fill)"
+
+    rm -f "$tmp/ref5.db" "$tmp/x5.db"
+    sqlite3 "$tmp/ref5.db" "PRAGMA page_size=1024; $av_sql" 2>/dev/null
+    cp "$tmp/ref5.db" "$tmp/x5.db"
+    sqlite3 "$tmp/ref5.db" "$churn_sql"
+    "$xq" bt-churn "$tmp/x5.db"
+    intact "$tmp/x5.db"
+    [ "$(content "$tmp/x5.db")" = "$(content "$tmp/ref5.db")" ] || fail "content differs ($av churn)"
+    if [ $av = incremental ]; then
+        # Commit keeps free pages; vacuuming removes them.
+        sqlite3 "$tmp/x5.db" "DELETE FROM t WHERE a>100000"
+        sqlite3 "$tmp/ref5.db" "DELETE FROM t WHERE a>100000; PRAGMA incremental_vacuum;"
+        [ "$(freelist "$tmp/x5.db")" -gt 0 ] || fail "expected free pages ($av)"
+        "$xq" bt-vacuum "$tmp/x5.db"
+        intact "$tmp/x5.db"
+        [ "$(content "$tmp/x5.db")" = "$(content "$tmp/ref5.db")" ] || fail "content differs ($av vacuum)"
+    fi
+    [ "$(freelist "$tmp/x5.db")" = 0 ] || fail "free pages left ($av churn)"
+    sqlite3 "$tmp/x5.db" "$more_sql"
+    sqlite3 "$tmp/ref5.db" "$more_sql"
+    intact "$tmp/x5.db"
+    [ "$(content "$tmp/x5.db")" = "$(content "$tmp/ref5.db")" ] || fail "content differs after sqlite3 writes ($av)"
+done
 echo "   ok"

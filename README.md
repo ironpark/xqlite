@@ -180,6 +180,14 @@ zig build run          # CLI 실행
 zig build test         # 단위 테스트
 ```
 
+`sqlite3`가 설치되어 있으면 순정 SQLite와의 상호 검증 스크립트를 돌릴 수 있습니다(`zig build` 후 실행).
+
+```sh
+./tools/interop-btree.sh        # 서로 쓴 테이블·인덱스를 읽고 수정, integrity_check 비교
+./tools/interop-hot-journal.sh  # 서로 남긴 핫 저널 복구
+./tools/gen-fixtures.sh         # src/testdata의 테스트용 DB 재생성
+```
+
 포팅 기준 SQLite 소스(현재 3.54.1)는 `ref/sqlite`에 받아 두고 참고합니다. 이 디렉토리는 git에서 제외됩니다.
 
 ```sh
@@ -206,7 +214,7 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall
 ## 로드맵
 
 - [x] **Phase 0 · 기반**: VFS(POSIX·메모리), 페이지 캐시, Pager(롤백 저널), 파일 헤더 파싱 — Windows VFS·WAL·세이브포인트는 이후 단계
-- [ ] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기, 레코드 포맷, 기존 SQLite 파일 읽기
+- [ ] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기, 레코드 포맷, 기존 SQLite 파일 읽기 — auto-vacuum DB 쓰기만 남음 (지금은 읽기 전용으로 엶)
 - [ ] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
 - [ ] **Phase 3 · 완성도**: WAL, 인덱스 최적화, 윈도우 함수, JSON, sqllogictest 통과
 - [ ] **Phase 4 · 공통 IR**: 방언 독립적인 Logical Plan으로 프론트엔드 분리, 카탈로그 확장

@@ -13,9 +13,9 @@ pub const UnixVfs = @import("vfs/unix.zig").UnixVfs;
 pub const pager = @import("pager/pager.zig");
 pub const pcache = @import("pager/pcache.zig");
 
-pub const btree = struct {
-    pub const header = @import("btree/header.zig");
-};
+pub const btree = @import("btree/btree.zig");
+
+pub const record = @import("vdbe/record.zig");
 
 /// The SQLite release this port tracks (SQLITE_VERSION_NUMBER). Keep in sync
 /// with SQLITE_VERSION in tools/fetch-sqlite.sh.
@@ -23,8 +23,6 @@ pub const sqlite_version_number = 3054001;
 
 test {
     std.testing.refAllDecls(@This());
-    // refAllDecls does not descend into the `btree` namespace struct.
-    _ = btree.header;
 }
 
 test "read header of a database written by sqlite3" {

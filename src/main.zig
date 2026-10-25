@@ -3,6 +3,10 @@ const Io = std.Io;
 
 const xqlite = @import("xqlite");
 const Header = xqlite.btree.header.Header;
+const Btree = xqlite.btree.Btree;
+const Cursor = xqlite.btree.Cursor;
+const record = xqlite.record;
+const Value = record.Value;
 
 const usage =
     \\usage: xqlite <command> [args]
@@ -12,6 +16,12 @@ const usage =
     \\  recover <file>            open the database, rolling back a hot journal
     \\  crash-write <file> <byte> overwrite every page, then exit after commit
     \\                            phase one, leaving a hot journal (testing aid)
+    \\  check <file>              run the b-tree integrity check on every table
+    \\                            and index listed in the schema
+    \\  bt-fill <file> <n>        create table t and index t_b with n rows, then
+    \\                            delete every 7th row (testing aid)
+    \\  bt-churn <file>           delete, update and insert rows of t and t_b
+    \\                            (testing aid, see tools/interop-btree.sh)
     \\
 ;
 
@@ -32,6 +42,12 @@ pub fn main(init: std.process.Init) !void {
     } else if (args.len == 4 and std.mem.eql(u8, args[1], "crash-write")) {
         const fill = try std.fmt.parseInt(u8, args[3], 0);
         try crashWrite(arena, io, args[2], fill);
+    } else if (args.len == 3 and std.mem.eql(u8, args[1], "check")) {
+        try check(arena, io, args[2], out);
+    } else if (args.len == 4 and std.mem.eql(u8, args[1], "bt-fill")) {
+        try btFill(arena, io, args[2], try std.fmt.parseInt(u32, args[3], 10));
+    } else if (args.len == 3 and std.mem.eql(u8, args[1], "bt-churn")) {
+        try btChurn(arena, io, args[2]);
     } else {
         std.debug.print("{s}", .{usage});
         std.process.exit(2);
@@ -74,7 +90,8 @@ fn dbinfo(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !vo
 }
 
 /// Takes a read lock, which rolls back any hot journal, then adopts the page
-/// size from the (recovered) header. The btree layer will own this later.
+/// size from the (recovered) header. For the pager-level commands; `Btree`
+/// does this itself.
 fn lockAndAdoptHeader(p: *xqlite.pager.Pager) !void {
     try p.sharedLock();
     var buf: [xqlite.btree.header.size]u8 = undefined;
@@ -119,4 +136,184 @@ fn crashWrite(gpa: std.mem.Allocator, io: Io, path: []const u8, fill: u8) !void 
     try p.commitPhaseOne(false);
     // Simulated power loss: no phase two, no unlock. The OS drops the locks.
     std.process.exit(0);
+}
+
+// ============================================================= b-tree tools
+
+fn openBtree(gpa: std.mem.Allocator, io: Io, path: []const u8) !*Btree {
+    const unix = try gpa.create(xqlite.UnixVfs);
+    unix.* = .init(gpa, io);
+    return Btree.open(gpa, unix.interface(), path, .{});
+}
+
+/// Root pages of the schema objects, by name.
+fn schemaRoots(gpa: std.mem.Allocator, bt: *Btree) !std.StringArrayHashMapUnmanaged(xqlite.btree.Pgno) {
+    var roots: std.StringArrayHashMapUnmanaged(xqlite.btree.Pgno) = .empty;
+    var cur: Cursor = undefined;
+    try bt.cursor(&cur, 1, .{});
+    defer cur.close();
+    var ok = try cur.first();
+    while (ok) : (ok = try cur.next()) {
+        var v: [5]Value = undefined;
+        // Kept for the name strings, which point into it.
+        _ = try readRecord(gpa, &cur, &v);
+        if (v[3] == .int and v[3].int > 0) try roots.put(gpa, v[1].text, @intCast(v[3].int));
+    }
+    return roots;
+}
+
+fn check(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !void {
+    const bt = try openBtree(gpa, io, path);
+    defer bt.close();
+    try bt.beginTrans(.read);
+    defer bt.commit() catch {};
+    var roots = try schemaRoots(gpa, bt);
+    const list = try std.mem.concat(gpa, xqlite.btree.Pgno, &.{ &.{1}, roots.values() });
+    const report = try bt.integrityCheck(gpa, list, 100);
+    try out.print("{s}\n", .{if (report.n_err == 0) "ok" else report.message});
+}
+
+/// Decodes the current entry into `out`. The values point into the
+/// returned buffer.
+fn readRecord(gpa: std.mem.Allocator, cur: *Cursor, out: []Value) ![]u8 {
+    const data = try gpa.alloc(u8, cur.payloadSize());
+    errdefer gpa.free(data);
+    try cur.payload(0, data);
+    if (try record.decode(data, out) != out.len) return error.Corrupt;
+    return data;
+}
+
+// The demo schema shared with tools/interop-btree.sh, which builds the same
+// content with SQL to compare against.
+const SchemaObject = struct { type: []const u8, name: []const u8, sql: []const u8 };
+const demo_objects = [_]SchemaObject{
+    .{ .type = "table", .name = "t", .sql = "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c BLOB)" },
+    .{ .type = "index", .name = "t_b", .sql = "CREATE INDEX t_b ON t(b)" },
+};
+const demo_key_info: record.KeyInfo = .{ .gpa = std.heap.smp_allocator, .sort_orders = &.{ .asc, .asc } };
+
+/// printf('v-%d', (i*7919)%n)
+fn demoB(buf: []u8, i: u64, n: u64) []const u8 {
+    return std.fmt.bufPrint(buf, "v-{d}", .{(i * 7919) % n}) catch unreachable;
+}
+
+/// cast(printf('%.*c', len, ch) AS BLOB)
+fn demoC(buf: []u8, len: usize, ch: u8) []const u8 {
+    @memset(buf[0..len], ch);
+    return buf[0..len];
+}
+
+/// Inserts a table row (with `rowid`) or an index key (without).
+fn insertRecord(cur: *Cursor, rowid: ?i64, values: []const Value) !void {
+    var buf: [16384]u8 = undefined;
+    const rec = record.encodeBuf(values, &buf);
+    try cur.insert(if (rowid) |r| .{ .rowid = r, .data = rec } else .{ .key = rec }, .{});
+}
+
+/// Deletes row `rowid` of t and its t_b entry. The table cursor is left so
+/// that next() continues the scan.
+fn deleteRow(gpa: std.mem.Allocator, tc: *Cursor, ic: *Cursor, rowid: i64) !void {
+    if (try tc.tableMoveto(rowid, false) != .eq) return error.Corrupt;
+    var v: [3]Value = undefined;
+    const data = try readRecord(gpa, tc, &v);
+    defer gpa.free(data);
+    const search: record.UnpackedRecord = .{ .info = &demo_key_info, .values = &.{ v[1], .{ .int = rowid } } };
+    if (try ic.indexMoveto(search.indexKey()) != .eq) return error.Corrupt;
+    try ic.delete(.{});
+    try tc.delete(.{ .save_position = true });
+}
+
+fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32) !void {
+    const bt = try openBtree(gpa, io, path);
+    defer bt.close();
+    try bt.beginTrans(.write);
+    errdefer bt.rollback(null, false) catch {};
+
+    const t_root = try bt.createTable(.intkey);
+    const i_root = try bt.createTable(.blobkey);
+    {
+        var sc: Cursor = undefined;
+        try bt.cursor(&sc, 1, .{ .write = true });
+        defer sc.close();
+        for (demo_objects, [_]xqlite.btree.Pgno{ t_root, i_root }, 1..) |obj, root, rowid| {
+            try insertRecord(&sc, @intCast(rowid), &.{
+                .{ .text = obj.type }, .{ .text = obj.name }, .{ .text = "t" }, .{ .int = root }, .{ .text = obj.sql },
+            });
+        }
+    }
+    // What SQLite sets when creating the first table.
+    try bt.updateMeta(.schema_version, 1);
+    try bt.updateMeta(.file_format, 4);
+    try bt.updateMeta(.text_encoding, 1);
+
+    {
+        var tc: Cursor = undefined;
+        try bt.cursor(&tc, t_root, .{ .write = true });
+        defer tc.close();
+        var ic: Cursor = undefined;
+        try bt.cursor(&ic, i_root, .{ .write = true, .key_info = demo_key_info.btreeKeyInfo() });
+        defer ic.close();
+
+        var b_buf: [32]u8 = undefined;
+        var c_buf: [4096]u8 = undefined;
+        for (1..n + 1) |i| {
+            const b = demoB(&b_buf, i, n);
+            const c = demoC(&c_buf, if (i % 50 == 0) 3000 else i % 20 + 1, 'p');
+            try insertRecord(&tc, @intCast(i), &.{ .null, .{ .text = b }, .{ .blob = c } });
+            try insertRecord(&ic, null, &.{ .{ .text = b }, .{ .int = @intCast(i) } });
+        }
+        var i: i64 = 7;
+        while (i <= n) : (i += 7) try deleteRow(gpa, &tc, &ic, i);
+    }
+    try bt.commit();
+}
+
+fn btChurn(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
+    const bt = try openBtree(gpa, io, path);
+    defer bt.close();
+    try bt.beginTrans(.write);
+    errdefer bt.rollback(null, false) catch {};
+    var roots = try schemaRoots(gpa, bt);
+    const t_root = roots.get("t") orelse return error.NoTable;
+    const i_root = roots.get("t_b") orelse return error.NoIndex;
+
+    {
+        var tc: Cursor = undefined;
+        try bt.cursor(&tc, t_root, .{ .write = true });
+        defer tc.close();
+        var ic: Cursor = undefined;
+        try bt.cursor(&ic, i_root, .{ .write = true, .key_info = demo_key_info.btreeKeyInfo() });
+        defer ic.close();
+
+        // DELETE FROM t WHERE a%3=0
+        var ok = try tc.first();
+        while (ok) {
+            const a = tc.integerKey();
+            if (@mod(a, 3) == 0) try deleteRow(gpa, &tc, &ic, a);
+            ok = try tc.next();
+        }
+
+        // UPDATE t SET c=cast(printf('%.*c', 1500+a, 'u') AS BLOB)
+        //   WHERE a%3=1 AND a<200
+        var c_buf: [4096]u8 = undefined;
+        var a: i64 = 1;
+        while (a < 200) : (a += 3) {
+            if (try tc.tableMoveto(a, false) != .eq) continue;
+            var v: [3]Value = undefined;
+            const data = try readRecord(gpa, &tc, &v);
+            defer gpa.free(data);
+            try insertRecord(&tc, a, &.{ .null, v[1], .{ .blob = demoC(&c_buf, @intCast(1500 + a), 'u') } });
+        }
+
+        // INSERT INTO t VALUES(100000+k, 'new-'||k, ...) for k in 1..500
+        var b_buf: [32]u8 = undefined;
+        for (1..501) |k| {
+            const b = std.fmt.bufPrint(&b_buf, "new-{d}", .{k}) catch unreachable;
+            const c = demoC(&c_buf, if (k % 10 == 0) 2500 else k % 30 + 1, 'n');
+            const rowid: i64 = @intCast(100000 + k);
+            try insertRecord(&tc, rowid, &.{ .null, .{ .text = b }, .{ .blob = c } });
+            try insertRecord(&ic, null, &.{ .{ .text = b }, .{ .int = rowid } });
+        }
+    }
+    try bt.commit();
 }

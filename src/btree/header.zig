@@ -91,10 +91,7 @@ pub const Header = struct {
         if (!read_version.known()) return error.NotADatabase;
         if (!std.mem.eql(u8, bytes[21..24], &payload_fractions)) return error.NotADatabase;
 
-        // The value 1 means 65536; this decodes both forms in one step.
-        const page_size: u32 = (@as(u32, bytes[16]) << 8) | (@as(u32, bytes[17]) << 16);
-        if (!std.math.isPowerOfTwo(page_size) or page_size < min_page_size or page_size > max_page_size)
-            return error.NotADatabase;
+        const page_size = pageSize(bytes) orelse return error.NotADatabase;
         if (page_size - bytes[20] < 480) return error.NotADatabase;
 
         var h: Header = .{
@@ -148,6 +145,18 @@ pub const Header = struct {
         return h.incremental_vacuum != 0;
     }
 };
+
+/// The page size stored at offset 16, or null if it is not a legal size.
+pub fn pageSize(bytes: *const [size]u8) ?u32 {
+    // The value 1 means 65536; this decodes both forms in one step.
+    const page_size: u32 = (@as(u32, bytes[16]) << 8) | (@as(u32, bytes[17]) << 16);
+    return if (validPageSize(page_size)) page_size else null;
+}
+
+/// A power of two from 512 to 65536.
+pub fn validPageSize(page_size: u32) bool {
+    return page_size >= min_page_size and page_size <= max_page_size and std.math.isPowerOfTwo(page_size);
+}
 
 fn get4(b: *const [size]u8, off: usize) u32 {
     return std.mem.readInt(u32, b[off..][0..4], .big);

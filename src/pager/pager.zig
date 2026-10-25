@@ -319,6 +319,10 @@ pub const Pager = struct {
         return pgno == p.lck_pgno;
     }
 
+    pub fn lockPage(p: *const Pager) Pgno {
+        return p.lck_pgno;
+    }
+
     pub fn refCount(p: *const Pager) u64 {
         return p.cache.refCount();
     }
@@ -623,6 +627,37 @@ pub const Pager = struct {
 
     pub fn ref(p: *Pager, pg: *Page) void {
         p.cache.ref(pg);
+    }
+
+    /// Exchanges the page numbers of two referenced, writable pages; the
+    /// b-tree does this to keep sibling pages in ascending order. Done as
+    /// in balance_nonroot(), with three sqlite3PagerRekey() calls through
+    /// the lock page, which is never cached.
+    pub fn swapPageNumbers(p: *Pager, a: *Page, b: *Page) void {
+        const pgno_a = a.pgno;
+        const pgno_b = b.pgno;
+        const flags_a = a.flags;
+        const flags_b = b.flags;
+        p.rekey(a, p.lck_pgno, flags_b);
+        p.rekey(b, pgno_a, flags_a);
+        p.rekey(a, pgno_b, flags_b);
+    }
+
+    /// Port of sqlite3PagerRekey().
+    fn rekey(p: *Pager, pg: *Page, pgno: Pgno, flags: pcache_mod.Flags) void {
+        std.debug.assert(pg.pgno != pgno);
+        pg.flags = flags;
+        p.cache.move(pg, pgno);
+    }
+
+    /// Page-sized scratch space (sqlite3PagerTempSpace). Its content is
+    /// clobbered by any pager call that rolls back or spills.
+    pub fn tempSpace(p: *Pager) []u8 {
+        return p.tmp_space[0..p.page_size];
+    }
+
+    pub fn isReadOnly(p: *const Pager) bool {
+        return p.read_only;
     }
 
     // ==================================================== write transaction

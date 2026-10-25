@@ -262,7 +262,8 @@ pub const VdbeCursor = struct {
     is_ordered: bool = false,
     no_reuse: bool = false,
     seek_hit: u16 = 0,
-    /// The separate b-tree of an ephemeral table, owned by this cursor.
+    /// The separate b-tree of an ephemeral table, shared with OP_OpenDup
+    /// cursors. It closes itself with its last cursor (BTREE_SINGLE).
     btx: ?*btree.Btree = null,
     /// Opened with OPFLAG_SEEKEQ (BTREE_SEEK_EQ): only equality seeks.
     seek_eq: bool = false,

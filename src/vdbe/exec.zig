@@ -92,7 +92,7 @@ const Exec = struct {
     }
 
     /// The flow for a failure of a lower layer.
-    fn fail(e: *Exec, err: anyerror) Flow {
+    fn fail(e: *Exec, err: main_mod.Error) Flow {
         e.rc = main_mod.errorCode(err);
         return .abort;
     }
@@ -1458,7 +1458,7 @@ const Part5 = struct {
 
     fn opCount(e: *Exec, op: *Op) Flow {
         const cur = e.csr(op.p1).uc.cursor;
-        const n = cur.count() catch |err| return e.fail(err);
+        const n = if (op.p3 != 0) cur.rowCountEst() else cur.count() catch |err| return e.fail(err);
         e.out2Prerelease(op).u = .{ .i = n };
         return .check_interrupt;
     }
@@ -1630,7 +1630,7 @@ const Part5 = struct {
         c.is_table = orig.is_table;
         c.pgno_root = orig.pgno_root;
         c.is_ordered = orig.is_ordered;
-        // The original cursor owns the ephemeral database (c.btx stays null).
+        c.btx = orig.btx;
         c.no_reuse = true;
         orig.no_reuse = true;
         openBtreeCursor(c, orig.btx.?, c.pgno_root, true, c.key_info) catch |err| return e.fail(err);
@@ -1658,13 +1658,20 @@ const Part5 = struct {
         }
         const c = allocateCursor(e, op.p1, op.p2, .btree) orelse return .no_mem;
         c.is_ephemeral = true;
-        const bt = btree.Btree.open(db.gpa, db.vfs.?, "", .{
-            .temp = true,
+        const bt = btree.Btree.open(db.gpa, db.vfs.?, null, .{
+            .single = true,
             .journal_mode = .off,
             .synchronous = .off,
         }) catch |err| return e.fail(err);
         c.btx = bt;
-        openEphemeralTable(c, bt, op) catch |err| return e.fail(err);
+        openEphemeralTable(c, bt, op) catch |err| {
+            // Without a cursor the b-tree would never close itself.
+            if (c.uc != .cursor) {
+                bt.close();
+                c.btx = null;
+            }
+            return e.fail(err);
+        };
         c.is_ordered = op.p5 != BTREE_UNORDERED;
         c.null_row = true;
         return .next;
@@ -2129,9 +2136,7 @@ const Part6 = struct {
         const has_rows = cur.first() catch |err| return e.fail(err);
         var sz: i64 = -1;
         if (has_rows) {
-            // An exact count stands in for sqlite3BtreeRowCountEst().
-            const n = cur.count() catch |err| return e.fail(err);
-            sz = util.logEst(@intCast(n));
+            sz = util.logEst(@intCast(cur.rowCountEst()));
         }
         return if (sz >= op.p3 and sz <= op.p4.int32) .jump_p2 else .next;
     }
@@ -2676,9 +2681,6 @@ const Part7 = struct {
 // ===================================================================
 // Part 8: pragmas, functions, Bloom filters and the rest.
 
-/// PAGER_JOURNALMODE_* values and their names (sqlite3JournalModename).
-const journal_mode_names = [_][:0]const u8{ "delete", "persist", "off", "truncate", "memory", "wal" };
-
 /// iOnceResetThreshold of sqlite3GlobalConfig.
 const once_reset_threshold: i32 = 0x7ffffffe;
 
@@ -2813,25 +2815,11 @@ const Part8 = struct {
 
     fn opJournalMode(e: *Exec, op: *Op) Flow {
         const out = e.out2Prerelease(op);
-        const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
-        const pager = bt.pager;
-        const old: usize = switch (pager.journal_mode) {
-            .delete => 0,
-            .persist => 1,
-            .off => 2,
-            .truncate => 3,
-        };
-        var new: usize = if (op.p3 < 0) old else @intCast(op.p3);
-        // MEMORY and WAL journals are not supported, and the mode cannot
-        // change while writing.
-        if (new >= 4 or bt.in_trans == .write) new = old;
-        pager.setJournalMode(switch (new) {
-            0 => .delete,
-            1 => .persist,
-            2 => .off,
-            else => .truncate,
-        });
-        const name = journal_mode_names[new];
+        const pager = e.db.dbs.items[@intCast(op.p1)].bt.?.pager;
+        const old = pager.journal_mode;
+        var new: @TypeOf(old) = if (op.p3 < 0) old else @enumFromInt(op.p3);
+        if (!pager.okToChangeJournalMode()) new = old;
+        const name = pager.setJournalMode(new).name();
         out.flags = MEM.Str | MEM.Static | MEM.Term;
         out.z = @constCast(name.ptr);
         out.n = @intCast(name.len);

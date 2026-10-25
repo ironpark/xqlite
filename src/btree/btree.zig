@@ -118,8 +118,9 @@ pub const Options = struct {
     secure_delete: SecureDelete = .off,
     /// Auto-vacuum mode for a new database. Existing files use their own.
     auto_vacuum: AutoVacuum = .none,
-    /// An anonymous temporary database (ephemeral tables).
-    temp: bool = false,
+    /// Close the b-tree when its last cursor closes (BTREE_SINGLE), as
+    /// ephemeral tables do.
+    single: bool = false,
 };
 
 /// Compares stored index keys against a search key.
@@ -176,6 +177,8 @@ pub const Btree = struct {
     incr_vacuum: bool = false,
     /// An incremental vacuum shrank `n_page`; truncate at commit.
     do_truncate: bool = false,
+    /// Closes with its last cursor (BTREE_SINGLE).
+    single: bool = false,
 
     page_size: u32,
     usable_size: u32,
@@ -201,8 +204,9 @@ pub const Btree = struct {
 
     // ================================================================ open
 
-    /// Port of sqlite3BtreeOpen() for an ordinary database file.
-    pub fn open(gpa: Allocator, v: vfs.Vfs, path: []const u8, opts: Options) Error!*Btree {
+    /// Port of sqlite3BtreeOpen(). A null path opens an anonymous temporary
+    /// database.
+    pub fn open(gpa: Allocator, v: vfs.Vfs, path: ?[]const u8, opts: Options) Error!*Btree {
         const bt = try gpa.create(Btree);
         errdefer gpa.destroy(bt);
         const p = try Pager.open(gpa, v, path, .{
@@ -216,7 +220,6 @@ pub const Btree = struct {
             .cache_size = opts.cache_size,
             .busy_handler = opts.busy_handler,
             .reiniter = pageReinit,
-            .temp = opts.temp,
         });
         errdefer p.close();
 
@@ -233,6 +236,7 @@ pub const Btree = struct {
             .usable_size = opts.page_size,
             .auto_vacuum = opts.auto_vacuum != .none,
             .incr_vacuum = opts.auto_vacuum == .incremental,
+            .single = opts.single,
         };
         var reserve: u8 = 0;
         if (header.pageSize(&hdr)) |page_size| {
@@ -2281,6 +2285,7 @@ pub const Cursor = struct {
         bt.gpa.free(cur.overflow);
         if (cur.saved_key) |k| bt.gpa.free(k);
         cur.* = undefined;
+        if (bt.single and bt.cursors == null) bt.close();
     }
 
     /// Port of sqlite3BtreeCursorHintFlags(BTREE_BULKLOAD): rows arrive in
@@ -2644,6 +2649,16 @@ pub const Cursor = struct {
         };
         cur.flags.at_last = true;
         return true;
+    }
+
+    /// Port of sqlite3BtreeRowCountEst(): a guess at the number of entries,
+    /// from the cell counts of the pages on the path to the current leaf.
+    /// -1 if the cursor is not on a leaf entry.
+    pub fn rowCountEst(cur: *const Cursor) i64 {
+        if (cur.state != .valid or !cur.page.leaf) return -1;
+        var n: i64 = cur.page.n_cell;
+        for (cur.ap_page[0..@intCast(cur.i_page)]) |p| n *= p.n_cell;
+        return n;
     }
 
     /// Port of sqlite3BtreeIsEmpty().

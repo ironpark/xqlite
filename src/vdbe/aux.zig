@@ -654,11 +654,6 @@ pub fn freeCursorNN(v: *Vdbe, cx: *VdbeCursor) void {
         .cursor => |c| c.close(),
         else => {},
     }
-    if (cx.btx) |bt| {
-        // An ephemeral table owns its database.
-        bt.close();
-        cx.btx = null;
-    }
     const box: *vi.CursorBox = @fieldParentPtr("vc", cx);
     v.db.gpa.free(cx.types.ptr[0 .. cx.types.len + cx.offsets.len]);
     v.db.gpa.destroy(box);

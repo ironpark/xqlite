@@ -10,10 +10,12 @@ const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
 const RC = int.RC;
 
-/// Extended result codes used by the port.
+/// Every error the storage and VM layers report. errorCode() and
+/// tripError() map them to and from result codes.
+pub const Error = btree.Error || error{TooBig};
 
-/// The result code of a Zig error from the lower layers.
-pub fn errorCode(err: anyerror) i32 {
+/// The result code of an error from the lower layers.
+pub fn errorCode(err: Error) i32 {
     return switch (err) {
         error.Busy => RC.BUSY,
         error.CantOpen => RC.CANTOPEN,
@@ -28,7 +30,6 @@ pub fn errorCode(err: anyerror) i32 {
         error.Abort => RC.ABORT,
         error.NotADatabase => RC.NOTADB,
         error.TooBig => RC.TOOBIG,
-        else => RC.ERROR,
     };
 }
 

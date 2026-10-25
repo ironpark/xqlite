@@ -46,15 +46,25 @@ pub const Error = vfs.Error || error{
 /// SQLITE_MAX_PAGE_COUNT.
 pub const max_page_count: Pgno = 0xfffffffe;
 
-pub const JournalMode = enum {
+/// PAGER_JOURNALMODE_*, with SQLite's values.
+pub const JournalMode = enum(u3) {
     /// Delete the journal at the end of each transaction.
-    delete,
+    delete = 0,
     /// Keep the file but zero its header.
-    persist,
-    /// Truncate the journal to zero bytes.
-    truncate,
+    persist = 1,
     /// No journal: rollback is impossible and a crash may corrupt the file.
-    off,
+    off = 2,
+    /// Truncate the journal to zero bytes.
+    truncate = 3,
+    /// The journal is kept in memory. Not supported yet.
+    memory = 4,
+    /// Write-ahead log. Not supported yet.
+    wal = 5,
+
+    /// sqlite3JournalModename().
+    pub fn name(m: JournalMode) [:0]const u8 {
+        return @tagName(m);
+    }
 };
 
 pub const Synchronous = enum { off, normal, full, extra };
@@ -81,9 +91,6 @@ pub const Options = struct {
     busy_handler: ?BusyHandler = null,
     /// Called after a page's content is restored during rollback (xReiniter).
     reiniter: ?*const fn (page: *Page) void = null,
-    /// Open an anonymous temporary file instead of `path` (deleted on
-    /// close).
-    temp: bool = false,
 };
 
 pub const State = enum(u8) {
@@ -110,8 +117,12 @@ pub const Pager = struct {
     vfs: vfs.Vfs,
     fd: vfs.File,
     jfd: ?vfs.File = null,
+    /// Empty for a temporary database.
     path: []u8,
     journal_path: []u8,
+    /// An anonymous temporary database (tempFile): its journal is anonymous
+    /// too, and there is no hot journal to look for.
+    temp_file: bool,
 
     state: State = .open,
     /// Lock held on the database file; null is UNKNOWN_LOCK, which arises
@@ -179,17 +190,19 @@ pub const Pager = struct {
 
     // ================================================================ open
 
-    /// Port of sqlite3PagerOpen() for an ordinary on-disk database.
-    pub fn open(gpa: Allocator, v: vfs.Vfs, path: []const u8, opts: Options) Error!*Pager {
+    /// Port of sqlite3PagerOpen(). A null path opens an anonymous temporary
+    /// database, deleted on close.
+    pub fn open(gpa: Allocator, v: vfs.Vfs, path_arg: ?[]const u8, opts: Options) Error!*Pager {
         const p = try gpa.create(Pager);
         errdefer gpa.destroy(p);
 
+        const path = path_arg orelse "";
         const path_copy = try gpa.dupe(u8, path);
         errdefer gpa.free(path_copy);
-        const journal_path = try std.mem.concat(gpa, u8, &.{ path, "-journal" });
+        const journal_path = if (path_arg == null) try gpa.dupe(u8, "") else try std.mem.concat(gpa, u8, &.{ path, "-journal" });
         errdefer gpa.free(journal_path);
 
-        const fd = try v.open(if (opts.temp) null else path, .{
+        const fd = try v.open(path_arg, .{
             .kind = .main_db,
             .read_write = !opts.read_only,
             .create = opts.create and !opts.read_only,
@@ -202,6 +215,7 @@ pub const Pager = struct {
             .fd = fd,
             .path = path_copy,
             .journal_path = journal_path,
+            .temp_file = path_arg == null,
             .read_only = opts.read_only,
             .journal_mode = opts.journal_mode,
             .busy_handler = opts.busy_handler,
@@ -254,9 +268,57 @@ pub const Pager = struct {
         return p.cache.setSpillSize(n);
     }
 
-    pub fn setJournalMode(p: *Pager, mode: JournalMode) void {
-        std.debug.assert(!p.state.atLeast(.writer_locked));
+    /// Port of sqlite3PagerSetJournalMode(). MEMORY and WAL are not
+    /// supported yet and leave the mode unchanged. Returns the mode in
+    /// effect.
+    pub fn setJournalMode(p: *Pager, mode_arg: JournalMode) JournalMode {
+        const old = p.journal_mode;
+        const mode = switch (mode_arg) {
+            .memory, .wal => old,
+            else => mode_arg,
+        };
+        if (mode == old) return old;
+        std.debug.assert(p.state != .err);
         p.journal_mode = mode;
+        const old_bits = @intFromEnum(old);
+        const new_bits = @intFromEnum(mode);
+        if (old_bits & 5 == 1 and new_bits & 1 == 0) {
+            // Leaving TRUNCATE or PERSIST for DELETE or OFF: delete the
+            // journal, under at least a RESERVED lock so that no other
+            // connection mistakes it for a hot journal meanwhile.
+            if (p.jfd) |j| j.close();
+            p.jfd = null;
+            if (p.temp_file) return mode;
+            if (p.lock != null and p.lock.?.atLeast(.reserved)) {
+                p.vfs.delete(p.journal_path, false) catch {};
+            } else {
+                const state = p.state;
+                var ok = true;
+                if (state == .open) p.sharedLock() catch {
+                    ok = false;
+                };
+                if (ok and p.state == .reader) p.lockDb(.reserved) catch {
+                    ok = false;
+                };
+                if (ok) p.vfs.delete(p.journal_path, false) catch {};
+                if (ok and state == .reader) {
+                    p.unlockDb(.shared) catch {};
+                } else if (state == .open) {
+                    p.unlock();
+                }
+            }
+        } else if (mode == .off) {
+            if (p.jfd) |j| j.close();
+            p.jfd = null;
+        }
+        return mode;
+    }
+
+    /// Port of sqlite3PagerOkToChangeJournalMode(): not while a write
+    /// transaction has changed the cache.
+    pub fn okToChangeJournalMode(p: *const Pager) bool {
+        if (p.state.atLeast(.writer_cachemod)) return false;
+        return !(p.jfd != null and p.journal_off > 0);
     }
 
     /// Port of sqlite3PagerJournalSizeLimit(). Negative means no limit.
@@ -472,7 +534,9 @@ pub const Pager = struct {
         try p.waitOnLock(.shared);
 
         // With an UNKNOWN lock, assume the worst and treat the journal as hot.
-        const hot = if (p.lock) |held| held.atLeast(.reserved) or try p.hasHotJournal() else true;
+        const hot = if (p.temp_file)
+            false
+        else if (p.lock) |held| held.atLeast(.reserved) or try p.hasHotJournal() else true;
         if (hot) {
             if (p.read_only) return error.ReadOnlyRollback;
             // Go straight to EXCLUSIVE. Passing through RESERVED would tell
@@ -728,7 +792,10 @@ pub const Pager = struct {
                 p.journal_off = 0;
             }
             if (p.jfd == null) {
-                p.jfd = try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .create = true });
+                p.jfd = if (p.temp_file)
+                    try p.vfs.open(null, .{ .kind = .temp_journal })
+                else
+                    try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .create = true });
             }
             p.n_rec = 0;
             p.journal_off = 0;
@@ -1102,10 +1169,11 @@ pub const Pager = struct {
                 defer p.journal_off = 0;
                 try p.zeroJournalHdr(has_super);
             },
+            .memory, .wal => unreachable,
             .delete, .off => {
                 j.close();
                 p.jfd = null;
-                try p.vfs.delete(p.journal_path, p.extra_sync);
+                if (!p.temp_file) try p.vfs.delete(p.journal_path, p.extra_sync);
             },
         }
     }

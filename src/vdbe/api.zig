@@ -530,7 +530,8 @@ test "api: sorter and ephemeral table" {
     const ki = try a.create(vi.KeyInfo);
     ki.* = .{ .n_key_field = 1, .n_all_field = 2, .db = &db, .sort_flags = &sort_flags, .coll = &coll };
 
-    // Sort (k, v) records by k descending; ties keep the sorter's order.
+    // Sort (k, v) records by k descending; ties keep insertion order, as
+    // in SQLite.
     _ = aux.addOp4(v, OP.SorterOpen, 0, 2, 0, .{ .keyinfo = ki });
     const vals = [_][2]i32{ .{ 2, 10 }, .{ 5, 20 }, .{ 2, 30 }, .{ 9, 40 } };
     for (vals) |kv| {
@@ -566,7 +567,7 @@ test "api: sorter and ephemeral table" {
     aux.setNumCols(v, 2);
     aux.makeReady(v, &p);
 
-    const want = [_][2]i64{ .{ 9, 40 }, .{ 5, 20 }, .{ 2, 30 }, .{ 2, 10 } };
+    const want = [_][2]i64{ .{ 9, 40 }, .{ 5, 20 }, .{ 2, 10 }, .{ 2, 30 } };
     for (want) |w| {
         try std.testing.expectEqual(RC.ROW, step(v));
         try std.testing.expectEqual(w[0], columnInt64(v, 0));
@@ -574,6 +575,114 @@ test "api: sorter and ephemeral table" {
     }
     try std.testing.expectEqual(RC.ROW, step(v));
     try std.testing.expectEqual(@as(i64, 3), columnInt64(v, 0));
+    try std.testing.expectEqual(RC.DONE, step(v));
+    try std.testing.expectEqual(RC.OK, finalize(v));
+}
+
+test "api: sorter order and ties for each key type" {
+    const vfs_mod = @import("../vfs/mem.zig");
+    var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
+    defer mv.deinit();
+    inline for (.{ int.Aff.integer, int.Aff.text, int.Aff.real, int.Aff.blob }) |aff| {
+        var db = testDb();
+        db.vfs = mv.interface();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var p: int.Parse = .{ .db = &db, .arena = arena.allocator() };
+        const v = try aux.create(&p);
+        const a = v.alloc();
+        var sort_flags = [_]u8{ 0, 0 };
+        var coll = [_]?*int.CollSeq{ null, null };
+        const ki = try a.create(vi.KeyInfo);
+        ki.* = .{ .n_key_field = 1, .n_all_field = 2, .db = &db, .sort_flags = &sort_flags, .coll = &coll };
+
+        // for i in 1..500: insert (i*7919 % 97 [cast], i)
+        const n = 500;
+        _ = aux.addOp4(v, OP.SorterOpen, 0, 2, 0, .{ .keyinfo = ki });
+        _ = aux.addOp2(v, OP.Integer, n, 1);
+        _ = aux.addOp2(v, OP.Integer, 7919, 5);
+        _ = aux.addOp2(v, OP.Integer, 97, 6);
+        const top = aux.addOp3(v, OP.Multiply, 5, 1, 2);
+        _ = aux.addOp3(v, OP.Remainder, 6, 2, 2);
+        // The blob case mixes types: odd keys become text.
+        if (aff == int.Aff.blob) {
+            _ = aux.addOp2(v, OP.Integer, 2, 7);
+            _ = aux.addOp3(v, OP.Remainder, 7, 2, 8);
+            const skip = aux.addOp1(v, OP.IfNot, 8);
+            _ = aux.addOp2(v, OP.Cast, 2, int.Aff.text);
+            aux.jumpHere(v, skip);
+        } else {
+            _ = aux.addOp2(v, OP.Cast, 2, aff);
+        }
+        _ = aux.addOp2(v, OP.SCopy, 1, 3);
+        _ = aux.addOp3(v, OP.MakeRecord, 2, 2, 4);
+        _ = aux.addOp2(v, OP.SorterInsert, 0, 4);
+        _ = aux.addOp3(v, OP.AddImm, 1, -1, 0);
+        _ = aux.addOp2(v, OP.If, 1, top);
+        _ = aux.addOp3(v, OP.OpenPseudo, 1, 9, 2);
+        const sort = aux.addOp2(v, OP.SorterSort, 0, 0);
+        const body = aux.addOp3(v, OP.SorterData, 0, 9, 1);
+        _ = aux.addOp3(v, OP.Column, 1, 0, 10);
+        _ = aux.addOp3(v, OP.Column, 1, 1, 11);
+        _ = aux.addOp2(v, OP.ResultRow, 10, 2);
+        _ = aux.addOp2(v, OP.SorterNext, 0, body);
+        aux.jumpHere(v, sort);
+        _ = aux.addOp0(v, OP.Halt);
+        aux.jumpHere(v, 0);
+        _ = aux.addOp2(v, OP.Goto, 0, 1);
+        p.n_mem = 11;
+        p.n_tab = 2;
+        aux.setNumCols(v, 2);
+        aux.makeReady(v, &p);
+
+        var rows: usize = 0;
+        var prev_key: Mem = .{ .db = &db };
+        defer mem.release(&prev_key);
+        var prev_seq: i64 = 0;
+        while (step(v) == RC.ROW) : (rows += 1) {
+            const key = columnValue(v, 0);
+            const seq = columnInt64(v, 1);
+            if (rows > 0) {
+                const c = @import("serial.zig").memCompare(&prev_key, key, null);
+                try std.testing.expect(c <= 0);
+                // Inserted with decreasing i: ties come out in that order.
+                if (c == 0) try std.testing.expect(seq < prev_seq);
+            }
+            try mem.copy(&prev_key, key);
+            prev_seq = seq;
+        }
+        try std.testing.expectEqual(@as(usize, n), rows);
+        try std.testing.expectEqual(RC.OK, finalize(v));
+    }
+}
+
+test "api: an OpenDup cursor outlives the original" {
+    const vfs_mod = @import("../vfs/mem.zig");
+    var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
+    defer mv.deinit();
+    var db = testDb();
+    db.vfs = mv.interface();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var p: int.Parse = .{ .db = &db, .arena = arena.allocator() };
+    const v = try aux.create(&p);
+    _ = aux.addOp2(v, OP.OpenEphemeral, 0, 1);
+    _ = aux.addOp2(v, OP.Integer, 5, 1);
+    _ = aux.addOp3(v, OP.MakeRecord, 1, 1, 2);
+    _ = aux.addOp3(v, OP.Insert, 0, 2, 1);
+    _ = aux.addOp2(v, OP.OpenDup, 1, 0);
+    _ = aux.addOp1(v, OP.Close, 0);
+    _ = aux.addOp2(v, OP.Count, 1, 3);
+    _ = aux.addOp2(v, OP.ResultRow, 3, 1);
+    _ = aux.addOp0(v, OP.Halt);
+    aux.jumpHere(v, 0);
+    _ = aux.addOp2(v, OP.Goto, 0, 1);
+    p.n_mem = 3;
+    p.n_tab = 2;
+    aux.setNumCols(v, 1);
+    aux.makeReady(v, &p);
+    try std.testing.expectEqual(RC.ROW, step(v));
+    try std.testing.expectEqual(@as(i64, 1), columnInt64(v, 0));
     try std.testing.expectEqual(RC.DONE, step(v));
     try std.testing.expectEqual(RC.OK, finalize(v));
 }

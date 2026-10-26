@@ -1,6 +1,6 @@
 //! The query result formatter: renders the rows of a statement as text in
 //! one of the shell's output styles (port of ext/qrf/qrf.c, without the
-//! EXPLAIN, EQP, statistics and JSONB renderings).
+//! statistics and JSONB renderings).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -398,6 +398,13 @@ const PerCol = struct {
     b_num: bool = false,
 };
 
+/// One line of EXPLAIN QUERY PLAN output (qrfEQPGraphRow).
+const EqpRow = struct {
+    id: i32,
+    parent: i32,
+    text: []u8,
+};
+
 const Qrf = struct {
     gpa: Allocator,
     stmt: *Stmt,
@@ -415,6 +422,8 @@ const Qrf = struct {
     /// The value being rendered by the line style, reused for every row.
     line_val: Str,
     n_ins: u32 = 0,
+    /// The EXPLAIN QUERY PLAN rows collected so far (qrfEQPGraph).
+    eqp_rows: std.ArrayList(EqpRow) = .empty,
 
     /// Port of qrfError().
     fn setError(p: *Qrf, code: i32, msg: []const u8) Error!void {
@@ -1369,6 +1378,11 @@ fn oneSimpleRow(p: *Qrf) Error!void {
     const titles = p.spec.titles == .yes or p.spec.titles == .always;
     switch (p.spec.style) {
         .off, .count => {},
+        .eqp => {
+            const line = if (api.columnText(p.stmt, 3)) |z| cstr(z) else "";
+            if (line.len > 0 and line[0] == '-') try eqpRender(p);
+            try eqpAppend(p, @truncate(api.columnInt64(p.stmt, 0)), @truncate(api.columnInt64(p.stmt, 1)), line);
+        },
         .json => {
             try p.out.append(if (p.n_row == 0) "[{" else "},\n{");
             try oneJsonRow(p);
@@ -1498,10 +1512,20 @@ fn initialize(p: *Qrf) void {
     const s = &p.spec;
     p.mx_width = if (s.screen_width <= 0) std.math.maxInt(i32) else s.screen_width;
     p.mx_height = if (s.line_limit <= 0) std.math.maxInt(i32) else s.line_limit;
-    if (s.style == .auto or s.style == .eqp or s.style == .explain or
+    if (s.style == .auto) {
+        s.style = switch (api.stmtIsExplain(p.stmt)) {
+            0 => .box,
+            1 => .explain,
+            else => .eqp,
+        };
+    }
+    // sqlite3_stmt_explain() is not ported, so a statement can only be
+    // rendered in the EXPLAIN style it was prepared with; the statistics
+    // styles need scan status, which is not ported either.
+    if ((s.style == .eqp and api.stmtIsExplain(p.stmt) != 2) or
+        (s.style == .explain and api.stmtIsExplain(p.stmt) != 1) or
         s.style == .stats or s.style == .stats_est or s.style == .stats_vm)
     {
-        // EXPLAIN renderings are not ported.
         s.style = .box;
     }
     switch (s.style) {
@@ -1570,6 +1594,142 @@ fn initialize(p: *Qrf) void {
     if (s.row_sep == null) s.row_sep = "\n";
 }
 
+// ======================================================= EXPLAIN renderings
+
+/// Port of qrfEqpAppend().
+fn eqpAppend(p: *Qrf, id: i32, parent: i32, text: []const u8) Error!void {
+    const z = try p.gpa.dupe(u8, text);
+    errdefer p.gpa.free(z);
+    try p.eqp_rows.append(p.gpa, .{ .id = id, .parent = parent, .text = z });
+}
+
+/// Port of qrfEqpReset().
+fn eqpReset(p: *Qrf) void {
+    for (p.eqp_rows.items) |r| p.gpa.free(r.text);
+    p.eqp_rows.clearRetainingCapacity();
+}
+
+/// Port of qrfEqpNextRow(): the index of the next row after `old` (or the
+/// first) whose parent is `id`.
+fn eqpNextRow(p: *Qrf, id: i32, old: ?usize) ?usize {
+    var i = if (old) |o| o + 1 else 0;
+    while (i < p.eqp_rows.items.len) : (i += 1) {
+        if (p.eqp_rows.items[i].parent == id) return i;
+    }
+    return null;
+}
+
+/// Port of qrfEqpRenderLevel(): the rows under `id`, with `prefix`
+/// (at most 100 bytes, as zPrefix[]) before each.
+fn eqpRenderLevel(p: *Qrf, id: i32, prefix: *[100]u8, n: usize) Error!void {
+    var row = eqpNextRow(p, id, null);
+    while (row) |r| {
+        const next = eqpNextRow(p, id, r);
+        try p.out.append(prefix[0..n]);
+        try p.out.append(if (next != null) "|--" else "`--");
+        try p.out.append(p.eqp_rows.items[r].text);
+        try p.out.append("\n");
+        if (n < prefix.len - 7) {
+            @memcpy(prefix[n..][0..3], if (next != null) "|  " else "   ");
+            try eqpRenderLevel(p, p.eqp_rows.items[r].id, prefix, n + 3);
+        }
+        row = next;
+    }
+}
+
+/// Port of qrfEqpRender() (without the scan-status cycle counts): show
+/// and reset the collected EXPLAIN QUERY PLAN rows.
+fn eqpRender(p: *Qrf) Error!void {
+    if (p.eqp_rows.items.len == 0) return;
+    const first = p.eqp_rows.items[0];
+    if (first.text.len > 0 and first.text[0] == '-') {
+        if (p.eqp_rows.items.len == 1) return eqpReset(p);
+        try p.out.append(first.text[@min(3, first.text.len)..]);
+        try p.out.append("\n");
+        p.gpa.free(first.text);
+        _ = p.eqp_rows.orderedRemove(0);
+    } else {
+        try p.out.append("QUERY PLAN\n");
+    }
+    var prefix: [100]u8 = undefined;
+    try eqpRenderLevel(p, 0, &prefix, 0);
+    eqpReset(p);
+}
+
+/// Port of qrfExplain(): EXPLAIN output in aligned columns, with the
+/// bodies of loops indented.
+fn explain(p: *Qrf) Error!void {
+    const next_ops = [_][]const u8{ "Next", "Prev", "VPrev", "VNext", "SorterNext", "Return" };
+    const yield_ops = [_][]const u8{ "Yield", "SeekLT", "SeekGT", "RowSetRead", "Rewind" };
+    const inArray = struct {
+        fn f(z: []const u8, list: []const []const u8) bool {
+            for (list) |x| if (std.mem.eql(u8, z, x)) return true;
+            return false;
+        }
+    }.f;
+    var indent: std.ArrayList(i32) = .empty;
+    defer indent.deinit(p.gpa);
+    var is_yield: std.ArrayList(bool) = .empty;
+    defer is_yield.deinit(p.gpa);
+
+    // First pass: the indentation of each opcode.
+    var i_op: usize = 0;
+    while (p.i_err == RC.OK and api.step(p.stmt) == RC.ROW) : (i_op += 1) {
+        const addr = api.columnInt64(p.stmt, 0);
+        const op = if (api.columnText(p.stmt, 1)) |z| cstr(z) else "";
+        const p1 = api.columnInt64(p.stmt, 2);
+        const p2 = api.columnInt64(p.stmt, 3);
+        // p2 as an index into indent[]: they differ inside the sub-programs
+        // of triggers and foreign keys.
+        const p2op = p2 + (@as(i64, @intCast(i_op)) - addr);
+        try is_yield.append(p.gpa, inArray(op, &yield_ops));
+        try indent.append(p.gpa, 0);
+        if (inArray(op, &next_ops) and p2op > 0) {
+            var i: usize = @intCast(p2op);
+            while (i < i_op) : (i += 1) indent.items[i] += 2;
+        }
+        if (std.mem.eql(u8, op, "Goto") and p2op < i_op and p2op >= 0 and (is_yield.items[@intCast(p2op)] or p1 != 0)) {
+            var i: usize = @intCast(p2op);
+            while (i < i_op) : (i += 1) indent.items[i] += 2;
+        }
+    }
+
+    // Second pass: the output.
+    _ = api.reset(p.stmt);
+    if (p.i_err != RC.OK) return;
+    const widths = [_]i32{ 4, 13, 4, 4, 4, 13, 2, 13 };
+    const n_arg = @min(p.n_col, widths.len);
+    i_op = 0;
+    while (p.i_err == RC.OK and api.step(p.stmt) == RC.ROW) : (i_op += 1) {
+        if (i_op == 0) {
+            for (0..n_arg) |i| {
+                try widthPrint(&p.out, widths[i], p.columnName(i));
+                try p.out.append(if (i == n_arg - 1) "\n" else "  ");
+            }
+            for (0..n_arg) |i| {
+                try p.out.appendChar(widths[i], '-');
+                try p.out.append(if (i == n_arg - 1) "\n" else "  ");
+            }
+        }
+        for (0..n_arg) |i| {
+            var sep: []const u8 = "  ";
+            var w = widths[i];
+            if (i == n_arg - 1) w = 0;
+            const val = if (api.columnText(p.stmt, i)) |z| cstr(z) else "";
+            const len = wcswidth(val);
+            if (len > w) {
+                w = len;
+                sep = " ";
+            }
+            if (i == 1 and i_op < indent.items.len) try p.out.appendChar(indent.items[i_op], ' ');
+            try widthPrint(&p.out, w, val);
+            try p.out.append(if (i == n_arg - 1) "\n" else sep);
+        }
+        p.n_row += 1;
+    }
+    try p.write();
+}
+
 /// Port of qrfFinalize().
 fn finalize(p: *Qrf) Error!void {
     switch (p.spec.style) {
@@ -1579,6 +1739,7 @@ fn finalize(p: *Qrf) Error!void {
         .json => if (p.n_row > 0) try p.out.append("}]\n"),
         .jobject => if (p.n_row > 0) try p.out.append("}\n"),
         .insert => if (p.n_ins != 0) try p.out.append(";\n"),
+        .eqp => try eqpRender(p),
         else => {},
     }
     try p.write();
@@ -1603,6 +1764,8 @@ pub fn format(gpa: Allocator, stmt: *Stmt, spec: Spec, w: *Writer, err_msg: *?[]
     defer {
         p.out.deinit();
         p.line_val.deinit();
+        eqpReset(&p);
+        p.eqp_rows.deinit(gpa);
         if (p.line_cols) |cols| {
             for (cols) |c| gpa.free(c);
             gpa.free(cols);
@@ -1612,6 +1775,7 @@ pub fn format(gpa: Allocator, stmt: *Stmt, spec: Spec, w: *Writer, err_msg: *?[]
     initialize(&p);
     switch (p.spec.style) {
         .box, .column, .markdown, .table => try columnar(&p),
+        .explain => try explain(&p),
         else => {
             while (api.step(stmt) == RC.ROW) try oneSimpleRow(&p);
             if (p.n_col > 0 and p.n_row == 0 and p.spec.titles == .always) try simpleTitle(&p);

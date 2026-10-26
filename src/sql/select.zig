@@ -211,6 +211,7 @@ const coll_mod = @import("coll.zig");
 const prepare = @import("prepare.zig");
 const callback = @import("callback.zig");
 const pending = @import("pending.zig");
+const serial = @import("../vdbe/serial.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Table = int.Table;
@@ -724,6 +725,7 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: i32, sort_arg: ?*SortCtx, dis
                 _ = aux.addOp4Int(v, OP.IdxInsert, i_parm, r1, reg_result, n_result_col);
                 if (dest.i_sd_parm2 != 0) {
                     _ = aux.addOp4Int(v, OP.FilterAdd, dest.i_sd_parm2, 0, reg_result, n_result_col);
+                    _ = aux.explain(p, false, "CREATE BLOOM FILTER", .{});
                 }
                 expr_mod.releaseTempReg(p, r1);
             }
@@ -815,6 +817,11 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     const out_ex = s.e_list.?.slice();
     const n_key: i32 = @as(i32, @intCast(order_by.len())) - sort.n_ob_sat;
 
+    if (sort.n_ob_sat == 0 or n_key == 1) {
+        _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}ORDER BY", .{if (sort.n_ob_sat != 0) "LAST TERM OF " else ""});
+    } else {
+        _ = aux.explain(p, false, "USE TEMP B-TREE FOR LAST {d} TERMS OF ORDER BY", .{n_key});
+    }
     if (sort.label_bk_out != 0) {
         _ = aux.addOp2(v, OP.Gosub, sort.reg_return, sort.label_bk_out);
         _ = aux.goto_(v, addr_break);
@@ -1329,6 +1336,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     // The setup query fills the Queue.
     const setup = first_rec.prior.?;
     setup.next = null;
+    _ = aux.explain(p, true, "SETUP", .{});
     const rc = select(p, setup, &dest_queue);
     setup.next = s;
     if (rc != 0) return;
@@ -1352,6 +1360,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     // The recursive part, with Current as the recursive table, adds to the
     // Queue.
     first_rec.prior = null;
+    _ = aux.explain(p, true, "RECURSIVE STEP", .{});
     _ = select(p, s, &dest_queue);
     first_rec.prior = setup;
 
@@ -1373,6 +1382,7 @@ fn multiSelectValues(p: *Parse, s_arg: *Select, dest: *SelectDest) i32 {
         s = pr;
         if (show_all) n_row += 1;
     }
+    _ = aux.explain(p, false, "SCAN {d} CONSTANT ROW{s}", .{ n_row, if (n_row == 1) "" else "S" });
     var it: ?*Select = s;
     while (it) |x| {
         selectInnerLoop(p, x, -1, null, null, dest, 1, 1);
@@ -1452,6 +1462,10 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
         // UNION ALL (or UNION LIMIT 1): run the left query, then the
         // right one.
         var addr: i32 = 0;
+        if (prior.prior == null) {
+            _ = aux.explain(p, true, "COMPOUND QUERY", .{});
+            _ = aux.explain(p, true, "LEFT-MOST SUBQUERY", .{});
+        }
         prior.i_limit = s.i_limit;
         prior.i_offset = s.i_offset;
         prior.limit = try expr_mod.exprDup(p.arena, s.limit);
@@ -1465,6 +1479,7 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
             addr = aux.addOp1(v, OP.IfNot, s.i_limit);
             if (s.i_offset != 0) _ = aux.addOp3(v, OP.OffsetLimit, s.i_limit, s.i_offset + 1, s.i_offset);
         }
+        _ = aux.explain(p, true, "UNION ALL", .{});
         rc = select(p, s, &dest);
         s.prior = prior;
         s.n_select_row = util.logEstAdd(s.n_select_row, prior.n_select_row);
@@ -1472,6 +1487,7 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
             if (n_limit > 0 and s.n_select_row > util.logEst(@intCast(n_limit))) s.n_select_row = util.logEst(@intCast(n_limit));
         };
         if (addr != 0) aux.jumpHere(v, addr);
+        if (s.next == null) aux.explainPop(p);
     }
     return rc;
 }
@@ -1521,6 +1537,7 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
             _ = aux.addOp4Int(v, OP.IdxInsert, dest.i_sd_parm, r1, in.i_sdst, in.n_sdst);
             if (dest.i_sd_parm2 > 0) {
                 _ = aux.addOp4Int(v, OP.FilterAdd, dest.i_sd_parm2, 0, in.i_sdst, in.n_sdst);
+                _ = aux.explain(p, false, "CREATE BLOOM FILTER", .{});
             }
             expr_mod.releaseTempReg(p, r1);
         },
@@ -1670,10 +1687,13 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     var dest_a = selectDestInit(SRT.Coroutine, reg_addr_a);
     var dest_b = selectDestInit(SRT.Coroutine, reg_addr_b);
 
+    _ = aux.explain(p, true, "MERGE ({s})", .{selectOpName(s.op)});
+
     // Co-routine A: the query on the left.
     const addr_select_a = aux.currentAddr(v) + 1;
     var addr1 = aux.addOp3(v, OP.InitCoroutine, reg_addr_a, 0, addr_select_a);
     prior.i_limit = reg_limit_a;
+    _ = aux.explain(p, true, "LEFT", .{});
     _ = select(p, prior, &dest_a);
     aux.endCoroutine(v, reg_addr_a);
     aux.jumpHere(v, addr1);
@@ -1685,6 +1705,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     const saved_offset = s.i_offset;
     s.i_limit = reg_limit_b;
     s.i_offset = 0;
+    _ = aux.explain(p, true, "RIGHT", .{});
     _ = select(p, s, &dest_b);
     s.i_limit = saved_limit;
     s.i_offset = saved_offset;
@@ -1766,7 +1787,680 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     split.prior = prior;
     prior.next = split;
     prior.order_by = null;
+    aux.explainPop(p);
     return @intFromBool(p.n_err != 0);
+}
+
+/// SubstContext: the substitution made by substExpr().
+const SubstContext = struct {
+    parse: *Parse,
+    /// Replace references to this table...
+    i_table: i32,
+    /// ...by references to this one.
+    i_new_table: i32,
+    /// Add TK_IF_NULL_ROW nodes on each replacement.
+    is_outer_join: bool,
+    /// Depth of subquery recursion. Top is 1.
+    n_sel_depth: i32,
+    /// Replacement expressions.
+    e_list: *ExprList,
+    /// Collation sequences of the replacement expressions.
+    c_list: *ExprList,
+};
+
+/// Port of substExpr(): replace every reference to column N of table
+/// `x.i_table` in `e` with a copy of the N-th expression of `x.e_list`,
+/// so that the outer query of a flattened subquery refers to the source
+/// tables of the subquery directly.
+fn substExpr(x: *SubstContext, e_arg: ?*Expr) Oom!?*Expr {
+    var e = e_arg orelse return null;
+    if (e.has(EP.OuterON | EP.InnerON) and e.w.join == x.i_table) e.w = .{ .join = x.i_new_table };
+    if (e.op == TK.COLUMN and e.i_table == x.i_table and !e.has(EP.FixedCol)) {
+        const i_column: usize = @intCast(e.i_column);
+        std.debug.assert(e.right == null);
+        var copy = x.e_list.at(i_column).expr.?;
+        if (expr_mod.isVector(copy)) {
+            expr_mod.vectorErrorMsg(x.parse, copy);
+        } else {
+            var if_null_row: Expr = undefined;
+            if (x.is_outer_join and (copy.op != TK.COLUMN or copy.i_table != x.i_new_table)) {
+                if_null_row = .{ .op = TK.IF_NULL_ROW, .left = copy, .i_table = x.i_new_table, .i_column = -99, .flags = EP.IfNullRow };
+                copy = &if_null_row;
+            }
+            var new = (try expr_mod.exprDup(x.parse.arena, copy)).?;
+            if (x.is_outer_join) new.set(EP.CanBeNull);
+            if (new.op == TK.TRUEFALSE) {
+                const value: i32 = @intFromBool(expr_mod.truthValue(new));
+                new.u = .{ .value = value };
+                new.op = TK.INTEGER;
+                new.set(EP.IntValue);
+            }
+            // Keep the implicit collation the column of the view or
+            // subquery had.
+            const nat = expr_mod.collSeq(x.parse, new);
+            const coll = expr_mod.collSeq(x.parse, x.c_list.at(i_column).expr);
+            if (nat != coll or (new.op != TK.COLUMN and new.op != TK.COLLATE)) {
+                new = try expr_mod.addCollateString(x.parse, new, if (coll) |c| c.name else "BINARY");
+            }
+            new.clear(EP.Collate);
+            if (e.has(EP.OuterON | EP.InnerON)) setJoinExpr(new, e.w.join, e.flags & (EP.OuterON | EP.InnerON));
+            e = new;
+        }
+    } else {
+        if (e.op == TK.IF_NULL_ROW and e.i_table == x.i_table) e.i_table = x.i_new_table;
+        if (e.op == TK.AGG_FUNCTION and e.op2 >= x.n_sel_depth) e.op2 -= 1;
+        e.left = try substExpr(x, e.left);
+        e.right = try substExpr(x, e.right);
+        if (e.useXSelect()) {
+            try substSelect(x, e.x.select, true);
+        } else {
+            try substExprList(x, e.x.list);
+        }
+        if (e.has(EP.WinFunc)) {
+            const win = e.y.win.?;
+            win.filter = try substExpr(x, win.filter);
+            try substExprList(x, win.partition);
+            try substExprList(x, win.order_by);
+        }
+    }
+    return e;
+}
+
+/// Port of substExprList().
+fn substExprList(x: *SubstContext, list: ?*ExprList) Oom!void {
+    const l = list orelse return;
+    for (l.slice()) |*item| item.expr = try substExpr(x, item.expr);
+}
+
+/// Port of substSelect(): substExpr() over the expressions of `s_arg`, its
+/// FROM-clause subqueries, and with `do_prior` its compound parts.
+fn substSelect(x: *SubstContext, s_arg: ?*Select, do_prior: bool) Oom!void {
+    var s = s_arg orelse return;
+    x.n_sel_depth += 1;
+    while (true) {
+        try substExprList(x, s.e_list);
+        try substExprList(x, s.group_by);
+        try substExprList(x, s.order_by);
+        s.having = try substExpr(x, s.having);
+        s.where = try substExpr(x, s.where);
+        for (s.src.?.slice()) |*item| {
+            if (item.fg.is_subquery) try substSelect(x, item.u4.subq.?.select, true);
+            if (item.fg.is_tab_func) try substExprList(x, item.u1.func_arg);
+        }
+        if (!do_prior) break;
+        s = s.prior orelse break;
+    }
+    x.n_sel_depth -= 1;
+}
+
+fn recomputeColumnsUsedExpr(w: *Walker, e: *Expr) u8 {
+    if (e.op != TK.COLUMN) return WRC.Continue;
+    const item: *SrcItem = @ptrCast(@alignCast(w.u.ptr.?));
+    if (item.i_cursor != e.i_table) return WRC.Continue;
+    if (e.i_column < 0) return WRC.Continue;
+    item.col_used |= resolve.exprColUsed(e);
+    return WRC.Continue;
+}
+
+/// Port of recomputeColumnsUsed(): recompute `item.col_used` from the
+/// whole of `s`.
+fn recomputeColumnsUsed(s: *Select, item: *SrcItem) void {
+    if (item.s_tab == null) return;
+    var w: Walker = .{
+        .expr_callback = recomputeColumnsUsedExpr,
+        .select_callback = walker.selectWalkNoop,
+        .u = .{ .ptr = item },
+    };
+    item.col_used = 0;
+    _ = walker.walkSelect(&w, s);
+}
+
+/// Port of srclistRenumberCursors(): give each term of `src` but
+/// `i_except` (and of its subqueries, recursively) a new cursor, noting
+/// csr_map[old+1] = new. csr_map[0] is the size of the map.
+fn srclistRenumberCursors(p: *Parse, csr_map: []i32, src: *SrcList, i_except: i32) void {
+    for (src.slice(), 0..) |*item, i| {
+        if (@as(i32, @intCast(i)) == i_except) continue;
+        std.debug.assert(item.i_cursor < csr_map[0]);
+        const k: usize = @intCast(item.i_cursor + 1);
+        if (!item.fg.is_recursive or csr_map[k] == 0) {
+            csr_map[k] = p.n_tab;
+            p.n_tab += 1;
+        }
+        item.i_cursor = csr_map[k];
+        if (item.fg.is_subquery) {
+            var it: ?*Select = item.u4.subq.?.select;
+            while (it) |sub| : (it = sub.prior) srclistRenumberCursors(p, csr_map, sub.src.?, -1);
+        }
+    }
+}
+
+/// Port of renumberCursorDoMapping().
+fn renumberCursorDoMapping(w: *Walker, cursor: *i32) void {
+    const csr_map = w.u.ai_col;
+    const i_csr = cursor.*;
+    if (i_csr < -1) return;
+    if (i_csr < csr_map[0] and csr_map[@intCast(i_csr + 1)] > 0) cursor.* = csr_map[@intCast(i_csr + 1)];
+}
+
+/// Port of renumberCursorsCb().
+fn renumberCursorsCb(w: *Walker, e: *Expr) u8 {
+    if (e.op == TK.COLUMN or e.op == TK.IF_NULL_ROW) renumberCursorDoMapping(w, &e.i_table);
+    if (e.has(EP.OuterON | EP.InnerON)) renumberCursorDoMapping(w, &e.w.join);
+    return WRC.Continue;
+}
+
+/// Port of renumberCursors(): new cursors for the FROM clause of `s` but
+/// term `i_except` (and its subqueries), with every reference updated.
+/// `csr_map` is larger than any cursor of `s` and zero for every cursor
+/// not in those FROM clauses.
+fn renumberCursors(p: *Parse, s: *Select, i_except: i32, csr_map: []i32) void {
+    srclistRenumberCursors(p, csr_map, s.src.?, i_except);
+    var w: Walker = .{
+        .expr_callback = renumberCursorsCb,
+        .select_callback = walker.selectWalkNoop,
+        .u = .{ .ai_col = csr_map.ptr },
+    };
+    _ = walker.walkSelect(&w, s);
+}
+
+/// Port of findLeftmostExprlist(): the result set of the leftmost SELECT
+/// of a compound.
+fn findLeftmostExprlist(sel_arg: *Select) *ExprList {
+    var sel = sel_arg;
+    while (sel.prior) |pr| sel = pr;
+    return sel.e_list.?;
+}
+
+/// Port of compoundHasDifferentAffinities(): some result column has
+/// different affinities in different arms of the compound.
+fn compoundHasDifferentAffinities(s: *Select) bool {
+    for (s.e_list.?.slice(), 0..) |item, ii| {
+        const aff = expr_mod.affinity(item.expr.?);
+        var it = s.prior;
+        while (it) |sub1| : (it = sub1.prior) {
+            if (expr_mod.affinity(sub1.e_list.?.at(ii).expr.?) != aff) return true;
+        }
+    }
+    return false;
+}
+
+/// Port of flattenSubquery(): merge the FROM-clause subquery `i_from` of
+/// `s` into `s`, as in
+///
+///     SELECT a FROM (SELECT x+y AS a FROM t1 WHERE z<100) WHERE a>5
+///  -> SELECT x+y AS a FROM t1 WHERE z<100 AND a>5
+///
+/// when the restrictions numbered as in select.c allow it. A UNION ALL
+/// subquery makes `s` a compound with one copy of `s` per arm. Returns
+/// true if flattened. `is_agg` tells whether `s` is an aggregate.
+fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool {
+    const db = p.db;
+    std.debug.assert(s.prior == null);
+    if (db.optDisabled(int.OPT.QueryFlattener)) return false;
+    var src = s.src.?;
+    const subitem = src.at(i_from);
+    const i_parent = subitem.i_cursor;
+    const sub = subitem.u4.subq.?.select;
+
+    if (s.win != null or sub.win != null) return false; // (25)
+
+    var sub_src = sub.src.?;
+    if (sub.limit != null and s.limit != null) return false; // (13)
+    if (sub.limit != null and sub.limit.?.right != null) return false; // (14)
+    if (s.sel_flags & SF.Compound != 0 and sub.limit != null) return false; // (15)
+    if (sub_src.len() == 0) return false; // (7)
+    if (sub.sel_flags & SF.Distinct != 0) return false; // (4)
+    if (sub.limit != null and (src.len() > 1 or is_agg)) return false; // (8) (9)
+    if (s.order_by != null and sub.order_by != null) return false; // (11)
+    if (is_agg and sub.order_by != null) return false; // (16)
+    if (sub.limit != null and s.where != null) return false; // (19)
+    if (sub.limit != null and s.sel_flags & SF.Distinct != 0) return false; // (21)
+    if (sub.sel_flags & SF.Recursive != 0) return false; // (22)
+
+    // The right operand of a LEFT JOIN may not be a join itself: "t1 LEFT
+    // JOIN (t2 JOIN t3)" is not "(t1 LEFT JOIN t2) JOIN t3".
+    var is_outer_join = false;
+    if (subitem.fg.jointype & (JT.OUTER | JT.LTORJ) != 0) {
+        if (sub_src.len() > 1 or // (3a)
+            s.sel_flags & SF.Distinct != 0 or // (3d)
+            subitem.fg.jointype & JT.RIGHT != 0) // (26)
+        {
+            return false;
+        }
+        is_outer_join = true;
+    }
+
+    if (i_from > 0 and sub_src.at(0).fg.jointype & JT.LTORJ != 0) return false; // (27a)
+
+    // (17): a compound subquery is a UNION ALL of simple non-aggregate,
+    // non-DISTINCT queries.
+    var csr_map: ?[]i32 = null;
+    if (sub.prior != null) {
+        if (sub.order_by != null) return false; // (20)
+        if (is_agg or s.sel_flags & SF.Distinct != 0 or is_outer_join) return false; // (17d1) (17d2) (17f)
+        var it: ?*Select = sub;
+        while (it) |sub1| : (it = sub1.prior) {
+            if (sub1.sel_flags & (SF.Distinct | SF.Aggregate) != 0 or // (17b)
+                (sub1.prior != null and sub1.op != TK.ALL) or // (17a)
+                sub1.src.?.len() < 1 or // (17c)
+                sub1.win != null) // (17e)
+            {
+                return false;
+            }
+            // Else JT_LTORJ would be lost on the left tables of the RIGHT
+            // JOIN being flattened.
+            if (i_from > 0 and sub1.src.?.at(0).fg.jointype & JT.LTORJ != 0) return false; // (17g) (27b)
+        }
+
+        // (18)
+        if (s.order_by) |ob| for (ob.slice()) |item| {
+            if (item.u.x.order_by_col == 0) return false;
+        };
+
+        if (s.sel_flags & SF.Recursive != 0) return false; // (23)
+        if (compoundHasDifferentAffinities(sub)) return false; // (17h)
+
+        if (src.len() > 1) {
+            if (p.n_select > 500) return false;
+            if (db.optDisabled(int.OPT.FlttnUnionAll)) return false;
+            const map = try p.arena.alloc(i32, @intCast(p.n_tab + 1));
+            @memset(map, 0);
+            map[0] = p.n_tab;
+            csr_map = map;
+        }
+    }
+
+    // Flattening is permitted.
+    const sub1 = build.subqueryDetach(subitem);
+    subitem.name = null;
+    subitem.alias = null;
+
+    // Compound-subquery flattening: N-1 copies of the outer query, without
+    // ORDER BY, LIMIT or OFFSET, are joined to its left by UNION ALL, one
+    // for each arm of the subquery:
+    //
+    //     SELECT a+1 FROM (SELECT x FROM tab UNION ALL SELECT y FROM tab)
+    //     WHERE a!=5 ORDER BY 1
+    //  -> SELECT x+1 FROM tab WHERE x+1!=5
+    //     UNION ALL SELECT y+1 FROM tab WHERE y+1!=5 ORDER BY 1
+    var arm = sub.prior;
+    while (arm) |a| : (arm = a.prior) {
+        const order_by = s.order_by;
+        const limit = s.limit;
+        const prior = s.prior;
+        const item_tab = subitem.s_tab;
+        subitem.s_tab = null;
+        s.order_by = null;
+        s.prior = null;
+        s.limit = null;
+        const new = try expr_mod.selectDup(p.arena, s);
+        s.limit = limit;
+        s.order_by = order_by;
+        s.op = TK.ALL;
+        subitem.s_tab = item_tab;
+        if (new) |n| {
+            p.n_select += 1;
+            n.sel_id = @intCast(p.n_select);
+            if (csr_map) |m| renumberCursors(p, n, @intCast(i_from), m);
+            n.prior = prior;
+            if (prior) |pr| pr.next = n;
+            n.next = s;
+            s.prior = n;
+        } else {
+            s.prior = prior;
+        }
+    }
+
+    // Drop the Table of the subquery. There may still be Expr.y.tab
+    // references to it (ticket #3346), but its reference is held by
+    // p.tab_refs (or it lives in the arena) until the statement is done.
+    subitem.s_tab = null;
+
+    // Once per arm of a compound flattening (else once): move the FROM
+    // terms of the subquery into the outer query, and substitute the
+    // subquery's result expressions for the references to cursor
+    // i_parent, which is never used again.
+    var sub_it: ?*Select = sub1;
+    var parent_it: ?*Select = s;
+    while (parent_it) |parent| : ({
+        parent_it = parent.prior;
+        sub_it = sub_it.?.prior;
+    }) {
+        const sx = sub_it.?;
+        const jointype = parent.src.?.at(i_from).fg.jointype;
+        sub_src = sx.src.?;
+        const n_sub_src = sub_src.len();
+        src = parent.src.?;
+
+        // The subquery takes one slot of the outer FROM clause; make room
+        // for all of its terms.
+        if (n_sub_src > 1) {
+            src = (try build.srcListEnlarge(p, src, n_sub_src - 1, i_from + 1)) orelse break;
+            parent.src = src;
+        }
+
+        const i_new_parent = sub_src.at(0).i_cursor;
+        for (0..n_sub_src) |i| {
+            const item = src.at(i + i_from);
+            item.* = sub_src.at(i).*;
+            item.fg.jointype |= jointype & JT.LTORJ;
+            sub_src.at(i).* = .{};
+        }
+        src.at(i_from).fg.jointype |= jointype;
+
+        if (sx.order_by) |ob| {
+            // Its iOrderByCol values refer to the subquery's result set,
+            // not the parent's (ticket [d11a6e908f]).
+            for (ob.slice()) |*item| item.u.x.order_by_col = 0;
+            std.debug.assert(parent.order_by == null);
+            parent.order_by = ob;
+            sx.order_by = null;
+        }
+        const where = sx.where;
+        sx.where = null;
+        if (is_outer_join) setJoinExpr(where, i_new_parent, EP.OuterON);
+        if (where) |w| {
+            parent.where = if (parent.where) |pw| try expr_mod.pExpr(p, TK.AND, w, pw) else w;
+        }
+        if (!db.malloc_failed) {
+            var x: SubstContext = .{
+                .parse = p,
+                .i_table = i_parent,
+                .i_new_table = i_new_parent,
+                .is_outer_join = is_outer_join,
+                .n_sel_depth = 0,
+                .e_list = sx.e_list.?,
+                .c_list = findLeftmostExprlist(sx),
+            };
+            try substSelect(&x, parent, false);
+        }
+
+        // The result is a compound if either query was.
+        parent.sel_flags |= sx.sel_flags & SF.Compound;
+
+        // The limits of "SELECT ... FROM (SELECT ... LIMIT a OFFSET b)
+        // LIMIT x OFFSET y" cannot be combined, if either is negative.
+        if (sx.limit) |l| {
+            parent.limit = l;
+            sx.limit = null;
+        }
+
+        for (0..n_sub_src) |i| recomputeColumnsUsed(parent, src.at(i + i_from));
+    }
+
+    // The AggInfo entries must not refer to the abandoned subquery.
+    var w = expr_mod.aggInfoPersistWalker(p);
+    _ = walker.walkSelect(&w, sub1);
+    return true;
+}
+
+/// WhereConst: the columns fixed to a constant by WHERE terms of the form
+/// COLUMN=VALUE, for propagateConstants().
+const WhereConst = struct {
+    parse: *Parse,
+    /// Number of COLUMN=CONSTANT terms.
+    n_const: usize = 0,
+    /// Number of times a constant was propagated.
+    n_chng: i32 = 0,
+    /// A column of `exprs` has affinity BLOB.
+    has_aff_blob: bool = false,
+    /// The ON terms not considered: EP_OuterON, or EP_InnerON|EP_OuterON.
+    exclude_on: u32 = 0,
+    /// [i*2] is the COLUMN and [i*2+1] the VALUE.
+    exprs: std.ArrayList(*Expr) = .empty,
+};
+
+/// Port of constInsert(): note that `column` is `value` by `e`, unless
+/// `value` has an affinity, the comparison is not BINARY, `value` might
+/// return a subtype, or `column` is already noted. `value` is constant.
+fn constInsert(c: *WhereConst, column: *Expr, value: *Expr, e: *Expr) Oom!void {
+    std.debug.assert(column.op == TK.COLUMN);
+    if (column.has(EP.FixedCol)) return;
+    if (expr_mod.affinity(value) != 0) return;
+    if (!serial.isBinary(expr_mod.compareCollSeq(c.parse, e))) return;
+    if (ec.canReturnSubtype(c.parse, value)) return;
+
+    // Each column only once (ticket [cf5ed20f]).
+    for (0..c.n_const) |i| {
+        const e2 = c.exprs.items[i * 2];
+        if (e2.i_table == column.i_table and e2.i_column == column.i_column) return;
+    }
+    if (expr_mod.affinity(column) <= Aff.blob) c.has_aff_blob = true;
+
+    try c.exprs.appendSlice(c.parse.arena, &.{ column, value });
+    c.n_const += 1;
+}
+
+/// Port of findConstInWhere(): constInsert() each COLUMN=VALUE or
+/// VALUE=COLUMN term, with a constant VALUE, of the AND-connected terms
+/// of `e_arg`.
+fn findConstInWhere(c: *WhereConst, e_arg: ?*Expr) Oom!void {
+    const e = e_arg orelse return;
+    if (e.has(c.exclude_on)) return;
+    if (e.op == TK.AND) {
+        try findConstInWhere(c, e.right);
+        try findConstInWhere(c, e.left);
+        return;
+    }
+    if (e.op != TK.EQ) return;
+    const right = e.right.?;
+    const left = e.left.?;
+    if (right.op == TK.COLUMN and expr_mod.isConstant(c.parse, left)) try constInsert(c, right, left, e);
+    if (left.op == TK.COLUMN and expr_mod.isConstant(c.parse, right)) try constInsert(c, left, right, e);
+}
+
+/// Port of propagateConstantExprRewriteOne(): if `e` is one of the
+/// columns of `c`, tag it EP_FixedCol and hang a copy of its value off
+/// its left. Not for a BLOB column if `ignore_aff_blob`.
+fn propagateConstantExprRewriteOne(c: *WhereConst, e: *Expr, ignore_aff_blob: bool) u8 {
+    if (c.parse.db.malloc_failed) return WRC.Prune;
+    if (e.op != TK.COLUMN) return WRC.Continue;
+    if (e.has(EP.FixedCol | c.exclude_on)) return WRC.Continue;
+    for (0..c.n_const) |i| {
+        const column = c.exprs.items[i * 2];
+        if (column == e) continue;
+        if (column.i_table != e.i_table) continue;
+        if (column.i_column != e.i_column) continue;
+        if (ignore_aff_blob and expr_mod.affinity(column) <= Aff.blob) break;
+        c.n_chng += 1;
+        e.clear(EP.Leaf);
+        e.set(EP.FixedCol);
+        std.debug.assert(e.left == null);
+        e.left = expr_mod.exprDup(c.parse.arena, c.exprs.items[i * 2 + 1]) catch {
+            oom(c.parse);
+            return WRC.Prune;
+        };
+        break;
+    }
+    return WRC.Prune;
+}
+
+/// Port of propagateConstantExprRewrite(): substitute the constants of
+/// `w.u` for `e`, a column, or for the column operands of `e`, a
+/// comparison (=, <, <=, >, >=, IS) whose left operand is not TEXT.
+fn propagateConstantExprRewrite(w: *Walker, e: *Expr) u8 {
+    const c: *WhereConst = @ptrCast(@alignCast(w.u.ptr.?));
+    if (c.has_aff_blob) {
+        if ((e.op >= TK.EQ and e.op <= TK.GE) or e.op == TK.IS) {
+            _ = propagateConstantExprRewriteOne(c, e.left.?, false);
+            if (c.parse.db.malloc_failed) return WRC.Prune;
+            if (expr_mod.affinity(e.left.?) != Aff.text) _ = propagateConstantExprRewriteOne(c, e.right.?, false);
+        }
+    }
+    return propagateConstantExprRewriteOne(c, e, c.has_aff_blob);
+}
+
+/// Port of propagateConstants(): the WHERE-clause constant propagation
+/// optimization. Each top-level AND-connected COLUMN=CONSTANT term (not
+/// of an OUTER JOIN's ON clause) fixes every other use of COLUMN in the
+/// WHERE clause to CONSTANT:
+///
+///     SELECT * FROM t1, t2, t3 WHERE t1.a=39 AND t2.b=t1.a AND t3.c=t2.b
+///  -> SELECT * FROM t1, t2, t3 WHERE t1.a=39 AND t2.b=39 AND t3.c=39
+///
+/// Because of affinities, the column is not replaced but tagged
+/// EP_FixedCol with the constant on its left, which the code generator
+/// uses instead of the column; and only with BINARY comparisons. For a
+/// BLOB column the constant is only used by comparison operators, which
+/// apply the right conversions ("x=10 AND x LIKE 10" must not become
+/// "10 LIKE 10" for x='10.0'). Returns the number of changes.
+fn propagateConstants(p: *Parse, s: *Select) Oom!i32 {
+    var x: WhereConst = .{ .parse = p };
+    var n_chng: i32 = 0;
+    while (true) {
+        x.n_const = 0;
+        x.n_chng = 0;
+        x.exprs.clearRetainingCapacity();
+        x.has_aff_blob = false;
+        const src = s.src.?;
+        // No propagation into any ON clause if there is a RIGHT JOIN,
+        // else none into the ON clause of a LEFT JOIN.
+        x.exclude_on = if (src.len() > 0 and src.at(0).fg.jointype & JT.LTORJ != 0) EP.InnerON | EP.OuterON else EP.OuterON;
+        try findConstInWhere(&x, s.where);
+        if (x.n_const != 0) {
+            var w: Walker = .{
+                .parse = p,
+                .expr_callback = propagateConstantExprRewrite,
+                .select_callback = walker.selectWalkNoop,
+                .u = .{ .ptr = &x },
+            };
+            _ = walker.walkExpr(&w, s.where);
+            n_chng += x.n_chng;
+        }
+        if (x.n_chng == 0) break;
+    }
+    return n_chng;
+}
+
+/// Port of pushDownWindowCheck(): `e` may be pushed down into `subq`,
+/// which has window functions, as it only uses constants and the
+/// PARTITION BY terms (filtering out whole partitions is safe).
+fn pushDownWindowCheck(p: *Parse, subq: *Select, e: *Expr) bool {
+    std.debug.assert(subq.sel_flags & SF.MultiPart == 0 and subq.prior == null);
+    return expr_mod.isConstantOrGroupBy(p, e, subq.win.?.partition.?);
+}
+
+/// Port of pushDownWhereTerms(): the WHERE-clause push-down optimization.
+/// Copy the terms of `where_arg` that only constrain the FROM-clause
+/// subquery `i_src` of `src_list` into `subq`'s WHERE (or HAVING) clause:
+///
+///     SELECT * FROM (SELECT a AS x, c-d AS y FROM t1) WHERE x=5 AND y=10
+///  -> SELECT * FROM (SELECT a AS x, c-d AS y FROM t1 WHERE a=5 AND c-d=10)
+///     WHERE x=5 AND y=10
+///
+/// subject to the restrictions numbered as in select.c. Returns the
+/// number of terms copied.
+fn pushDownWhereTerms(p: *Parse, subq_arg: *Select, where_arg: ?*Expr, src_list: *SrcList, i_src: usize) Oom!i32 {
+    var subq = subq_arg;
+    var where = where_arg orelse return 0;
+    const src = src_list.at(i_src);
+    var n_chng: i32 = 0;
+    if (subq.sel_flags & (SF.Recursive | SF.MultiPart) != 0) return 0; // (2) (11)
+    if (src.fg.jointype & (JT.LTORJ | JT.RIGHT) != 0) return 0; // (10)
+
+    if (subq.prior != null) {
+        var not_union_all = false;
+        var it: ?*Select = subq;
+        while (it) |sel| : (it = sel.prior) {
+            if (sel.op != TK.ALL and sel.op != TK.SELECT) not_union_all = true;
+            if (sel.win != null) return 0; // (6b)
+        }
+        if (not_union_all) {
+            // With UNION, INTERSECT or EXCEPT, every result column must be
+            // BINARY.
+            it = subq;
+            while (it) |sel| : (it = sel.prior) {
+                for (sel.e_list.?.slice()) |item| {
+                    if (!serial.isBinary(expr_mod.collSeq(p, item.expr))) return 0; // (8)
+                }
+            }
+        }
+    } else if (subq.win) |win| {
+        if (win.partition == null) return 0;
+    }
+
+    if (subq.limit != null) return 0; // (3)
+    while (where.op == TK.AND) {
+        n_chng += try pushDownWhereTerms(p, subq, where.right, src_list, i_src);
+        where = where.left.?;
+    }
+
+    // Restrictions (4), (5) and (9) are checked by isSingleTableConstraint().
+    if (expr_mod.isSingleTableConstraint(where, src_list, i_src, true)) {
+        n_chng += 1;
+        subq.sel_flags |= SF.PushDown;
+        while (true) {
+            var new = (try expr_mod.exprDup(p.arena, where)).?;
+            unsetJoinExpr(new, -1, true);
+            var x: SubstContext = .{
+                .parse = p,
+                .i_table = src.i_cursor,
+                .i_new_table = src.i_cursor,
+                .is_outer_join = false,
+                .n_sel_depth = 0,
+                .e_list = subq.e_list.?,
+                .c_list = findLeftmostExprlist(subq),
+            };
+            new = (try substExpr(&x, new)).?;
+            if (p.n_err == 0 and new.op == TK.IN and new.useXSelect()) {
+                new.x.select.?.sel_flags |= SF.ClonedRhsIn;
+                where.x.select.?.sel_flags |= SF.ClonedRhsIn;
+            }
+            if (subq.win != null and !pushDownWindowCheck(p, subq, new)) {
+                // Restriction (6c).
+                n_chng -= 1;
+                break;
+            }
+            if (subq.sel_flags & SF.Aggregate != 0) {
+                subq.having = try expr_mod.exprAnd(p, subq.having, new);
+            } else {
+                subq.where = try expr_mod.exprAnd(p, subq.where, new);
+            }
+            subq = subq.prior orelse break;
+        }
+    }
+    return n_chng;
+}
+
+/// Port of disableUnusedSubqueryResultColumns(): turn the result columns
+/// of the FROM-clause subquery `item` that are never used into NULLs.
+/// Returns the number of columns changed.
+fn disableUnusedSubqueryResultColumns(item: *SrcItem) i32 {
+    if (item.fg.is_correlated or item.fg.is_cte) return 0;
+    const t = item.s_tab.?;
+    const sub = item.u4.subq.?.select;
+    std.debug.assert(sub.e_list.?.len() == t.cols.len);
+    var it: ?*Select = sub;
+    while (it) |x| : (it = x.prior) {
+        if (x.sel_flags & (SF.Distinct | SF.Aggregate) != 0) return 0;
+        // Only UNION ALL compounds.
+        if (x.prior != null and x.op != TK.ALL) return 0;
+        if (x.win != null) return 0;
+    }
+    var col_used = item.col_used;
+    if (sub.order_by) |ob| for (ob.slice()) |o| {
+        var i_col = o.u.x.order_by_col;
+        if (i_col > 0) {
+            i_col -= 1;
+            col_used |= @as(int.Bitmask, 1) << @intCast(if (i_col >= int.bms) int.bms - 1 else i_col);
+        }
+    };
+    var n_chng: i32 = 0;
+    for (0..t.cols.len) |j| {
+        const m: int.Bitmask = if (j < int.bms - 1) @as(int.Bitmask, 1) << @intCast(j) else @as(int.Bitmask, 1) << (int.bms - 1);
+        if (m & col_used != 0) continue;
+        it = sub;
+        while (it) |x| : (it = x.prior) {
+            const y = x.e_list.?.at(j).expr.?;
+            if (y.op == TK.NULL) continue;
+            y.op = TK.NULL;
+            y.clear(EP.Skip | EP.Unlikely);
+            x.sel_flags |= SF.PushDown;
+            n_chng += 1;
+        }
+    }
+    return n_chng;
 }
 
 /// Port of isSimpleCount(): the table of "SELECT count(*) FROM <tbl>", or
@@ -2351,6 +3045,41 @@ fn analyzeAggFuncArgs(agg: *AggInfo, nc: *NameContext) void {
     nc.nc_flags &= ~NC.InAggFunc;
 }
 
+/// Port of optimizeAggregateUseOfIndexedExpr(): after whereBegin() has
+/// chosen indexes, analyze the aggregate function arguments again so that
+/// the indexed expressions among them become columns of those indexes.
+fn optimizeAggregateUseOfIndexedExpr(s: *Select, agg: *AggInfo, nc: *NameContext) void {
+    std.debug.assert(agg.i_first_reg == 0);
+    agg.cols.shrinkRetainingCapacity(@intCast(agg.n_accumulator));
+    if (agg.n_sorting_column > 0) {
+        var mx: i32 = @as(i32, @intCast(s.group_by.?.len())) - 1;
+        for (agg.cols.items) |c| mx = @max(mx, c.i_sorter_column);
+        agg.n_sorting_column = @intCast(mx + 1);
+    }
+    analyzeAggFuncArgs(agg, nc);
+}
+
+/// Walker callback of aggregateConvertIndexedExprRefToColumn().
+fn aggregateIdxEprRefToColCallback(_: *walker.Walker, e: *Expr) u8 {
+    const agg = e.agg_info orelse return WRC.Continue;
+    if (e.op == TK.AGG_COLUMN or e.op == TK.AGG_FUNCTION or e.op == TK.IF_NULL_ROW) return WRC.Continue;
+    if (e.i_agg >= agg.cols.items.len) return WRC.Continue;
+    const col = &agg.cols.items[@intCast(e.i_agg)];
+    e.op = TK.AGG_COLUMN;
+    e.i_table = col.i_table;
+    e.i_column = @intCast(col.i_column);
+    e.clear(EP.Skip | EP.Collate | EP.Unlikely);
+    return WRC.Prune;
+}
+
+/// Port of aggregateConvertIndexedExprRefToColumn(): the nodes of the
+/// aggregate function arguments that optimizeAggregateUseOfIndexedExpr()
+/// tied to index columns become TK_AGG_COLUMN.
+fn aggregateConvertIndexedExprRefToColumn(agg: *AggInfo) void {
+    var w: walker.Walker = .{ .expr_callback = aggregateIdxEprRefToColCallback };
+    for (agg.funcs.items) |f| _ = walker.walkExpr(&w, f.f_expr);
+}
+
 /// Port of assignAggregateRegisters(): one register per AggInfo column
 /// and function.
 fn assignAggregateRegisters(p: *Parse, agg: *AggInfo) void {
@@ -2375,6 +3104,7 @@ fn resetAccumulator(p: *Parse, agg: *AggInfo) void {
             } else {
                 const ki = keyInfoFromExprList(p, e.x.list.?, 0, 0);
                 f.i_dist_addr = aux.addOp4(v, OP.OpenEphemeral, f.i_distinct, 0, 0, if (ki) |k| .{ .keyinfo = k } else .notused);
+                _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}(DISTINCT)", .{f.func.?.name});
             }
         }
         if (f.i_ob_tab >= 0) {
@@ -2386,6 +3116,7 @@ fn resetAccumulator(p: *Parse, agg: *AggInfo) void {
             const ki = keyInfoFromExprList(p, ob_list, 0, n_extra);
             if (!f.b_ob_unique and p.n_err == 0) ki.?.n_key_field += 1;
             _ = aux.addOp4(v, OP.OpenEphemeral, f.i_ob_tab, @intCast(ob_list.len() + n_extra), 0, if (ki) |k| .{ .keyinfo = k } else .notused);
+            _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}(ORDER BY)", .{f.func.?.name});
         }
     }
 }
@@ -2538,6 +3269,47 @@ fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: u8
     if (addr_hit_test != 0) aux.jumpHereOrPopInst(v, addr_hit_test);
 }
 
+/// Walker callback of havingToWhere(): descend through AND nodes; move any
+/// other term that is constant or GROUP BY terms to the WHERE clause,
+/// leaving a "1" in its place.
+fn havingToWhereExprCb(w: *Walker, e: *Expr) u8 {
+    if (e.op == TK.AND) return WRC.Continue;
+    const s = w.u.select.?;
+    const p = w.parse.?;
+    // An agg_info here (before the HAVING clause is analyzed) means a
+    // correlated reference to an outer aggregate, whose AggInfo moving it
+    // could corrupt.
+    if (expr_mod.isConstantOrGroupBy(p, e, s.group_by.?) and !e.alwaysFalse() and e.agg_info == null) {
+        const new = expr_mod.exprInt32(p.arena, 1) catch {
+            oom(p);
+            return WRC.Abort;
+        };
+        const where = s.where;
+        std.mem.swap(Expr, new, e);
+        s.where = expr_mod.exprAnd(p, where, new) catch {
+            oom(p);
+            return WRC.Abort;
+        };
+        w.e_code = 1;
+    }
+    return WRC.Prune;
+}
+
+/// Port of havingToWhere(): move the HAVING terms made of constants and
+/// BINARY GROUP BY terms to the WHERE clause, where they filter rows
+/// before grouping:
+///
+///     SELECT * FROM <tables> WHERE a=? GROUP BY b HAVING b=? AND c=?
+///  -> SELECT * FROM <tables> WHERE a=? AND b=? GROUP BY b HAVING c=?
+fn havingToWhere(p: *Parse, s: *Select) void {
+    var w: Walker = .{
+        .parse = p,
+        .expr_callback = havingToWhereExprCb,
+        .u = .{ .select = s },
+    };
+    _ = walker.walkExpr(&w, s.having);
+}
+
 /// Port of isSelfJoinView(): an earlier materialization of the same view
 /// in tab_list[first..end], or null.
 fn isSelfJoinView(tab_list: *SrcList, this: *SrcItem, first: usize, end: usize) ?*SrcItem {
@@ -2555,6 +3327,66 @@ fn isSelfJoinView(tab_list: *SrcList, this: *SrcItem, first: usize, end: usize) 
         return item;
     }
     return null;
+}
+
+/// Port of countOfViewOptimization(): rewrite
+///
+///     SELECT count(*) FROM (SELECT x FROM t1 UNION ALL SELECT y FROM t2)
+///  -> SELECT (SELECT count(*) FROM t1)+(SELECT count(*) FROM t2)
+///
+/// when the subquery is a UNION ALL without LIMIT, WHERE, GROUP BY,
+/// HAVING, DISTINCT or aggregates, and the outer query is a plain
+/// count(*). Returns true if done.
+fn countOfViewOptimization(p: *Parse, s: *Select) Oom!bool {
+    if (s.sel_flags & SF.Aggregate == 0) return false;
+    if (s.e_list.?.len() != 1) return false;
+    if (s.where != null) return false;
+    if (s.having != null) return false;
+    if (s.group_by != null) return false;
+    if (s.order_by != null) return false;
+    const count = s.e_list.?.at(0).expr.?;
+    if (count.op != TK.AGG_FUNCTION) return false;
+    if (!ctype.eqlNoCase(count.token(), "count")) return false;
+    if (count.x.list != null) return false; // count(*)
+    if (s.src.?.len() != 1) return false;
+    if (count.has(EP.WinFunc)) return false;
+    const from = s.src.?.at(0);
+    if (!from.fg.is_subquery) return false;
+    if (s.sel_flags & SF.Correlated != 0) return false;
+    var sub: ?*Select = from.u4.subq.?.select;
+    if (sub.?.prior == null) return false; // a compound
+    if (sub.?.sel_flags & SF.CopyCte != 0) return false; // not a CTE
+    while (sub) |sx| : (sub = sx.prior) {
+        if (sx.op != TK.ALL and sx.prior != null) return false;
+        if (sx.where != null) return false;
+        if (sx.limit != null) return false;
+        if (sx.sel_flags & (SF.Aggregate | SF.Distinct) != 0) return false;
+        std.debug.assert(sx.having == null);
+    }
+
+    var e: ?*Expr = null;
+    sub = build.subqueryDetach(from);
+    const new_src = try p.arena.create(SrcList);
+    new_src.* = .{};
+    s.src = new_src;
+    while (sub) |sx| {
+        const prior = sx.prior;
+        sx.prior = null;
+        sx.next = null;
+        sx.sel_flags |= SF.Aggregate;
+        sx.sel_flags &= ~SF.Compound;
+        sx.n_select_row = 0;
+        var term = if (prior != null) (try expr_mod.exprDup(p.arena, count)).? else count;
+        sx.e_list = try expr_mod.listAppend(p, null, term);
+        term = try expr_mod.pExpr(p, TK.SELECT, null, null);
+        expr_mod.pExprAddSelect(p, term, sx);
+        e = if (e) |x| try expr_mod.pExpr(p, TK.PLUS, term, x) else term;
+        if (p.n_err != 0) e = null;
+        sub = prior;
+    }
+    s.e_list.?.at(0).expr = e;
+    s.sel_flags &= ~SF.Aggregate;
+    return true;
 }
 
 /// Port of fromClauseTermCanBeCoroutine(): FROM-clause subquery `i` can
@@ -2584,6 +3416,53 @@ fn fromClauseTermCanBeCoroutine(p: *Parse, tab_list: *SrcList, i_arg: usize, sel
         if (tab_list.at(i).fg.is_subquery) return false;
     }
     return true;
+}
+
+/// Port of existsToJoin(): turn the "EXISTS (SELECT ...)" terms of the
+/// WHERE clause `where_arg` of `s` into joins:
+///
+///     SELECT name FROM sailors AS S WHERE EXISTS (
+///       SELECT * FROM reserves AS R WHERE S.sid=R.sid AND R.day='2022-10-25')
+///  -> SELECT name FROM sailors AS S, reserves AS R
+///       WHERE S.sid=R.sid AND R.day='2022-10-25'
+///
+/// The new term is tagged fg.from_exists so that the planner leaves its
+/// loop after the first match.
+fn existsToJoin(p: *Parse, s: *Select, where_arg: ?*Expr) Oom!void {
+    const where = where_arg orelse return;
+    if (p.n_err == 0 and !where.has(EP.OuterON | EP.InnerON) and s.src.?.len() < int.bms and
+        (s.limit == null or s.limit.?.right == null))
+    {
+        if (where.op == TK.AND) {
+            const right = where.right;
+            try existsToJoin(p, s, where.left);
+            try existsToJoin(p, s, right);
+        } else if (where.op == TK.EXISTS) {
+            const sub = where.x.select.?;
+            const sub_where = sub.where;
+            if (sub.src.?.len() == 1 and sub.sel_flags & SF.Aggregate == 0 and !sub.src.?.at(0).fg.is_subquery and
+                sub.limit == null and sub.prior == null)
+            {
+                // The EXISTS might be a copy of another one in the tree, so
+                // its cursor must be made unique.
+                const csr_map = try p.arena.alloc(i32, @intCast(p.n_tab + 2));
+                @memset(csr_map, 0);
+                csr_map[0] = p.n_tab + 1;
+                renumberCursors(p, sub, -1, csr_map);
+
+                where.* = .{ .op = TK.INTEGER, .flags = EP.IntValue, .u = .{ .value = 1 } };
+                sub.src.?.at(0).fg.from_exists = true;
+                s.src = try build.srcListAppendList(p, s.src.?, sub.src);
+                if (sub_where) |sw| {
+                    s.where = try expr_mod.pExpr(p, TK.AND, s.where, sw);
+                    sub.where = null;
+                }
+                sub.src = null;
+                const src = s.src.?;
+                recomputeColumnsUsed(s, src.at(src.len() - 1));
+            }
+        }
+    }
 }
 
 /// CheckOnCtx: the state of selectCheckOnClauses().
@@ -2742,72 +3621,121 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     var is_agg = s.sel_flags & SF.Aggregate != 0;
     var sort: SortCtx = .{ .order_by = s.order_by };
 
-    // Simplify the FROM clause.
-    if (s.prior == null) {
-        var i: usize = 0;
-        while (i < tab_list.len()) : (i += 1) {
-            const item = tab_list.at(i);
-            const sub: ?*Select = if (item.fg.is_subquery) item.u4.subq.?.select else null;
-            const t = item.s_tab.?;
+    // Optimize the FROM clause: OUTER JOIN strength reduction, removal of
+    // pointless subquery ORDER BYs, and query flattening.
+    var i_from: usize = 0;
+    while (s.prior == null and i_from < tab_list.len()) {
+        const i = i_from;
+        i_from += 1;
+        const item = tab_list.at(i);
+        const sub: ?*Select = if (item.fg.is_subquery) item.u4.subq.?.select else null;
+        const t = item.s_tab.?;
 
-            // OUTER JOIN strength reduction: LEFT JOIN becomes JOIN (and
-            // so on) when the WHERE clause rules out the NULL row.
-            if (item.fg.jointype & (JT.LEFT | JT.LTORJ) != 0 and
-                expr_mod.impliesNonNullRow(s.where, item.i_cursor, item.fg.jointype & JT.LTORJ != 0) and
-                !db.optDisabled(int.OPT.SimplifyJoin))
-            {
-                if (item.fg.jointype & JT.LEFT != 0) {
-                    if (item.fg.jointype & JT.RIGHT != 0) {
-                        item.fg.jointype &= ~JT.LEFT;
-                    } else {
-                        item.fg.jointype &= ~(JT.LEFT | JT.OUTER);
-                        unsetJoinExpr(s.where, item.i_cursor, false);
-                    }
+        // LEFT JOIN becomes JOIN, RIGHT JOIN becomes JOIN and FULL JOIN
+        // becomes RIGHT JOIN when the WHERE clause rules out the NULL row
+        // of the i-th table.
+        if (item.fg.jointype & (JT.LEFT | JT.LTORJ) != 0 and
+            expr_mod.impliesNonNullRow(s.where, item.i_cursor, item.fg.jointype & JT.LTORJ != 0) and
+            !db.optDisabled(int.OPT.SimplifyJoin))
+        {
+            if (item.fg.jointype & JT.LEFT != 0) {
+                if (item.fg.jointype & JT.RIGHT != 0) {
+                    item.fg.jointype &= ~JT.LEFT;
+                } else {
+                    item.fg.jointype &= ~(JT.LEFT | JT.OUTER);
+                    unsetJoinExpr(s.where, item.i_cursor, false);
                 }
-                if (item.fg.jointype & JT.LTORJ != 0) {
-                    for (tab_list.slice()[i + 1 ..]) |*item2| {
-                        if (item2.fg.jointype & JT.RIGHT != 0) {
-                            if (item2.fg.jointype & JT.LEFT != 0) {
-                                item2.fg.jointype &= ~JT.RIGHT;
-                            } else {
-                                item2.fg.jointype &= ~(JT.RIGHT | JT.OUTER);
-                                unsetJoinExpr(s.where, item2.i_cursor, true);
-                            }
+            }
+            if (item.fg.jointype & JT.LTORJ != 0) {
+                for (tab_list.slice()[i + 1 ..]) |*item2| {
+                    if (item2.fg.jointype & JT.RIGHT != 0) {
+                        if (item2.fg.jointype & JT.LEFT != 0) {
+                            item2.fg.jointype &= ~JT.RIGHT;
+                        } else {
+                            item2.fg.jointype &= ~(JT.RIGHT | JT.OUTER);
+                            unsetJoinExpr(s.where, item2.i_cursor, true);
                         }
                     }
-                    var j = tab_list.len();
-                    while (j > 0) {
-                        j -= 1;
-                        tab_list.at(j).fg.jointype &= ~JT.LTORJ;
-                        if (tab_list.at(j).fg.jointype & JT.RIGHT != 0) break;
-                    }
+                }
+                var j = tab_list.len();
+                while (j > 0) {
+                    j -= 1;
+                    tab_list.at(j).fg.jointype &= ~JT.LTORJ;
+                    if (tab_list.at(j).fg.jointype & JT.RIGHT != 0) break;
                 }
             }
-
-            const sq = sub orelse continue;
-            // The declared columns of a view must match its SELECT.
-            if (t.cols.len != sq.e_list.?.len()) {
-                util.errorMsg(p, "expected {d} columns for '{s}' but got {d}", .{ t.cols.len, t.name, sq.e_list.?.len() });
-                return 1;
-            }
-            // A MATERIALIZED CTE is an optimization fence.
-            if (item.fg.is_cte and item.u2.cte_use.?.e_m10d == .yes) continue;
-            if (sq.sel_flags & SF.Aggregate != 0) continue;
-
-            // Omit an ORDER BY of a subquery that has no effect.
-            if (sq.order_by != null and (s.order_by != null or tab_list.len() > 1) and sq.limit == null and
-                sq.sel_flags & (SF.OrderByReqd | SF.Recursive) == 0 and s.sel_flags & SF.OrderByReqd == 0 and
-                !db.optDisabled(int.OPT.OmitOrderBy))
-            {
-                sq.order_by = null;
-            }
-            // Query flattening is not ported: subqueries are always coded
-            // as co-routines or materialized.
         }
+
+        const sq = sub orelse continue;
+        // The declared columns of a view must match its SELECT.
+        if (t.cols.len != sq.e_list.?.len()) {
+            util.errorMsg(p, "expected {d} columns for '{s}' but got {d}", .{ t.cols.len, t.name, sq.e_list.?.len() });
+            return 1;
+        }
+        // A MATERIALIZED CTE is an optimization fence.
+        if (item.fg.is_cte and item.u2.cte_use.?.e_m10d == .yes) continue;
+
+        // An aggregate subquery is not flattened: that is only possible if
+        // the outer query is not a join, and then the subquery is a
+        // co-routine anyway.
+        if (sq.sel_flags & SF.Aggregate != 0) continue;
+
+        // Omit an ORDER BY of a subquery that does nothing, so that it
+        // does not block flattening. It is kept with a LIMIT, for a window
+        // function or recursive CTE subquery, in UPDATE FROM, if the outer
+        // query uses an aggregate other than count(), min() or max(), and
+        // unless the outer query has its own ORDER BY or is a join.
+        if (sq.order_by != null and (s.order_by != null or tab_list.len() > 1) and sq.limit == null and
+            sq.sel_flags & (SF.OrderByReqd | SF.Recursive) == 0 and s.sel_flags & SF.OrderByReqd == 0 and
+            !db.optDisabled(int.OPT.OmitOrderBy))
+        {
+            sq.order_by = null;
+        }
+
+        // A subquery with ORDER BY that would be a co-routine is not
+        // flattened into a query with a complex result set, so that in
+        // "SELECT expensive_function(x) FROM (SELECT x FROM tab ORDER BY y
+        // LIMIT 10)" the function only runs for the 10 output rows.
+        if (sq.order_by != null and i == 0 and s.sel_flags & SF.ComplexResult != 0 and
+            (tab_list.len() == 1 or tab_list.at(1).fg.jointype & (JT.OUTER | JT.CROSS) != 0))
+        {
+            continue;
+        }
+
+        if (try flattenSubquery(p, s, i, is_agg)) {
+            if (p.n_err != 0) return 1;
+            // Start over with the new FROM clause.
+            i_from = 0;
+        }
+        tab_list = s.src.?;
+        if (db.malloc_failed) return 1;
+        if (!ignorableOrderby(dest)) sort.order_by = s.order_by;
     }
 
     // Compound SELECTs.
-    if (s.prior != null) return try multiSelect(p, s, dest);
+    if (s.prior != null) {
+        const rc = try multiSelect(p, s, dest);
+        if (s.next == null) aux.explainPop(p);
+        return rc;
+    }
+    defer aux.explainPop(p);
+
+    // EXISTS (SELECT ...) terms of the WHERE clause may become joins.
+    if (p.bhas_exists and !db.optDisabled(int.OPT.ExistsToJoin)) {
+        try existsToJoin(p, s, s.where);
+        tab_list = s.src.?;
+    }
+
+    // WHERE-clause constant propagation, for joins only: for a single
+    // table the planner does the equivalent.
+    if (s.where != null and s.where.?.op == TK.AND and !db.optDisabled(int.OPT.PropagateConst)) {
+        _ = try propagateConstants(p, s);
+    }
+
+    if (!db.optDisabled(int.OPT.QueryFlattener | int.OPT.CountOfView) and try countOfViewOptimization(p, s)) {
+        if (db.malloc_failed) return 1;
+        tab_list = s.src.?;
+    }
 
     // Code the FROM-clause subqueries.
     for (tab_list.slice(), 0..) |*item, i| {
@@ -2818,6 +3746,17 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         if (subq.addr_fill_sub != 0) continue;
         p.n_height += expr_mod.selectExprHeight(s);
 
+        // Copy WHERE-clause terms of the outer query into the subquery
+        // (predicate push-down).
+        if (!db.optDisabled(int.OPT.PushDown) and
+            (!item.fg.is_cte or (item.u2.cte_use.?.e_m10d != .yes and item.u2.cte_use.?.n_use < 2)))
+        {
+            _ = try pushDownWhereTerms(p, sub, s.where, tab_list, i);
+        }
+
+        // Unused result columns of the subquery become NULLs.
+        if (!db.optDisabled(int.OPT.NullUnusedCols)) _ = disableUnusedSubqueryResultColumns(item);
+
         if (fromClauseTermCanBeCoroutine(p, tab_list, i, s.sel_flags)) {
             // A co-routine returning one row per call.
             const addr_top = aux.currentAddr(v) + 1;
@@ -2826,6 +3765,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             _ = aux.addOp3(v, OP.InitCoroutine, subq.reg_return, 0, addr_top);
             subq.addr_fill_sub = addr_top;
             var d = selectDestInit(SRT.Coroutine, subq.reg_return);
+            _ = aux.explain(p, true, "CO-ROUTINE {f}", .{util.srcItemNameNoAlias(item)});
             _ = select(p, sub, &d);
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             item.fg.via_coroutine = true;
@@ -2857,6 +3797,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             // An uncorrelated subquery is computed once.
             if (!item.fg.is_correlated) once_addr = aux.addOp0(v, OP.Once);
             var d = selectDestInit(SRT.EphemTab, item.i_cursor);
+            _ = aux.explain(p, true, "MATERIALIZE {f}", .{util.srcItemNameNoAlias(item)});
             _ = select(p, sub, &d);
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             if (once_addr != 0) aux.jumpHere(v, once_addr);
@@ -2876,7 +3817,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     }
 
     var e_list = s.e_list.?;
-    const where = s.where;
+    var where = s.where;
     var group_by = s.group_by;
     const having = s.having;
     var distinct: DistinctCtx = .{ .is_tnct = @intFromBool(s.sel_flags & SF.Distinct != 0) };
@@ -2988,9 +3929,19 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         agg.group_by = group_by;
         expr_mod.analyzeAggList(&nc, e_list);
         expr_mod.analyzeAggList(&nc, sort.order_by);
-        if (having) |h| expr_mod.analyzeAggregates(&nc, h);
+        if (having) |h| {
+            if (group_by != null) {
+                havingToWhere(p, s);
+                where = s.where;
+            }
+            expr_mod.analyzeAggregates(&nc, h);
+        }
         agg.n_accumulator = @intCast(agg.cols.items.len);
-        const min_max_flag: u16 = WHERE.ORDERBY_NORMAL;
+        var min_max_order_by: ?*ExprList = null;
+        const min_max_flag: u16 = if (s.group_by == null and s.having == null and agg.funcs.items.len == 1)
+            try minMaxQuery(p, agg.funcs.items[0].f_expr, &min_max_order_by)
+        else
+            WHERE.ORDERBY_NORMAL;
         analyzeAggFuncArgs(agg, &nc);
         if (db.malloc_failed) return 1;
 
@@ -3034,6 +3985,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             _ = aux.addOp2(v, OP.Gosub, reg_reset, addr_reset);
             const w = where_mod.whereBegin(p, tab_list, where, gb, distinct_list, s, (if (distinct.is_tnct == 2) WHERE.DISTINCTBY else WHERE.GROUPBY) |
                 (if (order_by_grp) WHERE.SORTBYGROUP else 0) | dist_flag, 0) orelse return 1;
+            if (p.idx_epr != null) optimizeAggregateUseOfIndexedExpr(s, agg, &nc);
             assignAggregateRegisters(p, agg);
             const e_dist = where_mod.isDistinct(w);
             var group_by_sort = false;
@@ -3042,6 +3994,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             if (where_mod.isOrdered(w) == n_gb) {
                 group_by_sort = false;
             } else {
+                _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{if (distinct.is_tnct != 0 and s.sel_flags & SF.Distinct == 0) "DISTINCT" else "GROUP BY"});
                 group_by_sort = true;
                 var n_col: i32 = n_gb;
                 var j: i32 = n_gb;
@@ -3076,6 +4029,10 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                 _ = aux.addOp2(v, OP.SorterSort, agg.sorting_idx, addr_end);
                 agg.use_sorting_idx = true;
             }
+
+            // The indexed subexpressions tagged by
+            // optimizeAggregateUseOfIndexedExpr() are read from the index.
+            if (p.idx_epr != null) aggregateConvertIndexedExprRefToColumn(agg);
 
             // Rows already in ORDER BY order need no sorter.
             if (order_by_grp and !db.optDisabled(int.OPT.GroupByOrder) and (group_by_sort or where_mod.isSorted(w))) {
@@ -3191,6 +4148,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                 assignAggregateRegisters(p, agg);
                 _ = aux.addOp2(v, OP.Count, i_csr, agg.funcReg(0));
                 _ = aux.addOp1(v, OP.Close, i_csr);
+                explainSimpleCount(p, t, best);
             } else {
                 // The general case.
                 var reg_acc: i32 = 0;
@@ -3215,7 +4173,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                 assignAggregateRegisters(p, agg);
                 resetAccumulator(p, agg);
 
-                const w = where_mod.whereBegin(p, tab_list, where, null, distinct_list, s, min_max_flag | dist_flag, 0) orelse return 1;
+                const w = where_mod.whereBegin(p, tab_list, where, min_max_order_by, distinct_list, s, min_max_flag | dist_flag, 0) orelse return 1;
                 const e_dist = where_mod.isDistinct(w);
                 updateAccumulator(p, reg_acc, agg, e_dist);
                 if (e_dist != int.WHERE_DISTINCT_NOOP and agg.funcs.items.len > 0) {
@@ -3223,6 +4181,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                     fixDistinctOpenEph(p, e_dist, f.i_distinct, f.i_dist_addr);
                 }
                 if (reg_acc != 0) _ = aux.addOp2(v, OP.Integer, 1, reg_acc);
+                if (min_max_flag != 0) where_mod.minMaxOptEarlyOut(v, w);
                 where_mod.whereEnd(w);
                 finalizeAggFunctions(p, agg);
             }
@@ -3234,11 +4193,51 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         aux.resolveLabel(v, addr_end);
     }
 
+    if (distinct.e_tnct_type == int.WHERE_DISTINCT_UNORDERED) explainTempTable(p, "DISTINCT");
+
     // Sort the results.
     if (sort.order_by != null) generateSortTail(p, s, &sort, @intCast(e_list.len()), dest);
 
     aux.resolveLabel(v, i_end);
     return @intFromBool(p.n_err > 0);
+}
+
+/// Port of minMaxQuery(): WHERE_ORDERBY_MIN or _MAX if `func` is min()
+/// or max() of one argument, with the ORDER BY that lets the loop find
+/// the value in `min_max` ; else WHERE_ORDERBY_NORMAL.
+fn minMaxQuery(p: *Parse, func: *Expr, min_max: *?*ExprList) Oom!u16 {
+    std.debug.assert(func.op == TK.AGG_FUNCTION);
+    const list = func.x.list orelse return WHERE.ORDERBY_NORMAL;
+    if (list.len() != 1 or func.has(EP.WinFunc) or p.db.optDisabled(int.OPT.MinMaxOpt)) return WHERE.ORDERBY_NORMAL;
+    const name = func.token();
+    var ret: u16 = undefined;
+    var sort_flags: u8 = 0;
+    if (ctype.eqlNoCase(name, "min")) {
+        ret = WHERE.ORDERBY_MIN;
+        if (expr_mod.canBeNull(list.at(0).expr.?)) sort_flags = int.KeyInfoOrder.bignull;
+    } else if (ctype.eqlNoCase(name, "max")) {
+        ret = WHERE.ORDERBY_MAX;
+        sort_flags = int.KeyInfoOrder.desc;
+    } else {
+        return WHERE.ORDERBY_NORMAL;
+    }
+    const ob = (try expr_mod.listDup(p.arena, list)).?;
+    ob.at(0).fg.sort_flags = sort_flags;
+    min_max.* = ob;
+    return ret;
+}
+
+/// Port of explainTempTable().
+fn explainTempTable(p: *Parse, usage: []const u8) void {
+    _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{usage});
+}
+
+/// Port of explainSimpleCount(): the EXPLAIN QUERY PLAN line of
+/// "SELECT count(*) FROM <tbl>".
+fn explainSimpleCount(p: *Parse, t: *Table, idx: ?*Index) void {
+    if (p.explain != 2) return;
+    const cover = if (idx) |ix| t.hasRowid() or !ix.isPrimaryKey() else false;
+    _ = aux.explain(p, false, "SCAN {s}{s}{s}", .{ t.name, if (cover) " USING COVERING INDEX " else "", if (cover) idx.?.name else "" });
 }
 
 /// BTREE_UNORDERED: P5 of OP_OpenEphemeral for a table only used for

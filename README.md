@@ -196,6 +196,7 @@ zig-out/bin/xqlite sql test.db .dump > test.sql
 ./tools/interop-shell.sh        # `xqlite sql` 셸과 sqlite3 셸의 출력(모드·dot-command·오류) 비교, .dump 왕복 검증
 ./tools/interop-pragma.sh       # PRAGMA 결과를 sqlite3 3.54.1과 비교 (SQLITE3로 경로 지정)
 ./tools/gen-fixtures.sh         # src/testdata의 테스트용 DB 재생성
+./tools/planner/diff.py CASES   # 쿼리 결과·EXPLAIN QUERY PLAN·바이트코드를 sqlite3와 비교 (tools/planner/README.md)
 ```
 
 포팅 기준 SQLite 소스(현재 3.54.1)는 `ref/sqlite`에 받아 두고 참고합니다. 이 디렉토리는 git에서 제외됩니다.

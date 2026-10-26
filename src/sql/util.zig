@@ -360,6 +360,25 @@ pub fn logEst(x_arg: u64) i16 {
     return a[@intCast(x & 7)] + y - 10;
 }
 
+/// Port of sqlite3ProgressCheck() (without the progress callback, which is
+/// not ported): stop preparing a statement if it was interrupted.
+pub fn progressCheck(p: *int.Parse) void {
+    if (p.db.is_interrupted.load(.monotonic)) {
+        p.n_err += 1;
+        p.rc = int.RC.INTERRUPT;
+    }
+}
+
+/// Port of sqlite3LogEstToInt(): the integer a LogEst stands for.
+pub fn logEstToInt(x_arg: i16) u64 {
+    var n: u64 = @bitCast(@as(i64, @rem(x_arg, 10)));
+    const x = @divTrunc(x_arg, 10);
+    if (n >= 5) n -%= 2 else if (n >= 1) n -%= 1;
+    if (x > 60) return std.math.maxInt(i64);
+    if (x >= 3) return (n +% 8) << @intCast(x - 3);
+    return (n +% 8) >> @intCast(@min(63, 3 - @as(i32, x)));
+}
+
 /// Port of sqlite3HexToBlob(): the bytes of the hex digits `z` (an even
 /// number of them), allocated from `a`.
 pub fn hexToBlob(a: std.mem.Allocator, z: []const u8) error{OutOfMemory}![]u8 {
@@ -390,18 +409,25 @@ pub fn srcItemName(item: *const int.SrcItem) SrcItemName {
     return .{ .item = item };
 }
 
+/// The "%!S" conversion: like "%S", but the table name before the alias.
+pub fn srcItemNameNoAlias(item: *const int.SrcItem) SrcItemName {
+    return .{ .item = item, .alt = true };
+}
+
 pub const SrcItemName = struct {
     item: *const int.SrcItem,
+    alt: bool = false,
 
     pub fn format(n: SrcItemName, w: *std.Io.Writer) std.Io.Writer.Error!void {
         const it = n.item;
-        if (it.alias) |alias| return w.writeAll(alias);
+        if (!n.alt) if (it.alias) |alias| return w.writeAll(alias);
         if (it.name) |name| {
             if (!it.fg.fixed_schema and !it.fg.is_subquery) if (it.u4.database) |zdb| {
                 try w.print("{s}.", .{zdb});
             };
             return w.writeAll(name);
         }
+        if (it.alias) |alias| return w.writeAll(alias);
         if (!it.fg.is_subquery) return;
         const sel = it.u4.subq.?.select;
         if (sel.sel_flags & int.SF.NestedFrom != 0) {

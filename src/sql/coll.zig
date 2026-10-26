@@ -27,9 +27,16 @@ fn rtrimCollFunc(_: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order {
     return serial.binaryCollation(null, std.mem.trimEnd(u8, a, " "), std.mem.trimEnd(u8, b, " "));
 }
 
+/// The name of the built-in BINARY collation: a copy, as in C, where the
+/// CollSeq keeps its own copy of the name. Code that tests a collation
+/// name against str_binary by address (sqlite3KeyInfoOfIndex()) then sees
+/// a CollSeq's name as different. A `var`, so the compiler cannot merge
+/// it with an identical string literal.
+var binary_name = "BINARY".*;
+
 /// The collations every connection has (registered by openDatabase()).
 var builtin = [_]CollSeq{
-    .{ .name = str_binary, .cmp = serial.binaryCollation },
+    .{ .name = &binary_name, .cmp = serial.binaryCollation },
     .{ .name = "NOCASE", .cmp = nocaseCollatingFunc },
     .{ .name = "RTRIM", .cmp = rtrimCollFunc },
 };

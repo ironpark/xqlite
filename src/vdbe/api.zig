@@ -139,6 +139,12 @@ pub fn columnDouble(v: *Vdbe, i: usize) f64 {
     return valueDouble(columnMem(v, i));
 }
 
+/// Port of sqlite3_stmt_isexplain(): 1 for EXPLAIN, 2 for EXPLAIN QUERY
+/// PLAN, else 0.
+pub fn stmtIsExplain(v: *Vdbe) u8 {
+    return @intCast(v.explain);
+}
+
 /// Port of sqlite3_column_text(): null for NULL.
 pub fn columnText(v: *Vdbe, i: usize) ?[:0]const u8 {
     const r = valueText(columnMem(v, i));

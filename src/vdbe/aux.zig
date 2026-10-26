@@ -328,6 +328,13 @@ pub fn addOpList(v: *Vdbe, items: []const OpListItem) ?[]Op {
     return v.ops.items[first..];
 }
 
+/// Port of sqlite3VdbeReprepareOnBind() (without the smimask
+/// refinement): the plan depends on the value bound to ?`i_var`.
+pub fn reprepareOnBind(v: *Vdbe, i_var: i32) void {
+    std.debug.assert(i_var > 0);
+    v.expmask |= if (i_var >= 32) 0x80000000 else @as(u32, 1) << @intCast(i_var - 1);
+}
+
 pub fn changeOpcode(v: *Vdbe, addr: i32, opcode: u8) void {
     getOp(v, addr).opcode = opcode;
 }

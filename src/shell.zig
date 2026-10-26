@@ -110,14 +110,17 @@ const Mode = struct {
     /// spec.bTextJsonb: kept for the .mode description only, as rendering
     /// JSONB blobs as JSON text is not ported.
     text_jsonb: qrf.Switch = .auto,
+    /// autoExplain: render EXPLAIN and EXPLAIN QUERY PLAN specially.
+    auto_explain: bool = true,
     spec: qrf.Spec = .{},
 
+    /// Port of modeFree(): auto_explain survives.
     fn deinit(m: *Mode, gpa: Allocator) void {
         inline for (mode_str_fields) |f| {
             if (@field(m.spec, f)) |z| gpa.free(z);
         }
         gpa.free(m.spec.widths);
-        m.* = .{};
+        m.* = .{ .auto_explain = m.auto_explain };
     }
 
     /// Port of modeDup().
@@ -516,6 +519,8 @@ fn shellExec(p: *Shell, mode: *const Mode, text: []const u8, err_msg: ?*?[]u8) E
             continue;
         };
         spec.style = style;
+        const is_explain = api.stmtIsExplain(stmt);
+        if (is_explain != 0 and mode.auto_explain) spec.style = if (is_explain == 1) .explain else .eqp;
         var qerr: ?[]u8 = null;
         rc = qrf.format(p.gpa, stmt, spec, p.out, &qerr) catch |err| {
             _ = api.finalize(stmt);
@@ -884,6 +889,11 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
             try p.eprint("Usage: .echo on|off\n", .{});
             rc = 1;
         }
+    } else if (c == 'e' and isCmd(cmd, "explain")) {
+        // Automatic now; kept for backwards compatibility.
+        if (args.len >= 2) {
+            p.mode.auto_explain = if (std.mem.eql(u8, args[1], "auto")) true else try booleanValue(p, args[1]);
+        }
     } else if (c == 'e' and isCmd(cmd, "exit")) {
         if (args.len > 1) {
             const code = integerValue(args[1]);
@@ -985,7 +995,7 @@ fn dotShow(p: *Shell) Error!u8 {
     defer s.deinit(gpa);
     try s.print(gpa, "{s: >12}: {s}\n", .{ "echo", if (p.echo) "on" else "off" });
     try s.print(gpa, "{s: >12}: {s}\n", .{ "eqp", "off" });
-    try s.print(gpa, "{s: >12}: {s}\n", .{ "explain", "auto" });
+    try s.print(gpa, "{s: >12}: {s}\n", .{ "explain", if (m.auto_explain) "auto" else "off" });
     try s.print(gpa, "{s: >12}: {s}\n", .{ "headers", switch (m.spec.titles) {
         .always => "always",
         .yes => "on",

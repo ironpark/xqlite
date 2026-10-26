@@ -101,6 +101,16 @@ pub fn srcItemAttachSubquery(p: *Parse, item: *SrcItem, sel: *Select) Oom!void {
     item.fg.is_subquery = true;
 }
 
+/// Port of sqlite3SubqueryDetach(): take the subquery out of `item`,
+/// which becomes an ordinary term.
+pub fn subqueryDetach(item: *SrcItem) *Select {
+    std.debug.assert(item.fg.is_subquery);
+    const sel = item.u4.subq.?.select;
+    item.u4 = .{ .database = null };
+    item.fg.is_subquery = false;
+    return sel;
+}
+
 /// Port of sqlite3SrcListAppendFromTerm(): add a FROM-clause term: a
 /// table (with optional database), or a subquery, with its alias and
 /// ON/USING clause.
@@ -2251,11 +2261,20 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) Oom!u32 {
             // CREATE VIEW name(list) (kept in t.check), or as the result
             // set names them.
             const a = if (t.mem != null) try newViewColumnsMem(db, t) else p.arena;
-            t.cols = try select_mod.columnsFromExprList(p, a, t.check orelse sel.e_list);
-            if (p.n_err == 0 and t.cols.len == sel.e_list.?.len()) {
-                try select_mod.subqueryColumnTypes(p, a, t, sel, Aff.none);
+            if (t.check) |check| {
+                t.cols = try select_mod.columnsFromExprList(p, a, check);
+                if (p.n_err == 0 and t.cols.len == sel.e_list.?.len()) {
+                    try select_mod.subqueryColumnTypes(p, a, t, sel, Aff.none);
+                }
+            } else {
+                // The columns of sel_tab: those of the leftmost SELECT of
+                // a compound.
+                var left = sel;
+                while (left.prior) |pr| left = pr;
+                t.cols = try select_mod.columnsFromExprList(p, a, left.e_list);
+                try select_mod.subqueryColumnTypes(p, a, t, left, Aff.none);
+                t.tab_flags |= sel_tab.?.tab_flags & COLFLAG.NOINSERT;
             }
-            if (t.check == null) t.tab_flags |= sel_tab.?.tab_flags & COLFLAG.NOINSERT;
         }
         t.n_nv_col = @intCast(t.cols.len);
     } else {

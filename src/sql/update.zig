@@ -322,6 +322,8 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     var e_one_pass: u8 = ONEPASS_OFF;
     var ai_cur_one_pass: [2]i32 = .{ -1, -1 };
+    // Whether OP_FinishSeek must resolve an OP_DeferredSeek of the loop.
+    var b_finish_seek = true;
     var w: ?*where_mod.WhereInfo = null;
     if (n_change_from != 0) {
         main_mod.multiWrite(p);
@@ -338,6 +340,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         }
         w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, i_idx_cur) orelse return;
         e_one_pass = where_mod.okOnePass(w.?, &ai_cur_one_pass);
+        b_finish_seek = where_mod.usesDeferredSeek(w.?);
         if (e_one_pass != ONEPASS_SINGLE) {
             main_mod.multiWrite(p);
             if (e_one_pass == ONEPASS_MULTI) {
@@ -468,6 +471,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                     }
                 } else if (tmask & int.TRIGGER_BEFORE == 0 or i > 31 or newmask & (@as(u32, 1) << @intCast(i)) != 0) {
                     ec.codeGetColumnOfTable(v, t, i_data_cur, @intCast(i), k);
+                    b_finish_seek = false;
                 } else {
                     _ = aux.addOp2(v, OP.Null, 0, k);
                 }
@@ -499,6 +503,10 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
         // Replace the index entries and the record.
         delete_mod.generateRowIndexDelete(p, t, i_data_cur, i_idx_cur, reg_idx, -1);
+
+        // OP_FinishSeek resolves an OP_DeferredSeek if no OP_Column may
+        // have run since; it is skipped when it surely did.
+        if (b_finish_seek) _ = aux.addOp1(v, OP.FinishSeek, i_data_cur);
         if (has_fk > 1 or chng_key) _ = aux.addOp2(v, OP.Delete, i_data_cur, 0);
         if (has_fk != 0) fkey.fkCheck(p, t, 0, reg_new_rowid, ax_ref, chng_key);
         insert.completeInsertion(p, t, i_data_cur, i_idx_cur, reg_new_rowid, reg_idx, OPFLAG.ISUPDATE | (if (e_one_pass == ONEPASS_MULTI) OPFLAG.SAVEPOSITION else 0), false, false);

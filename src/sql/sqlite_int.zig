@@ -938,6 +938,25 @@ pub const AggInfoFunc = struct {
     b_use_subtype: bool = false,
 };
 
+/// An expression stored in an index the query uses: code reads its value
+/// from the index instead of computing it (IndexedExpr).
+pub const IndexedExpr = struct {
+    /// The expression contained in the index.
+    expr: *Expr,
+    /// The data cursor associated with the index.
+    i_data_cur: i32,
+    /// The index cursor.
+    i_idx_cur: i32,
+    /// The index column that holds the value of expr.
+    i_idx_col: i32,
+    /// An OP_IfNullRow check is needed (the table is on the right of an
+    /// outer join).
+    b_maybe_null_row: bool = false,
+    /// Affinity of the expression.
+    aff: u8 = 0,
+    next: ?*IndexedExpr = null,
+};
+
 /// How an aggregate query computes its result (AggInfo).
 pub const AggInfo = struct {
     /// Read data directly from the source tables, not the accumulators.
@@ -1136,6 +1155,11 @@ pub const Parse = struct {
     /// Table of an index on an expression, or minus the base register
     /// of a CHECK constraint.
     i_self_tab: i32 = 0,
+    /// pIdxEpr: expressions of indexes the query uses.
+    idx_epr: ?*IndexedExpr = null,
+    /// pIdxPartExpr: columns that the WHERE terms of a partial index the
+    /// query uses fix to constant values.
+    idx_part_expr: ?*IndexedExpr = null,
     /// Nested SELECTs and views.
     n_nest_sel: i32 = 0,
     /// Minus the number of labels made.

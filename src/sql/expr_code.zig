@@ -289,6 +289,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
             const addr = aux.addOp0(v, OP.Once);
             @import("insert.zig").openTable(p, i_tab, i_db, t, OP.OpenRead);
             e_type = IN_INDEX_ROWID;
+            _ = aux.explain(p, false, "USING ROWID SEARCH ON TABLE {s} FOR IN-OPERATOR", .{t.name});
             aux.jumpHere(v, addr);
         } else {
             // The comparison affinity must match each column's.
@@ -334,6 +335,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
                     }
                     if (col_used == (@as(int.Bitmask, 1) << @intCast(n_expr)) - 1) {
                         const addr = aux.addOp0(v, OP.Once);
+                        _ = aux.explain(p, false, "USING INDEX {s} FOR IN-OPERATOR", .{idx.name});
                         _ = aux.addOp3(v, OP.OpenRead, i_tab, @intCast(idx.tnum), @intCast(i_db));
                         aux.setP4KeyInfo(p, idx);
                         e_type = IN_INDEX_INDEX_ASC + @as(i32, idx.sort_order[0]);
@@ -442,6 +444,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
         }
         if (e.has(EP.Subrtn) or findCompatibleInRhsSubrtn(p, e, sig)) {
             addr_once = aux.addOp0(v, OP.Once);
+            if (e.useXSelect()) _ = aux.explain(p, false, "REUSE LIST SUBQUERY {d}", .{e.x.select.?.sel_id});
             _ = aux.addOp2(v, OP.Gosub, e.y.sub.reg_return, e.y.sub.addr);
             _ = aux.addOp2(v, OP.OpenDup, i_tab, e.i_table);
             aux.jumpHere(v, addr_once);
@@ -474,6 +477,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
         // expr IN (SELECT ...): the results go into the table.
         const sel = e.x.select.?;
         const e_list = sel.e_list.?;
+        _ = aux.explain(p, true, "{s}LIST SUBQUERY {d}", .{ if (addr_once != 0) "" else "CORRELATED ", sel.sel_id });
         if (e_list.len() == n_val) {
             var dest = select_mod.selectDestInit(SRT.Set, i_tab);
             dest.aff_sdst = exprINAffinity(p, e);
@@ -556,6 +560,7 @@ pub fn codeSubselect(p: *Parse, e: *Expr) i32 {
 
     // Already coded: call the subroutine.
     if (e.has(EP.Subrtn)) {
+        _ = aux.explain(p, false, "REUSE SUBQUERY {d}", .{sel.sel_id});
         _ = aux.addOp2(v, OP.Gosub, e.y.sub.reg_return, e.y.sub.addr);
         return e.i_table;
     }
@@ -569,6 +574,7 @@ pub fn codeSubselect(p: *Parse, e: *Expr) i32 {
     // An uncorrelated subquery runs once.
     var addr_once: i32 = 0;
     if (!e.has(EP.VarSelect)) addr_once = aux.addOp0(v, OP.Once);
+    _ = aux.explain(p, true, "{s}SCALAR SUBQUERY {d}", .{ if (addr_once != 0) "" else "CORRELATED ", sel.sel_id });
 
     // The first row of a SELECT goes into registers; EXISTS leaves 0 or 1.
     // Either way the query gets LIMIT 1.
@@ -1041,6 +1047,78 @@ fn codeTargetAndOr(p: *Parse, e: *Expr, target: i32, tmp_reg: *i32) i32 {
     return target;
 }
 
+/// Port of sqlite3IndexedExprLookup(): if `e` is one of the indexed
+/// expressions of Parse.idx_epr, code reading it from the index into
+/// `target` and return `target`; else -1.
+fn indexedExprLookup(p: *Parse, e: *Expr, target: i32) i32 {
+    var it = p.idx_epr;
+    while (it) |ie| : (it = ie.next) {
+        var i_data_cur = ie.i_data_cur;
+        if (i_data_cur < 0) continue;
+        if (p.i_self_tab != 0) {
+            if (ie.i_data_cur != p.i_self_tab - 1) continue;
+            i_data_cur = -1;
+        }
+        if (expr_mod.compare(null, e, ie.expr, i_data_cur) != 0) continue;
+        const expr_aff = expr_mod.affinity(e);
+        if ((expr_aff <= Aff.blob and ie.aff != Aff.blob) or
+            (expr_aff == Aff.text and ie.aff != Aff.text) or
+            (expr_aff >= Aff.numeric and ie.aff != Aff.numeric))
+        {
+            // Affinity mismatch on a generated column.
+            continue;
+        }
+        // A function that might set a subtype keeps being computed if it
+        // is itself an argument of another function.
+        if (e.has(EP.SubtArg) and canReturnSubtype(p, e)) continue;
+
+        const v = vdbe(p);
+        if (ie.b_maybe_null_row or expr_mod.isConstant(p, e)) {
+            // Compute the value from the expression if the index might be
+            // on the NULL row of an outer join, or if it is a constant
+            // (which might be used outside the loop that positions the
+            // index).
+            const addr = aux.currentAddr(v);
+            _ = aux.addOp3(v, OP.IfNullRow, ie.i_idx_cur, addr + 3, target);
+            _ = aux.addOp3(v, OP.Column, ie.i_idx_cur, ie.i_idx_col, target);
+            _ = aux.goto_(v, 0);
+            const saved = p.idx_epr;
+            p.idx_epr = null;
+            exprCode(p, e, target);
+            p.idx_epr = saved;
+            aux.jumpHere(v, addr + 2);
+        } else {
+            _ = aux.addOp3(v, OP.Column, ie.i_idx_cur, ie.i_idx_col, target);
+        }
+        return target;
+    }
+    return -1;
+}
+
+/// Port of exprPartidxExprLookup(): if column `e` is fixed to a constant
+/// by the WHERE clause of a partial index the query uses
+/// (Parse.idx_part_expr), code that constant and return its register;
+/// else 0.
+fn exprPartidxExprLookup(p: *Parse, e: *Expr, target: i32) i32 {
+    var it = p.idx_part_expr;
+    while (it) |ie| : (it = ie.next) {
+        if (e.i_column != ie.i_idx_col or e.i_table != ie.i_data_cur) continue;
+        const v = vdbe(p);
+        var addr: i32 = 0;
+        if (ie.b_maybe_null_row) addr = aux.addOp1(v, OP.IfNullRow, ie.i_idx_cur);
+        const ret = codeTarget(p, ie.expr, target);
+        _ = aux.addOp4Str(v, OP.Affinity, ret, 1, 0, &[1]u8{ie.aff});
+        // Values read from columns have no subtype.
+        if (canReturnSubtype(p, ie.expr)) _ = aux.addOp1(v, OP.ClrSubtype, ret);
+        if (addr != 0) {
+            aux.jumpHere(v, addr);
+            aux.changeP3(v, addr, ret);
+        }
+        return ret;
+    }
+    return 0;
+}
+
 /// Port of sqlite3ExprCodeTarget(): code `e`, trying to leave the result
 /// in `target`. Returns the register that holds it.
 pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
@@ -1064,6 +1142,10 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
             _ = aux.addOp2(v, OP.Null, 0, target);
             return target;
         };
+        if (p.idx_epr != null and !e.has(EP.Leaf)) {
+            const r = indexedExprLookup(p, e, target);
+            if (r >= 0) return r;
+        }
         var op = e.op;
         std.debug.assert(op != TK.ORDER);
         switch (op) {
@@ -1125,6 +1207,9 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                     }
                     // A column of an index's table.
                     i_tab = p.i_self_tab - 1;
+                } else if (p.idx_part_expr != null) {
+                    const r = exprPartidxExprLookup(p, e, target);
+                    if (r != 0) return r;
                 }
                 return codeGetColumn(p, e.y.tab.?, e.i_column, i_tab, target, e.op2);
             },

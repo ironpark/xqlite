@@ -54,6 +54,8 @@ test {
         @import("sql/prepare.zig"), @import("sql/legacy.zig"), @import("sql/resolve.zig"),
         @import("sql/expr_code.zig"), @import("sql/coll.zig"), @import("sql/date.zig"), @import("sql/sql_test.zig"),
         @import("sql/pragma.zig"), @import("sql/pragma_test.zig"),
+        @import("sql/where_int.zig"), @import("sql/where.zig"), @import("sql/where_loop.zig"),
+        @import("sql/where_code.zig"), @import("sql/where_expr.zig"), @import("sql/where_test.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

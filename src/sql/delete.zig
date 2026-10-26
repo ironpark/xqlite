@@ -178,6 +178,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         var ai_cur_one_pass: [2]i32 = .{ -1, -1 };
         const e_one_pass = where_mod.okOnePass(w, &ai_cur_one_pass);
         if (e_one_pass != ONEPASS_SINGLE) main_mod.multiWrite(p);
+        if (where_mod.usesDeferredSeek(w)) _ = aux.addOp1(v, OP.FinishSeek, i_tab_cur);
         if (mem_cnt != 0) _ = aux.addOp2(v, OP.AddImm, mem_cnt, 1);
 
         // The key of the current row.

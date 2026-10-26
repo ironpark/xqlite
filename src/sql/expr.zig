@@ -1006,9 +1006,9 @@ pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*CollSeq {
         if (op == TK.REGISTER) op = x.op2;
         if ((op == TK.AGG_COLUMN and x.y.tab != null) or op == TK.COLUMN or op == TK.TRIGGER) {
             if (x.i_column >= 0) {
-                if (build.columnColl(&x.y.tab.?.cols[@intCast(x.i_column)])) |z| {
-                    coll = coll_mod.findCollSeq(db, z, false);
-                }
+                // No declared collation is the default one, as C's
+                // sqlite3FindCollSeq(db, enc, 0, 0).
+                coll = coll_mod.findCollSeq(db, build.columnColl(&x.y.tab.?.cols[@intCast(x.i_column)]), false);
             }
             break;
         }
@@ -1591,7 +1591,30 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!u8 {
             }
             return WRC.Continue;
         },
-        else => return WRC.Continue,
+        else => {
+            // An argument of an aggregate that an index the query uses
+            // holds: read it from the index as an AggInfo column.
+            std.debug.assert(p.i_self_tab == 0);
+            if (nc.nc_flags & NC_InAggFunc == 0) return WRC.Continue;
+            var it = p.idx_epr;
+            const ie = while (it) |x| : (it = x.next) {
+                if (x.i_data_cur < 0) continue;
+                if (compare(null, e, x.expr, x.i_data_cur) == 0) break x;
+            } else return WRC.Continue;
+            const src = nc.src_list orelse return WRC.Continue;
+            for (src.slice()) |item| {
+                if (item.i_cursor == ie.i_data_cur) break;
+            } else return WRC.Continue;
+            if (e.agg_info != null) return WRC.Continue;
+            if (p.n_err != 0) return WRC.Abort;
+            var tmp: Expr = .{ .op = TK.AGG_COLUMN, .i_table = ie.i_idx_cur, .i_column = @intCast(ie.i_idx_col) };
+            try findOrCreateAggInfoColumn(p, agg, &tmp);
+            if (p.n_err != 0) return WRC.Abort;
+            agg.cols.items[@intCast(tmp.i_agg)].c_expr = e;
+            e.agg_info = agg;
+            e.i_agg = tmp.i_agg;
+            return WRC.Prune;
+        },
     }
 }
 

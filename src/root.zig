@@ -22,6 +22,16 @@ pub const sql_util = @import("sql/util.zig");
 pub const numeric = @import("sql/numeric.zig");
 pub const printf = @import("sql/printf.zig");
 
+/// The SQL interface: connections (sql.main) and statement execution.
+pub const sql = struct {
+    pub const Sqlite3 = @import("sql/sqlite_int.zig").Sqlite3;
+    pub const main = @import("sql/main.zig");
+    pub const legacy = @import("sql/legacy.zig");
+    pub const prepare = @import("sql/prepare.zig");
+    pub const api = @import("vdbe/api.zig");
+    pub const RC = @import("sql/sqlite_int.zig").RC;
+};
+
 pub const vdbe = struct {
     pub const mem = @import("vdbe/mem.zig");
     pub const aux = @import("vdbe/aux.zig");
@@ -37,7 +47,9 @@ test {
         @import("sql/select.zig"), @import("sql/window.zig"), @import("sql/main.zig"),
         @import("sql/util.zig"),   @import("sql/walker.zig"), @import("sql/trigger.zig"),
         @import("parse/parser.zig"), @import("vdbe/exec.zig"), @import("vdbe/sorter.zig"),
-        @import("vdbe/rowset.zig"), @import("vdbe/api.zig"),
+        @import("vdbe/rowset.zig"), @import("vdbe/api.zig"), @import("sql/func.zig"),
+        @import("sql/prepare.zig"), @import("sql/legacy.zig"), @import("sql/resolve.zig"),
+        @import("sql/expr_code.zig"), @import("sql/coll.zig"), @import("sql/date.zig"), @import("sql/sql_test.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

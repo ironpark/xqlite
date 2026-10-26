@@ -135,3 +135,28 @@ pub fn dropTrigger(p: *Parse, name: ?*SrcList, no_err: bool) void {
 pub fn unlinkAndDeleteTrigger(db: *int.Sqlite3, i_db: usize, name: [:0]const u8) void {
     _ = .{ db, i_db, name };
 }
+
+const Table = int.Table;
+const Trigger = int.Trigger;
+
+/// Port of sqlite3TriggersExist(): the triggers of `t` that fire for
+/// `op`, with their TRIGGER_BEFORE/AFTER mask in `mask`. Coding triggers
+/// is not ported yet, so a table with triggers cannot be written.
+pub fn triggersExist(p: *Parse, t: *Table, op: u8, changes: ?*ExprList, mask: ?*u8) ?*Trigger {
+    _ = .{ op, changes };
+    if (mask) |m| m.* = 0;
+    if (t.trigger != null and !p.disable_triggers) pending.notYet(p, "triggers");
+    return null;
+}
+
+/// Port of sqlite3CodeRowTrigger(). Nothing to code without triggers.
+pub fn codeRowTrigger(p: *Parse, trigger: ?*Trigger, op: u8, changes: ?*ExprList, tr_tm: u8, t: *Table, reg: i32, orconf: i32, ignore_jump: i32) void {
+    _ = .{ p, trigger, op, changes, tr_tm, t, reg, orconf, ignore_jump };
+}
+
+/// Port of sqlite3TriggerColmask(): the OLD.* or NEW.* columns the
+/// triggers use.
+pub fn triggerColmask(p: *Parse, trigger: ?*Trigger, changes: ?*ExprList, is_new: bool, tr_tm: u8, t: *Table, orconf: i32) u32 {
+    _ = .{ p, changes, is_new, tr_tm, t, orconf };
+    return if (trigger == null) 0 else 0xffffffff;
+}

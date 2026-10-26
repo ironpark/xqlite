@@ -128,7 +128,7 @@ pub const Expr = struct {
     /// The right table of an ON/USING term (EP_OuterON/EP_InnerON), else
     /// the token's offset in the statement.
     w: union { join: i32, ofst: i32 } = .{ .ofst = 0 },
-    agg_info: ?*anyopaque = null,
+    agg_info: ?*AggInfo = null,
     y: union {
         tab: ?*Table,
         win: ?*Window,
@@ -646,6 +646,9 @@ pub const Table = struct {
     sz_tab_row: LogEst = 0,
     key_conf: u8 = 0,
     e_tab_type: TabType = .norm,
+    /// The columns of this view are being computed (SQLite marks this
+    /// with a negative nCol), to catch circular definitions.
+    view_resolving: bool = false,
     u: union {
         tab: struct {
             add_col_offset: i32 = 0,
@@ -653,10 +656,19 @@ pub const Table = struct {
             /// DEFAULT clauses, or the AS of generated columns.
             dflt_list: ?*ExprList = null,
         },
-        view: struct { select: ?*Select = null },
+        view: struct {
+            select: ?*Select = null,
+            /// The memory of the computed columns of a schema view, freed
+            /// when they are reset (viewResetAll()).
+            cols_mem: ?*std.heap.ArenaAllocator = null,
+        },
     } = .{ .tab = .{} },
     trigger: ?*Trigger = null,
     schema: ?*Schema = null,
+    /// The memory of a schema table, which holds the table itself, its
+    /// columns, indexes and expressions; null for the tables of a single
+    /// statement, which live in the Parse arena.
+    mem: ?*std.heap.ArenaAllocator = null,
 
     pub fn nCol(t: *const Table) i16 {
         return @intCast(t.cols.len);
@@ -788,7 +800,10 @@ pub const CollSeq = struct {
     name: [:0]const u8,
     enc: u8 = 1,
     user: ?*anyopaque = null,
-    cmp: ?*const fn (user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order = null,
+    /// Null for a collation named in the schema but not defined.
+    cmp: ?CmpFn = null,
+
+    pub const CmpFn = *const fn (user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order;
 };
 
 /// An SQL function (FuncDef). The implementations are typed by the VDBE
@@ -810,6 +825,10 @@ pub const FuncDef = struct {
     /// Inverse step of a window aggregate.
     x_inverse: ?StepFn = null,
     name: [:0]const u8,
+    /// Next built-in in the same hash bucket (u.pHash).
+    hash_next: ?*FuncDef = null,
+    /// Destructor of an application-defined function (u.pDestructor).
+    destructor: ?*FuncDestructor = null,
 
     pub const StepFn = *const fn (ctx: *Context, argv: []*Mem) void;
     pub const FinalFn = *const fn (ctx: *Context) void;
@@ -818,6 +837,137 @@ pub const FuncDef = struct {
     pub fn isAggregate(f: *const FuncDef) bool {
         return f.x_finalize != null;
     }
+};
+
+// ============================================================== planning
+
+/// sqlite3WhereBegin() flags (WHERE_*).
+pub const WHERE = struct {
+    pub const ORDERBY_NORMAL: u16 = 0x0000;
+    pub const ORDERBY_MIN: u16 = 0x0001;
+    pub const ORDERBY_MAX: u16 = 0x0002;
+    pub const ONEPASS_DESIRED: u16 = 0x0004;
+    pub const ONEPASS_MULTIROW: u16 = 0x0008;
+    pub const DUPLICATES_OK: u16 = 0x0010;
+    pub const OR_SUBCLAUSE: u16 = 0x0020;
+    pub const GROUPBY: u16 = 0x0040;
+    pub const DISTINCTBY: u16 = 0x0080;
+    pub const WANT_DISTINCT: u16 = 0x0100;
+    pub const SORTBYGROUP: u16 = 0x0200;
+    pub const AGG_DISTINCT: u16 = 0x0400;
+    pub const ORDERBY_LIMIT: u16 = 0x0800;
+    pub const RIGHT_JOIN: u16 = 0x1000;
+    pub const KEEP_ALL_JOINS: u16 = 0x2000;
+    pub const USE_LIMIT: u16 = 0x4000;
+};
+
+/// sqlite3WhereIsDistinct() results (WHERE_DISTINCT_*).
+pub const WHERE_DISTINCT_NOOP: u8 = 0;
+pub const WHERE_DISTINCT_UNIQUE: u8 = 1;
+pub const WHERE_DISTINCT_ORDERED: u8 = 2;
+pub const WHERE_DISTINCT_UNORDERED: u8 = 3;
+
+// ============================================================ resolution
+
+/// NameContext.nc_flags (NC_*).
+pub const NC = struct {
+    pub const AllowAgg: u32 = 0x000001;
+    pub const PartIdx: u32 = 0x000002;
+    pub const IsCheck: u32 = 0x000004;
+    pub const GenCol: u32 = 0x000008;
+    pub const HasAgg: u32 = 0x000010;
+    pub const IdxExpr: u32 = 0x000020;
+    pub const SelfRef: u32 = 0x00002e;
+    pub const Subquery: u32 = 0x000040;
+    pub const UEList: u32 = 0x000080;
+    pub const UAggInfo: u32 = 0x000100;
+    pub const UUpsert: u32 = 0x000200;
+    pub const UBaseReg: u32 = 0x000400;
+    pub const MinMaxAgg: u32 = 0x001000;
+    pub const AllowWin: u32 = 0x004000;
+    pub const HasWin: u32 = 0x008000;
+    pub const IsDDL: u32 = 0x010000;
+    pub const InAggFunc: u32 = 0x020000;
+    pub const FromDDL: u32 = 0x040000;
+    pub const NoSelect: u32 = 0x080000;
+    pub const Where: u32 = 0x100000;
+    pub const OrderAgg: u32 = 0x8000000;
+};
+
+/// The tables and result columns names are resolved against
+/// (NameContext). Contexts chain outward through `next`.
+pub const NameContext = struct {
+    parse: *Parse,
+    src_list: ?*SrcList = null,
+    /// Which member is valid is given by NC_UEList, NC_UAggInfo,
+    /// NC_UUpsert and NC_UBaseReg.
+    u_nc: union { e_list: ?*ExprList, agg_info: ?*AggInfo, upsert: ?*Upsert, i_base_reg: i32 } = .{ .e_list = null },
+    next: ?*NameContext = null,
+    /// Names resolved by this context.
+    n_ref: i32 = 0,
+    n_nc_err: i32 = 0,
+    nc_flags: u32 = 0,
+    n_nested_select: u32 = 0,
+    /// The SELECT of any window functions.
+    win_select: ?*Select = null,
+};
+
+/// A column used by an aggregate query (AggInfo_col).
+pub const AggInfoCol = struct {
+    tab: ?*Table,
+    c_expr: *Expr,
+    i_table: i32,
+    i_column: i32,
+    i_sorter_column: i32,
+};
+
+/// An aggregate function of a query (AggInfo_func).
+pub const AggInfoFunc = struct {
+    f_expr: *Expr,
+    func: ?*FuncDef,
+    i_distinct: i32 = -1,
+    i_dist_addr: i32 = 0,
+    i_ob_tab: i32 = -1,
+    b_ob_payload: bool = false,
+    b_ob_unique: bool = false,
+    b_use_subtype: bool = false,
+};
+
+/// How an aggregate query computes its result (AggInfo).
+pub const AggInfo = struct {
+    /// Read data directly from the source tables, not the accumulators.
+    direct_mode: bool = false,
+    /// In direct mode, read from the sorting index.
+    use_sorting_idx: bool = false,
+    n_sorting_column: u32 = 0,
+    sorting_idx: i32 = 0,
+    sorting_idx_ptab: i32 = 0,
+    /// First register of the columns, then the functions.
+    i_first_reg: i32 = 0,
+    group_by: ?*ExprList = null,
+    cols: std.ArrayList(AggInfoCol) = .empty,
+    /// Columns that show through to the output.
+    n_accumulator: i32 = 0,
+    funcs: std.ArrayList(AggInfoFunc) = .empty,
+    sel_id: u32 = 0,
+
+    pub fn columnReg(a: *const AggInfo, i: usize) i32 {
+        std.debug.assert(a.i_first_reg != 0);
+        return a.i_first_reg + @as(i32, @intCast(i));
+    }
+
+    pub fn funcReg(a: *const AggInfo, i: usize) i32 {
+        std.debug.assert(a.i_first_reg != 0);
+        return a.i_first_reg + @as(i32, @intCast(a.cols.items.len + i));
+    }
+};
+
+/// The user-data destructor shared by the copies of an application-defined
+/// function (FuncDestructor).
+pub const FuncDestructor = struct {
+    n_ref: i32 = 0,
+    x_destroy: *const fn (?*anyopaque) void,
+    user_data: ?*anyopaque,
 };
 
 // ================================================================ parsing
@@ -867,7 +1017,9 @@ pub const RC = struct {
     pub const CONSTRAINT_UNIQUE: i32 = CONSTRAINT | (8 << 8);
     pub const CONSTRAINT_ROWID: i32 = CONSTRAINT | (10 << 8);
     pub const CONSTRAINT_DATATYPE: i32 = CONSTRAINT | (12 << 8);
+    pub const CORRUPT_SEQUENCE: i32 = CORRUPT | (2 << 8);
     pub const CORRUPT_INDEX: i32 = CORRUPT | (3 << 8);
+    pub const ERROR_MISSING_COLLSEQ: i32 = ERROR | (1 << 8);
     pub const ERROR_RETRY: i32 = ERROR | (2 << 8);
     pub const ERROR_SNAPSHOT: i32 = ERROR | (3 << 8);
     pub const LOCKED_SHAREDCACHE: i32 = LOCKED | (1 << 8);
@@ -927,14 +1079,18 @@ pub const Parse = struct {
     db: *Sqlite3,
     /// Holds the parse trees and other per-statement memory.
     arena: Allocator,
+    /// Schema tables the parse trees point at, each holding one
+    /// reference (Table.n_tab_ref) until the statement is prepared.
+    tab_refs: std.ArrayList(*Table) = .empty,
     err_msg: ?[:0]u8 = null,
     rc: i32 = RC.OK,
     nested: u8 = 0,
     disable_lookaside: u8 = 0,
     prep_flags: u8 = 0,
     is_create: bool = false,
-    /// Only check syntax: statement builders that are not ported yet do
-    /// nothing instead of failing (see pending.zig).
+    /// Only check syntax: no schema is read and no code is generated
+    /// (statement builders that are not ported yet do nothing instead of
+    /// failing, see pending.zig).
     syntax_only: bool = false,
     disable_triggers: bool = false,
     may_abort: bool = false,
@@ -959,6 +1115,8 @@ pub const Parse = struct {
     col_names_set: bool = false,
     ok_const_factor: bool = false,
     uses_ainc: bool = false,
+    /// The AUTOINCREMENT tables written by the statement.
+    ainc: ?*AutoincInfo = null,
     /// Size and first register of the temporary register block.
     n_range_reg: i32 = 0,
     i_range_reg: i32 = 0,
@@ -1008,6 +1166,10 @@ pub const Parse = struct {
     tail: []const u8 = "",
     new_table: ?*Table = null,
     new_index: ?*Index = null,
+    /// ASC or DESC of the INTEGER PRIMARY KEY.
+    i_pk_sort_order: u8 = 0,
+    /// The statement has IF NOT EXISTS.
+    if_not_exists: bool = false,
     new_trigger: ?*Trigger = null,
     with: ?*With = null,
 
@@ -1022,6 +1184,15 @@ pub const Parse = struct {
     pub fn inDeclareVtab(p: *const Parse) bool {
         return p.e_parse_mode == .declare_vtab;
     }
+};
+
+/// An AUTOINCREMENT table written by a statement (AutoincInfo).
+pub const AutoincInfo = struct {
+    next: ?*AutoincInfo = null,
+    tab: *Table,
+    i_db: usize,
+    /// Register holding the largest rowid.
+    reg_ctr: i32,
 };
 
 /// A named variable and its number (VList entry).
@@ -1075,6 +1246,7 @@ pub const OPT = struct {
     pub const QueryFlattener: u32 = 0x00000001;
     pub const WindowFunc: u32 = 0x00000002;
     pub const GroupByOrder: u32 = 0x00000004;
+    pub const FactorOutConst: u32 = 0x00000008;
     pub const DistinctOpt: u32 = 0x00000010;
     pub const CoverIdxScan: u32 = 0x00000020;
     pub const OrderByIdxJoin: u32 = 0x00000040;
@@ -1132,6 +1304,23 @@ pub const InitState = struct {
 const Vdbe = @import("../vdbe/vdbe_int.zig").Vdbe;
 const Mem = @import("../vdbe/vdbe_int.zig").Mem;
 
+/// Root page of sqlite_schema.
+pub const SCHEMA_ROOT: Pgno = 1;
+pub const LEGACY_SCHEMA_TABLE = "sqlite_master";
+pub const LEGACY_TEMP_SCHEMA_TABLE = "sqlite_temp_master";
+pub const PREFERRED_SCHEMA_TABLE = "sqlite_schema";
+pub const PREFERRED_TEMP_SCHEMA_TABLE = "sqlite_temp_schema";
+
+/// SCHEMA_TABLE(): the name of the schema table of database `i_db`.
+pub fn schemaTable(i_db: usize) [:0]const u8 {
+    return if (i_db == 1) LEGACY_TEMP_SCHEMA_TABLE else LEGACY_SCHEMA_TABLE;
+}
+
+/// SQLITE_MAX_FILE_FORMAT.
+pub const MAX_FILE_FORMAT = 4;
+/// SQLITE_DEFAULT_CACHE_SIZE.
+pub const DEFAULT_CACHE_SIZE = -2000;
+
 /// One attached database (Db): aDb[0] is "main", aDb[1] "temp".
 pub const Db = struct {
     name: [:0]const u8,
@@ -1139,6 +1328,18 @@ pub const Db = struct {
     safety_level: u8 = 3,
     sync_set: bool = false,
     schema: *Schema,
+
+    pub fn hasProperty(d: *const Db, p: u16) bool {
+        return d.schema.schema_flags & p == p;
+    }
+
+    pub fn setProperty(d: *Db, p: u16) void {
+        d.schema.schema_flags |= p;
+    }
+
+    pub fn clearProperty(d: *Db, p: u16) void {
+        d.schema.schema_flags &= ~p;
+    }
 };
 
 /// A database connection (sqlite3).
@@ -1192,6 +1393,15 @@ pub const Sqlite3 = struct {
     /// Significant digits when REAL values become text.
     n_fp_digit: u8 = 17,
     malloc_failed: bool = false,
+    /// Application-defined functions (aFunc), keyed by name; each entry
+    /// heads a FuncDef.next list. Freed by callback.freeFunctions().
+    funcs: NameMap(*FuncDef) = .empty,
+    /// Collations defined on the connection (see coll.zig).
+    colls: NameMap(*CollSeq) = .empty,
+    /// Page size for new databases, as set by PRAGMA page_size.
+    next_pagesize: u32 = 0,
+    /// Schema resets are deferred while this is nonzero.
+    n_schema_lock: u32 = 0,
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

@@ -180,10 +180,17 @@ zig build run          # CLI 실행
 zig build test         # 단위 테스트
 ```
 
+SQL은 `sql` 명령으로 실행합니다(셸은 아직 최소 기능만 있습니다). SQL을 인자로 주지 않으면 표준 입력에서 `;`로 끝나는 문장을 차례로 실행하고, 결과는 `sqlite3` 셸의 list 모드처럼 `a|b|c`로 출력합니다.
+
+```sh
+zig-out/bin/xqlite sql test.db "CREATE TABLE t(a, b); INSERT INTO t VALUES(1, 'x'); SELECT * FROM t;"
+```
+
 `sqlite3`가 설치되어 있으면 순정 SQLite와의 상호 검증 스크립트를 돌릴 수 있습니다(`zig build` 후 실행).
 
 ```sh
 ./tools/interop-btree.sh        # 서로 쓴 테이블·인덱스를 읽고 수정, integrity_check 비교
+./tools/interop-sql.sh          # 같은 SQL을 xqlite와 sqlite3로 실행, 결과·integrity_check 비교
 ./tools/interop-hot-journal.sh  # 서로 남긴 핫 저널 복구
 ./tools/gen-fixtures.sh         # src/testdata의 테스트용 DB 재생성
 ```

@@ -166,11 +166,16 @@ pub const NC_SelfRef: i32 = 0x00002e;
 /// `e_call_ctx` is set, with a context for `func`.
 pub fn addFunctionCall(p: *Parse, p1: i32, p2: i32, p3: i32, n_arg: i32, func: *int.FuncDef, e_call_ctx: i32) i32 {
     const v = p.vdbe.?;
-    const ctx = v.alloc().create(vi.Context) catch {
+    const a = v.alloc();
+    const ctx = a.create(vi.Context) catch {
         p.db.malloc_failed = true;
         return 0;
     };
-    ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .i_op = currentAddr(v) };
+    const argv = a.alloc(*vi.Mem, @intCast(n_arg)) catch {
+        p.db.malloc_failed = true;
+        return 0;
+    };
+    ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .argv = argv, .i_op = currentAddr(v) };
     const addr = addOp4(v, if (e_call_ctx != 0) OP.PureFunc else OP.Function, p1, p2, p3, .{ .funcctx = ctx });
     changeP5(v, @intCast(e_call_ctx & NC_SelfRef));
     main_mod.mayAbort(p);
@@ -414,6 +419,13 @@ pub fn changeP4Str(v: *Vdbe, addr: i32, z: ?[]const u8) void {
     changeP4(v, addr, .{ .z = copy });
 }
 
+/// Port of sqlite3VdbeSetP4KeyInfo(): P4 of the last instruction is the
+/// KeyInfo of `idx`.
+pub fn setP4KeyInfo(p: *Parse, idx: *int.Index) void {
+    const v = p.vdbe.?;
+    if (@import("../sql/build.zig").keyInfoOfIndex(p, idx)) |k| appendP4(v, .{ .keyinfo = k });
+}
+
 /// Port of sqlite3VdbeAppendP4(): P4 of the last instruction, which has
 /// none yet.
 pub fn appendP4(v: *Vdbe, p4: P4) void {
@@ -607,7 +619,8 @@ pub fn rewind(v: *Vdbe) void {
 pub fn makeReady(v: *Vdbe, p: *Parse) void {
     std.debug.assert(v.e_vdbe_state == .init and p == v.parse.?);
     const db = v.db;
-    v.vlist = p.vlist.items;
+    const a = v.alloc();
+    v.vlist = copyVList(a, p.vlist.items) catch return oom(v);
     const n_var: usize = @intCast(p.n_var);
     var n_mem: usize = @intCast(p.n_mem);
     const n_cursor: usize = @intCast(p.n_tab);
@@ -622,7 +635,6 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
         v.n_res_column = 12 - 4 * @as(u16, p.explain);
     }
     v.expired = 0;
-    const a = v.alloc();
     v.mem = a.alloc(Mem, n_mem) catch return oom(v);
     v.vars = a.alloc(Mem, n_var) catch return oom(v);
     v.csr = a.alloc(?*VdbeCursor, n_cursor) catch return oom(v);
@@ -631,6 +643,13 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     initMemArray(v.mem, db, MEM.Undefined);
     @memset(v.csr, null);
     rewind(v);
+}
+
+/// Copy the variable names into the program, which outlives the Parse.
+fn copyVList(a: std.mem.Allocator, src: []const int.VListEntry) error{OutOfMemory}![]const int.VListEntry {
+    const out = try a.alloc(int.VListEntry, src.len);
+    for (src, out) |e, *o| o.* = .{ .name = try a.dupe(u8, e.name), .num = e.num };
+    return out;
 }
 
 fn oom(v: *Vdbe) void {
@@ -916,6 +935,26 @@ pub fn halt(v: *Vdbe) i32 {
     v.e_vdbe_state = .halt;
     if (db.malloc_failed) v.rc = RC.NOMEM;
     return if (v.rc == RC.BUSY) RC.BUSY else RC.OK;
+}
+
+/// Port of sqlite3VdbeSwap(): exchange the programs of two statements,
+/// keeping each in its place in the connection's list. Used by
+/// sqlite3Reprepare(): `a` is the new statement, `b` the old one.
+pub fn swap(a: *Vdbe, b: *Vdbe) void {
+    std.mem.swap(Vdbe, a, b);
+    std.mem.swap(?*Vdbe, &a.next, &b.next);
+    std.mem.swap(?*Vdbe, &a.prev, &b.prev);
+    b.expmask = a.expmask;
+    b.prep_flags = a.prep_flags;
+    b.counters = a.counters;
+    b.counters[vi.STMTSTATUS.REPREPARE] += 1;
+}
+
+/// Port of sqlite3TransferBindings(): move the parameter values of `from`
+/// to `to`.
+pub fn transferBindings(from: *Vdbe, to: *Vdbe) void {
+    std.debug.assert(to.n_var == from.n_var);
+    for (from.vars, to.vars) |*f, *t| mem.move(t, f);
 }
 
 /// Port of sqlite3VdbeResetStepResult().

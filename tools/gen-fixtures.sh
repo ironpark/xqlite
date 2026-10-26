@@ -28,3 +28,15 @@ SQL
 
 gen btree.db 0
 gen autovacuum.db 1
+
+# The schema and rows src/sql/sql_test.zig queries.
+rm -f sql.db
+sqlite3 sql.db <<'SQL'
+CREATE TABLE t1(a INTEGER PRIMARY KEY, b TEXT, c REAL);
+INSERT INTO t1 VALUES(1,'one',1.5),(2,'two',2.5),(3,'three',NULL),(4,'four',4.0),(5,'five',-1);
+CREATE INDEX t1_b ON t1(b);
+CREATE TABLE t2(x, y);
+INSERT INTO t2 VALUES(1,'a'),(2,'b'),(2,'c'),(9,'z');
+CREATE TABLE wr(k TEXT PRIMARY KEY, v INT) WITHOUT ROWID;
+INSERT INTO wr VALUES('b',2),('a',1),('c',3);
+SQL

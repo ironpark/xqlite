@@ -1,5 +1,5 @@
-//! SELECT statements (port of select.c). This part builds Select objects
-//! during parsing; code generation comes later.
+//! SELECT statements (port of select.c): building Select objects while
+//! parsing, expanding and resolving them, and generating their code.
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -7,7 +7,9 @@ const util = @import("util.zig");
 const expr_mod = @import("expr.zig");
 const ctype = @import("../util/ctype.zig");
 
+const Allocator = std.mem.Allocator;
 const Parse = int.Parse;
+const ExprListItem = int.ExprListItem;
 const Expr = int.Expr;
 const ExprList = int.ExprList;
 const SrcList = int.SrcList;
@@ -155,12 +157,3106 @@ pub const SelectDest = struct {
     i_sd_parm2: i32 = 0,
     i_sdst: i32 = 0,
     n_sdst: i32 = 0,
-    aff_sdst: ?[:0]u8 = null,
+    aff_sdst: ?[]const u8 = null,
     order_by: ?*ExprList = null,
 };
 
-/// Port of sqlite3Select(): generate code for a SELECT.
-pub fn select(p: *Parse, s: *Select, dest: *SelectDest) void {
-    _ = .{ s, dest };
-    @import("pending.zig").notYet(p, "SELECT");
+/// Port of sqlite3SelectDestInit().
+pub fn selectDestInit(e_dest: u8, i_parm: i32) SelectDest {
+    return .{ .e_dest = e_dest, .i_sd_parm = i_parm };
+}
+
+/// Port of sqlite3KeyInfoAlloc(): a KeyInfo for `n` key columns and `x`
+/// more, allocated with the program. Null if out of memory.
+pub fn keyInfoAlloc(p: *Parse, n: usize, x: usize) ?*vi.KeyInfo {
+    const v = build.getVdbe(p) orelse return null;
+    const a = v.alloc();
+    const k = a.create(vi.KeyInfo) catch return oomNull(p);
+    k.* = .{
+        .n_key_field = @intCast(n),
+        .n_all_field = @intCast(n + x),
+        .db = p.db,
+        .enc = p.db.enc,
+        .sort_flags = a.alloc(u8, n + x) catch return oomNull(p),
+        .coll = a.alloc(?*int.CollSeq, n + x) catch return oomNull(p),
+    };
+    @memset(k.sort_flags, 0);
+    @memset(k.coll, null);
+    return k;
+}
+
+fn oomNull(p: *Parse) ?*vi.KeyInfo {
+    build.oomFault(p);
+    return null;
+}
+
+/// Port of sqlite3SelectWrongNumTermsError().
+pub fn selectWrongNumTermsError(p: *Parse, s: *Select) void {
+    if (s.sel_flags & SF.Values != 0) {
+        util.errorMsg(p, "all VALUES must have the same number of terms", .{});
+    } else {
+        util.errorMsg(p, "SELECTs to the left and right of {s} do not have the same number of result columns", .{selectOpName(s.op)});
+    }
+}
+
+const vi = @import("../vdbe/vdbe_int.zig");
+const aux = @import("../vdbe/aux.zig");
+const build = @import("build.zig");
+const ec = @import("expr_code.zig");
+const resolve = @import("resolve.zig");
+const where_mod = @import("where.zig");
+const walker = @import("walker.zig");
+const window = @import("window.zig");
+const coll_mod = @import("coll.zig");
+const prepare = @import("prepare.zig");
+const callback = @import("callback.zig");
+const pending = @import("pending.zig");
+
+const Sqlite3 = int.Sqlite3;
+const Table = int.Table;
+const Column = int.Column;
+const Index = int.Index;
+const SrcItem = int.SrcItem;
+const IdList = int.IdList;
+const NameContext = int.NameContext;
+const AggInfo = int.AggInfo;
+const KeyInfo = vi.KeyInfo;
+const CollSeq = int.CollSeq;
+const Vdbe = vi.Vdbe;
+const Walker = walker.Walker;
+const WRC = walker.WRC;
+const OP = vi.OP;
+const OPFLAG = vi.OPFLAG;
+const EP = int.EP;
+const SF = int.SF;
+const NC = int.NC;
+const TF = int.TF;
+const COLFLAG = int.COLFLAG;
+const Aff = int.Aff;
+const WHERE = int.WHERE;
+
+const oom = build.oomFault;
+
+/// Port of sqlite3SrcItemColumnUsed(): mark result column `i_col` of a
+/// parenthesized FROM group as used.
+pub fn srcItemColumnUsed(item: *SrcItem, i_col: i32) void {
+    if (item.fg.is_nested_from) {
+        item.u4.subq.?.select.e_list.?.at(@intCast(i_col)).fg.used = true;
+    }
+}
+
+/// IsHiddenColumn().
+fn isHiddenColumn(c: *const Column) bool {
+    return c.col_flags & COLFLAG.HIDDEN != 0;
+}
+
+/// Port of tableAndColumnIndex(): the first table of src[start..end]
+/// with a column named `col` (and the column), or null.
+fn tableAndColumnIndex(src: *SrcList, start: usize, end: usize, col: []const u8, ignore_hidden: bool) ?struct { tab: usize, col: i32 } {
+    var i = start;
+    while (i <= end) : (i += 1) {
+        const t = src.at(i).s_tab.?;
+        const i_col = build.columnIndex(t, col);
+        if (i_col >= 0 and (!ignore_hidden or !isHiddenColumn(&t.cols[@intCast(i_col)]))) {
+            srcItemColumnUsed(src.at(i), i_col);
+            return .{ .tab = i, .col = i_col };
+        }
+    }
+    return null;
+}
+
+/// Port of sqlite3SetJoinExpr(): tag every node of an ON/USING term with
+/// `join_flag` and the right table of its join.
+pub fn setJoinExpr(e_arg: ?*Expr, i_table: i32, join_flag: u32) void {
+    var e = e_arg;
+    while (e) |x| {
+        x.set(join_flag);
+        x.w = .{ .join = i_table };
+        if (x.useXList()) if (x.x.list) |l| {
+            for (l.slice()) |item| setJoinExpr(item.expr, i_table, join_flag);
+        };
+        setJoinExpr(x.left, i_table, join_flag);
+        e = x.right;
+    }
+}
+
+/// Port of unsetJoinExpr(): turn the ON terms of table `i_table` (all, if
+/// negative) into ordinary terms.
+pub fn unsetJoinExpr(e_arg: ?*Expr, i_table: i32, nullable: bool) void {
+    var e = e_arg;
+    while (e) |x| {
+        if (i_table < 0 or (x.has(EP.OuterON) and x.w.join == i_table)) {
+            x.clear(EP.OuterON | EP.InnerON);
+            if (i_table >= 0) x.set(EP.InnerON);
+        }
+        if (x.op == TK.COLUMN and x.i_table == i_table and !nullable) x.clear(EP.CanBeNull);
+        if (x.op == TK.FUNCTION) if (x.x.list) |l| {
+            for (l.slice()) |item| unsetJoinExpr(item.expr, i_table, nullable);
+        };
+        unsetJoinExpr(x.left, i_table, nullable);
+        e = x.right;
+    }
+}
+
+/// Port of sqlite3ProcessJoin(): turn NATURAL joins into USING joins, and
+/// move ON and USING constraints into the WHERE clause, tagged with
+/// EP_OuterON or EP_InnerON. Returns the number of errors.
+fn processJoin(p: *Parse, s: *Select) Oom!u32 {
+    const src = s.src.?;
+    var seen_tfunc = false;
+    if (src.len() < 2) return 0;
+    for (0..src.len() - 1) |i| {
+        const left = src.at(i);
+        const right = src.at(i + 1);
+        const right_tab = right.s_tab orelse continue;
+        if (left.s_tab == null) continue;
+        const join_type: u32 = if (right.fg.jointype & JT.OUTER != 0) EP.OuterON else EP.InnerON;
+
+        // NATURAL becomes USING the columns both sides have.
+        if (right.fg.jointype & JT.NATURAL != 0) {
+            if (right.fg.is_using or right.u3.on != null) {
+                util.errorMsg(p, "a NATURAL join may not have an ON or USING clause", .{});
+                return 1;
+            }
+            var using: ?*IdList = null;
+            for (right_tab.cols) |*c| {
+                if (isHiddenColumn(c)) continue;
+                const name = c.name();
+                if (tableAndColumnIndex(src, 0, i, name, true) != null) {
+                    const l = using orelse blk: {
+                        const n = try p.arena.create(IdList);
+                        n.* = .{};
+                        break :blk n;
+                    };
+                    try l.names.append(p.arena, try p.arena.dupeSentinel(u8, name, 0));
+                    using = l;
+                }
+            }
+            if (using) |l| {
+                right.fg.is_using = true;
+                right.fg.is_synth_using = true;
+                right.u3 = .{ .using = l };
+            }
+            if (p.n_err != 0) return 1;
+        }
+
+        if (right.fg.is_using) {
+            // "A JOIN B USING(x,y)" adds "A.x=B.x AND A.y=B.y".
+            const list = right.u3.using.?;
+            for (list.names.items) |name| {
+                const i_right_col = build.columnIndex(right_tab, name);
+                const found = if (i_right_col >= 0) tableAndColumnIndex(src, 0, i, name, right.fg.is_synth_using) else null;
+                if (found == null) {
+                    util.errorMsg(p, "cannot join using column {s} - column not present in both tables", .{name});
+                    return 1;
+                }
+                var i_left = found.?.tab;
+                var e1 = try resolve.createColumnExpr(p, src, i_left, found.?.col);
+                srcItemColumnUsed(src.at(i_left), found.?.col);
+                if (src.at(0).fg.jointype & JT.LTORJ != 0 and p.n_err == 0) {
+                    // With RIGHT or FULL JOINs, several tables on the left
+                    // may have the column: use coalesce() of them.
+                    var func_args: ?*ExprList = null;
+                    e1.set(EP.CanBeNull);
+                    while (i_left + 1 <= i) {
+                        const more = tableAndColumnIndex(src, i_left + 1, i, name, right.fg.is_synth_using) orelse break;
+                        i_left = more.tab;
+                        const it = src.at(i_left);
+                        if (!it.fg.is_using or build.idListIndex(it.u3.using.?, name) == null) {
+                            util.errorMsg(p, "ambiguous reference to {s} in USING()", .{name});
+                            break;
+                        }
+                        func_args = try expr_mod.listAppend(p, func_args, e1);
+                        e1 = try resolve.createColumnExpr(p, src, i_left, more.col);
+                        srcItemColumnUsed(src.at(i_left), more.col);
+                    }
+                    if (func_args) |fa| {
+                        const args = try expr_mod.listAppend(p, fa, e1);
+                        e1 = try expr_mod.exprFunction(p, args, Token.init("coalesce"), 0);
+                        e1.aff_expr = Aff.@"defer";
+                    }
+                } else if (src.at(i + 1).fg.jointype & JT.LEFT != 0 and p.n_err == 0) {
+                    e1.set(EP.CanBeNull);
+                }
+                const e2 = try resolve.createColumnExpr(p, src, i + 1, i_right_col);
+                srcItemColumnUsed(right, i_right_col);
+                const eq = try expr_mod.pExpr(p, TK.EQ, e1, e2);
+                eq.set(join_type);
+                eq.w = .{ .join = e2.i_table };
+                s.where = try expr_mod.exprAnd(p, s.where, eq);
+            }
+        } else if (right.u3.on) |on| {
+            // The ON clause joins the WHERE clause.
+            setJoinExpr(on, right.i_cursor, join_type);
+            s.where = try expr_mod.exprAnd(p, s.where, on);
+            right.u3 = .{ .on = null };
+            right.fg.is_on = true;
+            s.sel_flags |= SF.OnToWhere;
+        }
+
+        if (!seen_tfunc) seen_tfunc = left.fg.is_tab_func and left.u1.func_arg != null;
+        // Table-valued function arguments must not refer to tables on
+        // their right.
+        if ((right.fg.is_tab_func and join_type == EP.OuterON and right.u1.func_arg != null) or
+            (seen_tfunc and join_type == EP.OuterON))
+        {
+            s.sel_flags |= SF.OnToWhere;
+        }
+    }
+    return 0;
+}
+
+/// Port of DistinctCtx: how DISTINCT is processed.
+const DistinctCtx = struct {
+    /// 0 not distinct, 1 DISTINCT, 2 DISTINCT and ORDER BY.
+    is_tnct: u8 = 0,
+    /// A WHERE_DISTINCT_* value.
+    e_tnct_type: u8 = 0,
+    /// The ephemeral table of seen rows.
+    tab_tnct: i32 = 0,
+    /// The OP_OpenEphemeral of tab_tnct.
+    addr_tnct: i32 = 0,
+};
+
+/// Port of SortCtx: the ORDER BY (or GROUP BY) being coded.
+const SortCtx = struct {
+    order_by: ?*ExprList = null,
+    /// ORDER BY terms satisfied by an index.
+    n_ob_sat: i32 = 0,
+    /// The sorter cursor.
+    i_e_cursor: i32 = 0,
+    /// Return address of the block-output subroutine.
+    reg_return: i32 = 0,
+    label_bk_out: i32 = 0,
+    /// The OP_SorterOpen or OP_OpenEphemeral.
+    addr_sort_index: i32 = 0,
+    /// Jump here when done (LIMIT reached).
+    label_done: i32 = 0,
+    /// Jump here when the sorter is full.
+    label_ob_lopt: i32 = 0,
+    sort_flags: u8 = 0,
+    deferred_row_load: ?*RowLoadInfo = null,
+};
+
+/// SORTFLAG_UseSorter: OP_SorterOpen instead of OP_OpenEphemeral.
+const SORTFLAG_UseSorter: u8 = 0x01;
+
+/// Port of RowLoadInfo: what is needed to load a result row into the
+/// sorter later.
+const RowLoadInfo = struct {
+    reg_result: i32,
+    ecel_flags: u8,
+};
+
+/// Port of innerLoopLoadRow().
+fn innerLoopLoadRow(p: *Parse, s: *Select, info: *RowLoadInfo) void {
+    _ = ec.codeExprList(p, s.e_list.?, info.reg_result, 0, info.ecel_flags);
+}
+
+/// Port of makeSorterRecord(): the OP_MakeRecord of a sorter entry;
+/// returns its register.
+fn makeSorterRecord(p: *Parse, sort: *SortCtx, s: *Select, reg_base: i32, n_base: i32) i32 {
+    const n_ob_sat = sort.n_ob_sat;
+    const v = p.vdbe.?;
+    p.n_mem += 1;
+    const reg_out = p.n_mem;
+    if (sort.deferred_row_load) |d| innerLoopLoadRow(p, s, d);
+    _ = aux.addOp3(v, OP.MakeRecord, reg_base + n_ob_sat, n_base - n_ob_sat, reg_out);
+    return reg_out;
+}
+
+/// Port of pushOntoSorter(): add registers reg_data..+n_data to the
+/// sorter, with the sort key in front.
+fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, reg_data: i32, reg_orig_data: i32, n_data: i32, n_prefix_reg: i32) void {
+    const v = p.vdbe.?;
+    const b_seq: i32 = @intFromBool(sort.sort_flags & SORTFLAG_UseSorter == 0);
+    const n_expr: i32 = @intCast(sort.order_by.?.len());
+    const n_base = n_expr + b_seq + n_data;
+    var reg_record: i32 = 0;
+    const n_ob_sat = sort.n_ob_sat;
+    var i_skip: i32 = 0;
+
+    var reg_base: i32 = undefined;
+    if (n_prefix_reg != 0) {
+        reg_base = reg_data - n_prefix_reg;
+    } else {
+        reg_base = p.n_mem + 1;
+        p.n_mem += n_base;
+    }
+    const i_limit = if (s.i_offset != 0) s.i_offset + 1 else s.i_limit;
+    sort.label_done = aux.makeLabel(p);
+    _ = ec.codeExprList(p, sort.order_by.?, reg_base, reg_orig_data, ec.ECEL_DUP | (if (reg_orig_data != 0) ec.ECEL_REF else 0));
+    if (b_seq != 0) _ = aux.addOp2(v, OP.Sequence, sort.i_e_cursor, reg_base + n_expr);
+    if (n_prefix_reg == 0 and n_data > 0) ec.codeMove(p, reg_data, reg_base + n_expr + b_seq, n_data);
+    if (n_ob_sat > 0) {
+        reg_record = makeSorterRecord(p, sort, s, reg_base, n_base);
+        const reg_prev_key = p.n_mem + 1;
+        p.n_mem += sort.n_ob_sat;
+        const n_key = n_expr - sort.n_ob_sat + b_seq;
+        const addr_first = if (b_seq != 0)
+            aux.addOp1(v, OP.IfNot, reg_base + n_expr)
+        else
+            aux.addOp1(v, OP.SequenceTest, sort.i_e_cursor);
+        _ = aux.addOp3(v, OP.Compare, reg_prev_key, reg_base, sort.n_ob_sat);
+        if (p.db.malloc_failed) return;
+        const op = aux.getOp(v, sort.addr_sort_index);
+        op.p2 = n_key + n_data;
+        const ki = op.p4.keyinfo;
+        @memset(ki.sort_flags[0..ki.n_key_field], 0);
+        aux.changeP4(v, -1, .{ .keyinfo = ki });
+        if (keyInfoFromExprList(p, sort.order_by.?, @intCast(n_ob_sat), ki.n_all_field - ki.n_key_field - 1)) |k| {
+            aux.getOp(v, sort.addr_sort_index).p4 = .{ .keyinfo = k };
+        }
+        const addr_jmp = aux.currentAddr(v);
+        _ = aux.addOp3(v, OP.Jump, addr_jmp + 1, 0, addr_jmp + 1);
+        sort.label_bk_out = aux.makeLabel(p);
+        p.n_mem += 1;
+        sort.reg_return = p.n_mem;
+        _ = aux.addOp2(v, OP.Gosub, sort.reg_return, sort.label_bk_out);
+        _ = aux.addOp1(v, OP.ResetSorter, sort.i_e_cursor);
+        if (i_limit != 0) _ = aux.addOp2(v, OP.IfNot, i_limit, sort.label_done);
+        aux.jumpHere(v, addr_first);
+        ec.codeMove(p, reg_base, reg_prev_key, sort.n_ob_sat);
+        aux.jumpHere(v, addr_jmp);
+    }
+    if (i_limit != 0) {
+        // Keep at most LIMIT+OFFSET entries: replace the largest by a
+        // smaller one, or skip the row.
+        const i_csr = sort.i_e_cursor;
+        _ = aux.addOp2(v, OP.IfNotZero, i_limit, aux.currentAddr(v) + 4);
+        _ = aux.addOp2(v, OP.Last, i_csr, 0);
+        i_skip = aux.addOp4Int(v, OP.IdxLE, i_csr, 0, reg_base + n_ob_sat, n_expr - n_ob_sat);
+        _ = aux.addOp1(v, OP.Delete, i_csr);
+    }
+    if (reg_record == 0) reg_record = makeSorterRecord(p, sort, s, reg_base, n_base);
+    const op: u8 = if (sort.sort_flags & SORTFLAG_UseSorter != 0) OP.SorterInsert else OP.IdxInsert;
+    _ = aux.addOp4Int(v, op, sort.i_e_cursor, reg_record, reg_base + n_ob_sat, n_base - n_ob_sat);
+    if (i_skip != 0) {
+        aux.changeP2(v, i_skip, if (sort.label_ob_lopt != 0) sort.label_ob_lopt else aux.currentAddr(v));
+    }
+}
+
+/// Port of codeOffset(): skip the row while the OFFSET counter is
+/// positive.
+fn codeOffset(v: *Vdbe, i_offset: i32, i_continue: i32) void {
+    if (i_offset > 0) _ = aux.addOp3(v, OP.IfPos, i_offset, i_continue, 1);
+}
+
+/// Port of codeDistinct(): code the DISTINCT test of the row in
+/// registers from `reg_elem`, jumping to `addr_repeat` for a duplicate.
+/// Returns the table (or previous-row registers) used.
+fn codeDistinct(p: *Parse, e_tnct_type: u8, i_tab: i32, addr_repeat: i32, e_list: *ExprList, reg_elem: i32) i32 {
+    var ret: i32 = 0;
+    const n_result_col: i32 = @intCast(e_list.len());
+    const v = p.vdbe.?;
+    switch (e_tnct_type) {
+        int.WHERE_DISTINCT_ORDERED => {
+            // Compare with the previous row.
+            const reg_prev = p.n_mem + 1;
+            ret = reg_prev;
+            p.n_mem += n_result_col;
+            const i_jump = aux.currentAddr(v) + n_result_col;
+            for (e_list.slice(), 0..) |item, ii| {
+                const i: i32 = @intCast(ii);
+                const coll = expr_mod.collSeq(p, item.expr);
+                if (i < n_result_col - 1) {
+                    _ = aux.addOp3(v, OP.Ne, reg_elem + i, i_jump, reg_prev + i);
+                } else {
+                    _ = aux.addOp3(v, OP.Eq, reg_elem + i, addr_repeat, reg_prev + i);
+                }
+                if (coll) |c| aux.changeP4(v, -1, .{ .collseq = c });
+                aux.changeP5(v, vi.SQLITE_NULLEQ);
+            }
+            _ = aux.addOp3(v, OP.Copy, reg_elem, reg_prev, n_result_col - 1);
+        },
+        int.WHERE_DISTINCT_UNIQUE => {},
+        else => {
+            const r1 = expr_mod.getTempReg(p);
+            _ = aux.addOp4Int(v, OP.Found, i_tab, addr_repeat, reg_elem, n_result_col);
+            _ = aux.addOp3(v, OP.MakeRecord, reg_elem, n_result_col, r1);
+            _ = aux.addOp4Int(v, OP.IdxInsert, i_tab, r1, reg_elem, n_result_col);
+            aux.changeP5(v, OPFLAG.USESEEKRESULT);
+            expr_mod.releaseTempReg(p, r1);
+            ret = i_tab;
+        },
+    }
+    return ret;
+}
+
+/// Port of fixDistinctOpenEph(): the ephemeral table of a DISTINCT that
+/// turned out not to need one becomes a no-op (or the OP_Null that
+/// clears the previous-row registers).
+fn fixDistinctOpenEph(p: *Parse, e_tnct_type: u8, i_val: i32, i_open_eph_addr: i32) void {
+    if (p.n_err == 0 and (e_tnct_type == int.WHERE_DISTINCT_UNIQUE or e_tnct_type == int.WHERE_DISTINCT_ORDERED)) {
+        const v = p.vdbe.?;
+        _ = aux.changeToNoop(v, i_open_eph_addr);
+        if (aux.getOp(v, i_open_eph_addr + 1).opcode == OP.Explain) _ = aux.changeToNoop(v, i_open_eph_addr + 1);
+        if (e_tnct_type == int.WHERE_DISTINCT_ORDERED) {
+            // OP_Null with MEM_Cleared: the first comparison always fails.
+            const op = aux.getOp(v, i_open_eph_addr);
+            op.opcode = OP.Null;
+            op.p1 = 1;
+            op.p2 = i_val;
+        }
+    }
+}
+
+/// Port of selectInnerLoop(): the inside of the loop of a SELECT: compute
+/// the row (or read it from `src_tab` if not negative), apply DISTINCT,
+/// OFFSET and LIMIT, and send it to `dest` (or the sorter).
+fn selectInnerLoop(p: *Parse, s: *Select, src_tab: i32, sort_arg: ?*SortCtx, distinct: ?*DistinctCtx, dest: *SelectDest, i_continue: i32, i_break: i32) void {
+    const v = p.vdbe.?;
+    const e_dest = dest.e_dest;
+    const i_parm = dest.i_sd_parm;
+    var n_prefix_reg: i32 = 0;
+    var row_load: RowLoadInfo = undefined;
+    var sort = sort_arg;
+    const has_distinct: u8 = if (distinct) |d| d.e_tnct_type else int.WHERE_DISTINCT_NOOP;
+    if (sort) |so| if (so.order_by == null) {
+        sort = null;
+    };
+    if (sort == null and has_distinct == 0) codeOffset(v, s.i_offset, i_continue);
+
+    var n_result_col: i32 = @intCast(s.e_list.?.len());
+    if (dest.i_sdst == 0) {
+        if (sort) |so| {
+            n_prefix_reg = @intCast(so.order_by.?.len());
+            if (so.sort_flags & SORTFLAG_UseSorter == 0) n_prefix_reg += 1;
+            p.n_mem += n_prefix_reg;
+        }
+        dest.i_sdst = p.n_mem + 1;
+        p.n_mem += n_result_col;
+    } else if (dest.i_sdst + n_result_col > p.n_mem) {
+        // Too many result columns for the destination; the error is
+        // reported later.
+        p.n_mem += n_result_col;
+    }
+    dest.n_sdst = n_result_col;
+    const reg_result = dest.i_sdst;
+    var reg_orig = reg_result;
+    if (src_tab >= 0) {
+        for (0..@intCast(n_result_col)) |i| {
+            _ = aux.addOp3(v, OP.Column, src_tab, @intCast(i), reg_result + @as(i32, @intCast(i)));
+        }
+    } else if (e_dest != SRT.Exists) {
+        var ecel_flags: u8 = if (e_dest == SRT.Mem or e_dest == SRT.Output or e_dest == SRT.Coroutine) ec.ECEL_DUP else 0;
+        if (sort != null and has_distinct == 0 and e_dest != SRT.EphemTab and e_dest != SRT.Table) {
+            // Result columns that are also ORDER BY terms are not stored
+            // twice in the sorter record.
+            const so = sort.?;
+            ecel_flags |= ec.ECEL_OMITREF | ec.ECEL_REF;
+            var i: usize = @intCast(so.n_ob_sat);
+            while (i < so.order_by.?.len()) : (i += 1) {
+                const j = so.order_by.?.at(i).u.x.order_by_col;
+                if (j > 0) s.e_list.?.at(j - 1).u.x.order_by_col = @intCast(i + 1 - @as(usize, @intCast(so.n_ob_sat)));
+            }
+            for (s.e_list.?.slice()) |item| {
+                if (item.u.x.order_by_col > 0) {
+                    n_result_col -= 1;
+                    reg_orig = 0;
+                }
+            }
+        }
+        row_load = .{ .reg_result = reg_result, .ecel_flags = ecel_flags };
+        if (s.i_limit != 0 and ecel_flags & ec.ECEL_OMITREF != 0 and n_prefix_reg > 0) {
+            sort.?.deferred_row_load = &row_load;
+            reg_orig = 0;
+        } else {
+            innerLoopLoadRow(p, s, &row_load);
+        }
+    }
+
+    // Skip a row seen before.
+    if (has_distinct != 0) {
+        const d = distinct.?;
+        const i_tab = codeDistinct(p, d.e_tnct_type, d.tab_tnct, i_continue, s.e_list.?, reg_result);
+        fixDistinctOpenEph(p, d.e_tnct_type, i_tab, d.addr_tnct);
+        if (sort == null) codeOffset(v, s.i_offset, i_continue);
+    }
+
+    switch (e_dest) {
+        SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
+            // Store the row as data with a new rowid.
+            const r1 = expr_mod.getTempRange(p, n_prefix_reg + 1);
+            _ = aux.addOp3(v, OP.MakeRecord, reg_result, n_result_col, r1 + n_prefix_reg);
+            if (e_dest == SRT.DistFifo) {
+                // Cursor i_parm+1 holds the rows already written.
+                const addr = aux.currentAddr(v) + 4;
+                _ = aux.addOp4Int(v, OP.Found, i_parm + 1, addr, r1, 0);
+                _ = aux.addOp4Int(v, OP.IdxInsert, i_parm + 1, r1, reg_result, n_result_col);
+            }
+            if (sort) |so| {
+                pushOntoSorter(p, so, s, r1 + n_prefix_reg, reg_orig, 1, n_prefix_reg);
+            } else {
+                const r2 = expr_mod.getTempReg(p);
+                _ = aux.addOp2(v, OP.NewRowid, i_parm, r2);
+                _ = aux.addOp3(v, OP.Insert, i_parm, r1, r2);
+                aux.changeP5(v, OPFLAG.APPEND);
+                expr_mod.releaseTempReg(p, r2);
+            }
+            expr_mod.releaseTempRange(p, r1, n_prefix_reg + 1);
+        },
+        SRT.Upfrom => {
+            if (sort) |so| {
+                pushOntoSorter(p, so, s, reg_result, reg_orig, n_result_col, n_prefix_reg);
+            } else {
+                const i_2 = dest.i_sd_parm2;
+                const r1 = expr_mod.getTempReg(p);
+                // An aggregate matching no rows still makes one; skip it.
+                _ = aux.addOp2(v, OP.IsNull, reg_result, i_break);
+                _ = aux.addOp3(v, OP.MakeRecord, reg_result + @intFromBool(i_2 < 0), n_result_col - @intFromBool(i_2 < 0), r1);
+                if (i_2 < 0) {
+                    _ = aux.addOp3(v, OP.Insert, i_parm, r1, reg_result);
+                } else {
+                    _ = aux.addOp4Int(v, OP.IdxInsert, i_parm, r1, reg_result, i_2);
+                }
+            }
+        },
+        SRT.Set => {
+            // The keys of the set of "expr IN (SELECT ...)".
+            if (sort) |so| {
+                // The ORDER BY matters if there is a LIMIT.
+                pushOntoSorter(p, so, s, reg_result, reg_orig, n_result_col, n_prefix_reg);
+                dest.i_sd_parm2 = 0;
+            } else {
+                const r1 = expr_mod.getTempReg(p);
+                _ = aux.addOp4Str(v, OP.MakeRecord, reg_result, n_result_col, r1, dest.aff_sdst.?);
+                _ = aux.addOp4Int(v, OP.IdxInsert, i_parm, r1, reg_result, n_result_col);
+                if (dest.i_sd_parm2 != 0) {
+                    _ = aux.addOp4Int(v, OP.FilterAdd, dest.i_sd_parm2, 0, reg_result, n_result_col);
+                }
+                expr_mod.releaseTempReg(p, r1);
+            }
+        },
+        SRT.Exists => {
+            // The LIMIT ends the loop.
+            _ = aux.addOp2(v, OP.Integer, 1, i_parm);
+        },
+        SRT.Mem => {
+            // A scalar subquery.
+            if (sort) |so| {
+                pushOntoSorter(p, so, s, reg_result, reg_orig, n_result_col, n_prefix_reg);
+                dest.i_sd_parm = reg_result;
+            } else if (reg_result != i_parm) {
+                // With DISTINCT and OFFSET.
+                _ = aux.addOp3(v, OP.Copy, reg_result, i_parm, n_result_col - 1);
+            }
+        },
+        SRT.Coroutine, SRT.Output => {
+            if (sort) |so| {
+                pushOntoSorter(p, so, s, reg_result, reg_orig, n_result_col, n_prefix_reg);
+            } else if (e_dest == SRT.Coroutine) {
+                _ = aux.addOp1(v, OP.Yield, dest.i_sd_parm);
+            } else {
+                _ = aux.addOp2(v, OP.ResultRow, reg_result, n_result_col);
+            }
+        },
+        SRT.DistQueue, SRT.Queue => {
+            // A priority queue ordered by dest.order_by, made unique by an
+            // OP_Sequence column; the record is the last column.
+            const so = dest.order_by.?;
+            const n_key: i32 = @intCast(so.len());
+            const r1 = expr_mod.getTempReg(p);
+            const r2 = expr_mod.getTempRange(p, n_key + 2);
+            const r3 = r2 + n_key + 1;
+            var addr_test: i32 = 0;
+            if (e_dest == SRT.DistQueue) {
+                // Cursor i_parm+1 holds every row ever queued.
+                addr_test = aux.addOp4Int(v, OP.Found, i_parm + 1, 0, reg_result, n_result_col);
+            }
+            _ = aux.addOp3(v, OP.MakeRecord, reg_result, n_result_col, r3);
+            if (e_dest == SRT.DistQueue) {
+                _ = aux.addOp2(v, OP.IdxInsert, i_parm + 1, r3);
+                aux.changeP5(v, OPFLAG.USESEEKRESULT);
+            }
+            for (so.slice(), 0..) |item, i| {
+                _ = aux.addOp2(v, OP.SCopy, reg_result + @as(i32, item.u.x.order_by_col) - 1, r2 + @as(i32, @intCast(i)));
+            }
+            _ = aux.addOp2(v, OP.Sequence, i_parm, r2 + n_key);
+            _ = aux.addOp3(v, OP.MakeRecord, r2, n_key + 2, r1);
+            _ = aux.addOp4Int(v, OP.IdxInsert, i_parm, r1, r2, n_key + 2);
+            if (addr_test != 0) aux.jumpHere(v, addr_test);
+            expr_mod.releaseTempReg(p, r1);
+            expr_mod.releaseTempRange(p, r2, n_key + 2);
+        },
+        else => {
+            // SRT_Discard: a SELECT in a trigger, run for its side effects.
+            std.debug.assert(e_dest == SRT.Discard);
+        },
+    }
+
+    // Stop at the LIMIT, unless the sorter already applies it.
+    if (sort == null and s.i_limit != 0) _ = aux.addOp2(v, OP.DecrJumpZero, s.i_limit, i_break);
+}
+
+/// Port of sqlite3KeyInfoFromExprList(): a KeyInfo with the collation and
+/// order of each term of `list` from `start`, plus `n_extra` columns.
+pub fn keyInfoFromExprList(p: *Parse, list: *ExprList, start: usize, n_extra: usize) ?*KeyInfo {
+    const n_expr = list.len();
+    const info = keyInfoAlloc(p, n_expr - start, n_extra + 1) orelse return null;
+    for (list.slice()[start..], 0..) |item, i| {
+        info.coll[i] = expr_mod.nnCollSeq(p, item.expr);
+        info.sort_flags[i] = item.fg.sort_flags;
+    }
+    return info;
+}
+
+/// Port of generateSortTail(): after the loop, read the sorted rows back
+/// and send them to `dest`.
+fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, dest: *SelectDest) void {
+    const v = p.vdbe.?;
+    var n_column = n_column_arg;
+    const addr_break = sort.label_done;
+    const addr_continue = aux.makeLabel(p);
+    var addr_once: i32 = 0;
+    const order_by = sort.order_by.?;
+    const e_dest = dest.e_dest;
+    const i_parm = dest.i_sd_parm;
+    const out_ex = s.e_list.?.slice();
+    const n_key: i32 = @as(i32, @intCast(order_by.len())) - sort.n_ob_sat;
+
+    if (sort.label_bk_out != 0) {
+        _ = aux.addOp2(v, OP.Gosub, sort.reg_return, sort.label_bk_out);
+        _ = aux.goto_(v, addr_break);
+        aux.resolveLabel(v, sort.label_bk_out);
+    }
+
+    const i_tab = sort.i_e_cursor;
+    var reg_rowid: i32 = 0;
+    var reg_row: i32 = undefined;
+    if (e_dest == SRT.Output or e_dest == SRT.Coroutine or e_dest == SRT.Mem) {
+        if (e_dest == SRT.Mem and s.i_offset != 0) _ = aux.addOp2(v, OP.Null, 0, dest.i_sdst);
+        reg_row = dest.i_sdst;
+    } else {
+        reg_rowid = expr_mod.getTempReg(p);
+        if (e_dest == SRT.EphemTab or e_dest == SRT.Table) {
+            reg_row = expr_mod.getTempReg(p);
+            n_column = 0;
+        } else {
+            reg_row = expr_mod.getTempRange(p, n_column);
+        }
+    }
+    var i_sort_tab: i32 = undefined;
+    var addr: i32 = undefined;
+    var b_seq: i32 = undefined;
+    if (sort.sort_flags & SORTFLAG_UseSorter != 0) {
+        p.n_mem += 1;
+        const reg_sort_out = p.n_mem;
+        i_sort_tab = p.n_tab;
+        p.n_tab += 1;
+        if (sort.label_bk_out != 0) addr_once = aux.addOp0(v, OP.Once);
+        _ = aux.addOp3(v, OP.OpenPseudo, i_sort_tab, reg_sort_out, n_key + 1 + n_column);
+        if (addr_once != 0) aux.jumpHere(v, addr_once);
+        addr = 1 + aux.addOp2(v, OP.SorterSort, i_tab, addr_break);
+        _ = aux.addOp3(v, OP.SorterData, i_tab, reg_sort_out, i_sort_tab);
+        b_seq = 0;
+    } else {
+        addr = 1 + aux.addOp2(v, OP.Sort, i_tab, addr_break);
+        codeOffset(v, s.i_offset, addr_continue);
+        i_sort_tab = i_tab;
+        b_seq = 1;
+        if (s.i_offset > 0) _ = aux.addOp2(v, OP.AddImm, s.i_limit, -1);
+    }
+    var i_col: i32 = n_key + b_seq - 1;
+    for (out_ex[0..@intCast(n_column)]) |item| {
+        if (item.u.x.order_by_col == 0) i_col += 1;
+    }
+    var i: i32 = n_column - 1;
+    while (i >= 0) : (i -= 1) {
+        const item = out_ex[@intCast(i)];
+        var i_read: i32 = undefined;
+        if (item.u.x.order_by_col != 0) {
+            i_read = @as(i32, item.u.x.order_by_col) - 1;
+        } else {
+            i_read = i_col;
+            i_col -= 1;
+        }
+        _ = aux.addOp3(v, OP.Column, i_sort_tab, i_read, reg_row + i);
+    }
+    switch (e_dest) {
+        SRT.Table, SRT.EphemTab => {
+            _ = aux.addOp3(v, OP.Column, i_sort_tab, n_key + b_seq, reg_row);
+            _ = aux.addOp2(v, OP.NewRowid, i_parm, reg_rowid);
+            _ = aux.addOp3(v, OP.Insert, i_parm, reg_row, reg_rowid);
+            aux.changeP5(v, OPFLAG.APPEND);
+        },
+        SRT.Set => {
+            _ = aux.addOp4Str(v, OP.MakeRecord, reg_row, n_column, reg_rowid, dest.aff_sdst.?);
+            _ = aux.addOp4Int(v, OP.IdxInsert, i_parm, reg_rowid, reg_row, n_column);
+        },
+        SRT.Mem => {
+            // The LIMIT ends the loop.
+        },
+        SRT.Upfrom => {
+            const i_2 = dest.i_sd_parm2;
+            const r1 = expr_mod.getTempReg(p);
+            _ = aux.addOp3(v, OP.MakeRecord, reg_row + @intFromBool(i_2 < 0), n_column - @intFromBool(i_2 < 0), r1);
+            if (i_2 < 0) {
+                _ = aux.addOp3(v, OP.Insert, i_parm, r1, reg_row);
+            } else {
+                _ = aux.addOp4Int(v, OP.IdxInsert, i_parm, r1, reg_row, i_2);
+            }
+        },
+        else => {
+            if (e_dest == SRT.Output) {
+                _ = aux.addOp2(v, OP.ResultRow, dest.i_sdst, n_column);
+            } else {
+                _ = aux.addOp1(v, OP.Yield, dest.i_sd_parm);
+            }
+        },
+    }
+    if (reg_rowid != 0) {
+        if (e_dest == SRT.Set) {
+            expr_mod.releaseTempRange(p, reg_row, n_column);
+        } else {
+            expr_mod.releaseTempReg(p, reg_row);
+        }
+        expr_mod.releaseTempReg(p, reg_rowid);
+    }
+    // The bottom of the loop.
+    aux.resolveLabel(v, addr_continue);
+    if (sort.sort_flags & SORTFLAG_UseSorter != 0) {
+        _ = aux.addOp2(v, OP.SorterNext, i_tab, addr);
+    } else {
+        _ = aux.addOp2(v, OP.Next, i_tab, addr);
+    }
+    if (sort.reg_return != 0) _ = aux.addOp1(v, OP.Return, sort.reg_return);
+    aux.resolveLabel(v, addr_break);
+}
+
+/// Port of columnTypeImpl(): the declared type of a result expression
+/// that is (through subqueries) a table column; INTEGER for a rowid.
+fn columnType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
+    switch (e.op) {
+        TK.COLUMN => {
+            // Find the table (or subquery) of the column.
+            var t: ?*Table = null;
+            var sub: ?*Select = null;
+            var nc: ?*NameContext = nc_arg;
+            const i_col = e.i_column;
+            search: while (nc) |n| {
+                for (n.src_list.?.slice()) |*item| {
+                    if (item.i_cursor == e.i_table) {
+                        t = item.s_tab;
+                        sub = if (item.fg.is_subquery) item.u4.subq.?.select else null;
+                        break :search;
+                    }
+                }
+                nc = n.next;
+            }
+            const tab = t orelse return null;
+            if (sub) |ss| {
+                // The type of the subquery's result column (a rowid of a
+                // view is always NULL).
+                if (i_col >= 0 and i_col < ss.e_list.?.len()) {
+                    var snc: NameContext = .{ .parse = nc_arg.parse, .src_list = ss.src, .next = nc };
+                    return columnType(&snc, ss.e_list.?.at(@intCast(i_col)).expr.?);
+                }
+                return null;
+            }
+            if (i_col < 0) return "INTEGER";
+            const z = build.columnType(&tab.cols[@intCast(i_col)], "");
+            return if (z.len == 0) null else z;
+        },
+        TK.SELECT => {
+            // The type of the single result column of the subquery.
+            const ss = e.x.select.?;
+            var snc: NameContext = .{ .parse = nc_arg.parse, .src_list = ss.src, .next = nc_arg };
+            return columnType(&snc, ss.e_list.?.at(0).expr.?);
+        },
+        else => return null,
+    }
+}
+
+/// Port of generateColumnTypes(): the declared types of the result
+/// columns (sqlite3_column_decltype()).
+fn generateColumnTypes(p: *Parse, tab_list: *SrcList, e_list: *ExprList) void {
+    const v = p.vdbe.?;
+    var nc: NameContext = .{ .parse = p, .src_list = tab_list };
+    for (e_list.slice(), 0..) |item, i| {
+        const z = columnType(&nc, item.expr.?) orelse continue;
+        if (z.len == 0) continue;
+        aux.setColName(v, i, vi.COLNAME_DECLTYPE, z);
+    }
+}
+
+/// Port of sqlite3GenerateColumnNames(): the names of the result columns:
+/// the AS name, else the column name for a direct column reference (or
+/// TABLE.COLUMN with full_column_names), else the expression's text.
+pub fn generateColumnNames(p: *Parse, s_arg: *Select) void {
+    const v = p.vdbe.?;
+    const db = p.db;
+    if (p.col_names_set) return;
+    // Names come from the leftmost term of a compound.
+    var s = s_arg;
+    while (s.prior) |pr| s = pr;
+    const tab_list = s.src.?;
+    const e_list = s.e_list.?;
+    p.col_names_set = true;
+    const full_name = db.flags & int.DbFlag.FullColNames != 0;
+    const src_name = db.flags & int.DbFlag.ShortColNames != 0 or full_name;
+    aux.setNumCols(v, @intCast(e_list.len()));
+    for (e_list.slice(), 0..) |item, i| {
+        const e = item.expr.?;
+        if (item.e_name != null and item.fg.e_ename == .name) {
+            aux.setColName(v, i, vi.COLNAME_NAME, item.e_name.?);
+        } else if (src_name and e.op == TK.COLUMN) {
+            const t = e.y.tab.?;
+            var i_col = e.i_column;
+            if (i_col < 0) i_col = t.i_pkey;
+            const col: [:0]const u8 = if (i_col < 0) "rowid" else t.cols[@intCast(i_col)].name();
+            if (full_name) {
+                const z = std.fmt.allocPrintSentinel(p.arena, "{s}.{s}", .{ t.name, col }, 0) catch return oom(p);
+                aux.setColName(v, i, vi.COLNAME_NAME, z);
+            } else {
+                aux.setColName(v, i, vi.COLNAME_NAME, col);
+            }
+        } else if (item.e_name) |z| {
+            aux.setColName(v, i, vi.COLNAME_NAME, z);
+        } else {
+            const z = std.fmt.allocPrintSentinel(p.arena, "column{d}", .{i + 1}, 0) catch return oom(p);
+            aux.setColName(v, i, vi.COLNAME_NAME, z);
+        }
+    }
+    generateColumnTypes(p, tab_list, e_list);
+}
+
+/// Port of sqlite3ColumnsFromExprList(): unique column names for a table
+/// holding the result set `e_list`, allocated from `a`.
+pub fn columnsFromExprList(p: *Parse, a: Allocator, e_list: ?*ExprList) Oom![]Column {
+    const list = e_list orelse return &.{};
+    const n_col = @min(list.len(), 32767);
+    const cols = try a.alloc(Column, n_col);
+    var ht: int.NameMap(*ExprListItem) = .empty;
+    defer ht.deinit(p.db.gpa);
+    for (cols, 0..) |*col, i| {
+        if (p.n_err != 0) break;
+        const x = list.at(i);
+        col.* = .{ .cn_name = undefined };
+        var name: ?[]const u8 = null;
+        if (x.e_name != null and x.fg.e_ename == .name) {
+            name = x.e_name.?;
+        } else {
+            var ce = expr_mod.skipCollateAndLikely(x.expr).?;
+            while (ce.op == TK.DOT) ce = ce.right.?;
+            if (ce.op == TK.COLUMN and ce.y.tab != null) {
+                const t = ce.y.tab.?;
+                var i_col = ce.i_column;
+                if (i_col < 0) i_col = t.i_pkey;
+                name = if (i_col >= 0) t.cols[@intCast(i_col)].name() else "rowid";
+            } else if (ce.op == TK.ID) {
+                name = ce.token();
+            } else {
+                name = x.e_name;
+            }
+        }
+        var z: [:0]u8 = if (name != null and util.isTrueOrFalse(name.?) == 0)
+            try a.dupeSentinel(u8, name.?, 0)
+        else
+            try std.fmt.allocPrintSentinel(a, "column{d}", .{i + 1}, 0);
+
+        // Make the name unique by appending ":N".
+        var cnt: u32 = 0;
+        while (ht.get(z)) |collide| {
+            if (collide.fg.using_term) col.col_flags |= COLFLAG.NOEXPAND;
+            var n_name = z.len;
+            if (n_name > 0) {
+                var j = n_name - 1;
+                while (j > 0 and ctype.isDigit(z[j])) j -= 1;
+                if (z[j] == ':') n_name = j;
+            }
+            cnt += 1;
+            z = try std.fmt.allocPrintSentinel(a, "{s}:{d}", .{ z[0..n_name], cnt }, 0);
+            if (cnt > 3) @import("func.zig").randomness(p.db, std.mem.asBytes(&cnt));
+        }
+        col.cn_name = z;
+        if (x.fg.no_expand) col.col_flags |= COLFLAG.NOEXPAND;
+        try ht.put(p.db.gpa, z, x);
+    }
+    return cols;
+}
+
+/// Port of sqlite3SubqueryColumnTypes(): the declared types, collations
+/// and affinities of the columns of `t`, the table of subquery `s`.
+pub fn subqueryColumnTypes(p: *Parse, a: std.mem.Allocator, t: *Table, s_arg: *Select, default_aff: u8) Oom!void {
+    if (p.db.malloc_failed or p.inRenameObject()) return;
+    var s = s_arg;
+    while (s.prior) |pr| s = pr;
+    const items = s.e_list.?.slice();
+    var nc: NameContext = .{ .parse = p, .src_list = s.src };
+    for (t.cols, 0..) |*col, i| {
+        var m: u8 = 0;
+        var s2 = s;
+        t.tab_flags |= col.col_flags & COLFLAG.NOINSERT;
+        const e = items[i].expr.?;
+        col.affinity = expr_mod.affinity(e);
+        while (col.affinity <= Aff.none and s2.next != null) {
+            m |= expr_mod.dataType(s2.e_list.?.at(i).expr);
+            s2 = s2.next.?;
+            col.affinity = expr_mod.affinity(s2.e_list.?.at(i).expr.?);
+        }
+        if (col.affinity <= Aff.none) col.affinity = default_aff;
+        if (col.affinity >= Aff.text and (s2.next != null or s2 != s)) {
+            var it = s2.next;
+            while (it) |s3| : (it = s3.next) m |= expr_mod.dataType(s3.e_list.?.at(i).expr);
+            if (col.affinity == Aff.text and m & 0x01 != 0) {
+                col.affinity = Aff.blob;
+            } else if (col.affinity >= Aff.numeric and m & 0x02 != 0) {
+                col.affinity = Aff.blob;
+            }
+            if (col.affinity >= Aff.numeric and e.op == TK.CAST) col.affinity = Aff.flexnum;
+        }
+        var typ = columnType(&nc, e);
+        if (typ == null or col.affinity != build.affinityType(typ.?, null)) {
+            if (col.affinity == Aff.numeric or col.affinity == Aff.flexnum) {
+                typ = "NUM";
+            } else {
+                typ = null;
+                for (build.std_type_affinity[1..], 1..) |aff, j| {
+                    if (aff == col.affinity) {
+                        typ = build.std_type[j];
+                        break;
+                    }
+                }
+            }
+        }
+        if (typ) |zt| {
+            const n = col.cn_name.len;
+            const new = try a.allocSentinel(u8, n + zt.len + 1, 0);
+            @memcpy(new[0..n], col.cn_name);
+            new[n] = 0;
+            @memcpy(new[n + 1 ..], zt);
+            col.cn_name = new[0..n :0];
+            col.col_flags &= ~(COLFLAG.HASTYPE | COLFLAG.HASCOLL);
+            col.col_flags |= COLFLAG.HASTYPE;
+        }
+        if (expr_mod.collSeq(p, e)) |c| try build.columnSetColl(a, col, c.name);
+    }
+    t.sz_tab_row = 1;
+}
+
+/// Port of checkSubqueryNestingDepth().
+fn checkSubqueryNestingDepth(p: *Parse) bool {
+    if (p.n_nest_sel >= p.db.limit(.expr_depth)) {
+        util.errorMsg(p, "VIEWs and/or subqueries nested too deep", .{});
+        return true;
+    }
+    return false;
+}
+
+/// Port of sqlite3ResultSetOfSelect(): a table (in the statement's
+/// memory) describing the result set of `s`.
+pub fn resultSetOfSelect(p: *Parse, s_arg: *Select, aff: u8) Oom!?*Table {
+    const db = p.db;
+    p.n_nest_sel += 1;
+    if (checkSubqueryNestingDepth(p)) return null;
+    const saved_flags = db.flags;
+    db.flags &= ~int.DbFlag.FullColNames;
+    db.flags |= int.DbFlag.ShortColNames;
+    selectPrep(p, s_arg, null);
+    db.flags = saved_flags;
+    if (p.n_err != 0) return null;
+    var s = s_arg;
+    while (s.prior) |pr| s = pr;
+    const t = try p.arena.create(Table);
+    t.* = .{ .name = try p.arena.dupeSentinel(u8, "", 0), .n_row_log_est = 200 };
+    t.cols = try columnsFromExprList(p, p.arena, s.e_list);
+    t.n_nv_col = @intCast(t.cols.len);
+    try subqueryColumnTypes(p, build.tableAlloc(p, t), t, s, aff);
+    t.i_pkey = -1;
+    if (db.malloc_failed) return null;
+    p.n_nest_sel -= 1;
+    return t;
+}
+
+/// Port of computeLimitRegisters(): code the LIMIT and OFFSET counters
+/// (i_limit, i_offset, and i_offset+1 for LIMIT+OFFSET).
+fn computeLimitRegisters(p: *Parse, s: *Select, i_break: i32) void {
+    if (s.i_limit != 0) return;
+    const limit = s.limit orelse return;
+    std.debug.assert(limit.op == TK.LIMIT);
+    p.n_mem += 1;
+    const i_limit = p.n_mem;
+    s.i_limit = i_limit;
+    const v = build.getVdbe(p).?;
+    if (expr_mod.isInteger(limit.left, p)) |n| {
+        _ = aux.addOp2(v, OP.Integer, n, i_limit);
+        if (n == 0) {
+            _ = aux.goto_(v, i_break);
+        } else if (n >= 0 and s.n_select_row > util.logEst(@intCast(n))) {
+            s.n_select_row = util.logEst(@intCast(n));
+            s.sel_flags |= SF.FixedLimit;
+        }
+    } else {
+        ec.exprCode(p, limit.left, i_limit);
+        _ = aux.addOp1(v, OP.MustBeInt, i_limit);
+        @import("main.zig").mayAbort(p);
+        _ = aux.addOp2(v, OP.IfNot, i_limit, i_break);
+    }
+    if (limit.right) |off| {
+        p.n_mem += 1;
+        const i_offset = p.n_mem;
+        s.i_offset = i_offset;
+        p.n_mem += 1;
+        ec.exprCode(p, off, i_offset);
+        _ = aux.addOp1(v, OP.MustBeInt, i_offset);
+        @import("main.zig").mayAbort(p);
+        _ = aux.addOp3(v, OP.OffsetLimit, i_limit, i_offset + 1, i_offset);
+    }
+}
+
+/// Port of multiSelectCollSeq(): the collation of column `i_col` of a
+/// compound: that of the leftmost term that has one.
+fn multiSelectCollSeq(p: *Parse, s: *Select, i_col: usize) ?*CollSeq {
+    var ret: ?*CollSeq = if (s.prior) |pr| multiSelectCollSeq(p, pr, i_col) else null;
+    if (ret == null and i_col < s.e_list.?.len()) ret = expr_mod.collSeq(p, s.e_list.?.at(i_col).expr);
+    return ret;
+}
+
+/// Port of multiSelectByMergeKeyInfo(): the KeyInfo of the ORDER BY of a
+/// compound.
+fn multiSelectByMergeKeyInfo(p: *Parse, s: *Select, n_extra: usize) ?*KeyInfo {
+    const order_by = s.order_by;
+    const n_order_by: usize = if (order_by) |ob| ob.len() else 0;
+    const ret = keyInfoAlloc(p, n_order_by + n_extra, 1) orelse return null;
+    for (0..n_order_by) |i| {
+        const item = order_by.?.at(i);
+        const term = item.expr.?;
+        var c: *CollSeq = undefined;
+        if (term.flags & EP.Collate != 0) {
+            c = expr_mod.collSeq(p, term) orelse coll_mod.defaultColl();
+        } else {
+            c = multiSelectCollSeq(p, s, @as(usize, item.u.x.order_by_col) - 1) orelse coll_mod.defaultColl();
+            item.expr = expr_mod.addCollateString(p, term, c.name) catch {
+                oom(p);
+                return null;
+            };
+        }
+        ret.coll[i] = c;
+        ret.sort_flags[i] = item.fg.sort_flags;
+    }
+    return ret;
+}
+
+/// Port of generateWithRecursiveQuery(): code a recursive CTE
+/// "<setup> UNION [ALL] <recursive>": rows go through a Queue table, one
+/// at a time becoming the content of the recursive table (Current) for a
+/// run of the recursive part.
+fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
+    const src = s.src.?;
+    var n_col: i32 = @intCast(s.e_list.?.len());
+    const v = p.vdbe.?;
+    var i_current: i32 = 0;
+    var i_distinct: i32 = 0;
+
+    if (s.win != null) {
+        util.errorMsg(p, "cannot use window functions in recursive queries", .{});
+        return;
+    }
+
+    // LIMIT and OFFSET.
+    const addr_break = aux.makeLabel(p);
+    s.n_select_row = 320;
+    computeLimitRegisters(p, s, addr_break);
+    const limit = s.limit;
+    const reg_limit = s.i_limit;
+    const reg_offset = s.i_offset;
+    s.limit = null;
+    s.i_limit = 0;
+    s.i_offset = 0;
+    const order_by = s.order_by;
+    defer {
+        s.order_by = order_by;
+        s.limit = limit;
+    }
+
+    // The cursor of the Current table.
+    for (src.slice()) |item| {
+        if (item.fg.is_recursive) {
+            i_current = item.i_cursor;
+            break;
+        }
+    }
+
+    // Cursors for Queue and Distinct; Distinct must be Queue+1 for
+    // SRT_DistFifo and SRT_DistQueue.
+    const i_queue = p.n_tab;
+    p.n_tab += 1;
+    var e_dest: u8 = undefined;
+    if (s.op == TK.UNION) {
+        e_dest = if (order_by != null) SRT.DistQueue else SRT.DistFifo;
+        i_distinct = p.n_tab;
+        p.n_tab += 1;
+    } else {
+        e_dest = if (order_by != null) SRT.Queue else SRT.Fifo;
+    }
+    var dest_queue = selectDestInit(e_dest, i_queue);
+
+    p.n_mem += 1;
+    const reg_current = p.n_mem;
+    _ = aux.addOp3(v, OP.OpenPseudo, i_current, reg_current, n_col);
+    if (order_by) |ob| {
+        const ki = multiSelectByMergeKeyInfo(p, s, 1);
+        _ = aux.addOp4(v, OP.OpenEphemeral, i_queue, @as(i32, @intCast(ob.len())) + 2, 0, if (ki) |k| .{ .keyinfo = k } else .notused);
+        dest_queue.order_by = ob;
+    } else {
+        _ = aux.addOp2(v, OP.OpenEphemeral, i_queue, n_col);
+    }
+    if (i_distinct != 0) {
+        // Keeps the recursive part's output distinct.
+        n_col = @intCast(s.e_list.?.len());
+        if (keyInfoAlloc(p, @intCast(n_col), 1)) |ki| {
+            for (ki.coll[0..@intCast(n_col)], 0..) |*c, i| c.* = multiSelectCollSeq(p, s, i) orelse coll_mod.defaultColl();
+            _ = aux.addOp4(v, OP.OpenEphemeral, i_distinct, n_col, 0, .{ .keyinfo = ki });
+        }
+    }
+
+    s.order_by = null;
+
+    // The recursive terms (marked UNION ALL: the Distinct table removes
+    // duplicates), which may not be aggregates.
+    var first_rec = s;
+    while (true) {
+        if (first_rec.sel_flags & SF.Aggregate != 0) {
+            util.errorMsg(p, "recursive aggregate queries not supported", .{});
+            return;
+        }
+        first_rec.op = TK.ALL;
+        if (first_rec.prior.?.sel_flags & SF.Recursive == 0) break;
+        first_rec = first_rec.prior.?;
+    }
+
+    // The setup query fills the Queue.
+    const setup = first_rec.prior.?;
+    setup.next = null;
+    const rc = select(p, setup, &dest_queue);
+    setup.next = s;
+    if (rc != 0) return;
+
+    // Move the next row of the Queue to Current and output it.
+    const addr_top = aux.addOp2(v, OP.Rewind, i_queue, addr_break);
+    _ = aux.addOp1(v, OP.NullRow, i_current);
+    if (order_by) |ob| {
+        _ = aux.addOp3(v, OP.Column, i_queue, @as(i32, @intCast(ob.len())) + 1, reg_current);
+    } else {
+        _ = aux.addOp2(v, OP.RowData, i_queue, reg_current);
+    }
+    _ = aux.addOp1(v, OP.Delete, i_queue);
+
+    const addr_cont = aux.makeLabel(p);
+    codeOffset(v, reg_offset, addr_cont);
+    selectInnerLoop(p, s, i_current, null, null, dest, addr_cont, addr_break);
+    if (reg_limit != 0) _ = aux.addOp2(v, OP.DecrJumpZero, reg_limit, addr_break);
+    aux.resolveLabel(v, addr_cont);
+
+    // The recursive part, with Current as the recursive table, adds to the
+    // Queue.
+    first_rec.prior = null;
+    _ = select(p, s, &dest_queue);
+    first_rec.prior = setup;
+
+    // Until the Queue is empty.
+    _ = aux.goto_(v, addr_top);
+    aux.resolveLabel(v, addr_break);
+}
+
+/// Port of multiSelectValues(): a multi-row VALUES clause; each row is
+/// coded in turn (only the first with LIMIT 1). Returns -1 if it has
+/// window functions.
+fn multiSelectValues(p: *Parse, s_arg: *Select, dest: *SelectDest) i32 {
+    var s = s_arg;
+    var n_row: i16 = 1;
+    const show_all = s.limit == null;
+    while (true) {
+        if (s.win != null) return -1;
+        const pr = s.prior orelse break;
+        s = pr;
+        if (show_all) n_row += 1;
+    }
+    var it: ?*Select = s;
+    while (it) |x| {
+        selectInnerLoop(p, x, -1, null, null, dest, 1, 1);
+        if (!show_all) break;
+        x.n_select_row = n_row;
+        it = x.next;
+    }
+    return 0;
+}
+
+/// Port of hasAnchor(): the recursive SELECT still has its anchor terms.
+fn hasAnchor(s_arg: ?*Select) bool {
+    var s = s_arg;
+    while (s) |x| {
+        if (x.sel_flags & SF.Recursive == 0) break;
+        s = x.prior;
+    }
+    return s != null;
+}
+
+/// Port of unionWithLimitOne(): a UNION with LIMIT 1 and no OFFSET.
+fn unionWithLimitOne(db: *Sqlite3, s: *Select) bool {
+    if (s.op != TK.UNION) return false;
+    const limit = s.limit orelse return false;
+    if (limit.right != null) return false;
+    const v = expr_mod.isInteger(limit.left, null) orelse return false;
+    if (v != 1) return false;
+    if (db.optDisabled(int.OPT.UnionLimit)) return false;
+    return true;
+}
+
+/// Port of multiSelect(): code a compound "A op B" (s is B, s.prior A).
+/// UNION ALL runs one query after the other; the others merge sorted
+/// results.
+fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
+    const db = p.db;
+    const prior = s.prior.?;
+    var dest = dest_arg.*;
+    var rc: u32 = 0;
+    const v = build.getVdbe(p).?;
+    defer {
+        dest_arg.i_sdst = dest.i_sdst;
+        dest_arg.n_sdst = dest.n_sdst;
+        dest_arg.i_sd_parm2 = dest.i_sd_parm2;
+    }
+
+    // Create the destination temporary table if necessary.
+    if (dest.e_dest == SRT.EphemTab) {
+        _ = aux.addOp2(v, OP.OpenEphemeral, dest.i_sd_parm, @intCast(s.e_list.?.len()));
+        dest.e_dest = SRT.Table;
+    }
+
+    if (s.sel_flags & SF.MultiValue != 0) {
+        if (multiSelectValues(p, s, &dest) >= 0) return 0;
+    }
+
+    if (s.sel_flags & SF.Recursive != 0 and hasAnchor(s)) {
+        generateWithRecursiveQuery(p, s, &dest);
+    } else if (s.order_by != null) {
+        {
+            const r = multiSelectByMerge(p, s, dest_arg);
+            dest = dest_arg.*;
+            return r;
+        }
+    } else if (s.op != TK.ALL and !unionWithLimitOne(db, s)) {
+        // The merge needs an ORDER BY: invent one.
+        const one = try expr_mod.exprInt32(p.arena, 1);
+        s.order_by = try expr_mod.listAppend(p, null, one);
+        if (p.n_err != 0) return 0;
+        s.order_by.?.at(0).u.x.order_by_col = 1;
+        {
+            const r = multiSelectByMerge(p, s, dest_arg);
+            dest = dest_arg.*;
+            return r;
+        }
+    } else {
+        // UNION ALL (or UNION LIMIT 1): run the left query, then the
+        // right one.
+        var addr: i32 = 0;
+        prior.i_limit = s.i_limit;
+        prior.i_offset = s.i_offset;
+        prior.limit = try expr_mod.exprDup(p.arena, s.limit);
+        rc = select(p, prior, &dest);
+        prior.limit = null;
+        if (rc != 0) return rc;
+        s.prior = null;
+        s.i_limit = prior.i_limit;
+        s.i_offset = prior.i_offset;
+        if (s.i_limit != 0) {
+            addr = aux.addOp1(v, OP.IfNot, s.i_limit);
+            if (s.i_offset != 0) _ = aux.addOp3(v, OP.OffsetLimit, s.i_limit, s.i_offset + 1, s.i_offset);
+        }
+        rc = select(p, s, &dest);
+        s.prior = prior;
+        s.n_select_row = util.logEstAdd(s.n_select_row, prior.n_select_row);
+        if (s.limit) |lim| if (expr_mod.isInteger(lim.left, p)) |n_limit| {
+            if (n_limit > 0 and s.n_select_row > util.logEst(@intCast(n_limit))) s.n_select_row = util.logEst(@intCast(n_limit));
+        };
+        if (addr != 0) aux.jumpHere(v, addr);
+    }
+    return rc;
+}
+
+/// Port of generateOutputSubroutine(): the subroutine sending a row of a
+/// merge co-routine (`in`) to `dest`, skipping duplicates of the previous
+/// output if `reg_prev` is set. Returns its address.
+fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *SelectDest, reg_return: i32, reg_prev: i32, key_info: ?*KeyInfo, i_break: i32) i32 {
+    const v = p.vdbe.?;
+    std.debug.assert(in.e_dest == SRT.Coroutine);
+    const addr = aux.currentAddr(v);
+    const i_continue = aux.makeLabel(p);
+
+    // UNION, EXCEPT and INTERSECT: skip a row equal to the previous one.
+    if (reg_prev != 0) {
+        const addr1 = aux.addOp1(v, OP.IfNot, reg_prev);
+        const addr2 = aux.addOp4(v, OP.Compare, in.i_sdst, reg_prev + 1, in.n_sdst, if (key_info) |k| .{ .keyinfo = k } else .notused);
+        _ = aux.addOp3(v, OP.Jump, addr2 + 2, i_continue, addr2 + 2);
+        aux.jumpHere(v, addr1);
+        _ = aux.addOp3(v, OP.Copy, in.i_sdst, reg_prev + 1, in.n_sdst - 1);
+        _ = aux.addOp2(v, OP.Integer, 1, reg_prev);
+    }
+    if (p.db.malloc_failed) return 0;
+
+    codeOffset(v, s.i_offset, i_continue);
+
+    switch (dest.e_dest) {
+        SRT.Fifo, SRT.DistFifo, SRT.Table, SRT.EphemTab => {
+            const r1 = expr_mod.getTempReg(p);
+            const r2 = expr_mod.getTempReg(p);
+            const i_parm = dest.i_sd_parm;
+            _ = aux.addOp3(v, OP.MakeRecord, in.i_sdst, in.n_sdst, r1);
+            if (dest.e_dest == SRT.DistFifo) {
+                // Populate the uniqueness index of the recursive phase.
+                _ = aux.addOp4Int(v, OP.IdxInsert, i_parm + 1, r1, in.i_sdst, in.n_sdst);
+            }
+            _ = aux.addOp2(v, OP.NewRowid, i_parm, r2);
+            _ = aux.addOp3(v, OP.Insert, i_parm, r1, r2);
+            aux.changeP5(v, OPFLAG.APPEND);
+            expr_mod.releaseTempReg(p, r2);
+            expr_mod.releaseTempReg(p, r1);
+        },
+        SRT.Exists => _ = aux.addOp2(v, OP.Integer, 1, dest.i_sd_parm),
+        SRT.Set => {
+            const r1 = expr_mod.getTempReg(p);
+            _ = aux.addOp4Str(v, OP.MakeRecord, in.i_sdst, in.n_sdst, r1, dest.aff_sdst.?);
+            _ = aux.addOp4Int(v, OP.IdxInsert, dest.i_sd_parm, r1, in.i_sdst, in.n_sdst);
+            if (dest.i_sd_parm2 > 0) {
+                _ = aux.addOp4Int(v, OP.FilterAdd, dest.i_sd_parm2, 0, in.i_sdst, in.n_sdst);
+            }
+            expr_mod.releaseTempReg(p, r1);
+        },
+        SRT.Mem => ec.codeMove(p, in.i_sdst, dest.i_sd_parm, in.n_sdst),
+        SRT.Coroutine => {
+            if (dest.i_sdst == 0) {
+                dest.i_sdst = expr_mod.getTempRange(p, in.n_sdst);
+                dest.n_sdst = in.n_sdst;
+            }
+            ec.codeMove(p, in.i_sdst, dest.i_sdst, in.n_sdst);
+            _ = aux.addOp1(v, OP.Yield, dest.i_sd_parm);
+        },
+        SRT.DistQueue, SRT.Queue => {
+            const so = dest.order_by.?;
+            const i_parm = dest.i_sd_parm;
+            const n_key: i32 = @intCast(so.len());
+            const r1 = expr_mod.getTempReg(p);
+            const r2 = expr_mod.getTempRange(p, n_key + 2);
+            const r3 = r2 + n_key + 1;
+            _ = aux.addOp3(v, OP.MakeRecord, in.i_sdst, in.n_sdst, r3);
+            if (dest.e_dest == SRT.DistQueue) _ = aux.addOp2(v, OP.IdxInsert, i_parm + 1, r3);
+            for (so.slice(), 0..) |item, ii| {
+                _ = aux.addOp2(v, OP.SCopy, in.i_sdst + @as(i32, item.u.x.order_by_col) - 1, r2 + @as(i32, @intCast(ii)));
+            }
+            _ = aux.addOp2(v, OP.Sequence, i_parm, r2 + n_key);
+            _ = aux.addOp3(v, OP.MakeRecord, r2, n_key + 2, r1);
+            _ = aux.addOp4Int(v, OP.IdxInsert, i_parm, r1, r2, n_key + 2);
+            expr_mod.releaseTempReg(p, r1);
+            expr_mod.releaseTempRange(p, r2, n_key + 2);
+        },
+        SRT.Discard => {},
+        else => {
+            std.debug.assert(dest.e_dest == SRT.Output);
+            _ = aux.addOp2(v, OP.ResultRow, in.i_sdst, in.n_sdst);
+        },
+    }
+
+    // Stop at the LIMIT.
+    if (s.i_limit != 0) _ = aux.addOp2(v, OP.DecrJumpZero, s.i_limit, i_break);
+
+    // The subroutine return.
+    aux.resolveLabel(v, i_continue);
+    _ = aux.addOp1(v, OP.Return, reg_return);
+    return addr;
+}
+
+/// Port of multiSelectByMerge(): code "<A> op <B> ORDER BY ..." by
+/// running A and B as co-routines in ORDER BY order and merging their
+/// rows.
+fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
+    const db = p.db;
+    const v = p.vdbe.?;
+    const label_end = aux.makeLabel(p);
+    const label_cmpr = aux.makeLabel(p);
+    const op = s.op;
+    var order_by = s.order_by.?;
+    var n_order_by = order_by.len();
+
+    // Except for UNION ALL, the ORDER BY must cover every result column.
+    if (op != TK.ALL) {
+        var i: usize = 1;
+        while (!db.malloc_failed and i <= s.e_list.?.len()) : (i += 1) {
+            for (order_by.slice()) |item| {
+                if (item.u.x.order_by_col == i) break;
+            } else {
+                const new = try expr_mod.exprInt32(p.arena, @intCast(i));
+                order_by = try expr_mod.listAppend(p, order_by, new);
+                s.order_by = order_by;
+                order_by.at(n_order_by).u.x.order_by_col = @intCast(i);
+                n_order_by += 1;
+            }
+        }
+    }
+
+    // The permutation from ORDER BY terms to result columns, and the
+    // KeyInfo of the merge; COLLATEs are added to the ORDER BY terms.
+    var permute: ?[]u32 = try v.alloc().alloc(u32, n_order_by + 1);
+    {
+        var keep = false;
+        permute.?[0] = @intCast(n_order_by);
+        for (order_by.slice(), 1..) |item, i| {
+            permute.?[i] = @as(u32, item.u.x.order_by_col) - 1;
+            if (permute.?[i] != i - 1) keep = true;
+        }
+        if (!keep) permute = null;
+    }
+    const key_merge = multiSelectByMergeKeyInfo(p, s, 1);
+
+    // Registers and KeyInfo for removing duplicates.
+    var reg_prev: i32 = 0;
+    var key_dup: ?*KeyInfo = null;
+    if (op != TK.ALL) {
+        const n_expr = s.e_list.?.len();
+        reg_prev = p.n_mem + 1;
+        p.n_mem += @as(i32, @intCast(n_expr)) + 1;
+        _ = aux.addOp2(v, OP.Integer, 0, reg_prev);
+        key_dup = keyInfoAlloc(p, n_expr, 1);
+        if (key_dup) |k| {
+            for (0..n_expr) |i| {
+                k.coll[i] = multiSelectCollSeq(p, s, i);
+                k.sort_flags[i] = 0;
+            }
+        }
+    }
+
+    // Separate the left and right queries; a long UNION [ALL] chain is
+    // split in the middle.
+    var n_select: usize = 1;
+    if ((op == TK.ALL or op == TK.UNION) and !db.optDisabled(int.OPT.BalancedMerge)) {
+        var it = s;
+        while (it.prior != null and it.op == op) : (it = it.prior.?) n_select += 1;
+    }
+    var split = s;
+    if (n_select > 3) {
+        var i: usize = 2;
+        while (i < n_select) : (i += 2) split = split.prior.?;
+    }
+    const prior = split.prior.?;
+    split.prior = null;
+    prior.next = null;
+    prior.order_by = try expr_mod.listDup(p.arena, order_by);
+    _ = resolve.resolveOrderGroupBy(p, s, s.order_by, "ORDER");
+    _ = resolve.resolveOrderGroupBy(p, prior, prior.order_by, "ORDER");
+
+    // The limit registers.
+    computeLimitRegisters(p, s, label_end);
+    var reg_limit_a: i32 = 0;
+    var reg_limit_b: i32 = 0;
+    if (s.i_limit != 0 and (op == TK.ALL or unionWithLimitOne(db, s))) {
+        p.n_mem += 1;
+        reg_limit_a = p.n_mem;
+        p.n_mem += 1;
+        reg_limit_b = p.n_mem;
+        _ = aux.addOp2(v, OP.Copy, if (s.i_offset != 0) s.i_offset + 1 else s.i_limit, reg_limit_a);
+        _ = aux.addOp2(v, OP.Copy, reg_limit_a, reg_limit_b);
+    }
+    s.limit = null;
+
+    p.n_mem += 1;
+    const reg_addr_a = p.n_mem;
+    p.n_mem += 1;
+    const reg_addr_b = p.n_mem;
+    p.n_mem += 1;
+    const reg_out_a = p.n_mem;
+    p.n_mem += 1;
+    const reg_out_b = p.n_mem;
+    var dest_a = selectDestInit(SRT.Coroutine, reg_addr_a);
+    var dest_b = selectDestInit(SRT.Coroutine, reg_addr_b);
+
+    // Co-routine A: the query on the left.
+    const addr_select_a = aux.currentAddr(v) + 1;
+    var addr1 = aux.addOp3(v, OP.InitCoroutine, reg_addr_a, 0, addr_select_a);
+    prior.i_limit = reg_limit_a;
+    _ = select(p, prior, &dest_a);
+    aux.endCoroutine(v, reg_addr_a);
+    aux.jumpHere(v, addr1);
+
+    // Co-routine B: the query on the right.
+    const addr_select_b = aux.currentAddr(v) + 1;
+    addr1 = aux.addOp3(v, OP.InitCoroutine, reg_addr_b, 0, addr_select_b);
+    const saved_limit = s.i_limit;
+    const saved_offset = s.i_offset;
+    s.i_limit = reg_limit_b;
+    s.i_offset = 0;
+    _ = select(p, s, &dest_b);
+    s.i_limit = saved_limit;
+    s.i_offset = saved_offset;
+    aux.endCoroutine(v, reg_addr_b);
+
+    // Output a row of A, or of B.
+    const addr_out_a = generateOutputSubroutine(p, s, &dest_a, dest, reg_out_a, reg_prev, key_dup, label_end);
+    var addr_out_b: i32 = 0;
+    if (op == TK.ALL or op == TK.UNION) {
+        addr_out_b = generateOutputSubroutine(p, s, &dest_b, dest, reg_out_b, reg_prev, key_dup, label_end);
+    }
+
+    // A is exhausted.
+    var addr_eof_a: i32 = undefined;
+    var addr_eof_a_no_b: i32 = undefined;
+    if (op == TK.EXCEPT or op == TK.INTERSECT) {
+        addr_eof_a = label_end;
+        addr_eof_a_no_b = label_end;
+    } else {
+        addr_eof_a = aux.addOp2(v, OP.Gosub, reg_out_b, addr_out_b);
+        addr_eof_a_no_b = aux.addOp2(v, OP.Yield, reg_addr_b, label_end);
+        _ = aux.goto_(v, addr_eof_a);
+        s.n_select_row = util.logEstAdd(s.n_select_row, prior.n_select_row);
+    }
+
+    // B is exhausted.
+    var addr_eof_b: i32 = undefined;
+    if (op == TK.INTERSECT) {
+        addr_eof_b = addr_eof_a;
+        if (s.n_select_row > prior.n_select_row) s.n_select_row = prior.n_select_row;
+    } else {
+        addr_eof_b = aux.addOp2(v, OP.Gosub, reg_out_a, addr_out_a);
+        _ = aux.addOp2(v, OP.Yield, reg_addr_a, label_end);
+        _ = aux.goto_(v, addr_eof_b);
+    }
+
+    // A<B.
+    var addr_alt_b = aux.addOp2(v, OP.Gosub, reg_out_a, addr_out_a);
+    _ = aux.addOp2(v, OP.Yield, reg_addr_a, addr_eof_a);
+    _ = aux.goto_(v, label_cmpr);
+
+    // A==B.
+    var addr_aeq_b: i32 = undefined;
+    if (op == TK.ALL) {
+        addr_aeq_b = addr_alt_b;
+    } else if (op == TK.INTERSECT) {
+        addr_aeq_b = addr_alt_b;
+        addr_alt_b += 1;
+    } else {
+        addr_aeq_b = addr_alt_b + 1;
+    }
+
+    // A>B.
+    var addr_agt_b = aux.currentAddr(v);
+    if (op == TK.ALL or op == TK.UNION) {
+        _ = aux.addOp2(v, OP.Gosub, reg_out_b, addr_out_b);
+        _ = aux.addOp2(v, OP.Yield, reg_addr_b, addr_eof_b);
+        _ = aux.goto_(v, label_cmpr);
+    } else {
+        // Just next-B: the code below has it.
+        addr_agt_b += 1;
+    }
+
+    // Initialization.
+    aux.jumpHere(v, addr1);
+    _ = aux.addOp2(v, OP.Yield, reg_addr_a, addr_eof_a_no_b);
+    // Also the A>B case of EXCEPT and INTERSECT.
+    _ = aux.addOp2(v, OP.Yield, reg_addr_b, addr_eof_b);
+
+    // The merge loop.
+    if (permute) |pm| _ = aux.addOp4(v, OP.Permutation, 0, 0, 0, .{ .intarray = pm });
+    aux.resolveLabel(v, label_cmpr);
+    _ = aux.addOp4(v, OP.Compare, dest_a.i_sdst, dest_b.i_sdst, @intCast(n_order_by), if (key_merge) |k| .{ .keyinfo = k } else .notused);
+    if (permute != null) aux.changeP5(v, OPFLAG.PERMUTE);
+    _ = aux.addOp3(v, OP.Jump, addr_alt_b, addr_aeq_b, addr_agt_b);
+
+    aux.resolveLabel(v, label_end);
+
+    split.prior = prior;
+    prior.next = split;
+    prior.order_by = null;
+    return @intFromBool(p.n_err != 0);
+}
+
+/// Port of isSimpleCount(): the table of "SELECT count(*) FROM <tbl>", or
+/// null.
+fn isSimpleCount(s: *Select, agg: *AggInfo) ?*Table {
+    std.debug.assert(s.group_by == null);
+    if (s.where != null or s.e_list.?.len() != 1 or s.src.?.len() != 1 or
+        s.src.?.at(0).fg.is_subquery or agg.funcs.items.len != 1 or s.having != null)
+    {
+        return null;
+    }
+    const t = s.src.?.at(0).s_tab.?;
+    if (!t.isOrdinary()) return null;
+    const e = s.e_list.?.at(0).expr.?;
+    if (e.op != TK.AGG_FUNCTION) return null;
+    if (e.agg_info != agg) return null;
+    if (agg.funcs.items[0].func.?.func_flags & callback.FUNC.COUNT == 0) return null;
+    if (e.has(EP.Distinct | EP.WinFunc)) return null;
+    return t;
+}
+
+/// Port of sqlite3IndexedByLookup(): find the index of INDEXED BY.
+pub fn indexedByLookup(p: *Parse, from: *SrcItem) bool {
+    const t = from.s_tab.?;
+    const name = from.u1.indexed_by.?;
+    var idx = t.index;
+    while (idx) |ix| : (idx = ix.next) {
+        if (ctype.eqlNoCase(ix.name, name)) break;
+    }
+    const found = idx orelse {
+        util.errorMsg(p, "no such index: {s}", .{name});
+        p.check_schema = true;
+        return true;
+    };
+    from.u2 = .{ .ib_index = found };
+    return false;
+}
+
+/// Port of convertCompoundSelectToSubquery(): a compound (other than
+/// UNION ALL) with a COLLATE in its ORDER BY becomes "SELECT * FROM
+/// (compound) ORDER BY ...", as the merge needs the result columns'
+/// collations.
+fn convertCompoundSelectToSubquery(w: *Walker, s: *Select) u8 {
+    return convertCompoundSelectToSubqueryImpl(w, s) catch {
+        oom(w.parse.?);
+        return WRC.Abort;
+    };
+}
+
+fn convertCompoundSelectToSubqueryImpl(w: *Walker, s: *Select) Oom!u8 {
+    if (s.prior == null) return WRC.Continue;
+    const order_by = s.order_by orelse return WRC.Continue;
+    var x: ?*Select = s;
+    while (x) |xs| {
+        if (xs.op != TK.ALL and xs.op != TK.SELECT) break;
+        x = xs.prior;
+    }
+    if (x == null) return WRC.Continue;
+    // Already matched to result columns (a window rewrite).
+    if (order_by.at(0).u.x.order_by_col != 0) return WRC.Continue;
+    var i = order_by.len();
+    while (i > 0) {
+        i -= 1;
+        if (order_by.at(i).expr.?.flags & EP.Collate != 0) break;
+    } else return WRC.Continue;
+
+    const p = w.parse.?;
+    const new = try p.arena.create(Select);
+    const new_src = (try build.srcListAppendFromTerm(p, null, null, null, .{}, new, null)) orelse return WRC.Abort;
+    if (p.n_err != 0) return WRC.Abort;
+    new.* = s.*;
+    s.src = new_src;
+    s.e_list = try expr_mod.listAppend(p, null, try expr_mod.expr(p.arena, TK.ASTERISK, null));
+    s.op = TK.SELECT;
+    s.where = null;
+    new.group_by = null;
+    new.having = null;
+    new.order_by = null;
+    s.prior = null;
+    s.next = null;
+    s.with = null;
+    s.win_defn = null;
+    s.sel_flags &= ~SF.Compound;
+    s.sel_flags |= SF.Converted;
+    new.prior.?.next = new;
+    new.limit = null;
+    return WRC.Continue;
+}
+
+/// Port of cannotBeFunction(): a table-valued function where a plain
+/// table is needed is an error.
+fn cannotBeFunction(p: *Parse, from: *SrcItem) bool {
+    if (from.fg.is_tab_func) {
+        util.errorMsg(p, "'{s}' is not a function", .{from.name.?});
+        return true;
+    }
+    return false;
+}
+
+/// Port of searchWith(): the CTE the FROM term `item` names, in the WITH
+/// clauses in scope, with its WITH clause in `context`.
+fn searchWith(with_arg: ?*With, item: *SrcItem, context: *?*With) ?*int.Cte {
+    const name = item.name.?;
+    var w = with_arg;
+    while (w) |x| : (w = x.outer) {
+        for (x.ctes.items) |*c| {
+            if (ctype.eqlNoCase(name, c.name orelse "")) {
+                context.* = x;
+                return c;
+            }
+        }
+        if (x.view) break;
+    }
+    return null;
+}
+
+/// Port of resolveFromTermToCte(): if `from` names a CTE in scope, give
+/// it the CTE's subquery and a table for its result. Returns 0 if not a
+/// CTE, 1 if it is, 2 on error.
+fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
+    const db = p.db;
+    if (p.with == null) return 0;
+    if (p.n_err != 0) return 0;
+    // A schema qualifier rules out a CTE, as does fg.not_cte.
+    if (!from.fg.fixed_schema and from.u4.database != null) return 0;
+    if (from.fg.not_cte) return 0;
+    var with: ?*With = null;
+    const cte = searchWith(p.with, from, &with) orelse return 0;
+
+    // An illegal recursive reference.
+    if (cte.cte_err) |err| {
+        if (std.mem.eql(u8, err, "circular reference: %s")) {
+            util.errorMsg(p, "circular reference: {s}", .{cte.name.?});
+        } else if (std.mem.eql(u8, err, "multiple recursive references: %s")) {
+            util.errorMsg(p, "multiple recursive references: {s}", .{cte.name.?});
+        } else {
+            util.errorMsg(p, "recursive reference in a subquery: {s}", .{cte.name.?});
+        }
+        return 2;
+    }
+    if (cannotBeFunction(p, from)) return 2;
+
+    const t = try p.arena.create(Table);
+    var cte_use = cte.use;
+    if (cte_use == null) {
+        const u = try p.arena.create(int.CteUse);
+        u.* = .{ .e_m10d = cte.e_m10d };
+        cte.use = u;
+        cte_use = u;
+    }
+    from.s_tab = t;
+    t.* = .{
+        .name = try p.arena.dupeSentinel(u8, cte.name.?, 0),
+        .n_row_log_est = 200,
+        .tab_flags = TF.Ephemeral | TF.NoVisibleRowid,
+    };
+    try build.srcItemAttachSubquery(p, from, (try expr_mod.selectDup(p.arena, cte.select)).?);
+    if (db.malloc_failed) return 2;
+    const sel = from.u4.subq.?.select;
+    sel.sel_flags |= SF.CopyCte;
+    if (from.fg.is_indexed_by) {
+        util.errorMsg(p, "no such index: \"{s}\"", .{from.u1.indexed_by.?});
+        return 2;
+    }
+    from.fg.is_cte = true;
+    from.u2 = .{ .cte_use = cte_use };
+    cte_use.?.n_use += 1;
+
+    // Is it recursive?
+    var rec_term = sel;
+    const may_recursive = sel.op == TK.ALL or sel.op == TK.UNION;
+    var i_rec_tab: i32 = -1;
+    while (may_recursive and rec_term.op == sel.op) {
+        for (rec_term.src.?.slice()) |*item| {
+            if (item.name != null and !item.fg.had_schema and !item.fg.is_subquery and
+                (item.fg.fixed_schema or item.u4.database == null) and
+                ctype.eqlNoCase(item.name.?, cte.name.?))
+            {
+                item.s_tab = t;
+                build.tableRef(p, t);
+                item.fg.is_recursive = true;
+                if (rec_term.sel_flags & SF.Recursive != 0) {
+                    util.errorMsg(p, "multiple references to recursive table: {s}", .{cte.name.?});
+                    return 2;
+                }
+                rec_term.sel_flags |= SF.Recursive;
+                if (i_rec_tab < 0) {
+                    i_rec_tab = p.n_tab;
+                    p.n_tab += 1;
+                }
+                item.i_cursor = i_rec_tab;
+            }
+        }
+        if (rec_term.sel_flags & SF.Recursive == 0) break;
+        rec_term = rec_term.prior.?;
+    }
+
+    if (p.n_tab >= db.limit(.expr_depth)) {
+        // Nested CTEs must not make an exponential number of cursors.
+        p.n_nest_sel = p.n_tab;
+    }
+    p.n_nest_sel += 1;
+    if (checkSubqueryNestingDepth(p)) return 2;
+    cte.cte_err = "circular reference: %s";
+    const saved_with = p.with;
+    p.with = with;
+    if (sel.sel_flags & SF.Recursive != 0) {
+        rec_term.with = sel.with;
+        const rc = walker.walkSelect(w, rec_term);
+        rec_term.with = null;
+        if (rc != 0) {
+            p.with = saved_with;
+            return 2;
+        }
+    } else if (walker.walkSelect(w, sel) != 0) {
+        p.with = saved_with;
+        return 2;
+    }
+    p.with = with;
+    p.n_nest_sel -= 1;
+
+    var left = sel;
+    while (left.prior) |pr| left = pr;
+    var e_list = left.e_list;
+    if (cte.cols) |cols| {
+        if (e_list != null and e_list.?.len() != cols.len()) {
+            util.errorMsg(p, "table {s} has {d} values for {d} columns", .{ cte.name.?, e_list.?.len(), cols.len() });
+            p.with = saved_with;
+            return 2;
+        }
+        e_list = cols;
+    }
+
+    t.cols = try columnsFromExprList(p, p.arena, e_list);
+    t.n_nv_col = @intCast(t.cols.len);
+    if (may_recursive) {
+        cte.cte_err = if (sel.sel_flags & SF.Recursive != 0)
+            "multiple recursive references: %s"
+        else
+            "recursive reference in a subquery: %s";
+        _ = walker.walkSelect(w, sel);
+    }
+    cte.cte_err = null;
+    p.with = saved_with;
+    return 1;
+}
+
+/// Port of sqlite3SelectPopWith(): pop the WITH clause of `s` (the
+/// leftmost term of a compound) off the stack.
+fn selectPopWith(w: *Walker, s: *Select) void {
+    const p = w.parse.?;
+    if (p.with != null and s.prior == null) {
+        if (findRightmost(s).with) |with| p.with = with.outer;
+    }
+}
+
+/// Port of sqlite3ExpandSubquery(): the table describing the result of
+/// the FROM-clause subquery `from`.
+pub fn expandSubquery(p: *Parse, from: *SrcItem) Oom!bool {
+    var sel = from.u4.subq.?.select;
+    const t = try p.arena.create(Table);
+    from.s_tab = t;
+    const name = if (from.alias) |a| try p.arena.dupeSentinel(u8, a, 0) else try build.mprintf(p, "%!S", &.{.{ .src_item = from }});
+    while (sel.prior) |pr| sel = pr;
+    t.* = .{
+        .name = name,
+        .n_row_log_est = 200,
+        .e_tab_type = .view,
+        .tab_flags = TF.Ephemeral | TF.NoVisibleRowid,
+    };
+    t.cols = try columnsFromExprList(p, p.arena, sel.e_list);
+    t.n_nv_col = @intCast(t.cols.len);
+    return p.n_err != 0;
+}
+
+/// Port of inAnyUsingClause(): `name` is in a USING clause of one of the
+/// `n` terms after `base` of `src`.
+fn inAnyUsingClause(name: []const u8, src: *SrcList, base: usize, n: usize) bool {
+    for (src.slice()[base + 1 .. base + 1 + n]) |*item| {
+        if (!item.fg.is_using) continue;
+        const using = item.u3.using orelse continue;
+        if (build.idListIndex(using, name) != null) return true;
+    }
+    return false;
+}
+
+/// Port of sqlite3SrcListAssignCursors() (build.c): give every FROM term
+/// (and those of subqueries) a cursor.
+pub fn srcListAssignCursors(p: *Parse, list: ?*SrcList) void {
+    const l = list orelse return;
+    for (l.slice()) |*item| {
+        if (item.i_cursor >= 0) continue;
+        item.i_cursor = p.n_tab;
+        p.n_tab += 1;
+        if (item.fg.is_subquery) srcListAssignCursors(p, item.u4.subq.?.select.src);
+    }
+}
+
+/// Port of selectExpander(): assign cursors to the FROM terms and find
+/// their tables (views and subqueries become subquery tables), apply the
+/// joins, and expand "*" and "TABLE.*" in the result set.
+fn selectExpander(w: *Walker, s: *Select) u8 {
+    return selectExpanderImpl(w, s) catch {
+        oom(w.parse.?);
+        return WRC.Abort;
+    };
+}
+
+fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
+    const p = w.parse.?;
+    const db = p.db;
+    const sel_flags = s.sel_flags;
+    var elist_flags: u32 = 0;
+
+    s.sel_flags |= SF.Expanded;
+    if (db.malloc_failed) return WRC.Abort;
+    if (sel_flags & SF.Expanded != 0) return WRC.Prune;
+    if (w.e_code != 0) {
+        // Copied from a view: renumber.
+        p.n_select += 1;
+        s.sel_id = @intCast(p.n_select);
+    }
+    const tab_list = s.src.?;
+    const e_list = s.e_list.?;
+    if (p.with != null and s.sel_flags & SF.View != 0) {
+        if (s.with == null) {
+            const nw = try p.arena.create(With);
+            nw.* = .{};
+            s.with = nw;
+        }
+        s.with.?.view = true;
+    }
+    _ = withPush(p, s.with);
+
+    srcListAssignCursors(p, tab_list);
+
+    // Find the table of each FROM term.
+    for (tab_list.slice()) |*from| {
+        if (from.s_tab != null) continue;
+        if (from.name == null) {
+            // A subquery.
+            const sel = from.u4.subq.?.select;
+            if (walker.walkSelect(w, sel) != 0) return WRC.Abort;
+            if (try expandSubquery(p, from)) return WRC.Abort;
+        } else {
+            const rc = try resolveFromTermToCte(p, w, from);
+            if (rc > 1) return WRC.Abort;
+            if (rc == 0) {
+                // A table or view.
+                const t = build.locateTableItem(p, 0, from) orelse return WRC.Abort;
+                from.s_tab = t;
+                if (t.n_tab_ref >= 0xffff) {
+                    util.errorMsg(p, "too many references to \"{s}\": max 65535", .{t.name});
+                    from.s_tab = null;
+                    return WRC.Abort;
+                }
+                build.tableRef(p, t);
+                if (t.e_tab_type != .vtab and cannotBeFunction(p, from)) return WRC.Abort;
+                if (!t.isOrdinary()) {
+                    const e_code_orig = w.e_code;
+                    if (build.viewGetColumnNames(p, t) != 0) return WRC.Abort;
+                    if (t.isView()) {
+                        if (db.flags & int.DbFlag.EnableView == 0 and t.schema != db.dbs.items[1].schema) {
+                            util.errorMsg(p, "access to view \"{s}\" prohibited", .{t.name});
+                        }
+                        try build.srcItemAttachSubquery(p, from, (try expr_mod.selectDup(p.arena, t.u.view.select)).?);
+                    }
+                    // Renumber the Select ids of the view's copy.
+                    w.e_code = 1;
+                    if (from.fg.is_subquery) _ = walker.walkSelect(w, from.u4.subq.?.select);
+                    w.e_code = e_code_orig;
+                }
+            }
+        }
+        if (from.fg.is_indexed_by and indexedByLookup(p, from)) return WRC.Abort;
+    }
+
+    // NATURAL, ON and USING.
+    if (p.n_err != 0 or try processJoin(p, s) != 0) return WRC.Abort;
+
+    // Expand "*" and "TABLE.*".
+    var k: usize = 0;
+    while (k < e_list.len()) : (k += 1) {
+        const e = e_list.at(k).expr.?;
+        if (e.op == TK.ASTERISK) break;
+        if (e.op == TK.DOT and e.right.?.op == TK.ASTERISK) break;
+        elist_flags |= e.flags;
+    }
+    if (k < e_list.len()) {
+        var new: ?*ExprList = null;
+        const flags = db.flags;
+        const long_names = flags & int.DbFlag.FullColNames != 0 and flags & int.DbFlag.ShortColNames == 0;
+        for (e_list.slice()) |*a| {
+            const e = a.expr.?;
+            elist_flags |= e.flags;
+            const right_ast = e.right;
+            if (e.op != TK.ASTERISK and (e.op != TK.DOT or right_ast.?.op != TK.ASTERISK)) {
+                // No expansion needed.
+                new = try expr_mod.listAppend(p, new, e);
+                new.?.last().e_name = a.e_name;
+                new.?.last().fg.e_ename = a.fg.e_ename;
+                continue;
+            }
+            // "*" or "TABLE.*".
+            var table_seen = false;
+            var tname: ?[]const u8 = null;
+            var i_err_ofst: i32 = undefined;
+            if (e.op == TK.DOT) {
+                tname = e.left.?.token();
+                i_err_ofst = e.right.?.w.ofst;
+            } else {
+                i_err_ofst = e.w.ofst;
+            }
+            for (tab_list.slice(), 0..) |*from, i| {
+                const t = from.s_tab.?;
+                const tab_name: []const u8 = from.alias orelse t.name;
+                var nested_from: ?*ExprList = null;
+                var schema_name: ?[]const u8 = null;
+                if (db.malloc_failed) break;
+                if (from.fg.is_nested_from) {
+                    nested_from = from.u4.subq.?.select.e_list;
+                } else {
+                    if (tname) |tn| if (!ctype.eqlNoCase(tn, tab_name)) continue;
+                    const i_db = prepare.schemaToIndex(db, t.schema);
+                    schema_name = if (i_db >= 0) db.dbs.items[@intCast(i_db)].name else "*";
+                }
+                var using: ?*IdList = null;
+                if (i + 1 < tab_list.len() and tab_list.at(i + 1).fg.is_using and sel_flags & SF.NestedFrom != 0) {
+                    using = tab_list.at(i + 1).u3.using;
+                    for (using.?.names.items) |uname| {
+                        const r = try expr_mod.expr(p.arena, TK.ID, uname);
+                        expr_mod.setErrorOffset(r, i_err_ofst);
+                        new = try expr_mod.listAppend(p, new, r);
+                        const x = new.?.last();
+                        x.e_name = try std.fmt.allocPrintSentinel(p.arena, "..{s}", .{uname}, 0);
+                        x.fg.e_ename = .tab;
+                        x.fg.using_term = true;
+                    }
+                }
+
+                var n_add = t.cols.len;
+                if (t.tab_flags & TF.NoVisibleRowid == 0 and sel_flags & SF.NestedFrom != 0) n_add += 1;
+                for (0..n_add) |j| {
+                    var name: []const u8 = undefined;
+                    if (j == t.cols.len) {
+                        name = expr_mod.rowidAlias(t) orelse continue;
+                    } else {
+                        name = t.cols[j].name();
+                        // Not the ENAME_ROWID columns of a nested FROM.
+                        if (nested_from) |nf| if (nf.at(j).fg.e_ename == .rowid) continue;
+                        if (tname != null and nested_from != null and !resolve.matchEName(nested_from.?.at(j), null, tname, null, null)) continue;
+                        // Hidden columns unless SF_IncludeHidden.
+                        if (s.sel_flags & SF.IncludeHidden == 0 and isHiddenColumn(&t.cols[j])) continue;
+                        if (t.cols[j].col_flags & COLFLAG.NOEXPAND != 0 and tname == null and sel_flags & SF.NestedFrom == 0) continue;
+                    }
+                    table_seen = true;
+
+                    if (i > 0 and tname == null and sel_flags & SF.NestedFrom == 0) {
+                        // A USING column comes from the left table only.
+                        if (from.fg.is_using and build.idListIndex(from.u3.using.?, name) != null) continue;
+                    }
+                    const right = try expr_mod.expr(p.arena, TK.ID, name);
+                    var ex: *Expr = undefined;
+                    if ((tab_list.len() > 1 and (from.fg.jointype & JT.LTORJ == 0 or tname != null or
+                        sel_flags & SF.NestedFrom != 0 or !inAnyUsingClause(name, tab_list, i, tab_list.len() - i - 1))) or
+                        p.inRenameObject())
+                    {
+                        var left = try expr_mod.expr(p.arena, TK.ID, tab_name);
+                        ex = try expr_mod.pExpr(p, TK.DOT, left, right);
+                        if (schema_name) |sn| {
+                            left = try expr_mod.expr(p.arena, TK.ID, sn);
+                            ex = try expr_mod.pExpr(p, TK.DOT, left, ex);
+                        }
+                    } else {
+                        ex = right;
+                    }
+                    expr_mod.setErrorOffset(ex, i_err_ofst);
+                    new = try expr_mod.listAppend(p, new, ex);
+                    const x = new.?.last();
+                    if (sel_flags & SF.NestedFrom != 0 and !p.inRenameObject()) {
+                        if (nested_from != null and j < nested_from.?.len()) {
+                            x.e_name = if (nested_from.?.at(j).e_name) |en| try p.arena.dupeSentinel(u8, en, 0) else null;
+                        } else {
+                            x.e_name = try std.fmt.allocPrintSentinel(p.arena, "{s}.{s}.{s}", .{ schema_name orelse "", tab_name, name }, 0);
+                        }
+                        x.fg.e_ename = if (j == t.cols.len) .rowid else .tab;
+                        if ((from.fg.is_using and build.idListIndex(from.u3.using.?, name) != null) or
+                            (using != null and build.idListIndex(using.?, name) != null) or
+                            (j < t.cols.len and t.cols[j].col_flags & COLFLAG.NOEXPAND != 0))
+                        {
+                            x.fg.no_expand = true;
+                        }
+                    } else if (long_names) {
+                        x.e_name = try std.fmt.allocPrintSentinel(p.arena, "{s}.{s}", .{ tab_name, name }, 0);
+                        x.fg.e_ename = .name;
+                    } else {
+                        x.e_name = try p.arena.dupeSentinel(u8, name, 0);
+                        x.fg.e_ename = .name;
+                    }
+                }
+            }
+            if (!table_seen) {
+                if (tname) |tn| {
+                    util.errorMsg(p, "no such table: {s}", .{tn});
+                } else {
+                    util.errorMsg(p, "no tables specified", .{});
+                }
+            }
+        }
+        s.e_list = new;
+    }
+    if (s.e_list) |el| {
+        if (el.len() > @as(usize, @intCast(db.limit(.column)))) {
+            util.errorMsg(p, "too many columns in result set", .{});
+            return WRC.Abort;
+        }
+        if (elist_flags & (EP.HasFunc | EP.Subquery) != 0) s.sel_flags |= SF.ComplexResult;
+    }
+    return WRC.Continue;
+}
+
+/// Port of sqlite3SelectExpand(): expand a SELECT and its subqueries.
+fn selectExpand(p: *Parse, s: *Select) void {
+    var w: Walker = .{ .parse = p, .expr_callback = walker.exprWalkNoop };
+    if (p.has_compound) {
+        w.select_callback = convertCompoundSelectToSubquery;
+        _ = walker.walkSelect(&w, s);
+    }
+    w.select_callback = selectExpander;
+    w.select_callback2 = selectPopWith;
+    w.e_code = 0;
+    _ = walker.walkSelect(&w, s);
+}
+
+/// Port of selectAddSubqueryTypeInfo(): the types of the tables of the
+/// FROM-clause subqueries, now that names are resolved.
+fn selectAddSubqueryTypeInfo(w: *Walker, s: *Select) void {
+    if (s.sel_flags & SF.HasTypeInfo != 0) return;
+    s.sel_flags |= SF.HasTypeInfo;
+    const p = w.parse.?;
+    for (s.src.?.slice()) |*from| {
+        const t = from.s_tab.?;
+        if (t.tab_flags & TF.Ephemeral != 0 and from.fg.is_subquery) {
+            subqueryColumnTypes(p, build.tableAlloc(p, t), t, from.u4.subq.?.select, Aff.none) catch oom(p);
+        }
+    }
+}
+
+/// Port of sqlite3SelectAddTypeInfo().
+fn selectAddTypeInfo(p: *Parse, s: *Select) void {
+    var w: Walker = .{
+        .parse = p,
+        .expr_callback = walker.exprWalkNoop,
+        .select_callback = walker.selectWalkNoop,
+        .select_callback2 = selectAddSubqueryTypeInfo,
+    };
+    _ = walker.walkSelect(&w, s);
+}
+
+/// Port of sqlite3SelectPrep(): expand a SELECT (cursors, FROM tables,
+/// joins, "*"), resolve its names, and type its FROM subqueries.
+pub fn selectPrep(p: *Parse, s: *Select, outer_nc: ?*NameContext) void {
+    if (p.db.malloc_failed) return;
+    if (s.sel_flags & SF.HasTypeInfo != 0) return;
+    selectExpand(p, s);
+    if (p.n_err != 0) return;
+    resolve.resolveSelectNames(p, s, outer_nc);
+    if (p.n_err != 0) return;
+    selectAddTypeInfo(p, s);
+}
+
+/// Port of analyzeAggFuncArgs(): the AggInfo columns used only as
+/// arguments of aggregate functions.
+fn analyzeAggFuncArgs(agg: *AggInfo, nc: *NameContext) void {
+    nc.nc_flags |= NC.InAggFunc;
+    for (agg.funcs.items) |f| {
+        const e = f.f_expr;
+        expr_mod.analyzeAggList(nc, e.x.list);
+        if (e.left) |l| expr_mod.analyzeAggList(nc, l.x.list);
+        if (e.has(EP.WinFunc)) expr_mod.analyzeAggregates(nc, e.y.win.?.filter);
+    }
+    nc.nc_flags &= ~NC.InAggFunc;
+}
+
+/// Port of assignAggregateRegisters(): one register per AggInfo column
+/// and function.
+fn assignAggregateRegisters(p: *Parse, agg: *AggInfo) void {
+    agg.i_first_reg = p.n_mem + 1;
+    p.n_mem += @intCast(agg.cols.items.len + agg.funcs.items.len);
+}
+
+/// Port of resetAccumulator(): code NULLs into the accumulators, and open
+/// the tables of DISTINCT and ORDER BY aggregates.
+fn resetAccumulator(p: *Parse, agg: *AggInfo) void {
+    const v = p.vdbe.?;
+    const n_reg: i32 = @intCast(agg.funcs.items.len + agg.cols.items.len);
+    if (n_reg == 0) return;
+    if (p.n_err != 0) return;
+    _ = aux.addOp3(v, OP.Null, 0, agg.i_first_reg, agg.i_first_reg + n_reg - 1);
+    for (agg.funcs.items) |*f| {
+        if (f.i_distinct >= 0) {
+            const e = f.f_expr;
+            if (e.x.list == null or e.x.list.?.len() != 1) {
+                util.errorMsg(p, "DISTINCT aggregates must have exactly one argument", .{});
+                f.i_distinct = -1;
+            } else {
+                const ki = keyInfoFromExprList(p, e.x.list.?, 0, 0);
+                f.i_dist_addr = aux.addOp4(v, OP.OpenEphemeral, f.i_distinct, 0, 0, if (ki) |k| .{ .keyinfo = k } else .notused);
+            }
+        }
+        if (f.i_ob_tab >= 0) {
+            const ob_list = f.f_expr.left.?.x.list.?;
+            var n_extra: usize = 0;
+            if (!f.b_ob_unique) n_extra += 1;
+            if (f.b_ob_payload) n_extra += f.f_expr.x.list.?.len();
+            if (f.b_use_subtype) n_extra += f.f_expr.x.list.?.len();
+            const ki = keyInfoFromExprList(p, ob_list, 0, n_extra);
+            if (!f.b_ob_unique and p.n_err == 0) ki.?.n_key_field += 1;
+            _ = aux.addOp4(v, OP.OpenEphemeral, f.i_ob_tab, @intCast(ob_list.len() + n_extra), 0, if (ki) |k| .{ .keyinfo = k } else .notused);
+        }
+    }
+}
+
+/// Port of finalizeAggFunctions(): OP_AggFinal for every aggregate (after
+/// running the deferred steps of ORDER BY aggregates).
+fn finalizeAggFunctions(p: *Parse, agg: *AggInfo) void {
+    const v = p.vdbe.?;
+    for (agg.funcs.items, 0..) |*f, i| {
+        if (p.n_err != 0) return;
+        const list = f.f_expr.x.list;
+        if (f.i_ob_tab >= 0) {
+            // Feed the rows of the ORDER BY table to OP_AggStep in order.
+            const n_arg: i32 = @intCast(list.?.len());
+            const reg_agg = expr_mod.getTempRange(p, n_arg);
+            var n_key: i32 = 0;
+            if (f.b_ob_payload) {
+                n_key = @intCast(f.f_expr.left.?.x.list.?.len());
+                if (!f.b_ob_unique) n_key += 1;
+            }
+            const i_top = aux.addOp1(v, OP.Rewind, f.i_ob_tab);
+            var j = n_arg - 1;
+            while (j >= 0) : (j -= 1) _ = aux.addOp3(v, OP.Column, f.i_ob_tab, n_key + j, reg_agg + j);
+            if (f.b_use_subtype) {
+                const reg_subtype = expr_mod.getTempReg(p);
+                const i_base_col = n_key + n_arg + @intFromBool(!f.b_ob_payload and !f.b_ob_unique);
+                j = n_arg - 1;
+                while (j >= 0) : (j -= 1) {
+                    _ = aux.addOp3(v, OP.Column, f.i_ob_tab, i_base_col + j, reg_subtype);
+                    _ = aux.addOp2(v, OP.SetSubtype, reg_subtype, reg_agg + j);
+                }
+                expr_mod.releaseTempReg(p, reg_subtype);
+            }
+            _ = aux.addOp3(v, OP.AggStep, 0, reg_agg, agg.funcReg(i));
+            aux.appendP4(v, .{ .funcdef = f.func.? });
+            aux.changeP5(v, @intCast(n_arg));
+            _ = aux.addOp2(v, OP.Next, f.i_ob_tab, i_top + 1);
+            aux.jumpHere(v, i_top);
+            expr_mod.releaseTempRange(p, reg_agg, n_arg);
+        }
+        _ = aux.addOp2(v, OP.AggFinal, agg.funcReg(i), if (list) |l| @intCast(l.len()) else 0);
+        aux.appendP4(v, .{ .funcdef = f.func.? });
+    }
+}
+
+/// Port of updateAccumulator(): code the step of every aggregate for the
+/// current row, and the accumulator columns (only for the first row if
+/// `reg_acc` is set and there is no min() or max()).
+fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: u8) void {
+    const v = p.vdbe.?;
+    var reg_hit: i32 = 0;
+    var addr_hit_test: i32 = 0;
+    if (p.n_err != 0) return;
+    agg.direct_mode = true;
+    for (agg.funcs.items, 0..) |*f, i| {
+        var addr_next: i32 = 0;
+        var reg_agg: i32 = 0;
+        var reg_agg_sz: i32 = 0;
+        var reg_distinct: i32 = 0;
+        var n_arg: i32 = 0;
+        const list = f.f_expr.x.list;
+        if (f.f_expr.has(EP.WinFunc)) {
+            const filter = f.f_expr.y.win.?.filter;
+            if (agg.n_accumulator != 0 and f.func.?.func_flags & callback.FUNC.NEEDCOLL != 0 and reg_acc != 0) {
+                // The "magnet" register: populate the accumulators on the
+                // first row even if the FILTER skips min() or max().
+                if (reg_hit == 0) {
+                    p.n_mem += 1;
+                    reg_hit = p.n_mem;
+                }
+                _ = aux.addOp2(v, OP.Copy, reg_acc, reg_hit);
+            }
+            addr_next = aux.makeLabel(p);
+            ec.exprIfFalse(p, filter, addr_next, vi.SQLITE_JUMPIFNULL);
+        }
+        if (f.i_ob_tab >= 0) {
+            // The arguments go to the ORDER BY table; OP_AggStep runs at
+            // the end.
+            n_arg = @intCast(list.?.len());
+            const ob_list = f.f_expr.left.?.x.list.?;
+            reg_agg_sz = @intCast(ob_list.len());
+            if (!f.b_ob_unique) reg_agg_sz += 1;
+            if (f.b_ob_payload) reg_agg_sz += n_arg;
+            if (f.b_use_subtype) reg_agg_sz += n_arg;
+            reg_agg_sz += 1;
+            reg_agg = expr_mod.getTempRange(p, reg_agg_sz);
+            reg_distinct = reg_agg;
+            _ = ec.codeExprList(p, ob_list, reg_agg, 0, ec.ECEL_DUP);
+            var jj: i32 = @intCast(ob_list.len());
+            if (!f.b_ob_unique) {
+                _ = aux.addOp2(v, OP.Sequence, f.i_ob_tab, reg_agg + jj);
+                jj += 1;
+            }
+            if (f.b_ob_payload) {
+                reg_distinct = reg_agg + jj;
+                _ = ec.codeExprList(p, list.?, reg_distinct, 0, ec.ECEL_DUP);
+                jj += n_arg;
+            }
+            if (f.b_use_subtype) {
+                const reg_base = if (f.b_ob_payload) reg_distinct else reg_agg;
+                var kk: i32 = 0;
+                while (kk < n_arg) : (kk += 1) {
+                    _ = aux.addOp2(v, OP.GetSubtype, reg_base + kk, reg_agg + jj);
+                    jj += 1;
+                }
+            }
+        } else if (list) |l| {
+            n_arg = @intCast(l.len());
+            reg_agg = expr_mod.getTempRange(p, n_arg);
+            reg_distinct = reg_agg;
+            _ = ec.codeExprList(p, l, reg_agg, 0, ec.ECEL_DUP);
+        }
+        if (f.i_distinct >= 0 and list != null) {
+            if (addr_next == 0) addr_next = aux.makeLabel(p);
+            f.i_distinct = codeDistinct(p, e_distinct_type, f.i_distinct, addr_next, list.?, reg_distinct);
+        }
+        if (f.i_ob_tab >= 0) {
+            // A row of the ORDER BY table.
+            _ = aux.addOp3(v, OP.MakeRecord, reg_agg, reg_agg_sz - 1, reg_agg + reg_agg_sz - 1);
+            _ = aux.addOp4Int(v, OP.IdxInsert, f.i_ob_tab, reg_agg + reg_agg_sz - 1, reg_agg, reg_agg_sz - 1);
+            expr_mod.releaseTempRange(p, reg_agg, reg_agg_sz);
+        } else {
+            if (f.func.?.func_flags & callback.FUNC.NEEDCOLL != 0) {
+                var c: ?*CollSeq = null;
+                for (list.?.slice()) |item| {
+                    if (c != null) break;
+                    c = expr_mod.collSeq(p, item.expr);
+                }
+                if (reg_hit == 0 and agg.n_accumulator != 0) {
+                    p.n_mem += 1;
+                    reg_hit = p.n_mem;
+                }
+                _ = aux.addOp4(v, OP.CollSeq, reg_hit, 0, 0, .{ .collseq = c orelse coll_mod.defaultColl() });
+            }
+            _ = aux.addOp3(v, OP.AggStep, 0, reg_agg, agg.funcReg(i));
+            aux.appendP4(v, .{ .funcdef = f.func.? });
+            aux.changeP5(v, @intCast(n_arg));
+            expr_mod.releaseTempRange(p, reg_agg, n_arg);
+        }
+        if (addr_next != 0) aux.resolveLabel(v, addr_next);
+        if (p.n_err != 0) return;
+    }
+    if (reg_hit == 0 and agg.n_accumulator != 0) reg_hit = reg_acc;
+    if (reg_hit != 0) addr_hit_test = aux.addOp1(v, OP.If, reg_hit);
+    for (agg.cols.items[0..@intCast(agg.n_accumulator)], 0..) |c, i| {
+        ec.exprCode(p, c.c_expr, agg.columnReg(i));
+        if (p.n_err != 0) return;
+    }
+    agg.direct_mode = false;
+    if (addr_hit_test != 0) aux.jumpHereOrPopInst(v, addr_hit_test);
+}
+
+/// Port of isSelfJoinView(): an earlier materialization of the same view
+/// in tab_list[first..end], or null.
+fn isSelfJoinView(tab_list: *SrcList, this: *SrcItem, first: usize, end: usize) ?*SrcItem {
+    const sel = this.u4.subq.?.select;
+    if (sel.sel_flags & SF.PushDown != 0) return null;
+    for (tab_list.slice()[first..end]) |*item| {
+        if (!item.fg.is_subquery) continue;
+        if (item.fg.via_coroutine) continue;
+        const name = item.name orelse continue;
+        if (item.s_tab.?.schema != this.s_tab.?.schema) continue;
+        if (!ctype.eqlNoCase(name, this.name orelse "")) continue;
+        const s1 = item.u4.subq.?.select;
+        if (item.s_tab.?.schema == null and sel.sel_id != s1.sel_id) continue;
+        if (s1.sel_flags & SF.PushDown != 0) continue;
+        return item;
+    }
+    return null;
+}
+
+/// Port of fromClauseTermCanBeCoroutine(): FROM-clause subquery `i` can
+/// be a co-routine rather than materialized.
+fn fromClauseTermCanBeCoroutine(p: *Parse, tab_list: *SrcList, i_arg: usize, sel_flags: u32) bool {
+    var i = i_arg;
+    const item = tab_list.at(i);
+    if (item.fg.is_cte) {
+        const use = item.u2.cte_use.?;
+        if (use.e_m10d == .yes) return false;
+        if (use.n_use >= 2 and use.e_m10d != .no) return false;
+    }
+    if (tab_list.at(0).fg.jointype & JT.LTORJ != 0) return false;
+    if (p.db.optDisabled(int.OPT.Coroutines)) return false;
+    if (isSelfJoinView(tab_list, item, i + 1, tab_list.len()) != null) return false;
+    if (i == 0) {
+        if (tab_list.len() == 1) return true;
+        if (tab_list.at(1).fg.jointype & JT.CROSS != 0) return true;
+        if (sel_flags & SF.UpdateFrom != 0) return false;
+        return true;
+    }
+    if (sel_flags & SF.UpdateFrom != 0) return false;
+    while (true) {
+        if (tab_list.at(i).fg.jointype & (JT.OUTER | JT.CROSS) != 0) return false;
+        if (i == 0) break;
+        i -= 1;
+        if (tab_list.at(i).fg.is_subquery) return false;
+    }
+    return true;
+}
+
+/// CheckOnCtx: the state of selectCheckOnClauses().
+const CheckOnCtx = struct {
+    src: *SrcList,
+    /// Cursors must be left of this one, if not negative.
+    i_join: i32 = -1,
+    func_arg: bool = false,
+    parent: ?*CheckOnCtx = null,
+};
+
+fn hasRightJoin(src: *SrcList) bool {
+    return src.at(0).fg.jointype & JT.LTORJ != 0;
+}
+
+fn selectCheckOnClausesExpr(w: *Walker, e: *Expr) u8 {
+    var ctx: ?*CheckOnCtx = @ptrCast(@alignCast(w.u.ptr.?));
+    const c0 = ctx.?;
+    // The root of an ON term of an OUTER join, or of an INNER join in a
+    // FROM clause with a RIGHT or FULL join.
+    if (e.has(EP.OuterON) or (e.has(EP.InnerON) and hasRightJoin(c0.src))) {
+        if (c0.i_join < 0) {
+            c0.i_join = e.w.join;
+            _ = walker.walkExprNN(w, e);
+            c0.i_join = -1;
+            return WRC.Prune;
+        }
+    }
+    if (e.op == TK.COLUMN) {
+        // The column must not be of a table right of the ON term's join.
+        const i_tab = e.i_table;
+        while (ctx) |c| {
+            const items = c.src.slice();
+            var ii: usize = 0;
+            while (ii < items.len and items[ii].i_cursor != i_tab) ii += 1;
+            if (ii < items.len) {
+                if (c.i_join >= 0) {
+                    var k = ii;
+                    while (k > 0) {
+                        k -= 1;
+                        if (items[k].i_cursor == c.i_join) {
+                            util.errorMsg(w.parse.?, "{s} references tables to its right", .{if (c.func_arg) "table-function argument" else "ON clause"});
+                            return WRC.Abort;
+                        }
+                    }
+                }
+                break;
+            }
+            ctx = c.parent;
+        }
+    }
+    return WRC.Continue;
+}
+
+fn selectCheckOnClausesSelect(w: *Walker, s: *Select) u8 {
+    const ctx: *CheckOnCtx = @ptrCast(@alignCast(w.u.ptr.?));
+    if (s.src == ctx.src or s.src.?.len() == 0) return WRC.Continue;
+    var sub: CheckOnCtx = .{ .src = s.src.?, .parent = ctx };
+    w.u = .{ .ptr = &sub };
+    _ = walker.walkSelect(w, s);
+    w.u = .{ .ptr = ctx };
+    s.sel_flags &= ~SF.OnToWhere;
+    return WRC.Prune;
+}
+
+/// Port of sqlite3SelectCheckOnClauses(): ON clauses (and table-valued
+/// function arguments) must not refer to tables on their right.
+pub fn selectCheckOnClauses(p: *Parse, s: *Select) void {
+    var ctx: CheckOnCtx = .{ .src = s.src.? };
+    var w: Walker = .{
+        .parse = p,
+        .expr_callback = selectCheckOnClausesExpr,
+        .select_callback = selectCheckOnClausesSelect,
+        .u = .{ .ptr = &ctx },
+    };
+    _ = walker.walkExpr(&w, s.where);
+    s.sel_flags &= ~SF.OnToWhere;
+
+    ctx.func_arg = true;
+    const items = s.src.?.slice();
+    for (items, 0..) |*item, ii| {
+        if (!item.fg.is_tab_func) continue;
+        ctx.i_join = -1;
+        if (item.fg.jointype & (JT.LTORJ | JT.RIGHT) != 0) {
+            ctx.i_join = item.i_cursor;
+        } else {
+            for (items[ii + 1 ..], ii + 1..) |*item2, jj| {
+                if (item2.fg.jointype & JT.OUTER != 0) {
+                    ctx.i_join = items[jj - 1].i_cursor;
+                    break;
+                }
+            }
+        }
+        if (ctx.i_join >= 0) _ = walker.walkExprList(&w, item.u1.func_arg);
+    }
+}
+
+/// Port of sqlite3CopySortOrder(): give `p1` the sort orders of `p2` if
+/// they have the same length.
+fn copySortOrder(p1: *ExprList, p2: ?*ExprList) bool {
+    const l2 = p2 orelse return false;
+    if (p1.len() != l2.len()) return false;
+    for (p1.slice(), l2.slice()) |*a, b| a.fg.sort_flags = b.fg.sort_flags & int.KeyInfoOrder.desc;
+    return true;
+}
+
+/// IgnorableDistinct() and IgnorableOrderby().
+fn ignorableDistinct(dest: *const SelectDest) bool {
+    return dest.e_dest <= SRT.DistFifo;
+}
+
+fn ignorableOrderby(dest: *const SelectDest) bool {
+    return dest.e_dest <= SRT.Fifo;
+}
+
+/// Port of sqlite3Select(): generate code for a SELECT, sending the rows
+/// to `dest`. Returns nonzero on error.
+pub fn select(p: *Parse, s: *Select, dest: *SelectDest) u32 {
+    if (p.syntax_only) return 0;
+    return selectImpl(p, s, dest) catch {
+        oom(p);
+        return 1;
+    };
+}
+
+fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
+    const db = p.db;
+    const v = build.getVdbe(p) orelse return 1;
+    if (p.n_err != 0) return 1;
+
+    if (ignorableDistinct(dest)) {
+        // These destinations ignore ORDER BY and DISTINCT.
+        s.order_by = null;
+        s.sel_flags &= ~SF.Distinct;
+    }
+    selectPrep(p, s, null);
+    if (p.n_err != 0) return 1;
+
+    // UPDATE ... FROM: the target may not appear in the FROM clause.
+    if (s.sel_flags & SF.UFSrcCheck != 0) {
+        const p0 = s.src.?.at(0);
+        if (sameSrcAlias(p0, s.src.?)) {
+            util.errorMsg(p, "target object/alias may not appear in FROM clause: {s}", .{p0.alias orelse p0.s_tab.?.name});
+            return 1;
+        }
+        s.sel_flags &= ~SF.UFSrcCheck;
+    }
+
+    if (dest.e_dest == SRT.Output) generateColumnNames(p, s);
+
+    if (s.win != null) {
+        pending.notYet(p, "window functions");
+        return 1;
+    }
+    var tab_list = s.src.?;
+    var is_agg = s.sel_flags & SF.Aggregate != 0;
+    var sort: SortCtx = .{ .order_by = s.order_by };
+
+    // Simplify the FROM clause.
+    if (s.prior == null) {
+        var i: usize = 0;
+        while (i < tab_list.len()) : (i += 1) {
+            const item = tab_list.at(i);
+            const sub: ?*Select = if (item.fg.is_subquery) item.u4.subq.?.select else null;
+            const t = item.s_tab.?;
+
+            // OUTER JOIN strength reduction: LEFT JOIN becomes JOIN (and
+            // so on) when the WHERE clause rules out the NULL row.
+            if (item.fg.jointype & (JT.LEFT | JT.LTORJ) != 0 and
+                expr_mod.impliesNonNullRow(s.where, item.i_cursor, item.fg.jointype & JT.LTORJ != 0) and
+                !db.optDisabled(int.OPT.SimplifyJoin))
+            {
+                if (item.fg.jointype & JT.LEFT != 0) {
+                    if (item.fg.jointype & JT.RIGHT != 0) {
+                        item.fg.jointype &= ~JT.LEFT;
+                    } else {
+                        item.fg.jointype &= ~(JT.LEFT | JT.OUTER);
+                        unsetJoinExpr(s.where, item.i_cursor, false);
+                    }
+                }
+                if (item.fg.jointype & JT.LTORJ != 0) {
+                    for (tab_list.slice()[i + 1 ..]) |*item2| {
+                        if (item2.fg.jointype & JT.RIGHT != 0) {
+                            if (item2.fg.jointype & JT.LEFT != 0) {
+                                item2.fg.jointype &= ~JT.RIGHT;
+                            } else {
+                                item2.fg.jointype &= ~(JT.RIGHT | JT.OUTER);
+                                unsetJoinExpr(s.where, item2.i_cursor, true);
+                            }
+                        }
+                    }
+                    var j = tab_list.len();
+                    while (j > 0) {
+                        j -= 1;
+                        tab_list.at(j).fg.jointype &= ~JT.LTORJ;
+                        if (tab_list.at(j).fg.jointype & JT.RIGHT != 0) break;
+                    }
+                }
+            }
+
+            const sq = sub orelse continue;
+            // The declared columns of a view must match its SELECT.
+            if (t.cols.len != sq.e_list.?.len()) {
+                util.errorMsg(p, "expected {d} columns for '{s}' but got {d}", .{ t.cols.len, t.name, sq.e_list.?.len() });
+                return 1;
+            }
+            // A MATERIALIZED CTE is an optimization fence.
+            if (item.fg.is_cte and item.u2.cte_use.?.e_m10d == .yes) continue;
+            if (sq.sel_flags & SF.Aggregate != 0) continue;
+
+            // Omit an ORDER BY of a subquery that has no effect.
+            if (sq.order_by != null and (s.order_by != null or tab_list.len() > 1) and sq.limit == null and
+                sq.sel_flags & (SF.OrderByReqd | SF.Recursive) == 0 and s.sel_flags & SF.OrderByReqd == 0 and
+                !db.optDisabled(int.OPT.OmitOrderBy))
+            {
+                sq.order_by = null;
+            }
+            // Query flattening is not ported: subqueries are always coded
+            // as co-routines or materialized.
+        }
+    }
+
+    // Compound SELECTs.
+    if (s.prior != null) return try multiSelect(p, s, dest);
+
+    // Code the FROM-clause subqueries.
+    for (tab_list.slice(), 0..) |*item, i| {
+        if (!item.fg.is_subquery) continue;
+        const subq = item.u4.subq.?;
+        const sub = subq.select;
+        // Only once.
+        if (subq.addr_fill_sub != 0) continue;
+        p.n_height += expr_mod.selectExprHeight(s);
+
+        if (fromClauseTermCanBeCoroutine(p, tab_list, i, s.sel_flags)) {
+            // A co-routine returning one row per call.
+            const addr_top = aux.currentAddr(v) + 1;
+            p.n_mem += 1;
+            subq.reg_return = p.n_mem;
+            _ = aux.addOp3(v, OP.InitCoroutine, subq.reg_return, 0, addr_top);
+            subq.addr_fill_sub = addr_top;
+            var d = selectDestInit(SRT.Coroutine, subq.reg_return);
+            _ = select(p, sub, &d);
+            item.s_tab.?.n_row_log_est = sub.n_select_row;
+            item.fg.via_coroutine = true;
+            subq.reg_result = d.i_sdst;
+            aux.endCoroutine(v, subq.reg_return);
+            aux.jumpHere(v, addr_top - 1);
+            expr_mod.clearTempRegCache(p);
+        } else if (item.fg.is_cte and item.u2.cte_use.?.addr_m9e > 0) {
+            // A CTE already materialized: run its subroutine and use a
+            // copy of its table.
+            const use = item.u2.cte_use.?;
+            _ = aux.addOp2(v, OP.Gosub, use.reg_rtn, use.addr_m9e);
+            if (item.i_cursor != use.i_cur) _ = aux.addOp2(v, OP.OpenDup, item.i_cursor, use.i_cur);
+            sub.n_select_row = use.n_row_est;
+        } else if (isSelfJoinView(tab_list, item, 0, i)) |prior| {
+            // Materialized by an earlier term of this FROM clause.
+            const prior_subq = prior.u4.subq.?;
+            if (prior_subq.addr_fill_sub != 0) _ = aux.addOp2(v, OP.Gosub, prior_subq.reg_return, prior_subq.addr_fill_sub);
+            _ = aux.addOp2(v, OP.OpenDup, item.i_cursor, prior.i_cursor);
+            sub.n_select_row = prior_subq.select.n_select_row;
+        } else {
+            // Materialize, in a subroutine that later uses can call.
+            p.n_mem += 1;
+            subq.reg_return = p.n_mem;
+            const top_addr = aux.addOp0(v, OP.Goto);
+            subq.addr_fill_sub = top_addr + 1;
+            item.fg.is_materialized = true;
+            var once_addr: i32 = 0;
+            // An uncorrelated subquery is computed once.
+            if (!item.fg.is_correlated) once_addr = aux.addOp0(v, OP.Once);
+            var d = selectDestInit(SRT.EphemTab, item.i_cursor);
+            _ = select(p, sub, &d);
+            item.s_tab.?.n_row_log_est = sub.n_select_row;
+            if (once_addr != 0) aux.jumpHere(v, once_addr);
+            _ = aux.addOp2(v, OP.Return, subq.reg_return, top_addr + 1);
+            aux.jumpHere(v, top_addr);
+            expr_mod.clearTempRegCache(p);
+            if (item.fg.is_cte and !item.fg.is_correlated) {
+                const use = item.u2.cte_use.?;
+                use.addr_m9e = subq.addr_fill_sub;
+                use.reg_rtn = subq.reg_return;
+                use.i_cur = item.i_cursor;
+                use.n_row_est = sub.n_select_row;
+            }
+        }
+        if (db.malloc_failed) return 1;
+        p.n_height -= expr_mod.selectExprHeight(s);
+    }
+
+    var e_list = s.e_list.?;
+    const where = s.where;
+    var group_by = s.group_by;
+    const having = s.having;
+    var distinct: DistinctCtx = .{ .is_tnct = @intFromBool(s.sel_flags & SF.Distinct != 0) };
+
+    // "SELECT DISTINCT xyz ... ORDER BY xyz" is coded as "... GROUP BY xyz
+    // ORDER BY xyz".
+    if (s.sel_flags & (SF.Distinct | SF.Aggregate) == SF.Distinct and copySortOrder(e_list, sort.order_by) and
+        expr_mod.listCompare(e_list, sort.order_by, -1) == 0 and !db.optDisabled(int.OPT.GroupByOrder) and s.win == null)
+    {
+        s.sel_flags &= ~SF.Distinct;
+        group_by = try expr_mod.listDup(p.arena, e_list);
+        s.group_by = group_by;
+        if (group_by) |gb| for (gb.slice(), 0..) |*item, i| {
+            item.u = .{ .x = .{ .order_by_col = @intCast(i + 1) } };
+        };
+        s.sel_flags |= SF.Aggregate;
+        is_agg = true;
+        distinct.is_tnct = 2;
+    }
+
+    // The sorter of the ORDER BY (made a no-op if rows come out sorted).
+    if (sort.order_by) |ob| {
+        const ki = keyInfoFromExprList(p, ob, 0, e_list.len());
+        sort.i_e_cursor = p.n_tab;
+        p.n_tab += 1;
+        sort.addr_sort_index = aux.addOp4(v, OP.OpenEphemeral, sort.i_e_cursor, @intCast(ob.len() + 1 + e_list.len()), 0, if (ki) |k| .{ .keyinfo = k } else .notused);
+    } else {
+        sort.addr_sort_index = -1;
+    }
+
+    // The output table.
+    if (dest.e_dest == SRT.EphemTab) {
+        _ = aux.addOp2(v, OP.OpenEphemeral, dest.i_sd_parm, @intCast(e_list.len()));
+        if (s.sel_flags & SF.NestedFrom != 0) {
+            // Unused result columns are dropped or NULL.
+            var ii = e_list.len() - 1;
+            while (ii > 0 and !e_list.at(ii).fg.used) : (ii -= 1) {
+                e_list.items.items.len -= 1;
+            }
+            for (e_list.slice()) |item| {
+                if (!item.fg.used) item.expr.?.op = TK.NULL;
+            }
+        }
+    }
+
+    // LIMIT.
+    const i_end = aux.makeLabel(p);
+    if (s.sel_flags & SF.FixedLimit == 0) s.n_select_row = 320;
+    if (s.limit != null) computeLimitRegisters(p, s, i_end);
+    if (s.i_limit == 0 and sort.addr_sort_index >= 0) {
+        aux.changeOpcode(v, sort.addr_sort_index, OP.SorterOpen);
+        sort.sort_flags |= SORTFLAG_UseSorter;
+    }
+
+    // The table of DISTINCT.
+    if (s.sel_flags & SF.Distinct != 0) {
+        distinct.tab_tnct = p.n_tab;
+        p.n_tab += 1;
+        const ki = keyInfoFromExprList(p, s.e_list.?, 0, 0);
+        distinct.addr_tnct = aux.addOp4(v, OP.OpenEphemeral, distinct.tab_tnct, 0, 0, if (ki) |k| .{ .keyinfo = k } else .notused);
+        aux.changeP5(v, BTREE_UNORDERED);
+        distinct.e_tnct_type = int.WHERE_DISTINCT_UNORDERED;
+    } else {
+        distinct.e_tnct_type = int.WHERE_DISTINCT_NOOP;
+    }
+
+    if (!is_agg and group_by == null) {
+        // No aggregates and no GROUP BY.
+        const wctrl_flags: u16 = (if (distinct.is_tnct != 0) WHERE.WANT_DISTINCT else 0) | @as(u16, @intCast(s.sel_flags & SF.FixedLimit));
+        const w = where_mod.whereBegin(p, tab_list, where, sort.order_by, s.e_list, s, wctrl_flags, s.n_select_row) orelse return 1;
+        if (where_mod.outputRowCount(w) < s.n_select_row) {
+            s.n_select_row = where_mod.outputRowCount(w);
+            // A UNION CTE implies DISTINCT.
+            if (dest.e_dest <= SRT.DistQueue and dest.e_dest >= SRT.DistFifo) s.n_select_row -= 30;
+        }
+        if (distinct.is_tnct != 0 and where_mod.isDistinct(w) != 0) distinct.e_tnct_type = where_mod.isDistinct(w);
+        if (sort.order_by) |ob| {
+            sort.n_ob_sat = where_mod.isOrdered(w);
+            sort.label_ob_lopt = where_mod.orderByLimitOptLabel(w);
+            if (sort.n_ob_sat == ob.len()) sort.order_by = null;
+        }
+        // An unneeded sorter.
+        if (sort.addr_sort_index >= 0 and sort.order_by == null) _ = aux.changeToNoop(v, sort.addr_sort_index);
+
+        selectInnerLoop(p, s, -1, &sort, &distinct, dest, where_mod.continueLabel(w), where_mod.breakLabel(w));
+        where_mod.whereEnd(w);
+    } else {
+        // Aggregates and/or GROUP BY.
+        var order_by_grp = false;
+        if (group_by) |gb| {
+            // No aliases between the result set and GROUP BY.
+            for (s.e_list.?.slice()) |*item| item.u.x.alias = 0;
+            for (gb.slice()) |*item| item.u.x.alias = 0;
+            if (s.n_select_row > 66) s.n_select_row = 66;
+            // Identical GROUP BY and ORDER BY.
+            if (copySortOrder(gb, sort.order_by) and expr_mod.listCompare(gb, sort.order_by, -1) == 0) order_by_grp = true;
+        } else {
+            s.n_select_row = 0;
+        }
+
+        const addr_end = aux.makeLabel(p);
+
+        // TK_COLUMN become TK_AGG_COLUMN; the aggregate functions go into
+        // the AggInfo.
+        const agg = try p.arena.create(AggInfo);
+        agg.* = .{ .sel_id = s.sel_id };
+        var nc: NameContext = .{ .parse = p, .src_list = tab_list, .u_nc = .{ .agg_info = agg }, .nc_flags = NC.UAggInfo };
+        agg.n_sorting_column = if (group_by) |gb| @intCast(gb.len()) else 0;
+        agg.group_by = group_by;
+        expr_mod.analyzeAggList(&nc, e_list);
+        expr_mod.analyzeAggList(&nc, sort.order_by);
+        if (having) |h| expr_mod.analyzeAggregates(&nc, h);
+        agg.n_accumulator = @intCast(agg.cols.items.len);
+        const min_max_flag: u16 = WHERE.ORDERBY_NORMAL;
+        analyzeAggFuncArgs(agg, &nc);
+        if (db.malloc_failed) return 1;
+
+        if (group_by) |gb| {
+            var distinct_list: ?*ExprList = null;
+            var dist_flag: u16 = 0;
+            if (agg.funcs.items.len == 1 and agg.funcs.items[0].i_distinct >= 0 and agg.funcs.items[0].f_expr.x.list != null) {
+                const e = try expr_mod.exprDup(p.arena, agg.funcs.items[0].f_expr.x.list.?.at(0).expr);
+                distinct_list = try expr_mod.listDup(p.arena, gb);
+                distinct_list = try expr_mod.listAppend(p, distinct_list, e);
+                dist_flag = WHERE.WANT_DISTINCT | WHERE.AGG_DISTINCT;
+            }
+
+            // The sorter of the GROUP BY (made a no-op if not needed).
+            agg.sorting_idx = p.n_tab;
+            p.n_tab += 1;
+            const key_info = keyInfoFromExprList(p, gb, 0, agg.cols.items.len);
+            const addr_sorting_idx = aux.addOp4(v, OP.SorterOpen, agg.sorting_idx, @intCast(agg.n_sorting_column), 0, if (key_info) |k| .{ .keyinfo = k } else .notused);
+
+            p.n_mem += 1;
+            const i_use_flag = p.n_mem;
+            p.n_mem += 1;
+            const i_abort_flag = p.n_mem;
+            p.n_mem += 1;
+            const reg_output_row = p.n_mem;
+            var addr_output_row = aux.makeLabel(p);
+            p.n_mem += 1;
+            const reg_reset = p.n_mem;
+            const addr_reset = aux.makeLabel(p);
+            const n_gb: i32 = @intCast(gb.len());
+            const i_a_mem = p.n_mem + 1;
+            p.n_mem += n_gb;
+            const i_b_mem = p.n_mem + 1;
+            p.n_mem += n_gb;
+            _ = aux.addOp2(v, OP.Integer, 0, i_abort_flag);
+            _ = aux.addOp3(v, OP.Null, 0, i_a_mem, i_a_mem + n_gb - 1);
+            ec.nullRegisterRange(p, i_a_mem, n_gb);
+
+            // The rows in GROUP BY order: sorted by the sorter unless the
+            // loop delivers them so.
+            _ = aux.addOp2(v, OP.Gosub, reg_reset, addr_reset);
+            const w = where_mod.whereBegin(p, tab_list, where, gb, distinct_list, s, (if (distinct.is_tnct == 2) WHERE.DISTINCTBY else WHERE.GROUPBY) |
+                (if (order_by_grp) WHERE.SORTBYGROUP else 0) | dist_flag, 0) orelse return 1;
+            assignAggregateRegisters(p, agg);
+            const e_dist = where_mod.isDistinct(w);
+            var group_by_sort = false;
+            var sort_p_tab: i32 = 0;
+            var sort_out: i32 = 0;
+            if (where_mod.isOrdered(w) == n_gb) {
+                group_by_sort = false;
+            } else {
+                group_by_sort = true;
+                var n_col: i32 = n_gb;
+                var j: i32 = n_gb;
+                for (agg.cols.items) |c| {
+                    if (c.i_sorter_column >= j) {
+                        n_col += 1;
+                        j += 1;
+                    }
+                }
+                const reg_base = expr_mod.getTempRange(p, n_col);
+                _ = ec.codeExprList(p, gb, reg_base, 0, 0);
+                j = n_gb;
+                agg.direct_mode = true;
+                for (agg.cols.items) |c| {
+                    if (c.i_sorter_column >= j) {
+                        ec.exprCode(p, c.c_expr, j + reg_base);
+                        j += 1;
+                    }
+                }
+                agg.direct_mode = false;
+                const reg_record = expr_mod.getTempReg(p);
+                _ = aux.addOp3(v, OP.MakeRecord, reg_base, n_col, reg_record);
+                _ = aux.addOp2(v, OP.SorterInsert, agg.sorting_idx, reg_record);
+                expr_mod.releaseTempReg(p, reg_record);
+                expr_mod.releaseTempRange(p, reg_base, n_col);
+                where_mod.whereEnd(w);
+                sort_p_tab = p.n_tab;
+                agg.sorting_idx_ptab = sort_p_tab;
+                p.n_tab += 1;
+                sort_out = expr_mod.getTempReg(p);
+                _ = aux.addOp3(v, OP.OpenPseudo, sort_p_tab, sort_out, n_col);
+                _ = aux.addOp2(v, OP.SorterSort, agg.sorting_idx, addr_end);
+                agg.use_sorting_idx = true;
+            }
+
+            // Rows already in ORDER BY order need no sorter.
+            if (order_by_grp and !db.optDisabled(int.OPT.GroupByOrder) and (group_by_sort or where_mod.isSorted(w))) {
+                sort.order_by = null;
+                _ = aux.changeToNoop(v, sort.addr_sort_index);
+            }
+
+            // The current GROUP BY terms go to b0, b1, ...; compare with the
+            // previous row's in a0, a1, ...
+            const addr_top_of_loop = aux.currentAddr(v);
+            if (group_by_sort) _ = aux.addOp3(v, OP.SorterData, agg.sorting_idx, sort_out, sort_p_tab);
+            for (gb.slice(), 0..) |item, jj| {
+                const j: i32 = @intCast(jj);
+                const order_by_col = item.u.x.order_by_col;
+                if (group_by_sort) {
+                    _ = aux.addOp3(v, OP.Column, sort_p_tab, j, i_b_mem + j);
+                } else {
+                    agg.direct_mode = true;
+                    ec.exprCode(p, item.expr, i_b_mem + j);
+                }
+                if (order_by_col != 0) {
+                    var x = s.e_list.?.at(order_by_col - 1).expr.?;
+                    var base = expr_mod.skipCollateAndLikely(x);
+                    while (base != null and base.?.op == TK.IF_NULL_ROW) {
+                        x = base.?.left.?;
+                        base = expr_mod.skipCollateAndLikely(x);
+                    }
+                    if (base) |b| if (b.op != TK.AGG_COLUMN and b.op != TK.REGISTER) {
+                        expr_mod.toRegister(x, i_a_mem + j);
+                    };
+                }
+            }
+            _ = aux.addOp4(v, OP.Compare, i_a_mem, i_b_mem, n_gb, if (key_info) |k| .{ .keyinfo = k } else .notused);
+            const addr1 = aux.currentAddr(v);
+            _ = aux.addOp3(v, OP.Jump, addr1 + 1, 0, addr1 + 1);
+
+            // A new group: output the previous one and reset.
+            _ = aux.addOp2(v, OP.Gosub, reg_output_row, addr_output_row);
+            ec.codeMove(p, i_b_mem, i_a_mem, n_gb);
+            _ = aux.addOp2(v, OP.IfPos, i_abort_flag, addr_end);
+            _ = aux.addOp2(v, OP.Gosub, reg_reset, addr_reset);
+
+            // Update the accumulators with the current row.
+            aux.jumpHere(v, addr1);
+            updateAccumulator(p, i_use_flag, agg, e_dist);
+            _ = aux.addOp2(v, OP.Integer, 1, i_use_flag);
+
+            // The end of the loop.
+            if (group_by_sort) {
+                _ = aux.addOp2(v, OP.SorterNext, agg.sorting_idx, addr_top_of_loop);
+            } else {
+                where_mod.whereEnd(w);
+                _ = aux.changeToNoop(v, addr_sorting_idx);
+            }
+
+            // Output the last group.
+            _ = aux.addOp2(v, OP.Gosub, reg_output_row, addr_output_row);
+            _ = aux.goto_(v, addr_end);
+
+            // The subroutine outputting a group (a no-op if empty; it sets
+            // the abort flag at the LIMIT).
+            const addr_set_abort = aux.currentAddr(v);
+            _ = aux.addOp2(v, OP.Integer, 1, i_abort_flag);
+            _ = aux.addOp1(v, OP.Return, reg_output_row);
+            aux.resolveLabel(v, addr_output_row);
+            addr_output_row = aux.currentAddr(v);
+            _ = aux.addOp2(v, OP.IfPos, i_use_flag, addr_output_row + 2);
+            _ = aux.addOp1(v, OP.Return, reg_output_row);
+            finalizeAggFunctions(p, agg);
+            ec.exprIfFalse(p, having, addr_output_row + 1, vi.SQLITE_JUMPIFNULL);
+            selectInnerLoop(p, s, -1, &sort, &distinct, dest, addr_output_row + 1, addr_set_abort);
+            _ = aux.addOp1(v, OP.Return, reg_output_row);
+
+            // The subroutine resetting the accumulators.
+            aux.resolveLabel(v, addr_reset);
+            resetAccumulator(p, agg);
+            _ = aux.addOp2(v, OP.Integer, 0, i_use_flag);
+            _ = aux.addOp1(v, OP.Return, reg_reset);
+
+            if (dist_flag != 0 and e_dist != int.WHERE_DISTINCT_NOOP) {
+                const f = &agg.funcs.items[0];
+                fixDistinctOpenEph(p, e_dist, f.i_distinct, f.i_dist_addr);
+            }
+        } else {
+            // Aggregates without GROUP BY.
+            if (isSimpleCount(s, agg)) |t| {
+                // "SELECT count(*) FROM <tbl>": OP_Count on the table or
+                // its smallest index.
+                const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
+                const i_csr = p.n_tab;
+                p.n_tab += 1;
+                var key_info: ?*KeyInfo = null;
+                var best: ?*Index = null;
+                var i_root = t.tnum;
+                build.codeVerifySchema(p, i_db);
+                if (!t.hasRowid()) best = build.primaryKeyIndex(t);
+                if (!s.src.?.at(0).fg.not_indexed) {
+                    var idx = t.index;
+                    while (idx) |ix| : (idx = ix.next) {
+                        if (!ix.unordered and ix.sz_idx_row < t.sz_tab_row and ix.part_idx_where == null and
+                            (best == null or ix.sz_idx_row < best.?.sz_idx_row))
+                        {
+                            best = ix;
+                        }
+                    }
+                }
+                if (best) |b| {
+                    i_root = b.tnum;
+                    key_info = build.keyInfoOfIndex(p, b);
+                }
+                _ = aux.addOp4Int(v, OP.OpenRead, i_csr, @intCast(i_root), @intCast(i_db), 1);
+                if (key_info) |k| aux.changeP4(v, -1, .{ .keyinfo = k });
+                assignAggregateRegisters(p, agg);
+                _ = aux.addOp2(v, OP.Count, i_csr, agg.funcReg(0));
+                _ = aux.addOp1(v, OP.Close, i_csr);
+            } else {
+                // The general case.
+                var reg_acc: i32 = 0;
+                var distinct_list: ?*ExprList = null;
+                var dist_flag: u16 = 0;
+                // regAcc is 0 for the first row and 1 after, so that the
+                // accumulators are set once (unless min() or max() set them).
+                if (agg.n_accumulator != 0) {
+                    const has_minmax = for (agg.funcs.items) |f| {
+                        if (f.f_expr.has(EP.WinFunc)) continue;
+                        if (f.func.?.func_flags & callback.FUNC.NEEDCOLL != 0) break true;
+                    } else false;
+                    if (!has_minmax) {
+                        p.n_mem += 1;
+                        reg_acc = p.n_mem;
+                        _ = aux.addOp2(v, OP.Integer, 0, reg_acc);
+                    }
+                } else if (agg.funcs.items.len == 1 and agg.funcs.items[0].i_distinct >= 0) {
+                    distinct_list = agg.funcs.items[0].f_expr.x.list;
+                    if (distinct_list != null) dist_flag = WHERE.WANT_DISTINCT | WHERE.AGG_DISTINCT;
+                }
+                assignAggregateRegisters(p, agg);
+                resetAccumulator(p, agg);
+
+                const w = where_mod.whereBegin(p, tab_list, where, null, distinct_list, s, min_max_flag | dist_flag, 0) orelse return 1;
+                const e_dist = where_mod.isDistinct(w);
+                updateAccumulator(p, reg_acc, agg, e_dist);
+                if (e_dist != int.WHERE_DISTINCT_NOOP and agg.funcs.items.len > 0) {
+                    const f = &agg.funcs.items[0];
+                    fixDistinctOpenEph(p, e_dist, f.i_distinct, f.i_dist_addr);
+                }
+                if (reg_acc != 0) _ = aux.addOp2(v, OP.Integer, 1, reg_acc);
+                where_mod.whereEnd(w);
+                finalizeAggFunctions(p, agg);
+            }
+
+            sort.order_by = null;
+            ec.exprIfFalse(p, having, addr_end, vi.SQLITE_JUMPIFNULL);
+            selectInnerLoop(p, s, -1, null, null, dest, addr_end, addr_end);
+        }
+        aux.resolveLabel(v, addr_end);
+    }
+
+    // Sort the results.
+    if (sort.order_by != null) generateSortTail(p, s, &sort, @intCast(e_list.len()), dest);
+
+    aux.resolveLabel(v, i_end);
+    return @intFromBool(p.n_err > 0);
+}
+
+/// BTREE_UNORDERED: P5 of OP_OpenEphemeral for a table only used for
+/// lookups.
+const BTREE_UNORDERED: u16 = 8;
+
+/// Port of sameSrcAlias(): the target of UPDATE ... FROM appears again in
+/// the FROM clause (or its subqueries).
+fn sameSrcAlias(p0: *SrcItem, src: *SrcList) bool {
+    for (src.slice()) |*p1| {
+        if (p0 != p1) {
+            if (p0.s_tab == p1.s_tab and ctype.eqlNoCase(p0.alias orelse "", p1.alias orelse "")) return true;
+            if (p1.fg.is_subquery and p1.u4.subq.?.select.sel_flags & SF.NestedFrom != 0 and
+                sameSrcAlias(p0, p1.u4.subq.?.select.src.?))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
 }

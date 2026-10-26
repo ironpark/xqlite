@@ -367,7 +367,7 @@ pub const Parser = struct {
             .@"cmd ::= select" => {
                 var dest: sel.SelectDest = .{ .e_dest = sel.SRT.Output };
                 if (p.db.m_db_flags & int.DBFLAG.EncodingFixed != 0 or prepare.readSchema(p) == int.RC.OK) {
-                    if (s.m(0).select) |x| sel.select(p, x, &dest);
+                    if (s.m(0).select) |x| _ = sel.select(p, x, &dest);
                 }
             },
             .@"select ::= WITH wqlist selectnowith" => s.m(-2).select = attachWithToSelect(p, s.m(0).select, s.m(-1).with),

@@ -218,3 +218,66 @@ pub fn gatherSelectWindows(s: *Select) void {
     };
     _ = walker.walkSelect(&w, s);
 }
+
+/// Port of sqlite3WindowUpdate(): after resolving the window function
+/// `func` of `win`, copy a named window's definition into it and coerce
+/// the frame the built-in window functions need.
+pub fn windowUpdate(p: *Parse, list: ?*Window, win: *Window, func: *int.FuncDef) Oom!void {
+    if (win.name != null and win.e_frm_type == 0) {
+        const w = windowFind(p, list, win.name.?) orelse return;
+        const a = p.arena;
+                win.partition = try expr_mod.listDup(a, w.partition);
+        win.order_by = try expr_mod.listDup(a, w.order_by);
+        win.start = try expr_mod.exprDup(a, w.start);
+        win.end = try expr_mod.exprDup(a, w.end);
+        win.e_start = w.e_start;
+        win.e_end = w.e_end;
+        win.e_frm_type = w.e_frm_type;
+        win.e_exclude = w.e_exclude;
+    } else {
+        try windowChain(p, win, list);
+    }
+    if (win.e_frm_type == TK.RANGE and (win.start != null or win.end != null) and
+        (win.order_by == null or win.order_by.?.len() != 1))
+    {
+        util.errorMsg(p, "RANGE with offset PRECEDING/FOLLOWING requires one ORDER BY expression", .{});
+    } else if (func.func_flags & @import("callback.zig").FUNC.WINDOW != 0) {
+        if (win.filter != null) {
+            util.errorMsg(p, "FILTER clause may only be used with aggregate window functions", .{});
+        } else {
+            const Up = struct { name: []const u8, frm: u8, start: u8, end: u8 };
+            const ups = [_]Up{
+                .{ .name = "row_number", .frm = TK.ROWS, .start = TK.UNBOUNDED, .end = TK.CURRENT },
+                .{ .name = "dense_rank", .frm = TK.RANGE, .start = TK.UNBOUNDED, .end = TK.CURRENT },
+                .{ .name = "rank", .frm = TK.RANGE, .start = TK.UNBOUNDED, .end = TK.CURRENT },
+                .{ .name = "percent_rank", .frm = TK.GROUPS, .start = TK.CURRENT, .end = TK.UNBOUNDED },
+                .{ .name = "cume_dist", .frm = TK.GROUPS, .start = TK.FOLLOWING, .end = TK.UNBOUNDED },
+                .{ .name = "ntile", .frm = TK.ROWS, .start = TK.CURRENT, .end = TK.UNBOUNDED },
+                .{ .name = "lead", .frm = TK.ROWS, .start = TK.UNBOUNDED, .end = TK.UNBOUNDED },
+                .{ .name = "lag", .frm = TK.ROWS, .start = TK.UNBOUNDED, .end = TK.CURRENT },
+            };
+            for (ups) |u| {
+                if (std.mem.eql(u8, func.name, u.name)) {
+                    win.start = null;
+                    win.end = null;
+                    win.e_frm_type = u.frm;
+                    win.e_start = u.start;
+                    win.e_end = u.end;
+                    win.e_exclude = 0;
+                    if (win.e_start == TK.FOLLOWING) win.start = try expr_mod.exprInt32(p.arena, 1);
+                    break;
+                }
+            }
+        }
+    }
+    win.w_func = func;
+}
+
+/// Port of sqlite3WindowUnlinkFromSelect().
+pub fn windowUnlinkFromSelect(w: *Window) void {
+    if (w.this) |this| {
+        this.* = w.next_win;
+        if (w.next_win) |n| n.this = this;
+        w.this = null;
+    }
+}

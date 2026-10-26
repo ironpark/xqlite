@@ -186,7 +186,7 @@ pub fn stringify(m: *Mem, enc: u8, force: bool) Error!void {
 pub fn finalize(m: *Mem, func: *FuncDef) i32 {
     const func_mod = @import("func.zig");
     var t: Mem = .{ .db = m.db };
-    var ctx: vi.Context = .{ .out = &t, .mem = m, .func = func, .enc = if (m.db) |db| db.enc else ENC.UTF8 };
+    var ctx: vi.Context = .{ .out = &t, .mem = m, .func = func, .argv = &.{}, .enc = if (m.db) |db| db.enc else ENC.UTF8 };
     func_mod.callFinalize(func, &ctx);
     std.debug.assert(m.flags & MEM.Dyn == 0);
     if (m.z_malloc.len > 0) gpa(m).free(m.z_malloc);
@@ -199,7 +199,7 @@ pub fn finalize(m: *Mem, func: *FuncDef) i32 {
 pub fn aggValue(accum: *Mem, out: *Mem, func: *FuncDef) i32 {
     const func_mod = @import("func.zig");
     setNull(out);
-    var ctx: vi.Context = .{ .out = out, .mem = accum, .func = func, .enc = if (accum.db) |db| db.enc else ENC.UTF8 };
+    var ctx: vi.Context = .{ .out = out, .mem = accum, .func = func, .argv = &.{}, .enc = if (accum.db) |db| db.enc else ENC.UTF8 };
     func_mod.callValue(func, &ctx);
     return ctx.is_error;
 }

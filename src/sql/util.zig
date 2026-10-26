@@ -359,3 +359,36 @@ pub fn logEst(x_arg: u64) i16 {
     }
     return a[@intCast(x & 7)] + y - 10;
 }
+
+/// Port of sqlite3HexToBlob(): the bytes of the hex digits `z` (an even
+/// number of them), allocated from `a`.
+pub fn hexToBlob(a: std.mem.Allocator, z: []const u8) error{OutOfMemory}![]u8 {
+    const out = try a.alloc(u8, z.len / 2);
+    for (out, 0..) |*b, i| b.* = (hexToInt(z[2 * i]) << 4) | hexToInt(z[2 * i + 1]);
+    return out;
+}
+
+/// The "%r" conversion of printf: an ordinal like "1st", "2nd", "11th".
+pub fn ordinal(n: usize) Ordinal {
+    return .{ .n = n };
+}
+
+pub const Ordinal = struct {
+    n: usize,
+
+    pub fn format(o: Ordinal, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const suffixes = [_][]const u8{ "th", "st", "nd", "rd" };
+        var x = o.n % 10;
+        if (x >= 4 or (o.n / 10) % 10 == 1) x = 0;
+        try w.print("{d}{s}", .{ o.n, suffixes[x] });
+    }
+};
+
+/// Port of sqlite3LogEstAdd(): the LogEst of the sum of two LogEst values.
+pub fn logEstAdd(a: i16, b: i16) i16 {
+    const x = [_]u8{ 10, 10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2 };
+    const hi, const lo = if (a >= b) .{ a, b } else .{ b, a };
+    if (@as(i32, hi) > @as(i32, lo) + 49) return hi;
+    if (@as(i32, hi) > @as(i32, lo) + 31) return hi + 1;
+    return hi + x[@intCast(hi - lo)];
+}

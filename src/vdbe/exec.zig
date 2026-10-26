@@ -2175,7 +2175,21 @@ const Part6 = struct {
         const in2 = e.reg(op.p2);
         if (op.p5 & vi.OPFLAG.NCHANGE != 0) v.n_change += 1;
         if (in2.flags & MEM.Zero != 0) mem.expandBlob(in2) catch |err| return e.fail(err);
-        const res = c.uc.cursor.insert(.{ .key = in2.bytes() }, .{
+        // Seek by the first P4 fields, unpacked in P3.. (BtreePayload.aMem).
+        var r: vi.UnpackedRecord = undefined;
+        var kc: serial.IndexKeyCtx = undefined;
+        var seek: ?btree.IndexKey = null;
+        if (op.p4 == .int32 and op.p4.int32 > 0) {
+            r = .{
+                .key_info = c.key_info.?,
+                .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),
+                .n_field = @intCast(op.p4.int32),
+                .default_rc = 0,
+            };
+            kc = .{ .r = &r, .cmp = serial.findCompare(&r) };
+            seek = kc.indexKey();
+        }
+        const res = c.uc.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
             .append = op.p5 & vi.OPFLAG.APPEND != 0,
             .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
             .seek_result = if (op.p5 & vi.OPFLAG.USESEEKRESULT != 0) c.seek_result else 0,
@@ -2500,8 +2514,7 @@ const Part7 = struct {
     }
 
     fn schemaClear(db: *Sqlite3, i_db: usize) void {
-        // sqlite3SchemaClear() comes with schema loading.
-        @import("../sql/build.zig").resetOneSchema(db, i_db);
+        @import("../sql/build.zig").schemaClear(db, db.dbs.items[i_db].schema);
     }
 
     fn opIntegrityCk(e: *Exec, op: *Op) Flow {

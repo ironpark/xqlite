@@ -150,6 +150,10 @@ pub const Payload = struct {
     data: []const u8 = &.{},
     /// Zero bytes appended to `data`.
     n_zero: u32 = 0,
+    /// How to seek to an index entry when no prior seek result is given:
+    /// by a prefix of the key (BtreePayload.aMem/nMem), so an entry whose
+    /// prefix is equal is overwritten. Null seeks by the whole `key`.
+    seek: ?IndexKey = null,
 
     fn nKey(x: Payload) i64 {
         return if (x.key) |k| @intCast(k.len) else x.rowid;
@@ -3134,7 +3138,10 @@ pub const Cursor = struct {
             }
         } else {
             if (loc == 0 and !opts.save_position) {
-                loc = orderToInt(try cur.moveto(x.key, n_key, opts.append));
+                loc = orderToInt(if (x.seek) |k|
+                    try cur.indexMoveto(k)
+                else
+                    try cur.moveto(x.key, n_key, opts.append));
             }
             if (loc == 0) {
                 cur.getCellInfo();

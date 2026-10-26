@@ -477,6 +477,10 @@ pub fn runParser(p: *int.Parse, sql: [:0]const u8) int.Oom!u32 {
         n_err += 1;
     }
     p.tail = std.mem.span(z);
+    if (p.new_table) |t| if (!p.inSpecialParse()) {
+        @import("../sql/build.zig").deleteTable(db, t);
+        p.new_table = null;
+    };
     return n_err;
 }
 

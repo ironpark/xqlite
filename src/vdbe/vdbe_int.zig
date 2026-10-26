@@ -357,7 +357,7 @@ pub const Context = struct {
     enc: u8 = ENC.UTF8,
     skip_flag: bool = false,
     argc: u16 = 0,
-    argv: []*Mem = &.{},
+    argv: []*Mem,
 };
 
 // ==================================================================== vm

@@ -118,8 +118,10 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
+    const test_filters = b.option([]const []const u8, "test-filter", "Run only the tests whose names contain this text") orelse &.{};
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .filters = test_filters,
     });
 
     // A run step that will run the test executable.

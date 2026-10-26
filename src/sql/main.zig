@@ -5,6 +5,7 @@ const int = @import("sqlite_int.zig");
 const btree = @import("../btree/btree.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const mem = @import("../vdbe/mem.zig");
+const util = @import("util.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
@@ -120,4 +121,130 @@ pub fn errorClear(db: *Sqlite3) void {
     db.err_code = RC.OK;
     db.err_byte_offset = -1;
     if (db.err) |e| mem.setNull(e);
+}
+
+/// Port of sqlite3ApiExit(): the result of an API call, as seen by the
+/// application. Running out of memory is reported (and cleared) here.
+pub fn apiExit(db: *Sqlite3, rc: i32) i32 {
+    if (db.malloc_failed or rc == RC.NOMEM) {
+        db.malloc_failed = false;
+        setError(db, RC.NOMEM);
+        return RC.NOMEM;
+    }
+    return rc & db.err_mask;
+}
+
+/// Port of sqlite3_errmsg(): the English text of the last error.
+pub fn errmsg(db: *Sqlite3) [:0]const u8 {
+    if (db.malloc_failed) return util.errStr(RC.NOMEM);
+    if (db.err_code != RC.OK) {
+        if (db.err) |e| if (e.flags & vi.MEM.Str != 0) return e.z.?[0..@intCast(e.n) :0];
+    }
+    return util.errStr(db.err_code);
+}
+
+/// Port of sqlite3_errcode() and sqlite3_extended_errcode().
+pub fn errcode(db: *const Sqlite3) i32 {
+    if (db.malloc_failed) return RC.NOMEM;
+    return db.err_code & db.err_mask;
+}
+
+pub fn extendedErrcode(db: *const Sqlite3) i32 {
+    if (db.malloc_failed) return RC.NOMEM;
+    return db.err_code;
+}
+
+/// Port of sqlite3_extended_result_codes().
+pub fn extendedResultCodes(db: *Sqlite3, on: bool) void {
+    db.err_mask = if (on) -1 else 0xff;
+}
+
+/// Port of sqlite3_error_offset().
+pub fn errorOffset(db: *const Sqlite3) i32 {
+    return if (db.err_code != RC.OK) db.err_byte_offset else -1;
+}
+
+/// sqlite3_open_v2() flags this port understands.
+pub const OpenFlags = struct {
+    read_only: bool = false,
+    create: bool = true,
+};
+
+/// Port of openDatabase() (sqlite3_open_v2()): open a connection to the
+/// database file `filename` (":memory:" or "" for a private temporary
+/// database). The connection is returned even when opening fails, with
+/// the error recorded; it must be closed with close().
+pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenFlags, out: **Sqlite3) i32 {
+    const db = gpa.create(Sqlite3) catch return RC.NOMEM;
+    db.* = .{ .gpa = gpa, .vfs = v };
+    out.* = db;
+    const s_main = gpa.create(int.Schema) catch return oomOnOpen(db);
+    s_main.* = .{};
+    db.dbs.append(gpa, .{ .name = "main", .schema = s_main }) catch {
+        gpa.destroy(s_main);
+        return oomOnOpen(db);
+    };
+    const s_temp = gpa.create(int.Schema) catch return oomOnOpen(db);
+    s_temp.* = .{};
+    db.dbs.append(gpa, .{ .name = "temp", .schema = s_temp, .safety_level = 1 }) catch {
+        gpa.destroy(s_temp);
+        return oomOnOpen(db);
+    };
+    db.enc = 1;
+
+    const path: ?[]const u8 = if (filename.len == 0 or std.mem.eql(u8, filename, ":memory:")) null else filename;
+    const bt = btree.Btree.open(gpa, v, path, .{
+        .read_only = flags.read_only,
+        .create = flags.create and !flags.read_only,
+    }) catch |err| {
+        const rc = errorCode(err);
+        errorWithMsg(db, rc, "{s}", .{util.errStr(rc)});
+        return rc;
+    };
+    db.dbs.items[0].bt = bt;
+    db.dbs.items[0].schema.enc = db.enc;
+    @import("func.zig").registerPerConnectionBuiltinFunctions(db);
+    errorClear(db);
+    return RC.OK;
+}
+
+fn oomOnOpen(db: *Sqlite3) i32 {
+    db.malloc_failed = true;
+    db.err_code = RC.NOMEM;
+    return RC.NOMEM;
+}
+
+/// Port of sqlite3_close(): close the connection. Fails with BUSY if
+/// statements are not finalized.
+pub fn close(db: *Sqlite3) i32 {
+    if (db.vdbe != null) {
+        errorWithMsg(db, RC.BUSY, "unable to close due to unfinalized statements or unfinished backups", .{});
+        return RC.BUSY;
+    }
+    rollbackAll(db, RC.OK);
+    const gpa = db.gpa;
+    for (db.dbs.items) |*d| {
+        @import("build.zig").schemaFree(db, d.schema);
+        gpa.destroy(d.schema);
+        if (d.bt) |bt| bt.close();
+    }
+    db.dbs.deinit(gpa);
+    @import("coll.zig").freeAll(db);
+    @import("callback.zig").freeFunctions(db);
+    if (db.err) |e| {
+        mem.release(e);
+        gpa.destroy(e);
+    }
+    gpa.destroy(db);
+    return RC.OK;
+}
+
+/// Port of sqlite3_last_insert_rowid().
+pub fn lastInsertRowid(db: *const Sqlite3) i64 {
+    return db.last_rowid;
+}
+
+/// Port of sqlite3_get_autocommit().
+pub fn getAutocommit(db: *const Sqlite3) bool {
+    return db.auto_commit;
 }

@@ -41,6 +41,7 @@ pub const Walker = struct {
         tab: ?*int.Table,
         ai_col: [*]i32,
         ptr: ?*anyopaque,
+        nc: ?*int.NameContext,
     } = .{ .n = 0 },
 };
 

@@ -9,6 +9,7 @@ const aux = @import("aux.zig");
 const exec_mod = @import("exec.zig");
 const int = @import("../sql/sqlite_int.zig");
 const main_mod = @import("../sql/main.zig");
+const printf = @import("../sql/printf.zig");
 
 const Vdbe = vi.Vdbe;
 const Mem = vi.Mem;
@@ -250,6 +251,34 @@ pub fn valueFrombind(m: *const Mem) bool {
     return m.flags & MEM.FromBind != 0;
 }
 
+/// Port of sqlite3_value_dup(): a copy not tied to any connection, or
+/// null on OOM. Free it with valueFree().
+pub fn valueDup(orig: ?*const Mem) ?*Mem {
+    const o = orig orelse return null;
+    const new = std.heap.smp_allocator.create(Mem) catch return null;
+    new.* = .{ .u = o.u, .z = o.z, .n = o.n, .flags = o.flags, .enc = o.enc, .e_subtype = o.e_subtype };
+    new.flags &= ~MEM.Dyn;
+    if (new.flags & (MEM.Str | MEM.Blob) != 0) {
+        new.flags &= ~(MEM.Static | MEM.Dyn);
+        new.flags |= MEM.Ephem;
+        mem.makeWriteable(new) catch {
+            valueFree(new);
+            return null;
+        };
+    } else if (new.flags & MEM.Null != 0) {
+        // Pointer values are not duplicated.
+        new.flags &= ~(MEM.Term | MEM.Subtype);
+    }
+    return new;
+}
+
+/// Port of sqlite3_value_free().
+pub fn valueFree(m: ?*Mem) void {
+    const v = m orelse return;
+    mem.release(v);
+    std.heap.smp_allocator.destroy(v);
+}
+
 // =============================================================== bindings
 
 /// Port of vdbeUnbind(): prepare parameter `i` (1-based) for a new value.
@@ -388,9 +417,81 @@ pub fn resultBlob(ctx: *Context, z: []const u8, del: Destructor) void {
 
 /// Port of sqlite3_result_zeroblob64().
 pub fn resultZeroblob(ctx: *Context, n: u64) void {
+    _ = resultZeroblob64(ctx, n);
+}
+
+/// Port of sqlite3_result_zeroblob64(), with its result code: RC.TOOBIG
+/// (and the error set) past SQLITE_LIMIT_LENGTH.
+pub fn resultZeroblob64(ctx: *Context, n: u64) i32 {
     const db = ctx.out.db.?;
-    if (n > @as(u64, @intCast(db.limit(.length)))) return resultErrorTooBig(ctx);
+    if (n > @as(u64, @intCast(db.limit(.length)))) {
+        resultErrorTooBig(ctx);
+        return RC.TOOBIG;
+    }
     mem.setZeroBlob(ctx.out, @intCast(n));
+    return RC.OK;
+}
+
+/// Port of invokeValueDestructor(): a value that will not be used is
+/// freed, and the result is a TOOBIG error.
+fn invokeValueDestructor(ctx: *Context, z: []const u8, del: Destructor) void {
+    switch (del) {
+        .dynamic => if (ctx.out.db) |db| db.gpa.free(@constCast(z)),
+        .func => |f| f(@ptrCast(@constCast(z.ptr))),
+        else => {},
+    }
+    resultErrorTooBig(ctx);
+}
+
+/// Port of sqlite3_result_text64() for SQLITE_UTF8.
+pub fn resultText64(ctx: *Context, z: []const u8, del: Destructor) void {
+    if (z.len > 0x7fffffff) return invokeValueDestructor(ctx, z, del);
+    setResultStr(ctx, z, ENC.UTF8, del);
+    _ = mem.zeroTerminateIfAble(ctx.out);
+}
+
+/// Port of sqlite3_result_text64() for SQLITE_UTF8_ZT: text followed by
+/// a NUL byte. With .dynamic the allocation is z.len + 1 bytes.
+pub fn resultTextZ(ctx: *Context, z: [:0]const u8, del: Destructor) void {
+    const db = ctx.out.db.?;
+    if (z.len > 0x7fffffff or z.len > db.limit(.length)) {
+        switch (del) {
+            .dynamic => db.gpa.free(@constCast(z)),
+            .func => |f| f(@ptrCast(@constCast(z.ptr))),
+            else => {},
+        }
+        return resultErrorTooBig(ctx);
+    }
+    mem.setTextZ(ctx.out, z, del) catch |err| switch (err) {
+        error.TooBig => resultErrorTooBig(ctx),
+        error.OutOfMemory => resultErrorNomem(ctx),
+    };
+}
+
+/// Ownership of the sqlite3_str handed to resultStr() (SQLITE_COPY,
+/// SQLITE_XFER).
+pub const StrOwn = enum { copy, xfer };
+
+/// Port of sqlite3_result_str(): the content of `p` as the result. With
+/// .xfer the buffer is moved into the result and `p` left empty; with
+/// .copy `p` is unchanged.
+pub fn resultStr(ctx: *Context, p: *printf.StrAccum, own: StrOwn) void {
+    if (p.acc_error == 0) {
+        if (p.n_char == 0) {
+            resultTextZ(ctx, "", .static);
+            p.reset();
+        } else if (own == .copy) {
+            setResultStr(ctx, p.slice(), ENC.UTF8, .transient);
+        } else {
+            const z = p.finish() orelse return resultErrorNomem(ctx);
+            resultTextZ(ctx, z, .dynamic);
+            p.* = printf.StrAccum.init(p.gpa, &.{}, p.mx_alloc);
+        }
+    } else if (p.acc_error == printf.NOMEM) {
+        resultErrorNomem(ctx);
+    } else {
+        resultErrorTooBig(ctx);
+    }
 }
 
 /// Port of sqlite3_result_value(): a copy of `value`.
@@ -429,6 +530,54 @@ pub fn resultErrorNomem(ctx: *Context) void {
     mem.setNull(ctx.out);
     ctx.is_error = RC.NOMEM;
     if (ctx.out.db) |db| db.malloc_failed = true;
+}
+
+/// Port of unixCurrentTimeInt64() (os_unix.c): the current time as a
+/// julian day number times 86400000. The Vfs has no xCurrentTimeInt64
+/// yet, so every connection uses the system clock.
+pub fn osCurrentTimeInt64() i64 {
+    const unix_epoch: i64 = 24405875 * @as(i64, 8640000);
+    var now: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &now);
+    return unix_epoch + 1000 * @as(i64, now.sec) + @divTrunc(@as(i64, now.nsec), 1000000);
+}
+
+/// Port of sqlite3StmtCurrentTime(): the time of the current statement
+/// (julian day times 86400000), read once per sqlite3_step(). A context
+/// without a statement reads the clock each time, as with
+/// SQLITE_ENABLE_STAT4.
+pub fn stmtCurrentTime(ctx: *Context) i64 {
+    var i_time: i64 = 0;
+    const pi_time = if (ctx.vdbe) |v| &v.i_current_time else &i_time;
+    if (pi_time.* == 0) pi_time.* = osCurrentTimeInt64();
+    return pi_time.*;
+}
+
+/// Port of sqlite3NotPureFunc() (vdbeaux.c): false, with an error set,
+/// if the function runs as OP_PureFunc (in an index, CHECK constraint or
+/// generated column), where non-deterministic results are not allowed.
+pub fn notPureFunc(ctx: *Context) bool {
+    const v = ctx.vdbe orelse return true;
+    const op = &v.ops.items[@intCast(ctx.i_op)];
+    if (op.opcode == vi.OP.PureFunc) {
+        const z_context = if (op.p5 & int.NC.IsCheck != 0)
+            "a CHECK constraint"
+        else if (op.p5 & int.NC.GenCol != 0)
+            "a generated column"
+        else
+            "an index";
+        const gpa = ctx.out.db.?.gpa;
+        const msg = printf.mprintf(gpa, "non-deterministic use of %s() in %s", &.{
+            .{ .str = ctx.func.name }, .{ .str = z_context },
+        }) catch {
+            resultErrorNomem(ctx);
+            return false;
+        };
+        defer gpa.free(msg);
+        resultError(ctx, msg);
+        return false;
+    }
+    return true;
 }
 
 /// Port of sqlite3_user_data().

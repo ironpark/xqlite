@@ -3,6 +3,7 @@ const Io = std.Io;
 
 const xqlite = @import("xqlite");
 const shell = @import("shell.zig");
+const slt = @import("slt.zig");
 const Header = xqlite.btree.header.Header;
 const Btree = xqlite.btree.Btree;
 const Cursor = xqlite.btree.Cursor;
@@ -29,6 +30,7 @@ const usage =
     \\  sql [file] [sql...]       a sqlite3-compatible shell: run SQL and
     \\                            dot-commands on the database (in memory if
     \\                            no file), else read them from standard input
+    \\  slt [options] script...   run sqllogictest scripts (xqlite slt for help)
     \\
 ;
 
@@ -70,6 +72,14 @@ pub fn main(init: std.process.Init) !void {
             out,
             &stderr_file_writer.interface,
         );
+        if (code != 0) {
+            out.flush() catch {};
+            std.process.exit(code);
+        }
+    } else if (args.len >= 2 and std.mem.eql(u8, args[1], "slt")) {
+        var stderr_buffer: [1024]u8 = undefined;
+        var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
+        const code = try slt.run(init.gpa, io, args[2..], out, &stderr_file_writer.interface);
         if (code != 0) {
             out.flush() catch {};
             std.process.exit(code);
@@ -357,5 +367,6 @@ fn btVacuum(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
 
 test {
     _ = shell;
+    _ = slt;
     _ = @import("qrf.zig");
 }

@@ -428,3 +428,22 @@ test "sql: foreign keys" {
     try c.exec("CREATE TABLE bad(q REFERENCES emp(boss))");
     try c.expectError("INSERT INTO bad VALUES(1)", "foreign key mismatch - \"bad\" referencing \"emp\"");
 }
+
+test "sql: REINDEX" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t1(a TEXT COLLATE NOCASE, b, c);
+        \\CREATE INDEX i1 ON t1(a);
+        \\CREATE INDEX i2 ON t1(b+c);
+        \\CREATE TABLE t2(x PRIMARY KEY, y) WITHOUT ROWID;
+        \\INSERT INTO t1 VALUES('A',1,2),('b',3,4),('a',5,6);
+        \\INSERT INTO t2 VALUES(1,'x'),(2,'y');
+        \\REINDEX; REINDEX t1; REINDEX main.i2; REINDEX nocase; REINDEX expressions; REINDEX t2;
+    );
+    try c.expectRows("SELECT b FROM t1 WHERE a='a' ORDER BY b", "1\n5\n");
+    try c.expectRows("SELECT b FROM t1 WHERE b+c=7", "3\n");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+    try c.expectError("REINDEX nosuch", "unable to identify the object to be reindexed");
+}

@@ -2724,10 +2724,85 @@ pub fn dropIndex(p: *Parse, name: ?*SrcList, if_exists: bool) void {
     _ = aux.addOp4Str(v, OP.DropIndex, @intCast(i_db), 0, 0, idx.name);
 }
 
-/// Port of sqlite3Reindex().
-pub fn reindex(p: *Parse, name1: ?Token, name2: ?Token) void {
-    _ = .{ name1, name2 };
-    pending.notYet(p, "REINDEX");
+/// Port of collationMatch(): whether a column of `idx` uses collation
+/// `coll`.
+fn collationMatch(coll: []const u8, idx: *const Index) bool {
+    for (idx.coll[0..idx.n_column]) |z| {
+        if (std.ascii.eqlIgnoreCase(z, coll)) return true;
+    }
+    return false;
+}
+
+/// Port of sqlite3Reindex(): REINDEX, REINDEX collation, or REINDEX
+/// [database.]table-or-index, which rebuilds the indexes named.
+pub fn reindex(p: *Parse, name1_arg: ?Token, name2_arg: ?Token) void {
+    reindexImpl(p, name1_arg, name2_arg) catch oomFault(p);
+}
+
+fn reindexImpl(p: *Parse, name1_arg: ?Token, name2_arg: ?Token) Oom!void {
+    const db = p.db;
+    if (p.syntax_only or db.malloc_failed) return;
+    if (prepare.readSchema(p) != RC.OK) return;
+    var z: ?[]const u8 = null;
+    var zdb: ?[]const u8 = null;
+    var i_re_db: ?usize = null;
+    var all = false;
+    var match = false;
+    if (name1_arg) |name1| {
+        const name2 = name2_arg.?;
+        if (name2.z == null) {
+            z = (try nameFromToken(p.arena, name1)) orelse return;
+        } else {
+            var obj: *const Token = undefined;
+            i_re_db = twoPartName(p, &name1, &name2, &obj) orelse return;
+            z = (try nameFromToken(p.arena, obj.*)) orelse return;
+            zdb = db.dbs.items[i_re_db.?].name;
+        }
+    } else {
+        all = true;
+        match = true;
+    }
+    var is_expr_idx = false;
+    var zcoll: ?[]const u8 = null;
+    var re_tab: ?*Table = null;
+    var re_index: ?*Index = null;
+    if (!all) {
+        if (zdb == null and std.ascii.eqlIgnoreCase(z.?, "expressions")) {
+            is_expr_idx = true;
+            match = true;
+        }
+        if (zdb == null and coll_mod.findCollSeq(db, z.?, false) != null) {
+            zcoll = z;
+            match = true;
+        }
+        if (zcoll == null) {
+            re_tab = findTable(db, z.?, zdb);
+            if (re_tab != null) match = true;
+            re_index = findIndex(db, z.?, zdb);
+            if (re_index != null) match = true;
+        }
+    }
+    if (!match) {
+        util.errorMsg(p, "unable to identify the object to be reindexed", .{});
+        return;
+    }
+    for (db.dbs.items, 0..) |*d, i_db| {
+        if (i_re_db != null and i_re_db.? != i_db) continue;
+        var it = d.schema.tbl_hash.valueIterator();
+        while (it.next()) |tp| {
+            const t = tp.*;
+            if (t.e_tab_type == .vtab) continue;
+            var pidx = t.index;
+            while (pidx) |idx| : (pidx = idx.next) {
+                if (all or t == re_tab or idx == re_index or (is_expr_idx and idx.has_expr) or
+                    (zcoll != null and collationMatch(zcoll.?, idx)))
+                {
+                    beginWriteOperation(p, false, i_db);
+                    refillIndex(p, idx, -1);
+                }
+            }
+        }
+    }
 }
 
 /// Port of sqlite3AddReturning().

@@ -9,6 +9,8 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const build = @import("build.zig");
 const expr_mod = @import("expr.zig");
+const select_mod = @import("select.zig");
+const SF = int.SF;
 const ec = @import("expr_code.zig");
 const resolve = @import("resolve.zig");
 const util = @import("util.zig");
@@ -110,6 +112,16 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     if (p.nested == 0) aux.countChanges(v);
     build.beginWriteOperation(p, b_complex, i_db);
 
+    // A view (with INSTEAD OF triggers) is realized into an ephemeral
+    // table.
+    var i_data_cur: i32 = 0;
+    var i_idx_cur: i32 = 0;
+    if (is_view) {
+        materializeView(p, t, where, null, null, i_tab_cur);
+        i_data_cur = i_tab_cur;
+        i_idx_cur = i_tab_cur;
+    }
+
     var nc: NameContext = .{ .parse = p, .src_list = tab_list };
     if (resolve.resolveExprNames(&nc, where) != 0) return;
 
@@ -209,9 +221,8 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             where_mod.whereEnd(w);
         }
 
-        // Open the table and its indexes for writing.
-        var i_data_cur: i32 = 0;
-        var i_idx_cur: i32 = 0;
+        // Open the table and its indexes for writing (a view only fires
+        // its INSTEAD OF triggers).
         if (!is_view) {
             var i_addr_once: i32 = 0;
             if (e_one_pass == ONEPASS_MULTI) i_addr_once = aux.addOp0(v, OP.Once);
@@ -248,6 +259,25 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
 
     if (p.nested == 0 and p.trigger_tab == null) insert.autoincrementEnd(p);
     if (mem_cnt != 0) codeChangeCount(v, mem_cnt, "rows deleted");
+}
+
+/// Port of sqlite3MaterializeView(): code the rows of view `view` that
+/// match `where` into the ephemeral table `i_cur`.
+pub fn materializeView(p: *Parse, view: *Table, where: ?*Expr, order_by: ?*ExprList, limit: ?*Expr, i_cur: i32) void {
+    materializeViewImpl(p, view, where, order_by, limit, i_cur) catch build.oomFault(p);
+}
+
+fn materializeViewImpl(p: *Parse, view: *Table, where_arg: ?*Expr, order_by: ?*ExprList, limit: ?*Expr, i_cur: i32) int.Oom!void {
+    const db = p.db;
+    const i_db: usize = @intCast(prepare.schemaToIndex(db, view.schema));
+    const where = try expr_mod.exprDup(p.arena, where_arg);
+    const from = (try build.srcListAppend(p, null, null, null)) orelse return;
+    const item = from.at(0);
+    item.name = try p.arena.dupeSentinel(u8, view.name, 0);
+    item.u4 = .{ .database = try p.arena.dupeSentinel(u8, db.dbs.items[i_db].name, 0) };
+    const sel = try select_mod.selectNew(p, null, from, where, null, null, order_by, SF.IncludeHidden, limit);
+    var dest = select_mod.selectDestInit(select_mod.SRT.EphemTab, i_cur);
+    _ = select_mod.select(p, sel, &dest);
 }
 
 /// Port of sqlite3GenerateRowDelete(): delete one row and its index

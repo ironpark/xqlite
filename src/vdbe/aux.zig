@@ -377,6 +377,21 @@ pub fn jumpHereOrPopInst(v: *Vdbe, addr: i32) void {
     }
 }
 
+/// Port of sqlite3VdbeTakeOpArray(): the finished instructions of `v` go
+/// to `program`, with the arena that holds them and their operands.
+pub fn takeProgram(v: *Vdbe, program: *vi.SubProgram, max_arg: *i32) void {
+    resolveP2Values(v, max_arg);
+    program.ops = v.ops.items;
+    v.ops = .empty;
+    program.mem = v.arena;
+    v.arena = .init(v.db.gpa);
+}
+
+/// Port of sqlite3VdbeHasSubProgram().
+pub fn hasSubProgram(v: *const Vdbe) bool {
+    return v.program != null;
+}
+
 /// Port of sqlite3VdbeLinkSubProgram().
 pub fn linkSubProgram(v: *Vdbe, sub: *vi.SubProgram) void {
     sub.next = v.program;
@@ -1027,6 +1042,11 @@ pub fn delete(v: *Vdbe) void {
         db.vdbe = v.next;
     }
     if (v.next) |next| next.prev = v.prev;
+    var sub = v.program;
+    while (sub) |s| {
+        sub = s.next;
+        if (s.mem) |*m| m.deinit();
+    }
     v.arena.deinit();
     db.gpa.destroy(v);
 }

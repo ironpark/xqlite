@@ -122,3 +122,28 @@ pub fn fixSelect(fix: *DbFixer, s: ?*Select) bool {
 pub fn fixExpr(fix: *DbFixer, e: ?*Expr) bool {
     return walker.walkExpr(&fix.w, e) != 0;
 }
+
+/// Port of sqlite3FixTriggerStep(). True on error.
+pub fn fixTriggerStep(fix: *DbFixer, step_list: ?*int.TriggerStep) bool {
+    var it = step_list;
+    while (it) |step| : (it = step.next) {
+        if (walker.walkSelect(&fix.w, step.select) != 0 or
+            walker.walkExpr(&fix.w, step.where) != 0 or
+            walker.walkExprList(&fix.w, step.expr_list) != 0 or
+            fixSrcList(fix, step.src))
+        {
+            return true;
+        }
+        var up = step.upsert;
+        while (up) |u| : (up = u.next) {
+            if (walker.walkExprList(&fix.w, u.target) != 0 or
+                walker.walkExpr(&fix.w, u.target_where) != 0 or
+                walker.walkExprList(&fix.w, u.set) != 0 or
+                walker.walkExpr(&fix.w, u.where) != 0)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}

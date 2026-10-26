@@ -270,8 +270,30 @@ pub const Btree = struct {
         bt.pager.setCacheSize(n);
     }
 
-    pub fn setPagerFlags(bt: *Btree, level: pager_mod.Synchronous, full_fsync: bool) void {
-        bt.pager.setFlags(level, full_fsync);
+    pub fn setPagerFlags(bt: *Btree, level: pager_mod.Synchronous, full_fsync: bool, cache_spill: bool) void {
+        bt.pager.setFlags(level, full_fsync, cache_spill);
+    }
+
+    /// Port of sqlite3BtreeSetSpillSize(): set the cache spill threshold
+    /// (0 leaves it) and return the effective one.
+    pub fn setSpillSize(bt: *Btree, n: i32) u32 {
+        return bt.pager.setSpillSize(n);
+    }
+
+    /// Port of sqlite3BtreeMaxPageCount().
+    pub fn maxPageCount(bt: *Btree, mx: Pgno) Pgno {
+        return bt.pager.maxPageCount(mx);
+    }
+
+    /// Port of sqlite3BtreeSecureDelete(): `new_flag` 0 turns secure
+    /// delete off, 1 on, 2 FAST (overwrite only); negative only queries.
+    /// Returns the setting in effect.
+    pub fn secureDelete(bt: *Btree, new_flag: i32) i32 {
+        if (new_flag >= 0) {
+            bt.secure_delete = new_flag == 1;
+            bt.overwrite = new_flag == 2;
+        }
+        return @as(i32, @intFromBool(bt.secure_delete)) | @as(i32, @intFromBool(bt.overwrite)) << 1;
     }
 
     /// Port of sqlite3BtreeSetPageSize(). `page_size` 0 keeps the current

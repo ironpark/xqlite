@@ -143,6 +143,8 @@ pub const Pager = struct {
     /// unsafe (SPILLFLAG_NOSYNC).
     no_spill_rollback: bool = false,
     no_spill_nosync: bool = false,
+    /// PRAGMA cache_spill=OFF (SPILLFLAG_OFF).
+    no_spill_off: bool = false,
     /// The change counter on page 1 has been bumped in this transaction.
     change_count_done: bool = false,
     busy_handler: ?BusyHandler,
@@ -179,6 +181,8 @@ pub const Pager = struct {
     /// Bytes 24..39 of the database file as last seen. Used to detect writes
     /// by other connections.
     db_file_vers: [16]u8 = @splat(0),
+    /// A shared lock has been held before (hasHeldSharedLock).
+    has_held_shared_lock: bool = false,
     /// Bumped whenever the cache is discarded or a write commits.
     data_version: u32 = 0,
 
@@ -227,7 +231,7 @@ pub const Pager = struct {
         };
         errdefer p.cache.deinit();
         p.cache.setCacheSize(opts.cache_size);
-        p.setFlags(opts.synchronous, opts.full_fsync);
+        p.setFlags(opts.synchronous, opts.full_fsync, true);
         p.setSectorSize();
         try p.setPageSize(opts.page_size, null);
         return p;
@@ -253,11 +257,13 @@ pub const Pager = struct {
     }
 
     /// Port of sqlite3PagerSetFlags().
-    pub fn setFlags(p: *Pager, level: Synchronous, full_fsync: bool) void {
+    pub fn setFlags(p: *Pager, level: Synchronous, full_fsync: bool, cache_spill: bool) void {
         p.no_sync = level == .off;
         p.full_sync = level == .full or level == .extra;
         p.extra_sync = level == .extra;
         p.sync_flags = .{ .full = !p.no_sync and full_fsync };
+        // PAGER_CACHESPILL: dirty pages may be spilled before commit.
+        p.no_spill_off = !cache_spill;
     }
 
     pub fn setCacheSize(p: *Pager, n: i32) void {
@@ -321,9 +327,19 @@ pub const Pager = struct {
         return !(p.jfd != null and p.journal_off > 0);
     }
 
-    /// Port of sqlite3PagerJournalSizeLimit(). Negative means no limit.
-    pub fn setJournalSizeLimit(p: *Pager, limit: i64) void {
-        p.journal_size_limit = limit;
+    /// Port of sqlite3PagerJournalSizeLimit(): set the limit if `limit` >=
+    /// -1 (negative means no limit), and return it.
+    pub fn journalSizeLimit(p: *Pager, limit: i64) i64 {
+        if (limit >= -1) p.journal_size_limit = limit;
+        return p.journal_size_limit;
+    }
+
+    /// Port of sqlite3PagerMaxPageCount(): set the largest page count if
+    /// `mx` is not 0, and return it.
+    pub fn maxPageCount(p: *Pager, mx: Pgno) Pgno {
+        if (mx > 0) p.mx_pgno = mx;
+        std.debug.assert(p.state != .open);
+        return p.mx_pgno;
     }
 
     /// Bumped whenever the content seen by this connection may have changed
@@ -559,12 +575,16 @@ pub const Pager = struct {
         }
 
         // Another connection may have written since our last transaction.
-        // Before the first one the cache is empty and this is a no-op.
-        var vers: [16]u8 = undefined;
-        try readPadded(p.fd, &vers, 24);
-        if (!std.mem.eql(u8, &p.db_file_vers, &vers)) p.reset();
+        // Not checked on the very first access (hasHeldSharedLock), when
+        // the cache is empty anyway, so that data_version starts at 1.
+        if (!p.temp_file and p.has_held_shared_lock) {
+            var vers: [16]u8 = undefined;
+            try readPadded(p.fd, &vers, 24);
+            if (!std.mem.eql(u8, &p.db_file_vers, &vers)) p.reset();
+        }
 
         p.db_size = try p.pagecountFromFile();
+        p.has_held_shared_lock = true;
     }
 
     /// Port of pagerPagecount().
@@ -1342,7 +1362,7 @@ pub const Pager = struct {
     /// Port of pagerStress(): write one dirty page so its slot can be reused.
     /// Busy means "not now" and is not an error for the fetch.
     fn spill(p: *Pager, pg: *Page) Error!void {
-        if (p.err != null or p.no_spill_rollback) return;
+        if (p.err != null or p.no_spill_rollback or p.no_spill_off) return;
         if (p.no_spill_nosync and pg.flags.need_sync) return;
 
         pg.dirty = null;

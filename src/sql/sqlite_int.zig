@@ -539,6 +539,8 @@ pub const TRIGGER_AFTER: u8 = 2;
 /// A trigger (Trigger).
 pub const Trigger = struct {
     name: [:0]u8,
+    /// The trigger implements a foreign key action (fkey.zig).
+    is_fk_action: bool = false,
     table: [:0]u8,
     op: u8,
     tr_tm: u8,
@@ -549,6 +551,9 @@ pub const Trigger = struct {
     tab_schema: ?*Schema = null,
     step_list: ?*TriggerStep = null,
     next: ?*Trigger = null,
+    /// The memory of a schema trigger, which holds the trigger and its
+    /// steps; null while it is being built.
+    mem: ?*std.heap.ArenaAllocator = null,
 };
 
 // ================================================================= schema
@@ -1044,6 +1049,8 @@ pub const Limit = enum(u4) {
     trigger_depth,
     worker_threads,
     parser_depth,
+    schema,
+    trigger_steps,
 
     pub const defaults = std.enums.EnumArray(Limit, i32).init(.{
         .length = 1000000000,
@@ -1059,6 +1066,8 @@ pub const Limit = enum(u4) {
         .trigger_depth = 1000,
         .worker_threads = 0,
         .parser_depth = 2500,
+        .schema = 10000000,
+        .trigger_steps = 65000,
     });
 };
 
@@ -1142,6 +1151,9 @@ pub const Parse = struct {
     /// Main Parse of a trigger program, or null.
     toplevel: ?*Parse = null,
     trigger_tab: ?*Table = null,
+    /// The trigger programs coded for the statement (top-level Parse
+    /// only), a list of trigger.TriggerPrg.
+    trigger_prg: ?*TriggerPrg = null,
     temp_regs: [8]i32 = @splat(0),
     outer_parse: ?*Parse = null,
     name_token: Token = .{},
@@ -1302,6 +1314,7 @@ pub const InitState = struct {
 };
 
 const Vdbe = @import("../vdbe/vdbe_int.zig").Vdbe;
+const TriggerPrg = @import("trigger.zig").TriggerPrg;
 const Mem = @import("../vdbe/vdbe_int.zig").Mem;
 
 /// Root page of sqlite_schema.
@@ -1350,7 +1363,7 @@ pub const Sqlite3 = struct {
     dbs: std.ArrayList(Db) = .empty,
     flags: u64 = DbFlag.ShortColNames | DbFlag.EnableTrigger | DbFlag.EnableView |
         DbFlag.CacheSpill | DbFlag.TrustedSchema | DbFlag.DqsDML | DbFlag.DqsDDL |
-        DbFlag.AutoIndex | DbFlag.Comments | DbFlag.FkNoAction,
+        DbFlag.AutoIndex | DbFlag.Comments | DbFlag.AttachCreate | DbFlag.AttachWrite,
     m_db_flags: u32 = 0,
     /// Text encoding (SQLITE_UTF8 = 1).
     enc: u8 = 1,
@@ -1402,6 +1415,14 @@ pub const Sqlite3 = struct {
     next_pagesize: u32 = 0,
     /// Schema resets are deferred while this is nonzero.
     n_schema_lock: u32 = 0,
+    /// PRAGMA temp_store: 0 default, 1 file, 2 memory.
+    temp_store: u8 = 0,
+    /// PRAGMA auto_vacuum for databases yet to be created, or -1.
+    next_autovac: i8 = -1,
+    /// PRAGMA busy_timeout, in milliseconds.
+    busy_timeout: i32 = 0,
+    /// PRAGMA analysis_limit.
+    n_analysis_limit: i32 = 0,
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

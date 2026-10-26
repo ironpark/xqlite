@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const xqlite = @import("xqlite");
+const shell = @import("shell.zig");
 const Header = xqlite.btree.header.Header;
 const Btree = xqlite.btree.Btree;
 const Cursor = xqlite.btree.Cursor;
@@ -25,8 +26,9 @@ const usage =
     \\  bt-churn <file>           delete, update and insert rows of t and t_b
     \\                            (testing aid, see tools/interop-btree.sh)
     \\  bt-vacuum <file>          run an incremental vacuum to completion
-    \\  sql <file> [sql]          run SQL on the database (from standard input
-    \\                            if not given), printing rows as a|b|c
+    \\  sql [file] [sql...]       a sqlite3-compatible shell: run SQL and
+    \\                            dot-commands on the database (in memory if
+    \\                            no file), else read them from standard input
     \\
 ;
 
@@ -36,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    var stdout_file_writer: Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);
     const out = &stdout_file_writer.interface;
     defer out.flush() catch {};
 
@@ -57,12 +59,21 @@ pub fn main(init: std.process.Init) !void {
         try btFill(arena, io, args[2], try std.fmt.parseInt(u32, args[3], 10), av);
     } else if (args.len == 3 and std.mem.eql(u8, args[1], "bt-churn")) {
         try btChurn(arena, io, args[2]);
-    } else if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "sql")) {
-        runSql(init.gpa, io, args[2], if (args.len == 4) args[3] else null, out) catch |err| switch (err) {
-            // Already reported.
-            error.SqlError, error.OpenFailed => std.process.exit(1),
-            else => return err,
-        };
+    } else if (args.len >= 2 and std.mem.eql(u8, args[1], "sql")) {
+        var stderr_buffer: [1024]u8 = undefined;
+        var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
+        const code = try shell.run(
+            init.gpa,
+            io,
+            if (args.len > 2) args[2] else null,
+            if (args.len > 3) args[3..] else &.{},
+            out,
+            &stderr_file_writer.interface,
+        );
+        if (code != 0) {
+            out.flush() catch {};
+            std.process.exit(code);
+        }
     } else if (args.len == 3 and std.mem.eql(u8, args[1], "bt-vacuum")) {
         try btVacuum(arena, io, args[2]);
     } else {
@@ -344,65 +355,7 @@ fn btVacuum(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
     try bt.commit();
 }
 
-/// The `sql` command: run `text` (or each statement read from standard
-/// input) on the database `path`, printing rows in the list format of the
-/// sqlite3 shell.
-fn runSql(gpa: std.mem.Allocator, io: Io, path: []const u8, text: ?[]const u8, out: *Io.Writer) !void {
-    const sql = xqlite.sql;
-    var unix = xqlite.UnixVfs.init(gpa, io);
-    var db: *sql.Sqlite3 = undefined;
-    const rc = sql.main.open(gpa, unix.interface(), path, .{}, &db);
-    defer _ = sql.main.close(db);
-    if (rc != sql.RC.OK) {
-        std.debug.print("Error: unable to open database \"{s}\": {s}\n", .{ path, sql.main.errmsg(db) });
-        return error.OpenFailed;
-    }
-    if (text) |t| return execPrint(db, t, out);
-
-    // Statements from standard input, run as each line ending with ';'
-    // completes one.
-    var in_buffer: [4096]u8 = undefined;
-    var stdin_reader: Io.File.Reader = .init(.stdin(), io, &in_buffer);
-    const in = &stdin_reader.interface;
-    var pending: std.ArrayList(u8) = .empty;
-    defer pending.deinit(gpa);
-    var failed = false;
-    while (in.takeDelimiterInclusive('\n')) |line| {
-        try pending.appendSlice(gpa, line);
-        const trimmed = std.mem.trimEnd(u8, pending.items, " \t\r\n");
-        if (trimmed.len == 0 or trimmed[trimmed.len - 1] != ';') continue;
-        execPrint(db, pending.items, out) catch {
-            failed = true;
-        };
-        pending.clearRetainingCapacity();
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        else => return err,
-    }
-    if (std.mem.trim(u8, pending.items, " \t\r\n").len != 0) execPrint(db, pending.items, out) catch {
-        failed = true;
-    };
-    if (failed) return error.SqlError;
-}
-
-fn execPrint(db: *xqlite.sql.Sqlite3, text: []const u8, out: *Io.Writer) !void {
-    const sql = xqlite.sql;
-    var msg: ?[:0]u8 = null;
-    const rc = sql.legacy.exec(db, text, printRow, out, &msg);
-    try out.flush();
-    if (rc != sql.RC.OK) {
-        std.debug.print("Error: {s}\n", .{msg orelse sql.main.errmsg(db)});
-        if (msg) |m| db.gpa.free(m);
-        return error.SqlError;
-    }
-}
-
-fn printRow(ctx: ?*anyopaque, values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
-    const out: *Io.Writer = @ptrCast(@alignCast(ctx.?));
-    for (values, 0..) |val, i| {
-        if (i > 0) out.writeByte('|') catch return true;
-        if (val) |z| out.writeAll(std.mem.span(z)) catch return true;
-    }
-    out.writeByte('\n') catch return true;
-    return false;
+test {
+    _ = shell;
+    _ = @import("qrf.zig");
 }

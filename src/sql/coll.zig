@@ -34,6 +34,12 @@ var builtin = [_]CollSeq{
     .{ .name = "RTRIM", .cmp = rtrimCollFunc },
 };
 
+/// The built-in collations, which SQLite keeps in every connection's
+/// aCollSeq (for PRAGMA collation_list).
+pub fn builtins() []const CollSeq {
+    return &builtin;
+}
+
 /// db->pDfltColl: the BINARY collation.
 pub fn defaultColl() *CollSeq {
     return &builtin[0];

@@ -227,6 +227,9 @@ pub const SubProgram = struct {
     once: []u8,
     token: ?*anyopaque,
     next: ?*SubProgram = null,
+    /// The memory of the program's instructions and their operands
+    /// (the arena of the Vdbe it was coded in).
+    mem: ?std.heap.ArenaAllocator = null,
 };
 
 /// P5 values for OP_Halt with constraint errors.

@@ -1662,6 +1662,7 @@ const Part5 = struct {
             .single = true,
             .journal_mode = .off,
             .synchronous = .off,
+            .cell_size_check = db.flags & int.DbFlag.CellSizeCk != 0,
         }) catch |err| return e.fail(err);
         c.btx = bt;
         openEphemeralTable(c, bt, op) catch |err| {
@@ -2758,6 +2759,16 @@ const Part8 = struct {
                 e.out2Prerelease(op).u = .{ .i = bt.lastPage() };
                 break :blk .next;
             },
+            OP.MaxPgcnt => blk: {
+                const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
+                var new_max: u32 = 0;
+                if (op.p3 != 0) {
+                    new_max = @max(bt.lastPage(), @as(u32, @bitCast(op.p3)));
+                }
+                e.out2Prerelease(op).u = .{ .i = bt.maxPageCount(new_max) };
+                break :blk .next;
+            },
+            OP.IFindKey => opIFindKey(e, op),
             OP.PureFunc, OP.Function => opFunction(e, op),
             OP.ClrSubtype => blk: {
                 e.reg(op.p1).flags &= ~MEM.Subtype;
@@ -2816,14 +2827,33 @@ const Part8 = struct {
             },
             OP.Noop, OP.Explain, OP.CursorHint, OP.Abortable, OP.ReleaseReg => .next,
             else => blk: {
-                // Savepoint, RowCell, IFindKey, Checkpoint, Vacuum, MaxPgcnt,
-                // TableLock and the virtual table opcodes: not ported yet.
+                // Savepoint, RowCell, Checkpoint, Vacuum, TableLock and the
+                // virtual table opcodes: not ported yet.
                 const name = if (op.opcode < vi.opcodes.names.len) vi.opcodes.names[op.opcode].name else "?";
                 aux.vdbeError(e.v, "not supported yet: OP_{s}", .{name});
                 e.rc = RC.ERROR;
                 break :blk .abort;
             },
         };
+    }
+
+    /// OP_IFindKey: after an OP_Found on the same cursor and key missed,
+    /// look near the cursor for an entry of index P4 whose REAL fields
+    /// from expressions differ by a few ULPs (sqlite3VdbeFindIndexKey());
+    /// jump to P2 if there is none.
+    fn opIFindKey(e: *Exec, op: *Op) Flow {
+        const c = e.csr(op.p1);
+        std.debug.assert(c.e_cur_type == .btree and !c.is_table);
+        const idx = op.p4.index;
+        var r: vi.UnpackedRecord = .{
+            .key_info = c.key_info.?,
+            .mem = e.regs.ptr + @as(usize, @intCast(op.p3)),
+            .n_field = idx.n_column,
+        };
+        const res = serial.findIndexKey(c.uc.cursor, idx, &r, true) catch return .jump_p2;
+        if (res != 0) return .jump_p2;
+        c.null_row = false;
+        return .next;
     }
 
     fn opJournalMode(e: *Exec, op: *Op) Flow {

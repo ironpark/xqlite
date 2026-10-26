@@ -28,7 +28,10 @@ pub const sql = struct {
     pub const main = @import("sql/main.zig");
     pub const legacy = @import("sql/legacy.zig");
     pub const prepare = @import("sql/prepare.zig");
+    pub const complete = @import("sql/complete.zig");
     pub const api = @import("vdbe/api.zig");
+    /// A prepared statement (sqlite3_stmt).
+    pub const Stmt = @import("vdbe/vdbe_int.zig").Vdbe;
     pub const RC = @import("sql/sqlite_int.zig").RC;
 };
 
@@ -50,7 +53,12 @@ test {
         @import("vdbe/rowset.zig"), @import("vdbe/api.zig"), @import("sql/func.zig"),
         @import("sql/prepare.zig"), @import("sql/legacy.zig"), @import("sql/resolve.zig"),
         @import("sql/expr_code.zig"), @import("sql/coll.zig"), @import("sql/date.zig"), @import("sql/sql_test.zig"),
+        @import("sql/pragma.zig"), @import("sql/pragma_test.zig"),
     }) |file| std.testing.refAllDecls(file);
+}
+
+test {
+    std.testing.refAllDecls(@import("sql/complete.zig"));
 }
 
 /// The SQLite release this port tracks (SQLITE_VERSION_NUMBER). Keep in sync

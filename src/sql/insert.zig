@@ -28,6 +28,7 @@ const IdList = int.IdList;
 const SrcList = int.SrcList;
 const Select = int.Select;
 const Table = int.Table;
+const Trigger = int.Trigger;
 const Index = int.Index;
 const Column = int.Column;
 const Upsert = int.Upsert;
@@ -433,7 +434,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 ipk_column = i;
                 b_id_list_in_order = false;
             } else {
-                util.errorMsg(p, "table {s} has no column named {s}", .{ srcName(tab_list), name });
+                util.errorMsg(p, "table {f} has no column named {s}", .{ util.srcItemName(tab_list.at(0)), name });
                 p.check_schema = true;
                 return;
             }
@@ -507,7 +508,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         }
         const n_col: i32 = @intCast(t.cols.len);
         if (n_column != n_col - n_hidden) {
-            util.errorMsg(p, "table {s} has {d} columns but {d} values were supplied", .{ srcName(tab_list), n_col - n_hidden, n_column });
+            util.errorMsg(p, "table {f} has {d} columns but {d} values were supplied", .{ util.srcItemName(tab_list.at(0)), n_col - n_hidden, n_column });
             return;
         }
     }
@@ -618,6 +619,38 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     }
 
     const end_of_loop = aux.makeLabel(p);
+
+    // BEFORE (and INSTEAD OF) triggers, given the NEW.* row.
+    if (tmask & int.TRIGGER_BEFORE != 0) {
+        const n_col: i32 = @intCast(t.cols.len);
+        const reg_cols = expr_mod.getTempRange(p, n_col + 1);
+        // The rowid of a NULL INTEGER PRIMARY KEY is not known before the
+        // insert: it is -1 here.
+        if (ipk_column < 0) {
+            _ = aux.addOp2(v, OP.Integer, -1, reg_cols);
+        } else {
+            std.debug.assert(!without_rowid);
+            if (use_temp_table) {
+                _ = aux.addOp3(v, OP.Column, src_tab, ipk_column, reg_cols);
+            } else {
+                std.debug.assert(sel == null);
+                ec.exprCode(p, list.?.at(@intCast(ipk_column)).expr, reg_cols);
+            }
+            const addr1 = aux.addOp1(v, OP.NotNull, reg_cols);
+            _ = aux.addOp2(v, OP.Integer, -1, reg_cols);
+            aux.jumpHere(v, addr1);
+            _ = aux.addOp1(v, OP.MustBeInt, reg_cols);
+            main_mod.mayAbort(p);
+        }
+        _ = aux.addOp3(v, OP.Copy, reg_rowid + 1, reg_cols + 1, t.n_nv_col - 1);
+        // Generated columns may use the rowid, so they come last.
+        if (t.tab_flags & TF.HasGenerated != 0) computeGeneratedColumns(p, reg_cols + 1, t);
+        // A view takes the values as they are.
+        if (!is_view) tableAffinity(p, t, reg_cols + 1);
+        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_BEFORE, t, reg_cols - n_col - 1, on_error, end_of_loop);
+        expr_mod.releaseTempRange(p, reg_cols, n_col + 1);
+    }
+
     var append_flag = false;
     if (!is_view) {
         if (ipk_column >= 0) {
@@ -657,12 +690,17 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         var is_replace = false;
         generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0, on_error, end_of_loop, &is_replace, null);
         if (db.flags & int.DbFlag.ForeignKeys != 0) fkey.fkCheck(p, t, 0, reg_ins, null, false);
-        // OPFLAG_USESEEKRESULT is safe without REPLACE (no trigger
-        // programs are coded).
-        completeInsertion(p, t, i_data_cur, i_idx_cur, reg_ins, reg_idx, 0, append_flag, true);
+        // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
+        // trigger programs (a REPLACE delete then resets the seek result).
+        const use_seek = !is_replace or !aux.hasSubProgram(v);
+        completeInsertion(p, t, i_data_cur, i_idx_cur, reg_ins, reg_idx, 0, append_flag, use_seek);
     }
 
     if (reg_row_count != 0) _ = aux.addOp2(v, OP.AddImm, reg_row_count, 1);
+
+    if (trig != null) {
+        trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_AFTER, t, reg_data - 2 - @as(i32, @intCast(t.cols.len)), on_error, end_of_loop);
+    }
 
     // The bottom of the loop.
     aux.resolveLabel(v, end_of_loop);
@@ -680,12 +718,6 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     _ = &reg_ins;
     _ = &reg_data;
     _ = &reg_rowid;
-}
-
-/// The name of the table of an INSERT, as "%S" prints it.
-fn srcName(src: *SrcList) []const u8 {
-    const item = src.at(0);
-    return item.name orelse "";
 }
 
 /// sqlite3ExprReferencesUpdatedColumn() walker bits.
@@ -848,8 +880,37 @@ fn generateConstraintChecksImpl(
     // REPLACE, (C) those with REPLACE (createIndex() puts them last).
     //
     // Deletes by REPLACE may run "replace triggers" (DELETE triggers or
-    // foreign key actions), after which every uniqueness constraint is
-    // checked again. Neither is ported, so there is never a recheck.
+    // foreign key actions). If any did, every uniqueness constraint is
+    // checked again afterwards, with ABORT: reg_trig_cnt counts them, and
+    // the rechecks are chained through lbl_recheck_ok from addr_recheck.
+    var trig: ?*Trigger = null;
+    var reg_trig_cnt: i32 = 0;
+    var addr_recheck: i32 = 0;
+    var lbl_recheck_ok: i32 = 0;
+    var n_replace_trig: i32 = 0;
+    if (db.flags & (int.DbFlag.RecTriggers | int.DbFlag.ForeignKeys) != 0) {
+        if (db.flags & int.DbFlag.RecTriggers != 0) trig = trigger.triggersExist(p, t, TK.DELETE, null, null);
+        var may_fire = trig != null or fkey.fkRequired(p, t, null, false) != 0;
+        // Only if a row may be deleted by a REPLACE.
+        if (may_fire and override_error != OE.Replace) {
+            if (override_error != OE.Default) {
+                may_fire = false;
+            } else if (!pk_chng or pk != null or t.key_conf != OE.Replace) {
+                var it = t.index;
+                while (it) |ix| : (it = ix.next) {
+                    if (ix.on_error == OE.Replace) break;
+                }
+                if (it == null) may_fire = false;
+            }
+        }
+        if (may_fire) {
+            p.n_mem += 1;
+            reg_trig_cnt = p.n_mem;
+            _ = aux.addOp2(v, OP.Integer, 0, reg_trig_cnt);
+            lbl_recheck_ok = aux.makeLabel(p);
+            addr_recheck = lbl_recheck_ok;
+        }
+    }
 
     var ipk_top: i32 = 0;
     var ipk_bottom: i32 = 0;
@@ -878,9 +939,15 @@ fn generateConstraintChecksImpl(
         _ = aux.addOp3(v, OP.NotExists, i_data_cur, addr_rowid_ok, reg_new_data);
         switch (on_error) {
             OE.Replace => {
-                // The index entries of the other row go; its record is
-                // overwritten by the new one.
-                if (t.index != null) {
+                if (reg_trig_cnt != 0) {
+                    // Delete the other row, running its triggers.
+                    main_mod.multiWrite(p);
+                    delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_new_data, 1, false, OE.Replace, where_mod.ONEPASS_SINGLE, -1);
+                    _ = aux.addOp2(v, OP.AddImm, reg_trig_cnt, 1);
+                    n_replace_trig += 1;
+                } else if (t.index != null) {
+                    // The index entries of the other row go; its record is
+                    // overwritten by the new one.
                     main_mod.multiWrite(p);
                     delete_mod.generateRowIndexDelete(p, t, i_data_cur, i_idx_cur, null, -1);
                 }
@@ -969,7 +1036,7 @@ fn generateConstraintChecksImpl(
         }
 
         // Is the new entry unique?
-        _ = aux.addOp4Int(v, OP.NoConflict, i_this_cur, addr_unique_ok, reg_ix, idx.n_key_col);
+        var addr_conflict_ck = aux.addOp4Int(v, OP.NoConflict, i_this_cur, addr_unique_ok, reg_ix, idx.n_key_col);
 
         // On a collision, the key of the other row goes to reg_r.
         const reg_r = if (idx == pk) reg_ix else expr_mod.getTempRange(p, n_pk_field);
@@ -1010,14 +1077,42 @@ fn generateConstraintChecksImpl(
             }
         }
 
+        const n_conflict_end = aux.currentAddr(v);
         switch (on_error) {
             OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx),
             OE.Ignore => _ = aux.goto_(v, ignore_dest),
             else => {
                 // REPLACE: delete the other row.
-                delete_mod.generateRowDelete(p, t, null, i_data_cur, i_idx_cur, reg_r, @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS_SINGLE else where_mod.ONEPASS_OFF, i_this_cur);
+                if (reg_trig_cnt != 0) {
+                    main_mod.multiWrite(p);
+                    n_replace_trig += 1;
+                }
+                if (trig != null and is_update) _ = aux.addOp1(v, OP.CursorLock, i_data_cur);
+                delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_r, @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS_SINGLE else where_mod.ONEPASS_OFF, i_this_cur);
+                if (trig != null and is_update) _ = aux.addOp1(v, OP.CursorUnlock, i_data_cur);
                 seen_replace = true;
             },
+        }
+        if (reg_trig_cnt != 0) {
+            _ = aux.addOp2(v, OP.AddImm, reg_trig_cnt, 1);
+            const addr_bypass = aux.addOp0(v, OP.Goto);
+
+            // The recheck, run after all the constraint checks if a
+            // replace trigger fired: the conflict check above again,
+            // jumping on to the next recheck when it passes.
+            aux.resolveLabel(v, lbl_recheck_ok);
+            lbl_recheck_ok = aux.makeLabel(p);
+            if (idx.part_idx_where != null) _ = aux.addOp2(v, OP.IsNull, reg_ix - 1, lbl_recheck_ok);
+            while (addr_conflict_ck < n_conflict_end) : (addr_conflict_ck += 1) {
+                const x = aux.getOp(v, addr_conflict_ck).*;
+                if (x.opcode != OP.IdxRowid or is_update) {
+                    const p2 = if (vi.opcodes.properties[x.opcode] & vi.opcodes.OPFLG.JUMP != 0) lbl_recheck_ok else x.p2;
+                    _ = aux.addOp4(v, x.opcode, x.p1, p2, x.p3, x.p4);
+                    aux.changeP5(v, x.p5);
+                }
+            }
+            build.uniqueConstraint(p, OE.Abort, idx);
+            aux.jumpHere(v, addr_bypass);
         }
         aux.resolveLabel(v, addr_unique_ok);
         if (reg_r != reg_ix) expr_mod.releaseTempRange(p, reg_r, n_pk_field);
@@ -1028,6 +1123,22 @@ fn generateConstraintChecksImpl(
         _ = aux.goto_(v, ipk_top);
         aux.jumpHere(v, ipk_bottom);
     }
+
+    // Recheck the uniqueness constraints after replace triggers ran.
+    if (n_replace_trig != 0) {
+        _ = aux.addOp2(v, OP.IfNot, reg_trig_cnt, lbl_recheck_ok);
+        if (pk == null) {
+            if (is_update) {
+                _ = aux.addOp3(v, OP.Eq, reg_new_data, addr_recheck, reg_old_data);
+                aux.changeP5(v, vi.SQLITE_NOTNULL);
+            }
+            _ = aux.addOp3(v, OP.NotExists, i_data_cur, addr_recheck, reg_new_data);
+            build.rowidConstraint(p, OE.Abort, t);
+        } else {
+            _ = aux.goto_(v, addr_recheck);
+        }
+    }
+    if (reg_trig_cnt != 0) aux.resolveLabel(v, lbl_recheck_ok);
 
     // The table record.
     if (t.hasRowid()) {

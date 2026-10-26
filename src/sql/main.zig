@@ -248,3 +248,69 @@ pub fn lastInsertRowid(db: *const Sqlite3) i64 {
 pub fn getAutocommit(db: *const Sqlite3) bool {
     return db.auto_commit;
 }
+
+/// The hard upper bounds of sqlite3_limit() (aHardLimit): the defaults,
+/// except that worker threads default to 0 out of SQLITE_MAX_WORKER_THREADS.
+const hard_limits = blk: {
+    var a = int.Limit.defaults;
+    a.set(.worker_threads, 8);
+    break :blk a;
+};
+
+/// SQLITE_MIN_LENGTH.
+const min_length = 30;
+
+/// Port of sqlite3_limit(): set limit `id` to `new_limit` (capped at its
+/// hard bound) unless it is negative; returns the prior value.
+pub fn limit(db: *Sqlite3, id: int.Limit, new_limit_arg: i32) i32 {
+    const old = db.limits.get(id);
+    var new_limit = new_limit_arg;
+    if (new_limit >= 0) {
+        if (new_limit > hard_limits.get(id)) {
+            new_limit = hard_limits.get(id);
+        } else if (new_limit < min_length and id == .length) {
+            new_limit = min_length;
+        }
+        db.limits.set(id, new_limit);
+    }
+    return old;
+}
+
+/// Port of sqlite3_busy_timeout(): the timeout is recorded for PRAGMA
+/// busy_timeout. TODO: no busy handler is installed yet; that needs a
+/// sleep primitive in the VFS (xSleep), so lock contention still fails
+/// with SQLITE_BUSY at once.
+pub fn busyTimeout(db: *Sqlite3, ms: i32) i32 {
+    db.busy_timeout = if (ms > 0) ms else 0;
+    return RC.OK;
+}
+
+/// The process-wide heap limits (mem0.alarmThreshold and mem0.hardLimit).
+/// Memory comes from the application's allocator, so they are only
+/// recorded, not enforced.
+var soft_heap_limit: std.atomic.Value(i64) = .init(0);
+var hard_heap_limit: std.atomic.Value(i64) = .init(0);
+
+/// Port of sqlite3_soft_heap_limit64(): set the soft limit unless `n` is
+/// negative; returns the prior value.
+pub fn softHeapLimit64(n_arg: i64) i64 {
+    const prior = soft_heap_limit.load(.monotonic);
+    if (n_arg < 0) return prior;
+    var n = n_arg;
+    const hard = hard_heap_limit.load(.monotonic);
+    if (hard > 0 and (n > hard or n == 0)) n = hard;
+    soft_heap_limit.store(n, .monotonic);
+    return prior;
+}
+
+/// Port of sqlite3_hard_heap_limit64(): set the hard limit unless `n` is
+/// negative, lowering the soft limit to it; returns the prior value.
+pub fn hardHeapLimit64(n: i64) i64 {
+    const prior = hard_heap_limit.load(.monotonic);
+    if (n >= 0) {
+        hard_heap_limit.store(n, .monotonic);
+        const soft = soft_heap_limit.load(.monotonic);
+        if (n < soft or soft == 0) soft_heap_limit.store(n, .monotonic);
+    }
+    return prior;
+}

@@ -155,7 +155,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     @memset(to_open, true);
     to_open[n_idx + 1] = false;
 
-    var nc: NameContext = .{ .parse = p, .src_list = tab_list, .nc_flags = NC.UUpsert };
+    var nc: NameContext = .{ .parse = p, .src_list = tab_list, .nc_flags = NC.UUpsert, .u_nc = .{ .upsert = null } };
 
     const v = build.getVdbe(p) orelse return;
 
@@ -268,6 +268,10 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     }
     const reg_new = p.n_mem + 1;
     p.n_mem += @intCast(t.cols.len);
+
+    // A view (with INSTEAD OF triggers) is realized into an ephemeral
+    // table.
+    if (n_change_from == 0 and is_view) delete_mod.materializeView(p, t, where, null, null, i_data_cur);
 
     if (n_change_from == 0 and resolve.resolveExprNames(&nc, where) != 0) return;
 

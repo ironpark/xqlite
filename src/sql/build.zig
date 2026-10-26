@@ -250,6 +250,8 @@ const coll_mod = @import("coll.zig");
 const main_mod = @import("main.zig");
 const prepare = @import("prepare.zig");
 const insert_mod = @import("insert.zig");
+const trigger_mod = @import("trigger.zig");
+const fkey_mod = @import("fkey.zig");
 const delete_mod = @import("delete.zig");
 const resolve = @import("resolve.zig");
 const select_mod = @import("select.zig");
@@ -590,9 +592,15 @@ pub fn unlinkAndDeleteIndex(db: *Sqlite3, i_db: usize, name: [:0]const u8) void 
 /// Port of sqlite3SchemaClear() (callback.c): forget every object of a
 /// schema.
 pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
+    var trig_it = s.trig_hash.valueIterator();
+    while (trig_it.next()) |trig| trigger_mod.deleteTrigger(db, trig.*);
     s.trig_hash.clearRetainingCapacity();
     var it = s.tbl_hash.valueIterator();
-    while (it.next()) |t| deleteTable(db, t.*);
+    while (it.next()) |t| {
+        // A table still referenced outlives its triggers.
+        t.*.trigger = null;
+        deleteTable(db, t.*);
+    }
     s.tbl_hash.clearRetainingCapacity();
     s.idx_hash.clearRetainingCapacity();
     s.fkey_hash.clearRetainingCapacity();
@@ -743,7 +751,7 @@ pub fn deleteTable(db: *Sqlite3, t: *Table) void {
             };
         }
     }
-    if (t.isOrdinary()) @import("fkey.zig").fkDelete(db, t);
+    if (t.isOrdinary()) fkey_mod.fkDelete(db, t);
     if (t.isView()) freeViewColumns(db, t);
     m.deinit();
     db.gpa.destroy(m);
@@ -2386,7 +2394,7 @@ pub fn savepoint(p: *Parse, op: i32, name: Token) void {
 pub fn openTempDatabase(p: *Parse) u32 {
     const db = p.db;
     if (db.dbs.items[1].bt == null and p.explain == 0) {
-        const bt = btree.Btree.open(db.gpa, db.vfs.?, null, .{}) catch |err| {
+        const bt = btree.Btree.open(db.gpa, db.vfs.?, null, .{ .cell_size_check = db.flags & int.DbFlag.CellSizeCk != 0 }) catch |err| {
             util.errorMsg(p, "unable to open a temporary database file for storing temporary tables", .{});
             p.rc = main_mod.errorCode(err);
             return 1;
@@ -2547,10 +2555,9 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
     const db = p.db;
     const v = getVdbe(p) orelse return;
     beginWriteOperation(p, true, i_db);
-    if (t.trigger != null) {
-        pending.notYet(p, "triggers");
-        return;
-    }
+    // Drop its triggers (TEMP triggers on it too).
+    var trig = trigger_mod.triggerList(p, t);
+    while (trig) |tr| : (trig = tr.next) trigger_mod.dropTriggerPtr(p, tr);
     const db_name = db.dbs.items[i_db].name;
     // Before the b-tree goes, in case auto-vacuum moves sqlite_sequence.
     if (t.tab_flags & TF.Autoincrement != 0) {
@@ -2619,10 +2626,7 @@ pub fn dropTable(p: *Parse, name: ?*SrcList, is_view: bool, no_err: bool) void {
     beginWriteOperation(p, true, i_db);
     if (!is_view) {
         clearStatTables(p, i_db, "tbl", t.name);
-        if (db.flags & int.DbFlag.ForeignKeys != 0 and (t.u.tab.fkey != null or @import("fkey.zig").fkReferences(t) != null)) {
-            pending.notYet(p, "foreign key enforcement");
-            return;
-        }
+        fkey_mod.fkDropTable(p, src, t);
     }
     codeDropTable(p, t, i_db, is_view);
 }

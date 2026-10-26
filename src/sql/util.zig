@@ -384,6 +384,36 @@ pub const Ordinal = struct {
     }
 };
 
+/// The "%S" conversion of printf: the name of a FROM term, as "db.name",
+/// its alias, or a description of its subquery.
+pub fn srcItemName(item: *const int.SrcItem) SrcItemName {
+    return .{ .item = item };
+}
+
+pub const SrcItemName = struct {
+    item: *const int.SrcItem,
+
+    pub fn format(n: SrcItemName, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const it = n.item;
+        if (it.alias) |alias| return w.writeAll(alias);
+        if (it.name) |name| {
+            if (!it.fg.fixed_schema and !it.fg.is_subquery) if (it.u4.database) |zdb| {
+                try w.print("{s}.", .{zdb});
+            };
+            return w.writeAll(name);
+        }
+        if (!it.fg.is_subquery) return;
+        const sel = it.u4.subq.?.select;
+        if (sel.sel_flags & int.SF.NestedFrom != 0) {
+            try w.print("(join-{d})", .{sel.sel_id});
+        } else if (sel.sel_flags & int.SF.MultiValue != 0) {
+            try w.print("{d}-ROW VALUES CLAUSE", .{it.u1.n_row});
+        } else {
+            try w.print("(subquery-{d})", .{sel.sel_id});
+        }
+    }
+};
+
 /// Port of sqlite3LogEstAdd(): the LogEst of the sum of two LogEst values.
 pub fn logEstAdd(a: i16, b: i16) i16 {
     const x = [_]u8{ 10, 10, 9, 9, 8, 8, 7, 7, 7, 6, 6, 6, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2 };

@@ -13,16 +13,16 @@ const MemVfs = @import("../vfs/mem.zig").MemVfs;
 const RC = int.RC;
 
 /// A connection to "test.db" on a private in-memory file system.
-const Conn = struct {
+pub const Conn = struct {
     mem: MemVfs,
     db: *int.Sqlite3,
 
-    fn open(c: *Conn) !void {
+    pub fn open(c: *Conn) !void {
         return c.openWith(null);
     }
 
     /// Open "test.db" holding `image`, if given.
-    fn openWith(c: *Conn, image: ?[]const u8) !void {
+    pub fn openWith(c: *Conn, image: ?[]const u8) !void {
         c.mem = MemVfs.init(testing.allocator, testing.io);
         if (image) |bytes| {
             const f = try c.mem.interface().open("test.db", .{ .create = true });
@@ -36,13 +36,20 @@ const Conn = struct {
         }
     }
 
-    fn close(c: *Conn) void {
+    /// Close and open the connection again on the same file system.
+    pub fn reopen(c: *Conn) !void {
+        try testing.expectEqual(RC.OK, main_mod.close(c.db));
+        const rc = main_mod.open(testing.allocator, c.mem.interface(), "test.db", .{}, &c.db);
+        if (rc != RC.OK) return error.OpenFailed;
+    }
+
+    pub fn close(c: *Conn) void {
         std.testing.expectEqual(RC.OK, main_mod.close(c.db)) catch unreachable;
         c.mem.deinit();
     }
 
     /// Run `sql`; fail the test with the error message if it fails.
-    fn exec(c: *Conn, sql: []const u8) !void {
+    pub fn exec(c: *Conn, sql: []const u8) !void {
         var msg: ?[:0]u8 = null;
         const rc = legacy.exec(c.db, sql, null, null, &msg);
         if (rc != RC.OK) {
@@ -54,7 +61,7 @@ const Conn = struct {
 
     /// Run `sql` and return its rows, a line each with the columns
     /// separated by "|" and NULL as "NULL". The caller frees the result.
-    fn query(c: *Conn, sql: []const u8) ![]u8 {
+    pub fn query(c: *Conn, sql: []const u8) ![]u8 {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(testing.allocator);
         var msg: ?[:0]u8 = null;
@@ -67,7 +74,7 @@ const Conn = struct {
         return out.toOwnedSlice(testing.allocator);
     }
 
-    fn collect(ctx: ?*anyopaque, values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
+    pub fn collect(ctx: ?*anyopaque, values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
         const out: *std.ArrayList(u8) = @ptrCast(@alignCast(ctx.?));
         for (values, 0..) |val, i| {
             if (i > 0) out.append(testing.allocator, '|') catch return true;
@@ -78,7 +85,7 @@ const Conn = struct {
     }
 
     /// `sql` must return exactly `expected`.
-    fn expectRows(c: *Conn, sql: []const u8, expected: []const u8) !void {
+    pub fn expectRows(c: *Conn, sql: []const u8, expected: []const u8) !void {
         const got = try c.query(sql);
         defer testing.allocator.free(got);
         testing.expectEqualStrings(expected, got) catch |err| {
@@ -88,12 +95,26 @@ const Conn = struct {
     }
 
     /// Run `sql`, which must fail with `expected` as the message.
-    fn expectError(c: *Conn, sql: []const u8, expected: []const u8) !void {
+    pub fn expectError(c: *Conn, sql: []const u8, expected: []const u8) !void {
         var msg: ?[:0]u8 = null;
         const rc = legacy.exec(c.db, sql, null, null, &msg);
         defer if (msg) |m| testing.allocator.free(m);
         try testing.expect(rc != RC.OK);
         try testing.expectEqualStrings(expected, msg.?);
+    }
+
+    /// The result column names of `sql`, separated by "|".
+    pub fn expectColumns(c: *Conn, sql: []const u8, expected: []const u8) !void {
+        var stmt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;
+        try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, sql, &stmt, null));
+        defer _ = api.finalize(stmt.?);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(testing.allocator);
+        for (0..api.columnCount(stmt.?)) |i| {
+            if (i > 0) try out.append(testing.allocator, '|');
+            try out.appendSlice(testing.allocator, api.columnName(stmt.?, i).?);
+        }
+        try testing.expectEqualStrings(expected, out.items);
     }
 };
 
@@ -294,4 +315,116 @@ test "sql: views and DROP" {
     try c.expectError("DROP TABLE t", "no such table: t");
     try c.exec("DROP TABLE IF EXISTS t");
     try c.expectError("DROP TABLE sqlite_schema", "table sqlite_master may not be dropped");
+}
+
+test "sql: triggers" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)");
+    try c.exec("CREATE TABLE log(x TEXT)");
+    try c.exec("CREATE TRIGGER ti AFTER INSERT ON t BEGIN INSERT INTO log VALUES('ins ' || new.a || ' ' || new.b); END");
+    try c.exec("CREATE TRIGGER tb BEFORE INSERT ON t WHEN new.b = 'bad' BEGIN SELECT RAISE(ABORT, 'no bad'); END");
+    try c.exec("CREATE TRIGGER tg BEFORE INSERT ON t WHEN new.b = 'skip' BEGIN SELECT RAISE(IGNORE); END");
+    try c.exec("CREATE TRIGGER tu AFTER UPDATE OF b ON t BEGIN INSERT INTO log VALUES('upd ' || old.b || '->' || new.b); END");
+    try c.exec("CREATE TRIGGER td BEFORE DELETE ON t BEGIN INSERT INTO log VALUES('del ' || old.a); END");
+    try c.exec("INSERT INTO t VALUES(1, 'one'), (2, 'two'), (4, 'skip')");
+    try c.exec("INSERT INTO t(b) VALUES('three')");
+    try c.expectError("INSERT INTO t VALUES(9, 'bad')", "no bad");
+    try c.exec("UPDATE t SET b = 'TWO' WHERE a = 2");
+    try c.exec("UPDATE t SET a = a + 10 WHERE a = 1");
+    try c.exec("DELETE FROM t WHERE a = 3");
+    try c.expectRows("SELECT * FROM t", "2|TWO\n11|one\n");
+    try c.expectRows("SELECT * FROM log", "ins 1 one\nins 2 two\nins 3 three\nupd two->TWO\ndel 3\n");
+
+    // INSTEAD OF triggers on a view.
+    try c.exec("DELETE FROM log");
+    try c.exec("CREATE VIEW v AS SELECT a, b FROM t");
+    try c.exec("CREATE TRIGGER vi INSTEAD OF INSERT ON v BEGIN INSERT INTO t VALUES(new.a, upper(new.b)); END");
+    try c.exec("CREATE TRIGGER vu INSTEAD OF UPDATE ON v BEGIN UPDATE t SET b = new.b || '!' WHERE a = old.a; END");
+    try c.exec("CREATE TRIGGER vd INSTEAD OF DELETE ON v BEGIN DELETE FROM t WHERE a = old.a; END");
+    try c.exec("INSERT INTO v VALUES(5, 'five')");
+    try c.exec("UPDATE v SET b = 'x' WHERE a = 2");
+    try c.exec("DELETE FROM v WHERE a = 11");
+    try c.expectRows("SELECT * FROM t", "2|x!\n5|FIVE\n");
+    try c.expectRows("SELECT * FROM log", "ins 5 FIVE\nupd TWO->x!\ndel 11\n");
+
+    // The triggers are read back with the schema.
+    try c.exec("DROP TRIGGER tu");
+    try c.reopen();
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name", "tb\ntd\ntg\nti\nvd\nvi\nvu\n");
+    try c.exec("INSERT INTO v VALUES(6, 'six')");
+    try c.exec("UPDATE t SET b = 'y' WHERE a = 2");
+    try c.expectRows("SELECT x FROM log WHERE rowid > 3", "ins 6 SIX\n");
+
+    try c.expectError("CREATE TRIGGER x BEFORE INSERT ON v BEGIN SELECT 1; END", "cannot create BEFORE trigger on view: v");
+    try c.expectError("CREATE TRIGGER x INSTEAD OF INSERT ON t BEGIN SELECT 1; END", "cannot create INSTEAD OF trigger on table: t");
+    try c.expectError("CREATE TRIGGER x AFTER INSERT ON nosuch BEGIN SELECT 1; END", "no such table: main.nosuch");
+    try c.expectError("CREATE TRIGGER x AFTER INSERT ON sqlite_schema BEGIN SELECT 1; END", "cannot create trigger on system table");
+    try c.expectError("CREATE TRIGGER ti AFTER INSERT ON t BEGIN SELECT 1; END", "trigger ti already exists");
+    try c.exec("CREATE TRIGGER IF NOT EXISTS ti AFTER INSERT ON t BEGIN SELECT 1; END");
+    try c.expectError("CREATE TEMP TRIGGER main.x AFTER INSERT ON t BEGIN SELECT 1; END", "temporary trigger may not have qualified name");
+    try c.expectError("DROP TRIGGER nosuch", "no such trigger: nosuch");
+    try c.exec("DROP TRIGGER IF EXISTS nosuch");
+    try c.expectError("SELECT RAISE(ABORT, 'x')", "RAISE() may only be used within a trigger-program");
+
+    // DROP TABLE drops its triggers.
+    try c.exec("DROP VIEW v");
+    try c.exec("DROP TABLE t");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE type = 'trigger'", "0\n");
+}
+
+test "sql: foreign keys" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // PRAGMA foreign_keys=ON.
+    c.db.flags |= int.DbFlag.ForeignKeys;
+    try c.exec("CREATE TABLE p(id INTEGER PRIMARY KEY, name TEXT UNIQUE)");
+    try c.exec("CREATE TABLE c(x INTEGER PRIMARY KEY, pid REFERENCES p(id) ON DELETE CASCADE ON UPDATE CASCADE, pname REFERENCES p(name) ON DELETE SET NULL)");
+    try c.exec("CREATE TABLE r(y REFERENCES p ON DELETE RESTRICT)");
+    try c.exec("CREATE TABLE d(z REFERENCES p DEFERRABLE INITIALLY DEFERRED)");
+    try c.exec("INSERT INTO p VALUES(1, 'a'), (2, 'b'), (3, 'c')");
+    try c.exec("INSERT INTO c VALUES(10, 1, 'a'), (11, 2, 'b'), (12, 2, NULL), (13, NULL, 'c')");
+    try c.expectError("INSERT INTO c VALUES(14, 9, NULL)", "FOREIGN KEY constraint failed");
+    try c.expectError("INSERT INTO c VALUES(15, NULL, 'zz')", "FOREIGN KEY constraint failed");
+    try c.exec("UPDATE p SET id = 20 WHERE id = 2");
+    try c.expectRows("SELECT * FROM c ORDER BY x", "10|1|a\n11|20|b\n12|20|NULL\n13|NULL|c\n");
+    try c.exec("DELETE FROM p WHERE id = 1");
+    try c.expectRows("SELECT * FROM c ORDER BY x", "11|20|b\n12|20|NULL\n13|NULL|c\n");
+    try c.exec("DELETE FROM p WHERE name = 'c'");
+    try c.expectRows("SELECT * FROM c ORDER BY x", "11|20|b\n12|20|NULL\n13|NULL|NULL\n");
+    try c.exec("INSERT INTO r VALUES(20)");
+    try c.expectError("DELETE FROM p WHERE id = 20", "FOREIGN KEY constraint failed");
+    try c.expectError("UPDATE c SET pid = 99 WHERE x = 11", "FOREIGN KEY constraint failed");
+
+    // A deferred constraint is checked at COMMIT, which fails and leaves
+    // the transaction open.
+    try c.exec("BEGIN");
+    try c.exec("INSERT INTO d VALUES(77)");
+    try c.expectError("COMMIT", "FOREIGN KEY constraint failed");
+    try c.exec("INSERT INTO p VALUES(77, 'q')");
+    try c.exec("COMMIT");
+    try c.expectRows("SELECT * FROM d", "77\n");
+
+    try c.expectError("DROP TABLE p", "FOREIGN KEY constraint failed");
+    try c.exec("DELETE FROM r; DELETE FROM d; DELETE FROM c");
+    try c.exec("DROP TABLE p");
+    try c.expectRows("SELECT name FROM sqlite_schema ORDER BY 1", "c\nd\nr\n");
+
+    // A self-referencing table, a composite key, a mismatch.
+    try c.exec("CREATE TABLE emp(id INTEGER PRIMARY KEY, boss REFERENCES emp(id) ON DELETE CASCADE)");
+    try c.exec("INSERT INTO emp VALUES(1, NULL), (2, 1), (3, 2), (4, 4)");
+    try c.expectError("INSERT INTO emp VALUES(5, 9)", "FOREIGN KEY constraint failed");
+    try c.exec("DELETE FROM emp WHERE id = 1");
+    try c.expectRows("SELECT * FROM emp", "4|4\n");
+    try c.exec("CREATE TABLE pk2(a, b, PRIMARY KEY(a, b)) WITHOUT ROWID");
+    try c.exec("CREATE TABLE ch2(x, y, FOREIGN KEY(x, y) REFERENCES pk2 ON UPDATE CASCADE)");
+    try c.exec("INSERT INTO pk2 VALUES(1, 'x'), (2, 'y')");
+    try c.exec("INSERT INTO ch2 VALUES(1, 'x'), (2, 'y'), (NULL, 'q')");
+    try c.expectError("INSERT INTO ch2 VALUES(1, 'y')", "FOREIGN KEY constraint failed");
+    try c.exec("UPDATE pk2 SET b = 'z' WHERE a = 2");
+    try c.expectRows("SELECT * FROM ch2", "1|x\n2|z\nNULL|q\n");
+    try c.exec("CREATE TABLE bad(q REFERENCES emp(boss))");
+    try c.expectError("INSERT INTO bad VALUES(1)", "foreign key mismatch - \"bad\" referencing \"emp\"");
 }

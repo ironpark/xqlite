@@ -1,7 +1,9 @@
 //! UPSERT: INSERT ... ON CONFLICT (port of upsert.c). This part builds the
 //! clauses during parsing.
 
+const std = @import("std");
 const int = @import("sqlite_int.zig");
+const expr_mod = @import("expr.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -22,4 +24,19 @@ pub fn upsertNew(p: *Parse, target: ?*ExprList, target_where: ?*Expr, set: ?*Exp
         .next = next,
     };
     return u;
+}
+
+/// Port of sqlite3UpsertDup(): a copy of an ON CONFLICT list.
+pub fn upsertDup(a: std.mem.Allocator, u_arg: ?*Upsert) Oom!?*Upsert {
+    const u = u_arg orelse return null;
+    const n = try a.create(Upsert);
+    n.* = .{
+        .target = try expr_mod.listDup(a, u.target),
+        .target_where = try expr_mod.exprDup(a, u.target_where),
+        .set = try expr_mod.listDup(a, u.set),
+        .where = try expr_mod.exprDup(a, u.where),
+        .is_do_update = u.set != null,
+        .next = try upsertDup(a, u.next),
+    };
+    return n;
 }

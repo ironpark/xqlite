@@ -180,10 +180,11 @@ zig build run          # CLI 실행
 zig build test         # 단위 테스트
 ```
 
-SQL은 `sql` 명령으로 실행합니다(셸은 아직 최소 기능만 있습니다). SQL을 인자로 주지 않으면 표준 입력에서 `;`로 끝나는 문장을 차례로 실행하고, 결과는 `sqlite3` 셸의 list 모드처럼 `a|b|c`로 출력합니다.
+`sql` 명령은 `sqlite3`와 호환되는 셸입니다. 파일을 생략하거나 `:memory:`를 주면 메모리 DB를 엽니다. 인자로 준 SQL·dot-command를 차례로 실행하고, 인자가 없으면 표준 입력에서 읽습니다(터미널이면 `sqlite> ` 프롬프트를 띄웁니다). 문장 경계는 `sqlite3_complete()` 포팅으로 판단하고, 출력 형식·오류 메시지·종료 코드는 SQLite 3.54 셸과 바이트 단위로 맞춥니다. 출력 모드는 `list`, `csv`, `tabs`, `line`, `column`, `quote`, `insert`, `box`, `table`, `markdown`, `json` 등을 지원하고, dot-command는 `.mode`, `.headers`, `.separator`, `.nullvalue`, `.tables`, `.schema`, `.indexes`, `.dump`, `.read`, `.bail`, `.echo`, `.changes`, `.print`, `.show`, `.help`, `.quit`/`.exit`를 지원합니다.
 
 ```sh
-zig-out/bin/xqlite sql test.db "CREATE TABLE t(a, b); INSERT INTO t VALUES(1, 'x'); SELECT * FROM t;"
+zig-out/bin/xqlite sql test.db "CREATE TABLE t(a, b); INSERT INTO t VALUES(1, 'x');" ".mode box" "SELECT * FROM t"
+zig-out/bin/xqlite sql test.db .dump > test.sql
 ```
 
 `sqlite3`가 설치되어 있으면 순정 SQLite와의 상호 검증 스크립트를 돌릴 수 있습니다(`zig build` 후 실행).
@@ -192,6 +193,8 @@ zig-out/bin/xqlite sql test.db "CREATE TABLE t(a, b); INSERT INTO t VALUES(1, 'x
 ./tools/interop-btree.sh        # 서로 쓴 테이블·인덱스를 읽고 수정, integrity_check 비교
 ./tools/interop-sql.sh          # 같은 SQL을 xqlite와 sqlite3로 실행, 결과·integrity_check 비교
 ./tools/interop-hot-journal.sh  # 서로 남긴 핫 저널 복구
+./tools/interop-shell.sh        # `xqlite sql` 셸과 sqlite3 셸의 출력(모드·dot-command·오류) 비교, .dump 왕복 검증
+./tools/interop-pragma.sh       # PRAGMA 결과를 sqlite3 3.54.1과 비교 (SQLITE3로 경로 지정)
 ./tools/gen-fixtures.sh         # src/testdata의 테스트용 DB 재생성
 ```
 
@@ -222,7 +225,7 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall
 
 - [x] **Phase 0 · 기반**: VFS(POSIX·메모리), 페이지 캐시, Pager(롤백 저널), 파일 헤더 파싱 — Windows VFS·WAL·세이브포인트는 이후 단계
 - [x] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기(auto-vacuum·incremental vacuum 포함), 레코드 포맷, 기존 SQLite 파일 읽기/수정
-- [ ] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
+- [x] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
 - [ ] **Phase 3 · 완성도**: WAL, 인덱스 최적화, 윈도우 함수, JSON, sqllogictest 통과
 - [ ] **Phase 4 · 공통 IR**: 방언 독립적인 Logical Plan으로 프론트엔드 분리, 카탈로그 확장
 - [ ] **Phase 5 · PostgreSQL 방언**: 파서, 엄격한 타입, `pg_catalog`, 시퀀스, `RETURNING`

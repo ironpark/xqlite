@@ -612,6 +612,115 @@ fn seekPacked(ctx: *const anyopaque, cur: *btree.Cursor, key: []const u8) btree.
     return indexMoveto(cur, &r);
 }
 
+/// BTREE_FDK_RANGE: entries findIndexKey() looks at on either side.
+const fdk_range = 10;
+/// BTREE_ULPDISTORTION: the ULPs by which REAL key fields may differ.
+const ulp_distortion = 2;
+
+/// Port of vdbeSkipField(): whether field `i_col` is left out of the
+/// comparison. Fields in `mask` are skipped, unless `integrity`, in which
+/// case only REAL values a few ULPs apart are.
+fn skipField(mask: int.Bitmask, i_col: usize, m1: *const Mem, m2: *const Mem, integrity: bool) bool {
+    if (i_col >= int.bms or mask & (@as(int.Bitmask, 1) << @intCast(i_col)) == 0) return false;
+    if (!integrity) return true;
+    if (m1.flags & MEM.Real != 0 and m2.flags & MEM.Real != 0) {
+        const a: u64 = @bitCast(m1.u.r);
+        const b: u64 = @bitCast(m2.u.r);
+        if ((if (a < b) b - a else a - b) <= ulp_distortion) return true;
+    }
+    return false;
+}
+
+/// Port of vdbeIsMatchingIndexKey(): compare the index entry under `cur`
+/// with `r`, field by field, as skipField() allows. Returns the usual
+/// negative, zero or positive result.
+fn isMatchingIndexKey(cur: *btree.Cursor, integrity: bool, mask: int.Bitmask, r: *UnpackedRecord) btree.Error!i32 {
+    const ki = r.key_info;
+    const gpa = ki.db.?.gpa;
+    const n_rec = cur.payloadSize();
+    if (n_rec > 0x7fffffff) return error.Corrupt;
+    // Read the record in place when it is all on the page; copy it only
+    // when it spills onto overflow pages. (The C code always copies, with
+    // five zeroed spare bytes for a corrupt header varint; getVarint32()
+    // and serialGet() here read 0 past the end of the slice instead.)
+    const local = cur.payloadFetch();
+    var copy: ?[]u8 = null;
+    defer if (copy) |z| gpa.free(z);
+    const rec: []const u8 = if (n_rec <= local.len) local[0..n_rec] else blk: {
+        const z = try gpa.alloc(u8, n_rec);
+        copy = z;
+        try cur.payload(0, z);
+        break :blk z;
+    };
+
+    const hdr = getVarint32(rec, 0);
+    const sz_hdr = hdr.value;
+    if (sz_hdr > 98307) return error.Corrupt;
+    var idx_hdr: u32 = hdr.len;
+    var idx_rec: u32 = sz_hdr;
+    var res: i32 = 0;
+    var m: Mem = .{ .db = ki.db, .enc = ki.enc };
+    for (0..ki.n_all_field) |ii| {
+        if (idx_hdr >= sz_hdr) return error.Corrupt;
+        const st = getVarint32(rec, idx_hdr);
+        idx_hdr += st.len;
+        const n_serial = serialTypeLen(st.value);
+        if (@as(u64, idx_rec) + n_serial > n_rec) return error.Corrupt;
+        serialGet(rec, idx_rec, st.value, &m);
+        if (!skipField(mask, ii, &r.mem[ii], &m, integrity)) {
+            res = memCompare(&m, &r.mem[ii], ki.coll[ii]);
+            if (res != 0) break;
+        }
+        idx_rec += n_serial;
+    }
+    return res;
+}
+
+/// Port of sqlite3VdbeFindIndexKey(): the key `r` of index `idx` should be
+/// in the index but was not found exactly, perhaps because an indexed
+/// expression or VIRTUAL column computes a REAL a little differently.
+/// Look for the entry near `cur` (and, unless `integrity`, then in the
+/// whole index), comparing as isMatchingIndexKey() does. Returns 0 with
+/// `cur` on the entry if found, nonzero otherwise.
+pub fn findIndexKey(cur: *btree.Cursor, idx: *const int.Index, r: *UnpackedRecord, integrity: bool) btree.Error!i32 {
+    var res: i32 = 1;
+    var mask: int.Bitmask = 0;
+    for (0..@min(idx.n_column, int.bms)) |ii| {
+        const i_col = idx.ai_column[ii];
+        if (i_col == int.XN_EXPR or (i_col >= 0 and idx.table.cols[@intCast(i_col)].col_flags & int.COLFLAG.VIRTUAL != 0)) {
+            mask |= @as(int.Bitmask, 1) << @intCast(ii);
+        }
+    }
+    // Without expressions or virtual columns the key cannot be elsewhere.
+    if (mask == 0) return res;
+
+    // Step back fdk_range entries. Hitting the start means the first
+    // scan covers the whole index (n_step < 0).
+    var n_step: i32 = fdk_range * 2;
+    var ii: usize = 0;
+    while (!cur.eof() and ii < fdk_range) : (ii += 1) {
+        if (!try cur.previous()) {
+            _ = try cur.first();
+            n_step = -1;
+            break;
+        }
+    }
+    // At most two scans: near the cursor, then (unless `integrity`) the
+    // whole index.
+    while (!cur.eof()) {
+        var i: i32 = 0;
+        while (i < n_step or n_step < 0) : (i += 1) {
+            res = try isMatchingIndexKey(cur, integrity, mask, r);
+            if (res == 0) break;
+            if (!try cur.next()) break;
+        }
+        if (n_step < 0 or res == 0 or integrity) break;
+        n_step = -1;
+        _ = try cur.first();
+    }
+    return res;
+}
+
 test "serial: compare records" {
     // Record (1, 'abc') vs unpacked (1, 'abd').
     const rec = [_]u8{ 3, 1, 19, 1, 'a', 'b', 'c' };

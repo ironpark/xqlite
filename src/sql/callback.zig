@@ -77,6 +77,12 @@ fn funcHash(c: u8, n: usize) usize {
 /// through FuncDef.hash_next. Read-only once built.
 var builtin_functions: [func_hash_sz]?*FuncDef = @splat(null);
 
+/// The head of bucket `i` of the built-in function table
+/// (sqlite3BuiltinFunctions.a[i]), for PRAGMA function_list.
+pub fn builtinBucket(i: usize) ?*FuncDef {
+    return builtin_functions[i];
+}
+
 /// 0: not built, 1: being built, 2: ready.
 var builtins_state: std.atomic.Value(u8) = .init(0);
 

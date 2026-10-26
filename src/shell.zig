@@ -1316,11 +1316,28 @@ fn dumpTable(p: *Shell, table: []const u8, kind: []const u8, text: []const u8, f
     }
 
     if (std.mem.eql(u8, kind, "table")) {
-        // The C code selects the columns listed by PRAGMA table_info; the
-        // rows are the same as those of SELECT *.
+        // The columns listed by PRAGMA table_info (tableColumnList()),
+        // which leaves out generated columns.
         var q: std.ArrayList(u8) = .empty;
         defer q.deinit(p.gpa);
-        try q.appendSlice(p.gpa, "SELECT * FROM ");
+        try q.appendSlice(p.gpa, "SELECT ");
+        {
+            const info = xqlite.printf.mprintf(p.gpa, "PRAGMA table_info=%Q", &.{.{ .str = table }}) catch return error.OutOfMemory;
+            defer p.gpa.free(info);
+            var stmt_opt: ?*Stmt = null;
+            _ = sql.prepare.prepareV2(p.db, info, &stmt_opt, null);
+            var n_col: usize = 0;
+            if (stmt_opt) |stmt| {
+                defer _ = api.finalize(stmt);
+                while (api.step(stmt) == RC.ROW) : (n_col += 1) {
+                    const name = api.columnText(stmt, 1) orelse "";
+                    if (n_col > 0) try q.append(p.gpa, ',');
+                    try appendText(p.gpa, &q, name, quoteChar(name));
+                }
+            }
+            if (n_col == 0) try q.append(p.gpa, '*');
+        }
+        try q.appendSlice(p.gpa, " FROM ");
         try appendText(p.gpa, &q, table, quoteChar(table));
         var m = p.mode;
         m.spec.table_name = table;

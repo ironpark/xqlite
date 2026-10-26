@@ -32,6 +32,7 @@ const Trigger = int.Trigger;
 const Index = int.Index;
 const Column = int.Column;
 const Upsert = int.Upsert;
+const upsert_mod = @import("upsert.zig");
 const NameContext = int.NameContext;
 const Vdbe = vi.Vdbe;
 const Oom = int.Oom;
@@ -388,10 +389,6 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     if (p.n_err != 0) return;
     if (build.viewGetColumnNames(p, t) != 0) return;
     if (delete_mod.isReadOnly(p, t, trig)) return;
-    if (upsert != null) {
-        pending.notYet(p, "UPSERT");
-        return;
-    }
     if (t.e_tab_type == .vtab) {
         pending.notYet(p, "virtual tables");
         return;
@@ -545,6 +542,26 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         p.n_mem += 1;
         reg_idx[i] = p.n_mem;
     }
+    if (upsert) |up| {
+        if (t.e_tab_type == .vtab) {
+            util.errorMsg(p, "UPSERT not implemented for virtual table \"{s}\"", .{t.name});
+            return;
+        }
+        if (is_view) {
+            util.errorMsg(p, "cannot UPSERT a view", .{});
+            return;
+        }
+        if (build.hasExplicitNulls(p, up.target)) return;
+        tab_list.at(0).i_cursor = i_data_cur;
+        var nx: ?*Upsert = up;
+        while (nx) |n| : (nx = n.next) {
+            n.src = tab_list;
+            n.reg_data = reg_data;
+            n.i_data_cur = i_data_cur;
+            n.i_idx_cur = i_idx_cur;
+            if (n.target != null and try upsert_mod.analyzeTarget(p, tab_list, n, up) != 0) return;
+        }
+    }
 
     // The top of the loop over the rows.
     var addr_ins_top: i32 = 0;
@@ -688,7 +705,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         if (t.tab_flags & TF.HasGenerated != 0) computeGeneratedColumns(p, reg_rowid + 1, t);
 
         var is_replace = false;
-        generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0, on_error, end_of_loop, &is_replace, null);
+        generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0, on_error, end_of_loop, &is_replace, null, upsert);
         if (db.flags & int.DbFlag.ForeignKeys != 0) fkey.fkCheck(p, t, 0, reg_ins, null, false);
         // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
         // trigger programs (a REPLACE delete then resets the seek result).
@@ -767,8 +784,9 @@ pub fn generateConstraintChecks(
     ignore_dest: i32,
     may_replace: *bool,
     ai_chng: ?[]const i32,
+    upsert: ?*Upsert,
 ) void {
-    generateConstraintChecksImpl(p, t, reg_idx, i_data_cur, i_idx_cur, reg_new_data, reg_old_data, pk_chng, override_error_arg, ignore_dest, may_replace, ai_chng) catch build.oomFault(p);
+    generateConstraintChecksImpl(p, t, reg_idx, i_data_cur, i_idx_cur, reg_new_data, reg_old_data, pk_chng, override_error_arg, ignore_dest, may_replace, ai_chng, upsert) catch build.oomFault(p);
 }
 
 fn generateConstraintChecksImpl(
@@ -780,11 +798,14 @@ fn generateConstraintChecksImpl(
     reg_new_data: i32,
     reg_old_data: i32,
     pk_chng: bool,
-    override_error: u8,
+    override_error_arg: u8,
     ignore_dest: i32,
     may_replace: *bool,
     ai_chng: ?[]const i32,
+    upsert_arg: ?*Upsert,
 ) Oom!void {
+    var override_error = override_error_arg;
+    var upsert = upsert_arg;
     const db = p.db;
     const v = p.vdbe.?;
     const is_update = reg_old_data != 0;
@@ -876,6 +897,64 @@ fn generateConstraintChecksImpl(
         p.i_self_tab = 0;
     };
 
+    // The order the UNIQUE constraints are checked in (IndexIterator): the
+    // indexes as listed, except that those of ON CONFLICT clauses come
+    // first, in the order of the clauses.
+    var n_idx: usize = 0;
+    var idx_it = t.index;
+    while (idx_it) |ix| : (idx_it = ix.next) n_idx += 1;
+    const order = try p.arena.alloc(IndexListTerm, n_idx);
+    {
+        var i: usize = 0;
+        idx_it = t.index;
+        while (idx_it) |ix| : (idx_it = ix.next) {
+            order[i] = .{ .idx = ix, .ix = i };
+            i += 1;
+        }
+    }
+    if (upsert) |up| {
+        if (up.target == null) {
+            // One ON CONFLICT clause, without a target.
+            std.debug.assert(up.next == null);
+            if (!up.is_do_update) {
+                // DO NOTHING: all are INSERT OR IGNORE.
+                override_error = OE.Ignore;
+                upsert = null;
+            } else {
+                override_error = OE.Update;
+            }
+        } else if (t.index != null) {
+            const used = try p.arena.alloc(bool, n_idx);
+            @memset(used, false);
+            var i: usize = 0;
+            var term: ?*Upsert = up;
+            while (term) |tm| : (term = tm.next) {
+                if (tm.target == null) break;
+                // The clause of the INTEGER PRIMARY KEY.
+                const tidx = tm.idx orelse continue;
+                var jj: usize = 0;
+                idx_it = t.index;
+                while (idx_it != tidx) : (jj += 1) idx_it = idx_it.?.next;
+                // A duplicate clause is ignored.
+                if (used[jj]) continue;
+                used[jj] = true;
+                order[i] = .{ .idx = tidx, .ix = jj };
+                i += 1;
+            }
+            var jj: usize = 0;
+            idx_it = t.index;
+            while (idx_it) |ix| : ({
+                idx_it = ix.next;
+                jj += 1;
+            }) {
+                if (used[jj]) continue;
+                order[i] = .{ .idx = ix, .ix = jj };
+                i += 1;
+            }
+            std.debug.assert(i == n_idx);
+        }
+    }
+
     // UNIQUE and PRIMARY KEY: (A) the rowid, (B) the indexes without
     // REPLACE, (C) those with REPLACE (createIndex() puts them last).
     //
@@ -914,6 +993,13 @@ fn generateConstraintChecksImpl(
 
     var ipk_top: i32 = 0;
     var ipk_bottom: i32 = 0;
+    // The ON CONFLICT clause of the constraint being checked.
+    var upsert_clause: ?*Upsert = null;
+    // When the first ON CONFLICT clause is not on the rowid, the rowid
+    // check jumps (from upsert_ipk_delay) after the checks of the clauses
+    // before it, and returns (upsert_ipk_return) to the checks after.
+    var upsert_ipk_delay: i32 = 0;
+    var upsert_ipk_return: i32 = 0;
     if (pk_chng and pk == null) {
         // The new rowid must not exist already.
         const addr_rowid_ok = aux.makeLabel(p);
@@ -924,10 +1010,24 @@ fn generateConstraintChecksImpl(
             on_error = OE.Abort;
         }
 
+        if (upsert) |up| {
+            upsert_clause = upsert_mod.ofIndex(up, null);
+            if (upsert_clause) |uc| {
+                // DO NOTHING is INSERT OR IGNORE.
+                on_error = if (uc.is_do_update) OE.Update else OE.Ignore;
+            }
+            if (upsert_clause != up) upsert_ipk_delay = aux.addOp0(v, OP.Goto);
+        }
+
         // A REPLACE of the rowid waits until the other constraints, which
         // may FAIL or IGNORE, have been checked.
         if (on_error == OE.Replace and on_error != override_error and t.index != null) {
-            ipk_top = aux.addOp0(v, OP.Goto) + 1;
+            if (upsert_ipk_delay != 0) {
+                ipk_top = upsert_ipk_delay + 1;
+                upsert_ipk_delay = 0;
+            } else {
+                ipk_top = aux.addOp0(v, OP.Goto) + 1;
+            }
         }
 
         // An UPDATE need not check an unchanged rowid.
@@ -953,6 +1053,10 @@ fn generateConstraintChecksImpl(
                 }
                 seen_replace = true;
             },
+            OE.Update => {
+                try upsert_mod.doUpdate(p, upsert.?, t, null, i_data_cur);
+                _ = aux.goto_(v, ignore_dest);
+            },
             OE.Ignore => _ = aux.goto_(v, ignore_dest),
             OE.Rollback, OE.Fail => build.rowidConstraint(p, on_error, t),
             else => build.rowidConstraint(p, OE.Abort, t),
@@ -961,18 +1065,21 @@ fn generateConstraintChecksImpl(
         if (ipk_top != 0) {
             ipk_bottom = aux.addOp0(v, OP.Goto);
             aux.jumpHere(v, ipk_top - 1);
+        } else if (upsert != null and upsert_clause != upsert) {
+            upsert_ipk_return = aux.addOp0(v, OP.Goto);
         }
     }
 
     // UNIQUE indexes (and the PRIMARY KEY of a WITHOUT ROWID table):
     // build each new index entry and make sure it is not there already.
-    var ix: usize = 0;
-    var idx_opt = t.index;
-    while (idx_opt) |idx| : ({
-        idx_opt = idx.next;
-        ix += 1;
-    }) {
+    for (order) |term| {
+        const idx = term.idx;
+        const ix = term.ix;
         if (reg_idx[ix] == 0) continue;
+        if (upsert) |up| {
+            upsert_clause = upsert_mod.ofIndex(up, idx);
+            if (upsert_ipk_delay != 0 and upsert_clause == up) aux.jumpHere(v, upsert_ipk_delay);
+        }
         const addr_unique_ok = aux.makeLabel(p);
         if (!b_affinity_done) {
             tableAffinity(p, t, reg_new_data + 1);
@@ -1023,6 +1130,7 @@ fn generateConstraintChecksImpl(
         } else if (on_error == OE.Default) {
             on_error = OE.Abort;
         }
+        if (upsert_clause) |uc| on_error = if (uc.is_do_update) OE.Update else OE.Ignore;
 
         // No collision check is needed for a REPLACE of the PRIMARY KEY of
         // a WITHOUT ROWID table without other indexes (the new entry
@@ -1080,6 +1188,10 @@ fn generateConstraintChecksImpl(
         const n_conflict_end = aux.currentAddr(v);
         switch (on_error) {
             OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx),
+            OE.Update => {
+                try upsert_mod.doUpdate(p, upsert.?, t, idx, i_idx_cur + @as(i32, @intCast(ix)));
+                _ = aux.goto_(v, ignore_dest);
+            },
             OE.Ignore => _ = aux.goto_(v, ignore_dest),
             else => {
                 // REPLACE: delete the other row.
@@ -1116,6 +1228,11 @@ fn generateConstraintChecksImpl(
         }
         aux.resolveLabel(v, addr_unique_ok);
         if (reg_r != reg_ix) expr_mod.releaseTempRange(p, reg_r, n_pk_field);
+        if (upsert_clause) |uc| if (upsert_ipk_return != 0 and upsert_mod.nextIsIpk(uc)) {
+            _ = aux.goto_(v, upsert_ipk_delay + 1);
+            aux.jumpHere(v, upsert_ipk_return);
+            upsert_ipk_return = 0;
+        };
     }
 
     // The deferred REPLACE of the rowid.
@@ -1142,12 +1259,15 @@ fn generateConstraintChecksImpl(
 
     // The table record.
     if (t.hasRowid()) {
-        const reg_rec = reg_idx[ix];
+        const reg_rec = reg_idx[n_idx];
         _ = aux.addOp3(v, OP.MakeRecord, reg_new_data + 1, t.n_nv_col, reg_rec);
         if (!b_affinity_done) tableAffinity(p, t, 0);
     }
     may_replace.* = seen_replace;
 }
+
+/// IndexListTerm: an index, and its position in Table.index.
+const IndexListTerm = struct { idx: *Index, ix: usize };
 
 /// Port of sqlite3CompleteInsertion(): write the index entries and the
 /// record made by generateConstraintChecks(). `update_flags` is 0 for an

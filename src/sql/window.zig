@@ -33,7 +33,10 @@ fn windowFind(p: *Parse, list: ?*Window, name: []const u8) ?*Window {
 /// Port of sqlite3WindowOffsetExpr(): a PRECEDING/FOLLOWING offset must
 /// be constant; anything else becomes NULL (and fails later).
 fn offsetExpr(p: *Parse, e: ?*Expr) Oom!?*Expr {
-    if (!expr_mod.isConstant(null, e)) return try expr_mod.exprAlloc(p.arena, TK.NULL, null, false);
+    if (!expr_mod.isConstant(null, e)) {
+        if (p.inRenameObject()) @import("alter.zig").renameExprUnmap(p, e);
+        return try expr_mod.exprAlloc(p.arena, TK.NULL, null, false);
+    }
     return e;
 }
 

@@ -39,7 +39,9 @@ pub fn idListAppend(p: *Parse, list: ?*IdList, t: Token) Oom!*IdList {
         n.* = .{};
         break :blk n;
     };
-    try l.names.append(p.arena, (try nameFromToken(p.arena, t)).?);
+    const name = (try nameFromToken(p.arena, t)).?;
+    try l.names.append(p.arena, name);
+    if (p.inRenameObject()) alter.renameTokenMap(p, name, t);
     return l;
 }
 
@@ -129,6 +131,10 @@ pub fn srcListAppendFromTerm(
     };
     const l = (try srcListAppend(p, list, table, database)) orelse return null;
     const item = l.at(l.len() - 1);
+    if (p.inRenameObject()) if (item.name) |name| {
+        const tok = if (database != null and database.?.z != null) database.? else table.?;
+        alter.renameTokenMap(p, name, tok);
+    };
     if (alias.n != 0) item.alias = try nameFromToken(p.arena, alias);
     if (subquery) |sq| {
         try srcItemAttachSubquery(p, item, sq);
@@ -267,6 +273,7 @@ const resolve = @import("resolve.zig");
 const select_mod = @import("select.zig");
 const attach = @import("attach.zig");
 const pending = @import("pending.zig");
+const alter = @import("alter.zig");
 const btree = @import("../btree/btree.zig");
 
 const Sqlite3 = int.Sqlite3;
@@ -341,8 +348,18 @@ pub fn finishCoding(p: *Parse) void {
     }
     if (v_opt) |v| {
         if (p.returning) {
-            // RETURNING is not ported yet; addReturning() refuses it.
-            unreachable;
+            // Return the rows the RETURNING trigger stored.
+            const ret = p.u1.d.returning.?;
+            if (ret.n_ret_col != 0) {
+                _ = aux.addOp0(v, OP.FkCheck);
+                const addr_rewind = aux.addOp1(v, OP.Rewind, ret.i_ret_cur);
+                const reg = ret.i_ret_reg;
+                var i: i32 = 0;
+                while (i < ret.n_ret_col) : (i += 1) _ = aux.addOp3(v, OP.Column, ret.i_ret_cur, i, reg + i);
+                _ = aux.addOp2(v, OP.ResultRow, reg, ret.n_ret_col);
+                _ = aux.addOp2(v, OP.Next, ret.i_ret_cur, addr_rewind + 1);
+                aux.jumpHere(v, addr_rewind);
+            }
         }
         _ = aux.addOp0(v, OP.Halt);
 
@@ -372,6 +389,11 @@ pub fn finishCoding(p: *Parse) void {
                 std.debug.assert(item.u.const_expr_reg > 0);
                 @import("expr_code.zig").exprCode(p, item.expr, item.u.const_expr_reg);
             }
+        }
+
+        if (p.returning) {
+            const ret = p.u1.d.returning.?;
+            if (ret.n_ret_col != 0) _ = aux.addOp2(v, OP.OpenEphemeral, ret.i_ret_cur, ret.n_ret_col);
         }
 
         _ = aux.goto_(v, 1);
@@ -914,7 +936,7 @@ fn forceNotReadOnly(p: *Parse) void {
 }
 
 /// Allocate a new schema table named `name` with its own arena.
-fn newSchemaTable(db: *Sqlite3, name: []const u8) Oom!*Table {
+pub fn newSchemaTable(db: *Sqlite3, name: []const u8) Oom!*Table {
     const m = try db.gpa.create(std.heap.ArenaAllocator);
     m.* = .init(db.gpa);
     errdefer {
@@ -987,6 +1009,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
     }
 
     const t = newSchemaTable(db, name) catch return oomFault(p);
+    if (p.inRenameObject()) alter.renameTokenMap(p, t.name, name_tok.*);
     t.schema = db.dbs.items[i_db].schema;
     t.n_row_log_est = 200;
     std.debug.assert(p.new_table == null);
@@ -1077,6 +1100,7 @@ fn addColumnImpl(p: *Parse, name_arg: Token, type_arg: Token) Oom!void {
     const a = tableAlloc(p, t);
     const n_extra: usize = if (s_type.n > 0) s_type.n + 1 else 0;
     const z = try a.allocSentinel(u8, s_name.n + n_extra, 0);
+    if (p.inRenameObject()) alter.renameTokenMap(p, z, s_name);
     @memcpy(z[0..s_name.n], s_name.slice());
     z[s_name.n] = 0;
     const name_len = util.dequote(z[0..s_name.n :0]).len;
@@ -1198,6 +1222,7 @@ fn addDefaultValueImpl(p: *Parse, e: ?*Expr, start: ?[*]const u8, end: ?[*]const
         const dflt = try expr_mod.exprDup(tableAlloc(p, t), &x);
         try columnSetExpr(p, t, col, dflt);
     }
+    if (p.inRenameObject()) alter.renameExprUnmap(p, e);
 }
 
 /// Port of sqlite3StringToId(): accept 'name' for a column name in
@@ -1252,6 +1277,9 @@ pub fn addPrimaryKey(p: *Parse, list: ?*ExprList, on_error: i32, autoinc: bool, 
         n_term = 1;
     }
     if (n_term == 1 and col != null and col.?.e_ctype == COLTYPE.INTEGER and sort_order != int.SortOrder.desc) {
+        if (p.inRenameObject()) if (list) |l| {
+            alter.renameTokenRemap(p, &t.i_pkey, expr_mod.skipCollate(l.at(0).expr));
+        };
         t.i_pkey = @intCast(i_col);
         t.key_conf = @intCast(on_error);
         if (autoinc) t.tab_flags |= TF.Autoincrement;
@@ -1276,18 +1304,21 @@ fn addCheckConstraintImpl(p: *Parse, e: ?*Expr, start_arg: ?[*]const u8, end_arg
     if (p.inDeclareVtab()) return;
     if (db.dbs.items[db.init.i_db].bt) |bt| if (bt.read_only) return;
     const a = tableAlloc(p, t);
-    t.check = try expr_mod.listAppendIn(a, t.check, try expr_mod.exprDup(a, e));
+    // In rename mode the expression itself is kept: the rename map has
+    // its nodes.
+    const ce = if (p.inRenameObject()) e else try expr_mod.exprDup(a, e);
+    t.check = try expr_mod.listAppendIn(a, t.check, ce);
     const item = t.check.?.last();
-    if (p.u1.cr.constraint_name.n != 0) {
-        item.e_name = util.dequote(try a.dupeSentinel(u8, p.u1.cr.constraint_name.slice(), 0));
-    } else {
+    var name = p.u1.cr.constraint_name;
+    if (name.n == 0) {
         var start = start_arg.? + 1;
         while (ctype.isSpace(start[0])) start += 1;
         var end = end_arg.?;
         while (ctype.isSpace((end - 1)[0])) end -= 1;
-        const text = start[0 .. @intFromPtr(end) - @intFromPtr(start)];
-        item.e_name = util.dequote(try a.dupeSentinel(u8, text, 0));
+        name = .{ .z = start, .n = @intCast(@intFromPtr(end) - @intFromPtr(start)) };
     }
+    item.e_name = util.dequote(try a.dupeSentinel(u8, name.slice(), 0));
+    if (p.inRenameObject()) alter.renameTokenMap(p, item.e_name, name);
 }
 
 /// Port of sqlite3AddCollateType(): COLLATE on the last column.
@@ -1346,7 +1377,8 @@ fn addGeneratedImpl(p: *Parse, e_arg: ?*Expr, type_tok: ?Token) Oom!void {
     if (e) |x| if (x.op != TK.RAISE) {
         x.aff_expr = col.affinity;
     };
-    try columnSetExpr(p, t, col, try expr_mod.exprDup(tableAlloc(p, t), e));
+    // In rename mode the expression itself is kept for the rename map.
+    try columnSetExpr(p, t, col, if (p.inRenameObject()) e else try expr_mod.exprDup(tableAlloc(p, t), e));
 }
 
 /// Port of sqlite3ChangeCookie(): code an increment of the schema cookie.
@@ -1495,6 +1527,7 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
         // Formerly an INTEGER PRIMARY KEY: make a PRIMARY KEY index.
         const ipk = try expr_mod.exprAlloc(p.arena, TK.ID, Token.init(t.cols[@intCast(t.i_pkey)].name()), false);
         const list = try expr_mod.listAppend(p, null, ipk);
+        if (p.inRenameObject()) alter.renameTokenRemap(p, ipk, &t.i_pkey);
         list.at(0).fg.sort_flags = p.i_pk_sort_order;
         t.i_pkey = -1;
         createIndex(p, null, null, null, list, t.key_conf, null, null, 0, false, .primarykey);
@@ -1731,20 +1764,59 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel
         if (std.mem.eql(u8, t.name, "sqlite_sequence")) s.seq_tab = t;
     }
 
-    // The offset ALTER TABLE ADD COLUMN uses. Only a table read from the
-    // schema keeps it (after a nested parse name_token is another
-    // statement's).
-    if (sel == null and t.isOrdinary() and db.init.busy) {
+    // The offset ALTER TABLE ADD COLUMN (and sqlite_drop_column()) uses.
+    // Only a table read from the schema or parsed in rename mode keeps it
+    // (after a nested parse name_token is another statement's).
+    if (sel == null and t.isOrdinary() and (db.init.busy or p.inRenameObject())) {
         var cons = cons_arg.?;
         if (cons.z == null) cons = end_arg.?;
         t.u.tab.add_col_offset = 13 + @as(i32, @intCast(@intFromPtr(cons.z.?) - @intFromPtr(p.name_token.z.?)));
     }
 }
 
-/// The CREATE TABLE ... AS SELECT part of sqlite3EndTable().
+/// The CREATE TABLE ... AS SELECT part of sqlite3EndTable(): the SELECT
+/// runs as a co-routine whose rows are inserted into the new table, whose
+/// root page is in register u1.cr.reg_root. The columns of `t` are those
+/// of the SELECT's result set.
 fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!void {
-    _ = .{ t, sel, i_db };
-    pending.notYet(p, "CREATE TABLE ... AS SELECT");
+    const v = p.vdbe.?;
+    if (p.inSpecialParse()) {
+        p.rc = RC.ERROR;
+        p.n_err += 1;
+        return;
+    }
+    const i_csr = p.n_tab;
+    p.n_tab += 1;
+    p.n_mem += 1;
+    const reg_yield = p.n_mem;
+    p.n_mem += 1;
+    const reg_rec = p.n_mem;
+    p.n_mem += 1;
+    const reg_rowid = p.n_mem;
+    main_mod.mayAbort(p);
+    _ = aux.addOp3(v, OP.OpenWrite, i_csr, p.u1.cr.reg_root, @intCast(i_db));
+    aux.changeP5(v, vi.OPFLAG.P2ISREG);
+    const addr_top = aux.currentAddr(v) + 1;
+    _ = aux.addOp3(v, OP.InitCoroutine, reg_yield, 0, addr_top);
+    if (p.n_err != 0) return;
+    const sel_tab = (try select_mod.resultSetOfSelect(p, sel, Aff.blob)) orelse return;
+    std.debug.assert(t.cols.len == 0);
+    t.cols = sel_tab.cols;
+    t.n_nv_col = @intCast(sel_tab.cols.len);
+    sel_tab.cols = &.{};
+    var dest = select_mod.selectDestInit(select_mod.SRT.Coroutine, reg_yield);
+    _ = select_mod.select(p, sel, &dest);
+    if (p.n_err != 0) return;
+    aux.endCoroutine(v, reg_yield);
+    aux.jumpHere(v, addr_top - 1);
+    const addr_ins_loop = aux.addOp1(v, OP.Yield, dest.i_sd_parm);
+    _ = aux.addOp3(v, OP.MakeRecord, dest.i_sdst, dest.n_sdst, reg_rec);
+    insert_mod.tableAffinity(p, t, 0);
+    _ = aux.addOp2(v, OP.NewRowid, i_csr, reg_rowid);
+    _ = aux.addOp3(v, OP.Insert, i_csr, reg_rec, reg_rowid);
+    _ = aux.goto_(v, addr_ins_loop);
+    aux.jumpHere(v, addr_ins_loop);
+    _ = aux.addOp1(v, OP.Close, i_csr);
 }
 
 /// Port of sqlite3CreateForeignKey(): a REFERENCES clause or FOREIGN KEY
@@ -1779,6 +1851,7 @@ fn createForeignKeyImpl(p: *Parse, from_col: ?*ExprList, to: Token, to_col: ?*Ex
         .to = util.dequote(try a.dupeSentinel(u8, to.slice(), 0)),
         .cols = try a.alloc(int.FKeyCol, n_col),
     };
+    if (p.inRenameObject()) alter.renameTokenMap(p, fk.to, to);
     if (from_col) |fc| {
         for (fc.slice(), 0..) |item, i| {
             const j = columnIndex(t, item.e_name.?);
@@ -1787,12 +1860,16 @@ fn createForeignKeyImpl(p: *Parse, from_col: ?*ExprList, to: Token, to_col: ?*Ex
                 return;
             }
             fk.cols[i] = .{ .i_from = j, .col = null };
+            if (p.inRenameObject()) alter.renameTokenRemap(p, &fk.cols[i], item.e_name);
         }
     } else {
         fk.cols[0] = .{ .i_from = @intCast(t.cols.len - 1), .col = null };
     }
     if (to_col) |tc| {
-        for (tc.slice(), 0..) |item, i| fk.cols[i].col = try a.dupeSentinel(u8, item.e_name.?, 0);
+        for (tc.slice(), 0..) |item, i| {
+            fk.cols[i].col = try a.dupeSentinel(u8, item.e_name.?, 0);
+            if (p.inRenameObject()) alter.renameTokenRemap(p, fk.cols[i].col, item.e_name);
+        }
     }
     fk.is_deferred = false;
     fk.a_action = .{ @intCast(flags & 0xff), @intCast((flags >> 8) & 0xff) };
@@ -2003,7 +2080,9 @@ fn createIndexImpl(
     }
     const l = list.?;
 
-    const a = tableAlloc(p, t);
+    // An index that CREATE INDEX makes in rename mode only lives as long
+    // as the statement.
+    const a = if (tbl_name != null and p.inRenameObject()) p.arena else tableAlloc(p, t);
     const n_extra_col: usize = if (pk) |k| k.n_key_col else 1;
     const idx = try allocateIndexObject(a, l.len() + n_extra_col, t, name);
     idx.on_error = @intCast(on_error);
@@ -2013,7 +2092,9 @@ fn createIndexImpl(
     idx.n_key_col = @intCast(l.len());
     if (where) |w| {
         _ = resolve.resolveSelfReference(p, t, resolve.NC.PartIdx, w, null);
-        idx.part_idx_where = try expr_mod.exprDup(a, w);
+        // In rename mode the expressions themselves are kept: the rename
+        // map has their nodes.
+        idx.part_idx_where = if (p.inRenameObject()) w else try expr_mod.exprDup(a, w);
         where = null;
     }
 
@@ -2063,7 +2144,11 @@ fn createIndexImpl(
         idx.coll[i] = zcoll;
         idx.sort_order[i] = item.fg.sort_flags & sort_order_mask;
     }
-    if (has_col_expr) idx.col_expr = try expr_mod.listDup(a, l);
+    if (p.inRenameObject()) {
+        idx.col_expr = l;
+    } else if (has_col_expr) {
+        idx.col_expr = try expr_mod.listDup(a, l);
+    }
 
     // The key of the table follows: the WITHOUT ROWID primary key, or
     // the rowid.
@@ -2117,6 +2202,10 @@ fn createIndexImpl(
                     if (pi.on_error == OE.Default) pi.on_error = idx.on_error;
                 }
                 if (idx_type == .primarykey) pi.idx_type = idx_type;
+                if (p.inRenameObject()) {
+                    idx.next = p.new_index;
+                    p.new_index = idx;
+                }
                 return reorderReplaceIndexes(t);
             }
         }
@@ -2181,6 +2270,9 @@ fn createIndexImpl(
         idx.next = t.index;
         t.index = idx;
         linked = true;
+    } else if (p.inRenameObject()) {
+        std.debug.assert(p.new_index == null);
+        p.new_index = idx;
     }
     // An index of CREATE INDEX lives on only in the reread schema; its
     // memory stays in the table's arena until the table is freed.
@@ -2211,7 +2303,6 @@ pub fn srcListLookup(p: *Parse, src: *SrcList) ?*Table {
     item.s_tab = t;
     item.fg.not_cte = true;
     if (t) |tab| tableRef(p, tab);
-    if (t != null and viewGetColumnNames(p, t.?) != 0) return null;
     return t;
 }
 
@@ -2403,9 +2494,10 @@ pub const SAVEPOINT_ROLLBACK = aux.SAVEPOINT_ROLLBACK;
 
 /// Port of sqlite3Savepoint().
 pub fn savepoint(p: *Parse, op: i32, name: Token) void {
-    _ = op;
-    _ = name;
-    pending.notYet(p, "SAVEPOINT");
+    if (p.syntax_only) return;
+    const z = (nameFromToken(p.arena, name) catch return oomFault(p)) orelse return;
+    const v = getVdbe(p) orelse return;
+    _ = aux.addOp4Str(v, OP.Savepoint, op, 0, 0, z);
 }
 
 /// Port of sqlite3OpenTempDatabase(): open the TEMP database if it is not
@@ -2657,6 +2749,7 @@ pub fn createView(p: *Parse, begin: Token, name1: Token, name2: Token, cnames: ?
 }
 
 fn createViewImpl(p: *Parse, begin: Token, name1: Token, name2: Token, cnames: ?*ExprList, sel: *Select, is_temp: bool, no_err: bool) Oom!void {
+    defer if (p.inRenameObject()) alter.renameExprlistUnmap(p, cnames);
     if (p.n_var > 0) {
         util.errorMsg(p, "parameters are not allowed in views", .{});
         return;
@@ -2674,10 +2767,11 @@ fn createViewImpl(p: *Parse, begin: Token, name1: Token, name2: Token, cnames: ?
     attach.fixInit(&fix, p, i_db, "view", unq.slice());
     if (attach.fixSelect(&fix, sel)) return;
 
-    // The view keeps a copy of its SELECT (with its own memory).
+    // The view keeps a copy of its SELECT (with its own memory); in
+    // rename mode the SELECT itself, whose nodes the rename map has.
     sel.sel_flags |= SF.View;
     const a = tableAlloc(p, t);
-    t.u = .{ .view = .{ .select = try expr_mod.selectDup(a, sel) } };
+    t.u = .{ .view = .{ .select = if (p.inRenameObject()) sel else try expr_mod.selectDup(a, sel) } };
     t.check = try expr_mod.listDup(a, cnames);
     t.e_tab_type = .view;
     if (p.db.malloc_failed) return;
@@ -2805,10 +2899,55 @@ fn reindexImpl(p: *Parse, name1_arg: ?Token, name2_arg: ?Token) Oom!void {
     }
 }
 
-/// Port of sqlite3AddReturning().
+/// Port of sqlite3DeleteReturning(): the parse cleanup that removes the
+/// RETURNING trigger from the TEMP schema.
+pub fn deleteReturning(p: *Parse) void {
+    if (!p.returning) return;
+    const ret = p.u1.d.returning orelse return;
+    _ = p.db.dbs.items[1].schema.trig_hash.remove(ret.ret_trig.name);
+}
+
+/// Port of sqlite3AddReturning(): RETURNING becomes a TEMP trigger on
+/// whatever table the statement turns out to change (see
+/// trigger.triggerList()). Removed by deleteReturning() when the parse
+/// ends.
 pub fn addReturning(p: *Parse, list: ?*ExprList) void {
-    _ = list;
-    pending.notYet(p, "RETURNING");
+    addReturningImpl(p, list) catch oomFault(p);
+}
+
+fn addReturningImpl(p: *Parse, list: ?*ExprList) Oom!void {
+    const db = p.db;
+    if (p.syntax_only) return;
+    if (p.new_trigger != null) {
+        util.errorMsg(p, "cannot use RETURNING in a trigger", .{});
+    } else {
+        std.debug.assert(!p.returning or p.if_not_exists);
+    }
+    p.returning = true;
+    const ret = try p.arena.create(int.Returning);
+    const tmp_schema = db.dbs.items[1].schema;
+    ret.* = .{
+        .parse = p,
+        .return_el = list,
+        .ret_trig = .{
+            .name = undefined,
+            .table = @constCast(""),
+            .op = TK.RETURNING,
+            .tr_tm = int.TRIGGER_AFTER,
+            .returning = true,
+            .schema = tmp_schema,
+            .tab_schema = tmp_schema,
+        },
+        .ret_tstep = .{ .op = TK.RETURNING, .expr_list = list },
+    };
+    const name = std.fmt.bufPrint(ret.name_buf[0 .. ret.name_buf.len - 1], "sqlite_returning_{x}", .{@intFromPtr(p)}) catch unreachable;
+    ret.name_buf[name.len] = 0;
+    ret.ret_trig.name = ret.name_buf[0..name.len :0];
+    ret.ret_trig.step_list = &ret.ret_tstep;
+    ret.ret_tstep.trig = &ret.ret_trig;
+    p.u1 = .{ .d = .{ .returning = ret } };
+    std.debug.assert(!tmp_schema.trig_hash.contains(ret.ret_trig.name) or p.n_err != 0 or p.if_not_exists);
+    try tmp_schema.trig_hash.put(db.gpa, ret.ret_trig.name, &ret.ret_trig);
 }
 
 /// Port of sqlite3RootPageMoved(): an auto-vacuum DROP moved b-tree `from`

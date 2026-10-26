@@ -113,8 +113,10 @@ def main():
             ntot += 1
             for kind in sorted(kinds):
                 if kind == 'res':
+                    # Anything but a plain query may change the database:
+                    # it runs on a copy, and the result includes the dump.
                     post = ()
-                    if re.search(r'(^|;)\s*(UPDATE|DELETE|INSERT|REPLACE|WITH)\b', q, re.I):
+                    if not re.match(r'\s*(SELECT|VALUES)\b', q, re.I) or ';' in q:
                         post = ('.dump', 'PRAGMA integrity_check')
                     a = run([XQ, 'sql'], db, q, post=post, writes=bool(post))
                     b = run([SQ], db, q, pre=SQPRE, post=post, writes=bool(post))

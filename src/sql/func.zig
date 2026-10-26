@@ -1920,9 +1920,10 @@ var builtin_funcs = [_]FuncDef{
 /// Port of sqlite3RegisterBuiltinFunctions(): fill the global table of
 /// built-in functions. Called once, by callback.registerBuiltins().
 pub fn registerBuiltinFunctions() void {
-    // TODO: sqlite3AlterFunctions() (alter.c), sqlite3WindowFunctions()
-    // (window.c: row_number(), rank(), ...) and sqlite3RegisterJsonFunctions()
-    // (json.c) are called here once ported.
+    // TODO: sqlite3WindowFunctions() (window.c: row_number(), rank(), ...)
+    // and sqlite3RegisterJsonFunctions() (json.c) are called here once
+    // ported.
+    @import("alter.zig").alterFunctions();
     callback.insertBuiltinFuncs(&builtin_funcs);
     callback.insertBuiltinFuncs(&date_funcs);
 }

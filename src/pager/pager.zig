@@ -14,10 +14,13 @@
 //!
 //! plus `err`, entered when an I/O error leaves the cache untrustworthy.
 //!
-//! Not ported yet: WAL, savepoints and the statement sub-journal, super
-//! journals for multi-database commits (they are read during recovery but
-//! never written), journal_mode=MEMORY, locking_mode=EXCLUSIVE, temporary
-//! and in-memory databases, mmap.
+//! Savepoints (and the statement transactions built on them) save pages
+//! changed after the savepoint opened to the sub-journal, which is kept in
+//! memory (as with SQLITE_STMTJRNL_SPILL=-1).
+//!
+//! Not ported yet: WAL, super journals for multi-database commits (they
+//! are read during recovery but never written), journal_mode=MEMORY,
+//! locking_mode=EXCLUSIVE, temporary and in-memory databases, mmap.
 
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
@@ -107,6 +110,33 @@ pub const State = enum(u8) {
     }
 };
 
+/// SAVEPOINT_RELEASE and SAVEPOINT_ROLLBACK.
+pub const SavepointOp = enum { release, rollback };
+
+/// Port of PagerSavepoint.
+const Savepoint = struct {
+    /// Offset in the main journal of the first record written after the
+    /// savepoint opened.
+    offset: u64,
+    /// Offset of the first journal header written after it, or 0.
+    hdr_offset: u64 = 0,
+    /// Pages already saved for the savepoint, in the main journal or the
+    /// sub-journal (pInSavepoint).
+    in_savepoint: std.AutoHashMapUnmanaged(Pgno, void) = .empty,
+    /// Size of the image when it opened.
+    n_orig: Pgno,
+    /// Index of its first record in the sub-journal.
+    i_sub_rec: u32,
+    /// Releasing it may truncate the sub-journal: no later savepoint
+    /// shares records with it (bTruncateOnRelease).
+    truncate_on_release: bool = true,
+};
+
+/// Size of a sub-journal record: a page number and the page.
+fn subRecordSize(page_size: u32) u64 {
+    return @as(u64, page_size) + 4;
+}
+
 pub const GetFlags = struct {
     /// The caller will overwrite the page, so skip reading it (PAGER_GET_NOCONTENT).
     no_content: bool = false,
@@ -178,6 +208,14 @@ pub const Pager = struct {
     in_journal: std.AutoHashMapUnmanaged(Pgno, void) = .empty,
     journal_on: bool = false,
 
+    /// Open savepoints, outermost first (aSavepoint).
+    savepoints: std.ArrayListUnmanaged(Savepoint) = .empty,
+    /// The sub-journal: records of a 4-byte page number and the page's
+    /// content as it was when first written after a savepoint opened.
+    sub_journal: std.ArrayListUnmanaged(u8) = .empty,
+    /// Records in the sub-journal (nSubRec).
+    n_sub_rec: u32 = 0,
+
     /// Bytes 24..39 of the database file as last seen. Used to detect writes
     /// by other connections.
     db_file_vers: [16]u8 = @splat(0),
@@ -248,6 +286,8 @@ pub const Pager = struct {
         if (p.jfd) |j| j.close();
         p.fd.close();
         p.in_journal.deinit(p.gpa);
+        p.releaseAllSavepoints();
+        p.savepoints.deinit(p.gpa);
         p.gpa.free(p.tmp_space);
         p.gpa.free(p.record_buf);
         p.cache.deinit();
@@ -490,6 +530,7 @@ pub const Pager = struct {
     /// Port of pager_unlock(): drop every lock and return to `open`.
     fn unlock(p: *Pager) void {
         p.stopJournaling();
+        p.releaseAllSavepoints();
         // Close the journal so that another connection in DELETE mode can
         // delete it, unless the OS refuses to delete open files and the
         // journal is meant to persist anyway.
@@ -677,7 +718,11 @@ pub const Pager = struct {
             if (pg.pgno > p.mx_pgno) return error.DiskFull;
             // The page will be overwritten; no need to journal its old
             // content.
-            if (flags.no_content and pg.pgno <= p.db_orig_size) p.markInJournal(pg.pgno);
+            if (flags.no_content) {
+                if (pg.pgno <= p.db_orig_size) p.markInJournal(pg.pgno);
+                // Benign if it fails, as for the journal.
+                p.addToSavepoints(pg.pgno) catch {};
+            }
             @memset(pg.data, 0);
         } else {
             try p.readDbPage(pg);
@@ -738,6 +783,10 @@ pub const Pager = struct {
     pub fn movePage(p: *Pager, pg: *Page, pgno: Pgno, is_commit: bool) Error!void {
         std.debug.assert(pg.n_ref > 0);
         std.debug.assert(p.state == .writer_cachemod or p.state == .writer_dbmod);
+        if (p.temp_file) try p.write(pg);
+        // A dirty page not yet saved for the latest savepoint is saved now,
+        // under its old number.
+        if (pg.flags.dirty) try p.subjournalPageIfRequired(pg);
 
         // The journal must be synced before the old location is written:
         // remember to keep that requirement on whatever lands there.
@@ -829,7 +878,10 @@ pub const Pager = struct {
     /// Journals the original content the first time a page is written.
     pub fn write(p: *Pager, pg: *Page) Error!void {
         std.debug.assert(p.state.atLeast(.writer_locked));
-        if (pg.flags.writeable and p.db_size >= pg.pgno) return;
+        if (pg.flags.writeable and p.db_size >= pg.pgno) {
+            if (p.savepoints.items.len > 0) return p.subjournalPageIfRequired(pg);
+            return;
+        }
         if (p.err) |e| return e;
         if (p.sector_size > p.page_size) return p.writeLargeSector(pg);
         return p.writeOne(pg);
@@ -854,6 +906,8 @@ pub const Pager = struct {
             }
         }
         pg.flags.writeable = true;
+        // Save the page for the savepoints that do not have it yet.
+        if (p.savepoints.items.len > 0) try p.subjournalPageIfRequired(pg);
         if (p.db_size < pg.pgno) p.db_size = pg.pgno;
     }
 
@@ -868,6 +922,7 @@ pub const Pager = struct {
         p.journal_off += p.record_buf.len;
         p.n_rec += 1;
         p.markInJournal(pg.pgno);
+        try p.addToSavepoints(pg.pgno);
     }
 
     /// Port of pagerWriteLargeSector(). When several pages share a disk
@@ -911,8 +966,8 @@ pub const Pager = struct {
     /// Port of sqlite3PagerDontWrite(): the page's content no longer matters
     /// (e.g. it became a freelist leaf), so skip writing it.
     pub fn dontWrite(p: *Pager, pg: *Page) void {
-        _ = p;
-        if (pg.flags.dirty) {
+        // A savepoint rollback may still need the page's content.
+        if (!p.temp_file and pg.flags.dirty and p.savepoints.items.len == 0) {
             pg.flags.dont_write = true;
             pg.flags.writeable = false;
         }
@@ -935,6 +990,11 @@ pub const Pager = struct {
         const n_header = @min(p.page_size, p.sector_size);
         const hdr = p.tmp_space[0..n_header];
 
+        // Savepoints opened since the last header end their first segment
+        // of records here.
+        for (p.savepoints.items) |*sp| {
+            if (sp.hdr_offset == 0) sp.hdr_offset = p.journal_off;
+        }
         p.journal_off = journal.headerOffset(p.journal_off, p.sector_size);
         p.journal_hdr = p.journal_off;
 
@@ -1058,32 +1118,72 @@ pub const Pager = struct {
 
     // ============================================================ playback
 
-    /// Port of pager_playback_one_page() for the main journal. Returns false
-    /// when the record is invalid, which ends the playback (SQLITE_DONE).
+    /// pager_playback_one_page() for the main journal during a transaction
+    /// rollback or hot-journal recovery. Returns false when the record is
+    /// invalid, which ends the playback (SQLITE_DONE).
     fn playbackOnePage(p: *Pager) Error!bool {
-        try p.jfd.?.read(p.record_buf, p.journal_off);
-        p.journal_off += p.record_buf.len;
-        const rec = journal.decodeRecord(p.record_buf);
+        return p.playbackRecord(&p.journal_off, null, true, false);
+    }
 
-        // Garbage from a crash while the journal was being written.
-        if (rec.pgno == 0 or p.isLockPage(rec.pgno)) return false;
-        if (rec.pgno > p.db_size) return true;
-        if (journal.checksum(p.cksum_init, rec.page) != rec.cksum) return false;
-
-        if (rec.pgno == 1) p.n_reserve = rec.page[20];
-
-        // Records after `journal_hdr` were never synced and must not reach
-        // the database file; restoring the cache copy is still fine.
-        const is_synced = p.no_sync or p.journal_off <= p.journal_hdr;
-        if (p.mayWriteDb() and is_synced) {
-            try p.fd.write(rec.page, @as(u64, rec.pgno - 1) * p.page_size);
-            if (rec.pgno > p.db_file_size) p.db_file_size = rec.pgno;
+    /// Port of pager_playback_one_page(): play back the record at `off.*`
+    /// of the main journal (`is_main`) or the sub-journal, advancing
+    /// `off.*` past it. Records past the image, or already in `done`, are
+    /// skipped; `done` records the others. Returns false when the record is
+    /// invalid (never during a savepoint rollback).
+    fn playbackRecord(p: *Pager, off: *u64, done: ?*std.AutoHashMapUnmanaged(Pgno, void), is_main: bool, is_savepoint: bool) Error!bool {
+        var pgno: Pgno = undefined;
+        var data: []const u8 = undefined;
+        if (is_main) {
+            try p.jfd.?.read(p.record_buf, off.*);
+            off.* += p.record_buf.len;
+            const rec = journal.decodeRecord(p.record_buf);
+            pgno = rec.pgno;
+            data = rec.page;
+            // Garbage from a crash while the journal was being written.
+            if (pgno == 0 or p.isLockPage(pgno)) {
+                std.debug.assert(!is_savepoint);
+                return false;
+            }
+            if (pgno > p.db_size or (done != null and done.?.contains(pgno))) return true;
+            if (!is_savepoint and journal.checksum(p.cksum_init, data) != rec.cksum) return false;
+        } else {
+            const rec = p.sub_journal.items[@intCast(off.*)..][0..@intCast(subRecordSize(p.page_size))];
+            off.* += rec.len;
+            pgno = std.mem.readInt(u32, rec[0..4], .big);
+            data = rec[4..];
+            std.debug.assert(pgno != 0 and !p.isLockPage(pgno));
+            if (pgno > p.db_size or done.?.contains(pgno)) return true;
         }
-        if (p.lookup(rec.pgno)) |page| {
-            @memcpy(page.data, rec.page);
-            if (p.reiniter) |r| r(page);
-            if (rec.pgno == 1) @memcpy(&p.db_file_vers, page.data[24..40]);
-            p.cache.release(page);
+        if (done) |d| try d.put(p.gpa, pgno, {});
+
+        if (pgno == 1) p.n_reserve = data[20];
+
+        var page = p.lookup(pgno);
+        // Main-journal records after `journal_hdr` were never synced and
+        // must not reach the database file. A sub-journal record may hold
+        // content newer than the transaction's start, which may only reach
+        // the file once the original is synced in the main journal.
+        const is_synced = if (is_main)
+            p.no_sync or off.* <= p.journal_hdr
+        else
+            page == null or !page.?.flags.need_sync;
+        if (p.mayWriteDb() and is_synced) {
+            try p.fd.write(data, @as(u64, pgno - 1) * p.page_size);
+            if (pgno > p.db_file_size) p.db_file_size = pgno;
+        } else if (!is_main and page == null) {
+            // Not written and not cached: the next read would see the
+            // file. Cache the record's content instead, dirty.
+            std.debug.assert(is_savepoint and !p.no_spill_rollback);
+            p.no_spill_rollback = true;
+            defer p.no_spill_rollback = false;
+            page = try p.get(pgno, .{ .no_content = true });
+            p.cache.makeDirty(page.?);
+        }
+        if (page) |pg| {
+            @memcpy(pg.data, data);
+            if (p.reiniter) |r| r(pg);
+            if (pgno == 1) @memcpy(&p.db_file_vers, pg.data[24..40]);
+            p.cache.release(pg);
         }
         return true;
     }
@@ -1202,6 +1302,7 @@ pub const Pager = struct {
     /// SHARED. The unlock is attempted even if finalizing fails.
     fn endTransaction(p: *Pager, has_super: bool, commit: bool) Error!void {
         if (!p.state.atLeast(.writer_locked) and !(p.lock orelse LockLevel.exclusive).atLeast(.reserved)) return;
+        p.releaseAllSavepoints();
 
         const finalized = p.finalizeOrError(has_super, commit);
         const unlocked = p.unlockDb(.shared);
@@ -1357,6 +1458,157 @@ pub const Pager = struct {
         p.no_spill_rollback = true;
         defer p.no_spill_rollback = false;
         p.playback(false) catch |err| return p.setError(err);
+    }
+
+    // ========================================================== savepoints
+
+    /// Port of releaseAllSavepoints(): forget every savepoint and empty the
+    /// sub-journal.
+    fn releaseAllSavepoints(p: *Pager) void {
+        for (p.savepoints.items) |*sp| sp.in_savepoint.deinit(p.gpa);
+        p.savepoints.clearRetainingCapacity();
+        p.sub_journal.clearAndFree(p.gpa);
+        p.n_sub_rec = 0;
+    }
+
+    /// Port of addToSavepointBitvecs(): `pgno` is saved for every open
+    /// savepoint it was part of.
+    fn addToSavepoints(p: *Pager, pgno: Pgno) Error!void {
+        for (p.savepoints.items) |*sp| {
+            if (pgno <= sp.n_orig) try sp.in_savepoint.put(p.gpa, pgno, {});
+        }
+    }
+
+    /// Port of subjRequiresPage(): whether an open savepoint lacks the
+    /// page. Savepoints opened after that one then share its record, so
+    /// releasing them must not truncate the sub-journal.
+    fn subjRequiresPage(p: *Pager, pg: *const Page) bool {
+        const items = p.savepoints.items;
+        for (items, 0..) |*sp, i| {
+            if (sp.n_orig >= pg.pgno and !sp.in_savepoint.contains(pg.pgno)) {
+                for (items[i + 1 ..]) |*later| later.truncate_on_release = false;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Port of subjournalPage(): append the page's current content to the
+    /// sub-journal.
+    fn subjournalPage(p: *Pager, pg: *const Page) Error!void {
+        if (p.journal_mode != .off) {
+            std.debug.assert(p.inJournal(pg.pgno) or pg.pgno > p.db_orig_size);
+            var pgno_bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &pgno_bytes, pg.pgno, .big);
+            try p.sub_journal.ensureUnusedCapacity(p.gpa, @intCast(subRecordSize(p.page_size)));
+            p.sub_journal.appendSliceAssumeCapacity(&pgno_bytes);
+            p.sub_journal.appendSliceAssumeCapacity(pg.data);
+        }
+        p.n_sub_rec += 1;
+        std.debug.assert(p.savepoints.items.len > 0);
+        try p.addToSavepoints(pg.pgno);
+    }
+
+    /// Port of subjournalPageIfRequired().
+    fn subjournalPageIfRequired(p: *Pager, pg: *const Page) Error!void {
+        if (p.subjRequiresPage(pg)) try p.subjournalPage(pg);
+    }
+
+    /// Port of sqlite3PagerOpenSavepoint(): make sure at least `n`
+    /// savepoints are open, opening new ones at the current state.
+    /// Requires a write transaction.
+    pub fn openSavepoint(p: *Pager, n: u32) Error!void {
+        std.debug.assert(p.state.atLeast(.writer_locked));
+        if (n <= p.savepoints.items.len) return;
+        try p.savepoints.ensureTotalCapacity(p.gpa, n);
+        while (p.savepoints.items.len < n) {
+            p.savepoints.appendAssumeCapacity(.{
+                .n_orig = p.db_size,
+                .offset = if (p.jfd != null and p.journal_off > 0) p.journal_off else p.sector_size,
+                .i_sub_rec = p.n_sub_rec,
+            });
+        }
+    }
+
+    /// Port of sqlite3PagerSavepoint(): release savepoint `i` (and those
+    /// opened after it), or roll back to it, keeping it open. Rolling back
+    /// to -1 restores the start of the transaction, without ending it.
+    pub fn savepoint(p: *Pager, op: SavepointOp, i: i32) Error!void {
+        if (p.err) |e| return e;
+        std.debug.assert(i >= 0 or op == .rollback);
+        if (i >= @as(i32, @intCast(p.savepoints.items.len))) return;
+        const n_new: usize = @intCast(i + @intFromBool(op == .rollback));
+        for (p.savepoints.items[n_new..]) |*sp| sp.in_savepoint.deinit(p.gpa);
+        const items = p.savepoints.items;
+        p.savepoints.shrinkRetainingCapacity(n_new);
+        switch (op) {
+            .release => {
+                // Drop the sub-journal records only the released
+                // savepoints used.
+                const rel = items[n_new];
+                if (rel.truncate_on_release) {
+                    p.sub_journal.shrinkRetainingCapacity(@intCast(subRecordSize(p.page_size) * rel.i_sub_rec));
+                    p.n_sub_rec = rel.i_sub_rec;
+                }
+            },
+            .rollback => {
+                // Without a journal nothing has changed yet.
+                if (p.jfd != null) {
+                    const sp: ?*Savepoint = if (n_new == 0) null else &p.savepoints.items[n_new - 1];
+                    p.playbackSavepoint(sp) catch |err| return p.setError(err);
+                }
+            },
+        }
+    }
+
+    /// Port of pagerPlaybackSavepoint(): restore the pages changed since
+    /// `sp` opened (since the transaction started if null), from the main
+    /// journal records written after it and then its sub-journal records.
+    fn playbackSavepoint(p: *Pager, sp: ?*Savepoint) Error!void {
+        std.debug.assert(p.state != .err and p.state.atLeast(.writer_locked));
+        // Pages played back, so each is restored only from its oldest
+        // record.
+        var done: std.AutoHashMapUnmanaged(Pgno, void) = .empty;
+        defer done.deinit(p.gpa);
+        const done_opt: ?*std.AutoHashMapUnmanaged(Pgno, void) = if (sp != null) &done else null;
+
+        p.db_size = if (sp) |s| s.n_orig else p.db_orig_size;
+        p.change_count_done = p.temp_file;
+
+        // The journal's effective size: anything past journal_off belongs
+        // to an earlier transaction (TRUNCATE or PERSIST mode).
+        const sz_j = p.journal_off;
+
+        // The records from the savepoint up to the next journal header.
+        if (sp) |s| {
+            const hdr_off = if (s.hdr_offset != 0) s.hdr_offset else sz_j;
+            p.journal_off = s.offset;
+            while (p.journal_off < hdr_off) _ = try p.playbackRecord(&p.journal_off, done_opt, true, true);
+        } else {
+            p.journal_off = 0;
+        }
+
+        // Then every later segment of the journal.
+        const rec_size = journal.recordSize(p.page_size);
+        while (p.journal_off < sz_j) {
+            const hdr = try p.readJournalHdr(false, sz_j) orelse break;
+            var n_rec = hdr.n_rec;
+            if (n_rec == 0 and p.journal_hdr + p.sector_size == p.journal_off) {
+                n_rec = @intCast((sz_j - p.journal_off) / rec_size);
+            }
+            var ii: u32 = 0;
+            while (ii < n_rec and p.journal_off < sz_j) : (ii += 1) {
+                _ = try p.playbackRecord(&p.journal_off, done_opt, true, true);
+            }
+        }
+
+        // Finally the sub-journal records of the savepoint.
+        if (sp) |s| {
+            var off: u64 = subRecordSize(p.page_size) * s.i_sub_rec;
+            var ii = s.i_sub_rec;
+            while (ii < p.n_sub_rec) : (ii += 1) _ = try p.playbackRecord(&off, done_opt, false, true);
+        }
+        p.journal_off = sz_j;
     }
 
     /// Port of pagerStress(): write one dirty page so its slot can be reused.

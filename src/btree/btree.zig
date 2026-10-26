@@ -15,8 +15,7 @@
 //! end of the file.
 //!
 //! Not ported yet: WAL databases (refused, as with SQLITE_OMIT_WAL),
-//! savepoints and statement transactions, shared cache, incremental blob
-//! I/O and BtreeTransferRow.
+//! shared cache, incremental blob I/O and BtreeTransferRow.
 
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
@@ -534,10 +533,14 @@ pub const Btree = struct {
     /// requested strength is already open; a read transaction can be
     /// upgraded. Lock contention retries through the busy handler only
     /// when no transaction was open (holding a read lock while waiting for
-    /// a writer could deadlock).
-    pub fn beginTrans(bt: *Btree, mode: TransMode) Error!void {
+    /// a writer could deadlock). A write transaction makes sure the pager
+    /// has `n_savepoint` savepoints open (the connection's nSavepoint).
+    pub fn beginTrans(bt: *Btree, mode: TransMode, n_savepoint: u32) Error!void {
         const wrflag = mode != .read;
-        if (bt.in_trans == .write or (bt.in_trans == .read and !wrflag)) return;
+        if (bt.in_trans == .write or (bt.in_trans == .read and !wrflag)) {
+            if (wrflag) try bt.pager.openSavepoint(n_savepoint);
+            return;
+        }
         if (bt.read_only and wrflag) return error.ReadOnly;
 
         bt.initially_empty = bt.n_page == 0;
@@ -561,7 +564,31 @@ pub const Btree = struct {
                 try bt.pager.write(p1.db_page);
                 put4(p1.data + 28, bt.n_page);
             }
+            try bt.pager.openSavepoint(n_savepoint);
         }
+    }
+
+    /// Port of sqlite3BtreeBeginStmt(): open statement transaction
+    /// `i_statement`, a savepoint numbered after every SAVEPOINT the
+    /// connection has open. Requires a write transaction.
+    pub fn beginStmt(bt: *Btree, i_statement: u32) Error!void {
+        std.debug.assert(bt.in_trans == .write and !bt.read_only and i_statement > 0);
+        try bt.pager.openSavepoint(i_statement);
+    }
+
+    /// Port of sqlite3BtreeSavepoint(): release savepoint `i` (and those
+    /// opened after it), or roll back to it; rolling back to -1 restores
+    /// the start of the transaction. A no-op without a write transaction.
+    /// Cursors are saved first on rollback; their positions may no longer
+    /// exist afterwards.
+    pub fn savepoint(bt: *Btree, op: pager_mod.SavepointOp, i: i32) Error!void {
+        if (bt.in_trans != .write) return;
+        std.debug.assert(i >= 0 or (i == -1 and op == .rollback));
+        if (op == .rollback) try bt.saveAllCursors(0, null);
+        try bt.pager.savepoint(op, i);
+        if (i < 0 and bt.initially_empty) bt.n_page = 0;
+        try bt.newDatabase();
+        bt.setNPage(bt.page1.?);
     }
 
     fn tryBegin(bt: *Btree, mode: TransMode) Error!void {
@@ -649,7 +676,7 @@ pub const Btree = struct {
     }
 
     /// Port of sqlite3BtreeTripAllCursors().
-    fn tripAllCursors(bt: *Btree, err: Error, write_only: bool) Error!void {
+    pub fn tripAllCursors(bt: *Btree, err: Error, write_only: bool) Error!void {
         var it = bt.cursors;
         while (it) |c| : (it = c.next_cursor) {
             if (write_only and !c.flags.write) {

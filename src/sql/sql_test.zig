@@ -447,3 +447,295 @@ test "sql: REINDEX" {
     try c.expectRows("PRAGMA integrity_check", "ok\n");
     try c.expectError("REINDEX nosuch", "unable to identify the object to be reindexed");
 }
+
+test "sql: SAVEPOINT, RELEASE and ROLLBACK TO" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(a UNIQUE, b);
+        \\INSERT INTO t VALUES(1, 'x');
+        \\SAVEPOINT s1;
+        \\INSERT INTO t VALUES(2, randomblob(5000));
+        \\SAVEPOINT s2;
+        \\UPDATE t SET b = 'y';
+        \\DELETE FROM t WHERE a = 1;
+        \\ROLLBACK TO s2;
+    );
+    try c.expectRows("SELECT a, length(b) FROM t ORDER BY a", "1|1\n2|5000\n");
+    try c.exec("INSERT INTO t VALUES(3, 'z'); ROLLBACK TO s1;");
+    try c.expectRows("SELECT a FROM t", "1\n");
+    // RELEASE of the outermost savepoint commits.
+    try c.exec("INSERT INTO t VALUES(4, 'w'); RELEASE s1;");
+    try c.reopen();
+    try c.expectRows("SELECT a FROM t ORDER BY a", "1\n4\n");
+    try c.expectError("RELEASE s1", "no such savepoint: s1");
+
+    // Inside BEGIN, a savepoint nests in the transaction.
+    try c.exec("BEGIN; SAVEPOINT a; DELETE FROM t; SAVEPOINT b; INSERT INTO t VALUES(5, 'v'); RELEASE a;");
+    try c.expectRows("SELECT a FROM t", "5\n");
+    try c.exec("ROLLBACK");
+    try c.expectRows("SELECT a FROM t ORDER BY a", "1\n4\n");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+}
+
+test "sql: a failing statement inside a transaction undoes only itself" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE t(a UNIQUE); INSERT INTO t VALUES(3); BEGIN; INSERT INTO t VALUES(10);");
+    try c.expectError("INSERT INTO t VALUES(1),(2),(3)", "UNIQUE constraint failed: t.a");
+    try c.exec("COMMIT");
+    try c.expectRows("SELECT a FROM t ORDER BY a", "3\n10\n");
+}
+
+test "sql: RETURNING" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c REAL)");
+    try c.expectRows("INSERT INTO t(b, c) VALUES('x', 1), ('y', 2.5) RETURNING *", "1|x|1.0\n2|y|2.5\n");
+    try c.expectRows("UPDATE t SET c = c + 1 WHERE a > 1 RETURNING a, c, (SELECT count(*) FROM t) AS n", "2|3.5|2\n");
+    try c.expectRows("DELETE FROM t WHERE a = 1 RETURNING b || '!'", "x!\n");
+    try c.expectRows("SELECT a, b, c FROM t", "2|y|3.5\n");
+    try c.expectError("INSERT INTO t(b) VALUES('q') RETURNING t.*", "RETURNING may not use \"TABLE.*\" wildcards");
+    try c.expectError("CREATE TRIGGER tr AFTER INSERT ON t BEGIN DELETE FROM t RETURNING *; END", "near \"RETURNING\": syntax error");
+}
+
+test "sql: UPSERT" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT UNIQUE, n INT DEFAULT 0);
+        \\INSERT INTO t VALUES(1, 'x', 0), (2, 'y', 0);
+        \\INSERT INTO t VALUES(1, 'z', 5) ON CONFLICT(a) DO UPDATE SET n = n + excluded.n;
+        \\INSERT INTO t VALUES(9, 'y', 7) ON CONFLICT(b) DO UPDATE SET n = n + 10 WHERE excluded.n > 5;
+        \\INSERT INTO t VALUES(9, 'y', 1) ON CONFLICT(b) DO UPDATE SET n = n + 100 WHERE excluded.n > 5;
+        \\INSERT INTO t VALUES(1, 'q', 0) ON CONFLICT DO NOTHING;
+        \\INSERT INTO t VALUES(2, 'x', 0) ON CONFLICT(b) DO UPDATE SET n = -1 ON CONFLICT(a) DO UPDATE SET n = -2;
+    );
+    try c.expectRows("SELECT * FROM t ORDER BY a", "1|x|-1\n2|y|10\n");
+    try c.expectRows("INSERT INTO t VALUES(3, 'x', 0) ON CONFLICT DO UPDATE SET n = 42 RETURNING a, n", "1|42\n");
+    try c.expectError("INSERT INTO t VALUES(4, 'w', 0) ON CONFLICT(n) DO NOTHING", "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+}
+
+test "sql: CREATE TABLE ... AS SELECT" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE src(a INTEGER PRIMARY KEY, b TEXT, c REAL);
+        \\INSERT INTO src VALUES(1, 'x', 1.5), (2, 'y', 2), (3, 'z', NULL);
+        \\CREATE TABLE t1 AS SELECT * FROM src;
+        \\CREATE TABLE t2 AS SELECT a + 1 AS n, upper(b) FROM src WHERE a > 1 ORDER BY a DESC;
+    );
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 't1'", "CREATE TABLE t1(a INT,b TEXT,c REAL)\n");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 't2'", "CREATE TABLE t2(n,\"upper(b)\")\n");
+    try c.expectRows("SELECT * FROM t1", "1|x|1.5\n2|y|2.0\n3|z|NULL\n");
+    try c.expectRows("SELECT * FROM t2", "4|Z\n3|Y\n");
+    try c.expectError("CREATE TABLE t2 AS SELECT 1", "table t2 already exists");
+}
+
+test "sql: ALTER TABLE RENAME TO" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t1(a INTEGER PRIMARY KEY, b UNIQUE, c CHECK(t1.c > 0));
+        \\CREATE INDEX t1c ON t1(c) WHERE t1.c > 1;
+        \\CREATE TABLE t2(x REFERENCES t1(a), y);
+        \\CREATE VIEW v1 AS SELECT t1.a, x.b FROM t1, t1 AS x;
+        \\CREATE TRIGGER tr1 AFTER INSERT ON t1 BEGIN INSERT INTO t2 VALUES(new.a, new.b); END;
+        \\CREATE TABLE s(id INTEGER PRIMARY KEY AUTOINCREMENT);
+        \\INSERT INTO s VALUES(NULL);
+        \\INSERT INTO t1 VALUES(1, 2, 3);
+    );
+    try c.exec("ALTER TABLE t1 RENAME TO \"new t\"");
+    try c.expectRows("SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 's%' ORDER BY name",
+        \\table|new t|new t|CREATE TABLE "new t"(a INTEGER PRIMARY KEY, b UNIQUE, c CHECK("new t".c > 0))
+        \\index|t1c|new t|CREATE INDEX t1c ON "new t"(c) WHERE "new t".c > 1
+        \\table|t2|t2|CREATE TABLE t2(x REFERENCES "new t"(a), y)
+        \\trigger|tr1|new t|CREATE TRIGGER tr1 AFTER INSERT ON "new t" BEGIN INSERT INTO t2 VALUES(new.a, new.b); END
+        \\view|v1|v1|CREATE VIEW v1 AS SELECT "new t".a, x.b FROM "new t", "new t" AS x
+        \\
+    );
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE name LIKE 'sqlite_autoindex%'", "sqlite_autoindex_new t_1\n");
+    try c.exec("ALTER TABLE s RENAME TO s2");
+    try c.expectRows("SELECT * FROM sqlite_sequence", "s2|1\n");
+    try c.exec("INSERT INTO \"new t\" VALUES(2, 3, 4)");
+    try c.expectRows("SELECT * FROM t2", "1|2\n2|3\n");
+
+    try c.expectError("ALTER TABLE t2 RENAME TO \"NEW T\"", "there is already another table or index with this name: NEW T");
+    try c.expectError("ALTER TABLE t2 RENAME TO t1c", "there is already another table or index with this name: t1c");
+    try c.expectError("ALTER TABLE t2 RENAME TO sqlite_t", "object name reserved for internal use: sqlite_t");
+    try c.expectError("ALTER TABLE v1 RENAME TO v2", "view v1 may not be altered");
+    try c.expectError("ALTER TABLE sqlite_sequence RENAME TO x", "table sqlite_sequence may not be altered");
+    try c.expectError("ALTER TABLE nosuch RENAME TO x", "no such table: nosuch");
+    // The internal functions are not visible to ordinary statements.
+    try c.expectError("SELECT sqlite_rename_table('main', 'table', 't', 'CREATE TABLE t(a)', 't', 'u', 0)", "no such function: sqlite_rename_table");
+}
+
+test "sql: ALTER TABLE RENAME COLUMN" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(a INTEGER PRIMARY KEY, "b b" TEXT, c, d AS (c * 2), FOREIGN KEY(c) REFERENCES t(a));
+        \\CREATE TABLE u(x REFERENCES t(a), y, FOREIGN KEY(y) REFERENCES t);
+        \\CREATE INDEX ti ON t("b b", lower(c)) WHERE c > 0;
+        \\CREATE VIEW v AS SELECT a AS k, [b b], t.c FROM t WHERE c IN (SELECT c FROM t) ORDER BY a;
+        \\CREATE TRIGGER tr BEFORE UPDATE OF c ON t WHEN new.c > old.c BEGIN UPDATE u SET y = new.c WHERE x = old.a; INSERT INTO t(a, c) VALUES(NULL, new.c); END;
+    );
+    try c.exec("ALTER TABLE t RENAME COLUMN c TO \"select\"");
+    try c.exec("ALTER TABLE t RENAME [b b] TO bb");
+    try c.exec("ALTER TABLE t RENAME COLUMN a TO id");
+    try c.expectRows("SELECT sql FROM sqlite_schema ORDER BY name",
+        \\CREATE TABLE t(id INTEGER PRIMARY KEY, "bb" TEXT, "select", d AS ("select" * 2), FOREIGN KEY("select") REFERENCES t(id))
+        \\CREATE INDEX ti ON t("bb", lower("select")) WHERE "select" > 0
+        \\CREATE TRIGGER tr BEFORE UPDATE OF "select" ON t WHEN new."select" > old."select" BEGIN UPDATE u SET y = new."select" WHERE x = old.id; INSERT INTO t(id, "select") VALUES(NULL, new."select"); END
+        \\CREATE TABLE u(x REFERENCES t(id), y, FOREIGN KEY(y) REFERENCES t)
+        \\CREATE VIEW v AS SELECT id AS k, "bb", t."select" FROM t WHERE "select" IN (SELECT "select" FROM t) ORDER BY id
+        \\
+    );
+    try c.expectError("ALTER TABLE t RENAME COLUMN nosuch TO x", "no such column: \"nosuch\"");
+    try c.expectError("ALTER TABLE t RENAME COLUMN bb TO id", "error in table t after rename: duplicate column name: id");
+    try c.expectError("ALTER TABLE t RENAME COLUMN bb TO rowid", "cannot rename to rowid alias: rowid");
+    try c.expectError("ALTER TABLE v RENAME COLUMN k TO kk", "cannot rename columns of view \"v\"");
+}
+
+test "sql: ALTER TABLE RENAME COLUMN with double-quoted strings" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(a, b);
+        \\CREATE VIEW v AS SELECT "lit", a, "b" FROM t;
+        \\CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT "x"'y', new.a; END;
+    );
+    try c.exec("ALTER TABLE t RENAME COLUMN a TO aa");
+    try c.expectRows("SELECT sql FROM sqlite_schema ORDER BY name",
+        \\CREATE TABLE t(aa, b)
+        \\CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 'x' 'y', new.aa; END
+        \\CREATE VIEW v AS SELECT 'lit', aa, "b" FROM t
+        \\
+    );
+}
+
+test "sql: ALTER TABLE ADD COLUMN" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(a INTEGER PRIMARY KEY, b, CHECK(b IS NOT 0));
+        \\CREATE TABLE e(a);
+        \\INSERT INTO t VALUES(1, 2);
+    );
+    try c.exec("ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'it''s' NOT NULL ; ");
+    try c.exec("ALTER TABLE t ADD d AS (a + b)");
+    try c.expectRows("SELECT * FROM t", "1|2|it's|3\n");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 't'", "CREATE TABLE t(a INTEGER PRIMARY KEY, b, c TEXT DEFAULT 'it''s' NOT NULL, d AS (a + b), CHECK(b IS NOT 0))\n");
+    try c.expectError("ALTER TABLE t ADD COLUMN x NOT NULL", "Cannot add a NOT NULL column with default value NULL");
+    try c.expectError("ALTER TABLE t ADD COLUMN x DEFAULT CURRENT_TIME", "Cannot add a column with non-constant default");
+    try c.expectError("ALTER TABLE t ADD COLUMN x AS (b) STORED", "cannot add a STORED column");
+    try c.expectError("ALTER TABLE t ADD COLUMN x DEFAULT 0 CHECK(x <> 0)", "CHECK constraint failed");
+    try c.expectError("ALTER TABLE t ADD COLUMN x PRIMARY KEY", "Cannot add a PRIMARY KEY column");
+    try c.expectError("ALTER TABLE t ADD COLUMN x UNIQUE", "Cannot add a UNIQUE column");
+    try c.expectError("ALTER TABLE t ADD COLUMN b", "duplicate column name: b");
+    try c.expectError("ALTER TABLE t ADD COLUMN oid", "cannot add rowid alias: oid");
+    // Constraints that only existing rows break are fine on an empty table.
+    try c.exec("ALTER TABLE e ADD COLUMN x NOT NULL");
+    try c.exec("ALTER TABLE e ADD COLUMN y DEFAULT CURRENT_TIME");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'e'", "CREATE TABLE e(a, x NOT NULL, y DEFAULT CURRENT_TIME)\n");
+    try c.reopen();
+    try c.expectRows("SELECT * FROM t", "1|2|it's|3\n");
+}
+
+test "sql: ALTER TABLE DROP COLUMN" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE r(a INTEGER PRIMARY KEY, b REAL, c, d UNIQUE, e AS (a * 2));
+        \\CREATE TABLE w(k, v, x, PRIMARY KEY(v, k)) WITHOUT ROWID;
+        \\CREATE INDEX ri ON r(c);
+        \\INSERT INTO r VALUES(1, 2, 3, 4), (5, 6.5, 'x', 8);
+        \\INSERT INTO w VALUES(1, 2, 3), (4, 5, 6);
+    );
+    try c.expectError("ALTER TABLE r DROP COLUMN c", "error in index ri after drop column: no such column: c");
+    try c.expectError("ALTER TABLE r DROP COLUMN a", "cannot drop PRIMARY KEY column: \"a\"");
+    try c.expectError("ALTER TABLE r DROP COLUMN d", "cannot drop UNIQUE column: \"d\"");
+    try c.expectError("ALTER TABLE r DROP COLUMN nosuch", "no such column: \"nosuch\"");
+    try c.exec("DROP INDEX ri; ALTER TABLE r DROP COLUMN c; ALTER TABLE r DROP COLUMN e");
+    try c.expectRows("SELECT a, b, typeof(b), d FROM r", "1|2.0|real|4\n5|6.5|real|8\n");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'r'", "CREATE TABLE r(a INTEGER PRIMARY KEY, b REAL, d UNIQUE)\n");
+    try c.exec("ALTER TABLE w DROP COLUMN x");
+    try c.expectRows("SELECT * FROM w", "1|2\n4|5\n");
+    try c.expectError("ALTER TABLE w DROP COLUMN k", "cannot drop PRIMARY KEY column: \"k\"");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+}
+
+test "sql: ALTER TABLE constraints" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(a INT CONSTRAINT nn NOT NULL, b CONSTRAINT ck CHECK(b > 0), c, CONSTRAINT pk PRIMARY KEY(a));
+        \\INSERT INTO t VALUES(1, 2, NULL);
+    );
+    try c.exec("ALTER TABLE t DROP CONSTRAINT ck");
+    try c.exec("ALTER TABLE t ALTER COLUMN a DROP NOT NULL");
+    try c.exec("ALTER TABLE t ADD CONSTRAINT pos CHECK(a > 0) -- comment");
+    try c.exec("ALTER TABLE t ALTER b SET NOT NULL");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 't'", "CREATE TABLE t(a INT, b NOT NULL, c, CONSTRAINT pk PRIMARY KEY(a), CONSTRAINT pos CHECK(a > 0))\n");
+    try c.expectError("ALTER TABLE t ALTER c SET NOT NULL", "constraint failed");
+    try c.expectError("ALTER TABLE t ADD CHECK(b > 5)", "constraint failed");
+    try c.expectError("ALTER TABLE t ADD CONSTRAINT POS CHECK(1)", "constraint POS already exists");
+    try c.expectError("ALTER TABLE t DROP CONSTRAINT pk", "constraint may not be dropped: pk");
+    try c.expectError("ALTER TABLE t DROP CONSTRAINT nosuch", "no such constraint: nosuch");
+    try c.expectError("ALTER TABLE t ALTER nosuch DROP NOT NULL", "no such column: nosuch");
+    try c.expectError("INSERT INTO t VALUES(-1, 1, 1)", "CHECK constraint failed: pos");
+}
+
+test "sql: ALTER TABLE with PRAGMA writable_schema and legacy_alter_table" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(a, b);
+        \\CREATE VIEW v AS SELECT a, b FROM t;
+        \\PRAGMA writable_schema=ON;
+        \\UPDATE sqlite_schema SET sql='CREATE VIEW v AS SELECT nosuch FROM t' WHERE name='v';
+    );
+    // The broken view is kept as it is.
+    try c.exec("ALTER TABLE t RENAME COLUMN a TO aa");
+    try c.exec("ALTER TABLE t RENAME TO t2");
+    try c.expectRows("SELECT sql FROM sqlite_schema ORDER BY name",
+        \\CREATE TABLE "t2"(aa, b)
+        \\CREATE VIEW v AS SELECT nosuch FROM t
+        \\
+    );
+    try c.exec("PRAGMA writable_schema=OFF; DROP VIEW v; CREATE VIEW v AS SELECT aa, b FROM t2; PRAGMA legacy_alter_table=ON");
+    try c.exec("ALTER TABLE t2 RENAME TO t3");
+    try c.expectRows("SELECT sql FROM sqlite_schema ORDER BY name",
+        \\CREATE TABLE "t3"(aa, b)
+        \\CREATE VIEW v AS SELECT aa, b FROM t2
+        \\
+    );
+}
+
+test "sql: a failed ALTER TABLE in a transaction" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE e1(a, b, c CHECK(b > 0)); INSERT INTO e1 VALUES(1, 2, 3);");
+    try c.exec("BEGIN; CREATE TABLE zz(x);");
+    try c.expectError("ALTER TABLE e1 DROP COLUMN b", "error in table e1 after drop column: no such column: b");
+    try c.expectRows("SELECT * FROM e1", "1|2|3\n");
+    try c.exec("ROLLBACK");
+    // The schema in memory is that of the rolled back transaction: the
+    // statement is compiled again.
+    try c.expectRows("SELECT * FROM e1", "1|2|3\n");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema", "1\n");
+}

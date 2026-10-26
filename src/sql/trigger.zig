@@ -1,6 +1,7 @@
 //! Triggers (port of trigger.c): CREATE and DROP TRIGGER, and the code
 //! that runs a trigger's steps as a sub-program (OP_Program) for each row
-//! an INSERT, UPDATE or DELETE writes. RETURNING is not ported.
+//! an INSERT, UPDATE or DELETE writes, and the transient trigger of a
+//! RETURNING clause, which is coded in line.
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -38,6 +39,11 @@ const Oom = int.Oom;
 const OE = int.OE;
 const SF = int.SF;
 const TK = int.TK;
+const NC = int.NC;
+const EP = int.EP;
+const Aff = int.Aff;
+const walker = @import("walker.zig");
+const Walker = walker.Walker;
 
 /// Port of triggerSpanDup(): the statement text, whitespace turned into
 /// plain spaces.
@@ -137,9 +143,17 @@ pub fn triggerList(p: *Parse, t: *Table) ?*Trigger {
     var it = tmp_schema.trig_hash.valueIterator();
     while (it.next()) |tp| {
         const trig = tp.*;
-        if (trig.tab_schema == t.schema and ctype.eqlNoCase(trig.table, t.name) and
+        if (trig.tab_schema == t.schema and trig.table.len > 0 and ctype.eqlNoCase(trig.table, t.name) and
             (trig.tab_schema != tmp_schema or trig.returning))
         {
+            trig.next = list;
+            list = trig;
+        } else if (trig.op == TK.RETURNING) {
+            // The RETURNING trigger of this statement, seen for the first
+            // time: it is on `t`.
+            std.debug.assert(p.returning and trig == &p.u1.d.returning.?.ret_trig);
+            trig.table = t.name;
+            trig.tab_schema = t.schema;
             trig.next = list;
             list = trig;
         }
@@ -246,6 +260,7 @@ fn beginTriggerImpl(p: *Parse, name1: Token, name2: Token, tr_tm_arg: i32, op: i
         .when = when,
         .columns = columns,
     };
+    if (p.inRenameObject()) @import("alter.zig").renameTokenRemap(p, trig.table, tab_list.at(0).name);
     std.debug.assert(p.new_trigger == null);
     p.new_trigger = trig;
 }
@@ -481,7 +496,7 @@ pub fn triggersExist(p: *Parse, t: *Table, op: u8, changes: ?*ExprList, mask: ?*
     return triggersReallyExist(p, t, op, changes, mask);
 }
 
-/// Port of triggersReallyExist(). RETURNING is not ported.
+/// Port of triggersReallyExist().
 fn triggersReallyExist(p: *Parse, t: *Table, op: u8, changes: ?*ExprList, mask_out: ?*u8) ?*Trigger {
     var mask: u8 = 0;
     var list = triggerList(p, t);
@@ -500,7 +515,26 @@ fn triggersReallyExist(p: *Parse, t: *Table, op: u8, changes: ?*ExprList, mask_o
         }
         var it = list;
         while (it) |trig| : (it = trig.next) {
-            if (trig.op == op and checkColumnOverlap(trig.columns, changes)) mask |= trig.tr_tm;
+            if (trig.op == op and checkColumnOverlap(trig.columns, changes)) {
+                mask |= trig.tr_tm;
+            } else if (trig.op == TK.RETURNING) {
+                // The first time a RETURNING trigger is seen, `op` says
+                // what kind of trigger it is.
+                std.debug.assert(p.toplevel == null);
+                trig.op = op;
+                if (t.e_tab_type == .vtab) {
+                    if (op != TK.INSERT) {
+                        util.errorMsg(p, "{s} RETURNING is not available on virtual tables", .{if (op == TK.DELETE) "DELETE" else "UPDATE"});
+                    }
+                    trig.tr_tm = int.TRIGGER_BEFORE;
+                } else {
+                    trig.tr_tm = int.TRIGGER_AFTER;
+                }
+                mask |= trig.tr_tm;
+            } else if (trig.returning and trig.op == TK.INSERT and op == TK.UPDATE and p.toplevel == null) {
+                // The RETURNING of an upsert fires for its UPDATE too.
+                mask |= trig.tr_tm;
+            }
         }
     }
     if (mask_out) |m| m.* = mask;
@@ -684,10 +718,141 @@ pub fn codeRowTrigger(p: *Parse, trigger: ?*Trigger, op: u8, changes: ?*ExprList
     std.debug.assert((op == TK.UPDATE) == (changes != null));
     var it = trigger;
     while (it) |trig| : (it = trig.next) {
-        if (trig.op == op and trig.tr_tm == tr_tm and checkColumnOverlap(trig.columns, changes)) {
-            codeRowTriggerDirect(p, trig, t, reg, orconf, ignore_jump);
+        // The triggers for `op`, and the RETURNING of an INSERT for the
+        // UPDATE of its upsert.
+        if ((trig.op == op or (trig.returning and trig.op == TK.INSERT and op == TK.UPDATE)) and
+            trig.tr_tm == tr_tm and checkColumnOverlap(trig.columns, changes))
+        {
+            if (!trig.returning) {
+                codeRowTriggerDirect(p, trig, t, reg, orconf, ignore_jump);
+            } else if (p.toplevel == null) {
+                codeReturningTrigger(p, trig, t, reg) catch build.oomFault(p);
+            }
         }
     }
+}
+
+/// Port of isAsteriskTerm(): whether `term` of a RETURNING list is "*".
+/// "table.*" is an error.
+fn isAsteriskTerm(p: *Parse, term: *Expr) bool {
+    if (term.op == TK.ASTERISK) return true;
+    if (term.op != TK.DOT) return false;
+    if (term.right.?.op != TK.ASTERISK) return false;
+    util.errorMsg(p, "RETURNING may not use \"TABLE.*\" wildcards", .{});
+    return true;
+}
+
+/// Port of sqlite3ExpandReturning(): a copy of the RETURNING list with
+/// "*" expanded to the columns of `t`.
+fn expandReturning(p: *Parse, list: *ExprList, t: *Table) Oom!?*ExprList {
+    const a = p.arena;
+    var new: ?*ExprList = null;
+    for (list.slice()) |*item| {
+        const old = item.expr orelse continue;
+        if (isAsteriskTerm(p, old)) {
+            for (t.cols) |*col| {
+                if (col.col_flags & int.COLFLAG.HIDDEN != 0) continue;
+                new = try expr_mod.listAppend(p, new, try expr_mod.expr(a, TK.ID, col.cn_name));
+                const ni = new.?.at(new.?.len() - 1);
+                ni.e_name = try a.dupeSentinel(u8, col.cn_name, 0);
+                ni.fg.e_ename = .name;
+            }
+        } else {
+            new = try expr_mod.listAppend(p, new, try expr_mod.exprDup(a, old));
+            if (item.e_name) |name| {
+                const ni = new.?.at(new.?.len() - 1);
+                ni.e_name = try a.dupeSentinel(u8, name, 0);
+                ni.fg.e_ename = item.fg.e_ename;
+            }
+        }
+    }
+    return new;
+}
+
+/// Port of sqlite3ReturningSubqueryVarSelect().
+fn returningSubqueryVarSelect(_: *Walker, e: *Expr) u8 {
+    if (e.useXSelect() and e.x.select.?.sel_flags & int.SF.Correlated != 0) e.set(EP.VarSelect);
+    return walker.WRC.Continue;
+}
+
+/// Port of sqlite3ReturningSubqueryCorrelated(): a SELECT reading the
+/// table being changed is correlated.
+fn returningSubqueryCorrelated(w: *Walker, s: *Select) u8 {
+    for (s.src.?.slice()) |*item| {
+        if (item.s_tab == w.u.tab) {
+            s.sel_flags |= int.SF.Correlated;
+            w.e_code = 1;
+            break;
+        }
+    }
+    return walker.WRC.Continue;
+}
+
+/// Port of sqlite3ProcessReturningSubqueries(): the subqueries of the
+/// RETURNING list that read `t` are correlated, since `t` changes from
+/// row to row; so are the expressions holding them.
+fn processReturningSubqueries(list: *ExprList, t: *Table) void {
+    var w: Walker = .{
+        .expr_callback = walker.exprWalkNoop,
+        .select_callback = returningSubqueryCorrelated,
+        .u = .{ .tab = t },
+    };
+    _ = walker.walkExprList(&w, list);
+    if (w.e_code != 0) {
+        w.expr_callback = returningSubqueryVarSelect;
+        w.select_callback = walker.selectWalkNoop;
+        _ = walker.walkExprList(&w, list);
+    }
+}
+
+/// Port of codeReturningTrigger(): code, in line, the computation of a
+/// row of RETURNING results from the registers at `reg_in` (as for a
+/// trigger's OLD.* and NEW.*) and its insertion into the results table.
+fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32) Oom!void {
+    const v = p.vdbe.?;
+    const db = p.db;
+    const a = p.arena;
+    // A RETURNING trigger of another statement (an outer one).
+    if (!p.returning) return;
+    const ret = p.u1.d.returning.?;
+    if (trig != &ret.ret_trig) return;
+
+    // Name the result columns as a SELECT of the list from `t` would.
+    var from: SrcList = .{};
+    try from.items.append(a, .{ .s_tab = t, .name = t.name, .i_cursor = -1 });
+    var sel: Select = .{ .e_list = try expr_mod.listDup(a, ret.return_el), .src = &from };
+    select_mod.selectPrep(p, &sel, null);
+    if (p.n_err == 0) select_mod.generateColumnNames(p, &sel);
+
+    const new = (try expandReturning(p, ret.return_el.?, t)) orelse return;
+    if (p.n_err == 0) {
+        var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in }, .nc_flags = NC.UBaseReg };
+        if (ret.n_ret_col == 0) {
+            ret.n_ret_col = @intCast(new.len());
+            ret.i_ret_cur = p.n_tab;
+            p.n_tab += 1;
+        }
+        p.e_trigger_op = trig.op;
+        p.trigger_tab = t;
+        if (resolve.resolveExprListNames(&nc, new) == 0 and !db.malloc_failed) {
+            const n_col: i32 = @intCast(new.len());
+            const reg = p.n_mem + 1;
+            processReturningSubqueries(new, t);
+            p.n_mem += n_col + 2;
+            ret.i_ret_reg = reg;
+            for (new.slice(), 0..) |*item, i| {
+                const col = item.expr.?;
+                const r = reg + @as(i32, @intCast(i));
+                ec.codeFactorable(p, col, r);
+                if (expr_mod.affinity(col) == Aff.real) _ = aux.addOp1(v, OP.RealAffinity, r);
+            }
+            _ = aux.addOp3(v, OP.MakeRecord, reg, n_col, reg + n_col);
+            _ = aux.addOp2(v, OP.NewRowid, ret.i_ret_cur, reg + n_col + 1);
+            _ = aux.addOp3(v, OP.Insert, ret.i_ret_cur, reg + n_col, reg + n_col + 1);
+        }
+    }
+    p.e_trigger_op = 0;
+    p.trigger_tab = null;
 }
 
 /// Port of sqlite3TriggerColmask(): the OLD.* (`is_new` false) or NEW.*
@@ -700,7 +865,11 @@ pub fn triggerColmask(p: *Parse, trigger: ?*Trigger, changes: ?*ExprList, is_new
     var it = trigger;
     while (it) |trig| : (it = trig.next) {
         if (trig.op == op and tr_tm & trig.tr_tm != 0 and checkColumnOverlap(trig.columns, changes)) {
-            if (getRowTrigger(p, trig, t, orconf)) |prg| mask |= prg.colmask[@intFromBool(is_new)];
+            if (trig.returning) {
+                mask = 0xffffffff;
+            } else if (getRowTrigger(p, trig, t, orconf)) |prg| {
+                mask |= prg.colmask[@intFromBool(is_new)];
+            }
         }
     }
     return mask;

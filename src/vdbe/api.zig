@@ -53,6 +53,12 @@ fn stepOnce(v: *Vdbe) i32 {
         return RC.ROW;
     }
     v.result_row = null;
+    if (rc != RC.DONE and v.prep_flags & aux.PREPARE_SAVESQL != 0) {
+        // A statement with saved SQL returns the error of the program
+        // (an extended code, SQLITE_SCHEMA for a reprepare), also set on
+        // the connection.
+        rc = aux.transferError(v);
+    }
     db.err_code = rc;
     if (db.malloc_failed) {
         v.rc = RC.NOMEM;
@@ -61,10 +67,38 @@ fn stepOnce(v: *Vdbe) i32 {
     return rc & db.err_mask;
 }
 
-/// Port of sqlite3_step(). Returns RC.ROW, RC.DONE or an error code.
+/// SQLITE_MAX_SCHEMA_RETRY.
+const max_schema_retry = 50;
+
+/// Port of sqlite3_step(). Returns RC.ROW, RC.DONE or an error code. A
+/// statement that finds the schema changed is compiled again and rerun.
 pub fn step(v: *Vdbe) i32 {
-    // Reprepare on RC.SCHEMA comes with sqlite3_prepare_v2().
-    return stepOnce(v);
+    const db = v.db;
+    var cnt: u32 = 0;
+    var rc = stepOnce(v);
+    while (rc == RC.SCHEMA and cnt < max_schema_retry) : (rc = stepOnce(v)) {
+        cnt += 1;
+        const saved_pc = v.pc;
+        rc = @import("../sql/prepare.zig").reprepare(v);
+        if (rc != RC.OK) {
+            // The error of compiling the statement again, which is in
+            // the connection, becomes that of the statement.
+            if (!db.malloc_failed) {
+                v.err_msg = v.alloc().dupeSentinel(u8, main_mod.errmsg(db), 0) catch null;
+                rc = main_mod.apiExit(db, rc);
+                v.rc = rc;
+            } else {
+                v.err_msg = null;
+                rc = RC.NOMEM;
+                v.rc = rc;
+            }
+            break;
+        }
+        _ = reset(v);
+        // OP_Init must not trace the statement again (tag-20220401a).
+        if (saved_pc >= 0) v.min_write_file_format = 254;
+    }
+    return rc;
 }
 
 /// Port of sqlite3_reset().

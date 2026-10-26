@@ -1284,6 +1284,7 @@ const Part5 = struct {
             OP.MakeRecord => opMakeRecord(e, op),
             OP.Count => opCount(e, op),
             OP.AutoCommit => opAutoCommit(e, op),
+            OP.Savepoint => opSavepoint(e, op),
             OP.Transaction => opTransaction(e, op),
             OP.ReadCookie => blk: {
                 const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
@@ -1502,6 +1503,125 @@ const Part5 = struct {
         return .abort;
     }
 
+    /// Port of OP_Savepoint: open (P1 SAVEPOINT_BEGIN), release or roll
+    /// back to the savepoint named by P4.
+    fn opSavepoint(e: *Exec, op: *Op) Flow {
+        const v = e.v;
+        const db = e.db;
+        const p1 = op.p1;
+        const name: []const u8 = op.p4.z;
+        std.debug.assert(db.savepoint == null or !db.auto_commit);
+        std.debug.assert(db.savepoint != null or !db.is_transaction_savepoint);
+        if (p1 == aux.SAVEPOINT_BEGIN) {
+            if (db.n_vdbe_write > 0) {
+                // Not with active write statements (open blob handles).
+                aux.vdbeError(v, "cannot open savepoint - SQL statements in progress", .{});
+                e.rc = RC.BUSY;
+                return .abort;
+            }
+            const sp = db.gpa.create(int.Savepoint) catch return .no_mem;
+            sp.* = .{
+                .name = db.gpa.dupeSentinel(u8, name, 0) catch {
+                    db.gpa.destroy(sp);
+                    return .no_mem;
+                },
+                .n_deferred_cons = db.n_deferred_cons,
+                .n_deferred_imm_cons = db.n_deferred_imm_cons,
+                .next = db.savepoint,
+            };
+            // Outside a transaction it starts one: a "transaction
+            // savepoint".
+            if (db.auto_commit) {
+                db.auto_commit = false;
+                db.is_transaction_savepoint = true;
+            } else {
+                db.n_savepoint += 1;
+            }
+            db.savepoint = sp;
+        } else {
+            // Find the named savepoint.
+            var i_savepoint: i32 = 0;
+            var it = db.savepoint;
+            while (it) |sp| : (it = sp.next) {
+                if (std.ascii.eqlIgnoreCase(sp.name, name)) break;
+                i_savepoint += 1;
+            }
+            const sp = it orelse {
+                aux.vdbeError(v, "no such savepoint: {s}", .{name});
+                e.rc = RC.ERROR;
+                return .abort;
+            };
+            if (db.n_vdbe_write > 0 and p1 == aux.SAVEPOINT_RELEASE) {
+                aux.vdbeError(v, "cannot release savepoint - SQL statements in progress", .{});
+                e.rc = RC.BUSY;
+                return .abort;
+            }
+            // Releasing the transaction savepoint commits.
+            const is_transaction = sp.next == null and db.is_transaction_savepoint;
+            if (is_transaction and p1 == aux.SAVEPOINT_RELEASE) {
+                e.rc = aux.checkFkDeferred(v);
+                if (e.rc != RC.OK) return .ret;
+                db.auto_commit = true;
+                if (aux.halt(v) == RC.BUSY) {
+                    v.pc = @intCast(e.pc);
+                    db.auto_commit = false;
+                    v.rc = RC.BUSY;
+                    e.rc = RC.BUSY;
+                    return .ret;
+                }
+                e.rc = v.rc;
+                if (e.rc != RC.OK) {
+                    db.auto_commit = false;
+                } else {
+                    db.is_transaction_savepoint = false;
+                }
+            } else {
+                i_savepoint = db.n_savepoint - i_savepoint - 1;
+                var is_schema_change = false;
+                if (p1 == aux.SAVEPOINT_ROLLBACK) {
+                    is_schema_change = db.m_db_flags & int.DBFLAG.SchemaChange != 0;
+                    for (db.dbs.items) |d| {
+                        const bt = d.bt orelse continue;
+                        bt.tripAllCursors(main_mod.tripError(RC.ABORT_ROLLBACK).?, !is_schema_change) catch |err| return e.fail(err);
+                    }
+                }
+                for (db.dbs.items) |d| {
+                    const bt = d.bt orelse continue;
+                    bt.savepoint(if (p1 == aux.SAVEPOINT_RELEASE) .release else .rollback, i_savepoint) catch |err| return e.fail(err);
+                }
+                if (is_schema_change) {
+                    aux.expirePreparedStatements(db, 0);
+                    @import("../sql/build.zig").resetAllSchemasOfConnection(db);
+                    db.m_db_flags |= int.DBFLAG.SchemaChange;
+                }
+            }
+            if (e.rc != RC.OK) return .abort;
+
+            // Savepoints nested in this one go either way.
+            while (db.savepoint != sp) {
+                const tmp = db.savepoint.?;
+                db.savepoint = tmp.next;
+                main_mod.freeSavepoint(db, tmp);
+                db.n_savepoint -= 1;
+            }
+            // A RELEASE drops this one too; a ROLLBACK TO keeps it open
+            // and restores its count of deferred constraint violations.
+            if (p1 == aux.SAVEPOINT_RELEASE) {
+                db.savepoint = sp.next;
+                main_mod.freeSavepoint(db, sp);
+                if (!is_transaction) db.n_savepoint -= 1;
+            } else {
+                db.n_deferred_cons = sp.n_deferred_cons;
+                db.n_deferred_imm_cons = sp.n_deferred_imm_cons;
+            }
+        }
+        if (v.e_vdbe_state == .halt) {
+            e.rc = RC.DONE;
+            return .ret;
+        }
+        return .next;
+    }
+
     fn opTransaction(e: *Exec, op: *Op) Flow {
         const v = e.v;
         const db = e.db;
@@ -1517,7 +1637,7 @@ const Part5 = struct {
                 1 => .write,
                 else => .exclusive,
             };
-            bt.beginTrans(mode) catch |err| {
+            bt.beginTrans(mode, @intCast(db.n_savepoint)) catch |err| {
                 const rc = main_mod.errorCode(err);
                 if (rc & 0xff == RC.BUSY) {
                     v.pc = @intCast(e.pc);
@@ -1528,10 +1648,19 @@ const Part5 = struct {
                 e.rc = rc;
                 return .abort;
             };
+            // A statement that may fail midway inside a transaction (or
+            // while other statements read) gets a statement transaction,
+            // so that its changes can be undone alone.
+            if (op.p2 != 0 and v.uses_stmt_journal and (!db.auto_commit or db.n_vdbe_read > 1)) {
+                if (v.i_statement == 0) {
+                    db.n_statement += 1;
+                    v.i_statement = db.n_savepoint + db.n_statement;
+                }
+                bt.beginStmt(@intCast(v.i_statement)) catch |err| return e.fail(err);
+                v.n_stmt_def_cons = db.n_deferred_cons;
+                v.n_stmt_def_imm_cons = db.n_deferred_imm_cons;
+            }
             i_meta = bt.getMeta(.schema_version);
-            // Statement transactions are not supported yet: an error in a
-            // statement inside BEGIN...COMMIT does not undo the statement's
-            // earlier changes.
         }
         if (op.p5 != 0 and (@as(i32, @bitCast(i_meta)) != op.p3 or pdb.schema.i_generation != op.p4.int32)) {
             v.err_msg = null;
@@ -1679,7 +1808,7 @@ const Part5 = struct {
     }
 
     fn openEphemeralTable(c: *VdbeCursor, bt: *btree.Btree, op: *Op) btree.Error!void {
-        try bt.beginTrans(.write);
+        try bt.beginTrans(.write, 0);
         if (op.p4 == .keyinfo) {
             // A transient index gets its own b-tree; a table uses page 1.
             c.key_info = op.p4.keyinfo;

@@ -203,7 +203,7 @@ fn schemaRoots(gpa: std.mem.Allocator, bt: *Btree) !std.StringArrayHashMapUnmana
 fn check(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !void {
     const bt = try openBtree(gpa, io, path, .{});
     defer bt.close();
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     defer bt.commit() catch {};
     var roots = try schemaRoots(gpa, bt);
     const list = try std.mem.concat(gpa, xqlite.btree.Pgno, &.{ &.{1}, roots.values() });
@@ -264,7 +264,7 @@ fn deleteRow(gpa: std.mem.Allocator, tc: *Cursor, ic: *Cursor, rowid: i64) !void
 fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32, av: xqlite.btree.AutoVacuum) !void {
     const bt = try openBtree(gpa, io, path, .{ .auto_vacuum = av });
     defer bt.close();
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     errdefer bt.rollback(null, false) catch {};
 
     const t_root = try bt.createTable(.intkey);
@@ -309,7 +309,7 @@ fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32, av: xqlite.b
 fn btChurn(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
     const bt = try openBtree(gpa, io, path, .{});
     defer bt.close();
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     errdefer bt.rollback(null, false) catch {};
     var roots = try schemaRoots(gpa, bt);
     const t_root = roots.get("t") orelse return error.NoTable;
@@ -359,7 +359,7 @@ fn btChurn(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
 fn btVacuum(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
     const bt = try openBtree(gpa, io, path, .{});
     defer bt.close();
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     errdefer bt.rollback(null, false) catch {};
     while (try bt.incrVacuum()) {}
     try bt.commit();

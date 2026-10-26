@@ -160,6 +160,67 @@ test "pager: rollback restores cache, file and size" {
     }
 }
 
+fn expectPage(p: *Pager, pgno: Pgno, fill: u8) !void {
+    const pg = try p.get(pgno, .{});
+    defer p.unref(pg);
+    try expectFilled(pg, fill);
+}
+
+test "pager: savepoints roll back to their own state" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    const p = try openPager(v, .{});
+    defer p.close();
+    try commitFill(p, 3, 0x22);
+
+    inline for (.{ false, true }) |spill| {
+        const p1 = try beginWrite(p);
+        // Changed before any savepoint: only in the main journal.
+        try fillPages(p, p1, &.{2}, 0x33);
+        try p.openSavepoint(1);
+        try fillPages(p, p1, &.{ 2, 3, 5 }, 0x44);
+        try p.openSavepoint(2);
+        try fillPages(p, p1, &.{ 3, 6 }, 0x55);
+        try testing.expectEqual(@as(Pgno, 6), p.pageCount());
+        // With the pages in the file, rollbacks must restore the file too.
+        if (spill) try p.flush();
+
+        try p.savepoint(.rollback, 1);
+        try testing.expectEqual(@as(Pgno, 5), p.pageCount());
+        try expectFilled(p1, 0x44);
+        for ([_]Pgno{ 2, 3, 5 }) |pgno| try expectPage(p, pgno, 0x44);
+
+        // Savepoint 0 stays open after a rollback to it, and can be rolled
+        // back to again.
+        try fillPages(p, p1, &.{2}, 0x66);
+        try p.savepoint(.rollback, 0);
+        try p.savepoint(.rollback, 0);
+        try testing.expectEqual(@as(Pgno, 3), p.pageCount());
+        try expectFilled(p1, 0x33);
+        try expectPage(p, 2, 0x33);
+        try expectPage(p, 3, 0x22);
+
+        try fillPages(p, p1, &.{3}, 0x77);
+        try p.savepoint(.release, 0);
+        try p.commitPhaseOne(false);
+        try p.commitPhaseTwo();
+        p.unrefPageOne(p1);
+
+        {
+            try p.sharedLock();
+            const q1 = try p.get(1, .{});
+            defer p.unrefPageOne(q1);
+            try testing.expectEqual(@as(Pgno, 3), p.pageCount());
+            try expectFilled(q1, 0x77);
+            try expectPage(p, 2, 0x33);
+            try expectPage(p, 3, 0x77);
+        }
+        try testing.expectEqual(@as(u64, 3 * page_size), try fileSize(v, db_name));
+        try commitFill(p, 3, 0x22);
+    }
+}
+
 test "pager: hot journal from a crash between commit phases is rolled back" {
     var mem = MemVfs.init(testing.allocator, testing.io);
     defer mem.deinit();

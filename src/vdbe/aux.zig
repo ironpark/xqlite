@@ -818,12 +818,38 @@ pub const SAVEPOINT_ROLLBACK = 2;
 /// Port of sqlite3VdbeCloseStatement(). Statement transactions are not
 /// ported yet, so there is never one to close.
 pub fn closeStatement(v: *Vdbe, e_op: i32) i32 {
-    _ = e_op;
-    if (v.db.n_statement != 0 and v.i_statement != 0) {
-        v.db.n_statement -= 1;
-        v.i_statement = 0;
-    }
+    if (v.db.n_statement != 0 and v.i_statement != 0) return closeStatementImpl(v, e_op);
     return RC.OK;
+}
+
+/// Port of vdbeCloseStatement(): release statement transaction
+/// i_statement, first rolling it back for SAVEPOINT_ROLLBACK.
+fn closeStatementImpl(v: *Vdbe, e_op: i32) i32 {
+    const db = v.db;
+    var rc: i32 = RC.OK;
+    const i_savepoint = v.i_statement - 1;
+    for (db.dbs.items) |d| {
+        const bt = d.bt orelse continue;
+        var rc2: i32 = RC.OK;
+        if (e_op == SAVEPOINT_ROLLBACK) {
+            bt.savepoint(.rollback, i_savepoint) catch |err| {
+                rc2 = main_mod.errorCode(err);
+            };
+        }
+        if (rc2 == RC.OK) {
+            bt.savepoint(.release, i_savepoint) catch |err| {
+                rc2 = main_mod.errorCode(err);
+            };
+        }
+        if (rc == RC.OK) rc = rc2;
+    }
+    db.n_statement -= 1;
+    v.i_statement = 0;
+    if (e_op == SAVEPOINT_ROLLBACK) {
+        db.n_deferred_cons = v.n_stmt_def_cons;
+        db.n_deferred_imm_cons = v.n_stmt_def_imm_cons;
+    }
+    return rc;
 }
 
 /// Port of sqlite3VdbeCheckFkImmediate().
@@ -1049,13 +1075,21 @@ pub fn delete(v: *Vdbe) void {
         db.vdbe = v.next;
     }
     if (v.next) |next| next.prev = v.prev;
+    // The values of P4_MEM operands (column defaults) may own buffers.
+    releaseP4Mems(v.ops.items);
     var sub = v.program;
     while (sub) |s| {
         sub = s.next;
+        releaseP4Mems(s.ops);
         if (s.mem) |*m| m.deinit();
     }
     v.arena.deinit();
     db.gpa.destroy(v);
+}
+
+/// The part of freeP4() for P4_MEM: release the values of `ops`.
+fn releaseP4Mems(ops: []Op) void {
+    for (ops) |*op| if (op.p4 == .mem) mem.release(op.p4.mem);
 }
 
 /// Port of sqlite3VdbeSetChanges().

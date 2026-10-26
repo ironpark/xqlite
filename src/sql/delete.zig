@@ -66,7 +66,7 @@ pub fn isReadOnly(p: *Parse, t: *Table, trig: ?*Trigger) bool {
         util.errorMsg(p, "table {s} may not be modified", .{t.name});
         return true;
     }
-    if (t.isView() and trig == null) {
+    if (t.isView() and (trig == null or (trig.?.returning and trig.?.next == null))) {
         util.errorMsg(p, "cannot modify {s} because it is a view", .{t.name});
         return true;
     }

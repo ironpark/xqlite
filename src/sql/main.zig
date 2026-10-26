@@ -35,7 +35,7 @@ pub fn errorCode(err: Error) i32 {
 }
 
 /// The Zig error for a result code, as passed to b-tree rollbacks.
-fn tripError(code: i32) ?btree.Error {
+pub fn tripError(code: i32) ?btree.Error {
     if (code == RC.OK) return null;
     return switch (code & 0xff) {
         RC.NOMEM => error.OutOfMemory,
@@ -65,10 +65,20 @@ pub fn rollbackAll(db: *Sqlite3, trip_code: i32) void {
     db.flags &= ~(int.DbFlag.DeferFKs | int.DbFlag.CorruptRdOnly);
 }
 
-/// Port of sqlite3CloseSavepoints().
+/// Port of sqlite3CloseSavepoints(): forget every SAVEPOINT.
 pub fn closeSavepoints(db: *Sqlite3) void {
+    while (db.savepoint) |sp| {
+        db.savepoint = sp.next;
+        freeSavepoint(db, sp);
+    }
     db.n_savepoint = 0;
     db.n_statement = 0;
+    db.is_transaction_savepoint = false;
+}
+
+pub fn freeSavepoint(db: *Sqlite3, sp: *int.Savepoint) void {
+    db.gpa.free(sp.name);
+    db.gpa.destroy(sp);
 }
 
 /// Port of sqlite3CommitInternalChanges() (build.c).
@@ -222,6 +232,7 @@ pub fn close(db: *Sqlite3) i32 {
         return RC.BUSY;
     }
     rollbackAll(db, RC.OK);
+    closeSavepoints(db);
     const gpa = db.gpa;
     for (db.dbs.items) |*d| {
         @import("build.zig").schemaFree(db, d.schema);

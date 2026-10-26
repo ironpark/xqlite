@@ -97,18 +97,15 @@ fn indexWhereClauseMightChange(idx: *Index, ax_ref: []const i32, chng_rowid: boo
 }
 
 /// Port of sqlite3Update(): UPDATE `tab_list` SET `changes` [FROM ...]
-/// WHERE `where`.
+/// WHERE `where`. With `upsert`, the DO UPDATE of an upsert: one row, on
+/// the cursors of the INSERT, which already point at it.
 pub fn update(p: *Parse, tab_list: ?*int.SrcList, changes: ?*int.ExprList, where: ?*int.Expr, on_error: i32, order_by: ?*int.ExprList, limit: ?*int.Expr, upsert: ?*int.Upsert) void {
     if (p.syntax_only) return;
     _ = .{ order_by, limit };
-    if (upsert != null) {
-        pending.notYet(p, "UPSERT");
-        return;
-    }
-    updateImpl(p, tab_list.?, changes.?, where, @intCast(on_error)) catch build.oomFault(p);
+    updateImpl(p, tab_list.?, changes.?, where, @intCast(on_error), upsert) catch build.oomFault(p);
 }
 
-fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, on_error: u8) Oom!void {
+fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, on_error: u8, upsert: ?*int.Upsert) Oom!void {
     const db = p.db;
     if (p.n_err != 0) return;
 
@@ -121,6 +118,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     // With a FROM clause, the number of new values.
     const n_change_from: i32 = if (tab_list.len() > 1) @intCast(changes.len()) else 0;
+    std.debug.assert(n_change_from == 0 or upsert == null);
 
     if (build.viewGetColumnNames(p, t) != 0) return;
     if (delete_mod.isReadOnly(p, t, trig)) return;
@@ -134,7 +132,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     const i_base_cur = p.n_tab;
     var i_data_cur = p.n_tab;
     p.n_tab += 1;
-    const i_idx_cur = i_data_cur + 1;
+    var i_idx_cur = i_data_cur + 1;
     const pk: ?*Index = if (t.hasRowid()) null else build.primaryKeyIndex(t);
     var n_idx: usize = 0;
     var idx_opt = t.index;
@@ -142,6 +140,12 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         if (pk == ix) i_data_cur = p.n_tab;
         p.n_tab += 1;
         n_idx += 1;
+    }
+    if (upsert) |u| {
+        // The cursors the INSERT opened.
+        i_data_cur = u.i_data_cur;
+        i_idx_cur = u.i_idx_cur;
+        p.n_tab = i_base_cur;
     }
     tab_list.at(0).i_cursor = i_data_cur;
 
@@ -155,7 +159,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     @memset(to_open, true);
     to_open[n_idx + 1] = false;
 
-    var nc: NameContext = .{ .parse = p, .src_list = tab_list, .nc_flags = NC.UUpsert, .u_nc = .{ .upsert = null } };
+    var nc: NameContext = .{ .parse = p, .src_list = tab_list, .nc_flags = NC.UUpsert, .u_nc = .{ .upsert = upsert } };
 
     const v = build.getVdbe(p) orelse return;
 
@@ -279,7 +283,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     var label_continue = label_break;
 
     var reg_row_count: i32 = 0;
-    if (db.flags & int.DbFlag.CountRows != 0 and p.trigger_tab == null and p.nested == 0 and !p.returning) {
+    if (db.flags & int.DbFlag.CountRows != 0 and p.trigger_tab == null and p.nested == 0 and !p.returning and upsert == null) {
         p.n_mem += 1;
         reg_row_count = p.n_mem;
         _ = aux.addOp2(v, OP.Integer, 0, reg_row_count);
@@ -303,20 +307,22 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         p.n_mem += n_change_from;
         p.n_mem += 1;
         reg_key = p.n_mem;
-        const n_eph_col = n_pk + n_change_from + (if (is_view) @as(i32, @intCast(t.cols.len)) else 0);
-        i_eph = p.n_tab;
-        p.n_tab += 1;
-        if (pk != null) _ = aux.addOp3(v, OP.Null, 0, i_pk, i_pk + n_pk - 1);
-        addr_open = aux.addOp2(v, OP.OpenEphemeral, i_eph, n_eph_col);
-        if (pk) |k| {
-            if (build.keyInfoOfIndex(p, k)) |ki| {
-                ki.n_all_field = @intCast(n_eph_col);
-                aux.appendP4(v, .{ .keyinfo = ki });
+        if (upsert == null) {
+            const n_eph_col = n_pk + n_change_from + (if (is_view) @as(i32, @intCast(t.cols.len)) else 0);
+            i_eph = p.n_tab;
+            p.n_tab += 1;
+            if (pk != null) _ = aux.addOp3(v, OP.Null, 0, i_pk, i_pk + n_pk - 1);
+            addr_open = aux.addOp2(v, OP.OpenEphemeral, i_eph, n_eph_col);
+            if (pk) |k| {
+                if (build.keyInfoOfIndex(p, k)) |ki| {
+                    ki.n_all_field = @intCast(n_eph_col);
+                    aux.appendP4(v, .{ .keyinfo = ki });
+                }
             }
-        }
-        if (n_change_from != 0) {
-            try updateFromSelect(p, i_eph, pk, changes, tab_list, where);
-            if (is_view) i_data_cur = i_eph;
+            if (n_change_from != 0) {
+                try updateFromSelect(p, i_eph, pk, changes, tab_list, where);
+                if (is_view) i_data_cur = i_eph;
+            }
         }
     }
 
@@ -330,22 +336,30 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         n_key = n_pk;
         reg_key = i_pk;
     } else {
-        // The rows to update. A one-pass update of several rows is not
-        // safe if anything else may move the cursor.
-        var flags: u16 = WHERE.ONEPASS_DESIRED;
-        if (p.nested == 0 and trig == null and has_fk == 0 and !chng_key and !b_replace and
-            (where == null or !where.?.has(EP.Subquery)))
-        {
-            flags |= WHERE.ONEPASS_MULTIROW;
-        }
-        w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, i_idx_cur) orelse return;
-        e_one_pass = where_mod.okOnePass(w.?, &ai_cur_one_pass);
-        b_finish_seek = where_mod.usesDeferredSeek(w.?);
-        if (e_one_pass != ONEPASS_SINGLE) {
-            main_mod.multiWrite(p);
-            if (e_one_pass == ONEPASS_MULTI) {
-                const i_cur = ai_cur_one_pass[1];
-                if (i_cur >= 0 and i_cur != i_data_cur and to_open[@intCast(i_cur - i_base_cur)]) e_one_pass = ONEPASS_OFF;
+        if (upsert != null) {
+            // The INSERT left the data cursor on the row to update: no
+            // search, only the WHERE of the DO UPDATE.
+            e_one_pass = ONEPASS_SINGLE;
+            ec.exprIfFalse(p, where, label_break, vi.SQLITE_JUMPIFNULL);
+            b_finish_seek = false;
+        } else {
+            // The rows to update. A one-pass update of several rows is not
+            // safe if anything else may move the cursor.
+            var flags: u16 = WHERE.ONEPASS_DESIRED;
+            if (p.nested == 0 and trig == null and has_fk == 0 and !chng_key and !b_replace and
+                (where == null or !where.?.has(EP.Subquery)))
+            {
+                flags |= WHERE.ONEPASS_MULTIROW;
+            }
+            w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, i_idx_cur) orelse return;
+            e_one_pass = where_mod.okOnePass(w.?, &ai_cur_one_pass);
+            b_finish_seek = where_mod.usesDeferredSeek(w.?);
+            if (e_one_pass != ONEPASS_SINGLE) {
+                main_mod.multiWrite(p);
+                if (e_one_pass == ONEPASS_MULTI) {
+                    const i_cur = ai_cur_one_pass[1];
+                    if (i_cur >= 0 and i_cur != i_data_cur and to_open[@intCast(i_cur - i_base_cur)]) e_one_pass = ONEPASS_OFF;
+                }
             }
         }
 
@@ -375,53 +389,55 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         }
     }
 
-    if (n_change_from == 0 and e_one_pass != ONEPASS_MULTI) where_mod.whereEnd(w.?);
-
-    if (!is_view) {
-        // Open the indexes to update.
-        if (e_one_pass != ONEPASS_OFF) {
-            if (ai_cur_one_pass[0] >= 0) to_open[@intCast(ai_cur_one_pass[0] - i_base_cur)] = false;
-            if (ai_cur_one_pass[1] >= 0) to_open[@intCast(ai_cur_one_pass[1] - i_base_cur)] = false;
-        }
-        var addr_once: i32 = 0;
-        if (e_one_pass == ONEPASS_MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] >= 0) > 0) addr_once = aux.addOp0(v, OP.Once);
-        var not_used1: i32 = 0;
-        var not_used2: i32 = 0;
-        _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, i_base_cur, to_open, &not_used1, &not_used2);
-        if (addr_once != 0) aux.jumpHereOrPopInst(v, addr_once);
-    }
-
-    // The top of the loop over the rows.
     var addr_top: i32 = 0;
-    if (e_one_pass != ONEPASS_OFF) {
-        if (ai_cur_one_pass[0] != i_data_cur and ai_cur_one_pass[1] != i_data_cur) {
-            _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_break, reg_key, n_key);
+    if (upsert == null) {
+        if (n_change_from == 0 and e_one_pass != ONEPASS_MULTI) where_mod.whereEnd(w.?);
+
+        if (!is_view) {
+            // Open the indexes to update.
+            if (e_one_pass != ONEPASS_OFF) {
+                if (ai_cur_one_pass[0] >= 0) to_open[@intCast(ai_cur_one_pass[0] - i_base_cur)] = false;
+                if (ai_cur_one_pass[1] >= 0) to_open[@intCast(ai_cur_one_pass[1] - i_base_cur)] = false;
+            }
+            var addr_once: i32 = 0;
+            if (e_one_pass == ONEPASS_MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] >= 0) > 0) addr_once = aux.addOp0(v, OP.Once);
+            var not_used1: i32 = 0;
+            var not_used2: i32 = 0;
+            _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, i_base_cur, to_open, &not_used1, &not_used2);
+            if (addr_once != 0) aux.jumpHereOrPopInst(v, addr_once);
         }
-        if (e_one_pass != ONEPASS_SINGLE) label_continue = aux.makeLabel(p);
-        _ = aux.addOp2(v, OP.IsNull, if (pk != null) reg_key else reg_old_rowid, label_break);
-    } else if (pk != null or n_change_from != 0) {
-        label_continue = aux.makeLabel(p);
-        _ = aux.addOp2(v, OP.Rewind, i_eph, label_break);
-        addr_top = aux.currentAddr(v);
-        if (n_change_from != 0) {
-            if (!is_view) {
-                if (pk != null) {
-                    for (0..@intCast(n_pk)) |i| _ = aux.addOp3(v, OP.Column, i_eph, @intCast(i), i_pk + @as(i32, @intCast(i)));
-                    _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_continue, i_pk, n_pk);
-                } else {
-                    _ = aux.addOp2(v, OP.Rowid, i_eph, reg_old_rowid);
-                    _ = aux.addOp3(v, OP.NotExists, i_data_cur, label_continue, reg_old_rowid);
+
+        // The top of the loop over the rows.
+        if (e_one_pass != ONEPASS_OFF) {
+            if (ai_cur_one_pass[0] != i_data_cur and ai_cur_one_pass[1] != i_data_cur) {
+                _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_break, reg_key, n_key);
+            }
+            if (e_one_pass != ONEPASS_SINGLE) label_continue = aux.makeLabel(p);
+            _ = aux.addOp2(v, OP.IsNull, if (pk != null) reg_key else reg_old_rowid, label_break);
+        } else if (pk != null or n_change_from != 0) {
+            label_continue = aux.makeLabel(p);
+            _ = aux.addOp2(v, OP.Rewind, i_eph, label_break);
+            addr_top = aux.currentAddr(v);
+            if (n_change_from != 0) {
+                if (!is_view) {
+                    if (pk != null) {
+                        for (0..@intCast(n_pk)) |i| _ = aux.addOp3(v, OP.Column, i_eph, @intCast(i), i_pk + @as(i32, @intCast(i)));
+                        _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_continue, i_pk, n_pk);
+                    } else {
+                        _ = aux.addOp2(v, OP.Rowid, i_eph, reg_old_rowid);
+                        _ = aux.addOp3(v, OP.NotExists, i_data_cur, label_continue, reg_old_rowid);
+                    }
                 }
+            } else {
+                _ = aux.addOp2(v, OP.RowData, i_eph, reg_key);
+                _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_continue, reg_key, 0);
             }
         } else {
-            _ = aux.addOp2(v, OP.RowData, i_eph, reg_key);
-            _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_continue, reg_key, 0);
+            _ = aux.addOp2(v, OP.Rewind, i_eph, label_break);
+            label_continue = aux.makeLabel(p);
+            addr_top = aux.addOp2(v, OP.Rowid, i_eph, reg_old_rowid);
+            _ = aux.addOp3(v, OP.NotExists, i_data_cur, label_continue, reg_old_rowid);
         }
-    } else {
-        _ = aux.addOp2(v, OP.Rewind, i_eph, label_break);
-        label_continue = aux.makeLabel(p);
-        addr_top = aux.addOp2(v, OP.Rowid, i_eph, reg_old_rowid);
-        _ = aux.addOp3(v, OP.NotExists, i_data_cur, label_continue, reg_old_rowid);
     }
 
     // The new rowid.
@@ -487,7 +503,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     if (!is_view) {
         var replaced = b_replace;
-        insert.generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_new_rowid, reg_old_rowid, chng_key, on_error, label_continue, &replaced, ax_ref);
+        insert.generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_new_rowid, reg_old_rowid, chng_key, on_error, label_continue, &replaced, ax_ref, null);
         b_replace = replaced;
 
         // REPLACE or a new key may have moved the cursor.
@@ -528,7 +544,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     }
     aux.resolveLabel(v, label_break);
 
-    if (p.nested == 0 and p.trigger_tab == null) insert.autoincrementEnd(p);
+    if (p.nested == 0 and p.trigger_tab == null and upsert == null) insert.autoincrementEnd(p);
     if (reg_row_count != 0) delete_mod.codeChangeCount(v, reg_row_count, "rows updated");
 }
 

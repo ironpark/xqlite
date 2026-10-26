@@ -19,10 +19,11 @@ const Vdbe = vi.Vdbe;
 const RC = int.RC;
 
 /// sqlite3InitOne() flags (INITFLAG_*).
-pub const INITFLAG_AlterMask: u32 = 0x0003;
-pub const INITFLAG_AlterRename: u32 = 0x0001;
-pub const INITFLAG_AlterDrop: u32 = 0x0002;
-pub const INITFLAG_AlterAdd: u32 = 0x0003;
+pub const INITFLAG_AlterMask: u16 = 0x0007;
+pub const INITFLAG_AlterRename: u16 = 0x0001;
+pub const INITFLAG_AlterDrop: u16 = 0x0002;
+pub const INITFLAG_AlterAdd: u16 = 0x0003;
+pub const INITFLAG_AlterDropCons: u16 = 0x0004;
 
 /// SQLITE_MAX_PREPARE_RETRY.
 const max_prepare_retry = 25;
@@ -195,7 +196,7 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
 
     var opened_transaction = false;
     if (bt.txnState() == .none) {
-        bt.beginTrans(.read) catch |err| {
+        bt.beginTrans(.read, 0) catch |err| {
             rc = main_mod.errorCode(err);
             setErrMsg(&data, util.errStr(rc));
             return initError(db, i_db, rc);
@@ -325,7 +326,7 @@ fn schemaIsValid(p: *Parse) void {
         const bt = d.bt orelse continue;
         var opened = false;
         if (bt.txnState() == .none) {
-            bt.beginTrans(.read) catch |err| {
+            bt.beginTrans(.read, 0) catch |err| {
                 if (err == error.OutOfMemory) {
                     db.malloc_failed = true;
                     p.rc = RC.NOMEM;
@@ -363,6 +364,7 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
     defer arena_state.deinit();
     var p: Parse = .{ .db = db, .arena = arena_state.allocator() };
     defer build.releaseTableRefs(&p);
+    defer build.deleteReturning(&p);
     p.outer_parse = db.parse;
     db.parse = &p;
     defer db.parse = p.outer_parse;

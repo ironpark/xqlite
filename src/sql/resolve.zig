@@ -12,6 +12,7 @@ const walker = @import("walker.zig");
 const callback = @import("callback.zig");
 const numeric = @import("numeric.zig");
 const ctype = @import("../util/ctype.zig");
+const alter = @import("alter.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -249,6 +250,8 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                         if (tb.tnum != 1) continue;
                         if (!isValidSchemaTableName(tz, tb, zdb)) continue;
                     }
+                    // A table alias is not renamed with the table.
+                    if (p.inRenameObject() and item.alias != null) alter.renameTokenRemap(p, null, alter.yTabKey(e));
                 }
                 const j = build.columnIndex(tb, col);
                 if (j >= 0) {
@@ -387,6 +390,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                     try resolveAlias(p, e_list, j, e, n_subquery);
                     cnt = 1;
                     match = null;
+                    if (p.inRenameObject()) alter.renameTokenRemap(p, null, e);
                     return lookupNameEnd(p, top_nc, cur_nc, cnt);
                 }
             }
@@ -628,6 +632,10 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                     right = right.right.?;
                 }
                 tab = left.token();
+                if (p.inRenameObject()) {
+                    alter.renameTokenRemap(p, e, right);
+                    alter.renameTokenRemap(p, alter.yTabKey(e), left);
+                }
             }
             return lookupName(p, zdb, tab, right, nc, e);
         },

@@ -556,6 +556,24 @@ pub const Trigger = struct {
     mem: ?*std.heap.ArenaAllocator = null,
 };
 
+/// A RETURNING clause (Returning): a transient TEMP trigger whose one step
+/// stores each changed row's results in an ephemeral table, which the
+/// statement returns at its end.
+pub const Returning = struct {
+    parse: *Parse,
+    return_el: ?*ExprList,
+    ret_trig: Trigger,
+    ret_tstep: TriggerStep,
+    /// The ephemeral table of results.
+    i_ret_cur: i32 = 0,
+    /// Results per row once "*" is expanded.
+    n_ret_col: i32 = 0,
+    /// Registers holding a row of results.
+    i_ret_reg: i32 = 0,
+    /// The trigger's name: "sqlite_returning_%p".
+    name_buf: [40]u8 = undefined,
+};
+
 // ================================================================= schema
 
 /// Column.col_flags (COLFLAG_*).
@@ -781,6 +799,15 @@ pub const NoCaseContext = struct {
     pub fn eql(_: NoCaseContext, a: []const u8, b: []const u8) bool {
         return std.ascii.eqlIgnoreCase(a, b);
     }
+};
+
+/// A SAVEPOINT (Savepoint).
+pub const Savepoint = struct {
+    name: [:0]u8,
+    /// Deferred constraint violations when it opened.
+    n_deferred_cons: i64,
+    n_deferred_imm_cons: i64,
+    next: ?*Savepoint,
 };
 
 /// The schema of one database file (Schema).
@@ -1185,7 +1212,7 @@ pub const Parse = struct {
     newmask: u32 = 0,
     /// The innermost EXPLAIN QUERY PLAN node.
     addr_explain: i32 = 0,
-    u1: union { cr: CreateState, d: struct { returning: ?*anyopaque = null } } = .{ .cr = .{} },
+    u1: union { cr: CreateState, d: struct { returning: ?*Returning = null } } = .{ .cr = .{} },
 
     // Reset for each recursion.
     last_token: Token = .{},
@@ -1208,6 +1235,8 @@ pub const Parse = struct {
     if_not_exists: bool = false,
     new_trigger: ?*Trigger = null,
     with: ?*With = null,
+    /// The rename-token map built in rename mode (pRename; see alter.zig).
+    rename: ?*RenameToken = null,
 
     pub fn inRenameObject(p: *const Parse) bool {
         return @intFromEnum(p.e_parse_mode) >= @intFromEnum(ParseMode.rename);
@@ -1220,6 +1249,14 @@ pub const Parse = struct {
     pub fn inDeclareVtab(p: *const Parse) bool {
         return p.e_parse_mode == .declare_vtab;
     }
+};
+
+/// One entry of the rename-token map (RenameToken): parse-tree element
+/// `p` (its address, see alter.key()) was made from token `t`.
+pub const RenameToken = struct {
+    p: ?*const anyopaque,
+    t: Token,
+    next: ?*RenameToken,
 };
 
 /// An AUTOINCREMENT table written by a statement (AutoincInfo).
@@ -1420,6 +1457,11 @@ pub const Sqlite3 = struct {
     /// Open statement transactions and savepoints.
     n_statement: i32 = 0,
     n_savepoint: i32 = 0,
+    /// The open SAVEPOINTs, innermost first (pSavepoint).
+    savepoint: ?*Savepoint = null,
+    /// The outermost savepoint started the transaction (a SAVEPOINT
+    /// outside BEGIN): releasing it commits.
+    is_transaction_savepoint: bool = false,
     /// Outstanding deferred foreign key violations.
     n_deferred_cons: i64 = 0,
     n_deferred_imm_cons: i64 = 0,

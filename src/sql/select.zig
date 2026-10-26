@@ -2930,6 +2930,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                     {
                         var left = try expr_mod.expr(p.arena, TK.ID, tab_name);
                         ex = try expr_mod.pExpr(p, TK.DOT, left, right);
+                        if (p.inRenameObject()) if (e.left) |el| @import("alter.zig").renameTokenRemap(p, left, el);
                         if (schema_name) |sn| {
                             left = try expr_mod.expr(p.arena, TK.ID, sn);
                             ex = try expr_mod.pExpr(p, TK.DOT, left, ex);

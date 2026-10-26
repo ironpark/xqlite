@@ -345,10 +345,9 @@ pub fn recordErrorOffsetOfExpr(p: *Parse, e_arg: ?*const Expr) void {
 }
 
 /// Port of sqlite3ExprUnmapAndDelete(). Parse trees are freed with the
-/// statement; only the rename map would need updating.
+/// statement; only the rename map needs updating.
 pub fn unmapAndDelete(p: *Parse, e: ?*Expr) void {
-    _ = p;
-    _ = e;
+    if (e != null and p.inRenameObject()) @import("alter.zig").renameExprUnmap(p, e);
 }
 
 // =========================================================== expr lists
@@ -420,7 +419,12 @@ pub fn listSetName(p: *Parse, list: ?*ExprList, name: Token, dequote: bool) Oom!
     const item = l.last();
     std.debug.assert(item.e_name == null and item.fg.e_ename == .name);
     var z = try p.arena.dupeSentinel(u8, name.slice(), 0);
-    if (dequote) z = util.dequote(z);
+    if (dequote) {
+        // If not dequoted, `name` is not part of a statement the parser
+        // handled, so it has no place in the rename map.
+        z = util.dequote(z);
+        if (p.inRenameObject()) @import("alter.zig").renameTokenMap(p, z, name);
+    }
     item.e_name = z;
 }
 

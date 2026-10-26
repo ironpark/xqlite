@@ -1567,7 +1567,7 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
 /// initialization code (constants without functions), or behind OP_Once.
 /// With `reg_dest` < 0 any register may be used (and shared by equal
 /// expressions). Returns the register.
-pub fn codeRunJustOnce(p: *Parse, e_arg: *Expr, reg_dest_arg: i32) i32 {
+pub fn codeRunJustOnce(p: *Parse, e_arg: ?*Expr, reg_dest_arg: i32) i32 {
     var reg_dest = reg_dest_arg;
     std.debug.assert(constFactorOk(p) and reg_dest != 0);
     if (reg_dest < 0) if (p.const_expr) |list| {
@@ -1577,8 +1577,10 @@ pub fn codeRunJustOnce(p: *Parse, e_arg: *Expr, reg_dest_arg: i32) i32 {
             }
         }
     };
-    const e = dup(p, e_arg) orelse return if (reg_dest < 0) 0 else reg_dest;
-    if (e.has(EP.HasFunc)) {
+    // A null expression codes a NULL, as in C.
+    const e = dup(p, e_arg);
+    if (e == null and p.db.malloc_failed) return if (reg_dest < 0) 0 else reg_dest;
+    if (e != null and e.?.has(EP.HasFunc)) {
         const v = vdbe(p);
         const addr = aux.addOp0(v, OP.Once);
         p.ok_const_factor = false;
@@ -1659,8 +1661,8 @@ pub fn codeCopy(p: *Parse, e: ?*Expr, target: i32) void {
 /// Port of sqlite3ExprCodeFactorable(): like exprCode(), but a constant
 /// may be computed during initialization.
 pub fn codeFactorable(p: *Parse, e: ?*Expr, target: i32) void {
-    if (p.ok_const_factor and e != null and expr_mod.isConstantNotJoin(p, e)) {
-        _ = codeRunJustOnce(p, e.?, target);
+    if (p.ok_const_factor and expr_mod.isConstantNotJoin(p, e)) {
+        _ = codeRunJustOnce(p, e, target);
     } else {
         codeCopy(p, e, target);
     }

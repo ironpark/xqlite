@@ -128,7 +128,7 @@ test "btree: rows inserted in random order read back in order" {
         defer bt.close();
 
         const n = 1200;
-        try bt.beginTrans(.write);
+        try bt.beginTrans(.write, 0);
         const root = try bt.createTable(.intkey);
         {
             var cur: Cursor = undefined;
@@ -138,7 +138,7 @@ test "btree: rows inserted in random order read back in order" {
         }
         try bt.commit();
 
-        try bt.beginTrans(.read);
+        try bt.beginTrans(.read, 0);
         defer bt.commit() catch unreachable;
         var present: [n + 2]bool = @splat(true);
         present[0] = false;
@@ -172,7 +172,7 @@ test "btree: deletes shrink the tree and recycle pages" {
 
     const n = 1500;
     var present: [n + 2]bool = @splat(false);
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
     var cur: Cursor = undefined;
     try bt.cursor(&cur, root, .{ .write = true });
@@ -215,7 +215,7 @@ test "btree: delete with save_position while scanning" {
 
     const n = 800;
     var present: [n + 2]bool = @splat(false);
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
     var cur: Cursor = undefined;
     try bt.cursor(&cur, root, .{ .write = true });
@@ -249,7 +249,7 @@ test "btree: rollback restores pages and cursor positions" {
 
     const n = 600;
     var present: [n + 2]bool = @splat(false);
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
     {
         var cur: Cursor = undefined;
@@ -263,7 +263,7 @@ test "btree: rollback restores pages and cursor positions" {
     try bt.commit();
     const pages = bt.lastPage();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     var reader: Cursor = undefined;
     try bt.cursor(&reader, root, .{});
     try testing.expectEqual(std.math.Order.eq, try reader.tableMoveto(300, false));
@@ -280,7 +280,7 @@ test "btree: rollback restores pages and cursor positions" {
     // The reader was saved before the first change and survives.
     try testing.expect(reader.hasMoved());
     try bt.rollback(null, false);
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     try testing.expect(!try reader.restore());
     try expectRow(&reader, 300);
     reader.close();
@@ -297,7 +297,7 @@ test "btree: replacing rows, in place and resized" {
     const bt = try env.open(.{ .page_size = 1024 });
     defer bt.close();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
     var cur: Cursor = undefined;
     try bt.cursor(&cur, root, .{ .write = true });
@@ -332,7 +332,7 @@ test "btree: two cursors on one table" {
     const bt = try env.open(.{ .page_size = 512 });
     defer bt.close();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
     var writer: Cursor = undefined;
     try bt.cursor(&writer, root, .{ .write = true });
@@ -361,7 +361,7 @@ test "btree: clear and drop tables, meta values" {
     const bt = try env.open(.{ .page_size = 512 });
     defer bt.close();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const t1 = try bt.createTable(.intkey);
     const t2 = try bt.createTable(.intkey);
     inline for (.{ t1, t2 }) |root| {
@@ -377,14 +377,14 @@ test "btree: clear and drop tables, meta values" {
     try bt.updateMeta(.schema_version, 7);
     try bt.commit();
 
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     try testing.expectEqual(@as(u32, 42), bt.getMeta(.user_version));
     try testing.expectEqual(@as(u32, 7), bt.getMeta(.schema_version));
     try testing.expect(bt.getMeta(.free_page_count) > 10);
     const version = bt.getMeta(.data_version);
     try bt.commit();
     // Our own commits do not change the data version.
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     try testing.expectEqual(version, bt.getMeta(.data_version));
     try bt.commit();
 }
@@ -408,7 +408,7 @@ test "btree: index b-tree with record keys" {
         const ki: record.KeyInfo = .{ .gpa = gpa, .sort_orders = &.{ .asc, .asc } };
 
         const n = 700;
-        try bt.beginTrans(.write);
+        try bt.beginTrans(.write, 0);
         const root = try bt.createTable(.blobkey);
         var cur: Cursor = undefined;
         try bt.cursor(&cur, root, .{ .write = true, .key_info = ki.btreeKeyInfo() });
@@ -529,7 +529,7 @@ test "btree: reads a database written by sqlite3" {
     const bt = try env.open(.{});
     defer bt.close();
 
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     // Runs after the cursors below are closed.
     defer bt.commit() catch unreachable;
     try testing.expectEqual(@as(u32, 1024), bt.getPageSize());
@@ -570,7 +570,7 @@ test "btree: modifies a database written by sqlite3" {
     const bt = try env.open(.{});
     defer bt.close();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const s = try readSchema(bt);
     var cur: Cursor = undefined;
     try bt.cursor(&cur, s.table, .{ .write = true });
@@ -598,7 +598,7 @@ test "btree: modifies an auto-vacuum database written by sqlite3" {
     defer bt.close();
     try testing.expectEqual(btree.AutoVacuum.full, bt.getAutoVacuum());
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const s = try readSchema(bt);
     // The pointer map is checked too.
     try expectIntact(bt, &.{ s.table, s.index });
@@ -620,7 +620,7 @@ test "btree: modifies an auto-vacuum database written by sqlite3" {
     try bt.commit();
 
     // Commit moved the free pages out of the file.
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
     try testing.expect(bt.lastPage() < n_before);
     try expectIntact(bt, &.{ s.table, s.index });
@@ -640,7 +640,7 @@ test "btree: auto-vacuum keeps root pages packed" {
     const bt = try env.open(.{ .page_size = 512, .auto_vacuum = .full });
     defer bt.close();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     var roots: [5]Pgno = undefined;
     for (&roots) |*r| {
         r.* = try bt.createTable(.intkey);
@@ -665,7 +665,7 @@ test "btree: auto-vacuum keeps root pages packed" {
     try expectIntact(bt, roots[0..3]);
     try bt.commit();
 
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
     try expectIntact(bt, roots[0..3]);
     var present: [61]bool = @splat(true);
@@ -681,7 +681,7 @@ test "btree: incremental vacuum frees pages on request" {
     const bt = try env.open(.{ .page_size = 512, .auto_vacuum = .incremental });
     defer bt.close();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
     var cur: Cursor = undefined;
     try bt.cursor(&cur, root, .{ .write = true });
@@ -689,7 +689,7 @@ test "btree: incremental vacuum frees pages on request" {
     cur.close();
     try bt.commit();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     try bt.cursor(&cur, root, .{ .write = true });
     for (1..300) |k| {
         if (k % 3 == 0) continue;
@@ -700,7 +700,7 @@ test "btree: incremental vacuum frees pages on request" {
     try bt.commit();
 
     // Commit leaves the free pages in place.
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const n_free = bt.getMeta(.free_page_count);
     const n_page = bt.lastPage();
     try testing.expect(n_free > 10);
@@ -709,13 +709,13 @@ test "btree: incremental vacuum frees pages on request" {
     try expectIntact(bt, &.{root});
     try bt.commit();
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     try testing.expect(bt.lastPage() <= n_page - 10);
     while (try bt.incrVacuum()) {}
     try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
     try bt.commit();
 
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     try expectIntact(bt, &.{root});
     var present: [301]bool = @splat(false);
     var k: usize = 3;
@@ -737,7 +737,7 @@ test "btree: corrupt pages are reported, not trusted" {
     const bt = try env.open(.{});
     defer bt.close();
 
-    try bt.beginTrans(.read);
+    try bt.beginTrans(.read, 0);
     var report = try bt.integrityCheck(gpa, &.{ 1, 2, 3 }, 10);
     defer report.deinit(gpa);
     try testing.expect(report.n_err > 0);
@@ -768,7 +768,7 @@ fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, av: btree.AutoVa
     var model: [n_keys]?u32 = @splat(null);
     var committed = model;
 
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     const t_root = try bt.createTable(.intkey);
     const i_root = try bt.createTable(.blobkey);
     try bt.commit();
@@ -777,7 +777,7 @@ fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, av: btree.AutoVa
     const rand = prng.random();
     var buf: [6000]u8 = undefined;
     for (0..30) |round| {
-        try bt.beginTrans(.write);
+        try bt.beginTrans(.write, 0);
         {
             var tc: Cursor = undefined;
             try bt.cursor(&tc, t_root, .{ .write = true });
@@ -821,7 +821,7 @@ fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, av: btree.AutoVa
             committed = model;
         }
 
-        try bt.beginTrans(.read);
+        try bt.beginTrans(.read, 0);
         defer bt.commit() catch unreachable;
         try expectIntact(bt, &.{ t_root, i_root });
         if (av == .full) try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
@@ -872,7 +872,7 @@ test "btree: page 1 as a table root grows and shrinks" {
 
     const n = 500;
     var present: [n + 2]bool = @splat(false);
-    try bt.beginTrans(.write);
+    try bt.beginTrans(.write, 0);
     var cur: Cursor = undefined;
     try bt.cursor(&cur, 1, .{ .write = true });
     for (shuffled(n, 11)) |k| {

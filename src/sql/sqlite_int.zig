@@ -685,6 +685,18 @@ pub const Table = struct {
             /// when they are reset (viewResetAll()).
             cols_mem: ?*std.heap.ArenaAllocator = null,
         },
+        vtab: struct {
+            /// The module arguments (azArg): the module name, the
+            /// database name (set when a constructor runs), the table
+            /// name, then the arguments of CREATE VIRTUAL TABLE. They
+            /// live in the table's memory.
+            args: [][:0]const u8 = &.{},
+            /// The VTable of each connection using the table.
+            p: ?*VTable = null,
+            /// The memory of the columns sqlite3_declare_vtab() made (the
+            /// declared table's), freed with the table.
+            decl_mem: ?*std.heap.ArenaAllocator = null,
+        },
     } = .{ .tab = .{} },
     trigger: ?*Trigger = null,
     schema: ?*Schema = null,
@@ -708,6 +720,51 @@ pub const Table = struct {
     pub fn hasRowid(t: *const Table) bool {
         return t.tab_flags & TF.WithoutRowid == 0;
     }
+
+    /// IsVirtual().
+    pub fn isVirtual(t: *const Table) bool {
+        return t.e_tab_type == .vtab;
+    }
+};
+
+/// A virtual table module registered on a connection (Module).
+pub const Module = struct {
+    /// The callback methods.
+    module: *const @import("vtab.zig").Module,
+    name: [:0]u8,
+    /// pAux, passed to xCreate and xConnect.
+    aux: ?*anyopaque = null,
+    /// Destructor of `aux`.
+    x_destroy: ?*const fn (?*anyopaque) void = null,
+    /// References: the registration and each VTable.
+    n_ref_module: i32 = 1,
+    /// The eponymous virtual table, if made.
+    epo_tab: ?*Table = null,
+};
+
+/// SQLITE_VTABRISK_*.
+pub const VTABRISK = struct {
+    pub const Low: u8 = 0;
+    pub const Normal: u8 = 1;
+    pub const High: u8 = 2;
+};
+
+/// The instance of a virtual table on one connection (VTable).
+pub const VTable = struct {
+    db: *Sqlite3,
+    mod: *Module,
+    /// The object the module's constructor made.
+    vtab: ?*@import("vtab.zig").Vtab = null,
+    n_ref: i32 = 0,
+    /// SQLITE_VTAB_CONSTRAINT_SUPPORT was enabled.
+    b_constraint: bool = false,
+    /// SQLITE_VTAB_USES_ALL_SCHEMAS was set.
+    b_all_schemas: bool = false,
+    /// SQLITE_VTABRISK_*.
+    e_vtab_risk: u8 = VTABRISK.Normal,
+    /// Depth of the SAVEPOINT stack.
+    i_savepoint: i32 = 0,
+    next: ?*VTable = null,
 };
 
 /// A foreign key (FKey).
@@ -1237,6 +1294,11 @@ pub const Parse = struct {
     with: ?*With = null,
     /// The rename-token map built in rename mode (pRename; see alter.zig).
     rename: ?*RenameToken = null,
+    /// The argument of CREATE VIRTUAL TABLE being parsed (sArg).
+    s_arg: Token = .{},
+    /// Virtual tables that need an OP_VBegin (apVtabLock); top-level
+    /// Parse only.
+    vtab_lock: std.ArrayList(*Table) = .empty,
 
     pub fn inRenameObject(p: *const Parse) bool {
         return @intFromEnum(p.e_parse_mode) >= @intFromEnum(ParseMode.rename);
@@ -1489,6 +1551,21 @@ pub const Sqlite3 = struct {
     busy_timeout: i32 = 0,
     /// PRAGMA analysis_limit.
     n_analysis_limit: i32 = 0,
+    /// Registered virtual table modules (aModule).
+    modules: NameMap(*Module) = .empty,
+    /// Context of the virtual table constructor running (pVtabCtx).
+    vtab_ctx: ?*@import("vtab.zig").VtabCtx = null,
+    /// Virtual tables with an open transaction (aVTrans, nVTrans):
+    /// `a_vtrans` holds room for a multiple of 5. It is null while xSync
+    /// methods run (sqlite3VtabInSync()).
+    a_vtrans: ?[]*VTable = null,
+    n_vtrans: usize = 0,
+    /// VTables to disconnect at the next opportunity (pDisconnect).
+    disconnect: ?*VTable = null,
+    /// The ON CONFLICT mode of the running xUpdate (vtabOnConflict).
+    vtab_on_conflict: u8 = 0,
+    /// OP_VDestroy calls running (nVDestroy).
+    n_vdestroy: i32 = 0,
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

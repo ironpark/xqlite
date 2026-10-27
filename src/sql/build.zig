@@ -272,8 +272,8 @@ const delete_mod = @import("delete.zig");
 const resolve = @import("resolve.zig");
 const select_mod = @import("select.zig");
 const attach = @import("attach.zig");
-const pending = @import("pending.zig");
 const alter = @import("alter.zig");
+const vtab_mod = @import("vtab.zig");
 const btree = @import("../btree/btree.zig");
 
 const Sqlite3 = int.Sqlite3;
@@ -379,6 +379,10 @@ pub fn finishCoding(p: *Parse) void {
             );
             if (!db.init.busy) aux.changeP5(v, 1);
         }
+        for (p.vtab_lock.items) |t| {
+            _ = aux.addOp4(v, OP.VBegin, 0, 0, 0, vtabP4(db, t));
+        }
+        p.vtab_lock = .empty;
 
         if (p.uses_ainc) insert_mod.autoincrementBegin(p);
 
@@ -552,11 +556,26 @@ pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u
     if (db.m_db_flags & int.DBFLAG.SchemaKnownOk == 0 and prepare.readSchema(p) != RC.OK) {
         return null;
     }
-    const t = findTable(db, name, database);
+    var t = findTable(db, name, database);
     if (t == null) {
-        // Eponymous virtual tables are not supported.
+        // Not a table made with CREATE: perhaps an eponymous virtual
+        // table.
+        if (p.prep_flags & aux.PREPARE_NO_VTAB == 0 and !db.init.busy) {
+            var m = db.modules.get(name);
+            if (m == null and name.len >= 7 and ctype.eqlNoCase(name[0..7], "pragma_")) {
+                m = @import("pragma.zig").vtabRegister(db, name);
+            }
+            if (m == null and name.len >= 4 and ctype.eqlNoCase(name[0..4], "json")) {
+                m = @import("json.zig").jsonVtabRegister(db, name);
+            }
+            if (m) |mod| if (vtab_mod.epoTableInit(p, mod)) return mod.epo_tab;
+        }
         if (flags & LOCATE_NOERR != 0) return null;
         p.check_schema = true;
+    } else if (t.?.isVirtual() and p.prep_flags & aux.PREPARE_NO_VTAB != 0) {
+        t = null;
+    }
+    if (t == null) {
         const what = if (flags & LOCATE_VIEW != 0) "no such view" else "no such table";
         if (database) |zdb| {
             util.errorMsg(p, "{s}: {s}.{s}", .{ what, zdb, name });
@@ -682,6 +701,7 @@ pub fn resetAllSchemasOfConnection(db: *Sqlite3) void {
         }
     }
     db.m_db_flags &= ~(int.DBFLAG.SchemaChange | int.DBFLAG.SchemaKnownOk);
+    vtab_mod.unlockList(db);
 }
 
 /// The allocator of `t`'s memory: its arena if it is a schema table,
@@ -784,6 +804,7 @@ pub fn deleteTable(db: *Sqlite3, t: *Table) void {
         }
     }
     if (t.isOrdinary()) fkey_mod.fkDelete(db, t);
+    if (t.isVirtual()) vtab_mod.clear(db, t);
     if (t.isView()) freeViewColumns(db, t);
     m.deinit();
     db.gpa.destroy(m);
@@ -959,10 +980,6 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
     var name_tok: *const Token = &name1;
     var name: []const u8 = undefined;
     if (p.syntax_only) return;
-    if (is_virtual) {
-        pending.notYet(p, "CREATE VIRTUAL TABLE");
-        return;
-    }
     if (db.init.busy and db.init.new_tnum == 1) {
         // Reading sqlite_schema or sqlite_temp_schema itself.
         i_db = db.init.i_db;
@@ -1021,6 +1038,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
     if (!db.init.busy) if (getVdbe(p)) |v| {
         const null_row = [_]u8{ 6, 0, 0, 0, 0, 0 };
         beginWriteOperation(p, true, i_db);
+        if (is_virtual) _ = aux.addOp0(v, OP.VBegin);
         p.n_mem += 1;
         const reg1 = p.n_mem;
         p.n_mem += 1;
@@ -1035,7 +1053,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.file_format), file_format);
         _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.text_encoding), db.enc);
         aux.jumpHere(v, addr1);
-        if (is_view) {
+        if (is_view or is_virtual) {
             _ = aux.addOp2(v, OP.Integer, 0, reg2);
         } else {
             p.u1.cr.addr_cr_tab = aux.addOp3(v, OP.CreateBtree, @intCast(i_db), reg2, BTREE_INTKEY);
@@ -1606,11 +1624,54 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
     recomputeColumnsNotIndexed(pk);
 }
 
-/// Port of sqlite3ShadowTableName(): virtual tables are not supported, so
-/// no table is a shadow table.
+/// Port of sqlite3IsShadowTableOf(): `name` is the name of a shadow
+/// table of virtual table `t`.
+pub fn isShadowTableOf(db: *Sqlite3, t: *Table, name: []const u8) bool {
+    if (!t.isVirtual()) return false;
+    const n_name = t.name.len;
+    if (name.len < n_name or !ctype.eqlNoCase(name[0..n_name], t.name)) return false;
+    if (name.len == n_name or name[n_name] != '_') return false;
+    const m = db.modules.get(t.u.vtab.args[0]) orelse return false;
+    if (m.module.i_version < 3) return false;
+    const x = m.module.x_shadow_name orelse return false;
+    return x(name[n_name + 1 ..]);
+}
+
+/// Port of sqlite3MarkAllShadowTablesOf(): flag the shadow tables of
+/// virtual table `t` TF_Shadow, if its module has xShadowName.
+pub fn markAllShadowTablesOf(db: *Sqlite3, t: *Table) void {
+    std.debug.assert(t.isVirtual());
+    const m = db.modules.get(t.u.vtab.args[0]) orelse return;
+    if (m.module.i_version < 3) return;
+    const x = m.module.x_shadow_name orelse return;
+    const n_name = t.name.len;
+    var it = t.schema.?.tbl_hash.valueIterator();
+    while (it.next()) |op| {
+        const other = op.*;
+        if (!other.isOrdinary()) continue;
+        if (other.tab_flags & TF.Shadow != 0) continue;
+        if (other.name.len > n_name and ctype.eqlNoCase(other.name[0..n_name], t.name) and
+            other.name[n_name] == '_' and x(other.name[n_name + 1 ..]))
+        {
+            other.tab_flags |= TF.Shadow;
+        }
+    }
+}
+
+/// Port of sqlite3ShadowTableName(): `name` is the name of a shadow table
+/// of a virtual table of the connection.
 pub fn shadowTableName(db: *Sqlite3, name: []const u8) bool {
-    _ = .{ db, name };
-    return false;
+    const tail = std.mem.lastIndexOfScalar(u8, name, '_') orelse return false;
+    const t = findTable(db, name[0..tail], null) orelse return false;
+    if (!t.isVirtual()) return false;
+    return isShadowTableOf(db, t, name);
+}
+
+/// The P4 operand of a virtual table opcode: the VTable of `t` for `db`
+/// (P4_VTAB; aux.changeP4() locks it for as long as the program refers
+/// to it).
+pub fn vtabP4(db: *Sqlite3, t: *Table) vi.P4 {
+    return .{ .vtab = vtab_mod.getVTable(db, t).? };
 }
 
 /// Port of sqlite3EndTable(): the closing ")" (or AS SELECT) of a CREATE
@@ -2034,6 +2095,10 @@ fn createIndexImpl(
         util.errorMsg(p, "views may not be indexed", .{});
         return;
     }
+    if (t.isVirtual()) {
+        util.errorMsg(p, "virtual tables may not be indexed", .{});
+        return;
+    }
 
     // The index name: given, or invented for a constraint.
     var name: [:0]const u8 = undefined;
@@ -2309,9 +2374,11 @@ pub fn srcListLookup(p: *Parse, src: *SrcList) ?*Table {
 /// Port of sqlite3ViewGetColumnNames(): make sure the columns of a view
 /// are known (computed from its SELECT). Returns the number of errors.
 pub fn viewGetColumnNames(p: *Parse, t: *Table) u32 {
-    if (t.e_tab_type == .vtab) {
-        pending.notYet(p, "virtual tables");
-        return 1;
+    if (t.isVirtual()) {
+        p.db.n_schema_lock += 1;
+        const rc = vtab_mod.callConnect(p, t);
+        p.db.n_schema_lock -= 1;
+        return @intFromBool(rc != RC.OK);
     }
     if (!t.isView() or t.cols.len > 0) return 0;
     return viewGetColumnNamesImpl(p, t) catch {
@@ -2505,7 +2572,10 @@ pub fn savepoint(p: *Parse, op: i32, name: Token) void {
 pub fn openTempDatabase(p: *Parse) u32 {
     const db = p.db;
     if (db.dbs.items[1].bt == null and p.explain == 0) {
-        const bt = btree.Btree.open(db.gpa, db.vfs.?, null, .{ .cell_size_check = db.flags & int.DbFlag.CellSizeCk != 0 }) catch |err| {
+        const bt = btree.Btree.open(db.gpa, db.vfs.?, null, .{
+            .cell_size_check = db.flags & int.DbFlag.CellSizeCk != 0,
+            .n_vdbe_read = &db.n_vdbe_read,
+        }) catch |err| {
             util.errorMsg(p, "unable to open a temporary database file for storing temporary tables", .{});
             p.rc = main_mod.errorCode(err);
             return 1;
@@ -2666,6 +2736,7 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
     const db = p.db;
     const v = getVdbe(p) orelse return;
     beginWriteOperation(p, true, i_db);
+    if (t.isVirtual()) _ = aux.addOp0(v, OP.VBegin);
     // Drop its triggers (TEMP triggers on it too).
     var trig = trigger_mod.triggerList(p, t);
     while (trig) |tr| : (trig = tr.next) trigger_mod.dropTriggerPtr(p, tr);
@@ -2676,6 +2747,10 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
     }
     nestedParse(p, "DELETE FROM %Q." ++ int.LEGACY_SCHEMA_TABLE ++ " WHERE tbl_name=%Q and type!='trigger'", &.{ .{ .str = db_name }, .{ .str = t.name } });
     if (!is_view and t.e_tab_type != .vtab) destroyTable(p, t);
+    if (t.isVirtual()) {
+        _ = aux.addOp4Str(v, OP.VDestroy, @intCast(i_db), 0, 0, t.name);
+        main_mod.mayAbort(p);
+    }
     _ = aux.addOp4Str(v, OP.DropTable, @intCast(i_db), 0, 0, t.name);
     changeCookie(p, i_db);
     viewResetAll(db, i_db);
@@ -2684,7 +2759,8 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
 /// Port of sqlite3ReadOnlyShadowTables(): shadow tables are read-only
 /// to ordinary SQL in defensive mode.
 pub fn readOnlyShadowTables(db: *Sqlite3) bool {
-    return db.flags & int.DbFlag.Defensive != 0 and db.n_vdbe_exec == 0;
+    return db.flags & int.DbFlag.Defensive != 0 and db.vtab_ctx == null and
+        db.n_vdbe_exec == 0 and !vtab_mod.inSync(db);
 }
 
 /// Port of tableMayNotBeDropped().
@@ -2717,10 +2793,8 @@ pub fn dropTable(p: *Parse, name: ?*SrcList, is_view: bool, no_err: bool) void {
         return;
     };
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
-    if (t.e_tab_type == .vtab) {
-        pending.notYet(p, "virtual tables");
-        return;
-    }
+    // Make sure a virtual table is connected.
+    if (t.isVirtual() and viewGetColumnNames(p, t) != 0) return;
     if (tableMayNotBeDropped(db, t)) {
         util.errorMsg(p, "table {s} may not be dropped", .{t.name});
         return;

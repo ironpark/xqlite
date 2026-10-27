@@ -5,7 +5,7 @@
 const std = @import("std");
 const int = @import("sqlite_int.zig");
 const select_mod = @import("select.zig");
-const pending = @import("pending.zig");
+const vtab = @import("vtab.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const build = @import("build.zig");
@@ -150,9 +150,11 @@ pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
 fn readsTable(p: *Parse, i_db: usize, t: *Table) bool {
     const v = p.vdbe.?;
     const end = aux.currentAddr(v);
+    const vt: ?*int.VTable = if (t.isVirtual()) vtab.getVTable(p.db, t) else null;
     var i: i32 = 1;
     while (i < end) : (i += 1) {
         const op = aux.getOp(v, i);
+        if (op.opcode == OP.VOpen and op.p4.vtab == vt) return true;
         if (op.opcode == OP.OpenRead and op.p3 == @as(i32, @intCast(i_db))) {
             const tnum: int.Pgno = @intCast(op.p2);
             if (tnum == t.tnum) return true;
@@ -386,13 +388,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     var tmask: u8 = 0;
     const trig = trigger.triggersExist(p, t, TK.INSERT, null, &tmask);
     const is_view = t.isView();
-    if (p.n_err != 0) return;
     if (build.viewGetColumnNames(p, t) != 0) return;
     if (delete_mod.isReadOnly(p, t, trig)) return;
-    if (t.e_tab_type == .vtab) {
-        pending.notYet(p, "virtual tables");
-        return;
-    }
 
     const v = build.getVdbe(p) orelse return;
     if (p.nested == 0) aux.countChanges(v);
@@ -404,6 +401,11 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     var reg_rowid = p.n_mem + 1;
     var reg_ins = reg_rowid;
     p.n_mem += @as(i32, @intCast(t.cols.len)) + 1;
+    if (t.isVirtual()) {
+        // xUpdate takes the rowid to delete first.
+        reg_rowid += 1;
+        p.n_mem += 1;
+    }
     var reg_data = reg_rowid + 1;
 
     // Map the IDLIST to the columns. b_id_list_in_order: the IDLIST
@@ -670,6 +672,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
 
     var append_flag = false;
     if (!is_view) {
+        // The row xUpdate deletes: none.
+        if (t.isVirtual()) _ = aux.addOp2(v, OP.Null, 0, reg_ins);
         if (ipk_column >= 0) {
             // The rowid given by the row.
             if (use_temp_table) {
@@ -678,7 +682,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 // Already copied above.
             } else {
                 const ipk = list.?.at(@intCast(ipk_column)).expr.?;
-                if (ipk.op == TK.NULL) {
+                if (ipk.op == TK.NULL and !t.isVirtual()) {
                     _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
                     append_flag = true;
                 } else {
@@ -687,13 +691,18 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             }
             // A NULL rowid gets a new one.
             if (!append_flag) {
-                const addr1 = aux.addOp1(v, OP.NotNull, reg_rowid);
-                _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
-                aux.jumpHere(v, addr1);
+                if (!t.isVirtual()) {
+                    const addr1 = aux.addOp1(v, OP.NotNull, reg_rowid);
+                    _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
+                    aux.jumpHere(v, addr1);
+                } else {
+                    const addr1 = aux.currentAddr(v);
+                    _ = aux.addOp2(v, OP.IsNull, reg_rowid, addr1 + 2);
+                }
                 _ = aux.addOp1(v, OP.MustBeInt, reg_rowid);
                 main_mod.mayAbort(p);
             }
-        } else if (without_rowid) {
+        } else if (t.isVirtual() or without_rowid) {
             _ = aux.addOp2(v, OP.Null, 0, reg_rowid);
         } else {
             _ = aux.addOp3(v, OP.NewRowid, i_data_cur, reg_rowid, reg_autoinc);
@@ -704,13 +713,21 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         // Generated columns may use the rowid, so they come last.
         if (t.tab_flags & TF.HasGenerated != 0) computeGeneratedColumns(p, reg_rowid + 1, t);
 
-        var is_replace = false;
-        generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0, on_error, end_of_loop, &is_replace, null, upsert);
-        if (db.flags & int.DbFlag.ForeignKeys != 0) fkey.fkCheck(p, t, 0, reg_ins, null, false);
-        // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
-        // trigger programs (a REPLACE delete then resets the seek result).
-        const use_seek = !is_replace or !aux.hasSubProgram(v);
-        completeInsertion(p, t, i_data_cur, i_idx_cur, reg_ins, reg_idx, 0, append_flag, use_seek);
+        if (t.isVirtual()) {
+            vtab.makeWritable(p, t);
+            _ = aux.addOp4(v, OP.VUpdate, 1, @as(i32, @intCast(t.cols.len)) + 2, reg_ins, build.vtabP4(db, t));
+            aux.changeP5(v, if (on_error == OE.Default) OE.Abort else on_error);
+            main_mod.mayAbort(p);
+        } else {
+            var is_replace = false;
+            generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0, on_error, end_of_loop, &is_replace, null, upsert);
+            if (db.flags & int.DbFlag.ForeignKeys != 0) fkey.fkCheck(p, t, 0, reg_ins, null, false);
+            // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
+            // trigger programs (a REPLACE delete then resets the seek
+            // result).
+            const use_seek = !is_replace or !aux.hasSubProgram(v);
+            completeInsertion(p, t, i_data_cur, i_idx_cur, reg_ins, reg_idx, 0, append_flag, use_seek);
+        }
     }
 
     if (reg_row_count != 0) _ = aux.addOp2(v, OP.AddImm, reg_row_count, 1);

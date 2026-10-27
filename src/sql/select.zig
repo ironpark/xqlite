@@ -210,7 +210,6 @@ const window = @import("window.zig");
 const coll_mod = @import("coll.zig");
 const prepare = @import("prepare.zig");
 const callback = @import("callback.zig");
-const pending = @import("pending.zig");
 const serial = @import("../vdbe/serial.zig");
 
 const Sqlite3 = int.Sqlite3;
@@ -2710,7 +2709,7 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
 
 /// Port of sqlite3SelectPopWith(): pop the WITH clause of `s` (the
 /// leftmost term of a compound) off the stack.
-fn selectPopWith(w: *Walker, s: *Select) void {
+pub fn selectPopWith(w: *Walker, s: *Select) void {
     const p = w.parse.?;
     if (p.with != null and s.prior == null) {
         if (findRightmost(s).with) |with| p.with = with.outer;
@@ -2827,6 +2826,13 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                             util.errorMsg(p, "access to view \"{s}\" prohibited", .{t.name});
                         }
                         try build.srcItemAttachSubquery(p, from, (try expr_mod.selectDup(p.arena, t.u.view.select)).?);
+                    } else if (t.isVirtual() and
+                        (from.fg.from_ddl or p.prep_flags & aux.PREPARE_FROM_DDL != 0) and
+                        t.u.vtab.p != null and
+                        t.u.vtab.p.?.e_vtab_risk > @intFromBool(db.flags & int.DbFlag.TrustedSchema != 0))
+                    {
+                        // SQLITE_VTABRISK_Normal is 1 and _High 2.
+                        util.errorMsg(p, "unsafe use of virtual table \"{s}\"", .{t.name});
                     }
                     // Renumber the Select ids of the view's copy.
                     w.e_code = 1;
@@ -3614,10 +3620,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
 
     if (dest.e_dest == SRT.Output) generateColumnNames(p, s);
 
-    if (s.win != null) {
-        pending.notYet(p, "window functions");
-        return 1;
-    }
+    if (try window.windowRewrite(p, s) != 0) return 1;
     var tab_list = s.src.?;
     var is_agg = s.sel_flags & SF.Aggregate != 0;
     var sort: SortCtx = .{ .order_by = s.order_by };
@@ -3888,6 +3891,8 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     if (!is_agg and group_by == null) {
         // No aggregates and no GROUP BY.
         const wctrl_flags: u16 = (if (distinct.is_tnct != 0) WHERE.WANT_DISTINCT else 0) | @as(u16, @intCast(s.sel_flags & SF.FixedLimit));
+        const win = s.win; // The main window object, or null.
+        if (win != null) window.windowCodeInit(p, s);
         const w = where_mod.whereBegin(p, tab_list, where, sort.order_by, s.e_list, s, wctrl_flags, s.n_select_row) orelse return 1;
         if (where_mod.outputRowCount(w) < s.n_select_row) {
             s.n_select_row = where_mod.outputRowCount(w);
@@ -3903,8 +3908,28 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         // An unneeded sorter.
         if (sort.addr_sort_index >= 0 and sort.order_by == null) _ = aux.changeToNoop(v, sort.addr_sort_index);
 
-        selectInnerLoop(p, s, -1, &sort, &distinct, dest, where_mod.continueLabel(w), where_mod.breakLabel(w));
-        where_mod.whereEnd(w);
+        if (win != null) {
+            const addr_gosub = aux.makeLabel(p);
+            const i_cont = aux.makeLabel(p);
+            const i_break = aux.makeLabel(p);
+            p.n_mem += 1;
+            const reg_gosub = p.n_mem;
+
+            window.windowCodeStep(p, s, w, reg_gosub, addr_gosub);
+
+            _ = aux.addOp2(v, OP.Goto, 0, i_break);
+            aux.resolveLabel(v, addr_gosub);
+            // The inner-loop subroutine.
+            sort.label_ob_lopt = 0;
+            selectInnerLoop(p, s, -1, &sort, &distinct, dest, i_cont, i_break);
+            aux.resolveLabel(v, i_cont);
+            _ = aux.addOp1(v, OP.Return, reg_gosub);
+            aux.resolveLabel(v, i_break);
+        } else {
+            // The standard inner loop.
+            selectInnerLoop(p, s, -1, &sort, &distinct, dest, where_mod.continueLabel(w), where_mod.breakLabel(w));
+            where_mod.whereEnd(w);
+        }
     } else {
         // Aggregates and/or GROUP BY.
         var order_by_grp = false;

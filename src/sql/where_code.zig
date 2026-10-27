@@ -16,6 +16,7 @@ const expr_mod = @import("expr.zig");
 const ec = @import("expr_code.zig");
 const insert = @import("insert.zig");
 const util = @import("util.zig");
+const vtab = @import("vtab.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -150,7 +151,15 @@ fn explainScanText(w: *Writer, item: *const SrcItem, loop: *const WhereLoop, is_
         }
         try w.print("{c}?)", .{c_range_op});
     }
-    // The virtual-table "VIRTUAL TABLE INDEX" text is not ported.
+    else if (flags & wi.WHERE_VIRTUALTABLE != 0) {
+        try w.writeAll(" VIRTUAL TABLE INDEX ");
+        const idx_str: []const u8 = loop.vtab.idx_str orelse "";
+        if (loop.vtab.b_idx_num_hex) {
+            try w.print("0x{x}:{s}", .{ @as(u32, @bitCast(loop.vtab.idx_num)), idx_str });
+        } else {
+            try w.print("{d}:{s}", .{ loop.vtab.idx_num, idx_str });
+        }
+    }
     if (item.fg.jointype & JT.LEFT != 0) try w.writeAll(" LEFT-JOIN");
 }
 
@@ -249,7 +258,9 @@ fn disableTerm(level: *const WhereLevel, term_arg: *WhereTerm) void {
         }
         if (term.i_parent < 0) break;
         term = &term.wc.a[@intCast(term.i_parent)];
-        term.n_child -= 1;
+        // Wraps as in C: the LIMIT and OFFSET terms of a virtual table have
+        // iParent 0 (whereClauseInsert()) but are no child of a[0].
+        term.n_child -%= 1;
         if (term.n_child != 0) break;
         n_loop += 1;
     }
@@ -581,6 +592,98 @@ fn codeDeferredSeek(w: *WhereInfo, idx: *Index, i_cur: i32, i_idx_cur: i32) Oom!
     }
 }
 
+/// Case 1 of sqlite3WhereCodeOneLoopStart(): the loop over virtual table
+/// cursor `i_cur`, by OP_VFilter and OP_VNext.
+fn codeVirtualLoop(p: *Parse, v: *Vdbe, w: *WhereInfo, level: *WhereLevel, i_cur: i32, b_rev: bool) Oom!void {
+    const db = p.db;
+    const loop = level.w_loop.?;
+    const n_constraint: usize = loop.n_lterm;
+    const i_reg = expr_mod.getTempRange(p, @as(i32, @intCast(n_constraint)) + 2);
+    var addr_not_found = level.addr_brk;
+    for (0..n_constraint) |j| {
+        const i_target = i_reg + @as(i32, @intCast(j)) + 2;
+        const term = loop.a_lterm[j] orelse continue;
+        if (term.e_operator & WO.IN != 0) {
+            if (wi.smaskBit32(j) & loop.vtab.m_handle_in != 0) {
+                const i_tab = p.n_tab;
+                p.n_tab += 1;
+                p.n_mem += 1;
+                const i_cache = p.n_mem;
+                ec.codeRhsOfIN(p, term.expr, i_tab, false);
+                _ = aux.addOp3(v, OP.VInitIn, i_tab, i_target, i_cache);
+            } else {
+                _ = try codeEqualityTerm(p, term, level, j, b_rev, i_target);
+                addr_not_found = level.addr_nxt;
+            }
+        } else {
+            const right = term.expr.right;
+            codeExprOrVector(p, right, i_target, 1);
+            if (term.e_match_op == vtab.INDEX_CONSTRAINT.OFFSET and loop.vtab.b_omit_offset) {
+                std.debug.assert(term.e_operator == WO.AUX);
+                std.debug.assert(w.select != null and w.select.?.i_offset > 0);
+                // Zero the OFFSET counter.
+                _ = aux.addOp2(v, OP.Integer, 0, w.select.?.i_offset);
+            }
+        }
+    }
+    _ = aux.addOp2(v, OP.Integer, loop.vtab.idx_num, i_reg);
+    _ = aux.addOp2(v, OP.Integer, @intCast(n_constraint), i_reg + 1);
+    // The instruction before OP_VFilter must be the OP_Integer of argc,
+    // for resolveP2Values() (tag-20250207a).
+    // The string goes to the program: P4_DYNAMIC if the loop owns it.
+    const p4: vi.P4 = if (loop.vtab.idx_str) |z|
+        (if (loop.vtab.need_free) .{ .dynamic = z } else .{ .z = z })
+    else
+        .notused;
+    _ = aux.addOp4(v, OP.VFilter, i_cur, addr_not_found, i_reg, p4);
+    loop.vtab.need_free = false;
+    level.p1 = i_cur;
+    level.op = if (w.e_one_pass != 0) OP.Noop else OP.VNext;
+    level.p2 = aux.currentAddr(v);
+    std.debug.assert(loop.ws_flags & wi.WHERE_MULTI_OR == 0);
+
+    for (0..n_constraint) |j| {
+        const term = loop.a_lterm[j].?;
+        if (j < 16 and (loop.vtab.omit_mask >> @intCast(j)) & 1 != 0) {
+            disableTerm(level, term);
+            continue;
+        }
+        if (term.e_operator & WO.IN != 0 and wi.smaskBit32(j) & loop.vtab.m_handle_in == 0 and !db.malloc_failed) {
+            // Reload the value of the constraint into reg[i_reg+j+2]:
+            // xFilter may have changed its type or encoding.
+            const reg = i_reg + @as(i32, @intCast(j)) + 2;
+            for (level.in_loops) |in| {
+                const op = aux.getOp(v, in.addr_in_top);
+                if ((op.opcode == OP.Column and op.p3 == reg) or (op.opcode == OP.Rowid and op.p2 == reg)) {
+                    _ = aux.addOp3(v, op.opcode, op.p1, op.p2, op.p3);
+                    break;
+                }
+            }
+
+            // Continue with the next row if the IN constraint fails.
+            const compare = try expr_mod.pExpr(p, TK.EQ, null, null);
+            if (!db.malloc_failed) {
+                const i_fld = term.i_field;
+                const left = term.expr.left.?;
+                if (i_fld > 0) {
+                    std.debug.assert(left.op == TK.VECTOR);
+                    std.debug.assert(left.useXList());
+                    compare.left = left.x.list.?.at(@intCast(i_fld - 1)).expr;
+                } else {
+                    compare.left = left;
+                }
+                const right = try expr_mod.exprAlloc(p.arena, TK.REGISTER, null, false);
+                compare.right = right;
+                right.i_table = reg;
+                ec.exprIfFalse(p, compare, level.addr_cont, vi.SQLITE_JUMPIFNULL);
+                compare.left = null;
+            }
+        }
+    }
+    // The registers are kept for any IN operator loop rather than
+    // released (sqlite3ReleaseTempRange() is not called).
+}
+
 /// Port of codeExprOrVector(): code the first `n_reg` elements of vector
 /// `e` into registers i_reg.., or (n_reg 1) the value of `e`.
 fn codeExprOrVector(p: *Parse, e_opt: ?*Expr, i_reg: i32, n_reg: usize) void {
@@ -744,8 +847,10 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         level.p2 = aux.addOp2(v, OP.Yield, reg_yield, addr_brk);
         level.op = OP.Goto;
     }
-    // Case 1 (virtual tables, OP_VFilter/OP_VNext) is not ported.
-    else if (loop.ws_flags & wi.WHERE_IPK != 0 and loop.ws_flags & (wi.WHERE_COLUMN_IN | wi.WHERE_COLUMN_EQ) != 0) {
+    else if (loop.ws_flags & wi.WHERE_VIRTUALTABLE != 0) {
+        // Case 1: a virtual table, read with OP_VFilter and OP_VNext.
+        try codeVirtualLoop(p, v, w, level, i_cur, b_rev);
+    } else if (loop.ws_flags & wi.WHERE_IPK != 0 and loop.ws_flags & (wi.WHERE_COLUMN_IN | wi.WHERE_COLUMN_EQ) != 0) {
         // Case 2: one row by rowid equality, or several by "rowid IN (...)".
         std.debug.assert(loop.btree.n_eq == 1);
         const term = loop.a_lterm[0].?;

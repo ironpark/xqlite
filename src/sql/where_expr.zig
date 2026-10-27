@@ -42,27 +42,11 @@ const TERM = wi.TERM;
 const WO = wi.WO;
 const getMask = wi.getMask;
 
-/// SQLITE_INDEX_CONSTRAINT_* values used by this file.
-const INDEX_CONSTRAINT = struct {
-    const MATCH: u8 = 64;
-    const LIKE: u8 = 65;
-    const GLOB: u8 = 66;
-    const REGEXP: u8 = 67;
-    const NE: u8 = 68;
-    const ISNOT: u8 = 69;
-    const ISNOTNULL: u8 = 70;
-    const LIMIT: u8 = 73;
-    const OFFSET: u8 = 74;
-};
-
-/// IsVirtual().
-fn isVirtual(t: *const Table) bool {
-    return t.e_tab_type == .vtab;
-}
+const INDEX_CONSTRAINT = @import("vtab.zig").INDEX_CONSTRAINT;
 
 /// ExprIsVtab(): a column of a virtual table.
 fn exprIsVtab(e: *const Expr) bool {
-    return e.op == TK.COLUMN and isVirtual(e.y.tab.?);
+    return e.op == TK.COLUMN and e.y.tab.?.isVirtual();
 }
 
 /// Port of whereClauseInsert(): append a term for `e` and return its
@@ -200,7 +184,7 @@ fn isLikeOrGlob(p: *Parse, e: *Expr, prefix: *?*Expr, is_complete: *bool, no_cas
             // Unless the LHS is an ordinary TEXT column, the prefix bounds
             // must not look like numbers.
             if (left.op != TK.COLUMN or expr_mod.affinity(left) != Aff.text or
-                (left.useYTab() and left.y.tab != null and isVirtual(left.y.tab.?)))
+                (left.useYTab() and left.y.tab != null and left.y.tab.?.isVirtual()))
             {
                 var r_dummy: f64 = undefined;
                 var is_num = numeric.atoF(z_new.ptr, &r_dummy);
@@ -254,9 +238,10 @@ pub fn exprIsLikeOperator(e: *const Expr) u8 {
 }
 
 /// Port of isAuxiliaryVtabOperator(): 1 or 2 if `e` is a form passed to
-/// xBestIndex of a virtual table, else 0. Virtual tables are not ported,
-/// so exprIsVtab() is always false; the xFindFunction() case is omitted.
-fn isAuxiliaryVtabOperator(e: *Expr, e_op2: *u8, pp_left: *?*Expr, pp_right: *?*Expr) i32 {
+/// xBestIndex of a virtual table (MATCH, GLOB, LIKE, REGEXP, a function
+/// xFindFunction offers, !=, IS NOT or NOT NULL on one of its columns),
+/// else 0.
+fn isAuxiliaryVtabOperator(db: *int.Sqlite3, e: *Expr, e_op2: *u8, pp_left: *?*Expr, pp_right: *?*Expr) i32 {
     if (e.op == TK.FUNCTION) {
         std.debug.assert(e.useXList());
         const list = e.x.list orelse return 0;
@@ -272,7 +257,26 @@ fn isAuxiliaryVtabOperator(e: *Expr, e_op2: *u8, pp_left: *?*Expr, pp_right: *?*
                 return 1;
             }
         }
-        // vtab: OVERLOADED(vtab_column, expr) via xFindFunction() omitted.
+        // OVERLOADED(vtab_column, expr) where xFindFunction returns at
+        // least SQLITE_INDEX_CONSTRAINT_FUNCTION (the name may be in any
+        // case here).
+        const col0 = list.at(0).expr.?;
+        if (exprIsVtab(col0)) {
+            const vtab = @import("vtab.zig");
+            const pv = vtab.getVTable(db, col0.y.tab.?).?.vtab.?;
+            std.debug.assert(!e.has(EP.IntValue));
+            if (pv.module.x_find_function) |x_find| {
+                var x_not_used: ?int.FuncDef.StepFn = null;
+                var not_used: ?*anyopaque = null;
+                const i = x_find(pv, 2, e.token(), &x_not_used, &not_used);
+                if (i >= INDEX_CONSTRAINT.FUNCTION) {
+                    e_op2.* = @intCast(i);
+                    pp_right.* = list.at(1).expr;
+                    pp_left.* = col0;
+                    return 1;
+                }
+            }
+        }
     } else if (e.op >= TK.EQ) {
         return 0;
     } else if (e.op == TK.NE or e.op == TK.ISNOT or e.op == TK.NOTNULL) {
@@ -972,12 +976,11 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
         }
 
         // A WO_AUX term for operators only virtual tables use (MATCH, LIKE,
-        // GLOB, REGEXP, !=, IS NOT, NOT NULL); never matches here since
-        // virtual tables are not ported.
+        // GLOB, REGEXP, !=, IS NOT, NOT NULL).
         else if (wc.op == TK.AND) {
             var right: ?*Expr = null;
             var left: ?*Expr = null;
-            var res = isAuxiliaryVtabOperator(e, &e_op2, &left, &right);
+            var res = isAuxiliaryVtabOperator(db, e, &e_op2, &left, &right);
             while (res > 0) : (res -= 1) {
                 const prereq_expr = exprUsage(mask_set, right);
                 const prereq_column = exprUsage(mask_set, left);
@@ -1066,13 +1069,13 @@ pub fn clauseClear(wc: *WhereClause) void {
 
 /// Port of sqlite3WhereAddLimit(): add LIMIT/OFFSET terms for a SELECT
 /// over a single virtual table whose WHERE and ORDER BY all go to
-/// xBestIndex. Virtual tables are not ported, so condition 3 never holds.
+/// xBestIndex.
 pub fn addLimit(wc: *WhereClause, sel: *Select) Oom!void {
     std.debug.assert(sel.limit != null); // 1 -- checked by caller
     const src = sel.src.?;
     if (sel.group_by == null and
         sel.sel_flags & (SF.Distinct | SF.Aggregate) == 0 and // 2
-        (src.len() == 1 and isVirtual(src.at(0).s_tab.?))) // 3
+        (src.len() == 1 and src.at(0).s_tab.?.isVirtual())) // 3
     {
         const order_by = sel.order_by;
         const i_csr = src.at(0).i_cursor;
@@ -1181,7 +1184,7 @@ pub fn exprAnalyze(tab_list: *SrcList, wc: *WhereClause) Oom!void {
 pub fn tabFuncArgs(p: *Parse, item: *SrcItem, wc: *WhereClause) Oom!void {
     if (!item.fg.is_tab_func) return;
     const tab = item.s_tab.?;
-    if (!isVirtual(tab)) {
+    if (!tab.isVirtual()) {
         util.errorMsg(p, "'{s}' is not a function", .{item.name orelse ""});
         return;
     }

@@ -189,11 +189,15 @@ pub const Op = struct {
 };
 
 /// The fourth operand (p4type and p4). Memory behind pointer variants
-/// belongs to the Vdbe (its arena), not the instruction.
+/// belongs to the Vdbe (its arena), not the instruction, except for
+/// `dynamic`.
 pub const P4 = union(enum) {
     notused,
     /// A NUL-terminated string.
     z: [:0]const u8,
+    /// A NUL-terminated string from db.gpa that the Vdbe frees: P4_DYNAMIC
+    /// memory handed over by a module (the idxStr of OP_VFilter).
+    dynamic: [:0]u8,
     int32: i32,
     collseq: *CollSeq,
     funcdef: *FuncDef,
@@ -207,6 +211,8 @@ pub const P4 = union(enum) {
     tableref: *Table,
     index: *Index,
     subrtnsig: *SubrtnSig,
+    /// A virtual table, locked while the program refers to it (P4_VTAB).
+    vtab: *int.VTable,
 };
 
 /// SubrtnSig: a reusable IN subroutine.
@@ -279,7 +285,7 @@ pub const VdbeCursor = struct {
     /// record.
     seek_result: i32 = 0,
     alt_cursor: ?*VdbeCursor = null,
-    uc: union(enum) { none, cursor: *btree.Cursor, sorter: *anyopaque, pseudo } = .none,
+    uc: union(enum) { none, cursor: *btree.Cursor, sorter: *anyopaque, pseudo, vtab: *@import("../sql/vtab.zig").VtabCursor } = .none,
     key_info: ?*KeyInfo = null,
     /// Offset of the next unparsed byte of the record header.
     i_hdr_offset: u32 = 0,
@@ -431,6 +437,8 @@ pub const Vdbe = struct {
     smimask: u32 = 0,
     program: ?*SubProgram = null,
     aux_data: ?*AuxData = null,
+    /// Room for the arguments of xUpdate and xFilter (apArg).
+    ap_arg: []*Mem = &.{},
 
     pub fn alloc(v: *Vdbe) Allocator {
         return v.arena.allocator();

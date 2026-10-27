@@ -34,7 +34,7 @@ def run(cmd, db, q, pre=(), post=(), writes=False):
             os.remove(work)
         db = work
     try:
-        r = subprocess.run([*cmd, db, *pre, q, *post], capture_output=True, text=True, timeout=60)
+        r = subprocess.run([*cmd, db, *pre, q, *post], capture_output=True, text=True, errors='surrogateescape', timeout=60)
     except subprocess.TimeoutExpired:
         return 'TIMEOUT'
     out = r.stdout
@@ -44,7 +44,9 @@ def run(cmd, db, q, pre=(), post=(), writes=False):
         err = re.sub(r'in \d+(st|nd|rd|th) command line argument', 'in Nth command line argument', err)
         if pre[:1] == SQPRE:
             out = out.split('\n', 1)[1] if '\n' in out else ''  # the .testctrl status line
-    return out + (('ERR:' + err) if err else '')
+    out = out + (('ERR:' + err) if err else '')
+    # P4 of virtual table opcodes is the address of the sqlite3_vtab.
+    return re.sub(r'vtab:[0-9A-Fa-f]+', 'vtab:PTR', out)
 
 
 def eqp_tree(out):
@@ -108,24 +110,37 @@ def main():
         # Build the database once with sqlite3 so both read the same file.
         db = os.path.join(tmp, f'b{bi}.db')
         if setup.strip():
-            subprocess.run([SQ, db, setup], capture_output=True, text=True)
+            # Dot-commands (".dbconfig defensive off") go as arguments of
+            # their own, between the SQL of the lines around them.
+            args, sql = [], []
+            for l in setup.splitlines():
+                if l.startswith('.'):
+                    if sql:
+                        args.append('\n'.join(sql))
+                        sql = []
+                    args.append(l)
+                else:
+                    sql.append(l)
+            if sql:
+                args.append('\n'.join(sql))
+            subprocess.run([SQ, db, *args], capture_output=True, text=True)
         for q in queries:
             ntot += 1
+            # Anything but a plain query may change the database: it runs
+            # on a copy (the statements after the first of an EXPLAIN run
+            # too), and the result includes the dump.
+            writes = not re.match(r'\s*(SELECT|VALUES)\b', q, re.I) or ';' in q
             for kind in sorted(kinds):
                 if kind == 'res':
-                    # Anything but a plain query may change the database:
-                    # it runs on a copy, and the result includes the dump.
-                    post = ()
-                    if not re.match(r'\s*(SELECT|VALUES)\b', q, re.I) or ';' in q:
-                        post = ('.dump', 'PRAGMA integrity_check')
-                    a = run([XQ, 'sql'], db, q, post=post, writes=bool(post))
-                    b = run([SQ], db, q, pre=SQPRE, post=post, writes=bool(post))
+                    post = ('.dump', 'PRAGMA integrity_check') if writes else ()
+                    a = run([XQ, 'sql'], db, q, post=post, writes=writes)
+                    b = run([SQ], db, q, pre=SQPRE, post=post, writes=writes)
                 elif kind == 'eqp':
-                    a = eqp_tree(run([XQ, 'sql'], db, 'EXPLAIN QUERY PLAN ' + q, pre=('.explain off',)))
-                    b = eqp_tree(run([SQ], db, 'EXPLAIN QUERY PLAN ' + q, pre=SQPRE + ('.explain off',)))
+                    a = eqp_tree(run([XQ, 'sql'], db, 'EXPLAIN QUERY PLAN ' + q, pre=('.explain off',), writes=writes))
+                    b = eqp_tree(run([SQ], db, 'EXPLAIN QUERY PLAN ' + q, pre=SQPRE + ('.explain off',), writes=writes))
                 else:
-                    a = code_norm(run([XQ, 'sql'], db, 'EXPLAIN ' + q, pre=('.explain off',)))
-                    b = code_norm(run([SQ], db, 'EXPLAIN ' + q, pre=SQPRE + ('.explain off',)))
+                    a = code_norm(run([XQ, 'sql'], db, 'EXPLAIN ' + q, pre=('.explain off',), writes=writes))
+                    b = code_norm(run([SQ], db, 'EXPLAIN ' + q, pre=SQPRE + ('.explain off',), writes=writes))
                 if a != b:
                     nfail[kind] += 1
                     tag = kind

@@ -425,9 +425,14 @@ pub fn deletePriorOpcode(v: *Vdbe, op: u8) bool {
 /// Port of sqlite3VdbeChangeP4() for pointer operands; `addr` -1 means
 /// the last instruction.
 pub fn changeP4(v: *Vdbe, addr_arg: i32, p4: P4) void {
-    if (v.db.malloc_failed) return;
+    if (v.db.malloc_failed) {
+        // freeP4(), except that a VTable is not locked yet.
+        if (p4 == .dynamic) v.db.gpa.free(p4.dynamic);
+        return;
+    }
     const addr = if (addr_arg < 0) v.nOp() - 1 else addr_arg;
     v.ops.items[@intCast(addr)].p4 = p4;
+    acquireP4(p4);
 }
 
 /// Port of sqlite3VdbeChangeP4() with a string (copied, P4_DYNAMIC).
@@ -451,10 +456,32 @@ pub fn setP4KeyInfo(p: *Parse, idx: *int.Index) void {
 /// Port of sqlite3VdbeAppendP4(): P4 of the last instruction, which has
 /// none yet.
 pub fn appendP4(v: *Vdbe, p4: P4) void {
-    if (v.db.malloc_failed) return;
+    if (v.db.malloc_failed) {
+        // freeP4(): of what releaseP4s() would drop, only P4_MEM and
+        // P4_DYNAMIC are owned here (the references are taken on success).
+        switch (p4) {
+            .mem => |m| mem.release(m),
+            .dynamic => |z| v.db.gpa.free(z),
+            else => {},
+        }
+        return;
+    }
     const op = &v.ops.items[v.ops.items.len - 1];
     std.debug.assert(op.p4 == .notused);
     op.p4 = p4;
+    acquireP4(p4);
+}
+
+/// Take the references that releaseP4s() drops once `p4` is stored in an
+/// instruction: lock a VTable (sqlite3VtabLock(), as sqlite3VdbeChangeP4()
+/// does for P4_VTAB) or count a reference to a table (P4_TABLEREF, which
+/// C's callers count and sqlite3VdbeAppendP4() frees on failure).
+fn acquireP4(p4: P4) void {
+    switch (p4) {
+        .vtab => |vt| @import("../sql/vtab.zig").lock(vt),
+        .tableref => |t| t.n_tab_ref += 1,
+        else => {},
+    }
 }
 
 /// Port of sqlite3VdbeComment(): only kept with
@@ -530,7 +557,9 @@ pub fn displayP4(a: std.mem.Allocator, op: *const Op) error{OutOfMemory}![:0]u8 
         .table, .tableref => |t| w.writeAll(t.name),
         .index => |idx| w.writeAll(idx.name),
         .subrtnsig => |s| w.print("subrtnsig:{d},{s}", .{ s.sel_id, s.aff orelse "" }),
+        .vtab => |vt| w.print("vtab:{X}", .{if (vt.vtab) |p| @intFromPtr(p) else 0}),
         .z => |z| w.writeAll(z),
+        .dynamic => |z| w.writeAll(z),
         .notused => {},
     }) catch return error.OutOfMemory;
     return out.toOwnedSliceSentinel(0) catch error.OutOfMemory;
@@ -561,22 +590,104 @@ pub fn releaseMemArray(cells: []Mem) void {
     }
 }
 
-/// Port of sqlite3VdbeNextOpcode() for the main program (trigger
-/// programs are not listed yet): the next instruction to show for EXPLAIN
-/// (`eqp` false) or EXPLAIN QUERY PLAN. Returns null when done.
-fn nextOpcode(v: *Vdbe, eqp: bool) ?usize {
-    while (true) {
-        const i: usize = @intCast(v.pc);
-        v.pc += 1;
-        if (i >= v.ops.items.len) {
-            v.rc = RC.OK;
-            return null;
+/// sqlite3VdbeNextOpcode() modes.
+pub const NEXTOP_NORMAL: u8 = 0;
+pub const NEXTOP_EQP: u8 = 1;
+pub const NEXTOP_TABLES_USED: u8 = 2;
+
+/// Port of sqlite3VdbeNextOpcode(): the next instruction to show for
+/// EXPLAIN (`e_mode` NEXTOP_NORMAL), EXPLAIN QUERY PLAN (NEXTOP_EQP: only
+/// OP_Explain and OP_Init) or tables_used() (NEXTOP_TABLES_USED: only the
+/// opcodes that open tables). The rows are numbered from `pc` on (updated),
+/// through the main program, then each trigger program as it is found; `sub`
+/// (null to show only the main program) keeps the list of those, as a blob
+/// of pointers. The instruction is `addr` of `ops`. Returns RC.OK, RC.DONE
+/// at the end, or RC.ERROR.
+pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: u8, pc: *i32, addr: *usize, ops: *[]Op) i32 {
+    var n_row: usize = v.ops.items.len;
+    var n_sub: usize = 0;
+    var rc: i32 = RC.OK;
+    var a_op: []Op = &.{};
+    var i: usize = 0;
+    const Subs = struct {
+        z: [*]u8 = undefined,
+        fn at(self: @This(), j: usize) *vi.SubProgram {
+            const sz = @sizeOf(usize);
+            return @ptrFromInt(std.mem.readInt(usize, self.z[j * sz ..][0..sz], .native));
         }
-        if (!eqp) return i;
-        const op = v.ops.items[i].opcode;
-        if (op == OP.Explain) return i;
-        if (op == OP.Init and v.pc > 1) return i;
+        fn set(self: @This(), j: usize, prog: *vi.SubProgram) void {
+            const sz = @sizeOf(usize);
+            std.mem.writeInt(usize, self.z[j * sz ..][0..sz], @intFromPtr(prog), .native);
+        }
+    };
+    var subs: Subs = .{};
+    if (sub) |s| {
+        if (s.flags & MEM.Blob != 0) {
+            // Null at first; a blob once the first program is seen.
+            n_sub = @as(usize, @intCast(s.n)) / @sizeOf(usize);
+            subs.z = s.z.?;
+        }
+        for (0..n_sub) |j| n_row += subs.at(j).ops.len;
     }
+    var i_pc: usize = @intCast(pc.*);
+    while (true) {
+        i = i_pc;
+        i_pc += 1;
+        if (i >= n_row) {
+            v.rc = RC.OK;
+            rc = RC.DONE;
+            break;
+        }
+        if (i < v.ops.items.len) {
+            // Still in the main program.
+            a_op = v.ops.items;
+        } else {
+            // In the trigger programs: find which.
+            i -= v.ops.items.len;
+            var j: usize = 0;
+            while (i >= subs.at(j).ops.len) : (j += 1) i -= subs.at(j).ops.len;
+            a_op = subs.at(j).ops;
+        }
+
+        // An OP_Program (the only opcode with a P4_SUBPROGRAM) adds its
+        // program to the list, unless already there.
+        if (sub) |s| if (a_op[i].p4 == .subprogram) {
+            const prog = a_op[i].p4.subprogram;
+            var j: usize = 0;
+            while (j < n_sub) : (j += 1) {
+                if (subs.at(j) == prog) break;
+            }
+            if (j == n_sub) {
+                const n_byte = (n_sub + 1) * @sizeOf(usize);
+                mem.grow(s, n_byte, n_sub != 0) catch {
+                    v.rc = RC.NOMEM;
+                    rc = RC.ERROR;
+                    break;
+                };
+                subs.z = s.z.?;
+                subs.set(n_sub, prog);
+                n_sub += 1;
+                s.setTypeFlag(MEM.Blob);
+                s.n = @intCast(n_sub * @sizeOf(usize));
+                n_row += prog.ops.len;
+            }
+        };
+        if (e_mode == NEXTOP_NORMAL) break;
+        if (e_mode == NEXTOP_TABLES_USED) {
+            const op = &a_op[i];
+            if (op.opcode == OP.OpenRead) break;
+            if (op.opcode == OP.OpenWrite and op.p5 & vi.OPFLAG.P2ISREG == 0) break;
+            if (op.opcode == OP.ReopenIdx) break;
+        } else {
+            std.debug.assert(e_mode == NEXTOP_EQP);
+            if (a_op[i].opcode == OP.Explain) break;
+            if (a_op[i].opcode == OP.Init and i_pc > 1) break;
+        }
+    }
+    pc.* = @intCast(i_pc);
+    addr.* = i;
+    ops.* = a_op;
+    return rc;
 }
 
 /// Port of sqlite3VdbeList(): the next row of EXPLAIN or EXPLAIN QUERY
@@ -590,8 +701,15 @@ pub fn list(v: *Vdbe) i32 {
         db.malloc_failed = true;
         return RC.ERROR;
     }
-    const i = nextOpcode(v, v.explain == 2) orelse return RC.DONE;
-    const op = &v.ops.items[i];
+    // With the trigger programs, mem[9] keeps the list of them.
+    const list_subprogs = v.explain == 1 or db.flags & int.DbFlag.TriggerEQP != 0;
+    const sub: ?*Mem = if (list_subprogs) &v.mem[9] else null;
+    var i: usize = 0;
+    var a_op: []Op = &.{};
+    const rc = nextOpcode(v, sub, if (v.explain == 2) NEXTOP_EQP else NEXTOP_NORMAL, &v.pc, &i, &a_op);
+    if (rc == RC.DONE) return RC.DONE;
+    if (rc != RC.OK) return RC.ERROR;
+    const op = &a_op[i];
     if (db.is_interrupted.load(.monotonic)) {
         v.rc = RC.INTERRUPT;
         vdbeError(v, "{s}", .{util.errStr(v.rc)});
@@ -659,6 +777,7 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.expired = 0;
     v.mem = a.alloc(Mem, n_mem) catch return oom(v);
     v.vars = a.alloc(Mem, n_var) catch return oom(v);
+    v.ap_arg = a.alloc(*Mem, @intCast(n_arg)) catch return oom(v);
     v.csr = a.alloc(?*VdbeCursor, n_cursor) catch return oom(v);
     v.n_var = @intCast(n_var);
     initMemArray(v.vars, db, MEM.Null);
@@ -693,6 +812,13 @@ pub fn freeCursorNN(v: *Vdbe, cx: *VdbeCursor) void {
     switch (cx.uc) {
         .sorter => @import("sorter.zig").close(v.db, cx),
         .cursor => |c| c.close(),
+        .vtab => |vc| {
+            const vtab = vc.vtab;
+            const module = vtab.module;
+            std.debug.assert(vtab.n_ref > 0);
+            vtab.n_ref -= 1;
+            _ = module.x_close.?(vc);
+        },
         else => {},
     }
     const box: *vi.CursorBox = @fieldParentPtr("vc", cx);
@@ -781,23 +907,35 @@ pub fn setColName(v: *Vdbe, idx: usize, var_: usize, name: [:0]const u8) void {
 
 /// Port of vdbeCommit(): commit the open transactions. Only one database
 /// file can be written (no ATTACH yet), so no super-journal is needed.
-fn vdbeCommit(db: *Sqlite3) i32 {
+fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
+    const vtab = @import("../sql/vtab.zig");
+    // First the xSync of the virtual tables written by the transaction.
+    var rc = vtab.sync(db, v);
     var need_xcommit = false;
-    for (db.dbs.items) |d| {
+    if (rc == RC.OK) for (db.dbs.items) |d| {
         const bt = d.bt orelse continue;
         if (bt.txnState() == .write) need_xcommit = true;
-    }
+    };
     if (need_xcommit) {
         for (db.dbs.items) |d| {
+            if (rc != RC.OK) break;
             const bt = d.bt orelse continue;
-            if (bt.txnState() == .write) bt.commitPhaseOne() catch |err| return main_mod.errorCode(err);
+            if (bt.txnState() == .write) bt.commitPhaseOne() catch |err| {
+                rc = main_mod.errorCode(err);
+            };
         }
     }
-    for (db.dbs.items) |d| {
-        const bt = d.bt orelse continue;
-        if (bt.txnState() != .none) bt.commitPhaseTwo(false) catch |err| return main_mod.errorCode(err);
+    if (rc == RC.OK) {
+        for (db.dbs.items) |d| {
+            if (rc != RC.OK) break;
+            const bt = d.bt orelse continue;
+            if (bt.txnState() != .none) bt.commitPhaseTwo(false) catch |err| {
+                rc = main_mod.errorCode(err);
+            };
+        }
+        if (rc == RC.OK) _ = vtab.commit(db);
     }
-    return RC.OK;
+    return rc;
 }
 
 /// sqlite3VdbeError(p, "%s", sqlite3_value_text(m)): the error message
@@ -845,6 +983,11 @@ fn closeStatementImpl(v: *Vdbe, e_op: i32) i32 {
     }
     db.n_statement -= 1;
     v.i_statement = 0;
+    if (rc == RC.OK) {
+        const vtab = @import("../sql/vtab.zig");
+        if (e_op == SAVEPOINT_ROLLBACK) rc = vtab.savepoint(db, SAVEPOINT_ROLLBACK, i_savepoint);
+        if (rc == RC.OK) rc = vtab.savepoint(db, SAVEPOINT_RELEASE, i_savepoint);
+    }
     if (e_op == SAVEPOINT_ROLLBACK) {
         db.n_deferred_cons = v.n_stmt_def_cons;
         db.n_deferred_imm_cons = v.n_stmt_def_imm_cons;
@@ -913,7 +1056,7 @@ pub fn halt(v: *Vdbe) i32 {
             _ = checkFkImmediate(v);
         }
 
-        if (db.auto_commit and db.n_vdbe_write == @intFromBool(!v.read_only)) {
+        if (!@import("../sql/vtab.zig").inSync(db) and db.auto_commit and db.n_vdbe_write == @intFromBool(!v.read_only)) {
             if (v.rc == RC.OK or (v.error_action == OE.Fail and !is_special_error)) {
                 var rc = checkFkDeferred(v);
                 if (rc != RC.OK) {
@@ -923,7 +1066,7 @@ pub fn halt(v: *Vdbe) i32 {
                     rc = RC.CORRUPT;
                     db.flags &= ~int.DbFlag.CorruptRdOnly;
                 } else {
-                    rc = vdbeCommit(db);
+                    rc = vdbeCommit(db, v);
                 }
                 if (rc == RC.BUSY and v.read_only) {
                     return RC.BUSY;
@@ -1075,21 +1218,30 @@ pub fn delete(v: *Vdbe) void {
         db.vdbe = v.next;
     }
     if (v.next) |next| next.prev = v.prev;
-    // The values of P4_MEM operands (column defaults) may own buffers.
-    releaseP4Mems(v.ops.items);
+    // The values of P4_MEM operands (column defaults) may own buffers;
+    // P4_VTAB operands hold a lock.
+    releaseP4s(db, v.ops.items);
     var sub = v.program;
     while (sub) |s| {
         sub = s.next;
-        releaseP4Mems(s.ops);
+        releaseP4s(db, s.ops);
         if (s.mem) |*m| m.deinit();
     }
     v.arena.deinit();
     db.gpa.destroy(v);
 }
 
-/// The part of freeP4() for P4_MEM: release the values of `ops`.
-fn releaseP4Mems(ops: []Op) void {
-    for (ops) |*op| if (op.p4 == .mem) mem.release(op.p4.mem);
+/// The parts of freeP4() for P4_MEM, P4_VTAB, P4_TABLEREF and the
+/// db.gpa strings: release the values, unlock the virtual tables, drop
+/// the table references and free the strings of `ops`.
+fn releaseP4s(db: *Sqlite3, ops: []Op) void {
+    for (ops) |*op| switch (op.p4) {
+        .mem => |m| mem.release(m),
+        .dynamic => |z| db.gpa.free(z),
+        .vtab => |vt| @import("../sql/vtab.zig").unlock(vt),
+        .tableref => |t| @import("../sql/build.zig").deleteTable(db, t),
+        else => {},
+    };
 }
 
 /// Port of sqlite3VdbeSetChanges().

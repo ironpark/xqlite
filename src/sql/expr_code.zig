@@ -1525,7 +1525,7 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
         expr_mod.recordErrorOffsetOfExpr(p, e);
         return target;
     }
-    const def = def_opt.?;
+    var def = def_opt.?;
     if (def.func_flags & FUNC.INLINE != 0) if (farg) |f| {
         return codeInlineFunction(p, f, @intFromPtr(def.user_data), target);
     };
@@ -1554,6 +1554,17 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
             }
         }
         _ = codeExprList(p, f, r1, 0, ECEL_FACTOR);
+    }
+    // A virtual table may overload the function when its first argument
+    // (the second for infix LIKE, GLOB, REGEXP and MATCH, whose left
+    // operand it is) is one of its columns.
+    if (farg) |f| {
+        const vtab = @import("vtab.zig");
+        if (n_farg >= 2 and e.has(EP.InfixFunc)) {
+            def = vtab.overloadFunction(db, v.alloc(), def, @intCast(n_farg), f.at(1).expr);
+        } else if (n_farg > 0) {
+            def = vtab.overloadFunction(db, v.alloc(), def, @intCast(n_farg), f.at(0).expr);
+        }
     }
     if (def.func_flags & FUNC.NEEDCOLL != 0) {
         _ = aux.addOp4(v, OP.CollSeq, 0, 0, 0, .{ .collseq = coll orelse coll_mod.defaultColl() });

@@ -17,6 +17,7 @@ const btree = @import("../btree/btree.zig");
 const varint = @import("../util/varint.zig");
 const sorter = @import("sorter.zig");
 const rowset = @import("rowset.zig");
+const vtab_mod = @import("../sql/vtab.zig");
 
 const Vdbe = vi.Vdbe;
 const Op = vi.Op;
@@ -1519,6 +1520,11 @@ const Part5 = struct {
                 e.rc = RC.BUSY;
                 return .abort;
             }
+            // Fine for a transaction savepoint too: then db.a_vtrans is
+            // empty.
+            std.debug.assert(!db.auto_commit or db.n_vtrans == 0);
+            e.rc = vtab_mod.savepoint(db, aux.SAVEPOINT_BEGIN, db.n_statement + db.n_savepoint);
+            if (e.rc != RC.OK) return .abort;
             const sp = db.gpa.create(int.Savepoint) catch return .no_mem;
             sp.* = .{
                 .name = db.gpa.dupeSentinel(u8, name, 0) catch {
@@ -1558,6 +1564,7 @@ const Part5 = struct {
             }
             // Releasing the transaction savepoint commits.
             const is_transaction = sp.next == null and db.is_transaction_savepoint;
+            var i_sp_vtab: i32 = i_savepoint;
             if (is_transaction and p1 == aux.SAVEPOINT_RELEASE) {
                 e.rc = aux.checkFkDeferred(v);
                 if (e.rc != RC.OK) return .ret;
@@ -1577,6 +1584,7 @@ const Part5 = struct {
                 }
             } else {
                 i_savepoint = db.n_savepoint - i_savepoint - 1;
+                i_sp_vtab = i_savepoint;
                 var is_schema_change = false;
                 if (p1 == aux.SAVEPOINT_ROLLBACK) {
                     is_schema_change = db.m_db_flags & int.DBFLAG.SchemaChange != 0;
@@ -1613,6 +1621,10 @@ const Part5 = struct {
             } else {
                 db.n_deferred_cons = sp.n_deferred_cons;
                 db.n_deferred_imm_cons = sp.n_deferred_imm_cons;
+            }
+            if (!is_transaction or p1 == aux.SAVEPOINT_ROLLBACK) {
+                e.rc = vtab_mod.savepoint(db, p1, i_sp_vtab);
+                if (e.rc != RC.OK) return .abort;
             }
         }
         if (v.e_vdbe_state == .halt) {
@@ -1656,6 +1668,8 @@ const Part5 = struct {
                     db.n_statement += 1;
                     v.i_statement = db.n_savepoint + db.n_statement;
                 }
+                e.rc = vtab_mod.savepoint(db, aux.SAVEPOINT_BEGIN, v.i_statement - 1);
+                if (e.rc != RC.OK) return .abort;
                 bt.beginStmt(@intCast(v.i_statement)) catch |err| return e.fail(err);
                 v.n_stmt_def_cons = db.n_deferred_cons;
                 v.n_stmt_def_imm_cons = db.n_deferred_imm_cons;
@@ -1792,6 +1806,10 @@ const Part5 = struct {
             .journal_mode = .off,
             .synchronous = .off,
             .cell_size_check = db.flags & int.DbFlag.CellSizeCk != 0,
+            // No n_vdbe_read (C has db->nVdbeRead here too): the only
+            // transaction end is the rollback of close(), where keeping a
+            // read transaction would only skip unlockIfUnused() before the
+            // pager closes.
         }) catch |err| return e.fail(err);
         c.btx = bt;
         openEphemeralTable(c, bt, op) catch |err| {
@@ -2215,6 +2233,12 @@ const Part6 = struct {
             return .next;
         } else if (c.deferred_moveto) {
             rowid = c.moveto_target;
+        } else if (c.e_cur_type == .vtab) {
+            const vc = c.uc.vtab;
+            const vtab = vc.vtab;
+            e.rc = vtab.module.x_rowid.?(vc, &rowid);
+            vtab_mod.importErrmsg(e.v, vtab);
+            if (e.rc != RC.OK) return .abort;
         } else {
             serial.cursorRestore(c) catch |err| return e.fail(err);
             if (c.null_row) {
@@ -2581,7 +2605,7 @@ const Part7 = struct {
         const db = e.db;
         const out = e.out2Prerelease(op);
         out.flags = MEM.Null;
-        if (db.n_vdbe_read > 1) {
+        if (db.n_vdbe_read > db.n_vdestroy + 1) {
             // Other statements may be reading the b-tree.
             e.rc = RC.LOCKED;
             v.error_action = OE.Abort;
@@ -2955,15 +2979,251 @@ const Part8 = struct {
                 break :blk .jump_p2;
             },
             OP.Noop, OP.Explain, OP.CursorHint, OP.Abortable, OP.ReleaseReg => .next,
+            OP.VBegin => opVBegin(e, op),
+            OP.VCreate => opVCreate(e, op),
+            OP.VDestroy => blk: {
+                const db = e.db;
+                db.n_vdestroy += 1;
+                e.rc = vtab_mod.callDestroy(db, @intCast(op.p1), op.p4.z);
+                db.n_vdestroy -= 1;
+                break :blk if (e.rc != RC.OK) .abort else .next;
+            },
+            OP.VOpen => opVOpen(e, op),
+            OP.VCheck => opVCheck(e, op),
+            OP.VInitIn => blk: {
+                const c = e.csr(op.p1);
+                const rhs = std.heap.smp_allocator.create(vtab_mod.ValueList) catch break :blk .no_mem;
+                rhs.* = .{ .csr = c.uc.cursor, .out = e.reg(op.p3) };
+                const out = e.out2Prerelease(op);
+                out.flags = MEM.Null;
+                mem.setPointer(out, rhs, vtab_mod.value_list_type, vtab_mod.valueListFree);
+                break :blk .next;
+            },
+            OP.VFilter => opVFilter(e, op),
+            OP.VColumn => opVColumn(e, op),
+            OP.VNext => opVNext(e, op),
+            OP.VRename => opVRename(e, op),
+            OP.VUpdate => opVUpdate(e, op),
             else => blk: {
-                // Savepoint, RowCell, Checkpoint, Vacuum, TableLock and the
-                // virtual table opcodes: not ported yet.
+                // RowCell, Checkpoint, Vacuum and TableLock: not ported
+                // yet.
                 const name = if (op.opcode < vi.opcodes.names.len) vi.opcodes.names[op.opcode].name else "?";
                 aux.vdbeError(e.v, "not supported yet: OP_{s}", .{name});
                 e.rc = RC.ERROR;
                 break :blk .abort;
             },
         };
+    }
+
+    fn opVBegin(e: *Exec, op: *Op) Flow {
+        const vt: ?*int.VTable = if (op.p4 == .vtab) op.p4.vtab else null;
+        e.rc = vtab_mod.begin(e.db, vt);
+        if (vt) |t| if (t.vtab) |p| vtab_mod.importErrmsg(e.v, p);
+        return if (e.rc != RC.OK) .abort else .next;
+    }
+
+    fn opVCreate(e: *Exec, op: *Op) Flow {
+        const db = e.db;
+        // P2 is a static string, so the copy cannot fail.
+        var s_mem: Mem = .{ .db = db, .flags = MEM.Null };
+        defer mem.release(&s_mem);
+        mem.copy(&s_mem, e.reg(op.p2)) catch return .no_mem;
+        const z = mem.valueText(&s_mem, vi.ENC.UTF8) catch return .no_mem;
+        if (z) |tab_name| {
+            var err: ?[:0]u8 = null;
+            e.rc = vtab_mod.callCreate(db, @intCast(op.p1), std.mem.span(tab_name), &err);
+            if (err) |msg| {
+                e.v.err_msg = e.v.alloc().dupeSentinel(u8, msg, 0) catch null;
+                db.gpa.free(msg);
+            }
+        }
+        return if (e.rc != RC.OK) .abort else .next;
+    }
+
+    fn opVOpen(e: *Exec, op: *Op) Flow {
+        const v = e.v;
+        std.debug.assert(v.is_reader);
+        if (v.csr[@intCast(op.p1)]) |cur| {
+            // Already open.
+            if (cur.e_cur_type == .vtab and cur.uc.vtab.vtab == op.p4.vtab.vtab.?) return .next;
+        }
+        const vtab = op.p4.vtab.vtab orelse {
+            e.rc = RC.LOCKED;
+            return .abort;
+        };
+        const module = vtab.module;
+        var vcur: ?*vtab_mod.VtabCursor = null;
+        e.rc = module.x_open.?(vtab, &vcur);
+        vtab_mod.importErrmsg(v, vtab);
+        if (e.rc != RC.OK) return .abort;
+        vcur.?.vtab = vtab;
+        if (allocateCursor(e, op.p1, 0, .vtab)) |cur| {
+            cur.uc = .{ .vtab = vcur.? };
+            vtab.n_ref += 1;
+        } else {
+            _ = module.x_close.?(vcur.?);
+            return .no_mem;
+        }
+        return .next;
+    }
+
+    fn opVCheck(e: *Exec, op: *Op) Flow {
+        const db = e.db;
+        const out = e.reg(op.p2);
+        mem.setNull(out);
+        const t = op.p4.tableref;
+        std.debug.assert(t.isVirtual());
+        const vt = t.u.vtab.p orelse return .next;
+        const vtab = vt.vtab.?;
+        const module = vtab.module;
+        std.debug.assert(module.i_version >= 4 and module.x_integrity != null);
+        vtab_mod.lock(vt);
+        var err: ?[:0]u8 = null;
+        e.rc = module.x_integrity.?(vtab, db.dbs.items[@intCast(op.p1)].name, t.name, op.p3, &err);
+        vtab_mod.unlock(vt);
+        if (e.rc != RC.OK) {
+            if (err) |m| db.gpa.free(m);
+            return .abort;
+        }
+        if (err) |m| {
+            // The register takes the message over (sqlite3_free as the
+            // destructor). setTextZ() fails, with TooBig, only before.
+            mem.setTextZ(out, m, .dynamic) catch {
+                db.gpa.free(m);
+                return .no_mem;
+            };
+        }
+        return .next;
+    }
+
+    fn opVFilter(e: *Exec, op: *Op) Flow {
+        const v = e.v;
+        const query = e.reg(op.p3);
+        const argc = e.reg(op.p3 + 1);
+        const cur = e.csr(op.p1);
+        std.debug.assert(cur.e_cur_type == .vtab);
+        const vcur = cur.uc.vtab;
+        const vtab = vcur.vtab;
+        const module = vtab.module;
+        std.debug.assert(query.flags & MEM.Int != 0 and argc.flags == MEM.Int);
+        const n_arg: usize = @intCast(argc.u.i);
+        const i_query: i32 = @truncate(query.u.i);
+        const args = v.ap_arg[0..n_arg];
+        for (args, 0..) |*a, i| a.* = e.reg(op.p3 + 2 + @as(i32, @intCast(i)));
+        const idx_str: ?[:0]const u8 = switch (op.p4) {
+            .z => |z| z,
+            .dynamic => |z| z,
+            else => null,
+        };
+        e.rc = module.x_filter.?(vcur, i_query, idx_str, args);
+        vtab_mod.importErrmsg(v, vtab);
+        if (e.rc != RC.OK) return .abort;
+        const res = module.x_eof.?(vcur);
+        cur.null_row = false;
+        return if (res) .jump_p2 else .next;
+    }
+
+    fn opVColumn(e: *Exec, op: *Op) Flow {
+        const cur = e.csr(op.p1);
+        const dest = e.reg(op.p3);
+        if (cur.null_row) {
+            mem.setNull(dest);
+            return .next;
+        }
+        std.debug.assert(cur.e_cur_type == .vtab);
+        const vtab = cur.uc.vtab.vtab;
+        const module = vtab.module;
+        var null_func: int.FuncDef = .{ .n_arg = 0, .name = "", .func_flags = @import("../sql/callback.zig").FUNC.RESULT_SUBTYPE };
+        var ctx: vi.Context = .{ .out = dest, .func = &null_func, .enc = e.encoding, .argv = &.{} };
+        std.debug.assert(op.p5 == vi.OPFLAG.NOCHNG or op.p5 == 0);
+        if (op.p5 & vi.OPFLAG.NOCHNG != 0) {
+            mem.setNull(dest);
+            dest.flags = MEM.Null | MEM.Zero;
+            dest.u = .{ .n_zero = 0 };
+        } else {
+            dest.setTypeFlag(MEM.Null);
+        }
+        e.rc = module.x_column.?(cur.uc.vtab, &ctx, op.p2);
+        vtab_mod.importErrmsg(e.v, vtab);
+        if (ctx.is_error > 0) {
+            aux.vdbeErrorFromMem(e.v, dest);
+            e.rc = ctx.is_error;
+        }
+        mem.changeEncoding(dest, e.encoding) catch return .no_mem;
+        if (e.rc != RC.OK) return .abort;
+        return .next;
+    }
+
+    fn opVNext(e: *Exec, op: *Op) Flow {
+        const cur = e.csr(op.p1);
+        std.debug.assert(cur.e_cur_type == .vtab);
+        if (cur.null_row) return .next;
+        const vtab = cur.uc.vtab.vtab;
+        const module = vtab.module;
+        // xNext reports errors on the next xColumn or other call.
+        e.rc = module.x_next.?(cur.uc.vtab);
+        vtab_mod.importErrmsg(e.v, vtab);
+        if (e.rc != RC.OK) return .abort;
+        const res = module.x_eof.?(cur.uc.vtab);
+        return if (!res) .jump_p2_check_interrupt else .check_interrupt;
+    }
+
+    fn opVRename(e: *Exec, op: *Op) Flow {
+        const db = e.db;
+        const is_legacy = db.flags & int.DbFlag.LegacyAlter;
+        db.flags |= int.DbFlag.LegacyAlter;
+        const vtab = op.p4.vtab.vtab.?;
+        const name = e.reg(op.p1);
+        std.debug.assert(name.flags & MEM.Str != 0);
+        mem.changeEncoding(name, vi.ENC.UTF8) catch return .no_mem;
+        const z = mem.valueText(name, vi.ENC.UTF8) catch return .no_mem;
+        e.rc = vtab.module.x_rename.?(vtab, std.mem.span(z.?));
+        if (is_legacy == 0) db.flags &= ~int.DbFlag.LegacyAlter;
+        vtab_mod.importErrmsg(e.v, vtab);
+        e.v.expired = 0;
+        if (e.rc != RC.OK) return .abort;
+        return .next;
+    }
+
+    fn opVUpdate(e: *Exec, op: *Op) Flow {
+        const v = e.v;
+        const db = e.db;
+        std.debug.assert(op.p2 == 1 or op.p5 == OE.Fail or op.p5 == OE.Rollback or
+            op.p5 == OE.Abort or op.p5 == OE.Ignore or op.p5 == OE.Replace);
+        std.debug.assert(!v.read_only);
+        if (db.malloc_failed) return .no_mem;
+        const vt = op.p4.vtab;
+        const vtab = vt.vtab orelse {
+            e.rc = RC.LOCKED;
+            return .abort;
+        };
+        const module = vtab.module;
+        const n_arg: usize = @intCast(op.p2);
+        if (module.x_update) |x_update| {
+            const vtab_on_conflict = db.vtab_on_conflict;
+            const args = v.ap_arg[0..n_arg];
+            for (args, 0..) |*a, i| a.* = e.reg(op.p3 + @as(i32, @intCast(i)));
+            db.vtab_on_conflict = @intCast(op.p5);
+            var rowid: i64 = 0;
+            e.rc = x_update(vtab, args, &rowid);
+            db.vtab_on_conflict = vtab_on_conflict;
+            vtab_mod.importErrmsg(v, vtab);
+            if (e.rc == RC.OK and op.p1 != 0) {
+                std.debug.assert(n_arg > 1 and args[0].flags & MEM.Null != 0);
+                db.last_rowid = rowid;
+            }
+            if (e.rc & 0xff == RC.CONSTRAINT and vt.b_constraint) {
+                if (op.p5 == OE.Ignore) {
+                    e.rc = RC.OK;
+                } else {
+                    v.error_action = if (op.p5 == OE.Replace) OE.Abort else @intCast(op.p5);
+                }
+            } else {
+                v.n_change += 1;
+            }
+            if (e.rc != RC.OK) return .abort;
+        }
+        return .next;
     }
 
     /// OP_IFindKey: after an OP_Found on the same cursor and key missed,

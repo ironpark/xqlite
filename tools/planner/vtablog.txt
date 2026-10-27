@@ -1,0 +1,166 @@
+# vtablog: SELECT planning (xBestIndex inputs), xFilter/xColumn/xNext calls
+create table t1(a integer primary key, b, c);
+insert into t1 values(1,'x',10),(2,'y',20),(3,'z',30);
+create virtual table log using vtablog(schema='create table x(a,b collate nocase,c)', rows=3);
+==
+select * from log
+select a from log where b='b1'
+select * from log where a=5 and b>3
+select * from log where a<>5
+select * from log where a is not null
+select * from log where a is null
+select * from log where a is 5
+select * from log where a is not 5
+select * from log where a like 'a%'
+select * from log where a glob 'a*'
+select * from log where a match 'x'
+select * from log where a in (1,2,3)
+select * from log where a in (select b from t1)
+select * from log where (a,b)=(1,2)
+select * from log where (a,b)>(1,2)
+select * from log where a between 1 and 3
+select * from log where 5<a
+select * from log where a=b
+select * from log where a=?1
+select * from log where b collate binary='x'
+select * from log where rowid=2
+select * from log where rowid in (1,2)
+select * from log where a=1 or b=2
+select * from log order by a
+select * from log order by a desc, b
+select * from log order by b collate nocase
+select * from log order by b collate binary
+select * from log order by a nulls first
+select * from log order by 1
+select * from log limit 2
+select * from log limit 2 offset 1
+select * from log where b=1 limit 2 offset 1
+select * from log where a in (1,2) limit 2
+select * from log order by a limit 1
+select a from log group by a
+select distinct a from log
+select distinct a, b from log order by a
+select count(*) from log
+select a, count(*) from log group by a
+select * from t1, log where log.a=t1.b
+select * from log, t1 where log.a=t1.b
+select * from t1 left join log on log.a=t1.a
+select * from log left join t1 on log.a=t1.b
+select * from t1 cross join log where log.b=t1.c
+select * from t1 where b in (select a from log)
+select (select count(*) from log where a=t1.b) from t1
+select * from log a, log b where a.a=b.b
+select upper(a), lower(b) from log
+select * from log where upper(a)='A0'
+select a from log union select b from log
+select * from (select * from log limit 1)
+----
+# vtablog: INSERT, UPDATE, DELETE and conflict modes
+create table t1(a integer primary key, b, c);
+insert into t1 values(1,'x',10),(2,'y',20);
+create virtual table log using vtablog(schema='create table x(a,b,c)', rows=3);
+==
+insert into log values(1,2,3)
+insert into log(a,c) values('x',x'0102')
+insert into log(rowid,a) values(7,1)
+insert into log(rowid,a) values(null,1)
+insert into log(rowid,a,b,c) values('8',1,2.5,null)
+insert into log select * from t1
+insert into log select a,b,c from log
+insert or replace into log values(1,2,3)
+insert or ignore into log values(1,2,3)
+insert or fail into log values(1,2,3)
+insert or rollback into log values(1,2,3)
+replace into log values(1,2,3)
+insert into log default values
+insert into log values(1,2,3) returning *
+update log set a=1
+update log set b=b+1 where a='a1'
+update log set rowid=7 where rowid=1
+update log set rowid=rowid+1
+update or replace log set a=1
+update or ignore log set c=a where b='b2'
+update log set a=5 from t1 where t1.a=log.rowid
+update log set (a,b)=(select b,c from t1 where t1.a=1)
+update log set a=1 returning *
+delete from log
+delete from log where a='a0'
+delete from log where rowid=1
+delete from log where rowid in (0,2)
+delete from log returning *
+with x as (select 1) insert into log select 1,2,3 from x
+----
+# vtablog: transactions, savepoints and statement journals
+create virtual table log using vtablog(schema='create table x(a,b,c)', rows=2);
+create table t1(a);
+==
+begin; insert into log values(1,2,3); commit
+begin; insert into log values(1,2,3); rollback
+begin; savepoint s1; insert into log values(1,2,3); release s1; commit
+begin; insert into log values(1,2,3); savepoint s1; insert into log values(4,5,6); rollback to s1; commit
+savepoint a; insert into log values(1,2,3); savepoint b; insert into log values(2,3,4); release b; release a
+savepoint a; insert into log values(1,2,3); rollback to a; release a
+begin; insert into t1 values(1); insert into log values(1,2,3); insert into t1 values(2); commit
+begin; update log set a=1; delete from log; commit
+begin; select * from log; commit
+insert into log select 1,2,3 union all select 4,5,6
+begin; insert into log select 1,2,3 union all select 4,5,6; commit
+----
+# vtablog: DDL, schema, rename, integrity, shadow tables
+create table t1(a);
+create virtual table log using vtablog(schema='create table x(a,b,c)', rows=1);
+==
+alter table log rename to log3
+alter table log add column d
+alter table log rename column a to z
+alter table log drop column a
+drop table log
+drop table if exists log
+pragma integrity_check
+pragma quick_check
+pragma integrity_check(log)
+pragma table_info(log)
+pragma table_xinfo(log)
+select * from pragma_table_info('log')
+create index li on log(a)
+create trigger lt after insert on log begin select 1; end
+create table log_shadow(x)
+create table log_other(x)
+create virtual table if not exists log using vtablog
+select * from sqlite_schema
+----
+# vtablog: hidden columns and table-valued function syntax
+create virtual table lh using vtablog(schema='create table x(a, b hidden, c hidden)', rows=2);
+==
+select * from lh
+select *, b, c from lh
+select * from lh(5)
+select * from lh(5, 6)
+select * from lh(5, 6, 7)
+select * from lh where b=5
+insert into lh values(1)
+insert into lh(a,b,c) values(1,2,3)
+----
+# vtablog: ORDER BY consumption
+create virtual table lo using vtablog(schema='create table x(a, b)', rows=3, consume_order_by=1);
+create virtual table lo2 using vtablog(schema='create table x(a, b)', rows=3, consume_order_by=-2);
+==
+select * from lo order by a
+select * from lo order by a desc
+select * from lo order by b
+select * from lo order by a limit 2
+select * from lo2 order by b desc
+select * from lo2 order by b
+select a from lo group by a
+select distinct a from lo order by a
+----
+# vtablog: CREATE VIRTUAL TABLE arguments and declared schemas
+create table t1(a);
+==
+create virtual table log2 using vtablog
+create virtual table log2 using vtablog(rows=2, rows=3)
+create virtual table log2 using vtablog(schema='create table x(a,a)')
+create virtual table log2 using vtablog(schema='create table x(a hidden, b, c hidden)')
+create virtual table log2 using vtablog(schema='create table x(a, b) without rowid')
+create virtual table log2 using vtablog(schema='create table x(a primary key, b) without rowid')
+create virtual table temp.log2 using vtablog(rows=1)

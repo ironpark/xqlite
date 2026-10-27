@@ -120,6 +120,10 @@ pub const Options = struct {
     /// Close the b-tree when its last cursor closes (BTREE_SINGLE), as
     /// ephemeral tables do.
     single: bool = false,
+    /// The connection's count of reading statements (&db.n_vdbe_read) for
+    /// a database of a connection; see Btree.n_vdbe_read. Null for a
+    /// b-tree used on its own.
+    n_vdbe_read: ?*const i32 = null,
 };
 
 /// Compares stored index keys against a search key.
@@ -182,6 +186,10 @@ pub const Btree = struct {
     do_truncate: bool = false,
     /// Closes with its last cursor (BTREE_SINGLE).
     single: bool = false,
+    /// The count of statements of the connection that read
+    /// (p->db->nVdbeRead), if the b-tree belongs to one (Options): while
+    /// others read, ending a transaction leaves a read transaction.
+    n_vdbe_read: ?*const i32 = null,
 
     page_size: u32,
     usable_size: u32,
@@ -240,6 +248,7 @@ pub const Btree = struct {
             .auto_vacuum = opts.auto_vacuum != .none,
             .incr_vacuum = opts.auto_vacuum == .incremental,
             .single = opts.single,
+            .n_vdbe_read = opts.n_vdbe_read,
         };
         var reserve: u8 = 0;
         if (header.pageSize(&hdr)) |page_size| {
@@ -631,8 +640,14 @@ pub const Btree = struct {
     /// Port of btreeEndTransaction().
     fn endTransaction(bt: *Btree) void {
         bt.do_truncate = false;
-        bt.in_trans = .none;
-        bt.unlockIfUnused();
+        if (bt.in_trans != .none and bt.n_vdbe_read != null and bt.n_vdbe_read.?.* > 1) {
+            // Other statements of the connection may still be reading
+            // the database: downgrade to a read transaction.
+            bt.in_trans = .read;
+        } else {
+            bt.in_trans = .none;
+            bt.unlockIfUnused();
+        }
     }
 
     /// Port of sqlite3BtreeRollback(). With `trip` set, cursors are put in

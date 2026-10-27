@@ -10,6 +10,7 @@ const walker = @import("walker.zig");
 const coll_mod = @import("coll.zig");
 const serial = @import("../vdbe/serial.zig");
 const ctype = @import("../util/ctype.zig");
+const vtab = @import("vtab.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -29,6 +30,7 @@ const TF = int.TF;
 const SF = int.SF;
 const OE = int.OE;
 const OPT = int.OPT;
+const WHERE = int.WHERE;
 const Aff = int.Aff;
 const XN_ROWID = int.XN_ROWID;
 const XN_EXPR = int.XN_EXPR;
@@ -413,11 +415,21 @@ pub fn whereLoopInit(l: *WhereLoop) void {
     l.ws_flags = 0;
 }
 
+/// Port of whereLoopClearUnion(): free the idxStr of a virtual table
+/// loop that owns it (the rest of the memory belongs to the arena).
+pub fn whereLoopClearUnion(db: *int.Sqlite3, l: *WhereLoop) void {
+    if (l.ws_flags & wi.WHERE_VIRTUALTABLE != 0 and l.vtab.need_free) {
+        if (l.vtab.idx_str) |z| db.gpa.free(z);
+        l.vtab.need_free = false;
+        l.vtab.idx_str = null;
+    }
+}
+
 /// Port of whereLoopClear(): reset `l` as if newly initialized (the
 /// memory itself belongs to the arena).
-fn whereLoopClear(l: *WhereLoop) void {
+fn whereLoopClear(db: *int.Sqlite3, l: *WhereLoop) void {
+    whereLoopClearUnion(db, l);
     l.a_lterm = &l.a_lterm_space;
-    // whereLoopClearUnion(): nothing to free with arena memory.
     l.n_lterm = 0;
     l.ws_flags = 0;
 }
@@ -433,7 +445,8 @@ pub fn whereLoopResize(a: std.mem.Allocator, l: *WhereLoop, n_arg: usize) Oom!vo
 
 /// Port of whereLoopXfer(): copy `from` into `to` (the fields above the
 /// whereLoopXfer() marker, then aLTerm[]).
-fn whereLoopXfer(a: std.mem.Allocator, to: *WhereLoop, from: *WhereLoop) Oom!void {
+fn whereLoopXfer(db: *int.Sqlite3, a: std.mem.Allocator, to: *WhereLoop, from: *WhereLoop) Oom!void {
+    whereLoopClearUnion(db, to);
     if (from.n_lterm > to.nLSlot()) try whereLoopResize(a, to, from.n_lterm);
     to.prereq = from.prereq;
     to.mask_self = from.mask_self;
@@ -448,8 +461,10 @@ fn whereLoopXfer(a: std.mem.Allocator, to: *WhereLoop, from: *WhereLoop) Oom!voi
     to.n_lterm = from.n_lterm;
     to.n_skip = from.n_skip;
     @memcpy(to.a_lterm[0..to.n_lterm], from.a_lterm[0..to.n_lterm]);
-    // (WHERE_VIRTUALTABLE needFree hand-off removed: no virtual tables.)
-    if (from.ws_flags & wi.WHERE_AUTO_INDEX != 0) {
+    if (from.ws_flags & wi.WHERE_VIRTUALTABLE != 0) {
+        // `to` owns the idxStr now.
+        from.vtab.need_free = false;
+    } else if (from.ws_flags & wi.WHERE_AUTO_INDEX != 0) {
         from.btree.index = null;
     }
 }
@@ -579,7 +594,8 @@ fn whereLoopInsert(builder: *WhereLoopBuilder, template: *WhereLoop) Oom!i32 {
             pp_tail = whereLoopFindLesser(pp_tail, template) orelse break;
             const to_del = pp_tail.* orelse break;
             pp_tail.* = to_del.next_loop;
-            // whereLoopDelete(): arena memory.
+            // whereLoopDelete(): the rest is arena memory.
+            whereLoopClearUnion(w.parse.db, to_del);
         }
     } else {
         p = try a.create(WhereLoop);
@@ -588,7 +604,7 @@ fn whereLoopInsert(builder: *WhereLoopBuilder, template: *WhereLoop) Oom!i32 {
         p.next_loop = null;
         pp_prev.* = p;
     }
-    try whereLoopXfer(a, p, template);
+    try whereLoopXfer(w.parse.db, a, p, template);
     if (p.ws_flags & wi.WHERE_VIRTUALTABLE == 0) {
         if (p.btree.index) |idx| {
             if (idx.idx_type == .ipk) p.btree.index = null;
@@ -1412,6 +1428,467 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
     return rc;
 }
 
+// ======================================================== virtual tables
+
+/// Port of allocateIndexInfo() (where.c): the sqlite3_index_info for
+/// xBestIndex of virtual table `src`, listing the WHERE terms on it
+/// (marked TERM_OK) and the ORDER BY if the table can do all of it.
+/// Constraints that may not be omitted are flagged in `no_omit`.
+fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: *SrcItem, no_omit: *u16) Oom!*vtab.HiddenIndexInfo {
+    const p = w.parse;
+    const tab = src.s_tab.?;
+    std.debug.assert(tab.isVirtual());
+    var m_no_omit: u16 = 0;
+    var e_distinct: i32 = 0;
+    const order_by = w.order_by;
+
+    // Mark the WHERE terms on this virtual table TERM_OK.
+    var n_term: usize = 0;
+    var it: ?*WhereClause = wc;
+    while (it) |c| : (it = c.outer) {
+        for (c.terms()) |*term| {
+            term.wt_flags &= ~TERM.OK;
+            if (term.left_cursor != src.i_cursor) continue;
+            if (term.prereq_right & m_unusable != 0) continue;
+            // IsPowerOfTwo(), which holds for 0 too.
+            const eop = term.e_operator & ~WO.EQUIV;
+            std.debug.assert(eop & (eop -% 1) == 0);
+            if (term.e_operator & ~WO.EQUIV == 0) continue;
+            if (term.wt_flags & TERM.VNULL != 0) continue;
+            std.debug.assert(term.e_operator & (WO.OR | WO.AND) == 0);
+            std.debug.assert(term.left_column >= XN_ROWID);
+            std.debug.assert(term.left_column < tab.nCol());
+            if (src.fg.jointype & (JT.LEFT | JT.LTORJ | JT.RIGHT) != 0 and
+                !constraintCompatibleWithOuterJoin(term, src))
+            {
+                continue;
+            }
+            n_term += 1;
+            term.wt_flags |= TERM.OK;
+        }
+    }
+
+    // The ORDER BY goes to xBestIndex if it is all columns of this table.
+    var n_order_by: usize = 0;
+    if (order_by) |ob| {
+        const n = ob.len();
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const e = ob.at(i).expr.?;
+            // Constant terms are skipped.
+            if (expr_mod.isConstant(null, e)) continue;
+            // Virtual tables cannot do NULLS FIRST.
+            if (ob.at(i).fg.sort_flags & int.KeyInfoOrder.bignull != 0) break;
+            // A column of the table.
+            if (e.op == TK.COLUMN and e.i_table == src.i_cursor) {
+                std.debug.assert(e.i_column >= XN_ROWID and e.i_column < tab.nCol());
+                continue;
+            }
+            // A column with a COLLATE that is the column's own.
+            if (e.op == TK.COLLATE) if (e.left) |e2| if (e2.op == TK.COLUMN and e2.i_table == src.i_cursor) {
+                std.debug.assert(!e.has(EP.IntValue));
+                e.i_column = e2.i_column;
+                if (e2.i_column < 0) continue; // the rowid has no collation
+                const z_coll = @import("build.zig").columnColl(&tab.cols[@intCast(e2.i_column)]) orelse coll_mod.str_binary;
+                if (ctype.strICmp(e.token(), z_coll) == 0) continue;
+            };
+            break;
+        }
+        if (i == n) {
+            const b_sort_by_group: i32 = @intFromBool(w.wctrl_flags & WHERE.SORTBYGROUP != 0);
+            n_order_by = n;
+            if (w.wctrl_flags & WHERE.DISTINCTBY != 0 and !src.fg.rowid_used) {
+                e_distinct = 2 + b_sort_by_group;
+            } else if (w.wctrl_flags & WHERE.GROUPBY != 0) {
+                e_distinct = 1 - b_sort_by_group;
+            } else if (w.wctrl_flags & WHERE.WANT_DISTINCT != 0) {
+                e_distinct = 3;
+            }
+        }
+    }
+
+    const a = p.arena;
+    const h = try a.create(vtab.HiddenIndexInfo);
+    h.* = .{
+        .info = .{
+            .constraints = try a.alloc(vtab.IndexConstraint, n_term),
+            .order_by = try a.alloc(vtab.IndexOrderBy, n_order_by),
+            .usage = try a.alloc(vtab.IndexConstraintUsage, n_term),
+            .col_used = src.col_used,
+        },
+        .wc = wc,
+        .parse = p,
+        .e_distinct = e_distinct,
+        .rhs = try a.alloc(?*@import("../vdbe/vdbe_int.zig").Mem, n_term),
+    };
+    @memset(h.rhs, null);
+    @memset(h.info.usage, .{});
+    const info = &h.info;
+    if (!tab.hasRowid()) {
+        // The bits of the PRIMARY KEY columns are always set, for RIGHT
+        // joins and OR loops.
+        const pk = @import("build.zig").primaryKeyIndex(tab).?;
+        for (pk.ai_column[0..pk.n_key_col]) |c| {
+            var i_col: i32 = c;
+            std.debug.assert(i_col >= 0);
+            if (i_col >= int.bms - 1) i_col = int.bms - 1;
+            info.col_used |= wi.maskBit(i_col);
+        }
+    }
+
+    var j: usize = 0;
+    var i: i32 = 0;
+    it = wc;
+    while (it) |c| : (it = c.outer) {
+        for (c.terms()) |*term| {
+            defer i += 1;
+            if (term.wt_flags & TERM.OK == 0) continue;
+            const cons = &info.constraints[j];
+            cons.* = .{ .i_column = term.left_column, .i_term_offset = i, .op = 0 };
+            var op = term.e_operator & WO.ALL;
+            if (op == WO.IN) {
+                if (term.wt_flags & TERM.SLICE == 0) {
+                    h.m_in |= wi.smaskBit32(j);
+                }
+                op = WO.EQ;
+            }
+            if (op == WO.AUX) {
+                cons.op = term.e_match_op;
+            } else if (op & (WO.ISNULL | WO.IS) != 0) {
+                cons.op = if (op == WO.ISNULL) vtab.INDEX_CONSTRAINT.ISNULL else vtab.INDEX_CONSTRAINT.IS;
+            } else {
+                // The WO_ and SQLITE_INDEX_CONSTRAINT_ codes are the same
+                // (WO_EQUIV is cut off, as by the u8 cast in C).
+                cons.op = @truncate(op);
+                std.debug.assert(term.e_operator & (WO.IN | WO.EQ | WO.LT | WO.LE | WO.GT | WO.GE | WO.AUX) != 0);
+                if (op & (WO.LT | WO.LE | WO.GT | WO.GE) != 0 and expr_mod.isVector(term.expr.right.?)) {
+                    if (j < 16) m_no_omit |= @as(u16, 1) << @intCast(j);
+                    if (op == WO.LT) cons.op = @intCast(WO.LE);
+                    if (op == WO.GT) cons.op = @intCast(WO.GE);
+                }
+            }
+            j += 1;
+        }
+    }
+    std.debug.assert(j == n_term);
+    j = 0;
+    if (n_order_by > 0) for (order_by.?.slice()[0..n_order_by]) |item| {
+        const e = item.expr.?;
+        if (expr_mod.isConstant(null, e)) continue;
+        std.debug.assert(e.op == TK.COLUMN or (e.op == TK.COLLATE and e.left.?.op == TK.COLUMN and e.i_column == e.left.?.i_column));
+        info.order_by[j] = .{ .i_column = e.i_column, .desc = item.fg.sort_flags & int.KeyInfoOrder.desc != 0 };
+        j += 1;
+    };
+    info.order_by = info.order_by[0..j];
+
+    no_omit.* = m_no_omit;
+    return h;
+}
+
+/// Port of freeIdxStr() (where.c): free IndexInfo.idx_str if the core
+/// owns it.
+fn freeIdxStr(db: *int.Sqlite3, info: *vtab.IndexInfo) void {
+    if (info.need_to_free_idx_str) {
+        if (info.idx_str) |z| db.gpa.free(z);
+        info.idx_str = null;
+        info.need_to_free_idx_str = false;
+    }
+}
+
+/// Port of freeIndexInfo() (where.c): the right-hand-side values and the
+/// structure itself are in the statement's memory.
+fn freeIndexInfo(db: *int.Sqlite3, h: *vtab.HiddenIndexInfo) void {
+    for (h.rhs) |*r| {
+        if (r.*) |m| @import("../vdbe/mem.zig").release(m);
+        r.* = null;
+    }
+    freeIdxStr(db, &h.info);
+}
+
+/// Port of vtabBestIndex() (where.c): call xBestIndex. Errors other than
+/// SQLITE_CONSTRAINT (an unusable combination) are left in `p`.
+fn vtabBestIndex(p: *Parse, tab: *Table, info: *vtab.IndexInfo) i32 {
+    const db = p.db;
+    const vt = vtab.getVTable(db, tab).?;
+    const pv = vt.vtab.?;
+    db.n_schema_lock += 1;
+    const rc = pv.module.x_best_index.?(pv, info);
+    db.n_schema_lock -= 1;
+    if (rc != RC.OK and rc != RC.CONSTRAINT) {
+        if (rc == RC.NOMEM) {
+            db.malloc_failed = true;
+        } else if (pv.err_msg) |msg| {
+            util.errorMsg(p, "{s}", .{msg});
+        } else {
+            util.errorMsg(p, "{s}", .{util.errStr(rc)});
+        }
+    }
+    if (tab.u.vtab.p.?.b_all_schemas) vtabUsesAllSchemas(p);
+    if (pv.err_msg) |msg| db.gpa.free(msg);
+    pv.err_msg = null;
+    return rc;
+}
+
+/// Port of sqlite3VtabUsesAllSchemas() (where.c): the statement uses every
+/// database (as sqlite_dbpage does): read transactions on all of them, or
+/// write transactions if it writes.
+pub fn vtabUsesAllSchemas(p: *Parse) void {
+    const build = @import("build.zig");
+    const n_db = p.db.dbs.items.len;
+    for (0..n_db) |i| build.codeVerifySchema(p, i);
+    if (p.write_mask != 0) {
+        for (0..n_db) |i| build.beginWriteOperation(p, false, i);
+    }
+}
+
+/// Port of isLimitTerm() (where.c): a LIMIT or OFFSET term of a virtual
+/// table.
+fn isLimitTerm(term: *const WhereTerm) bool {
+    std.debug.assert(term.e_operator == WO.AUX or term.e_match_op == 0);
+    return term.e_match_op >= vtab.INDEX_CONSTRAINT.LIMIT and term.e_match_op <= vtab.INDEX_CONSTRAINT.OFFSET;
+}
+
+/// Port of allConstraintsUsed() (where.c): the first `n_cons` constraints
+/// have an argvIndex.
+fn allConstraintsUsed(usage: []const vtab.IndexConstraintUsage, n_cons: usize) bool {
+    for (usage[0..n_cons]) |u| {
+        if (u.argv_index <= 0) return false;
+    }
+    return true;
+}
+
+/// Port of whereLoopAddVirtualOne() (where.c): call xBestIndex with the
+/// constraints usable with `m_usable` (and not using an operator of
+/// `m_exclude`) and add the plan it returns. `b_in` tells whether the plan
+/// uses an IN term; `retry_limit` (null to ignore LIMIT and OFFSET terms)
+/// is set if the plan must be redone without LIMIT and OFFSET.
+fn whereLoopAddVirtualOne(
+    builder: *WhereLoopBuilder,
+    m_prereq: Bitmask,
+    m_usable: Bitmask,
+    m_exclude: u16,
+    h: *vtab.HiddenIndexInfo,
+    m_no_omit: u16,
+    b_in: *bool,
+    retry_limit: ?*bool,
+) Oom!i32 {
+    const wc = builder.wc;
+    const info = &h.info;
+    const usage = info.usage;
+    const new = builder.new;
+    const p = builder.w_info.parse;
+    const src = builder.w_info.tab_list.at(new.i_tab);
+    const n_constraint = info.constraints.len;
+    const db = p.db;
+
+    std.debug.assert(m_usable & m_prereq == m_prereq);
+    b_in.* = false;
+    new.prereq = m_prereq;
+
+    // Mark the usable constraints.
+    for (info.constraints) |*cons| {
+        const term = vtab.termFromWhereClause(wc, cons.i_term_offset).?;
+        cons.usable = false;
+        if (term.prereq_right & m_usable == term.prereq_right and
+            term.e_operator & m_exclude == 0 and
+            (retry_limit != null or !isLimitTerm(term)))
+        {
+            cons.usable = true;
+        }
+    }
+
+    // Initialize the outputs.
+    @memset(usage, .{});
+    std.debug.assert(!info.need_to_free_idx_str);
+    info.idx_str = null;
+    info.idx_num = 0;
+    info.order_by_consumed = false;
+    info.estimated_cost = 1e99 / 2.0;
+    info.estimated_rows = 25;
+    info.idx_flags = 0;
+    h.m_handle_in = 0;
+
+    // Invoke xBestIndex.
+    var rc = vtabBestIndex(p, src.s_tab.?, info);
+    if (rc != RC.OK) {
+        if (rc == RC.CONSTRAINT) {
+            // An unusable combination of constraints: no plan.
+            freeIdxStr(db, info);
+            return RC.OK;
+        }
+        return rc;
+    }
+
+    var mx_term: i32 = -1;
+    std.debug.assert(new.nLSlot() >= n_constraint);
+    @memset(new.a_lterm[0..n_constraint], null);
+    new.vtab = .{};
+    for (info.constraints, 0..) |*cons, i| {
+        const i_term = usage[i].argv_index - 1;
+        if (i_term >= 0) {
+            const j = cons.i_term_offset;
+            const term_opt = if (j < 0) null else vtab.termFromWhereClause(wc, j);
+            if (i_term >= n_constraint or term_opt == null or
+                new.a_lterm[@intCast(i_term)] != null or !cons.usable)
+            {
+                util.errorMsg(p, "{s}.xBestIndex malfunction", .{src.s_tab.?.name});
+                freeIdxStr(db, info);
+                return RC.ERROR;
+            }
+            const term = term_opt.?;
+            new.prereq |= term.prereq_right;
+            std.debug.assert(i_term < new.nLSlot());
+            new.a_lterm[@intCast(i_term)] = term;
+            if (i_term > mx_term) mx_term = i_term;
+            if (usage[i].omit) {
+                if (i < 16 and (@as(u16, 1) << @intCast(i)) & m_no_omit == 0) {
+                    new.vtab.omit_mask |= @as(u16, 1) << @intCast(i_term);
+                }
+                if (term.e_match_op == vtab.INDEX_CONSTRAINT.OFFSET) new.vtab.b_omit_offset = true;
+            }
+            if (wi.smaskBit32(i) & h.m_handle_in != 0) {
+                new.vtab.m_handle_in |= @as(u32, 1) << @intCast(@as(u32, @intCast(i_term)) & 31);
+            } else if (term.e_operator & WO.IN != 0) {
+                // A plan with an IN constraint cannot consume the ORDER
+                // BY: the order of the IN values is not that of the output,
+                // and several outputs of one value do not merge.
+                info.order_by_consumed = false;
+                info.idx_flags &= ~vtab.INDEX_SCAN_UNIQUE;
+                b_in.* = true;
+                std.debug.assert(m_exclude & WO.IN == 0);
+            }
+
+            // LIMIT and OFFSET terms come last, and only with retry_limit.
+            std.debug.assert(retry_limit != null or !isLimitTerm(term));
+            if (isLimitTerm(term) and (b_in.* or !allConstraintsUsed(usage, i))) {
+                // With an IN term handled as separate xFilter calls, or
+                // other constraints unused, LIMIT and OFFSET cannot be
+                // used: the caller retries without them.
+                freeIdxStr(db, info);
+                retry_limit.?.* = true;
+                return RC.OK;
+            }
+        }
+    }
+
+    new.n_lterm = @intCast(mx_term + 1);
+    for (new.a_lterm[0..new.n_lterm]) |t| {
+        if (t == null) {
+            // The argvIndex values must be contiguous.
+            util.errorMsg(p, "{s}.xBestIndex malfunction", .{src.s_tab.?.name});
+            freeIdxStr(db, info);
+            return RC.ERROR;
+        }
+    }
+    std.debug.assert(new.n_lterm <= new.nLSlot());
+    new.vtab.idx_num = info.idx_num;
+    // The plan takes the string: it owns it with need_to_free_idx_str
+    // (whereLoopInsert() hands it to the loop it fills); otherwise the
+    // module keeps it valid (P4_STATIC).
+    new.vtab.idx_str = info.idx_str;
+    new.vtab.need_free = info.need_to_free_idx_str;
+    info.idx_str = null;
+    info.need_to_free_idx_str = false;
+    defer whereLoopClearUnion(db, new);
+    new.vtab.is_ordered = if (info.order_by_consumed) @intCast(info.order_by.len) else 0;
+    new.vtab.b_idx_num_hex = info.idx_flags & vtab.INDEX_SCAN_HEX != 0;
+    new.r_setup = 0;
+    new.r_run = util.logEstFromDouble(info.estimated_cost);
+    new.n_out = util.logEst(@bitCast(info.estimated_rows));
+
+    // WHERE_ONEROW if xBestIndex says the scan visits at most one row.
+    if (info.idx_flags & vtab.INDEX_SCAN_UNIQUE != 0) {
+        new.ws_flags |= wi.WHERE_ONEROW;
+    } else {
+        new.ws_flags &= ~wi.WHERE_ONEROW;
+    }
+    rc = try whereLoopInsert(builder, new);
+    return rc;
+}
+
+/// Port of whereLoopAddVirtual() (where.c): add the WhereLoops of virtual
+/// table builder.new.iTab, calling xBestIndex for each distinct set of
+/// usable constraints. Tables of `m_prereq` come before it; those of
+/// `m_unusable` after it.
+fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bitmask) Oom!i32 {
+    std.debug.assert(m_prereq & m_unusable == 0);
+    const w = builder.w_info;
+    const p = w.parse;
+    const wc = builder.wc;
+    const new = builder.new;
+    const src = w.tab_list.at(new.i_tab);
+    std.debug.assert(src.s_tab.?.isVirtual());
+    var m_no_omit: u16 = 0;
+    const h = try allocateIndexInfo(w, wc, m_unusable, src, &m_no_omit);
+    defer freeIndexInfo(p.db, h);
+    const info = &h.info;
+    new.r_setup = 0;
+    new.ws_flags = wi.WHERE_VIRTUALTABLE;
+    new.n_lterm = 0;
+    new.vtab.need_free = false;
+    const n_constraint = info.constraints.len;
+    try whereLoopResize(p.arena, new, n_constraint);
+
+    // First with all constraints usable.
+    var b_in = false;
+    var b_retry = false;
+    var rc = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, 0, h, m_no_omit, &b_in, &b_retry);
+    if (b_retry) {
+        std.debug.assert(rc == RC.OK);
+        rc = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, 0, h, m_no_omit, &b_in, null);
+    }
+
+    // If that plan needs no other table and uses no IN, others would be
+    // the same (if xBestIndex is sane).
+    const m_best = new.prereq & ~m_prereq;
+    if (rc == RC.OK and (m_best != 0 or b_in)) {
+        var seen_zero = false; // a plan with no prereqs
+        var seen_zero_no_in = false; // ... and no IN
+        var m_prev: Bitmask = 0;
+        var m_best_no_in: Bitmask = 0;
+
+        // A plan with an IN: try again without IN terms.
+        if (b_in) {
+            rc = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, WO.IN, h, m_no_omit, &b_in, null);
+            std.debug.assert(!b_in);
+            m_best_no_in = new.prereq & ~m_prereq;
+            if (m_best_no_in == 0) {
+                seen_zero = true;
+                seen_zero_no_in = true;
+            }
+        }
+
+        // Once for each distinct (prereqRight & ~mPrereq) of the terms.
+        while (rc == RC.OK) {
+            var m_next: Bitmask = wi.ALLBITS;
+            for (info.constraints) |cons| {
+                const m_this = vtab.termFromWhereClause(wc, cons.i_term_offset).?.prereq_right & ~m_prereq;
+                if (m_this > m_prev and m_this < m_next) m_next = m_this;
+            }
+            m_prev = m_next;
+            if (m_next == wi.ALLBITS) break;
+            if (m_next == m_best or m_next == m_best_no_in) continue;
+            rc = try whereLoopAddVirtualOne(builder, m_prereq, m_next | m_prereq, 0, h, m_no_omit, &b_in, null);
+            if (new.prereq == m_prereq) {
+                seen_zero = true;
+                if (!b_in) seen_zero_no_in = true;
+            }
+        }
+
+        // A plan that needs no other table, with all of them disabled.
+        if (rc == RC.OK and !seen_zero) {
+            rc = try whereLoopAddVirtualOne(builder, m_prereq, m_prereq, 0, h, m_no_omit, &b_in, null);
+            if (!b_in) seen_zero_no_in = true;
+        }
+
+        // And one without IN as well.
+        if (rc == RC.OK and !seen_zero_no_in) {
+            rc = try whereLoopAddVirtualOne(builder, m_prereq, m_prereq, WO.IN, h, m_no_omit, &b_in, null);
+        }
+    }
+    return rc;
+}
+
 /// Port of whereLoopAddOr(): add WhereLoops for the OR terms of the
 /// WHERE clause usable by builder.new.iTab.
 fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bitmask) Oom!i32 {
@@ -1456,8 +1933,11 @@ fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bit
                     continue;
                 }
                 cur.n = 0;
-                // (Virtual table branch removed: whereLoopAddVirtual().)
-                rc = try whereLoopAddBtree(&sub_build, m_prereq);
+                if (item.s_tab.?.isVirtual()) {
+                    rc = try whereLoopAddVirtual(&sub_build, m_prereq, m_unusable);
+                } else {
+                    rc = try whereLoopAddBtree(&sub_build, m_prereq);
+                }
                 if (rc == RC.OK) {
                     rc = try whereLoopAddOr(&sub_build, m_prereq, m_unusable);
                 }
@@ -1527,7 +2007,7 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) Oom!i32 {
     var i_tab: usize = 0;
     while (i_tab < w.n_level) : (i_tab += 1) {
         const item = tab_list.at(i_tab);
-        const m_unusable: Bitmask = 0;
+        var m_unusable: Bitmask = 0;
         new.i_tab = @intCast(i_tab);
         builder.i_plan_limit += wi.QUERY_PLANNER_LIMIT_INCR;
         new.mask_self = wi.getMask(&w.s_mask_set, item.i_cursor);
@@ -1550,8 +2030,16 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) Oom!i32 {
         } else if (!has_right_cross_join) {
             m_prereq = 0;
         }
-        // (Virtual table branch removed: whereLoopAddVirtual().)
-        rc = try whereLoopAddBtree(builder, m_prereq);
+        if (item.s_tab.?.isVirtual()) {
+            for (tab_list.slice()[i_tab + 1 ..]) |*p| {
+                if (p.fg.jointype & (JT.OUTER | JT.CROSS) != 0) {
+                    m_unusable |= wi.getMask(&w.s_mask_set, p.i_cursor);
+                }
+            }
+            rc = try whereLoopAddVirtual(builder, m_prereq, m_unusable);
+        } else {
+            rc = try whereLoopAddBtree(builder, m_prereq);
+        }
         if (rc == RC.OK and builder.wc.has_or) {
             rc = try whereLoopAddOr(builder, m_prereq, m_unusable);
         }
@@ -1568,6 +2056,6 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) Oom!i32 {
         }
     }
 
-    whereLoopClear(new);
+    whereLoopClear(db, new);
     return rc;
 }

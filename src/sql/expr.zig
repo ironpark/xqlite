@@ -1381,6 +1381,17 @@ fn impliesNotNullRow(w: *Walker, e: *Expr) u8 {
             bothImplyNotNullRow(w, e.x.list.?.at(0).expr, e.x.list.?.at(1).expr);
             return WRC.Prune;
         },
+        TK.EQ, TK.NE, TK.LT, TK.LE, TK.GT, TK.GE => {
+            // A virtual table column may not be what it seems.
+            const left = e.left.?;
+            const right = e.right.?;
+            if ((left.op == TK.COLUMN and left.y.tab != null and left.y.tab.?.isVirtual()) or
+                (right.op == TK.COLUMN and right.y.tab != null and right.y.tab.?.isVirtual()))
+            {
+                return WRC.Prune;
+            }
+            return WRC.Continue;
+        },
         else => return WRC.Continue,
     }
 }

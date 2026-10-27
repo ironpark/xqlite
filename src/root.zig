@@ -30,9 +30,21 @@ pub const sql = struct {
     pub const prepare = @import("sql/prepare.zig");
     pub const complete = @import("sql/complete.zig");
     pub const api = @import("vdbe/api.zig");
+    /// Virtual table modules (sqlite3_module, sqlite3_create_module()).
+    pub const vtab = @import("sql/vtab.zig");
     /// A prepared statement (sqlite3_stmt).
     pub const Stmt = @import("vdbe/vdbe_int.zig").Vdbe;
     pub const RC = @import("sql/sqlite_int.zig").RC;
+    /// Connection flags (Sqlite3.flags; SQLITE_DBCONFIG_* and PRAGMAs).
+    pub const DbFlag = @import("sql/sqlite_int.zig").DbFlag;
+};
+
+/// Extensions from ext/misc that the sqlite3 shell builds in.
+pub const ext = struct {
+    /// generate_series() (series.c).
+    pub const series = @import("ext/series.zig");
+    /// vtablog (vtablog.c), a virtual table that prints its method calls.
+    pub const vtablog = @import("ext/vtablog.zig");
 };
 
 pub const vdbe = struct {
@@ -56,11 +68,17 @@ test {
         @import("sql/pragma.zig"), @import("sql/pragma_test.zig"),
         @import("sql/where_int.zig"), @import("sql/where.zig"), @import("sql/where_loop.zig"),
         @import("sql/where_code.zig"), @import("sql/where_expr.zig"), @import("sql/where_test.zig"),
+        @import("sql/vtab.zig"),   @import("ext/series.zig"), @import("ext/vtablog.zig"),
+        @import("vdbe/vdbevtab.zig"), @import("sql/vtab_test.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 
 test {
     std.testing.refAllDecls(@import("sql/complete.zig"));
+}
+
+test {
+    std.testing.refAllDecls(@import("sql/json.zig"));
 }
 
 /// The SQLite release this port tracks (SQLITE_VERSION_NUMBER). Keep in sync

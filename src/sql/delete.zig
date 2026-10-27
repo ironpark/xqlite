@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
-const pending = @import("pending.zig");
+const vtab = @import("vtab.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const build = @import("build.zig");
@@ -51,10 +51,25 @@ pub fn codeChangeCount(v: *Vdbe, reg_counter: i32, col_name: [:0]const u8) void 
     aux.setColName(v, 0, vi.COLNAME_NAME, col_name);
 }
 
-/// Port of tabIsReadOnly(): sqlite_schema (outside nested parses and
-/// writable_schema) and, in defensive mode, shadow tables.
+/// Port of vtabIsReadOnly(): a virtual table without xUpdate. Within
+/// triggers, writing a SQLITE_VTAB_DIRECTONLY table, or (with PRAGMA
+/// trusted_schema=OFF) one that is not SQLITE_VTAB_INNOCUOUS, is an error.
+fn vtabIsReadOnly(p: *Parse, t: *Table) bool {
+    std.debug.assert(t.isVirtual());
+    if (vtab.getVTable(p.db, t).?.mod.module.x_update == null) return true;
+    if ((p.toplevel != null or p.prep_flags & aux.PREPARE_FROM_DDL != 0) and
+        t.u.vtab.p.?.e_vtab_risk > @intFromBool(p.db.flags & int.DbFlag.TrustedSchema != 0))
+    {
+        util.errorMsg(p, "unsafe use of virtual table \"{s}\"", .{t.name});
+    }
+    return false;
+}
+
+/// Port of tabIsReadOnly(): a virtual table without xUpdate, sqlite_schema
+/// (outside nested parses and writable_schema) and, in defensive mode,
+/// shadow tables.
 fn tabIsReadOnly(p: *Parse, t: *Table) bool {
-    if (t.e_tab_type == .vtab) return false;
+    if (t.isVirtual()) return vtabIsReadOnly(p, t);
     if (t.tab_flags & (TF.Readonly | TF.Shadow) == 0) return false;
     if (t.tab_flags & TF.Readonly != 0) return !build.writableSchema(p.db) and p.nested == 0;
     return build.readOnlyShadowTables(p.db);
@@ -88,13 +103,8 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     const trig = trigger.triggersExist(p, t, TK.DELETE, null, null);
     const is_view = t.isView();
     var b_complex = trig != null or fkey.fkRequired(p, t, null, false) != 0;
-    if (p.n_err != 0) return;
     if (build.viewGetColumnNames(p, t) != 0) return;
     if (isReadOnly(p, t, trig)) return;
-    if (t.e_tab_type == .vtab) {
-        pending.notYet(p, "virtual tables");
-        return;
-    }
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
 
     // Cursors for the table and its indexes.
@@ -132,7 +142,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         _ = aux.addOp2(v, OP.Integer, 0, mem_cnt);
     }
 
-    if (where == null and !b_complex) {
+    if (where == null and !b_complex and !t.isVirtual()) {
         // Without a WHERE clause the b-trees are just cleared.
         if (t.hasRowid()) {
             _ = aux.addOp4Str(v, OP.Clear, @intCast(t.tnum), @intCast(i_db), if (mem_cnt != 0) mem_cnt else -1, t.name);
@@ -234,17 +244,33 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         // The loop over the keys found.
         var addr_loop: i32 = 0;
         if (e_one_pass != ONEPASS_OFF) {
-            if (to_open.?[@intCast(i_data_cur - i_tab_cur)]) {
+            if (!t.isVirtual() and to_open.?[@intCast(i_data_cur - i_tab_cur)]) {
                 _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, addr_bypass, i_key, n_key);
             }
         } else if (pk != null) {
             addr_loop = aux.addOp1(v, OP.Rewind, i_eph_cur);
-            _ = aux.addOp2(v, OP.RowData, i_eph_cur, i_key);
+            if (t.isVirtual()) {
+                _ = aux.addOp3(v, OP.Column, i_eph_cur, 0, i_key);
+            } else {
+                _ = aux.addOp2(v, OP.RowData, i_eph_cur, i_key);
+            }
         } else {
             addr_loop = aux.addOp3(v, OP.RowSetRead, i_row_set, 0, i_key);
         }
 
-        generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, i_key, n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
+        if (t.isVirtual()) {
+            vtab.makeWritable(p, t);
+            std.debug.assert(e_one_pass == ONEPASS_OFF or e_one_pass == ONEPASS_SINGLE);
+            main_mod.mayAbort(p);
+            if (e_one_pass == ONEPASS_SINGLE) {
+                _ = aux.addOp1(v, OP.Close, i_tab_cur);
+                if (p.toplevel == null) p.is_multi_write = false;
+            }
+            _ = aux.addOp4(v, OP.VUpdate, 0, 1, i_key, build.vtabP4(db, t));
+            aux.changeP5(v, OE.Abort);
+        } else {
+            generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, i_key, n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
+        }
 
         if (e_one_pass != ONEPASS_OFF) {
             aux.resolveLabel(v, addr_bypass);

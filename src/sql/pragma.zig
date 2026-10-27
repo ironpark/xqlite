@@ -1,9 +1,7 @@
 //! PRAGMA statements (port of pragma.c and the generated pragma.h).
 //!
-//! Not ported: the eponymous pragma virtual tables (pragma_table_info(...)
-//! and friends), as virtual tables are not ported yet. Pragmas that need
-//! other missing subsystems (WAL, exclusive locking, ANALYZE, virtual
-//! table modules, UTF-16) fail with "not supported yet".
+//! Pragmas that need missing subsystems (WAL, exclusive locking, ANALYZE,
+//! UTF-16) fail with "not supported yet".
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -29,6 +27,7 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const api = @import("../vdbe/api.zig");
 const mem = @import("../vdbe/mem.zig");
+const vtab = @import("vtab.zig");
 
 const Parse = int.Parse;
 const Sqlite3 = int.Sqlite3;
@@ -984,7 +983,12 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             while (it.next()) |f| pragmaFunclistLine(v, f.*, false, show_intern);
         },
 
-        .module_list => return pending.notYet(p, "PRAGMA module_list"),
+        // PRAGMA module_list: the virtual table modules.
+        .module_list => {
+            p.n_mem = 1;
+            var it = db.modules.valueIterator();
+            while (it.next()) |m| aux.multiLoad(v, 1, &.{.{ .s = m.*.name }}, false);
+        },
 
         // PRAGMA pragma_list.
         .pragma_list => {
@@ -1398,8 +1402,27 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
             if (!t.isOrdinary()) continue;
             try integrityCheckTable(p, v, t, is_quick);
         }
-        // Virtual tables have no xIntegrity method to call: they are not
-        // ported.
+        // Second pass: the xIntegrity method of the virtual tables.
+        it = tbls.valueIterator();
+        while (it.next()) |tp| {
+            const t = tp.*;
+            if (tableSkipIntegrityCheck(t, obj_tab)) continue;
+            if (t.isOrdinary()) continue;
+            if (!t.isVirtual()) continue;
+            if (t.cols.len == 0) {
+                if (db.modules.get(t.u.vtab.args[0]) == null) continue;
+            }
+            _ = build.viewGetColumnNames(p, t);
+            const vt = t.u.vtab.p orelse continue;
+            const pv = vt.vtab orelse continue;
+            if (pv.module.i_version < 4) continue;
+            if (pv.module.x_integrity == null) continue;
+            _ = aux.addOp3(v, OP.VCheck, @intCast(i), 3, @intFromBool(is_quick));
+            aux.appendP4(v, .{ .tableref = t });
+            const a1 = aux.addOp1(v, OP.IsNull, 3);
+            _ = integrityCheckResultRow(v);
+            aux.jumpHere(v, a1);
+        }
     }
 
     // Report "ok" if there were no errors.
@@ -1689,4 +1712,247 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     _ = aux.addOp2(v, OP.Next, i_data_cur, loop_top);
     aux.jumpHere(v, loop_top - 1);
     if (pk) |pki| expr.releaseTempRange(p, r2, pki.n_key_col);
+}
+
+// ===================================================== pragma virtual tables
+
+/// The eponymous virtual table that runs a pragma (PragmaVtab).
+const PragmaVtab = struct {
+    base: vtab.Vtab = .{},
+    db: *Sqlite3,
+    /// The pragma.
+    name: *const PragmaName,
+    /// Number of hidden columns.
+    n_hidden: u8,
+    /// Index of the first hidden column.
+    i_hidden: u8,
+
+    fn of(p: *vtab.Vtab) *PragmaVtab {
+        return @fieldParentPtr("base", p);
+    }
+};
+
+/// A cursor of a PragmaVtab (PragmaVtabCursor).
+const PragmaVtabCursor = struct {
+    base: vtab.VtabCursor = .{},
+    /// The pragma statement running.
+    pragma: ?*Vdbe = null,
+    /// Current rowid.
+    i_rowid: i64 = 0,
+    /// Values of the argument and the schema.
+    args: [2]?[:0]u8 = .{ null, null },
+
+    fn of(cur: *vtab.VtabCursor) *PragmaVtabCursor {
+        return @fieldParentPtr("base", cur);
+    }
+};
+
+/// Port of pragmaVtabConnect(): declare the result columns of the pragma
+/// and HIDDEN columns for its argument and schema.
+fn pragmaVtabConnect(db: *Sqlite3, aux_data: ?*anyopaque, _: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8) i32 {
+    const pn: *const PragmaName = @ptrCast(@alignCast(aux_data.?));
+    var buf: [200]u8 = undefined;
+    var acc: std.Io.Writer = .fixed(&buf);
+    var sep: u8 = '(';
+    acc.writeAll("CREATE TABLE x") catch {};
+    var i: u8 = 0;
+    while (i < pn.n_prag_c_name) : (i += 1) {
+        acc.print("{c}\"{s}\"", .{ sep, prag_c_name[pn.i_prag_c_name + i] }) catch {};
+        sep = ',';
+    }
+    if (i == 0) {
+        acc.print("(\"{s}\"", .{pn.name}) catch {};
+        i += 1;
+    }
+    var j: u8 = 0;
+    if (pn.flags & PragFlg.Result1 != 0) {
+        acc.writeAll(",arg HIDDEN") catch {};
+        j += 1;
+    }
+    if (pn.flags & (PragFlg.SchemaOpt | PragFlg.SchemaReq) != 0) {
+        acc.writeAll(",schema HIDDEN") catch {};
+        j += 1;
+    }
+    acc.writeAll(")") catch {};
+    std.debug.assert(acc.end < buf.len - 1);
+    buf[acc.end] = 0;
+    var rc = vtab.declareVtab(db, buf[0..acc.end :0]);
+    var tab: ?*PragmaVtab = null;
+    if (rc == int.RC.OK) {
+        if (db.gpa.create(PragmaVtab)) |t| {
+            t.* = .{ .db = db, .name = pn, .i_hidden = i, .n_hidden = j };
+            tab = t;
+        } else |_| {
+            rc = int.RC.NOMEM;
+        }
+    } else {
+        err.* = db.gpa.dupeSentinel(u8, main_mod.errmsg(db), 0) catch null;
+    }
+    pp_vtab.* = if (tab) |t| &t.base else null;
+    return rc;
+}
+
+/// Port of pragmaVtabDisconnect().
+fn pragmaVtabDisconnect(p: *vtab.Vtab) i32 {
+    const t = PragmaVtab.of(p);
+    t.db.gpa.destroy(t);
+    return int.RC.OK;
+}
+
+/// Port of pragmaVtabBestIndex(): there is no index to choose, but ==
+/// constraints on the hidden parameters, the first above all, should be
+/// used: unconstrained ones cost much.
+fn pragmaVtabBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
+    const t = PragmaVtab.of(p);
+    info.estimated_cost = 1;
+    if (t.n_hidden == 0) return int.RC.OK;
+    var seen = [2]usize{ 0, 0 };
+    for (info.constraints, 0..) |cons, i| {
+        if (cons.i_column < t.i_hidden) continue;
+        if (cons.op != vtab.INDEX_CONSTRAINT.EQ) continue;
+        if (!cons.usable) return int.RC.CONSTRAINT;
+        const j: usize = @intCast(cons.i_column - t.i_hidden);
+        std.debug.assert(j < 2);
+        seen[j] = i + 1;
+    }
+    if (seen[0] == 0) {
+        info.estimated_cost = 2147483647;
+        info.estimated_rows = 2147483647;
+        return int.RC.OK;
+    }
+    var j = seen[0] - 1;
+    info.usage[j] = .{ .argv_index = 1, .omit = true };
+    info.estimated_cost = 20;
+    info.estimated_rows = 20;
+    if (seen[1] != 0) {
+        j = seen[1] - 1;
+        info.usage[j] = .{ .argv_index = 2, .omit = true };
+    }
+    return int.RC.OK;
+}
+
+/// Port of pragmaVtabOpen().
+fn pragmaVtabOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
+    const t = PragmaVtab.of(p);
+    const c = t.db.gpa.create(PragmaVtabCursor) catch return int.RC.NOMEM;
+    c.* = .{};
+    c.base.vtab = p;
+    pp_cursor.* = &c.base;
+    return int.RC.OK;
+}
+
+/// Port of pragmaVtabCursorClear().
+fn pragmaVtabCursorClear(c: *PragmaVtabCursor) void {
+    const gpa = PragmaVtab.of(c.base.vtab).db.gpa;
+    if (c.pragma) |stmt| _ = api.finalize(stmt);
+    c.pragma = null;
+    c.i_rowid = 0;
+    for (&c.args) |*a| {
+        if (a.*) |z| gpa.free(z);
+        a.* = null;
+    }
+}
+
+/// Port of pragmaVtabClose().
+fn pragmaVtabClose(cur: *vtab.VtabCursor) i32 {
+    const c = PragmaVtabCursor.of(cur);
+    const gpa = PragmaVtab.of(cur.vtab).db.gpa;
+    pragmaVtabCursorClear(c);
+    gpa.destroy(c);
+    return int.RC.OK;
+}
+
+/// Port of pragmaVtabNext().
+fn pragmaVtabNext(cur: *vtab.VtabCursor) i32 {
+    const c = PragmaVtabCursor.of(cur);
+    var rc: i32 = int.RC.OK;
+    c.i_rowid += 1;
+    std.debug.assert(c.pragma != null);
+    if (api.step(c.pragma.?) != int.RC.ROW) {
+        rc = api.finalize(c.pragma.?);
+        c.pragma = null;
+        pragmaVtabCursorClear(c);
+    }
+    return rc;
+}
+
+/// Port of pragmaVtabFilter(): run "PRAGMA [schema.]name[=arg]".
+fn pragmaVtabFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, argv: []*vi.Mem) i32 {
+    const c = PragmaVtabCursor.of(cur);
+    const t = PragmaVtab.of(cur.vtab);
+    const db = t.db;
+    pragmaVtabCursorClear(c);
+    var j: usize = if (t.name.flags & PragFlg.Result1 != 0) 0 else 1;
+    for (argv) |a| {
+        std.debug.assert(j < c.args.len);
+        std.debug.assert(c.args[j] == null);
+        if (api.valueText(a)) |text| {
+            c.args[j] = db.gpa.dupeSentinel(u8, text, 0) catch return int.RC.NOMEM;
+        }
+        j += 1;
+    }
+    const printf = @import("printf.zig");
+    var acc = printf.StrAccum.init(db.gpa, &.{}, @intCast(db.limit(.sql_length)));
+    acc.appendAll("PRAGMA ");
+    if (c.args[1]) |schema| acc.appendf("%Q.", &.{.{ .str = schema }});
+    acc.appendAll(t.name.name);
+    if (c.args[0]) |arg| acc.appendf("=%Q", &.{.{ .str = arg }});
+    const sql = acc.finish() orelse return int.RC.NOMEM;
+    defer db.gpa.free(sql);
+    const rc = prepare.prepareV2(db, sql, &c.pragma, null);
+    if (rc != int.RC.OK) {
+        vtab.setErrMsg(db, &t.base, "{s}", .{main_mod.errmsg(db)});
+        return rc;
+    }
+    return pragmaVtabNext(cur);
+}
+
+/// Port of pragmaVtabEof().
+fn pragmaVtabEof(cur: *vtab.VtabCursor) bool {
+    return PragmaVtabCursor.of(cur).pragma == null;
+}
+
+/// Port of pragmaVtabColumn(): the column of the pragma's row, or a
+/// hidden argument.
+fn pragmaVtabColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
+    const c = PragmaVtabCursor.of(cur);
+    const t = PragmaVtab.of(cur.vtab);
+    if (i < t.i_hidden) {
+        api.resultValue(ctx, api.columnValue(c.pragma.?, @intCast(i)));
+    } else {
+        api.resultText(ctx, c.args[@intCast(i - t.i_hidden)], .transient);
+    }
+    return int.RC.OK;
+}
+
+/// Port of pragmaVtabRowid().
+fn pragmaVtabRowid(cur: *vtab.VtabCursor, rowid: *i64) i32 {
+    rowid.* = PragmaVtabCursor.of(cur).i_rowid;
+    return int.RC.OK;
+}
+
+/// The pragma virtual table module (pragmaVtabModule).
+const pragma_vtab_module: vtab.Module = .{
+    .i_version = 0,
+    .x_connect = pragmaVtabConnect,
+    .x_best_index = pragmaVtabBestIndex,
+    .x_disconnect = pragmaVtabDisconnect,
+    .x_open = pragmaVtabOpen,
+    .x_close = pragmaVtabClose,
+    .x_filter = pragmaVtabFilter,
+    .x_next = pragmaVtabNext,
+    .x_eof = pragmaVtabEof,
+    .x_column = pragmaVtabColumn,
+    .x_rowid = pragmaVtabRowid,
+};
+
+/// Port of sqlite3PragmaVtabRegister(): if `name` is "pragma_" and the
+/// name of a pragma that returns rows, register the eponymous virtual
+/// table module that runs it.
+pub fn vtabRegister(db: *Sqlite3, name: []const u8) ?*int.Module {
+    std.debug.assert(ctype.eqlNoCase(name[0..7], "pragma_"));
+    const pn = pragmaLocate(name[7..]) orelse return null;
+    if (pn.flags & (PragFlg.Result0 | PragFlg.Result1) == 0) return null;
+    std.debug.assert(db.modules.get(name) == null);
+    return vtab.createModuleInternal(db, name, &pragma_vtab_module, @ptrCast(@constCast(pn)), null);
 }

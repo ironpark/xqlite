@@ -52,9 +52,9 @@ for mode in delete persist truncate off; do
 PRAGMA cache_size=$cache;
 $body"
     rm -f "$tmp"/x.db* "$tmp"/s.db*
-    printf '%s\n' "$script" | "$xq" sql "$tmp/x.db" > "$tmp/xq.out" 2>&1 || true
-    # The sqlite3 shell turns on defensive mode, which refuses
-    # journal_mode=OFF.
+    # The shells turn on defensive mode, which refuses journal_mode=OFF.
+    { echo ".dbconfig defensive off"; printf '%s\n' "$script"; } | "$xq" sql "$tmp/x.db" 2>&1 |
+      grep -v '^ *defensive' > "$tmp/xq.out" || true
     { echo ".dbconfig defensive off"; printf '%s\n' "$script"; } | "$sq" "$tmp/s.db" 2>&1 |
       grep -v '^ *defensive' | sed 's/line \([0-9]*\)/line N/' > "$tmp/sq.out" || true
     sed 's/line \([0-9]*\)/line N/' "$tmp/xq.out" > "$tmp/xq.norm"

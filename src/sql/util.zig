@@ -360,6 +360,15 @@ pub fn logEst(x_arg: u64) i16 {
     return a[@intCast(x & 7)] + y - 10;
 }
 
+/// Port of sqlite3LogEstFromDouble(): the LogEst of a double.
+pub fn logEstFromDouble(x: f64) i16 {
+    if (x <= 1) return 0;
+    if (x <= 2000000000) return logEst(@intFromFloat(x));
+    const a: u64 = @bitCast(x);
+    const e: i16 = @intCast(@as(i64, @intCast(a >> 52)) - 1022);
+    return e * 10;
+}
+
 /// Port of sqlite3ProgressCheck() (without the progress callback, which is
 /// not ported): stop preparing a statement if it was interrupted.
 pub fn progressCheck(p: *int.Parse) void {

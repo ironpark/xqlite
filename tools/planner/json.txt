@@ -1,0 +1,1973 @@
+# Differential tests for the JSON SQL functions, harvested from
+# ref/sqlite/test/json1*.test, json50*.test and jsonb01.test
+# (random-JSON and test-harness-only parts omitted), plus extra
+# hand-written cases (marked "extra"). The json_each/json_tree blocks at
+# the end also take cases from join.test, join8.test, whereF.test,
+# tabfunc01.test, altertab.test, attach.test and memdb1.test.
+# from json101
+SELECT json_array(1,2.5,null,'hello')
+SELECT json_array(1,'{"abc":2.5,"def":null,"ghi":hello}',99)
+SELECT json_array(1,json('{"abc":2.5,"def":null,"ghi":"hello"}'),99)
+SELECT json_array(1,json_object('abc',2.5,'def',null,'ghi','hello'),99)
+SELECT hex(json_array('String "\ Test'))
+SELECT json_array(1,printf('%.1000c','x'),x'abcd',3)
+SELECT jsonb_array(1,printf('%.1000c','x'),x'abcd',3)
+SELECT hex(jsonb_array(1,printf('%.1000c','x'),x'abcd',3))
+SELECT json(jsonb_array(1,printf('%.1000c','x'),x'abcd',3))
+SELECT json_array(-9223372036854775808,9223372036854775807,0,1,-1, 0.0, 1.0, -1.0, -1e99, +2e100, 'one','two','three', 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, NULL, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 99)
+SELECT json(jsonb_array(-9223372036854775808,9223372036854775807,0,1,-1, 0.0, 1.0, -1.0, -1e99, +2e100, 'one','two','three', 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, NULL, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 99))
+SELECT hex(jsonb_array(-9223372036854775808,9223372036854775807,0,1,-1, 0.0, 1.0, -1.0, -1e99, +2e100, 'one','two','three', 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, NULL, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwyxzABCDEFGHIJKLMNOPQRSTUVWXYZ', 99))
+SELECT json_object('a',1,'b',2.5,'c',null,'d','String Test')
+SELECT json(jsonb_object('a',1,'b',2.5,'c',null,'d','String Test'))
+SELECT hex(jsonb_object('a',1,'b',2.5,'c',null,'d','String Test'))
+SELECT json_object('a',printf('%.1000c','x'),2,2.5)
+SELECT jsonb_object('a',printf('%.1000c','x'),2,2.5)
+SELECT hex(jsonb_object('a',printf('%.1000c','x'),2,2.5))
+SELECT json(jsonb_object('a',printf('%.1000c','x'),2,2.5))
+SELECT json_object('a',json_array('xyx',77,4.5),'x',2.5)
+SELECT json(jsonb_object('a',json_array('xyx',77,4.5),'x',2.5))
+SELECT hex(jsonb_object('a',json_array('xyx',77,4.5),'x',2.5))
+SELECT json_object('a',jsonb_array('xyx',77,4.5),'x',2.5)
+SELECT json(jsonb_object('a',jsonb_array('xyx',77,4.5),'x',2.5))
+SELECT hex(jsonb_object('a',jsonb_array('xyx',77,4.5),'x',2.5))
+SELECT json_object('a',1,'b')
+SELECT json_object('a',printf('%.1000c','x'),'b',x'abcd')
+SELECT json_object('a',printf('%.10c','x'),'b',jsonb_array(1,2,3))
+SELECT json_replace('{"a":1,"b":2}','$.a','[3,4,5]')
+SELECT json(jsonb_replace('{"a":1,"b":2}','$.a','[3,4,5]'))
+SELECT hex(jsonb_replace('{"a":1,"b":2}','$.a','[3,4,5]'))
+SELECT json_replace('{"a":1,"b":2}','$.a',json('[3,4,5]'))
+SELECT json_replace('{"a":1,"b":2}','$.a',jsonb('[3,4,5]'))
+SELECT json_type(json_set('{"a":1,"b":2}','$.b','{"x":3,"y":4}'),'$.b')
+SELECT json_type(jsonb_set('{"a":1,"b":2}','$.b','{"x":3,"y":4}'),'$.b')
+SELECT json_type(json_set('{"a":1,"b":2}','$.b',json('{"x":3,"y":4}')),'$.b')
+SELECT json_type(jsonb_set('{"a":1,"b":2}','$.b',jsonb('{"x":3,"y":4}')),'$.b')
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+==
+SELECT * FROM j1 WHERE NOT json_valid(x)
+SELECT * FROM j1 WHERE NOT json_valid(char(0x20,0x09,0x0a,0x0d)||x)
+SELECT * FROM j1 WHERE NOT json_valid(x||char(0x20,0x09,0x0a,0x0d))
+SELECT json_valid(''), json_valid(char(0x20,0x09,0x0a,0x0d))
+SELECT x FROM j1 WHERE json_remove(x)<>x
+SELECT x FROM j1 WHERE json_replace(x)<>x
+SELECT x FROM j1 WHERE json_set(x)<>x
+SELECT x FROM j1 WHERE json_insert(x)<>x
+SELECT json_insert('{"a":1}','$.b',CAST(x'0000' AS text))
+SELECT count(*) FROM j1 WHERE json_type(x) IN ('object','array')
+SELECT x FROM j1 WHERE json_extract(x,'$')<>x AND json_type(x) IN ('object','array')
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+==
+SELECT count(*) FROM j1b WHERE json_type(x) IN ('object','array')
+SELECT json(x) FROM j1b WHERE json_extract(x,'$')<>json(x) AND json_type(x) IN ('object','array')
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+==
+SELECT count(*) FROM j2
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+==
+SELECT count(*) FROM j2b
+SELECT id, json_valid(json), json_type(json), '|' FROM j2 ORDER BY id
+SELECT id, json_valid(json,5), json_type(json), '|' FROM j2b ORDER BY id
+SELECT json_valid('{"a":55,"b":72,}')
+SELECT json_error_position('{"a":55,"b":72,}')
+SELECT json_valid(json('{"a":55,"b":72,}'))
+SELECT json_valid('{"a":55,"b":72 , }')
+SELECT json_error_position('{"a":55,"b":72 , }')
+SELECT json_error_position('{"a":55,"b":72,,}')
+SELECT json_valid('{"a":55,"b":72}')
+SELECT json_error_position('["a",55,"b",72,]')
+SELECT json_error_position('["a",55,"b",72 , ]')
+SELECT json_error_position('["a",55,"b",72,,]')
+SELECT json_valid('["a",55,"b",72]')
+SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x20),char(0x20),char(0x20),char(0x20),char(0x20),char(0x20)))
+SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x09),char(0x09),char(0x09),char(0x09),char(0x09),char(0x09)))
+SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x0A),char(0x0A),char(0x0A),char(0x0A),char(0x0A),char(0x0A)))
+SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x0D),char(0x0D),char(0x0D),char(0x0D),char(0x0D),char(0x0D)))
+SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x0C),char(0x0C),char(0x0C),char(0x0C),char(0x0C),char(0x0C)))
+SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20),char(0x20,0x09,0x0a,0x0d,0x20)))
+SELECT json_valid(printf('%s{%s"x"%s:%s9%s}%s', char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20),char(0x20,0x09,0x0a,0x0c,0x0d,0x20)))
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=json_array(a);
+==
+SELECT b FROM t8
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=json_array(a);
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=jsonb_array(a);
+==
+SELECT json(b) FROM t8
+SELECT a=json_extract(b,'$[0]') FROM t8
+SELECT json_valid(char(0x22,0xe4,0x22))
+SELECT unicode(json_extract(char(0x22,228,0x22),'$'))
+SELECT json_quote('abc"xyz')
+SELECT json_quote(3.14159)
+SELECT json_quote(12345)
+SELECT json_quote(null)
+SELECT json_quote(x'3031323334')
+SELECT json_quote(123,456)
+SELECT json_quote()
+SELECT json_valid('" \ "')
+SELECT json_valid('" \" "')
+SELECT json_valid('" \'' "')
+SELECT json_valid('" \/ "')
+SELECT json_valid('" \0 "')
+SELECT json_valid('" \\ "')
+SELECT json_valid('" \a "')
+SELECT json_valid('" \b "')
+SELECT json_valid('" \f "')
+SELECT json_valid('" \n "')
+SELECT json_valid('" \q "')
+SELECT json_valid('" \r "')
+SELECT json_valid('" \t "')
+SELECT json_valid('" \ua "')
+SELECT json_valid('" \uab "')
+SELECT json_valid('" \uabc "')
+SELECT json_valid('" \uabcd "')
+SELECT json_valid('" \uFEDC "')
+SELECT json_valid('" \u1234 "')
+SELECT json_valid('" \v "')
+SELECT json_valid('" \x "')
+SELECT json_valid('" \{ "')
+SELECT json_valid(printf('%.1000c0%.1000c','[',']'))
+SELECT json_valid(printf('%.1001c0%.1001c','[',']'))
+SELECT json_valid(replace(printf('%.1000c0%.1000c','[','}'),'[','{"a":'))
+SELECT json_valid(replace(printf('%.1001c0%.1001c','[','}'),'[','{"a":'))
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=json_array(a);
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=jsonb_array(a);
+CREATE TABLE t12(x);
+INSERT INTO t12(x) VALUES( ('{"settings":'||char(10)||' {"layer2":'||char(10)||' {"hapax.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":true,'||char(10)||' "add.footnote":true,'||char(10)||' "summary.report":true},'||char(10)||' "dis.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":true},'||char(10)||' "tris.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":false}'||char(10)||' }'||char(10)||' }'||char(10)||' }'));
+==
+SELECT json_remove(x, '$.settings.layer2."dis.legomenon".forceDisplay') FROM t12
+SELECT json_remove(jsonb(x), '$.settings.layer2."dis.legomenon".forceDisplay') FROM t12
+SELECT json_extract(x, '$.settings.layer2."tris.legomenon"."summary.report"') FROM t12
+SELECT json_extract(jsonb(x), '$.settings.layer2."tris.legomenon"."summary.report"') FROM t12
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=json_array(a);
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=jsonb_array(a);
+CREATE TABLE t12(x);
+INSERT INTO t12(x) VALUES( ('{"settings":'||char(10)||' {"layer2":'||char(10)||' {"hapax.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":true,'||char(10)||' "add.footnote":true,'||char(10)||' "summary.report":true},'||char(10)||' "dis.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":true},'||char(10)||' "tris.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":false}'||char(10)||' }'||char(10)||' }'||char(10)||' }'));
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(id, json);
+INSERT INTO t1(id,json) VALUES(1,'{"items":[3,5]}');
+CREATE TABLE t2(id, json);
+INSERT INTO t2(id,json) VALUES(2,'{"value":2}');
+INSERT INTO t2(id,json) VALUES(3,'{"value":3}');
+INSERT INTO t2(id,json) VALUES(4,'{"value":4}');
+INSERT INTO t2(id,json) VALUES(5,'{"value":5}');
+INSERT INTO t2(id,json) VALUES(6,'{"value":6}');
+==
+SELECT length(json_extract('"abc\uD834\uDD1Exyz"','$'))
+SELECT length(json_extract('"\uD834\uDD1E"','$'))
+SELECT unicode(json_extract('"\uD834\uDD1E"','$'))
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=json_array(a);
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=jsonb_array(a);
+CREATE TABLE t12(x);
+INSERT INTO t12(x) VALUES( ('{"settings":'||char(10)||' {"layer2":'||char(10)||' {"hapax.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":true,'||char(10)||' "add.footnote":true,'||char(10)||' "summary.report":true},'||char(10)||' "dis.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":true},'||char(10)||' "tris.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":false}'||char(10)||' }'||char(10)||' }'||char(10)||' }'));
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(id, json);
+INSERT INTO t1(id,json) VALUES(1,'{"items":[3,5]}');
+CREATE TABLE t2(id, json);
+INSERT INTO t2(id,json) VALUES(2,'{"value":2}');
+INSERT INTO t2(id,json) VALUES(3,'{"value":3}');
+INSERT INTO t2(id,json) VALUES(4,'{"value":4}');
+INSERT INTO t2(id,json) VALUES(5,'{"value":5}');
+INSERT INTO t2(id,json) VALUES(6,'{"value":6}');
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(a,b,c);
+CREATE TABLE t2(d);
+==
+SELECT json_valid('{"":5}')
+SELECT json_extract('{"":5}', '$.""')
+SELECT json_extract('[3,{"a":4,"":[5,{"hi":6},7]},8]', '$[1].""[1].hi')
+SELECT json_extract('[3,{"a":4,"":[5,{"hi":6},7]},8]', '$[1].""[1]."hi"')
+SELECT json_extract('{"":8}', '$.')
+----
+# from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=json_array(a);
+DROP TABLE IF EXISTS t8;
+CREATE TABLE t8(a,b);
+INSERT INTO t8(a) VALUES('abc' || char(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35) || 'xyz');
+UPDATE t8 SET b=jsonb_array(a);
+CREATE TABLE t12(x);
+INSERT INTO t12(x) VALUES( ('{"settings":'||char(10)||' {"layer2":'||char(10)||' {"hapax.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":true,'||char(10)||' "add.footnote":true,'||char(10)||' "summary.report":true},'||char(10)||' "dis.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":true},'||char(10)||' "tris.legomenon":'||char(10)||' {"forceDisplay":true,'||char(10)||' "transliterate":false,'||char(10)||' "add.footnote":false,'||char(10)||' "summary.report":false}'||char(10)||' }'||char(10)||' }'||char(10)||' }'));
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(id, json);
+INSERT INTO t1(id,json) VALUES(1,'{"items":[3,5]}');
+CREATE TABLE t2(id, json);
+INSERT INTO t2(id,json) VALUES(2,'{"value":2}');
+INSERT INTO t2(id,json) VALUES(3,'{"value":3}');
+INSERT INTO t2(id,json) VALUES(4,'{"value":4}');
+INSERT INTO t2(id,json) VALUES(5,'{"value":5}');
+INSERT INTO t2(id,json) VALUES(6,'{"value":6}');
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(a,b,c);
+CREATE TABLE t2(d);
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(x);
+==
+SELECT * FROM t1
+SELECT json_object('a',2e370,'b',-3e380)
+SELECT json_object('a',2e370,'b',-3e380)->>'a'
+SELECT json_object('a',2e370,'b',-3e380)->>'b'
+SELECT json_valid(NULL)
+SELECT json_error_position(NULL)
+SELECT json(NULL)
+SELECT json_array(NULL)
+SELECT json_extract(NULL)
+SELECT json_insert(NULL,'$',123)
+SELECT NULL->0
+SELECT NULL->>0
+SELECT '{a:5}'->NULL
+SELECT '{a:5}'->>NULL
+SELECT json_object(NULL,5)
+SELECT json_patch(NULL,'{a:5}')
+SELECT json_patch('{a:5}',NULL)
+SELECT json_patch(NULL,NULL)
+SELECT json_remove(NULL,'$')
+SELECT json_remove('{a:5,b:7}',NULL)
+SELECT json_replace(NULL,'$.a',123)
+SELECT json_replace('{a:5,b:7}',NULL,NULL)
+SELECT json_set(NULL,'$.a',123)
+SELECT json_set('{a:5,b:7}',NULL,NULL)
+SELECT json_type(NULL)
+SELECT json_type('{a:5,b:7}',NULL)
+SELECT json_quote(NULL)
+WITH c(x) AS (VALUES(1),(2.0),(NULL),('three')) SELECT json_group_array(x) FROM c
+WITH c(x,y) AS (VALUES('a',1),('b',2.0),('c',NULL),(NULL,'three'),('e','four')) SELECT json_group_object(x,y) FROM c
+SELECT json_set( '{}', '$.a', json('1'), '$.a', json('2'), '$.b', json('3'), '$.b', json('4'), '$.c', json('5'), '$.c', json('6') )
+SELECT json_replace( '{"a":7,"b":8,"c":9}', '$.a', json('1'), '$.a', json('2'), '$.b', json('3'), '$.b', json('4'), '$.c', json('5'), '$.c', json('6') )
+SELECT j, j->>0, j->>1 FROM (SELECT json_set(json_set('[]','$[#]',0), '$[#]',1) AS j)
+SELECT j, j->>0, j->>1 FROM (SELECT json_set('[]','$[#]',0,'$[#]',1) AS j)
+SELECT json_insert('{}','$.a.b.c',9)
+SELECT json_set('{}','$.a.b.c',9)
+SELECT json_replace('{}','$.a.b.c',9)
+SELECT json_insert('{a:4}','$.a.b.c',9)
+SELECT json_set('{a:4}','$.a.b.c',9)
+SELECT json_replace('{a:4}','$.a.b.c',9)
+SELECT json_insert('{a:{}}','$.a.b.c',9)
+SELECT json_set('{a:{}}','$.a.b.c',9)
+SELECT json_replace('{a:{}}','$.a.b.c',9)
+SELECT json_insert('[0,1,2]','$[3].a[0].b',9)
+SELECT json_set('[0,1,2]','$[3].a[0].b',9)
+SELECT json_replace('[0,1,2]','$[3].a[0].b',9)
+SELECT json_insert('[0,1,2]','$[1].a[0].b',9)
+SELECT json_set('[0,1,2]','$[1].a[0].b',9)
+SELECT json_replace('[0,1,2]','$[1].a[0].b',9)
+SELECT json_insert('[0,{},2]','$[1].a[0].b',9)
+SELECT json_set('[0,{},2]','$[1].a[0].b',9)
+SELECT json_replace('[0,{},2]','$[1].a[0].b',9)
+SELECT json_insert('[0,1,2]','$[3][0].b',9)
+SELECT json_set('[0,1,2]','$[3][0].b',9)
+SELECT json_replace('[0,1,2]','$[3][0].b',9)
+SELECT json_insert('[0,1,2]','$[1][0].b',9)
+SELECT json_set('[0,1,2]','$[1][0].b',9)
+SELECT json_replace('[0,1,2]','$[1][0].b',9)
+SELECT json_array(0.1234567890123456789)->>0 = 0.1234567890123456789
+SELECT json_valid(x'CC141761133117621332176313331764133437656565',8)
+----
+# from json102
+SELECT json_object('ex','[52,3.14159]')
+SELECT json(jsonb_object('ex','[52,3.14159]'))
+SELECT hex(jsonb_object('ex','[52,3.14159]'))
+SELECT json_object('ex',json('[52,3.14159]'))
+SELECT json(jsonb_object('ex',json('[52,3.14159]')))
+SELECT hex(jsonb_object('ex',json('[52,3.14159]')))
+SELECT json_object('ex',jsonb('[52,3.14159]'))
+SELECT json(jsonb_object('ex',jsonb('[52,3.14159]')))
+SELECT hex(jsonb_object('ex',jsonb('[52,3.14159]')))
+SELECT json_object('ex',json_array(52,3.14159))
+SELECT json(jsonb_object('ex',json_array(52,3.14159)))
+SELECT hex(jsonb_object('ex',json_array(52,3.14159)))
+SELECT json_object('ex',jsonb_array(52,3.14159))
+SELECT json(jsonb_object('ex',jsonb_array(52,3.14159)))
+SELECT hex(jsonb_object('ex',jsonb_array(52,3.14159)))
+SELECT json(' { "this" : "is", "a": [ "test" ] } ')
+SELECT json(jsonb(' { "this" : "is", "a": [ "test" ] } '))
+SELECT hex(jsonb(' { "this" : "is", "a": [ "test" ] } '))
+SELECT json_array(1,2,'3',4)
+SELECT json(jsonb_array(1,2,'3',4))
+SELECT hex(jsonb_array(1,2,'3',4))
+SELECT json_array('[1,2]')
+SELECT json(jsonb_array('[1,2]'))
+SELECT hex(jsonb_array('[1,2]'))
+SELECT json_array(json_array(1,2))
+SELECT json_array(jsonb_array(1,2))
+SELECT json(jsonb_array(json_array(1,2)))
+SELECT hex(jsonb_array(json_array(1,2)))
+SELECT json(jsonb_array(jsonb_array(1,2)))
+SELECT hex(jsonb_array(jsonb_array(1,2)))
+SELECT json_array(1,null,'3','[4,5]','{"six":7.7}')
+SELECT json(jsonb_array(1,null,'3','[4,5]','{"six":7.7}'))
+SELECT hex(jsonb_array(1,null,'3','[4,5]','{"six":7.7}'))
+SELECT json_array(1,null,'3',json('[4,5]'),json('{"six":7.7}'))
+SELECT json_array(1,null,'3',jsonb('[4,5]'),json('{"six":7.7}'))
+SELECT json(jsonb_array(1,null,'3',json('[4,5]'),json('{"six":7.7}')))
+SELECT hex(jsonb_array(1,null,'3',json('[4,5]'),json('{"six":7.7}')))
+SELECT json(jsonb_array(1,null,'3',jsonb('[4,5]'),jsonb('{"six":7.7}')))
+SELECT hex(jsonb_array(1,null,'3',jsonb('[4,5]'),jsonb('{"six":7.7}')))
+SELECT json_array_length('[1,2,3,4]')
+SELECT json_array_length(jsonb('[1,2,3,4]'))
+SELECT json_array_length( json_remove('[1,2,3,4]','$[2]') )
+SELECT json_array_length( jsonb_remove('[1,2,3,4]','$[2]') )
+SELECT json_array_length('[1,2,3,4]', '$')
+SELECT json_array_length(jsonb('[1,2,3,4]'), '$')
+SELECT json_array_length('[1,2,3,4]', '$[2]')
+SELECT json_array_length(jsonb('[1,2,3,4]'), '$[2]')
+SELECT json_array_length('{"one":[1,2,3]}')
+SELECT json_array_length(jsonb('{"one":[1,2,3]}'), '$.one')
+SELECT json_array_length('{"one":[1,2,3]}', '$.two')
+SELECT json_array_length(jsonb('{"one":[1,2,3]}'), '$.two')
+SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$')
+SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$')
+SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$'))
+SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$'))
+SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$'))
+SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$'))
+SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c')
+SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c')
+SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c'))
+SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c'))
+SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c'))
+SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c'))
+SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2]')
+SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c[2]')
+SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c[2]'))
+SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.c[2]'))
+SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2]'))
+SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2]'))
+SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f')
+SELECT jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f')
+SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f'))
+SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.c[2].f'))
+SELECT json_extract('{"a":2,"c":[4,5],"f":7}','$.c','$.a')
+SELECT json_extract(jsonb('{"a":2,"c":[4,5],"f":7}'),'$.c','$.a')
+SELECT json(jsonb_extract('{"a":2,"c":[4,5],"f":7}','$.c','$.a'))
+SELECT hex(jsonb_extract('{"a":2,"c":[4,5],"f":7}','$.c','$.a'))
+SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5],"f":7}'),'$.c','$.a'))
+SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5],"f":7}'),'$.c','$.a'))
+SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x')
+SELECT jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x')
+SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x'))
+SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x'))
+SELECT json_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x', '$.a')
+SELECT json_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.x', '$.a')
+SELECT json(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.x', '$.a'))
+SELECT hex(jsonb_extract(jsonb('{"a":2,"c":[4,5,{"f":7}]}'), '$.x', '$.a'))
+SELECT json(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x', '$.a'))
+SELECT hex(jsonb_extract('{"a":2,"c":[4,5,{"f":7}]}', '$.x', '$.a'))
+SELECT json_insert('{"a":2,"c":4}', '$.a', 99)
+SELECT json_insert(jsonb('{"a":2,"c":4}'), '$.a', 99)
+SELECT json(jsonb_insert('{"a":2,"c":4}', '$.a', 99))
+SELECT hex(jsonb_insert('{"a":2,"c":4}', '$.a', 99))
+SELECT json(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.a', 99))
+SELECT hex(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.a', 99))
+SELECT json_insert('{"a":2,"c":4}', '$.e', 99)
+SELECT json_insert(jsonb('{"a":2,"c":4}'), '$.e', 99)
+SELECT json(jsonb_insert('{"a":2,"c":4}', '$.e', 99))
+SELECT hex(jsonb_insert('{"a":2,"c":4}', '$.e', 99))
+SELECT json(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.e', 99))
+SELECT hex(jsonb_insert(jsonb('{"a":2,"c":4}'), '$.e', 99))
+SELECT json_replace('{"a":2,"c":4}', '$.a', 99)
+SELECT json_replace(jsonb('{"a":2,"c":4}'), '$.a', 99)
+SELECT json(jsonb_replace('{"a":2,"c":4}', '$.a', 99))
+SELECT hex(jsonb_replace('{"a":2,"c":4}', '$.a', 99))
+SELECT json(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.a', 99))
+SELECT hex(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.a', 99))
+SELECT json_replace('{"a":2,"c":4}', '$.e', 99)
+SELECT json_replace(jsonb('{"a":2,"c":4}'), '$.e', 99)
+SELECT json(jsonb_replace('{"a":2,"c":4}', '$.e', 99))
+SELECT hex(jsonb_replace('{"a":2,"c":4}', '$.e', 99))
+SELECT json(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.e', 99))
+SELECT hex(jsonb_replace(jsonb('{"a":2,"c":4}'), '$.e', 99))
+SELECT json_set('{"a":2,"c":4}', '$.a', 99)
+SELECT json_set(jsonb('{"a":2,"c":4}'), '$.a', 99)
+SELECT json(jsonb_set('{"a":2,"c":4}', '$.a', 99))
+SELECT hex(jsonb_set('{"a":2,"c":4}', '$.a', 99))
+SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.a', 99))
+SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.a', 99))
+SELECT json_set('{"a":2,"c":4}', '$.e', 99)
+SELECT json_set(jsonb('{"a":2,"c":4}'), '$.e', 99)
+SELECT json(jsonb_set('{"a":2,"c":4}', '$.e', 99))
+SELECT hex(jsonb_set('{"a":2,"c":4}', '$.e', 99))
+SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.e', 99))
+SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.e', 99))
+SELECT json_set('{"a":2,"c":4}', '$.c', '[97,96]')
+SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', '[97,96]')
+SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', '[97,96]'))
+SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', '[97,96]'))
+SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', '[97,96]'))
+SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', '[97,96]'))
+SELECT json_set('{"a":2,"c":4}', '$.c', json('[97,96]'))
+SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', json('[97,96]'))
+SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', json('[97,96]')))
+SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', json('[97,96]')))
+SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json('[97,96]')))
+SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json('[97,96]')))
+SELECT json_set('{"a":2,"c":4}', '$.c', jsonb('[97,96]'))
+SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb('[97,96]'))
+SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', jsonb('[97,96]')))
+SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', jsonb('[97,96]')))
+SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb('[97,96]')))
+SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb('[97,96]')))
+SELECT json_set('{"a":2,"c":4}', '$.c', json_array(97,96))
+SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', json_array(97,96))
+SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', json_array(97,96)))
+SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', json_array(97,96)))
+SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json_array(97,96)))
+SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', json_array(97,96)))
+SELECT json_set('{"a":2,"c":4}', '$.c', jsonb_array(97,96))
+SELECT json_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb_array(97,96))
+SELECT json(jsonb_set('{"a":2,"c":4}', '$.c', jsonb_array(97,96)))
+SELECT hex(jsonb_set('{"a":2,"c":4}', '$.c', jsonb_array(97,96)))
+SELECT json(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb_array(97,96)))
+SELECT hex(jsonb_set(jsonb('{"a":2,"c":4}'), '$.c', jsonb_array(97,96)))
+SELECT json_object('a',2,'c',4)
+SELECT json(jsonb_object('a',2,'c',4))
+SELECT hex(jsonb_object('a',2,'c',4))
+SELECT json_object('a',2,'c','{e:5}')
+SELECT json(jsonb_object('a',2,'c','{e:5}'))
+SELECT hex(jsonb_object('a',2,'c','{e:5}'))
+SELECT json_object('a',2,'c',json_object('e',5))
+SELECT json(jsonb_object('a',2,'c',json_object('e',5)))
+SELECT hex(jsonb_object('a',2,'c',json_object('e',5)))
+SELECT json_object('a',2,'c',jsonb_object('e',5))
+SELECT json(jsonb_object('a',2,'c',jsonb_object('e',5)))
+SELECT hex(jsonb_object('a',2,'c',jsonb_object('e',5)))
+SELECT json_remove('[0,1,2,3,4]','$[2]')
+SELECT json_remove(jsonb('[0,1,2,3,4]'),'$[2]')
+SELECT json(jsonb_remove('[0,1,2,3,4]','$[2]'))
+SELECT hex(jsonb_remove('[0,1,2,3,4]','$[2]'))
+SELECT json(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]'))
+SELECT hex(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]'))
+SELECT json_remove('[0,1,2,3,4]','$[5]')
+SELECT json_remove('[0,1,2,3,4]','$[6]')
+SELECT json_remove('[0,1,2,3,4]','$[4294967295]')
+SELECT json_remove('[0,1,2,3,4]','$[4294967296]')
+SELECT json_remove('[0,1,2,3,4]','$[4294967297]')
+SELECT json_remove('[0,1,2,3,4]','$[42949672950]')
+SELECT json_remove('[0,1,2,3,4]','$[42949672960]')
+SELECT json_remove('[0,1,2,3,4]','$[2]','$[0]')
+SELECT json_remove(jsonb('[0,1,2,3,4]'),'$[2]','$[0]')
+SELECT json(jsonb_remove('[0,1,2,3,4]','$[2]','$[0]'))
+SELECT hex(jsonb_remove('[0,1,2,3,4]','$[2]','$[0]'))
+SELECT json(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]','$[0]'))
+SELECT hex(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[2]','$[0]'))
+SELECT json_remove('[0,1,2,3,4]','$[0]','$[2]')
+SELECT json_remove(jsonb('[0,1,2,3,4]'),'$[0]','$[2]')
+SELECT json(jsonb_remove('[0,1,2,3,4]','$[0]','$[2]'))
+SELECT hex(jsonb_remove('[0,1,2,3,4]','$[0]','$[2]'))
+SELECT json(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[0]','$[2]'))
+SELECT hex(jsonb_remove(jsonb('[0,1,2,3,4]'),'$[0]','$[2]'))
+SELECT json_remove('{"x":25,"y":42}')
+SELECT json_remove(jsonb('{"x":25,"y":42}'))
+SELECT json(jsonb_remove('{"x":25,"y":42}'))
+SELECT hex(jsonb_remove('{"x":25,"y":42}'))
+SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}')))
+SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}')))
+SELECT json_remove('{"x":25,"y":42}','$.z')
+SELECT json_remove(jsonb('{"x":25,"y":42}'),'$.z')
+SELECT json(jsonb_remove('{"x":25,"y":42}','$.z'))
+SELECT hex(jsonb_remove('{"x":25,"y":42}','$.z'))
+SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.z'))
+SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.z'))
+SELECT json_remove('{"x":25,"y":42}','$.y')
+SELECT json_remove(jsonb('{"x":25,"y":42}'),'$.y')
+SELECT json(jsonb_remove('{"x":25,"y":42}','$.y'))
+SELECT hex(jsonb_remove('{"x":25,"y":42}','$.y'))
+SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.y'))
+SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}'),'$.y'))
+SELECT json_remove('{"x":25,"y":42}','$')
+SELECT json_remove(jsonb('{"x":25,"y":42}'),'$')
+SELECT json(jsonb_remove('{"x":25,"y":42}','$'))
+SELECT hex(jsonb_remove('{"x":25,"y":42}','$'))
+SELECT json(jsonb_remove(jsonb('{"x":25,"y":42}'),'$'))
+SELECT hex(jsonb_remove(jsonb('{"x":25,"y":42}'),'$'))
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[0]')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[0]')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[1]')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[1]')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[2]')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[2]')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[3]')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[3]')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[4]')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[4]')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[5]')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[5]')
+SELECT json_type('{"a":[2,3.5,true,false,null,"x"]}','$.a[6]')
+SELECT json_type(x'cc0f1761cb0b133235332e350102001778','$.a[6]')
+SELECT json_valid(char(123)||'"x":35'||char(125))
+SELECT json_valid(char(123)||'"x":35')
+----
+# from json102
+CREATE TABLE user(name,phone,phoneb);
+INSERT INTO user(name,phone) VALUES ('Alice','["919-555-2345","804-555-3621"]'), ('Bob','["201-555-8872"]'), ('Cindy','["704-555-9983"]'), ('Dave','["336-555-8421","704-555-4321","803-911-4421"]');
+UPDATE user SET phoneb=jsonb(phone);
+UPDATE user SET phone=json_extract(phone,'$[0]') WHERE json_array_length(phone)<2;
+==
+SELECT name, substr(phone,1,5) FROM user ORDER BY name
+----
+# from json102
+CREATE TABLE user(name,phone,phoneb);
+INSERT INTO user(name,phone) VALUES ('Alice','["919-555-2345","804-555-3621"]'), ('Bob','["201-555-8872"]'), ('Cindy','["704-555-9983"]'), ('Dave','["336-555-8421","704-555-4321","803-911-4421"]');
+UPDATE user SET phoneb=jsonb(phone);
+UPDATE user SET phone=json_extract(phone,'$[0]') WHERE json_array_length(phone)<2;
+CREATE TABLE big(json JSON);
+INSERT INTO big(json) VALUES(('{'||char(10)||' "id":123,'||char(10)||' "stuff":[1,2,3,4],'||char(10)||' "partlist":['||char(10)||' {"uuid":"bb108722-572e-11e5-9320-7f3b63a4ca74"},'||char(10)||' {"uuid":"c690dc14-572e-11e5-95f9-dfc8861fd535"},'||char(10)||' {"subassembly":['||char(10)||' {"uuid":"6fa5181e-5721-11e5-a04e-57f3d7b32808"}'||char(10)||' ]}'||char(10)||' ]'||char(10)||' }'));
+INSERT INTO big(json) VALUES(('{'||char(10)||' "id":456,'||char(10)||' "stuff":["hello","world","xyzzy"],'||char(10)||' "partlist":['||char(10)||' {"uuid":false},'||char(10)||' {"uuid":"c690dc14-572e-11e5-95f9-dfc8861fd535"}'||char(10)||' ]'||char(10)||' }'));
+==
+SELECT json_valid(char(32) || '"xyz"')
+SELECT json_valid(char(200) || '"xyz"')
+SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+SELECT json_extract(json_array('abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'),'$[0]')=='abcdef""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""uvwxyz'
+SELECT json_valid('{"x":01}'), NOT json_error_position('{"x":01}')
+SELECT json_valid('{"x":-01}'), NOT json_error_position('{"x":-01}')
+SELECT json_valid('{"x":0}'), NOT json_error_position('{"x":0}')
+SELECT json_valid('{"x":-0}'), NOT json_error_position('{"x":-0}')
+SELECT json_valid('{"x":0.1}'), NOT json_error_position('{"x":0.1}')
+SELECT json_valid('{"x":-0.1}'), NOT json_error_position('{"x":-0.1}')
+SELECT json_valid('{"x":0.0000}'), NOT json_error_position('{"x":0.0000}')
+SELECT json_valid('{"x":-0.0000}'), NOT json_error_position('{"x":-0.0000}')
+SELECT json_valid('{"x":01.5}'), NOT json_error_position('{"x":01.5}')
+SELECT json_valid('{"x":-01.5}'), NOT json_error_position('{"x":-01.5}')
+SELECT json_valid('{"x":00}'), NOT json_error_position('{"x":00}')
+SELECT json_valid('{"x":-00}'), NOT json_error_position('{"x":-00}')
+SELECT json_valid('{"x":+0}'), NOT json_error_position('{"x":+0}')
+SELECT json_valid('{"x":+5}'), NOT json_error_position('{"x":+5}')
+SELECT json_valid('{"x":+5.5}'), NOT json_error_position('{"x":+5.5}')
+WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x20) SELECT x FROM c WHERE json_valid(printf('{"a":"x%sz"}', char(x))) ORDER BY x
+WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<0x1f) SELECT sum(json_valid(json_quote('a'||char(x)||'z'))) FROM c ORDER BY x
+----
+# from json102
+CREATE TABLE t1(id INTEGER PRIMARY KEY, x JSON);
+INSERT INTO t1(id,x) VALUES (1, '{"a":null}'), (2, '{"a":123}'), (3, '{"a":4.5}'), (4, '{"a":"six"}'), (5, '{"a":[7,8]}'), (6, '{"a":{"b":9}}'), (7, '{"b":999}');
+==
+SELECT id, x->'a' AS '->', CASE WHEN subtype(x->'a') THEN 'json' ELSE typeof(x->'a') END AS 'type', x->>'a' AS '->>', CASE WHEN subtype(x->>'a') THEN 'json' ELSE typeof(x->>'a') END AS 'type', json_extract(x,'$.a') AS 'json_extract', CASE WHEN subtype(json_extract(x,'$.a')) THEN 'json' ELSE typeof(json_extract(x,'$.a')) END AS 'type' FROM t1 ORDER BY id
+----
+# from json102
+CREATE TABLE t1(id INTEGER PRIMARY KEY, x JSON);
+INSERT INTO t1(id,x) VALUES (1, '{"a":null}'), (2, '{"a":123}'), (3, '{"a":4.5}'), (4, '{"a":"six"}'), (5, '{"a":[7,8]}'), (6, '{"a":{"b":9}}'), (7, '{"b":999}');
+DELETE FROM t1;
+INSERT INTO t1(x) VALUES('[null,123,4.5,"six",[7,8],{"b":9}]');
+==
+WITH c(y) AS (VALUES(0),(1),(2),(3),(4),(5),(6)) SELECT y, x->y AS '->', CASE WHEN subtype(x->y) THEN 'json' ELSE typeof(x->y) END AS 'type', x->>y AS '->>', CASE WHEN subtype(x->>y) THEN 'json' ELSE typeof(x->>y) END AS 'type', json_extract(x,format('$[%d]',y)) AS 'json_extract', CASE WHEN subtype(json_extract(x,format('$[%d]',y))) THEN 'json' ELSE typeof(json_extract(x,format('$[%d]',y))) END AS 'type' FROM c, t1 ORDER BY y
+----
+# from json102
+CREATE TABLE t1(id INTEGER PRIMARY KEY, x JSON);
+INSERT INTO t1(id,x) VALUES (1, '{"a":null}'), (2, '{"a":123}'), (3, '{"a":4.5}'), (4, '{"a":"six"}'), (5, '{"a":[7,8]}'), (6, '{"a":{"b":9}}'), (7, '{"b":999}');
+DELETE FROM t1;
+INSERT INTO t1(x) VALUES('[null,123,4.5,"six",[7,8],{"b":9}]');
+DELETE FROM t1;
+INSERT INTO t1(x) VALUES('[null,123,4.5,"six",[7,8],{"b":9}]');
+==
+WITH c(y) AS (VALUES(0),(1),(2),(3),(4),(5),(6)) SELECT y, x->y AS '->', CASE WHEN subtype(if(json_valid(x),x->y)) THEN 'json' ELSE typeof(x->y) END AS 'type', x->>y AS '->>', CASE WHEN subtype(x->>y) THEN 'json' ELSE typeof(x->>y) END AS 'type', json_extract(x,format('$[%d]',y)) AS 'json_extract', CASE WHEN subtype(json_extract(x,format('$[%d]',y))) THEN 'json' ELSE typeof(json_extract(x,format('$[%d]',y))) END AS 'type' FROM c, t1 ORDER BY y
+----
+# from json102
+CREATE TABLE t1(a1 DATE, a2 INTEGER PRIMARY KEY, a3 INTEGER, memo TEXT);
+CREATE INDEX t1x1 ON t1(a3, a1, memo->>'y');
+INSERT INTO t1(a2,a1,a3,memo) VALUES (876, '2023-08-03', 5, '{"x":77,"y":4}');
+UPDATE t1 SET memo = JSON_REMOVE(memo, '$.y');
+==
+SELECT * FROM t1
+----
+# from json102
+CREATE TABLE t1(a1 DATE, a2 INTEGER PRIMARY KEY, a3 INTEGER, memo TEXT);
+CREATE INDEX t1x1 ON t1(a3, a1, memo->>'y');
+INSERT INTO t1(a2,a1,a3,memo) VALUES (876, '2023-08-03', 5, '{"x":77,"y":4}');
+UPDATE t1 SET memo = JSON_REMOVE(memo, '$.y');
+UPDATE t1 SET memo = JSON_SET(memo, '$.y', 6) WHERE a2 IN (876) AND JSON_TYPE(memo, '$.y') IS NULL;
+==
+SELECT * FROM t1
+SELECT '{"1":"one","2":"two","3":"three"}'->>'2'
+SELECT '{"1":"one","2":"two","3":"three"}'->>2
+SELECT '["zero","one","two"]'->>'1'
+SELECT '["zero","one","two"]'->>1
+SELECT '{"1":"one","2":"two","3":"three"}'->'2'
+SELECT '{"1":"one","2":"two","3":"three"}'->2
+SELECT '["zero","one","two"]'->'1'
+SELECT '["zero","one","two"]'->1
+SELECT json_set('[0x1F]', '$[1]', 2), json_valid(json_set('[0x1F]', '$[1]', 2))
+SELECT typeof(jsonb_set('[0x1F]', '$[1]', 2)), json_valid(jsonb_set('[0x1F]', '$[1]', 2),6)
+SELECT json_set('[0x1F]', '$[1]', 2), json_valid(' '||json_set('[0x1F]', '$[1]', 2))
+SELECT json_set('[0x1F]', '$[1]', 2), json_valid('[31,2]')
+SELECT json_valid('[31,2]'), json_set('[0x1F]', '$[1]', 2)
+SELECT json_valid(json_set('{k:1}','$.v', printf('%.*c',120,'x')))
+SELECT json_valid(jsonb_set('{k:1}','$.v', printf('%.*c',120,'x')),6)
+SELECT json_valid(json_set('{k:1}','$.v', printf('%.*c',120,'x'))||' ')
+----
+# from json103
+CREATE TABLE t1(a,b,c);
+WITH RECURSIVE c(x) AS (VALUES(1) UNION SELECT x+1 FROM c WHERE x<100) INSERT INTO t1(a,b,c) SELECT x, x%3, printf('n%d',x) FROM c;
+UPDATE t1 SET a='orange' WHERE rowid=39;
+UPDATE t1 SET a=32.5 WHERE rowid=31;
+UPDATE t1 SET a=x'303132' WHERE rowid=29;
+UPDATE t1 SET a=NULL WHERE rowid=37;
+==
+SELECT json_group_array(a) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+SELECT json_group_array(a) FROM t1
+SELECT quote(jsonb_group_array(a)) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+SELECT json_group_array(a) FROM t1 WHERE rowid BETWEEN 31 AND 39
+SELECT json_array_length(json_group_array(a)) FROM t1 WHERE rowid BETWEEN 31 AND 39
+SELECT b, json_group_array(a) FROM t1 WHERE rowid<10 GROUP BY b ORDER BY b
+SELECT json_group_object(c,a) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+SELECT json_group_object(c,a) FROM t1
+SELECT quote(jsonb_group_object(c,a)) FROM t1 WHERE a<0 AND typeof(a)!='blob'
+SELECT json_group_object(c,a) FROM t1 WHERE rowid BETWEEN 31 AND 39 AND rowid%2==1
+SELECT b, json_group_object(c,a) FROM t1 WHERE rowid<7 GROUP BY b ORDER BY b
+----
+# from json103
+CREATE TABLE t1(a,b,c);
+WITH RECURSIVE c(x) AS (VALUES(1) UNION SELECT x+1 FROM c WHERE x<100) INSERT INTO t1(a,b,c) SELECT x, x%3, printf('n%d',x) FROM c;
+UPDATE t1 SET a='orange' WHERE rowid=39;
+UPDATE t1 SET a=32.5 WHERE rowid=31;
+UPDATE t1 SET a=x'303132' WHERE rowid=29;
+UPDATE t1 SET a=NULL WHERE rowid=37;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(x);
+INSERT INTO t1 VALUES(1),('abc');
+==
+SELECT json_group_array(x), json_group_array(json_object('x',x)) FROM t1
+----
+# from json103
+CREATE TABLE t1(a,b,c);
+WITH RECURSIVE c(x) AS (VALUES(1) UNION SELECT x+1 FROM c WHERE x<100) INSERT INTO t1(a,b,c) SELECT x, x%3, printf('n%d',x) FROM c;
+UPDATE t1 SET a='orange' WHERE rowid=39;
+UPDATE t1 SET a=32.5 WHERE rowid=31;
+UPDATE t1 SET a=x'303132' WHERE rowid=29;
+UPDATE t1 SET a=NULL WHERE rowid=37;
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(x);
+INSERT INTO t1 VALUES(1),('abc');
+CREATE TABLE t4(x);
+INSERT INTO t4 VALUES (1), ('a,b'), (3), ('x"y'), (5), (6), (7);
+==
+SELECT json_group_array(x) OVER (ROWS 2 PRECEDING) FROM t4
+SELECT json_group_object(rowid, x) OVER (ROWS 2 PRECEDING) FROM t4
+----
+# from json104
+SELECT json_patch(('{'||char(10)||' "a": "b",'||char(10)||' "c": {'||char(10)||' "d": "e",'||char(10)||' "f": "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' "a":"z",'||char(10)||' "c": {'||char(10)||' "f": null'||char(10)||' }'||char(10)||' }'))
+SELECT json_patch(('{'||char(10)||' "a": "b",'||char(10)||' "c": {'||char(10)||' "d": "e",'||char(10)||' "f": "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' a:"z",'||char(10)||' c: {'||char(10)||' f: null'||char(10)||' }'||char(10)||' }'))
+SELECT json_patch(('{'||char(10)||' a: "b",'||char(10)||' c: {'||char(10)||' d: "e",'||char(10)||' f: "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' "a":"z",'||char(10)||' "c": {'||char(10)||' "f": null'||char(10)||' }'||char(10)||' }'))
+SELECT json_patch(('{'||char(10)||' a: "b",'||char(10)||' c: {'||char(10)||' d: "e",'||char(10)||' f: "g"'||char(10)||' }'||char(10)||' }'),('{'||char(10)||' a:"z",'||char(10)||' c: {'||char(10)||' f: null'||char(10)||' }'||char(10)||' }'))
+SELECT json_patch(('{'||char(10)||' "title": "Goodbye!",'||char(10)||' "author" : {'||char(10)||' "givenName" : "John",'||char(10)||' "familyName" : "Doe"'||char(10)||' },'||char(10)||' "tags":[ "example", "sample" ],'||char(10)||' "content": "This will be unchanged"'||char(10)||' }'),('{'||char(10)||' "title": "Hello!",'||char(10)||' "phoneNumber": "+01-123-456-7890",'||char(10)||' "author": {'||char(10)||' "familyName": null'||char(10)||' },'||char(10)||' "tags": [ "example" ]'||char(10)||' }'))
+SELECT json_patch('[1,2,3]','{"x":null}')
+SELECT json_patch('[1,2,3]','{"x":null,"y":1,"z":null}')
+SELECT json_patch('{}','{"a":{"bb":{"ccc":null}}}')
+SELECT json_patch('{}','{"a":{"bb":{"ccc":[1,null,3]}}}')
+SELECT json_patch('{}','{"a":{"bb":{"ccc":[1,{"dddd":null},3]}}}')
+SELECT json_patch('{"a":"b"}','{"a":"c"}')
+SELECT coalesce(json_patch(null,'{"a":"c"}'), 'real-null')
+SELECT json_patch('{"a":"b"}','{"b":"c"}')
+SELECT json_patch('{"a":"b"}','{"a":null}')
+SELECT json_patch('{"a":"b","b":"c"}','{"a":null}')
+SELECT json_patch('{"a":["b"]}','{"a":"c"}')
+SELECT json_patch('{"a":"c"}','{"a":["b"]}')
+SELECT json_patch('{"a":{"b":"c"}}','{"a":{"b":"d","c":null}}')
+SELECT json_patch('{"a":[{"b":"c"}]}','{"a":[1]}')
+SELECT json_patch('["a","b"]','["c","d"]')
+SELECT json_patch('{"a":"b"}','["c"]')
+SELECT json_patch('{"a":"foo"}','null')
+SELECT coalesce(json_patch('{"a":"foo"}',null), 'real-null')
+SELECT json_patch('{"a":"foo"}','"bar"')
+SELECT json_patch('{"e":null}','{"a":1}')
+SELECT json_patch('[1,2]','{"a":"b","c":null}')
+SELECT json_patch('{"x":{"one":1}}','{"x":{"two":2},"x":"three"}')
+----
+# from json104
+CREATE TABLE obj(x);
+INSERT INTO obj VALUES('{"a":1,"b":2}');
+==
+SELECT * FROM obj
+----
+# from json104
+CREATE TABLE obj(x);
+INSERT INTO obj VALUES('{"a":1,"b":2}');
+UPDATE obj SET x = json_insert(x, '$.c', 3);
+==
+SELECT * FROM obj
+SELECT json_extract(x, '$.b') FROM obj
+SELECT json_extract(x, '$."b"') FROM obj
+----
+# from json104
+CREATE TABLE obj(x);
+INSERT INTO obj VALUES('{"a":1,"b":2}');
+UPDATE obj SET x = json_insert(x, '$.c', 3);
+UPDATE obj SET x = json_set(x, '$."b"', 555);
+==
+SELECT json_extract(x, '$.b') FROM obj
+SELECT json_extract(x, '$."b"') FROM obj
+----
+# from json104
+CREATE TABLE obj(x);
+INSERT INTO obj VALUES('{"a":1,"b":2}');
+UPDATE obj SET x = json_insert(x, '$.c', 3);
+UPDATE obj SET x = json_set(x, '$."b"', 555);
+UPDATE obj SET x = json_set(x, '$."d"', 4);
+==
+SELECT json_extract(x, '$."d"') FROM obj
+----
+# from json105
+CREATE TABLE t1(j);
+INSERT INTO t1(j) VALUES('{"a":1,"b":[1,[2,3],4],"c":99}');
+==
+SELECT quote(json_extract(j,'$.b[#]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-1]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-2]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-02]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-3]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-4]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-4296967295]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-4296967296]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-4296967297]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-42969672950]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-42969672960]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-2][#-1]')) FROM t1
+SELECT quote(json_extract(j,'$.b[0]','$.b[#-1]')) FROM t1
+SELECT quote(json_extract(j,'$.a[#-1]')) FROM t1
+SELECT quote(json_extract(j,'$.b[#-000001]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-0]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-1]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-2]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-3]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-4]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-2][#-1]')) FROM t1
+SELECT quote(json_remove(j,'$.b[0]','$.b[#-1]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-1]','$.b[0]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-1]','$.b[#-2]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-1]','$.b[#-1]')) FROM t1
+SELECT quote(json_remove(j,'$.b[#-2]','$.b[#-1]')) FROM t1
+SELECT quote(json_insert(j,'$.b[#]','AAA')) FROM t1
+SELECT quote(json_insert(j,'$.b[1][#]','AAA')) FROM t1
+SELECT quote(json_insert(j,'$.b[1][#]','AAA','$.b[#]','BBB')) FROM t1
+SELECT quote(json_insert(j,'$.b[#]','AAA','$.b[#]','BBB')) FROM t1
+SELECT quote(json_set(j,'$.b[#]','AAA')) FROM t1
+SELECT quote(json_set(j,'$.b[1][#]','AAA')) FROM t1
+SELECT quote(json_set(j,'$.b[1][#]','AAA','$.b[#]','BBB')) FROM t1
+SELECT quote(json_set(j,'$.b[#]','AAA','$.b[#]','BBB')) FROM t1
+SELECT quote(json_set(j,'$.b[#-1]','AAA')) FROM t1
+SELECT quote(json_set(j,'$.b[1][#-1]','AAA')) FROM t1
+SELECT quote(json_set(j,'$.b[1][#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+SELECT quote(json_set(j,'$.b[#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+SELECT quote(json_replace(j,'$.b[#]','AAA')) FROM t1
+SELECT quote(json_replace(j,'$.b[1][#]','AAA')) FROM t1
+SELECT quote(json_replace(j,'$.b[1][#]','AAA','$.b[#]','BBB')) FROM t1
+SELECT quote(json_replace(j,'$.b[#]','AAA','$.b[#]','BBB')) FROM t1
+SELECT quote(json_replace(j,'$.b[#-1]','AAA')) FROM t1
+SELECT quote(json_replace(j,'$.b[1][#-1]','AAA')) FROM t1
+SELECT quote(json_replace(j,'$.b[1][#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+SELECT quote(json_replace(j,'$.b[#-1]','AAA','$.b[#-1]','BBB')) FROM t1
+SELECT json_extract(j, '$.b[#-]') FROM t1
+SELECT json_extract(j, '$.b[#9]') FROM t1
+SELECT json_extract(j, '$.b[#+2]') FROM t1
+SELECT json_extract(j, '$.b[#-1') FROM t1
+SELECT json_extract(j, '$.b[#-1x]') FROM t1
+----
+# from json107
+SELECT json_valid( CAST('{"a":1}' AS BLOB) )
+SELECT json_valid( CAST('{"a":1}' AS BLOB), 1)
+SELECT json_valid( CAST('{"a":1}' AS BLOB), 2)
+SELECT json_valid( CAST('{"a":1}' AS BLOB), 4)
+SELECT json_valid( CAST('{"a":1}' AS BLOB), 8)
+SELECT CAST('{"a":123}' AS blob) -> 'a'
+SELECT CAST('{"a":123}' AS blob) ->> 'a'
+SELECT json_extract(CAST('{"a":123}' AS blob), '$.a')
+SELECT json_insert(CAST('{"a":123}' AS blob),'$.b',456)
+SELECT json_remove(CAST('{"a":123,"b":456}' AS blob),'$.a')
+SELECT json_set(CAST('{"a":123,"b":456}' AS blob),'$.a',789)
+SELECT json_replace(CAST('{"a":123,"b":456}' AS blob),'$.a',789)
+SELECT json_type(CAST('{"a":123,"b":456}' AS blob))
+SELECT json(CAST('{"a":123,"b":456}' AS blob))
+----
+# from json109
+SELECT json_array_insert('[1,2,3]','$[0]',999,'$[0]',888)
+SELECT json_array_insert('[1,2,3]','$[0]',999,'$[#]',888)
+SELECT json_array_insert('[1,2,3]','$[1]',888)
+SELECT json_array_insert('[1,2,3]','$[2]',888)
+SELECT json_array_insert('[1,2,3]','$[3]',888)
+SELECT json_array_insert('[1,2,3]','$[#-1]',888)
+SELECT json_array_insert('[1,2,3]','$[#-2]',888)
+SELECT json_array_insert('[1,2,3]','$[#-3]',888)
+SELECT json_array_insert('[1,2,3]','$[#-4]',888)
+SELECT json_array_insert('{a:[1,2,3]}','$.a',888)
+SELECT json_array_insert('{a:[1,2,3]}','$.b',888)
+SELECT json_array_insert('{a:[1,2,3]}','$.b[0]',888)
+SELECT json_array_insert('{a:[1,2,3]}','$.b.c.d[0]',888)
+SELECT json_array_insert('{a:[1,2,3]}','$.b.c.d[0',888)
+SELECT json_array_insert('{a:[1,2,3]}','$.b.c.d',888)
+SELECT json_array_insert('{a:[1,2,3]}','$[0]',888)
+SELECT json_array_insert('{a:[1,2,3]}','$.b[0]',888,'$.a[1]','999','$.c',0)
+----
+# from json501
+WITH c(x) AS (VALUES('{a:5,b:6}')) SELECT x->>'a', json(x), json_valid(x), NOT json_error_position(x) FROM c
+SELECT '[7,null,{a:5,b:6},[8,9]]'->>'$[2].b'
+SELECT '{ $123 : 789 }'->>'$."$123"'
+SELECT '{ _123$xyz : 789 }'->>'$."_123$xyz"'
+SELECT '{ MNO_123$xyz : 789 }'->>'$."MNO_123$xyz"'
+SELECT json('{ MNO_123$xyz : 789 }')
+SELECT json('{ MNO_123/xyz : 789 }')
+SELECT '{ MNO_123æxyz : 789 }'->>'MNO_123æxyz'
+WITH c(x) AS (VALUES('{"a":5, "b":6, }')) SELECT x->>'b', json(x), json_valid(x), NOT json_error_position(x) FROM c
+SELECT '{a:5, b:6 , }'->>'b'
+SELECT '{a:5, b:6 ,, }'->>'b'
+SELECT '{a:5, b:6, ,}'->>'b'
+WITH c(x) AS (VALUES('[5, 6,]')) SELECT x->>1, json(x), json_valid(x), NOT json_error_position(x) FROM c
+SELECT '[5, 6 , ]'->>1
+SELECT '[5, 6,,]'->>1
+SELECT '[5, 6 , , ]'->>1
+WITH c(x) AS (VALUES('{"a": ''abcd''}')) SELECT x->>'a', json(x), json_valid(x), NOT json_error_position(x) FROM c
+SELECT '{b: 123, ''a'': ''ab\''cd''}'->>'a'
+WITH c(x) AS (VALUES('{a: "abc'||char(0x5c,0x0a)||'xyz"}')) SELECT x->>'a', json(x), json_valid(x), NOT json_error_position(x) FROM c
+SELECT ('{a: "abc'||char(0x5c,0x0d)||'xyz"}')->>'a'
+SELECT ('{a: "abc'||char(0x5c,0x0d,0x0a)||'xyz"}')->>'a'
+SELECT ('{a: "abc'||char(0x5c,0x2028)||'xyz"}')->>'a'
+SELECT ('{a: "abc'||char(0x5c,0x2029)||'xyz"}')->>'a'
+SELECT ('{a: "abc'||char(0x5c,0x27)||'xyz"}')->>'a'
+SELECT ('{a: "abc'||char(0x5c,0x22)||'xyz"}')->>'a'
+SELECT ('{a: "abc'||char(0x5c,0x5c)||'xyz"}')->>'a'
+SELECT hex(('{a: "abc\bxyz"}')->>'a')
+SELECT hex(('{a: "abc\f\n\r\t\vxyz"}')->>'a')
+SELECT hex(('{a: "abc\0xyz"}')->>'a')
+SELECT '{a: "abc\x35\x4f\x6Exyz"}'->>'a'
+SELECT '{a: "\x6a\x6A\x6b\x6B\x6c\x6C\x6d\x6D\x6e\x6E\x6f\x6F"}'->>'a'
+SELECT '{a: 0x0}'->>'a'
+SELECT '{a: -0x0}'->>'a'
+SELECT '{a: +0x0}'->>'a'
+SELECT '{a: 0xabcdef}'->>'a'
+SELECT '{a: -0xaBcDeF}'->>'a'
+SELECT '{a: +0xABCDEF}'->>'a'
+WITH c(x) AS (VALUES('{x: 4.}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: +4.}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: -4.}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: .5}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: -.5}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: +.5}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: 4.e0}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: +4.e1}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: -4.e2}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: .5e3}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: -.5e-1}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: +.5e-2}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: +Infinity}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: -Infinity}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: Infinity}')) SELECT x->>'x', json(x) FROM c
+WITH c(x) AS (VALUES('{x: NaN}')) SELECT x->>'x', json(x) FROM c
+SELECT '{a: +123}'->'a'
+SELECT (' /* abc */ { /*def*/ aaa /* xyz */ : // to the end of line'||char(10)||' 123 /* xyz */ , /* 123 */ }')->>'aaa'
+SELECT (char(0x09,0x0a,0x0b,0x0c,0x0d,0x20,0xa0,0x2028,0x2029) || '{a: "xyz"}')->>'a'
+SELECT ('{a:' || char(0x09,0x0a,0x0b,0x0c,0x0d,0x20,0xa0,0x2028,0x2029) || '"xyz"}')->>'a'
+SELECT (char(0x1680,0x2000,0x2001,0x2002,0x2003,0x2004,0x2005, 0x2006,0x2007,0x2008,0x2009,0x200a,0x3000,0xfeff) || '{a: "xyz"}')->>'a'
+SELECT ('{a: ' ||char(0x1680,0x2000,0x2001,0x2002,0x2003,0x2004,0x2005, 0x2006,0x2007,0x2008,0x2009,0x200a,0x3000,0xfeff) || ' "xyz"}')->>'a'
+SELECT json('{x:''a "b" c''}')
+SELECT json_valid('"abc' || char(1) || 'xyz"')
+SELECT json_valid('"abc' || char(1) || 'xyz"', 2)
+SELECT json('{label:"abc' || char(1) || 'xyz"}')
+SELECT jsonb('{label:"abc' || char(1) || 'xyz"}') -> '$'
+SELECT json_valid('"abc' || char(8) || 'xyz"')
+SELECT json_valid('"abc' || char(8) || 'xyz"', 2)
+SELECT json('{label:"abc' || char(8) || 'xyz"}')
+SELECT jsonb('{label:"abc' || char(8) || 'xyz"}') -> '$'
+SELECT json_valid('"abc' || char(9) || 'xyz"')
+SELECT json_valid('"abc' || char(9) || 'xyz"', 2)
+SELECT json('{label:"abc' || char(9) || 'xyz"}')
+SELECT jsonb('{label:"abc' || char(9) || 'xyz"}') -> '$'
+SELECT json_valid('"abc' || char(10) || 'xyz"')
+SELECT json_valid('"abc' || char(10) || 'xyz"', 2)
+SELECT json('{label:"abc' || char(10) || 'xyz"}')
+SELECT jsonb('{label:"abc' || char(10) || 'xyz"}') -> '$'
+SELECT json_valid('"abc' || char(12) || 'xyz"')
+SELECT json_valid('"abc' || char(12) || 'xyz"', 2)
+SELECT json('{label:"abc' || char(12) || 'xyz"}')
+SELECT jsonb('{label:"abc' || char(12) || 'xyz"}') -> '$'
+SELECT json_valid('"abc' || char(13) || 'xyz"')
+SELECT json_valid('"abc' || char(13) || 'xyz"', 2)
+SELECT json('{label:"abc' || char(13) || 'xyz"}')
+SELECT jsonb('{label:"abc' || char(13) || 'xyz"}') -> '$'
+SELECT json_valid('"abc' || char(31) || 'xyz"')
+SELECT json_valid('"abc' || char(31) || 'xyz"', 2)
+SELECT json('{label:"abc' || char(31) || 'xyz"}')
+SELECT jsonb('{label:"abc' || char(31) || 'xyz"}') -> '$'
+----
+# from json502
+CREATE TABLE t1(x JSON);
+INSERT INTO t1(x) VALUES('{a:{b:{c:"hello",},},}');
+==
+SELECT json_error_position('{a:null,{"h":[1,[1,2,3]],"j":"abc"}:true}')
+SELECT json('{a:null,{"h":[1,[1,2,3]],"j":"abc"}:true}')
+SELECT '{a:null,{"h":[1,[1,2,3]],"j":"abc"}:true}'->'$h[#-1]'
+SELECT '{"a\x62c":123}' ->> 'abc'
+SELECT '{"abc":123}' ->> 'a\x62c'
+----
+# from json502
+CREATE TABLE t1(x JSON);
+INSERT INTO t1(x) VALUES('{a:{b:{c:"hello",},},}');
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(x);
+INSERT INTO t1 VALUES(json_insert('{}','$.a\',111,'$."b\\"',222));
+INSERT INTO t1 VALUES(jsonb_insert('{}','$.a\',111,'$."b\\"',222));
+==
+SELECT x->'$.a\', x->'$.a\\', x->'$."a\\"', x->'$."b\\"' FROM t1
+SELECT json_patch('{"a\x62c":123}','{"ab\x63":456}') ->> 'abc'
+SELECT json_extract('{"A\"Key":1}', '$.A"Key')
+SELECT json_extract('{"A\"Key":1}', '$."A\"Key"')
+SELECT JSON_SET('{}', '$."\"Key"', 1)
+----
+# from jsonb01
+CREATE TABLE t1(x JSON BLOB);
+INSERT INTO t1 VALUES(jsonb('{a:5,b:{x:10,y:11},c:[1,2,3,4]}'));
+==
+SELECT json(jsonb_remove(x,'$.a')) FROM t1
+SELECT json_remove(x,'$.a') FROM t1
+SELECT json(jsonb_remove(x,'$.b')) FROM t1
+SELECT json_remove(x,'$.b') FROM t1
+SELECT json(jsonb_remove(x,'$.c')) FROM t1
+SELECT json_remove(x,'$.c') FROM t1
+SELECT json(jsonb_remove(x,'$.d')) FROM t1
+SELECT json_remove(x,'$.d') FROM t1
+SELECT json(jsonb_remove(x,'$.b.x')) FROM t1
+SELECT json_remove(x,'$.b.x') FROM t1
+SELECT json(jsonb_remove(x,'$.b.y')) FROM t1
+SELECT json_remove(x,'$.b.y') FROM t1
+SELECT json(jsonb_remove(x,'$.c[0]')) FROM t1
+SELECT json_remove(x,'$.c[0]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[1]')) FROM t1
+SELECT json_remove(x,'$.c[1]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[2]')) FROM t1
+SELECT json_remove(x,'$.c[2]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[3]')) FROM t1
+SELECT json_remove(x,'$.c[3]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[4]')) FROM t1
+SELECT json_remove(x,'$.c[4]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[#]')) FROM t1
+SELECT json_remove(x,'$.c[#]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[#-1]')) FROM t1
+SELECT json_remove(x,'$.c[#-1]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[#-2]')) FROM t1
+SELECT json_remove(x,'$.c[#-2]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[#-3]')) FROM t1
+SELECT json_remove(x,'$.c[#-3]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[#-4]')) FROM t1
+SELECT json_remove(x,'$.c[#-4]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[#-5]')) FROM t1
+SELECT json_remove(x,'$.c[#-5]') FROM t1
+SELECT json(jsonb_remove(x,'$.c[#-6]')) FROM t1
+SELECT json_remove(x,'$.c[#-6]') FROM t1
+SELECT x'8ce6ffffffff171333' -> '$'
+SELECT json(x'6B37616263162d')
+----
+# extra cases
+SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}')
+SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}','  ')
+SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}','')
+SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}',NULL)
+SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}','--')
+SELECT json_pretty('{"a":1,"b":[1,2,{"c":3}],"d":{}}',char(9))
+SELECT json_pretty('[]')
+SELECT json_pretty('{}')
+SELECT json_pretty('[[],{},[[]]]')
+SELECT json_pretty('123')
+SELECT json_pretty('"abc"')
+SELECT json_pretty(NULL)
+SELECT json_pretty('{a:1,b:[2,3,],/*c*/}')
+SELECT json_pretty(jsonb('{"x":[1,{"y":null}]}'))
+SELECT json_pretty('{"a":')
+SELECT json_pretty()
+SELECT json_pretty('[1]','a','b')
+SELECT json_pretty('[1,2]',5)
+SELECT json_valid('{"a":1}',1)
+SELECT json_valid('{"a":1}',2)
+SELECT json_valid('{"a":1}',3)
+SELECT json_valid('{"a":1}',4)
+SELECT json_valid('{"a":1}',5)
+SELECT json_valid('{"a":1}',6)
+SELECT json_valid('{"a":1}',7)
+SELECT json_valid('{"a":1}',8)
+SELECT json_valid('{"a":1}',9)
+SELECT json_valid('{"a":1}',10)
+SELECT json_valid('{"a":1}',11)
+SELECT json_valid('{"a":1}',12)
+SELECT json_valid('{"a":1}',13)
+SELECT json_valid('{"a":1}',14)
+SELECT json_valid('{"a":1}',15)
+SELECT json_valid('{"a":1}',0)
+SELECT json_valid('{"a":1}',16)
+SELECT json_valid('{"a":1}',-1)
+SELECT json_valid('{"a":1}',NULL)
+SELECT json_valid('{"a":1}','abc')
+SELECT json_valid('{a:1}',1)
+SELECT json_valid('{a:1}',2)
+SELECT json_valid('{a:1}',3)
+SELECT json_valid('{a:1}',6)
+SELECT json_valid(jsonb('{a:1}'),1)
+SELECT json_valid(jsonb('{a:1}'),4)
+SELECT json_valid(jsonb('{a:1}'),8)
+SELECT json_valid(jsonb('{a:1}'),12)
+SELECT json_valid(jsonb('{a:1}'),9)
+SELECT json_valid(x'00',4)
+SELECT json_valid(x'00',8)
+SELECT json_valid(x'0c',8)
+SELECT json_valid(x'13',4)
+SELECT json_valid(x'13',8)
+SELECT json_valid(x'1a61',8)
+SELECT json_valid(x'',8)
+SELECT json_valid(x'',1)
+SELECT json_valid(123)
+SELECT json_valid(12.5,1)
+SELECT json_valid('',1)
+SELECT json_valid('  ',2)
+SELECT json_valid('[1,2,]',1)
+SELECT json_valid('[1,2,]',2)
+SELECT json_valid(char(0xfeff)||'[1]',2)
+SELECT json_valid()
+SELECT json_valid('1',1,2)
+SELECT json_error_position('{"a":1}')
+SELECT json_error_position('{"a":1')
+SELECT json_error_position('{"a":1,}')
+SELECT json_error_position('[1,2,3')
+SELECT json_error_position('[1,2,3]x')
+SELECT json_error_position('')
+SELECT json_error_position('   ')
+SELECT json_error_position('{a:1}')
+SELECT json_error_position('{"a":01}')
+SELECT json_error_position('"abc')
+SELECT json_error_position('"\q"')
+SELECT json_error_position('[1,/*x*/2]')
+SELECT json_error_position('[1,/*x 2]')
+SELECT json_error_position(x'0c')
+SELECT json_error_position(jsonb('[1,2]'))
+SELECT json_error_position(x'8c')
+SELECT json_error_position(123)
+SELECT json_error_position(NULL)
+SELECT json_error_position('{"é":1,')
+SELECT json_error_position()
+SELECT json('{a:1, b:2,}')
+SELECT json('[1,2,3,]')
+SELECT json('{''a'':''b''}')
+SELECT json('{"a":0x1F}')
+SELECT json('[0xff,-0x10,0X0]')
+SELECT json('[Infinity,-Infinity,+Infinity]')
+SELECT json('[NaN,-NaN]')
+SELECT json('[.5,5.,+5,-.5e3]')
+SELECT json('// line comment' || char(10) || '[1,2]')
+SELECT json('/* block */ {x: /* in */ 1}')
+SELECT json('{x:"line1\' || char(10) || 'line2"}')
+SELECT json('"\x41B\v\0"')
+SELECT json('{$a_b:1, _c:2, d$:3}')
+SELECT json('[1' || char(0x2028) || ',2]')
+SELECT json('[1' || char(0xa0) || ',2]')
+SELECT jsonb('{a:Infinity}') -> '$.a'
+SELECT jsonb('{a:NaN}') ->> '$.a'
+SELECT hex(jsonb('{a:0x10, b:''x'', c:[1,],}'))
+SELECT json(jsonb('{a:0x10, b:''x'', c:[1,],}'))
+SELECT json('[1,2,,]')
+SELECT json('{a:1 b:2}')
+SELECT json('[0x]')
+SELECT json('[Inf]')
+SELECT json('[-NaN]')
+SELECT json('{"a":1}/*')
+SELECT '{"a":{"b":[10,20,30]}}' -> 'a'
+SELECT '{"a":{"b":[10,20,30]}}' -> '$.a.b'
+SELECT '{"a":{"b":[10,20,30]}}' -> '$.a.b[1]'
+SELECT '{"a":{"b":[10,20,30]}}' ->> '$.a.b[1]'
+SELECT '{"a":{"b":[10,20,30]}}' -> 'a' -> 'b' -> 2
+SELECT '{"a":{"b":[10,20,30]}}' -> 'a' -> 'b' ->> -1
+SELECT '[10,20,30]' -> 0
+SELECT '[10,20,30]' ->> 2
+SELECT '[10,20,30]' -> 3
+SELECT '[10,20,30]' -> -1
+SELECT '[10,20,30]' ->> '$[#-1]'
+SELECT '{"a":"xyz"}' -> 'a'
+SELECT '{"a":"xyz"}' ->> 'a'
+SELECT '{"a":null}' -> 'a'
+SELECT typeof('{"a":null}' ->> 'a')
+SELECT typeof('{"a":1.5}' ->> 'a')
+SELECT typeof('{"a":15}' ->> 'a')
+SELECT typeof('{"a":true}' ->> 'a')
+SELECT typeof('{"a":[1]}' -> 'a')
+SELECT '{"a":1}' -> 1.5
+SELECT '{"1":"one"}' -> 1
+SELECT '{"1":"one"}' -> '1'
+SELECT '{"a b":5}' -> 'a b'
+SELECT '{"a b":5}' -> '$."a b"'
+SELECT '{a:5}' -> 'a'
+SELECT jsonb('{"a":[1,2]}') -> 'a'
+SELECT hex(jsonb('{"a":[1,2]}') -> 'a')
+SELECT jsonb('{"a":[1,2]}') ->> '$.a[1]'
+SELECT 'not json' -> 'a'
+SELECT '{"a":1}' -> '$.'
+SELECT '{"a":1}' -> 'a' -> NULL
+SELECT 5 -> '$'
+SELECT x'0c' -> '$'
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[0]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[1]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[2]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[3]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[4]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[5]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[6]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.a[7]')
+SELECT json_type('{"a":[1,2.5,"x",null,true,false,{}]}','$.b')
+SELECT json_type('{"a":1}','a')
+SELECT json_type('[0x10, Infinity, NaN]','$[0]')
+SELECT json_type('[0x10, Infinity, NaN]','$[1]')
+SELECT json_type('[0x10, Infinity, NaN]','$[2]')
+SELECT json_type(jsonb('[1e5]'),'$[0]')
+SELECT json_type(NULL)
+SELECT json_type('bad')
+SELECT json_type()
+SELECT json_type('1','$','$')
+SELECT json_quote('abc')
+SELECT json_quote('a"b\c')
+SELECT json_quote('tab' || char(9) || 'nl' || char(10) || 'ctl' || char(1))
+SELECT json_quote(123)
+SELECT json_quote(-1.5e300)
+SELECT json_quote(9e999)
+SELECT json_quote(NULL)
+SELECT json_quote(json('[1,2]'))
+SELECT json_quote(jsonb('[1,2]'))
+SELECT json_quote('[1,2]')
+SELECT json_quote('é' || char(0x1f600))
+SELECT json_quote(char(0x7f,0x80,0x2028))
+SELECT json_array_length('[]')
+SELECT json_array_length('[1,[2,3],{}]')
+SELECT json_array_length('{"a":1}')
+SELECT json_array_length('5')
+SELECT json_array_length('[1,[2,3],{}]','$[1]')
+SELECT json_array_length('[1,[2,3],{}]','$[2]')
+SELECT json_array_length('[1,[2,3],{}]','$[9]')
+SELECT json_array_length('[1,[2,3],{}]','bad')
+SELECT json_array_length('[1,2')
+SELECT json_array_length(NULL)
+SELECT json_array_length('[1]', NULL)
+SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.a','$.b','$.c')
+SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.a','$.zz')
+SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.c.d','$.b[1]','$.b[#-1]')
+SELECT json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.c.d')
+SELECT typeof(json_extract('{"a":1,"b":[2,3],"c":{"d":"e"}}','$.a','$.b'))
+SELECT json_extract('{"a":1}','$.a','bad')
+SELECT json_extract('{"a":1}')
+SELECT json_extract('{"a":1}',NULL)
+SELECT json_extract('{"a":1}','$',NULL)
+SELECT json_extract('[1,2,3]','$[1]','$[0]','$[2]','$[3]')
+SELECT json(jsonb_extract('{"a":1,"b":[2,3]}','$.b','$.a'))
+SELECT hex(jsonb_extract('{"a":1,"b":[2,3]}','$.b','$.a'))
+SELECT jsonb_extract('{"a":"x"}','$.a')
+SELECT json_extract('{"a":"A\n"}','$.a')
+SELECT json_extract('{"a":9223372036854775808}','$.a')
+SELECT json_extract('{"a":-9223372036854775809}','$.a')
+SELECT json_extract('{"a":1e400}','$.a')
+SELECT json_extract('{"a":0x7fffffffffffffffff}','$.a')
+SELECT json_patch('{"a":1,"b":2}','{"b":3,"c":4}')
+SELECT json_patch('{"a":1,"b":2}','{"b":null}')
+SELECT json_patch('{"a":{"x":1,"y":2}}','{"a":{"y":null,"z":3}}')
+SELECT json_patch('{"a":1}','[1,2]')
+SELECT json_patch('[1,2]','{"a":1}')
+SELECT json_patch('{"a":1}','5')
+SELECT json_patch('{"a":1}','null')
+SELECT json_patch('{}','{"a":{"b":null}}')
+SELECT json_patch('{a:1}','{b:2,}')
+SELECT json(jsonb_patch('{"a":1,"b":2}','{"b":3,"c":4}'))
+SELECT hex(jsonb_patch('{"a":1,"b":2}','{"b":3,"c":4}'))
+SELECT json_patch('{"a":1}','bad')
+SELECT json_patch(NULL,'{}')
+SELECT json_patch('{}',NULL)
+SELECT json_patch('{}')
+SELECT json_remove('[0,1,2,3,4]','$[2]')
+SELECT json_remove('[0,1,2,3,4]','$[2]','$[0]')
+SELECT json_remove('[0,1,2,3,4]','$[0]','$[2]')
+SELECT json_remove('[0,1,2,3,4]','$[#-1]','$[0]')
+SELECT json_remove('{"x":25,"y":42}','$.y')
+SELECT json_remove('{"x":25,"y":42}','$.z')
+SELECT json_remove('{"x":25,"y":42}')
+SELECT json_remove('{"x":25,"y":42}','$')
+SELECT json_remove('{"x":25,"y":42}','x')
+SELECT json_remove('{"x":25,"y":42}',NULL)
+SELECT json(jsonb_remove('{"x":25,"y":42}','$.x'))
+SELECT hex(jsonb_remove('{"x":25,"y":42}','$.x'))
+SELECT json_remove()
+SELECT json_set('{"a":2,"c":4}','$.a',99,'$.e','[5]')
+SELECT json_set('{"a":2,"c":4}','$.a',99,'$.e',json('[5]'))
+SELECT json_set('{"a":2,"c":4}','$.c[0]',1)
+SELECT json_set('{"a":2,"c":4}','$.d.e.f',1)
+SELECT json_set('[1,2]','$[#]',3,'$[#]',4)
+SELECT json_set('[1,2]','$[5]',3)
+SELECT json_set('{"a":1}','$',json('[0]'))
+SELECT json_set('{"a":1}','$.a')
+SELECT json_set('{"a":1}','$.a',x'00')
+SELECT json_set('{"a":1}','bad',1)
+SELECT json_insert('{"a":2,"c":4}','$.a',99,'$.e',5)
+SELECT json_insert('[1,2]','$[#]',3)
+SELECT json_insert('[1,2]','$[1]',3)
+SELECT json_insert('{}','$.a.b',1)
+SELECT json_replace('{"a":2,"c":4}','$.a',99,'$.e',5)
+SELECT json_replace('{"a":2,"c":4}','$.a',NULL)
+SELECT json_replace('[1,2]','$[#]',3)
+SELECT json_replace('[1,2]','$[#-1]',3)
+SELECT json_replace('{"a":2}','$',3)
+SELECT json(jsonb_set('{"a":2,"c":4}','$.a',99,'$.e',5))
+SELECT hex(jsonb_set('{"a":2,"c":4}','$.a',99,'$.e',5))
+SELECT json(jsonb_insert('{"a":2,"c":4}','$.a',99,'$.e',5))
+SELECT hex(jsonb_insert('{"a":2,"c":4}','$.a',99,'$.e',5))
+SELECT json(jsonb_replace('{"a":2,"c":4}','$.a',99,'$.e',5))
+SELECT hex(jsonb_replace('{"a":2,"c":4}','$.a',99,'$.e',5))
+SELECT json_array_insert('[1,2,3]','$[0]',0)
+SELECT json_array_insert('[1,2,3]','$[1]','x')
+SELECT json_array_insert('[1,2,3]','$[#]',4)
+SELECT json_array_insert('[1,2,3]','$[#-1]',4)
+SELECT json_array_insert('[1,2,3]','$[9]',4)
+SELECT json_array_insert('[1,2,3]','$[0]',json('{"a":1}'))
+SELECT json_array_insert('{"a":[1,2]}','$.a[1]',9,'$.a[0]',8)
+SELECT json_array_insert('[1,2,3]','$',4)
+SELECT json_array_insert('[1,2,3]')
+SELECT json_array_insert('[1,2,3]','$[0]')
+SELECT json(jsonb_array_insert('[1,2,3]','$[1]',9))
+SELECT hex(jsonb_array_insert('[1,2,3]','$[1]',9))
+SELECT json_array()
+SELECT json_object()
+SELECT json_array(1,2.0,'3',NULL,json('true'),json('[4]'))
+SELECT json_object('a',1,'b',json('{"c":2}'),'d','{"e":3}')
+SELECT json_object('a',1,'a',2)
+SELECT json_array(1e400,-1e400)
+SELECT json_array(9223372036854775807,-9223372036854775808)
+SELECT json_array(0.1,1e-7,123456789012345678901234567890.0)
+SELECT json(' [ 1 , 2 ] ')
+SELECT json('{"a":1,"a":2}')
+SELECT json('"é😀"')
+SELECT json('"\ud800"')
+SELECT json('1.50')
+SELECT json('-0')
+SELECT json('1E+2')
+SELECT json(x'0c')
+SELECT json(x'1f')
+SELECT hex(jsonb('[1,"a",null,true,false,1.5,{"k":[]}]'))
+SELECT hex(jsonb('"A"'))
+SELECT hex(jsonb('''x'''))
+SELECT hex(jsonb('0x1A'))
+SELECT hex(jsonb('Infinity'))
+SELECT hex(jsonb('.5'))
+SELECT hex(jsonb('"' || printf('%.20c','a') || '"'))
+SELECT hex(jsonb('"' || printf('%.300c','a') || '"'))
+SELECT hex(jsonb_array(1,'a',NULL,2.5))
+SELECT hex(jsonb_object('a',1,'b','x'))
+SELECT jsonb('bad')
+SELECT json(jsonb(x'0c'))
+----
+# extra cases
+CREATE TABLE g(id INTEGER PRIMARY KEY, grp, k, v);
+INSERT INTO g(grp,k,v) VALUES('x','a',1),('x','b',2.5),('y','c','str'),('y','d',NULL),('x','e',json('[1,2]')),('z','f',jsonb('{"q":1}'));
+==
+SELECT json_group_array(v) FROM g
+SELECT json_group_array(v) FROM g GROUP BY grp ORDER BY grp
+SELECT grp, json_group_object(k,v) FROM g GROUP BY grp ORDER BY grp
+SELECT json_group_object(k,v) FROM g
+SELECT hex(jsonb_group_array(v)) FROM g
+SELECT json(jsonb_group_array(v)) FROM g
+SELECT hex(jsonb_group_object(k,v)) FROM g
+SELECT json(jsonb_group_object(k,v)) FROM g
+SELECT json_group_array(v) FROM g WHERE 0
+SELECT json_group_object(k,v) FROM g WHERE 0
+SELECT jsonb_group_array(v) FROM g WHERE 0
+SELECT json_group_array(DISTINCT grp) FROM g
+SELECT json_group_array(v ORDER BY k DESC) FROM g
+SELECT json_group_array(v) FILTER (WHERE grp='x') FROM g
+SELECT json_group_object(NULL,v) FROM g
+SELECT json_group_array(x'00') FROM g
+SELECT json_group_object(k) FROM g
+SELECT id, json_group_array(v) OVER (ORDER BY id) FROM g
+SELECT id, json_group_array(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM g
+SELECT id, json_group_array(id) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM g
+SELECT id, json_group_array(id) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM g
+SELECT id, json_group_object(k,id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM g
+SELECT id, json_group_object(k,v) OVER (PARTITION BY grp ORDER BY id) FROM g ORDER BY id
+SELECT id, hex(jsonb_group_array(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)) FROM g
+SELECT id, json(jsonb_group_object(k,id) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)) FROM g
+SELECT id, json_group_array(id) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM g
+SELECT id, json_group_array(id) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM g
+SELECT id, json_group_array(k) OVER w FROM g WINDOW w AS (ORDER BY id DESC ROWS 2 PRECEDING)
+SELECT json_object('items', (SELECT json_group_array(k) FROM g))
+SELECT json_group_array(json_object('k',k,'v',v)) FROM g
+SELECT k, v -> '$' FROM g ORDER BY id
+SELECT k, json_type(v) FROM g ORDER BY id
+SELECT k, json_valid(v) FROM g ORDER BY id
+SELECT k, json_quote(v) FROM g ORDER BY id
+SELECT id FROM g WHERE v ->> '$[1]' = 2
+----
+# extra cases
+CREATE TABLE doc(id INTEGER PRIMARY KEY, j TEXT, b BLOB);
+INSERT INTO doc(j) VALUES('{"name":"a","tags":["x","y"],"n":1}'),('{"name":"b","tags":[],"n":2.5}'),('{name:"c",tags:["z",],n:0x10}'),('[1,2,3]'),('not json'),(NULL);
+UPDATE doc SET b=jsonb(j) WHERE json_valid(j,2);
+==
+SELECT id, j->>'name' FROM doc WHERE json_valid(j) ORDER BY id
+SELECT id, j->>'name' FROM doc WHERE json_valid(j,2) ORDER BY id
+SELECT id, b->>'name', b->'tags' FROM doc ORDER BY id
+SELECT id, hex(b) FROM doc ORDER BY id
+SELECT id, json_array_length(b,'$.tags') FROM doc ORDER BY id
+SELECT id, json_error_position(j) FROM doc ORDER BY id
+SELECT id, json_type(b) FROM doc ORDER BY id
+SELECT id, json(b) FROM doc ORDER BY id
+SELECT id, json_pretty(b) FROM doc WHERE id<=2 ORDER BY id
+SELECT json_group_array(b->>'n') FROM doc
+SELECT sum(b->>'n') FROM doc
+SELECT id, json_set(b,'$.n',99) FROM doc WHERE id<=3 ORDER BY id
+SELECT id, hex(jsonb_set(b,'$.n',99)) FROM doc WHERE id<=3 ORDER BY id
+SELECT id, json_remove(b,'$.tags[0]') FROM doc ORDER BY id
+SELECT j->>'name' FROM doc
+UPDATE doc SET j=json_set(j,'$.extra',id) WHERE json_valid(j)
+UPDATE doc SET b=jsonb_insert(b,'$.tags[#]','new') WHERE b IS NOT NULL
+----
+# json_each/json_tree: from json101
+==
+SELECT fullkey, atom, '|' FROM json_tree(json_set('{}','$.x',123,'$.x',456))
+SELECT fullkey, atom, '|' FROM json_tree(jsonb_set('{}','$.x',123,'$.x',456))
+SELECT json_insert('{}','$.a',value) FROM json_tree('[1,2,3]') WHERE atom IS NULL
+SELECT json_insert('{}','$.a',value) FROM json_tree('"[1,2,3]"')
+SELECT fullkey FROM json_each('123')
+SELECT fullkey FROM json_each('123.56')
+SELECT fullkey FROM json_each('"hello"')
+SELECT fullkey FROM json_each('null')
+SELECT fullkey FROM json_tree('123')
+SELECT fullkey FROM json_tree('123.56')
+SELECT fullkey FROM json_tree('"hello"')
+SELECT fullkey FROM json_tree('null')
+SELECT * FROM JSON_EACH('{"a":1, "b":2}')
+SELECT xyz.* FROM JSON_EACH('{"a":1, "b":2}') AS xyz
+SELECT * FROM (JSON_EACH('{"a":1, "b":2}'))
+SELECT xyz.* FROM (JSON_EACH('{"a":1, "b":2}')) AS xyz
+SELECT count(*) FROM json_each(NULL)
+SELECT count(*) FROM json_tree(NULL)
+SELECT value FROM json_each(x'CC141761133117621332176313331764133437656565') WHERE key='eee'
+SELECT * FROM json_each(x'CC141761133117621332176313331764133437656565')
+SELECT * FROM json_tree(x'CC141761133117621332176313331764133437656565')
+----
+# json_each/json_tree: from json101
+CREATE TABLE j1(x);
+INSERT INTO j1(x) VALUES('true'),('false'),('null'),('123'),('-234'),('34.5e+6'), ('""'),('"\""'),('"\\"'),('"abcdefghijlmnopqrstuvwxyz"'), ('[]'),('{}'),('[true,false,null,123,-234,34.5e+6,{},[]]'), ('{"a":true,"b":{"c":false}}');
+CREATE TABLE j1b AS SELECT jsonb(x) AS "x" FROM j1;
+CREATE TABLE j2(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO j2(id,json,src) VALUES(1,('{'||char(10)||' "firstName": "John",'||char(10)||' "lastName": "Smith",'||char(10)||' "isAlive": true,'||char(10)||' "age": 25,'||char(10)||' "address": {'||char(10)||' "streetAddress": "21 2nd Street",'||char(10)||' "city": "New York",'||char(10)||' "state": "NY",'||char(10)||' "postalCode": "10021-3100"'||char(10)||' },'||char(10)||' "phoneNumbers": ['||char(10)||' {'||char(10)||' "type": "home",'||char(10)||' "number": "212 555-1234"'||char(10)||' },'||char(10)||' {'||char(10)||' "type": "office",'||char(10)||' "number": "646 555-4567"'||char(10)||' }'||char(10)||' ],'||char(10)||' "children": [],'||char(10)||' "spouse": null'||char(10)||' }'),'https://en.wikipedia.org/wiki/JSON');
+INSERT INTO j2(id,json,src) VALUES(2, ('{'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+INSERT INTO j2(id,json,src) VALUES(3,('['||char(10)||' {'||char(10)||' "id": "0001",'||char(10)||' "type": "donut",'||char(10)||' "name": "Cake",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" },'||char(10)||' { "id": "1003", "type": "Blueberry" },'||char(10)||' { "id": "1004", "type": "Devil''s Food" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5007", "type": "Powdered Sugar" },'||char(10)||' { "id": "5006", "type": "Chocolate with Sprinkles" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0002",'||char(10)||' "type": "donut",'||char(10)||' "name": "Raised",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5005", "type": "Sugar" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' },'||char(10)||' {'||char(10)||' "id": "0003",'||char(10)||' "type": "donut",'||char(10)||' "name": "Old Fashioned",'||char(10)||' "ppu": 0.55,'||char(10)||' "batters":'||char(10)||' {'||char(10)||' "batter":'||char(10)||' ['||char(10)||' { "id": "1001", "type": "Regular" },'||char(10)||' { "id": "1002", "type": "Chocolate" }'||char(10)||' ]'||char(10)||' },'||char(10)||' "topping":'||char(10)||' ['||char(10)||' { "id": "5001", "type": "None" },'||char(10)||' { "id": "5002", "type": "Glazed" },'||char(10)||' { "id": "5003", "type": "Chocolate" },'||char(10)||' { "id": "5004", "type": "Maple" }'||char(10)||' ]'||char(10)||' }'||char(10)||' ]'),'https://adobe.github.io/Spry/samples/data_region/JSONDataSetSample.html');
+CREATE TABLE j2b(id INTEGER PRIMARY KEY, json, src);
+INSERT INTO J2b(id,json,src) SELECT id, jsonb(json), src FROM j2;
+==
+SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_tree(j2.json) AS jx WHERE fullkey!=(path || CASE WHEN typeof(key)=='integer' THEN '['||key||']' ELSE '.'||key END)
+SELECT j2b.rowid, jx.rowid, fullkey, path, key FROM j2b, json_tree(j2b.json) AS jx WHERE fullkey!=(path || CASE WHEN typeof(key)=='integer' THEN '['||key||']' ELSE '.'||key END)
+SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_each(j2.json) AS jx WHERE fullkey!=(path || CASE WHEN typeof(key)=='integer' THEN '['||key||']' ELSE '.'||key END)
+SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_each(j2.json) AS jx WHERE jx.json<>j2.json
+SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_tree(j2.json) AS jx WHERE jx.json<>j2.json
+SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_each(j2.json) AS jx WHERE jx.value<>jx.atom AND type NOT IN ('array','object')
+SELECT j2.rowid, jx.rowid, fullkey, path, key FROM j2, json_tree(j2.json) AS jx WHERE jx.value<>jx.atom AND type NOT IN ('array','object')
+SELECT j2.id, jx.* FROM j2, json_tree(j2.json) AS jx ORDER BY j2.id, jx.id
+SELECT j2b.id, jx.key, jx.value, jx.type, jx.atom, jx.id, jx.parent, jx.fullkey, jx.path FROM j2b, json_tree(j2b.json) AS jx ORDER BY j2b.id, jx.id
+SELECT j2.id, jx.* FROM j2, json_each(j2.json) AS jx
+SELECT j2.id, count(*), max(jx.id) FROM j2, json_tree(j2.json) AS jx GROUP BY j2.id
+SELECT j2.id, jx.fullkey, jx.value FROM j2, json_tree(j2.json, '$.address') AS jx
+SELECT j2.id, jx.fullkey, jx.value FROM j2, json_tree(j2.json, '$[0].batters') AS jx
+SELECT j2.id, jx.key, jx.type FROM j2, json_each(j2.json, '$.phoneNumbers') AS jx
+SELECT j2.id, jx.key, jx.type FROM j2b AS j2, jsonb_each(j2.json, '$[1]') AS jx
+SELECT j2.id, typeof(jx.value), hex(jx.value) FROM j2b AS j2, jsonb_each(j2.json) AS jx WHERE jx.type IN ('array','object')
+SELECT j2.id, typeof(jx.json) FROM j2b AS j2, json_each(j2.json) AS jx LIMIT 3
+SELECT j2.id, jx.fullkey FROM j2, json_tree(j2.json) AS jx WHERE jx.key = 'type' ORDER BY 1, 2
+SELECT DISTINCT jx.type FROM j2, json_tree(j2.json) AS jx ORDER BY 1
+----
+# json_each/json_tree: from json101
+CREATE TABLE t1(id, json);
+INSERT INTO t1(id,json) VALUES(1,'{"items":[3,5]}');
+CREATE TABLE t2(id, json);
+INSERT INTO t2(id,json) VALUES(2,'{"value":2}');
+INSERT INTO t2(id,json) VALUES(3,'{"value":3}');
+INSERT INTO t2(id,json) VALUES(4,'{"value":4}');
+INSERT INTO t2(id,json) VALUES(5,'{"value":5}');
+INSERT INTO t2(id,json) VALUES(6,'{"value":6}');
+==
+SELECT *, 'NL' FROM t1 CROSS JOIN t2 WHERE EXISTS(SELECT 1 FROM json_each(t1.json,'$.items') AS Z WHERE Z.value==t2.id)
+SELECT *, 'NL' FROM t2 CROSS JOIN t1 WHERE EXISTS(SELECT 1 FROM json_each(t1.json,'$.items') AS Z WHERE Z.value==t2.id)
+SELECT t2.id FROM t1, json_each(t1.json,'$.items') AS Z, t2 WHERE Z.value=t2.id
+SELECT t2.id FROM t2 WHERE t2.id IN (SELECT value FROM t1, json_each(t1.json,'$.items'))
+SELECT t2.id, (SELECT count(*) FROM json_each(t2.json)) FROM t2
+SELECT t2.id, (SELECT key FROM json_each(t2.json)) FROM t2
+SELECT t2.id FROM t2 JOIN json_each((SELECT json FROM t1),'$.items') AS z ON z.value=t2.id
+----
+# json_each/json_tree: from json101
+CREATE TABLE t1(a,b,c);
+CREATE TABLE t2(d);
+==
+SELECT * FROM t1 LEFT JOIN t2 ON (SELECT b FROM json_each ORDER BY 1)
+----
+# json_each/json_tree: from json102
+CREATE TABLE user(name,phone,phoneb);
+INSERT INTO user(name,phone) VALUES ('Alice','["919-555-2345","804-555-3621"]'), ('Bob','["201-555-8872"]'), ('Cindy','["704-555-9983"]'), ('Dave','["336-555-8421","704-555-4321","803-911-4421"]');
+UPDATE user SET phoneb=jsonb(phone);
+==
+SELECT DISTINCT user.name FROM user, json_each(user.phone) WHERE json_each.value LIKE '704-%' ORDER BY 1
+SELECT DISTINCT user.name FROM user, json_each(user.phoneb) WHERE json_each.value LIKE '704-%' ORDER BY 1
+SELECT user.name, json_each.key, json_each.value FROM user, json_each(user.phone) ORDER BY 1, 2
+SELECT user.name, count(*) FROM user, json_each(user.phoneb) GROUP BY 1
+----
+# json_each/json_tree: from json102
+CREATE TABLE user(name,phone,phoneb);
+INSERT INTO user(name,phone) VALUES ('Alice','["919-555-2345","804-555-3621"]'), ('Bob','["201-555-8872"]'), ('Cindy','["704-555-9983"]'), ('Dave','["336-555-8421","704-555-4321","803-911-4421"]');
+UPDATE user SET phoneb=jsonb(phone);
+UPDATE user SET phone=json_extract(phone,'$[0]') WHERE json_array_length(phone)<2;
+==
+SELECT name FROM user WHERE phone LIKE '704-%' UNION SELECT user.name FROM user, json_each(user.phone) WHERE json_valid(user.phone) AND json_each.value LIKE '704-%'
+SELECT user.name, json_each.* FROM user, json_each(user.phone) ORDER BY user.rowid
+----
+# json_each/json_tree: from json102
+CREATE TABLE big(json JSON);
+INSERT INTO big(json) VALUES(('{'||char(10)||' "id":123,'||char(10)||' "stuff":[1,2,3,4],'||char(10)||' "partlist":['||char(10)||' {"uuid":"bb108722-572e-11e5-9320-7f3b63a4ca74"},'||char(10)||' {"uuid":"c690dc14-572e-11e5-95f9-dfc8861fd535"},'||char(10)||' {"subassembly":['||char(10)||' {"uuid":"6fa5181e-5721-11e5-a04e-57f3d7b32808"}'||char(10)||' ]}'||char(10)||' ]'||char(10)||' }'));
+INSERT INTO big(json) VALUES(('{'||char(10)||' "id":456,'||char(10)||' "stuff":["hello","world","xyzzy"],'||char(10)||' "partlist":['||char(10)||' {"uuid":false},'||char(10)||' {"uuid":"c690dc14-572e-11e5-95f9-dfc8861fd535"}'||char(10)||' ]'||char(10)||' }'));
+==
+SELECT big.rowid, fullkey, value FROM big, json_tree(big.json) WHERE json_tree.type NOT IN ('object','array') ORDER BY +big.rowid, +json_tree.id
+SELECT big.rowid, fullkey, value FROM big, json_tree(jsonb(big.json)) WHERE json_tree.type NOT IN ('object','array') ORDER BY +big.rowid, +json_tree.id
+SELECT big.rowid, fullkey, atom FROM big, json_tree(big.json) WHERE atom IS NOT NULL ORDER BY +big.rowid, +json_tree.id
+SELECT DISTINCT json_extract(big.json,'$.id') FROM big, json_tree(big.json,'$.partlist') WHERE json_tree.key='uuid' AND json_tree.value='6fa5181e-5721-11e5-a04e-57f3d7b32808'
+SELECT DISTINCT json_extract(big.json,'$.id') FROM big, json_tree(big.json,'$') WHERE json_tree.key='uuid' AND json_tree.value='6fa5181e-5721-11e5-a04e-57f3d7b32808'
+SELECT DISTINCT json_extract(big.json,'$.id') FROM big, json_tree(big.json) WHERE json_tree.key='uuid' AND json_tree.value='6fa5181e-5721-11e5-a04e-57f3d7b32808'
+SELECT big.rowid, json_tree.* FROM big, json_tree(big.json,'$.partlist')
+SELECT big.rowid, json_tree.* FROM big, json_tree(big.json,'$.partlist[2]')
+SELECT big.rowid, json_tree.* FROM big, json_tree(big.json,'$.partlist[2].subassembly')
+SELECT big.rowid, json_each.* FROM big, json_each(big.json,'$.stuff')
+SELECT big.rowid, json_each.* FROM big, jsonb_each(big.json,'$.partlist')
+SELECT big.rowid, key, path, fullkey, parent FROM big, jsonb_tree(jsonb(big.json)) ORDER BY 1, id
+----
+# json_each/json_tree: from json106 (fixed values for random_json)
+CREATE TEMP TABLE t1(j0,j5,p);
+INSERT INTO t1(j0,j5) VALUES('{"a":[1,2.5,{"b":null,"c":"x\u0041y"}],"d e":true,"":[[],{}],"f":-0.0}', '{a:[1,2.5,{b:null,c:''x\u0041y'',}],"d e":true,"":[[],{},],f:-0.0}');
+INSERT INTO t1(j0,j5) VALUES('[[[1]],{"x":{"y":{"z":[0,"q"]}}},false,1e5,"\\"\n"]', '[[[1]],{x:{y:{z:[0x0,"q"]}}},false,1e5,"\\\"\n",]');
+CREATE TEMP TABLE kv(n,key,val);
+INSERT INTO kv SELECT rt.rowid, rt.fullkey, rt.atom FROM t1, json_tree(j0) AS rt WHERE rt.type NOT IN ('object','array');
+==
+SELECT count(*) FROM t1, json_tree(j0) AS rt WHERE rt.type NOT IN ('object','array') AND rt.atom IS NOT (j0 ->> rt.fullkey)
+SELECT count(*) FROM t1, json_tree(j5) AS rt WHERE rt.type NOT IN ('object','array') AND rt.atom IS NOT (j0 ->> rt.fullkey)
+SELECT count(*) FROM t1, kv WHERE key NOT LIKE '%]' AND json_remove(j5,key)->>key IS NOT NULL
+SELECT count(*) FROM t1, kv WHERE json_set(j0,key,'xyzzy')->>key IS NOT 'xyzzy'
+SELECT rt.* FROM t1, json_tree(j0) AS rt
+SELECT rt.* FROM t1, json_tree(j5) AS rt
+SELECT * FROM kv
+----
+# json_each/json_tree: from json107
+==
+SELECT key, value FROM json_tree( CAST('{"a":123,"b":456}' AS blob) ) WHERE atom
+SELECT * FROM json_each( CAST('[1,{"a":2}]' AS blob) )
+----
+# json_each/json_tree: from json108
+CREATE TABLE obj(x);
+INSERT INTO obj VALUES('{name:"value"}');
+CREATE TABLE one(y);
+INSERT INTO one VALUES(1);
+CREATE TABLE zero(z);
+==
+SELECT key, value FROM json_tree(obj.x) JOIN obj
+SELECT key, value FROM json_tree(obj.x) LEFT JOIN obj
+SELECT key, value FROM json_tree(obj.x) LEFT JOIN obj WHERE obj.x!=''
+SELECT key, value FROM json_tree(obj.x), one LEFT JOIN obj WHERE obj.x!=''
+SELECT key, value FROM json_tree(obj.x), obj LEFT JOIN one
+SELECT key, value FROM obj, json_tree(obj.x) LEFT JOIN one
+SELECT key, value FROM one LEFT JOIN json_tree(obj.x), obj
+SELECT key, value FROM one LEFT JOIN obj, json_tree(obj.x)
+SELECT key, value FROM zero LEFT JOIN obj, json_tree(obj.x)
+SELECT key, value FROM obj LEFT JOIN json_tree(obj.x)
+SELECT key, value FROM obj LEFT JOIN zero, json_tree(obj.x)
+----
+# json_each/json_tree: from json502
+CREATE TABLE t1(x JSON);
+INSERT INTO t1(x) VALUES('{a:{b:{c:"hello",},},}');
+==
+SELECT fullkey FROM t1, json_tree(x)
+SELECT * FROM t1, json_tree(x)
+SELECT * FROM t1, json_each(x, '$.a.b')
+----
+# json_each/json_tree: from json502
+==
+SELECT * FROM json_tree('{"\u0017":1}','$."\x17"')
+SELECT * FROM json_each('{"\u0017":1}')
+SELECT * FROM json_tree('{"a\"b":{"c.d":[1]}}')
+----
+# json_each/json_tree: from join
+CREATE TABLE a(value TEXT);
+INSERT INTO a(value) SELECT value FROM json_each('["a", "b", null]');
+CREATE TABLE b(value TEXT);
+INSERT INTO b(value) SELECT value FROM json_each('["a", "c", null]');
+==
+SELECT a.value, b.value FROM a RIGHT JOIN b ON a.value = b.value
+SELECT a.value, b.value FROM json_each('["a", "c", null]') AS b LEFT JOIN json_each('["a", "b", null]') AS a ON a.value = b.value
+SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a RIGHT JOIN b ON a.value = b.value
+SELECT a.value, b.value FROM a RIGHT JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+SELECT a.value, b.value FROM json_each('["a", "b", null]') AS a FULL JOIN json_each('["a", "c", null]') AS b ON a.value = b.value
+----
+# json_each/json_tree: from join8
+CREATE TABLE t1(a INT PRIMARY KEY, b TEXT, c TEXT, d INT) WITHOUT ROWID;
+INSERT INTO t1 VALUES(15,'xray','baker',42);
+==
+SELECT value, t1.* FROM json_each('7') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT a, b FROM t1)
+----
+# json_each/json_tree: from join8
+CREATE TABLE t1(a INTEGER PRIMARY KEY,b);
+INSERT INTO t1 VALUES(0,NULL),(1,2);
+CREATE TABLE a(key TEXT);
+INSERT INTO a(key) VALUES('a'),('b');
+==
+SELECT value, t1.* FROM json_each('17') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
+SELECT value, t1.* FROM json_each('null') NATURAL RIGHT JOIN t1 WHERE (a,b) IN (SELECT rowid, b FROM t1)
+SELECT quote(a.key), b.value FROM a RIGHT JOIN json_each('["a","c"]') AS b ON a.key=b.value
+----
+# json_each/json_tree: from whereF
+CREATE TABLE t6(x);
+==
+SELECT * FROM t6 WHERE 1 IN (SELECT value FROM json_each(x))
+----
+# json_each/json_tree: from whereF
+CREATE TABLE t6(a,b,c);
+INSERT INTO t6 VALUES(0,null,'{"a":0,"b":[3,4,5],"c":{"x":4.5,"y":7.8}}'), (1,null,'{"a":1,"b":[3,4,5],"c":{"x":4.5,"y":7.8}}'), (2,null,'{"a":9,"b":[3,4,5],"c":{"x":4.5,"y":7.8}}');
+CREATE TABLE t(json JSON);
+INSERT INTO t VALUES('{"xyzzy":null}');
+INSERT INTO t VALUES('{"foo":"meep","other":12345}');
+INSERT INTO t VALUES('{"foo":"bingo","alt":5.25}');
+==
+SELECT * FROM t6 WHERE (EXISTS (SELECT 1 FROM json_each(t6.c) AS x WHERE x.value=1))
+SELECT * FROM t WHERE(EXISTS(SELECT 1 FROM json_each(t.json,'$.foo') j WHERE j.value = 'meep'))
+SELECT * FROM t6 WHERE 4 IN (SELECT value FROM json_each(t6.c, '$.b'))
+SELECT a, (SELECT sum(value) FROM json_each(c, '$.b')) FROM t6
+SELECT a, (SELECT group_concat(key) FROM json_tree(c)) FROM t6
+----
+# json_each/json_tree: from tabfunc01
+CREATE TABLE t0(c0);
+INSERT INTO t0 VALUES('[1,2,3]');
+==
+SELECT value FROM json_each(t0.c0), t0
+SELECT value FROM json_each(t0.c0), t0 RIGHT JOIN (SELECT 1) WHERE t0.c0 != 400
+SELECT value FROM json_each(t0.c0), t0 RIGHT JOIN (SELECT 1)
+----
+# json_each/json_tree: from altertab and attach
+CREATE TABLE t1(x);
+CREATE TABLE t2(a,b);
+CREATE TRIGGER x1 AFTER INSERT ON t1 BEGIN INSERT INTO t2(a,b) SELECT key, value FROM json_each(NEW.x); END;
+==
+ALTER TABLE json_each RENAME TO t4
+INSERT INTO t1(x) VALUES('{"a":1}'); SELECT * FROM t2
+INSERT INTO t1(x) VALUES('[1,[2],{"c":3}]'); SELECT * FROM t2
+DROP TABLE json_each
+CREATE INDEX i1 ON json_each(key)
+INSERT INTO json_each(key) VALUES(1)
+DELETE FROM json_tree
+UPDATE json_each SET key=1
+CREATE VIRTUAL TABLE v1 USING json_each
+----
+# json_each/json_tree: from memdb1
+CREATE TABLE t(x);
+==
+SELECT * FROM json_each('[1]')
+SELECT value FROM json_each('[1,2,3]')
+SELECT value FROM json_each('[4,5]')
+----
+# json_each/json_tree: extra, every column and both variants
+==
+SELECT * FROM json_each('{"a":1,"b":[2,3],"c":{"d":"x"}}')
+SELECT * FROM json_tree('{"a":1,"b":[2,3],"c":{"d":"x","e f":null}}')
+SELECT * FROM jsonb_each('{"a":1,"b":[2,3],"c":{"d":"x"}}')
+SELECT key, hex(value), type, atom, id, parent, fullkey, path FROM jsonb_tree('{"a":1,"b":[2,3],"c":{"d":"x"}}')
+SELECT rowid, * FROM json_each('[10,20,30]')
+SELECT rowid, * FROM json_tree('[10,[20,[30]]]')
+SELECT key, value, json, root FROM json_each('[1,2]')
+SELECT key, value, json, root FROM json_tree('{"a":[1]}', '$.a')
+SELECT typeof(key), typeof(value), typeof(atom), typeof(id), typeof(parent) FROM json_tree('[1,"a",2.5,null,true,false,[],{}]')
+SELECT type FROM json_each('[1,"a",2.5,null,true,false,[],{},-1e400,0x10]')
+SELECT value, atom FROM json_each('[1e999,-1e999,0x1F,.5,+3,''s'',"\u00e9"]')
+SELECT * FROM json_each('[]')
+SELECT * FROM json_each('{}')
+SELECT * FROM json_tree('[]')
+SELECT * FROM json_tree('{}')
+SELECT * FROM json_each('5')
+SELECT * FROM json_tree('"str"')
+SELECT * FROM json_each('')
+SELECT * FROM json_each(' [1, 2] ')
+SELECT * FROM json_each('[1,[2,[3,[4,[5]]]]]')
+SELECT * FROM json_tree('[1,[2,[3,[4,[5]]]]]')
+SELECT * FROM json_tree('{"a":{"b":{"c":{"d":{}}}}}')
+SELECT * FROM json_tree('[[[],[]],[{}],{"a":[]}]')
+SELECT * FROM json_each(json_object('k1', 1, 'k 2', 2, '3k', 3, '', 4, 'a.b', 5))
+SELECT fullkey, path FROM json_tree(json_object('k1', json_array(1), 'k 2', json_object('x"y', 2), '3k', 3, '', 4))
+SELECT * FROM json_each('{"a":1,"a":2}')
+SELECT * FROM json_each(json('{a:1, b:[2,], /* c */ c:''x''}'))
+SELECT * FROM json_tree('{a:1, b:[2,], /* c */ c:''x''}')
+SELECT value FROM json_each('["\u0000x", "a\nb", "\t"]')
+SELECT length(value), hex(value) FROM json_each('["\u0000x", "a\"b"]')
+SELECT * FROM json_each(json_array(1, 2.5, 'x', NULL, x'00'))
+SELECT key, value FROM json_each('[' || printf('%.200c', '1') || ']')
+SELECT count(*) FROM json_each(json_group_array(1))
+SELECT count(*), sum(value) FROM json_each((SELECT json_group_array(value) FROM generate_series(1,500)))
+SELECT count(*), max(id) FROM json_tree((SELECT json_group_array(json_array(value, json_object('v', value))) FROM generate_series(1,100)))
+----
+# json_each/json_tree: extra, the path argument
+==
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$')
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a')
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b')
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b[1]')
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.c')
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.x.y.z')
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b[5]')
+SELECT * FROM json_each('{"a":{"b":[1,2]}}', '$.a.b[#-1]')
+SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$')
+SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a')
+SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a.b')
+SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a.b[1]')
+SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.a.b[#-2]')
+SELECT * FROM json_tree('{"a":{"b":[1,2]}}', '$.zz')
+SELECT * FROM json_tree('[[1,[2,3]],[4]]', '$[0][1]')
+SELECT * FROM json_tree('[[1,[2,3]],[4]]', '$[0][1][0]')
+SELECT * FROM json_tree('{"x y":{"z":[7]}}', '$."x y"')
+SELECT * FROM json_tree('{"x y":{"z":[7]}}', '$."x y".z')
+SELECT * FROM json_each('{"x y":{"z":[7]}}', '$."x y"')
+SELECT * FROM json_each('{"x y":{"z":[7]}}', '$."x y".z[0]')
+SELECT * FROM json_each('[1,2,3]', NULL)
+SELECT * FROM json_tree('[1,2,3]', NULL)
+SELECT * FROM json_each(NULL, '$')
+SELECT * FROM json_each('[1,2,3]', '$[1]')
+SELECT * FROM jsonb_each('{"a":[1,{"b":2}]}', '$.a')
+SELECT key, hex(value), fullkey FROM jsonb_tree('{"a":[1,{"b":2}]}', '$.a')
+SELECT * FROM json_each(jsonb('{"a":[1,{"b":2}]}'), '$.a[1]')
+SELECT * FROM json_tree(jsonb('{"a":[1,{"b":2}]}'), '$.a[1].b')
+SELECT * FROM json_tree('{"a":{"a":{"a":1}}}', '$.a.a')
+SELECT * FROM json_tree('[{"a":[{"a":1}]}]', '$[0].a[0]')
+----
+# json_each/json_tree: extra, errors
+==
+SELECT * FROM json_each('[1,2')
+SELECT * FROM json_tree('{"a":')
+SELECT * FROM json_each('{"a":1}x')
+SELECT * FROM json_each('[1]', 'x')
+SELECT * FROM json_tree('[1]', 'x')
+SELECT * FROM json_each('[1]', '$[')
+SELECT * FROM json_each('[1]', '$.a[')
+SELECT * FROM json_each('[1]', '')
+SELECT * FROM json_each('{"a":[1]}', '$.a[x]')
+SELECT * FROM json_each(x'0b01')
+SELECT * FROM json_each(x'00')
+SELECT * FROM json_each(x'1b31')
+SELECT * FROM json_tree(x'cb02133113')
+SELECT * FROM json_each(x'cb021331')
+SELECT * FROM json_each('[1,2]', 5)
+SELECT * FROM json_each(123)
+SELECT * FROM json_each(12.5)
+SELECT * FROM json_each()
+SELECT * FROM json_each('[1]', '$', 3)
+SELECT * FROM json_tree
+SELECT * FROM json_each
+SELECT * FROM jsonx_each('[1]')
+SELECT * FROM json_eachx('[1]')
+SELECT * FROM main.json_each('[1]')
+SELECT * FROM temp.json_each('[1]')
+SELECT json_each.value FROM json_each('[1]')
+SELECT * FROM json_each('[1]') WHERE json = '[2]'
+SELECT * FROM json_each WHERE json = '[1,2]'
+SELECT * FROM json_each WHERE json = '{"a":[1]}' AND root = '$.a'
+SELECT * FROM json_each WHERE json > '[1]'
+SELECT * FROM json_each WHERE root = '$'
+SELECT * FROM json_tree WHERE json IN ('[1]', '[2,3]')
+SELECT * FROM json_each('[1]') AS j, json_each(j.value)
+SELECT * FROM json_each(json_each.value)
+----
+# json_each/json_tree: extra, joins and correlated arguments
+CREATE TABLE doc(id INTEGER PRIMARY KEY, body TEXT, b BLOB);
+INSERT INTO doc VALUES(1, '{"tags":["x","y"],"n":{"a":1,"b":[2,3]}}', NULL);
+INSERT INTO doc VALUES(2, '{"tags":["y","z","w"],"n":{"a":4}}', NULL);
+INSERT INTO doc VALUES(3, '{"tags":[],"n":null}', NULL);
+INSERT INTO doc VALUES(4, NULL, NULL);
+INSERT INTO doc VALUES(5, '[1,2,3]', NULL);
+UPDATE doc SET b = jsonb(body);
+CREATE TABLE tag(name TEXT PRIMARY KEY, w INT);
+INSERT INTO tag VALUES('x',1),('y',2),('z',3);
+CREATE TABLE paths(p);
+INSERT INTO paths VALUES('$.tags'),('$.n'),('$.n.b'),(NULL),('$.zz');
+==
+SELECT doc.id, j.value FROM doc, json_each(doc.body, '$.tags') AS j
+SELECT doc.id, j.value FROM doc, json_each(doc.b, '$.tags') AS j
+SELECT doc.id, j.value, tag.w FROM doc, json_each(doc.body, '$.tags') AS j JOIN tag ON tag.name = j.value
+SELECT doc.id, j.value, tag.w FROM doc, json_each(doc.body, '$.tags') AS j LEFT JOIN tag ON tag.name = j.value
+SELECT doc.id, j.value FROM doc LEFT JOIN json_each(doc.body, '$.tags') AS j
+SELECT doc.id, j.value FROM doc LEFT JOIN json_each(doc.body, '$.tags') AS j ON j.value <> 'y'
+SELECT doc.id, count(j.key) FROM doc LEFT JOIN json_each(doc.body, '$.tags') AS j GROUP BY doc.id
+SELECT doc.id, j.fullkey, j.atom FROM doc, json_tree(doc.body) AS j WHERE j.atom IS NOT NULL ORDER BY doc.id, j.id
+SELECT doc.id, j.fullkey, j.atom FROM doc, json_tree(doc.b, '$.n') AS j ORDER BY doc.id, j.id
+SELECT doc.id, paths.p, j.key, j.value FROM doc, paths, json_each(doc.body, paths.p) AS j
+SELECT doc.id, paths.p, j.fullkey FROM paths, doc, json_tree(doc.body, paths.p) AS j
+SELECT tag.name, (SELECT group_concat(doc.id) FROM doc, json_each(doc.body, '$.tags') AS j WHERE j.value = tag.name) FROM tag
+SELECT tag.name FROM tag WHERE EXISTS (SELECT 1 FROM doc, json_each(doc.body, '$.tags') AS j WHERE j.value = tag.name AND doc.id = 2)
+SELECT doc.id FROM doc WHERE 'z' IN (SELECT value FROM json_each(doc.body, '$.tags'))
+SELECT doc.id FROM doc WHERE (SELECT count(*) FROM json_each(doc.body, '$.tags')) >= 2
+SELECT doc.id, j.value FROM doc CROSS JOIN json_each(doc.body, '$.tags') AS j
+SELECT doc.id, j.value FROM json_each(doc.body, '$.tags') AS j, doc
+SELECT doc.id, j.value FROM json_each(doc.body, '$.tags') AS j JOIN doc
+SELECT a.value, b.value FROM json_each('[1,2,3]') AS a, json_each('[10,20]') AS b
+SELECT a.value, b.value FROM json_each('[[1,2],[3]]') AS a, json_each(a.value) AS b
+SELECT a.key, b.key, c.key FROM json_each('{"p":{"q":{"r":1}}}') AS a, json_each(a.value) AS b, json_each(b.value) AS c
+SELECT a.value, b.value FROM json_each('[1,2,3]') AS a JOIN json_each('[2,3,4]') AS b ON a.value = b.value
+SELECT a.value FROM json_each('[1,2,3]') AS a WHERE a.value NOT IN (SELECT value FROM json_each('[2]'))
+SELECT j.value, t.w FROM tag AS t JOIN json_each('["z","x","q"]') AS j ON j.value = t.name
+SELECT j.value, t.w FROM json_each('["z","x","q"]') AS j LEFT JOIN tag AS t ON j.value = t.name
+SELECT j.value, t.w FROM tag AS t RIGHT JOIN json_each('["z","x","q"]') AS j ON j.value = t.name
+SELECT j.key, j.value FROM doc, json_each(doc.body) AS j WHERE doc.id = 5
+SELECT j.key, j.value FROM doc, json_each(doc.body) AS j WHERE doc.id = 1 AND j.key = 'n'
+SELECT doc.id, json_group_array(j.value) FROM doc, json_each(doc.body, '$.tags') AS j GROUP BY doc.id
+SELECT j.value, count(*) FROM doc, json_each(doc.body, '$.tags') AS j GROUP BY j.value ORDER BY 2 DESC, 1
+SELECT DISTINCT j.value FROM doc, json_each(doc.body, '$.tags') AS j ORDER BY 1
+SELECT doc.id, j.value FROM doc, json_each(doc.body, '$.tags') AS j WHERE j.value > 'x' ORDER BY j.value, doc.id
+SELECT doc.id, j.* FROM doc, json_each(doc.body) AS j WHERE j.type = 'object'
+SELECT doc.id, j.* FROM doc, json_tree(doc.body) AS j WHERE j.parent IS NULL
+SELECT doc.id, j.key FROM doc, json_each(json_extract(doc.body, '$.n')) AS j
+SELECT doc.id, j.key FROM doc, json_each(doc.body -> '$.n') AS j
+SELECT doc.id, j.key FROM doc, json_each(doc.body ->> '$.n') AS j
+SELECT * FROM doc WHERE id IN (SELECT value FROM json_each('[1,3,5]'))
+SELECT * FROM doc WHERE id IN (SELECT value FROM json_each('[1,3,5]')) ORDER BY id DESC
+SELECT * FROM doc JOIN json_each('[1,3,5]') AS j ON doc.id = j.value
+SELECT * FROM json_each('[5,1,3]') AS j JOIN doc ON doc.id = j.value
+SELECT * FROM json_each('[5,1,3]') AS j, doc WHERE doc.id = j.value + 0
+SELECT * FROM doc WHERE id = (SELECT max(value) FROM json_each('[1,3,5]'))
+SELECT doc.id, (SELECT json_group_array(value) FROM json_each(doc.body, '$.tags') ORDER BY value DESC) FROM doc
+WITH x AS (SELECT value AS v FROM json_each('[1,2,3,4]')) SELECT * FROM x, doc WHERE doc.id = x.v
+WITH RECURSIVE r(n, j) AS (SELECT 1, '[[1],[2,[3]]]' UNION ALL SELECT n+1, value FROM r, json_each(r.j) WHERE type = 'array') SELECT * FROM r
+SELECT * FROM (SELECT * FROM json_each('[3,1,2]') ORDER BY value) LIMIT 2
+SELECT * FROM json_each('[3,1,2]') UNION ALL SELECT * FROM json_each('[4]')
+SELECT value FROM json_each('[3,1,2]') UNION SELECT value FROM json_each('[2,4]')
+SELECT value FROM json_each('[3,1,2]') INTERSECT SELECT value FROM json_each('[2,3,4]')
+SELECT value FROM json_each('[3,1,2]') EXCEPT SELECT value FROM json_each('[2,4]')
+----
+# json_each/json_tree: extra, ORDER BY, LIMIT and WHERE on columns
+==
+SELECT * FROM json_each('[3,1,2]') ORDER BY rowid
+SELECT * FROM json_each('[3,1,2]') ORDER BY rowid DESC
+SELECT * FROM json_each('[3,1,2]') ORDER BY value
+SELECT * FROM json_each('[3,1,2]') ORDER BY key DESC
+SELECT * FROM json_each('[3,1,2]') ORDER BY id
+SELECT * FROM json_tree('[3,[1],2]') ORDER BY rowid
+SELECT * FROM json_tree('[3,[1],2]') ORDER BY rowid, value
+SELECT * FROM json_tree('[3,[1],2]') ORDER BY fullkey
+SELECT * FROM json_each('[3,1,2]') LIMIT 2
+SELECT * FROM json_each('[3,1,2]') LIMIT 1 OFFSET 1
+SELECT * FROM json_each('[3,1,2]') ORDER BY rowid LIMIT 2
+SELECT * FROM json_each('[3,1,2]') ORDER BY value LIMIT 2
+SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') LIMIT 3
+SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') ORDER BY id DESC LIMIT 3
+SELECT * FROM json_each('[3,1,2]') WHERE value > 1
+SELECT * FROM json_each('[3,1,2]') WHERE key = 1
+SELECT * FROM json_each('[3,1,2]') WHERE rowid = 1
+SELECT * FROM json_each('[3,1,2]') WHERE rowid IN (0, 2)
+SELECT * FROM json_each('[3,1,2]') WHERE value IN (1, 3)
+SELECT * FROM json_each('[3,1,2]') WHERE value BETWEEN 2 AND 3
+SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE type = 'integer'
+SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE parent = 0
+SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE path = '$.a'
+SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE fullkey LIKE '$.b%'
+SELECT * FROM json_tree('{"a":[1,2],"b":{"c":3}}') WHERE key IS NULL
+SELECT * FROM json_each('{"a":1,"b":2}') WHERE key = 'b'
+SELECT * FROM json_each('{"a":1,"b":2}') WHERE json = '{"a":1,"b":2}'
+SELECT * FROM json_each('{"a":1,"b":2}') WHERE root = '$'
+SELECT key FROM json_each('{"c":1,"a":2,"b":3}') ORDER BY key
+SELECT key FROM json_each('{"c":1,"a":2,"b":3}') ORDER BY 1 DESC LIMIT 2
+SELECT count(*) FROM json_each('[1,2,3]')
+SELECT sum(value), avg(value), min(value), max(value) FROM json_each('[1,2,3,4.5]')
+SELECT group_concat(key, ',') FROM json_each('{"z":1,"y":2}')
+SELECT json_group_array(value) FROM json_each('[1,[2],{"a":3}]')
+SELECT json_group_object(key, value) FROM json_each('{"a":[1],"b":{"c":2}}')
+SELECT json_group_array(value) FROM json_tree('[1,[2],{"a":3}]') WHERE atom IS NOT NULL
+SELECT type, count(*) FROM json_tree('[1,[2,"x"],{"a":3,"b":null}]') GROUP BY type ORDER BY type
+SELECT value FROM json_each('[1,2,3]') WHERE value = (SELECT max(value) FROM json_each('[1,2,3]'))
+SELECT value, row_number() OVER (ORDER BY value DESC) FROM json_each('[3,1,2]')
+SELECT key, value, sum(value) OVER (ORDER BY key) FROM json_each('{"b":2,"a":1,"c":3}')
+SELECT value, lag(value) OVER (), lead(value) OVER () FROM json_each('[3,1,2]')
+----
+# json_each/json_tree: extra, JSONB input
+CREATE TABLE jb(id INTEGER PRIMARY KEY, j BLOB);
+INSERT INTO jb VALUES(1, jsonb('{"a":[1,2,{"b":"x"}],"c":null}'));
+INSERT INTO jb VALUES(2, jsonb('[true,false,1.5,"s",[]]'));
+INSERT INTO jb VALUES(3, jsonb('{a:0x10, b:''q'', c:Infinity}'));
+INSERT INTO jb VALUES(4, x'0c');
+INSERT INTO jb VALUES(5, x'13');
+==
+SELECT jb.id, j.* FROM jb, json_each(jb.j) AS j
+SELECT jb.id, j.* FROM jb, json_tree(jb.j) AS j
+SELECT jb.id, j.key, hex(j.value), j.type, quote(j.atom), j.fullkey, typeof(j.json) FROM jb, jsonb_each(jb.j) AS j
+SELECT jb.id, j.key, hex(j.value), j.type, j.path FROM jb, jsonb_tree(jb.j) AS j
+SELECT jb.id, j.* FROM jb, json_each(jb.j, '$.a') AS j
+SELECT jb.id, j.* FROM jb, json_tree(jb.j, '$.a[2]') AS j
+SELECT jb.id, hex(j.json) FROM jb, json_each(jb.j) AS j WHERE j.key = 'c'
+SELECT * FROM json_each(jsonb_array(1, jsonb_object('a', 2)))
+SELECT * FROM json_tree(jsonb_array(1, jsonb_object('a', 2)))
+SELECT * FROM jsonb_each('[1,[2],{"a":3}]')
+SELECT key, value FROM jsonb_each('[1,[2],{"a":3}]') WHERE type = 'text'
+SELECT key, json(value) FROM jsonb_tree('[1,[2],{"a":3}]')
+SELECT * FROM json_each(x'8c176113317162')
+SELECT * FROM json_each(CAST('[1,2]' AS BLOB))
+SELECT * FROM json_each(x'5b315d')
+SELECT * FROM json_tree(jsonb('"x"'))
+SELECT * FROM json_each(jsonb('null'))
+SELECT json_insert('{}', '$.v', value) FROM jsonb_each('[[1],{"a":2},3]')
+SELECT json_insert('{}', '$.v', value) FROM json_each('[[1],{"a":2},3]')
+SELECT json_array(value) FROM json_tree('{"a":[1,{"b":2}]}')
+----
+# json_each/json_tree: extra, DML and views
+CREATE TABLE src(id INTEGER PRIMARY KEY, j);
+INSERT INTO src VALUES(1, '{"a":1,"b":[1,2]}'), (2, '[5,6]');
+CREATE TABLE dst(id, k, v, t);
+CREATE VIEW flat AS SELECT src.id, j.fullkey, j.atom FROM src, json_tree(src.j) AS j WHERE j.atom IS NOT NULL;
+==
+SELECT * FROM flat
+SELECT * FROM flat WHERE id = 2
+SELECT id, count(*) FROM flat GROUP BY id
+INSERT INTO dst SELECT src.id, j.key, j.value, j.type FROM src, json_each(src.j) AS j; SELECT * FROM dst
+INSERT INTO dst SELECT src.id, j.fullkey, j.value, j.type FROM src, json_tree(src.j) AS j; SELECT * FROM dst ORDER BY rowid
+UPDATE src SET j = (SELECT json_group_array(value) FROM json_each(src.j)); SELECT * FROM src
+DELETE FROM src WHERE EXISTS (SELECT 1 FROM json_each(src.j) WHERE value = 6); SELECT * FROM src
+CREATE TABLE ctas AS SELECT * FROM json_tree('{"a":[1,2]}'); SELECT * FROM ctas
+INSERT INTO dst(id, k) SELECT key, value FROM json_each('{"x":1,"y":2}') RETURNING *
+UPDATE src SET j = json_set(j, '$.n', (SELECT count(*) FROM json_tree(src.j))) RETURNING *
+----
+# json_each/json_tree: extra, schema-level uses
+CREATE TABLE t(j);
+INSERT INTO t VALUES('[1,2]'), ('[3]');
+CREATE VIEW v AS SELECT value FROM json_each('[7,8,9]');
+CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO t2 SELECT value FROM json_each(new.j); END;
+CREATE TABLE t2(x);
+==
+SELECT * FROM v
+SELECT * FROM v WHERE value > 7
+INSERT INTO t VALUES('[4,5,6]'); SELECT * FROM t2
+SELECT * FROM json_each('[1]'); SELECT name FROM pragma_module_list WHERE name LIKE 'json%' ORDER BY 1
+SELECT * FROM jsonb_tree('[1]'); SELECT 'n=' || count(*) FROM JSON_TREE('[2]'); SELECT name FROM pragma_module_list WHERE name LIKE 'json%' ORDER BY 1
+SELECT name FROM pragma_module_list WHERE name LIKE 'json%' ORDER BY 1
+SELECT * FROM json_tree('[1]') AS a, jsonb_each('[2]') AS b, jsonb_tree('[3]') AS c, JSON_EACH('[4]') AS d
+SELECT * FROM pragma_table_info('json_each')
+SELECT * FROM pragma_table_xinfo('json_tree')

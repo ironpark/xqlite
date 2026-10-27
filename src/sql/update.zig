@@ -2,7 +2,8 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
-const pending = @import("pending.zig");
+const vtab = @import("vtab.zig");
+const wi = @import("where_int.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const mem = @import("../vdbe/mem.zig");
@@ -67,12 +68,12 @@ fn updateFromSelect(p: *Parse, i_eph: i32, pk: ?*Index, changes: *ExprList, tab_
     var e_dest: u8 = undefined;
     if (pk) |k| {
         for (0..k.n_key_col) |i| list = try expr_mod.listAppend(p, list, try exprRowColumn(p, k.ai_column[i]));
-        e_dest = SRT.Upfrom;
+        e_dest = if (t.isVirtual()) SRT.Table else SRT.Upfrom;
     } else if (t.isView()) {
         for (0..t.cols.len) |i| list = try expr_mod.listAppend(p, list, try exprRowColumn(p, @intCast(i)));
         e_dest = SRT.Table;
     } else {
-        e_dest = SRT.Upfrom;
+        e_dest = if (t.isVirtual()) SRT.Table else SRT.Upfrom;
         list = try expr_mod.listAppend(p, null, try expr_mod.pExpr(p, TK.ROW, null, null));
     }
     for (changes.slice()) |item| list = try expr_mod.listAppend(p, list, try expr_mod.exprDup(p.arena, item.expr));
@@ -114,7 +115,6 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     var tmask: u8 = 0;
     const trig = trigger.triggersExist(p, t, TK.UPDATE, changes, &tmask);
     const is_view = t.isView();
-    if (p.n_err != 0) return;
 
     // With a FROM clause, the number of new values.
     const n_change_from: i32 = if (tab_list.len() > 1) @intCast(changes.len()) else 0;
@@ -122,10 +122,6 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     if (build.viewGetColumnNames(p, t) != 0) return;
     if (delete_mod.isReadOnly(p, t, trig)) return;
-    if (t.e_tab_type == .vtab) {
-        pending.notYet(p, "virtual tables");
-        return;
-    }
 
     // Cursors for the table and all its indexes (used or not, the index
     // cursors follow the table's).
@@ -215,8 +211,9 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         }
     }
 
-    // The new values are not used by the WHERE loop.
-    tab_list.at(0).col_used = 0;
+    // The new values are not used by the WHERE loop; but a virtual table
+    // must make every column available.
+    tab_list.at(0).col_used = if (t.isVirtual()) wi.ALLBITS else 0;
 
     const has_fk = fkey.fkRequired(p, t, ax_ref, chng_key);
 
@@ -257,27 +254,39 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     // Registers. reg_row_set shares the register of the record until the
     // two-pass method needs it.
-    const reg_row_set = reg_idx[n_all_idx];
-    p.n_mem += 1;
-    const reg_old_rowid = p.n_mem;
-    var reg_new_rowid = reg_old_rowid;
+    var reg_row_set: i32 = 0;
+    var reg_old_rowid: i32 = 0;
+    var reg_new_rowid: i32 = 0;
     var reg_old: i32 = 0;
-    if (chng_pk or trig != null or has_fk != 0) {
-        reg_old = p.n_mem + 1;
+    var reg_new: i32 = 0;
+    if (!t.isVirtual()) {
+        reg_row_set = reg_idx[n_all_idx];
+        p.n_mem += 1;
+        reg_old_rowid = p.n_mem;
+        reg_new_rowid = reg_old_rowid;
+        if (chng_pk or trig != null or has_fk != 0) {
+            reg_old = p.n_mem + 1;
+            p.n_mem += @intCast(t.cols.len);
+        }
+        if (chng_key or trig != null or has_fk != 0) {
+            p.n_mem += 1;
+            reg_new_rowid = p.n_mem;
+        }
+        reg_new = p.n_mem + 1;
         p.n_mem += @intCast(t.cols.len);
     }
-    if (chng_key or trig != null or has_fk != 0) {
-        p.n_mem += 1;
-        reg_new_rowid = p.n_mem;
-    }
-    const reg_new = p.n_mem + 1;
-    p.n_mem += @intCast(t.cols.len);
 
     // A view (with INSTEAD OF triggers) is realized into an ephemeral
     // table.
     if (n_change_from == 0 and is_view) delete_mod.materializeView(p, t, where, null, null, i_data_cur);
 
     if (n_change_from == 0 and resolve.resolveExprNames(&nc, where) != 0) return;
+
+    // Virtual tables are done apart.
+    if (t.isVirtual()) {
+        try updateVirtualTable(p, tab_list, t, changes, rowid_expr, ax_ref, where, on_error);
+        return;
+    }
 
     const label_break = aux.makeLabel(p);
     var label_continue = label_break;
@@ -546,6 +555,130 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     if (p.nested == 0 and p.trigger_tab == null and upsert == null) insert.autoincrementEnd(p);
     if (reg_row_count != 0) delete_mod.codeChangeCount(v, reg_row_count, "rows updated");
+}
+
+/// Port of updateVirtualTable(): UPDATE of a virtual table. By default the
+/// old rowid, the new rowid and the columns of each row to change go to
+/// an ephemeral table, then each row to xUpdate (OP_VUpdate). With the
+/// one-pass strategy (when xBestIndex says the WHERE matches at most one
+/// row) they go to xUpdate from registers instead.
+fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprList, rowid: ?*Expr, ax_ref: []const i32, where: ?*Expr, on_error: u8) Oom!void {
+    const v = p.vdbe.?;
+    const db = p.db;
+    const n_arg: i32 = 2 + @as(i32, @intCast(t.cols.len));
+    const i_csr = src.at(0).i_cursor;
+    var w: ?*where_mod.WhereInfo = null;
+
+    // The registers of the arguments of xUpdate, and the ephemeral table
+    // of their records.
+    const ephem_tab = p.n_tab;
+    p.n_tab += 1;
+    var addr = aux.addOp2(v, OP.OpenEphemeral, ephem_tab, n_arg);
+    const reg_arg = p.n_mem + 1;
+    p.n_mem += n_arg;
+    var e_one_pass: u8 = undefined;
+    if (src.len() > 1) {
+        var pk: ?*Index = null;
+        var row: *Expr = undefined;
+        if (t.hasRowid()) {
+            row = if (rowid) |r| (try expr_mod.exprDup(p.arena, r)).? else try expr_mod.pExpr(p, TK.ROW, null, null);
+        } else {
+            pk = build.primaryKeyIndex(t).?;
+            std.debug.assert(pk.?.n_key_col == 1);
+            const i_pk = pk.?.ai_column[0];
+            if (ax_ref[@intCast(i_pk)] >= 0) {
+                row = (try expr_mod.exprDup(p.arena, changes.at(@intCast(ax_ref[@intCast(i_pk)])).expr)).?;
+            } else {
+                row = try exprRowColumn(p, i_pk);
+            }
+        }
+        var list = try expr_mod.listAppend(p, null, row);
+        for (0..t.cols.len) |i| {
+            if (ax_ref[i] >= 0) {
+                list = try expr_mod.listAppend(p, list, try expr_mod.exprDup(p.arena, changes.at(@intCast(ax_ref[i])).expr));
+            } else {
+                const row_expr = try exprRowColumn(p, @intCast(i));
+                row_expr.op2 = @intCast(vi.OPFLAG.NOCHNG);
+                list = try expr_mod.listAppend(p, list, row_expr);
+            }
+        }
+        try updateFromSelect(p, ephem_tab, pk, list, src, where);
+        e_one_pass = ONEPASS_OFF;
+    } else {
+        p.n_mem += 1;
+        const reg_rec = p.n_mem;
+        p.n_mem += 1;
+        const reg_rowid = p.n_mem;
+
+        // Scan the virtual table.
+        w = where_mod.whereBegin(p, src, where, null, null, null, int.WHERE.ONEPASS_DESIRED, 0) orelse return;
+
+        // The arguments.
+        for (t.cols, 0..) |*c, ii| {
+            const i: i32 = @intCast(ii);
+            std.debug.assert(c.col_flags & COLFLAG.GENERATED == 0);
+            if (ax_ref[ii] >= 0) {
+                ec.exprCode(p, changes.at(@intCast(ax_ref[ii])).expr, reg_arg + 2 + i);
+            } else {
+                _ = aux.addOp3(v, OP.VColumn, i_csr, i, reg_arg + 2 + i);
+                // For sqlite3_vtab_nochange().
+                aux.changeP5(v, vi.OPFLAG.NOCHNG);
+            }
+        }
+        if (t.hasRowid()) {
+            _ = aux.addOp2(v, OP.Rowid, i_csr, reg_arg);
+            if (rowid) |r| {
+                ec.exprCode(p, r, reg_arg + 1);
+            } else {
+                _ = aux.addOp2(v, OP.Rowid, i_csr, reg_arg + 1);
+            }
+        } else {
+            const pk = build.primaryKeyIndex(t).?;
+            std.debug.assert(pk.n_key_col == 1);
+            const i_pk = pk.ai_column[0];
+            _ = aux.addOp3(v, OP.VColumn, i_csr, i_pk, reg_arg);
+            _ = aux.addOp2(v, OP.SCopy, reg_arg + 2 + i_pk, reg_arg + 1);
+        }
+
+        var a_dummy: [2]i32 = undefined;
+        e_one_pass = where_mod.okOnePass(w.?, &a_dummy);
+        // No ONEPASS_MULTI on virtual tables.
+        std.debug.assert(e_one_pass == ONEPASS_OFF or e_one_pass == ONEPASS_SINGLE);
+        if (e_one_pass != ONEPASS_OFF) {
+            // One pass: no ephemeral table.
+            _ = aux.changeToNoop(v, addr);
+            _ = aux.addOp1(v, OP.Close, i_csr);
+        } else {
+            // The record of the arguments goes to the ephemeral table.
+            main_mod.multiWrite(p);
+            _ = aux.addOp3(v, OP.MakeRecord, reg_arg, n_arg, reg_rec);
+            _ = aux.addOp2(v, OP.NewRowid, ephem_tab, reg_rowid);
+            _ = aux.addOp3(v, OP.Insert, ephem_tab, reg_rec, reg_rowid);
+        }
+    }
+
+    if (e_one_pass == ONEPASS_OFF) {
+        // End the virtual table scan, and loop over the ephemeral table,
+        // loading the arguments from each row.
+        if (src.len() == 1) where_mod.whereEnd(w.?);
+        addr = aux.addOp1(v, OP.Rewind, ephem_tab);
+        var i: i32 = 0;
+        while (i < n_arg) : (i += 1) _ = aux.addOp3(v, OP.Column, ephem_tab, i, reg_arg + i);
+    }
+    vtab.makeWritable(p, t);
+    _ = aux.addOp4(v, OP.VUpdate, 0, n_arg, reg_arg, build.vtabP4(db, t));
+    aux.changeP5(v, if (on_error == OE.Default) OE.Abort else on_error);
+    main_mod.mayAbort(p);
+
+    // The end of the loop over the ephemeral table; or with one pass,
+    // where an empty scan jumps.
+    if (e_one_pass == ONEPASS_OFF) {
+        _ = aux.addOp2(v, OP.Next, ephem_tab, addr + 1);
+        aux.jumpHere(v, addr);
+        _ = aux.addOp2(v, OP.Close, ephem_tab, 0);
+    } else {
+        where_mod.whereEnd(w.?);
+    }
 }
 
 /// Port of sqlite3ColumnDefault(): after OP_Column of column `i` of `t`,

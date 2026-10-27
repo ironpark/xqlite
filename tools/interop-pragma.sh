@@ -190,8 +190,10 @@ compare "auto_vacuum=full" f.db "PRAGMA auto_vacuum;
 PRAGMA page_count;
 PRAGMA freelist_count" 0
 integrity "auto_vacuum=full" f.db
+# The shell turns on defensive mode, which refuses journal_mode=OFF.
 for mode in persist truncate off delete; do
-  "$xq" sql j.db "PRAGMA journal_mode=$mode; CREATE TABLE IF NOT EXISTS t(a); INSERT INTO t VALUES('$mode');" > "$tmp/jm.out"
+  "$xq" sql j.db ".dbconfig defensive off" "PRAGMA journal_mode=$mode; CREATE TABLE IF NOT EXISTS t(a); INSERT INTO t VALUES('$mode');" |
+    grep -v '^ *defensive' > "$tmp/jm.out"
   if [ "$(cat "$tmp/jm.out")" != "$mode" ]; then echo "FAIL journal_mode=$mode: $(cat "$tmp/jm.out")"; fail=1; fi
   integrity "journal_mode=$mode" j.db
 done

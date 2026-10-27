@@ -6,6 +6,7 @@ const btree = @import("../btree/btree.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const mem = @import("../vdbe/mem.zig");
 const util = @import("util.zig");
+const vtab = @import("vtab.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
@@ -56,6 +57,7 @@ pub fn rollbackAll(db: *Sqlite3, trip_code: i32) void {
         const bt = d.bt orelse continue;
         bt.rollback(tripError(trip_code), !schema_change) catch {};
     }
+    _ = vtab.rollback(db);
     if (schema_change) {
         @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
         @import("build.zig").resetAllSchemasOfConnection(db);
@@ -206,6 +208,7 @@ pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: 
     const bt = btree.Btree.open(gpa, v, path, .{
         .read_only = flags.read_only,
         .create = flags.create and !flags.read_only,
+        .n_vdbe_read = &db.n_vdbe_read,
     }) catch |err| {
         const rc = errorCode(err);
         errorWithMsg(db, rc, "{s}", .{util.errStr(rc)});
@@ -214,6 +217,9 @@ pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: 
     db.dbs.items[0].bt = bt;
     db.dbs.items[0].schema.enc = db.enc;
     @import("func.zig").registerPerConnectionBuiltinFunctions(db);
+    // The built-in extensions (sqlite3BuiltinExtensions): the reference
+    // build has SQLITE_ENABLE_BYTECODE_VTAB.
+    _ = @import("../vdbe/vdbevtab.zig").init(db);
     errorClear(db);
     return RC.OK;
 }
@@ -227,6 +233,9 @@ fn oomOnOpen(db: *Sqlite3) i32 {
 /// Port of sqlite3_close(): close the connection. Fails with BUSY if
 /// statements are not finalized.
 pub fn close(db: *Sqlite3) i32 {
+    // Disconnect the virtual tables, and those with a transaction too.
+    disconnectAllVtab(db);
+    _ = vtab.rollback(db);
     if (db.vdbe != null) {
         errorWithMsg(db, RC.BUSY, "unable to close due to unfinalized statements or unfinished backups", .{});
         return RC.BUSY;
@@ -242,12 +251,112 @@ pub fn close(db: *Sqlite3) i32 {
     db.dbs.deinit(gpa);
     @import("coll.zig").freeAll(db);
     @import("callback.zig").freeFunctions(db);
+    {
+        vtab.unlockList(db);
+        var it = db.modules.valueIterator();
+        while (it.next()) |m| {
+            vtab.epoTableClear(db, m.*);
+            vtab.moduleUnref(db, m.*);
+        }
+        db.modules.deinit(gpa);
+    }
     if (db.err) |e| {
         mem.release(e);
         gpa.destroy(e);
     }
     gpa.destroy(db);
     return RC.OK;
+}
+
+/// Port of disconnectAllVtab(): disconnect every virtual table of the
+/// connection, as it closes.
+fn disconnectAllVtab(db: *Sqlite3) void {
+    for (db.dbs.items) |d| {
+        var it = d.schema.tbl_hash.valueIterator();
+        while (it.next()) |t| {
+            if (t.*.isVirtual()) vtab.disconnect(db, t.*);
+        }
+    }
+    var it = db.modules.valueIterator();
+    while (it.next()) |m| {
+        if (m.*.epo_tab) |t| vtab.disconnect(db, t);
+    }
+    vtab.unlockList(db);
+}
+
+/// The sqlite3_db_config() options that set or clear connection flags
+/// (the aFlagOp table of sqlite3_db_config()).
+pub const DbConfig = enum {
+    enable_fkey,
+    enable_trigger,
+    enable_view,
+    enable_fts3_tokenizer,
+    enable_load_extension,
+    no_ckpt_on_close,
+    enable_qpsg,
+    trigger_eqp,
+    reset_database,
+    defensive,
+    writable_schema,
+    legacy_alter_table,
+    dqs_ddl,
+    dqs_dml,
+    legacy_file_format,
+    trusted_schema,
+    stmt_scanstatus,
+    reverse_scanorder,
+    enable_attach_create,
+    enable_attach_write,
+    enable_comments,
+
+    pub fn mask(op: DbConfig) u64 {
+        const F = int.DbFlag;
+        return switch (op) {
+            .enable_fkey => F.ForeignKeys,
+            .enable_trigger => F.EnableTrigger,
+            .enable_view => F.EnableView,
+            .enable_fts3_tokenizer => F.Fts3Tokenizer,
+            .enable_load_extension => F.LoadExtension,
+            .no_ckpt_on_close => F.NoCkptOnClose,
+            .enable_qpsg => F.EnableQPSG,
+            .trigger_eqp => F.TriggerEQP,
+            .reset_database => F.ResetDatabase,
+            .defensive => F.Defensive,
+            .writable_schema => F.WriteSchema | F.NoSchemaError,
+            .legacy_alter_table => F.LegacyAlter,
+            .dqs_ddl => F.DqsDDL,
+            .dqs_dml => F.DqsDML,
+            .legacy_file_format => F.LegacyFileFmt,
+            .trusted_schema => F.TrustedSchema,
+            .stmt_scanstatus => F.StmtScanStatus,
+            .reverse_scanorder => F.ReverseOrder,
+            .enable_attach_create => F.AttachCreate,
+            .enable_attach_write => F.AttachWrite,
+            .enable_comments => F.Comments,
+        };
+    }
+};
+
+/// Port of sqlite3_db_config() for the flag options: set (`onoff` > 0) or
+/// clear (0) the flag, or leave it (< 0); returns whether it is set.
+/// Changing a flag expires the prepared statements.
+pub fn dbConfig(db: *Sqlite3, op: DbConfig, onoff: i32) bool {
+    const m = op.mask();
+    const old_flags = db.flags;
+    if (onoff > 0) {
+        db.flags |= m;
+    } else if (onoff == 0) {
+        db.flags &= ~m;
+    }
+    if (old_flags != db.flags) @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
+    return db.flags & m != 0;
+}
+
+/// Port of sqlite3_db_config(SQLITE_DBCONFIG_FP_DIGITS): set the digits
+/// of REAL to text conversions if `n` is 4-23; returns the setting.
+pub fn dbConfigFpDigits(db: *Sqlite3, n: i32) i32 {
+    if (n > 3 and n < 24) db.n_fp_digit = @intCast(n);
+    return db.n_fp_digit;
 }
 
 /// Port of sqlite3_last_insert_rowid().

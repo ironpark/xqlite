@@ -739,3 +739,57 @@ test "sql: a failed ALTER TABLE in a transaction" {
     try c.expectRows("SELECT * FROM e1", "1|2|3\n");
     try c.expectRows("SELECT count(*) FROM sqlite_schema", "1\n");
 }
+
+test "sql: window functions" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t(id INTEGER PRIMARY KEY, g TEXT, v INT);
+        \\INSERT INTO t VALUES(1,'a',10),(2,'a',20),(3,'a',20),(4,'b',5),(5,'b',NULL),(6,'b',7),(7,'c',3);
+    );
+    // Ranking functions over a named window.
+    try c.expectRows(
+        "SELECT id, row_number() OVER w, rank() OVER w, dense_rank() OVER w, percent_rank() OVER w, round(cume_dist() OVER w, 2), ntile(2) OVER w FROM t WINDOW w AS (PARTITION BY g ORDER BY v) ORDER BY id",
+        "1|1|1|1|0.0|0.33|1\n2|2|2|2|0.5|1.0|1\n3|3|2|2|0.5|1.0|2\n4|2|2|2|0.5|0.67|1\n5|1|1|1|0.0|0.33|1\n6|3|3|3|1.0|1.0|2\n7|1|1|1|0.0|1.0|1\n",
+    );
+    // ROWS, RANGE and GROUPS frames, EXCLUDE GROUP.
+    try c.expectRows(
+        "SELECT id, sum(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING), count(v) OVER (ORDER BY v RANGE BETWEEN 5 PRECEDING AND CURRENT ROW), group_concat(id, '.') OVER (ORDER BY v GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE GROUP) FROM t ORDER BY id",
+        "1|30|3|6.2.3\n2|50|2|1\n3|45|2|1\n4|25|2|7.6\n5|12|0|7\n6|10|3|4.1\n7|10|1|5.4\n",
+    );
+    // EXCLUDE CURRENT ROW and EXCLUDE TIES.
+    try c.expectRows(
+        "SELECT id, sum(v) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW), count(*) OVER (ORDER BY v RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING EXCLUDE TIES) FROM t ORDER BY id",
+        "1|NULL|3\n2|10|1\n3|30|1\n4|50|5\n5|55|7\n6|55|4\n7|62|6\n",
+    );
+    // lead(), lag(), first_value(), last_value() and nth_value().
+    try c.expectRows(
+        "SELECT id, lead(v) OVER (ORDER BY id), lag(v, 2, -1) OVER (ORDER BY id), first_value(v) OVER w, last_value(v) OVER w, nth_value(v, 2) OVER w FROM t WINDOW w AS (PARTITION BY g ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) ORDER BY id",
+        "1|20|-1|10|20|20\n2|20|-1|10|20|20\n3|5|10|10|20|20\n4|NULL|20|5|7|NULL\n5|7|20|5|7|NULL\n6|3|5|5|7|NULL\n7|NULL|NULL|3|3|NULL\n",
+    );
+    // Sliding min() and max(), and FILTER.
+    try c.expectRows(
+        "SELECT id, max(v) OVER (ORDER BY id ROWS 2 PRECEDING), min(v) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING), avg(v) FILTER (WHERE id % 2) OVER (ORDER BY id) FROM t ORDER BY id",
+        "1|10|10|10.0\n2|20|5|10.0\n3|20|5|15.0\n4|20|5|15.0\n5|20|3|15.0\n6|7|3|15.0\n7|7|3|11.0\n",
+    );
+    // A window over an aggregate.
+    try c.expectRows("SELECT g, sum(v), sum(sum(v)) OVER (ORDER BY g) FROM t GROUP BY g", "a|50|50\nb|12|62\nc|3|65\n");
+
+    try c.expectError("SELECT row_number() FROM t", "misuse of window function row_number()");
+    try c.expectError("SELECT sum(v) FROM t WHERE sum(v) OVER () > 1", "misuse of window function sum()");
+    try c.expectError("SELECT sum(v) OVER w FROM t", "no such window: w");
+    try c.expectError("SELECT abs(v) OVER () FROM t", "abs() may not be used as a window function");
+    try c.expectError("SELECT rank() FILTER (WHERE 1) OVER () FROM t", "FILTER clause may only be used with aggregate window functions");
+    try c.expectError("SELECT sum(v) OVER (RANGE 1 PRECEDING) FROM t", "RANGE with offset PRECEDING/FOLLOWING requires one ORDER BY expression");
+    try c.expectError("SELECT row_number() OVER () FROM t ORDER BY sum(v)", "misuse of aggregate: sum()");
+    try c.expectError("SELECT sum(v) OVER (ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM t", "unsupported frame specification");
+    try c.expectError("SELECT sum(v) OVER (w PARTITION BY g) FROM t WINDOW w AS (ORDER BY id)", "cannot override PARTITION clause of window: w");
+    try c.expectError("SELECT count(DISTINCT v) OVER () FROM t", "DISTINCT is not supported for window functions");
+    try c.expectError("WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT row_number() OVER () FROM r WHERE x<3) SELECT * FROM r", "cannot use window functions in recursive queries");
+    // Errors found while running.
+    try c.expectError("SELECT sum(v) OVER (ORDER BY id ROWS -1 PRECEDING) FROM t", "frame starting offset must be a non-negative integer");
+    try c.expectError("SELECT sum(v) OVER (ORDER BY v RANGE 'x' PRECEDING) FROM t", "frame starting offset must be a non-negative number");
+    try c.expectError("SELECT ntile(0) OVER (ORDER BY id) FROM t", "argument of ntile must be a positive integer");
+    try c.expectError("SELECT nth_value(v, 0) OVER (ORDER BY id) FROM t", "second argument to nth_value must be a positive integer");
+}

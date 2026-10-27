@@ -31,6 +31,7 @@ const tokenize = @import("../parse/tokenize.zig");
 const btree = @import("../btree/btree.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
+const vtab = @import("vtab.zig");
 const api = @import("../vdbe/api.zig");
 const vi_mem = @import("../vdbe/mem.zig");
 
@@ -133,13 +134,6 @@ fn renameReloadSchema(p: *Parse, i_db: usize, p5: u16) void {
     if (i_db != 1) aux.addParseSchemaOp(v, 1, null, p5);
 }
 
-/// Port of sqlite3IsShadowTableOf(): virtual tables are not supported, so
-/// no table is a shadow table of another.
-fn isShadowTableOf(db: *Sqlite3, t: *Table, name: []const u8) bool {
-    _ = .{ db, t, name };
-    return false;
-}
-
 /// Port of sqlite3AlterRenameTable(): ALTER TABLE src RENAME TO name.
 pub fn renameTable(p: *Parse, src: ?*SrcList, name: Token) void {
     renameTableImpl(p, src orelse return, name) catch build.oomFault(p);
@@ -156,7 +150,7 @@ fn renameTableImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
     // The new name may not be that of another table or index.
     const z_name = (try build.nameFromToken(p.arena, name)).?;
     if (build.findTable(db, z_name, zdb) != null or build.findIndex(db, z_name, zdb) != null or
-        isShadowTableOf(db, t, z_name))
+        build.isShadowTableOf(db, t, z_name))
     {
         util.errorMsg(p, "there is already another table or index with this name: {s}", .{z_name});
         return;
@@ -171,10 +165,16 @@ fn renameTableImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         return;
     }
     if (build.viewGetColumnNames(p, t) != 0) return;
+    // A virtual table with xRename is told of its new name.
+    var vt: ?*int.VTable = null;
+    if (t.isVirtual()) {
+        vt = vtab.getVTable(db, t);
+        if (vt.?.vtab.?.module.x_rename == null) vt = null;
+    }
 
     // The internal functions the nested statements call may raise
     // errors, so the statement needs a statement journal.
-    _ = build.getVdbe(p) orelse return;
+    const v = build.getVdbe(p) orelse return;
     main_mod.mayAbort(p);
 
     const tab_name = t.name;
@@ -238,6 +238,15 @@ fn renameTableImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
             .{ .str = zdb },
             .{ .str = z_name },
         });
+    }
+
+    // xRename renames what the virtual table keeps under its name (its
+    // shadow tables, say).
+    if (vt) |pv| {
+        p.n_mem += 1;
+        const i = p.n_mem;
+        _ = aux.loadString(v, i, z_name);
+        _ = aux.addOp4(v, OP.VRename, i, 0, 0, .{ .vtab = pv });
     }
 
     renameReloadSchema(p, i_db, prepare.INITFLAG_AlterRename);
@@ -358,11 +367,17 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
     if (new.check != null or (col.not_null != 0 and col.col_flags & COLFLAG.GENERATED != 0) or
         t.tab_flags & TF.Strict != 0)
     {
-        // SQLite reads the table-valued function pragma_quick_check() here,
-        // which needs virtual tables; sqlite_alter_quick_check() runs the
-        // same check and raises the same errors.
         p.col_names_set = true;
-        build.nestedParse(p, "SELECT 1 WHERE sqlite_alter_quick_check(%Q,%Q)", &.{
+        build.nestedParse(p, "SELECT CASE WHEN quick_check GLOB 'CHECK*'" ++
+            " THEN raise(ABORT,'CHECK constraint failed')" ++
+            " WHEN quick_check GLOB 'non-* value in*'" ++
+            " THEN raise(ABORT,'type mismatch on DEFAULT')" ++
+            " ELSE raise(ABORT,'NOT NULL constraint failed')" ++
+            " END" ++
+            "  FROM pragma_quick_check(%Q,%Q)" ++
+            " WHERE quick_check GLOB 'CHECK*'" ++
+            " OR quick_check GLOB 'NULL*'" ++
+            " OR quick_check GLOB 'non-* value in*'", &.{
             .{ .str = z_tab },
             .{ .str = zdb },
         });
@@ -1961,43 +1976,6 @@ fn addConstraintImpl(p: *Parse, src: *SrcList, first: Token, name: ?Token, text:
     renameReloadSchema(p, i_db, prepare.INITFLAG_AlterDropCons);
 }
 
-/// The SQL function sqlite_alter_quick_check(TABLE, DB), which stands in
-/// for the pragma_quick_check() table-valued function SQLite reads after
-/// ALTER TABLE ADD COLUMN (virtual tables are not supported). It runs
-/// PRAGMA DB.quick_check(TABLE) and raises the error the SELECT of
-/// sqlite3AlterFinishAddColumn() raises for its first result that is a
-/// CHECK, NOT NULL or STRICT type error; else its result is NULL.
-fn alterQuickCheckFunc(ctx: *Context, argv: []*Mem) void {
-    const db = api.contextDbHandle(ctx);
-    const tab = api.valueText(argv[0]) orelse return;
-    const zdb = api.valueText(argv[1]) orelse return;
-    const sql = printf.mprintf(db.gpa, "PRAGMA %Q.quick_check(%Q)", &.{ .{ .str = zdb }, .{ .str = tab } }) catch
-        return api.resultErrorNomem(ctx);
-    defer db.gpa.free(sql);
-    var stmt: ?*vi.Vdbe = null;
-    var rc = prepare.prepareV2(db, sql, &stmt, null);
-    if (rc != RC.OK) return api.resultErrorCode(ctx, rc);
-    const s = stmt orelse return;
-    defer _ = api.finalize(s);
-    while (true) {
-        rc = api.step(s);
-        if (rc != RC.ROW) break;
-        const msg = api.columnText(s, 0) orelse continue;
-        const err: []const u8 = if (std.mem.startsWith(u8, msg, "CHECK"))
-            "CHECK constraint failed"
-        else if (std.mem.startsWith(u8, msg, "non-") and std.mem.indexOf(u8, msg[4..], " value in") != null)
-            "type mismatch on DEFAULT"
-        else if (std.mem.startsWith(u8, msg, "NULL"))
-            "NOT NULL constraint failed"
-        else
-            continue;
-        api.resultError(ctx, err);
-        api.resultErrorCode(ctx, RC.CONSTRAINT_TRIGGER);
-        return;
-    }
-    if (rc != RC.DONE) api.resultErrorCode(ctx, rc);
-}
-
 // ========================================================= registration
 
 /// INTERNAL_FUNCTION(): a built-in that only nested statements may call.
@@ -2020,14 +1998,6 @@ var alter_table_funcs = [_]FuncDef{
     internalFunction("sqlite_fail", 2, failConstraintFunc),
     internalFunction("sqlite_add_constraint", 3, addConstraintFunc),
     internalFunction("sqlite_find_constraint", 2, findConstraintFunc),
-    // Not constant: it reads the table, and must not be factored out of
-    // the statement to run before the table has the new column.
-    .{
-        .n_arg = 2,
-        .func_flags = FUNC.BUILTIN | FUNC.INTERNAL | vi.ENC.UTF8,
-        .x_sfunc = alterQuickCheckFunc,
-        .name = "sqlite_alter_quick_check",
-    },
 };
 
 /// Port of sqlite3AlterFunctions(): register the built-in functions of

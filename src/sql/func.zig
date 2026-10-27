@@ -69,7 +69,7 @@ pub fn ptrToInt(p: ?*const anyopaque) usize {
 // ================================================================ helpers
 
 /// sqlite3Utf8Trans1: the value bits of a UTF-8 lead byte (0xc0..0xff).
-const utf8_trans1 = [64]u8{
+pub const utf8_trans1 = [64]u8{
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
@@ -148,7 +148,7 @@ fn skipAccumulatorLoad(ctx: *Context) void {
 /// The aggregate context as a `T`, created zeroed if `create`. The
 /// buffer comes from the connection's allocator, aligned for any `T`
 /// used here.
-fn aggContext(comptime T: type, ctx: *Context, create: bool) ?*T {
+pub fn aggContext(comptime T: type, ctx: *Context, create: bool) ?*T {
     const b = api.aggregateContext(ctx, if (create) @sizeOf(T) else 0) orelse return null;
     return @ptrCast(@alignCast(b.ptr));
 }
@@ -168,10 +168,10 @@ fn contextMalloc(ctx: *Context, n_byte: i64) ?[]u8 {
     };
 }
 
-/// Hand `buf` (from the connection's allocator) to the result as the
-/// text in buf[0..n], as sqlite3_result_text(...,sqlite3_free) does.
-fn resultOwnedText(ctx: *Context, buf: []u8, n: usize) void {
-    const gpa = api.contextDbHandle(ctx).gpa;
+/// Hand `buf` (from `gpa`, the connection's allocator) to the result as
+/// the text in buf[0..n] (buf[n] becomes the terminator), as
+/// sqlite3_result_text(...,sqlite3_free) does.
+pub fn resultOwnedText(ctx: *Context, gpa: std.mem.Allocator, buf: []u8, n: usize) void {
     std.debug.assert(buf.len > n);
     buf[n] = 0;
     const z = if (buf.len == n + 1) buf else gpa.realloc(buf, n + 1) catch {
@@ -183,8 +183,7 @@ fn resultOwnedText(ctx: *Context, buf: []u8, n: usize) void {
 }
 
 /// Like resultOwnedText() for the blob in buf[0..n].
-fn resultOwnedBlob(ctx: *Context, buf: []u8, n: usize) void {
-    const gpa = api.contextDbHandle(ctx).gpa;
+pub fn resultOwnedBlob(ctx: *Context, gpa: std.mem.Allocator, buf: []u8, n: usize) void {
     if (n == 0) {
         gpa.free(buf);
         api.resultBlob(ctx, "", .static);
@@ -1020,7 +1019,7 @@ fn unistrFunc(ctx: *Context, argv: []*Mem) void {
         api.resultError(ctx, "invalid Unicode escape");
         return;
     }
-    resultOwnedText(ctx, z_out, j);
+    resultOwnedText(ctx, api.contextDbHandle(ctx).gpa, z_out, j);
 }
 
 /// quoteFunc(): quote(X), the SQL literal for X. With user data,
@@ -1051,7 +1050,7 @@ fn charFunc(ctx: *Context, argv: []*Mem) void {
         const c: u32 = @intCast(x & 0x1fffff);
         n += printf.appendOneUtf8Character(z[n..], c);
     }
-    resultOwnedText(ctx, z, n);
+    resultOwnedText(ctx, gpa, z, n);
 }
 
 /// hexFunc(): hex(X), the bytes of X as upper-case hex text.
@@ -1119,7 +1118,7 @@ fn unhexFunc(ctx: *Context, argv: []*Mem) void {
         blob[p] = (util.hexToInt(c) << 4) | util.hexToInt(d);
         p += 1;
     }
-    resultOwnedBlob(ctx, blob, p);
+    resultOwnedBlob(ctx, api.contextDbHandle(ctx).gpa, blob, p);
 }
 
 /// zeroblobFunc(): zeroblob(N).
@@ -1183,7 +1182,7 @@ fn replaceFunc(ctx: *Context, argv: []*Mem) void {
     const tail: usize = @intCast(n_str - i);
     @memcpy(z_out[j..][0..tail], z_str[@intCast(i)..]);
     j += tail;
-    resultOwnedText(ctx, z_out, j);
+    resultOwnedText(ctx, db.gpa, z_out, j);
 }
 
 /// trimFunc(): trim(), ltrim() and rtrim(), with an optional set of
@@ -1273,7 +1272,7 @@ fn concatFuncCore(ctx: *Context, argv: []*Mem, sep: []const u8) void {
         }
     }
     std.debug.assert(j <= n);
-    resultOwnedText(ctx, z, j);
+    resultOwnedText(ctx, gpa, z, j);
 }
 
 /// concatFunc(): concat(...).
@@ -1920,10 +1919,9 @@ var builtin_funcs = [_]FuncDef{
 /// Port of sqlite3RegisterBuiltinFunctions(): fill the global table of
 /// built-in functions. Called once, by callback.registerBuiltins().
 pub fn registerBuiltinFunctions() void {
-    // TODO: sqlite3WindowFunctions() (window.c: row_number(), rank(), ...)
-    // and sqlite3RegisterJsonFunctions() (json.c) are called here once
-    // ported.
     @import("alter.zig").alterFunctions();
+    @import("window.zig").windowFunctions();
+    @import("json.zig").registerJsonFunctions();
     callback.insertBuiltinFuncs(&builtin_funcs);
     callback.insertBuiltinFuncs(&date_funcs);
 }

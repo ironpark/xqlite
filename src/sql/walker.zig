@@ -113,17 +113,13 @@ pub fn walkSelectExpr(w: *Walker, s: *Select) u8 {
     if (s.win_defn) |defn| {
         const in_rename = if (w.parse) |p| p.inRenameObject() else false;
         if (w.select_callback2 == walkWinDefnDummyCallback or in_rename or
-            w.select_callback2 == select_pop_with)
+            w.select_callback2 == @as(?*const fn (*Walker, *Select) void, @import("select.zig").selectPopWith))
         {
             return walkWindowList(w, defn, false);
         }
     }
     return WRC.Continue;
 }
-
-/// sqlite3SelectPopWith, registered by the CTE code; walkSelectExpr walks
-/// window definitions for it.
-pub var select_pop_with: ?*const fn (w: *Walker, s: *Select) void = null;
 
 /// Port of sqlite3WalkSelectFrom(): visit the subqueries and table-valued
 /// function arguments of a FROM clause.

@@ -375,6 +375,8 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
     }
     p.prep_flags = prep_flags;
 
+    if (db.disconnect != null) @import("vtab.zig").unlockList(db);
+
     _ = tokenize.runParser(&p, sql) catch {
         db.malloc_failed = true;
     };

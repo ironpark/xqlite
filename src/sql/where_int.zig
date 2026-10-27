@@ -18,9 +18,10 @@
 //! WhereLevel.u) are separate fields here, so reading the "wrong" member,
 //! as the C code sometimes does harmlessly, is not a safety panic.
 //!
-//! Not ported: virtual tables (xBestIndex), STAT4 (SQLITE_ENABLE_STAT4 is
-//! off by default in SQLite as well), scan status. Of WHERETRACE only the
-//! WhereLoop listing is ported (traceEnabled, showAllLoops).
+//! Not ported: STAT4 (SQLITE_ENABLE_STAT4 is off by default in SQLite as
+//! well), scan status. Of WHERETRACE only the WhereLoop listing is ported
+//! (traceEnabled, showAllLoops; the xBestIndex inputs and outputs are not
+//! printed).
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -86,6 +87,11 @@ pub fn showAllLoops(w: *WhereInfo, wc: *const WhereClause) void {
 /// MASKBIT(n).
 pub inline fn maskBit(n: anytype) Bitmask {
     return @as(Bitmask, 1) << @intCast(n);
+}
+
+/// SMASKBIT32: bit `n` of a u32 mask, 0 for n >= 32.
+pub inline fn smaskBit32(n: anytype) u32 {
+    return if (n < 32) @as(u32, 1) << @intCast(n) else 0;
 }
 
 /// ALLBITS.
@@ -194,7 +200,9 @@ pub const WhereLoopBtree = struct {
     order_by: ?*ExprList = null,
 };
 
-/// WhereLoop.u.vtab (virtual tables are not ported; kept for the shape).
+/// WhereLoop.u.vtab. With need_free, idx_str is from db.gpa and the loop
+/// owns it (whereLoopClearUnion() frees it, OP_VFilter takes it over);
+/// otherwise the module keeps it valid.
 pub const WhereLoopVtab = struct {
     idx_num: i32 = 0,
     need_free: bool = false,

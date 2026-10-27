@@ -392,6 +392,56 @@ fn integerValue(z_arg: []const u8) i64 {
     return if (neg) -%v else v;
 }
 
+/// Port of the .dbconfig command: show, or set and show, the
+/// sqlite3_db_config() options.
+fn dotDbconfig(p: *Shell) Error!u8 {
+    const args = p.dot_args.items;
+    const Choice = struct { name: []const u8, op: ?sql.main.DbConfig };
+    const choices = [_]Choice{
+        .{ .name = "attach_create", .op = .enable_attach_create },
+        .{ .name = "attach_write", .op = .enable_attach_write },
+        .{ .name = "comments", .op = .enable_comments },
+        .{ .name = "defensive", .op = .defensive },
+        .{ .name = "dqs_ddl", .op = .dqs_ddl },
+        .{ .name = "dqs_dml", .op = .dqs_dml },
+        .{ .name = "enable_fkey", .op = .enable_fkey },
+        .{ .name = "enable_qpsg", .op = .enable_qpsg },
+        .{ .name = "enable_trigger", .op = .enable_trigger },
+        .{ .name = "enable_view", .op = .enable_view },
+        .{ .name = "fts3_tokenizer", .op = .enable_fts3_tokenizer },
+        // SQLITE_DBCONFIG_FP_DIGITS.
+        .{ .name = "fp_digits", .op = null },
+        .{ .name = "legacy_alter_table", .op = .legacy_alter_table },
+        .{ .name = "legacy_file_format", .op = .legacy_file_format },
+        .{ .name = "load_extension", .op = .enable_load_extension },
+        .{ .name = "no_ckpt_on_close", .op = .no_ckpt_on_close },
+        .{ .name = "reset_database", .op = .reset_database },
+        .{ .name = "reverse_scanorder", .op = .reverse_scanorder },
+        .{ .name = "stmt_scanstatus", .op = .stmt_scanstatus },
+        .{ .name = "trigger_eqp", .op = .trigger_eqp },
+        .{ .name = "trusted_schema", .op = .trusted_schema },
+        .{ .name = "writable_schema", .op = .writable_schema },
+    };
+    var found = false;
+    for (choices) |ch| {
+        if (args.len > 1 and !std.mem.eql(u8, args[1], ch.name)) continue;
+        found = true;
+        if (ch.op) |op| {
+            const onoff: i32 = if (args.len >= 3) @intFromBool(try booleanValue(p, args[2])) else -1;
+            const v = sql.main.dbConfig(p.db, op, onoff);
+            try p.print("{s:>19} {s}\n", .{ ch.name, if (v) "on" else "off" });
+        } else {
+            const v = sql.main.dbConfigFpDigits(p.db, if (args.len >= 3) @truncate(integerValue(args[2])) else -1);
+            try p.print("{s:>19} {d}\n", .{ ch.name, v });
+        }
+        if (args.len > 1) break;
+    }
+    if (args.len > 1 and !found) {
+        try dotCmdError(p, 1, "unknown dbconfig", "Enter \".dbconfig\" with no arguments for a list");
+    }
+    return 0;
+}
+
 /// Port of booleanValue().
 fn booleanValue(p: *Shell, z: []const u8) Error!bool {
     var i: usize = 0;
@@ -880,6 +930,8 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
             try p.eprint("Usage: .changes on|off\n", .{});
             rc = 1;
         }
+    } else if (c == 'd' and n >= 3 and isCmd(cmd, "dbconfig")) {
+        rc = try dotDbconfig(p);
     } else if (c == 'd' and isCmd(cmd, "dump")) {
         rc = try dotDump(p);
     } else if (c == 'e' and isCmd(cmd, "echo")) {
@@ -1382,6 +1434,16 @@ fn dotDump(p: *Shell) Error!u8 {
         p.mode.deinit(gpa);
         p.mode = saved_mode;
     }
+    // outputDumpWarning(): virtual tables are dumped by writing to
+    // sqlite_schema.
+    {
+        var w: std.ArrayList(u8) = .empty;
+        defer w.deinit(gpa);
+        try w.print(gpa, "SELECT 1 FROM sqlite_schema o WHERE sql LIKE 'CREATE VIRTUAL TABLE%' AND ({s})", .{like.items});
+        if (try queryInt(p, w.items) == 1) {
+            try p.out.writeAll("/* WARNING: Script requires that SQLITE_DBCONFIG_DEFENSIVE be disabled */\n");
+        }
+    }
     const data_only = flags & dump_data_only != 0;
     if (!data_only) try p.out.writeAll("PRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n");
     p.writable_schema = false;
@@ -1855,6 +1917,19 @@ pub fn run(gpa: Allocator, io: Io, path: ?[]const u8, cmds: []const []const u8, 
         try err_out.print("Error: unable to open database \"{s}\": {s}\n", .{ filename, sql.main.errmsg(db) });
         try err_out.flush();
         return 1;
+    }
+    // open_db(): without --unsafe-testing (not ported), the schema is not
+    // trusted (SQLITE_DBCONFIG_TRUSTED_SCHEMA off) and the connection is in
+    // defensive mode (SQLITE_DBCONFIG_DEFENSIVE on).
+    _ = sql.main.dbConfig(db, .trusted_schema, 0);
+    _ = sql.main.dbConfig(db, .defensive, 1);
+    // The extensions the sqlite3 shell builds in.
+    _ = xqlite.ext.series.init(db);
+    // For differential testing against an sqlite3 built with vtablog.c
+    // (see tools/planner/README.md).
+    if (std.c.getenv("XQ_VTABLOG") != null) {
+        xqlite.ext.vtablog.out = out;
+        _ = xqlite.ext.vtablog.init(db);
     }
 
     var stdin_buf: [16384]u8 = undefined;

@@ -276,6 +276,17 @@ pub fn valueNumericType(m: *Mem) i32 {
     return mem.valueNumericType(m);
 }
 
+/// Port of sqlite3_value_pointer(): the pointer of a pointer value of
+/// type `ptype` (sqlite3_result_pointer()), or null.
+pub fn valuePointer(m: *const Mem, ptype: [:0]const u8) ?*anyopaque {
+    if (m.flags & (MEM.TypeMask | MEM.Term | MEM.Subtype) == MEM.Null | MEM.Term | MEM.Subtype and
+        m.e_subtype == 'p' and std.mem.eql(u8, std.mem.span(m.u.z_ptype), ptype))
+    {
+        return @ptrCast(m.z);
+    }
+    return null;
+}
+
 /// Port of sqlite3_value_subtype().
 pub fn valueSubtype(m: *const Mem) u32 {
     return if (m.flags & MEM.Subtype != 0) m.e_subtype else 0;
@@ -628,6 +639,48 @@ pub fn userData(ctx: *const Context) ?*anyopaque {
 /// Port of sqlite3_context_db_handle().
 pub fn contextDbHandle(ctx: *const Context) *Sqlite3 {
     return ctx.out.db.?;
+}
+
+/// Port of sqlite3_get_auxdata(): the auxiliary data of argument `i_arg`
+/// of this function call, or for a negative `i_arg` of the statement;
+/// null if there is none.
+pub fn getAuxdata(ctx: *const Context, i_arg: i32) ?*anyopaque {
+    const v = ctx.vdbe orelse return null;
+    var p = v.aux_data;
+    while (p) |aux_data| : (p = aux_data.next_aux) {
+        if (aux_data.i_aux_arg == i_arg and (aux_data.i_aux_op == ctx.i_op or i_arg < 0)) {
+            return aux_data.aux;
+        }
+    }
+    return null;
+}
+
+/// Port of sqlite3_set_auxdata(): keep `aux` as the auxiliary data of
+/// argument `i_arg` (of the statement if negative); `x_delete` frees it
+/// when it is replaced or no longer needed.
+pub fn setAuxdata(ctx: *Context, i_arg: i32, p_aux: ?*anyopaque, x_delete: ?*const fn (?*anyopaque) void) void {
+    const v = ctx.vdbe orelse {
+        if (x_delete) |del| del(p_aux);
+        return;
+    };
+    var p = v.aux_data;
+    const found: *vi.AuxData = while (p) |aux_data| : (p = aux_data.next_aux) {
+        if (aux_data.i_aux_arg == i_arg and (aux_data.i_aux_op == ctx.i_op or i_arg < 0)) {
+            if (aux_data.x_delete_aux) |del| del(aux_data.aux);
+            break aux_data;
+        }
+    } else blk: {
+        const new = v.db.gpa.create(vi.AuxData) catch {
+            if (x_delete) |del| del(p_aux);
+            return;
+        };
+        new.* = .{ .i_aux_op = ctx.i_op, .i_aux_arg = i_arg, .aux = null, .x_delete_aux = null, .next_aux = v.aux_data };
+        v.aux_data = new;
+        if (ctx.is_error == 0) ctx.is_error = -1;
+        break :blk new;
+    };
+    found.aux = p_aux;
+    found.x_delete_aux = x_delete;
 }
 
 /// Port of sqlite3_aggregate_context(): `n` zeroed bytes kept for the

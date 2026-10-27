@@ -19,7 +19,6 @@ const insert = @import("insert.zig");
 const delete = @import("delete.zig");
 const select = @import("select.zig");
 const coll_mod = @import("coll.zig");
-const pending = @import("pending.zig");
 const wi = @import("where_int.zig");
 const we = @import("where_expr.zig");
 const wl = @import("where_loop.zig");
@@ -556,7 +555,16 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
         } else {
             loop = last;
         }
-        // WHERE_VIRTUALTABLE branch removed (virtual tables not ported).
+        if (loop.ws_flags & WHERE_VIRTUALTABLE != 0) {
+            if (loop.vtab.is_ordered != 0 and w.order_by == order_by) {
+                ob_sat = ob_done;
+            } else {
+                // No further ORDER BY terms may be matched: the result
+                // must be >= 0, not -1.
+                is_order_distinct = false;
+            }
+            break;
+        }
         const i_cur = w.tab_list.at(loop.i_tab).i_cursor;
 
         // Mark off the ORDER BY terms X of this table with a WHERE term
@@ -1132,7 +1140,8 @@ fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
 fn whereInterstageHeuristic(w: *WhereInfo) void {
     for (w.levels()) |*level| {
         const l = level.w_loop orelse break;
-        // WHERE_VIRTUALTABLE check removed (virtual tables not ported).
+        // A vtab scan is like a full table scan.
+        if (l.ws_flags & WHERE_VIRTUALTABLE != 0) break;
         if (l.ws_flags & (WHERE_COLUMN_EQ | WHERE_COLUMN_NULL | WHERE_COLUMN_IN) != 0) {
             const i_tab = l.i_tab;
             var it = w.loops;
@@ -1370,9 +1379,17 @@ fn whereReverseScanOrder(w: *WhereInfo) void {
 }
 
 /// Port of whereInfoFree(): the memory is the Parse arena's, so only the
-/// WHERE clause is cleared.
+/// WHERE clause is cleared and the idxStr the loops own freed.
 fn whereInfoFree(w: *WhereInfo) void {
     we.clauseClear(&w.s_wc);
+    freeLoops(w);
+}
+
+/// The whereLoopDelete() calls of whereInfoFree(): free what the loops
+/// own outside the arena.
+fn freeLoops(w: *WhereInfo) void {
+    var it = w.loops;
+    while (it) |l| : (it = l.next_loop) wl.whereLoopClearUnion(w.parse.db, l);
 }
 
 /// The whereBeginError path of sqlite3WhereBegin().
@@ -1422,14 +1439,6 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
         return null;
     }
 
-    // Virtual tables are not ported.
-    for (tab_list.slice()) |*item| {
-        if (item.s_tab.?.e_tab_type == .vtab) {
-            pending.notYet(p, "virtual tables");
-            return null;
-        }
-    }
-
     // With WHERE_OR_SUBCLAUSE only the first table is coded; the cursors
     // of the others are uninitialized.
     var n_tab_list: usize = if (wctrl_flags & WHERE.OR_SUBCLAUSE != 0) 1 else tab_list.len();
@@ -1450,6 +1459,8 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
         .a = try p.arena.alloc(WhereLevel, n_tab_list),
     };
     @memset(w.a, .{});
+    // On OOM, as whereInfoFree() of whereBeginError.
+    errdefer freeLoops(w);
     w.i_break = aux.makeLabel(p);
     w.i_continue = w.i_break;
     std.debug.assert(w.e_one_pass == ONEPASS_OFF);
@@ -1622,10 +1633,13 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
         }
         if (tab.tab_flags & TF.Ephemeral != 0 or tab.isView()) {
             // Do nothing.
+        } else if (loop.ws_flags & WHERE_VIRTUALTABLE != 0) {
+            _ = aux.addOp4(v, OP.VOpen, tab_item.i_cursor, 0, 0, build.vtabP4(db, tab));
+        } else if (tab.isVirtual()) {
+            // Nothing.
         } else if ((loop.ws_flags & WHERE_IDX_ONLY == 0 and wctrl_flags & WHERE.OR_SUBCLAUSE == 0) or
             tab_item.fg.jointype & (JT.LTORJ | JT.RIGHT) != 0)
         {
-            // (The OP_VOpen branch for virtual tables is removed.)
             var op: u8 = OP.OpenRead;
             if (w.e_one_pass != ONEPASS_OFF) {
                 op = OP.OpenWrite;

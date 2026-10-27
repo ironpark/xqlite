@@ -1,0 +1,596 @@
+# pragma_* table-valued functions: hidden arg/schema columns, joins with sqlite_schema, ORDER BY, LIMIT
+create table t1(a integer primary key, b text, c real);
+create index t1b on t1(b);
+create table t2(x int, y int unique, z, foreign key(z) references t1(a));
+create view v1 as select a, b from t1;
+create table t3(p, q, r, primary key(p,q)) without rowid;
+insert into t1 values(1,'one',1.5),(2,'two',2.5),(3,'three',3.5);
+insert into t2 values(1,10,1),(2,20,2),(3,30,9);
+==
+select * from pragma_table_info('t1')
+select * from pragma_table_info('t2')
+select * from pragma_table_xinfo('t3')
+select name from pragma_table_info('t1') where pk
+select name, type from pragma_table_info('t1') order by name
+select * from pragma_table_info('t1') where cid>0
+select * from pragma_table_info('nosuch')
+select * from pragma_table_info
+select count(*) from pragma_table_info('t1')
+select * from pragma_index_list('t1')
+select * from pragma_index_list('t2')
+select * from pragma_index_info('t1b')
+select * from pragma_index_xinfo('t1b')
+select * from pragma_foreign_key_list('t2')
+select * from pragma_foreign_key_check
+select * from pragma_foreign_key_check('t2')
+select * from pragma_table_list order by name
+select * from pragma_table_list('t1')
+select name, ncol from pragma_table_list where schema='main' order by name
+select * from pragma_quick_check
+select * from pragma_integrity_check
+select * from pragma_integrity_check('t1')
+select * from pragma_quick_check(1)
+select * from pragma_page_size
+select * from pragma_user_version
+select * from pragma_application_id
+select * from pragma_freelist_count
+select * from pragma_page_count
+select * from pragma_encoding
+select * from pragma_schema_version
+select * from pragma_foreign_keys
+select * from pragma_journal_mode
+select * from pragma_synchronous
+select * from pragma_cache_size
+select * from pragma_auto_vacuum
+select * from pragma_busy_timeout
+select name from pragma_function_list where name='abs'
+select name, narg from pragma_function_list where name like 'sub%' order by 1,2
+select count(*)>100 from pragma_pragma_list
+select name from pragma_pragma_list where name like 'table%' order by 1
+select s.name, i.name from sqlite_schema s, pragma_table_info(s.name) i where s.type='table' order by 1,2
+select s.name, i.name from sqlite_schema s join pragma_index_list(s.name) i order by 1,2
+select s.name, count(*) from sqlite_schema s, pragma_table_info(s.name) group by 1 order by 1
+select t.name, c.name from pragma_table_list t, pragma_table_info(t.name) c where t.type='table' and t.schema='main' order by 1,2
+select * from pragma_table_info('t1') where arg='t1'
+select * from pragma_table_info where arg='t1'
+select * from pragma_table_info where arg='t1' and schema='main'
+select * from pragma_table_info('t1','main')
+select * from pragma_table_info('t1','temp')
+select * from pragma_table_info('t1') where schema='main'
+select arg, schema from pragma_table_info('t1')
+select name from pragma_table_info('v1')
+select * from pragma_index_list('t3')
+select * from pragma_index_xinfo((select name from pragma_index_list('t3')))
+select * from main.pragma_table_info('t1')
+select * from t1 where b in (select name from pragma_table_info('t1'))
+select * from t1 where exists (select 1 from pragma_index_list('t1') where name='t1b')
+select (select count(*) from pragma_table_info(s.name)) from sqlite_schema s where type='table' order by name
+select * from pragma_table_info('t1') limit 1
+select * from pragma_table_info('t1') limit 1 offset 1
+select * from pragma_table_info('t1') order by cid desc
+select distinct type from pragma_table_info('t1')
+select max(cid) from pragma_table_info('t2')
+select * from pragma_table_info('t1') a, pragma_table_info('t2') b where a.cid=b.cid
+select * from pragma_table_info('t1') left join pragma_table_info('t2') b using(cid)
+select a.name from pragma_table_info('t1') a where a.name not in (select name from pragma_table_info('t2'))
+select rowid, name from pragma_table_info('t1')
+select * from pragma_compile_options where 0
+select * from pragma_module_list where name='generate_series'
+select * from pragma_table_info(null)
+select * from pragma_index_info('nosuch')
+select * from pragma_data_version
+----
+# generate_series (shell module): constraints, LIMIT/OFFSET push-down, ORDER BY consumption, IN, joins, errors
+create table t1(a integer primary key, b text, c real);
+create index t1b on t1(b);
+create table t2(x int, y int unique, z);
+insert into t1 values(1,'one',1.5),(2,'two',2.5),(3,'three',3.5);
+insert into t2 values(1,10,1),(2,20,2),(3,30,9);
+==
+select * from generate_series(1,5)
+select * from generate_series(5,1,-1)
+select * from generate_series(1,10,0)
+select * from generate_series(1,10,-2)
+select * from generate_series(10,1)
+select * from generate_series(1,20,5)
+select * from generate_series(0) limit 3
+select * from generate_series(-3,3) where value<0
+select * from generate_series(1,100) where value>=95
+select * from generate_series(1,100) where value>95 and value<99
+select * from generate_series(1,100) where value<=3
+select * from generate_series(1,100) where value=50
+select * from generate_series(1,100) where value=50.0
+select * from generate_series(1,100) where value=50.5
+select * from generate_series(1,100) where value>2.5 and value<5.5
+select * from generate_series(1,100) where value between 7 and 9
+select * from generate_series(1,100) where value in (3,4,200)
+select * from generate_series(1,100) where value in (select a from t1)
+select * from generate_series(1,100) where value not in (1,2,3) limit 2
+select * from generate_series(1,100) where value is null
+select * from generate_series(1,100) where value is not null limit 2
+select * from generate_series(1,10) where value%3=0
+select * from generate_series(1,10) where value>start+5
+select * from generate_series(null)
+select * from generate_series(1,null)
+select * from generate_series(1,5,null)
+select * from generate_series('a')
+select * from generate_series('3','5')
+select * from generate_series(1.9,4.2)
+select * from generate_series(9223372036854775800,9223372036854775807)
+select * from generate_series(-9223372036854775808,-9223372036854775805)
+select * from generate_series(9223372036854775807,-9223372036854775808,-9223372036854775808) order by value
+select * from generate_series(1,10) order by value limit 3 offset 4
+select * from generate_series(1,10) limit -1 offset 8
+select * from generate_series(1,10) limit 3 offset -2
+select * from generate_series(1,10) limit 0
+select * from generate_series(1,10) where value>3 limit 2
+select value from generate_series(1,10) order by rowid desc limit 3
+select * from generate_series where start=1 and stop=3
+select * from generate_series where start=1 and stop=3 and step=2
+select * from generate_series where stop=3 and start=1
+select * from generate_series where start=5 limit 3
+select * from generate_series where value between 1 and 3
+select * from generate_series where value=7
+select * from generate_series where value in (1,2)
+select * from generate_series where stop=3
+select * from generate_series
+select * from generate_series()
+select * from generate_series(1,2,3,4)
+select count(*), sum(value), min(value), max(value), avg(value) from generate_series(1,1000)
+select total(value) from generate_series(1,100,7)
+select group_concat(value) from generate_series(1,10)
+select group_concat(value,'-') from (select value from generate_series(1,10) order by value desc)
+select value, value*value from generate_series(1,5)
+select a.value, b.value from generate_series(1,3) a, generate_series(1,2) b
+select a.value, b.value from generate_series(1,3) a join generate_series(1,a.value) b
+select a.value, b.value from generate_series(1,3) a left join generate_series(a.value,2) b order by 1,2
+select a.value, b.value from generate_series(1,3) a cross join generate_series(1,2) b
+select * from t1, generate_series(1,t1.a) order by a, value
+select * from t1 join generate_series(1,3) g on g.value=t1.a
+select * from t1 left join generate_series(1,2) g on g.value=t1.a
+select * from generate_series(1,3) g left join t1 on g.value=t1.a
+select * from generate_series(1,5) g where exists (select 1 from t1 where a=g.value)
+select * from generate_series(1,5) g where not exists (select 1 from t1 where a=g.value)
+select * from t1 where a in (select value from generate_series(2,3))
+select * from t1 where a = (select max(value) from generate_series(1,2))
+select (select count(*) from generate_series(1,t1.a)) from t1
+select * from t2, generate_series(t2.x, t2.y, 5) order by 1,2,3,4
+select * from generate_series(1,3) union select * from generate_series(2,5)
+select * from generate_series(1,3) union all select * from generate_series(2,5)
+select * from generate_series(1,5) intersect select * from generate_series(3,8)
+select * from generate_series(1,5) except select * from generate_series(3,8)
+select distinct value%3 from generate_series(1,20)
+select value%3 as m, count(*) from generate_series(1,20) group by m
+select value%3 as m, count(*) from generate_series(1,20) group by m having count(*)>6
+select value, row_number() over (order by value desc) from generate_series(1,4)
+select value, sum(value) over (rows between 1 preceding and current row) from generate_series(1,5)
+with c(x) as (select value from generate_series(1,4)) select * from c
+with c(x) as (select * from generate_series(1,3)) select * from c, generate_series(1,c.x)
+with recursive r(n) as (select 1 union all select n+1 from r where n<3) select * from r, generate_series(1,r.n)
+select * from (select * from generate_series(1,10)) where value>7
+create view vg as select value from generate_series(1,5)
+create table tg as select * from generate_series(1,3)
+insert into t2 select value, value*100, value from generate_series(10,12)
+update t2 set z=z+1 where x in (select value from generate_series(1,2))
+delete from t2 where x in (select value from generate_series(1,2))
+insert into generate_series values(1,2,3,4)
+update generate_series set value=1
+delete from generate_series
+create virtual table g2 using generate_series
+create virtual table temp.g2 using generate_series
+create index gi on generate_series(value)
+drop table generate_series
+alter table generate_series rename to gs
+alter table generate_series add column w
+create trigger tg after insert on t1 begin select * from generate_series(1,2); end
+select * from generate_series(1,3) where value match 'x'
+select * from generate_series(1,3) as gs where gs.value glob '2'
+select * from generate_series(1,3) where value like '2'
+select * from generate_series(1,3) where value != 2
+select * from generate_series(1,3) where value is not 2
+select * from generate_series(1,3) where value<>2 and start=1
+select * from generate_series(1,3) where 2=value
+select * from generate_series(1,3) where value=a
+select * from generate_series(1,3) where (value,start)=(2,1)
+select * from generate_series(1,3) where value>(select 1)
+select * from generate_series(1,3) where value=?1
+select * from generate_series(?1,?2)
+select * from generate_series(1,3) indexed by xyz
+select * from generate_series(1,3) not indexed
+select value from generate_series(1,3) where rowid=2
+select rowid from generate_series(1,3)
+select _rowid_, oid from generate_series(4,5)
+select * from main.generate_series(1,2)
+select * from temp.generate_series(1,2)
+select * from generate_series(1,(select count(*) from t1))
+select * from generate_series(1,3) a, generate_series(1,3) b where a.value=b.value
+select * from generate_series(1,3) a, generate_series(1,3) b where a.value=b.start
+select * from generate_series(1,3) a, generate_series(a.value,3) b where b.value>a.value
+select * from generate_series(1,3) a where a.value in (select b.value from generate_series(2,4) b)
+select sum(a.value*b.value) from generate_series(1,30) a, generate_series(1,30) b
+select * from generate_series(1,4) where value in (1,3) order by value desc
+select * from generate_series(1,9) where value in (1,3) and value>2
+----
+# bytecode() and tables_used() (SQLITE_ENABLE_BYTECODE_VTAB)
+create table t1(a integer primary key, b text, c real);
+create index t1b on t1(b);
+create table t2(x int, y int unique, z);
+create table log(n);
+create trigger tr1 after insert on t1 begin insert into log values(new.a); end;
+insert into t1 values(1,'one',1.5),(2,'two',2.5);
+==
+select * from bytecode('select 1')
+select * from bytecode('select * from t1 where b=?')
+select addr, opcode, p1, p2, p3, p5 from bytecode('select * from t1 where a>1 order by c')
+select opcode from bytecode('insert into t1 values(3,''x'',1)')
+select addr, opcode, p4, subprog from bytecode('insert into t1 values(3,''x'',1)')
+select addr, opcode, subprog from bytecode('insert into t1 values(3,''x'',1)') where subprog is null
+select count(*) from bytecode('update t1 set b=1')
+select opcode, count(*) from bytecode('select * from t1, t2 where t1.a=t2.x') group by 1 order by 1
+select * from bytecode('select * from t1') where opcode='OpenRead'
+select * from bytecode('select * from t1') where addr between 1 and 3
+select * from bytecode('select * from t1') limit 2
+select * from bytecode('select * from t1') order by addr desc limit 2
+select * from bytecode
+select * from bytecode(1)
+select * from bytecode(null)
+select * from bytecode('not sql')
+select * from bytecode('select * from nosuch')
+select * from bytecode('')
+select * from bytecode('select 1; select 2')
+select * from tables_used('select * from t1')
+select * from tables_used('select * from t1 where b=?')
+select * from tables_used('select * from t1, t2 where t1.a=t2.x')
+select * from tables_used('insert into t1 values(4,''y'',2)')
+select * from tables_used('update t2 set z=1 where y=10')
+select * from tables_used('delete from t1 where b=''one''')
+select type, name, wr from tables_used('insert into t1 values(4,''y'',2)') order by name
+select * from tables_used('select * from t1') where subprog is null
+select * from tables_used('select * from sqlite_schema')
+select * from tables_used('select * from generate_series(1,3)')
+select * from tables_used('select 1')
+select * from tables_used(1)
+select name from tables_used('select * from t2 where y=5')
+select * from bytecode('select * from generate_series(1,3)')
+select * from bytecode('select * from pragma_table_info(''t1'')')
+select p4 from bytecode('select * from bytecode(''select 1'')') where opcode='VFilter'
+select b.opcode, t.name from bytecode('select * from t1') b, tables_used('select * from t1') t where b.opcode='OpenRead'
+select * from t1 where a in (select p1 from bytecode('select 1'))
+select (select count(*) from bytecode('select ' || a)) from t1
+select * from bytecode('pragma table_info(t1)')
+select * from bytecode('create table t9(a)')
+select * from bytecode('explain select 1')
+select * from bytecode('begin')
+select opcode from bytecode('select * from t1 where a in (1,2,3)')
+----
+# single statements from ref/sqlite/test (tabfunc01, pragma5, ...)
+create table t1(x);
+insert into t1 values(2),(3);
+==
+CREATE VIRTUAL TABLE t1 USING generate_series
+PRAGMA table_info(pragma_function_list)
+PRAGMA table_info(pragma_module_list)
+PRAGMA table_info(pragma_pragma_list)
+PRAGMA table_xinfo(generate_series)
+SELECT (flags & 0x200000) FROM pragma_function_list WHERE name='next_char'
+SELECT (flgs & 0x0100)!=0 FROM pragma_stats WHERE tbl='t1' AND idx IS NULL
+SELECT * FROM ( SELECT * FROM generate_series(1,10) UNION ALL SELECT * FROM generate_series(101,104) ) LIMIT -1 OFFSET 0
+SELECT * FROM ( SELECT * FROM generate_series(1,10) UNION ALL SELECT * FROM generate_series(101,104) ) LIMIT -1 OFFSET 5
+SELECT * FROM ( SELECT * FROM generate_series(1,10) UNION ALL SELECT * FROM generate_series(101,104) ) LIMIT 10 OFFSET 5
+SELECT * FROM (generate_series(1,5,2)) AS x LIMIT 10
+SELECT * FROM (t1 NATURAL JOIN pragma_table_xinfo('t1_a') NATURAL JOIN t3) t1 NATURAL JOIN t2 NATURAL JOIN t3 WHERE rowid ISNULL>0 AND 0%y
+SELECT * FROM generate_series WHERE start IN (1,7) AND stop=20 AND step=10 ORDER BY +1
+SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808)
+SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) LIMIT 1 OFFSET 0
+SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) ORDER BY value ASC
+SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) ORDER BY value ASC LIMIT 10 OFFSET 1
+SELECT * FROM generate_series(0,-9223372036854775808,-9223372036854775808) ORDER BY value ASC LIMIT 10 OFFSET 40000000
+SELECT * FROM generate_series(0,0,0)
+SELECT * FROM generate_series(0,32,5) ORDER BY rowid DESC
+SELECT * FROM generate_series(0) LIMIT 5
+SELECT * FROM generate_series(1, 5) WHERE value = (value & 14) LIMIT 3
+SELECT * FROM generate_series(1,10) WHERE step=3
+SELECT * FROM generate_series(1,11,1) LIMIT 100 OFFSET 10
+SELECT * FROM generate_series(1,11,1) LIMIT 3 OFFSET 3
+SELECT * FROM generate_series(1,11,2)
+SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 4
+SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 5
+SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 6
+SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 7
+SELECT * FROM generate_series(1,11,2) LIMIT 100 OFFSET 9223372036854775807
+SELECT * FROM generate_series(1,9,2,11)
+SELECT * FROM generate_series(1,9,2)
+SELECT * FROM generate_series(1,9)
+SELECT * FROM generate_series(11,1,-1) LIMIT 100 OFFSET 10
+SELECT * FROM generate_series(11,1,-1) LIMIT 100 OFFSET 9223372036854775807
+SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808)
+SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808) LIMIT 100 OFFSET 1
+SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808) LIMIT 100 OFFSET 2
+SELECT * FROM generate_series(9223372036854775807, -9223372036854775808, -9223372036854775808) LIMIT 100 OFFSET 9223372036854775807
+SELECT * FROM main.generate_series(1,4)
+SELECT * FROM pragma_foreign_key_list('c2')
+SELECT * FROM pragma_index_info('i2')
+SELECT * FROM pragma_index_list('t1')
+SELECT * FROM pragma_index_list('t2')
+SELECT * FROM pragma_pragma_list WHERE name='pragma_list'
+SELECT * FROM pragma_table_info('t2')
+SELECT * FROM temp.generate_series(1,4)
+SELECT *, '|' FROM (SELECT x FROM t1) AS y, generate_series(1,y.x) ORDER BY 1, 2
+SELECT *, '|' FROM generate_series LIMIT 5
+SELECT *, '|' FROM generate_series WHERE start=1 AND stop=9 AND step=2
+SELECT *, '|' FROM generate_series(0) LIMIT 5
+SELECT *, '|' FROM generate_series(value) LIMIT 5
+SELECT *, '|' FROM pragma_foreign_key_check AS x ORDER BY x."table"
+SELECT *, 'x' FROM pragma_foreign_key_check('t1','aux')
+SELECT *, 'x' FROM pragma_foreign_key_check('t1','main')
+SELECT *, 'x' FROM pragma_foreign_key_check('t1')
+select 1 as c_0 from generate_series(1, 1) as ref_3 where (ref_3.value) in (select 1)
+SELECT DISTINCT 'xyz' FROM pragma_cache_size WHERE rowid OR abs(0) ORDER BY 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+SELECT DISTINCT name, builtin FROM pragma_function_list WHERE name LIKE 'exter%'
+SELECT DISTINCT name, builtin FROM pragma_function_list WHERE name='upper' AND builtin
+SELECT DISTINCT value FROM generate_series(1,x), t1 ORDER BY 1
+SELECT name FROM pragma_table_info('t1') ORDER BY cid
+SELECT name FROM pragma_table_xinfo('t1')
+SELECT name, type FROM pragma_table_list('v1')
+SELECT rowid, * FROM generate_series(0,32,5) ORDER BY +value DESC
+SELECT rowid, * FROM generate_series(0,32,5) ORDER BY value DESC
+SELECT strict FROM pragma_table_list('t1')
+SELECT t4.name, t3.name FROM pragma_table_info('t4') t4 RIGHT JOIN pragma_table_info('t3') t3 ON (t4.name=t3.name)
+SELECT value FROM generate_series(-9223372036854760000,-9223372036854775808,-10000)
+SELECT value FROM generate_series(-9223372036854760000,-9223372036854775808,-10000) WHERE value < -9223372036854770001
+SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 0 AND 6
+SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 0.5 AND 6.25
+SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 1 AND 5
+SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 9223372036854775803 AND 9223372036854775807
+SELECT value FROM generate_series(-9223372036854775808, 9223372036854775807, 2) WHERE value BETWEEN 9223372036854775803 AND 9223372036854775807 ORDER BY value DESC
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value BETWEEN 4 AND 1
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value<-9223372036854775807
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value<-9223372036854775808
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value<=-9223372036854775808
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value=-9.2234e18
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value=9.2234e18
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value>=9223372036854775807
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value>9223372036854775806
+SELECT value FROM generate_series(-9223372036854775808,+9223372036854775807) WHERE value>9223372036854775807
+SELECT value FROM generate_series(-9223372036854775808,1) WHERE value>-9223372036854775000.0 LIMIT 3
+SELECT value FROM generate_series(-9223372036854775808,1) WHERE value>=-9223372036854775000.0 LIMIT 3
+SELECT value FROM generate_series(0,100,+10) WHERE value BETWEEN 33 AND 38
+SELECT value FROM generate_series(0) LIMIT 5
+SELECT value FROM generate_series(0) WHERE stop=6
+SELECT value FROM generate_series(0xfffffffd)
+SELECT value FROM generate_series(1,10) WHERE step IS NULL
+SELECT value FROM generate_series(1,10) WHERE value<=5.0
+SELECT value FROM generate_series(1,10) WHERE value<=5.5
+SELECT value FROM generate_series(1,10) WHERE value<5.0
+SELECT value FROM generate_series(1,10) WHERE value==5.0
+SELECT value FROM generate_series(1,10) WHERE value==5.5
+SELECT value FROM generate_series(1,10) WHERE value>=5.0
+SELECT value FROM generate_series(1,10) WHERE value>=5.5
+SELECT value FROM generate_series(1,10) WHERE value>2 LIMIT 4 OFFSET 1
+SELECT value FROM generate_series(1,10) WHERE value>5.0
+SELECT value FROM generate_series(1,10) WHERE value>5.5
+SELECT value FROM generate_series(1,9223372036854775807) WHERE value>=9223372036854775000.0 LIMIT 3
+SELECT value FROM generate_series(1,9223372036854775807) WHERE value>=9223372036854775807.0 LIMIT 3
+SELECT value FROM generate_series(1,9223372036854775807) WHERE value>9223372036854775000.0 LIMIT 3
+SELECT value FROM generate_series(1,9223372036854775807) WHERE value>9223372036854775807.0 LIMIT 3
+SELECT value FROM generate_series(1) WHERE value<-1e19 LIMIT 3
+SELECT value FROM generate_series(1) WHERE value<=-1e19 LIMIT 3
+SELECT value FROM generate_series(1) WHERE value>=1e19 LIMIT 3
+SELECT value FROM generate_series(1) WHERE value>1e19 LIMIT 3
+SELECT value FROM generate_series(10,1,-1) WHERE value<=5.0
+SELECT value FROM generate_series(10,1,-1) WHERE value<=5.5
+SELECT value FROM generate_series(10,1,-1) WHERE value<5.0
+SELECT value FROM generate_series(10,1,-1) WHERE value<5.5
+SELECT value FROM generate_series(10,1,-1) WHERE value>=5.0
+SELECT value FROM generate_series(10,1,-1) WHERE value>=5.5
+SELECT value FROM generate_series(10,1,-1) WHERE value>5.0
+SELECT value FROM generate_series(10,1,-1) WHERE value>5.5
+SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 38
+SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 59
+SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 60
+SELECT value FROM generate_series(100,0,-10) WHERE value BETWEEN 33 AND 66
+SELECT value FROM generate_series(3,4,-1)
+SELECT value FROM generate_series(4,3,1)
+SELECT value FROM generate_series(5) LIMIT 5
+SELECT value FROM generate_series(9223372036854760000,9223372036854775807,10000)
+SELECT value FROM generate_series(9223372036854760000,9223372036854775807,10000) WHERE value > 9223372036854770001
+SELECT value FROM generate_series(9223372036854774784) WHERE value<=9223372036854775000.0 LIMIT 3
+SELECT value FROM generate_series(9223372036854774784) WHERE value<9223372036854775000.0 LIMIT 3
+SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE +value<=9223372036854775807.0 LIMIT 3
+SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE +value<9223372036854775807.0 LIMIT 3
+SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE value<=9223372036854775807.0 LIMIT 3
+SELECT value FROM generate_series(9223372036854775805,9223372036854775807) WHERE value<9223372036854775807.0 LIMIT 3
+SELECT x, y, value FROM t2 JOIN (t1 RIGHT JOIN generate_series(t2.y,5) AS value)
+SELECT x.*, '|' FROM sqlite_schema, pragma_foreign_key_check(name) AS x WHERE type='table' ORDER BY x."table"
+UPDATE pragma_encoding SET encoding='UTF-8' RETURNING a, b, *
+WITH cst(rsx, rsy) AS ( SELECT 100, 100 ), cst2(minx, maxx, stepx, miny, maxy, stepy, qualitativex, qualitativey) AS ( SELECT NULL, NULL, NULL, NULL, NULL, NULL, 0, 0 ), ds0(m, n, x, y, x2, y2, title, size, mark, label, markmode) AS ( SELECT 1, 2, 3, 4, 5, 6, 7 , 8, 9, 10, 11 ), ds(m, n, x, y, x2, y2, title, size, mark, label, markmode) AS ( SELECT m, n, x, y, x2, y2, title, size, mark, label, markmode FROM ds0 WINDOW w AS (PARTITION BY m, x ORDER BY n) ), d(m, n, x, y, x2, y2, labelx,labely,title,size,mark,label,markmode) AS ( SELECT m, n, x, y, x2, y2, x, y, title, size, mark, label, markmode FROM ds, cst2 ), ylabels(y, label) AS ( SELECT y, MIN(labely) FROM d GROUP BY y ), yaxis(maxy, miny, stepy , minstepy) AS ( WITH xt0(minx, maxx) AS ( SELECT coalesce(miny, min(min(y2), min(y))), coalesce(maxy, max(max(y2), max(y))) + qualitativey FROM d, cst2 ), xt1(mx, mn) AS (SELECT maxx, minx FROM xt0), xt2(mx, mn, step) AS (SELECT mx, mn, (mx-mn) FROM xt1), xt3(mx, mn, ms) AS ( SELECT mx, mn, first_value(rs) OVER (order by x desc) AS ms FROM (SELECT mx, mn, step, f,(mx-mn) as rng, 1.0*step/f as rs, 1.0*(mx-mn)/(step/f) AS x FROM xt2, (SELECT 1 AS f UNION ALL SELECT 2 UNION ALL SELECT 4 UNION ALL SELECT 5)) AS src WHERE x < 10 limit 1), xt4(minstepy) AS ( SELECT MIN(abs(y2-y)) FROM d WHERE y2 != y ) SELECT (mx/ms)*ms, (mn/ms)*ms, coalesce(stepy, ms), coalesce(minstepy, ms, stepy) FROM xt3, cst2,xt4 ), distinct_mark_n_m(mark, ze, zem, title) AS ( SELECT DISTINCT mark, n AS ze, m AS zem, title FROM ds0 ), facet0(m, mi, title, radial) AS ( SELECT md, row_number() OVER () - 1, title, 'radial' IN (SELECT mark FROM distinct_mark_n_m WHERE zem = md) FROM (SELECT DISTINCT zem AS md, title AS title FROM distinct_mark_n_m ORDER BY 2, 1) ), facet(m, mi, xorigin, yorigin, title, radial) AS ( SELECT m, mi, rsx * 1.2 * IFNULL(CASE WHEN ( 0 ) > 0 THEN mi / ( 0 ) ELSE mi % ( 2 ) END, mi), rsy * 1.2 * IFNULL(CASE WHEN ( 2 ) > 0 THEN mi / ( 2 ) ELSE mi / ( 0 ) END, 0), title, radial FROM facet0, cst ), radygrid(m, mi, tty, wty, ttx, ttx2, xorigin, yorigin) AS ( SELECT m, mi, rsy / 2 / ((maxy-miny)/stepy) * (value-1) AS tty, coalesce(NULL, miny + stepy * (value-1)) AS wty, xorigin, xorigin+rsx, xorigin + rsx / 2, yorigin + rsy / 2 FROM generate_series(1), yaxis, cst, facet LEFT JOIN ylabels ON ylabels.y = (miny + (value-1) * stepy) WHERE radial AND stop = 1+1.0*(maxy-miny)/stepy ), ypos(m, mi, pcx, pcy, radial) AS ( SELECT m, mi, xorigin, yorigin + CASE WHEN 0 BETWEEN miny AND maxy THEN rsy - (0 - miny) * rsy / (maxy-miny) WHEN 0 >= maxy THEN 0 ELSE rsy END, radial FROM yaxis, cst, facet WHERE NOT radial UNION ALL SELECT m, mi, xorigin + rsx / 2, yorigin + (CASE WHEN 0 BETWEEN miny AND maxy THEN rsy - (0 - miny) * rsy / 2 / (maxy-miny) WHEN 0 >= maxy THEN 0 ELSE rsy END ) / 2, radial FROM yaxis, cst, facet WHERE radial ) SELECT * FROM radygrid , ypos
+WITH data(v) AS ( SELECT value FROM generate_series(1,35,3) UNION ALL SELECT value FROM generate_series(10,30,4) UNION ALL SELECT value FROM generate_series(20,50,5) UNION ALL SELECT value FROM generate_series(30,60,6) UNION ALL SELECT value FROM generate_series(1,50,7) UNION ALL SELECT value FROM generate_series(10,80,8) ) SELECT v FROM data ORDER BY v
+----
+# from ref/sqlite/test
+CREATE TABLE t0(c0);
+INSERT INTO t0(c0) VALUES(123);
+CREATE VIEW v0(c0) AS SELECT 0 GROUP BY 1;
+==
+SELECT t0.c0, v0.c0, vt0.name FROM v0, t0 LEFT JOIN pragma_table_info('t0') AS vt0 ON vt0.name LIKE 'c0' WHERE v0.c0 == 0
+----
+# from ref/sqlite/test
+CREATE TABLE t1( a integer primary key, b int generated always as (a+5), c text GENERATED ALWAYS as (printf('%08x',a)), d Generated Always AS ('xyzzy'), e int Always default(5) );
+INSERT INTO t1(a) VALUES(5);
+==
+SELECT name, type FROM pragma_table_xinfo('t1')
+----
+# from ref/sqlite/test
+CREATE TABLE t1(a INTEGER PRIMARY KEY, b, c, d);
+CREATE UNIQUE INDEX t1bc ON t1(b,c);
+CREATE INDEX t1d ON t1(d);
+WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<100) INSERT INTO t1(a,b,c,d) SELECT x, x, x, x FROM c;
+SELECT idx, flgs FROM pragma_stats WHERE idx IS NOT NULL ORDER BY idx;
+==
+SELECT tbl, (flgs & 0x10)!=0 FROM pragma_stats WHERE tbl='t1' AND idx IS NULL
+----
+# from ref/sqlite/test
+CREATE TABLE t1(id INTEGER PRIMARY KEY, a INT);
+CREATE TABLE t2(id INTEGER PRIMARY KEY, b INT);
+CREATE TABLE t3(id INTEGER PRIMARY KEY, c INT);
+CREATE TABLE t4(id INTEGER PRIMARY KEY, d INT);
+CREATE TABLE t5(id INTEGER PRIMARY KEY, e INT);
+CREATE TABLE t6(id INTEGER PRIMARY KEY, f INT);
+CREATE TABLE t7(id INTEGER PRIMARY KEY, g INT);
+CREATE TABLE t8(id INTEGER PRIMARY KEY, h INT);
+INSERT INTO t1 SELECT value, 1 FROM generate_series(1,256) WHERE value & 1;
+INSERT INTO t2 SELECT value, 1 FROM generate_series(1,256) WHERE value & 2;
+INSERT INTO t3 SELECT value, 1 FROM generate_series(1,256) WHERE value & 4;
+INSERT INTO t4 SELECT value, 1 FROM generate_series(1,256) WHERE value & 8;
+INSERT INTO t5 SELECT value, 1 FROM generate_series(1,256) WHERE value & 16;
+INSERT INTO t6 SELECT value, 1 FROM generate_series(1,256) WHERE value & 32;
+INSERT INTO t7 SELECT value, 1 FROM generate_series(1,256) WHERE value & 64;
+INSERT INTO t8 SELECT value, 1 FROM generate_series(1,256) WHERE value & 128;
+==
+CREATE TABLE t9 AS SELECT id, h, g, f, e, d, c, b, a FROM t1 NATURAL FULL JOIN t2 NATURAL FULL JOIN t3 NATURAL FULL JOIN t4 NATURAL FULL JOIN t5 NATURAL FULL JOIN t6 NATURAL FULL JOIN t7 NATURAL FULL JOIN t8
+----
+# from ref/sqlite/test
+CREATE TABLE t1(x);
+INSERT INTO t1(x) VALUES(2),(3);
+==
+SELECT *, '|' FROM t1, generate_series(1,x) ORDER BY 1, 2
+----
+# from ref/sqlite/test
+CREATE TABLE t2 AS SELECT BBb FROM (SELECT aaa AS Bbb FROM t1);
+==
+SELECT name FROM pragma_table_info('t2')
+----
+# from ref/sqlite/test
+CREATE TABLE t600(a INTEGER PRIMARY KEY, b TEXT);
+WITH RECURSIVE c(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM c WHERE x<100) INSERT INTO t600(a,b) SELECT x, printf('(%03d)',x) FROM c;
+==
+SELECT b FROM t600 WHERE a IN generate_series(2,52,10)
+----
+# from ref/sqlite/test
+CREATE VIEW v2 AS VALUES(CAST(44 AS REAL)),(55);
+==
+SELECT type FROM pragma_table_info('v2')
+----
+# from ref/sqlite/test
+CREATE VIEW v2(x) AS SELECT value FROM generate_series(1,5);
+==
+SELECT * FROM v2
+----
+# from ref/sqlite/test
+CREATE VIRTUAL TABLE t5_1 USING csv(filename='csv01.csv');
+==
+SELECT name FROM temp.pragma_table_info('t5_1')
+----
+# from ref/sqlite/test
+DROP TABLE IF EXISTS t1;
+CREATE TABLE t1(value INT);
+INSERT INTO t1 VALUES (1),(2),(3);
+==
+SELECT t1.value, t2.value FROM t1 RIGHT JOIN generate_series(1,3,1) AS t2 USING(value)
+----
+# from ref/sqlite/test
+DROP TABLE IF EXISTS t1;
+DROP TABLE IF EXISTS t2;
+CREATE TABLE t1(a INT PRIMARY KEY, b INT);
+CREATE TABLE t2(c INT PRIMARY KEY, d INT REFERENCES t1);
+==
+SELECT t.name, f."table", f."from", i.name, i.pk FROM pragma_table_list() AS t JOIN pragma_foreign_key_list(t.name, t.schema) AS f JOIN pragma_table_info(f."table", t.schema) AS i WHERE i.pk
+----
+# from ref/sqlite/test
+DROP TABLE t5_1;
+CREATE VIRTUAL TABLE t5_1 USING csv(filename='csv01.csv', header);
+==
+SELECT name FROM temp.pragma_table_info('t5_1')
+----
+# from ref/sqlite/test
+DROP VIEW v1;
+CREATE VIEW v1 AS SELECT CAST(44 AS REAL) AS 'm' UNION ALL SELECT 55;
+==
+SELECT name, type FROM pragma_table_info('v1')
+----
+# virtual tables in sqlite_schema (written with writable_schema): xConnect of a non-eponymous table, DDL and errors
+create table t1(a integer primary key, b);
+insert into t1 values(1,'x'),(2,'y');
+.dbconfig defensive off
+PRAGMA writable_schema=ON;
+INSERT INTO sqlite_schema VALUES('table','vx','vx',0,'CREATE VIRTUAL TABLE vx USING generate_series');
+INSERT INTO sqlite_schema VALUES('table','vp','vp',0,'CREATE VIRTUAL TABLE vp USING pragma_table_info');
+INSERT INTO sqlite_schema VALUES('table','vb','vb',0,'CREATE VIRTUAL TABLE vb USING bytecode');
+INSERT INTO sqlite_schema VALUES('table','vn','vn',0,'CREATE VIRTUAL TABLE vn USING nosuchmod(a,b)');
+==
+select * from vx(1,3)
+select * from vx where start=2 and stop=4
+select value, start from vx(5) limit 2
+select * from vx
+select * from vp('t1')
+select name from vp where arg='t1'
+select opcode from vb('select 1')
+select * from vn
+select * from t1, vx(1,t1.a)
+pragma table_info(vx)
+pragma table_xinfo(vx)
+pragma table_info(vp)
+pragma table_info(vn)
+select * from pragma_table_xinfo('vx')
+select type, name, ncol from pragma_table_list order by name
+drop table vx
+drop table vn
+drop table if exists vx
+alter table vx rename to vy
+alter table vx add column w
+alter table vx rename column start to s
+alter table vx drop column start
+create index vxi on vx(value)
+create trigger vxt after insert on vx begin select 1; end
+insert into vx values(1,2,3,4)
+update vx set value=1
+delete from vx
+select * from vx(1,2) a join vx(1,2) b using(value)
+select * from vx(1,10) where value in (select a from t1)
+select count(*) from sqlite_schema where sql like 'CREATE VIRTUAL%'
+create virtual table v2 using nosuch
+create virtual table v2 using nosuch(a, b int, 'c d', "e", (f, g), [h])
+create virtual table if not exists vx using generate_series
+create virtual table if not exists v3 using generate_series
+create virtual table temp.v3 using generate_series(1,2)
+create virtual table main.v3 using pragma_table_info
+create virtual table t1 using generate_series
+create virtual table v4 using bytecode
+create virtual table sqlite_v4 using generate_series
+create temp virtual table v5 using nosuch
+create virtual table v5 using
+explain create virtual table v6 using whatever(x, y)
+explain create virtual table temp.v6 using whatever
+explain create virtual table if not exists v6 using whatever(a 'b' (c d))
+insert into pragma_table_info values(1)
+update pragma_table_info set name='x'
+delete from pragma_table_info
+drop table pragma_table_info
+drop table bytecode
+create index pi on pragma_table_info(name)
+create trigger pt after insert on pragma_table_info begin select 1; end
+alter table pragma_table_info add column x
+alter table pragma_compile_options rename to flubber
+alter table pragma_compile_options drop column start
+select * from pragma_nosuch
+select * from pragma_case_sensitive_like
+select * from pragma_table_info('t1') where cid in (0,1)
+insert into t1 select cid+10, name from pragma_table_info('t1')
+update t1 set b=(select count(*) from pragma_table_info('t1'))
+delete from t1 where a in (select value from generate_series(1,1))
+select * from generate_series(1,3) where value in (select value from vx(2,3))
+----
+# trusted_schema and "unsafe use of virtual table" in views and triggers
+create table t1(a integer primary key, b);
+create view vv as select name from pragma_table_info('t1');
+create view vg as select value from generate_series(1,3);
+create view vb as select opcode from bytecode('select 1');
+create trigger tr after insert on t1 begin insert into t1 select value+100, 'g' from generate_series(1,2) where new.a<100; end;
+==
+select * from vv
+select * from vg
+select * from vb
+pragma trusted_schema=off; select * from vv
+pragma trusted_schema=off; select * from vg
+pragma trusted_schema=off; select * from vb
+pragma trusted_schema=off; insert into t1 values(1,'x')
+insert into t1 values(1,'x')

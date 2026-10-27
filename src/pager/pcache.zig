@@ -58,6 +58,68 @@ pub const Page = struct {
     lru_next: ?*Page = null,
     lru_prev: ?*Page = null,
     on_lru: bool = false,
+    /// Next page in the same hash bucket (PgHdr1.pNext).
+    hash_next: ?*Page = null,
+};
+
+/// The page-number hash of pcache1.c: chained buckets (apHash/nHash),
+/// doubled once the page count reaches the bucket count. Chaining keeps
+/// lookups short under the constant evict/insert churn of a full cache,
+/// where an open-addressing map piles up tombstones.
+const PageHash = struct {
+    buckets: []?*Page = &.{},
+    n_page: u32 = 0,
+
+    fn bucket(h: *const PageHash, pgno: Pgno) *?*Page {
+        return &h.buckets[pgno & (h.buckets.len - 1)];
+    }
+
+    fn get(h: *const PageHash, pgno: Pgno) ?*Page {
+        if (h.buckets.len == 0) return null;
+        var p = h.bucket(pgno).*;
+        while (p) |pg| : (p = pg.hash_next) {
+            if (pg.pgno == pgno) return pg;
+        }
+        return null;
+    }
+
+    /// Port of pcache1ResizeHash(): makes room for one more page.
+    fn ensureUnusedCapacity(h: *PageHash, gpa: Allocator) error{OutOfMemory}!void {
+        if (h.n_page < h.buckets.len) return;
+        const n_new = @max(256, h.buckets.len * 2);
+        const new = try gpa.alloc(?*Page, n_new);
+        @memset(new, null);
+        for (h.buckets) |head| {
+            var p = head;
+            while (p) |pg| {
+                p = pg.hash_next;
+                const b = &new[pg.pgno & (n_new - 1)];
+                pg.hash_next = b.*;
+                b.* = pg;
+            }
+        }
+        gpa.free(h.buckets);
+        h.buckets = new;
+    }
+
+    fn insert(h: *PageHash, p: *Page) void {
+        const b = h.bucket(p.pgno);
+        p.hash_next = b.*;
+        b.* = p;
+        h.n_page += 1;
+    }
+
+    /// Port of pcache1RemoveFromHash().
+    fn remove(h: *PageHash, p: *Page) void {
+        var link = h.bucket(p.pgno);
+        while (link.*.? != p) link = &link.*.?.hash_next;
+        link.* = p.hash_next;
+        h.n_page -= 1;
+    }
+
+    fn deinit(h: *PageHash, gpa: Allocator) void {
+        gpa.free(h.buckets);
+    }
 };
 
 /// Called to write out a dirty page so its slot can be reused (xStress).
@@ -76,7 +138,7 @@ pub const PCache = struct {
     extra_size: u32,
     stress: ?Stress,
 
-    map: std.AutoHashMapUnmanaged(Pgno, *Page) = .empty,
+    map: PageHash = .{},
     /// Largest page number that may be in the map.
     max_pgno: Pgno = 0,
     /// Unreferenced clean pages, newest at the head.
@@ -107,8 +169,13 @@ pub const PCache = struct {
     }
 
     pub fn deinit(pc: *PCache) void {
-        var it = pc.map.valueIterator();
-        while (it.next()) |p| pc.freePage(p.*);
+        for (pc.map.buckets) |head| {
+            var p = head;
+            while (p) |pg| {
+                p = pg.hash_next;
+                pc.freePage(pg);
+            }
+        }
         pc.map.deinit(pc.gpa);
         pc.* = undefined;
     }
@@ -146,7 +213,7 @@ pub const PCache = struct {
     }
 
     pub fn pageCount(pc: *const PCache) u32 {
-        return pc.map.count();
+        return pc.map.n_page;
     }
 
     pub fn refCount(pc: *const PCache) u64 {
@@ -171,7 +238,7 @@ pub const PCache = struct {
         if (pc.lookup(pgno)) |p| return p;
         // With dirty pages around, only create "cheaply" (below 90% pinned)
         // before trying to spill one.
-        if (pc.dirty_head != null and pc.map.count() - pc.n_recyclable >= pc.max_pinned) {
+        if (pc.dirty_head != null and pc.map.n_page - pc.n_recyclable >= pc.max_pinned) {
             try pc.spillOne();
         }
         return pc.finish(try pc.create(pgno));
@@ -180,7 +247,7 @@ pub const PCache = struct {
     /// Spills the oldest unreferenced dirty page, preferring one that needs
     /// no journal sync, if the cache is over its spill threshold.
     fn spillOne(pc: *PCache) error{SpillFailed}!void {
-        if (pc.map.count() <= pc.spill_size) return;
+        if (pc.map.n_page <= pc.spill_size) return;
         var p = pc.synced;
         while (p) |pg| : (p = pg.dirty_prev) {
             if (pg.n_ref == 0 and !pg.flags.need_sync) break;
@@ -206,16 +273,16 @@ pub const PCache = struct {
     /// pcache1FetchStage2(): recycle the oldest clean page if the cache is
     /// full, otherwise allocate.
     fn create(pc: *PCache, pgno: Pgno) error{OutOfMemory}!*Page {
-        try pc.map.ensureUnusedCapacity(pc.gpa, 1);
-        const p: *Page = if (pc.lru_tail != null and pc.map.count() + 1 >= pc.max_pages) blk: {
+        try pc.map.ensureUnusedCapacity(pc.gpa);
+        const p: *Page = if (pc.lru_tail != null and pc.map.n_page + 1 >= pc.max_pages) blk: {
             const victim = pc.lru_tail.?;
             pc.lruRemove(victim);
-            _ = pc.map.remove(victim.pgno);
+            pc.map.remove(victim);
             break :blk victim;
         } else try pc.allocPage();
         p.* = .{ .data = p.data, .extra = p.extra, .pgno = pgno, .cache = pc };
         @memset(p.extra[0..8], 0);
-        pc.map.putAssumeCapacityNoClobber(pgno, p);
+        pc.map.insert(p);
         pc.max_pgno = @max(pc.max_pgno, pgno);
         return p;
     }
@@ -273,13 +340,13 @@ pub const PCache = struct {
         std.debug.assert(p.n_ref == 1);
         if (p.flags.dirty) pc.dirtyRemove(p);
         pc.ref_sum -= 1;
-        _ = pc.map.remove(p.pgno);
+        pc.map.remove(p);
         pc.freePage(p);
     }
 
     fn unpin(pc: *PCache, p: *Page) void {
-        if (pc.map.count() > pc.max_pages) {
-            _ = pc.map.remove(p.pgno);
+        if (pc.map.n_page > pc.max_pages) {
+            pc.map.remove(p);
             pc.freePage(p);
         } else {
             pc.lruPushFront(p);
@@ -324,9 +391,9 @@ pub const PCache = struct {
             std.debug.assert(other.n_ref == 0);
             pc.drop(pc.finish(other));
         }
-        _ = pc.map.remove(p.pgno);
-        pc.map.putAssumeCapacity(new_pgno, p);
+        pc.map.remove(p);
         p.pgno = new_pgno;
+        pc.map.insert(p);
         pc.max_pgno = @max(pc.max_pgno, new_pgno);
         if (p.flags.dirty and p.flags.need_sync) pc.dirtyMoveToFront(p);
     }
@@ -357,15 +424,19 @@ pub const PCache = struct {
     /// pcache1Truncate(): frees every page numbered `limit` or above.
     fn truncateBackend(pc: *PCache, limit: Pgno) void {
         if (limit > pc.max_pgno) return;
-        // Removal only leaves a tombstone, so iterating while removing is safe.
-        var it = pc.map.valueIterator();
-        while (it.next()) |slot| {
-            const p = slot.*;
-            if (p.pgno < limit) continue;
-            std.debug.assert(p.n_ref == 0 and !p.flags.dirty);
-            if (p.on_lru) pc.lruRemove(p);
-            _ = pc.map.remove(p.pgno);
-            pc.freePage(p);
+        for (pc.map.buckets) |*head| {
+            var link = head;
+            while (link.*) |p| {
+                if (p.pgno < limit) {
+                    link = &p.hash_next;
+                    continue;
+                }
+                std.debug.assert(p.n_ref == 0 and !p.flags.dirty);
+                if (p.on_lru) pc.lruRemove(p);
+                link.* = p.hash_next;
+                pc.map.n_page -= 1;
+                pc.freePage(p);
+            }
         }
         pc.max_pgno = limit -| 1;
     }

@@ -7,8 +7,9 @@
 //! `VtabCursor` (sqlite3_vtab_cursor) and recover themselves with
 //! @fieldParentPtr. Strings a module hands to the core (`Vtab.err_msg`,
 //! the error of xCreate/xConnect, `IndexInfo.idx_str` with
-//! `need_to_free_idx_str`) are allocated with the connection's allocator
-//! (db.gpa), which plays the part of sqlite3_malloc(); the core frees them.
+//! `need_to_free_idx_str`) are allocated with sqlite3_malloc()
+//! (malloc.allocator) or the connection's allocator (db.gpa); the core
+//! frees them through db.gpa, which, as sqlite3DbFree(), takes either.
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -25,6 +26,7 @@ const expr_mod = @import("expr.zig");
 const tokenize = @import("../parse/tokenize.zig");
 const ctype = @import("../util/ctype.zig");
 const wi = @import("where_int.zig");
+const malloc = @import("malloc.zig");
 
 const Allocator = std.mem.Allocator;
 const Parse = int.Parse;
@@ -231,12 +233,12 @@ pub fn createModuleInternal(db: *Sqlite3, name: []const u8, module: ?*const Modu
     var new: ?*int.Module = null;
     if (module) |m| {
         const pm = gpa.create(int.Module) catch {
-            db.malloc_failed = true;
+            db.oomFault();
             return null;
         };
         const copy = gpa.dupeSentinel(u8, name, 0) catch {
             gpa.destroy(pm);
-            db.malloc_failed = true;
+            db.oomFault();
             return null;
         };
         pm.* = .{ .module = m, .name = copy, .aux = aux_data, .x_destroy = x_destroy };
@@ -245,7 +247,7 @@ pub fn createModuleInternal(db: *Sqlite3, name: []const u8, module: ?*const Modu
     var old: ?*int.Module = null;
     if (new) |pm| {
         const gop = db.modules.getOrPut(gpa, pm.name) catch {
-            db.malloc_failed = true;
+            db.oomFault();
             gpa.free(pm.name);
             gpa.destroy(pm);
             return null;
@@ -516,7 +518,7 @@ pub fn finishParse(p: *Parse, end: ?Token) void {
         const s = t.schema.?;
         build.markAllShadowTablesOf(db, t);
         s.tbl_hash.put(db.gpa, t.name, t) catch {
-            db.malloc_failed = true;
+            db.oomFault();
             return;
         };
         p.new_table = null;
@@ -544,7 +546,7 @@ pub fn argExtend(p: *Parse, t: Token) void {
 
 fn allocErr(db: *Sqlite3, comptime fmt: []const u8, args: anytype) ?[:0]u8 {
     return std.fmt.allocPrintSentinel(db.gpa, fmt, args, 0) catch {
-        db.malloc_failed = true;
+        db.oomFault();
         return null;
     };
 }
@@ -568,7 +570,7 @@ fn callConstructor(db: *Sqlite3, t: *Table, m: *int.Module, x_construct: Module.
     defer gpa.free(module_name);
 
     const vt = gpa.create(VTable) catch {
-        db.malloc_failed = true;
+        db.oomFault();
         return RC.NOMEM;
     };
     vt.* = .{ .db = db, .mod = m, .e_vtab_risk = int.VTABRISK.Normal };
@@ -584,7 +586,7 @@ fn callConstructor(db: *Sqlite3, t: *Table, m: *int.Module, x_construct: Module.
     var rc = x_construct(db, m.aux, t.u.vtab.args, &vt.vtab, &z_err);
     build.deleteTable(db, t);
     db.vtab_ctx = s_ctx.prior;
-    if (rc == RC.NOMEM) db.malloc_failed = true;
+    if (rc == RC.NOMEM) db.oomFault();
 
     if (rc != RC.OK) {
         if (z_err == null) {
@@ -747,6 +749,7 @@ pub fn declareVtab(db: *Sqlite3, create_table: [:0]const u8) i32 {
     defer arena_state.deinit();
     var p: Parse = .{ .db = db, .arena = arena_state.allocator() };
     defer build.releaseTableRefs(&p);
+    defer prepare.parseObjectResetLookaside(&p);
     p.e_parse_mode = .declare_vtab;
     p.disable_triggers = true;
     // Never reached while reading the schema; defend against it anyway.
@@ -758,7 +761,7 @@ pub fn declareVtab(db: *Sqlite3, create_table: [:0]const u8) i32 {
 
     var rc: i32 = RC.OK;
     const n_err = tokenize.runParser(&p, create_table) catch blk: {
-        db.malloc_failed = true;
+        db.oomFault();
         break :blk 1;
     };
     if (n_err == 0 and p.new_table != null) {
@@ -1050,7 +1053,7 @@ pub fn epoTableClearAll(db: *Sqlite3) void {
 /// of `vtab` to `v`.
 pub fn importErrmsg(v: *vi.Vdbe, vtab: *Vtab) void {
     if (vtab.err_msg) |msg| {
-        v.err_msg = v.alloc().dupeSentinel(u8, msg, 0) catch null;
+        aux.setErrMsg(v, v.db.gpa.dupeSentinel(u8, msg, 0) catch null);
         v.db.gpa.free(msg);
         vtab.err_msg = null;
     }
@@ -1202,7 +1205,7 @@ pub const value_list_type = "ValueList";
 /// Port of sqlite3VdbeValueListFree() (vdbeapi.c).
 pub fn valueListFree(p: ?*anyopaque) void {
     const list: *ValueList = @ptrCast(@alignCast(p.?));
-    std.heap.smp_allocator.destroy(list);
+    malloc.allocator.destroy(list);
 }
 
 /// Port of valueFromValueList() (vdbeapi.c).

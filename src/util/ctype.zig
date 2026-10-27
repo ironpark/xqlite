@@ -67,6 +67,19 @@ pub fn strICmp(a: []const u8, b: []const u8) i32 {
     return @as(i32, @intCast(a.len)) - @as(i32, @intCast(b.len));
 }
 
+/// Port of sqlite3StrNICmp(): compares the first `n` bytes of `a` and `b`
+/// ignoring ASCII case, stopping early at a NUL in `a`. Both slices must
+/// hold at least `n` bytes, except that a slice may end at its NUL.
+pub fn strNICmp(a: []const u8, b: []const u8, n: usize) i32 {
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const x = if (i < a.len) a[i] else 0;
+        const y = if (i < b.len) b[i] else 0;
+        if (x == 0 or toLower(x) != toLower(y)) return @as(i32, toLower(x)) - toLower(y);
+    }
+    return 0;
+}
+
 pub fn eqlNoCase(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     for (a, b) |x, y| if (toLower(x) != toLower(y)) return false;

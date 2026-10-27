@@ -131,10 +131,7 @@ fn getFuncCollSeq(ctx: *Context) ?*const int.CollSeq {
     const v = ctx.vdbe orelse return null;
     const op = &v.ops.items[@intCast(ctx.i_op - 1)];
     std.debug.assert(op.opcode == vi.OP.CollSeq);
-    return switch (op.p4) {
-        .collseq => |c| c,
-        else => null,
-    };
+    return if (op.p4type == .collseq) op.p4.collseq else null;
 }
 
 /// Port of sqlite3SkipAccumulatorLoad(): skip the accumulator load on this
@@ -153,8 +150,11 @@ pub fn aggContext(comptime T: type, ctx: *Context, create: bool) ?*T {
     return @ptrCast(@alignCast(b.ptr));
 }
 
-/// Port of contextMalloc(): `n_byte` bytes from the connection's
-/// allocator, or null with a TOOBIG or NOMEM error set.
+const sqlite3_malloc = @import("malloc.zig").allocator;
+
+/// Port of contextMalloc(): `n_byte` bytes from sqlite3_malloc(), or null
+/// with a TOOBIG or NOMEM error set. The connection's allocator (and a
+/// .dynamic result) frees it too.
 fn contextMalloc(ctx: *Context, n_byte: i64) ?[]u8 {
     const db = api.contextDbHandle(ctx);
     std.debug.assert(n_byte > 0);
@@ -162,39 +162,30 @@ fn contextMalloc(ctx: *Context, n_byte: i64) ?[]u8 {
         api.resultErrorTooBig(ctx);
         return null;
     }
-    return db.gpa.alloc(u8, @intCast(n_byte)) catch {
+    return sqlite3_malloc.alloc(u8, @intCast(n_byte)) catch {
         api.resultErrorNomem(ctx);
         return null;
     };
 }
 
-/// Hand `buf` (from `gpa`, the connection's allocator) to the result as
-/// the text in buf[0..n] (buf[n] becomes the terminator), as
-/// sqlite3_result_text(...,sqlite3_free) does.
-pub fn resultOwnedText(ctx: *Context, gpa: std.mem.Allocator, buf: []u8, n: usize) void {
+/// Hand `buf` (from the connection's allocator, db.gpa, or from
+/// sqlite3_malloc()) to the result as the text in buf[0..n] (buf[n]
+/// becomes the terminator), as sqlite3_result_text(...,SQLITE_DYNAMIC)
+/// does: the result takes over the whole allocation.
+pub fn resultOwnedText(ctx: *Context, buf: []u8, n: usize) void {
     std.debug.assert(buf.len > n);
     buf[n] = 0;
-    const z = if (buf.len == n + 1) buf else gpa.realloc(buf, n + 1) catch {
-        api.resultText(ctx, buf[0..n], .transient);
-        gpa.free(buf);
-        return;
-    };
-    api.resultTextZ(ctx, z[0..n :0], .dynamic);
+    api.resultTextZ(ctx, buf[0..n :0], .dynamic);
 }
 
 /// Like resultOwnedText() for the blob in buf[0..n].
-pub fn resultOwnedBlob(ctx: *Context, gpa: std.mem.Allocator, buf: []u8, n: usize) void {
+pub fn resultOwnedBlob(ctx: *Context, buf: []u8, n: usize) void {
     if (n == 0) {
-        gpa.free(buf);
+        api.contextDbHandle(ctx).gpa.free(buf);
         api.resultBlob(ctx, "", .static);
         return;
     }
-    const z = if (buf.len == n) buf else gpa.realloc(buf, n) catch {
-        api.resultBlob(ctx, buf[0..n], .transient);
-        gpa.free(buf);
-        return;
-    };
-    api.resultBlob(ctx, z, .dynamic);
+    api.resultBlob(ctx, buf[0..n], .dynamic);
 }
 
 // ====================================================== scalar functions
@@ -1019,7 +1010,7 @@ fn unistrFunc(ctx: *Context, argv: []*Mem) void {
         api.resultError(ctx, "invalid Unicode escape");
         return;
     }
-    resultOwnedText(ctx, api.contextDbHandle(ctx).gpa, z_out, j);
+    resultOwnedText(ctx, z_out, j);
 }
 
 /// quoteFunc(): quote(X), the SQL literal for X. With user data,
@@ -1050,7 +1041,7 @@ fn charFunc(ctx: *Context, argv: []*Mem) void {
         const c: u32 = @intCast(x & 0x1fffff);
         n += printf.appendOneUtf8Character(z[n..], c);
     }
-    resultOwnedText(ctx, gpa, z, n);
+    resultOwnedText(ctx, z, n);
 }
 
 /// hexFunc(): hex(X), the bytes of X as upper-case hex text.
@@ -1102,7 +1093,7 @@ fn unhexFunc(ctx: *Context, argv: []*Mem) void {
         while (!ctype.isXdigit(c)) {
             const ch = utf8Read(&z_hex);
             if (!strContainsChar(pass, n_pass, ch)) {
-                api.contextDbHandle(ctx).gpa.free(blob);
+                sqlite3_malloc.free(blob);
                 return;
             }
             c = z_hex[0];
@@ -1112,13 +1103,13 @@ fn unhexFunc(ctx: *Context, argv: []*Mem) void {
         const d = z_hex[0]; // least significant digit
         z_hex += 1;
         if (!ctype.isXdigit(d)) {
-            api.contextDbHandle(ctx).gpa.free(blob);
+            sqlite3_malloc.free(blob);
             return;
         }
         blob[p] = (util.hexToInt(c) << 4) | util.hexToInt(d);
         p += 1;
     }
-    resultOwnedBlob(ctx, api.contextDbHandle(ctx).gpa, blob, p);
+    resultOwnedBlob(ctx, blob, p);
 }
 
 /// zeroblobFunc(): zeroblob(N).
@@ -1161,15 +1152,15 @@ fn replaceFunc(ctx: *Context, argv: []*Mem) void {
                 n_out += n_rep - n_pattern;
                 if (n_out - 1 > db.limit(.length)) {
                     api.resultErrorTooBig(ctx);
-                    db.gpa.free(z_out);
+                    sqlite3_malloc.free(z_out);
                     return;
                 }
                 cnt_expand += 1;
                 if (cnt_expand & (cnt_expand - 1) == 0) {
                     // Grow only on substitutions 1, 2, 4, 8, ...
-                    z_out = db.gpa.realloc(z_out, @intCast(n_out + (n_out - n_str - 1))) catch {
+                    z_out = sqlite3_malloc.realloc(z_out, @intCast(n_out + (n_out - n_str - 1))) catch {
                         api.resultErrorNomem(ctx);
-                        db.gpa.free(z_out);
+                        sqlite3_malloc.free(z_out);
                         return;
                     };
                 }
@@ -1182,7 +1173,7 @@ fn replaceFunc(ctx: *Context, argv: []*Mem) void {
     const tail: usize = @intCast(n_str - i);
     @memcpy(z_out[j..][0..tail], z_str[@intCast(i)..]);
     j += tail;
-    resultOwnedText(ctx, db.gpa, z_out, j);
+    resultOwnedText(ctx, z_out, j);
 }
 
 /// trimFunc(): trim(), ltrim() and rtrim(), with an optional set of
@@ -1195,7 +1186,7 @@ fn trimFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
     var az_char: []const []const u8 = &.{" "};
     var allocated: ?[][]const u8 = null;
-    defer if (allocated) |a| db.gpa.free(a);
+    defer if (allocated) |a| sqlite3_malloc.free(a);
     if (argv.len != 1) {
         const char_set = api.valueText(argv[1]) orelse return;
         var n_char: usize = 0;
@@ -1208,7 +1199,7 @@ fn trimFunc(ctx: *Context, argv: []*Mem) void {
                 api.resultErrorTooBig(ctx);
                 return;
             }
-            const a = db.gpa.alloc([]const u8, n_char) catch return api.resultErrorNomem(ctx);
+            const a = sqlite3_malloc.alloc([]const u8, n_char) catch return api.resultErrorNomem(ctx);
             allocated = a;
             z = char_set.ptr;
             for (a) |*ch| {
@@ -1272,7 +1263,7 @@ fn concatFuncCore(ctx: *Context, argv: []*Mem, sep: []const u8) void {
         }
     }
     std.debug.assert(j <= n);
-    resultOwnedText(ctx, gpa, z, j);
+    resultOwnedText(ctx, z, j);
 }
 
 /// concatFunc(): concat(...).
@@ -1516,7 +1507,7 @@ fn minmaxStep(ctx: *Context, argv: []*Mem) void {
         const cmp = serial.memCompare(&p.best, arg, getFuncCollSeq(ctx));
         if ((max and cmp < 0) or (!max and cmp > 0)) {
             mem.copy(&p.best, arg) catch {
-                db.malloc_failed = true;
+                db.oomFault();
             };
         } else {
             skipAccumulatorLoad(ctx);
@@ -1525,7 +1516,7 @@ fn minmaxStep(ctx: *Context, argv: []*Mem) void {
         p.init = true;
         p.best = .{ .db = db };
         mem.copy(&p.best, arg) catch {
-            db.malloc_failed = true;
+            db.oomFault();
         };
     }
 }
@@ -1563,11 +1554,12 @@ const GroupConcatCtx = struct {
     sep_lengths: ?[]i32,
 };
 
-fn groupConcatInit(g: *GroupConcatCtx, db: *Sqlite3) void {
+fn groupConcatInit(g: *GroupConcatCtx) void {
     if (g.init) return;
     g.* = .{
         .init = true,
-        .str = printf.StrAccum.init(db.gpa, &.{}, 0),
+        // pGCC->str.db is 0: sqlite3_malloc() memory.
+        .str = printf.StrAccum.init(sqlite3_malloc, &.{}, 0),
         .n_accum = 0,
         .n_first_sep_length = 0,
         .sep_lengths = null,
@@ -1580,7 +1572,7 @@ fn groupConcatStep(ctx: *Context, argv: []*Mem) void {
     if (api.valueType(argv[0]) == SQLITE_NULL) return;
     const g = aggContext(GroupConcatCtx, ctx, true) orelse return;
     const db = api.contextDbHandle(ctx);
-    groupConcatInit(g, db);
+    groupConcatInit(g);
     const first_term = g.str.mx_alloc == 0;
     g.str.mx_alloc = @intCast(db.limit(.length));
     if (argv.len == 1) {
@@ -1628,7 +1620,7 @@ fn groupConcatInverse(ctx: *Context, argv: []*Mem) void {
     // groupConcatStep() always ran first.
     const g = aggContext(GroupConcatCtx, ctx, true) orelse return;
     const db = api.contextDbHandle(ctx);
-    groupConcatInit(g, db);
+    groupConcatInit(g);
     // value_text() first so value_bytes() counts the text.
     _ = api.valueText(argv[0]);
     var n_vs: usize = api.valueBytes(argv[0]);
@@ -1677,7 +1669,7 @@ fn groupConcatValue(ctx: *Context) void {
 pub fn registerPerConnectionBuiltinFunctions(db: *Sqlite3) void {
     const rc = callback.overloadFunction(db, "MATCH", 2);
     std.debug.assert(rc == RC.NOMEM or rc == RC.OK);
-    if (rc == RC.NOMEM) db.malloc_failed = true;
+    if (rc == RC.NOMEM) db.oomFault();
 }
 
 /// Port of sqlite3RegisterLikeFunctions(): re-register like() as case
@@ -1934,8 +1926,8 @@ var date_funcs = @import("date.zig").funcs;
 
 const testing = std.testing;
 
-fn testDb() Sqlite3 {
-    return .{ .gpa = testing.allocator };
+fn testDb(db: *Sqlite3) void {
+    db.* = .{ .gpa = @import("malloc.zig").dbAllocator(db) };
 }
 
 fn tInt(db: *Sqlite3, v: i64) Mem {
@@ -2087,7 +2079,8 @@ const Agg = struct {
 };
 
 test "func: substr edge cases" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     try expectText(&db, "bc", "substr", .{ tText(&db, "abcde"), tInt(&db, 2), tInt(&db, 2) });
     try expectText(&db, "cde", "substr", .{ tText(&db, "abcde"), tInt(&db, 3) });
@@ -2118,7 +2111,8 @@ test "func: substr edge cases" {
 }
 
 test "func: like, glob and escapes" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     // like(PATTERN, STRING)
     try expectInt(&db, 1, "like", .{ tText(&db, "a%C"), tText(&db, "AbbbC") });
@@ -2154,7 +2148,8 @@ test "func: like, glob and escapes" {
 }
 
 test "func: round, abs and sign" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     try expectReal(&db, 3.0, "round", .{tReal(&db, 2.5)});
     try expectReal(&db, -3.0, "round", .{tReal(&db, -2.5)});
@@ -2173,7 +2168,8 @@ test "func: round, abs and sign" {
 }
 
 test "func: sum, total, avg and count" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     {
         var a = try Agg.init(&db, "sum", 1);
@@ -2264,7 +2260,8 @@ test "func: sum, total, avg and count" {
 }
 
 test "func: min and max" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     try expectInt(&db, 1, "min", .{ tInt(&db, 3), tInt(&db, 1), tInt(&db, 2) });
     try expectText(&db, "b", "max", .{ tInt(&db, 3), tText(&db, "a"), tText(&db, "b") });
@@ -2280,7 +2277,8 @@ test "func: min and max" {
 }
 
 test "func: group_concat with separators and inverse" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     {
         var a = try Agg.init(&db, "group_concat", 1);
@@ -2328,7 +2326,8 @@ test "func: group_concat with separators and inverse" {
 }
 
 test "func: quote, hex and unhex" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     try expectText(&db, "'it''s'", "quote", .{tText(&db, "it's")});
     try expectText(&db, "X'00FF10'", "quote", .{tBlob(&db, "\x00\xff\x10")});
@@ -2357,7 +2356,8 @@ test "func: quote, hex and unhex" {
 }
 
 test "func: replace, trim, case and concat" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     try expectText(&db, "a--b--c", "replace", .{ tText(&db, "a,b,c"), tText(&db, ","), tText(&db, "--") });
     try expectText(&db, "XXXXXXXX", "replace", .{ tText(&db, "aaaaaaaa"), tText(&db, "a"), tText(&db, "X") });
@@ -2380,7 +2380,8 @@ test "func: replace, trim, case and concat" {
 }
 
 test "func: typeof, length, instr, char, unicode, printf" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     try expectText(&db, "integer", "typeof", .{tInt(&db, 1)});
     try expectText(&db, "real", "typeof", .{tReal(&db, 1.5)});
@@ -2428,7 +2429,8 @@ test "func: typeof, length, instr, char, unicode, printf" {
 }
 
 test "func: registration and lookup" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     defer callback.freeFunctions(&db);
     // In-line functions are coded by the code generator.
     for ([_][]const u8{ "coalesce", "iif", "if" }) |name| {

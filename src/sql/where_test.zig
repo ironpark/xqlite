@@ -38,7 +38,7 @@ fn expectPlan(c: *Conn, sql: []const u8, expected: []const u8) !void {
     defer testing.allocator.free(q);
     var msg: ?[:0]u8 = null;
     const rc = legacy.exec(c.db, q, Ctx.row, &ctx, &msg);
-    if (msg) |m| testing.allocator.free(m);
+    if (msg) |m| @import("malloc.zig").free(m.ptr);
     try testing.expectEqual(RC.OK, rc);
     testing.expectEqualStrings(expected, ctx.out.items) catch |err| {
         std.debug.print("query: {s}\n", .{sql});

@@ -10,6 +10,7 @@ const exec_mod = @import("exec.zig");
 const int = @import("../sql/sqlite_int.zig");
 const main_mod = @import("../sql/main.zig");
 const printf = @import("../sql/printf.zig");
+const malloc = @import("../sql/malloc.zig");
 
 const Vdbe = vi.Vdbe;
 const Mem = vi.Mem;
@@ -66,7 +67,7 @@ fn stepOnce(v: *Vdbe) i32 {
     db.err_code = rc;
     if (db.malloc_failed) {
         v.rc = RC.NOMEM;
-        db.malloc_failed = false;
+        malloc.oomClear(db);
     }
     return rc & db.err_mask;
 }
@@ -102,11 +103,11 @@ pub fn step(v: *Vdbe) i32 {
             // The error of compiling the statement again, which is in
             // the connection, becomes that of the statement.
             if (!db.malloc_failed) {
-                v.err_msg = v.alloc().dupeSentinel(u8, main_mod.errmsg(db), 0) catch null;
+                aux.setErrMsg(v, db.gpa.dupeSentinel(u8, main_mod.errmsg(db), 0) catch null);
                 rc = main_mod.apiExit(db, rc);
                 v.rc = rc;
             } else {
-                v.err_msg = null;
+                aux.setErrMsg(v, null);
                 rc = RC.NOMEM;
                 v.rc = rc;
             }
@@ -262,7 +263,7 @@ pub fn valueDouble(m: *Mem) f64 {
 /// Port of sqlite3_value_text(): the value as UTF-8 text; null for NULL.
 pub fn valueText(m: *Mem) ?[:0]const u8 {
     const z = (mem.valueText(m, ENC.UTF8) catch {
-        if (m.db) |db| db.malloc_failed = true;
+        if (m.db) |db| db.oomFault();
         return null;
     }) orelse return null;
     return z[0..@intCast(m.n) :0];
@@ -320,11 +321,12 @@ pub fn valueFrombind(m: *const Mem) bool {
     return m.flags & MEM.FromBind != 0;
 }
 
-/// Port of sqlite3_value_dup(): a copy not tied to any connection, or
-/// null on OOM. Free it with valueFree().
+/// Port of sqlite3_value_dup(): a copy not tied to any connection, in
+/// memory from sqlite3_malloc(), or null on OOM. Free it with
+/// valueFree().
 pub fn valueDup(orig: ?*const Mem) ?*Mem {
     const o = orig orelse return null;
-    const new = std.heap.smp_allocator.create(Mem) catch return null;
+    const new = malloc.allocator.create(Mem) catch return null;
     new.* = .{ .u = o.u, .z = o.z, .n = o.n, .flags = o.flags, .enc = o.enc, .e_subtype = o.e_subtype };
     new.flags &= ~MEM.Dyn;
     if (new.flags & (MEM.Str | MEM.Blob) != 0) {
@@ -345,7 +347,7 @@ pub fn valueDup(orig: ?*const Mem) ?*Mem {
 pub fn valueFree(m: ?*Mem) void {
     const v = m orelse return;
     mem.release(v);
-    std.heap.smp_allocator.destroy(v);
+    malloc.allocator.destroy(v);
 }
 
 // =============================================================== bindings
@@ -598,7 +600,7 @@ pub fn resultErrorTooBig(ctx: *Context) void {
 pub fn resultErrorNomem(ctx: *Context) void {
     mem.setNull(ctx.out);
     ctx.is_error = RC.NOMEM;
-    if (ctx.out.db) |db| db.malloc_failed = true;
+    if (ctx.out.db) |db| db.oomFault();
 }
 
 /// Port of unixCurrentTimeInt64() (os_unix.c): the current time as a
@@ -729,12 +731,13 @@ pub fn aggregateContext(ctx: *Context, n: usize) ?[]u8 {
 const OP = vi.OP;
 
 /// A connection with no databases, for programs that use none.
-fn testDb() Sqlite3 {
-    return .{ .gpa = std.testing.allocator };
+fn testDb(db: *Sqlite3) void {
+    db.* = .{ .gpa = malloc.dbAllocator(db) };
 }
 
 test "api: run a hand-assembled program" {
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var p: int.Parse = .{ .db = &db, .arena = arena.allocator() };
@@ -778,7 +781,8 @@ test "api: sorter and ephemeral table" {
     const vfs_mod = @import("../vfs/mem.zig");
     var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
     defer mv.deinit();
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     db.vfs = mv.interface();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -844,7 +848,8 @@ test "api: sorter order and ties for each key type" {
     var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
     defer mv.deinit();
     inline for (.{ int.Aff.integer, int.Aff.text, int.Aff.real, int.Aff.blob }) |aff| {
-        var db = testDb();
+        var db: Sqlite3 = undefined;
+        testDb(&db);
         db.vfs = mv.interface();
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -920,7 +925,8 @@ test "api: an OpenDup cursor outlives the original" {
     const vfs_mod = @import("../vfs/mem.zig");
     var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
     defer mv.deinit();
-    var db = testDb();
+    var db: Sqlite3 = undefined;
+    testDb(&db);
     db.vfs = mv.interface();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

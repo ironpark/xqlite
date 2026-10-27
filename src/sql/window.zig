@@ -1575,7 +1575,7 @@ fn windowCodeOp(cx: *WindowCodeArg, op: i32, reg_countdown: i32, jump_on_eof: bo
 /// greater than zero as an integer.
 fn windowExprGtZero(p: *Parse, e: ?*Expr) bool {
     const val = update.valueFromExpr(p.vdbe.?, e, Aff.numeric) catch {
-        p.db.malloc_failed = true;
+        p.db.oomFault();
         return false;
     };
     return if (val) |m| api.valueInt(m) > 0 else false;

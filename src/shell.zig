@@ -1913,7 +1913,7 @@ fn showMode(p: *Shell, b_all: bool) Error!void {
 pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: []const []const u8, out: *Io.Writer, err_out: *Io.Writer) Error!u8 {
     const filename = path orelse ":memory:";
     var db: *Sqlite3 = undefined;
-    const orc = sql.main.open(gpa, v, filename, .{}, &db);
+    const orc = sql.main.open(v, filename, .{}, &db);
     defer _ = sql.main.close(db);
     if (orc != RC.OK) {
         try err_out.print("Error: unable to open database \"{s}\": {s}\n", .{ filename, sql.main.errmsg(db) });

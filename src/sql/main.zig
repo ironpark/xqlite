@@ -7,6 +7,7 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const mem = @import("../vdbe/mem.zig");
 const util = @import("util.zig");
 const vtab = @import("vtab.zig");
+const malloc = @import("malloc.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
@@ -149,7 +150,7 @@ pub fn errorClear(db: *Sqlite3) void {
 /// application. Running out of memory is reported (and cleared) here.
 pub fn apiExit(db: *Sqlite3, rc: i32) i32 {
     if (db.malloc_failed or rc == RC.NOMEM) {
-        db.malloc_failed = false;
+        malloc.oomClear(db);
         setError(db, RC.NOMEM);
         return RC.NOMEM;
     }
@@ -195,10 +196,13 @@ pub const OpenFlags = struct {
 /// Port of openDatabase() (sqlite3_open_v2()): open a connection to the
 /// database file `filename` (":memory:" or "" for a private temporary
 /// database). The connection is returned even when opening fails, with
-/// the error recorded; it must be closed with close().
-pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenFlags, out: **Sqlite3) i32 {
-    const db = gpa.create(Sqlite3) catch return RC.NOMEM;
-    db.* = .{ .gpa = gpa, .vfs = v };
+/// the error recorded; it must be closed with close(). Its memory comes
+/// from sqlite3_malloc() (malloc.configMalloc() chooses the allocator).
+pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenFlags, out: **Sqlite3) i32 {
+    const db = malloc.allocator.create(Sqlite3) catch return RC.NOMEM;
+    // Lookaside is off until set up at the end.
+    db.* = .{ .gpa = malloc.dbAllocator(db), .vfs = v };
+    const gpa = db.gpa;
     out.* = db;
     const s_main = gpa.create(int.Schema) catch return oomOnOpen(db);
     s_main.* = .{};
@@ -215,7 +219,7 @@ pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: 
     db.enc = 1;
 
     const path: ?[]const u8 = if (filename.len == 0 or std.mem.eql(u8, filename, ":memory:")) null else filename;
-    const bt = btree.Btree.open(gpa, v, path, .{
+    const bt = btree.Btree.open(malloc.allocator, v, path, .{
         .read_only = flags.read_only,
         .create = flags.create and !flags.read_only,
         .n_vdbe_read = &db.n_vdbe_read,
@@ -228,17 +232,20 @@ pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: 
     db.dbs.items[0].bt = bt;
     db.dbs.items[0].schema.enc = db.enc;
     @import("func.zig").registerPerConnectionBuiltinFunctions(db);
-    // SQLITE_DEFAULT_WAL_AUTOCHECKPOINT.
-    _ = walAutocheckpoint(db, 1000);
     // The built-in extensions (sqlite3BuiltinExtensions): the reference
     // build has SQLITE_ENABLE_BYTECODE_VTAB.
     _ = @import("../vdbe/vdbevtab.zig").init(db);
     errorClear(db);
+    // Enable the lookaside-malloc subsystem.
+    const cfg = malloc.configLookasideDefaults();
+    _ = malloc.setupLookaside(db, null, cfg.sz, cfg.n);
+    // SQLITE_DEFAULT_WAL_AUTOCHECKPOINT.
+    _ = walAutocheckpoint(db, 1000);
     return RC.OK;
 }
 
 fn oomOnOpen(db: *Sqlite3) i32 {
-    db.malloc_failed = true;
+    db.oomFault();
     db.err_code = RC.NOMEM;
     return RC.NOMEM;
 }
@@ -277,7 +284,8 @@ pub fn close(db: *Sqlite3) i32 {
         mem.release(e);
         gpa.destroy(e);
     }
-    gpa.destroy(db);
+    malloc.freeLookaside(db);
+    malloc.allocator.destroy(db);
     return RC.OK;
 }
 
@@ -363,6 +371,14 @@ pub fn dbConfig(db: *Sqlite3, op: DbConfig, onoff: i32) bool {
     }
     if (old_flags != db.flags) @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
     return db.flags & m != 0;
+}
+
+/// Port of sqlite3_db_config(SQLITE_DBCONFIG_LOOKASIDE): `cnt` lookaside
+/// slots of `sz` bytes, in `buf` or (if null) in memory from
+/// sqlite3_malloc(); 0 for either turns lookaside off. BUSY while any
+/// slot is in use.
+pub fn dbConfigLookaside(db: *Sqlite3, buf: ?[]align(8) u8, sz: i32, cnt: i32) i32 {
+    return malloc.setupLookaside(db, buf, sz, cnt);
 }
 
 /// Port of sqlite3_db_config(SQLITE_DBCONFIG_FP_DIGITS): set the digits

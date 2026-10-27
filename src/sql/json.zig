@@ -28,6 +28,7 @@ const ctype = @import("../util/ctype.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const api = @import("../vdbe/api.zig");
 const vtab = @import("vtab.zig");
+const malloc = @import("malloc.zig");
 
 const Allocator = std.mem.Allocator;
 const Sqlite3 = int.Sqlite3;
@@ -227,28 +228,23 @@ fn jsonId1(c: u8) bool {
 // ================================================================= RCStr
 
 /// The header in front of an RCStr (printf.c): a reference-counted string
-/// that the JSON cache can share with function results.
+/// that the JSON cache can share with function results. It lives in
+/// memory from sqlite3_malloc(), whose free needs only the pointer.
 const RCStr = struct {
     n_rc_ref: u64,
-    gpa: Allocator,
-    /// Bytes of the allocation, header included.
-    n_alloc: usize,
 };
 
-const rcstr_hdr = std.mem.alignForward(usize, @sizeOf(RCStr), 8);
-
 fn rcstrHeader(z: [*]u8) *RCStr {
-    return @ptrCast(@alignCast(z - rcstr_hdr));
+    return @ptrCast(@alignCast(z - @sizeOf(RCStr)));
 }
 
 /// Port of sqlite3RCStrNew(): room for `n` bytes and a terminator, with
 /// one reference.
-fn rcstrNew(gpa: Allocator, n: u64) ?[*]u8 {
-    const total = rcstr_hdr + n + 1;
-    const buf = gpa.alignedAlloc(u8, .@"8", @intCast(total)) catch return null;
-    const h: *RCStr = @ptrCast(buf.ptr);
-    h.* = .{ .n_rc_ref = 1, .gpa = gpa, .n_alloc = @intCast(total) };
-    return buf.ptr + rcstr_hdr;
+fn rcstrNew(n: u64) ?[*]u8 {
+    const p = malloc.malloc(n + @sizeOf(RCStr) + 1) orelse return null;
+    const h: *RCStr = @ptrCast(@alignCast(p));
+    h.n_rc_ref = 1;
+    return p + @sizeOf(RCStr);
 }
 
 /// Port of sqlite3RCStrRef(): add a reference.
@@ -266,8 +262,7 @@ fn rcstrUnref(p: ?*anyopaque) void {
     if (h.n_rc_ref >= 2) {
         h.n_rc_ref -= 1;
     } else {
-        const base: [*]align(8) u8 = @ptrCast(h);
-        h.gpa.free(base[0..h.n_alloc]);
+        malloc.free(h);
     }
 }
 
@@ -277,16 +272,11 @@ fn rcstrUnref(p: ?*anyopaque) void {
 fn rcstrResize(z: [*]u8, n: u64) ?[*]u8 {
     const h = rcstrHeader(z);
     std.debug.assert(h.n_rc_ref == 1);
-    const gpa = h.gpa;
-    const base: [*]align(8) u8 = @ptrCast(h);
-    const total = rcstr_hdr + n + 1;
-    const new = gpa.realloc(base[0..h.n_alloc], @intCast(total)) catch {
-        gpa.free(base[0..h.n_alloc]);
+    const new = malloc.realloc(h, n + @sizeOf(RCStr) + 1) orelse {
+        malloc.free(h);
         return null;
     };
-    const nh: *RCStr = @ptrCast(new.ptr);
-    nh.n_alloc = @intCast(total);
-    return new.ptr + rcstr_hdr;
+    return new + @sizeOf(RCStr);
 }
 
 /// Port of sqlite3ValueIsOfClass() (vdbemem.c): `m` is a string or blob
@@ -458,11 +448,6 @@ fn jsonCacheSearch(ctx: *Context, arg: *Mem) ?*JsonParse {
 
 // ====================================================== JsonString
 
-/// The allocator for the RCStr buffers of `p`.
-fn jsonStringGpa(p: *const JsonString) Allocator {
-    return if (p.ctx) |ctx| api.contextDbHandle(ctx).gpa else std.heap.smp_allocator;
-}
-
 /// Port of jsonStringZero(): an empty string in the static space.
 fn jsonStringZero(p: *JsonString) void {
     p.z_buf = &p.z_space;
@@ -504,7 +489,7 @@ fn jsonStringGrow(p: *JsonString, n: u32) i32 {
     const n_total: u64 = if (n < p.n_alloc) p.n_alloc * 2 else p.n_alloc + n + 10;
     if (p.b_static) {
         if (p.e_err != 0) return 1;
-        const z_new = rcstrNew(jsonStringGpa(p), n_total) orelse {
+        const z_new = rcstrNew(n_total) orelse {
             jsonStringOom(p);
             return RC.NOMEM;
         };
@@ -1755,7 +1740,7 @@ fn jsonReturnStringAsBlob(str: *JsonString) void {
     } else {
         std.debug.assert(px.n_blob_alloc > 0);
         std.debug.assert(!px.b_read_only);
-        func.resultOwnedBlob(ctx, px.gpa(), px.blob()[0..px.n_blob_alloc], px.n_blob);
+        func.resultOwnedBlob(ctx, px.blob()[0..px.n_blob_alloc], px.n_blob);
     }
 }
 
@@ -2807,7 +2792,7 @@ fn jsonReturnFromBlob(parse: *JsonParse, i: u32, ctx: *Context, e_mode_arg: u8) 
                         }
                     }
                     std.debug.assert(i_out <= n_out);
-                    func.resultOwnedText(ctx, db.gpa, z_out, i_out);
+                    func.resultOwnedText(ctx, z_out, i_out);
                 },
                 JSONB.ARRAY, JSONB.OBJECT => {
                     if (e_mode == 0) {
@@ -3086,7 +3071,7 @@ fn jsonParseFuncArg(ctx: *Context, arg: *Mem, flgs: u32) ?*JsonParse {
             const is_rcstr = valueIsOfClass(arg, rcstrUnref);
             if (!is_rcstr) {
                 const n_json: usize = @intCast(px.n_json);
-                const z_new = rcstrNew(db.gpa, n_json) orelse break :oom;
+                const z_new = rcstrNew(n_json) orelse break :oom;
                 @memcpy(z_new[0..n_json], px.z_json.?[0..n_json]);
                 z_new[n_json] = 0;
                 px.z_json = z_new;
@@ -3121,7 +3106,7 @@ fn jsonReturnParse(ctx: *Context, p: *JsonParse) void {
     const flgs = userFlags(ctx);
     if (flgs & JSON.BLOB != 0) {
         if (p.n_blob_alloc > 0 and !p.b_read_only) {
-            func.resultOwnedBlob(ctx, p.gpa(), p.blob()[0..p.n_blob_alloc], p.n_blob);
+            func.resultOwnedBlob(ctx, p.blob()[0..p.n_blob_alloc], p.n_blob);
             p.n_blob_alloc = 0;
         } else {
             api.resultBlob(ctx, p.blob()[0..p.n_blob], .transient);
@@ -4623,7 +4608,8 @@ test "json: aggregates" {
 /// function would: step, value and inverse in the order of `ops`, then
 /// final. Returns the values ('v' and 'f' ops) joined with " ".
 fn windowCalls(out: *std.ArrayList(u8), name: []const u8, ops: []const union(enum) { step: [2]?[]const u8, inverse, value }) !void {
-    var db: Sqlite3 = .{ .gpa = testing.allocator };
+    var db: Sqlite3 = .{ .gpa = undefined };
+    db.gpa = malloc.dbAllocator(&db);
     const def: *FuncDef = for (&json_funcs) |*f| {
         if (std.mem.eql(u8, f.name, name)) break f;
     } else unreachable;

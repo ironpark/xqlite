@@ -1462,8 +1462,8 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
     };
     if (aux.addOpList(v, &end_code)) |ops| {
         ops[0].p2 = 1 - mx_err;
-        ops[2].p4 = .{ .z = "ok" };
-        ops[5].p4 = .{ .z = util.errStr(int.RC.CORRUPT) };
+        ops[2].setP4(.{ .z = "ok" });
+        ops[5].setP4(.{ .z = util.errStr(int.RC.CORRUPT) });
     }
     // A corrupt record seen by OP_Column jumps to the "corrupt" message.
     aux.changeP3(v, 0, aux.currentAddr(v) - 2);
@@ -1917,7 +1917,7 @@ fn pragmaVtabFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, argv: []*vi
         j += 1;
     }
     const printf = @import("printf.zig");
-    var acc = printf.StrAccum.init(db.gpa, &.{}, @intCast(db.limit(.sql_length)));
+    var acc = printf.StrAccum.init(@import("malloc.zig").allocator, &.{}, @intCast(db.limit(.sql_length)));
     acc.appendAll("PRAGMA ");
     if (c.args[1]) |schema| acc.appendf("%Q.", &.{.{ .str = schema }});
     acc.appendAll(t.name.name);

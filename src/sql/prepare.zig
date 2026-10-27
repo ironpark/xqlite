@@ -129,7 +129,7 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
             if (!db.init.orphan_trigger) {
                 if (rc > data.rc) data.rc = rc;
                 if (rc == RC.NOMEM) {
-                    db.malloc_failed = true;
+                    db.oomFault();
                 } else if (rc != RC.INTERRUPT and rc & 0xff != RC.LOCKED) {
                     corruptSchema(data, argv, main_mod.errmsg(db));
                 }
@@ -267,7 +267,7 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
 
 /// The error_out path of sqlite3InitOne().
 fn initError(db: *Sqlite3, i_db: usize, rc: i32) i32 {
-    if (rc == RC.NOMEM) db.malloc_failed = true;
+    if (rc == RC.NOMEM) db.oomFault();
     build.resetOneSchema(db, i_db);
     return rc;
 }
@@ -328,7 +328,7 @@ fn schemaIsValid(p: *Parse) void {
         if (bt.txnState() == .none) {
             bt.beginTrans(.read, 0) catch |err| {
                 if (err == error.OutOfMemory) {
-                    db.malloc_failed = true;
+                    db.oomFault();
                     p.rc = RC.NOMEM;
                 }
                 return;
@@ -354,6 +354,16 @@ pub fn schemaToIndex(db: *Sqlite3, s: ?*Schema) i32 {
     unreachable;
 }
 
+/// The lookaside part of sqlite3ParseObjectReset(): undo the
+/// disableLookaside() calls made while parsing `p`.
+pub fn parseObjectResetLookaside(p: *Parse) void {
+    const db = p.db;
+    std.debug.assert(db.lookaside.b_disable >= p.disable_lookaside);
+    db.lookaside.b_disable -= p.disable_lookaside;
+    db.lookaside.sz = if (db.lookaside.b_disable != 0) 0 else db.lookaside.sz_true;
+    p.disable_lookaside = 0;
+}
+
 /// Port of sqlite3Prepare(): compile the first statement of `sql`. The
 /// statement (null for blank input) goes to `stmt` and the text after it
 /// to `tail`.
@@ -368,17 +378,23 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
     p.outer_parse = db.parse;
     db.parse = &p;
     defer db.parse = p.outer_parse;
+    defer parseObjectResetLookaside(&p);
     if (old) |r| p.explain = r.explain;
     if (db.malloc_failed) {
         db.err_code = RC.NOMEM;
         return RC.NOMEM;
+    }
+    // A long-lived statement keeps out of lookaside.
+    if (prep_flags & aux.PREPARE_PERSISTENT != 0) {
+        p.disable_lookaside += 1;
+        @import("malloc.zig").disableLookaside(db);
     }
     p.prep_flags = prep_flags;
 
     if (db.disconnect != null) @import("vtab.zig").unlockList(db);
 
     _ = tokenize.runParser(&p, sql) catch {
-        db.malloc_failed = true;
+        db.oomFault();
     };
     const consumed = @intFromPtr(p.tail.ptr) - @intFromPtr(sql.ptr);
     tail.* = sql[consumed..];
@@ -440,7 +456,7 @@ pub fn prepareV3(db: *Sqlite3, sql: []const u8, prep_flags: u8, stmt: *?*Vdbe, t
         return main_mod.apiExit(db, RC.TOOBIG);
     }
     const copy = db.gpa.dupeSentinel(u8, sql, 0) catch {
-        db.malloc_failed = true;
+        db.oomFault();
         return main_mod.apiExit(db, RC.NOMEM);
     };
     defer db.gpa.free(copy);
@@ -472,7 +488,7 @@ pub fn reprepare(v: *Vdbe) i32 {
     var tail: [:0]const u8 = "";
     const rc = lockAndPrepare(db, sql, v.prep_flags, v, &new, &tail);
     if (rc != RC.OK) {
-        if (rc == RC.NOMEM) db.malloc_failed = true;
+        if (rc == RC.NOMEM) db.oomFault();
         return rc;
     }
     const n = new.?;

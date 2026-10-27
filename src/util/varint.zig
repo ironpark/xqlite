@@ -29,8 +29,9 @@ pub const Decoded32 = struct {
 };
 
 /// Encodes `v` into `buf` and returns the number of bytes written (1-9).
-/// Port of sqlite3PutVarint().
-pub fn put(buf: []u8, v: u64) u8 {
+/// Port of sqlite3PutVarint(), with the one- and two-byte cases in line
+/// (as the putVarint32() macro and sqlite3PutVarint() have them).
+pub inline fn put(buf: []u8, v: u64) u8 {
     if (v <= 0x7f) {
         buf[0] = @intCast(v);
         return 1;
@@ -131,8 +132,14 @@ pub fn get32(p: []const u8) Decoded32 {
     };
 }
 
-/// Number of bytes needed to encode `v`. Port of sqlite3VarintLen().
-pub fn len(v: u64) u8 {
+/// Number of bytes needed to encode `v`. Port of sqlite3VarintLen(), with
+/// the one-byte case in line.
+pub inline fn len(v: u64) u8 {
+    if (v < 0x80) return 1;
+    return lenSlow(v);
+}
+
+fn lenSlow(v: u64) u8 {
     if (v > 0x00ff_ffff_ffff_ffff) return 9;
     var n: u8 = 1;
     var x = v >> 7;

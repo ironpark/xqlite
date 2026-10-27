@@ -31,7 +31,7 @@ pub const small_type_sizes = blk: {
 };
 
 /// Port of sqlite3VdbeSerialTypeLen().
-pub fn serialTypeLen(serial_type: u32) u32 {
+pub inline fn serialTypeLen(serial_type: u32) u32 {
     if (serial_type >= 128) return (serial_type - 12) / 2;
     return small_type_sizes[serial_type];
 }
@@ -49,8 +49,22 @@ fn get8(s: []const u8, i: usize) u64 {
     return @as(u64, get4(s, i)) << 32 | get4(s, i + 4);
 }
 
-/// The header varint at `i`, as getVarint32() reads it.
-pub fn getVarint32(s: []const u8, i: usize) struct { value: u32, len: u32 } {
+pub const Varint32 = struct { value: u32, len: u32 };
+
+/// The header varint at `i`, as the getVarint32() macro reads it: the
+/// one-byte case inline, the rest out of line.
+pub inline fn getVarint32(s: []const u8, i: usize) Varint32 {
+    if (i < s.len and s[i] < 0x80) return .{ .value = s[i], .len = 1 };
+    return getVarint32Slow(s, i);
+}
+
+/// Port of sqlite3GetVarint32() for getVarint32(): a varint of two or
+/// more bytes, or one that starts past the end of `s` (which reads as 0).
+pub noinline fn getVarint32Slow(s: []const u8, i: usize) Varint32 {
+    if (i + varint.max_len <= s.len) {
+        const d = varint.get32(s[i..]);
+        return .{ .value = d.value, .len = d.len };
+    }
     var buf: [9]u8 = undefined;
     for (&buf, 0..) |*b, k| b.* = at(s, i + k);
     const d = varint.get32(&buf);
@@ -60,7 +74,7 @@ pub fn getVarint32(s: []const u8, i: usize) struct { value: u32, len: u32 } {
 /// Port of sqlite3VdbeSerialGet7(): a REAL; NaN becomes NULL (returns
 /// true).
 fn serialGet7(s: []const u8, i: usize, m: *Mem) bool {
-    const x = get8(s, i);
+    const x = if (i + 8 <= s.len) std.mem.readInt(u64, s[i..][0..8], .big) else get8(s, i);
     m.u = .{ .r = @bitCast(x) };
     if (std.math.isNan(m.u.r)) {
         m.flags = MEM.Null;
@@ -70,8 +84,31 @@ fn serialGet7(s: []const u8, i: usize, m: *Mem) bool {
     return false;
 }
 
-/// Port of vdbeRecordDecodeInt(): the integer of serial type 1-6, 8 or 9.
-fn decodeInt(serial_type: u32, s: []const u8, i: usize) i64 {
+/// Port of vdbeRecordDecodeInt(): the integer of serial type 1-6, 8 or 9
+/// at `p`, which must hold all of its bytes (the ONE_BYTE_INT() to
+/// sqlite3Get8byte() macros).
+pub inline fn decodeIntPtr(serial_type: u32, p: [*]const u8) i64 {
+    return switch (serial_type) {
+        0, 1 => @as(i8, @bitCast(p[0])),
+        2 => std.mem.readInt(i16, p[0..2], .big),
+        3 => @as(i32, @bitCast(@as(u32, p[0]) << 24 | @as(u32, p[1]) << 16 | @as(u32, p[2]) << 8)) >> 8,
+        4 => std.mem.readInt(i32, p[0..4], .big),
+        5 => @as(i64, std.mem.readInt(i16, p[0..2], .big)) * (@as(i64, 1) << 32) + std.mem.readInt(u32, p[2..6], .big),
+        6 => std.mem.readInt(i64, p[0..8], .big),
+        else => @as(i64, serial_type) - 8,
+    };
+}
+
+/// Port of vdbeRecordDecodeInt() on a slice: bytes past the end of `s`
+/// read as 0.
+inline fn decodeInt(serial_type: u32, s: []const u8, i: usize) i64 {
+    const n: usize = if (serial_type < 2) 1 else small_type_sizes[serial_type & 0x7f];
+    if (i + n <= s.len) return decodeIntPtr(serial_type, s.ptr + i);
+    return decodeIntSlow(serial_type, s, i);
+}
+
+/// decodeInt() of a value running past the end of `s` (corrupt records).
+noinline fn decodeIntSlow(serial_type: u32, s: []const u8, i: usize) i64 {
     return switch (serial_type) {
         0, 1 => @as(i8, @bitCast(at(s, i))),
         2 => @as(i16, @bitCast(@as(u16, at(s, i)) << 8 | at(s, i + 1))),
@@ -89,9 +126,10 @@ fn decodeInt(serial_type: u32, s: []const u8, i: usize) i64 {
     };
 }
 
-/// Port of sqlite3VdbeSerialGet(): decode the value of `serial_type` at
-/// `s[i..]`. Strings and blobs point into `s` (MEM_Ephem).
-pub fn serialGet(s: []const u8, i: usize, serial_type: u32, m: *Mem) void {
+/// Port of sqlite3VdbeSerialGet() (the in-line switch of OP_Column) for
+/// a value whose bytes are all at `p`. Strings and blobs point at `p`
+/// (MEM_Ephem).
+pub inline fn serialGetPtr(p: [*]const u8, serial_type: u32, m: *Mem) void {
     switch (serial_type) {
         10 => {
             // NULL with the virtual-table no-change flag (internal).
@@ -100,20 +138,41 @@ pub fn serialGet(s: []const u8, i: usize, serial_type: u32, m: *Mem) void {
             m.u = .{ .n_zero = 0 };
         },
         0, 11 => m.flags = MEM.Null,
-        1...6 => {
-            m.u = .{ .i = decodeInt(serial_type, s, i) };
+        1...6, 8, 9 => {
+            m.u = .{ .i = decodeIntPtr(serial_type, p) };
             m.flags = MEM.Int;
         },
-        7 => _ = serialGet7(s, i, m),
-        8, 9 => {
-            m.u = .{ .i = @as(i64, serial_type) - 8 };
-            m.flags = MEM.Int;
+        7 => {
+            m.u = .{ .r = @bitCast(std.mem.readInt(u64, p[0..8], .big)) };
+            m.flags = if (std.math.isNan(m.u.r)) MEM.Null else MEM.Real;
         },
         else => {
-            m.z = @constCast(s.ptr + i);
+            m.z = @constCast(p);
             m.n = @intCast((serial_type - 12) / 2);
             m.flags = if (serial_type & 1 != 0) MEM.Str | MEM.Ephem else MEM.Blob | MEM.Ephem;
         },
+    }
+}
+
+/// Port of sqlite3VdbeSerialGet(): decode the value of `serial_type` at
+/// `s[i..]`. Strings and blobs point into `s` (MEM_Ephem). Bytes of a
+/// number past the end of `s` read as 0.
+pub fn serialGet(s: []const u8, i: usize, serial_type: u32, m: *Mem) void {
+    if (serial_type >= 12 or i + small_type_sizes[serial_type] <= s.len) {
+        return serialGetPtr(s.ptr + i, serial_type, m);
+    }
+    serialGetSlow(s, i, serial_type, m);
+}
+
+/// serialGet() of a number running past the end of `s` (corrupt records).
+noinline fn serialGetSlow(s: []const u8, i: usize, serial_type: u32, m: *Mem) void {
+    switch (serial_type) {
+        1...6 => {
+            m.u = .{ .i = decodeIntSlow(serial_type, s, i) };
+            m.flags = MEM.Int;
+        },
+        7 => _ = serialGet7(s, i, m),
+        else => serialGetPtr(s.ptr + i, serial_type, m),
     }
 }
 
@@ -176,8 +235,24 @@ fn isAllZero(z: []const u8) bool {
     return true;
 }
 
-fn memcmp(a: []const u8, b: []const u8) i32 {
-    for (a, b) |x, y| if (x != y) return @as(i32, x) - y;
+/// memcmp() of two slices of the same length: the difference of the
+/// first differing bytes, or 0. Compares eight bytes at a time.
+pub fn memcmp(a: []const u8, b: []const u8) i32 {
+    std.debug.assert(a.len == b.len);
+    const n = a.len;
+    var i: usize = 0;
+    while (i + 8 <= n) : (i += 8) {
+        const x = std.mem.readInt(u64, a[i..][0..8], .big);
+        const y = std.mem.readInt(u64, b[i..][0..8], .big);
+        if (x != y) {
+            // The first differing byte is the highest one in big-endian.
+            const shift: u6 = @intCast(56 - (@clz(x ^ y) & ~@as(u7, 7)));
+            return @as(i32, @as(u8, @truncate(x >> shift))) - @as(u8, @truncate(y >> shift));
+        }
+    }
+    while (i < n) : (i += 1) {
+        if (a[i] != b[i]) return @as(i32, a[i]) - b[i];
+    }
     return 0;
 }
 
@@ -266,7 +341,8 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
     var idx1: u32 = undefined;
     var rhs: [*]Mem = r.mem;
     var rc: i32 = 0;
-    var mem1: Mem = .{};
+    // Uninitialized, as in C: each use sets the fields it reads.
+    var mem1: Mem = undefined;
     if (skip) {
         var s1: u32 = at(key1, 1);
         if (s1 < 0x80) {
@@ -505,7 +581,10 @@ pub fn isBinary(coll: ?*const CollSeq) bool {
 
 /// The BINARY collation (binCollFunc): memcmp, then length.
 pub fn binaryCollation(_: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order {
-    return std.mem.order(u8, a, b);
+    const n = @min(a.len, b.len);
+    const c = memcmp(a[0..n], b[0..n]);
+    if (c != 0) return if (c < 0) .lt else .gt;
+    return std.math.order(a.len, b.len);
 }
 
 /// Port of sqlite3VdbeIdxRowid(): the rowid at the end of the index entry
@@ -574,11 +653,26 @@ pub const IndexKeyCtx = struct {
     r: *UnpackedRecord,
     cmp: RecordCompare,
 
+    /// Calls `cmp` through the function pointer.
     pub fn compare(ctx: *const anyopaque, stored: []const u8) btree.CompareError!std.math.Order {
         const self: *const IndexKeyCtx = @ptrCast(@alignCast(ctx));
-        const c = self.cmp(stored, self.r);
-        if (self.r.err_code != 0) {
-            return if (self.r.err_code == RC.NOMEM) error.OutOfMemory else error.Corrupt;
+        return finish(self.r, self.cmp(stored, self.r));
+    }
+
+    /// compare() with the comparator fixed, so that the b-tree's call
+    /// reaches it directly, as C calls xRecordCompare.
+    fn compareWith(comptime cmp: RecordCompare) *const fn (ctx: *const anyopaque, stored: []const u8) btree.CompareError!std.math.Order {
+        return struct {
+            fn f(ctx: *const anyopaque, stored: []const u8) btree.CompareError!std.math.Order {
+                const self: *const IndexKeyCtx = @ptrCast(@alignCast(ctx));
+                return finish(self.r, @call(.always_inline, cmp, .{ stored, self.r }));
+            }
+        }.f;
+    }
+
+    inline fn finish(r: *UnpackedRecord, c: i32) btree.CompareError!std.math.Order {
+        if (r.err_code != 0) {
+            return if (r.err_code == RC.NOMEM) error.OutOfMemory else error.Corrupt;
         }
         // The b-tree wants the order of the stored key relative to the
         // search key.
@@ -588,7 +682,15 @@ pub const IndexKeyCtx = struct {
     }
 
     pub fn indexKey(self: *const IndexKeyCtx) btree.IndexKey {
-        return .{ .ctx = self, .compare = compare };
+        const f = if (self.cmp == &recordCompareInt)
+            compareWith(recordCompareInt)
+        else if (self.cmp == &recordCompareString)
+            compareWith(recordCompareString)
+        else if (self.cmp == &recordCompare)
+            compareWith(recordCompare)
+        else
+            compare;
+        return .{ .ctx = self, .compare = f };
     }
 };
 
@@ -602,7 +704,7 @@ fn seekPacked(ctx: *const anyopaque, cur: *btree.Cursor, key: []const u8) btree.
     const ki: *KeyInfo = @ptrCast(@alignCast(@constCast(ctx)));
     const n = @as(usize, ki.n_key_field) + 1;
     var stack: [16]Mem = undefined;
-    const gpa = if (ki.db) |db| db.gpa else std.heap.page_allocator;
+    const gpa = if (ki.db) |db| db.gpa else @import("../sql/malloc.zig").allocator;
     const cells = if (n <= stack.len) stack[0..n] else try gpa.alloc(Mem, n);
     defer if (n > stack.len) gpa.free(cells);
     for (cells) |*c| c.* = .{ .db = ki.db };

@@ -16,6 +16,8 @@ const Mem = vi.Mem;
 const RC = int.RC;
 const IC = vtab.INDEX_CONSTRAINT;
 const gpa = testing.allocator;
+/// sqlite3_mprintf(): strings handed to the core, which frees them.
+const sqlite3_malloc = @import("malloc.zig").allocator;
 
 // ============================================================ the module
 
@@ -146,14 +148,14 @@ fn kvConstruct(db: *int.Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, p
     if (cols.len >= 2 and cols[0] == '\'' and cols[cols.len - 1] == '\'') cols = cols[1 .. cols.len - 1];
     store.note("{s}({s}.{s})", .{ if (create) "xCreate" else "xConnect", argv[1], argv[2] });
     if (std.mem.eql(u8, cols, "fail")) {
-        err.* = gpa.dupeSentinel(u8, "kvtab refused", 0) catch null;
+        err.* = sqlite3_malloc.dupeSentinel(u8, "kvtab refused", 0) catch null;
         return RC.ERROR;
     }
     const sql = std.fmt.allocPrintSentinel(gpa, "CREATE TABLE x({s})", .{cols}, 0) catch return RC.NOMEM;
     defer gpa.free(sql);
     const rc = vtab.declareVtab(db, sql);
     if (rc != RC.OK) {
-        err.* = gpa.dupeSentinel(u8, main_mod.errmsg(db), 0) catch null;
+        err.* = sqlite3_malloc.dupeSentinel(u8, main_mod.errmsg(db), 0) catch null;
         return rc;
     }
     if (create) {
@@ -162,7 +164,7 @@ fn kvConstruct(db: *int.Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, p
         d.* = .{};
         store.tables.put(gpa, name, d) catch return RC.NOMEM;
     } else if (store.tables.get(argv[2]) == null) {
-        err.* = gpa.dupeSentinel(u8, "kvtab: no data", 0) catch null;
+        err.* = sqlite3_malloc.dupeSentinel(u8, "kvtab: no data", 0) catch null;
         return RC.ERROR;
     }
     const t = gpa.create(KvVtab) catch return RC.NOMEM;
@@ -269,7 +271,7 @@ fn kvBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
         info.order_by_consumed = true;
     }
     info.idx_num = plan;
-    info.idx_str = std.fmt.allocPrintSentinel(t.db.gpa, "plan{d}", .{plan}, 0) catch null;
+    info.idx_str = std.fmt.allocPrintSentinel(sqlite3_malloc, "plan{d}", .{plan}, 0) catch null;
     info.need_to_free_idx_str = true;
     return RC.OK;
 }

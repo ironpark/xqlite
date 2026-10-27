@@ -489,7 +489,8 @@ test "parser: syntax of a range of statements" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var schema: int.Schema = .{};
-    var db: int.Sqlite3 = .{ .gpa = std.testing.allocator };
+    var db: int.Sqlite3 = .{ .gpa = undefined };
+    db.gpa = @import("../sql/malloc.zig").dbAllocator(&db);
     try db.dbs.append(arena, .{ .name = "main", .schema = &schema });
     try db.dbs.append(arena, .{ .name = "temp", .schema = &schema });
 

@@ -220,7 +220,7 @@ const Runner = struct {
         };
         const filename = db_path orelse ":memory:";
         if (db_path) |p| r.deleteDbFiles(p);
-        if (sql.main.open(r.gpa, unix.interface(), filename, .{}, &r.db) != RC.OK) {
+        if (sql.main.open(unix.interface(), filename, .{}, &r.db) != RC.OK) {
             try r.out.print("{s}: unable to connect to database: {s}\n", .{ r.path, sql.main.errmsg(r.db) });
             _ = sql.main.close(r.db);
             return 1;
@@ -345,7 +345,7 @@ const Runner = struct {
         }
         var msg: ?[:0]u8 = null;
         var rc = sql.legacy.exec(r.db, text, null, null, &msg);
-        defer if (msg) |m| r.gpa.free(m);
+        defer if (msg) |m| xqlite.malloc.free(m.ptr);
         var check_msg: ?[]const u8 = null;
         if (rc == RC.OK and r.opts.integrity_check) {
             check_msg = try r.integrityCheck();

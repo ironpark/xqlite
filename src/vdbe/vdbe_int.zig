@@ -71,10 +71,13 @@ pub const Destructor = union(enum) {
     static,
     /// Must be copied (SQLITE_TRANSIENT).
     transient,
-    /// Allocated with the connection's allocator, which the Mem takes over
-    /// (SQLITE_DYNAMIC).
+    /// Allocated with the connection's allocator (or sqlite3_malloc());
+    /// the Mem takes over the whole allocation as its buffer, whatever
+    /// the length of the string (SQLITE_DYNAMIC: szMalloc is
+    /// sqlite3DbMallocSize()).
     dynamic,
-    /// Freed by calling this.
+    /// Freed by calling this, e.g. malloc.free (sqlite3_free), which
+    /// needs only the pointer.
     func: *const fn (?*anyopaque) void,
 };
 
@@ -177,34 +180,113 @@ pub const UnpackedRecord = struct {
 
 // =========================================================== instructions
 
-/// One instruction (VdbeOp).
+/// One instruction (VdbeOp). As in C built without
+/// SQLITE_ENABLE_EXPLAIN_COMMENTS, it is 24 bytes: the P4 type fits in
+/// the padding before p5, and P4 is a single word.
 pub const Op = struct {
     opcode: u8,
+    /// Which field of `p4` is valid (p4type).
+    p4type: P4Type = .notused,
     p5: u16 = 0,
     p1: i32 = 0,
     p2: i32 = 0,
     p3: i32 = 0,
-    p4: P4 = .notused,
-    comment: ?[]const u8 = null,
+    p4: P4Union = .{ .p = null },
+
+    /// Store `p4` as the fourth operand, replacing any (without freeing
+    /// it: see aux.changeP4()).
+    pub fn setP4(op: *Op, p4: P4) void {
+        op.p4type = p4;
+        op.p4 = switch (p4) {
+            .notused => .{ .p = null },
+            .z => |z| .{ .z = z.ptr },
+            .dynamic => |z| .{ .dynamic = z.ptr },
+            .int32 => |i| .{ .int32 = i },
+            .collseq => |x| .{ .collseq = x },
+            .funcdef => |x| .{ .funcdef = x },
+            .keyinfo => |x| .{ .keyinfo = x },
+            .mem => |x| .{ .mem = x },
+            .intarray => |a| blk: {
+                std.debug.assert(a.len > a[0]);
+                break :blk .{ .intarray = a.ptr };
+            },
+            .funcctx => |x| .{ .funcctx = x },
+            .subprogram => |x| .{ .subprogram = x },
+            .table => |x| .{ .table = x },
+            .tableref => |x| .{ .tableref = x },
+            .index => |x| .{ .index = x },
+            .subrtnsig => |x| .{ .subrtnsig = x },
+            .vtab => |x| .{ .vtab = x },
+        };
+    }
+
+    /// The fourth operand with its type, strings and arrays as slices:
+    /// for code where the cost of the lengths does not matter.
+    pub fn getP4(op: *const Op) P4 {
+        return switch (op.p4type) {
+            .notused => .notused,
+            .z => .{ .z = std.mem.span(op.p4.z) },
+            .dynamic => .{ .dynamic = std.mem.span(op.p4.dynamic) },
+            .int32 => .{ .int32 = op.p4.int32 },
+            .collseq => .{ .collseq = op.p4.collseq },
+            .funcdef => .{ .funcdef = op.p4.funcdef },
+            .keyinfo => .{ .keyinfo = op.p4.keyinfo },
+            .mem => .{ .mem = op.p4.mem },
+            .intarray => .{ .intarray = op.p4.intarray[0 .. op.p4.intarray[0] + 1] },
+            .funcctx => .{ .funcctx = op.p4.funcctx },
+            .subprogram => .{ .subprogram = op.p4.subprogram },
+            .table => .{ .table = op.p4.table },
+            .tableref => .{ .tableref = op.p4.tableref },
+            .index => .{ .index = op.p4.index },
+            .subrtnsig => .{ .subrtnsig = op.p4.subrtnsig },
+            .vtab => .{ .vtab = op.p4.vtab },
+        };
+    }
 };
 
-/// The fourth operand (p4type and p4). Memory behind pointer variants
-/// belongs to the Vdbe (its arena), not the instruction, except for
-/// `dynamic`.
-pub const P4 = union(enum) {
+comptime {
+    std.debug.assert(@sizeOf(Op) == 24);
+}
+
+/// The type of the fourth operand (P4_*).
+pub const P4Type = enum(u8) {
     notused,
-    /// A NUL-terminated string.
-    z: [:0]const u8,
+    z,
+    dynamic,
+    int32,
+    collseq,
+    funcdef,
+    keyinfo,
+    mem,
+    intarray,
+    funcctx,
+    subprogram,
+    table,
+    tableref,
+    index,
+    subrtnsig,
+    vtab,
+};
+
+/// The fourth operand as an instruction holds it (the p4 union of
+/// VdbeOp): one word, read as the field Op.p4type names. Memory behind
+/// the pointers belongs to the Vdbe (its arena), not the instruction,
+/// except for `dynamic`.
+pub const P4Union = extern union {
+    p: ?*anyopaque,
+    /// A NUL-terminated string (P4_STATIC, P4_DYNAMIC in the arena).
+    z: [*:0]const u8,
     /// A NUL-terminated string from db.gpa that the Vdbe frees: P4_DYNAMIC
     /// memory handed over by a module (the idxStr of OP_VFilter).
-    dynamic: [:0]u8,
+    dynamic: [*:0]u8,
     int32: i32,
     collseq: *CollSeq,
     funcdef: *FuncDef,
     keyinfo: *KeyInfo,
     mem: *Mem,
-    /// The first element is the count (P4_INTARRAY).
-    intarray: []u32,
+    /// The first element is the count of those that follow
+    /// (P4_INTARRAY).
+    intarray: [*]u32,
     funcctx: *Context,
     subprogram: *SubProgram,
     table: *Table,
@@ -212,6 +294,28 @@ pub const P4 = union(enum) {
     index: *Index,
     subrtnsig: *SubrtnSig,
     /// A virtual table, locked while the program refers to it (P4_VTAB).
+    vtab: *int.VTable,
+};
+
+/// The fourth operand as the instruction builders take it: a P4 type
+/// with its value, strings and arrays as slices (see Op.setP4()).
+pub const P4 = union(P4Type) {
+    notused,
+    z: [:0]const u8,
+    dynamic: [:0]u8,
+    int32: i32,
+    collseq: *CollSeq,
+    funcdef: *FuncDef,
+    keyinfo: *KeyInfo,
+    mem: *Mem,
+    /// The first element is the count of those that follow.
+    intarray: []u32,
+    funcctx: *Context,
+    subprogram: *SubProgram,
+    table: *Table,
+    tableref: *Table,
+    index: *Index,
+    subrtnsig: *SubrtnSig,
     vtab: *int.VTable,
 };
 
@@ -276,8 +380,9 @@ pub const VdbeCursor = struct {
     btx: ?*btree.Btree = null,
     /// Opened with OPFLAG_SEEKEQ (BTREE_SEEK_EQ): only equality seeks.
     seek_eq: bool = false,
-    /// Table to index column mapping (aAltMap).
-    alt_map: ?[]u32 = null,
+    /// Table to index column mapping (aAltMap): a P4_INTARRAY, whose
+    /// first element is the count.
+    alt_map: ?[*]u32 = null,
     seq_count: i64 = 0,
     /// Column cache valid while equal to Vdbe.cache_ctr.
     cache_status: u32 = cache_stale,

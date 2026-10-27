@@ -690,7 +690,7 @@ pub fn columnDefault(v: *vi.Vdbe, t: *int.Table, i: i32, reg: i32) void {
         // columnDefaultUncommonCase().
         const e = build.columnExpr(t, col);
         if (valueFromExpr(v, e, col.affinity) catch blk: {
-            v.db.malloc_failed = true;
+            v.db.oomFault();
             break :blk null;
         }) |m| aux.appendP4(v, .{ .mem = m });
     }

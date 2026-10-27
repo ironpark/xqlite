@@ -46,7 +46,7 @@ pub const Conn = struct {
     }
 
     fn connect(c: *Conn) !void {
-        const rc = main_mod.open(testing.allocator, c.mem.interface(), "test.db", .{}, &c.db);
+        const rc = main_mod.open(c.mem.interface(), "test.db", .{}, &c.db);
         if (rc != RC.OK) {
             std.debug.print("open: {s}\n", .{main_mod.errmsg(c.db)});
             _ = main_mod.close(c.db);
@@ -57,7 +57,7 @@ pub const Conn = struct {
     /// Close and open the connection again on the same file system.
     pub fn reopen(c: *Conn) !void {
         try testing.expectEqual(RC.OK, main_mod.close(c.db));
-        const rc = main_mod.open(testing.allocator, c.mem.interface(), "test.db", .{}, &c.db);
+        const rc = main_mod.open(c.mem.interface(), "test.db", .{}, &c.db);
         if (rc != RC.OK) return error.OpenFailed;
     }
 
@@ -72,7 +72,7 @@ pub const Conn = struct {
         const rc = legacy.exec(c.db, sql, null, null, &msg);
         if (rc != RC.OK) {
             std.debug.print("{s}\n  -> {s}\n", .{ sql, msg orelse "?" });
-            if (msg) |m| testing.allocator.free(m);
+            if (msg) |m| @import("malloc.zig").free(m.ptr);
             return error.ExecFailed;
         }
     }
@@ -86,7 +86,7 @@ pub const Conn = struct {
         const rc = legacy.exec(c.db, sql, collect, &out, &msg);
         if (rc != RC.OK) {
             std.debug.print("{s}\n  -> {s}\n", .{ sql, msg orelse "?" });
-            if (msg) |m| testing.allocator.free(m);
+            if (msg) |m| @import("malloc.zig").free(m.ptr);
             return error.ExecFailed;
         }
         return out.toOwnedSlice(testing.allocator);
@@ -116,7 +116,7 @@ pub const Conn = struct {
     pub fn expectError(c: *Conn, sql: []const u8, expected: []const u8) !void {
         var msg: ?[:0]u8 = null;
         const rc = legacy.exec(c.db, sql, null, null, &msg);
-        defer if (msg) |m| testing.allocator.free(m);
+        defer if (msg) |m| @import("malloc.zig").free(m.ptr);
         try testing.expect(rc != RC.OK);
         try testing.expectEqualStrings(expected, msg.?);
     }

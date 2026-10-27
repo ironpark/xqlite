@@ -182,7 +182,7 @@ pub fn addExplainText(p: *Parse, addr: i32, tab_list: *SrcList, level: *WhereLev
     const z = try out.toOwnedSliceSentinel(0);
     const op = aux.getOp(v, addr);
     std.debug.assert(op.opcode == OP.Explain);
-    op.p4 = .{ .z = z };
+    op.setP4(.{ .z = z });
 }
 
 /// Port of sqlite3WhereExplainOneScan(): the address of the OP_Explain, or 0.

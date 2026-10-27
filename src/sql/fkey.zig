@@ -23,6 +23,7 @@ const coll_mod = @import("coll.zig");
 const ctype = @import("../util/ctype.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
+const malloc = @import("malloc.zig");
 
 const Parse = int.Parse;
 const Table = int.Table;
@@ -582,7 +583,10 @@ fn fkActionTrigger(p: *Parse, t: *Table, fk: *FKey, changes: ?*ExprList) Oom!?*T
         where = null;
     }
 
-    // The trigger lives with the foreign key, in the memory of its table.
+    // The trigger lives with the foreign key, in the memory of its table:
+    // not in lookaside.
+    malloc.disableLookaside(db);
+    defer malloc.enableLookaside(db);
     const m = build.tableAlloc(p, fk.from);
     const trig = try m.create(Trigger);
     const step = try m.create(TriggerStep);

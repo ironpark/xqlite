@@ -98,7 +98,7 @@ pub fn analysisLoad(db: *int.Sqlite3, i_db: usize) i32 {
     var info: LoadInfo = .{ .db = db, .database = db.dbs.items[i_db].name };
     if (build.findTable(db, "sqlite_stat1", info.database)) |stat1| if (stat1.isOrdinary()) {
         const sql = printf.mprintf(db.gpa, "SELECT tbl,idx,stat FROM %Q.sqlite_stat1", &.{.{ .str = info.database }}) catch {
-            db.malloc_failed = true;
+            db.oomFault();
             return int.RC.NOMEM;
         };
         defer db.gpa.free(sql);
@@ -109,6 +109,6 @@ pub fn analysisLoad(db: *int.Sqlite3, i_db: usize) i32 {
     iit = schema.idx_hash.valueIterator();
     while (iit.next()) |ix| if (!ix.*.has_stat1) build.defaultRowEst(ix.*);
 
-    if (rc == int.RC.NOMEM) db.malloc_failed = true;
+    if (rc == int.RC.NOMEM) db.oomFault();
     return rc;
 }

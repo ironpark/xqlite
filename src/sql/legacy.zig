@@ -17,13 +17,14 @@ pub const Callback = *const fn (ctx: ?*anyopaque, values: []const ?[*:0]const u8
 
 /// Port of sqlite3_exec(): run every statement of `sql`, passing each
 /// result row to `callback`. On error, `err_msg` (if given) receives a
-/// copy of the message, allocated with db.gpa.
+/// copy of the message, from sqlite3_malloc(): free it with
+/// malloc.free() (sqlite3_free()).
 pub fn exec(db: *Sqlite3, sql_arg: []const u8, callback: ?Callback, ctx: ?*anyopaque, err_msg: ?*?[:0]u8) i32 {
     var rc: i32 = RC.OK;
     main_mod.setError(db, RC.OK);
     // One NUL-terminated copy, parsed in place statement by statement.
     const copy: ?[:0]u8 = db.gpa.dupeSentinel(u8, sql_arg, 0) catch blk: {
-        db.malloc_failed = true;
+        db.oomFault();
         rc = RC.NOMEM;
         break :blk null;
     };
@@ -53,7 +54,7 @@ pub fn exec(db: *Sqlite3, sql_arg: []const u8, callback: ?Callback, ctx: ?*anyop
                     names.clearRetainingCapacity();
                     for (0..n_col) |i| {
                         names.append(db.gpa, api.columnName(stmt, i).?.ptr) catch {
-                            db.malloc_failed = true;
+                            db.oomFault();
                             _ = aux.finalize(stmt);
                             break :outer;
                         };
@@ -65,12 +66,12 @@ pub fn exec(db: *Sqlite3, sql_arg: []const u8, callback: ?Callback, ctx: ?*anyop
                     for (0..n_col) |i| {
                         const t = api.columnText(stmt, i);
                         if (t == null and api.columnType(stmt, i) != @import("../vdbe/vdbe_int.zig").SQLITE_NULL) {
-                            db.malloc_failed = true;
+                            db.oomFault();
                             _ = aux.finalize(stmt);
                             break :outer;
                         }
                         cols.append(db.gpa, if (t) |z| z.ptr else null) catch {
-                            db.malloc_failed = true;
+                            db.oomFault();
                             _ = aux.finalize(stmt);
                             break :outer;
                         };
@@ -95,7 +96,7 @@ pub fn exec(db: *Sqlite3, sql_arg: []const u8, callback: ?Callback, ctx: ?*anyop
     rc = main_mod.apiExit(db, rc);
     if (err_msg) |out| {
         if (rc != RC.OK) {
-            out.* = db.gpa.dupeSentinel(u8, main_mod.errmsg(db), 0) catch blk: {
+            out.* = @import("malloc.zig").allocator.dupeSentinel(u8, main_mod.errmsg(db), 0) catch blk: {
                 rc = RC.NOMEM;
                 main_mod.setError(db, RC.NOMEM);
                 break :blk null;

@@ -236,8 +236,8 @@ fn bytecodevtabColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i_arg: i32) i32 {
             std.debug.assert(a_op[0].opcode == OP.Init);
             if (c.i_rowid == @as(i32, @intCast(c.i_addr)) + 1) {
                 // NULL for the main program.
-            } else if (a_op[0].p4 == .z) {
-                api.resultText(ctx, a_op[0].p4.z[3..], .static);
+            } else if (a_op[0].p4type == .z) {
+                api.resultText(ctx, std.mem.span(a_op[0].p4.z + 3), .static);
             } else {
                 api.resultText(ctx, "(FK)", .static);
             }

@@ -307,7 +307,7 @@ pub fn mprintf(p: *Parse, fmt: []const u8, args: []const @import("printf.zig").A
 
 /// Record that the statement ran out of memory.
 pub fn oomFault(p: *Parse) void {
-    p.db.malloc_failed = true;
+    p.db.oomFault();
     if (p.rc == RC.OK) p.rc = RC.NOMEM;
     p.n_err += 1;
 }
@@ -419,7 +419,7 @@ pub fn nestedParse(p: *Parse, fmt: []const u8, args: []const @import("printf.zig
     if (p.e_parse_mode != .normal) return;
     std.debug.assert(p.nested < 10);
     const sql = @import("printf.zig").mprintfLimit(p.arena, @intCast(db.limit(.length)), fmt, args) catch |err| {
-        if (err == error.TooBig) p.rc = RC.TOOBIG else db.malloc_failed = true;
+        if (err == error.TooBig) p.rc = RC.TOOBIG else db.oomFault();
         p.n_err += 1;
         return;
     };
@@ -2397,6 +2397,9 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) Oom!u32 {
     // the view's SELECT.
     var n_err: u32 = 0;
     if (try expr_mod.selectDup(p.arena, t.u.view.select)) |sel| {
+        // The columns live with the view: not in lookaside.
+        @import("malloc.zig").disableLookaside(db);
+        defer @import("malloc.zig").enableLookaside(db);
         const parse_mode = p.e_parse_mode;
         const n_tab = p.n_tab;
         const n_select = p.n_select;
@@ -2572,7 +2575,7 @@ pub fn savepoint(p: *Parse, op: i32, name: Token) void {
 pub fn openTempDatabase(p: *Parse) u32 {
     const db = p.db;
     if (db.dbs.items[1].bt == null and p.explain == 0) {
-        const bt = btree.Btree.open(db.gpa, db.vfs.?, null, .{
+        const bt = btree.Btree.open(@import("malloc.zig").allocator, db.vfs.?, null, .{
             .cell_size_check = db.flags & int.DbFlag.CellSizeCk != 0,
             .n_vdbe_read = &db.n_vdbe_read,
         }) catch |err| {

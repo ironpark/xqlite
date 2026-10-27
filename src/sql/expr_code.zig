@@ -411,7 +411,7 @@ fn findCompatibleInRhsSubrtn(p: *Parse, e: *Expr, new_sig: ?*vi.SubrtnSig) bool 
     const ops = v.ops.items;
     if (ops.len < 2) return false;
     for (ops[1 .. ops.len - 1]) |*op| {
-        if (op.p4 != .subrtnsig) continue;
+        if (op.p4type != .subrtnsig) continue;
         const sig = op.p4.subrtnsig;
         if (!sig.complete) continue;
         if (sig_new.sel_id != sig.sel_id) continue;

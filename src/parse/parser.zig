@@ -1172,9 +1172,11 @@ pub fn syntaxError(p: *Parse, t: Token) void {
     util.errorMsgAt(p, t.z, "near \"{s}\": syntax error", .{t.slice()});
 }
 
-/// Port of disableLookaside(): starting a CREATE statement.
+/// Port of disableLookaside(): starting a CREATE statement, whose objects
+/// may outlive the statement, so not in lookaside.
 fn disableLookaside(p: *Parse) void {
     p.disable_lookaside += 1;
+    @import("../sql/malloc.zig").disableLookaside(p.db);
     p.is_create = true;
     p.u1 = .{ .cr = .{} };
 }

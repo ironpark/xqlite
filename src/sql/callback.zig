@@ -196,12 +196,12 @@ pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, create:
     // Add a new entry if creating and there was no exact match.
     if (create and best_score < func_perfect_match) {
         const new = newFuncDef(db, name, n_arg, enc) orelse {
-            db.malloc_failed = true;
+            db.oomFault();
             return null;
         };
         const gop = db.funcs.getOrPut(db.gpa, new.name) catch {
             freeFuncDef(db, new);
-            db.malloc_failed = true;
+            db.oomFault();
             return null;
         };
         new.next = if (gop.found_existing) gop.value_ptr.* else null;
@@ -384,7 +384,7 @@ pub fn createFunctionV2(
     var arg: ?*FuncDestructor = null;
     if (x_destroy) |destroy| {
         arg = db.gpa.create(FuncDestructor) catch {
-            db.malloc_failed = true;
+            db.oomFault();
             destroy(user_data);
             return apiExit(db, RC.OK);
         };
@@ -415,16 +415,15 @@ fn invalidFunction(ctx: *vi.Context, argv: []*vi.Mem) void {
     api.resultError(ctx, msg);
 }
 
-fn freeOverloadName(p: ?*anyopaque) void {
-    const z: [*:0]u8 = @ptrCast(p.?);
-    std.heap.smp_allocator.free(std.mem.span(z));
-}
+/// The name of an overload function is from sqlite3_mprintf(), freed with
+/// sqlite3_free().
+const freeOverloadName = @import("malloc.zig").free;
 
 /// Port of sqlite3_overload_function(): make sure a function `name` with
 /// `n_arg` arguments exists, so a virtual table can overload it; called
 /// outside that context it fails.
 pub fn overloadFunction(db: *Sqlite3, name: []const u8, n_arg: i32) i32 {
     if (findFunction(db, name, n_arg, ENC.UTF8, false) != null) return RC.OK;
-    const copy = std.heap.smp_allocator.dupeSentinel(u8, name, 0) catch return RC.NOMEM;
+    const copy = @import("malloc.zig").allocator.dupeSentinel(u8, name, 0) catch return RC.NOMEM;
     return createFunctionV2(db, name, n_arg, ENC.UTF8, @ptrCast(copy.ptr), invalidFunction, null, null, null, freeOverloadName);
 }

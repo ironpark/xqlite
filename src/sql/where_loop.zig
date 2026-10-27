@@ -1616,7 +1616,7 @@ fn vtabBestIndex(p: *Parse, tab: *Table, info: *vtab.IndexInfo) i32 {
     db.n_schema_lock -= 1;
     if (rc != RC.OK and rc != RC.CONSTRAINT) {
         if (rc == RC.NOMEM) {
-            db.malloc_failed = true;
+            db.oomFault();
         } else if (pv.err_msg) |msg| {
             util.errorMsg(p, "{s}", .{msg});
         } else {

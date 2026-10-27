@@ -12,6 +12,7 @@ const util = @import("../sql/util.zig");
 const numeric = @import("../sql/numeric.zig");
 const printf = @import("../sql/printf.zig");
 const btree = @import("../btree/btree.zig");
+const malloc = @import("../sql/malloc.zig");
 
 const Mem = vi.Mem;
 const MEM = vi.MEM;
@@ -30,10 +31,16 @@ pub const max_length = 1000000000;
 /// SQLITE_MAX_ALLOCATION_SIZE.
 pub const max_allocation_size = 2147483391;
 
-/// The allocator of a Mem's buffers: its connection's, or the default for
-/// values not tied to a connection.
+/// The allocator of a Mem's buffers: its connection's (sqlite3DbMalloc),
+/// or sqlite3_malloc() for values not tied to a connection.
 fn gpa(m: *const Mem) std.mem.Allocator {
-    return if (m.db) |db| db.gpa else std.heap.smp_allocator;
+    return if (m.db) |db| db.gpa else malloc.allocator;
+}
+
+/// `z` as the buffer of `m`: all of its allocation (szMalloc is
+/// sqlite3DbMallocSize()).
+fn ownBuffer(m: *Mem, z: [*]u8) void {
+    m.z_malloc = z[0..malloc.dbMallocSize(m.db, z)];
 }
 
 /// Port of sqlite3VdbeChangeEncoding().
@@ -53,23 +60,25 @@ pub fn grow(m: *Mem, n: usize, preserve_arg: bool) Error!void {
     var preserve = preserve_arg;
     const a = gpa(m);
     if (m.z_malloc.len > 0 and preserve and m.z == m.z_malloc.ptr) {
-        m.z_malloc = a.realloc(m.z_malloc, n) catch {
+        const z = a.realloc(m.z_malloc, n) catch {
             a.free(m.z_malloc);
             m.z_malloc = &.{};
             setNull(m);
             m.z = null;
             return error.OutOfMemory;
         };
+        ownBuffer(m, z.ptr);
         m.z = m.z_malloc.ptr;
         preserve = false;
     } else {
         if (m.z_malloc.len > 0) a.free(m.z_malloc);
-        m.z_malloc = a.alloc(u8, n) catch {
+        const z = a.alloc(u8, n) catch {
             m.z_malloc = &.{};
             setNull(m);
             m.z = null;
             return error.OutOfMemory;
         };
+        ownBuffer(m, z.ptr);
     }
     if (preserve) if (m.z) |z| {
         @memcpy(m.z_malloc[0..@intCast(m.n)], z[0..@intCast(m.n)]);
@@ -517,7 +526,7 @@ pub fn setStr(m: *Mem, z_arg: ?[]const u8, enc_arg: u8, del: Destructor) Error!v
         .dynamic => {
             release(m);
             m.z = @constCast(z.ptr);
-            m.z_malloc = @constCast(z);
+            if (z.len > 0) ownBuffer(m, @constCast(z.ptr));
         },
         .static => {
             release(m);
@@ -551,7 +560,7 @@ pub fn setTextZ(m: *Mem, z: [:0]const u8, del: Destructor) Error!void {
         .dynamic => {
             release(m);
             m.z = @constCast(z.ptr);
-            m.z_malloc = @constCast(z.ptr)[0 .. z.len + 1];
+            ownBuffer(m, @constCast(z.ptr));
         },
         .static => {
             release(m);

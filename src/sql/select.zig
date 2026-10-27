@@ -505,7 +505,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, reg_data: i32, reg_orig
         @memset(ki.sort_flags[0..ki.n_key_field], 0);
         aux.changeP4(v, -1, .{ .keyinfo = ki });
         if (keyInfoFromExprList(p, sort.order_by.?, @intCast(n_ob_sat), ki.n_all_field - ki.n_key_field - 1)) |k| {
-            aux.getOp(v, sort.addr_sort_index).p4 = .{ .keyinfo = k };
+            aux.getOp(v, sort.addr_sort_index).setP4(.{ .keyinfo = k });
         }
         const addr_jmp = aux.currentAddr(v);
         _ = aux.addOp3(v, OP.Jump, addr_jmp + 1, 0, addr_jmp + 1);

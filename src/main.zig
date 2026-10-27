@@ -44,6 +44,10 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
+    // sqlite3_config(SQLITE_CONFIG_MALLOC): safe builds take the memory of
+    // the library from the leak-checking allocator of main(); fast builds
+    // keep the default, the C library's malloc() (as mem1.c).
+    if (std.debug.runtime_safety) xqlite.malloc.configMalloc(init.gpa);
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);

@@ -184,7 +184,7 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
     if (t.tab_flags & TF.HasStored != 0) {
         const op = aux.getLastOp(v);
         if (op.opcode == OP.Affinity) {
-            const z: []u8 = @constCast(op.p4.z);
+            const z: []u8 = @constCast(std.mem.span(op.p4.z));
             var jj: usize = 0;
             for (t.cols) |c| {
                 if (jj >= z.len) break;
@@ -1236,7 +1236,7 @@ fn generateConstraintChecksImpl(
                 const x = aux.getOp(v, addr_conflict_ck).*;
                 if (x.opcode != OP.IdxRowid or is_update) {
                     const p2 = if (vi.opcodes.properties[x.opcode] & vi.opcodes.OPFLG.JUMP != 0) lbl_recheck_ok else x.p2;
-                    _ = aux.addOp4(v, x.opcode, x.p1, p2, x.p3, x.p4);
+                    _ = aux.addOp4(v, x.opcode, x.p1, p2, x.p3, x.getP4());
                     aux.changeP5(v, x.p5);
                 }
             }

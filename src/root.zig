@@ -23,6 +23,9 @@ pub const tokenize = @import("parse/tokenize.zig");
 pub const sql_util = @import("sql/util.zig");
 pub const numeric = @import("sql/numeric.zig");
 pub const printf = @import("sql/printf.zig");
+/// The allocators: sqlite3_malloc() and the per-connection lookaside
+/// (malloc.c).
+pub const malloc = @import("sql/malloc.zig");
 
 /// The SQL interface: connections (sql.main) and statement execution.
 pub const sql = struct {
@@ -70,8 +73,12 @@ test {
         @import("sql/pragma.zig"), @import("sql/pragma_test.zig"),
         @import("sql/where_int.zig"), @import("sql/where.zig"), @import("sql/where_loop.zig"),
         @import("sql/where_code.zig"), @import("sql/where_expr.zig"), @import("sql/where_test.zig"),
-        @import("sql/vtab.zig"),   @import("ext/series.zig"), @import("ext/vtablog.zig"),
+        @import("sql/vtab.zig"),   @import("ext/series.zig"), @import("sql/malloc.zig"), @import("ext/vtablog.zig"),
         @import("vdbe/vdbevtab.zig"), @import("sql/vtab_test.zig"),
+        @import("vdbe/exec/control.zig"), @import("vdbe/exec/register.zig"), @import("vdbe/exec/arith.zig"),
+        @import("vdbe/exec/record.zig"), @import("vdbe/exec/txn.zig"), @import("vdbe/exec/cursor.zig"),
+        @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"), @import("vdbe/exec/vtab_ops.zig"),
+        @import("vdbe/exec/misc.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

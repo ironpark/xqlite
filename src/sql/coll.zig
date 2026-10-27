@@ -17,9 +17,12 @@ const RC = int.RC;
 /// sqlite3StrBINARY.
 pub const str_binary: [:0]const u8 = "BINARY";
 
-/// Port of nocaseCollatingFunc(): ASCII case folding, then length.
+/// Port of nocaseCollatingFunc(): ASCII case folding up to the shorter
+/// length or the first NUL, then length.
 fn nocaseCollatingFunc(_: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order {
-    return std.math.order(ctype.strICmp(a, b), 0);
+    const r = ctype.strNICmp(a, b, @min(a.len, b.len));
+    if (r != 0) return std.math.order(r, 0);
+    return std.math.order(a.len, b.len);
 }
 
 /// Port of rtrimCollFunc(): BINARY ignoring trailing spaces.
@@ -151,6 +154,8 @@ pub fn freeAll(db: *Sqlite3) void {
 test "built-in collations" {
     try std.testing.expectEqual(std.math.Order.eq, nocaseCollatingFunc(null, "AbC", "abc"));
     try std.testing.expectEqual(std.math.Order.lt, nocaseCollatingFunc(null, "ab", "ABC"));
+    // As sqlite3StrNICmp(), the comparison stops at a NUL; then length decides.
+    try std.testing.expectEqual(std.math.Order.gt, nocaseCollatingFunc(null, "a\x00bb", "a\x00c"));
     try std.testing.expectEqual(std.math.Order.eq, rtrimCollFunc(null, "ab  ", "ab"));
     try std.testing.expectEqual(std.math.Order.gt, rtrimCollFunc(null, "ab c", "ab"));
 }

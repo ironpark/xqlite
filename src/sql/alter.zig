@@ -783,7 +783,7 @@ fn renameParseSql(p: *Parse, zdb: ?[]const u8, db: *Sqlite3, sql_arg: ?[:0]const
     const flags = db.flags;
     db.flags |= int.DbFlag.Comments;
     const n_err = tokenize.runParser(p, sql) catch blk: {
-        db.malloc_failed = true;
+        db.oomFault();
         break :blk 1;
     };
     db.flags = flags;
@@ -948,6 +948,7 @@ fn renameParseCleanup(rp: *RenameParse) void {
     p.new_table = null;
     build.releaseTableRefs(p);
     build.deleteReturning(p);
+    @import("prepare.zig").parseObjectResetLookaside(p);
     db.parse = p.outer_parse;
     rp.arena_state.deinit();
 }

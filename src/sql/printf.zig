@@ -13,6 +13,7 @@
 const std = @import("std");
 const numeric = @import("numeric.zig");
 const int = @import("sqlite_int.zig");
+const malloc = @import("malloc.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -122,13 +123,16 @@ pub const StrAccum = struct {
             p.setError(NOMEM);
             return 0;
         };
+        // sqlite3DbRealloc() with a connection's allocator, else
+        // sqlite3Realloc().
         const new = if (p.malloced)
             gpa.realloc(p.buf, sz_new) catch null
         else
             gpa.alloc(u8, sz_new) catch null;
         if (new) |z| {
             if (!p.malloced and p.n_char > 0) @memcpy(z[0..p.n_char], p.buf[0..p.n_char]);
-            p.buf = z;
+            // nAlloc is sqlite3DbMallocSize(): all of a lookaside slot.
+            p.buf = z.ptr[0..malloc.allocSize(gpa, z)];
             p.malloced = true;
         } else {
             p.reset();
@@ -187,7 +191,9 @@ pub const StrAccum = struct {
     /// Port of sqlite3StrAccumFinish(): the NUL-terminated result in
     /// memory from gpa (or in the base buffer if it never grew and the
     /// accumulator may not allocate). Null after an error. The caller
-    /// owns allocated results.
+    /// owns allocated results; they are not trimmed, as the allocators
+    /// of malloc.zig free by pointer, except for other allocators, which
+    /// need the exact length to free.
     pub fn finish(p: *StrAccum) ?[:0]u8 {
         if (p.acc_error != 0 or p.buf.len == 0) {
             if (p.buf.len == 0 and p.acc_error == 0 and p.mx_alloc > 0) {
@@ -212,8 +218,7 @@ pub const StrAccum = struct {
                 @memcpy(z, p.buf[0 .. p.n_char + 1]);
                 p.buf = z;
                 p.malloced = true;
-            } else if (p.buf.len != p.n_char + 1) {
-                // Trim so the caller can free the result by its length.
+            } else if (p.buf.len != p.n_char + 1 and !malloc.freesByPointer(gpa)) {
                 p.buf = gpa.realloc(p.buf, p.n_char + 1) catch p.buf;
             }
             const out = p.buf[0..p.n_char :0];

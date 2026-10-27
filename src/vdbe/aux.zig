@@ -44,9 +44,18 @@ pub fn create(p: *Parse) error{OutOfMemory}!*Vdbe {
     return v;
 }
 
-/// Port of sqlite3VdbeError(): set the error message of `v`.
+/// Port of sqlite3VdbeError(): set the error message of `v`, in the
+/// connection's memory (zErrMsg).
 pub fn vdbeError(v: *Vdbe, comptime fmt: []const u8, args: anytype) void {
-    v.err_msg = std.fmt.allocPrintSentinel(v.alloc(), fmt, args, 0) catch null;
+    const msg = std.fmt.allocPrintSentinel(v.db.gpa, fmt, args, 0) catch null;
+    setErrMsg(v, msg);
+}
+
+/// Replace the error message of `v` with `msg` (from db.gpa, or null),
+/// freeing the old one.
+pub fn setErrMsg(v: *Vdbe, msg: ?[:0]u8) void {
+    if (v.err_msg) |old| v.db.gpa.free(old);
+    v.err_msg = msg;
 }
 
 /// Port of sqlite3VdbeSetSql().
@@ -78,11 +87,11 @@ pub fn addOp3(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32) i32 {
     std.debug.assert(v.e_vdbe_state == .init);
     const i = v.nOp();
     if (v.ops.items.len >= @as(usize, @intCast(v.db.limit(.vdbe_op)))) {
-        v.db.malloc_failed = true;
+        v.db.oomFault();
         return i;
     }
     v.ops.append(v.alloc(), .{ .opcode = op, .p1 = p1, .p2 = p2, .p3 = p3 }) catch {
-        v.db.malloc_failed = true;
+        v.db.oomFault();
     };
     return i;
 }
@@ -102,7 +111,7 @@ pub fn addOp2(v: *Vdbe, op: u8, p1: i32, p2: i32) i32 {
 /// Port of sqlite3VdbeAddOp4Int(): P4 is a 32-bit integer.
 pub fn addOp4Int(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32, p4: i32) i32 {
     const addr = addOp3(v, op, p1, p2, p3);
-    if (!v.db.malloc_failed) v.ops.items[@intCast(addr)].p4 = .{ .int32 = p4 };
+    if (!v.db.malloc_failed) v.ops.items[@intCast(addr)].setP4(.{ .int32 = p4 });
     return addr;
 }
 
@@ -168,11 +177,11 @@ pub fn addFunctionCall(p: *Parse, p1: i32, p2: i32, p3: i32, n_arg: i32, func: *
     const v = p.vdbe.?;
     const a = v.alloc();
     const ctx = a.create(vi.Context) catch {
-        p.db.malloc_failed = true;
+        p.db.oomFault();
         return 0;
     };
     const argv = a.alloc(*vi.Mem, @intCast(n_arg)) catch {
-        p.db.malloc_failed = true;
+        p.db.oomFault();
         return 0;
     };
     ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .argv = argv, .i_op = currentAddr(v) };
@@ -196,7 +205,7 @@ pub fn explain(p: *Parse, push: bool, comptime fmt: []const u8, args: anytype) i
     if (p.explain != 2) return 0;
     const v = p.vdbe.?;
     const msg = std.fmt.allocPrintSentinel(v.alloc(), fmt, args, 0) catch {
-        p.db.malloc_failed = true;
+        p.db.oomFault();
         return 0;
     };
     const this = v.nOp();
@@ -242,7 +251,7 @@ pub fn resolveLabel(v: *Vdbe, label: i32) void {
     std.debug.assert(j < -p.n_label);
     while (p.labels.items.len <= j) {
         p.labels.append(p.arena, -1) catch {
-            p.db.malloc_failed = true;
+            p.db.oomFault();
             return;
         };
     }
@@ -321,7 +330,7 @@ pub fn addOpList(v: *Vdbe, items: []const OpListItem) ?[]Op {
         var p2: i32 = item.p2;
         if (opcodes.properties[item.opcode] & opcodes.OPFLG.JUMP != 0 and item.p2 > 0) p2 += @intCast(first);
         v.ops.append(v.alloc(), .{ .opcode = item.opcode, .p1 = item.p1, .p2 = p2, .p3 = item.p3 }) catch {
-            v.db.malloc_failed = true;
+            v.db.oomFault();
             return null;
         };
     }
@@ -409,7 +418,7 @@ pub fn linkSubProgram(v: *Vdbe, sub: *vi.SubProgram) void {
 pub fn changeToNoop(v: *Vdbe, addr: i32) bool {
     if (v.db.malloc_failed) return false;
     const op = &v.ops.items[@intCast(addr)];
-    op.p4 = .notused;
+    op.setP4(.notused);
     op.opcode = OP.Noop;
     return true;
 }
@@ -431,7 +440,7 @@ pub fn changeP4(v: *Vdbe, addr_arg: i32, p4: P4) void {
         return;
     }
     const addr = if (addr_arg < 0) v.nOp() - 1 else addr_arg;
-    v.ops.items[@intCast(addr)].p4 = p4;
+    v.ops.items[@intCast(addr)].setP4(p4);
     acquireP4(p4);
 }
 
@@ -440,7 +449,7 @@ pub fn changeP4Str(v: *Vdbe, addr: i32, z: ?[]const u8) void {
     const s = z orelse return;
     if (v.db.malloc_failed) return;
     const copy = v.alloc().dupeSentinel(u8, s, 0) catch {
-        v.db.malloc_failed = true;
+        v.db.oomFault();
         return;
     };
     changeP4(v, addr, .{ .z = copy });
@@ -467,8 +476,8 @@ pub fn appendP4(v: *Vdbe, p4: P4) void {
         return;
     }
     const op = &v.ops.items[v.ops.items.len - 1];
-    std.debug.assert(op.p4 == .notused);
-    op.p4 = p4;
+    std.debug.assert(op.p4type == .notused);
+    op.setP4(p4);
     acquireP4(p4);
 }
 
@@ -515,7 +524,7 @@ pub fn displayP4(a: std.mem.Allocator, op: *const Op) error{OutOfMemory}![:0]u8 
     var out: std.Io.Writer.Allocating = .init(a);
     defer out.deinit();
     const w = &out.writer;
-    (switch (op.p4) {
+    (switch (op.getP4()) {
         .keyinfo => |ki| blk: {
             w.print("k({d}", .{ki.n_key_field}) catch break :blk error.WriteFailed;
             for (0..ki.n_key_field) |j| {
@@ -651,7 +660,7 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: u8, pc: *i32, addr: *usize, ops:
 
         // An OP_Program (the only opcode with a P4_SUBPROGRAM) adds its
         // program to the list, unless already there.
-        if (sub) |s| if (a_op[i].p4 == .subprogram) {
+        if (sub) |s| if (a_op[i].p4type == .subprogram) {
             const prog = a_op[i].p4.subprogram;
             var j: usize = 0;
             while (j < n_sub) : (j += 1) {
@@ -698,7 +707,7 @@ pub fn list(v: *Vdbe) i32 {
     const cells = v.mem[1..9];
     releaseMemArray(cells);
     if (v.rc == RC.NOMEM) {
-        db.malloc_failed = true;
+        db.oomFault();
         return RC.ERROR;
     }
     // With the trigger programs, mem[9] keeps the list of them.
@@ -794,7 +803,7 @@ fn copyVList(a: std.mem.Allocator, src: []const int.VListEntry) error{OutOfMemor
 }
 
 fn oom(v: *Vdbe) void {
-    v.db.malloc_failed = true;
+    v.db.oomFault();
     v.mem = &.{};
     v.vars = &.{};
     v.csr = &.{};
@@ -888,7 +897,7 @@ pub fn setNumCols(v: *Vdbe, n: u16) void {
     v.n_res_column = n;
     v.n_res_alloc = n;
     v.col_names = v.alloc().alloc(Mem, @as(usize, n) * vi.COLNAME_N) catch {
-        v.db.malloc_failed = true;
+        v.db.oomFault();
         v.col_names = &.{};
         return;
     };
@@ -901,7 +910,7 @@ pub fn setColName(v: *Vdbe, idx: usize, var_: usize, name: [:0]const u8) void {
     if (v.db.malloc_failed) return;
     const m = &v.col_names[idx + var_ * v.n_res_alloc];
     mem.setTextZ(m, name, .transient) catch {
-        v.db.malloc_failed = true;
+        v.db.oomFault();
     };
 }
 
@@ -942,7 +951,7 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
 /// a function left in `m`.
 pub fn vdbeErrorFromMem(v: *Vdbe, m: *Mem) void {
     const z = mem.valueText(m, vi.ENC.UTF8) catch {
-        v.db.malloc_failed = true;
+        v.db.oomFault();
         return;
     };
     vdbeError(v, "{s}", .{if (z != null) m.bytes() else ""});
@@ -1105,7 +1114,7 @@ pub fn halt(v: *Vdbe) i32 {
             if (rc != 0) {
                 if (v.rc == RC.OK or v.rc & 0xff == RC.CONSTRAINT) {
                     v.rc = rc;
-                    v.err_msg = null;
+                    setErrMsg(v, null);
                 }
                 main_mod.rollbackAll(db, RC.ABORT_ROLLBACK);
                 main_mod.closeSavepoints(db);
@@ -1176,7 +1185,7 @@ pub fn reset(v: *Vdbe) i32 {
             db.err_code = v.rc;
         }
     }
-    v.err_msg = null;
+    setErrMsg(v, null);
     v.result_row = null;
     return v.rc & db.err_mask;
 }
@@ -1227,6 +1236,7 @@ pub fn delete(v: *Vdbe) void {
         releaseP4s(db, s.ops);
         if (s.mem) |*m| m.deinit();
     }
+    setErrMsg(v, null);
     v.arena.deinit();
     db.gpa.destroy(v);
 }
@@ -1235,8 +1245,9 @@ pub fn delete(v: *Vdbe) void {
 /// db.gpa strings: release the values, unlock the virtual tables, drop
 /// the table references and free the strings of `ops`.
 fn releaseP4s(db: *Sqlite3, ops: []Op) void {
-    for (ops) |*op| switch (op.p4) {
+    for (ops) |*op| switch (op.getP4()) {
         .mem => |m| mem.release(m),
+        // db.gpa frees by the pointer alone, whatever the length.
         .dynamic => |z| db.gpa.free(z),
         .vtab => |vt| @import("../sql/vtab.zig").unlock(vt),
         .tableref => |t| @import("../sql/build.zig").deleteTable(db, t),

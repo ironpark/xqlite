@@ -1378,12 +1378,17 @@ pub const Btree = struct {
                     b.n_cell += 1;
                 }
             }
+            // The cell pointers, with the count and array in locals (a
+            // store through b.cells may alias b.n_cell).
             const pi_end = data + old.cell_offset + 2 * @as(u32, old.n_cell);
+            const cells = b.cells.ptr;
+            var n_cell = b.n_cell;
             while (@intFromPtr(pi_cell) < @intFromPtr(pi_end)) {
-                b.cells[b.n_cell] = data + (mask & get2(pi_cell));
+                cells[n_cell] = data + (mask & get2(pi_cell));
                 pi_cell += 2;
-                b.n_cell += 1;
+                n_cell += 1;
             }
+            b.n_cell = n_cell;
 
             cnt_old[ii] = @intCast(b.n_cell);
             if (ii < n_old - 1 and !leaf_data) {
@@ -2514,12 +2519,14 @@ pub const Cursor = struct {
         return cur.state != .valid;
     }
 
-    /// Port of getCellInfo().
-    fn getCellInfo(cur: *Cursor) void {
-        if (cur.info.n_size == 0) {
-            cur.flags.valid_nkey = true;
-            cur.info = cur.page.parseCellAt(cur.ix);
-        }
+    /// Port of getCellInfo(): the check in line, the parse out of line.
+    inline fn getCellInfo(cur: *Cursor) void {
+        if (cur.info.n_size == 0) cur.parseCurrentCell();
+    }
+
+    noinline fn parseCurrentCell(cur: *Cursor) void {
+        cur.flags.valid_nkey = true;
+        cur.info = cur.page.parseCellAt(cur.ix);
     }
 
     /// The rowid of the current entry (table b-trees).
@@ -2549,11 +2556,24 @@ pub const Cursor = struct {
     pub fn payloadFetch(cur: *Cursor) []const u8 {
         std.debug.assert(cur.state == .valid);
         cur.getCellInfo();
+        return cur.localPayload();
+    }
+
+    /// The end of fetchPayload(): the local payload of the parsed cell.
+    inline fn localPayload(cur: *Cursor) []const u8 {
         var amt: isize = cur.info.n_local;
         // Too little room for the local content: corrupt.
         const room = ptrDiff(cur.page.data_end, cur.info.payload);
         if (amt > room) amt = @max(0, room);
         return cur.info.payload[0..@intCast(amt)];
+    }
+
+    /// sqlite3BtreePayloadSize() and sqlite3BtreePayloadFetch() together,
+    /// as OP_Column calls them, parsing the cell once.
+    pub inline fn payloadFetchWithSize(cur: *Cursor) struct { n_payload: u32, local: []const u8 } {
+        std.debug.assert(cur.state == .valid);
+        cur.getCellInfo();
+        return .{ .n_payload = cur.info.n_payload, .local = cur.localPayload() };
     }
 
     /// Port of accessPayload(): read (or overwrite, if `write`) payload

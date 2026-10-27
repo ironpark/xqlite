@@ -1504,9 +1504,46 @@ pub const Db = struct {
     }
 };
 
+/// A free lookaside slot (LookasideSlot).
+pub const LookasideSlot = struct {
+    next: ?*LookasideSlot,
+};
+
+/// The lookaside memory of a connection (Lookaside): one block cut into
+/// slots of `sz_true` bytes, then smaller ones of LOOKASIDE_SMALL bytes
+/// from `middle` on. See malloc.zig.
+pub const Lookaside = struct {
+    /// Slots are handed out only while this is zero (bDisable).
+    b_disable: u32 = 1,
+    /// Size of each slot, or 0 while disabled (sz).
+    sz: u16 = 0,
+    /// Size of each slot, even while disabled (szTrue).
+    sz_true: u16 = 0,
+    /// The block came from malloc() (bMalloced).
+    b_malloced: bool = false,
+    /// Slots in all (nSlot).
+    n_slot: u32 = 0,
+    /// Hits, misses for size and misses with every slot taken (anStat).
+    an_stat: [3]u32 = .{ 0, 0, 0 },
+    /// Slots never used (pInit), and freed ones (pFree).
+    init: ?*LookasideSlot = null,
+    free: ?*LookasideSlot = null,
+    /// The same for the small slots (pSmallInit, pSmallFree).
+    small_init: ?*LookasideSlot = null,
+    small_free: ?*LookasideSlot = null,
+    /// Addresses of the block, its small slots and its end (pStart,
+    /// pMiddle, pEnd; pTrueEnd is pEnd).
+    start: usize = 0,
+    middle: usize = 0,
+    end: usize = 0,
+};
+
 /// A database connection (sqlite3).
 pub const Sqlite3 = struct {
+    /// The memory of the connection: sqlite3DbMalloc*() and
+    /// sqlite3DbFree(), through `lookaside` (malloc.dbAllocator()).
     gpa: Allocator,
+    lookaside: Lookaside = .{},
     /// The VFS of the connection's files, also used for ephemeral tables.
     vfs: ?@import("../vfs/vfs.zig").Vfs = null,
     dbs: std.ArrayList(Db) = .empty,
@@ -1600,6 +1637,11 @@ pub const Sqlite3 = struct {
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);
+    }
+
+    /// sqlite3OomFault(): record an allocation failure.
+    pub fn oomFault(db: *Sqlite3) void {
+        @import("malloc.zig").oomFault(db);
     }
 
     /// OptimizationDisabled().

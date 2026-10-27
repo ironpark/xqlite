@@ -1010,7 +1010,8 @@ fn strftimeFunc(ctx: *Context, argv: []*Mem) void {
     var x: DateTime = undefined;
     if (isDate(ctx, argv[1..], &x)) return;
     const db = api.contextDbHandle(ctx);
-    var res = StrAccum.init(db.gpa, &.{}, @intCast(db.limit(.length)));
+    // sqlite3_str_new(): sqlite3_malloc() memory.
+    var res = StrAccum.init(@import("malloc.zig").allocator, &.{}, @intCast(db.limit(.length)));
 
     computeJD(&x);
     computeYMD_HMS(&x);
@@ -1196,7 +1197,7 @@ fn timediffFunc(ctx: *Context, argv: []*Mem) void {
     }
     clearYMD_HMS_TZ(&d1);
     computeYMD_HMS(&d1);
-    var res = StrAccum.init(api.contextDbHandle(ctx).gpa, &.{}, 100);
+    var res = StrAccum.init(@import("malloc.zig").allocator, &.{}, 100);
     res.appendf("%c%04d-%02d-%02d %02d:%02d:%06.3f", &.{
         .{ .int = sign },       .{ .int = y },       .{ .int = m },
         .{ .int = d1.day - 1 }, .{ .int = d1.hour }, .{ .int = d1.minute },
@@ -1252,7 +1253,8 @@ const TestArg = union(enum) { text: []const u8, int: i64, real: f64, null };
 /// Calls the function named `name` with `args` and returns its result
 /// rendered as text ("NULL" for NULL), in `buf`.
 fn callFunc(buf: []u8, name: []const u8, args: []const TestArg) ![]const u8 {
-    var db: int.Sqlite3 = .{ .gpa = std.testing.allocator };
+    var db: int.Sqlite3 = .{ .gpa = undefined };
+    db.gpa = @import("malloc.zig").dbAllocator(&db);
     var def: FuncDef = for (funcs) |f| {
         if (std.mem.eql(u8, f.name, name)) break f;
     } else unreachable;

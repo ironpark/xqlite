@@ -1540,7 +1540,7 @@ fn findOrCreateAggInfoColumn(p: *Parse, agg: *AggInfo, e: *Expr) Oom!void {
 
 fn analyzeAggregate(w: *Walker, e: *Expr) u8 {
     return analyzeAggregateImpl(w, e) catch {
-        w.u.nc.?.parse.db.malloc_failed = true;
+        w.u.nc.?.parse.db.oomFault();
         return WRC.Abort;
     };
 }

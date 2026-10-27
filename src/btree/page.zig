@@ -139,14 +139,20 @@ pub const MemPage = extern struct {
                 return .{ .n_key = @bitCast(d.value), .payload = cell + 4 + d.len, .n_size = @intCast(4 + d.len) };
             },
             .table_leaf => {
-                // btreeParseCellPtr
+                // btreeParseCellPtr: the payload size, then the rowid,
+                // each with the one-byte case inline.
                 const sz = getPayloadSize(cell);
-                const key = varint.get(cell[sz.len..][0..9]);
-                var info: CellInfo = .{
-                    .n_key = @bitCast(key.value),
-                    .n_payload = sz.value,
-                    .payload = cell + sz.len + key.len,
-                };
+                const key_at = cell + sz.len;
+                var info: CellInfo = undefined;
+                if (key_at[0] < 0x80) {
+                    info.n_key = key_at[0];
+                    info.payload = key_at + 1;
+                } else {
+                    const key = varint.get(key_at[0..9]);
+                    info.n_key = @bitCast(key.value);
+                    info.payload = key_at + key.len;
+                }
+                info.n_payload = sz.value;
                 p.finishParse(cell, &info);
                 return info;
             },
@@ -165,7 +171,21 @@ pub const MemPage = extern struct {
         }
     }
 
-    fn finishParse(p: *const MemPage, cell: [*]u8, info: *CellInfo) void {
+    /// The end of btreeParseCellPtr() and btreeParseCellPtrIndex(): the
+    /// local size, and the size on the page.
+    inline fn finishParse(p: *const MemPage, cell: [*]u8, info: *CellInfo) void {
+        if (info.n_payload <= p.max_local) {
+            const hdr = @intFromPtr(info.payload) - @intFromPtr(cell);
+            info.n_size = @truncate(@max(info.n_payload + hdr, 4));
+            info.n_local = @intCast(info.n_payload);
+        } else {
+            p.adjustSizeForOverflow(cell, info);
+        }
+    }
+
+    /// Port of btreeParseCellAdjustSizeForOverflow(): the local part and
+    /// size on the page of a cell that spills onto overflow pages.
+    noinline fn adjustSizeForOverflow(p: *const MemPage, cell: [*]u8, info: *CellInfo) void {
         info.n_local = p.payloadToLocal(info.n_payload);
         info.n_size = p.sizeOnPage(info.n_payload, @intFromPtr(info.payload) - @intFromPtr(cell));
     }
@@ -217,8 +237,10 @@ pub const MemPage = extern struct {
         }
     }
 
-    pub fn parseCellAt(p: *const MemPage, i: usize) CellInfo {
-        return p.parseCell(p.findCell(i));
+    /// parseCell() of the cell at index `i`, in line (as getCellInfo()
+    /// calls it for every row).
+    pub inline fn parseCellAt(p: *const MemPage, i: usize) CellInfo {
+        return @call(.always_inline, parseCell, .{ p, p.findCell(i) });
     }
 
     // ======================================================= header/init
@@ -667,7 +689,7 @@ pub const MemPage = extern struct {
 
 /// The payload-size varint at the start of a cell, as the C parsers read
 /// it: at most 9 bytes, 7 bits each, truncated to 32 bits.
-fn getPayloadSize(p: [*]const u8) struct { value: u32, len: u8 } {
+inline fn getPayloadSize(p: [*]const u8) struct { value: u32, len: u8 } {
     var n: u32 = p[0];
     var i: u8 = 0;
     if (n >= 0x80) {

@@ -868,6 +868,7 @@ const help_text = [_][]const u8{
     "      --indent             Try to pretty-print the schema",
     "      --nosys              Omit objects whose names start with \"sqlite_\"",
     ".tables ?TABLE?          List names of tables matching LIKE pattern TABLE",
+    ".timeout MS              Try opening locked tables for MS milliseconds",
 };
 
 /// Port of showHelp(), for the first-line and prefix forms. Returns the
@@ -1008,6 +1009,8 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         rc = try dotShow(p);
     } else if (c == 't' and n > 1 and isCmd(cmd, "tables")) {
         rc = try dotTables(p);
+    } else if (c == 't' and n > 4 and isCmd(cmd, "timeout")) {
+        _ = sql.main.busyTimeout(p.db, if (args.len >= 2) @truncate(integerValue(args[1])) else 0);
     } else {
         try p.eprint("Error: unknown command or invalid arguments:  \"{s}\". Enter \".help\" for help\n", .{cmd});
         rc = 1;
@@ -1907,11 +1910,10 @@ fn showMode(p: *Shell, b_all: bool) Error!void {
 /// database) and run each of `cmds` (SQL or dot-commands) as the sqlite3
 /// shell runs its command-line arguments, or else read standard input.
 /// Returns the exit code.
-pub fn run(gpa: Allocator, io: Io, path: ?[]const u8, cmds: []const []const u8, out: *Io.Writer, err_out: *Io.Writer) Error!u8 {
-    var unix = xqlite.UnixVfs.init(gpa, io);
+pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: []const []const u8, out: *Io.Writer, err_out: *Io.Writer) Error!u8 {
     const filename = path orelse ":memory:";
     var db: *Sqlite3 = undefined;
-    const orc = sql.main.open(gpa, unix.interface(), filename, .{}, &db);
+    const orc = sql.main.open(gpa, v, filename, .{}, &db);
     defer _ = sql.main.close(db);
     if (orc != RC.OK) {
         try err_out.print("Error: unable to open database \"{s}\": {s}\n", .{ filename, sql.main.errmsg(db) });

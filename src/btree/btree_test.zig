@@ -125,7 +125,7 @@ test "btree: rows inserted in random order read back in order" {
         var env = Env.init();
         defer env.deinit();
         const bt = try env.open(.{ .page_size = page_size });
-        defer bt.close();
+        defer bt.close(.{});
 
         const n = 1200;
         try bt.beginTrans(.write, 0);
@@ -168,7 +168,7 @@ test "btree: deletes shrink the tree and recycle pages" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 512 });
-    defer bt.close();
+    defer bt.close(.{});
 
     const n = 1500;
     var present: [n + 2]bool = @splat(false);
@@ -211,7 +211,7 @@ test "btree: delete with save_position while scanning" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 1024 });
-    defer bt.close();
+    defer bt.close(.{});
 
     const n = 800;
     var present: [n + 2]bool = @splat(false);
@@ -245,7 +245,7 @@ test "btree: rollback restores pages and cursor positions" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 512 });
-    defer bt.close();
+    defer bt.close(.{});
 
     const n = 600;
     var present: [n + 2]bool = @splat(false);
@@ -295,7 +295,7 @@ test "btree: replacing rows, in place and resized" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 1024 });
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
@@ -330,7 +330,7 @@ test "btree: two cursors on one table" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 512 });
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
@@ -359,7 +359,7 @@ test "btree: clear and drop tables, meta values" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 512 });
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.write, 0);
     const t1 = try bt.createTable(.intkey);
@@ -404,7 +404,7 @@ test "btree: index b-tree with record keys" {
         var env = Env.init();
         defer env.deinit();
         const bt = try env.open(.{ .page_size = 512 });
-        defer bt.close();
+        defer bt.close(.{});
         const ki: record.KeyInfo = .{ .gpa = gpa, .sort_orders = &.{ .asc, .asc } };
 
         const n = 700;
@@ -527,7 +527,7 @@ test "btree: reads a database written by sqlite3" {
     defer env.deinit();
     try env.load(@embedFile("../testdata/btree.db"));
     const bt = try env.open(.{});
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.read, 0);
     // Runs after the cursors below are closed.
@@ -568,7 +568,7 @@ test "btree: modifies a database written by sqlite3" {
     defer env.deinit();
     try env.load(@embedFile("../testdata/btree.db"));
     const bt = try env.open(.{});
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.write, 0);
     const s = try readSchema(bt);
@@ -595,7 +595,7 @@ test "btree: modifies an auto-vacuum database written by sqlite3" {
     defer env.deinit();
     try env.load(@embedFile("../testdata/autovacuum.db"));
     const bt = try env.open(.{});
-    defer bt.close();
+    defer bt.close(.{});
     try testing.expectEqual(btree.AutoVacuum.full, bt.getAutoVacuum());
 
     try bt.beginTrans(.write, 0);
@@ -638,7 +638,7 @@ test "btree: auto-vacuum keeps root pages packed" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 512, .auto_vacuum = .full });
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.write, 0);
     var roots: [5]Pgno = undefined;
@@ -679,7 +679,7 @@ test "btree: incremental vacuum frees pages on request" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 512, .auto_vacuum = .incremental });
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.write, 0);
     const root = try bt.createTable(.intkey);
@@ -735,7 +735,7 @@ test "btree: corrupt pages are reported, not trusted" {
     std.mem.writeInt(u16, bytes[off..][0..2], 1030, .big);
     try env.load(bytes);
     const bt = try env.open(.{});
-    defer bt.close();
+    defer bt.close(.{});
 
     try bt.beginTrans(.read, 0);
     var report = try bt.integrityCheck(gpa, &.{ 1, 2, 3 }, 10);
@@ -759,7 +759,7 @@ fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, av: btree.AutoVa
         .secure_delete = secure_delete,
         .auto_vacuum = av,
     });
-    defer bt.close();
+    defer bt.close(.{});
     const ki: record.KeyInfo = .{ .gpa = gpa, .sort_orders = &.{ .asc, .asc } };
 
     const n_keys = 400;
@@ -868,7 +868,7 @@ test "btree: page 1 as a table root grows and shrinks" {
     var env = Env.init();
     defer env.deinit();
     const bt = try env.open(.{ .page_size = 512 });
-    defer bt.close();
+    defer bt.close(.{});
 
     const n = 500;
     var present: [n + 2]bool = @splat(false);

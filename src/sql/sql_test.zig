@@ -12,9 +12,12 @@ const MemVfs = @import("../vfs/mem.zig").MemVfs;
 
 const RC = int.RC;
 
-/// A connection to "test.db" on a private in-memory file system.
+/// A connection to "test.db" on a private in-memory file system, or on
+/// the file system of another connection (openOn).
 pub const Conn = struct {
-    mem: MemVfs,
+    /// The file system: `own` unless opened with openOn().
+    mem: *MemVfs,
+    own: MemVfs,
     db: *int.Sqlite3,
 
     pub fn open(c: *Conn) !void {
@@ -23,15 +26,30 @@ pub const Conn = struct {
 
     /// Open "test.db" holding `image`, if given.
     pub fn openWith(c: *Conn, image: ?[]const u8) !void {
-        c.mem = MemVfs.init(testing.allocator, testing.io);
+        c.own = MemVfs.init(testing.allocator, testing.io);
+        c.mem = &c.own;
+        errdefer c.own.deinit();
         if (image) |bytes| {
             const f = try c.mem.interface().open("test.db", .{ .create = true });
             defer f.close();
             try f.write(bytes, 0);
         }
+        try c.connect();
+    }
+
+    /// Open another connection to "test.db" of `mem`, which stays owned
+    /// by its connection and must outlive this one.
+    pub fn openOn(c: *Conn, mem: *MemVfs) !void {
+        c.own = undefined;
+        c.mem = mem;
+        try c.connect();
+    }
+
+    fn connect(c: *Conn) !void {
         const rc = main_mod.open(testing.allocator, c.mem.interface(), "test.db", .{}, &c.db);
         if (rc != RC.OK) {
             std.debug.print("open: {s}\n", .{main_mod.errmsg(c.db)});
+            _ = main_mod.close(c.db);
             return error.OpenFailed;
         }
     }
@@ -45,7 +63,7 @@ pub const Conn = struct {
 
     pub fn close(c: *Conn) void {
         std.testing.expectEqual(RC.OK, main_mod.close(c.db)) catch unreachable;
-        c.mem.deinit();
+        if (c.mem == &c.own) c.own.deinit();
     }
 
     /// Run `sql`; fail the test with the error message if it fails.
@@ -792,4 +810,196 @@ test "sql: window functions" {
     try c.expectError("SELECT sum(v) OVER (ORDER BY v RANGE 'x' PRECEDING) FROM t", "frame starting offset must be a non-negative number");
     try c.expectError("SELECT ntile(0) OVER (ORDER BY id) FROM t", "argument of ntile must be a positive integer");
     try c.expectError("SELECT nth_value(v, 0) OVER (ORDER BY id) FROM t", "second argument to nth_value must be a positive integer");
+}
+
+/// Bytes 18 and 19 of the database file: the write and read versions.
+fn fileVersions(c: *Conn) ![2]u8 {
+    const f = try c.mem.interface().open("test.db", .{ .read_write = false });
+    defer f.close();
+    var b: [2]u8 = undefined;
+    try f.read(&b, 18);
+    return b;
+}
+
+test "sql: WAL mode in and out" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES(1, 'one')");
+    try c.expectRows("PRAGMA journal_mode=WAL", "wal\n");
+    try testing.expectEqual([2]u8{ 2, 2 }, try fileVersions(&c));
+    try c.exec("INSERT INTO t VALUES(2, 'two'); CREATE INDEX t_b ON t(b)");
+    try testing.expect(try c.mem.interface().access("test.db-wal", .exists));
+    try c.expectRows("PRAGMA journal_mode; PRAGMA main.journal_mode", "wal\nwal\n");
+    try c.expectError("BEGIN; PRAGMA journal_mode=DELETE", "cannot change out of wal mode from within a transaction");
+    try c.exec("COMMIT");
+
+    // A new connection finds the database in WAL mode, and the last one
+    // to close checkpoints and deletes the WAL.
+    try c.reopen();
+    try testing.expect(!try c.mem.interface().access("test.db-wal", .exists));
+    try c.expectRows("SELECT * FROM t ORDER BY b", "1|one\n2|two\n");
+    try c.expectRows("PRAGMA journal_mode", "wal\n");
+    try c.exec("UPDATE t SET b = b || '!'");
+    try c.expectRows("PRAGMA wal_checkpoint(NOOP)", "0|2|0\n");
+    try c.expectRows("PRAGMA wal_checkpoint", "0|2|2\n");
+    try c.expectRows("PRAGMA wal_checkpoint(TRUNCATE)", "0|0|0\n");
+    try c.exec("INSERT INTO t VALUES(3, 'three')");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+
+    try c.expectRows("PRAGMA journal_mode=DELETE", "delete\n");
+    try testing.expect(!try c.mem.interface().access("test.db-wal", .exists));
+    try testing.expectEqual([2]u8{ 1, 1 }, try fileVersions(&c));
+    try c.expectRows("SELECT count(*) FROM t; PRAGMA wal_checkpoint", "3\n0|-1|-1\n");
+    try c.expectError("BEGIN; PRAGMA journal_mode=WAL", "cannot change into wal mode from within a transaction");
+    try c.exec("ROLLBACK");
+}
+
+test "sql: an empty database in WAL mode" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // The switch commits through the rollback journal; the checkpoint
+    // then opens the WAL (C runs PRAGMA table_list for that).
+    try c.expectRows("PRAGMA journal_mode=wal; PRAGMA wal_checkpoint; SELECT count(*) FROM sqlite_schema; PRAGMA wal_checkpoint", "wal\n0|0|0\n0\n0|0|0\n");
+    try testing.expectEqual([2]u8{ 2, 2 }, try fileVersions(&c));
+}
+
+test "sql: WAL readers keep their snapshot while others write" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+    var peer: Conn = undefined;
+    try peer.openOn(c.mem);
+    defer peer.close();
+    const r = &peer;
+
+    try r.exec("BEGIN");
+    try r.expectRows("SELECT sum(x) FROM t", "1\n");
+    try c.exec("INSERT INTO t VALUES(2)");
+    try c.exec("INSERT INTO t VALUES(3)");
+    try r.expectRows("SELECT sum(x) FROM t", "1\n");
+    // The reader cannot write from its old snapshot.
+    try r.expectError("INSERT INTO t VALUES(10)", "database is locked");
+    try testing.expectEqual(RC.BUSY_SNAPSHOT, main_mod.extendedErrcode(r.db));
+    // A checkpoint cannot pass the reader, and RESTART reports busy.
+    try c.expectRows("PRAGMA wal_checkpoint", "0|5|3\n");
+    try c.expectRows("PRAGMA wal_checkpoint(RESTART)", "1|5|3\n");
+    try r.exec("COMMIT");
+    try r.expectRows("SELECT sum(x) FROM t", "6\n");
+    try c.expectRows("PRAGMA wal_checkpoint(RESTART)", "0|5|5\n");
+
+    // One writer at a time; the other is busy at once without a timeout.
+    try c.exec("BEGIN IMMEDIATE; INSERT INTO t VALUES(4)");
+    try r.expectError("INSERT INTO t VALUES(5)", "database is locked");
+    try r.expectError("BEGIN IMMEDIATE", "database is locked");
+    try r.expectRows("SELECT sum(x) FROM t", "6\n");
+    try c.exec("COMMIT");
+    // With a busy timeout, a short wait succeeds once the writer is done.
+    try r.exec("PRAGMA busy_timeout=2000; INSERT INTO t VALUES(5)");
+    try c.expectRows("SELECT sum(x) FROM t; PRAGMA integrity_check", "15\nok\n");
+    // DELETE mode needs the only connection.
+    try c.expectError("PRAGMA journal_mode=DELETE", "database is locked");
+    try c.expectRows("PRAGMA journal_mode", "wal\n");
+}
+
+test "sql: a statement stepped again after SQLITE_BUSY waits again" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x)");
+    var r: Conn = undefined;
+    try r.openOn(c.mem);
+    defer r.close();
+    try c.exec("BEGIN IMMEDIATE; INSERT INTO t VALUES(1)");
+    try r.exec("PRAGMA busy_timeout=40");
+    var stmt_opt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;
+    try testing.expectEqual(RC.OK, prepare.prepareV2(r.db, "INSERT INTO t VALUES(2)", &stmt_opt, null));
+    const stmt = stmt_opt.?;
+    defer _ = api.finalize(stmt);
+    // Each step runs the busy handler afresh (vdbe.c resets nBusy), so
+    // each one waits out the whole timeout.
+    for (0..2) |_| {
+        const t0 = std.Io.Timestamp.now(testing.io, .awake);
+        try testing.expectEqual(RC.BUSY, api.step(stmt));
+        try testing.expect(t0.untilNow(testing.io, .awake).toMilliseconds() >= 35);
+    }
+    try c.exec("COMMIT");
+    try testing.expectEqual(RC.DONE, api.step(stmt));
+    try c.expectRows("SELECT x FROM t ORDER BY x", "1\n2\n");
+}
+
+test "sql: WAL autocheckpoint, savepoints, rollback and auto_vacuum" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("PRAGMA page_size=1024; PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=WAL");
+    try c.exec("PRAGMA wal_autocheckpoint=5; CREATE TABLE t(x)");
+    try c.exec("WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<200) INSERT INTO t SELECT randomblob(300) FROM c");
+    // The commit left more than 5 frames, so the hook checkpointed them.
+    const counts = try c.query("PRAGMA wal_checkpoint(NOOP)");
+    defer testing.allocator.free(counts);
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, counts, "\n"), '|');
+    _ = it.next();
+    const n_log = it.next().?;
+    try testing.expectEqualStrings(n_log, it.next().?);
+
+    try c.exec("BEGIN; DELETE FROM t WHERE rowid % 2 = 0; SAVEPOINT s; DELETE FROM t; ROLLBACK TO s; RELEASE s; COMMIT");
+    try c.expectRows("SELECT count(*) FROM t", "100\n");
+    // A large transaction spills frames, then rolls back.
+    try c.exec("PRAGMA cache_size=10; BEGIN; UPDATE t SET x = randomblob(300); DELETE FROM t WHERE rowid < 150; ROLLBACK");
+    try c.expectRows("SELECT count(*) FROM t; PRAGMA integrity_check", "100\nok\n");
+    // auto_vacuum shrinks the image; the checkpoint shrinks the file.
+    try c.exec("DELETE FROM t WHERE rowid > 20");
+    try c.expectRows("PRAGMA freelist_count; PRAGMA integrity_check", "0\nok\n");
+    try c.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    const n_page = try c.query("PRAGMA page_count");
+    defer testing.allocator.free(n_page);
+    const f = try c.mem.interface().open("test.db", .{ .read_write = false });
+    defer f.close();
+    const want = try std.fmt.parseInt(u64, std.mem.trimEnd(u8, n_page, "\n"), 10) * 1024;
+    try testing.expectEqual(want, try f.fileSize());
+}
+
+test "sql: sqlite3_wal_hook and sqlite3_wal_checkpoint_v2" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    const Hook = struct {
+        calls: u32 = 0,
+        last: i32 = 0,
+        fn f(arg: ?*anyopaque, db: *int.Sqlite3, name: [:0]const u8, n_frame: i32) i32 {
+            _ = db;
+            const self: *@This() = @ptrCast(@alignCast(arg.?));
+            std.testing.expectEqualStrings("main", name) catch unreachable;
+            self.calls += 1;
+            self.last = n_frame;
+            return RC.OK;
+        }
+    };
+    var hook: Hook = .{};
+    try c.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x)");
+    _ = main_mod.walHook(c.db, Hook.f, &hook);
+    // The hook replaces wal_autocheckpoint.
+    try c.expectRows("PRAGMA wal_autocheckpoint", "0\n");
+    try c.exec("INSERT INTO t VALUES(1); INSERT INTO t VALUES(2)");
+    try testing.expectEqual(@as(u32, 2), hook.calls);
+    try testing.expect(hook.last > 0);
+    // Read-only statements commit nothing.
+    try c.exec("SELECT * FROM t");
+    try testing.expectEqual(@as(u32, 2), hook.calls);
+
+    var n_log: i32 = 0;
+    var n_ckpt: i32 = 0;
+    try testing.expectEqual(RC.OK, main_mod.walCheckpointV2(c.db, "main", .truncate, &n_log, &n_ckpt));
+    try testing.expectEqual(@as(i32, 0), n_log);
+    try testing.expectEqual(@as(i32, 0), n_ckpt);
+    try testing.expectEqual(RC.ERROR, main_mod.walCheckpointV2(c.db, "nosuch", .passive, &n_log, &n_ckpt));
+    try testing.expectEqualStrings("unknown database: nosuch", main_mod.errmsg(c.db));
+    try testing.expectEqual(@as(i32, -1), n_log);
+    try testing.expectEqual(RC.OK, main_mod.walCheckpoint(c.db, null));
+    // Back to an autocheckpoint every 1000 frames.
+    _ = main_mod.walAutocheckpoint(c.db, 1000);
+    try c.expectRows("PRAGMA wal_autocheckpoint", "1000\n");
 }

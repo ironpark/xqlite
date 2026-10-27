@@ -1,4 +1,4 @@
-//! The pager (port of pager.c, rollback-journal mode).
+//! The pager (port of pager.c).
 //!
 //! The pager reads database pages into the page cache, tracks which ones a
 //! write transaction modified, saves their original content to the rollback
@@ -6,6 +6,12 @@
 //! on rollback or after a crash. The journal format (journal.zig) is
 //! byte-compatible with SQLite, so either library can recover the other's
 //! hot journals.
+//!
+//! In WAL mode (journal_mode=WAL, wal.zig) there is no rollback journal:
+//! pages are read through the WAL, commits and cache spills append frames
+//! to it, and a rollback just forgets the transaction's frames. The pager
+//! then never goes past `writer_cachemod`, and keeps a SHARED lock on the
+//! database file while the WAL is open, so that no one deletes the WAL.
 //!
 //! State machine (see the big comment at the top of pager.c):
 //!
@@ -18,14 +24,17 @@
 //! changed after the savepoint opened to the sub-journal, which is kept in
 //! memory (as with SQLITE_STMTJRNL_SPILL=-1).
 //!
-//! Not ported yet: WAL, super journals for multi-database commits (they
-//! are read during recovery but never written), journal_mode=MEMORY,
-//! locking_mode=EXCLUSIVE, temporary and in-memory databases, mmap.
+//! Not ported yet: super journals for multi-database commits (they are
+//! read during recovery but never written), journal_mode=MEMORY,
+//! locking_mode=EXCLUSIVE (and with it the heap-memory WAL mode),
+//! in-memory databases, mmap, WAL snapshots, backups.
 
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
 const pcache_mod = @import("pcache.zig");
 const journal = @import("journal.zig");
+const wal_mod = @import("wal.zig");
+pub const wal = wal_mod;
 const root = @import("../root.zig");
 
 const Allocator = std.mem.Allocator;
@@ -35,9 +44,7 @@ const PCache = pcache_mod.PCache;
 pub const Page = pcache_mod.Page;
 pub const Pgno = pcache_mod.Pgno;
 
-pub const Error = vfs.Error || error{
-    /// The database file is malformed (SQLITE_CORRUPT).
-    Corrupt,
+pub const Error = wal_mod.Error || error{
     /// A hot journal must be rolled back but the database is read-only
     /// (SQLITE_READONLY_ROLLBACK).
     ReadOnlyRollback,
@@ -61,7 +68,7 @@ pub const JournalMode = enum(u3) {
     truncate = 3,
     /// The journal is kept in memory. Not supported yet.
     memory = 4,
-    /// Write-ahead log. Not supported yet.
+    /// Write-ahead log.
     wal = 5,
 
     /// sqlite3JournalModename().
@@ -72,11 +79,20 @@ pub const JournalMode = enum(u3) {
 
 pub const Synchronous = enum { off, normal, full, extra };
 
-pub const BusyHandler = struct {
-    ctx: ?*anyopaque,
-    /// Called with the number of prior attempts. Return true to retry.
-    func: *const fn (ctx: ?*anyopaque, count: u32) bool,
+/// Returns true to retry.
+pub const BusyHandler = wal_mod.BusyHandler;
+
+/// What WAL closes and checkpoints need of the connection (C passes db to
+/// sqlite3PagerClose() and sqlite3PagerCheckpoint()). The defaults suit a
+/// pager used on its own.
+pub const Conn = struct {
+    /// Checked by checkpoints (db->u1.isInterrupted).
+    interrupt: ?*const std.atomic.Value(bool) = null,
+    /// Do not checkpoint the WAL on close (SQLITE_NoCkptOnClose).
+    no_ckpt_on_close: bool = false,
 };
+
+pub const CheckpointMode = wal_mod.CheckpointMode;
 
 pub const Options = struct {
     page_size: u32 = 4096,
@@ -130,6 +146,8 @@ const Savepoint = struct {
     /// Releasing it may truncate the sub-journal: no later savepoint
     /// shares records with it (bTruncateOnRelease).
     truncate_on_release: bool = true,
+    /// The WAL write position when it opened (aWalData).
+    wal_data: wal_mod.SavepointData = .{ 0, 0, 0, 0 },
 };
 
 /// Size of a sub-journal record: a page number and the page.
@@ -150,6 +168,14 @@ pub const Pager = struct {
     /// Empty for a temporary database.
     path: []u8,
     journal_path: []u8,
+    /// Name of the WAL file (zWal). Empty for a temporary database.
+    wal_path: []u8,
+    /// The open WAL, in WAL mode (pWal).
+    wal: ?*wal_mod.Wal = null,
+    /// Sync flags for the WAL (walSyncFlags): the low two bits for
+    /// commits, the next two for checkpoints, each 0, 2 (normal) or 3
+    /// (full), as wal.walSyncFlags() reads them.
+    wal_sync_flags: u8 = 0,
     /// An anonymous temporary database (tempFile): its journal is anonymous
     /// too, and there is no hot journal to look for.
     temp_file: bool,
@@ -243,6 +269,8 @@ pub const Pager = struct {
         errdefer gpa.free(path_copy);
         const journal_path = if (path_arg == null) try gpa.dupe(u8, "") else try std.mem.concat(gpa, u8, &.{ path, "-journal" });
         errdefer gpa.free(journal_path);
+        const wal_path = if (path_arg == null) try gpa.dupe(u8, "") else try std.mem.concat(gpa, u8, &.{ path, "-wal" });
+        errdefer gpa.free(wal_path);
 
         const fd = try v.open(path_arg, .{
             .kind = .main_db,
@@ -257,8 +285,10 @@ pub const Pager = struct {
             .fd = fd,
             .path = path_copy,
             .journal_path = journal_path,
+            .wal_path = wal_path,
             .temp_file = path_arg == null,
-            .read_only = opts.read_only,
+            // The VFS may fall back to read-only (pOutFlags).
+            .read_only = opts.read_only or fd.isReadOnly(),
             .journal_mode = opts.journal_mode,
             .busy_handler = opts.busy_handler,
             .reiniter = opts.reiniter,
@@ -269,15 +299,22 @@ pub const Pager = struct {
         };
         errdefer p.cache.deinit();
         p.cache.setCacheSize(opts.cache_size);
-        p.setFlags(opts.synchronous, opts.full_fsync, true);
+        p.setFlags(opts.synchronous, opts.full_fsync, false, true);
         p.setSectorSize();
         try p.setPageSize(opts.page_size, null);
         return p;
     }
 
     /// Port of sqlite3PagerClose(). Rolls back any open transaction; if that
-    /// fails a hot journal is left for the next connection.
-    pub fn close(p: *Pager) void {
+    /// fails a hot journal is left for the next connection. In WAL mode,
+    /// where no write transaction may be open, the last connection
+    /// checkpoints and deletes the WAL unless `db` says not to.
+    pub fn close(p: *Pager, db: Conn) void {
+        if (p.wal) |w| {
+            const buf: ?[]u8 = if (db.no_ckpt_on_close) null else p.tmp_space[0..p.page_size];
+            w.close(db.interrupt, p.wal_sync_flags, buf) catch {};
+            p.wal = null;
+        }
         p.reset();
         if (p.jfd != null) {
             p.syncHotJournal() catch |err| p.noteError(err);
@@ -293,15 +330,22 @@ pub const Pager = struct {
         p.cache.deinit();
         p.gpa.free(p.path);
         p.gpa.free(p.journal_path);
+        p.gpa.free(p.wal_path);
         p.gpa.destroy(p);
     }
 
-    /// Port of sqlite3PagerSetFlags().
-    pub fn setFlags(p: *Pager, level: Synchronous, full_fsync: bool, cache_spill: bool) void {
-        p.no_sync = level == .off;
-        p.full_sync = level == .full or level == .extra;
-        p.extra_sync = level == .extra;
+    /// Port of sqlite3PagerSetFlags(). `ckpt_full_fsync` is
+    /// PAGER_CKPT_FULLFSYNC: full syncs for checkpoints.
+    pub fn setFlags(p: *Pager, level: Synchronous, full_fsync: bool, ckpt_full_fsync: bool, cache_spill: bool) void {
+        p.no_sync = p.temp_file or level == .off;
+        p.full_sync = !p.no_sync and (level == .full or level == .extra);
+        p.extra_sync = !p.no_sync and level == .extra;
         p.sync_flags = .{ .full = !p.no_sync and full_fsync };
+        // SQLITE_SYNC_NORMAL is 2, SQLITE_SYNC_FULL 3.
+        const sync: u8 = if (p.no_sync) 0 else if (full_fsync) 3 else 2;
+        p.wal_sync_flags = sync << 2;
+        if (p.full_sync) p.wal_sync_flags |= sync;
+        if (ckpt_full_fsync and !p.no_sync) p.wal_sync_flags |= 3 << 2;
         // PAGER_CACHESPILL: dirty pages may be spilled before commit.
         p.no_spill_off = !cache_spill;
     }
@@ -314,13 +358,14 @@ pub const Pager = struct {
         return p.cache.setSpillSize(n);
     }
 
-    /// Port of sqlite3PagerSetJournalMode(). MEMORY and WAL are not
-    /// supported yet and leave the mode unchanged. Returns the mode in
-    /// effect.
+    /// Port of sqlite3PagerSetJournalMode(). MEMORY is not supported yet
+    /// and leaves the mode unchanged. Opening and closing the WAL is the
+    /// caller's (OP_JournalMode's) business. Returns the mode in effect.
     pub fn setJournalMode(p: *Pager, mode_arg: JournalMode) JournalMode {
         const old = p.journal_mode;
+        std.debug.assert(!p.temp_file or mode_arg != .wal);
         const mode = switch (mode_arg) {
-            .memory, .wal => old,
+            .memory => old,
             else => mode_arg,
         };
         if (mode == old) return old;
@@ -370,7 +415,10 @@ pub const Pager = struct {
     /// Port of sqlite3PagerJournalSizeLimit(): set the limit if `limit` >=
     /// -1 (negative means no limit), and return it.
     pub fn journalSizeLimit(p: *Pager, limit: i64) i64 {
-        if (limit >= -1) p.journal_size_limit = limit;
+        if (limit >= -1) {
+            p.journal_size_limit = limit;
+            if (p.wal) |w| w.setLimit(limit);
+        }
         return p.journal_size_limit;
     }
 
@@ -391,12 +439,10 @@ pub const Pager = struct {
     /// Port of setSectorSize(). With POWERSAFE_OVERWRITE a crash cannot
     /// damage bytes we did not write, so the minimum of 512 is used.
     fn setSectorSize(p: *Pager) void {
-        if (p.fd.deviceCharacteristics().powersafe_overwrite) {
-            p.sector_size = 512;
-        } else {
-            const s = p.fd.sectorSize();
-            p.sector_size = if (s < 32) 512 else @min(s, journal.max_sector_size);
-        }
+        p.sector_size = if (p.fd.deviceCharacteristics().powersafe_overwrite)
+            512
+        else
+            journal.sectorSize(p.fd.sectorSize());
     }
 
     /// Port of sqlite3PagerSetPagesize(). Takes effect only when no page is
@@ -468,11 +514,10 @@ pub const Pager = struct {
 
     /// Port of pager_wait_on_lock(): retry through the busy handler.
     fn waitOnLock(p: *Pager, level: LockLevel) Error!void {
-        var count: u32 = 0;
-        while (true) : (count += 1) {
+        while (true) {
             p.lockDb(level) catch |err| {
                 if (err == error.Busy) {
-                    if (p.busy_handler) |h| if (h.func(h.ctx, count)) continue;
+                    if (p.busy_handler) |h| if (h.func(h.ctx)) continue;
                 }
                 return err;
             };
@@ -527,22 +572,32 @@ pub const Pager = struct {
         return p.state.atLeast(.writer_dbmod) or p.state == .open;
     }
 
-    /// Port of pager_unlock(): drop every lock and return to `open`.
+    /// Port of pager_unlock(): drop every lock and return to `open`. In WAL
+    /// mode only the WAL read lock is dropped; the SHARED lock on the
+    /// database stays while the WAL is open.
     fn unlock(p: *Pager) void {
         p.stopJournaling();
         p.releaseAllSavepoints();
-        // Close the journal so that another connection in DELETE mode can
-        // delete it, unless the OS refuses to delete open files and the
-        // journal is meant to persist anyway.
-        const keep_open = p.fd.deviceCharacteristics().undeletable_when_open and
-            (p.journal_mode == .truncate or p.journal_mode == .persist);
-        if (!keep_open) {
-            if (p.jfd) |j| j.close();
-            p.jfd = null;
+        if (p.wal) |w| {
+            std.debug.assert(p.jfd == null);
+            // An I/O error while restarting the WAL may leave the write
+            // lock held without a read lock.
+            if (p.state == .err) w.endWriteTransaction();
+            w.endReadTransaction();
+        } else {
+            // Close the journal so that another connection in DELETE mode
+            // can delete it, unless the OS refuses to delete open files
+            // and the journal is meant to persist anyway.
+            const keep_open = p.fd.deviceCharacteristics().undeletable_when_open and
+                (p.journal_mode == .truncate or p.journal_mode == .persist);
+            if (!keep_open) {
+                if (p.jfd) |j| j.close();
+                p.jfd = null;
+            }
+            p.unlockDb(.none) catch {
+                if (p.state == .err) p.lock = null;
+            };
         }
-        p.unlockDb(.none) catch {
-            if (p.state == .err) p.lock = null;
-        };
         p.state = .open;
         if (p.err != null) {
             p.reset();
@@ -588,6 +643,16 @@ pub const Pager = struct {
     }
 
     fn sharedLockOpen(p: *Pager) Error!void {
+        if (p.wal == null) try p.sharedLockRollback();
+        if (p.wal != null) try p.beginReadTransaction();
+        if (!p.temp_file and p.state == .open) p.db_size = try p.pagecountFromFile();
+        p.has_held_shared_lock = true;
+    }
+
+    /// The rollback-mode part of sqlite3PagerSharedLock(): take SHARED,
+    /// roll back a hot journal, check for changes, and switch to WAL mode
+    /// if a WAL exists.
+    fn sharedLockRollback(p: *Pager) Error!void {
         try p.waitOnLock(.shared);
 
         // With an UNKNOWN lock, assume the worst and treat the journal as hot.
@@ -624,14 +689,18 @@ pub const Pager = struct {
             if (!std.mem.eql(u8, &p.db_file_vers, &vers)) p.reset();
         }
 
-        p.db_size = try p.pagecountFromFile();
-        p.has_held_shared_lock = true;
+        // A WAL in the file system means WAL mode.
+        try p.openWalIfPresent();
     }
 
-    /// Port of pagerPagecount().
+    /// Port of pagerPagecount(): the database size, from the WAL snapshot
+    /// if it knows it, else from the file size.
     fn pagecountFromFile(p: *Pager) Error!Pgno {
-        const n_byte = try p.fd.fileSize();
-        const n: Pgno = @intCast(std.math.divCeil(u64, n_byte, p.page_size) catch unreachable);
+        var n: Pgno = wal_mod.Wal.dbsize(p.wal);
+        if (n == 0) {
+            const n_byte = try p.fd.fileSize();
+            n = @intCast(std.math.divCeil(u64, n_byte, p.page_size) catch unreachable);
+        }
         if (n > p.mx_pgno) p.mx_pgno = n;
         return n;
     }
@@ -729,13 +798,23 @@ pub const Pager = struct {
         }
     }
 
-    /// Port of readDbPage(). Reading past the end of the file yields zeros.
-    fn readDbPage(p: *Pager, pg: *Page) Error!void {
-        readPadded(p.fd, pg.data, @as(u64, pg.pgno - 1) * p.page_size) catch |err| {
+    /// Port of readDbPage(): read the page from the WAL if the snapshot has
+    /// it there, else from the database file. Reading past the end of the
+    /// file yields zeros.
+    fn readDbPage(p: *Pager, pg: *Page) wal_mod.Error!void {
+        p.readDbPageInner(pg) catch |err| {
             if (pg.pgno == 1) @memset(&p.db_file_vers, 0xff);
             return err;
         };
         if (pg.pgno == 1) @memcpy(&p.db_file_vers, pg.data[24..40]);
+    }
+
+    fn readDbPageInner(p: *Pager, pg: *Page) wal_mod.Error!void {
+        if (p.wal) |w| {
+            const frame = try w.findFrame(pg.pgno);
+            if (frame != 0) return w.readFrame(frame, pg.data);
+        }
+        try readPadded(p.fd, pg.data, @as(u64, pg.pgno - 1) * p.page_size);
     }
 
     /// Port of sqlite3PagerLookup(): a referenced page if cached, else null.
@@ -842,8 +921,16 @@ pub const Pager = struct {
         std.debug.assert(p.state.atLeast(.reader) and p.state != .err);
         if (p.state != .reader) return;
         if (p.read_only) return error.ReadOnly;
-        try p.lockDb(.reserved);
-        if (exclusive) try p.waitOnLock(.exclusive);
+        if (p.wal) |w| {
+            // The busy handler is not invoked if another connection holds
+            // the write lock; the b-tree may invoke it.
+            try w.beginWriteTransaction();
+        } else {
+            try p.lockDb(.reserved);
+            if (exclusive) try p.waitOnLock(.exclusive);
+        }
+        // WAL mode never goes past writer_cachemod: in writer_dbmod a
+        // savepoint rollback could write the sub-journal to the database.
         p.state = .writer_locked;
         p.db_file_size = p.db_size;
         p.db_orig_size = p.db_size;
@@ -854,7 +941,7 @@ pub const Pager = struct {
     /// header. Called on the first write of a transaction.
     fn openJournal(p: *Pager) Error!void {
         std.debug.assert(p.state == .writer_locked);
-        if (p.journal_mode != .off) {
+        if (p.wal == null and p.journal_mode != .off) {
             p.journal_on = true;
             errdefer {
                 p.stopJournaling();
@@ -978,6 +1065,172 @@ pub const Pager = struct {
     pub fn truncateImage(p: *Pager, n_page: Pgno) void {
         std.debug.assert(p.state.atLeast(.writer_cachemod));
         p.db_size = n_page;
+    }
+
+    // ================================================================= WAL
+
+    /// pagerUseWal().
+    pub fn useWal(p: *const Pager) bool {
+        return p.wal != null;
+    }
+
+    /// Port of sqlite3PagerWalSupported(): whether the VFS has the shared
+    /// memory WAL mode needs (exclusive locking mode is not ported).
+    pub fn walSupported(p: *const Pager) bool {
+        return p.fd.hasShm();
+    }
+
+    /// Port of pagerUndoCallback(): a page the rolled-back transaction
+    /// wrote to the WAL is discarded from the cache, or reloaded if it is
+    /// still referenced.
+    fn undoCallback(ctx: *anyopaque, pgno: Pgno) wal_mod.Error!void {
+        const p: *Pager = @ptrCast(@alignCast(ctx));
+        std.debug.assert(p.wal != null);
+        const pg = p.lookup(pgno) orelse return;
+        if (pg.n_ref == 1) {
+            p.cache.drop(pg);
+        } else {
+            defer p.cache.release(pg);
+            try p.readDbPage(pg);
+            if (p.reiniter) |r| r(pg);
+        }
+    }
+
+    /// Port of pagerRollbackWal(): forget the transaction's frames and
+    /// revert every page it changed, cached or already in the WAL.
+    fn rollbackWal(p: *Pager) Error!void {
+        p.db_size = p.db_orig_size;
+        const cb: wal_mod.UndoCallback = .{ .ctx = p, .func = undoCallback };
+        try p.wal.?.undo(cb);
+        var it = p.cache.dirtyList();
+        while (it) |pg| {
+            it = pg.dirty;
+            try undoCallback(p, pg.pgno);
+        }
+    }
+
+    /// Port of pagerWalFrames(): write the pages of `list` (sorted by page
+    /// number) to the WAL. A commit leaves out pages past the new end of
+    /// the database and stamps the change counter on page 1.
+    fn walFrames(p: *Pager, list_arg: *Page, n_truncate: Pgno, is_commit: bool) Error!void {
+        std.debug.assert(list_arg.dirty == null or is_commit);
+        var list: ?*Page = list_arg;
+        if (is_commit) {
+            // Pages past the end are never read again; drop them.
+            var link: *?*Page = &list;
+            var it: ?*Page = list_arg;
+            while (it) |pg| : (it = pg.dirty) {
+                link.* = pg;
+                if (pg.pgno <= n_truncate) link = &pg.dirty;
+            }
+            link.* = null;
+        }
+        const head = list orelse return;
+        if (head.pgno == 1) p.writeChangeCounter(head);
+        try p.wal.?.frames(p.page_size, head, n_truncate, is_commit, p.wal_sync_flags);
+    }
+
+    /// Port of pagerBeginReadTransaction(): take a WAL snapshot, discarding
+    /// the cache if the database changed since the last one.
+    fn beginReadTransaction(p: *Pager) Error!void {
+        const w = p.wal.?;
+        std.debug.assert(p.state == .open or p.state == .reader);
+        // The previous read transaction may still be open (as in
+        // exclusive locking mode); ending it again is harmless.
+        w.endReadTransaction();
+        const changed = w.beginReadTransaction() catch |err| {
+            p.reset();
+            return err;
+        };
+        if (changed) p.reset();
+    }
+
+    /// Port of pagerOpenWalIfPresent(): with a SHARED lock held, open the
+    /// WAL if one exists and the database is not empty, deleting a WAL
+    /// left next to an empty database. Without a WAL, a journal_mode of
+    /// WAL falls back to DELETE.
+    fn openWalIfPresent(p: *Pager) Error!void {
+        std.debug.assert(p.state == .open);
+        if (p.temp_file) return;
+        if (try p.vfs.access(p.wal_path, .exists)) {
+            const n_page = try p.pagecountFromFile();
+            if (n_page == 0) {
+                try p.vfs.delete(p.wal_path, false);
+            } else {
+                _ = try p.openWal();
+            }
+        } else if (p.journal_mode == .wal) {
+            p.journal_mode = .delete;
+        }
+    }
+
+    /// Port of pagerOpenWal(): open the WAL on the shared memory.
+    fn openWalHandle(p: *Pager) Error!void {
+        std.debug.assert(p.wal == null and !p.temp_file);
+        std.debug.assert(p.lock == .shared or p.lock == .exclusive);
+        p.wal = try wal_mod.Wal.open(p.gpa, p.vfs, p.fd, p.wal_path, p.journal_size_limit);
+    }
+
+    /// Port of sqlite3PagerOpenWal(): switch to WAL mode, holding a SHARED
+    /// lock. Returns true if there was nothing to do (a temporary
+    /// database, or the WAL is already open). Fails with CantOpen if the
+    /// VFS has no shared memory.
+    pub fn openWal(p: *Pager) Error!bool {
+        if (p.temp_file or p.wal != null) return true;
+        if (!p.walSupported()) return error.CantOpen;
+        // Close any rollback journal still open.
+        if (p.jfd) |j| j.close();
+        p.jfd = null;
+        try p.openWalHandle();
+        p.journal_mode = .wal;
+        p.state = .open;
+        return false;
+    }
+
+    /// Port of pagerExclusiveLock(): take EXCLUSIVE, dropping a PENDING
+    /// lock left by a failed attempt.
+    fn exclusiveLockDb(p: *Pager) Error!void {
+        std.debug.assert(p.lock != null and p.lock.?.atLeast(.shared));
+        const orig = p.lock.?;
+        p.lockDb(.exclusive) catch |err| {
+            p.unlockDb(orig) catch {};
+            return err;
+        };
+    }
+
+    /// Port of sqlite3PagerCloseWal(): checkpoint and close the WAL before
+    /// leaving WAL mode. Needs the EXCLUSIVE lock, which is kept; fails
+    /// with Busy (WAL still open) if another connection uses the
+    /// database.
+    pub fn closeWal(p: *Pager, db: Conn) Error!void {
+        std.debug.assert(p.journal_mode == .wal);
+        // A WAL that exists but is not open may still need a checkpoint.
+        if (p.wal == null) {
+            try p.lockDb(.shared);
+            if (try p.vfs.access(p.wal_path, .exists)) try p.openWalHandle();
+        }
+        const w = p.wal orelse return;
+        try p.exclusiveLockDb();
+        p.wal = null;
+        w.close(db.interrupt, p.wal_sync_flags, p.tmp_space[0..p.page_size]) catch |err| {
+            p.unlockDb(.shared) catch {};
+            return err;
+        };
+    }
+
+    /// Port of sqlite3PagerCheckpoint(): checkpoint the WAL, if open (see
+    /// wal.Wal.checkpoint). The busy handler is only used by FULL and up.
+    /// `n_log` and `n_ckpt` are left alone outside WAL mode.
+    pub fn checkpoint(p: *Pager, db: Conn, mode: CheckpointMode, n_log: ?*i32, n_ckpt: ?*i32) Error!void {
+        const w = p.wal orelse return;
+        const busy = if (mode.atLeast(.full)) p.busy_handler else null;
+        try w.checkpoint(db.interrupt, mode, busy, p.wal_sync_flags, p.tmp_space[0..p.page_size], n_log, n_ckpt);
+    }
+
+    /// Port of sqlite3PagerWalCallback(): frames in the WAL after the last
+    /// commit since the previous call, or 0.
+    pub fn walCallback(p: *Pager) u32 {
+        return wal_mod.Wal.takeCallback(p.wal);
     }
 
     // ============================================================== journal
@@ -1158,7 +1411,8 @@ pub const Pager = struct {
 
         if (pgno == 1) p.n_reserve = data[20];
 
-        var page = p.lookup(pgno);
+        // In WAL mode the record always goes to the cache.
+        var page = if (p.wal == null) p.lookup(pgno) else null;
         // Main-journal records after `journal_hdr` were never synced and
         // must not reach the database file. A sub-journal record may hold
         // content newer than the transaction's start, which may only reach
@@ -1289,8 +1543,10 @@ pub const Pager = struct {
                 defer p.journal_off = 0;
                 try p.zeroJournalHdr(has_super);
             },
-            .memory, .wal => unreachable,
-            .delete, .off => {
+            .memory => unreachable,
+            // A journal is open in WAL mode only while the transaction
+            // that switches to WAL commits through the rollback journal.
+            .delete, .off, .wal => {
                 j.close();
                 p.jfd = null;
                 if (!p.temp_file) try p.vfs.delete(p.journal_path, p.extra_sync);
@@ -1299,13 +1555,16 @@ pub const Pager = struct {
     }
 
     /// Port of pager_end_transaction(): finalize the journal, then drop to
-    /// SHARED. The unlock is attempted even if finalizing fails.
+    /// SHARED (in WAL mode: release the WAL write lock). The unlock is
+    /// attempted even if finalizing fails.
     fn endTransaction(p: *Pager, has_super: bool, commit: bool) Error!void {
         if (!p.state.atLeast(.writer_locked) and !(p.lock orelse LockLevel.exclusive).atLeast(.reserved)) return;
         p.releaseAllSavepoints();
 
         const finalized = p.finalizeOrError(has_super, commit);
-        const unlocked = p.unlockDb(.shared);
+        // In WAL mode the database lock stays SHARED (WalExclusiveMode(0)
+        // is false outside exclusive mode).
+        const unlocked = if (p.wal == null) p.unlockDb(.shared) else {};
         p.state = .reader;
         try finalized;
         return unlocked;
@@ -1315,11 +1574,15 @@ pub const Pager = struct {
         defer {
             p.stopJournaling();
             p.n_rec = 0;
+            if (p.wal) |w| w.endWriteTransaction();
         }
-        try p.finalizeJournal(has_super);
+        if (p.jfd != null) {
+            std.debug.assert(p.wal == null);
+            try p.finalizeJournal(has_super);
+        }
         p.cache.cleanAll();
         p.cache.truncate(p.db_size);
-        if (commit and p.db_file_size > p.db_size) {
+        if (p.wal == null and commit and p.db_file_size > p.db_size) {
             std.debug.assert(p.lock == .exclusive);
             try p.truncateFile(p.db_size);
         }
@@ -1419,6 +1682,21 @@ pub const Pager = struct {
         if (p.err) |e| return e;
         if (!p.state.atLeast(.writer_cachemod)) return;
 
+        if (p.wal != null) {
+            // A commit needs at least one frame to carry the commit mark.
+            var page_one: ?*Page = null;
+            defer if (page_one) |pg| p.unref(pg);
+            var list = p.cache.dirtyList();
+            if (list == null) {
+                page_one = try p.get(1, .{});
+                list = page_one;
+                list.?.dirty = null;
+            }
+            try p.walFrames(list.?, p.db_size, true);
+            p.cache.cleanAll();
+            return;
+        }
+
         try p.incrChangeCounter();
         try p.syncJournal(false);
         try p.writePageList(p.cache.dirtyList());
@@ -1438,7 +1716,8 @@ pub const Pager = struct {
     /// transaction is durable once this returns.
     pub fn commitPhaseTwo(p: *Pager) Error!void {
         if (p.err) |e| return e;
-        std.debug.assert(p.state == .writer_locked or p.state == .writer_finished);
+        std.debug.assert(p.state == .writer_locked or p.state == .writer_finished or
+            (p.wal != null and p.state == .writer_cachemod));
         p.data_version +%= 1;
         p.endTransaction(false, true) catch |err| return p.setError(err);
     }
@@ -1448,6 +1727,13 @@ pub const Pager = struct {
         if (p.err) |e| return e;
         if (!p.state.atLeast(.writer_locked)) return;
 
+        if (p.wal != null) {
+            const r = p.savepoint(.rollback, -1);
+            const r2 = p.endTransaction(false, false);
+            r catch |err| return p.setError(err);
+            r2 catch |err| return p.setError(err);
+            return;
+        }
         if (p.jfd == null or p.state == .writer_locked) {
             const prev = p.state;
             p.endTransaction(false, false) catch |err| return p.setError(err);
@@ -1497,7 +1783,7 @@ pub const Pager = struct {
     /// sub-journal.
     fn subjournalPage(p: *Pager, pg: *const Page) Error!void {
         if (p.journal_mode != .off) {
-            std.debug.assert(p.inJournal(pg.pgno) or pg.pgno > p.db_orig_size);
+            std.debug.assert(p.wal != null or p.inJournal(pg.pgno) or pg.pgno > p.db_orig_size);
             var pgno_bytes: [4]u8 = undefined;
             std.mem.writeInt(u32, &pgno_bytes, pg.pgno, .big);
             try p.sub_journal.ensureUnusedCapacity(p.gpa, @intCast(subRecordSize(p.page_size)));
@@ -1522,11 +1808,13 @@ pub const Pager = struct {
         if (n <= p.savepoints.items.len) return;
         try p.savepoints.ensureTotalCapacity(p.gpa, n);
         while (p.savepoints.items.len < n) {
-            p.savepoints.appendAssumeCapacity(.{
+            const sp = p.savepoints.addOneAssumeCapacity();
+            sp.* = .{
                 .n_orig = p.db_size,
                 .offset = if (p.jfd != null and p.journal_off > 0) p.journal_off else p.sector_size,
                 .i_sub_rec = p.n_sub_rec,
-            });
+            };
+            if (p.wal) |w| w.savepoint(&sp.wal_data);
         }
     }
 
@@ -1552,8 +1840,8 @@ pub const Pager = struct {
                 }
             },
             .rollback => {
-                // Without a journal nothing has changed yet.
-                if (p.jfd != null) {
+                // Without a journal (or WAL) nothing has changed yet.
+                if (p.wal != null or p.jfd != null) {
                     const sp: ?*Savepoint = if (n_new == 0) null else &p.savepoints.items[n_new - 1];
                     p.playbackSavepoint(sp) catch |err| return p.setError(err);
                 }
@@ -1575,12 +1863,18 @@ pub const Pager = struct {
         p.db_size = if (sp) |s| s.n_orig else p.db_orig_size;
         p.change_count_done = p.temp_file;
 
+        // Rolling back the whole transaction in WAL mode.
+        if (sp == null and p.wal != null) return p.rollbackWal();
+
         // The journal's effective size: anything past journal_off belongs
         // to an earlier transaction (TRUNCATE or PERSIST mode).
         const sz_j = p.journal_off;
 
+        std.debug.assert(p.wal == null or sz_j == 0);
+
         // The records from the savepoint up to the next journal header.
-        if (sp) |s| {
+        if (sp != null and p.wal == null) {
+            const s = sp.?;
             const hdr_off = if (s.hdr_offset != 0) s.hdr_offset else sz_j;
             p.journal_off = s.offset;
             while (p.journal_off < hdr_off) _ = try p.playbackRecord(&p.journal_off, done_opt, true, true);
@@ -1604,6 +1898,7 @@ pub const Pager = struct {
 
         // Finally the sub-journal records of the savepoint.
         if (sp) |s| {
+            if (p.wal) |w| try w.savepointUndo(&s.wal_data);
             var off: u64 = subRecordSize(p.page_size) * s.i_sub_rec;
             var ii = s.i_sub_rec;
             while (ii < p.n_sub_rec) : (ii += 1) _ = try p.playbackRecord(&off, done_opt, false, true);
@@ -1618,8 +1913,14 @@ pub const Pager = struct {
         if (p.no_spill_nosync and pg.flags.need_sync) return;
 
         pg.dirty = null;
-        if (pg.flags.need_sync or p.state == .writer_cachemod) try p.syncJournal(true);
-        try p.writePageList(pg);
+        if (p.wal != null) {
+            // Write the page to the WAL as a frame without a commit mark.
+            try p.subjournalPageIfRequired(pg);
+            try p.walFrames(pg, 0, false);
+        } else {
+            if (pg.flags.need_sync or p.state == .writer_cachemod) try p.syncJournal(true);
+            try p.writePageList(pg);
+        }
         p.cache.makeClean(pg);
     }
 
@@ -1656,5 +1957,6 @@ fn readPadded(f: vfs.File, buf: []u8, off: u64) vfs.Error!void {
 
 test {
     _ = @import("journal.zig");
+    _ = @import("wal.zig");
     _ = @import("pager_test.zig");
 }

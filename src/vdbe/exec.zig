@@ -104,6 +104,7 @@ const Exec = struct {
         if (v.rc == RC.NOMEM) return e.finish(.no_mem);
         v.rc = RC.OK;
         v.i_current_time = 0;
+        db.busy_handler.n_busy = 0;
         if (db.is_interrupted.load(.monotonic)) return e.finish(.interrupt);
         while (true) {
             const op = &e.ops[@intCast(e.pc)];
@@ -1815,7 +1816,7 @@ const Part5 = struct {
         openEphemeralTable(c, bt, op) catch |err| {
             // Without a cursor the b-tree would never close itself.
             if (c.uc != .cursor) {
-                bt.close();
+                bt.close(.{});
                 c.btx = null;
             }
             return e.fail(err);
@@ -2892,6 +2893,7 @@ const Part8 = struct {
     inline fn dispatch8(e: *Exec, op: *Op) Flow {
         return switch (op.opcode) {
             OP.JournalMode => opJournalMode(e, op),
+            OP.Checkpoint => opCheckpoint(e, op),
             OP.IncrVacuum => blk: {
                 const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
                 const more = bt.incrVacuum() catch |err| break :blk e.fail(err);
@@ -3005,7 +3007,7 @@ const Part8 = struct {
             OP.VRename => opVRename(e, op),
             OP.VUpdate => opVUpdate(e, op),
             else => blk: {
-                // RowCell, Checkpoint, Vacuum and TableLock: not ported
+                // RowCell, Vacuum and TableLock: not ported
                 // yet.
                 const name = if (op.opcode < vi.opcodes.names.len) vi.opcodes.names[op.opcode].name else "?";
                 aux.vdbeError(e.v, "not supported yet: OP_{s}", .{name});
@@ -3245,17 +3247,77 @@ const Part8 = struct {
         return .next;
     }
 
+    /// OP_JournalMode: set the journal mode of database P1 to P3 (-1
+    /// only queries), storing the mode in effect in register P2. Moving
+    /// into or out of WAL mode also rewrites the file format versions in
+    /// the header, in a rollback-journal transaction.
     fn opJournalMode(e: *Exec, op: *Op) Flow {
+        const db = e.db;
         const out = e.out2Prerelease(op);
-        const pager = e.db.dbs.items[@intCast(op.p1)].bt.?.pager;
+        const bt = db.dbs.items[@intCast(op.p1)].bt.?;
+        const pager = bt.pager;
         const old = pager.journal_mode;
         var new: @TypeOf(old) = if (op.p3 < 0) old else @enumFromInt(op.p3);
         if (!pager.okToChangeJournalMode()) new = old;
+
+        // No WAL for a temporary database or without shared memory.
+        if (new == .wal and (pager.path.len == 0 or !pager.walSupported())) new = old;
+
+        var rc: i32 = RC.OK;
+        if (new != old and (old == .wal or new == .wal)) {
+            if (!db.auto_commit or db.n_vdbe_read > 1) {
+                aux.vdbeError(e.v, "cannot change {s} wal mode from within a transaction", .{
+                    if (new == .wal) "into" else "out of",
+                });
+                e.rc = RC.ERROR;
+                return .abort;
+            }
+            if (old == .wal) {
+                // Checkpoint and delete the WAL; the EXCLUSIVE lock this
+                // takes may still be held afterwards.
+                if (pager.closeWal(main_mod.pagerConn(db))) |_| {
+                    _ = pager.setJournalMode(new);
+                } else |err| rc = main_mod.errorCode(err);
+            } else if (old == .memory) {
+                // No direct way from MEMORY to WAL: go through OFF.
+                _ = pager.setJournalMode(.off);
+            }
+            // Whatever the mode, this transaction uses a rollback journal.
+            std.debug.assert(bt.txnState() != .write);
+            if (rc == RC.OK) {
+                bt.setVersion(if (new == .wal) 2 else 1) catch |err| {
+                    rc = main_mod.errorCode(err);
+                };
+            }
+        }
+
+        if (rc != RC.OK) new = old;
         const name = pager.setJournalMode(new).name();
         out.flags = MEM.Str | MEM.Static | MEM.Term;
         out.z = @constCast(name.ptr);
         out.n = @intCast(name.len);
         out.enc = ENC.UTF8;
+        if (rc != RC.OK) {
+            e.rc = rc;
+            return .abort;
+        }
+        return .next;
+    }
+
+    /// OP_Checkpoint: checkpoint database P1 (MAX_DB: all of them) in
+    /// mode P2, writing to registers P3..P3+2 the busy flag, the WAL size
+    /// and the frames checkpointed (-1 if not in WAL mode).
+    fn opCheckpoint(e: *Exec, op: *Op) Flow {
+        var res = [3]i32{ 0, -1, -1 };
+        const rc = main_mod.checkpoint(e.db, op.p1, @enumFromInt(op.p2), &res[1], &res[2]);
+        if (rc != RC.OK) {
+            if (rc != RC.BUSY) {
+                e.rc = rc;
+                return .abort;
+            }
+            res[0] = 1;
+        }
+        for (res, 0..) |x, i| mem.setInt64(e.reg(op.p3 + @as(i32, @intCast(i))), x);
         return .next;
     }
 

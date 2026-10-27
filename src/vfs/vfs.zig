@@ -16,6 +16,106 @@ pub const shared_size: u64 = 510;
 /// Default sector size reported by files (SQLITE_DEFAULT_SECTOR_SIZE).
 pub const default_sector_size: u32 = 4096;
 
+/// Number of shared-memory locks (SQLITE_SHM_NLOCK). The WAL uses lock 0
+/// for the writer, 1 for the checkpointer, 2 for recovery and 3..7 for
+/// readers.
+pub const shm_nlock: u32 = 8;
+
+/// What `File.shmLock` does (the SQLITE_SHM_LOCK, SQLITE_SHM_UNLOCK,
+/// SQLITE_SHM_SHARED and SQLITE_SHM_EXCLUSIVE flags).
+pub const ShmLockFlags = struct {
+    unlock: bool = false,
+    exclusive: bool = false,
+};
+
+/// A region of shared memory returned by `File.shmMap`.
+pub const ShmRegion = struct {
+    /// Null if the region does not exist yet and `extend` was false, or
+    /// with `cant_init`.
+    ptr: ?[*]align(8) u8,
+    /// The memory can only be read (SQLITE_READONLY from xShmMap).
+    read_only: bool = false,
+    /// The memory is read-only and no connection that could initialize
+    /// it is attached, so its content cannot be trusted; nothing was
+    /// mapped (SQLITE_READONLY_CANTINIT from xShmMap). Implies
+    /// `read_only`. The next call checks again.
+    cant_init: bool = false,
+};
+
+/// The in-process half of shared-memory locking (from unixShmLock()):
+/// every connection to one shared memory in this process shares a table
+/// of the locks held on each slot, and the backend's lock on the
+/// underlying file (if any) is only taken by the first lock of the
+/// process on a slot and released with the last. The caller serializes
+/// access to the table.
+pub const ShmLockTable = struct {
+    /// Per slot, the number of shared locks held in this process, or -1
+    /// for an exclusive one (aLock).
+    slots: [shm_nlock]i32 = @splat(0),
+
+    /// The locks held by one connection (sharedMask, exclMask).
+    pub const Held = struct {
+        shared: u16 = 0,
+        excl: u16 = 0,
+    };
+
+    /// What `apply` asks of the backend's lock on the file.
+    pub const FileLock = enum { read, write, unlock };
+
+    fn mask(ofst: u32, n: u32) u16 {
+        return @intCast((@as(u32, 1) << @intCast(ofst + n)) - (@as(u32, 1) << @intCast(ofst)));
+    }
+
+    /// Whether `flags` on slots `ofst`..`ofst+n-1` would change anything
+    /// for `held`: an unlock of locks held, or a lock not held yet. Asked
+    /// before taking the mutex that guards the table.
+    pub fn needed(held: Held, ofst: u32, n: u32, flags: ShmLockFlags) bool {
+        const m = mask(ofst, n);
+        std.debug.assert(flags.unlock or !flags.exclusive or held.excl & m == 0);
+        if (flags.unlock) return (held.excl | held.shared) & m != 0;
+        if (!flags.exclusive) return held.shared & m == 0;
+        return true;
+    }
+
+    /// Take or release locks for the connection `held` (see
+    /// `File.shmLock`), which `needed` said would change something.
+    /// `file.lock(kind, ofst, n)` takes or releases the backend's lock on
+    /// the slots; it returns `Error!void`. Fails with Busy when another
+    /// connection holds a conflicting lock.
+    pub fn apply(t: *ShmLockTable, held: *Held, ofst: u32, n: u32, flags: ShmLockFlags, file: anytype) Error!void {
+        const m = mask(ofst, n);
+        const slots = &t.slots;
+        if (flags.unlock) {
+            // Other connections in this process may hold the same shared
+            // lock: keep the file lock for them.
+            if (!flags.exclusive) {
+                std.debug.assert(n == 1 and slots[ofst] >= 1);
+                if (slots[ofst] > 1) {
+                    slots[ofst] -= 1;
+                    held.shared &= ~m;
+                    return;
+                }
+            }
+            try file.lock(.unlock, ofst, n);
+            @memset(slots[ofst..][0..n], 0);
+            held.shared &= ~m;
+            held.excl &= ~m;
+        } else if (!flags.exclusive) {
+            if (slots[ofst] < 0) return error.Busy;
+            if (slots[ofst] == 0) try file.lock(.read, ofst, n);
+            held.shared |= m;
+            slots[ofst] += 1;
+        } else {
+            std.debug.assert(held.shared & m == 0 and held.excl & m == 0);
+            // A sibling connection holding any of the locks blocks us.
+            for (slots[ofst..][0..n]) |l| if (l != 0) return error.Busy;
+            try file.lock(.write, ofst, n);
+            held.excl |= m;
+            @memset(slots[ofst..][0..n], -1);
+        }
+    }
+};
+
 /// SQLite file lock levels. Ordering matters: a higher value is a stronger lock.
 ///
 ///     NONE -> SHARED
@@ -112,6 +212,16 @@ pub const Error = error{
     IoErr,
     /// Failure while acquiring or releasing a lock (SQLITE_IOERR_LOCK/UNLOCK).
     LockErr,
+    /// The shared-memory file could not be opened or initialized
+    /// (SQLITE_IOERR_SHMOPEN).
+    ShmOpen,
+    /// The shared-memory file could not be sized (SQLITE_IOERR_SHMSIZE).
+    ShmSize,
+    /// The shared-memory file could not be mapped (SQLITE_IOERR_SHMMAP).
+    ShmMap,
+    /// A shared-memory lock was used without shared memory
+    /// (SQLITE_IOERR_SHMLOCK).
+    ShmLock,
     OutOfMemory,
 };
 
@@ -132,6 +242,16 @@ pub const File = struct {
         checkReservedLock: *const fn (ptr: *anyopaque) Error!bool,
         sectorSize: *const fn (ptr: *anyopaque) u32,
         deviceCharacteristics: *const fn (ptr: *anyopaque) DeviceCharacteristics,
+        /// Whether the file was opened read-only, also when read-write
+        /// was asked for (SQLITE_OPEN_READONLY in xOpen's pOutFlags).
+        isReadOnly: *const fn (ptr: *anyopaque) bool,
+        /// The shared-memory methods (xShmMap, xShmLock, xShmBarrier,
+        /// xShmUnmap). Null in a backend without shared memory, where WAL
+        /// needs exclusive locking mode (heap-memory wal-index).
+        shmMap: ?*const fn (ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!ShmRegion = null,
+        shmLock: ?*const fn (ptr: *anyopaque, ofst: u32, n: u32, flags: ShmLockFlags) Error!void = null,
+        shmBarrier: ?*const fn (ptr: *anyopaque) void = null,
+        shmUnmap: ?*const fn (ptr: *anyopaque, delete: bool) void = null,
     };
 
     /// Closes the handle, dropping any lock it holds.
@@ -189,6 +309,45 @@ pub const File = struct {
     pub fn deviceCharacteristics(f: File) DeviceCharacteristics {
         return f.vtable.deviceCharacteristics(f.ptr);
     }
+
+    /// Whether the file is open read-only: asked for, or the fallback when
+    /// it could not be opened read-write (as unixOpen() reports it in
+    /// pOutFlags).
+    pub fn isReadOnly(f: File) bool {
+        return f.vtable.isReadOnly(f.ptr);
+    }
+
+    /// Whether the backend implements shared memory (xShmMap != 0).
+    pub fn hasShm(f: File) bool {
+        return f.vtable.shmMap != null;
+    }
+
+    /// Port of sqlite3OsShmMap(): region `region` (each `size` bytes) of
+    /// the shared memory of the database file, created if `extend` and it
+    /// does not exist yet. The shared memory is opened on first use.
+    pub fn shmMap(f: File, region: u32, size: u32, extend: bool) Error!ShmRegion {
+        return f.vtable.shmMap.?(f.ptr, region, size, extend);
+    }
+
+    /// Port of sqlite3OsShmLock(): take or release shared-memory locks
+    /// `ofst`..`ofst+n-1`. Shared locks are one at a time. Fails with
+    /// Busy when another connection holds a conflicting lock.
+    pub fn shmLock(f: File, ofst: u32, n: u32, flags: ShmLockFlags) Error!void {
+        std.debug.assert(n >= 1 and ofst + n <= shm_nlock);
+        std.debug.assert(n == 1 or flags.exclusive);
+        return f.vtable.shmLock.?(f.ptr, ofst, n, flags);
+    }
+
+    /// Port of sqlite3OsShmBarrier(): a full memory barrier.
+    pub fn shmBarrier(f: File) void {
+        f.vtable.shmBarrier.?(f.ptr);
+    }
+
+    /// Port of sqlite3OsShmUnmap(): drop this handle's connection to the
+    /// shared memory, deleting it with `delete` if no other remains.
+    pub fn shmUnmap(f: File, delete: bool) void {
+        if (f.vtable.shmUnmap) |unmap| unmap(f.ptr, delete);
+    }
 };
 
 pub const Vfs = struct {
@@ -200,11 +359,15 @@ pub const Vfs = struct {
         delete: *const fn (ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void,
         access: *const fn (ptr: *anyopaque, path: []const u8, mode: AccessMode) Error!bool,
         randomness: *const fn (ptr: *anyopaque, buf: []u8) void,
+        /// Sleeps for at least `microseconds` and returns the time slept
+        /// (xSleep).
+        sleep: *const fn (ptr: *anyopaque, microseconds: u32) u32,
     };
 
     /// Opens `path`. A null path asks for an anonymous temporary file; the
     /// backend picks the name and always receives create, exclusive and
-    /// delete_on_close set.
+    /// delete_on_close set. A backend may open a file read-only when it
+    /// cannot be opened read-write; `File.isReadOnly` tells.
     pub fn open(v: Vfs, path: ?[]const u8, flags: OpenFlags) Error!File {
         std.debug.assert(!flags.create or flags.read_write);
         std.debug.assert(!flags.exclusive or flags.create);
@@ -233,9 +396,21 @@ pub const Vfs = struct {
     pub fn randomness(v: Vfs, buf: []u8) void {
         v.vtable.randomness(v.ptr, buf);
     }
+
+    /// Port of sqlite3OsSleep().
+    pub fn sleep(v: Vfs, microseconds: u32) u32 {
+        return v.vtable.sleep(v.ptr, microseconds);
+    }
 };
+
+/// xSleep for the backends on `std.Io` (unixSleep()).
+pub fn ioSleep(io: std.Io, microseconds: u32) u32 {
+    io.sleep(.fromMicroseconds(microseconds), .awake) catch {};
+    return microseconds;
+}
 
 test {
     _ = @import("mem.zig");
     _ = @import("unix.zig");
+    _ = @import("crash.zig");
 }

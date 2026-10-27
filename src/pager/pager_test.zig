@@ -1,6 +1,7 @@
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
 const MemVfs = @import("../vfs/mem.zig").MemVfs;
+const UnixVfs = @import("../vfs/unix.zig").UnixVfs;
 const pager_mod = @import("pager.zig");
 const root = @import("../root.zig");
 
@@ -100,7 +101,7 @@ fn snapshot(src: vfs.Vfs, dst: vfs.Vfs) !void {
     try copyFile(src, dst, journal_name);
 }
 
-fn fileSize(v: vfs.Vfs, name: []const u8) !u64 {
+pub fn fileSize(v: vfs.Vfs, name: []const u8) !u64 {
     const f = try v.open(name, .{ .read_write = false });
     defer f.close();
     return f.fileSize();
@@ -113,14 +114,14 @@ test "pager: create, commit, reopen" {
 
     {
         const p = try openPager(v, .{});
-        defer p.close();
+        defer p.close(.{});
         try commitFill(p, 4, 0x11);
         try testing.expect(!try v.access(journal_name, .exists));
         try testing.expectEqual(@as(u64, 4 * page_size), try fileSize(v, db_name));
     }
     {
         const p = try openPager(v, .{});
-        defer p.close();
+        defer p.close(.{});
         try expectDb(p, 4, 0x11);
         try p.sharedLock();
         const p1 = try p.get(1, .{});
@@ -136,7 +137,7 @@ test "pager: rollback restores cache, file and size" {
     defer mem.deinit();
     const v = mem.interface();
     const p = try openPager(v, .{});
-    defer p.close();
+    defer p.close(.{});
     try commitFill(p, 3, 0x22);
 
     inline for (.{ false, true }) |spill| {
@@ -171,7 +172,7 @@ test "pager: savepoints roll back to their own state" {
     defer mem.deinit();
     const v = mem.interface();
     const p = try openPager(v, .{});
-    defer p.close();
+    defer p.close(.{});
     try commitFill(p, 3, 0x22);
 
     inline for (.{ false, true }) |spill| {
@@ -229,7 +230,7 @@ test "pager: hot journal from a crash between commit phases is rolled back" {
 
     {
         const p = try openPager(mem.interface(), .{});
-        defer p.close();
+        defer p.close(.{});
         try commitFill(p, 3, 0x33);
 
         const p1 = try beginWrite(p);
@@ -245,14 +246,39 @@ test "pager: hot journal from a crash between commit phases is rolled back" {
     {
         // A read-only connection cannot recover.
         const ro = try openPager(v, .{ .read_only = true });
-        defer ro.close();
+        defer ro.close(.{});
         try testing.expectError(error.ReadOnlyRollback, ro.sharedLock());
     }
     const p = try openPager(v, .{});
-    defer p.close();
+    defer p.close(.{});
     try expectDb(p, 3, 0x33);
     try testing.expect(!try v.access(journal_name, .exists));
     try testing.expectEqual(@as(u64, 3 * page_size), try fileSize(v, db_name));
+}
+
+test "pager: a database without write permission opens read-only" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = UnixVfs.init(testing.allocator, testing.io);
+    u.dir = tmp.dir;
+    const v = u.interface();
+    {
+        const p = try openPager(v, .{});
+        defer p.close(.{});
+        try commitFill(p, 3, 0x21);
+    }
+    if (std.c.fchmodat(tmp.dir.handle, db_name, 0o444, 0) != 0) return error.SkipZigTest;
+    // Like unixOpen(), the VFS falls back to read-only and says so.
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    // Permissions do not bind root.
+    if (!p.fd.isReadOnly()) return error.SkipZigTest;
+    try testing.expect(p.isReadOnly());
+    try expectDb(p, 3, 0x21);
+    try p.sharedLock();
+    const p1 = try p.get(1, .{});
+    defer p.unrefPageOne(p1);
+    try testing.expectError(error.ReadOnly, p.begin(false));
 }
 
 test "pager: crash before the journal is synced leaves the database intact" {
@@ -262,7 +288,7 @@ test "pager: crash before the journal is synced leaves the database intact" {
     defer crashed.deinit();
     {
         const p = try openPager(mem.interface(), .{});
-        defer p.close();
+        defer p.close(.{});
         try commitFill(p, 2, 0x55);
         const p1 = try beginWrite(p);
         defer p.unrefPageOne(p1);
@@ -271,7 +297,7 @@ test "pager: crash before the journal is synced leaves the database intact" {
         try p.rollback();
     }
     const p = try openPager(crashed.interface(), .{});
-    defer p.close();
+    defer p.close(.{});
     try expectDb(p, 2, 0x55);
 }
 
@@ -281,10 +307,10 @@ test "pager: writer waits for readers; readers see the commit" {
     const v = mem.interface();
 
     const a = try openPager(v, .{});
-    defer a.close();
+    defer a.close(.{});
     try commitFill(a, 2, 0x10);
     const b = try openPager(v, .{});
-    defer b.close();
+    defer b.close(.{});
 
     // a reads (and caches) the database and keeps its SHARED lock.
     try a.sharedLock();
@@ -298,7 +324,7 @@ test "pager: writer waits for readers; readers see the commit" {
 
     // PENDING keeps new readers out.
     const c = try openPager(v, .{});
-    defer c.close();
+    defer c.close(.{});
     try testing.expectError(error.Busy, c.sharedLock());
 
     a.unrefPageOne(a1);
@@ -316,28 +342,28 @@ test "pager: busy handler retries" {
     const v = mem.interface();
 
     const a = try openPager(v, .{});
-    defer a.close();
+    defer a.close(.{});
     try commitFill(a, 1, 0x01);
 
     const Ctx = struct {
         holder: *Pager,
         page: ?*Page,
         calls: u32 = 0,
-        fn busy(ctx: ?*anyopaque, count: u32) bool {
+        fn busy(ctx: ?*anyopaque) bool {
             const self: *@This() = @ptrCast(@alignCast(ctx.?));
             self.calls += 1;
             // Release the reader on the first retry.
-            if (count == 0) {
+            if (self.calls == 1) {
                 self.holder.unrefPageOne(self.page.?);
                 self.page = null;
             }
-            return count < 3;
+            return self.calls <= 3;
         }
     };
     try a.sharedLock();
     var ctx: Ctx = .{ .holder = a, .page = try a.get(1, .{}) };
     const b = try openPager(v, .{ .busy_handler = .{ .ctx = &ctx, .func = Ctx.busy } });
-    defer b.close();
+    defer b.close(.{});
     try commitFill(b, 1, 0x02);
     try testing.expectEqual(@as(u32, 1), ctx.calls);
     try expectDb(a, 1, 0x02);
@@ -352,7 +378,7 @@ test "pager: truncate and persist journal modes" {
         const v = mem.interface();
         {
             const p = try openPager(v, .{ .journal_mode = mode });
-            defer p.close();
+            defer p.close(.{});
             try commitFill(p, 3, 0x70);
             try commitFill(p, 3, 0x71);
             try testing.expect(try v.access(journal_name, .exists));
@@ -381,11 +407,11 @@ test "pager: truncate and persist journal modes" {
         // A finalized journal is not hot.
         {
             const p = try openPager(v, .{ .journal_mode = mode });
-            defer p.close();
+            defer p.close(.{});
             try expectDb(p, 3, 0x72);
         }
         const p = try openPager(crashed.interface(), .{ .journal_mode = mode });
-        defer p.close();
+        defer p.close(.{});
         try expectDb(p, 3, 0x71);
     }
 }
@@ -394,7 +420,7 @@ test "pager: journal_mode=off cannot roll back" {
     var mem = MemVfs.init(testing.allocator, testing.io);
     defer mem.deinit();
     const p = try openPager(mem.interface(), .{ .journal_mode = .off });
-    defer p.close();
+    defer p.close(.{});
     try commitFill(p, 2, 0x01);
     try testing.expect(!try mem.interface().access(journal_name, .exists));
 
@@ -411,7 +437,7 @@ test "pager: lock-byte page and page 0 are rejected" {
     var mem = MemVfs.init(testing.allocator, testing.io);
     defer mem.deinit();
     const p = try openPager(mem.interface(), .{});
-    defer p.close();
+    defer p.close(.{});
     try commitFill(p, 1, 0);
     try p.sharedLock();
     const p1 = try p.get(1, .{});
@@ -432,7 +458,7 @@ test "pager: pages sharing a sector are journaled together" {
 
     {
         const p = try openPager(mem.interface(), .{});
-        defer p.close();
+        defer p.close(.{});
         try testing.expectEqual(@as(u32, 4096), p.sector_size);
         try commitFill(p, 8, 0x80);
 
@@ -455,6 +481,199 @@ test "pager: pages sharing a sector are journaled together" {
     }
 
     const p = try openPager(crashed.interface(), .{});
-    defer p.close();
+    defer p.close(.{});
     try expectDb(p, 8, 0x80);
+}
+
+// ================================================================= WAL
+
+const wal_name = "test.db-wal";
+
+/// Switches `p` (holding no reference) to WAL mode, as lockBtree() does
+/// when the header asks for it.
+fn enterWal(p: *Pager) !void {
+    try p.sharedLock();
+    const p1 = try p.get(1, .{});
+    try testing.expect(!try p.openWal());
+    p.unrefPageOne(p1);
+    try testing.expect(p.useWal());
+}
+
+test "pager: WAL commit, readers through the WAL, checkpoint on close" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    {
+        const p = try openPager(v, .{});
+        defer p.close(.{});
+        try commitFill(p, 3, 0x11);
+        try enterWal(p);
+        try commitFill(p, 5, 0x22);
+        // The database file is untouched; the pages are in the WAL.
+        try testing.expectEqual(@as(u64, 3 * page_size), try fileSize(v, db_name));
+        try testing.expect(try v.access(wal_name, .exists));
+        try expectDb(p, 5, 0x22);
+
+        // A second connection finds the WAL and reads through it.
+        const q = try openPager(v, .{});
+        defer q.close(.{});
+        try expectDb(q, 5, 0x22);
+        try commitFill(q, 5, 0x33);
+        try testing.expect(q.useWal());
+        // The first one sees the new snapshot.
+        try expectDb(p, 5, 0x33);
+
+        var n_log: i32 = -1;
+        var n_ckpt: i32 = -1;
+        try p.checkpoint(.{}, .passive, &n_log, &n_ckpt);
+        try testing.expect(n_log > 0);
+        try testing.expectEqual(n_log, n_ckpt);
+        try testing.expectEqual(@as(u64, 5 * page_size), try fileSize(v, db_name));
+    }
+    // The last connection checkpointed and deleted the WAL.
+    try testing.expect(!try v.access(wal_name, .exists));
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    try expectDb(p, 5, 0x33);
+    try testing.expect(!p.useWal());
+}
+
+test "pager: WAL rollback, savepoints and spilled frames" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    try commitFill(p, 3, 0x22);
+    try enterWal(p);
+
+    inline for (.{ false, true }) |spill| {
+        const p1 = try beginWrite(p);
+        try fillPages(p, p1, &.{2}, 0x33);
+        try p.openSavepoint(1);
+        try fillPages(p, p1, &.{ 2, 3, 5 }, 0x44);
+        try p.openSavepoint(2);
+        try fillPages(p, p1, &.{ 3, 6 }, 0x55);
+        // Spilled pages go to the WAL as frames without a commit mark.
+        if (spill) try p.flush();
+
+        try p.savepoint(.rollback, 1);
+        try testing.expectEqual(@as(Pgno, 5), p.pageCount());
+        try expectFilled(p1, 0x44);
+        for ([_]Pgno{ 2, 3, 5 }) |pgno| try expectPage(p, pgno, 0x44);
+
+        try fillPages(p, p1, &.{2}, 0x66);
+        if (spill) try p.flush();
+        try p.savepoint(.rollback, 0);
+        try testing.expectEqual(@as(Pgno, 3), p.pageCount());
+        try expectFilled(p1, 0x33);
+        try expectPage(p, 2, 0x33);
+        try expectPage(p, 3, 0x22);
+
+        try fillPages(p, p1, &.{3}, 0x77);
+        try p.savepoint(.release, 0);
+        try p.commitPhaseOne(false);
+        try p.commitPhaseTwo();
+        p.unrefPageOne(p1);
+
+        {
+            try p.sharedLock();
+            const q1 = try p.get(1, .{});
+            defer p.unrefPageOne(q1);
+            try testing.expectEqual(@as(Pgno, 3), p.pageCount());
+            try expectFilled(q1, 0x77);
+            try expectPage(p, 2, 0x33);
+            try expectPage(p, 3, 0x77);
+        }
+        // A whole-transaction rollback forgets spilled frames.
+        {
+            const p1b = try beginWrite(p);
+            try fillPages(p, p1b, &.{ 2, 3, 4 }, 0x88);
+            if (spill) try p.flush();
+            try p.rollback();
+            try expectFilled(p1b, 0x77);
+            p.unrefPageOne(p1b);
+        }
+        {
+            try p.sharedLock();
+            const q1 = try p.get(1, .{});
+            defer p.unrefPageOne(q1);
+            try testing.expectEqual(@as(Pgno, 3), p.pageCount());
+            try expectPage(p, 2, 0x33);
+            try expectPage(p, 3, 0x77);
+        }
+        try commitFill(p, 3, 0x22);
+    }
+}
+
+test "pager: WAL snapshot isolation and writer exclusion" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    const a = try openPager(v, .{});
+    defer a.close(.{});
+    try commitFill(a, 2, 0x01);
+    try enterWal(a);
+    try commitFill(a, 2, 0x02);
+
+    const b = try openPager(v, .{});
+    defer b.close(.{});
+    // b holds a snapshot while a commits twice.
+    try b.sharedLock();
+    const b1 = try b.get(1, .{});
+    try expectFilled(b1, 0x02);
+    try commitFill(a, 2, 0x03);
+    try commitFill(a, 3, 0x04);
+    try expectPage(b, 2, 0x02);
+    try testing.expectEqual(@as(Pgno, 2), b.pageCount());
+    // A writer with an old snapshot is refused.
+    try testing.expectError(error.BusySnapshot, b.begin(false));
+    // Checkpoints cannot complete past b's snapshot.
+    try testing.expectError(error.Busy, a.checkpoint(.{}, .restart, null, null));
+    b.unrefPageOne(b1);
+    try expectDb(b, 3, 0x04);
+
+    // Only one writer at a time.
+    const a1 = try beginWrite(a);
+    try b.sharedLock();
+    const c1 = try b.get(1, .{});
+    try testing.expectError(error.Busy, b.begin(false));
+    b.unrefPageOne(c1);
+    try a.rollback();
+    a.unrefPageOne(a1);
+
+    var n_log: i32 = -1;
+    var n_ckpt: i32 = -1;
+    try a.checkpoint(.{}, .truncate, &n_log, &n_ckpt);
+    try testing.expectEqual(@as(i32, 0), n_log);
+    try testing.expectEqual(@as(u64, 0), try fileSize(v, wal_name));
+    try expectDb(b, 3, 0x04);
+    try commitFill(b, 3, 0x05);
+    try expectDb(a, 3, 0x05);
+}
+
+test "pager: leaving WAL mode checkpoints and deletes the WAL" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    const v = mem.interface();
+    const p = try openPager(v, .{});
+    defer p.close(.{});
+    try commitFill(p, 2, 0x01);
+    try enterWal(p);
+    try commitFill(p, 4, 0x02);
+    {
+        // Another connection holds the database: no exclusive lock.
+        const q = try openPager(v, .{});
+        defer q.close(.{});
+        try expectDb(q, 4, 0x02);
+        try testing.expectError(error.Busy, p.closeWal(.{}));
+        try testing.expect(p.useWal());
+    }
+    try p.closeWal(.{});
+    _ = p.setJournalMode(.delete);
+    try testing.expect(!p.useWal());
+    try testing.expect(!try v.access(wal_name, .exists));
+    // The EXCLUSIVE lock is kept until the next read transaction.
+    try expectDb(p, 4, 0x02);
+    try testing.expectEqual(@as(u64, 4 * page_size), try fileSize(v, db_name));
 }

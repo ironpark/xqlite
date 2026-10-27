@@ -53,7 +53,11 @@ fn stepOnce(v: *Vdbe) i32 {
         return RC.ROW;
     }
     v.result_row = null;
-    if (rc != RC.DONE and v.prep_flags & aux.PREPARE_SAVESQL != 0) {
+    if (rc == RC.DONE and db.auto_commit) {
+        std.debug.assert(v.rc == RC.OK);
+        v.rc = doWalCallbacks(db);
+        if (v.rc != RC.OK) rc = RC.ERROR;
+    } else if (rc != RC.DONE and v.prep_flags & aux.PREPARE_SAVESQL != 0) {
         // A statement with saved SQL returns the error of the program
         // (an extended code, SQLITE_SCHEMA for a reprepare), also set on
         // the connection.
@@ -65,6 +69,20 @@ fn stepOnce(v: *Vdbe) i32 {
         db.malloc_failed = false;
     }
     return rc & db.err_mask;
+}
+
+/// Port of doWalCallbacks(): after a commit, call the WAL hook for every
+/// database whose WAL grew.
+fn doWalCallbacks(db: *Sqlite3) i32 {
+    var rc: i32 = RC.OK;
+    for (db.dbs.items) |d| {
+        const bt = d.bt orelse continue;
+        const n_entry = bt.pager.walCallback();
+        if (n_entry > 0 and rc == RC.OK) {
+            if (db.wal_callback) |cb| rc = cb(db.wal_arg, db, d.name, @intCast(n_entry));
+        }
+    }
+    return rc;
 }
 
 /// SQLITE_MAX_SCHEMA_RETRY.

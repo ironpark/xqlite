@@ -26,6 +26,16 @@ pub fn errorCode(err: Error) i32 {
         error.ReadOnly => RC.READONLY,
         error.IoErr => RC.IOERR,
         error.LockErr => RC.IOERR_LOCK,
+        error.ShmOpen => RC.IOERR_SHMOPEN,
+        error.ShmSize => RC.IOERR_SHMSIZE,
+        error.ShmMap => RC.IOERR_SHMMAP,
+        error.ShmLock => RC.IOERR_SHMLOCK,
+        error.ReadOnlyCantInit => RC.READONLY_CANTINIT,
+        error.BusyRecovery => RC.BUSY_RECOVERY,
+        error.BusySnapshot => RC.BUSY_SNAPSHOT,
+        error.ReadOnlyRecovery => RC.READONLY_RECOVERY,
+        error.Protocol => RC.PROTOCOL,
+        error.Interrupt => RC.INTERRUPT,
         error.OutOfMemory => RC.NOMEM,
         error.Corrupt => RC.CORRUPT,
         error.ReadOnlyRollback => RC.READONLY_ROLLBACK,
@@ -209,6 +219,7 @@ pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: 
         .read_only = flags.read_only,
         .create = flags.create and !flags.read_only,
         .n_vdbe_read = &db.n_vdbe_read,
+        .busy_handler = btreeBusyHandler(db),
     }) catch |err| {
         const rc = errorCode(err);
         errorWithMsg(db, rc, "{s}", .{util.errStr(rc)});
@@ -217,6 +228,8 @@ pub fn open(gpa: std.mem.Allocator, v: @import("../vfs/vfs.zig").Vfs, filename: 
     db.dbs.items[0].bt = bt;
     db.dbs.items[0].schema.enc = db.enc;
     @import("func.zig").registerPerConnectionBuiltinFunctions(db);
+    // SQLITE_DEFAULT_WAL_AUTOCHECKPOINT.
+    _ = walAutocheckpoint(db, 1000);
     // The built-in extensions (sqlite3BuiltinExtensions): the reference
     // build has SQLITE_ENABLE_BYTECODE_VTAB.
     _ = @import("../vdbe/vdbevtab.zig").init(db);
@@ -246,7 +259,7 @@ pub fn close(db: *Sqlite3) i32 {
     for (db.dbs.items) |*d| {
         @import("build.zig").schemaFree(db, d.schema);
         gpa.destroy(d.schema);
-        if (d.bt) |bt| bt.close();
+        if (d.bt) |bt| bt.close(pagerConn(db));
     }
     db.dbs.deinit(gpa);
     @import("coll.zig").freeAll(db);
@@ -396,13 +409,183 @@ pub fn limit(db: *Sqlite3, id: int.Limit, new_limit_arg: i32) i32 {
     return old;
 }
 
-/// Port of sqlite3_busy_timeout(): the timeout is recorded for PRAGMA
-/// busy_timeout. TODO: no busy handler is installed yet; that needs a
-/// sleep primitive in the VFS (xSleep), so lock contention still fails
-/// with SQLITE_BUSY at once.
-pub fn busyTimeout(db: *Sqlite3, ms: i32) i32 {
-    db.busy_timeout = if (ms > 0) ms else 0;
+/// Port of sqlite3InvokeBusyHandler(): whether to retry an operation
+/// that found a lock taken. Once the handler declines, it is not called
+/// again until `n_busy` is reset.
+pub fn invokeBusyHandler(p: *int.BusyHandler) bool {
+    const func = p.func orelse return false;
+    if (p.n_busy < 0) return false;
+    const rc = func(p.arg, p.n_busy);
+    if (rc == 0) {
+        p.n_busy = -1;
+    } else {
+        p.n_busy += 1;
+    }
+    return rc != 0;
+}
+
+/// The busy handler given to the pagers of the connection (C passes
+/// sqlite3InvokeBusyHandler with &db->busyHandler).
+pub fn btreeBusyHandler(db: *Sqlite3) @import("../pager/pager.zig").BusyHandler {
+    return .{ .ctx = db, .func = pagerBusy };
+}
+
+/// What the pagers of the connection need of it for WAL closes and
+/// checkpoints (C passes db): the interrupt flag, and whether the last
+/// connection checkpoints the WAL on close (not with
+/// SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE).
+pub fn pagerConn(db: *Sqlite3) @import("../pager/pager.zig").Conn {
+    return .{
+        .interrupt = &db.is_interrupted,
+        .no_ckpt_on_close = db.flags & int.DbFlag.NoCkptOnClose != 0,
+    };
+}
+
+fn pagerBusy(ctx: ?*anyopaque) bool {
+    const db: *Sqlite3 = @ptrCast(@alignCast(ctx.?));
+    return invokeBusyHandler(&db.busy_handler);
+}
+
+/// Port of sqliteDefaultBusyCallback(): sleep a little longer each time,
+/// until `busy_timeout` milliseconds have passed.
+fn defaultBusyCallback(ptr: ?*anyopaque, count: i32) i32 {
+    const delays = [_]u8{ 1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100 };
+    const totals = [_]u8{ 0, 1, 3, 8, 18, 33, 53, 78, 103, 128, 178, 228 };
+    const db: *Sqlite3 = @ptrCast(@alignCast(ptr.?));
+    const tmout = db.busy_timeout;
+    std.debug.assert(count >= 0);
+    var delay: i32 = undefined;
+    var prior: i32 = undefined;
+    if (count < delays.len) {
+        delay = delays[@intCast(count)];
+        prior = totals[@intCast(count)];
+    } else {
+        delay = delays[delays.len - 1];
+        prior = totals[totals.len - 1] + delay * (count - @as(i32, delays.len - 1));
+    }
+    if (prior + delay > tmout) {
+        delay = tmout - prior;
+        if (delay <= 0) return 0;
+    }
+    if (db.vfs) |v| _ = v.sleep(@intCast(delay * 1000));
+    return 1;
+}
+
+/// Port of sqlite3_busy_handler().
+pub fn busyHandler(db: *Sqlite3, func: ?*const fn (arg: ?*anyopaque, count: i32) i32, arg: ?*anyopaque) i32 {
+    db.busy_handler = .{ .func = func, .arg = arg, .n_busy = 0 };
+    db.busy_timeout = 0;
     return RC.OK;
+}
+
+/// Port of sqlite3_busy_timeout(): retry locks for up to `ms`
+/// milliseconds; 0 or less turns the busy handler off.
+pub fn busyTimeout(db: *Sqlite3, ms: i32) i32 {
+    if (ms > 0) {
+        _ = busyHandler(db, defaultBusyCallback, db);
+        db.busy_timeout = ms;
+    } else {
+        _ = busyHandler(db, null, null);
+    }
+    return RC.OK;
+}
+
+// ===================================================================== WAL
+
+/// Port of sqlite3_wal_hook(): register the WAL hook, returning the
+/// previous argument.
+pub fn walHook(db: *Sqlite3, func: ?int.WalCallback, arg: ?*anyopaque) ?*anyopaque {
+    const old = db.wal_arg;
+    db.wal_callback = func;
+    db.wal_arg = arg;
+    return old;
+}
+
+/// Port of sqlite3WalDefaultHook(): the hook of sqlite3_wal_autocheckpoint(),
+/// a PASSIVE checkpoint once the WAL holds the given number of frames.
+pub fn walDefaultHook(arg: ?*anyopaque, db: *Sqlite3, name: [:0]const u8, n_frame: i32) i32 {
+    if (n_frame >= @as(i32, @intCast(@intFromPtr(arg)))) {
+        _ = walCheckpointV2(db, name, .passive, null, null);
+    }
+    return RC.OK;
+}
+
+/// Port of sqlite3_wal_autocheckpoint(): checkpoint after commits that
+/// leave at least `n_frame` frames in the WAL; 0 or less turns it off.
+pub fn walAutocheckpoint(db: *Sqlite3, n_frame: i32) i32 {
+    if (n_frame > 0) {
+        _ = walHook(db, walDefaultHook, @ptrFromInt(@as(usize, @intCast(n_frame))));
+    } else {
+        _ = walHook(db, null, null);
+    }
+    return RC.OK;
+}
+
+/// The wal_autocheckpoint setting: the frame count if the default hook is
+/// installed, else 0.
+pub fn walAutocheckpointValue(db: *const Sqlite3) i32 {
+    if (db.wal_callback == walDefaultHook) return @intCast(@intFromPtr(db.wal_arg));
+    return 0;
+}
+
+/// Port of sqlite3Checkpoint(): checkpoint database `i_db`, or all of them
+/// for MAX_DB. `n_log` and `n_ckpt` are only set by the first. Busy from
+/// one database does not stop the others; it is reported at the end.
+pub fn checkpoint(db: *Sqlite3, i_db: i32, mode: @import("../pager/pager.zig").CheckpointMode, n_log_arg: ?*i32, n_ckpt_arg: ?*i32) i32 {
+    var rc: i32 = RC.OK;
+    var seen_busy = false;
+    var n_log = n_log_arg;
+    var n_ckpt = n_ckpt_arg;
+    for (db.dbs.items, 0..) |d, i| {
+        if (rc != RC.OK) break;
+        if (i == i_db or i_db == int.MAX_DB) {
+            if (d.bt) |bt| {
+                bt.checkpoint(pagerConn(db), mode, n_log, n_ckpt) catch |err| {
+                    rc = switch (err) {
+                        error.Locked => RC.LOCKED,
+                        else => |e| errorCode(e),
+                    };
+                };
+            }
+            n_log = null;
+            n_ckpt = null;
+            if (rc == RC.BUSY) {
+                seen_busy = true;
+                rc = RC.OK;
+            }
+        }
+    }
+    return if (rc == RC.OK and seen_busy) RC.BUSY else rc;
+}
+
+/// Port of sqlite3_wal_checkpoint_v2(): checkpoint the database named
+/// `zdb` (all of them if null or empty). `n_log` and `n_ckpt` receive the
+/// WAL size and the frames checkpointed, or -1.
+pub fn walCheckpointV2(db: *Sqlite3, zdb: ?[]const u8, mode: @import("../pager/pager.zig").CheckpointMode, n_log: ?*i32, n_ckpt: ?*i32) i32 {
+    if (n_log) |p| p.* = -1;
+    if (n_ckpt) |p| p.* = -1;
+    var rc: i32 = undefined;
+    const i_db: i32 = if (zdb != null and zdb.?.len > 0)
+        if (@import("build.zig").findDbName(db, zdb.?)) |i| @intCast(i) else -1
+    else
+        int.MAX_DB;
+    if (i_db < 0) {
+        errorWithMsg(db, RC.ERROR, "unknown database: {s}", .{zdb.?});
+        rc = RC.ERROR;
+    } else {
+        db.busy_handler.n_busy = 0;
+        rc = checkpoint(db, i_db, mode, n_log, n_ckpt);
+        setError(db, rc);
+    }
+    rc = apiExit(db, rc);
+    // With no statement running, a pending interrupt is cleared here.
+    if (db.n_vdbe_active == 0) db.is_interrupted.store(false, .monotonic);
+    return rc;
+}
+
+/// Port of sqlite3_wal_checkpoint(): a PASSIVE checkpoint.
+pub fn walCheckpoint(db: *Sqlite3, zdb: ?[]const u8) i32 {
+    return walCheckpointV2(db, zdb, .passive, null, null);
 }
 
 /// The process-wide heap limits (mem0.alarmThreshold and mem0.hardLimit).

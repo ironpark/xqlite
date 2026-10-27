@@ -1,6 +1,6 @@
 //! PRAGMA statements (port of pragma.c and the generated pragma.h).
 //!
-//! Pragmas that need missing subsystems (WAL, exclusive locking, ANALYZE,
+//! Pragmas that need missing subsystems (exclusive locking, ANALYZE,
 //! UTF-16) fail with "not supported yet".
 
 const std = @import("std");
@@ -317,7 +317,7 @@ fn invalidateTempStorage(p: *Parse) bool {
             util.errorMsg(p, "temporary storage cannot be changed from within a transaction", .{});
             return false;
         }
-        bt.close();
+        bt.close(.{});
         db.dbs.items[1].bt = null;
         build.resetAllSchemasOfConnection(db);
     }
@@ -370,7 +370,7 @@ fn setAllPagerFlags(db: *Sqlite3) void {
             4 => .extra,
             else => .full,
         };
-        bt.setPagerFlags(level, db.flags & DbFlag.FullFSync != 0, db.flags & DbFlag.CacheSpill != 0);
+        bt.setPagerFlags(level, db.flags & DbFlag.FullFSync != 0, db.flags & DbFlag.CkptFullFSync != 0, db.flags & DbFlag.CacheSpill != 0);
     }
 }
 
@@ -477,6 +477,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         try build.nameFromToken(p.arena, value);
     const zdb: ?[:0]const u8 = if (id2.n > 0) db.dbs.items[i_db].name else null;
 
+    db.busy_handler.n_busy = 0;
     // The SQLITE_FCNTL_PRAGMA file control is not supported by the VFS
     // layer, which is as if every VFS answered SQLITE_NOTFOUND.
 
@@ -602,7 +603,6 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 }
             }
             if (mode == @backingInt(pager_mod.JournalMode.memory)) return pending.notYet(p, "PRAGMA journal_mode=MEMORY");
-            if (mode == @backingInt(pager_mod.JournalMode.wal)) return pending.notYet(p, "PRAGMA journal_mode=WAL");
             if (mode == journalmode_query and id2.n == 0) {
                 // "PRAGMA journal_mode" means "PRAGMA main.journal_mode".
                 i_db = 0;
@@ -1108,8 +1108,33 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             aux.reusable(v);
         },
 
-        .wal_checkpoint => return pending.notYet(p, "PRAGMA wal_checkpoint"),
-        .wal_autocheckpoint => return pending.notYet(p, "PRAGMA wal_autocheckpoint"),
+        // PRAGMA [schema.]wal_checkpoint[(PASSIVE|FULL|RESTART|TRUNCATE|NOOP)]:
+        // checkpoint one database, or all of them, returning the busy
+        // flag, the WAL size and the frames checkpointed.
+        .wal_checkpoint => {
+            const i_bt: i32 = if (id2.n > 0) @intCast(i_db) else int.MAX_DB;
+            var e_mode = pager_mod.CheckpointMode.passive;
+            if (right) |z| {
+                if (ctype.eqlNoCase(z, "full")) {
+                    e_mode = .full;
+                } else if (ctype.eqlNoCase(z, "restart")) {
+                    e_mode = .restart;
+                } else if (ctype.eqlNoCase(z, "truncate")) {
+                    e_mode = .truncate;
+                } else if (ctype.eqlNoCase(z, "noop")) {
+                    e_mode = .noop;
+                }
+            }
+            p.n_mem = 3;
+            _ = aux.addOp3(v, OP.Checkpoint, i_bt, @backingInt(e_mode), 1);
+            _ = aux.addOp2(v, OP.ResultRow, 1, 3);
+        },
+
+        // PRAGMA wal_autocheckpoint[=N].
+        .wal_autocheckpoint => {
+            if (right) |z| _ = main_mod.walAutocheckpoint(db, atoi(z));
+            returnSingleInt(v, main_mod.walAutocheckpointValue(db));
+        },
 
         // PRAGMA shrink_memory: the page caches are not shrunk on demand,
         // so this does nothing.

@@ -14,8 +14,11 @@
 //! (ptrmap.zig), and commit relocates pages to drop free pages from the
 //! end of the file.
 //!
-//! Not ported yet: WAL databases (refused, as with SQLITE_OMIT_WAL),
-//! shared cache, incremental blob I/O and BtreeTransferRow.
+//! A database whose header says read version 2 is opened in WAL mode
+//! (lockBtree), and `setVersion` switches the file between the two.
+//!
+//! Not ported yet: shared cache, incremental blob I/O and
+//! BtreeTransferRow.
 
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
@@ -186,6 +189,9 @@ pub const Btree = struct {
     do_truncate: bool = false,
     /// Closes with its last cursor (BTREE_SINGLE).
     single: bool = false,
+    /// Do not open the WAL even if the header asks for it, while
+    /// `setVersion` moves the file out of WAL mode (BTS_NO_WAL).
+    no_wal: bool = false,
     /// The count of statements of the connection that read
     /// (p->db->nVdbeRead), if the b-tree belongs to one (Options): while
     /// others read, ending a transaction leaves a read transaction.
@@ -232,7 +238,7 @@ pub const Btree = struct {
             .busy_handler = opts.busy_handler,
             .reiniter = pageReinit,
         });
-        errdefer p.close();
+        errdefer p.close(.{});
 
         var hdr: [header.size]u8 = undefined;
         try p.readFileHeader(&hdr);
@@ -264,11 +270,12 @@ pub const Btree = struct {
     }
 
     /// Port of sqlite3BtreeClose(). All cursors must be closed. Rolls back
-    /// any open transaction.
-    pub fn close(bt: *Btree) void {
+    /// any open transaction. `db` is the connection's part in closing a
+    /// WAL (see Pager.close).
+    pub fn close(bt: *Btree, db: pager_mod.Conn) void {
         std.debug.assert(bt.cursors == null);
         bt.rollback(null, false) catch {};
-        bt.pager.close();
+        bt.pager.close(db);
         bt.has_content.deinit(bt.gpa);
         bt.freeTempSpace();
         bt.gpa.destroy(bt);
@@ -278,8 +285,9 @@ pub const Btree = struct {
         bt.pager.setCacheSize(n);
     }
 
-    pub fn setPagerFlags(bt: *Btree, level: pager_mod.Synchronous, full_fsync: bool, cache_spill: bool) void {
-        bt.pager.setFlags(level, full_fsync, cache_spill);
+    /// Port of sqlite3BtreeSetPagerFlags().
+    pub fn setPagerFlags(bt: *Btree, level: pager_mod.Synchronous, full_fsync: bool, ckpt_full_fsync: bool, cache_spill: bool) void {
+        bt.pager.setFlags(level, full_fsync, ckpt_full_fsync, cache_spill);
     }
 
     /// Port of sqlite3BtreeSetSpillSize(): set the cache spill threshold
@@ -455,13 +463,21 @@ pub const Btree = struct {
                 bt.pager.unrefPageOne(p1.db_page);
                 return err;
             };
-            // No WAL support: like a SQLITE_OMIT_WAL build, refuse WAL
-            // files and treat unknown write versions as read-only.
-            if (h.read_version != .legacy) {
-                bt.pager.unrefPageOne(p1.db_page);
-                return error.NotADatabase;
+            // Unknown write versions make the file read-only; parse()
+            // refused unknown read versions.
+            if (h.readOnly()) bt.read_only = true;
+            // Read version 2: the database is in WAL mode. Open the WAL,
+            // and let the caller retry, as page 1 may be newer there.
+            if (h.read_version == .wal and !bt.no_wal) {
+                const was_open = bt.pager.openWal() catch |err| {
+                    bt.pager.unrefPageOne(p1.db_page);
+                    return err;
+                };
+                if (!was_open) {
+                    bt.pager.unrefPageOne(p1.db_page);
+                    return;
+                }
             }
-            if (h.write_version != .legacy) bt.read_only = true;
             if (h.page_size != bt.page_size) {
                 // Page 1 was read with the wrong page size. Adopt the real
                 // one and let the caller try again.
@@ -553,11 +569,14 @@ pub const Btree = struct {
         if (bt.read_only and wrflag) return error.ReadOnly;
 
         bt.initially_empty = bt.n_page == 0;
-        var count: u32 = 0;
-        while (true) : (count += 1) {
-            bt.tryBegin(mode) catch |err| {
-                if (err == error.Busy and bt.in_trans == .none) {
-                    if (bt.pager.busy_handler) |h| if (h.func(h.ctx, count)) continue;
+        while (true) {
+            bt.tryBegin(mode) catch |err_arg| {
+                var err = err_arg;
+                // A stale WAL snapshot outside a transaction is plain
+                // contention: a new read transaction gets a fresh one.
+                if (err == error.BusySnapshot and bt.in_trans == .none) err = error.Busy;
+                if ((err == error.Busy or err == error.BusyRecovery) and bt.in_trans == .none) {
+                    if (bt.pager.busy_handler) |h| if (h.func(h.ctx)) continue;
                 }
                 return err;
             };
@@ -608,6 +627,38 @@ pub const Btree = struct {
             try bt.pager.begin(mode == .exclusive);
             try bt.newDatabase();
         }
+    }
+
+    /// Port of sqlite3BtreeSetVersion(): set the read and write versions of
+    /// the header to 2 (WAL) or 1 (rollback), in a write transaction left
+    /// for the caller to commit. Version 1 keeps the WAL from opening
+    /// meanwhile, even if the header still says 2.
+    pub fn setVersion(bt: *Btree, version: u8) Error!void {
+        std.debug.assert(version == 1 or version == 2);
+        bt.no_wal = version == 1;
+        defer bt.no_wal = false;
+        try bt.beginTrans(.read, 0);
+        const data = bt.page1.?.data;
+        if (data[18] != version or data[19] != version) {
+            try bt.beginTrans(.exclusive, 0);
+            try bt.pager.write(bt.page1.?.db_page);
+            data[18] = version;
+            data[19] = version;
+        }
+    }
+
+    /// Port of sqlite3BtreeCheckpoint(): checkpoint the WAL (see
+    /// Pager.checkpoint). Fails with Locked inside a transaction.
+    pub fn checkpoint(bt: *Btree, db: pager_mod.Conn, mode: pager_mod.CheckpointMode, n_log: ?*i32, n_ckpt: ?*i32) (Error || error{Locked})!void {
+        if (bt.in_trans != .none) return error.Locked;
+        // An empty database switched to WAL mode has not opened its WAL
+        // yet; a read transaction does that (C runs PRAGMA table_list).
+        if (!bt.pager.useWal() and bt.pager.journal_mode == .wal) {
+            if (bt.beginTrans(.read, 0)) |_| {
+                bt.commitPhaseTwo(false) catch {};
+            } else |_| {}
+        }
+        try bt.pager.checkpoint(db, mode, n_log, n_ckpt);
     }
 
     /// Port of sqlite3BtreeCommitPhaseOne(): write and sync everything. Only
@@ -2353,7 +2404,7 @@ pub const Cursor = struct {
         bt.gpa.free(cur.overflow);
         if (cur.saved_key) |k| bt.gpa.free(k);
         cur.* = undefined;
-        if (bt.single and bt.cursors == null) bt.close();
+        if (bt.single and bt.cursors == null) bt.close(.{});
     }
 
     /// Port of sqlite3BtreeCursorHintFlags(BTREE_BULKLOAD): rows arrive in

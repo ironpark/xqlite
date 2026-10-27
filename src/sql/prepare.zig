@@ -423,7 +423,9 @@ fn lockAndPrepare(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, 
         }
         break;
     }
-    return main_mod.apiExit(db, rc);
+    rc = main_mod.apiExit(db, rc);
+    db.busy_handler.n_busy = 0;
+    return rc;
 }
 
 /// Port of sqlite3_prepare_v2() and sqlite3_prepare_v3(): compile the

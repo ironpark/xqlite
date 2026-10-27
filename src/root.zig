@@ -9,6 +9,8 @@ pub const varint = @import("util/varint.zig");
 pub const vfs = @import("vfs/vfs.zig");
 pub const MemVfs = @import("vfs/mem.zig").MemVfs;
 pub const UnixVfs = @import("vfs/unix.zig").UnixVfs;
+/// A VFS wrapper that crashes the process at a chosen write (testing aid).
+pub const crash_vfs = @import("vfs/crash.zig");
 
 pub const pager = @import("pager/pager.zig");
 pub const pcache = @import("pager/pcache.zig");

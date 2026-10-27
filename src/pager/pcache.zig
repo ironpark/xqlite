@@ -26,7 +26,11 @@ pub const Flags = packed struct(u8) {
     need_sync: bool = false,
     /// Content does not need to reach the disk (PGHDR_DONT_WRITE).
     dont_write: bool = false,
-    _: u4 = 0,
+    /// Appended to the WAL by the last sqlite3WalFrames() call, rather
+    /// than overwriting an earlier frame of the transaction
+    /// (PGHDR_WAL_APPEND).
+    wal_append: bool = false,
+    _: u3 = 0,
 };
 
 pub const Page = struct {

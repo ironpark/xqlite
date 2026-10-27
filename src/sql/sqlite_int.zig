@@ -1134,7 +1134,16 @@ pub const RC = struct {
     pub const ABORT_ROLLBACK: i32 = ABORT | (2 << 8);
     pub const IOERR_SHORT_READ: i32 = IOERR | (2 << 8);
     pub const IOERR_LOCK: i32 = IOERR | (15 << 8);
+    pub const IOERR_SHMOPEN: i32 = IOERR | (18 << 8);
+    pub const IOERR_SHMSIZE: i32 = IOERR | (19 << 8);
+    pub const IOERR_SHMLOCK: i32 = IOERR | (20 << 8);
+    pub const IOERR_SHMMAP: i32 = IOERR | (21 << 8);
+    pub const BUSY_RECOVERY: i32 = BUSY | (1 << 8);
+    pub const BUSY_SNAPSHOT: i32 = BUSY | (2 << 8);
+    pub const READONLY_RECOVERY: i32 = READONLY | (1 << 8);
+    pub const READONLY_CANTLOCK: i32 = READONLY | (2 << 8);
     pub const READONLY_ROLLBACK: i32 = READONLY | (3 << 8);
+    pub const READONLY_CANTINIT: i32 = READONLY | (5 << 8);
 };
 
 /// sqlite3_limit() categories (SQLITE_LIMIT_*) with their defaults.
@@ -1457,6 +1466,23 @@ pub const MAX_FILE_FORMAT = 4;
 /// SQLITE_DEFAULT_CACHE_SIZE.
 pub const DEFAULT_CACHE_SIZE = -2000;
 
+/// SQLITE_MAX_DB: as a database index, every database.
+pub const MAX_DB: i32 = 10 + 2;
+
+/// A busy handler (struct BusyHandler).
+pub const BusyHandler = struct {
+    /// Called with the number of prior calls; nonzero means retry
+    /// (xBusyHandler).
+    func: ?*const fn (arg: ?*anyopaque, count: i32) i32 = null,
+    arg: ?*anyopaque = null,
+    /// Calls so far, or -1 once the handler gave up (nBusy).
+    n_busy: i32 = 0,
+};
+
+/// A WAL hook (sqlite3_wal_hook()): called after a commit with the
+/// database name and the frames in its WAL.
+pub const WalCallback = *const fn (arg: ?*anyopaque, db: *Sqlite3, name: [:0]const u8, n_frame: i32) i32;
+
 /// One attached database (Db): aDb[0] is "main", aDb[1] "temp".
 pub const Db = struct {
     name: [:0]const u8,
@@ -1547,8 +1573,13 @@ pub const Sqlite3 = struct {
     temp_store: u8 = 0,
     /// PRAGMA auto_vacuum for databases yet to be created, or -1.
     next_autovac: i8 = -1,
-    /// PRAGMA busy_timeout, in milliseconds.
+    /// PRAGMA busy_timeout, in milliseconds (busyTimeout).
     busy_timeout: i32 = 0,
+    /// The busy handler (busyHandler).
+    busy_handler: BusyHandler = .{},
+    /// The WAL hook (xWalCallback and pWalArg).
+    wal_callback: ?WalCallback = null,
+    wal_arg: ?*anyopaque = null,
     /// PRAGMA analysis_limit.
     n_analysis_limit: i32 = 0,
     /// Registered virtual table modules (aModule).

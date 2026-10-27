@@ -93,8 +93,9 @@ test "pragma: flags and settings" {
     defer testing.allocator.free(opts);
     try testing.expect(std.mem.indexOf(u8, opts, "THREADSAFE=1\n") != null);
     try c.expectRows("PRAGMA shrink_memory", "");
-    try c.expectError("PRAGMA wal_checkpoint", "not supported yet: PRAGMA wal_checkpoint");
-    try c.expectError("PRAGMA journal_mode=WAL", "not supported yet: PRAGMA journal_mode=WAL");
+    // Not in WAL mode: nothing to checkpoint.
+    try c.expectRows("PRAGMA wal_checkpoint; PRAGMA main.wal_checkpoint(FULL)", "0|-1|-1\n0|-1|-1\n");
+    try c.expectRows("PRAGMA wal_autocheckpoint; PRAGMA wal_autocheckpoint=50; PRAGMA wal_autocheckpoint=0", "1000\n50\n0\n");
     const list = try c.query("PRAGMA pragma_list");
     defer testing.allocator.free(list);
     try testing.expect(std.mem.startsWith(u8, list, "analysis_limit\napplication_id\n"));

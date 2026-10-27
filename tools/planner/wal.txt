@@ -1,0 +1,43 @@
+# WAL pragmas: journal_mode transitions, wal_checkpoint in every mode,
+# wal_autocheckpoint; on a rollback-journal database, then on a WAL one.
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+CREATE INDEX tb ON t(b);
+INSERT INTO t VALUES(1,'x'),(2,'y'),(3,'z');
+==
+PRAGMA journal_mode
+PRAGMA journal_mode=wal
+PRAGMA main.journal_mode=WAL
+PRAGMA journal_mode=WAL; INSERT INTO t VALUES(4,'w'); SELECT count(*) FROM t
+PRAGMA journal_mode=WAL; PRAGMA journal_mode=DELETE
+PRAGMA journal_mode=wal; PRAGMA journal_mode=truncate; PRAGMA journal_mode
+PRAGMA journal_mode=bogus
+PRAGMA wal_checkpoint
+PRAGMA wal_checkpoint(PASSIVE)
+PRAGMA wal_checkpoint(full)
+PRAGMA wal_checkpoint(RESTART)
+PRAGMA main.wal_checkpoint(TRUNCATE)
+PRAGMA wal_checkpoint(noop)
+PRAGMA wal_checkpoint(bogus)
+PRAGMA wal_autocheckpoint
+PRAGMA wal_autocheckpoint=10
+PRAGMA wal_autocheckpoint=-1; PRAGMA wal_autocheckpoint
+PRAGMA wal_autocheckpoint=0
+SELECT * FROM pragma_journal_mode
+BEGIN; PRAGMA journal_mode=WAL
+----
+PRAGMA journal_mode=wal;
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+CREATE INDEX tb ON t(b);
+WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<500) INSERT INTO t SELECT i, 'v' || i FROM c;
+==
+PRAGMA journal_mode
+SELECT count(*), sum(a) FROM t
+INSERT INTO t VALUES(1000, 'x'); PRAGMA wal_checkpoint
+UPDATE t SET b = b || '!' WHERE a % 3 = 0; PRAGMA wal_checkpoint(NOOP); PRAGMA wal_checkpoint(TRUNCATE)
+DELETE FROM t WHERE a > 100; PRAGMA wal_checkpoint(FULL); PRAGMA wal_checkpoint(RESTART)
+PRAGMA journal_mode=DELETE
+PRAGMA journal_mode=DELETE; PRAGMA journal_mode=wal; SELECT count(*) FROM t
+PRAGMA journal_mode=persist; INSERT INTO t VALUES(2000, 'p'); PRAGMA journal_mode
+BEGIN; PRAGMA journal_mode=DELETE
+PRAGMA wal_checkpoint
+PRAGMA wal_autocheckpoint=1; INSERT INTO t VALUES(3000, 'q'); PRAGMA wal_checkpoint(NOOP)

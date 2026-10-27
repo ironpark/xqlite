@@ -9,8 +9,14 @@
 //! `InodeInfo` that tracks lock state across handles, and closing a handle
 //! while other handles still hold locks defers the close(2).
 //!
-//! Not ported yet: mmap, shared memory (WAL index), proxy/dotfile/flock
-//! locking styles, F_SETLKW timeouts.
+//! The shared memory of a WAL database (the wal-index) is the mmapped
+//! "-shm" file next to it, locked with the same byte ranges as os_unix.c
+//! (UNIX_SHM_BASE, UNIX_SHM_DMS), so the wal-index is shared with real
+//! SQLite processes too. As in os_unix.c, each inode has at most one
+//! `ShmNode` per process, shared by every handle that maps it.
+//!
+//! Not ported yet: mmap of the database file, proxy/dotfile/flock locking
+//! styles, unix-excl (process-private locks), F_SETLKW timeouts.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -44,6 +50,7 @@ pub const UnixVfs = struct {
         .delete = delete,
         .access = access,
         .randomness = randomness,
+        .sleep = sleep,
     };
 
     fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
@@ -61,18 +68,31 @@ pub const UnixVfs = struct {
             }) catch return error.CantOpen;
         };
 
-        const file: Io.File = if (flags.create)
+        var read_only = !flags.read_write;
+        const opened = if (flags.create)
             self.dir.createFile(io, name, .{
                 .read = true,
                 .truncate = false,
                 .exclusive = flags.exclusive,
                 .permissions = .default_file,
-            }) catch |err| return mapOpenError(err)
+            })
         else
             self.dir.openFile(io, name, .{
                 .mode = if (flags.read_write) .read_write else .read_only,
                 .allow_directory = false,
-            }) catch |err| return mapOpenError(err);
+            });
+        const file: Io.File = opened catch |err| retry: {
+            // Like unixOpen(): what cannot be opened read-write (a file
+            // without write permission, say) is opened read-only, which
+            // File.isReadOnly() reports. Not a directory, nor a file that
+            // must be new.
+            if (read_only or flags.exclusive or err == error.IsDir) return mapOpenError(err);
+            read_only = true;
+            break :retry self.dir.openFile(io, name, .{
+                .mode = .read_only,
+                .allow_directory = false,
+            }) catch |e| return mapOpenError(e);
+        };
         errdefer file.close(io);
 
         // Like os_unix.c: unlink right away and let the descriptor keep the
@@ -81,12 +101,16 @@ pub const UnixVfs = struct {
 
         const inode = try InodeInfo.acquire(io, file);
         errdefer inode.release(io);
+        // The name of a database is kept to derive the -shm file's.
+        const path_copy: ?[]u8 = if (path != null and flags.kind == .main_db) try self.gpa.dupe(u8, name) else null;
+        errdefer if (path_copy) |pc| self.gpa.free(pc);
         const handle = try self.gpa.create(UnixFile);
         handle.* = .{
             .owner = self,
             .file = file,
             .inode = inode,
-            .read_only = !flags.read_write,
+            .read_only = read_only,
+            .path = path_copy,
         };
         return .{ .ptr = handle, .vtable = &UnixFile.vtable };
     }
@@ -118,6 +142,12 @@ pub const UnixVfs = struct {
     fn randomness(ptr: *anyopaque, buf: []u8) void {
         const self: *UnixVfs = @ptrCast(@alignCast(ptr));
         self.io.random(buf);
+    }
+
+    /// Port of unixSleep().
+    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
+        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+        return vfs.ioSleep(self.io, microseconds);
     }
 
     fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {
@@ -172,6 +202,9 @@ const InodeInfo = struct {
     /// Descriptors whose close(2) is deferred until `n_lock` drops to zero.
     unused: std.ArrayList(Io.File) = .empty,
     ref_count: u32 = 0,
+    /// The shared memory of this database, while any handle maps it
+    /// (pShmNode). Created and destroyed under `big_lock`.
+    shm_node: ?*ShmNode = null,
 
     /// The table outlives any one VFS instance, so it uses a global allocator.
     const gpa = std.heap.smp_allocator;
@@ -270,12 +303,134 @@ fn fsyncFd(fd: fd_t, full: bool) Error!void {
     }
 }
 
+// ======================================================== shared memory
+
+/// UNIX_SHM_BASE: the first lock byte of the -shm file, which is the
+/// WalCkptInfo.aLock[] array of the wal-index header.
+const shm_base: u64 = (22 + vfs.shm_nlock) * 4;
+/// UNIX_SHM_DMS: the dead-man switch. Every process using the -shm file
+/// holds a shared lock on it; the first one to arrive (no lock held)
+/// truncates the file, as its content may be left over from a crash.
+const shm_dms: u64 = shm_base + vfs.shm_nlock;
+
+/// The shared memory of one database, shared by every handle in this
+/// process that maps it (struct unixShmNode).
+///
+/// `InodeInfo.big_lock` guards creation, destruction and `n_ref`;
+/// `mutex` guards everything else.
+const ShmNode = struct {
+    inode: *InodeInfo,
+    mutex: Io.Mutex = .init,
+    /// Name of the -shm file (zFilename).
+    filename: []u8,
+    /// The open -shm file (hShm).
+    file: Io.File,
+    /// Size of each region (szRegion).
+    sz_region: u32 = 0,
+    /// The mapped regions (apRegion). A mapping covers `regionPerMap()`
+    /// consecutive regions and is unmapped through its first one.
+    regions: std.ArrayList([*]align(8) u8) = .empty,
+    /// The -shm file could only be opened read-only (isReadonly).
+    is_readonly: bool = false,
+    /// The DMS lock is not held yet (isUnlocked).
+    is_unlocked: bool = false,
+    /// Handles connected to this node (nRef).
+    n_ref: u32 = 0,
+    /// Locks held by this process on each slot (aLock).
+    locks: vfs.ShmLockTable = .{},
+
+    fn fd(node: *const ShmNode) fd_t {
+        return node.file.handle;
+    }
+
+    /// The file lock of ShmLockTable.apply(): unixShmSystemLock() on
+    /// the slots.
+    pub fn lock(node: *ShmNode, kind: vfs.ShmLockTable.FileLock, ofst: u32, n: u32) Error!void {
+        const k: LockType = switch (kind) {
+            .read => .read,
+            .write => .write,
+            .unlock => .unlock,
+        };
+        return shmSystemLock(node, k, ofst + shm_base, n);
+    }
+};
+
+/// One handle's connection to a `ShmNode` (struct unixShm).
+const Shm = struct {
+    node: *ShmNode,
+    /// Locks held by this connection (sharedMask, exclMask).
+    held: vfs.ShmLockTable.Held = .{},
+};
+
+/// Port of unixShmSystemLock(): apply a POSIX lock to bytes
+/// `ofst`..`ofst+n-1` of the -shm file. Any failure is reported as Busy.
+fn shmSystemLock(node: *ShmNode, kind: LockType, ofst: u64, n: u64) Error!void {
+    std.debug.assert((ofst == shm_dms and n == 1) or (ofst >= shm_base and ofst + n <= shm_base + vfs.shm_nlock));
+    std.debug.assert(n == 1 or kind != .read);
+    posixLock(node.fd(), kind, ofst, n) catch return error.Busy;
+}
+
+/// Port of unixShmRegionPerMap(): how many 32 KiB regions one mapping
+/// covers, so that each mapping is a whole number of system pages.
+fn shmRegionPerMap() u32 {
+    const shmsz = 32 * 1024;
+    const pgsz = std.heap.pageSize();
+    if (pgsz < shmsz) return 1;
+    return @intCast(pgsz / shmsz);
+}
+
+/// Port of unixShmPurge(): free the inode's ShmNode once nothing refers to
+/// it. Caller holds `big_lock`.
+fn shmPurge(io: Io, inode: *InodeInfo) void {
+    const node = inode.shm_node orelse return;
+    if (node.n_ref != 0) return;
+    const per_map = shmRegionPerMap();
+    var i: usize = 0;
+    while (i < node.regions.items.len) : (i += per_map) {
+        const len = @as(usize, node.sz_region) * per_map;
+        const base: [*]align(std.heap.page_size_min) u8 = @alignCast(node.regions.items[i]);
+        std.posix.munmap(base[0..len]);
+    }
+    node.regions.deinit(InodeInfo.gpa);
+    node.file.close(io);
+    InodeInfo.gpa.free(node.filename);
+    inode.shm_node = null;
+    InodeInfo.gpa.destroy(node);
+}
+
+/// Port of unixLockSharedMemory(): take the shared DMS lock, first
+/// truncating the -shm file if no other process uses it. Returns true
+/// (SQLITE_READONLY_CANTINIT) instead if the -shm file is read-only and
+/// no other process uses it, leaving the node unlocked.
+fn shmLockSharedMemory(node: *ShmNode) Error!bool {
+    var fl = flock(.write, shm_dms, 1);
+    if (c.fcntl(node.fd(), c.F.GETLK, &fl) != 0) return error.LockErr;
+    if (fl.type == c.F.UNLCK) {
+        if (node.is_readonly) {
+            node.is_unlocked = true;
+            return true;
+        }
+        try shmSystemLock(node, .write, shm_dms, 1);
+        // Truncated to 3 bytes rather than 0, as a debugging aid, like
+        // os_unix.c: it tells a legitimate truncation from a rogue one.
+        if (c.ftruncate(node.fd(), 3) != 0) return error.ShmOpen;
+    } else if (fl.type == c.F.WRLCK) {
+        return error.Busy;
+    }
+    try shmSystemLock(node, .read, shm_dms, 1);
+    return false;
+}
+
 const UnixFile = struct {
     owner: *UnixVfs,
     file: Io.File,
     inode: *InodeInfo,
     level: LockLevel = .none,
     read_only: bool,
+    /// The database name, for the -shm file (zPath). Null for other files.
+    path: ?[]u8 = null,
+    /// This handle's connection to the shared memory (pShm).
+    shm: ?*Shm = null,
 
     const vtable: vfs.File.VTable = .{
         .close = close,
@@ -289,6 +444,11 @@ const UnixFile = struct {
         .checkReservedLock = checkReservedLock,
         .sectorSize = sectorSize,
         .deviceCharacteristics = deviceCharacteristics,
+        .isReadOnly = isReadOnly,
+        .shmMap = shmMap,
+        .shmLock = shmLock,
+        .shmBarrier = shmBarrier,
+        .shmUnmap = shmUnmap,
     };
 
     fn cast(ptr: *anyopaque) *UnixFile {
@@ -303,6 +463,9 @@ const UnixFile = struct {
     fn close(ptr: *anyopaque) void {
         const f = cast(ptr);
         const io = f.owner.io;
+        // The WAL unmaps the shared memory before the database closes.
+        std.debug.assert(f.shm == null);
+        if (f.shm != null) shmUnmap(ptr, false);
         unlock(ptr, .none) catch {};
         const inode = f.inode;
         inode.mutex.lockUncancelable(io);
@@ -316,6 +479,7 @@ const UnixFile = struct {
         }
         inode.mutex.unlock(io);
         inode.release(io);
+        if (f.path) |pth| f.owner.gpa.free(pth);
         f.owner.gpa.destroy(f);
     }
 
@@ -466,6 +630,163 @@ const UnixFile = struct {
         // SQLITE_POWERSAFE_OVERWRITE defaults to on in os_unix.c.
         return .{ .powersafe_overwrite = true };
     }
+
+    fn isReadOnly(ptr: *anyopaque) bool {
+        return cast(ptr).read_only;
+    }
+
+    /// Port of unixOpenSharedMemory(): connect this handle to the inode's
+    /// ShmNode, creating it (and opening the -shm file) if this is the
+    /// first handle in the process. Returns true (SQLITE_READONLY_CANTINIT)
+    /// if a new node could not be locked because it is read-only and has
+    /// no other user; the handle is connected all the same.
+    fn openSharedMemory(f: *UnixFile) Error!bool {
+        std.debug.assert(f.shm == null);
+        const io = f.owner.io;
+        const gpa = InodeInfo.gpa;
+        const p = try gpa.create(Shm);
+        errdefer gpa.destroy(p);
+
+        InodeInfo.big_lock.lockUncancelable(io);
+        defer InodeInfo.big_lock.unlock(io);
+        const inode = f.inode;
+        var cant_init = false;
+        const node = inode.shm_node orelse blk: {
+            const base = f.path orelse return error.ShmOpen;
+            var st: c.Stat = undefined;
+            if (c.fstat(f.fd(), &st) != 0) return error.IoErr;
+            const name = try std.mem.concat(gpa, u8, &.{ base, "-shm" });
+            // Create it with the permissions of the database.
+            const perm: Io.File.Permissions = @fromBackingInt(@intCast(st.mode & 0o777));
+            var read_only = false;
+            const file = f.owner.dir.createFile(io, name, .{
+                .read = true,
+                .truncate = false,
+                .permissions = perm,
+            }) catch open_ro: {
+                read_only = true;
+                break :open_ro f.owner.dir.openFile(io, name, .{ .mode = .read_only, .allow_directory = false }) catch {
+                    gpa.free(name);
+                    return error.CantOpen;
+                };
+            };
+            const node = gpa.create(ShmNode) catch |err| {
+                file.close(io);
+                gpa.free(name);
+                return err;
+            };
+            node.* = .{ .inode = inode, .filename = name, .file = file, .is_readonly = read_only };
+            inode.shm_node = node;
+            cant_init = shmLockSharedMemory(node) catch |err| {
+                // Frees the node, which nothing refers to yet.
+                shmPurge(io, inode);
+                return err;
+            };
+            break :blk node;
+        };
+        p.* = .{ .node = node };
+        node.n_ref += 1;
+        f.shm = p;
+        return cant_init;
+    }
+
+    /// Port of unixShmMap(): region `region` of the shared memory, each
+    /// region `size` bytes, extending the -shm file if `extend`.
+    fn shmMap(ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
+        const f = cast(ptr);
+        const io = f.owner.io;
+        const cant_init: vfs.ShmRegion = .{ .ptr = null, .read_only = true, .cant_init = true };
+        if (f.shm == null) {
+            if (try f.openSharedMemory()) return cant_init;
+        }
+        const node = f.shm.?.node;
+        node.mutex.lockUncancelable(io);
+        defer node.mutex.unlock(io);
+        if (node.is_unlocked) {
+            if (try shmLockSharedMemory(node)) return cant_init;
+            node.is_unlocked = false;
+        }
+        std.debug.assert(size == node.sz_region or node.regions.items.len == 0);
+
+        const per_map = shmRegionPerMap();
+        const n_req = ((region + per_map) / per_map) * per_map;
+        if (node.regions.items.len < n_req) map: {
+            node.sz_region = size;
+            const n_byte = @as(u64, n_req) * size;
+            const cur = node.file.length(io) catch return error.ShmSize;
+            if (cur < n_byte) {
+                if (!extend) break :map;
+                // Write the last byte of every new 4 KiB page, so that the
+                // OS allocates them now rather than raising SIGBUS later.
+                const pgsz = 4096;
+                var pg = cur / pgsz;
+                while (pg < n_byte / pgsz) : (pg += 1) {
+                    node.file.writePositionalAll(io, &.{0}, pg * pgsz + pgsz - 1) catch return error.ShmSize;
+                }
+            }
+            try node.regions.ensureTotalCapacity(InodeInfo.gpa, n_req);
+            while (node.regions.items.len < n_req) {
+                const n_map = @as(usize, size) * per_map;
+                const mem = std.posix.mmap(
+                    null,
+                    n_map,
+                    if (node.is_readonly) .{ .READ = true } else .{ .READ = true, .WRITE = true },
+                    .{ .TYPE = .SHARED },
+                    node.fd(),
+                    @as(u64, size) * node.regions.items.len,
+                ) catch return error.ShmMap;
+                for (0..per_map) |i| node.regions.appendAssumeCapacity(@alignCast(mem.ptr + size * i));
+            }
+        }
+        return .{
+            .ptr = if (node.regions.items.len > region) node.regions.items[region] else null,
+            .read_only = node.is_readonly,
+        };
+    }
+
+    /// Port of unixShmLock(). Shared locks are counted per process, so
+    /// the POSIX lock is only released with the last one.
+    fn shmLock(ptr: *anyopaque, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
+        const f = cast(ptr);
+        const p = f.shm orelse return error.ShmLock;
+        if (!vfs.ShmLockTable.needed(p.held, ofst, n, flags)) return;
+        const node = p.node;
+        const io = f.owner.io;
+        node.mutex.lockUncancelable(io);
+        defer node.mutex.unlock(io);
+        return node.locks.apply(&p.held, ofst, n, flags, node);
+    }
+
+    /// Port of unixShmBarrier(): a full memory barrier, plus the global
+    /// mutex for redundancy, as in os_unix.c.
+    fn shmBarrier(ptr: *anyopaque) void {
+        const f = cast(ptr);
+        _ = @atomicRmw(u32, &barrier_word, .Add, 0, .seq_cst);
+        InodeInfo.big_lock.lockUncancelable(f.owner.io);
+        InodeInfo.big_lock.unlock(f.owner.io);
+    }
+
+    var barrier_word: u32 = 0;
+
+    /// Port of unixShmUnmap(): disconnect this handle from the shared
+    /// memory; the last one out deletes the -shm file if `delete`.
+    fn shmUnmap(ptr: *anyopaque, delete_flag: bool) void {
+        const f = cast(ptr);
+        const p = f.shm orelse return;
+        const node = p.node;
+        const io = f.owner.io;
+        InodeInfo.gpa.destroy(p);
+        f.shm = null;
+
+        InodeInfo.big_lock.lockUncancelable(io);
+        defer InodeInfo.big_lock.unlock(io);
+        std.debug.assert(node.n_ref > 0);
+        node.n_ref -= 1;
+        if (node.n_ref == 0) {
+            if (delete_flag) f.owner.dir.deleteFile(io, node.filename) catch {};
+            shmPurge(io, f.inode);
+        }
+    }
 };
 
 const testing = std.testing;
@@ -500,6 +821,31 @@ test "unix: read/write/short read/truncate" {
 
     try testing.expect(try v.access("a.db", .exists));
     try testing.expectError(error.CantOpen, v.open("a.db", .{ .create = true, .exclusive = true }));
+}
+
+test "unix: a file without write permission opens read-only" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var u = testVfs(&tmp);
+    const v = u.interface();
+
+    const f = try v.open("ro", .{ .create = true });
+    try testing.expect(!f.isReadOnly());
+    try f.write("data", 0);
+    f.close();
+    if (std.c.fchmodat(tmp.dir.handle, "ro", 0o444, 0) != 0) return error.SkipZigTest;
+    const g = try v.open("ro", .{ .create = true });
+    defer g.close();
+    // Permissions do not bind root.
+    if (!g.isReadOnly()) return error.SkipZigTest;
+    try testing.expectError(error.ReadOnly, g.write("x", 0));
+    var buf: [4]u8 = undefined;
+    try g.read(&buf, 0);
+    try testing.expectEqualStrings("data", &buf);
+    // No fallback for a directory, or for a file that must be new.
+    try testing.expectError(error.CantOpen, v.open("ro", .{ .create = true, .exclusive = true }));
+    try tmp.dir.createDir(testing.io, "d", .default_dir);
+    try testing.expectError(error.CantOpen, v.open("d", .{}));
 }
 
 test "unix: delete and temp files" {

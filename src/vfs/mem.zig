@@ -2,6 +2,10 @@
 //! several handles to the same name share contents and locks, which lets the
 //! pager and its journal behave exactly as they would on disk. Intended for
 //! tests and `:memory:`-style databases.
+//!
+//! Shared memory (for WAL) is kept on the heap per file name, with the same
+//! locking rules as the unix VFS between handles. It is freed when the last
+//! handle unmaps it, like a -shm file whose dead-man switch nobody holds.
 
 const std = @import("std");
 const vfs = @import("vfs.zig");
@@ -39,6 +43,12 @@ pub const MemVfs = struct {
         reserved: bool = false,
         /// Some handle holds PENDING or stronger.
         pending: bool = false,
+        /// Shared-memory regions, zero-filled when created.
+        shm_regions: std.ArrayList([]align(8) u8) = .empty,
+        /// Handles that have mapped the shared memory.
+        shm_ref: u32 = 0,
+        /// Shared-memory locks held through the handles.
+        shm_locks: vfs.ShmLockTable = .{},
     };
 
     pub fn init(gpa: Allocator, io: Io) MemVfs {
@@ -65,9 +75,22 @@ pub const MemVfs = struct {
         .delete = delete,
         .access = access,
         .randomness = randomness,
+        .sleep = sleep,
     };
 
+    fn freeShm(self: *MemVfs, node: *Node) void {
+        for (node.shm_regions.items) |r| self.gpa.free(r);
+        node.shm_regions.deinit(self.gpa);
+        node.shm_regions = .empty;
+    }
+
+    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
+        const self: *MemVfs = @ptrCast(@alignCast(ptr));
+        return vfs.ioSleep(self.io, microseconds);
+    }
+
     fn destroyNode(self: *MemVfs, node: *Node) void {
+        freeShm(self, node);
         node.data.deinit(self.gpa);
         if (node.name) |n| self.gpa.free(n);
         self.gpa.destroy(node);
@@ -147,6 +170,10 @@ const MemFile = struct {
     node: *MemVfs.Node,
     level: LockLevel = .none,
     read_only: bool,
+    /// This handle has mapped the shared memory.
+    shm_on: bool = false,
+    /// Shared-memory locks held by this handle.
+    shm_held: vfs.ShmLockTable.Held = .{},
 
     const vtable: vfs.File.VTable = .{
         .close = close,
@@ -160,6 +187,11 @@ const MemFile = struct {
         .checkReservedLock = checkReservedLock,
         .sectorSize = sectorSize,
         .deviceCharacteristics = deviceCharacteristics,
+        .isReadOnly = isReadOnly,
+        .shmMap = shmMap,
+        .shmLock = shmLock,
+        .shmBarrier = shmBarrier,
+        .shmUnmap = shmUnmap,
     };
 
     fn cast(ptr: *anyopaque) *MemFile {
@@ -176,6 +208,9 @@ const MemFile = struct {
 
     fn close(ptr: *anyopaque) void {
         const f = cast(ptr);
+        // The WAL unmaps the shared memory before the database closes.
+        std.debug.assert(!f.shm_on);
+        if (f.shm_on) shmUnmap(ptr, false);
         unlock(ptr, .none) catch unreachable;
         const owner = f.owner;
         f.enter();
@@ -298,6 +333,74 @@ const MemFile = struct {
 
     fn deviceCharacteristics(ptr: *anyopaque) vfs.DeviceCharacteristics {
         return cast(ptr).owner.device_characteristics;
+    }
+
+    fn isReadOnly(ptr: *anyopaque) bool {
+        return cast(ptr).read_only;
+    }
+
+    fn shmMap(ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
+        const f = cast(ptr);
+        f.enter();
+        defer f.leave();
+        const node = f.node;
+        const gpa = f.owner.gpa;
+        if (!f.shm_on) {
+            f.shm_on = true;
+            node.shm_ref += 1;
+        }
+        if (node.shm_regions.items.len <= region) {
+            if (!extend) return .{ .ptr = null };
+            try node.shm_regions.ensureTotalCapacity(gpa, region + 1);
+            while (node.shm_regions.items.len <= region) {
+                const r = try gpa.alignedAlloc(u8, .@"8", size);
+                @memset(r, 0);
+                node.shm_regions.appendAssumeCapacity(r);
+            }
+        }
+        std.debug.assert(node.shm_regions.items[region].len == size);
+        return .{ .ptr = node.shm_regions.items[region].ptr };
+    }
+
+    /// The unix VFS's in-process lock arbitration (unixShmLock), without
+    /// a file to lock.
+    fn shmLock(ptr: *anyopaque, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
+        const f = cast(ptr);
+        if (!f.shm_on) return error.ShmLock;
+        if (!vfs.ShmLockTable.needed(f.shm_held, ofst, n, flags)) return;
+        f.enter();
+        defer f.leave();
+        const no_file: struct {
+            pub fn lock(_: @This(), _: vfs.ShmLockTable.FileLock, _: u32, _: u32) Error!void {}
+        } = .{};
+        return f.node.shm_locks.apply(&f.shm_held, ofst, n, flags, no_file);
+    }
+
+    fn shmBarrier(ptr: *anyopaque) void {
+        const f = cast(ptr);
+        f.enter();
+        f.leave();
+    }
+
+    fn shmUnmap(ptr: *anyopaque, delete: bool) void {
+        _ = delete;
+        const f = cast(ptr);
+        if (!f.shm_on) return;
+        f.enter();
+        defer f.leave();
+        const node = f.node;
+        // Locks still held go with the connection, as when the -shm file
+        // is closed.
+        const slots = &node.shm_locks.slots;
+        for (slots, 0..) |*l, i| {
+            const bit = @as(u16, 1) << @intCast(i);
+            if (f.shm_held.excl & bit != 0) l.* = 0;
+            if (f.shm_held.shared & bit != 0) l.* -= 1;
+        }
+        f.shm_held = .{};
+        f.shm_on = false;
+        node.shm_ref -= 1;
+        if (node.shm_ref == 0) f.owner.freeShm(node);
     }
 };
 

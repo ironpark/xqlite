@@ -24,6 +24,13 @@ const std = @import("std");
 
 pub const magic = [8]u8{ 0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7 };
 pub const max_sector_size = 0x10000;
+
+/// Port of sqlite3SectorSize(): the sector size `raw` reported by a file
+/// (xSectorSize), bounded to 512 (if below 32) .. max_sector_size.
+pub fn sectorSize(raw: u32) u32 {
+    if (raw < 32) return 512;
+    return @min(raw, max_sector_size);
+}
 /// Bytes of the header that carry data; the rest of the sector is padding.
 pub const header_len = 28;
 /// The magic plus nRec, rewritten in place once the records are synced.

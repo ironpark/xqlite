@@ -32,6 +32,12 @@ const usage =
     \\                            no file), else read them from standard input
     \\  slt [options] script...   run sqllogictest scripts (xqlite slt for help)
     \\
+    \\environment:
+    \\  XQLITE_TEST_CRASH=F:N[:torn]  sql: exit at once at the Nth write to a file
+    \\                            of kind F (wal, db or journal); with torn,
+    \\                            only half of that write is done (a testing
+    \\                            aid, see tools/interop-wal.sh)
+    \\
 ;
 
 pub fn main(init: std.process.Init) !void {
@@ -64,9 +70,22 @@ pub fn main(init: std.process.Init) !void {
     } else if (args.len >= 2 and std.mem.eql(u8, args[1], "sql")) {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
+        var unix = xqlite.UnixVfs.init(init.gpa, io);
+        // $XQLITE_TEST_CRASH: crash at a chosen write (see usage).
+        var crash: xqlite.crash_vfs.CrashVfs = undefined;
+        var v = unix.interface();
+        if (std.c.getenv("XQLITE_TEST_CRASH")) |z| {
+            const spec = xqlite.crash_vfs.Spec.parse(std.mem.span(z)) orelse {
+                std.debug.print("bad XQLITE_TEST_CRASH: {s}\n{s}", .{ z, usage });
+                std.process.exit(2);
+            };
+            crash = .init(init.gpa, v, spec);
+            v = crash.interface();
+        }
         const code = try shell.run(
             init.gpa,
             io,
+            v,
             if (args.len > 2) args[2] else null,
             if (args.len > 3) args[3..] else &.{},
             out,
@@ -142,7 +161,7 @@ fn recover(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !v
     var unix = xqlite.UnixVfs.init(gpa, io);
     const v = unix.interface();
     const p = try xqlite.pager.Pager.open(gpa, v, path, .{ .create = false });
-    defer p.close();
+    defer p.close(.{});
 
     const had_journal = try v.access(p.journal_path, .exists);
     try lockAndAdoptHeader(p);
@@ -202,7 +221,7 @@ fn schemaRoots(gpa: std.mem.Allocator, bt: *Btree) !std.StringArrayHashMapUnmana
 
 fn check(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !void {
     const bt = try openBtree(gpa, io, path, .{});
-    defer bt.close();
+    defer bt.close(.{});
     try bt.beginTrans(.read, 0);
     defer bt.commit() catch {};
     var roots = try schemaRoots(gpa, bt);
@@ -263,7 +282,7 @@ fn deleteRow(gpa: std.mem.Allocator, tc: *Cursor, ic: *Cursor, rowid: i64) !void
 
 fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32, av: xqlite.btree.AutoVacuum) !void {
     const bt = try openBtree(gpa, io, path, .{ .auto_vacuum = av });
-    defer bt.close();
+    defer bt.close(.{});
     try bt.beginTrans(.write, 0);
     errdefer bt.rollback(null, false) catch {};
 
@@ -308,7 +327,7 @@ fn btFill(gpa: std.mem.Allocator, io: Io, path: []const u8, n: u32, av: xqlite.b
 
 fn btChurn(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
     const bt = try openBtree(gpa, io, path, .{});
-    defer bt.close();
+    defer bt.close(.{});
     try bt.beginTrans(.write, 0);
     errdefer bt.rollback(null, false) catch {};
     var roots = try schemaRoots(gpa, bt);
@@ -358,7 +377,7 @@ fn btChurn(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
 
 fn btVacuum(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
     const bt = try openBtree(gpa, io, path, .{});
-    defer bt.close();
+    defer bt.close(.{});
     try bt.beginTrans(.write, 0);
     errdefer bt.rollback(null, false) catch {};
     while (try bt.incrVacuum()) {}

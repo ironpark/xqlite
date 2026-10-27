@@ -32,6 +32,9 @@ const usage =
     \\  --ht NUM           hash results of more than NUM values, overriding
     \\                     the scripts' hash-threshold records
     \\  --integrity-check  run PRAGMA integrity_check after every statement
+    \\  --journal-mode M   run each script with PRAGMA journal_mode=M, on a
+    \\                     file (--db, else a fresh one in /tmp per script)
+    \\  --wal              the same as --journal-mode wal
     \\  -v, --verbose      print the SQL of each failing record
     \\
 ;
@@ -41,6 +44,8 @@ const Options = struct {
     halt: bool = false,
     hash_threshold: ?i32 = null,
     integrity_check: bool = false,
+    /// PRAGMA journal_mode for every script; needs a database file.
+    journal_mode: ?[]const u8 = null,
     verbose: bool = false,
 };
 
@@ -69,6 +74,11 @@ pub fn run(gpa: Allocator, io: Io, args: []const []const u8, out: *Io.Writer, er
             opts.hash_threshold = std.fmt.parseInt(i32, args[i], 10) catch return usageError(err_out);
         } else if (std.mem.eql(u8, a, "--integrity-check")) {
             opts.integrity_check = true;
+        } else if (std.mem.eql(u8, a, "--journal-mode") and has_value) {
+            i += 1;
+            opts.journal_mode = args[i];
+        } else if (std.mem.eql(u8, a, "--wal")) {
+            opts.journal_mode = "wal";
         } else if (std.mem.eql(u8, a, "-v") or std.mem.eql(u8, a, "--verbose")) {
             opts.verbose = true;
         } else if (a.len > 0 and a[0] == '-') {
@@ -80,7 +90,7 @@ pub fn run(gpa: Allocator, io: Io, args: []const []const u8, out: *Io.Writer, er
     if (scripts.items.len == 0) return usageError(err_out);
 
     var n_failed: usize = 0;
-    for (scripts.items) |path| {
+    for (scripts.items, 0..) |path, n_script| {
         const text = Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited) catch |e| {
             try err_out.print("{s}: cannot open for reading: {s}\n", .{ path, @errorName(e) });
             try err_out.flush();
@@ -88,7 +98,7 @@ pub fn run(gpa: Allocator, io: Io, args: []const []const u8, out: *Io.Writer, er
             continue;
         };
         defer gpa.free(text);
-        var runner: Runner = .{ .gpa = gpa, .io = io, .opts = opts, .path = path, .out = out };
+        var runner: Runner = .{ .gpa = gpa, .io = io, .opts = opts, .path = path, .out = out, .n_script = n_script };
         const n_err = try runner.runScript(text);
         if (n_err != 0) n_failed += 1;
         try out.flush();
@@ -179,6 +189,8 @@ const Runner = struct {
     opts: Options,
     path: []const u8,
     out: *Io.Writer,
+    /// Position of the script on the command line.
+    n_script: usize = 0,
     db: *Sqlite3 = undefined,
     n_err: u32 = 0,
     /// Per-record memory: the SQL, the results, messages.
@@ -196,12 +208,18 @@ const Runner = struct {
         }
 
         var unix = xqlite.UnixVfs.init(r.gpa, r.io);
-        const filename = r.opts.db_path orelse ":memory:";
-        if (r.opts.db_path) |p| {
-            Io.Dir.cwd().deleteFile(r.io, p) catch {};
-            const journal = try std.fmt.allocPrint(r.arena.allocator(), "{s}-journal", .{p});
-            Io.Dir.cwd().deleteFile(r.io, journal) catch {};
-        }
+        // A journal mode needs a file; without --db, one per script and
+        // process, so that parallel runs do not collide.
+        const db_path: ?[]const u8 = r.opts.db_path orelse if (r.opts.journal_mode != null)
+            try std.fmt.allocPrint(r.gpa, "/tmp/xqlite-slt-{d}-{d}.db", .{ std.c.getpid(), r.n_script })
+        else
+            null;
+        defer if (r.opts.db_path == null) if (db_path) |p| {
+            r.deleteDbFiles(p);
+            r.gpa.free(p);
+        };
+        const filename = db_path orelse ":memory:";
+        if (db_path) |p| r.deleteDbFiles(p);
         if (sql.main.open(r.gpa, unix.interface(), filename, .{}, &r.db) != RC.OK) {
             try r.out.print("{s}: unable to connect to database: {s}\n", .{ r.path, sql.main.errmsg(r.db) });
             _ = sql.main.close(r.db);
@@ -209,6 +227,12 @@ const Runner = struct {
         }
         defer _ = sql.main.close(r.db);
         _ = sql.legacy.exec(r.db, "PRAGMA synchronous=OFF", null, null, null);
+        if (r.opts.journal_mode) |mode| {
+            if (!try r.setJournalMode(mode)) {
+                try r.out.print("{s}: cannot set journal_mode={s}: {s}\n", .{ r.path, mode, sql.main.errmsg(r.db) });
+                return 1;
+            }
+        }
 
         var s: Script = .{ .z = text };
         var hash_threshold: i32 = r.opts.hash_threshold orelse default_hash_threshold;
@@ -262,6 +286,28 @@ const Runner = struct {
         }
         try r.out.print("{d} errors out of {d} tests in {s} - {d} skipped.\n", .{ r.n_err, n_cmd, r.path, n_skipped });
         return r.n_err;
+    }
+
+    /// Removes a database file and its journal, WAL and shared memory.
+    fn deleteDbFiles(r: *Runner, p: []const u8) void {
+        Io.Dir.cwd().deleteFile(r.io, p) catch {};
+        for ([_][]const u8{ "-journal", "-wal", "-shm" }) |suffix| {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const name = std.fmt.bufPrint(&buf, "{s}{s}", .{ p, suffix }) catch continue;
+            Io.Dir.cwd().deleteFile(r.io, name) catch {};
+        }
+    }
+
+    /// PRAGMA journal_mode=MODE; whether the mode took effect.
+    fn setJournalMode(r: *Runner, mode: []const u8) Error!bool {
+        const text = try std.fmt.allocPrint(r.arena.allocator(), "PRAGMA journal_mode={s}", .{mode});
+        var stmt_opt: ?*sql.Stmt = null;
+        if (sql.prepare.prepareV2(r.db, text, &stmt_opt, null) != RC.OK) return false;
+        const stmt = stmt_opt orelse return false;
+        defer _ = api.finalize(stmt);
+        if (api.step(stmt) != RC.ROW) return false;
+        const z = api.columnText(stmt, 0) orelse return false;
+        return std.ascii.eqlIgnoreCase(z, mode);
     }
 
     /// Report a failure of the current record.

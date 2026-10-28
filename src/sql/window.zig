@@ -316,7 +316,7 @@ fn noopValueFunc(_: *Context) void {}
 fn windowFuncAll(name: [:0]const u8, n_arg: i16, step: FuncDef.StepFn, final: FuncDef.FinalFn, value: FuncDef.FinalFn, inverse: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | vi.ENC.UTF8 | FUNC.WINDOW,
+        .func_flags = .{ .enc = vi.ENC.UTF8, .BUILTIN = true, .WINDOW = true },
         .x_sfunc = step,
         .x_finalize = final,
         .x_value = value,
@@ -460,9 +460,9 @@ pub fn windowChain(p: *Parse, w: *Window, list: ?*Window) Oom!void {
 pub fn windowAttach(p: *Parse, e: *Expr, w: *Window) void {
     std.debug.assert(e.op == TK.FUNCTION);
     e.y = .{ .win = w };
-    e.set(EP.WinFunc | EP.FullSize);
+    e.flags.set(.{ .WinFunc = true, .FullSize = true });
     w.owner = e;
-    if (e.flags & EP.Distinct != 0 and w.e_frm_type != TK.FILTER) {
+    if (e.flags.Distinct and w.e_frm_type != TK.FILTER) {
         util.errorMsg(p, "DISTINCT is not supported for window functions", .{});
     }
 }
@@ -477,7 +477,7 @@ pub fn windowLink(sel: ?*Select, w: *Window) void {
         s.win = w;
         w.this = &s.win;
     } else if (expr_mod.listCompare(w.partition, s.win.?.partition, -1) != 0) {
-        s.sel_flags |= SF.MultiPart;
+        s.sel_flags.MultiPart = true;
     }
 }
 
@@ -541,8 +541,8 @@ pub fn windowListDup(a: Allocator, list: ?*Window) Oom!?*Window {
     return ret;
 }
 
-fn gatherCallback(w: *walker.Walker, e: *Expr) u8 {
-    if (e.op == TK.FUNCTION and e.has(EP.WinFunc)) {
+fn gatherCallback(w: *walker.Walker, e: *Expr) WRC {
+    if (e.op == TK.FUNCTION and e.flags.WinFunc) {
         const win = e.y.win.?;
         std.debug.assert(win.this == null);
         windowLink(w.u.select, win);
@@ -550,7 +550,7 @@ fn gatherCallback(w: *walker.Walker, e: *Expr) u8 {
     return walker.WRC.Continue;
 }
 
-fn gatherSelectCallback(w: *walker.Walker, s: *Select) u8 {
+fn gatherSelectCallback(w: *walker.Walker, s: *Select) WRC {
     return if (s == w.u.select) walker.WRC.Continue else walker.WRC.Prune;
 }
 
@@ -587,7 +587,7 @@ pub fn windowUpdate(p: *Parse, list: ?*Window, win: *Window, func: *FuncDef) Oom
         (win.order_by == null or win.order_by.?.len() != 1))
     {
         util.errorMsg(p, "RANGE with offset PRECEDING/FOLLOWING requires one ORDER BY expression", .{});
-    } else if (func.func_flags & FUNC.WINDOW != 0) {
+    } else if (func.func_flags.WINDOW) {
         if (win.filter != null) {
             util.errorMsg(p, "FILTER clause may only be used with aggregate window functions", .{});
         } else {
@@ -631,7 +631,7 @@ pub fn windowUnlinkFromSelect(w: *Window) void {
 // ================================================================ rewrite
 
 /// The context of selectWindowRewriteExprCb() (struct WindowRewrite).
-const WindowRewrite = struct {
+pub const WindowRewrite = struct {
     win: *Window,
     src: *SrcList,
     sub: ?*ExprList,
@@ -643,15 +643,15 @@ const WindowRewrite = struct {
 /// Port of selectWindowRewriteExprCb(): move a column, aggregate or
 /// window function of another window into the subquery's result list
 /// (if not there yet) and read it from the ephemeral table instead.
-fn selectWindowRewriteExprCb(w: *Walker, e: *Expr) u8 {
+fn selectWindowRewriteExprCb(w: *Walker, e: *Expr) WRC {
     return rewriteExpr(w, e) catch {
         build.oomFault(w.parse.?);
         return WRC.Abort;
     };
 }
 
-fn rewriteExpr(w: *Walker, e: *Expr) Oom!u8 {
-    const r: *WindowRewrite = @ptrCast(@alignCast(w.u.ptr.?));
+fn rewriteExpr(w: *Walker, e: *Expr) Oom!WRC {
+    const r = w.u.rewrite;
     const p = w.parse.?;
 
     // In a scalar sub-select of the SELECT, only columns of the outer
@@ -667,7 +667,7 @@ fn rewriteExpr(w: *Walker, e: *Expr) Oom!u8 {
     switch (e.op) {
         TK.FUNCTION, TK.IF_NULL_ROW, TK.AGG_FUNCTION, TK.COLUMN => {
             if (e.op == TK.FUNCTION) {
-                if (!e.has(EP.WinFunc)) return WRC.Continue;
+                if (!e.flags.WinFunc) return WRC.Continue;
                 var it: ?*Window = r.win;
                 while (it) |win| : (it = win.next_win) {
                     if (e.y.win == win) {
@@ -694,7 +694,7 @@ fn rewriteExpr(w: *Walker, e: *Expr) Oom!u8 {
                 r.sub = try expr_mod.listAppend(p, r.sub, dup);
             }
             if (r.sub) |sub| {
-                const f = e.flags & (EP.Collate | EP.OuterON | EP.InnerON);
+                const f = e.flags.only(.{ .Collate = true, .OuterON = true, .InnerON = true });
                 const join = e.w;
                 e.* = .{
                     .op = TK.COLUMN,
@@ -703,7 +703,7 @@ fn rewriteExpr(w: *Walker, e: *Expr) Oom!u8 {
                     .y = .{ .tab = r.tab },
                     .flags = f,
                 };
-                if (f & (EP.OuterON | EP.InnerON) != 0) e.w = join;
+                if (f.intersects(.{ .OuterON = true, .InnerON = true })) e.w = join;
             }
             if (p.db.malloc_failed) return WRC.Abort;
         },
@@ -713,8 +713,8 @@ fn rewriteExpr(w: *Walker, e: *Expr) Oom!u8 {
 }
 
 /// Port of selectWindowRewriteSelectCb().
-fn selectWindowRewriteSelectCb(w: *Walker, s: *Select) u8 {
-    const r: *WindowRewrite = @ptrCast(@alignCast(w.u.ptr.?));
+fn selectWindowRewriteSelectCb(w: *Walker, s: *Select) WRC {
+    const r = w.u.rewrite;
     const save = r.sub_select;
     if (save == s) return WRC.Continue;
     r.sub_select = s;
@@ -733,7 +733,7 @@ fn selectWindowRewriteEList(p: *Parse, win: *Window, src: *SrcList, e_list: ?*Ex
         .parse = p,
         .expr_callback = selectWindowRewriteExprCb,
         .select_callback = selectWindowRewriteSelectCb,
-        .u = .{ .ptr = &r },
+        .u = .{ .rewrite = &r },
     };
     _ = walker.walkExprList(&w, e_list);
     sub.* = r.sub;
@@ -752,7 +752,7 @@ fn exprListAppendList(p: *Parse, list_arg: ?*ExprList, append_arg: ?*ExprList, i
             if (expr_mod.skipCollateAndLikely(dup)) |sub| {
                 if (expr_mod.isInteger(sub, null) != null) {
                     sub.op = TK.NULL;
-                    sub.flags &= ~(EP.IntValue | EP.IsTrue | EP.IsFalse);
+                    sub.flags.clear(.{ .IntValue = true, .IsTrue = true, .IsFalse = true });
                     sub.u = .{ .token = null };
                 }
             }
@@ -767,13 +767,13 @@ fn exprListAppendList(p: *Parse, list_arg: ?*ExprList, append_arg: ?*ExprList, i
 /// Port of sqlite3WindowExtraAggFuncDepth(): the subquery added by the
 /// rewrite is one more level between an aggregate and the query it
 /// belongs to.
-fn windowExtraAggFuncDepth(w: *Walker, e: *Expr) u8 {
+fn windowExtraAggFuncDepth(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.AGG_FUNCTION and e.op2 >= w.walker_depth) e.op2 += 1;
     return WRC.Continue;
 }
 
 /// Port of disallowAggregatesInOrderByCb().
-fn disallowAggregatesInOrderByCb(w: *Walker, e: *Expr) u8 {
+fn disallowAggregatesInOrderByCb(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.AGG_FUNCTION and e.agg_info == null) {
         util.errorMsg(w.parse.?, "misuse of aggregate: {s}()", .{e.token()});
     }
@@ -782,11 +782,11 @@ fn disallowAggregatesInOrderByCb(w: *Walker, e: *Expr) u8 {
 
 /// Port of sqlite3WindowRewrite(): if `s` uses window functions, rewrite
 /// it to read from a subquery whose rows come in the order the window
-/// functions need them, as in "SELECT REWRITING" of window.c. Returns
-/// nonzero on error.
-pub fn windowRewrite(p: *Parse, s: *Select) Oom!u32 {
-    if (s.win == null or s.prior != null or s.sel_flags & SF.WinRewrite != 0 or p.inRenameObject()) return 0;
-    const v = build.getVdbe(p) orelse return 1;
+/// functions need them, as in "SELECT REWRITING" of window.c. Fails on
+/// error (C: nonzero), which is in the Parse.
+pub fn windowRewrite(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
+    if (s.win == null or s.prior != null or s.sel_flags.WinRewrite or p.inRenameObject()) return;
+    const v = build.getVdbe(p) orelse return error.ParseFailed;
     const db = p.db;
     const src = s.src.?;
     const where = s.where;
@@ -800,7 +800,7 @@ pub fn windowRewrite(p: *Parse, s: *Select) Oom!u32 {
     tab.* = .{ .name = try p.arena.dupeSentinel(u8, "", 0) };
     var w = expr_mod.aggInfoPersistWalker(p);
     _ = walker.walkSelect(&w, s);
-    if (s.sel_flags & SF.Aggregate == 0) {
+    if (!s.sel_flags.Aggregate) {
         w.expr_callback = disallowAggregatesInOrderByCb;
         w.select_callback = null;
         _ = walker.walkExprList(&w, s.order_by);
@@ -810,8 +810,8 @@ pub fn windowRewrite(p: *Parse, s: *Select) Oom!u32 {
     s.where = null;
     s.group_by = null;
     s.having = null;
-    s.sel_flags &= ~SF.Aggregate;
-    s.sel_flags |= SF.WinRewrite;
+    s.sel_flags.Aggregate = false;
+    s.sel_flags.WinRewrite = true;
 
     // The ORDER BY of the subquery is the PARTITION BY and ORDER BY of the
     // window. The ORDER BY of the SELECT is dropped if that makes it
@@ -844,7 +844,7 @@ pub fn windowRewrite(p: *Parse, s: *Select) Oom!u32 {
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
         const args = win.owner.?.x.list;
-        if (win.w_func.?.func_flags & FUNC.SUBTYPE != 0) {
+        if (win.w_func.?.func_flags.SUBTYPE) {
             selectWindowRewriteEList(p, m_win, src, args, tab, &sublist);
             win.i_arg_col = if (sublist) |l| @intCast(l.len()) else 0;
             win.expr_args = true;
@@ -866,20 +866,20 @@ pub fn windowRewrite(p: *Parse, s: *Select) Oom!u32 {
     // the subquery legal with a constant.
     if (sublist == null) sublist = try expr_mod.listAppend(p, null, try expr_mod.exprInt32(p.arena, 0));
 
-    const sub = try select_mod.selectNew(p, sublist, src, where, group_by, having, sort, 0, null);
-    const new_src = (try build.srcListAppend(p, null, null, null)) orelse return 1;
+    const sub = try select_mod.selectNew(p, sublist, src, where, group_by, having, sort, .{}, null);
+    const new_src = (try build.srcListAppend(p, null, null, null)) orelse return error.ParseFailed;
     s.src = new_src;
     const item = new_src.at(0);
     try build.srcItemAttachSubquery(p, item, sub);
     item.fg.is_correlated = true;
     select_mod.srcListAssignCursors(p, new_src);
-    sub.sel_flags |= SF.Expanded | SF.OrderByReqd;
+    sub.sel_flags.set(.{ .Expanded = true, .OrderByReqd = true });
     const tab2 = try select_mod.resultSetOfSelect(p, sub, Aff.none);
-    sub.sel_flags |= sel_flags & SF.Aggregate;
-    var rc: u32 = 0;
+    if (sel_flags.Aggregate) sub.sel_flags.Aggregate = true;
+    var failed = false;
     if (tab2) |t2| {
         tab.* = t2.*;
-        tab.tab_flags |= TF.Ephemeral;
+        tab.tab_flags.Ephemeral = true;
         item.s_tab = tab;
         var w2: Walker = .{
             .expr_callback = windowExtraAggFuncDepth,
@@ -888,10 +888,9 @@ pub fn windowRewrite(p: *Parse, s: *Select) Oom!u32 {
         };
         _ = walker.walkSelect(&w2, sub);
     } else {
-        rc = 1;
+        failed = true;
     }
-    if (db.malloc_failed) rc = 1;
-    return rc;
+    if (failed or db.malloc_failed) return error.ParseFailed;
 }
 
 // ======================================================== code generation
@@ -939,7 +938,7 @@ pub fn windowCodeInit(p: *Parse, s: *Select) void {
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
         const f = win.w_func.?;
-        if (f.func_flags & FUNC.MINMAX != 0 and win.e_start != TK.UNBOUNDED) {
+        if (f.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
             // The in-line min() and max() use an ephemeral table and three
             // registers: reg_app+0 is the argument for MakeRecord, reg_app+1
             // a counter that makes the keys unique, reg_app+2 the record.
@@ -988,7 +987,7 @@ fn windowCheckValue(p: *Parse, reg: i32, e_cond: usize) void {
         "frame starting offset must be a non-negative number",
         "frame ending offset must be a non-negative number",
     };
-    const ops = [_]u8{ OP.Ge, OP.Ge, OP.Gt, OP.Ge, OP.Ge };
+    const ops = [_]OP{ OP.Ge, OP.Ge, OP.Gt, OP.Ge, OP.Ge };
     const v = p.vdbe.?;
     const reg_zero = expr_mod.getTempReg(p);
     _ = aux.addOp2(v, OP.Integer, 0, reg_zero);
@@ -1003,7 +1002,7 @@ fn windowCheckValue(p: *Parse, reg: i32, e_cond: usize) void {
     _ = aux.addOp3(v, ops[e_cond], reg_zero, aux.currentAddr(v) + 2, reg);
     aux.changeP5(v, Aff.numeric);
     main_mod.mayAbort(p);
-    _ = aux.addOp2(v, OP.Halt, RC.ERROR, OE.Abort);
+    _ = aux.addOp2(v, OP.Halt, RC.ERROR, OE.Abort.int());
     aux.appendP4(v, .{ .z = errs[e_cond] });
     expr_mod.releaseTempReg(p, reg_zero);
 }
@@ -1088,7 +1087,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: i32, b_inverse: bool, 
             expr_mod.releaseTempReg(p, reg_tmp);
         }
 
-        if (m_win.reg_start_rowid == 0 and func.func_flags & FUNC.MINMAX != 0 and win.e_start != TK.UNBOUNDED) {
+        if (m_win.reg_start_rowid == 0 and func.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
             const addr_is_null = aux.addOp1(v, OP.IsNull, reg_arg);
             if (!b_inverse) {
                 _ = aux.addOp2(v, OP.AddImm, win.reg_app + 1, 1);
@@ -1118,7 +1117,7 @@ fn windowAggStep(cx: *WindowCodeArg, m_win: *Window, csr: i32, b_inverse: bool, 
                     if (op.opcode == OP.Column and op.p1 == m_win.i_eph_csr) op.p1 = csr;
                 }
             }
-            if (func.func_flags & FUNC.NEEDCOLL != 0) {
+            if (func.func_flags.NEEDCOLL) {
                 std.debug.assert(n_arg > 0);
                 const coll = expr_mod.nnCollSeq(p, list.?.at(0).expr);
                 _ = aux.addOp4(v, OP.CollSeq, 0, 0, 0, .{ .collseq = coll });
@@ -1147,7 +1146,7 @@ fn windowAggFinal(cx: *WindowCodeArg, b_fin: bool) void {
     const v = p.vdbe.?;
     var it: ?*Window = m_win;
     while (it) |win| : (it = win.next_win) {
-        if (m_win.reg_start_rowid == 0 and win.w_func.?.func_flags & FUNC.MINMAX != 0 and win.e_start != TK.UNBOUNDED) {
+        if (m_win.reg_start_rowid == 0 and win.w_func.?.func_flags.MINMAX and win.e_start != TK.UNBOUNDED) {
             _ = aux.addOp2(v, OP.Null, 0, win.reg_result);
             _ = aux.addOp1(v, OP.Last, win.csr_app);
             _ = aux.addOp3(v, OP.Column, win.csr_app, 0, win.reg_result);
@@ -1326,7 +1325,7 @@ fn windowInitAccum(p: *Parse, m_win: *Window) i32 {
                 _ = aux.addOp2(v, OP.Integer, 0, win.reg_app);
                 _ = aux.addOp2(v, OP.Integer, 0, win.reg_app + 1);
             }
-            if (func.func_flags & FUNC.MINMAX != 0 and win.csr_app != 0) {
+            if (func.func_flags.MINMAX and win.csr_app != 0) {
                 std.debug.assert(win.e_start != TK.UNBOUNDED);
                 _ = aux.addOp1(v, OP.ResetSorter, win.csr_app);
                 _ = aux.addOp2(v, OP.Integer, 0, win.reg_app + 1);
@@ -1379,7 +1378,7 @@ fn windowIfNewPeer(p: *Parse, order_by: ?*ExprList, reg_new: i32, reg_old: i32, 
 /// with `op` (OP_Ge, OP_Gt or OP_Le) as the comparison. For a DESC ORDER
 /// BY, regVal is subtracted and the comparison reversed. If csr1.peerVal
 /// is not a number, it is compared unchanged.
-fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: u8, csr1: i32, reg_val: i32, csr2: i32, lbl: i32) void {
+fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: OP, csr1: i32, reg_val: i32, csr2: i32, lbl: i32) void {
     const p = cx.parse;
     const v = p.vdbe.?;
     const order_by = cx.m_win.order_by.?;
@@ -1387,7 +1386,7 @@ fn windowCodeRangeTest(cx: *WindowCodeArg, op_arg: u8, csr1: i32, reg_val: i32, 
     const reg2 = expr_mod.getTempReg(p);
     p.n_mem += 1;
     const reg_string = p.n_mem;
-    var arith: u8 = OP.Add;
+    var arith: OP = OP.Add;
     const addr_done = aux.makeLabel(p);
     var op = op_arg;
 

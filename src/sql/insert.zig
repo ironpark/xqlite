@@ -13,6 +13,7 @@ const expr_mod = @import("expr.zig");
 const ec = @import("expr_code.zig");
 const resolve = @import("resolve.zig");
 const walker = @import("walker.zig");
+const WRC = walker.WRC;
 const util = @import("util.zig");
 const prepare = @import("prepare.zig");
 const delete_mod = @import("delete.zig");
@@ -51,7 +52,7 @@ const SRT = select_mod.SRT;
 /// Port of sqlite3OpenTable(): open cursor `i_cur` on table `t` with
 /// OP_OpenRead or OP_OpenWrite (on the PRIMARY KEY of a WITHOUT ROWID
 /// table).
-pub fn openTable(p: *Parse, i_cur: i32, i_db: usize, t: *Table, opcode: u8) void {
+pub fn openTable(p: *Parse, i_cur: i32, i_db: usize, t: *Table, opcode: OP) void {
     const v = p.vdbe.?;
     if (t.hasRowid()) {
         _ = aux.addOp4Int(v, opcode, i_cur, @intCast(t.tnum), @intCast(i_db), t.n_nv_col);
@@ -100,7 +101,7 @@ fn tableAffinityStr(a: std.mem.Allocator, t: *const Table) Oom![:0]u8 {
     var buf = try a.allocSentinel(u8, t.cols.len, 0);
     var j: usize = 0;
     for (t.cols) |c| {
-        if (c.col_flags & COLFLAG.VIRTUAL == 0) {
+        if (!c.col_flags.VIRTUAL) {
             buf[j] = c.affinity;
             j += 1;
         }
@@ -115,7 +116,7 @@ fn tableAffinityStr(a: std.mem.Allocator, t: *const Table) Oom![:0]u8 {
 /// OP_MakeRecord just coded). STRICT tables get an OP_TypeCheck instead.
 pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
     const v = p.vdbe.?;
-    if (t.tab_flags & TF.Strict != 0) {
+    if (t.tab_flags.Strict) {
         if (reg == 0) {
             // Turn the OP_MakeRecord into OP_TypeCheck and code it again.
             aux.appendP4(v, .{ .table = t });
@@ -167,11 +168,11 @@ fn readsTable(p: *Parse, i_db: usize, t: *Table) bool {
     return false;
 }
 
-fn exprColumnFlagUnion(w: *walker.Walker, e: *Expr) u8 {
+fn exprColumnFlagUnion(w: *walker.Walker, e: *Expr) WRC {
     if (e.op == TK.COLUMN and e.i_column >= 0) {
-        w.e_code |= w.u.tab.?.cols[@intCast(e.i_column)].col_flags;
+        w.e_code |= w.u.tab.?.cols[@intCast(e.i_column)].col_flags.int();
     }
-    return walker.WRC.Continue;
+    return WRC.Continue;
 }
 
 /// Port of sqlite3ComputeGeneratedColumns(): with the ordinary columns of
@@ -181,15 +182,15 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
     // Affinity for the ordinary columns first; '@' (none) for the stored
     // generated columns, not computed yet.
     tableAffinity(p, t, reg_store);
-    if (t.tab_flags & TF.HasStored != 0) {
+    if (t.tab_flags.HasStored) {
         const op = aux.getLastOp(v);
         if (op.opcode == OP.Affinity) {
             const z: []u8 = @constCast(std.mem.span(op.p4.z));
             var jj: usize = 0;
             for (t.cols) |c| {
                 if (jj >= z.len) break;
-                if (c.col_flags & COLFLAG.VIRTUAL != 0) continue;
-                if (c.col_flags & COLFLAG.STORED != 0) z[jj] = Aff.none;
+                if (c.col_flags.VIRTUAL) continue;
+                if (c.col_flags.STORED) z[jj] = Aff.none;
                 jj += 1;
             }
         } else if (op.opcode == OP.TypeCheck) {
@@ -201,7 +202,7 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
     // Generated columns may use each other: mark them all unavailable,
     // then compute those whose inputs are available until done.
     for (t.cols) |*c| {
-        if (c.col_flags & COLFLAG.GENERATED != 0) c.col_flags |= COLFLAG.NOTAVAIL;
+        if (c.col_flags.intersects(COLFLAG.GENERATED)) c.col_flags.NOTAVAIL = true;
     }
     var w: walker.Walker = .{ .expr_callback = exprColumnFlagUnion, .u = .{ .tab = t } };
     p.i_self_tab = -reg_store;
@@ -210,19 +211,19 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
         var progress = false;
         redo = null;
         for (t.cols, 0..) |*c, i| {
-            if (c.col_flags & COLFLAG.NOTAVAIL == 0) continue;
-            c.col_flags |= COLFLAG.BUSY;
+            if (!c.col_flags.NOTAVAIL) continue;
+            c.col_flags.BUSY = true;
             w.e_code = 0;
             _ = walker.walkExpr(&w, build.columnExpr(t, c));
-            c.col_flags &= ~COLFLAG.BUSY;
-            if (w.e_code & COLFLAG.NOTAVAIL != 0) {
+            c.col_flags.BUSY = false;
+            if (COLFLAG.fromInt(w.e_code).NOTAVAIL) {
                 redo = c;
                 continue;
             }
             progress = true;
             const x = build.tableColumnToStorage(t, @intCast(i)) + reg_store;
             ec.codeGeneratedColumn(p, t, c, x);
-            c.col_flags &= ~COLFLAG.NOTAVAIL;
+            c.col_flags.NOTAVAIL = false;
         }
         if (redo == null or !progress) break;
     }
@@ -234,7 +235,7 @@ pub fn computeGeneratedColumns(p: *Parse, reg_store: i32, t: *Table) void {
 /// AUTOINCREMENT table `t`, or 0 if `t` has no AUTOINCREMENT.
 fn autoIncBegin(p: *Parse, i_db: usize, t: *Table) i32 {
     const db = p.db;
-    if (t.tab_flags & TF.Autoincrement == 0 or db.m_db_flags & int.DBFLAG.Vacuum != 0) return 0;
+    if (!t.tab_flags.Autoincrement or db.m_db_flags.Vacuum) return 0;
     const top = build.toplevel(p);
     const seq = db.dbs.items[i_db].schema.seq_tab;
     // sqlite_sequence must be an ordinary rowid table of two columns.
@@ -347,15 +348,15 @@ pub fn multiValuesEnd(p: *Parse, val: ?*Select) void {
 /// with the "UNION ALL" method.
 pub fn multiValues(p: *Parse, left_arg: *Select, row: ?*ExprList) Oom!*Select {
     var left = left_arg;
-    var f: u32 = SF.Values | SF.MultiValue;
+    var f: SF = .{ .Values = true, .MultiValue = true };
     if (left.src.?.len() != 0) {
         multiValuesEnd(p, left);
-        f = SF.Values;
+        f = .{ .Values = true };
     } else if (left.prior != null) {
-        f &= left.sel_flags;
+        f = f.only(left.sel_flags);
     }
     const s = try select_mod.selectNew(p, row, null, null, null, null, null, f, null);
-    left.sel_flags &= ~SF.MultiValue;
+    left.sel_flags.MultiValue = false;
     s.op = TK.ALL;
     s.prior = left;
     left = s;
@@ -364,19 +365,19 @@ pub fn multiValues(p: *Parse, left_arg: *Select, row: ?*ExprList) Oom!*Select {
 
 /// Port of sqlite3Insert(): INSERT INTO `tab_list` [(column)] with the
 /// rows of `sel` (VALUES or a SELECT), or DEFAULT VALUES if null.
-pub fn insert(p: *Parse, tab_list: ?*SrcList, sel: ?*Select, column: ?*IdList, on_error: i32, upsert: ?*Upsert) void {
+pub fn insert(p: *Parse, tab_list: ?*SrcList, sel: ?*Select, column: ?*IdList, on_error: OE, upsert: ?*Upsert) void {
     if (p.syntax_only) return;
-    insertImpl(p, tab_list.?, sel, column, @intCast(on_error), upsert) catch build.oomFault(p);
+    insertImpl(p, tab_list.?, sel, column, on_error, upsert) catch build.oomFault(p);
 }
 
-fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList, on_error: u8, upsert: ?*Upsert) Oom!void {
+fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList, on_error: OE, upsert: ?*Upsert) Oom!void {
     const db = p.db;
     if (p.n_err != 0) return;
     var sel = sel_arg;
     var list: ?*ExprList = null;
 
     // A single-row VALUES clause is just its expressions.
-    if (sel) |s| if (s.sel_flags & SF.Values != 0 and s.prior == null) {
+    if (sel) |s| if (s.sel_flags.Values and s.prior == null) {
         list = s.e_list;
         sel = null;
     };
@@ -388,7 +389,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     var tmask: u8 = 0;
     const trig = trigger.triggersExist(p, t, TK.INSERT, null, &tmask);
     const is_view = t.isView();
-    if (build.viewGetColumnNames(p, t) != 0) return;
+    build.viewGetColumnNames(p, t) catch return;
     if (delete_mod.isReadOnly(p, t, trig)) return;
 
     const v = build.getVdbe(p) orelse return;
@@ -412,7 +413,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     // names the columns in storage order (a false negative is harmless,
     // a false positive corrupts the database).
     var ipk_column: i32 = -1;
-    var b_id_list_in_order = t.tab_flags & (TF.OOOHidden | TF.HasStored) == 0;
+    var b_id_list_in_order = !t.tab_flags.intersects(.{ .OOOHidden = true, .HasStored = true });
     var tab_col_map: []i32 = &.{};
     if (column) |cl| {
         tab_col_map = try p.arena.alloc(i32, t.cols.len);
@@ -425,7 +426,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 if (tab_col_map[ju] == 0) tab_col_map[ju] = i + 1;
                 if (i != j) b_id_list_in_order = false;
                 if (j == t.i_pkey) ipk_column = i;
-                if (t.cols[ju].col_flags & (COLFLAG.STORED | COLFLAG.VIRTUAL) != 0) {
+                if (t.cols[ju].col_flags.intersects(.{ .STORED = true, .VIRTUAL = true })) {
                     util.errorMsg(p, "cannot INSERT into generated column \"{s}\"", .{t.cols[ju].name()});
                     return;
                 }
@@ -457,7 +458,8 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         dest.n_sdst = @intCast(t.cols.len);
         const rc = select_mod.select(p, s, &dest);
         reg_from_select = dest.i_sdst;
-        if (rc != 0 or p.n_err != 0) return;
+        rc catch return;
+        if (p.n_err != 0) return;
         aux.endCoroutine(v, reg_yield);
         aux.jumpHere(v, addr_top - 1);
         n_column = @intCast(s.e_list.?.len());
@@ -485,7 +487,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         src_tab = -1;
         if (list) |l| {
             n_column = @intCast(l.len());
-            if (resolve.resolveExprListNames(&nc, l) != 0) return;
+            resolve.resolveExprListNames(&nc, l) catch return;
         }
     }
 
@@ -493,16 +495,16 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     // INTEGER PRIMARY KEY included.
     if (column == null and n_column > 0) {
         ipk_column = t.i_pkey;
-        if (ipk_column >= 0 and t.tab_flags & TF.HasGenerated != 0) {
+        if (ipk_column >= 0 and t.tab_flags.intersects(TF.HasGenerated)) {
             var i = ipk_column - 1;
             while (i >= 0) : (i -= 1) {
-                if (t.cols[@intCast(i)].col_flags & COLFLAG.GENERATED != 0) ipk_column -= 1;
+                if (t.cols[@intCast(i)].col_flags.intersects(COLFLAG.GENERATED)) ipk_column -= 1;
             }
         }
         var n_hidden: i32 = 0;
-        if (t.tab_flags & (TF.HasGenerated | TF.HasHidden) != 0) {
+        if (t.tab_flags.intersects(TF.HasGenerated.with(.{ .HasHidden = true }))) {
             for (t.cols) |c| {
-                if (c.col_flags & COLFLAG.NOINSERT != 0) n_hidden += 1;
+                if (c.col_flags.intersects(COLFLAG.NOINSERT)) n_hidden += 1;
             }
         }
         const n_col: i32 = @intCast(t.cols.len);
@@ -517,7 +519,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     };
 
     var reg_row_count: i32 = 0;
-    if (db.flags & int.DbFlag.CountRows != 0 and p.nested == 0 and p.trigger_tab == null and !p.returning) {
+    if (db.flags.CountRows and p.nested == 0 and p.trigger_tab == null and !p.returning) {
         p.n_mem += 1;
         reg_row_count = p.n_mem;
         _ = aux.addOp2(v, OP.Integer, 0, reg_row_count);
@@ -561,7 +563,10 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             n.reg_data = reg_data;
             n.i_data_cur = i_data_cur;
             n.i_idx_cur = i_idx_cur;
-            if (n.target != null and try upsert_mod.analyzeTarget(p, tab_list, n, up) != 0) return;
+            if (n.target != null) upsert_mod.analyzeTarget(p, tab_list, n, up) catch |err| switch (err) {
+                error.ParseFailed => return,
+                error.OutOfMemory => |e| return e,
+            };
         }
     }
 
@@ -595,13 +600,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             }
             var k: i32 = undefined;
             const col_flags = c.col_flags;
-            if (col_flags & COLFLAG.NOINSERT != 0) {
+            if (col_flags.intersects(COLFLAG.NOINSERT)) {
                 n_hidden += 1;
-                if (col_flags & COLFLAG.VIRTUAL != 0) {
+                if (col_flags.VIRTUAL) {
                     // Not part of the record.
                     i_reg_store -= 1;
                     continue;
-                } else if (col_flags & COLFLAG.STORED != 0) {
+                } else if (col_flags.STORED) {
                     if (tmask & int.TRIGGER_BEFORE != 0) _ = aux.addOp1(v, OP.SoftNull, i_reg_store);
                     continue;
                 } else if (column == null) {
@@ -632,7 +637,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
             } else {
                 const x = list.?.at(@intCast(k)).expr.?;
                 const y = ec.codeTarget(p, x, i_reg_store);
-                if (y != i_reg_store) _ = aux.addOp2(v, if (x.has(EP.Subquery)) OP.Copy else OP.SCopy, y, i_reg_store);
+                if (y != i_reg_store) _ = aux.addOp2(v, if (x.flags.Subquery) OP.Copy else OP.SCopy, y, i_reg_store);
             }
         }
     }
@@ -663,7 +668,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         }
         _ = aux.addOp3(v, OP.Copy, reg_rowid + 1, reg_cols + 1, t.n_nv_col - 1);
         // Generated columns may use the rowid, so they come last.
-        if (t.tab_flags & TF.HasGenerated != 0) computeGeneratedColumns(p, reg_cols + 1, t);
+        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, reg_cols + 1, t);
         // A view takes the values as they are.
         if (!is_view) tableAffinity(p, t, reg_cols + 1);
         trigger.codeRowTrigger(p, trig, TK.INSERT, null, int.TRIGGER_BEFORE, t, reg_cols - n_col - 1, on_error, end_of_loop);
@@ -711,17 +716,17 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         autoIncStep(p, reg_autoinc, reg_rowid);
 
         // Generated columns may use the rowid, so they come last.
-        if (t.tab_flags & TF.HasGenerated != 0) computeGeneratedColumns(p, reg_rowid + 1, t);
+        if (t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, reg_rowid + 1, t);
 
         if (t.isVirtual()) {
             vtab.makeWritable(p, t);
             _ = aux.addOp4(v, OP.VUpdate, 1, @as(i32, @intCast(t.cols.len)) + 2, reg_ins, build.vtabP4(db, t));
-            aux.changeP5(v, if (on_error == OE.Default) OE.Abort else on_error);
+            aux.changeP5(v, (if (on_error == OE.Default) OE.Abort else on_error).int());
             main_mod.mayAbort(p);
         } else {
             var is_replace = false;
             generateConstraintChecks(p, t, reg_idx, i_data_cur, i_idx_cur, reg_ins, 0, ipk_column >= 0, on_error, end_of_loop, &is_replace, null, upsert);
-            if (db.flags & int.DbFlag.ForeignKeys != 0) fkey.fkCheck(p, t, 0, reg_ins, null, false);
+            if (db.flags.ForeignKeys) fkey.fkCheck(p, t, 0, reg_ins, null, false);
             // OPFLAG_USESEEKRESULT is safe without REPLACE, or without
             // trigger programs (a REPLACE delete then resets the seek
             // result).
@@ -758,25 +763,25 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
 const CKCNSTRNT_COLUMN: u16 = 0x01;
 const CKCNSTRNT_ROWID: u16 = 0x02;
 
-const ChngCtx = struct { ai_chng: []const i32 };
+pub const ChngCtx = struct { ai_chng: []const i32 };
 
-fn checkConstraintExprNode(w: *walker.Walker, e: *Expr) u8 {
+fn checkConstraintExprNode(w: *walker.Walker, e: *Expr) WRC {
     if (e.op == TK.COLUMN) {
-        const ctx: *const ChngCtx = @ptrCast(@alignCast(w.u.ptr.?));
+        const ctx = w.u.chng;
         if (e.i_column >= 0) {
             if (ctx.ai_chng[@intCast(e.i_column)] >= 0) w.e_code |= CKCNSTRNT_COLUMN;
         } else {
             w.e_code |= CKCNSTRNT_ROWID;
         }
     }
-    return walker.WRC.Continue;
+    return WRC.Continue;
 }
 
 /// Port of sqlite3ExprReferencesUpdatedColumn(): `e` uses a column
 /// changed by an UPDATE (ai_chng[i] >= 0), or the rowid if `chng_rowid`.
 pub fn exprReferencesUpdatedColumn(e: ?*Expr, ai_chng: []const i32, chng_rowid: bool) bool {
     var ctx: ChngCtx = .{ .ai_chng = ai_chng };
-    var w: walker.Walker = .{ .expr_callback = checkConstraintExprNode, .u = .{ .ptr = &ctx } };
+    var w: walker.Walker = .{ .expr_callback = checkConstraintExprNode, .u = .{ .chng = &ctx } };
     _ = walker.walkExpr(&w, e);
     if (!chng_rowid) w.e_code &= ~CKCNSTRNT_ROWID;
     return w.e_code != 0;
@@ -797,7 +802,7 @@ pub fn generateConstraintChecks(
     reg_new_data: i32,
     reg_old_data: i32,
     pk_chng: bool,
-    override_error_arg: u8,
+    override_error_arg: OE,
     ignore_dest: i32,
     may_replace: *bool,
     ai_chng: ?[]const i32,
@@ -815,7 +820,7 @@ fn generateConstraintChecksImpl(
     reg_new_data: i32,
     reg_old_data: i32,
     pk_chng: bool,
-    override_error_arg: u8,
+    override_error_arg: OE,
     ignore_dest: i32,
     may_replace: *bool,
     ai_chng: ?[]const i32,
@@ -836,17 +841,17 @@ fn generateConstraintChecksImpl(
 
     // NOT NULL. A second pass handles generated columns and the columns
     // that ON CONFLICT REPLACE gave a default.
-    if (t.tab_flags & TF.HasNotNull != 0) {
+    if (t.tab_flags.HasNotNull) {
         var b2nd_pass = false;
         var n_seen_replace: i32 = 0;
         var n_generated: i32 = 0;
         while (true) {
             for (t.cols, 0..) |*c, ii| {
                 const i: i32 = @intCast(ii);
-                var on_error: u8 = c.not_null;
+                var on_error: OE = c.not_null;
                 if (on_error == OE.None) continue;
                 if (i == t.i_pkey) continue;
-                const is_generated = c.col_flags & COLFLAG.GENERATED != 0;
+                const is_generated = c.col_flags.intersects(COLFLAG.GENERATED);
                 if (is_generated and !b2nd_pass) {
                     n_generated += 1;
                     continue;
@@ -874,7 +879,7 @@ fn generateConstraintChecksImpl(
                     OE.Abort, OE.Rollback, OE.Fail => {
                         if (on_error == OE.Abort) main_mod.mayAbort(p);
                         const msg = try std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, c.name() });
-                        _ = aux.addOp4Str(v, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, i_reg, msg);
+                        _ = aux.addOp4Str(v, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error.int(), i_reg, msg);
                         aux.changeP5(v, vi.P5_ConstraintNotNull);
                     },
                     else => {
@@ -885,14 +890,14 @@ fn generateConstraintChecksImpl(
             if (n_generated == 0 and n_seen_replace == 0) break;
             if (b2nd_pass) break;
             b2nd_pass = true;
-            if (n_seen_replace > 0 and t.tab_flags & TF.HasGenerated != 0) computeGeneratedColumns(p, reg_new_data + 1, t);
+            if (n_seen_replace > 0 and t.tab_flags.intersects(TF.HasGenerated)) computeGeneratedColumns(p, reg_new_data + 1, t);
         }
     }
 
     // CHECK.
-    if (t.check) |checks| if (db.flags & int.DbFlag.IgnoreChecks == 0) {
+    if (t.check) |checks| if (!db.flags.IgnoreChecks) {
         p.i_self_tab = -(reg_new_data + 1);
-        var on_error: u8 = if (override_error != OE.Default) override_error else OE.Abort;
+        var on_error: OE = if (override_error != OE.Default) override_error else OE.Abort;
         for (checks.slice()) |item| {
             const e = item.expr;
             if (ai_chng) |ac| if (!exprReferencesUpdatedColumn(e, ac, pk_chng)) continue;
@@ -984,8 +989,8 @@ fn generateConstraintChecksImpl(
     var addr_recheck: i32 = 0;
     var lbl_recheck_ok: i32 = 0;
     var n_replace_trig: i32 = 0;
-    if (db.flags & (int.DbFlag.RecTriggers | int.DbFlag.ForeignKeys) != 0) {
-        if (db.flags & int.DbFlag.RecTriggers != 0) trig = trigger.triggersExist(p, t, TK.DELETE, null, null);
+    if (db.flags.intersects(.{ .RecTriggers = true, .ForeignKeys = true })) {
+        if (db.flags.RecTriggers) trig = trigger.triggersExist(p, t, TK.DELETE, null, null);
         var may_fire = trig != null or fkey.fkRequired(p, t, null, false) != 0;
         // Only if a row may be deleted by a REPLACE.
         if (may_fire and override_error != OE.Replace) {
@@ -1020,7 +1025,7 @@ fn generateConstraintChecksImpl(
     if (pk_chng and pk == null) {
         // The new rowid must not exist already.
         const addr_rowid_ok = aux.makeLabel(p);
-        var on_error: u8 = t.key_conf;
+        var on_error: OE = t.key_conf;
         if (override_error != OE.Default) {
             on_error = override_error;
         } else if (on_error == OE.Default) {
@@ -1059,7 +1064,7 @@ fn generateConstraintChecksImpl(
                 if (reg_trig_cnt != 0) {
                     // Delete the other row, running its triggers.
                     main_mod.multiWrite(p);
-                    delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_new_data, 1, false, OE.Replace, where_mod.ONEPASS_SINGLE, -1);
+                    delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_new_data, 1, false, OE.Replace, where_mod.ONEPASS.SINGLE, -1);
                     _ = aux.addOp2(v, OP.AddImm, reg_trig_cnt, 1);
                     n_replace_trig += 1;
                 } else if (t.index != null) {
@@ -1137,7 +1142,7 @@ fn generateConstraintChecksImpl(
             continue;
         }
 
-        var on_error: u8 = idx.on_error;
+        var on_error: OE = idx.on_error;
         if (on_error == OE.None) {
             aux.resolveLabel(v, addr_unique_ok);
             continue;
@@ -1153,8 +1158,8 @@ fn generateConstraintChecksImpl(
         // a WITHOUT ROWID table without other indexes (the new entry
         // overwrites the old).
         if (ix == 0 and idx.next == null and pk == idx and on_error == OE.Replace and
-            (db.flags & int.DbFlag.RecTriggers == 0 or trigger.triggersExist(p, t, TK.DELETE, null, null) == null) and
-            (db.flags & int.DbFlag.ForeignKeys == 0 or (t.u.tab.fkey == null and fkey.fkReferences(t) == null)))
+            (!db.flags.RecTriggers or trigger.triggersExist(p, t, TK.DELETE, null, null) == null) and
+            (!db.flags.ForeignKeys or (t.u.tab.fkey == null and fkey.fkReferences(t) == null)))
         {
             aux.resolveLabel(v, addr_unique_ok);
             continue;
@@ -1185,7 +1190,7 @@ fn generateConstraintChecksImpl(
                     // A conflict only if the PRIMARY KEY found differs from
                     // the old one.
                     var addr_jump = aux.currentAddr(v) + k.n_key_col;
-                    var op: u8 = OP.Ne;
+                    var op: OP = OP.Ne;
                     const reg_cmp = if (idx.isPrimaryKey()) reg_ix else reg_r;
                     for (0..k.n_key_col) |ii| {
                         const coll = @import("coll.zig").locateCollSeq(p, k.coll[ii]);
@@ -1217,7 +1222,7 @@ fn generateConstraintChecksImpl(
                     n_replace_trig += 1;
                 }
                 if (trig != null and is_update) _ = aux.addOp1(v, OP.CursorLock, i_data_cur);
-                delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_r, @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS_SINGLE else where_mod.ONEPASS_OFF, i_this_cur);
+                delete_mod.generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, reg_r, @intCast(n_pk_field), false, OE.Replace, if (idx == pk) where_mod.ONEPASS.SINGLE else where_mod.ONEPASS.OFF, i_this_cur);
                 if (trig != null and is_update) _ = aux.addOp1(v, OP.CursorUnlock, i_data_cur);
                 seen_replace = true;
             },
@@ -1235,7 +1240,7 @@ fn generateConstraintChecksImpl(
             while (addr_conflict_ck < n_conflict_end) : (addr_conflict_ck += 1) {
                 const x = aux.getOp(v, addr_conflict_ck).*;
                 if (x.opcode != OP.IdxRowid or is_update) {
-                    const p2 = if (vi.opcodes.properties[x.opcode] & vi.opcodes.OPFLG.JUMP != 0) lbl_recheck_ok else x.p2;
+                    const p2 = if (x.opcode.opflags() & vi.opcodes.OPFLG.JUMP != 0) lbl_recheck_ok else x.p2;
                     _ = aux.addOp4(v, x.opcode, x.p1, p2, x.p3, x.getP4());
                     aux.changeP5(v, x.p5);
                 }
@@ -1330,7 +1335,7 @@ pub fn completeInsertion(p: *Parse, t: *Table, i_data_cur: i32, i_idx_cur: i32, 
 /// with `to_open` set if given. Returns the number of indexes; the cursor
 /// of the table (the PRIMARY KEY of a WITHOUT ROWID table) goes to
 /// `data_cur` and that of the first index to `idx_cur`.
-pub fn openTableAndIndices(p: *Parse, t: *Table, op: u8, p5_arg: u8, i_base_arg: i32, to_open: ?[]const bool, data_cur: *i32, idx_cur: *i32) usize {
+pub fn openTableAndIndices(p: *Parse, t: *Table, op: OP, p5_arg: u8, i_base_arg: i32, to_open: ?[]const bool, data_cur: *i32, idx_cur: *i32) usize {
     var p5 = p5_arg;
     if (t.e_tab_type == .vtab) {
         data_cur.* = -999;

@@ -13,6 +13,7 @@ const numeric = @import("../sql/numeric.zig");
 const printf = @import("../sql/printf.zig");
 const btree = @import("../btree/btree.zig");
 const malloc = @import("../sql/malloc.zig");
+const thunk = @import("../util/thunk.zig");
 
 const Mem = vi.Mem;
 const MEM = vi.MEM;
@@ -23,7 +24,10 @@ const Sqlite3 = int.Sqlite3;
 const FuncDef = int.FuncDef;
 const Destructor = vi.Destructor;
 
+/// The errors of setting a string or blob: TooBig past
+/// SQLITE_LIMIT_LENGTH. The other operations can only run out of memory.
 pub const Error = error{ OutOfMemory, TooBig };
+const Oom = error{OutOfMemory};
 
 /// SQLITE_MAX_LENGTH: the default limit on TEXT and BLOB sizes.
 pub const max_length = 1000000000;
@@ -44,8 +48,8 @@ fn ownBuffer(m: *Mem, z: [*]u8) void {
 }
 
 /// Port of sqlite3VdbeChangeEncoding().
-pub fn changeEncoding(m: *Mem, desired: u8) Error!void {
-    if (m.flags & MEM.Str == 0) {
+pub fn changeEncoding(m: *Mem, desired: u8) Oom!void {
+    if (!m.flags.Str) {
         m.enc = desired;
         return;
     }
@@ -56,7 +60,7 @@ pub fn changeEncoding(m: *Mem, desired: u8) Error!void {
 
 /// Port of sqlite3VdbeMemGrow(): make `z` a writable buffer of at least
 /// `n` bytes, copying the current content if `preserve`.
-pub fn grow(m: *Mem, n: usize, preserve_arg: bool) Error!void {
+pub fn grow(m: *Mem, n: usize, preserve_arg: bool) Oom!void {
     var preserve = preserve_arg;
     const a = gpa(m);
     if (m.z_malloc.len > 0 and preserve and m.z == m.z_malloc.ptr) {
@@ -83,82 +87,82 @@ pub fn grow(m: *Mem, n: usize, preserve_arg: bool) Error!void {
     if (preserve) if (m.z) |z| {
         @memcpy(m.z_malloc[0..@intCast(m.n)], z[0..@intCast(m.n)]);
     };
-    if (m.flags & MEM.Dyn != 0) m.x_del.?(m.z);
+    if (m.flags.Dyn) m.x_del.?(m.z);
     m.z = m.z_malloc.ptr;
-    m.flags &= ~(MEM.Dyn | MEM.Ephem | MEM.Static);
+    m.flags.clear(.{ .Dyn = true, .Ephem = true, .Static = true });
 }
 
 /// Port of sqlite3VdbeMemClearAndResize(): a buffer of at least `sz`
 /// bytes; string and blob content is discarded, numbers kept.
-pub fn clearAndResize(m: *Mem, sz: usize) Error!void {
+pub fn clearAndResize(m: *Mem, sz: usize) Oom!void {
     if (m.z_malloc.len < sz) return grow(m, sz, false);
     m.z = m.z_malloc.ptr;
-    m.flags &= MEM.Null | MEM.Int | MEM.Real | MEM.IntReal;
+    m.flags = m.flags.only(.{ .Null = true, .Int = true, .Real = true, .IntReal = true });
 }
 
 /// Port of sqlite3VdbeMemZeroTerminateIfAble(): NUL-terminate a string if
 /// there is room. An optimization; returns whether it is terminated.
 pub fn zeroTerminateIfAble(m: *Mem) bool {
-    if (m.flags & (MEM.Str | MEM.Term | MEM.Ephem | MEM.Static) != MEM.Str) return false;
+    if (m.flags.only(.{ .Str = true, .Term = true, .Ephem = true, .Static = true }) != MEM{ .Str = true }) return false;
     if (m.enc != ENC.UTF8) return false;
-    if (m.flags & MEM.Dyn != 0) return false;
+    if (m.flags.Dyn) return false;
     if (m.z_malloc.len >= m.n + 1) {
         m.z.?[@intCast(m.n)] = 0;
-        m.flags |= MEM.Term;
+        m.flags.Term = true;
         return true;
     }
     return false;
 }
 
 /// Port of vdbeMemAddTerminator(): three zero bytes, enough for UTF-16.
-fn addTerminator(m: *Mem) Error!void {
+fn addTerminator(m: *Mem) Oom!void {
     const n: usize = @intCast(m.n);
     try grow(m, n + 3, true);
     const z = m.z.?;
     z[n] = 0;
     z[n + 1] = 0;
     z[n + 2] = 0;
-    m.flags |= MEM.Term;
+    m.flags.Term = true;
 }
 
 /// Port of sqlite3VdbeMemMakeWriteable(): move a string or blob into the
 /// Mem's own buffer.
-pub fn makeWriteable(m: *Mem) Error!void {
-    if (m.flags & (MEM.Str | MEM.Blob) != 0) {
-        if (m.flags & MEM.Zero != 0) try expandBlob(m);
+pub fn makeWriteable(m: *Mem) Oom!void {
+    if (m.flags.intersects(.{ .Str = true, .Blob = true })) {
+        if (m.flags.Zero) try expandBlob(m);
         if (m.z_malloc.len == 0 or m.z != m.z_malloc.ptr) try addTerminator(m);
     }
-    m.flags &= ~MEM.Ephem;
+    m.flags.Ephem = false;
 }
 
 /// Port of sqlite3VdbeMemExpandBlob(): materialize the zero tail of a
 /// MEM_Zero blob.
-pub fn expandBlob(m: *Mem) Error!void {
-    std.debug.assert(m.flags & MEM.Zero != 0);
+pub fn expandBlob(m: *Mem) Oom!void {
+    std.debug.assert(m.flags.Zero);
     var n_byte: i32 = m.n + m.u.n_zero;
     if (n_byte <= 0) {
-        if (m.flags & MEM.Blob == 0) return;
+        if (!m.flags.Blob) return;
         n_byte = 1;
     }
     try grow(m, @intCast(n_byte), true);
     @memset(m.z.?[@intCast(m.n)..][0..@intCast(m.u.n_zero)], 0);
     m.n += m.u.n_zero;
-    m.flags &= ~(MEM.Zero | MEM.Term);
+    m.flags.clear(.{ .Zero = true, .Term = true });
 }
 
 /// Port of sqlite3VdbeMemNulTerminate().
-pub fn nulTerminate(m: *Mem) Error!void {
-    if (m.flags & (MEM.Term | MEM.Str) != MEM.Str) return;
+pub fn nulTerminate(m: *Mem) Oom!void {
+    if (m.flags.only(.{ .Term = true, .Str = true }) != MEM{ .Str = true }) return;
     return addTerminator(m);
 }
 
 /// Port of vdbeMemRenderNum(): the text of a number, as SQLite prints it:
 /// integers plainly (IntReal with ".0"), reals with "%!.*g".
 fn renderNum(buf: []u8, m: *Mem) usize {
-    std.debug.assert(m.flags & (MEM.Int | MEM.Real | MEM.IntReal) != 0);
-    if (m.flags & (MEM.Int | MEM.IntReal) != 0) {
+    std.debug.assert(m.flags.intersects(.{ .Int = true, .Real = true, .IntReal = true }));
+    if (m.flags.intersects(.{ .Int = true, .IntReal = true })) {
         var n = numeric.int64ToText(m.u.i, buf);
-        if (m.flags & MEM.IntReal != 0) {
+        if (m.flags.IntReal) {
             @memcpy(buf[n..][0..2], ".0");
             n += 2;
         }
@@ -173,9 +177,9 @@ fn renderNum(buf: []u8, m: *Mem) usize {
 
 /// Port of sqlite3VdbeMemStringify(): add a text representation to a
 /// number. With `force` the numeric representation is dropped.
-pub fn stringify(m: *Mem, enc: u8, force: bool) Error!void {
+pub fn stringify(m: *Mem, enc: u8, force: bool) Oom!void {
     const n_byte = 32;
-    std.debug.assert(m.flags & (MEM.Str | MEM.Blob | MEM.Zero) == 0);
+    std.debug.assert(!m.flags.intersects(.{ .Str = true, .Blob = true, .Zero = true }));
     clearAndResize(m, n_byte) catch |err| {
         m.enc = 0;
         return err;
@@ -184,8 +188,8 @@ pub fn stringify(m: *Mem, enc: u8, force: bool) Error!void {
     m.z.?[n] = 0;
     m.n = @intCast(n);
     m.enc = ENC.UTF8;
-    m.flags |= MEM.Str | MEM.Term;
-    if (force) m.flags &= ~(MEM.Int | MEM.Real | MEM.IntReal);
+    m.flags.set(.{ .Str = true, .Term = true });
+    if (force) m.flags.clear(.{ .Int = true, .Real = true, .IntReal = true });
     try changeEncoding(m, enc);
 }
 
@@ -197,7 +201,7 @@ pub fn finalize(m: *Mem, func: *FuncDef) i32 {
     var t: Mem = .{ .db = m.db };
     var ctx: vi.Context = .{ .out = &t, .mem = m, .func = func, .argv = &.{}, .enc = if (m.db) |db| db.enc else ENC.UTF8 };
     func_mod.callFinalize(func, &ctx);
-    std.debug.assert(m.flags & MEM.Dyn == 0);
+    std.debug.assert(!m.flags.Dyn);
     if (m.z_malloc.len > 0) gpa(m).free(m.z_malloc);
     m.* = t;
     return ctx.is_error;
@@ -216,12 +220,12 @@ pub fn aggValue(accum: *Mem, out: *Mem, func: *FuncDef) i32 {
 /// Port of vdbeMemClearExternAndSetNull().
 fn clearExternAndSetNull(m: *Mem) void {
     std.debug.assert(m.isDynamic());
-    if (m.flags & MEM.Agg != 0) {
+    if (m.flags.Agg) {
         _ = finalize(m, m.u.def);
-        std.debug.assert(m.flags & MEM.Agg == 0);
+        std.debug.assert(!m.flags.Agg);
     }
-    if (m.flags & MEM.Dyn != 0) m.x_del.?(m.z);
-    m.flags = MEM.Null;
+    if (m.flags.Dyn) m.x_del.?(m.z);
+    m.flags = .{ .Null = true };
 }
 
 /// Port of vdbeMemClear().
@@ -249,9 +253,9 @@ pub fn releaseMalloc(m: *Mem) void {
 /// text and blobs are parsed as far as they look like a number).
 pub fn intValue(m: *const Mem) i64 {
     const flags = m.flags;
-    if (flags & (MEM.Int | MEM.IntReal) != 0) return m.u.i;
-    if (flags & MEM.Real != 0) return numeric.realToI64(m.u.r);
-    if (flags & (MEM.Str | MEM.Blob) != 0) if (m.z) |z| {
+    if (flags.intersects(.{ .Int = true, .IntReal = true })) return m.u.i;
+    if (flags.Real) return numeric.realToI64(m.u.r);
+    if (flags.intersects(.{ .Str = true, .Blob = true })) if (m.z) |z| {
         var v: i64 = 0;
         _ = util.atoi64(z[0..@intCast(m.n)], &v);
         return v;
@@ -264,13 +268,13 @@ pub fn intValue(m: *const Mem) i64 {
 /// negative if only a prefix is, positive if all of it is; bit 2 set if
 /// it has a decimal point or exponent.
 pub fn realValueRC(m: *Mem, value: *f64) i32 {
-    std.debug.assert(m.flags & (MEM.Str | MEM.Blob) != 0);
+    std.debug.assert(m.flags.intersects(.{ .Str = true, .Blob = true }));
     const z = m.z orelse {
         value.* = 0.0;
         return 0;
     };
     std.debug.assert(m.enc == ENC.UTF8 or m.enc == 0);
-    if (m.flags & MEM.Term != 0 or zeroTerminateIfAble(m)) return numeric.atoF(@ptrCast(z), value);
+    if (m.flags.Term or zeroTerminateIfAble(m)) return numeric.atoF(@ptrCast(z), value);
     if (m.n == 0) {
         value.* = 0.0;
         return 0;
@@ -287,9 +291,9 @@ pub fn realValueRC(m: *Mem, value: *f64) i32 {
 
 /// Port of sqlite3VdbeRealValue().
 pub fn realValue(m: *Mem) f64 {
-    if (m.flags & MEM.Real != 0) return m.u.r;
-    if (m.flags & (MEM.Int | MEM.IntReal) != 0) return @floatFromInt(m.u.i);
-    if (m.flags & (MEM.Str | MEM.Blob) != 0) {
+    if (m.flags.Real) return m.u.r;
+    if (m.flags.intersects(.{ .Int = true, .IntReal = true })) return @floatFromInt(m.u.i);
+    if (m.flags.intersects(.{ .Str = true, .Blob = true })) {
         var r: f64 = undefined;
         _ = realValueRC(m, &r);
         return r;
@@ -300,17 +304,17 @@ pub fn realValue(m: *Mem) f64 {
 /// Port of sqlite3VdbeBooleanValue(): the truth of a value, `if_null` for
 /// NULL.
 pub fn booleanValue(m: *Mem, if_null: bool) bool {
-    if (m.flags & (MEM.Int | MEM.IntReal) != 0) return m.u.i != 0;
-    if (m.flags & MEM.Null != 0) return if_null;
+    if (m.flags.intersects(.{ .Int = true, .IntReal = true })) return m.u.i != 0;
+    if (m.flags.Null) return if_null;
     return realValue(m) != 0.0;
 }
 
 /// Port of sqlite3VdbeIntegerAffinity(): turn a real with an exact
 /// integer value into an integer.
 pub fn integerAffinity(m: *Mem) void {
-    std.debug.assert(m.flags & (MEM.Real | MEM.IntReal) != 0);
-    if (m.flags & MEM.IntReal != 0) {
-        m.setTypeFlag(MEM.Int);
+    std.debug.assert(m.flags.intersects(.{ .Real = true, .IntReal = true }));
+    if (m.flags.IntReal) {
+        m.setTypeFlag(.{ .Int = true });
         return;
     }
     const ix = numeric.realToI64(m.u.r);
@@ -318,27 +322,27 @@ pub fn integerAffinity(m: *Mem) void {
     // (ticket #3922).
     if (m.u.r == @as(f64, @floatFromInt(ix)) and ix > std.math.minInt(i64) and ix < std.math.maxInt(i64)) {
         m.u.i = ix;
-        m.setTypeFlag(MEM.Int);
+        m.setTypeFlag(.{ .Int = true });
     }
 }
 
 /// Port of sqlite3VdbeMemIntegerify().
 pub fn integerify(m: *Mem) void {
     m.u.i = intValue(m);
-    m.setTypeFlag(MEM.Int);
+    m.setTypeFlag(.{ .Int = true });
 }
 
 /// Port of sqlite3VdbeMemRealify().
 pub fn realify(m: *Mem) void {
     m.u.r = realValue(m);
-    m.setTypeFlag(MEM.Real);
+    m.setTypeFlag(.{ .Real = true });
 }
 
 /// Port of sqlite3VdbeMemNumerify(): convert to INTEGER or REAL, as much
 /// of the text as looks like a number.
 pub fn numerify(m: *Mem) void {
-    if (m.flags & (MEM.Int | MEM.Real | MEM.IntReal | MEM.Null) == 0) {
-        std.debug.assert(m.flags & (MEM.Blob | MEM.Str) != 0);
+    if (!m.flags.intersects(.{ .Int = true, .Real = true, .IntReal = true, .Null = true })) {
+        std.debug.assert(m.flags.intersects(.{ .Blob = true, .Str = true }));
         var r: f64 = undefined;
         const rc = realValueRC(m, &r);
         m.u.r = r;
@@ -346,30 +350,30 @@ pub fn numerify(m: *Mem) void {
         const as_int = rc & 2 == 0 and @intFromEnum(util.atoi64(m.bytes(), &ix)) < 2;
         if (as_int) {
             m.u.i = ix;
-            m.setTypeFlag(MEM.Int);
+            m.setTypeFlag(.{ .Int = true });
         } else {
             ix = numeric.realToI64(r);
             if (numeric.realSameAsInt(r, ix)) {
                 m.u.i = ix;
-                m.setTypeFlag(MEM.Int);
+                m.setTypeFlag(.{ .Int = true });
             } else {
-                m.setTypeFlag(MEM.Real);
+                m.setTypeFlag(.{ .Real = true });
             }
         }
     }
-    m.flags &= ~(MEM.Str | MEM.Blob | MEM.Zero);
+    m.flags.clear(.{ .Str = true, .Blob = true, .Zero = true });
 }
 
 /// Port of sqlite3VdbeMemCast(): CAST(value AS affinity).
-pub fn cast(m: *Mem, aff: u8, enc: u8) Error!void {
-    if (m.flags & MEM.Null != 0) return;
+pub fn cast(m: *Mem, aff: u8, enc: u8) Oom!void {
+    if (m.flags.Null) return;
     switch (aff) {
         Aff.blob => {
-            if (m.flags & MEM.Blob == 0) {
+            if (!m.flags.Blob) {
                 try applyAffinity(m, Aff.text, enc);
-                if (m.flags & MEM.Str != 0) m.setTypeFlag(MEM.Blob);
+                if (m.flags.Str) m.setTypeFlag(.{ .Blob = true });
             } else {
-                m.flags &= ~(MEM.TypeMask & ~MEM.Blob);
+                m.flags.clear(MEM.TypeMask.without(.{ .Blob = true }));
             }
         },
         Aff.numeric => numerify(m),
@@ -377,9 +381,10 @@ pub fn cast(m: *Mem, aff: u8, enc: u8) Error!void {
         Aff.real => realify(m),
         else => {
             std.debug.assert(aff == Aff.text);
-            m.flags |= (m.flags & MEM.Blob) >> 3;
+            // C: flags |= (flags & MEM_Blob) >> 3, which is MEM_Str.
+            if (m.flags.Blob) m.flags.Str = true;
             try applyAffinity(m, Aff.text, enc);
-            m.flags &= ~(MEM.Int | MEM.Real | MEM.IntReal | MEM.Blob | MEM.Zero);
+            m.flags.clear(.{ .Int = true, .Real = true, .IntReal = true, .Blob = true, .Zero = true });
             if (enc != ENC.UTF8) m.n &= ~@as(i32, 1);
             try changeEncoding(m, enc);
             _ = zeroTerminateIfAble(m);
@@ -393,14 +398,14 @@ pub fn setNull(m: *Mem) void {
     if (m.isDynamic()) {
         clearExternAndSetNull(m);
     } else {
-        m.flags = MEM.Null;
+        m.flags = .{ .Null = true };
     }
 }
 
 /// Port of sqlite3VdbeMemSetZeroBlob().
 pub fn setZeroBlob(m: *Mem, n: i32) void {
     release(m);
-    m.flags = MEM.Blob | MEM.Zero;
+    m.flags = .{ .Blob = true, .Zero = true };
     m.n = 0;
     m.u = .{ .n_zero = @max(n, 0) };
     m.enc = ENC.UTF8;
@@ -411,7 +416,7 @@ pub fn setZeroBlob(m: *Mem, n: i32) void {
 pub fn setInt64(m: *Mem, val: i64) void {
     if (m.isDynamic()) setNull(m);
     m.u = .{ .i = val };
-    m.flags = MEM.Int;
+    m.flags = .{ .Int = true };
 }
 
 /// Port of sqlite3VdbeMemSetDouble(): NaN becomes NULL.
@@ -419,8 +424,18 @@ pub fn setDouble(m: *Mem, val: f64) void {
     setNull(m);
     if (!std.math.isNan(val)) {
         m.u = .{ .r = val };
-        m.flags = MEM.Real;
+        m.flags = .{ .Real = true };
     }
+}
+
+/// The object that `m` holds with MEM_Dyn and the destructor
+/// int.destructor(del) (`del` a typed destructor, `fn (*T) void`), as a
+/// RowSet or VdbeFrame register or a ValueList pointer does; null if it
+/// holds anything else. The destructor stands for the type, as in C's
+/// tests of pMem->xDel.
+pub fn dynObject(m: *const Mem, comptime del: anytype) ?@typeInfo(@TypeOf(del)).@"fn".param_types[0].? {
+    if (!m.flags.Dyn or m.x_del != int.destructor(del)) return null;
+    return thunk.downcast(@typeInfo(@TypeOf(del)).@"fn".param_types[0].?, m.z);
 }
 
 /// Port of sqlite3NoopDestructor().
@@ -428,21 +443,21 @@ pub fn noopDestructor(_: ?*anyopaque) void {}
 
 /// Port of sqlite3VdbeMemSetPointer(): a NULL carrying a pointer of type
 /// `ptype` (sqlite3_result_pointer).
-pub fn setPointer(m: *Mem, ptr: ?*anyopaque, ptype: ?[*:0]const u8, destructor: ?*const fn (?*anyopaque) void) void {
-    std.debug.assert(m.flags == MEM.Null);
+pub fn setPointer(m: *Mem, ptr: ?*anyopaque, ptype: ?[*:0]const u8, destructor: ?int.DestructorFn) void {
+    std.debug.assert(m.flags == MEM{ .Null = true });
     clear(m);
     m.u = .{ .z_ptype = ptype orelse "" };
     m.z = @ptrCast(ptr);
-    m.flags = MEM.Null | MEM.Dyn | MEM.Subtype | MEM.Term;
+    m.flags = .{ .Null = true, .Dyn = true, .Subtype = true, .Term = true };
     m.e_subtype = 'p';
     m.x_del = destructor orelse noopDestructor;
 }
 
 /// Port of sqlite3VdbeMemTooBig(): a string or blob over SQLITE_LIMIT_LENGTH.
 pub fn tooBig(m: *const Mem) bool {
-    if (m.flags & (MEM.Str | MEM.Blob) != 0) {
+    if (m.flags.intersects(.{ .Str = true, .Blob = true })) {
         var n = m.n;
-        if (m.flags & MEM.Zero != 0) n += m.u.n_zero;
+        if (m.flags.Zero) n += m.u.n_zero;
         return n > m.db.?.limit(.length);
     }
     return false;
@@ -451,13 +466,13 @@ pub fn tooBig(m: *const Mem) bool {
 /// Port of sqlite3VdbeMemShallowCopy(): copy the value without its buffer;
 /// strings then point at `from`'s, marked `src_type` (MEM_Ephem or
 /// MEM_Static) unless static already.
-pub fn shallowCopy(to: *Mem, from: *const Mem, src_type: u16) void {
+pub fn shallowCopy(to: *Mem, from: *const Mem, src_type: MEM) void {
     if (to.isDynamic()) clearExternAndSetNull(to);
     copyCell(to, from);
-    if (from.flags & MEM.Static == 0) {
-        to.flags &= ~(MEM.Dyn | MEM.Static | MEM.Ephem);
-        std.debug.assert(src_type == MEM.Ephem or src_type == MEM.Static);
-        to.flags |= src_type;
+    if (!from.flags.Static) {
+        to.flags.clear(.{ .Dyn = true, .Static = true, .Ephem = true });
+        std.debug.assert(src_type == MEM{ .Ephem = true } or src_type == MEM{ .Static = true });
+        to.flags.set(src_type);
     }
 }
 
@@ -472,13 +487,13 @@ fn copyCell(to: *Mem, from: *const Mem) void {
 }
 
 /// Port of sqlite3VdbeMemCopy(): a deep copy.
-pub fn copy(to: *Mem, from: *const Mem) Error!void {
+pub fn copy(to: *Mem, from: *const Mem) Oom!void {
     if (to.isDynamic()) clearExternAndSetNull(to);
     copyCell(to, from);
-    to.flags &= ~MEM.Dyn;
-    if (to.flags & (MEM.Str | MEM.Blob) != 0) {
-        if (from.flags & MEM.Static == 0) {
-            to.flags |= MEM.Ephem;
+    to.flags.Dyn = false;
+    if (to.flags.intersects(.{ .Str = true, .Blob = true })) {
+        if (!from.flags.Static) {
+            to.flags.Ephem = true;
             try makeWriteable(to);
         }
     }
@@ -489,7 +504,7 @@ pub fn copy(to: *Mem, from: *const Mem) Error!void {
 pub fn move(to: *Mem, from: *Mem) void {
     release(to);
     to.* = from.*;
-    from.flags = MEM.Null;
+    from.flags = .{ .Null = true };
     from.z_malloc = &.{};
 }
 
@@ -502,12 +517,12 @@ pub fn setStr(m: *Mem, z_arg: ?[]const u8, enc_arg: u8, del: Destructor) Error!v
     };
     const limit: i64 = if (m.db) |db| db.limit(.length) else max_length;
     var enc = enc_arg;
-    var flags: u16 = undefined;
+    var flags: MEM = undefined;
     if (enc == 0) {
-        flags = MEM.Blob;
+        flags = .{ .Blob = true };
         enc = ENC.UTF8;
     } else {
-        flags = MEM.Str;
+        flags = .{ .Str = true };
     }
     if (@as(i64, @intCast(z.len)) > limit) {
         switch (del) {
@@ -531,13 +546,13 @@ pub fn setStr(m: *Mem, z_arg: ?[]const u8, enc_arg: u8, del: Destructor) Error!v
         .static => {
             release(m);
             m.z = @constCast(z.ptr);
-            flags |= MEM.Static;
+            flags.Static = true;
         },
         .func => |f| {
             release(m);
             m.z = @constCast(z.ptr);
             m.x_del = f;
-            flags |= MEM.Dyn;
+            flags.Dyn = true;
         },
     }
     m.n = @intCast(z.len & 0x7fffffff);
@@ -572,19 +587,19 @@ pub fn setTextZ(m: *Mem, z: [:0]const u8, del: Destructor) Error!void {
             m.x_del = f;
         },
     }
-    m.flags = MEM.Str | MEM.Term | switch (del) {
-        .static => MEM.Static,
-        .func => MEM.Dyn,
-        else => @as(u16, 0),
-    };
+    m.flags = (MEM{ .Str = true, .Term = true }).with(switch (del) {
+        .static => .{ .Static = true },
+        .func => .{ .Dyn = true },
+        else => .{},
+    });
     m.n = @intCast(z.len);
     m.enc = ENC.UTF8;
 }
 
 /// Port of sqlite3VdbeMemFromBtree(): copy `amt` bytes of the cursor's
 /// payload from `offset` into the Mem's buffer as a blob.
-pub fn fromBtree(cur: *btree.Cursor, offset: u32, amt: u32, m: *Mem) (Error || btree.Error)!void {
-    m.flags = MEM.Null;
+pub fn fromBtree(cur: *btree.Cursor, offset: u32, amt: u32, m: *Mem) btree.Error!void {
+    m.flags = .{ .Null = true };
     if (amt >= max_allocation_size) return error.OutOfMemory;
     if (@as(u64, amt) + offset > cur.payloadSize()) return error.Corrupt;
     try clearAndResize(m, @as(usize, amt) + 1);
@@ -593,18 +608,18 @@ pub fn fromBtree(cur: *btree.Cursor, offset: u32, amt: u32, m: *Mem) (Error || b
         return err;
     };
     m.z.?[amt] = 0;
-    m.flags = MEM.Blob;
+    m.flags = .{ .Blob = true };
     m.n = @intCast(amt);
 }
 
 /// Port of sqlite3VdbeMemFromBtreeZeroOffset(): the first `amt` bytes of
 /// the payload, pointing into the page when they are all there.
-pub fn fromBtreeZeroOffset(cur: *btree.Cursor, amt: u32, m: *Mem) (Error || btree.Error)!void {
+pub fn fromBtreeZeroOffset(cur: *btree.Cursor, amt: u32, m: *Mem) btree.Error!void {
     std.debug.assert(!m.isDynamic());
     const avail = cur.payloadFetch();
     if (amt <= avail.len) {
         m.z = @constCast(avail.ptr);
-        m.flags = MEM.Blob | MEM.Ephem;
+        m.flags = .{ .Blob = true, .Ephem = true };
         m.n = @intCast(amt);
     } else {
         try fromBtree(cur, 0, amt, m);
@@ -613,15 +628,15 @@ pub fn fromBtreeZeroOffset(cur: *btree.Cursor, amt: u32, m: *Mem) (Error || btre
 
 /// Port of sqlite3ValueText(): the value as NUL-terminated text in `enc`,
 /// converting it if needed; null for NULL.
-pub fn valueText(m: *Mem, enc: u8) Error!?[*:0]const u8 {
-    if (m.flags & (MEM.Str | MEM.Term) == MEM.Str | MEM.Term and m.enc == enc) {
+pub fn valueText(m: *Mem, enc: u8) Oom!?[*:0]const u8 {
+    if (m.flags.contains(.{ .Str = true, .Term = true }) and m.enc == enc) {
         return @ptrCast(m.z.?);
     }
-    if (m.flags & MEM.Null != 0) return null;
+    if (m.flags.Null) return null;
     // valueToText().
-    if (m.flags & (MEM.Blob | MEM.Str) != 0) {
-        if (m.flags & MEM.Zero != 0) try expandBlob(m);
-        m.flags |= MEM.Str;
+    if (m.flags.intersects(.{ .Blob = true, .Str = true })) {
+        if (m.flags.Zero) try expandBlob(m);
+        m.flags.Str = true;
         if (m.enc != enc & ~ENC.UTF16_ALIGNED) try changeEncoding(m, enc & ~ENC.UTF16_ALIGNED);
         try nulTerminate(m);
     } else {
@@ -632,14 +647,14 @@ pub fn valueText(m: *Mem, enc: u8) Error!?[*:0]const u8 {
 }
 
 /// Port of sqlite3ValueBytes(): the size of the value as text or blob.
-pub fn valueBytes(m: *Mem, enc: u8) Error!i32 {
-    if (m.flags & MEM.Str != 0 and m.enc == enc) return m.n;
-    if (m.flags & MEM.Str != 0 and enc != ENC.UTF8 and m.enc != ENC.UTF8) return m.n;
-    if (m.flags & MEM.Blob != 0) {
-        if (m.flags & MEM.Zero != 0) return m.n + m.u.n_zero;
+pub fn valueBytes(m: *Mem, enc: u8) Oom!i32 {
+    if (m.flags.Str and m.enc == enc) return m.n;
+    if (m.flags.Str and enc != ENC.UTF8 and m.enc != ENC.UTF8) return m.n;
+    if (m.flags.Blob) {
+        if (m.flags.Zero) return m.n + m.u.n_zero;
         return m.n;
     }
-    if (m.flags & MEM.Null != 0) return 0;
+    if (m.flags.Null) return 0;
     _ = try valueText(m, enc);
     return m.n;
 }
@@ -659,48 +674,48 @@ fn alsoAnInt(m: *Mem, r: f64, out: *i64) bool {
 /// Port of applyNumericAffinity() (vdbe.c): turn text that looks like a
 /// number into one; with `try_for_int`, "48.00" becomes an integer.
 pub fn applyNumericAffinity(m: *Mem, try_for_int: bool) void {
-    std.debug.assert(m.flags & (MEM.Str | MEM.Int | MEM.Real | MEM.IntReal) == MEM.Str);
+    std.debug.assert(m.flags.only(.{ .Str = true, .Int = true, .Real = true, .IntReal = true }) == MEM{ .Str = true });
     var r: f64 = undefined;
     const rc = realValueRC(m, &r);
     if (rc <= 0) return;
     var iv: i64 = undefined;
     if (rc & 2 == 0 and alsoAnInt(m, r, &iv)) {
         m.u = .{ .i = iv };
-        m.flags |= MEM.Int;
+        m.flags.Int = true;
     } else {
         m.u = .{ .r = r };
-        m.flags |= MEM.Real;
+        m.flags.Real = true;
         if (try_for_int) integerAffinity(m);
     }
     // TEXT to NUMERIC is many-to-one: drop the text.
-    m.flags &= ~MEM.Str;
+    m.flags.Str = false;
 }
 
 /// Port of applyAffinity() (vdbe.c) / sqlite3ValueApplyAffinity().
-pub fn applyAffinity(m: *Mem, affinity: u8, enc: u8) Error!void {
+pub fn applyAffinity(m: *Mem, affinity: u8, enc: u8) Oom!void {
     if (affinity >= Aff.numeric) {
-        if (m.flags & MEM.Int == 0) {
-            if (m.flags & (MEM.Real | MEM.IntReal) == 0) {
-                if (m.flags & MEM.Str != 0) applyNumericAffinity(m, true);
+        if (!m.flags.Int) {
+            if (!m.flags.intersects(.{ .Real = true, .IntReal = true })) {
+                if (m.flags.Str) applyNumericAffinity(m, true);
             } else if (affinity <= Aff.real) {
                 integerAffinity(m);
             }
         }
     } else if (affinity == Aff.text) {
-        if (m.flags & MEM.Str == 0) {
-            if (m.flags & (MEM.Real | MEM.Int | MEM.IntReal) != 0) try stringify(m, enc, true);
+        if (!m.flags.Str) {
+            if (m.flags.intersects(.{ .Real = true, .Int = true, .IntReal = true })) try stringify(m, enc, true);
         }
-        m.flags &= ~(MEM.Real | MEM.Int | MEM.IntReal);
+        m.flags.clear(.{ .Real = true, .Int = true, .IntReal = true });
     }
 }
 
 /// Port of computeNumericType() (vdbe.c).
-fn computeNumericType(m: *Mem) u16 {
-    std.debug.assert(m.flags & (MEM.Int | MEM.Real | MEM.IntReal) == 0);
-    if (m.flags & MEM.Zero != 0) {
+fn computeNumericType(m: *Mem) MEM {
+    std.debug.assert(!m.flags.intersects(.{ .Int = true, .Real = true, .IntReal = true }));
+    if (m.flags.Zero) {
         expandBlob(m) catch {
             m.u = .{ .i = 0 };
-            return MEM.Int;
+            return .{ .Int = true };
         };
     }
     var r: f64 = undefined;
@@ -710,21 +725,21 @@ fn computeNumericType(m: *Mem) u16 {
     if (rc <= 0) {
         if (rc & 2 == 0 and @intFromEnum(util.atoi64(m.bytes(), &ix)) <= 1) {
             m.u = .{ .i = ix };
-            return MEM.Int;
+            return .{ .Int = true };
         }
-        return MEM.Real;
+        return .{ .Real = true };
     } else if (rc & 2 == 0 and util.atoi64(m.bytes(), &ix) == .ok) {
         m.u = .{ .i = ix };
-        return MEM.Int;
+        return .{ .Int = true };
     }
-    return MEM.Real;
+    return .{ .Real = true };
 }
 
 /// Port of numericType() (vdbe.c): MEM_Int and/or MEM_Real for the value,
 /// setting u.i/u.r but not the flags.
-pub fn numericType(m: *Mem) u16 {
-    if (m.flags & (MEM.Int | MEM.Real | MEM.IntReal | MEM.Null) != 0) {
-        return m.flags & (MEM.Int | MEM.Real | MEM.IntReal | MEM.Null);
+pub fn numericType(m: *Mem) MEM {
+    if (m.flags.intersects(.{ .Int = true, .Real = true, .IntReal = true, .Null = true })) {
+        return m.flags.only(.{ .Int = true, .Real = true, .IntReal = true, .Null = true });
     }
     return computeNumericType(m);
 }
@@ -733,25 +748,26 @@ pub fn numericType(m: *Mem) u16 {
 pub fn valueType(m: *const Mem) i32 {
     const types = comptime blk: {
         var t: [64]u8 = undefined;
-        for (0..64) |f| {
-            t[f] = if (f & MEM.Null != 0)
+        for (0..64) |i| {
+            const f = MEM.fromInt(i);
+            t[i] = if (f.Null)
                 vi.SQLITE_NULL
-            else if (f & MEM.Int != 0)
+            else if (f.Int)
                 vi.SQLITE_INTEGER
-            else if (f & MEM.Real != 0)
+            else if (f.Real)
                 vi.SQLITE_FLOAT
-            else if (f & MEM.IntReal != 0)
+            else if (f.IntReal)
                 vi.SQLITE_FLOAT
-            else if (f & MEM.Str != 0)
+            else if (f.Str)
                 vi.SQLITE_TEXT
-            else if (f & MEM.Blob != 0)
+            else if (f.Blob)
                 vi.SQLITE_BLOB
             else
                 vi.SQLITE_NULL;
         }
         break :blk t;
     };
-    return types[m.flags & MEM.AffMask];
+    return types[m.flags.affIndex()];
 }
 
 /// Port of sqlite3_value_numeric_type().
@@ -771,7 +787,7 @@ test "mem: affinity and conversions" {
     defer release(&m);
     try setStr(&m, "  42  ", ENC.UTF8, .transient);
     try applyAffinity(&m, Aff.numeric, ENC.UTF8);
-    try std.testing.expectEqual(MEM.Int, m.flags & MEM.TypeMask);
+    try std.testing.expectEqual(MEM{ .Int = true }, m.flags.only(MEM.TypeMask));
     try std.testing.expectEqual(@as(i64, 42), m.u.i);
 
     try setStr(&m, "48.00", ENC.UTF8, .transient);
@@ -780,7 +796,7 @@ test "mem: affinity and conversions" {
 
     try setStr(&m, "1.5x", ENC.UTF8, .transient);
     try applyAffinity(&m, Aff.numeric, ENC.UTF8);
-    try std.testing.expect(m.flags & MEM.Str != 0);
+    try std.testing.expect(m.flags.Str);
 
     setDouble(&m, 2.5);
     try applyAffinity(&m, Aff.text, ENC.UTF8);

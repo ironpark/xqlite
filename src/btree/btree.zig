@@ -21,6 +21,7 @@
 //! BtreeTransferRow.
 
 const std = @import("std");
+const thunk = @import("../util/thunk.zig");
 const vfs = @import("../vfs/vfs.zig");
 const pager_mod = @import("../pager/pager.zig");
 const varint = @import("../util/varint.zig");
@@ -129,22 +130,18 @@ pub const Options = struct {
     n_vdbe_read: ?*const i32 = null,
 };
 
-/// Compares stored index keys against a search key.
-pub const IndexKey = struct {
-    ctx: *const anyopaque,
-    /// Returns the order of `stored` relative to the search key.
-    compare: *const fn (ctx: *const anyopaque, stored: []const u8) CompareError!Order,
-};
+/// Compares stored index keys against a search key: call(.{stored})
+/// returns the order of `stored` relative to it. Made with
+/// IndexKey.init(key, f) from a typed `f(key, stored)`.
+pub const IndexKey = thunk.Closure(*const fn (ctx: *const anyopaque, stored: []const u8) CompareError!Order);
 
 /// What the b-tree needs to know about an index's keys (its view of
 /// KeyInfo): how to seek to a packed key, as when restoring a saved cursor
-/// position or inserting without a prior seek.
-pub const KeyInfo = struct {
-    ctx: *const anyopaque,
-    /// Port of btreeMoveto() for index keys: unpack `key` once, then call
-    /// `cur.indexMoveto`.
-    seek: *const fn (ctx: *const anyopaque, cur: *Cursor, key: []const u8) Error!Order,
-};
+/// position or inserting without a prior seek: call(.{cur, key}) is
+/// btreeMoveto() for index keys (unpack `key` once, then call
+/// `cur.indexMoveto`). Made with KeyInfo.init(info, f) from a typed
+/// `f(info, cur, key)`.
+pub const KeyInfo = thunk.Closure(*const fn (ctx: *const anyopaque, cur: *Cursor, key: []const u8) Error!Order);
 
 /// Content for `Cursor.insert` (BtreePayload).
 pub const Payload = struct {
@@ -576,7 +573,7 @@ pub const Btree = struct {
                 // contention: a new read transaction gets a fresh one.
                 if (err == error.BusySnapshot and bt.in_trans == .none) err = error.Busy;
                 if ((err == error.Busy or err == error.BusyRecovery) and bt.in_trans == .none) {
-                    if (bt.pager.busy_handler) |h| if (h.func(h.ctx)) continue;
+                    if (bt.pager.busy_handler) |h| if (h.call(.{})) continue;
                 }
                 return err;
             };
@@ -2479,7 +2476,7 @@ pub const Cursor = struct {
     fn moveto(cur: *Cursor, key: ?[]const u8, n_key: i64, bias: bool) Error!Order {
         if (key) |k| {
             const ki = cur.key_info.?;
-            return ki.seek(ki.ctx, cur, k);
+            return ki.call(.{ cur, k });
         }
         return cur.tableMoveto(n_key, bias);
     }
@@ -2981,13 +2978,13 @@ pub const Cursor = struct {
         var n: u32 = cell[0];
         if (n <= pg.max1byte_payload) {
             if (@intFromPtr(cell + n) >= @intFromPtr(pg.data_end)) return null;
-            return try key.compare(key.ctx, cell[1..][0..n]);
+            return try key.call(.{cell[1..][0..n]});
         }
         if (cell[1] & 0x80 == 0) {
             n = ((n & 0x7f) << 7) + cell[1];
             if (n <= pg.max_local) {
                 if (@intFromPtr(cell + n) >= @intFromPtr(pg.data_end)) return null;
-                return try key.compare(key.ctx, cell[2..][0..n]);
+                return try key.call(.{cell[2..][0..n]});
             }
         }
         return null;
@@ -3043,12 +3040,12 @@ pub const Cursor = struct {
                 var n: u32 = cell[0];
                 if (n <= pg.max1byte_payload) {
                     if (@intFromPtr(cell + n) >= @intFromPtr(pg.data_end)) return error.Corrupt;
-                    c = try key.compare(key.ctx, cell[1..][0..n]);
+                    c = try key.call(.{cell[1..][0..n]});
                 } else if (cell[1] & 0x80 == 0 and blk: {
                     n = ((n & 0x7f) << 7) + cell[1];
                     break :blk n <= pg.max_local and @intFromPtr(cell + n) < @intFromPtr(pg.data_end);
                 }) {
-                    c = try key.compare(key.ctx, cell[2..][0..n]);
+                    c = try key.call(.{cell[2..][0..n]});
                 } else {
                     // The record spills onto overflow pages: assemble it.
                     cur.info = pg.parseCell(cell - pg.child_ptr_size);
@@ -3063,7 +3060,7 @@ pub const Cursor = struct {
                     cur.flags.valid_ovfl = false;
                     try r;
                     @memset(buf[len..], 0);
-                    c = try key.compare(key.ctx, buf[0..len]);
+                    c = try key.call(.{buf[0..len]});
                 }
                 switch (c) {
                     .lt => lwr = idx + 1,

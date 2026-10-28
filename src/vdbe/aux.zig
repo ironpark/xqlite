@@ -79,11 +79,11 @@ pub const PREPARE_MASK: u8 = 0x3f;
 
 /// A placeholder returned by `getOp` after an allocation failure: readable
 /// but never written.
-var dummy_op: Op = .{ .opcode = 0 };
+var dummy_op: Op = .{ .opcode = @fromBackingInt(0) };
 
 /// Port of sqlite3VdbeAddOp3(): append an instruction; returns its
 /// address.
-pub fn addOp3(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32) i32 {
+pub fn addOp3(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32) i32 {
     std.debug.assert(v.e_vdbe_state == .init);
     const i = v.nOp();
     if (v.ops.items.len >= @as(usize, @intCast(v.db.limit(.vdbe_op)))) {
@@ -96,27 +96,27 @@ pub fn addOp3(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32) i32 {
     return i;
 }
 
-pub fn addOp0(v: *Vdbe, op: u8) i32 {
+pub fn addOp0(v: *Vdbe, op: OP) i32 {
     return addOp3(v, op, 0, 0, 0);
 }
 
-pub fn addOp1(v: *Vdbe, op: u8, p1: i32) i32 {
+pub fn addOp1(v: *Vdbe, op: OP, p1: i32) i32 {
     return addOp3(v, op, p1, 0, 0);
 }
 
-pub fn addOp2(v: *Vdbe, op: u8, p1: i32, p2: i32) i32 {
+pub fn addOp2(v: *Vdbe, op: OP, p1: i32, p2: i32) i32 {
     return addOp3(v, op, p1, p2, 0);
 }
 
 /// Port of sqlite3VdbeAddOp4Int(): P4 is a 32-bit integer.
-pub fn addOp4Int(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32, p4: i32) i32 {
+pub fn addOp4Int(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32, p4: i32) i32 {
     const addr = addOp3(v, op, p1, p2, p3);
     if (!v.db.malloc_failed) v.ops.items[@intCast(addr)].setP4(.{ .int32 = p4 });
     return addr;
 }
 
 /// Port of sqlite3VdbeAddOp4() with a pointer operand.
-pub fn addOp4(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32, p4: P4) i32 {
+pub fn addOp4(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32, p4: P4) i32 {
     const addr = addOp3(v, op, p1, p2, p3);
     changeP4(v, addr, p4);
     return addr;
@@ -124,7 +124,7 @@ pub fn addOp4(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32, p4: P4) i32 {
 
 /// Port of sqlite3VdbeAddOp4() with a string operand (P4_DYNAMIC): the
 /// string is copied.
-pub fn addOp4Str(v: *Vdbe, op: u8, p1: i32, p2: i32, p3: i32, z: ?[]const u8) i32 {
+pub fn addOp4Str(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32, z: ?[]const u8) i32 {
     const addr = addOp3(v, op, p1, p2, p3);
     changeP4Str(v, addr, z);
     return addr;
@@ -284,7 +284,7 @@ fn resolveP2Values(v: *Vdbe, max_vtab_args: *i32) void {
     while (i > 0) {
         i -= 1;
         const op = &v.ops.items[i];
-        if (op.opcode > opcodes.max_jump_opcode) continue;
+        if (!op.opcode.mayJump()) continue;
         switch (op.opcode) {
             OP.Transaction => {
                 if (op.p2 != 0) v.read_only = false;
@@ -302,7 +302,7 @@ fn resolveP2Values(v: *Vdbe, max_vtab_args: *i32) void {
                     max_vtab_args.* = @max(max_vtab_args.*, v.ops.items[i - 1].p1);
                 }
                 if (op.p2 < 0) {
-                    std.debug.assert(opcodes.properties[op.opcode] & opcodes.OPFLG.JUMP != 0);
+                    std.debug.assert(op.opcode.opflags() & opcodes.OPFLG.JUMP != 0);
                     op.p2 = p.labels.items[@intCast(~op.p2)];
                 }
             },
@@ -319,7 +319,7 @@ pub fn currentAddr(v: *Vdbe) i32 {
 }
 
 /// An entry of `addOpList` (VdbeOpList).
-pub const OpListItem = struct { opcode: u8, p1: i8 = 0, p2: i8 = 0, p3: i8 = 0 };
+pub const OpListItem = struct { opcode: OP, p1: i8 = 0, p2: i8 = 0, p3: i8 = 0 };
 
 /// Port of sqlite3VdbeAddOpList(): append instructions; nonzero jump
 /// targets are relative to the first. Returns the first, or null.
@@ -328,7 +328,7 @@ pub fn addOpList(v: *Vdbe, items: []const OpListItem) ?[]Op {
     const first = v.ops.items.len;
     for (items) |item| {
         var p2: i32 = item.p2;
-        if (opcodes.properties[item.opcode] & opcodes.OPFLG.JUMP != 0 and item.p2 > 0) p2 += @intCast(first);
+        if (item.opcode.opflags() & opcodes.OPFLG.JUMP != 0 and item.p2 > 0) p2 += @intCast(first);
         v.ops.append(v.alloc(), .{ .opcode = item.opcode, .p1 = item.p1, .p2 = p2, .p3 = item.p3 }) catch {
             v.db.oomFault();
             return null;
@@ -344,7 +344,7 @@ pub fn reprepareOnBind(v: *Vdbe, i_var: i32) void {
     v.expmask |= if (i_var >= 32) 0x80000000 else @as(u32, 1) << @intCast(i_var - 1);
 }
 
-pub fn changeOpcode(v: *Vdbe, addr: i32, opcode: u8) void {
+pub fn changeOpcode(v: *Vdbe, addr: i32, opcode: OP) void {
     getOp(v, addr).opcode = opcode;
 }
 
@@ -425,7 +425,7 @@ pub fn changeToNoop(v: *Vdbe, addr: i32) bool {
 
 /// Port of sqlite3VdbeDeletePriorOpcode(): drop the last instruction if
 /// it is `op`.
-pub fn deletePriorOpcode(v: *Vdbe, op: u8) bool {
+pub fn deletePriorOpcode(v: *Vdbe, op: OP) bool {
     const n = v.ops.items.len;
     if (n > 0 and v.ops.items[n - 1].opcode == op) return changeToNoop(v, @intCast(n - 1));
     return false;
@@ -508,7 +508,7 @@ pub fn noopComment(v: *Vdbe, comptime fmt: []const u8, args: anytype) void {
 pub fn getOp(v: *Vdbe, addr: i32) *Op {
     std.debug.assert(v.e_vdbe_state == .init);
     if (v.db.malloc_failed) {
-        dummy_op = .{ .opcode = 0 };
+        dummy_op = .{ .opcode = @fromBackingInt(0) };
         return &dummy_op;
     }
     return &v.ops.items[@intCast(addr)];
@@ -546,15 +546,15 @@ pub fn displayP4(a: std.mem.Allocator, op: *const Op) error{OutOfMemory}![:0]u8 
         .funcctx => |ctx| w.print("{s}({d})", .{ ctx.func.name, ctx.func.n_arg }),
         .int32 => |i| w.print("{d}", .{i}),
         .mem => |m| blk: {
-            if (m.flags & MEM.Str != 0) break :blk w.writeAll(m.bytes());
-            if (m.flags & (MEM.Int | MEM.IntReal) != 0) break :blk w.print("{d}", .{m.u.i});
-            if (m.flags & MEM.Real != 0) {
+            if (m.flags.Str) break :blk w.writeAll(m.bytes());
+            if (m.flags.intersects(.{ .Int = true, .IntReal = true })) break :blk w.print("{d}", .{m.u.i});
+            if (m.flags.Real) {
                 const printf = @import("../sql/printf.zig");
                 const s = printf.mprintf(a, "%.16g", &.{.{ .double = m.u.r }}) catch break :blk error.WriteFailed;
                 defer a.free(s);
                 break :blk w.writeAll(s);
             }
-            if (m.flags & MEM.Null != 0) break :blk w.writeAll("NULL");
+            if (m.flags.Null) break :blk w.writeAll("NULL");
             break :blk w.writeAll("(blob)");
         },
         .intarray => |ai| blk: {
@@ -580,15 +580,15 @@ pub fn usesBtree(v: *Vdbe, i: u5) void {
 }
 
 /// Port of initMemArray().
-pub fn initMemArray(cells: []Mem, db: *Sqlite3, flags: u16) void {
-    for (cells) |*m| m.* = .{ .flags = flags, .db = db };
+pub fn initMemArray(cells: []Mem, db: *Sqlite3, f: MEM) void {
+    for (cells) |*m| m.* = .{ .flags = f, .db = db };
 }
 
 /// Port of releaseMemArray(): free what the cells hold; freed cells
 /// become MEM_Undefined.
 pub fn releaseMemArray(cells: []Mem) void {
     for (cells) |*m| {
-        if (m.flags & (MEM.Agg | MEM.Dyn) != 0) {
+        if (m.flags.intersects(.{ .Agg = true, .Dyn = true })) {
             mem.release(m);
             m.flags = MEM.Undefined;
         } else if (m.z_malloc.len > 0) {
@@ -600,22 +600,26 @@ pub fn releaseMemArray(cells: []Mem) void {
 }
 
 /// sqlite3VdbeNextOpcode() modes.
-pub const NEXTOP_NORMAL: u8 = 0;
-pub const NEXTOP_EQP: u8 = 1;
-pub const NEXTOP_TABLES_USED: u8 = 2;
+/// What nextOpcode() lists (NEXTOP_*).
+pub const NEXTOP = enum(u8) {
+    NORMAL = 0,
+    EQP = 1,
+    TABLES_USED = 2,
+};
 
 /// Port of sqlite3VdbeNextOpcode(): the next instruction to show for
-/// EXPLAIN (`e_mode` NEXTOP_NORMAL), EXPLAIN QUERY PLAN (NEXTOP_EQP: only
-/// OP_Explain and OP_Init) or tables_used() (NEXTOP_TABLES_USED: only the
+/// EXPLAIN (`e_mode` NEXTOP.NORMAL), EXPLAIN QUERY PLAN (NEXTOP.EQP: only
+/// OP_Explain and OP_Init) or tables_used() (NEXTOP.TABLES_USED: only the
 /// opcodes that open tables). The rows are numbered from `pc` on (updated),
 /// through the main program, then each trigger program as it is found; `sub`
 /// (null to show only the main program) keeps the list of those, as a blob
-/// of pointers. The instruction is `addr` of `ops`. Returns RC.OK, RC.DONE
-/// at the end, or RC.ERROR.
-pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: u8, pc: *i32, addr: *usize, ops: *[]Op) i32 {
+/// of pointers. The instruction is `addr` of `ops`. Returns false at the
+/// end (C: SQLITE_DONE); on OOM (C: SQLITE_ERROR) `v.rc` is NOMEM.
+pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: NEXTOP, pc: *i32, addr: *usize, ops: *[]Op) error{OutOfMemory}!bool {
     var n_row: usize = v.ops.items.len;
     var n_sub: usize = 0;
-    var rc: i32 = RC.OK;
+    var more = true;
+    var failed = false;
     var a_op: []Op = &.{};
     var i: usize = 0;
     const Subs = struct {
@@ -631,7 +635,7 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: u8, pc: *i32, addr: *usize, ops:
     };
     var subs: Subs = .{};
     if (sub) |s| {
-        if (s.flags & MEM.Blob != 0) {
+        if (s.flags.Blob) {
             // Null at first; a blob once the first program is seen.
             n_sub = @as(usize, @intCast(s.n)) / @sizeOf(usize);
             subs.z = s.z.?;
@@ -644,7 +648,7 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: u8, pc: *i32, addr: *usize, ops:
         i_pc += 1;
         if (i >= n_row) {
             v.rc = RC.OK;
-            rc = RC.DONE;
+            more = false;
             break;
         }
         if (i < v.ops.items.len) {
@@ -670,25 +674,25 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: u8, pc: *i32, addr: *usize, ops:
                 const n_byte = (n_sub + 1) * @sizeOf(usize);
                 mem.grow(s, n_byte, n_sub != 0) catch {
                     v.rc = RC.NOMEM;
-                    rc = RC.ERROR;
+                    failed = true;
                     break;
                 };
                 subs.z = s.z.?;
                 subs.set(n_sub, prog);
                 n_sub += 1;
-                s.setTypeFlag(MEM.Blob);
+                s.setTypeFlag(.{ .Blob = true });
                 s.n = @intCast(n_sub * @sizeOf(usize));
                 n_row += prog.ops.len;
             }
         };
-        if (e_mode == NEXTOP_NORMAL) break;
-        if (e_mode == NEXTOP_TABLES_USED) {
+        if (e_mode == .NORMAL) break;
+        if (e_mode == .TABLES_USED) {
             const op = &a_op[i];
             if (op.opcode == OP.OpenRead) break;
             if (op.opcode == OP.OpenWrite and op.p5 & vi.OPFLAG.P2ISREG == 0) break;
             if (op.opcode == OP.ReopenIdx) break;
         } else {
-            std.debug.assert(e_mode == NEXTOP_EQP);
+            std.debug.assert(e_mode == .EQP);
             if (a_op[i].opcode == OP.Explain) break;
             if (a_op[i].opcode == OP.Init and i_pc > 1) break;
         }
@@ -696,7 +700,8 @@ pub fn nextOpcode(v: *Vdbe, sub: ?*Mem, e_mode: u8, pc: *i32, addr: *usize, ops:
     pc.* = @intCast(i_pc);
     addr.* = i;
     ops.* = a_op;
-    return rc;
+    if (failed) return error.OutOfMemory;
+    return more;
 }
 
 /// Port of sqlite3VdbeList(): the next row of EXPLAIN or EXPLAIN QUERY
@@ -711,13 +716,12 @@ pub fn list(v: *Vdbe) i32 {
         return RC.ERROR;
     }
     // With the trigger programs, mem[9] keeps the list of them.
-    const list_subprogs = v.explain == 1 or db.flags & int.DbFlag.TriggerEQP != 0;
+    const list_subprogs = v.explain == 1 or db.flags.TriggerEQP;
     const sub: ?*Mem = if (list_subprogs) &v.mem[9] else null;
     var i: usize = 0;
     var a_op: []Op = &.{};
-    const rc = nextOpcode(v, sub, if (v.explain == 2) NEXTOP_EQP else NEXTOP_NORMAL, &v.pc, &i, &a_op);
-    if (rc == RC.DONE) return RC.DONE;
-    if (rc != RC.OK) return RC.ERROR;
+    const more = nextOpcode(v, sub, if (v.explain == 2) NEXTOP.EQP else NEXTOP.NORMAL, &v.pc, &i, &a_op) catch return RC.ERROR;
+    if (!more) return RC.DONE;
     const op = &a_op[i];
     if (db.is_interrupted.load(.monotonic)) {
         v.rc = RC.INTERRUPT;
@@ -735,7 +739,7 @@ pub fn list(v: *Vdbe) i32 {
         mem.setTextZ(&cells[3], p4, .dynamic) catch {};
     } else {
         mem.setInt64(&cells[0], @intCast(i));
-        mem.setTextZ(&cells[1], @ptrCast(opcodes.names[op.opcode].name), .static) catch {};
+        mem.setTextZ(&cells[1], op.opcode.name(), .static) catch {};
         mem.setInt64(&cells[2], op.p1);
         mem.setInt64(&cells[3], op.p2);
         mem.setInt64(&cells[4], op.p3);
@@ -789,7 +793,7 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.ap_arg = a.alloc(*Mem, @intCast(n_arg)) catch return oom(v);
     v.csr = a.alloc(?*VdbeCursor, n_cursor) catch return oom(v);
     v.n_var = @intCast(n_var);
-    initMemArray(v.vars, db, MEM.Null);
+    initMemArray(v.vars, db, .{ .Null = true });
     initMemArray(v.mem, db, MEM.Undefined);
     @memset(v.csr, null);
     rewind(v);
@@ -901,7 +905,7 @@ pub fn setNumCols(v: *Vdbe, n: u16) void {
         v.col_names = &.{};
         return;
     };
-    initMemArray(v.col_names, v.db, MEM.Null);
+    initMemArray(v.col_names, v.db, .{ .Null = true });
 }
 
 /// Port of sqlite3VdbeSetColName(): name `var` (COLNAME_*) of column
@@ -930,7 +934,7 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
             if (rc != RC.OK) break;
             const bt = d.bt orelse continue;
             if (bt.txnState() == .write) bt.commitPhaseOne() catch |err| {
-                rc = main_mod.errorCode(err);
+                rc = int.errorCode(err);
             };
         }
     }
@@ -939,10 +943,10 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
             if (rc != RC.OK) break;
             const bt = d.bt orelse continue;
             if (bt.txnState() != .none) bt.commitPhaseTwo(false) catch |err| {
-                rc = main_mod.errorCode(err);
+                rc = int.errorCode(err);
             };
         }
-        if (rc == RC.OK) _ = vtab.commit(db);
+        if (rc == RC.OK) vtab.commit(db);
     }
     return rc;
 }
@@ -957,35 +961,42 @@ pub fn vdbeErrorFromMem(v: *Vdbe, m: *Mem) void {
     vdbeError(v, "{s}", .{if (z != null) m.bytes() else ""});
 }
 
-/// SAVEPOINT_* operations.
-pub const SAVEPOINT_BEGIN = 0;
-pub const SAVEPOINT_RELEASE = 1;
-pub const SAVEPOINT_ROLLBACK = 2;
+/// SAVEPOINT_* operations, numbered as in C (the P1 of OP_Savepoint).
+pub const SAVEPOINT = enum(u8) {
+    BEGIN = 0,
+    RELEASE = 1,
+    ROLLBACK = 2,
+
+    /// The number of the operation, as C stores it.
+    pub inline fn int(op: SAVEPOINT) u8 {
+        return @backingInt(op);
+    }
+};
 
 /// Port of sqlite3VdbeCloseStatement(). Statement transactions are not
 /// ported yet, so there is never one to close.
-pub fn closeStatement(v: *Vdbe, e_op: i32) i32 {
+pub fn closeStatement(v: *Vdbe, e_op: SAVEPOINT) i32 {
     if (v.db.n_statement != 0 and v.i_statement != 0) return closeStatementImpl(v, e_op);
     return RC.OK;
 }
 
 /// Port of vdbeCloseStatement(): release statement transaction
-/// i_statement, first rolling it back for SAVEPOINT_ROLLBACK.
-fn closeStatementImpl(v: *Vdbe, e_op: i32) i32 {
+/// i_statement, first rolling it back for SAVEPOINT.ROLLBACK.
+fn closeStatementImpl(v: *Vdbe, e_op: SAVEPOINT) i32 {
     const db = v.db;
     var rc: i32 = RC.OK;
     const i_savepoint = v.i_statement - 1;
     for (db.dbs.items) |d| {
         const bt = d.bt orelse continue;
         var rc2: i32 = RC.OK;
-        if (e_op == SAVEPOINT_ROLLBACK) {
+        if (e_op == .ROLLBACK) {
             bt.savepoint(.rollback, i_savepoint) catch |err| {
-                rc2 = main_mod.errorCode(err);
+                rc2 = int.errorCode(err);
             };
         }
         if (rc2 == RC.OK) {
             bt.savepoint(.release, i_savepoint) catch |err| {
-                rc2 = main_mod.errorCode(err);
+                rc2 = int.errorCode(err);
             };
         }
         if (rc == RC.OK) rc = rc2;
@@ -994,53 +1005,58 @@ fn closeStatementImpl(v: *Vdbe, e_op: i32) i32 {
     v.i_statement = 0;
     if (rc == RC.OK) {
         const vtab = @import("../sql/vtab.zig");
-        if (e_op == SAVEPOINT_ROLLBACK) rc = vtab.savepoint(db, SAVEPOINT_ROLLBACK, i_savepoint);
-        if (rc == RC.OK) rc = vtab.savepoint(db, SAVEPOINT_RELEASE, i_savepoint);
+        if (e_op == .ROLLBACK) rc = vtab.savepoint(db, .ROLLBACK, i_savepoint);
+        if (rc == RC.OK) rc = vtab.savepoint(db, .RELEASE, i_savepoint);
     }
-    if (e_op == SAVEPOINT_ROLLBACK) {
+    if (e_op == .ROLLBACK) {
         db.n_deferred_cons = v.n_stmt_def_cons;
         db.n_deferred_imm_cons = v.n_stmt_def_imm_cons;
     }
     return rc;
 }
 
+/// The errors of the foreign key checks.
+pub const FkError = error{ Constraint, Error };
+
 /// Port of sqlite3VdbeCheckFkImmediate().
-pub fn checkFkImmediate(v: *Vdbe) i32 {
-    if (v.n_fk_constraint == 0) return RC.OK;
+pub fn checkFkImmediate(v: *Vdbe) FkError!void {
+    if (v.n_fk_constraint == 0) return;
     return fkError(v);
 }
 
 /// Port of sqlite3VdbeCheckFkDeferred().
-pub fn checkFkDeferred(v: *Vdbe) i32 {
+pub fn checkFkDeferred(v: *Vdbe) FkError!void {
     const db = v.db;
-    if (db.n_deferred_cons + db.n_deferred_imm_cons == 0) return RC.OK;
+    if (db.n_deferred_cons + db.n_deferred_imm_cons == 0) return;
     return fkError(v);
 }
 
-/// SQLITE_CONSTRAINT_FOREIGNKEY.
-pub const CONSTRAINT_FOREIGNKEY: i32 = RC.CONSTRAINT | (3 << 8);
-
-fn fkError(v: *Vdbe) i32 {
-    v.rc = CONSTRAINT_FOREIGNKEY;
+/// The foreign key constraint failed: `v.rc` is
+/// SQLITE_CONSTRAINT_FOREIGNKEY, and the error is error.Constraint, or
+/// error.Error (SQLITE_ERROR) for a statement without saved SQL (the
+/// legacy sqlite3_prepare()).
+fn fkError(v: *Vdbe) FkError {
+    v.rc = RC.CONSTRAINT_FOREIGNKEY;
     v.error_action = OE.Abort;
     vdbeError(v, "FOREIGN KEY constraint failed", .{});
-    if (v.prep_flags & PREPARE_SAVESQL == 0) return RC.ERROR;
-    return CONSTRAINT_FOREIGNKEY;
+    if (v.prep_flags & PREPARE_SAVESQL == 0) return error.Error;
+    return error.Constraint;
 }
 
 
 /// Port of sqlite3VdbeHalt(): the program stops. In autocommit mode the
 /// transaction is committed (or rolled back on error); otherwise the
-/// statement transaction is released or rolled back. Returns BUSY if the
-/// commit must be retried.
-pub fn halt(v: *Vdbe) i32 {
+/// statement transaction is released or rolled back. Fails with Busy if
+/// the commit must be retried.
+pub fn halt(v: *Vdbe) error{Busy}!void {
     const db = v.db;
     std.debug.assert(v.e_vdbe_state == .run);
     if (db.malloc_failed) v.rc = RC.NOMEM;
     closeAllCursors(v);
 
     if (v.is_reader) {
-        var e_statement_op: i32 = 0;
+        // Null for none (0 in C).
+        var e_statement_op: ?SAVEPOINT = null;
         var is_special_error = false;
         var mrc: i32 = 0;
         if (v.rc != 0) {
@@ -1051,9 +1067,9 @@ pub fn halt(v: *Vdbe) i32 {
             // A rollback restores a consistent state, even if read-only.
             if (!v.read_only or mrc != RC.INTERRUPT) {
                 if ((mrc == RC.NOMEM or mrc == RC.FULL) and v.uses_stmt_journal) {
-                    e_statement_op = SAVEPOINT_ROLLBACK;
+                    e_statement_op = .ROLLBACK;
                 } else {
-                    main_mod.rollbackAll(db, RC.ABORT_ROLLBACK);
+                    main_mod.rollbackAll(db, error.Abort);
                     main_mod.closeSavepoints(db);
                     db.auto_commit = true;
                     v.n_change = 0;
@@ -1062,61 +1078,64 @@ pub fn halt(v: *Vdbe) i32 {
         }
 
         if (v.rc == RC.OK or (v.error_action == OE.Fail and !is_special_error)) {
-            _ = checkFkImmediate(v);
+            checkFkImmediate(v) catch {};
         }
 
         if (!@import("../sql/vtab.zig").inSync(db) and db.auto_commit and db.n_vdbe_write == @intFromBool(!v.read_only)) {
             if (v.rc == RC.OK or (v.error_action == OE.Fail and !is_special_error)) {
-                var rc = checkFkDeferred(v);
-                if (rc != RC.OK) {
-                    if (v.read_only) return RC.ERROR;
-                    rc = CONSTRAINT_FOREIGNKEY;
-                } else if (db.flags & int.DbFlag.CorruptRdOnly != 0) {
-                    rc = RC.CORRUPT;
-                    db.flags &= ~int.DbFlag.CorruptRdOnly;
-                } else {
-                    rc = vdbeCommit(db, v);
+                var rc: i32 = RC.OK;
+                if (checkFkDeferred(v)) |_| {
+                    if (db.flags.CorruptRdOnly) {
+                        rc = RC.CORRUPT;
+                        db.flags.CorruptRdOnly = false;
+                    } else {
+                        rc = vdbeCommit(db, v);
+                    }
+                } else |_| {
+                    // C returns SQLITE_ERROR here, which no caller acts on.
+                    if (v.read_only) return;
+                    rc = RC.CONSTRAINT_FOREIGNKEY;
                 }
                 if (rc == RC.BUSY and v.read_only) {
-                    return RC.BUSY;
+                    return error.Busy;
                 } else if (rc != RC.OK) {
                     v.rc = rc;
-                    main_mod.rollbackAll(db, RC.OK);
+                    main_mod.rollbackAll(db, null);
                     v.n_change = 0;
                 } else {
                     db.n_deferred_cons = 0;
                     db.n_deferred_imm_cons = 0;
-                    db.flags &= ~int.DbFlag.DeferFKs;
+                    db.flags.DeferFKs = false;
                     main_mod.commitInternalChanges(db);
                 }
             } else if (v.rc == RC.SCHEMA and db.n_vdbe_active > 1) {
                 v.n_change = 0;
             } else {
-                main_mod.rollbackAll(db, RC.OK);
+                main_mod.rollbackAll(db, null);
                 v.n_change = 0;
             }
             db.n_statement = 0;
-        } else if (e_statement_op == 0) {
+        } else if (e_statement_op == null) {
             if (v.rc == RC.OK or v.error_action == OE.Fail) {
-                e_statement_op = SAVEPOINT_RELEASE;
+                e_statement_op = .RELEASE;
             } else if (v.error_action == OE.Abort) {
-                e_statement_op = SAVEPOINT_ROLLBACK;
+                e_statement_op = .ROLLBACK;
             } else {
-                main_mod.rollbackAll(db, RC.ABORT_ROLLBACK);
+                main_mod.rollbackAll(db, error.Abort);
                 main_mod.closeSavepoints(db);
                 db.auto_commit = true;
                 v.n_change = 0;
             }
         }
 
-        if (e_statement_op != 0) {
-            const rc = closeStatement(v, e_statement_op);
+        if (e_statement_op) |op| {
+            const rc = closeStatement(v, op);
             if (rc != 0) {
                 if (v.rc == RC.OK or v.rc & 0xff == RC.CONSTRAINT) {
                     v.rc = rc;
                     setErrMsg(v, null);
                 }
-                main_mod.rollbackAll(db, RC.ABORT_ROLLBACK);
+                main_mod.rollbackAll(db, error.Abort);
                 main_mod.closeSavepoints(db);
                 db.auto_commit = true;
                 v.n_change = 0;
@@ -1124,7 +1143,7 @@ pub fn halt(v: *Vdbe) i32 {
         }
 
         if (v.change_cnt_on) {
-            setChanges(db, if (e_statement_op != SAVEPOINT_ROLLBACK) v.n_change else 0);
+            setChanges(db, if (e_statement_op != .ROLLBACK) v.n_change else 0);
             v.n_change = 0;
         }
     }
@@ -1134,7 +1153,7 @@ pub fn halt(v: *Vdbe) i32 {
     if (v.is_reader) db.n_vdbe_read -= 1;
     v.e_vdbe_state = .halt;
     if (db.malloc_failed) v.rc = RC.NOMEM;
-    return if (v.rc == RC.BUSY) RC.BUSY else RC.OK;
+    if (v.rc == RC.BUSY) return error.Busy;
 }
 
 /// Port of sqlite3VdbeSwap(): exchange the programs of two statements,
@@ -1177,7 +1196,7 @@ pub fn transferError(v: *Vdbe) i32 {
 /// connection, and be ready to run again. Returns the result code.
 pub fn reset(v: *Vdbe) i32 {
     const db = v.db;
-    if (v.e_vdbe_state == .run) _ = halt(v);
+    if (v.e_vdbe_state == .run) halt(v) catch {};
     if (v.pc >= 0) {
         if (db.err != null or v.err_msg != null) {
             _ = transferError(v);

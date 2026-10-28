@@ -345,18 +345,15 @@ fn instrFunc(ctx: *Context, argv: []*Mem) void {
 }
 
 /// The arguments of printf() after the format (PrintfArguments).
-fn printfArgInt64(p: *anyopaque, i: usize) i64 {
-    const args: *const []*Mem = @ptrCast(@alignCast(p));
+fn printfArgInt64(args: *const []*Mem, i: usize) i64 {
     return api.valueInt64(args.*[i]);
 }
 
-fn printfArgDouble(p: *anyopaque, i: usize) f64 {
-    const args: *const []*Mem = @ptrCast(@alignCast(p));
+fn printfArgDouble(args: *const []*Mem, i: usize) f64 {
     return api.valueDouble(args.*[i]);
 }
 
-fn printfArgText(p: *anyopaque, i: usize) ?[]const u8 {
-    const args: *const []*Mem = @ptrCast(@alignCast(p));
+fn printfArgText(args: *const []*Mem, i: usize) ?[]const u8 {
     return api.valueText(args.*[i]);
 }
 
@@ -365,14 +362,8 @@ fn printfFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
     if (argv.len < 1) return;
     const z_format = api.valueText(argv[0]) orelse return;
-    var rest: []*Mem = argv[1..];
-    var x: printf.ArgSource = .{
-        .ctx = @ptrCast(&rest),
-        .n_arg = rest.len,
-        .int64 = printfArgInt64,
-        .double = printfArgDouble,
-        .text = printfArgText,
-    };
+    const rest: []*Mem = argv[1..];
+    var x: printf.ArgSource = .init(&rest, rest.len, printfArgInt64, printfArgDouble, printfArgText);
     var str = printf.StrAccum.init(db.gpa, &.{}, @intCast(db.limit(.length)));
     printf.vappendf(&str, z_format, .{ .sql = &x });
     api.resultStr(ctx, &str, .xfer);
@@ -798,9 +789,9 @@ pub fn strlike(pattern: ?[*:0]const u8, string: ?[*:0]const u8, esc: u32) i32 {
 
 /// likeFunc(): like(PATTERN, STRING[, ESCAPE]), which implements
 /// "STRING LIKE PATTERN"; with glob_info as user data, GLOB.
-fn likeFunc(ctx: *Context, argv: []*Mem) void {
+fn likeFunc(ctx: *Context, argv: []*Mem, user_info: *const CompareInfo) void {
     const db = api.contextDbHandle(ctx);
-    var info: *const CompareInfo = @ptrCast(@alignCast(api.userData(ctx).?));
+    var info = user_info;
     var backup_info: CompareInfo = undefined;
 
     // Limit the pattern length against deep recursion and N*N behavior.
@@ -1283,7 +1274,7 @@ fn concatwsFunc(ctx: *Context, argv: []*Mem) void {
 fn loadExt(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
     // Only with SQLITE_LoadExtFunc (sqlite3_enable_load_extension()).
-    if (db.flags & int.DbFlag.LoadExtFunc == 0) {
+    if (!db.flags.LoadExtFunc) {
         api.resultError(ctx, "not authorized");
         return;
     }
@@ -1526,7 +1517,7 @@ fn minmaxStep(ctx: *Context, argv: []*Mem) void {
 fn minMaxValueFinalize(ctx: *Context, b_value: bool) void {
     const p = aggContext(MinMaxCtx, ctx, false) orelse return;
     if (!p.init) return;
-    if (p.best.flags != 0) api.resultValue(ctx, &p.best);
+    if (!p.best.flags.isEmpty()) api.resultValue(ctx, &p.best);
     if (!b_value) mem.release(&p.best);
 }
 
@@ -1676,14 +1667,14 @@ pub fn registerPerConnectionBuiltinFunctions(db: *Sqlite3) void {
 /// sensitive or not (PRAGMA case_sensitive_like).
 pub fn registerLikeFunctions(db: *Sqlite3, case_sensitive: bool) void {
     const info: *const CompareInfo = if (case_sensitive) &like_info_alt else &like_info_norm;
-    const flags: u32 = if (case_sensitive) FUNC.LIKE | FUNC.CASE else FUNC.LIKE;
+    const like_flags: FUNC = .{ .LIKE = true, .CASE = case_sensitive };
     var n_arg: i32 = 2;
     while (n_arg <= 3) : (n_arg += 1) {
-        _ = callback.createFunc(db, "like", n_arg, ENC.UTF8, @ptrCast(@constCast(info)), likeFunc, null, null, null, null, null);
+        _ = callback.createFunc(db, "like", n_arg, ENC.UTF8, .{}, FuncDef.userDataFor(likeFunc, info), FuncDef.withUserData(likeFunc), null, null, null, null, null);
         // Cannot fail: "like" already exists.
         const def = callback.findFunction(db, "like", n_arg, ENC.UTF8, false).?;
-        def.func_flags |= flags;
-        def.func_flags &= ~FUNC.UNSAFE;
+        def.func_flags.set(like_flags);
+        def.func_flags.UNSAFE = false;
     }
 }
 
@@ -1697,9 +1688,9 @@ pub fn isLikeFunction(db: *Sqlite3, e: *Expr, is_nocase: *bool, wc: *[4]u8) bool
     const list = e.x.list orelse return false;
     const n_expr = list.len();
     const def = callback.findFunction(db, e.token(), @intCast(n_expr), ENC.UTF8, false) orelse return false;
-    if (def.func_flags & FUNC.LIKE == 0) return false;
+    if (!def.func_flags.LIKE) return false;
 
-    const info: *const CompareInfo = @ptrCast(@alignCast(def.user_data.?));
+    const info = def.userDataOf(likeFunc);
     wc[0] = info.match_all;
     wc[1] = info.match_one;
     wc[2] = info.match_set;
@@ -1713,7 +1704,7 @@ pub fn isLikeFunction(db: *Sqlite3, e: *Expr, is_nocase: *bool, wc: *[4]u8) bool
         if (z[0] == wc[0] or z[0] == wc[1]) return false;
         wc[3] = z[0];
     }
-    is_nocase.* = def.func_flags & FUNC.CASE == 0;
+    is_nocase.* = !def.func_flags.CASE;
     return true;
 }
 
@@ -1722,7 +1713,7 @@ pub fn isLikeFunction(db: *Sqlite3, e: *Expr, is_nocase: *bool, wc: *[4]u8) bool
 fn function(name: [:0]const u8, n_arg: i16, i_arg: usize, bnc: u1, x: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | FUNC.CONSTANT | ENC.UTF8 | @as(u32, bnc) * FUNC.NEEDCOLL,
+        .func_flags = .{ .enc = ENC.UTF8, .BUILTIN = true, .CONSTANT = true, .NEEDCOLL = bnc != 0 },
         .user_data = intToPtr(i_arg),
         .x_sfunc = x,
         .name = name,
@@ -1733,7 +1724,7 @@ fn function(name: [:0]const u8, n_arg: i16, i_arg: usize, bnc: u1, x: FuncDef.St
 fn vfunction(name: [:0]const u8, n_arg: i16, i_arg: usize, bnc: u1, x: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | ENC.UTF8 | @as(u32, bnc) * FUNC.NEEDCOLL,
+        .func_flags = .{ .enc = ENC.UTF8, .BUILTIN = true, .NEEDCOLL = bnc != 0 },
         .user_data = intToPtr(i_arg),
         .x_sfunc = x,
         .name = name,
@@ -1744,7 +1735,8 @@ fn vfunction(name: [:0]const u8, n_arg: i16, i_arg: usize, bnc: u1, x: FuncDef.S
 fn sfunction(name: [:0]const u8, n_arg: i16, i_arg: usize, x: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | ENC.UTF8 | callback.FNFLAG.DIRECTONLY | FUNC.UNSAFE,
+        // SQLITE_DIRECTONLY is SQLITE_FUNC_DIRECT.
+        .func_flags = .{ .enc = ENC.UTF8, .BUILTIN = true, .DIRECT = true, .UNSAFE = true },
         .user_data = intToPtr(i_arg),
         .x_sfunc = x,
         .name = name,
@@ -1755,25 +1747,25 @@ fn sfunction(name: [:0]const u8, n_arg: i16, i_arg: usize, x: FuncDef.StepFn) Fu
 pub fn dfunction(name: [:0]const u8, n_arg: i16, x: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | FUNC.SLOCHNG | ENC.UTF8,
+        .func_flags = .{ .enc = ENC.UTF8, .BUILTIN = true, .SLOCHNG = true },
         .x_sfunc = x,
         .name = name,
     };
 }
 
 /// FUNCTION2(): FUNCTION() with extra flags.
-fn function2(name: [:0]const u8, n_arg: i16, i_arg: usize, bnc: u1, x: FuncDef.StepFn, extra: u32) FuncDef {
+fn function2(name: [:0]const u8, n_arg: i16, i_arg: usize, bnc: u1, x: FuncDef.StepFn, extra: FUNC) FuncDef {
     var f = function(name, n_arg, i_arg, bnc, x);
-    f.func_flags |= extra;
+    f.func_flags.set(extra);
     return f;
 }
 
 /// INLINE_FUNC(): coded in-line by the code generator; user data is the
 /// INLINEFUNC_* number.
-fn inlineFunc(name: [:0]const u8, n_arg: i16, i_arg: usize, m_flags: u32) FuncDef {
+fn inlineFunc(name: [:0]const u8, n_arg: i16, i_arg: usize, m_flags: FUNC) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | ENC.UTF8 | FUNC.INLINE | FUNC.CONSTANT | m_flags,
+        .func_flags = m_flags.with(.{ .enc = ENC.UTF8, .BUILTIN = true, .INLINE = true, .CONSTANT = true }),
         .user_data = intToPtr(i_arg),
         .x_sfunc = noopFunc,
         .name = name,
@@ -1781,10 +1773,10 @@ fn inlineFunc(name: [:0]const u8, n_arg: i16, i_arg: usize, m_flags: u32) FuncDe
 }
 
 /// TEST_FUNC(): an in-line function for SQLITE_TESTCTRL_INTERNAL_FUNCTIONS.
-fn testFunc(name: [:0]const u8, n_arg: i16, i_arg: usize, m_flags: u32) FuncDef {
+fn testFunc(name: [:0]const u8, n_arg: i16, i_arg: usize, m_flags: FUNC) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | ENC.UTF8 | FUNC.INTERNAL | FUNC.TEST | FUNC.INLINE | FUNC.CONSTANT | m_flags,
+        .func_flags = m_flags.with(.{ .enc = ENC.UTF8, .BUILTIN = true, .INTERNAL = true, .TEST = true, .INLINE = true, .CONSTANT = true }),
         .user_data = intToPtr(i_arg),
         .x_sfunc = noopFunc,
         .name = name,
@@ -1792,12 +1784,12 @@ fn testFunc(name: [:0]const u8, n_arg: i16, i_arg: usize, m_flags: u32) FuncDef 
 }
 
 /// LIKEFUNC(): like() or glob() with its CompareInfo.
-fn likeFuncDef(name: [:0]const u8, n_arg: i16, info: *const CompareInfo, flags: u32) FuncDef {
+fn likeFuncDef(name: [:0]const u8, n_arg: i16, info: *const CompareInfo, like_flags: FUNC) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | FUNC.CONSTANT | ENC.UTF8 | flags,
-        .user_data = @ptrCast(@constCast(info)),
-        .x_sfunc = likeFunc,
+        .func_flags = like_flags.with(.{ .enc = ENC.UTF8, .BUILTIN = true, .CONSTANT = true }),
+        .user_data = FuncDef.userDataFor(likeFunc, info),
+        .x_sfunc = FuncDef.withUserData(likeFunc),
         .name = name,
     };
 }
@@ -1813,11 +1805,11 @@ fn waggregate(
     final: FuncDef.FinalFn,
     value: ?FuncDef.FinalFn,
     inverse: ?FuncDef.StepFn,
-    f: u32,
+    f: FUNC,
 ) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | ENC.UTF8 | @as(u32, nc) * FUNC.NEEDCOLL | f,
+        .func_flags = f.with(.{ .enc = ENC.UTF8, .BUILTIN = true, .NEEDCOLL = nc != 0 }),
         .user_data = intToPtr(arg),
         .x_sfunc = step,
         .x_finalize = final,
@@ -1831,18 +1823,18 @@ fn waggregate(
 /// are set by callback.insertBuiltinFuncs(); read-only after that.
 var builtin_funcs = [_]FuncDef{
     // Only with SQLITE_TESTCTRL_INTERNAL_FUNCTIONS.
-    testFunc("implies_nonnull_row", 2, INLINEFUNC_implies_nonnull_row, 0),
-    testFunc("expr_compare", 2, INLINEFUNC_expr_compare, 0),
-    testFunc("expr_implies_expr", 2, INLINEFUNC_expr_implies_expr, 0),
-    testFunc("affinity", 1, INLINEFUNC_affinity, 0),
+    testFunc("implies_nonnull_row", 2, INLINEFUNC_implies_nonnull_row, .{}),
+    testFunc("expr_compare", 2, INLINEFUNC_expr_compare, .{}),
+    testFunc("expr_implies_expr", 2, INLINEFUNC_expr_implies_expr, .{}),
+    testFunc("affinity", 1, INLINEFUNC_affinity, .{}),
     // Regular functions.
     sfunction("load_extension", 1, 0, loadExt),
     sfunction("load_extension", 2, 0, loadExt),
     dfunction("sqlite_compileoption_used", 1, compileoptionusedFunc),
     dfunction("sqlite_compileoption_get", 1, compileoptiongetFunc),
-    inlineFunc("unlikely", 1, INLINEFUNC_unlikely, FUNC.UNLIKELY),
-    inlineFunc("likelihood", 2, INLINEFUNC_unlikely, FUNC.UNLIKELY),
-    inlineFunc("likely", 1, INLINEFUNC_unlikely, FUNC.UNLIKELY),
+    inlineFunc("unlikely", 1, INLINEFUNC_unlikely, .{ .UNLIKELY = true }),
+    inlineFunc("likelihood", 2, INLINEFUNC_unlikely, .{ .UNLIKELY = true }),
+    inlineFunc("likely", 1, INLINEFUNC_unlikely, .{ .UNLIKELY = true }),
     function("ltrim", 1, 1, 0, trimFunc),
     function("ltrim", 2, 1, 0, trimFunc),
     function("rtrim", 1, 2, 0, trimFunc),
@@ -1850,12 +1842,12 @@ var builtin_funcs = [_]FuncDef{
     function("trim", 1, 3, 0, trimFunc),
     function("trim", 2, 3, 0, trimFunc),
     function("min", -3, 0, 1, minmaxFunc),
-    waggregate("min", 1, 0, 1, minmaxStep, minMaxFinalize, minMaxValue, null, FUNC.MINMAX | FUNC.ANYORDER),
+    waggregate("min", 1, 0, 1, minmaxStep, minMaxFinalize, minMaxValue, null, .{ .MINMAX = true, .ANYORDER = true }),
     function("max", -3, 1, 1, minmaxFunc),
-    waggregate("max", 1, 1, 1, minmaxStep, minMaxFinalize, minMaxValue, null, FUNC.MINMAX | FUNC.ANYORDER),
-    function2("typeof", 1, 0, 0, typeofFunc, FUNC.TYPEOF),
-    function2("subtype", 1, 0, 0, subtypeFunc, FUNC.TYPEOF | callback.FNFLAG.SUBTYPE),
-    function2("length", 1, 0, 0, lengthFunc, FUNC.LENGTH),
+    waggregate("max", 1, 1, 1, minmaxStep, minMaxFinalize, minMaxValue, null, .{ .MINMAX = true, .ANYORDER = true }),
+    function2("typeof", 1, 0, 0, typeofFunc, .{ .TYPEOF = true }),
+    function2("subtype", 1, 0, 0, subtypeFunc, .{ .TYPEOF = true, .SUBTYPE = true }),
+    function2("length", 1, 0, 0, lengthFunc, .{ .LENGTH = true }),
     function2("octet_length", 1, 0, 0, bytelengthFunc, FUNC.BYTELEN),
     function("instr", 2, 0, 0, instrFunc),
     function("printf", -1, 0, 0, printfFunc),
@@ -1872,7 +1864,7 @@ var builtin_funcs = [_]FuncDef{
     function("unhex", 2, 0, 0, unhexFunc),
     function("concat", -3, 0, 0, concatFunc),
     function("concat_ws", -4, 0, 0, concatwsFunc),
-    inlineFunc("ifnull", 2, INLINEFUNC_coalesce, 0),
+    inlineFunc("ifnull", 2, INLINEFUNC_coalesce, .{}),
     vfunction("random", 0, 0, 0, randomFunc),
     vfunction("randomblob", 1, 0, 0, randomBlob),
     function("nullif", 2, 0, 1, nullifFunc),
@@ -1891,21 +1883,21 @@ var builtin_funcs = [_]FuncDef{
     function("substr", 3, 0, 0, substrFunc),
     function("substring", 2, 0, 0, substrFunc),
     function("substring", 3, 0, 0, substrFunc),
-    waggregate("sum", 1, 0, 0, sumStep, sumFinalize, sumFinalize, sumInverse, 0),
-    waggregate("total", 1, 0, 0, sumStep, totalFinalize, totalFinalize, sumInverse, 0),
-    waggregate("avg", 1, 0, 0, sumStep, avgFinalize, avgFinalize, sumInverse, 0),
-    waggregate("count", 0, 0, 0, countStep, countFinalize, countFinalize, countInverse, FUNC.COUNT | FUNC.ANYORDER),
-    waggregate("count", 1, 0, 0, countStep, countFinalize, countFinalize, countInverse, FUNC.ANYORDER),
-    waggregate("group_concat", 1, 0, 0, groupConcatStep, groupConcatFinalize, groupConcatValue, groupConcatInverse, 0),
-    waggregate("group_concat", 2, 0, 0, groupConcatStep, groupConcatFinalize, groupConcatValue, groupConcatInverse, 0),
-    waggregate("string_agg", 2, 0, 0, groupConcatStep, groupConcatFinalize, groupConcatValue, groupConcatInverse, 0),
-    likeFuncDef("glob", 2, &glob_info, FUNC.LIKE | FUNC.CASE),
-    likeFuncDef("like", 2, &like_info_norm, FUNC.LIKE),
-    likeFuncDef("like", 3, &like_info_norm, FUNC.LIKE),
+    waggregate("sum", 1, 0, 0, sumStep, sumFinalize, sumFinalize, sumInverse, .{}),
+    waggregate("total", 1, 0, 0, sumStep, totalFinalize, totalFinalize, sumInverse, .{}),
+    waggregate("avg", 1, 0, 0, sumStep, avgFinalize, avgFinalize, sumInverse, .{}),
+    waggregate("count", 0, 0, 0, countStep, countFinalize, countFinalize, countInverse, .{ .COUNT = true, .ANYORDER = true }),
+    waggregate("count", 1, 0, 0, countStep, countFinalize, countFinalize, countInverse, .{ .ANYORDER = true }),
+    waggregate("group_concat", 1, 0, 0, groupConcatStep, groupConcatFinalize, groupConcatValue, groupConcatInverse, .{}),
+    waggregate("group_concat", 2, 0, 0, groupConcatStep, groupConcatFinalize, groupConcatValue, groupConcatInverse, .{}),
+    waggregate("string_agg", 2, 0, 0, groupConcatStep, groupConcatFinalize, groupConcatValue, groupConcatInverse, .{}),
+    likeFuncDef("glob", 2, &glob_info, .{ .LIKE = true, .CASE = true }),
+    likeFuncDef("like", 2, &like_info_norm, .{ .LIKE = true }),
+    likeFuncDef("like", 3, &like_info_norm, .{ .LIKE = true }),
     function("sign", 1, 0, 0, signFunc),
-    inlineFunc("coalesce", -4, INLINEFUNC_coalesce, 0),
-    inlineFunc("iif", -4, INLINEFUNC_iif, 0),
-    inlineFunc("if", -4, INLINEFUNC_iif, 0),
+    inlineFunc("coalesce", -4, INLINEFUNC_coalesce, .{}),
+    inlineFunc("iif", -4, INLINEFUNC_iif, .{}),
+    inlineFunc("if", -4, INLINEFUNC_iif, .{}),
 };
 
 /// Port of sqlite3RegisterBuiltinFunctions(): fill the global table of
@@ -2253,7 +2245,7 @@ test "func: sum, total, avg and count" {
         try testing.expectEqual(@as(i64, 2), a.acc.u.i);
         var star = try Agg.init(&db, "count", 0);
         defer star.deinit();
-        try testing.expect(star.def.func_flags & FUNC.COUNT != 0);
+        try testing.expect(star.def.func_flags.COUNT);
         try testing.expectEqual(@as(i32, 0), star.final());
         try testing.expectEqual(@as(i64, 0), star.acc.u.i);
     }
@@ -2435,8 +2427,8 @@ test "func: registration and lookup" {
     // In-line functions are coded by the code generator.
     for ([_][]const u8{ "coalesce", "iif", "if" }) |name| {
         const def = callback.findFunction(&db, name, 3, ENC.UTF8, false).?;
-        try testing.expect(def.func_flags & FUNC.INLINE != 0);
-        try testing.expect(def.func_flags & FUNC.BUILTIN != 0);
+        try testing.expect(def.func_flags.INLINE);
+        try testing.expect(def.func_flags.BUILTIN);
     }
     try testing.expectEqual(@as(usize, INLINEFUNC_coalesce), ptrToInt(callback.findFunction(&db, "COALESCE", 2, ENC.UTF8, false).?.user_data));
     try testing.expectEqual(@as(usize, INLINEFUNC_iif), ptrToInt(callback.findFunction(&db, "iif", 3, ENC.UTF8, false).?.user_data));
@@ -2460,17 +2452,17 @@ test "func: registration and lookup" {
             api.resultInt(ctx, 42);
         }
     }.f;
-    try testing.expectEqual(RC.OK, callback.createFunction(&db, "Abs", 1, ENC.UTF8 | callback.FNFLAG.DETERMINISTIC, null, custom, null, null, null));
+    try testing.expectEqual(RC.OK, callback.createFunction(&db, "Abs", 1, ENC.UTF8 | callback.FNFLAG.DETERMINISTIC.int(), null, custom, null, null, null));
     try expectInt(&db, 42, "abs", .{tInt(&db, -1)});
     // ... unless built-ins are preferred.
-    db.m_db_flags |= int.DBFLAG.PreferBuiltin;
+    db.m_db_flags.PreferBuiltin = true;
     try expectInt(&db, 1, "abs", .{tInt(&db, -1)});
-    db.m_db_flags &= ~int.DBFLAG.PreferBuiltin;
+    db.m_db_flags.PreferBuiltin = false;
     const def = callback.findFunction(&db, "ABS", 1, ENC.UTF8, false).?;
     try testing.expectEqualStrings("abs", def.name);
-    try testing.expect(def.func_flags & FUNC.BUILTIN == 0);
-    try testing.expect(def.func_flags & FUNC.CONSTANT != 0);
-    try testing.expect(def.func_flags & FUNC.UNSAFE != 0);
+    try testing.expect(!def.func_flags.BUILTIN);
+    try testing.expect(def.func_flags.CONSTANT);
+    try testing.expect(def.func_flags.UNSAFE);
     // Replacing keeps one FuncDef; a different arity adds another.
     try testing.expectEqual(RC.OK, callback.createFunction(&db, "abs", 1, ENC.UTF8, null, custom, null, null, null));
     try testing.expectEqual(def, callback.findFunction(&db, "abs", 1, ENC.UTF8, false).?);
@@ -2488,7 +2480,7 @@ test "func: registration and lookup" {
         }
     };
     try testing.expectEqual(RC.OK, callback.createFunctionV2(&db, "anyenc", 0, ENC.ANY, null, custom, null, null, null, destroyed.f));
-    try testing.expect(callback.findFunction(&db, "anyenc", 0, ENC.UTF16BE, false).?.func_flags & FUNC.ENCMASK == ENC.UTF16BE);
+    try testing.expect(callback.findFunction(&db, "anyenc", 0, ENC.UTF16BE, false).?.func_flags.enc == ENC.UTF16BE);
     try testing.expectEqual(@as(u32, 0), destroyed.n);
     // MATCH exists but fails outside a virtual table.
     registerPerConnectionBuiltinFunctions(&db);

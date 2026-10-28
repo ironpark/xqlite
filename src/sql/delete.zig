@@ -38,9 +38,7 @@ const TK = int.TK;
 const OE = int.OE;
 const NC = int.NC;
 const WHERE = int.WHERE;
-const ONEPASS_OFF = where_mod.ONEPASS_OFF;
-const ONEPASS_SINGLE = where_mod.ONEPASS_SINGLE;
-const ONEPASS_MULTI = where_mod.ONEPASS_MULTI;
+const ONEPASS = where_mod.ONEPASS;
 
 /// Port of sqlite3CodeChangeCount(): return the number of rows changed
 /// as the statement's result.
@@ -58,7 +56,7 @@ fn vtabIsReadOnly(p: *Parse, t: *Table) bool {
     std.debug.assert(t.isVirtual());
     if (vtab.getVTable(p.db, t).?.mod.module.x_update == null) return true;
     if ((p.toplevel != null or p.prep_flags & aux.PREPARE_FROM_DDL != 0) and
-        t.u.vtab.p.?.e_vtab_risk > @intFromBool(p.db.flags & int.DbFlag.TrustedSchema != 0))
+        t.u.vtab.p.?.e_vtab_risk.unsafeInSchema(p.db.flags.TrustedSchema))
     {
         util.errorMsg(p, "unsafe use of virtual table \"{s}\"", .{t.name});
     }
@@ -70,8 +68,8 @@ fn vtabIsReadOnly(p: *Parse, t: *Table) bool {
 /// shadow tables.
 fn tabIsReadOnly(p: *Parse, t: *Table) bool {
     if (t.isVirtual()) return vtabIsReadOnly(p, t);
-    if (t.tab_flags & (TF.Readonly | TF.Shadow) == 0) return false;
-    if (t.tab_flags & TF.Readonly != 0) return !build.writableSchema(p.db) and p.nested == 0;
+    if (!t.tab_flags.intersects(.{ .Readonly = true, .Shadow = true })) return false;
+    if (t.tab_flags.Readonly) return !build.writableSchema(p.db) and p.nested == 0;
     return build.readOnlyShadowTables(p.db);
 }
 
@@ -103,7 +101,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     const trig = trigger.triggersExist(p, t, TK.DELETE, null, null);
     const is_view = t.isView();
     var b_complex = trig != null or fkey.fkRequired(p, t, null, false) != 0;
-    if (build.viewGetColumnNames(p, t) != 0) return;
+    build.viewGetColumnNames(p, t) catch return;
     if (isReadOnly(p, t, trig)) return;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
 
@@ -133,10 +131,10 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     }
 
     var nc: NameContext = .{ .parse = p, .src_list = tab_list };
-    if (resolve.resolveExprNames(&nc, where) != 0) return;
+    resolve.resolveExprNames(&nc, where) catch return;
 
     var mem_cnt: i32 = 0;
-    if (db.flags & int.DbFlag.CountRows != 0 and p.nested == 0 and p.trigger_tab == null and !p.returning) {
+    if (db.flags.CountRows and p.nested == 0 and p.trigger_tab == null and !p.returning) {
         p.n_mem += 1;
         mem_cnt = p.n_mem;
         _ = aux.addOp2(v, OP.Integer, 0, mem_cnt);
@@ -156,9 +154,9 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
             }
         }
     } else {
-        var wcf: u16 = WHERE.ONEPASS_DESIRED | WHERE.DUPLICATES_OK;
-        if (nc.nc_flags & NC.Subquery != 0) b_complex = true;
-        if (!b_complex) wcf |= WHERE.ONEPASS_MULTIROW;
+        var wcf: WHERE = .{ .ONEPASS_DESIRED = true, .DUPLICATES_OK = true };
+        if (nc.nc_flags.Subquery) b_complex = true;
+        if (!b_complex) wcf.ONEPASS_MULTIROW = true;
 
         // The keys of the rows to delete: a RowSet of rowids, or for a
         // WITHOUT ROWID table an ephemeral table of PRIMARY KEYs.
@@ -187,7 +185,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         const w = where_mod.whereBegin(p, tab_list, where, null, null, null, wcf, i_tab_cur + 1) orelse return;
         var ai_cur_one_pass: [2]i32 = .{ -1, -1 };
         const e_one_pass = where_mod.okOnePass(w, &ai_cur_one_pass);
-        if (e_one_pass != ONEPASS_SINGLE) main_mod.multiWrite(p);
+        if (e_one_pass != ONEPASS.SINGLE) main_mod.multiWrite(p);
         if (where_mod.usesDeferredSeek(w)) _ = aux.addOp1(v, OP.FinishSeek, i_tab_cur);
         if (mem_cnt != 0) _ = aux.addOp2(v, OP.AddImm, mem_cnt, 1);
 
@@ -207,7 +205,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         var n_key: i16 = undefined;
         var to_open: ?[]bool = null;
         var addr_bypass: i32 = 0;
-        if (e_one_pass != ONEPASS_OFF) {
+        if (e_one_pass != ONEPASS.OFF) {
             // One pass: the key stays in its registers.
             n_key = n_pk;
             const o = try p.arena.alloc(bool, n_idx + 2);
@@ -236,14 +234,14 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         // its INSTEAD OF triggers).
         if (!is_view) {
             var i_addr_once: i32 = 0;
-            if (e_one_pass == ONEPASS_MULTI) i_addr_once = aux.addOp0(v, OP.Once);
+            if (e_one_pass == ONEPASS.MULTI) i_addr_once = aux.addOp0(v, OP.Once);
             _ = insert.openTableAndIndices(p, t, OP.OpenWrite, OPFLAG.FORDELETE, i_tab_cur, to_open, &i_data_cur, &i_idx_cur);
-            if (e_one_pass == ONEPASS_MULTI) aux.jumpHereOrPopInst(v, i_addr_once);
+            if (e_one_pass == ONEPASS.MULTI) aux.jumpHereOrPopInst(v, i_addr_once);
         }
 
         // The loop over the keys found.
         var addr_loop: i32 = 0;
-        if (e_one_pass != ONEPASS_OFF) {
+        if (e_one_pass != ONEPASS.OFF) {
             if (!t.isVirtual() and to_open.?[@intCast(i_data_cur - i_tab_cur)]) {
                 _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, addr_bypass, i_key, n_key);
             }
@@ -260,19 +258,19 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
 
         if (t.isVirtual()) {
             vtab.makeWritable(p, t);
-            std.debug.assert(e_one_pass == ONEPASS_OFF or e_one_pass == ONEPASS_SINGLE);
+            std.debug.assert(e_one_pass == ONEPASS.OFF or e_one_pass == ONEPASS.SINGLE);
             main_mod.mayAbort(p);
-            if (e_one_pass == ONEPASS_SINGLE) {
+            if (e_one_pass == ONEPASS.SINGLE) {
                 _ = aux.addOp1(v, OP.Close, i_tab_cur);
                 if (p.toplevel == null) p.is_multi_write = false;
             }
             _ = aux.addOp4(v, OP.VUpdate, 0, 1, i_key, build.vtabP4(db, t));
-            aux.changeP5(v, OE.Abort);
+            aux.changeP5(v, OE.Abort.int());
         } else {
             generateRowDelete(p, t, trig, i_data_cur, i_idx_cur, i_key, n_key, p.nested == 0, OE.Default, e_one_pass, ai_cur_one_pass[1]);
         }
 
-        if (e_one_pass != ONEPASS_OFF) {
+        if (e_one_pass != ONEPASS.OFF) {
             aux.resolveLabel(v, addr_bypass);
             where_mod.whereEnd(w);
         } else if (pk != null) {
@@ -302,14 +300,14 @@ fn materializeViewImpl(p: *Parse, view: *Table, where_arg: ?*Expr, order_by: ?*E
     const item = from.at(0);
     item.name = try p.arena.dupeSentinel(u8, view.name, 0);
     item.u4 = .{ .database = try p.arena.dupeSentinel(u8, db.dbs.items[i_db].name, 0) };
-    const sel = try select_mod.selectNew(p, null, from, where, null, null, order_by, SF.IncludeHidden, limit);
+    const sel = try select_mod.selectNew(p, null, from, where, null, null, order_by, .{ .IncludeHidden = true }, limit);
     var dest = select_mod.selectDestInit(select_mod.SRT.EphemTab, i_cur);
-    _ = select_mod.select(p, sel, &dest);
+    select_mod.select(p, sel, &dest) catch {};
 }
 
 /// Port of sqlite3GenerateRowDelete(): delete one row and its index
 /// entries. Its key is in the `n_pk` registers from `i_pk` (a record if
-/// `n_pk` is 0); with `e_mode` other than ONEPASS_OFF `i_data_cur`
+/// `n_pk` is 0); with `e_mode` other than ONEPASS.OFF `i_data_cur`
 /// already points at it. `i_idx_no_seek`, if not negative, is an index
 /// cursor already on the row's entry.
 pub fn generateRowDelete(
@@ -321,8 +319,8 @@ pub fn generateRowDelete(
     i_pk: i32,
     n_pk: i16,
     count: bool,
-    onconf: u8,
-    e_mode: u8,
+    onconf: OE,
+    e_mode: ONEPASS,
     i_idx_no_seek_arg: i32,
 ) void {
     const v = p.vdbe.?;
@@ -331,8 +329,8 @@ pub fn generateRowDelete(
 
     // Seek the row; it may be gone already (deleted by a trigger).
     const i_label = aux.makeLabel(p);
-    const op_seek: u8 = if (t.hasRowid()) OP.NotExists else OP.NotFound;
-    if (e_mode == ONEPASS_OFF) _ = aux.addOp4Int(v, op_seek, i_data_cur, i_label, i_pk, n_pk);
+    const op_seek: OP = if (t.hasRowid()) OP.NotExists else OP.NotFound;
+    if (e_mode == ONEPASS.OFF) _ = aux.addOp4Int(v, op_seek, i_data_cur, i_label, i_pk, n_pk);
 
     // The OLD.* registers of triggers and foreign keys.
     if (fkey.fkRequired(p, t, null, false) != 0 or trig != null) {
@@ -364,9 +362,9 @@ pub fn generateRowDelete(
         generateRowIndexDelete(p, t, i_data_cur, i_idx_cur, null, i_idx_no_seek);
         _ = aux.addOp2(v, OP.Delete, i_data_cur, if (count) OPFLAG.NCHANGE else 0);
         if (p.nested == 0 or std.ascii.eqlIgnoreCase(t.name, "sqlite_stat1")) aux.appendP4(v, .{ .table = t });
-        if (e_mode != ONEPASS_OFF) aux.changeP5(v, OPFLAG.AUXDELETE);
+        if (e_mode != ONEPASS.OFF) aux.changeP5(v, OPFLAG.AUXDELETE);
         if (i_idx_no_seek >= 0 and i_idx_no_seek != i_data_cur) _ = aux.addOp1(v, OP.Delete, i_idx_no_seek);
-        if (e_mode == ONEPASS_MULTI) p5 |= OPFLAG.SAVEPOSITION;
+        if (e_mode == ONEPASS.MULTI) p5 |= OPFLAG.SAVEPOSITION;
         aux.changeP5(v, p5);
     }
 

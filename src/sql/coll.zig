@@ -92,11 +92,11 @@ pub fn getCollSeq(p: *Parse, coll: ?*CollSeq, name: []const u8) ?*CollSeq {
     return c;
 }
 
-/// Port of sqlite3CheckCollSeq(): OK if `coll` is null or defined.
-pub fn checkCollSeq(p: *Parse, coll: ?*CollSeq) i32 {
-    const c = coll orelse return RC.OK;
-    if (c.cmp == null and getCollSeq(p, c, c.name) == null) return RC.ERROR;
-    return RC.OK;
+/// Port of sqlite3CheckCollSeq(): fine if `coll` is null or defined;
+/// else (C: SQLITE_ERROR) the error is in `p`.
+pub fn checkCollSeq(p: *Parse, coll: ?*CollSeq) int.ParseError!void {
+    const c = coll orelse return;
+    if (c.cmp == null and getCollSeq(p, c, c.name) == null) return error.ParseFailed;
 }
 
 /// Port of sqlite3LocateCollSeq(): the collation named `name`, or null

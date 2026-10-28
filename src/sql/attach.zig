@@ -38,6 +38,8 @@ pub const DbFixer = struct {
     schema: *Schema,
     /// "view", "trigger" or "index", for error messages.
     typ: []const u8,
+    /// The name of the object: a token of the statement, or a copy of it
+    /// (C: pName, a Token, quoted with %T).
     name: []const u8,
     temp: bool,
     w: walker.Walker,
@@ -60,12 +62,12 @@ pub fn fixInit(fix: *DbFixer, p: *Parse, i_db: usize, typ: []const u8, name: []c
             .select_callback2 = walker.walkWinDefnDummyCallback,
         },
     };
-    fix.w.u = .{ .ptr = fix };
+    fix.w.u = .{ .fix = fix };
 }
 
-fn fixExprCb(w: *walker.Walker, e: *Expr) u8 {
-    const fix: *DbFixer = @ptrCast(@alignCast(w.u.ptr.?));
-    if (!fix.temp) e.set(EP.FromDDL);
+fn fixExprCb(w: *walker.Walker, e: *Expr) WRC {
+    const fix = w.u.fix;
+    if (!fix.temp) e.flags.FromDDL = true;
     if (e.op == TK.VARIABLE) {
         if (fix.parse.db.init.busy) {
             e.op = TK.NULL;
@@ -77,8 +79,8 @@ fn fixExprCb(w: *walker.Walker, e: *Expr) u8 {
     return WRC.Continue;
 }
 
-fn fixSelectCb(w: *walker.Walker, s: *Select) u8 {
-    const fix: *DbFixer = @ptrCast(@alignCast(w.u.ptr.?));
+fn fixSelectCb(w: *walker.Walker, s: *Select) WRC {
+    const fix = w.u.fix;
     const db = fix.parse.db;
     const i_db = build.findDbName(db, fix.db_name);
     const list = s.src orelse return WRC.Continue;
@@ -86,7 +88,7 @@ fn fixSelectCb(w: *walker.Walker, s: *Select) u8 {
         if (!fix.temp and !item.fg.is_subquery) {
             if (!item.fg.fixed_schema) if (item.u4.database) |zdb| {
                 if (i_db != build.findDbName(db, zdb)) {
-                    util.errorMsg(fix.parse, "{s} {s} cannot reference objects in database {s}", .{ fix.typ, fix.name, zdb });
+                    util.errorMsgAt(fix.parse, if (fix.name.len != 0) fix.name.ptr else null, "{s} {s} cannot reference objects in database {s}", .{ fix.typ, fix.name, zdb });
                     return WRC.Abort;
                 }
                 item.fg.not_cte = true;
@@ -96,11 +98,11 @@ fn fixSelectCb(w: *walker.Walker, s: *Select) u8 {
             item.fg.from_ddl = true;
             item.fg.fixed_schema = true;
         }
-        if (!item.fg.is_using and walker.walkExpr(&fix.w, item.u3.on) != 0) return WRC.Abort;
+        if (!item.fg.is_using and walker.walkExpr(&fix.w, item.u3.on) != .Continue) return WRC.Abort;
     }
     if (s.with) |with| {
         for (with.ctes.items) |*cte| {
-            if (walker.walkSelect(w, cte.select) != 0) return WRC.Abort;
+            if (walker.walkSelect(w, cte.select) != .Continue) return WRC.Abort;
         }
     }
     return WRC.Continue;
@@ -110,36 +112,36 @@ fn fixSelectCb(w: *walker.Walker, s: *Select) u8 {
 pub fn fixSrcList(fix: *DbFixer, list: ?*SrcList) bool {
     const l = list orelse return false;
     var s: Select = .{ .src = l };
-    return walker.walkSelect(&fix.w, &s) != 0;
+    return walker.walkSelect(&fix.w, &s) != .Continue;
 }
 
 /// Port of sqlite3FixSelect(). True on error.
 pub fn fixSelect(fix: *DbFixer, s: ?*Select) bool {
-    return walker.walkSelect(&fix.w, s) != 0;
+    return walker.walkSelect(&fix.w, s) != .Continue;
 }
 
 /// Port of sqlite3FixExpr(). True on error.
 pub fn fixExpr(fix: *DbFixer, e: ?*Expr) bool {
-    return walker.walkExpr(&fix.w, e) != 0;
+    return walker.walkExpr(&fix.w, e) != .Continue;
 }
 
 /// Port of sqlite3FixTriggerStep(). True on error.
 pub fn fixTriggerStep(fix: *DbFixer, step_list: ?*int.TriggerStep) bool {
     var it = step_list;
     while (it) |step| : (it = step.next) {
-        if (walker.walkSelect(&fix.w, step.select) != 0 or
-            walker.walkExpr(&fix.w, step.where) != 0 or
-            walker.walkExprList(&fix.w, step.expr_list) != 0 or
+        if (walker.walkSelect(&fix.w, step.select) != .Continue or
+            walker.walkExpr(&fix.w, step.where) != .Continue or
+            walker.walkExprList(&fix.w, step.expr_list) != .Continue or
             fixSrcList(fix, step.src))
         {
             return true;
         }
         var up = step.upsert;
         while (up) |u| : (up = u.next) {
-            if (walker.walkExprList(&fix.w, u.target) != 0 or
-                walker.walkExpr(&fix.w, u.target_where) != 0 or
-                walker.walkExprList(&fix.w, u.set) != 0 or
-                walker.walkExpr(&fix.w, u.where) != 0)
+            if (walker.walkExprList(&fix.w, u.target) != .Continue or
+                walker.walkExpr(&fix.w, u.target_where) != .Continue or
+                walker.walkExprList(&fix.w, u.set) != .Continue or
+                walker.walkExpr(&fix.w, u.where) != .Continue)
             {
                 return true;
             }

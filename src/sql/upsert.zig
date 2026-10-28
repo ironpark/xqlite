@@ -60,8 +60,8 @@ pub fn upsertDup(a: std.mem.Allocator, u_arg: ?*Upsert) Oom!?*Upsert {
 /// Port of sqlite3UpsertAnalyzeTarget(): resolve the conflict targets of
 /// `upsert` and the clauses after it, and match each to the INTEGER
 /// PRIMARY KEY or a UNIQUE index of the table (Upsert.idx). `all` is the
-/// whole list. Returns an error count.
-pub fn analyzeTarget(p: *Parse, tab_list: *SrcList, upsert: *Upsert, all: *Upsert) Oom!u32 {
+/// whole list. On error (C: an error count) the error is in `p`.
+pub fn analyzeTarget(p: *Parse, tab_list: *SrcList, upsert: *Upsert, all: *Upsert) (Oom || int.ParseError)!void {
     std.debug.assert(tab_list.len() == 1 and tab_list.at(0).s_tab != null);
     var nc: int.NameContext = .{ .parse = p, .src_list = tab_list };
     var n_clause: u32 = 0;
@@ -71,8 +71,8 @@ pub fn analyzeTarget(p: *Parse, tab_list: *SrcList, upsert: *Upsert, all: *Upser
         n_clause += 1;
     }) {
         const target = u.target orelse break;
-        if (resolve.resolveExprListNames(&nc, target) != 0) return 1;
-        if (resolve.resolveExprNames(&nc, u.target_where) != 0) return 1;
+        try resolve.resolveExprListNames(&nc, target);
+        try resolve.resolveExprNames(&nc, u.target_where);
 
         // The rowid of the table?
         const t = tab_list.at(0).s_tab.?;
@@ -134,10 +134,9 @@ pub fn analyzeTarget(p: *Parse, tab_list: *SrcList, upsert: *Upsert, all: *Upser
             else
                 printf.mprintf(p.arena, "%r ", &.{.{ .int = n_clause + 1 }}) catch return error.OutOfMemory;
             util.errorMsg(p, "{s}ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint", .{which});
-            return 1;
+            return error.ParseFailed;
         }
     }
-    return 0;
 }
 
 /// Port of sqlite3UpsertNextIsIPK(): whether `u` is the last clause with
@@ -191,7 +190,7 @@ pub fn doUpdate(p: *Parse, top: *Upsert, t: *Table, idx: ?*Index, i_cur: i32) Oo
                 _ = aux.addOp3(v, OP.Column, i_cur, k, i_pk + @as(i32, @intCast(i)));
             }
             const addr = aux.addOp4Int(v, OP.Found, i_data_cur, 0, i_pk, n_pk);
-            _ = aux.addOp4Str(v, OP.Halt, RC.CORRUPT, OE.Abort, 0, "corrupt database");
+            _ = aux.addOp4Str(v, OP.Halt, RC.CORRUPT, OE.Abort.int(), 0, "corrupt database");
             main_mod.mayAbort(p);
             aux.jumpHere(v, addr);
         }

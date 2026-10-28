@@ -10,6 +10,8 @@
 
 const std = @import("std");
 const grammar = @import("../parse/grammar.zig");
+const flags = @import("../util/flags.zig");
+const thunk = @import("../util/thunk.zig");
 
 pub const TK = grammar.TK;
 pub const Allocator = std.mem.Allocator;
@@ -17,6 +19,14 @@ pub const Pgno = u32;
 
 /// Out of memory: the only failure of parse-tree constructors.
 pub const Oom = error{OutOfMemory};
+
+/// The failure of a step of compiling a statement, where C returns a
+/// nonzero error count or SQLITE_ERROR: the error is already in the Parse
+/// (Parse.n_err, Parse.err_msg and Parse.rc, as sqlite3ErrorMsg() and
+/// sqlite3OomFault() leave them; nothing if db.suppress_err is set), and
+/// the caller stops. Running out of memory is reported this way too, once
+/// the Parse knows (build.oomFault()).
+pub const ParseError = error{ParseFailed};
 
 /// LogEst: 10*log2(X), so 10 means 2 and 33 means 10.
 pub const LogEst = i16;
@@ -62,41 +72,91 @@ pub const Aff = struct {
 };
 
 /// Expr.flags (EP_*).
-pub const EP = struct {
-    pub const OuterON: u32 = 0x000001;
-    pub const InnerON: u32 = 0x000002;
-    pub const Distinct: u32 = 0x000004;
-    pub const HasFunc: u32 = 0x000008;
-    pub const Agg: u32 = 0x000010;
-    pub const FixedCol: u32 = 0x000020;
-    pub const VarSelect: u32 = 0x000040;
-    pub const DblQuoted: u32 = 0x000080;
-    pub const InfixFunc: u32 = 0x000100;
-    pub const Collate: u32 = 0x000200;
-    pub const Commuted: u32 = 0x000400;
-    pub const IntValue: u32 = 0x000800;
-    pub const xIsSelect: u32 = 0x001000;
-    pub const Skip: u32 = 0x002000;
-    pub const Reduced: u32 = 0x004000;
-    pub const Win: u32 = 0x008000;
-    pub const TokenOnly: u32 = 0x010000;
-    pub const FullSize: u32 = 0x020000;
-    pub const IfNullRow: u32 = 0x040000;
-    pub const Unlikely: u32 = 0x080000;
-    pub const ConstFunc: u32 = 0x100000;
-    pub const CanBeNull: u32 = 0x200000;
-    pub const Subquery: u32 = 0x400000;
-    pub const Leaf: u32 = 0x800000;
-    pub const WinFunc: u32 = 0x1000000;
-    pub const Subrtn: u32 = 0x2000000;
-    pub const Quoted: u32 = 0x4000000;
-    pub const Static: u32 = 0x8000000;
-    pub const IsTrue: u32 = 0x10000000;
-    pub const IsFalse: u32 = 0x20000000;
-    pub const FromDDL: u32 = 0x40000000;
-    pub const SubtArg: u32 = 0x80000000;
+pub const EP = packed struct(u32) {
+    OuterON: bool = false,
+    InnerON: bool = false,
+    Distinct: bool = false,
+    HasFunc: bool = false,
+    Agg: bool = false,
+    FixedCol: bool = false,
+    VarSelect: bool = false,
+    DblQuoted: bool = false,
+    InfixFunc: bool = false,
+    Collate: bool = false,
+    Commuted: bool = false,
+    IntValue: bool = false,
+    xIsSelect: bool = false,
+    Skip: bool = false,
+    Reduced: bool = false,
+    Win: bool = false,
+    TokenOnly: bool = false,
+    FullSize: bool = false,
+    IfNullRow: bool = false,
+    Unlikely: bool = false,
+    ConstFunc: bool = false,
+    CanBeNull: bool = false,
+    Subquery: bool = false,
+    Leaf: bool = false,
+    WinFunc: bool = false,
+    Subrtn: bool = false,
+    Quoted: bool = false,
+    Static: bool = false,
+    IsTrue: bool = false,
+    IsFalse: bool = false,
+    FromDDL: bool = false,
+    SubtArg: bool = false,
+
     /// Properties that propagate up to parent nodes.
-    pub const Propagate: u32 = EP.Collate | EP.Subquery | EP.HasFunc;
+    pub const Propagate: EP = .{ .HasFunc = true, .Collate = true, .Subquery = true };
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(EP, .{
+            .OuterON = 0x00000001,
+            .InnerON = 0x00000002,
+            .Distinct = 0x00000004,
+            .HasFunc = 0x00000008,
+            .Agg = 0x00000010,
+            .FixedCol = 0x00000020,
+            .VarSelect = 0x00000040,
+            .DblQuoted = 0x00000080,
+            .InfixFunc = 0x00000100,
+            .Collate = 0x00000200,
+            .Commuted = 0x00000400,
+            .IntValue = 0x00000800,
+            .xIsSelect = 0x00001000,
+            .Skip = 0x00002000,
+            .Reduced = 0x00004000,
+            .Win = 0x00008000,
+            .TokenOnly = 0x00010000,
+            .FullSize = 0x00020000,
+            .IfNullRow = 0x00040000,
+            .Unlikely = 0x00080000,
+            .ConstFunc = 0x00100000,
+            .CanBeNull = 0x00200000,
+            .Subquery = 0x00400000,
+            .Leaf = 0x00800000,
+            .WinFunc = 0x01000000,
+            .Subrtn = 0x02000000,
+            .Quoted = 0x04000000,
+            .Static = 0x08000000,
+            .IsTrue = 0x10000000,
+            .IsFalse = 0x20000000,
+            .FromDDL = 0x40000000,
+            .SubtArg = 0x80000000,
+        });
+    }
 };
 
 /// A node of an expression tree (Expr). Which union members are valid
@@ -108,7 +168,7 @@ pub const Expr = struct {
     /// TK_REGISTER/TK_TRUTH: original op. TK_COLUMN: P5 of OP_Column.
     /// TK_AGG_FUNCTION: nesting depth. TK_FUNCTION: NC_SelfRef flag.
     op2: u8 = 0,
-    flags: u32 = 0,
+    flags: EP = .{},
     /// Token value (dequoted, NUL-terminated), or with EP_IntValue a
     /// non-negative integer.
     u: union { token: ?[:0]u8, value: i32 } = .{ .token = null },
@@ -136,44 +196,28 @@ pub const Expr = struct {
         sub: struct { addr: i32, reg_return: i32 },
     } = .{ .tab = null },
 
-    pub fn has(e: *const Expr, p: u32) bool {
-        return e.flags & p != 0;
-    }
-
-    pub fn hasAll(e: *const Expr, p: u32) bool {
-        return e.flags & p == p;
-    }
-
-    pub fn set(e: *Expr, p: u32) void {
-        e.flags |= p;
-    }
-
-    pub fn clear(e: *Expr, p: u32) void {
-        e.flags &= ~p;
-    }
-
     pub fn useUToken(e: *const Expr) bool {
-        return e.flags & EP.IntValue == 0;
+        return !e.flags.IntValue;
     }
 
     pub fn useXList(e: *const Expr) bool {
-        return e.flags & EP.xIsSelect == 0;
+        return !e.flags.xIsSelect;
     }
 
     pub fn useXSelect(e: *const Expr) bool {
-        return e.flags & EP.xIsSelect != 0;
+        return e.flags.xIsSelect;
     }
 
     pub fn useYWin(e: *const Expr) bool {
-        return e.flags & EP.WinFunc != 0;
+        return e.flags.WinFunc;
     }
 
     pub fn useYTab(e: *const Expr) bool {
-        return e.flags & (EP.WinFunc | EP.Subrtn) == 0;
+        return !e.flags.intersects(.{ .WinFunc = true, .Subrtn = true });
     }
 
     pub fn useWJoin(e: *const Expr) bool {
-        return e.flags & (EP.InnerON | EP.OuterON) != 0;
+        return e.flags.intersects(.{ .InnerON = true, .OuterON = true });
     }
 
     /// The token text, or "" (u.zToken).
@@ -183,16 +227,16 @@ pub const Expr = struct {
     }
 
     pub fn alwaysTrue(e: *const Expr) bool {
-        return e.flags & (EP.OuterON | EP.IsTrue) == EP.IsTrue;
+        return e.flags.IsTrue and !e.flags.OuterON;
     }
 
     pub fn alwaysFalse(e: *const Expr) bool {
-        return e.flags & (EP.OuterON | EP.IsFalse) == EP.IsFalse;
+        return e.flags.IsFalse and !e.flags.OuterON;
     }
 
     /// IsWindowFunc(): a function with an OVER clause.
     pub fn isWindowFunc(e: *const Expr) bool {
-        return e.has(EP.WinFunc) and e.y.win.?.e_frm_type != TK.FILTER;
+        return e.flags.WinFunc and e.y.win.?.e_frm_type != TK.FILTER;
     }
 };
 
@@ -281,15 +325,40 @@ pub const Subquery = struct {
 };
 
 /// Join types (JT_*).
-pub const JT = struct {
-    pub const INNER: u8 = 0x01;
-    pub const CROSS: u8 = 0x02;
-    pub const NATURAL: u8 = 0x04;
-    pub const LEFT: u8 = 0x08;
-    pub const RIGHT: u8 = 0x10;
-    pub const OUTER: u8 = 0x20;
-    pub const LTORJ: u8 = 0x40;
-    pub const ERROR: u8 = 0x80;
+pub const JT = packed struct(u8) {
+    INNER: bool = false,
+    CROSS: bool = false,
+    NATURAL: bool = false,
+    LEFT: bool = false,
+    RIGHT: bool = false,
+    OUTER: bool = false,
+    LTORJ: bool = false,
+    ERROR: bool = false,
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(JT, .{
+            .INNER = 0x01,
+            .CROSS = 0x02,
+            .NATURAL = 0x04,
+            .LEFT = 0x08,
+            .RIGHT = 0x10,
+            .OUTER = 0x20,
+            .LTORJ = 0x40,
+            .ERROR = 0x80,
+        });
+    }
 };
 
 /// One term of a FROM clause (SrcItem).
@@ -299,7 +368,7 @@ pub const SrcItem = struct {
     /// The table zName resolved to.
     s_tab: ?*Table = null,
     fg: packed struct {
-        jointype: u8 = 0,
+        jointype: JT = .{},
         not_indexed: bool = false,
         is_indexed_by: bool = false,
         is_subquery: bool = false,
@@ -362,36 +431,85 @@ pub const SrcList = struct {
 };
 
 /// Select.sel_flags (SF_*).
-pub const SF = struct {
-    pub const Distinct: u32 = 0x0000001;
-    pub const All: u32 = 0x0000002;
-    pub const Resolved: u32 = 0x0000004;
-    pub const Aggregate: u32 = 0x0000008;
-    pub const HasAgg: u32 = 0x0000010;
-    pub const ClonedRhsIn: u32 = 0x0000020;
-    pub const Expanded: u32 = 0x0000040;
-    pub const HasTypeInfo: u32 = 0x0000080;
-    pub const Compound: u32 = 0x0000100;
-    pub const Values: u32 = 0x0000200;
-    pub const MultiValue: u32 = 0x0000400;
-    pub const NestedFrom: u32 = 0x0000800;
-    pub const MinMaxAgg: u32 = 0x0001000;
-    pub const Recursive: u32 = 0x0002000;
-    pub const FixedLimit: u32 = 0x0004000;
-    pub const Converted: u32 = 0x0010000;
-    pub const IncludeHidden: u32 = 0x0020000;
-    pub const ComplexResult: u32 = 0x0040000;
-    pub const WhereBegin: u32 = 0x0080000;
-    pub const WinRewrite: u32 = 0x0100000;
-    pub const View: u32 = 0x0200000;
-    pub const UFSrcCheck: u32 = 0x0800000;
-    pub const PushDown: u32 = 0x1000000;
-    pub const MultiPart: u32 = 0x2000000;
-    pub const CopyCte: u32 = 0x4000000;
-    pub const OrderByReqd: u32 = 0x8000000;
-    pub const UpdateFrom: u32 = 0x10000000;
-    pub const Correlated: u32 = 0x20000000;
-    pub const OnToWhere: u32 = 0x40000000;
+pub const SF = packed struct(u32) {
+    Distinct: bool = false,
+    All: bool = false,
+    Resolved: bool = false,
+    Aggregate: bool = false,
+    HasAgg: bool = false,
+    ClonedRhsIn: bool = false,
+    Expanded: bool = false,
+    HasTypeInfo: bool = false,
+    Compound: bool = false,
+    Values: bool = false,
+    MultiValue: bool = false,
+    NestedFrom: bool = false,
+    MinMaxAgg: bool = false,
+    Recursive: bool = false,
+    FixedLimit: bool = false,
+    _15: u1 = 0,
+    Converted: bool = false,
+    IncludeHidden: bool = false,
+    ComplexResult: bool = false,
+    WhereBegin: bool = false,
+    WinRewrite: bool = false,
+    View: bool = false,
+    _22: u1 = 0,
+    UFSrcCheck: bool = false,
+    PushDown: bool = false,
+    MultiPart: bool = false,
+    CopyCte: bool = false,
+    OrderByReqd: bool = false,
+    UpdateFrom: bool = false,
+    Correlated: bool = false,
+    OnToWhere: bool = false,
+    _31: u1 = 0,
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(SF, .{
+            .Distinct = 0x00000001,
+            .All = 0x00000002,
+            .Resolved = 0x00000004,
+            .Aggregate = 0x00000008,
+            .HasAgg = 0x00000010,
+            .ClonedRhsIn = 0x00000020,
+            .Expanded = 0x00000040,
+            .HasTypeInfo = 0x00000080,
+            .Compound = 0x00000100,
+            .Values = 0x00000200,
+            .MultiValue = 0x00000400,
+            .NestedFrom = 0x00000800,
+            .MinMaxAgg = 0x00001000,
+            .Recursive = 0x00002000,
+            .FixedLimit = 0x00004000,
+            .Converted = 0x00010000,
+            .IncludeHidden = 0x00020000,
+            .ComplexResult = 0x00040000,
+            .WhereBegin = 0x00080000,
+            .WinRewrite = 0x00100000,
+            .View = 0x00200000,
+            .UFSrcCheck = 0x00800000,
+            .PushDown = 0x01000000,
+            .MultiPart = 0x02000000,
+            .CopyCte = 0x04000000,
+            .OrderByReqd = 0x08000000,
+            .UpdateFrom = 0x10000000,
+            .Correlated = 0x20000000,
+            .OnToWhere = 0x40000000,
+        });
+    }
 };
 
 /// One SELECT (Select). Compound selects link through `prior`.
@@ -399,7 +517,7 @@ pub const Select = struct {
     /// TK_SELECT, or TK_UNION, TK_ALL, TK_INTERSECT, TK_EXCEPT.
     op: u8 = TK.SELECT,
     n_select_row: LogEst = 0,
-    sel_flags: u32 = 0,
+    sel_flags: SF = .{},
     i_limit: i32 = 0,
     i_offset: i32 = 0,
     sel_id: u32 = 0,
@@ -498,27 +616,40 @@ pub const Window = struct {
     expr_args: bool = false,
 };
 
-/// Conflict resolution (OE_*).
-pub const OE = struct {
-    pub const None: u8 = 0;
-    pub const Rollback: u8 = 1;
-    pub const Abort: u8 = 2;
-    pub const Fail: u8 = 3;
-    pub const Ignore: u8 = 4;
-    pub const Replace: u8 = 5;
-    pub const Update: u8 = 6;
-    pub const Restrict: u8 = 7;
-    pub const SetNull: u8 = 8;
-    pub const SetDflt: u8 = 9;
-    pub const Cascade: u8 = 10;
-    pub const Default: u8 = 11;
+/// Conflict resolution (OE_*), numbered as in C. The codes travel as
+/// integers through the parser's values (with two foreign key actions
+/// packed in one), the P2 of OP_Halt, the P5 of OP_VUpdate and OP_Insert
+/// and Expr.aff_expr of RAISE(); int() and fromInt() convert there.
+pub const OE = enum(u8) {
+    None = 0,
+    Rollback = 1,
+    Abort = 2,
+    Fail = 3,
+    Ignore = 4,
+    Replace = 5,
+    Update = 6,
+    Restrict = 7,
+    SetNull = 8,
+    SetDflt = 9,
+    Cascade = 10,
+    Default = 11,
+
+    /// The number of the code, as C stores it.
+    pub inline fn int(oe: OE) u8 {
+        return @backingInt(oe);
+    }
+
+    /// The code numbered `n`, which must be one.
+    pub inline fn fromInt(n: anytype) OE {
+        return @fromBackingInt(@intCast(n));
+    }
 };
 
 /// One statement of a trigger body (TriggerStep).
 pub const TriggerStep = struct {
     /// TK_DELETE, TK_UPDATE, TK_INSERT, TK_SELECT or TK_RETURNING.
     op: u8,
-    orconf: u8 = 0,
+    orconf: OE = .None,
     trig: ?*Trigger = null,
     select: ?*Select = null,
     src: ?*SrcList = null,
@@ -577,31 +708,85 @@ pub const Returning = struct {
 // ================================================================= schema
 
 /// Column.col_flags (COLFLAG_*).
-pub const COLFLAG = struct {
-    pub const PRIMKEY: u16 = 0x0001;
-    pub const HIDDEN: u16 = 0x0002;
-    pub const HASTYPE: u16 = 0x0004;
-    pub const UNIQUE: u16 = 0x0008;
-    pub const SORTERREF: u16 = 0x0010;
-    pub const VIRTUAL: u16 = 0x0020;
-    pub const STORED: u16 = 0x0040;
-    pub const NOTAVAIL: u16 = 0x0080;
-    pub const BUSY: u16 = 0x0100;
-    pub const HASCOLL: u16 = 0x0200;
-    pub const NOEXPAND: u16 = 0x0400;
-    pub const GENERATED: u16 = 0x0060;
-    pub const NOINSERT: u16 = 0x0062;
+pub const COLFLAG = packed struct(u16) {
+    PRIMKEY: bool = false,
+    HIDDEN: bool = false,
+    HASTYPE: bool = false,
+    UNIQUE: bool = false,
+    SORTERREF: bool = false,
+    VIRTUAL: bool = false,
+    STORED: bool = false,
+    NOTAVAIL: bool = false,
+    BUSY: bool = false,
+    HASCOLL: bool = false,
+    NOEXPAND: bool = false,
+    _11: u5 = 0,
+
+    /// Either kind of generated column.
+    pub const GENERATED: COLFLAG = .{ .VIRTUAL = true, .STORED = true };
+
+    /// Not set by an INSERT: hidden or generated.
+    pub const NOINSERT: COLFLAG = .{ .HIDDEN = true, .VIRTUAL = true, .STORED = true };
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(COLFLAG, .{
+            .PRIMKEY = 0x0001,
+            .HIDDEN = 0x0002,
+            .HASTYPE = 0x0004,
+            .UNIQUE = 0x0008,
+            .SORTERREF = 0x0010,
+            .VIRTUAL = 0x0020,
+            .STORED = 0x0040,
+            .NOTAVAIL = 0x0080,
+            .BUSY = 0x0100,
+            .HASCOLL = 0x0200,
+            .NOEXPAND = 0x0400,
+        });
+    }
 };
 
-/// Column.e_ctype: the standard types of STRICT tables (COLTYPE_*).
-pub const COLTYPE = struct {
-    pub const CUSTOM: u4 = 0;
-    pub const ANY: u4 = 1;
-    pub const BLOB: u4 = 2;
-    pub const INT: u4 = 3;
-    pub const INTEGER: u4 = 4;
-    pub const REAL: u4 = 5;
-    pub const TEXT: u4 = 6;
+/// Column.e_ctype: the standard types of STRICT tables (COLTYPE_*),
+/// numbered as in C. CUSTOM (0) is any other declared type; the standard
+/// ones follow from ANY in the order of sqlite3StdType[], so that C
+/// indexes that array and its companions by eCType-1 (stdTypeIndex()) and
+/// tests for a type stricter than ANY with eCType>COLTYPE_ANY.
+pub const COLTYPE = enum(u4) {
+    CUSTOM = 0,
+    ANY = 1,
+    BLOB = 2,
+    INT = 3,
+    INTEGER = 4,
+    REAL = 5,
+    TEXT = 6,
+
+    /// The number of the type, as C stores it.
+    pub inline fn int(t: COLTYPE) u4 {
+        return @backingInt(t);
+    }
+
+    /// The position of a standard type in sqlite3StdType[] (C:
+    /// `eCType-1`). Not for CUSTOM.
+    pub inline fn stdTypeIndex(t: COLTYPE) usize {
+        std.debug.assert(t != .CUSTOM);
+        return t.int() - 1;
+    }
+
+    /// The standard type at sqlite3StdType[i] (C: `i+1`).
+    pub inline fn fromStdTypeIndex(i: usize) COLTYPE {
+        return @fromBackingInt(@intCast(i + 1));
+    }
 };
 
 /// A table column (Column). As in C, the declared type and collation
@@ -610,15 +795,15 @@ pub const COLTYPE = struct {
 pub const Column = struct {
     cn_name: [:0]u8,
     /// An OE_ code for NOT NULL.
-    not_null: u4 = 0,
-    e_ctype: u4 = 0,
+    not_null: OE = .None,
+    e_ctype: COLTYPE = .CUSTOM,
     affinity: u8 = Aff.blob,
     /// Estimated size; sizeof(INT) is 1.
     sz_est: u8 = 1,
     h_name: u8 = 0,
     /// 1-based index of the DEFAULT expression in Table.dflt_list; 0 none.
     i_dflt: u16 = 0,
-    col_flags: u16 = 0,
+    col_flags: COLFLAG = .{},
 
     pub fn name(c: *const Column) [:0]const u8 {
         return std.mem.sliceTo(c.cn_name, 0);
@@ -626,26 +811,71 @@ pub const Column = struct {
 };
 
 /// Table.tab_flags (TF_*).
-pub const TF = struct {
-    pub const Readonly: u32 = 0x00000001;
-    pub const HasHidden: u32 = 0x00000002;
-    pub const HasPrimaryKey: u32 = 0x00000004;
-    pub const Autoincrement: u32 = 0x00000008;
-    pub const HasStat1: u32 = 0x00000010;
-    pub const HasVirtual: u32 = 0x00000020;
-    pub const HasStored: u32 = 0x00000040;
-    pub const HasGenerated: u32 = 0x00000060;
-    pub const WithoutRowid: u32 = 0x00000080;
-    pub const MaybeReanalyze: u32 = 0x00000100;
-    pub const NoVisibleRowid: u32 = 0x00000200;
-    pub const OOOHidden: u32 = 0x00000400;
-    pub const HasNotNull: u32 = 0x00000800;
-    pub const Shadow: u32 = 0x00001000;
-    pub const HasStat4: u32 = 0x00002000;
-    pub const Ephemeral: u32 = 0x00004000;
-    pub const Eponymous: u32 = 0x00008000;
-    pub const Strict: u32 = 0x00010000;
-    pub const Imposter: u32 = 0x00020000;
+pub const TF = packed struct(u32) {
+    Readonly: bool = false,
+    HasHidden: bool = false,
+    HasPrimaryKey: bool = false,
+    Autoincrement: bool = false,
+    HasStat1: bool = false,
+    HasVirtual: bool = false,
+    HasStored: bool = false,
+    WithoutRowid: bool = false,
+    MaybeReanalyze: bool = false,
+    NoVisibleRowid: bool = false,
+    OOOHidden: bool = false,
+    HasNotNull: bool = false,
+    Shadow: bool = false,
+    HasStat4: bool = false,
+    Ephemeral: bool = false,
+    Eponymous: bool = false,
+    Strict: bool = false,
+    Imposter: bool = false,
+    _18: u14 = 0,
+
+    /// Has a generated column, VIRTUAL or STORED.
+    pub const HasGenerated: TF = .{ .HasVirtual = true, .HasStored = true };
+
+    /// The flags a table takes from one of its columns: TF_HasHidden,
+    /// TF_HasVirtual and TF_HasStored (C ors `colFlags & COLFLAG_NOINSERT`
+    /// into tabFlags, the bits being the same).
+    pub fn ofColumn(c: COLFLAG) TF {
+        return .{ .HasHidden = c.HIDDEN, .HasVirtual = c.VIRTUAL, .HasStored = c.STORED };
+    }
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(TF, .{
+            .Readonly = 0x00000001,
+            .HasHidden = 0x00000002,
+            .HasPrimaryKey = 0x00000004,
+            .Autoincrement = 0x00000008,
+            .HasStat1 = 0x00000010,
+            .HasVirtual = 0x00000020,
+            .HasStored = 0x00000040,
+            .WithoutRowid = 0x00000080,
+            .MaybeReanalyze = 0x00000100,
+            .NoVisibleRowid = 0x00000200,
+            .OOOHidden = 0x00000400,
+            .HasNotNull = 0x00000800,
+            .Shadow = 0x00001000,
+            .HasStat4 = 0x00002000,
+            .Ephemeral = 0x00004000,
+            .Eponymous = 0x00008000,
+            .Strict = 0x00010000,
+            .Imposter = 0x00020000,
+        });
+    }
 };
 
 pub const TabType = enum(u8) { norm = 0, vtab = 1, view = 2 };
@@ -660,14 +890,14 @@ pub const Table = struct {
     check: ?*ExprList = null,
     tnum: Pgno = 0,
     n_tab_ref: u32 = 1,
-    tab_flags: u32 = 0,
+    tab_flags: TF = .{},
     /// The INTEGER PRIMARY KEY column, or -1.
     i_pkey: i16 = -1,
     /// Columns that are not VIRTUAL.
     n_nv_col: i16 = 0,
     n_row_log_est: LogEst = 200,
     sz_tab_row: LogEst = 0,
-    key_conf: u8 = 0,
+    key_conf: OE = .None,
     e_tab_type: TabType = .norm,
     /// The columns of this view are being computed (SQLite marks this
     /// with a negative nCol), to catch circular definitions.
@@ -718,7 +948,7 @@ pub const Table = struct {
     }
 
     pub fn hasRowid(t: *const Table) bool {
-        return t.tab_flags & TF.WithoutRowid == 0;
+        return !t.tab_flags.WithoutRowid;
     }
 
     /// IsVirtual().
@@ -735,18 +965,25 @@ pub const Module = struct {
     /// pAux, passed to xCreate and xConnect.
     aux: ?*anyopaque = null,
     /// Destructor of `aux`.
-    x_destroy: ?*const fn (?*anyopaque) void = null,
+    x_destroy: ?DestructorFn = null,
     /// References: the registration and each VTable.
     n_ref_module: i32 = 1,
     /// The eponymous virtual table, if made.
     epo_tab: ?*Table = null,
 };
 
-/// SQLITE_VTABRISK_*.
-pub const VTABRISK = struct {
-    pub const Low: u8 = 0;
-    pub const Normal: u8 = 1;
-    pub const High: u8 = 2;
+/// SQLITE_VTABRISK_*, numbered as in C.
+pub const VTABRISK = enum(u8) {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+
+    /// Whether a virtual table of this risk may not be used from the schema
+    /// (C: `eVtabRisk > ((db->flags & SQLITE_TrustedSchema)!=0)`): High
+    /// never, Normal only with a trusted schema, Low always.
+    pub inline fn unsafeInSchema(risk: VTABRISK, trusted_schema: bool) bool {
+        return @backingInt(risk) > @intFromBool(trusted_schema);
+    }
 };
 
 /// The instance of a virtual table on one connection (VTable).
@@ -761,7 +998,7 @@ pub const VTable = struct {
     /// SQLITE_VTAB_USES_ALL_SCHEMAS was set.
     b_all_schemas: bool = false,
     /// SQLITE_VTABRISK_*.
-    e_vtab_risk: u8 = VTABRISK.Normal,
+    e_vtab_risk: VTABRISK = .Normal,
     /// Depth of the SAVEPOINT stack.
     i_savepoint: i32 = 0,
     next: ?*VTable = null,
@@ -776,7 +1013,7 @@ pub const FKey = struct {
     prev_to: ?*FKey = null,
     is_deferred: bool = false,
     /// OE_ actions for ON DELETE and ON UPDATE.
-    a_action: [2]u8 = .{ 0, 0 },
+    a_action: [2]OE = .{ .None, .None },
     trigger: [2]?*Trigger = .{ null, null },
     cols: []FKeyCol = &.{},
 };
@@ -813,7 +1050,7 @@ pub const Index = struct {
     n_key_col: u16 = 0,
     /// Columns in the b-tree; can be 2*Table.nCol.
     n_column: u16 = 0,
-    on_error: u8 = OE.None,
+    on_error: OE = .None,
     idx_type: IdxType = .appdef,
     unordered: bool = false,
     uniq_not_null: bool = false,
@@ -837,9 +1074,24 @@ pub const Index = struct {
 };
 
 /// Schema.schema_flags (DB_*).
-pub const DB_SchemaLoaded: u16 = 0x0001;
-pub const DB_UnresetViews: u16 = 0x0002;
-pub const DB_ResetWanted: u16 = 0x0008;
+pub const DB = packed struct(u16) {
+    /// The schema has been read.
+    SchemaLoaded: bool = false,
+    /// Some views have defined column names.
+    UnresetViews: bool = false,
+    _2: u1 = 0,
+    /// Reset the schema when nRefTables==0.
+    ResetWanted: bool = false,
+    _4: u12 = 0,
+
+    comptime {
+        flags.checkBits(DB, .{
+            .SchemaLoaded = 0x0001,
+            .UnresetViews = 0x0002,
+            .ResetWanted = 0x0008,
+        });
+    }
+};
 
 /// Case-insensitive name map, as SQLite's Hash with sqlite3StrICmp.
 pub fn NameMap(comptime V: type) type {
@@ -878,7 +1130,7 @@ pub const Schema = struct {
     seq_tab: ?*Table = null,
     file_format: u8 = 0,
     enc: u8 = 0,
-    schema_flags: u16 = 0,
+    schema_flags: DB = .{},
     cache_size: i32 = 0,
 };
 
@@ -901,7 +1153,7 @@ pub const FuncDef = struct {
     /// Number of arguments; -1 means any.
     n_arg: i16,
     /// SQLITE_FUNC_* flags (callback.FUNC).
-    func_flags: u32 = 0,
+    func_flags: @import("callback.zig").FUNC = .{},
     user_data: ?*anyopaque = null,
     /// Next function with the same name.
     next: ?*FuncDef = null,
@@ -923,6 +1175,36 @@ pub const FuncDef = struct {
     pub const FinalFn = *const fn (ctx: *Context) void;
     const Context = @import("../vdbe/vdbe_int.zig").Context;
 
+    /// The type of the user data of `f`, a function that takes it as a
+    /// third parameter.
+    pub fn UserData(comptime f: anytype) type {
+        return @typeInfo(@TypeOf(f)).@"fn".param_types[2].?;
+    }
+
+    /// The StepFn of `f` (`fn (*Context, []*Mem, data: P) void`), which
+    /// takes the user data of its function (sqlite3_user_data()) typed,
+    /// cast from `user_data` here only. Register it with
+    /// userDataFor(f, data) as the user data.
+    pub fn withUserData(comptime f: anytype) StepFn {
+        return struct {
+            fn call(ctx: *Context, argv: []*Mem) void {
+                @call(.always_inline, f, .{ ctx, argv, thunk.downcast(UserData(f), ctx.func.user_data) });
+            }
+        }.call;
+    }
+
+    /// `data`, of the type withUserData(f) takes, as user data.
+    pub fn userDataFor(comptime f: anytype, data: UserData(f)) ?*anyopaque {
+        return @ptrCast(@constCast(data));
+    }
+
+    /// The user data of `def`, a function made with withUserData(f), as
+    /// `f` takes it.
+    pub fn userDataOf(def: *const FuncDef, comptime f: anytype) UserData(f) {
+        std.debug.assert(def.x_sfunc == withUserData(f));
+        return thunk.downcast(UserData(f), def.user_data);
+    }
+
     pub fn isAggregate(f: *const FuncDef) bool {
         return f.x_finalize != null;
     }
@@ -931,56 +1213,140 @@ pub const FuncDef = struct {
 // ============================================================== planning
 
 /// sqlite3WhereBegin() flags (WHERE_*).
-pub const WHERE = struct {
-    pub const ORDERBY_NORMAL: u16 = 0x0000;
-    pub const ORDERBY_MIN: u16 = 0x0001;
-    pub const ORDERBY_MAX: u16 = 0x0002;
-    pub const ONEPASS_DESIRED: u16 = 0x0004;
-    pub const ONEPASS_MULTIROW: u16 = 0x0008;
-    pub const DUPLICATES_OK: u16 = 0x0010;
-    pub const OR_SUBCLAUSE: u16 = 0x0020;
-    pub const GROUPBY: u16 = 0x0040;
-    pub const DISTINCTBY: u16 = 0x0080;
-    pub const WANT_DISTINCT: u16 = 0x0100;
-    pub const SORTBYGROUP: u16 = 0x0200;
-    pub const AGG_DISTINCT: u16 = 0x0400;
-    pub const ORDERBY_LIMIT: u16 = 0x0800;
-    pub const RIGHT_JOIN: u16 = 0x1000;
-    pub const KEEP_ALL_JOINS: u16 = 0x2000;
-    pub const USE_LIMIT: u16 = 0x4000;
+pub const WHERE = packed struct(u16) {
+    ORDERBY_MIN: bool = false,
+    ORDERBY_MAX: bool = false,
+    ONEPASS_DESIRED: bool = false,
+    ONEPASS_MULTIROW: bool = false,
+    DUPLICATES_OK: bool = false,
+    OR_SUBCLAUSE: bool = false,
+    GROUPBY: bool = false,
+    DISTINCTBY: bool = false,
+    WANT_DISTINCT: bool = false,
+    SORTBYGROUP: bool = false,
+    AGG_DISTINCT: bool = false,
+    ORDERBY_LIMIT: bool = false,
+    RIGHT_JOIN: bool = false,
+    KEEP_ALL_JOINS: bool = false,
+    USE_LIMIT: bool = false,
+    _15: u1 = 0,
+
+    /// No ORDER BY optimization (neither ORDERBY_MIN nor ORDERBY_MAX).
+    pub const ORDERBY_NORMAL: WHERE = .{};
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(WHERE, .{
+            .ORDERBY_MIN = 0x0001,
+            .ORDERBY_MAX = 0x0002,
+            .ONEPASS_DESIRED = 0x0004,
+            .ONEPASS_MULTIROW = 0x0008,
+            .DUPLICATES_OK = 0x0010,
+            .OR_SUBCLAUSE = 0x0020,
+            .GROUPBY = 0x0040,
+            .DISTINCTBY = 0x0080,
+            .WANT_DISTINCT = 0x0100,
+            .SORTBYGROUP = 0x0200,
+            .AGG_DISTINCT = 0x0400,
+            .ORDERBY_LIMIT = 0x0800,
+            .RIGHT_JOIN = 0x1000,
+            .KEEP_ALL_JOINS = 0x2000,
+            .USE_LIMIT = 0x4000,
+        });
+    }
 };
 
 /// sqlite3WhereIsDistinct() results (WHERE_DISTINCT_*).
-pub const WHERE_DISTINCT_NOOP: u8 = 0;
-pub const WHERE_DISTINCT_UNIQUE: u8 = 1;
-pub const WHERE_DISTINCT_ORDERED: u8 = 2;
-pub const WHERE_DISTINCT_UNORDERED: u8 = 3;
+pub const WHERE_DISTINCT = enum(u8) {
+    /// DISTINCT keyword not used.
+    NOOP = 0,
+    /// No duplicates.
+    UNIQUE = 1,
+    /// All duplicates are adjacent.
+    ORDERED = 2,
+    /// Duplicates are scattered.
+    UNORDERED = 3,
+};
 
 // ============================================================ resolution
 
 /// NameContext.nc_flags (NC_*).
-pub const NC = struct {
-    pub const AllowAgg: u32 = 0x000001;
-    pub const PartIdx: u32 = 0x000002;
-    pub const IsCheck: u32 = 0x000004;
-    pub const GenCol: u32 = 0x000008;
-    pub const HasAgg: u32 = 0x000010;
-    pub const IdxExpr: u32 = 0x000020;
-    pub const SelfRef: u32 = 0x00002e;
-    pub const Subquery: u32 = 0x000040;
-    pub const UEList: u32 = 0x000080;
-    pub const UAggInfo: u32 = 0x000100;
-    pub const UUpsert: u32 = 0x000200;
-    pub const UBaseReg: u32 = 0x000400;
-    pub const MinMaxAgg: u32 = 0x001000;
-    pub const AllowWin: u32 = 0x004000;
-    pub const HasWin: u32 = 0x008000;
-    pub const IsDDL: u32 = 0x010000;
-    pub const InAggFunc: u32 = 0x020000;
-    pub const FromDDL: u32 = 0x040000;
-    pub const NoSelect: u32 = 0x080000;
-    pub const Where: u32 = 0x100000;
-    pub const OrderAgg: u32 = 0x8000000;
+pub const NC = packed struct(u32) {
+    AllowAgg: bool = false,
+    PartIdx: bool = false,
+    IsCheck: bool = false,
+    GenCol: bool = false,
+    HasAgg: bool = false,
+    IdxExpr: bool = false,
+    Subquery: bool = false,
+    UEList: bool = false,
+    UAggInfo: bool = false,
+    UUpsert: bool = false,
+    UBaseReg: bool = false,
+    _11: u1 = 0,
+    MinMaxAgg: bool = false,
+    _13: u1 = 0,
+    AllowWin: bool = false,
+    HasWin: bool = false,
+    IsDDL: bool = false,
+    InAggFunc: bool = false,
+    FromDDL: bool = false,
+    NoSelect: bool = false,
+    Where: bool = false,
+    _21: u6 = 0,
+    OrderAgg: bool = false,
+    _28: u4 = 0,
+
+    /// Resolving an expression that may only refer to its own table.
+    pub const SelfRef: NC = .{ .PartIdx = true, .IsCheck = true, .GenCol = true, .IdxExpr = true };
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(NC, .{
+            .AllowAgg = 0x00000001,
+            .PartIdx = 0x00000002,
+            .IsCheck = 0x00000004,
+            .GenCol = 0x00000008,
+            .HasAgg = 0x00000010,
+            .IdxExpr = 0x00000020,
+            .Subquery = 0x00000040,
+            .UEList = 0x00000080,
+            .UAggInfo = 0x00000100,
+            .UUpsert = 0x00000200,
+            .UBaseReg = 0x00000400,
+            .MinMaxAgg = 0x00001000,
+            .AllowWin = 0x00004000,
+            .HasWin = 0x00008000,
+            .IsDDL = 0x00010000,
+            .InAggFunc = 0x00020000,
+            .FromDDL = 0x00040000,
+            .NoSelect = 0x00080000,
+            .Where = 0x00100000,
+            .OrderAgg = 0x08000000,
+        });
+    }
 };
 
 /// The tables and result columns names are resolved against
@@ -995,7 +1361,7 @@ pub const NameContext = struct {
     /// Names resolved by this context.
     n_ref: i32 = 0,
     n_nc_err: i32 = 0,
-    nc_flags: u32 = 0,
+    nc_flags: NC = .{},
     n_nested_select: u32 = 0,
     /// The SELECT of any window functions.
     win_select: ?*Select = null,
@@ -1074,9 +1440,23 @@ pub const AggInfo = struct {
 /// function (FuncDestructor).
 pub const FuncDestructor = struct {
     n_ref: i32 = 0,
-    x_destroy: *const fn (?*anyopaque) void,
+    x_destroy: DestructorFn,
     user_data: ?*anyopaque,
 };
+
+/// A destructor of the C API (`void(*)(void*)`): the xDel of a Mem and of
+/// sqlite3_result_text() and the like, of sqlite3_set_auxdata() and
+/// sqlite3_result_pointer(), and the xDestroy of
+/// sqlite3_create_function_v2() and sqlite3_create_module_v2().
+pub const DestructorFn = *const fn (?*anyopaque) void;
+
+/// The DestructorFn of `f`, a typed destructor (`fn (*T) void`): it calls
+/// `f` with the pointer cast to the type of its parameter (thunk.thunk()).
+/// It is one function per `f`, so it can be compared as C compares xDel
+/// (`pMem->xDel==sqlite3RowSetDelete`).
+pub fn destructor(comptime f: anytype) DestructorFn {
+    return thunk.thunk(DestructorFn, f);
+}
 
 // ================================================================ parsing
 
@@ -1144,7 +1524,179 @@ pub const RC = struct {
     pub const READONLY_CANTLOCK: i32 = READONLY | (2 << 8);
     pub const READONLY_ROLLBACK: i32 = READONLY | (3 << 8);
     pub const READONLY_CANTINIT: i32 = READONLY | (5 << 8);
+    // Other extended codes of sqlite3.h, which the VFS, extensions or
+    // the application may report (named by the Zig API's ResultCode).
+    pub const BUSY_TIMEOUT: i32 = BUSY | (3 << 8);
+    pub const READONLY_DBMOVED: i32 = READONLY | (4 << 8);
+    pub const READONLY_DIRECTORY: i32 = READONLY | (6 << 8);
+    pub const IOERR_READ: i32 = IOERR | (1 << 8);
+    pub const IOERR_WRITE: i32 = IOERR | (3 << 8);
+    pub const IOERR_FSYNC: i32 = IOERR | (4 << 8);
+    pub const CORRUPT_VTAB: i32 = CORRUPT | (1 << 8);
+    pub const CANTOPEN_NOTEMPDIR: i32 = CANTOPEN | (1 << 8);
+    pub const CANTOPEN_ISDIR: i32 = CANTOPEN | (2 << 8);
+    pub const CANTOPEN_FULLPATH: i32 = CANTOPEN | (3 << 8);
+    pub const CONSTRAINT_COMMITHOOK: i32 = CONSTRAINT | (2 << 8);
+    pub const CONSTRAINT_FUNCTION: i32 = CONSTRAINT | (4 << 8);
+    pub const CONSTRAINT_VTAB: i32 = CONSTRAINT | (9 << 8);
+    pub const CONSTRAINT_PINNED: i32 = CONSTRAINT | (11 << 8);
 };
+
+/// The errors of the SQL and VDBE layers. Those of the storage layers
+/// (btree.Error) each stand for one result code, primary or extended;
+/// the others stand for the primary codes only the upper layers report.
+/// An extended code with no error of its own (CONSTRAINT_UNIQUE,
+/// CORRUPT_INDEX, ERROR_MISSING_COLLSEQ, ...) travels as the error of its
+/// primary code, while the code itself is kept where C keeps it (Vdbe.rc,
+/// Parse.rc, db.err_code): see resultCode(). The integer codes are only
+/// seen at the C-shaped API and in the callbacks of extensions, which
+/// errorCode() and codeError() convert from and to.
+pub const Error = @import("../btree/btree.zig").Error || error{
+    /// SQLITE_ERROR: an SQL error or missing database, and the error of
+    /// any code that has no error of its own.
+    Error,
+    /// SQLITE_INTERNAL.
+    Internal,
+    /// SQLITE_PERM.
+    Perm,
+    /// SQLITE_LOCKED: a table of the connection is in use.
+    Locked,
+    /// SQLITE_NOTFOUND.
+    NotFound,
+    /// SQLITE_SCHEMA: the schema changed since the statement was compiled.
+    Schema,
+    /// SQLITE_TOOBIG: a string or blob over the length limit.
+    TooBig,
+    /// SQLITE_CONSTRAINT.
+    Constraint,
+    /// SQLITE_MISMATCH.
+    Mismatch,
+    /// SQLITE_MISUSE.
+    Misuse,
+    /// SQLITE_NOLFS.
+    NoLfs,
+    /// SQLITE_AUTH.
+    Auth,
+    /// SQLITE_FORMAT.
+    Format,
+    /// SQLITE_RANGE.
+    Range,
+    /// SQLITE_EMPTY.
+    Empty,
+};
+
+/// The result code of each error, primary or extended: the one table
+/// errorCode() and codeError() derive from. Every error of Error is in
+/// it once, with a code of its own (checked below).
+const error_codes = [_]struct { Error, i32 }{
+    .{ error.Error, RC.ERROR },
+    .{ error.Internal, RC.INTERNAL },
+    .{ error.Perm, RC.PERM },
+    .{ error.Abort, RC.ABORT },
+    .{ error.Busy, RC.BUSY },
+    .{ error.BusyRecovery, RC.BUSY_RECOVERY },
+    .{ error.BusySnapshot, RC.BUSY_SNAPSHOT },
+    .{ error.Locked, RC.LOCKED },
+    .{ error.OutOfMemory, RC.NOMEM },
+    .{ error.ReadOnly, RC.READONLY },
+    .{ error.ReadOnlyRecovery, RC.READONLY_RECOVERY },
+    .{ error.ReadOnlyRollback, RC.READONLY_ROLLBACK },
+    .{ error.ReadOnlyCantInit, RC.READONLY_CANTINIT },
+    .{ error.Interrupt, RC.INTERRUPT },
+    .{ error.IoErr, RC.IOERR },
+    .{ error.ShortRead, RC.IOERR_SHORT_READ },
+    .{ error.LockErr, RC.IOERR_LOCK },
+    .{ error.ShmOpen, RC.IOERR_SHMOPEN },
+    .{ error.ShmSize, RC.IOERR_SHMSIZE },
+    .{ error.ShmLock, RC.IOERR_SHMLOCK },
+    .{ error.ShmMap, RC.IOERR_SHMMAP },
+    .{ error.Corrupt, RC.CORRUPT },
+    .{ error.NotFound, RC.NOTFOUND },
+    .{ error.DiskFull, RC.FULL },
+    .{ error.CantOpen, RC.CANTOPEN },
+    .{ error.Protocol, RC.PROTOCOL },
+    .{ error.Empty, RC.EMPTY },
+    .{ error.Schema, RC.SCHEMA },
+    .{ error.TooBig, RC.TOOBIG },
+    .{ error.Constraint, RC.CONSTRAINT },
+    .{ error.Mismatch, RC.MISMATCH },
+    .{ error.Misuse, RC.MISUSE },
+    .{ error.NoLfs, RC.NOLFS },
+    .{ error.Auth, RC.AUTH },
+    .{ error.Format, RC.FORMAT },
+    .{ error.Range, RC.RANGE },
+    .{ error.NotADatabase, RC.NOTADB },
+};
+
+comptime {
+    @setEvalBranchQuota(10_000);
+    const names = @typeInfo(Error).error_set.error_names.?;
+    if (names.len != error_codes.len) @compileError("error_codes must list every error of Error once");
+    for (names) |name| {
+        var n = 0;
+        for (error_codes) |m| {
+            if (std.mem.eql(u8, @errorName(m[0]), name)) n += 1;
+        }
+        if (n != 1) @compileError("error." ++ name ++ " must be in error_codes once");
+    }
+    for (error_codes, 0..) |m, i| {
+        if (m[1] == RC.OK or m[1] & 0xff == RC.OK) @compileError("error_codes maps an error to SQLITE_OK");
+        for (error_codes[0..i]) |o| {
+            if (o[1] == m[1]) @compileError("two errors of error_codes share a code");
+        }
+    }
+}
+
+/// The error of each primary code: that of the code itself, or
+/// error.Error for codes with none (ERROR, and ROW, DONE, NOTICE,
+/// WARNING and unknown codes, which are not errors).
+const primary_errors: [256]Error = blk: {
+    var t: [256]Error = @splat(error.Error);
+    for (error_codes) |m| {
+        if (m[1] <= 0xff) t[m[1]] = m[0];
+    }
+    break :blk t;
+};
+
+/// The result code `err` stands for.
+pub fn errorCode(err: Error) i32 {
+    return switch (err) {
+        inline else => |e| comptime for (error_codes) |m| {
+            if (m[0] == e) break m[1];
+        } else unreachable,
+    };
+}
+
+/// The error of result code `rc`, which is not OK: that of the code
+/// itself if it has one, else that of its primary code. Codes that are
+/// not errors (ROW, DONE, NOTICE, WARNING) or unknown give error.Error,
+/// as do the SQLITE_ERROR codes.
+pub fn codeError(rc: i32) Error {
+    std.debug.assert(rc != RC.OK);
+    inline for (error_codes) |m| {
+        if (comptime m[1] > 0xff) {
+            if (rc == m[1]) return m[0];
+        }
+    }
+    return primary_errors[@as(u8, @truncate(@as(u32, @bitCast(rc))))];
+}
+
+/// The result code to report for `err`, given the code `recorded` where
+/// the failing code keeps it (Vdbe.rc, Parse.rc, ...): `recorded` if it
+/// is a code of `err` (the error's own code or one of its extended
+/// codes), else errorCode(err). So an extended code survives the trip
+/// through the error, and a stale or unrelated one is ignored.
+pub fn resultCode(err: Error, recorded: i32) i32 {
+    if (recorded != RC.OK and codeError(recorded) == err) return recorded;
+    return errorCode(err);
+}
+
+/// Inward conversion: the error of `rc` (from a callback of an
+/// extension, or a function that returns a result code) unless it is
+/// OK. The caller keeps `rc` where resultCode() finds it.
+pub fn check(rc: i32) Error!void {
+    if (rc != RC.OK) return codeError(rc);
+}
 
 /// sqlite3_limit() categories (SQLITE_LIMIT_*) with their defaults.
 pub const Limit = enum(u4) {
@@ -1231,7 +1783,7 @@ pub const Parse = struct {
     is_multi_write: bool = false,
     within_rj_subrtn: u8 = 0,
     e_trigger_op: u8 = 0,
-    e_orconf: u8 = 0,
+    e_orconf: OE = .None,
     bhas_exists: bool = false,
     col_names_set: bool = false,
     ok_const_factor: bool = false,
@@ -1343,46 +1895,103 @@ pub const AutoincInfo = struct {
 pub const VListEntry = struct { name: []const u8, num: YnVar };
 
 /// Sqlite3.flags (SQLITE_* connection flags).
-pub const DbFlag = struct {
-    pub const WriteSchema: u64 = 0x00000001;
-    pub const LegacyFileFmt: u64 = 0x00000002;
-    pub const FullColNames: u64 = 0x00000004;
-    pub const FullFSync: u64 = 0x00000008;
-    pub const CkptFullFSync: u64 = 0x00000010;
-    pub const CacheSpill: u64 = 0x00000020;
-    pub const ShortColNames: u64 = 0x00000040;
-    pub const TrustedSchema: u64 = 0x00000080;
-    pub const NullCallback: u64 = 0x00000100;
-    pub const IgnoreChecks: u64 = 0x00000200;
-    pub const StmtScanStatus: u64 = 0x00000400;
-    pub const NoCkptOnClose: u64 = 0x00000800;
-    pub const ReverseOrder: u64 = 0x00001000;
-    pub const RecTriggers: u64 = 0x00002000;
-    pub const ForeignKeys: u64 = 0x00004000;
-    pub const AutoIndex: u64 = 0x00008000;
-    pub const LoadExtension: u64 = 0x00010000;
-    pub const LoadExtFunc: u64 = 0x00020000;
-    pub const EnableTrigger: u64 = 0x00040000;
-    pub const DeferFKs: u64 = 0x00080000;
-    pub const QueryOnly: u64 = 0x00100000;
-    pub const CellSizeCk: u64 = 0x00200000;
-    pub const Fts3Tokenizer: u64 = 0x00400000;
-    pub const EnableQPSG: u64 = 0x00800000;
-    pub const TriggerEQP: u64 = 0x01000000;
-    pub const ResetDatabase: u64 = 0x02000000;
-    pub const LegacyAlter: u64 = 0x04000000;
-    pub const NoSchemaError: u64 = 0x08000000;
-    pub const Defensive: u64 = 0x10000000;
-    pub const DqsDDL: u64 = 0x20000000;
-    pub const DqsDML: u64 = 0x40000000;
-    pub const EnableView: u64 = 0x80000000;
-    pub const CountRows: u64 = 0x1_00000000;
-    pub const CorruptRdOnly: u64 = 0x2_00000000;
-    pub const ReadUncommit: u64 = 0x4_00000000;
-    pub const FkNoAction: u64 = 0x8_00000000;
-    pub const AttachCreate: u64 = 0x10_00000000;
-    pub const AttachWrite: u64 = 0x20_00000000;
-    pub const Comments: u64 = 0x40_00000000;
+pub const DbFlag = packed struct(u64) {
+    WriteSchema: bool = false,
+    LegacyFileFmt: bool = false,
+    FullColNames: bool = false,
+    FullFSync: bool = false,
+    CkptFullFSync: bool = false,
+    CacheSpill: bool = false,
+    ShortColNames: bool = false,
+    TrustedSchema: bool = false,
+    NullCallback: bool = false,
+    IgnoreChecks: bool = false,
+    StmtScanStatus: bool = false,
+    NoCkptOnClose: bool = false,
+    ReverseOrder: bool = false,
+    RecTriggers: bool = false,
+    ForeignKeys: bool = false,
+    AutoIndex: bool = false,
+    LoadExtension: bool = false,
+    LoadExtFunc: bool = false,
+    EnableTrigger: bool = false,
+    DeferFKs: bool = false,
+    QueryOnly: bool = false,
+    CellSizeCk: bool = false,
+    Fts3Tokenizer: bool = false,
+    EnableQPSG: bool = false,
+    TriggerEQP: bool = false,
+    ResetDatabase: bool = false,
+    LegacyAlter: bool = false,
+    NoSchemaError: bool = false,
+    Defensive: bool = false,
+    DqsDDL: bool = false,
+    DqsDML: bool = false,
+    EnableView: bool = false,
+    CountRows: bool = false,
+    CorruptRdOnly: bool = false,
+    ReadUncommit: bool = false,
+    FkNoAction: bool = false,
+    AttachCreate: bool = false,
+    AttachWrite: bool = false,
+    Comments: bool = false,
+    _39: u25 = 0,
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(DbFlag, .{
+            .WriteSchema = 0x0000000000000001,
+            .LegacyFileFmt = 0x0000000000000002,
+            .FullColNames = 0x0000000000000004,
+            .FullFSync = 0x0000000000000008,
+            .CkptFullFSync = 0x0000000000000010,
+            .CacheSpill = 0x0000000000000020,
+            .ShortColNames = 0x0000000000000040,
+            .TrustedSchema = 0x0000000000000080,
+            .NullCallback = 0x0000000000000100,
+            .IgnoreChecks = 0x0000000000000200,
+            .StmtScanStatus = 0x0000000000000400,
+            .NoCkptOnClose = 0x0000000000000800,
+            .ReverseOrder = 0x0000000000001000,
+            .RecTriggers = 0x0000000000002000,
+            .ForeignKeys = 0x0000000000004000,
+            .AutoIndex = 0x0000000000008000,
+            .LoadExtension = 0x0000000000010000,
+            .LoadExtFunc = 0x0000000000020000,
+            .EnableTrigger = 0x0000000000040000,
+            .DeferFKs = 0x0000000000080000,
+            .QueryOnly = 0x0000000000100000,
+            .CellSizeCk = 0x0000000000200000,
+            .Fts3Tokenizer = 0x0000000000400000,
+            .EnableQPSG = 0x0000000000800000,
+            .TriggerEQP = 0x0000000001000000,
+            .ResetDatabase = 0x0000000002000000,
+            .LegacyAlter = 0x0000000004000000,
+            .NoSchemaError = 0x0000000008000000,
+            .Defensive = 0x0000000010000000,
+            .DqsDDL = 0x0000000020000000,
+            .DqsDML = 0x0000000040000000,
+            .EnableView = 0x0000000080000000,
+            .CountRows = 0x0000000100000000,
+            .CorruptRdOnly = 0x0000000200000000,
+            .ReadUncommit = 0x0000000400000000,
+            .FkNoAction = 0x0000000800000000,
+            .AttachCreate = 0x0000001000000000,
+            .AttachWrite = 0x0000002000000000,
+            .Comments = 0x0000004000000000,
+        });
+    }
 };
 
 /// Query optimizations that Sqlite3.db_opt_flags can disable (SQLITE_*).
@@ -1420,14 +2029,39 @@ pub const OPT = struct {
 };
 
 /// Sqlite3.m_db_flags (DBFLAG_*).
-pub const DBFLAG = struct {
-    pub const SchemaChange: u32 = 0x0001;
-    pub const PreferBuiltin: u32 = 0x0002;
-    pub const Vacuum: u32 = 0x0004;
-    pub const VacuumInto: u32 = 0x0008;
-    pub const SchemaKnownOk: u32 = 0x0010;
-    pub const InternalFunc: u32 = 0x0020;
-    pub const EncodingFixed: u32 = 0x0040;
+pub const DBFLAG = packed struct(u32) {
+    SchemaChange: bool = false,
+    PreferBuiltin: bool = false,
+    Vacuum: bool = false,
+    VacuumInto: bool = false,
+    SchemaKnownOk: bool = false,
+    InternalFunc: bool = false,
+    EncodingFixed: bool = false,
+    _7: u25 = 0,
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(DBFLAG, .{
+            .SchemaChange = 0x00000001,
+            .PreferBuiltin = 0x00000002,
+            .Vacuum = 0x00000004,
+            .VacuumInto = 0x00000008,
+            .SchemaKnownOk = 0x00000010,
+            .InternalFunc = 0x00000020,
+            .EncodingFixed = 0x00000040,
+        });
+    }
 };
 
 /// sqlite3.init: state while reading the schema.
@@ -1473,10 +2107,13 @@ pub const MAX_DB: i32 = 10 + 2;
 pub const BusyHandler = struct {
     /// Called with the number of prior calls; nonzero means retry
     /// (xBusyHandler).
-    func: ?*const fn (arg: ?*anyopaque, count: i32) i32 = null,
+    func: ?Fn = null,
     arg: ?*anyopaque = null,
     /// Calls so far, or -1 once the handler gave up (nBusy).
     n_busy: i32 = 0,
+
+    /// The busy callback of sqlite3_busy_handler().
+    pub const Fn = *const fn (arg: ?*anyopaque, count: i32) i32;
 };
 
 /// A WAL hook (sqlite3_wal_hook()): called after a commit with the
@@ -1491,17 +2128,6 @@ pub const Db = struct {
     sync_set: bool = false,
     schema: *Schema,
 
-    pub fn hasProperty(d: *const Db, p: u16) bool {
-        return d.schema.schema_flags & p == p;
-    }
-
-    pub fn setProperty(d: *Db, p: u16) void {
-        d.schema.schema_flags |= p;
-    }
-
-    pub fn clearProperty(d: *Db, p: u16) void {
-        d.schema.schema_flags &= ~p;
-    }
 };
 
 /// A free lookaside slot (LookasideSlot).
@@ -1547,10 +2173,20 @@ pub const Sqlite3 = struct {
     /// The VFS of the connection's files, also used for ephemeral tables.
     vfs: ?@import("../vfs/vfs.zig").Vfs = null,
     dbs: std.ArrayList(Db) = .empty,
-    flags: u64 = DbFlag.ShortColNames | DbFlag.EnableTrigger | DbFlag.EnableView |
-        DbFlag.CacheSpill | DbFlag.TrustedSchema | DbFlag.DqsDML | DbFlag.DqsDDL |
-        DbFlag.AutoIndex | DbFlag.Comments | DbFlag.AttachCreate | DbFlag.AttachWrite,
-    m_db_flags: u32 = 0,
+    flags: DbFlag = .{
+        .ShortColNames = true,
+        .EnableTrigger = true,
+        .EnableView = true,
+        .CacheSpill = true,
+        .TrustedSchema = true,
+        .DqsDML = true,
+        .DqsDDL = true,
+        .AutoIndex = true,
+        .Comments = true,
+        .AttachCreate = true,
+        .AttachWrite = true,
+    },
+    m_db_flags: DBFLAG = .{},
     /// Text encoding (SQLITE_UTF8 = 1).
     enc: u8 = 1,
     limits: std.enums.EnumArray(Limit, i32) = Limit.defaults,
@@ -1631,7 +2267,7 @@ pub const Sqlite3 = struct {
     /// VTables to disconnect at the next opportunity (pDisconnect).
     disconnect: ?*VTable = null,
     /// The ON CONFLICT mode of the running xUpdate (vtabOnConflict).
-    vtab_on_conflict: u8 = 0,
+    vtab_on_conflict: OE = .None,
     /// OP_VDestroy calls running (nVDestroy).
     n_vdestroy: i32 = 0,
 
@@ -1651,3 +2287,64 @@ pub const Sqlite3 = struct {
 };
 
 const Btree = @import("../btree/btree.zig").Btree;
+
+test "errorCode() and codeError() are inverse for every error" {
+    inline for (@typeInfo(Error).error_set.error_names.?) |name| {
+        const err = @field(anyerror, name);
+        const rc = errorCode(err);
+        try std.testing.expect(rc != RC.OK);
+        try std.testing.expectEqual(@as(Error, err), codeError(rc));
+        try std.testing.expectEqual(rc, resultCode(err, RC.OK));
+    }
+}
+
+test "resultCode() keeps every extended code through its error" {
+    // Every primary code, the non-error codes, and extended codes with
+    // and without errors of their own.
+    var codes: std.ArrayList(i32) = .empty;
+    defer codes.deinit(std.testing.allocator);
+    for (1..29) |p| try codes.append(std.testing.allocator, @intCast(p));
+    inline for (comptime std.meta.declarations(RC)) |name| {
+        try codes.append(std.testing.allocator, @field(RC, name));
+    }
+    for ([_]i32{
+        RC.IOERR | (3 << 8), // IOERR_WRITE
+        RC.IOERR | (12 << 8), // IOERR_NOMEM
+        RC.CORRUPT | (1 << 8), // CORRUPT_VTAB
+        RC.CANTOPEN | (1 << 8), // CANTOPEN_NOTEMPDIR
+        RC.CONSTRAINT | (2 << 8), // CONSTRAINT_COMMITHOOK
+        RC.CONSTRAINT | (4 << 8), // CONSTRAINT_FUNCTION
+        RC.CONSTRAINT | (9 << 8), // CONSTRAINT_VTAB
+        RC.NOTICE | (1 << 8), // NOTICE_RECOVER_WAL
+        RC.WARNING | (1 << 8), // WARNING_AUTOINDEX
+        RC.AUTH | (1 << 8), // AUTH_USER
+        RC.OK | (1 << 8), // OK_LOAD_PERMANENTLY
+        0x7f, // unknown
+    }) |c| try codes.append(std.testing.allocator, c);
+    for (codes.items) |rc| {
+        if (rc == RC.OK) continue;
+        const err = codeError(rc);
+        // The code survives when it is recorded next to its error ...
+        try std.testing.expectEqual(rc, resultCode(err, rc));
+        // ... and the error alone gives the primary code (or the code
+        // itself, if it has an error of its own), else SQLITE_ERROR.
+        const alone = errorCode(err);
+        try std.testing.expect(alone == rc or alone == rc & 0xff or alone == RC.ERROR);
+    }
+    try std.testing.expectEqual(error.Constraint, codeError(RC.CONSTRAINT_UNIQUE));
+    try std.testing.expectEqual(error.BusySnapshot, codeError(RC.BUSY_SNAPSHOT));
+    try std.testing.expectEqual(error.Busy, codeError(RC.BUSY | (3 << 8)));
+    try std.testing.expectEqual(error.Error, codeError(RC.ROW));
+    try std.testing.expectEqual(error.Error, codeError(RC.ERROR_MISSING_COLLSEQ));
+    try std.testing.expectEqual(RC.ERROR_MISSING_COLLSEQ, resultCode(error.Error, RC.ERROR_MISSING_COLLSEQ));
+    try std.testing.expectEqual(RC.ROW, resultCode(error.Error, RC.ROW));
+    try std.testing.expectEqual(RC.CORRUPT_INDEX, resultCode(error.Corrupt, RC.CORRUPT_INDEX));
+    try std.testing.expectEqual(RC.IOERR | (3 << 8), resultCode(error.IoErr, RC.IOERR | (3 << 8)));
+    // A recorded code of another error is not taken.
+    try std.testing.expectEqual(RC.BUSY, resultCode(error.Busy, RC.CONSTRAINT_UNIQUE));
+    try std.testing.expectEqual(RC.BUSY, resultCode(error.Busy, RC.BUSY_SNAPSHOT));
+    try std.testing.expectEqual(RC.IOERR_SHORT_READ, resultCode(error.ShortRead, RC.IOERR));
+    try std.testing.expectEqual(RC.NOMEM, resultCode(error.OutOfMemory, RC.ERROR));
+    try check(RC.OK);
+    try std.testing.expectError(error.Constraint, check(RC.CONSTRAINT_FOREIGNKEY));
+}

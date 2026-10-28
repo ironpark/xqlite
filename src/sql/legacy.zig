@@ -7,6 +7,7 @@ const prepare = @import("prepare.zig");
 const api = @import("../vdbe/api.zig");
 const aux = @import("../vdbe/aux.zig");
 const ctype = @import("../util/ctype.zig");
+const thunk = @import("../util/thunk.zig");
 
 const Sqlite3 = int.Sqlite3;
 const RC = int.RC;
@@ -14,6 +15,13 @@ const RC = int.RC;
 /// The callback of exec(): the values of one result row (null for NULL)
 /// and the column names. Returning true aborts the statement.
 pub const Callback = *const fn (ctx: ?*anyopaque, values: []const ?[*:0]const u8, names: []const [*:0]const u8) bool;
+
+/// exec() with a typed callback: `f(ctx, values, names)` receives `ctx`
+/// as passed here (a pointer of the type of its first parameter).
+pub fn execWith(db: *Sqlite3, sql: []const u8, ctx: anytype, comptime f: anytype, err_msg: ?*?[:0]u8) i32 {
+    const typed: @typeInfo(@TypeOf(f)).@"fn".param_types[0].? = ctx;
+    return exec(db, sql, thunk.thunk(Callback, f), thunk.erase(?*anyopaque, typed), err_msg);
+}
 
 /// Port of sqlite3_exec(): run every statement of `sql`, passing each
 /// result row to `callback`. On error, `err_msg` (if given) receives a
@@ -48,7 +56,7 @@ pub fn exec(db: *Sqlite3, sql_arg: []const u8, callback: ?Callback, ctx: ?*anyop
         var callback_is_init = false;
         while (true) {
             rc = api.step(stmt);
-            if (callback) |cb| if (rc == RC.ROW or (rc == RC.DONE and !callback_is_init and db.flags & int.DbFlag.NullCallback != 0)) {
+            if (callback) |cb| if (rc == RC.ROW or (rc == RC.DONE and !callback_is_init and db.flags.NullCallback)) {
                 const n_col = api.columnCount(stmt);
                 if (!callback_is_init) {
                     names.clearRetainingCapacity();

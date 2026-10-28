@@ -10,6 +10,13 @@
 //! `need_to_free_idx_str`) are allocated with sqlite3_malloc()
 //! (malloc.allocator) or the connection's allocator (db.gpa); the core
 //! frees them through db.gpa, which, as sqlite3DbFree(), takes either.
+//!
+//! The methods return C result codes, which may be extended codes. The
+//! functions here that call them for the VM (begin(), savepoint(),
+//! sync(), callCreate(), callDestroy()) pass the code on as it is; the
+//! opcodes turn it into an error (Exec.check()), keeping the code in
+//! Vdbe.rc. The sqlite3_vtab_*() and sqlite3_*_module() functions are
+//! the C-shaped API and return codes too.
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -27,6 +34,7 @@ const tokenize = @import("../parse/tokenize.zig");
 const ctype = @import("../util/ctype.zig");
 const wi = @import("where_int.zig");
 const malloc = @import("malloc.zig");
+const thunk = @import("../util/thunk.zig");
 
 const Allocator = std.mem.Allocator;
 const Parse = int.Parse;
@@ -92,6 +100,24 @@ pub const Module = struct {
     x_integrity: ?*const fn (vtab: *Vtab, schema: [:0]const u8, tab_name: [:0]const u8, flags: i32, err: *?[:0]u8) i32 = null,
 
     pub const ConstructFn = *const fn (db: *Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, vtab: *?*Vtab, err: *?[:0]u8) i32;
+
+    /// The type of the pAux that `f`, a typed xCreate or xConnect, takes
+    /// as its second parameter.
+    pub fn Aux(comptime f: anytype) type {
+        return @typeInfo(@TypeOf(f)).@"fn".param_types[1].?;
+    }
+
+    /// The ConstructFn of `f`, an xCreate or xConnect taking the pAux of
+    /// its module typed (thunk.thunk()). Register the module with
+    /// auxFor(f, aux) as pAux.
+    pub fn constructor(comptime f: anytype) ConstructFn {
+        return thunk.thunk(ConstructFn, f);
+    }
+
+    /// `p_aux`, of the type constructor(f) takes, as the pAux of a module.
+    pub fn auxFor(comptime f: anytype, p_aux: Aux(f)) ?*anyopaque {
+        return @ptrCast(@constCast(p_aux));
+    }
 };
 
 /// The base of a virtual table object (sqlite3_vtab). The core sets its
@@ -228,33 +254,29 @@ pub const VtabCtx = struct {
 
 /// Port of sqlite3VtabCreateModule(): install module `name`, replacing any
 /// module of that name; delete it if `module` is null.
-pub fn createModuleInternal(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_data: ?*anyopaque, x_destroy: ?*const fn (?*anyopaque) void) ?*int.Module {
+/// Null if out of memory, which is recorded.
+pub fn createModuleInternal(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_data: ?*anyopaque, x_destroy: ?int.DestructorFn) ?*int.Module {
+    return createModuleOrOom(db, name, module, aux_data, x_destroy) catch {
+        db.oomFault();
+        return null;
+    };
+}
+
+fn createModuleOrOom(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_data: ?*anyopaque, x_destroy: ?int.DestructorFn) error{OutOfMemory}!?*int.Module {
     const gpa = db.gpa;
     var new: ?*int.Module = null;
-    if (module) |m| {
-        const pm = gpa.create(int.Module) catch {
-            db.oomFault();
-            return null;
-        };
-        const copy = gpa.dupeSentinel(u8, name, 0) catch {
-            gpa.destroy(pm);
-            db.oomFault();
-            return null;
-        };
-        pm.* = .{ .module = m, .name = copy, .aux = aux_data, .x_destroy = x_destroy };
-        new = pm;
-    }
     var old: ?*int.Module = null;
-    if (new) |pm| {
-        const gop = db.modules.getOrPut(gpa, pm.name) catch {
-            db.oomFault();
-            gpa.free(pm.name);
-            gpa.destroy(pm);
-            return null;
-        };
+    if (module) |m| {
+        const pm = try gpa.create(int.Module);
+        errdefer gpa.destroy(pm);
+        const copy = try gpa.dupeSentinel(u8, name, 0);
+        errdefer gpa.free(copy);
+        pm.* = .{ .module = m, .name = copy, .aux = aux_data, .x_destroy = x_destroy };
+        const gop = try db.modules.getOrPut(gpa, pm.name);
         if (gop.found_existing) old = gop.value_ptr.*;
         gop.key_ptr.* = pm.name;
         gop.value_ptr.* = pm;
+        new = pm;
     } else if (db.modules.fetchRemove(name)) |kv| {
         old = kv.value;
     }
@@ -267,7 +289,7 @@ pub fn createModuleInternal(db: *Sqlite3, name: []const u8, module: ?*const Modu
 
 /// Port of createModule(): sqlite3_create_module_v2(). The destructor
 /// of `aux_data` runs if the registration fails.
-fn createModuleImpl(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_data: ?*anyopaque, x_destroy: ?*const fn (?*anyopaque) void) i32 {
+fn createModuleImpl(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_data: ?*anyopaque, x_destroy: ?int.DestructorFn) i32 {
     _ = createModuleInternal(db, name, module, aux_data, x_destroy);
     const rc = main_mod.apiExit(db, RC.OK);
     if (rc != RC.OK) if (x_destroy) |d| d(aux_data);
@@ -283,7 +305,7 @@ pub fn createModule(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_
 /// Port of sqlite3_create_module_v2(): sqlite3_create_module() with a
 /// destructor for `aux_data`, run when the module is replaced or the
 /// connection closes.
-pub fn createModuleV2(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_data: ?*anyopaque, x_destroy: ?*const fn (?*anyopaque) void) i32 {
+pub fn createModuleV2(db: *Sqlite3, name: []const u8, module: ?*const Module, aux_data: ?*anyopaque, x_destroy: ?int.DestructorFn) i32 {
     return createModuleImpl(db, name, module, aux_data, x_destroy);
 }
 
@@ -608,7 +630,7 @@ fn callConstructor(db: *Sqlite3, t: *Table, m: *int.Module, x_construct: Module.
             // contains the word "hidden" HIDDEN, removing the word.
             vt.next = t.u.vtab.p;
             t.u.vtab.p = vt;
-            var ooo_hidden: u32 = 0;
+            var ooo_hidden: int.TF = .{};
             for (t.cols) |*col| {
                 const zt = build.columnType(col, "");
                 const z: [*]u8 = @constCast(zt.ptr);
@@ -630,11 +652,11 @@ fn callConstructor(db: *Sqlite3, t: *Table, m: *int.Module, x_construct: Module.
                         std.debug.assert(z[i - 1] == ' ');
                         z[i - 1] = 0;
                     }
-                    col.col_flags |= int.COLFLAG.HIDDEN;
-                    t.tab_flags |= int.TF.HasHidden;
-                    ooo_hidden = int.TF.OOOHidden;
+                    col.col_flags.HIDDEN = true;
+                    t.tab_flags.HasHidden = true;
+                    ooo_hidden = .{ .OOOHidden = true };
                 } else {
-                    t.tab_flags |= ooo_hidden;
+                    t.tab_flags.set(ooo_hidden);
                 }
             }
         }
@@ -645,41 +667,37 @@ fn callConstructor(db: *Sqlite3, t: *Table, m: *int.Module, x_construct: Module.
 }
 
 /// Port of sqlite3VtabCallConnect(): make sure `t` is connected on this
-/// connection (xConnect). Errors are left in `p`.
-pub fn callConnect(p: *Parse, t: *Table) i32 {
+/// connection (xConnect). Errors are left in `p`, with the result code of
+/// the constructor in Parse.rc.
+pub fn callConnect(p: *Parse, t: *Table) int.ParseError!void {
     const db = p.db;
     std.debug.assert(t.isVirtual());
-    if (getVTable(db, t) != null) return RC.OK;
+    if (getVTable(db, t) != null) return;
 
     // Find the module.
     const z_mod = t.u.vtab.args[0];
-    var rc: i32 = undefined;
-    if (db.modules.get(z_mod)) |m| {
-        var z_err: ?[:0]u8 = null;
-        rc = callConstructor(db, t, m, m.module.x_connect.?, &z_err);
-        if (rc != RC.OK) {
-            util.errorMsg(p, "{s}", .{z_err orelse ""});
-            p.rc = rc;
-        } else {
-            build.markAllShadowTablesOf(db, t);
-        }
-        if (z_err) |e| db.gpa.free(e);
-    } else {
+    const m = db.modules.get(z_mod) orelse {
         util.errorMsg(p, "no such module: {s}", .{z_mod});
-        rc = RC.ERROR;
+        return error.ParseFailed;
+    };
+    var z_err: ?[:0]u8 = null;
+    defer if (z_err) |e| db.gpa.free(e);
+    const rc = callConstructor(db, t, m, m.module.x_connect.?, &z_err);
+    if (rc != RC.OK) {
+        util.errorMsg(p, "{s}", .{z_err orelse ""});
+        p.rc = rc;
+        return error.ParseFailed;
     }
-    return rc;
+    build.markAllShadowTablesOf(db, t);
 }
 
 /// Port of growVTrans(): room for one more entry in db.a_vtrans.
-fn growVTrans(db: *Sqlite3) i32 {
+fn growVTrans(db: *Sqlite3) error{OutOfMemory}!void {
     const array_incr = 5;
     if (db.n_vtrans % array_incr == 0) {
         const old: []*VTable = db.a_vtrans orelse &.{};
-        const new = db.gpa.realloc(old, db.n_vtrans + array_incr) catch return RC.NOMEM;
-        db.a_vtrans = new;
+        db.a_vtrans = try db.gpa.realloc(old, db.n_vtrans + array_incr);
     }
-    return RC.OK;
 }
 
 /// Port of addToVTrans().
@@ -709,8 +727,8 @@ pub fn callCreate(db: *Sqlite3, i_db: usize, tab_name: []const u8, err: *?[:0]u8
     }
 
     if (rc == RC.OK) if (getVTable(db, t)) |vt| {
-        rc = growVTrans(db);
-        if (rc == RC.OK) addToVTrans(db, vt);
+        growVTrans(db) catch return RC.NOMEM;
+        addToVTrans(db, vt);
     };
     return rc;
 }
@@ -760,11 +778,14 @@ pub fn declareVtab(db: *Sqlite3, create_table: [:0]const u8) i32 {
     p.n_query_loop = 1;
 
     var rc: i32 = RC.OK;
-    const n_err = tokenize.runParser(&p, create_table) catch blk: {
-        db.oomFault();
-        break :blk 1;
+    const parsed = if (tokenize.runParser(&p, create_table)) |_| true else |err| switch (err) {
+        error.OutOfMemory => blk: {
+            db.oomFault();
+            break :blk false;
+        },
+        error.ParseFailed => false,
     };
-    if (n_err == 0 and p.new_table != null) {
+    if (parsed and p.new_table != null) {
         const new = p.new_table.?;
         std.debug.assert(new.isOrdinary());
         if (tab.cols.len == 0) {
@@ -772,7 +793,7 @@ pub fn declareVtab(db: *Sqlite3, create_table: [:0]const u8) i32 {
             // the virtual table takes over.
             tab.cols = new.cols;
             tab.n_nv_col = @intCast(new.cols.len);
-            tab.tab_flags |= new.tab_flags & (int.TF.WithoutRowid | int.TF.NoVisibleRowid);
+            tab.tab_flags.set(new.tab_flags.only(.{ .WithoutRowid = true, .NoVisibleRowid = true }));
             new.cols = &.{};
             std.debug.assert(tab.index == null);
             std.debug.assert(new.hasRowid() or build.primaryKeyIndex(new) != null);
@@ -877,16 +898,14 @@ pub fn sync(db: *Sqlite3, v: *vi.Vdbe) i32 {
     return rc;
 }
 
-/// Port of sqlite3VtabRollback().
-pub fn rollback(db: *Sqlite3) i32 {
+/// Port of sqlite3VtabRollback(). (C returns SQLITE_OK.)
+pub fn rollback(db: *Sqlite3) void {
     callFinaliser(db, .rollback);
-    return RC.OK;
 }
 
-/// Port of sqlite3VtabCommit().
-pub fn commit(db: *Sqlite3) i32 {
+/// Port of sqlite3VtabCommit(). (C returns SQLITE_OK.)
+pub fn commit(db: *Sqlite3) void {
     callFinaliser(db, .commit);
-    return RC.OK;
 }
 
 /// sqlite3VtabInSync(): xSync methods are running.
@@ -907,17 +926,15 @@ pub fn begin(db: *Sqlite3, vt_opt: ?*VTable) i32 {
         if (db.a_vtrans) |a| for (a[0..db.n_vtrans]) |t| {
             if (t == vt) return RC.OK;
         };
-        rc = growVTrans(db);
+        growVTrans(db) catch return RC.NOMEM;
+        rc = x_begin(vt.vtab.?);
         if (rc == RC.OK) {
-            rc = x_begin(vt.vtab.?);
-            if (rc == RC.OK) {
-                const i_svpt = db.n_statement + db.n_savepoint;
-                addToVTrans(db, vt);
-                if (i_svpt != 0) if (module.x_savepoint) |x_savepoint| {
-                    vt.i_savepoint = i_svpt;
-                    rc = x_savepoint(vt.vtab.?, i_svpt - 1);
-                };
-            }
+            const i_svpt = db.n_statement + db.n_savepoint;
+            addToVTrans(db, vt);
+            if (i_svpt != 0) if (module.x_savepoint) |x_savepoint| {
+                vt.i_savepoint = i_svpt;
+                rc = x_savepoint(vt.vtab.?, i_svpt - 1);
+            };
         }
     }
     return rc;
@@ -926,9 +943,8 @@ pub fn begin(db: *Sqlite3, vt_opt: ?*VTable) i32 {
 /// Port of sqlite3VtabSavepoint(): call xSavepoint, xRollbackTo or
 /// xRelease (`op` SAVEPOINT_BEGIN, _ROLLBACK or _RELEASE) of every virtual
 /// table with a transaction.
-pub fn savepoint(db: *Sqlite3, op: i32, i_savepoint: i32) i32 {
+pub fn savepoint(db: *Sqlite3, op: aux.SAVEPOINT, i_savepoint: i32) i32 {
     var rc: i32 = RC.OK;
-    std.debug.assert(op == aux.SAVEPOINT_RELEASE or op == aux.SAVEPOINT_ROLLBACK or op == aux.SAVEPOINT_BEGIN);
     std.debug.assert(i_savepoint >= -1);
     if (db.a_vtrans) |a| {
         var i: usize = 0;
@@ -938,18 +954,18 @@ pub fn savepoint(db: *Sqlite3, op: i32, i_savepoint: i32) i32 {
             if (vt.vtab != null and module.i_version >= 2) {
                 lock(vt);
                 const x_method = switch (op) {
-                    aux.SAVEPOINT_BEGIN => blk: {
+                    .BEGIN => blk: {
                         vt.i_savepoint = i_savepoint + 1;
                         break :blk module.x_savepoint;
                     },
-                    aux.SAVEPOINT_ROLLBACK => module.x_rollback_to,
+                    .ROLLBACK => module.x_rollback_to,
                     else => module.x_release,
                 };
                 if (x_method) |x| if (vt.i_savepoint > i_savepoint) {
-                    const saved_flags = db.flags & int.DbFlag.Defensive;
-                    db.flags &= ~int.DbFlag.Defensive;
+                    const saved_defensive = db.flags.Defensive;
+                    db.flags.Defensive = false;
                     rc = x(vt.vtab.?, i_savepoint);
-                    db.flags |= saved_flags;
+                    if (saved_defensive) db.flags.Defensive = true;
                 };
                 unlock(vt);
             }
@@ -983,7 +999,7 @@ pub fn overloadFunction(db: *Sqlite3, a: Allocator, def: *FuncDef, n_arg: i32, e
     new.name = a.dupeSentinel(u8, def.name, 0) catch return def;
     new.x_sfunc = x_sfunc;
     new.user_data = arg;
-    new.func_flags |= @import("callback.zig").FUNC.EPHEM;
+    new.func_flags.EPHEM = true;
     return new;
 }
 
@@ -1014,7 +1030,7 @@ pub fn epoTableInit(p: *Parse, m: *int.Module) bool {
     t.u = .{ .vtab = .{} };
     t.schema = db.dbs.items[0].schema;
     t.i_pkey = -1;
-    t.tab_flags |= int.TF.Eponymous;
+    t.tab_flags.Eponymous = true;
     const a = t.mem.?.allocator();
     addModuleArgument(p, t, a.dupeSentinel(u8, t.name, 0) catch null);
     addModuleArgument(p, t, "");
@@ -1037,7 +1053,7 @@ pub fn epoTableInit(p: *Parse, m: *int.Module) bool {
 pub fn epoTableClear(db: *Sqlite3, m: *int.Module) void {
     if (m.epo_tab) |t| {
         // Not in a schema.
-        t.tab_flags |= int.TF.Ephemeral;
+        t.tab_flags.Ephemeral = true;
         build.deleteTable(db, t);
         m.epo_tab = null;
     }
@@ -1062,9 +1078,14 @@ pub fn importErrmsg(v: *vi.Vdbe, vtab: *Vtab) void {
 /// Port of sqlite3_vtab_on_conflict(): the ON CONFLICT mode of the xUpdate
 /// call running (SQLITE_ROLLBACK, _ABORT, _FAIL, _IGNORE or _REPLACE).
 pub fn onConflict(db: *const Sqlite3) i32 {
-    const map = [_]i32{ SQLITE_ROLLBACK, SQLITE_ABORT, SQLITE_FAIL, SQLITE_IGNORE, SQLITE_REPLACE };
-    std.debug.assert(db.vtab_on_conflict >= 1 and db.vtab_on_conflict <= 5);
-    return map[db.vtab_on_conflict - 1];
+    return switch (db.vtab_on_conflict) {
+        .Rollback => SQLITE_ROLLBACK,
+        .Abort => SQLITE_ABORT,
+        .Fail => SQLITE_FAIL,
+        .Ignore => SQLITE_IGNORE,
+        .Replace => SQLITE_REPLACE,
+        else => unreachable,
+    };
 }
 
 /// Port of sqlite3_vtab_config(): called by xCreate or xConnect to set
@@ -1202,9 +1223,9 @@ pub const ValueList = struct {
 /// The pointer type of a ValueList argument.
 pub const value_list_type = "ValueList";
 
-/// Port of sqlite3VdbeValueListFree() (vdbeapi.c).
-pub fn valueListFree(p: ?*anyopaque) void {
-    const list: *ValueList = @ptrCast(@alignCast(p.?));
+/// Port of sqlite3VdbeValueListFree() (vdbeapi.c), as a typed destructor
+/// (int.destructor(valueListFree) is the C-shaped one).
+pub fn valueListFree(list: *ValueList) void {
     malloc.allocator.destroy(list);
 }
 
@@ -1212,27 +1233,26 @@ pub fn valueListFree(p: ?*anyopaque) void {
 fn valueFromValueList(val_opt: ?*Mem, out: *?*Mem, b_next: bool) i32 {
     out.* = null;
     const val = val_opt orelse return RC.MISUSE;
-    if (val.flags & vi.MEM.Dyn == 0 or val.x_del != valueListFree) return RC.ERROR;
-    const rhs: *ValueList = @ptrCast(@alignCast(val.z.?));
+    const rhs = mem.dynObject(val, valueListFree) orelse return RC.ERROR;
     var rc: i32 = RC.OK;
     if (b_next) {
-        const more = rhs.csr.next() catch |err| return main_mod.errorCode(err);
+        const more = rhs.csr.next() catch |err| return int.errorCode(err);
         if (!more) rc = RC.DONE;
     } else {
-        const any = rhs.csr.first() catch |err| return main_mod.errorCode(err);
+        const any = rhs.csr.first() catch |err| return int.errorCode(err);
         if (!any or rhs.csr.eof()) rc = RC.DONE;
     }
     if (rc == RC.OK) {
-        var s_mem: Mem = .{ .flags = vi.MEM.Null };
+        var s_mem: Mem = .{ .flags = .{ .Null = true } };
         const sz = rhs.csr.payloadSize();
-        mem.fromBtreeZeroOffset(rhs.csr, sz, &s_mem) catch |err| return main_mod.errorCode(err);
+        mem.fromBtreeZeroOffset(rhs.csr, sz, &s_mem) catch |err| return int.errorCode(err);
         defer mem.release(&s_mem);
         const buf = s_mem.bytes();
         const sv = serial.getVarint32(buf, 1);
         const p_out = rhs.out;
         serial.serialGet(buf, 1 + sv.len, sv.value, p_out);
         p_out.enc = p_out.db.?.enc;
-        if (p_out.flags & vi.MEM.Ephem != 0) {
+        if (p_out.flags.Ephem) {
             mem.makeWriteable(p_out) catch return RC.NOMEM;
         }
         out.* = p_out;

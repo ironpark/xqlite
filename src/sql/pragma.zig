@@ -4,6 +4,7 @@
 //! UTF-16) fail with "not supported yet".
 
 const std = @import("std");
+const flags = @import("../util/flags.zig");
 const builtin = @import("builtin");
 const int = @import("sqlite_int.zig");
 const fkey = @import("fkey.zig");
@@ -92,23 +93,48 @@ pub const PragTyp = enum(u8) {
 };
 
 /// Property flags of the pragmas (PragFlg_*).
-pub const PragFlg = struct {
+pub const PragFlg = packed struct(u8) {
     /// Force schema load before running.
-    pub const NeedSchema: u8 = 0x01;
+    NeedSchema: bool = false,
     /// OP_ResultRow called with zero columns.
-    pub const NoColumns: u8 = 0x02;
+    NoColumns: bool = false,
     /// Zero columns if the RHS argument is present.
-    pub const NoColumns1: u8 = 0x04;
+    NoColumns1: bool = false,
     /// Read-only HEADER_VALUE.
-    pub const ReadOnly: u8 = 0x08;
+    ReadOnly: bool = false,
     /// Acts as query when no argument.
-    pub const Result0: u8 = 0x10;
+    Result0: bool = false,
     /// Acts as query when it has one argument.
-    pub const Result1: u8 = 0x20;
+    Result1: bool = false,
     /// Schema restricts name search if present.
-    pub const SchemaOpt: u8 = 0x40;
+    SchemaOpt: bool = false,
     /// Schema required - "main" is the default.
-    pub const SchemaReq: u8 = 0x80;
+    SchemaReq: bool = false,
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(PragFlg, .{
+            .NeedSchema = 0x01,
+            .NoColumns = 0x02,
+            .NoColumns1 = 0x04,
+            .ReadOnly = 0x08,
+            .Result0 = 0x10,
+            .Result1 = 0x20,
+            .SchemaOpt = 0x40,
+            .SchemaReq = 0x80,
+        });
+    }
 };
 
 /// Names of the result columns of pragmas that return several columns,
@@ -151,7 +177,7 @@ const prag_c_name = [_][:0]const u8{
 pub const PragmaName = struct {
     name: [:0]const u8,
     typ: PragTyp,
-    flags: u8 = 0,
+    flags: PragFlg = .{},
     /// Start and number of the column names in prag_c_name; 0 names means
     /// the one column is named after the pragma.
     i_prag_c_name: u8 = 0,
@@ -167,78 +193,78 @@ const locking_style = builtin.os.tag.isDarwin();
 /// The pragmas, sorted by name for pragmaLocate() (aPragmaName), as in a
 /// default build of SQLite 3.54.1 without SQLITE_DEBUG.
 const pragma_names = [_]PragmaName{
-    .{ .name = "analysis_limit", .typ = .analysis_limit, .flags = F.Result0 },
-    .{ .name = "application_id", .typ = .header_value, .flags = F.NoColumns1 | F.Result0, .i_arg = @backingInt(btree.Meta.application_id) },
-    .{ .name = "auto_vacuum", .typ = .auto_vacuum, .flags = F.NeedSchema | F.Result0 | F.SchemaReq | F.NoColumns1 },
-    .{ .name = "automatic_index", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.AutoIndex },
-    .{ .name = "busy_timeout", .typ = .busy_timeout, .flags = F.Result0, .i_prag_c_name = 56, .n_prag_c_name = 1 },
-    .{ .name = "cache_size", .typ = .cache_size, .flags = F.NeedSchema | F.Result0 | F.SchemaReq | F.NoColumns1 },
-    .{ .name = "cache_spill", .typ = .cache_spill, .flags = F.Result0 | F.SchemaReq | F.NoColumns1 },
-    .{ .name = "case_sensitive_like", .typ = .case_sensitive_like, .flags = F.NoColumns },
-    .{ .name = "cell_size_check", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.CellSizeCk },
-    .{ .name = "checkpoint_fullfsync", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.CkptFullFSync },
-    .{ .name = "collation_list", .typ = .collation_list, .flags = F.Result0, .i_prag_c_name = 33, .n_prag_c_name = 2 },
-    .{ .name = "compile_options", .typ = .compile_options, .flags = F.Result0 },
-    .{ .name = "count_changes", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.CountRows },
+    .{ .name = "analysis_limit", .typ = .analysis_limit, .flags = .{ .Result0 = true } },
+    .{ .name = "application_id", .typ = .header_value, .flags = .{ .NoColumns1 = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.application_id) },
+    .{ .name = "auto_vacuum", .typ = .auto_vacuum, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
+    .{ .name = "automatic_index", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .AutoIndex = true }) },
+    .{ .name = "busy_timeout", .typ = .busy_timeout, .flags = .{ .Result0 = true }, .i_prag_c_name = 56, .n_prag_c_name = 1 },
+    .{ .name = "cache_size", .typ = .cache_size, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
+    .{ .name = "cache_spill", .typ = .cache_spill, .flags = .{ .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
+    .{ .name = "case_sensitive_like", .typ = .case_sensitive_like, .flags = .{ .NoColumns = true } },
+    .{ .name = "cell_size_check", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .CellSizeCk = true }) },
+    .{ .name = "checkpoint_fullfsync", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .CkptFullFSync = true }) },
+    .{ .name = "collation_list", .typ = .collation_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 33, .n_prag_c_name = 2 },
+    .{ .name = "compile_options", .typ = .compile_options, .flags = .{ .Result0 = true } },
+    .{ .name = "count_changes", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .CountRows = true }) },
 } ++ (if (builtin.os.tag == .windows) [_]PragmaName{
-    .{ .name = "data_store_directory", .typ = .data_store_directory, .flags = F.NoColumns1 },
+    .{ .name = "data_store_directory", .typ = .data_store_directory, .flags = .{ .NoColumns1 = true } },
 } else [_]PragmaName{}) ++ [_]PragmaName{
-    .{ .name = "data_version", .typ = .header_value, .flags = F.ReadOnly | F.Result0, .i_arg = @backingInt(btree.Meta.data_version) },
-    .{ .name = "database_list", .typ = .database_list, .flags = F.Result0, .i_prag_c_name = 50, .n_prag_c_name = 3 },
-    .{ .name = "default_cache_size", .typ = .default_cache_size, .flags = F.NeedSchema | F.Result0 | F.SchemaReq | F.NoColumns1, .i_prag_c_name = 55, .n_prag_c_name = 1 },
-    .{ .name = "defer_foreign_keys", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.DeferFKs },
-    .{ .name = "empty_result_callbacks", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.NullCallback },
-    .{ .name = "encoding", .typ = .encoding, .flags = F.Result0 | F.NoColumns1 },
-    .{ .name = "foreign_key_check", .typ = .foreign_key_check, .flags = F.NeedSchema | F.Result0 | F.Result1 | F.SchemaOpt, .i_prag_c_name = 43, .n_prag_c_name = 4 },
-    .{ .name = "foreign_key_list", .typ = .foreign_key_list, .flags = F.NeedSchema | F.Result1 | F.SchemaOpt, .i_prag_c_name = 0, .n_prag_c_name = 8 },
-    .{ .name = "foreign_keys", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.ForeignKeys },
-    .{ .name = "freelist_count", .typ = .header_value, .flags = F.ReadOnly | F.Result0, .i_arg = @backingInt(btree.Meta.free_page_count) },
-    .{ .name = "full_column_names", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.FullColNames },
-    .{ .name = "fullfsync", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.FullFSync },
-    .{ .name = "function_list", .typ = .function_list, .flags = F.Result0, .i_prag_c_name = 15, .n_prag_c_name = 6 },
-    .{ .name = "hard_heap_limit", .typ = .hard_heap_limit, .flags = F.Result0 },
-    .{ .name = "ignore_check_constraints", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.IgnoreChecks },
-    .{ .name = "incremental_vacuum", .typ = .incremental_vacuum, .flags = F.NeedSchema | F.NoColumns },
-    .{ .name = "index_info", .typ = .index_info, .flags = F.NeedSchema | F.Result1 | F.SchemaOpt, .i_prag_c_name = 27, .n_prag_c_name = 3 },
-    .{ .name = "index_list", .typ = .index_list, .flags = F.NeedSchema | F.Result1 | F.SchemaOpt, .i_prag_c_name = 33, .n_prag_c_name = 5 },
-    .{ .name = "index_xinfo", .typ = .index_info, .flags = F.NeedSchema | F.Result1 | F.SchemaOpt, .i_prag_c_name = 27, .n_prag_c_name = 6, .i_arg = 1 },
-    .{ .name = "integrity_check", .typ = .integrity_check, .flags = F.NeedSchema | F.Result0 | F.Result1 | F.SchemaOpt },
-    .{ .name = "journal_mode", .typ = .journal_mode, .flags = F.NeedSchema | F.Result0 | F.SchemaReq },
-    .{ .name = "journal_size_limit", .typ = .journal_size_limit, .flags = F.Result0 | F.SchemaReq },
-    .{ .name = "legacy_alter_table", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.LegacyAlter },
+    .{ .name = "data_version", .typ = .header_value, .flags = .{ .ReadOnly = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.data_version) },
+    .{ .name = "database_list", .typ = .database_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 50, .n_prag_c_name = 3 },
+    .{ .name = "default_cache_size", .typ = .default_cache_size, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true }, .i_prag_c_name = 55, .n_prag_c_name = 1 },
+    .{ .name = "defer_foreign_keys", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .DeferFKs = true }) },
+    .{ .name = "empty_result_callbacks", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .NullCallback = true }) },
+    .{ .name = "encoding", .typ = .encoding, .flags = .{ .Result0 = true, .NoColumns1 = true } },
+    .{ .name = "foreign_key_check", .typ = .foreign_key_check, .flags = .{ .NeedSchema = true, .Result0 = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 43, .n_prag_c_name = 4 },
+    .{ .name = "foreign_key_list", .typ = .foreign_key_list, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 0, .n_prag_c_name = 8 },
+    .{ .name = "foreign_keys", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .ForeignKeys = true }) },
+    .{ .name = "freelist_count", .typ = .header_value, .flags = .{ .ReadOnly = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.free_page_count) },
+    .{ .name = "full_column_names", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .FullColNames = true }) },
+    .{ .name = "fullfsync", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .FullFSync = true }) },
+    .{ .name = "function_list", .typ = .function_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 15, .n_prag_c_name = 6 },
+    .{ .name = "hard_heap_limit", .typ = .hard_heap_limit, .flags = .{ .Result0 = true } },
+    .{ .name = "ignore_check_constraints", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .IgnoreChecks = true }) },
+    .{ .name = "incremental_vacuum", .typ = .incremental_vacuum, .flags = .{ .NeedSchema = true, .NoColumns = true } },
+    .{ .name = "index_info", .typ = .index_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 27, .n_prag_c_name = 3 },
+    .{ .name = "index_list", .typ = .index_list, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 33, .n_prag_c_name = 5 },
+    .{ .name = "index_xinfo", .typ = .index_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 27, .n_prag_c_name = 6, .i_arg = 1 },
+    .{ .name = "integrity_check", .typ = .integrity_check, .flags = .{ .NeedSchema = true, .Result0 = true, .Result1 = true, .SchemaOpt = true } },
+    .{ .name = "journal_mode", .typ = .journal_mode, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true } },
+    .{ .name = "journal_size_limit", .typ = .journal_size_limit, .flags = .{ .Result0 = true, .SchemaReq = true } },
+    .{ .name = "legacy_alter_table", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .LegacyAlter = true }) },
 } ++ (if (locking_style) [_]PragmaName{
-    .{ .name = "lock_proxy_file", .typ = .lock_proxy_file, .flags = F.NoColumns1 },
+    .{ .name = "lock_proxy_file", .typ = .lock_proxy_file, .flags = .{ .NoColumns1 = true } },
 } else [_]PragmaName{}) ++ [_]PragmaName{
-    .{ .name = "locking_mode", .typ = .locking_mode, .flags = F.Result0 | F.SchemaReq },
-    .{ .name = "max_page_count", .typ = .page_count, .flags = F.NeedSchema | F.Result0 | F.SchemaReq },
+    .{ .name = "locking_mode", .typ = .locking_mode, .flags = .{ .Result0 = true, .SchemaReq = true } },
+    .{ .name = "max_page_count", .typ = .page_count, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true } },
     .{ .name = "mmap_size", .typ = .mmap_size },
-    .{ .name = "module_list", .typ = .module_list, .flags = F.Result0, .i_prag_c_name = 9, .n_prag_c_name = 1 },
-    .{ .name = "optimize", .typ = .optimize, .flags = F.Result1 | F.NeedSchema },
-    .{ .name = "page_count", .typ = .page_count, .flags = F.NeedSchema | F.Result0 | F.SchemaReq },
-    .{ .name = "page_size", .typ = .page_size, .flags = F.Result0 | F.SchemaReq | F.NoColumns1 },
-    .{ .name = "pragma_list", .typ = .pragma_list, .flags = F.Result0, .i_prag_c_name = 9, .n_prag_c_name = 1 },
-    .{ .name = "query_only", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.QueryOnly },
-    .{ .name = "quick_check", .typ = .integrity_check, .flags = F.NeedSchema | F.Result0 | F.Result1 | F.SchemaOpt },
-    .{ .name = "read_uncommitted", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.ReadUncommit },
-    .{ .name = "recursive_triggers", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.RecTriggers },
-    .{ .name = "reverse_unordered_selects", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.ReverseOrder },
-    .{ .name = "schema_version", .typ = .header_value, .flags = F.NoColumns1 | F.Result0, .i_arg = @backingInt(btree.Meta.schema_version) },
-    .{ .name = "secure_delete", .typ = .secure_delete, .flags = F.Result0 },
-    .{ .name = "short_column_names", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.ShortColNames },
-    .{ .name = "shrink_memory", .typ = .shrink_memory, .flags = F.NoColumns },
-    .{ .name = "soft_heap_limit", .typ = .soft_heap_limit, .flags = F.Result0 },
-    .{ .name = "synchronous", .typ = .synchronous, .flags = F.NeedSchema | F.Result0 | F.SchemaReq | F.NoColumns1 },
-    .{ .name = "table_info", .typ = .table_info, .flags = F.NeedSchema | F.Result1 | F.SchemaOpt, .i_prag_c_name = 8, .n_prag_c_name = 6 },
-    .{ .name = "table_list", .typ = .table_list, .flags = F.NeedSchema | F.Result1, .i_prag_c_name = 21, .n_prag_c_name = 6 },
-    .{ .name = "table_xinfo", .typ = .table_info, .flags = F.NeedSchema | F.Result1 | F.SchemaOpt, .i_prag_c_name = 8, .n_prag_c_name = 7, .i_arg = 1 },
-    .{ .name = "temp_store", .typ = .temp_store, .flags = F.Result0 | F.NoColumns1 },
-    .{ .name = "temp_store_directory", .typ = .temp_store_directory, .flags = F.NoColumns1 },
-    .{ .name = "threads", .typ = .threads, .flags = F.Result0 },
-    .{ .name = "trusted_schema", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.TrustedSchema },
-    .{ .name = "user_version", .typ = .header_value, .flags = F.NoColumns1 | F.Result0, .i_arg = @backingInt(btree.Meta.user_version) },
+    .{ .name = "module_list", .typ = .module_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 9, .n_prag_c_name = 1 },
+    .{ .name = "optimize", .typ = .optimize, .flags = .{ .Result1 = true, .NeedSchema = true } },
+    .{ .name = "page_count", .typ = .page_count, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true } },
+    .{ .name = "page_size", .typ = .page_size, .flags = .{ .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
+    .{ .name = "pragma_list", .typ = .pragma_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 9, .n_prag_c_name = 1 },
+    .{ .name = "query_only", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .QueryOnly = true }) },
+    .{ .name = "quick_check", .typ = .integrity_check, .flags = .{ .NeedSchema = true, .Result0 = true, .Result1 = true, .SchemaOpt = true } },
+    .{ .name = "read_uncommitted", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .ReadUncommit = true }) },
+    .{ .name = "recursive_triggers", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .RecTriggers = true }) },
+    .{ .name = "reverse_unordered_selects", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .ReverseOrder = true }) },
+    .{ .name = "schema_version", .typ = .header_value, .flags = .{ .NoColumns1 = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.schema_version) },
+    .{ .name = "secure_delete", .typ = .secure_delete, .flags = .{ .Result0 = true } },
+    .{ .name = "short_column_names", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .ShortColNames = true }) },
+    .{ .name = "shrink_memory", .typ = .shrink_memory, .flags = .{ .NoColumns = true } },
+    .{ .name = "soft_heap_limit", .typ = .soft_heap_limit, .flags = .{ .Result0 = true } },
+    .{ .name = "synchronous", .typ = .synchronous, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
+    .{ .name = "table_info", .typ = .table_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 8, .n_prag_c_name = 6 },
+    .{ .name = "table_list", .typ = .table_list, .flags = .{ .NeedSchema = true, .Result1 = true }, .i_prag_c_name = 21, .n_prag_c_name = 6 },
+    .{ .name = "table_xinfo", .typ = .table_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 8, .n_prag_c_name = 7, .i_arg = 1 },
+    .{ .name = "temp_store", .typ = .temp_store, .flags = .{ .Result0 = true, .NoColumns1 = true } },
+    .{ .name = "temp_store_directory", .typ = .temp_store_directory, .flags = .{ .NoColumns1 = true } },
+    .{ .name = "threads", .typ = .threads, .flags = .{ .Result0 = true } },
+    .{ .name = "trusted_schema", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .TrustedSchema = true }) },
+    .{ .name = "user_version", .typ = .header_value, .flags = .{ .NoColumns1 = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.user_version) },
     .{ .name = "wal_autocheckpoint", .typ = .wal_autocheckpoint },
-    .{ .name = "wal_checkpoint", .typ = .wal_checkpoint, .flags = F.NeedSchema, .i_prag_c_name = 47, .n_prag_c_name = 3 },
-    .{ .name = "writable_schema", .typ = .flag, .flags = F.Result0 | F.NoColumns1, .i_arg = DbFlag.WriteSchema | DbFlag.NoSchemaError },
+    .{ .name = "wal_checkpoint", .typ = .wal_checkpoint, .flags = .{ .NeedSchema = true }, .i_prag_c_name = 47, .n_prag_c_name = 3 },
+    .{ .name = "writable_schema", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .WriteSchema = true, .NoSchemaError = true }) },
 };
 
 comptime {
@@ -370,12 +396,12 @@ fn setAllPagerFlags(db: *Sqlite3) void {
             4 => .extra,
             else => .full,
         };
-        bt.setPagerFlags(level, db.flags & DbFlag.FullFSync != 0, db.flags & DbFlag.CkptFullFSync != 0, db.flags & DbFlag.CacheSpill != 0);
+        bt.setPagerFlags(level, db.flags.FullFSync, db.flags.CkptFullFSync, db.flags.CacheSpill);
     }
 }
 
 /// Port of actionName(): the name of a foreign key action.
-fn actionName(action: u8) [:0]const u8 {
+fn actionName(action: int.OE) [:0]const u8 {
     return switch (action) {
         int.OE.SetNull => "SET NULL",
         int.OE.SetDflt => "SET DEFAULT",
@@ -404,23 +430,22 @@ fn pragmaLocate(name: []const u8) ?*const PragmaName {
 /// Port of pragmaFunclistLine(): a row of PRAGMA function_list for each
 /// implementation of function `first`.
 fn pragmaFunclistLine(v: *Vdbe, first: ?*int.FuncDef, is_builtin: bool, show_intern_funcs: bool) void {
-    const FUNC = callback.FUNC;
     const FN = callback.FNFLAG;
-    var mask: u32 = FN.DETERMINISTIC | FN.DIRECTONLY | FN.SUBTYPE | FN.INNOCUOUS | FUNC.INTERNAL;
-    if (show_intern_funcs) mask = 0xffffffff;
+    // The flags column shows the bits of FuncDef.funcFlags as C has them.
+    const shown: callback.FUNC = FN.DETERMINISTIC.with(FN.DIRECTONLY).with(FN.SUBTYPE).with(FN.INNOCUOUS).with(.{ .INTERNAL = true });
     const enc_names = [_]?[]const u8{ null, "utf8", "utf16le", "utf16be" };
     var f_opt = first;
     while (f_opt) |f| : (f_opt = f.next) {
         if (f.x_sfunc == null) continue;
-        if (f.func_flags & FUNC.INTERNAL != 0 and !show_intern_funcs) continue;
+        if (f.func_flags.INTERNAL and !show_intern_funcs) continue;
         const typ: []const u8 = if (f.x_value != null) "w" else if (f.x_finalize != null) "a" else "s";
         aux.multiLoad(v, 1, &.{
             .{ .s = f.name },
             .{ .i = @intFromBool(is_builtin) },
             .{ .s = typ },
-            .{ .s = enc_names[f.func_flags & FUNC.ENCMASK] },
+            .{ .s = enc_names[f.func_flags.enc] },
             .{ .i = f.n_arg },
-            .{ .i = @bitCast((f.func_flags & mask) ^ FN.INNOCUOUS) },
+            .{ .i = @bitCast((if (show_intern_funcs) f.func_flags else f.func_flags.only(shown)).int() ^ FN.INNOCUOUS.int()) },
         }, false);
     }
 }
@@ -439,7 +464,7 @@ fn integrityCheckResultRow(v: *Vdbe) i32 {
 /// table; otherwise skip imposter tables.
 fn tableSkipIntegrityCheck(t: *const Table, obj_tab: ?*const Table) bool {
     if (obj_tab) |o| return t != o;
-    return t.tab_flags & int.TF.Imposter != 0;
+    return t.tab_flags.Imposter;
 }
 
 // ================================================================= pragma
@@ -468,7 +493,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
     var i_db = build.twoPartName(p, &id1, &id2, &id) orelse return;
 
     // A named TEMP database must be open.
-    if (i_db == 1 and build.openTempDatabase(p) != 0) return;
+    if (i_db == 1) build.openTempDatabase(p) catch return;
 
     const left = (try build.nameFromToken(p.arena, id.*)) orelse return;
     const right: ?[:0]u8 = if (minus)
@@ -484,12 +509,12 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
     // Unknown pragmas are silently ignored.
     const pn = pragmaLocate(left) orelse return;
 
-    if (pn.flags & F.NeedSchema != 0) {
-        if (prepare.readSchema(p) != int.RC.OK) return;
+    if (pn.flags.NeedSchema) {
+        prepare.readSchema(p) catch return;
     }
 
     // Pragmas that return results name their columns.
-    if (pn.flags & F.NoColumns == 0 and (pn.flags & F.NoColumns1 == 0 or right == null)) {
+    if (!pn.flags.NoColumns and (!pn.flags.NoColumns1 or right == null)) {
         setPragmaResultColumnNames(v, pn);
     }
 
@@ -598,7 +623,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     }
                 }
                 // OFF can corrupt the database with ordinary SQL.
-                if (mode == @backingInt(pager_mod.JournalMode.off) and db.flags & DbFlag.Defensive != 0) {
+                if (mode == @backingInt(pager_mod.JournalMode.off) and db.flags.Defensive) {
                     mode = journalmode_query;
                 }
             }
@@ -646,7 +671,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                         .{ .opcode = OP.Transaction, .p2 = 1 },
                         .{ .opcode = OP.ReadCookie, .p2 = 1, .p3 = @backingInt(btree.Meta.largest_root_page) },
                         .{ .opcode = OP.If, .p1 = 1 },
-                        .{ .opcode = OP.Halt, .p1 = int.RC.OK, .p2 = int.OE.Abort },
+                        .{ .opcode = OP.Halt, .p1 = int.RC.OK, .p2 = @intCast(int.OE.Abort.int()) },
                         .{ .opcode = OP.SetCookie, .p2 = @backingInt(btree.Meta.incr_vacuum) },
                     };
                     const i_addr = aux.currentAddr(v);
@@ -699,13 +724,13 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     _ = pdb.bt.?.setSpillSize(size);
                 }
                 if (getBoolean(z, size != 0)) {
-                    db.flags |= DbFlag.CacheSpill;
+                    db.flags.CacheSpill = true;
                 } else {
-                    db.flags &= ~DbFlag.CacheSpill;
+                    db.flags.CacheSpill = false;
                 }
                 setAllPagerFlags(db);
             } else {
-                returnSingleInt(v, if (db.flags & DbFlag.CacheSpill == 0) 0 else pdb.bt.?.setSpillSize(0));
+                returnSingleInt(v, if (!db.flags.CacheSpill) 0 else pdb.bt.?.setSpillSize(0));
             }
         },
 
@@ -748,19 +773,19 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // The pragmas that read or set a bit of the connection flags.
         .flag => {
             if (right) |z| {
-                var mask = pn.i_arg;
+                var mask = DbFlag.fromInt(pn.i_arg);
                 // Foreign keys cannot be turned on or off in a transaction.
-                if (!db.auto_commit) mask &= ~DbFlag.ForeignKeys;
+                if (!db.auto_commit) mask.ForeignKeys = false;
                 if (getBoolean(z, false)) {
-                    if (mask & DbFlag.WriteSchema == 0 or db.flags & DbFlag.Defensive == 0) db.flags |= mask;
+                    if (!mask.WriteSchema or !db.flags.Defensive) db.flags.set(mask);
                 } else {
-                    db.flags &= ~mask;
-                    if (mask == DbFlag.DeferFKs) {
+                    db.flags.clear(mask);
+                    if (mask == DbFlag{ .DeferFKs = true }) {
                         db.n_deferred_imm_cons = 0;
                         db.n_deferred_cons = 0;
                     }
                     // writable_schema=RESET also reloads the schema.
-                    if (mask & DbFlag.WriteSchema != 0 and ctype.eqlNoCase(z, "reset")) {
+                    if (mask.WriteSchema and ctype.eqlNoCase(z, "reset")) {
                         build.resetAllSchemasOfConnection(db);
                     }
                 }
@@ -771,11 +796,11 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 // The C b-tree reads cell_size_check from db->flags; this
                 // one keeps its own copy, set here and when a b-tree opens.
                 for (db.dbs.items) |*d| if (d.bt) |bt| {
-                    bt.cell_size_check = db.flags & DbFlag.CellSizeCk != 0;
+                    bt.cell_size_check = db.flags.CellSizeCk;
                 };
             } else {
                 setPragmaResultColumnNames(v, pn);
-                returnSingleInt(v, @intFromBool(db.flags & pn.i_arg != 0));
+                returnSingleInt(v, @intFromBool(db.flags.intersects(.fromInt(pn.i_arg))));
             }
         },
 
@@ -787,24 +812,24 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             var n_hidden: i32 = 0;
             const pk = build.primaryKeyIndex(t);
             p.n_mem = 7;
-            _ = build.viewGetColumnNames(p, t);
+            build.viewGetColumnNames(p, t) catch {};
             for (t.cols, 0..) |*col, i| {
                 var is_hidden: i32 = 0;
-                if (col.col_flags & int.COLFLAG.NOINSERT != 0) {
+                if (col.col_flags.intersects(int.COLFLAG.NOINSERT)) {
                     if (pn.i_arg == 0) {
                         n_hidden += 1;
                         continue;
                     }
-                    if (col.col_flags & int.COLFLAG.VIRTUAL != 0) {
+                    if (col.col_flags.VIRTUAL) {
                         is_hidden = 2; // GENERATED ALWAYS AS ... VIRTUAL
-                    } else if (col.col_flags & int.COLFLAG.STORED != 0) {
+                    } else if (col.col_flags.STORED) {
                         is_hidden = 3; // GENERATED ALWAYS AS ... STORED
                     } else {
                         is_hidden = 1; // HIDDEN
                     }
                 }
                 var k: i32 = 0;
-                if (col.col_flags & int.COLFLAG.PRIMKEY == 0) {
+                if (!col.col_flags.PRIMKEY) {
                     k = 0;
                 } else if (pk) |pki| {
                     k = 1;
@@ -818,7 +843,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     .{ .i = @as(i32, @intCast(i)) - n_hidden },
                     .{ .s = col.name() },
                     .{ .s = build.columnType(col, "") },
-                    .{ .i = @intFromBool(col.not_null != 0) },
+                    .{ .i = @intFromBool(col.not_null != .None) },
                     .{ .s = dflt },
                     .{ .i = k },
                     .{ .i = is_hidden },
@@ -858,7 +883,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                         "view"
                     else if (t.e_tab_type == .vtab)
                         "virtual"
-                    else if (t.tab_flags & int.TF.Shadow != 0)
+                    else if (t.tab_flags.Shadow)
                         "shadow"
                     else
                         "table";
@@ -867,8 +892,8 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                         .{ .s = build.preferredTableName(t.name) },
                         .{ .s = typ },
                         .{ .i = t.nCol() },
-                        .{ .i = @intFromBool(t.tab_flags & int.TF.WithoutRowid != 0) },
-                        .{ .i = @intFromBool(t.tab_flags & int.TF.Strict != 0) },
+                        .{ .i = @intFromBool(t.tab_flags.WithoutRowid) },
+                        .{ .i = @intFromBool(t.tab_flags.Strict) },
                     }, false);
                 }
             }
@@ -972,7 +997,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // PRAGMA function_list: the built-in functions, then those of the
         // connection.
         .function_list => {
-            const show_intern = db.m_db_flags & int.DBFLAG.InternalFunc != 0;
+            const show_intern = db.m_db_flags.InternalFunc;
             p.n_mem = 6;
             callback.registerBuiltins();
             for (0..callback.func_hash_sz) |i| {
@@ -1047,7 +1072,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 .{ .name = "UTF16", .enc = 0 }, // SQLITE_UTF16NATIVE
             };
             if (right) |z| {
-                if (db.m_db_flags & int.DBFLAG.EncodingFixed == 0) {
+                if (!db.m_db_flags.EncodingFixed) {
                     for (encnames) |e| {
                         if (!ctype.eqlNoCase(z, e.name)) continue;
                         const enc = if (e.enc != 0) e.enc else if (builtin.cpu.arch.endian() == .little) vi.ENC.UTF16LE else vi.ENC.UTF16BE;
@@ -1058,7 +1083,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     } else util.errorMsg(p, "unsupported encoding: {s}", .{z});
                 }
             } else {
-                if (prepare.readSchema(p) != int.RC.OK) return;
+                prepare.readSchema(p) catch return;
                 returnSingleText(v, encnames[db.enc].name);
             }
         },
@@ -1068,7 +1093,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         .header_value => {
             const cookie: i32 = @intCast(pn.i_arg);
             aux.usesBtree(v, @intCast(i_db));
-            if (right != null and pn.flags & F.ReadOnly == 0) {
+            if (right != null and !pn.flags.ReadOnly) {
                 const set_cookie = [_]aux.OpListItem{
                     .{ .opcode = OP.Transaction, .p2 = 1 },
                     .{ .opcode = OP.SetCookie },
@@ -1080,7 +1105,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 ops[1].p3 = atoi(right.?);
                 ops[1].p5 = 1;
                 // No schema_version=N in defensive mode.
-                if (cookie == @backingInt(btree.Meta.schema_version) and db.flags & DbFlag.Defensive != 0) {
+                if (cookie == @backingInt(btree.Meta.schema_version) and db.flags.Defensive) {
                     ops[1].opcode = OP.Noop;
                 }
             } else {
@@ -1437,7 +1462,7 @@ fn integrityCheck(p: *Parse, v: *Vdbe, left: []const u8, i_db_opt: ?usize, value
             if (t.cols.len == 0) {
                 if (db.modules.get(t.u.vtab.args[0]) == null) continue;
             }
-            _ = build.viewGetColumnNames(p, t);
+            build.viewGetColumnNames(p, t) catch {};
             const vt = t.u.vtab.p orelse continue;
             const pv = vt.vtab orelse continue;
             if (pv.module.i_version < 4) continue;
@@ -1500,7 +1525,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     var mx_col: i32 = -1;
     if (t.hasRowid()) {
         for (t.cols) |c| {
-            if (c.col_flags & int.COLFLAG.VIRTUAL == 0) mx_col += 1;
+            if (!c.col_flags.VIRTUAL) mx_col += 1;
         }
         if (mx_col == t.i_pkey) mx_col -= 1;
     } else {
@@ -1531,18 +1556,18 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     //   (3) TEXT columns of other tables hold NULL, TEXT or BLOB;
     //   (4) numeric columns of other tables hold no TEXT that converts
     //       to a number without loss.
-    const strict = t.tab_flags & int.TF.Strict != 0;
+    const strict = t.tab_flags.Strict;
     for (t.cols, 0..) |*col, jj| {
         const jc: i32 = @intCast(jj);
         if (jc == t.i_pkey) continue;
-        const do_type_check = if (strict) col.e_ctype > int.COLTYPE.ANY else col.affinity > int.Aff.blob;
-        if (col.not_null == 0 and !do_type_check) continue;
+        const do_type_check = if (strict) col.e_ctype.int() > int.COLTYPE.ANY.int() else col.affinity > int.Aff.blob;
+        if (col.not_null == .None and !do_type_check) continue;
 
         // The operands of OP_IsType.
         var p4: i32 = vi.SQLITE_NULL;
         var p1: i32 = undefined;
         var p3: i32 = undefined;
-        if (col.col_flags & int.COLFLAG.VIRTUAL != 0) {
+        if (col.col_flags.VIRTUAL) {
             ec.codeGetColumnOfTable(v, t, i_data_cur, jc, 3);
             p1 = -1;
             p3 = 3;
@@ -1564,7 +1589,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
 
         const label_error = aux.makeLabel(p);
         const label_ok = aux.makeLabel(p);
-        if (col.not_null != 0) {
+        if (col.not_null != .None) {
             // (1) NOT NULL columns may not hold NULL.
             const jmp2 = aux.addOp4Int(v, OP.IsType, p1, label_ok, p3, p4);
             var jmp3: i32 = undefined;
@@ -1598,9 +1623,9 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 0x14, // TEXT
             };
             _ = aux.addOp4Int(v, OP.IsType, p1, label_ok, p3, p4);
-            aux.changeP5(v, std_type_mask[col.e_ctype - 1]);
+            aux.changeP5(v, std_type_mask[col.e_ctype.stdTypeIndex()]);
             const msg = try build.mprintf(p, "non-%s value in %s.%s", &.{
-                .{ .str = build.std_type[col.e_ctype - 1] },
+                .{ .str = build.std_type[col.e_ctype.stdTypeIndex()] },
                 .{ .str = t.name },
                 .{ .str = col.name() },
             });
@@ -1628,7 +1653,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
     }
 
     // CHECK constraints.
-    if (t.check) |checks| if (db.flags & DbFlag.IgnoreChecks == 0) {
+    if (t.check) |checks| if (!db.flags.IgnoreChecks) {
         const check = (try expr.listDup(p.arena, checks)).?;
         const addr_ck_fault = aux.makeLabel(p);
         const addr_ck_ok = aux.makeLabel(p);
@@ -1719,7 +1744,7 @@ fn integrityCheckTable(p: *Parse, v: *Vdbe, t: *Table, is_quick: bool) Oom!void 
                 const uniq_ok = aux.makeLabel(p);
                 for (0..idx.n_key_col) |kk| {
                     const i_col = idx.ai_column[kk];
-                    if (i_col >= 0 and t.cols[@intCast(i_col)].not_null != 0) continue;
+                    if (i_col >= 0 and t.cols[@intCast(i_col)].not_null != .None) continue;
                     _ = aux.addOp2(v, OP.IsNull, r1 + @as(i32, @intCast(kk)), uniq_ok);
                 }
                 const jmp6 = aux.addOp1(v, OP.Next, i_idx_cur + j);
@@ -1774,8 +1799,7 @@ const PragmaVtabCursor = struct {
 
 /// Port of pragmaVtabConnect(): declare the result columns of the pragma
 /// and HIDDEN columns for its argument and schema.
-fn pragmaVtabConnect(db: *Sqlite3, aux_data: ?*anyopaque, _: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8) i32 {
-    const pn: *const PragmaName = @ptrCast(@alignCast(aux_data.?));
+fn pragmaVtabConnect(db: *Sqlite3, pn: *const PragmaName, _: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8) i32 {
     var buf: [200]u8 = undefined;
     var acc: std.Io.Writer = .fixed(&buf);
     var sep: u8 = '(';
@@ -1790,11 +1814,11 @@ fn pragmaVtabConnect(db: *Sqlite3, aux_data: ?*anyopaque, _: []const [:0]const u
         i += 1;
     }
     var j: u8 = 0;
-    if (pn.flags & PragFlg.Result1 != 0) {
+    if (pn.flags.Result1) {
         acc.writeAll(",arg HIDDEN") catch {};
         j += 1;
     }
-    if (pn.flags & (PragFlg.SchemaOpt | PragFlg.SchemaReq) != 0) {
+    if (pn.flags.intersects(.{ .SchemaOpt = true, .SchemaReq = true })) {
         acc.writeAll(",schema HIDDEN") catch {};
         j += 1;
     }
@@ -1907,7 +1931,7 @@ fn pragmaVtabFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, argv: []*vi
     const t = PragmaVtab.of(cur.vtab);
     const db = t.db;
     pragmaVtabCursorClear(c);
-    var j: usize = if (t.name.flags & PragFlg.Result1 != 0) 0 else 1;
+    var j: usize = if (t.name.flags.Result1) 0 else 1;
     for (argv) |a| {
         std.debug.assert(j < c.args.len);
         std.debug.assert(c.args[j] == null);
@@ -1959,7 +1983,7 @@ fn pragmaVtabRowid(cur: *vtab.VtabCursor, rowid: *i64) i32 {
 /// The pragma virtual table module (pragmaVtabModule).
 const pragma_vtab_module: vtab.Module = .{
     .i_version = 0,
-    .x_connect = pragmaVtabConnect,
+    .x_connect = vtab.Module.constructor(pragmaVtabConnect),
     .x_best_index = pragmaVtabBestIndex,
     .x_disconnect = pragmaVtabDisconnect,
     .x_open = pragmaVtabOpen,
@@ -1977,7 +2001,7 @@ const pragma_vtab_module: vtab.Module = .{
 pub fn vtabRegister(db: *Sqlite3, name: []const u8) ?*int.Module {
     std.debug.assert(ctype.eqlNoCase(name[0..7], "pragma_"));
     const pn = pragmaLocate(name[7..]) orelse return null;
-    if (pn.flags & (PragFlg.Result0 | PragFlg.Result1) == 0) return null;
+    if (!pn.flags.intersects(.{ .Result0 = true, .Result1 = true })) return null;
     std.debug.assert(db.modules.get(name) == null);
-    return vtab.createModuleInternal(db, name, &pragma_vtab_module, @ptrCast(@constCast(pn)), null);
+    return vtab.createModuleInternal(db, name, &pragma_vtab_module, vtab.Module.auxFor(pragmaVtabConnect, pn), null);
 }

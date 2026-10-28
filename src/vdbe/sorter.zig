@@ -68,7 +68,7 @@ const SorterFile = struct {
 };
 
 /// VdbeSorter.
-const Sorter = struct {
+pub const Sorter = struct {
     gpa: Allocator,
     db: *int.Sqlite3,
     /// Minimum and maximum PMA size, in bytes. mx_pma_size 0 means no
@@ -188,11 +188,7 @@ const PmaWriter = struct {
 };
 
 fn get(c: *VdbeCursor) *Sorter {
-    return @ptrCast(@alignCast(c.uc.sorter));
-}
-
-fn unpackedError(code: u8) Error {
-    return if (code == int.RC.NOMEM) error.OutOfMemory else error.Corrupt;
+    return c.uc.sorter;
 }
 
 /// Port of sqlite3TempInMemory() for SQLITE_TEMP_STORE=1: temporary
@@ -482,7 +478,7 @@ fn sorterSort(t: *SortSubtask) Error!u32 {
         sorterSortWith(compareReal, t)
     else
         sorterSortWith(compareGeneral, t);
-    if (t.unpacked.err_code != 0) return unpackedError(t.unpacked.err_code);
+    if (t.unpacked.err) |err| return err;
     return p;
 }
 
@@ -686,7 +682,7 @@ fn mergeEngineStep(m: *MergeEngine) Error!bool {
             r1 = m.tree[i ^ 0x0001];
         }
     }
-    if (t.unpacked.err_code != 0) return unpackedError(t.unpacked.err_code);
+    if (t.unpacked.err) |err| return err;
     return m.readers[m.tree[1]].fd == null;
 }
 
@@ -784,7 +780,7 @@ fn mergeEngineInit(t: *SortSubtask, m: *MergeEngine) Error!void {
     for (m.readers) |*r| try pmaReaderIncrInit(r);
     var i = m.n_tree - 1;
     while (i > 0) : (i -= 1) mergeEngineCompare(m, i);
-    if (t.unpacked.err_code != 0) return unpackedError(t.unpacked.err_code);
+    if (t.unpacked.err) |err| return err;
 }
 
 /// Port of vdbePmaReaderIncrMergeInit() with INCRINIT_NORMAL: initialize
@@ -907,7 +903,7 @@ pub fn init(db: *int.Sqlite3, n_field: i32, c: *VdbeCursor) Error!void {
     errdefer gpa.destroy(s);
     const n_cells = @as(usize, ki.n_all_field) + 1;
     const cells = try gpa.alloc(Mem, n_cells);
-    @import("aux.zig").initMemArray(cells, db, MEM.Null);
+    @import("aux.zig").initMemArray(cells, db, .{ .Null = true });
 
     // A connection without a main b-tree (hand-built test programs) does
     // not spill.
@@ -956,7 +952,7 @@ fn subtaskCleanup(t: *SortSubtask) void {
     t.file2 = .{};
     t.n_pma = 0;
     t.n_spill = 0;
-    t.unpacked.err_code = 0;
+    t.unpacked.err = null;
 }
 
 /// Port of sqlite3VdbeSorterReset(): drop every record and PMA.
@@ -1065,7 +1061,7 @@ pub fn rowkey(c: *VdbeCursor, out: *Mem) Error!void {
     const key = currentKey(get(c));
     mem.clearAndResize(out, key.len) catch return error.OutOfMemory;
     out.n = @intCast(key.len);
-    out.setTypeFlag(MEM.Blob);
+    out.setTypeFlag(.{ .Blob = true });
     @memcpy(out.z.?[0..key.len], key);
 }
 
@@ -1078,7 +1074,7 @@ pub fn compare(c: *VdbeCursor, val: *const Mem, n_key_col: i32) Error!i32 {
     var r: UnpackedRecord = .{ .key_info = &s.key_info, .mem = s.cells.ptr, .n_field = @intCast(n_key_col) };
     serial.recordUnpack(key, &r);
     for (s.cells[0..@min(r.n_field, @as(usize, @intCast(n_key_col)))]) |m| {
-        if (m.flags & MEM.Null != 0) return -1;
+        if (m.flags.Null) return -1;
     }
     return serial.recordCompare(val.bytes(), &r);
 }

@@ -27,8 +27,8 @@ const RC = int.RC;
 const BytecodeVtab = struct {
     base: vtab.Vtab = .{},
     db: *Sqlite3,
-    /// 2 for tables_used(), 0 for bytecode().
-    b_tables_used: u8,
+    /// tables_used() rather than bytecode().
+    b_tables_used: bool,
 
     fn of(p: *vtab.Vtab) *BytecodeVtab {
         return @fieldParentPtr("base", p);
@@ -98,7 +98,7 @@ fn bytecodevtabConnect(db: *Sqlite3, aux_data: ?*anyopaque, _: []const [:0]const
     const rc = vtab.declareVtab(db, schemas[@intFromBool(is_tab_used)]);
     if (rc == RC.OK) {
         const new = db.gpa.create(BytecodeVtab) catch return RC.NOMEM;
-        new.* = .{ .db = db, .b_tables_used = @as(u8, @intFromBool(is_tab_used)) * 2 };
+        new.* = .{ .db = db, .b_tables_used = is_tab_used };
         pp_vtab.* = &new.base;
     }
     return rc;
@@ -115,7 +115,7 @@ fn bytecodevtabDisconnect(p: *vtab.Vtab) i32 {
 fn bytecodevtabOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
     const t = BytecodeVtab.of(p);
     const c = t.db.gpa.create(BytecodeCursor) catch return RC.NOMEM;
-    c.* = .{ .sub = Mem.init(t.db, vi.MEM.Null) };
+    c.* = .{ .sub = Mem.init(t.db, .{ .Null = true }) };
     pp_cursor.* = &c.base;
     return RC.OK;
 }
@@ -159,8 +159,9 @@ fn bytecodevtabNext(cur: *vtab.VtabCursor) i32 {
         c.z_schema = null;
     }
     var ops: []Op = &.{};
-    const rc = aux.nextOpcode(c.stmt.?, if (c.show_subprograms) &c.sub else null, t.b_tables_used, &c.i_rowid, &c.i_addr, &ops);
-    if (rc != RC.OK) {
+    // At the end or out of memory, the cursor is at EOF (C: rc!=SQLITE_OK).
+    const more = aux.nextOpcode(c.stmt.?, if (c.show_subprograms) &c.sub else null, if (t.b_tables_used) .TABLES_USED else .NORMAL, &c.i_rowid, &c.i_addr, &ops) catch false;
+    if (!more) {
         mem.setNull(&c.sub);
         c.a_op = null;
     } else {
@@ -181,7 +182,7 @@ fn bytecodevtabColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i_arg: i32) i32 {
     const a_op = c.a_op.?;
     const op = &a_op[c.i_addr];
     var i = i_arg;
-    if (t.b_tables_used != 0) {
+    if (t.b_tables_used) {
         if (i == 4) {
             i = 8;
         } else {
@@ -218,7 +219,7 @@ fn bytecodevtabColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i_arg: i32) i32 {
         // addr
         0 => api.resultInt(ctx, @intCast(c.i_addr)),
         // opcode
-        1 => api.resultText(ctx, vi.opcodes.names[op.opcode].name, .static),
+        1 => api.resultText(ctx, op.opcode.name(), .static),
         2 => api.resultInt(ctx, op.p1),
         3 => api.resultInt(ctx, op.p2),
         4 => api.resultInt(ctx, op.p3),
@@ -281,7 +282,7 @@ fn bytecodevtabFilter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, arg
         c.stmt = @ptrCast(@alignCast(api.valuePointer(argv[0], "stmt-pointer")));
     }
     if (c.stmt == null) {
-        vtab.setErrMsg(t.db, &t.base, "argument to {s}() is not a valid SQL statement", .{if (t.b_tables_used != 0) "tables_used" else "bytecode"});
+        vtab.setErrMsg(t.db, &t.base, "argument to {s}() is not a valid SQL statement", .{if (t.b_tables_used) "tables_used" else "bytecode"});
         rc = RC.ERROR;
     } else {
         _ = bytecodevtabNext(cur);
@@ -294,7 +295,7 @@ fn bytecodevtabFilter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, arg
 fn bytecodevtabBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
     var rc: i32 = RC.CONSTRAINT;
     const t = BytecodeVtab.of(p);
-    const i_base_col: i32 = if (t.b_tables_used != 0) 4 else 10;
+    const i_base_col: i32 = if (t.b_tables_used) 4 else 10;
     info.estimated_cost = 100;
     info.estimated_rows = 100;
     info.idx_num = 0;

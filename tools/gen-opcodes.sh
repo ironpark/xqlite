@@ -18,7 +18,7 @@ cat "$tmp/parse.h" "$ref/src/vdbe.c" | tclsh "$ref/tool/mkopcodeh.tcl" > "$tmp/o
 tclsh "$ref/tool/mkopcodec.tcl" "$tmp/opcodes.h" > "$tmp/opcodes.c"
 mkdir -p "$root/src/vdbe"
 zig run "$root/tools/vdbe/opcodes2zig.zig" -- \
-    "$tmp/opcodes.h" "$tmp/opcodes.c" "$(cat "$ref/VERSION")" \
+    "$tmp/opcodes.h" "$tmp/opcodes.c" "$ref/src/vdbe.c" "$(cat "$ref/VERSION")" \
     > "$root/src/vdbe/opcodes.zig"
 zig fmt "$root/src/vdbe/opcodes.zig" >/dev/null
 echo "wrote src/vdbe/opcodes.zig"

@@ -138,7 +138,7 @@ pub fn srcListAppendFromTerm(
     if (alias.n != 0) item.alias = try nameFromToken(p.arena, alias);
     if (subquery) |sq| {
         try srcItemAttachSubquery(p, item, sq);
-        if (sq.sel_flags & SF.NestedFrom != 0) item.fg.is_nested_from = true;
+        if (sq.sel_flags.NestedFrom) item.fg.is_nested_from = true;
     }
     if (on_using) |ou| {
         if (ou.using) |u| {
@@ -172,7 +172,7 @@ pub fn srcListAppendList(p: *Parse, p1: *SrcList, p2_arg: ?*SrcList) Oom!*SrcLis
     const n_old = p1.len();
     const l = (try srcListEnlarge(p, p1, p2.len(), n_old)) orelse return p1;
     @memcpy(l.items.items[n_old..], p2.items.items);
-    l.at(0).fg.jointype |= JT.LTORJ & p2.at(0).fg.jointype;
+    if (p2.at(0).fg.jointype.LTORJ) l.at(0).fg.jointype.LTORJ = true;
     return l;
 }
 
@@ -194,19 +194,19 @@ pub fn srcListShiftJoinType(list: ?*SrcList) void {
     const n = l.len();
     if (n <= 1) return;
     const a = l.items.items;
-    var all: u8 = 0;
+    var all: JT = .{};
     var i = n - 1;
     while (i > 0) : (i -= 1) {
         a[i].fg.jointype = a[i - 1].fg.jointype;
-        all |= a[i].fg.jointype;
+        all.set(a[i].fg.jointype);
     }
-    a[0].fg.jointype = 0;
-    if (all & JT.RIGHT != 0) {
+    a[0].fg.jointype = .{};
+    if (all.RIGHT) {
         i = n - 1;
-        while (i > 0 and a[i].fg.jointype & JT.RIGHT == 0) i -= 1;
+        while (i > 0 and !a[i].fg.jointype.RIGHT) i -= 1;
         while (i > 0) {
             i -= 1;
-            a[i].fg.jointype |= JT.LTORJ;
+            a[i].fg.jointype.LTORJ = true;
         }
     }
 }
@@ -302,7 +302,8 @@ pub const BTREE_BLOBKEY = 2;
 /// sqlite3MPrintf() into the statement's memory; too long a result is
 /// reported as out of memory.
 pub fn mprintf(p: *Parse, fmt: []const u8, args: []const @import("printf.zig").Arg) Oom![:0]u8 {
-    return @import("printf.zig").mprintf(p.arena, fmt, args) catch error.OutOfMemory;
+    const printf = @import("printf.zig");
+    return printf.mprintfLimit(p.db, p.arena, printf.max_length, fmt, args) catch error.OutOfMemory;
 }
 
 /// Record that the statement ran out of memory.
@@ -418,7 +419,7 @@ pub fn nestedParse(p: *Parse, fmt: []const u8, args: []const @import("printf.zig
     if (p.n_err != 0) return;
     if (p.e_parse_mode != .normal) return;
     std.debug.assert(p.nested < 10);
-    const sql = @import("printf.zig").mprintfLimit(p.arena, @intCast(db.limit(.length)), fmt, args) catch |err| {
+    const sql = @import("printf.zig").mprintfLimit(db, p.arena, @intCast(db.limit(.length)), fmt, args) catch |err| {
         if (err == error.TooBig) p.rc = RC.TOOBIG else db.oomFault();
         p.n_err += 1;
         return;
@@ -427,8 +428,11 @@ pub fn nestedParse(p: *Parse, fmt: []const u8, args: []const @import("printf.zig
     p.nested += 1;
     // The part of Parse reset for each recursion (PARSE_TAIL).
     const saved = ParseTail.save(p);
-    db.m_db_flags |= int.DBFLAG.PreferBuiltin;
-    _ = @import("../parse/tokenize.zig").runParser(p, sql) catch oomFault(p);
+    db.m_db_flags.PreferBuiltin = true;
+    @import("../parse/tokenize.zig").runParser(p, sql) catch |err| switch (err) {
+        error.OutOfMemory => oomFault(p),
+        error.ParseFailed => {},
+    };
     db.m_db_flags = saved_db_flags;
     saved.restore(p);
     p.nested -= 1;
@@ -553,9 +557,7 @@ pub const LOCATE_NOERR: u32 = 0x02;
 /// first and leaves an error in `p` if the table is not found.
 pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u8) ?*Table {
     const db = p.db;
-    if (db.m_db_flags & int.DBFLAG.SchemaKnownOk == 0 and prepare.readSchema(p) != RC.OK) {
-        return null;
-    }
+    if (!db.m_db_flags.SchemaKnownOk) prepare.readSchema(p) catch return null;
     var t = findTable(db, name, database);
     if (t == null) {
         // Not a table made with CREATE: perhaps an eponymous virtual
@@ -637,7 +639,7 @@ pub fn unlinkAndDeleteIndex(db: *Sqlite3, i_db: usize, name: [:0]const u8) void 
             }
         }
     }
-    db.m_db_flags |= int.DBFLAG.SchemaChange;
+    db.m_db_flags.SchemaChange = true;
 }
 
 /// Port of sqlite3SchemaClear() (callback.c): forget every object of a
@@ -656,10 +658,11 @@ pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
     s.idx_hash.clearRetainingCapacity();
     s.fkey_hash.clearRetainingCapacity();
     s.seq_tab = null;
-    if (s.schema_flags & int.DB_SchemaLoaded != 0) {
+    if (s.schema_flags.SchemaLoaded) {
         s.i_generation +%= 1;
     }
-    s.schema_flags &= ~(int.DB_SchemaLoaded | int.DB_ResetWanted);
+    s.schema_flags.SchemaLoaded = false;
+    s.schema_flags.ResetWanted = false;
 }
 
 /// Free the maps of a schema whose objects are cleared.
@@ -676,15 +679,15 @@ pub fn schemaFree(db: *Sqlite3, s: *Schema) void {
 /// deferred by n_schema_lock are done.
 pub fn resetOneSchema(db: *Sqlite3, i_db: ?usize) void {
     if (i_db) |i| {
-        db.dbs.items[i].setProperty(int.DB_ResetWanted);
-        db.dbs.items[1].setProperty(int.DB_ResetWanted);
-        db.m_db_flags &= ~int.DBFLAG.SchemaKnownOk;
+        db.dbs.items[i].schema.schema_flags.ResetWanted = true;
+        db.dbs.items[1].schema.schema_flags.ResetWanted = true;
+        db.m_db_flags.SchemaKnownOk = false;
     }
     if (db.n_schema_lock == 0) {
         for (db.dbs.items) |*d| {
-            if (d.hasProperty(int.DB_ResetWanted)) {
+            if (d.schema.schema_flags.ResetWanted) {
                 schemaClear(db, d.schema);
-                db.m_db_flags &= ~int.DBFLAG.SchemaKnownOk;
+                db.m_db_flags.SchemaKnownOk = false;
             }
         }
     }
@@ -697,10 +700,10 @@ pub fn resetAllSchemasOfConnection(db: *Sqlite3) void {
         if (db.n_schema_lock == 0) {
             schemaClear(db, d.schema);
         } else {
-            d.setProperty(int.DB_ResetWanted);
+            d.schema.schema_flags.ResetWanted = true;
         }
     }
-    db.m_db_flags &= ~(int.DBFLAG.SchemaChange | int.DBFLAG.SchemaKnownOk);
+    db.m_db_flags.clear(.{ .SchemaChange = true, .SchemaKnownOk = true });
     vtab_mod.unlockList(db);
 }
 
@@ -742,28 +745,28 @@ fn afterNul(z: [*:0]const u8) [*:0]const u8 {
 /// Port of sqlite3ColumnSetColl().
 pub fn columnSetColl(a: Allocator, col: *Column, coll: []const u8) Oom!void {
     var end: [*:0]const u8 = afterNul(col.cn_name.ptr);
-    if (col.col_flags & COLFLAG.HASTYPE != 0) end = afterNul(end);
+    if (col.col_flags.HASTYPE) end = afterNul(end);
     const n = @intFromPtr(end) - @intFromPtr(col.cn_name.ptr);
     const new = try a.allocSentinel(u8, n + coll.len, 0);
     @memcpy(new[0..n], col.cn_name.ptr[0..n]);
     @memcpy(new[n..], coll);
     col.cn_name = new[0..col.cn_name.len :0];
-    col.col_flags |= COLFLAG.HASCOLL;
+    col.col_flags.HASCOLL = true;
 }
 
 /// Port of sqlite3ColumnColl(): the declared collation of a column, or
 /// null.
 pub fn columnColl(col: *const Column) ?[:0]const u8 {
-    if (col.col_flags & COLFLAG.HASCOLL == 0) return null;
+    if (!col.col_flags.HASCOLL) return null;
     var z = afterNul(col.cn_name.ptr);
-    if (col.col_flags & COLFLAG.HASTYPE != 0) z = afterNul(z);
+    if (col.col_flags.HASTYPE) z = afterNul(z);
     return std.mem.span(z);
 }
 
 /// Port of sqlite3ColumnType(): the declared type of a column, or `dflt`.
 pub fn columnType(col: *const Column, dflt: [:0]const u8) [:0]const u8 {
-    if (col.col_flags & COLFLAG.HASTYPE != 0) return std.mem.span(afterNul(col.cn_name.ptr));
-    if (col.e_ctype != 0) return std_type[col.e_ctype - 1];
+    if (col.col_flags.HASTYPE) return std.mem.span(afterNul(col.cn_name.ptr));
+    if (col.e_ctype != .CUSTOM) return std_type[col.e_ctype.stdTypeIndex()];
     return dflt;
 }
 
@@ -771,6 +774,11 @@ pub fn columnType(col: *const Column, dflt: [:0]const u8) [:0]const u8 {
 /// STRICT tables.
 pub const std_type = [_][:0]const u8{ "ANY", "BLOB", "INT", "INTEGER", "REAL", "TEXT" };
 pub const std_type_affinity = [_]u8{ Aff.numeric, Aff.blob, Aff.integer, Aff.integer, Aff.real, Aff.text };
+
+comptime {
+    // In COLTYPE order from COLTYPE_ANY.
+    for (std_type, 0..) |name, i| std.debug.assert(std.mem.eql(u8, @tagName(COLTYPE.fromStdTypeIndex(i)), name));
+}
 
 /// Take a reference to `t` for the parse trees of `p`, released by
 /// releaseTableRefs(). (SQLite counts a reference per SrcItem and drops
@@ -815,7 +823,7 @@ pub fn deleteTable(db: *Sqlite3, t: *Table) void {
 pub fn unlinkAndDeleteTable(db: *Sqlite3, i_db: usize, name: [:0]const u8) void {
     const kv = db.dbs.items[i_db].schema.tbl_hash.fetchRemove(name) orelse return;
     deleteTable(db, kv.value);
-    db.m_db_flags |= int.DBFLAG.SchemaChange;
+    db.m_db_flags.SchemaChange = true;
 }
 
 /// Port of sqlite3OpenSchemaTable(): open sqlite_schema of `i_db` for
@@ -869,15 +877,16 @@ pub fn twoPartName(p: *Parse, name1: *const Token, name2: *const Token, unqual: 
 
 /// Port of sqlite3WritableSchema(): PRAGMA writable_schema is on.
 pub fn writableSchema(db: *Sqlite3) bool {
-    return db.flags & (int.DbFlag.WriteSchema | int.DbFlag.Defensive) == int.DbFlag.WriteSchema;
+    return db.flags.WriteSchema and !db.flags.Defensive;
 }
 
 /// Port of sqlite3CheckObjectName(): names starting with "sqlite_" are
 /// reserved; while reading the schema, the type, name and table must
-/// agree with the sqlite_schema row.
-pub fn checkObjectName(p: *Parse, name: []const u8, typ: []const u8, tbl_name: []const u8) i32 {
+/// agree with the sqlite_schema row. On error (C: SQLITE_ERROR) the error
+/// is in `p`.
+pub fn checkObjectName(p: *Parse, name: []const u8, typ: []const u8, tbl_name: []const u8) int.ParseError!void {
     const db = p.db;
-    if (writableSchema(db) or db.init.imposter_table != 0) return RC.OK;
+    if (writableSchema(db) or db.init.imposter_table != 0) return;
     if (db.init.busy) {
         if (!ctype.eqlNoCase(typ, db.init.az_init[0]) or
             !ctype.eqlNoCase(name, db.init.az_init[1]) or
@@ -885,13 +894,12 @@ pub fn checkObjectName(p: *Parse, name: []const u8, typ: []const u8, tbl_name: [
         {
             // corruptSchema() supplies the message.
             util.errorMsg(p, "", .{});
-            return RC.ERROR;
+            return error.ParseFailed;
         }
     } else if (p.nested == 0 and hasSqlitePrefix(name)) {
         util.errorMsg(p, "object name reserved for internal use: {s}", .{name});
-        return RC.ERROR;
+        return error.ParseFailed;
     }
-    return RC.OK;
 }
 
 /// Port of sqlite3PrimaryKeyIndex().
@@ -915,10 +923,10 @@ pub fn tableColumnToIndex(idx: *const Index, i_col: i32) i32 {
 /// Port of sqlite3StorageColumnToTable().
 pub fn storageColumnToTable(t: *const Table, i_col_arg: i16) i16 {
     var i_col = i_col_arg;
-    if (t.tab_flags & TF.HasVirtual != 0) {
+    if (t.tab_flags.HasVirtual) {
         var i: usize = 0;
         while (i <= i_col) : (i += 1) {
-            if (t.cols[i].col_flags & COLFLAG.VIRTUAL != 0) i_col += 1;
+            if (t.cols[i].col_flags.VIRTUAL) i_col += 1;
         }
     }
     return i_col;
@@ -927,13 +935,13 @@ pub fn storageColumnToTable(t: *const Table, i_col_arg: i16) i16 {
 /// Port of sqlite3TableColumnToStorage(): VIRTUAL columns are stored
 /// after all the others.
 pub fn tableColumnToStorage(t: *const Table, i_col: i16) i16 {
-    if (t.tab_flags & TF.HasVirtual == 0 or i_col < 0) return i_col;
+    if (!t.tab_flags.HasVirtual or i_col < 0) return i_col;
     var n: i16 = 0;
     var i: usize = 0;
     while (i < i_col) : (i += 1) {
-        if (t.cols[i].col_flags & COLFLAG.VIRTUAL == 0) n += 1;
+        if (!t.cols[i].col_flags.VIRTUAL) n += 1;
     }
-    if (t.cols[i].col_flags & COLFLAG.VIRTUAL != 0) {
+    if (t.cols[i].col_flags.VIRTUAL) {
         return t.n_nv_col + @as(i16, @intCast(i)) - n;
     }
     return n;
@@ -994,19 +1002,19 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         name = (nameFromToken(p.arena, name_tok.*) catch return oomFault(p)).?;
     }
     p.name_token = name_tok.*;
-    if (checkObjectName(p, name, if (is_view) "view" else "table", name) != RC.OK) {
+    checkObjectName(p, name, if (is_view) "view" else "table", name) catch {
         p.check_schema = true;
         return;
-    }
+    };
     if (db.init.i_db == 1) is_temp = true;
 
     // The name must not collide with a table or index of the database.
     if (!p.inSpecialParse()) {
         const zdb = db.dbs.items[i_db].name;
-        if (prepare.readSchema(p) != RC.OK) {
+        prepare.readSchema(p) catch {
             p.check_schema = true;
             return;
-        }
+        };
         if (findTable(db, name, zdb)) |t| {
             if (!no_err) {
                 util.errorMsgAt(p, name_tok.z, "{s} {s} already exists", .{ if (t.isView()) "view" else "table", name_tok.slice() });
@@ -1049,7 +1057,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         _ = aux.addOp3(v, OP.ReadCookie, @intCast(i_db), reg3, @intFromEnum(btree.Meta.file_format));
         aux.usesBtree(v, @intCast(i_db));
         const addr1 = aux.addOp1(v, OP.If, reg3);
-        const file_format: i32 = if (db.flags & int.DbFlag.LegacyFileFmt != 0) 1 else int.MAX_FILE_FORMAT;
+        const file_format: i32 = if (db.flags.LegacyFileFmt) 1 else int.MAX_FILE_FORMAT;
         _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.file_format), file_format);
         _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.text_encoding), db.enc);
         aux.jumpHere(v, addr1);
@@ -1066,8 +1074,8 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         aux.changeP5(v, OPFLAG.APPEND);
         _ = aux.addOp0(v, OP.Close);
     } else if (db.init.imposter_table != 0) {
-        t.tab_flags |= TF.Imposter;
-        if (db.init.imposter_table >= 2) t.tab_flags |= TF.Readonly;
+        t.tab_flags.Imposter = true;
+        if (db.init.imposter_table >= 2) t.tab_flags.Readonly = true;
     };
 }
 
@@ -1082,7 +1090,7 @@ fn addColumnImpl(p: *Parse, name_arg: Token, type_arg: Token) Oom!void {
     const db = p.db;
     var s_name = name_arg;
     var s_type = type_arg;
-    var e_type: u4 = COLTYPE.CUSTOM;
+    var e_type: COLTYPE = COLTYPE.CUSTOM;
     var sz_est: u8 = 1;
     var affinity: u8 = Aff.blob;
     if (t.cols.len + 1 > @as(usize, @intCast(db.limit(.column)))) {
@@ -1107,7 +1115,7 @@ fn addColumnImpl(p: *Parse, name_arg: Token, type_arg: Token) Oom!void {
         for (std_type, 0..) |st, i| {
             if (s_type.n == st.len and ctype.eqlNoCase(s_type.slice(), st)) {
                 s_type.n = 0;
-                e_type = @intCast(i + 1);
+                e_type = .fromStdTypeIndex(i);
                 affinity = std_type_affinity[i];
                 if (affinity <= Aff.text) sz_est = 5;
                 break;
@@ -1140,21 +1148,21 @@ fn addColumnImpl(p: *Parse, name_arg: Token, type_arg: Token) Oom!void {
         zt[s_type.n] = 0;
         const typ = util.dequote(zt[0..s_type.n :0]);
         col.affinity = affinityType(typ, col);
-        col.col_flags |= COLFLAG.HASTYPE;
+        col.col_flags.HASTYPE = true;
     }
     t.n_nv_col += 1;
     p.u1.cr.constraint_name.n = 0;
 }
 
 /// Port of sqlite3AddNotNull(): NOT NULL on the last column.
-pub fn addNotNull(p: *Parse, on_error: i32) void {
+pub fn addNotNull(p: *Parse, on_error: OE) void {
     const t = p.new_table orelse return;
     if (t.cols.len < 1) return;
     const col = &t.cols[t.cols.len - 1];
-    col.not_null = @intCast(on_error);
-    t.tab_flags |= TF.HasNotNull;
+    col.not_null = on_error;
+    t.tab_flags.HasNotNull = true;
     // UNIQUE and PRIMARY KEY indexes already made on the column.
-    if (col.col_flags & COLFLAG.UNIQUE != 0) {
+    if (col.col_flags.UNIQUE) {
         var idx = t.index;
         while (idx) |ix| : (idx = ix.next) {
             if (ix.ai_column[0] == t.cols.len - 1) ix.uniq_not_null = true;
@@ -1232,10 +1240,10 @@ fn addDefaultValueImpl(p: *Parse, e: ?*Expr, start: ?[*]const u8, end: ?[*]const
     const col = &t.cols[t.cols.len - 1];
     if (!expr_mod.isConstantOrFunction(e, is_init)) {
         util.errorMsg(p, "default value of column [{s}] is not constant", .{col.name()});
-    } else if (col.col_flags & COLFLAG.GENERATED != 0) {
+    } else if (col.col_flags.intersects(COLFLAG.GENERATED)) {
         util.errorMsg(p, "cannot use DEFAULT on a generated column", .{});
     } else {
-        var x: Expr = .{ .op = TK.SPAN, .flags = int.EP.Skip, .left = e };
+        var x: Expr = .{ .op = TK.SPAN, .flags = .{ .Skip = true }, .left = e };
         x.u = .{ .token = try expr_mod.spanDup(p.arena, start.?, end.?) };
         const dflt = try expr_mod.exprDup(tableAlloc(p, t), &x);
         try columnSetExpr(p, t, col, dflt);
@@ -1255,8 +1263,8 @@ fn stringToId(e: *Expr) void {
 
 /// Port of makeColumnPartOfPrimaryKey().
 fn makeColumnPartOfPrimaryKey(p: *Parse, col: *Column) void {
-    col.col_flags |= COLFLAG.PRIMKEY;
-    if (col.col_flags & COLFLAG.GENERATED != 0) {
+    col.col_flags.PRIMKEY = true;
+    if (col.col_flags.intersects(COLFLAG.GENERATED)) {
         util.errorMsg(p, "generated columns cannot be part of the PRIMARY KEY", .{});
     }
 }
@@ -1265,13 +1273,13 @@ fn makeColumnPartOfPrimaryKey(p: *Parse, col: *Column) void {
 /// construction: the columns of `list`, or the last column. A single
 /// INTEGER column (not DESC) becomes the rowid; anything else gets an
 /// index.
-pub fn addPrimaryKey(p: *Parse, list: ?*ExprList, on_error: i32, autoinc: bool, sort_order: i32) void {
+pub fn addPrimaryKey(p: *Parse, list: ?*ExprList, on_error: OE, autoinc: bool, sort_order: i32) void {
     const t = p.new_table orelse return;
-    if (t.tab_flags & TF.HasPrimaryKey != 0) {
+    if (t.tab_flags.HasPrimaryKey) {
         util.errorMsg(p, "table \"{s}\" has more than one primary key", .{t.name});
         return;
     }
-    t.tab_flags |= TF.HasPrimaryKey;
+    t.tab_flags.HasPrimaryKey = true;
     var col: ?*Column = null;
     var i_col: i32 = -1;
     var n_term: usize = undefined;
@@ -1299,8 +1307,8 @@ pub fn addPrimaryKey(p: *Parse, list: ?*ExprList, on_error: i32, autoinc: bool, 
             alter.renameTokenRemap(p, &t.i_pkey, expr_mod.skipCollate(l.at(0).expr));
         };
         t.i_pkey = @intCast(i_col);
-        t.key_conf = @intCast(on_error);
-        if (autoinc) t.tab_flags |= TF.Autoincrement;
+        t.key_conf = on_error;
+        if (autoinc) t.tab_flags.Autoincrement = true;
         if (list) |l| p.i_pk_sort_order = l.at(0).fg.sort_flags;
         _ = hasExplicitNulls(p, list);
     } else if (autoinc) {
@@ -1364,7 +1372,7 @@ pub fn addGenerated(p: *Parse, e_arg: ?*Expr, type_tok: ?Token) void {
 fn addGeneratedImpl(p: *Parse, e_arg: ?*Expr, type_tok: ?Token) Oom!void {
     const t = p.new_table orelse return;
     const col = &t.cols[t.cols.len - 1];
-    var e_type: u16 = COLFLAG.VIRTUAL;
+    var e_type: COLFLAG = .{ .VIRTUAL = true };
     if (p.inDeclareVtab()) {
         util.errorMsg(p, "virtual tables cannot use computed columns", .{});
         return;
@@ -1377,16 +1385,16 @@ fn addGeneratedImpl(p: *Parse, e_arg: ?*Expr, type_tok: ?Token) Oom!void {
         if (tt.n == 7 and ctype.eqlNoCase("virtual", tt.slice())) {
             // no-op
         } else if (tt.n == 6 and ctype.eqlNoCase("stored", tt.slice())) {
-            e_type = COLFLAG.STORED;
+            e_type = .{ .STORED = true };
         } else {
             util.errorMsg(p, "error in generated column \"{s}\"", .{col.name()});
             return;
         }
     }
-    if (e_type == COLFLAG.VIRTUAL) t.n_nv_col -= 1;
-    col.col_flags |= e_type;
-    t.tab_flags |= e_type;
-    if (col.col_flags & COLFLAG.PRIMKEY != 0) makeColumnPartOfPrimaryKey(p, col);
+    if (e_type == COLFLAG{ .VIRTUAL = true }) t.n_nv_col -= 1;
+    col.col_flags.set(e_type);
+    t.tab_flags.set(.ofColumn(e_type));
+    if (col.col_flags.PRIMKEY) makeColumnPartOfPrimaryKey(p, col);
     var e = e_arg;
     if (e != null and e.?.op == TK.ID) {
         // A generated column must be an expression, not a bare column.
@@ -1515,7 +1523,7 @@ fn recomputeColumnsNotIndexed(idx: *Index) void {
     while (j > 0) {
         j -= 1;
         const x = idx.ai_column[j];
-        if (x >= 0 and t.cols[@intCast(x)].col_flags & COLFLAG.VIRTUAL == 0) {
+        if (x >= 0 and !t.cols[@intCast(x)].col_flags.VIRTUAL) {
             if (x < int.bms - 1) m |= @as(int.Bitmask, 1) << @intCast(x);
         }
     }
@@ -1533,9 +1541,9 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
 
     if (db.init.imposter_table == 0) {
         for (t.cols) |*c| {
-            if (c.col_flags & COLFLAG.PRIMKEY != 0 and c.not_null == OE.None) c.not_null = OE.Abort;
+            if (c.col_flags.PRIMKEY and c.not_null == OE.None) c.not_null = OE.Abort;
         }
-        t.tab_flags |= TF.HasNotNull;
+        t.tab_flags.HasNotNull = true;
     }
 
     if (p.u1.cr.addr_cr_tab != 0) aux.changeP3(v.?, p.u1.cr.addr_cr_tab, BTREE_BLOBKEY);
@@ -1550,7 +1558,7 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
         t.i_pkey = -1;
         createIndex(p, null, null, null, list, t.key_conf, null, null, 0, false, .primarykey);
         if (p.n_err != 0) {
-            t.tab_flags &= ~TF.WithoutRowid;
+            t.tab_flags.WithoutRowid = false;
             return;
         }
         pk = primaryKeyIndex(t).?;
@@ -1610,12 +1618,12 @@ fn convertToWithoutRowidTable(p: *Parse, t: *Table) Oom!void {
     // The PRIMARY KEY index holds every column.
     var n_extra: usize = 0;
     for (t.cols, 0..) |*c, i| {
-        if (!hasColumn(pk.ai_column[0..n_pk], @intCast(i)) and c.col_flags & COLFLAG.VIRTUAL == 0) n_extra += 1;
+        if (!hasColumn(pk.ai_column[0..n_pk], @intCast(i)) and !c.col_flags.VIRTUAL) n_extra += 1;
     }
     try resizeIndexObject(a, pk, n_pk + n_extra);
     var j = n_pk;
     for (t.cols, 0..) |*c, i| {
-        if (!hasColumn(pk.ai_column[0..j], @intCast(i)) and c.col_flags & COLFLAG.VIRTUAL == 0) {
+        if (!hasColumn(pk.ai_column[0..j], @intCast(i)) and !c.col_flags.VIRTUAL) {
             pk.ai_column[j] = @intCast(i);
             pk.coll[j] = columnColl(c) orelse coll_mod.str_binary;
             j += 1;
@@ -1649,11 +1657,11 @@ pub fn markAllShadowTablesOf(db: *Sqlite3, t: *Table) void {
     while (it.next()) |op| {
         const other = op.*;
         if (!other.isOrdinary()) continue;
-        if (other.tab_flags & TF.Shadow != 0) continue;
+        if (other.tab_flags.Shadow) continue;
         if (other.name.len > n_name and ctype.eqlNoCase(other.name[0..n_name], t.name) and
             other.name[n_name] == '_' and x(other.name[n_name + 1 ..]))
         {
-            other.tab_flags |= TF.Shadow;
+            other.tab_flags.Shadow = true;
         }
     }
 }
@@ -1677,16 +1685,16 @@ pub fn vtabP4(db: *Sqlite3, t: *Table) vi.P4 {
 /// Port of sqlite3EndTable(): the closing ")" (or AS SELECT) of a CREATE
 /// TABLE. When reading the schema the table is added to it; otherwise
 /// code fills in the table's sqlite_schema row and rereads the schema.
-pub fn endTable(p: *Parse, cons: ?Token, end: ?Token, tab_opts: u32, sel: ?*Select) void {
+pub fn endTable(p: *Parse, cons: ?Token, end: ?Token, tab_opts: TF, sel: ?*Select) void {
     endTableImpl(p, cons, end, tab_opts, sel) catch oomFault(p);
 }
 
-fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel: ?*Select) Oom!void {
+fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: TF, sel: ?*Select) Oom!void {
     const db = p.db;
     if (end_arg == null and sel == null) return;
     const t = p.new_table orelse return;
 
-    if (sel == null and shadowTableName(db, t.name)) t.tab_flags |= TF.Shadow;
+    if (sel == null and shadowTableName(db, t.name)) t.tab_flags.Shadow = true;
 
     // While reading the schema the root page comes from sqlite_schema;
     // page 1 is sqlite_schema itself, which is read-only.
@@ -1696,16 +1704,16 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel
             return;
         }
         t.tnum = db.init.new_tnum;
-        if (t.tnum == 1) t.tab_flags |= TF.Readonly;
+        if (t.tnum == 1) t.tab_flags.Readonly = true;
     }
 
     // STRICT: every column has a standard type; primary key columns
     // other than the INTEGER PRIMARY KEY are NOT NULL.
-    if (tab_opts & TF.Strict != 0) {
-        t.tab_flags |= TF.Strict;
+    if (tab_opts.Strict) {
+        t.tab_flags.Strict = true;
         for (t.cols, 0..) |*c, ii| {
             if (c.e_ctype == COLTYPE.CUSTOM) {
-                if (c.col_flags & COLFLAG.HASTYPE != 0) {
+                if (c.col_flags.HASTYPE) {
                     util.errorMsg(p, "unknown datatype for {s}.{s}: \"{s}\"", .{ t.name, c.name(), columnType(c, "") });
                 } else {
                     util.errorMsg(p, "missing datatype for {s}.{s}", .{ t.name, c.name() });
@@ -1714,40 +1722,40 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel
             } else if (c.e_ctype == COLTYPE.ANY) {
                 c.affinity = Aff.blob;
             }
-            if (c.col_flags & COLFLAG.PRIMKEY != 0 and t.i_pkey != ii and c.not_null == OE.None) {
+            if (c.col_flags.PRIMKEY and t.i_pkey != ii and c.not_null == OE.None) {
                 c.not_null = OE.Abort;
-                t.tab_flags |= TF.HasNotNull;
+                t.tab_flags.HasNotNull = true;
             }
         }
     }
 
-    if (tab_opts & TF.WithoutRowid != 0) {
-        if (t.tab_flags & TF.Autoincrement != 0) {
+    if (tab_opts.WithoutRowid) {
+        if (t.tab_flags.Autoincrement) {
             util.errorMsg(p, "AUTOINCREMENT not allowed on WITHOUT ROWID tables", .{});
             return;
         }
-        if (t.tab_flags & TF.HasPrimaryKey == 0) {
+        if (!t.tab_flags.HasPrimaryKey) {
             util.errorMsg(p, "PRIMARY KEY missing on table {s}", .{t.name});
             return;
         }
-        t.tab_flags |= TF.WithoutRowid | TF.NoVisibleRowid;
+        t.tab_flags.set(.{ .WithoutRowid = true, .NoVisibleRowid = true });
         try convertToWithoutRowidTable(p, t);
     }
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
 
     if (t.check) |check| {
-        _ = resolve.resolveSelfReference(p, t, resolve.NC.IsCheck, null, check);
+        resolve.resolveSelfReference(p, t, .{ .IsCheck = true }, null, check) catch {};
         if (p.n_err != 0) t.check = null;
     }
-    if (t.tab_flags & TF.HasGenerated != 0) {
+    if (t.tab_flags.intersects(TF.HasGenerated)) {
         var n_ng: usize = 0;
         for (t.cols) |*c| {
-            if (c.col_flags & COLFLAG.GENERATED != 0) {
+            if (c.col_flags.intersects(COLFLAG.GENERATED)) {
                 const x = columnExpr(t, c);
-                if (resolve.resolveSelfReference(p, t, resolve.NC.GenCol, x, null) != 0) {
+                resolve.resolveSelfReference(p, t, .{ .GenCol = true }, x, null) catch {
                     // Use NULL rather than a half-resolved expression.
                     try columnSetExpr(p, t, c, try expr_mod.exprAlloc(tableAlloc(p, t), TK.NULL, null, false));
-                }
+                };
             } else {
                 n_ng += 1;
             }
@@ -1778,7 +1786,7 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel
         if (sel != null) {
             stmt = try createTableStmt(p.arena, t);
         } else {
-            const end2 = if (tab_opts != 0) p.last_token else end_arg.?;
+            const end2 = if (!tab_opts.isEmpty()) p.last_token else end_arg.?;
             var n = @intFromPtr(end2.z.?) - @intFromPtr(p.name_token.z.?);
             if (end2.z.?[0] != ';') n += end2.n;
             stmt = try std.fmt.allocPrintSentinel(p.arena, "CREATE {s} {s}", .{ typ2, p.name_token.z.?[0..n] }, 0);
@@ -1797,7 +1805,7 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel
         changeCookie(p, i_db);
 
         // AUTOINCREMENT needs sqlite_sequence.
-        if (t.tab_flags & TF.Autoincrement != 0 and !p.inSpecialParse()) {
+        if (t.tab_flags.Autoincrement and !p.inSpecialParse()) {
             if (db.dbs.items[i_db].schema.seq_tab == null) {
                 nestedParse(p, "CREATE TABLE %Q.sqlite_sequence(name,seq)", &.{.{ .str = db.dbs.items[i_db].name }});
             }
@@ -1808,7 +1816,7 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel
         aux.addParseSchemaOp(v, @intCast(i_db), where, 0);
 
         // Check generated columns for cycles and bad expressions.
-        if (t.tab_flags & TF.HasGenerated != 0) {
+        if (t.tab_flags.intersects(TF.HasGenerated)) {
             const q = try mprintf(p, "SELECT*FROM\"%w\".\"%w\"", &.{ .{ .str = db.dbs.items[i_db].name }, .{ .str = t.name } });
             _ = aux.addOp4Str(v, OP.SqlExec, 0x0001, 0, 0, q);
         }
@@ -1821,7 +1829,7 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: u32, sel
         std.debug.assert(!gop.found_existing);
         gop.value_ptr.* = t;
         p.new_table = null;
-        db.m_db_flags |= int.DBFLAG.SchemaChange;
+        db.m_db_flags.SchemaChange = true;
         if (std.mem.eql(u8, t.name, "sqlite_sequence")) s.seq_tab = t;
     }
 
@@ -1866,7 +1874,7 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     t.n_nv_col = @intCast(sel_tab.cols.len);
     sel_tab.cols = &.{};
     var dest = select_mod.selectDestInit(select_mod.SRT.Coroutine, reg_yield);
-    _ = select_mod.select(p, sel, &dest);
+    select_mod.select(p, sel, &dest) catch {};
     if (p.n_err != 0) return;
     aux.endCoroutine(v, reg_yield);
     aux.jumpHere(v, addr_top - 1);
@@ -1933,7 +1941,7 @@ fn createForeignKeyImpl(p: *Parse, from_col: ?*ExprList, to: Token, to_col: ?*Ex
         }
     }
     fk.is_deferred = false;
-    fk.a_action = .{ @intCast(flags & 0xff), @intCast((flags >> 8) & 0xff) };
+    fk.a_action = .{ .fromInt(flags & 0xff), .fromInt((flags >> 8) & 0xff) };
 
     const s = t.schema.?;
     const gop = try s.fkey_hash.getOrPut(p.db.gpa, fk.to);
@@ -2014,7 +2022,7 @@ pub fn createIndex(
     name2: ?Token,
     tbl_name: ?*SrcList,
     list: ?*ExprList,
-    on_error: i32,
+    on_error: OE,
     start: ?Token,
     where: ?*Expr,
     sort_order: i32,
@@ -2044,7 +2052,7 @@ fn createIndexImpl(
     name2: ?*const Token,
     tbl_name: ?*SrcList,
     list_arg: ?*ExprList,
-    on_error: i32,
+    on_error: OE,
     start: ?*const Token,
     where_arg: ?*Expr,
     sort_order: i32,
@@ -2056,7 +2064,7 @@ fn createIndexImpl(
     var where = where_arg;
     if (p.n_err != 0 or p.syntax_only) return;
     if (p.inDeclareVtab() and idx_type != .primarykey) return;
-    if (prepare.readSchema(p) != RC.OK) return;
+    prepare.readSchema(p) catch return;
     if (hasExplicitNulls(p, list)) return;
 
     var t: *Table = undefined;
@@ -2104,7 +2112,7 @@ fn createIndexImpl(
     var name: [:0]const u8 = undefined;
     if (name_tok) |nt| {
         name = (try nameFromToken(p.arena, nt.*)).?;
-        if (checkObjectName(p, name, "index", t.name) != RC.OK) return;
+        checkObjectName(p, name, "index", t.name) catch return;
         if (!p.inRenameObject()) {
             if (!db.init.busy and findTable(db, name, pdb.name) != null) {
                 util.errorMsg(p, "there is already a table named {s}", .{name});
@@ -2135,7 +2143,7 @@ fn createIndexImpl(
     // Without a list, the index is on the last column added.
     if (list == null) {
         const col = &t.cols[t.cols.len - 1];
-        col.col_flags |= COLFLAG.UNIQUE;
+        col.col_flags.UNIQUE = true;
         const e = try expr_mod.exprAlloc(p.arena, TK.ID, Token.init(col.name()), false);
         list = try expr_mod.listAppend(p, null, e);
         expr_mod.listSetSortOrder(list, sort_order, int.SortOrder.undef);
@@ -2150,13 +2158,13 @@ fn createIndexImpl(
     const a = if (tbl_name != null and p.inRenameObject()) p.arena else tableAlloc(p, t);
     const n_extra_col: usize = if (pk) |k| k.n_key_col else 1;
     const idx = try allocateIndexObject(a, l.len() + n_extra_col, t, name);
-    idx.on_error = @intCast(on_error);
+    idx.on_error = on_error;
     idx.uniq_not_null = on_error != OE.None;
     idx.idx_type = idx_type;
     idx.schema = db.dbs.items[i_db].schema;
     idx.n_key_col = @intCast(l.len());
     if (where) |w| {
-        _ = resolve.resolveSelfReference(p, t, resolve.NC.PartIdx, w, null);
+        resolve.resolveSelfReference(p, t, .{ .PartIdx = true }, w, null) catch {};
         // In rename mode the expressions themselves are kept: the rename
         // map has their nodes.
         idx.part_idx_where = if (p.inRenameObject()) w else try expr_mod.exprDup(a, w);
@@ -2170,7 +2178,7 @@ fn createIndexImpl(
     var has_col_expr = false;
     for (l.slice(), 0..) |*item, i| {
         stringToId(item.expr.?);
-        _ = resolve.resolveSelfReference(p, t, resolve.NC.IdxExpr, item.expr, null);
+        resolve.resolveSelfReference(p, t, .{ .IdxExpr = true }, item.expr, null) catch {};
         if (p.n_err != 0) return;
         const ce = expr_mod.skipCollate(item.expr).?;
         var j: i32 = undefined;
@@ -2190,8 +2198,8 @@ fn createIndexImpl(
                 j = t.i_pkey;
             } else {
                 const c = &t.cols[@intCast(j)];
-                if (c.not_null == 0) idx.uniq_not_null = false;
-                if (c.col_flags & COLFLAG.VIRTUAL != 0) {
+                if (c.not_null == .None) idx.uniq_not_null = false;
+                if (c.col_flags.VIRTUAL) {
                     idx.has_vcol = true;
                     idx.has_expr = true;
                 }
@@ -2290,7 +2298,7 @@ fn createIndexImpl(
             const gop = try idx.schema.?.idx_hash.getOrPut(db.gpa, idx.name);
             std.debug.assert(!gop.found_existing);
             gop.value_ptr.* = idx;
-            db.m_db_flags |= int.DBFLAG.SchemaChange;
+            db.m_db_flags.SchemaChange = true;
         } else if (t.hasRowid() or tbl_name != null) {
             // Code the index's b-tree and sqlite_schema row, unless this
             // is the PRIMARY KEY of a WITHOUT ROWID table.
@@ -2372,30 +2380,33 @@ pub fn srcListLookup(p: *Parse, src: *SrcList) ?*Table {
 }
 
 /// Port of sqlite3ViewGetColumnNames(): make sure the columns of a view
-/// are known (computed from its SELECT). Returns the number of errors.
-pub fn viewGetColumnNames(p: *Parse, t: *Table) u32 {
+/// are known (computed from its SELECT). On error (C: the number of
+/// errors) the error is in `p`.
+pub fn viewGetColumnNames(p: *Parse, t: *Table) int.ParseError!void {
     if (t.isVirtual()) {
         p.db.n_schema_lock += 1;
-        const rc = vtab_mod.callConnect(p, t);
-        p.db.n_schema_lock -= 1;
-        return @intFromBool(rc != RC.OK);
+        defer p.db.n_schema_lock -= 1;
+        return vtab_mod.callConnect(p, t);
     }
-    if (!t.isView() or t.cols.len > 0) return 0;
-    return viewGetColumnNamesImpl(p, t) catch {
-        oomFault(p);
-        return 1;
+    if (!t.isView() or t.cols.len > 0) return;
+    viewGetColumnNamesImpl(p, t) catch |err| switch (err) {
+        error.OutOfMemory => {
+            oomFault(p);
+            return error.ParseFailed;
+        },
+        error.ParseFailed => |e| return e,
     };
 }
 
-fn viewGetColumnNamesImpl(p: *Parse, t: *Table) Oom!u32 {
+fn viewGetColumnNamesImpl(p: *Parse, t: *Table) (Oom || int.ParseError)!void {
     const db = p.db;
     if (t.view_resolving) {
         util.errorMsg(p, "view {s} is circularly defined", .{t.name});
-        return 1;
+        return error.ParseFailed;
     }
     // Work on a copy: expanding "*" and assigning cursors must not change
     // the view's SELECT.
-    var n_err: u32 = 0;
+    var failed = false;
     if (try expr_mod.selectDup(p.arena, t.u.view.select)) |sel| {
         // The columns live with the view: not in lookaside.
         @import("malloc.zig").disableLookaside(db);
@@ -2416,7 +2427,7 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) Oom!u32 {
             break :sel_tab try select_mod.resultSetOfSelect(p, sel, Aff.none);
         };
         if (sel_tab == null) {
-            n_err += 1;
+            failed = true;
         } else {
             // The columns live with the view: named by the list of
             // CREATE VIEW name(list) (kept in t.check), or as the result
@@ -2434,16 +2445,17 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) Oom!u32 {
                 while (left.prior) |pr| left = pr;
                 t.cols = try select_mod.columnsFromExprList(p, a, left.e_list);
                 try select_mod.subqueryColumnTypes(p, a, t, left, Aff.none);
-                t.tab_flags |= sel_tab.?.tab_flags & COLFLAG.NOINSERT;
+                // C: tabFlags & COLFLAG_NOINSERT, the column bits.
+                t.tab_flags.set(sel_tab.?.tab_flags.only(TF.HasGenerated.with(.{ .HasHidden = true })));
             }
         }
         t.n_nv_col = @intCast(t.cols.len);
     } else {
-        n_err += 1;
+        failed = true;
     }
-    t.schema.?.schema_flags |= int.DB_UnresetViews;
+    t.schema.?.schema_flags.UnresetViews = true;
     if (db.malloc_failed) t.cols = &.{};
-    return n_err + @as(u32, @intCast(p.n_err));
+    if (failed or p.n_err != 0) return error.ParseFailed;
 }
 
 /// Fresh memory for the columns of schema view `t`, replacing the old.
@@ -2467,12 +2479,12 @@ fn freeViewColumns(db: *Sqlite3, t: *Table) void {
 /// Port of sqliteViewResetAll(): forget the columns of every view of
 /// database `idx` (they are computed again when needed).
 fn viewResetAll(db: *Sqlite3, idx: usize) void {
-    if (!db.dbs.items[idx].hasProperty(int.DB_UnresetViews)) return;
+    if (!db.dbs.items[idx].schema.schema_flags.UnresetViews) return;
     var it = db.dbs.items[idx].schema.tbl_hash.valueIterator();
     while (it.next()) |t| {
         if (t.*.isView()) freeViewColumns(db, t.*);
     }
-    db.dbs.items[idx].clearProperty(int.DB_UnresetViews);
+    db.dbs.items[idx].schema.schema_flags.UnresetViews = false;
 }
 
 /// Port of sqlite3RefillIndex(): code the (re)filling of an index from
@@ -2558,35 +2570,33 @@ pub fn endTransaction(p: *Parse, op: u16) void {
 }
 
 /// SAVEPOINT_* operations.
-pub const SAVEPOINT_BEGIN = aux.SAVEPOINT_BEGIN;
-pub const SAVEPOINT_RELEASE = aux.SAVEPOINT_RELEASE;
-pub const SAVEPOINT_ROLLBACK = aux.SAVEPOINT_ROLLBACK;
+pub const SAVEPOINT = aux.SAVEPOINT;
 
 /// Port of sqlite3Savepoint().
-pub fn savepoint(p: *Parse, op: i32, name: Token) void {
+pub fn savepoint(p: *Parse, op: SAVEPOINT, name: Token) void {
     if (p.syntax_only) return;
     const z = (nameFromToken(p.arena, name) catch return oomFault(p)) orelse return;
     const v = getVdbe(p) orelse return;
-    _ = aux.addOp4Str(v, OP.Savepoint, op, 0, 0, z);
+    _ = aux.addOp4Str(v, OP.Savepoint, op.int(), 0, 0, z);
 }
 
 /// Port of sqlite3OpenTempDatabase(): open the TEMP database if it is not
-/// yet. Returns the number of errors.
-pub fn openTempDatabase(p: *Parse) u32 {
+/// yet. On error (C: the number of errors) the error is in `p`, with the
+/// code of the b-tree in Parse.rc.
+pub fn openTempDatabase(p: *Parse) int.ParseError!void {
     const db = p.db;
     if (db.dbs.items[1].bt == null and p.explain == 0) {
         const bt = btree.Btree.open(@import("malloc.zig").allocator, db.vfs.?, null, .{
-            .cell_size_check = db.flags & int.DbFlag.CellSizeCk != 0,
+            .cell_size_check = db.flags.CellSizeCk,
             .n_vdbe_read = &db.n_vdbe_read,
         }) catch |err| {
             util.errorMsg(p, "unable to open a temporary database file for storing temporary tables", .{});
-            p.rc = main_mod.errorCode(err);
-            return 1;
+            p.rc = int.errorCode(err);
+            return error.ParseFailed;
         };
         db.dbs.items[1].bt = bt;
         if (db.next_pagesize != 0) bt.setPageSize(db.next_pagesize, 0, false) catch {};
     }
-    return 0;
 }
 
 /// Port of sqlite3CodeVerifySchema(): the statement checks the schema
@@ -2596,7 +2606,7 @@ pub fn codeVerifySchema(p: *Parse, i_db: usize) void {
     const bit = @as(u32, 1) << @intCast(i_db);
     if (top.cookie_mask & bit == 0) {
         top.cookie_mask |= bit;
-        if (i_db == 1) _ = openTempDatabase(top);
+        if (i_db == 1) openTempDatabase(top) catch {};
     }
 }
 
@@ -2618,20 +2628,20 @@ pub fn beginWriteOperation(p: *Parse, set_statement: bool, i_db: usize) void {
 
 /// Port of sqlite3HaltConstraint(): code an OP_Halt for a constraint
 /// error.
-pub fn haltConstraint(p: *Parse, err_code: i32, on_error: i32, msg: ?[]const u8, p5_errmsg: u16) void {
+pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, p5_errmsg: u16) void {
     const v = getVdbe(p) orelse return;
     if (on_error == OE.Abort) main_mod.mayAbort(p);
-    _ = aux.addOp4Str(v, OP.Halt, err_code, on_error, 0, msg);
+    _ = aux.addOp4Str(v, OP.Halt, err_code, on_error.int(), 0, msg);
     aux.changeP5(v, p5_errmsg);
 }
 
 /// Port of sqlite3UniqueConstraint(): halt for a UNIQUE or PRIMARY KEY
 /// violation of `idx`.
-pub fn uniqueConstraint(p: *Parse, on_error: i32, idx: *Index) void {
+pub fn uniqueConstraint(p: *Parse, on_error: OE, idx: *Index) void {
     uniqueConstraintImpl(p, on_error, idx) catch oomFault(p);
 }
 
-fn uniqueConstraintImpl(p: *Parse, on_error: i32, idx: *Index) Oom!void {
+fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index) Oom!void {
     const t = idx.table;
     var msg: std.ArrayList(u8) = .empty;
     if (idx.col_expr != null) {
@@ -2648,7 +2658,7 @@ fn uniqueConstraintImpl(p: *Parse, on_error: i32, idx: *Index) Oom!void {
 }
 
 /// Port of sqlite3RowidConstraint(): halt for a duplicate rowid.
-pub fn rowidConstraint(p: *Parse, on_error: i32, t: *Table) void {
+pub fn rowidConstraint(p: *Parse, on_error: OE, t: *Table) void {
     const msg, const rc = if (t.i_pkey >= 0)
         .{ std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, t.cols[@intCast(t.i_pkey)].name() }) catch return oomFault(p), RC.CONSTRAINT_PRIMARYKEY }
     else
@@ -2745,7 +2755,7 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
     while (trig) |tr| : (trig = tr.next) trigger_mod.dropTriggerPtr(p, tr);
     const db_name = db.dbs.items[i_db].name;
     // Before the b-tree goes, in case auto-vacuum moves sqlite_sequence.
-    if (t.tab_flags & TF.Autoincrement != 0) {
+    if (t.tab_flags.Autoincrement) {
         nestedParse(p, "DELETE FROM %Q.sqlite_sequence WHERE name=%Q", &.{ .{ .str = db_name }, .{ .str = t.name } });
     }
     nestedParse(p, "DELETE FROM %Q." ++ int.LEGACY_SCHEMA_TABLE ++ " WHERE tbl_name=%Q and type!='trigger'", &.{ .{ .str = db_name }, .{ .str = t.name } });
@@ -2762,7 +2772,7 @@ fn codeDropTable(p: *Parse, t: *Table, i_db: usize, is_view: bool) void {
 /// Port of sqlite3ReadOnlyShadowTables(): shadow tables are read-only
 /// to ordinary SQL in defensive mode.
 pub fn readOnlyShadowTables(db: *Sqlite3) bool {
-    return db.flags & int.DbFlag.Defensive != 0 and db.vtab_ctx == null and
+    return db.flags.Defensive and db.vtab_ctx == null and
         db.n_vdbe_exec == 0 and !vtab_mod.inSync(db);
 }
 
@@ -2774,8 +2784,8 @@ fn tableMayNotBeDropped(db: *Sqlite3, t: *Table) bool {
         if (rest.len >= 10 and ctype.eqlNoCase(rest[0..10], "parameters")) return false;
         return true;
     }
-    if (t.tab_flags & TF.Shadow != 0 and readOnlyShadowTables(db)) return true;
-    if (t.tab_flags & TF.Eponymous != 0) return true;
+    if (t.tab_flags.Shadow and readOnlyShadowTables(db)) return true;
+    if (t.tab_flags.Eponymous) return true;
     return false;
 }
 
@@ -2784,7 +2794,7 @@ pub fn dropTable(p: *Parse, name: ?*SrcList, is_view: bool, no_err: bool) void {
     const db = p.db;
     if (p.syntax_only or db.malloc_failed) return;
     const src = name.?;
-    if (prepare.readSchema(p) != RC.OK) return;
+    prepare.readSchema(p) catch return;
     if (no_err) db.suppress_err += 1;
     const t_opt = locateTableItem(p, if (is_view) LOCATE_VIEW else 0, src.at(0));
     if (no_err) db.suppress_err -= 1;
@@ -2797,7 +2807,7 @@ pub fn dropTable(p: *Parse, name: ?*SrcList, is_view: bool, no_err: bool) void {
     };
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
     // Make sure a virtual table is connected.
-    if (t.isVirtual() and viewGetColumnNames(p, t) != 0) return;
+    if (t.isVirtual()) viewGetColumnNames(p, t) catch return;
     if (tableMayNotBeDropped(db, t)) {
         util.errorMsg(p, "table {s} may not be dropped", .{t.name});
         return;
@@ -2835,7 +2845,7 @@ fn createViewImpl(p: *Parse, begin: Token, name1: Token, name2: Token, cnames: ?
     const t = p.new_table orelse return;
     if (p.n_err != 0) return;
     // A view has no rowid.
-    t.tab_flags |= TF.NoVisibleRowid;
+    t.tab_flags.NoVisibleRowid = true;
 
     var unq: *const Token = undefined;
     _ = twoPartName(p, &name1, &name2, &unq);
@@ -2846,7 +2856,7 @@ fn createViewImpl(p: *Parse, begin: Token, name1: Token, name2: Token, cnames: ?
 
     // The view keeps a copy of its SELECT (with its own memory); in
     // rename mode the SELECT itself, whose nodes the rename map has.
-    sel.sel_flags |= SF.View;
+    sel.sel_flags.View = true;
     const a = tableAlloc(p, t);
     t.u = .{ .view = .{ .select = if (p.inRenameObject()) sel else try expr_mod.selectDup(a, sel) } };
     t.check = try expr_mod.listDup(a, cnames);
@@ -2861,7 +2871,7 @@ fn createViewImpl(p: *Parse, begin: Token, name1: Token, name2: Token, cnames: ?
     while (n > 0 and ctype.isSpace(z[n - 1])) n -= 1;
     end.z = z + n - 1;
     end.n = 1;
-    endTable(p, null, end, 0, null);
+    endTable(p, null, end, .{}, null);
 }
 
 /// Port of sqlite3DropIndex(): DROP INDEX [IF EXISTS] name.
@@ -2869,7 +2879,7 @@ pub fn dropIndex(p: *Parse, name: ?*SrcList, if_exists: bool) void {
     const db = p.db;
     if (p.syntax_only or db.malloc_failed) return;
     const src = name.?;
-    if (prepare.readSchema(p) != RC.OK) return;
+    prepare.readSchema(p) catch return;
     const item = src.at(0);
     const idx = findIndex(db, item.name.?, item.u4.database) orelse {
         if (!if_exists) {
@@ -2913,7 +2923,7 @@ pub fn reindex(p: *Parse, name1_arg: ?Token, name2_arg: ?Token) void {
 fn reindexImpl(p: *Parse, name1_arg: ?Token, name2_arg: ?Token) Oom!void {
     const db = p.db;
     if (p.syntax_only or db.malloc_failed) return;
-    if (prepare.readSchema(p) != RC.OK) return;
+    prepare.readSchema(p) catch return;
     var z: ?[]const u8 = null;
     var zdb: ?[]const u8 = null;
     var i_re_db: ?usize = null;

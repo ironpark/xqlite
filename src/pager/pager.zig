@@ -292,10 +292,7 @@ pub const Pager = struct {
             .journal_mode = opts.journal_mode,
             .busy_handler = opts.busy_handler,
             .reiniter = opts.reiniter,
-            .cache = PCache.init(gpa, opts.page_size, std.mem.alignForward(u32, opts.extra_size, 8), .{
-                .ctx = p,
-                .func = stressCallback,
-            }),
+            .cache = PCache.init(gpa, opts.page_size, std.mem.alignForward(u32, opts.extra_size, 8), .init(p, stressCallback)),
         };
         errdefer p.cache.deinit();
         p.cache.setCacheSize(opts.cache_size);
@@ -517,7 +514,7 @@ pub const Pager = struct {
         while (true) {
             p.lockDb(level) catch |err| {
                 if (err == error.Busy) {
-                    if (p.busy_handler) |h| if (h.func(h.ctx)) continue;
+                    if (p.busy_handler) |h| if (h.call(.{})) continue;
                 }
                 return err;
             };
@@ -1083,8 +1080,7 @@ pub const Pager = struct {
     /// Port of pagerUndoCallback(): a page the rolled-back transaction
     /// wrote to the WAL is discarded from the cache, or reloaded if it is
     /// still referenced.
-    fn undoCallback(ctx: *anyopaque, pgno: Pgno) wal_mod.Error!void {
-        const p: *Pager = @ptrCast(@alignCast(ctx));
+    fn undoCallback(p: *Pager, pgno: Pgno) wal_mod.Error!void {
         std.debug.assert(p.wal != null);
         const pg = p.lookup(pgno) orelse return;
         if (pg.n_ref == 1) {
@@ -1100,7 +1096,7 @@ pub const Pager = struct {
     /// revert every page it changed, cached or already in the WAL.
     fn rollbackWal(p: *Pager) Error!void {
         p.db_size = p.db_orig_size;
-        const cb: wal_mod.UndoCallback = .{ .ctx = p, .func = undoCallback };
+        const cb: wal_mod.UndoCallback = .init(p, undoCallback);
         try p.wal.?.undo(cb);
         var it = p.cache.dirtyList();
         while (it) |pg| {
@@ -1924,8 +1920,7 @@ pub const Pager = struct {
         p.cache.makeClean(pg);
     }
 
-    fn stressCallback(ctx: *anyopaque, pg: *Page) error{SpillFailed}!void {
-        const p: *Pager = @ptrCast(@alignCast(ctx));
+    fn stressCallback(p: *Pager, pg: *Page) error{SpillFailed}!void {
         p.spill(pg) catch |err| switch (err) {
             error.Busy => {},
             else => {

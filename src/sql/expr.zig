@@ -54,7 +54,7 @@ pub fn exprInt32(a: Allocator, v: i32) Oom!*Expr {
     e.* = .{
         .op = TK.INTEGER,
         .i_agg = -1,
-        .flags = EP.IntValue | EP.Leaf | (if (v != 0) EP.IsTrue else EP.IsFalse),
+        .flags = .{ .IntValue = true, .Leaf = true, .IsTrue = v != 0, .IsFalse = v == 0 },
         .u = .{ .value = v },
         .n_height = 1,
     };
@@ -66,14 +66,14 @@ pub fn attachSubtrees(root: *Expr, left: ?*Expr, right: ?*Expr) void {
     std.debug.assert(root.useXList() and root.x.list == null);
     if (right) |r| {
         root.right = r;
-        root.flags |= EP.Propagate & r.flags;
+        root.flags.set(r.flags.only(EP.Propagate));
         root.n_height = r.n_height + 1;
     } else {
         root.n_height = 1;
     }
     if (left) |l| {
         root.left = l;
-        root.flags |= EP.Propagate & l.flags;
+        root.flags.set(l.flags.only(EP.Propagate));
         if (l.n_height >= root.n_height) root.n_height = l.n_height + 1;
     }
 }
@@ -90,7 +90,7 @@ pub fn pExpr(p: *Parse, op: u8, left: ?*Expr, right: ?*Expr) Oom!*Expr {
 /// Port of sqlite3PExprAddSelect().
 pub fn pExprAddSelect(p: *Parse, e: *Expr, sel: ?*Select) void {
     e.x = .{ .select = sel };
-    e.set(EP.xIsSelect | EP.Subquery);
+    e.flags.set(.{ .xIsSelect = true, .Subquery = true });
     setHeightAndFlags(p, e);
 }
 
@@ -134,7 +134,7 @@ fn exprSetHeight(e: *Expr) void {
         heightOfSelect(e.x.select, &h);
     } else if (e.x.list) |l| {
         heightOfExprList(l, &h);
-        e.flags |= EP.Propagate & listFlags(l);
+        e.flags.set(listFlags(l).only(EP.Propagate));
     }
     e.n_height = h + 1;
 }
@@ -154,9 +154,9 @@ pub fn selectExprHeight(s: *Select) i32 {
 }
 
 /// Port of sqlite3ExprListFlags(): the OR of the flags of every entry.
-pub fn listFlags(l: *ExprList) u32 {
-    var m: u32 = 0;
-    for (l.slice()) |item| m |= item.expr.?.flags;
+pub fn listFlags(l: *ExprList) EP {
+    var m: EP = .{};
+    for (l.slice()) |item| m.set(item.expr.?.flags);
     return m;
 }
 
@@ -172,7 +172,7 @@ pub fn addCollateToken(p: *Parse, e: *Expr, coll_name: Token, dequote: bool) Oom
     if (coll_name.n == 0 or p.n_err != 0) return e;
     const n = try exprAlloc(p.arena, TK.COLLATE, coll_name, dequote);
     n.left = e;
-    n.flags |= EP.Collate | EP.Skip;
+    n.flags.set(.{ .Collate = true, .Skip = true });
     n.n_height = e.n_height + 1;
     _ = checkHeight(p, n.n_height);
     return n;
@@ -187,7 +187,7 @@ pub fn addCollateString(p: *Parse, e: *Expr, z: []const u8) Oom!*Expr {
 pub fn skipCollate(e_arg: ?*Expr) ?*Expr {
     var e = e_arg;
     while (e) |x| {
-        if (!x.has(EP.Skip)) break;
+        if (!x.flags.Skip) break;
         e = x.left;
     }
     return e;
@@ -197,8 +197,8 @@ pub fn skipCollate(e_arg: ?*Expr) ?*Expr {
 pub fn skipCollateAndLikely(e_arg: ?*Expr) ?*Expr {
     var e = e_arg;
     while (e) |x| {
-        if (!x.has(EP.Skip | EP.Unlikely)) break;
-        if (x.has(EP.Unlikely)) {
+        if (!x.flags.intersects(.{ .Skip = true, .Unlikely = true })) break;
+        if (x.flags.Unlikely) {
             e = x.x.list.?.at(0).expr;
         } else if (x.op == TK.COLLATE) {
             e = x.left;
@@ -215,15 +215,15 @@ pub fn skipCollateAndLikely(e_arg: ?*Expr) ?*Expr {
 pub fn exprAnd(p: *Parse, left: ?*Expr, right: ?*Expr) Oom!?*Expr {
     const l = left orelse return right;
     const r = right orelse return l;
-    const f = l.flags | r.flags;
-    if (f & (EP.OuterON | EP.InnerON | EP.IsFalse | EP.HasFunc) == EP.IsFalse and !p.inRenameObject()) {
+    const f = l.flags.with(r.flags);
+    if (f.only(.{ .OuterON = true, .InnerON = true, .IsFalse = true, .HasFunc = true }) == EP{ .IsFalse = true } and !p.inRenameObject()) {
         return try exprInt32(p.arena, 0);
     }
     return try pExpr(p, TK.AND, l, r);
 }
 
 /// Port of sqlite3ExprFunction(): a function call node.
-pub fn exprFunction(p: *Parse, list: ?*ExprList, name: Token, e_distinct: i32) Oom!*Expr {
+pub fn exprFunction(p: *Parse, list: ?*ExprList, name: Token, e_distinct: SF) Oom!*Expr {
     const e = try exprAlloc(p.arena, TK.FUNCTION, name, true);
     e.w = .{ .ofst = tokenOffset(p, name) };
     if (list) |l| {
@@ -232,9 +232,9 @@ pub fn exprFunction(p: *Parse, list: ?*ExprList, name: Token, e_distinct: i32) O
         }
     }
     e.x = .{ .list = list };
-    e.set(EP.HasFunc);
+    e.flags.HasFunc = true;
     setHeightAndFlags(p, e);
-    if (e_distinct == SF.Distinct) e.set(EP.Distinct);
+    if (e_distinct.Distinct) e.flags.Distinct = true;
     return e;
 }
 
@@ -246,7 +246,9 @@ pub fn tokenOffset(p: *const Parse, t: Token) i32 {
 
 /// Port of sqlite3ExprOrderByAggregateError().
 pub fn orderByAggregateError(p: *Parse, e: *Expr) void {
+    // %#T in C: the offset of the function.
     util.errorMsg(p, "ORDER BY may not be used with non-aggregate {s}()", .{e.token()});
+    recordErrorOffsetOfExpr(p, e);
 }
 
 /// Port of sqlite3ExprAddFunctionOrderBy(): attach "f(args ORDER BY ...)"
@@ -266,7 +268,7 @@ pub fn addFunctionOrderBy(p: *Parse, e: *Expr, order_by: *ExprList) Oom!void {
     const ob = try exprAlloc(p.arena, TK.ORDER, null, false);
     ob.x = .{ .list = order_by };
     e.left = ob;
-    ob.set(EP.FullSize);
+    ob.flags.FullSize = true;
 }
 
 /// Port of sqlite3ExprAssignVarNumber(): number a "?", "?NNN", ":aaa",
@@ -332,13 +334,17 @@ pub fn vlistNameToNum(p: *const Parse, name: []const u8) i32 {
 }
 
 /// Port of sqlite3RecordErrorOffsetOfExpr().
+/// Nothing is recorded for an expression of the schema (EP_FromDDL),
+/// whose offset is not in the statement.
 pub fn recordErrorOffsetOfExpr(p: *Parse, e_arg: ?*const Expr) void {
     var e = e_arg;
     while (e) |x| {
+        if (x.flags.intersects(.{ .Reduced = true, .TokenOnly = true })) return;
         if (x.useWJoin() or x.w.ofst <= 0) {
             e = x.left;
             continue;
         }
+        if (x.flags.FromDDL) return;
         p.db.err_byte_offset = x.w.ofst;
         return;
     }
@@ -486,7 +492,7 @@ pub fn forVectorField(p: *Parse, v_arg: *Expr, field: i32, n_field: i32) Oom!?*E
     var v = v_arg;
     if (v.op == TK.SELECT) {
         const r = try pExpr(p, TK.SELECT_COLUMN, null, null);
-        r.set(EP.FullSize);
+        r.flags.FullSize = true;
         r.i_table = n_field;
         r.i_column = @intCast(field);
         r.left = v;
@@ -515,7 +521,7 @@ pub fn listToValues(p: *Parse, n_elem: usize, list: *ExprList) Oom!?*Select {
             util.errorMsg(p, "IN(...) element has {d} term{s} - expected {d}", .{ n, if (n > 1) "s" else "", n_elem });
             break;
         }
-        const sel = try select_mod.selectNew(p, e.x.list, null, null, null, null, null, SF.Values, null);
+        const sel = try select_mod.selectNew(p, e.x.list, null, null, null, null, null, .{ .Values = true }, null);
         e.x = .{ .list = null };
         if (ret) |r| {
             sel.op = TK.ALL;
@@ -524,7 +530,7 @@ pub fn listToValues(p: *Parse, n_elem: usize, list: *ExprList) Oom!?*Select {
         ret = sel;
     }
     if (ret) |r| if (r.prior != null) {
-        r.sel_flags |= SF.MultiValue;
+        r.sel_flags.MultiValue = true;
     };
     return ret;
 }
@@ -535,11 +541,11 @@ pub fn listToValues(p: *Parse, n_elem: usize, list: *ExprList) Oom!?*Select {
 /// identifier into a TK_TRUEFALSE node.
 pub fn idToTrueFalse(e: *Expr) bool {
     std.debug.assert(e.op == TK.ID or e.op == TK.STRING);
-    if (!e.has(EP.Quoted | EP.IntValue)) {
+    if (!e.flags.intersects(.{ .Quoted = true, .IntValue = true })) {
         const v = util.isTrueOrFalse(e.token());
-        if (v != 0) {
+        if (!v.isEmpty()) {
             e.op = TK.TRUEFALSE;
-            e.set(v);
+            e.flags.set(v);
             return true;
         }
     }
@@ -568,10 +574,10 @@ pub fn simplifiedAndOr(e: *Expr) *Expr {
 // ============================================================ constants
 
 /// Port of exprNodeIsConstantFunction().
-fn nodeIsConstantFunction(w: *Walker, e: *Expr) u8 {
+fn nodeIsConstantFunction(w: *Walker, e: *Expr) WRC {
     std.debug.assert(e.op == TK.FUNCTION);
     var n: usize = 0;
-    if (!e.has(EP.TokenOnly)) if (e.x.list) |l| {
+    if (!e.flags.TokenOnly) if (e.x.list) |l| {
         n = l.len();
         _ = walker.walkExprList(w, l);
         if (w.e_code == 0) return WRC.Abort;
@@ -579,8 +585,8 @@ fn nodeIsConstantFunction(w: *Walker, e: *Expr) u8 {
     const db = w.parse.?.db;
     const def = callback.findFunction(db, e.token(), @intCast(n), db.enc, false);
     if (def == null or def.?.isAggregate() or
-        def.?.func_flags & (callback.FUNC.CONSTANT | callback.FUNC.SLOCHNG) == 0 or
-        e.has(EP.WinFunc))
+        !def.?.func_flags.intersects(.{ .CONSTANT = true, .SLOCHNG = true }) or
+        e.flags.WinFunc)
     {
         w.e_code = 0;
         return WRC.Abort;
@@ -592,21 +598,21 @@ fn nodeIsConstantFunction(w: *Walker, e: *Expr) u8 {
 /// constant: 1 constant, 2 constant outside outer-join ON clauses, 3
 /// constant for one table (u.i_cur), 4/5 DEFAULT values of new/existing
 /// schemas, 6 constant without IS.
-fn nodeIsConstant(w: *Walker, e: *Expr) u8 {
+fn nodeIsConstant(w: *Walker, e: *Expr) WRC {
     std.debug.assert(w.e_code > 0);
-    if (w.e_code == 2 and e.has(EP.OuterON)) {
+    if (w.e_code == 2 and e.flags.OuterON) {
         w.e_code = 0;
         return WRC.Abort;
     }
     switch (e.op) {
         TK.FUNCTION => {
-            if (e.has(EP.WinFunc)) {
+            if (e.flags.WinFunc) {
                 w.e_code = 0;
                 return WRC.Abort;
             } else if (w.e_code >= 4 and w.e_code <= 5) {
-                if (w.e_code == 5) e.set(EP.FromDDL);
+                if (w.e_code == 5) e.flags.FromDDL = true;
                 return WRC.Continue;
-            } else if (e.has(EP.ConstFunc)) {
+            } else if (e.flags.ConstFunc) {
                 return WRC.Continue;
             } else if (w.parse != null) {
                 return nodeIsConstantFunction(w, e);
@@ -616,7 +622,7 @@ fn nodeIsConstant(w: *Walker, e: *Expr) u8 {
         },
         TK.ID, TK.COLUMN, TK.AGG_FUNCTION, TK.AGG_COLUMN => {
             if (e.op == TK.ID and idToTrueFalse(e)) return WRC.Prune;
-            if (e.has(EP.FixedCol) and w.e_code != 2) return WRC.Continue;
+            if (e.flags.FixedCol and w.e_code != 2) return WRC.Continue;
             if (w.e_code == 3 and e.i_table == w.u.i_cur) return WRC.Continue;
             w.e_code = 0;
             return WRC.Abort;
@@ -688,17 +694,17 @@ pub fn exprDup(a: Allocator, e_arg: ?*const Expr) Oom!?*Expr {
     const e = e_arg orelse return null;
     const n = try a.create(Expr);
     n.* = e.*;
-    n.flags &= ~(EP.Reduced | EP.TokenOnly | EP.Static);
+    n.flags.clear(.{ .Reduced = true, .TokenOnly = true, .Static = true });
     if (e.useUToken()) {
         if (e.u.token) |t| n.u = .{ .token = try a.dupeSentinel(u8, t, 0) };
     }
-    if ((e.flags | n.flags) & (EP.TokenOnly | EP.Leaf) == 0) {
+    if (!e.flags.with(n.flags).intersects(.{ .TokenOnly = true, .Leaf = true })) {
         if (e.useXSelect()) {
             n.x = .{ .select = try selectDup(a, e.x.select) };
         } else {
             n.x = .{ .list = try listDup(a, e.x.list) };
         }
-        if (e.has(EP.WinFunc)) n.y = .{ .win = try window.windowDup(a, n, e.y.win.?) };
+        if (e.flags.WinFunc) n.y = .{ .win = try window.windowDup(a, n, e.y.win.?) };
         if (e.op == TK.SELECT_COLUMN) {
             n.left = e.left;
         } else {
@@ -856,9 +862,9 @@ pub fn compare(p: ?*const Parse, a_arg: ?*const Expr, b_arg: ?*const Expr, i_tab
     const a = a_arg orelse return if (b_arg == null) 0 else 2;
     const b = b_arg orelse return 2;
     if (p != null and a.op == TK.VARIABLE) return compareVariable(a, b);
-    const combined = a.flags | b.flags;
-    if (combined & EP.IntValue != 0) {
-        if (a.flags & b.flags & EP.IntValue != 0 and a.u.value == b.u.value) return 0;
+    const combined = a.flags.with(b.flags);
+    if (combined.IntValue) {
+        if (a.flags.IntValue and b.flags.IntValue and a.u.value == b.u.value) return 0;
         return 2;
     }
     if (a.op != b.op or a.op == TK.RAISE) {
@@ -869,8 +875,8 @@ pub fn compare(p: ?*const Parse, a_arg: ?*const Expr, b_arg: ?*const Expr, i_tab
     if (a.u.token) |at| {
         if (a.op == TK.FUNCTION or a.op == TK.AGG_FUNCTION) {
             if (!ctype.eqlNoCase(at, b.u.token orelse "")) return 2;
-            if (a.has(EP.WinFunc) != b.has(EP.WinFunc)) return 2;
-            if (a.has(EP.WinFunc)) {
+            if (a.flags.WinFunc != b.flags.WinFunc) return 2;
+            if (a.flags.WinFunc) {
                 if (window.windowCompare(p, a.y.win.?, b.y.win.?, true) != 0) return 2;
             }
         } else if (a.op == TK.NULL) {
@@ -881,13 +887,13 @@ pub fn compare(p: ?*const Parse, a_arg: ?*const Expr, b_arg: ?*const Expr, i_tab
             if (a.op != TK.COLUMN and a.op != TK.AGG_COLUMN and !std.mem.eql(u8, at, bt)) return 2;
         }
     }
-    if (a.flags & (EP.Distinct | EP.Commuted) != b.flags & (EP.Distinct | EP.Commuted)) return 2;
-    if (combined & EP.TokenOnly == 0) {
-        if (combined & EP.xIsSelect != 0) return 2;
-        if (combined & EP.FixedCol == 0 and compare(p, a.left, b.left, i_tab) != 0) return 2;
+    if (a.flags.only(.{ .Distinct = true, .Commuted = true }) != b.flags.only(.{ .Distinct = true, .Commuted = true })) return 2;
+    if (!combined.TokenOnly) {
+        if (combined.xIsSelect) return 2;
+        if (!combined.FixedCol and compare(p, a.left, b.left, i_tab) != 0) return 2;
         if (compare(p, a.right, b.right, i_tab) != 0) return 2;
         if (listCompare(a.x.list, b.x.list, i_tab) != 0) return 2;
-        if (a.op != TK.STRING and a.op != TK.TRUEFALSE and combined & EP.Reduced == 0) {
+        if (a.op != TK.STRING and a.op != TK.TRUEFALSE and !combined.Reduced) {
             if (a.i_column != b.i_column) return 2;
             if (a.op2 != b.op2 and a.op == TK.TRUTH) return 2;
             if (a.op != TK.IN and a.i_table != b.i_table and a.i_table != i_tab) return 2;
@@ -955,7 +961,7 @@ pub fn affinity(e_arg: *const Expr) u8 {
         if (op == TK.VECTOR or (op == TK.FUNCTION and e.aff_expr == Aff.@"defer")) {
             return affinity(e.x.list.?.at(0).expr.?);
         }
-        if (e.has(EP.Skip | EP.IfNullRow)) {
+        if (e.flags.intersects(.{ .Skip = true, .IfNullRow = true })) {
             e = e.left.?;
             op = e.op;
             continue;
@@ -1028,14 +1034,14 @@ pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*CollSeq {
             coll = coll_mod.getCollSeq(p, null, x.token());
             break;
         }
-        if (x.flags & EP.Collate != 0) {
-            if (x.left != null and x.left.?.flags & EP.Collate != 0) {
+        if (x.flags.Collate) {
+            if (x.left != null and x.left.?.flags.Collate) {
                 e = x.left;
             } else {
                 var next = x.right;
                 if (x.useXList()) if (x.x.list) |l| if (!db.malloc_failed) {
                     for (l.slice()) |item| {
-                        if (item.expr.?.has(EP.Collate)) {
+                        if (item.expr.?.flags.Collate) {
                             next = item.expr;
                             break;
                         }
@@ -1047,7 +1053,9 @@ pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*CollSeq {
             break;
         }
     }
-    if (coll_mod.checkCollSeq(p, coll) != int.RC.OK) coll = null;
+    coll_mod.checkCollSeq(p, coll) catch {
+        coll = null;
+    };
     return coll;
 }
 
@@ -1105,14 +1113,14 @@ pub fn binaryCompareP5(e1: *const Expr, e2: *const Expr, jump_if_null: u16) u16 
 /// Port of sqlite3BinaryCompareCollSeq(): the collation of a comparison:
 /// an explicit COLLATE, else the left operand's, else the right's.
 pub fn binaryCompareCollSeq(p: *Parse, left: *const Expr, right: ?*const Expr) ?*CollSeq {
-    if (left.flags & EP.Collate != 0) return collSeq(p, left);
-    if (right) |r| if (r.flags & EP.Collate != 0) return collSeq(p, r);
+    if (left.flags.Collate) return collSeq(p, left);
+    if (right) |r| if (r.flags.Collate) return collSeq(p, r);
     return collSeq(p, left) orelse collSeq(p, right);
 }
 
 /// Port of sqlite3ExprCompareCollSeq().
 pub fn compareCollSeq(p: *Parse, e: *const Expr) ?*CollSeq {
-    if (e.has(EP.Commuted)) return binaryCompareCollSeq(p, e.right.?, e.left);
+    if (e.flags.Commuted) return binaryCompareCollSeq(p, e.right.?, e.left);
     return binaryCompareCollSeq(p, e.left.?, e.right);
 }
 
@@ -1121,15 +1129,17 @@ pub fn compareCollSeq(p: *Parse, e: *const Expr) ?*CollSeq {
 /// Port of sqlite3ExprFunctionUsable(): DIRECTONLY and unsafe functions
 /// may not be used from the schema.
 pub fn functionUsable(p: *Parse, e: *const Expr, def: *const int.FuncDef) void {
-    if (e.has(EP.FromDDL) or p.prep_flags & @import("../vdbe/aux.zig").PREPARE_FROM_DDL != 0) {
-        if (def.func_flags & callback.FUNC.DIRECT != 0 or p.db.flags & int.DbFlag.TrustedSchema == 0) {
+    if (e.flags.FromDDL or p.prep_flags & @import("../vdbe/aux.zig").PREPARE_FROM_DDL != 0) {
+        if (def.func_flags.DIRECT or !p.db.flags.TrustedSchema) {
+            // %#T in C: the offset of the function.
             util.errorMsg(p, "unsafe use of {s}()", .{e.token()});
+            recordErrorOffsetOfExpr(p, e);
         }
     }
 }
 
-fn selectWalkTableConstant(w: *Walker, s: *Select) u8 {
-    if (s.sel_flags & SF.Correlated != 0) {
+fn selectWalkTableConstant(w: *Walker, s: *Select) WRC {
+    if (s.sel_flags.Correlated) {
         w.e_code = 0;
         return WRC.Abort;
     }
@@ -1153,17 +1163,17 @@ pub fn isTableConstant(e: ?*Expr, i_cur: i32, allow_subq: bool) bool {
 /// `i_src` alone.
 pub fn isSingleTableConstraint(e: *Expr, src_list: *SrcList, i_src: usize, allow_subq: bool) bool {
     const src = src_list.at(i_src);
-    if (src.fg.jointype & int.JT.LTORJ != 0) return false;
-    if (src.fg.jointype & int.JT.LEFT != 0) {
-        if (!e.has(EP.OuterON)) return false;
+    if (src.fg.jointype.LTORJ) return false;
+    if (src.fg.jointype.LEFT) {
+        if (!e.flags.OuterON) return false;
         if (e.w.join != src.i_cursor) return false;
-    } else if (e.has(EP.OuterON)) {
+    } else if (e.flags.OuterON) {
         return false;
     }
-    if (e.has(EP.OuterON | EP.InnerON) and src_list.at(0).fg.jointype & int.JT.LTORJ != 0) {
+    if (e.flags.intersects(.{ .OuterON = true, .InnerON = true }) and src_list.at(0).fg.jointype.LTORJ) {
         for (src_list.slice()[0..i_src]) |*s| {
             if (e.w.join == s.i_cursor) {
-                if (s.fg.jointype & int.JT.LTORJ != 0) return false;
+                if (s.fg.jointype.LTORJ) return false;
                 break;
             }
         }
@@ -1171,7 +1181,7 @@ pub fn isSingleTableConstraint(e: *Expr, src_list: *SrcList, i_src: usize, allow
     return isTableConstant(e, src.i_cursor, allow_subq);
 }
 
-fn nodeIsConstantOrGroupBy(w: *Walker, e: *Expr) u8 {
+fn nodeIsConstantOrGroupBy(w: *Walker, e: *Expr) WRC {
     const gb = w.u.group_by.?;
     for (gb.slice()) |item| {
         if (compare(null, e, item.expr, -1) < 2) {
@@ -1228,9 +1238,9 @@ pub fn canBeNull(e_arg: *const Expr) bool {
     if (op == TK.REGISTER) op = e.op2;
     return switch (op) {
         TK.INTEGER, TK.STRING, TK.FLOAT, TK.BLOB => false,
-        TK.COLUMN => e.has(EP.CanBeNull) or e.y.tab == null or
+        TK.COLUMN => e.flags.CanBeNull or e.y.tab == null or
             (e.i_column >= 0 and e.y.tab.?.cols.len > 0 and e.i_column < e.y.tab.?.cols.len and
-            e.y.tab.?.cols[@intCast(e.i_column)].not_null == 0),
+            e.y.tab.?.cols[@intCast(e.i_column)].not_null == .None),
         else => true,
     };
 }
@@ -1270,7 +1280,7 @@ fn impliesNotNull(p: ?*const Parse, e: *const Expr, nn: *const Expr, i_tab: i32,
     if (compare(p, e, nn, i_tab) == 0) return nn.op != TK.NULL;
     switch (e.op) {
         TK.IN => {
-            if (seen_not and e.has(EP.xIsSelect)) return false;
+            if (seen_not and e.flags.xIsSelect) return false;
             return impliesNotNull(p, e.left.?, nn, i_tab, true);
         },
         TK.BETWEEN => {
@@ -1313,7 +1323,7 @@ fn isIIF(db: *int.Sqlite3, e: *const Expr) bool {
         if (z.len == 0 or (z[0] != 'i' and z[0] != 'I')) return false;
         const l = e.x.list orelse return false;
         const def = callback.findFunction(db, z, @intCast(l.len()), db.enc, false) orelse return false;
-        if (def.func_flags & callback.FUNC.INLINE == 0) return false;
+        if (!def.func_flags.INLINE) return false;
         if (@intFromPtr(def.user_data) != INLINEFUNC_iif) return false;
     } else if (e.op == TK.CASE) {
         if (e.left != null) return false;
@@ -1356,9 +1366,9 @@ fn bothImplyNotNullRow(w: *Walker, e1: ?*Expr, e2: ?*Expr) void {
     }
 }
 
-fn impliesNotNullRow(w: *Walker, e: *Expr) u8 {
-    if (e.has(EP.OuterON)) return WRC.Prune;
-    if (e.has(EP.InnerON) and w.m_wflags != 0) return WRC.Prune;
+fn impliesNotNullRow(w: *Walker, e: *Expr) WRC {
+    if (e.flags.OuterON) return WRC.Prune;
+    if (e.flags.InnerON and w.m_wflags != 0) return WRC.Prune;
     switch (e.op) {
         TK.ISNOT, TK.ISNULL, TK.NOTNULL, TK.IS, TK.VECTOR, TK.FUNCTION, TK.TRUTH, TK.CASE => return WRC.Prune,
         TK.COLUMN => {
@@ -1413,10 +1423,10 @@ pub fn impliesNonNullRow(e_arg: ?*Expr, i_tab: i32, is_rj: bool) bool {
     return w.e_code != 0;
 }
 
-const IdxCover = struct { idx: *Index, i_cur: i32 };
+pub const IdxCover = struct { idx: *Index, i_cur: i32 };
 
-fn exprIdxCover(w: *Walker, e: *Expr) u8 {
-    const c: *IdxCover = @ptrCast(@alignCast(w.u.ptr.?));
+fn exprIdxCover(w: *Walker, e: *Expr) WRC {
+    const c = w.u.idx_cover;
     if (e.op == TK.COLUMN and e.i_table == c.i_cur and build.tableColumnToIndex(c.idx, e.i_column) < 0) {
         w.e_code = 1;
         return WRC.Abort;
@@ -1427,19 +1437,19 @@ fn exprIdxCover(w: *Walker, e: *Expr) u8 {
 /// Port of sqlite3ExprCoveredByIndex(): `e` uses only columns of `idx`.
 pub fn coveredByIndex(e: ?*Expr, i_cur: i32, idx: *Index) bool {
     var c: IdxCover = .{ .idx = idx, .i_cur = i_cur };
-    var w: Walker = .{ .expr_callback = exprIdxCover, .u = .{ .ptr = &c } };
+    var w: Walker = .{ .expr_callback = exprIdxCover, .u = .{ .idx_cover = &c } };
     _ = walker.walkExpr(&w, e);
     return w.e_code == 0;
 }
 
-const RefSrcList = struct {
+pub const RefSrcList = struct {
     gpa: Allocator,
     ref: ?*SrcList,
     exclude: std.ArrayList(i32) = .empty,
 };
 
-fn selectRefEnter(w: *Walker, s: *Select) u8 {
-    const x: *RefSrcList = @ptrCast(@alignCast(w.u.ptr.?));
+fn selectRefEnter(w: *Walker, s: *Select) WRC {
+    const x = w.u.ref_src_list;
     const src = s.src orelse return WRC.Continue;
     if (src.len() == 0) return WRC.Continue;
     for (src.slice()) |item| x.exclude.append(x.gpa, item.i_cursor) catch {
@@ -1450,14 +1460,14 @@ fn selectRefEnter(w: *Walker, s: *Select) u8 {
 }
 
 fn selectRefLeave(w: *Walker, s: *Select) void {
-    const x: *RefSrcList = @ptrCast(@alignCast(w.u.ptr.?));
+    const x = w.u.ref_src_list;
     const n = if (s.src) |src| src.len() else 0;
     if (x.exclude.items.len > 0) x.exclude.shrinkRetainingCapacity(x.exclude.items.len - n);
 }
 
-fn exprRefToSrcList(w: *Walker, e: *Expr) u8 {
+fn exprRefToSrcList(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.COLUMN or e.op == TK.AGG_COLUMN) {
-        const x: *RefSrcList = @ptrCast(@alignCast(w.u.ptr.?));
+        const x = w.u.ref_src_list;
         if (x.ref) |src| for (src.slice()) |item| {
             if (e.i_table == item.i_cursor) {
                 w.e_code |= 1;
@@ -1480,12 +1490,12 @@ pub fn referencesSrcList(p: *Parse, e: *Expr, src_list: ?*SrcList) i32 {
         .expr_callback = exprRefToSrcList,
         .select_callback = selectRefEnter,
         .select_callback2 = selectRefLeave,
-        .u = .{ .ptr = &x },
+        .u = .{ .ref_src_list = &x },
     };
     std.debug.assert(e.op == TK.AGG_FUNCTION);
     _ = walker.walkExprList(&w, e.x.list);
     if (e.left) |l| _ = walker.walkExprList(&w, l.x.list);
-    if (e.has(EP.WinFunc)) _ = walker.walkExpr(&w, e.y.win.?.filter);
+    if (e.flags.WinFunc) _ = walker.walkExpr(&w, e.y.win.?.filter);
     if (w.e_code & 0x01 != 0) return 1;
     if (w.e_code != 0) return 0;
     return -1;
@@ -1538,14 +1548,14 @@ fn findOrCreateAggInfoColumn(p: *Parse, agg: *AggInfo, e: *Expr) Oom!void {
     e.i_agg = @intCast(k);
 }
 
-fn analyzeAggregate(w: *Walker, e: *Expr) u8 {
+fn analyzeAggregate(w: *Walker, e: *Expr) WRC {
     return analyzeAggregateImpl(w, e) catch {
         w.u.nc.?.parse.db.oomFault();
         return WRC.Abort;
     };
 }
 
-fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!u8 {
+fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
     const nc = w.u.nc.?;
     const p = nc.parse;
     const agg = nc.u_nc.agg_info.?;
@@ -1561,7 +1571,7 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!u8 {
             return WRC.Continue;
         },
         TK.AGG_FUNCTION => {
-            if (nc.nc_flags & NC_InAggFunc == 0 and w.walker_depth == e.op2 and e.agg_info == null) {
+            if (!nc.nc_flags.InAggFunc and w.walker_depth == e.op2 and e.agg_info == null) {
                 // The same function may already be in the AggInfo.
                 const mx_term: usize = @intCast(p.db.limit(.column));
                 var i: usize = 0;
@@ -1577,22 +1587,22 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!u8 {
                         .f_expr = e,
                         .func = callback.findFunction(p.db, e.token(), n_arg, p.db.enc, false),
                     };
-                    if (e.left != null and item.func.?.func_flags & callback.FUNC.NEEDCOLL == 0) {
+                    if (e.left != null and !item.func.?.func_flags.NEEDCOLL) {
                         // ORDER BY in an aggregate (ignored for min/max).
                         item.i_ob_tab = p.n_tab;
                         p.n_tab += 1;
                         const ob = e.left.?.x.list.?;
                         if (ob.len() == 1 and n_arg == 1 and compare(null, ob.at(0).expr, e.x.list.?.at(0).expr, -1) == 0) {
                             item.b_ob_payload = false;
-                            item.b_ob_unique = e.has(EP.Distinct);
+                            item.b_ob_unique = e.flags.Distinct;
                         } else {
                             item.b_ob_payload = true;
                         }
-                        item.b_use_subtype = item.func.?.func_flags & callback.FUNC.SUBTYPE != 0;
+                        item.b_use_subtype = item.func.?.func_flags.SUBTYPE;
                     } else {
                         item.i_ob_tab = -1;
                     }
-                    if (e.has(EP.Distinct) and !item.b_ob_unique) {
+                    if (e.flags.Distinct and !item.b_ob_unique) {
                         item.i_distinct = p.n_tab;
                         p.n_tab += 1;
                     } else {
@@ -1610,7 +1620,7 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!u8 {
             // An argument of an aggregate that an index the query uses
             // holds: read it from the index as an AggInfo column.
             std.debug.assert(p.i_self_tab == 0);
-            if (nc.nc_flags & NC_InAggFunc == 0) return WRC.Continue;
+            if (!nc.nc_flags.InAggFunc) return WRC.Continue;
             var it = p.idx_epr;
             const ie = while (it) |x| : (it = x.next) {
                 if (x.i_data_cur < 0) continue;
@@ -1633,7 +1643,6 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!u8 {
     }
 }
 
-const NC_InAggFunc = int.NC.InAggFunc;
 
 /// Port of sqlite3ExprAnalyzeAggregates(): add the columns and aggregate
 /// functions of `e` to the AggInfo of `nc`.
@@ -1653,8 +1662,8 @@ pub fn analyzeAggList(nc: *NameContext, list: ?*ExprList) void {
     for (l.slice()) |item| analyzeAggregates(nc, item.expr);
 }
 
-fn agginfoPersistExprCb(w: *Walker, e: *Expr) u8 {
-    if (!e.has(EP.TokenOnly | EP.Reduced)) if (e.agg_info) |agg| {
+fn agginfoPersistExprCb(w: *Walker, e: *Expr) WRC {
+    if (!e.flags.intersects(.{ .TokenOnly = true, .Reduced = true })) if (e.agg_info) |agg| {
         const i_agg: usize = @intCast(e.i_agg);
         const p = w.parse.?;
         if (e.op != TK.AGG_FUNCTION) {
@@ -1768,6 +1777,6 @@ pub fn toRegister(e_arg: *Expr, reg: i32) void {
         e.op2 = e.op;
         e.op = TK.REGISTER;
         e.i_table = reg;
-        e.clear(EP.Skip);
+        e.flags.Skip = false;
     }
 }

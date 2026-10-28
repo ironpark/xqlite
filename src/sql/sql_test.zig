@@ -2,6 +2,7 @@
 //! file system, run statements, and check results and errors.
 
 const std = @import("std");
+const thunk = @import("../util/thunk.zig");
 const testing = std.testing;
 const int = @import("sqlite_int.zig");
 const main_mod = @import("main.zig");
@@ -46,7 +47,9 @@ pub const Conn = struct {
     }
 
     fn connect(c: *Conn) !void {
-        const rc = main_mod.open(c.mem.interface(), "test.db", .{}, &c.db);
+        var db: ?*int.Sqlite3 = null;
+        const rc = main_mod.open(c.mem.interface(), "test.db", .{}, &db);
+        c.db = db orelse return error.OutOfMemory;
         if (rc != RC.OK) {
             std.debug.print("open: {s}\n", .{main_mod.errmsg(c.db)});
             _ = main_mod.close(c.db);
@@ -57,7 +60,9 @@ pub const Conn = struct {
     /// Close and open the connection again on the same file system.
     pub fn reopen(c: *Conn) !void {
         try testing.expectEqual(RC.OK, main_mod.close(c.db));
-        const rc = main_mod.open(c.mem.interface(), "test.db", .{}, &c.db);
+        var db: ?*int.Sqlite3 = null;
+        const rc = main_mod.open(c.mem.interface(), "test.db", .{}, &db);
+        c.db = db orelse return error.OutOfMemory;
         if (rc != RC.OK) return error.OpenFailed;
     }
 
@@ -83,7 +88,7 @@ pub const Conn = struct {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(testing.allocator);
         var msg: ?[:0]u8 = null;
-        const rc = legacy.exec(c.db, sql, collect, &out, &msg);
+        const rc = legacy.execWith(c.db, sql, &out, collect, &msg);
         if (rc != RC.OK) {
             std.debug.print("{s}\n  -> {s}\n", .{ sql, msg orelse "?" });
             if (msg) |m| @import("malloc.zig").free(m.ptr);
@@ -92,8 +97,7 @@ pub const Conn = struct {
         return out.toOwnedSlice(testing.allocator);
     }
 
-    pub fn collect(ctx: ?*anyopaque, values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
-        const out: *std.ArrayList(u8) = @ptrCast(@alignCast(ctx.?));
+    pub fn collect(out: *std.ArrayList(u8), values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
         for (values, 0..) |val, i| {
             if (i > 0) out.append(testing.allocator, '|') catch return true;
             out.appendSlice(testing.allocator, if (val) |z| std.mem.span(z) else "NULL") catch return true;
@@ -172,6 +176,8 @@ test "sql: SELECT without FROM" {
     try c.expectRows("SELECT 1, 'a'||'b', 2*3+1, NULL, 7/2, 7.0/2", "1|ab|7|NULL|3|3.5\n");
     try c.expectRows("SELECT abs(-3), upper('xy'), length('hello'), typeof(1.5), coalesce(NULL, 4)", "3|XY|5|real|4\n");
     try c.expectRows("SELECT 1 WHERE 0", "");
+    // Arithmetic on NULL, integers, reals and text that looks numeric.
+    try c.expectRows("SELECT NULL*2, 2*NULL, NULL+NULL, typeof(NULL-1), 3*2, typeof(3*2), 3*2.0, '4'+1, typeof('4'+1), '1.5'*2", "NULL|NULL|NULL|null|6|integer|6.0|5|integer|3.0\n");
     try c.expectRows("SELECT CASE WHEN 1<2 THEN 'lt' ELSE 'ge' END, 3 IN (1,2,3), 5 BETWEEN 1 AND 4", "lt|1|0\n");
     try c.expectRows("SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 1", "1\n2\n1\n");
     try c.expectRows("SELECT 2 UNION SELECT 1 UNION SELECT 2", "1\n2\n");
@@ -397,7 +403,7 @@ test "sql: foreign keys" {
     try c.open();
     defer c.close();
     // PRAGMA foreign_keys=ON.
-    c.db.flags |= int.DbFlag.ForeignKeys;
+    c.db.flags.ForeignKeys = true;
     try c.exec("CREATE TABLE p(id INTEGER PRIMARY KEY, name TEXT UNIQUE)");
     try c.exec("CREATE TABLE c(x INTEGER PRIMARY KEY, pid REFERENCES p(id) ON DELETE CASCADE ON UPDATE CASCADE, pname REFERENCES p(name) ON DELETE SET NULL)");
     try c.exec("CREATE TABLE r(y REFERENCES p ON DELETE RESTRICT)");
@@ -969,9 +975,8 @@ test "sql: sqlite3_wal_hook and sqlite3_wal_checkpoint_v2" {
     const Hook = struct {
         calls: u32 = 0,
         last: i32 = 0,
-        fn f(arg: ?*anyopaque, db: *int.Sqlite3, name: [:0]const u8, n_frame: i32) i32 {
+        fn f(self: *@This(), db: *int.Sqlite3, name: [:0]const u8, n_frame: i32) i32 {
             _ = db;
-            const self: *@This() = @ptrCast(@alignCast(arg.?));
             std.testing.expectEqualStrings("main", name) catch unreachable;
             self.calls += 1;
             self.last = n_frame;
@@ -980,7 +985,8 @@ test "sql: sqlite3_wal_hook and sqlite3_wal_checkpoint_v2" {
     };
     var hook: Hook = .{};
     try c.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x)");
-    _ = main_mod.walHook(c.db, Hook.f, &hook);
+    const cb: thunk.Closure(int.WalCallback) = .init(&hook, Hook.f);
+    _ = main_mod.walHook(c.db, cb.func, cb.ctx);
     // The hook replaces wal_autocheckpoint.
     try c.expectRows("PRAGMA wal_autocheckpoint", "0\n");
     try c.exec("INSERT INTO t VALUES(1); INSERT INTO t VALUES(2)");
@@ -1002,4 +1008,313 @@ test "sql: sqlite3_wal_hook and sqlite3_wal_checkpoint_v2" {
     // Back to an autocheckpoint every 1000 frames.
     _ = main_mod.walAutocheckpoint(c.db, 1000);
     try c.expectRows("PRAGMA wal_autocheckpoint", "1000\n");
+}
+
+// ======================================================= result codes
+
+/// Run `sql` with prepareV2() and step() to its end, which must be an
+/// error with the extended code `extended` and the message `msg`. The
+/// code comes back from step() and finalize() as the primary code, and
+/// in full once extended result codes are on.
+fn expectStepError(c: *Conn, sql: []const u8, extended: i32, msg: []const u8) !void {
+    for ([_]bool{ false, true }) |ext_on| {
+        main_mod.extendedResultCodes(c.db, ext_on);
+        defer main_mod.extendedResultCodes(c.db, false);
+        const want = if (ext_on) extended else extended & 0xff;
+        var stmt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;
+        try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, sql, &stmt, null));
+        var finalized = false;
+        defer if (!finalized) {
+            _ = api.finalize(stmt.?);
+        };
+        var rc = api.step(stmt.?);
+        while (rc == RC.ROW) rc = api.step(stmt.?);
+        testing.expectEqual(want, rc) catch |err| {
+            std.debug.print("{s}: {s}\n", .{ sql, main_mod.errmsg(c.db) });
+            return err;
+        };
+        try testing.expectEqual(extended, main_mod.extendedErrcode(c.db));
+        try testing.expectEqual(want, main_mod.errcode(c.db));
+        try testing.expectEqualStrings(msg, main_mod.errmsg(c.db));
+        finalized = true;
+        try testing.expectEqual(want, api.finalize(stmt.?));
+        try testing.expectEqualStrings(msg, main_mod.errmsg(c.db));
+    }
+}
+
+test "sql: extended result codes and messages of the VM" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE t(a UNIQUE, b NOT NULL, c CHECK(c>0), d INTEGER PRIMARY KEY); INSERT INTO t VALUES(1, 1, 1, 1)");
+    try expectStepError(&c, "INSERT INTO t VALUES(1, 2, 2, 2)", RC.CONSTRAINT_UNIQUE, "UNIQUE constraint failed: t.a");
+    try expectStepError(&c, "INSERT INTO t VALUES(2, NULL, 2, 2)", RC.CONSTRAINT_NOTNULL, "NOT NULL constraint failed: t.b");
+    try expectStepError(&c, "INSERT INTO t VALUES(2, 2, 0, 2)", RC.CONSTRAINT_CHECK, "CHECK constraint failed: c>0");
+    try expectStepError(&c, "INSERT INTO t VALUES(2, 2, 2, 1)", RC.CONSTRAINT_PRIMARYKEY, "UNIQUE constraint failed: t.d");
+    try c.exec("CREATE TABLE s(a INTEGER) STRICT");
+    try expectStepError(&c, "INSERT INTO s VALUES('x')", RC.CONSTRAINT_DATATYPE, "cannot store TEXT value in INTEGER column s.a");
+    // OP_MustBeInt.
+    try expectStepError(&c, "SELECT 1 LIMIT 'x'", RC.MISMATCH, "datatype mismatch");
+    // OP_Halt with a message of the program.
+    try c.exec("CREATE TABLE tt(x); CREATE TRIGGER tr BEFORE INSERT ON tt BEGIN SELECT RAISE(ABORT, 'stop'); END");
+    try expectStepError(&c, "INSERT INTO tt VALUES(1)", RC.CONSTRAINT_TRIGGER, "stop");
+    // Errors of opcodes without an extended code.
+    try expectStepError(&c, "RELEASE nosuch", RC.ERROR, "no such savepoint: nosuch");
+    try expectStepError(&c, "ROLLBACK", RC.ERROR, "cannot rollback - no transaction is active");
+    try c.exec("BEGIN");
+    try expectStepError(&c, "BEGIN", RC.ERROR, "cannot start a transaction within a transaction");
+    try c.exec("COMMIT");
+    // SQLITE_LIMIT_LENGTH: OP_Concat and OP_String8.
+    _ = main_mod.limit(c.db, .length, 100);
+    try expectStepError(&c, "SELECT printf('%.*c', 60, 'x') || printf('%.*c', 60, 'y')", RC.TOOBIG, "string or blob too big");
+    try expectStepError(&c, "SELECT zeroblob(200)", RC.TOOBIG, "string or blob too big");
+    _ = main_mod.limit(c.db, .length, 1000000000);
+    // The statement still works after all that.
+    try c.expectRows("SELECT a, b, c, d FROM t", "1|1|1|1\n");
+}
+
+test "sql: foreign key errors keep their extended code" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("PRAGMA foreign_keys=ON; CREATE TABLE p(id INTEGER PRIMARY KEY); INSERT INTO p VALUES(1)");
+    try c.exec("CREATE TABLE ci(x REFERENCES p(id)); CREATE TABLE cd(x REFERENCES p(id) DEFERRABLE INITIALLY DEFERRED)");
+    // Immediate: the statement fails (OP_FkCheck).
+    try expectStepError(&c, "INSERT INTO ci VALUES(5)", RC.CONSTRAINT_FOREIGNKEY, "FOREIGN KEY constraint failed");
+    // Deferred: the COMMIT fails and the transaction stays open.
+    try c.exec("BEGIN; INSERT INTO cd VALUES(7)");
+    try expectStepError(&c, "COMMIT", RC.CONSTRAINT_FOREIGNKEY, "FOREIGN KEY constraint failed");
+    try testing.expect(!main_mod.getAutocommit(c.db));
+    try expectStepError(&c, "RELEASE nosuch", RC.ERROR, "no such savepoint: nosuch");
+    try c.exec("SAVEPOINT sp");
+    // Releasing the outermost savepoint commits, and fails the same way.
+    try c.exec("ROLLBACK; SAVEPOINT sp; INSERT INTO cd VALUES(8)");
+    try expectStepError(&c, "RELEASE sp", RC.CONSTRAINT_FOREIGNKEY, "FOREIGN KEY constraint failed");
+    try testing.expect(!main_mod.getAutocommit(c.db));
+    try c.exec("ROLLBACK");
+    try c.expectRows("SELECT count(*) FROM cd", "0\n");
+    // A deferred violation fixed before the commit is fine.
+    try c.exec("BEGIN; INSERT INTO cd VALUES(9); INSERT INTO p VALUES(9); COMMIT");
+    try c.expectRows("SELECT x FROM cd", "9\n");
+}
+
+/// failcode(code[, msg]): fails with result code `code` (and message `msg`).
+fn failcode(ctx: *@import("../vdbe/vdbe_int.zig").Context, argv: []*@import("../vdbe/vdbe_int.zig").Mem) void {
+    if (argv.len > 1) api.resultError(ctx, api.valueText(argv[1]).?);
+    api.resultErrorCode(ctx, @intCast(api.valueInt64(argv[0])));
+}
+
+test "sql: the result codes of application functions reach the API" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    const callback = @import("callback.zig");
+    const utf8 = @import("../vdbe/vdbe_int.zig").ENC.UTF8;
+    try testing.expectEqual(RC.OK, callback.createFunction(c.db, "failcode", -1, utf8, null, failcode, null, null, null));
+    var buf: [128]u8 = undefined;
+    const IOERR_WRITE = RC.IOERR | (3 << 8);
+    const CONSTRAINT_FUNCTION = RC.CONSTRAINT | (4 << 8);
+    for ([_]struct { i32, []const u8 }{
+        .{ IOERR_WRITE, "disk I/O error" },
+        .{ RC.BUSY_SNAPSHOT, "database is locked" },
+        .{ RC.CORRUPT, "database disk image is malformed" },
+        .{ CONSTRAINT_FUNCTION, "constraint failed" },
+        .{ RC.ERROR_MISSING_COLLSEQ, "SQL logic error" },
+        .{ RC.ABORT_ROLLBACK, "abort due to ROLLBACK" },
+    }) |case| {
+        const sql = try std.fmt.bufPrint(&buf, "SELECT failcode({d})", .{case[0]});
+        try expectStepError(&c, sql, case[0], case[1]);
+    }
+    try expectStepError(&c, "SELECT failcode(1555, 'mine')", RC.CONSTRAINT_PRIMARYKEY, "mine");
+    // Codes the VM also raises itself keep the function's message.
+    try expectStepError(&c, "SELECT failcode(18, 'too long')", RC.TOOBIG, "too long");
+    try expectStepError(&c, "SELECT failcode(7, 'no room')", RC.NOMEM, "no room");
+    try expectStepError(&c, "SELECT failcode(9, 'stopped')", RC.INTERRUPT, "stopped");
+    // An aggregate that fails at its step and at its end.
+    try c.exec("CREATE TABLE t(x); INSERT INTO t VALUES(1), (2)");
+    try expectStepError(&c, "SELECT max(failcode(2067, 'agg')) FROM t", RC.CONSTRAINT_UNIQUE, "agg");
+}
+
+/// A VFS over a MemVfs whose file reads or writes fail with `fault` while
+/// it is set.
+const FaultVfs = struct {
+    inner: @import("../vfs/vfs.zig").Vfs,
+    var fault_read: ?@import("../vfs/vfs.zig").Error = null;
+    var fault_write: ?@import("../vfs/vfs.zig").Error = null;
+    var file_vtable: @import("../vfs/vfs.zig").File.VTable = undefined;
+    var inner_read: *const fn (*anyopaque, []u8, u64) @import("../vfs/vfs.zig").Error!usize = undefined;
+    var inner_write: *const fn (*anyopaque, []const u8, u64) @import("../vfs/vfs.zig").Error!void = undefined;
+
+    const V = @import("../vfs/vfs.zig");
+    const vtable: V.Vfs.VTable = .{ .open = open, .delete = delete, .access = access, .randomness = randomness, .sleep = sleep };
+
+    fn interface(self: *FaultVfs) V.Vfs {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+    fn cast(ptr: *anyopaque) *FaultVfs {
+        return @ptrCast(@alignCast(ptr));
+    }
+    fn open(ptr: *anyopaque, path: ?[]const u8, flags: V.OpenFlags) V.Error!V.File {
+        const f = try cast(ptr).inner.open(path, flags);
+        // The files of a MemVfs share one vtable: patch a copy of it.
+        inner_read = f.vtable.read;
+        inner_write = f.vtable.write;
+        file_vtable = f.vtable.*;
+        file_vtable.read = read;
+        file_vtable.write = write;
+        return .{ .ptr = f.ptr, .vtable = &file_vtable };
+    }
+    fn read(ptr: *anyopaque, buf: []u8, offset: u64) V.Error!usize {
+        if (fault_read) |e| return e;
+        return inner_read(ptr, buf, offset);
+    }
+    fn write(ptr: *anyopaque, buf: []const u8, offset: u64) V.Error!void {
+        if (fault_write) |e| return e;
+        return inner_write(ptr, buf, offset);
+    }
+    fn delete(ptr: *anyopaque, path: []const u8, sync_dir: bool) V.Error!void {
+        return cast(ptr).inner.delete(path, sync_dir);
+    }
+    fn access(ptr: *anyopaque, path: []const u8, mode: V.AccessMode) V.Error!bool {
+        return cast(ptr).inner.access(path, mode);
+    }
+    fn randomness(ptr: *anyopaque, buf: []u8) void {
+        cast(ptr).inner.randomness(buf);
+    }
+    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
+        return cast(ptr).inner.sleep(microseconds);
+    }
+};
+
+test "sql: errors of the storage layers keep their extended code" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+    var peer: Conn = undefined;
+    try peer.openOn(c.mem);
+    defer peer.close();
+    try peer.exec("BEGIN");
+    try peer.expectRows("SELECT x FROM t", "1\n");
+    try c.exec("INSERT INTO t VALUES(2)");
+    // OP_Transaction returns BUSY_SNAPSHOT as it is (vdbe_return).
+    try expectStepError(&peer, "INSERT INTO t VALUES(3)", RC.BUSY_SNAPSHOT, "database is locked");
+    try peer.exec("COMMIT");
+}
+
+test "sql: a corrupt page is SQLITE_CORRUPT" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE big(x); INSERT INTO big SELECT randomblob(900) FROM (SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5)");
+    try c.expectRows("SELECT rootpage FROM sqlite_schema WHERE name = 'big'", "2\n");
+    {
+        const f = try c.mem.interface().open("test.db", .{ .read_write = true });
+        defer f.close();
+        try f.write(&.{0x7f}, 1 * 4096);
+    }
+    try c.reopen();
+    try expectStepError(&c, "SELECT count(*) FROM big", RC.CORRUPT, "database disk image is malformed");
+}
+
+test "sql: I/O errors of the VFS reach the API" {
+    var mem = MemVfs.init(testing.allocator, testing.io);
+    defer mem.deinit();
+    var fv: FaultVfs = .{ .inner = mem.interface() };
+    defer FaultVfs.fault_read = null;
+    defer FaultVfs.fault_write = null;
+    var c: Conn = .{ .mem = &mem, .own = undefined, .db = undefined };
+    var opened: ?*int.Sqlite3 = null;
+    try testing.expectEqual(RC.OK, main_mod.open(fv.interface(), "test.db", .{}, &opened));
+    c.db = opened.?;
+    defer _ = main_mod.close(c.db);
+    try c.exec("CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+    for ([_]struct { @import("../vfs/vfs.zig").Error, i32, []const u8 }{
+        .{ error.IoErr, RC.IOERR, "disk I/O error" },
+        .{ error.DiskFull, RC.FULL, "database or disk is full" },
+        .{ error.ReadOnly, RC.READONLY, "attempt to write a readonly database" },
+    }) |case| {
+        FaultVfs.fault_write = case[0];
+        try expectStepError(&c, "INSERT INTO t VALUES(2)", case[1], case[2]);
+        FaultVfs.fault_write = null;
+        try c.expectRows("SELECT x FROM t", "1\n");
+    }
+    // A read that fails: the schema is read again after a change by
+    // another connection.
+    var other_opened: ?*int.Sqlite3 = null;
+    try testing.expectEqual(RC.OK, main_mod.open(mem.interface(), "test.db", .{}, &other_opened));
+    const other = other_opened.?;
+    defer _ = main_mod.close(other);
+    var msg: ?[:0]u8 = null;
+    try testing.expectEqual(RC.OK, legacy.exec(other, "CREATE TABLE u(y)", null, null, &msg));
+    FaultVfs.fault_read = error.IoErr;
+    var stmt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;
+    const rc = prepare.prepareV2(c.db, "SELECT x FROM t", &stmt, null);
+    if (rc == RC.OK) {
+        try testing.expectEqual(RC.IOERR, api.step(stmt.?));
+        _ = api.finalize(stmt.?);
+    } else {
+        try testing.expectEqual(RC.IOERR, rc);
+    }
+    try testing.expectEqual(RC.IOERR, main_mod.extendedErrcode(c.db));
+    try testing.expectEqualStrings("disk I/O error", main_mod.errmsg(c.db));
+    FaultVfs.fault_read = null;
+    try c.expectRows("SELECT x FROM t", "1\n");
+}
+
+test "sql: error offsets of messages that quote a token or an expression" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("CREATE TABLE t(a, b); CREATE TEMP TABLE tt(x)");
+    try c.exec("CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END");
+    // The offsets sqlite3 3.54.1 reports (the carets of its shell).
+    for ([_]struct { []const u8, []const u8, i32 }{
+        .{ "SELECT * FROM t WHERE a=1 frob", "near \"frob\": syntax error", 26 },
+        .{ "SELECT * FROM t t1 LEFT FOO BAR JOIN t t2", "unknown join type: LEFT FOO BAR", 19 },
+        .{ "CREATE TABLE t(z)", "table t already exists", 13 },
+        .{ "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END", "trigger tr already exists", 15 },
+        .{ "SELECT abs(a ORDER BY b) FROM t", "ORDER BY may not be used with non-aggregate abs()", 7 },
+        .{ "CREATE VIEW main.v AS SELECT * FROM temp.tt", "view v cannot reference objects in database temp", 17 },
+        .{ "SELECT max() FROM t", "wrong number of arguments to function max()", 7 },
+        .{ "SELECT * FROM t WHERE nosuchcol=1", "no such column: nosuchcol", 22 },
+    }) |case| {
+        var stmt: ?*@import("../vdbe/vdbe_int.zig").Vdbe = null;
+        try testing.expectEqual(RC.ERROR, prepare.prepareV2(c.db, case[0], &stmt, null));
+        try testing.expectEqualStrings(case[1], main_mod.errmsg(c.db));
+        testing.expectEqual(case[2], main_mod.errorOffset(c.db)) catch |err| {
+            std.debug.print("{s}\n", .{case[0]});
+            return err;
+        };
+    }
+}
+
+test "sql: %T records the error offset only while an error is formatted" {
+    const printf = @import("printf.zig");
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    const sql = "SELECT frob FROM t";
+    var p: int.Parse = .{ .db = c.db, .arena = testing.allocator, .tail = sql };
+    c.db.parse = &p;
+    defer c.db.parse = null;
+    const tok: int.Token = .init(sql[7..11]);
+    // As in sqlite3ErrorMsg(): -2 while the message is formatted.
+    c.db.err_byte_offset = -2;
+    const msg = try printf.mprintfLimit(c.db, testing.allocator, 100, "near \"%T\"", &.{.{ .token = &tok }});
+    defer testing.allocator.free(msg);
+    try testing.expectEqualStrings("near \"frob\"", msg);
+    try testing.expectEqual(@as(i32, 7), c.db.err_byte_offset);
+    // Otherwise (sqlite3MPrintf(db, "CREATE VIRTUAL TABLE %T", ...)) it
+    // is left alone, as is a token outside the statement.
+    c.db.err_byte_offset = -1;
+    const other = try printf.mprintfLimit(c.db, testing.allocator, 100, "%T", &.{.{ .token = &tok }});
+    defer testing.allocator.free(other);
+    try testing.expectEqual(@as(i32, -1), c.db.err_byte_offset);
+    const outside: int.Token = .init("frob");
+    c.db.err_byte_offset = -2;
+    const third = try printf.mprintfLimit(c.db, testing.allocator, 100, "%T", &.{.{ .token = &outside }});
+    defer testing.allocator.free(third);
+    try testing.expectEqual(@as(i32, -2), c.db.err_byte_offset);
+    c.db.err_byte_offset = -1;
 }

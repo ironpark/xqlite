@@ -43,9 +43,7 @@ const where_mod = @import("where.zig");
 const main_mod = @import("main.zig");
 const select_mod = @import("select.zig");
 const SRT = select_mod.SRT;
-const ONEPASS_OFF = where_mod.ONEPASS_OFF;
-const ONEPASS_SINGLE = where_mod.ONEPASS_SINGLE;
-const ONEPASS_MULTI = where_mod.ONEPASS_MULTI;
+const ONEPASS = where_mod.ONEPASS;
 
 /// Port of exprRowColumn(): a TK_ROW expression the resolver turns into
 /// column `i_col` of the first FROM-clause table.
@@ -65,7 +63,7 @@ fn updateFromSelect(p: *Parse, i_eph: i32, pk: ?*Index, changes: *ExprList, tab_
     src.at(0).i_cursor = -1;
     src.at(0).s_tab = null;
     var list: ?*ExprList = null;
-    var e_dest: u8 = undefined;
+    var e_dest: SRT = undefined;
     if (pk) |k| {
         for (0..k.n_key_col) |i| list = try expr_mod.listAppend(p, list, try exprRowColumn(p, k.ai_column[i]));
         e_dest = if (t.isVirtual()) SRT.Table else SRT.Upfrom;
@@ -77,11 +75,11 @@ fn updateFromSelect(p: *Parse, i_eph: i32, pk: ?*Index, changes: *ExprList, tab_
         list = try expr_mod.listAppend(p, null, try expr_mod.pExpr(p, TK.ROW, null, null));
     }
     for (changes.slice()) |item| list = try expr_mod.listAppend(p, list, try expr_mod.exprDup(p.arena, item.expr));
-    const sel = try select_mod.selectNew(p, list, src, where2, null, null, null, SF.UFSrcCheck | SF.IncludeHidden | SF.UpdateFrom, null);
-    sel.sel_flags |= SF.OrderByReqd;
+    const sel = try select_mod.selectNew(p, list, src, where2, null, null, null, .{ .UFSrcCheck = true, .IncludeHidden = true, .UpdateFrom = true }, null);
+    sel.sel_flags.OrderByReqd = true;
     var dest = select_mod.selectDestInit(e_dest, i_eph);
     dest.i_sd_parm2 = if (pk) |k| k.n_key_col else -1;
-    _ = select_mod.select(p, sel, &dest);
+    select_mod.select(p, sel, &dest) catch {};
 }
 
 /// Port of indexColumnIsBeingUpdated().
@@ -100,13 +98,13 @@ fn indexWhereClauseMightChange(idx: *Index, ax_ref: []const i32, chng_rowid: boo
 /// Port of sqlite3Update(): UPDATE `tab_list` SET `changes` [FROM ...]
 /// WHERE `where`. With `upsert`, the DO UPDATE of an upsert: one row, on
 /// the cursors of the INSERT, which already point at it.
-pub fn update(p: *Parse, tab_list: ?*int.SrcList, changes: ?*int.ExprList, where: ?*int.Expr, on_error: i32, order_by: ?*int.ExprList, limit: ?*int.Expr, upsert: ?*int.Upsert) void {
+pub fn update(p: *Parse, tab_list: ?*int.SrcList, changes: ?*int.ExprList, where: ?*int.Expr, on_error: OE, order_by: ?*int.ExprList, limit: ?*int.Expr, upsert: ?*int.Upsert) void {
     if (p.syntax_only) return;
     _ = .{ order_by, limit };
-    updateImpl(p, tab_list.?, changes.?, where, @intCast(on_error), upsert) catch build.oomFault(p);
+    updateImpl(p, tab_list.?, changes.?, where, on_error, upsert) catch build.oomFault(p);
 }
 
-fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, on_error: u8, upsert: ?*int.Upsert) Oom!void {
+fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, on_error: OE, upsert: ?*int.Upsert) Oom!void {
     const db = p.db;
     if (p.n_err != 0) return;
 
@@ -120,7 +118,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     const n_change_from: i32 = if (tab_list.len() > 1) @intCast(changes.len()) else 0;
     std.debug.assert(n_change_from == 0 or upsert == null);
 
-    if (build.viewGetColumnNames(p, t) != 0) return;
+    build.viewGetColumnNames(p, t) catch return;
     if (delete_mod.isReadOnly(p, t, trig)) return;
 
     // Cursors for the table and all its indexes (used or not, the index
@@ -155,7 +153,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     @memset(to_open, true);
     to_open[n_idx + 1] = false;
 
-    var nc: NameContext = .{ .parse = p, .src_list = tab_list, .nc_flags = NC.UUpsert, .u_nc = .{ .upsert = upsert } };
+    var nc: NameContext = .{ .parse = p, .src_list = tab_list, .nc_flags = .{ .UUpsert = true }, .u_nc = .{ .upsert = upsert } };
 
     const v = build.getVdbe(p) orelse return;
 
@@ -167,7 +165,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     for (changes.slice(), 0..) |item, ii| {
         const i: i32 = @intCast(ii);
         // With a FROM clause, the SELECT resolves them.
-        if (n_change_from == 0 and resolve.resolveExprNames(&nc, item.expr) != 0) return;
+        if (n_change_from == 0) resolve.resolveExprNames(&nc, item.expr) catch return;
         const name = item.e_name.?;
         const j = build.columnIndex(t, name);
         if (j >= 0) {
@@ -176,9 +174,9 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                 chng_rowid = true;
                 rowid_expr = item.expr;
                 i_rowid_expr = i;
-            } else if (pk != null and t.cols[ju].col_flags & COLFLAG.PRIMKEY != 0) {
+            } else if (pk != null and t.cols[ju].col_flags.PRIMKEY) {
                 chng_pk = true;
-            } else if (t.cols[ju].col_flags & COLFLAG.GENERATED != 0) {
+            } else if (t.cols[ju].col_flags.intersects(COLFLAG.GENERATED)) {
                 util.errorMsg(p, "cannot UPDATE generated column \"{s}\"", .{t.cols[ju].name()});
                 return;
             }
@@ -196,12 +194,12 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     const chng_key = chng_rowid or chng_pk;
 
     // Generated columns change if what they use changes.
-    if (t.tab_flags & TF.HasGenerated != 0) {
+    if (t.tab_flags.intersects(TF.HasGenerated)) {
         while (true) {
             var progress = false;
             for (t.cols, 0..) |*c, i| {
                 if (ax_ref[i] >= 0) continue;
-                if (c.col_flags & COLFLAG.GENERATED == 0) continue;
+                if (!c.col_flags.intersects(COLFLAG.GENERATED)) continue;
                 if (insert.exprReferencesUpdatedColumn(build.columnExpr(t, c), ax_ref, chng_rowid)) {
                     ax_ref[i] = 99999;
                     progress = true;
@@ -280,7 +278,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     // table.
     if (n_change_from == 0 and is_view) delete_mod.materializeView(p, t, where, null, null, i_data_cur);
 
-    if (n_change_from == 0 and resolve.resolveExprNames(&nc, where) != 0) return;
+    if (n_change_from == 0) resolve.resolveExprNames(&nc, where) catch return;
 
     // Virtual tables are done apart.
     if (t.isVirtual()) {
@@ -292,7 +290,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     var label_continue = label_break;
 
     var reg_row_count: i32 = 0;
-    if (db.flags & int.DbFlag.CountRows != 0 and p.trigger_tab == null and p.nested == 0 and !p.returning and upsert == null) {
+    if (db.flags.CountRows and p.trigger_tab == null and p.nested == 0 and !p.returning and upsert == null) {
         p.n_mem += 1;
         reg_row_count = p.n_mem;
         _ = aux.addOp2(v, OP.Integer, 0, reg_row_count);
@@ -335,7 +333,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         }
     }
 
-    var e_one_pass: u8 = ONEPASS_OFF;
+    var e_one_pass: ONEPASS = ONEPASS.OFF;
     var ai_cur_one_pass: [2]i32 = .{ -1, -1 };
     // Whether OP_FinishSeek must resolve an OP_DeferredSeek of the loop.
     var b_finish_seek = true;
@@ -348,26 +346,26 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         if (upsert != null) {
             // The INSERT left the data cursor on the row to update: no
             // search, only the WHERE of the DO UPDATE.
-            e_one_pass = ONEPASS_SINGLE;
+            e_one_pass = ONEPASS.SINGLE;
             ec.exprIfFalse(p, where, label_break, vi.SQLITE_JUMPIFNULL);
             b_finish_seek = false;
         } else {
             // The rows to update. A one-pass update of several rows is not
             // safe if anything else may move the cursor.
-            var flags: u16 = WHERE.ONEPASS_DESIRED;
+            var flags: WHERE = .{ .ONEPASS_DESIRED = true };
             if (p.nested == 0 and trig == null and has_fk == 0 and !chng_key and !b_replace and
-                (where == null or !where.?.has(EP.Subquery)))
+                (where == null or !where.?.flags.Subquery))
             {
-                flags |= WHERE.ONEPASS_MULTIROW;
+                flags.ONEPASS_MULTIROW = true;
             }
             w = where_mod.whereBegin(p, tab_list, where, null, null, null, flags, i_idx_cur) orelse return;
             e_one_pass = where_mod.okOnePass(w.?, &ai_cur_one_pass);
             b_finish_seek = where_mod.usesDeferredSeek(w.?);
-            if (e_one_pass != ONEPASS_SINGLE) {
+            if (e_one_pass != ONEPASS.SINGLE) {
                 main_mod.multiWrite(p);
-                if (e_one_pass == ONEPASS_MULTI) {
+                if (e_one_pass == ONEPASS.MULTI) {
                     const i_cur = ai_cur_one_pass[1];
-                    if (i_cur >= 0 and i_cur != i_data_cur and to_open[@intCast(i_cur - i_base_cur)]) e_one_pass = ONEPASS_OFF;
+                    if (i_cur >= 0 and i_cur != i_data_cur and to_open[@intCast(i_cur - i_base_cur)]) e_one_pass = ONEPASS.OFF;
                 }
             }
         }
@@ -375,7 +373,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         if (t.hasRowid()) {
             // The rowid of the row: to the FIFO for two passes.
             _ = aux.addOp2(v, OP.Rowid, i_data_cur, reg_old_rowid);
-            if (e_one_pass == ONEPASS_OFF) {
+            if (e_one_pass == ONEPASS.OFF) {
                 p.n_mem += 1;
                 reg_idx[n_all_idx] = p.n_mem;
                 _ = aux.addOp3(v, OP.Insert, i_eph, reg_row_set, reg_old_rowid);
@@ -387,7 +385,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             // for two passes.
             const k = pk.?;
             for (0..k.n_key_col) |i| ec.codeGetColumnOfTable(v, t, i_data_cur, k.ai_column[i], i_pk + @as(i32, @intCast(i)));
-            if (e_one_pass != ONEPASS_OFF) {
+            if (e_one_pass != ONEPASS.OFF) {
                 if (addr_open != 0) _ = aux.changeToNoop(v, addr_open);
                 n_key = n_pk;
                 reg_key = i_pk;
@@ -400,16 +398,16 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 
     var addr_top: i32 = 0;
     if (upsert == null) {
-        if (n_change_from == 0 and e_one_pass != ONEPASS_MULTI) where_mod.whereEnd(w.?);
+        if (n_change_from == 0 and e_one_pass != ONEPASS.MULTI) where_mod.whereEnd(w.?);
 
         if (!is_view) {
             // Open the indexes to update.
-            if (e_one_pass != ONEPASS_OFF) {
+            if (e_one_pass != ONEPASS.OFF) {
                 if (ai_cur_one_pass[0] >= 0) to_open[@intCast(ai_cur_one_pass[0] - i_base_cur)] = false;
                 if (ai_cur_one_pass[1] >= 0) to_open[@intCast(ai_cur_one_pass[1] - i_base_cur)] = false;
             }
             var addr_once: i32 = 0;
-            if (e_one_pass == ONEPASS_MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] >= 0) > 0) addr_once = aux.addOp0(v, OP.Once);
+            if (e_one_pass == ONEPASS.MULTI and n_idx - @intFromBool(ai_cur_one_pass[1] >= 0) > 0) addr_once = aux.addOp0(v, OP.Once);
             var not_used1: i32 = 0;
             var not_used2: i32 = 0;
             _ = insert.openTableAndIndices(p, t, OP.OpenWrite, 0, i_base_cur, to_open, &not_used1, &not_used2);
@@ -417,11 +415,11 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         }
 
         // The top of the loop over the rows.
-        if (e_one_pass != ONEPASS_OFF) {
+        if (e_one_pass != ONEPASS.OFF) {
             if (ai_cur_one_pass[0] != i_data_cur and ai_cur_one_pass[1] != i_data_cur) {
                 _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_break, reg_key, n_key);
             }
-            if (e_one_pass != ONEPASS_SINGLE) label_continue = aux.makeLabel(p);
+            if (e_one_pass != ONEPASS.SINGLE) label_continue = aux.makeLabel(p);
             _ = aux.addOp2(v, OP.IsNull, if (pk != null) reg_key else reg_old_rowid, label_break);
         } else if (pk != null or n_change_from != 0) {
             label_continue = aux.makeLabel(p);
@@ -466,7 +464,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         oldmask |= trigger.triggerColmask(p, trig, changes, false, int.TRIGGER_BEFORE | int.TRIGGER_AFTER, t, on_error);
         for (t.cols, 0..) |c, i| {
             const k = build.tableColumnToStorage(t, @intCast(i)) + reg_old;
-            if (oldmask == 0xffffffff or (i < 32 and oldmask & (@as(u32, 1) << @intCast(i)) != 0) or c.col_flags & COLFLAG.PRIMKEY != 0) {
+            if (oldmask == 0xffffffff or (i < 32 and oldmask & (@as(u32, 1) << @intCast(i)) != 0) or c.col_flags.PRIMKEY) {
                 ec.codeGetColumnOfTable(v, t, i_data_cur, @intCast(i), k);
             } else {
                 _ = aux.addOp2(v, OP.Null, 0, k);
@@ -483,8 +481,8 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             defer k += 1;
             if (@as(i32, @intCast(i)) == t.i_pkey) {
                 _ = aux.addOp2(v, OP.Null, 0, k);
-            } else if (c.col_flags & COLFLAG.GENERATED != 0) {
-                if (c.col_flags & COLFLAG.VIRTUAL != 0) k -= 1;
+            } else if (c.col_flags.intersects(COLFLAG.GENERATED)) {
+                if (c.col_flags.VIRTUAL) k -= 1;
             } else {
                 const j = ax_ref[i];
                 if (j >= 0) {
@@ -503,7 +501,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             }
         }
     }
-    if (t.tab_flags & TF.HasGenerated != 0) insert.computeGeneratedColumns(p, reg_new, t);
+    if (t.tab_flags.intersects(TF.HasGenerated)) insert.computeGeneratedColumns(p, reg_new, t);
 
     if (tmask & int.TRIGGER_BEFORE != 0) {
         insert.tableAffinity(p, t, reg_new);
@@ -534,7 +532,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         if (b_finish_seek) _ = aux.addOp1(v, OP.FinishSeek, i_data_cur);
         if (has_fk > 1 or chng_key) _ = aux.addOp2(v, OP.Delete, i_data_cur, 0);
         if (has_fk != 0) fkey.fkCheck(p, t, 0, reg_new_rowid, ax_ref, chng_key);
-        insert.completeInsertion(p, t, i_data_cur, i_idx_cur, reg_new_rowid, reg_idx, OPFLAG.ISUPDATE | (if (e_one_pass == ONEPASS_MULTI) OPFLAG.SAVEPOSITION else 0), false, false);
+        insert.completeInsertion(p, t, i_data_cur, i_idx_cur, reg_new_rowid, reg_idx, OPFLAG.ISUPDATE | (if (e_one_pass == ONEPASS.MULTI) OPFLAG.SAVEPOSITION else 0), false, false);
         if (has_fk != 0) fkey.fkActions(p, t, changes, reg_old_rowid, ax_ref, chng_key);
     }
 
@@ -542,9 +540,9 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     if (trig != null) trigger.codeRowTrigger(p, trig, TK.UPDATE, changes, int.TRIGGER_AFTER, t, reg_old_rowid, on_error, label_continue);
 
     // The next row.
-    if (e_one_pass == ONEPASS_SINGLE) {
+    if (e_one_pass == ONEPASS.SINGLE) {
         // Nothing to loop over.
-    } else if (e_one_pass == ONEPASS_MULTI) {
+    } else if (e_one_pass == ONEPASS.MULTI) {
         aux.resolveLabel(v, label_continue);
         where_mod.whereEnd(w.?);
     } else {
@@ -562,7 +560,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
 /// an ephemeral table, then each row to xUpdate (OP_VUpdate). With the
 /// one-pass strategy (when xBestIndex says the WHERE matches at most one
 /// row) they go to xUpdate from registers instead.
-fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprList, rowid: ?*Expr, ax_ref: []const i32, where: ?*Expr, on_error: u8) Oom!void {
+fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprList, rowid: ?*Expr, ax_ref: []const i32, where: ?*Expr, on_error: OE) Oom!void {
     const v = p.vdbe.?;
     const db = p.db;
     const n_arg: i32 = 2 + @as(i32, @intCast(t.cols.len));
@@ -576,7 +574,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
     var addr = aux.addOp2(v, OP.OpenEphemeral, ephem_tab, n_arg);
     const reg_arg = p.n_mem + 1;
     p.n_mem += n_arg;
-    var e_one_pass: u8 = undefined;
+    var e_one_pass: ONEPASS = undefined;
     if (src.len() > 1) {
         var pk: ?*Index = null;
         var row: *Expr = undefined;
@@ -603,7 +601,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
             }
         }
         try updateFromSelect(p, ephem_tab, pk, list, src, where);
-        e_one_pass = ONEPASS_OFF;
+        e_one_pass = ONEPASS.OFF;
     } else {
         p.n_mem += 1;
         const reg_rec = p.n_mem;
@@ -611,12 +609,12 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
         const reg_rowid = p.n_mem;
 
         // Scan the virtual table.
-        w = where_mod.whereBegin(p, src, where, null, null, null, int.WHERE.ONEPASS_DESIRED, 0) orelse return;
+        w = where_mod.whereBegin(p, src, where, null, null, null, .{ .ONEPASS_DESIRED = true }, 0) orelse return;
 
         // The arguments.
         for (t.cols, 0..) |*c, ii| {
             const i: i32 = @intCast(ii);
-            std.debug.assert(c.col_flags & COLFLAG.GENERATED == 0);
+            std.debug.assert(!c.col_flags.intersects(COLFLAG.GENERATED));
             if (ax_ref[ii] >= 0) {
                 ec.exprCode(p, changes.at(@intCast(ax_ref[ii])).expr, reg_arg + 2 + i);
             } else {
@@ -642,9 +640,9 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
 
         var a_dummy: [2]i32 = undefined;
         e_one_pass = where_mod.okOnePass(w.?, &a_dummy);
-        // No ONEPASS_MULTI on virtual tables.
-        std.debug.assert(e_one_pass == ONEPASS_OFF or e_one_pass == ONEPASS_SINGLE);
-        if (e_one_pass != ONEPASS_OFF) {
+        // No ONEPASS.MULTI on virtual tables.
+        std.debug.assert(e_one_pass == ONEPASS.OFF or e_one_pass == ONEPASS.SINGLE);
+        if (e_one_pass != ONEPASS.OFF) {
             // One pass: no ephemeral table.
             _ = aux.changeToNoop(v, addr);
             _ = aux.addOp1(v, OP.Close, i_csr);
@@ -657,7 +655,7 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
         }
     }
 
-    if (e_one_pass == ONEPASS_OFF) {
+    if (e_one_pass == ONEPASS.OFF) {
         // End the virtual table scan, and loop over the ephemeral table,
         // loading the arguments from each row.
         if (src.len() == 1) where_mod.whereEnd(w.?);
@@ -667,12 +665,12 @@ fn updateVirtualTable(p: *Parse, src: *SrcList, t: *int.Table, changes: *ExprLis
     }
     vtab.makeWritable(p, t);
     _ = aux.addOp4(v, OP.VUpdate, 0, n_arg, reg_arg, build.vtabP4(db, t));
-    aux.changeP5(v, if (on_error == OE.Default) OE.Abort else on_error);
+    aux.changeP5(v, (if (on_error == OE.Default) OE.Abort else on_error).int());
     main_mod.mayAbort(p);
 
     // The end of the loop over the ephemeral table; or with one pass,
     // where an empty scan jumps.
-    if (e_one_pass == ONEPASS_OFF) {
+    if (e_one_pass == ONEPASS.OFF) {
         _ = aux.addOp2(v, OP.Next, ephem_tab, addr + 1);
         aux.jumpHere(v, addr);
         _ = aux.addOp2(v, OP.Close, ephem_tab, 0);
@@ -705,7 +703,7 @@ const OP = vi.OP;
 pub fn valueFromExpr(v: *vi.Vdbe, e_arg: ?*const Expr, aff: u8) mem.Error!?*Mem {
     const e = e_arg orelse return null;
     const m = (try valueFromExprImpl(v, e, aff)) orelse return null;
-    if (aff == Aff.real and m.flags & (MEM.Int | MEM.IntReal) != 0) {
+    if (aff == Aff.real and m.flags.intersects(.{ .Int = true, .IntReal = true })) {
         mem.realify(m);
     }
     return m;
@@ -713,7 +711,7 @@ pub fn valueFromExpr(v: *vi.Vdbe, e_arg: ?*const Expr, aff: u8) mem.Error!?*Mem 
 
 fn newValue(v: *vi.Vdbe) mem.Error!*Mem {
     const m = try v.alloc().create(Mem);
-    m.* = .{ .db = v.db, .flags = MEM.Null };
+    m.* = .{ .db = v.db, .flags = .{ .Null = true } };
     return m;
 }
 
@@ -743,7 +741,7 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
     if (op == TK.UMINUS) {
         const left = e.left.?;
         if (left.op == TK.INTEGER or left.op == TK.FLOAT) {
-            if (left.has(EP.IntValue) or left.token().len < 2 or left.token()[0] != '0' or (left.token()[1] & ~@as(u8, 0x20)) != 'X') {
+            if (left.flags.IntValue or left.token().len < 2 or left.token()[0] != '0' or (left.token()[1] & ~@as(u8, 0x20)) != 'X') {
                 e = left;
                 op = e.op;
                 neg = -1;
@@ -754,7 +752,7 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
 
     if (op == TK.STRING or op == TK.FLOAT or op == TK.INTEGER) {
         const m = try newValue(v);
-        if (e.has(EP.IntValue)) {
+        if (e.flags.IntValue) {
             mem.setInt64(m, @as(i64, e.u.value) * neg);
         } else {
             var ival: i64 = 0;
@@ -770,24 +768,24 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
                 var r: f64 = 0;
                 _ = numeric.atoF(@ptrCast(m.z.?), &r);
                 m.u = .{ .r = r };
-                m.flags = MEM.Real;
+                m.flags = .{ .Real = true };
             } else if (op == TK.INTEGER) {
                 try mem.applyAffinity(m, Aff.numeric, vi.ENC.UTF8);
             }
         } else {
             try mem.applyAffinity(m, aff, vi.ENC.UTF8);
         }
-        if (m.flags & (MEM.Int | MEM.IntReal | MEM.Real) != 0) m.flags &= ~MEM.Str;
+        if (m.flags.intersects(.{ .Int = true, .IntReal = true, .Real = true })) m.flags.Str = false;
         return m;
     } else if (op == TK.UMINUS) {
         // Several minus signs: -(-5).
         const m = (try valueFromExprImpl(v, e.left.?, aff)) orelse return null;
         mem.numerify(m);
-        if (m.flags & MEM.Real != 0) {
+        if (m.flags.Real) {
             m.u.r = -m.u.r;
         } else if (m.u.i == std.math.minInt(i64)) {
             m.u = .{ .r = -@as(f64, @floatFromInt(std.math.minInt(i64))) };
-            m.flags = (m.flags & ~(MEM.TypeMask | MEM.Zero)) | MEM.Real;
+            m.setTypeFlag(.{ .Real = true });
         } else {
             m.u.i = -m.u.i;
         }
@@ -803,7 +801,7 @@ fn valueFromExprImpl(v: *vi.Vdbe, e_arg: *const Expr, aff: u8) mem.Error!?*Mem {
         return m;
     } else if (op == TK.TRUEFALSE) {
         const m = try newValue(v);
-        m.flags = MEM.Int;
+        m.flags = .{ .Int = true };
         m.u = .{ .i = @intFromBool(e.token().len == 4) };
         try mem.applyAffinity(m, aff, vi.ENC.UTF8);
         return m;

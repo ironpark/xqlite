@@ -8,74 +8,29 @@ const mem = @import("../vdbe/mem.zig");
 const util = @import("util.zig");
 const vtab = @import("vtab.zig");
 const malloc = @import("malloc.zig");
+const thunk = @import("../util/thunk.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
 const RC = int.RC;
 
-/// Every error the storage and VM layers report. errorCode() and
-/// tripError() map them to and from result codes.
-pub const Error = btree.Error || error{TooBig};
-
-/// The result code of an error from the lower layers.
-pub fn errorCode(err: Error) i32 {
-    return switch (err) {
-        error.Busy => RC.BUSY,
-        error.CantOpen => RC.CANTOPEN,
-        error.ShortRead => RC.IOERR_SHORT_READ,
-        error.DiskFull => RC.FULL,
-        error.ReadOnly => RC.READONLY,
-        error.IoErr => RC.IOERR,
-        error.LockErr => RC.IOERR_LOCK,
-        error.ShmOpen => RC.IOERR_SHMOPEN,
-        error.ShmSize => RC.IOERR_SHMSIZE,
-        error.ShmMap => RC.IOERR_SHMMAP,
-        error.ShmLock => RC.IOERR_SHMLOCK,
-        error.ReadOnlyCantInit => RC.READONLY_CANTINIT,
-        error.BusyRecovery => RC.BUSY_RECOVERY,
-        error.BusySnapshot => RC.BUSY_SNAPSHOT,
-        error.ReadOnlyRecovery => RC.READONLY_RECOVERY,
-        error.Protocol => RC.PROTOCOL,
-        error.Interrupt => RC.INTERRUPT,
-        error.OutOfMemory => RC.NOMEM,
-        error.Corrupt => RC.CORRUPT,
-        error.ReadOnlyRollback => RC.READONLY_ROLLBACK,
-        error.Abort => RC.ABORT,
-        error.NotADatabase => RC.NOTADB,
-        error.TooBig => RC.TOOBIG,
-    };
-}
-
-/// The Zig error for a result code, as passed to b-tree rollbacks.
-pub fn tripError(code: i32) ?btree.Error {
-    if (code == RC.OK) return null;
-    return switch (code & 0xff) {
-        RC.NOMEM => error.OutOfMemory,
-        RC.CORRUPT => error.Corrupt,
-        RC.BUSY => error.Busy,
-        RC.IOERR => error.IoErr,
-        RC.FULL => error.DiskFull,
-        RC.READONLY => error.ReadOnly,
-        else => error.Abort,
-    };
-}
-
 /// Port of sqlite3RollbackAll(): roll back every open transaction.
-/// Cursors are tripped with `trip_code` unless it is OK.
-pub fn rollbackAll(db: *Sqlite3, trip_code: i32) void {
-    const schema_change = db.m_db_flags & int.DBFLAG.SchemaChange != 0 and !db.init.busy;
+/// Cursors are tripped with `trip` unless it is null (C: tripCode
+/// SQLITE_OK); the callers trip with error.Abort (SQLITE_ABORT_ROLLBACK).
+pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
+    const schema_change = db.m_db_flags.SchemaChange and !db.init.busy;
     for (db.dbs.items) |d| {
         const bt = d.bt orelse continue;
-        bt.rollback(tripError(trip_code), !schema_change) catch {};
+        bt.rollback(trip, !schema_change) catch {};
     }
-    _ = vtab.rollback(db);
+    vtab.rollback(db);
     if (schema_change) {
         @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
         @import("build.zig").resetAllSchemasOfConnection(db);
     }
     db.n_deferred_cons = 0;
     db.n_deferred_imm_cons = 0;
-    db.flags &= ~(int.DbFlag.DeferFKs | int.DbFlag.CorruptRdOnly);
+    db.flags.clear(.{ .DeferFKs = true, .CorruptRdOnly = true });
 }
 
 /// Port of sqlite3CloseSavepoints(): forget every SAVEPOINT.
@@ -96,7 +51,7 @@ pub fn freeSavepoint(db: *Sqlite3, sp: *int.Savepoint) void {
 
 /// Port of sqlite3CommitInternalChanges() (build.c).
 pub fn commitInternalChanges(db: *Sqlite3) void {
-    db.m_db_flags &= ~int.DBFLAG.SchemaChange;
+    db.m_db_flags.SchemaChange = false;
 }
 
 /// Port of sqlite3MayAbort() (build.c): the statement may abort part way,
@@ -161,7 +116,7 @@ pub fn apiExit(db: *Sqlite3, rc: i32) i32 {
 pub fn errmsg(db: *Sqlite3) [:0]const u8 {
     if (db.malloc_failed) return util.errStr(RC.NOMEM);
     if (db.err_code != RC.OK) {
-        if (db.err) |e| if (e.flags & vi.MEM.Str != 0) return e.z.?[0..@intCast(e.n) :0];
+        if (db.err) |e| if (e.flags.Str) return e.z.?[0..@intCast(e.n) :0];
     }
     return util.errStr(db.err_code);
 }
@@ -195,10 +150,13 @@ pub const OpenFlags = struct {
 
 /// Port of openDatabase() (sqlite3_open_v2()): open a connection to the
 /// database file `filename` (":memory:" or "" for a private temporary
-/// database). The connection is returned even when opening fails, with
-/// the error recorded; it must be closed with close(). Its memory comes
-/// from sqlite3_malloc() (malloc.configMalloc() chooses the allocator).
-pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenFlags, out: **Sqlite3) i32 {
+/// database). The connection is returned in `out` even when opening
+/// fails, with the error recorded; it must be closed with close(). `out`
+/// is null only if the connection object itself could not be allocated
+/// (C: `*ppDb = 0`). Its memory comes from sqlite3_malloc()
+/// (malloc.configMalloc() chooses the allocator).
+pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenFlags, out: *?*Sqlite3) i32 {
+    out.* = null;
     const db = malloc.allocator.create(Sqlite3) catch return RC.NOMEM;
     // Lookaside is off until set up at the end.
     db.* = .{ .gpa = malloc.dbAllocator(db), .vfs = v };
@@ -225,7 +183,7 @@ pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenF
         .n_vdbe_read = &db.n_vdbe_read,
         .busy_handler = btreeBusyHandler(db),
     }) catch |err| {
-        const rc = errorCode(err);
+        const rc = int.errorCode(err);
         errorWithMsg(db, rc, "{s}", .{util.errStr(rc)});
         return rc;
     };
@@ -255,12 +213,12 @@ fn oomOnOpen(db: *Sqlite3) i32 {
 pub fn close(db: *Sqlite3) i32 {
     // Disconnect the virtual tables, and those with a transaction too.
     disconnectAllVtab(db);
-    _ = vtab.rollback(db);
+    vtab.rollback(db);
     if (db.vdbe != null) {
         errorWithMsg(db, RC.BUSY, "unable to close due to unfinalized statements or unfinished backups", .{});
         return RC.BUSY;
     }
-    rollbackAll(db, RC.OK);
+    rollbackAll(db, null);
     closeSavepoints(db);
     const gpa = db.gpa;
     for (db.dbs.items) |*d| {
@@ -330,30 +288,29 @@ pub const DbConfig = enum {
     enable_attach_write,
     enable_comments,
 
-    pub fn mask(op: DbConfig) u64 {
-        const F = int.DbFlag;
+    pub fn mask(op: DbConfig) int.DbFlag {
         return switch (op) {
-            .enable_fkey => F.ForeignKeys,
-            .enable_trigger => F.EnableTrigger,
-            .enable_view => F.EnableView,
-            .enable_fts3_tokenizer => F.Fts3Tokenizer,
-            .enable_load_extension => F.LoadExtension,
-            .no_ckpt_on_close => F.NoCkptOnClose,
-            .enable_qpsg => F.EnableQPSG,
-            .trigger_eqp => F.TriggerEQP,
-            .reset_database => F.ResetDatabase,
-            .defensive => F.Defensive,
-            .writable_schema => F.WriteSchema | F.NoSchemaError,
-            .legacy_alter_table => F.LegacyAlter,
-            .dqs_ddl => F.DqsDDL,
-            .dqs_dml => F.DqsDML,
-            .legacy_file_format => F.LegacyFileFmt,
-            .trusted_schema => F.TrustedSchema,
-            .stmt_scanstatus => F.StmtScanStatus,
-            .reverse_scanorder => F.ReverseOrder,
-            .enable_attach_create => F.AttachCreate,
-            .enable_attach_write => F.AttachWrite,
-            .enable_comments => F.Comments,
+            .enable_fkey => .{ .ForeignKeys = true },
+            .enable_trigger => .{ .EnableTrigger = true },
+            .enable_view => .{ .EnableView = true },
+            .enable_fts3_tokenizer => .{ .Fts3Tokenizer = true },
+            .enable_load_extension => .{ .LoadExtension = true },
+            .no_ckpt_on_close => .{ .NoCkptOnClose = true },
+            .enable_qpsg => .{ .EnableQPSG = true },
+            .trigger_eqp => .{ .TriggerEQP = true },
+            .reset_database => .{ .ResetDatabase = true },
+            .defensive => .{ .Defensive = true },
+            .writable_schema => .{ .WriteSchema = true, .NoSchemaError = true },
+            .legacy_alter_table => .{ .LegacyAlter = true },
+            .dqs_ddl => .{ .DqsDDL = true },
+            .dqs_dml => .{ .DqsDML = true },
+            .legacy_file_format => .{ .LegacyFileFmt = true },
+            .trusted_schema => .{ .TrustedSchema = true },
+            .stmt_scanstatus => .{ .StmtScanStatus = true },
+            .reverse_scanorder => .{ .ReverseOrder = true },
+            .enable_attach_create => .{ .AttachCreate = true },
+            .enable_attach_write => .{ .AttachWrite = true },
+            .enable_comments => .{ .Comments = true },
         };
     }
 };
@@ -365,12 +322,12 @@ pub fn dbConfig(db: *Sqlite3, op: DbConfig, onoff: i32) bool {
     const m = op.mask();
     const old_flags = db.flags;
     if (onoff > 0) {
-        db.flags |= m;
+        db.flags.set(m);
     } else if (onoff == 0) {
-        db.flags &= ~m;
+        db.flags.clear(m);
     }
     if (old_flags != db.flags) @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
-    return db.flags & m != 0;
+    return db.flags.intersects(m);
 }
 
 /// Port of sqlite3_db_config(SQLITE_DBCONFIG_LOOKASIDE): `cnt` lookaside
@@ -443,7 +400,7 @@ pub fn invokeBusyHandler(p: *int.BusyHandler) bool {
 /// The busy handler given to the pagers of the connection (C passes
 /// sqlite3InvokeBusyHandler with &db->busyHandler).
 pub fn btreeBusyHandler(db: *Sqlite3) @import("../pager/pager.zig").BusyHandler {
-    return .{ .ctx = db, .func = pagerBusy };
+    return .init(db, pagerBusy);
 }
 
 /// What the pagers of the connection need of it for WAL closes and
@@ -453,21 +410,19 @@ pub fn btreeBusyHandler(db: *Sqlite3) @import("../pager/pager.zig").BusyHandler 
 pub fn pagerConn(db: *Sqlite3) @import("../pager/pager.zig").Conn {
     return .{
         .interrupt = &db.is_interrupted,
-        .no_ckpt_on_close = db.flags & int.DbFlag.NoCkptOnClose != 0,
+        .no_ckpt_on_close = db.flags.NoCkptOnClose,
     };
 }
 
-fn pagerBusy(ctx: ?*anyopaque) bool {
-    const db: *Sqlite3 = @ptrCast(@alignCast(ctx.?));
+fn pagerBusy(db: *Sqlite3) bool {
     return invokeBusyHandler(&db.busy_handler);
 }
 
 /// Port of sqliteDefaultBusyCallback(): sleep a little longer each time,
 /// until `busy_timeout` milliseconds have passed.
-fn defaultBusyCallback(ptr: ?*anyopaque, count: i32) i32 {
+fn defaultBusyCallback(db: *Sqlite3, count: i32) i32 {
     const delays = [_]u8{ 1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100 };
     const totals = [_]u8{ 0, 1, 3, 8, 18, 33, 53, 78, 103, 128, 178, 228 };
-    const db: *Sqlite3 = @ptrCast(@alignCast(ptr.?));
     const tmout = db.busy_timeout;
     std.debug.assert(count >= 0);
     var delay: i32 = undefined;
@@ -488,7 +443,7 @@ fn defaultBusyCallback(ptr: ?*anyopaque, count: i32) i32 {
 }
 
 /// Port of sqlite3_busy_handler().
-pub fn busyHandler(db: *Sqlite3, func: ?*const fn (arg: ?*anyopaque, count: i32) i32, arg: ?*anyopaque) i32 {
+pub fn busyHandler(db: *Sqlite3, func: ?int.BusyHandler.Fn, arg: ?*anyopaque) i32 {
     db.busy_handler = .{ .func = func, .arg = arg, .n_busy = 0 };
     db.busy_timeout = 0;
     return RC.OK;
@@ -498,7 +453,8 @@ pub fn busyHandler(db: *Sqlite3, func: ?*const fn (arg: ?*anyopaque, count: i32)
 /// milliseconds; 0 or less turns the busy handler off.
 pub fn busyTimeout(db: *Sqlite3, ms: i32) i32 {
     if (ms > 0) {
-        _ = busyHandler(db, defaultBusyCallback, db);
+        const cb: thunk.Closure(int.BusyHandler.Fn) = .init(db, defaultBusyCallback);
+        _ = busyHandler(db, cb.func, cb.ctx);
         db.busy_timeout = ms;
     } else {
         _ = busyHandler(db, null, null);
@@ -547,31 +503,23 @@ pub fn walAutocheckpointValue(db: *const Sqlite3) i32 {
 /// Port of sqlite3Checkpoint(): checkpoint database `i_db`, or all of them
 /// for MAX_DB. `n_log` and `n_ckpt` are only set by the first. Busy from
 /// one database does not stop the others; it is reported at the end.
-pub fn checkpoint(db: *Sqlite3, i_db: i32, mode: @import("../pager/pager.zig").CheckpointMode, n_log_arg: ?*i32, n_ckpt_arg: ?*i32) i32 {
-    var rc: i32 = RC.OK;
+pub fn checkpoint(db: *Sqlite3, i_db: i32, mode: @import("../pager/pager.zig").CheckpointMode, n_log_arg: ?*i32, n_ckpt_arg: ?*i32) int.Error!void {
     var seen_busy = false;
     var n_log = n_log_arg;
     var n_ckpt = n_ckpt_arg;
     for (db.dbs.items, 0..) |d, i| {
-        if (rc != RC.OK) break;
         if (i == i_db or i_db == int.MAX_DB) {
             if (d.bt) |bt| {
-                bt.checkpoint(pagerConn(db), mode, n_log, n_ckpt) catch |err| {
-                    rc = switch (err) {
-                        error.Locked => RC.LOCKED,
-                        else => |e| errorCode(e),
-                    };
+                bt.checkpoint(pagerConn(db), mode, n_log, n_ckpt) catch |err| switch (err) {
+                    error.Busy => seen_busy = true,
+                    else => |e| return e,
                 };
             }
             n_log = null;
             n_ckpt = null;
-            if (rc == RC.BUSY) {
-                seen_busy = true;
-                rc = RC.OK;
-            }
         }
     }
-    return if (rc == RC.OK and seen_busy) RC.BUSY else rc;
+    if (seen_busy) return error.Busy;
 }
 
 /// Port of sqlite3_wal_checkpoint_v2(): checkpoint the database named
@@ -590,7 +538,7 @@ pub fn walCheckpointV2(db: *Sqlite3, zdb: ?[]const u8, mode: @import("../pager/p
         rc = RC.ERROR;
     } else {
         db.busy_handler.n_busy = 0;
-        rc = checkpoint(db, i_db, mode, n_log, n_ckpt);
+        rc = if (checkpoint(db, i_db, mode, n_log, n_ckpt)) |_| RC.OK else |err| int.errorCode(err);
         setError(db, rc);
     }
     rc = apiExit(db, rc);

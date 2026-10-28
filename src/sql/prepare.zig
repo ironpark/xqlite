@@ -68,7 +68,7 @@ fn corruptSchema(data: *InitData, obj: []const ?[:0]const u8, extra: ?[]const u8
         }) catch &buf;
         setErrMsg(data, msg);
         data.rc = RC.ERROR;
-    } else if (db.flags & int.DbFlag.WriteSchema != 0) {
+    } else if (db.flags.WriteSchema) {
         data.rc = RC.CORRUPT;
     } else {
         const name = obj[1] orelse "?";
@@ -87,8 +87,7 @@ fn corruptSchema(data: *InitData, obj: []const ?[:0]const u8, extra: ?[]const u8
 /// Port of sqlite3InitCallback(): process one row of sqlite_schema:
 /// argv is type, name, tbl_name, rootpage and sql. Also called by
 /// OP_ParseSchema. Returns true to stop.
-pub fn initCallback(ctx: ?*anyopaque, argv: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
-    const data: *InitData = @ptrCast(@alignCast(ctx.?));
+pub fn initCallback(data: *InitData, argv: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
     var obj: [5]?[:0]const u8 = undefined;
     for (&obj, argv[0..5]) |*o, a| o.* = if (a) |z| std.mem.span(z) else null;
     return initRow(data, &obj);
@@ -97,7 +96,7 @@ pub fn initCallback(ctx: ?*anyopaque, argv: []const ?[*:0]const u8, _: []const [
 fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
     const db = data.db;
     const i_db = data.i_db;
-    db.m_db_flags |= int.DBFLAG.EncodingFixed;
+    db.m_db_flags.EncodingFixed = true;
     data.n_init_row += 1;
     if (db.malloc_failed) {
         corruptSchema(data, argv, null);
@@ -122,7 +121,7 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
         db.init.az_init = .{ argv[0] orelse "", argv[1] orelse "", argv[2] orelse "" };
         var stmt: ?*Vdbe = null;
         var tail: [:0]const u8 = "";
-        _ = prepareInternal(db, argv[4].?, 0, null, &stmt, &tail);
+        prepareInternal(db, argv[4].?, 0, null, &stmt, &tail) catch {};
         const rc = db.err_code;
         db.init.i_db = saved_i_db;
         if (rc != RC.OK) {
@@ -164,8 +163,9 @@ fn initRow(data: *InitData, argv: *const [5]?[:0]const u8) bool {
 /// Port of sqlite3InitOne(): read the schema of database `i_db`. On error
 /// returns the code and sets `err_msg` (owned by the caller, from gpa).
 pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
-    std.debug.assert(db.m_db_flags & int.DBFLAG.SchemaKnownOk == 0);
-    const mask: u32 = (db.m_db_flags & int.DBFLAG.EncodingFixed) | ~int.DBFLAG.EncodingFixed;
+    std.debug.assert(!db.m_db_flags.SchemaKnownOk);
+    // C: mask = (mDbFlags & DBFLAG_EncodingFixed) | ~DBFLAG_EncodingFixed.
+    const encoding_was_fixed = db.m_db_flags.EncodingFixed;
     db.init.busy = true;
     defer db.init.busy = false;
     var rc: i32 = RC.OK;
@@ -181,7 +181,8 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
         "CREATE TABLE x(type text,name text,tbl_name text,rootpage int,sql text)",
     };
     _ = initRow(&data, &arg);
-    db.m_db_flags &= mask;
+    // mDbFlags &= mask: reading the schema table does not fix the encoding.
+    if (!encoding_was_fixed) db.m_db_flags.EncodingFixed = false;
     if (data.rc != RC.OK) {
         rc = data.rc;
         return initError(db, i_db, rc);
@@ -190,14 +191,14 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
     const pdb = &db.dbs.items[i_db];
     const bt = pdb.bt orelse {
         std.debug.assert(i_db == 1);
-        pdb.setProperty(int.DB_SchemaLoaded);
+        pdb.schema.schema_flags.SchemaLoaded = true;
         return RC.OK;
     };
 
     var opened_transaction = false;
     if (bt.txnState() == .none) {
         bt.beginTrans(.read, 0) catch |err| {
-            rc = main_mod.errorCode(err);
+            rc = int.errorCode(err);
             setErrMsg(&data, util.errStr(rc));
             return initError(db, i_db, rc);
         };
@@ -209,14 +210,14 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
     // page, text encoding.
     var meta: [5]u32 = undefined;
     for (&meta, 1..) |*m, i| m.* = bt.getMeta(@enumFromInt(i));
-    if (db.flags & int.DbFlag.ResetDatabase != 0) meta = @splat(0);
+    if (db.flags.ResetDatabase) meta = @splat(0);
     pdb.schema.schema_cookie = @bitCast(meta[0]);
 
     // The text encoding of a non-empty database.
     if (meta[4] != 0) {
         var enc: u8 = @intCast(meta[4] & 3);
         if (enc == 0) enc = 1;
-        if (i_db == 0 and db.m_db_flags & int.DBFLAG.EncodingFixed == 0) {
+        if (i_db == 0 and !db.m_db_flags.EncodingFixed) {
             if (enc != 1) {
                 setErrMsg(&data, "UTF-16 databases are not supported");
                 return initError(db, i_db, RC.ERROR);
@@ -243,22 +244,22 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
         return initError(db, i_db, RC.ERROR);
     }
     // Newer file formats must not be downgraded by VACUUM.
-    if (i_db == 0 and meta[1] >= 4) db.flags &= ~int.DbFlag.LegacyFileFmt;
+    if (i_db == 0 and meta[1] >= 4) db.flags.LegacyFileFmt = false;
 
     // Read the schema rows.
     data.mx_page = bt.lastPage();
     var buf: [128]u8 = undefined;
     const sql = std.fmt.bufPrintSentinel(&buf, "SELECT*FROM\"{s}\".{s} ORDER BY rowid", .{ pdb.name, schema_tab_name }, 0) catch unreachable;
-    rc = legacy.exec(db, sql, initCallback, &data, null);
+    rc = legacy.execWith(db, sql, &data, initCallback, null);
     if (rc == RC.OK) rc = data.rc;
     if (rc == RC.OK) _ = @import("analyze.zig").analysisLoad(db, i_db);
 
     if (db.malloc_failed) {
         rc = RC.NOMEM;
         build.resetAllSchemasOfConnection(db);
-    } else if (rc == RC.OK or (db.flags & int.DbFlag.NoSchemaError != 0 and rc != RC.NOMEM)) {
+    } else if (rc == RC.OK or (db.flags.NoSchemaError and rc != RC.NOMEM)) {
         // With NoSchemaError the schema is used as far as it was read.
-        db.dbs.items[i_db].setProperty(int.DB_SchemaLoaded);
+        db.dbs.items[i_db].schema.schema_flags.SchemaLoaded = true;
         rc = RC.OK;
     }
     if (rc != RC.OK) return initError(db, i_db, rc);
@@ -275,18 +276,18 @@ fn initError(db: *Sqlite3, i_db: usize, rc: i32) i32 {
 /// Port of sqlite3Init(): read every schema not yet loaded, main first
 /// and TEMP last.
 pub fn init(db: *Sqlite3, err_msg: *?[:0]u8) i32 {
-    const commit_internal = db.m_db_flags & int.DBFLAG.SchemaChange == 0;
+    const commit_internal = !db.m_db_flags.SchemaChange;
     std.debug.assert(!db.init.busy);
     db.enc = db.dbs.items[0].schema.enc;
     if (db.enc == 0) db.enc = 1;
-    if (!db.dbs.items[0].hasProperty(int.DB_SchemaLoaded)) {
+    if (!db.dbs.items[0].schema.schema_flags.SchemaLoaded) {
         const rc = initOne(db, 0, err_msg, 0);
         if (rc != RC.OK) return rc;
     }
     var i = db.dbs.items.len;
     while (i > 1) {
         i -= 1;
-        if (!db.dbs.items[i].hasProperty(int.DB_SchemaLoaded)) {
+        if (!db.dbs.items[i].schema.schema_flags.SchemaLoaded) {
             const rc = initOne(db, i, err_msg, 0);
             if (rc != RC.OK) return rc;
         }
@@ -295,14 +296,15 @@ pub fn init(db: *Sqlite3, err_msg: *?[:0]u8) i32 {
     return RC.OK;
 }
 
-/// Port of sqlite3ReadSchema(): make sure the schema is loaded.
-pub fn readSchema(p: *Parse) i32 {
+/// Port of sqlite3ReadSchema(): make sure the schema is loaded. On
+/// failure the error is in `p`, with the result code of init() in
+/// Parse.rc.
+pub fn readSchema(p: *Parse) int.ParseError!void {
     const db = p.db;
-    var rc: i32 = RC.OK;
-    if (p.syntax_only) return RC.OK;
+    if (p.syntax_only) return;
     if (!db.init.busy) {
         var msg: ?[:0]u8 = null;
-        rc = init(db, &msg);
+        const rc = init(db, &msg);
         if (msg) |m| {
             defer db.gpa.free(m);
             p.err_msg = p.arena.dupeSentinel(u8, m, 0) catch null;
@@ -310,11 +312,10 @@ pub fn readSchema(p: *Parse) i32 {
         if (rc != RC.OK) {
             p.rc = rc;
             p.n_err += 1;
-        } else {
-            db.m_db_flags |= int.DBFLAG.SchemaKnownOk;
+            return error.ParseFailed;
         }
+        db.m_db_flags.SchemaKnownOk = true;
     }
-    return rc;
 }
 
 /// Port of schemaIsValid(): if a schema cookie changed, set p.rc to
@@ -337,7 +338,7 @@ fn schemaIsValid(p: *Parse) void {
         }
         const cookie: i32 = @bitCast(bt.getMeta(.schema_version));
         if (cookie != d.schema.schema_cookie) {
-            if (d.hasProperty(int.DB_SchemaLoaded)) p.rc = RC.SCHEMA;
+            if (d.schema.schema_flags.SchemaLoaded) p.rc = RC.SCHEMA;
             build.resetOneSchema(db, i_db);
         }
         if (opened) bt.commit() catch {};
@@ -366,9 +367,9 @@ pub fn parseObjectResetLookaside(p: *Parse) void {
 
 /// Port of sqlite3Prepare(): compile the first statement of `sql`. The
 /// statement (null for blank input) goes to `stmt` and the text after it
-/// to `tail`.
-fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, stmt: *?*Vdbe, tail: *[:0]const u8) i32 {
-    var rc: i32 = RC.OK;
+/// to `tail`. The result is also left in the connection, as the error
+/// code (db.err_code, possibly an extended code) and message.
+fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, stmt: *?*Vdbe, tail: *[:0]const u8) int.Error!void {
     stmt.* = null;
     var arena_state = std.heap.ArenaAllocator.init(db.gpa);
     defer arena_state.deinit();
@@ -382,7 +383,7 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
     if (old) |r| p.explain = r.explain;
     if (db.malloc_failed) {
         db.err_code = RC.NOMEM;
-        return RC.NOMEM;
+        return error.OutOfMemory;
     }
     // A long-lived statement keeps out of lookaside.
     if (prep_flags & aux.PREPARE_PERSISTENT != 0) {
@@ -393,8 +394,9 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
 
     if (db.disconnect != null) @import("vtab.zig").unlockList(db);
 
-    _ = tokenize.runParser(&p, sql) catch {
-        db.oomFault();
+    tokenize.runParser(&p, sql) catch |err| switch (err) {
+        error.OutOfMemory => db.oomFault(),
+        error.ParseFailed => {},
     };
     const consumed = @intFromPtr(p.tail.ptr) - @intFromPtr(sql.ptr);
     tail.* = sql[consumed..];
@@ -407,36 +409,38 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
     if (p.rc != RC.OK and p.rc != RC.DONE) {
         if (p.check_schema and !db.init.busy) schemaIsValid(&p);
         if (p.vdbe) |v| _ = aux.finalize(v);
-        rc = p.rc;
+        const rc = p.rc;
         if (p.err_msg) |m| {
             main_mod.errorWithMsg(db, rc, "{s}", .{m});
         } else {
             main_mod.setError(db, rc);
         }
-    } else {
-        if (p.vdbe) |v| v.parse = null;
-        stmt.* = p.vdbe;
-        rc = RC.OK;
-        main_mod.errorClear(db);
+        return int.codeError(rc);
     }
-    return rc;
+    if (p.vdbe) |v| v.parse = null;
+    stmt.* = p.vdbe;
+    main_mod.errorClear(db);
 }
 
 /// Port of sqlite3LockAndPrepare(): prepare, retrying after a schema
 /// change was detected.
 fn lockAndPrepare(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe, stmt: *?*Vdbe, tail: *[:0]const u8) i32 {
-    var rc: i32 = undefined;
+    var rc: i32 = RC.OK;
     var cnt: u32 = 0;
     stmt.* = null;
     while (true) {
-        rc = prepareInternal(db, sql, prep_flags, old, stmt, tail);
-        if (rc == RC.OK or db.malloc_failed) break;
-        cnt += 1;
-        if (rc == RC.ERROR_RETRY and cnt <= max_prepare_retry) continue;
-        if (rc == RC.SCHEMA) {
-            build.resetOneSchema(db, null);
-            if (cnt == 1) continue;
-        }
+        prepareInternal(db, sql, prep_flags, old, stmt, tail) catch |err| {
+            rc = int.resultCode(err, db.err_code);
+            if (db.malloc_failed) break;
+            cnt += 1;
+            if (rc == RC.ERROR_RETRY and cnt <= max_prepare_retry) continue;
+            if (rc == RC.SCHEMA) {
+                build.resetOneSchema(db, null);
+                if (cnt == 1) continue;
+            }
+            break;
+        };
+        rc = RC.OK;
         break;
     }
     rc = main_mod.apiExit(db, rc);
@@ -511,7 +515,7 @@ pub fn parseSchemaWhere(db: *Sqlite3, i_db: usize, where: [:0]const u8, err_msg:
         where,
     }, 0) catch return RC.NOMEM;
     defer db.gpa.free(sql);
-    var rc = legacy.exec(db, sql, initCallback, &data, null);
+    var rc = legacy.execWith(db, sql, &data, initCallback, null);
     if (rc == RC.OK) rc = data.rc;
     // At least one row must match, else sqlite_schema is corrupt.
     if (rc == RC.OK and data.n_init_row == 0) rc = RC.CORRUPT;

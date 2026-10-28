@@ -186,7 +186,7 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, ai
         }
     }
 
-    if (!fk.is_deferred and p.db.flags & DbFlag.DeferFKs == 0 and p.toplevel == null and !p.is_multi_write) {
+    if (!fk.is_deferred and !p.db.flags.DeferFKs and p.toplevel == null and !p.is_multi_write) {
         // An INSERT of a single row fails at once: it runs without a
         // statement transaction.
         std.debug.assert(n_incr == 1);
@@ -266,10 +266,10 @@ fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, 
     }
 
     var nc: NameContext = .{ .parse = p, .src_list = src };
-    _ = resolve.resolveExprNames(&nc, where);
+    resolve.resolveExprNames(&nc, where) catch {};
 
     if (p.n_err == 0) {
-        const w = where_mod.whereBegin(p, src, where, null, null, null, 0, 0);
+        const w = where_mod.whereBegin(p, src, where, null, null, null, .{}, 0);
         _ = aux.addOp2(v, OP.FkCounter, @intFromBool(fk.is_deferred), n_incr);
         if (w) |wi| where_mod.whereEnd(wi);
     }
@@ -290,7 +290,7 @@ pub fn fkDropTable(p: *Parse, name: *SrcList, t: *Table) void {
 
 fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
     const db = p.db;
-    if (db.flags & DbFlag.ForeignKeys == 0 or !t.isOrdinary()) return;
+    if (!db.flags.ForeignKeys or !t.isOrdinary()) return;
     const v = build.getVdbe(p) orelse return;
     var i_skip: i32 = 0;
     if (fkReferences(t) == null) {
@@ -298,7 +298,7 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
         // zero, dropping the table changes nothing.
         var it = t.u.tab.fkey;
         while (it) |fk| : (it = fk.next_from) {
-            if (fk.is_deferred or db.flags & DbFlag.DeferFKs != 0) break;
+            if (fk.is_deferred or db.flags.DeferFKs) break;
         }
         if (it == null) return;
         i_skip = aux.makeLabel(p);
@@ -311,7 +311,7 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
 
     // An immediate violation fails the DROP now, not at the end of the
     // statement (which would drop the table anyway).
-    if (db.flags & DbFlag.DeferFKs == 0) {
+    if (!db.flags.DeferFKs) {
         _ = aux.addOp2(v, OP.FkIfZero, 0, aux.currentAddr(v) + 2);
         build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
     }
@@ -336,7 +336,7 @@ fn fkParentIsModified(t: *Table, fk: *FKey, a_change: []const i32, chng_rowid: b
             if (a_change[k] >= 0 or (@as(i32, @intCast(k)) == t.i_pkey and chng_rowid)) {
                 if (c.col) |z_key| {
                     if (ctype.eqlNoCase(col.name(), z_key)) return true;
-                } else if (col.col_flags & COLFLAG.PRIMKEY != 0) {
+                } else if (col.col_flags.PRIMKEY) {
                     return true;
                 }
             }
@@ -368,7 +368,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
     const db = p.db;
     const is_ignore_errors = p.disable_triggers;
     std.debug.assert((reg_old == 0) != (reg_new == 0));
-    if (db.flags & DbFlag.ForeignKeys == 0) return;
+    if (!db.flags.ForeignKeys) return;
     if (!t.isOrdinary()) return;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
     const zdb = db.dbs.items[i_db].name;
@@ -422,7 +422,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
 
         // Inserting one row into a parent table cannot cause (or fix) an
         // immediate violation.
-        if (!fk.is_deferred and db.flags & DbFlag.DeferFKs == 0 and p.toplevel == null and !p.is_multi_write) {
+        if (!fk.is_deferred and !db.flags.DeferFKs and p.toplevel == null and !p.is_multi_write) {
             std.debug.assert(reg_old == 0 and reg_new != 0);
             continue;
         }
@@ -446,7 +446,7 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         if (reg_new != 0) try fkScanChildren(p, src, t, idx, fk, ai_col, reg_new, -1);
         if (reg_old != 0) {
             var e_action = fk.a_action[@intFromBool(a_change != null)];
-            if (db.flags & DbFlag.FkNoAction != 0) e_action = OE.None;
+            if (db.flags.FkNoAction) e_action = OE.None;
             try fkScanChildren(p, src, t, idx, fk, ai_col, reg_old, 1);
             // A CASCADE or SET NULL action (or the check at COMMIT) fixes
             // what removing the parent breaks.
@@ -464,7 +464,7 @@ fn columnMask(x: i32) u32 {
 /// processing of an UPDATE or DELETE of `t` reads.
 pub fn fkOldmask(p: *Parse, t: *Table) u32 {
     var mask: u32 = 0;
-    if (p.db.flags & DbFlag.ForeignKeys == 0 or !t.isOrdinary()) return mask;
+    if (!p.db.flags.ForeignKeys or !t.isOrdinary()) return mask;
     var it = t.u.tab.fkey;
     while (it) |fk| : (it = fk.next_from) {
         for (fk.cols) |c| mask |= columnMask(c.i_from);
@@ -486,7 +486,7 @@ pub fn fkOldmask(p: *Parse, t: *Table) u32 {
 pub fn fkRequired(p: *Parse, t: *Table, a_change: ?[]const i32, chng_rowid: bool) u8 {
     var ret: u8 = 1;
     var have_fk = false;
-    if (p.db.flags & DbFlag.ForeignKeys == 0 or !t.isOrdinary()) return 0;
+    if (!p.db.flags.ForeignKeys or !t.isOrdinary()) return 0;
     if (a_change) |ac| {
         // An UPDATE needs it only if a child or parent key changes.
         var it = t.u.tab.fkey;
@@ -499,7 +499,7 @@ pub fn fkRequired(p: *Parse, t: *Table, a_change: ?[]const i32, chng_rowid: bool
         it = fkReferences(t);
         while (it) |fk| : (it = fk.next_to) {
             if (fkParentIsModified(t, fk, ac, chng_rowid)) {
-                if (p.db.flags & DbFlag.FkNoAction == 0 and fk.a_action[1] != OE.None) return 2;
+                if (!p.db.flags.FkNoAction and fk.a_action[1] != OE.None) return 2;
                 have_fk = true;
             }
         }
@@ -522,8 +522,8 @@ fn fkActionTrigger(p: *Parse, t: *Table, fk: *FKey, changes: ?*ExprList) Oom!?*T
     const db = p.db;
     const i_action = @intFromBool(changes != null);
     var action = fk.a_action[i_action];
-    if (db.flags & DbFlag.FkNoAction != 0) action = OE.None;
-    if (action == OE.Restrict and db.flags & DbFlag.DeferFKs != 0) return null;
+    if (db.flags.FkNoAction) action = OE.None;
+    if (action == OE.Restrict and db.flags.DeferFKs) return null;
     if (action == OE.None or fk.trigger[i_action] != null) return fk.trigger[i_action];
 
     var idx: ?*Index = null;
@@ -558,7 +558,7 @@ fn fkActionTrigger(p: *Parse, t: *Table, fk: *FKey, changes: ?*ExprList) Oom!?*T
                 new = try dotExpr(p, t_new, t_to_col);
             } else if (action == OE.SetDflt) {
                 const col = &fk.from.cols[@intCast(i_from_col)];
-                const dflt = if (col.col_flags & COLFLAG.GENERATED != 0) null else build.columnExpr(fk.from, col);
+                const dflt = if (col.col_flags.intersects(COLFLAG.GENERATED)) null else build.columnExpr(fk.from, col);
                 new = if (dflt) |d| (try expr_mod.exprDup(a, d)).? else try expr_mod.exprAlloc(a, TK.NULL, null, false);
             } else {
                 new = try expr_mod.exprAlloc(a, TK.NULL, null, false);
@@ -573,13 +573,13 @@ fn fkActionTrigger(p: *Parse, t: *Table, fk: *FKey, changes: ?*ExprList) Oom!?*T
     if (action == OE.Restrict) {
         // SELECT RAISE(ABORT, ...) FROM child WHERE ...
         const raise = try expr_mod.pExpr(p, TK.RAISE, try expr_mod.expr(a, TK.STRING, "FOREIGN KEY constraint failed"), null);
-        raise.aff_expr = OE.Abort;
+        raise.aff_expr = OE.Abort.int();
         const src = (try build.srcListAppend(p, null, null, null)) orelse return null;
         const item = src.at(0);
         item.name = try a.dupeSentinel(u8, z_from, 0);
         item.fg.fixed_schema = true;
         item.u4 = .{ .schema = t.schema };
-        sel = try select_mod.selectNew(p, try expr_mod.listAppend(p, null, raise), src, where, null, null, null, 0, null);
+        sel = try select_mod.selectNew(p, try expr_mod.listAppend(p, null, raise), src, where, null, null, null, .{}, null);
         where = null;
     }
 
@@ -632,7 +632,7 @@ fn dotExpr(p: *Parse, tbl: Token, col: Token) Oom!*Expr {
 /// null) or UPDATE of the row whose old values are in registers from
 /// `reg_old`.
 pub fn fkActions(p: *Parse, t: *Table, changes: ?*ExprList, reg_old: i32, a_change: ?[]const i32, chng_rowid: bool) void {
-    if (p.db.flags & DbFlag.ForeignKeys == 0) return;
+    if (!p.db.flags.ForeignKeys) return;
     var it = fkReferences(t);
     while (it) |fk| : (it = fk.next_to) {
         if (a_change == null or fkParentIsModified(t, fk, a_change.?, chng_rowid)) {

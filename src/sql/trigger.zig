@@ -43,6 +43,7 @@ const NC = int.NC;
 const EP = int.EP;
 const Aff = int.Aff;
 const walker = @import("walker.zig");
+const WRC = walker.WRC;
 const Walker = walker.Walker;
 
 /// Port of triggerSpanDup(): the statement text, whitespace turned into
@@ -83,7 +84,7 @@ pub fn insertStep(
     tab_list: *SrcList,
     columns: ?*IdList,
     sel: ?*Select,
-    orconf: u8,
+    orconf: OE,
     upsert: ?*Upsert,
     start: [*]const u8,
     end: [*]const u8,
@@ -105,7 +106,7 @@ pub fn updateStep(
     from: ?*SrcList,
     e_list: ?*ExprList,
     where: ?*Expr,
-    orconf: u8,
+    orconf: OE,
     start: [*]const u8,
     end: [*]const u8,
 ) Oom!?*TriggerStep {
@@ -115,7 +116,7 @@ pub fn updateStep(
     s.orconf = orconf;
     var from_list = from;
     if (from_list != null and !p.inRenameObject()) {
-        const sub = try select_mod.selectNew(p, null, from_list, null, null, null, null, SF.NestedFrom, null);
+        const sub = try select_mod.selectNew(p, null, from_list, null, null, null, null, .{ .NestedFrom = true }, null);
         from_list = try build.srcListAppendFromTerm(p, null, null, null, .{}, sub, null);
     }
     if (from_list) |f| if (s.src) |src| {
@@ -208,18 +209,18 @@ fn beginTriggerImpl(p: *Parse, name1: Token, name2: Token, tr_tm_arg: i32, op: i
         util.errorMsg(p, "cannot create triggers on virtual tables", .{});
         return orphanError(db);
     }
-    if (t.tab_flags & int.TF.Shadow != 0 and build.readOnlyShadowTables(db)) {
+    if (t.tab_flags.Shadow and build.readOnlyShadowTables(db)) {
         util.errorMsg(p, "cannot create triggers on shadow tables", .{});
         return orphanError(db);
     }
 
     // The name must be free and not reserved.
     const z_name = (try build.nameFromToken(p.arena, name.*)) orelse return;
-    if (build.checkObjectName(p, z_name, "trigger", t.name) != 0) return;
+    build.checkObjectName(p, z_name, "trigger", t.name) catch return;
     if (!p.inRenameObject()) {
         if (db.dbs.items[i_db].schema.trig_hash.get(z_name) != null) {
             if (!no_err) {
-                util.errorMsg(p, "trigger {s} already exists", .{name.slice()});
+                util.errorMsgAt(p, name.z, "trigger {s} already exists", .{name.slice()});
             } else if (db.init.busy) {
                 // The message comes from corruptSchema().
                 util.errorMsg(p, "", .{});
@@ -406,7 +407,7 @@ pub fn deleteTrigger(db: *int.Sqlite3, t: *Trigger) void {
 pub fn dropTrigger(p: *Parse, name: ?*SrcList, no_err: bool) void {
     const db = p.db;
     if (p.syntax_only or db.malloc_failed) return;
-    if (prepare.readSchema(p) != RC.OK) return;
+    prepare.readSchema(p) catch return;
     const item = name.?.at(0);
     const zdb = item.u4.database;
     const z_name = item.name.?;
@@ -466,7 +467,7 @@ pub fn unlinkAndDeleteTrigger(db: *int.Sqlite3, i_db: usize, name: [:0]const u8)
         }
     }
     deleteTrigger(db, trig);
-    db.m_db_flags |= int.DBFLAG.SchemaChange;
+    db.m_db_flags.SchemaChange = true;
 }
 
 /// Port of checkColumnOverlap(): whether an UPDATE setting `changes`
@@ -501,7 +502,7 @@ fn triggersReallyExist(p: *Parse, t: *Table, op: u8, changes: ?*ExprList, mask_o
     var mask: u8 = 0;
     var list = triggerList(p, t);
     if (list) |first| {
-        if (p.db.flags & int.DbFlag.EnableTrigger == 0 and t.trigger != null and
+        if (!p.db.flags.EnableTrigger and t.trigger != null and
             prepare.schemaToIndex(p.db, t.trigger.?.schema) != 1)
         {
             // Triggers are disabled: only the TEMP ones are kept.
@@ -547,13 +548,13 @@ pub const TriggerPrg = struct {
     trigger: *Trigger,
     next: ?*TriggerPrg,
     program: *vi.SubProgram,
-    orconf: i32,
+    orconf: OE,
     /// The OLD.* and NEW.* columns the program reads.
     colmask: [2]u32,
 };
 
 /// Port of codeTriggerProgram(): code the steps of a trigger.
-fn codeTriggerProgram(p: *Parse, step_list: *TriggerStep, orconf: i32) Oom!void {
+fn codeTriggerProgram(p: *Parse, step_list: *TriggerStep, orconf: OE) Oom!void {
     const v = p.vdbe.?;
     const a = p.arena;
     std.debug.assert(p.trigger_tab != null and p.toplevel != null);
@@ -561,7 +562,7 @@ fn codeTriggerProgram(p: *Parse, step_list: *TriggerStep, orconf: i32) Oom!void 
     while (it) |step| : (it = step.next) {
         // The policy of the statement that fired the trigger, unless it
         // has none: then that of the step.
-        p.e_orconf = if (orconf == OE.Default) step.orconf else @intCast(orconf);
+        p.e_orconf = if (orconf == OE.Default) step.orconf else orconf;
         std.debug.assert(!p.ok_const_factor);
         if (step.span) |span| {
             const z = try std.fmt.allocPrint(a, "-- {s}", .{span});
@@ -583,7 +584,7 @@ fn codeTriggerProgram(p: *Parse, step_list: *TriggerStep, orconf: i32) Oom!void 
             else => {
                 std.debug.assert(step.op == TK.SELECT);
                 var dest = select_mod.selectDestInit(select_mod.SRT.Discard, 0);
-                if (try expr_mod.selectDup(a, step.select)) |sel| _ = select_mod.select(p, sel, &dest);
+                if (try expr_mod.selectDup(a, step.select)) |sel| select_mod.select(p, sel, &dest) catch {};
             },
         }
     }
@@ -601,14 +602,14 @@ fn transferParseError(to: *Parse, from: *Parse) void {
 
 /// Port of codeRowTrigger() (static in trigger.c): a new TriggerPrg with
 /// the program of `trig` for ON CONFLICT policy `orconf`.
-fn codeTriggerPrg(p: *Parse, trig: *Trigger, t: *Table, orconf: i32) ?*TriggerPrg {
+fn codeTriggerPrg(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) ?*TriggerPrg {
     return codeTriggerPrgImpl(p, trig, t, orconf) catch {
         build.oomFault(p);
         return null;
     };
 }
 
-fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: i32) Oom!?*TriggerPrg {
+fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) Oom!?*TriggerPrg {
     const db = p.db;
 
     // Bound how deeply triggers code each other.
@@ -661,10 +662,10 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: i32) Oom!?*T
     var end_trigger: i32 = 0;
     if (trig.when) |when| {
         const w = try expr_mod.exprDup(sub.arena, when);
-        if (!db.malloc_failed and resolve.resolveExprNames(&nc, w) == RC.OK) {
+        if (!db.malloc_failed) if (resolve.resolveExprNames(&nc, w)) |_| {
             end_trigger = aux.makeLabel(&sub);
             ec.exprIfFalse(&sub, w, end_trigger, vi.SQLITE_JUMPIFNULL);
-        }
+        } else |_| {};
     }
 
     try codeTriggerProgram(&sub, trig.step_list.?, orconf);
@@ -684,7 +685,7 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: i32) Oom!?*T
 
 /// Port of getRowTrigger(): the TriggerPrg of `trig` and `orconf`, coded
 /// now unless the statement already has it.
-fn getRowTrigger(p: *Parse, trig: *Trigger, t: *Table, orconf: i32) ?*TriggerPrg {
+fn getRowTrigger(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) ?*TriggerPrg {
     const root = build.toplevel(p);
     var it = root.trigger_prg;
     while (it) |prg| : (it = prg.next) {
@@ -697,12 +698,12 @@ fn getRowTrigger(p: *Parse, trig: *Trigger, t: *Table, orconf: i32) ?*TriggerPrg
 
 /// Port of sqlite3CodeRowTriggerDirect(): call the program of `trig`.
 /// See codeRowTrigger() for the arguments.
-pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: i32, orconf: i32, ignore_jump: i32) void {
+pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: i32, orconf: OE, ignore_jump: i32) void {
     const v = build.getVdbe(p) orelse return;
     const prg = getRowTrigger(p, trig, t, orconf) orelse return;
     // Unless recursive triggers are on, a running trigger does not fire
     // again (foreign key actions always may).
-    const recursive = !trig.is_fk_action and p.db.flags & int.DbFlag.RecTriggers == 0;
+    const recursive = !trig.is_fk_action and !p.db.flags.RecTriggers;
     p.n_mem += 1;
     _ = aux.addOp4(v, OP.Program, reg, ignore_jump, p.n_mem, .{ .subprogram = prg.program });
     aux.changeP5(v, @intFromBool(recursive));
@@ -713,7 +714,7 @@ pub fn codeRowTriggerDirect(p: *Parse, trig: *Trigger, t: *Table, reg: i32, orco
 /// OLD.rowid, OLD.* columns, NEW.rowid and NEW.* columns are in the
 /// registers from `reg` (the OLD ones unused for an INSERT, the NEW ones
 /// for a DELETE). RAISE(IGNORE) jumps to `ignore_jump`.
-pub fn codeRowTrigger(p: *Parse, trigger: ?*Trigger, op: u8, changes: ?*ExprList, tr_tm: u8, t: *Table, reg: i32, orconf: i32, ignore_jump: i32) void {
+pub fn codeRowTrigger(p: *Parse, trigger: ?*Trigger, op: u8, changes: ?*ExprList, tr_tm: u8, t: *Table, reg: i32, orconf: OE, ignore_jump: i32) void {
     std.debug.assert(op == TK.UPDATE or op == TK.INSERT or op == TK.DELETE);
     std.debug.assert((op == TK.UPDATE) == (changes != null));
     var it = trigger;
@@ -751,7 +752,7 @@ fn expandReturning(p: *Parse, list: *ExprList, t: *Table) Oom!?*ExprList {
         const old = item.expr orelse continue;
         if (isAsteriskTerm(p, old)) {
             for (t.cols) |*col| {
-                if (col.col_flags & int.COLFLAG.HIDDEN != 0) continue;
+                if (col.col_flags.HIDDEN) continue;
                 new = try expr_mod.listAppend(p, new, try expr_mod.expr(a, TK.ID, col.cn_name));
                 const ni = new.?.at(new.?.len() - 1);
                 ni.e_name = try a.dupeSentinel(u8, col.cn_name, 0);
@@ -770,22 +771,22 @@ fn expandReturning(p: *Parse, list: *ExprList, t: *Table) Oom!?*ExprList {
 }
 
 /// Port of sqlite3ReturningSubqueryVarSelect().
-fn returningSubqueryVarSelect(_: *Walker, e: *Expr) u8 {
-    if (e.useXSelect() and e.x.select.?.sel_flags & int.SF.Correlated != 0) e.set(EP.VarSelect);
-    return walker.WRC.Continue;
+fn returningSubqueryVarSelect(_: *Walker, e: *Expr) WRC {
+    if (e.useXSelect() and e.x.select.?.sel_flags.Correlated) e.flags.VarSelect = true;
+    return WRC.Continue;
 }
 
 /// Port of sqlite3ReturningSubqueryCorrelated(): a SELECT reading the
 /// table being changed is correlated.
-fn returningSubqueryCorrelated(w: *Walker, s: *Select) u8 {
+fn returningSubqueryCorrelated(w: *Walker, s: *Select) WRC {
     for (s.src.?.slice()) |*item| {
         if (item.s_tab == w.u.tab) {
-            s.sel_flags |= int.SF.Correlated;
+            s.sel_flags.Correlated = true;
             w.e_code = 1;
             break;
         }
     }
-    return walker.WRC.Continue;
+    return WRC.Continue;
 }
 
 /// Port of sqlite3ProcessReturningSubqueries(): the subqueries of the
@@ -826,7 +827,7 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32) Oom!v
 
     const new = (try expandReturning(p, ret.return_el.?, t)) orelse return;
     if (p.n_err == 0) {
-        var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in }, .nc_flags = NC.UBaseReg };
+        var nc: NameContext = .{ .parse = p, .u_nc = .{ .i_base_reg = reg_in }, .nc_flags = .{ .UBaseReg = true } };
         if (ret.n_ret_col == 0) {
             ret.n_ret_col = @intCast(new.len());
             ret.i_ret_cur = p.n_tab;
@@ -834,7 +835,8 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32) Oom!v
         }
         p.e_trigger_op = trig.op;
         p.trigger_tab = t;
-        if (resolve.resolveExprListNames(&nc, new) == 0 and !db.malloc_failed) {
+        const resolved = if (resolve.resolveExprListNames(&nc, new)) |_| true else |_| false;
+        if (resolved and !db.malloc_failed) {
             const n_col: i32 = @intCast(new.len());
             const reg = p.n_mem + 1;
             processReturningSubqueries(new, t);
@@ -858,7 +860,7 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32) Oom!v
 /// Port of sqlite3TriggerColmask(): the OLD.* (`is_new` false) or NEW.*
 /// columns the triggers firing at `tr_tm` read, bit i for column i
 /// (all bits if one past the 32nd is read).
-pub fn triggerColmask(p: *Parse, trigger: ?*Trigger, changes: ?*ExprList, is_new: bool, tr_tm: u8, t: *Table, orconf: i32) u32 {
+pub fn triggerColmask(p: *Parse, trigger: ?*Trigger, changes: ?*ExprList, is_new: bool, tr_tm: u8, t: *Table, orconf: OE) u32 {
     const op: u8 = if (changes != null) TK.UPDATE else TK.DELETE;
     if (t.isView()) return 0xffffffff;
     var mask: u32 = 0;

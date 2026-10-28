@@ -77,6 +77,16 @@ const Minor = extern union {
     trig_event: TrigEvent,
     refarg: RefArg,
     u32: u32,
+    /// Table options (TF_WithoutRowid etc.).
+    tab_opts: int.TF,
+    /// A join type (JT_*).
+    jt: JT,
+    /// SF_Distinct, SF_All or nothing, for DISTINCT/ALL.
+    sf: SF,
+    /// A conflict resolution (OE_*) of onconf, orconf, resolvetype,
+    /// raisetype, insert_cmd and uniqueflag. The actions of refargs and
+    /// refact stay in `int`, where refargs packs two of them as C does.
+    oe: OE,
     trig_step: ?*TriggerStep,
     expr: ?*Expr,
     u8: u8,
@@ -219,9 +229,9 @@ pub const Parser = struct {
             .@"cmd ::= COMMIT|END trans_opt",
             .@"cmd ::= ROLLBACK trans_opt",
             => build.endTransaction(p, s.major(-1)),
-            .@"cmd ::= SAVEPOINT nm" => build.savepoint(p, build.SAVEPOINT_BEGIN, s.m(0).tok),
-            .@"cmd ::= RELEASE savepoint_opt nm" => build.savepoint(p, build.SAVEPOINT_RELEASE, s.m(0).tok),
-            .@"cmd ::= ROLLBACK trans_opt TO savepoint_opt nm" => build.savepoint(p, build.SAVEPOINT_ROLLBACK, s.m(0).tok),
+            .@"cmd ::= SAVEPOINT nm" => build.savepoint(p, .BEGIN, s.m(0).tok),
+            .@"cmd ::= RELEASE savepoint_opt nm" => build.savepoint(p, .RELEASE, s.m(0).tok),
+            .@"cmd ::= ROLLBACK trans_opt TO savepoint_opt nm" => build.savepoint(p, .ROLLBACK, s.m(0).tok),
             .@"create_table ::= createkw temp TABLE ifnotexists nm dbnm" => {
                 build.startTable(p, s.m(-1).tok, s.m(0).tok, s.m(-4).int != 0, false, false, s.m(-2).int != 0);
             },
@@ -232,38 +242,38 @@ pub const Parser = struct {
             .@"init_deferred_pred_opt ::=",
             .@"defer_subclause_opt ::=",
             .@"ifexists ::=",
-            .@"distinct ::=",
             .@"collate ::=",
             => s.m(1).int = 0,
+            .@"distinct ::=" => s.m(1).sf = .{},
             .@"ifnotexists ::= IF NOT EXISTS" => s.m(-2).int = 1,
             .@"temp ::= TEMP" => s.m(0).int = @intFromBool(!p.db.init.busy),
             .@"create_table_args ::= LP columnlist conslist_opt RP table_option_set" => {
-                build.endTable(p, s.m(-2).tok, s.m(-1).tok, s.m(0).u32, null);
+                build.endTable(p, s.m(-2).tok, s.m(-1).tok, s.m(0).tab_opts, null);
             },
-            .@"create_table_args ::= AS select" => build.endTable(p, null, null, 0, s.m(0).select),
-            .@"table_option_set ::=" => s.m(1).u32 = 0,
+            .@"create_table_args ::= AS select" => build.endTable(p, null, null, .{}, s.m(0).select),
+            .@"table_option_set ::=" => s.m(1).tab_opts = .{},
             .@"table_option_set ::= table_option_set COMMA table_option" => {
-                lhs.u32 = s.m(-2).u32 | s.m(0).u32;
-                s.m(-2).u32 = lhs.u32;
+                lhs.tab_opts = s.m(-2).tab_opts.with(s.m(0).tab_opts);
+                s.m(-2).tab_opts = lhs.tab_opts;
             },
             .@"table_option ::= WITHOUT nm" => {
                 const x = s.m(0).tok;
                 if (ctype.eqlNoCase(x.slice(), "rowid")) {
-                    s.m(-1).u32 = int.TF.WithoutRowid | int.TF.NoVisibleRowid;
+                    s.m(-1).tab_opts = .{ .WithoutRowid = true, .NoVisibleRowid = true };
                 } else {
-                    s.m(-1).u32 = 0;
+                    s.m(-1).tab_opts = .{};
                     util.errorMsg(p, "unknown table option: {s}", .{x.slice()});
                 }
             },
             .@"table_option ::= nm" => {
                 const x = s.m(0).tok;
                 if (ctype.eqlNoCase(x.slice(), "strict")) {
-                    lhs.u32 = int.TF.Strict;
+                    lhs.tab_opts = .{ .Strict = true };
                 } else {
-                    lhs.u32 = 0;
+                    lhs.tab_opts = .{};
                     util.errorMsg(p, "unknown table option: {s}", .{x.slice()});
                 }
-                s.m(0).u32 = lhs.u32;
+                s.m(0).tab_opts = lhs.tab_opts;
             },
             .@"columnname ::= nm typetoken" => build.addColumn(p, s.m(-1).tok, s.m(0).tok),
             .@"typetoken ::=",
@@ -296,12 +306,12 @@ pub const Parser = struct {
                 _ = expr.idToTrueFalse(e);
                 build.addDefaultValue(p, e, s.m(0).tok.z, tokEnd(s.m(0).tok));
             },
-            .@"ccons ::= NOT NULL onconf" => build.addNotNull(p, s.m(0).int),
+            .@"ccons ::= NOT NULL onconf" => build.addNotNull(p, s.m(0).oe),
             .@"ccons ::= PRIMARY KEY sortorder onconf autoinc" => {
-                build.addPrimaryKey(p, null, s.m(-1).int, s.m(0).int != 0, s.m(-2).int);
+                build.addPrimaryKey(p, null, s.m(-1).oe, s.m(0).int != 0, s.m(-2).int);
             },
             .@"ccons ::= UNIQUE onconf" => {
-                build.createIndex(p, null, null, null, null, s.m(0).int, null, null, 0, false, .unique);
+                build.createIndex(p, null, null, null, null, s.m(0).oe, null, null, 0, false, .unique);
             },
             .@"ccons ::= CHECK LP expr RP" => build.addCheckConstraint(p, s.m(-1).expr, s.m(-2).tok.z, s.m(0).tok.z),
             .@"ccons ::= REFERENCES nm eidlist_opt refargs" => {
@@ -312,7 +322,7 @@ pub const Parser = struct {
             .@"generated ::= LP expr RP" => build.addGenerated(p, s.m(-1).expr, null),
             .@"generated ::= LP expr RP ID" => build.addGenerated(p, s.m(-2).expr, s.m(0).tok),
             .@"autoinc ::= AUTOINCR" => s.m(0).int = 1,
-            .@"refargs ::=" => s.m(1).int = @as(i32, OE.None) * 0x0101,
+            .@"refargs ::=" => s.m(1).int = @as(i32, OE.None.int()) * 0x0101,
             .@"refargs ::= refargs refarg" => {
                 s.m(-1).int = (s.m(-1).int & ~s.m(0).refarg.mask) | s.m(0).refarg.value;
             },
@@ -320,16 +330,16 @@ pub const Parser = struct {
             .@"refarg ::= ON INSERT refact" => s.m(-2).refarg = .{ .value = 0, .mask = 0 },
             .@"refarg ::= ON DELETE refact" => s.m(-2).refarg = .{ .value = s.m(0).int, .mask = 0x0000ff },
             .@"refarg ::= ON UPDATE refact" => s.m(-2).refarg = .{ .value = s.m(0).int << 8, .mask = 0x00ff00 },
-            .@"refact ::= SET NULL" => s.m(-1).int = OE.SetNull,
-            .@"refact ::= SET DEFAULT" => s.m(-1).int = OE.SetDflt,
-            .@"refact ::= CASCADE" => s.m(0).int = OE.Cascade,
-            .@"refact ::= RESTRICT" => s.m(0).int = OE.Restrict,
-            .@"refact ::= NO ACTION" => s.m(-1).int = OE.None,
+            .@"refact ::= SET NULL" => s.m(-1).int = OE.SetNull.int(),
+            .@"refact ::= SET DEFAULT" => s.m(-1).int = OE.SetDflt.int(),
+            .@"refact ::= CASCADE" => s.m(0).int = OE.Cascade.int(),
+            .@"refact ::= RESTRICT" => s.m(0).int = OE.Restrict.int(),
+            .@"refact ::= NO ACTION" => s.m(-1).int = OE.None.int(),
             .@"defer_subclause ::= NOT DEFERRABLE init_deferred_pred_opt" => s.m(-2).int = 0,
-            .@"defer_subclause ::= DEFERRABLE init_deferred_pred_opt",
+            .@"defer_subclause ::= DEFERRABLE init_deferred_pred_opt" => s.m(-1).int = s.m(0).int,
             .@"orconf ::= OR resolvetype",
             .@"insert_cmd ::= INSERT orconf",
-            => s.m(-1).int = s.m(0).int,
+            => s.m(-1).oe = s.m(0).oe,
             .@"init_deferred_pred_opt ::= INITIALLY DEFERRED",
             .@"ifexists ::= IF EXISTS",
             .@"between_op ::= NOT BETWEEN",
@@ -339,10 +349,10 @@ pub const Parser = struct {
             .@"init_deferred_pred_opt ::= INITIALLY IMMEDIATE" => s.m(-1).int = 0,
             .@"tconscomma ::= COMMA" => p.u1.cr.constraint_name.n = 0,
             .@"tcons ::= PRIMARY KEY LP sortlist autoinc RP onconf" => {
-                build.addPrimaryKey(p, s.m(-3).elist, s.m(0).int, s.m(-2).int != 0, 0);
+                build.addPrimaryKey(p, s.m(-3).elist, s.m(0).oe, s.m(-2).int != 0, 0);
             },
             .@"tcons ::= UNIQUE LP sortlist RP onconf" => {
-                build.createIndex(p, null, null, null, s.m(-2).elist, s.m(0).int, null, null, 0, false, .unique);
+                build.createIndex(p, null, null, null, s.m(-2).elist, s.m(0).oe, null, null, 0, false, .unique);
             },
             .@"tcons ::= CHECK LP expr RP onconf" => {
                 build.addCheckConstraint(p, s.m(-2).expr, s.m(-3).tok.z, s.m(-1).tok.z);
@@ -353,22 +363,21 @@ pub const Parser = struct {
             },
             .@"onconf ::=",
             .@"orconf ::=",
-            => s.m(1).int = OE.Default,
-            .@"onconf ::= ON CONFLICT resolvetype" => s.m(-2).int = s.m(0).int,
-            .@"resolvetype ::= IGNORE" => s.m(0).int = OE.Ignore,
+            => s.m(1).oe = .Default,
+            .@"onconf ::= ON CONFLICT resolvetype" => s.m(-2).oe = s.m(0).oe,
+            .@"resolvetype ::= IGNORE" => s.m(0).oe = .Ignore,
             .@"resolvetype ::= REPLACE",
             .@"insert_cmd ::= REPLACE",
-            => s.m(0).int = OE.Replace,
+            => s.m(0).oe = .Replace,
             .@"cmd ::= DROP TABLE ifexists fullname" => build.dropTable(p, s.m(0).srclist, false, s.m(-1).int != 0),
             .@"cmd ::= createkw temp VIEW ifnotexists nm dbnm eidlist_opt AS select" => {
                 build.createView(p, s.m(-8).tok, s.m(-4).tok, s.m(-3).tok, s.m(-2).elist, s.m(0).select, s.m(-7).int != 0, s.m(-5).int != 0);
             },
             .@"cmd ::= DROP VIEW ifexists fullname" => build.dropTable(p, s.m(0).srclist, true, s.m(-1).int != 0),
-            .@"cmd ::= select" => {
+            .@"cmd ::= select" => cmd: {
                 var dest: sel.SelectDest = .{ .e_dest = sel.SRT.Output };
-                if (p.db.m_db_flags & int.DBFLAG.EncodingFixed != 0 or prepare.readSchema(p) == int.RC.OK) {
-                    if (s.m(0).select) |x| _ = sel.select(p, x, &dest);
-                }
+                if (!p.db.m_db_flags.EncodingFixed) prepare.readSchema(p) catch break :cmd;
+                if (s.m(0).select) |x| sel.select(p, x, &dest) catch {};
             },
             .@"select ::= WITH wqlist selectnowith" => s.m(-2).select = attachWithToSelect(p, s.m(0).select, s.m(-1).with),
             .@"select ::= WITH RECURSIVE wqlist selectnowith" => s.m(-3).select = attachWithToSelect(p, s.m(0).select, s.m(-1).with),
@@ -379,13 +388,13 @@ pub const Parser = struct {
                 if (rhs) |r| if (r.prior != null) {
                     doubleLinkSelect(p, r);
                     const from = try build.srcListAppendFromTerm(p, null, null, null, .{}, r, null);
-                    rhs = try sel.selectNew(p, null, from, null, null, null, null, 0, null);
+                    rhs = try sel.selectNew(p, null, from, null, null, null, null, .{}, null);
                 };
                 if (rhs) |r| {
                     r.op = @intCast(s.m(-1).int);
                     r.prior = lhs_sel;
-                    if (lhs_sel) |l| l.sel_flags &= ~SF.MultiValue;
-                    r.sel_flags &= ~SF.MultiValue;
+                    if (lhs_sel) |l| l.sel_flags.MultiValue = false;
+                    r.sel_flags.MultiValue = false;
                     if (s.m(-1).int != TK.ALL) p.has_compound = true;
                 }
                 s.m(-2).select = rhs;
@@ -395,22 +404,22 @@ pub const Parser = struct {
             => s.m(0).int = s.major(0),
             .@"multiselect_op ::= UNION ALL" => s.m(-1).int = TK.ALL,
             .@"oneselect ::= SELECT distinct selcollist from where_opt groupby_opt having_opt orderby_opt limit_opt" => {
-                s.m(-8).select = try sel.selectNew(p, s.m(-6).elist, s.m(-5).srclist, s.m(-4).expr, s.m(-3).elist, s.m(-2).expr, s.m(-1).elist, @intCast(s.m(-7).int), s.m(0).expr);
+                s.m(-8).select = try sel.selectNew(p, s.m(-6).elist, s.m(-5).srclist, s.m(-4).expr, s.m(-3).elist, s.m(-2).expr, s.m(-1).elist, s.m(-7).sf, s.m(0).expr);
             },
             .@"oneselect ::= SELECT distinct selcollist from where_opt groupby_opt having_opt window_clause orderby_opt limit_opt" => {
-                const x = try sel.selectNew(p, s.m(-7).elist, s.m(-6).srclist, s.m(-5).expr, s.m(-4).elist, s.m(-3).expr, s.m(-1).elist, @intCast(s.m(-8).int), s.m(0).expr);
+                const x = try sel.selectNew(p, s.m(-7).elist, s.m(-6).srclist, s.m(-5).expr, s.m(-4).elist, s.m(-3).expr, s.m(-1).elist, s.m(-8).sf, s.m(0).expr);
                 x.win_defn = s.m(-2).window;
                 s.m(-9).select = x;
             },
             .@"values ::= VALUES LP nexprlist RP" => {
-                s.m(-3).select = try sel.selectNew(p, s.m(-1).elist, null, null, null, null, null, SF.Values, null);
+                s.m(-3).select = try sel.selectNew(p, s.m(-1).elist, null, null, null, null, null, .{ .Values = true }, null);
             },
             .@"oneselect ::= mvalues" => insert_mod.multiValuesEnd(p, s.m(0).select),
             .@"mvalues ::= values COMMA LP nexprlist RP",
             .@"mvalues ::= mvalues COMMA LP nexprlist RP",
             => s.m(-4).select = try insert_mod.multiValues(p, s.m(-4).select.?, s.m(-1).elist),
-            .@"distinct ::= DISTINCT" => s.m(0).int = SF.Distinct,
-            .@"distinct ::= ALL" => s.m(0).int = SF.All,
+            .@"distinct ::= DISTINCT" => s.m(0).sf = .{ .Distinct = true },
+            .@"distinct ::= ALL" => s.m(0).sf = .{ .All = true },
             .@"sclp ::=",
             .@"orderby_opt ::=",
             .@"groupby_opt ::=",
@@ -450,7 +459,7 @@ pub const Parser = struct {
             },
             .@"stl_prefix ::= seltablist joinop" => {
                 if (s.m(-1).srclist) |l| if (l.len() > 0) {
-                    l.at(l.len() - 1).fg.jointype = @intCast(s.m(0).int);
+                    l.at(l.len() - 1).fg.jointype = s.m(0).jt;
                 };
             },
             .@"seltablist ::= stl_prefix nm dbnm as on_using" => {
@@ -507,10 +516,10 @@ pub const Parser = struct {
                 }
                 s.m(-4).srclist = lhs.srclist;
             },
-            .@"joinop ::= COMMA|JOIN" => s.m(0).int = JT.INNER,
-            .@"joinop ::= JOIN_KW JOIN" => s.m(-1).int = sel.joinType(p, s.m(-1).tok, null, null),
-            .@"joinop ::= JOIN_KW nm JOIN" => s.m(-2).int = sel.joinType(p, s.m(-2).tok, s.m(-1).tok, null),
-            .@"joinop ::= JOIN_KW nm nm JOIN" => s.m(-3).int = sel.joinType(p, s.m(-3).tok, s.m(-2).tok, s.m(-1).tok),
+            .@"joinop ::= COMMA|JOIN" => s.m(0).jt = .{ .INNER = true },
+            .@"joinop ::= JOIN_KW JOIN" => s.m(-1).jt = sel.joinType(p, s.m(-1).tok, null, null),
+            .@"joinop ::= JOIN_KW nm JOIN" => s.m(-2).jt = sel.joinType(p, s.m(-2).tok, s.m(-1).tok, null),
+            .@"joinop ::= JOIN_KW nm nm JOIN" => s.m(-3).jt = sel.joinType(p, s.m(-3).tok, s.m(-2).tok, s.m(-1).tok),
             .@"on_using ::= ON expr" => s.m(-1).on_using = .{ .on = s.m(0).expr, .using = null },
             .@"on_using ::= USING LP idlist RP" => s.m(-3).on_using = .{ .on = null, .using = s.m(-1).idlist },
             .@"on_using ::=" => s.m(1).on_using = .{},
@@ -570,12 +579,12 @@ pub const Parser = struct {
                 if (s.m(-1).srclist) |from| {
                     var from_clause: ?*SrcList = from;
                     if (from.len() > 1) {
-                        const sub = try sel.selectNew(p, null, from, null, null, null, null, SF.NestedFrom, null);
+                        const sub = try sel.selectNew(p, null, from, null, null, null, null, .{ .NestedFrom = true }, null);
                         from_clause = try build.srcListAppendFromTerm(p, null, null, null, .{}, sub, null);
                     }
                     if (s.m(-5).srclist) |target| s.m(-5).srclist = try build.srcListAppendList(p, target, from_clause);
                 }
-                update_mod.update(p, s.m(-5).srclist, s.m(-2).elist, s.m(0).expr, s.m(-6).int, null, null, null);
+                update_mod.update(p, s.m(-5).srclist, s.m(-2).elist, s.m(0).expr, s.m(-6).oe, null, null, null);
             },
             .@"setlist ::= setlist COMMA nm EQ expr" => {
                 s.m(-4).elist = try expr.listAppend(p, s.m(-4).elist, s.m(0).expr);
@@ -593,10 +602,10 @@ pub const Parser = struct {
                 s.m(-4).elist = try expr.listAppendVector(p, null, s.m(-3).idlist, s.m(0).expr);
             },
             .@"cmd ::= with insert_cmd INTO xfullname idlist_opt select upsert" => {
-                insert_mod.insert(p, s.m(-3).srclist, s.m(-1).select, s.m(-2).idlist, s.m(-5).int, s.m(0).upsert);
+                insert_mod.insert(p, s.m(-3).srclist, s.m(-1).select, s.m(-2).idlist, s.m(-5).oe, s.m(0).upsert);
             },
             .@"cmd ::= with insert_cmd INTO xfullname idlist_opt DEFAULT VALUES returning" => {
-                insert_mod.insert(p, s.m(-4).srclist, null, s.m(-3).idlist, s.m(-6).int, null);
+                insert_mod.insert(p, s.m(-4).srclist, null, s.m(-3).idlist, s.m(-6).oe, null);
             },
             .@"upsert ::=" => s.m(1).upsert = null,
             .@"upsert ::= RETURNING selcollist" => {
@@ -675,43 +684,43 @@ pub const Parser = struct {
                 s.m(-5).expr = e;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist RP" => {
-                lhs.expr = try expr.exprFunction(p, s.m(-1).elist, s.m(-4).tok, s.m(-2).int);
+                lhs.expr = try expr.exprFunction(p, s.m(-1).elist, s.m(-4).tok, s.m(-2).sf);
                 s.m(-4).expr = lhs.expr;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist ORDER BY sortlist RP" => {
-                const e = try expr.exprFunction(p, s.m(-4).elist, s.m(-7).tok, s.m(-5).int);
+                const e = try expr.exprFunction(p, s.m(-4).elist, s.m(-7).tok, s.m(-5).sf);
                 if (s.m(-1).elist) |ob| try expr.addFunctionOrderBy(p, e, ob);
                 s.m(-7).expr = e;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP STAR RP" => {
-                lhs.expr = try expr.exprFunction(p, null, s.m(-3).tok, 0);
+                lhs.expr = try expr.exprFunction(p, null, s.m(-3).tok, .{});
                 s.m(-3).expr = lhs.expr;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist RP filter_over" => {
-                const e = try expr.exprFunction(p, s.m(-2).elist, s.m(-5).tok, s.m(-3).int);
+                const e = try expr.exprFunction(p, s.m(-2).elist, s.m(-5).tok, s.m(-3).sf);
                 if (s.m(0).window) |w| win.windowAttach(p, e, w);
                 s.m(-5).expr = e;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist ORDER BY sortlist RP filter_over" => {
-                const e = try expr.exprFunction(p, s.m(-5).elist, s.m(-8).tok, s.m(-6).int);
+                const e = try expr.exprFunction(p, s.m(-5).elist, s.m(-8).tok, s.m(-6).sf);
                 if (s.m(0).window) |w| win.windowAttach(p, e, w);
                 if (s.m(-2).elist) |ob| try expr.addFunctionOrderBy(p, e, ob);
                 s.m(-8).expr = e;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP STAR RP filter_over" => {
-                const e = try expr.exprFunction(p, null, s.m(-4).tok, 0);
+                const e = try expr.exprFunction(p, null, s.m(-4).tok, .{});
                 if (s.m(0).window) |w| win.windowAttach(p, e, w);
                 s.m(-4).expr = e;
             },
             .@"term ::= CTIME_KW" => {
-                lhs.expr = try expr.exprFunction(p, null, s.m(0).tok, 0);
+                lhs.expr = try expr.exprFunction(p, null, s.m(0).tok, .{});
                 s.m(0).expr = lhs.expr;
             },
             .@"expr ::= LP nexprlist COMMA expr RP" => {
                 const list = try expr.listAppend(p, s.m(-3).elist, s.m(-1).expr);
                 const e = try expr.pExpr(p, TK.VECTOR, null, null);
                 e.x = .{ .list = list };
-                for (list.slice()) |item| e.flags |= item.expr.?.flags & EP.Propagate;
+                for (list.slice()) |item| e.flags.set(item.expr.?.flags.only(EP.Propagate));
                 s.m(-4).expr = e;
             },
             .@"expr ::= expr AND expr" => s.m(-2).expr = try expr.exprAnd(p, s.m(-2).expr, s.m(0).expr),
@@ -732,9 +741,9 @@ pub const Parser = struct {
                 s.m(-1).tok.n &= 0x7fffffff;
                 var list = try expr.listAppend(p, null, s.m(0).expr);
                 list = try expr.listAppend(p, list, s.m(-2).expr);
-                var e = try expr.exprFunction(p, list, s.m(-1).tok, 0);
+                var e = try expr.exprFunction(p, list, s.m(-1).tok, .{});
                 if (not) e = try expr.pExpr(p, TK.NOT, e, null);
-                e.flags |= EP.InfixFunc;
+                e.flags.InfixFunc = true;
                 s.m(-2).expr = e;
             },
             .@"expr ::= expr likeop expr ESCAPE expr" => {
@@ -743,9 +752,9 @@ pub const Parser = struct {
                 var list = try expr.listAppend(p, null, s.m(-2).expr);
                 list = try expr.listAppend(p, list, s.m(-4).expr);
                 list = try expr.listAppend(p, list, s.m(0).expr);
-                var e = try expr.exprFunction(p, list, s.m(-3).tok, 0);
+                var e = try expr.exprFunction(p, list, s.m(-3).tok, .{});
                 if (not) e = try expr.pExpr(p, TK.NOT, e, null);
-                e.flags |= EP.InfixFunc;
+                e.flags.InfixFunc = true;
                 s.m(-4).expr = e;
             },
             .@"expr ::= expr ISNULL|NOTNULL" => s.m(-1).expr = try pExprIsNull(p, s.major(0), s.m(-1).expr.?),
@@ -770,7 +779,7 @@ pub const Parser = struct {
             .@"expr ::= expr PTR expr" => {
                 var list = try expr.listAppend(p, null, s.m(-2).expr);
                 list = try expr.listAppend(p, list, s.m(0).expr);
-                lhs.expr = try expr.exprFunction(p, list, s.m(-1).tok, 0);
+                lhs.expr = try expr.exprFunction(p, list, s.m(-1).tok, .{});
                 s.m(-2).expr = lhs.expr;
             },
             .@"between_op ::= BETWEEN",
@@ -799,7 +808,7 @@ pub const Parser = struct {
             },
             .@"expr ::= expr in_op nm dbnm paren_exprlist" => {
                 const src = try build.srcListAppend(p, null, s.m(-2).tok, s.m(-1).tok);
-                const sub = try sel.selectNew(p, null, src, null, null, null, null, 0, null);
+                const sub = try sel.selectNew(p, null, src, null, null, null, null, .{}, null);
                 if (s.m(0).elist) |args| build.srcListFuncArgs(src, args);
                 var e = try expr.pExpr(p, TK.IN, s.m(-4).expr, null);
                 expr.pExprAddSelect(p, e, sub);
@@ -835,13 +844,13 @@ pub const Parser = struct {
             => s.m(-2).elist = s.m(-1).elist,
             .@"cmd ::= createkw uniqueflag INDEX ifnotexists nm dbnm ON nm LP sortlist RP where_opt" => {
                 const tbl = try build.srcListAppend(p, null, s.m(-4).tok, null);
-                build.createIndex(p, s.m(-7).tok, s.m(-6).tok, tbl, s.m(-2).elist, s.m(-10).int, s.m(-11).tok, s.m(0).expr, SO.asc, s.m(-8).int != 0, .appdef);
+                build.createIndex(p, s.m(-7).tok, s.m(-6).tok, tbl, s.m(-2).elist, s.m(-10).oe, s.m(-11).tok, s.m(0).expr, SO.asc, s.m(-8).int != 0, .appdef);
                 if (p.inRenameObject()) if (p.new_index) |idx| alter.renameTokenMap(p, idx.name.ptr, s.m(-4).tok);
             },
             .@"uniqueflag ::= UNIQUE",
             .@"raisetype ::= ABORT",
-            => s.m(0).int = OE.Abort,
-            .@"uniqueflag ::=" => s.m(1).int = OE.None,
+            => s.m(0).oe = .Abort,
+            .@"uniqueflag ::=" => s.m(1).oe = .None,
             .@"eidlist ::= eidlist COMMA nm collate sortorder" => {
                 s.m(-4).elist = try addExprIdListTerm(p, s.m(-4).elist, s.m(-2).tok, s.m(-1).int != 0, s.m(0).int);
             },
@@ -895,14 +904,14 @@ pub const Parser = struct {
             },
             .@"trigger_cmd ::= UPDATE orconf xfullname tridxby SET setlist from where_opt scanpt" => {
                 lhs.trig_step = if (s.m(-6).srclist) |t|
-                    try trig.updateStep(p, t, s.m(-2).srclist, s.m(-3).elist, s.m(-1).expr, @intCast(s.m(-7).int), s.m(-8).tok.z.?, s.m(0).str.?)
+                    try trig.updateStep(p, t, s.m(-2).srclist, s.m(-3).elist, s.m(-1).expr, s.m(-7).oe, s.m(-8).tok.z.?, s.m(0).str.?)
                 else
                     null;
                 s.m(-8).trig_step = lhs.trig_step;
             },
             .@"trigger_cmd ::= scanpt insert_cmd INTO xfullname idlist_opt select upsert scanpt" => {
                 lhs.trig_step = if (s.m(-4).srclist) |t|
-                    try trig.insertStep(p, t, s.m(-3).idlist, s.m(-2).select, @intCast(s.m(-6).int), s.m(-1).upsert, s.m(-7).str.?, s.m(0).str.?)
+                    try trig.insertStep(p, t, s.m(-3).idlist, s.m(-2).select, s.m(-6).oe, s.m(-1).upsert, s.m(-7).str.?, s.m(0).str.?)
                 else
                     null;
                 s.m(-7).trig_step = lhs.trig_step;
@@ -920,16 +929,16 @@ pub const Parser = struct {
             },
             .@"expr ::= RAISE LP IGNORE RP" => {
                 const e = try expr.pExpr(p, TK.RAISE, null, null);
-                e.aff_expr = OE.Ignore;
+                e.aff_expr = OE.Ignore.int();
                 s.m(-3).expr = e;
             },
             .@"expr ::= RAISE LP raisetype COMMA expr RP" => {
                 const e = try expr.pExpr(p, TK.RAISE, s.m(-1).expr, null);
-                e.aff_expr = @intCast(s.m(-3).int);
+                e.aff_expr = s.m(-3).oe.int();
                 s.m(-5).expr = e;
             },
-            .@"raisetype ::= ROLLBACK" => s.m(0).int = OE.Rollback,
-            .@"raisetype ::= FAIL" => s.m(0).int = OE.Fail,
+            .@"raisetype ::= ROLLBACK" => s.m(0).oe = .Rollback,
+            .@"raisetype ::= FAIL" => s.m(0).oe = .Fail,
             .@"cmd ::= DROP TRIGGER ifexists fullname" => trig.dropTrigger(p, s.m(0).srclist, s.m(-1).int != 0),
             .@"cmd ::= ATTACH database_kw_opt expr AS expr key_opt" => attach_mod.attach(p, s.m(-3).expr, s.m(-1).expr, s.m(0).expr),
             .@"cmd ::= DETACH database_kw_opt expr" => attach_mod.detach(p, s.m(0).expr),
@@ -1196,7 +1205,7 @@ fn tokenExpr(p: *Parse, op: u8, t: Token) Oom!*Expr {
     const e = try p.arena.create(Expr);
     e.* = .{
         .op = op,
-        .flags = EP.Leaf,
+        .flags = .{ .Leaf = true },
         .u = .{ .token = try p.arena.dupeSentinel(u8, t.slice(), 0) },
         .w = .{ .ofst = expr.tokenOffset(p, t) },
         .n_height = 1,
@@ -1215,7 +1224,7 @@ fn doubleLinkSelect(p: *Parse, s: *Select) void {
     var cnt: i32 = 1;
     while (true) {
         loop.next = next;
-        loop.sel_flags |= SF.Compound;
+        loop.sel_flags.Compound = true;
         next = loop;
         loop = loop.prior orelse break;
         cnt += 1;
@@ -1228,7 +1237,7 @@ fn doubleLinkSelect(p: *Parse, s: *Select) void {
         }
     }
     const mx = p.db.limit(.compound_select);
-    if (s.sel_flags & (SF.MultiValue | SF.Values) == 0 and mx > 0 and cnt > mx) {
+    if (!s.sel_flags.intersects(.{ .MultiValue = true, .Values = true }) and mx > 0 and cnt > mx) {
         util.errorMsg(p, "too many terms in compound SELECT", .{});
     }
 }
@@ -1295,7 +1304,7 @@ fn nestedFrom(s: *Parser, p: *Parse) Oom!void {
                 new.u4 = .{ .subq = old.u4.subq };
                 old.u4 = .{ .subq = null };
                 old.fg.is_subquery = false;
-                if (new.u4.subq.?.select.sel_flags & SF.NestedFrom != 0) new.fg.is_nested_from = true;
+                if (new.u4.subq.?.select.sel_flags.NestedFrom) new.fg.is_nested_from = true;
             } else {
                 new.u4 = .{ .database = old.u4.database };
                 old.u4 = .{ .database = null };
@@ -1315,7 +1324,7 @@ fn nestedFrom(s: *Parser, p: *Parse) Oom!void {
         }
     } else {
         build.srcListShiftJoinType(inner);
-        const sub = try sel.selectNew(p, null, inner, null, null, null, null, SF.NestedFrom, null);
+        const sub = try sel.selectNew(p, null, inner, null, null, null, null, .{ .NestedFrom = true }, null);
         s.m(-5).srclist = try build.srcListAppendFromTerm(p, s.m(-5).srclist, null, null, alias, sub, on_using);
     }
 }
@@ -1330,7 +1339,7 @@ fn inList(s: *Parser, p: *Parse) Oom!void {
         // function (maybe an aggregate) keep evaluating it.
         const b = try expr.expr(p.arena, TK.STRING, if (not) "true" else "false");
         _ = expr.idToTrueFalse(b);
-        if (!lhs_e.has(EP.HasFunc)) {
+        if (!lhs_e.flags.HasFunc) {
             expr.unmapAndDelete(p, lhs_e);
             s.m(-4).expr = b;
         } else {

@@ -53,7 +53,7 @@ fn exprIsVtab(e: *const Expr) bool {
 /// index. May reallocate wc.a, invalidating WhereTerm pointers into it.
 /// C starts from 8 inline slots (aStatic) and doubles; the first insert
 /// here allocates those 8.
-fn whereClauseInsert(wc: *WhereClause, e: *Expr, wt_flags: u16) Oom!i32 {
+fn whereClauseInsert(wc: *WhereClause, e: *Expr, wt_flags: TERM) Oom!i32 {
     if (wc.n_term >= wc.nSlot()) {
         const old = wc.a;
         const n_slot: usize = if (old.len == 0) 8 else old.len * 2;
@@ -64,8 +64,8 @@ fn whereClauseInsert(wc: *WhereClause, e: *Expr, wt_flags: u16) Oom!i32 {
     const idx = wc.n_term;
     wc.n_term += 1;
     const term = &wc.a[@intCast(idx)];
-    if (wt_flags & TERM.VIRTUAL == 0) wc.n_base = wc.n_term;
-    const truth_prob: int.LogEst = if (e.has(EP.Unlikely))
+    if (!wt_flags.VIRTUAL) wc.n_base = wc.n_term;
+    const truth_prob: int.LogEst = if (e.flags.Unlikely)
         util.logEst(@intCast(e.i_table)) - 270
     else
         1;
@@ -91,19 +91,19 @@ fn allowedOp(op: u8) bool {
 }
 
 /// Port of exprCommute(): turn "X op Y" into "Y op X".
-fn exprCommute(p: *Parse, e: *Expr) u16 {
+fn exprCommute(p: *Parse, e: *Expr) TERM {
     if (e.left.?.op == TK.VECTOR or e.right.?.op == TK.VECTOR or
         expr_mod.binaryCompareCollSeq(p, e.left.?, e.right) !=
             expr_mod.binaryCompareCollSeq(p, e.right.?, e.left))
     {
-        e.flags ^= EP.Commuted;
+        e.flags.Commuted = !e.flags.Commuted;
     }
     std.mem.swap(?*Expr, &e.left, &e.right);
     if (e.op >= TK.GT) {
         std.debug.assert(e.op >= TK.GT and e.op <= TK.GE);
         e.op = ((e.op - TK.GT) ^ 2) + TK.GT;
     }
-    return 0;
+    return .{};
 }
 
 /// Port of operatorMask(): TK_xx operator to WO_xx bitmask.
@@ -131,7 +131,7 @@ fn isLikeOrGlob(p: *Parse, e: *Expr, prefix: *?*Expr, is_complete: *bool, no_cas
     const right = expr_mod.skipCollate(list.at(0).expr).?;
     const op = right.op;
     var z_opt: ?[*:0]const u8 = null;
-    if (op == TK.VARIABLE and db.flags & int.DbFlag.EnableQPSG == 0) {
+    if (op == TK.VARIABLE and !db.flags.EnableQPSG) {
         const i_col = right.i_column;
         // sqlite3VdbeGetBoundValue(): no bound value available.
         aux.reprepareOnBind(p.vdbe.?, i_col);
@@ -230,7 +230,7 @@ pub fn exprIsLikeOperator(e: *const Expr) u8 {
         .{ .z = "regexp", .e_op = INDEX_CONSTRAINT.REGEXP },
     };
     std.debug.assert(e.op == TK.FUNCTION);
-    std.debug.assert(!e.has(EP.IntValue));
+    std.debug.assert(!e.flags.IntValue);
     for (ops) |o| {
         if (ctype.strICmp(e.token(), o.z) == 0) return o.e_op;
     }
@@ -264,7 +264,7 @@ fn isAuxiliaryVtabOperator(db: *int.Sqlite3, e: *Expr, e_op2: *u8, pp_left: *?*E
         if (exprIsVtab(col0)) {
             const vtab = @import("vtab.zig");
             const pv = vtab.getVTable(db, col0.y.tab.?).?.vtab.?;
-            std.debug.assert(!e.has(EP.IntValue));
+            std.debug.assert(!e.flags.IntValue);
             if (pv.module.x_find_function) |x_find| {
                 var x_not_used: ?int.FuncDef.StepFn = null;
                 var not_used: ?*anyopaque = null;
@@ -300,8 +300,8 @@ fn isAuxiliaryVtabOperator(db: *int.Sqlite3, e: *Expr, e_op2: *u8, pp_left: *?*E
 
 /// Port of transferJoinMarkings(): copy the ON/USING markings of `base`.
 fn transferJoinMarkings(derived: ?*Expr, base: *Expr) void {
-    if (derived) |d| if (base.has(EP.OuterON | EP.InnerON)) {
-        d.flags |= base.flags & (EP.OuterON | EP.InnerON);
+    if (derived) |d| if (base.flags.intersects(.{ .OuterON = true, .InnerON = true })) {
+        d.flags.set(base.flags.only(.{ .OuterON = true, .InnerON = true }));
         d.w = .{ .join = base.w.join };
     };
 }
@@ -330,7 +330,7 @@ fn whereNthSubterm(term: *WhereTerm, n: i32) ?*WhereTerm {
 fn whereCombineDisjuncts(src: *SrcList, wc: *WhereClause, one: *WhereTerm, two: *WhereTerm) Oom!void {
     var e_op: u16 = one.e_operator | two.e_operator;
     const cmp_ops = WO.EQ | WO.LT | WO.LE | WO.GT | WO.GE;
-    if ((one.wt_flags | two.wt_flags) & TERM.VNULL != 0) return;
+    if (one.wt_flags.VNULL or two.wt_flags.VNULL) return;
     if (one.e_operator & cmp_ops == 0) return;
     if (two.e_operator & cmp_ops == 0) return;
     if (e_op & (WO.EQ | WO.LT | WO.LE) != e_op and e_op & (WO.EQ | WO.GT | WO.GE) != e_op) return;
@@ -338,7 +338,7 @@ fn whereCombineDisjuncts(src: *SrcList, wc: *WhereClause, one: *WhereTerm, two: 
     const b = two.expr;
     if (expr_mod.compare(null, a.left, b.left, -1) != 0) return;
     if (expr_mod.compare(null, a.right, b.right, -1) != 0) return;
-    if (a.has(EP.Commuted) != b.has(EP.Commuted)) return;
+    if (a.flags.Commuted != b.flags.Commuted) return;
     // The two subterms can be combined.
     if (e_op & (e_op - 1) != 0) {
         if (e_op & (WO.LT | WO.LE) != 0) {
@@ -354,7 +354,7 @@ fn whereCombineDisjuncts(src: *SrcList, wc: *WhereClause, one: *WhereTerm, two: 
         std.debug.assert(op < TK.GE);
     }
     new.op = op;
-    const idx_new = try whereClauseInsert(wc, new, TERM.VIRTUAL | TERM.DYNAMIC);
+    const idx_new = try whereClauseInsert(wc, new, .{ .VIRTUAL = true, .DYNAMIC = true });
     try exprAnalyzeTerm(src, wc, idx_new);
 }
 
@@ -370,12 +370,12 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
     const e = term.expr;
 
     // Break the OR clause into its subterms.
-    std.debug.assert(term.wt_flags & (TERM.DYNAMIC | TERM.ORINFO | TERM.ANDINFO) == 0);
+    std.debug.assert(!term.wt_flags.intersects(.{ .DYNAMIC = true, .ORINFO = true, .ANDINFO = true }));
     std.debug.assert(e.op == TK.OR);
     const or_info = try p.arena.create(WhereOrInfo);
     or_info.* = .{ .wc = .{ .w_info = w } };
     term.or_info = or_info;
-    term.wt_flags |= TERM.ORINFO;
+    term.wt_flags.ORINFO = true;
     const or_wc = &or_info.wc;
     clauseInit(or_wc, w);
     try split(or_wc, e, TK.OR);
@@ -395,13 +395,13 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
         }) {
             const or_term = &or_wc.a[k];
             if (or_term.e_operator & WO.SINGLE == 0) {
-                std.debug.assert(or_term.wt_flags & (TERM.ANDINFO | TERM.ORINFO) == 0);
+                std.debug.assert(!or_term.wt_flags.intersects(.{ .ANDINFO = true, .ORINFO = true }));
                 chng_to_in = 0;
                 const and_info = try p.arena.create(WhereAndInfo);
                 and_info.* = .{ .wc = .{ .w_info = w } };
                 var b: Bitmask = 0;
                 or_term.and_info = and_info;
-                or_term.wt_flags |= TERM.ANDINFO;
+                or_term.wt_flags.ANDINFO = true;
                 or_term.e_operator = WO.AND;
                 or_term.left_cursor = -1;
                 const and_wc = &and_info.wc;
@@ -417,11 +417,11 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                     }
                 }
                 indexable &= b;
-            } else if (or_term.wt_flags & TERM.COPIED != 0) {
+            } else if (or_term.wt_flags.COPIED) {
                 // Revisited with the corresponding TERM_VIRTUAL term.
             } else {
                 var b = getMask(&w.s_mask_set, or_term.left_cursor);
-                if (or_term.wt_flags & TERM.VIRTUAL != 0) {
+                if (or_term.wt_flags.VIRTUAL) {
                     const other = &or_wc.a[@intCast(or_term.i_parent)];
                     b |= getMask(&w.s_mask_set, other.left_cursor);
                 }
@@ -473,7 +473,7 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
             }) {
                 const or_term = &or_wc.a[k];
                 std.debug.assert(or_term.e_operator & WO.EQ != 0);
-                or_term.wt_flags &= ~TERM.OK;
+                or_term.wt_flags.OK = false;
                 if (or_term.left_cursor == i_cursor) {
                     // 2-bit case, second iteration: a first-iteration term.
                     std.debug.assert(j == 1);
@@ -482,7 +482,7 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 if (chng_to_in & getMask(&w.s_mask_set, or_term.left_cursor) == 0) {
                     // t1.a==t2.b with only t2 in chngToIN: use the inverted
                     // copy instead.
-                    std.debug.assert(or_term.wt_flags & (TERM.COPIED | TERM.VIRTUAL) != 0);
+                    std.debug.assert(or_term.wt_flags.intersects(.{ .COPIED = true, .VIRTUAL = true }));
                     continue;
                 }
                 std.debug.assert(or_term.e_operator & (WO.OR | WO.AND) == 0);
@@ -509,7 +509,7 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 std.debug.assert(or_term.e_operator & WO.EQ != 0);
                 std.debug.assert(or_term.e_operator & (WO.OR | WO.AND) == 0);
                 if (or_term.left_cursor != i_cursor) {
-                    or_term.wt_flags &= ~TERM.OK;
+                    or_term.wt_flags.OK = false;
                 } else if (or_term.left_column != i_column or (i_column == int.XN_EXPR and
                     expr_mod.compare(p, or_term.expr.left, left, -1) != 0))
                 {
@@ -522,7 +522,7 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                     if (aff_right != 0 and aff_right != aff_left) {
                         ok_to_chng_to_in = false;
                     } else {
-                        or_term.wt_flags |= TERM.OK;
+                        or_term.wt_flags.OK = true;
                     }
                 }
             }
@@ -542,7 +542,7 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 k += 1;
             }) {
                 const or_term = &or_wc.a[k];
-                if (or_term.wt_flags & TERM.OK == 0) continue;
+                if (!or_term.wt_flags.OK) continue;
                 std.debug.assert(or_term.e_operator & WO.EQ != 0);
                 std.debug.assert(or_term.e_operator & (WO.OR | WO.AND) == 0);
                 std.debug.assert(or_term.left_cursor == i_cursor);
@@ -571,7 +571,7 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 transferJoinMarkings(n, e);
                 std.debug.assert(n.useXList());
                 n.x = .{ .list = list };
-                const idx_new = try whereClauseInsert(wc, n, TERM.VIRTUAL | TERM.DYNAMIC);
+                const idx_new = try whereClauseInsert(wc, n, .{ .VIRTUAL = true, .DYNAMIC = true });
                 try exprAnalyzeTerm(src, wc, idx_new);
                 markTermAsChild(wc, idx_new, idx_term);
             }
@@ -584,8 +584,8 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
 fn termIsEquivalence(p: *Parse, e: *Expr, src: *SrcList) bool {
     if (p.db.optDisabled(int.OPT.Transitive)) return false; // (1)
     if (e.op != TK.EQ and e.op != TK.IS) return false; // (2)
-    if (e.has(EP.OuterON | EP.Collate)) return false; // (3)
-    if (e.op == TK.IS and src.len() >= 2 and src.at(0).fg.jointype & JT.LTORJ != 0) {
+    if (e.flags.intersects(.{ .OuterON = true, .Collate = true })) return false; // (3)
+    if (e.op == TK.IS and src.len() >= 2 and src.at(0).fg.jointype.LTORJ) {
         return false; // (4)
     }
     const aff1 = expr_mod.affinity(e.left.?);
@@ -711,23 +711,23 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
             prereq_all = prereq_left | term.prereq_right;
         } else {
             term.prereq_right = exprUsage(mask_set, e.right);
-            if (e.left == null or e.has(EP.xIsSelect | EP.IfNullRow) or e.x.list != null) {
+            if (e.left == null or e.flags.intersects(.{ .xIsSelect = true, .IfNullRow = true }) or e.x.list != null) {
                 prereq_all = exprUsageNN(mask_set, e);
             } else {
                 prereq_all = prereq_left | term.prereq_right;
             }
         }
-        if (mask_set.b_var_select) term.wt_flags |= TERM.VARSELECT;
+        if (mask_set.b_var_select) term.wt_flags.VARSELECT = true;
 
-        if (e.has(EP.OuterON | EP.InnerON)) {
+        if (e.flags.intersects(.{ .OuterON = true, .InnerON = true })) {
             const x = getMask(mask_set, e.w.join);
-            if (e.has(EP.OuterON)) {
+            if (e.flags.OuterON) {
                 prereq_all |= x;
                 // ON terms may not use an index on the left table of a
                 // LEFT JOIN (ticket #3015).
                 extra_right = x -% 1;
             } else if ((prereq_all >> 1) >= x) {
-                e.clear(EP.InnerON);
+                e.flags.InnerON = false;
             }
         }
         term.prereq_all = prereq_all;
@@ -753,9 +753,9 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 term.left_column = ai_cur_col[1];
                 term.e_operator = operatorMask(op) & op_mask;
             }
-            if (op == TK.IS) term.wt_flags |= TERM.IS;
+            if (op == TK.IS) term.wt_flags.IS = true;
             if (right != null and exprMightBeIndexed(src, &ai_cur_col, right.?, op) and
-                !right.?.has(EP.FixedCol))
+                !right.?.flags.FixedCol)
             {
                 var new: *WhereTerm = undefined;
                 var dup: *Expr = undefined;
@@ -764,12 +764,12 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 if (term.left_cursor >= 0) {
                     dup = (try expr_mod.exprDup(p.arena, e)).?;
                     if (db.malloc_failed) return;
-                    const idx_new = try whereClauseInsert(wc, dup, TERM.VIRTUAL | TERM.DYNAMIC);
+                    const idx_new = try whereClauseInsert(wc, dup, .{ .VIRTUAL = true, .DYNAMIC = true });
                     new = &wc.a[@intCast(idx_new)];
                     markTermAsChild(wc, idx_new, idx_term);
-                    if (op == TK.IS) new.wt_flags |= TERM.IS;
+                    if (op == TK.IS) new.wt_flags.IS = true;
                     term = &wc.a[@intCast(idx_term)];
-                    term.wt_flags |= TERM.COPIED;
+                    term.wt_flags.COPIED = true;
                     if (termIsEquivalence(p, dup, w.tab_list)) {
                         term.e_operator |= WO.EQUIV;
                         e_extra_op = WO.EQUIV;
@@ -778,18 +778,18 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                     dup = e;
                     new = term;
                 }
-                new.wt_flags |= exprCommute(p, dup);
+                new.wt_flags.set(exprCommute(p, dup));
                 new.left_cursor = ai_cur_col[0];
                 std.debug.assert(term.e_operator & (WO.OR | WO.AND) == 0);
                 new.left_column = ai_cur_col[1];
                 new.prereq_right = prereq_left | extra_right;
                 new.prereq_all = prereq_all;
                 new.e_operator = (operatorMask(dup.op) + e_extra_op) & op_mask;
-            } else if (op == TK.ISNULL and !e.has(EP.OuterON) and !expr_mod.canBeNull(left)) {
-                std.debug.assert(!e.has(EP.IntValue));
+            } else if (op == TK.ISNULL and !e.flags.OuterON and !expr_mod.canBeNull(left)) {
+                std.debug.assert(!e.flags.IntValue);
                 e.op = TK.TRUEFALSE; // See tag-20230504-1
                 e.u = .{ .token = try p.arena.dupeSentinel(u8, "false", 0) };
-                e.set(EP.IsFalse);
+                e.flags.IsFalse = true;
                 term.prereq_all = 0;
                 term.e_operator = 0;
             }
@@ -810,7 +810,7 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                     try expr_mod.exprDup(p.arena, list.at(i).expr),
                 );
                 transferJoinMarkings(new_expr, e);
-                const idx_new = try whereClauseInsert(wc, new_expr, TERM.VIRTUAL | TERM.DYNAMIC);
+                const idx_new = try whereClauseInsert(wc, new_expr, .{ .VIRTUAL = true, .DYNAMIC = true });
                 try exprAnalyzeTerm(src, wc, idx_new);
                 term = &wc.a[@intCast(idx_term)];
                 markTermAsChild(wc, idx_new, idx_term);
@@ -818,7 +818,7 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
         }
 
         // Two or more OR-connected subterms.
-        else if (e.op == TK.OR and !e.has(EP.Collate)) {
+        else if (e.op == TK.OR and !e.flags.Collate) {
             const alt = expr_mod.simplifiedAndOr(e);
             if (alt != e) {
                 e = expr_mod.skipCollateAndLikely(alt).?;
@@ -833,7 +833,7 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
         // "x IS NOT NULL" adds the virtual term "x>NULL" (TERM_VNULL) for
         // a column x that is not the rowid.
         else if (e.op == TK.NOTNULL) {
-            if (e.left.?.op == TK.COLUMN and e.left.?.i_column >= 0 and !e.has(EP.OuterON)) {
+            if (e.left.?.op == TK.COLUMN and e.left.?.i_column >= 0 and !e.flags.OuterON) {
                 const left = e.left.?;
                 const new_expr = try expr_mod.pExpr(
                     p,
@@ -841,7 +841,7 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                     try expr_mod.exprDup(p.arena, left),
                     try expr_mod.exprAlloc(p.arena, TK.NULL, null, false),
                 );
-                const idx_new = try whereClauseInsert(wc, new_expr, TERM.VIRTUAL | TERM.DYNAMIC | TERM.VNULL);
+                const idx_new = try whereClauseInsert(wc, new_expr, .{ .VIRTUAL = true, .DYNAMIC = true, .VNULL = true });
                 if (idx_new != 0) {
                     const new_term = &wc.a[@intCast(idx_new)];
                     new_term.prereq_right = 0;
@@ -850,7 +850,7 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                     new_term.e_operator = WO.GT;
                     markTermAsChild(wc, idx_new, idx_term);
                     term = &wc.a[@intCast(idx_term)];
-                    term.wt_flags |= TERM.COPIED;
+                    term.wt_flags.COPIED = true;
                     new_term.prereq_all = term.prereq_all;
                 }
             }
@@ -863,14 +863,14 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
         else if (e.op == TK.FUNCTION and wc.op == TK.AND and
             try isLikeOrGlob(p, e, &str1, &is_complete, &no_case))
         {
-            const wt_flags: u16 = TERM.LIKEOPT | TERM.VIRTUAL | TERM.DYNAMIC;
+            const wt_flags: TERM = .{ .LIKEOPT = true, .VIRTUAL = true, .DYNAMIC = true };
             std.debug.assert(e.useXList());
             const left = e.x.list.?.at(1).expr.?;
             const s1 = str1.?;
             const s2 = (try expr_mod.exprDup(p.arena, s1)).?;
 
             if (no_case and !p.db.malloc_failed) {
-                term.wt_flags |= TERM.LIKE;
+                term.wt_flags.LIKE = true;
                 const t1 = s1.u.token.?;
                 const t2 = s2.u.token.?;
                 var i: usize = 0;
@@ -938,7 +938,7 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 break :blk n_left > 1;
             } and
             expr_mod.vectorSize(e.right.?) == n_left and
-            (e.left.?.flags & EP.xIsSelect == 0 or e.right.?.flags & EP.xIsSelect == 0) and
+            (!e.left.?.flags.xIsSelect or !e.right.?.flags.xIsSelect) and
             wc.op == TK.AND)
         {
             for (0..n_left) |i| {
@@ -947,11 +947,11 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 const right = try expr_mod.forVectorField(p, e.right.?, @intCast(i), n);
                 const new = try expr_mod.pExpr(p, e.op, left, right);
                 transferJoinMarkings(new, e);
-                const idx_new = try whereClauseInsert(wc, new, TERM.DYNAMIC | TERM.SLICE);
+                const idx_new = try whereClauseInsert(wc, new, .{ .DYNAMIC = true, .SLICE = true });
                 try exprAnalyzeTerm(src, wc, idx_new);
             }
             term = &wc.a[@intCast(idx_term)];
-            term.wt_flags |= TERM.CODED | TERM.VIRTUAL; // disable the original
+            term.wt_flags.set(.{ .CODED = true, .VIRTUAL = true }); // disable the original
             term.e_operator = WO.ROWVAL;
         }
 
@@ -959,16 +959,16 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
         // right, gets one virtual term per LHS field, all using `e`.
         else if (e.op == TK.IN and term.i_field == 0 and e.left.?.op == TK.VECTOR and
             e.useXSelect() and
-            (e.x.select.?.prior == null or e.x.select.?.sel_flags & SF.Values != 0) and
+            (e.x.select.?.prior == null or e.x.select.?.sel_flags.Values) and
             e.x.select.?.win == null and
-            e.x.select.?.sel_flags & SF.MinMaxAgg == 0 and
+            !e.x.select.?.sel_flags.MinMaxAgg and
             wc.op == TK.AND and
             e.x.select.?.e_list.?.len() <= std.math.maxInt(u8))
         {
             std.debug.assert(term.n_child == 0);
             var i: usize = 0;
             while (i < expr_mod.vectorSize(e.left.?)) : (i += 1) {
-                const idx_new = try whereClauseInsert(wc, e, TERM.VIRTUAL | TERM.SLICE);
+                const idx_new = try whereClauseInsert(wc, e, .{ .VIRTUAL = true, .SLICE = true });
                 wc.a[@intCast(idx_new)].i_field = @intCast(i + 1);
                 try exprAnalyzeTerm(src, wc, idx_new);
                 markTermAsChild(wc, idx_new, idx_term);
@@ -986,11 +986,11 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                 const prereq_column = exprUsage(mask_set, left);
                 if (prereq_expr & prereq_column == 0) {
                     const new_expr = try expr_mod.pExpr(p, TK.MATCH, null, try expr_mod.exprDup(p.arena, right));
-                    if (e.has(EP.OuterON)) {
-                        new_expr.set(EP.OuterON);
+                    if (e.flags.OuterON) {
+                        new_expr.flags.OuterON = true;
                         new_expr.w = .{ .join = e.w.join };
                     }
-                    const idx_new = try whereClauseInsert(wc, new_expr, TERM.VIRTUAL | TERM.DYNAMIC);
+                    const idx_new = try whereClauseInsert(wc, new_expr, .{ .VIRTUAL = true, .DYNAMIC = true });
                     const new_term = &wc.a[@intCast(idx_new)];
                     new_term.prereq_right = prereq_expr | extra_right;
                     new_term.left_cursor = left.?.i_table;
@@ -999,7 +999,7 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
                     new_term.e_match_op = e_op2;
                     markTermAsChild(wc, idx_new, idx_term);
                     term = &wc.a[@intCast(idx_term)];
-                    term.wt_flags |= TERM.COPIED;
+                    term.wt_flags.COPIED = true;
                     new_term.prereq_all = term.prereq_all;
                 }
                 std.mem.swap(?*Expr, &left, &right);
@@ -1022,7 +1022,7 @@ pub fn split(wc: *WhereClause, e: ?*Expr, op: u8) Oom!void {
     wc.op = op;
     const x = e2 orelse return;
     if (x.op != op) {
-        _ = try whereClauseInsert(wc, e.?, 0);
+        _ = try whereClauseInsert(wc, e.?, .{});
     } else {
         try split(wc, x.left, op);
         try split(wc, x.right, op);
@@ -1043,7 +1043,7 @@ fn whereAddLimitExpr(wc: *WhereClause, i_reg: i32, e: ?*Expr, i_csr: i32, e_matc
         val.i_table = i_reg;
         new = try expr_mod.pExpr(p, TK.MATCH, null, val);
     }
-    const idx = try whereClauseInsert(wc, new, TERM.DYNAMIC | TERM.VIRTUAL);
+    const idx = try whereClauseInsert(wc, new, .{ .DYNAMIC = true, .VIRTUAL = true });
     const term = &wc.a[@intCast(idx)];
     term.left_cursor = i_csr;
     term.e_operator = WO.AUX;
@@ -1074,7 +1074,7 @@ pub fn addLimit(wc: *WhereClause, sel: *Select) Oom!void {
     std.debug.assert(sel.limit != null); // 1 -- checked by caller
     const src = sel.src.?;
     if (sel.group_by == null and
-        sel.sel_flags & (SF.Distinct | SF.Aggregate) == 0 and // 2
+        !sel.sel_flags.intersects(.{ .Distinct = true, .Aggregate = true }) and // 2
         (src.len() == 1 and src.at(0).s_tab.?.isVirtual())) // 3
     {
         const order_by = sel.order_by;
@@ -1082,9 +1082,9 @@ pub fn addLimit(wc: *WhereClause, sel: *Select) Oom!void {
 
         // Condition (4): every term goes to xBestIndex.
         for (wc.terms()) |*t| {
-            if (t.wt_flags & TERM.CODED != 0) {
+            if (t.wt_flags.CODED) {
                 // A decomposed vector term (tag-20220128a).
-                std.debug.assert(t.wt_flags & TERM.VIRTUAL != 0);
+                std.debug.assert(t.wt_flags.VIRTUAL);
                 std.debug.assert(t.e_operator == WO.ROWVAL);
                 continue;
             }
@@ -1113,10 +1113,10 @@ pub fn addLimit(wc: *WhereClause, sel: *Select) Oom!void {
 
         const limit = sel.limit.?;
         std.debug.assert(limit.op == TK.LIMIT);
-        if (sel.i_offset != 0 and sel.sel_flags & SF.Compound == 0) {
+        if (sel.i_offset != 0 and !sel.sel_flags.Compound) {
             try whereAddLimitExpr(wc, sel.i_offset, limit.right, i_csr, INDEX_CONSTRAINT.OFFSET);
         }
-        if (sel.i_offset == 0 or sel.sel_flags & SF.Compound == 0) {
+        if (sel.i_offset == 0 or !sel.sel_flags.Compound) {
             try whereAddLimitExpr(wc, sel.i_limit, limit.left, i_csr, INDEX_CONSTRAINT.LIMIT);
         }
     }
@@ -1131,7 +1131,7 @@ fn exprUsageFull(ms: *WhereMaskSet, e: *Expr) Bitmask {
         mask |= exprUsageNN(ms, r);
         std.debug.assert(e.x.list == null);
     } else if (e.useXSelect()) {
-        if (e.has(EP.VarSelect)) ms.b_var_select = true;
+        if (e.flags.VarSelect) ms.b_var_select = true;
         mask |= exprSelectUsage(ms, e.x.select);
     } else if (e.x.list) |l| {
         mask |= exprListUsage(ms, l);
@@ -1147,9 +1147,9 @@ fn exprUsageFull(ms: *WhereMaskSet, e: *Expr) Bitmask {
 
 /// Port of sqlite3WhereExprUsageNN(): the tables referenced by `e`.
 pub fn exprUsageNN(ms: *WhereMaskSet, e: *Expr) Bitmask {
-    if (e.op == TK.COLUMN and !e.has(EP.FixedCol)) {
+    if (e.op == TK.COLUMN and !e.flags.FixedCol) {
         return getMask(ms, e.i_table);
-    } else if (e.has(EP.TokenOnly | EP.Leaf)) {
+    } else if (e.flags.intersects(.{ .TokenOnly = true, .Leaf = true })) {
         std.debug.assert(e.op != TK.IF_NULL_ROW);
         return 0;
     }
@@ -1191,7 +1191,7 @@ pub fn tabFuncArgs(p: *Parse, item: *SrcItem, wc: *WhereClause) Oom!void {
     const args = item.u1.func_arg orelse return;
     var k: usize = 0;
     for (args.slice(), 0..) |arg, j| {
-        while (k < tab.cols.len and tab.cols[k].col_flags & int.COLFLAG.HIDDEN == 0) k += 1;
+        while (k < tab.cols.len and !tab.cols[k].col_flags.HIDDEN) k += 1;
         if (k >= tab.cols.len) {
             util.errorMsg(p, "too many arguments on {s}() - max {d}", .{ tab.name, j });
             return;
@@ -1205,16 +1205,16 @@ pub fn tabFuncArgs(p: *Parse, item: *SrcItem, wc: *WhereClause) Oom!void {
         item.col_used |= resolve.exprColUsed(col_ref);
         const rhs = try expr_mod.pExpr(p, TK.UPLUS, try expr_mod.exprDup(p.arena, arg.expr), null);
         const term = try expr_mod.pExpr(p, TK.EQ, col_ref, rhs);
-        const join_type: u32 = if (item.fg.jointype & (JT.LEFT | JT.RIGHT) != 0) EP.OuterON else EP.InnerON;
+        const join_type: EP = if (item.fg.jointype.intersects(.{ .LEFT = true, .RIGHT = true })) .{ .OuterON = true } else .{ .InnerON = true };
         select_mod.setJoinExpr(term, item.i_cursor, join_type);
-        _ = try whereClauseInsert(wc, term, TERM.DYNAMIC);
+        _ = try whereClauseInsert(wc, term, .{ .DYNAMIC = true });
     }
 }
 
 /// Port of sqlite3WhereLoopBloomable(): true if `l` can use a Bloom
 /// filter (tag-202607231411).
 pub fn loopBloomable(l: *const WhereLoop) bool {
-    if (l.ws_flags & wi.WHERE_IPK != 0) return true;
-    if (l.ws_flags & wi.WHERE_INDEXED == 0) return false;
+    if (l.ws_flags.IPK) return true;
+    if (!l.ws_flags.INDEXED) return false;
     return build.indexBloomable(l.btree.index.?, l.btree.n_eq);
 }

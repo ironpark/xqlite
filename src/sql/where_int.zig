@@ -25,6 +25,8 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
+const flags = @import("../util/flags.zig");
+const OP = @import("../vdbe/opcodes.zig").OP;
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -64,10 +66,10 @@ pub fn loopPrint(l: *const WhereLoop, wc: *const WhereClause, id: u8) void {
     } else {
         out.print("{s:>20}", .{""}) catch {};
     }
-    if (l.ws_flags & WHERE_SKIPSCAN != 0) {
-        out.print(" f {x:0>6} {d}-{d}", .{ l.ws_flags, l.n_lterm, l.n_skip }) catch {};
+    if (l.ws_flags.SKIPSCAN) {
+        out.print(" f {x:0>6} {d}-{d}", .{ l.ws_flags.int(), l.n_lterm, l.n_skip }) catch {};
     } else {
-        out.print(" f {x:0>6} N {d}", .{ l.ws_flags, l.n_lterm }) catch {};
+        out.print(" f {x:0>6} N {d}", .{ l.ws_flags.int(), l.n_lterm }) catch {};
     }
     out.print(" cost {d},{d},{d}\n", .{ l.r_setup, l.r_run, l.n_out }) catch {};
     std.debug.print("{s}", .{out.buffered()});
@@ -122,7 +124,7 @@ pub const InLoop = struct {
     /// Number of prior entries in the key.
     n_prefix: i32 = 0,
     /// IN loop terminator: OP_Next or OP_Prev.
-    e_end_loop_op: u8 = 0,
+    e_end_loop_op: OP = @fromBackingInt(0),
 };
 
 /// How one nested loop is implemented (WhereLevel). WhereInfo.a[0] is the
@@ -163,7 +165,7 @@ pub const WhereLevel = struct {
     /// Which entry in the FROM clause.
     i_from: u8 = 0,
     /// Opcode, P3 & P5 of the opcode that ends the loop.
-    op: u8 = 0,
+    op: OP = @fromBackingInt(0),
     p3: u8 = 0,
     p5: u8 = 0,
     /// Operands of the opcode used to end the loop.
@@ -208,7 +210,7 @@ pub const WhereLoopVtab = struct {
     need_free: bool = false,
     b_omit_offset: bool = false,
     b_idx_num_hex: bool = false,
-    is_ordered: i8 = 0,
+    is_ordered: bool = false,
     omit_mask: u16 = 0,
     idx_str: ?[:0]u8 = null,
     m_handle_in: u32 = 0,
@@ -235,7 +237,7 @@ pub const WhereLoop = struct {
     /// u.vtab (WHERE_VIRTUALTABLE set).
     vtab: WhereLoopVtab = .{},
     /// WHERE_* flags describing the plan (WHERE_COLUMN_EQ, ...).
-    ws_flags: u32 = 0,
+    ws_flags: WS = .{},
     /// Number of entries in aLTerm[].
     n_lterm: u16 = 0,
     /// Number of NULL aLTerm[] entries.
@@ -292,24 +294,58 @@ pub const WherePath = struct {
 };
 
 /// WhereTerm.wtFlags (TERM_*).
-pub const TERM = struct {
-    pub const DYNAMIC: u16 = 0x0001;
-    pub const VIRTUAL: u16 = 0x0002;
-    pub const CODED: u16 = 0x0004;
-    pub const COPIED: u16 = 0x0008;
-    pub const ORINFO: u16 = 0x0010;
-    pub const ANDINFO: u16 = 0x0020;
-    pub const OK: u16 = 0x0040;
-    pub const VNULL: u16 = 0x0080;
-    pub const LIKEOPT: u16 = 0x0100;
-    pub const LIKECOND: u16 = 0x0200;
-    pub const LIKE: u16 = 0x0400;
-    pub const IS: u16 = 0x0800;
-    pub const VARSELECT: u16 = 0x1000;
-    pub const HEURTRUTH: u16 = 0x2000;
-    /// Only used with STAT4.
-    pub const HIGHTRUTH: u16 = 0;
-    pub const SLICE: u16 = 0x8000;
+pub const TERM = packed struct(u16) {
+    DYNAMIC: bool = false,
+    VIRTUAL: bool = false,
+    CODED: bool = false,
+    COPIED: bool = false,
+    ORINFO: bool = false,
+    ANDINFO: bool = false,
+    OK: bool = false,
+    VNULL: bool = false,
+    LIKEOPT: bool = false,
+    LIKECOND: bool = false,
+    LIKE: bool = false,
+    IS: bool = false,
+    VARSELECT: bool = false,
+    HEURTRUTH: bool = false,
+    _14: u1 = 0,
+    SLICE: bool = false,
+
+    /// Only used with STAT4 (bit 0x4000), which is not built: no bits.
+    pub const HIGHTRUTH: TERM = .{};
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(TERM, .{
+            .DYNAMIC = 0x0001,
+            .VIRTUAL = 0x0002,
+            .CODED = 0x0004,
+            .COPIED = 0x0008,
+            .ORINFO = 0x0010,
+            .ANDINFO = 0x0020,
+            .OK = 0x0040,
+            .VNULL = 0x0080,
+            .LIKEOPT = 0x0100,
+            .LIKECOND = 0x0200,
+            .LIKE = 0x0400,
+            .IS = 0x0800,
+            .VARSELECT = 0x1000,
+            .HEURTRUTH = 0x2000,
+            .SLICE = 0x8000,
+        });
+    }
 };
 
 /// One subexpression of the WHERE clause (WhereTerm).
@@ -321,7 +357,7 @@ pub const WhereTerm = struct {
     /// Probability of truth for this expression.
     truth_prob: LogEst = 0,
     /// TERM_* bit flags.
-    wt_flags: u16 = 0,
+    wt_flags: TERM = .{},
     /// A WO_* value describing <op>.
     e_operator: u16 = 0,
     /// Number of children that must disable us.
@@ -493,17 +529,17 @@ pub const WhereInfo = struct {
     /// pParse->nQueryLoop outside the WHERE loop.
     saved_n_query_loop: LogEst = 0,
     /// Flags originally passed to sqlite3WhereBegin().
-    wctrl_flags: u16 = 0,
+    wctrl_flags: int.WHERE = .{},
     /// LIMIT if wctrlFlags has WHERE_USE_LIMIT.
     i_limit: LogEst = 0,
     /// Number of nested loops.
     n_level: u8 = 0,
     /// Number of ORDER BY terms satisfied by indices.
     n_ob_sat: i8 = 0,
-    /// ONEPASS_OFF, or _SINGLE, or _MULTI.
-    e_one_pass: u8 = 0,
+    /// ONEPASS.OFF, or _SINGLE, or _MULTI.
+    e_one_pass: ONEPASS = .OFF,
     /// One of the WHERE_DISTINCT_* values.
-    e_distinct: u8 = 0,
+    e_distinct: int.WHERE_DISTINCT = .NOOP,
     /// Uses OP_DeferredSeek.
     b_deferred_seek: bool = false,
     /// Not all WHERE terms resolved by outer loop.
@@ -574,38 +610,94 @@ pub const WO = struct {
     pub const SINGLE: u16 = 0x01ff;
 };
 
-/// WhereLoop.wsFlags bits (WHERE_* in whereInt.h; the sqlite3WhereBegin()
-/// flags are int.WHERE).
-pub const WHERE_COLUMN_EQ: u32 = 0x00000001;
-pub const WHERE_COLUMN_RANGE: u32 = 0x00000002;
-pub const WHERE_COLUMN_IN: u32 = 0x00000004;
-pub const WHERE_COLUMN_NULL: u32 = 0x00000008;
-pub const WHERE_CONSTRAINT: u32 = 0x0000000f;
-pub const WHERE_TOP_LIMIT: u32 = 0x00000010;
-pub const WHERE_BTM_LIMIT: u32 = 0x00000020;
-pub const WHERE_BOTH_LIMIT: u32 = 0x00000030;
-pub const WHERE_IDX_ONLY: u32 = 0x00000040;
-pub const WHERE_IPK: u32 = 0x00000100;
-pub const WHERE_INDEXED: u32 = 0x00000200;
-pub const WHERE_VIRTUALTABLE: u32 = 0x00000400;
-pub const WHERE_IN_ABLE: u32 = 0x00000800;
-pub const WHERE_ONEROW: u32 = 0x00001000;
-pub const WHERE_MULTI_OR: u32 = 0x00002000;
-pub const WHERE_AUTO_INDEX: u32 = 0x00004000;
-pub const WHERE_SKIPSCAN: u32 = 0x00008000;
-pub const WHERE_UNQ_WANTED: u32 = 0x00010000;
-pub const WHERE_PARTIALIDX: u32 = 0x00020000;
-pub const WHERE_IN_EARLYOUT: u32 = 0x00040000;
-pub const WHERE_BIGNULL_SORT: u32 = 0x00080000;
-pub const WHERE_IN_SEEKSCAN: u32 = 0x00100000;
-pub const WHERE_TRANSCONS: u32 = 0x00200000;
-pub const WHERE_BLOOMFILTER: u32 = 0x00400000;
-pub const WHERE_SELFCULL: u32 = 0x00800000;
-pub const WHERE_OMIT_OFFSET: u32 = 0x01000000;
-pub const WHERE_COROUTINE: u32 = 0x02000000;
-pub const WHERE_EXPRIDX: u32 = 0x04000000;
+/// WhereLoop.wsFlags (the WHERE_* of whereInt.h; WS after the field, the
+/// sqlite3WhereBegin() flags being int.WHERE).
+pub const WS = packed struct(u32) {
+    COLUMN_EQ: bool = false,
+    COLUMN_RANGE: bool = false,
+    COLUMN_IN: bool = false,
+    COLUMN_NULL: bool = false,
+    TOP_LIMIT: bool = false,
+    BTM_LIMIT: bool = false,
+    IDX_ONLY: bool = false,
+    _7: u1 = 0,
+    IPK: bool = false,
+    INDEXED: bool = false,
+    VIRTUALTABLE: bool = false,
+    IN_ABLE: bool = false,
+    ONEROW: bool = false,
+    MULTI_OR: bool = false,
+    AUTO_INDEX: bool = false,
+    SKIPSCAN: bool = false,
+    UNQ_WANTED: bool = false,
+    PARTIALIDX: bool = false,
+    IN_EARLYOUT: bool = false,
+    BIGNULL_SORT: bool = false,
+    IN_SEEKSCAN: bool = false,
+    TRANSCONS: bool = false,
+    BLOOMFILTER: bool = false,
+    SELFCULL: bool = false,
+    OMIT_OFFSET: bool = false,
+    COROUTINE: bool = false,
+    EXPRIDX: bool = false,
+    _27: u5 = 0,
+
+    /// Any of the COLUMN_ constraints.
+    pub const CONSTRAINT: WS = .{ .COLUMN_EQ = true, .COLUMN_RANGE = true, .COLUMN_IN = true, .COLUMN_NULL = true };
+
+    /// A range with both ends.
+    pub const BOTH_LIMIT: WS = .{ .TOP_LIMIT = true, .BTM_LIMIT = true };
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(WS, .{
+            .COLUMN_EQ = 0x00000001,
+            .COLUMN_RANGE = 0x00000002,
+            .COLUMN_IN = 0x00000004,
+            .COLUMN_NULL = 0x00000008,
+            .TOP_LIMIT = 0x00000010,
+            .BTM_LIMIT = 0x00000020,
+            .IDX_ONLY = 0x00000040,
+            .IPK = 0x00000100,
+            .INDEXED = 0x00000200,
+            .VIRTUALTABLE = 0x00000400,
+            .IN_ABLE = 0x00000800,
+            .ONEROW = 0x00001000,
+            .MULTI_OR = 0x00002000,
+            .AUTO_INDEX = 0x00004000,
+            .SKIPSCAN = 0x00008000,
+            .UNQ_WANTED = 0x00010000,
+            .PARTIALIDX = 0x00020000,
+            .IN_EARLYOUT = 0x00040000,
+            .BIGNULL_SORT = 0x00080000,
+            .IN_SEEKSCAN = 0x00100000,
+            .TRANSCONS = 0x00200000,
+            .BLOOMFILTER = 0x00400000,
+            .SELFCULL = 0x00800000,
+            .OMIT_OFFSET = 0x01000000,
+            .COROUTINE = 0x02000000,
+            .EXPRIDX = 0x04000000,
+        });
+    }
+};
 
 /// ONEPASS_*: how a DELETE or UPDATE visits its rows.
-pub const ONEPASS_OFF: u8 = 0;
-pub const ONEPASS_SINGLE: u8 = 1;
-pub const ONEPASS_MULTI: u8 = 2;
+pub const ONEPASS = enum(u8) {
+    /// One-pass is not allowed.
+    OFF = 0,
+    /// One-pass, for a single row.
+    SINGLE = 1,
+    /// One-pass, for several rows.
+    MULTI = 2,
+};

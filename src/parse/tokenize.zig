@@ -405,12 +405,12 @@ const util = @import("../sql/util.zig");
 const Parser = @import("parser.zig").Parser;
 
 /// Port of sqlite3RunParser(): tokenize `sql` and run the parser over it,
-/// which generates code as statements complete. Errors are left in `p`;
-/// returns the number of errors (0 or 1). Afterwards `p.tail` is the text
-/// after the last token parsed.
-pub fn runParser(p: *int.Parse, sql: [:0]const u8) int.Oom!u32 {
+/// which generates code as statements complete. Errors are left in `p`,
+/// and fail the run (C: returns the number of errors, 0 or 1). Afterwards
+/// `p.tail` is the text after the last token parsed.
+pub fn runParser(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
     const db = p.db;
-    var n_err: u32 = 0;
+    var failed = false;
     var mx_sql_len: i64 = db.limit(.sql_length);
     if (db.n_vdbe_active == 0) db.is_interrupted.store(false, .monotonic);
     p.rc = int.RC.OK;
@@ -458,7 +458,7 @@ pub fn runParser(p: *int.Parse, sql: [:0]const u8) int.Oom!u32 {
                 t.tk = analyzeOverKeyword(z + 4, last_token_parsed);
             } else if (t.tk == TK.FILTER) {
                 t.tk = analyzeFilterKeyword(z + 6, last_token_parsed);
-            } else if (t.tk == TK.COMMENT and (db.init.busy or db.flags & int.DbFlag.Comments != 0)) {
+            } else if (t.tk == TK.COMMENT and (db.init.busy or db.flags.Comments)) {
                 z += t.len;
                 continue;
             } else if (t.tk != TK.QNUMBER) {
@@ -474,14 +474,23 @@ pub fn runParser(p: *int.Parse, sql: [:0]const u8) int.Oom!u32 {
     }
     if (p.err_msg != null or (p.rc != int.RC.OK and p.rc != int.RC.DONE)) {
         if (p.err_msg == null) p.err_msg = try p.arena.dupeSentinel(u8, util.errStr(p.rc), 0);
-        n_err += 1;
+        failed = true;
     }
     p.tail = std.mem.span(z);
     if (p.new_table) |t| if (!p.inSpecialParse()) {
         @import("../sql/build.zig").deleteTable(db, t);
         p.new_table = null;
     };
-    return n_err;
+    if (failed) return error.ParseFailed;
+}
+
+/// runParser() for the tests: whether the statements have an error.
+fn testParse(p: *int.Parse, sql: [:0]const u8) int.Oom!bool {
+    runParser(p, sql) catch |err| switch (err) {
+        error.ParseFailed => return true,
+        error.OutOfMemory => |e| return e,
+    };
+    return false;
 }
 
 test "parser: syntax of a range of statements" {
@@ -528,9 +537,9 @@ test "parser: syntax of a range of statements" {
     };
     for (ok) |sql| {
         var p: int.Parse = .{ .db = &db, .arena = arena, .syntax_only = true };
-        const n = try runParser(&p, sql);
-        if (n != 0) std.debug.print("{s}\n  -> {s}\n", .{ sql, p.err_msg.? });
-        try std.testing.expectEqual(@as(u32, 0), n);
+        const failed = try testParse(&p, sql);
+        if (failed) std.debug.print("{s}\n  -> {s}\n", .{ sql, p.err_msg.? });
+        try std.testing.expect(!failed);
     }
 
     const bad = [_]struct { [:0]const u8, []const u8 }{
@@ -553,10 +562,10 @@ test "parser: syntax of a range of statements" {
     };
     for (bad) |c| {
         var p: int.Parse = .{ .db = &db, .arena = arena, .syntax_only = true };
-        const n = try runParser(&p, c[0]);
+        const failed = try testParse(&p, c[0]);
         if (c[1].len == 0) continue;
-        if (n == 0) std.debug.print("{s}: no error\n", .{c[0]});
-        try std.testing.expectEqual(@as(u32, 1), n);
+        if (!failed) std.debug.print("{s}: no error\n", .{c[0]});
+        try std.testing.expect(failed);
         std.testing.expectEqualStrings(c[1], p.err_msg.?) catch |err| {
             std.debug.print("for {s}\n", .{c[0]});
             return err;

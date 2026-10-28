@@ -5,6 +5,7 @@ const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
 const btree = @import("../btree/btree.zig");
 pub const opcodes = @import("opcodes.zig");
+const flags = @import("../util/flags.zig");
 
 pub const OP = opcodes.OP;
 pub const Sqlite3 = int.Sqlite3;
@@ -35,34 +36,83 @@ pub const SQLITE_NULL = 5;
 
 // ================================================================ memory
 
-/// Mem.flags (MEM_*).
-pub const MEM = struct {
-    pub const Undefined: u16 = 0x0000;
-    pub const Null: u16 = 0x0001;
-    pub const Str: u16 = 0x0002;
-    pub const Int: u16 = 0x0004;
-    pub const Real: u16 = 0x0008;
-    pub const Blob: u16 = 0x0010;
+/// Mem.flags (MEM_*). The VM tests these in its inner loop: a test of one
+/// flag is a field, of several (C: `(flags & (MEM_Int|MEM_Real))!=0`)
+/// intersects() with a literal mask, both one AND of the u16 as in C.
+pub const MEM = packed struct(u16) {
+    Null: bool = false,
+    Str: bool = false,
+    Int: bool = false,
+    Real: bool = false,
+    Blob: bool = false,
     /// An integer that renders as a real (e.g. 1.0 stored as 1).
-    pub const IntReal: u16 = 0x0020;
-    pub const AffMask: u16 = 0x003f;
-    pub const FromBind: u16 = 0x0040;
+    IntReal: bool = false,
+    FromBind: bool = false,
+    /// Free in C.
+    _7: u1 = 0,
     /// NULL set by OP_Null rather than read from data.
-    pub const Cleared: u16 = 0x0100;
+    Cleared: bool = false,
     /// Mem.z is NUL-terminated.
-    pub const Term: u16 = 0x0200;
+    Term: bool = false,
     /// Mem.u.n_zero zero bytes follow the blob.
-    pub const Zero: u16 = 0x0400;
-    pub const Subtype: u16 = 0x0800;
-    pub const TypeMask: u16 = 0x0dbf;
+    Zero: bool = false,
+    Subtype: bool = false,
     /// Mem.x_del must be called on Mem.z.
-    pub const Dyn: u16 = 0x1000;
+    Dyn: bool = false,
     /// Mem.z points to a static string.
-    pub const Static: u16 = 0x2000;
+    Static: bool = false,
     /// Mem.z points to an ephemeral string (owned by someone else).
-    pub const Ephem: u16 = 0x4000;
+    Ephem: bool = false,
     /// Mem.z points to an aggregate function context.
-    pub const Agg: u16 = 0x8000;
+    Agg: bool = false,
+
+    /// A cell that holds no value (released, or never set).
+    pub const Undefined: MEM = .{};
+
+    /// The bits giving the datatype, the first six.
+    pub const AffMask: MEM = .{ .Null = true, .Str = true, .Int = true, .Real = true, .Blob = true, .IntReal = true };
+
+    /// The datatype and what qualifies it: AffMask, Cleared, Zero and
+    /// Subtype (and the free bit 0x80, as in C).
+    pub const TypeMask: MEM = .fromInt(0x0dbf);
+
+    /// The datatype bits as a number, to index a table by them (C:
+    /// `flags & MEM_AffMask`).
+    pub inline fn affIndex(f: MEM) u6 {
+        return @truncate(f.int());
+    }
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        flags.checkBits(MEM, .{
+            .Null = 0x0001,
+            .Str = 0x0002,
+            .Int = 0x0004,
+            .Real = 0x0008,
+            .Blob = 0x0010,
+            .IntReal = 0x0020,
+            .FromBind = 0x0040,
+            .Cleared = 0x0100,
+            .Term = 0x0200,
+            .Zero = 0x0400,
+            .Subtype = 0x0800,
+            .Dyn = 0x1000,
+            .Static = 0x2000,
+            .Ephem = 0x4000,
+            .Agg = 0x8000,
+        });
+    }
 };
 
 /// How a string or blob handed to a Mem is managed (the xDel argument).
@@ -77,8 +127,8 @@ pub const Destructor = union(enum) {
     /// sqlite3DbMallocSize()).
     dynamic,
     /// Freed by calling this, e.g. malloc.free (sqlite3_free), which
-    /// needs only the pointer.
-    func: *const fn (?*anyopaque) void,
+    /// needs only the pointer, or int.destructor(f) of a typed `f`.
+    func: int.DestructorFn,
 };
 
 pub const MemValue = extern union {
@@ -100,7 +150,7 @@ pub const Mem = struct {
     z: ?[*]u8 = null,
     /// Bytes in the string or blob, excluding any terminator.
     n: i32 = 0,
-    flags: u16 = MEM.Null,
+    flags: MEM = .{ .Null = true },
     enc: u8 = 0,
     e_subtype: u8 = 0,
     // A shallow copy (MEMCELLSIZE) copies only the fields above.
@@ -110,10 +160,10 @@ pub const Mem = struct {
     /// Serial type, while OP_MakeRecord runs.
     u_temp: u32 = 0,
     /// Destructor of Mem.z with MEM_Dyn.
-    x_del: ?*const fn (?*anyopaque) void = null,
+    x_del: ?int.DestructorFn = null,
 
-    pub fn init(db: ?*Sqlite3, flags: u16) Mem {
-        return .{ .db = db, .flags = flags };
+    pub fn init(db: ?*Sqlite3, f: MEM) Mem {
+        return .{ .db = db, .flags = f };
     }
 
     pub fn szMalloc(m: *const Mem) usize {
@@ -122,7 +172,7 @@ pub const Mem = struct {
 
     /// VdbeMemDynamic().
     pub fn isDynamic(m: *const Mem) bool {
-        return m.flags & (MEM.Agg | MEM.Dyn) != 0;
+        return m.flags.intersects(.{ .Agg = true, .Dyn = true });
     }
 
     /// The string or blob bytes.
@@ -132,13 +182,13 @@ pub const Mem = struct {
     }
 
     /// MemSetTypeFlag().
-    pub fn setTypeFlag(m: *Mem, f: u16) void {
-        m.flags = (m.flags & ~(MEM.TypeMask | MEM.Zero)) | f;
+    pub fn setTypeFlag(m: *Mem, f: MEM) void {
+        m.flags = m.flags.without(MEM.TypeMask.with(.{ .Zero = true })).with(f);
     }
 
     /// MemNullNochng(): a NULL standing for an unchanged column.
     pub fn isNullNochng(m: *const Mem) bool {
-        return m.flags & MEM.TypeMask == MEM.Null | MEM.Zero and m.n == 0 and m.u.n_zero == 0;
+        return m.flags.only(MEM.TypeMask) == MEM{ .Null = true, .Zero = true } and m.n == 0 and m.u.n_zero == 0;
     }
 };
 
@@ -169,8 +219,8 @@ pub const UnpackedRecord = struct {
     n_field: u16,
     /// Result when the keys are equal.
     default_rc: i8 = 0,
-    /// CORRUPT or NOMEM detected while comparing.
-    err_code: u8 = 0,
+    /// Corruption (or OOM) detected while comparing (C: errCode).
+    err: ?error{ Corrupt, OutOfMemory } = null,
     /// Results for lhs < rhs and lhs > rhs (inverted for DESC b-trees).
     r1: i8 = -1,
     r2: i8 = 1,
@@ -184,7 +234,7 @@ pub const UnpackedRecord = struct {
 /// SQLITE_ENABLE_EXPLAIN_COMMENTS, it is 24 bytes: the P4 type fits in
 /// the padding before p5, and P4 is a single word.
 pub const Op = struct {
-    opcode: u8,
+    opcode: OP,
     /// Which field of `p4` is valid (p4type).
     p4type: P4Type = .notused,
     p5: u16 = 0,
@@ -390,7 +440,7 @@ pub const VdbeCursor = struct {
     /// record.
     seek_result: i32 = 0,
     alt_cursor: ?*VdbeCursor = null,
-    uc: union(enum) { none, cursor: *btree.Cursor, sorter: *anyopaque, pseudo, vtab: *@import("../sql/vtab.zig").VtabCursor } = .none,
+    uc: union(enum) { none, cursor: *btree.Cursor, sorter: *@import("sorter.zig").Sorter, pseudo, vtab: *@import("../sql/vtab.zig").VtabCursor } = .none,
     key_info: ?*KeyInfo = null,
     /// Offset of the next unparsed byte of the record header.
     i_hdr_offset: u32 = 0,
@@ -453,7 +503,7 @@ pub const AuxData = struct {
     i_aux_op: i32,
     i_aux_arg: i32,
     aux: ?*anyopaque,
-    x_delete_aux: ?*const fn (?*anyopaque) void,
+    x_delete_aux: ?int.DestructorFn,
     next_aux: ?*AuxData,
 };
 
@@ -519,7 +569,7 @@ pub const Vdbe = struct {
     vlist: []const int.VListEntry = &.{},
     n_res_column: u16 = 0,
     n_res_alloc: u16 = 0,
-    error_action: u8 = int.OE.Abort,
+    error_action: int.OE = .Abort,
     min_write_file_format: u8 = 255,
     prep_flags: u8 = 0,
     e_vdbe_state: VdbeState = .init,

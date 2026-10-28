@@ -12,6 +12,7 @@
 //! non-purgeable (in-memory database) caches are not ported.
 
 const std = @import("std");
+const thunk = @import("../util/thunk.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -125,10 +126,8 @@ const PageHash = struct {
 /// Called to write out a dirty page so its slot can be reused (xStress).
 /// Return `error.SpillFailed` to abort the fetch; the callback keeps the
 /// real cause. Returning normally without cleaning the page is fine.
-pub const Stress = struct {
-    ctx: *anyopaque,
-    func: *const fn (ctx: *anyopaque, page: *Page) error{SpillFailed}!void,
-};
+/// Made with Stress.init(owner, f) from a typed `f(owner, page)`.
+pub const Stress = thunk.Closure(*const fn (ctx: *anyopaque, page: *Page) error{SpillFailed}!void);
 
 pub const FetchError = error{ OutOfMemory, SpillFailed };
 
@@ -260,7 +259,7 @@ pub const PCache = struct {
             }
         }
         const victim = p orelse return;
-        if (pc.stress) |s| try s.func(s.ctx, victim);
+        if (pc.stress) |s| try s.call(.{victim});
     }
 
     fn finish(pc: *PCache, p: *Page) *Page {
@@ -614,15 +613,14 @@ test "pcache: truncate keeps referenced page 1" {
 test "pcache: stress spills the oldest synced dirty page" {
     const Ctx = struct {
         spilled: std.ArrayList(Pgno) = .empty,
-        fn stress(ctx: *anyopaque, page: *Page) error{SpillFailed}!void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
+        fn stress(self: *@This(), page: *Page) error{SpillFailed}!void {
             self.spilled.append(testing.allocator, page.pgno) catch return error.SpillFailed;
             page.cache.makeClean(page);
         }
     };
     var ctx: Ctx = .{};
     defer ctx.spilled.deinit(testing.allocator);
-    var pc = PCache.init(testing.allocator, 512, 8, .{ .ctx = &ctx, .func = Ctx.stress });
+    var pc = PCache.init(testing.allocator, 512, 8, .init(&ctx, Ctx.stress));
     defer pc.deinit();
     pc.setCacheSize(2);
 

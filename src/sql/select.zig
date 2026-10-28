@@ -30,7 +30,7 @@ pub fn selectNew(
     group_by: ?*ExprList,
     having: ?*Expr,
     order_by: ?*ExprList,
-    sel_flags: u32,
+    sel_flags: SF,
     limit: ?*Expr,
 ) Oom!*Select {
     const s = try p.arena.create(Select);
@@ -67,33 +67,33 @@ pub fn findRightmost(s_arg: *Select) *Select {
 /// Port of sqlite3JoinType(): the JT_* mask for the one to three words
 /// before JOIN ("LEFT OUTER" etc.). Nonsense combinations that SQLite has
 /// always accepted are accepted; the rest are errors.
-pub fn joinType(p: *Parse, a: Token, b: ?Token, c: ?Token) i32 {
-    const keywords = [_]struct { []const u8, u8 }{
-        .{ "natural", JT.NATURAL },
-        .{ "left", JT.LEFT | JT.OUTER },
-        .{ "outer", JT.OUTER },
-        .{ "right", JT.RIGHT | JT.OUTER },
-        .{ "full", JT.LEFT | JT.RIGHT | JT.OUTER },
-        .{ "inner", JT.INNER },
-        .{ "cross", JT.INNER | JT.CROSS },
+pub fn joinType(p: *Parse, a: Token, b: ?Token, c: ?Token) JT {
+    const keywords = [_]struct { []const u8, JT }{
+        .{ "natural", .{ .NATURAL = true } },
+        .{ "left", .{ .LEFT = true, .OUTER = true } },
+        .{ "outer", .{ .OUTER = true } },
+        .{ "right", .{ .RIGHT = true, .OUTER = true } },
+        .{ "full", .{ .LEFT = true, .RIGHT = true, .OUTER = true } },
+        .{ "inner", .{ .INNER = true } },
+        .{ "cross", .{ .INNER = true, .CROSS = true } },
     };
-    var jointype: u8 = 0;
+    var jointype: JT = .{};
     const all = [3]?Token{ a, b, c };
     for (all) |maybe| {
         const t = maybe orelse break;
         const word = t.slice();
         for (keywords) |k| {
             if (ctype.eqlNoCase(word, k[0])) {
-                jointype |= k[1];
+                jointype.set(k[1]);
                 break;
             }
         } else {
-            jointype |= JT.ERROR;
+            jointype.ERROR = true;
             break;
         }
     }
-    if (jointype & (JT.INNER | JT.OUTER) == JT.INNER | JT.OUTER or jointype & JT.ERROR != 0 or
-        jointype & (JT.OUTER | JT.LEFT | JT.RIGHT) == JT.OUTER)
+    if (jointype.contains(.{ .INNER = true, .OUTER = true }) or jointype.ERROR or
+        jointype.only(.{ .OUTER = true, .LEFT = true, .RIGHT = true }) == JT{ .OUTER = true })
     {
         const sp1 = if (b == null) "" else " ";
         const sp2 = if (c == null) "" else " ";
@@ -104,7 +104,7 @@ pub fn joinType(p: *Parse, a: Token, b: ?Token, c: ?Token) i32 {
             sp2,
             if (c) |t| t.slice() else "",
         });
-        return JT.INNER;
+        return .{ .INNER = true };
     }
     return jointype;
 }
@@ -133,26 +133,34 @@ pub fn withPush(p: *Parse, w_arg: ?*With) ?*With {
 
 // ============================================================== codegen
 
-/// Where the results of a SELECT go (SRT_*).
-pub const SRT = struct {
-    pub const Exists: u8 = 1;
-    pub const Discard: u8 = 2;
-    pub const DistFifo: u8 = 3;
-    pub const DistQueue: u8 = 4;
-    pub const Queue: u8 = 5;
-    pub const Fifo: u8 = 6;
-    pub const Output: u8 = 7;
-    pub const Mem: u8 = 8;
-    pub const Set: u8 = 9;
-    pub const EphemTab: u8 = 10;
-    pub const Coroutine: u8 = 11;
-    pub const Table: u8 = 12;
-    pub const Upfrom: u8 = 13;
+/// Where the results of a SELECT go (SRT_*), numbered as in C. The order
+/// matters: IgnorableDistinct() and IgnorableOrderby() compare the
+/// numbers, as the destinations that ignore DISTINCT and ORDER BY come
+/// first.
+pub const SRT = enum(u8) {
+    Exists = 1,
+    Discard = 2,
+    DistFifo = 3,
+    DistQueue = 4,
+    Queue = 5,
+    Fifo = 6,
+    Output = 7,
+    Mem = 8,
+    Set = 9,
+    EphemTab = 10,
+    Coroutine = 11,
+    Table = 12,
+    Upfrom = 13,
+
+    /// The number of the destination, as C compares it.
+    pub inline fn int(d: SRT) u8 {
+        return @backingInt(d);
+    }
 };
 
 /// SelectDest.
 pub const SelectDest = struct {
-    e_dest: u8,
+    e_dest: SRT,
     i_sd_parm: i32 = 0,
     i_sd_parm2: i32 = 0,
     i_sdst: i32 = 0,
@@ -162,7 +170,7 @@ pub const SelectDest = struct {
 };
 
 /// Port of sqlite3SelectDestInit().
-pub fn selectDestInit(e_dest: u8, i_parm: i32) SelectDest {
+pub fn selectDestInit(e_dest: SRT, i_parm: i32) SelectDest {
     return .{ .e_dest = e_dest, .i_sd_parm = i_parm };
 }
 
@@ -192,7 +200,7 @@ fn oomNull(p: *Parse) ?*vi.KeyInfo {
 
 /// Port of sqlite3SelectWrongNumTermsError().
 pub fn selectWrongNumTermsError(p: *Parse, s: *Select) void {
-    if (s.sel_flags & SF.Values != 0) {
+    if (s.sel_flags.Values) {
         util.errorMsg(p, "all VALUES must have the same number of terms", .{});
     } else {
         util.errorMsg(p, "SELECTs to the left and right of {s} do not have the same number of result columns", .{selectOpName(s.op)});
@@ -247,7 +255,7 @@ pub fn srcItemColumnUsed(item: *SrcItem, i_col: i32) void {
 
 /// IsHiddenColumn().
 fn isHiddenColumn(c: *const Column) bool {
-    return c.col_flags & COLFLAG.HIDDEN != 0;
+    return c.col_flags.HIDDEN;
 }
 
 /// Port of tableAndColumnIndex(): the first table of src[start..end]
@@ -267,10 +275,10 @@ fn tableAndColumnIndex(src: *SrcList, start: usize, end: usize, col: []const u8,
 
 /// Port of sqlite3SetJoinExpr(): tag every node of an ON/USING term with
 /// `join_flag` and the right table of its join.
-pub fn setJoinExpr(e_arg: ?*Expr, i_table: i32, join_flag: u32) void {
+pub fn setJoinExpr(e_arg: ?*Expr, i_table: i32, join_flag: EP) void {
     var e = e_arg;
     while (e) |x| {
-        x.set(join_flag);
+        x.flags.set(join_flag);
         x.w = .{ .join = i_table };
         if (x.useXList()) if (x.x.list) |l| {
             for (l.slice()) |item| setJoinExpr(item.expr, i_table, join_flag);
@@ -285,11 +293,11 @@ pub fn setJoinExpr(e_arg: ?*Expr, i_table: i32, join_flag: u32) void {
 pub fn unsetJoinExpr(e_arg: ?*Expr, i_table: i32, nullable: bool) void {
     var e = e_arg;
     while (e) |x| {
-        if (i_table < 0 or (x.has(EP.OuterON) and x.w.join == i_table)) {
-            x.clear(EP.OuterON | EP.InnerON);
-            if (i_table >= 0) x.set(EP.InnerON);
+        if (i_table < 0 or (x.flags.OuterON and x.w.join == i_table)) {
+            x.flags.clear(.{ .OuterON = true, .InnerON = true });
+            if (i_table >= 0) x.flags.InnerON = true;
         }
-        if (x.op == TK.COLUMN and x.i_table == i_table and !nullable) x.clear(EP.CanBeNull);
+        if (x.op == TK.COLUMN and x.i_table == i_table and !nullable) x.flags.CanBeNull = false;
         if (x.op == TK.FUNCTION) if (x.x.list) |l| {
             for (l.slice()) |item| unsetJoinExpr(item.expr, i_table, nullable);
         };
@@ -300,23 +308,24 @@ pub fn unsetJoinExpr(e_arg: ?*Expr, i_table: i32, nullable: bool) void {
 
 /// Port of sqlite3ProcessJoin(): turn NATURAL joins into USING joins, and
 /// move ON and USING constraints into the WHERE clause, tagged with
-/// EP_OuterON or EP_InnerON. Returns the number of errors.
-fn processJoin(p: *Parse, s: *Select) Oom!u32 {
+/// EP_OuterON or EP_InnerON. On error (C: the number of errors) the
+/// error is in `p`.
+fn processJoin(p: *Parse, s: *Select) (Oom || int.ParseError)!void {
     const src = s.src.?;
     var seen_tfunc = false;
-    if (src.len() < 2) return 0;
+    if (src.len() < 2) return;
     for (0..src.len() - 1) |i| {
         const left = src.at(i);
         const right = src.at(i + 1);
         const right_tab = right.s_tab orelse continue;
         if (left.s_tab == null) continue;
-        const join_type: u32 = if (right.fg.jointype & JT.OUTER != 0) EP.OuterON else EP.InnerON;
+        const join_type: EP = if (right.fg.jointype.OUTER) .{ .OuterON = true } else .{ .InnerON = true };
 
         // NATURAL becomes USING the columns both sides have.
-        if (right.fg.jointype & JT.NATURAL != 0) {
+        if (right.fg.jointype.NATURAL) {
             if (right.fg.is_using or right.u3.on != null) {
                 util.errorMsg(p, "a NATURAL join may not have an ON or USING clause", .{});
-                return 1;
+                return error.ParseFailed;
             }
             var using: ?*IdList = null;
             for (right_tab.cols) |*c| {
@@ -337,7 +346,7 @@ fn processJoin(p: *Parse, s: *Select) Oom!u32 {
                 right.fg.is_synth_using = true;
                 right.u3 = .{ .using = l };
             }
-            if (p.n_err != 0) return 1;
+            if (p.n_err != 0) return error.ParseFailed;
         }
 
         if (right.fg.is_using) {
@@ -348,16 +357,16 @@ fn processJoin(p: *Parse, s: *Select) Oom!u32 {
                 const found = if (i_right_col >= 0) tableAndColumnIndex(src, 0, i, name, right.fg.is_synth_using) else null;
                 if (found == null) {
                     util.errorMsg(p, "cannot join using column {s} - column not present in both tables", .{name});
-                    return 1;
+                    return error.ParseFailed;
                 }
                 var i_left = found.?.tab;
                 var e1 = try resolve.createColumnExpr(p, src, i_left, found.?.col);
                 srcItemColumnUsed(src.at(i_left), found.?.col);
-                if (src.at(0).fg.jointype & JT.LTORJ != 0 and p.n_err == 0) {
+                if (src.at(0).fg.jointype.LTORJ and p.n_err == 0) {
                     // With RIGHT or FULL JOINs, several tables on the left
                     // may have the column: use coalesce() of them.
                     var func_args: ?*ExprList = null;
-                    e1.set(EP.CanBeNull);
+                    e1.flags.CanBeNull = true;
                     while (i_left + 1 <= i) {
                         const more = tableAndColumnIndex(src, i_left + 1, i, name, right.fg.is_synth_using) orelse break;
                         i_left = more.tab;
@@ -372,16 +381,16 @@ fn processJoin(p: *Parse, s: *Select) Oom!u32 {
                     }
                     if (func_args) |fa| {
                         const args = try expr_mod.listAppend(p, fa, e1);
-                        e1 = try expr_mod.exprFunction(p, args, Token.init("coalesce"), 0);
+                        e1 = try expr_mod.exprFunction(p, args, Token.init("coalesce"), .{});
                         e1.aff_expr = Aff.@"defer";
                     }
-                } else if (src.at(i + 1).fg.jointype & JT.LEFT != 0 and p.n_err == 0) {
-                    e1.set(EP.CanBeNull);
+                } else if (src.at(i + 1).fg.jointype.LEFT and p.n_err == 0) {
+                    e1.flags.CanBeNull = true;
                 }
                 const e2 = try resolve.createColumnExpr(p, src, i + 1, i_right_col);
                 srcItemColumnUsed(right, i_right_col);
                 const eq = try expr_mod.pExpr(p, TK.EQ, e1, e2);
-                eq.set(join_type);
+                eq.flags.set(join_type);
                 eq.w = .{ .join = e2.i_table };
                 s.where = try expr_mod.exprAnd(p, s.where, eq);
             }
@@ -391,19 +400,19 @@ fn processJoin(p: *Parse, s: *Select) Oom!u32 {
             s.where = try expr_mod.exprAnd(p, s.where, on);
             right.u3 = .{ .on = null };
             right.fg.is_on = true;
-            s.sel_flags |= SF.OnToWhere;
+            s.sel_flags.OnToWhere = true;
         }
 
         if (!seen_tfunc) seen_tfunc = left.fg.is_tab_func and left.u1.func_arg != null;
         // Table-valued function arguments must not refer to tables on
         // their right.
-        if ((right.fg.is_tab_func and join_type == EP.OuterON and right.u1.func_arg != null) or
-            (seen_tfunc and join_type == EP.OuterON))
+        if ((right.fg.is_tab_func and join_type == EP{ .OuterON = true } and right.u1.func_arg != null) or
+            (seen_tfunc and join_type == EP{ .OuterON = true }))
         {
-            s.sel_flags |= SF.OnToWhere;
+            s.sel_flags.OnToWhere = true;
         }
     }
-    return 0;
+    return;
 }
 
 /// Port of DistinctCtx: how DISTINCT is processed.
@@ -411,7 +420,7 @@ const DistinctCtx = struct {
     /// 0 not distinct, 1 DISTINCT, 2 DISTINCT and ORDER BY.
     is_tnct: u8 = 0,
     /// A WHERE_DISTINCT_* value.
-    e_tnct_type: u8 = 0,
+    e_tnct_type: int.WHERE_DISTINCT = .NOOP,
     /// The ephemeral table of seen rows.
     tab_tnct: i32 = 0,
     /// The OP_OpenEphemeral of tab_tnct.
@@ -529,7 +538,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, reg_data: i32, reg_orig
         _ = aux.addOp1(v, OP.Delete, i_csr);
     }
     if (reg_record == 0) reg_record = makeSorterRecord(p, sort, s, reg_base, n_base);
-    const op: u8 = if (sort.sort_flags & SORTFLAG_UseSorter != 0) OP.SorterInsert else OP.IdxInsert;
+    const op: OP = if (sort.sort_flags & SORTFLAG_UseSorter != 0) OP.SorterInsert else OP.IdxInsert;
     _ = aux.addOp4Int(v, op, sort.i_e_cursor, reg_record, reg_base + n_ob_sat, n_base - n_ob_sat);
     if (i_skip != 0) {
         aux.changeP2(v, i_skip, if (sort.label_ob_lopt != 0) sort.label_ob_lopt else aux.currentAddr(v));
@@ -545,12 +554,12 @@ fn codeOffset(v: *Vdbe, i_offset: i32, i_continue: i32) void {
 /// Port of codeDistinct(): code the DISTINCT test of the row in
 /// registers from `reg_elem`, jumping to `addr_repeat` for a duplicate.
 /// Returns the table (or previous-row registers) used.
-fn codeDistinct(p: *Parse, e_tnct_type: u8, i_tab: i32, addr_repeat: i32, e_list: *ExprList, reg_elem: i32) i32 {
+fn codeDistinct(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, i_tab: i32, addr_repeat: i32, e_list: *ExprList, reg_elem: i32) i32 {
     var ret: i32 = 0;
     const n_result_col: i32 = @intCast(e_list.len());
     const v = p.vdbe.?;
     switch (e_tnct_type) {
-        int.WHERE_DISTINCT_ORDERED => {
+        int.WHERE_DISTINCT.ORDERED => {
             // Compare with the previous row.
             const reg_prev = p.n_mem + 1;
             ret = reg_prev;
@@ -569,7 +578,7 @@ fn codeDistinct(p: *Parse, e_tnct_type: u8, i_tab: i32, addr_repeat: i32, e_list
             }
             _ = aux.addOp3(v, OP.Copy, reg_elem, reg_prev, n_result_col - 1);
         },
-        int.WHERE_DISTINCT_UNIQUE => {},
+        int.WHERE_DISTINCT.UNIQUE => {},
         else => {
             const r1 = expr_mod.getTempReg(p);
             _ = aux.addOp4Int(v, OP.Found, i_tab, addr_repeat, reg_elem, n_result_col);
@@ -586,12 +595,12 @@ fn codeDistinct(p: *Parse, e_tnct_type: u8, i_tab: i32, addr_repeat: i32, e_list
 /// Port of fixDistinctOpenEph(): the ephemeral table of a DISTINCT that
 /// turned out not to need one becomes a no-op (or the OP_Null that
 /// clears the previous-row registers).
-fn fixDistinctOpenEph(p: *Parse, e_tnct_type: u8, i_val: i32, i_open_eph_addr: i32) void {
-    if (p.n_err == 0 and (e_tnct_type == int.WHERE_DISTINCT_UNIQUE or e_tnct_type == int.WHERE_DISTINCT_ORDERED)) {
+fn fixDistinctOpenEph(p: *Parse, e_tnct_type: int.WHERE_DISTINCT, i_val: i32, i_open_eph_addr: i32) void {
+    if (p.n_err == 0 and (e_tnct_type == int.WHERE_DISTINCT.UNIQUE or e_tnct_type == int.WHERE_DISTINCT.ORDERED)) {
         const v = p.vdbe.?;
         _ = aux.changeToNoop(v, i_open_eph_addr);
         if (aux.getOp(v, i_open_eph_addr + 1).opcode == OP.Explain) _ = aux.changeToNoop(v, i_open_eph_addr + 1);
-        if (e_tnct_type == int.WHERE_DISTINCT_ORDERED) {
+        if (e_tnct_type == int.WHERE_DISTINCT.ORDERED) {
             // OP_Null with MEM_Cleared: the first comparison always fails.
             const op = aux.getOp(v, i_open_eph_addr);
             op.opcode = OP.Null;
@@ -611,11 +620,11 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: i32, sort_arg: ?*SortCtx, dis
     var n_prefix_reg: i32 = 0;
     var row_load: RowLoadInfo = undefined;
     var sort = sort_arg;
-    const has_distinct: u8 = if (distinct) |d| d.e_tnct_type else int.WHERE_DISTINCT_NOOP;
+    const has_distinct: int.WHERE_DISTINCT = if (distinct) |d| d.e_tnct_type else int.WHERE_DISTINCT.NOOP;
     if (sort) |so| if (so.order_by == null) {
         sort = null;
     };
-    if (sort == null and has_distinct == 0) codeOffset(v, s.i_offset, i_continue);
+    if (sort == null and has_distinct == .NOOP) codeOffset(v, s.i_offset, i_continue);
 
     var n_result_col: i32 = @intCast(s.e_list.?.len());
     if (dest.i_sdst == 0) {
@@ -640,7 +649,7 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: i32, sort_arg: ?*SortCtx, dis
         }
     } else if (e_dest != SRT.Exists) {
         var ecel_flags: u8 = if (e_dest == SRT.Mem or e_dest == SRT.Output or e_dest == SRT.Coroutine) ec.ECEL_DUP else 0;
-        if (sort != null and has_distinct == 0 and e_dest != SRT.EphemTab and e_dest != SRT.Table) {
+        if (sort != null and has_distinct == .NOOP and e_dest != SRT.EphemTab and e_dest != SRT.Table) {
             // Result columns that are also ORDER BY terms are not stored
             // twice in the sorter record.
             const so = sort.?;
@@ -667,7 +676,7 @@ fn selectInnerLoop(p: *Parse, s: *Select, src_tab: i32, sort_arg: ?*SortCtx, dis
     }
 
     // Skip a row seen before.
-    if (has_distinct != 0) {
+    if (has_distinct != .NOOP) {
         const d = distinct.?;
         const i_tab = codeDistinct(p, d.e_tnct_type, d.tab_tnct, i_continue, s.e_list.?, reg_result);
         fixDistinctOpenEph(p, d.e_tnct_type, i_tab, d.addr_tnct);
@@ -999,8 +1008,8 @@ pub fn generateColumnNames(p: *Parse, s_arg: *Select) void {
     const tab_list = s.src.?;
     const e_list = s.e_list.?;
     p.col_names_set = true;
-    const full_name = db.flags & int.DbFlag.FullColNames != 0;
-    const src_name = db.flags & int.DbFlag.ShortColNames != 0 or full_name;
+    const full_name = db.flags.FullColNames;
+    const src_name = db.flags.ShortColNames or full_name;
     aux.setNumCols(v, @intCast(e_list.len()));
     for (e_list.slice(), 0..) |item, i| {
         const e = item.expr.?;
@@ -1056,7 +1065,7 @@ pub fn columnsFromExprList(p: *Parse, a: Allocator, e_list: ?*ExprList) Oom![]Co
                 name = x.e_name;
             }
         }
-        var z: [:0]u8 = if (name != null and util.isTrueOrFalse(name.?) == 0)
+        var z: [:0]u8 = if (name != null and util.isTrueOrFalse(name.?).isEmpty())
             try a.dupeSentinel(u8, name.?, 0)
         else
             try std.fmt.allocPrintSentinel(a, "column{d}", .{i + 1}, 0);
@@ -1064,7 +1073,7 @@ pub fn columnsFromExprList(p: *Parse, a: Allocator, e_list: ?*ExprList) Oom![]Co
         // Make the name unique by appending ":N".
         var cnt: u32 = 0;
         while (ht.get(z)) |collide| {
-            if (collide.fg.using_term) col.col_flags |= COLFLAG.NOEXPAND;
+            if (collide.fg.using_term) col.col_flags.NOEXPAND = true;
             var n_name = z.len;
             if (n_name > 0) {
                 var j = n_name - 1;
@@ -1076,7 +1085,7 @@ pub fn columnsFromExprList(p: *Parse, a: Allocator, e_list: ?*ExprList) Oom![]Co
             if (cnt > 3) @import("func.zig").randomness(p.db, std.mem.asBytes(&cnt));
         }
         col.cn_name = z;
-        if (x.fg.no_expand) col.col_flags |= COLFLAG.NOEXPAND;
+        if (x.fg.no_expand) col.col_flags.NOEXPAND = true;
         try ht.put(p.db.gpa, z, x);
     }
     return cols;
@@ -1093,7 +1102,7 @@ pub fn subqueryColumnTypes(p: *Parse, a: std.mem.Allocator, t: *Table, s_arg: *S
     for (t.cols, 0..) |*col, i| {
         var m: u8 = 0;
         var s2 = s;
-        t.tab_flags |= col.col_flags & COLFLAG.NOINSERT;
+        t.tab_flags.set(.ofColumn(col.col_flags));
         const e = items[i].expr.?;
         col.affinity = expr_mod.affinity(e);
         while (col.affinity <= Aff.none and s2.next != null) {
@@ -1133,8 +1142,8 @@ pub fn subqueryColumnTypes(p: *Parse, a: std.mem.Allocator, t: *Table, s_arg: *S
             new[n] = 0;
             @memcpy(new[n + 1 ..], zt);
             col.cn_name = new[0..n :0];
-            col.col_flags &= ~(COLFLAG.HASTYPE | COLFLAG.HASCOLL);
-            col.col_flags |= COLFLAG.HASTYPE;
+            col.col_flags.clear(.{ .HASTYPE = true, .HASCOLL = true });
+            col.col_flags.HASTYPE = true;
         }
         if (expr_mod.collSeq(p, e)) |c| try build.columnSetColl(a, col, c.name);
     }
@@ -1157,8 +1166,8 @@ pub fn resultSetOfSelect(p: *Parse, s_arg: *Select, aff: u8) Oom!?*Table {
     p.n_nest_sel += 1;
     if (checkSubqueryNestingDepth(p)) return null;
     const saved_flags = db.flags;
-    db.flags &= ~int.DbFlag.FullColNames;
-    db.flags |= int.DbFlag.ShortColNames;
+    db.flags.FullColNames = false;
+    db.flags.ShortColNames = true;
     selectPrep(p, s_arg, null);
     db.flags = saved_flags;
     if (p.n_err != 0) return null;
@@ -1191,7 +1200,7 @@ fn computeLimitRegisters(p: *Parse, s: *Select, i_break: i32) void {
             _ = aux.goto_(v, i_break);
         } else if (n >= 0 and s.n_select_row > util.logEst(@intCast(n))) {
             s.n_select_row = util.logEst(@intCast(n));
-            s.sel_flags |= SF.FixedLimit;
+            s.sel_flags.FixedLimit = true;
         }
     } else {
         ec.exprCode(p, limit.left, i_limit);
@@ -1229,7 +1238,7 @@ fn multiSelectByMergeKeyInfo(p: *Parse, s: *Select, n_extra: usize) ?*KeyInfo {
         const item = order_by.?.at(i);
         const term = item.expr.?;
         var c: *CollSeq = undefined;
-        if (term.flags & EP.Collate != 0) {
+        if (term.flags.Collate) {
             c = expr_mod.collSeq(p, term) orelse coll_mod.defaultColl();
         } else {
             c = multiSelectCollSeq(p, s, @as(usize, item.u.x.order_by_col) - 1) orelse coll_mod.defaultColl();
@@ -1288,7 +1297,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     // SRT_DistFifo and SRT_DistQueue.
     const i_queue = p.n_tab;
     p.n_tab += 1;
-    var e_dest: u8 = undefined;
+    var e_dest: SRT = undefined;
     if (s.op == TK.UNION) {
         e_dest = if (order_by != null) SRT.DistQueue else SRT.DistFifo;
         i_distinct = p.n_tab;
@@ -1323,12 +1332,12 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     // duplicates), which may not be aggregates.
     var first_rec = s;
     while (true) {
-        if (first_rec.sel_flags & SF.Aggregate != 0) {
+        if (first_rec.sel_flags.Aggregate) {
             util.errorMsg(p, "recursive aggregate queries not supported", .{});
             return;
         }
         first_rec.op = TK.ALL;
-        if (first_rec.prior.?.sel_flags & SF.Recursive == 0) break;
+        if (!first_rec.prior.?.sel_flags.Recursive) break;
         first_rec = first_rec.prior.?;
     }
 
@@ -1338,7 +1347,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     _ = aux.explain(p, true, "SETUP", .{});
     const rc = select(p, setup, &dest_queue);
     setup.next = s;
-    if (rc != 0) return;
+    rc catch return;
 
     // Move the next row of the Queue to Current and output it.
     const addr_top = aux.addOp2(v, OP.Rewind, i_queue, addr_break);
@@ -1360,7 +1369,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
     // Queue.
     first_rec.prior = null;
     _ = aux.explain(p, true, "RECURSIVE STEP", .{});
-    _ = select(p, s, &dest_queue);
+    select(p, s, &dest_queue) catch {};
     first_rec.prior = setup;
 
     // Until the Queue is empty.
@@ -1396,7 +1405,7 @@ fn multiSelectValues(p: *Parse, s_arg: *Select, dest: *SelectDest) i32 {
 fn hasAnchor(s_arg: ?*Select) bool {
     var s = s_arg;
     while (s) |x| {
-        if (x.sel_flags & SF.Recursive == 0) break;
+        if (!x.sel_flags.Recursive) break;
         s = x.prior;
     }
     return s != null;
@@ -1416,11 +1425,10 @@ fn unionWithLimitOne(db: *Sqlite3, s: *Select) bool {
 /// Port of multiSelect(): code a compound "A op B" (s is B, s.prior A).
 /// UNION ALL runs one query after the other; the others merge sorted
 /// results.
-fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
+fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) (Oom || int.ParseError)!void {
     const db = p.db;
     const prior = s.prior.?;
     var dest = dest_arg.*;
-    var rc: u32 = 0;
     const v = build.getVdbe(p).?;
     defer {
         dest_arg.i_sdst = dest.i_sdst;
@@ -1434,11 +1442,11 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
         dest.e_dest = SRT.Table;
     }
 
-    if (s.sel_flags & SF.MultiValue != 0) {
-        if (multiSelectValues(p, s, &dest) >= 0) return 0;
+    if (s.sel_flags.MultiValue) {
+        if (multiSelectValues(p, s, &dest) >= 0) return;
     }
 
-    if (s.sel_flags & SF.Recursive != 0 and hasAnchor(s)) {
+    if (s.sel_flags.Recursive and hasAnchor(s)) {
         generateWithRecursiveQuery(p, s, &dest);
     } else if (s.order_by != null) {
         {
@@ -1450,7 +1458,7 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
         // The merge needs an ORDER BY: invent one.
         const one = try expr_mod.exprInt32(p.arena, 1);
         s.order_by = try expr_mod.listAppend(p, null, one);
-        if (p.n_err != 0) return 0;
+        if (p.n_err != 0) return;
         s.order_by.?.at(0).u.x.order_by_col = 1;
         {
             const r = multiSelectByMerge(p, s, dest_arg);
@@ -1468,9 +1476,9 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
         prior.i_limit = s.i_limit;
         prior.i_offset = s.i_offset;
         prior.limit = try expr_mod.exprDup(p.arena, s.limit);
-        rc = select(p, prior, &dest);
+        const rc_prior = select(p, prior, &dest);
         prior.limit = null;
-        if (rc != 0) return rc;
+        try rc_prior;
         s.prior = null;
         s.i_limit = prior.i_limit;
         s.i_offset = prior.i_offset;
@@ -1479,7 +1487,7 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
             if (s.i_offset != 0) _ = aux.addOp3(v, OP.OffsetLimit, s.i_limit, s.i_offset + 1, s.i_offset);
         }
         _ = aux.explain(p, true, "UNION ALL", .{});
-        rc = select(p, s, &dest);
+        const rc = select(p, s, &dest);
         s.prior = prior;
         s.n_select_row = util.logEstAdd(s.n_select_row, prior.n_select_row);
         if (s.limit) |lim| if (expr_mod.isInteger(lim.left, p)) |n_limit| {
@@ -1487,8 +1495,8 @@ fn multiSelect(p: *Parse, s: *Select, dest_arg: *SelectDest) Oom!u32 {
         };
         if (addr != 0) aux.jumpHere(v, addr);
         if (s.next == null) aux.explainPop(p);
+        return rc;
     }
-    return rc;
 }
 
 /// Port of generateOutputSubroutine(): the subroutine sending a row of a
@@ -1586,7 +1594,7 @@ fn generateOutputSubroutine(p: *Parse, s: *Select, in: *SelectDest, dest: *Selec
 /// Port of multiSelectByMerge(): code "<A> op <B> ORDER BY ..." by
 /// running A and B as co-routines in ORDER BY order and merging their
 /// rows.
-fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
+fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!void {
     const db = p.db;
     const v = p.vdbe.?;
     const label_end = aux.makeLabel(p);
@@ -1658,8 +1666,8 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     split.prior = null;
     prior.next = null;
     prior.order_by = try expr_mod.listDup(p.arena, order_by);
-    _ = resolve.resolveOrderGroupBy(p, s, s.order_by, "ORDER");
-    _ = resolve.resolveOrderGroupBy(p, prior, prior.order_by, "ORDER");
+    resolve.resolveOrderGroupBy(p, s, s.order_by, "ORDER") catch {};
+    resolve.resolveOrderGroupBy(p, prior, prior.order_by, "ORDER") catch {};
 
     // The limit registers.
     computeLimitRegisters(p, s, label_end);
@@ -1693,7 +1701,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     var addr1 = aux.addOp3(v, OP.InitCoroutine, reg_addr_a, 0, addr_select_a);
     prior.i_limit = reg_limit_a;
     _ = aux.explain(p, true, "LEFT", .{});
-    _ = select(p, prior, &dest_a);
+    select(p, prior, &dest_a) catch {};
     aux.endCoroutine(v, reg_addr_a);
     aux.jumpHere(v, addr1);
 
@@ -1705,7 +1713,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     s.i_limit = reg_limit_b;
     s.i_offset = 0;
     _ = aux.explain(p, true, "RIGHT", .{});
-    _ = select(p, s, &dest_b);
+    select(p, s, &dest_b) catch {};
     s.i_limit = saved_limit;
     s.i_offset = saved_offset;
     aux.endCoroutine(v, reg_addr_b);
@@ -1787,7 +1795,7 @@ fn multiSelectByMerge(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     prior.next = split;
     prior.order_by = null;
     aux.explainPop(p);
-    return @intFromBool(p.n_err != 0);
+    if (p.n_err != 0) return error.ParseFailed;
 }
 
 /// SubstContext: the substitution made by substExpr().
@@ -1813,8 +1821,8 @@ const SubstContext = struct {
 /// tables of the subquery directly.
 fn substExpr(x: *SubstContext, e_arg: ?*Expr) Oom!?*Expr {
     var e = e_arg orelse return null;
-    if (e.has(EP.OuterON | EP.InnerON) and e.w.join == x.i_table) e.w = .{ .join = x.i_new_table };
-    if (e.op == TK.COLUMN and e.i_table == x.i_table and !e.has(EP.FixedCol)) {
+    if (e.flags.intersects(.{ .OuterON = true, .InnerON = true }) and e.w.join == x.i_table) e.w = .{ .join = x.i_new_table };
+    if (e.op == TK.COLUMN and e.i_table == x.i_table and !e.flags.FixedCol) {
         const i_column: usize = @intCast(e.i_column);
         std.debug.assert(e.right == null);
         var copy = x.e_list.at(i_column).expr.?;
@@ -1823,16 +1831,16 @@ fn substExpr(x: *SubstContext, e_arg: ?*Expr) Oom!?*Expr {
         } else {
             var if_null_row: Expr = undefined;
             if (x.is_outer_join and (copy.op != TK.COLUMN or copy.i_table != x.i_new_table)) {
-                if_null_row = .{ .op = TK.IF_NULL_ROW, .left = copy, .i_table = x.i_new_table, .i_column = -99, .flags = EP.IfNullRow };
+                if_null_row = .{ .op = TK.IF_NULL_ROW, .left = copy, .i_table = x.i_new_table, .i_column = -99, .flags = .{ .IfNullRow = true } };
                 copy = &if_null_row;
             }
             var new = (try expr_mod.exprDup(x.parse.arena, copy)).?;
-            if (x.is_outer_join) new.set(EP.CanBeNull);
+            if (x.is_outer_join) new.flags.CanBeNull = true;
             if (new.op == TK.TRUEFALSE) {
                 const value: i32 = @intFromBool(expr_mod.truthValue(new));
                 new.u = .{ .value = value };
                 new.op = TK.INTEGER;
-                new.set(EP.IntValue);
+                new.flags.IntValue = true;
             }
             // Keep the implicit collation the column of the view or
             // subquery had.
@@ -1841,8 +1849,8 @@ fn substExpr(x: *SubstContext, e_arg: ?*Expr) Oom!?*Expr {
             if (nat != coll or (new.op != TK.COLUMN and new.op != TK.COLLATE)) {
                 new = try expr_mod.addCollateString(x.parse, new, if (coll) |c| c.name else "BINARY");
             }
-            new.clear(EP.Collate);
-            if (e.has(EP.OuterON | EP.InnerON)) setJoinExpr(new, e.w.join, e.flags & (EP.OuterON | EP.InnerON));
+            new.flags.Collate = false;
+            if (e.flags.intersects(.{ .OuterON = true, .InnerON = true })) setJoinExpr(new, e.w.join, e.flags.only(.{ .OuterON = true, .InnerON = true }));
             e = new;
         }
     } else {
@@ -1855,7 +1863,7 @@ fn substExpr(x: *SubstContext, e_arg: ?*Expr) Oom!?*Expr {
         } else {
             try substExprList(x, e.x.list);
         }
-        if (e.has(EP.WinFunc)) {
+        if (e.flags.WinFunc) {
             const win = e.y.win.?;
             win.filter = try substExpr(x, win.filter);
             try substExprList(x, win.partition);
@@ -1892,9 +1900,9 @@ fn substSelect(x: *SubstContext, s_arg: ?*Select, do_prior: bool) Oom!void {
     x.n_sel_depth -= 1;
 }
 
-fn recomputeColumnsUsedExpr(w: *Walker, e: *Expr) u8 {
+fn recomputeColumnsUsedExpr(w: *Walker, e: *Expr) WRC {
     if (e.op != TK.COLUMN) return WRC.Continue;
-    const item: *SrcItem = @ptrCast(@alignCast(w.u.ptr.?));
+    const item = w.u.src_item;
     if (item.i_cursor != e.i_table) return WRC.Continue;
     if (e.i_column < 0) return WRC.Continue;
     item.col_used |= resolve.exprColUsed(e);
@@ -1908,7 +1916,7 @@ fn recomputeColumnsUsed(s: *Select, item: *SrcItem) void {
     var w: Walker = .{
         .expr_callback = recomputeColumnsUsedExpr,
         .select_callback = walker.selectWalkNoop,
-        .u = .{ .ptr = item },
+        .u = .{ .src_item = item },
     };
     item.col_used = 0;
     _ = walker.walkSelect(&w, s);
@@ -1943,9 +1951,9 @@ fn renumberCursorDoMapping(w: *Walker, cursor: *i32) void {
 }
 
 /// Port of renumberCursorsCb().
-fn renumberCursorsCb(w: *Walker, e: *Expr) u8 {
+fn renumberCursorsCb(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.COLUMN or e.op == TK.IF_NULL_ROW) renumberCursorDoMapping(w, &e.i_table);
-    if (e.has(EP.OuterON | EP.InnerON)) renumberCursorDoMapping(w, &e.w.join);
+    if (e.flags.intersects(.{ .OuterON = true, .InnerON = true })) renumberCursorDoMapping(w, &e.w.join);
     return WRC.Continue;
 }
 
@@ -2007,40 +2015,40 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
     var sub_src = sub.src.?;
     if (sub.limit != null and s.limit != null) return false; // (13)
     if (sub.limit != null and sub.limit.?.right != null) return false; // (14)
-    if (s.sel_flags & SF.Compound != 0 and sub.limit != null) return false; // (15)
+    if (s.sel_flags.Compound and sub.limit != null) return false; // (15)
     if (sub_src.len() == 0) return false; // (7)
-    if (sub.sel_flags & SF.Distinct != 0) return false; // (4)
+    if (sub.sel_flags.Distinct) return false; // (4)
     if (sub.limit != null and (src.len() > 1 or is_agg)) return false; // (8) (9)
     if (s.order_by != null and sub.order_by != null) return false; // (11)
     if (is_agg and sub.order_by != null) return false; // (16)
     if (sub.limit != null and s.where != null) return false; // (19)
-    if (sub.limit != null and s.sel_flags & SF.Distinct != 0) return false; // (21)
-    if (sub.sel_flags & SF.Recursive != 0) return false; // (22)
+    if (sub.limit != null and s.sel_flags.Distinct) return false; // (21)
+    if (sub.sel_flags.Recursive) return false; // (22)
 
     // The right operand of a LEFT JOIN may not be a join itself: "t1 LEFT
     // JOIN (t2 JOIN t3)" is not "(t1 LEFT JOIN t2) JOIN t3".
     var is_outer_join = false;
-    if (subitem.fg.jointype & (JT.OUTER | JT.LTORJ) != 0) {
+    if (subitem.fg.jointype.intersects(.{ .OUTER = true, .LTORJ = true })) {
         if (sub_src.len() > 1 or // (3a)
-            s.sel_flags & SF.Distinct != 0 or // (3d)
-            subitem.fg.jointype & JT.RIGHT != 0) // (26)
+            s.sel_flags.Distinct or // (3d)
+            subitem.fg.jointype.RIGHT) // (26)
         {
             return false;
         }
         is_outer_join = true;
     }
 
-    if (i_from > 0 and sub_src.at(0).fg.jointype & JT.LTORJ != 0) return false; // (27a)
+    if (i_from > 0 and sub_src.at(0).fg.jointype.LTORJ) return false; // (27a)
 
     // (17): a compound subquery is a UNION ALL of simple non-aggregate,
     // non-DISTINCT queries.
     var csr_map: ?[]i32 = null;
     if (sub.prior != null) {
         if (sub.order_by != null) return false; // (20)
-        if (is_agg or s.sel_flags & SF.Distinct != 0 or is_outer_join) return false; // (17d1) (17d2) (17f)
+        if (is_agg or s.sel_flags.Distinct or is_outer_join) return false; // (17d1) (17d2) (17f)
         var it: ?*Select = sub;
         while (it) |sub1| : (it = sub1.prior) {
-            if (sub1.sel_flags & (SF.Distinct | SF.Aggregate) != 0 or // (17b)
+            if (sub1.sel_flags.intersects(.{ .Distinct = true, .Aggregate = true }) or // (17b)
                 (sub1.prior != null and sub1.op != TK.ALL) or // (17a)
                 sub1.src.?.len() < 1 or // (17c)
                 sub1.win != null) // (17e)
@@ -2049,7 +2057,7 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
             }
             // Else JT_LTORJ would be lost on the left tables of the RIGHT
             // JOIN being flattened.
-            if (i_from > 0 and sub1.src.?.at(0).fg.jointype & JT.LTORJ != 0) return false; // (17g) (27b)
+            if (i_from > 0 and sub1.src.?.at(0).fg.jointype.LTORJ) return false; // (17g) (27b)
         }
 
         // (18)
@@ -2057,7 +2065,7 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
             if (item.u.x.order_by_col == 0) return false;
         };
 
-        if (s.sel_flags & SF.Recursive != 0) return false; // (23)
+        if (s.sel_flags.Recursive) return false; // (23)
         if (compoundHasDifferentAffinities(sub)) return false; // (17h)
 
         if (src.len() > 1) {
@@ -2143,10 +2151,10 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
         for (0..n_sub_src) |i| {
             const item = src.at(i + i_from);
             item.* = sub_src.at(i).*;
-            item.fg.jointype |= jointype & JT.LTORJ;
+            if (jointype.LTORJ) item.fg.jointype.LTORJ = true;
             sub_src.at(i).* = .{};
         }
-        src.at(i_from).fg.jointype |= jointype;
+        src.at(i_from).fg.jointype = src.at(i_from).fg.jointype.with(jointype);
 
         if (sx.order_by) |ob| {
             // Its iOrderByCol values refer to the subquery's result set,
@@ -2158,7 +2166,7 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
         }
         const where = sx.where;
         sx.where = null;
-        if (is_outer_join) setJoinExpr(where, i_new_parent, EP.OuterON);
+        if (is_outer_join) setJoinExpr(where, i_new_parent, .{ .OuterON = true });
         if (where) |w| {
             parent.where = if (parent.where) |pw| try expr_mod.pExpr(p, TK.AND, w, pw) else w;
         }
@@ -2176,7 +2184,7 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
         }
 
         // The result is a compound if either query was.
-        parent.sel_flags |= sx.sel_flags & SF.Compound;
+        if (sx.sel_flags.Compound) parent.sel_flags.Compound = true;
 
         // The limits of "SELECT ... FROM (SELECT ... LIMIT a OFFSET b)
         // LIMIT x OFFSET y" cannot be combined, if either is negative.
@@ -2196,7 +2204,7 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
 
 /// WhereConst: the columns fixed to a constant by WHERE terms of the form
 /// COLUMN=VALUE, for propagateConstants().
-const WhereConst = struct {
+pub const WhereConst = struct {
     parse: *Parse,
     /// Number of COLUMN=CONSTANT terms.
     n_const: usize = 0,
@@ -2205,7 +2213,7 @@ const WhereConst = struct {
     /// A column of `exprs` has affinity BLOB.
     has_aff_blob: bool = false,
     /// The ON terms not considered: EP_OuterON, or EP_InnerON|EP_OuterON.
-    exclude_on: u32 = 0,
+    exclude_on: EP = .{},
     /// [i*2] is the COLUMN and [i*2+1] the VALUE.
     exprs: std.ArrayList(*Expr) = .empty,
 };
@@ -2215,7 +2223,7 @@ const WhereConst = struct {
 /// return a subtype, or `column` is already noted. `value` is constant.
 fn constInsert(c: *WhereConst, column: *Expr, value: *Expr, e: *Expr) Oom!void {
     std.debug.assert(column.op == TK.COLUMN);
-    if (column.has(EP.FixedCol)) return;
+    if (column.flags.FixedCol) return;
     if (expr_mod.affinity(value) != 0) return;
     if (!serial.isBinary(expr_mod.compareCollSeq(c.parse, e))) return;
     if (ec.canReturnSubtype(c.parse, value)) return;
@@ -2236,7 +2244,7 @@ fn constInsert(c: *WhereConst, column: *Expr, value: *Expr, e: *Expr) Oom!void {
 /// of `e_arg`.
 fn findConstInWhere(c: *WhereConst, e_arg: ?*Expr) Oom!void {
     const e = e_arg orelse return;
-    if (e.has(c.exclude_on)) return;
+    if (e.flags.intersects(c.exclude_on)) return;
     if (e.op == TK.AND) {
         try findConstInWhere(c, e.right);
         try findConstInWhere(c, e.left);
@@ -2252,10 +2260,10 @@ fn findConstInWhere(c: *WhereConst, e_arg: ?*Expr) Oom!void {
 /// Port of propagateConstantExprRewriteOne(): if `e` is one of the
 /// columns of `c`, tag it EP_FixedCol and hang a copy of its value off
 /// its left. Not for a BLOB column if `ignore_aff_blob`.
-fn propagateConstantExprRewriteOne(c: *WhereConst, e: *Expr, ignore_aff_blob: bool) u8 {
+fn propagateConstantExprRewriteOne(c: *WhereConst, e: *Expr, ignore_aff_blob: bool) WRC {
     if (c.parse.db.malloc_failed) return WRC.Prune;
     if (e.op != TK.COLUMN) return WRC.Continue;
-    if (e.has(EP.FixedCol | c.exclude_on)) return WRC.Continue;
+    if (e.flags.intersects(c.exclude_on.with(.{ .FixedCol = true }))) return WRC.Continue;
     for (0..c.n_const) |i| {
         const column = c.exprs.items[i * 2];
         if (column == e) continue;
@@ -2263,8 +2271,8 @@ fn propagateConstantExprRewriteOne(c: *WhereConst, e: *Expr, ignore_aff_blob: bo
         if (column.i_column != e.i_column) continue;
         if (ignore_aff_blob and expr_mod.affinity(column) <= Aff.blob) break;
         c.n_chng += 1;
-        e.clear(EP.Leaf);
-        e.set(EP.FixedCol);
+        e.flags.Leaf = false;
+        e.flags.FixedCol = true;
         std.debug.assert(e.left == null);
         e.left = expr_mod.exprDup(c.parse.arena, c.exprs.items[i * 2 + 1]) catch {
             oom(c.parse);
@@ -2278,8 +2286,8 @@ fn propagateConstantExprRewriteOne(c: *WhereConst, e: *Expr, ignore_aff_blob: bo
 /// Port of propagateConstantExprRewrite(): substitute the constants of
 /// `w.u` for `e`, a column, or for the column operands of `e`, a
 /// comparison (=, <, <=, >, >=, IS) whose left operand is not TEXT.
-fn propagateConstantExprRewrite(w: *Walker, e: *Expr) u8 {
-    const c: *WhereConst = @ptrCast(@alignCast(w.u.ptr.?));
+fn propagateConstantExprRewrite(w: *Walker, e: *Expr) WRC {
+    const c = w.u.where_const;
     if (c.has_aff_blob) {
         if ((e.op >= TK.EQ and e.op <= TK.GE) or e.op == TK.IS) {
             _ = propagateConstantExprRewriteOne(c, e.left.?, false);
@@ -2315,14 +2323,14 @@ fn propagateConstants(p: *Parse, s: *Select) Oom!i32 {
         const src = s.src.?;
         // No propagation into any ON clause if there is a RIGHT JOIN,
         // else none into the ON clause of a LEFT JOIN.
-        x.exclude_on = if (src.len() > 0 and src.at(0).fg.jointype & JT.LTORJ != 0) EP.InnerON | EP.OuterON else EP.OuterON;
+        x.exclude_on = if (src.len() > 0 and src.at(0).fg.jointype.LTORJ) .{ .InnerON = true, .OuterON = true } else .{ .OuterON = true };
         try findConstInWhere(&x, s.where);
         if (x.n_const != 0) {
             var w: Walker = .{
                 .parse = p,
                 .expr_callback = propagateConstantExprRewrite,
                 .select_callback = walker.selectWalkNoop,
-                .u = .{ .ptr = &x },
+                .u = .{ .where_const = &x },
             };
             _ = walker.walkExpr(&w, s.where);
             n_chng += x.n_chng;
@@ -2336,7 +2344,7 @@ fn propagateConstants(p: *Parse, s: *Select) Oom!i32 {
 /// which has window functions, as it only uses constants and the
 /// PARTITION BY terms (filtering out whole partitions is safe).
 fn pushDownWindowCheck(p: *Parse, subq: *Select, e: *Expr) bool {
-    std.debug.assert(subq.sel_flags & SF.MultiPart == 0 and subq.prior == null);
+    std.debug.assert(!subq.sel_flags.MultiPart and subq.prior == null);
     return expr_mod.isConstantOrGroupBy(p, e, subq.win.?.partition.?);
 }
 
@@ -2355,8 +2363,8 @@ fn pushDownWhereTerms(p: *Parse, subq_arg: *Select, where_arg: ?*Expr, src_list:
     var where = where_arg orelse return 0;
     const src = src_list.at(i_src);
     var n_chng: i32 = 0;
-    if (subq.sel_flags & (SF.Recursive | SF.MultiPart) != 0) return 0; // (2) (11)
-    if (src.fg.jointype & (JT.LTORJ | JT.RIGHT) != 0) return 0; // (10)
+    if (subq.sel_flags.intersects(.{ .Recursive = true, .MultiPart = true })) return 0; // (2) (11)
+    if (src.fg.jointype.intersects(.{ .LTORJ = true, .RIGHT = true })) return 0; // (10)
 
     if (subq.prior != null) {
         var not_union_all = false;
@@ -2388,7 +2396,7 @@ fn pushDownWhereTerms(p: *Parse, subq_arg: *Select, where_arg: ?*Expr, src_list:
     // Restrictions (4), (5) and (9) are checked by isSingleTableConstraint().
     if (expr_mod.isSingleTableConstraint(where, src_list, i_src, true)) {
         n_chng += 1;
-        subq.sel_flags |= SF.PushDown;
+        subq.sel_flags.PushDown = true;
         while (true) {
             var new = (try expr_mod.exprDup(p.arena, where)).?;
             unsetJoinExpr(new, -1, true);
@@ -2403,15 +2411,15 @@ fn pushDownWhereTerms(p: *Parse, subq_arg: *Select, where_arg: ?*Expr, src_list:
             };
             new = (try substExpr(&x, new)).?;
             if (p.n_err == 0 and new.op == TK.IN and new.useXSelect()) {
-                new.x.select.?.sel_flags |= SF.ClonedRhsIn;
-                where.x.select.?.sel_flags |= SF.ClonedRhsIn;
+                new.x.select.?.sel_flags.ClonedRhsIn = true;
+                where.x.select.?.sel_flags.ClonedRhsIn = true;
             }
             if (subq.win != null and !pushDownWindowCheck(p, subq, new)) {
                 // Restriction (6c).
                 n_chng -= 1;
                 break;
             }
-            if (subq.sel_flags & SF.Aggregate != 0) {
+            if (subq.sel_flags.Aggregate) {
                 subq.having = try expr_mod.exprAnd(p, subq.having, new);
             } else {
                 subq.where = try expr_mod.exprAnd(p, subq.where, new);
@@ -2432,7 +2440,7 @@ fn disableUnusedSubqueryResultColumns(item: *SrcItem) i32 {
     std.debug.assert(sub.e_list.?.len() == t.cols.len);
     var it: ?*Select = sub;
     while (it) |x| : (it = x.prior) {
-        if (x.sel_flags & (SF.Distinct | SF.Aggregate) != 0) return 0;
+        if (x.sel_flags.intersects(.{ .Distinct = true, .Aggregate = true })) return 0;
         // Only UNION ALL compounds.
         if (x.prior != null and x.op != TK.ALL) return 0;
         if (x.win != null) return 0;
@@ -2454,8 +2462,8 @@ fn disableUnusedSubqueryResultColumns(item: *SrcItem) i32 {
             const y = x.e_list.?.at(j).expr.?;
             if (y.op == TK.NULL) continue;
             y.op = TK.NULL;
-            y.clear(EP.Skip | EP.Unlikely);
-            x.sel_flags |= SF.PushDown;
+            y.flags.clear(.{ .Skip = true, .Unlikely = true });
+            x.sel_flags.PushDown = true;
             n_chng += 1;
         }
     }
@@ -2476,8 +2484,8 @@ fn isSimpleCount(s: *Select, agg: *AggInfo) ?*Table {
     const e = s.e_list.?.at(0).expr.?;
     if (e.op != TK.AGG_FUNCTION) return null;
     if (e.agg_info != agg) return null;
-    if (agg.funcs.items[0].func.?.func_flags & callback.FUNC.COUNT == 0) return null;
-    if (e.has(EP.Distinct | EP.WinFunc)) return null;
+    if (!agg.funcs.items[0].func.?.func_flags.COUNT) return null;
+    if (e.flags.intersects(.{ .Distinct = true, .WinFunc = true })) return null;
     return t;
 }
 
@@ -2502,14 +2510,14 @@ pub fn indexedByLookup(p: *Parse, from: *SrcItem) bool {
 /// UNION ALL) with a COLLATE in its ORDER BY becomes "SELECT * FROM
 /// (compound) ORDER BY ...", as the merge needs the result columns'
 /// collations.
-fn convertCompoundSelectToSubquery(w: *Walker, s: *Select) u8 {
+fn convertCompoundSelectToSubquery(w: *Walker, s: *Select) WRC {
     return convertCompoundSelectToSubqueryImpl(w, s) catch {
         oom(w.parse.?);
         return WRC.Abort;
     };
 }
 
-fn convertCompoundSelectToSubqueryImpl(w: *Walker, s: *Select) Oom!u8 {
+fn convertCompoundSelectToSubqueryImpl(w: *Walker, s: *Select) Oom!WRC {
     if (s.prior == null) return WRC.Continue;
     const order_by = s.order_by orelse return WRC.Continue;
     var x: ?*Select = s;
@@ -2523,7 +2531,7 @@ fn convertCompoundSelectToSubqueryImpl(w: *Walker, s: *Select) Oom!u8 {
     var i = order_by.len();
     while (i > 0) {
         i -= 1;
-        if (order_by.at(i).expr.?.flags & EP.Collate != 0) break;
+        if (order_by.at(i).expr.?.flags.Collate) break;
     } else return WRC.Continue;
 
     const p = w.parse.?;
@@ -2542,8 +2550,8 @@ fn convertCompoundSelectToSubqueryImpl(w: *Walker, s: *Select) Oom!u8 {
     s.next = null;
     s.with = null;
     s.win_defn = null;
-    s.sel_flags &= ~SF.Compound;
-    s.sel_flags |= SF.Converted;
+    s.sel_flags.Compound = false;
+    s.sel_flags.Converted = true;
     new.prior.?.next = new;
     new.limit = null;
     return WRC.Continue;
@@ -2614,12 +2622,12 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
     t.* = .{
         .name = try p.arena.dupeSentinel(u8, cte.name.?, 0),
         .n_row_log_est = 200,
-        .tab_flags = TF.Ephemeral | TF.NoVisibleRowid,
+        .tab_flags = .{ .Ephemeral = true, .NoVisibleRowid = true },
     };
     try build.srcItemAttachSubquery(p, from, (try expr_mod.selectDup(p.arena, cte.select)).?);
     if (db.malloc_failed) return 2;
     const sel = from.u4.subq.?.select;
-    sel.sel_flags |= SF.CopyCte;
+    sel.sel_flags.CopyCte = true;
     if (from.fg.is_indexed_by) {
         util.errorMsg(p, "no such index: \"{s}\"", .{from.u1.indexed_by.?});
         return 2;
@@ -2641,11 +2649,11 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
                 item.s_tab = t;
                 build.tableRef(p, t);
                 item.fg.is_recursive = true;
-                if (rec_term.sel_flags & SF.Recursive != 0) {
+                if (rec_term.sel_flags.Recursive) {
                     util.errorMsg(p, "multiple references to recursive table: {s}", .{cte.name.?});
                     return 2;
                 }
-                rec_term.sel_flags |= SF.Recursive;
+                rec_term.sel_flags.Recursive = true;
                 if (i_rec_tab < 0) {
                     i_rec_tab = p.n_tab;
                     p.n_tab += 1;
@@ -2653,7 +2661,7 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
                 item.i_cursor = i_rec_tab;
             }
         }
-        if (rec_term.sel_flags & SF.Recursive == 0) break;
+        if (!rec_term.sel_flags.Recursive) break;
         rec_term = rec_term.prior.?;
     }
 
@@ -2666,15 +2674,15 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
     cte.cte_err = "circular reference: %s";
     const saved_with = p.with;
     p.with = with;
-    if (sel.sel_flags & SF.Recursive != 0) {
+    if (sel.sel_flags.Recursive) {
         rec_term.with = sel.with;
         const rc = walker.walkSelect(w, rec_term);
         rec_term.with = null;
-        if (rc != 0) {
+        if (rc != .Continue) {
             p.with = saved_with;
             return 2;
         }
-    } else if (walker.walkSelect(w, sel) != 0) {
+    } else if (walker.walkSelect(w, sel) != .Continue) {
         p.with = saved_with;
         return 2;
     }
@@ -2696,7 +2704,7 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
     t.cols = try columnsFromExprList(p, p.arena, e_list);
     t.n_nv_col = @intCast(t.cols.len);
     if (may_recursive) {
-        cte.cte_err = if (sel.sel_flags & SF.Recursive != 0)
+        cte.cte_err = if (sel.sel_flags.Recursive)
             "multiple recursive references: %s"
         else
             "recursive reference in a subquery: %s";
@@ -2728,7 +2736,7 @@ pub fn expandSubquery(p: *Parse, from: *SrcItem) Oom!bool {
         .name = name,
         .n_row_log_est = 200,
         .e_tab_type = .view,
-        .tab_flags = TF.Ephemeral | TF.NoVisibleRowid,
+        .tab_flags = .{ .Ephemeral = true, .NoVisibleRowid = true },
     };
     t.cols = try columnsFromExprList(p, p.arena, sel.e_list);
     t.n_nv_col = @intCast(t.cols.len);
@@ -2761,22 +2769,22 @@ pub fn srcListAssignCursors(p: *Parse, list: ?*SrcList) void {
 /// Port of selectExpander(): assign cursors to the FROM terms and find
 /// their tables (views and subqueries become subquery tables), apply the
 /// joins, and expand "*" and "TABLE.*" in the result set.
-fn selectExpander(w: *Walker, s: *Select) u8 {
+fn selectExpander(w: *Walker, s: *Select) WRC {
     return selectExpanderImpl(w, s) catch {
         oom(w.parse.?);
         return WRC.Abort;
     };
 }
 
-fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
+fn selectExpanderImpl(w: *Walker, s: *Select) Oom!WRC {
     const p = w.parse.?;
     const db = p.db;
     const sel_flags = s.sel_flags;
-    var elist_flags: u32 = 0;
+    var elist_flags: EP = .{};
 
-    s.sel_flags |= SF.Expanded;
+    s.sel_flags.Expanded = true;
     if (db.malloc_failed) return WRC.Abort;
-    if (sel_flags & SF.Expanded != 0) return WRC.Prune;
+    if (sel_flags.Expanded) return WRC.Prune;
     if (w.e_code != 0) {
         // Copied from a view: renumber.
         p.n_select += 1;
@@ -2784,7 +2792,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
     }
     const tab_list = s.src.?;
     const e_list = s.e_list.?;
-    if (p.with != null and s.sel_flags & SF.View != 0) {
+    if (p.with != null and s.sel_flags.View) {
         if (s.with == null) {
             const nw = try p.arena.create(With);
             nw.* = .{};
@@ -2802,7 +2810,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
         if (from.name == null) {
             // A subquery.
             const sel = from.u4.subq.?.select;
-            if (walker.walkSelect(w, sel) != 0) return WRC.Abort;
+            if (walker.walkSelect(w, sel) != .Continue) return WRC.Abort;
             if (try expandSubquery(p, from)) return WRC.Abort;
         } else {
             const rc = try resolveFromTermToCte(p, w, from);
@@ -2820,18 +2828,17 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                 if (t.e_tab_type != .vtab and cannotBeFunction(p, from)) return WRC.Abort;
                 if (!t.isOrdinary()) {
                     const e_code_orig = w.e_code;
-                    if (build.viewGetColumnNames(p, t) != 0) return WRC.Abort;
+                    build.viewGetColumnNames(p, t) catch return WRC.Abort;
                     if (t.isView()) {
-                        if (db.flags & int.DbFlag.EnableView == 0 and t.schema != db.dbs.items[1].schema) {
+                        if (!db.flags.EnableView and t.schema != db.dbs.items[1].schema) {
                             util.errorMsg(p, "access to view \"{s}\" prohibited", .{t.name});
                         }
                         try build.srcItemAttachSubquery(p, from, (try expr_mod.selectDup(p.arena, t.u.view.select)).?);
                     } else if (t.isVirtual() and
                         (from.fg.from_ddl or p.prep_flags & aux.PREPARE_FROM_DDL != 0) and
                         t.u.vtab.p != null and
-                        t.u.vtab.p.?.e_vtab_risk > @intFromBool(db.flags & int.DbFlag.TrustedSchema != 0))
+                        t.u.vtab.p.?.e_vtab_risk.unsafeInSchema(db.flags.TrustedSchema))
                     {
-                        // SQLITE_VTABRISK_Normal is 1 and _High 2.
                         util.errorMsg(p, "unsafe use of virtual table \"{s}\"", .{t.name});
                     }
                     // Renumber the Select ids of the view's copy.
@@ -2845,7 +2852,11 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
     }
 
     // NATURAL, ON and USING.
-    if (p.n_err != 0 or try processJoin(p, s) != 0) return WRC.Abort;
+    if (p.n_err != 0) return WRC.Abort;
+    processJoin(p, s) catch |err| switch (err) {
+        error.ParseFailed => return WRC.Abort,
+        error.OutOfMemory => |e| return e,
+    };
 
     // Expand "*" and "TABLE.*".
     var k: usize = 0;
@@ -2853,15 +2864,15 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
         const e = e_list.at(k).expr.?;
         if (e.op == TK.ASTERISK) break;
         if (e.op == TK.DOT and e.right.?.op == TK.ASTERISK) break;
-        elist_flags |= e.flags;
+        elist_flags.set(e.flags);
     }
     if (k < e_list.len()) {
         var new: ?*ExprList = null;
         const flags = db.flags;
-        const long_names = flags & int.DbFlag.FullColNames != 0 and flags & int.DbFlag.ShortColNames == 0;
+        const long_names = flags.FullColNames and !flags.ShortColNames;
         for (e_list.slice()) |*a| {
             const e = a.expr.?;
-            elist_flags |= e.flags;
+            elist_flags.set(e.flags);
             const right_ast = e.right;
             if (e.op != TK.ASTERISK and (e.op != TK.DOT or right_ast.?.op != TK.ASTERISK)) {
                 // No expansion needed.
@@ -2894,7 +2905,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                     schema_name = if (i_db >= 0) db.dbs.items[@intCast(i_db)].name else "*";
                 }
                 var using: ?*IdList = null;
-                if (i + 1 < tab_list.len() and tab_list.at(i + 1).fg.is_using and sel_flags & SF.NestedFrom != 0) {
+                if (i + 1 < tab_list.len() and tab_list.at(i + 1).fg.is_using and sel_flags.NestedFrom) {
                     using = tab_list.at(i + 1).u3.using;
                     for (using.?.names.items) |uname| {
                         const r = try expr_mod.expr(p.arena, TK.ID, uname);
@@ -2908,7 +2919,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                 }
 
                 var n_add = t.cols.len;
-                if (t.tab_flags & TF.NoVisibleRowid == 0 and sel_flags & SF.NestedFrom != 0) n_add += 1;
+                if (!t.tab_flags.NoVisibleRowid and sel_flags.NestedFrom) n_add += 1;
                 for (0..n_add) |j| {
                     var name: []const u8 = undefined;
                     if (j == t.cols.len) {
@@ -2919,19 +2930,19 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                         if (nested_from) |nf| if (nf.at(j).fg.e_ename == .rowid) continue;
                         if (tname != null and nested_from != null and !resolve.matchEName(nested_from.?.at(j), null, tname, null, null)) continue;
                         // Hidden columns unless SF_IncludeHidden.
-                        if (s.sel_flags & SF.IncludeHidden == 0 and isHiddenColumn(&t.cols[j])) continue;
-                        if (t.cols[j].col_flags & COLFLAG.NOEXPAND != 0 and tname == null and sel_flags & SF.NestedFrom == 0) continue;
+                        if (!s.sel_flags.IncludeHidden and isHiddenColumn(&t.cols[j])) continue;
+                        if (t.cols[j].col_flags.NOEXPAND and tname == null and !sel_flags.NestedFrom) continue;
                     }
                     table_seen = true;
 
-                    if (i > 0 and tname == null and sel_flags & SF.NestedFrom == 0) {
+                    if (i > 0 and tname == null and !sel_flags.NestedFrom) {
                         // A USING column comes from the left table only.
                         if (from.fg.is_using and build.idListIndex(from.u3.using.?, name) != null) continue;
                     }
                     const right = try expr_mod.expr(p.arena, TK.ID, name);
                     var ex: *Expr = undefined;
-                    if ((tab_list.len() > 1 and (from.fg.jointype & JT.LTORJ == 0 or tname != null or
-                        sel_flags & SF.NestedFrom != 0 or !inAnyUsingClause(name, tab_list, i, tab_list.len() - i - 1))) or
+                    if ((tab_list.len() > 1 and (!from.fg.jointype.LTORJ or tname != null or
+                        sel_flags.NestedFrom or !inAnyUsingClause(name, tab_list, i, tab_list.len() - i - 1))) or
                         p.inRenameObject())
                     {
                         var left = try expr_mod.expr(p.arena, TK.ID, tab_name);
@@ -2947,7 +2958,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                     expr_mod.setErrorOffset(ex, i_err_ofst);
                     new = try expr_mod.listAppend(p, new, ex);
                     const x = new.?.last();
-                    if (sel_flags & SF.NestedFrom != 0 and !p.inRenameObject()) {
+                    if (sel_flags.NestedFrom and !p.inRenameObject()) {
                         if (nested_from != null and j < nested_from.?.len()) {
                             x.e_name = if (nested_from.?.at(j).e_name) |en| try p.arena.dupeSentinel(u8, en, 0) else null;
                         } else {
@@ -2956,7 +2967,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
                         x.fg.e_ename = if (j == t.cols.len) .rowid else .tab;
                         if ((from.fg.is_using and build.idListIndex(from.u3.using.?, name) != null) or
                             (using != null and build.idListIndex(using.?, name) != null) or
-                            (j < t.cols.len and t.cols[j].col_flags & COLFLAG.NOEXPAND != 0))
+                            (j < t.cols.len and t.cols[j].col_flags.NOEXPAND))
                         {
                             x.fg.no_expand = true;
                         }
@@ -2984,7 +2995,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!u8 {
             util.errorMsg(p, "too many columns in result set", .{});
             return WRC.Abort;
         }
-        if (elist_flags & (EP.HasFunc | EP.Subquery) != 0) s.sel_flags |= SF.ComplexResult;
+        if (elist_flags.intersects(.{ .HasFunc = true, .Subquery = true })) s.sel_flags.ComplexResult = true;
     }
     return WRC.Continue;
 }
@@ -3005,12 +3016,12 @@ fn selectExpand(p: *Parse, s: *Select) void {
 /// Port of selectAddSubqueryTypeInfo(): the types of the tables of the
 /// FROM-clause subqueries, now that names are resolved.
 fn selectAddSubqueryTypeInfo(w: *Walker, s: *Select) void {
-    if (s.sel_flags & SF.HasTypeInfo != 0) return;
-    s.sel_flags |= SF.HasTypeInfo;
+    if (s.sel_flags.HasTypeInfo) return;
+    s.sel_flags.HasTypeInfo = true;
     const p = w.parse.?;
     for (s.src.?.slice()) |*from| {
         const t = from.s_tab.?;
-        if (t.tab_flags & TF.Ephemeral != 0 and from.fg.is_subquery) {
+        if (t.tab_flags.Ephemeral and from.fg.is_subquery) {
             subqueryColumnTypes(p, build.tableAlloc(p, t), t, from.u4.subq.?.select, Aff.none) catch oom(p);
         }
     }
@@ -3031,7 +3042,7 @@ fn selectAddTypeInfo(p: *Parse, s: *Select) void {
 /// joins, "*"), resolve its names, and type its FROM subqueries.
 pub fn selectPrep(p: *Parse, s: *Select, outer_nc: ?*NameContext) void {
     if (p.db.malloc_failed) return;
-    if (s.sel_flags & SF.HasTypeInfo != 0) return;
+    if (s.sel_flags.HasTypeInfo) return;
     selectExpand(p, s);
     if (p.n_err != 0) return;
     resolve.resolveSelectNames(p, s, outer_nc);
@@ -3042,14 +3053,14 @@ pub fn selectPrep(p: *Parse, s: *Select, outer_nc: ?*NameContext) void {
 /// Port of analyzeAggFuncArgs(): the AggInfo columns used only as
 /// arguments of aggregate functions.
 fn analyzeAggFuncArgs(agg: *AggInfo, nc: *NameContext) void {
-    nc.nc_flags |= NC.InAggFunc;
+    nc.nc_flags.InAggFunc = true;
     for (agg.funcs.items) |f| {
         const e = f.f_expr;
         expr_mod.analyzeAggList(nc, e.x.list);
         if (e.left) |l| expr_mod.analyzeAggList(nc, l.x.list);
-        if (e.has(EP.WinFunc)) expr_mod.analyzeAggregates(nc, e.y.win.?.filter);
+        if (e.flags.WinFunc) expr_mod.analyzeAggregates(nc, e.y.win.?.filter);
     }
-    nc.nc_flags &= ~NC.InAggFunc;
+    nc.nc_flags.InAggFunc = false;
 }
 
 /// Port of optimizeAggregateUseOfIndexedExpr(): after whereBegin() has
@@ -3067,7 +3078,7 @@ fn optimizeAggregateUseOfIndexedExpr(s: *Select, agg: *AggInfo, nc: *NameContext
 }
 
 /// Walker callback of aggregateConvertIndexedExprRefToColumn().
-fn aggregateIdxEprRefToColCallback(_: *walker.Walker, e: *Expr) u8 {
+fn aggregateIdxEprRefToColCallback(_: *walker.Walker, e: *Expr) WRC {
     const agg = e.agg_info orelse return WRC.Continue;
     if (e.op == TK.AGG_COLUMN or e.op == TK.AGG_FUNCTION or e.op == TK.IF_NULL_ROW) return WRC.Continue;
     if (e.i_agg >= agg.cols.items.len) return WRC.Continue;
@@ -3075,7 +3086,7 @@ fn aggregateIdxEprRefToColCallback(_: *walker.Walker, e: *Expr) u8 {
     e.op = TK.AGG_COLUMN;
     e.i_table = col.i_table;
     e.i_column = @intCast(col.i_column);
-    e.clear(EP.Skip | EP.Collate | EP.Unlikely);
+    e.flags.clear(.{ .Skip = true, .Collate = true, .Unlikely = true });
     return WRC.Prune;
 }
 
@@ -3172,7 +3183,7 @@ fn finalizeAggFunctions(p: *Parse, agg: *AggInfo) void {
 /// Port of updateAccumulator(): code the step of every aggregate for the
 /// current row, and the accumulator columns (only for the first row if
 /// `reg_acc` is set and there is no min() or max()).
-fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: u8) void {
+fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: int.WHERE_DISTINCT) void {
     const v = p.vdbe.?;
     var reg_hit: i32 = 0;
     var addr_hit_test: i32 = 0;
@@ -3185,9 +3196,9 @@ fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: u8
         var reg_distinct: i32 = 0;
         var n_arg: i32 = 0;
         const list = f.f_expr.x.list;
-        if (f.f_expr.has(EP.WinFunc)) {
+        if (f.f_expr.flags.WinFunc) {
             const filter = f.f_expr.y.win.?.filter;
-            if (agg.n_accumulator != 0 and f.func.?.func_flags & callback.FUNC.NEEDCOLL != 0 and reg_acc != 0) {
+            if (agg.n_accumulator != 0 and f.func.?.func_flags.NEEDCOLL and reg_acc != 0) {
                 // The "magnet" register: populate the accumulators on the
                 // first row even if the FILTER skips min() or max().
                 if (reg_hit == 0) {
@@ -3246,7 +3257,7 @@ fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: u8
             _ = aux.addOp4Int(v, OP.IdxInsert, f.i_ob_tab, reg_agg + reg_agg_sz - 1, reg_agg, reg_agg_sz - 1);
             expr_mod.releaseTempRange(p, reg_agg, reg_agg_sz);
         } else {
-            if (f.func.?.func_flags & callback.FUNC.NEEDCOLL != 0) {
+            if (f.func.?.func_flags.NEEDCOLL) {
                 var c: ?*CollSeq = null;
                 for (list.?.slice()) |item| {
                     if (c != null) break;
@@ -3279,7 +3290,7 @@ fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: u8
 /// Walker callback of havingToWhere(): descend through AND nodes; move any
 /// other term that is constant or GROUP BY terms to the WHERE clause,
 /// leaving a "1" in its place.
-fn havingToWhereExprCb(w: *Walker, e: *Expr) u8 {
+fn havingToWhereExprCb(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.AND) return WRC.Continue;
     const s = w.u.select.?;
     const p = w.parse.?;
@@ -3321,7 +3332,7 @@ fn havingToWhere(p: *Parse, s: *Select) void {
 /// in tab_list[first..end], or null.
 fn isSelfJoinView(tab_list: *SrcList, this: *SrcItem, first: usize, end: usize) ?*SrcItem {
     const sel = this.u4.subq.?.select;
-    if (sel.sel_flags & SF.PushDown != 0) return null;
+    if (sel.sel_flags.PushDown) return null;
     for (tab_list.slice()[first..end]) |*item| {
         if (!item.fg.is_subquery) continue;
         if (item.fg.via_coroutine) continue;
@@ -3330,7 +3341,7 @@ fn isSelfJoinView(tab_list: *SrcList, this: *SrcItem, first: usize, end: usize) 
         if (!ctype.eqlNoCase(name, this.name orelse "")) continue;
         const s1 = item.u4.subq.?.select;
         if (item.s_tab.?.schema == null and sel.sel_id != s1.sel_id) continue;
-        if (s1.sel_flags & SF.PushDown != 0) continue;
+        if (s1.sel_flags.PushDown) continue;
         return item;
     }
     return null;
@@ -3345,7 +3356,7 @@ fn isSelfJoinView(tab_list: *SrcList, this: *SrcItem, first: usize, end: usize) 
 /// HAVING, DISTINCT or aggregates, and the outer query is a plain
 /// count(*). Returns true if done.
 fn countOfViewOptimization(p: *Parse, s: *Select) Oom!bool {
-    if (s.sel_flags & SF.Aggregate == 0) return false;
+    if (!s.sel_flags.Aggregate) return false;
     if (s.e_list.?.len() != 1) return false;
     if (s.where != null) return false;
     if (s.having != null) return false;
@@ -3356,18 +3367,18 @@ fn countOfViewOptimization(p: *Parse, s: *Select) Oom!bool {
     if (!ctype.eqlNoCase(count.token(), "count")) return false;
     if (count.x.list != null) return false; // count(*)
     if (s.src.?.len() != 1) return false;
-    if (count.has(EP.WinFunc)) return false;
+    if (count.flags.WinFunc) return false;
     const from = s.src.?.at(0);
     if (!from.fg.is_subquery) return false;
-    if (s.sel_flags & SF.Correlated != 0) return false;
+    if (s.sel_flags.Correlated) return false;
     var sub: ?*Select = from.u4.subq.?.select;
     if (sub.?.prior == null) return false; // a compound
-    if (sub.?.sel_flags & SF.CopyCte != 0) return false; // not a CTE
+    if (sub.?.sel_flags.CopyCte) return false; // not a CTE
     while (sub) |sx| : (sub = sx.prior) {
         if (sx.op != TK.ALL and sx.prior != null) return false;
         if (sx.where != null) return false;
         if (sx.limit != null) return false;
-        if (sx.sel_flags & (SF.Aggregate | SF.Distinct) != 0) return false;
+        if (sx.sel_flags.intersects(.{ .Aggregate = true, .Distinct = true })) return false;
         std.debug.assert(sx.having == null);
     }
 
@@ -3380,8 +3391,8 @@ fn countOfViewOptimization(p: *Parse, s: *Select) Oom!bool {
         const prior = sx.prior;
         sx.prior = null;
         sx.next = null;
-        sx.sel_flags |= SF.Aggregate;
-        sx.sel_flags &= ~SF.Compound;
+        sx.sel_flags.Aggregate = true;
+        sx.sel_flags.Compound = false;
         sx.n_select_row = 0;
         var term = if (prior != null) (try expr_mod.exprDup(p.arena, count)).? else count;
         sx.e_list = try expr_mod.listAppend(p, null, term);
@@ -3392,13 +3403,13 @@ fn countOfViewOptimization(p: *Parse, s: *Select) Oom!bool {
         sub = prior;
     }
     s.e_list.?.at(0).expr = e;
-    s.sel_flags &= ~SF.Aggregate;
+    s.sel_flags.Aggregate = false;
     return true;
 }
 
 /// Port of fromClauseTermCanBeCoroutine(): FROM-clause subquery `i` can
 /// be a co-routine rather than materialized.
-fn fromClauseTermCanBeCoroutine(p: *Parse, tab_list: *SrcList, i_arg: usize, sel_flags: u32) bool {
+fn fromClauseTermCanBeCoroutine(p: *Parse, tab_list: *SrcList, i_arg: usize, sel_flags: SF) bool {
     var i = i_arg;
     const item = tab_list.at(i);
     if (item.fg.is_cte) {
@@ -3406,18 +3417,18 @@ fn fromClauseTermCanBeCoroutine(p: *Parse, tab_list: *SrcList, i_arg: usize, sel
         if (use.e_m10d == .yes) return false;
         if (use.n_use >= 2 and use.e_m10d != .no) return false;
     }
-    if (tab_list.at(0).fg.jointype & JT.LTORJ != 0) return false;
+    if (tab_list.at(0).fg.jointype.LTORJ) return false;
     if (p.db.optDisabled(int.OPT.Coroutines)) return false;
     if (isSelfJoinView(tab_list, item, i + 1, tab_list.len()) != null) return false;
     if (i == 0) {
         if (tab_list.len() == 1) return true;
-        if (tab_list.at(1).fg.jointype & JT.CROSS != 0) return true;
-        if (sel_flags & SF.UpdateFrom != 0) return false;
+        if (tab_list.at(1).fg.jointype.CROSS) return true;
+        if (sel_flags.UpdateFrom) return false;
         return true;
     }
-    if (sel_flags & SF.UpdateFrom != 0) return false;
+    if (sel_flags.UpdateFrom) return false;
     while (true) {
-        if (tab_list.at(i).fg.jointype & (JT.OUTER | JT.CROSS) != 0) return false;
+        if (tab_list.at(i).fg.jointype.intersects(.{ .OUTER = true, .CROSS = true })) return false;
         if (i == 0) break;
         i -= 1;
         if (tab_list.at(i).fg.is_subquery) return false;
@@ -3437,7 +3448,7 @@ fn fromClauseTermCanBeCoroutine(p: *Parse, tab_list: *SrcList, i_arg: usize, sel
 /// loop after the first match.
 fn existsToJoin(p: *Parse, s: *Select, where_arg: ?*Expr) Oom!void {
     const where = where_arg orelse return;
-    if (p.n_err == 0 and !where.has(EP.OuterON | EP.InnerON) and s.src.?.len() < int.bms and
+    if (p.n_err == 0 and !where.flags.intersects(.{ .OuterON = true, .InnerON = true }) and s.src.?.len() < int.bms and
         (s.limit == null or s.limit.?.right == null))
     {
         if (where.op == TK.AND) {
@@ -3447,7 +3458,7 @@ fn existsToJoin(p: *Parse, s: *Select, where_arg: ?*Expr) Oom!void {
         } else if (where.op == TK.EXISTS) {
             const sub = where.x.select.?;
             const sub_where = sub.where;
-            if (sub.src.?.len() == 1 and sub.sel_flags & SF.Aggregate == 0 and !sub.src.?.at(0).fg.is_subquery and
+            if (sub.src.?.len() == 1 and !sub.sel_flags.Aggregate and !sub.src.?.at(0).fg.is_subquery and
                 sub.limit == null and sub.prior == null)
             {
                 // The EXISTS might be a copy of another one in the tree, so
@@ -3457,7 +3468,7 @@ fn existsToJoin(p: *Parse, s: *Select, where_arg: ?*Expr) Oom!void {
                 csr_map[0] = p.n_tab + 1;
                 renumberCursors(p, sub, -1, csr_map);
 
-                where.* = .{ .op = TK.INTEGER, .flags = EP.IntValue, .u = .{ .value = 1 } };
+                where.* = .{ .op = TK.INTEGER, .flags = .{ .IntValue = true }, .u = .{ .value = 1 } };
                 sub.src.?.at(0).fg.from_exists = true;
                 s.src = try build.srcListAppendList(p, s.src.?, sub.src);
                 if (sub_where) |sw| {
@@ -3473,7 +3484,7 @@ fn existsToJoin(p: *Parse, s: *Select, where_arg: ?*Expr) Oom!void {
 }
 
 /// CheckOnCtx: the state of selectCheckOnClauses().
-const CheckOnCtx = struct {
+pub const CheckOnCtx = struct {
     src: *SrcList,
     /// Cursors must be left of this one, if not negative.
     i_join: i32 = -1,
@@ -3482,15 +3493,15 @@ const CheckOnCtx = struct {
 };
 
 fn hasRightJoin(src: *SrcList) bool {
-    return src.at(0).fg.jointype & JT.LTORJ != 0;
+    return src.at(0).fg.jointype.LTORJ;
 }
 
-fn selectCheckOnClausesExpr(w: *Walker, e: *Expr) u8 {
-    var ctx: ?*CheckOnCtx = @ptrCast(@alignCast(w.u.ptr.?));
-    const c0 = ctx.?;
+fn selectCheckOnClausesExpr(w: *Walker, e: *Expr) WRC {
+    const c0 = w.u.check_on_ctx;
+    var ctx: ?*CheckOnCtx = c0;
     // The root of an ON term of an OUTER join, or of an INNER join in a
     // FROM clause with a RIGHT or FULL join.
-    if (e.has(EP.OuterON) or (e.has(EP.InnerON) and hasRightJoin(c0.src))) {
+    if (e.flags.OuterON or (e.flags.InnerON and hasRightJoin(c0.src))) {
         if (c0.i_join < 0) {
             c0.i_join = e.w.join;
             _ = walker.walkExprNN(w, e);
@@ -3524,14 +3535,14 @@ fn selectCheckOnClausesExpr(w: *Walker, e: *Expr) u8 {
     return WRC.Continue;
 }
 
-fn selectCheckOnClausesSelect(w: *Walker, s: *Select) u8 {
-    const ctx: *CheckOnCtx = @ptrCast(@alignCast(w.u.ptr.?));
+fn selectCheckOnClausesSelect(w: *Walker, s: *Select) WRC {
+    const ctx = w.u.check_on_ctx;
     if (s.src == ctx.src or s.src.?.len() == 0) return WRC.Continue;
     var sub: CheckOnCtx = .{ .src = s.src.?, .parent = ctx };
-    w.u = .{ .ptr = &sub };
+    w.u = .{ .check_on_ctx = &sub };
     _ = walker.walkSelect(w, s);
-    w.u = .{ .ptr = ctx };
-    s.sel_flags &= ~SF.OnToWhere;
+    w.u = .{ .check_on_ctx = ctx };
+    s.sel_flags.OnToWhere = false;
     return WRC.Prune;
 }
 
@@ -3543,21 +3554,21 @@ pub fn selectCheckOnClauses(p: *Parse, s: *Select) void {
         .parse = p,
         .expr_callback = selectCheckOnClausesExpr,
         .select_callback = selectCheckOnClausesSelect,
-        .u = .{ .ptr = &ctx },
+        .u = .{ .check_on_ctx = &ctx },
     };
     _ = walker.walkExpr(&w, s.where);
-    s.sel_flags &= ~SF.OnToWhere;
+    s.sel_flags.OnToWhere = false;
 
     ctx.func_arg = true;
     const items = s.src.?.slice();
     for (items, 0..) |*item, ii| {
         if (!item.fg.is_tab_func) continue;
         ctx.i_join = -1;
-        if (item.fg.jointype & (JT.LTORJ | JT.RIGHT) != 0) {
+        if (item.fg.jointype.intersects(.{ .LTORJ = true, .RIGHT = true })) {
             ctx.i_join = item.i_cursor;
         } else {
             for (items[ii + 1 ..], ii + 1..) |*item2, jj| {
-                if (item2.fg.jointype & JT.OUTER != 0) {
+                if (item2.fg.jointype.OUTER) {
                     ctx.i_join = items[jj - 1].i_cursor;
                     break;
                 }
@@ -3578,51 +3589,54 @@ fn copySortOrder(p1: *ExprList, p2: ?*ExprList) bool {
 
 /// IgnorableDistinct() and IgnorableOrderby().
 fn ignorableDistinct(dest: *const SelectDest) bool {
-    return dest.e_dest <= SRT.DistFifo;
+    return dest.e_dest.int() <= SRT.DistQueue.int();
 }
 
 fn ignorableOrderby(dest: *const SelectDest) bool {
-    return dest.e_dest <= SRT.Fifo;
+    return dest.e_dest.int() <= SRT.Fifo.int();
 }
 
 /// Port of sqlite3Select(): generate code for a SELECT, sending the rows
-/// to `dest`. Returns nonzero on error.
-pub fn select(p: *Parse, s: *Select, dest: *SelectDest) u32 {
-    if (p.syntax_only) return 0;
-    return selectImpl(p, s, dest) catch {
-        oom(p);
-        return 1;
+/// to `dest`. On error (C: nonzero) the error is in `p`.
+pub fn select(p: *Parse, s: *Select, dest: *SelectDest) int.ParseError!void {
+    if (p.syntax_only) return;
+    return selectImpl(p, s, dest) catch |err| switch (err) {
+        error.OutOfMemory => {
+            oom(p);
+            return error.ParseFailed;
+        },
+        error.ParseFailed => |e| return e,
     };
 }
 
-fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
+fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!void {
     const db = p.db;
-    const v = build.getVdbe(p) orelse return 1;
-    if (p.n_err != 0) return 1;
+    const v = build.getVdbe(p) orelse return error.ParseFailed;
+    if (p.n_err != 0) return error.ParseFailed;
 
     if (ignorableDistinct(dest)) {
         // These destinations ignore ORDER BY and DISTINCT.
         s.order_by = null;
-        s.sel_flags &= ~SF.Distinct;
+        s.sel_flags.Distinct = false;
     }
     selectPrep(p, s, null);
-    if (p.n_err != 0) return 1;
+    if (p.n_err != 0) return error.ParseFailed;
 
     // UPDATE ... FROM: the target may not appear in the FROM clause.
-    if (s.sel_flags & SF.UFSrcCheck != 0) {
+    if (s.sel_flags.UFSrcCheck) {
         const p0 = s.src.?.at(0);
         if (sameSrcAlias(p0, s.src.?)) {
             util.errorMsg(p, "target object/alias may not appear in FROM clause: {s}", .{p0.alias orelse p0.s_tab.?.name});
-            return 1;
+            return error.ParseFailed;
         }
-        s.sel_flags &= ~SF.UFSrcCheck;
+        s.sel_flags.UFSrcCheck = false;
     }
 
     if (dest.e_dest == SRT.Output) generateColumnNames(p, s);
 
-    if (try window.windowRewrite(p, s) != 0) return 1;
+    try window.windowRewrite(p, s);
     var tab_list = s.src.?;
-    var is_agg = s.sel_flags & SF.Aggregate != 0;
+    var is_agg = s.sel_flags.Aggregate;
     var sort: SortCtx = .{ .order_by = s.order_by };
 
     // Optimize the FROM clause: OUTER JOIN strength reduction, removal of
@@ -3638,25 +3652,25 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         // LEFT JOIN becomes JOIN, RIGHT JOIN becomes JOIN and FULL JOIN
         // becomes RIGHT JOIN when the WHERE clause rules out the NULL row
         // of the i-th table.
-        if (item.fg.jointype & (JT.LEFT | JT.LTORJ) != 0 and
-            expr_mod.impliesNonNullRow(s.where, item.i_cursor, item.fg.jointype & JT.LTORJ != 0) and
+        if (item.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true }) and
+            expr_mod.impliesNonNullRow(s.where, item.i_cursor, item.fg.jointype.LTORJ) and
             !db.optDisabled(int.OPT.SimplifyJoin))
         {
-            if (item.fg.jointype & JT.LEFT != 0) {
-                if (item.fg.jointype & JT.RIGHT != 0) {
-                    item.fg.jointype &= ~JT.LEFT;
+            if (item.fg.jointype.LEFT) {
+                if (item.fg.jointype.RIGHT) {
+                    item.fg.jointype.LEFT = false;
                 } else {
-                    item.fg.jointype &= ~(JT.LEFT | JT.OUTER);
+                    item.fg.jointype = item.fg.jointype.without(.{ .LEFT = true, .OUTER = true });
                     unsetJoinExpr(s.where, item.i_cursor, false);
                 }
             }
-            if (item.fg.jointype & JT.LTORJ != 0) {
+            if (item.fg.jointype.LTORJ) {
                 for (tab_list.slice()[i + 1 ..]) |*item2| {
-                    if (item2.fg.jointype & JT.RIGHT != 0) {
-                        if (item2.fg.jointype & JT.LEFT != 0) {
-                            item2.fg.jointype &= ~JT.RIGHT;
+                    if (item2.fg.jointype.RIGHT) {
+                        if (item2.fg.jointype.LEFT) {
+                            item2.fg.jointype.RIGHT = false;
                         } else {
-                            item2.fg.jointype &= ~(JT.RIGHT | JT.OUTER);
+                            item2.fg.jointype = item2.fg.jointype.without(.{ .RIGHT = true, .OUTER = true });
                             unsetJoinExpr(s.where, item2.i_cursor, true);
                         }
                     }
@@ -3664,8 +3678,8 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                 var j = tab_list.len();
                 while (j > 0) {
                     j -= 1;
-                    tab_list.at(j).fg.jointype &= ~JT.LTORJ;
-                    if (tab_list.at(j).fg.jointype & JT.RIGHT != 0) break;
+                    tab_list.at(j).fg.jointype.LTORJ = false;
+                    if (tab_list.at(j).fg.jointype.RIGHT) break;
                 }
             }
         }
@@ -3674,7 +3688,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         // The declared columns of a view must match its SELECT.
         if (t.cols.len != sq.e_list.?.len()) {
             util.errorMsg(p, "expected {d} columns for '{s}' but got {d}", .{ t.cols.len, t.name, sq.e_list.?.len() });
-            return 1;
+            return error.ParseFailed;
         }
         // A MATERIALIZED CTE is an optimization fence.
         if (item.fg.is_cte and item.u2.cte_use.?.e_m10d == .yes) continue;
@@ -3682,7 +3696,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         // An aggregate subquery is not flattened: that is only possible if
         // the outer query is not a join, and then the subquery is a
         // co-routine anyway.
-        if (sq.sel_flags & SF.Aggregate != 0) continue;
+        if (sq.sel_flags.Aggregate) continue;
 
         // Omit an ORDER BY of a subquery that does nothing, so that it
         // does not block flattening. It is kept with a LIMIT, for a window
@@ -3690,7 +3704,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         // query uses an aggregate other than count(), min() or max(), and
         // unless the outer query has its own ORDER BY or is a join.
         if (sq.order_by != null and (s.order_by != null or tab_list.len() > 1) and sq.limit == null and
-            sq.sel_flags & (SF.OrderByReqd | SF.Recursive) == 0 and s.sel_flags & SF.OrderByReqd == 0 and
+            !sq.sel_flags.intersects(.{ .OrderByReqd = true, .Recursive = true }) and !s.sel_flags.OrderByReqd and
             !db.optDisabled(int.OPT.OmitOrderBy))
         {
             sq.order_by = null;
@@ -3700,27 +3714,27 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         // flattened into a query with a complex result set, so that in
         // "SELECT expensive_function(x) FROM (SELECT x FROM tab ORDER BY y
         // LIMIT 10)" the function only runs for the 10 output rows.
-        if (sq.order_by != null and i == 0 and s.sel_flags & SF.ComplexResult != 0 and
-            (tab_list.len() == 1 or tab_list.at(1).fg.jointype & (JT.OUTER | JT.CROSS) != 0))
+        if (sq.order_by != null and i == 0 and s.sel_flags.ComplexResult and
+            (tab_list.len() == 1 or tab_list.at(1).fg.jointype.intersects(.{ .OUTER = true, .CROSS = true })))
         {
             continue;
         }
 
         if (try flattenSubquery(p, s, i, is_agg)) {
-            if (p.n_err != 0) return 1;
+            if (p.n_err != 0) return error.ParseFailed;
             // Start over with the new FROM clause.
             i_from = 0;
         }
         tab_list = s.src.?;
-        if (db.malloc_failed) return 1;
+        if (db.malloc_failed) return error.ParseFailed;
         if (!ignorableOrderby(dest)) sort.order_by = s.order_by;
     }
 
     // Compound SELECTs.
     if (s.prior != null) {
-        const rc = try multiSelect(p, s, dest);
+        const r = multiSelect(p, s, dest);
         if (s.next == null) aux.explainPop(p);
-        return rc;
+        return r;
     }
     defer aux.explainPop(p);
 
@@ -3737,7 +3751,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     }
 
     if (!db.optDisabled(int.OPT.QueryFlattener | int.OPT.CountOfView) and try countOfViewOptimization(p, s)) {
-        if (db.malloc_failed) return 1;
+        if (db.malloc_failed) return error.ParseFailed;
         tab_list = s.src.?;
     }
 
@@ -3770,7 +3784,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             subq.addr_fill_sub = addr_top;
             var d = selectDestInit(SRT.Coroutine, subq.reg_return);
             _ = aux.explain(p, true, "CO-ROUTINE {f}", .{util.srcItemNameNoAlias(item)});
-            _ = select(p, sub, &d);
+            select(p, sub, &d) catch {};
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             item.fg.via_coroutine = true;
             subq.reg_result = d.i_sdst;
@@ -3802,7 +3816,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             if (!item.fg.is_correlated) once_addr = aux.addOp0(v, OP.Once);
             var d = selectDestInit(SRT.EphemTab, item.i_cursor);
             _ = aux.explain(p, true, "MATERIALIZE {f}", .{util.srcItemNameNoAlias(item)});
-            _ = select(p, sub, &d);
+            select(p, sub, &d) catch {};
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             if (once_addr != 0) aux.jumpHere(v, once_addr);
             _ = aux.addOp2(v, OP.Return, subq.reg_return, top_addr + 1);
@@ -3816,7 +3830,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                 use.n_row_est = sub.n_select_row;
             }
         }
-        if (db.malloc_failed) return 1;
+        if (db.malloc_failed) return error.ParseFailed;
         p.n_height -= expr_mod.selectExprHeight(s);
     }
 
@@ -3824,20 +3838,20 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     var where = s.where;
     var group_by = s.group_by;
     const having = s.having;
-    var distinct: DistinctCtx = .{ .is_tnct = @intFromBool(s.sel_flags & SF.Distinct != 0) };
+    var distinct: DistinctCtx = .{ .is_tnct = @intFromBool(s.sel_flags.Distinct) };
 
     // "SELECT DISTINCT xyz ... ORDER BY xyz" is coded as "... GROUP BY xyz
     // ORDER BY xyz".
-    if (s.sel_flags & (SF.Distinct | SF.Aggregate) == SF.Distinct and copySortOrder(e_list, sort.order_by) and
+    if (s.sel_flags.only(.{ .Distinct = true, .Aggregate = true }) == SF{ .Distinct = true } and copySortOrder(e_list, sort.order_by) and
         expr_mod.listCompare(e_list, sort.order_by, -1) == 0 and !db.optDisabled(int.OPT.GroupByOrder) and s.win == null)
     {
-        s.sel_flags &= ~SF.Distinct;
+        s.sel_flags.Distinct = false;
         group_by = try expr_mod.listDup(p.arena, e_list);
         s.group_by = group_by;
         if (group_by) |gb| for (gb.slice(), 0..) |*item, i| {
             item.u = .{ .x = .{ .order_by_col = @intCast(i + 1) } };
         };
-        s.sel_flags |= SF.Aggregate;
+        s.sel_flags.Aggregate = true;
         is_agg = true;
         distinct.is_tnct = 2;
     }
@@ -3855,7 +3869,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     // The output table.
     if (dest.e_dest == SRT.EphemTab) {
         _ = aux.addOp2(v, OP.OpenEphemeral, dest.i_sd_parm, @intCast(e_list.len()));
-        if (s.sel_flags & SF.NestedFrom != 0) {
+        if (s.sel_flags.NestedFrom) {
             // Unused result columns are dropped or NULL.
             var ii = e_list.len() - 1;
             while (ii > 0 and !e_list.at(ii).fg.used) : (ii -= 1) {
@@ -3869,7 +3883,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
 
     // LIMIT.
     const i_end = aux.makeLabel(p);
-    if (s.sel_flags & SF.FixedLimit == 0) s.n_select_row = 320;
+    if (!s.sel_flags.FixedLimit) s.n_select_row = 320;
     if (s.limit != null) computeLimitRegisters(p, s, i_end);
     if (s.i_limit == 0 and sort.addr_sort_index >= 0) {
         aux.changeOpcode(v, sort.addr_sort_index, OP.SorterOpen);
@@ -3877,29 +3891,30 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
     }
 
     // The table of DISTINCT.
-    if (s.sel_flags & SF.Distinct != 0) {
+    if (s.sel_flags.Distinct) {
         distinct.tab_tnct = p.n_tab;
         p.n_tab += 1;
         const ki = keyInfoFromExprList(p, s.e_list.?, 0, 0);
         distinct.addr_tnct = aux.addOp4(v, OP.OpenEphemeral, distinct.tab_tnct, 0, 0, if (ki) |k| .{ .keyinfo = k } else .notused);
         aux.changeP5(v, BTREE_UNORDERED);
-        distinct.e_tnct_type = int.WHERE_DISTINCT_UNORDERED;
+        distinct.e_tnct_type = int.WHERE_DISTINCT.UNORDERED;
     } else {
-        distinct.e_tnct_type = int.WHERE_DISTINCT_NOOP;
+        distinct.e_tnct_type = int.WHERE_DISTINCT.NOOP;
     }
 
     if (!is_agg and group_by == null) {
         // No aggregates and no GROUP BY.
-        const wctrl_flags: u16 = (if (distinct.is_tnct != 0) WHERE.WANT_DISTINCT else 0) | @as(u16, @intCast(s.sel_flags & SF.FixedLimit));
+        // C: selFlags & SF_FixedLimit, the bit of WHERE_USE_LIMIT.
+        const wctrl_flags: WHERE = .{ .WANT_DISTINCT = distinct.is_tnct != 0, .USE_LIMIT = s.sel_flags.FixedLimit };
         const win = s.win; // The main window object, or null.
         if (win != null) window.windowCodeInit(p, s);
-        const w = where_mod.whereBegin(p, tab_list, where, sort.order_by, s.e_list, s, wctrl_flags, s.n_select_row) orelse return 1;
+        const w = where_mod.whereBegin(p, tab_list, where, sort.order_by, s.e_list, s, wctrl_flags, s.n_select_row) orelse return error.ParseFailed;
         if (where_mod.outputRowCount(w) < s.n_select_row) {
             s.n_select_row = where_mod.outputRowCount(w);
             // A UNION CTE implies DISTINCT.
-            if (dest.e_dest <= SRT.DistQueue and dest.e_dest >= SRT.DistFifo) s.n_select_row -= 30;
+            if (dest.e_dest.int() <= SRT.DistQueue.int() and dest.e_dest.int() >= SRT.DistFifo.int()) s.n_select_row -= 30;
         }
-        if (distinct.is_tnct != 0 and where_mod.isDistinct(w) != 0) distinct.e_tnct_type = where_mod.isDistinct(w);
+        if (distinct.is_tnct != 0 and where_mod.isDistinct(w) != .NOOP) distinct.e_tnct_type = where_mod.isDistinct(w);
         if (sort.order_by) |ob| {
             sort.n_ob_sat = where_mod.isOrdered(w);
             sort.label_ob_lopt = where_mod.orderByLimitOptLabel(w);
@@ -3950,7 +3965,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         // the AggInfo.
         const agg = try p.arena.create(AggInfo);
         agg.* = .{ .sel_id = s.sel_id };
-        var nc: NameContext = .{ .parse = p, .src_list = tab_list, .u_nc = .{ .agg_info = agg }, .nc_flags = NC.UAggInfo };
+        var nc: NameContext = .{ .parse = p, .src_list = tab_list, .u_nc = .{ .agg_info = agg }, .nc_flags = .{ .UAggInfo = true } };
         agg.n_sorting_column = if (group_by) |gb| @intCast(gb.len()) else 0;
         agg.group_by = group_by;
         expr_mod.analyzeAggList(&nc, e_list);
@@ -3964,21 +3979,21 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         }
         agg.n_accumulator = @intCast(agg.cols.items.len);
         var min_max_order_by: ?*ExprList = null;
-        const min_max_flag: u16 = if (s.group_by == null and s.having == null and agg.funcs.items.len == 1)
+        const min_max_flag: WHERE = if (s.group_by == null and s.having == null and agg.funcs.items.len == 1)
             try minMaxQuery(p, agg.funcs.items[0].f_expr, &min_max_order_by)
         else
             WHERE.ORDERBY_NORMAL;
         analyzeAggFuncArgs(agg, &nc);
-        if (db.malloc_failed) return 1;
+        if (db.malloc_failed) return error.ParseFailed;
 
         if (group_by) |gb| {
             var distinct_list: ?*ExprList = null;
-            var dist_flag: u16 = 0;
+            var dist_flag: WHERE = .{};
             if (agg.funcs.items.len == 1 and agg.funcs.items[0].i_distinct >= 0 and agg.funcs.items[0].f_expr.x.list != null) {
                 const e = try expr_mod.exprDup(p.arena, agg.funcs.items[0].f_expr.x.list.?.at(0).expr);
                 distinct_list = try expr_mod.listDup(p.arena, gb);
                 distinct_list = try expr_mod.listAppend(p, distinct_list, e);
-                dist_flag = WHERE.WANT_DISTINCT | WHERE.AGG_DISTINCT;
+                dist_flag = .{ .WANT_DISTINCT = true, .AGG_DISTINCT = true };
             }
 
             // The sorter of the GROUP BY (made a no-op if not needed).
@@ -4009,8 +4024,11 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             // The rows in GROUP BY order: sorted by the sorter unless the
             // loop delivers them so.
             _ = aux.addOp2(v, OP.Gosub, reg_reset, addr_reset);
-            const w = where_mod.whereBegin(p, tab_list, where, gb, distinct_list, s, (if (distinct.is_tnct == 2) WHERE.DISTINCTBY else WHERE.GROUPBY) |
-                (if (order_by_grp) WHERE.SORTBYGROUP else 0) | dist_flag, 0) orelse return 1;
+            const w = where_mod.whereBegin(p, tab_list, where, gb, distinct_list, s, dist_flag.with(.{
+                .DISTINCTBY = distinct.is_tnct == 2,
+                .GROUPBY = distinct.is_tnct != 2,
+                .SORTBYGROUP = order_by_grp,
+            }), 0) orelse return error.ParseFailed;
             if (p.idx_epr != null) optimizeAggregateUseOfIndexedExpr(s, agg, &nc);
             assignAggregateRegisters(p, agg);
             const e_dist = where_mod.isDistinct(w);
@@ -4020,7 +4038,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             if (where_mod.isOrdered(w) == n_gb) {
                 group_by_sort = false;
             } else {
-                _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{if (distinct.is_tnct != 0 and s.sel_flags & SF.Distinct == 0) "DISTINCT" else "GROUP BY"});
+                _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{if (distinct.is_tnct != 0 and !s.sel_flags.Distinct) "DISTINCT" else "GROUP BY"});
                 group_by_sort = true;
                 var n_col: i32 = n_gb;
                 var j: i32 = n_gb;
@@ -4138,7 +4156,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
             _ = aux.addOp2(v, OP.Integer, 0, i_use_flag);
             _ = aux.addOp1(v, OP.Return, reg_reset);
 
-            if (dist_flag != 0 and e_dist != int.WHERE_DISTINCT_NOOP) {
+            if (!dist_flag.isEmpty() and e_dist != int.WHERE_DISTINCT.NOOP) {
                 const f = &agg.funcs.items[0];
                 fixDistinctOpenEph(p, e_dist, f.i_distinct, f.i_dist_addr);
             }
@@ -4179,13 +4197,13 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                 // The general case.
                 var reg_acc: i32 = 0;
                 var distinct_list: ?*ExprList = null;
-                var dist_flag: u16 = 0;
+                var dist_flag: WHERE = .{};
                 // regAcc is 0 for the first row and 1 after, so that the
                 // accumulators are set once (unless min() or max() set them).
                 if (agg.n_accumulator != 0) {
                     const has_minmax = for (agg.funcs.items) |f| {
-                        if (f.f_expr.has(EP.WinFunc)) continue;
-                        if (f.func.?.func_flags & callback.FUNC.NEEDCOLL != 0) break true;
+                        if (f.f_expr.flags.WinFunc) continue;
+                        if (f.func.?.func_flags.NEEDCOLL) break true;
                     } else false;
                     if (!has_minmax) {
                         p.n_mem += 1;
@@ -4194,20 +4212,20 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
                     }
                 } else if (agg.funcs.items.len == 1 and agg.funcs.items[0].i_distinct >= 0) {
                     distinct_list = agg.funcs.items[0].f_expr.x.list;
-                    if (distinct_list != null) dist_flag = WHERE.WANT_DISTINCT | WHERE.AGG_DISTINCT;
+                    if (distinct_list != null) dist_flag = .{ .WANT_DISTINCT = true, .AGG_DISTINCT = true };
                 }
                 assignAggregateRegisters(p, agg);
                 resetAccumulator(p, agg);
 
-                const w = where_mod.whereBegin(p, tab_list, where, min_max_order_by, distinct_list, s, min_max_flag | dist_flag, 0) orelse return 1;
+                const w = where_mod.whereBegin(p, tab_list, where, min_max_order_by, distinct_list, s, min_max_flag.with(dist_flag), 0) orelse return error.ParseFailed;
                 const e_dist = where_mod.isDistinct(w);
                 updateAccumulator(p, reg_acc, agg, e_dist);
-                if (e_dist != int.WHERE_DISTINCT_NOOP and agg.funcs.items.len > 0) {
+                if (e_dist != int.WHERE_DISTINCT.NOOP and agg.funcs.items.len > 0) {
                     const f = &agg.funcs.items[0];
                     fixDistinctOpenEph(p, e_dist, f.i_distinct, f.i_dist_addr);
                 }
                 if (reg_acc != 0) _ = aux.addOp2(v, OP.Integer, 1, reg_acc);
-                if (min_max_flag != 0) where_mod.minMaxOptEarlyOut(v, w);
+                if (!min_max_flag.isEmpty()) where_mod.minMaxOptEarlyOut(v, w);
                 where_mod.whereEnd(w);
                 finalizeAggFunctions(p, agg);
             }
@@ -4219,30 +4237,30 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) Oom!u32 {
         aux.resolveLabel(v, addr_end);
     }
 
-    if (distinct.e_tnct_type == int.WHERE_DISTINCT_UNORDERED) explainTempTable(p, "DISTINCT");
+    if (distinct.e_tnct_type == int.WHERE_DISTINCT.UNORDERED) explainTempTable(p, "DISTINCT");
 
     // Sort the results.
     if (sort.order_by != null) generateSortTail(p, s, &sort, @intCast(e_list.len()), dest);
 
     aux.resolveLabel(v, i_end);
-    return @intFromBool(p.n_err > 0);
+    if (p.n_err > 0) return error.ParseFailed;
 }
 
 /// Port of minMaxQuery(): WHERE_ORDERBY_MIN or _MAX if `func` is min()
 /// or max() of one argument, with the ORDER BY that lets the loop find
 /// the value in `min_max` ; else WHERE_ORDERBY_NORMAL.
-fn minMaxQuery(p: *Parse, func: *Expr, min_max: *?*ExprList) Oom!u16 {
+fn minMaxQuery(p: *Parse, func: *Expr, min_max: *?*ExprList) Oom!WHERE {
     std.debug.assert(func.op == TK.AGG_FUNCTION);
     const list = func.x.list orelse return WHERE.ORDERBY_NORMAL;
-    if (list.len() != 1 or func.has(EP.WinFunc) or p.db.optDisabled(int.OPT.MinMaxOpt)) return WHERE.ORDERBY_NORMAL;
+    if (list.len() != 1 or func.flags.WinFunc or p.db.optDisabled(int.OPT.MinMaxOpt)) return WHERE.ORDERBY_NORMAL;
     const name = func.token();
-    var ret: u16 = undefined;
+    var ret: WHERE = undefined;
     var sort_flags: u8 = 0;
     if (ctype.eqlNoCase(name, "min")) {
-        ret = WHERE.ORDERBY_MIN;
+        ret = .{ .ORDERBY_MIN = true };
         if (expr_mod.canBeNull(list.at(0).expr.?)) sort_flags = int.KeyInfoOrder.bignull;
     } else if (ctype.eqlNoCase(name, "max")) {
-        ret = WHERE.ORDERBY_MAX;
+        ret = .{ .ORDERBY_MAX = true };
         sort_flags = int.KeyInfoOrder.desc;
     } else {
         return WHERE.ORDERBY_NORMAL;
@@ -4276,7 +4294,7 @@ fn sameSrcAlias(p0: *SrcItem, src: *SrcList) bool {
     for (src.slice()) |*p1| {
         if (p0 != p1) {
             if (p0.s_tab == p1.s_tab and ctype.eqlNoCase(p0.alias orelse "", p1.alias orelse "")) return true;
-            if (p1.fg.is_subquery and p1.u4.subq.?.select.sel_flags & SF.NestedFrom != 0 and
+            if (p1.fg.is_subquery and p1.u4.subq.?.select.sel_flags.NestedFrom and
                 sameSrcAlias(p0, p1.u4.subq.?.select.src.?))
             {
                 return true;

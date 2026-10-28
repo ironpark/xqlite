@@ -14,6 +14,7 @@ const std = @import("std");
 const numeric = @import("numeric.zig");
 const int = @import("sqlite_int.zig");
 const malloc = @import("malloc.zig");
+const thunk = @import("../util/thunk.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -45,28 +46,37 @@ pub const Arg = union(enum) {
     src_item: *const int.SrcItem,
 };
 
-/// The arguments of the printf() SQL function (PrintfArguments).
+/// The arguments of the printf() SQL function (PrintfArguments), read
+/// through callbacks so that this file needs no VDBE values. Made with
+/// init() from typed readers.
 pub const ArgSource = struct {
-    ctx: *anyopaque,
+    ctx: *const anyopaque,
     n_arg: usize,
     n_used: usize = 0,
-    int64: *const fn (ctx: *anyopaque, i: usize) i64,
-    double: *const fn (ctx: *anyopaque, i: usize) f64,
+    int64: *const fn (ctx: *const anyopaque, i: usize) i64,
+    double: *const fn (ctx: *const anyopaque, i: usize) f64,
     /// The argument as text, or null for NULL.
-    text: *const fn (ctx: *anyopaque, i: usize) ?[]const u8,
+    text: *const fn (ctx: *const anyopaque, i: usize) ?[]const u8,
+
+    /// The `n_arg` arguments of `ctx`, read by `int64(ctx, i)`,
+    /// `double(ctx, i)` and `text(ctx, i)`, typed functions taking `ctx`
+    /// first (made C-shaped by thunk.thunk()).
+    pub fn init(ctx: anytype, n_arg: usize, comptime int64: anytype, comptime double: anytype, comptime text: anytype) ArgSource {
+        const Ctx = @typeInfo(@TypeOf(int64)).@"fn".param_types[0].?;
+        const typed: Ctx = ctx;
+        return .{
+            .ctx = thunk.erase(*const anyopaque, typed),
+            .n_arg = n_arg,
+            .int64 = thunk.thunk(@FieldType(ArgSource, "int64"), int64),
+            .double = thunk.thunk(@FieldType(ArgSource, "double"), double),
+            .text = thunk.thunk(@FieldType(ArgSource, "text"), text),
+        };
+    }
 };
 
 pub const Args = union(enum) {
     list: []const Arg,
     sql: *ArgSource,
-};
-
-/// Called while rendering %T and %#T so the caller can record the error
-/// offset (sqlite3RecordErrorByteOffset/sqlite3RecordErrorOffsetOfExpr).
-pub const OffsetHook = struct {
-    ctx: *anyopaque,
-    token: *const fn (ctx: *anyopaque, z: [*]const u8) void,
-    expr: *const fn (ctx: *anyopaque, e: *const int.Expr) void,
 };
 
 /// A string under construction (StrAccum / sqlite3_str).
@@ -85,7 +95,9 @@ pub const StrAccum = struct {
     internal: bool = false,
     /// SQLITE_PRINTF_MALLOCED: buf was allocated with gpa.
     malloced: bool = false,
-    offset_hook: ?OffsetHook = null,
+    /// The connection, if any (sqlite3MPrintf(db, ...)): %T and %#T
+    /// record the error offset of its statement under construction.
+    db: ?*int.Sqlite3 = null,
 
     /// Port of sqlite3StrAccumInit(): `base` is the initial buffer (may
     /// be empty); `mx_alloc` 0 means it never grows.
@@ -142,10 +154,15 @@ pub const StrAccum = struct {
         return n;
     }
 
-    /// Port of sqlite3StrAccumEnlargeIfNeeded(): returns acc_error.
-    pub fn enlargeIfNeeded(p: *StrAccum, n: usize) u8 {
+    /// Port of sqlite3StrAccumEnlargeIfNeeded(): fails with the error of
+    /// the accumulator (acc_error), if it has one.
+    pub fn enlargeIfNeeded(p: *StrAccum, n: usize) Error!void {
         if (n + p.n_char >= p.buf.len) _ = p.enlarge(n);
-        return p.acc_error;
+        return switch (p.acc_error) {
+            0 => {},
+            TOOBIG => error.TooBig,
+            else => error.OutOfMemory,
+        };
     }
 
     /// Port of sqlite3_str_appendchar(): `n` copies of `c`.
@@ -934,7 +951,7 @@ pub fn vappendf(acc: *StrAccum, fmt: []const u8, args: Args) void {
                     while (precision > 1) {
                         if (n_prior > precision - 1) n_prior = precision - 1;
                         const n_copy: usize = length * @as(usize, @intCast(n_prior));
-                        if (acc.enlargeIfNeeded(n_copy) != 0) break;
+                        acc.enlargeIfNeeded(n_copy) catch break;
                         @memcpy(acc.buf[acc.n_char..][0..n_copy], acc.buf[acc.n_char - n_copy ..][0..n_copy]);
                         acc.n_char += n_copy;
                         precision -= n_prior;
@@ -1156,13 +1173,13 @@ pub fn vappendf(acc: *StrAccum, fmt: []const u8, args: Args) void {
                         const e = arg.expr;
                         if (e.useUToken()) {
                             acc.appendAll(e.u.token orelse "");
-                            if (acc.offset_hook) |h| h.expr(h.ctx, e);
+                            if (acc.db) |db| recordErrorOffsetOfExpr(db, e);
                         }
                     };
                 } else if (a) |arg| if (arg == .token) {
                     if (arg.token) |t| if (t.n != 0) {
                         acc.append(t.slice());
-                        if (acc.offset_hook) |h| h.token(h.ctx, t.z.?);
+                        if (acc.db) |db| recordErrorByteOffset(db, t.z.?);
                     };
                 };
                 width = 0;
@@ -1186,9 +1203,9 @@ pub fn vappendf(acc: *StrAccum, fmt: []const u8, args: Args) void {
                     acc.appendAll(alias);
                 } else if (item.fg.is_subquery) {
                     const sel = item.u4.subq.?.select;
-                    if (sel.sel_flags & int.SF.NestedFrom != 0) {
+                    if (sel.sel_flags.NestedFrom) {
                         acc.appendf("(join-%u)", &.{.{ .int = sel.sel_id }});
-                    } else if (sel.sel_flags & int.SF.MultiValue != 0) {
+                    } else if (sel.sel_flags.MultiValue) {
                         acc.appendf("%u-ROW VALUES CLAUSE", &.{.{ .int = item.u1.n_row }});
                     } else {
                         acc.appendf("(subquery-%u)", &.{.{ .int = sel.sel_id }});
@@ -1230,12 +1247,29 @@ fn adjustWidthForUtf8(out: []const u8, width_arg: i64, flag_altform2: bool) i64 
 
 pub const Error = error{ OutOfMemory, TooBig };
 
+/// Port of sqlite3RecordErrorByteOffset(): while an error message of
+/// `db` is formatted (db.err_byte_offset is -2), remember where `z` is in
+/// the statement being compiled, if it points into it.
+fn recordErrorByteOffset(db: *int.Sqlite3, z: [*]const u8) void {
+    const p = db.parse orelse return;
+    @import("util.zig").recordErrorByteOffset(p, z);
+}
+
+/// Port of sqlite3RecordErrorOffsetOfExpr(), for the statement of `db`
+/// being compiled.
+fn recordErrorOffsetOfExpr(db: *int.Sqlite3, e: *const int.Expr) void {
+    const p = db.parse orelse return;
+    @import("expr.zig").recordErrorOffsetOfExpr(p, e);
+}
+
 /// Port of sqlite3MPrintf() with an explicit length limit: render into
 /// memory from `gpa` (internal conversions allowed). The caller frees.
-pub fn mprintfLimit(gpa: Allocator, limit: usize, fmt: []const u8, args: []const Arg) Error![:0]u8 {
+/// With `db`, %T and %#T record the error offset as C's do.
+pub fn mprintfLimit(db: ?*int.Sqlite3, gpa: Allocator, limit: usize, fmt: []const u8, args: []const Arg) Error![:0]u8 {
     var base: [buf_size]u8 = undefined;
     var acc = StrAccum.init(gpa, &base, limit);
     acc.internal = true;
+    acc.db = db;
     vappendf(&acc, fmt, .{ .list = args });
     if (acc.acc_error == TOOBIG) return error.TooBig;
     return acc.finish() orelse error.OutOfMemory;
@@ -1243,7 +1277,7 @@ pub fn mprintfLimit(gpa: Allocator, limit: usize, fmt: []const u8, args: []const
 
 /// sqlite3MPrintf() with SQLITE_MAX_LENGTH as the limit.
 pub fn mprintf(gpa: Allocator, fmt: []const u8, args: []const Arg) Error![:0]u8 {
-    return mprintfLimit(gpa, max_length, fmt, args);
+    return mprintfLimit(null, gpa, max_length, fmt, args);
 }
 
 /// Render `r` as SQLite turns a REAL into TEXT: "%!.*g" with `digits`
@@ -1398,21 +1432,20 @@ test "printf: tokens and source items need internal mode" {
 test "printf: SQL function arguments" {
     const Ctx = struct {
         vals: []const ?[]const u8,
-        fn get(ctx: *anyopaque, i: usize) ?[]const u8 {
-            const self: *const @This() = @ptrCast(@alignCast(ctx));
+        fn get(self: *const @This(), i: usize) ?[]const u8 {
             return self.vals[i];
         }
-        fn int64(ctx: *anyopaque, i: usize) i64 {
-            const t = get(ctx, i) orelse return 0;
+        fn int64(self: *const @This(), i: usize) i64 {
+            const t = get(self, i) orelse return 0;
             return std.fmt.parseInt(i64, t, 10) catch 0;
         }
-        fn double(ctx: *anyopaque, i: usize) f64 {
-            const t = get(ctx, i) orelse return 0;
+        fn double(self: *const @This(), i: usize) f64 {
+            const t = get(self, i) orelse return 0;
             return std.fmt.parseFloat(f64, t) catch 0;
         }
     };
     var ctx: Ctx = .{ .vals = &.{ "5", "hello", "\xc3\xa9x" } };
-    var src: ArgSource = .{ .ctx = &ctx, .n_arg = 3, .int64 = Ctx.int64, .double = Ctx.double, .text = Ctx.get };
+    var src: ArgSource = .init(&ctx, 3, Ctx.int64, Ctx.double, Ctx.get);
     var acc = StrAccum.init(std.testing.allocator, &.{}, 1000);
     defer acc.reset();
     // A missing argument reads as NULL / 0; %c takes a whole character.
@@ -1427,7 +1460,7 @@ test "printf: limits" {
     try std.testing.expectEqual(TOOBIG, acc.acc_error);
     try std.testing.expectEqualStrings("0123456", acc.slice());
     // The limit applies to allocations past the 70-byte base buffer.
-    const short = try mprintfLimit(std.testing.allocator, 5, "%s", &.{.{ .str = "0123456789" }});
+    const short = try mprintfLimit(null, std.testing.allocator, 5, "%s", &.{.{ .str = "0123456789" }});
     std.testing.allocator.free(short);
-    try std.testing.expectError(error.TooBig, mprintfLimit(std.testing.allocator, 80, "%100d", &.{.{ .int = 1 }}));
+    try std.testing.expectError(error.TooBig, mprintfLimit(null, std.testing.allocator, 80, "%100d", &.{.{ .int = 1 }}));
 }

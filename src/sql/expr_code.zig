@@ -51,12 +51,20 @@ pub const ECEL_FACTOR: u8 = 0x02;
 pub const ECEL_REF: u8 = 0x04;
 pub const ECEL_OMITREF: u8 = 0x08;
 
-/// sqlite3FindInIndex() flags and results (IN_INDEX_*).
-pub const IN_INDEX_ROWID = 1;
-pub const IN_INDEX_EPH = 2;
-pub const IN_INDEX_INDEX_ASC = 3;
-pub const IN_INDEX_INDEX_DESC = 4;
-pub const IN_INDEX_NOOP = 5;
+/// sqlite3FindInIndex() results (IN_INDEX_*), numbered as in C.
+pub const IN_INDEX = enum(u8) {
+    /// Search the rowid of the table.
+    ROWID = 1,
+    /// Search an ephemeral b-tree.
+    EPH = 2,
+    /// An existing index, ascending or descending.
+    INDEX_ASC = 3,
+    INDEX_DESC = 4,
+    /// No table: compare with each value of the list.
+    NOOP = 5,
+};
+
+/// sqlite3FindInIndex() flags (IN_INDEX_*).
 pub const IN_INDEX_NOOP_OK: u32 = 0x0001;
 pub const IN_INDEX_MEMBERSHIP: u32 = 0x0002;
 pub const IN_INDEX_LOOP: u32 = 0x0004;
@@ -88,7 +96,8 @@ fn dup(p: *Parse, e: ?*const Expr) ?*Expr {
 }
 
 /// Port of codeCompare(): code comparison `opcode` of registers `in1`
-/// and `in2`, jumping to `dest` if true.
+/// and `in2`, jumping to `dest` if true. As in C, `opcode` is the TK_
+/// code of the comparison, which numbers its opcode (OP.fromTk()).
 fn codeCompare(p: *Parse, left: *Expr, right: *Expr, opcode: u8, in1: i32, in2: i32, dest: i32, jump_if_null: u16, is_commuted: bool) i32 {
     if (p.n_err != 0) return 0;
     const p4 = if (is_commuted)
@@ -96,7 +105,7 @@ fn codeCompare(p: *Parse, left: *Expr, right: *Expr, opcode: u8, in1: i32, in2: 
     else
         expr_mod.binaryCompareCollSeq(p, left, right);
     const p5 = expr_mod.binaryCompareP5(left, right, jump_if_null);
-    const addr = aux.addOp4(vdbe(p), opcode, in2, dest, in1, if (p4) |c| .{ .collseq = c } else .notused);
+    const addr = aux.addOp4(vdbe(p), OP.fromTk(opcode), in2, dest, in1, if (p4) |c| .{ .collseq = c } else .notused);
     aux.changeP5(vdbe(p), p5);
     return addr;
 }
@@ -139,7 +148,7 @@ fn codeVectorCompare(p: *Parse, e: *Expr, dest: i32, op: u8, p5: u16) void {
     const n_left = expr_mod.vectorSize(left);
     var addr_cmp: i32 = 0;
     const addr_done = aux.makeLabel(p);
-    const is_commuted = e.has(EP.Commuted);
+    const is_commuted = e.flags.Commuted;
     if (p.n_err != 0) return;
     if (n_left != expr_mod.vectorSize(right)) {
         util.errorMsg(p, "row value misused", .{});
@@ -192,7 +201,7 @@ fn codeVectorCompare(p: *Parse, e: *Expr, dest: i32, op: u8, p5: u16) void {
 
 /// Port of exprEvalRhsFirst(): only the left operand has a subquery.
 fn evalRhsFirst(e: *const Expr) bool {
-    return e.left.?.has(EP.Subquery) and !e.right.?.has(EP.Subquery);
+    return e.left.?.flags.Subquery and !e.right.?.flags.Subquery;
 }
 
 /// Port of exprComputeOperands(): code both operands of a binary
@@ -207,7 +216,7 @@ fn computeOperands(p: *Parse, e: *Expr, r1: *i32, r2: *i32, free1: *i32, free2: 
     }
     r1.* = codeTemp(p, e.left, free1);
     if (addr_is_null == 0) {
-        if (e.right.?.has(EP.Subquery) and expr_mod.canBeNull(e.left.?)) {
+        if (e.right.?.flags.Subquery and expr_mod.canBeNull(e.left.?)) {
             addr_is_null = aux.addOp1(v, OP.IsNull, r1.*);
         }
         r2.* = codeTemp(p, e.right, free2);
@@ -221,10 +230,10 @@ fn computeOperands(p: *Parse, e: *Expr, r1: *i32, r2: *i32, free1: *i32, free2: 
 /// reads columns of one table directly, or null.
 fn isCandidateForInOpt(x: *const Expr) ?*Select {
     if (!x.useXSelect()) return null;
-    if (x.has(EP.VarSelect)) return null;
+    if (x.flags.VarSelect) return null;
     const s = x.x.select.?;
     if (s.prior != null) return null;
-    if (s.sel_flags & SF.Aggregate != 0) return null;
+    if (s.sel_flags.Aggregate) return null;
     if (s.limit != null) return null;
     if (s.where != null) return null;
     const src = s.src.?;
@@ -258,12 +267,13 @@ fn inRhsIsConstant(p: *Parse, in: *Expr) bool {
 }
 
 /// Port of sqlite3FindInIndex(): find or build a b-tree for the right side
-/// of IN: the table itself (IN_INDEX_ROWID), an index, or an ephemeral
-/// table (IN_INDEX_EPH); IN_INDEX_NOOP means compare against each value.
+/// of IN: the table itself (IN_INDEX.ROWID), an index, or an ephemeral
+/// table (IN_INDEX.EPH); IN_INDEX.NOOP means compare against each value.
 /// The cursor goes to `tab`.
-pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, ai_map: ?[]i32, tab: *i32) i32 {
+pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, ai_map: ?[]i32, tab: *i32) IN_INDEX {
     var rhs_has_null = rhs_has_null_arg;
-    var e_type: i32 = 0;
+    // Null until chosen (0 in C).
+    var e_type: ?IN_INDEX = null;
     const must_be_unique = in_flags & IN_INDEX_LOOP != 0;
     var i_tab = p.n_tab;
     p.n_tab += 1;
@@ -288,7 +298,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
             // "x IN (SELECT rowid FROM table)".
             const addr = aux.addOp0(v, OP.Once);
             @import("insert.zig").openTable(p, i_tab, i_db, t, OP.OpenRead);
-            e_type = IN_INDEX_ROWID;
+            e_type = .ROWID;
             _ = aux.explain(p, false, "USING ROWID SEARCH ON TABLE {s} FOR IN-OPERATOR", .{t.name});
             aux.jumpHere(v, addr);
         } else {
@@ -308,7 +318,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
             if (affinity_ok) {
                 var idx_opt = t.index;
                 while (idx_opt) |idx| : (idx_opt = idx.next) {
-                    if (e_type != 0) break;
+                    if (e_type != null) break;
                     if (idx.n_column < n_expr) continue;
                     if (idx.part_idx_where != null) continue;
                     if (idx.n_column >= int.bms - 1) continue;
@@ -338,7 +348,7 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
                         _ = aux.explain(p, false, "USING INDEX {s} FOR IN-OPERATOR", .{idx.name});
                         _ = aux.addOp3(v, OP.OpenRead, i_tab, @intCast(idx.tnum), @intCast(i_db));
                         aux.setP4KeyInfo(p, idx);
-                        e_type = IN_INDEX_INDEX_ASC + @as(i32, idx.sort_order[0]);
+                        e_type = if (idx.sort_order[0] == int.SortOrder.desc) .INDEX_DESC else .INDEX_ASC;
                         if (rhs_has_null) |r| {
                             p.n_mem += 1;
                             r.* = p.n_mem;
@@ -352,20 +362,20 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
     };
 
     // A short or non-constant list is not worth a b-tree.
-    if (e_type == 0 and in_flags & IN_INDEX_NOOP_OK != 0 and x.useXList() and
+    if (e_type == null and in_flags & IN_INDEX_NOOP_OK != 0 and x.useXList() and
         (!inRhsIsConstant(p, x) or x.x.list.?.len() <= 2))
     {
         p.n_tab -= 1;
         i_tab = -1;
-        e_type = IN_INDEX_NOOP;
+        e_type = .NOOP;
     }
 
-    if (e_type == 0) {
+    if (e_type == null) {
         // Build an ephemeral table.
         const saved_n_query_loop = p.n_query_loop;
         var r_may_have_null: i32 = 0;
         var bloom_ok = in_flags & IN_INDEX_MEMBERSHIP != 0;
-        e_type = IN_INDEX_EPH;
+        e_type = .EPH;
         if (in_flags & IN_INDEX_LOOP != 0) {
             p.n_query_loop = 0;
         } else if (rhs_has_null) |r| {
@@ -373,17 +383,17 @@ pub fn findInIndex(p: *Parse, x: *Expr, in_flags: u32, rhs_has_null_arg: ?*i32, 
             r_may_have_null = p.n_mem;
             r.* = r_may_have_null;
         }
-        if (!bloom_ok and x.useXSelect() and x.x.select.?.sel_flags & SF.ClonedRhsIn != 0) bloom_ok = true;
+        if (!bloom_ok and x.useXSelect() and x.x.select.?.sel_flags.ClonedRhsIn) bloom_ok = true;
         codeRhsOfIN(p, x, i_tab, bloom_ok);
         if (r_may_have_null != 0) setHasNullFlag(v, i_tab, r_may_have_null, 0);
         p.n_query_loop = saved_n_query_loop;
     }
 
-    if (ai_map) |m| if (e_type != IN_INDEX_INDEX_ASC and e_type != IN_INDEX_INDEX_DESC) {
+    if (ai_map) |m| if (e_type.? != .INDEX_ASC and e_type.? != .INDEX_DESC) {
         for (m[0..expr_mod.vectorSize(x.left.?)], 0..) |*a, i| a.* = @intCast(i);
     };
     tab.* = i_tab;
-    return e_type;
+    return e_type.?;
 }
 
 /// Port of exprINAffinity(): the comparison affinity of each column of an
@@ -418,7 +428,7 @@ fn findCompatibleInRhsSubrtn(p: *Parse, e: *Expr, new_sig: ?*vi.SubrtnSig) bool 
         if (!std.mem.eql(u8, sig_new.aff orelse "", sig.aff orelse "")) continue;
         e.y = .{ .sub = .{ .addr = sig.i_addr, .reg_return = sig.reg_return } };
         e.i_table = sig.i_table;
-        e.set(EP.Subrtn);
+        e.flags.Subrtn = true;
         return true;
     }
     return false;
@@ -433,16 +443,16 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
     var addr_once: i32 = 0;
     var sig: ?*vi.SubrtnSig = null;
 
-    if (!e.has(EP.VarSelect) and p.i_self_tab == 0) {
+    if (!e.flags.VarSelect and p.i_self_tab == 0) {
         // The result can be computed once and reused.
-        if (e.useXSelect() and e.x.select.?.sel_flags & SF.All == 0) {
+        if (e.useXSelect() and !e.x.select.?.sel_flags.All) {
             if (v.alloc().create(vi.SubrtnSig) catch null) |s| {
                 const aff = exprINAffinity(p, e);
                 s.* = .{ .sel_id = @intCast(e.x.select.?.sel_id), .aff = if (aff) |a| v.alloc().dupeSentinel(u8, a, 0) catch null else null };
                 sig = s;
             }
         }
-        if (e.has(EP.Subrtn) or findCompatibleInRhsSubrtn(p, e, sig)) {
+        if (e.flags.Subrtn or findCompatibleInRhsSubrtn(p, e, sig)) {
             addr_once = aux.addOp0(v, OP.Once);
             if (e.useXSelect()) _ = aux.explain(p, false, "REUSE LIST SUBQUERY {d}", .{e.x.select.?.sel_id});
             _ = aux.addOp2(v, OP.Gosub, e.y.sub.reg_return, e.y.sub.addr);
@@ -451,7 +461,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
             return;
         }
         // Begin the subroutine.
-        e.set(EP.Subrtn);
+        e.flags.Subrtn = true;
         p.n_mem += 1;
         e.y = .{ .sub = .{ .reg_return = p.n_mem, .addr = 0 } };
         e.y.sub.addr = aux.addOp2(v, OP.BeginSubrtn, 0, e.y.sub.reg_return) + 1;
@@ -508,7 +518,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
                 aux.getOp(v, addr_once).p3 = dest.i_sd_parm2;
                 if (dest.i_sd_parm2 == 0) aux.getOp(v, addr_bloom).p1 = 10;
             }
-            if (rc != 0) return;
+            rc catch return;
         }
     } else if (e.x.list) |list| {
         // expr IN (exprlist): insert each value with the left side's
@@ -529,7 +539,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
             if (addr_once != 0 and !expr_mod.isConstant(p, e2)) {
                 _ = aux.changeToNoop(v, addr_once - 1);
                 _ = aux.changeToNoop(v, addr_once);
-                e.clear(EP.Subrtn);
+                e.flags.Subrtn = false;
                 addr_once = 0;
             }
             exprCode(p, e2, r1);
@@ -559,31 +569,31 @@ pub fn codeSubselect(p: *Parse, e: *Expr) i32 {
     const sel = e.x.select.?;
 
     // Already coded: call the subroutine.
-    if (e.has(EP.Subrtn)) {
+    if (e.flags.Subrtn) {
         _ = aux.explain(p, false, "REUSE SUBQUERY {d}", .{sel.sel_id});
         _ = aux.addOp2(v, OP.Gosub, e.y.sub.reg_return, e.y.sub.addr);
         return e.i_table;
     }
 
     // Begin the subroutine.
-    e.set(EP.Subrtn);
+    e.flags.Subrtn = true;
     p.n_mem += 1;
     e.y = .{ .sub = .{ .reg_return = p.n_mem, .addr = 0 } };
     e.y.sub.addr = aux.addOp2(v, OP.BeginSubrtn, 0, e.y.sub.reg_return) + 1;
 
     // An uncorrelated subquery runs once.
     var addr_once: i32 = 0;
-    if (!e.has(EP.VarSelect)) addr_once = aux.addOp0(v, OP.Once);
+    if (!e.flags.VarSelect) addr_once = aux.addOp0(v, OP.Once);
     _ = aux.explain(p, true, "{s}SCALAR SUBQUERY {d}", .{ if (addr_once != 0) "" else "CORRELATED ", sel.sel_id });
 
     // The first row of a SELECT goes into registers; EXISTS leaves 0 or 1.
     // Either way the query gets LIMIT 1.
     const n_reg: i32 = if (e.op == TK.SELECT) @intCast(sel.e_list.?.len()) else 1;
-    var dest = select_mod.selectDestInit(0, p.n_mem + 1);
+    var dest = select_mod.selectDestInit(undefined, p.n_mem + 1); // e_dest set below (0 in C)
     p.n_mem += n_reg;
     if (e.op == TK.SELECT) {
         dest.e_dest = SRT.Mem;
-        if (sel.sel_flags & SF.Distinct != 0 and sel.limit != null and sel.limit.?.right != null) {
+        if (sel.sel_flags.Distinct and sel.limit != null and sel.limit.?.right != null) {
             // With DISTINCT and OFFSET, results are copied over only
             // after the OFFSET.
             dest.i_sdst = p.n_mem + 1;
@@ -600,7 +610,7 @@ pub fn codeSubselect(p: *Parse, e: *Expr) i32 {
     if (sel.limit) |lim| {
         // A limit X other than 0 or 1 becomes X<>0.
         const left = lim.left.?;
-        if (!left.has(EP.IntValue) or (left.u.value != 1 and left.u.value != 0)) {
+        if (!left.flags.IntValue or (left.u.value != 1 and left.u.value != 0)) {
             const zero = expr_mod.exprInt32(p.arena, 0) catch return oomZero(p);
             zero.aff_expr = Aff.numeric;
             lim.left = expr_mod.pExpr(p, TK.NE, dup(p, left), zero) catch return oomZero(p);
@@ -610,11 +620,11 @@ pub fn codeSubselect(p: *Parse, e: *Expr) i32 {
         sel.limit = expr_mod.pExpr(p, TK.LIMIT, one, null) catch return oomZero(p);
     }
     sel.i_limit = 0;
-    if (select_mod.select(p, sel, &dest) != 0) {
+    select_mod.select(p, sel, &dest) catch {
         e.op2 = e.op;
         e.op = TK.ERROR;
         return 0;
-    }
+    };
     const r_reg = dest.i_sd_parm;
     e.i_table = r_reg;
     if (addr_once != 0) aux.jumpHere(v, addr_once);
@@ -665,7 +675,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
     p.ok_const_factor = ok_const_factor;
 
     // Without a b-tree, compare with each value in turn.
-    if (e_type == IN_INDEX_NOOP) {
+    if (e_type == .NOOP) {
         const list = e.x.list.?;
         const coll = expr_mod.collSeq(p, e.left);
         const label_ok = aux.makeLabel(p);
@@ -683,11 +693,11 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
             releaseTempReg(p, reg_to_free);
             const p4: vi.P4 = if (coll) |c| .{ .collseq = c } else .notused;
             if (ii < list.len() - 1 or dest_if_null != dest_if_false) {
-                const op: u8 = if (r_lhs != r2) OP.Eq else OP.NotNull;
+                const op: OP = if (r_lhs != r2) OP.Eq else OP.NotNull;
                 _ = aux.addOp4(v, op, r_lhs, label_ok, r2, p4);
                 aux.changeP5(v, zaff[0]);
             } else {
-                const op: u8 = if (r_lhs != r2) OP.Ne else OP.IsNull;
+                const op: OP = if (r_lhs != r2) OP.Ne else OP.IsNull;
                 _ = aux.addOp4(v, op, r_lhs, dest_if_false, r2, p4);
                 aux.changeP5(v, @as(u16, zaff[0]) | JUMPIFNULL);
             }
@@ -701,7 +711,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
         return;
     }
 
-    if (e_type != IN_INDEX_ROWID) {
+    if (e_type != .ROWID) {
         // Apply affinity, then reorder the left side to the index's
         // column order.
         if (n_vector == 1) {
@@ -743,14 +753,14 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
 
     // Step 3: search the right side.
     var addr_truth_op: i32 = undefined;
-    if (e_type == IN_INDEX_ROWID) {
+    if (e_type == .ROWID) {
         // Steps 3 and 4 together: a rowid is never NULL.
         _ = aux.addOp3(v, OP.SeekRowid, i_tab, dest_if_false, r_lhs);
         addr_truth_op = aux.addOp0(v, OP.Goto);
     } else {
         if (dest_if_false == dest_if_null) {
             // Steps 3 and 5 together.
-            if (e.has(EP.Subrtn)) {
+            if (e.flags.Subrtn) {
                 const op = aux.getOp(v, e.y.sub.addr);
                 if (op.p3 > 0) {
                     _ = aux.addOp4Int(v, OP.Filter, op.p3, dest_if_false, r_lhs, @intCast(n_vector));
@@ -772,7 +782,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
 
     // Step 6: compare with each row; any NULL comparison means NULL.
     if (dest_step6 != 0) aux.resolveLabel(v, dest_step6);
-    const addr_top = if (e_type == IN_INDEX_INDEX_DESC)
+    const addr_top = if (e_type == .INDEX_DESC)
         aux.addOp2(v, OP.Last, i_tab, dest_if_false)
     else
         aux.addOp2(v, OP.Rewind, i_tab, dest_if_false);
@@ -812,7 +822,7 @@ fn codeReal(v: *Vdbe, z: [:0]const u8, negate: bool, mem: i32) void {
 /// REAL (hex ones are an error).
 fn codeInteger(p: *Parse, e: *Expr, neg: bool, mem: i32) void {
     const v = vdbe(p);
-    if (e.flags & EP.IntValue != 0) {
+    if (e.flags.IntValue) {
         var i = e.u.value;
         if (neg) i = -i;
         _ = aux.addOp2(v, OP.Integer, i, mem);
@@ -855,7 +865,7 @@ pub fn codeGeneratedColumn(p: *Parse, t: *Table, col: *Column, reg_out: i32) voi
     std.debug.assert(p.i_self_tab != 0);
     const addr: i32 = if (p.i_self_tab > 0) aux.addOp3(v, OP.IfNullRow, p.i_self_tab - 1, 0, reg_out) else 0;
     codeCopy(p, build.columnExpr(t, col), reg_out);
-    if (col.col_flags & COLFLAG.VIRTUAL != 0 and t.tab_flags & TF.Strict != 0) {
+    if (col.col_flags.VIRTUAL and t.tab_flags.Strict) {
         const idx = (@intFromPtr(col) - @intFromPtr(t.cols.ptr)) / @sizeOf(Column);
         _ = aux.addOp4(v, OP.TypeCheck, reg_out, 1, 2 + @as(i32, @intCast(idx)), .{ .table = t });
     } else if (col.affinity >= Aff.text) {
@@ -879,17 +889,17 @@ pub fn codeGetColumnOfTable(v: *Vdbe, t: *Table, i_tab_cur: i32, i_col: i32, reg
     if (t.e_tab_type == .vtab) {
         _ = aux.addOp3(v, OP.VColumn, i_tab_cur, i_col, reg_out);
         return;
-    } else if (col.col_flags & COLFLAG.VIRTUAL != 0) {
+    } else if (col.col_flags.VIRTUAL) {
         const p = v.parse.?;
-        if (col.col_flags & COLFLAG.BUSY != 0) {
+        if (col.col_flags.BUSY) {
             util.errorMsg(p, "generated column loop on \"{s}\"", .{col.name()});
         } else {
             const saved_self_tab = p.i_self_tab;
-            col.col_flags |= COLFLAG.BUSY;
+            col.col_flags.BUSY = true;
             p.i_self_tab = i_tab_cur + 1;
             codeGeneratedColumn(p, t, col, reg_out);
             p.i_self_tab = saved_self_tab;
-            col.col_flags &= ~COLFLAG.BUSY;
+            col.col_flags.BUSY = false;
         }
         return;
     } else if (!t.hasRowid()) {
@@ -987,13 +997,13 @@ fn codeInlineFunction(p: *Parse, farg: *ExprList, func_id: usize, target_arg: i3
     return target;
 }
 
-fn nodeCanReturnSubtype(w: *Walker, e: *Expr) u8 {
+fn nodeCanReturnSubtype(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.CASE or e.op == TK.UPLUS or e.op == TK.COLLATE or e.op == TK.CAST) return WRC.Continue;
     if (e.op != TK.FUNCTION and e.op != TK.AGG_FUNCTION) return WRC.Prune;
     const db = w.parse.?.db;
     const n: i32 = if (e.x.list) |l| @intCast(l.len()) else 0;
     const def = callback.findFunction(db, e.token(), n, db.enc, false) orelse return WRC.Continue;
-    if (def.func_flags & FUNC.RESULT_SUBTYPE != 0) {
+    if (def.func_flags.RESULT_SUBTYPE) {
         w.e_code = 1;
         return WRC.Abort;
     }
@@ -1019,7 +1029,7 @@ fn codeTargetAndOr(p: *Parse, e: *Expr, target: i32, tmp_reg: *i32) i32 {
         _ = aux.addOp3(v, OP.And, r1, r1, target);
         return target;
     }
-    const skip_op: u8 = if (op == TK.AND) OP.IfNot else OP.If;
+    const skip_op: OP = if (op == TK.AND) OP.IfNot else OP.If;
     var addr_skip: i32 = 0;
     var reg_ss: i32 = 0;
     var r1: i32 = undefined;
@@ -1032,13 +1042,13 @@ fn codeTargetAndOr(p: *Parse, e: *Expr, target: i32, tmp_reg: *i32) i32 {
         r1 = codeTemp(p, e.left, tmp_reg);
     } else {
         r1 = codeTarget(p, e.left, target);
-        if (e.right.?.has(EP.Subquery)) {
+        if (e.right.?.flags.Subquery) {
             reg_ss = r1;
             addr_skip = aux.addOp1(v, skip_op, r1);
         }
         r2 = codeTemp(p, e.right, tmp_reg);
     }
-    _ = aux.addOp3(v, op, r2, r1, target);
+    _ = aux.addOp3(v, OP.fromTk(op), r2, r1, target);
     if (addr_skip != 0) {
         _ = aux.addOp2(v, OP.Goto, 0, aux.currentAddr(v) + 2);
         aux.jumpHere(v, addr_skip);
@@ -1070,7 +1080,7 @@ fn indexedExprLookup(p: *Parse, e: *Expr, target: i32) i32 {
         }
         // A function that might set a subtype keeps being computed if it
         // is itself an argument of another function.
-        if (e.has(EP.SubtArg) and canReturnSubtype(p, e)) continue;
+        if (e.flags.SubtArg and canReturnSubtype(p, e)) continue;
 
         const v = vdbe(p);
         if (ie.b_maybe_null_row or expr_mod.isConstant(p, e)) {
@@ -1142,7 +1152,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
             _ = aux.addOp2(v, OP.Null, 0, target);
             return target;
         };
-        if (p.idx_epr != null and !e.has(EP.Leaf)) {
+        if (p.idx_epr != null and !e.flags.Leaf) {
             const r = indexedExprLookup(p, e, target);
             if (r >= 0) return r;
         }
@@ -1172,7 +1182,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                     }
                 }
                 var i_tab = e.i_table;
-                if (e.has(EP.FixedCol)) {
+                if (e.flags.FixedCol) {
                     // A constant by WHERE clause constraints; apply the
                     // column's affinity to it.
                     const i_reg = codeTarget(p, e.left, target);
@@ -1189,14 +1199,14 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                         if (i_col < 0) return -1 - p.i_self_tab;
                         const col = &t.cols[@intCast(i_col)];
                         const i_src = build.tableColumnToStorage(t, @intCast(i_col)) - p.i_self_tab;
-                        if (col.col_flags & COLFLAG.GENERATED != 0) {
-                            if (col.col_flags & COLFLAG.BUSY != 0) {
+                        if (col.col_flags.intersects(COLFLAG.GENERATED)) {
+                            if (col.col_flags.BUSY) {
                                 util.errorMsg(p, "generated column loop on \"{s}\"", .{col.name()});
                                 return 0;
                             }
-                            col.col_flags |= COLFLAG.BUSY;
-                            if (col.col_flags & COLFLAG.NOTAVAIL != 0) codeGeneratedColumn(p, t, col, i_src);
-                            col.col_flags &= ~(COLFLAG.BUSY | COLFLAG.NOTAVAIL);
+                            col.col_flags.BUSY = true;
+                            if (col.col_flags.NOTAVAIL) codeGeneratedColumn(p, t, col, i_src);
+                            col.col_flags.clear(.{ .BUSY = true, .NOTAVAIL = true });
                             return i_src;
                         } else if (col.affinity == Aff.real) {
                             _ = aux.addOp2(v, OP.SCopy, i_src, target);
@@ -1263,14 +1273,14 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                 if (expr_mod.isVector(left)) {
                     codeVectorCompare(p, e, target, op, p5);
                 } else {
-                    if (e.has(EP.Subquery) and p5 != NULLEQ) {
+                    if (e.flags.Subquery and p5 != NULLEQ) {
                         addr_is_null = computeOperands(p, e, &r1, &r2, &reg_free1, &reg_free2);
                     } else {
                         r1 = codeTemp(p, e.left, &reg_free1);
                         r2 = codeTemp(p, e.right, &reg_free2);
                     }
                     _ = aux.addOp2(v, OP.Integer, 1, in_reg);
-                    _ = codeCompare(p, left, e.right.?, op, r1, r2, aux.currentAddr(v) + 2, p5, e.has(EP.Commuted));
+                    _ = codeCompare(p, left, e.right.?, op, r1, r2, aux.currentAddr(v) + 2, p5, e.flags.Commuted);
                     if (p5 == NULLEQ) {
                         _ = aux.addOp2(v, OP.Integer, 0, in_reg);
                     } else {
@@ -1290,13 +1300,13 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
             },
             TK.PLUS, TK.STAR, TK.MINUS, TK.REM, TK.BITAND, TK.BITOR, TK.SLASH, TK.LSHIFT, TK.RSHIFT, TK.CONCAT => {
                 var addr_is_null: i32 = 0;
-                if (e.has(EP.Subquery)) {
+                if (e.flags.Subquery) {
                     addr_is_null = computeOperands(p, e, &r1, &r2, &reg_free1, &reg_free2);
                 } else {
                     r1 = codeTemp(p, e.left, &reg_free1);
                     r2 = codeTemp(p, e.right, &reg_free2);
                 }
-                _ = aux.addOp3(v, op, r2, r1, target);
+                _ = aux.addOp3(v, OP.fromTk(op), r2, r1, target);
                 if (addr_is_null != 0) {
                     _ = aux.addOp2(v, OP.Goto, 0, aux.currentAddr(v) + 2);
                     aux.jumpHere(v, addr_is_null);
@@ -1313,7 +1323,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                     codeReal(v, left.token(), true, target);
                     return target;
                 }
-                var temp_x: Expr = .{ .op = TK.INTEGER, .flags = EP.IntValue | EP.TokenOnly, .u = .{ .value = 0 } };
+                var temp_x: Expr = .{ .op = TK.INTEGER, .flags = .{ .IntValue = true, .TokenOnly = true }, .u = .{ .value = 0 } };
                 r1 = codeTemp(p, &temp_x, &reg_free1);
                 r2 = codeTemp(p, e.left, &reg_free2);
                 _ = aux.addOp3(v, OP.Subtract, r2, r1, target);
@@ -1321,7 +1331,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
             },
             TK.BITNOT, TK.NOT => {
                 r1 = codeTemp(p, e.left, &reg_free1);
-                _ = aux.addOp2(v, op, r1, in_reg);
+                _ = aux.addOp2(v, OP.fromTk(op), r1, in_reg);
                 return in_reg;
             },
             TK.TRUTH => {
@@ -1334,7 +1344,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
             TK.ISNULL, TK.NOTNULL => {
                 _ = aux.addOp2(v, OP.Integer, 1, target);
                 r1 = codeTemp(p, e.left, &reg_free1);
-                const addr = aux.addOp1(v, op, r1);
+                const addr = aux.addOp1(v, OP.fromTk(op), r1);
                 _ = aux.addOp2(v, OP.Integer, 0, target);
                 aux.jumpHere(v, addr);
                 return in_reg;
@@ -1388,7 +1398,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                 return target;
             },
             TK.COLLATE => {
-                if (!e.has(EP.Collate)) {
+                if (!e.flags.Collate) {
                     // A "soft" COLLATE from a pushed-down constraint:
                     // subtypes may not cross a subquery boundary.
                     exprCode(p, e.left, target);
@@ -1445,9 +1455,9 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                     util.errorMsg(p, "RAISE() may only be used within a trigger-program", .{});
                     return 0;
                 }
-                if (e.aff_expr == OE.Abort) @import("main.zig").mayAbort(p);
-                if (e.aff_expr == OE.Ignore) {
-                    _ = aux.addOp2(v, OP.Halt, RC.OK, OE.Ignore);
+                if (e.aff_expr == OE.Abort.int()) @import("main.zig").mayAbort(p);
+                if (e.aff_expr == OE.Ignore.int()) {
+                    _ = aux.addOp2(v, OP.Halt, RC.OK, OE.Ignore.int());
                 } else {
                     r1 = codeTemp(p, e.left, &reg_free1);
                     _ = aux.addOp3(v, OP.Halt, if (p.trigger_tab != null) RC.CONSTRAINT_TRIGGER else RC.ERROR, e.aff_expr, r1);
@@ -1509,7 +1519,7 @@ fn codeCase(p: *Parse, e: *Expr, target: i32, reg_free1: *i32) void {
 fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
     const v = vdbe(p);
     const db = p.db;
-    if (e.has(EP.WinFunc)) return e.y.win.?.reg_result;
+    if (e.flags.WinFunc) return e.y.win.?.reg_result;
 
     // A constant function call is computed once.
     if (constFactorOk(p) and expr_mod.isConstantNotJoin(p, e)) return codeRunJustOnce(p, e, -1);
@@ -1519,23 +1529,23 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
     const id = e.token();
     const def_opt = callback.findFunction(db, id, @intCast(n_farg), db.enc, false);
     if (def_opt == null or def_opt.?.x_finalize != null or
-        (def_opt.?.func_flags & FUNC.INTERNAL != 0 and p.nested == 0 and db.m_db_flags & int.DBFLAG.InternalFunc == 0))
+        (def_opt.?.func_flags.INTERNAL and p.nested == 0 and !db.m_db_flags.InternalFunc))
     {
         util.errorMsg(p, "unknown function: {s}()", .{id});
         expr_mod.recordErrorOffsetOfExpr(p, e);
         return target;
     }
     var def = def_opt.?;
-    if (def.func_flags & FUNC.INLINE != 0) if (farg) |f| {
+    if (def.func_flags.INLINE) if (farg) |f| {
         return codeInlineFunction(p, f, @intFromPtr(def.user_data), target);
     };
-    if (def.func_flags & (FUNC.DIRECT | FUNC.UNSAFE) != 0) expr_mod.functionUsable(p, e, def);
+    if (def.func_flags.intersects(.{ .DIRECT = true, .UNSAFE = true })) expr_mod.functionUsable(p, e, def);
 
     var const_mask: u32 = 0;
     var coll: ?*CollSeq = null;
     if (farg) |f| for (f.slice(), 0..) |item, i| {
         if (i < 32 and expr_mod.isConstant(p, item.expr)) const_mask |= @as(u32, 1) << @intCast(i);
-        if (def.func_flags & FUNC.NEEDCOLL != 0 and coll == null) coll = expr_mod.collSeq(p, item.expr);
+        if (def.func_flags.NEEDCOLL and coll == null) coll = expr_mod.collSeq(p, item.expr);
     };
     var r1: i32 = 0;
     if (farg) |f| {
@@ -1547,10 +1557,11 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
         }
         // length(), typeof() and octet_length() of a column need not load
         // all of it.
-        if (def.func_flags & (FUNC.LENGTH | FUNC.TYPEOF) != 0) {
+        if (def.func_flags.intersects(.{ .LENGTH = true, .TYPEOF = true })) {
             const a0 = f.at(0).expr.?;
             if (a0.op == TK.COLUMN or a0.op == TK.AGG_COLUMN) {
-                a0.op2 = @intCast(def.func_flags & OPFLAG.BYTELENARG);
+                // The P5 of the OP_Column (OPFLAG_LENGTHARG etc.: the same bits).
+                a0.op2 = @intCast(def.func_flags.only(FUNC.BYTELEN).int());
             }
         }
         _ = codeExprList(p, f, r1, 0, ECEL_FACTOR);
@@ -1560,13 +1571,13 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
     // operand it is) is one of its columns.
     if (farg) |f| {
         const vtab = @import("vtab.zig");
-        if (n_farg >= 2 and e.has(EP.InfixFunc)) {
+        if (n_farg >= 2 and e.flags.InfixFunc) {
             def = vtab.overloadFunction(db, v.alloc(), def, @intCast(n_farg), f.at(1).expr);
         } else if (n_farg > 0) {
             def = vtab.overloadFunction(db, v.alloc(), def, @intCast(n_farg), f.at(0).expr);
         }
     }
-    if (def.func_flags & FUNC.NEEDCOLL != 0) {
+    if (def.func_flags.NEEDCOLL) {
         _ = aux.addOp4(v, OP.CollSeq, 0, 0, 0, .{ .collseq = coll orelse coll_mod.defaultColl() });
     }
     _ = aux.addFunctionCall(p, @bitCast(const_mask), r1, target, @intCast(n_farg), def, e.op2);
@@ -1591,7 +1602,7 @@ pub fn codeRunJustOnce(p: *Parse, e_arg: ?*Expr, reg_dest_arg: i32) i32 {
     // A null expression codes a NULL, as in C.
     const e = dup(p, e_arg);
     if (e == null and p.db.malloc_failed) return if (reg_dest < 0) 0 else reg_dest;
-    if (e != null and e.?.has(EP.HasFunc)) {
+    if (e != null and e.?.flags.HasFunc) {
         const v = vdbe(p);
         const addr = aux.addOp0(v, OP.Once);
         p.ok_const_factor = false;
@@ -1657,7 +1668,7 @@ pub fn exprCode(p: *Parse, e: ?*Expr, target: i32) void {
     const in_reg = codeTarget(p, e, target);
     if (in_reg != target) {
         const x = expr_mod.skipCollateAndLikely(e);
-        const op: u8 = if (x != null and (x.?.has(EP.Subquery) or x.?.op == TK.REGISTER)) OP.Copy else OP.SCopy;
+        const op: OP = if (x != null and (x.?.flags.Subquery or x.?.op == TK.REGISTER)) OP.Copy else OP.SCopy;
         _ = aux.addOp2(v, op, in_reg, target);
     }
 }
@@ -1683,7 +1694,7 @@ pub fn codeFactorable(p: *Parse, e: ?*Expr, target: i32) void {
 /// consecutive registers from `target`. Returns the number coded.
 pub fn codeExprList(p: *Parse, list: *ExprList, target: i32, src_reg: i32, flags_arg: u8) i32 {
     var flags = flags_arg;
-    const copy_op: u8 = if (flags & ECEL_DUP != 0) OP.Copy else OP.SCopy;
+    const copy_op: OP = if (flags & ECEL_DUP != 0) OP.Copy else OP.SCopy;
     const v = vdbe(p);
     var n: i32 = @intCast(list.len());
     if (!constFactorOk(p)) flags &= ~ECEL_FACTOR;
@@ -1733,7 +1744,7 @@ fn codeBetween(p: *Parse, e: *Expr, dest: i32, jump: ?JumpFn, jump_if_null: u16)
         j(p, &expr_and, dest, jump_if_null);
     } else {
         // EP_OuterON keeps the AND from being factored out as a constant.
-        del.flags |= EP.OuterON;
+        del.flags.OuterON = true;
         _ = codeTarget(p, &expr_and, dest);
     }
     releaseTempReg(p, reg_free1);
@@ -1788,13 +1799,13 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, dest: i32, jump_if_null_arg: u16) vo
                 var r1: i32 = undefined;
                 var r2: i32 = undefined;
                 var addr_is_null: i32 = 0;
-                if (e.has(EP.Subquery) and jump_if_null != NULLEQ) {
+                if (e.flags.Subquery and jump_if_null != NULLEQ) {
                     addr_is_null = computeOperands(p, e, &r1, &r2, &reg_free1, &reg_free2);
                 } else {
                     r1 = codeTemp(p, e.left, &reg_free1);
                     r2 = codeTemp(p, e.right, &reg_free2);
                 }
-                _ = codeCompare(p, e.left.?, e.right.?, op, r1, r2, dest, jump_if_null, e.has(EP.Commuted));
+                _ = codeCompare(p, e.left.?, e.right.?, op, r1, r2, dest, jump_if_null, e.flags.Commuted);
                 if (addr_is_null != 0) {
                     if (jump_if_null != 0) aux.changeP2(v, addr_is_null, dest) else aux.jumpHere(v, addr_is_null);
                 }
@@ -1804,7 +1815,7 @@ pub fn exprIfTrue(p: *Parse, e_arg: ?*Expr, dest: i32, jump_if_null_arg: u16) vo
         TK.ISNULL, TK.NOTNULL => {
             const r1 = codeTemp(p, e.left, &reg_free1);
             if (reg_free1 != 0) aux.typeofColumn(v, r1);
-            _ = aux.addOp2(v, op, r1, dest);
+            _ = aux.addOp2(v, OP.fromTk(op), r1, dest);
             return;
         },
         TK.BETWEEN => return codeBetween(p, e, dest, exprIfTrue, jump_if_null),
@@ -1881,13 +1892,13 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, dest: i32, jump_if_null_arg: u16) v
                 var r1: i32 = undefined;
                 var r2: i32 = undefined;
                 var addr_is_null: i32 = 0;
-                if (e.has(EP.Subquery) and jump_if_null != NULLEQ) {
+                if (e.flags.Subquery and jump_if_null != NULLEQ) {
                     addr_is_null = computeOperands(p, e, &r1, &r2, &reg_free1, &reg_free2);
                 } else {
                     r1 = codeTemp(p, e.left, &reg_free1);
                     r2 = codeTemp(p, e.right, &reg_free2);
                 }
-                _ = codeCompare(p, e.left.?, e.right.?, op, r1, r2, dest, jump_if_null, e.has(EP.Commuted));
+                _ = codeCompare(p, e.left.?, e.right.?, op, r1, r2, dest, jump_if_null, e.flags.Commuted);
                 if (addr_is_null != 0) {
                     if (jump_if_null != 0) aux.changeP2(v, addr_is_null, dest) else aux.jumpHere(v, addr_is_null);
                 }
@@ -1897,7 +1908,7 @@ pub fn exprIfFalse(p: *Parse, e_arg: ?*Expr, dest: i32, jump_if_null_arg: u16) v
         TK.ISNULL, TK.NOTNULL => {
             const r1 = codeTemp(p, e.left, &reg_free1);
             if (reg_free1 != 0) aux.typeofColumn(v, r1);
-            _ = aux.addOp2(v, op, r1, dest);
+            _ = aux.addOp2(v, OP.fromTk(op), r1, dest);
             return;
         },
         TK.BETWEEN => return codeBetween(p, e, dest, exprIfFalse, jump_if_null),

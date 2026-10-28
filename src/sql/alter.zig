@@ -73,8 +73,8 @@ const FUNC = callback.FUNC;
 /// Port of isAlterableTable(): system tables (and read-only shadow tables)
 /// may not be altered. Leaves an error and returns true if `t` is one.
 fn isAlterableTable(p: *Parse, t: *Table) bool {
-    if (build.hasSqlitePrefix(t.name) or t.tab_flags & TF.Eponymous != 0 or
-        (t.tab_flags & TF.Shadow != 0 and build.readOnlyShadowTables(p.db)))
+    if (build.hasSqlitePrefix(t.name) or t.tab_flags.Eponymous or
+        (t.tab_flags.Shadow and build.readOnlyShadowTables(p.db)))
     {
         util.errorMsg(p, "table {s} may not be altered", .{t.name});
         return true;
@@ -158,13 +158,13 @@ fn renameTableImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
 
     // Not a system table, nor a reserved new name.
     if (isAlterableTable(p, t)) return;
-    if (build.checkObjectName(p, z_name, "table", z_name) != RC.OK) return;
+    build.checkObjectName(p, z_name, "table", z_name) catch return;
 
     if (t.isView()) {
         util.errorMsg(p, "view {s} may not be altered", .{t.name});
         return;
     }
-    if (build.viewGetColumnNames(p, t) != 0) return;
+    build.viewGetColumnNames(p, t) catch return;
     // A virtual table with xRename is told of its new name.
     var vt: ?*int.VTable = null;
     if (t.isVirtual()) {
@@ -294,7 +294,7 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
 
     // Not a PRIMARY KEY, UNIQUE or rowid alias; NOT NULL needs a default
     // that is not NULL.
-    if (col.col_flags & COLFLAG.PRIMKEY != 0) {
+    if (col.col_flags.PRIMKEY) {
         util.errorMsg(p, "Cannot add a PRIMARY KEY column", .{});
         return;
     }
@@ -303,16 +303,16 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
         return;
     }
     if (isRowidAlias(p, t, col.name(), "add")) return;
-    if (col.col_flags & COLFLAG.GENERATED == 0) {
+    if (!col.col_flags.intersects(COLFLAG.GENERATED)) {
         // A literal NULL default is no default.
         std.debug.assert(dflt == null or dflt.?.op == TK.SPAN);
         if (dflt) |d| if (d.left.?.op == TK.NULL) {
             dflt = null;
         };
-        if (db.flags & int.DbFlag.ForeignKeys != 0 and new.u.tab.fkey != null and dflt != null) {
+        if (db.flags.ForeignKeys and new.u.tab.fkey != null and dflt != null) {
             errorIfNotEmpty(p, zdb, z_tab, "Cannot add a REFERENCES column with non-NULL default value");
         }
-        if (col.not_null != 0 and dflt == null) {
+        if (col.not_null != .None and dflt == null) {
             errorIfNotEmpty(p, zdb, z_tab, "Cannot add a NOT NULL column with default value NULL");
         }
 
@@ -327,7 +327,7 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
                 errorIfNotEmpty(p, zdb, z_tab, "Cannot add a column with non-constant default");
             }
         }
-    } else if (col.col_flags & COLFLAG.STORED != 0) {
+    } else if (col.col_flags.STORED) {
         errorIfNotEmpty(p, zdb, z_tab, "cannot add a STORED column");
     }
 
@@ -364,8 +364,8 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
     renameReloadSchema(p, i_db, prepare.INITFLAG_AlterAdd);
 
     // The existing rows must satisfy the constraints the column adds.
-    if (new.check != null or (col.not_null != 0 and col.col_flags & COLFLAG.GENERATED != 0) or
-        t.tab_flags & TF.Strict != 0)
+    if (new.check != null or (col.not_null != .None and col.col_flags.intersects(COLFLAG.GENERATED)) or
+        t.tab_flags.Strict)
     {
         p.col_names_set = true;
         build.nestedParse(p, "SELECT CASE WHEN quick_check GLOB 'CHECK*'" ++
@@ -422,8 +422,8 @@ fn beginAddColumnImpl(p: *Parse, src: *SrcList) Oom!void {
         nc.* = oc.*;
         // The name with the declared type and collation that follow it.
         var end: usize = oc.cn_name.len + 1;
-        if (oc.col_flags & COLFLAG.HASTYPE != 0) end += std.mem.len(oc.cn_name.ptr + end) + 1;
-        if (oc.col_flags & COLFLAG.HASCOLL != 0) end += std.mem.len(oc.cn_name.ptr + end) + 1;
+        if (oc.col_flags.HASTYPE) end += std.mem.len(oc.cn_name.ptr + end) + 1;
+        if (oc.col_flags.HASCOLL) end += std.mem.len(oc.cn_name.ptr + end) + 1;
         const z = try a.dupeSentinel(u8, oc.cn_name.ptr[0 .. end - 1], 0);
         nc.cn_name = z[0..oc.cn_name.len :0];
     }
@@ -539,7 +539,7 @@ pub fn yTabKey(e: *const Expr) *const anyopaque {
 }
 
 /// A RENAME TABLE or RENAME COLUMN operation, for the Walker (RenameCtx).
-const RenameCtx = struct {
+pub const RenameCtx = struct {
     /// The tokens to replace.
     list: ?*RenameToken = null,
     n_list: usize = 0,
@@ -575,7 +575,7 @@ pub fn renameTokenRemap(p: *Parse, to: anytype, from: anytype) void {
 }
 
 /// Port of renameUnmapExprCb().
-fn renameUnmapExprCb(w: *Walker, e: *Expr) u8 {
+fn renameUnmapExprCb(w: *Walker, e: *Expr) WRC {
     const p = w.parse.?;
     renameTokenRemap(p, null, e);
     if (e.useYTab()) renameTokenRemap(p, null, yTabKey(e));
@@ -588,7 +588,7 @@ fn renameWalkWith(w: *Walker, sel: *Select) void {
     const p = w.parse.?;
     std.debug.assert(with.ctes.items.len > 0);
     var copy: ?*With = null;
-    if (with.ctes.items[0].select.?.sel_flags & SF.Expanded == 0) {
+    if (!with.ctes.items[0].select.?.sel_flags.Expanded) {
         // Push a copy of the WITH clause: the original is about to be
         // expanded and resolved, and the parser code that reads the WITH
         // stack fails on SELECTs that already are.
@@ -612,10 +612,10 @@ fn unmapColumnIdlistNames(p: *Parse, list: *const IdList) void {
 }
 
 /// Port of renameUnmapSelectCb().
-fn renameUnmapSelectCb(w: *Walker, s: *Select) u8 {
+fn renameUnmapSelectCb(w: *Walker, s: *Select) WRC {
     const p = w.parse.?;
     if (p.n_err != 0) return WRC.Abort;
-    if (s.sel_flags & (SF.View | SF.CopyCte) != 0) return WRC.Prune;
+    if (s.sel_flags.intersects(.{ .View = true, .CopyCte = true })) return WRC.Prune;
     if (s.e_list) |list| {
         for (list.slice()) |*item| {
             if (item.e_name != null and item.fg.e_ename == .name) renameTokenRemap(p, null, item.e_name);
@@ -676,19 +676,19 @@ fn renameTokenFind(p: *Parse, ctx: ?*RenameCtx, ptr: ?*const anyopaque) ?*Rename
 
 /// Port of renameColumnSelectCb(): a select callback that makes the
 /// walker descend into subqueries (and WITH clauses).
-fn renameColumnSelectCb(w: *Walker, s: *Select) u8 {
-    if (s.sel_flags & (SF.View | SF.CopyCte) != 0) return WRC.Prune;
+fn renameColumnSelectCb(w: *Walker, s: *Select) WRC {
+    if (s.sel_flags.intersects(.{ .View = true, .CopyCte = true })) return WRC.Prune;
     renameWalkWith(w, s);
     return WRC.Continue;
 }
 
 fn renameCtx(w: *Walker) *RenameCtx {
-    return @ptrCast(@alignCast(w.u.ptr.?));
+    return w.u.rename;
 }
 
 /// Port of renameColumnExprCb(): collect the tokens of references to the
 /// column being renamed.
-fn renameColumnExprCb(w: *Walker, e: *Expr) u8 {
+fn renameColumnExprCb(w: *Walker, e: *Expr) WRC {
     const ctx = renameCtx(w);
     if (e.op == TK.TRIGGER and e.i_column == ctx.i_col and w.parse.?.trigger_tab == ctx.tab) {
         _ = renameTokenFind(w.parse.?, ctx, e);
@@ -781,13 +781,17 @@ fn renameParseSql(p: *Parse, zdb: ?[]const u8, db: *Sqlite3, sql_arg: ?[:0]const
     p.e_parse_mode = .rename;
     p.n_query_loop = 1;
     const flags = db.flags;
-    db.flags |= int.DbFlag.Comments;
-    const n_err = tokenize.runParser(p, sql) catch blk: {
-        db.oomFault();
-        break :blk 1;
+    db.flags.Comments = true;
+    // C: rc is the error count of sqlite3RunParser(), 1 (SQLITE_ERROR)
+    // on error.
+    var rc: i32 = if (tokenize.runParser(p, sql)) |_| RC.OK else |err| switch (err) {
+        error.OutOfMemory => blk: {
+            db.oomFault();
+            break :blk RC.ERROR;
+        },
+        error.ParseFailed => RC.ERROR,
     };
     db.flags = flags;
-    var rc: i32 = @intCast(n_err);
     if (db.malloc_failed) rc = RC.NOMEM;
     if (rc == RC.OK and p.new_table == null and p.new_index == null and p.new_trigger == null) {
         rc = RC.CORRUPT;
@@ -857,8 +861,15 @@ fn renameSetENames(list: ?*ExprList, val: int.EName) void {
     for (l.slice()) |*item| item.fg.e_ename = val;
 }
 
+/// The result code C takes from a resolve step, which returns its error
+/// count: 1 (SQLITE_ERROR) on error.
+fn resolveRc(r: int.ParseError!void) i32 {
+    return if (r) |_| RC.OK else |_| RC.ERROR;
+}
+
 /// Port of renameResolveTrigger(): resolve the names of the trigger in
-/// p.new_trigger. Returns an SQLite result code; errors are left in `p`.
+/// p.new_trigger. Returns an SQLite result code (which the rename
+/// functions report as theirs); errors are left in `p`.
 fn renameResolveTrigger(p: *Parse) Oom!i32 {
     const db = p.db;
     const new = p.new_trigger.?;
@@ -869,10 +880,10 @@ fn renameResolveTrigger(p: *Parse) Oom!i32 {
     p.trigger_tab = build.findTable(db, new.table, db.dbs.items[i_tab_db].name);
     p.e_trigger_op = new.op;
     // The table exists, or the parse would have failed.
-    if (p.trigger_tab) |tt| rc = @intFromBool(build.viewGetColumnNames(p, tt) != 0);
+    if (p.trigger_tab) |tt| rc = resolveRc(build.viewGetColumnNames(p, tt));
 
     // The WHEN clause.
-    if (rc == RC.OK and new.when != null) rc = @intCast(resolve.resolveExprNames(&nc, new.when));
+    if (rc == RC.OK and new.when != null) rc = resolveRc(resolve.resolveExprNames(&nc, new.when));
 
     var step_opt = new.step_list;
     while (rc == RC.OK) {
@@ -884,7 +895,7 @@ fn renameResolveTrigger(p: *Parse) Oom!i32 {
         }
         if (rc == RC.OK and step.src != null) {
             const src = (try expr_mod.srcListDup(p.arena, step.src)).?;
-            const sel = try select_mod.selectNew(p, step.expr_list, src, null, null, null, null, 0, null);
+            const sel = try select_mod.selectNew(p, step.expr_list, src, null, null, null, null, .{}, null);
             // The names of step.expr_list are the columns an UPDATE sets:
             // they must not resolve the ids of ON clauses as aliases.
             renameSetENames(step.expr_list, .span);
@@ -897,18 +908,18 @@ fn renameResolveTrigger(p: *Parse) Oom!i32 {
             }
             if (db.malloc_failed) rc = RC.NOMEM;
             nc.src_list = src;
-            if (rc == RC.OK and step.where != null) rc = @intCast(resolve.resolveExprNames(&nc, step.where));
-            if (rc == RC.OK) rc = @intCast(resolve.resolveExprListNames(&nc, step.expr_list));
+            if (rc == RC.OK and step.where != null) rc = resolveRc(resolve.resolveExprNames(&nc, step.where));
+            if (rc == RC.OK) rc = resolveRc(resolve.resolveExprListNames(&nc, step.expr_list));
             std.debug.assert(step.upsert == null or (step.where == null and step.expr_list == null));
             if (step.upsert) |up| if (rc == RC.OK) {
                 up.src = src;
                 nc.u_nc = .{ .upsert = up };
-                nc.nc_flags = NC.UUpsert;
-                rc = @intCast(resolve.resolveExprListNames(&nc, up.target));
-                if (rc == RC.OK) rc = @intCast(resolve.resolveExprListNames(&nc, up.set));
-                if (rc == RC.OK) rc = @intCast(resolve.resolveExprNames(&nc, up.where));
-                if (rc == RC.OK) rc = @intCast(resolve.resolveExprNames(&nc, up.target_where));
-                nc.nc_flags = 0;
+                nc.nc_flags = .{ .UUpsert = true };
+                rc = resolveRc(resolve.resolveExprListNames(&nc, up.target));
+                if (rc == RC.OK) rc = resolveRc(resolve.resolveExprListNames(&nc, up.set));
+                if (rc == RC.OK) rc = resolveRc(resolve.resolveExprNames(&nc, up.where));
+                if (rc == RC.OK) rc = resolveRc(resolve.resolveExprNames(&nc, up.target_where));
+                nc.nc_flags = .{};
             };
             nc.src_list = null;
         }
@@ -998,7 +1009,7 @@ fn renameColumnFunc(ctx: *Context, argv: []*Mem) void {
         .parse = p,
         .expr_callback = renameColumnExprCb,
         .select_callback = renameColumnSelectCb,
-        .u = .{ .ptr = &rctx },
+        .u = .{ .rename = &rctx },
     };
     rctx.tab = t;
     if (rc == RC.OK) rc = renameColumnFind(p, &w, &rctx, t, table.?, i_col, old) catch RC.NOMEM;
@@ -1013,7 +1024,7 @@ fn renameColumnFind(p: *Parse, w: *Walker, rctx: *RenameCtx, t: *Table, table: [
     if (p.new_table) |nt| {
         if (nt.isView()) {
             const sel = nt.u.view.select.?;
-            sel.sel_flags &= ~SF.View;
+            sel.sel_flags.View = false;
             p.rc = RC.OK;
             select_mod.selectPrep(p, sel, null);
             rc = if (db.malloc_failed) RC.NOMEM else p.rc;
@@ -1073,7 +1084,7 @@ fn renameColumnFind(p: *Parse, w: *Walker, rctx: *RenameCtx, t: *Table, table: [
 
 /// Port of renameTableExprCb(): collect the table names of "table.column"
 /// references to the table being renamed.
-fn renameTableExprCb(w: *Walker, e: *Expr) u8 {
+fn renameTableExprCb(w: *Walker, e: *Expr) WRC {
     const ctx = renameCtx(w);
     if (e.op == TK.COLUMN and e.useYTab() and ctx.tab == e.y.tab) {
         _ = renameTokenFind(w.parse.?, ctx, yTabKey(e));
@@ -1083,9 +1094,9 @@ fn renameTableExprCb(w: *Walker, e: *Expr) u8 {
 
 /// Port of renameTableSelectCb(): collect the FROM-clause terms that name
 /// the table being renamed.
-fn renameTableSelectCb(w: *Walker, s: *Select) u8 {
+fn renameTableSelectCb(w: *Walker, s: *Select) WRC {
     const ctx = renameCtx(w);
-    if (s.sel_flags & (SF.View | SF.CopyCte) != 0) return WRC.Prune;
+    if (s.sel_flags.intersects(.{ .View = true, .CopyCte = true })) return WRC.Prune;
     const src = s.src orelse return WRC.Abort;
     for (src.slice()) |*item| {
         if (item.s_tab == ctx.tab) _ = renameTokenFind(w.parse.?, ctx, key(item.name));
@@ -1120,7 +1131,7 @@ fn renameTableFunc(ctx: *Context, argv: []*Mem) void {
         .parse = p,
         .expr_callback = renameTableExprCb,
         .select_callback = renameTableSelectCb,
-        .u = .{ .ptr = &rctx },
+        .u = .{ .rename = &rctx },
     };
     var rc = renameParseSql(p, zdb, db, input, b_temp);
     if (rc == RC.OK) rc = renameTableFind(p, &w, &rctx, old.?) catch RC.NOMEM;
@@ -1132,14 +1143,14 @@ fn renameTableFunc(ctx: *Context, argv: []*Mem) void {
 fn renameTableFind(p: *Parse, w: *Walker, rctx: *RenameCtx, old: []const u8) Oom!i32 {
     const db = p.db;
     var rc: i32 = RC.OK;
-    const is_legacy = db.flags & int.DbFlag.LegacyAlter != 0;
+    const is_legacy = db.flags.LegacyAlter;
     if (p.new_table) |t| {
         if (t.isView()) {
             if (!is_legacy) {
                 const sel = t.u.view.select.?;
                 var nc: NameContext = .{ .parse = p };
-                std.debug.assert(sel.sel_flags & SF.View != 0);
-                sel.sel_flags &= ~SF.View;
+                std.debug.assert(sel.sel_flags.View);
+                sel.sel_flags.View = false;
                 select_mod.selectPrep(p, sel, &nc);
                 if (p.n_err != 0) {
                     rc = p.rc;
@@ -1149,7 +1160,7 @@ fn renameTableFind(p: *Parse, w: *Walker, rctx: *RenameCtx, old: []const u8) Oom
             }
         } else {
             // Foreign keys that refer to the renamed table.
-            if ((!is_legacy or db.flags & int.DbFlag.ForeignKeys != 0) and t.e_tab_type != .vtab) {
+            if ((!is_legacy or db.flags.ForeignKeys) and t.e_tab_type != .vtab) {
                 std.debug.assert(t.isOrdinary());
                 var fk_opt = t.u.tab.fkey;
                 while (fk_opt) |fk| : (fk_opt = fk.next_from) {
@@ -1192,8 +1203,8 @@ fn renameTableFind(p: *Parse, w: *Walker, rctx: *RenameCtx, old: []const u8) Oom
 }
 
 /// Port of renameQuotefixExprCb().
-fn renameQuotefixExprCb(w: *Walker, e: *Expr) u8 {
-    if (e.op == TK.STRING and e.has(EP.DblQuoted)) _ = renameTokenFind(w.parse.?, renameCtx(w), e);
+fn renameQuotefixExprCb(w: *Walker, e: *Expr) WRC {
+    if (e.op == TK.STRING and e.flags.DblQuoted) _ = renameTokenFind(w.parse.?, renameCtx(w), e);
     return WRC.Continue;
 }
 
@@ -1220,12 +1231,12 @@ fn renameQuotefixFunc(ctx: *Context, argv: []*Mem) void {
             .parse = p,
             .expr_callback = renameQuotefixExprCb,
             .select_callback = renameColumnSelectCb,
-            .u = .{ .ptr = &rctx },
+            .u = .{ .rename = &rctx },
         };
         if (p.new_table) |t| {
             if (t.isView()) {
                 const sel = t.u.view.select.?;
-                sel.sel_flags &= ~SF.View;
+                sel.sel_flags.View = false;
                 p.rc = RC.OK;
                 select_mod.selectPrep(p, sel, null);
                 rc = if (db.malloc_failed) RC.NOMEM else p.rc;
@@ -1266,7 +1277,7 @@ fn renameTableTest(ctx: *Context, argv: []*Mem) void {
     const zdb = api.valueText(argv[0]);
     const input = api.valueText(argv[1]);
     const b_temp = api.valueInt(argv[4]) != 0;
-    const is_legacy = db.flags & int.DbFlag.LegacyAlter != 0;
+    const is_legacy = db.flags.LegacyAlter;
     const when = api.valueText(argv[5]);
     const b_no_dqs = api.valueInt(argv[6]) != 0;
     if (zdb == null or input == null) return;
@@ -1276,7 +1287,7 @@ fn renameTableTest(ctx: *Context, argv: []*Mem) void {
     defer renameParseCleanup(&rp);
     const p = &rp.p;
     const flags = db.flags;
-    if (b_no_dqs) db.flags &= ~(int.DbFlag.DqsDML | int.DbFlag.DqsDDL);
+    if (b_no_dqs) db.flags.clear(.{ .DqsDML = true, .DqsDDL = true });
     var rc = renameParseSql(p, zdb, db, input, b_temp);
     db.flags = flags;
     if (rc == RC.OK) {
@@ -1420,9 +1431,9 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
 
     // Not a PRIMARY KEY or UNIQUE column.
     const flags = t.cols[i_col].col_flags;
-    if (flags & (COLFLAG.PRIMKEY | COLFLAG.UNIQUE) != 0) {
+    if (flags.intersects(.{ .PRIMKEY = true, .UNIQUE = true })) {
         util.errorMsg(p, "cannot drop {s} column: \"{s}\"", .{
-            if (flags & COLFLAG.PRIMKEY != 0) "PRIMARY KEY" else "UNIQUE",
+            if (flags.PRIMKEY) "PRIMARY KEY" else "UNIQUE",
             z_col,
         });
         return;
@@ -1454,7 +1465,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
 
     // Rewrite every row without the column (a VIRTUAL column is not
     // stored).
-    if (p.n_err == 0 and t.cols[i_col].col_flags & COLFLAG.VIRTUAL == 0) {
+    if (p.n_err == 0 and !t.cols[i_col].col_flags.VIRTUAL) {
         const v = build.getVdbe(p) orelse return;
         var pk: ?*Index = null;
         var n_field: i32 = 0;
@@ -1478,7 +1489,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         p.n_mem += 1;
         const reg_rec = p.n_mem;
         for (t.cols, 0..) |*c, i| {
-            if (i == i_col or c.col_flags & COLFLAG.VIRTUAL != 0) continue;
+            if (i == i_col or c.col_flags.VIRTUAL) continue;
             var reg_out: i32 = undefined;
             if (pk) |k| {
                 const i_pos = build.tableColumnToIndex(k, @intCast(i));
@@ -1934,7 +1945,7 @@ fn addConstraintImpl(p: *Parse, src: *SrcList, first: Token, name: ?Token, text:
 
     // The constraint may not use internal functions (forum post
     // 2026-05-10T01:11:28Z).
-    if (resolve.resolveSelfReference(p, t, NC.IsCheck, e, null) != 0) return;
+    resolve.resolveSelfReference(p, t, .{ .IsCheck = true }, e, null) catch return;
 
     // A named constraint must not exist already.
     if (name) |nm| {
@@ -1983,7 +1994,7 @@ fn addConstraintImpl(p: *Parse, src: *SrcList, first: Token, name: ?Token, text:
 fn internalFunction(name: [:0]const u8, n_arg: i16, x: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | FUNC.INTERNAL | vi.ENC.UTF8 | FUNC.CONSTANT,
+        .func_flags = .{ .enc = vi.ENC.UTF8, .BUILTIN = true, .INTERNAL = true, .CONSTANT = true },
         .x_sfunc = x,
         .name = name,
     };

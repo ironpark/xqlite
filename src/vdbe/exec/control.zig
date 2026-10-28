@@ -11,6 +11,7 @@ const int = @import("../../sql/sqlite_int.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
+const Error = core.Error;
 const Op = vi.Op;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
@@ -26,14 +27,14 @@ const once_reset_threshold: i32 = 0x7ffffffe;
 pub fn opGosub(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(!in1.isDynamic());
-    in1.flags = MEM.Int;
+    in1.flags = .{ .Int = true };
     in1.u = .{ .i = e.pc };
     return .jump_p2_check_interrupt;
 }
 
 pub fn opReturn(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
-    if (in1.flags & MEM.Int != 0) {
+    if (in1.flags.Int) {
         e.pc = @intCast(in1.u.i);
         return .goto_pc;
     }
@@ -45,14 +46,14 @@ pub fn opInitCoroutine(e: *Exec, op: *Op) Flow {
     const out = e.reg(op.p1);
     std.debug.assert(!out.isDynamic());
     out.u = .{ .i = op.p3 - 1 };
-    out.flags = MEM.Int;
+    out.flags = .{ .Int = true };
     if (op.p2 == 0) return .next;
     return .jump_p2;
 }
 
 pub fn opEndCoroutine(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
-    std.debug.assert(in1.flags == MEM.Int);
+    std.debug.assert(in1.flags == MEM{ .Int = true });
     const caller = &e.ops[@intCast(in1.u.i)];
     std.debug.assert(caller.opcode == OP.Yield);
     in1.u = .{ .i = e.pc - 1 };
@@ -63,19 +64,19 @@ pub fn opEndCoroutine(e: *Exec, op: *Op) Flow {
 pub fn opYield(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(!in1.isDynamic());
-    in1.flags = MEM.Int;
+    in1.flags = .{ .Int = true };
     const dest = in1.u.i;
     in1.u = .{ .i = e.pc };
     e.pc = @intCast(dest);
     return .goto_pc;
 }
 
-pub fn opHaltIfNull(e: *Exec, op: *Op) Flow {
-    if (e.reg(op.p3).flags & MEM.Null == 0) return .next;
+pub fn opHaltIfNull(e: *Exec, op: *Op) Error!Flow {
+    if (!e.reg(op.p3).flags.Null) return .next;
     return opHalt(e, op);
 }
 
-pub fn opHalt(e: *Exec, op: *Op) Flow {
+pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     const db = e.db;
     std.debug.assert(op.p1 != RC.INTERNAL);
@@ -86,7 +87,7 @@ pub fn opHalt(e: *Exec, op: *Op) Flow {
         v.n_frame -= 1;
         aux.setChanges(db, v.n_change);
         var pcx = aux.frameRestore(frame);
-        if (op.p2 == OE.Ignore) {
+        if (op.p2 == OE.Ignore.int()) {
             // RAISE(IGNORE): continue at P2 of the calling OP_Program.
             pcx = v.ops.items[@intCast(pcx)].p2 - 1;
         }
@@ -96,11 +97,11 @@ pub fn opHalt(e: *Exec, op: *Op) Flow {
         return .goto_pc;
     }
     v.rc = op.p1;
-    v.error_action = @intCast(op.p2);
+    v.error_action = .fromInt(op.p2);
     std.debug.assert(op.p5 <= 4);
     if (v.rc != 0) {
         if (op.p3 > 0 and op.p4type == .notused) {
-            const z = mem.valueText(e.reg(op.p3), ENC.UTF8) catch return .no_mem;
+            const z = try mem.valueText(e.reg(op.p3), ENC.UTF8);
             aux.vdbeError(v, "{s}", .{if (z) |s| std.mem.span(s) else ""});
         } else if (op.p5 != 0) {
             const types = [_][]const u8{ "NOT NULL", "UNIQUE", "CHECK", "FOREIGN KEY" };
@@ -113,13 +114,11 @@ pub fn opHalt(e: *Exec, op: *Op) Flow {
             aux.vdbeError(v, "{s}", .{if (op.p4type == .z) std.mem.span(op.p4.z) else ""});
         }
     }
-    const rc = aux.halt(v);
-    std.debug.assert(rc == RC.BUSY or rc == RC.OK or rc == RC.ERROR);
-    if (rc == RC.BUSY) {
+    if (aux.halt(v)) |_| {
+        e.rc = if (v.rc != 0) RC.ERROR else RC.DONE;
+    } else |_| {
         v.rc = RC.BUSY;
         e.rc = RC.BUSY;
-    } else {
-        e.rc = if (v.rc != 0) RC.ERROR else RC.DONE;
     }
     return .ret;
 }
@@ -157,8 +156,7 @@ pub fn opInit(e: *Exec, op: *Op) Flow {
 
 /// sqlite3VdbeFrameMemDel(): the destructor of the register holding a
 /// trigger frame; the frame is freed when the statement halts.
-fn frameMemDel(p: ?*anyopaque) void {
-    const frame: *vi.VdbeFrame = @ptrCast(@alignCast(p.?));
+fn frameMemDel(frame: *vi.VdbeFrame) void {
     frame.parent = frame.v.del_frame;
     frame.v.del_frame = frame;
 }
@@ -198,7 +196,7 @@ fn allocFrame(e: *Exec, program: *vi.SubProgram) error{OutOfMemory}!*vi.VdbeFram
     return frame;
 }
 
-pub fn opProgram(e: *Exec, op: *Op) Flow {
+pub fn opProgram(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     const db = e.db;
     const program = op.p4.subprogram;
@@ -212,19 +210,18 @@ pub fn opProgram(e: *Exec, op: *Op) Flow {
     }
     if (v.n_frame >= db.limit(.trigger_depth)) {
         aux.vdbeError(v, "triggers nested too deep", .{});
-        e.rc = RC.ERROR;
-        return .abort;
+        return error.Error;
     }
     var frame: *vi.VdbeFrame = undefined;
-    if (rt.flags & MEM.Blob == 0) {
-        frame = allocFrame(e, program) catch return .no_mem;
+    if (!rt.flags.Blob) {
+        frame = try allocFrame(e, program);
         mem.release(rt);
-        rt.flags = MEM.Blob | MEM.Dyn;
+        rt.flags = .{ .Blob = true, .Dyn = true };
         rt.z = @ptrCast(frame);
         rt.n = @sizeOf(vi.VdbeFrame);
-        rt.x_del = frameMemDel;
+        rt.x_del = int.destructor(frameMemDel);
     } else {
-        frame = @ptrCast(@alignCast(rt.z.?));
+        frame = mem.dynObject(rt, frameMemDel).?;
     }
     v.n_frame += 1;
     frame.parent = v.frame;
@@ -249,14 +246,14 @@ pub fn opParam(e: *Exec, op: *Op) Flow {
     const out = e.out2Prerelease(op);
     const frame = e.v.frame.?;
     const in_ = &frame.mem[@intCast(op.p1 + frame.ops[@intCast(frame.pc)].p1)];
-    mem.shallowCopy(out, in_, MEM.Ephem);
+    mem.shallowCopy(out, in_, .{ .Ephem = true });
     return .next;
 }
 
 pub fn opFkCounter(e: *Exec, op: *Op) Flow {
     if (op.p1 != 0) {
         e.db.n_deferred_cons += op.p2;
-    } else if (e.db.flags & int.DbFlag.DeferFKs != 0) {
+    } else if (e.db.flags.DeferFKs) {
         e.db.n_deferred_imm_cons += op.p2;
     } else {
         e.v.n_fk_constraint += op.p2;

@@ -114,6 +114,90 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 🎯 목표 · 🔬 실험적 / 후순위 · — 해당 없음
 
+## Zig API
+
+엔진 위에 얇은 Zig 계층(`xqlite.Db`, `xqlite.Stmt`)을 제공합니다. 전역 초기화 없이 할당자와 `std.Io`를 명시적으로 넘기고, 바인딩·결과 매핑·사용자 함수의 타입은 comptime으로 결정합니다. 오류는 정수 코드가 아니라 Zig 오류 집합(`error.Constraint`, `error.Busy` ...)으로 올라오며, 확장 코드와 메시지는 `db.lastError()`나 `Diagnostics`로 확인합니다.
+
+```zig
+const std = @import("std");
+const xqlite = @import("xqlite");
+
+const User = struct { id: i64, name: []const u8, email: ?[]const u8 };
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    var db = try xqlite.Db.open(gpa, init.io, "app.db", .{ .journal_mode = .wal, .busy_timeout_ms = 1000 });
+    defer db.close();
+
+    try db.exec("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE)");
+
+    // 튜플은 위치(?1, ?2), 구조체는 이름(:name, @name, $name)으로 바인딩
+    try db.execArgs("INSERT INTO users(name, email) VALUES(?, ?)", .{ "Ada", "ada@example.com" });
+    try db.execArgs("INSERT INTO users(name, email) VALUES(:name, :email)", .{ .name = "Linus", .email = null });
+    std.debug.print("last id = {d}\n", .{db.lastInsertRowid()});
+
+    // 행을 구조체로 매핑 (필드 이름 = 열 이름). 문자열은 다음 next()까지 유효
+    var stmt = try db.prepare("SELECT id, name, email FROM users WHERE id > ?");
+    defer stmt.finalize();
+    try stmt.bind(.{0});
+    var it = stmt.iterator(User);
+    while (try it.next()) |u| std.debug.print("{d} {s} {?s}\n", .{ u.id, u.name, u.email });
+
+    // 문장보다 오래 살아야 하는 값은 할당자로 복사
+    const name = (try db.oneAlloc([]const u8, gpa, "SELECT name FROM users WHERE id = ?", .{1})).?;
+    defer gpa.free(name);
+
+    // 오류는 Zig 오류 집합, 자세한 내용은 lastError()
+    db.execArgs("INSERT INTO users(name, email) VALUES(?, ?)", .{ "Eve", "ada@example.com" }) catch |err| {
+        const e = db.lastError().?;
+        std.debug.print("{s}: {s} ({t})\n", .{ @errorName(err), e.message, e.code }); // Constraint: UNIQUE constraint failed: users.email (constraint_unique)
+    };
+
+    // 트랜잭션: 함수가 오류를 돌려주면 ROLLBACK, 아니면 COMMIT
+    try db.transaction(.immediate, renameAll, .{ &db, "user" });
+}
+
+fn renameAll(db: *xqlite.Db, prefix: []const u8) !void {
+    try db.execArgs("UPDATE users SET name = ? || '-' || id", .{prefix});
+}
+```
+
+사용자 함수, 집계(윈도우) 함수, collation, 가상 테이블도 Zig 함수와 타입에서 시그니처를 추론해 등록합니다.
+
+```zig
+fn gcd(a: i64, b: i64) i64 { ... }                       // 인자 2개, INTEGER -> INTEGER
+try db.createFunction("gcd", {}, gcd, .{ .deterministic = true });
+
+const Sum = struct {                                       // 그룹마다의 상태
+    total: i64 = 0,
+    pub fn step(self: *Sum, x: ?i64) void { self.total += x orelse 0; }
+    pub fn final(self: *Sum) i64 { return self.total; }
+};
+try db.createAggregate("my_sum", Sum, .{});
+
+try db.createCollation("bylength", {}, byLength);         // fn ([]const u8, []const u8) std.math.Order
+try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(10)
+```
+
+| Zig 타입 | SQLite 값 |
+| --- | --- |
+| 정수(모든 폭), `comptime_int` | INTEGER (범위를 넘으면 `error.IntegerOverflow`) |
+| `f32`, `f64` ... | REAL |
+| `bool` | INTEGER 0/1 |
+| `[]const u8`, 문자열 리터럴 | TEXT |
+| `xqlite.Blob`, `xqlite.ZeroBlob` | BLOB |
+| `?T`, `null` | NULL (옵셔널이 아닌 타입으로 NULL을 읽으면 `error.UnexpectedNull`) |
+| enum | 태그 이름(TEXT), `xqlite_storage = .integer`를 선언하면 INTEGER |
+| `xqlite.Value` | 동적 타입 |
+
+수명 규칙, 오류 모델, C API와의 대응은 [docs/zig-api.md](docs/zig-api.md)에 정리했습니다. 예제는 `examples/`에 있습니다.
+
+```sh
+zig build example-basic                # examples/basic.zig (인자: -- notes.db)
+zig build example-extensions           # examples/extensions.zig
+zig build examples                     # 예제 빌드만
+```
+
 ## 사용 예시 (계획 중인 API)
 
 ```zig

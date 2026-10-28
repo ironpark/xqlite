@@ -11,6 +11,7 @@ const int = @import("../sql/sqlite_int.zig");
 const main_mod = @import("../sql/main.zig");
 const printf = @import("../sql/printf.zig");
 const malloc = @import("../sql/malloc.zig");
+const thunk = @import("../util/thunk.zig");
 
 const Vdbe = vi.Vdbe;
 const Mem = vi.Mem;
@@ -136,7 +137,7 @@ pub fn finalize(v: *Vdbe) i32 {
 pub fn clearBindings(v: *Vdbe) void {
     for (v.vars) |*m| {
         mem.release(m);
-        m.flags = MEM.Null;
+        m.flags = .{ .Null = true };
     }
 }
 
@@ -166,12 +167,12 @@ pub fn dataCount(v: *const Vdbe) usize {
 /// Port of columnMem(): the value of column `i` (a NULL outside a row).
 fn columnMem(v: *Vdbe, i: usize) *Mem {
     const null_mem = struct {
-        var m: Mem = .{ .flags = MEM.Null };
+        var m: Mem = .{ .flags = .{ .Null = true } };
     };
     if (v.result_row) |row| {
         if (i < v.n_res_column) return &row[i];
     }
-    null_mem.m = .{ .flags = MEM.Null };
+    null_mem.m = .{ .flags = .{ .Null = true } };
     return &null_mem.m;
 }
 
@@ -271,9 +272,9 @@ pub fn valueText(m: *Mem) ?[:0]const u8 {
 
 /// Port of sqlite3_value_blob().
 pub fn valueBlob(m: *Mem) ?[]const u8 {
-    if (m.flags & (MEM.Blob | MEM.Str) != 0) {
-        if (m.flags & MEM.Zero != 0) mem.expandBlob(m) catch return null;
-        m.flags |= MEM.Blob;
+    if (m.flags.intersects(.{ .Blob = true, .Str = true })) {
+        if (m.flags.Zero) mem.expandBlob(m) catch return null;
+        m.flags.Blob = true;
         if (m.n == 0) return null;
         return m.bytes();
     }
@@ -298,7 +299,7 @@ pub fn valueNumericType(m: *Mem) i32 {
 /// Port of sqlite3_value_pointer(): the pointer of a pointer value of
 /// type `ptype` (sqlite3_result_pointer()), or null.
 pub fn valuePointer(m: *const Mem, ptype: [:0]const u8) ?*anyopaque {
-    if (m.flags & (MEM.TypeMask | MEM.Term | MEM.Subtype) == MEM.Null | MEM.Term | MEM.Subtype and
+    if (m.flags.only(MEM.TypeMask.with(.{ .Term = true, .Subtype = true })) == MEM{ .Null = true, .Term = true, .Subtype = true } and
         m.e_subtype == 'p' and std.mem.eql(u8, std.mem.span(m.u.z_ptype), ptype))
     {
         return @ptrCast(m.z);
@@ -308,7 +309,7 @@ pub fn valuePointer(m: *const Mem, ptype: [:0]const u8) ?*anyopaque {
 
 /// Port of sqlite3_value_subtype().
 pub fn valueSubtype(m: *const Mem) u32 {
-    return if (m.flags & MEM.Subtype != 0) m.e_subtype else 0;
+    return if (m.flags.Subtype) m.e_subtype else 0;
 }
 
 /// Port of sqlite3_value_nochange().
@@ -318,7 +319,7 @@ pub fn valueNochange(m: *const Mem) bool {
 
 /// Port of sqlite3_value_frombind().
 pub fn valueFrombind(m: *const Mem) bool {
-    return m.flags & MEM.FromBind != 0;
+    return m.flags.FromBind;
 }
 
 /// Port of sqlite3_value_dup(): a copy not tied to any connection, in
@@ -328,17 +329,17 @@ pub fn valueDup(orig: ?*const Mem) ?*Mem {
     const o = orig orelse return null;
     const new = malloc.allocator.create(Mem) catch return null;
     new.* = .{ .u = o.u, .z = o.z, .n = o.n, .flags = o.flags, .enc = o.enc, .e_subtype = o.e_subtype };
-    new.flags &= ~MEM.Dyn;
-    if (new.flags & (MEM.Str | MEM.Blob) != 0) {
-        new.flags &= ~(MEM.Static | MEM.Dyn);
-        new.flags |= MEM.Ephem;
+    new.flags.Dyn = false;
+    if (new.flags.intersects(.{ .Str = true, .Blob = true })) {
+        new.flags.clear(.{ .Static = true, .Dyn = true });
+        new.flags.Ephem = true;
         mem.makeWriteable(new) catch {
             valueFree(new);
             return null;
         };
-    } else if (new.flags & MEM.Null != 0) {
+    } else if (new.flags.Null) {
         // Pointer values are not duplicated.
-        new.flags &= ~(MEM.Term | MEM.Subtype);
+        new.flags.clear(.{ .Term = true, .Subtype = true });
     }
     return new;
 }
@@ -364,7 +365,7 @@ fn unbind(v: *Vdbe, i: usize) i32 {
     }
     const m = &v.vars[i - 1];
     mem.release(m);
-    m.flags = MEM.Null;
+    m.flags = .{ .Null = true };
     v.db.err_code = RC.OK;
     // Statements whose plan depends on bound values (expmask) would be
     // reprepared here; that comes with sqlite3_prepare_v2().
@@ -401,7 +402,7 @@ fn bindStr(v: *Vdbe, i: usize, z: []const u8, enc: u8) i32 {
     const rc = unbind(v, i);
     if (rc != RC.OK) return rc;
     mem.setStr(&v.vars[i - 1], z, enc, .transient) catch |err| {
-        const code = main_mod.errorCode(err);
+        const code = int.errorCode(err);
         main_mod.setError(v.db, code);
         return code;
     };
@@ -418,8 +419,8 @@ pub fn bindZeroblob(v: *Vdbe, i: usize, n: i32) i32 {
 pub fn bindValue(v: *Vdbe, i: usize, value: *Mem) i32 {
     return switch (mem.valueType(value)) {
         vi.SQLITE_INTEGER => bindInt64(v, i, value.u.i),
-        vi.SQLITE_FLOAT => bindDouble(v, i, if (value.flags & MEM.Real != 0) value.u.r else @floatFromInt(value.u.i)),
-        vi.SQLITE_BLOB => if (value.flags & MEM.Zero != 0)
+        vi.SQLITE_FLOAT => bindDouble(v, i, if (value.flags.Real) value.u.r else @floatFromInt(value.u.i)),
+        vi.SQLITE_BLOB => if (value.flags.Zero)
             bindZeroblob(v, i, value.u.n_zero)
         else
             bindBlob(v, i, value.bytes()),
@@ -573,7 +574,7 @@ pub fn resultValue(ctx: *Context, value: *const Mem) void {
 /// Port of sqlite3_result_subtype().
 pub fn resultSubtype(ctx: *Context, subtype: u32) void {
     ctx.out.e_subtype = @truncate(subtype);
-    ctx.out.flags |= MEM.Subtype;
+    ctx.out.flags.Subtype = true;
 }
 
 /// Port of sqlite3_result_error(): fail the function with `msg`.
@@ -585,7 +586,7 @@ pub fn resultError(ctx: *Context, msg: []const u8) void {
 /// Port of sqlite3_result_error_code().
 pub fn resultErrorCode(ctx: *Context, code: i32) void {
     ctx.is_error = if (code != 0) code else -1;
-    if (ctx.out.flags & MEM.Null != 0) {
+    if (ctx.out.flags.Null) {
         mem.setStr(ctx.out, @import("../sql/util.zig").errStr(code), ENC.UTF8, .static) catch {};
     }
 }
@@ -631,9 +632,11 @@ pub fn notPureFunc(ctx: *Context) bool {
     const v = ctx.vdbe orelse return true;
     const op = &v.ops.items[@intCast(ctx.i_op)];
     if (op.opcode == vi.OP.PureFunc) {
-        const z_context = if (op.p5 & int.NC.IsCheck != 0)
+        // P5 holds the NC_SelfRef flags of the expression (resolveExprStep()).
+        const nc = int.NC.fromInt(op.p5);
+        const z_context = if (nc.IsCheck)
             "a CHECK constraint"
-        else if (op.p5 & int.NC.GenCol != 0)
+        else if (nc.GenCol)
             "a generated column"
         else
             "an index";
@@ -678,7 +681,7 @@ pub fn getAuxdata(ctx: *const Context, i_arg: i32) ?*anyopaque {
 /// Port of sqlite3_set_auxdata(): keep `aux` as the auxiliary data of
 /// argument `i_arg` (of the statement if negative); `x_delete` frees it
 /// when it is replaced or no longer needed.
-pub fn setAuxdata(ctx: *Context, i_arg: i32, p_aux: ?*anyopaque, x_delete: ?*const fn (?*anyopaque) void) void {
+pub fn setAuxdata(ctx: *Context, i_arg: i32, p_aux: ?*anyopaque, x_delete: ?int.DestructorFn) void {
     const v = ctx.vdbe orelse {
         if (x_delete) |del| del(p_aux);
         return;
@@ -703,11 +706,28 @@ pub fn setAuxdata(ctx: *Context, i_arg: i32, p_aux: ?*anyopaque, x_delete: ?*con
     found.x_delete_aux = x_delete;
 }
 
+/// The type of the auxiliary data that `x_delete` (a typed destructor,
+/// `fn (*T) void`) frees.
+fn AuxType(comptime x_delete: anytype) type {
+    return @typeInfo(@TypeOf(x_delete)).@"fn".param_types[0].?;
+}
+
+/// setAuxdata() of typed data, freed by the typed destructor `x_delete`.
+pub fn setAuxdataTyped(ctx: *Context, i_arg: i32, comptime x_delete: anytype, p_aux: AuxType(x_delete)) void {
+    setAuxdata(ctx, i_arg, p_aux, int.destructor(x_delete));
+}
+
+/// getAuxdata() of data set by setAuxdataTyped() with the same
+/// `x_delete`, which gives its type.
+pub fn getAuxdataTyped(ctx: *const Context, i_arg: i32, comptime x_delete: anytype) ?AuxType(x_delete) {
+    return thunk.downcast(AuxType(x_delete), getAuxdata(ctx, i_arg) orelse return null);
+}
+
 /// Port of sqlite3_aggregate_context(): `n` zeroed bytes kept for the
 /// aggregate across calls; null if `n` is 0 and none was made yet.
 pub fn aggregateContext(ctx: *Context, n: usize) ?[]u8 {
     const m = ctx.mem.?;
-    if (m.flags & MEM.Agg == 0) {
+    if (!m.flags.Agg) {
         // createAggContext()
         if (n == 0) {
             mem.setNull(m);
@@ -718,7 +738,7 @@ pub fn aggregateContext(ctx: *Context, n: usize) ?[]u8 {
             resultErrorNomem(ctx);
             return null;
         };
-        m.flags = MEM.Agg;
+        m.flags = .{ .Agg = true };
         m.u = .{ .def = ctx.func };
         @memset(m.z.?[0..n], 0);
         m.n = @intCast(n);

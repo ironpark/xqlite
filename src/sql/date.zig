@@ -406,9 +406,14 @@ fn osLocaltime(t: *const std.c.time_t, tm: *Tm) bool {
     return localtime_r(t, tm) == null;
 }
 
+/// The failures of a modifier: not one, or (with an error set on the
+/// context) no local time.
+const ModifierError = error{ BadModifier, LocaltimeUnavailable };
+
 /// Port of toLocaltime(): move `p`, taken as UTC, to local time. Sets an
-/// error on `ctx` and returns RC.ERROR if local time is unavailable.
-fn toLocaltime(p: *DateTime, ctx: *Context) i32 {
+/// error on `ctx` and fails (C: SQLITE_ERROR) if local time is
+/// unavailable.
+fn toLocaltime(p: *DateTime, ctx: *Context) ModifierError!void {
     var s_local: Tm = .{};
     var i_year_diff: i32 = undefined;
     var t: std.c.time_t = undefined;
@@ -431,7 +436,7 @@ fn toLocaltime(p: *DateTime, ctx: *Context) i32 {
     }
     if (osLocaltime(&t, &s_local)) {
         api.resultError(ctx, "local time unavailable");
-        return RC.ERROR;
+        return error.LocaltimeUnavailable;
     }
     p.year = s_local.tm_year + 1900 - i_year_diff;
     p.month = s_local.tm_mon + 1;
@@ -445,7 +450,6 @@ fn toLocaltime(p: *DateTime, ctx: *Context) i32 {
     p.raw_s = false;
     p.tz = 0;
     p.is_error = false;
-    return RC.OK;
 }
 
 /// The 'NNN days' style transformations (aXformType): unit name, the
@@ -489,22 +493,27 @@ fn eqlZ(z: [*:0]const u8, s: []const u8) bool {
     return ctype.eqlNoCase(std.mem.span(z), s);
 }
 
+/// Fails with BadModifier unless `ok`.
+fn modifierDone(ok: bool) ModifierError!void {
+    if (!ok) return error.BadModifier;
+}
+
 /// Port of parseModifier(): apply modifier `z_arg` (argument `idx`) to
-/// `p`. Returns 0 on success, nonzero on error. Only errors in system
-/// calls (localtime()) set an error on `ctx`; an unknown modifier does
-/// not.
-fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) i32 {
+/// `p`; fails (C: nonzero) if it is not one or cannot be applied. Only
+/// errors in system calls (localtime()) set an error on `ctx`; an
+/// unknown modifier does not.
+fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) ModifierError!void {
     var z = z_arg;
-    var rc: i32 = 1;
+    var ok = false;
     var r: f64 = undefined;
     switch (ctype.toLower(z[0])) {
         'a' => {
             // auto: a raw number is a julian day number or unix seconds,
             // depending on its magnitude.
             if (eqlZ(z, "auto")) {
-                if (idx > 1) return 1;
+                if (idx > 1) return error.BadModifier;
                 autoAdjustDate(p);
-                rc = 0;
+                ok = true;
             }
         },
         'c' => {
@@ -513,14 +522,14 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
             if (eqlZ(z, "ceiling")) {
                 computeJD(p);
                 clearYMD_HMS_TZ(p);
-                rc = 0;
+                ok = true;
                 p.n_floor = 0;
             }
         },
         'e' => {
             // end of day / month / year: the last millisecond of it.
-            if (!hasPrefixNoCase(z, "end of ")) return rc;
-            if (!p.valid_jd and !p.valid_ymd and !p.valid_hms) return rc;
+            if (!hasPrefixNoCase(z, "end of ")) return modifierDone(ok);
+            if (!p.valid_jd and !p.valid_ymd and !p.valid_hms) return modifierDone(ok);
             z += 7;
             computeYMD(p);
             p.valid_hms = true;
@@ -541,13 +550,13 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
                 computeJD(p);
                 p.i_jd -= @as(i64, p.n_floor + 1) * 86400000;
                 clearYMD_HMS_TZ(p);
-                rc = 0;
+                ok = true;
             } else if (eqlZ(z, "year")) {
                 p.month = 12;
                 p.day = 31;
-                rc = 0;
+                ok = true;
             } else if (eqlZ(z, "day")) {
-                rc = 0;
+                ok = true;
             }
         },
         'f' => {
@@ -557,16 +566,16 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
                 computeJD(p);
                 p.i_jd -= @as(i64, p.n_floor) * 86400000;
                 clearYMD_HMS_TZ(p);
-                rc = 0;
+                ok = true;
             }
         },
         'j' => {
             // julianday: the prior number is a julian day number. Only as
             // the first modifier, and only for an in-range number.
             if (eqlZ(z, "julianday")) {
-                if (idx > 1) return 1;
+                if (idx > 1) return error.BadModifier;
                 if (p.valid_jd and p.raw_s) {
-                    rc = 0;
+                    ok = true;
                     p.raw_s = false;
                 }
             }
@@ -574,22 +583,24 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
         'l' => {
             // localtime: shift a UTC time to local time.
             if (eqlZ(z, "localtime") and api.notPureFunc(ctx)) {
-                rc = if (p.is_local) RC.OK else toLocaltime(p, ctx);
+                const local = if (p.is_local) {} else toLocaltime(p, ctx);
                 p.is_utc = false;
                 p.is_local = true;
+                try local;
+                ok = true;
             }
         },
         'u' => {
             if (eqlZ(z, "unixepoch") and p.raw_s) {
                 // unixepoch: the raw number is seconds since 1970.
-                if (idx > 1) return 1;
+                if (idx > 1) return error.BadModifier;
                 r = p.sec * 1000.0 + 210866760000000.0;
                 if (r >= 0.0 and r < 464269060800000.0) {
                     clearYMD_HMS_TZ(p);
                     p.i_jd = @intFromFloat(r + 0.5);
                     p.valid_jd = true;
                     p.raw_s = false;
-                    rc = 0;
+                    ok = true;
                 }
             } else if (eqlZ(z, "utc") and api.notPureFunc(ctx)) {
                 // utc: shift a local time to UTC, by guessing and
@@ -605,8 +616,7 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
                         i_guess -= i_err;
                         nw.i_jd = i_guess;
                         nw.valid_jd = true;
-                        rc = toLocaltime(&nw, ctx);
-                        if (rc != 0) return rc;
+                        try toLocaltime(&nw, ctx);
                         computeJD(&nw);
                         i_err = nw.i_jd - i_orig_jd;
                         if (i_err == 0) break;
@@ -620,7 +630,7 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
                     p.is_utc = true;
                     p.is_local = false;
                 }
-                rc = RC.OK;
+                ok = true;
             }
         },
         'w' => {
@@ -631,7 +641,7 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
                 r >= -6.0 and r <= 6.0)
             {
                 var n: i32 = @intFromFloat(r);
-                if (!numeric.realSameAsInt(r, n)) return rc;
+                if (!numeric.realSameAsInt(r, n)) return modifierDone(ok);
                 computeYMD_HMS(p);
                 p.tz = 0;
                 p.valid_jd = false;
@@ -646,7 +656,7 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
                     }
                 }
                 clearYMD_HMS_TZ(p);
-                rc = 0;
+                ok = true;
             }
         },
         's' => {
@@ -656,11 +666,11 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
             if (!hasPrefixNoCase(z, "start of ")) {
                 if (eqlZ(z, "subsec") or eqlZ(z, "subsecond")) {
                     p.use_subsec = true;
-                    rc = 0;
+                    ok = true;
                 }
-                return rc;
+                return modifierDone(ok);
             }
-            if (!p.valid_jd and !p.valid_ymd and !p.valid_hms) return rc;
+            if (!p.valid_jd and !p.valid_ymd and !p.valid_hms) return modifierDone(ok);
             z += 9;
             computeYMD(p);
             p.valid_hms = true;
@@ -672,24 +682,24 @@ fn parseModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime, idx: usize) 
             p.valid_jd = false;
             if (eqlZ(z, "month")) {
                 p.day = 1;
-                rc = 0;
+                ok = true;
             } else if (eqlZ(z, "year")) {
                 p.month = 1;
                 p.day = 1;
-                rc = 0;
+                ok = true;
             } else if (eqlZ(z, "day")) {
-                rc = 0;
+                ok = true;
             }
         },
         '+', '-', '0'...'9' => return parseShiftModifier(ctx, z, p),
         else => {},
     }
-    return rc;
+    return modifierDone(ok);
 }
 
 /// The numeric cases of parseModifier(): "NNN units", "(+|-)HH:MM:SS.FFF"
 /// and "(+|-)YYYY-MM-DD HH:MM:SS.FFF".
-fn parseShiftModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime) i32 {
+fn parseShiftModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime) ModifierError!void {
     var z = z_arg;
     var r: f64 = undefined;
     var y: i32 = undefined;
@@ -713,23 +723,23 @@ fn parseShiftModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime) i32 {
         var buf: [64]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buf);
         const a = if (n < buf.len) fba.allocator() else api.contextDbHandle(ctx).gpa;
-        const z_copy = a.dupeSentinel(u8, z[0..n], 0) catch return 1;
+        const z_copy = a.dupeSentinel(u8, z[0..n], 0) catch return error.BadModifier;
         defer a.free(z_copy);
-        if (numeric.atoF(z_copy, &r) <= 0) return 1;
+        if (numeric.atoF(z_copy, &r) <= 0) return error.BadModifier;
     }
     if (z[n] == '-') {
         // (+|-)YYYY-MM-DD adds or subtracts years, months (0-11) and days
         // (0-30).
-        if (z0 != '+' and z0 != '-') return 1;
+        if (z0 != '+' and z0 != '-') return error.BadModifier;
         if (n == 5) {
-            if (getDigits(z + 1, "40f-20a-20d", &.{ &y, &m, &d }) != 3) return 1;
+            if (getDigits(z + 1, "40f-20a-20d", &.{ &y, &m, &d }) != 3) return error.BadModifier;
         } else {
             std.debug.assert(n == 6);
-            if (getDigits(z + 1, "50f-20a-20d", &.{ &y, &m, &d }) != 3) return 1;
+            if (getDigits(z + 1, "50f-20a-20d", &.{ &y, &m, &d }) != 3) return error.BadModifier;
             z += 1;
         }
-        if (m >= 12) return 1;
-        if (d >= 31) return 1;
+        if (m >= 12) return error.BadModifier;
+        if (d >= 31) return error.BadModifier;
         computeYMD_HMS(p);
         p.valid_jd = false;
         if (z0 == '-') {
@@ -748,12 +758,12 @@ fn parseShiftModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime) i32 {
         p.valid_hms = false;
         p.valid_ymd = false;
         p.i_jd += @as(i64, d) * 86400000;
-        if (z[11] == 0) return 0;
+        if (z[11] == 0) return;
         if (ctype.isSpace(z[11]) and getDigits(z + 12, "20c:20e", &.{ &h, &mi }) == 2) {
             z2 = z + 12;
             n = 2;
         } else {
-            return 1;
+            return error.BadModifier;
         }
     }
     if (z2[n] == ':') {
@@ -761,7 +771,7 @@ fn parseShiftModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime) i32 {
         // are optional.
         if (!ctype.isDigit(z2[0])) z2 += 1;
         var tx: DateTime = .{};
-        if (parseHhMmSs(z2, &tx)) return 1;
+        if (parseHhMmSs(z2, &tx)) return error.BadModifier;
         computeJD(&tx);
         tx.i_jd -= 43200000;
         const day = @divTrunc(tx.i_jd, 86400000);
@@ -770,17 +780,17 @@ fn parseShiftModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime) i32 {
         computeJD(p);
         clearYMD_HMS_TZ(p);
         p.i_jd += tx.i_jd;
-        return 0;
+        return;
     }
 
     // "+NNN days" and the like.
     z += n;
     while (ctype.isSpace(z[0])) z += 1;
     var unit: []const u8 = std.mem.span(z);
-    if (unit.len < 3 or unit.len > 10) return 1;
+    if (unit.len < 3 or unit.len > 10) return error.BadModifier;
     if (ctype.toLower(unit[unit.len - 1]) == 's') unit = unit[0 .. unit.len - 1];
     computeJD(p);
-    var rc: i32 = 1;
+    var ok = false;
     const r_rounder: f64 = if (r < 0) -0.5 else 0.5;
     p.n_floor = 0;
     for (xform_types, 0..) |xt, i| {
@@ -813,12 +823,12 @@ fn parseShiftModifier(ctx: *Context, z_arg: [*:0]const u8, p: *DateTime) i32 {
             }
             computeJD(p);
             p.i_jd += @as(i64, @intFromFloat(r * 1000.0 * xt.r_xform + r_rounder));
-            rc = 0;
+            ok = true;
             break;
         }
     }
     clearYMD_HMS_TZ(p);
-    return rc;
+    return modifierDone(ok);
 }
 
 /// Port of isDate(): argv[0] is a date-time and the rest are modifiers;
@@ -839,7 +849,7 @@ fn isDate(ctx: *Context, argv: []const *Mem, p: *DateTime) bool {
     }
     for (argv[1..], 1..) |arg, i| {
         const z = api.valueText(arg) orelse return true;
-        if (parseModifier(ctx, z, p, i) != 0) return true;
+        parseModifier(ctx, z, p, i) catch return true;
     }
     computeJD(p);
     if (p.is_error or !validJulianDay(p.i_jd)) return true;
@@ -1218,7 +1228,7 @@ fn ctimestampFunc(ctx: *Context, argv: []*Mem) void {
 fn pureDate(name: [:0]const u8, n_arg: i16, x_func: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | FUNC.SLOCHNG | vi.ENC.UTF8 | FUNC.CONSTANT,
+        .func_flags = .{ .enc = vi.ENC.UTF8, .BUILTIN = true, .SLOCHNG = true, .CONSTANT = true },
         .x_sfunc = x_func,
         .name = name,
     };

@@ -1,22 +1,108 @@
 //! Converts SQLite's generated opcodes.h and opcodes.c (made by
-//! mkopcodeh.tcl/mkopcodec.tcl from vdbe.c) into Zig.
+//! mkopcodeh.tcl/mkopcodec.tcl from vdbe.c) into Zig. vdbe.c itself is
+//! read for its "same as TK_xxx" comments.
 //!
-//!     zig run opcodes2zig.zig -- opcodes.h opcodes.c VERSION > opcodes.zig
+//!     zig run opcodes2zig.zig -- opcodes.h opcodes.c vdbe.c VERSION > opcodes.zig
+//!
+//! The helper methods of OP and the checks of the numbering invariants
+//! they rely on are the `helpers` and `checks` templates below.
 
 const std = @import("std");
+
+/// Methods of OP, emitted inside the enum.
+const helpers =
+    \\
+    \\    /// The number of the opcode, as C stores it (u8).
+    \\    pub inline fn int(op: OP) u8 {
+    \\        return @backingInt(op);
+    \\    }
+    \\
+    \\    /// The opcode numbered like token `tk`, for code that uses an
+    \\    /// operator as the opcode (C passes pExpr->op to
+    \\    /// sqlite3VdbeAddOp*()). mkopcodeh.tcl gives each opcode that vdbe.c
+    \\    /// marks "same as TK_xxx" the value of that token (same_as_tk, checked
+    \\    /// below), so this is no conversion at all; `tk` must be one of those
+    \\    /// tokens.
+    \\    pub inline fn fromTk(tk: u8) OP {
+    \\        std.debug.assert(tk_is_op[tk]);
+    \\        return @fromBackingInt(tk);
+    \\    }
+    \\
+    \\    /// The OPFLG_* properties of the opcode (sqlite3OpcodeProperty[]).
+    \\    pub inline fn opflags(op: OP) u8 {
+    \\        return properties[op.int()];
+    \\    }
+    \\
+    \\    /// Whether the opcode may have OPFLG_JUMP (C:
+    \\    /// `opcode<=SQLITE_MX_JUMP_OPCODE`). mkopcodeh.tcl numbers the jump
+    \\    /// opcodes first, so no opcode after max_jump_opcode jumps.
+    \\    pub inline fn mayJump(op: OP) bool {
+    \\        return op.int() <= max_jump_opcode;
+    \\    }
+    \\
+    \\    /// The name of the opcode without "OP_" (sqlite3OpcodeName()).
+    \\    pub fn name(op: OP) [:0]const u8 {
+    \\        return names[op.int()].name;
+    \\    }
+    \\
+    \\    /// The place of a comparison opcode in the order OP_Ne, OP_Eq,
+    \\    /// OP_Gt, OP_Le, OP_Lt, OP_Ge, which indexes sqlite3aLTb[],
+    \\    /// sqlite3aEQb[] and sqlite3aGTb[] (C: `pOp->opcode - OP_Ne`). The
+    \\    /// six are consecutive because TK_NE..TK_GE are.
+    \\    pub inline fn compareIndex(op: OP) u3 {
+    \\        std.debug.assert(op.int() >= OP.Ne.int() and op.int() <= OP.Ge.int());
+    \\        return @intCast(op.int() - OP.Ne.int());
+    \\    }
+    \\
+    \\    /// For OP_SeekLT, OP_SeekLE, OP_SeekGE and OP_SeekGT, which are
+    \\    /// consecutive in that order: whether the seek moves forward, that
+    \\    /// is, it is OP_SeekGE or OP_SeekGT (C: `oc>=OP_SeekGE`).
+    \\    pub inline fn seekIsGeOrGt(op: OP) bool {
+    \\        return op.int() >= OP.SeekGE.int();
+    \\    }
+    \\
+;
+
+/// Checks of the invariants above, emitted after the tables.
+const checks =
+    \\
+    \\/// tk_is_op[tk]: whether some opcode is numbered like token `tk`.
+    \\const tk_is_op = blk: {
+    \\    var t: [256]bool = @splat(false);
+    \\    for (same_as_tk) |s| t[s.tk] = true;
+    \\    break :blk t;
+    \\};
+    \\
+    \\comptime {
+    \\    @setEvalBranchQuota(100_000);
+    \\    const assert = std.debug.assert;
+    \\    assert(properties.len == n_opcodes and names.len == n_opcodes);
+    \\    const info = @typeInfo(OP).@"enum";
+    \\    for (info.field_names, info.field_values) |name, value| {
+    \\        assert(std.mem.eql(u8, names[value].name, name));
+    \\        if (properties[value] & OPFLG.JUMP != 0) assert(value <= max_jump_opcode);
+    \\    }
+    \\    for (same_as_tk) |s| assert(s.op.int() == s.tk);
+    \\    for ([_]OP{ .Ne, .Eq, .Gt, .Le, .Lt, .Ge }, 0..) |op, i| assert(op.compareIndex() == i);
+    \\    for ([_]OP{ .SeekLT, .SeekLE, .SeekGE, .SeekGT }, 0..) |op, i| assert(op.int() == OP.SeekLT.int() + i);
+    \\    assert(!OP.SeekLT.seekIsGeOrGt() and !OP.SeekLE.seekIsGeOrGt() and OP.SeekGE.seekIsGeOrGt() and OP.SeekGT.seekIsGeOrGt());
+    \\}
+    \\
+;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
-    if (args.len != 4) {
-        std.debug.print("usage: opcodes2zig opcodes.h opcodes.c version\n", .{});
+    if (args.len != 5) {
+        std.debug.print("usage: opcodes2zig opcodes.h opcodes.c vdbe.c version\n", .{});
         std.process.exit(2);
     }
     const cwd = std.Io.Dir.cwd();
     const h = try cwd.readFileAlloc(io, args[1], gpa, .limited(1 << 20));
     const c = try cwd.readFileAlloc(io, args[2], gpa, .limited(1 << 20));
-    const version = std.mem.trim(u8, args[3], " \n");
+    const vdbe_c = try cwd.readFileAlloc(io, args[3], gpa, .limited(1 << 24));
+    const version = std.mem.trim(u8, args[4], " \n");
 
     var buf: [1 << 16]u8 = undefined;
     var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
@@ -25,9 +111,15 @@ pub fn main(init: std.process.Init) !void {
     try w.print(
         \\//! VDBE opcodes of SQLite {s}, generated by tools/gen-opcodes.sh from
         \\//! vdbe.c (mkopcodeh.tcl numbers them so that comparison and
-        \\//! arithmetic opcodes equal their TK_ codes). Do not edit.
+        \\//! arithmetic opcodes equal their TK_ codes). Do not edit: the methods
+        \\//! of OP and the checks of their invariants come from
+        \\//! tools/vdbe/opcodes2zig.zig.
         \\
-        \\pub const OP = struct {{
+        \\const std = @import("std");
+        \\const TK = @import("../parse/grammar.zig").TK;
+        \\
+        \\/// The opcodes (OP_*), numbered as in C.
+        \\pub const OP = enum(u8) {{
         \\
     , .{version});
     var n_ops: usize = 0;
@@ -39,12 +131,13 @@ pub fn main(init: std.process.Init) !void {
         const name = it.next() orelse continue;
         const value = it.next() orelse continue;
         if (std.mem.startsWith(u8, name, "OP_")) {
-            try w.print("    pub const {s}: u8 = {s};\n", .{ name[3..], value });
+            try w.print("    {s} = {s},\n", .{ name[3..], value });
             n_ops = @max(n_ops, (try std.fmt.parseInt(usize, value, 10)) + 1);
         } else if (std.mem.eql(u8, name, "SQLITE_MX_JUMP_OPCODE")) {
             mx_jump = value;
         }
     }
+    try w.writeAll(helpers);
     try w.print("}};\n\npub const n_opcodes = {d};\n\n", .{n_ops});
     try w.print("/// The largest opcode with the jump property.\npub const max_jump_opcode = {s};\n\n", .{mx_jump});
 
@@ -74,7 +167,23 @@ pub fn main(init: std.process.Init) !void {
     }
     try w.writeAll("\n};\n\n");
 
-    try w.writeAll("/// Opcode names and EXPLAIN synopses (sqlite3OpcodeName).\npub const names = [_]struct { name: []const u8, synopsis: []const u8 }{\n");
+    // The "case OP_Xxx: /* same as TK_YYY ... */" lines of vdbe.c.
+    try w.writeAll(
+        \\/// The opcodes that vdbe.c marks "same as TK_xxx", with their tokens.
+        \\pub const same_as_tk = [_]struct { op: OP, tk: u8 }{
+        \\
+    );
+    var vl = std.mem.splitScalar(u8, vdbe_c, '\n');
+    while (vl.next()) |line| {
+        const case = std.mem.indexOf(u8, line, "case OP_") orelse continue;
+        const same = std.mem.indexOf(u8, line, "same as TK_") orelse continue;
+        const op = ident(line[case + "case OP_".len ..]);
+        const tk = ident(line[same + "same as TK_".len ..]);
+        try w.print("    .{{ .op = .{s}, .tk = TK.{s} }},\n", .{ op, tk });
+    }
+    try w.writeAll("};\n\n");
+
+    try w.writeAll("/// Opcode names and EXPLAIN synopses (sqlite3OpcodeName).\npub const names = [_]struct { name: [:0]const u8, synopsis: [:0]const u8 }{\n");
     var cl = std.mem.splitScalar(u8, c, '\n');
     while (cl.next()) |line| {
         const q1 = std.mem.indexOf(u8, line, "*/ \"") orelse continue;
@@ -86,5 +195,13 @@ pub fn main(init: std.process.Init) !void {
         try w.print("    .{{ .name = \"{s}\", .synopsis = \"{s}\" }},\n", .{ line[start..end], line[hs..he] });
     }
     try w.writeAll("};\n");
+    try w.writeAll(checks);
     try w.flush();
+}
+
+/// The C identifier at the start of `s`.
+fn ident(s: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < s.len and (std.ascii.isAlphanumeric(s[i]) or s[i] == '_')) i += 1;
+    return s[0..i];
 }

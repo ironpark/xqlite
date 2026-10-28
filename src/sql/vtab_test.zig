@@ -142,8 +142,7 @@ const KvCursor = struct {
 };
 
 /// argv[3] is the column list ("a,b,c" by default).
-fn kvConstruct(db: *int.Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, pp: *?*vtab.Vtab, err: *?[:0]u8, create: bool) i32 {
-    const store: *Store = @ptrCast(@alignCast(aux.?));
+fn kvConstruct(db: *int.Sqlite3, store: *Store, argv: []const [:0]const u8, pp: *?*vtab.Vtab, err: *?[:0]u8, create: bool) i32 {
     var cols: []const u8 = if (argv.len > 3) argv[3] else "a,b,c";
     if (cols.len >= 2 and cols[0] == '\'' and cols[cols.len - 1] == '\'') cols = cols[1 .. cols.len - 1];
     store.note("{s}({s}.{s})", .{ if (create) "xCreate" else "xConnect", argv[1], argv[2] });
@@ -174,12 +173,12 @@ fn kvConstruct(db: *int.Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, p
     return RC.OK;
 }
 
-fn kvCreate(db: *int.Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, pp: *?*vtab.Vtab, err: *?[:0]u8) i32 {
-    return kvConstruct(db, aux, argv, pp, err, true);
+fn kvCreate(db: *int.Sqlite3, store: *Store, argv: []const [:0]const u8, pp: *?*vtab.Vtab, err: *?[:0]u8) i32 {
+    return kvConstruct(db, store, argv, pp, err, true);
 }
 
-fn kvConnect(db: *int.Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, pp: *?*vtab.Vtab, err: *?[:0]u8) i32 {
-    return kvConstruct(db, aux, argv, pp, err, false);
+fn kvConnect(db: *int.Sqlite3, store: *Store, argv: []const [:0]const u8, pp: *?*vtab.Vtab, err: *?[:0]u8) i32 {
+    return kvConstruct(db, store, argv, pp, err, false);
 }
 
 fn freeKv(t: *KvVtab) void {
@@ -555,8 +554,8 @@ fn kvShadowName(name: []const u8) bool {
 
 const kv_module: vtab.Module = .{
     .i_version = 3,
-    .x_create = kvCreate,
-    .x_connect = kvConnect,
+    .x_create = vtab.Module.constructor(kvCreate),
+    .x_connect = vtab.Module.constructor(kvConnect),
     .x_best_index = kvBestIndex,
     .x_disconnect = kvDisconnect,
     .x_destroy = kvDestroy,
@@ -687,7 +686,7 @@ fn openWith(c: *Conn, store: *Store) !void {
 }
 
 fn register(c: *Conn, store: *Store) !void {
-    try testing.expectEqual(RC.OK, vtab.createModuleV2(c.db, "kvtab", &kv_module, store, destroyAux));
+    try testing.expectEqual(RC.OK, vtab.createModuleV2(c.db, "kvtab", &kv_module, vtab.Module.auxFor(kvCreate, store), destroyAux));
     try testing.expectEqual(RC.OK, vtab.createModule(c.db, "kvepo", &epo_module, null));
 }
 
@@ -995,4 +994,131 @@ test "vtab: declared schemas and the interface outside constructors" {
     try testing.expectEqual(RC.MISUSE, vtab.config(c.db, vtab.VTAB_INNOCUOUS, 0));
     try testing.expectEqual(RC.ERROR, vtab.declareVtab(c.db, "SELECT 1"));
     try testing.expectEqualStrings("syntax error", main_mod.errmsg(c.db));
+}
+
+// ======================================== result codes of module methods
+
+/// "errepo": an eponymous table of one row whose method `fail_method`
+/// fails with `fail_code` and a message naming it.
+const ErrMethod = enum { none, open, filter, next, column, rowid, best_index };
+var fail_method: ErrMethod = .none;
+var fail_code: i32 = RC.OK;
+
+fn errFail(vt: *vtab.Vtab, m: ErrMethod) i32 {
+    if (fail_method != m) return RC.OK;
+    vt.err_msg = std.fmt.allocPrintSentinel(sqlite3_malloc, "x{t} failed", .{m}, 0) catch return RC.NOMEM;
+    return fail_code;
+}
+
+const ErrCursor = struct { base: vtab.VtabCursor = .{}, n: i64 = 0 };
+
+fn errConnect(db: *int.Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp: *?*vtab.Vtab, _: *?[:0]u8) i32 {
+    const rc = vtab.declareVtab(db, "CREATE TABLE x(a)");
+    if (rc != RC.OK) return rc;
+    const t = gpa.create(vtab.Vtab) catch return RC.NOMEM;
+    t.* = .{};
+    pp.* = t;
+    return RC.OK;
+}
+
+fn errDisconnect(p: *vtab.Vtab) i32 {
+    gpa.destroy(p);
+    return RC.OK;
+}
+
+fn errBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
+    info.estimated_cost = 1;
+    return errFail(p, .best_index);
+}
+
+fn errOpen(p: *vtab.Vtab, pp: *?*vtab.VtabCursor) i32 {
+    const rc = errFail(p, .open);
+    if (rc != RC.OK) return rc;
+    const c = gpa.create(ErrCursor) catch return RC.NOMEM;
+    c.* = .{};
+    pp.* = &c.base;
+    return RC.OK;
+}
+
+fn errClose(cur: *vtab.VtabCursor) i32 {
+    gpa.destroy(@as(*ErrCursor, @fieldParentPtr("base", cur)));
+    return RC.OK;
+}
+
+fn errFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, _: []*Mem) i32 {
+    @as(*ErrCursor, @fieldParentPtr("base", cur)).n = 0;
+    return errFail(cur.vtab, .filter);
+}
+
+fn errNext(cur: *vtab.VtabCursor) i32 {
+    @as(*ErrCursor, @fieldParentPtr("base", cur)).n += 1;
+    return errFail(cur.vtab, .next);
+}
+
+fn errEof(cur: *vtab.VtabCursor) bool {
+    return @as(*ErrCursor, @fieldParentPtr("base", cur)).n > 0;
+}
+
+fn errColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, _: i32) i32 {
+    api.resultInt64(ctx, 7);
+    return errFail(cur.vtab, .column);
+}
+
+fn errRowid(cur: *vtab.VtabCursor, rowid: *i64) i32 {
+    rowid.* = 1;
+    return errFail(cur.vtab, .rowid);
+}
+
+const err_module: vtab.Module = .{
+    .x_connect = errConnect,
+    .x_best_index = errBestIndex,
+    .x_disconnect = errDisconnect,
+    .x_open = errOpen,
+    .x_close = errClose,
+    .x_filter = errFilter,
+    .x_next = errNext,
+    .x_eof = errEof,
+    .x_column = errColumn,
+    .x_rowid = errRowid,
+};
+
+test "vtab: the result codes and messages of module methods reach the API" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try testing.expectEqual(RC.OK, vtab.createModule(c.db, "errepo", &err_module, null));
+    defer fail_method = .none;
+    try c.expectRows("SELECT rowid, a FROM errepo", "1|7\n");
+    main_mod.extendedResultCodes(c.db, true);
+    const CONSTRAINT_VTAB = RC.CONSTRAINT | (9 << 8);
+    const IOERR_WRITE = RC.IOERR | (3 << 8);
+    const CORRUPT_VTAB = RC.CORRUPT | (1 << 8);
+    for ([_]ErrMethod{ .open, .filter, .next, .column, .rowid }) |m| {
+        for ([_]i32{ CONSTRAINT_VTAB, IOERR_WRITE, RC.BUSY_SNAPSHOT, CORRUPT_VTAB, RC.ERROR, RC.NOMEM, RC.TOOBIG, RC.INTERRUPT }) |code| {
+            fail_method = m;
+            fail_code = code;
+            var stmt: ?*vi.Vdbe = null;
+            try testing.expectEqual(RC.OK, @import("prepare.zig").prepareV2(c.db, "SELECT rowid, a FROM errepo", &stmt, null));
+            var rc = api.step(stmt.?);
+            while (rc == RC.ROW) rc = api.step(stmt.?);
+            testing.expectEqual(code, rc) catch |err| {
+                std.debug.print("x{t}: {s}\n", .{ m, main_mod.errmsg(c.db) });
+                return err;
+            };
+            try testing.expectEqual(code, main_mod.extendedErrcode(c.db));
+            var buf: [32]u8 = undefined;
+            // A code returned by a method keeps the message of the method,
+            // SQLITE_NOMEM too (it is not an allocation failure).
+            const msg = try std.fmt.bufPrint(&buf, "x{t} failed", .{m});
+            try testing.expectEqualStrings(msg, main_mod.errmsg(c.db));
+            try testing.expectEqual(code, api.finalize(stmt.?));
+        }
+    }
+    // xBestIndex fails the prepare, with its message.
+    fail_method = .best_index;
+    fail_code = RC.ERROR;
+    try c.expectError("SELECT a FROM errepo", "xbest_index failed");
+    try testing.expectEqual(RC.ERROR, main_mod.extendedErrcode(c.db));
+    fail_method = .none;
+    try c.expectRows("SELECT rowid, a FROM errepo", "1|7\n");
 }

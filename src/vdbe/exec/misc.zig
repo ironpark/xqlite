@@ -12,6 +12,7 @@ const int = @import("../../sql/sqlite_int.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
+const Error = core.Error;
 const Op = vi.Op;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
@@ -19,19 +20,19 @@ const RC = int.RC;
 
 // ================================================================ row sets
 
-pub fn opRowSetAdd(e: *Exec, op: *Op) Flow {
+pub fn opRowSetAdd(e: *Exec, op: *Op) Error!Flow {
     const in1 = e.reg(op.p1);
-    if (in1.flags & MEM.Blob == 0) rowset.memSetRowSet(in1, e.db.gpa) catch return .no_mem;
-    rowset.fromMem(in1).insert(e.reg(op.p2).u.i) catch return .no_mem;
+    if (!in1.flags.Blob) try rowset.memSetRowSet(in1, e.db.gpa);
+    try rowset.fromMem(in1).insert(e.reg(op.p2).u.i);
     return .next;
 }
 
-pub fn opRowSetRead(e: *Exec, op: *Op) Flow {
+pub fn opRowSetRead(e: *Exec, op: *Op) Error!Flow {
     const in1 = e.reg(op.p1);
-    const val: ?i64 = if (in1.flags & MEM.Blob == 0)
+    const val: ?i64 = if (!in1.flags.Blob)
         null
     else
-        rowset.fromMem(in1).next() catch return .no_mem;
+        try rowset.fromMem(in1).next();
     if (val) |x| {
         mem.setInt64(e.reg(op.p3), x);
         return .check_interrupt;
@@ -40,17 +41,17 @@ pub fn opRowSetRead(e: *Exec, op: *Op) Flow {
     return .jump_p2_check_interrupt;
 }
 
-pub fn opRowSetTest(e: *Exec, op: *Op) Flow {
+pub fn opRowSetTest(e: *Exec, op: *Op) Error!Flow {
     const in1 = e.reg(op.p1);
     const in3 = e.reg(op.p3);
     const i_set = op.p4.int32;
-    if (in1.flags & MEM.Blob == 0) rowset.memSetRowSet(in1, e.db.gpa) catch return .no_mem;
+    if (!in1.flags.Blob) try rowset.memSetRowSet(in1, e.db.gpa);
     const rs = rowset.fromMem(in1);
     if (i_set != 0) {
-        const exists = rs.testBatch(i_set, in3.u.i) catch return .no_mem;
+        const exists = try rs.testBatch(i_set, in3.u.i);
         if (exists) return .jump_p2;
     }
-    if (i_set >= 0) rs.insert(in3.u.i) catch return .no_mem;
+    if (i_set >= 0) try rs.insert(in3.u.i);
     return .next;
 }
 
@@ -63,11 +64,11 @@ fn filterHash(regs: []Mem, op: *const Op) u64 {
     const end = i + @as(usize, @intCast(op.p4.int32));
     while (i < end) : (i += 1) {
         const m = &regs[i];
-        if (m.flags & (MEM.Int | MEM.IntReal) != 0) {
+        if (m.flags.intersects(.{ .Int = true, .IntReal = true })) {
             h +%= @bitCast(m.u.i);
-        } else if (m.flags & MEM.Real != 0) {
+        } else if (m.flags.Real) {
             h +%= @bitCast(mem.intValue(m));
-        } else if (m.flags & MEM.Str != 0) {
+        } else if (m.flags.Str) {
             const z = m.bytes();
             h +%= @intCast(z.len);
             if (z.len >= 8) {
@@ -78,7 +79,7 @@ fn filterHash(regs: []Mem, op: *const Op) u64 {
                 @memcpy(x[0..z.len], z);
                 h +%= std.mem.readInt(u64, &x, .little);
             }
-        } else if (m.flags & MEM.Blob != 0) {
+        } else if (m.flags.Blob) {
             const z = m.bytes();
             if (z.len != 0) {
                 var x: [8]u8 = @splat(0);
@@ -87,7 +88,7 @@ fn filterHash(regs: []Mem, op: *const Op) u64 {
                 h +%= std.mem.readInt(u64, &x, .little);
             }
             h +%= @intCast(z.len);
-            if (m.flags & MEM.Zero != 0) h +%= @intCast(m.u.n_zero);
+            if (m.flags.Zero) h +%= @intCast(m.u.n_zero);
         }
     }
     return h;
@@ -115,10 +116,9 @@ pub fn opFilter(e: *Exec, op: *Op) Flow {
 
 // ============================================================ not ported
 
-/// RowCell, Vacuum and TableLock: not ported yet.
-pub fn opNotSupported(e: *Exec, op: *Op) Flow {
-    const name = if (op.opcode < vi.opcodes.names.len) vi.opcodes.names[op.opcode].name else "?";
-    aux.vdbeError(e.v, "not supported yet: OP_{s}", .{name});
-    e.rc = RC.ERROR;
-    return .abort;
+/// RowCell, Vacuum and TableLock (not ported yet), Offset and ColumnsUsed
+/// (not in the C build either).
+pub fn opNotSupported(e: *Exec, op: *Op) Error!Flow {
+    aux.vdbeError(e.v, "not supported yet: OP_{s}", .{op.opcode.name()});
+    return error.Error;
 }

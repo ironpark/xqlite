@@ -144,6 +144,39 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Example programs of the Zig API (examples/*.zig): `zig build
+    // example-<name>` runs one (arguments after `--`), `zig build examples`
+    // builds them all.
+    const examples_step = b.step("examples", "Build the example programs");
+    inline for (.{ "basic", "extensions" }) |name| {
+        const example = b.addExecutable(.{
+            .name = "example-" ++ name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/" ++ name ++ ".zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "xqlite", .module = mod }},
+            }),
+        });
+        examples_step.dependOn(&b.addInstallArtifact(example, .{}).step);
+        const run_example = b.addRunArtifact(example);
+        run_example.addPassthruArgs();
+        b.step("example-" ++ name, "Run examples/" ++ name ++ ".zig").dependOn(&run_example.step);
+    }
+
+    // `zig build test` also checks that the names docs/zig-api.md and the
+    // examples use exist in the module, as its users see it.
+    const doc_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("docs/names_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xqlite", .module = mod }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(doc_tests).step);
+    test_step.dependOn(examples_step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

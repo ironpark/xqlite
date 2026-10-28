@@ -16,8 +16,7 @@ fn expectPlan(c: *Conn, sql: []const u8, expected: []const u8) !void {
         ids: [32]i64 = undefined,
         n: usize = 0,
 
-        fn row(ctx: ?*anyopaque, values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
-            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        fn row(self: *@This(), values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
             const id = std.fmt.parseInt(i64, std.mem.span(values[0].?), 10) catch return true;
             const parent = std.fmt.parseInt(i64, std.mem.span(values[1].?), 10) catch return true;
             // The depth is the position of the parent among the open rows.
@@ -37,7 +36,7 @@ fn expectPlan(c: *Conn, sql: []const u8, expected: []const u8) !void {
     const q = try std.fmt.allocPrint(testing.allocator, "EXPLAIN QUERY PLAN {s}", .{sql});
     defer testing.allocator.free(q);
     var msg: ?[:0]u8 = null;
-    const rc = legacy.exec(c.db, q, Ctx.row, &ctx, &msg);
+    const rc = legacy.execWith(c.db, q, &ctx, Ctx.row, &msg);
     if (msg) |m| @import("malloc.zig").free(m.ptr);
     try testing.expectEqual(RC.OK, rc);
     testing.expectEqualStrings(expected, ctx.out.items) catch |err| {

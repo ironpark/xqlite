@@ -190,12 +190,11 @@ pub const KeyInfo = struct {
     sort_orders: []const SortOrder,
 
     pub fn btreeKeyInfo(ki: *const KeyInfo) btree.KeyInfo {
-        return .{ .ctx = ki, .seek = seekPacked };
+        return .init(ki, seekPacked);
     }
 
     /// btreeMoveto(): unpack the key once, then search with it.
-    fn seekPacked(ctx: *const anyopaque, cur: *btree.Cursor, key: []const u8) btree.Error!Order {
-        const ki: *const KeyInfo = @ptrCast(@alignCast(ctx));
+    fn seekPacked(ki: *const KeyInfo, cur: *btree.Cursor, key: []const u8) btree.Error!Order {
         var stack: [16]Value = undefined;
         const n_all = ki.sort_orders.len;
         const values = if (n_all <= stack.len) stack[0..n_all] else try ki.gpa.alloc(Value, n_all);
@@ -217,11 +216,10 @@ pub const UnpackedRecord = struct {
     default_order: Order = .eq,
 
     pub fn indexKey(r: *const UnpackedRecord) btree.IndexKey {
-        return .{ .ctx = r, .compare = compareCtx };
+        return .init(r, compareCtx);
     }
 
-    fn compareCtx(ctx: *const anyopaque, stored: []const u8) btree.CompareError!Order {
-        const r: *const UnpackedRecord = @ptrCast(@alignCast(ctx));
+    fn compareCtx(r: *const UnpackedRecord, stored: []const u8) btree.CompareError!Order {
         return r.compare(stored);
     }
 

@@ -58,7 +58,7 @@ test "pragma: flags and settings" {
     try c.expectRows("PRAGMA foreign_keys", "0\n");
     try c.exec("PRAGMA foreign_keys=ON");
     try c.expectRows("PRAGMA foreign_keys", "1\n");
-    try testing.expect(c.db.flags & int.DbFlag.ForeignKeys != 0);
+    try testing.expect(c.db.flags.ForeignKeys);
     try c.exec("PRAGMA recursive_triggers=yes; PRAGMA reverse_unordered_selects=1; PRAGMA count_changes=true");
     try c.expectRows("PRAGMA recursive_triggers; PRAGMA reverse_unordered_selects; PRAGMA count_changes", "1\n1\n1\n");
     try c.exec("PRAGMA count_changes=off");

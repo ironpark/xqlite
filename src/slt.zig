@@ -220,7 +220,13 @@ const Runner = struct {
         };
         const filename = db_path orelse ":memory:";
         if (db_path) |p| r.deleteDbFiles(p);
-        if (sql.main.open(unix.interface(), filename, .{}, &r.db) != RC.OK) {
+        var opened: ?*Sqlite3 = null;
+        const orc = sql.main.open(unix.interface(), filename, .{}, &opened);
+        r.db = opened orelse {
+            try r.out.print("{s}: unable to connect to database: out of memory\n", .{r.path});
+            return 1;
+        };
+        if (orc != RC.OK) {
             try r.out.print("{s}: unable to connect to database: {s}\n", .{ r.path, sql.main.errmsg(r.db) });
             _ = sql.main.close(r.db);
             return 1;

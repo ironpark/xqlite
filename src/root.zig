@@ -4,6 +4,47 @@
 
 const std = @import("std");
 
+// ============================================================== Zig API
+// The primary public surface: every public name of src/xqlite.zig (the
+// one list of them; see docs/zig-api.md), re-exported here, which the
+// comptime block below checks. The low-level exports further down stay
+// for the shell, tools and tests.
+
+pub const api = @import("xqlite.zig");
+pub const Db = api.Db;
+pub const Stmt = api.Stmt;
+pub const Savepoint = api.Savepoint;
+pub const OpenOptions = api.OpenOptions;
+pub const JournalMode = api.JournalMode;
+pub const TransactionMode = api.TransactionMode;
+pub const VfsOption = api.VfsOption;
+pub const Error = api.Error;
+pub const SqlError = api.SqlError;
+pub const UsageError = api.UsageError;
+pub const ResultCode = api.ResultCode;
+pub const ErrorInfo = api.ErrorInfo;
+pub const Diagnostics = api.Diagnostics;
+pub const Value = api.Value;
+pub const Kind = api.Kind;
+pub const Blob = api.Blob;
+pub const ZeroBlob = api.ZeroBlob;
+pub const EnumStorage = api.EnumStorage;
+pub const free = api.free;
+pub const FunctionOptions = api.FunctionOptions;
+pub const Args = api.Args;
+pub const FilterArgs = api.FilterArgs;
+
+comptime {
+    for (std.meta.declarations(api)) |name| {
+        if (!@hasDecl(@This(), name)) @compileError("root.zig must re-export `" ++ name ++ "` of xqlite.zig");
+        const mine = @field(@This(), name);
+        const theirs = @field(api, name);
+        if (@TypeOf(mine) != @TypeOf(theirs) or (@TypeOf(mine) == type and mine != theirs)) {
+            @compileError("root." ++ name ++ " is not xqlite.zig's " ++ name);
+        }
+    }
+}
+
 pub const varint = @import("util/varint.zig");
 
 pub const vfs = @import("vfs/vfs.zig");
@@ -78,7 +119,8 @@ test {
         @import("vdbe/exec/control.zig"), @import("vdbe/exec/register.zig"), @import("vdbe/exec/arith.zig"),
         @import("vdbe/exec/record.zig"), @import("vdbe/exec/txn.zig"), @import("vdbe/exec/cursor.zig"),
         @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"), @import("vdbe/exec/vtab_ops.zig"),
-        @import("vdbe/exec/misc.zig"),
+        @import("vdbe/exec/misc.zig"), @import("util/flags.zig"), @import("sql/sqlite_int.zig"),
+        @import("util/thunk.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

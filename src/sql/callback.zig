@@ -12,6 +12,7 @@ const int = @import("sqlite_int.zig");
 const ctype = @import("../util/ctype.zig");
 const func = @import("func.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
+const flags = @import("../util/flags.zig");
 
 const Sqlite3 = int.Sqlite3;
 const FuncDef = int.FuncDef;
@@ -19,45 +20,123 @@ const FuncDestructor = int.FuncDestructor;
 const RC = int.RC;
 const ENC = vi.ENC;
 
-/// FuncDef.func_flags (SQLITE_FUNC_*).
-pub const FUNC = struct {
-    pub const ENCMASK: u32 = 0x0003;
-    pub const LIKE: u32 = 0x0004;
-    pub const CASE: u32 = 0x0008;
-    pub const EPHEM: u32 = 0x0010;
-    pub const NEEDCOLL: u32 = 0x0020;
-    pub const LENGTH: u32 = 0x0040;
-    pub const TYPEOF: u32 = 0x0080;
-    pub const BYTELEN: u32 = 0x00c0;
-    pub const COUNT: u32 = 0x0100;
-    pub const UNLIKELY: u32 = 0x0400;
-    pub const CONSTANT: u32 = 0x0800;
-    pub const MINMAX: u32 = 0x1000;
-    pub const SLOCHNG: u32 = 0x2000;
-    pub const TEST: u32 = 0x4000;
-    pub const RUNONLY: u32 = 0x8000;
-    pub const WINDOW: u32 = 0x00010000;
-    pub const INTERNAL: u32 = 0x00040000;
-    pub const DIRECT: u32 = 0x00080000;
-    pub const SUBTYPE: u32 = 0x00100000;
-    pub const UNSAFE: u32 = 0x00200000;
-    pub const INLINE: u32 = 0x00400000;
-    pub const BUILTIN: u32 = 0x00800000;
-    pub const RESULT_SUBTYPE: u32 = 0x01000000;
-    pub const SELFORDER1: u32 = 0x02000000;
-    pub const ANYORDER: u32 = 0x08000000;
+/// FuncDef.func_flags (SQLITE_FUNC_*). C keeps the text encoding of the
+/// implementation in the low bits (SQLITE_FUNC_ENCMASK); here it is the
+/// field `enc`.
+pub const FUNC = packed struct(u32) {
+    /// SQLITE_UTF8, SQLITE_UTF16LE or SQLITE_UTF16BE (see ENC).
+    enc: u2 = 0,
+    LIKE: bool = false,
+    CASE: bool = false,
+    EPHEM: bool = false,
+    NEEDCOLL: bool = false,
+    LENGTH: bool = false,
+    TYPEOF: bool = false,
+    COUNT: bool = false,
+    _9: u1 = 0,
+    UNLIKELY: bool = false,
+    CONSTANT: bool = false,
+    MINMAX: bool = false,
+    SLOCHNG: bool = false,
+    TEST: bool = false,
+    RUNONLY: bool = false,
+    WINDOW: bool = false,
+    _17: u1 = 0,
+    INTERNAL: bool = false,
+    DIRECT: bool = false,
+    SUBTYPE: bool = false,
+    UNSAFE: bool = false,
+    INLINE: bool = false,
+    BUILTIN: bool = false,
+    RESULT_SUBTYPE: bool = false,
+    SELFORDER1: bool = false,
+    _26: u1 = 0,
+    ANYORDER: bool = false,
+    _28: u4 = 0,
+
+    /// octet_length(): LENGTH and TYPEOF.
+    pub const BYTELEN: FUNC = .{ .LENGTH = true, .TYPEOF = true };
+
+    const ops = flags.Ops(@This());
+    pub const int = ops.int;
+    pub const fromInt = ops.fromInt;
+    pub const intersects = ops.intersects;
+    pub const contains = ops.contains;
+    pub const isEmpty = ops.isEmpty;
+    pub const with = ops.with;
+    pub const without = ops.without;
+    pub const only = ops.only;
+    pub const set = ops.set;
+    pub const clear = ops.clear;
+
+    comptime {
+        // length(), typeof() and octet_length() pass these bits on as the
+        // P5 of OP_Column.
+        std.debug.assert(FUNC.int(.{ .LENGTH = true }) == vi.OPFLAG.LENGTHARG);
+        std.debug.assert(FUNC.int(.{ .TYPEOF = true }) == vi.OPFLAG.TYPEOFARG);
+        std.debug.assert(BYTELEN.int() == vi.OPFLAG.BYTELENARG);
+        flags.checkBits(FUNC, .{
+            .enc = 0x00000003,
+            .LIKE = 0x00000004,
+            .CASE = 0x00000008,
+            .EPHEM = 0x00000010,
+            .NEEDCOLL = 0x00000020,
+            .LENGTH = 0x00000040,
+            .TYPEOF = 0x00000080,
+            .COUNT = 0x00000100,
+            .UNLIKELY = 0x00000400,
+            .CONSTANT = 0x00000800,
+            .MINMAX = 0x00001000,
+            .SLOCHNG = 0x00002000,
+            .TEST = 0x00004000,
+            .RUNONLY = 0x00008000,
+            .WINDOW = 0x00010000,
+            .INTERNAL = 0x00040000,
+            .DIRECT = 0x00080000,
+            .SUBTYPE = 0x00100000,
+            .UNSAFE = 0x00200000,
+            .INLINE = 0x00400000,
+            .BUILTIN = 0x00800000,
+            .RESULT_SUBTYPE = 0x01000000,
+            .SELFORDER1 = 0x02000000,
+            .ANYORDER = 0x08000000,
+        });
+    }
 };
 
 /// Flags of sqlite3_create_function() (SQLITE_DETERMINISTIC etc.), or'ed
-/// into the encoding argument. Some share bits with FUNC.
+/// into the encoding argument at the C-shaped API. Each is the FUNC flag
+/// at the same bit, so they go into FuncDef.func_flags as they are.
 pub const FNFLAG = struct {
-    pub const DETERMINISTIC: u32 = 0x000000800;
-    pub const DIRECTONLY: u32 = 0x000080000;
-    pub const SUBTYPE: u32 = 0x000100000;
+    pub const DETERMINISTIC: FUNC = .{ .CONSTANT = true };
+    pub const DIRECTONLY: FUNC = .{ .DIRECT = true };
+    pub const SUBTYPE: FUNC = .{ .SUBTYPE = true };
     /// The same bit as FUNC.UNSAFE, with the opposite meaning.
-    pub const INNOCUOUS: u32 = 0x000200000;
-    pub const RESULT_SUBTYPE: u32 = 0x001000000;
-    pub const SELFORDER1: u32 = 0x002000000;
+    pub const INNOCUOUS: FUNC = .{ .UNSAFE = true };
+    pub const RESULT_SUBTYPE: FUNC = .{ .RESULT_SUBTYPE = true };
+    pub const SELFORDER1: FUNC = .{ .SELFORDER1 = true };
+
+    /// All of them.
+    pub const mask: FUNC = .{
+        .CONSTANT = true,
+        .DIRECT = true,
+        .SUBTYPE = true,
+        .UNSAFE = true,
+        .RESULT_SUBTYPE = true,
+        .SELFORDER1 = true,
+    };
+
+    comptime {
+        // The values of SQLITE_DETERMINISTIC etc. in sqlite3.h.
+        std.debug.assert(DETERMINISTIC.int() == 0x000000800);
+        std.debug.assert(DIRECTONLY.int() == 0x000080000);
+        std.debug.assert(SUBTYPE.int() == 0x000100000);
+        std.debug.assert(INNOCUOUS.int() == 0x000200000);
+        std.debug.assert(RESULT_SUBTYPE.int() == 0x001000000);
+        std.debug.assert(SELFORDER1.int() == 0x002000000);
+        std.debug.assert(mask.int() == DETERMINISTIC.int() | DIRECTONLY.int() | SUBTYPE.int() |
+            INNOCUOUS.int() | RESULT_SUBTYPE.int() | SELFORDER1.int());
+    }
 };
 
 /// SQLITE_MAX_FUNCTION_ARG.
@@ -117,9 +196,9 @@ fn matchQuality(p: *const FuncDef, n_arg: i32, enc: u8) i32 {
     // A specific number of arguments beats any number.
     var match: i32 = if (p.n_arg == n_arg) 4 else 1;
     // Bonus points if the text encoding matches.
-    if (enc == p.func_flags & FUNC.ENCMASK) {
+    if (enc == p.func_flags.enc) {
         match += 2;
-    } else if (enc & p.func_flags & 2 != 0) {
+    } else if (enc & @as(u8, p.func_flags.enc) & 2 != 0) {
         match += 1;
     }
     return match;
@@ -130,7 +209,7 @@ fn matchQuality(p: *const FuncDef, n_arg: i32, enc: u8) i32 {
 pub fn functionSearch(h: usize, name: []const u8) ?*FuncDef {
     var p = builtin_functions[h];
     while (p) |f| : (p = f.hash_next) {
-        std.debug.assert(f.func_flags & FUNC.BUILTIN != 0);
+        std.debug.assert(f.func_flags.BUILTIN);
         if (ctype.eqlNoCase(f.name, name)) return f;
     }
     return null;
@@ -141,7 +220,7 @@ pub fn functionSearch(h: usize, name: []const u8) ?*FuncDef {
 pub fn insertBuiltinFuncs(defs: []FuncDef) void {
     for (defs) |*d| {
         const h = funcHash(if (d.name.len > 0) d.name[0] else 0, d.name.len);
-        std.debug.assert(d.func_flags & FUNC.BUILTIN != 0);
+        std.debug.assert(d.func_flags.BUILTIN);
         if (functionSearch(h, d.name)) |other| {
             std.debug.assert(other != d and other.next != d);
             d.next = other.next;
@@ -180,7 +259,7 @@ pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, create:
 
     // Then the built-ins, unless creating a new function: those are
     // read-only.
-    if (!create and (best == null or db.m_db_flags & int.DBFLAG.PreferBuiltin != 0)) {
+    if (!create and (best == null or db.m_db_flags.PreferBuiltin)) {
         best_score = 0;
         const h = funcHash(ctype.toLower(if (name.len > 0) name[0] else 0), name.len);
         p = functionSearch(h, name);
@@ -221,7 +300,7 @@ fn newFuncDef(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8) ?*FuncDef {
         db.gpa.free(z);
         return null;
     };
-    f.* = .{ .n_arg = @intCast(n_arg), .func_flags = enc, .name = z };
+    f.* = .{ .n_arg = @intCast(n_arg), .func_flags = .{ .enc = @intCast(enc) }, .name = z };
     return f;
 }
 
@@ -233,7 +312,7 @@ fn freeFuncDef(db: *Sqlite3, f: *FuncDef) void {
 /// Port of functionDestroy() (main.c): drop `p`'s reference to its
 /// destructor, running it with the last one.
 fn functionDestroy(db: *Sqlite3, p: *FuncDef) void {
-    std.debug.assert(p.func_flags & FUNC.BUILTIN == 0);
+    std.debug.assert(!p.func_flags.BUILTIN);
     const d = p.destructor orelse return;
     d.n_ref -= 1;
     if (d.n_ref == 0) {
@@ -263,14 +342,16 @@ pub fn freeFunctions(db: *Sqlite3) void {
 
 /// Port of sqlite3CreateFunc() (main.c): add, replace or (with no
 /// implementation) delete the function `name` taking `n_arg` arguments.
-/// `enc` is a text encoding or'ed with FNFLAG flags. A scalar function
-/// has `x_sfunc`; an aggregate `x_step` and `x_final`, and a window
-/// aggregate also `x_value` and `x_inverse`.
+/// `enc` is a text encoding (ENC, or ENC.ANY for all three) and
+/// `fn_flags` the FNFLAG flags, as passed (C: the two or'ed into `enc`).
+/// A scalar function has `x_sfunc`; an aggregate `x_step` and `x_final`,
+/// and a window aggregate also `x_value` and `x_inverse`.
 pub fn createFunc(
     db: *Sqlite3,
     name: ?[]const u8,
     n_arg: i32,
-    enc_arg: u32,
+    enc_arg: u8,
+    fn_flags: FUNC,
     user_data: ?*anyopaque,
     x_sfunc: ?FuncDef.StepFn,
     x_step: ?FuncDef.StepFn,
@@ -290,22 +371,24 @@ pub fn createFunc(
         return RC.MISUSE;
     }
 
-    var extra_flags = enc_arg & (FNFLAG.DETERMINISTIC | FNFLAG.DIRECTONLY |
-        FNFLAG.SUBTYPE | FNFLAG.INNOCUOUS | FNFLAG.RESULT_SUBTYPE | FNFLAG.SELFORDER1);
-    var enc = enc_arg & (FUNC.ENCMASK | ENC.ANY);
+    std.debug.assert(FNFLAG.mask.contains(fn_flags));
+    // The FNFLAG flags are FUNC flags (see FNFLAG).
+    var extra_flags = fn_flags;
+    // C: enc & (SQLITE_FUNC_ENCMASK|SQLITE_ANY).
+    var enc = enc_arg & 0x7;
 
     // SQLITE_INNOCUOUS is the same bit as FUNC.UNSAFE with the opposite
     // meaning (tag-20230109-1).
-    extra_flags ^= FUNC.UNSAFE;
+    extra_flags.UNSAFE = !extra_flags.UNSAFE;
 
     // SQLITE_UTF16 becomes the native byte order; SQLITE_ANY adds the
     // function in all three encodings.
     switch (enc) {
         ENC.UTF16 => enc = ENC.UTF16LE,
         ENC.ANY => {
-            var rc = createFunc(db, z_name, n_arg, (ENC.UTF8 | extra_flags) ^ FUNC.UNSAFE, user_data, x_sfunc, x_step, x_final, x_value, x_inverse, destructor);
+            var rc = createFunc(db, z_name, n_arg, ENC.UTF8, fn_flags, user_data, x_sfunc, x_step, x_final, x_value, x_inverse, destructor);
             if (rc == RC.OK) {
-                rc = createFunc(db, z_name, n_arg, (ENC.UTF16LE | extra_flags) ^ FUNC.UNSAFE, user_data, x_sfunc, x_step, x_final, x_value, x_inverse, destructor);
+                rc = createFunc(db, z_name, n_arg, ENC.UTF16LE, fn_flags, user_data, x_sfunc, x_step, x_final, x_value, x_inverse, destructor);
             }
             if (rc != RC.OK) return rc;
             enc = ENC.UTF16BE;
@@ -317,7 +400,7 @@ pub fn createFunc(
     // Overriding or deleting a function is refused while statements run;
     // otherwise prepared statements are expired.
     var p = findFunction(db, z_name, n_arg, @intCast(enc), false);
-    if (p != null and p.?.func_flags & FUNC.ENCMASK == enc and p.?.n_arg == n_arg) {
+    if (p != null and p.?.func_flags.enc == enc and p.?.n_arg == n_arg) {
         if (db.n_vdbe_active != 0) {
             @import("main.zig").errorWithMsg(db, RC.BUSY, "unable to delete/modify user-function due to active statements", .{});
             return RC.BUSY;
@@ -336,7 +419,7 @@ pub fn createFunc(
 
     if (destructor) |d| d.n_ref += 1;
     f.destructor = destructor;
-    f.func_flags = (f.func_flags & FUNC.ENCMASK) | extra_flags;
+    f.func_flags = extra_flags.with(.{ .enc = f.func_flags.enc });
     f.x_sfunc = x_sfunc orelse x_step;
     f.x_finalize = x_final;
     f.x_value = x_value;
@@ -377,7 +460,7 @@ pub fn createFunctionV2(
     x_final: ?FuncDef.FinalFn,
     x_value: ?FuncDef.FinalFn,
     x_inverse: ?FuncDef.StepFn,
-    x_destroy: ?*const fn (?*anyopaque) void,
+    x_destroy: ?int.DestructorFn,
 ) i32 {
     const scalar = if (x_final == null) x_sfunc else null;
     const step = if (x_final != null) x_sfunc else null;
@@ -390,7 +473,8 @@ pub fn createFunctionV2(
         };
         arg.?.* = .{ .x_destroy = destroy, .user_data = user_data };
     }
-    const rc = createFunc(db, name, n_arg, enc, user_data, scalar, step, x_final, x_value, x_inverse, arg);
+    // The C-shaped `enc`: the encoding or'ed with the FNFLAG flags.
+    const rc = createFunc(db, name, n_arg, @intCast(enc & 0x7), .fromInt(enc & FNFLAG.mask.int()), user_data, scalar, step, x_final, x_value, x_inverse, arg);
     if (arg) |a| if (a.n_ref == 0) {
         a.x_destroy(user_data);
         db.gpa.destroy(a);
@@ -403,10 +487,9 @@ const apiExit = @import("main.zig").apiExit;
 
 /// Port of sqlite3InvalidFunction() (main.c): always fails, naming the
 /// function (the user data).
-fn invalidFunction(ctx: *vi.Context, argv: []*vi.Mem) void {
+fn invalidFunction(ctx: *vi.Context, argv: []*vi.Mem, z_name: [*:0]const u8) void {
     _ = argv;
     const api = @import("../vdbe/api.zig");
-    const z_name: [*:0]const u8 = @ptrCast(api.userData(ctx).?);
     const db = api.contextDbHandle(ctx);
     const msg = @import("printf.zig").mprintf(db.gpa, "unable to use function %s in the requested context", &.{.{ .str = std.mem.span(z_name) }}) catch {
         return api.resultErrorNomem(ctx);
@@ -425,5 +508,5 @@ const freeOverloadName = @import("malloc.zig").free;
 pub fn overloadFunction(db: *Sqlite3, name: []const u8, n_arg: i32) i32 {
     if (findFunction(db, name, n_arg, ENC.UTF8, false) != null) return RC.OK;
     const copy = @import("malloc.zig").allocator.dupeSentinel(u8, name, 0) catch return RC.NOMEM;
-    return createFunctionV2(db, name, n_arg, ENC.UTF8, @ptrCast(copy.ptr), invalidFunction, null, null, null, freeOverloadName);
+    return createFunctionV2(db, name, n_arg, ENC.UTF8, FuncDef.userDataFor(invalidFunction, copy.ptr), FuncDef.withUserData(invalidFunction), null, null, null, freeOverloadName);
 }

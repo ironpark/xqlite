@@ -49,7 +49,7 @@ fn errorAtExpr(p: *Parse, e: *const Expr, comptime fmt: []const u8, args: anytyp
     expr_mod.recordErrorOffsetOfExpr(p, e);
 }
 
-fn incrAggDepth(w: *Walker, e: *Expr) u8 {
+fn incrAggDepth(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.AGG_FUNCTION) e.op2 +%= @intCast(w.u.n);
     return WRC.Continue;
 }
@@ -72,7 +72,7 @@ fn resolveAlias(p: *Parse, e_list: *ExprList, i_col: usize, e: *Expr, n_subquery
     incrAggFunctionDepth(dup, n_subquery);
     if (e.op == TK.COLLATE) dup = try expr_mod.addCollateString(p, dup, e.token());
     std.mem.swap(Expr, dup, e);
-    if (e.has(EP.WinFunc)) {
+    if (e.flags.WinFunc) {
         if (e.y.win) |win| win.owner = e;
     }
 }
@@ -107,11 +107,11 @@ pub fn isRowid(z: []const u8) bool {
 /// Port of areDoubleQuotedStringsEnabled().
 fn areDoubleQuotedStringsEnabled(db: *int.Sqlite3, top: *NameContext) bool {
     if (db.init.busy) return true;
-    if (top.nc_flags & NC.IsDDL != 0) {
-        if (build.writableSchema(db) and db.flags & int.DbFlag.DqsDML != 0) return true;
-        return db.flags & int.DbFlag.DqsDDL != 0;
+    if (top.nc_flags.IsDDL) {
+        if (build.writableSchema(db) and db.flags.DqsDML) return true;
+        return db.flags.DqsDDL;
     }
-    return db.flags & int.DbFlag.DqsDML != 0;
+    return db.flags.DqsDML;
 }
 
 /// Port of sqlite3ExprColUsed(): the colUsed bit of a TK_COLUMN; every
@@ -119,7 +119,7 @@ fn areDoubleQuotedStringsEnabled(db: *int.Sqlite3, top: *NameContext) bool {
 pub fn exprColUsed(e: *const Expr) Bitmask {
     var n: i32 = e.i_column;
     const t = e.y.tab.?;
-    if (t.tab_flags & TF.HasGenerated != 0 and t.cols[@intCast(n)].col_flags & COLFLAG.GENERATED != 0) {
+    if (t.tab_flags.intersects(TF.HasGenerated) and t.cols[@intCast(n)].col_flags.intersects(COLFLAG.GENERATED)) {
         return if (t.cols.len >= int.bms) ~@as(Bitmask, 0) else (@as(Bitmask, 1) << @intCast(t.cols.len)) - 1;
     }
     if (n >= int.bms) n = int.bms - 1;
@@ -132,7 +132,7 @@ fn extendFJMatch(p: *Parse, list: *?*ExprList, match: *SrcItem, i_column: i16) O
     new.i_table = match.i_cursor;
     new.i_column = i_column;
     new.y = .{ .tab = match.s_tab };
-    new.set(EP.CanBeNull);
+    new.flags.CanBeNull = true;
     list.* = try expr_mod.listAppend(p, list.*, new);
 }
 
@@ -153,14 +153,14 @@ fn isValidSchemaTableName(tab: []const u8, t: *Table, zdb: ?[]const u8) bool {
 
 /// VisibleRowid().
 fn visibleRowid(t: *const Table) bool {
-    return t.tab_flags & TF.NoVisibleRowid == 0;
+    return !t.tab_flags.NoVisibleRowid;
 }
 
 /// Port of lookupName(): resolve the column name of "X.Y.Z", "Y.Z" or
 /// "Z" (`right` holds Z) against the name contexts from `nc` outward,
 /// turning `e` into a TK_COLUMN (or an alias's expression, a TK_TRIGGER
 /// or TK_REGISTER). Returns WRC_Prune, or WRC_Abort on error.
-fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const Expr, nc_arg: *NameContext, e: *Expr) Oom!u8 {
+fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const Expr, nc_arg: *NameContext, e: *Expr) Oom!WRC {
     const db = p.db;
     var zdb = zdb_arg;
     var cnt: i32 = 0;
@@ -179,7 +179,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
 
     // The schema of the database name; none matches if it is unknown.
     if (zdb) |d| {
-        if (nc_arg.nc_flags & (NC.PartIdx | NC.IsCheck) != 0) {
+        if (nc_arg.nc_flags.intersects(.{ .PartIdx = true, .IsCheck = true })) {
             // Database names are ignored in CHECK constraints and partial
             // index WHERE clauses.
             zdb = null;
@@ -217,9 +217,9 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                                 if (!item.fg.is_using or build.idListIndex(item.u3.using.?, col) == null or match == item) {
                                     // Ambiguous.
                                     fj_match = null;
-                                } else if (item.fg.jointype & JT.RIGHT == 0) {
+                                } else if (!item.fg.jointype.RIGHT) {
                                     continue;
-                                } else if (item.fg.jointype & JT.LEFT == 0) {
+                                } else if (!item.fg.jointype.LEFT) {
                                     cnt = 0;
                                     fj_match = null;
                                 } else {
@@ -258,9 +258,9 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                     if (cnt > 0) {
                         if (!item.fg.is_using or build.idListIndex(item.u3.using.?, col) == null) {
                             fj_match = null;
-                        } else if (item.fg.jointype & JT.RIGHT == 0) {
+                        } else if (!item.fg.jointype.RIGHT) {
                             continue;
-                        } else if (item.fg.jointype & JT.LEFT == 0) {
+                        } else if (!item.fg.jointype.LEFT) {
                             cnt = 0;
                             fj_match = null;
                         } else {
@@ -282,7 +282,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
             if (match) |m| {
                 e.i_table = m.i_cursor;
                 e.y = .{ .tab = m.s_tab };
-                if (m.fg.jointype & (JT.LEFT | JT.LTORJ) != 0) e.set(EP.CanBeNull);
+                if (m.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true })) e.flags.CanBeNull = true;
                 schema = m.s_tab.?.schema;
             }
         }
@@ -294,7 +294,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
             if (p.trigger_tab) |tt| {
                 const op = p.e_trigger_op;
                 if (p.returning) {
-                    if (n.nc_flags & NC.UBaseReg != 0 and
+                    if (n.nc_flags.UBaseReg and
                         (tab == null or ctype.eqlNoCase(tab.?, tt.name) or isValidSchemaTableName(tab.?, tt, null)))
                     {
                         e.i_table = @intFromBool(op != TK.DELETE);
@@ -308,7 +308,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                     t = tt;
                 }
             }
-            if (n.nc_flags & NC.UUpsert != 0 and tab != null) {
+            if (n.nc_flags.UUpsert and tab != null) {
                 if (n.u_nc.upsert) |up| if (ctype.eqlNoCase("excluded", tab.?)) {
                     t = up.src.?.at(0).s_tab;
                     e.i_table = EXCLUDED_TABLE_NUMBER;
@@ -362,7 +362,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
         }
 
         // The rowid.
-        if (cnt == 0 and cnt_tab >= 1 and match != null and n.nc_flags & (NC.IdxExpr | NC.GenCol) == 0 and isRowid(col)) {
+        if (cnt == 0 and cnt_tab >= 1 and match != null and !n.nc_flags.intersects(.{ .IdxExpr = true, .GenCol = true }) and isRowid(col)) {
             cnt = cnt_tab;
             if (!match.?.fg.is_nested_from) e.i_column = -1;
             e.aff_expr = Aff.integer;
@@ -370,16 +370,16 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
 
         // A bare name may be an alias of the result set (a legacy
         // extension, as in "SELECT a+b AS x FROM t WHERE x<10").
-        if (cnt == 0 and n.nc_flags & NC.UEList != 0 and tab == null) {
+        if (cnt == 0 and n.nc_flags.UEList and tab == null) {
             const e_list = n.u_nc.e_list.?;
             for (e_list.slice(), 0..) |*el, j| {
                 if (el.fg.e_ename == .name and el.e_name != null and ctype.eqlNoCase(el.e_name.?, col)) {
                     const orig = el.expr.?;
-                    if (n.nc_flags & NC.AllowAgg == 0 and orig.has(EP.Agg)) {
+                    if (!n.nc_flags.AllowAgg and orig.flags.Agg) {
                         util.errorMsg(p, "misuse of aliased aggregate {s}", .{el.e_name.?});
                         return WRC.Abort;
                     }
-                    if (orig.has(EP.Win) and (n.nc_flags & NC.AllowWin == 0 or n != top_nc)) {
+                    if (orig.flags.Win and (!n.nc_flags.AllowWin or n != top_nc)) {
                         util.errorMsg(p, "misuse of aliased window function {s}", .{el.e_name.?});
                         return WRC.Abort;
                     }
@@ -404,7 +404,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     // An unmatched double-quoted bare name is a string literal.
     if (cnt == 0 and tab == null) {
         std.debug.assert(e.op == TK.ID);
-        if (e.has(EP.DblQuoted) and areDoubleQuotedStringsEnabled(db, top_nc)) {
+        if (e.flags.DblQuoted and areDoubleQuotedStringsEnabled(db, top_nc)) {
             e.op = TK.STRING;
             e.y = .{ .tab = null };
             return WRC.Prune;
@@ -417,8 +417,8 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     if (cnt != 1) {
         if (fj_match) |fj| {
             if (fj.len() == cnt - 1) {
-                if (e.has(EP.Leaf)) {
-                    e.clear(EP.Leaf);
+                if (e.flags.Leaf) {
+                    e.flags.Leaf = false;
                 } else {
                     e.left = null;
                     e.right = null;
@@ -438,7 +438,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
             util.errorMsg(p, "{s}: {s}.{s}.{s}", .{ err, d, tab.?, col });
         } else if (tab) |tz| {
             util.errorMsg(p, "{s}: {s}.{s}", .{ err, tz, col });
-        } else if (cnt == 0 and right.has(EP.DblQuoted)) {
+        } else if (cnt == 0 and right.flags.DblQuoted) {
             util.errorMsg(p, "{s}: \"{s}\" - should this be a string literal in single-quotes?", .{ err, col });
         } else {
             util.errorMsg(p, "{s}: {s}", .{ err, col });
@@ -450,10 +450,10 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     }
 
     // Remove all substructure.
-    if (!e.has(EP.TokenOnly | EP.Leaf)) {
+    if (!e.flags.intersects(.{ .TokenOnly = true, .Leaf = true })) {
         e.left = null;
         e.right = null;
-        e.set(EP.Leaf);
+        e.flags.Leaf = true;
     }
 
     // Record the column in colUsed.
@@ -471,7 +471,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
 
 /// The lookupname_end part of lookupName(): count the reference in every
 /// context from the top to the one that matched.
-fn lookupNameEnd(p: *Parse, top: *NameContext, matched: *NameContext, cnt: i32) u8 {
+fn lookupNameEnd(p: *Parse, top: *NameContext, matched: *NameContext, cnt: i32) WRC {
     _ = p;
     if (cnt != 1) return WRC.Abort;
     var it = top;
@@ -495,7 +495,7 @@ pub fn createColumnExpr(p: *Parse, src: *SrcList, i_src: usize, i_col: i32) Oom!
         e.i_column = -1;
     } else {
         e.i_column = @intCast(i_col);
-        if (t.tab_flags & TF.HasGenerated != 0 and t.cols[@intCast(i_col)].col_flags & COLFLAG.GENERATED != 0) {
+        if (t.tab_flags.intersects(TF.HasGenerated) and t.cols[@intCast(i_col)].col_flags.intersects(COLFLAG.GENERATED)) {
             item.col_used = if (t.cols.len >= 64) ~@as(Bitmask, 0) else (@as(Bitmask, 1) << @intCast(t.cols.len)) - 1;
         } else {
             item.col_used |= @as(Bitmask, 1) << @intCast(if (i_col >= int.bms) int.bms - 1 else i_col);
@@ -508,11 +508,11 @@ pub fn createColumnExpr(p: *Parse, src: *SrcList, i_src: usize, i_col: i32) Oom!
 /// context of `nc`.
 fn notValidImpl(p: *Parse, nc: *NameContext, msg: []const u8, e: ?*Expr, err_expr: ?*Expr) void {
     var in: []const u8 = "partial index WHERE clauses";
-    if (nc.nc_flags & NC.IdxExpr != 0) {
+    if (nc.nc_flags.IdxExpr) {
         in = "index expressions";
-    } else if (nc.nc_flags & NC.IsCheck != 0) {
+    } else if (nc.nc_flags.IsCheck) {
         in = "CHECK constraints";
-    } else if (nc.nc_flags & NC.GenCol != 0) {
+    } else if (nc.nc_flags.GenCol) {
         in = "generated columns";
     }
     util.errorMsg(p, "{s} prohibited in {s}", .{ msg, in });
@@ -521,8 +521,8 @@ fn notValidImpl(p: *Parse, nc: *NameContext, msg: []const u8, e: ?*Expr, err_exp
 }
 
 /// sqlite3ResolveNotValid().
-fn resolveNotValid(p: *Parse, nc: *NameContext, msg: []const u8, valid_mask: u32, e: ?*Expr, err_expr: ?*Expr) void {
-    if (nc.nc_flags & valid_mask != 0) notValidImpl(p, nc, msg, e, err_expr);
+fn resolveNotValid(p: *Parse, nc: *NameContext, msg: []const u8, valid_mask: NC, e: ?*Expr, err_expr: ?*Expr) void {
+    if (nc.nc_flags.intersects(valid_mask)) notValidImpl(p, nc, msg, e, err_expr);
 }
 
 /// Port of exprProbability(): 2^27 times a constant probability, or -1.
@@ -540,7 +540,7 @@ fn resolveSetExprSubtypeArg(list: ?*ExprList) void {
     for (l.slice()) |item| {
         var e = item.expr.?;
         while (true) {
-            e.set(EP.SubtArg);
+            e.flags.SubtArg = true;
             if (e.op == TK.SELECT) {
                 resolveSetExprSubtypeArg(e.x.select.?.e_list);
                 break;
@@ -555,14 +555,14 @@ fn resolveSetExprSubtypeArg(list: ?*ExprList) void {
 }
 
 /// Port of resolveExprStep(): the expression callback of the resolver.
-fn resolveExprStep(w: *Walker, e: *Expr) u8 {
+fn resolveExprStep(w: *Walker, e: *Expr) WRC {
     return resolveExprStepImpl(w, e) catch {
         build.oomFault(w.parse.?);
         return WRC.Abort;
     };
 }
 
-fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
+fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
     const nc = w.u.nc.?;
     const p = nc.parse;
     switch (e.op) {
@@ -595,11 +595,11 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
             {
                 var it: ?*NameContext = nc;
                 while (it) |q| : (it = q.next) {
-                    if (q.nc_flags & NC.Where == 0) return WRC.Prune;
+                    if (!q.nc_flags.Where) return WRC.Prune;
                 }
             }
             e.u = .{ .value = @intFromBool(e.op == TK.NOTNULL) };
-            e.flags |= EP.IntValue;
+            e.flags.IntValue = true;
             e.op = TK.INTEGER;
             {
                 var it: ?*NameContext = nc;
@@ -623,7 +623,7 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                 right = e;
             } else {
                 var left = e.left.?;
-                resolveNotValid(p, nc, "the \".\" operator", NC.IdxExpr | NC.GenCol, null, e);
+                resolveNotValid(p, nc, "the \".\" operator", .{ .IdxExpr = true, .GenCol = true }, null, e);
                 right = e.right.?;
                 if (right.op != TK.ID) {
                     std.debug.assert(right.op == TK.DOT);
@@ -648,7 +648,7 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
             var wrong_num_args = false;
             var is_agg = false;
             const id = e.token();
-            const saved_allow_flags = nc.nc_flags & (NC.AllowAgg | NC.AllowWin);
+            const saved_allow_flags = nc.nc_flags.only(.{ .AllowAgg = true, .AllowWin = true });
             const win: ?*int.Window = if (e.isWindowFunc()) e.y.win else null;
             var def = callback.findFunction(p.db, id, n, p.db.enc, false);
             if (def == null) {
@@ -661,8 +661,8 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
             } else {
                 const d = def.?;
                 is_agg = d.x_finalize != null;
-                if (d.func_flags & FUNC.UNLIKELY != 0) {
-                    e.set(EP.Unlikely);
+                if (d.func_flags.UNLIKELY) {
+                    e.flags.Unlikely = true;
                     if (n == 2) {
                         e.i_table = exprProbability(list.?.at(1).expr.?);
                         if (e.i_table < 0) {
@@ -675,22 +675,24 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                         e.i_table = if (d.name[0] == 'u') 8388608 else 125829120;
                     }
                 }
-                if (d.func_flags & FUNC.SUBTYPE != 0 or e.has(EP.SubtArg)) resolveSetExprSubtypeArg(list);
-                if (d.func_flags & (FUNC.CONSTANT | FUNC.SLOCHNG) != 0) {
+                if (d.func_flags.SUBTYPE or e.flags.SubtArg) resolveSetExprSubtypeArg(list);
+                if (d.func_flags.intersects(.{ .CONSTANT = true, .SLOCHNG = true })) {
                     // Constant for the duration of one query.
-                    e.set(EP.ConstFunc);
+                    e.flags.ConstFunc = true;
                 }
-                if (d.func_flags & FUNC.CONSTANT == 0) {
-                    resolveNotValid(p, nc, "non-deterministic functions", NC.IdxExpr | NC.PartIdx | NC.GenCol, null, e);
+                if (!d.func_flags.CONSTANT) {
+                    resolveNotValid(p, nc, "non-deterministic functions", .{ .IdxExpr = true, .PartIdx = true, .GenCol = true }, null, e);
                 } else {
-                    e.op2 = @intCast(nc.nc_flags & NC.SelfRef);
+                    // The P5 of OP_PureFunc tells sqlite3_result_error() which
+                    // context it is in (C: ncFlags & NC_SelfRef).
+                    e.op2 = @intCast(nc.nc_flags.only(NC.SelfRef).int());
                 }
-                if (d.func_flags & FUNC.INTERNAL != 0 and p.nested == 0 and p.db.m_db_flags & int.DBFLAG.InternalFunc == 0) {
+                if (d.func_flags.INTERNAL and p.nested == 0 and !p.db.m_db_flags.InternalFunc) {
                     // Internal functions are unknown outside nested parses.
                     no_such_func = 2;
                     def = null;
-                } else if (d.func_flags & (FUNC.DIRECT | FUNC.UNSAFE) != 0 and !p.inRenameObject()) {
-                    if (nc.nc_flags & NC.FromDDL != 0) e.set(EP.FromDDL);
+                } else if (d.func_flags.intersects(.{ .DIRECT = true, .UNSAFE = true }) and !p.inRenameObject()) {
+                    if (nc.nc_flags.FromDDL) e.flags.FromDDL = true;
                     expr_mod.functionUsable(p, e, d);
                 }
             }
@@ -699,11 +701,11 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                 if (def != null and def.?.x_value == null and win != null) {
                     errorAtExpr(p, e, "{s}() may not be used as a window function", .{id});
                     nc.n_nc_err += 1;
-                } else if ((is_agg and nc.nc_flags & NC.AllowAgg == 0) or
-                    (is_agg and def.?.func_flags & FUNC.WINDOW != 0 and win == null) or
-                    (is_agg and win != null and nc.nc_flags & NC.AllowWin == 0))
+                } else if ((is_agg and !nc.nc_flags.AllowAgg) or
+                    (is_agg and def.?.func_flags.WINDOW and win == null) or
+                    (is_agg and win != null and !nc.nc_flags.AllowWin))
                 {
-                    const typ = if (def.?.func_flags & FUNC.WINDOW != 0 or win != null) "window" else "aggregate";
+                    const typ = if (def.?.func_flags.WINDOW or win != null) "window" else "aggregate";
                     errorAtExpr(p, e, "misuse of {s} function {s}()", .{ typ, id });
                     nc.n_nc_err += 1;
                     is_agg = false;
@@ -715,7 +717,7 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                 } else if (wrong_num_args) {
                     errorAtExpr(p, e, "wrong number of arguments to function {s}()", .{id});
                     nc.n_nc_err += 1;
-                } else if (!is_agg and e.has(EP.WinFunc)) {
+                } else if (!is_agg and e.flags.WinFunc) {
                     errorAtExpr(p, e, "FILTER may not be used with non-aggregate {s}()", .{id});
                     nc.n_nc_err += 1;
                 } else if (!is_agg and e.left != null) {
@@ -725,9 +727,10 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                 if (is_agg) {
                     // Window functions may not be arguments of aggregates,
                     // nor aggregates of aggregates.
-                    nc.nc_flags &= ~(NC.AllowWin | (if (win == null) NC.AllowAgg else 0));
+                    nc.nc_flags.AllowWin = false;
+                    if (win == null) nc.nc_flags.AllowAgg = false;
                 }
-            } else if (e.has(EP.WinFunc) or e.left != null) {
+            } else if (e.flags.WinFunc or e.left != null) {
                 is_agg = true;
             }
             _ = walker.walkExprList(w, list);
@@ -743,11 +746,11 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                     _ = walker.walkExprList(w, win.?.order_by);
                     _ = walker.walkExpr(w, win.?.filter);
                     window.windowLink(sel, win.?);
-                    nc.nc_flags |= NC.HasWin;
+                    nc.nc_flags.HasWin = true;
                 } else {
                     e.op = TK.AGG_FUNCTION;
                     e.op2 = 0;
-                    if (e.has(EP.WinFunc)) _ = walker.walkExpr(w, e.y.win.?.filter);
+                    if (e.flags.WinFunc) _ = walker.walkExpr(w, e.y.win.?.filter);
                     var nc2: ?*NameContext = nc;
                     while (nc2) |q| {
                         if (expr_mod.referencesSrcList(p, e, q.src_list) != 0) break;
@@ -756,10 +759,13 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
                     }
                     if (nc2) |q| if (def) |d| {
                         e.op2 +%= @intCast(q.n_nested_select);
-                        q.nc_flags |= NC.HasAgg | ((d.func_flags ^ FUNC.ANYORDER) & (FUNC.MINMAX | FUNC.ANYORDER));
+                        // C: NC_HasAgg | ((funcFlags^SQLITE_FUNC_ANYORDER) &
+                        // (SQLITE_FUNC_MINMAX|SQLITE_FUNC_ANYORDER)), the bits of
+                        // NC_MinMaxAgg and NC_OrderAgg.
+                        q.nc_flags.set(.{ .HasAgg = true, .MinMaxAgg = d.func_flags.MINMAX, .OrderAgg = !d.func_flags.ANYORDER });
                     };
                 }
-                nc.nc_flags |= saved_allow_flags;
+                nc.nc_flags.set(saved_allow_flags);
             }
             return WRC.Prune;
         },
@@ -768,21 +774,21 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!u8 {
             if (e.useXSelect()) {
                 const n_ref = nc.n_ref;
                 if (e.op == TK.EXISTS) p.bhas_exists = true;
-                if (nc.nc_flags & NC.SelfRef != 0) {
+                if (nc.nc_flags.intersects(NC.SelfRef)) {
                     notValidImpl(p, nc, "subqueries", e, e);
                 } else {
                     _ = walker.walkSelect(w, e.x.select);
                 }
                 if (n_ref != nc.n_ref) {
-                    e.set(EP.VarSelect);
-                    e.x.select.?.sel_flags |= SF.Correlated;
+                    e.flags.VarSelect = true;
+                    e.x.select.?.sel_flags.Correlated = true;
                 }
-                nc.nc_flags |= NC.Subquery;
+                nc.nc_flags.Subquery = true;
             }
         },
 
         TK.VARIABLE => {
-            resolveNotValid(p, nc, "parameters", NC.IsCheck | NC.PartIdx | NC.IdxExpr | NC.GenCol, e, e);
+            resolveNotValid(p, nc, "parameters", .{ .IsCheck = true, .PartIdx = true, .IdxExpr = true, .GenCol = true }, e, e);
         },
 
         else => {
@@ -842,14 +848,14 @@ fn resolveOrderByTermToExprList(p: *Parse, sel: *Select, e: *Expr) usize {
         .parse = p,
         .src_list = sel.src,
         .u_nc = .{ .e_list = e_list },
-        .nc_flags = NC.AllowAgg | NC.UEList | NC.NoSelect,
+        .nc_flags = .{ .AllowAgg = true, .UEList = true, .NoSelect = true },
     };
     const db = p.db;
     const saved = db.suppress_err;
     db.suppress_err = 1;
-    const rc = resolveExprNames(&nc, e);
+    const ok = if (resolveExprNames(&nc, e)) |_| true else |_| false;
     db.suppress_err = saved;
-    if (rc != 0) return 0;
+    if (!ok) return 0;
     for (e_list.slice(), 0..) |*item, i| {
         if (expr_mod.compare(null, item.expr, e, -1) < 2) return i + 1;
     }
@@ -863,15 +869,15 @@ fn resolveOutOfRangeError(p: *Parse, typ: []const u8, i: usize, mx: usize, err_e
 }
 
 /// Port of resolveCompoundOrderBy(): turn every ORDER BY term of a
-/// compound SELECT into a result column number. Returns the number of
-/// errors.
-fn resolveCompoundOrderBy(p: *Parse, sel_arg: *Select) Oom!u32 {
+/// compound SELECT into a result column number. On error (C: the
+/// number of errors) the error is in `p`.
+fn resolveCompoundOrderBy(p: *Parse, sel_arg: *Select) (Oom || int.ParseError)!void {
     var sel: ?*Select = sel_arg;
-    const order_by = sel_arg.order_by orelse return 0;
+    const order_by = sel_arg.order_by orelse return;
     const db = p.db;
     if (order_by.len() > @as(usize, @intCast(db.limit(.column)))) {
         util.errorMsg(p, "too many terms in ORDER BY clause", .{});
-        return 1;
+        return error.ParseFailed;
     }
     for (order_by.slice()) |*item| item.fg.done = false;
     var s = sel_arg;
@@ -893,7 +899,7 @@ fn resolveCompoundOrderBy(p: *Parse, sel_arg: *Select) Oom!u32 {
             if (expr_mod.isInteger(e, null)) |v| {
                 if (v <= 0 or v > e_list.len()) {
                     resolveOutOfRangeError(p, "ORDER", i + 1, e_list.len(), e);
-                    return 1;
+                    return error.ParseFailed;
                 }
                 i_col = @intCast(v);
             } else {
@@ -929,22 +935,22 @@ fn resolveCompoundOrderBy(p: *Parse, sel_arg: *Select) Oom!u32 {
     for (order_by.slice(), 0..) |*item, i| {
         if (!item.fg.done) {
             util.errorMsg(p, "{f} ORDER BY term does not match any column in the result set", .{util.ordinal(i + 1)});
-            return 1;
+            return error.ParseFailed;
         }
     }
-    return 0;
+    return;
 }
 
 /// Port of sqlite3ResolveOrderGroupBy(): replace each ORDER BY or GROUP
 /// BY term that refers to a result column (order_by_col) by a copy of
-/// that column's expression. Returns nonzero on error.
-pub fn resolveOrderGroupBy(p: *Parse, sel: *Select, order_by_arg: ?*ExprList, typ: []const u8) u32 {
-    const order_by = order_by_arg orelse return 0;
+/// that column's expression. On error (C: nonzero) the error is in `p`.
+pub fn resolveOrderGroupBy(p: *Parse, sel: *Select, order_by_arg: ?*ExprList, typ: []const u8) int.ParseError!void {
+    const order_by = order_by_arg orelse return;
     const db = p.db;
-    if (db.malloc_failed or p.inRenameObject()) return 0;
+    if (db.malloc_failed or p.inRenameObject()) return;
     if (order_by.len() > @as(usize, @intCast(db.limit(.column)))) {
         util.errorMsg(p, "too many terms in {s} BY clause", .{typ});
-        return 1;
+        return error.ParseFailed;
     }
     const e_list = sel.e_list.?;
     for (order_by.slice(), 0..) |*item, i| {
@@ -952,19 +958,19 @@ pub fn resolveOrderGroupBy(p: *Parse, sel: *Select, order_by_arg: ?*ExprList, ty
         if (col != 0) {
             if (col > e_list.len()) {
                 resolveOutOfRangeError(p, typ, i + 1, e_list.len(), null);
-                return 1;
+                return error.ParseFailed;
             }
             resolveAlias(p, e_list, col - 1, item.expr.?, 0) catch {
                 build.oomFault(p);
-                return 1;
+                return error.ParseFailed;
             };
         }
     }
-    return 0;
+    return;
 }
 
-fn resolveRemoveWindowsCb(_: *Walker, e: *Expr) u8 {
-    if (e.has(EP.WinFunc)) window.windowUnlinkFromSelect(e.y.win.?);
+fn resolveRemoveWindowsCb(_: *Walker, e: *Expr) WRC {
+    if (e.flags.WinFunc) window.windowUnlinkFromSelect(e.y.win.?);
     return WRC.Continue;
 }
 
@@ -979,9 +985,9 @@ fn windowRemoveExprFromSelect(sel: *Select, e: *Expr) void {
 
 /// Port of resolveOrderGroupBy(): resolve each ORDER BY or GROUP BY term:
 /// a result column number or AS name refers to that column, anything
-/// else is an expression (which may equal a result column). Returns the
-/// number of errors.
-fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList, typ: []const u8) u32 {
+/// else is an expression (which may equal a result column). On error
+/// (C: the number of errors) the error is in the Parse.
+fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList, typ: []const u8) int.ParseError!void {
     const n_result = sel.e_list.?.len();
     const p = nc.parse;
     for (order_by.slice(), 0..) |*item, i| {
@@ -997,14 +1003,14 @@ fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList,
         if (expr_mod.isInteger(e2, null)) |v| {
             if (v < 1 or v > 0xffff) {
                 resolveOutOfRangeError(p, typ, i + 1, n_result, e2);
-                return 1;
+                return error.ParseFailed;
             }
             item.u = .{ .x = .{ .order_by_col = @intCast(v) } };
             continue;
         }
         // An ordinary expression.
         item.u = .{ .x = .{} };
-        if (resolveExprNames(nc, e) != 0) return 1;
+        try resolveExprNames(nc, e);
         for (sel.e_list.?.slice(), 0..) |*r, j| {
             if (expr_mod.compare(null, e, r.expr, -1) == 0) {
                 windowRemoveExprFromSelect(sel, e);
@@ -1017,22 +1023,22 @@ fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList,
 
 /// Port of resolveSelectStep(): resolve the names of a SELECT (and its
 /// compound terms and FROM subqueries).
-fn resolveSelectStep(w: *Walker, s: *Select) u8 {
+fn resolveSelectStep(w: *Walker, s: *Select) WRC {
     return resolveSelectStepImpl(w, s) catch {
         build.oomFault(w.parse.?);
         return WRC.Abort;
     };
 }
 
-fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!u8 {
-    if (s_arg.sel_flags & SF.Resolved != 0) return WRC.Prune;
+fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
+    if (s_arg.sel_flags.Resolved) return WRC.Prune;
     const outer_nc = w.u.nc;
     const p = w.parse.?;
     const db = p.db;
 
     // A subquery in an expression is not expanded yet: let selectPrep()
     // expand and resolve it.
-    if (s_arg.sel_flags & SF.Expanded == 0) {
+    if (!s_arg.sel_flags.Expanded) {
         select_mod.selectPrep(p, s_arg, outer_nc);
         return if (p.n_err != 0) WRC.Abort else WRC.Prune;
     }
@@ -1042,16 +1048,16 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!u8 {
     const leftmost = s_arg;
     var s_opt: ?*Select = s_arg;
     while (s_opt) |s| {
-        std.debug.assert(s.sel_flags & SF.Expanded != 0);
-        s.sel_flags |= SF.Resolved;
+        std.debug.assert(s.sel_flags.Expanded);
+        s.sel_flags.Resolved = true;
 
         // LIMIT and OFFSET may not refer to any names.
         var nc: NameContext = .{ .parse = p, .win_select = s };
-        if (resolveExprNames(&nc, s.limit) != 0) return WRC.Abort;
+        resolveExprNames(&nc, s.limit) catch return WRC.Abort;
 
         // A Select made by convertCompoundSelectToSubquery() resolves its
         // ORDER BY as part of the subquery.
-        if (s.sel_flags & SF.Converted != 0) {
+        if (s.sel_flags.Converted) {
             const sub = s.src.?.at(0).u4.subq.?.select;
             sub.order_by = s.order_by;
             s.order_by = null;
@@ -1060,7 +1066,7 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!u8 {
         // Subqueries of the FROM clause.
         if (outer_nc) |o| o.n_nested_select += 1;
         for (s.src.?.slice()) |*item| {
-            if (item.fg.is_subquery and item.u4.subq.?.select.sel_flags & SF.Resolved == 0) {
+            if (item.fg.is_subquery and !item.u4.subq.?.select.sel_flags.Resolved) {
                 const n_ref = if (outer_nc) |o| o.n_ref else 0;
                 resolveSelectNames(p, item.u4.subq.?.select, outer_nc);
                 if (p.n_err != 0) return WRC.Abort;
@@ -1073,53 +1079,56 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!u8 {
             o.n_nested_select -= 1;
         };
 
-        nc.nc_flags = NC.AllowAgg | NC.AllowWin;
+        nc.nc_flags = .{ .AllowAgg = true, .AllowWin = true };
         nc.src_list = s.src;
         nc.next = outer_nc;
 
         // The result set.
-        if (resolveExprListNames(&nc, s.e_list) != 0) return WRC.Abort;
-        nc.nc_flags &= ~NC.AllowWin;
+        resolveExprListNames(&nc, s.e_list) catch return WRC.Abort;
+        nc.nc_flags.AllowWin = false;
 
         // Without aggregates in the result set or a GROUP BY, aggregates
         // are not allowed anywhere else either.
         const group_by = s.group_by;
-        if (group_by != null or nc.nc_flags & NC.HasAgg != 0) {
-            s.sel_flags |= SF.Aggregate | (nc.nc_flags & (NC.MinMaxAgg | NC.OrderAgg));
+        if (group_by != null or nc.nc_flags.HasAgg) {
+            // C: SF_Aggregate | (ncFlags & (NC_MinMaxAgg|NC_OrderAgg)), the
+            // bits of SF_MinMaxAgg and SF_OrderByReqd.
+            s.sel_flags.set(.{ .Aggregate = true, .MinMaxAgg = nc.nc_flags.MinMaxAgg, .OrderByReqd = nc.nc_flags.OrderAgg });
         } else {
-            nc.nc_flags &= ~NC.AllowAgg;
+            nc.nc_flags.AllowAgg = false;
         }
 
         // Other clauses may use the result columns' AS names.
         nc.u_nc = .{ .e_list = s.e_list };
-        nc.nc_flags |= NC.UEList;
+        nc.nc_flags.UEList = true;
         if (s.having) |h| {
-            if (s.sel_flags & SF.Aggregate == 0) {
+            if (!s.sel_flags.Aggregate) {
                 util.errorMsg(p, "HAVING clause on a non-aggregate query", .{});
                 return WRC.Abort;
             }
-            if (resolveExprNames(&nc, h) != 0) return WRC.Abort;
+            resolveExprNames(&nc, h) catch return WRC.Abort;
         }
-        nc.nc_flags |= NC.Where;
-        if (resolveExprNames(&nc, s.where) != 0) return WRC.Abort;
-        nc.nc_flags &= ~NC.Where;
+        nc.nc_flags.Where = true;
+        resolveExprNames(&nc, s.where) catch return WRC.Abort;
+        nc.nc_flags.Where = false;
 
         // Arguments of table-valued functions.
         for (s.src.?.slice()) |*item| {
-            if (item.fg.is_tab_func and resolveExprListNames(&nc, item.u1.func_arg) != 0) return WRC.Abort;
+            if (item.fg.is_tab_func) resolveExprListNames(&nc, item.u1.func_arg) catch return WRC.Abort;
         }
 
         if (p.inRenameObject()) {
             var win = s.win_defn;
             while (win) |wd| : (win = wd.next_win) {
-                if (resolveExprListNames(&nc, wd.order_by) != 0 or resolveExprListNames(&nc, wd.partition) != 0) return WRC.Abort;
+                resolveExprListNames(&nc, wd.order_by) catch return WRC.Abort;
+                resolveExprListNames(&nc, wd.partition) catch return WRC.Abort;
             }
         }
 
-        nc.nc_flags |= NC.AllowAgg | NC.AllowWin;
+        nc.nc_flags.set(.{ .AllowAgg = true, .AllowWin = true });
 
         // Move the ORDER BY of a converted compound back up.
-        if (s.sel_flags & SF.Converted != 0) {
+        if (s.sel_flags.Converted) {
             const sub = s.src.?.at(0).u4.subq.?.select;
             s.order_by = sub.order_by;
             sub.order_by = null;
@@ -1128,16 +1137,17 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!u8 {
         // The ORDER BY of a simple SELECT; that of a compound comes after
         // all its terms are resolved.
         if (s.order_by) |ob| {
-            if (@intFromBool(is_compound) <= n_compound and resolveOrderGroupByTerms(&nc, s, ob, "ORDER") != 0) return WRC.Abort;
+            if (@intFromBool(is_compound) <= n_compound) resolveOrderGroupByTerms(&nc, s, ob, "ORDER") catch return WRC.Abort;
         }
         if (db.malloc_failed) return WRC.Abort;
-        nc.nc_flags &= ~NC.AllowWin;
+        nc.nc_flags.AllowWin = false;
 
         // GROUP BY, which may not hold aggregates.
         if (group_by) |gb| {
-            if (resolveOrderGroupByTerms(&nc, s, gb, "GROUP") != 0 or db.malloc_failed) return WRC.Abort;
+            resolveOrderGroupByTerms(&nc, s, gb, "GROUP") catch return WRC.Abort;
+            if (db.malloc_failed) return WRC.Abort;
             for (gb.slice()) |item| {
-                if (item.expr.?.has(EP.Agg)) {
+                if (item.expr.?.flags.Agg) {
                     util.errorMsg(p, "aggregate functions are not allowed in the GROUP BY clause", .{});
                     return WRC.Abort;
                 }
@@ -1152,7 +1162,7 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!u8 {
 
         // ON clauses moved into the WHERE clause may not refer to tables
         // on their right.
-        if (s.sel_flags & SF.OnToWhere != 0) {
+        if (s.sel_flags.OnToWhere) {
             select_mod.selectCheckOnClauses(p, s);
             if (p.n_err != 0) return WRC.Abort;
         }
@@ -1161,36 +1171,52 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!u8 {
         n_compound += 1;
     }
 
-    if (is_compound and try resolveCompoundOrderBy(p, leftmost) != 0) return WRC.Abort;
+    if (is_compound) resolveCompoundOrderBy(p, leftmost) catch |err| switch (err) {
+        error.ParseFailed => return WRC.Abort,
+        error.OutOfMemory => |e| return e,
+    };
     return WRC.Prune;
+}
+
+/// NC_HasAgg|NC_MinMaxAgg|NC_HasWin|NC_OrderAgg: what resolving an
+/// expression found out about aggregates and window functions.
+const found_agg: NC = .{ .HasAgg = true, .MinMaxAgg = true, .HasWin = true, .OrderAgg = true };
+
+/// EP_Agg and EP_Win for an expression whose resolution set NC_HasAgg and
+/// NC_HasWin (C: `ExprSetProperty(pExpr, ncFlags & (NC_HasAgg|NC_HasWin))`,
+/// the bits being the same).
+fn setAggProperties(e: *Expr, nc_flags: NC) void {
+    if (nc_flags.HasAgg) e.flags.Agg = true;
+    if (nc_flags.HasWin) e.flags.Win = true;
 }
 
 /// Port of sqlite3ResolveExprNames(): resolve the names of `e` (column
 /// references, result-set aliases and functions) in `nc`. Aggregates set
-/// EP_Agg. Returns nonzero if there were errors.
-pub fn resolveExprNames(nc: *NameContext, e_arg: ?*Expr) u32 {
-    const e = e_arg orelse return 0;
-    const saved_has_agg = nc.nc_flags & (NC.HasAgg | NC.MinMaxAgg | NC.HasWin | NC.OrderAgg);
-    nc.nc_flags &= ~(NC.HasAgg | NC.MinMaxAgg | NC.HasWin | NC.OrderAgg);
+/// EP_Agg. Fails if there were errors (C: nonzero), which are in the
+/// Parse (unless suppressed) or counted in `nc`.
+pub fn resolveExprNames(nc: *NameContext, e_arg: ?*Expr) int.ParseError!void {
+    const e = e_arg orelse return;
+    const saved_has_agg = nc.nc_flags.only(found_agg);
+    nc.nc_flags.clear(found_agg);
     const p = nc.parse;
     var w: Walker = .{
         .parse = p,
         .expr_callback = resolveExprStep,
-        .select_callback = if (nc.nc_flags & NC.NoSelect != 0) null else resolveSelectStep,
+        .select_callback = if (nc.nc_flags.NoSelect) null else resolveSelectStep,
         .u = .{ .nc = nc },
     };
     p.n_height += e.n_height;
-    if (!expr_mod.checkHeight(p, p.n_height)) return 1;
+    if (!expr_mod.checkHeight(p, p.n_height)) return error.ParseFailed;
     _ = walker.walkExprNN(&w, e);
     p.n_height -= e.n_height;
-    e.set(nc.nc_flags & (NC.HasAgg | NC.HasWin));
-    nc.nc_flags |= saved_has_agg;
-    return @intFromBool(nc.n_nc_err > 0 or p.n_err > 0);
+    setAggProperties(e, nc.nc_flags);
+    nc.nc_flags.set(saved_has_agg);
+    if (nc.n_nc_err > 0 or p.n_err > 0) return error.ParseFailed;
 }
 
 /// Port of sqlite3ResolveExprListNames().
-pub fn resolveExprListNames(nc: *NameContext, list_arg: ?*ExprList) u32 {
-    const list = list_arg orelse return 0;
+pub fn resolveExprListNames(nc: *NameContext, list_arg: ?*ExprList) int.ParseError!void {
+    const list = list_arg orelse return;
     const p = nc.parse;
     var w: Walker = .{
         .parse = p,
@@ -1198,23 +1224,23 @@ pub fn resolveExprListNames(nc: *NameContext, list_arg: ?*ExprList) u32 {
         .select_callback = resolveSelectStep,
         .u = .{ .nc = nc },
     };
-    var saved_has_agg = nc.nc_flags & (NC.HasAgg | NC.MinMaxAgg | NC.HasWin | NC.OrderAgg);
-    nc.nc_flags &= ~(NC.HasAgg | NC.MinMaxAgg | NC.HasWin | NC.OrderAgg);
+    var saved_has_agg = nc.nc_flags.only(found_agg);
+    nc.nc_flags.clear(found_agg);
     for (list.slice()) |item| {
         const e = item.expr orelse continue;
         p.n_height += e.n_height;
-        if (!expr_mod.checkHeight(p, p.n_height)) return 1;
+        if (!expr_mod.checkHeight(p, p.n_height)) return error.ParseFailed;
         _ = walker.walkExprNN(&w, e);
         p.n_height -= e.n_height;
-        if (nc.nc_flags & (NC.HasAgg | NC.MinMaxAgg | NC.HasWin | NC.OrderAgg) != 0) {
-            e.set(nc.nc_flags & (NC.HasAgg | NC.HasWin));
-            saved_has_agg |= nc.nc_flags & (NC.HasAgg | NC.MinMaxAgg | NC.HasWin | NC.OrderAgg);
-            nc.nc_flags &= ~(NC.HasAgg | NC.MinMaxAgg | NC.HasWin | NC.OrderAgg);
+        if (nc.nc_flags.intersects(found_agg)) {
+            setAggProperties(e, nc.nc_flags);
+            saved_has_agg.set(nc.nc_flags.only(found_agg));
+            nc.nc_flags.clear(found_agg);
         }
-        if (p.n_err > 0) return 1;
+        if (p.n_err > 0) return error.ParseFailed;
     }
-    nc.nc_flags |= saved_has_agg;
-    return 0;
+    nc.nc_flags.set(saved_has_agg);
+    return;
 }
 
 /// Port of sqlite3ResolveSelectNames(): resolve every name of a SELECT
@@ -1232,8 +1258,9 @@ pub fn resolveSelectNames(p: *Parse, s: *Select, outer_nc: ?*NameContext) void {
 /// Port of sqlite3ResolveSelfReference(): resolve an expression that can
 /// only refer to columns of `t` (CHECK constraints, partial index WHERE
 /// clauses, index expressions, generated columns), or to none if `t` is
-/// null. Column references get i_table -1. Returns nonzero on error.
-pub fn resolveSelfReference(p: *Parse, t: ?*Table, type_arg: u32, e: ?*Expr, list: ?*ExprList) u32 {
+/// null. Column references get i_table -1. On error (C: nonzero) the
+/// error is in `p`.
+pub fn resolveSelfReference(p: *Parse, t: ?*Table, type_arg: NC, e: ?*Expr, list: ?*ExprList) int.ParseError!void {
     var typ = type_arg;
     var src: SrcList = .{};
     var item: [1]SrcItem = .{.{}};
@@ -1244,11 +1271,9 @@ pub fn resolveSelfReference(p: *Parse, t: ?*Table, type_arg: u32, e: ?*Expr, lis
         src.items = .initBuffer(&item);
         src.items.items.len = 1;
         // Functions of non-TEMP schema objects get EP_FromDDL.
-        if (tab.schema != p.db.dbs.items[1].schema) typ |= NC.FromDDL;
+        if (tab.schema != p.db.dbs.items[1].schema) typ.FromDDL = true;
     }
-    var nc: NameContext = .{ .parse = p, .src_list = &src, .nc_flags = typ | NC.IsDDL };
-    const rc = resolveExprNames(&nc, e);
-    if (rc != 0) return rc;
-    if (list != null) return resolveExprListNames(&nc, list);
-    return 0;
+    var nc: NameContext = .{ .parse = p, .src_list = &src, .nc_flags = typ.with(.{ .IsDDL = true }) };
+    try resolveExprNames(&nc, e);
+    if (list != null) try resolveExprListNames(&nc, list);
 }

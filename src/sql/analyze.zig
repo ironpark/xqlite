@@ -53,8 +53,7 @@ const LoadInfo = struct {
 };
 
 /// Port of analysisLoader(): one row (tbl, idx, stat) of sqlite_stat1.
-fn analysisLoader(ctx: ?*anyopaque, values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
-    const info: *LoadInfo = @ptrCast(@alignCast(ctx.?));
+fn analysisLoader(info: *LoadInfo, values: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
     if (values.len < 3) return false;
     const tbl = std.mem.span(values[0] orelse return false);
     const stat = std.mem.span(values[2] orelse return false);
@@ -70,13 +69,13 @@ fn analysisLoader(ctx: ?*anyopaque, values: []const ?[*:0]const u8, _: []const [
         ix.has_stat1 = true;
         if (ix.part_idx_where == null) {
             t.n_row_log_est = ix.ai_row_log_est[0];
-            t.tab_flags |= int.TF.HasStat1;
+            t.tab_flags.HasStat1 = true;
         }
     } else {
         var fake: Index = .{ .name = undefined, .table = t, .sz_idx_row = t.sz_tab_row };
         decodeIntArray(stat, (&t.n_row_log_est)[0..1], &fake);
         t.sz_tab_row = fake.sz_idx_row;
-        t.tab_flags |= int.TF.HasStat1;
+        t.tab_flags.HasStat1 = true;
     }
     return false;
 }
@@ -90,7 +89,7 @@ pub fn analysisLoad(db: *int.Sqlite3, i_db: usize) i32 {
 
     // Clear any prior statistics.
     var tit = schema.tbl_hash.valueIterator();
-    while (tit.next()) |t| t.*.tab_flags &= ~int.TF.HasStat1;
+    while (tit.next()) |t| t.*.tab_flags.HasStat1 = false;
     var iit = schema.idx_hash.valueIterator();
     while (iit.next()) |ix| ix.*.has_stat1 = false;
 
@@ -102,7 +101,7 @@ pub fn analysisLoad(db: *int.Sqlite3, i_db: usize) i32 {
             return int.RC.NOMEM;
         };
         defer db.gpa.free(sql);
-        rc = legacy.exec(db, sql, analysisLoader, &info, null);
+        rc = legacy.execWith(db, sql, &info, analysisLoader, null);
     };
 
     // Set appropriate defaults on all indexes not in sqlite_stat1.

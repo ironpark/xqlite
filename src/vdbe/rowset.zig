@@ -8,6 +8,7 @@
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
 const mem = @import("mem.zig");
+const int = @import("../sql/sqlite_int.zig");
 
 const Allocator = std.mem.Allocator;
 const Mem = vi.Mem;
@@ -79,24 +80,19 @@ pub const RowSet = struct {
     }
 };
 
-fn destructor(p: ?*anyopaque) void {
-    const r: *RowSet = @ptrCast(@alignCast(p.?));
-    r.destroy();
-}
-
 /// Port of sqlite3VdbeMemSetRowSet(): make `m` hold a new, empty RowSet.
 pub fn memSetRowSet(m: *Mem, gpa: Allocator) Allocator.Error!void {
     const r = try RowSet.create(gpa);
     mem.release(m);
     m.z = @ptrCast(r);
     m.n = 0;
-    m.flags = MEM.Blob | MEM.Dyn;
-    m.x_del = destructor;
+    m.flags = .{ .Blob = true, .Dyn = true };
+    m.x_del = int.destructor(RowSet.destroy);
 }
 
 /// The RowSet of a register set by memSetRowSet().
 pub fn fromMem(m: *Mem) *RowSet {
-    return @ptrCast(@alignCast(m.z.?));
+    return mem.dynObject(m, RowSet.destroy).?;
 }
 
 test "rowset: read and test" {

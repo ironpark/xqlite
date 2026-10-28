@@ -394,7 +394,7 @@ fn integerValue(z_arg: []const u8) i64 {
 
 /// Port of the .dbconfig command: show, or set and show, the
 /// sqlite3_db_config() options.
-fn dotDbconfig(p: *Shell) Error!u8 {
+fn dotDbconfig(p: *Shell) DotError!void {
     const args = p.dot_args.items;
     const Choice = struct { name: []const u8, op: ?sql.main.DbConfig };
     const choices = [_]Choice{
@@ -439,7 +439,6 @@ fn dotDbconfig(p: *Shell) Error!u8 {
     if (args.len > 1 and !found) {
         try dotCmdError(p, 1, "unknown dbconfig", "Enter \".dbconfig\" with no arguments for a list");
     }
-    return 0;
 }
 
 /// Port of booleanValue().
@@ -902,8 +901,21 @@ fn showHelp(p: *Shell, pattern_arg: ?[]const u8) Error!usize {
     return n;
 }
 
+/// A dot-command that failed after reporting the error (C: rc 1).
+const DotError = Error || error{CommandFailed};
+
+/// The rc of a dot-command for doMetaCommand(): 1 if it failed.
+fn dotStatus(r: DotError!void) Error!u8 {
+    r catch |err| switch (err) {
+        error.CommandFailed => return 1,
+        else => |e| return e,
+    };
+    return 0;
+}
+
 /// Port of do_meta_command(): run a dot-command. Returns 0, 1 on error,
-/// or 2 to stop reading the input.
+/// or 2 to stop reading the input (the rc of the C shell, which makes its
+/// exit status).
 fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
     try parseDotCmdArgs(p, line);
     const args = p.dot_args.items;
@@ -932,9 +944,9 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
             rc = 1;
         }
     } else if (c == 'd' and n >= 3 and isCmd(cmd, "dbconfig")) {
-        rc = try dotDbconfig(p);
+        rc = try dotStatus(dotDbconfig(p));
     } else if (c == 'd' and isCmd(cmd, "dump")) {
-        rc = try dotDump(p);
+        rc = try dotStatus(dotDump(p));
     } else if (c == 'e' and isCmd(cmd, "echo")) {
         if (args.len == 2) {
             p.echo = try booleanValue(p, args[1]);
@@ -976,9 +988,9 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
             _ = try showHelp(p, null);
         }
     } else if (c == 'i' and (isCmd(cmd, "indices") or isCmd(cmd, "indexes"))) {
-        rc = try dotIndexes(p);
+        rc = try dotStatus(dotIndexes(p));
     } else if (c == 'm' and isCmd(cmd, "mode")) {
-        rc = try dotMode(p);
+        rc = try dotStatus(dotMode(p));
     } else if (c == 'n' and isCmd(cmd, "nullvalue")) {
         if (args.len == 2) {
             try setStr(p.gpa, &p.mode.spec.null_text, args[1]);
@@ -995,9 +1007,9 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
     } else if (c == 'q' and isCmd(cmd, "quit")) {
         rc = 2;
     } else if (c == 'r' and n >= 3 and isCmd(cmd, "read")) {
-        rc = try dotRead(p);
+        rc = try dotStatus(dotRead(p));
     } else if (c == 's' and isCmd(cmd, "schema")) {
-        rc = try dotSchema(p);
+        rc = try dotStatus(dotSchema(p));
     } else if (c == 's' and isCmd(cmd, "separator")) {
         if (args.len < 2 or args.len > 3) {
             try p.eprint("Usage: .separator COL ?ROW?\n", .{});
@@ -1006,9 +1018,9 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         if (args.len >= 2) try setStr(p.gpa, &p.mode.spec.column_sep, args[1]);
         if (args.len >= 3) try setStr(p.gpa, &p.mode.spec.row_sep, args[2]);
     } else if (c == 's' and isCmd(cmd, "show")) {
-        rc = try dotShow(p);
+        rc = try dotStatus(dotShow(p));
     } else if (c == 't' and n > 1 and isCmd(cmd, "tables")) {
-        rc = try dotTables(p);
+        rc = try dotStatus(dotTables(p));
     } else if (c == 't' and n > 4 and isCmd(cmd, "timeout")) {
         _ = sql.main.busyTimeout(p.db, if (args.len >= 2) @truncate(integerValue(args[1])) else 0);
     } else {
@@ -1019,15 +1031,15 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
 }
 
 /// .read FILE
-fn dotRead(p: *Shell) Error!u8 {
+fn dotRead(p: *Shell) DotError!void {
     const args = p.dot_args.items;
     if (args.len != 2) {
         try p.eprint("Usage: .read FILE\n", .{});
-        return 1;
+        return error.CommandFailed;
     }
     const file = Io.Dir.cwd().openFile(p.io, args[1], .{}) catch {
         try p.eprint("Error: cannot open \"{s}\"\n", .{args[1]});
-        return 1;
+        return error.CommandFailed;
     };
     defer file.close(p.io);
     // The arguments live in p.dot_copy, which nested commands reuse.
@@ -1035,14 +1047,14 @@ fn dotRead(p: *Shell) Error!u8 {
     defer p.gpa.free(name);
     var buf: [16384]u8 = undefined;
     var r = file.reader(p.io, &buf);
-    return @intCast(try processInput(p, &r.interface, name));
+    if (try processInput(p, &r.interface, name) != 0) return error.CommandFailed;
 }
 
 /// Port of the .show command.
-fn dotShow(p: *Shell) Error!u8 {
+fn dotShow(p: *Shell) DotError!void {
     if (p.dot_args.items.len != 1) {
         try p.eprint("Usage: .show\n", .{});
-        return 1;
+        return error.CommandFailed;
     }
     const gpa = p.gpa;
     const m = &p.mode;
@@ -1077,11 +1089,10 @@ fn dotShow(p: *Shell) Error!u8 {
     for (m.spec.widths) |w| try s.print(gpa, "{d} ", .{w});
     try s.print(gpa, "\n{s: >12}: {s}\n", .{ "filename", p.db_filename });
     try p.out.writeAll(s.items);
-    return 0;
 }
 
 /// Port of the .tables command, reading only the main and temp schemas.
-fn dotTables(p: *Shell) Error!u8 {
+fn dotTables(p: *Shell) DotError!void {
     const args = p.dot_args.items;
     const pattern: ?[]const u8 = if (args.len > 1) args[1] else null;
     const gpa = p.gpa;
@@ -1104,7 +1115,6 @@ fn dotTables(p: *Shell) Error!u8 {
     defer p.modePop();
     try p.modeChange(MODE_Split);
     _ = try shellExec(p, &p.mode, s.items, null);
-    return 0;
 }
 
 /// Appends the output of an SQLite printf format to `s`.
@@ -1130,7 +1140,7 @@ fn queryInt(p: *Shell, text: []const u8) Error!i64 {
 
 /// Port of the .indexes command. The C code reads pragma_index_list();
 /// the same names come from sqlite_schema.
-fn dotIndexes(p: *Shell) Error!u8 {
+fn dotIndexes(p: *Shell) DotError!void {
     const args = p.dot_args.items;
     var all = false;
     var sys = false;
@@ -1144,13 +1154,13 @@ fn dotIndexes(p: *Shell) Error!u8 {
                 all = false;
             } else {
                 try dotCmdError(p, i, "unknown option", null);
-                return 1;
+                return error.CommandFailed;
             }
         } else if (pattern == null) {
             pattern = a;
         } else {
             try dotCmdError(p, i, "unknown argument", null);
-            return 1;
+            return error.CommandFailed;
         }
     }
     const gpa = p.gpa;
@@ -1176,7 +1186,6 @@ fn dotIndexes(p: *Shell) Error!u8 {
     defer p.modePop();
     try p.modeChange(MODE_Split);
     _ = try shellExec(p, &p.mode, s.items, null);
-    return 0;
 }
 
 /// Port of shellFakeSchema(): "name(col,...)" for a view, from the column
@@ -1215,7 +1224,7 @@ fn fakeSchema(p: *Shell, s: *std.ArrayList(u8), name: []const u8) Error!void {
 /// Port of the .schema command for the main database. The C code builds
 /// its query from PRAGMA database_list and SQL functions of the shell;
 /// their work is done here on the rows of sqlite_schema.
-fn dotSchema(p: *Shell) Error!u8 {
+fn dotSchema(p: *Shell) DotError!void {
     const args = p.dot_args.items;
     const gpa = p.gpa;
     var name: ?[]const u8 = null;
@@ -1230,12 +1239,12 @@ fn dotSchema(p: *Shell) Error!u8 {
             no_sys = true;
         } else if (a.len > 0 and a[0] == '-') {
             try p.eprint("Unknown option: \"{s}\"\n", .{a});
-            return 1;
+            return error.CommandFailed;
         } else if (name == null) {
             name = a;
         } else {
             try p.eprint("Usage: .schema ?--indent? ?--nosys? ?LIKE-PATTERN?\n", .{});
-            return 1;
+            return error.CommandFailed;
         }
     }
     if (name) |z| {
@@ -1263,7 +1272,7 @@ fn dotSchema(p: *Shell) Error!u8 {
     try q.appendSlice(gpa, "sql IS NOT NULL ORDER BY rowid");
     if (debug) {
         try p.print("SQL: {s};\n", .{q.items});
-        return 0;
+        return;
     }
 
     // Collect the rows first: views are queried while formatting.
@@ -1279,9 +1288,9 @@ fn dotSchema(p: *Shell) Error!u8 {
         var stmt_opt: ?*Stmt = null;
         if (sql.prepare.prepareV2(p.db, q.items, &stmt_opt, null) != RC.OK) {
             try p.eprint("Error: {s}\n", .{sql.main.errmsg(p.db)});
-            return 1;
+            return error.CommandFailed;
         }
-        const stmt = stmt_opt orelse return 0;
+        const stmt = stmt_opt orelse return;
         defer _ = api.finalize(stmt);
         var rc = api.step(stmt);
         while (rc == RC.ROW) : (rc = api.step(stmt)) {
@@ -1293,7 +1302,7 @@ fn dotSchema(p: *Shell) Error!u8 {
         }
         if (rc != RC.DONE) {
             try p.eprint("Error: {s}\n", .{sql.main.errmsg(p.db)});
-            return 1;
+            return error.CommandFailed;
         }
     }
 
@@ -1323,7 +1332,6 @@ fn dotSchema(p: *Shell) Error!u8 {
         try out.append(gpa, '\n');
         try p.out.writeAll(out.items);
     }
-    return 0;
 }
 
 /// Port of printSchemaLine().
@@ -1407,7 +1415,7 @@ fn dumpTable(p: *Shell, table: []const u8, kind: []const u8, text: []const u8, f
 }
 
 /// Port of the .dump command, without --preserve-rowids.
-fn dotDump(p: *Shell) Error!u8 {
+fn dotDump(p: *Shell) DotError!void {
     const gpa = p.gpa;
     const args = p.dot_args.items;
     var flags: u8 = 0;
@@ -1423,7 +1431,7 @@ fn dotDump(p: *Shell) Error!u8 {
                 flags |= dump_no_sys;
             } else {
                 try dotCmdError(p, i, "unknown option", null);
-                return 1;
+                return error.CommandFailed;
             }
         } else {
             if (like.items.len > 0) try like.appendSlice(gpa, " OR ");
@@ -1497,7 +1505,7 @@ fn dotDump(p: *Shell) Error!u8 {
         p.writable_schema = false;
     }
     if (!data_only) try p.out.writeAll(if (p.n_err != 0) ";\nROLLBACK; -- due to errors\n" else "COMMIT;\n");
-    return @intFromBool(p.n_err > 0);
+    if (p.n_err > 0) return error.CommandFailed;
 }
 
 /// Runs `text` and copies the first `n` columns of every row (as text,
@@ -1568,7 +1576,7 @@ const quote_names = [_][]const u8{ "off", "on", "sql", "csv", "html", "tcl", "js
 
 /// Port of dotCmdMode(), without --align, --once, --tag, --ifmt and --fpfmt
 /// (--textjsonb is recorded but JSONB blobs are not rendered as JSON).
-fn dotMode(p: *Shell) Error!u8 {
+fn dotMode(p: *Shell) DotError!void {
     const args = p.dot_args.items;
     const gpa = p.gpa;
     const m = &p.mode;
@@ -1629,7 +1637,7 @@ fn dotMode(p: *Shell) Error!u8 {
             if (i >= args.len) return missingArg(p, i - 1);
             m.spec.esc = std.meta.stringToEnum(qrf.Escape, args[i]) orelse {
                 try dotCmdError(p, i, "unknown escape type", "should be auto, off, ascii, or symbol");
-                return 1;
+                return error.CommandFailed;
             };
             chng = true;
         } else if (optionMatch(z, "limits")) {
@@ -1637,7 +1645,7 @@ fn dotMode(p: *Shell) Error!u8 {
             if (i >= args.len) return missingArg(p, i - 1);
             if (!setLimits(m, args[i])) {
                 try dotCmdError(p, i, "bad argument", "Should be \"on\" or \"off\" or \"L,C,T\" where L, C, and T are unsigned integers");
-                return 1;
+                return error.CommandFailed;
             }
             chng = true;
         } else if (optionMatch(z, "list")) {
@@ -1660,7 +1668,7 @@ fn dotMode(p: *Shell) Error!u8 {
                 } else {
                     k = pickStr(args[i], &quote_names) orelse {
                         try dotCmdError(p, i, "unknown", "should be off, on, sql, csv, html, tcl, json, or relaxed");
-                        return 1;
+                        return error.CommandFailed;
                     };
                 }
             }
@@ -1710,7 +1718,7 @@ fn dotMode(p: *Shell) Error!u8 {
             i += 1;
             const k = pickStr(args[i], &.{ "off", "on", "always", "auto", "plain", "sql", "csv", "html", "tcl", "json" }) orelse {
                 try dotCmdError(p, i, "bad --titles value", "should be off, on, always, auto, plain, sql, csv, html, tcl, or json");
-                return 1;
+                return error.CommandFailed;
             };
             m.hdr_set = false;
             if (k <= 2) {
@@ -1737,13 +1745,13 @@ fn dotMode(p: *Shell) Error!u8 {
                     w = w * 10 + (zw[k] - '0');
                     if (w > qrf.max_width) {
                         try dotCmdError(p, i + 1, "width too big", "Maximum column width is 10000");
-                        return 1;
+                        return error.CommandFailed;
                     }
                     n_digit += 1;
                 }
                 if (n_digit == 0) {
                     try dotCmdError(p, i + 1, "syntax error", "should be a comma-separated list if integers");
-                    return 1;
+                    return error.CommandFailed;
                 }
                 if (zw[0] == '-') w = -w;
                 try widths.append(gpa, @intCast(w));
@@ -1771,19 +1779,18 @@ fn dotMode(p: *Shell) Error!u8 {
             b_all = true;
         } else if (z.len > 0 and z[0] == '-') {
             try dotCmdError(p, i, "bad option", "Use \".help .mode\" for more info");
-            return 1;
+            return error.CommandFailed;
         } else {
             try dotCmdError(p, i, if (i_mode != null) "bad argument" else "unknown mode", "Use \".help .mode\" for more info");
-            return 1;
+            return error.CommandFailed;
         }
     }
     if (!chng or b_all) try showMode(p, b_all);
-    return 0;
 }
 
-fn missingArg(p: *Shell, i: usize) Error!u8 {
+fn missingArg(p: *Shell, i: usize) DotError {
     try dotCmdError(p, i, "missing argument", null);
-    return 1;
+    return error.CommandFailed;
 }
 
 /// Port of modeSetLimit().
@@ -1912,8 +1919,13 @@ fn showMode(p: *Shell, b_all: bool) Error!void {
 /// Returns the exit code.
 pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: []const []const u8, out: *Io.Writer, err_out: *Io.Writer) Error!u8 {
     const filename = path orelse ":memory:";
-    var db: *Sqlite3 = undefined;
-    const orc = sql.main.open(v, filename, .{}, &db);
+    var opened: ?*Sqlite3 = null;
+    const orc = sql.main.open(v, filename, .{}, &opened);
+    const db = opened orelse {
+        try err_out.print("Error: unable to open database \"{s}\": out of memory\n", .{filename});
+        try err_out.flush();
+        return 1;
+    };
     defer _ = sql.main.close(db);
     if (orc != RC.OK) {
         try err_out.print("Error: unable to open database \"{s}\": {s}\n", .{ filename, sql.main.errmsg(db) });

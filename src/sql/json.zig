@@ -38,7 +38,6 @@ const Mem = vi.Mem;
 const MEM = vi.MEM;
 const ENC = vi.ENC;
 const FUNC = callback.FUNC;
-const FNFLAG = callback.FNFLAG;
 const RC = int.RC;
 
 const SQLITE_INTEGER = vi.SQLITE_INTEGER;
@@ -160,18 +159,25 @@ fn jsonInsertType(x: usize) usize {
     return (x & 0xC) >> 2;
 }
 
-/// JsonParse.e_edit values (JEDIT_*).
-const JEDIT = struct {
+/// JsonParse.e_edit values (JEDIT_*), numbered as in C, where 0 is no
+/// edit (null here).
+const JEDIT = enum(u8) {
     /// Delete if exists.
-    const DEL: u8 = 1;
+    DEL = 1,
     /// Overwrite if exists.
-    const REPL: u8 = 2;
+    REPL = 2,
     /// Insert if not exists.
-    const INS: u8 = 3;
+    INS = 3,
     /// Insert or overwrite.
-    const SET: u8 = 4;
+    SET = 4,
     /// json_array_insert().
-    const AINS: u8 = 5;
+    AINS = 5,
+
+    /// Whether the edit may insert: INS, SET and AINS, which come last (C:
+    /// `eEdit>=JEDIT_INS`).
+    fn mayInsert(e: JEDIT) bool {
+        return @backingInt(e) >= @backingInt(JEDIT.INS);
+    }
 };
 
 /// Maximum nesting depth of JSON (JSON_MAX_DEPTH), which keeps the
@@ -255,8 +261,7 @@ fn rcstrRef(z: [*]u8) [*]u8 {
 
 /// Port of sqlite3RCStrUnref(): drop a reference, freeing the string
 /// with the last one. Usable as a destructor.
-fn rcstrUnref(p: ?*anyopaque) void {
-    const z: [*]u8 = @ptrCast(p.?);
+fn rcstrUnref(z: [*]u8) void {
     const h = rcstrHeader(z);
     std.debug.assert(h.n_rc_ref > 0);
     if (h.n_rc_ref >= 2) {
@@ -281,8 +286,8 @@ fn rcstrResize(z: [*]u8, n: u64) ?[*]u8 {
 
 /// Port of sqlite3ValueIsOfClass() (vdbemem.c): `m` is a string or blob
 /// freed by `x_free`.
-fn valueIsOfClass(m: *const Mem, x_free: *const fn (?*anyopaque) void) bool {
-    return m.flags & (MEM.Str | MEM.Blob) != 0 and m.flags & MEM.Dyn != 0 and m.x_del == x_free;
+fn valueIsOfClass(m: *const Mem, x_free: int.DestructorFn) bool {
+    return m.flags.intersects(.{ .Str = true, .Blob = true }) and m.flags.Dyn and m.x_del == x_free;
 }
 
 // ================================================================ objects
@@ -350,8 +355,8 @@ const JsonParse = struct {
     /// Do not modify.
     b_read_only: bool = false,
     // Search and edit information; see jsonLookupStep().
-    /// JEDIT.* operation to apply.
-    e_edit: u8 = 0,
+    /// JEDIT.* operation to apply, if any.
+    e_edit: ?JEDIT = null,
     /// Size change due to the edit.
     delta: i32 = 0,
     /// Bytes to insert.
@@ -378,23 +383,19 @@ fn jsonCacheDelete(p: *JsonCache) void {
     p.db.gpa.destroy(p);
 }
 
-fn jsonCacheDeleteGeneric(p: ?*anyopaque) void {
-    jsonCacheDelete(@ptrCast(@alignCast(p.?)));
-}
-
 /// Port of jsonCacheInsert(): add `parse` to the cache of the statement,
 /// expelling the least recently used entry if it is full.
 fn jsonCacheInsert(ctx: *Context, parse: *JsonParse) i32 {
     std.debug.assert(parse.z_json != null);
     std.debug.assert(parse.b_json_is_rcstr);
     std.debug.assert(parse.delta == 0);
-    var p: ?*JsonCache = @ptrCast(@alignCast(api.getAuxdata(ctx, json_cache_id)));
+    var p = api.getAuxdataTyped(ctx, json_cache_id, jsonCacheDelete);
     if (p == null) {
         const db = api.contextDbHandle(ctx);
         const new = db.gpa.create(JsonCache) catch return RC.NOMEM;
         new.* = .{ .db = db, .n_used = 0, .a = undefined };
-        api.setAuxdata(ctx, json_cache_id, new, jsonCacheDeleteGeneric);
-        p = @ptrCast(@alignCast(api.getAuxdata(ctx, json_cache_id)));
+        api.setAuxdataTyped(ctx, json_cache_id, jsonCacheDelete, new);
+        p = api.getAuxdataTyped(ctx, json_cache_id, jsonCacheDelete);
         if (p == null) return RC.NOMEM;
     }
     const c = p.?;
@@ -404,7 +405,7 @@ fn jsonCacheInsert(ctx: *Context, parse: *JsonParse) i32 {
         c.n_used = json_cache_size - 1;
     }
     std.debug.assert(parse.n_blob_alloc > 0);
-    parse.e_edit = 0;
+    parse.e_edit = null;
     parse.n_jp_ref += 1;
     parse.b_read_only = true;
     c.a[c.n_used] = parse;
@@ -420,7 +421,7 @@ fn jsonCacheSearch(ctx: *Context, arg: *Mem) ?*JsonParse {
     const z_json = api.valueText(arg) orelse return null;
     const n_json = api.valueBytes(arg);
 
-    const p: *JsonCache = @ptrCast(@alignCast(api.getAuxdata(ctx, json_cache_id) orelse return null));
+    const p = api.getAuxdataTyped(ctx, json_cache_id, jsonCacheDelete) orelse return null;
     var i: usize = 0;
     while (i < p.n_used) : (i += 1) {
         if (p.a[i].z_json == z_json.ptr) break;
@@ -465,7 +466,7 @@ fn jsonStringInit(p: *JsonString, ctx: ?*Context) void {
 
 /// Port of jsonStringReset(): free the buffer and empty the string.
 fn jsonStringReset(p: *JsonString) void {
-    if (!p.b_static) rcstrUnref(p.z_buf);
+    if (!p.b_static) rcstrUnref(p.z_buf.?);
     jsonStringZero(p);
 }
 
@@ -738,7 +739,7 @@ fn jsonReturnString(p: *JsonString, parse: ?*JsonParse, ctx: ?*Context) void {
                 }
             }
             const z = rcstrRef(p.buf());
-            api.resultTextZ(p.ctx.?, z[0..@intCast(p.n_used) :0], .{ .func = rcstrUnref });
+            api.resultTextZ(p.ctx.?, z[0..@intCast(p.n_used) :0], .{ .func = int.destructor(rcstrUnref) });
         }
     } else if (p.e_err & JSTRING.OOM != 0) {
         api.resultErrorNomem(p.ctx.?);
@@ -909,9 +910,13 @@ fn jsonWrongNumArgs(ctx: *Context, z_func_name: []const u8) void {
 
 // ================================================ JSONB utilities
 
-/// Port of jsonBlobExpand(): make a_blob hold at least `n` bytes. Returns
-/// the number of errors.
-fn jsonBlobExpand(parse: *JsonParse, n: u64) i32 {
+/// The failures of turning an argument into JSONB: out of memory (also
+/// recorded in JsonParse.oom), or not JSON.
+const ToBlobError = error{ OutOfMemory, Malformed };
+
+/// Port of jsonBlobExpand(): make a_blob hold at least `n` bytes. On OOM
+/// (C: an error count of 1) JsonParse.oom is set too.
+fn jsonBlobExpand(parse: *JsonParse, n: u64) error{OutOfMemory}!void {
     std.debug.assert(n > parse.n_blob_alloc);
     var t: u64 = if (parse.n_blob_alloc == 0) 100 else @as(u64, parse.n_blob_alloc) * 2;
     if (t < n) t = n + 100;
@@ -920,14 +925,13 @@ fn jsonBlobExpand(parse: *JsonParse, n: u64) i32 {
         gpa.alloc(u8, @intCast(t))
     else
         gpa.realloc(parse.blob()[0..parse.n_blob_alloc], @intCast(t));
-    const a_new = new catch {
+    const a_new = new catch |err| {
         parse.oom = true;
-        return 1;
+        return err;
     };
     std.debug.assert(t < 0x7fffffff);
     parse.a_blob = a_new.ptr;
     parse.n_blob_alloc = @intCast(t);
-    return 0;
 }
 
 /// Port of jsonBlobMakeEditable(): copy an external a_blob (from
@@ -940,7 +944,7 @@ fn jsonBlobMakeEditable(parse: *JsonParse, n_extra: u32) bool {
     const a_old = parse.a_blob;
     const n_size: u64 = @as(u64, parse.n_blob) + n_extra;
     parse.a_blob = null;
-    if (jsonBlobExpand(parse, n_size) != 0) return false;
+    jsonBlobExpand(parse, n_size) catch return false;
     std.debug.assert(parse.n_blob_alloc >= parse.n_blob + n_extra);
     if (parse.n_blob > 0) @memcpy(parse.blob()[0..parse.n_blob], a_old.?[0..parse.n_blob]);
     return true;
@@ -948,7 +952,7 @@ fn jsonBlobMakeEditable(parse: *JsonParse, n_extra: u32) bool {
 
 /// Port of jsonBlobExpandAndAppendOneByte().
 fn jsonBlobExpandAndAppendOneByte(parse: *JsonParse, c: u8) void {
-    _ = jsonBlobExpand(parse, @as(u64, parse.n_blob) + 1);
+    jsonBlobExpand(parse, @as(u64, parse.n_blob) + 1) catch {};
     if (!parse.oom) {
         std.debug.assert(parse.n_blob + 1 <= parse.n_blob_alloc);
         parse.blob()[parse.n_blob] = c;
@@ -968,7 +972,7 @@ fn jsonBlobAppendOneByte(parse: *JsonParse, c: u8) void {
 
 /// Port of jsonBlobExpandAndAppendNode().
 fn jsonBlobExpandAndAppendNode(parse: *JsonParse, e_type: u8, sz_payload: u64, a_payload: ?[*]const u8) void {
-    if (jsonBlobExpand(parse, @as(u64, parse.n_blob) + sz_payload + 9) != 0) return;
+    jsonBlobExpand(parse, @as(u64, parse.n_blob) + sz_payload + 9) catch return;
     jsonBlobAppendNode(parse, e_type, sz_payload, a_payload);
 }
 
@@ -1022,8 +1026,8 @@ fn jsonBlobChangePayloadSize(parse: *JsonParse, i: u32, sz_payload: u32) i32 {
     if (delta != 0) {
         const new_size: u64 = @intCast(@as(i64, parse.n_blob) + delta);
         if (delta > 0) {
-            if (new_size > parse.n_blob_alloc and jsonBlobExpand(parse, new_size) != 0) {
-                return 0; // OOM; recorded in parse.oom
+            if (new_size > parse.n_blob_alloc) {
+                jsonBlobExpand(parse, new_size) catch return 0; // recorded in parse.oom
             }
             a = parse.blob() + i;
             const n = parse.n_blob - (i + 1);
@@ -1694,9 +1698,9 @@ fn strNCmp(z: [*]const u8, lit: []const u8) bool {
 }
 
 /// Port of jsonConvertTextToBlob(): parse the complete JSON text in
-/// z_json. Non-zero on an error, after which the memory of `parse` (not
-/// the object) is freed and, with `ctx`, an error set.
-fn jsonConvertTextToBlob(parse: *JsonParse, ctx: ?*Context) i32 {
+/// z_json. On an error (C: non-zero) the memory of `parse` (not the
+/// object) is freed and, with `ctx`, an error set.
+fn jsonConvertTextToBlob(parse: *JsonParse, ctx: ?*Context) ToBlobError!void {
     const z_json = parse.z_json.?;
     var i = jsonTranslateTextToBlob(parse, 0);
     if (parse.oom) i = -1;
@@ -1708,7 +1712,7 @@ fn jsonConvertTextToBlob(parse: *JsonParse, ctx: ?*Context) i32 {
             if (z_json[k] != 0) {
                 if (ctx) |c| api.resultError(c, "malformed JSON");
                 jsonParseReset(parse);
-                return 1;
+                return error.Malformed;
             }
             parse.has_nonstd = true;
         }
@@ -1721,10 +1725,10 @@ fn jsonConvertTextToBlob(parse: *JsonParse, ctx: ?*Context) i32 {
                 api.resultError(c, "malformed JSON");
             }
         }
+        const oom = parse.oom;
         jsonParseReset(parse);
-        return 1;
+        return if (oom) error.OutOfMemory else error.Malformed;
     }
-    return 0;
 }
 
 /// Port of jsonReturnStringAsBlob(): convert the well-formed JSON text in
@@ -2210,8 +2214,7 @@ fn jsonBlobEdit(parse: *JsonParse, i_del: u32, n_del: u32, a_ins: ?[*]const u8, 
     }
     if (d != 0) {
         if (parse.n_blob + d > parse.n_blob_alloc) {
-            _ = jsonBlobExpand(parse, @intCast(parse.n_blob + d));
-            if (parse.oom) return;
+            jsonBlobExpand(parse, @intCast(parse.n_blob + d)) catch return;
         }
         const a = parse.blob();
         {
@@ -2478,7 +2481,7 @@ fn jsonLookupStep(parse: *JsonParse, i_root_arg: u32, z_path_arg: [*:0]const u8,
     var rc: u32 = undefined;
 
     if (z_path[0] == 0) {
-        if (parse.e_edit != 0 and jsonBlobMakeEditable(parse, parse.n_ins)) {
+        if (parse.e_edit != null and jsonBlobMakeEditable(parse, parse.n_ins)) {
             n = jsonbPayloadSize(parse, i_root, &sz);
             sz += n;
             if (parse.e_edit == JEDIT.DEL) {
@@ -2564,7 +2567,7 @@ fn jsonLookupStep(parse: *JsonParse, i_root_arg: u32, z_path_arg: [*:0]const u8,
             j += n + sz;
         }
         if (j > i_end) return JSON_LOOKUP.ERROR;
-        if (parse.e_edit >= JEDIT.INS) {
+        if (parse.e_edit != null and parse.e_edit.?.mayInsert()) {
             // BLOB encoding of the value to be inserted.
             var v: JsonParse = undefined;
             // Header of the label to be inserted.
@@ -2644,7 +2647,7 @@ fn jsonLookupStep(parse: *JsonParse, i_root_arg: u32, z_path_arg: [*:0]const u8,
         }
         if (j > i_end) return JSON_LOOKUP.ERROR;
         if (kk > 0) return JSON_LOOKUP.NOTFOUND;
-        if (parse.e_edit >= JEDIT.INS) {
+        if (parse.e_edit != null and parse.e_edit.?.mayInsert()) {
             var v: JsonParse = undefined;
             rc = jsonCreateEditSubstructure(parse, &v, z_path + i + 1);
             if (!jsonLookupIsError(rc) and jsonBlobMakeEditable(parse, v.n_blob)) {
@@ -2827,9 +2830,9 @@ fn jsonReturnFromBlob(parse: *JsonParse, i: u32, ctx: *Context, e_mode_arg: u8) 
 /// Port of jsonFunctionArgToBlob(): the SQL value or JSON in `arg` as
 /// JSONB in `parse` (uninitialized on entry). a_blob may be allocated
 /// (n_blob_alloc > 0; the caller frees it), static, or the blob of
-/// `arg`. Non-zero, maybe with an error set, if `arg` is a BLOB that is
-/// not JSONB, or on OOM.
-fn jsonFunctionArgToBlob(ctx: *Context, arg: *Mem, parse: *JsonParse) i32 {
+/// `arg`. Fails (C: non-zero), maybe with an error set, if `arg` is a
+/// BLOB that is not JSONB, or on OOM.
+fn jsonFunctionArgToBlob(ctx: *Context, arg: *Mem, parse: *JsonParse) ToBlobError!void {
     const S = struct {
         var a_null = [_]u8{0x00};
     };
@@ -2839,21 +2842,21 @@ fn jsonFunctionArgToBlob(ctx: *Context, arg: *Mem, parse: *JsonParse) i32 {
         SQLITE_BLOB => {
             if (!jsonArgIsJsonb(arg, parse)) {
                 api.resultError(ctx, "JSON cannot hold BLOB values");
-                return 1;
+                return error.Malformed;
             }
         },
         SQLITE_TEXT => {
-            const z_json = api.valueText(arg) orelse return 1;
+            const z_json = api.valueText(arg) orelse return error.OutOfMemory;
             const n_json = api.valueBytes(arg);
             if (api.valueSubtype(arg) == json_subtype) {
                 parse.z_json = z_json.ptr;
                 parse.n_json = @intCast(n_json);
-                if (jsonConvertTextToBlob(parse, ctx) != 0) {
+                jsonConvertTextToBlob(parse, ctx) catch |err| {
                     api.resultError(ctx, "malformed JSON");
                     if (parse.n_blob_alloc > 0) parse.gpa().free(parse.blob()[0..parse.n_blob_alloc]);
                     parse.* = .{};
-                    return 1;
-                }
+                    return err;
+                };
             } else {
                 jsonBlobAppendNode(parse, JSONB.TEXTRAW, n_json, z_json.ptr);
             }
@@ -2863,7 +2866,7 @@ fn jsonFunctionArgToBlob(ctx: *Context, arg: *Mem, parse: *JsonParse) i32 {
                 jsonBlobAppendNode(parse, JSONB.NULL, 0, null);
             } else {
                 const n = api.valueBytes(arg);
-                const z = api.valueText(arg) orelse return 1;
+                const z = api.valueText(arg) orelse return error.OutOfMemory;
                 if (z[0] == 'I') {
                     jsonBlobAppendNode(parse, JSONB.FLOAT, 5, "9e999");
                 } else if (z[0] == '-' and z[1] == 'I') {
@@ -2875,20 +2878,19 @@ fn jsonFunctionArgToBlob(ctx: *Context, arg: *Mem, parse: *JsonParse) i32 {
         },
         SQLITE_INTEGER => {
             const n = api.valueBytes(arg);
-            const z = api.valueText(arg) orelse return 1;
+            const z = api.valueText(arg) orelse return error.OutOfMemory;
             jsonBlobAppendNode(parse, JSONB.INT, n, z.ptr);
         },
         else => {
             parse.a_blob = &S.a_null;
             parse.n_blob = 1;
-            return 0;
+            return;
         },
     }
     if (parse.oom) {
         api.resultErrorNomem(ctx);
-        return 1;
+        return error.OutOfMemory;
     }
-    return 0;
 }
 
 /// The message of jsonBadPathError() (its ctx==0 case), allocated with
@@ -2924,7 +2926,7 @@ fn jsonBadPathError(ctx: *Context, z_path: ?[*:0]const u8, rc: u32) void {
 /// are pairs of a path and the content to insert or set there, as
 /// `e_edit` (JEDIT.INS, REPL, SET or AINS) says. The result is the
 /// edited JSON.
-fn jsonInsertIntoBlob(ctx: *Context, argv: []*Mem, e_edit: u8) void {
+fn jsonInsertIntoBlob(ctx: *Context, argv: []*Mem, e_edit: JEDIT) void {
     const argc = argv.len;
     var rc: u32 = 0;
     var z_path: ?[*:0]const u8 = null;
@@ -2943,11 +2945,11 @@ fn jsonInsertIntoBlob(ctx: *Context, argv: []*Mem, e_edit: u8) void {
             z_path = zp.ptr;
             if (zp[0] != '$') break :patherror;
             var ax: JsonParse = undefined;
-            if (jsonFunctionArgToBlob(ctx, argv[i + 1], &ax) != 0) {
+            jsonFunctionArgToBlob(ctx, argv[i + 1], &ax) catch {
                 jsonParseReset(&ax);
                 jsonParseFree(p);
                 return;
-            }
+            };
             if (zp[1] == 0) {
                 if (e_edit == JEDIT.REPL or e_edit == JEDIT.SET) {
                     jsonBlobEdit(p, 0, p.n_blob, ax.a_blob, ax.n_blob);
@@ -3060,7 +3062,7 @@ fn jsonParseFuncArg(ctx: *Context, arg: *Mem, flgs: u32) ?*JsonParse {
                 return null;
             }
             std.debug.assert(px.z_json != null);
-            if (jsonConvertTextToBlob(px, if (flgs & JSON_KEEPERROR != 0) null else ctx) != 0) {
+            if (jsonConvertTextToBlob(px, if (flgs & JSON_KEEPERROR != 0) null else ctx)) |_| {} else |_| {
                 if (flgs & JSON_KEEPERROR != 0) {
                     px.n_err = 1;
                     return px;
@@ -3068,7 +3070,7 @@ fn jsonParseFuncArg(ctx: *Context, arg: *Mem, flgs: u32) ?*JsonParse {
                 jsonParseFree(px);
                 return null;
             }
-            const is_rcstr = valueIsOfClass(arg, rcstrUnref);
+            const is_rcstr = valueIsOfClass(arg, int.destructor(rcstrUnref));
             if (!is_rcstr) {
                 const n_json: usize = @intCast(px.n_json);
                 const z_new = rcstrNew(n_json) orelse break :oom;
@@ -3541,7 +3543,7 @@ fn jsonReplaceFunc(ctx: *Context, argv: []*Mem) void {
 /// creates, and json_array_insert() inserts array elements.
 fn jsonSetFunc(ctx: *Context, argv: []*Mem) void {
     const az_ins_type = [_][]const u8{ "insert", "set", "array_insert" };
-    const a_edit_type = [_]u8{ JEDIT.INS, JEDIT.SET, JEDIT.AINS };
+    const a_edit_type = [_]JEDIT{ JEDIT.INS, JEDIT.SET, JEDIT.AINS };
     const e_ins_type = jsonInsertType(userFlags(ctx));
     if (argv.len < 1) return;
     std.debug.assert(e_ins_type <= 2);
@@ -3667,7 +3669,7 @@ fn jsonErrorFunc(ctx: *Context, argv: []*Mem) void {
         const z = api.valueText(argv[0]) orelse return; // NULL input or OOM
         s.z_json = z.ptr;
         s.n_json = @intCast(api.valueBytes(argv[0]));
-        if (jsonConvertTextToBlob(&s, null) != 0) {
+        if (jsonConvertTextToBlob(&s, null)) |_| {} else |_| {
             if (s.oom) {
                 i_err_pos = -1;
             } else {
@@ -3718,7 +3720,7 @@ fn jsonArrayCompute(ctx: *Context, is_final: bool) void {
         } else if (flags & JSON.BLOB != 0) {
             jsonReturnStringAsBlob(str);
             if (is_final) {
-                if (!str.b_static) rcstrUnref(str.z_buf);
+                if (!str.b_static) rcstrUnref(str.z_buf.?);
             } else {
                 jsonStringTrimOneChar(str);
             }
@@ -3728,7 +3730,7 @@ fn jsonArrayCompute(ctx: *Context, is_final: bool) void {
             if (str.b_static) {
                 api.resultText(ctx, z, .transient);
             } else {
-                api.resultTextZ(ctx, z, .{ .func = rcstrUnref });
+                api.resultTextZ(ctx, z, .{ .func = int.destructor(rcstrUnref) });
             }
             str.b_static = true;
         } else {
@@ -3880,7 +3882,7 @@ fn jsonObjectCompute(ctx: *Context, is_final: bool) void {
         if (flags & JSON.BLOB != 0) {
             jsonReturnStringAsBlob(str);
             if (is_final) {
-                if (!str.b_static) rcstrUnref(str.z_buf);
+                if (!str.b_static) rcstrUnref(str.z_buf.?);
             } else {
                 jsonStringTrimOneChar(og_str);
             }
@@ -3889,7 +3891,7 @@ fn jsonObjectCompute(ctx: *Context, is_final: bool) void {
             if (str.b_static) {
                 api.resultText(ctx, z, .transient);
             } else {
-                api.resultTextZ(ctx, z, .{ .func = rcstrUnref });
+                api.resultTextZ(ctx, z, .{ .func = int.destructor(rcstrUnref) });
             }
             str.b_static = true;
         } else {
@@ -4185,7 +4187,7 @@ fn jsonEachPathLength(p: *JsonEachCursor) u32 {
                 var sz: u32 = 0;
                 const c_saved = z[n];
                 z[n] = 0;
-                std.debug.assert(p.s_parse.e_edit == 0);
+                std.debug.assert(p.s_parse.e_edit == null);
                 const x = jsonLookupStep(&p.s_parse, 0, @ptrCast(z + 1), 0);
                 z[n] = c_saved;
                 if (jsonLookupIsError(x)) continue;
@@ -4361,10 +4363,10 @@ fn jsonEachFilter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, argv: [
             p.i_end = 0;
             return RC.OK;
         }
-        if (jsonConvertTextToBlob(&p.s_parse, null) != 0) {
-            if (p.s_parse.oom) return RC.NOMEM;
-            return jsonEachMalformedInput(cur);
-        }
+        jsonConvertTextToBlob(&p.s_parse, null) catch |err| switch (err) {
+            error.OutOfMemory => return RC.NOMEM,
+            error.Malformed => return jsonEachMalformedInput(cur),
+        };
     }
     if (idx_num == 3) {
         const z_root = api.valueText(argv[1]) orelse return RC.OK;
@@ -4454,9 +4456,14 @@ pub fn jsonVtabRegister(db: *Sqlite3, name: []const u8) ?*int.Module {
 fn jfunction(name: [:0]const u8, n_arg: i16, use_cache: u1, ws: u1, rs: u1, jsonb: u1, i_arg: usize, x: FuncDef.StepFn) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | FNFLAG.DETERMINISTIC | FUNC.CONSTANT | ENC.UTF8 |
-            @as(u32, use_cache) * FUNC.RUNONLY |
-            @as(u32, rs) * FUNC.SUBTYPE | @as(u32, ws) * FUNC.RESULT_SUBTYPE,
+        .func_flags = .{
+            .enc = ENC.UTF8,
+            .BUILTIN = true,
+            .CONSTANT = true, // SQLITE_DETERMINISTIC
+            .RUNONLY = use_cache != 0,
+            .SUBTYPE = rs != 0,
+            .RESULT_SUBTYPE = ws != 0,
+        },
         .user_data = func.intToPtr(i_arg | @as(usize, jsonb) * JSON.BLOB),
         .x_sfunc = x,
         .name = name,
@@ -4464,10 +4471,10 @@ fn jfunction(name: [:0]const u8, n_arg: i16, use_cache: u1, ws: u1, rs: u1, json
 }
 
 /// WAGGREGATE(): an aggregate that is also a window function.
-fn waggregate(name: [:0]const u8, n_arg: i16, arg: usize, step: FuncDef.StepFn, final: FuncDef.FinalFn, value: FuncDef.FinalFn, inverse: FuncDef.StepFn, f: u32) FuncDef {
+fn waggregate(name: [:0]const u8, n_arg: i16, arg: usize, step: FuncDef.StepFn, final: FuncDef.FinalFn, value: FuncDef.FinalFn, inverse: FuncDef.StepFn, f: FUNC) FuncDef {
     return .{
         .n_arg = n_arg,
-        .func_flags = FUNC.BUILTIN | ENC.UTF8 | f,
+        .func_flags = f.with(.{ .enc = ENC.UTF8, .BUILTIN = true }),
         .user_data = func.intToPtr(arg),
         .x_sfunc = step,
         .x_finalize = final,
@@ -4477,7 +4484,8 @@ fn waggregate(name: [:0]const u8, n_arg: i16, arg: usize, step: FuncDef.StepFn, 
     };
 }
 
-const agg_flags = FNFLAG.SUBTYPE | FNFLAG.RESULT_SUBTYPE | ENC.UTF8 | FNFLAG.DETERMINISTIC;
+/// SQLITE_SUBTYPE|SQLITE_RESULT_SUBTYPE|SQLITE_UTF8|SQLITE_DETERMINISTIC.
+const agg_flags: FUNC = .{ .SUBTYPE = true, .RESULT_SUBTYPE = true, .enc = ENC.UTF8, .CONSTANT = true };
 
 /// aJsonFunc[]: the JSON functions. Their links are set by
 /// callback.insertBuiltinFuncs(); read-only after that.

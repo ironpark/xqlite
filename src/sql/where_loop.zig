@@ -3,6 +3,7 @@
 const std = @import("std");
 const int = @import("sqlite_int.zig");
 const wi = @import("where_int.zig");
+const WS = wi.WS;
 const we = @import("where_expr.zig");
 const util = @import("util.zig");
 const expr_mod = @import("expr.zig");
@@ -22,6 +23,7 @@ const Index = int.Index;
 const LogEst = int.LogEst;
 const Bitmask = int.Bitmask;
 const Oom = int.Oom;
+const ParseError = int.ParseError;
 const RC = int.RC;
 const TK = int.TK;
 const EP = int.EP;
@@ -45,6 +47,23 @@ const WhereLoopBuilder = wi.WhereLoopBuilder;
 const WhereOrSet = wi.WhereOrSet;
 const WO = wi.WO;
 const TERM = wi.TERM;
+
+/// The outcome of whereLoopInsert() and the whereLoopAdd*() family when
+/// it does not fail: `done` is C's SQLITE_DONE, the query planner search
+/// limit was hit and the search stops.
+const Flow = enum { ok, done };
+
+/// The failures of the whereLoopAdd*() family: running out of memory, or
+/// error.ParseFailed where C returns another nonzero result code (an
+/// error of xBestIndex, a malfunction it causes, or an earlier error of
+/// the Parse). The error is then already in the Parse; only its being
+/// nonzero matters to the caller, as in C.
+const AddError = Oom || ParseError;
+
+/// C's `rc==SQLITE_OK` for the rc of the whereLoopAdd*() family.
+fn isOk(rc: AddError!Flow) bool {
+    return if (rc) |flow| flow == .ok else |_| false;
+}
 
 /// TOPBIT: the "column 63 or later" bit of a column-usage Bitmask.
 const TOPBIT: Bitmask = @as(Bitmask, 1) << (int.bms - 1);
@@ -101,7 +120,7 @@ pub fn whereOrInsert(set: *WhereOrSet, prereq: Bitmask, r_run: LogEst, n_out: Lo
 /// a TK_COLUMN (not EP_FixedCol), else null.
 fn whereRightSubexprIsColumn(p: *Expr) ?*Expr {
     const r = expr_mod.skipCollateAndLikely(p.right) orelse return null;
-    if (r.op == TK.COLUMN and !r.has(EP.FixedCol)) return r;
+    if (r.op == TK.COLUMN and !r.flags.FixedCol) return r;
     return null;
 }
 
@@ -144,7 +163,7 @@ pub fn whereScanNext(scan: *WhereScan) ?*WhereTerm {
                     term.left_column == i_column and
                     (i_column != XN_EXPR or
                         expr_mod.compareSkip(term.expr.left, scan.idx_expr, i_cur) == 0) and
-                    (scan.i_equiv <= 1 or !term.expr.has(EP.OuterON)))
+                    (scan.i_equiv <= 1 or !term.expr.flags.OuterON))
                 {
                     if (term.e_operator & WO.EQUIV != 0 and scan.n_equiv < scan.ai_cur.len) {
                         if (whereRightSubexprIsColumn(term.expr)) |x| {
@@ -278,7 +297,7 @@ fn findIndexCol(p: *Parse, list: *ExprList, i_base: i32, idx: *Index, i_col: usi
 fn indexColumnNotNull(idx: *const Index, i_col: usize) bool {
     std.debug.assert(i_col < idx.n_column);
     const j = idx.ai_column[i_col];
-    if (j >= 0) return idx.table.cols[@intCast(j)].not_null != 0;
+    if (j >= 0) return idx.table.cols[@intCast(j)].not_null != .None;
     if (j == -1) return true;
     std.debug.assert(j == -2);
     return false; // An indexed expression can always yield a NULL.
@@ -327,9 +346,9 @@ pub fn estLog(n: LogEst) LogEst {
 /// access `src`, the right operand of a LEFT JOIN or either operand of a
 /// RIGHT JOIN.
 pub fn constraintCompatibleWithOuterJoin(term: *const WhereTerm, src: *const SrcItem) bool {
-    std.debug.assert(src.fg.jointype & (JT.LEFT | JT.LTORJ | JT.RIGHT) != 0);
-    if (!term.expr.has(EP.OuterON | EP.InnerON) or term.expr.w.join != src.i_cursor) return false;
-    if (src.fg.jointype & (JT.LEFT | JT.RIGHT) != 0 and term.expr.has(EP.InnerON)) return false;
+    std.debug.assert(src.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true, .RIGHT = true }));
+    if (!term.expr.flags.intersects(.{ .OuterON = true, .InnerON = true }) or term.expr.w.join != src.i_cursor) return false;
+    if (src.fg.jointype.intersects(.{ .LEFT = true, .RIGHT = true }) and term.expr.flags.InnerON) return false;
     return true;
 }
 
@@ -355,8 +374,8 @@ pub fn columnIsGoodIndexCandidate(tab: *const Table, i_col: i32) bool {
 pub fn termCanDriveIndex(term: *const WhereTerm, src: *const SrcItem, not_ready: Bitmask) bool {
     if (term.left_cursor != src.i_cursor) return false;
     if (term.e_operator & (WO.EQ | WO.IS) == 0) return false;
-    std.debug.assert(src.fg.jointype & JT.RIGHT == 0);
-    if (src.fg.jointype & (JT.LEFT | JT.LTORJ | JT.RIGHT) != 0 and
+    std.debug.assert(!src.fg.jointype.RIGHT);
+    if (src.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true, .RIGHT = true }) and
         !constraintCompatibleWithOuterJoin(term, src)) return false;
     if (term.prereq_right & not_ready != 0) return false;
     std.debug.assert(term.e_operator & (WO.OR | WO.AND) == 0);
@@ -377,7 +396,7 @@ fn whereRangeAdjust(term: ?*const WhereTerm, n_new: LogEst) LogEst {
     if (term) |t| {
         if (t.truth_prob <= 0) {
             n_ret += t.truth_prob;
-        } else if (t.wt_flags & TERM.VNULL == 0) {
+        } else if (!t.wt_flags.VNULL) {
             n_ret -= 20; // 20 == logEst(4)
         }
     }
@@ -390,7 +409,7 @@ fn whereRangeScanEst(p: *Parse, builder: *WhereLoopBuilder, lower: ?*WhereTerm, 
     _ = builder;
     var n_out: i32 = loop.n_out;
     std.debug.assert(lower != null or upper != null);
-    std.debug.assert(upper == null or upper.?.wt_flags & TERM.VNULL == 0 or p.n_err > 0);
+    std.debug.assert(upper == null or !upper.?.wt_flags.VNULL or p.n_err > 0);
     var n_new: i32 = whereRangeAdjust(lower, @intCast(n_out));
     n_new = whereRangeAdjust(upper, @intCast(n_new));
 
@@ -412,13 +431,13 @@ fn whereRangeScanEst(p: *Parse, builder: *WhereLoopBuilder, lower: ?*WhereTerm, 
 pub fn whereLoopInit(l: *WhereLoop) void {
     l.a_lterm = &l.a_lterm_space;
     l.n_lterm = 0;
-    l.ws_flags = 0;
+    l.ws_flags = .{};
 }
 
 /// Port of whereLoopClearUnion(): free the idxStr of a virtual table
 /// loop that owns it (the rest of the memory belongs to the arena).
 pub fn whereLoopClearUnion(db: *int.Sqlite3, l: *WhereLoop) void {
-    if (l.ws_flags & wi.WHERE_VIRTUALTABLE != 0 and l.vtab.need_free) {
+    if (l.ws_flags.VIRTUALTABLE and l.vtab.need_free) {
         if (l.vtab.idx_str) |z| db.gpa.free(z);
         l.vtab.need_free = false;
         l.vtab.idx_str = null;
@@ -431,7 +450,7 @@ fn whereLoopClear(db: *int.Sqlite3, l: *WhereLoop) void {
     whereLoopClearUnion(db, l);
     l.a_lterm = &l.a_lterm_space;
     l.n_lterm = 0;
-    l.ws_flags = 0;
+    l.ws_flags = .{};
 }
 
 /// Port of whereLoopResize(): make room for at least `n` aLTerm[] slots.
@@ -461,10 +480,10 @@ fn whereLoopXfer(db: *int.Sqlite3, a: std.mem.Allocator, to: *WhereLoop, from: *
     to.n_lterm = from.n_lterm;
     to.n_skip = from.n_skip;
     @memcpy(to.a_lterm[0..to.n_lterm], from.a_lterm[0..to.n_lterm]);
-    if (from.ws_flags & wi.WHERE_VIRTUALTABLE != 0) {
+    if (from.ws_flags.VIRTUALTABLE) {
         // `to` owns the idxStr now.
         from.vtab.need_free = false;
-    } else if (from.ws_flags & wi.WHERE_AUTO_INDEX != 0) {
+    } else if (from.ws_flags.AUTO_INDEX) {
         from.btree.index = null;
     }
 }
@@ -473,8 +492,8 @@ fn whereLoopXfer(db: *int.Sqlite3, a: std.mem.Allocator, to: *WhereLoop, from: *
 /// costs no more, so their costs need adjusting.
 fn whereLoopCheaperProperSubset(x: *const WhereLoop, y: *const WhereLoop) bool {
     if (x.r_run > y.r_run and x.n_out > y.n_out) return false; // (1d) and (2a)
-    std.debug.assert(x.ws_flags & wi.WHERE_VIRTUALTABLE == 0);
-    std.debug.assert(y.ws_flags & wi.WHERE_VIRTUALTABLE == 0);
+    std.debug.assert(!x.ws_flags.VIRTUALTABLE);
+    std.debug.assert(!y.ws_flags.VIRTUALTABLE);
     if (x.btree.n_eq < y.btree.n_eq and // (1b)
         x.btree.index == y.btree.index and // (1a)
         x.n_skip == 0 and y.n_skip == 0) // (1c)
@@ -492,7 +511,7 @@ fn whereLoopCheaperProperSubset(x: *const WhereLoop, y: *const WhereLoop) bool {
         }
         if (j < 0) return false; // (2c)
     }
-    if (x.ws_flags & wi.WHERE_IDX_ONLY != 0 and y.ws_flags & wi.WHERE_IDX_ONLY == 0) {
+    if (x.ws_flags.IDX_ONLY and !y.ws_flags.IDX_ONLY) {
         return false; // (2e)
     }
     return true; // Case 2 is true
@@ -501,11 +520,11 @@ fn whereLoopCheaperProperSubset(x: *const WhereLoop, y: *const WhereLoop) bool {
 /// Port of whereLoopAdjustCost(): make `template` cheaper than its proper
 /// subsets and costlier than its proper supersets in list `p`.
 fn whereLoopAdjustCost(p_arg: ?*const WhereLoop, template: *WhereLoop) void {
-    if (template.ws_flags & wi.WHERE_INDEXED == 0) return;
+    if (!template.ws_flags.INDEXED) return;
     var it = p_arg;
     while (it) |p| : (it = p.next_loop) {
         if (p.i_tab != template.i_tab) continue;
-        if (p.ws_flags & wi.WHERE_INDEXED == 0) continue;
+        if (!p.ws_flags.INDEXED) continue;
         if (whereLoopCheaperProperSubset(p, template)) {
             template.r_run = @min(p.r_run, template.r_run);
             template.n_out = @min(p.n_out - 1, template.n_out);
@@ -529,10 +548,10 @@ fn whereLoopFindLesser(pp_prev_arg: *?*WhereLoop, template: *const WhereLoop) ?*
 
         // An index with == constraints beats an automatic index, unless
         // it is a skip-scan.
-        if (p.ws_flags & wi.WHERE_AUTO_INDEX != 0 and
+        if (p.ws_flags.AUTO_INDEX and
             template.n_skip == 0 and
-            template.ws_flags & wi.WHERE_INDEXED != 0 and
-            template.ws_flags & wi.WHERE_COLUMN_EQ != 0 and
+            template.ws_flags.INDEXED and
+            template.ws_flags.COLUMN_EQ and
             (p.prereq & template.prereq) == template.prereq)
         {
             break;
@@ -560,16 +579,16 @@ fn whereLoopFindLesser(pp_prev_arg: *?*WhereLoop, template: *const WhereLoop) ?*
 }
 
 /// Port of whereLoopInsert(): add `template` to the loop list, replacing
-/// worse loops, or record it in builder.or_set. SQLITE_DONE when the
-/// planner search limit is hit.
-fn whereLoopInsert(builder: *WhereLoopBuilder, template: *WhereLoop) Oom!i32 {
+/// worse loops, or record it in builder.or_set. `done` (SQLITE_DONE) when
+/// the planner search limit is hit.
+fn whereLoopInsert(builder: *WhereLoopBuilder, template: *WhereLoop) Oom!Flow {
     const w = builder.w_info;
     const a = w.parse.arena;
 
     // Stop the search once we hit the query planner search limit.
     if (builder.i_plan_limit == 0) {
         if (builder.or_set) |s| s.n = 0;
-        return RC.DONE;
+        return .done;
     }
     builder.i_plan_limit -= 1;
 
@@ -580,11 +599,11 @@ fn whereLoopInsert(builder: *WhereLoopBuilder, template: *WhereLoop) Oom!i32 {
         if (template.n_lterm != 0) {
             _ = whereOrInsert(s, template.prereq, template.r_run, template.n_out);
         }
-        return RC.OK;
+        return .ok;
     }
 
     // Look for an existing WhereLoop to replace with template.
-    const pp_prev = whereLoopFindLesser(&w.loops, template) orelse return RC.OK;
+    const pp_prev = whereLoopFindLesser(&w.loops, template) orelse return .ok;
     var p: *WhereLoop = undefined;
     if (pp_prev.*) |existing| {
         p = existing;
@@ -605,17 +624,17 @@ fn whereLoopInsert(builder: *WhereLoopBuilder, template: *WhereLoop) Oom!i32 {
         pp_prev.* = p;
     }
     try whereLoopXfer(w.parse.db, a, p, template);
-    if (p.ws_flags & wi.WHERE_VIRTUALTABLE == 0) {
+    if (!p.ws_flags.VIRTUALTABLE) {
         if (p.btree.index) |idx| {
             if (idx.idx_type == .ipk) p.btree.index = null;
         }
     }
-    return RC.OK;
+    return .ok;
 }
 
 /// Port of exprNodePatternLengthEst(): track the longest string literal,
 /// counted as a LIKE (e_code 1) or GLOB (0) pattern.
-fn exprNodePatternLengthEst(w: *Walker, e: *Expr) u8 {
+fn exprNodePatternLengthEst(w: *Walker, e: *Expr) WRC {
     if (e.op == TK.STRING) {
         var sz: i32 = 0;
         const z: [:0]const u8 = e.u.token orelse "";
@@ -670,11 +689,11 @@ fn whereLoopOutputAdjust(wc: *WhereClause, loop: *WhereLoop, n_row: LogEst) void
     // Accuracy does not matter for a single table without ORDER BY.
     if (wc.w_info.tab_list.len() <= 1 and wc.w_info.order_by == null) return;
 
-    std.debug.assert(loop.ws_flags & wi.WHERE_AUTO_INDEX == 0);
+    std.debug.assert(!loop.ws_flags.AUTO_INDEX);
     for (wc.a[0..@intCast(wc.n_base)], 0..) |*term, i_term| {
         if (term.prereq_all & not_allowed != 0) continue;
         if (term.prereq_all & loop.mask_self == 0) continue;
-        if (term.wt_flags & TERM.VIRTUAL != 0) continue;
+        if (term.wt_flags.VIRTUAL) continue;
         var j: i32 = @as(i32, loop.n_lterm) - 1;
         while (j >= 0) : (j -= 1) {
             const x = loop.a_lterm[@intCast(j)] orelse continue;
@@ -689,9 +708,9 @@ fn whereLoopOutputAdjust(wc: *WhereClause, loop: *WhereLoop, n_row: LogEst) void
                 // Self-culling: only for comparisons that are not true with
                 // a NULL operand, or outside an OUTER JOIN.
                 if (term.e_operator & 0x3f != 0 or
-                    wc.w_info.tab_list.at(loop.i_tab).fg.jointype & (JT.LEFT | JT.LTORJ) == 0)
+                    !wc.w_info.tab_list.at(loop.i_tab).fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true }))
                 {
-                    loop.ws_flags |= wi.WHERE_SELFCULL;
+                    loop.ws_flags.SELFCULL = true;
                 }
             }
             if (term.truth_prob <= 0) {
@@ -701,7 +720,7 @@ fn whereLoopOutputAdjust(wc: *WhereClause, loop: *WhereLoop, n_row: LogEst) void
                 const op_expr = term.expr;
                 loop.n_out -= 1;
                 if (term.e_operator & (WO.EQ | WO.IS) != 0 and
-                    term.wt_flags & TERM.HIGHTRUTH == 0) // tag-20200224-1
+                    !term.wt_flags.intersects(TERM.HIGHTRUTH)) // tag-20200224-1
                 {
                     const right = op_expr.right;
                     const p = wc.w_info.parse;
@@ -710,10 +729,10 @@ fn whereLoopOutputAdjust(wc: *WhereClause, loop: *WhereLoop, n_row: LogEst) void
                         if (v >= -1 and v <= 1) k = 10;
                     }
                     if (i_reduce < k) {
-                        term.wt_flags |= TERM.HEURTRUTH;
+                        term.wt_flags.HEURTRUTH = true;
                         i_reduce = k;
                     }
-                } else if (op_expr.has(EP.InfixFunc) and op_expr.op == TK.FUNCTION) {
+                } else if (op_expr.flags.InfixFunc and op_expr.op == TK.FUNCTION) {
                     std.debug.assert(op_expr.useXList());
                     std.debug.assert(op_expr.x.list.?.len() >= 2);
                     const e_op = we.exprIsLikeOperator(op_expr);
@@ -763,7 +782,7 @@ fn whereRangeVectorLen(p: *Parse, i_cur: i32, idx: *Index, n_eq: usize, term: *W
         const idxaff = expr_mod.tableColumnAffinity(idx.table, lhs.i_column);
         if (aff != idxaff) break;
 
-        if (term.expr.has(EP.Commuted)) std.mem.swap(*Expr, &rhs, &lhs);
+        if (term.expr.flags.Commuted) std.mem.swap(*Expr, &rhs, &lhs);
         const coll = expr_mod.binaryCompareCollSeq(p, lhs, rhs) orelse break;
         if (ctype.strICmp(coll.name, idx.coll[i + n_eq]) != 0) break;
     }
@@ -771,25 +790,29 @@ fn whereRangeVectorLen(p: *Parse, i_cur: i32, idx: *Index, n_eq: usize, term: *W
 }
 
 /// Port of whereLoopAddBtreeIndex(): with builder.new matching nEq
-/// columns of `probe`, try to match one more.
-fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Index, n_in_mul: LogEst) Oom!i32 {
+/// columns of `probe`, try to match one more. Fails only on an earlier
+/// error of the Parse (C returns pParse->rc).
+fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Index, n_in_mul: LogEst) AddError!Flow {
     const w = builder.w_info;
     const p = w.parse;
     const db = p.db;
     const a = p.arena;
     const new = builder.new;
     var scan: WhereScan = .{};
-    var rc: i32 = RC.OK;
+    var flow: Flow = .ok;
     var top: ?*WhereTerm = null;
     var btm: ?*WhereTerm = null;
 
     std.debug.assert(!db.malloc_failed or p.n_err > 0);
-    if (p.n_err != 0) return p.rc;
+    if (p.n_err != 0) {
+        if (p.rc == RC.OK) return .ok;
+        return error.ParseFailed;
+    }
 
-    std.debug.assert(new.ws_flags & wi.WHERE_VIRTUALTABLE == 0);
-    std.debug.assert(new.ws_flags & wi.WHERE_TOP_LIMIT == 0);
+    std.debug.assert(!new.ws_flags.VIRTUALTABLE);
+    std.debug.assert(!new.ws_flags.TOP_LIMIT);
     var op_mask: u32 = undefined;
-    if (new.ws_flags & wi.WHERE_BTM_LIMIT != 0) {
+    if (new.ws_flags.BTM_LIMIT) {
         op_mask = WO.LT | WO.LE;
     } else {
         std.debug.assert(new.btree.n_btm == 0);
@@ -812,11 +835,11 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
     new.r_setup = 0;
     const r_size: LogEst = probe.ai_row_log_est[0];
     const r_log_size = estLog(r_size);
-    while (rc == RC.OK and term_opt != null) : (term_opt = whereScanNext(&scan)) {
+    while (flow == .ok and term_opt != null) : (term_opt = whereScanNext(&scan)) {
         const term = term_opt.?;
         const e_op: u16 = term.e_operator;
         var n_in: LogEst = 0;
-        if ((e_op == WO.ISNULL or term.wt_flags & TERM.VNULL != 0) and
+        if ((e_op == WO.ISNULL or term.wt_flags.VNULL) and
             indexColumnNotNull(probe, saved_n_eq))
         {
             continue; // ignore IS [NOT] NULL constraints on NOT NULL columns
@@ -825,9 +848,9 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
 
         // The upper bound of a LIKE optimization range must not mix with a
         // lower bound from some other source.
-        if (term.wt_flags & TERM.LIKEOPT != 0 and term.e_operator == WO.LT) continue;
+        if (term.wt_flags.LIKEOPT and term.e_operator == WO.LT) continue;
 
-        if (src.fg.jointype & (JT.LEFT | JT.LTORJ | JT.RIGHT) != 0 and
+        if (src.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true, .RIGHT = true }) and
             !constraintCompatibleWithOuterJoin(term, src))
         {
             continue;
@@ -848,9 +871,9 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
         new.prereq = (saved_prereq | term.prereq_right) & ~new.mask_self;
 
         std.debug.assert(n_in_mul == 0 or
-            new.ws_flags & wi.WHERE_COLUMN_NULL != 0 or
-            new.ws_flags & wi.WHERE_COLUMN_IN != 0 or
-            new.ws_flags & wi.WHERE_SKIPSCAN != 0);
+            new.ws_flags.COLUMN_NULL or
+            new.ws_flags.COLUMN_IN or
+            new.ws_flags.SKIPSCAN);
 
         if (e_op & WO.IN != 0) {
             const e = term.expr;
@@ -888,15 +911,15 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
                 if (x >= 0) {
                     // prefers indexed lookup
                 } else if (n_in_mul < 2 and !db.optDisabled(OPT.SeekScan)) {
-                    new.ws_flags |= wi.WHERE_IN_SEEKSCAN;
+                    new.ws_flags.IN_SEEKSCAN = true;
                 } else {
                     continue;
                 }
             }
-            new.ws_flags |= wi.WHERE_COLUMN_IN;
+            new.ws_flags.COLUMN_IN = true;
         } else if (e_op & (WO.EQ | WO.IS) != 0) {
             const i_col = probe.ai_column[saved_n_eq];
-            new.ws_flags |= wi.WHERE_COLUMN_EQ;
+            new.ws_flags.COLUMN_EQ = true;
             std.debug.assert(saved_n_eq == new.btree.n_eq);
             if (i_col == XN_ROWID or
                 (i_col >= 0 and n_in_mul == 0 and @as(i32, saved_n_eq) == @as(i32, probe.n_key_col) - 1))
@@ -904,46 +927,46 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
                 if (i_col == XN_ROWID or probe.uniq_not_null or
                     (probe.n_key_col == 1 and probe.on_error != OE.None and e_op & WO.EQ != 0))
                 {
-                    new.ws_flags |= wi.WHERE_ONEROW;
+                    new.ws_flags.ONEROW = true;
                 } else {
-                    new.ws_flags |= wi.WHERE_UNQ_WANTED;
+                    new.ws_flags.UNQ_WANTED = true;
                 }
             }
-            if (scan.i_equiv > 1) new.ws_flags |= wi.WHERE_TRANSCONS;
+            if (scan.i_equiv > 1) new.ws_flags.TRANSCONS = true;
         } else if (e_op & WO.ISNULL != 0) {
-            new.ws_flags |= wi.WHERE_COLUMN_NULL;
+            new.ws_flags.COLUMN_NULL = true;
         } else {
             const n_vec_len = whereRangeVectorLen(p, src.i_cursor, probe, saved_n_eq, term);
             if (e_op & (WO.GT | WO.GE) != 0) {
-                new.ws_flags |= wi.WHERE_COLUMN_RANGE | wi.WHERE_BTM_LIMIT;
+                new.ws_flags.set(.{ .COLUMN_RANGE = true, .BTM_LIMIT = true });
                 new.btree.n_btm = n_vec_len;
                 btm = term;
                 top = null;
-                if (term.wt_flags & TERM.LIKEOPT != 0) {
+                if (term.wt_flags.LIKEOPT) {
                     // LIKE optimization range constraints come in pairs.
                     const t = &term.wc.a[termIndex(term.wc, term) + 1];
                     top = t;
                     std.debug.assert(termIndex(term.wc, t) < term.wc.n_term);
-                    std.debug.assert(t.wt_flags & TERM.LIKEOPT != 0);
+                    std.debug.assert(t.wt_flags.LIKEOPT);
                     std.debug.assert(t.e_operator == WO.LT);
                     try whereLoopResize(a, new, @as(usize, new.n_lterm) + 1);
                     new.a_lterm[new.n_lterm] = t;
                     new.n_lterm += 1;
-                    new.ws_flags |= wi.WHERE_TOP_LIMIT;
+                    new.ws_flags.TOP_LIMIT = true;
                     new.btree.n_top = 1;
                 }
             } else {
                 std.debug.assert(e_op & (WO.LT | WO.LE) != 0);
-                new.ws_flags |= wi.WHERE_COLUMN_RANGE | wi.WHERE_TOP_LIMIT;
+                new.ws_flags.set(.{ .COLUMN_RANGE = true, .TOP_LIMIT = true });
                 new.btree.n_top = n_vec_len;
                 top = term;
-                btm = if (new.ws_flags & wi.WHERE_BTM_LIMIT != 0) new.a_lterm[new.n_lterm - 2] else null;
+                btm = if (new.ws_flags.BTM_LIMIT) new.a_lterm[new.n_lterm - 2] else null;
             }
         }
 
         // Update new.nOut for this term (but not nIn/nInMul).
         std.debug.assert(new.n_out == saved_n_out);
-        if (new.ws_flags & wi.WHERE_COLUMN_RANGE != 0) {
+        if (new.ws_flags.COLUMN_RANGE) {
             whereRangeScanEst(p, builder, btm, top, new);
         } else {
             new.btree.n_eq += 1;
@@ -980,7 +1003,7 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
         // Add the cost of nOut table lookups unless all data comes from
         // the index.
         new.r_run = r_cost_idx;
-        if (new.ws_flags & (wi.WHERE_IDX_ONLY | wi.WHERE_IPK | wi.WHERE_EXPRIDX) == 0) {
+        if (!new.ws_flags.intersects(.{ .IDX_ONLY = true, .IPK = true, .EXPRIDX = true })) {
             new.r_run = util.logEstAdd(new.r_run, new.n_out + 16);
         }
 
@@ -989,20 +1012,24 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
         new.n_out += n_in_mul + n_in;
         whereLoopOutputAdjust(builder.wc, new, r_size);
         if (src.fg.from_exists) new.n_out = 0;
-        rc = try whereLoopInsert(builder, new);
+        flow = try whereLoopInsert(builder, new);
 
-        if (new.ws_flags & wi.WHERE_COLUMN_RANGE != 0) {
+        if (new.ws_flags.COLUMN_RANGE) {
             new.n_out = saved_n_out;
         } else {
             new.n_out = n_out_unadjusted;
         }
 
-        if (new.ws_flags & wi.WHERE_TOP_LIMIT == 0 and
+        if (!new.ws_flags.TOP_LIMIT and
             new.btree.n_eq < probe.n_column and
             (new.btree.n_eq < probe.n_key_col or probe.idx_type != .primarykey))
         {
             if (new.btree.n_eq > 3) util.progressCheck(p);
-            _ = try whereLoopAddBtreeIndex(builder, src, probe, n_in_mul + n_in);
+            // C ignores the result of the recursion.
+            _ = whereLoopAddBtreeIndex(builder, src, probe, n_in_mul + n_in) catch |e| switch (e) {
+                error.OutOfMemory => return e,
+                error.ParseFailed => {},
+            };
         }
         new.n_out = saved_n_out;
     }
@@ -1027,23 +1054,26 @@ fn whereLoopAddBtreeIndex(builder: *WhereLoopBuilder, src: *SrcItem, probe: *Ind
         !src.fg.from_exists)
     {
         try whereLoopResize(a, new, @as(usize, new.n_lterm) + 1);
-        rc = RC.OK;
+        flow = .ok;
         new.btree.n_eq += 1;
         new.n_skip += 1;
         new.a_lterm[new.n_lterm] = null;
         new.n_lterm += 1;
-        new.ws_flags |= wi.WHERE_SKIPSCAN;
+        new.ws_flags.SKIPSCAN = true;
         var n_iter: LogEst = probe.ai_row_log_est[saved_n_eq] - probe.ai_row_log_est[saved_n_eq + 1];
         new.n_out -= n_iter;
         // TUNING: a 1.375 fudge factor makes skip-scan slightly less likely.
         n_iter += 5;
-        _ = try whereLoopAddBtreeIndex(builder, src, probe, n_iter + n_in_mul);
+        _ = whereLoopAddBtreeIndex(builder, src, probe, n_iter + n_in_mul) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            error.ParseFailed => {},
+        };
         new.n_out = saved_n_out;
         new.btree.n_eq = saved_n_eq;
         new.n_skip = saved_n_skip;
         new.ws_flags = saved_ws_flags;
     }
-    return rc;
+    return flow;
 }
 
 /// Port of indexMightHelpWithOrderBy(): `index` might help implement the
@@ -1071,8 +1101,8 @@ fn indexMightHelpWithOrderBy(builder: *WhereLoopBuilder, index: *Index, i_cursor
 
 /// Port of whereUsablePartialIndex(): a partial index with WHERE clause
 /// `where_arg` can be used by this query.
-fn whereUsablePartialIndex(i_tab: i32, jointype: u8, wc: *WhereClause, where_arg: *Expr) bool {
-    if (jointype & JT.LTORJ != 0) return false;
+fn whereUsablePartialIndex(i_tab: i32, jointype: int.JT, wc: *WhereClause, where_arg: *Expr) bool {
+    if (jointype.LTORJ) return false;
     const p = wc.w_info.parse;
     var where = where_arg;
     while (where.op == TK.AND) {
@@ -1081,11 +1111,11 @@ fn whereUsablePartialIndex(i_tab: i32, jointype: u8, wc: *WhereClause, where_arg
     }
     for (wc.terms()) |*term| {
         const e = term.expr;
-        if ((!e.has(EP.OuterON) or e.w.join == i_tab) and
-            (jointype & JT.OUTER == 0 or e.has(EP.OuterON)) and
+        if ((!e.flags.OuterON or e.w.join == i_tab) and
+            (!jointype.OUTER or e.flags.OuterON) and
             expr_mod.impliesExpr(p, e, where, i_tab) and
             !expr_mod.impliesExpr(p, e, where, -1) and
-            term.wt_flags & TERM.VNULL == 0)
+            !term.wt_flags.VNULL)
         {
             return true;
         }
@@ -1108,7 +1138,7 @@ fn exprIsCoveredByIndex(e: *const Expr, idx: *const Index, i_tab_cur: i32) bool 
 }
 
 /// Context of whereIsCoveringIndexWalkCallback() (CoveringIndexCheck).
-const CoveringIndexCheck = struct {
+pub const CoveringIndexCheck = struct {
     /// The index.
     idx: *Index,
     /// Cursor number for the corresponding table.
@@ -1121,8 +1151,8 @@ const CoveringIndexCheck = struct {
 
 /// Port of whereIsCoveringIndexWalkCallback(): abort on a column of the
 /// table that the index lacks; prune on an indexed expression.
-fn whereIsCoveringIndexWalkCallback(w: *Walker, e: *Expr) u8 {
-    const ck: *CoveringIndexCheck = @ptrCast(@alignCast(w.u.ptr.?));
+fn whereIsCoveringIndexWalkCallback(w: *Walker, e: *Expr) WRC {
+    const ck = w.u.cov_idx_ck;
     const idx = ck.idx;
     if (e.op == TK.COLUMN or e.op == TK.AGG_COLUMN) {
         if (e.i_table != ck.i_tab_cur) return WRC.Continue;
@@ -1141,26 +1171,26 @@ fn whereIsCoveringIndexWalkCallback(w: *Walker, e: *Expr) u8 {
 /// Port of whereIsCoveringIndex(): 0 if `idx` is not a covering index,
 /// WHERE_IDX_ONLY if it is, WHERE_EXPRIDX if it probably is (indexed
 /// expressions), found by walking the whole SELECT.
-fn whereIsCoveringIndex(w_info: *WhereInfo, idx: *Index, i_tab_cur: i32) u32 {
-    const sel = w_info.select orelse return 0; // Cannot check: assume not.
+fn whereIsCoveringIndex(w_info: *WhereInfo, idx: *Index, i_tab_cur: i32) WS {
+    const sel = w_info.select orelse return .{}; // Cannot check: assume not.
     if (!idx.has_expr) {
         var i: usize = 0;
         while (i < idx.n_column) : (i += 1) {
             if (idx.ai_column[i] >= int.bms - 1) break;
         }
         // No column >62 is indexed, yet such columns are used.
-        if (i >= idx.n_column) return 0;
+        if (i >= idx.n_column) return .{};
     }
     var ck: CoveringIndexCheck = .{ .idx = idx, .i_tab_cur = i_tab_cur };
     var w: Walker = .{
         .expr_callback = whereIsCoveringIndexWalkCallback,
         .select_callback = walker.selectWalkNoop,
-        .u = .{ .ptr = &ck },
+        .u = .{ .cov_idx_ck = &ck },
     };
     _ = walker.walkSelect(&w, sel);
-    if (ck.b_unidx) return 0;
-    if (ck.b_expr) return wi.WHERE_EXPRIDX;
-    return wi.WHERE_IDX_ONLY;
+    if (ck.b_unidx) return .{};
+    if (ck.b_expr) return .{ .EXPRIDX = true };
+    return .{ .IDX_ONLY = true };
 }
 
 /// Port of wherePartIdxExpr(): find "col=<constant>" terms of partial
@@ -1168,7 +1198,7 @@ fn whereIsCoveringIndex(w_info: *WhereInfo, idx: *Index, i_tab_cur: i32) u32 {
 /// With `mask`, clear those columns' bits; with `item`, add
 /// Parse.pIdxPartExpr entries.
 pub fn wherePartIdxExpr(p: *Parse, idx: *Index, part_arg: ?*Expr, mask: ?*Bitmask, i_idx_cur: i32, item: ?*SrcItem) Oom!void {
-    std.debug.assert(item == null or item.?.fg.jointype & JT.RIGHT == 0);
+    std.debug.assert(item == null or !item.?.fg.jointype.RIGHT);
     std.debug.assert((item == null or mask == null) and (mask != null or item != null));
     var part = part_arg.?;
 
@@ -1193,7 +1223,7 @@ pub fn wherePartIdxExpr(p: *Parse, idx: *Index, part_arg: ?*Expr, mask: ?*Bitmas
                     .i_data_cur = it.i_cursor,
                     .i_idx_cur = i_idx_cur,
                     .i_idx_col = left.i_column,
-                    .b_maybe_null_row = it.fg.jointype & (JT.LEFT | JT.LTORJ) != 0,
+                    .b_maybe_null_row = it.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true }),
                     .aff = aff,
                     .next = p.idx_part_expr,
                 };
@@ -1207,7 +1237,7 @@ pub fn wherePartIdxExpr(p: *Parse, idx: *Index, part_arg: ?*Expr, mask: ?*Bitmas
 
 /// Port of whereLoopAddBtree(): add the WhereLoops for b-tree table
 /// builder.new.iTab: automatic indexes, full scans and index lookups.
-fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
+fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) AddError!Flow {
     const new = builder.new;
     const w = builder.w_info;
     const p = w.parse;
@@ -1215,7 +1245,7 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
     const src = tab_list.at(new.i_tab);
     const tab = src.s_tab.?;
     const wc = builder.wc;
-    var rc: i32 = RC.OK;
+    var flow: Flow = .ok;
     var i_sort_idx: u8 = 1;
     std.debug.assert(tab.e_tab_type != .vtab);
 
@@ -1256,17 +1286,17 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
 
     // Automatic indexes.
     if (builder.or_set == null and // Not part of an OR optimization
-        w.wctrl_flags & (int.WHERE.RIGHT_JOIN | int.WHERE.OR_SUBCLAUSE) == 0 and
-        p.db.flags & int.DbFlag.AutoIndex != 0 and
+        !w.wctrl_flags.intersects(.{ .RIGHT_JOIN = true, .OR_SUBCLAUSE = true }) and
+        p.db.flags.AutoIndex and
         !src.fg.is_indexed_by and
         !src.fg.not_indexed and
         !src.fg.is_correlated and
         !src.fg.is_recursive and
-        src.fg.jointype & JT.RIGHT == 0)
+        !src.fg.jointype.RIGHT)
     {
         const r_log_size = estLog(r_size);
         var t: usize = 0;
-        while (rc == RC.OK and t < wc.n_term) : (t += 1) {
+        while (flow == .ok and t < wc.n_term) : (t += 1) {
             const term = &wc.a[t];
             if (term.prereq_right & new.mask_self != 0) continue;
             if (termCanDriveIndex(term, src, 0)) {
@@ -1279,7 +1309,7 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
                 // X being 7 (LogEst 28) for tables and 0.5 (LogEst -10)
                 // for views and subqueries.
                 new.r_setup = r_log_size + r_size;
-                if (!tab.isView() and tab.tab_flags & TF.Ephemeral == 0) {
+                if (!tab.isView() and !tab.tab_flags.Ephemeral) {
                     new.r_setup += 28;
                 } else {
                     new.r_setup -= 25;
@@ -1289,15 +1319,15 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
                 // logEst(20)).
                 new.n_out = 43;
                 new.r_run = util.logEstAdd(r_log_size, new.n_out);
-                new.ws_flags = wi.WHERE_AUTO_INDEX;
+                new.ws_flags = .{ .AUTO_INDEX = true };
                 new.prereq = m_prereq | term.prereq_right;
-                rc = try whereLoopInsert(builder, new);
+                flow = try whereLoopInsert(builder, new);
             }
         }
     }
 
     // Loop over all indexes; with INDEXED BY, only probe.
-    while (rc == RC.OK and probe_opt != null) : ({
+    while (flow == .ok and probe_opt != null) : ({
         probe_opt = if (src.fg.is_indexed_by) null else probe_opt.?.next;
         i_sort_idx +%= 1;
     }) {
@@ -1324,48 +1354,48 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
         const b = indexMightHelpWithOrderBy(builder, probe, src.i_cursor);
 
         // ONEPASS_DESIRED never occurs together with ORDER BY.
-        std.debug.assert(w.wctrl_flags & int.WHERE.ONEPASS_DESIRED == 0 or !b);
+        std.debug.assert(!w.wctrl_flags.ONEPASS_DESIRED or !b);
         if (probe.idx_type == .ipk) {
             // Integer primary key index: full table scan.
-            new.ws_flags = wi.WHERE_IPK;
+            new.ws_flags = .{ .IPK = true };
             new.i_sort_idx = if (b) i_sort_idx else 0;
             // TUNING: a full table scan costs 3.0*N, to discourage it.
             new.r_run = r_size + 16;
             whereLoopOutputAdjust(wc, new, r_size);
             if (src.fg.is_subquery) {
-                if (src.fg.via_coroutine) new.ws_flags |= wi.WHERE_COROUTINE;
+                if (src.fg.via_coroutine) new.ws_flags.COROUTINE = true;
                 // The ORDER BY of a recursive CTE does not fix its order.
                 const sub = src.u4.subq.?.select;
-                if (sub.sel_flags & SF.Recursive == 0) {
+                if (!sub.sel_flags.Recursive) {
                     new.btree.order_by = sub.order_by;
                 }
             } else if (src.fg.from_exists) {
                 new.n_out = 0;
             }
-            rc = try whereLoopInsert(builder, new);
+            flow = try whereLoopInsert(builder, new);
             new.n_out = r_size;
-            if (rc != 0) break;
+            if (flow != .ok) break;
         } else {
             var m: Bitmask = undefined;
             if (probe.is_covering) {
                 m = 0;
-                new.ws_flags = wi.WHERE_IDX_ONLY | wi.WHERE_INDEXED;
+                new.ws_flags = .{ .IDX_ONLY = true, .INDEXED = true };
             } else {
                 m = src.col_used & probe.col_not_idxed;
                 if (probe.part_idx_where) |piw| {
                     try wherePartIdxExpr(p, probe, piw, &m, 0, null);
                 }
-                new.ws_flags = wi.WHERE_INDEXED;
+                new.ws_flags = .{ .INDEXED = true };
                 if (m == TOPBIT or (probe.has_expr and !probe.has_vcol and m != 0)) {
                     const is_cov = whereIsCoveringIndex(w, probe, src.i_cursor);
-                    if (is_cov == 0) {
+                    if (is_cov.isEmpty()) {
                         std.debug.assert(m != 0);
                     } else {
                         m = 0;
-                        new.ws_flags |= is_cov;
+                        new.ws_flags.set(is_cov);
                     }
                 } else if (m == 0 and (tab.hasRowid() or w.select != null)) {
-                    new.ws_flags = wi.WHERE_IDX_ONLY | wi.WHERE_INDEXED;
+                    new.ws_flags = .{ .IDX_ONLY = true, .INDEXED = true };
                 }
             }
 
@@ -1378,7 +1408,7 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
                 (m == 0 and
                     !probe.unordered and
                     probe.sz_idx_row < tab.sz_tab_row and
-                    w.wctrl_flags & int.WHERE.ONEPASS_DESIRED == 0 and
+                    !w.wctrl_flags.ONEPASS_DESIRED and
                     !p.db.optDisabled(OPT.CoverIdxScan)))
             {
                 new.i_sort_idx = if (b) i_sort_idx else 0;
@@ -1405,27 +1435,28 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) Oom!i32 {
                     new.r_run = util.logEstAdd(new.r_run, n_lookup);
                 }
                 whereLoopOutputAdjust(wc, new, r_size);
-                if (src.fg.jointype & JT.RIGHT != 0 and probe.col_expr != null) {
+                if (src.fg.jointype.RIGHT and probe.col_expr != null) {
                     // No SCAN of an index-on-expression in a RIGHT JOIN: its
                     // cursor might be misplaced in the no-match loop.
                 } else {
                     if (src.fg.from_exists) new.n_out = 0;
-                    rc = try whereLoopInsert(builder, new);
+                    flow = try whereLoopInsert(builder, new);
                 }
                 new.n_out = r_size;
-                if (rc != 0) break;
+                if (flow != .ok) break;
             }
         }
 
         builder.bld_flags1 = 0;
-        rc = try whereLoopAddBtreeIndex(builder, src, probe, 0);
+        const rc = whereLoopAddBtreeIndex(builder, src, probe, 0);
         if (builder.bld_flags1 == wi.BLDF1_INDEXED) {
             // A non-unique index (or a prefix of a unique one) is used, so
             // sqlite_stat1 data matters for scoring the plan.
-            tab.tab_flags |= TF.MaybeReanalyze;
+            tab.tab_flags.MaybeReanalyze = true;
         }
+        flow = try rc;
     }
-    return rc;
+    return flow;
 }
 
 // ======================================================== virtual tables
@@ -1447,24 +1478,24 @@ fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: 
     var it: ?*WhereClause = wc;
     while (it) |c| : (it = c.outer) {
         for (c.terms()) |*term| {
-            term.wt_flags &= ~TERM.OK;
+            term.wt_flags.OK = false;
             if (term.left_cursor != src.i_cursor) continue;
             if (term.prereq_right & m_unusable != 0) continue;
             // IsPowerOfTwo(), which holds for 0 too.
             const eop = term.e_operator & ~WO.EQUIV;
             std.debug.assert(eop & (eop -% 1) == 0);
             if (term.e_operator & ~WO.EQUIV == 0) continue;
-            if (term.wt_flags & TERM.VNULL != 0) continue;
+            if (term.wt_flags.VNULL) continue;
             std.debug.assert(term.e_operator & (WO.OR | WO.AND) == 0);
             std.debug.assert(term.left_column >= XN_ROWID);
             std.debug.assert(term.left_column < tab.nCol());
-            if (src.fg.jointype & (JT.LEFT | JT.LTORJ | JT.RIGHT) != 0 and
+            if (src.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true, .RIGHT = true }) and
                 !constraintCompatibleWithOuterJoin(term, src))
             {
                 continue;
             }
             n_term += 1;
-            term.wt_flags |= TERM.OK;
+            term.wt_flags.OK = true;
         }
     }
 
@@ -1486,7 +1517,7 @@ fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: 
             }
             // A column with a COLLATE that is the column's own.
             if (e.op == TK.COLLATE) if (e.left) |e2| if (e2.op == TK.COLUMN and e2.i_table == src.i_cursor) {
-                std.debug.assert(!e.has(EP.IntValue));
+                std.debug.assert(!e.flags.IntValue);
                 e.i_column = e2.i_column;
                 if (e2.i_column < 0) continue; // the rowid has no collation
                 const z_coll = @import("build.zig").columnColl(&tab.cols[@intCast(e2.i_column)]) orelse coll_mod.str_binary;
@@ -1495,13 +1526,13 @@ fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: 
             break;
         }
         if (i == n) {
-            const b_sort_by_group: i32 = @intFromBool(w.wctrl_flags & WHERE.SORTBYGROUP != 0);
+            const b_sort_by_group: i32 = @intFromBool(w.wctrl_flags.SORTBYGROUP);
             n_order_by = n;
-            if (w.wctrl_flags & WHERE.DISTINCTBY != 0 and !src.fg.rowid_used) {
+            if (w.wctrl_flags.DISTINCTBY and !src.fg.rowid_used) {
                 e_distinct = 2 + b_sort_by_group;
-            } else if (w.wctrl_flags & WHERE.GROUPBY != 0) {
+            } else if (w.wctrl_flags.GROUPBY) {
                 e_distinct = 1 - b_sort_by_group;
-            } else if (w.wctrl_flags & WHERE.WANT_DISTINCT != 0) {
+            } else if (w.wctrl_flags.WANT_DISTINCT) {
                 e_distinct = 3;
             }
         }
@@ -1542,12 +1573,12 @@ fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: 
     while (it) |c| : (it = c.outer) {
         for (c.terms()) |*term| {
             defer i += 1;
-            if (term.wt_flags & TERM.OK == 0) continue;
+            if (!term.wt_flags.OK) continue;
             const cons = &info.constraints[j];
             cons.* = .{ .i_column = term.left_column, .i_term_offset = i, .op = 0 };
             var op = term.e_operator & WO.ALL;
             if (op == WO.IN) {
-                if (term.wt_flags & TERM.SLICE == 0) {
+                if (!term.wt_flags.SLICE) {
                     h.m_in |= wi.smaskBit32(j);
                 }
                 op = WO.EQ;
@@ -1605,9 +1636,14 @@ fn freeIndexInfo(db: *int.Sqlite3, h: *vtab.HiddenIndexInfo) void {
     freeIdxStr(db, &h.info);
 }
 
-/// Port of vtabBestIndex() (where.c): call xBestIndex. Errors other than
-/// SQLITE_CONSTRAINT (an unusable combination) are left in `p`.
-fn vtabBestIndex(p: *Parse, tab: *Table, info: *vtab.IndexInfo) i32 {
+/// The outcome of an xBestIndex call that did not fail: `constraint` is
+/// its SQLITE_CONSTRAINT, an unusable combination of constraints, which
+/// gives no plan but is not an error.
+const BestIndex = enum { ok, constraint };
+
+/// Port of vtabBestIndex() (where.c): call xBestIndex. Its other result
+/// codes are left in `p` (error.ParseFailed).
+fn vtabBestIndex(p: *Parse, tab: *Table, info: *vtab.IndexInfo) ParseError!BestIndex {
     const db = p.db;
     const vt = vtab.getVTable(db, tab).?;
     const pv = vt.vtab.?;
@@ -1626,7 +1662,11 @@ fn vtabBestIndex(p: *Parse, tab: *Table, info: *vtab.IndexInfo) i32 {
     if (tab.u.vtab.p.?.b_all_schemas) vtabUsesAllSchemas(p);
     if (pv.err_msg) |msg| db.gpa.free(msg);
     pv.err_msg = null;
-    return rc;
+    return switch (rc) {
+        RC.OK => .ok,
+        RC.CONSTRAINT => .constraint,
+        else => error.ParseFailed,
+    };
 }
 
 /// Port of sqlite3VtabUsesAllSchemas() (where.c): the statement uses every
@@ -1671,7 +1711,7 @@ fn whereLoopAddVirtualOne(
     m_no_omit: u16,
     b_in: *bool,
     retry_limit: ?*bool,
-) Oom!i32 {
+) AddError!Flow {
     const wc = builder.wc;
     const info = &h.info;
     const usage = info.usage;
@@ -1709,14 +1749,13 @@ fn whereLoopAddVirtualOne(
     h.m_handle_in = 0;
 
     // Invoke xBestIndex.
-    var rc = vtabBestIndex(p, src.s_tab.?, info);
-    if (rc != RC.OK) {
-        if (rc == RC.CONSTRAINT) {
+    switch (try vtabBestIndex(p, src.s_tab.?, info)) {
+        .ok => {},
+        .constraint => {
             // An unusable combination of constraints: no plan.
             freeIdxStr(db, info);
-            return RC.OK;
-        }
-        return rc;
+            return .ok;
+        },
     }
 
     var mx_term: i32 = -1;
@@ -1733,7 +1772,7 @@ fn whereLoopAddVirtualOne(
             {
                 util.errorMsg(p, "{s}.xBestIndex malfunction", .{src.s_tab.?.name});
                 freeIdxStr(db, info);
-                return RC.ERROR;
+                return error.ParseFailed;
             }
             const term = term_opt.?;
             new.prereq |= term.prereq_right;
@@ -1766,7 +1805,7 @@ fn whereLoopAddVirtualOne(
                 // used: the caller retries without them.
                 freeIdxStr(db, info);
                 retry_limit.?.* = true;
-                return RC.OK;
+                return .ok;
             }
         }
     }
@@ -1777,7 +1816,7 @@ fn whereLoopAddVirtualOne(
             // The argvIndex values must be contiguous.
             util.errorMsg(p, "{s}.xBestIndex malfunction", .{src.s_tab.?.name});
             freeIdxStr(db, info);
-            return RC.ERROR;
+            return error.ParseFailed;
         }
     }
     std.debug.assert(new.n_lterm <= new.nLSlot());
@@ -1790,7 +1829,8 @@ fn whereLoopAddVirtualOne(
     info.idx_str = null;
     info.need_to_free_idx_str = false;
     defer whereLoopClearUnion(db, new);
-    new.vtab.is_ordered = if (info.order_by_consumed) @intCast(info.order_by.len) else 0;
+    // C stores (i8)nOrderBy, so a count that truncates to 0 is not ordered.
+    new.vtab.is_ordered = info.order_by_consumed and @as(u8, @truncate(info.order_by.len)) != 0;
     new.vtab.b_idx_num_hex = info.idx_flags & vtab.INDEX_SCAN_HEX != 0;
     new.r_setup = 0;
     new.r_run = util.logEstFromDouble(info.estimated_cost);
@@ -1798,19 +1838,18 @@ fn whereLoopAddVirtualOne(
 
     // WHERE_ONEROW if xBestIndex says the scan visits at most one row.
     if (info.idx_flags & vtab.INDEX_SCAN_UNIQUE != 0) {
-        new.ws_flags |= wi.WHERE_ONEROW;
+        new.ws_flags.ONEROW = true;
     } else {
-        new.ws_flags &= ~wi.WHERE_ONEROW;
+        new.ws_flags.ONEROW = false;
     }
-    rc = try whereLoopInsert(builder, new);
-    return rc;
+    return try whereLoopInsert(builder, new);
 }
 
 /// Port of whereLoopAddVirtual() (where.c): add the WhereLoops of virtual
 /// table builder.new.iTab, calling xBestIndex for each distinct set of
 /// usable constraints. Tables of `m_prereq` come before it; those of
 /// `m_unusable` after it.
-fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bitmask) Oom!i32 {
+fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bitmask) AddError!Flow {
     std.debug.assert(m_prereq & m_unusable == 0);
     const w = builder.w_info;
     const p = w.parse;
@@ -1823,7 +1862,7 @@ fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable
     defer freeIndexInfo(p.db, h);
     const info = &h.info;
     new.r_setup = 0;
-    new.ws_flags = wi.WHERE_VIRTUALTABLE;
+    new.ws_flags = .{ .VIRTUALTABLE = true };
     new.n_lterm = 0;
     new.vtab.need_free = false;
     const n_constraint = info.constraints.len;
@@ -1832,16 +1871,16 @@ fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable
     // First with all constraints usable.
     var b_in = false;
     var b_retry = false;
-    var rc = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, 0, h, m_no_omit, &b_in, &b_retry);
+    var flow = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, 0, h, m_no_omit, &b_in, &b_retry);
     if (b_retry) {
-        std.debug.assert(rc == RC.OK);
-        rc = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, 0, h, m_no_omit, &b_in, null);
+        std.debug.assert(flow == .ok);
+        flow = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, 0, h, m_no_omit, &b_in, null);
     }
 
     // If that plan needs no other table and uses no IN, others would be
     // the same (if xBestIndex is sane).
     const m_best = new.prereq & ~m_prereq;
-    if (rc == RC.OK and (m_best != 0 or b_in)) {
+    if (flow == .ok and (m_best != 0 or b_in)) {
         var seen_zero = false; // a plan with no prereqs
         var seen_zero_no_in = false; // ... and no IN
         var m_prev: Bitmask = 0;
@@ -1849,7 +1888,7 @@ fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable
 
         // A plan with an IN: try again without IN terms.
         if (b_in) {
-            rc = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, WO.IN, h, m_no_omit, &b_in, null);
+            flow = try whereLoopAddVirtualOne(builder, m_prereq, wi.ALLBITS, WO.IN, h, m_no_omit, &b_in, null);
             std.debug.assert(!b_in);
             m_best_no_in = new.prereq & ~m_prereq;
             if (m_best_no_in == 0) {
@@ -1859,7 +1898,7 @@ fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable
         }
 
         // Once for each distinct (prereqRight & ~mPrereq) of the terms.
-        while (rc == RC.OK) {
+        while (flow == .ok) {
             var m_next: Bitmask = wi.ALLBITS;
             for (info.constraints) |cons| {
                 const m_this = vtab.termFromWhereClause(wc, cons.i_term_offset).?.prereq_right & ~m_prereq;
@@ -1868,7 +1907,7 @@ fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable
             m_prev = m_next;
             if (m_next == wi.ALLBITS) break;
             if (m_next == m_best or m_next == m_best_no_in) continue;
-            rc = try whereLoopAddVirtualOne(builder, m_prereq, m_next | m_prereq, 0, h, m_no_omit, &b_in, null);
+            flow = try whereLoopAddVirtualOne(builder, m_prereq, m_next | m_prereq, 0, h, m_no_omit, &b_in, null);
             if (new.prereq == m_prereq) {
                 seen_zero = true;
                 if (!b_in) seen_zero_no_in = true;
@@ -1876,27 +1915,29 @@ fn whereLoopAddVirtual(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable
         }
 
         // A plan that needs no other table, with all of them disabled.
-        if (rc == RC.OK and !seen_zero) {
-            rc = try whereLoopAddVirtualOne(builder, m_prereq, m_prereq, 0, h, m_no_omit, &b_in, null);
+        if (flow == .ok and !seen_zero) {
+            flow = try whereLoopAddVirtualOne(builder, m_prereq, m_prereq, 0, h, m_no_omit, &b_in, null);
             if (!b_in) seen_zero_no_in = true;
         }
 
         // And one without IN as well.
-        if (rc == RC.OK and !seen_zero_no_in) {
-            rc = try whereLoopAddVirtualOne(builder, m_prereq, m_prereq, WO.IN, h, m_no_omit, &b_in, null);
+        if (flow == .ok and !seen_zero_no_in) {
+            flow = try whereLoopAddVirtualOne(builder, m_prereq, m_prereq, WO.IN, h, m_no_omit, &b_in, null);
         }
     }
-    return rc;
+    return flow;
 }
 
 /// Port of whereLoopAddOr(): add WhereLoops for the OR terms of the
-/// WHERE clause usable by builder.new.iTab.
-fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bitmask) Oom!i32 {
+/// WHERE clause usable by builder.new.iTab. As in C, a failed sub-search
+/// does not stop the OR term (the next one overwrites rc); only running
+/// out of memory returns at once.
+fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bitmask) AddError!Flow {
     const w = builder.w_info;
     const wc = builder.wc;
     const n_term: usize = @intCast(wc.n_term);
     const new = builder.new;
-    var rc: i32 = RC.OK;
+    var rc: AddError!Flow = .ok;
     var temp_wc: WhereClause = undefined;
     var sum: WhereOrSet = .{};
     var cur: WhereOrSet = .{};
@@ -1904,10 +1945,10 @@ fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bit
     const i_cur = item.i_cursor;
 
     // The multi-index OR optimization does not work for RIGHT and FULL JOIN.
-    if (item.fg.jointype & JT.RIGHT != 0) return RC.OK;
+    if (item.fg.jointype.RIGHT) return .ok;
 
     var t: usize = 0;
-    while (t < n_term and rc == RC.OK) : (t += 1) {
+    while (t < n_term and isOk(rc)) : (t += 1) {
         const term = &wc.a[t];
         if (term.e_operator & WO.OR != 0 and term.or_info.?.indexable & new.mask_self != 0) {
             const or_wc = &term.or_info.?.wc;
@@ -1934,13 +1975,14 @@ fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bit
                 }
                 cur.n = 0;
                 if (item.s_tab.?.isVirtual()) {
-                    rc = try whereLoopAddVirtual(&sub_build, m_prereq, m_unusable);
+                    rc = whereLoopAddVirtual(&sub_build, m_prereq, m_unusable);
                 } else {
-                    rc = try whereLoopAddBtree(&sub_build, m_prereq);
+                    rc = whereLoopAddBtree(&sub_build, m_prereq);
                 }
-                if (rc == RC.OK) {
-                    rc = try whereLoopAddOr(&sub_build, m_prereq, m_unusable);
+                if (isOk(rc)) {
+                    rc = whereLoopAddOr(&sub_build, m_prereq, m_unusable);
                 }
+                if (rc) |_| {} else |e| if (e == error.OutOfMemory) return e;
                 if (cur.n == 0) {
                     sum.n = 0;
                     break;
@@ -1965,13 +2007,13 @@ fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bit
             }
             new.n_lterm = 1;
             new.a_lterm[0] = term;
-            new.ws_flags = wi.WHERE_MULTI_OR;
+            new.ws_flags = .{ .MULTI_OR = true };
             new.r_setup = 0;
             new.i_sort_idx = 0;
             new.btree = .{};
             new.vtab = .{};
             var i: usize = 0;
-            while (rc == RC.OK and i < sum.n) : (i += 1) {
+            while (isOk(rc) and i < sum.n) : (i += 1) {
                 // TUNING: add the smallest penalty so the OR-scan always
                 // costs more than its most expensive sub-scan.
                 new.r_run = sum.a[i].r_run + 1;
@@ -1984,23 +2026,23 @@ fn whereLoopAddOr(builder: *WhereLoopBuilder, m_prereq: Bitmask, m_unusable: Bit
     return rc;
 }
 
-/// Port of whereLoopAddAll(): add the WhereLoops for all tables. The
-/// SQLite result code other than SQLITE_NOMEM (which is
-/// error.OutOfMemory), as in C.
-pub fn whereLoopAddAll(builder: *WhereLoopBuilder) Oom!i32 {
+/// Port of whereLoopAddAll(): add the WhereLoops for all tables.
+/// error.ParseFailed where C returns a nonzero result code other than
+/// SQLITE_NOMEM (which is error.OutOfMemory): the error is in the Parse.
+pub fn whereLoopAddAll(builder: *WhereLoopBuilder) AddError!void {
     const w = builder.w_info;
     var m_prereq: Bitmask = 0;
     var m_prior: Bitmask = 0;
     const tab_list = w.tab_list;
     const db = w.parse.db;
-    var rc: i32 = RC.OK;
+    var rc: AddError!Flow = .ok;
     var b_first_past_rj = false;
     var has_right_cross_join = false;
     const new = builder.new;
 
     // pNew must already be initialized.
     std.debug.assert(new.n_lterm == 0);
-    std.debug.assert(new.ws_flags == 0);
+    std.debug.assert(new.ws_flags.isEmpty());
     std.debug.assert(new.nLSlot() >= new.a_lterm_space.len);
 
     builder.i_plan_limit = wi.QUERY_PLANNER_LIMIT;
@@ -2011,14 +2053,14 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) Oom!i32 {
         new.i_tab = @intCast(i_tab);
         builder.i_plan_limit += wi.QUERY_PLANNER_LIMIT_INCR;
         new.mask_self = wi.getMask(&w.s_mask_set, item.i_cursor);
-        if (b_first_past_rj or item.fg.jointype & (JT.OUTER | JT.CROSS | JT.LTORJ) != 0) {
+        if (b_first_past_rj or item.fg.jointype.intersects(.{ .OUTER = true, .CROSS = true, .LTORJ = true })) {
             // Prevent reordering across CROSS and outer joins; the right
             // operand of a RIGHT JOIN stays put relative to later terms.
-            if (item.fg.jointype & (JT.LTORJ | JT.CROSS) != 0) {
+            if (item.fg.jointype.intersects(.{ .LTORJ = true, .CROSS = true })) {
                 has_right_cross_join = true;
             }
             m_prereq |= m_prior;
-            b_first_past_rj = item.fg.jointype & JT.RIGHT != 0;
+            b_first_past_rj = item.fg.jointype.RIGHT;
         } else if (item.fg.from_exists) {
             // EXISTS-to-JOIN terms stay right of their dependencies.
             const wc = &w.s_wc;
@@ -2032,24 +2074,25 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) Oom!i32 {
         }
         if (item.s_tab.?.isVirtual()) {
             for (tab_list.slice()[i_tab + 1 ..]) |*p| {
-                if (p.fg.jointype & (JT.OUTER | JT.CROSS) != 0) {
+                if (p.fg.jointype.intersects(.{ .OUTER = true, .CROSS = true })) {
                     m_unusable |= wi.getMask(&w.s_mask_set, p.i_cursor);
                 }
             }
-            rc = try whereLoopAddVirtual(builder, m_prereq, m_unusable);
+            rc = whereLoopAddVirtual(builder, m_prereq, m_unusable);
         } else {
-            rc = try whereLoopAddBtree(builder, m_prereq);
+            rc = whereLoopAddBtree(builder, m_prereq);
         }
-        if (rc == RC.OK and builder.wc.has_or) {
-            rc = try whereLoopAddOr(builder, m_prereq, m_unusable);
+        if (isOk(rc) and builder.wc.has_or) {
+            rc = whereLoopAddOr(builder, m_prereq, m_unusable);
         }
         m_prior |= new.mask_self;
-        if (rc != 0 or db.malloc_failed) {
-            if (rc == RC.DONE) {
+        if (!isOk(rc) or db.malloc_failed) {
+            const done = if (rc) |flow| flow == .done else |_| false;
+            if (done) {
                 // The query planner search limit was hit. (C logs
                 // "abbreviated query algorithm search"; no sqlite3_log
                 // here.)
-                rc = RC.OK;
+                rc = .ok;
             } else {
                 break;
             }
@@ -2057,5 +2100,5 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) Oom!i32 {
     }
 
     whereLoopClear(db, new);
-    return rc;
+    _ = try rc;
 }

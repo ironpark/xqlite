@@ -82,7 +82,7 @@ pub fn dequote(z: [:0]u8) [:0]u8 {
 pub fn dequoteExpr(e: *Expr) void {
     const tok = e.u.token.?;
     std.debug.assert(ctype.isQuote(tok[0]));
-    e.flags |= if (tok[0] == '"') EP.Quoted | EP.DblQuoted else EP.Quoted;
+    e.flags.set(.{ .Quoted = true, .DblQuoted = tok[0] == '"' });
     e.u.token = dequote(tok);
 }
 
@@ -116,7 +116,7 @@ pub fn dequoteNumber(p: *Parse, e: *Expr) void {
     if (e.op == TK.INTEGER) {
         if (getInt32(e.u.token.?)) |v| {
             e.u = .{ .value = v };
-            e.flags |= EP.IntValue;
+            e.flags.IntValue = true;
         }
     }
 }
@@ -265,10 +265,10 @@ pub fn decOrHexToI64(z: [:0]const u8, out: *i64) AtoiResult {
 
 /// Port of sqlite3IsTrueOrFalse(): EP_IsTrue for "true", EP_IsFalse for
 /// "false" (any case), else 0.
-pub fn isTrueOrFalse(z: []const u8) u32 {
-    if (ctype.eqlNoCase(z, "true")) return EP.IsTrue;
-    if (ctype.eqlNoCase(z, "false")) return EP.IsFalse;
-    return 0;
+pub fn isTrueOrFalse(z: []const u8) int.EP {
+    if (ctype.eqlNoCase(z, "true")) return .{ .IsTrue = true };
+    if (ctype.eqlNoCase(z, "false")) return .{ .IsFalse = true };
+    return .{};
 }
 
 test "util: dequote" {
@@ -439,9 +439,9 @@ pub const SrcItemName = struct {
         if (it.alias) |alias| return w.writeAll(alias);
         if (!it.fg.is_subquery) return;
         const sel = it.u4.subq.?.select;
-        if (sel.sel_flags & int.SF.NestedFrom != 0) {
+        if (sel.sel_flags.NestedFrom) {
             try w.print("(join-{d})", .{sel.sel_id});
-        } else if (sel.sel_flags & int.SF.MultiValue != 0) {
+        } else if (sel.sel_flags.MultiValue) {
             try w.print("{d}-ROW VALUES CLAUSE", .{it.u1.n_row});
         } else {
             try w.print("(subquery-{d})", .{sel.sel_id});

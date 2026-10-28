@@ -41,6 +41,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const vfs = @import("../vfs/vfs.zig");
 const pcache = @import("pcache.zig");
+const thunk = @import("../util/thunk.zig");
 const journal = @import("journal.zig");
 
 const Allocator = std.mem.Allocator;
@@ -188,17 +189,13 @@ pub const CheckpointMode = enum(i32) {
     }
 };
 
-/// A busy handler (xBusyHandler): returns true to retry.
-pub const BusyHandler = struct {
-    ctx: ?*anyopaque,
-    func: *const fn (ctx: ?*anyopaque) bool,
-};
+/// A busy handler (xBusyHandler): returns true to retry. Made with
+/// BusyHandler.init(ctx, f) from a typed `f(ctx)`.
+pub const BusyHandler = thunk.Closure(*const fn (ctx: ?*anyopaque) bool);
 
-/// Called for each page whose frame a rollback drops (xUndo).
-pub const UndoCallback = struct {
-    ctx: *anyopaque,
-    func: *const fn (ctx: *anyopaque, pgno: Pgno) Error!void,
-};
+/// Called for each page whose frame a rollback drops (xUndo). Made with
+/// UndoCallback.init(ctx, f) from a typed `f(ctx, pgno)`.
+pub const UndoCallback = thunk.Closure(*const fn (ctx: *anyopaque, pgno: Pgno) Error!void);
 
 /// WAL_SAVEPOINT_NDATA values saved by `savepoint`.
 pub const SavepointData = [4]u32;
@@ -479,7 +476,7 @@ pub const Wal = struct {
         while (true) {
             w.lockExclusive(idx, n) catch |err| {
                 if (err == error.Busy) if (busy) |b| {
-                    if (b.func(b.ctx)) continue;
+                    if (b.call(.{})) continue;
                 };
                 return err;
             };
@@ -1333,7 +1330,7 @@ pub const Wal = struct {
         while (frame <= i_max) : (frame += 1) {
             // Page 1 is only written at commit.
             std.debug.assert(w.framePgno(frame) != 1);
-            cb.func(cb.ctx, w.framePgno(frame)) catch |err| {
+            cb.call(.{w.framePgno(frame)}) catch |err| {
                 result = err;
                 break;
             };

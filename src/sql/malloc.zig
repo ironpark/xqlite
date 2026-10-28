@@ -899,3 +899,43 @@ test "lookaside: statements under allocation failures" {
     }
     try testing.expect(n_nomem > 0);
 }
+
+test "lookaside: failing statements under allocation failures" {
+    const saved = configGetMalloc();
+    defer configMalloc(saved);
+    var n_nomem: usize = 0;
+    var i: usize = 0;
+    while (i < 600) : (i += 5) {
+        var c: Conn = undefined;
+        try c.open();
+        defer c.close();
+        try c.exec("PRAGMA foreign_keys=ON; CREATE TABLE p(id INTEGER PRIMARY KEY, v UNIQUE); CREATE TABLE ch(x REFERENCES p(id)); INSERT INTO p VALUES(1, 'a')");
+        var failing = std.testing.FailingAllocator.init(saved, .{ .fail_index = i });
+        configMalloc(failing.allocator());
+        const legacy = @import("legacy.zig");
+        var rcs: [3]i32 = undefined;
+        for ([_][]const u8{
+            "SAVEPOINT s; INSERT OR IGNORE INTO p VALUES(2, 'a'); INSERT INTO p VALUES(3, 'c') ON CONFLICT(v) DO UPDATE SET id = id; ROLLBACK TO s; RELEASE s",
+            "INSERT INTO p VALUES(4, 'a')",
+            "INSERT INTO ch VALUES(9)",
+        }, &rcs) |sql, *rc| {
+            var msg: ?[:0]u8 = null;
+            rc.* = legacy.exec(c.db, sql, null, null, &msg);
+            if (msg) |m| free(m.ptr);
+        }
+        configMalloc(saved);
+        try testing.expect(rcs[0] == RC.OK or rcs[0] == RC.NOMEM);
+        try testing.expect(rcs[1] == RC.CONSTRAINT or rcs[1] == RC.NOMEM);
+        try testing.expect(rcs[2] == RC.CONSTRAINT or rcs[2] == RC.NOMEM);
+        for (rcs) |rc| {
+            if (rc == RC.NOMEM) n_nomem += 1;
+        }
+        try testing.expect(!c.db.malloc_failed);
+        try testing.expectEqual(@as(u32, 0), c.db.lookaside.b_disable);
+        // A statement cut short may leave the savepoint open.
+        if (!c.db.auto_commit) try c.exec("ROLLBACK");
+        try c.expectRows("SELECT id, v FROM p; SELECT count(*) FROM ch", "1|a\n0\n");
+        try c.expectError("INSERT INTO p VALUES(5, 'a')", "UNIQUE constraint failed: p.v");
+    }
+    try testing.expect(n_nomem > 0);
+}

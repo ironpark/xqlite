@@ -77,10 +77,10 @@ fn serialGet7(s: []const u8, i: usize, m: *Mem) bool {
     const x = if (i + 8 <= s.len) std.mem.readInt(u64, s[i..][0..8], .big) else get8(s, i);
     m.u = .{ .r = @bitCast(x) };
     if (std.math.isNan(m.u.r)) {
-        m.flags = MEM.Null;
+        m.flags = .{ .Null = true };
         return true;
     }
-    m.flags = MEM.Real;
+    m.flags = .{ .Real = true };
     return false;
 }
 
@@ -133,23 +133,23 @@ pub inline fn serialGetPtr(p: [*]const u8, serial_type: u32, m: *Mem) void {
     switch (serial_type) {
         10 => {
             // NULL with the virtual-table no-change flag (internal).
-            m.flags = MEM.Null | MEM.Zero;
+            m.flags = .{ .Null = true, .Zero = true };
             m.n = 0;
             m.u = .{ .n_zero = 0 };
         },
-        0, 11 => m.flags = MEM.Null,
+        0, 11 => m.flags = .{ .Null = true },
         1...6, 8, 9 => {
             m.u = .{ .i = decodeIntPtr(serial_type, p) };
-            m.flags = MEM.Int;
+            m.flags = .{ .Int = true };
         },
         7 => {
             m.u = .{ .r = @bitCast(std.mem.readInt(u64, p[0..8], .big)) };
-            m.flags = if (std.math.isNan(m.u.r)) MEM.Null else MEM.Real;
+            m.flags = if (std.math.isNan(m.u.r)) .{ .Null = true } else .{ .Real = true };
         },
         else => {
             m.z = @constCast(p);
             m.n = @intCast((serial_type - 12) / 2);
-            m.flags = if (serial_type & 1 != 0) MEM.Str | MEM.Ephem else MEM.Blob | MEM.Ephem;
+            m.flags = if (serial_type & 1 != 0) .{ .Str = true, .Ephem = true } else .{ .Blob = true, .Ephem = true };
         },
     }
 }
@@ -169,7 +169,7 @@ noinline fn serialGetSlow(s: []const u8, i: usize, serial_type: u32, m: *Mem) vo
     switch (serial_type) {
         1...6 => {
             m.u = .{ .i = decodeIntSlow(serial_type, s, i) };
-            m.flags = MEM.Int;
+            m.flags = .{ .Int = true };
         },
         7 => _ = serialGet7(s, i, m),
         else => serialGetPtr(s.ptr + i, serial_type, m),
@@ -261,9 +261,9 @@ pub fn memcmp(a: []const u8, b: []const u8) i32 {
 pub fn blobCompare(b1: *const Mem, b2: *const Mem) i32 {
     const n1 = b1.n;
     const n2 = b2.n;
-    if ((b1.flags | b2.flags) & MEM.Zero != 0) {
-        if (b1.flags & b2.flags & MEM.Zero != 0) return b1.u.n_zero - b2.u.n_zero;
-        if (b1.flags & MEM.Zero != 0) {
+    if (b1.flags.with(b2.flags).Zero) {
+        if (b1.flags.only(b2.flags).Zero) return b1.u.n_zero - b2.u.n_zero;
+        if (b1.flags.Zero) {
             if (!isAllZero(b2.bytes())) return -1;
             return b1.u.n_zero - n2;
         }
@@ -294,37 +294,37 @@ pub fn intFloatCompare(i: i64, r: f64) i32 {
 pub fn memCompare(m1: *const Mem, m2: *const Mem, coll: ?*const CollSeq) i32 {
     const f1 = m1.flags;
     const f2 = m2.flags;
-    const combined = f1 | f2;
-    if (combined & MEM.Null != 0) return @as(i32, f2 & MEM.Null) - @as(i32, f1 & MEM.Null);
-    if (combined & (MEM.Int | MEM.Real | MEM.IntReal) != 0) {
-        if (f1 & f2 & (MEM.Int | MEM.IntReal) != 0) {
+    const combined = f1.with(f2);
+    if (combined.Null) return @as(i32, @intFromBool(f2.Null)) - @intFromBool(f1.Null);
+    if (combined.intersects(.{ .Int = true, .Real = true, .IntReal = true })) {
+        if (f1.only(f2).intersects(.{ .Int = true, .IntReal = true })) {
             if (m1.u.i < m2.u.i) return -1;
             if (m1.u.i > m2.u.i) return 1;
             return 0;
         }
-        if (f1 & f2 & MEM.Real != 0) {
+        if (f1.only(f2).Real) {
             if (m1.u.r < m2.u.r) return -1;
             if (m1.u.r > m2.u.r) return 1;
             return 0;
         }
-        if (f1 & (MEM.Int | MEM.IntReal) != 0) {
-            if (f2 & MEM.Real != 0) return intFloatCompare(m1.u.i, m2.u.r);
-            if (f2 & (MEM.Int | MEM.IntReal) != 0) {
+        if (f1.intersects(.{ .Int = true, .IntReal = true })) {
+            if (f2.Real) return intFloatCompare(m1.u.i, m2.u.r);
+            if (f2.intersects(.{ .Int = true, .IntReal = true })) {
                 if (m1.u.i < m2.u.i) return -1;
                 if (m1.u.i > m2.u.i) return 1;
                 return 0;
             }
             return -1;
         }
-        if (f1 & MEM.Real != 0) {
-            if (f2 & (MEM.Int | MEM.IntReal) != 0) return -intFloatCompare(m2.u.i, m1.u.r);
+        if (f1.Real) {
+            if (f2.intersects(.{ .Int = true, .IntReal = true })) return -intFloatCompare(m2.u.i, m1.u.r);
             return -1;
         }
         return 1;
     }
-    if (combined & MEM.Str != 0) {
-        if (f1 & MEM.Str == 0) return 1;
-        if (f2 & MEM.Str == 0) return -1;
+    if (combined.Str) {
+        if (!f1.Str) return 1;
+        if (!f2.Str) return -1;
         if (coll) |c| return compareMemString(m1, m2, c);
     }
     return blobCompare(m1, m2);
@@ -333,7 +333,7 @@ pub fn memCompare(m1: *const Mem, m2: *const Mem, coll: ?*const CollSeq) i32 {
 /// Port of sqlite3VdbeRecordCompareWithSkip(): compare the record `key1`
 /// with the unpacked `r`: negative, zero or positive as key1 is less,
 /// equal or greater. With `skip` the first fields are known to be equal.
-/// Corruption sets r.err_code and returns 0.
+/// Corruption sets r.err and returns 0.
 pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i32 {
     var d1: u32 = undefined;
     var i: usize = undefined;
@@ -369,14 +369,14 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
         i = 0;
     }
     if (d1 > key1.len) {
-        r.err_code = RC.CORRUPT;
+        r.err = error.Corrupt;
         return 0;
     }
 
     var serial_type: u32 = 0;
     while (true) {
         const p = &rhs[0];
-        if (p.flags & (MEM.Int | MEM.IntReal) != 0) {
+        if (p.flags.intersects(.{ .Int = true, .IntReal = true })) {
             serial_type = at(key1, idx1);
             if (serial_type >= 10) {
                 rc = if (serial_type == 10) -1 else 1;
@@ -394,7 +394,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                     rc = 1;
                 }
             }
-        } else if (p.flags & MEM.Real != 0) {
+        } else if (p.flags.Real) {
             serial_type = at(key1, idx1);
             if (serial_type >= 10) {
                 rc = if (serial_type == 10) -1 else 1;
@@ -412,7 +412,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                 serialGet(key1, d1, serial_type, &mem1);
                 rc = intFloatCompare(mem1.u.i, p.u.r);
             }
-        } else if (p.flags & MEM.Str != 0) {
+        } else if (p.flags.Str) {
             serial_type = getVarint32(key1, idx1).value;
             if (serial_type < 12) {
                 rc = -1;
@@ -422,11 +422,11 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                 const n: u32 = (serial_type - 12) / 2;
                 const ki = r.key_info;
                 if (d1 + n > key1.len or ki.n_all_field <= i) {
-                    r.err_code = RC.CORRUPT;
+                    r.err = error.Corrupt;
                     return 0;
                 }
                 if (ki.coll[i]) |coll| {
-                    mem1 = .{ .enc = ki.enc, .db = ki.db, .flags = MEM.Str, .z = @constCast(key1.ptr + d1), .n = @intCast(n) };
+                    mem1 = .{ .enc = ki.enc, .db = ki.db, .flags = .{ .Str = true }, .z = @constCast(key1.ptr + d1), .n = @intCast(n) };
                     rc = compareMemString(&mem1, p, coll);
                 } else {
                     const n_cmp: usize = @min(n, @as(u32, @intCast(p.n)));
@@ -434,17 +434,17 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                     if (rc == 0) rc = @as(i32, @intCast(n)) - p.n;
                 }
             }
-        } else if (p.flags & MEM.Blob != 0) {
+        } else if (p.flags.Blob) {
             serial_type = getVarint32(key1, idx1).value;
             if (serial_type < 12 or serial_type & 1 != 0) {
                 rc = -1;
             } else {
                 const n: u32 = (serial_type - 12) / 2;
                 if (d1 + n > key1.len) {
-                    r.err_code = RC.CORRUPT;
+                    r.err = error.Corrupt;
                     return 0;
                 }
-                if (p.flags & MEM.Zero != 0) {
+                if (p.flags.Zero) {
                     rc = if (!isAllZero(key1[d1..][0..n])) 1 else @as(i32, @intCast(n)) - p.u.n_zero;
                 } else {
                     const n_cmp: usize = @min(n, @as(u32, @intCast(p.n)));
@@ -462,7 +462,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
         if (rc != 0) {
             const sort_flags = r.key_info.sort_flags[i];
             if (sort_flags != 0) {
-                const is_null = serial_type == 0 or p.flags & MEM.Null != 0;
+                const is_null = serial_type == 0 or p.flags.Null;
                 if (sort_flags & KeyInfoOrder.bignull == 0 or (sort_flags & KeyInfoOrder.desc != 0) != is_null) {
                     rc = -rc;
                 }
@@ -477,7 +477,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
         if (d1 > key1.len) break;
         idx1 += varint.len(serial_type);
         if (idx1 >= sz_hdr1) {
-            r.err_code = RC.CORRUPT;
+            r.err = error.Corrupt;
             return 0;
         }
     }
@@ -527,7 +527,7 @@ fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
         const sz_hdr: u32 = at(key1, 0);
         const n_str: u32 = @intCast(@divTrunc(serial_type - 12, 2));
         if (sz_hdr + n_str > key1.len) {
-            r.err_code = RC.CORRUPT;
+            r.err = error.Corrupt;
             return 0;
         }
         const pn: u32 = @intCast(r.n);
@@ -560,11 +560,11 @@ pub fn findCompare(r: *UnpackedRecord) RecordCompare {
             r.r1 = -1;
             r.r2 = 1;
         }
-        if (flags & MEM.Int != 0) {
+        if (flags.Int) {
             r.u = .{ .i = r.mem[0].u.i };
             return recordCompareInt;
         }
-        if (flags & (MEM.Real | MEM.IntReal | MEM.Null | MEM.Blob) == 0 and isBinary(ki.coll[0])) {
+        if (!flags.intersects(.{ .Real = true, .IntReal = true, .Null = true, .Blob = true }) and isBinary(ki.coll[0])) {
             r.u = .{ .z = r.mem[0].z };
             r.n = r.mem[0].n;
             return recordCompareString;
@@ -591,7 +591,7 @@ pub fn binaryCollation(_: ?*anyopaque, a: []const u8, b: []const u8) std.math.Or
 /// under the cursor.
 pub fn idxRowid(db: *int.Sqlite3, cur: *btree.Cursor) (mem.Error || btree.Error)!i64 {
     const n_cell_key = cur.payloadSize();
-    var m: Mem = .{ .db = db, .flags = 0 };
+    var m: Mem = .{ .db = db, .flags = .{} };
     try mem.fromBtreeZeroOffset(cur, n_cell_key, &m);
     defer mem.releaseMalloc(&m);
     const z = m.bytes();
@@ -612,7 +612,7 @@ pub fn idxKeyCompare(db: *int.Sqlite3, c: *VdbeCursor, r: *UnpackedRecord) (mem.
     const cur = c.uc.cursor;
     const n_cell_key = cur.payloadSize();
     if (n_cell_key == 0 or n_cell_key > 0x7fffffff) return error.Corrupt;
-    var m: Mem = .{ .db = db, .flags = 0 };
+    var m: Mem = .{ .db = db, .flags = .{} };
     try mem.fromBtreeZeroOffset(cur, n_cell_key, &m);
     defer mem.releaseMalloc(&m);
     return recordCompareWithSkip(m.bytes(), r, false);
@@ -654,26 +654,22 @@ pub const IndexKeyCtx = struct {
     cmp: RecordCompare,
 
     /// Calls `cmp` through the function pointer.
-    pub fn compare(ctx: *const anyopaque, stored: []const u8) btree.CompareError!std.math.Order {
-        const self: *const IndexKeyCtx = @ptrCast(@alignCast(ctx));
+    pub fn compare(self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
         return finish(self.r, self.cmp(stored, self.r));
     }
 
     /// compare() with the comparator fixed, so that the b-tree's call
     /// reaches it directly, as C calls xRecordCompare.
-    fn compareWith(comptime cmp: RecordCompare) *const fn (ctx: *const anyopaque, stored: []const u8) btree.CompareError!std.math.Order {
+    fn compareWith(comptime cmp: RecordCompare) fn (self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
         return struct {
-            fn f(ctx: *const anyopaque, stored: []const u8) btree.CompareError!std.math.Order {
-                const self: *const IndexKeyCtx = @ptrCast(@alignCast(ctx));
+            fn f(self: *const IndexKeyCtx, stored: []const u8) btree.CompareError!std.math.Order {
                 return finish(self.r, @call(.always_inline, cmp, .{ stored, self.r }));
             }
         }.f;
     }
 
     inline fn finish(r: *UnpackedRecord, c: i32) btree.CompareError!std.math.Order {
-        if (r.err_code != 0) {
-            return if (r.err_code == RC.NOMEM) error.OutOfMemory else error.Corrupt;
-        }
+        if (r.err) |err| return err;
         // The b-tree wants the order of the stored key relative to the
         // search key.
         if (c < 0) return .lt;
@@ -682,26 +678,23 @@ pub const IndexKeyCtx = struct {
     }
 
     pub fn indexKey(self: *const IndexKeyCtx) btree.IndexKey {
-        const f = if (self.cmp == &recordCompareInt)
-            compareWith(recordCompareInt)
-        else if (self.cmp == &recordCompareString)
-            compareWith(recordCompareString)
-        else if (self.cmp == &recordCompare)
-            compareWith(recordCompare)
-        else
-            compare;
-        return .{ .ctx = self, .compare = f };
+        if (self.cmp == &recordCompareInt) return .init(self, compareWith(recordCompareInt));
+        if (self.cmp == &recordCompareString) return .init(self, compareWith(recordCompareString));
+        if (self.cmp == &recordCompare) return .init(self, compareWith(recordCompare));
+        return .init(self, compare);
     }
 };
 
 /// The b-tree's view of `ki` (for restoring saved positions and inserts
 /// without a prior seek): btreeMoveto() for index keys.
 pub fn btreeKeyInfo(ki: *KeyInfo) btree.KeyInfo {
-    return .{ .ctx = ki, .seek = seekPacked };
+    return .init(ki, seekPacked);
 }
 
-fn seekPacked(ctx: *const anyopaque, cur: *btree.Cursor, key: []const u8) btree.Error!std.math.Order {
-    const ki: *KeyInfo = @ptrCast(@alignCast(@constCast(ctx)));
+fn seekPacked(ki_const: *const KeyInfo, cur: *btree.Cursor, key: []const u8) btree.Error!std.math.Order {
+    // The b-tree holds the KeyInfo as const; the record unpacked from it
+    // refers to it as C's (non-const) pKeyInfo.
+    const ki = @constCast(ki_const);
     const n = @as(usize, ki.n_key_field) + 1;
     var stack: [16]Mem = undefined;
     const gpa = if (ki.db) |db| db.gpa else @import("../sql/malloc.zig").allocator;
@@ -725,7 +718,7 @@ const ulp_distortion = 2;
 fn skipField(mask: int.Bitmask, i_col: usize, m1: *const Mem, m2: *const Mem, integrity: bool) bool {
     if (i_col >= int.bms or mask & (@as(int.Bitmask, 1) << @intCast(i_col)) == 0) return false;
     if (!integrity) return true;
-    if (m1.flags & MEM.Real != 0 and m2.flags & MEM.Real != 0) {
+    if (m1.flags.Real and m2.flags.Real) {
         const a: u64 = @bitCast(m1.u.r);
         const b: u64 = @bitCast(m2.u.r);
         if ((if (a < b) b - a else a - b) <= ulp_distortion) return true;
@@ -789,7 +782,7 @@ pub fn findIndexKey(cur: *btree.Cursor, idx: *const int.Index, r: *UnpackedRecor
     var mask: int.Bitmask = 0;
     for (0..@min(idx.n_column, int.bms)) |ii| {
         const i_col = idx.ai_column[ii];
-        if (i_col == int.XN_EXPR or (i_col >= 0 and idx.table.cols[@intCast(i_col)].col_flags & int.COLFLAG.VIRTUAL != 0)) {
+        if (i_col == int.XN_EXPR or (i_col >= 0 and idx.table.cols[@intCast(i_col)].col_flags.VIRTUAL)) {
             mask |= @as(int.Bitmask, 1) << @intCast(ii);
         }
     }

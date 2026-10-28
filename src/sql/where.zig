@@ -20,6 +20,7 @@ const delete = @import("delete.zig");
 const select = @import("select.zig");
 const coll_mod = @import("coll.zig");
 const wi = @import("where_int.zig");
+const WS = wi.WS;
 const we = @import("where_expr.zig");
 const wl = @import("where_loop.zig");
 const wc_mod = @import("where_code.zig");
@@ -63,33 +64,8 @@ const TERM = wi.TERM;
 const maskBit = wi.maskBit;
 const ALLBITS = wi.ALLBITS;
 
-const WHERE_COLUMN_EQ = wi.WHERE_COLUMN_EQ;
-const WHERE_COLUMN_RANGE = wi.WHERE_COLUMN_RANGE;
-const WHERE_COLUMN_IN = wi.WHERE_COLUMN_IN;
-const WHERE_COLUMN_NULL = wi.WHERE_COLUMN_NULL;
-const WHERE_CONSTRAINT = wi.WHERE_CONSTRAINT;
-const WHERE_IDX_ONLY = wi.WHERE_IDX_ONLY;
-const WHERE_IPK = wi.WHERE_IPK;
-const WHERE_INDEXED = wi.WHERE_INDEXED;
-const WHERE_VIRTUALTABLE = wi.WHERE_VIRTUALTABLE;
-const WHERE_IN_ABLE = wi.WHERE_IN_ABLE;
-const WHERE_ONEROW = wi.WHERE_ONEROW;
-const WHERE_MULTI_OR = wi.WHERE_MULTI_OR;
-const WHERE_AUTO_INDEX = wi.WHERE_AUTO_INDEX;
-const WHERE_SKIPSCAN = wi.WHERE_SKIPSCAN;
-const WHERE_PARTIALIDX = wi.WHERE_PARTIALIDX;
-const WHERE_IN_EARLYOUT = wi.WHERE_IN_EARLYOUT;
-const WHERE_BIGNULL_SORT = wi.WHERE_BIGNULL_SORT;
-const WHERE_IN_SEEKSCAN = wi.WHERE_IN_SEEKSCAN;
-const WHERE_TRANSCONS = wi.WHERE_TRANSCONS;
-const WHERE_BLOOMFILTER = wi.WHERE_BLOOMFILTER;
-const WHERE_SELFCULL = wi.WHERE_SELFCULL;
-const WHERE_COROUTINE = wi.WHERE_COROUTINE;
-const WHERE_EXPRIDX = wi.WHERE_EXPRIDX;
 
-pub const ONEPASS_OFF = wi.ONEPASS_OFF;
-pub const ONEPASS_SINGLE = wi.ONEPASS_SINGLE;
-pub const ONEPASS_MULTI = wi.ONEPASS_MULTI;
+pub const ONEPASS = wi.ONEPASS;
 
 const LOGEST_MIN: LogEst = std.math.minInt(LogEst);
 const LOGEST_MAX: LogEst = std.math.maxInt(LogEst);
@@ -108,7 +84,7 @@ pub fn outputRowCount(w: *WhereInfo) LogEst {
 }
 
 /// Port of sqlite3WhereIsDistinct(): one of the WHERE_DISTINCT_* values.
-pub fn isDistinct(w: *WhereInfo) u8 {
+pub fn isDistinct(w: *WhereInfo) int.WHERE_DISTINCT {
     return w.e_distinct;
 }
 
@@ -137,7 +113,7 @@ pub fn minMaxOptEarlyOut(v: *Vdbe, w: *WhereInfo) void {
     while (i > 0) {
         i -= 1;
         const inner = &w.a[i];
-        if (inner.w_loop.?.ws_flags & WHERE_COLUMN_IN != 0) {
+        if (inner.w_loop.?.ws_flags.COLUMN_IN) {
             _ = aux.goto_(v, inner.addr_nxt);
             return;
         }
@@ -156,9 +132,9 @@ pub fn breakLabel(w: *WhereInfo) i32 {
     return w.i_break;
 }
 
-/// Port of sqlite3WhereOkOnePass(): ONEPASS_OFF, _SINGLE or _MULTI, with
+/// Port of sqlite3WhereOkOnePass(): ONEPASS.OFF, .SINGLE or .MULTI, with
 /// the data and index cursors (or -1) the one-pass statement uses.
-pub fn okOnePass(w: *WhereInfo, ai_cur: *[2]i32) u8 {
+pub fn okOnePass(w: *WhereInfo, ai_cur: *[2]i32) ONEPASS {
     ai_cur.* = w.ai_cur_one_pass;
     return w.e_one_pass;
 }
@@ -171,8 +147,8 @@ pub fn usesDeferredSeek(w: *WhereInfo) bool {
 /// Port of sqlite3WhereIsSorted(): with WHERE_GROUPBY|WHERE_SORTBYGROUP,
 /// whether the rows are really sorted and not just grouped.
 pub fn isSorted(w: *WhereInfo) bool {
-    std.debug.assert(w.wctrl_flags & (WHERE.GROUPBY | WHERE.DISTINCTBY) != 0);
-    std.debug.assert(w.wctrl_flags & WHERE.SORTBYGROUP != 0);
+    std.debug.assert(w.wctrl_flags.intersects(.{ .GROUPBY = true, .DISTINCTBY = true }));
+    std.debug.assert(w.wctrl_flags.SORTBYGROUP);
     return w.sorted;
 }
 
@@ -226,7 +202,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     for (wc.terms()) |*term| {
         const e = term.expr;
         // Terms that restrict the rows of `src` make the index partial.
-        if (term.wt_flags & TERM.VIRTUAL == 0 and
+        if (!term.wt_flags.VIRTUAL and
             expr_mod.isSingleTableConstraint(e, tab_list, level.i_from, false))
         {
             partial = try expr_mod.exprAnd(p, partial, try expr_mod.exprDup(p.arena, e));
@@ -250,7 +226,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     std.debug.assert(n_key_col > 0 or p.db.malloc_failed);
     loop.n_lterm = @intCast(n_key_col);
     loop.btree.n_eq = @intCast(n_key_col);
-    loop.ws_flags = WHERE_COLUMN_EQ | WHERE_IDX_ONLY | WHERE_INDEXED | WHERE_AUTO_INDEX;
+    loop.ws_flags = .{ .COLUMN_EQ = true, .IDX_ONLY = true, .INDEXED = true, .AUTO_INDEX = true };
 
     // The automatic index must be covering: it is not updated if the
     // table changes.
@@ -265,7 +241,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         // All PRIMARY KEY columns of a WITHOUT ROWID table are needed.
         var i: i32 = 0;
         while (i < n_col) : (i += 1) {
-            if (table.cols[@intCast(i)].col_flags & int.COLFLAG.PRIMKEY == 0) continue;
+            if (!table.cols[@intCast(i)].col_flags.PRIMKEY) continue;
             if (i >= BMS - 1) {
                 extra_cols |= maskBit(BMS - 1);
                 break;
@@ -361,7 +337,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     if (partial) |pe| {
         i_continue = aux.makeLabel(p);
         ec.exprIfFalse(p, pe, i_continue, vi.SQLITE_JUMPIFNULL);
-        loop.ws_flags |= WHERE_PARTIALIDX;
+        loop.ws_flags.PARTIALIDX = true;
     }
     const reg_record = expr_mod.getTempReg(p);
     const reg_base = delete.generateIndexKey(p, idx, level.i_tab_cur, reg_record, false, null, null, 0);
@@ -383,7 +359,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     } else {
         _ = aux.addOp2(v, OP.Next, level.i_tab_cur, addr_top + 1);
         aux.changeP5(v, vi.STMTSTATUS.AUTOINDEX);
-        if (src.fg.jointype & JT.LEFT != 0) aux.jumpHere(v, addr_top);
+        if (src.fg.jointype.LEFT) aux.jumpHere(v, addr_top);
     }
     expr_mod.releaseTempReg(p, reg_record);
 
@@ -406,8 +382,8 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
     p.idx_epr = null;
     p.idx_part_expr = null;
 
-    std.debug.assert(loop.ws_flags & WHERE_BLOOMFILTER != 0);
-    std.debug.assert(loop.ws_flags & WHERE_IDX_ONLY == 0);
+    std.debug.assert(loop.ws_flags.BLOOMFILTER);
+    std.debug.assert(!loop.ws_flags.IDX_ONLY);
 
     const addr_once = aux.addOp0(v, OP.Once);
     while (true) {
@@ -435,13 +411,13 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
         const addr_top = aux.addOp1(v, OP.Rewind, i_cur);
         for (w.s_wc.terms()) |*term| {
             const e = term.expr;
-            if (term.wt_flags & TERM.VIRTUAL == 0 and
+            if (!term.wt_flags.VIRTUAL and
                 expr_mod.isSingleTableConstraint(e, tab_list, i_src, false))
             {
                 ec.exprIfFalse(p, term.expr, addr_cont, vi.SQLITE_JUMPIFNULL);
             }
         }
-        if (loop.ws_flags & WHERE_IPK != 0) {
+        if (loop.ws_flags.IPK) {
             const r1 = expr_mod.getTempReg(p);
             _ = aux.addOp2(v, OP.Rowid, i_cur, r1);
             _ = aux.addOp4Int(v, OP.FilterAdd, level.reg_filter, 0, r1, 1);
@@ -461,16 +437,16 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
         aux.resolveLabel(v, addr_cont);
         _ = aux.addOp2(v, OP.Next, level.i_tab_cur, addr_top + 1);
         aux.jumpHere(v, addr_top);
-        loop.ws_flags &= ~WHERE_BLOOMFILTER;
+        loop.ws_flags.BLOOMFILTER = false;
         i_level += 1;
         while (i_level < w.n_level) : (i_level += 1) {
             level = &w.a[i_level];
             const tab_item = w.tab_list.at(level.i_from);
-            if (tab_item.fg.jointype & (JT.LEFT | JT.LTORJ) != 0) continue;
+            if (tab_item.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true })) continue;
             loop = level.w_loop orelse continue;
             if (loop.prereq & not_ready != 0) continue;
             // A candidate for early evaluation, unless it uses IN.
-            if (loop.ws_flags & (WHERE_BLOOMFILTER | WHERE_COLUMN_IN) == WHERE_BLOOMFILTER) break;
+            if (loop.ws_flags.only(.{ .BLOOMFILTER = true, .COLUMN_IN = true }) == WS{ .BLOOMFILTER = true }) break;
         }
         if (i_level >= w.n_level) break;
     }
@@ -482,7 +458,7 @@ fn constructBloomFilter(w: *WhereInfo, i_level_arg: usize, level_arg: *WhereLeve
 /// Port of wherePathMatchSubqueryOB(): mark off the ORDER BY terms that
 /// the ORDER BY of the subquery of `loop` (cursor `i_cur`) delivers.
 /// True if any did.
-fn wherePathMatchSubqueryOB(loop: *WhereLoop, i_loop: usize, i_cur: i32, order_by: *ExprList, rev_mask: *Bitmask, ob_sat: *Bitmask, wctrl_flags: u16) bool {
+fn wherePathMatchSubqueryOB(loop: *WhereLoop, i_loop: usize, i_cur: i32, order_by: *ExprList, rev_mask: *Bitmask, ob_sat: *Bitmask, wctrl_flags: int.WHERE) bool {
     var rev: u8 = 0;
     var rev_idx: u8 = 0;
     const sub_ob = loop.btree.order_by.?;
@@ -499,7 +475,7 @@ fn wherePathMatchSubqueryOB(loop: *WhereLoop, i_loop: usize, i_cur: i32, order_b
         if (ob_expr.op != TK.COLUMN and ob_expr.op != TK.AGG_COLUMN) break;
         if (ob_expr.i_table != i_cur) break;
         if (ob_expr.i_column != @as(i32, sub_item.u.x.order_by_col) - 1) break;
-        if (wctrl_flags & WHERE.GROUPBY == 0) {
+        if (!wctrl_flags.GROUPBY) {
             const sf_ob = order_by.at(i_ob).fg.sort_flags;
             const sf_sub = sub_item.fg.sort_flags;
             if (sf_sub & KEYINFO_ORDER_BIGNULL != sf_ob & KEYINFO_ORDER_BIGNULL) break;
@@ -510,7 +486,7 @@ fn wherePathMatchSubqueryOB(loop: *WhereLoop, i_loop: usize, i_cur: i32, order_b
                 rev = rev_idx ^ (sf_ob & KEYINFO_ORDER_DESC);
                 if (rev != 0) {
                     // A co-routine cannot run in reverse order.
-                    if (loop.ws_flags & WHERE_COROUTINE != 0) break;
+                    if (loop.ws_flags.COROUTINE) break;
                     rev_mask.* |= maskBit(i_loop);
                 }
             }
@@ -525,7 +501,7 @@ fn wherePathMatchSubqueryOB(loop: *WhereLoop, i_loop: usize, i_cur: i32, order_b
 /// delivers in order: N>0 terms, 0 none, -1 not known yet. GROUP BY and
 /// DISTINCT only need equal rows to be adjacent, so their terms match in
 /// any order.
-fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePath, wctrl_flags: u16, n_loop: u16, last: *WhereLoop, rev_mask: *Bitmask) i8 {
+fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePath, wctrl_flags: int.WHERE, n_loop: u16, last: *WhereLoop, rev_mask: *Bitmask) i8 {
     const db = w.parse.db;
     var ob_sat: Bitmask = 0;
     var loop: *WhereLoop = undefined;
@@ -543,7 +519,7 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
     var order_distinct_mask: Bitmask = 0;
     var ready: Bitmask = 0;
     var eq_op_mask: u16 = WO.EQ | WO.IS | WO.ISNULL;
-    if (wctrl_flags & (WHERE.ORDERBY_LIMIT | WHERE.ORDERBY_MAX | WHERE.ORDERBY_MIN) != 0) {
+    if (wctrl_flags.intersects(.{ .ORDERBY_LIMIT = true, .ORDERBY_MAX = true, .ORDERBY_MIN = true })) {
         eq_op_mask |= WO.IN;
     }
     var i_loop: usize = 0;
@@ -551,12 +527,12 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
         if (i_loop > 0) ready |= loop.mask_self;
         if (i_loop < n_loop) {
             loop = path.a_loop[i_loop];
-            if (wctrl_flags & WHERE.ORDERBY_LIMIT != 0) continue;
+            if (wctrl_flags.ORDERBY_LIMIT) continue;
         } else {
             loop = last;
         }
-        if (loop.ws_flags & WHERE_VIRTUALTABLE != 0) {
-            if (loop.vtab.is_ordered != 0 and w.order_by == order_by) {
+        if (loop.ws_flags.VIRTUALTABLE) {
+            if (loop.vtab.is_ordered and w.order_by == order_by) {
                 ob_sat = ob_done;
             } else {
                 // No further ORDER BY terms may be matched: the result
@@ -579,7 +555,7 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
             if (term.e_operator == WO.IN) {
                 // IN terms count only for the ORDER BY LIMIT optimization,
                 // and only if the plan uses them.
-                std.debug.assert(wctrl_flags & (WHERE.ORDERBY_LIMIT | WHERE.ORDERBY_MIN | WHERE.ORDERBY_MAX) != 0);
+                std.debug.assert(wctrl_flags.intersects(.{ .ORDERBY_LIMIT = true, .ORDERBY_MIN = true, .ORDERBY_MAX = true }));
                 var j: usize = 0;
                 while (j < loop.n_lterm and term != loop.a_lterm[j]) j += 1;
                 if (j >= loop.n_lterm) continue;
@@ -599,11 +575,11 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
             ob_sat |= maskBit(i);
         }
 
-        if (loop.ws_flags & WHERE_ONEROW == 0) {
+        if (!loop.ws_flags.ONEROW) {
             var n_key_col: u16 = 0;
             var n_column: u16 = 0;
             var index: ?*Index = null;
-            if (loop.ws_flags & WHERE_IPK != 0) {
+            if (loop.ws_flags.IPK) {
                 if (loop.btree.order_by != null and
                     !db.optDisabled(OPT.OrderBySubq) and
                     wherePathMatchSubqueryOB(loop, i_loop, i_cur, order_by, rev_mask, &ob_sat, wctrl_flags))
@@ -624,7 +600,7 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
                 std.debug.assert(n_column == n_key_col + 1 or !ix.table.hasRowid());
                 std.debug.assert(ix.ai_column[n_column - 1] == XN_ROWID or !ix.table.hasRowid());
                 // Possibly a false positive; corrected at tag-20210426-1.
-                is_order_distinct = ix.isUnique() and loop.ws_flags & WHERE_SKIPSCAN == 0;
+                is_order_distinct = ix.isUnique() and !loop.ws_flags.SKIPSCAN;
             }
 
             // The index columns not constrained by == or IN.
@@ -676,7 +652,7 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
                 // the loop is not well-ordered (tag-20210426-1).
                 if (is_order_distinct) {
                     if (i_column >= 0 and j >= loop.btree.n_eq and
-                        index.?.table.cols[@intCast(i_column)].not_null == 0)
+                        index.?.table.cols[@intCast(i_column)].not_null == .None)
                     {
                         is_order_distinct = false;
                     }
@@ -690,7 +666,7 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
                 while (b_once and i < n_order_by) : (i += 1) {
                     if (maskBit(i) & ob_sat != 0) continue;
                     const ob_expr = expr_mod.skipCollateAndLikely(order_by.at(i).expr) orelse continue;
-                    if (wctrl_flags & (WHERE.GROUPBY | WHERE.DISTINCTBY) == 0) b_once = false;
+                    if (!wctrl_flags.intersects(.{ .GROUPBY = true, .DISTINCTBY = true })) b_once = false;
                     if (i_column >= XN_ROWID) {
                         if (ob_expr.op != TK.COLUMN and ob_expr.op != TK.AGG_COLUMN) continue;
                         if (ob_expr.i_table != i_cur) continue;
@@ -703,13 +679,13 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
                         const coll = expr_mod.nnCollSeq(w.parse, order_by.at(i).expr);
                         if (ctype.strICmp(coll.name, index.?.coll[j]) != 0) continue;
                     }
-                    if (wctrl_flags & WHERE.DISTINCTBY != 0) {
+                    if (wctrl_flags.DISTINCTBY) {
                         loop.btree.n_distinct_col = @intCast(j + 1);
                     }
                     is_match = true;
                     break;
                 }
-                if (is_match and wctrl_flags & WHERE.GROUPBY == 0) {
+                if (is_match and !wctrl_flags.GROUPBY) {
                     // The sort order must be compatible with ORDER BY (it
                     // does not matter for GROUP BY).
                     if (rev_set) {
@@ -724,7 +700,7 @@ fn wherePathSatisfiesOrderBy(w: *WhereInfo, order_by: *ExprList, path: *WherePat
                 }
                 if (is_match and order_by.at(i).fg.sort_flags & KEYINFO_ORDER_BIGNULL != 0) {
                     if (j == loop.btree.n_eq) {
-                        loop.ws_flags |= WHERE_BIGNULL_SORT;
+                        loop.ws_flags.BIGNULL_SORT = true;
                     } else {
                         is_match = false;
                     }
@@ -784,12 +760,12 @@ fn whereSortingCost(w: *WhereInfo, n_row_arg: LogEst, n_order_by: i32, n_sorted:
 
     // Multiply by log(M), M the number of output rows: the LIMIT if it is
     // smaller, or for DISTINCT a little less than the row count.
-    if (w.wctrl_flags & WHERE.USE_LIMIT != 0) {
+    if (w.wctrl_flags.USE_LIMIT) {
         // TUNING: extra 2.0x with LIMIT, and 1.5x more with partial sort.
         r_sort_cost = le(@as(i32, r_sort_cost) + 10);
         if (n_sorted != 0) r_sort_cost = le(@as(i32, r_sort_cost) + 6);
         if (w.i_limit < n_row) n_row = w.i_limit;
-    } else if (w.wctrl_flags & WHERE.WANT_DISTINCT != 0) {
+    } else if (w.wctrl_flags.WANT_DISTINCT) {
         // TUNING: DISTINCT halves the number of output rows.
         if (n_row > 10) n_row -= 10;
     }
@@ -823,7 +799,7 @@ fn computeMxChoice(w: *WhereInfo) i32 {
             var n_dep: i32 = 0;
             var m_seen: Bitmask = 0;
             const fact_tab = &a_from_tabs[i_from_idx];
-            if (fact_tab.fg.jointype & (JT.OUTER | JT.CROSS) != 0) {
+            if (fact_tab.fg.jointype.intersects(.{ .OUTER = true, .CROSS = true })) {
                 // The right table of an outer join: only tables to its
                 // right can be dimensions (bb).
                 if (i_from_idx + 3 > n_loop) break; // (cc) unreachable
@@ -834,7 +810,7 @@ fn computeMxChoice(w: *WhereInfo) i32 {
             }
             var it = start;
             while (it) |l| : (it = l.next_loop) {
-                if (a_from_tabs[l.i_tab].fg.jointype & (JT.OUTER | JT.CROSS) != 0) break; // (bb)
+                if (a_from_tabs[l.i_tab].fg.jointype.intersects(.{ .OUTER = true, .CROSS = true })) break; // (bb)
                 if (l.prereq & m != 0 and l.mask_self & m_seen == 0 and l.mask_self & m_self_join == 0) {
                     if (a_from_tabs[l.i_tab].s_tab == fact_tab.s_tab) {
                         m_self_join |= m;
@@ -874,8 +850,8 @@ fn computeMxChoice(w: *WhereInfo) i32 {
 /// Port of whereLoopIsNoBetter(): for two loops of equal cost, false if
 /// `candidate` is even slightly better than `baseline`.
 fn whereLoopIsNoBetter(candidate: *const WhereLoop, baseline: *const WhereLoop) bool {
-    if (candidate.ws_flags & WHERE_INDEXED == 0) return true;
-    if (baseline.ws_flags & WHERE_INDEXED == 0) return true;
+    if (!candidate.ws_flags.INDEXED) return true;
+    if (!baseline.ws_flags.INDEXED) return true;
     if (candidate.btree.index.?.sz_idx_row < baseline.btree.index.?.sz_idx_row) return false;
     return true;
 }
@@ -883,8 +859,9 @@ fn whereLoopIsNoBetter(candidate: *const WhereLoop, baseline: *const WhereLoop) 
 /// Port of wherePathSolver(): find the cheapest path through the
 /// WhereLoops of `w` that visits each FROM term once and load it into
 /// w.a[].w_loop. Sorting `n_row_est` rows is costed in, or ignored when
-/// it is 0. SQLITE_OK, or SQLITE_ERROR if there is no solution.
-fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
+/// it is 0. If there is no solution the error is left in the Parse (C
+/// returns SQLITE_ERROR, which its callers do not look at).
+fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!void {
     const p = w.parse;
     const n_loop: usize = w.n_level;
     var mx_i: usize = 0;
@@ -952,7 +929,7 @@ fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
                 // No automatic index for a loop expected to run less than
                 // 1.25 times (it can still help the outer loop of a
                 // correlated subquery).
-                if (wloop.ws_flags & WHERE_AUTO_INDEX != 0 and from.n_row < 3) continue;
+                if (wloop.ws_flags.AUTO_INDEX and from.n_row < 3) continue;
 
                 // wloop is a candidate for the next loop: its cost.
                 var r_unsort: LogEst = le(@as(i32, wloop.r_run) + from.n_row);
@@ -1062,7 +1039,7 @@ fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
 
     if (n_from == 0) {
         util.errorMsg(p, "no query solution", .{});
-        return int.RC.ERROR;
+        return;
     }
 
     // Only one path is left, the best one.
@@ -1079,20 +1056,20 @@ fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
         level.i_from = wloop.i_tab;
         level.i_tab_cur = w.tab_list.at(level.i_from).i_cursor;
     }
-    if (w.wctrl_flags & WHERE.WANT_DISTINCT != 0 and
-        w.wctrl_flags & WHERE.DISTINCTBY == 0 and
-        w.e_distinct == int.WHERE_DISTINCT_NOOP and
+    if (w.wctrl_flags.WANT_DISTINCT and
+        !w.wctrl_flags.DISTINCTBY and
+        w.e_distinct == int.WHERE_DISTINCT.NOOP and
         n_row_est != 0)
     {
         var not_used: Bitmask = 0;
-        const rc = wherePathSatisfiesOrderBy(w, w.result_set.?, from, WHERE.DISTINCTBY, @intCast(n_loop - 1), from.a_loop[n_loop - 1], &not_used);
-        if (rc == w.result_set.?.len()) w.e_distinct = int.WHERE_DISTINCT_ORDERED;
+        const rc = wherePathSatisfiesOrderBy(w, w.result_set.?, from, .{ .DISTINCTBY = true }, @intCast(n_loop - 1), from.a_loop[n_loop - 1], &not_used);
+        if (rc == w.result_set.?.len()) w.e_distinct = int.WHERE_DISTINCT.ORDERED;
     }
     w.b_ordered_inner_loop = false;
     if (w.order_by) |ob| {
         w.n_ob_sat = from.is_ordered;
-        if (w.wctrl_flags & WHERE.DISTINCTBY != 0) {
-            if (from.is_ordered == ob.len()) w.e_distinct = int.WHERE_DISTINCT_ORDERED;
+        if (w.wctrl_flags.DISTINCTBY) {
+            if (from.is_ordered == ob.len()) w.e_distinct = int.WHERE_DISTINCT.ORDERED;
             // See check-in [12ad822d9b827777] on 2023-03-16.
             std.debug.assert(w.select.?.order_by == null or w.n_ob_sat <= w.select.?.order_by.?.len());
         } else {
@@ -1101,11 +1078,11 @@ fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
                 w.n_ob_sat = 0;
                 if (n_loop > 0) {
                     const ws_flags = from.a_loop[n_loop - 1].ws_flags;
-                    if (ws_flags & WHERE_ONEROW == 0 and
-                        ws_flags & (WHERE_IPK | WHERE_COLUMN_IN) != (WHERE_IPK | WHERE_COLUMN_IN))
+                    if (!ws_flags.ONEROW and
+                        ws_flags.contains(.{ .IPK = true, .COLUMN_IN = true }))
                     {
                         var m: Bitmask = 0;
-                        const rc = wherePathSatisfiesOrderBy(w, ob, from, WHERE.ORDERBY_LIMIT, @intCast(n_loop - 1), from.a_loop[n_loop - 1], &m);
+                        const rc = wherePathSatisfiesOrderBy(w, ob, from, .{ .ORDERBY_LIMIT = true }, @intCast(n_loop - 1), from.a_loop[n_loop - 1], &m);
                         if (rc == ob.len()) {
                             w.b_ordered_inner_loop = true;
                             w.rev_mask = m;
@@ -1113,14 +1090,14 @@ fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
                     }
                 }
             } else if (n_loop != 0 and w.n_ob_sat == 1 and
-                w.wctrl_flags & (WHERE.ORDERBY_MIN | WHERE.ORDERBY_MAX) != 0)
+                w.wctrl_flags.intersects(.{ .ORDERBY_MIN = true, .ORDERBY_MAX = true }))
             {
                 w.b_ordered_inner_loop = true;
             }
         }
-        if (w.wctrl_flags & WHERE.SORTBYGROUP != 0 and w.n_ob_sat == ob.len() and n_loop > 0) {
+        if (w.wctrl_flags.SORTBYGROUP and w.n_ob_sat == ob.len() and n_loop > 0) {
             var rev_mask: Bitmask = 0;
-            const n_order = wherePathSatisfiesOrderBy(w, ob, from, 0, @intCast(n_loop - 1), from.a_loop[n_loop - 1], &rev_mask);
+            const n_order = wherePathSatisfiesOrderBy(w, ob, from, .{}, @intCast(n_loop - 1), from.a_loop[n_loop - 1], &rev_mask);
             std.debug.assert(!w.sorted);
             if (n_order == ob.len()) {
                 w.sorted = true;
@@ -1130,7 +1107,6 @@ fn wherePathSolver(w: *WhereInfo, n_row_est: LogEst) Oom!i32 {
     }
 
     w.n_row_out = from.n_row;
-    return int.RC.OK;
 }
 
 /// Port of whereInterstageHeuristic(): between the two solver runs, for
@@ -1141,14 +1117,14 @@ fn whereInterstageHeuristic(w: *WhereInfo) void {
     for (w.levels()) |*level| {
         const l = level.w_loop orelse break;
         // A vtab scan is like a full table scan.
-        if (l.ws_flags & WHERE_VIRTUALTABLE != 0) break;
-        if (l.ws_flags & (WHERE_COLUMN_EQ | WHERE_COLUMN_NULL | WHERE_COLUMN_IN) != 0) {
+        if (l.ws_flags.VIRTUALTABLE) break;
+        if (l.ws_flags.intersects(.{ .COLUMN_EQ = true, .COLUMN_NULL = true, .COLUMN_IN = true })) {
             const i_tab = l.i_tab;
             var it = w.loops;
             while (it) |loop| : (it = loop.next_loop) {
                 if (loop.i_tab != i_tab) continue;
                 // Auto-index and index-constrained loops may remain.
-                if (loop.ws_flags & (WHERE_CONSTRAINT | WHERE_AUTO_INDEX) != 0) continue;
+                if (loop.ws_flags.intersects(WS.CONSTRAINT.with(.{ .AUTO_INDEX = true }))) continue;
                 // Keep the second solver run from using this one.
                 loop.prereq = ALLBITS;
             }
@@ -1163,7 +1139,7 @@ fn whereInterstageHeuristic(w: *WhereInfo) void {
 /// it did.
 fn whereShortCut(builder: *WhereLoopBuilder) bool {
     const w = builder.w_info;
-    if (w.wctrl_flags & WHERE.OR_SUBCLAUSE != 0) return false;
+    if (w.wctrl_flags.OR_SUBCLAUSE) return false;
     std.debug.assert(w.tab_list.len() >= 1);
     const item = w.tab_list.at(0);
     const tab = item.s_tab.?;
@@ -1172,13 +1148,13 @@ fn whereShortCut(builder: *WhereLoopBuilder) bool {
     const i_cur = item.i_cursor;
     const wc = &w.s_wc;
     const loop = builder.new;
-    loop.ws_flags = 0;
+    loop.ws_flags = .{};
     loop.n_skip = 0;
     var scan: WhereScan = .{};
     var term = wl.whereScanInit(&scan, wc, i_cur, -1, WO.EQ | WO.IS, null);
     while (term != null and term.?.prereq_right != 0) term = wl.whereScanNext(&scan);
     if (term) |t| {
-        loop.ws_flags = WHERE_COLUMN_EQ | WHERE_IPK | WHERE_ONEROW;
+        loop.ws_flags = .{ .COLUMN_EQ = true, .IPK = true, .ONEROW = true };
         loop.a_lterm[0] = t;
         loop.n_lterm = 1;
         loop.btree.n_eq = 1;
@@ -1198,9 +1174,9 @@ fn whereShortCut(builder: *WhereLoopBuilder) bool {
                 loop.a_lterm[j] = term;
             }
             if (j != idx.n_key_col) continue;
-            loop.ws_flags = WHERE_COLUMN_EQ | WHERE_ONEROW | WHERE_INDEXED;
+            loop.ws_flags = .{ .COLUMN_EQ = true, .ONEROW = true, .INDEXED = true };
             if (idx.is_covering or item.col_used & idx.col_not_idxed == 0) {
-                loop.ws_flags |= WHERE_IDX_ONLY;
+                loop.ws_flags.IDX_ONLY = true;
             }
             loop.n_lterm = @intCast(j);
             loop.btree.n_eq = @intCast(j);
@@ -1210,7 +1186,7 @@ fn whereShortCut(builder: *WhereLoopBuilder) bool {
             break;
         }
     }
-    if (loop.ws_flags != 0) {
+    if (!loop.ws_flags.isEmpty()) {
         loop.n_out = 1;
         w.a[0].w_loop = loop;
         std.debug.assert(w.s_mask_set.n == 1 and i_cur == w.s_mask_set.ix[0]);
@@ -1218,18 +1194,18 @@ fn whereShortCut(builder: *WhereLoopBuilder) bool {
         w.a[0].i_tab_cur = i_cur;
         w.n_row_out = 1;
         if (w.order_by) |ob| w.n_ob_sat = @intCast(ob.len());
-        if (w.wctrl_flags & WHERE.WANT_DISTINCT != 0) {
-            w.e_distinct = int.WHERE_DISTINCT_UNIQUE;
+        if (w.wctrl_flags.WANT_DISTINCT) {
+            w.e_distinct = int.WHERE_DISTINCT.UNIQUE;
         }
-        if (scan.i_equiv > 1) loop.ws_flags |= WHERE_TRANSCONS;
+        if (scan.i_equiv > 1) loop.ws_flags.TRANSCONS = true;
         return true;
     }
     return false;
 }
 
 /// Port of exprNodeIsDeterministic().
-fn exprNodeIsDeterministic(walk: *walker.Walker, e: *Expr) u8 {
-    if (e.op == TK.FUNCTION and !e.has(EP.ConstFunc)) {
+fn exprNodeIsDeterministic(walk: *walker.Walker, e: *Expr) WRC {
+    if (e.op == TK.FUNCTION and !e.flags.ConstFunc) {
         walk.e_code = 0;
         return WRC.Abort;
     }
@@ -1259,28 +1235,28 @@ fn whereOmitNoopJoin(w: *WhereInfo, not_ready_arg: Bitmask) Bitmask {
     std.debug.assert(w.n_level >= 2);
     std.debug.assert(!w.parse.db.optDisabled(OPT.OmitNoopJoin));
     std.debug.assert(w.result_set != null);
-    std.debug.assert(w.wctrl_flags & WHERE.AGG_DISTINCT == 0);
+    std.debug.assert(!w.wctrl_flags.AGG_DISTINCT);
 
     var tab_used = we.exprListUsage(&w.s_mask_set, w.result_set);
     if (w.order_by != null) {
         tab_used |= we.exprListUsage(&w.s_mask_set, w.order_by);
     }
-    const has_right_join = w.tab_list.at(0).fg.jointype & JT.LTORJ != 0;
+    const has_right_join = w.tab_list.at(0).fg.jointype.LTORJ;
     var i: usize = w.n_level - 1;
     while (i >= 1) : (i -= 1) {
         const loop = w.a[i].w_loop.?;
         const item = w.tab_list.at(loop.i_tab);
-        if (item.fg.jointype & (JT.LEFT | JT.RIGHT) != JT.LEFT) continue;
-        if (w.wctrl_flags & WHERE.WANT_DISTINCT == 0 and loop.ws_flags & WHERE_ONEROW == 0) continue;
+        if (item.fg.jointype.only(.{ .LEFT = true, .RIGHT = true }) != JT{ .LEFT = true }) continue;
+        if (!w.wctrl_flags.WANT_DISTINCT and !loop.ws_flags.ONEROW) continue;
         if (tab_used & loop.mask_self != 0) continue;
         const terms = w.s_wc.terms();
         var k: usize = 0;
         while (k < terms.len) : (k += 1) {
             const term = &terms[k];
             if (term.prereq_all & loop.mask_self != 0) {
-                if (!term.expr.has(EP.OuterON) or term.expr.w.join != item.i_cursor) break;
+                if (!term.expr.flags.OuterON or term.expr.w.join != item.i_cursor) break;
             }
-            if (has_right_join and term.expr.has(EP.InnerON) and term.expr.w.join == item.i_cursor) {
+            if (has_right_join and term.expr.flags.InnerON and term.expr.w.join == item.i_cursor) {
                 break; // restriction (5)
             }
         }
@@ -1290,7 +1266,7 @@ fn whereOmitNoopJoin(w: *WhereInfo, not_ready_arg: Bitmask) Bitmask {
         not_ready &= ~loop.mask_self;
         for (terms) |*term| {
             if (term.prereq_all & loop.mask_self != 0) {
-                term.wt_flags |= TERM.CODED;
+                term.wt_flags.CODED = true;
                 term.prereq_all = 0;
             }
         }
@@ -1313,18 +1289,18 @@ fn whereCheckIfBloomFilterIsUseful(w: *const WhereInfo) void {
     std.debug.assert(!w.parse.db.optDisabled(OPT.BloomFilter));
     for (w.a[0..w.n_level], 0..) |*level, i| {
         const loop = level.w_loop.?;
-        const req_flags: u32 = WHERE_SELFCULL | WHERE_COLUMN_EQ;
+        const req_flags: WS = .{ .SELFCULL = true, .COLUMN_EQ = true };
         const item = w.tab_list.at(loop.i_tab);
         const tab = item.s_tab.?;
-        if (tab.tab_flags & TF.HasStat1 == 0) break;
-        tab.tab_flags |= TF.MaybeReanalyze;
+        if (!tab.tab_flags.HasStat1) break;
+        tab.tab_flags.MaybeReanalyze = true;
         if (i >= 1 and
-            loop.ws_flags & req_flags == req_flags and
+            loop.ws_flags.contains(req_flags) and
             we.loopBloomable(loop) and
             n_search > tab.n_row_log_est)
         {
-            loop.ws_flags |= WHERE_BLOOMFILTER;
-            loop.ws_flags &= ~WHERE_IDX_ONLY;
+            loop.ws_flags.BLOOMFILTER = true;
+            loop.ws_flags.IDX_ONLY = false;
         }
         n_search = le(@as(i32, n_search) + loop.n_out);
     }
@@ -1342,7 +1318,7 @@ fn whereAddIndexedExpr(p: *Parse, idx: *Index, i_idx_cur: i32, tab_item: *SrcIte
         var e: ?*Expr = undefined;
         if (j == XN_EXPR) {
             e = idx.col_expr.?.at(i).expr;
-        } else if (j >= 0 and tab.cols[@intCast(j)].col_flags & int.COLFLAG.VIRTUAL != 0) {
+        } else if (j >= 0 and tab.cols[@intCast(j)].col_flags.VIRTUAL) {
             e = build.columnExpr(tab, &tab.cols[@intCast(j)]);
         } else {
             continue;
@@ -1354,7 +1330,7 @@ fn whereAddIndexedExpr(p: *Parse, idx: *Index, i_idx_cur: i32, tab_item: *SrcIte
             .i_data_cur = tab_item.i_cursor,
             .i_idx_cur = i_idx_cur,
             .i_idx_col = @intCast(i),
-            .b_maybe_null_row = tab_item.fg.jointype & (JT.LEFT | JT.LTORJ | JT.RIGHT) != 0,
+            .b_maybe_null_row = tab_item.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true, .RIGHT = true }),
             .next = p.idx_epr,
         };
         if (insert.indexAffinityStr(p, idx)) |aff| ie.aff = aff[i];
@@ -1405,7 +1381,7 @@ fn whereBeginError(w: *WhereInfo) ?*WhereInfo {
 /// WHERE_GROUPBY the GROUP BY. `i_aux_arg` is the index cursor with
 /// WHERE_OR_SUBCLAUSE, the first index cursor with WHERE_ONEPASS_DESIRED,
 /// or the LIMIT with WHERE_USE_LIMIT. Null on error (p.n_err or OOM set).
-pub fn whereBegin(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by: ?*ExprList, result_set: ?*ExprList, sel: ?*Select, wctrl_flags: u16, i_aux_arg: i32) ?*WhereInfo {
+pub fn whereBegin(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by: ?*ExprList, result_set: ?*ExprList, sel: ?*Select, wctrl_flags: int.WHERE, i_aux_arg: i32) ?*WhereInfo {
     const saved_n_query_loop = p.n_query_loop;
     return whereBeginImpl(p, tab_list, where, order_by, result_set, sel, wctrl_flags, i_aux_arg) catch {
         p.n_query_loop = saved_n_query_loop;
@@ -1414,23 +1390,23 @@ pub fn whereBegin(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by: ?*Expr
     };
 }
 
-fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*ExprList, result_set: ?*ExprList, sel: ?*Select, wctrl_flags_arg: u16, i_aux_arg: i32) Oom!?*WhereInfo {
+fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*ExprList, result_set: ?*ExprList, sel: ?*Select, wctrl_flags_arg: int.WHERE, i_aux_arg: i32) Oom!?*WhereInfo {
     var order_by = order_by_arg;
     var wctrl_flags = wctrl_flags_arg;
     const db = p.db;
     var b_fordelete: u16 = 0;
 
-    std.debug.assert(wctrl_flags & WHERE.ONEPASS_MULTIROW == 0 or
-        (wctrl_flags & WHERE.ONEPASS_DESIRED != 0 and wctrl_flags & WHERE.OR_SUBCLAUSE == 0));
+    std.debug.assert(!wctrl_flags.ONEPASS_MULTIROW or
+        (wctrl_flags.ONEPASS_DESIRED and !wctrl_flags.OR_SUBCLAUSE));
     // Only one of WHERE_OR_SUBCLAUSE or WHERE_USE_LIMIT.
-    std.debug.assert(wctrl_flags & WHERE.OR_SUBCLAUSE == 0 or wctrl_flags & WHERE.USE_LIMIT == 0);
+    std.debug.assert(!wctrl_flags.OR_SUBCLAUSE or !wctrl_flags.USE_LIMIT);
 
     // An ORDER/GROUP BY of more than 63 terms cannot be optimized.
     if (order_by != null and order_by.?.len() >= BMS) {
         order_by = null;
-        wctrl_flags &= ~WHERE.WANT_DISTINCT;
+        wctrl_flags.WANT_DISTINCT = false;
         // Disable the omit-noop-join optimization.
-        wctrl_flags |= WHERE.KEEP_ALL_JOINS;
+        wctrl_flags.KEEP_ALL_JOINS = true;
     }
 
     // The number of tables in a join is limited by the bits of a Bitmask.
@@ -1441,7 +1417,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
 
     // With WHERE_OR_SUBCLAUSE only the first table is coded; the cursors
     // of the others are uninitialized.
-    var n_tab_list: usize = if (wctrl_flags & WHERE.OR_SUBCLAUSE != 0) 1 else tab_list.len();
+    var n_tab_list: usize = if (wctrl_flags.OR_SUBCLAUSE) 1 else tab_list.len();
 
     // The WhereInfo, its levels and the template WhereLoop.
     const w = try p.arena.create(WhereInfo);
@@ -1463,7 +1439,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
     errdefer freeLoops(w);
     w.i_break = aux.makeLabel(p);
     w.i_continue = w.i_break;
-    std.debug.assert(w.e_one_pass == ONEPASS_OFF);
+    std.debug.assert(w.e_one_pass == ONEPASS.OFF);
     const mask_set = &w.s_mask_set;
     mask_set.n = 0;
     // Never a valid cursor, so getMask() needs no test for n==0.
@@ -1480,11 +1456,11 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
     if (n_tab_list == 0) {
         // Special case: no FROM clause.
         if (order_by) |ob| w.n_ob_sat = @intCast(ob.len());
-        if (wctrl_flags & WHERE.WANT_DISTINCT != 0 and !db.optDisabled(OPT.DistinctOpt)) {
-            w.e_distinct = int.WHERE_DISTINCT_UNIQUE;
+        if (wctrl_flags.WANT_DISTINCT and !db.optDisabled(OPT.DistinctOpt)) {
+            w.e_distinct = int.WHERE_DISTINCT.UNIQUE;
         }
         if (w.select) |s| {
-            if (s.sel_flags & int.SF.MultiValue == 0) {
+            if (!s.sel_flags.MultiValue) {
                 _ = aux.explain(p, false, "SCAN CONSTANT ROW", .{});
             }
         }
@@ -1514,54 +1490,56 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
     var ii: usize = 0;
     while (ii < builder.wc.n_base) : (ii += 1) {
         const t = &builder.wc.a[ii];
-        if (t.wt_flags & TERM.VIRTUAL != 0) continue;
+        if (t.wt_flags.VIRTUAL) continue;
         const x = t.expr;
-        std.debug.assert(t.prereq_all != 0 or !x.has(EP.OuterON));
+        std.debug.assert(t.prereq_all != 0 or !x.flags.OuterON);
         if (t.prereq_all == 0 and
             (n_tab_list == 0 or exprIsDeterministic(x)) and
-            !(x.has(EP.InnerON) and tab_list.at(0).fg.jointype & JT.LTORJ != 0))
+            !(x.flags.InnerON and tab_list.at(0).fg.jointype.LTORJ))
         {
             ec.exprIfFalse(p, x, w.i_break, vi.SQLITE_JUMPIFNULL);
-            t.wt_flags |= TERM.CODED;
+            t.wt_flags.CODED = true;
         }
     }
 
-    if (wctrl_flags & WHERE.WANT_DISTINCT != 0) {
+    if (wctrl_flags.WANT_DISTINCT) {
         if (db.optDisabled(OPT.DistinctOpt)) {
-            wctrl_flags &= ~WHERE.WANT_DISTINCT;
-            w.wctrl_flags &= ~WHERE.WANT_DISTINCT;
+            wctrl_flags.WANT_DISTINCT = false;
+            w.wctrl_flags.WANT_DISTINCT = false;
         } else if (wl.isDistinctRedundant(p, tab_list, &w.s_wc, result_set.?)) {
             // The DISTINCT marking is pointless.
-            w.e_distinct = int.WHERE_DISTINCT_UNIQUE;
+            w.e_distinct = int.WHERE_DISTINCT.UNIQUE;
         } else if (order_by == null) {
             // ORDER BY the result set to make DISTINCT easier.
-            w.wctrl_flags |= WHERE.DISTINCTBY;
+            w.wctrl_flags.DISTINCTBY = true;
             w.order_by = result_set;
         }
     }
 
     // Construct the WhereLoop objects and choose the plan.
     if (n_tab_list != 1 or !whereShortCut(&builder)) {
-        const rc = try wl.whereLoopAddAll(&builder);
-        if (rc != 0) return whereBeginError(w);
+        wl.whereLoopAddAll(&builder) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ParseFailed => return whereBeginError(w),
+        };
         // (The STAT4 second pass is not ported.)
         if (wi.traceEnabled()) wi.showAllLoops(w, builder.wc);
 
-        _ = try wherePathSolver(w, 0);
+        try wherePathSolver(w, 0);
         if (db.malloc_failed) return whereBeginError(w);
         if (w.order_by != null) {
             whereInterstageHeuristic(w);
-            _ = try wherePathSolver(w, if (w.n_row_out < 0) 1 else le(@as(i32, w.n_row_out) + 1));
+            try wherePathSolver(w, if (w.n_row_out < 0) 1 else le(@as(i32, w.n_row_out) + 1));
             if (db.malloc_failed) return whereBeginError(w);
         }
 
         // TUNING: DISTINCT on a subquery reduces the output by 8x
         // (tag-20250414a).
-        if (w.wctrl_flags & WHERE.WANT_DISTINCT != 0) {
+        if (w.wctrl_flags.WANT_DISTINCT) {
             w.n_row_out = le(@as(i32, w.n_row_out) - 30);
         }
     }
-    if (w.order_by == null and db.flags & int.DbFlag.ReverseOrder != 0) {
+    if (w.order_by == null and db.flags.ReverseOrder) {
         whereReverseScanOrder(w);
     }
     if (p.n_err != 0) return whereBeginError(w);
@@ -1571,7 +1549,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
     var not_ready: Bitmask = ~@as(Bitmask, 0);
     if (w.n_level >= 2 and // must be a join
         result_set != null and // condition (1)
-        wctrl_flags & (WHERE.AGG_DISTINCT | WHERE.KEEP_ALL_JOINS) == 0 and // (1),(6)
+        !wctrl_flags.intersects(.{ .AGG_DISTINCT = true, .KEEP_ALL_JOINS = true }) and // (1),(6)
         !db.optDisabled(OPT.OmitNoopJoin)) // (7)
     {
         not_ready = whereOmitNoopJoin(w, not_ready);
@@ -1592,23 +1570,23 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
     // OR optimization unless this is a DELETE (WHERE_DUPLICATES_OK): an
     // UPDATE relies on aiCurOnePass[1], which the OR optimization does not
     // set accurately.
-    std.debug.assert(wctrl_flags & WHERE.ONEPASS_DESIRED == 0 or w.n_level == 1);
-    if (wctrl_flags & WHERE.ONEPASS_DESIRED != 0) {
+    std.debug.assert(!wctrl_flags.ONEPASS_DESIRED or w.n_level == 1);
+    if (wctrl_flags.ONEPASS_DESIRED) {
         const ws_flags = w.a[0].w_loop.?.ws_flags;
-        const b_onerow = ws_flags & WHERE_ONEROW != 0;
-        std.debug.assert(ws_flags & WHERE_VIRTUALTABLE == 0 or tab_list.at(0).s_tab.?.e_tab_type == .vtab);
+        const b_onerow = ws_flags.ONEROW;
+        std.debug.assert(!ws_flags.VIRTUALTABLE or tab_list.at(0).s_tab.?.e_tab_type == .vtab);
         if (b_onerow or
-            (wctrl_flags & WHERE.ONEPASS_MULTIROW != 0 and
+            (wctrl_flags.ONEPASS_MULTIROW and
                 tab_list.at(0).s_tab.?.e_tab_type != .vtab and
-                (ws_flags & WHERE_MULTI_OR == 0 or wctrl_flags & WHERE.DUPLICATES_OK != 0) and
+                (!ws_flags.MULTI_OR or wctrl_flags.DUPLICATES_OK) and
                 !db.optDisabled(OPT.OnePass)))
         {
-            w.e_one_pass = if (b_onerow) ONEPASS_SINGLE else ONEPASS_MULTI;
-            if (tab_list.at(0).s_tab.?.hasRowid() and ws_flags & WHERE_IDX_ONLY != 0) {
-                if (wctrl_flags & WHERE.ONEPASS_MULTIROW != 0) {
+            w.e_one_pass = if (b_onerow) ONEPASS.SINGLE else ONEPASS.MULTI;
+            if (tab_list.at(0).s_tab.?.hasRowid() and ws_flags.IDX_ONLY) {
+                if (wctrl_flags.ONEPASS_MULTIROW) {
                     b_fordelete = vi.OPFLAG.FORDELETE;
                 }
-                w.a[0].w_loop.?.ws_flags = ws_flags & ~WHERE_IDX_ONLY;
+                w.a[0].w_loop.?.ws_flags = ws_flags.without(.{ .IDX_ONLY = true });
             }
         }
     }
@@ -1624,33 +1602,33 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
         const i_db = prepare.schemaToIndex(db, tab.schema);
         const loop = level.w_loop.?;
         level.addr_brk = aux.makeLabel(p);
-        if (ii == 0 or tab_item.fg.jointype & JT.LEFT != 0) {
+        if (ii == 0 or tab_item.fg.jointype.LEFT) {
             level.addr_halt = level.addr_brk;
         } else if (w.a[ii - 1].rj != null) {
             level.addr_halt = w.a[ii - 1].addr_brk;
         } else {
             level.addr_halt = w.a[ii - 1].addr_halt;
         }
-        if (tab.tab_flags & TF.Ephemeral != 0 or tab.isView()) {
+        if (tab.tab_flags.Ephemeral or tab.isView()) {
             // Do nothing.
-        } else if (loop.ws_flags & WHERE_VIRTUALTABLE != 0) {
+        } else if (loop.ws_flags.VIRTUALTABLE) {
             _ = aux.addOp4(v, OP.VOpen, tab_item.i_cursor, 0, 0, build.vtabP4(db, tab));
         } else if (tab.isVirtual()) {
             // Nothing.
-        } else if ((loop.ws_flags & WHERE_IDX_ONLY == 0 and wctrl_flags & WHERE.OR_SUBCLAUSE == 0) or
-            tab_item.fg.jointype & (JT.LTORJ | JT.RIGHT) != 0)
+        } else if ((!loop.ws_flags.IDX_ONLY and !wctrl_flags.OR_SUBCLAUSE) or
+            tab_item.fg.jointype.intersects(.{ .LTORJ = true, .RIGHT = true }))
         {
-            var op: u8 = OP.OpenRead;
-            if (w.e_one_pass != ONEPASS_OFF) {
+            var op: OP = OP.OpenRead;
+            if (w.e_one_pass != ONEPASS.OFF) {
                 op = OP.OpenWrite;
                 w.ai_cur_one_pass[0] = tab_item.i_cursor;
             }
             insert.openTable(p, tab_item.i_cursor, @intCast(i_db), tab, op);
             std.debug.assert(tab_item.i_cursor == level.i_tab_cur);
-            if (w.e_one_pass == ONEPASS_OFF and
+            if (w.e_one_pass == ONEPASS.OFF and
                 tab.nCol() < BMS and
-                tab.tab_flags & (TF.HasGenerated | TF.WithoutRowid) == 0 and
-                loop.ws_flags & (WHERE_AUTO_INDEX | WHERE_BLOOMFILTER) == 0)
+                !tab.tab_flags.intersects(TF.HasGenerated.with(.{ .WithoutRowid = true })) and
+                !loop.ws_flags.intersects(.{ .AUTO_INDEX = true, .BLOOMFILTER = true }))
             {
                 // Only a prefix of the record is used: reduce the column
                 // count in P4 of the OP_OpenRead/Write.
@@ -1665,7 +1643,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             }
             aux.changeP5(v, b_fordelete);
             if (ii >= 2 and
-                tab_item.fg.jointype & (JT.LTORJ | JT.LEFT) == 0 and
+                !tab_item.fg.jointype.intersects(.{ .LTORJ = true, .LEFT = true }) and
                 level.addr_halt == w.a[0].addr_halt)
             {
                 _ = aux.addOp2(v, OP.IfEmpty, tab_item.i_cursor, w.i_break);
@@ -1673,28 +1651,29 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
         } else {
             // sqlite3TableLock(): nothing to do without shared cache.
         }
-        if (loop.ws_flags & WHERE_INDEXED != 0) {
+        if (loop.ws_flags.INDEXED) {
             const ix = loop.btree.index.?;
             var i_index_cur: i32 = undefined;
-            var op: u8 = OP.OpenRead;
+            // Null for no cursor of its own (C: op = 0).
+            var op: ?OP = OP.OpenRead;
             // i_aux_arg is always positive if ONEPASS is possible.
-            std.debug.assert(i_aux_arg != 0 or w.wctrl_flags & WHERE.ONEPASS_DESIRED == 0);
-            if (!tab.hasRowid() and ix.isPrimaryKey() and wctrl_flags & WHERE.OR_SUBCLAUSE != 0) {
+            std.debug.assert(i_aux_arg != 0 or !w.wctrl_flags.ONEPASS_DESIRED);
+            if (!tab.hasRowid() and ix.isPrimaryKey() and wctrl_flags.OR_SUBCLAUSE) {
                 // One term of an OR-optimization on the PRIMARY KEY of a
                 // WITHOUT ROWID table: no separate index.
                 i_index_cur = level.i_tab_cur;
-                op = 0;
-            } else if (w.e_one_pass != ONEPASS_OFF) {
+                op = null;
+            } else if (w.e_one_pass != ONEPASS.OFF) {
                 var j = tab_item.s_tab.?.index;
                 i_index_cur = i_aux_arg;
-                std.debug.assert(wctrl_flags & WHERE.ONEPASS_DESIRED != 0);
+                std.debug.assert(wctrl_flags.ONEPASS_DESIRED);
                 while (j != null and j.? != ix) {
                     i_index_cur += 1;
                     j = j.?.next;
                 }
                 op = OP.OpenWrite;
                 w.ai_cur_one_pass[1] = i_index_cur;
-            } else if (i_aux_arg != 0 and wctrl_flags & WHERE.OR_SUBCLAUSE != 0) {
+            } else if (i_aux_arg != 0 and wctrl_flags.OR_SUBCLAUSE) {
                 i_index_cur = i_aux_arg;
                 op = OP.ReopenIdx;
             } else {
@@ -1703,29 +1682,29 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
                 if (ix.has_expr and !db.optDisabled(OPT.IndexedExpr)) {
                     try whereAddIndexedExpr(p, ix, i_index_cur, tab_item);
                 }
-                if (ix.part_idx_where != null and tab_item.fg.jointype & JT.RIGHT == 0) {
+                if (ix.part_idx_where != null and !tab_item.fg.jointype.RIGHT) {
                     try wl.wherePartIdxExpr(p, ix, ix.part_idx_where, null, i_index_cur, tab_item);
                 }
             }
             level.i_idx_cur = i_index_cur;
             std.debug.assert(ix.schema == tab.schema);
             std.debug.assert(i_index_cur >= 0);
-            if (op != 0) {
-                _ = aux.addOp3(v, op, i_index_cur, @intCast(ix.tnum), i_db);
+            if (op) |opcode| {
+                _ = aux.addOp3(v, opcode, i_index_cur, @intCast(ix.tnum), i_db);
                 aux.setP4KeyInfo(p, ix);
-                if (loop.ws_flags & WHERE_CONSTRAINT != 0 and
-                    loop.ws_flags & (WHERE_COLUMN_RANGE | WHERE_SKIPSCAN) == 0 and
-                    loop.ws_flags & WHERE_BIGNULL_SORT == 0 and
-                    loop.ws_flags & WHERE_IN_SEEKSCAN == 0 and
-                    w.wctrl_flags & WHERE.ORDERBY_MIN == 0 and
-                    w.e_distinct != int.WHERE_DISTINCT_ORDERED)
+                if (loop.ws_flags.intersects(WS.CONSTRAINT) and
+                    !loop.ws_flags.intersects(.{ .COLUMN_RANGE = true, .SKIPSCAN = true }) and
+                    !loop.ws_flags.BIGNULL_SORT and
+                    !loop.ws_flags.IN_SEEKSCAN and
+                    !w.wctrl_flags.ORDERBY_MIN and
+                    w.e_distinct != int.WHERE_DISTINCT.ORDERED)
                 {
                     aux.changeP5(v, vi.OPFLAG.SEEKEQ);
                 }
             }
         }
         if (i_db >= 0) build.codeVerifySchema(p, @intCast(i_db));
-        if (tab_item.fg.jointype & JT.RIGHT != 0) {
+        if (tab_item.fg.jointype.RIGHT) {
             const rj = try p.arena.create(WhereRightJoin);
             rj.* = .{};
             level.rj = rj;
@@ -1757,11 +1736,11 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             } else {
                 rj.reg_bloom = 0;
             }
-            loop.ws_flags &= ~WHERE_IDX_ONLY;
+            loop.ws_flags.IDX_ONLY = false;
             // RIGHT JOIN processing messes up the output order, so a real
             // sort is needed.
             w.n_ob_sat = 0;
-            w.e_distinct = int.WHERE_DISTINCT_UNORDERED;
+            w.e_distinct = int.WHERE_DISTINCT.UNORDERED;
         }
     }
     w.i_top = aux.currentAddr(v);
@@ -1787,8 +1766,8 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
             if (i_once != 0) aux.jumpHere(v, i_once);
         }
         std.debug.assert(tab_list == w.tab_list);
-        if (ws_flags & (WHERE_AUTO_INDEX | WHERE_BLOOMFILTER) != 0) {
-            if (ws_flags & WHERE_AUTO_INDEX != 0) {
+        if (ws_flags.intersects(.{ .AUTO_INDEX = true, .BLOOMFILTER = true })) {
+            if (ws_flags.AUTO_INDEX) {
                 try constructAutomaticIndex(p, &w.s_wc, not_ready, level);
             } else {
                 try constructBloomFilter(w, ii, level, not_ready);
@@ -1799,7 +1778,7 @@ fn whereBeginImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr, order_by_arg: ?*
         level.addr_body = aux.currentAddr(v);
         not_ready = try wc_mod.codeOneLoopStart(p, v, w, ii, level, not_ready);
         w.i_continue = level.addr_cont;
-        if (ws_flags & WHERE_MULTI_OR == 0 and wctrl_flags & WHERE.OR_SUBCLAUSE == 0) {
+        if (!ws_flags.MULTI_OR and !wctrl_flags.OR_SUBCLAUSE) {
             wc_mod.addScanStatus(v, tab_list, level, addr_explain);
         }
     }
@@ -1839,9 +1818,9 @@ pub fn whereEnd(w: *WhereInfo) void {
         const loop = level.w_loop.?;
         if (level.op != OP.Noop) {
             // Skip-ahead DISTINCT (SQLITE_DISABLE_SKIPAHEAD_DISTINCT off).
-            if (w.e_distinct == int.WHERE_DISTINCT_ORDERED and
+            if (w.e_distinct == int.WHERE_DISTINCT.ORDERED and
                 i == w.n_level - 1 and // Ticket [ef9318757b152e3] 2017-10-21
-                loop.ws_flags & WHERE_INDEXED != 0 and
+                loop.ws_flags.INDEXED and
                 loop.btree.index.?.has_stat1 and
                 loop.btree.n_distinct_col > 0 and
                 loop.btree.index.?.ai_row_log_est[loop.btree.n_distinct_col] >= 36)
@@ -1857,7 +1836,7 @@ pub fn whereEnd(w: *WhereInfo) void {
                     _ = aux.addOp3(v, OP.Column, level.i_idx_cur, j, r1 + j);
                 }
                 p.n_mem += n + 1;
-                const op: u8 = if (level.op == OP.Prev) OP.SeekLT else OP.SeekGT;
+                const op: OP = if (level.op == OP.Prev) OP.SeekLT else OP.SeekGT;
                 addr_seek = aux.addOp4Int(v, op, level.i_idx_cur, 0, r1, n);
                 _ = aux.addOp2(v, OP.Goto, 1, level.p2);
                 if (level.i_left_join != 0) aux.jumpHere(v, addr_if_null);
@@ -1880,7 +1859,7 @@ pub fn whereEnd(w: *WhereInfo) void {
                 _ = aux.addOp2(v, OP.DecrJumpZero, level.reg_bignull, level.p2 - 1);
             }
         }
-        if (loop.ws_flags & WHERE_IN_ABLE != 0 and level.nIn() > 0) {
+        if (loop.ws_flags.IN_ABLE and level.nIn() > 0) {
             aux.resolveLabel(v, level.addr_nxt);
             var j = level.nIn();
             while (j > 0) : (j -= 1) {
@@ -1889,8 +1868,8 @@ pub fn whereEnd(w: *WhereInfo) void {
                 aux.jumpHere(v, in_.addr_in_top + 1);
                 if (in_.e_end_loop_op != OP.Noop) {
                     if (in_.n_prefix != 0) {
-                        const b_early_out: i32 = @intFromBool(loop.ws_flags & WHERE_VIRTUALTABLE == 0 and
-                            loop.ws_flags & WHERE_IN_EARLYOUT != 0);
+                        const b_early_out: i32 = @intFromBool(!loop.ws_flags.VIRTUALTABLE and
+                            loop.ws_flags.IN_EARLYOUT);
                         if (level.i_left_join != 0) {
                             // Cursor in_.i_cur may be disabled by
                             // OP_NullRow; the jump NULLs in_.i_base, which
@@ -1925,8 +1904,8 @@ pub fn whereEnd(w: *WhereInfo) void {
         if (level.i_left_join != 0) {
             const ws = loop.ws_flags;
             const addr = aux.addOp1(v, OP.IfPos, level.i_left_join);
-            std.debug.assert(ws & WHERE_IDX_ONLY == 0 or ws & WHERE_INDEXED != 0);
-            if (ws & WHERE_IDX_ONLY == 0) {
+            std.debug.assert(!ws.IDX_ONLY or ws.INDEXED);
+            if (!ws.IDX_ONLY) {
                 const src = tab_list.at(level.i_from);
                 std.debug.assert(level.i_tab_cur == src.i_cursor);
                 if (src.fg.via_coroutine) {
@@ -1937,8 +1916,8 @@ pub fn whereEnd(w: *WhereInfo) void {
                 }
                 _ = aux.addOp1(v, OP.NullRow, level.i_tab_cur);
             }
-            if (ws & WHERE_INDEXED != 0 or (ws & WHERE_MULTI_OR != 0 and level.covering_idx != null)) {
-                if (ws & WHERE_MULTI_OR != 0) {
+            if (ws.INDEXED or (ws.MULTI_OR and level.covering_idx != null)) {
+                if (ws.MULTI_OR) {
                     const ix = level.covering_idx.?;
                     const i_db = prepare.schemaToIndex(db, ix.schema);
                     _ = aux.addOp3(v, OP.ReopenIdx, level.i_idx_cur, @intCast(ix.tnum), i_db);
@@ -1946,7 +1925,7 @@ pub fn whereEnd(w: *WhereInfo) void {
                 }
                 _ = aux.addOp1(v, OP.NullRow, level.i_idx_cur);
             }
-            if (ws & WHERE_IN_ABLE != 0) {
+            if (ws.IN_ABLE) {
                 for (level.in_loops) |*in_| {
                     if (in_.e_end_loop_op != OP.Noop) _ = aux.addOp1(v, OP.NullRow, in_.i_cur);
                 }
@@ -1985,14 +1964,14 @@ pub fn whereEnd(w: *WhereInfo) void {
         // and whereEnd() into reads of the index where possible; sometimes
         // the table is then never read.
         var idx: ?*Index = null;
-        if (loop.ws_flags & (WHERE_INDEXED | WHERE_IDX_ONLY) != 0) {
+        if (loop.ws_flags.intersects(.{ .INDEXED = true, .IDX_ONLY = true })) {
             idx = loop.btree.index;
-        } else if (loop.ws_flags & WHERE_MULTI_OR != 0) {
+        } else if (loop.ws_flags.MULTI_OR) {
             idx = level.covering_idx;
         }
         if (idx != null and !db.malloc_failed) {
             const ix = idx.?;
-            const last = if (w.e_one_pass == ONEPASS_OFF or !ix.table.hasRowid()) i_end else w.i_end_where;
+            const last = if (w.e_one_pass == ONEPASS.OFF or !ix.table.hasRowid()) i_end else w.i_end_where;
             if (ix.has_expr) {
                 var it = p.idx_epr;
                 while (it) |ie| : (it = ie.next) {
@@ -2024,8 +2003,8 @@ pub fn whereEnd(w: *WhereInfo) void {
                     if (x >= 0) {
                         op.p2 = x;
                         op.p1 = level.i_idx_cur;
-                    } else if (loop.ws_flags & (WHERE_IDX_ONLY | WHERE_EXPRIDX) != 0) {
-                        if (loop.ws_flags & WHERE_IDX_ONLY != 0) {
+                    } else if (loop.ws_flags.intersects(.{ .IDX_ONLY = true, .EXPRIDX = true })) {
+                        if (loop.ws_flags.IDX_ONLY) {
                             // A covering index loop reads a column of the
                             // table that is not in the index.
                             util.errorMsg(p, "internal query planner error", .{});
@@ -2033,7 +2012,7 @@ pub fn whereEnd(w: *WhereInfo) void {
                         } else {
                             // WHERE_EXPRIDX guessed the index covering, and
                             // this op proves otherwise: fix the EXPLAIN text.
-                            loop.ws_flags &= ~WHERE_EXPRIDX;
+                            loop.ws_flags.EXPRIDX = false;
                             wc_mod.addExplainText(p, level.addr_body - 1, tab_list, level, w.wctrl_flags) catch build.oomFault(p);
                         }
                     }

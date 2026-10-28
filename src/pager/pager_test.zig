@@ -349,8 +349,7 @@ test "pager: busy handler retries" {
         holder: *Pager,
         page: ?*Page,
         calls: u32 = 0,
-        fn busy(ctx: ?*anyopaque) bool {
-            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        fn busy(self: *@This()) bool {
             self.calls += 1;
             // Release the reader on the first retry.
             if (self.calls == 1) {
@@ -362,7 +361,7 @@ test "pager: busy handler retries" {
     };
     try a.sharedLock();
     var ctx: Ctx = .{ .holder = a, .page = try a.get(1, .{}) };
-    const b = try openPager(v, .{ .busy_handler = .{ .ctx = &ctx, .func = Ctx.busy } });
+    const b = try openPager(v, .{ .busy_handler = .init(&ctx, Ctx.busy) });
     defer b.close(.{});
     try commitFill(b, 1, 0x02);
     try testing.expectEqual(@as(u32, 1), ctx.calls);

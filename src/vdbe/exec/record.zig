@@ -16,6 +16,7 @@ const varint = @import("../../util/varint.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
+const Error = core.Error;
 const Op = vi.Op;
 const Mem = vi.Mem;
 const MEM = vi.MEM;
@@ -57,17 +58,16 @@ pub fn opIsType(e: *Exec, op: *Op) Flow {
 // ================================================================ OP_Column
 
 /// The op_column_corrupt exit.
-fn columnCorrupt(e: *Exec) Flow {
+fn columnCorrupt(e: *Exec) Error!Flow {
     if (e.ops[0].p3 > 0) {
         e.pc = e.ops[0].p3 - 1;
         return .goto_pc;
     }
-    e.rc = RC.CORRUPT;
-    return .abort;
+    return error.Corrupt;
 }
 
 /// Port of OP_Column.
-pub fn opColumn(e: *Exec, op: *Op) Flow {
+pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     var c = e.csr(op.p1);
     var p2: u32 = @intCast(op.p2);
@@ -105,9 +105,9 @@ pub fn opColumn(e: *Exec, op: *Op) Flow {
                             continue :restart;
                         }
                     }
-                    serial.finishMoveto(c) catch |err| return e.fail(err);
+                    try serial.finishMoveto(c);
                 } else if (cur.hasMoved()) {
-                    serial.handleMovedCursor(c) catch |err| return e.fail(err);
+                    try serial.handleMovedCursor(c);
                     continue :restart;
                 }
                 const fetched = cur.payloadFetchWithSize();
@@ -135,7 +135,7 @@ pub fn opColumn(e: *Exec, op: *Op) Flow {
                 hdr_parse = hd.len;
             }
         } else if (c.e_cur_type == .btree and c.uc.cursor.hasMoved()) {
-            serial.handleMovedCursor(c) catch |err| return e.fail(err);
+            try serial.handleMovedCursor(c);
             continue :restart;
         }
 
@@ -147,8 +147,8 @@ pub fn opColumn(e: *Exec, op: *Op) Flow {
                 if (c.row) |row| {
                     z_data = row[0..c.sz_row];
                 } else {
-                    s_mem = .{ .db = e.db, .flags = 0 };
-                    mem.fromBtreeZeroOffset(c.uc.cursor, end_hdr, &s_mem) catch |err| return e.fail(err);
+                    s_mem = .{ .db = e.db, .flags = .{} };
+                    try mem.fromBtreeZeroOffset(c.uc.cursor, end_hdr, &s_mem);
                     z_data = s_mem.bytes();
                 }
                 parse = true;
@@ -203,7 +203,7 @@ pub fn opColumn(e: *Exec, op: *Op) Flow {
         // Fewer columns than p2: the default value or NULL.
         const dest = e.reg(op.p3);
         if (op.p4type == .mem) {
-            mem.shallowCopy(dest, op.p4.mem, MEM.Static);
+            mem.shallowCopy(dest, op.p4.mem, .{ .Static = true });
         } else {
             mem.setNull(dest);
         }
@@ -225,9 +225,9 @@ pub fn opColumn(e: *Exec, op: *Op) Flow {
             dest.n = @intCast(len);
             dest.enc = e.encoding;
             if (dest.szMalloc() < len + 2) {
-                if (len > e.db.limit(.length)) return .too_big;
-                dest.flags = MEM.Null;
-                mem.grow(dest, len + 2, false) catch return .no_mem;
+                if (len > e.db.limit(.length)) return error.TooBig;
+                dest.flags = .{ .Null = true };
+                try mem.grow(dest, len + 2, false);
             } else {
                 dest.z = dest.z_malloc.ptr;
             }
@@ -235,7 +235,7 @@ pub fn opColumn(e: *Exec, op: *Op) Flow {
             @memcpy(out[0..len], z[0..len]);
             out[len] = 0;
             out[len + 1] = 0;
-            dest.flags = if (t & 1 != 0) MEM.Str | MEM.Term else MEM.Blob;
+            dest.flags = if (t & 1 != 0) .{ .Str = true, .Term = true } else .{ .Blob = true };
         }
     } else {
         dest.enc = e.encoding;
@@ -248,15 +248,11 @@ pub fn opColumn(e: *Exec, op: *Op) Flow {
             serial.serialGet(&zeros, 0, t, dest);
             if (t >= 12) {
                 dest.z = null;
-                dest.flags &= ~MEM.Ephem;
-                dest.flags |= MEM.Static;
+                dest.flags.Ephem = false;
+                dest.flags.Static = true;
             }
         } else {
-            columnFromOverflow(e, c, t, offsets[p2], dest) catch |err| switch (err) {
-                error.OutOfMemory => return .no_mem,
-                error.TooBig => return .too_big,
-                else => return e.fail(err),
-            };
+            try columnFromOverflow(e, c, t, offsets[p2], dest);
         }
     }
     return .next;
@@ -270,14 +266,14 @@ fn columnFromOverflow(e: *Exec, c: *VdbeCursor, t: u32, offset: u32, dest: *Mem)
     serial.serialGet(dest.z.?[0..len], 0, t, dest);
     if (t & 1 != 0 and dest.enc == ENC.UTF8) {
         dest.z.?[len] = 0;
-        dest.flags |= MEM.Term;
+        dest.flags.Term = true;
     }
-    dest.flags &= ~MEM.Ephem;
+    dest.flags.Ephem = false;
 }
 
 // ===================================================== affinity and types
 
-pub fn opTypeCheck(e: *Exec, op: *Op) Flow {
+pub fn opTypeCheck(e: *Exec, op: *Op) Error!Flow {
     const tab = op.p4.table;
     const cols = tab.cols;
     var in1: i32 = op.p1;
@@ -292,43 +288,42 @@ pub fn opTypeCheck(e: *Exec, op: *Op) Flow {
     }
     while (i < n_col) : (i += 1) {
         const col = &cols[i];
-        if (col.col_flags & int.COLFLAG.GENERATED != 0 and op.p3 < 2) {
-            if (col.col_flags & int.COLFLAG.VIRTUAL != 0) continue;
+        if (col.col_flags.intersects(int.COLFLAG.GENERATED) and op.p3 < 2) {
+            if (col.col_flags.VIRTUAL) continue;
             if (op.p3 != 0) {
                 in1 += 1;
                 continue;
             }
         }
         const m = e.reg(in1);
-        mem.applyAffinity(m, col.affinity, e.encoding) catch return .no_mem;
-        if (m.flags & MEM.Null == 0) {
+        try mem.applyAffinity(m, col.affinity, e.encoding);
+        if (!m.flags.Null) {
             const ok = switch (col.e_ctype) {
-                int.COLTYPE.BLOB => m.flags & MEM.Blob != 0,
-                int.COLTYPE.INTEGER, int.COLTYPE.INT => m.flags & MEM.Int != 0,
-                int.COLTYPE.TEXT => m.flags & MEM.Str != 0,
+                int.COLTYPE.BLOB => m.flags.Blob,
+                int.COLTYPE.INTEGER, int.COLTYPE.INT => m.flags.Int,
+                int.COLTYPE.TEXT => m.flags.Str,
                 int.COLTYPE.REAL => blk: {
-                    if (m.flags & MEM.Int != 0) {
+                    if (m.flags.Int) {
                         // Keep a small integer exact, but typed REAL.
                         if (m.u.i <= 140737488355327 and m.u.i >= -140737488355328) {
-                            m.flags |= MEM.IntReal;
-                            m.flags &= ~MEM.Int;
+                            m.flags.IntReal = true;
+                            m.flags.Int = false;
                         } else {
                             m.u = .{ .r = @floatFromInt(m.u.i) };
-                            m.flags |= MEM.Real;
-                            m.flags &= ~MEM.Int;
+                            m.flags.Real = true;
+                            m.flags.Int = false;
                         }
                         break :blk true;
                     }
-                    break :blk m.flags & (MEM.Real | MEM.IntReal) != 0;
+                    break :blk m.flags.intersects(.{ .Real = true, .IntReal = true });
                 },
                 else => true,
             };
             if (!ok) {
                 aux.vdbeError(e.v, "cannot store {s} value in {s} column {s}.{s}", .{
-                    memTypeName(m), std_type[col.e_ctype - 1], tab.name, col.name(),
+                    memTypeName(m), std_type[col.e_ctype.stdTypeIndex()], tab.name, col.name(),
                 });
-                e.rc = RC.CONSTRAINT_DATATYPE;
-                return .abort;
+                return e.abort(RC.CONSTRAINT_DATATYPE);
             }
         }
         in1 += 1;
@@ -336,18 +331,18 @@ pub fn opTypeCheck(e: *Exec, op: *Op) Flow {
     return .next;
 }
 
-pub fn opAffinity(e: *Exec, op: *Op) Flow {
+pub fn opAffinity(e: *Exec, op: *Op) Error!Flow {
     const aff = op.p4.z;
     var in1 = op.p1;
     var i: usize = 0;
     while (aff[i] != 0) : (i += 1) {
         const a = aff[i];
         const m = e.reg(in1);
-        mem.applyAffinity(m, a, e.encoding) catch return .no_mem;
-        if (a == Aff.real and m.flags & MEM.Int != 0) {
+        try mem.applyAffinity(m, a, e.encoding);
+        if (a == Aff.real and m.flags.Int) {
             m.u = .{ .r = @floatFromInt(m.u.i) };
-            m.flags |= MEM.Real;
-            m.flags &= ~(MEM.Int | MEM.Str);
+            m.flags.Real = true;
+            m.flags.clear(.{ .Int = true, .Str = true });
         }
         in1 += 1;
     }
@@ -356,7 +351,7 @@ pub fn opAffinity(e: *Exec, op: *Op) Flow {
 
 // ============================================================ OP_MakeRecord
 
-pub fn opMakeRecord(e: *Exec, op: *Op) Flow {
+pub fn opMakeRecord(e: *Exec, op: *Op) Error!Flow {
     const n_field: usize = @intCast(op.p2);
     const data0: usize = @intCast(op.p1);
     const recs = e.regs[data0..][0..n_field];
@@ -367,10 +362,10 @@ pub fn opMakeRecord(e: *Exec, op: *Op) Flow {
         while (aff[i] != 0) : (i += 1) {
             const a = aff[i];
             const rec = &recs[i];
-            mem.applyAffinity(rec, a, e.encoding) catch return .no_mem;
-            if (a == Aff.real and rec.flags & MEM.Int != 0) {
-                rec.flags |= MEM.IntReal;
-                rec.flags &= ~MEM.Int;
+            try mem.applyAffinity(rec, a, e.encoding);
+            if (a == Aff.real and rec.flags.Int) {
+                rec.flags.IntReal = true;
+                rec.flags.Int = false;
             }
         }
     }
@@ -383,10 +378,10 @@ pub fn opMakeRecord(e: *Exec, op: *Op) Flow {
     while (k > 0) {
         k -= 1;
         const rec = &recs[k];
-        if (rec.flags & MEM.Null != 0) {
-            rec.u_temp = if (rec.flags & MEM.Zero != 0) 10 else 0;
+        if (rec.flags.Null) {
+            rec.u_temp = if (rec.flags.Zero) 10 else 0;
             n_hdr += 1;
-        } else if (rec.flags & (MEM.Int | MEM.IntReal) != 0) {
+        } else if (rec.flags.intersects(.{ .Int = true, .IntReal = true })) {
             const i = rec.u.i;
             const uu: u64 = if (i < 0) @bitCast(~i) else @bitCast(i);
             n_hdr += 1;
@@ -411,27 +406,27 @@ pub fn opMakeRecord(e: *Exec, op: *Op) Flow {
                 rec.u_temp = 5;
             } else {
                 n_data += 8;
-                if (rec.flags & MEM.IntReal != 0) {
+                if (rec.flags.IntReal) {
                     // An 8-byte integer might as well be a real.
                     rec.u = .{ .r = @floatFromInt(rec.u.i) };
-                    rec.flags &= ~MEM.IntReal;
-                    rec.flags |= MEM.Real;
+                    rec.flags.IntReal = false;
+                    rec.flags.Real = true;
                     rec.u_temp = 7;
                 } else {
                     rec.u_temp = 6;
                 }
             }
-        } else if (rec.flags & MEM.Real != 0) {
+        } else if (rec.flags.Real) {
             n_hdr += 1;
             n_data += 8;
             rec.u_temp = 7;
         } else {
             var len: u64 = @intCast(rec.n);
-            var serial_type: u64 = len * 2 + 12 + @intFromBool(rec.flags & MEM.Str != 0);
-            if (rec.flags & MEM.Zero != 0) {
+            var serial_type: u64 = len * 2 + 12 + @intFromBool(rec.flags.Str);
+            if (rec.flags.Zero) {
                 serial_type += @as(u64, @intCast(rec.u.n_zero)) * 2;
                 if (n_data != 0) {
-                    mem.expandBlob(rec) catch return .no_mem;
+                    try mem.expandBlob(rec);
                     len = @intCast(rec.n);
                 } else {
                     n_zero += rec.u.n_zero;
@@ -453,14 +448,14 @@ pub fn opMakeRecord(e: *Exec, op: *Op) Flow {
     if (n_byte + @as(u64, @intCast(n_zero)) <= out.szMalloc()) {
         out.z = out.z_malloc.ptr;
     } else {
-        if (n_byte + @as(u64, @intCast(n_zero)) > @as(u64, @intCast(e.db.limit(.length)))) return .too_big;
-        mem.clearAndResize(out, @intCast(n_byte)) catch return .no_mem;
+        if (n_byte + @as(u64, @intCast(n_zero)) > @as(u64, @intCast(e.db.limit(.length)))) return error.TooBig;
+        try mem.clearAndResize(out, @intCast(n_byte));
     }
     out.n = @intCast(n_byte);
-    out.flags = MEM.Blob;
+    out.flags = .{ .Blob = true };
     if (n_zero != 0) {
         out.u = .{ .n_zero = @intCast(n_zero) };
-        out.flags |= MEM.Zero;
+        out.flags.Zero = true;
     }
     const z = out.z.?[0..@intCast(n_byte)];
     var hdr: usize = varint.put(z, n_hdr);

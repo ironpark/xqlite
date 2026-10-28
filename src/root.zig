@@ -120,7 +120,7 @@ test {
         @import("vdbe/exec/record.zig"), @import("vdbe/exec/txn.zig"), @import("vdbe/exec/cursor.zig"),
         @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"), @import("vdbe/exec/vtab_ops.zig"),
         @import("vdbe/exec/misc.zig"), @import("util/flags.zig"), @import("sql/sqlite_int.zig"),
-        @import("util/thunk.zig"),
+        @import("util/thunk.zig"), @import("util/cast.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

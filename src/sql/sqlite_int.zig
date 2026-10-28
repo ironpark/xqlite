@@ -600,7 +600,7 @@ pub const Window = struct {
     this: ?*?*Window = null,
     next_win: ?*Window = null,
     filter: ?*Expr = null,
-    w_func: ?*FuncDef = null,
+    w_func: ?*const FuncDef = null,
     i_eph_csr: i32 = 0,
     reg_accum: i32 = 0,
     reg_result: i32 = 0,
@@ -1155,7 +1155,8 @@ pub const FuncDef = struct {
     /// SQLITE_FUNC_* flags (callback.FUNC).
     func_flags: @import("callback.zig").FUNC = .{},
     user_data: ?*anyopaque = null,
-    /// Next function with the same name.
+    /// Next application-defined function with the same name (a built-in
+    /// has its overloads next to it in callback.builtins).
     next: ?*FuncDef = null,
     /// Scalar function, or aggregate step.
     x_sfunc: ?StepFn = null,
@@ -1166,8 +1167,6 @@ pub const FuncDef = struct {
     /// Inverse step of a window aggregate.
     x_inverse: ?StepFn = null,
     name: [:0]const u8,
-    /// Next built-in in the same hash bucket (u.pHash).
-    hash_next: ?*FuncDef = null,
     /// Destructor of an application-defined function (u.pDestructor).
     destructor: ?*FuncDestructor = null,
 
@@ -1379,7 +1378,7 @@ pub const AggInfoCol = struct {
 /// An aggregate function of a query (AggInfo_func).
 pub const AggInfoFunc = struct {
     f_expr: *Expr,
-    func: ?*FuncDef,
+    func: ?*const FuncDef,
     i_distinct: i32 = -1,
     i_dist_addr: i32 = 0,
     i_ob_tab: i32 = -1,
@@ -2238,6 +2237,9 @@ pub const Sqlite3 = struct {
     funcs: NameMap(*FuncDef) = .empty,
     /// Collations defined on the connection (see coll.zig).
     colls: NameMap(*CollSeq) = .empty,
+    /// PMAs the sorters of the connection wrote, for tests that check
+    /// that a sort spilled (C has no such counter; tests only).
+    n_pma_written: if (@import("builtin").is_test) u64 else void = if (@import("builtin").is_test) 0 else {},
     /// Page size for new databases, as set by PRAGMA page_size.
     next_pagesize: u32 = 0,
     /// Schema resets are deferred while this is nonzero.

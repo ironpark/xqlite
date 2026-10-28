@@ -512,15 +512,14 @@ fn lowerFunc(ctx: *Context, argv: []*Mem) void {
     caseFunc(ctx, argv, ctype.toLower);
 }
 
-/// The PRNG shared by all connections (sqlite3Prng): ChaCha20 state and
-/// unused output.
-const Prng = struct {
+/// The PRNG shared by all connections (sqlite3Prng, global.prng):
+/// ChaCha20 state and unused output, under a lock (C: the PRNG mutex).
+pub const Prng = struct {
     s: [16]u32 = @splat(0),
     out: [64]u8 = undefined,
     n: u8 = 0,
+    lock: std.atomic.Value(bool) = .init(false),
 };
-var prng: Prng = .{};
-var prng_lock: std.atomic.Value(bool) = .init(false);
 
 /// The quarter round of ChaCha20 (QR()).
 fn chachaQr(x: *[16]u32, a: usize, b: usize, c: usize, d: usize) void {
@@ -558,8 +557,9 @@ fn chachaBlock(out: *[16]u32, in: *const [16]u32) void {
 /// pseudo-random bytes. The generator is seeded on first use from the
 /// connection's VFS (C uses the default VFS); an empty `buf` resets it.
 pub fn randomness(db: ?*const Sqlite3, buf: []u8) void {
-    while (prng_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
-    defer prng_lock.store(false, .release);
+    const prng = &@import("global.zig").prng;
+    while (prng.lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+    defer prng.lock.store(false, .release);
     if (buf.len == 0) {
         prng.s[0] = 0;
         return;
@@ -1670,9 +1670,11 @@ pub fn registerLikeFunctions(db: *Sqlite3, case_sensitive: bool) void {
     const like_flags: FUNC = .{ .LIKE = true, .CASE = case_sensitive };
     var n_arg: i32 = 2;
     while (n_arg <= 3) : (n_arg += 1) {
-        _ = callback.createFunc(db, "like", n_arg, ENC.UTF8, .{}, FuncDef.userDataFor(likeFunc, info), FuncDef.withUserData(likeFunc), null, null, null, null, null);
-        // Cannot fail: "like" already exists.
-        const def = callback.findFunction(db, "like", n_arg, ENC.UTF8, false).?;
+        if (callback.createFunc(db, "like", n_arg, ENC.UTF8, .{}, FuncDef.userDataFor(likeFunc, info), FuncDef.withUserData(likeFunc), null, null, null, null, null) != RC.OK) return;
+        // The function just made, an exact match (C finds it with
+        // sqlite3FindFunction() without createFlag; built-ins are
+        // read-only here).
+        const def = callback.findFunction(db, "like", n_arg, ENC.UTF8, true).?;
         def.func_flags.set(like_flags);
         def.func_flags.UNSAFE = false;
     }
@@ -1819,9 +1821,9 @@ fn waggregate(
     };
 }
 
-/// aBuiltinFunc[]: the functions of this file. Their next/hash_next links
-/// are set by callback.insertBuiltinFuncs(); read-only after that.
-var builtin_funcs = [_]FuncDef{
+/// aBuiltinFunc[] of sqlite3RegisterBuiltinFunctions(): the functions of
+/// this file, in callback.builtins.
+pub const funcs = [_]FuncDef{
     // Only with SQLITE_TESTCTRL_INTERNAL_FUNCTIONS.
     testFunc("implies_nonnull_row", 2, INLINEFUNC_implies_nonnull_row, .{}),
     testFunc("expr_compare", 2, INLINEFUNC_expr_compare, .{}),
@@ -1899,20 +1901,6 @@ var builtin_funcs = [_]FuncDef{
     inlineFunc("iif", -4, INLINEFUNC_iif, .{}),
     inlineFunc("if", -4, INLINEFUNC_iif, .{}),
 };
-
-/// Port of sqlite3RegisterBuiltinFunctions(): fill the global table of
-/// built-in functions. Called once, by callback.registerBuiltins().
-pub fn registerBuiltinFunctions() void {
-    @import("alter.zig").alterFunctions();
-    @import("window.zig").windowFunctions();
-    @import("json.zig").registerJsonFunctions();
-    callback.insertBuiltinFuncs(&builtin_funcs);
-    callback.insertBuiltinFuncs(&date_funcs);
-}
-
-/// sqlite3RegisterDateTimeFunctions(): the registry links its entries, so
-/// they need mutable storage.
-var date_funcs = @import("date.zig").funcs;
 
 // ================================================================== tests
 
@@ -2025,7 +2013,7 @@ fn expectError(db: *Sqlite3, want: []const u8, name: []const u8, args_in: anytyp
 /// rows (indexes into `rows`) are removed after all steps.
 const Agg = struct {
     db: *Sqlite3,
-    def: *FuncDef,
+    def: *const FuncDef,
     acc: Mem,
 
     fn init(db: *Sqlite3, name: []const u8, n_arg: i32) !Agg {

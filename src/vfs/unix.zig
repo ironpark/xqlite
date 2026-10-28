@@ -186,10 +186,28 @@ const FileId = struct {
     }
 };
 
+/// The process-wide state of this VFS (unixBigLock and inodeList of
+/// os_unix.c): POSIX locks belong to the process, so every handle on a
+/// file, whatever connection or Vfs it comes from, has to share one
+/// InodeInfo.
+var inodes: Inodes = .{};
+
+const Inodes = struct {
+    /// unixBigLock: guards `table`, InodeInfo.ref_count and the ShmNodes.
+    big_lock: Io.Mutex = .init,
+    table: std.AutoHashMapUnmanaged(FileId, *InodeInfo) = .empty,
+    /// What the full memory barrier of shmBarrier() is an atomic on.
+    barrier_word: u32 = 0,
+
+    /// The table outlives any one VFS instance, so it uses a global allocator.
+    const gpa = std.heap.smp_allocator;
+};
+
 /// Lock state shared by every handle on one inode (struct unixInodeInfo).
 ///
-/// Mutex rules mirror os_unix.c: `big_lock` guards the table and `ref_count`;
-/// `mutex` guards the lock fields. Never take `big_lock` while holding `mutex`.
+/// Mutex rules mirror os_unix.c: `inodes.big_lock` guards the table and
+/// `ref_count`; `mutex` guards the lock fields. Never take
+/// `inodes.big_lock` while holding `mutex`.
 const InodeInfo = struct {
     id: FileId,
     mutex: Io.Mutex = .init,
@@ -203,23 +221,18 @@ const InodeInfo = struct {
     unused: std.ArrayList(Io.File) = .empty,
     ref_count: u32 = 0,
     /// The shared memory of this database, while any handle maps it
-    /// (pShmNode). Created and destroyed under `big_lock`.
+    /// (pShmNode). Created and destroyed under `inodes.big_lock`.
     shm_node: ?*ShmNode = null,
-
-    /// The table outlives any one VFS instance, so it uses a global allocator.
-    const gpa = std.heap.smp_allocator;
-    var big_lock: Io.Mutex = .init;
-    var table: std.AutoHashMapUnmanaged(FileId, *InodeInfo) = .empty;
 
     /// Port of findInodeInfo().
     fn acquire(io: Io, file: Io.File) Error!*InodeInfo {
         const id = try FileId.of(file.handle);
-        big_lock.lockUncancelable(io);
-        defer big_lock.unlock(io);
-        const gop = try table.getOrPut(gpa, id);
+        inodes.big_lock.lockUncancelable(io);
+        defer inodes.big_lock.unlock(io);
+        const gop = try inodes.table.getOrPut(Inodes.gpa, id);
         if (!gop.found_existing) {
-            const info = gpa.create(InodeInfo) catch |err| {
-                table.removeByPtr(gop.key_ptr);
+            const info = Inodes.gpa.create(InodeInfo) catch |err| {
+                inodes.table.removeByPtr(gop.key_ptr);
                 return err;
             };
             info.* = .{ .id = id };
@@ -231,16 +244,16 @@ const InodeInfo = struct {
 
     /// Port of releaseInodeInfo().
     fn release(info: *InodeInfo, io: Io) void {
-        big_lock.lockUncancelable(io);
-        defer big_lock.unlock(io);
+        inodes.big_lock.lockUncancelable(io);
+        defer inodes.big_lock.unlock(io);
         info.ref_count -= 1;
         if (info.ref_count != 0) return;
         info.mutex.lockUncancelable(io);
         info.closePendingFds(io);
         info.mutex.unlock(io);
-        info.unused.deinit(gpa);
-        _ = table.remove(info.id);
-        gpa.destroy(info);
+        info.unused.deinit(Inodes.gpa);
+        _ = inodes.table.remove(info.id);
+        Inodes.gpa.destroy(info);
     }
 
     /// Caller holds `mutex`.
@@ -316,7 +329,7 @@ const shm_dms: u64 = shm_base + vfs.shm_nlock;
 /// The shared memory of one database, shared by every handle in this
 /// process that maps it (struct unixShmNode).
 ///
-/// `InodeInfo.big_lock` guards creation, destruction and `n_ref`;
+/// `inodes.big_lock` guards creation, destruction and `n_ref`;
 /// `mutex` guards everything else.
 const ShmNode = struct {
     inode: *InodeInfo,
@@ -380,7 +393,7 @@ fn shmRegionPerMap() u32 {
 }
 
 /// Port of unixShmPurge(): free the inode's ShmNode once nothing refers to
-/// it. Caller holds `big_lock`.
+/// it. Caller holds `inodes.big_lock`.
 fn shmPurge(io: Io, inode: *InodeInfo) void {
     const node = inode.shm_node orelse return;
     if (node.n_ref != 0) return;
@@ -391,11 +404,11 @@ fn shmPurge(io: Io, inode: *InodeInfo) void {
         const base: [*]align(std.heap.page_size_min) u8 = @alignCast(node.regions.items[i]);
         std.posix.munmap(base[0..len]);
     }
-    node.regions.deinit(InodeInfo.gpa);
+    node.regions.deinit(Inodes.gpa);
     node.file.close(io);
-    InodeInfo.gpa.free(node.filename);
+    Inodes.gpa.free(node.filename);
     inode.shm_node = null;
-    InodeInfo.gpa.destroy(node);
+    Inodes.gpa.destroy(node);
 }
 
 /// Port of unixLockSharedMemory(): take the shared DMS lock, first
@@ -471,7 +484,7 @@ const UnixFile = struct {
         inode.mutex.lockUncancelable(io);
         if (inode.n_lock != 0) {
             // Closing now would release locks held through other handles.
-            inode.unused.append(InodeInfo.gpa, f.file) catch {
+            inode.unused.append(Inodes.gpa, f.file) catch {
                 // Out of memory: leak the descriptor rather than break locks.
             };
         } else {
@@ -643,12 +656,12 @@ const UnixFile = struct {
     fn openSharedMemory(f: *UnixFile) Error!bool {
         std.debug.assert(f.shm == null);
         const io = f.owner.io;
-        const gpa = InodeInfo.gpa;
+        const gpa = Inodes.gpa;
         const p = try gpa.create(Shm);
         errdefer gpa.destroy(p);
 
-        InodeInfo.big_lock.lockUncancelable(io);
-        defer InodeInfo.big_lock.unlock(io);
+        inodes.big_lock.lockUncancelable(io);
+        defer inodes.big_lock.unlock(io);
         const inode = f.inode;
         var cant_init = false;
         const node = inode.shm_node orelse blk: {
@@ -724,7 +737,7 @@ const UnixFile = struct {
                     node.file.writePositionalAll(io, &.{0}, pg * pgsz + pgsz - 1) catch return error.ShmSize;
                 }
             }
-            try node.regions.ensureTotalCapacity(InodeInfo.gpa, n_req);
+            try node.regions.ensureTotalCapacity(Inodes.gpa, n_req);
             while (node.regions.items.len < n_req) {
                 const n_map = @as(usize, size) * per_map;
                 const mem = std.posix.mmap(
@@ -761,12 +774,10 @@ const UnixFile = struct {
     /// mutex for redundancy, as in os_unix.c.
     fn shmBarrier(ptr: *anyopaque) void {
         const f = cast(ptr);
-        _ = @atomicRmw(u32, &barrier_word, .Add, 0, .seq_cst);
-        InodeInfo.big_lock.lockUncancelable(f.owner.io);
-        InodeInfo.big_lock.unlock(f.owner.io);
+        _ = @atomicRmw(u32, &inodes.barrier_word, .Add, 0, .seq_cst);
+        inodes.big_lock.lockUncancelable(f.owner.io);
+        inodes.big_lock.unlock(f.owner.io);
     }
-
-    var barrier_word: u32 = 0;
 
     /// Port of unixShmUnmap(): disconnect this handle from the shared
     /// memory; the last one out deletes the -shm file if `delete`.
@@ -775,11 +786,11 @@ const UnixFile = struct {
         const p = f.shm orelse return;
         const node = p.node;
         const io = f.owner.io;
-        InodeInfo.gpa.destroy(p);
+        Inodes.gpa.destroy(p);
         f.shm = null;
 
-        InodeInfo.big_lock.lockUncancelable(io);
-        defer InodeInfo.big_lock.unlock(io);
+        inodes.big_lock.lockUncancelable(io);
+        defer inodes.big_lock.unlock(io);
         std.debug.assert(node.n_ref > 0);
         node.n_ref -= 1;
         if (node.n_ref == 0) {

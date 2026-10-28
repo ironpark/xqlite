@@ -94,12 +94,14 @@ pub const Module = struct {
     x_savepoint: ?*const fn (vtab: *Vtab, i: i32) i32 = null,
     x_release: ?*const fn (vtab: *Vtab, i: i32) i32 = null,
     x_rollback_to: ?*const fn (vtab: *Vtab, i: i32) i32 = null,
-    /// Whether `name` is the suffix of a shadow table name.
-    x_shadow_name: ?*const fn (name: []const u8) bool = null,
+    /// Whether `name` is the suffix of a shadow table name. `aux` is the
+    /// pAux of the module, as for xCreate (C passes nothing).
+    x_shadow_name: ?ShadowNameFn = null,
     /// Check the table's content; report problems in `err` (db.gpa).
     x_integrity: ?*const fn (vtab: *Vtab, schema: [:0]const u8, tab_name: [:0]const u8, flags: i32, err: *?[:0]u8) i32 = null,
 
     pub const ConstructFn = *const fn (db: *Sqlite3, aux: ?*anyopaque, argv: []const [:0]const u8, vtab: *?*Vtab, err: *?[:0]u8) i32;
+    pub const ShadowNameFn = *const fn (aux: ?*anyopaque, name: []const u8) bool;
 
     /// The type of the pAux that `f`, a typed xCreate or xConnect, takes
     /// as its second parameter.
@@ -112,6 +114,12 @@ pub const Module = struct {
     /// auxFor(f, aux) as pAux.
     pub fn constructor(comptime f: anytype) ConstructFn {
         return thunk.thunk(ConstructFn, f);
+    }
+
+    /// The ShadowNameFn of `f`, an xShadowName taking the pAux typed as
+    /// constructor() does.
+    pub fn shadowName(comptime f: anytype) ShadowNameFn {
+        return thunk.thunk(ShadowNameFn, f);
     }
 
     /// `p_aux`, of the type constructor(f) takes, as the pAux of a module.
@@ -978,7 +986,7 @@ pub fn savepoint(db: *Sqlite3, op: aux.SAVEPOINT, i_savepoint: i32) i32 {
 /// function `def`) is a column of a virtual table, let xFindFunction
 /// overload the function; returns `def` or a new ephemeral FuncDef
 /// (SQLITE_FUNC_EPHEM) allocated in `a`.
-pub fn overloadFunction(db: *Sqlite3, a: Allocator, def: *FuncDef, n_arg: i32, e_opt: ?*int.Expr) *FuncDef {
+pub fn overloadFunction(db: *Sqlite3, a: Allocator, def: *const FuncDef, n_arg: i32, e_opt: ?*int.Expr) *const FuncDef {
     const e = e_opt orelse return def;
     if (e.op != TK.COLUMN) return def;
     std.debug.assert(e.useYTab());
@@ -1156,7 +1164,7 @@ pub fn collation(info: *IndexInfo, i_cons: i32) ?[:0]const u8 {
     if (i_cons >= 0 and i_cons < info.constraints.len) {
         const i_term = info.constraints[@intCast(i_cons)].i_term_offset;
         const x = termFromWhereClause(hidden.wc, i_term).?.expr;
-        var c: ?*int.CollSeq = null;
+        var c: ?*const int.CollSeq = null;
         if (x.left != null) c = expr_mod.compareCollSeq(hidden.parse, x);
         return if (c) |cs| cs.name else "BINARY";
     }

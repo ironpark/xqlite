@@ -552,11 +552,8 @@ pub fn walCheckpoint(db: *Sqlite3, zdb: ?[]const u8) i32 {
     return walCheckpointV2(db, zdb, .passive, null, null);
 }
 
-/// The process-wide heap limits (mem0.alarmThreshold and mem0.hardLimit).
-/// Memory comes from the application's allocator, so they are only
-/// recorded, not enforced.
-var soft_heap_limit: std.atomic.Value(i64) = .init(0);
-var hard_heap_limit: std.atomic.Value(i64) = .init(0);
+const soft_heap_limit = &@import("global.zig").heap_limit.soft;
+const hard_heap_limit = &@import("global.zig").heap_limit.hard;
 
 /// Port of sqlite3_soft_heap_limit64(): set the soft limit unless `n` is
 /// negative; returns the prior value.

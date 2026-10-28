@@ -166,14 +166,11 @@ pub fn dataCount(v: *const Vdbe) usize {
 
 /// Port of columnMem(): the value of column `i` (a NULL outside a row).
 fn columnMem(v: *Vdbe, i: usize) *Mem {
-    const null_mem = struct {
-        var m: Mem = .{ .flags = .{ .Null = true } };
-    };
     if (v.result_row) |row| {
         if (i < v.n_res_column) return &row[i];
     }
-    null_mem.m = .{ .flags = .{ .Null = true } };
-    return &null_mem.m;
+    v.null_mem = .{ .flags = .{ .Null = true } };
+    return &v.null_mem;
 }
 
 /// Port of columnMallocFailure().
@@ -810,7 +807,7 @@ test "api: sorter and ephemeral table" {
     const v = try aux.create(&p);
     const a = v.alloc();
     var sort_flags = [_]u8{ int.KeyInfoOrder.desc, 0 };
-    var coll = [_]?*int.CollSeq{ null, null };
+    var coll = [_]?*const int.CollSeq{ null, null };
     const ki = try a.create(vi.KeyInfo);
     ki.* = .{ .n_key_field = 1, .n_all_field = 2, .db = &db, .sort_flags = &sort_flags, .coll = &coll };
 
@@ -877,7 +874,7 @@ test "api: sorter order and ties for each key type" {
         const v = try aux.create(&p);
         const a = v.alloc();
         var sort_flags = [_]u8{ 0, 0 };
-        var coll = [_]?*int.CollSeq{ null, null };
+        var coll = [_]?*const int.CollSeq{ null, null };
         const ki = try a.create(vi.KeyInfo);
         ki.* = .{ .n_key_field = 1, .n_all_field = 2, .db = &db, .sort_flags = &sort_flags, .coll = &coll };
 

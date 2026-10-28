@@ -1007,9 +1007,9 @@ pub fn dataType(e_arg: ?*const Expr) u8 {
 
 /// Port of sqlite3ExprCollSeq(): the collation of `e` from a COLLATE or a
 /// column, or null.
-pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*CollSeq {
+pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*const CollSeq {
     const db = p.db;
-    var coll: ?*CollSeq = null;
+    var coll: ?*const CollSeq = null;
     var e = e_arg;
     while (e) |x| {
         var op = x.op;
@@ -1060,7 +1060,7 @@ pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*CollSeq {
 }
 
 /// Port of sqlite3ExprNNCollSeq(): like collSeq(), but BINARY by default.
-pub fn nnCollSeq(p: *Parse, e: ?*const Expr) *CollSeq {
+pub fn nnCollSeq(p: *Parse, e: ?*const Expr) *const CollSeq {
     return collSeq(p, e) orelse coll_mod.defaultColl();
 }
 
@@ -1112,14 +1112,14 @@ pub fn binaryCompareP5(e1: *const Expr, e2: *const Expr, jump_if_null: u16) u16 
 
 /// Port of sqlite3BinaryCompareCollSeq(): the collation of a comparison:
 /// an explicit COLLATE, else the left operand's, else the right's.
-pub fn binaryCompareCollSeq(p: *Parse, left: *const Expr, right: ?*const Expr) ?*CollSeq {
+pub fn binaryCompareCollSeq(p: *Parse, left: *const Expr, right: ?*const Expr) ?*const CollSeq {
     if (left.flags.Collate) return collSeq(p, left);
     if (right) |r| if (r.flags.Collate) return collSeq(p, r);
     return collSeq(p, left) orelse collSeq(p, right);
 }
 
 /// Port of sqlite3ExprCompareCollSeq().
-pub fn compareCollSeq(p: *Parse, e: *const Expr) ?*CollSeq {
+pub fn compareCollSeq(p: *Parse, e: *const Expr) ?*const CollSeq {
     if (e.flags.Commuted) return binaryCompareCollSeq(p, e.right.?, e.left);
     return binaryCompareCollSeq(p, e.left.?, e.right);
 }

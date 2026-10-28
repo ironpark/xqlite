@@ -12,6 +12,7 @@ const int = @import("../../sql/sqlite_int.zig");
 const main_mod = @import("../../sql/main.zig");
 const btree = @import("../../btree/btree.zig");
 const vtab_mod = @import("../../sql/vtab.zig");
+const cast = @import("../../util/cast.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
@@ -242,7 +243,7 @@ pub fn opTransaction(e: *Exec, op: *Op) Error!Flow {
 
 pub fn opReadCookie(e: *Exec, op: *Op) Flow {
     const bt = e.db.dbs.items[@intCast(op.p1)].bt.?;
-    const meta = bt.getMeta(@enumFromInt(op.p3));
+    const meta = bt.getMeta(cast.enumFromInt(btree.Meta, op.p3));
     e.out2Prerelease(op).u = .{ .i = @as(i32, @bitCast(meta)) };
     return .next;
 }
@@ -250,7 +251,7 @@ pub fn opReadCookie(e: *Exec, op: *Op) Flow {
 pub fn opSetCookie(e: *Exec, op: *Op) Error!Flow {
     const db = e.db;
     const pdb = &db.dbs.items[@intCast(op.p1)];
-    const rc_err = pdb.bt.?.updateMeta(@enumFromInt(op.p2), @bitCast(op.p3));
+    const rc_err = pdb.bt.?.updateMeta(cast.enumFromInt(btree.Meta, op.p2), @bitCast(op.p3));
     if (op.p2 == @intFromEnum(btree.Meta.schema_version)) {
         pdb.schema.schema_cookie = op.p3 - op.p5;
         db.m_db_flags.SchemaChange = true;
@@ -414,7 +415,7 @@ pub fn opJournalMode(e: *Exec, op: *Op) Error!Flow {
     const bt = db.dbs.items[@intCast(op.p1)].bt.?;
     const pager = bt.pager;
     const old = pager.journal_mode;
-    var new: @TypeOf(old) = if (op.p3 < 0) old else @enumFromInt(op.p3);
+    var new: @TypeOf(old) = if (op.p3 < 0) old else cast.enumFromInt(@TypeOf(old), op.p3);
     if (!pager.okToChangeJournalMode()) new = old;
 
     // No WAL for a temporary database or without shared memory.
@@ -467,7 +468,7 @@ pub fn opExpire(e: *Exec, op: *Op) Flow {
     if (op.p1 == 0) {
         aux.expirePreparedStatements(e.db, @intCast(op.p2));
     } else {
-        e.v.expired = @intCast(op.p2 + 1);
+        e.v.expired = cast.intCast(@TypeOf(e.v.expired), op.p2 + 1);
     }
     return .next;
 }

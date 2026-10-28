@@ -186,7 +186,7 @@ pub fn keyInfoAlloc(p: *Parse, n: usize, x: usize) ?*vi.KeyInfo {
         .db = p.db,
         .enc = p.db.enc,
         .sort_flags = a.alloc(u8, n + x) catch return oomNull(p),
-        .coll = a.alloc(?*int.CollSeq, n + x) catch return oomNull(p),
+        .coll = a.alloc(?*const int.CollSeq, n + x) catch return oomNull(p),
     };
     @memset(k.sort_flags, 0);
     @memset(k.coll, null);
@@ -1222,8 +1222,8 @@ fn computeLimitRegisters(p: *Parse, s: *Select, i_break: i32) void {
 
 /// Port of multiSelectCollSeq(): the collation of column `i_col` of a
 /// compound: that of the leftmost term that has one.
-fn multiSelectCollSeq(p: *Parse, s: *Select, i_col: usize) ?*CollSeq {
-    var ret: ?*CollSeq = if (s.prior) |pr| multiSelectCollSeq(p, pr, i_col) else null;
+fn multiSelectCollSeq(p: *Parse, s: *Select, i_col: usize) ?*const CollSeq {
+    var ret: ?*const CollSeq = if (s.prior) |pr| multiSelectCollSeq(p, pr, i_col) else null;
     if (ret == null and i_col < s.e_list.?.len()) ret = expr_mod.collSeq(p, s.e_list.?.at(i_col).expr);
     return ret;
 }
@@ -1237,7 +1237,7 @@ fn multiSelectByMergeKeyInfo(p: *Parse, s: *Select, n_extra: usize) ?*KeyInfo {
     for (0..n_order_by) |i| {
         const item = order_by.?.at(i);
         const term = item.expr.?;
-        var c: *CollSeq = undefined;
+        var c: *const CollSeq = undefined;
         if (term.flags.Collate) {
             c = expr_mod.collSeq(p, term) orelse coll_mod.defaultColl();
         } else {
@@ -3258,7 +3258,7 @@ fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: in
             expr_mod.releaseTempRange(p, reg_agg, reg_agg_sz);
         } else {
             if (f.func.?.func_flags.NEEDCOLL) {
-                var c: ?*CollSeq = null;
+                var c: ?*const CollSeq = null;
                 for (list.?.slice()) |item| {
                     if (c != null) break;
                     c = expr_mod.collSeq(p, item.expr);

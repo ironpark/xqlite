@@ -139,7 +139,7 @@ pub const MemValue = extern union {
     /// Pointer type of a MEM_Null|MEM_Term|MEM_Subtype pointer value.
     z_ptype: [*:0]const u8,
     /// The function of a MEM_Agg cell.
-    def: *FuncDef,
+    def: *const FuncDef,
 };
 
 /// A value: a register of the VM, a function argument or result
@@ -206,7 +206,7 @@ pub const KeyInfo = struct {
     /// KEYINFO_ORDER_* flags of each field.
     sort_flags: []u8,
     /// Collation of each field; null means BINARY.
-    coll: []?*CollSeq,
+    coll: []?*const CollSeq,
 };
 
 /// A record parsed into fields, for comparisons (UnpackedRecord).
@@ -330,8 +330,8 @@ pub const P4Union = extern union {
     /// memory handed over by a module (the idxStr of OP_VFilter).
     dynamic: [*:0]u8,
     int32: i32,
-    collseq: *CollSeq,
-    funcdef: *FuncDef,
+    collseq: *const CollSeq,
+    funcdef: *const FuncDef,
     keyinfo: *KeyInfo,
     mem: *Mem,
     /// The first element is the count of those that follow
@@ -354,8 +354,8 @@ pub const P4 = union(P4Type) {
     z: [:0]const u8,
     dynamic: [:0]u8,
     int32: i32,
-    collseq: *CollSeq,
-    funcdef: *FuncDef,
+    collseq: *const CollSeq,
+    funcdef: *const FuncDef,
     keyinfo: *KeyInfo,
     mem: *Mem,
     /// The first element is the count of those that follow.
@@ -510,7 +510,7 @@ pub const AuxData = struct {
 /// The context of a function call (sqlite3_context).
 pub const Context = struct {
     out: *Mem,
-    func: *FuncDef,
+    func: *const FuncDef,
     /// The aggregate context cell.
     mem: ?*Mem = null,
     vdbe: ?*Vdbe = null,
@@ -564,6 +564,12 @@ pub const Vdbe = struct {
     ops: std.ArrayList(Op) = .empty,
     col_names: []Mem = &.{},
     result_row: ?[*]Mem = null,
+    /// What api.columnMem() returns outside a row (C: a static const
+    /// nullMem, which callers may not write; here they may).
+    null_mem: Mem = .{ .flags = .{ .Null = true } },
+    /// What aux.getOp() returns after an allocation failure (C: a static
+    /// VdbeOp), so that writes through it go nowhere.
+    dummy_op: Op = .{ .opcode = @fromBackingInt(0) },
     err_msg: ?[:0]u8 = null,
     /// Names of named parameters.
     vlist: []const int.VListEntry = &.{},

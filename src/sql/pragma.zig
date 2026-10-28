@@ -427,27 +427,24 @@ fn pragmaLocate(name: []const u8) ?*const PragmaName {
     return null;
 }
 
-/// Port of pragmaFunclistLine(): a row of PRAGMA function_list for each
-/// implementation of function `first`.
-fn pragmaFunclistLine(v: *Vdbe, first: ?*int.FuncDef, is_builtin: bool, show_intern_funcs: bool) void {
+/// Port of pragmaFunclistLine(): the row of PRAGMA function_list for the
+/// implementation `f`, if it is shown (C loops over the pNext chain here).
+fn pragmaFunclistLine(v: *Vdbe, f: *const int.FuncDef, is_builtin: bool, show_intern_funcs: bool) void {
     const FN = callback.FNFLAG;
     // The flags column shows the bits of FuncDef.funcFlags as C has them.
     const shown: callback.FUNC = FN.DETERMINISTIC.with(FN.DIRECTONLY).with(FN.SUBTYPE).with(FN.INNOCUOUS).with(.{ .INTERNAL = true });
     const enc_names = [_]?[]const u8{ null, "utf8", "utf16le", "utf16be" };
-    var f_opt = first;
-    while (f_opt) |f| : (f_opt = f.next) {
-        if (f.x_sfunc == null) continue;
-        if (f.func_flags.INTERNAL and !show_intern_funcs) continue;
-        const typ: []const u8 = if (f.x_value != null) "w" else if (f.x_finalize != null) "a" else "s";
-        aux.multiLoad(v, 1, &.{
-            .{ .s = f.name },
-            .{ .i = @intFromBool(is_builtin) },
-            .{ .s = typ },
-            .{ .s = enc_names[f.func_flags.enc] },
-            .{ .i = f.n_arg },
-            .{ .i = @bitCast((if (show_intern_funcs) f.func_flags else f.func_flags.only(shown)).int() ^ FN.INNOCUOUS.int()) },
-        }, false);
-    }
+    if (f.x_sfunc == null) return;
+    if (f.func_flags.INTERNAL and !show_intern_funcs) return;
+    const typ: []const u8 = if (f.x_value != null) "w" else if (f.x_finalize != null) "a" else "s";
+    aux.multiLoad(v, 1, &.{
+        .{ .s = f.name },
+        .{ .i = @intFromBool(is_builtin) },
+        .{ .s = typ },
+        .{ .s = enc_names[f.func_flags.enc] },
+        .{ .i = f.n_arg },
+        .{ .i = @bitCast((if (show_intern_funcs) f.func_flags else f.func_flags.only(shown)).int() ^ FN.INNOCUOUS.int()) },
+    }, false);
 }
 
 /// Port of integrityCheckResultRow(): output the row in register 3, count
@@ -999,13 +996,14 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         .function_list => {
             const show_intern = db.m_db_flags.InternalFunc;
             p.n_mem = 6;
-            callback.registerBuiltins();
-            for (0..callback.func_hash_sz) |i| {
-                var f_opt = callback.builtinBucket(i);
-                while (f_opt) |f| : (f_opt = f.hash_next) pragmaFunclistLine(v, f, true, show_intern);
+            for (callback.builtins.names) |defs| {
+                for (defs) |*f| pragmaFunclistLine(v, f, true, show_intern);
             }
             var it = db.funcs.valueIterator();
-            while (it.next()) |f| pragmaFunclistLine(v, f.*, false, show_intern);
+            while (it.next()) |head| {
+                var f_opt: ?*int.FuncDef = head.*;
+                while (f_opt) |f| : (f_opt = f.next) pragmaFunclistLine(v, f, false, show_intern);
+            }
         },
 
         // PRAGMA module_list: the virtual table modules.

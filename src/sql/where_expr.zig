@@ -532,7 +532,7 @@ fn exprAnalyzeOrTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
         if (ok_to_chng_to_in) {
             var list: ?*ExprList = null;
             var left: ?*Expr = null;
-            var coll_seq: ?*CollSeq = null;
+            var coll_seq: ?*const CollSeq = null;
             var new: ?*Expr = null;
 
             var k: usize = 0;

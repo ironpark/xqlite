@@ -2,10 +2,10 @@
 //! registration of application-defined functions (sqlite3CreateFunc() and
 //! friends of main.c).
 //!
-//! Built-in functions live in one process-wide hash table
-//! (sqlite3BuiltinFunctions), filled once on first use from the static
-//! FuncDef arrays of func.zig. Application-defined functions belong to
-//! the connection (Sqlite3.funcs).
+//! Built-in functions live in one read-only hash table
+//! (sqlite3BuiltinFunctions), built at compile time from the FuncDef
+//! arrays that `builtin_defs` lists. Application-defined functions belong
+//! to the connection (Sqlite3.funcs).
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -152,30 +152,73 @@ fn funcHash(c: u8, n: usize) usize {
     return (@as(usize, c) + n) % func_hash_sz;
 }
 
-/// sqlite3BuiltinFunctions: the hash table of built-in functions, chained
-/// through FuncDef.hash_next. Read-only once built.
-var builtin_functions: [func_hash_sz]?*FuncDef = @splat(null);
+/// The built-in functions, in the order sqlite3RegisterBuiltinFunctions()
+/// adds them to the table.
+const builtin_defs = @import("alter.zig").funcs ++ @import("window.zig").funcs ++
+    @import("date.zig").funcs ++ @import("json.zig").funcs ++ func.funcs;
 
-/// The head of bucket `i` of the built-in function table
-/// (sqlite3BuiltinFunctions.a[i]), for PRAGMA function_list.
-pub fn builtinBucket(i: usize) ?*FuncDef {
-    return builtin_functions[i];
-}
+/// sqlite3BuiltinFunctions: the hash table of the built-in functions,
+/// built at compile time as sqlite3InsertBuiltinFuncs() builds it at
+/// startup. Instead of the u.pHash and pNext links, each name has a slice
+/// of its definitions in the order of its pNext chain, and the names of a
+/// bucket are next to each other in the order of its u.pHash chain.
+pub const builtins: Builtins = Builtins.build(&builtin_defs);
 
-/// 0: not built, 1: being built, 2: ready.
-var builtins_state: std.atomic.Value(u8) = .init(0);
+pub const Builtins = struct {
+    /// The definitions of each name, bucket by bucket.
+    names: []const []const FuncDef,
+    /// The names in bucket h are names[buckets[h]..buckets[h + 1]].
+    buckets: [func_hash_sz + 1]u16,
 
-/// Build the built-in function table if that has not happened yet (the
-/// part of sqlite3_initialize() that calls sqlite3RegisterBuiltinFunctions()).
-pub fn registerBuiltins() void {
-    if (builtins_state.load(.acquire) == 2) return;
-    if (builtins_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
-        func.registerBuiltinFunctions();
-        builtins_state.store(2, .release);
-        return;
+    /// Port of sqlite3InsertBuiltinFuncs(), run on `defs` at compile time.
+    fn build(comptime defs: []const FuncDef) Builtins {
+        @setEvalBranchQuota(100_000);
+        // The table as C links it, by index into `defs`.
+        var head: [func_hash_sz]?usize = @splat(null);
+        var hash_next: [defs.len]?usize = @splat(null);
+        var next: [defs.len]?usize = @splat(null);
+        for (defs, 0..) |d, i| {
+            std.debug.assert(d.func_flags.BUILTIN);
+            const h = funcHash(if (d.name.len > 0) d.name[0] else 0, d.name.len);
+            var other = head[h];
+            while (other) |o| : (other = hash_next[o]) {
+                if (ctype.eqlNoCase(defs[o].name, d.name)) break;
+            }
+            if (other) |o| {
+                next[i] = next[o];
+                next[o] = i;
+            } else {
+                hash_next[i] = head[h];
+                head[h] = i;
+            }
+        }
+        // Lay the chains out in order.
+        var order: [defs.len]FuncDef = undefined;
+        var ends: [defs.len]usize = undefined;
+        var buckets: [func_hash_sz + 1]u16 = undefined;
+        var n_def: usize = 0;
+        var n_name: usize = 0;
+        for (head, 0..) |first, h| {
+            buckets[h] = @intCast(n_name);
+            var name = first;
+            while (name) |k| : (name = hash_next[k]) {
+                var p: ?usize = k;
+                while (p) |j| : (p = next[j]) {
+                    order[n_def] = defs[j];
+                    n_def += 1;
+                }
+                ends[n_name] = n_def;
+                n_name += 1;
+            }
+        }
+        buckets[func_hash_sz] = @intCast(n_name);
+        const laid_out = order;
+        var names: [n_name][]const FuncDef = undefined;
+        for (&names, 0..) |*n, i| n.* = laid_out[if (i == 0) 0 else ends[i - 1]..ends[i]];
+        const final = names;
+        return .{ .names = &final, .buckets = buckets };
     }
-    while (builtins_state.load(.acquire) != 2) std.atomic.spinLoopHint();
-}
+};
 
 /// The score of a perfect match in matchQuality().
 const func_perfect_match = 6;
@@ -204,33 +247,13 @@ fn matchQuality(p: *const FuncDef, n_arg: i32, enc: u8) i32 {
     return match;
 }
 
-/// Port of sqlite3FunctionSearch(): the built-in named `name` in bucket
-/// `h`, or null.
-pub fn functionSearch(h: usize, name: []const u8) ?*FuncDef {
-    var p = builtin_functions[h];
-    while (p) |f| : (p = f.hash_next) {
-        std.debug.assert(f.func_flags.BUILTIN);
-        if (ctype.eqlNoCase(f.name, name)) return f;
+/// Port of sqlite3FunctionSearch(): the definitions of the built-in named
+/// `name` in bucket `h`, or none.
+pub fn functionSearch(h: usize, name: []const u8) []const FuncDef {
+    for (builtins.names[builtins.buckets[h]..builtins.buckets[h + 1]]) |defs| {
+        if (ctype.eqlNoCase(defs[0].name, name)) return defs;
     }
-    return null;
-}
-
-/// Port of sqlite3InsertBuiltinFuncs(): add `defs` to the built-in table.
-/// The array must stay alive for the life of the process.
-pub fn insertBuiltinFuncs(defs: []FuncDef) void {
-    for (defs) |*d| {
-        const h = funcHash(if (d.name.len > 0) d.name[0] else 0, d.name.len);
-        std.debug.assert(d.func_flags.BUILTIN);
-        if (functionSearch(h, d.name)) |other| {
-            std.debug.assert(other != d and other.next != d);
-            d.next = other.next;
-            other.next = d;
-        } else {
-            d.next = null;
-            d.hash_next = builtin_functions[h];
-            builtin_functions[h] = d;
-        }
-    }
+    return &.{};
 }
 
 // ================================================================ lookup
@@ -238,12 +261,12 @@ pub fn insertBuiltinFuncs(defs: []FuncDef) void {
 /// Port of sqlite3FindFunction(): the function `name` taking `n_arg`
 /// arguments (-1 any; -2 the first with an implementation), preferring
 /// text encoding `enc`. Application-defined functions come first, unless
-/// DBFLAG.PreferBuiltin is set. With `create`, a blank FuncDef is added
-/// to the connection when there is no exact match (null on OOM).
-pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, create: bool) ?*FuncDef {
+/// DBFLAG.PreferBuiltin is set. With `create`, only those of the
+/// connection are looked at, and a blank FuncDef is added to it when there
+/// is no exact match (null on OOM); a built-in is read-only.
+pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, comptime create: bool) if (create) ?*FuncDef else ?*const FuncDef {
     std.debug.assert(n_arg >= -2);
     std.debug.assert(n_arg >= -1 or !create);
-    registerBuiltins();
     var best: ?*FuncDef = null;
     var best_score: i32 = 0;
 
@@ -257,23 +280,9 @@ pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, create:
         }
     }
 
-    // Then the built-ins, unless creating a new function: those are
-    // read-only.
-    if (!create and (best == null or db.m_db_flags.PreferBuiltin)) {
-        best_score = 0;
-        const h = funcHash(ctype.toLower(if (name.len > 0) name[0] else 0), name.len);
-        p = functionSearch(h, name);
-        while (p) |f| : (p = f.next) {
-            const score = matchQuality(f, n_arg, enc);
-            if (score > best_score) {
-                best = f;
-                best_score = score;
-            }
-        }
-    }
-
     // Add a new entry if creating and there was no exact match.
-    if (create and best_score < func_perfect_match) {
+    if (create) {
+        if (best_score == func_perfect_match) return best;
         const new = newFuncDef(db, name, n_arg, enc) orelse {
             db.oomFault();
             return null;
@@ -285,10 +294,23 @@ pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, create:
         };
         new.next = if (gop.found_existing) gop.value_ptr.* else null;
         gop.value_ptr.* = new;
-        best = new;
+        return new;
     }
 
-    if (best) |b| if (b.x_sfunc != null or create) return b;
+    // Then the built-ins.
+    var found: ?*const FuncDef = best;
+    if (best == null or db.m_db_flags.PreferBuiltin) {
+        best_score = 0;
+        const h = funcHash(ctype.toLower(if (name.len > 0) name[0] else 0), name.len);
+        for (functionSearch(h, name)) |*f| {
+            const score = matchQuality(f, n_arg, enc);
+            if (score > best_score) {
+                found = f;
+                best_score = score;
+            }
+        }
+    }
+    if (found) |f| if (f.x_sfunc != null) return f;
     return null;
 }
 
@@ -399,8 +421,8 @@ pub fn createFunc(
 
     // Overriding or deleting a function is refused while statements run;
     // otherwise prepared statements are expired.
-    var p = findFunction(db, z_name, n_arg, @intCast(enc), false);
-    if (p != null and p.?.func_flags.enc == enc and p.?.n_arg == n_arg) {
+    const old = findFunction(db, z_name, n_arg, @intCast(enc), false);
+    if (old != null and old.?.func_flags.enc == enc and old.?.n_arg == n_arg) {
         if (db.n_vdbe_active != 0) {
             @import("main.zig").errorWithMsg(db, RC.BUSY, "unable to delete/modify user-function due to active statements", .{});
             return RC.BUSY;
@@ -411,8 +433,7 @@ pub fn createFunc(
         return RC.OK;
     }
 
-    p = findFunction(db, z_name, n_arg, @intCast(enc), true);
-    const f = p orelse return RC.NOMEM;
+    const f = findFunction(db, z_name, n_arg, @intCast(enc), true) orelse return RC.NOMEM;
 
     // Run the destructor of the version being replaced.
     functionDestroy(db, f);

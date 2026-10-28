@@ -2000,7 +2000,9 @@ fn internalFunction(name: [:0]const u8, n_arg: i16, x: FuncDef.StepFn) FuncDef {
     };
 }
 
-var alter_table_funcs = [_]FuncDef{
+/// aAlterTableFuncs[] of sqlite3AlterFunctions(): the built-in functions
+/// of ALTER TABLE, in callback.builtins.
+pub const funcs = [_]FuncDef{
     internalFunction("sqlite_rename_column", 9, renameColumnFunc),
     internalFunction("sqlite_rename_table", 7, renameTableFunc),
     internalFunction("sqlite_rename_test", 7, renameTableTest),
@@ -2011,9 +2013,3 @@ var alter_table_funcs = [_]FuncDef{
     internalFunction("sqlite_add_constraint", 3, addConstraintFunc),
     internalFunction("sqlite_find_constraint", 2, findConstraintFunc),
 };
-
-/// Port of sqlite3AlterFunctions(): register the built-in functions of
-/// ALTER TABLE.
-pub fn alterFunctions() void {
-    callback.insertBuiltinFuncs(&alter_table_funcs);
-}

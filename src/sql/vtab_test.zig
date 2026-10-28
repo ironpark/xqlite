@@ -548,7 +548,7 @@ fn kvFindFunction(p: *vtab.Vtab, n_arg: i32, name: [:0]const u8, func: *?int.Fun
     return 0;
 }
 
-fn kvShadowName(name: []const u8) bool {
+fn kvShadowName(_: ?*anyopaque, name: []const u8) bool {
     return std.mem.eql(u8, name, "shadow");
 }
 

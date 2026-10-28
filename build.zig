@@ -175,6 +175,21 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(doc_tests).step);
+
+    // ... and that src/ keeps no mutable globals but the few it lists.
+    const globals_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/globals_test.zig"),
+            .target = target,
+            // It runs every time (see below); optimized, that takes 30ms.
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const run_globals_tests = b.addRunArtifact(globals_tests);
+    run_globals_tests.setCwd(b.path("."));
+    // It reads src/ at run time, which the cache does not see.
+    run_globals_tests.has_side_effects = true;
+    test_step.dependOn(&run_globals_tests.step);
     test_step.dependOn(examples_step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.

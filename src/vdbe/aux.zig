@@ -77,10 +77,6 @@ pub const PREPARE_FROM_DDL: u8 = 0x20;
 pub const PREPARE_SAVESQL: u8 = 0x80;
 pub const PREPARE_MASK: u8 = 0x3f;
 
-/// A placeholder returned by `getOp` after an allocation failure: readable
-/// but never written.
-var dummy_op: Op = .{ .opcode = @fromBackingInt(0) };
-
 /// Port of sqlite3VdbeAddOp3(): append an instruction; returns its
 /// address.
 pub fn addOp3(v: *Vdbe, op: OP, p1: i32, p2: i32, p3: i32) i32 {
@@ -173,7 +169,7 @@ pub const NC_SelfRef: i32 = 0x00002e;
 
 /// Port of sqlite3VdbeAddFunctionCall(): OP_Function, or OP_PureFunc when
 /// `e_call_ctx` is set, with a context for `func`.
-pub fn addFunctionCall(p: *Parse, p1: i32, p2: i32, p3: i32, n_arg: i32, func: *int.FuncDef, e_call_ctx: i32) i32 {
+pub fn addFunctionCall(p: *Parse, p1: i32, p2: i32, p3: i32, n_arg: i32, func: *const int.FuncDef, e_call_ctx: i32) i32 {
     const v = p.vdbe.?;
     const a = v.alloc();
     const ctx = a.create(vi.Context) catch {
@@ -508,8 +504,8 @@ pub fn noopComment(v: *Vdbe, comptime fmt: []const u8, args: anytype) void {
 pub fn getOp(v: *Vdbe, addr: i32) *Op {
     std.debug.assert(v.e_vdbe_state == .init);
     if (v.db.malloc_failed) {
-        dummy_op = .{ .opcode = @fromBackingInt(0) };
-        return &dummy_op;
+        v.dummy_op = .{ .opcode = @fromBackingInt(0) };
+        return &v.dummy_op;
     }
     return &v.ops.items[@intCast(addr)];
 }

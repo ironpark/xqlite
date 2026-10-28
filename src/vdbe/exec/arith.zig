@@ -8,6 +8,7 @@ const vi = @import("../vdbe_int.zig");
 const mem = @import("../mem.zig");
 const serial = @import("../serial.zig");
 const int = @import("../../sql/sqlite_int.zig");
+const cast = @import("../../util/cast.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
@@ -184,12 +185,12 @@ pub fn opBit(e: *Exec, op: *Op) Flow {
             ia = if (ia >= 0 or opc == OP.ShiftLeft) 0 else -1;
         } else {
             var ua: u64 = @bitCast(ia);
-            const sh: u6 = @intCast(ib);
+            const sh = cast.intCast(u6, ib);
             if (opc == OP.ShiftLeft) {
                 ua <<= sh;
             } else {
                 ua >>= sh;
-                if (ia < 0) ua |= ~@as(u64, 0) << @intCast(64 - ib);
+                if (ia < 0) ua |= ~@as(u64, 0) << cast.intCast(u6, 64 - ib);
             }
             ia = @bitCast(ua);
         }

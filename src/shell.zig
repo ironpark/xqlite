@@ -1942,8 +1942,7 @@ pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: [
     // For differential testing against an sqlite3 built with vtablog.c
     // (see tools/planner/README.md).
     if (std.c.getenv("XQ_VTABLOG") != null) {
-        xqlite.ext.vtablog.out = out;
-        _ = xqlite.ext.vtablog.init(db);
+        _ = xqlite.ext.vtablog.init(db, out);
     }
 
     var stdin_buf: [16384]u8 = undefined;

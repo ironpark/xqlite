@@ -1542,7 +1542,7 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
     if (def.func_flags.intersects(.{ .DIRECT = true, .UNSAFE = true })) expr_mod.functionUsable(p, e, def);
 
     var const_mask: u32 = 0;
-    var coll: ?*CollSeq = null;
+    var coll: ?*const CollSeq = null;
     if (farg) |f| for (f.slice(), 0..) |item, i| {
         if (i < 32 and expr_mod.isConstant(p, item.expr)) const_mask |= @as(u32, 1) << @intCast(i);
         if (def.func_flags.NEEDCOLL and coll == null) coll = expr_mod.collSeq(p, item.expr);

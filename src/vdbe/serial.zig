@@ -820,7 +820,7 @@ test "serial: compare records" {
     // Record (1, 'abc') vs unpacked (1, 'abd').
     const rec = [_]u8{ 3, 1, 19, 1, 'a', 'b', 'c' };
     var sort_flags = [_]u8{ 0, 0 };
-    var coll = [_]?*CollSeq{ null, null };
+    var coll = [_]?*const CollSeq{ null, null };
     var ki: KeyInfo = .{ .n_key_field = 2, .n_all_field = 2, .db = null, .sort_flags = &sort_flags, .coll = &coll };
     var cells: [2]Mem = .{ .{}, .{} };
     mem.setInt64(&cells[0], 1);

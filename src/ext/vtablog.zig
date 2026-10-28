@@ -31,18 +31,18 @@ const Mem = vi.Mem;
 const RC = int.RC;
 const IC = vtab.INDEX_CONSTRAINT;
 
-/// Where the calls are printed (stdout in C).
-pub var out: ?*std.Io.Writer = null;
+/// Where the calls are printed (stdout in C): the pAux of the module.
+const Out = *std.Io.Writer;
 
-fn print(comptime fmt: []const u8, args: anytype) void {
-    const w = out orelse return;
-    w.print(fmt, args) catch {};
+fn printTo(out: Out, comptime fmt: []const u8, args: anytype) void {
+    out.print(fmt, args) catch {};
 }
 
 /// vtablog_vtab.
 const LogVtab = struct {
     base: vtab.Vtab = .{},
     gpa: std.mem.Allocator,
+    out: Out,
     /// Schema name: argv[1] of xConnect/xCreate.
     z_db: [:0]u8,
     /// Table name: argv[2] of xConnect/xCreate.
@@ -56,6 +56,10 @@ const LogVtab = struct {
 
     fn of(p: *vtab.Vtab) *LogVtab {
         return @fieldParentPtr("base", p);
+    }
+
+    fn print(t: *const LogVtab, comptime fmt: []const u8, args: anytype) void {
+        printTo(t.out, fmt, args);
     }
 };
 
@@ -149,7 +153,7 @@ fn atoi(z: []const u8) i32 {
 }
 
 /// Port of vtablogConnectCreate().
-fn connectCreate(db: *Sqlite3, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8, is_create: bool) i32 {
+fn connectCreate(db: *Sqlite3, out: Out, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8, is_create: bool) i32 {
     const gpa = db.gpa;
     var rc: i32 = RC.OK;
     var z_schema: ?[:0]u8 = null;
@@ -161,9 +165,9 @@ fn connectCreate(db: *Sqlite3, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab
         freeParam(gpa, z_consume_ob);
     }
 
-    print("{s}.{s}.{s}():\n", .{ argv[1], argv[2], if (is_create) "xCreate" else "xConnect" });
-    print("  argc={d}\n", .{argv.len});
-    for (argv, 0..) |a, i| print("  argv[{d}] = [{s}]\n", .{ i, a });
+    printTo(out, "{s}.{s}.{s}():\n", .{ argv[1], argv[2], if (is_create) "xCreate" else "xConnect" });
+    printTo(out, "  argc={d}\n", .{argv.len});
+    for (argv, 0..) |a, i| printTo(out, "  argv[{d}] = [{s}]\n", .{ i, a });
 
     for (argv[3..]) |z| {
         if (stringParameter(gpa, err, "schema", z, &z_schema)) return RC.ERROR;
@@ -173,12 +177,13 @@ fn connectCreate(db: *Sqlite3, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab
     if (z_schema == null) {
         z_schema = gpa.dupeSentinel(u8, "CREATE TABLE x(a,b);", 0) catch return RC.NOMEM;
     }
-    print("  schema = '{s}'\n", .{paramText(z_schema.?)});
+    printTo(out, "  schema = '{s}'\n", .{paramText(z_schema.?)});
     rc = vtab.declareVtab(db, paramText(z_schema.?));
     if (rc == RC.OK) {
         const new = gpa.create(LogVtab) catch return RC.NOMEM;
         new.* = .{
             .gpa = gpa,
+            .out = out,
             .z_db = gpa.dupeSentinel(u8, argv[1], 0) catch {
                 gpa.destroy(new);
                 return RC.NOMEM;
@@ -190,19 +195,19 @@ fn connectCreate(db: *Sqlite3, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab
         };
         pp_vtab.* = &new.base;
         if (z_nrow) |z| new.n_row = atoi(paramText(z));
-        print("  nrow = {d}\n", .{new.n_row});
+        printTo(out, "  nrow = {d}\n", .{new.n_row});
         if (z_consume_ob) |z| new.i_consume_ob = atoi(paramText(z));
-        if (new.i_consume_ob != 0) print("  consume_order_by = {d}\n", .{new.i_consume_ob});
+        if (new.i_consume_ob != 0) printTo(out, "  consume_order_by = {d}\n", .{new.i_consume_ob});
     }
     return rc;
 }
 
-fn logCreate(db: *Sqlite3, _: ?*anyopaque, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8) i32 {
-    return connectCreate(db, argv, pp_vtab, err, true);
+fn logCreate(db: *Sqlite3, out: Out, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8) i32 {
+    return connectCreate(db, out, argv, pp_vtab, err, true);
 }
 
-fn logConnect(db: *Sqlite3, _: ?*anyopaque, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8) i32 {
-    return connectCreate(db, argv, pp_vtab, err, false);
+fn logConnect(db: *Sqlite3, out: Out, argv: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, err: *?[:0]u8) i32 {
+    return connectCreate(db, out, argv, pp_vtab, err, false);
 }
 
 fn freeVtab(t: *LogVtab) void {
@@ -215,7 +220,7 @@ fn freeVtab(t: *LogVtab) void {
 /// Port of vtablogDisconnect().
 fn logDisconnect(p: *vtab.Vtab) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xDisconnect()\n", .{ t.z_db, t.z_name });
+    t.print("{s}.{s}.xDisconnect()\n", .{ t.z_db, t.z_name });
     freeVtab(t);
     return RC.OK;
 }
@@ -223,7 +228,7 @@ fn logDisconnect(p: *vtab.Vtab) i32 {
 /// Port of vtablogDestroy().
 fn logDestroy(p: *vtab.Vtab) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xDestroy()\n", .{ t.z_db, t.z_name });
+    t.print("{s}.{s}.xDestroy()\n", .{ t.z_db, t.z_name });
     freeVtab(t);
     return RC.OK;
 }
@@ -232,7 +237,7 @@ fn logDestroy(p: *vtab.Vtab) i32 {
 fn logOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
     const t = LogVtab.of(p);
     t.n_cursor += 1;
-    print("{s}.{s}.xOpen(cursor={d})\n", .{ t.z_db, t.z_name, t.n_cursor });
+    t.print("{s}.{s}.xOpen(cursor={d})\n", .{ t.z_db, t.z_name, t.n_cursor });
     const cur = t.gpa.create(LogCursor) catch return RC.NOMEM;
     cur.* = .{ .i_cursor = t.n_cursor };
     pp_cursor.* = &cur.base;
@@ -243,7 +248,7 @@ fn logOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
 fn logClose(cur: *vtab.VtabCursor) i32 {
     const c = LogCursor.of(cur);
     const t = LogVtab.of(cur.vtab);
-    print("{s}.{s}.xClose(cursor={d})\n", .{ t.z_db, t.z_name, c.i_cursor });
+    t.print("{s}.{s}.xClose(cursor={d})\n", .{ t.z_db, t.z_name, c.i_cursor });
     t.gpa.destroy(c);
     return RC.OK;
 }
@@ -253,7 +258,7 @@ fn logNext(cur: *vtab.VtabCursor) i32 {
     const c = LogCursor.of(cur);
     const t = LogVtab.of(cur.vtab);
     const r: i32 = @truncate(c.i_rowid);
-    print("{s}.{s}.xNext(cursor={d})  rowid {d} -> {d}\n", .{ t.z_db, t.z_name, c.i_cursor, r, r +% 1 });
+    t.print("{s}.{s}.xNext(cursor={d})  rowid {d} -> {d}\n", .{ t.z_db, t.z_name, c.i_cursor, r, r +% 1 });
     c.i_rowid += 1;
     return RC.OK;
 }
@@ -268,7 +273,7 @@ fn logColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
         std.fmt.bufPrint(&buf, "{c}{d}", .{ "abcdefghijklmnopqrstuvwxyz"[@intCast(i)], r }) catch unreachable
     else
         std.fmt.bufPrint(&buf, "{{{d}}}{d}", .{ i, r }) catch unreachable;
-    print("{s}.{s}.xColumn(cursor={d}, i={d}): [{s}]\n", .{ t.z_db, t.z_name, c.i_cursor, i, val });
+    t.print("{s}.{s}.xColumn(cursor={d}, i={d}): [{s}]\n", .{ t.z_db, t.z_name, c.i_cursor, i, val });
     api.resultText(ctx, val, .transient);
     return RC.OK;
 }
@@ -277,7 +282,7 @@ fn logColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
 fn logRowid(cur: *vtab.VtabCursor, rowid: *i64) i32 {
     const c = LogCursor.of(cur);
     const t = LogVtab.of(cur.vtab);
-    print("{s}.{s}.xRowid(cursor={d}): {d}\n", .{ t.z_db, t.z_name, c.i_cursor, @as(i32, @truncate(c.i_rowid)) });
+    t.print("{s}.{s}.xRowid(cursor={d}): {d}\n", .{ t.z_db, t.z_name, c.i_cursor, @as(i32, @truncate(c.i_rowid)) });
     rowid.* = c.i_rowid;
     return RC.OK;
 }
@@ -287,37 +292,37 @@ fn logEof(cur: *vtab.VtabCursor) bool {
     const c = LogCursor.of(cur);
     const t = LogVtab.of(cur.vtab);
     const rc = c.i_rowid >= t.n_row;
-    print("{s}.{s}.xEof(cursor={d}): {d}\n", .{ t.z_db, t.z_name, c.i_cursor, @intFromBool(rc) });
+    t.print("{s}.{s}.xEof(cursor={d}): {d}\n", .{ t.z_db, t.z_name, c.i_cursor, @intFromBool(rc) });
     return rc;
 }
 
 /// Port of vtablogQuote(): print a value as an SQL literal.
-fn quote(gpa: std.mem.Allocator, p: *Mem) void {
+fn quote(out: Out, gpa: std.mem.Allocator, p: *Mem) void {
     switch (api.valueType(p)) {
-        vi.SQLITE_NULL => print("NULL", .{}),
-        vi.SQLITE_INTEGER => print("{d}", .{api.valueInt64(p)}),
+        vi.SQLITE_NULL => printTo(out, "NULL", .{}),
+        vi.SQLITE_INTEGER => printTo(out, "{d}", .{api.valueInt64(p)}),
         vi.SQLITE_FLOAT => {
             const z = printf.mprintf(gpa, "%!.20g", &.{.{ .double = api.valueDouble(p) }}) catch return;
             defer gpa.free(z);
-            print("{s}", .{z});
+            printTo(out, "{s}", .{z});
         },
         vi.SQLITE_BLOB => {
             const z = api.valueBlob(p) orelse {
-                print("/*OOM-fault*/", .{});
+                printTo(out, "/*OOM-fault*/", .{});
                 return;
             };
-            print("x'", .{});
-            for (z) |b| print("{x:0>2}", .{b});
-            print("'", .{});
+            printTo(out, "x'", .{});
+            for (z) |b| printTo(out, "{x:0>2}", .{b});
+            printTo(out, "'", .{});
         },
         vi.SQLITE_TEXT => {
             const z: []const u8 = api.valueText(p) orelse "";
             // A single quote is doubled... as the C code does it: each
             // quote is printed once more after the text up to it.
             if (std.mem.indexOfScalar(u8, z, '\'') == null) {
-                print("'{s}'", .{z});
+                printTo(out, "'{s}'", .{z});
             } else {
-                print("'", .{});
+                printTo(out, "'", .{});
                 var rest = z;
                 while (rest.len > 0) {
                     var i: usize = 0;
@@ -325,17 +330,17 @@ fn quote(gpa: std.mem.Allocator, p: *Mem) void {
                     const c: u8 = if (i < rest.len) rest[i] else 0;
                     if (c == '\'') i += 1;
                     if (i > 0) {
-                        print("{s}", .{rest[0..i]});
+                        printTo(out, "{s}", .{rest[0..i]});
                         rest = rest[i..];
                     }
                     if (c == '\'') {
-                        print("'", .{});
+                        printTo(out, "'", .{});
                         continue;
                     }
                     if (c == 0) break;
                     rest = rest[1..];
                 }
-                print("'", .{});
+                printTo(out, "'", .{});
             }
         },
         else => {},
@@ -346,7 +351,7 @@ fn quote(gpa: std.mem.Allocator, p: *Mem) void {
 fn logFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, _: []*Mem) i32 {
     const c = LogCursor.of(cur);
     const t = LogVtab.of(cur.vtab);
-    print("{s}.{s}.xFilter(cursor={d}):\n", .{ t.z_db, t.z_name, c.i_cursor });
+    t.print("{s}.{s}.xFilter(cursor={d}):\n", .{ t.z_db, t.z_name, c.i_cursor });
     c.i_rowid = 0;
     return RC.OK;
 }
@@ -378,14 +383,14 @@ fn opName(buf: *[30]u8, op: u8) []const u8 {
 /// Port of vtablogBestIndex().
 fn logBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xBestIndex():\n", .{ t.z_db, t.z_name });
-    print("  colUsed: 0x{x:0>16}\n", .{info.col_used});
-    print("  nConstraint: {d}\n", .{info.constraints.len});
+    t.print("{s}.{s}.xBestIndex():\n", .{ t.z_db, t.z_name });
+    t.print("  colUsed: 0x{x:0>16}\n", .{info.col_used});
+    t.print("  nConstraint: {d}\n", .{info.constraints.len});
     for (info.constraints, 0..) |cons, i| {
         var val: ?*Mem = null;
         const rc = vtab.rhsValue(info, @intCast(i), &val);
         var buf: [30]u8 = undefined;
-        print("  constraint[{d}]: col={d} termid={d} op={s} usabled={d} coll={s} rhs=", .{
+        t.print("  constraint[{d}]: col={d} termid={d} op={s} usabled={d} coll={s} rhs=", .{
             i,
             cons.i_column,
             cons.i_term_offset,
@@ -394,16 +399,16 @@ fn logBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
             vtab.collation(info, @intCast(i)) orelse "(null)",
         });
         if (rc == RC.OK) {
-            quote(t.gpa, val.?);
-            print("\n", .{});
+            quote(t.out, t.gpa, val.?);
+            t.print("\n", .{});
         } else {
-            print("N/A\n", .{});
+            t.print("N/A\n", .{});
         }
     }
-    print("  nOrderBy: {d}\n", .{info.order_by.len});
+    t.print("  nOrderBy: {d}\n", .{info.order_by.len});
     if (info.order_by.len > 0) {
         for (info.order_by, 0..) |ob, i| {
-            print("  orderby[{d}]: col={d} desc={d}\n", .{ i, ob.i_column, @intFromBool(ob.desc) });
+            t.print("  orderby[{d}]: col={d} desc={d}\n", .{ i, ob.i_column, @intFromBool(ob.desc) });
         }
         if (t.i_consume_ob != 0) {
             const n = info.order_by[0].i_column + 1;
@@ -416,83 +421,83 @@ fn logBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
     }
     info.estimated_cost = 500;
     info.estimated_rows = 500;
-    print("  idxNum={d}\n", .{info.idx_num});
-    print("  idxStr=NULL\n", .{});
-    print("  sqlite3_vtab_distinct()={d}\n", .{vtab.distinct(info)});
-    print("  orderByConsumed={d}\n", .{@intFromBool(info.order_by_consumed)});
+    t.print("  idxNum={d}\n", .{info.idx_num});
+    t.print("  idxStr=NULL\n", .{});
+    t.print("  sqlite3_vtab_distinct()={d}\n", .{vtab.distinct(info)});
+    t.print("  orderByConsumed={d}\n", .{@intFromBool(info.order_by_consumed)});
     const cost = printf.mprintf(t.gpa, "%g", &.{.{ .double = info.estimated_cost }}) catch return RC.NOMEM;
     defer t.gpa.free(cost);
-    print("  estimatedCost={s}\n", .{cost});
-    print("  estimatedRows={d}\n", .{info.estimated_rows});
+    t.print("  estimatedCost={s}\n", .{cost});
+    t.print("  estimatedRows={d}\n", .{info.estimated_rows});
     return RC.OK;
 }
 
 /// Port of vtablogUpdate(): print the arguments; nothing changes.
 fn logUpdate(p: *vtab.Vtab, argv: []*Mem, _: *i64) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xUpdate():\n", .{ t.z_db, t.z_name });
-    print("  argc={d}\n", .{argv.len});
+    t.print("{s}.{s}.xUpdate():\n", .{ t.z_db, t.z_name });
+    t.print("  argc={d}\n", .{argv.len});
     for (argv, 0..) |a, i| {
-        print("  argv[{d}]=", .{i});
-        quote(t.gpa, a);
-        print("\n", .{});
+        t.print("  argv[{d}]=", .{i});
+        quote(t.out, t.gpa, a);
+        t.print("\n", .{});
     }
     return RC.OK;
 }
 
 fn logBegin(p: *vtab.Vtab) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xBegin()\n", .{ t.z_db, t.z_name });
+    t.print("{s}.{s}.xBegin()\n", .{ t.z_db, t.z_name });
     return RC.OK;
 }
 
 fn logSync(p: *vtab.Vtab) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xSync()\n", .{ t.z_db, t.z_name });
+    t.print("{s}.{s}.xSync()\n", .{ t.z_db, t.z_name });
     return RC.OK;
 }
 
 fn logCommit(p: *vtab.Vtab) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xCommit()\n", .{ t.z_db, t.z_name });
+    t.print("{s}.{s}.xCommit()\n", .{ t.z_db, t.z_name });
     return RC.OK;
 }
 
 fn logRollback(p: *vtab.Vtab) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xRollback()\n", .{ t.z_db, t.z_name });
+    t.print("{s}.{s}.xRollback()\n", .{ t.z_db, t.z_name });
     return RC.OK;
 }
 
 fn logSavepoint(p: *vtab.Vtab, n: i32) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xSavepoint({d})\n", .{ t.z_db, t.z_name, n });
+    t.print("{s}.{s}.xSavepoint({d})\n", .{ t.z_db, t.z_name, n });
     return RC.OK;
 }
 
 fn logRelease(p: *vtab.Vtab, n: i32) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xRelease({d})\n", .{ t.z_db, t.z_name, n });
+    t.print("{s}.{s}.xRelease({d})\n", .{ t.z_db, t.z_name, n });
     return RC.OK;
 }
 
 fn logRollbackTo(p: *vtab.Vtab, n: i32) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xRollbackTo({d})\n", .{ t.z_db, t.z_name, n });
+    t.print("{s}.{s}.xRollbackTo({d})\n", .{ t.z_db, t.z_name, n });
     return RC.OK;
 }
 
 /// Port of vtablogFindMethod(): prints; overloads nothing.
 fn logFindMethod(p: *vtab.Vtab, n_arg: i32, name: [:0]const u8, _: *?int.FuncDef.StepFn, _: *?*anyopaque) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xFindMethod(nArg={d}, zName={s})\n", .{ t.z_db, t.z_name, n_arg, name });
+    t.print("{s}.{s}.xFindMethod(nArg={d}, zName={s})\n", .{ t.z_db, t.z_name, n_arg, name });
     return RC.OK;
 }
 
 /// Port of vtablogRename().
 fn logRename(p: *vtab.Vtab, new_name: [:0]const u8) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xRename('{s}')\n", .{ t.z_db, t.z_name, new_name });
+    t.print("{s}.{s}.xRename('{s}')\n", .{ t.z_db, t.z_name, new_name });
     const copy = t.gpa.dupeSentinel(u8, new_name, 0) catch return RC.NOMEM;
     t.gpa.free(t.z_name);
     t.z_name = copy;
@@ -501,23 +506,23 @@ fn logRename(p: *vtab.Vtab, new_name: [:0]const u8) i32 {
 
 /// Port of vtablogShadowName(): a name containing "shadow" is a shadow
 /// table name.
-fn logShadowName(name: []const u8) bool {
-    print("vtablog.xShadowName('{s}')\n", .{name});
+fn logShadowName(out: Out, name: []const u8) bool {
+    printTo(out, "vtablog.xShadowName('{s}')\n", .{name});
     return std.mem.indexOf(u8, name, "shadow") != null;
 }
 
 /// Port of vtablogIntegrity().
 fn logIntegrity(p: *vtab.Vtab, _: [:0]const u8, _: [:0]const u8, flags: i32, _: *?[:0]u8) i32 {
     const t = LogVtab.of(p);
-    print("{s}.{s}.xIntegrity(mFlags=0x{x})\n", .{ t.z_db, t.z_name, flags });
+    t.print("{s}.{s}.xIntegrity(mFlags=0x{x})\n", .{ t.z_db, t.z_name, flags });
     return 0;
 }
 
 /// The vtablog module (vtablogModule).
 pub const module: vtab.Module = .{
     .i_version = 4,
-    .x_create = logCreate,
-    .x_connect = logConnect,
+    .x_create = vtab.Module.constructor(logCreate),
+    .x_connect = vtab.Module.constructor(logConnect),
     .x_best_index = logBestIndex,
     .x_disconnect = logDisconnect,
     .x_destroy = logDestroy,
@@ -538,11 +543,12 @@ pub const module: vtab.Module = .{
     .x_savepoint = logSavepoint,
     .x_release = logRelease,
     .x_rollback_to = logRollbackTo,
-    .x_shadow_name = logShadowName,
+    .x_shadow_name = vtab.Module.shadowName(logShadowName),
     .x_integrity = logIntegrity,
 };
 
-/// Port of sqlite3_vtablog_init(): register vtablog on `db`.
-pub fn init(db: *Sqlite3) i32 {
-    return vtab.createModule(db, "vtablog", &module, null);
+/// Port of sqlite3_vtablog_init(): register vtablog on `db`, printing
+/// the calls to `out`.
+pub fn init(db: *Sqlite3, out: Out) i32 {
+    return vtab.createModule(db, "vtablog", &module, vtab.Module.auxFor(logCreate, out));
 }

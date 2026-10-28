@@ -2833,9 +2833,8 @@ fn jsonReturnFromBlob(parse: *JsonParse, i: u32, ctx: *Context, e_mode_arg: u8) 
 /// `arg`. Fails (C: non-zero), maybe with an error set, if `arg` is a
 /// BLOB that is not JSONB, or on OOM.
 fn jsonFunctionArgToBlob(ctx: *Context, arg: *Mem, parse: *JsonParse) ToBlobError!void {
-    const S = struct {
-        var a_null = [_]u8{0x00};
-    };
+    // External (n_blob_alloc == 0), so never written.
+    const a_null = [_]u8{JSONB.NULL};
     const e_type = api.valueType(arg);
     parse.* = .{ .db = api.contextDbHandle(ctx) };
     switch (e_type) {
@@ -2882,7 +2881,7 @@ fn jsonFunctionArgToBlob(ctx: *Context, arg: *Mem, parse: *JsonParse) ToBlobErro
             jsonBlobAppendNode(parse, JSONB.INT, n, z.ptr);
         },
         else => {
-            parse.a_blob = &S.a_null;
+            parse.a_blob = @constCast(&a_null);
             parse.n_blob = 1;
             return;
         },
@@ -4487,9 +4486,9 @@ fn waggregate(name: [:0]const u8, n_arg: i16, arg: usize, step: FuncDef.StepFn, 
 /// SQLITE_SUBTYPE|SQLITE_RESULT_SUBTYPE|SQLITE_UTF8|SQLITE_DETERMINISTIC.
 const agg_flags: FUNC = .{ .SUBTYPE = true, .RESULT_SUBTYPE = true, .enc = ENC.UTF8, .CONSTANT = true };
 
-/// aJsonFunc[]: the JSON functions. Their links are set by
-/// callback.insertBuiltinFuncs(); read-only after that.
-var json_funcs = [_]FuncDef{
+/// aJsonFunc[] of sqlite3RegisterJsonFunctions(): the JSON functions, in
+/// callback.builtins.
+pub const funcs = [_]FuncDef{
     //     sqlite3_result_subtype() --------------,  ,--- sqlite3_value_subtype()
     //                                            |  |
     //                       Uses cache ------, |  | ,---- Returns JSONB
@@ -4533,12 +4532,6 @@ var json_funcs = [_]FuncDef{
     waggregate("json_group_object", 2, 0, jsonObjectStep, jsonObjectFinal, jsonObjectValue, jsonGroupInverse, agg_flags),
     waggregate("jsonb_group_object", 2, JSON.BLOB, jsonObjectStep, jsonObjectFinal, jsonObjectValue, jsonGroupInverse, agg_flags),
 };
-
-/// Port of sqlite3RegisterJsonFunctions(): add the JSON functions to the
-/// built-in function table. Called by func.registerBuiltinFunctions().
-pub fn registerJsonFunctions() void {
-    callback.insertBuiltinFuncs(&json_funcs);
-}
 
 // ================================================================== tests
 
@@ -4618,7 +4611,7 @@ test "json: aggregates" {
 fn windowCalls(out: *std.ArrayList(u8), name: []const u8, ops: []const union(enum) { step: [2]?[]const u8, inverse, value }) !void {
     var db: Sqlite3 = .{ .gpa = undefined };
     db.gpa = malloc.dbAllocator(&db);
-    const def: *FuncDef = for (&json_funcs) |*f| {
+    const def: *const FuncDef = for (&funcs) |*f| {
         if (std.mem.eql(u8, f.name, name)) break f;
     } else unreachable;
     var accum: Mem = .{ .db = &db };

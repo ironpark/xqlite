@@ -196,7 +196,7 @@ pub fn stringify(m: *Mem, enc: u8, force: bool) Oom!void {
 /// Port of sqlite3VdbeMemFinalize(): run the finalizer of the aggregate
 /// whose context is in `m` and store the result there. Returns the error
 /// code the function reported.
-pub fn finalize(m: *Mem, func: *FuncDef) i32 {
+pub fn finalize(m: *Mem, func: *const FuncDef) i32 {
     const func_mod = @import("func.zig");
     var t: Mem = .{ .db = m.db };
     var ctx: vi.Context = .{ .out = &t, .mem = m, .func = func, .argv = &.{}, .enc = if (m.db) |db| db.enc else ENC.UTF8 };
@@ -209,7 +209,7 @@ pub fn finalize(m: *Mem, func: *FuncDef) i32 {
 
 /// Port of sqlite3VdbeMemAggValue(): the current value of a window
 /// aggregate.
-pub fn aggValue(accum: *Mem, out: *Mem, func: *FuncDef) i32 {
+pub fn aggValue(accum: *Mem, out: *Mem, func: *const FuncDef) i32 {
     const func_mod = @import("func.zig");
     setNull(out);
     var ctx: vi.Context = .{ .out = out, .mem = accum, .func = func, .argv = &.{}, .enc = if (accum.db) |db| db.enc else ENC.UTF8 };

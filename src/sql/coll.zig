@@ -14,8 +14,16 @@ const Parse = int.Parse;
 const CollSeq = int.CollSeq;
 const RC = int.RC;
 
-/// sqlite3StrBINARY.
-pub const str_binary: [:0]const u8 = "BINARY";
+/// Both names "BINARY" in one array, at addresses that cannot be merged.
+const binary_names = "BINARY\x00BINARY\x00".*;
+
+/// sqlite3StrBINARY: the name of the default collation of an index column.
+/// Code tests a collation name against it by address
+/// (sqlite3KeyInfoOfIndex()), so it is not the name of the BINARY CollSeq.
+pub const str_binary: [:0]const u8 = binary_names[0..6 :0];
+
+/// The name of the BINARY CollSeq: in C a copy of its own.
+const binary_name: [:0]const u8 = binary_names[7..13 :0];
 
 /// Port of nocaseCollatingFunc(): ASCII case folding up to the shorter
 /// length or the first NUL, then length.
@@ -30,59 +38,60 @@ fn rtrimCollFunc(_: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order {
     return serial.binaryCollation(null, std.mem.trimEnd(u8, a, " "), std.mem.trimEnd(u8, b, " "));
 }
 
-/// The name of the built-in BINARY collation: a copy, as in C, where the
-/// CollSeq keeps its own copy of the name. Code that tests a collation
-/// name against str_binary by address (sqlite3KeyInfoOfIndex()) then sees
-/// a CollSeq's name as different. A `var`, so the compiler cannot merge
-/// it with an identical string literal.
-var binary_name = "BINARY".*;
-
-/// The collations every connection has (registered by openDatabase()).
-var builtin = [_]CollSeq{
-    .{ .name = &binary_name, .cmp = serial.binaryCollation },
+/// The collations every connection has (registered by openDatabase();
+/// read-only, as a connection shadows them rather than replacing them).
+const builtin = [_]CollSeq{
+    .{ .name = binary_name, .cmp = serial.binaryCollation },
     .{ .name = "NOCASE", .cmp = nocaseCollatingFunc },
     .{ .name = "RTRIM", .cmp = rtrimCollFunc },
 };
 
-/// The built-in collations, which SQLite keeps in every connection's
-/// aCollSeq (for PRAGMA collation_list).
+/// The built-in collations, which SQLite keeps in the connection's
+/// aCollSeq with the others (for PRAGMA collation_list).
 pub fn builtins() []const CollSeq {
     return &builtin;
 }
 
 /// db->pDfltColl: the BINARY collation.
-pub fn defaultColl() *CollSeq {
+pub fn defaultColl() *const CollSeq {
     return &builtin[0];
 }
 
 /// Port of sqlite3FindCollSeq(): the collation named `name`, or BINARY if
 /// `name` is null. With `create`, an undefined entry (null `cmp`) is made
 /// for an unknown name.
-pub fn findCollSeq(db: *Sqlite3, name: ?[]const u8, create: bool) ?*CollSeq {
+pub fn findCollSeq(db: *Sqlite3, name: ?[]const u8, create: bool) ?*const CollSeq {
     const z = name orelse return defaultColl();
     if (db.colls.get(z)) |c| return c;
     for (&builtin) |*c| {
         if (std.ascii.eqlIgnoreCase(c.name, z)) return c;
     }
     if (!create) return null;
+    return addCollSeq(db, z, .{ .name = undefined });
+}
+
+/// Add `c`, named `name`, to the collations of the connection (null on
+/// OOM).
+fn addCollSeq(db: *Sqlite3, name: []const u8, c: CollSeq) ?*CollSeq {
     const a = db.gpa;
-    const c = a.create(CollSeq) catch return null;
-    const owned = a.dupeSentinel(u8, z, 0) catch {
-        a.destroy(c);
+    const new = a.create(CollSeq) catch return null;
+    const owned = a.dupeSentinel(u8, name, 0) catch {
+        a.destroy(new);
         return null;
     };
-    c.* = .{ .name = owned };
-    db.colls.put(a, owned, c) catch {
+    new.* = c;
+    new.name = owned;
+    db.colls.put(a, owned, new) catch {
         a.free(owned);
-        a.destroy(c);
+        a.destroy(new);
         return null;
     };
-    return c;
+    return new;
 }
 
 /// Port of sqlite3GetCollSeq(): `coll` if defined, else look `name` up.
 /// Leaves an error in `p` if there is no such collation.
-pub fn getCollSeq(p: *Parse, coll: ?*CollSeq, name: []const u8) ?*CollSeq {
+pub fn getCollSeq(p: *Parse, coll: ?*const CollSeq, name: []const u8) ?*const CollSeq {
     const c = coll orelse findCollSeq(p.db, name, false);
     if (c == null or c.?.cmp == null) {
         util.errorMsg(p, "no such collation sequence: {s}", .{name});
@@ -94,14 +103,14 @@ pub fn getCollSeq(p: *Parse, coll: ?*CollSeq, name: []const u8) ?*CollSeq {
 
 /// Port of sqlite3CheckCollSeq(): fine if `coll` is null or defined;
 /// else (C: SQLITE_ERROR) the error is in `p`.
-pub fn checkCollSeq(p: *Parse, coll: ?*CollSeq) int.ParseError!void {
+pub fn checkCollSeq(p: *Parse, coll: ?*const CollSeq) int.ParseError!void {
     const c = coll orelse return;
     if (c.cmp == null and getCollSeq(p, c, c.name) == null) return error.ParseFailed;
 }
 
 /// Port of sqlite3LocateCollSeq(): the collation named `name`, or null
 /// with an error left in `p`.
-pub fn locateCollSeq(p: *Parse, name: []const u8) ?*CollSeq {
+pub fn locateCollSeq(p: *Parse, name: []const u8) ?*const CollSeq {
     const db = p.db;
     const init_busy = db.init.busy;
     const coll = findCollSeq(db, name, init_busy);
@@ -119,25 +128,13 @@ pub fn createCollation(db: *Sqlite3, name: []const u8, user: ?*anyopaque, cmp: C
         return RC.BUSY;
     }
     @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
-    const c = findCollSeq(db, name, true) orelse return RC.NOMEM;
-    if (@intFromPtr(c) >= @intFromPtr(&builtin[0]) and @intFromPtr(c) <= @intFromPtr(&builtin[builtin.len - 1])) {
-        // Built-in collations cannot be replaced; shadow them instead.
-        const a = db.gpa;
-        const n = a.create(CollSeq) catch return RC.NOMEM;
-        const owned = a.dupeSentinel(u8, name, 0) catch {
-            a.destroy(n);
-            return RC.NOMEM;
-        };
-        n.* = .{ .name = owned, .user = user, .cmp = cmp };
-        db.colls.put(a, owned, n) catch {
-            a.free(owned);
-            a.destroy(n);
-            return RC.NOMEM;
-        };
-        return RC.OK;
+    // Built-in collations are not replaced but shadowed.
+    if (db.colls.get(name)) |c| {
+        c.user = user;
+        c.cmp = cmp;
+    } else if (addCollSeq(db, name, .{ .name = undefined, .user = user, .cmp = cmp }) == null) {
+        return RC.NOMEM;
     }
-    c.user = user;
-    c.cmp = cmp;
     return RC.OK;
 }
 
@@ -152,6 +149,8 @@ pub fn freeAll(db: *Sqlite3) void {
 }
 
 test "built-in collations" {
+    try std.testing.expect(defaultColl().name.ptr != str_binary.ptr);
+    try std.testing.expectEqualStrings(str_binary, defaultColl().name);
     try std.testing.expectEqual(std.math.Order.eq, nocaseCollatingFunc(null, "AbC", "abc"));
     try std.testing.expectEqual(std.math.Order.lt, nocaseCollatingFunc(null, "ab", "ABC"));
     // As sqlite3StrNICmp(), the comparison stops at a NUL; then length decides.

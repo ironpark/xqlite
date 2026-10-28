@@ -336,8 +336,9 @@ fn windowFuncX(name: [:0]const u8, n_arg: i16, step: FuncDef.StepFn, value: Func
     return windowFuncAll(name, n_arg, step, value, value, noopStepFunc);
 }
 
-/// aWindowFuncs[] of sqlite3WindowFunctions(); linked into the registry.
-var window_funcs = [_]FuncDef{
+/// aWindowFuncs[] of sqlite3WindowFunctions(): the built-in window
+/// functions that are not also aggregates, in callback.builtins.
+pub const funcs = [_]FuncDef{
     windowFuncX(row_number_name, 0, rowNumberStepFunc, rowNumberValueFunc),
     windowFuncX(dense_rank_name, 0, denseRankStepFunc, denseRankValueFunc),
     windowFuncX(rank_name, 0, rankStepFunc, rankValueFunc),
@@ -354,12 +355,6 @@ var window_funcs = [_]FuncDef{
     windowFuncNoop(lag_name, 2),
     windowFuncNoop(lag_name, 3),
 };
-
-/// Port of sqlite3WindowFunctions(): register the built-in window
-/// functions that are not also aggregates.
-pub fn windowFunctions() void {
-    callback.insertBuiltinFuncs(&window_funcs);
-}
 
 // ============================================================ Window objects
 
@@ -568,7 +563,7 @@ pub fn gatherSelectWindows(s: *Select) void {
 /// Port of sqlite3WindowUpdate(): after resolving the window function
 /// `func` of `win`, copy a named window's definition into it and coerce
 /// the frame the built-in window functions need.
-pub fn windowUpdate(p: *Parse, list: ?*Window, win: *Window, func: *FuncDef) Oom!void {
+pub fn windowUpdate(p: *Parse, list: ?*Window, win: *Window, func: *const FuncDef) Oom!void {
     if (win.name != null and win.e_frm_type == 0) {
         const w = windowFind(p, list, win.name.?) orelse return;
         const a = p.arena;

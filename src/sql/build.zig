@@ -1642,7 +1642,7 @@ pub fn isShadowTableOf(db: *Sqlite3, t: *Table, name: []const u8) bool {
     const m = db.modules.get(t.u.vtab.args[0]) orelse return false;
     if (m.module.i_version < 3) return false;
     const x = m.module.x_shadow_name orelse return false;
-    return x(name[n_name + 1 ..]);
+    return x(m.aux, name[n_name + 1 ..]);
 }
 
 /// Port of sqlite3MarkAllShadowTablesOf(): flag the shadow tables of
@@ -1659,7 +1659,7 @@ pub fn markAllShadowTablesOf(db: *Sqlite3, t: *Table) void {
         if (!other.isOrdinary()) continue;
         if (other.tab_flags.Shadow) continue;
         if (other.name.len > n_name and ctype.eqlNoCase(other.name[0..n_name], t.name) and
-            other.name[n_name] == '_' and x(other.name[n_name + 1 ..]))
+            other.name[n_name] == '_' and x(m.aux, other.name[n_name + 1 ..]))
         {
             other.tab_flags.Shadow = true;
         }

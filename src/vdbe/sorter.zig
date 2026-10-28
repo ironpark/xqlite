@@ -58,9 +58,6 @@ const type_real: u8 = 0x04;
 /// No next record in a sort list.
 const end_of_list = std.math.maxInt(u32);
 
-/// PMAs written by all sorters, for tests that check that a sort spilled.
-pub var n_pma_written: std.atomic.Value(u64) = .init(0);
-
 /// SorterFile: a temporary file and the amount of data stored in it.
 const SorterFile = struct {
     fd: ?vfs.File = null,
@@ -597,7 +594,7 @@ fn listToPMA(t: *SortSubtask) Error!void {
 
     var writer = pmaWriterInit(s.gpa, t.file.fd.?, s.pgsz, t.file.eof);
     t.n_pma += 1;
-    _ = n_pma_written.fetchAdd(1, .monotonic);
+    if (@import("builtin").is_test) s.db.n_pma_written += 1;
     pmaWriteVarint(&writer, @intCast(s.sz_pma));
     var p = head;
     while (p != end_of_list) : (p = s.links.items[p]) {
@@ -1113,15 +1110,15 @@ fn openSpilling(c: *Conn, n: u32) !void {
 /// the rows must be the same. Returns the number of PMAs written.
 fn expectSameSpilled(c: *Conn, sql: []const u8) !u64 {
     try c.exec("PRAGMA temp_store=0");
-    const before = n_pma_written.load(.monotonic);
+    const before = c.db.n_pma_written;
     const spilled = try c.query(sql);
     defer testing.allocator.free(spilled);
-    const n = n_pma_written.load(.monotonic) - before;
+    const n = c.db.n_pma_written - before;
 
     try c.exec("PRAGMA temp_store=2");
     const in_memory = try c.query(sql);
     defer testing.allocator.free(in_memory);
-    try testing.expectEqual(before + n, n_pma_written.load(.monotonic));
+    try testing.expectEqual(before + n, c.db.n_pma_written);
     try c.exec("PRAGMA temp_store=0");
     testing.expectEqualStrings(in_memory, spilled) catch |err| {
         std.debug.print("query: {s}\n", .{sql});
@@ -1186,11 +1183,11 @@ test "sorter: CREATE INDEX spills" {
     var c: Conn = undefined;
     try openSpilling(&c, 6000);
     defer c.close();
-    const before = n_pma_written.load(.monotonic);
+    const before = c.db.n_pma_written;
     try c.exec("CREATE INDEX t_b ON t(b, pad)");
     try c.exec("CREATE INDEX t_m ON t(m COLLATE NOCASE DESC, a)");
     try c.exec("CREATE UNIQUE INDEX t_u ON t(b, i, pad)");
-    try testing.expect(n_pma_written.load(.monotonic) - before > 3);
+    try testing.expect(c.db.n_pma_written - before > 3);
     try c.expectRows("SELECT count(*) FROM t INDEXED BY t_b WHERE b > ''", "6000\n");
     // Duplicates found while merging PMAs.
     try c.expectError("CREATE UNIQUE INDEX t_bad ON t(b, pad)", "UNIQUE constraint failed: t.b, t.pad");
@@ -1216,9 +1213,9 @@ test "sorter: more PMAs than one merge takes" {
     try testing.expect(try expectSameSpilled(&c, "SELECT b, i, pad FROM t ORDER BY b") > max_merge_count);
     try testing.expect(try expectSameSpilled(&c, "SELECT a, b, pad, i FROM t ORDER BY a DESC") > max_merge_count);
     try testing.expect(try expectSameSpilled(&c, "SELECT b, count(*), sum(i) FROM (SELECT b, i, pad FROM t UNION ALL SELECT b, i, pad FROM t) GROUP BY b, pad") > max_merge_count);
-    const before = n_pma_written.load(.monotonic);
+    const before = c.db.n_pma_written;
     try c.exec("CREATE INDEX t_ab ON t(a, b, pad)");
-    try testing.expect(n_pma_written.load(.monotonic) - before > max_merge_count);
+    try testing.expect(c.db.n_pma_written - before > max_merge_count);
     try expectIndexOrder(&c, "t_ab", "a, b, pad");
 }
 

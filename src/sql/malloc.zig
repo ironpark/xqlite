@@ -51,24 +51,22 @@ pub const default_lookaside_n = 40;
 
 // ============================================================ configuration
 
-/// The parts of sqlite3GlobalConfig about memory.
-const Config = struct {
+/// The parts of sqlite3GlobalConfig about memory (global.config).
+pub const Config = struct {
     /// What the allocations of the library come from (sqlite3GlobalConfig.m,
     /// which mem1.c fills with the system malloc()).
-    backing: Allocator,
-    /// Default lookaside slot size and count (szLookaside, nLookaside).
-    sz_lookaside: i32 = default_lookaside_sz,
-    n_lookaside: i32 = default_lookaside_n,
-};
-
-var config: Config = .{
-    .backing = if (builtin.is_test)
+    backing: Allocator = if (builtin.is_test)
         std.testing.allocator
     else if (builtin.link_libc)
         libc_allocator
     else
         std.heap.smp_allocator,
+    /// Default lookaside slot size and count (szLookaside, nLookaside).
+    sz_lookaside: i32 = default_lookaside_sz,
+    n_lookaside: i32 = default_lookaside_n,
 };
+
+const config = &@import("global.zig").config;
 
 /// The system malloc(), free() and realloc() under the size header, as
 /// mem1.c uses them (SQLITE_MALLOC() and friends); std.heap.c_allocator

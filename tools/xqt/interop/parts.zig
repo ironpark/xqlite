@@ -13,17 +13,23 @@ const std = @import("std");
 const xqt = @import("xqt");
 const Check = xqt.Check;
 
-/// How many parts of one check run at a time: a quarter of -j, as other
+/// How many parts of one check run at a time: an eighth of -j, as other
 /// checks run alongside (and -j 1 runs everything one after the other).
+/// Every process start allocates from xqt's allocator (the debug
+/// allocator in a Debug xqt), whose lock spins: with a quarter of -j,
+/// attach, vacuum and analyze together took 56s instead of 16s.
 pub fn width(c: *const Check) usize {
-    return @max(1, (c.cfg.jobs + 3) / 4);
+    return @max(1, (c.cfg.jobs + 7) / 8);
 }
+
+/// What the parts allocate with, to keep off that lock.
+const allocator = std.heap.smp_allocator;
 
 const Status = enum { not_run, ok, failed, skipped };
 
 const Result = struct {
     status: Status = .not_run,
-    /// The part's log (on c.suite.gpa).
+    /// The part's log (on `allocator`).
     log: []const u8 = "",
 };
 
@@ -33,13 +39,13 @@ const Result = struct {
 /// ended); a part that skips (error.Skipped) counts as not run.
 pub fn forEach(c: *Check, n: usize, ctx: anytype, comptime func: fn (*Check, @TypeOf(ctx), usize) anyerror!void) !void {
     const results = try runAll(c, n, ctx, func);
-    defer free(c, results);
+    defer free(results);
     report(c, results);
 }
 
 /// The parts, run; `free` the result.
 fn runAll(c: *Check, n: usize, ctx: anytype, comptime func: fn (*Check, @TypeOf(ctx), usize) anyerror!void) ![]Result {
-    const results = try c.suite.gpa.alloc(Result, n);
+    const results = try allocator.alloc(Result, n);
     @memset(results, .{});
     const Shared = struct {
         parent: *Check,
@@ -55,9 +61,9 @@ fn runAll(c: *Check, n: usize, ctx: anytype, comptime func: fn (*Check, @TypeOf(
     return results;
 }
 
-fn free(c: *Check, results: []Result) void {
-    for (results) |r| c.suite.gpa.free(r.log);
-    c.suite.gpa.free(results);
+fn free(results: []Result) void {
+    for (results) |r| allocator.free(r.log);
+    allocator.free(results);
 }
 
 /// Fails `c` with the log of each part that failed.
@@ -70,7 +76,7 @@ fn report(c: *Check, results: []const Result) void {
 }
 
 fn runPart(parent: *Check, i: usize, ctx: anytype, comptime func: anytype) Result {
-    const gpa = parent.suite.gpa;
+    const gpa = allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     var log: std.Io.Writer.Allocating = .init(gpa);
@@ -130,7 +136,7 @@ pub fn crashPoints(c: *Check, max: u32, ctx: anytype, comptime point: fn (*Check
     };
     var shared: Shared = .{ .ctx = ctx };
     const results = try runAll(c, max, &shared, Shared.one);
-    defer free(c, results);
+    defer free(results);
     const through = shared.through.load(.monotonic);
     if (through == std.math.maxInt(u32)) {
         report(c, results);

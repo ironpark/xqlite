@@ -103,10 +103,27 @@ pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
         .append = op.p5 & vi.OPFLAG.APPEND != 0,
         .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
         .seek_result = insertSeekResult(op, c),
+        .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
     });
     c.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
     try res;
+    return .next;
+}
+
+/// OP_RowCell: build the cell for the entry of cursor P2 in cursor P1,
+/// with the rowid in register P3 for tables, for the OP_Insert or
+/// OP_IdxInsert with OPFLAG_PREFORMAT that follows.
+pub fn opRowCell(e: *Exec, op: *Op) Error!Flow {
+    if (std.debug.runtime_safety) {
+        const next = e.ops[@intCast(e.pc + 1)];
+        std.debug.assert(next.opcode == .Insert or next.opcode == .IdxInsert);
+        std.debug.assert(next.p5 & vi.OPFLAG.PREFORMAT != 0);
+    }
+    const dest = e.csr(op.p1).uc.cursor;
+    const src = e.csr(op.p2).uc.cursor;
+    const key: i64 = if (op.p3 != 0) e.reg(op.p3).u.i else 0;
+    try dest.transferRow(src, key);
     return .next;
 }
 
@@ -163,6 +180,7 @@ pub fn opIdxInsert(e: *Exec, op: *Op) Error!Flow {
         .append = op.p5 & vi.OPFLAG.APPEND != 0,
         .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
         .seek_result = insertSeekResult(op, c),
+        .preformat = op.p5 & vi.OPFLAG.PREFORMAT != 0,
     });
     c.cache_status = vi.cache_stale;
     try res;

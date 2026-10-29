@@ -17,8 +17,7 @@
 //! A database whose header says read version 2 is opened in WAL mode
 //! (lockBtree), and `setVersion` switches the file between the two.
 //!
-//! Not ported yet: shared cache, incremental blob I/O and
-//! BtreeTransferRow.
+//! Not ported yet: shared cache and incremental blob I/O.
 
 const std = @import("std");
 const thunk = @import("../util/thunk.zig");
@@ -221,6 +220,9 @@ pub const Btree = struct {
     tmp_space: ?[]u8 = null,
     /// Compensates for the pager's data version bump on our own commits.
     data_version_bias: u32 = 0,
+    /// Size of the cell `Cursor.transferRow` left in the scratch space
+    /// (nPreformatSize).
+    n_preformat_size: u32 = 0,
 
     // ================================================================ open
 
@@ -2397,6 +2399,9 @@ pub const Cursor = struct {
         /// is on a smaller entry, .gt if on a larger one, .eq if on the
         /// entry itself. Null if unknown (a seek is then done here).
         seek_result: ?Order = null,
+        /// The cell was built by `transferRow` (BTREE_PREFORMAT); the
+        /// payload is ignored.
+        preformat: bool = false,
     };
 
     pub const DeleteOptions = struct {
@@ -3268,7 +3273,8 @@ pub const Cursor = struct {
         const bt = cur.bt;
         var seek = opts.seek_result;
         const n_key = x.nKey();
-        std.debug.assert((x.key == null) == (cur.key_info == null));
+        std.debug.assert(opts.preformat or (x.key == null) == (cur.key_info == null));
+        std.debug.assert(!opts.preformat or seek != null or cur.key_info == null);
 
         if (cur.flags.multiple) {
             try bt.saveAllCursors(cur.pgno_root, cur);
@@ -3299,7 +3305,7 @@ pub const Cursor = struct {
             if ((seek orelse .eq) == .eq) {
                 cur.getCellInfo();
                 if (cur.info.n_key == n_key) {
-                    return cur.overwriteCell(.{ .data = x.key.? });
+                    return cur.overwriteCell(.{ .data = x.key orelse &.{} });
                 }
             }
         }
@@ -3314,7 +3320,22 @@ pub const Cursor = struct {
             try pg.computeFreeSpace();
         }
         const new_cell = bt.tmpCell();
-        const sz_new = try bt.fillInCell(pg, new_cell, x);
+        var sz_new: u32 = undefined;
+        if (opts.preformat) {
+            sz_new = bt.n_preformat_size;
+            if (sz_new < 4) {
+                sz_new = 4;
+                new_cell[3] = 0;
+            }
+            if (bt.isAutoVacuum() and sz_new > pg.max_local) {
+                const info = pg.parseCell(new_cell);
+                if (info.n_payload != info.n_local) {
+                    try ptrmap.put(bt, get4(new_cell + sz_new - 4), .overflow1, pg.pgno);
+                }
+            }
+        } else {
+            sz_new = try bt.fillInCell(pg, new_cell, x);
+        }
         var idx: usize = cur.ix;
         cur.info.n_size = 0;
         if (loc == .eq) {
@@ -3360,6 +3381,100 @@ pub const Cursor = struct {
                 cur.state = .requireseek;
                 cur.n_key = n_key;
             }
+        }
+    }
+
+    /// Port of sqlite3BtreeTransferRow(): copy the entry of `src` into a
+    /// cell for `dest`, with rowid `key` for tables, overflow pages and
+    /// all. The cell is left in the scratch space of dest's b-tree, for
+    /// an insert() with `preformat` to finish. `dest` must be positioned
+    /// (on a page).
+    pub fn transferRow(dest: *Cursor, src: *Cursor, key: i64) Error!void {
+        const bt = dest.bt;
+        const start = bt.tmpCell();
+        var out = start;
+        src.getCellInfo();
+        const n_payload = src.info.n_payload;
+        if (n_payload < 0x80) {
+            out[0] = @intCast(n_payload);
+            out += 1;
+        } else {
+            out += varint.put(out[0..9], n_payload);
+        }
+        if (dest.key_info == null) out += varint.put(out[0..9], @bitCast(key));
+        var n_in: u32 = src.info.n_local;
+        var in: [*]const u8 = src.info.payload;
+        if (@intFromPtr(in) + n_in > @intFromPtr(src.page.data_end)) return error.Corrupt;
+        var n_rem = n_payload;
+        if (n_in == n_rem and n_in < dest.page.max_local) {
+            @memcpy(out[0..n_in], in[0..n_in]);
+            bt.n_preformat_size = n_in + @as(u32, @intCast(out - start));
+            return;
+        }
+
+        const src_pager = src.bt.pager;
+        var pgno_out: ?[*]u8 = null;
+        var ovfl_in: Pgno = 0;
+        var page_in: ?*pager_mod.Page = null;
+        var page_out: ?*MemPage = null;
+        defer {
+            if (page_out) |po| releasePage(po);
+            if (page_in) |pi| src_pager.unref(pi);
+        }
+        var n_out: u32 = dest.page.payloadToLocal(n_payload);
+        bt.n_preformat_size = n_out + @as(u32, @intCast(out - start));
+        if (n_out < n_payload) {
+            pgno_out = out + n_out;
+            bt.n_preformat_size += 4;
+        }
+        if (n_rem > n_in) {
+            if (@intFromPtr(in) + n_in + 4 > @intFromPtr(src.page.data_end)) return error.Corrupt;
+            ovfl_in = get4(src.info.payload + n_in);
+        }
+        while (true) {
+            n_rem -= n_out;
+            while (true) {
+                std.debug.assert(n_out > 0);
+                if (n_in > 0) {
+                    const n_copy = @min(n_out, n_in);
+                    // In a corrupt file the source chain may run through the
+                    // page being filled (C copies with memcpy() regardless).
+                    @memmove(out[0..n_copy], in[0..n_copy]);
+                    n_out -= n_copy;
+                    n_in -= n_copy;
+                    out += n_copy;
+                    in += n_copy;
+                }
+                if (n_out > 0) {
+                    if (page_in) |pi| src_pager.unref(pi);
+                    page_in = null;
+                    const pi = try src_pager.get(ovfl_in, .{});
+                    page_in = pi;
+                    in = pi.data.ptr;
+                    ovfl_in = get4(in);
+                    in += 4;
+                    n_in = src.bt.usable_size - 4;
+                }
+                if (n_out == 0) break;
+            }
+            if (n_rem > 0) {
+                const po_ptr = pgno_out orelse return error.Corrupt;
+                const new = try bt.allocatePage(0, .any);
+                put4(po_ptr, new.pgno);
+                if (bt.isAutoVacuum()) if (page_out) |po| {
+                    ptrmap.put(bt, new.pgno, .overflow2, po.pgno) catch |err| {
+                        releasePage(new);
+                        return err;
+                    };
+                };
+                if (page_out) |po| releasePage(po);
+                page_out = new;
+                pgno_out = new.data;
+                put4(new.data, 0);
+                out = new.data + 4;
+                n_out = @min(bt.usable_size - 4, n_rem);
+            }
+            if (n_rem == 0) break;
         }
     }
 

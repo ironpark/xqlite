@@ -1,6 +1,6 @@
 //! INSERT statements (port of insert.c): the INSERT driver, AUTOINCREMENT,
-//! and the constraint checks and record writes UPDATE shares. UPSERT, the
-//! transfer optimization and triggers come later.
+//! the transfer optimization, and the constraint checks and record writes
+//! UPDATE shares.
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
@@ -21,6 +21,8 @@ const trigger = @import("trigger.zig");
 const fkey = @import("fkey.zig");
 const main_mod = @import("main.zig");
 const where_mod = @import("where.zig");
+const ctype = @import("../util/ctype.zig");
+const coll_mod = @import("coll.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -396,6 +398,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     if (p.nested == 0) aux.countChanges(v);
     build.beginWriteOperation(p, sel != null or trig != null, i_db);
 
+    // INSERT INTO table1 SELECT * FROM table2 may copy the records as
+    // they are (the 2nd template).
+    if (column == null and sel != null and trig == null and xferOptimization(p, t, sel.?, on_error, i_db)) {
+        if (p.nested == 0 and p.trigger_tab == null) autoincrementEnd(p);
+        return;
+    }
+
     const reg_autoinc = autoIncBegin(p, i_db, t);
 
     // The rowid and the columns of the new row.
@@ -757,6 +766,255 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     _ = &reg_ins;
     _ = &reg_data;
     _ = &reg_rowid;
+}
+
+/// sqlite3_stricmp(), where a null string sorts first.
+fn stricmpNull(a: ?[]const u8, b: ?[]const u8) i32 {
+    const x = a orelse return if (b != null) -1 else 0;
+    const y = b orelse return 1;
+    return ctype.strICmp(x, y);
+}
+
+/// Port of xferCompatibleIndex(): index `src` can feed index `dest` in
+/// the transfer optimization: same columns, sort orders, conflict
+/// resolution, collations and WHERE clause.
+fn xferCompatibleIndex(dest: *Index, src: *Index) bool {
+    std.debug.assert(dest.table != src.table);
+    if (dest.n_key_col != src.n_key_col or dest.n_column != src.n_column) return false;
+    if (dest.on_error != src.on_error) return false;
+    for (0..src.n_key_col) |i| {
+        if (src.ai_column[i] != dest.ai_column[i]) return false;
+        if (src.ai_column[i] == int.XN_EXPR) {
+            if (expr_mod.compare(null, src.col_expr.?.at(i).expr, dest.col_expr.?.at(i).expr, -1) != 0) return false;
+        }
+        if (src.sort_order[i] != dest.sort_order[i]) return false;
+        if (stricmpNull(src.coll[i], dest.coll[i]) != 0) return false;
+    }
+    if (expr_mod.compare(null, src.part_idx_where, dest.part_idx_where, -1) != 0) return false;
+    return true;
+}
+
+/// Port of xferCheckRowid().
+fn xferCheckRowid(w: *walker.Walker, e: *Expr) WRC {
+    if (e.op == TK.COLUMN and e.i_column < 0) {
+        w.e_code = 1;
+        return WRC.Abort;
+    }
+    return WRC.Continue;
+}
+
+/// Port of xferCompatibleCheck(): the CHECK constraints are the same, and
+/// none refers to the rowid unless `dest` has an INTEGER PRIMARY KEY.
+fn xferCompatibleCheck(dest: *Table, src: *Table) bool {
+    if (expr_mod.listCompare(src.check, dest.check, -1) != 0) return false;
+    if (dest.i_pkey < 0) {
+        var w: walker.Walker = .{ .expr_callback = xferCheckRowid };
+        _ = walker.walkExprList(&w, dest.check);
+        if (w.e_code != 0) return false;
+    }
+    return true;
+}
+
+/// Port of xferOptimization(): code INSERT INTO `dest` SELECT * FROM src
+/// by copying the raw records of src and its indexes, if the two tables
+/// are compatible. True if the transfer is certain to be used. When it
+/// works only if `dest` is empty, the code tests that at run time and
+/// falls through to the ordinary INSERT coded after it (false is
+/// returned). VACUUM relies on this: its tables are always copied so.
+fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_db_dest: usize) bool {
+    const db = p.db;
+    if (p.with != null or sel.with != null) {
+        // A CTE named after the source table would not be seen.
+        return false;
+    }
+    if (dest.isVirtual()) return false;
+    var on_error = on_error_arg;
+    if (on_error == OE.Default) {
+        if (dest.i_pkey >= 0) on_error = dest.key_conf;
+        if (on_error == OE.Default) on_error = OE.Abort;
+    }
+    // Only SELECT * FROM one table, with nothing else.
+    const src_list = sel.src.?;
+    if (src_list.len() != 1) return false;
+    if (src_list.at(0).fg.is_subquery) return false;
+    if (sel.where != null or sel.order_by != null or sel.group_by != null or sel.limit != null or sel.prior != null) return false;
+    if (sel.sel_flags.Distinct) return false;
+    const elist = sel.e_list.?;
+    if (elist.len() != 1) return false;
+    if (elist.at(0).expr.?.op != TK.ASTERISK) return false;
+
+    // The source must be a real table compatible with the destination.
+    const item = src_list.at(0);
+    const src = build.locateTableItem(p, 0, item) orelse return false;
+    if (src.tnum == dest.tnum and src.schema == dest.schema) return false;
+    if (dest.hasRowid() != src.hasRowid()) return false;
+    if (!src.isOrdinary()) return false;
+    if (dest.cols.len != src.cols.len) return false;
+    if (dest.i_pkey != src.i_pkey) return false;
+    if (dest.tab_flags.Strict) {
+        if (!src.tab_flags.Strict) return false;
+        for (dest.cols, src.cols) |dc, sc| {
+            const dt = dc.e_ctype;
+            const st = sc.e_ctype;
+            if (dt == int.COLTYPE.ANY) continue;
+            if (dt == st) continue;
+            if (dt == int.COLTYPE.INT and st == int.COLTYPE.INTEGER) continue;
+            if (dt == int.COLTYPE.INTEGER and st == int.COLTYPE.INT) continue;
+            return false;
+        }
+    }
+    for (dest.cols, src.cols, 0..) |*dc, *sc, i| {
+        // Generated columns must be of the same kind with the same
+        // expression. (INSERT INTO t2 SELECT * FROM t1 is then a bulk copy
+        // even though the SELECT returns the generated values.)
+        const dgen = dc.col_flags.int() & COLFLAG.GENERATED.int();
+        if (dgen != sc.col_flags.int() & COLFLAG.GENERATED.int()) return false;
+        if (dgen != 0) {
+            if (expr_mod.compare(null, build.columnExpr(src, sc), build.columnExpr(dest, dc), -1) != 0) return false;
+        }
+        if (dc.affinity != sc.affinity) return false;
+        if (stricmpNull(build.columnColl(dc), build.columnColl(sc)) != 0) return false;
+        if (dc.not_null != OE.None and sc.not_null == OE.None) return false;
+        // The defaults of the second and later columns must be the same.
+        if (dgen == 0 and i > 0) {
+            const de = build.columnExpr(dest, dc);
+            const se = build.columnExpr(src, sc);
+            if ((de == null) != (se == null) or
+                (de != null and !std.mem.eql(u8, de.?.token(), se.?.token())))
+            {
+                return false;
+            }
+        }
+    }
+    var dest_has_unique_idx = false;
+    var di = dest.index;
+    while (di) |dest_idx| : (di = dest_idx.next) {
+        if (dest_idx.isUnique()) dest_has_unique_idx = true;
+        var si = src.index;
+        const src_idx = while (si) |x| : (si = x.next) {
+            if (xferCompatibleIndex(dest_idx, x)) break x;
+        } else return false;
+        // Two indexes on one b-tree: a corrupt schema.
+        if (src_idx.tnum == dest_idx.tnum and src.schema == dest.schema) return false;
+    }
+    if (dest.check != null and !db.m_db_flags.Vacuum and !xferCompatibleCheck(dest, src)) return false;
+    // The transfer would not check foreign keys (VACUUM turns them off).
+    if (db.flags.ForeignKeys and dest.u.tab.fkey != null) return false;
+    if (db.flags.CountRows) return false;
+
+    // The transfer is possible, though perhaps only into an empty table.
+    const i_db_src: usize = @intCast(prepare.schemaToIndex(db, src.schema));
+    const v = build.getVdbe(p).?;
+    build.codeVerifySchema(p, i_db_src);
+    const i_src = p.n_tab;
+    p.n_tab += 1;
+    const i_dest = p.n_tab;
+    p.n_tab += 1;
+    const reg_autoinc = autoIncBegin(p, i_db_dest, dest);
+    const reg_data = expr_mod.getTempReg(p);
+    _ = aux.addOp2(v, OP.Null, 0, reg_data);
+    const reg_rowid = expr_mod.getTempReg(p);
+    openTable(p, i_dest, i_db_dest, dest, OP.OpenWrite);
+    std.debug.assert(dest.hasRowid() or dest_has_unique_idx);
+    var empty_dest_test: i32 = 0;
+    var empty_src_test: i32 = 0;
+    const vacuum = db.m_db_flags.Vacuum;
+    if (!vacuum and ((dest.i_pkey < 0 and dest.index != null) or dest_has_unique_idx or
+        (on_error != OE.Abort and on_error != OE.Rollback)))
+    {
+        // The destination must be empty: (1) without an INTEGER PRIMARY
+        // KEY the rowids in its index entries might have to change, (2)
+        // uniqueness is not checked, (3) neither is the conflict
+        // resolution. VACUUM's destination is always empty.
+        const addr1 = aux.addOp2(v, OP.Rewind, i_dest, 0);
+        empty_dest_test = aux.addOp0(v, OP.Goto);
+        aux.jumpHere(v, addr1);
+    }
+    if (src.hasRowid()) {
+        openTable(p, i_src, i_db_src, src, OP.OpenRead);
+        empty_src_test = aux.addOp2(v, OP.Rewind, i_src, 0);
+        var addr1: i32 = undefined;
+        if (dest.i_pkey >= 0) {
+            addr1 = aux.addOp2(v, OP.Rowid, i_src, reg_rowid);
+            if (!vacuum) {
+                const addr2 = aux.addOp3(v, OP.NotExists, i_dest, 0, reg_rowid);
+                build.rowidConstraint(p, on_error, dest);
+                aux.jumpHere(v, addr2);
+            }
+            autoIncStep(p, reg_autoinc, reg_rowid);
+        } else if (dest.index == null and !db.m_db_flags.VacuumInto) {
+            addr1 = aux.addOp2(v, OP.NewRowid, i_dest, reg_rowid);
+        } else {
+            addr1 = aux.addOp2(v, OP.Rowid, i_src, reg_rowid);
+            std.debug.assert(!dest.tab_flags.Autoincrement);
+        }
+        var ins_flags: u16 = undefined;
+        if (vacuum) {
+            _ = aux.addOp1(v, OP.SeekEnd, i_dest);
+            ins_flags = OPFLAG.APPEND | OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT;
+        } else {
+            ins_flags = OPFLAG.NCHANGE | OPFLAG.LASTROWID | OPFLAG.APPEND | OPFLAG.PREFORMAT;
+        }
+        _ = aux.addOp3(v, OP.RowCell, i_dest, i_src, reg_rowid);
+        _ = aux.addOp3(v, OP.Insert, i_dest, reg_data, reg_rowid);
+        if (!vacuum) aux.appendP4(v, .{ .table = dest });
+        aux.changeP5(v, ins_flags);
+        _ = aux.addOp2(v, OP.Next, i_src, addr1);
+        _ = aux.addOp2(v, OP.Close, i_src, 0);
+        _ = aux.addOp2(v, OP.Close, i_dest, 0);
+    }
+    // (C codes sqlite3TableLock() for WITHOUT ROWID tables, which does
+    // nothing without a shared cache.)
+    di = dest.index;
+    while (di) |dest_idx| : (di = dest_idx.next) {
+        var idx_ins_flags: u16 = 0;
+        var si = src.index;
+        const src_idx = while (si) |x| : (si = x.next) {
+            if (xferCompatibleIndex(dest_idx, x)) break x;
+        } else unreachable;
+        _ = aux.addOp3(v, OP.OpenRead, i_src, @intCast(src_idx.tnum), @intCast(i_db_src));
+        aux.setP4KeyInfo(p, src_idx);
+        _ = aux.addOp3(v, OP.OpenWrite, i_dest, @intCast(dest_idx.tnum), @intCast(i_db_dest));
+        aux.setP4KeyInfo(p, dest_idx);
+        aux.changeP5(v, OPFLAG.BULKCSR);
+        const addr1 = aux.addOp2(v, OP.Rewind, i_src, 0);
+        if (vacuum) {
+            // The destination is empty, and if every column collates with
+            // BINARY the keys come in sorted order: append each one at
+            // the end instead of seeking. (A user-defined collation may
+            // have changed since the index was built.)
+            const all_binary = for (src_idx.coll[0..src_idx.n_column]) |zcoll| {
+                if (ctype.strICmp(coll_mod.str_binary, zcoll) != 0) break false;
+            } else true;
+            if (all_binary) {
+                idx_ins_flags = OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT;
+                _ = aux.addOp1(v, OP.SeekEnd, i_dest);
+                _ = aux.addOp2(v, OP.RowCell, i_dest, i_src);
+            }
+        } else if (!src.hasRowid() and dest_idx.isPrimaryKey()) {
+            idx_ins_flags |= OPFLAG.NCHANGE;
+        }
+        if (idx_ins_flags != OPFLAG.USESEEKRESULT | OPFLAG.PREFORMAT) {
+            _ = aux.addOp3(v, OP.RowData, i_src, reg_data, 1);
+        }
+        _ = aux.addOp2(v, OP.IdxInsert, i_dest, reg_data);
+        aux.changeP5(v, idx_ins_flags | OPFLAG.APPEND);
+        _ = aux.addOp2(v, OP.Next, i_src, addr1 + 1);
+        aux.jumpHere(v, addr1);
+        _ = aux.addOp2(v, OP.Close, i_src, 0);
+        _ = aux.addOp2(v, OP.Close, i_dest, 0);
+    }
+    if (empty_src_test != 0) aux.jumpHere(v, empty_src_test);
+    expr_mod.releaseTempReg(p, reg_rowid);
+    expr_mod.releaseTempReg(p, reg_data);
+    if (empty_dest_test != 0) {
+        autoincrementEnd(p);
+        _ = aux.addOp2(v, OP.Halt, RC.OK, 0);
+        aux.jumpHere(v, empty_dest_test);
+        _ = aux.addOp2(v, OP.Close, i_dest, 0);
+        return false;
+    }
+    return true;
 }
 
 /// sqlite3ExprReferencesUpdatedColumn() walker bits.

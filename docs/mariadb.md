@@ -325,7 +325,7 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
   - `View's SELECT contains a variable or parameter`
 - 엔진 함수(`xq_div` ...)나 방언 함수(`xq_mariadb_*`)를 부르는 스키마는 xqlite에서는 어느 방언으로든 같은 결과를 냅니다.
 - sqlite3는 그런 식을 계산할 수 없습니다.
-- `/`, `UCASE`, `GREATEST`, `IF`, `CONCAT`, `LIKE` 같은 식은 sqlite3에서도 같습니다(`tools/interop-mariadb.sh`).
+- `/`, `UCASE`, `GREATEST`, `IF`, `CONCAT`, `LIKE` 같은 식은 sqlite3에서도 같습니다(`xqt interop mariadb`).
 - 저장된 식의 비교는 열 collation이 없으면 읽는 연결의 기본 collation을 씁니다.
 
 | 읽는 쪽 | 기본 collation |
@@ -387,10 +387,10 @@ tools/dialect/maria-diff.sh [cases-file]
 
 ### sqlite3와 교차 검사
 
-`tools/interop-mariadb.sh`는 MariaDB 방언으로 쓴 데이터베이스를 sqlite3로 확인합니다.
+`xqt interop mariadb`(`tools/xqt/interop/mariadb.zig`)는 MariaDB 방언으로 쓴 데이터베이스를 sqlite3로 확인합니다.
 
 - sqlite3의 무결성 검사를 통과해야 합니다.
 - sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
 - 다루는 것: STRICT 테이블, 이름 붙은 CHECK, DEFAULT·생성 열 식, `AUTO_INCREMENT`, 테이블과 함께 이름이 바뀌는 `"t$i"` 인덱스, 뷰, `xq_catalog`.
 - 엔진 함수(`xq_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mariadb/test.zig`에서 확인합니다.
-- `sqlite3`(또는 `$SQLITE3`)와 먼저 `zig build`가 필요합니다.
+- 먼저 `zig build tools`가 필요합니다. sqlite3는 xqt의 `cfg.sqlite3`(`--sqlite3`, `$SQLITE3`)입니다.

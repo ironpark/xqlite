@@ -14,6 +14,8 @@ const xqt = @import("xqt");
 pub const modules = .{
     @import("interop/sql.zig"),
     @import("interop/hot_journal.zig"),
+    @import("interop/pg.zig"),
+    @import("interop/mariadb.zig"),
 };
 
 pub const usage =

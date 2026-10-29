@@ -246,12 +246,12 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | --- | --- |
 | `src/dialect/postgres/test.zig` | 종단 테스트 |
 | `tools/dialect/pg-diff.sh` + `pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 28개 케이스가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교) |
-| `tools/interop-pg.sh` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
+| `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
 
 차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다. 두 스크립트 모두 먼저 `zig build`가 필요합니다.
 
 ```sh
 podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
 tools/dialect/pg-diff.sh
-tools/interop-pg.sh
+zig-out/bin/xqt interop pg
 ```

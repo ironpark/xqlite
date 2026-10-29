@@ -1,18 +1,17 @@
 //! The PostgreSQL dialect (Phase 5).
 //!
-//! The parser is not written yet: `run` only accepts blank text. What is
-//! here already is the engine side: the function table (version() and
-//! the sequence functions nextval/currval/setval/lastval of
-//! src/catalog/sequence.zig).
+//! The frontend reads one statement (lexer.zig, parser.zig into the tree
+//! of ast.zig) and lowers it: queries, DML and transaction control into
+//! the common IR (lower.zig), DDL as SQLite text with catalog entries
+//! (ddl.zig, render.zig). PRAGMA, VACUUM and ANALYZE are passed to
+//! SQLite's grammar as written, so that `PRAGMA xq_dialect = 'sqlite'`
+//! switches back. Errors use PostgreSQL's wording where it is cheap
+//! (`syntax error at or near "x"`, `relation "t" does not exist`).
 //!
-//! Where to start: replace `run` with a tokenizer and parser for
-//! PostgreSQL that lowers each statement through src/ir/ir.zig, following
-//! the contract of dialect.Frontend (one statement, p.tail, errors in the
-//! Parse, ir.stmt.finishCoding()). DDL goes through
-//! ir.stmt.lowerSqliteText() with SQLite text (types mapped with
-//! ir.ddl.strictStorageType() and STRICT, the declared types and
-//! identity sequences recorded with src/catalog). Identifiers are folded
-//! to lower case by the frontend.
+//! The engine side: the function table (version(), the sequence
+//! functions of src/catalog/sequence.zig and funcs.zig).
+//!
+//! What is supported and what is not: README.md, "PostgreSQL 방언".
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
@@ -20,11 +19,124 @@ const dialect = @import("../dialect.zig");
 const dfunc = @import("../func.zig");
 const sequence = @import("../../catalog/sequence.zig");
 const api = @import("../../vdbe/api.zig");
+const ir = @import("../../ir/ir.zig");
+const util = @import("../../sql/util.zig");
+const parser = @import("parser.zig");
+const lower = @import("lower.zig");
+const ddl = @import("ddl.zig");
+const funcs = @import("funcs.zig");
+
+const RC = int.RC;
 
 pub const frontend: dialect.Frontend = .{ .name = "postgres", .run = run };
 
 pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-    return dialect.notImplemented(p, sql, "postgres");
+    const db = p.db;
+    p.rc = RC.OK;
+    p.tail = sql;
+    const parent = db.parse;
+    db.parse = p;
+    defer db.parse = parent;
+
+    var ps = parser.Parser.init(p.arena, sql, 0) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.ParseFailed => {
+            const e = parser.Parser.lexError(p.arena, sql, 0);
+            ir.stmt.errorMsgAt(p, sql.ptr + e[1], "{s}", .{e[0]});
+            p.tail = sql[sql.len..];
+            return error.ParseFailed;
+        },
+    };
+    const rest = sql[ps.end..];
+    if (ps.isEmpty()) {
+        p.tail = rest;
+        return;
+    }
+    compile(p, sql, &ps) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.Failed => {},
+    };
+    if (p.n_err == 0 and p.rc == RC.OK) ir.stmt.finishCoding(p);
+    p.tail = rest;
+    if (p.err_msg != null or (p.rc != RC.OK and p.rc != RC.DONE)) {
+        if (p.err_msg == null) p.err_msg = try p.arena.dupeSentinel(u8, util.errStr(p.rc), 0);
+        try translateError(p);
+        return error.ParseFailed;
+    }
+}
+
+fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
+    // SQLite's administrative statements, as written.
+    const first = ps.toks[0];
+    if (first.isKw("pragma") or first.isKw("vacuum") or first.isKw("analyze") or first.isKw("reindex")) {
+        var last = first;
+        for (ps.toks) |t| {
+            if (t.kind == .eof) break;
+            last = t;
+        }
+        const text = try p.arena.dupeSentinel(u8, sql[first.start..last.end], 0);
+        try ir.stmt.lowerSqliteText(p, text);
+        return;
+    }
+    const stmt = ps.statement() catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.ParseFailed => {
+            const z: ?[*]const u8 = if (ps.err_pos < sql.len) sql.ptr + ps.err_pos else null;
+            ir.stmt.errorMsgAt(p, z, "{s}", .{ps.err_msg});
+            return error.Failed;
+        },
+    };
+    switch (stmt) {
+        .create_table, .create_index, .create_view, .create_sequence, .alter_table, .drop => {
+            var d: ddl.Ddl = .{ .p = p, .src = sql };
+            try d.statement(stmt);
+        },
+        .explain => |inner| switch (inner.*) {
+            .select, .insert, .update, .delete => {
+                var l: lower.Lowerer = .{ .p = p, .src = sql };
+                try l.statement(stmt);
+            },
+            else => {
+                ir.stmt.errorMsgAt(p, sql.ptr, "EXPLAIN of this statement is not supported", .{});
+                return error.Failed;
+            },
+        },
+        else => {
+            var l: lower.Lowerer = .{ .p = p, .src = sql };
+            try l.statement(stmt);
+        },
+    }
+}
+
+/// SQLite's messages for common failures in PostgreSQL's words.
+fn translateError(p: *int.Parse) int.Oom!void {
+    const m: []const u8 = p.err_msg orelse return;
+    const rules = [_]struct { []const u8, []const u8, []const u8 }{
+        // prefix, before the name, after it
+        .{ "no such table: ", "relation \"", "\" does not exist" },
+        .{ "no such column: ", "column \"", "\" does not exist" },
+        .{ "no such function: ", "function ", "() does not exist" },
+        .{ "no such index: ", "index \"", "\" does not exist" },
+        .{ "no such view: ", "view \"", "\" does not exist" },
+        .{ "ambiguous column name: ", "column reference \"", "\" is ambiguous" },
+        .{ "no such collation sequence: ", "collation \"", "\" for encoding \"UTF8\" does not exist" },
+    };
+    for (rules) |r| if (std.mem.startsWith(u8, m, r[0])) {
+        var name = m[r[0].len..];
+        if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
+        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}", .{ r[1], name, r[2] }, 0);
+        return;
+    };
+    // "table t already exists", "index i already exists"
+    inline for (.{ "table ", "index ", "view " }) |kind| {
+        if (std.mem.startsWith(u8, m, kind) and std.mem.endsWith(u8, m, " already exists")) {
+            var name = m[kind.len .. m.len - " already exists".len];
+            if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
+            if (name.len > 1 and name[0] == '"') name = name[1 .. name.len - 1];
+            p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "relation \"{s}\" already exists", .{name}, 0);
+            return;
+        }
+    }
 }
 
 pub const hooks: dialect.Hooks = .{
@@ -33,7 +145,7 @@ pub const hooks: dialect.Hooks = .{
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-} ++ sequence.functions;
+} ++ sequence.functions ++ funcs.functions;
 
 comptime {
     dfunc.checkTable(&functions);
@@ -44,4 +156,10 @@ pub const version = "PostgreSQL 17.0 (xqlite " ++ @import("../../sql/func.zig").
 
 fn versionFunc(ctx: *dfunc.Context, _: []*dfunc.Mem) void {
     api.resultText(ctx, version, .static);
+}
+
+test {
+    _ = @import("lexer.zig");
+    _ = @import("funcs.zig");
+    _ = @import("test.zig");
 }

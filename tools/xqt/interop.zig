@@ -18,6 +18,7 @@ pub const modules = .{
     @import("interop/savepoint.zig"),
     @import("interop/pragma.zig"),
     @import("interop/shell.zig"),
+    @import("interop/wal.zig"),
 };
 
 pub const usage =

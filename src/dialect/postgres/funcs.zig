@@ -222,7 +222,7 @@ fn rightFunc(ctx: *Context, argv: []*Mem) void {
     const s = text(ctx, argv[0]) orelse return;
     const n = api.valueInt64(argv[1]);
     const total: i64 = @intCast(cpCount(s));
-    const skip: i64 = if (n >= 0) @max(0, total - n) else @min(total, -n);
+    const skip: i64 = if (n >= 0) @max(0, total - n) else @min(total, 0 -| n);
     api.resultText(ctx, s[cpOffset(s, @intCast(skip))..], .transient);
 }
 

@@ -1,5 +1,6 @@
 //! Regression tests of what the render≡lower fuzzer (fuzz.zig) found:
-//! trees whose lowering and rendered text did not mean the same.
+//! trees whose lowering and rendered text did not mean the same, and
+//! crashes of functions it called.
 
 const std = @import("std");
 const testing = std.testing;
@@ -228,4 +229,14 @@ test "ir roundtrip: IS TRUE in a DEFAULT, which SQLite does not resolve" {
     try c.exec(try render.statement(&p, "", .{ .create_table = ct }));
     try c.exec("INSERT INTO t(z) VALUES (0)");
     try c.expectRows("SELECT x, y, w, 2 IS TRUE, 'a' IS NOT FALSE, 'a' IS (1 IN ()) FROM t", "1|0|1|1|0|1\n");
+}
+
+test "ir roundtrip: dialect functions on edge values" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // right(s, n) with n the smallest integer: overflowed negating it.
+    try c.expectRows("SELECT xq_postgres_right('abc', -9223372036854775808), xq_postgres_right('abc', -1)", "|bc\n");
+    // An empty CONCAT(): its buffer was freed twice.
+    try c.expectRows("SELECT xq_mariadb_concat('', ''), xq_mariadb_concat('a', '')", "|a\n");
 }

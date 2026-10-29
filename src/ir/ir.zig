@@ -1,6 +1,12 @@
 //! The common IR: the dialect-neutral interface through which a frontend
 //! (src/dialect/*/frontend.zig) lowers a statement.
 //!
+//! A frontend other than SQLite's parses into the syntax tree IR
+//! (tree.zig), with its dialect's semantics resolved into explicit nodes,
+//! and hands it to lower.zig, which builds the parse tree below, and to
+//! render.zig, which writes the SQLite text the schema keeps (see those
+//! files and README.md, "방언 아키텍처").
+//!
 //! The IR is SQLite's own parse tree (Expr, ExprList, IdList, SrcList,
 //! Select, With, Window, Upsert, TriggerStep of src/sql/sqlite_int.zig)
 //! together with the code generator entry points that SQLite's grammar
@@ -794,3 +800,13 @@ pub const admin = struct {
 
 /// The catalog of dialect metadata and the sequences (src/catalog).
 pub const catalog = @import("../catalog/catalog.zig");
+
+/// The syntax tree IR (tree.zig), its lowering into the parse tree
+/// (lower.zig) and its SQLite text (render.zig).
+pub const tree = @import("tree.zig");
+pub const lower = @import("lower.zig");
+pub const render = @import("render.zig");
+
+test {
+    _ = @import("test.zig");
+}

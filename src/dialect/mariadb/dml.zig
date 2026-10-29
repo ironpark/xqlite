@@ -69,7 +69,15 @@ pub fn insert(s: *Parser) Error!void {
 
     var needed = false;
     for (cols.items) |c| needed = needed or c.decl_type != null or c.autoinc;
-    const wrap: parser.RowWrap = .{ .target = &t, .cols = if (unknown_col) &.{} else cols.items, .ignore = ignore, .needed = needed and !unknown_col };
+    const missing = if (unknown_col or s.isKw("SET")) &.{} else try s.missingColumns(&t, cols.items);
+    for (missing) |c| id_list = try ir.list.idAppend(s.p, id_list, int.Token.init(c.name));
+    if (missing.len > 0 and id_list.?.len() == missing.len) {
+        // No column list: name the columns.
+        id_list = null;
+        for (cols.items) |c| id_list = try ir.list.idAppend(s.p, id_list, int.Token.init(c.name));
+        for (missing) |c| id_list = try ir.list.idAppend(s.p, id_list, int.Token.init(c.name));
+    }
+    const wrap: parser.RowWrap = .{ .target = &t, .cols = if (unknown_col) &.{} else cols.items, .ignore = ignore, .needed = needed and !unknown_col, .missing = missing };
 
     var sel: ?*Select = null;
     if (s.isKw("VALUES") or s.isKw("VALUE")) {
@@ -91,13 +99,18 @@ pub fn insert(s: *Parser) Error!void {
             id_list = try ir.list.idAppend(s.p, id_list, irTok(c));
             const m = Parser.findCol(&t, try s.nameText(c));
             row = try ir.list.append(s.p, row, if (m) |cm| try s.wrapValue(&t, cm, e, 1, ignore) else try noDefault(s, e));
+            if (m) |cm| try cols.append(s.a, cm);
             if (!s.eatOp(",")) break;
         }
         s.allow_default = saved;
+        for (try s.missingColumns(&t, cols.items)) |c| {
+            id_list = try ir.list.idAppend(s.p, id_list, int.Token.init(c.name));
+            row = try ir.list.append(s.p, row, try s.wrapValueX(&t, c, try ir.expr.leaf(s.a, TK.NULL, null), 1, ignore, true));
+        }
         sel = try ir.select.values(s.p, row);
     } else if (s.isSelectStart()) {
         sel = try s.selectStmt();
-        if (wrap.needed) sel = try wrapSelect(s, &wrap, sel.?);
+        if (wrap.needed or wrap.missing.len > 0) sel = try wrapSelect(s, &wrap, sel.?);
     } else return s.syntaxError();
 
     var upsert: ?*int.Upsert = null;
@@ -141,6 +154,9 @@ fn wrapSelect(s: *Parser, w: *const parser.RowWrap, sel: *Select) Error!*Select 
         names = try ir.list.addIdTerm(s.p, names, int.Token.init(n), false, int.SortOrder.undef);
         const ref = try ir.expr.token(s.p, TK.ID, int.Token.init(n));
         out = try ir.list.append(s.p, out, try s.wrapValue(w.target, c, ref, 1, w.ignore));
+    }
+    for (w.missing) |c| {
+        out = try ir.list.append(s.p, out, try s.wrapValueX(w.target, c, try ir.expr.leaf(s.a, TK.NULL, null), 1, w.ignore, true));
     }
     const cte = try ir.with.cte(s.p, int.Token.init("xq_src"), names, sel, .any);
     const with = try ir.with.add(s.p, null, cte);

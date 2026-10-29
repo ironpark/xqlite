@@ -221,7 +221,7 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("setval", 2, .{ .unsafe = true }, sequence.setvalFunc),
     dfunc.scalar("setval", 3, .{ .unsafe = true }, sequence.setvalFunc),
     // Lowered operators and statements.
-    dfunc.scalar("xq_coerce", 5, .{}, types.coerceFunc),
+    dfunc.scalar("xq_coerce", 7, .{}, types.coerceFunc),
     dfunc.scalar("xq_sysvar", 1, .{}, session.sysvarFunc),
     dfunc.scalar("xq_set_sysvar", 2, .{ .direct_only = true }, session.setSysvarFunc),
     dfunc.scalar("xq_uservar", 1, .{}, session.uservarFunc),
@@ -264,6 +264,8 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("degrees", 1, det, rt.degreesFunc),
     dfunc.scalar("radians", 1, det, rt.radiansFunc),
     dfunc.scalar("truncate", 2, det, rt.truncateFunc),
+    dfunc.scalar("round", 1, det, rt.roundFunc),
+    dfunc.scalar("round", 2, det, rt.roundFunc),
     // Strings.
     dfunc.scalar("left", 2, det, rt.leftFunc),
     dfunc.scalar("right", 2, det, rt.rightFunc),
@@ -299,6 +301,10 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("datediff", 2, det, rt.datediffFunc),
     dfunc.scalar("last_day", 1, det, rt.lastDayFunc),
     dfunc.scalar("date_format", 2, det, rt.dateFormatFunc),
+    dfunc.scalar("dayname", 1, det, rt.daynameFunc),
+    dfunc.scalar("monthname", 1, det, rt.monthnameFunc),
+    dfunc.scalar("str_to_date", 2, det, rt.strToDateFunc),
+    dfunc.scalar("ascii", 1, det, rt.asciiFunc),
 };
 
 comptime {

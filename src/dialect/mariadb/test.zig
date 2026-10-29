@@ -87,9 +87,9 @@ test "mariadb: strict and lenient INSERT" {
     try c.expectError("INSERT INTO t (i) VALUES (200)", "Out of range value for column 'i' at row 1");
     try c.expectError("INSERT INTO t (u) VALUES (-1)", "Out of range value for column 'u' at row 1");
     try c.expectError("INSERT INTO t (s) VALUES ('toolong')", "Data too long for column 's' at row 1");
-    try c.expectError("INSERT INTO t (i) VALUES (1), ('x')", "Incorrect integer value: 'x' for column `i` at row 2");
+    try c.expectError("INSERT INTO t (i) VALUES (1), ('x')", "Incorrect integer value: 'x' for column `main`.`t`.`i` at row 2");
     try c.expectError("INSERT INTO t (e) VALUES ('c')", "Data truncated for column 'e' at row 1");
-    try c.expectError("INSERT INTO t (dt) VALUES ('2024-02-30')", "Incorrect date value: '2024-02-30' for column `dt` at row 1");
+    try c.expectError("INSERT INTO t (dt) VALUES ('2024-02-30')", "Incorrect date value: '2024-02-30' for column `main`.`t`.`dt` at row 1");
     try c.expectError("INSERT INTO t (d) VALUES (1000)", "Out of range value for column 'd' at row 1");
     try c.expectRows("SELECT count(*) FROM t", "0\n");
     // Conversions that fit.
@@ -104,7 +104,7 @@ test "mariadb: strict and lenient INSERT" {
         "Warning|1265|Data truncated for column 's' at row 1\n" ++
         "Warning|1264|Out of range value for column 'd' at row 1\n" ++
         "Warning|1265|Data truncated for column 'e' at row 1\n" ++
-        "Warning|1292|Incorrect date value: 'garbage' for column `dt` at row 1\n");
+        "Warning|1265|Data truncated for column 'dt' at row 1\n");
     try c.expectRows("SELECT @@warning_count", "6\n");
     try c.expectRows("SHOW COUNT(*) WARNINGS", "6\n");
     try c.expectRows("SELECT i, u, s, d, e, dt FROM t", "127|0|toolo|999.99||0000-00-00\n");
@@ -114,6 +114,20 @@ test "mariadb: strict and lenient INSERT" {
     try c.exec("DELETE FROM t");
     try c.exec("INSERT IGNORE INTO t (i, s) VALUES (-500, 'abcdefg')");
     try c.expectRows("SELECT i, s FROM t", "-128|abcde\n");
+    // NULL into NOT NULL, and a NOT NULL column without a default left
+    // out.
+    try c.exec("CREATE TABLE nn (a INT NOT NULL, b INT NOT NULL DEFAULT 5, c VARCHAR(3))");
+    try c.expectError("INSERT INTO nn (a) VALUES (NULL)", "Column 'a' cannot be null");
+    try c.expectError("INSERT INTO nn (c) VALUES ('x')", "Field 'a' doesn't have a default value");
+    try c.exec("INSERT IGNORE INTO nn (a) VALUES (NULL)");
+    try c.expectRows("SHOW WARNINGS", "Warning|1048|Column 'a' cannot be null\n");
+    try c.exec("SET sql_mode = ''");
+    try c.exec("INSERT INTO nn (c) VALUES ('y')");
+    try c.expectRows("SHOW WARNINGS", "Warning|1364|Field 'a' doesn't have a default value\n");
+    try c.expectError("INSERT INTO nn (a) VALUES (NULL)", "Column 'a' cannot be null");
+    try c.exec("INSERT INTO nn (a) VALUES (1), (NULL)");
+    try c.expectRows("SELECT a, b, c FROM nn", "0|5|NULL\n0|5|y\n1|5|NULL\n0|5|NULL\n");
+    try c.exec("SET sql_mode = DEFAULT");
     // UPDATE converts too.
     try c.expectError("UPDATE t SET i = 1000", "Out of range value for column 'i' at row 1");
     try c.exec("UPDATE IGNORE t SET i = 1000");
@@ -224,7 +238,7 @@ test "mariadb: functions" {
     try c.expectRows("SELECT LENGTH('é'), CHAR_LENGTH('é'), UCASE('a'), LCASE('B'), SUBSTRING('hello', 2, 3), SUBSTRING('hello' FROM 2), MID('hello', 2, 1)", "2|1|A|b|ell|ello|e\n");
     try c.expectRows("SELECT TRIM('  x  '), TRIM(LEADING 'x' FROM 'xxaxx'), TRIM(TRAILING FROM 'a  '), LOCATE('l', 'hello'), LOCATE('l', 'hello', 4), POSITION('l' IN 'hello')", "x|axx|a|3|4|3\n");
     try c.expectRows("SELECT LPAD('5', 3, '0'), RPAD('ab', 4, '.'), LEFT('hello', 2), RIGHT('hello', 3), REPEAT('ab', 2), REVERSE('abc'), HEX(255), HEX('A')", "005|ab..|he|llo|abab|cba|FF|41\n");
-    try c.expectRows("SELECT FLOOR(1.5), CEIL(1.2), POW(2, 10), ROUND(2.5), TRUNCATE(1.29, 1), ABS(-3), GREATEST(1, 5, 3), LEAST(4, 2), MOD(10, 3)", "1|2|1024.0|3.0|1.2|3|5|2|1\n");
+    try c.expectRows("SELECT FLOOR(1.5), CEIL(1.2), POW(2, 10), ROUND(2.5), TRUNCATE(1.29, 1), ABS(-3), GREATEST(1, 5, 3), LEAST(4, 2), MOD(10, 3)", "1|2|1024.0|3|1.2|3|5|2|1\n");
     try c.expectRows("SELECT FORMAT(1234567.891, 2), FIND_IN_SET('b', 'a,b,c'), FIELD('b', 'a', 'b'), ELT(2, 'a', 'b')", "1,234,567.89|2|2|b\n");
     try c.expectRows("SELECT DATE_ADD('2024-01-31', INTERVAL 1 MONTH), '2024-01-01' + INTERVAL 1 DAY, DATE_SUB('2024-03-01 00:00:00', INTERVAL 1 SECOND)", "2024-02-29|2024-01-02|2024-02-29 23:59:59\n");
     try c.expectRows("SELECT YEAR('2024-05-06'), MONTH('2024-05-06'), DAY('2024-05-06'), DAYOFWEEK('2024-05-06'), DATEDIFF('2024-03-01', '2024-02-01'), LAST_DAY('2023-02-10')", "2024|5|6|2|29|2023-02-28\n");
@@ -232,6 +246,10 @@ test "mariadb: functions" {
     try c.expectRows("SELECT TIMESTAMPDIFF(MONTH, '2024-01-15', '2024-03-14'), TIMESTAMPDIFF(DAY, '2024-01-01', '2024-01-31')", "1|30\n");
     try c.expectRows("SELECT NOW() = CURRENT_TIMESTAMP, LENGTH(NOW()), LENGTH(CURDATE()), DATABASE(), VERSION() LIKE '%MariaDB%'", "1|19|10|main|1\n");
     try c.expectRows("SELECT ISNULL(NULL), COALESCE(NULL, 1), NULLIF(1, 1)", "1|1|NULL\n");
+    try c.expectRows("SELECT ROUND(2.5), ROUND(2.567, 2), ROUND(-2.5), ROUND(15, -1), CAST('2024-02-30' AS DATE)", "3|2.57|-3|20|NULL\n");
+    try c.expectRows("SELECT ASCII('A'), DAYNAME('2024-05-06'), MONTHNAME('2024-05-06'), TIME('2024-01-01 10:20:30'), STR_TO_DATE('01/02/2024', '%m/%d/%Y')", "65|Monday|May|10:20:30|2024-01-02\n");
+    // IN compares with the default collation too.
+    try c.expectRows("SELECT 'a' IN ('A', 'b'), 'a' IN ('A'), 'a' IN (SELECT 'A')", "1|1|1\n");
 }
 
 test "mariadb: collation and case-insensitive keys" {
@@ -329,7 +347,7 @@ test "mariadb: transactions, USE, user variables, LIMIT on DML" {
     try c.exec("SET foreign_key_checks = 0; SET autocommit = 1; SET time_zone = '+00:00'");
     // Back to SQLite.
     try c.exec("PRAGMA xq_dialect = 'sqlite'");
-    try c.expectRows("SELECT 'a' || 'b'", "ab\n");
+    try c.expectRows("SELECT 'a' || 'b', 'a' IN ('A', 'b'), 'a' IN ('A')", "ab|0|0\n");
 }
 
 test "mariadb: errors" {

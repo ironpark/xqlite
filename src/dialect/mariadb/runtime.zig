@@ -178,6 +178,19 @@ pub fn truncateFunc(ctx: *Context, argv: []*Mem) void {
     api.resultDouble(ctx, r);
 }
 
+/// ROUND(x[, d]): half away from zero; an integer for an integer or
+/// when d <= 0 (MariaDB's exact result for ROUND(2.5) is 3).
+pub fn roundFunc(ctx: *Context, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(ctx);
+    const d: i64 = if (argv.len > 1) std.math.clamp(api.valueInt64(argv[1]), -30, 30) else 0;
+    if (isIntegral(argv[0]) and d >= 0) return api.resultInt64(ctx, api.valueInt64(argv[0]));
+    const x = api.valueDouble(argv[0]);
+    const p = std.math.pow(f64, 10, @floatFromInt(d));
+    const r = @round(x * p) / p;
+    if (d <= 0 and r >= -9.2233720368547758e18 and r < 9.2233720368547758e18) return api.resultInt64(ctx, @intFromFloat(r));
+    api.resultDouble(ctx, r);
+}
+
 /// RAND([seed]): a float in [0, 1).
 pub fn randFunc(ctx: *Context, argv: []*Mem) void {
     var buf: [8]u8 = undefined;
@@ -538,6 +551,8 @@ pub fn castFunc(ctx: *Context, argv: []*Mem) void {
         return api.resultText(ctx, w.buffered(), .transient);
     }
     const dt = dateArg(argv[0]) orelse return api.resultNull(ctx);
+    const zero = dt.year == 0 and dt.month == 0 and dt.day == 0;
+    if (!zero and !validCalendar(dt)) return api.resultNull(ctx);
     writeDate(&w, dt.year, dt.month, dt.day);
     if (std.mem.eql(u8, to, "datetime")) {
         w.writeByte(' ') catch {};
@@ -726,6 +741,144 @@ pub fn lastDayFunc(ctx: *Context, argv: []*Mem) void {
 
 const month_names = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 const day_names = [_][]const u8{ "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday" };
+
+/// DAYNAME(d), MONTHNAME(d).
+fn nameFunc(comptime month: bool) dfunc.StepFn {
+    return struct {
+        fn call(ctx: *Context, argv: []*Mem) void {
+            const dt = dateArg(argv[0]) orelse return api.resultNull(ctx);
+            if (!validCalendar(dt)) return api.resultNull(ctx);
+            if (month) return api.resultText(ctx, month_names[dt.month - 1], .static);
+            const wd: usize = @intCast(@mod(daysFromCivil(dt.year, dt.month, dt.day) + 3, 7));
+            api.resultText(ctx, day_names[wd], .static);
+        }
+    }.call;
+}
+
+pub const daynameFunc = nameFunc(false);
+pub const monthnameFunc = nameFunc(true);
+
+/// ASCII(s): the first byte, 0 for ''.
+pub fn asciiFunc(ctx: *Context, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(ctx);
+    const z = text(argv[0]);
+    api.resultInt64(ctx, if (z.len == 0) 0 else z[0]);
+}
+
+/// STR_TO_DATE(s, fmt): the date (or datetime, or time) `s` written in
+/// DATE_FORMAT's format; NULL if it does not match.
+pub fn strToDateFunc(ctx: *Context, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(ctx);
+    const z = text(argv[0]);
+    const fmt = text(argv[1]);
+    var dt: types.DateTime = .{};
+    var has_date = false;
+    var has_time = false;
+    var pm: ?bool = null;
+    var i: usize = 0;
+    var f: usize = 0;
+    const Num = struct {
+        fn read(s: []const u8, pos: *usize, max: usize) ?u32 {
+            var v: u32 = 0;
+            const start = pos.*;
+            while (pos.* < s.len and pos.* - start < max and std.ascii.isDigit(s[pos.*])) : (pos.* += 1) v = v * 10 + (s[pos.*] - '0');
+            return if (pos.* == start) null else v;
+        }
+    };
+    while (f < fmt.len) : (f += 1) {
+        if (fmt[f] != '%' or f + 1 == fmt.len) {
+            if (i >= z.len or z[i] != fmt[f]) return api.resultNull(ctx);
+            i += 1;
+            continue;
+        }
+        f += 1;
+        switch (fmt[f]) {
+            'Y' => {
+                dt.year = Num.read(z, &i, 4) orelse return api.resultNull(ctx);
+                has_date = true;
+            },
+            'y' => {
+                const y = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                dt.year = if (y < 70) 2000 + y else 1900 + y;
+                has_date = true;
+            },
+            'm', 'c' => {
+                dt.month = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                has_date = true;
+            },
+            'd', 'e' => {
+                dt.day = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                has_date = true;
+            },
+            'H', 'k', 'h', 'I', 'l' => {
+                dt.hour = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                has_time = true;
+            },
+            'i' => {
+                dt.minute = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                has_time = true;
+            },
+            's', 'S' => {
+                dt.second = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                has_time = true;
+            },
+            'f' => {
+                const start = i;
+                var v = Num.read(z, &i, 6) orelse return api.resultNull(ctx);
+                var digits = i - start;
+                while (digits < 6) : (digits += 1) v *= 10;
+                dt.micro = v;
+                has_time = true;
+            },
+            'p' => {
+                if (i + 2 > z.len) return api.resultNull(ctx);
+                pm = std.ascii.eqlIgnoreCase(z[i .. i + 2], "PM");
+                i += 2;
+            },
+            'M', 'b' => {
+                for (month_names, 1..) |m, k| {
+                    const n = if (fmt[f] == 'b') m[0..3] else m;
+                    if (i + n.len <= z.len and std.ascii.eqlIgnoreCase(z[i .. i + n.len], n)) {
+                        dt.month = @intCast(k);
+                        i += n.len;
+                        break;
+                    }
+                } else return api.resultNull(ctx);
+                has_date = true;
+            },
+            'T' => {
+                dt.hour = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                if (i >= z.len or z[i] != ':') return api.resultNull(ctx);
+                i += 1;
+                dt.minute = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                if (i >= z.len or z[i] != ':') return api.resultNull(ctx);
+                i += 1;
+                dt.second = Num.read(z, &i, 2) orelse return api.resultNull(ctx);
+                has_time = true;
+            },
+            '%' => {
+                if (i >= z.len or z[i] != '%') return api.resultNull(ctx);
+                i += 1;
+            },
+            else => return api.resultNull(ctx),
+        }
+    }
+    if (pm) |is_pm| {
+        if (dt.hour == 12) dt.hour = 0;
+        if (is_pm) dt.hour += 12;
+    }
+    if (dt.month > 12 or dt.day > 31 or dt.hour > 23 or dt.minute > 59 or dt.second > 59) return api.resultNull(ctx);
+    if (has_date and dt.month != 0 and dt.day != 0 and !validCalendar(dt)) return api.resultNull(ctx);
+    var buf: [48]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    if (has_date) writeDate(&w, dt.year, dt.month, dt.day);
+    if (has_time) {
+        if (has_date) w.writeByte(' ') catch {};
+        writeTime(&w, dt.hour, dt.minute, dt.second, dt.micro);
+    }
+    if (!has_date and !has_time) return api.resultNull(ctx);
+    api.resultText(ctx, w.buffered(), .transient);
+}
 
 /// DATE_FORMAT(d, fmt) with MariaDB's specifiers.
 pub fn dateFormatFunc(ctx: *Context, argv: []*Mem) void {

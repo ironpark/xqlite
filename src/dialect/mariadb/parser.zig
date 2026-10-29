@@ -907,7 +907,10 @@ pub const Parser = struct {
             sel = if (sel) |prev| try ir.select.multiValues(s.p, prev, row) else try ir.select.values(s.p, row);
             if (!s.eatOp(",")) break;
         }
-        if (n > 1) ir.select.multiValuesEnd(s.p, sel.?);
+        if (n > 1) {
+            ir.select.multiValuesEnd(s.p, sel.?);
+            if (wrap != null) markMultiRow(sel.?);
+        }
         ir.select.doubleLink(s.p, sel.?);
         try s.check();
         return sel.?;
@@ -1276,6 +1279,8 @@ pub const Parser = struct {
     pub const Target = struct {
         tab: ?*int.Table,
         schema: []const u8,
+        /// The table name as stored.
+        name: []const u8 = "",
         cols: []ColMeta,
     };
 
@@ -1287,6 +1292,7 @@ pub const Parser = struct {
         autoinc: bool = false,
         generated: bool = false,
         hidden: bool = false,
+        has_default: bool = false,
     };
 
     /// Look up the target table and its catalog entries (the catalog is
@@ -1323,6 +1329,7 @@ pub const Parser = struct {
                 .autoinc = tab.tab_flags.Autoincrement and tab.i_pkey == i,
                 .generated = c.col_flags.intersects(int.COLFLAG.GENERATED),
                 .hidden = c.col_flags.HIDDEN,
+                .has_default = c.i_dflt != 0,
             };
             for (entries.items) |en| {
                 if (!std.ascii.eqlIgnoreCase(en[0], cols[i].name)) continue;
@@ -1330,7 +1337,7 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, en[1], "mariadb.on_update")) cols[i].on_update = true;
             }
         }
-        return .{ .tab = tab, .schema = schema, .cols = cols };
+        return .{ .tab = tab, .schema = schema, .name = stored, .cols = cols };
     }
 
     /// The column called `n` of the target, or null.
@@ -1345,15 +1352,24 @@ pub const Parser = struct {
     /// NO_AUTO_VALUE_ON_ZERO). A DEFAULT marker becomes the column's
     /// default.
     pub fn wrapValue(s: *Parser, t: *const Target, c: *const ColMeta, e_in: *Expr, row: usize, ignore: bool) Error!*Expr {
+        return s.wrapValueX(t, c, e_in, row, ignore, false);
+    }
+
+    /// wrapValue(); `missing`: the NULL for a NOT NULL column without a
+    /// DEFAULT that the INSERT leaves out.
+    pub fn wrapValueX(s: *Parser, t: *const Target, c: *const ColMeta, e_in: *Expr, row: usize, ignore: bool, missing: bool) Error!*Expr {
         var e = e_in;
         if (e.op == TK.DEFAULT) e = try s.columnDefault(t, c.name);
         if (c.decl_type) |ty| {
             var flags: i32 = 0;
             if (ignore) flags |= types.coerce_ignore;
             if (c.not_null and !c.autoinc) flags |= types.coerce_not_null;
+            if (missing) flags |= types.coerce_missing | types.coerce_not_null;
             e = try s.call("xq_coerce", &.{
                 e,
                 try s.stringExpr(ty),
+                try s.stringExpr(t.schema),
+                try s.stringExpr(t.name),
                 try s.stringExpr(c.name),
                 try s.intExpr(flags),
                 try s.intExpr(@intCast(@min(row, std.math.maxInt(i32)))),
@@ -1377,6 +1393,19 @@ pub const Parser = struct {
         return ir.expr.leaf(s.a, TK.NULL, null);
     }
 
+    /// The NOT NULL columns without a DEFAULT of a MariaDB table that an
+    /// INSERT into `cols` leaves out.
+    pub fn missingColumns(s: *Parser, t: *const Target, cols: []const *ColMeta) Error![]*ColMeta {
+        var out: std.ArrayList(*ColMeta) = .empty;
+        for (t.cols) |*c| {
+            if (!c.not_null or c.has_default or c.autoinc or c.generated or c.hidden or c.decl_type == null) continue;
+            for (cols) |x| {
+                if (x == c) break;
+            } else try out.append(s.a, c);
+        }
+        return out.items;
+    }
+
     /// The columns an INSERT without a column list fills.
     pub fn insertColumns(s: *Parser, t: *const Target) Error![]*ColMeta {
         var out: std.ArrayList(*ColMeta) = .empty;
@@ -1385,16 +1414,39 @@ pub const Parser = struct {
     }
 };
 
+/// Set coerce_multi_row in the xq_coerce() calls of a multi-row VALUES.
+fn markMultiRow(last: *Select) void {
+    var sel: ?*Select = last;
+    while (sel) |x| : (sel = x.prior) {
+        const l = x.e_list orelse continue;
+        for (l.slice()) |item| {
+            var e = item.expr orelse continue;
+            // nullif(xq_coerce(...), 0) for AUTO_INCREMENT.
+            if (e.op == TK.FUNCTION and std.ascii.eqlIgnoreCase(e.token(), "nullif")) e = e.x.list.?.at(0).expr.?;
+            if (e.op != TK.FUNCTION or !std.ascii.eqlIgnoreCase(e.token(), "xq_coerce")) continue;
+            const f = e.x.list.?.at(types.coerce_flags_arg).expr.?;
+            f.u = .{ .value = f.u.value | types.coerce_multi_row };
+        }
+    }
+}
+
 /// The per-row wrapping of INSERT's VALUES.
 pub const RowWrap = struct {
     target: *const Parser.Target,
     cols: []const *Parser.ColMeta,
     ignore: bool,
     needed: bool,
+    /// NOT NULL columns without a DEFAULT the INSERT leaves out: a NULL
+    /// for each is added to each row (and to the column list).
+    missing: []const *Parser.ColMeta = &.{},
 
     pub fn apply(w: *const RowWrap, s: *Parser, row: ?*ExprList, n: usize) Error!?*ExprList {
-        const l = row orelse return row;
-        if (l.len() != w.cols.len and w.cols.len > 0) {
+        var l = row orelse return row;
+        for (w.missing) |c| {
+            const e = try s.wrapValueX(w.target, c, try ir.expr.leaf(s.a, TK.NULL, null), n, w.ignore, true);
+            l = try ir.list.append(s.p, l, e);
+        }
+        if (l.len() != w.cols.len + w.missing.len and w.cols.len > 0) {
             return s.fail("Column count doesn't match value count at row {d}", .{n});
         }
         for (l.slice(), 0..) |*item, i| {

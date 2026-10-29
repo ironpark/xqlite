@@ -250,42 +250,59 @@ pub fn baseByName(name: []const u8) ?Base {
 
 // ============================================================ coercion
 
-/// Flags of xq_coerce(): INSERT/UPDATE IGNORE (never strict), and a
-/// NOT NULL column (NULL fails with MariaDB's message, or with IGNORE is
-/// the type's implicit default).
+/// Flags of xq_coerce():
+///  - coerce_ignore: INSERT/UPDATE IGNORE (never strict);
+///  - coerce_not_null: a NOT NULL column: NULL fails ("Column 'c' cannot
+///    be null"), or with IGNORE, or in a multi-row INSERT outside strict
+///    mode, is the type's implicit default (0, '', the zero date);
+///  - coerce_multi_row: a row of a multi-row INSERT;
+///  - coerce_missing: the NULL stands for a NOT NULL column without a
+///    DEFAULT that the INSERT leaves out ("Field 'c' doesn't have a
+///    default value" in strict mode, else the implicit default).
 pub const coerce_ignore = 1;
 pub const coerce_not_null = 2;
+pub const coerce_multi_row = 4;
+pub const coerce_missing = 8;
 
-/// mariadb_coerce(value, type, column, flags, row): see the file comment.
+/// The position of the flags among the arguments of xq_coerce().
+pub const coerce_flags_arg = 5;
+
+/// xq_coerce(value, type, schema, table, column, flags, row): see the
+/// file comment.
 pub fn coerceFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
     const v = argv[0];
-    const flags = api.valueInt64(argv[3]);
+    const flags = api.valueInt64(argv[coerce_flags_arg]);
     const is_null = api.valueType(v) == vi.SQLITE_NULL;
     if (is_null and flags & coerce_not_null == 0) return api.resultNull(ctx);
     const db = api.contextDbHandle(ctx);
     const st = &db.xq.mariadb;
-    const col = api.valueText(argv[2]) orelse "?";
-    const row = api.valueInt64(argv[4]);
     var buf: [4096]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
     const type_text = api.valueText(argv[1]) orelse return api.resultValue(ctx, v);
     const t = (parse(fba.allocator(), type_text) catch null) orelse return api.resultValue(ctx, v);
-    if (is_null) {
-        if (flags & coerce_ignore == 0) {
-            var msg: [state_mod.Warning.msg_max + 32]u8 = undefined;
-            return api.resultError(ctx, std.fmt.bufPrint(&msg, "Column '{s}' cannot be null", .{col}) catch "Column cannot be null");
-        }
-        st.warn(.warning, 1048, "Column '{s}' cannot be null", .{col});
-        return implicitDefault(ctx, t);
-    }
     var c: Coercion = .{
         .ctx = ctx,
         .st = st,
-        .col = col,
-        .row = row,
+        .schema = api.valueText(argv[2]) orelse "main",
+        .table = api.valueText(argv[3]) orelse "?",
+        .col = api.valueText(argv[4]) orelse "?",
+        .row = api.valueInt64(argv[6]),
         .strict = st.sql_mode.strict() and flags & coerce_ignore == 0,
         .mode = st.sql_mode,
     };
+    if (is_null) {
+        if (flags & coerce_missing != 0) {
+            if (c.problem(1364, "Field '{s}' doesn't have a default value", .{c.col})) return;
+            return implicitDefault(ctx, t);
+        }
+        const lenient = flags & coerce_ignore != 0 or (!c.strict and flags & coerce_multi_row != 0);
+        if (!lenient) {
+            var msg: [state_mod.Warning.msg_max + 32]u8 = undefined;
+            return api.resultError(ctx, std.fmt.bufPrint(&msg, "Column '{s}' cannot be null", .{c.col}) catch "Column cannot be null");
+        }
+        st.warn(.warning, 1048, "Column '{s}' cannot be null", .{c.col});
+        return implicitDefault(ctx, t);
+    }
     c.run(t, v);
 }
 
@@ -307,6 +324,8 @@ fn implicitDefault(ctx: *dfunc.Context, t: Type) void {
 const Coercion = struct {
     ctx: *dfunc.Context,
     st: *state_mod.State,
+    schema: []const u8,
+    table: []const u8,
     col: []const u8,
     row: i64,
     strict: bool,
@@ -345,7 +364,15 @@ const Coercion = struct {
 
     fn incorrect(c: *Coercion, what: []const u8, text: []const u8) bool {
         const shown = text[0..@min(text.len, 64)];
-        return c.problem(1366, "Incorrect {s} value: '{s}' for column `{s}` at row {d}", .{ what, shown, c.col, c.row });
+        return c.problem(1366, "Incorrect {s} value: '{s}' for column `{s}`.`{s}`.`{s}` at row {d}", .{ what, shown, c.schema, c.table, c.col, c.row });
+    }
+
+    /// A string that is no date: MariaDB's error is "Incorrect date
+    /// value", its warning "Data truncated".
+    fn badTemporal(c: *Coercion, what: []const u8, text: []const u8) bool {
+        if (!c.strict) return c.truncated();
+        const shown = text[0..@min(text.len, 64)];
+        return c.problem(1292, "Incorrect {s} value: '{s}' for column `{s}`.`{s}`.`{s}` at row {d}", .{ what, shown, c.schema, c.table, c.col, c.row });
     }
 
     fn run(c: *Coercion, t: Type, v: *dfunc.Mem) void {
@@ -597,11 +624,11 @@ const Coercion = struct {
             else => "datetime",
         };
         var dt = parseDateTime(z) orelse {
-            if (c.problem(1292, "Incorrect {s} value: '{s}' for column `{s}` at row {d}", .{ what, z[0..@min(z.len, 64)], c.col, c.row })) return;
+            if (c.badTemporal(what, z)) return;
             return api.resultText(c.ctx, if (t.base == .date) "0000-00-00" else "0000-00-00 00:00:00", .static);
         };
         if (!c.validDate(dt)) {
-            if (c.problem(1292, "Incorrect {s} value: '{s}' for column `{s}` at row {d}", .{ what, z[0..@min(z.len, 64)], c.col, c.row })) return;
+            if (c.badTemporal(what, z)) return;
             dt = .{};
         }
         if (t.base == .date and dt.has_time and (dt.hour != 0 or dt.minute != 0 or dt.second != 0 or dt.micro != 0)) {
@@ -643,7 +670,7 @@ const Coercion = struct {
             else => api.valueText(v) orelse "",
         };
         var tm = parseTime(z) orelse {
-            if (c.problem(1292, "Incorrect time value: '{s}' for column `{s}` at row {d}", .{ z[0..@min(z.len, 64)], c.col, c.row })) return;
+            if (c.badTemporal("time", z)) return;
             return api.resultText(c.ctx, "00:00:00", .static);
         };
         if (tm.hours > 838 or (tm.hours == 838 and (tm.minute > 59 or tm.second > 59))) {
@@ -887,6 +914,11 @@ pub fn parseTime(z_in: []const u8) ?Time {
     var z = std.mem.trim(u8, z_in, " ");
     if (z.len == 0) return null;
     var t: Time = .{};
+    // A datetime: its time part.
+    if (z.len >= 10 and std.mem.indexOfScalarPos(u8, z, 1, '-') != null) {
+        const dt = parseDateTime(z) orelse return null;
+        return .{ .hours = dt.hour, .minute = dt.minute, .second = dt.second, .micro = dt.micro };
+    }
     if (z[0] == '-') {
         t.neg = true;
         z = z[1..];

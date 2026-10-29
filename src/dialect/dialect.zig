@@ -61,20 +61,23 @@ pub const Dialect = enum(u8) {
 /// A dialect frontend: compiles SQL text into the Parse by lowering it
 /// into the IR (src/ir/ir.zig).
 ///
-/// The contract of `run(p, sql)`, which prepare calls in place of
-/// sqlite3RunParser():
+/// The contract of `run(p, sql)`, which runParser() calls (prepare's
+/// sqlite3RunParser()) with p.rc OK, p.tail `sql` and db.parse `p`:
 ///  - compile the *first* statement of `sql` (the caller loops over the
 ///    rest), finishing it with ir.stmt.finishCoding() (the SQLite grammar
 ///    does so in its `cmdx ::= cmd` action), which leaves p.rc DONE;
 ///  - leave in p.tail the text after that statement (a suffix of `sql`);
 ///    a blank statement (only spaces/comments) codes nothing;
 ///  - report errors with ir.stmt.errorMsg()/syntaxError() (p.err_msg,
-///    p.n_err, p.rc) and fail with error.ParseFailed; error.OutOfMemory
-///    only for allocations of the parse tree;
+///    p.n_err, p.rc), and may fail with error.ParseFailed; error.OutOfMemory
+///    only for allocations of the parse tree. runParser() does the rest
+///    of what sqlite3RunParser() does (the message of an error without
+///    one, the SQL length limit, freeing p.new_table);
 ///  - never persist dialect text: whatever ends up in sqlite_schema must
 ///    be SQLite text (sqlite3 reads it back), see ir.stmt.lowerSqliteText().
+///
+/// The SQLite frontend's run() is sqlite3RunParser() itself.
 pub const Frontend = struct {
-    name: [:0]const u8,
     run: *const fn (p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void,
 };
 
@@ -104,16 +107,17 @@ pub const Hooks = struct {
 
 /// Everything that makes a dialect.
 pub const Spec = struct {
-    dialect: Dialect,
     frontend: *const Frontend,
     hooks: Hooks,
+    /// Hooks.functions by name (functionSearch()).
+    function_map: FunctionMap,
 };
 
 const specs = blk: {
     var s: [std.enums.values(Dialect).len]Spec = undefined;
     for (std.enums.values(Dialect)) |d| {
         const m = module(d);
-        s[@backingInt(d)] = .{ .dialect = d, .frontend = &m.frontend, .hooks = m.hooks };
+        s[@backingInt(d)] = .{ .frontend = &m.frontend, .hooks = m.hooks, .function_map = functionMap(m.hooks.functions) };
     }
     break :blk s;
 };
@@ -168,20 +172,17 @@ pub const ConnState = struct {
     }
 };
 
-/// Switch the connection to Lang.sqlite for SQL the engine generates and
+/// Make `lang` the connection's language and return the one it had, to
+/// give back afterwards. Lang.sqlite is for SQL the engine generates and
 /// runs itself (OP_SqlExec, the pragma virtual tables, sqlite_stat1, the
-/// catalog); give the result to leaveEngineSql() afterwards:
+/// catalog):
 ///
-///     const saved = dialect.enterEngineSql(db);
-///     defer dialect.leaveEngineSql(db, saved);
-pub fn enterEngineSql(db: *Sqlite3) Lang {
+///     const saved = dialect.swapLang(db, .sqlite);
+///     defer _ = dialect.swapLang(db, saved);
+pub fn swapLang(db: *Sqlite3, lang: Lang) Lang {
     const saved = db.xq.lang;
-    db.xq.lang = .sqlite;
+    db.xq.lang = lang;
     return saved;
-}
-
-pub fn leaveEngineSql(db: *Sqlite3, saved: Lang) void {
-    db.xq.lang = saved;
 }
 
 /// The hooks of the dialect the connection compiles in.
@@ -192,31 +193,84 @@ pub fn hooks(db: *const Sqlite3) *const Hooks {
 /// Compile the first statement of `sql` with the connection's frontend
 /// (the dispatch prepare does in place of sqlite3RunParser()). Schema
 /// text is always SQLite's: while the schema is read, the SQLite
-/// frontend runs whatever the dialect.
+/// frontend runs whatever the dialect. So do SQLite's own commands in
+/// every dialect (isSqliteCommand()).
 pub fn runParser(p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-    const f = if (p.db.init.busy) spec(.sqlite).frontend else p.db.xq.lang.frontend;
-    return f.run(p, sql);
-}
+    const db = p.db;
+    const sqlite_frontend = spec(.sqlite).frontend;
+    const f = if (db.init.busy) sqlite_frontend else db.xq.lang.frontend;
+    if (f == sqlite_frontend or isSqliteCommand(sql)) return sqlite_frontend.run(p, sql);
 
-/// The frontend of a dialect whose parser is not written yet: blank text
-/// (spaces and comments, as SQLite's tokenizer sees them) is an empty
-/// statement, anything else fails with "<name> dialect: parser not
-/// implemented" and consumes the rest of the text.
-pub fn notImplemented(p: *Parse, sql: [:0]const u8, name: []const u8) int.ParseError!void {
-    const tokenize = @import("../parse/tokenize.zig");
+    // What sqlite3RunParser() does around its parser.
+    if (db.n_vdbe_active == 0) db.is_interrupted.store(false, .monotonic);
     p.rc = int.RC.OK;
     p.tail = sql;
-    var i: usize = 0;
-    while (sql[i] != 0) {
-        const t = tokenize.getToken(sql[i..].ptr);
-        if (t.tk != int.TK.SPACE and t.tk != int.TK.COMMENT) {
-            @import("../sql/util.zig").errorMsg(p, "{s} dialect: parser not implemented", .{name});
-            p.tail = sql[sql.len..];
-            return error.ParseFailed;
-        }
-        i += t.len;
+    const parent = db.parse;
+    db.parse = p;
+    defer db.parse = parent;
+    var failed = false;
+    f.run(p, sql) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.ParseFailed => failed = true,
+    };
+    if (!failed and sql.len - p.tail.len > @as(usize, @intCast(db.limit(.sql_length)))) {
+        p.rc = int.RC.TOOBIG;
+        p.n_err += 1;
     }
-    p.tail = sql[sql.len..];
+    if (failed or p.n_err > 0 or p.err_msg != null or (p.rc != int.RC.OK and p.rc != int.RC.DONE)) {
+        if (p.rc == int.RC.OK or p.rc == int.RC.DONE) p.rc = int.RC.ERROR;
+        if (p.err_msg == null) p.err_msg = try p.arena.dupeSentinel(u8, @import("../sql/util.zig").errStr(p.rc), 0);
+        failed = true;
+    }
+    if (p.new_table) |t| if (!p.inSpecialParse()) {
+        @import("../sql/build.zig").deleteTable(db, t);
+        p.new_table = null;
+    };
+    if (failed) return error.ParseFailed;
+}
+
+/// Whether the first statement of `sql` is one of SQLite's commands that
+/// every dialect passes to SQLite's grammar as written (xqlite extensions
+/// of the dialects): PRAGMA, so that `PRAGMA xq_dialect = 'sqlite'`
+/// switches back, ATTACH, DETACH, VACUUM and REINDEX. Spaces, comments
+/// and semicolons before it are SQLite's.
+fn isSqliteCommand(sql: [:0]const u8) bool {
+    const getToken = @import("../parse/tokenize.zig").getToken;
+    const TK = int.TK;
+    var z: [*:0]const u8 = sql.ptr;
+    while (z[0] != 0) {
+        const t = getToken(z);
+        switch (t.tk) {
+            TK.SPACE, TK.COMMENT, TK.SEMI => z += t.len,
+            TK.PRAGMA, TK.ATTACH, TK.DETACH, TK.VACUUM, TK.REINDEX => return true,
+            else => return false,
+        }
+    }
+    return false;
+}
+
+// ================================================================ SQL text
+
+/// `z` between `q` quotes, with the quotes in it doubled, for the SQL
+/// text a frontend generates (`{f}`): Quoted('\'') is a string literal,
+/// Quoted('"') an SQLite or PostgreSQL identifier, Quoted('`') a MariaDB
+/// one.
+pub fn Quoted(comptime q: u8) type {
+    return struct {
+        z: []const u8,
+
+        pub fn format(x: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
+            try w.writeByte(q);
+            var rest = x.z;
+            while (std.mem.indexOfScalar(u8, rest, q)) |i| {
+                try w.writeAll(rest[0 .. i + 1]);
+                try w.writeByte(q);
+                rest = rest[i + 1 ..];
+            }
+            try w.writeAll(rest);
+            try w.writeByte(q);
+        }
+    };
 }
 
 // ============================================================== functions
@@ -226,15 +280,26 @@ pub fn notImplemented(p: *Parse, sql: [:0]const u8, name: []const u8) int.ParseE
 /// dialect and while the engine runs its own SQL (PreferBuiltin).
 pub fn functionSearch(db: *const Sqlite3, name: []const u8) []const FuncDef {
     if (db.xq.lang.dialect == .sqlite or db.m_db_flags.PreferBuiltin) return &.{};
-    const all = hooks(db).functions;
-    // The definitions of one name are next to each other (func.zig).
-    for (all, 0..) |*f, i| {
-        if (!ctype.eqlNoCase(f.name, name)) continue;
+    return spec(db.xq.lang.dialect).function_map.get(name) orelse &.{};
+}
+
+const FunctionMap = std.StaticStringMapWithEql([]const FuncDef, ctype.eqlNoCase);
+
+/// The overloads of each name of `defs`, which are next to each other
+/// (func.checkTable()).
+fn functionMap(comptime defs: []const FuncDef) FunctionMap {
+    @setEvalBranchQuota(100_000);
+    var kvs: [defs.len]struct { []const u8, []const FuncDef } = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < defs.len) {
         var j = i + 1;
-        while (j < all.len and ctype.eqlNoCase(all[j].name, name)) j += 1;
-        return all[i..j];
+        while (j < defs.len and ctype.eqlNoCase(defs[j].name, defs[i].name)) j += 1;
+        kvs[n] = .{ defs[i].name, defs[i..j] };
+        n += 1;
+        i = j;
     }
-    return &.{};
+    return .initComptime(kvs[0..n]);
 }
 
 // ============================================================= collations
@@ -243,7 +308,7 @@ pub fn functionSearch(db: *const Sqlite3, name: []const u8) []const FuncDef {
 pub fn findCollation(db: *const Sqlite3, name: []const u8) ?*const CollSeq {
     if (db.xq.lang.dialect == .sqlite) return null;
     for (hooks(db).collations) |*c| {
-        if (std.ascii.eqlIgnoreCase(c.name, name)) return c;
+        if (ctype.eqlNoCase(c.name, name)) return c;
     }
     return null;
 }
@@ -263,7 +328,6 @@ test {
 test "Dialect names" {
     for (std.enums.values(Dialect)) |d| {
         try std.testing.expectEqual(d, Dialect.fromName(d.name()).?);
-        try std.testing.expect(spec(d).dialect == d);
     }
     try std.testing.expectEqual(Dialect.postgres, Dialect.fromName("PG").?);
     try std.testing.expectEqual(Dialect.mariadb, Dialect.fromName("MySQL").?);

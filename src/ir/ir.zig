@@ -186,8 +186,6 @@ pub const expr = struct {
     pub const isConstant = expr_mod.isConstant;
     /// sqlite3ExprUnmapAndDelete().
     pub const unmapAndDelete = expr_mod.unmapAndDelete;
-    /// sqlite3WindowAttach(): `f(...) OVER (...)`.
-    pub const attachWindow = win.windowAttach;
     /// sqlite3DequoteNumber(): a TK.QNUMBER with digit separators.
     pub const dequoteNumber = util.dequoteNumber;
 

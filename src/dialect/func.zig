@@ -74,3 +74,104 @@ pub fn checkTable(comptime defs: []const FuncDef) void {
         }
     }
 }
+
+// ============================================== helpers of implementations
+
+const api = @import("../vdbe/api.zig");
+
+pub fn isNull(m: *Mem) bool {
+    return api.valueType(m) == vi.SQLITE_NULL;
+}
+
+pub fn anyNull(argv: []*Mem) bool {
+    for (argv) |m| if (isNull(m)) return true;
+    return false;
+}
+
+/// Whether `m` is an integer, or text that looks like one.
+pub fn isIntegral(m: *Mem) bool {
+    return api.valueNumericType(m) == vi.SQLITE_INTEGER;
+}
+
+/// The text of `m` ("" for NULL); null on OOM, after making it the error
+/// of the call.
+pub fn text(ctx: *Context, m: *Mem) ?[]const u8 {
+    if (isNull(m)) return "";
+    return api.valueText(m) orelse {
+        api.resultErrorNomem(ctx);
+        return null;
+    };
+}
+
+/// The connection's allocator, for buffers of a result: give them to the
+/// result with .dynamic (they are freed with it).
+pub fn gpa(ctx: *Context) std.mem.Allocator {
+    return api.contextDbHandle(ctx).gpa;
+}
+
+/// Make the text in `out` (a buffer of gpa(ctx)) the result, which takes
+/// the buffer over (.dynamic, as sqlite3_result_text(SQLITE_DYNAMIC));
+/// `out` is left empty.
+pub fn resultOwned(ctx: *Context, out: *std.ArrayList(u8)) void {
+    if (out.items.len == 0) {
+        out.deinit(gpa(ctx));
+        return api.resultText(ctx, "", .static);
+    }
+    api.resultText(ctx, out.items, .dynamic);
+    out.* = .empty;
+}
+
+/// The offset after the character at offset `i` of `z`, as SQLite counts
+/// characters (length(), substr()): a byte from 0xc0 up and the
+/// continuation bytes after it, or any other byte alone. Invalid UTF-8
+/// counts the same in every dialect.
+pub fn nextChar(z: []const u8, i: usize) usize {
+    var j = i + 1;
+    if (z[i] >= 0xc0) {
+        while (j < z.len and z[j] & 0xc0 == 0x80) j += 1;
+    }
+    return j;
+}
+
+/// The number of characters of `z` (nextChar()).
+pub fn charCount(z: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < z.len) : (n += 1) i = nextChar(z, i);
+    return n;
+}
+
+/// The offset of character `n` of `z` (z.len past the end).
+pub fn charOffset(z: []const u8, n: u64) usize {
+    var i: usize = 0;
+    var k: u64 = 0;
+    while (i < z.len and k < n) : (k += 1) i = nextChar(z, i);
+    return i;
+}
+
+/// A random float in [0, 1), from the connection's PRNG (randomness()).
+pub fn randomUnit(ctx: *Context) f64 {
+    var buf: [8]u8 = undefined;
+    @import("../sql/func.zig").randomness(api.contextDbHandle(ctx), &buf);
+    const r = std.mem.readInt(u64, &buf, .little) >> 11;
+    return @as(f64, @floatFromInt(r)) / @as(f64, 1 << 53);
+}
+
+/// A random (version 4) UUID, in lower-case hexadecimal.
+pub fn uuidV4(ctx: *Context) [36]u8 {
+    var b: [16]u8 = undefined;
+    @import("../sql/func.zig").randomness(api.contextDbHandle(ctx), &b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    var out: [36]u8 = undefined;
+    _ = std.fmt.bufPrint(&out, "{x}-{x}-{x}-{x}-{x}", .{ b[0..4], b[4..6], b[6..8], b[8..10], b[10..16] }) catch unreachable;
+    return out;
+}
+
+test "characters" {
+    try std.testing.expectEqual(@as(usize, 3), charCount("a\xc3\xa9b"));
+    try std.testing.expectEqual(@as(usize, 3), charOffset("a\xc3\xa9b", 2));
+    try std.testing.expectEqual(@as(usize, 4), charOffset("a\xc3\xa9b", 9));
+    // A stray continuation byte is a character of its own, as in SQLite.
+    try std.testing.expectEqual(@as(usize, 3), charCount("a\x80b"));
+}

@@ -314,9 +314,9 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     var err_msg: ?[:0]u8 = null;
     // xqlite: the SQL is the engine's, SQLite text in any dialect.
     const dialect = @import("../../dialect/dialect.zig");
-    const saved_lang = dialect.enterEngineSql(e.db);
+    const saved_lang = dialect.swapLang(e.db, .sqlite);
     const rc = @import("../../sql/legacy.zig").execNoCallback(e.db, std.mem.span(op.p4.z), &err_msg);
-    dialect.leaveEngineSql(e.db, saved_lang);
+    _ = dialect.swapLang(e.db, saved_lang);
     if (err_msg != null or rc != RC.OK) {
         aux.vdbeError(e.v, "{s}", .{err_msg orelse ""});
         if (err_msg) |m| e.db.gpa.free(m);

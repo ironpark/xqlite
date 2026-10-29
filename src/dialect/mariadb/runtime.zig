@@ -14,18 +14,12 @@ const types = @import("types.zig");
 const Context = dfunc.Context;
 const Mem = dfunc.Mem;
 
-fn isNull(m: *Mem) bool {
-    return api.valueType(m) == vi.SQLITE_NULL;
-}
-
-fn anyNull(argv: []*Mem) bool {
-    for (argv) |m| if (isNull(m)) return true;
-    return false;
-}
-
-fn isIntegral(m: *Mem) bool {
-    return api.valueNumericType(m) == vi.SQLITE_INTEGER;
-}
+const isNull = dfunc.isNull;
+const anyNull = dfunc.anyNull;
+const isIntegral = dfunc.isIntegral;
+const text = dfunc.text;
+const utf8Len = dfunc.charCount;
+const utf8Offset = dfunc.charOffset;
 
 // ============================================================ operators
 
@@ -193,64 +187,27 @@ pub fn roundFunc(ctx: *Context, argv: []*Mem) void {
 
 /// RAND([seed]): a float in [0, 1).
 pub fn randFunc(ctx: *Context, argv: []*Mem) void {
-    var buf: [8]u8 = undefined;
     if (argv.len == 1 and !isNull(argv[0])) {
         var prng: std.Random.DefaultPrng = .init(@bitCast(api.valueInt64(argv[0])));
         return api.resultDouble(ctx, prng.random().float(f64));
     }
-    @import("../../sql/func.zig").randomness(api.contextDbHandle(ctx), &buf);
-    const v = std.mem.readInt(u64, &buf, .little) >> 11;
-    api.resultDouble(ctx, @as(f64, @floatFromInt(v)) / 9007199254740992.0);
+    api.resultDouble(ctx, dfunc.randomUnit(ctx));
 }
 
 /// UUID(): a random (version 4) UUID.
 pub fn uuidFunc(ctx: *Context, _: []*Mem) void {
-    var b: [16]u8 = undefined;
-    @import("../../sql/func.zig").randomness(api.contextDbHandle(ctx), &b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    var out: [36]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{x}-{x}-{x}-{x}-{x}", .{ b[0..4], b[4..6], b[6..8], b[8..10], b[10..16] }) catch unreachable;
+    const out = dfunc.uuidV4(ctx);
     api.resultText(ctx, &out, .transient);
 }
 
 // ============================================================== strings
-
-fn text(m: *Mem) []const u8 {
-    return api.valueText(m) orelse "";
-}
-
-fn utf8Len(z: []const u8) usize {
-    var n: usize = 0;
-    for (z) |c| {
-        if (c & 0xc0 != 0x80) n += 1;
-    }
-    return n;
-}
-
-/// Byte offset of character `n` (clamped to the end).
-fn utf8Offset(z: []const u8, n: usize) usize {
-    var count: usize = 0;
-    for (z, 0..) |c, i| {
-        if (c & 0xc0 != 0x80) {
-            if (count == n) return i;
-            count += 1;
-        }
-    }
-    return z.len;
-}
-
-fn resultOwned(ctx: *Context, out: *std.ArrayList(u8), gpa: std.mem.Allocator) void {
-    defer out.deinit(gpa);
-    api.resultText(ctx, out.items, .transient);
-}
 
 /// LEFT(s, n), RIGHT(s, n).
 fn sideFunc(comptime right: bool) dfunc.StepFn {
     return struct {
         fn call(ctx: *Context, argv: []*Mem) void {
             if (anyNull(argv)) return api.resultNull(ctx);
-            const z = text(argv[0]);
+            const z = text(ctx, argv[0]) orelse return;
             const n_i = api.valueInt64(argv[1]);
             const n: usize = if (n_i < 0) 0 else @intCast(n_i);
             const len = utf8Len(z);
@@ -268,13 +225,13 @@ pub const rightFunc = sideFunc(true);
 pub fn repeatFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const gpa = api.contextDbHandle(ctx).gpa;
-    const z = text(argv[0]);
+    const z = text(ctx, argv[0]) orelse return;
     const n = api.valueInt64(argv[1]);
     if (n <= 0 or z.len == 0) return api.resultText(ctx, "", .static);
     if (@as(u64, @intCast(n)) * z.len > 1 << 30) return api.resultErrorTooBig(ctx);
     var out: std.ArrayList(u8) = .empty;
     for (0..@intCast(n)) |_| out.appendSlice(gpa, z) catch return api.resultErrorNomem(ctx);
-    resultOwned(ctx, &out, gpa);
+    dfunc.resultOwned(ctx, &out);
 }
 
 /// SPACE(n).
@@ -286,14 +243,14 @@ pub fn spaceFunc(ctx: *Context, argv: []*Mem) void {
     if (n > 1 << 30) return api.resultErrorTooBig(ctx);
     var out: std.ArrayList(u8) = .empty;
     out.appendNTimes(gpa, ' ', @intCast(n)) catch return api.resultErrorNomem(ctx);
-    resultOwned(ctx, &out, gpa);
+    dfunc.resultOwned(ctx, &out);
 }
 
 /// REVERSE(s), by characters.
 pub fn reverseFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
     const gpa = api.contextDbHandle(ctx).gpa;
-    const z = text(argv[0]);
+    const z = text(ctx, argv[0]) orelse return;
     var out: std.ArrayList(u8) = .empty;
     out.ensureTotalCapacity(gpa, z.len) catch return api.resultErrorNomem(ctx);
     var end = z.len;
@@ -303,7 +260,7 @@ pub fn reverseFunc(ctx: *Context, argv: []*Mem) void {
         out.appendSliceAssumeCapacity(z[start..end]);
         end = start;
     }
-    resultOwned(ctx, &out, gpa);
+    dfunc.resultOwned(ctx, &out);
 }
 
 /// LPAD(s, n, pad), RPAD(s, n, pad).
@@ -312,9 +269,9 @@ fn padFunc(comptime right: bool) dfunc.StepFn {
         fn call(ctx: *Context, argv: []*Mem) void {
             if (anyNull(argv)) return api.resultNull(ctx);
             const gpa = api.contextDbHandle(ctx).gpa;
-            const z = text(argv[0]);
+            const z = text(ctx, argv[0]) orelse return;
             const n_i = api.valueInt64(argv[1]);
-            const pad = if (argv.len > 2) text(argv[2]) else " ";
+            const pad = if (argv.len > 2) (text(ctx, argv[2]) orelse return) else " ";
             if (n_i < 0) return api.resultNull(ctx);
             const n: usize = @intCast(@min(n_i, 1 << 24));
             const len = utf8Len(z);
@@ -338,7 +295,7 @@ fn padFunc(comptime right: bool) dfunc.StepFn {
                 out.appendSlice(gpa, fill.items) catch return api.resultErrorNomem(ctx);
                 out.appendSlice(gpa, z) catch return api.resultErrorNomem(ctx);
             }
-            resultOwned(ctx, &out, gpa);
+            dfunc.resultOwned(ctx, &out);
         }
     }.call;
 }
@@ -365,7 +322,7 @@ pub fn hexFunc(ctx: *Context, argv: []*Mem) void {
         out.appendAssumeCapacity(digits[c >> 4]);
         out.appendAssumeCapacity(digits[c & 15]);
     }
-    resultOwned(ctx, &out, gpa);
+    dfunc.resultOwned(ctx, &out);
 }
 
 /// FORMAT(x, d): '1,234.50'.
@@ -399,10 +356,10 @@ pub fn formatFunc(ctx: *Context, argv: []*Mem) void {
 pub fn insertFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const gpa = api.contextDbHandle(ctx).gpa;
-    const z = text(argv[0]);
+    const z = text(ctx, argv[0]) orelse return;
     const pos = api.valueInt64(argv[1]);
     const len = api.valueInt64(argv[2]);
-    const new = text(argv[3]);
+    const new = text(ctx, argv[3]) orelse return;
     const n = utf8Len(z);
     if (pos < 1 or pos > n) return api.resultText(ctx, z, .transient);
     const a = utf8Offset(z, @intCast(pos - 1));
@@ -411,14 +368,14 @@ pub fn insertFunc(ctx: *Context, argv: []*Mem) void {
     out.appendSlice(gpa, z[0..a]) catch return api.resultErrorNomem(ctx);
     out.appendSlice(gpa, new) catch return api.resultErrorNomem(ctx);
     out.appendSlice(gpa, z[b..]) catch return api.resultErrorNomem(ctx);
-    resultOwned(ctx, &out, gpa);
+    dfunc.resultOwned(ctx, &out);
 }
 
 /// LOCATE(sub, s, pos): 1-based position of sub in s from pos, 0 if none.
 pub fn locateFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const sub = text(argv[0]);
-    const z = text(argv[1]);
+    const sub = text(ctx, argv[0]) orelse return;
+    const z = text(ctx, argv[1]) orelse return;
     const pos = api.valueInt64(argv[2]);
     if (pos < 1) return api.resultInt64(ctx, 0);
     const start = utf8Offset(z, @intCast(pos - 1));
@@ -438,8 +395,9 @@ fn indexOfIgnoreCasePos(z: []const u8, start: usize, needle: []const u8) ?usize 
 /// FIND_IN_SET(s, list): 1-based index of s in the comma list, 0 if none.
 pub fn findInSetFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const needle = text(argv[0]);
-    var it = std.mem.splitScalar(u8, text(argv[1]), ',');
+    const needle = text(ctx, argv[0]) orelse return;
+    const list = text(ctx, argv[1]) orelse return;
+    var it = std.mem.splitScalar(u8, list, ',');
     var i: i64 = 1;
     while (it.next()) |item| : (i += 1) {
         if (std.ascii.eqlIgnoreCase(item, needle)) return api.resultInt64(ctx, i);
@@ -453,7 +411,7 @@ pub fn fieldFunc(ctx: *Context, argv: []*Mem) void {
     const numeric = isIntegral(argv[0]) or api.valueType(argv[0]) == vi.SQLITE_FLOAT;
     for (argv[1..], 1..) |m, i| {
         if (isNull(m)) continue;
-        const same = if (numeric) api.valueDouble(m) == api.valueDouble(argv[0]) else std.ascii.eqlIgnoreCase(text(m), text(argv[0]));
+        const same = if (numeric) api.valueDouble(m) == api.valueDouble(argv[0]) else std.ascii.eqlIgnoreCase(text(ctx, m) orelse return, text(ctx, argv[0]) orelse return);
         if (same) return api.resultInt64(ctx, @intCast(i));
     }
     api.resultInt64(ctx, 0);
@@ -477,7 +435,7 @@ pub fn bitLengthFunc(ctx: *Context, argv: []*Mem) void {
 /// JSON_UNQUOTE(s): the value of a JSON string, else s.
 pub fn jsonUnquoteFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
-    const z = text(argv[0]);
+    const z = text(ctx, argv[0]) orelse return;
     if (z.len < 2 or z[0] != '"' or z[z.len - 1] != '"') return api.resultText(ctx, z, .transient);
     const gpa = api.contextDbHandle(ctx).gpa;
     const v = std.json.parseFromSlice([]const u8, gpa, z, .{}) catch return api.resultText(ctx, z, .transient);
@@ -517,7 +475,7 @@ fn dateArg(m: *Mem) ?types.DateTime {
     var buf: [32]u8 = undefined;
     const z: []const u8 = switch (api.valueType(m)) {
         vi.SQLITE_INTEGER => std.fmt.bufPrint(&buf, "{d}", .{api.valueInt64(m)}) catch return null,
-        else => text(m),
+        else => api.valueText(m) orelse return null,
     };
     const dt = types.parseDateTime(z) orelse return null;
     if (dt.month > 12 or dt.day > 31) return null;
@@ -541,11 +499,11 @@ fn writeTime(w: *std.Io.Writer, h: u32, mi: u32, s: u32, micro: u32) void {
 /// in MariaDB's formats; NULL if x is not a date.
 pub fn castFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
-    const to = text(argv[1]);
+    const to = text(ctx, argv[1]) orelse return;
     var buf: [48]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     if (std.mem.eql(u8, to, "time")) {
-        const tm = types.parseTime(text(argv[0])) orelse return api.resultNull(ctx);
+        const tm = types.parseTime(text(ctx, argv[0]) orelse return) orelse return api.resultNull(ctx);
         if (tm.neg) w.writeByte('-') catch {};
         writeTime(&w, tm.hours, tm.minute, tm.second, tm.micro);
         return api.resultText(ctx, w.buffered(), .transient);
@@ -568,7 +526,7 @@ pub fn dateAddFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv[0..2])) return api.resultNull(ctx);
     var dt = dateArg(argv[0]) orelse return api.resultNull(ctx);
     if (!validCalendar(dt)) return api.resultNull(ctx);
-    const unit = text(argv[2]);
+    const unit = text(ctx, argv[2]) orelse return;
     const n_f = api.valueDouble(argv[1]);
     const n: i64 = if (isIntegral(argv[1])) api.valueInt64(argv[1]) else @intFromFloat(std.math.clamp(@round(n_f), -1e15, 1e15));
     const U = struct {
@@ -633,7 +591,7 @@ fn partFunc(comptime part: enum { year, month, day, hour, minute, second, micros
         fn call(ctx: *Context, argv: []*Mem) void {
             if (isNull(argv[0])) return api.resultNull(ctx);
             if (part == .hour or part == .minute or part == .second or part == .microsecond) {
-                const z = text(argv[0]);
+                const z = text(ctx, argv[0]) orelse return;
                 const tm = if (std.mem.indexOfScalar(u8, z, '-') != null and z.len >= 10)
                     (if (types.parseDateTime(z)) |dt| types.Time{ .hours = dt.hour, .minute = dt.minute, .second = dt.second, .micro = dt.micro } else null)
                 else
@@ -681,7 +639,7 @@ pub const toDaysFunc = partFunc(.to_days);
 
 /// xq_extract('UNIT', d): EXTRACT(unit FROM d).
 pub fn extractFunc(ctx: *Context, argv: []*Mem) void {
-    const unit = text(argv[0]);
+    const unit = text(ctx, argv[0]) orelse return;
     const sub = argv[1..2];
     const map = [_]struct { []const u8, dfunc.StepFn }{
         .{ "YEAR", yearFunc },     .{ "MONTH", monthFunc },   .{ "DAY", dayFunc },         .{ "HOUR", hourFunc },
@@ -702,7 +660,7 @@ pub fn datediffFunc(ctx: *Context, argv: []*Mem) void {
 pub fn timestampdiffFunc(ctx: *Context, argv: []*Mem) void {
     const a = dateArg(argv[1]) orelse return api.resultNull(ctx);
     const b = dateArg(argv[2]) orelse return api.resultNull(ctx);
-    const unit = text(argv[0]);
+    const unit = text(ctx, argv[0]) orelse return;
     const ua = microOf(a);
     const ub = microOf(b);
     const diff = ub - ua;
@@ -761,7 +719,7 @@ pub const monthnameFunc = nameFunc(true);
 /// ASCII(s): the first byte, 0 for ''.
 pub fn asciiFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
-    const z = text(argv[0]);
+    const z = text(ctx, argv[0]) orelse return;
     api.resultInt64(ctx, if (z.len == 0) 0 else z[0]);
 }
 
@@ -769,8 +727,8 @@ pub fn asciiFunc(ctx: *Context, argv: []*Mem) void {
 /// DATE_FORMAT's format; NULL if it does not match.
 pub fn strToDateFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const z = text(argv[0]);
-    const fmt = text(argv[1]);
+    const z = text(ctx, argv[0]) orelse return;
+    const fmt = text(ctx, argv[1]) orelse return;
     var dt: types.DateTime = .{};
     var has_date = false;
     var has_time = false;
@@ -883,12 +841,12 @@ pub fn strToDateFunc(ctx: *Context, argv: []*Mem) void {
 /// DATE_FORMAT(d, fmt) with MariaDB's specifiers.
 pub fn dateFormatFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const z = text(argv[0]);
+    const z = text(ctx, argv[0]) orelse return;
     const dt = types.parseDateTime(z) orelse blk: {
         const t = types.parseTime(z) orelse return api.resultNull(ctx);
         break :blk types.DateTime{ .hour = t.hours, .minute = t.minute, .second = t.second, .micro = t.micro };
     };
-    const fmt = text(argv[1]);
+    const fmt = text(ctx, argv[1]) orelse return;
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const days = daysFromCivil(dt.year, dt.month, dt.day);

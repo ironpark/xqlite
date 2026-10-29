@@ -14,10 +14,9 @@
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
-const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
 
-const user_tables = " m.name NOT LIKE 'sqlite\\_%' AND m.name NOT LIKE 'xq\\_%'";
+const user_tables = " m.name NOT LIKE 'sqlite\\_%' AND m.name" ++ catalog.not_catalog_table;
 
 /// `{cat}` and `{seq}` stand for xq_catalog and xq_sequence, or for an
 /// empty query of the same columns when the database has none.
@@ -93,8 +92,8 @@ const pg_indexes =
     \\    ELSE '_' || (SELECT string_agg(i.name, '_') FROM pragma_index_info(m.name) i) || '_key' END
     \\  ELSE m.name END AS indexname,
     \\  NULL AS tablespace, m.sql AS indexdef
-    \\FROM sqlite_schema m WHERE m.type = 'index' AND m.tbl_name NOT LIKE 'sqlite\_%' AND m.tbl_name NOT LIKE 'xq\_%'
-;
+    \\FROM sqlite_schema m WHERE m.type = 'index' AND m.tbl_name NOT LIKE 'sqlite\_%' AND m.tbl_name
+++ catalog.not_catalog_table;
 
 const pg_sequences =
     \\SELECT 'public' AS schemaname, s.name AS sequencename, 'postgres' AS sequenceowner,
@@ -131,7 +130,7 @@ pub fn definition(p: *int.Parse, schema: ?[]const u8, name: []const u8) error{Ou
             if (!std.mem.eql(u8, s, d.schema)) continue;
         } else if (!std.mem.eql(u8, d.schema, "pg_catalog")) continue;
         const has_catalog = catalog.exists(p.db, catalog.main_schema);
-        const has_sequences = build.findTable(p.db, catalog.sequence.table_name, catalog.main_schema) != null;
+        const has_sequences = catalog.sequence.exists(p.db, catalog.main_schema);
         var out: std.ArrayList(u8) = .empty;
         var rest: []const u8 = d.text;
         while (std.mem.indexOfScalar(u8, rest, '{')) |i| {

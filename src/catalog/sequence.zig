@@ -122,7 +122,7 @@ pub fn codeCreate(p: *Parse, schema: []const u8, name: []const u8, o: Options, i
 /// DROP SEQUENCE `name`, when the statement runs (nothing if there is
 /// no such sequence).
 pub fn codeDrop(p: *Parse, schema: []const u8, name: []const u8) void {
-    if (@import("../sql/build.zig").findTable(p.db, table_name, schema) == null) return;
+    if (!exists(p.db, schema)) return;
     catalog.codeExecFmt(p, schema, "DELETE FROM %Q.xq_sequence WHERE name=%Q", &.{ .{ .str = schema }, .{ .str = name } });
 }
 
@@ -133,6 +133,12 @@ pub fn nextvalExpr(p: *Parse, name: []const u8) int.Oom!*int.Expr {
     const arg = try expr_mod.expr(p.arena, int.TK.STRING, name);
     const list = try expr_mod.listAppend(p, null, arg);
     return @import("../ir/ir.zig").expr.functionCall(p, "nextval", list);
+}
+
+/// Whether schema `schema` has the sequence table (as far as the schema
+/// read so far knows).
+pub fn exists(db: *Sqlite3, schema: []const u8) bool {
+    return @import("../sql/build.zig").findTable(db, table_name, schema) != null;
 }
 
 // ============================================================== runtime

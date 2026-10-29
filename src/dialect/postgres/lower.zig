@@ -240,9 +240,7 @@ pub const Lowerer = struct {
     /// The collation a PostgreSQL collation name maps to: "C" and
     /// "POSIX" are BINARY; SQLite's own names pass through.
     fn collationTok(l: *Lowerer, n: ast.Name) Error!Token {
-        if (std.mem.eql(u8, n.text, "C") or std.mem.eql(u8, n.text, "POSIX") or std.ascii.eqlIgnoreCase(n.text, "default") or std.ascii.eqlIgnoreCase(n.text, "ucs_basic")) {
-            return Token.init("BINARY");
-        }
+        if (isBinaryCollation(n.text)) return Token.init("BINARY");
         return l.nameTok(n);
     }
 
@@ -322,15 +320,11 @@ pub const Lowerer = struct {
     fn cast(l: *Lowerer, e: *const ast.Expr, c: ast.Cast) Error!*IrExpr {
         const p = l.p;
         // '\x0102'::bytea is a blob constant.
-        if (std.mem.eql(u8, c.ty.name, "bytea") and !c.ty.array and c.e.kind == .string) {
-            const s = c.e.kind.string;
-            if (std.mem.startsWith(u8, s, "\\x")) {
-                const hex = s[2..];
-                for (hex) |ch| if (!std.ascii.isHex(ch)) return l.fail(e.pos, "invalid hexadecimal digit: \"{c}\"", .{ch});
-                if (hex.len % 2 != 0) return l.fail(e.pos, "invalid hexadecimal data: odd number of digits", .{});
-                return l.leaf(TK.BLOB, try std.fmt.allocPrint(l.arena(), "x'{s}'", .{hex}), e.pos);
-            }
-        }
+        if (byteaHex(c)) |b| switch (b) {
+            .hex => |hex| return l.leaf(TK.BLOB, try std.fmt.allocPrint(l.arena(), "x'{s}'", .{hex}), e.pos),
+            .bad_digit => |ch| return l.fail(e.pos, ByteaHex.bad_digit_msg, .{ch}),
+            .odd_length => return l.fail(e.pos, ByteaHex.odd_length_msg, .{}),
+        };
         const plan = types.castPlan(c.ty) catch |err| return l.typeError(c.ty, err);
         const x = try l.expr(c.e);
         switch (plan) {
@@ -371,20 +365,17 @@ pub const Lowerer = struct {
     fn func(l: *Lowerer, f: *const ast.Func) Error!*IrExpr {
         const p = l.p;
         const n = f.name.text;
-        const eql = std.mem.eql;
         // Calls that become something else.
-        if (f.over == null and f.filter == null and f.order_by.len == 0) {
-            if (eql(u8, n, "now") or eql(u8, n, "current_timestamp") or eql(u8, n, "localtimestamp") or
-                eql(u8, n, "transaction_timestamp") or eql(u8, n, "statement_timestamp") or eql(u8, n, "clock_timestamp"))
-            {
+        if (specialCall(f)) |sc| switch (sc) {
+            .now => {
                 if (f.args.len != 0) return l.fail(f.name.pos, "function {s} does not exist", .{n});
                 return l.now();
-            }
-            if (eql(u8, n, "localtime")) return ir.expr.functionCall(p, "current_time", null);
-            if (eql(u8, n, "current_role") or eql(u8, n, "session_user")) return ir.expr.functionCall(p, "current_user", null);
-            if (eql(u8, n, "current_catalog")) return ir.expr.functionCall(p, "current_database", null);
-            if (eql(u8, n, "date_part")) return l.datePart(f);
-        }
+            },
+            .localtime => return ir.expr.functionCall(p, "current_time", null),
+            .current_user => return ir.expr.functionCall(p, "current_user", null),
+            .current_database => return ir.expr.functionCall(p, "current_database", null),
+            .date_part => return l.datePart(f),
+        };
         const mapped = funcName(n);
         const name_tok = if (mapped.ptr == n.ptr) try l.nameTok(f.name) else Token.init(mapped);
         const sf: int.SF = if (f.distinct) .{ .Distinct = true } else .{};
@@ -822,7 +813,7 @@ pub const Lowerer = struct {
             return null;
         };
         const parser = @import("parser.zig");
-        var ps = parser.Parser.init(p.arena, text, 0) catch return l.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
+        var ps = parser.Parser.init(p.arena, text, 0, null) catch return l.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
         const tree = ps.select() catch return l.fail(q.name.pos, "internal error in the definition of {s}: {s}", .{ q.name.text, ps.err_msg });
         if (ps.toks[ps.i].kind != .eof) return l.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
         var sub: Lowerer = .{ .p = p, .src = text };
@@ -866,17 +857,12 @@ pub const Lowerer = struct {
     fn checkAlways(l: *Lowerer, t: *int.Table, c: *const int.Column, pos: u32, is_update: bool) Error!void {
         if (identitySequence(t, c) == null) return;
         const db = l.p.db;
-        const schema = if (t.schema) |sch| schemaOf(db, sch) else "main";
+        const schema = catalog.schemaName(db, t);
         const kind = catalog.get(db, l.arena(), schema, t.name, c.name(), catalog.Key.identity_kind) catch null;
         if (kind) |k| if (std.mem.eql(u8, k, "always")) {
             if (is_update) return l.fail(pos, "column \"{s}\" can only be updated to DEFAULT", .{c.name()});
             return l.fail(pos, "cannot insert a non-DEFAULT value into column \"{s}\"", .{c.name()});
         };
-    }
-
-    fn schemaOf(db: *int.Sqlite3, s: *int.Schema) []const u8 {
-        for (db.dbs.items) |d| if (d.schema == s) return d.name;
-        return "main";
     }
 
     fn columnIndex(t: *int.Table, name: []const u8) ?usize {
@@ -1125,15 +1111,62 @@ pub const Lowerer = struct {
         ir.dml.delete(p, try l.target(q, null), null, null, null);
         try l.check();
         if (t.restart_identity) {
-            const schema = if (tab.schema) |s| schemaOf(p.db, s) else "main";
-            if (catalog.exists(p.db, schema) and build.findTable(p.db, catalog.sequence.table_name, schema) != null) {
-                catalog.codeExecFmt(p, schema, "UPDATE %Q.xq_sequence SET last_value=start_value,is_called=0 WHERE name IN (SELECT value FROM %Q.xq_catalog WHERE tbl=%Q AND key='identity')", &.{
-                    .{ .str = schema }, .{ .str = schema }, .{ .str = tab.name },
+            const schema = catalog.schemaName(p.db, tab);
+            if (catalog.exists(p.db, schema) and catalog.sequence.exists(p.db, schema)) {
+                catalog.codeExecFmt(p, schema, "UPDATE %Q.xq_sequence SET last_value=start_value,is_called=0 WHERE name IN (SELECT value FROM %Q.xq_catalog WHERE tbl=%Q AND key=%Q)", &.{
+                    .{ .str = schema }, .{ .str = schema }, .{ .str = tab.name }, .{ .str = catalog.Key.identity },
                 });
             }
         }
     }
 };
+
+/// Whether PostgreSQL collation `name` is SQLite's BINARY.
+pub fn isBinaryCollation(name: []const u8) bool {
+    return std.mem.eql(u8, name, "C") or std.mem.eql(u8, name, "POSIX") or
+        std.ascii.eqlIgnoreCase(name, "default") or std.ascii.eqlIgnoreCase(name, "ucs_basic");
+}
+
+/// The calls (without OVER, FILTER or ORDER BY) that lowering and
+/// rendering rewrite: now() and its synonyms (no arguments), localtime,
+/// current_role/session_user (current_user()), current_catalog
+/// (current_database()), date_part().
+pub const SpecialCall = enum { now, localtime, current_user, current_database, date_part };
+
+pub fn specialCall(f: *const ast.Func) ?SpecialCall {
+    if (f.over != null or f.filter != null or f.order_by.len > 0) return null;
+    const map = std.StaticStringMap(SpecialCall).initComptime(.{
+        .{ "now", .now },                   .{ "current_timestamp", .now },
+        .{ "localtimestamp", .now },        .{ "transaction_timestamp", .now },
+        .{ "statement_timestamp", .now },   .{ "clock_timestamp", .now },
+        .{ "localtime", .localtime },       .{ "current_role", .current_user },
+        .{ "session_user", .current_user }, .{ "current_catalog", .current_database },
+        .{ "date_part", .date_part },
+    });
+    return map.get(f.name.text);
+}
+
+/// A '\x0102'::bytea cast of a string: its hex digits (a blob constant),
+/// or what is wrong with them.
+pub const ByteaHex = union(enum) {
+    hex: []const u8,
+    bad_digit: u8,
+    odd_length,
+
+    pub const bad_digit_msg = "invalid hexadecimal digit: \"{c}\"";
+    pub const odd_length_msg = "invalid hexadecimal data: odd number of digits";
+};
+
+/// The bytea literal of cast `c`, null if it is not one.
+pub fn byteaHex(c: ast.Cast) ?ByteaHex {
+    if (!std.mem.eql(u8, c.ty.name, "bytea") or c.ty.array or c.e.kind != .string) return null;
+    const s = c.e.kind.string;
+    if (!std.mem.startsWith(u8, s, "\\x")) return null;
+    const hex = s[2..];
+    for (hex) |ch| if (!std.ascii.isHex(ch)) return .{ .bad_digit = ch };
+    if (hex.len % 2 != 0) return .odd_length;
+    return .{ .hex = hex };
+}
 
 /// The SQLite name of a PostgreSQL function, if it differs (else `n`).
 pub fn funcName(n: []const u8) []const u8 {

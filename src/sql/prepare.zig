@@ -401,8 +401,7 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
     // dialect, see dialect.zig). A PRAGMA xq_dialect compiled here
     // changes the connection's language for the statements after it.
     const lang = if (old) |r| r.xq_lang else db.xq.lang;
-    const saved_lang = db.xq.lang;
-    db.xq.lang = lang;
+    const saved_lang = dialect.swapLang(db, lang);
     defer if (std.meta.eql(db.xq.lang, lang)) {
         db.xq.lang = saved_lang;
     };
@@ -502,9 +501,8 @@ pub fn prepareV2(db: *Sqlite3, sql: []const u8, stmt: *?*Vdbe, tail: ?*[]const u
 /// statement keeps it when recompiled): Lang.sqlite for SQL that the
 /// engine or the catalog generates (xqlite; no C counterpart).
 pub fn prepareLang(db: *Sqlite3, sql: []const u8, lang: dialect.Lang, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
-    const saved = db.xq.lang;
-    db.xq.lang = lang;
-    defer db.xq.lang = saved;
+    const saved = dialect.swapLang(db, lang);
+    defer _ = dialect.swapLang(db, saved);
     return prepareV3(db, sql, prep_flags, stmt, tail);
 }
 

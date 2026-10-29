@@ -74,25 +74,13 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_num_scale", 2, det, numScaleFunc),
 };
 
-fn isNull(m: *const Mem) bool {
-    return api.valueType(m) == vi.SQLITE_NULL;
-}
-
-fn anyNull(argv: []*Mem) bool {
-    for (argv) |m| if (isNull(m)) return true;
-    return false;
-}
-
-fn text(ctx: *Context, m: *Mem) ?[]const u8 {
-    return api.valueText(m) orelse {
-        api.resultErrorNomem(ctx);
-        return null;
-    };
-}
-
-fn gpa(ctx: *Context) std.mem.Allocator {
-    return api.contextDbHandle(ctx).gpa;
-}
+const isNull = dfunc.isNull;
+const anyNull = dfunc.anyNull;
+const text = dfunc.text;
+const gpa = dfunc.gpa;
+const isInt = dfunc.isIntegral;
+const cpCount = dfunc.charCount;
+const cpOffset = dfunc.charOffset;
 
 // ================================================================= LIKE
 
@@ -213,18 +201,6 @@ fn extreme(ctx: *Context, argv: []*Mem, sign_: i32) void {
 
 // ============================================================== strings
 
-fn cpCount(s: []const u8) usize {
-    return std.unicode.utf8CountCodepoints(s) catch s.len;
-}
-
-/// The byte offset of codepoint `n` of `s` (s.len past the end).
-fn cpOffset(s: []const u8, n: usize) usize {
-    var i: usize = 0;
-    var k: usize = 0;
-    while (i < s.len and k < n) : (k += 1) _ = nextCp(s, &i);
-    return i;
-}
-
 fn leftFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const s = text(ctx, argv[0]) orelse return;
@@ -251,26 +227,25 @@ fn repeatFunc(ctx: *Context, argv: []*Mem) void {
     const total = std.math.mul(usize, s.len, @intCast(n)) catch return api.resultErrorTooBig(ctx);
     if (total > 1_000_000_000) return api.resultErrorTooBig(ctx);
     const out = gpa(ctx).alloc(u8, total) catch return api.resultErrorNomem(ctx);
-    defer gpa(ctx).free(out);
     var i: usize = 0;
     while (i < total) : (i += s.len) @memcpy(out[i..][0..s.len], s);
-    api.resultText(ctx, out, .transient);
+    api.resultText(ctx, out, .dynamic);
 }
 
 fn reverseFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const s = text(ctx, argv[0]) orelse return;
+    if (s.len == 0) return api.resultText(ctx, "", .static);
     const out = gpa(ctx).alloc(u8, s.len) catch return api.resultErrorNomem(ctx);
-    defer gpa(ctx).free(out);
     var i: usize = 0;
     var o: usize = s.len;
     while (i < s.len) {
         const start = i;
-        _ = nextCp(s, &i);
+        i = dfunc.nextChar(s, i);
         o -= i - start;
         @memcpy(out[o..][0 .. i - start], s[start..i]);
     }
-    api.resultText(ctx, out, .transient);
+    api.resultText(ctx, out, .dynamic);
 }
 
 fn pad(ctx: *Context, argv: []*Mem, left_side: bool) void {
@@ -283,6 +258,7 @@ fn pad(ctx: *Context, argv: []*Mem, left_side: bool) void {
     if (have >= n) return api.resultText(ctx, s[0..cpOffset(s, n)], .transient);
     if (fill.len == 0) return api.resultText(ctx, s, .transient);
     var out: std.ArrayList(u8) = .empty;
+    // Empty once resultOwned() has it.
     defer out.deinit(gpa(ctx));
     if (!left_side) out.appendSlice(gpa(ctx), s) catch return api.resultErrorNomem(ctx);
     var need = n - have;
@@ -290,11 +266,11 @@ fn pad(ctx: *Context, argv: []*Mem, left_side: bool) void {
     while (need > 0) : (need -= 1) {
         if (fi >= fill.len) fi = 0;
         const start = fi;
-        _ = nextCp(fill, &fi);
+        fi = dfunc.nextChar(fill, fi);
         out.appendSlice(gpa(ctx), fill[start..fi]) catch return api.resultErrorNomem(ctx);
     }
     if (left_side) out.appendSlice(gpa(ctx), s) catch return api.resultErrorNomem(ctx);
-    api.resultText(ctx, out.items, .transient);
+    dfunc.resultOwned(ctx, &out);
 }
 
 fn lpadFunc(ctx: *Context, argv: []*Mem) void {
@@ -333,42 +309,16 @@ fn startsWithFunc(ctx: *Context, argv: []*Mem) void {
 
 // ============================================================= random
 
-fn randomBytes(ctx: *Context, buf: []u8) void {
-    @import("../../sql/func.zig").randomness(api.contextDbHandle(ctx), buf);
-}
-
 fn randomFunc(ctx: *Context, _: []*Mem) void {
-    var buf: [8]u8 = undefined;
-    randomBytes(ctx, &buf);
-    const r = std.mem.readInt(u64, &buf, .little) >> 11;
-    api.resultDouble(ctx, @as(f64, @floatFromInt(r)) / @as(f64, 1 << 53));
+    api.resultDouble(ctx, dfunc.randomUnit(ctx));
 }
 
 fn uuidFunc(ctx: *Context, _: []*Mem) void {
-    var b: [16]u8 = undefined;
-    randomBytes(ctx, &b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    var out: [36]u8 = undefined;
-    const hex = "0123456789abcdef";
-    var o: usize = 0;
-    for (b, 0..) |byte, i| {
-        if (i == 4 or i == 6 or i == 8 or i == 10) {
-            out[o] = '-';
-            o += 1;
-        }
-        out[o] = hex[byte >> 4];
-        out[o + 1] = hex[byte & 15];
-        o += 2;
-    }
+    const out = dfunc.uuidV4(ctx);
     api.resultText(ctx, &out, .transient);
 }
 
 // =============================================================== math
-
-fn isInt(m: *Mem) bool {
-    return api.valueNumericType(m) == vi.SQLITE_INTEGER;
-}
 
 fn floorFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);

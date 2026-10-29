@@ -95,26 +95,15 @@ fn dup(p: *Parse, e: ?*const Expr) ?*Expr {
     };
 }
 
-/// xqlite: `c`, or for none the default collation of the connection's
-/// dialect (null, BINARY, in the SQLite dialect): for IN, whose
-/// comparisons do not go through codeCompare().
-fn dialectColl(p: *Parse, c: ?*const int.CollSeq) ?*const int.CollSeq {
-    if (c == null and @import("../dialect/dialect.zig").defaultCollationName(p.db) != null) return coll_mod.dfltColl(p.db);
-    return c;
-}
-
 /// Port of codeCompare(): code comparison `opcode` of registers `in1`
 /// and `in2`, jumping to `dest` if true. As in C, `opcode` is the TK_
 /// code of the comparison, which numbers its opcode (OP.fromTk()).
 fn codeCompare(p: *Parse, left: *Expr, right: *Expr, opcode: u8, in1: i32, in2: i32, dest: i32, jump_if_null: u16, is_commuted: bool) i32 {
     if (p.n_err != 0) return 0;
-    var p4 = if (is_commuted)
+    const p4 = if (is_commuted)
         expr_mod.binaryCompareCollSeq(p, right, left)
     else
         expr_mod.binaryCompareCollSeq(p, left, right);
-    // xqlite: no collation compares in BINARY (a null P4), unless the
-    // dialect has another default.
-    if (p4 == null and @import("../dialect/dialect.zig").defaultCollationName(p.db) != null) p4 = coll_mod.dfltColl(p.db);
     const p5 = expr_mod.binaryCompareP5(left, right, jump_if_null);
     const addr = aux.addOp4(vdbe(p), OP.fromTk(opcode), in2, dest, in1, if (p4) |c| .{ .collseq = c } else .notused);
     aux.changeP5(vdbe(p), p5);
@@ -506,7 +495,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
             const key_info = key_info_opt.?;
             for (0..n_val) |i| {
                 const x = expr_mod.vectorFieldSubexpr(left, i);
-                const c = dialectColl(p, expr_mod.binaryCompareCollSeq(p, x, e_list.at(i).expr.?));
+                const c = expr_mod.binaryCompareCollSeq(p, x, e_list.at(i).expr.?);
                 key_info.coll[i] = c;
                 if (!serial.isBinary(c)) allow_bloom = false;
             }
@@ -540,7 +529,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
         } else if (aff == Aff.real) {
             aff = Aff.numeric;
         }
-        key_info_opt.?.coll[0] = dialectColl(p, expr_mod.collSeq(p, e.left));
+        key_info_opt.?.coll[0] = expr_mod.inCollSeq(p, e.left);
         const r1 = getTempReg(p);
         const r2 = getTempReg(p);
         const aff_str = [1]u8{aff};
@@ -688,7 +677,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
     // Without a b-tree, compare with each value in turn.
     if (e_type == .NOOP) {
         const list = e.x.list.?;
-        const coll = dialectColl(p, expr_mod.collSeq(p, e.left));
+        const coll = expr_mod.inCollSeq(p, e.left);
         const label_ok = aux.makeLabel(p);
         var reg_ck_null: i32 = 0;
         if (dest_if_null != dest_if_false) {
@@ -804,7 +793,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
         const coll = if (e.useXSelect())
             expr_mod.binaryCompareCollSeq(p, x, e.x.select.?.e_list.?.at(i).expr.?)
         else
-            expr_mod.collSeq(p, x);
+            expr_mod.inCollSeq(p, x);
         _ = aux.addOp3(v, OP.Column, i_tab, ai_map[i], r3);
         _ = aux.addOp4(v, OP.Ne, r_lhs + ai_map[i], dest_not_null, r3, if (coll) |c| .{ .collseq = c } else .notused);
         releaseTempReg(p, r3);

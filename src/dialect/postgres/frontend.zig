@@ -3,9 +3,9 @@
 //! The frontend reads one statement (lexer.zig, parser.zig into the tree
 //! of ast.zig) and lowers it: queries, DML and transaction control into
 //! the common IR (lower.zig), DDL as SQLite text with catalog entries
-//! (ddl.zig, render.zig). PRAGMA, VACUUM and ANALYZE are passed to
-//! SQLite's grammar as written, so that `PRAGMA xq_dialect = 'sqlite'`
-//! switches back. Errors use PostgreSQL's wording where it is cheap
+//! (ddl.zig, render.zig). ANALYZE is passed to SQLite's grammar as
+//! written, as are PRAGMA, VACUUM and the other SQLite commands of
+//! dialect.runParser(). Errors use PostgreSQL's wording where it is cheap
 //! (`syntax error at or near "x"`, `relation "t" does not exist`).
 //!
 //! The engine side: the function table (version(), the sequence
@@ -20,7 +20,6 @@ const dfunc = @import("../func.zig");
 const sequence = @import("../../catalog/sequence.zig");
 const api = @import("../../vdbe/api.zig");
 const ir = @import("../../ir/ir.zig");
-const util = @import("../../sql/util.zig");
 const parser = @import("parser.zig");
 const lower = @import("lower.zig");
 const ddl = @import("ddl.zig");
@@ -28,21 +27,14 @@ const funcs = @import("funcs.zig");
 
 const RC = int.RC;
 
-pub const frontend: dialect.Frontend = .{ .name = "postgres", .run = run };
+pub const frontend: dialect.Frontend = .{ .run = run };
 
 pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-    const db = p.db;
-    p.rc = RC.OK;
-    p.tail = sql;
-    const parent = db.parse;
-    db.parse = p;
-    defer db.parse = parent;
-
-    var ps = parser.Parser.init(p.arena, sql, 0) catch |err| switch (err) {
+    var lex_error: parser.LexError = .{};
+    var ps = parser.Parser.init(p.arena, sql, 0, &lex_error) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.ParseFailed => {
-            const e = parser.Parser.lexError(p.arena, sql, 0);
-            ir.stmt.errorMsgAt(p, sql.ptr + e[1], "{s}", .{e[0]});
+            ir.stmt.errorMsgAt(p, sql.ptr + lex_error.pos, "{s}", .{lex_error.msg});
             p.tail = sql[sql.len..];
             return error.ParseFailed;
         },
@@ -58,17 +50,14 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
     };
     if (p.n_err == 0 and p.rc == RC.OK) ir.stmt.finishCoding(p);
     p.tail = rest;
-    if (p.err_msg != null or (p.rc != RC.OK and p.rc != RC.DONE)) {
-        if (p.err_msg == null) p.err_msg = try p.arena.dupeSentinel(u8, util.errStr(p.rc), 0);
-        try translateError(p);
-        return error.ParseFailed;
-    }
+    // dialect.runParser() fails the statement.
+    try translateError(p);
 }
 
 fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
-    // SQLite's administrative statements, as written.
+    // ANALYZE, as written (PostgreSQL's takes the same arguments).
     const first = ps.toks[0];
-    if (first.isKw("pragma") or first.isKw("vacuum") or first.isKw("analyze") or first.isKw("reindex")) {
+    if (first.isKw("analyze")) {
         var last = first;
         for (ps.toks) |t| {
             if (t.kind == .eof) break;
@@ -89,23 +78,19 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     switch (stmt) {
         .create_table, .create_index, .create_view, .create_sequence, .alter_table, .drop => {
             var d: ddl.Ddl = .{ .p = p, .src = sql };
-            try d.statement(stmt);
+            return d.statement(stmt);
         },
         .explain => |inner| switch (inner.*) {
-            .select, .insert, .update, .delete => {
-                var l: lower.Lowerer = .{ .p = p, .src = sql };
-                try l.statement(stmt);
-            },
+            .select, .insert, .update, .delete => {},
             else => {
                 ir.stmt.errorMsgAt(p, sql.ptr, "EXPLAIN of this statement is not supported", .{});
                 return error.Failed;
             },
         },
-        else => {
-            var l: lower.Lowerer = .{ .p = p, .src = sql };
-            try l.statement(stmt);
-        },
+        else => {},
     }
+    var l: lower.Lowerer = .{ .p = p, .src = sql };
+    try l.statement(stmt);
 }
 
 /// SQLite's messages for common failures in PostgreSQL's words.

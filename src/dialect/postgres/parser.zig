@@ -21,7 +21,7 @@ pub const Error = error{ ParseFailed, OutOfMemory };
 
 /// PostgreSQL's reserved keywords and the "type_func_name" ones: neither
 /// can be a column name or a bare alias.
-const reserved = [_][]const u8{
+const reserved = wordSet(&.{
     "all",           "analyse",      "analyze",      "and",               "any",          "array",
     "as",            "asc",          "asymmetric",   "both",              "case",         "cast",
     "check",         "collate",      "column",       "constraint",        "create",       "current_catalog",
@@ -40,19 +40,32 @@ const reserved = [_][]const u8{
     "freeze",        "full",         "ilike",        "inner",             "is",           "isnull",
     "join",          "left",         "like",         "natural",           "notnull",      "outer",
     "overlaps",      "right",        "similar",      "tablesample",       "verbose",
-};
+});
+
+/// A set of (lower-case) words.
+fn wordSet(comptime words: []const []const u8) std.StaticStringMap(void) {
+    @setEvalBranchQuota(10_000);
+    var kvs: [words.len]struct { []const u8 } = undefined;
+    for (words, 0..) |w, i| kvs[i] = .{w};
+    return .initComptime(kvs);
+}
 
 pub fn isReserved(word: []const u8) bool {
-    for (reserved) |r| if (std.mem.eql(u8, r, word)) return true;
-    return false;
+    return reserved.has(word);
 }
 
 /// The words that start a type in a typed literal (`DATE '2024-01-01'`).
-const type_words = [_][]const u8{
+const type_words = wordSet(&.{
     "date",  "time",      "timestamp", "timestamptz", "timetz",  "interval", "boolean", "bool",
     "int",   "integer",   "int2",      "int4",        "int8",    "smallint", "bigint",  "real",
     "float", "float4",    "float8",    "double",      "numeric", "decimal",  "text",    "varchar",
     "char",  "character", "bytea",     "uuid",        "json",    "jsonb",
+});
+
+/// The error of a statement that does not lex (Parser.init()).
+pub const LexError = struct {
+    msg: []const u8 = "",
+    pos: usize = 0,
 };
 
 pub const Parser = struct {
@@ -67,7 +80,8 @@ pub const Parser = struct {
 
     /// Lex the statement that starts at `pos` (blank text and leading
     /// semicolons are skipped). An empty statement has no tokens but eof.
-    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize) Error!Parser {
+    /// A lexical error fails with its message and offset in `lex_error`.
+    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError) Error!Parser {
         var l = lexer.Lexer.init(arena, src, pos);
         var toks: std.ArrayList(Token) = .empty;
         var end: usize = src.len;
@@ -75,9 +89,7 @@ pub const Parser = struct {
             const t = l.next() catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.LexFailed => {
-                    var p: Parser = .{ .arena = arena, .src = src, .toks = &.{}, .end = src.len };
-                    p.err_msg = l.err_msg;
-                    p.err_pos = l.err_pos;
+                    if (lex_error) |e| e.* = .{ .msg = l.err_msg, .pos = l.err_pos };
                     return error.ParseFailed;
                 },
             };
@@ -91,15 +103,6 @@ pub const Parser = struct {
             if (t.kind == .eof) break;
         }
         return .{ .arena = arena, .src = src, .toks = toks.items, .end = end };
-    }
-
-    /// The parser of `init()` that failed: its message.
-    pub fn lexError(arena: Allocator, src: [:0]const u8, pos: usize) struct { []const u8, usize } {
-        var l = lexer.Lexer.init(arena, src, pos);
-        while (true) {
-            const t = l.next() catch return .{ l.err_msg, l.err_pos };
-            if (t.kind == .eof) return .{ "", 0 };
-        }
     }
 
     pub fn isEmpty(p: *const Parser) bool {
@@ -144,6 +147,25 @@ pub const Parser = struct {
 
     fn expectKw(p: *Parser, kw: []const u8) Error!void {
         if (!p.eatKw(kw)) return p.syntaxError();
+    }
+
+    fn isAnyKw(p: *const Parser, comptime kws: []const []const u8) bool {
+        return p.peek().isAnyKw(kws);
+    }
+
+    /// An optional IF EXISTS: whether it is there.
+    fn ifExists(p: *Parser) Error!bool {
+        if (!p.eatKw("if")) return false;
+        try p.expectKw("exists");
+        return true;
+    }
+
+    /// An optional IF NOT EXISTS: whether it is there.
+    fn ifNotExists(p: *Parser) Error!bool {
+        if (!p.eatKw("if")) return false;
+        try p.expectKw("not");
+        try p.expectKw("exists");
+        return true;
     }
 
     fn eat(p: *Parser, kind: lexer.Kind) bool {
@@ -386,7 +408,7 @@ pub const Parser = struct {
 
     fn startsSelect(p: *const Parser, k: usize) bool {
         const t = p.peekAt(k);
-        return t.isKw("select") or t.isKw("values") or t.isKw("with") or t.isKw("table");
+        return t.isAnyKw(&.{ "select", "values", "with", "table" });
     }
 
     /// Whether a parenthesized query starts here: `(` then (more `(`s
@@ -471,7 +493,7 @@ pub const Parser = struct {
                 cte.materialized = false;
             }
             _ = try p.expect(.lparen);
-            if (p.isKw("insert") or p.isKw("update") or p.isKw("delete")) {
+            if (p.isAnyKw(&.{ "insert", "update", "delete" })) {
                 return p.unsupported(p.peek().start, "a data-modifying statement in WITH");
             }
             cte.select = try p.select();
@@ -555,7 +577,7 @@ pub const Parser = struct {
             _ = p.advance();
             try p.expectKw("by");
             _ = p.eatKw("all");
-            if (p.isKw("rollup") or p.isKw("cube") or p.isKw("grouping")) return p.unsupported(p.peek().start, "GROUP BY ROLLUP/CUBE/GROUPING SETS");
+            if (p.isAnyKw(&.{ "rollup", "cube", "grouping" })) return p.unsupported(p.peek().start, "GROUP BY ROLLUP/CUBE/GROUPING SETS");
             c.group_by = try p.exprList();
         }
         if (p.eatKw("having")) c.having = try p.expr0();
@@ -855,7 +877,7 @@ pub const Parser = struct {
         while (cmpOp(p.peek())) |op| {
             const at = p.advance().start;
             // x = ANY (subquery), x <> ALL (subquery)
-            if (p.isKw("any") or p.isKw("some") or p.isKw("all")) {
+            if (p.isAnyKw(&.{ "any", "some", "all" })) {
                 const all = p.advance().isKw("all");
                 if (!((op == .eq and !all) or (op == .ne and all)) or !p.parenStartsSelect()) {
                     return p.unsupported(at, "this ANY/ALL comparison");
@@ -1338,7 +1360,7 @@ pub const Parser = struct {
             try p.expectKw("by");
             w.order_by = try p.sortList();
         }
-        if (p.isKw("rows") or p.isKw("range") or p.isKw("groups")) {
+        if (p.isAnyKw(&.{ "rows", "range", "groups" })) {
             const u = p.advance();
             var fr: ast.Frame = .{ .unit = if (u.isKw("rows")) .rows else if (u.isKw("range")) .range else .groups, .start = undefined, .end = null };
             if (p.eatKw("between")) {
@@ -1639,12 +1661,7 @@ pub const Parser = struct {
         if (p.isKw("sequence")) {
             _ = p.advance();
             var s: ast.CreateSequence = .{ .name = undefined };
-            if (p.isKw("if")) {
-                _ = p.advance();
-                try p.expectKw("not");
-                try p.expectKw("exists");
-                s.if_not_exists = true;
-            }
+            s.if_not_exists = try p.ifNotExists();
             s.name = try p.qname();
             s.opts = try p.seqOptions();
             return .{ .create_sequence = try p.new(ast.CreateSequence, s) };
@@ -1653,7 +1670,7 @@ pub const Parser = struct {
             if (or_replace or temp) return p.syntaxError();
             return .{ .create_index = try p.createIndex() };
         }
-        if (p.isKw("schema") or p.isKw("database") or p.isKw("extension") or p.isKw("type") or p.isKw("function") or p.isKw("trigger") or p.isKw("domain") or p.isKw("procedure") or p.isKw("role") or p.isKw("user")) {
+        if (p.isAnyKw(&.{ "schema", "database", "extension", "type", "function", "trigger", "domain", "procedure", "role", "user" })) {
             return p.fail(at, "CREATE {s} is not supported", .{std.ascii.allocUpperString(p.arena, p.peek().text) catch return error.OutOfMemory});
         }
         return p.syntaxError();
@@ -1693,12 +1710,7 @@ pub const Parser = struct {
     fn createTable(p: *Parser, temp: bool) Error!*ast.CreateTable {
         _ = p.advance(); // TABLE
         var ct: ast.CreateTable = .{ .temp = temp, .name = undefined };
-        if (p.isKw("if")) {
-            _ = p.advance();
-            try p.expectKw("not");
-            try p.expectKw("exists");
-            ct.if_not_exists = true;
-        }
+        ct.if_not_exists = try p.ifNotExists();
         ct.name = try p.qname();
         if (p.eatKw("as")) {
             ct.as_select = try p.select();
@@ -1713,7 +1725,7 @@ pub const Parser = struct {
         var cons: std.ArrayList(ast.TableConstraint) = .empty;
         if (p.peek().kind != .rparen) while (true) {
             const t = p.peek();
-            if (t.isKw("constraint") or t.isKw("check") or t.isKw("unique") or t.isKw("primary") or t.isKw("foreign") or t.isKw("exclude")) {
+            if (t.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign", "exclude" })) {
                 try cons.append(p.arena, try p.tableConstraint());
             } else if (t.isKw("like")) {
                 return p.unsupported(t.start, "CREATE TABLE ... LIKE");
@@ -1914,12 +1926,7 @@ pub const Parser = struct {
         if (p.eatKw("unique")) ci.unique = true;
         try p.expectKw("index");
         _ = p.eatKw("concurrently");
-        if (p.isKw("if")) {
-            _ = p.advance();
-            try p.expectKw("not");
-            try p.expectKw("exists");
-            ci.if_not_exists = true;
-        }
+        ci.if_not_exists = try p.ifNotExists();
         if (!p.isKw("on")) ci.name = try p.colId();
         try p.expectKw("on");
         _ = p.eatKw("only");
@@ -1973,14 +1980,10 @@ pub const Parser = struct {
             _ = p.eatKw("concurrently");
         } else if (p.eatKw("sequence")) {
             d.kind = .sequence;
-        } else if (t.kind == .ident and (t.isKw("schema") or t.isKw("database") or t.isKw("extension") or t.isKw("type") or t.isKw("function") or t.isKw("trigger"))) {
+        } else if (t.kind == .ident and t.isAnyKw(&.{ "schema", "database", "extension", "type", "function", "trigger" })) {
             return p.fail(t.start, "DROP {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
         } else return p.syntaxError();
-        if (p.isKw("if")) {
-            _ = p.advance();
-            try p.expectKw("exists");
-            d.if_exists = true;
-        }
+        d.if_exists = try p.ifExists();
         var names: std.ArrayList(ast.QName) = .empty;
         while (true) {
             try names.append(p.arena, try p.qname());
@@ -2000,11 +2003,7 @@ pub const Parser = struct {
         }
         _ = p.advance();
         var a: ast.AlterTable = .{ .name = undefined, .action = undefined };
-        if (p.isKw("if")) {
-            _ = p.advance();
-            try p.expectKw("exists");
-            a.if_exists = true;
-        }
+        a.if_exists = try p.ifExists();
         _ = p.eatKw("only");
         a.name = try p.qname();
         const at = p.peek().start;
@@ -2019,27 +2018,16 @@ pub const Parser = struct {
                 a.action = .{ .rename_column = .{ .old = old, .new = try p.colId() } };
             }
         } else if (p.eatKw("add")) {
-            if (p.isKw("constraint") or p.isKw("check") or p.isKw("unique") or p.isKw("primary") or p.isKw("foreign")) {
+            if (p.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign" })) {
                 return p.unsupported(at, "ALTER TABLE ... ADD CONSTRAINT");
             }
             _ = p.eatKw("column");
-            var ine = false;
-            if (p.isKw("if")) {
-                _ = p.advance();
-                try p.expectKw("not");
-                try p.expectKw("exists");
-                ine = true;
-            }
+            const ine = try p.ifNotExists();
             a.action = .{ .add_column = .{ .if_not_exists = ine, .def = try p.columnDef() } };
         } else if (p.eatKw("drop")) {
             if (p.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... DROP CONSTRAINT");
             _ = p.eatKw("column");
-            var ie = false;
-            if (p.isKw("if")) {
-                _ = p.advance();
-                try p.expectKw("exists");
-                ie = true;
-            }
+            const ie = try p.ifExists();
             a.action = .{ .drop_column = .{ .if_exists = ie, .name = try p.colId() } };
             _ = p.eatKw("cascade") or p.eatKw("restrict");
         } else if (p.isKw("alter")) {
@@ -2074,8 +2062,7 @@ fn eql(a: []const u8, b: []const u8) bool {
 }
 
 fn isTypeWord(w: []const u8) bool {
-    for (type_words) |t| if (eql(t, w)) return true;
-    return false;
+    return type_words.has(w);
 }
 
 /// Reserved words that may still name a function: left(), right().

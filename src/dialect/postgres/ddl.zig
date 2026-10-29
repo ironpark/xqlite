@@ -236,15 +236,6 @@ pub const Ddl = struct {
         if (ref.deferred) try r.put(" DEFERRABLE INITIALLY DEFERRED");
     }
 
-    fn nameList(r: *Renderer, names: []const ast.Name) Error!void {
-        try r.put("(");
-        for (names, 0..) |n, i| {
-            if (i > 0) try r.put(", ");
-            try r.ident(n.text);
-        }
-        try r.put(")");
-    }
-
     // ==================================================== CREATE TABLE
 
     fn createTable(d: *Ddl, ct: *const ast.CreateTable) Error!void {
@@ -300,15 +291,15 @@ pub const Ddl = struct {
                 },
                 .unique => |cols| {
                     try r.put("UNIQUE");
-                    try nameList(&r, cols);
+                    try r.nameList(cols);
                 },
                 .primary_key => |cols| {
                     try r.put("PRIMARY KEY");
-                    try nameList(&r, cols);
+                    try r.nameList(cols);
                 },
                 .foreign_key => |fk| {
                     try r.put("FOREIGN KEY");
-                    try nameList(&r, fk.cols);
+                    try r.nameList(fk.cols);
                     try d.references(&r, fk.ref);
                 },
             }
@@ -414,7 +405,7 @@ pub const Ddl = struct {
             try r.put(".");
         }
         try r.ident(name);
-        if (v.cols.len > 0) try nameList(&r, v.cols);
+        if (v.cols.len > 0) try r.nameList(v.cols);
         try r.put(" AS ");
         try r.select(v.select);
         if (replace) {
@@ -461,13 +452,12 @@ pub const Ddl = struct {
             if (a.if_exists) return;
             return d.fail(a.name.name.pos, "relation \"{s}\" does not exist", .{table});
         };
-        const db_name = schemaName(p.db, tab);
+        const db_name = catalog.schemaName(p.db, tab);
         var r = d.renderer();
         try r.put("ALTER TABLE ");
         try r.ident(db_name);
         try r.put(".");
         try r.ident(table);
-        const has_catalog = catalog.exists(p.db, db_name);
         switch (a.action) {
             .rename_to => |n| {
                 try r.put(" RENAME TO ");
@@ -481,12 +471,10 @@ pub const Ddl = struct {
                 try r.put(" TO ");
                 try r.ident(rc.new.text);
                 try d.lowerText(try r.text());
-                if (has_catalog) catalog.codeExecFmt(p, db_name, "UPDATE %Q.xq_catalog SET col=%Q WHERE tbl=%Q AND col=%Q", &.{
-                    .{ .str = db_name }, .{ .str = rc.new.text }, .{ .str = table }, .{ .str = rc.old.text },
-                });
+                catalog.codeRenameColumn(p, db_name, table, rc.old.text, rc.new.text);
             },
             .add_column => |ac| {
-                if (columnExists(tab, ac.def.name.text)) {
+                if (build.columnIndex(tab, ac.def.name.text) >= 0) {
                     if (ac.if_not_exists) return;
                     return d.fail(ac.def.name.pos, "column \"{s}\" of relation \"{s}\" already exists", .{ ac.def.name.text, table });
                 }
@@ -497,21 +485,20 @@ pub const Ddl = struct {
                 catalog.codeSet(p, db_name, table, meta.name, catalog.Key.decl_type, meta.decl);
             },
             .drop_column => |dc| {
-                if (!columnExists(tab, dc.name.text)) {
+                if (build.columnIndex(tab, dc.name.text) < 0) {
                     if (dc.if_exists) return;
                     return d.fail(dc.name.pos, "column \"{s}\" of relation \"{s}\" does not exist", .{ dc.name.text, table });
                 }
                 try r.put(" DROP COLUMN ");
                 try r.ident(dc.name.text);
                 try d.lowerText(try r.text());
-                if (has_catalog) {
-                    if (sequenceTableExists(p.db)) catalog.codeExecFmt(p, db_name, "DELETE FROM main.xq_sequence WHERE name IN (SELECT value FROM %Q.xq_catalog WHERE tbl=%Q AND col=%Q AND key='identity')", &.{
-                        .{ .str = db_name }, .{ .str = table }, .{ .str = dc.name.text },
-                    });
-                    catalog.codeExecFmt(p, db_name, "DELETE FROM %Q.xq_catalog WHERE tbl=%Q AND col=%Q", &.{
-                        .{ .str = db_name }, .{ .str = table }, .{ .str = dc.name.text },
+                // The column's identity sequence, then its entries.
+                if (catalog.exists(p.db, db_name) and sequence.exists(p.db, catalog.main_schema)) {
+                    catalog.codeExecFmt(p, db_name, "DELETE FROM main.xq_sequence WHERE name IN (SELECT value FROM %Q.xq_catalog WHERE tbl=%Q AND col=%Q AND key=%Q)", &.{
+                        .{ .str = db_name }, .{ .str = table }, .{ .str = dc.name.text }, .{ .str = catalog.Key.identity },
                     });
                 }
+                catalog.codeDeleteColumn(p, db_name, table, dc.name.text);
             },
         }
     }
@@ -536,11 +523,11 @@ pub const Ddl = struct {
                 ir.ddl.dropTable(p, src, x.kind == .view, x.if_exists);
                 try d.check();
                 if (tab) |t| {
-                    const db_name = schemaName(p.db, t);
+                    const db_name = catalog.schemaName(p.db, t);
                     if (catalog.exists(p.db, db_name)) {
-                        if (x.kind == .table and sequenceTableExists(p.db)) {
-                            catalog.codeExecFmt(p, db_name, "DELETE FROM main.xq_sequence WHERE name IN (SELECT value FROM %Q.xq_catalog WHERE tbl=%Q AND key='identity')", &.{
-                                .{ .str = db_name }, .{ .str = name },
+                        if (x.kind == .table and sequence.exists(p.db, catalog.main_schema)) {
+                            catalog.codeExecFmt(p, db_name, "DELETE FROM main.xq_sequence WHERE name IN (SELECT value FROM %Q.xq_catalog WHERE tbl=%Q AND key=%Q)", &.{
+                                .{ .str = db_name }, .{ .str = name }, .{ .str = catalog.Key.identity },
                             });
                         }
                         catalog.codeDeleteTable(p, db_name, name);
@@ -563,30 +550,17 @@ pub const Ddl = struct {
     }
 };
 
-fn schemaName(db: *int.Sqlite3, t: *int.Table) []const u8 {
-    for (db.dbs.items) |x| if (t.schema != null and x.schema == t.schema.?) return x.name;
-    return "main";
-}
-
-fn columnExists(t: *int.Table, name: []const u8) bool {
-    for (t.cols) |*c| if (std.ascii.eqlIgnoreCase(c.name(), name)) return true;
-    return false;
-}
-
 fn relationExists(db: *int.Sqlite3, name: []const u8, schema: []const u8) bool {
     if (build.findTable(db, name, schema) != null) return true;
     const i = build.findDbName(db, schema) orelse return false;
     return db.dbs.items[i].schema.idx_hash.get(name) != null;
 }
 
-fn sequenceTableExists(db: *int.Sqlite3) bool {
-    return build.findTable(db, sequence.table_name, catalog.main_schema) != null;
-}
-
 /// Whether sequence `name` exists (a query of xq_sequence, now).
 pub fn sequenceExists(db: *int.Sqlite3, name: []const u8) bool {
-    if (!sequenceTableExists(db)) return false;
-    var q = catalog.Query.initFmt(db, "SELECT 1 FROM main.xq_sequence WHERE name=%Q", &.{.{ .str = name }}) catch return false;
+    if (!sequence.exists(db, catalog.main_schema)) return false;
+    var q = catalog.Query.init(db, "SELECT 1 FROM main.xq_sequence WHERE name=?1") catch return false;
     defer q.deinit();
+    q.bindText(1, name) catch return false;
     return q.step() catch false;
 }

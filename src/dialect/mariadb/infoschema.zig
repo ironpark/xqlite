@@ -32,9 +32,7 @@ pub fn select(s: *Parser, name: []const u8) Error!?*int.Select {
     return sel;
 }
 
-const user_tables =
-    \\FROM pragma_table_list tl WHERE tl.`schema` <> 'temp' AND tl.name NOT LIKE 'sqlite\_%' AND tl.name NOT IN ('xq_catalog', 'xq_sequence')
-;
+const user_tables = "FROM pragma_table_list tl WHERE tl.`schema` <> 'temp' AND tl.name NOT LIKE 'sqlite\\_%' AND tl.name" ++ catalog.not_catalog_table;
 
 fn tables(s: *Parser) Error![:0]const u8 {
     _ = s;
@@ -51,11 +49,11 @@ fn tables(s: *Parser) Error![:0]const u8 {
 fn columns(s: *Parser) Error![:0]const u8 {
     const has_cat = catalog.exists(s.p.db, "main");
     const ty = if (has_cat)
-        "coalesce((SELECT c.value FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = 'type'), lower(ti.type))"
+        "coalesce((SELECT c.value FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = '" ++ catalog.Key.decl_type ++ "'), lower(ti.type))"
     else
         "lower(ti.type)";
     const dflt = if (has_cat)
-        "coalesce((SELECT c.value FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = 'default'), ti.dflt_value)"
+        "coalesce((SELECT c.value FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = '" ++ catalog.Key.default ++ "'), ti.dflt_value)"
     else
         "ti.dflt_value";
     const extra = if (has_cat)
@@ -75,7 +73,7 @@ fn columns(s: *Parser) Error![:0]const u8 {
         "NULL AS CHARACTER_MAXIMUM_LENGTH, NULL AS NUMERIC_PRECISION, NULL AS NUMERIC_SCALE, " ++
         "{s} AS COLUMN_TYPE, {s} AS COLUMN_KEY, {s} AS EXTRA, '' AS COLUMN_COMMENT " ++
         "FROM pragma_table_list tl JOIN pragma_table_xinfo(tl.name, tl.`schema`) ti " ++
-        "WHERE ti.hidden IN (0, 2, 3) AND tl.`schema` <> 'temp' AND tl.name NOT LIKE 'sqlite\\_%' AND tl.name NOT IN ('xq_catalog', 'xq_sequence')", .{ dflt, ty, ty, ty, ty, ty, ty, ty, ty, key, extra }, 0);
+        "WHERE ti.hidden IN (0, 2, 3) AND tl.`schema` <> 'temp' AND tl.name NOT LIKE 'sqlite\\_%' AND tl.name" ++ catalog.not_catalog_table, .{ dflt, ty, ty, ty, ty, ty, ty, ty, ty, key, extra }, 0);
 }
 
 const schemata = "SELECT 'def' AS CATALOG_NAME, name AS SCHEMA_NAME, 'utf8mb4' AS DEFAULT_CHARACTER_SET_NAME, " ++

@@ -21,6 +21,7 @@
 //!    (functionCall()).
 
 const std = @import("std");
+const ctype = @import("../../util/ctype.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
 const build = @import("../../sql/build.zig");
@@ -49,24 +50,28 @@ pub const Error = int.Oom || int.ParseError;
 
 /// Words that are not names where a name is optional (aliases) or
 /// where they would make no sense as one (a column reference).
-const reserved = [_][]const u8{
-    "ALL",      "AND",           "AS",         "ASC",     "BETWEEN",   "BINARY",  "BY",     "CASE",
-    "CHECK",    "COLLATE",       "CONSTRAINT", "CREATE",  "CROSS",     "DEFAULT", "DELETE", "DESC",
-    "DISTINCT", "DISTINCTROW",   "DIV",        "DROP",    "DUAL",      "ELSE",    "ESCAPE", "EXCEPT",
-    "EXISTS",   "FALSE",         "FETCH",      "FOR",     "FORCE",     "FOREIGN", "FROM",   "GROUP",
-    "HAVING",   "HIGH_PRIORITY", "IGNORE",     "IN",      "INDEX",     "INNER",   "INSERT", "INTERSECT",
-    "INTERVAL", "INTO",          "IS",         "JOIN",    "KEY",       "LEFT",    "LIKE",   "LIMIT",
-    "LOCK",     "LOW_PRIORITY",  "MOD",        "NATURAL", "NOT",       "NULL",    "OFFSET", "ON",
-    "OR",       "ORDER",         "OUTER",      "OVER",    "PARTITION", "PRIMARY", "RANGE",  "REFERENCES",
-    "REGEXP",   "REPLACE",       "RETURNING",  "RIGHT",   "RLIKE",     "ROWS",    "SELECT", "SEPARATOR",
-    "SET",      "STRAIGHT_JOIN", "THEN",       "TRUE",    "UNION",     "UNIQUE",  "UPDATE", "USE",
-    "USING",    "VALUES",        "WHEN",       "WHERE",   "WINDOW",    "WITH",    "XOR",
+const reserved = blk: {
+    @setEvalBranchQuota(10_000);
+    const words = [_][]const u8{
+        "ALL",      "AND",           "AS",         "ASC",     "BETWEEN",   "BINARY",  "BY",     "CASE",
+        "CHECK",    "COLLATE",       "CONSTRAINT", "CREATE",  "CROSS",     "DEFAULT", "DELETE", "DESC",
+        "DISTINCT", "DISTINCTROW",   "DIV",        "DROP",    "DUAL",      "ELSE",    "ESCAPE", "EXCEPT",
+        "EXISTS",   "FALSE",         "FETCH",      "FOR",     "FORCE",     "FOREIGN", "FROM",   "GROUP",
+        "HAVING",   "HIGH_PRIORITY", "IGNORE",     "IN",      "INDEX",     "INNER",   "INSERT", "INTERSECT",
+        "INTERVAL", "INTO",          "IS",         "JOIN",    "KEY",       "LEFT",    "LIKE",   "LIMIT",
+        "LOCK",     "LOW_PRIORITY",  "MOD",        "NATURAL", "NOT",       "NULL",    "OFFSET", "ON",
+        "OR",       "ORDER",         "OUTER",      "OVER",    "PARTITION", "PRIMARY", "RANGE",  "REFERENCES",
+        "REGEXP",   "REPLACE",       "RETURNING",  "RIGHT",   "RLIKE",     "ROWS",    "SELECT", "SEPARATOR",
+        "SET",      "STRAIGHT_JOIN", "THEN",       "TRUE",    "UNION",     "UNIQUE",  "UPDATE", "USE",
+        "USING",    "VALUES",        "WHEN",       "WHERE",   "WINDOW",    "WITH",    "XOR",
+    };
+    var kvs: [words.len]struct { []const u8 } = undefined;
+    for (words, 0..) |w, i| kvs[i] = .{w};
+    break :blk std.StaticStringMapWithEql(void, ctype.eqlNoCase).initComptime(kvs);
 };
 
 pub fn isReserved(t: Token) bool {
-    if (t.kind != .ident) return false;
-    for (reserved) |w| if (std.ascii.eqlIgnoreCase(w, t.text)) return true;
-    return false;
+    return t.kind == .ident and reserved.has(t.text);
 }
 
 pub fn irTok(t: Token) int.Token {
@@ -130,6 +135,26 @@ pub const Parser = struct {
 
     pub fn expectKw(s: *Parser, kw: []const u8) Error!void {
         if (!s.eatKw(kw)) return s.syntaxError();
+    }
+
+    /// Whether the current token is one of the keywords `kws`.
+    pub fn isAnyKw(s: *Parser, comptime kws: []const []const u8) bool {
+        return s.tok.isAnyKw(kws);
+    }
+
+    /// An optional IF EXISTS: whether it is there.
+    pub fn ifExists(s: *Parser) Error!bool {
+        if (!s.eatKw("IF")) return false;
+        try s.expectKw("EXISTS");
+        return true;
+    }
+
+    /// An optional IF NOT EXISTS: whether it is there.
+    pub fn ifNotExists(s: *Parser) Error!bool {
+        if (!s.eatKw("IF")) return false;
+        try s.expectKw("NOT");
+        try s.expectKw("EXISTS");
+        return true;
     }
 
     pub fn isOp(s: *Parser, op: []const u8) bool {
@@ -301,7 +326,7 @@ pub const Parser = struct {
         while (true) {
             if (compareOp(s.tok)) |op| {
                 s.advance();
-                if (s.isKw("ANY") or s.isKw("SOME") or s.isKw("ALL")) {
+                if (s.isAnyKw(&.{ "ANY", "SOME", "ALL" })) {
                     return s.fail("xqlite: comparisons with ANY/SOME/ALL subqueries are not supported", .{});
                 }
                 const r = try s.bitOr();
@@ -324,7 +349,7 @@ pub const Parser = struct {
             var not = false;
             if (s.isKw("NOT")) {
                 const n = s.peek();
-                if (!(n.isKw("LIKE") or n.isKw("IN") or n.isKw("BETWEEN") or n.isKw("REGEXP") or n.isKw("RLIKE"))) break;
+                if (!n.isAnyKw(&.{ "LIKE", "IN", "BETWEEN", "REGEXP", "RLIKE" })) break;
                 s.advance();
                 not = true;
             }
@@ -616,7 +641,7 @@ pub const Parser = struct {
     /// `( ... )`: a subquery, a row value or a parenthesized expression.
     fn parenthesized(s: *Parser) Error!*Expr {
         try s.expectOp("(");
-        if (s.isKw("SELECT") or s.isKw("WITH") or s.isKw("VALUES")) {
+        if (s.isAnyKw(&.{ "SELECT", "WITH", "VALUES" })) {
             const sub = try s.selectStmt();
             try s.expectOp(")");
             return ir.expr.subquery(s.p, TK.SELECT, sub);
@@ -674,7 +699,7 @@ pub const Parser = struct {
             s.advance();
             return ir.expr.binary(s.p, TK.DEFAULT, null, null);
         }
-        if ((t.isKw("DATE") or t.isKw("TIME") or t.isKw("TIMESTAMP")) and next.kind == .string) {
+        if (t.isAnyKw(&.{ "DATE", "TIME", "TIMESTAMP" }) and next.kind == .string) {
             // DATE '2024-01-01' and the like: the string.
             s.advance();
             return s.primary();
@@ -1208,7 +1233,7 @@ pub const Parser = struct {
         _ = joined;
         if (s.isOp("(")) {
             const n = s.peek();
-            if (n.isKw("SELECT") or n.isKw("WITH") or n.isKw("VALUES")) {
+            if (n.isAnyKw(&.{ "SELECT", "WITH", "VALUES" })) {
                 s.advance();
                 const sub = try s.selectStmt();
                 try s.expectOp(")");
@@ -1252,7 +1277,7 @@ pub const Parser = struct {
 
     /// USE/IGNORE/FORCE {INDEX|KEY} [FOR ...] (names): accepted, ignored.
     fn indexHints(s: *Parser) Error!void {
-        while (s.isKw("USE") or s.isKw("IGNORE") or s.isKw("FORCE")) {
+        while (s.isAnyKw(&.{ "USE", "IGNORE", "FORCE" })) {
             const n = s.peek();
             if (!(n.isKw("INDEX") or n.isKw("KEY"))) return;
             s.advance();
@@ -1302,22 +1327,14 @@ pub const Parser = struct {
         const tbl_name = try s.tokName(if (n2.n != 0) n2 else n1);
         const schema_name: ?[]const u8 = if (n2.n != 0) try s.tokName(n1) else null;
         var tab = build.findTable(s.p.db, tbl_name, schema_name) orelse return .{ .tab = null, .schema = "main", .cols = &.{} };
-        const schema: []const u8 = if (tab.schema) |sch| s.p.db.dbs.items[@intCast(@import("../../sql/prepare.zig").schemaToIndex(s.p.db, sch))].name else "main";
+        const schema = catalog.schemaName(s.p.db, tab);
         const stored = try s.a.dupe(u8, tab.name);
-        var entries: std.ArrayList(struct { []const u8, []const u8, []const u8 }) = .empty;
+        var entries: []const catalog.Entry = &.{};
         if (catalog.exists(s.p.db, schema)) {
-            var q = catalog.Query.initFmt(s.p.db, "SELECT col, key, value FROM %Q.xq_catalog WHERE tbl=%Q AND key IN ('type','mariadb.on_update')", &.{ .{ .str = schema }, .{ .str = stored } }) catch {
-                return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)});
+            entries = catalog.entries(s.p.db, s.a, schema, stored) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
             };
-            defer q.deinit();
-            while (q.step() catch false) {
-                const api = @import("../../vdbe/api.zig");
-                try entries.append(s.a, .{
-                    try s.a.dupe(u8, api.columnText(q.v, 0) orelse ""),
-                    try s.a.dupe(u8, api.columnText(q.v, 1) orelse ""),
-                    try s.a.dupe(u8, api.columnText(q.v, 2) orelse ""),
-                });
-            }
             // The query may have reloaded the schema.
             tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .schema = schema, .cols = &.{} };
         }
@@ -1331,10 +1348,10 @@ pub const Parser = struct {
                 .hidden = c.col_flags.HIDDEN,
                 .has_default = c.i_dflt != 0,
             };
-            for (entries.items) |en| {
-                if (!std.ascii.eqlIgnoreCase(en[0], cols[i].name)) continue;
-                if (std.mem.eql(u8, en[1], "type")) cols[i].decl_type = en[2];
-                if (std.mem.eql(u8, en[1], "mariadb.on_update")) cols[i].on_update = true;
+            for (entries) |en| {
+                if (!std.ascii.eqlIgnoreCase(en.col, cols[i].name)) continue;
+                if (std.mem.eql(u8, en.key, catalog.Key.decl_type)) cols[i].decl_type = en.value;
+                if (std.mem.eql(u8, en.key, "mariadb.on_update")) cols[i].on_update = true;
             }
         }
         return .{ .tab = tab, .schema = schema, .name = stored, .cols = cols };

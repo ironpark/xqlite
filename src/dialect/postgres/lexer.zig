@@ -21,6 +21,7 @@
 //! source).
 
 const std = @import("std");
+const ctype = @import("../../util/ctype.zig");
 
 pub const Kind = enum {
     eof,
@@ -61,6 +62,11 @@ pub const Token = struct {
     /// Whether this is the unquoted keyword `kw` (lower case).
     pub fn isKw(t: Token, kw: []const u8) bool {
         return t.kind == .ident and std.mem.eql(u8, t.text, kw);
+    }
+
+    pub fn isAnyKw(t: Token, comptime kws: []const []const u8) bool {
+        inline for (kws) |kw| if (t.isKw(kw)) return true;
+        return false;
     }
 
     pub fn isOp(t: Token, op: []const u8) bool {
@@ -436,20 +442,13 @@ pub const Lexer = struct {
     }
 };
 
-pub fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0b or c == 0x0c;
-}
-
-fn isDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
-}
+const isSpace = ctype.isSpace;
+const isDigit = ctype.isDigit;
+/// isIdentStart(), digits and `$`.
+const isIdentChar = ctype.isIdChar;
 
 fn isIdentStart(c: u8) bool {
     return std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80;
-}
-
-fn isIdentChar(c: u8) bool {
-    return isIdentStart(c) or isDigit(c) or c == '$';
 }
 
 fn isOpChar(c: u8) bool {

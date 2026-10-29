@@ -7,6 +7,7 @@
 //! built-ins and the dialect table resolve it.
 
 const std = @import("std");
+const ctype = @import("../../util/ctype.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
 const parser = @import("parser.zig");
@@ -174,31 +175,36 @@ fn nargs(args: ?*ExprList) usize {
     return if (args) |l| l.len() else 0;
 }
 
+/// MariaDB functions that are SQLite's (or the dialect's) under another
+/// name, taking the same arguments (case-insensitive): renamed in queries
+/// (byNameFlags()) and in the stored text of DDL (ddl.functionName()).
+pub const renames = std.StaticStringMapWithEql([]const u8, ctype.eqlNoCase).initComptime(.{
+    .{ "ucase", "upper" },
+    .{ "lcase", "lower" },
+    .{ "length", "octet_length" },
+    .{ "char_length", "length" },
+    .{ "character_length", "length" },
+    .{ "mid", "substr" },
+    .{ "substring", "substr" },
+    .{ "row_count", "changes" },
+    .{ "json_value", "json_extract" },
+    .{ "std", "xq_stddev_pop" },
+    .{ "stddev", "xq_stddev_pop" },
+    .{ "stddev_pop", "xq_stddev_pop" },
+    .{ "stddev_samp", "xq_stddev_samp" },
+    .{ "variance", "xq_var_pop" },
+    .{ "var_pop", "xq_var_pop" },
+    .{ "var_samp", "xq_var_samp" },
+    .{ "bit_length", "xq_bit_length" },
+});
+
 fn arg(args: ?*ExprList, i: usize) *Expr {
     return args.?.at(i).expr.?;
 }
 
 fn byNameFlags(s: *Parser, lname: []const u8, args: ?*ExprList, t: Token, sf: SF) Error!*Expr {
     const n = nargs(args);
-    // Plain renames.
-    const renames = [_]struct { []const u8, []const u8 }{
-        .{ "ucase", "upper" },
-        .{ "lcase", "lower" },
-        .{ "length", "octet_length" },
-        .{ "char_length", "length" },
-        .{ "character_length", "length" },
-        .{ "row_count", "changes" },
-        .{ "json_value", "json_extract" },
-        .{ "std", "xq_stddev_pop" },
-        .{ "stddev", "xq_stddev_pop" },
-        .{ "stddev_pop", "xq_stddev_pop" },
-        .{ "stddev_samp", "xq_stddev_samp" },
-        .{ "variance", "xq_var_pop" },
-        .{ "var_pop", "xq_var_pop" },
-        .{ "var_samp", "xq_var_samp" },
-        .{ "bit_length", "xq_bit_length" },
-    };
-    for (renames) |r| if (eq(lname, r[0])) return renamed(s, r[1], args, sf);
+    if (renames.get(lname)) |to| return renamed(s, to, args, sf);
     if (eq(lname, "now") or eq(lname, "sysdate") or eq(lname, "current_timestamp") or
         eq(lname, "localtime") or eq(lname, "localtimestamp") or eq(lname, "utc_timestamp"))
     {
@@ -298,12 +304,12 @@ fn castTo(s: *Parser, e: *Expr) Error!*Expr {
         };
         return r;
     };
-    if (t.isKw("DECIMAL") or t.isKw("DEC") or t.isKw("NUMERIC") or t.isKw("FIXED")) {
+    if (t.isAnyKw(&.{ "DECIMAL", "DEC", "NUMERIC", "FIXED" })) {
         const real = try ir.expr.cast(s.p, e, int.Token.init("REAL"));
         if (scale) |sc| return s.call("round", &.{ real, sc });
         return ir.expr.cast(s.p, try s.call("round", &.{real}), int.Token.init("INTEGER"));
     }
-    if (t.isKw("DATE") or t.isKw("DATETIME") or t.isKw("TIME") or t.isKw("TIMESTAMP")) {
+    if (t.isAnyKw(&.{ "DATE", "DATETIME", "TIME", "TIMESTAMP" })) {
         const to = try std.ascii.allocLowerString(s.a, if (t.isKw("TIMESTAMP")) "DATETIME" else t.text);
         return s.call("xq_cast", &.{ e, try s.stringExpr(to) });
     }

@@ -12,6 +12,7 @@ const ast = @import("ast.zig");
 const types = @import("types.zig");
 const lower = @import("lower.zig");
 const views = @import("catalog_views.zig");
+const Quoted = @import("../dialect.zig").Quoted;
 
 pub const Error = error{ OutOfMemory, Failed };
 
@@ -44,21 +45,11 @@ pub const Renderer = struct {
     }
 
     pub fn ident(r: *Renderer, name: []const u8) Error!void {
-        try r.put("\"");
-        for (name) |c| {
-            if (c == '"') try r.put("\"");
-            try r.out.append(r.a(), c);
-        }
-        try r.put("\"");
+        try r.print("{f}", .{Quoted('"'){ .z = name }});
     }
 
     pub fn string(r: *Renderer, s: []const u8) Error!void {
-        try r.put("'");
-        for (s) |c| {
-            if (c == '\'') try r.put("'");
-            try r.out.append(r.a(), c);
-        }
-        try r.put("'");
+        try r.print("{f}", .{Quoted('\''){ .z = s }});
     }
 
     fn schema(r: *Renderer, n: ast.Name) Error!void {
@@ -240,9 +231,7 @@ pub const Renderer = struct {
     }
 
     pub fn collation(r: *Renderer, n: ast.Name) Error!void {
-        if (std.mem.eql(u8, n.text, "C") or std.mem.eql(u8, n.text, "POSIX") or std.ascii.eqlIgnoreCase(n.text, "default") or std.ascii.eqlIgnoreCase(n.text, "ucs_basic")) {
-            return r.put("BINARY");
-        }
+        if (lower.isBinaryCollation(n.text)) return r.put("BINARY");
         return r.ident(n.text);
     }
 
@@ -254,13 +243,11 @@ pub const Renderer = struct {
     }
 
     fn cast(r: *Renderer, e: *const ast.Expr, c: ast.Cast) Error!void {
-        if (std.mem.eql(u8, c.ty.name, "bytea") and !c.ty.array and c.e.kind == .string) {
-            const s = c.e.kind.string;
-            if (std.mem.startsWith(u8, s, "\\x")) {
-                for (s[2..]) |ch| if (!std.ascii.isHex(ch)) return r.fail(e.pos, "invalid hexadecimal digit: \"{c}\"", .{ch});
-                return r.print("X'{s}'", .{s[2..]});
-            }
-        }
+        if (lower.byteaHex(c)) |b| switch (b) {
+            .hex => |hex| return r.print("X'{s}'", .{hex}),
+            .bad_digit => |ch| return r.fail(e.pos, lower.ByteaHex.bad_digit_msg, .{ch}),
+            .odd_length => return r.fail(e.pos, lower.ByteaHex.odd_length_msg, .{}),
+        };
         const plan = types.castPlan(c.ty) catch |err| return switch (err) {
             error.Array => r.fail(c.ty.pos, "arrays are not supported", .{}),
             error.UnknownType => r.fail(c.ty.pos, "type \"{s}\" does not exist", .{c.ty.name}),
@@ -293,16 +280,17 @@ pub const Renderer = struct {
         const n = f.name.text;
         const eql = std.mem.eql;
         if (f.over == null and f.filter == null and f.order_by.len == 0) {
-            if (eql(u8, n, "now") or eql(u8, n, "current_timestamp") or eql(u8, n, "localtimestamp") or
-                eql(u8, n, "transaction_timestamp") or eql(u8, n, "statement_timestamp") or eql(u8, n, "clock_timestamp"))
-            {
-                return r.put("strftime('%Y-%m-%d %H:%M:%f', 'now')");
-            }
-            if (eql(u8, n, "localtime")) return r.put("current_time");
             if (eql(u8, n, "current_date") or eql(u8, n, "current_time")) return r.put(n);
-            if (eql(u8, n, "current_role") or eql(u8, n, "session_user")) return r.put("current_user()");
-            if (eql(u8, n, "current_catalog")) return r.put("current_database()");
-            if (eql(u8, n, "date_part")) {
+        }
+        if (lower.specialCall(f)) |sc| switch (sc) {
+            .now => {
+                if (f.args.len != 0) return r.fail(f.name.pos, "function {s} does not exist", .{n});
+                return r.put("strftime('%Y-%m-%d %H:%M:%f', 'now')");
+            },
+            .localtime => return r.put("current_time"),
+            .current_user => return r.put("current_user()"),
+            .current_database => return r.put("current_database()"),
+            .date_part => {
                 if (f.args.len != 2 or f.args[0].kind != .string) return r.fail(f.name.pos, "function date_part with these arguments is not supported", .{});
                 const plan = lower.datePartPlan(f.args[0].kind.string) orelse
                     return r.fail(f.args[0].pos, "unit \"{s}\" not recognized for type timestamp", .{f.args[0].kind.string});
@@ -317,8 +305,8 @@ pub const Renderer = struct {
                 try r.print(") AS {s})", .{plan.cast});
                 if (plan.quarter) try r.put(" + 2) / 3)");
                 return;
-            }
-        }
+            },
+        };
         try r.put(lower.funcName(n));
         try r.put("(");
         if (f.star) {
@@ -457,7 +445,7 @@ pub const Renderer = struct {
         }
     }
 
-    fn nameList(r: *Renderer, names: []const ast.Name) Error!void {
+    pub fn nameList(r: *Renderer, names: []const ast.Name) Error!void {
         try r.put("(");
         for (names, 0..) |n, i| {
             if (i > 0) try r.put(", ");
@@ -588,7 +576,7 @@ pub const Renderer = struct {
                         try views.definition(r.p, schema_name, q.name.text);
                     if (def) |text_| {
                         const parser = @import("parser.zig");
-                        var ps = parser.Parser.init(r.a(), text_, 0) catch return r.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
+                        var ps = parser.Parser.init(r.a(), text_, 0, null) catch return r.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
                         const tree = ps.select() catch return r.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
                         var sub: Renderer = .{ .p = r.p, .src = text_, .out = r.out };
                         try sub.put("(");

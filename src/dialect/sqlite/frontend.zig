@@ -8,7 +8,7 @@ const int = @import("../../sql/sqlite_int.zig");
 const tokenize = @import("../../parse/tokenize.zig");
 const dialect = @import("../dialect.zig");
 
-pub const frontend: dialect.Frontend = .{ .name = "sqlite", .run = run };
+pub const frontend: dialect.Frontend = .{ .run = run };
 
 /// SQLite changes nothing.
 pub const hooks: dialect.Hooks = .{};

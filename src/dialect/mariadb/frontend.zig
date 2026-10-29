@@ -11,7 +11,7 @@
 //!  - parser.zig: parser core, expressions, SELECT; functions.zig:
 //!    function calls; dml.zig: INSERT/REPLACE/UPDATE/DELETE; ddl.zig:
 //!    CREATE/DROP/ALTER (rendered as SQLite text + xq_catalog);
-//!    session.zig: SET, transactions, SHOW, DESCRIBE, USE, PRAGMA;
+//!    session.zig: SET, transactions, SHOW, DESCRIBE, USE;
 //!  - infoschema.zig: information_schema.TABLES, COLUMNS, SCHEMATA;
 //!  - types.zig: MariaDB column types and the sql_mode-dependent value
 //!    conversion of INSERT/UPDATE; runtime.zig: the dialect's functions.
@@ -29,7 +29,6 @@ const dialect = @import("../dialect.zig");
 const dfunc = @import("../func.zig");
 const sequence = @import("../../catalog/sequence.zig");
 const api = @import("../../vdbe/api.zig");
-const vi = @import("../../vdbe/vdbe_int.zig");
 const ir = @import("../../ir/ir.zig");
 const build = @import("../../sql/build.zig");
 const parser = @import("parser.zig");
@@ -39,15 +38,13 @@ const session = @import("session.zig");
 const types = @import("types.zig");
 const rt = @import("runtime.zig");
 
-pub const frontend: dialect.Frontend = .{ .name = "mariadb", .run = run };
+pub const frontend: dialect.Frontend = .{ .run = run };
 
 const Parser = parser.Parser;
 const Error = parser.Error;
 
 /// Compile the first statement of `sql` (dialect.Frontend's contract).
 pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-    p.rc = int.RC.OK;
-    p.tail = sql;
     const db = p.db;
     var s: Parser = .init(p, sql, db.xq.mariadb.sql_mode);
     while (s.isOp(";")) s.advance();
@@ -67,33 +64,22 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
         }
         break :blk p.n_err == 0;
     };
-    if (ok) {
-        if (s.isOp(";")) {
-            s.advance();
-            p.tail = sql[@intFromPtr(s.prev_end) - @intFromPtr(sql.ptr) ..];
-        } else p.tail = sql[sql.len..];
-        ir.stmt.finishCoding(p);
-    } else {
+    if (!ok) {
         p.tail = sql[sql.len..];
-    }
-    if (p.new_table) |t| if (!p.inSpecialParse()) {
-        build.deleteTable(db, t);
-        p.new_table = null;
-    };
-    if (p.n_err > 0 or p.err_msg != null or (p.rc != int.RC.OK and p.rc != int.RC.DONE)) {
-        if (p.err_msg == null) {
-            p.err_msg = try p.arena.dupeSentinel(u8, @import("../../sql/util.zig").errStr(if (p.rc == int.RC.OK or p.rc == int.RC.DONE) int.RC.ERROR else p.rc), 0);
-        }
-        if (p.rc == int.RC.OK or p.rc == int.RC.DONE) p.rc = int.RC.ERROR;
         return error.ParseFailed;
     }
+    if (s.isOp(";")) {
+        s.advance();
+        p.tail = sql[@intFromPtr(s.prev_end) - @intFromPtr(sql.ptr) ..];
+    } else p.tail = sql[sql.len..];
+    ir.stmt.finishCoding(p);
 }
 
 /// SHOW WARNINGS and friends look at the warnings of the statement
 /// before.
 fn keepsWarnings(s: *Parser) bool {
     const n = s.peek();
-    if (s.isKw("SHOW")) return n.isKw("WARNINGS") or n.isKw("ERRORS") or n.isKw("COUNT");
+    if (s.isKw("SHOW")) return n.isAnyKw(&.{ "WARNINGS", "ERRORS", "COUNT" });
     if (s.isKw("SELECT") and n.kind == .sys_var) {
         return std.ascii.endsWithIgnoreCase(n.text, "warning_count") or std.ascii.endsWithIgnoreCase(n.text, "error_count");
     }
@@ -123,13 +109,13 @@ fn statement(s: *Parser) Error!void {
         s.advance();
         return ddl.renameTableStmt(s);
     }
-    if (t.isKw("START") or t.isKw("BEGIN") or t.isKw("COMMIT") or t.isKw("ROLLBACK") or t.isKw("SAVEPOINT") or t.isKw("RELEASE")) {
+    if (t.isAnyKw(&.{ "START", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE" })) {
         return session.transaction(s);
     }
     if (t.isKw("SET")) return session.set(s);
     if (t.isKw("SHOW")) return session.show(s);
     if (t.isKw("USE")) return session.use(s);
-    if (t.isKw("DESCRIBE") or t.isKw("DESC") or t.isKw("EXPLAIN")) {
+    if (t.isAnyKw(&.{ "DESCRIBE", "DESC", "EXPLAIN" })) {
         if (try session.describe(s)) return;
         s.advance();
         while (s.eatKw("EXTENDED") or s.eatKw("PARTITIONS") or s.eatKw("ANALYZE")) {}
@@ -139,10 +125,6 @@ fn statement(s: *Parser) Error!void {
         }
         ir.stmt.setExplain(s.p, 2);
         return statement(s);
-    }
-    if (t.isKw("PRAGMA") or t.isKw("ATTACH") or t.isKw("DETACH") or t.isKw("VACUUM") or t.isKw("REINDEX")) {
-        // SQLite commands (xqlite extensions of the dialect).
-        return session.pragma(s);
     }
     if (t.isKw("LOCK") or t.isKw("UNLOCK")) return session.lockTables(s);
     if (t.isKw("DO")) {
@@ -173,7 +155,7 @@ fn create(s: *Parser) Error!void {
         if (unique) return s.syntaxError();
     }
     // View options.
-    while (s.isKw("ALGORITHM") or s.isKw("DEFINER") or s.isKw("SQL")) {
+    while (s.isAnyKw(&.{ "ALGORITHM", "DEFINER", "SQL" })) {
         if (s.eatKw("SQL")) {
             try s.expectKw("SECURITY");
             _ = try s.anyName();
@@ -186,7 +168,7 @@ fn create(s: *Parser) Error!void {
     }
     if (s.isKw("VIEW")) return ddl.createView(s, or_replace, temp);
     if (s.isKw("DATABASE") or s.isKw("SCHEMA")) return s.fail("xqlite: CREATE DATABASE is not supported (use ATTACH)", .{});
-    if (s.isKw("TRIGGER") or s.isKw("PROCEDURE") or s.isKw("FUNCTION") or s.isKw("EVENT")) {
+    if (s.isAnyKw(&.{ "TRIGGER", "PROCEDURE", "FUNCTION", "EVENT" })) {
         return s.fail("xqlite: CREATE {s} is not supported in the MariaDB dialect", .{s.tok.text});
     }
     return s.syntaxError();
@@ -320,15 +302,16 @@ fn versionFunc(ctx: *dfunc.Context, _: []*dfunc.Mem) void {
 
 /// CONCAT(str, ...): the arguments as text, NULL if any is NULL.
 fn concatFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
-    const db = api.contextDbHandle(ctx);
+    if (dfunc.anyNull(argv)) return api.resultNull(ctx);
+    const gpa = dfunc.gpa(ctx);
     var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(db.gpa);
+    // Empty once resultOwned() has it.
+    defer out.deinit(gpa);
     for (argv) |m| {
-        if (api.valueType(m) == vi.SQLITE_NULL) return api.resultNull(ctx);
-        const z = api.valueText(m) orelse return api.resultErrorNomem(ctx);
-        out.appendSlice(db.gpa, z) catch return api.resultErrorNomem(ctx);
+        const z = dfunc.text(ctx, m) orelse return;
+        out.appendSlice(gpa, z) catch return api.resultErrorNomem(ctx);
     }
-    api.resultText(ctx, out.items, .transient);
+    dfunc.resultOwned(ctx, &out);
 }
 
 /// LASTVAL(seq): the value NEXTVAL(seq) last returned on this connection,

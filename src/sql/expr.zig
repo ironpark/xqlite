@@ -1117,7 +1117,15 @@ pub fn binaryCompareP5(e1: *const Expr, e2: *const Expr, jump_if_null: u16) u16 
 pub fn binaryCompareCollSeq(p: *Parse, left: *const Expr, right: ?*const Expr) ?*const CollSeq {
     if (left.flags.Collate) return collSeq(p, left);
     if (right) |r| if (r.flags.Collate) return collSeq(p, r);
-    return collSeq(p, left) orelse collSeq(p, right);
+    // xqlite: no collation is the default one of the connection's
+    // dialect (none, BINARY, in the SQLite dialect).
+    return collSeq(p, left) orelse collSeq(p, right) orelse coll_mod.dialectColl(p.db);
+}
+
+/// collSeq() of the left operand of an IN with a list (no right operand
+/// for binaryCompareCollSeq()), with the dialect default (xqlite).
+pub fn inCollSeq(p: *Parse, left: ?*const Expr) ?*const CollSeq {
+    return collSeq(p, left) orelse coll_mod.dialectColl(p.db);
 }
 
 /// Port of sqlite3ExprCompareCollSeq().

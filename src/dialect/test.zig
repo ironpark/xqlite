@@ -149,7 +149,7 @@ fn ddlFrontendRun(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!
     if (p.rc != RC.DONE) return error.ParseFailed;
 }
 
-const ddl_frontend: dialect.Frontend = .{ .name = "test-ddl", .run = ddlFrontendRun };
+const ddl_frontend: dialect.Frontend = .{ .run = ddlFrontendRun };
 
 test "dialect: DDL lowered as SQLite text, with catalog entries in the same statement" {
     var c: Conn = undefined;

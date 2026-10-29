@@ -242,7 +242,7 @@ pub fn update(s: *Parser) Error!void {
     const n1, const n2 = try s.qualifiedName();
     var al: int.Token = .{};
     if (s.eatKw("AS")) al = irTok(try s.name()) else if (s.isName()) al = irTok(try s.name());
-    if (s.isOp(",") or s.isKw("JOIN") or s.isKw("INNER") or s.isKw("LEFT") or s.isKw("RIGHT") or s.isKw("CROSS") or s.isKw("STRAIGHT_JOIN")) {
+    if (s.isOp(",") or s.isAnyKw(&.{ "JOIN", "INNER", "LEFT", "RIGHT", "CROSS", "STRAIGHT_JOIN" })) {
         return s.fail("xqlite: multi-table UPDATE is not supported", .{});
     }
     const t = try s.target(n1, n2);

@@ -25,6 +25,7 @@ const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
 const state_mod = @import("state.zig");
+const Quoted = @import("../dialect.zig").Quoted;
 
 pub const Base = enum {
     tinyint,
@@ -73,13 +74,6 @@ pub const Base = enum {
     pub fn isBinary(b: Base) bool {
         return switch (b) {
             .binary, .varbinary, .tinyblob, .blob, .mediumblob, .longblob => true,
-            else => false,
-        };
-    }
-
-    pub fn isTemporal(b: Base) bool {
-        return switch (b) {
-            .date, .datetime, .timestamp, .time => true,
             else => false,
         };
     }
@@ -156,12 +150,7 @@ pub const Type = struct {
                 try w.writeByte('(');
                 for (t.members, 0..) |m, i| {
                     if (i > 0) try w.writeByte(',');
-                    try w.writeByte('\'');
-                    for (m) |c| {
-                        if (c == '\'') try w.writeByte('\'');
-                        try w.writeByte(c);
-                    }
-                    try w.writeByte('\'');
+                    try w.print("{f}", .{Quoted('\''){ .z = m }});
                 }
                 try w.writeByte(')');
             },
@@ -279,7 +268,8 @@ pub fn coerceFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
     var buf: [4096]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
     const type_text = api.valueText(argv[1]) orelse return api.resultValue(ctx, v);
-    const t = (parse(fba.allocator(), type_text) catch null) orelse return api.resultValue(ctx, v);
+    const t = cachedType(ctx, type_text) orelse
+        (parse(fba.allocator(), type_text) catch null) orelse return api.resultValue(ctx, v);
     var c: Coercion = .{
         .ctx = ctx,
         .st = st,
@@ -304,6 +294,47 @@ pub fn coerceFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
         return implicitDefault(ctx, t);
     }
     c.run(t, v);
+}
+
+/// The type argument of xq_coerce() parsed, kept with the statement
+/// (sqlite3_set_auxdata()) for the rows after the first: the frontend
+/// passes a constant.
+const ParsedType = struct {
+    arena: std.heap.ArenaAllocator,
+    text: []const u8,
+    t: ?Type,
+
+    fn destroy(pt: *ParsedType) void {
+        const gpa = pt.arena.child_allocator;
+        pt.arena.deinit();
+        gpa.destroy(pt);
+    }
+};
+
+const type_arg = 1;
+
+/// The type `text` (argument type_arg) parsed once per statement; null if
+/// it is not a type or on OOM (then the caller parses it itself).
+fn cachedType(ctx: *dfunc.Context, text: []const u8) ?Type {
+    if (api.getAuxdataTyped(ctx, type_arg, ParsedType.destroy)) |pt| {
+        if (std.mem.eql(u8, pt.text, text)) return pt.t;
+    }
+    const gpa = dfunc.gpa(ctx);
+    const pt = gpa.create(ParsedType) catch return null;
+    pt.arena = .init(gpa);
+    const a = pt.arena.allocator();
+    pt.text = a.dupe(u8, text) catch {
+        pt.destroy();
+        return null;
+    };
+    pt.t = parse(a, text) catch {
+        pt.destroy();
+        return null;
+    };
+    api.setAuxdataTyped(ctx, type_arg, ParsedType.destroy, pt);
+    // Outside a statement (or on OOM) setAuxdata() has freed it.
+    const kept = api.getAuxdataTyped(ctx, type_arg, ParsedType.destroy) orelse return null;
+    return kept.t;
 }
 
 /// The value MariaDB stores for a NULL it cannot store (INSERT IGNORE
@@ -534,9 +565,9 @@ const Coercion = struct {
         var z: []const u8 = (if (api.valueType(v) == vi.SQLITE_BLOB) api.valueBlob(v) else api.valueText(v)) orelse "";
         const max = t.maxLen().?;
         const by_chars = t.base == .char or t.base == .varchar;
-        const n = if (by_chars) utf8Count(z) else z.len;
+        const n = if (by_chars) dfunc.charCount(z) else z.len;
         if (n > max) {
-            const cut = if (by_chars) utf8Prefix(z, max) else utf8Floor(z, max);
+            const cut = if (by_chars) dfunc.charOffset(z, max) else utf8Floor(z, max);
             const all_spaces = std.mem.trimEnd(u8, z[cut..], " ").len == 0;
             if (all_spaces) {
                 c.st.warn(.note, 1265, "Data truncated for column '{s}' at row {d}", .{ c.col, c.row });
@@ -745,26 +776,6 @@ pub fn parseNumber(z_in: []const u8) ParsedNumber {
     }
     const f = std.fmt.parseFloat(f64, text) catch 0;
     return .{ .num = .{ .float = f }, .len = i, .clean = clean };
-}
-
-fn utf8Count(z: []const u8) usize {
-    var n: usize = 0;
-    for (z) |c| {
-        if (c & 0xc0 != 0x80) n += 1;
-    }
-    return n;
-}
-
-/// The byte length of the first `n` characters of `z`.
-fn utf8Prefix(z: []const u8, n: u64) usize {
-    var count: u64 = 0;
-    for (z, 0..) |c, i| {
-        if (c & 0xc0 != 0x80) {
-            if (count == n) return i;
-            count += 1;
-        }
-    }
-    return z.len;
 }
 
 /// At most `n` bytes of `z`, not cutting a character.

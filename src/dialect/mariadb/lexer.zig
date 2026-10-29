@@ -61,6 +61,11 @@ pub const Token = struct {
         return t.kind == .ident and std.ascii.eqlIgnoreCase(t.text, kw);
     }
 
+    pub fn isAnyKw(t: Token, comptime kws: []const []const u8) bool {
+        inline for (kws) |kw| if (t.isKw(kw)) return true;
+        return false;
+    }
+
     pub fn end(t: Token) [*]const u8 {
         return t.text.ptr + t.text.len;
     }
@@ -136,12 +141,6 @@ pub const Lexer = struct {
 
     fn skipLine(lx: *Lexer) void {
         while (lx.sql[lx.pos] != 0 and lx.sql[lx.pos] != '\n') lx.pos += 1;
-    }
-
-    /// Whether only spaces and comments are left.
-    pub fn atEnd(lx: *Lexer) bool {
-        var copy = lx.*;
-        return copy.next().kind == .eof;
     }
 
     pub fn next(lx: *Lexer) Token {
@@ -307,9 +306,8 @@ pub fn isIdentStart(c: u8) bool {
     return std.ascii.isAlphabetic(c) or c == '_' or c == '$' or c >= 0x80;
 }
 
-pub fn isIdentChar(c: u8) bool {
-    return isIdentStart(c) or std.ascii.isDigit(c);
-}
+/// isIdentStart() and digits.
+pub const isIdentChar = @import("../../util/ctype.zig").isIdChar;
 
 /// The name an identifier token stands for: the word itself, or the
 /// text between the quotes with doubled quotes undone (in `a` if any).

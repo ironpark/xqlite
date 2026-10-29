@@ -47,6 +47,7 @@ const parser = @import("parser.zig");
 const lexer = @import("lexer.zig");
 const types = @import("types.zig");
 const session = @import("session.zig");
+const functions = @import("functions.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -107,13 +108,7 @@ const Table = struct {
 
 pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
     try s.expectKw("TABLE");
-    var if_not_exists = false;
-    if (s.isKw("IF")) {
-        s.advance();
-        try s.expectKw("NOT");
-        try s.expectKw("EXISTS");
-        if_not_exists = true;
-    }
+    const if_not_exists = try s.ifNotExists();
     const n1, const n2 = try s.qualifiedName();
     const name = try s.tokName(if (n2.n != 0) n2 else n1);
     const schema: []const u8 = if (temp) "temp" else if (n2.n != 0) try s.tokName(n1) else "main";
@@ -134,7 +129,7 @@ pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
         ir.ddl.startTable(s.p, n1, n2, temp, false, false, if_not_exists);
         ir.ddl.endTable(s.p, null, null, .{}, sel);
         try s.check();
-        catalog.codeSet(s.p, schema, name, "", catalog.Key.dialect, "mariadb");
+        catalog.codeSet(s.p, schema, name, dialect_entry.col, dialect_entry.key, dialect_entry.value);
         return;
     }
     try s.expectOp("(");
@@ -525,7 +520,7 @@ fn intArg(s: *Parser) Error!u32 {
 /// DEFAULT literal | (expr) | CURRENT_TIMESTAMP[(n)] | NOW() ...
 fn defaultValue(s: *Parser, c: *Column) Error!void {
     const t = s.tok;
-    if (t.isKw("CURRENT_TIMESTAMP") or t.isKw("NOW") or t.isKw("LOCALTIMESTAMP") or t.isKw("LOCALTIME")) {
+    if (t.isAnyKw(&.{ "CURRENT_TIMESTAMP", "NOW", "LOCALTIMESTAMP", "LOCALTIME" })) {
         s.advance();
         if (s.eatOp("(")) {
             if (s.tok.kind == .integer) s.advance();
@@ -814,47 +809,42 @@ fn codeTableExtras(s: *Parser, t: *Table, schema: []const u8, name: []const u8) 
         w.print("INSERT INTO {f}.sqlite_sequence(name,seq) VALUES({f},{d});", .{ Id{ .z = schema }, Q{ .z = name }, n - 1 }) catch return error.OutOfMemory;
     };
     // The catalog.
-    w.print(catalog_ddl ++ ";INSERT OR REPLACE INTO {f}.xq_catalog VALUES({f},'','dialect','mariadb')", .{ Id{ .z = schema }, Id{ .z = schema }, Q{ .z = name } }) catch return error.OutOfMemory;
+    var entries: std.ArrayList(catalog.Entry) = .empty;
+    try entries.append(s.a, dialect_entry);
     for (t.columns.items) |c| {
-        try catalogColumn(s, w, schema, name, &c);
+        try catalogColumn(s, &entries, &c);
     }
     if (t.default_collation_name) |cn| {
-        w.print(",({f},'','collation',{f})", .{ Q{ .z = name }, Q{ .z = cn } }) catch return error.OutOfMemory;
+        try entries.append(s.a, .{ .col = "", .key = catalog.Key.collation, .value = cn });
     }
+    catalog.writeSetAll(w, schema, name, entries.items) catch return error.OutOfMemory;
     w.writeByte(';') catch return error.OutOfMemory;
     const text = try sql.toOwnedSliceSentinel(0);
     const i_db = catalog.schemaIndex(s.p, schema) orelse return error.ParseFailed;
     catalog.codeExec(s.p, i_db, text);
 }
 
-const catalog_ddl = "CREATE TABLE IF NOT EXISTS {f}.xq_catalog(tbl TEXT NOT NULL,col TEXT NOT NULL,key TEXT NOT NULL,value,PRIMARY KEY(tbl,col,key))WITHOUT ROWID";
+/// The catalog entry of a table the MariaDB dialect created.
+const dialect_entry: catalog.Entry = .{ .col = "", .key = catalog.Key.dialect, .value = "mariadb" };
 
-fn catalogColumn(s: *Parser, w: *Writer, schema: []const u8, table: []const u8, c: *const Column) Error!void {
-    _ = schema;
+/// The catalog entries of column `c`.
+fn catalogColumn(s: *Parser, list: *std.ArrayList(catalog.Entry), c: *const Column) Error!void {
     var tbuf: [512]u8 = undefined;
     var tw: Writer = .fixed(&tbuf);
     c.type.format(&tw) catch return s.fail("xqlite: column type too long", .{});
-    const ty = tw.buffered();
-    const T = Q{ .z = table };
-    const C = Q{ .z = c.name };
-    w.print(",({f},{f},'type',{f})", .{ T, C, Q{ .z = ty } }) catch return error.OutOfMemory;
-    if (c.collation_name) |cn| w.print(",({f},{f},'collation',{f})", .{ T, C, Q{ .z = cn } }) catch return error.OutOfMemory;
-    if (c.default_shown) |d| w.print(",({f},{f},'default',{f})", .{ T, C, Q{ .z = d } }) catch return error.OutOfMemory;
-    if (c.autoinc) w.print(",({f},{f},'mariadb.auto_increment','1')", .{ T, C }) catch return error.OutOfMemory;
-    if (c.on_update) w.print(",({f},{f},'mariadb.on_update','current_timestamp()')", .{ T, C }) catch return error.OutOfMemory;
+    const ty = try s.a.dupe(u8, tw.buffered());
+    try list.append(s.a, .{ .col = c.name, .key = catalog.Key.decl_type, .value = ty });
+    if (c.collation_name) |cn| try list.append(s.a, .{ .col = c.name, .key = catalog.Key.collation, .value = cn });
+    if (c.default_shown) |d| try list.append(s.a, .{ .col = c.name, .key = catalog.Key.default, .value = d });
+    if (c.autoinc) try list.append(s.a, .{ .col = c.name, .key = "mariadb.auto_increment", .value = "1" });
+    if (c.on_update) try list.append(s.a, .{ .col = c.name, .key = "mariadb.on_update", .value = "current_timestamp()" });
 }
 
 // ====================================================== CREATE INDEX
 
 pub fn createIndex(s: *Parser, unique: bool) Error!void {
     try s.expectKw("INDEX");
-    var if_not_exists = false;
-    if (s.isKw("IF")) {
-        s.advance();
-        try s.expectKw("NOT");
-        try s.expectKw("EXISTS");
-        if_not_exists = true;
-    }
+    const if_not_exists = try s.ifNotExists();
     const iname = try s.nameText(try s.name());
     try indexType(s);
     try s.expectKw("ON");
@@ -875,7 +865,7 @@ pub fn createIndex(s: *Parser, unique: bool) Error!void {
     w.print("CREATE {s}INDEX {s}{f}.{f} ON {f}(", .{
         if (unique) "UNIQUE " else "",
         if (if_not_exists) "IF NOT EXISTS " else "",
-        Id{ .z = tableSchema(s, tab) },
+        Id{ .z = catalog.schemaName(s.p.db, tab) },
         Id{ .z = try sqliteIndexName(s.a, tab.name, iname) },
         Id{ .z = tab.name },
     }) catch return error.OutOfMemory;
@@ -887,20 +877,10 @@ pub fn createIndex(s: *Parser, unique: bool) Error!void {
     try session.lowerText(s, try out.toOwnedSliceSentinel(0));
 }
 
-fn tableSchema(s: *Parser, tab: *int.Table) []const u8 {
-    const sch = tab.schema orelse return "main";
-    return s.p.db.dbs.items[@intCast(@import("../../sql/prepare.zig").schemaToIndex(s.p.db, sch))].name;
-}
-
 /// DROP INDEX [IF EXISTS] i ON t.
 pub fn dropIndex(s: *Parser) Error!void {
     try s.expectKw("INDEX");
-    var if_exists = false;
-    if (s.isKw("IF")) {
-        s.advance();
-        try s.expectKw("EXISTS");
-        if_exists = true;
-    }
+    const if_exists = try s.ifExists();
     const iname = try s.nameText(try s.anyName());
     if (!s.eatKw("ON")) return s.fail("xqlite: DROP INDEX needs ON table", .{});
     const n1, const n2 = try s.qualifiedName();
@@ -927,12 +907,7 @@ pub fn dropIndex(s: *Parser) Error!void {
 /// DROP [TEMPORARY] TABLE [IF EXISTS] t [, t2 ...] [RESTRICT|CASCADE].
 pub fn dropTable(s: *Parser, view: bool) Error!void {
     s.advance(); // TABLE / VIEW
-    var if_exists = false;
-    if (s.isKw("IF")) {
-        s.advance();
-        try s.expectKw("EXISTS");
-        if_exists = true;
-    }
+    const if_exists = try s.ifExists();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     var n: usize = 0;
     while (true) {
@@ -947,7 +922,7 @@ pub fn dropTable(s: *Parser, view: bool) Error!void {
         const src = try ir.from.fullName(s.p, n1, n2, .{});
         ir.ddl.dropTable(s.p, src, view, if_exists);
         try s.check();
-        if (tab) |x| catalog.codeDeleteTable(s.p, tableSchema(s, x), try s.a.dupe(u8, x.name));
+        if (tab) |x| catalog.codeDeleteTable(s.p, catalog.schemaName(s.p.db, x), try s.a.dupe(u8, x.name));
         n += 1;
         if (!s.eatOp(",")) break;
     }
@@ -960,13 +935,7 @@ pub fn dropTable(s: *Parser, view: bool) Error!void {
 /// [IF NOT EXISTS] v [(cols)] AS select [WITH CHECK OPTION].
 pub fn createView(s: *Parser, or_replace: bool, temp: bool) Error!void {
     try s.expectKw("VIEW");
-    var if_not_exists = false;
-    if (s.isKw("IF")) {
-        s.advance();
-        try s.expectKw("NOT");
-        try s.expectKw("EXISTS");
-        if_not_exists = true;
-    }
+    const if_not_exists = try s.ifNotExists();
     const n1, const n2 = try s.qualifiedName();
     const vname = try s.tokName(if (n2.n != 0) n2 else n1);
     const schema: []const u8 = if (temp) "temp" else if (n2.n != 0) try s.tokName(n1) else "main";
@@ -1011,13 +980,7 @@ pub fn createView(s: *Parser, or_replace: bool, temp: bool) Error!void {
 /// CREATE [OR REPLACE] SEQUENCE [IF NOT EXISTS] s [options] (MariaDB 10.3).
 pub fn createSequence(s: *Parser) Error!void {
     try s.expectKw("SEQUENCE");
-    var if_not_exists = false;
-    if (s.isKw("IF")) {
-        s.advance();
-        try s.expectKw("NOT");
-        try s.expectKw("EXISTS");
-        if_not_exists = true;
-    }
+    const if_not_exists = try s.ifNotExists();
     const n1, const n2 = try s.qualifiedName();
     const name = try s.tokName(if (n2.n != 0) n2 else n1);
     const schema: []const u8 = if (n2.n != 0) try s.tokName(n1) else "main";
@@ -1066,12 +1029,7 @@ fn signedInt(s: *Parser) Error!i64 {
 /// DROP SEQUENCE [IF EXISTS] s.
 pub fn dropSequence(s: *Parser) Error!void {
     try s.expectKw("SEQUENCE");
-    var if_exists = false;
-    if (s.isKw("IF")) {
-        s.advance();
-        try s.expectKw("EXISTS");
-        if_exists = true;
-    }
+    const if_exists = try s.ifExists();
     const n1, const n2 = try s.qualifiedName();
     const name = try s.tokName(if (n2.n != 0) n2 else n1);
     const schema: []const u8 = if (n2.n != 0) try s.tokName(n1) else "main";
@@ -1097,11 +1055,11 @@ pub fn alterTable(s: *Parser) Error!void {
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const tab = build.findTable(s.p.db, tname, schema_q) orelse return s.fail("Table '{s}' doesn't exist", .{tname});
     const real = try s.a.dupe(u8, tab.name);
-    const schema = tableSchema(s, tab);
+    const schema = catalog.schemaName(s.p.db, tab);
     const T = Id{ .z = real };
     const S = Id{ .z = schema };
     if (s.eatKw("ADD")) {
-        if (s.isKw("INDEX") or s.isKw("KEY") or s.isKw("UNIQUE") or s.isKw("FULLTEXT") or s.isKw("SPATIAL")) {
+        if (s.isAnyKw(&.{ "INDEX", "KEY", "UNIQUE", "FULLTEXT", "SPATIAL" })) {
             var t: Table = .{};
             try createDefinition(s, &t);
             const ix = t.indexes.items[0];
@@ -1117,15 +1075,11 @@ pub fn alterTable(s: *Parser) Error!void {
             try session.lowerText(s, try out.toOwnedSliceSentinel(0));
             return endAlter(s);
         }
-        if (s.isKw("PRIMARY") or s.isKw("CONSTRAINT") or s.isKw("FOREIGN") or s.isKw("CHECK")) {
+        if (s.isAnyKw(&.{ "PRIMARY", "CONSTRAINT", "FOREIGN", "CHECK" })) {
             return s.fail("xqlite: ALTER TABLE ADD {s} is not supported", .{s.tok.text});
         }
         _ = s.eatKw("COLUMN");
-        if (s.isKw("IF")) {
-            s.advance();
-            try s.expectKw("NOT");
-            try s.expectKw("EXISTS");
-        }
+        _ = try s.ifNotExists();
         var t: Table = .{};
         try columnDefinition(s, &t);
         if (s.eatKw("FIRST")) {} else if (s.eatKw("AFTER")) _ = try s.anyName();
@@ -1137,11 +1091,11 @@ pub fn alterTable(s: *Parser) Error!void {
         w.print("ALTER TABLE {f}.{f} ADD COLUMN ", .{ S, T }) catch return error.OutOfMemory;
         renderColumn(w, c, false) catch return error.OutOfMemory;
         try session.lowerText(s, try out.toOwnedSliceSentinel(0));
-        var cat: Writer.Allocating = .init(s.a);
-        cat.writer.print(catalog_ddl ++ ";INSERT OR REPLACE INTO {f}.xq_catalog VALUES({f},'','dialect','mariadb')", .{ S, S, Q{ .z = real } }) catch return error.OutOfMemory;
-        try catalogColumn(s, &cat.writer, schema, real, c);
-        cat.writer.writeByte(';') catch return error.OutOfMemory;
-        catalog.codeExec(s.p, catalog.schemaIndex(s.p, schema) orelse return error.ParseFailed, try cat.toOwnedSliceSentinel(0));
+        var entries: std.ArrayList(catalog.Entry) = .empty;
+        try entries.append(s.a, dialect_entry);
+        try catalogColumn(s, &entries, c);
+        catalog.codeSetAll(s.p, schema, real, entries.items);
+        try s.check();
         return endAlter(s);
     }
     if (s.eatKw("DROP")) {
@@ -1152,15 +1106,13 @@ pub fn alterTable(s: *Parser) Error!void {
             try session.lowerText(s, try std.fmt.allocPrintSentinel(s.a, "DROP INDEX {f}.{f}", .{ S, Id{ .z = idx } }, 0));
             return endAlter(s);
         }
-        if (s.isKw("PRIMARY") or s.isKw("FOREIGN") or s.isKw("CONSTRAINT") or s.isKw("CHECK")) {
+        if (s.isAnyKw(&.{ "PRIMARY", "FOREIGN", "CONSTRAINT", "CHECK" })) {
             return s.fail("xqlite: ALTER TABLE DROP {s} is not supported", .{s.tok.text});
         }
         _ = s.eatKw("COLUMN");
         const c = try s.nameText(try s.anyName());
         try session.lowerText(s, try std.fmt.allocPrintSentinel(s.a, "ALTER TABLE {f}.{f} DROP COLUMN {f}", .{ S, T, Id{ .z = c } }, 0));
-        if (catalog.exists(s.p.db, schema)) {
-            catalog.codeExecFmt(s.p, schema, "DELETE FROM %Q.xq_catalog WHERE tbl=%Q AND col=%Q", &.{ .{ .str = schema }, .{ .str = real }, .{ .str = c } });
-        }
+        catalog.codeDeleteColumn(s.p, schema, real, c);
         return endAlter(s);
     }
     if (s.eatKw("RENAME")) {
@@ -1169,9 +1121,7 @@ pub fn alterTable(s: *Parser) Error!void {
             try s.expectKw("TO");
             const b = try s.nameText(try s.anyName());
             try session.lowerText(s, try std.fmt.allocPrintSentinel(s.a, "ALTER TABLE {f}.{f} RENAME COLUMN {f} TO {f}", .{ S, T, Id{ .z = a }, Id{ .z = b } }, 0));
-            if (catalog.exists(s.p.db, schema)) {
-                catalog.codeExecFmt(s.p, schema, "UPDATE %Q.xq_catalog SET col=%Q WHERE tbl=%Q AND col=%Q", &.{ .{ .str = schema }, .{ .str = b }, .{ .str = real }, .{ .str = a } });
-            }
+            catalog.codeRenameColumn(s.p, schema, real, a, b);
             return endAlter(s);
         }
         if (s.isKw("INDEX") or s.isKw("KEY")) return s.fail("xqlite: ALTER TABLE RENAME INDEX is not supported", .{});
@@ -1186,7 +1136,7 @@ pub fn alterTable(s: *Parser) Error!void {
         try s.expectKw("KEYS");
         return session.emptyStatement(s);
     }
-    if (s.isKw("ENGINE") or s.isKw("DEFAULT") or s.isKw("CHARSET") or s.isKw("CHARACTER") or s.isKw("COMMENT") or s.isKw("AUTO_INCREMENT") or s.isKw("CONVERT")) {
+    if (s.isAnyKw(&.{ "ENGINE", "DEFAULT", "CHARSET", "CHARACTER", "COMMENT", "AUTO_INCREMENT", "CONVERT" })) {
         if (s.isKw("CONVERT")) {
             while (!s.atStmtEnd()) s.advance();
         } else try tableOptions(s, null);
@@ -1216,7 +1166,7 @@ pub fn renameTableStmt(s: *Parser) Error!void {
     const tab = build.findTable(s.p.db, tname, if (n2.n != 0) try s.tokName(n1) else null) orelse
         return s.fail("Table '{s}' doesn't exist", .{tname});
     const new = try s.tokName(if (m2.n != 0) m2 else m1);
-    try renameTable(s, tableSchema(s, tab), try s.a.dupe(u8, tab.name), new);
+    try renameTable(s, catalog.schemaName(s.p.db, tab), try s.a.dupe(u8, tab.name), new);
 }
 
 // ======================================================= translation
@@ -1276,7 +1226,7 @@ pub fn translateRange(s: *Parser, start: [*]const u8, end: [*]const u8) Error![]
             .ident => {
                 if (next_tok.is("(")) {
                     try out.appendSlice(s.a, functionName(t.text));
-                } else if (t.isKw("DIV") or t.isKw("XOR") or t.isKw("INTERVAL")) {
+                } else if (t.isAnyKw(&.{ "DIV", "XOR", "INTERVAL" })) {
                     return s.fail("xqlite: {s} is not supported in stored expressions", .{t.text});
                 } else if (t.isKw("MOD")) {
                     try out.appendSlice(s.a, "%");
@@ -1289,13 +1239,11 @@ pub fn translateRange(s: *Parser, start: [*]const u8, end: [*]const u8) Error![]
                     try out.appendSlice(s.a, if (prev != null and prev.?.isKw("SELECT")) "" else "CROSS JOIN");
                 } else if (t.isKw("DISTINCTROW")) {
                     try out.appendSlice(s.a, "DISTINCT");
-                } else if (t.isKw("SQL_CALC_FOUND_ROWS") or t.isKw("SQL_NO_CACHE") or t.isKw("SQL_CACHE") or
-                    t.isKw("HIGH_PRIORITY") or t.isKw("SQL_SMALL_RESULT") or t.isKw("SQL_BIG_RESULT") or t.isKw("SQL_BUFFER_RESULT"))
-                {} else if (t.isKw("FROM") and next_tok.isKw("DUAL")) {
+                } else if (t.isAnyKw(&.{ "SQL_CALC_FOUND_ROWS", "SQL_NO_CACHE", "SQL_CACHE", "HIGH_PRIORITY", "SQL_SMALL_RESULT", "SQL_BIG_RESULT", "SQL_BUFFER_RESULT" })) {} else if (t.isKw("FROM") and next_tok.isKw("DUAL")) {
                     _ = lx.next();
                 } else if (t.isKw("TRUE") or t.isKw("FALSE")) {
                     try out.appendSlice(s.a, if (t.isKw("TRUE")) "1" else "0");
-                } else if ((t.isKw("CURRENT_TIMESTAMP") or t.isKw("LOCALTIMESTAMP") or t.isKw("LOCALTIME")) and !next_tok.is("(")) {
+                } else if (t.isAnyKw(&.{ "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "LOCALTIME" }) and !next_tok.is("(")) {
                     try out.appendSlice(s.a, "CURRENT_TIMESTAMP");
                 } else if (t.text[0] == '_' and next_tok.kind == .string) {
                     // A character set introducer.
@@ -1308,15 +1256,16 @@ pub fn translateRange(s: *Parser, start: [*]const u8, end: [*]const u8) Error![]
     return out.items;
 }
 
-/// SQLite's name for a MariaDB function in stored text.
+/// SQLite's name for a MariaDB function in stored text: the renames of
+/// queries, and the names of what queries rewrite (functions.zig) when
+/// renaming does the same.
 fn functionName(n: []const u8) []const u8 {
+    if (functions.renames.get(n)) |to| return to;
     const map = [_]struct { []const u8, []const u8 }{
-        .{ "ucase", "upper" },        .{ "lcase", "lower" },                      .{ "length", "octet_length" },
-        .{ "char_length", "length" }, .{ "character_length", "length" },          .{ "mid", "substr" },
-        .{ "substring", "substr" },   .{ "now", "datetime" },                     .{ "greatest", "max" },
-        .{ "least", "min" },          .{ "last_insert_id", "last_insert_rowid" }, .{ "curdate", "date" },
-        .{ "curtime", "time" },       .{ "sysdate", "datetime" },                 .{ "utc_timestamp", "datetime" },
-        .{ "utc_date", "date" },      .{ "utc_time", "time" },
+        .{ "now", "datetime" },     .{ "greatest", "max" },                     .{ "least", "min" },
+        .{ "curdate", "date" },     .{ "last_insert_id", "last_insert_rowid" }, .{ "curtime", "time" },
+        .{ "sysdate", "datetime" }, .{ "utc_timestamp", "datetime" },           .{ "utc_date", "date" },
+        .{ "utc_time", "time" },
     };
     for (map) |m| if (std.ascii.eqlIgnoreCase(n, m[0])) return m[1];
     return n;
@@ -1339,35 +1288,21 @@ pub fn showCreateTable(s: *Parser, tab: *int.Table, schema: []const u8) Error![]
         defer q.deinit();
         if (q.step() catch false) sqlite_sql = try s.a.dupe(u8, api.columnText(q.v, 0) orelse "");
     }
-    if (catalog.exists(s.p.db, schema)) {
-        var q = catalog.Query.initFmt(s.p.db, "SELECT col, key, value FROM %Q.xq_catalog WHERE tbl=%Q", &.{ .{ .str = schema }, .{ .str = tname } }) catch
-            return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)});
-        defer q.deinit();
-        while (q.step() catch false) {
-            const col = try s.a.dupe(u8, api.columnText(q.v, 0) orelse "");
-            const key = api.columnText(q.v, 1) orelse "";
-            const val = try s.a.dupe(u8, api.columnText(q.v, 2) orelse "");
-            const lc = try std.ascii.allocLowerString(s.a, col);
-            if (std.mem.eql(u8, key, "type")) try types_by_col.put(s.a, lc, val);
-            if (std.mem.eql(u8, key, "default")) try defaults.put(s.a, lc, val);
-            if (std.mem.eql(u8, key, "mariadb.auto_increment")) autoinc = col;
-        }
+    const list = catalog.entries(s.p.db, s.a, schema, tname) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+    };
+    for (list) |e| {
+        const lc = try std.ascii.allocLowerString(s.a, e.col);
+        if (std.mem.eql(u8, e.key, catalog.Key.decl_type)) try types_by_col.put(s.a, lc, e.value);
+        if (std.mem.eql(u8, e.key, catalog.Key.default)) try defaults.put(s.a, lc, e.value);
+        if (std.mem.eql(u8, e.key, "mariadb.auto_increment")) autoinc = e.col;
     }
     const tab2 = build.findTable(s.p.db, tname, schema) orelse return sqlite_sql;
     if (tab2.isView() or types_by_col.count() == 0) return sqlite_sql;
     var out: Writer.Allocating = .init(s.a);
     const w = &out.writer;
-    const B = struct {
-        z: []const u8,
-        pub fn format(b: @This(), wr: *Writer) Writer.Error!void {
-            try wr.writeByte('`');
-            for (b.z) |c| {
-                if (c == '`') try wr.writeByte('`');
-                try wr.writeByte(c);
-            }
-            try wr.writeByte('`');
-        }
-    };
+    const B = @import("../dialect.zig").Quoted('`');
     w.print("CREATE TABLE {f} (\n", .{B{ .z = tname }}) catch return error.OutOfMemory;
     for (tab2.cols, 0..) |*c, i| {
         if (i > 0) w.writeAll(",\n") catch return error.OutOfMemory;

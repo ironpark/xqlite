@@ -61,8 +61,14 @@ pub fn defaultColl() *const CollSeq {
 /// the dialect of the connection has another default (xqlite; see
 /// dialect.Hooks.default_collation).
 pub fn dfltColl(db: *Sqlite3) *const CollSeq {
-    const name = @import("../dialect/dialect.zig").defaultCollationName(db) orelse return defaultColl();
-    return findCollSeq(db, name, false) orelse defaultColl();
+    return dialectColl(db) orelse defaultColl();
+}
+
+/// xqlite: the default collation of the connection's dialect, null if it
+/// has none (BINARY, as in the SQLite dialect).
+pub fn dialectColl(db: *Sqlite3) ?*const CollSeq {
+    const name = @import("../dialect/dialect.zig").defaultCollationName(db) orelse return null;
+    return findCollSeq(db, name, false);
 }
 
 /// Port of sqlite3FindCollSeq(): the collation named `name`, or the

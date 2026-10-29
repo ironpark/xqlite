@@ -38,6 +38,7 @@ const main_mod = @import("../sql/main.zig");
 const api = @import("../vdbe/api.zig");
 const aux = @import("../vdbe/aux.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
+const Quoted = @import("../dialect/dialect.zig").Quoted;
 
 pub const sequence = @import("sequence.zig");
 
@@ -51,7 +52,13 @@ pub const Error = int.Error;
 pub const table_name = "xq_catalog";
 
 /// The CREATE TABLE of xq_catalog (%Q: the schema name).
-pub const ddl = "CREATE TABLE IF NOT EXISTS %Q.xq_catalog(tbl TEXT NOT NULL,col TEXT NOT NULL,key TEXT NOT NULL,value,PRIMARY KEY(tbl,col,key))WITHOUT ROWID";
+pub const ddl = "CREATE TABLE IF NOT EXISTS %Q" ++ ddl_rest;
+const ddl_rest = ".xq_catalog(tbl TEXT NOT NULL,col TEXT NOT NULL,key TEXT NOT NULL,value,PRIMARY KEY(tbl,col,key))WITHOUT ROWID";
+
+/// A condition on a table name, true for all but xqlite's own tables
+/// (xq_catalog, xq_sequence), to put after the name in SQLite,
+/// PostgreSQL or MariaDB text: `"name" ++ not_catalog_table`.
+pub const not_catalog_table = " NOT IN ('" ++ table_name ++ "','" ++ sequence.table_name ++ "')";
 
 /// The keys xqlite defines. A dialect may add its own, prefixed with its
 /// name and a dot ("pg.", "mariadb.").
@@ -78,6 +85,16 @@ pub const Key = struct {
 /// The name of the main database, the default schema of these
 /// functions.
 pub const main_schema = "main";
+
+/// One entry: the `key` of column `col` ('' for the table itself).
+pub const Entry = struct { col: []const u8, key: []const u8, value: []const u8 };
+
+/// The name of the schema ("main", "temp" or an attached name) of table
+/// `t`.
+pub fn schemaName(db: *Sqlite3, t: *const int.Table) []const u8 {
+    const i = prepare.schemaToIndex(db, t.schema);
+    return if (i < 0) main_schema else db.dbs.items[@intCast(i)].name;
+}
 
 // ===================================================== code generation
 
@@ -119,6 +136,28 @@ pub fn codeSet(p: *Parse, schema: []const u8, tbl: []const u8, col: []const u8, 
     }
 }
 
+/// SQL text that creates the catalog of `schema` if needed and sets the
+/// entries `list` of `tbl`, for a frontend that runs it with other SQL of
+/// its own (codeSetAll() runs it alone).
+pub fn writeSetAll(w: *std.Io.Writer, schema: []const u8, tbl: []const u8, list: []const Entry) std.Io.Writer.Error!void {
+    const S = Quoted('\'');
+    try w.print("CREATE TABLE IF NOT EXISTS {f}" ++ ddl_rest, .{S{ .z = schema }});
+    if (list.len == 0) return;
+    try w.print(";INSERT OR REPLACE INTO {f}.xq_catalog VALUES", .{S{ .z = schema }});
+    for (list, 0..) |e, i| {
+        try w.print("{s}({f},{f},{f},{f})", .{ if (i > 0) "," else "", S{ .z = tbl }, S{ .z = e.col }, S{ .z = e.key }, S{ .z = e.value } });
+    }
+}
+
+/// codeSet() of the entries `list` of `tbl` (one INSERT).
+pub fn codeSetAll(p: *Parse, schema: []const u8, tbl: []const u8, list: []const Entry) void {
+    const i_db = schemaIndex(p, schema) orelse return;
+    var out: std.Io.Writer.Allocating = .init(p.arena);
+    writeSetAll(&out.writer, schema, tbl, list) catch return build.oomFault(p);
+    const sql = out.toOwnedSliceSentinel(0) catch return build.oomFault(p);
+    codeExec(p, i_db, sql);
+}
+
 /// Remove every entry of `tbl` (after DROP TABLE), when the statement
 /// runs. Codes nothing if there is no catalog.
 pub fn codeDeleteTable(p: *Parse, schema: []const u8, tbl: []const u8) void {
@@ -131,6 +170,22 @@ pub fn codeDeleteTable(p: *Parse, schema: []const u8, tbl: []const u8) void {
 pub fn codeRenameTable(p: *Parse, schema: []const u8, old: []const u8, new: []const u8) void {
     if (!exists(p.db, schema)) return;
     codeExecFmt(p, schema, "UPDATE %Q.xq_catalog SET tbl=%Q WHERE tbl=%Q", &.{ .{ .str = schema }, .{ .str = new }, .{ .str = old } });
+}
+
+/// Move the entries of column `old` of `tbl` to `new` (after ALTER TABLE
+/// RENAME COLUMN), when the statement runs. Codes nothing if there is no
+/// catalog.
+pub fn codeRenameColumn(p: *Parse, schema: []const u8, tbl: []const u8, old: []const u8, new: []const u8) void {
+    if (!exists(p.db, schema)) return;
+    codeExecFmt(p, schema, "UPDATE %Q.xq_catalog SET col=%Q WHERE tbl=%Q AND col=%Q", &.{ .{ .str = schema }, .{ .str = new }, .{ .str = tbl }, .{ .str = old } });
+}
+
+/// Remove the entries of column `col` of `tbl` (after ALTER TABLE DROP
+/// COLUMN), when the statement runs. Codes nothing if there is no
+/// catalog.
+pub fn codeDeleteColumn(p: *Parse, schema: []const u8, tbl: []const u8, col: []const u8) void {
+    if (!exists(p.db, schema)) return;
+    codeExecFmt(p, schema, "DELETE FROM %Q.xq_catalog WHERE tbl=%Q AND col=%Q", &.{ .{ .str = schema }, .{ .str = tbl }, .{ .str = col } });
 }
 
 /// Whether schema `schema` has the catalog table (as far as the schema
@@ -168,17 +223,56 @@ pub fn get(db: *Sqlite3, gpa: std.mem.Allocator, schema: []const u8, tbl: []cons
     return gpa.dupe(u8, z) catch error.OutOfMemory;
 }
 
+/// All the entries of `tbl` (col, key, value), copied with `gpa`; none if
+/// there is no catalog.
+pub fn entries(db: *Sqlite3, gpa: std.mem.Allocator, schema: []const u8, tbl: []const u8) Error![]Entry {
+    if (!try tableExists(db, schema, table_name)) return &.{};
+    var q = try Query.initFmt(db, "SELECT col,key,value FROM %Q.xq_catalog WHERE tbl=%Q", &.{ .{ .str = schema }, .{ .str = tbl } });
+    defer q.deinit();
+    var list: std.ArrayList(Entry) = .empty;
+    errdefer {
+        for (list.items) |e| {
+            gpa.free(e.col);
+            gpa.free(e.key);
+            gpa.free(e.value);
+        }
+        list.deinit(gpa);
+    }
+    while (try q.step()) {
+        const col = try dupeColumn(gpa, q, 0);
+        errdefer gpa.free(col);
+        const key = try dupeColumn(gpa, q, 1);
+        errdefer gpa.free(key);
+        const value = try dupeColumn(gpa, q, 2);
+        errdefer gpa.free(value);
+        list.append(gpa, .{ .col = col, .key = key, .value = value }) catch return error.OutOfMemory;
+    }
+    return list.toOwnedSlice(gpa) catch error.OutOfMemory;
+}
+
+fn dupeColumn(gpa: std.mem.Allocator, q: Query, i: usize) Error![]u8 {
+    return gpa.dupe(u8, api.columnText(q.v, i) orelse "") catch error.OutOfMemory;
+}
+
 /// Remove every entry of `tbl` now.
 pub fn deleteTable(db: *Sqlite3, schema: []const u8, tbl: []const u8) Error!void {
     if (!try tableExists(db, schema, table_name)) return;
     try execFmt(db, "DELETE FROM %Q.xq_catalog WHERE tbl=%Q", &.{ .{ .str = schema }, .{ .str = tbl } });
 }
 
-/// Whether `schema` has a table `name`, reading the schema first.
+/// Whether `schema` has a table `name` (in the schema in memory, read
+/// first if it was not).
 pub fn tableExists(db: *Sqlite3, schema: []const u8, name: []const u8) Error!bool {
-    var q = try Query.initFmt(db, "SELECT 1 FROM %Q.sqlite_schema WHERE type='table' AND name=%Q", &.{ .{ .str = schema }, .{ .str = name } });
-    defer q.deinit();
-    return q.step();
+    if (!db.init.busy) {
+        var msg: ?[:0]u8 = null;
+        const rc = prepare.init(db, &msg);
+        if (msg) |m| {
+            defer db.gpa.free(m);
+            if (rc != RC.OK) main_mod.errorWithMsg(db, rc, "{s}", .{m});
+        }
+        try int.check(rc);
+    }
+    return build.findTable(db, name, schema) != null;
 }
 
 // =============================================== statements of the catalog

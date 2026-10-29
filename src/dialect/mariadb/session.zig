@@ -1,7 +1,7 @@
 //! Session and introspection statements: SET (system and user
-//! variables), transactions, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES,
-//! and PRAGMA (xqlite's, passed to SQLite so that a MariaDB connection
-//! can switch back: PRAGMA xq_dialect = 'sqlite').
+//! variables), transactions, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES.
+//! PRAGMA and SQLite's other commands go to SQLite's grammar before this
+//! frontend runs (dialect.runParser()).
 //!
 //! SET runs when the statement runs (it calls xq_set_sysvar() or
 //! xq_set_uservar() for each assignment), so the value may be any
@@ -20,6 +20,7 @@ const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
+const dialect = @import("../dialect.zig");
 const dfunc = @import("../func.zig");
 const parser = @import("parser.zig");
 const state = @import("state.zig");
@@ -41,19 +42,22 @@ const Var = struct {
     /// Whether SET accepts it (and ignores the value, unless handled).
     settable: bool = true,
 
-    const Value = union(enum) { text: []const u8, int: i64, dynamic };
+    const Value = union(enum) { text: []const u8, int: i64, dynamic: Dynamic };
+
+    /// The variables whose value is the session's (sysvarFunc()).
+    const Dynamic = enum { sql_mode, autocommit, foreign_key_checks, warning_count, last_insert_id, in_transaction };
 };
 
 /// The system variables a MariaDB session can read; SET accepts the
 /// settable ones and ignores the value of those xqlite does not use.
 const vars = [_]Var{
-    .{ .name = "sql_mode", .value = .dynamic },
-    .{ .name = "autocommit", .value = .dynamic },
-    .{ .name = "foreign_key_checks", .value = .dynamic },
-    .{ .name = "warning_count", .value = .dynamic, .settable = false },
+    .{ .name = "sql_mode", .value = .{ .dynamic = .sql_mode } },
+    .{ .name = "autocommit", .value = .{ .dynamic = .autocommit } },
+    .{ .name = "foreign_key_checks", .value = .{ .dynamic = .foreign_key_checks } },
+    .{ .name = "warning_count", .value = .{ .dynamic = .warning_count }, .settable = false },
     .{ .name = "error_count", .value = .{ .int = 0 }, .settable = false },
-    .{ .name = "last_insert_id", .value = .dynamic },
-    .{ .name = "identity", .value = .dynamic },
+    .{ .name = "last_insert_id", .value = .{ .dynamic = .last_insert_id } },
+    .{ .name = "identity", .value = .{ .dynamic = .last_insert_id } },
     .{ .name = "version", .value = .{ .text = frontend.version }, .settable = false },
     .{ .name = "version_comment", .value = .{ .text = "xqlite" }, .settable = false },
     .{ .name = "version_compile_os", .value = .{ .text = @tagName(@import("builtin").os.tag) }, .settable = false },
@@ -106,7 +110,7 @@ const vars = [_]Var{
     .{ .name = "license", .value = .{ .text = "MIT" }, .settable = false },
     .{ .name = "read_only", .value = .{ .int = 0 }, .settable = false },
     .{ .name = "server_id", .value = .{ .int = 1 }, .settable = false },
-    .{ .name = "in_transaction", .value = .dynamic, .settable = false },
+    .{ .name = "in_transaction", .value = .{ .dynamic = .in_transaction }, .settable = false },
     .{ .name = "group_concat_max_len", .value = .{ .int = 1048576 } },
     .{ .name = "div_precision_increment", .value = .{ .int = 4 } },
     .{ .name = "sql_big_selects", .value = .{ .int = 1 } },
@@ -140,18 +144,16 @@ pub fn sysvarFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
     switch (v.value) {
         .text => |z| api.resultText(ctx, z, .static),
         .int => |i| api.resultInt64(ctx, i),
-        .dynamic => {
-            const st = &db.xq.mariadb;
-            if (eq(v.name, "sql_mode")) {
+        .dynamic => |d| switch (d) {
+            .sql_mode => {
                 var buf: [state.SqlMode.max_text]u8 = undefined;
-                return api.resultText(ctx, st.sql_mode.format(&buf), .transient);
-            }
-            if (eq(v.name, "autocommit")) return api.resultInt64(ctx, 1);
-            if (eq(v.name, "in_transaction")) return api.resultInt64(ctx, @intFromBool(!db.auto_commit));
-            if (eq(v.name, "foreign_key_checks")) return api.resultInt64(ctx, @intFromBool(db.flags.ForeignKeys));
-            if (eq(v.name, "warning_count")) return api.resultInt64(ctx, st.n_warnings);
-            if (eq(v.name, "last_insert_id") or eq(v.name, "identity")) return api.resultInt64(ctx, db.last_rowid);
-            api.resultNull(ctx);
+                api.resultText(ctx, db.xq.mariadb.sql_mode.format(&buf), .transient);
+            },
+            .autocommit => api.resultInt64(ctx, 1),
+            .in_transaction => api.resultInt64(ctx, @intFromBool(!db.auto_commit)),
+            .foreign_key_checks => api.resultInt64(ctx, @intFromBool(db.flags.ForeignKeys)),
+            .warning_count => api.resultInt64(ctx, db.xq.mariadb.n_warnings),
+            .last_insert_id => api.resultInt64(ctx, db.last_rowid),
         },
     }
 }
@@ -384,14 +386,6 @@ pub fn use(s: *Parser) Error!void {
     return emptyStatement(s);
 }
 
-/// PRAGMA ...: the rest of the statement as SQLite text.
-pub fn pragma(s: *Parser) Error!void {
-    const start = s.tok.text.ptr;
-    while (!s.atStmtEnd()) s.advance();
-    const text = try s.a.dupeSentinel(u8, start[0 .. @intFromPtr(s.prev_end) - @intFromPtr(start)], 0);
-    try lowerText(s, text);
-}
-
 /// LOCK TABLES ... / UNLOCK TABLES: accepted, nothing to do (the
 /// database file is locked by transactions).
 pub fn lockTables(s: *Parser) Error!void {
@@ -411,30 +405,10 @@ fn lowerFmt(s: *Parser, comptime fmt: []const u8, args: anytype) Error!void {
 }
 
 /// SQLite string literal.
-pub const Q = struct {
-    z: []const u8,
-    pub fn format(q: Q, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.writeByte('\'');
-        for (q.z) |c| {
-            if (c == '\'') try w.writeByte('\'');
-            try w.writeByte(c);
-        }
-        try w.writeByte('\'');
-    }
-};
+pub const Q = dialect.Quoted('\'');
 
 /// SQLite identifier.
-pub const Id = struct {
-    z: []const u8,
-    pub fn format(q: Id, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.writeByte('"');
-        for (q.z) |c| {
-            if (c == '"') try w.writeByte('"');
-            try w.writeByte(c);
-        }
-        try w.writeByte('"');
-    }
-};
+pub const Id = dialect.Quoted('"');
 
 // ================================================================= SHOW
 
@@ -499,9 +473,8 @@ pub fn show(s: *Parser) Error!void {
 /// of a statement: EXPLAIN QUERY PLAN.
 pub fn describe(s: *Parser) Error!bool {
     const n = s.peek();
-    const is_stmt = n.isKw("SELECT") or n.isKw("INSERT") or n.isKw("UPDATE") or n.isKw("DELETE") or
-        n.isKw("REPLACE") or n.isKw("WITH") or n.isKw("EXTENDED") or n.isKw("PARTITIONS") or
-        n.isKw("FORMAT") or n.isKw("ANALYZE") or n.is("(");
+    const is_stmt = n.isAnyKw(&.{ "SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "WITH", "EXTENDED", "PARTITIONS", "FORMAT", "ANALYZE" }) or
+        n.is("(");
     if (is_stmt) return false;
     s.advance();
     const n1, const n2 = try s.qualifiedName();
@@ -519,7 +492,7 @@ fn showTables(s: *Parser, full: bool) Error!void {
     if (s.eatKw("LIKE")) like = try s.stringLiteral();
     if (s.isKw("WHERE")) return s.fail("xqlite: SHOW TABLES WHERE is not supported", .{});
     const col = try std.fmt.allocPrint(s.a, "Tables_in_{s}", .{schema});
-    return lowerFmt(s, "SELECT name AS {f}{s} FROM {f}.sqlite_schema WHERE type IN ('table','view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT IN ('xq_catalog','xq_sequence'){s} ORDER BY name COLLATE BINARY", .{
+    return lowerFmt(s, "SELECT name AS {f}{s} FROM {f}.sqlite_schema WHERE type IN ('table','view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name" ++ catalog.not_catalog_table ++ "{s} ORDER BY name COLLATE BINARY", .{
         Id{ .z = col },
         if (full) ", CASE type WHEN 'view' THEN 'VIEW' ELSE 'BASE TABLE' END AS Table_type" else "",
         Id{ .z = schema },
@@ -537,8 +510,7 @@ fn resolveTable(s: *Parser, name: []const u8, schema: ?[]const u8) Error!struct 
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const tab = build.findTable(s.p.db, name, schema) orelse
         return s.fail("Table '{s}.{s}' doesn't exist", .{ schema orelse "main", name });
-    const sch: []const u8 = if (tab.schema) |x| s.p.db.dbs.items[@intCast(@import("../../sql/prepare.zig").schemaToIndex(s.p.db, x))].name else "main";
-    return .{ tab, try s.a.dupe(u8, sch) };
+    return .{ tab, try s.a.dupe(u8, catalog.schemaName(s.p.db, tab)) };
 }
 
 fn showColumns(s: *Parser, name: []const u8, schema_in: ?[]const u8, like: ?[]const u8) Error!void {
@@ -554,11 +526,11 @@ fn showColumns(s: *Parser, name: []const u8, schema_in: ?[]const u8, like: ?[]co
         }
     };
     o.writeAll("SELECT ti.name AS Field, coalesce(") catch return error.OutOfMemory;
-    cat.sub(o, has_cat, schema, tn, "type") catch return error.OutOfMemory;
+    cat.sub(o, has_cat, schema, tn, catalog.Key.decl_type) catch return error.OutOfMemory;
     o.print(
         \\, lower(ti.type)) AS Type, CASE WHEN ti."notnull" OR ti.pk THEN 'NO' ELSE 'YES' END AS "Null", CASE WHEN ti.pk THEN 'PRI' WHEN EXISTS(SELECT 1 FROM pragma_index_list({f},{f}) il WHERE il."unique" AND (SELECT count(*) FROM pragma_index_info(il.name,{f}))=1 AND (SELECT name FROM pragma_index_info(il.name,{f}))=ti.name) THEN 'UNI' WHEN EXISTS(SELECT 1 FROM pragma_index_list({f},{f}) il, pragma_index_info(il.name,{f}) ii WHERE ii.seqno=0 AND ii.name=ti.name) THEN 'MUL' ELSE '' END AS "Key", coalesce(
     , .{ Q{ .z = tn }, Q{ .z = schema }, Q{ .z = schema }, Q{ .z = schema }, Q{ .z = tn }, Q{ .z = schema }, Q{ .z = schema } }) catch return error.OutOfMemory;
-    cat.sub(o, has_cat, schema, tn, "default") catch return error.OutOfMemory;
+    cat.sub(o, has_cat, schema, tn, catalog.Key.default) catch return error.OutOfMemory;
     o.writeAll(", ti.dflt_value) AS \"Default\", trim(CASE WHEN ") catch return error.OutOfMemory;
     cat.sub(o, has_cat, schema, tn, "mariadb.auto_increment") catch return error.OutOfMemory;
     o.writeAll(" IS NOT NULL THEN 'auto_increment' ELSE '' END || CASE WHEN ") catch return error.OutOfMemory;

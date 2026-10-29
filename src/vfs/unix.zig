@@ -666,11 +666,10 @@ const UnixFile = struct {
         var cant_init = false;
         const node = inode.shm_node orelse blk: {
             const base = f.path orelse return error.ShmOpen;
-            var st: c.Stat = undefined;
-            if (c.fstat(f.fd(), &st) != 0) return error.IoErr;
+            const st = f.file.stat(io) catch return error.IoErr;
             const name = try std.mem.concat(gpa, u8, &.{ base, "-shm" });
             // Create it with the permissions of the database.
-            const perm: Io.File.Permissions = @fromBackingInt(@intCast(st.mode & 0o777));
+            const perm: Io.File.Permissions = @fromBackingInt(@backingInt(st.permissions) & 0o777);
             var read_only = false;
             const file = f.owner.dir.createFile(io, name, .{
                 .read = true,

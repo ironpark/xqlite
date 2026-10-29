@@ -8,10 +8,10 @@
 //! connection to MariaDB and back keeps the session's settings.
 //!
 //! When a setting takes effect:
-//!  - SET sql_mode is applied when the statement is compiled (prepared),
-//!    as PRAGMA xq_dialect is: the parser-level modes (ANSI_QUOTES,
+//!  - SET sql_mode is applied when the statement runs (xq_set_sysvar()
+//!    in session.zig); the parser-level modes (ANSI_QUOTES,
 //!    PIPES_AS_CONCAT, NO_BACKSLASH_ESCAPES, NO_AUTO_VALUE_ON_ZERO,
-//!    EMPTY_STRING_IS_NULL) shape the statements compiled after it;
+//!    EMPTY_STRING_IS_NULL) shape the statements compiled after that;
 //!  - the data modes (STRICT_TRANS_TABLES, STRICT_ALL_TABLES,
 //!    NO_ZERO_DATE, NO_ZERO_IN_DATE, ALLOW_INVALID_DATES) are read when a
 //!    statement runs, by the value coercion of INSERT and UPDATE

@@ -1,5 +1,5 @@
 //! A recursive descent parser for the PostgreSQL statements the dialect
-//! supports (see README.md, "PostgreSQL 방언"), producing the syntax tree
+//! supports (see docs/postgres.md), producing the syntax tree
 //! IR (src/ir/tree.zig) with PostgreSQL's semantics resolved:
 //!
 //!  - names: unquoted identifiers folded (lexer.zig); schemas mapped to

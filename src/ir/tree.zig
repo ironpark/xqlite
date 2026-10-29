@@ -8,7 +8,7 @@
 //!               (CREATE TABLE/INDEX/VIEW, CHECK, DEFAULT, generated
 //!               columns, view queries).
 //!
-//! The contract between them (README.md, "방언 아키텍처"): for every tree
+//! The contract between them (docs/architecture.md): for every tree
 //! `t` that render.zig accepts, the SQLite frontend compiling render(t)
 //! means what lower(t) means, in the SQLite dialect and in the dialect of
 //! the frontend that built `t`.

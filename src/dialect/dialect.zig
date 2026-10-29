@@ -1,7 +1,7 @@
 //! SQL dialects: which language a connection speaks, and the seams where
 //! a dialect changes what the engine does.
 //!
-//! A dialect is two things (see README.md, "방언 아키텍처"):
+//! A dialect is two things (see docs/architecture.md):
 //!
 //!  - a **frontend** (Frontend): a lexer/parser that reads the text of a
 //!    statement and lowers it into the common IR, SQLite's parse tree,

@@ -5,7 +5,7 @@
 //! (tree.zig), with its dialect's semantics resolved into explicit nodes,
 //! and hands it to lower.zig, which builds the parse tree below, and to
 //! render.zig, which writes the SQLite text the schema keeps (see those
-//! files and README.md, "방언 아키텍처").
+//! files and docs/architecture.md).
 //!
 //! The IR is SQLite's own parse tree (Expr, ExprList, IdList, SrcList,
 //! Select, With, Window, Upsert, TriggerStep of src/sql/sqlite_int.zig)
@@ -32,8 +32,8 @@
 //!    generate code; the statement ends with stmt.finishCoding().
 //!
 //! SQLite's grammar (src/parse/parser.zig) is the reference for which
-//! builder each construct calls with which arguments; see README.md
-//! ("방언 아키텍처") for the frontend contract.
+//! builder each construct calls with which arguments; see
+//! docs/architecture.md for the frontend contract.
 
 const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");

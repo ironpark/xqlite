@@ -2,6 +2,8 @@
 
 [sqllogictest](https://sqlite.org/sqllogictest/)는 SQLite 팀이 여러 DB 엔진을 서로 비교하려고 만든 테스트 모음입니다. 스크립트 622개에 쿼리가 약 590만 개 들어 있고, 각 쿼리의 기대 결과는 SQLite가 낸 값입니다.
 
+다른 테스트 도구는 [테스트와 검증](../../docs/testing.md)에 정리되어 있습니다.
+
 ## 준비
 
 ```sh
@@ -21,7 +23,7 @@ zig-out/bin/xqlite slt --wal FILE                                   # WAL 모드
 ```
 
 - `xqlite slt`는 C 실행기 `sqllogictest.c`의 verify 모드와 SQLite 엔진(`slt_sqlite.c`)을 옮긴 것입니다. 값 표시(`I`는 32비트 정수, `R`은 `%.3f`, `T`는 출력할 수 없는 문자를 `@`로 바꿈), 정렬(`nosort`/`rowsort`/`valuesort`), 해시 기준(`hash-threshold`, 기본 8), 레이블 비교, `skipif`/`onlyif`(엔진 이름은 `sqlite`)를 그대로 따릅니다.
-- C 실행기와 다른 점이 셋 있습니다.
+- C 실행기와 다른 점은 넷입니다.
   - 스크립트를 여러 개 받을 수 있고, 스크립트마다 새 데이터베이스(기본은 메모리, `--db FILE`이면 그 파일을 지우고 새로 만듦)를 씁니다.
   - 결과가 틀린 쿼리는 값 개수와 상관없이 오류 하나로 셉니다.
   - `--journal-mode MODE`(`--wal`은 `--journal-mode wal`)를 주면 스크립트마다 `PRAGMA journal_mode=MODE`로 시작합니다. 파일 DB가 필요하므로 `--db`가 없으면 `/tmp/xqlite-slt-PID-N.db`를 스크립트마다 만들고 지웁니다(병렬 실행에서도 겹치지 않음).

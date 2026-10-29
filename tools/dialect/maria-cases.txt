@@ -3,7 +3,7 @@
 -- called main, in MariaDB (the mariadb client, batch mode) and in
 -- `xqlite sql` with `.dialect mariadb`; the rows, column names and error
 -- messages (the "ERROR:" line) must be the same. What the two print
--- differently by design (README.md, "MariaDB 방언": DECIMAL as REAL, the
+-- differently by design (docs/mariadb.md: DECIMAL as REAL, the
 -- engine's own error messages, NOW()) is avoided; numbers with a
 -- fraction are compared without trailing zeros.
 

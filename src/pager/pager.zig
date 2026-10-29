@@ -1418,8 +1418,13 @@ pub const Pager = struct {
             p.no_sync or off.* <= p.journal_hdr
         else
             page == null or !page.?.flags.need_sync;
+        // A failed write still updates and releases the cached page, as
+        // in C; the error is returned after.
+        var write_err: ?Error = null;
         if (p.mayWriteDb() and is_synced) {
-            try p.fd.write(data, @as(u64, pgno - 1) * p.page_size);
+            p.fd.write(data, @as(u64, pgno - 1) * p.page_size) catch |err| {
+                write_err = err;
+            };
             if (pgno > p.db_file_size) p.db_file_size = pgno;
         } else if (!is_main and page == null) {
             // Not written and not cached: the next read would see the
@@ -1436,6 +1441,7 @@ pub const Pager = struct {
             if (pgno == 1) @memcpy(&p.db_file_vers, pg.data[24..40]);
             p.cache.release(pg);
         }
+        if (write_err) |err| return err;
         return true;
     }
 

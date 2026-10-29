@@ -1240,7 +1240,7 @@ pub fn canBeNull(e_arg: *const Expr) bool {
         TK.INTEGER, TK.STRING, TK.FLOAT, TK.BLOB => false,
         TK.COLUMN => e.flags.CanBeNull or e.y.tab == null or
             (e.i_column >= 0 and e.y.tab.?.cols.len > 0 and e.i_column < e.y.tab.?.cols.len and
-            e.y.tab.?.cols[@intCast(e.i_column)].not_null == .None),
+                e.y.tab.?.cols[@intCast(e.i_column)].not_null == .None),
         else => true,
     };
 }
@@ -1642,7 +1642,6 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
         },
     }
 }
-
 
 /// Port of sqlite3ExprAnalyzeAggregates(): add the columns and aggregate
 /// functions of `e` to the AggInfo of `nc`.

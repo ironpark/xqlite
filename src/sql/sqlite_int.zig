@@ -1861,7 +1861,7 @@ pub const Parse = struct {
     vtab_lock: std.ArrayList(*Table) = .empty,
 
     pub fn inRenameObject(p: *const Parse) bool {
-        return @intFromEnum(p.e_parse_mode) >= @intFromEnum(ParseMode.rename);
+        return @backingInt(p.e_parse_mode) >= @backingInt(ParseMode.rename);
     }
 
     pub fn inSpecialParse(p: *const Parse) bool {
@@ -2126,7 +2126,6 @@ pub const Db = struct {
     safety_level: u8 = 3,
     sync_set: bool = false,
     schema: *Schema,
-
 };
 
 /// A free lookaside slot (LookasideSlot).

@@ -197,7 +197,7 @@ pub const Parser = struct {
     /// Port of yy_reduce(): run the action of rule `ruleno`, then pop its
     /// right side and push its left side. Returns the new state.
     fn reduce(s: *Parser, ruleno: u16, lookahead: u8, lookahead_token: Token) Oom!u16 {
-        try s.action(@enumFromInt(ruleno), lookahead, lookahead_token);
+        try s.action(@fromBackingInt(@intCast(ruleno)), lookahead, lookahead_token);
         const goto = g.yy_rule_info_lhs[ruleno];
         const size: isize = g.yy_rule_info_nrhs[ruleno];
         const base: usize = @intCast(@as(isize, @intCast(s.tos)) + size);
@@ -983,11 +983,11 @@ pub const Parser = struct {
             .@"with ::= WITH wqlist",
             .@"with ::= WITH RECURSIVE wqlist",
             => _ = sel.withPush(p, s.m(0).with),
-            .@"wqas ::= AS" => s.m(0).u8 = @intFromEnum(int.M10d.any),
-            .@"wqas ::= AS MATERIALIZED" => s.m(-1).u8 = @intFromEnum(int.M10d.yes),
-            .@"wqas ::= AS NOT MATERIALIZED" => s.m(-2).u8 = @intFromEnum(int.M10d.no),
+            .@"wqas ::= AS" => s.m(0).u8 = @backingInt(int.M10d.any),
+            .@"wqas ::= AS MATERIALIZED" => s.m(-1).u8 = @backingInt(int.M10d.yes),
+            .@"wqas ::= AS NOT MATERIALIZED" => s.m(-2).u8 = @backingInt(int.M10d.no),
             .@"wqitem ::= withnm eidlist_opt wqas LP select RP" => {
-                s.m(-5).cte = try build.cteNew(p, s.m(-5).tok, s.m(-4).elist, s.m(-1).select, @enumFromInt(s.m(-3).u8));
+                s.m(-5).cte = try build.cteNew(p, s.m(-5).tok, s.m(-4).elist, s.m(-1).select, @fromBackingInt(@intCast(s.m(-3).u8)));
             },
             .@"withnm ::= nm" => p.has_with = true,
             .@"wqlist ::= wqitem" => s.m(0).with = try build.withAdd(p, null, s.m(0).cte.?),

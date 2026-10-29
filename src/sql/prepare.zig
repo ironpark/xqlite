@@ -209,7 +209,7 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
     // meta[0..5]: schema cookie, file format, cache size, largest root
     // page, text encoding.
     var meta: [5]u32 = undefined;
-    for (&meta, 1..) |*m, i| m.* = bt.getMeta(@enumFromInt(i));
+    for (&meta, 1..) |*m, i| m.* = bt.getMeta(@fromBackingInt(@intCast(i)));
     if (db.flags.ResetDatabase) meta = @splat(0);
     pdb.schema.schema_cookie = @bitCast(meta[0]);
 

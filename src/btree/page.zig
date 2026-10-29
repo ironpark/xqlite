@@ -347,8 +347,10 @@ pub const MemPage = extern struct {
         data[hdr + 7] = 0;
         put2(data + hdr + 5, bt.usable_size);
         p.n_free = @intCast(bt.usable_size - first);
-        // The flags come from our own callers, so they are always legal.
-        p.decodeFlags(flags) catch unreachable;
+        // As in C, an illegal type is left for the next read of the page to
+        // report: clearDatabasePage() passes a byte of a page that a
+        // corrupt tree may have overwritten.
+        p.decodeFlags(flags) catch {};
         p.setLayout();
         p.n_cell = 0;
         p.is_init = true;

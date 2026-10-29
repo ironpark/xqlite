@@ -88,6 +88,8 @@ fn corruptSchema(data: *InitData, obj: []const ?[:0]const u8, extra: ?[]const u8
 /// argv is type, name, tbl_name, rootpage and sql. Also called by
 /// OP_ParseSchema. Returns true to stop.
 pub fn initCallback(data: *InitData, argv: []const ?[*:0]const u8, _: []const [*:0]const u8) bool {
+    // No row: PRAGMA empty_result_callbacks calls back once with none.
+    if (argv.len == 0) return false;
     var obj: [5]?[:0]const u8 = undefined;
     for (&obj, argv[0..5]) |*o, a| o.* = if (a) |z| std.mem.span(z) else null;
     return initRow(data, &obj);

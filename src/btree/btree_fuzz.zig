@@ -84,7 +84,7 @@ fn opWeights(rand: std.Random) std.enums.EnumArray(ModelOp, u32) {
 pub fn model(gpa: Allocator, io: Io, seed: u64, events_max: u32) !void {
     var prng = std.Random.DefaultPrng.init(seed);
     const config: ModelConfig = .random(prng.random());
-    std.debug.print("model config: {any}\n", .{config});
+    if (!@import("builtin").is_test) std.debug.print("model config: {any}\n", .{config});
     return modelWith(gpa, io, prng.random(), config, events_max);
 }
 

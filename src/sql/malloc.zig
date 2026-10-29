@@ -501,13 +501,24 @@ pub fn allocSize(a: Allocator, buf: []u8) usize {
 
 // ===================================================== allocation failure
 
-/// Port of sqlite3OomFault(): record that an allocation failed and turn
-/// lookaside off until oomClear(). (Running statements are not
-/// interrupted, and the Parse is not told: callers report the error.)
+/// Port of sqlite3OomFault(): record that an allocation failed, turn
+/// lookaside off until oomClear(), interrupt running statements and fail
+/// the statement being prepared.
 pub fn oomFault(db: *Sqlite3) void {
-    if (!db.malloc_failed) {
-        db.malloc_failed = true;
-        disableLookaside(db);
+    if (db.malloc_failed) return;
+    db.malloc_failed = true;
+    if (db.n_vdbe_exec > 0) db.is_interrupted.store(true, .monotonic);
+    disableLookaside(db);
+    // The statement being prepared fails, and so do the ones it is nested
+    // in.
+    if (db.parse) |p| {
+        @import("util.zig").errorMsg(p, "out of memory", .{});
+        p.rc = RC.NOMEM;
+        var it = p.outer_parse;
+        while (it) |outer| : (it = outer.outer_parse) {
+            outer.n_err += 1;
+            outer.rc = RC.NOMEM;
+        }
     }
 }
 

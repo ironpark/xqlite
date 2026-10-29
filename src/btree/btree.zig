@@ -998,7 +998,7 @@ pub const Btree = struct {
 
         try bt.pager.write(p1.db_page);
         const n_free = header.get(p1.data, .freelist_count);
-        header.put(p1.data, .freelist_count, n_free + 1);
+        header.put(p1.data, .freelist_count, n_free +% 1);
 
         if (bt.secure_delete == .on) {
             if (pg == null) pg = try bt.getPage(pgno, .{});
@@ -1067,7 +1067,7 @@ pub const Btree = struct {
         if (@intFromPtr(cell) + info.n_size > @intFromPtr(pg.data_end)) return error.Corrupt;
         var ovfl = get4(cell + info.n_size - 4);
         const ovfl_size = bt.usable_size - 4;
-        var n_ovfl = (info.n_payload - info.n_local + ovfl_size - 1) / ovfl_size;
+        var n_ovfl = (info.n_payload -% info.n_local +% ovfl_size -% 1) / ovfl_size; // u32, wraps as in C
         while (n_ovfl > 0) : (n_ovfl -= 1) {
             if (ovfl < 2 or ovfl > bt.n_page) return error.Corrupt;
             var next: Pgno = 0;
@@ -2615,7 +2615,7 @@ pub const Cursor = struct {
         var next_page = get4(info.payload + info.n_local);
         var i_idx: usize = 0;
         if (!cur.flags.valid_ovfl) {
-            const n_ovfl = (info.n_payload - info.n_local + ovfl_size - 1) / ovfl_size;
+            const n_ovfl = (info.n_payload -% info.n_local +% ovfl_size -% 1) / ovfl_size; // u32, wraps as in C
             if (cur.overflow.len < n_ovfl) {
                 cur.overflow = try bt.gpa.realloc(cur.overflow, n_ovfl * 2);
             }

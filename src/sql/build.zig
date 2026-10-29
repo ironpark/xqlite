@@ -1999,7 +1999,8 @@ pub fn defaultRowEst(idx: *Index) void {
     a[0] = x;
     const n_copy = @min(vals.len, idx.n_key_col);
     @memcpy(a[1 .. 1 + n_copy], vals[0..n_copy]);
-    var i = n_copy + 1;
+    // Not `n_copy + 1`'s type: @min narrows n_copy to the bound of vals.
+    var i: usize = n_copy + 1;
     while (i <= idx.n_key_col) : (i += 1) a[i] = 23;
     if (idx.isUnique()) a[idx.n_key_col] = 0;
 }

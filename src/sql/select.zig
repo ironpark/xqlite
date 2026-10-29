@@ -1088,6 +1088,9 @@ pub fn columnsFromExprList(p: *Parse, a: Allocator, e_list: ?*ExprList) Oom![]Co
         if (x.fg.no_expand) col.col_flags.NOEXPAND = true;
         try ht.put(p.db.gpa, z, x);
     }
+    // After an error, no columns: the loop stopped short, leaving the rest
+    // unnamed. (They are in `a`, which its owner frees.)
+    if (p.n_err != 0) return &.{};
     return cols;
 }
 
@@ -1855,7 +1858,7 @@ fn substExpr(x: *SubstContext, e_arg: ?*Expr) Oom!?*Expr {
         }
     } else {
         if (e.op == TK.IF_NULL_ROW and e.i_table == x.i_table) e.i_table = x.i_new_table;
-        if (e.op == TK.AGG_FUNCTION and e.op2 >= x.n_sel_depth) e.op2 -= 1;
+        if (e.op == TK.AGG_FUNCTION and e.op2 >= x.n_sel_depth) e.op2 -%= 1; // u8, wraps as in C
         e.left = try substExpr(x, e.left);
         e.right = try substExpr(x, e.right);
         if (e.useXSelect()) {

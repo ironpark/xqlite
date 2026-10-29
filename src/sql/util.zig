@@ -31,7 +31,13 @@ pub fn errorMsgAt(p: *Parse, z: ?[*]const u8, comptime fmt: []const u8, args: an
         p.rc = RC.NOMEM;
         return;
     };
-    if (db.suppress_err != 0) return;
+    if (db.suppress_err != 0) {
+        if (db.malloc_failed) {
+            p.n_err += 1;
+            p.rc = RC.NOMEM;
+        }
+        return;
+    }
     p.n_err += 1;
     p.err_msg = msg;
     p.rc = RC.ERROR;

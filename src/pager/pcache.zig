@@ -208,7 +208,8 @@ pub const PCache = struct {
 
     fn updateLimits(pc: *PCache) void {
         pc.max_pages = pc.pagesFor(pc.cache_size);
-        pc.max_pinned = pc.max_pages * 9 / 10;
+        // Unsigned arithmetic that wraps for huge cache sizes, as in C.
+        pc.max_pinned = pc.max_pages *% 9 / 10;
     }
 
     pub fn pageCount(pc: *const PCache) u32 {

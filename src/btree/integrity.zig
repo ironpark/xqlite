@@ -262,7 +262,8 @@ const Check = struct {
             }
 
             if (info.n_payload > info.n_local) {
-                const n_page = (info.n_payload - info.n_local + usable - 5) / (usable - 4);
+                // u32 arithmetic that wraps on a corrupt cell, as in C.
+                const n_page = (info.n_payload -% info.n_local +% usable -% 5) / (usable - 4);
                 const ovfl = get4(cell + info.n_size - 4);
                 if (bt.isAutoVacuum()) c.checkPtrmap(ovfl, .overflow1, pgno);
                 c.checkList(false, ovfl, n_page);

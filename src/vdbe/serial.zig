@@ -637,7 +637,13 @@ pub fn handleMovedCursor(c: *VdbeCursor) btree.Error!void {
 
 /// Port of sqlite3VdbeCursorRestore().
 pub fn cursorRestore(c: *VdbeCursor) btree.Error!void {
-    if (c.uc.cursor.hasMoved()) return handleMovedCursor(c);
+    // A null cursor (OP_NullRow on a cursor never opened) is a pseudo
+    // cursor here; C gives it a fake b-tree cursor that never moves.
+    const cur = switch (c.uc) {
+        .cursor => |cur| cur,
+        else => return,
+    };
+    if (cur.hasMoved()) return handleMovedCursor(c);
 }
 
 /// Port of sqlite3BtreeIndexMoveto() taking an unpacked record: move the

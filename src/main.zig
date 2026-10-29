@@ -26,7 +26,7 @@ const usage =
     \\                            mode of a new file: none, full or incremental
     \\                            (testing aid)
     \\  bt-churn <file>           delete, update and insert rows of t and t_b
-    \\                            (testing aid, see tools/interop-btree.sh)
+    \\                            (testing aid, see `xqt interop btree`)
     \\  bt-vacuum <file>          run an incremental vacuum to completion
     \\  sql [file] [sql...]       a sqlite3-compatible shell: run SQL and
     \\                            dot-commands on the database (in memory if
@@ -40,7 +40,7 @@ const usage =
     \\  XQLITE_TEST_CRASH=F:N[:torn]  sql: exit at once at the Nth write to a file
     \\                            of kind F (wal, db or journal); with torn,
     \\                            only half of that write is done (a testing
-    \\                            aid, see tools/interop-wal.sh)
+    \\                            aid, see `xqt interop wal`)
     \\
 ;
 
@@ -259,7 +259,7 @@ fn readRecord(gpa: std.mem.Allocator, cur: *Cursor, out: []Value) ![]u8 {
     return data;
 }
 
-// The demo schema shared with tools/interop-btree.sh, which builds the same
+// The demo schema shared with `xqt interop btree`, which builds the same
 // content with SQL to compare against.
 const SchemaObject = struct { type: []const u8, name: []const u8, sql: []const u8 };
 const demo_objects = [_]SchemaObject{

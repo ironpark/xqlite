@@ -290,7 +290,7 @@ pub fn build(b: *std.Build) void {
         slt_run.addDirectoryArg(b.path("ref/sqllogictest/test"));
         check_step.dependOn(&slt_run.step);
     }
-    // SQLite's corpora (tools/fetch-sqlite.sh), one process each.
+    // SQLite's corpora (`xqt fetch sqlite`), one process each.
     for (1..9) |i| {
         const run_fuzzcheck = b.addRunArtifact(safe_exe);
         run_fuzzcheck.addArg("fuzzcheck");

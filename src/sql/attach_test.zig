@@ -433,7 +433,7 @@ test "attach: a transaction over several databases commits atomically" {
     }
 }
 
-/// Whether tools/gen-superjournal-fixtures.sh leaves `file` in `state`.
+/// Whether `xqt gen superjournal` leaves `file` in `state`.
 fn fixtureExists(comptime state: []const u8, comptime file: []const u8) bool {
     const have = .{
         .{ "pending", "main.db a.db b.db main.db-journal a.db-journal b.db-journal super" },
@@ -469,7 +469,7 @@ test "attach: recovery of the super-journal and journals sqlite3 left" {
         // sqlite3 died before deleting the super-journal: all roll back.
         .{ "pending", "oldoldold\n" },
         // It died after deleting it (the commit point), while deleting
-        // the journals: none may roll back. tools/interop-attach.sh found
+        // the journals: none may roll back. `xqt interop attach` found
         // a and b rolled back here in optimized builds, which read the
         // checksum of the super-journal name wrong.
         .{ "committed-0", "newnewnew\n" },

@@ -16,7 +16,7 @@
 //!
 //! The output goes to `out`; the xqlite shell sets it to its own output
 //! when the XQ_VTABLOG environment variable is set (the sqlite3 shell
-//! prints to the same stdout), so that tools/planner/diff.py can compare
+//! prints to the same stdout), so that `xqt planner` can compare
 //! the calls with those of an sqlite3 built with vtablog.c.
 
 const std = @import("std");

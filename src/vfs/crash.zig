@@ -6,7 +6,7 @@
 //! its first half reaches the file.
 //!
 //! Only the `xqlite` command installs it, when $XQLITE_TEST_CRASH asks
-//! for it (see `Spec.parse` and tools/interop-wal.sh); the library never
+//! for it (see `Spec.parse` and `xqt interop wal`); the library never
 //! does.
 
 const std = @import("std");
@@ -254,7 +254,7 @@ test "crash: the Nth write to a file of the target kind crashes" {
     var mem = MemVfs.init(testing.allocator, testing.io);
     defer mem.deinit();
     // The crash itself ends the process, so only the writes before it
-    // can be checked here; tools/interop-wal.sh crashes for real.
+    // can be checked here; `xqt interop wal` crashes for real.
     var cv = CrashVfs.init(testing.allocator, mem.interface(), .{ .target = .wal, .at = 3 });
     const v = cv.interface();
     const db = try v.open("t.db", .{ .create = true });

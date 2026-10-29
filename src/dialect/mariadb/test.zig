@@ -545,3 +545,21 @@ test "mariadb: RENAME TABLE renames the table's indexes" {
     try c.expectRows("SELECT a FROM w ORDER BY id", "10\n20\n");
     try c.expectRows("PRAGMA integrity_check", "ok\n");
 }
+
+test "mariadb: ANALYZE TABLE" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (a INT PRIMARY KEY, b INT, KEY kb (b)); INSERT INTO t VALUES (1,1),(2,1),(3,2); CREATE VIEW v AS SELECT a FROM t");
+    try c.expectColumns("ANALYZE TABLE t", "Table|Op|Msg_type|Msg_text");
+    try c.expectRows("ANALYZE NO_WRITE_TO_BINLOG TABLE t, nosuch, v",
+        \\main.t|analyze|status|OK
+        \\main.nosuch|analyze|Error|Table 'main.nosuch' doesn't exist
+        \\main.nosuch|analyze|status|Operation failed
+        \\main.v|analyze|Error|'main.v' is not of type 'BASE TABLE'
+        \\main.v|analyze|status|Operation failed
+        \\
+    );
+    try c.expectRows("ANALYZE LOCAL TABLE main.t PERSISTENT FOR ALL", "main.t|analyze|status|Engine-independent statistics collected\nmain.t|analyze|status|OK\n");
+    try c.expectRows("SELECT tbl, idx, stat FROM sqlite_stat1", "t|t$kb|3 2\n");
+}

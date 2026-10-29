@@ -4,9 +4,10 @@
 //! syntax tree IR of src/ir/tree.zig, PostgreSQL's semantics resolved)
 //! and lowers it with src/ir/lower.zig, DDL after the checks of ddl.zig
 //! (the IR renders it as SQLite text with its catalog entries). ANALYZE
-//! is passed to SQLite's grammar as written, as are PRAGMA, VACUUM and
-//! the other SQLite commands of dialect.runParser(). Errors use PostgreSQL's wording where it is cheap
-//! (`syntax error at or near "x"`, `relation "t" does not exist`).
+//! is passed to SQLite's grammar (with public as main), as are PRAGMA,
+//! VACUUM and the other SQLite commands of dialect.runParser(). Errors
+//! use PostgreSQL's wording where it is cheap (`syntax error at or near
+//! "x"`, `relation "t" does not exist`).
 //!
 //! The engine side: the function table (version(), the sequence
 //! functions of src/catalog/sequence.zig and funcs.zig).
@@ -55,15 +56,29 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
 }
 
 fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
-    // ANALYZE, as written (PostgreSQL's takes the same arguments).
+    // ANALYZE [VERBOSE] [[schema.]name], as written (SQLite's takes the
+    // same arguments). VERBOSE does nothing; schema public is main and
+    // pg_temp temp.
     const first = ps.toks[0];
     if (first.isKw("analyze")) {
-        var last = first;
-        for (ps.toks) |t| {
-            if (t.kind == .eof) break;
-            last = t;
+        var i: usize = 1;
+        if (ps.toks[i].isKw("verbose")) i += 1;
+        var schema: ?[]const u8 = null;
+        if (ps.toks[i].kind == .ident and i + 1 < ps.toks.len and ps.toks[i + 1].kind == .dot) {
+            if (ps.toks[i].isKw("public")) schema = "main";
+            if (ps.toks[i].isKw("pg_temp")) schema = "temp";
+            if (schema != null) i += 2;
         }
-        const text = try p.arena.dupeSentinel(u8, sql[first.start..last.end], 0);
+        var end = ps.toks[i].start;
+        for (ps.toks[i..]) |t| {
+            if (t.kind == .eof) break;
+            end = t.end;
+        }
+        const rest = sql[ps.toks[i].start..@max(end, ps.toks[i].start)];
+        const text = if (schema) |s|
+            try std.fmt.allocPrintSentinel(p.arena, "ANALYZE {s}.{s}", .{ s, rest }, 0)
+        else
+            try std.fmt.allocPrintSentinel(p.arena, "ANALYZE {s}", .{rest}, 0);
         try ir.stmt.lowerSqliteText(p, text);
         return;
     }

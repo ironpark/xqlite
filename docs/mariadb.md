@@ -53,7 +53,7 @@ SHOW WARNINGS;
 | `functions.zig` | 함수 호출과 특수 문법(`CAST`, `TRIM`, `SUBSTRING ... FROM`, `GROUP_CONCAT ... SEPARATOR` ...) |
 | `dml.zig` | INSERT, REPLACE, UPDATE, DELETE, TRUNCATE |
 | `ddl.zig` | CREATE/DROP/ALTER, 인덱스, `xq_catalog` 키 |
-| `session.zig` | SET, 트랜잭션, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES |
+| `session.zig` | SET, 트랜잭션, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES, ANALYZE TABLE |
 | `infoschema.zig` | `information_schema.TABLES`, `COLUMNS`, `SCHEMATA` |
 | `types.zig` | MariaDB 열 타입, 저장 타입, INSERT/UPDATE의 값 변환(`xq_coerce()`) |
 | `runtime.zig` | 방언 함수 테이블: SQLite에 없거나 뜻이 다른 연산·함수 |
@@ -285,6 +285,7 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
 - `EXPLAIN`은 `EXPLAIN QUERY PLAN`입니다.
 - `USE db`는 존재만 확인합니다. 기본 스키마는 `main`입니다.
 - `LOCK TABLES`, `UNLOCK TABLES`는 무시합니다.
+- `ANALYZE [NO_WRITE_TO_BINLOG | LOCAL] TABLE t [, ...] [PERSISTENT FOR ...]`는 테이블마다 SQLite의 `ANALYZE`를 실행하고 MariaDB와 같은 결과 행(`Table`, `Op`, `Msg_type`, `Msg_text`)을 돌려줍니다. 없는 테이블과 뷰는 MariaDB처럼 `Error` 행을 냅니다.
 - `information_schema.TABLES`, `COLUMNS`, `SCHEMATA`
 - mysqldump 출력을 그대로 불러올 수 있습니다.
 

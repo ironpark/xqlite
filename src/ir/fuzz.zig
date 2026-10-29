@@ -459,6 +459,8 @@ const Stats = struct {
     /// Views that failed while running where the subquery did not, or
     /// the other way around.
     view_step_errors: u32 = 0,
+    /// Rows whose expected values failed while the table took them.
+    row_step_errors: u32 = 0,
 };
 
 const Fuzz = struct {
@@ -670,9 +672,14 @@ const Fuzz = struct {
     fn checkRow(f: *Fuzz, a: Allocator, spec: gen.TableSpec, expected: Outcome, inserted: Outcome, stored: Outcome, args: anytype, ddl: []const u8) !void {
         const what = "table created in {s}, row inserted in {s} ({s}), row {d}";
         // An expression that fails: the INSERT or the reading fails (with
-        // which error depends on what is computed first).
+        // which error depends on what is computed first), unless SQLite
+        // did not compute it there: it may compute a constant ahead in a
+        // query (a CASE branch not taken) and not in a DEFAULT.
         if (expected == .err) {
-            if (stored != .err) return f.mismatch(what, args, ddl, stored, expected);
+            if (stored != .err) {
+                if (!expected.err.step) return f.mismatch(what, args, ddl, stored, expected);
+                f.stats.row_step_errors += 1;
+            }
             return;
         }
         if (expected.rows.len != 1) return f.mismatch(what, args, ddl, stored, expected);
@@ -721,8 +728,8 @@ pub fn roundtrip(gpa: Allocator, io: std.Io, seed: u64, events_max: u32) !void {
     }
     const s = f.stats;
     if (!@import("builtin").is_test) std.debug.print(
-        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors\n",
-        .{ s.queries, s.query_errors, s.params_checked, s.tables, s.table_errors, s.rows_checked, s.check_failures, s.cross_skipped, s.view_step_errors },
+        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors, {d} row errors\n",
+        .{ s.queries, s.query_errors, s.params_checked, s.tables, s.table_errors, s.rows_checked, s.check_failures, s.cross_skipped, s.view_step_errors, s.row_step_errors },
     );
 }
 

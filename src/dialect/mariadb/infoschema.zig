@@ -26,7 +26,7 @@ pub fn select(s: *Parser, name: []const u8) Error!?*int.Select {
         schemata
     else
         return null;
-    var sub: Parser = .init(s.p, text, .{});
+    var sub: Parser = .init(s.p, text, (state.SqlMode{}).with(.PIPES_AS_CONCAT));
     const sel = try sub.selectStmt();
     if (sub.tok.kind != .eof) return sub.syntaxError();
     return sel;
@@ -58,18 +58,24 @@ fn columns(s: *Parser) Error![:0]const u8 {
         "coalesce((SELECT c.value FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = 'default'), ti.dflt_value)"
     else
         "ti.dflt_value";
-    const autoinc = if (has_cat)
-        "CASE WHEN EXISTS (SELECT 1 FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = 'mariadb.auto_increment') THEN 'auto_increment' ELSE '' END"
+    const extra = if (has_cat)
+        "trim(CASE WHEN EXISTS (SELECT 1 FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = 'mariadb.auto_increment') THEN 'auto_increment' ELSE '' END || " ++
+            "CASE WHEN EXISTS (SELECT 1 FROM main.xq_catalog c WHERE tl.`schema` = 'main' AND c.tbl = tl.name AND c.col = ti.name AND c.`key` = 'mariadb.on_update') THEN ' on update current_timestamp()' ELSE '' END || " ++
+            "CASE ti.hidden WHEN 2 THEN ' VIRTUAL GENERATED' WHEN 3 THEN ' STORED GENERATED' ELSE '' END)"
     else
         "''";
+    // SHOW COLUMNS' Key.
+    const key = "CASE WHEN ti.pk THEN 'PRI' " ++
+        "WHEN EXISTS (SELECT 1 FROM pragma_index_list(tl.name, tl.`schema`) il WHERE il.`unique` AND (SELECT count(*) FROM pragma_index_info(il.name, tl.`schema`)) = 1 AND (SELECT name FROM pragma_index_info(il.name, tl.`schema`)) = ti.name) THEN 'UNI' " ++
+        "WHEN EXISTS (SELECT 1 FROM pragma_index_list(tl.name, tl.`schema`) il, pragma_index_info(il.name, tl.`schema`) ii WHERE ii.seqno = 0 AND ii.name = ti.name) THEN 'MUL' ELSE '' END";
     return std.fmt.allocPrintSentinel(s.a, "SELECT 'def' AS TABLE_CATALOG, tl.`schema` AS TABLE_SCHEMA, tl.name AS TABLE_NAME, " ++
         "ti.name AS COLUMN_NAME, ti.cid + 1 AS ORDINAL_POSITION, {s} AS COLUMN_DEFAULT, " ++
         "CASE WHEN ti.`notnull` OR ti.pk THEN 'NO' ELSE 'YES' END AS IS_NULLABLE, " ++
         "CASE WHEN instr({s}, '(') THEN substr({s}, 1, instr({s}, '(') - 1) WHEN instr({s}, ' ') THEN substr({s}, 1, instr({s}, ' ') - 1) ELSE {s} END AS DATA_TYPE, " ++
         "NULL AS CHARACTER_MAXIMUM_LENGTH, NULL AS NUMERIC_PRECISION, NULL AS NUMERIC_SCALE, " ++
-        "{s} AS COLUMN_TYPE, CASE WHEN ti.pk THEN 'PRI' ELSE '' END AS COLUMN_KEY, {s} AS EXTRA, '' AS COLUMN_COMMENT " ++
+        "{s} AS COLUMN_TYPE, {s} AS COLUMN_KEY, {s} AS EXTRA, '' AS COLUMN_COMMENT " ++
         "FROM pragma_table_list tl JOIN pragma_table_xinfo(tl.name, tl.`schema`) ti " ++
-        "WHERE ti.hidden IN (0, 2, 3) AND tl.`schema` <> 'temp' AND tl.name NOT LIKE 'sqlite\\_%' AND tl.name NOT IN ('xq_catalog', 'xq_sequence')", .{ dflt, ty, ty, ty, ty, ty, ty, ty, ty, autoinc }, 0);
+        "WHERE ti.hidden IN (0, 2, 3) AND tl.`schema` <> 'temp' AND tl.name NOT LIKE 'sqlite\\_%' AND tl.name NOT IN ('xq_catalog', 'xq_sequence')", .{ dflt, ty, ty, ty, ty, ty, ty, ty, ty, key, extra }, 0);
 }
 
 const schemata = "SELECT 'def' AS CATALOG_NAME, name AS SCHEMA_NAME, 'utf8mb4' AS DEFAULT_CHARACTER_SET_NAME, " ++

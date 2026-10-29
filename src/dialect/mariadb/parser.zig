@@ -16,7 +16,7 @@
 //!    xq_xor() and xq_bitxor();
 //!  - `a || b` is OR, or SQLite's || (NULL if an operand is) under
 //!    PIPES_AS_CONCAT; `a <=> b` is `a IS b`;
-//!  - LIKE has the escape character \ unless NO_BACKSLASH_ESCAPES;
+//!  - LIKE has the escape character \ (also under NO_BACKSLASH_ESCAPES);
 //!  - function names MariaDB spells differently are renamed
 //!    (functionCall()).
 
@@ -335,7 +335,7 @@ pub const Parser = struct {
                 var esc: ?*Expr = null;
                 if (s.eatKw("ESCAPE")) {
                     esc = try s.primaryWithCollate();
-                } else if (!s.mode.has(.NO_BACKSLASH_ESCAPES)) {
+                } else {
                     esc = try s.stringExpr("\\");
                 }
                 l = try ir.expr.like(s.p, irTok(op), not, l, r, esc);

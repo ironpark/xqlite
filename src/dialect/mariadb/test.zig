@@ -302,10 +302,10 @@ test "mariadb: DDL, catalog, SHOW and DESCRIBE" {
     try c.expectError("INSERT INTO users (email, meta) VALUES ('z@y', 'not json')", "CHECK constraint failed: json_valid(\"meta\")");
     try c.exec("UPDATE users SET score = 1.5");
     try c.expectRows("SELECT score, updated_at IS NOT NULL FROM users", "1.5|1\n");
-    try c.expectRows("SHOW INDEX FROM users", "users|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE||\n" ++
-        "users|0|email|1|email|A|NULL|NULL|NULL||BTREE||\n" ++
-        "users|1|idx_status|1|status|A|NULL|NULL|NULL||BTREE||\n" ++
-        "users|1|idx_status|2|created_at|A|NULL|NULL|NULL||BTREE||\n");
+    try c.expectRows("SHOW INDEX FROM users", "users|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE|||NO\n" ++
+        "users|0|email|1|email|A|NULL|NULL|NULL||BTREE|||NO\n" ++
+        "users|1|idx_status|1|status|A|NULL|NULL|NULL||BTREE|||NO\n" ++
+        "users|1|idx_status|2|created_at|A|NULL|NULL|NULL||BTREE|||NO\n");
     // The second CREATE IF NOT EXISTS does nothing.
     try c.exec("CREATE TABLE IF NOT EXISTS users (x INT)");
     try c.expectRows("SHOW WARNINGS", "Note|1050|Table 'users' already exists\n");

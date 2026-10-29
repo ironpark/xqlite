@@ -24,10 +24,15 @@ clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB
 
 ```sh
 zig build
-SQ=/tmp/sqref/sqlite3 tools/planner/diff.py tools/planner/planner.txt -v
-tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 tools/planner/diff.py /tmp/c1.txt
+zig build tools
+SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner tools/planner/planner.txt -v
+SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner -k code tools/planner/window.txt
+SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner     # vtablog.txt를 뺀 전부
+tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner /tmp/c1.txt
 ```
 
+- `xqt planner`(예전 `diff.py`)는 파일마다 실패한 쿼리를 `FAIL[종류] block N: 쿼리`로, 마지막에 `N queries; failures: code=…, eqp=…, res=…`를 출력합니다. `-k res,eqp,code`로 비교할 것을 고르고, `-v`는 다른 부분을 보여 줍니다(바이트코드는 unified diff). 블록의 셋업을 모두 병렬로 만든 뒤, 쿼리를 블록 안에서도 8개씩 나눠 각자 블록 디렉터리의 사본에서 병렬로 돌립니다. 엔진은 쿼리마다 60초가 지나면 `TIMEOUT`이 됩니다.
+- `--known FILE`은 알려진 차이의 목록(`known-failures.list`, 줄마다 `케이스파일 종류 쿼리`)입니다. 목록에 있는 실패는 `KNOWN`으로 출력하고 종료 코드에 넣지 않으며, 다시 같아진 항목은 `FIXED`로 실패합니다. `zig build check`가 이 목록을 씁니다.
 - 케이스 파일은 `----` 줄로 블록을 나눕니다. 블록마다 `==` 줄 앞은 스키마와 데이터(기준 셸로 한 번 만들어 둠), 뒤는 한 줄에 쿼리 하나입니다.
 - `vtab.txt`는 가상 테이블 케이스입니다. 두 엔진에 다 있는 모듈만 씁니다: `pragma_*` 테이블 값 함수(`sqlite_schema`와 조인, 숨은 열 제약, ORDER BY, LIMIT), 셸이 등록하는 `generate_series`, `bytecode()`/`tables_used()`, `sqlite_schema`에 써 넣은 가상 테이블(xConnect, DDL)과 오류("no such module", "may not be modified" 등). 일부는 SQLite TCL 테스트(`tabfunc01.test`, `pragma5.test` 등)에서 뽑았습니다.
 - `vtablog.txt`는 `ext/misc/vtablog.c`(모듈 메서드 호출을 모두 출력하는 가상 테이블)로 xBestIndex 입력, xUpdate 인자, 트랜잭션·세이브포인트 호출 순서를 비교합니다. vtablog.c를 넣어 빌드한 sqlite3가 필요하고, xqlite는 `XQ_VTABLOG=1`일 때 셸에 Zig 포팅(`src/ext/vtablog.zig`)을 등록합니다. 아말감(`make sqlite3.c shell.c`)으로 다음처럼 빌드합니다.
@@ -45,7 +50,7 @@ tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 tools/pl
     -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_STRICT_SUBTYPE=1 \
     -DSQLITE_EXTRA_INIT=vtablog_extra_init -DSQLITE_CORE \
     -o /tmp/sqref-vtablog/sqlite3 shell.c sqlite3.c ref/sqlite/ext/misc/vtablog.c extra.c -lpthread -lm
-  XQ_VTABLOG=1 SQ=/tmp/sqref-vtablog/sqlite3 tools/planner/diff.py tools/planner/vtablog.txt
+  XQ_VTABLOG=1 SQ=/tmp/sqref-vtablog/sqlite3 zig-out/bin/xqt planner tools/planner/vtablog.txt
   ```
 
   블록마다 가상 테이블을 하나만 둡니다. 스키마 해시를 도는 순서(연결을 닫을 때의 xDisconnect, integrity_check의 xIntegrity)가 SQLite의 해시와 다르기 때문입니다.

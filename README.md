@@ -201,9 +201,9 @@ pub fn main(init: std.process.Init) !void {
 호환성은 주장이 아니라 테스트로 증명합니다.
 
 - **단위 테스트**: `zig build test`. 시드 퍼저의 짧은 실행과 문서·예제의 이름 검사도 함께 합니다.
-- **sqlite3 교차 검증**: `tools/interop-*.sh`가 서로 만든 DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 순정 sqlite3와 비교합니다.
-- **플래너 차등 테스트**: `tools/planner/diff.py`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
-- **sqllogictest**: `tools/slt/run.py`
+- **sqlite3 교차 검증**: `xqt interop`과 `tools/interop-*.sh`가 서로 만든 DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 순정 sqlite3와 비교합니다.
+- **플래너 차등 테스트**: `xqt planner`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
+- **sqllogictest**: `xqt slt`
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `ir_roundtrip`)
 - **방언 차등 테스트**: `tools/dialect/pg-diff.sh`, `maria-diff.sh`가 실제 PostgreSQL 16, MariaDB 11과 결과를 비교합니다.
 

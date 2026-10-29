@@ -6,6 +6,7 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 
 - [도구 한눈에 보기](#도구-한눈에-보기)
 - [준비](#준비)
+- [한 번에 전부: zig build check](#한-번에-전부-zig-build-check)
 - [단위 테스트](#단위-테스트)
 - [sqlite3 교차 검증](#sqlite3-교차-검증)
 - [플래너 차등 테스트](#플래너-차등-테스트)
@@ -17,14 +18,15 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 
 ## 도구 한눈에 보기
 
-모든 스크립트는 먼저 `zig build`를 해 두어야 합니다.
+모든 스크립트는 먼저 `zig build`를 해 두어야 합니다. `xqt`는 `zig build tools`로 빌드합니다([tools/xqt/README.md](../tools/xqt/README.md)). 셸·Python 스크립트는 `xqt`로 옮기는 중입니다.
 
 | 도구 | 확인하는 것 | 기준 |
 | --- | --- | --- |
 | `zig build test` | 단위 테스트, 문서·예제의 이름, 전역 상태, 시드 퍼저 스모크 | — |
+| `zig build check` | 아래 표의 대부분을 병렬로 한 번에: 단위 테스트, `xqt interop`, `xqt planner`, `fuzzcheck` (`-Dslt`, `-Dfuzz`로 더) | 아래와 같음 |
 | `tools/interop-btree.sh` | 서로 쓴 테이블·인덱스를 읽고 수정, `integrity_check` 비교 | sqlite3 (`PATH`) |
-| `tools/interop-sql.sh` | 같은 SQL을 두 엔진으로 실행, 결과·`integrity_check` 비교 | sqlite3 (`PATH`) |
-| `tools/interop-hot-journal.sh` | 서로 남긴 핫 저널 복구 | sqlite3 (`PATH`) |
+| `xqt interop sql` | 같은 SQL을 두 엔진으로 실행, 결과·`integrity_check` 비교 | `SQLITE3` (3.54.1) |
+| `xqt interop hot-journal` | 서로 남긴 핫 저널 복구 | `SQLITE3` (3.54.1) |
 | `tools/interop-shell.sh` | `xqlite sql` 셸과 sqlite3 셸의 출력·오류·종료 코드, `.dump` 왕복 | `SQLITE3` (3.54.1) |
 | `tools/interop-pragma.sh` | PRAGMA 결과 | `SQLITE3` (3.54.1) |
 | `tools/interop-savepoint.sh` | SAVEPOINT·문장 롤백을 저널 모드·캐시 크기별로 비교 | `SQLITE3` |
@@ -34,8 +36,8 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 | `tools/interop-vacuum.sh` | 두 엔진이 `VACUUM`/`VACUUM INTO`한 파일의 바이트 비교, 셸의 `.backup`/`.save`/`.restore`, VACUUM 도중 크래시 복구 | `SQLITE3` (3.54.1), C 컴파일러(`CC`) |
 | `tools/interop-pg.sh` | PostgreSQL 방언이 쓴 DB를 sqlite3가 검사하고 같은 행·스키마를 읽음 | sqlite3 (`PATH`) |
 | `tools/interop-mariadb.sh` | MariaDB 방언이 쓴 DB를 sqlite3가 검사하고 같은 행·스키마를 읽음 | `SQLITE3` |
-| `tools/planner/diff.py` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드 | `SQ` (3.54.1, 주석 없는 빌드) |
-| `tools/slt/run.py` | sqllogictest | `--ref` (선택) |
+| `xqt planner` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드 | `SQ` (3.54.1, 주석 없는 빌드) |
+| `xqt slt` | sqllogictest | `--ref` (선택) |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스에서 크래시·메모리 누수·close 실패 | — |
 | `zig build fuzz` | 시드 퍼저: `btree_model`, `btree_corrupt`, `ir_roundtrip` | — |
 | `tools/dialect/pg-diff.sh` | PostgreSQL 방언을 실제 PostgreSQL 16과 차등 비교 | PostgreSQL 서버 |
@@ -64,10 +66,11 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 | --- | --- | --- |
 | `SQLITE3` | `interop-shell.sh`, `interop-pragma.sh`, `interop-wal.sh`, `interop-attach.sh`, `interop-analyze.sh`, `interop-vacuum.sh`, `bench.sh` | `/tmp/xq-sqlite-build/sqlite3`가 있으면 그것, 없으면 `PATH`의 `sqlite3` |
 | `SQLITE3` | `interop-savepoint.sh`, `interop-mariadb.sh` | `PATH`의 `sqlite3` |
-| `SQ` | `tools/planner/diff.py` | `PATH`의 `sqlite3` |
-| `XQ` | `tools/planner/diff.py`, `tools/slt/run.py` | 이 저장소의 `zig-out/bin/xqlite` |
+| `SQLITE3` | `xqt interop` (모든 모듈) | `/tmp/xq-sqlite-build/sqlite3`가 있으면 그것, 없으면 `PATH`의 `sqlite3` |
+| `SQ` | `xqt planner` | `PATH`의 `sqlite3` |
+| `XQ` | `xqt` | 이 저장소의 `zig-out/bin/xqlite` |
 
-`interop-btree.sh`, `interop-sql.sh`, `interop-hot-journal.sh`, `interop-pg.sh`는 `PATH`의 `sqlite3`를 씁니다.
+`interop-btree.sh`, `interop-pg.sh`는 `PATH`의 `sqlite3`를 씁니다. `xqt`에서는 같은 변수를 `--sqlite3`, `--sq`, `--xq` 옵션으로도 줄 수 있고, 옵션이 환경 변수보다 앞섭니다.
 
 **`SQ`는 따로 빌드한 셸이어야 합니다.** sqlite3 셸의 기본 빌드는 `SQLITE_ENABLE_EXPLAIN_COMMENTS`를 켜는데, 이 옵션은 주석용 `OP_Noop`을 바이트코드에 끼워 넣습니다. 그래서 바이트코드를 비교하려면 이 옵션을 뺀 3.54.1 셸이 필요합니다. 아말감(`sqlite3.c`, `shell.c`)으로 다음처럼 빌드합니다.
 
@@ -78,6 +81,23 @@ clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB
 ```
 
 같은 셸을 `SQLITE3`에도 쓸 수 있습니다. 가상 테이블 로그(`vtablog.txt`)용 빌드는 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.
+
+## 한 번에 전부: zig build check
+
+```sh
+SQ=/tmp/sqref/sqlite3 zig build check -Doptimize=ReleaseSafe
+zig build check -Dslt=true      # sqllogictest도 (ref/sqllogictest, 몇 분)
+zig build check -Dfuzz=true     # 시드 퍼저 셋을 무작위 시드로 한 번씩
+```
+
+다음을 모두 병렬로 돌리고, 하나라도 실패하면 실패합니다.
+
+- `zig build test`의 모든 것과 `xqt` 자체의 단위 테스트
+- `xqt interop`: 옮긴 모든 interop 모듈
+- `xqt planner`: `vtablog.txt`를 뺀 모든 케이스 파일. 알려진 차이(`tools/planner/known-failures.list`)는 실패로 세지 않습니다.
+- `xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db`
+
+같은 빌드의 xqlite와 크래시 shim을 `xqt`에 넘기므로 `zig build`를 따로 할 필요가 없습니다. 아직 옮기지 않은 셸 스크립트(`interop-btree.sh` 등)는 들어 있지 않습니다.
 
 ## 단위 테스트
 
@@ -101,8 +121,8 @@ zig build test
 ```sh
 zig build
 ./tools/interop-btree.sh
-./tools/interop-sql.sh
-./tools/interop-hot-journal.sh
+zig build tools
+zig-out/bin/xqt interop sql hot-journal     # 이름 없이: 옮긴 모듈 전부
 SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-shell.sh
 SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-pragma.sh
 SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-savepoint.sh
@@ -117,8 +137,8 @@ SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-mariadb.sh
 | 스크립트 | 자세한 내용 |
 | --- | --- |
 | `interop-btree.sh` | xqlite가 만든 테이블·인덱스를 sqlite3가 검사하고, sqlite3가 만든 DB를 xqlite가 수정합니다. auto-vacuum(full, incremental) DB에서도 반복합니다. |
-| `interop-sql.sh` | 어느 쪽이 쓴 DB에서든 같은 문장이 같은 결과를 내고 `integrity_check`를 통과해야 합니다. |
-| `interop-hot-journal.sh` | 커밋 중에 죽은 xqlite의 핫 저널을 sqlite3가 되돌리고, 그 반대도 확인합니다. |
+| `xqt interop sql` | 어느 쪽이 쓴 DB에서든 같은 문장이 같은 결과를 내고 `integrity_check`를 통과해야 합니다. |
+| `xqt interop hot-journal` | 커밋 중에 죽은 xqlite의 핫 저널을 sqlite3가 되돌리고, 그 반대도 확인합니다. |
 | `interop-shell.sh` | 모든 출력 모드, 헤더, nullvalue, 구분자, `.tables`/`.schema`/`.indexes`/`.dump`, 오류의 표준 출력·표준 오류·종료 코드를 비교합니다. xqlite의 `.dump`로 sqlite3에서 DB를 다시 만듭니다. |
 | `interop-pragma.sh` | 각 PRAGMA의 결과 행을 비교합니다. 헤더를 바꾸는 PRAGMA(page_size, auto_vacuum, user_version, journal_mode ...) 뒤에는 `integrity_check`도 봅니다. |
 | `interop-savepoint.sh` | SAVEPOINT / RELEASE / ROLLBACK TO와 도중에 실패하는 문장을 저널 모드마다, 스필이 일어나는 작은 캐시로 비교합니다. |
@@ -132,7 +152,7 @@ SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-mariadb.sh
 크래시는 두 가지 방법으로 만듭니다.
 
 - `interop-wal.sh`: 오류를 주입하는 VFS(`src/vfs/crash.zig`)를 씁니다. N번째 쓰기에서 프로세스를 바로 끝내 전원 차단을 흉내 내고, 선택하면 그 쓰기를 절반만 기록합니다. `xqlite` 명령이 `$XQLITE_TEST_CRASH`를 받을 때만 설치하고, 라이브러리는 쓰지 않습니다.
-- `interop-hot-journal.sh`: `xqlite crash-write FILE BYTE`가 모든 페이지를 덮어쓴 뒤 커밋 1단계에서 끝나 핫 저널을 남깁니다.
+- `xqt interop hot-journal`: `xqlite crash-write FILE BYTE`가 모든 페이지를 덮어쓴 뒤 커밋 1단계에서 끝나 핫 저널을 남깁니다.
 - `interop-attach.sh`, `interop-vacuum.sh`: xqlite는 `$XQLITE_TEST_CRASH`(`db:N`, `journal:N`, `wal:N`)로, sqlite3는 스크립트가 `CC`로 빌드해 미리 올리는 라이브러리(`interop-attach.sh`는 `tools/crashshim.c`, macOS `DYLD_INSERT_LIBRARIES`, Linux `LD_PRELOAD`)로 죽입니다. 이 라이브러리는 이름이 정한 접미사로 끝나는 파일의 N번째 변경(쓰기, 자르기, 삭제)에서 프로세스를 끝냅니다. 빌드할 수 없거나 sqlite3에 닿지 않으면 그 단계만 건너뜁니다.
 
 ## 플래너 차등 테스트
@@ -141,7 +161,9 @@ SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-mariadb.sh
 
 ```sh
 zig build
-SQ=/tmp/sqref/sqlite3 tools/planner/diff.py tools/planner/planner.txt -v
+zig build tools
+SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner tools/planner/planner.txt -v
+SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner      # vtablog.txt를 뺀 전부, 블록과 쿼리까지 병렬로
 ```
 
 케이스 파일 형식, 케이스 모음(`vtab.txt`, `json.txt`, `window.txt`, `wal.txt`, `attach.txt`, `vacuum.txt` ...), 무작위 케이스 생성기, `SQOPT`·`XQ_WHERETRACE` 같은 옵션은 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.
@@ -152,8 +174,8 @@ SQ=/tmp/sqref/sqlite3 tools/planner/diff.py tools/planner/planner.txt -v
 
 ```sh
 ./tools/fetch-slt.sh
-zig build -Doptimize=ReleaseSafe
-./tools/slt/run.py ref/sqllogictest/test     # 전부 병렬로, 실패를 원인별로 묶음
+zig build tools -Doptimize=ReleaseSafe
+zig-out/bin/xqt slt ref/sqllogictest/test     # 전부 병렬로, 실패를 원인별로 묶음
 ```
 
 C 실행기와의 대조, WAL 모드 실행 같은 옵션은 [tools/slt/README.md](../tools/slt/README.md)에 있습니다.
@@ -280,7 +302,7 @@ tools/dialect/maria-diff.sh [cases-file]     # 기본: tools/dialect/maria-cases
 | 영역 | 방법 | 지금 |
 | --- | --- | --- |
 | SQLite | [sqllogictest](https://www.sqlite.org/sqllogictest/)와 SQLite TCL 테스트 스위트 일부를 포팅 | sqllogictest 실행기, 플래너 케이스 일부를 TCL 테스트에서 뽑음 |
-| 파일 포맷 | 순정 SQLite와 xqlite가 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check`로 검증 | `interop-*.sh` |
+| 파일 포맷 | 순정 SQLite와 xqlite가 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check`로 검증 | `xqt interop`, `interop-*.sh` |
 | PostgreSQL / MariaDB / MSSQL | 같은 쿼리를 실제 서버와 xqlite에서 실행해 비교(differential testing), 각 DB의 regression test에서 필요한 부분을 가져옴 | `pg-diff.sh`, `maria-diff.sh` |
 | 퍼징 | 파서, 레코드 디코더, B-Tree 페이지 디코더, IR | `fuzzcheck`, 시드 퍼저 |
-| 크래시 복구 | 오류를 주입하는 VFS로 쓰기 도중 전원 차단을 흉내 냄 | `src/vfs/crash.zig`(`interop-wal.sh`), `xqlite crash-write`(`interop-hot-journal.sh`) |
+| 크래시 복구 | 오류를 주입하는 VFS로 쓰기 도중 전원 차단을 흉내 냄 | `src/vfs/crash.zig`(`interop-wal.sh`), `xqlite crash-write`(`xqt interop hot-journal`) |

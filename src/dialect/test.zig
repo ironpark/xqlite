@@ -22,6 +22,10 @@ fn useHooksOf(c: *Conn, d: dialect.Dialect) void {
     main_mod.setFrontend(c.db, dialect.spec(.sqlite).frontend);
 }
 
+test {
+    _ = @import("postgres/frontend.zig");
+}
+
 test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {
     var c: Conn = undefined;
     try c.open();
@@ -35,7 +39,7 @@ test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {
     try c.expectRows("PRAGMA xq_dialect = 'postgres'", "postgres\n");
     try testing.expectEqual(dialect.Dialect.postgres, main_mod.getDialect(c.db));
     // The PostgreSQL frontend runs now.
-    try c.expectError("SELECT 1", "postgres dialect: parser not implemented");
+    try c.expectError("SELECT 1 +", "syntax error at end of input");
     try c.exec("  -- only a comment\n ");
     main_mod.setDialect(c.db, .mariadb);
     try c.expectError("SELECT 1", "mariadb dialect: parser not implemented");
@@ -46,7 +50,7 @@ test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {
     try c.exec("CREATE TABLE t(a)");
     try c.reopen();
     main_mod.setDialect(c.db, .postgres);
-    try c.expectError("SELECT * FROM t", "postgres dialect: parser not implemented");
+    try c.expectRows("SELECT count(*) FROM t", "0\n");
     useHooksOf(&c, .postgres);
     try c.expectRows("SELECT count(*) FROM t", "0\n");
 }

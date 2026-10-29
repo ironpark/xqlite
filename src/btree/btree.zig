@@ -654,10 +654,16 @@ pub const Btree = struct {
     /// Port of sqlite3BtreeCommitPhaseOne(): write and sync everything. Only
     /// finalizing the journal remains.
     pub fn commitPhaseOne(bt: *Btree) Error!void {
+        return bt.commitPhaseOneSuper(null);
+    }
+
+    /// sqlite3BtreeCommitPhaseOne() of a multi-database transaction: the
+    /// journal names the super-journal `super` (see Pager).
+    pub fn commitPhaseOneSuper(bt: *Btree, super: ?[]const u8) Error!void {
         if (bt.in_trans != .write) return;
         if (bt.isAutoVacuum()) try bt.autoVacuumCommit();
         if (bt.do_truncate) bt.pager.truncateImage(bt.n_page);
-        try bt.pager.commitPhaseOne(false);
+        try bt.pager.commitPhaseOneSuper(super, false);
     }
 
     /// Port of sqlite3BtreeCommitPhaseTwo(). Cursors must be closed. With

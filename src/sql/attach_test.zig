@@ -1,4 +1,5 @@
-//! Tests of ATTACH and DETACH (attach.zig).
+//! Tests of ATTACH and DETACH (attach.zig) and of transactions over
+//! several databases (the super-journal of vdbeCommit()).
 
 const std = @import("std");
 const testing = std.testing;
@@ -257,4 +258,177 @@ test "attach: the internal ATTACH of VACUUM, and closeDb()" {
     attach.closeDb(c.db, i_db);
     try testing.expectEqual(@as(usize, 2), c.db.dbs.items.len);
     try c.expectRows("SELECT name FROM pragma_database_list", "main\n");
+}
+
+/// A VFS over a MemVfs that loses power at the Nth change to a file (a
+/// write, truncation or delete): that change and everything after it
+/// fail with IoErr and change nothing, as if the process had died.
+const PowerCut = struct {
+    gpa: std.mem.Allocator,
+    inner: vfs.Vfs,
+    at: u32,
+    changes: u32 = 0,
+    cut: bool = false,
+
+    /// Count a change; true if it must fail.
+    fn change(self: *PowerCut) bool {
+        if (self.cut) return true;
+        self.changes += 1;
+        if (self.changes == self.at) self.cut = true;
+        return self.cut;
+    }
+
+    fn interface(self: *PowerCut) vfs.Vfs {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: vfs.Vfs.VTable = .{ .open = open, .delete = delete, .access = access, .randomness = randomness, .sleep = sleep };
+
+    fn cast(ptr: *anyopaque) *PowerCut {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) vfs.Error!vfs.File {
+        const self = cast(ptr);
+        if (self.cut and flags.create) return error.IoErr;
+        const inner = try self.inner.open(path, flags);
+        const f = try self.gpa.create(File);
+        f.* = .{ .owner = self, .inner = inner };
+        return .{ .ptr = f, .vtable = &File.vtable };
+    }
+
+    fn delete(ptr: *anyopaque, path: []const u8, sync_dir: bool) vfs.Error!void {
+        if (cast(ptr).change()) return error.IoErr;
+        return cast(ptr).inner.delete(path, sync_dir);
+    }
+
+    fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) vfs.Error!bool {
+        return cast(ptr).inner.access(path, mode);
+    }
+
+    fn randomness(ptr: *anyopaque, buf: []u8) void {
+        cast(ptr).inner.randomness(buf);
+    }
+
+    fn sleep(ptr: *anyopaque, us: u32) u32 {
+        return cast(ptr).inner.sleep(us);
+    }
+
+    const File = struct {
+        owner: *PowerCut,
+        inner: vfs.File,
+
+        const vtable: vfs.File.VTable = .{
+            .close = close,
+            .read = read,
+            .write = write,
+            .truncate = truncate,
+            .sync = sync,
+            .fileSize = fileSize,
+            .lock = lock,
+            .unlock = unlock,
+            .checkReservedLock = checkReservedLock,
+            .sectorSize = sectorSize,
+            .deviceCharacteristics = deviceCharacteristics,
+            .isReadOnly = isReadOnly,
+        };
+
+        fn of(ptr: *anyopaque) *File {
+            return @ptrCast(@alignCast(ptr));
+        }
+        fn close(ptr: *anyopaque) void {
+            const f = of(ptr);
+            f.inner.close();
+            f.owner.gpa.destroy(f);
+        }
+        fn read(ptr: *anyopaque, buf: []u8, offset: u64) vfs.Error!usize {
+            const i = of(ptr).inner;
+            return i.vtable.read(i.ptr, buf, offset);
+        }
+        fn write(ptr: *anyopaque, buf: []const u8, offset: u64) vfs.Error!void {
+            const f = of(ptr);
+            if (f.owner.change()) return error.IoErr;
+            return f.inner.write(buf, offset);
+        }
+        fn truncate(ptr: *anyopaque, size: u64) vfs.Error!void {
+            if (of(ptr).owner.change()) return error.IoErr;
+            return of(ptr).inner.truncate(size);
+        }
+        fn sync(ptr: *anyopaque, flags: vfs.SyncFlags) vfs.Error!void {
+            if (of(ptr).owner.cut) return error.IoErr;
+            return of(ptr).inner.sync(flags);
+        }
+        fn fileSize(ptr: *anyopaque) vfs.Error!u64 {
+            return of(ptr).inner.fileSize();
+        }
+        fn lock(ptr: *anyopaque, level: vfs.LockLevel) vfs.Error!void {
+            return of(ptr).inner.lock(level);
+        }
+        fn unlock(ptr: *anyopaque, level: vfs.LockLevel) vfs.Error!void {
+            return of(ptr).inner.unlock(level);
+        }
+        fn checkReservedLock(ptr: *anyopaque) vfs.Error!bool {
+            return of(ptr).inner.checkReservedLock();
+        }
+        fn sectorSize(ptr: *anyopaque) u32 {
+            return of(ptr).inner.sectorSize();
+        }
+        fn deviceCharacteristics(ptr: *anyopaque) vfs.DeviceCharacteristics {
+            return of(ptr).inner.deviceCharacteristics();
+        }
+        fn isReadOnly(ptr: *anyopaque) bool {
+            return of(ptr).inner.isReadOnly();
+        }
+    };
+};
+
+test "attach: a transaction over several databases commits atomically" {
+    for ([_][]const u8{ "delete", "persist", "truncate" }) |mode| {
+        // Lose power at each change to a file in turn, until the commit
+        // gets through. Without a super-journal, a cut between deleting
+        // (or zeroing) the two journals leaves main committed and a.db
+        // rolled back.
+        var at: u32 = 1;
+        while (true) : (at += 1) {
+            var mem = MemVfs.init(testing.allocator, testing.io);
+            defer mem.deinit();
+            var setup: Conn = undefined;
+            try setup.openOn(&mem);
+            var buf: [256]u8 = undefined;
+            try setup.exec("ATTACH 'a.db' AS a; CREATE TABLE t(x); INSERT INTO t VALUES(1); CREATE TABLE a.t(x); INSERT INTO a.t VALUES(1)");
+            setup.close();
+
+            var pc: PowerCut = .{ .gpa = testing.allocator, .inner = mem.interface(), .at = at };
+            var opened: ?*int.Sqlite3 = null;
+            try testing.expectEqual(RC.OK, main_mod.open(pc.interface(), "test.db", .{}, &opened));
+            // The journal mode is the connection's.
+            const sql = try std.fmt.bufPrint(&buf, "ATTACH 'a.db' AS a; PRAGMA journal_mode={s}; BEGIN; UPDATE t SET x = 2; UPDATE a.t SET x = 2; COMMIT", .{mode});
+            const rc = legacy.exec(opened.?, sql, null, null, null);
+            _ = main_mod.close(opened.?);
+            const committed = !pc.cut;
+            if (committed) try testing.expectEqual(RC.OK, rc);
+
+            // Another connection recovers the journals: both databases
+            // have the old row or both the new one.
+            var check: Conn = undefined;
+            try check.openOn(&mem);
+            defer check.close();
+            try check.exec("ATTACH 'a.db' AS a");
+            const got = try check.query("SELECT (SELECT x FROM main.t) || (SELECT x FROM a.t)");
+            defer testing.allocator.free(got);
+            if (committed) {
+                try testing.expectEqualStrings("22\n", got);
+            } else if (!std.mem.eql(u8, got, "11\n") and !std.mem.eql(u8, got, "22\n")) {
+                std.debug.print("journal_mode={s}, power cut at change {d}: {s}", .{ mode, at, got });
+                return error.NotAtomic;
+            }
+            try check.expectRows("PRAGMA integrity_check; PRAGMA a.integrity_check", "ok\nok\n");
+            if (committed) {
+                // The super-journal was deleted.
+                var names = mem.files.keyIterator();
+                while (names.next()) |name| try testing.expect(std.mem.indexOf(u8, name.*, "-mj") == null);
+                break;
+            }
+        }
+    }
 }

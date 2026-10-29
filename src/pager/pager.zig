@@ -24,8 +24,11 @@
 //! changed after the savepoint opened to the sub-journal, which is kept in
 //! memory (as with SQLITE_STMTJRNL_SPILL=-1).
 //!
-//! Not ported yet: super journals for multi-database commits (they are
-//! read during recovery but never written), journal_mode=MEMORY,
+//! A transaction that writes several databases names a super journal in
+//! each journal (commitPhaseOneSuper); recovery plays a journal back only
+//! while its super journal exists.
+//!
+//! Not ported yet: journal_mode=MEMORY,
 //! locking_mode=EXCLUSIVE (and with it the heap-memory WAL mode),
 //! in-memory databases, mmap, WAL snapshots, backups.
 
@@ -226,6 +229,8 @@ pub const Pager = struct {
     journal_hdr: u64 = 0,
     /// Page records written after the current header.
     n_rec: u32 = 0,
+    /// The super-journal name is written into the journal (setSuper).
+    set_super: bool = false,
     cksum_init: u32 = 0,
     /// PRAGMA journal_size_limit; negative means no limit.
     journal_size_limit: i64 = -1,
@@ -604,6 +609,7 @@ pub const Pager = struct {
         }
         p.journal_off = 0;
         p.journal_hdr = 0;
+        p.set_super = false;
     }
 
     /// Port of pagerUnlockAndRollback().
@@ -953,6 +959,7 @@ pub const Pager = struct {
             }
             p.n_rec = 0;
             p.journal_off = 0;
+            p.set_super = false;
             p.journal_hdr = 0;
             try p.writeJournalHdr();
         }
@@ -1569,6 +1576,7 @@ pub const Pager = struct {
         // is false outside exclusive mode).
         const unlocked = if (p.wal == null) p.unlockDb(.shared) else {};
         p.state = .reader;
+        p.set_super = false;
         try finalized;
         return unlocked;
     }
@@ -1599,6 +1607,48 @@ pub const Pager = struct {
     fn exclusiveLock(p: *Pager) Error!void {
         if (p.err) |e| return e;
         try p.waitOnLock(.exclusive);
+    }
+
+    /// Port of sqlite3PagerExclusiveLock(): take the EXCLUSIVE lock of a
+    /// write transaction ahead of the commit, unless in WAL mode.
+    pub fn exclusiveLockForCommit(p: *Pager) Error!void {
+        if (p.err) |e| return e;
+        std.debug.assert(p.state.atLeast(.writer_locked) and !p.state.atLeast(.writer_finished));
+        if (p.wal == null) try p.waitOnLock(.exclusive);
+    }
+
+    /// Port of writeSuperJournal(): append the super-journal name `super`
+    /// to the journal (see journal.superNameLen), once per transaction.
+    fn writeSuperJournal(p: *Pager, super_name: ?[]const u8) Error!void {
+        std.debug.assert(!p.set_super and p.wal == null);
+        const super = super_name orelse return;
+        const j = p.jfd orelse return;
+        if (p.journal_mode == .memory) return;
+        p.set_super = true;
+        std.debug.assert(p.journal_hdr <= p.journal_off);
+
+        // The checksum adds the name's bytes as (signed) chars.
+        var cksum: u32 = 0;
+        for (super) |c| cksum +%= @bitCast(@as(i32, @as(i8, @bitCast(c))));
+
+        // In full-sync mode, go on to the next sector, in case the last
+        // record written is already synced.
+        if (p.full_sync) p.journal_off = journal.headerOffset(p.journal_off, p.sector_size);
+        const off = p.journal_off;
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, p.lck_pgno, .big);
+        try j.write(&be, off);
+        try j.write(super, off + 4);
+        std.mem.writeInt(u32, &be, @intCast(super.len), .big);
+        try j.write(&be, off + 4 + super.len);
+        std.mem.writeInt(u32, &be, cksum, .big);
+        try j.write(&be, off + 4 + super.len + 4);
+        try j.write(&journal.magic, off + 4 + super.len + 8);
+        p.journal_off += super.len + 20;
+
+        // A persistent journal may go on past the name; recovery would
+        // then not find it. Truncate.
+        if (try j.fileSize() > p.journal_off) try j.truncate(p.journal_off);
     }
 
     /// Port of syncJournal(). Makes every journaled page durable before any
@@ -1682,6 +1732,13 @@ pub const Pager = struct {
     /// journal (phase two) remains. `no_sync_db` skips the final database
     /// sync, for callers that sync several files themselves.
     pub fn commitPhaseOne(p: *Pager, no_sync_db: bool) Error!void {
+        return p.commitPhaseOneSuper(null, no_sync_db);
+    }
+
+    /// sqlite3PagerCommitPhaseOne() with a super-journal: `super` (if not
+    /// null) is written into the journal before it is synced, so that a
+    /// multi-database transaction commits or rolls back as a whole.
+    pub fn commitPhaseOneSuper(p: *Pager, super: ?[]const u8, no_sync_db: bool) Error!void {
         if (p.err) |e| return e;
         if (!p.state.atLeast(.writer_cachemod)) return;
 
@@ -1701,6 +1758,7 @@ pub const Pager = struct {
         }
 
         try p.incrChangeCounter();
+        try p.writeSuperJournal(super);
         try p.syncJournal(false);
         try p.writePageList(p.cache.dirtyList());
         p.cache.cleanAll();
@@ -1722,7 +1780,7 @@ pub const Pager = struct {
         std.debug.assert(p.state == .writer_locked or p.state == .writer_finished or
             (p.wal != null and p.state == .writer_cachemod));
         p.data_version +%= 1;
-        p.endTransaction(false, true) catch |err| return p.setError(err);
+        p.endTransaction(p.set_super, true) catch |err| return p.setError(err);
     }
 
     /// Port of sqlite3PagerRollback().
@@ -1732,7 +1790,7 @@ pub const Pager = struct {
 
         if (p.wal != null) {
             const r = p.savepoint(.rollback, -1);
-            const r2 = p.endTransaction(false, false);
+            const r2 = p.endTransaction(p.set_super, false);
             r catch |err| return p.setError(err);
             r2 catch |err| return p.setError(err);
             return;

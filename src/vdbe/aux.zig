@@ -914,27 +914,53 @@ pub fn setColName(v: *Vdbe, idx: usize, var_: usize, name: [:0]const u8) void {
     };
 }
 
-/// Port of vdbeCommit(): commit the open transactions. Only one database
-/// file can be written (no ATTACH yet), so no super-journal is needed.
+/// Port of vdbeCommit(): commit the open transactions. When more than one
+/// database file (not counting TEMP) was written in a journal mode that
+/// can roll back, they commit through a super-journal, atomically.
 fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
     const vtab = @import("../sql/vtab.zig");
-    // First the xSync of the virtual tables written by the transaction.
+    // First the xSync of the virtual tables written by the transaction:
+    // it may add an attached database to the transaction.
     var rc = vtab.sync(db, v);
+
+    // Whether anything was written, and how many database files (not
+    // TEMP) need a super-journal for an atomic commit.
     var need_xcommit = false;
-    if (rc == RC.OK) for (db.dbs.items) |d| {
+    var n_trans: usize = 0;
+    for (db.dbs.items) |d| {
+        if (rc != RC.OK) break;
         const bt = d.bt orelse continue;
-        if (bt.txnState() == .write) need_xcommit = true;
-    };
-    if (need_xcommit) {
-        for (db.dbs.items) |d| {
-            if (rc != RC.OK) break;
-            const bt = d.bt orelse continue;
-            if (bt.txnState() == .write) bt.commitPhaseOne() catch |err| {
-                rc = int.errorCode(err);
-            };
-        }
+        if (bt.txnState() != .write) continue;
+        need_xcommit = true;
+        const pager = bt.pager;
+        // aMJNeeded: DELETE, PERSIST and TRUNCATE journals. A temporary
+        // or in-memory database (one pager here) needs none.
+        const mj_needed = switch (pager.journal_mode) {
+            .delete, .persist, .truncate => true,
+            .off, .memory, .wal => false,
+        };
+        if (d.safety_level != PAGER_SYNCHRONOUS_OFF and mj_needed and !pager.temp_file) n_trans += 1;
+        pager.exclusiveLockForCommit() catch |err| {
+            rc = int.errorCode(err);
+        };
     }
-    if (rc == RC.OK) {
+    if (rc != RC.OK) return rc;
+
+    // The simple case: no more than one database file has a write
+    // transaction, or main is a temporary database (multi-file commits
+    // are then not atomic).
+    const main_file = if (db.dbs.items[0].bt) |bt| bt.pager.path else "";
+    if (main_file.len == 0 or n_trans <= 1) {
+        if (need_xcommit) {
+            for (db.dbs.items) |d| {
+                if (rc != RC.OK) break;
+                const bt = d.bt orelse continue;
+                if (bt.txnState() == .write) bt.commitPhaseOne() catch |err| {
+                    rc = int.errorCode(err);
+                };
+            }
+        }
+        // Commit only if every database completed phase one.
         for (db.dbs.items) |d| {
             if (rc != RC.OK) break;
             const bt = d.bt orelse continue;
@@ -943,8 +969,103 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
             };
         }
         if (rc == RC.OK) vtab.commit(db);
+        return rc;
     }
-    return rc;
+    return commitWithSuperJournal(db, main_file);
+}
+
+/// Write the 0-terminated name of a journal into the super-journal.
+fn writeSuperJournalEntry(sj: @import("../vfs/vfs.zig").File, name: []const u8, offset: u64) @import("../vfs/vfs.zig").Error!void {
+    try sj.write(name, offset);
+    try sj.write(&.{0}, offset + name.len);
+}
+
+/// PAGER_SYNCHRONOUS_OFF, the safety level of TEMP.
+const PAGER_SYNCHRONOUS_OFF = 1;
+
+/// The complex case of vdbeCommit(): a write transaction on several
+/// database files, committed through a super-journal named after main.
+fn commitWithSuperJournal(db: *Sqlite3, main_file: []const u8) i32 {
+    const v = db.vfs.?;
+    const gpa = db.gpa;
+
+    // Choose a super-journal name that is not taken: main's name with
+    // "-mjXXXXXX9XX" (the 9 avoids collisions with 8+3 names).
+    const super = gpa.alloc(u8, main_file.len + 12) catch return RC.NOMEM;
+    defer gpa.free(super);
+    @memcpy(super[0..main_file.len], main_file);
+    var retry_count: u32 = 0;
+    while (true) {
+        if (retry_count > 100) {
+            // C logs "MJ delete" here.
+            v.delete(super, false) catch {};
+            break;
+        }
+        retry_count += 1;
+        var random: [4]u8 = undefined;
+        @import("../sql/func.zig").randomness(db, &random);
+        const r = std.mem.readInt(u32, &random, .little);
+        _ = std.fmt.bufPrint(super[main_file.len..], "-mj{X:0>6}9{X:0>2}", .{ (r >> 8) & 0xffffff, r & 0xff }) catch unreachable;
+        const exists = v.access(super, .exists) catch |err| return int.errorCode(err);
+        if (!exists) break;
+    }
+    const sj = v.open(super, .{ .kind = .super_journal, .read_write = true, .create = true, .exclusive = true }) catch |err| return int.errorCode(err);
+
+    // The names of the journals of the transaction. On error the journals
+    // do not name the super-journal yet, so each rolls back on its own.
+    var offset: u64 = 0;
+    for (db.dbs.items) |d| {
+        const bt = d.bt orelse continue;
+        if (bt.txnState() != .write) continue;
+        // TEMP and in-memory databases have no journal name.
+        if (bt.pager.temp_file) continue;
+        const name = bt.pager.journal_path;
+        std.debug.assert(name.len > 0);
+        writeSuperJournalEntry(sj, name, offset) catch |err| {
+            sj.close();
+            v.delete(super, false) catch {};
+            return int.errorCode(err);
+        };
+        offset += name.len + 1;
+    }
+
+    // Sync the super-journal, unless the device writes sequentially.
+    if (!sj.deviceCharacteristics().sequential) {
+        sj.sync(.{}) catch |err| {
+            sj.close();
+            v.delete(super, false) catch {};
+            return int.errorCode(err);
+        };
+    }
+
+    // Sync every database file of the transaction; this also writes the
+    // super-journal name into each journal. After an error the
+    // super-journal is left: a journal may already name it.
+    var rc: i32 = RC.OK;
+    for (db.dbs.items) |d| {
+        if (rc != RC.OK) break;
+        const bt = d.bt orelse continue;
+        bt.commitPhaseOneSuper(super) catch |err| {
+            rc = int.errorCode(err);
+        };
+    }
+    sj.close();
+    std.debug.assert(rc != RC.BUSY);
+    if (rc != RC.OK) return rc;
+
+    // Deleting the super-journal commits the transaction; the directory
+    // is synced before any journal is deleted.
+    v.delete(super, true) catch |err| return int.errorCode(err);
+
+    // Everything is synced: what is left only closes, deletes or
+    // truncates journals. A failure leaves cold journals behind, which
+    // does no harm, so it is not reported.
+    for (db.dbs.items) |d| {
+        const bt = d.bt orelse continue;
+        bt.commitPhaseTwo(true) catch {};
+    }
+    @import("../sql/vtab.zig").commit(db);
+    return RC.OK;
 }
 
 /// sqlite3VdbeError(p, "%s", sqlite3_value_text(m)): the error message
@@ -1038,7 +1159,6 @@ fn fkError(v: *Vdbe) FkError {
     if (v.prep_flags & PREPARE_SAVESQL == 0) return error.Error;
     return error.Constraint;
 }
-
 
 /// Port of sqlite3VdbeHalt(): the program stops. In autocommit mode the
 /// transaction is committed (or rolled back on error); otherwise the
@@ -1208,7 +1328,7 @@ pub fn reset(v: *Vdbe) i32 {
 /// Port of sqlite3VdbeFinalize().
 pub fn finalize(v: *Vdbe) i32 {
     var rc: i32 = RC.OK;
-    if (@intFromEnum(v.e_vdbe_state) >= @intFromEnum(vi.VdbeState.ready)) rc = reset(v);
+    if (@backingInt(v.e_vdbe_state) >= @backingInt(vi.VdbeState.ready)) rc = reset(v);
     delete(v);
     return rc;
 }

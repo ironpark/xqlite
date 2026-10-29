@@ -377,7 +377,19 @@ pub const Lowerer = struct {
         const lhs = try l.expr(b.l);
         const rhs = try l.expr(b.r);
         const op: u8 = switch (b.op) {
-            .@"and" => return (try ir.expr.@"and"(p, lhs, rhs)).?,
+            .@"and" => {
+                // ir.expr.and() folds `x AND 0` to 0, as SQLite's parser does,
+                // but not `x AND FALSE` in the text: FALSE is a name until
+                // resolved (in ORDER BY the 0 would be a column number).
+                const truth: int.EP = .{ .IsTrue = true, .IsFalse = true };
+                const saved = .{ lhs.flags, rhs.flags };
+                if (b.l.kind == .boolean) lhs.flags.clear(truth);
+                if (b.r.kind == .boolean) rhs.flags.clear(truth);
+                const x = (try ir.expr.@"and"(p, lhs, rhs)).?;
+                lhs.flags = saved[0];
+                rhs.flags = saved[1];
+                return x;
+            },
             .json_get, .json_get_text => {
                 var args = try ir.list.append(p, null, lhs);
                 args = try ir.list.append(p, args, rhs);
@@ -613,9 +625,13 @@ pub const Lowerer = struct {
         if (s.src) |text| l.src = text;
         l.value_target = null;
         var x = try l.body(s.body);
+        // A query takes one WITH: a nested query's is kept in a subquery.
+        if (s.with != null and x.with != null) x = try l.wrap(x);
         if (s.order_by.len > 0 or s.limit != null or s.offset != null) {
-            // SQLite takes no ORDER BY/LIMIT after VALUES.
-            if (x.order_by != null or x.limit != null or s.body.* == .values) x = try l.wrap(x);
+            // SQLite takes no ORDER BY/LIMIT after VALUES: wrapped where
+            // render.zig wraps, so that the text is the same query (the
+            // subquery may sort, and LIMIT pick rows, otherwise).
+            if (x.order_by != null or x.limit != null or render.Renderer.tail(s.body) != .plain) x = try l.wrap(x);
             const items: []const tree.FromItem = if (s.body.* == .core and !aliasShadows(s.body.core, s.order_by)) s.body.core.from else &.{};
             x.order_by = try l.sortList(s.order_by, items);
             x.limit = try l.limit(s.limit, s.offset);

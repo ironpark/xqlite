@@ -12,6 +12,7 @@
 const std = @import("std");
 const fuzz = @import("testing/fuzz.zig");
 const btree_fuzz = @import("btree/btree_fuzz.zig");
+const ir_fuzz = @import("ir/fuzz.zig");
 
 const Fuzzer = struct {
     name: []const u8,
@@ -24,6 +25,7 @@ const Fuzzer = struct {
 const fuzzers = [_]Fuzzer{
     .{ .name = "btree_model", .run = btree_fuzz.model, .events = 50_000, .smoke_events = 2_000 },
     .{ .name = "btree_corrupt", .run = btree_fuzz.corrupt, .events = 5_000, .smoke_events = 100 },
+    .{ .name = "ir_roundtrip", .run = ir_fuzz.roundtrip, .events = 2_000, .smoke_events = 30 },
 };
 
 const usage =
@@ -83,4 +85,5 @@ test "fuzzers: smoke" {
 
 test {
     _ = fuzz;
+    _ = ir_fuzz;
 }

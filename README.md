@@ -130,7 +130,7 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 | `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`; 3은 MSSQL 자리), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
 | `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`) |
 | `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
-| `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 방언](#postgresql-방언)) |
+| `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](docs/postgres.md)) |
 | `src/ir/ir.zig` | IR 빌더 파사드: `stmt`, `expr`, `list`, `from`, `select`, `with`, `window`, `dml`, `ddl`, `txn`, `admin`. 각 항목은 대응하는 C 함수(`sqlite3PExpr`, `sqlite3StartTable` ...)의 별칭이거나 parse.y에서 옮긴 도우미 |
 | `src/ir/tree.zig` | 구문 트리 IR: 식, SELECT(복합, CTE, 윈도우, 조인, 서브쿼리, VALUES), INSERT/UPDATE/DELETE(RETURNING, upsert, UPDATE FROM, DELETE USING, ORDER BY ... LIMIT), 트랜잭션, DDL(CREATE/DROP TABLE/INDEX/VIEW/SEQUENCE, ALTER 일부)과 의미 노드 |
 | `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록 |
@@ -214,136 +214,11 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 
 🎯 목표 · 🔬 실험적 / 후순위 · — 해당 없음
 
-### PostgreSQL 방언
+### 방언별 문서
 
-`PRAGMA xq_dialect = 'postgres'`(셸 `.dialect postgres`, Zig API `.dialect = .postgres`)로 켭니다. 프론트엔드는 `src/dialect/postgres/`에 있습니다.
-
-```sql
-PRAGMA xq_dialect = 'postgres';
-CREATE TABLE app_user (
-  id         bigserial PRIMARY KEY,
-  email      varchar(100) NOT NULL UNIQUE,
-  active     boolean NOT NULL DEFAULT true,
-  created_at timestamptz DEFAULT now()
-);
-INSERT INTO app_user (email) VALUES ($1) RETURNING id;
-INSERT INTO app_user (email) VALUES ('a@x') ON CONFLICT (email) DO UPDATE SET active = EXCLUDED.active;
-SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'app_user';
-PRAGMA xq_dialect = 'sqlite';   -- PRAGMA·VACUUM·ANALYZE는 SQLite 문법 그대로 통과
-```
-
-| 파일 | 내용 |
-| --- | --- |
-| `lexer.zig` | PostgreSQL 어휘: 따옴표 없는 식별자는 소문자로 접고 `"Quoted"`는 그대로, `'...'`(`''`, 줄바꿈 사이 이어 붙이기), `E'...'` 이스케이프, `$$...$$`/`$tag$...$tag$`, `$1` 매개변수(→ `?1`), `--`·중첩 `/* */` 주석, `::`, 연산자 규칙(`a<-1`은 `a < -1`), 16진/8진/2진·`1_000` 숫자. 백틱과 `[x]`는 식별자가 아님 |
-| `parser.zig` | 재귀 하강 파서. 구문 트리 IR(`src/ir/tree.zig`)을 만들면서 PostgreSQL 의미를 해석함: 캐스트, LIKE/ILIKE, 함수 이름과 특수 문법, 결과 열 이름, NULL 정렬, 스키마 이름과 카탈로그 뷰, 짧은 INSERT VALUES, DDL의 타입·검사·identity. 연산자 우선순위는 PostgreSQL(OR < AND < NOT < IS < 비교 < BETWEEN/IN/LIKE < 기타 연산자(`\|\|`, `->`) < `+ -` < `* / %` < `^` < 단항 < `::`) |
-| `ddl.zig` | DDL의 PostgreSQL 문구 검사와 이름 없는 인덱스의 이름. 내림·렌더링·카탈로그 기록은 `src/ir/lower.zig`, `render.zig` |
-| `types.zig` | 타입 → STRICT 저장 타입·검사·`format_type()` 철자·캐스트 |
-| `funcs.zig`, `catalog_views.zig` | 방언 함수, `information_schema`/`pg_catalog` 뷰 |
-| `test.zig` | 종단 테스트. `tools/interop-pg.sh`(sqlite3 교차 검증), `tools/dialect/pg-diff.sh` + `pg-cases.txt`(실제 PostgreSQL과 차등 비교) |
-
-**지원하는 것.**
-
-- SELECT: `DISTINCT`, FROM의 테이블·서브쿼리·`VALUES`·`generate_series()`, `JOIN`(`INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS`/`NATURAL`, `ON`/`USING`, 괄호 조인), 서브쿼리 별칭의 열 이름 `AS t(a, b)`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, `ORDER BY ... [ASC|DESC] [NULLS FIRST|LAST]`, `LIMIT`/`OFFSET`/`LIMIT ALL`, `OFFSET n ROWS FETCH FIRST n ROWS ONLY`, `UNION`/`INTERSECT`/`EXCEPT`(INTERSECT가 먼저 묶임), `WITH [RECURSIVE]`와 `[NOT] MATERIALIZED`, `VALUES`, `TABLE t`, `FOR UPDATE/SHARE`(무시)
-- INSERT(열 목록, 여러 행 `VALUES`와 `DEFAULT`, 열보다 적은 값, `SELECT`, `DEFAULT VALUES`, `OVERRIDING SYSTEM VALUE`, `ON CONFLICT (cols) [WHERE] DO NOTHING | DO UPDATE SET ... EXCLUDED.x [WHERE]`), UPDATE(`SET a = ..., (a, b) = (...)`, `= DEFAULT`, `FROM`), DELETE(`USING`), 모두 `RETURNING`(대상의 별칭으로 한정한 열 포함)과 앞의 `WITH`. `TRUNCATE [RESTART IDENTITY]`
-- `BEGIN`/`START TRANSACTION`(격리 수준 등은 파싱만), `COMMIT`/`END`, `ROLLBACK`/`ABORT`, `SAVEPOINT`, `RELEASE [SAVEPOINT]`, `ROLLBACK TO [SAVEPOINT]`, `EXPLAIN`(= SQLite의 EXPLAIN QUERY PLAN)
-- DDL: `CREATE [TEMP] TABLE [IF NOT EXISTS]`(열 제약 `NOT NULL`·`DEFAULT`·`PRIMARY KEY`·`UNIQUE`·`CHECK`·`REFERENCES ... ON DELETE/UPDATE`·`GENERATED ALWAYS AS (...) STORED`·`GENERATED {ALWAYS|BY DEFAULT} AS IDENTITY [(옵션)]`·`COLLATE "C"`, 테이블 제약), `CREATE TABLE ... AS`, `DROP TABLE/VIEW/INDEX/SEQUENCE [IF EXISTS] [CASCADE]`, `CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] [name] ON t [USING btree] (열·식 [DESC]) [WHERE]`(이름이 없으면 PostgreSQL처럼 `t_col_idx`), `CREATE [OR REPLACE] [TEMP] VIEW`, `CREATE SEQUENCE [IF NOT EXISTS] ... START/INCREMENT/MINVALUE/MAXVALUE/[NO] CYCLE`, `ALTER TABLE ... RENAME TO / RENAME COLUMN / ADD COLUMN [IF NOT EXISTS] / DROP COLUMN [IF EXISTS]`
-- 식: `::type`과 `CAST`, 타입 리터럴(`DATE '2024-01-01'`), `IS [NOT] NULL`/`ISNULL`/`NOTNULL`, `IS [NOT] DISTINCT FROM`, `IS [NOT] TRUE/FALSE/UNKNOWN`, `BETWEEN`, `IN (목록|서브쿼리)`, `= ANY (서브쿼리)`/`<> ALL (서브쿼리)`, `EXISTS`, `LIKE`/`ILIKE`/`~~`/`~~*`와 `ESCAPE`, `CASE`, 행 값, `->`/`->>`, `count(*)`, 집계의 `DISTINCT`/`ORDER BY`/`FILTER`, 윈도우 함수(`OVER (PARTITION BY ... ORDER BY ... ROWS/RANGE/GROUPS ... EXCLUDE ...)`, `OVER name`)
-- 함수: SQLite 내장에 더해 `now()`/`current_timestamp`/`localtimestamp`, `current_date`, `substring(x FROM a FOR b)`, `position(a IN b)`, `trim([BOTH|LEADING|TRAILING] [c] FROM x)`, `extract(field FROM x)`/`date_part`, `strpos`, `left`/`right`, `concat`/`concat_ws`, `string_agg`, `lpad`/`rpad`, `repeat`, `reverse`, `split_part`, `starts_with`, `btrim`, `char_length`, `ascii`/`chr`, `greatest`/`least`(NULL은 건너뜀), `bool_and`/`bool_or`/`every`, `floor`/`ceil`/`sqrt`/`power`/`exp`/`ln`/`log`/`mod`/`trunc`/`sign`/`pi`, `random()`(0..1 실수), `gen_random_uuid()`, `version()`, `current_user`/`current_database()`/`current_schema`, 시퀀스 함수
-- 카탈로그: `information_schema.tables`/`columns`(`xq_catalog`의 PostgreSQL 선언 타입, identity 여부)/`views`/`schemata`/`sequences`, `pg_catalog.pg_tables`/`pg_views`/`pg_indexes`/`pg_sequences`(스키마 없이도 보임). PostgreSQL 텍스트로 쓴 정의를 이 프론트엔드가 FROM 자리에서 파싱해 넣으므로 저장되는 것은 없음. 모든 테이블은 catalog `main`, schema `public`이고 `public.t`는 `main.t`, `pg_temp.t`는 `temp.t`
-
-**타입과 의미(정한 방식).**
-
-| PostgreSQL | STRICT 저장 | 검사(이름이 PostgreSQL 메시지인 CHECK) |
-| --- | --- | --- |
-| `smallint`, `integer`(`smallserial`, `serial`) | `INTEGER` | 범위 → `CHECK constraint failed: integer out of range` |
-| `bigint`, `bigserial`, `oid` | `INTEGER` | |
-| `real`, `double precision`, `float(p)` | `REAL` | |
-| `numeric(p,s)`, `decimal` | `ANY` | 숫자만(`invalid input syntax for type numeric`) |
-| `boolean` | `INTEGER` | 0/1만 |
-| `text`, `varchar(n)`, `char(n)` | `TEXT` | `length() <= n`(`value too long for type character varying(n)`) |
-| `bytea` | `BLOB` | |
-| `date`, `time`, `timestamp[tz]`, `interval`, `uuid` | `TEXT` | |
-| `json`, `jsonb` | `TEXT` | `json_valid()` |
-
-- 선언 타입은 `xq_catalog`의 `type` 키에 `format_type()` 철자(`character varying(20)`, `timestamp with time zone`)로 남고, 다른 타입을 넣으면 SQLite STRICT 오류(`cannot store TEXT value in INTEGER column t.a`)가 납니다. 배열과 모르는 타입은 `type "x" does not exist` 같은 오류입니다.
-- **불리언은 정수 0/1입니다.** sqlite3 API로 돌아오는 결과의 타입을 바꿀 수 없으므로 `SELECT true`는 `1`(SQLITE_INTEGER)을 돌려주고 `'t'`/`'yes'`/`'on'` 같은 철자는 `::boolean` 캐스트가 읽습니다(INSERT에 문자열로 넣으면 STRICT 오류).
-- `numeric`은 고정 소수점이 아니라 SQLite 수(정수 또는 실수)입니다: `1.50`은 `1.5`로 나오고, 문자열 상수 `'1.5'`는 숫자로 바꿔 넣지만 텍스트로 바인딩한 값은 거부합니다.
-- SERIAL/IDENTITY는 Phase 4의 시퀀스(`<table>_<col>_seq`)로 번호를 매깁니다. 열은 `INTEGER NOT NULL DEFAULT (nextval('seq'))`이고 키이면 SQLite의 INTEGER PRIMARY KEY(rowid)가 됩니다. INSERT가 빠뜨린 identity 열(그리고 `DEFAULT`)은 프론트엔드가 `nextval()`로 채웁니다: SQLite는 INTEGER PRIMARY KEY의 DEFAULT를 쓰지 않고, `trusted_schema`가 꺼져 있으면 스키마의 `nextval()`은 unsafe use이기 때문입니다. `GENERATED ALWAYS`는 명시한 값을 거부합니다(`OVERRIDING SYSTEM VALUE`로 허용). `xq_catalog`에 `identity`/`identity_kind`가 남고, 테이블을 지우면 시퀀스도 지웁니다. sqlite3에서 이 테이블에 키 없이 넣으면 rowid가 번호를 매깁니다.
-- ORDER BY는 PostgreSQL처럼 NULL을 가장 큰 값으로 칩니다(ASC면 마지막, DESC면 처음). NOT NULL 열과 INTEGER PRIMARY KEY에는 붙이지 않아서 인덱스 순서를 그대로 씁니다(그때 바이트코드는 SQLite와 같음).
-- `LIKE`는 대소문자를 구분하고 기본 이스케이프가 `\`입니다(엔진 함수 `xq_like()`). `ILIKE`는 ASCII 대소문자를 무시합니다(`xq_ilike()`).
-- 스키마에 저장되는 식(CHECK, DEFAULT, 생성 열, 인덱스 식, 뷰)은 IR이 렌더링하므로 SQLite 방언이나 다른 방언의 연결에서 읽어도 같은 뜻입니다. PostgreSQL 함수 테이블의 함수는 `xq_postgres_greatest(...)`처럼 저장됩니다(sqlite3에서는 그런 식을 계산할 수 없음).
-- 결과 열 이름은 PostgreSQL 규칙(`?column?`, 함수 이름, 상수 캐스트면 `int4` 같은 타입 이름, `case`, `exists`)입니다.
-- 식별자를 접지만 SQLite의 이름 비교는 대소문자를 구분하지 않으므로 `"Foo"`와 `foo`는 같은 이름입니다.
-- `now()`와 `current_timestamp`는 문장 시각의 `'YYYY-MM-DD HH:MM:SS.SSS'`(UTC, 시간대 표기 없음)여서 SQLite 날짜 함수가 그대로 읽습니다. `::date`/`::timestamp`/`::time`은 `date()`/`datetime()`/`time()`, `::int`는 실수를 버림(PostgreSQL은 반올림), `::varchar(n)`은 자름, `::numeric(p,s)`는 반올림입니다.
-- 오류는 싼 곳에서 PostgreSQL 문구를 씁니다: `syntax error at or near "x"`, `syntax error at end of input`, `relation "t" does not exist`, `column "c" does not exist`, `column reference "a" is ambiguous`, `relation "t" already exists`, `cannot insert a non-DEFAULT value into column "id"`. 실행 중 제약 위반은 SQLite 문구(`UNIQUE constraint failed: t.a`)입니다.
-- 외래 키는 SQLite처럼 `PRAGMA foreign_keys = ON`일 때만 강제합니다. 0으로 나누면 NULL(PostgreSQL은 오류)이고, 정수 오버플로는 검사하지 않습니다.
-- 차등 비교: `podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine` 뒤 `tools/dialect/pg-diff.sh`. 지금 28개 케이스가 PostgreSQL 16과 같은 행·열 이름·오류를 냅니다(불리언 `t`/`f`는 1/0으로 맞춰 비교).
-
-**아직 하지 않은 것.** `DISTINCT ON`, 배열·`ARRAY[...]`, `ENUM`·`CREATE TYPE`·도메인, `public` 밖의 스키마(`CREATE SCHEMA`), `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `COPY`, `SET`/`SHOW`, 격리 수준(파싱만 함; SQLite는 늘 직렬화), `LATERAL`, `GROUPING SETS`/`ROLLUP`/`CUBE`, `EXCEPT ALL`/`INTERSECT ALL`, `SIMILAR TO`와 정규식 연산자(`~`), `AT TIME ZONE`, `interval` 산술, `to_char`/`date_trunc`/`age`, 데이터를 바꾸는 CTE, `ON CONFLICT ON CONSTRAINT`, `FETCH ... WITH TIES`, `U&'...'`, 테이블·함수 별칭의 열 이름, 한 문장으로 여러 개체 `DROP`, 0으로 나누기·오버플로 오류, 실행 중 오류 메시지의 PostgreSQL화, INTEGER PRIMARY KEY의 인덱스(`pg_indexes`에 `t_pkey`가 없음), 시퀀스의 데이터 타입(언제나 `bigint`), 임시 테이블의 시퀀스(`main`에 남음), 셸의 dollar-quote 문장 분할(셸은 SQLite 규칙으로 문장을 나눔).
-
-### MariaDB 방언
-
-`PRAGMA xq_dialect = 'mariadb'`(또는 `'mysql'`), 셸의 `.dialect mariadb`, Zig API의 `db.setDialect(.mariadb)`로 켭니다. SQLite로 돌아갈 때는 MariaDB 방언에서도 `PRAGMA xq_dialect = 'sqlite'`를 그대로 씁니다(`PRAGMA`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`는 SQLite 문장으로 넘김).
-
-```sql
-PRAGMA xq_dialect = 'mariadb';
-CREATE TABLE `users` (
-  `id` int unsigned NOT NULL AUTO_INCREMENT,
-  `email` varchar(190) NOT NULL,
-  `status` enum('active','banned') NOT NULL DEFAULT 'active',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uq_email` (`email`)
-) ENGINE=InnoDB AUTO_INCREMENT=100 DEFAULT CHARSET=utf8mb4;
-INSERT INTO users (email) VALUES ('a@x.org'), ('b@x.org');
-INSERT INTO users (email) VALUES ('A@X.ORG') ON DUPLICATE KEY UPDATE status = 'banned';
-SELECT id, email, status FROM users ORDER BY id LIMIT 0, 10;   -- 100, 101
-SET sql_mode = '';                                -- 엄격 모드 끄기
-INSERT INTO users (email, status) VALUES ('c@x.org', 'nope');  -- '' + 경고
-SHOW WARNINGS;
-```
-
-**구조.** `src/dialect/mariadb/`의 토크나이저(`lexer.zig`)와 재귀 하강 파서(`parser.zig`, `functions.zig`, `dml.zig`, `ddl.zig`, `session.zig`)가 문장을 구문 트리 IR(`ir.tree`)로 만들고, 실행할 문장은 `ir.lower`가, 스키마에 저장되는 것(CREATE TABLE의 CHECK·DEFAULT·생성 열, CREATE VIEW, 인덱스)은 `ir.render`가 같은 트리에서 만듭니다. 그래서 질의, CHECK, DEFAULT, 생성 열, 뷰에서 같은 식은 같은 뜻입니다(`/`는 어디서나 `CAST(l AS REAL) / r`, `DIV`는 `xq_div()`, 바뀐 함수 이름도 같음). 파서가 트리에 남기는 MariaDB 의미는 다음과 같습니다.
-
-- `/`는 `div{real}`, `DIV`는 `div{int}`, `XOR`·`^`는 엔진 함수 `xq_xor()`·`xq_bitxor()`, `<=>`는 `IS`, `||`는 `OR`(`PIPES_AS_CONCAT`이면 `concat{propagate}`), 두 인자 이상의 `CONCAT()`도 `concat{propagate}`, `LIKE`는 SQLite `LIKE ... ESCAPE '\'`(ASCII 대소문자 무시).
-- 이름이 다른 함수는 SQLite 내장 함수나 엔진 함수로 바꾸고(`UCASE` → `upper`, `CHAR_LENGTH` → `length`, `GREATEST` → `max`, `STDDEV` → `xq_stddev_pop` ...), 방언 함수 테이블(`runtime.zig`)의 함수는 `Func.dialect = .mariadb`로 표시해 스키마에는 `xq_mariadb_left(...)`처럼 한정 이름으로 씁니다.
-- INSERT/UPDATE가 열에 저장하는 값은 `coerce` 노드(`xq_coerce()`), `AUTO_INCREMENT` 열의 0은 `nullif(v, 0)`(`NO_AUTO_VALUE_ON_ZERO`가 아니면), VALUES/SET의 `DEFAULT`는 IR 공통 의미(그 열의 DEFAULT, 없으면 NULL이라 `AUTO_INCREMENT`는 다음 rowid)로 내립니다.
-- 결과 열 이름은 MariaDB처럼 쓴 식의 텍스트(문자열 상수는 그 값)입니다.
-
-`SHOW`·`DESCRIBE`·`information_schema`는 스키마·pragma 함수·`xq_catalog`를 읽는 SQLite 질의를 만들어 내리고(`information_schema` 뷰는 MariaDB 텍스트를 같은 파서로 트리로 만듦), `SET`의 값은 트리로 만들어 `ir.lower`로 내립니다. 세션 상태(`sql_mode`, 경고, 사용자 변수)는 연결의 `ConnState.mariadb`(`state.zig`)에 있고, MariaDB 의미가 SQLite와 다른 연산·함수는 엔진 함수와 방언 함수 테이블(`runtime.zig`)로 구현합니다.
-
-**저장 방식.** DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내리므로 sqlite3가 그대로 열고 `PRAGMA integrity_check`를 통과합니다.
-
-- 테이블은 `STRICT`이고 열은 저장 타입(`INTEGER`/`REAL`/`TEXT`/`BLOB`)으로, MariaDB 선언 타입(`int(10) unsigned`, `varchar(20)`, `enum('a','b')` ...)·기본값·`AUTO_INCREMENT`·`ON UPDATE CURRENT_TIMESTAMP`는 같은 문장 안에서 `xq_catalog`에 기록합니다(`SHOW COLUMNS`, `DESCRIBE`, `SHOW CREATE TABLE`, `information_schema`가 읽음).
-- 문자열 열에는 언제나 명시적 `COLLATE`를 적습니다. 기본·`*_ci` collation은 `NOCASE`, `*_bin`·`binary`·`*_cs`는 `BINARY`이고, 날짜·JSON 열은 `BINARY`입니다. 그래서 `UNIQUE` 키도 MariaDB처럼 대소문자를 구분하지 않습니다. `NOCASE`는 ASCII만 접습니다(`'é' = 'É'`는 거짓).
-- `AUTO_INCREMENT`는 SQLite의 `INTEGER PRIMARY KEY AUTOINCREMENT`(sqlite_sequence)입니다. NULL과 0(`NO_AUTO_VALUE_ON_ZERO`가 아니면)은 다음 값을 만들고, 더 큰 값을 직접 넣으면 카운터가 따라가며, 지운 값은 다시 쓰지 않습니다. `AUTO_INCREMENT=n`은 sqlite_sequence를 미리 채우고 `TRUNCATE`는 되돌립니다. 열은 PRIMARY KEY(또는 PRIMARY KEY 없는 테이블의 유일한 UNIQUE 키)여야 합니다. `LAST_INSERT_ID()`는 `last_insert_rowid()`입니다.
-- MariaDB 인덱스 이름은 테이블마다, SQLite는 스키마마다 유일하므로 테이블 `t`의 인덱스 `i`는 SQLite 인덱스 `"t$i"`입니다. `KEY`/`INDEX`/`UNIQUE` 정의는 테이블을 만든 직후 같은 문장 안에서(`OP_SqlExec`) 만듭니다. `RENAME TABLE t TO u`(와 `ALTER TABLE ... RENAME`)는 인덱스 이름도 `"u$i"`로 바꿉니다. SQLite의 ALTER TABLE처럼 같은 문장 안에서 `sqlite_schema`의 인덱스 행(이름과 CREATE INDEX 텍스트)을 고쳐 쓰고 스키마를 다시 읽으므로 b-tree는 그대로이고, `SHOW INDEX`, `SHOW CREATE TABLE`, `DROP INDEX i ON u`가 새 이름으로 찾습니다.
-- 열의 `CHECK`는 열 이름, 이름 없는 테이블 `CHECK`는 `CONSTRAINT_<n>`으로 MariaDB처럼 이름을 붙입니다(오류는 `CHECK constraint failed: price`).
-- `JSON`은 `longtext` + `CHECK(json_valid(...))`, `BOOL`은 `tinyint(1)`, `SERIAL`은 `bigint unsigned NOT NULL AUTO_INCREMENT UNIQUE`입니다.
-
-**`sql_mode`.** 연결 단위이고 기본값은 MariaDB 10.2+의 `STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION`입니다. `SET [SESSION] sql_mode = ...`, `SET @@sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')`, `SET sql_mode = DEFAULT`로 바꾸고 `SELECT @@sql_mode`로 읽습니다(조합 모드 `ANSI`, `TRADITIONAL`, `POSTGRESQL` ... 는 MariaDB처럼 펼쳐 보임). `SET`은 문장이 실행될 때 적용되고, 문법에 영향을 주는 모드는 그 뒤에 컴파일되는 문장부터 적용됩니다.
-
-- `ANSI_QUOTES`: `"x"`가 식별자(아니면 문자열). `PIPES_AS_CONCAT`: `||`가 연결(아니면 `OR`). `NO_BACKSLASH_ESCAPES`: 문자열의 `\`가 보통 문자. `EMPTY_STRING_IS_NULL`, `NO_AUTO_VALUE_ON_ZERO`도 지원합니다.
-- 엄격 모드(`STRICT_TRANS_TABLES`/`STRICT_ALL_TABLES`, 모든 테이블이 트랜잭션 테이블이라 같은 뜻): INSERT/UPDATE가 저장하는 값마다 `xq_coerce(value, type, ...)`를 거칩니다. 엄격 모드에서는 범위 밖·너무 긴 값·잘못된 날짜가 MariaDB 메시지(`Out of range value for column 'i' at row 1`, `Data too long ...`, `Incorrect date value ...`)로 문장을 실패시키고, 아니면(또는 `INSERT/UPDATE IGNORE`) 잘라 저장하고 경고를 남깁니다(`SHOW WARNINGS`, `@@warning_count`). `NOT NULL` 열의 NULL, 기본값 없는 `NOT NULL` 열 생략(`Field 'c' doesn't have a default value`)도 MariaDB와 같습니다. `NO_ZERO_DATE`, `NO_ZERO_IN_DATE`, `ALLOW_INVALID_DATES`는 날짜 변환에 반영합니다. 실행 시점의 모드를 읽으므로 준비된 문장도 현재 모드를 따릅니다.
-- `ONLY_FULL_GROUP_BY`, `ERROR_FOR_DIVISION_BY_ZERO`(0으로 나누기는 언제나 NULL), `HIGH_NOT_PRECEDENCE`, `PAD_CHAR_TO_FULL_LENGTH`, `IGNORE_SPACE`, `REAL_AS_FLOAT`는 받아들이지만 효과가 없습니다.
-
-**지원 문법.**
-
-- 토큰: `` `a``b` ``, `'...'`/`"..."`와 백슬래시 이스케이프(`\%`, `\_`는 LIKE용으로 유지), `#`·`-- `·`/* */` 주석, 실행 주석 `/*! */`·`/*!50100 */`·`/*M!100100 */`(버전이 11.8 이하면 코드), `X'..'`/`0x..`, `b'..'`/`0b..`, `N'..'`, `_utf8mb4'..'`, 인접 문자열 연결, `?`, `@var`, `@@[session.]var`.
-- 식: MariaDB 우선순위, `||`/`&&`/`!`/`XOR`/`<=>`/`DIV`/`MOD`/`^`/`<<`/`>>`, `/`는 실수 나눗셈(7/2 = 3.5), `LIKE`(기본 escape `\`, 대소문자 무시), `IN`, `BETWEEN`, `IS [NOT] TRUE/FALSE/NULL/UNKNOWN`, `CASE`, `CAST/CONVERT(... AS SIGNED/UNSIGNED/CHAR(n)/DECIMAL(p,s)/DATE/DATETIME/TIME/BINARY)`, `BINARY x`, `COLLATE`, `x + INTERVAL n DAY`, `NEXT VALUE FOR s`, 윈도우 함수. 함수: `IFNULL`, `IF`, `CONCAT`(NULL이면 NULL), `CONCAT_WS`, `GROUP_CONCAT([DISTINCT] ... ORDER BY ... SEPARATOR ...)`, `NOW()`/`CURDATE()`/`CURTIME()`(UTC), `LAST_INSERT_ID()`, `LENGTH`(바이트)/`CHAR_LENGTH`, `SUBSTRING(... FROM ... FOR ...)`, `TRIM(LEADING ... FROM ...)`, `LOCATE`, `POSITION`, `LPAD`/`RPAD`, `LEFT`/`RIGHT`, `REPEAT`, `REVERSE`, `HEX`, `FORMAT`, `FIND_IN_SET`, `FIELD`, `ELT`, `FLOOR`/`CEIL`/`ROUND`/`TRUNCATE`/`POW`/`SQRT`/`LOG` ..., `DATE_ADD`/`DATE_SUB`, `DATEDIFF`, `TIMESTAMPDIFF`, `DATE_FORMAT`, `STR_TO_DATE`, `YEAR`/`MONTH`/`DAY`/`HOUR`/`DAYOFWEEK`/`DAYNAME` ..., `EXTRACT`, `UUID()`, `RAND()`, `STDDEV`/`VARIANCE`, `JSON_UNQUOTE`(그 밖의 `JSON_*`는 SQLite의 json 함수).
-- `SELECT`: `DISTINCT`, 조인(`STRAIGHT_JOIN`은 순서 고정), `LIMIT n` / `LIMIT off, n` / `LIMIT n OFFSET m` / `OFFSET ... FETCH`, `GROUP BY`(ASC/DESC 무시), `HAVING`, `WINDOW`, `UNION [ALL|DISTINCT]`/`EXCEPT`/`INTERSECT`와 괄호 친 항, 서브쿼리, `WITH [RECURSIVE]`, `FROM DUAL`, 인덱스 힌트·`FOR UPDATE`·`LOCK IN SHARE MODE`·`SQL_NO_CACHE` 등은 무시, 테이블 값 함수.
-- DML: `INSERT [IGNORE]`(`VALUES`/`VALUE` 여러 행, `SET a=1`, `SELECT`, `DEFAULT`, `ON DUPLICATE KEY UPDATE col = VALUES(col)`, `RETURNING`), `REPLACE`, `UPDATE [IGNORE] ... [ORDER BY] [LIMIT n]`, `DELETE ... [ORDER BY] [LIMIT n] [RETURNING]`, `TRUNCATE`.
-- DDL: `CREATE [TEMPORARY] TABLE [IF NOT EXISTS]`(타입, `NOT NULL`/`NULL`, `DEFAULT`, `AUTO_INCREMENT`, `PRIMARY KEY`, `UNIQUE [KEY]`, `KEY`/`INDEX`(접두 길이 무시), `CHECK`, `FOREIGN KEY ... ON DELETE/UPDATE`, 생성 열 `AS (...) VIRTUAL/STORED`, `COMMENT`·`CHARACTER SET`·`COLLATE`, 테이블 옵션 `ENGINE=`·`DEFAULT CHARSET=`·`COLLATE=`·`AUTO_INCREMENT=n` ...), `CREATE TABLE ... AS SELECT`, `DROP TABLE [IF EXISTS]`, `CREATE [UNIQUE] INDEX`, `DROP INDEX i ON t`, `CREATE [OR REPLACE] VIEW`, `DROP VIEW`, `CREATE/DROP SEQUENCE`, `ALTER TABLE` 한 가지 변경(`ADD [COLUMN]`, `DROP [COLUMN]`, `RENAME COLUMN`, `RENAME TO`, `ADD/DROP INDEX`, `DISABLE/ENABLE KEYS`·테이블 옵션은 무시), `RENAME TABLE`.
-- 그 밖: `START TRANSACTION`/`BEGIN [WORK]`/`COMMIT`/`ROLLBACK [TO SAVEPOINT]`/`SAVEPOINT`/`RELEASE SAVEPOINT`, `SET`(시스템 변수, `@사용자 변수`, `NAMES`, `CHARACTER SET`, `TRANSACTION`, `foreign_key_checks`는 `PRAGMA foreign_keys`), `SHOW [FULL] TABLES [LIKE]`, `SHOW COLUMNS/FIELDS`, `DESCRIBE`/`DESC`, `SHOW INDEX`, `SHOW CREATE TABLE`, `SHOW WARNINGS/ERRORS/COUNT(*) WARNINGS`, `SHOW VARIABLES [LIKE]`, `SHOW DATABASES`, `EXPLAIN`(= `EXPLAIN QUERY PLAN`), `USE db`(존재 확인만, 기본 스키마는 `main`), `LOCK/UNLOCK TABLES`(무시), `information_schema.TABLES/COLUMNS/SCHEMATA`. mysqldump 출력을 그대로 불러올 수 있습니다.
-- 이름: 쓴 대소문자를 그대로 저장하고 대소문자 없이 비교합니다(MariaDB `lower_case_table_names=2`와 같은 동작이라 `@@lower_case_table_names`는 2). 데이터베이스는 SQLite 스키마(`main`, `ATTACH`한 이름)입니다.
-
-**MariaDB와 다른 점 / 하지 않은 것.** 저장 프로시저·함수, MySQL 문법의 트리거·이벤트, 다중 테이블 `UPDATE`/`DELETE`, `ALTER TABLE`의 `CHANGE`/`MODIFY`와 여러 변경, `PARTITION`, `FULLTEXT`(보통 인덱스로 만듦)·`MATCH ... AGAINST`, `REGEXP`(SQLite처럼 `regexp()` 함수가 있어야 함), `WITH ROLLUP`, `SELECT ... INTO`, `LOAD DATA`, `CREATE TABLE ... LIKE`, `CREATE OR REPLACE TABLE`, `INVISIBLE` 열, utf8 밖의 문자 집합, `ONLY_FULL_GROUP_BY` 검사, 셸의 문장 분할(SQLite 규칙이라 `'it\'s'` 같은 문자열이 있으면 파일 끝까지 한 덩어리로 실행됨). 또한:
-- `DECIMAL`은 `REAL`(scale 0이면 `INTEGER`)로 저장되어 반올림은 되지만 정확한 십진 연산이 아니고 `220.00`이 `220.0`으로 보입니다. 정수형 실수(`POW(2,10)`)도 `1024.0`처럼 SQLite 형식으로 보입니다.
-- `BIGINT UNSIGNED`와 `CAST(... AS UNSIGNED)`는 부호 있는 64비트 범위입니다. `TIMESTAMP`는 시간대 변환이 없고 범위도 `DATETIME`과 같습니다(시간대는 UTC).
-- PAD SPACE 비교가 없어 `'x' = 'x  '`는 거짓입니다. UPDATE의 대입은 모두 이전 행 값을 봅니다(`SIMULTANEOUS_ASSIGNMENT`와 같음). `LAST_INSERT_ID()`는 여러 행 INSERT에서 마지막 행 id이고 직접 넣은 id에도 바뀝니다. `ON DUPLICATE KEY UPDATE`의 affected rows는 SQLite 방식(행마다 1)입니다.
-- `SHOW WARNINGS`는 문장을 컴파일할 때(보통 직전 문장 실행 직후) 기록된 경고를 보여 주고, 경고는 다음 문장을 컴파일할 때 지워집니다(최대 8개 저장, 개수는 전부 셈). 엔진 오류(`no such table`, `UNIQUE constraint failed` ...)는 SQLite 메시지 그대로입니다.
-- 저장되는 식(`DEFAULT (...)`, `CHECK`, 생성 열, 뷰)에는 MariaDB처럼 변수와 매개변수를 쓸 수 없습니다(`Function or expression '@x' cannot be used in the CHECK clause of ...`, `View's SELECT contains a variable or parameter`). 엔진 함수(`xq_div` ...)·방언 함수(`xq_mariadb_*`)를 부르는 스키마는 xqlite에서는 어느 방언으로든 같은 결과를 내지만 sqlite3에서는 그 식을 계산할 수 없습니다(`/`, `UCASE`, `GREATEST`, `IF`, `CONCAT`, `LIKE` 같은 식은 sqlite3에서도 같음, `tools/interop-mariadb.sh`).
-- 저장된 식의 비교는 열 collation이 없으면 읽는 연결의 기본 collation을 씁니다(MariaDB 방언은 `NOCASE`, SQLite 방언과 sqlite3는 `BINARY`). 문자열 열에는 언제나 collation을 적으므로 열과의 비교는 어디서나 같고, 열이 아닌 값끼리(`'a' = 'A'`, `UPPER(x) = 'a'`) 비교할 때만 다릅니다.
-- `DEFAULT (NEXT VALUE FOR s)`는 아직 쓸 수 없습니다(`nextval()`이 unsafe라 스키마에서 부를 수 없음). `ALTER TABLE ... ADD COLUMN`의 DEFAULT는 SQLite처럼 상수여야 합니다. `INSERT ... SELECT`의 변환 오류 메시지의 행 번호는 언제나 1이고, `information_schema`를 읽는 뷰는 pragma 테이블 값 함수가 스키마에서 unsafe라 쓸 수 없습니다.
+- [SQLite 호환](docs/sqlite.md): 구현 범위, sqlite3와의 교차 검증 도구
+- [PostgreSQL 호환](docs/postgres.md): 지원 문법, 타입과 의미, PostgreSQL과 다른 점
+- [MariaDB 호환](docs/mariadb.md): 저장 방식, `sql_mode`, 지원 문법, MariaDB와 다른 점
 
 ## Zig API
 
@@ -554,14 +429,10 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall
 - [x] **Phase 0 · 기반**: VFS(POSIX·메모리), 페이지 캐시, Pager(롤백 저널), 파일 헤더 파싱 — Windows VFS·WAL·세이브포인트는 이후 단계
 - [x] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기(auto-vacuum·incremental vacuum 포함), 레코드 포맷, 기존 SQLite 파일 읽기/수정
 - [x] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
-- [ ] **Phase 3 · 완성도**: WAL, 인덱스 최적화, 윈도우 함수, JSON, sqllogictest 통과
-  - [x] 윈도우 함수: `OVER`/`WINDOW`/`FILTER`, ROWS·RANGE·GROUPS 프레임과 `EXCLUDE`, 내장 윈도우 함수(`row_number`, `rank`, `ntile`, `lead`/`lag`, `nth_value` 등). 결과와 바이트코드를 sqlite3 3.54.1과 맞춤
-  - [x] 가상 테이블: `CREATE VIRTUAL TABLE`, 모듈 등록(`sql.vtab.createModule`, `sqlite3_module`에 대응하는 Zig 구조체), `xBestIndex` 기반 플래너(제약·ORDER BY·IN·LIMIT/OFFSET 전달), `xUpdate`로 INSERT/UPDATE/DELETE, `xBegin`~`xRollbackTo` 트랜잭션·세이브포인트, `xRename`, `xFindFunction` 오버로드, eponymous 테이블과 테이블 값 함수. 내장 모듈로 `pragma_*` 테이블 값 함수, `bytecode()`/`tables_used()`, 셸의 `generate_series`. 결과와 바이트코드를 sqlite3 3.54.1과 맞춤
-  - [x] WAL: `PRAGMA journal_mode=WAL`과 다른 모드로 되돌리기(헤더의 파일 포맷 버전 18/19바이트 포함), `-wal`·`-shm` 파일 형식과 잠금 프로토콜(shm 바이트 락, dead-man switch)을 SQLite 3.54.1과 같게 맞춰 xqlite와 sqlite3 프로세스가 한 DB를 동시에 읽고 씀. 읽기 스냅샷과 read mark, `walIndexRecover`로 크래시 뒤 wal-index 재구성, 캐시 스필과 세이브포인트·롤백, 체크포인트(PASSIVE/FULL/RESTART/TRUNCATE/NOOP, `wal_autocheckpoint`, `sqlite3_wal_checkpoint_v2`, WAL 훅), `journal_size_limit`, 읽기 전용 shm(heap wal-index). unix VFS는 `-shm`을 mmap하고 메모리 VFS는 공유 메모리를 힙에 둠. `busy_timeout`이 실제 바쁜 핸들러(`sqliteDefaultBusyCallback`)로 동작. 결과와 바이트코드를 sqlite3 3.54.1과 맞춤. `locking_mode=EXCLUSIVE`, 스냅샷 API는 아직
-  - [x] JSON: `json`/`jsonb` 계열 스칼라 함수, `->`/`->>` 연산자, `json_group_array`/`json_group_object`(윈도우 함수 포함), JSON5 입력과 JSONB 바이너리 형식, `json_each`/`json_tree`/`jsonb_each`/`jsonb_tree` 테이블 값 함수(경로 인자, 상관 인자, 조인). 결과를 sqlite3 3.54.1과 바이트 단위로 맞춤
+- [ ] **Phase 3 · 완성도**: WAL, 인덱스 최적화, 윈도우 함수, JSON, sqllogictest 통과 — 윈도우 함수·가상 테이블·WAL·JSON 완료 ([SQLite 호환](docs/sqlite.md))
 - [x] **Phase 4 · 공통 IR**: 프론트엔드 분리와 카탈로그 확장. SQLite 파스 트리와 코드 생성기 진입점을 IR로 삼고(`src/ir/ir.zig`, SQLite 파서도 이 파사드로 내림), 연결 단위 방언 선택(`OpenOptions.dialect`, `PRAGMA xq_dialect`, `.dialect`)과 프론트엔드 디스패치, 방언 훅(함수 테이블, 추가·기본 collation), STRICT 기반 엄격한 타입, `xq_catalog`·`xq_sequence` 카탈로그와 시퀀스(nextval/currval/setval/lastval). PostgreSQL·MariaDB는 스텁 프론트엔드와 함수 테이블만. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 그대로 같음 ([방언 아키텍처](#방언-아키텍처))
-- [x] **Phase 5 · PostgreSQL 방언**: PostgreSQL 어휘 규칙의 lexer와 재귀 하강 파서(구문 트리 → `ir.*`), SELECT 전반(조인, 서브쿼리, 집합 연산, `WITH [RECURSIVE]`, 윈도우, `OFFSET/FETCH`, PostgreSQL식 NULL 정렬), INSERT/UPDATE/DELETE와 `RETURNING`·`ON CONFLICT`·`UPDATE FROM`·`DELETE USING`, 트랜잭션·세이브포인트, DDL(SQLite 텍스트 + `xq_catalog`), STRICT 기반 엄격한 타입과 PostgreSQL 메시지 이름의 CHECK, `SERIAL`/`IDENTITY`(시퀀스), `CREATE SEQUENCE`, `information_schema`·`pg_catalog` 뷰, PostgreSQL 함수와 오류 문구. 실제 PostgreSQL 16과 차등 비교(`tools/dialect/pg-diff.sh`), sqlite3 교차 검증(`tools/interop-pg.sh`). `DISTINCT ON`, 배열, ENUM, 스키마, PL/pgSQL 등은 아직 ([PostgreSQL 방언](#postgresql-방언))
-- [x] **Phase 6 · MariaDB 방언**: 토크나이저(백틱, 백슬래시 이스케이프, `#`/`-- `/실행 주석)와 재귀 하강 파서(지금은 구문 트리 IR로 파싱). 연결 단위 `sql_mode`(`ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `NO_AUTO_VALUE_ON_ZERO`, `EMPTY_STRING_IS_NULL`, 엄격/관대 모드의 값 변환과 MariaDB 오류·경고, 조합 모드), `SELECT`(조인, 세 가지 `LIMIT`, `UNION`, CTE, 윈도우), `INSERT [IGNORE]`/`REPLACE`/`ON DUPLICATE KEY UPDATE`/`RETURNING`, `UPDATE`/`DELETE ... LIMIT`, STRICT 테이블 + 명시적 collation으로 렌더링하는 DDL과 `xq_catalog`, `AUTO_INCREMENT`(`INTEGER PRIMARY KEY AUTOINCREMENT`), MariaDB 타입(정수 범위, `DECIMAL`, 문자열 길이, `ENUM`/`SET`, 날짜/시간), 기본 대소문자 무시 비교(`IN` 포함), `SHOW`/`DESCRIBE`/`information_schema`, 시스템·사용자 변수, 시퀀스, MariaDB 함수. MariaDB 11.8 서버와 차등 비교(`tools/dialect/maria-diff.sh`), sqlite3 교차 검증(`tools/interop-mariadb.sh`). 저장 프로시저·트리거·다중 테이블 DML·`ALTER TABLE CHANGE/MODIFY`·정확한 `DECIMAL`·PAD SPACE·셸의 방언별 문장 분할은 아직 ([MariaDB 방언](#mariadb-방언))
+- [x] **Phase 5 · PostgreSQL 방언**: lexer·파서, SELECT·DML 전반과 `RETURNING`·`ON CONFLICT`, DDL과 엄격한 타입, `SERIAL`/`IDENTITY`, `information_schema`·`pg_catalog`. 실제 PostgreSQL 16과 차등 비교 ([PostgreSQL 호환](docs/postgres.md))
+- [x] **Phase 6 · MariaDB 방언**: 토크나이저·파서, 연결 단위 `sql_mode`, `INSERT IGNORE`/`REPLACE`/`ON DUPLICATE KEY UPDATE`, `AUTO_INCREMENT`, MariaDB 타입과 collation, `SHOW`/`information_schema`. MariaDB 11.8과 차등 비교 ([MariaDB 호환](docs/mariadb.md))
 - [x] **구문 트리 IR**: 방언 중립 구문 트리(`src/ir/tree.zig`)와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT 처리. PostgreSQL(`ast.zig`/`lower.zig`/`render.zig` 삭제)과 MariaDB(직접 내리던 코드와 저장 텍스트의 토큰 단위 번역 삭제, 실행과 저장의 의미가 같아짐)를 옮김 ([방언 아키텍처](#방언-아키텍처))
 - [ ] **Phase 7 · MSSQL 방언**: T-SQL 파서, `IDENTITY`, `TOP`, `OUTPUT`, `MERGE`
 - [ ] **Phase 8 · 서버 모드**: pgwire, MySQL protocol, TDS

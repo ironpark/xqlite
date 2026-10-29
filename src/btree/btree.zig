@@ -2077,9 +2077,11 @@ fn rebuildPage(b: *CellArray, first: u32, n: u32, pg: *MemPage) Error!void {
             return error.Corrupt;
         }
         data -= sz;
+        // C stores the offset before this check; checking first keeps the
+        // offset from going below the start of the page.
+        if (@intFromPtr(data) < @intFromPtr(cellptr) + 2) return error.Corrupt;
         put2(cellptr, @intCast(@intFromPtr(data) - @intFromPtr(a)));
         cellptr += 2;
-        if (@intFromPtr(data) < @intFromPtr(cellptr)) return error.Corrupt;
         @memmove(data[0..sz], cell[0..sz]);
         i += 1;
         if (i >= first + n) break;

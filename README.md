@@ -286,6 +286,15 @@ zig-out/bin/xqlite sql test.db .dump > test.sql
 ./tools/slt/run.py ref/sqllogictest/test  # sqllogictest 실행, 실패를 원인별로 묶음 (tools/slt/README.md)
 ```
 
+퍼징 도구는 두 가지입니다.
+
+```sh
+zig-out/bin/xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db  # SQLite fuzzcheck 포팅: 퍼즈 코퍼스를 돌려 크래시·메모리 누수·close 실패를 보고
+zig build fuzz -Doptimize=ReleaseSafe -- btree_model [SEED]  # 시드 기반 퍼저 (btree_model, btree_corrupt), 시드를 생략하면 무작위로 골라 출력
+```
+
+`fuzzcheck`는 크래시가 나면 케이스 번호를 출력하므로 `--start N`으로 그다음부터 이어 돌릴 수 있고, `-v`는 실행하는 케이스를 하나씩 출력합니다(세그폴트처럼 패닉 핸들러를 거치지 않는 크래시를 찾을 때 씁니다). 시드 퍼저는 같은 시드면 같은 동작을 재현하고 커밋 해시(40자리)도 시드로 받습니다. `zig build test`는 모든 시드 퍼저를 고정 시드로 짧게 돌립니다.
+
 포팅 기준 SQLite 소스(현재 3.54.1)는 `ref/sqlite`에 받아 두고 참고합니다. 이 디렉토리는 git에서 제외됩니다.
 
 ```sh

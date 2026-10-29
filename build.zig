@@ -177,6 +177,20 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(doc_tests).step);
 
     // ... and that src/ keeps no mutable globals but the few it lists.
+    // The seeded fuzzers (src/fuzz_tests.zig): `zig build fuzz -- NAME
+    // [SEED]` runs one. Their smoke test runs with the module's tests
+    // (src/root.zig), which import the same files.
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("src/fuzz_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const fuzz_exe = b.addExecutable(.{ .name = "fuzz", .root_module = fuzz_module });
+    const run_fuzz = b.addRunArtifact(fuzz_exe);
+    run_fuzz.addPassthruArgs();
+    b.step("fuzz", "Run a seeded fuzzer (zig build fuzz -- NAME [SEED])").dependOn(&run_fuzz.step);
+
     const globals_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/globals_test.zig"),

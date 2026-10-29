@@ -4,6 +4,7 @@ const Io = std.Io;
 const xqlite = @import("xqlite");
 const shell = @import("shell.zig");
 const slt = @import("slt.zig");
+const fuzzcheck = @import("fuzzcheck.zig");
 const Header = xqlite.btree.header.Header;
 const Btree = xqlite.btree.Btree;
 const Cursor = xqlite.btree.Cursor;
@@ -31,6 +32,9 @@ const usage =
     \\                            dot-commands on the database (in memory if
     \\                            no file), else read them from standard input
     \\  slt [options] script...   run sqllogictest scripts (xqlite slt for help)
+    \\  fuzzcheck [options] db... run SQLite's fuzz corpora (test/fuzzdata*.db)
+    \\                            and report crashes and leaks (xqlite fuzzcheck
+    \\                            for help)
     \\
     \\environment:
     \\  XQLITE_TEST_CRASH=F:N[:torn]  sql: exit at once at the Nth write to a file
@@ -39,6 +43,9 @@ const usage =
     \\                            aid, see tools/interop-wal.sh)
     \\
 ;
+
+/// A crash during `fuzzcheck` names the fuzz case it happened in.
+pub const panic = std.debug.FullPanic(fuzzcheck.panic);
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -103,6 +110,14 @@ pub fn main(init: std.process.Init) !void {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
         const code = try slt.run(init.gpa, io, args[2..], out, &stderr_file_writer.interface);
+        if (code != 0) {
+            out.flush() catch {};
+            std.process.exit(code);
+        }
+    } else if (args.len >= 2 and std.mem.eql(u8, args[1], "fuzzcheck")) {
+        var stderr_buffer: [1024]u8 = undefined;
+        var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
+        const code = try fuzzcheck.run(init.gpa, io, args[2..], out, &stderr_file_writer.interface);
         if (code != 0) {
             out.flush() catch {};
             std.process.exit(code);
@@ -391,5 +406,6 @@ fn btVacuum(gpa: std.mem.Allocator, io: Io, path: []const u8) !void {
 test {
     _ = shell;
     _ = slt;
+    _ = fuzzcheck;
     _ = @import("qrf.zig");
 }

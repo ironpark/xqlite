@@ -1,6 +1,7 @@
 const std = @import("std");
 const MemVfs = @import("../vfs/mem.zig").MemVfs;
 const btree = @import("btree.zig");
+const btree_fuzz = @import("btree_fuzz.zig");
 const record = @import("../vdbe/record.zig");
 
 const testing = std.testing;
@@ -45,12 +46,7 @@ fn payloadLen(rowid: i64) usize {
     return r % 100;
 }
 
-fn fillPayload(buf: []u8, rowid: i64) void {
-    const seed: u64 = @bitCast(rowid);
-    for (buf, 0..) |*b, i| b.* = @truncate(seed *% 31 +% i);
-    // The integrity check expects a record, whose header size is >= 2.
-    if (buf.len > 0) buf[0] |= 2;
-}
+const fillPayload = btree_fuzz.fillPayload;
 
 fn insertRow(cur: *Cursor, rowid: i64) !void {
     return insertRowWith(cur, rowid, .{});
@@ -852,105 +848,23 @@ test "btree: corrupt pages are reported, not trusted" {
 
 // ================================================================ stress
 
-/// Random inserts, replacements and deletes on a table and an index of the
-/// same rows, checked against a model. Commits and rollbacks are mixed in,
-/// and a tiny cache forces the pager to spill pages mid-transaction.
+/// The model fuzzer (btree_fuzz.zig) in a fixed configuration: inserts,
+/// replacements and deletes on a table and an index, a quarter of the
+/// transactions rolled back, and a tiny cache that makes the pager spill
+/// pages mid-transaction.
 fn randomOps(page_size: u32, secure_delete: btree.SecureDelete, av: btree.AutoVacuum, seed: u64) !void {
-    var env = Env.init();
-    defer env.deinit();
-    const bt = try env.open(.{
+    var prng = std.Random.DefaultPrng.init(seed);
+    try btree_fuzz.modelWith(gpa, testing.io, prng.random(), .{
         .page_size = page_size,
         .cache_size = 10,
         .secure_delete = secure_delete,
         .auto_vacuum = av,
-    });
-    defer bt.close(.{});
-    const ki: record.KeyInfo = .{ .gpa = gpa, .sort_orders = &.{ .asc, .asc } };
-
-    const n_keys = 400;
-    // Model: the payload length of each rowid, or null if absent. The index
-    // holds (length, rowid) for every row.
-    var model: [n_keys]?u32 = @splat(null);
-    var committed = model;
-
-    try bt.beginTrans(.write, 0);
-    const t_root = try bt.createTable(.intkey);
-    const i_root = try bt.createTable(.blobkey);
-    try bt.commit();
-
-    var prng = std.Random.DefaultPrng.init(seed);
-    const rand = prng.random();
-    var buf: [6000]u8 = undefined;
-    for (0..30) |round| {
-        try bt.beginTrans(.write, 0);
-        {
-            var tc: Cursor = undefined;
-            try bt.cursor(&tc, t_root, .{ .write = true });
-            defer tc.close();
-            var ic: Cursor = undefined;
-            try bt.cursor(&ic, i_root, .{ .write = true, .key_info = ki.btreeKeyInfo() });
-            defer ic.close();
-
-            for (0..60) |_| {
-                const k = rand.uintLessThan(u32, n_keys);
-                const rowid: i64 = k + 1;
-                if (model[k]) |len| {
-                    // Remove the index entry, then delete or replace the row.
-                    const key: record.UnpackedRecord = .{ .info = &ki, .values = &.{ .{ .int = len }, .{ .int = rowid } } };
-                    try testing.expectEqual(std.math.Order.eq, try ic.indexMoveto(key.indexKey()));
-                    try ic.delete(.{});
-                    try testing.expectEqual(std.math.Order.eq, try tc.tableMoveto(rowid, false));
-                    if (rand.boolean()) {
-                        try tc.delete(.{});
-                        model[k] = null;
-                        continue;
-                    }
-                }
-                const len: u32 = if (rand.uintLessThan(u32, 8) == 0) rand.uintLessThan(u32, 6000) else rand.uintLessThan(u32, 200);
-                fillPayload(buf[0..len], rowid);
-                try tc.insert(.{ .rowid = rowid, .data = buf[0..len] }, .{});
-                var key_buf: [32]u8 = undefined;
-                const values = [_]Value{ .{ .int = len }, .{ .int = rowid } };
-                try ic.insert(.{ .key = record.encodeBuf(&values, &key_buf) }, .{});
-                model[k] = len;
-            }
-        }
-        if (av == .incremental) {
-            for (0..rand.uintLessThan(u32, 20)) |_| _ = try bt.incrVacuum();
-        }
-        if (round % 4 == 3) {
-            try bt.rollback(null, false);
-            model = committed;
-        } else {
-            try bt.commit();
-            committed = model;
-        }
-
-        try bt.beginTrans(.read, 0);
-        defer bt.commit() catch unreachable;
-        try expectIntact(bt, &.{ t_root, i_root });
-        if (av == .full) try testing.expectEqual(@as(u32, 0), bt.getMeta(.free_page_count));
-        var tc: Cursor = undefined;
-        try bt.cursor(&tc, t_root, .{});
-        defer tc.close();
-        var expected: i64 = 0;
-        for (model, 1..) |m, rowid| {
-            if (m) |len| {
-                expected += 1;
-                try testing.expectEqual(std.math.Order.eq, try tc.tableMoveto(@intCast(rowid), false));
-                try testing.expectEqual(len, tc.payloadSize());
-                var got: [6000]u8 = undefined;
-                try tc.payload(0, got[0..len]);
-                fillPayload(buf[0..len], @intCast(rowid));
-                try testing.expectEqualSlices(u8, buf[0..len], got[0..len]);
-            }
-        }
-        try testing.expectEqual(expected, try tc.count());
-        var ic: Cursor = undefined;
-        try bt.cursor(&ic, i_root, .{ .key_info = ki.btreeKeyInfo() });
-        defer ic.close();
-        try testing.expectEqual(expected, try ic.count());
-    }
+        .n_keys = 400,
+        .overflow_chance = 32,
+        .rollback_chance = 64,
+        .transaction_size = 60,
+        .op_weights = .initFill(1),
+    }, 1800);
 }
 
 test "btree: random operations match a model" {

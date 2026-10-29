@@ -129,6 +129,11 @@ test {
 }
 
 test {
+    // The fuzzers' smoke test (`zig build fuzz` runs them for longer).
+    _ = @import("fuzz_tests.zig");
+}
+
+test {
     std.testing.refAllDecls(@import("sql/json.zig"));
 }
 

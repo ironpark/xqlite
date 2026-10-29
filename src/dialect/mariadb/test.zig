@@ -439,3 +439,76 @@ test "mariadb: names, parameters and the file seen from SQLite" {
     try c.expectError("INSERT INTO Items VALUES (3, x'00')", "cannot store BLOB value in TEXT column Items.Label");
     try c.expectRows("PRAGMA integrity_check", "ok\n");
 }
+
+/// An expression of MariaDB, what it gives, the declared type of a
+/// column holding it, and SQL literals (in both dialects) of the value
+/// and of another value.
+const Same = struct { e: []const u8, ty: []const u8, rows: []const u8, lit: []const u8, wrong: []const u8 };
+
+const same_cases = [_]Same{
+    .{ .e = "7 / 2", .ty = "DOUBLE", .rows = "3.5", .lit = "3.5", .wrong = "3" },
+    .{ .e = "'7' / 2", .ty = "DOUBLE", .rows = "3.5", .lit = "3.5", .wrong = "3" },
+    .{ .e = "7 DIV 2", .ty = "INT", .rows = "3", .lit = "3", .wrong = "4" },
+    .{ .e = "-7 DIV 2", .ty = "INT", .rows = "-3", .lit = "-3", .wrong = "-4" },
+    .{ .e = "5 XOR 0", .ty = "INT", .rows = "1", .lit = "1", .wrong = "0" },
+    .{ .e = "5 ^ 3", .ty = "INT", .rows = "6", .lit = "6", .wrong = "7" },
+    .{ .e = "UCASE('ab')", .ty = "VARCHAR(10)", .rows = "AB", .lit = "'AB'", .wrong = "'x'" },
+    .{ .e = "CHAR_LENGTH('é') + LENGTH('é')", .ty = "INT", .rows = "3", .lit = "3", .wrong = "2" },
+    .{ .e = "GREATEST(1, 5, 3)", .ty = "INT", .rows = "5", .lit = "5", .wrong = "1" },
+    .{ .e = "'2024-01-31' + INTERVAL 1 MONTH", .ty = "VARCHAR(20)", .rows = "2024-02-29", .lit = "'2024-02-29'", .wrong = "'2024-03-01'" },
+    .{ .e = "CONCAT('a', NULL)", .ty = "VARCHAR(10)", .rows = "NULL", .lit = "NULL", .wrong = "'a'" },
+    .{ .e = "CONCAT('a', 1)", .ty = "VARCHAR(10)", .rows = "a1", .lit = "'a1'", .wrong = "'a'" },
+    .{ .e = "LEFT('hello', 2)", .ty = "VARCHAR(10)", .rows = "he", .lit = "'he'", .wrong = "'h'" },
+    .{ .e = "FLOOR(2.5) + MOD(7, 3)", .ty = "INT", .rows = "3", .lit = "3", .wrong = "2" },
+    .{ .e = "CAST('3.456' AS DECIMAL(5,2))", .ty = "DOUBLE", .rows = "3.46", .lit = "3.46", .wrong = "3.456" },
+    .{ .e = "IF(1 > 2, 'y', 'n')", .ty = "VARCHAR(1)", .rows = "n", .lit = "'n'", .wrong = "'y'" },
+    .{ .e = "'a_C' LIKE 'A\\_%'", .ty = "INT", .rows = "1", .lit = "1", .wrong = "0" },
+    .{ .e = "TIMESTAMPDIFF(DAY, '2024-01-01', '2024-01-31')", .ty = "INT", .rows = "30", .lit = "30", .wrong = "31" },
+    .{ .e = "1 || 0 && 0", .ty = "INT", .rows = "1", .lit = "1", .wrong = "0" },
+};
+
+test "mariadb: an expression means the same in a query, a CHECK, a DEFAULT, a generated column and a view" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    var buf: [1024]u8 = undefined;
+    var buf2: [256]u8 = undefined;
+    for (same_cases, 0..) |x, i| {
+        try c.exec(try std.fmt.bufPrint(&buf, "CREATE TABLE t{d} (id INT PRIMARY KEY, v {s} CHECK (v <=> ({s})), d {s} DEFAULT ({s}), g {s} AS ({s}) VIRTUAL)", .{ i, x.ty, x.e, x.ty, x.e, x.ty, x.e }));
+        try c.exec(try std.fmt.bufPrint(&buf, "CREATE VIEW v{d} AS SELECT {s} AS x", .{ i, x.e }));
+        try c.expectRows(try std.fmt.bufPrint(&buf, "SELECT {s}", .{x.e}), try std.fmt.bufPrint(&buf2, "{s}\n", .{x.rows}));
+        try c.exec(try std.fmt.bufPrint(&buf, "INSERT INTO t{d} (id, v) VALUES (1, {s})", .{ i, x.e }));
+    }
+    // Read by this dialect, then by the SQLite dialect (which compiles
+    // what the schema keeps as written).
+    for ([_]@import("../dialect.zig").Dialect{ .mariadb, .sqlite }) |d| {
+        main_mod.setDialect(c.db, d);
+        for (same_cases, 0..) |x, i| {
+            try c.exec(try std.fmt.bufPrint(&buf, "DELETE FROM t{d} WHERE id = 2", .{i}));
+            try c.exec(try std.fmt.bufPrint(&buf, "INSERT INTO t{d} (id, v) VALUES (2, {s})", .{ i, x.lit }));
+            try c.expectRows(try std.fmt.bufPrint(&buf, "SELECT v, d, g FROM t{d} ORDER BY id", .{i}), try std.fmt.bufPrint(&buf2, "{s}|{s}|{s}\n{s}|{s}|{s}\n", .{ x.rows, x.rows, x.rows, x.rows, x.rows, x.rows }));
+            try c.expectRows(try std.fmt.bufPrint(&buf, "SELECT x FROM v{d}", .{i}), try std.fmt.bufPrint(&buf2, "{s}\n", .{x.rows}));
+            try c.expectError(try std.fmt.bufPrint(&buf, "INSERT INTO t{d} (id, v) VALUES (3, {s})", .{ i, x.wrong }), "CHECK constraint failed: v");
+        }
+    }
+    // The schema calls the engine functions lowering calls, not a
+    // token-level translation (* 1.0 /).
+    main_mod.setDialect(c.db, .mariadb);
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'v2'", "CREATE VIEW \"v2\" AS SELECT xq_div(7, 2) AS \"x\"\n");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'v0'", "CREATE VIEW \"v0\" AS SELECT (CAST(7 AS REAL) / 2) AS \"x\"\n");
+    try c.expectRows("SELECT instr(lower(sql), 'xq_mariadb_left(') > 0 FROM sqlite_schema WHERE name = 't12'", "1\n");
+    try c.expectColumns("SELECT 7 / 2, 7 DIV 2 AS q, `id` FROM t0", "7 / 2|q|id");
+}
+
+test "mariadb: variables and parameters are not kept in the schema" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.expectError("CREATE TABLE t (a INT DEFAULT (@x))", "Function or expression '@x' cannot be used in the DEFAULT clause of `a`");
+    try c.expectError("CREATE TABLE t (a INT CHECK (a > @@sql_mode))", "Function or expression '@@sql_mode' cannot be used in the CHECK clause of `a`");
+    try c.expectError("CREATE TABLE t (a INT, b INT AS (a + @x))", "Function or expression '@x' cannot be used in the GENERATED ALWAYS AS clause of `b`");
+    try c.expectError("CREATE VIEW v AS SELECT @x", "View's SELECT contains a variable or parameter");
+    try c.expectError("CREATE VIEW v AS SELECT 1 FROM (SELECT ?) s", "View's SELECT contains a variable or parameter");
+    try c.exec("SET @x = 1");
+    try c.expectRows("SELECT @x + 1", "2\n");
+}

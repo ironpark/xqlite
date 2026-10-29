@@ -20,7 +20,16 @@
 //! out of range".
 
 const std = @import("std");
-const ast = @import("ast.zig");
+
+/// A type as PostgreSQL names it: `name` is the canonical spelling
+/// ("integer", "character varying", "timestamp with time zone" ...),
+/// `mods` the modifiers in parentheses.
+pub const TypeName = struct {
+    name: []const u8,
+    mods: []const i64 = &.{},
+    array: bool = false,
+    pos: u32,
+};
 
 pub const Check = enum {
     none,
@@ -44,7 +53,7 @@ pub const Info = struct {
 pub const Error = error{ UnknownType, Array };
 
 /// The storage of declared type `ty`.
-pub fn info(ty: ast.TypeName) Error!Info {
+pub fn info(ty: TypeName) Error!Info {
     if (ty.array) return error.Array;
     const n = ty.name;
     const table = [_]struct { []const u8, Info }{
@@ -84,7 +93,7 @@ pub fn info(ty: ast.TypeName) Error!Info {
 }
 
 /// The length limit of varchar(n)/char(n) (char is char(1)).
-pub fn maxLength(ty: ast.TypeName) ?i64 {
+pub fn maxLength(ty: TypeName) ?i64 {
     if (ty.mods.len > 0) return ty.mods[0];
     if (std.mem.eql(u8, ty.name, "character")) return 1;
     return null;
@@ -99,7 +108,7 @@ pub fn serialBase(name: []const u8) []const u8 {
 
 /// format_type(): "character varying(20)", "numeric(10,2)",
 /// "timestamp(3) without time zone", "integer" for serial ...
-pub fn format(a: std.mem.Allocator, ty: ast.TypeName) ![]const u8 {
+pub fn format(a: std.mem.Allocator, ty: TypeName) ![]const u8 {
     const n = if (std.mem.endsWith(u8, ty.name, "serial")) serialBase(ty.name) else ty.name;
     if (std.mem.eql(u8, n, "character") and ty.mods.len == 0) return "character(1)";
     if (ty.mods.len == 0) return n;
@@ -142,7 +151,7 @@ pub const CastPlan = union(enum) {
     round: i64,
 };
 
-pub fn castPlan(ty: ast.TypeName) Error!CastPlan {
+pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (ty.array) return error.Array;
     const n = ty.name;
     const eql = std.mem.eql;

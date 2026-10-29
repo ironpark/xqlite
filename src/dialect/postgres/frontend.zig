@@ -1,11 +1,11 @@
 //! The PostgreSQL dialect (Phase 5).
 //!
-//! The frontend reads one statement (lexer.zig, parser.zig into the tree
-//! of ast.zig) and lowers it: queries, DML and transaction control into
-//! the common IR (lower.zig), DDL as SQLite text with catalog entries
-//! (ddl.zig, render.zig). ANALYZE is passed to SQLite's grammar as
-//! written, as are PRAGMA, VACUUM and the other SQLite commands of
-//! dialect.runParser(). Errors use PostgreSQL's wording where it is cheap
+//! The frontend reads one statement (lexer.zig, parser.zig into the
+//! syntax tree IR of src/ir/tree.zig, PostgreSQL's semantics resolved)
+//! and lowers it with src/ir/lower.zig, DDL after the checks of ddl.zig
+//! (the IR renders it as SQLite text with its catalog entries). ANALYZE
+//! is passed to SQLite's grammar as written, as are PRAGMA, VACUUM and
+//! the other SQLite commands of dialect.runParser(). Errors use PostgreSQL's wording where it is cheap
 //! (`syntax error at or near "x"`, `relation "t" does not exist`).
 //!
 //! The engine side: the function table (version(), the sequence
@@ -20,8 +20,8 @@ const dfunc = @import("../func.zig");
 const sequence = @import("../../catalog/sequence.zig");
 const api = @import("../../vdbe/api.zig");
 const ir = @import("../../ir/ir.zig");
+const lower = @import("../../ir/lower.zig");
 const parser = @import("parser.zig");
-const lower = @import("lower.zig");
 const ddl = @import("ddl.zig");
 const funcs = @import("funcs.zig");
 
@@ -67,9 +67,12 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
         try ir.stmt.lowerSqliteText(p, text);
         return;
     }
+    ps.p = p;
     const stmt = ps.statement() catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.ParseFailed => {
+            // The schema could not be read: its error is in `p`.
+            if (ps.err_in_parse) return error.Failed;
             const z: ?[*]const u8 = if (ps.err_pos < sql.len) sql.ptr + ps.err_pos else null;
             ir.stmt.errorMsgAt(p, z, "{s}", .{ps.err_msg});
             return error.Failed;
@@ -77,7 +80,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     };
     switch (stmt) {
         .create_table, .create_index, .create_view, .create_sequence, .alter_table, .drop => {
-            var d: ddl.Ddl = .{ .p = p, .src = sql };
+            var d: ddl.Ddl = .init(p, sql);
             return d.statement(stmt);
         },
         .explain => |inner| switch (inner.*) {
@@ -89,7 +92,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
         },
         else => {},
     }
-    var l: lower.Lowerer = .{ .p = p, .src = sql };
+    var l: lower.Lowerer = .init(p, sql);
     try l.statement(stmt);
 }
 

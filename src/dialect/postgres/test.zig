@@ -265,7 +265,7 @@ test "pg: types are strict" {
         \\  dt date, ts timestamp, tz timestamptz, tm time, u uuid, j jsonb)
     );
     try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'ty'",
-        \\CREATE TABLE "ty"("i2" INTEGER CONSTRAINT "smallint out of range" CHECK("i2" BETWEEN -32768 AND 32767), "i4" INTEGER CONSTRAINT "integer out of range" CHECK("i4" BETWEEN -2147483648 AND 2147483647), "i8" INTEGER, "r" REAL, "d" REAL, "n" ANY CONSTRAINT "invalid input syntax for type numeric" CHECK(typeof("n") IN ('integer', 'real', 'null')), "b" INTEGER CONSTRAINT "invalid input syntax for type boolean" CHECK("b" IN (0, 1)), "t" TEXT, "vc" TEXT CONSTRAINT "value too long for type character varying(3)" CHECK(length("vc") <= 3), "ch" TEXT CONSTRAINT "value too long for type character(2)" CHECK(length("ch") <= 2), "by" BLOB, "dt" TEXT, "ts" TEXT, "tz" TEXT, "tm" TEXT, "u" TEXT, "j" TEXT CONSTRAINT "invalid input syntax for type json" CHECK(json_valid("j"))) STRICT
+        \\CREATE TABLE "ty"("i2" INTEGER CONSTRAINT "smallint out of range" CHECK(("i2" BETWEEN -32768 AND 32767)), "i4" INTEGER CONSTRAINT "integer out of range" CHECK(("i4" BETWEEN -2147483648 AND 2147483647)), "i8" INTEGER, "r" REAL, "d" REAL, "n" ANY CONSTRAINT "invalid input syntax for type numeric" CHECK((typeof("n") IN ('integer', 'real', 'null'))), "b" INTEGER CONSTRAINT "invalid input syntax for type boolean" CHECK(("b" IN (0, 1))), "t" TEXT, "vc" TEXT CONSTRAINT "value too long for type character varying(3)" CHECK((length("vc") <= 3)), "ch" TEXT CONSTRAINT "value too long for type character(2)" CHECK((length("ch") <= 2)), "by" BLOB, "dt" TEXT, "ts" TEXT, "tz" TEXT, "tm" TEXT, "u" TEXT, "j" TEXT CONSTRAINT "invalid input syntax for type json" CHECK(json_valid("j"))) STRICT
         \\
     );
     try c.expectRows("SELECT col, value FROM xq_catalog WHERE tbl = 'ty' AND key = 'type' ORDER BY col",
@@ -312,7 +312,7 @@ test "pg: SERIAL and IDENTITY" {
     defer c.close();
     try c.exec("CREATE TABLE s (id serial PRIMARY KEY, v text)");
     try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 's'",
-        \\CREATE TABLE "s"("id" INTEGER NOT NULL DEFAULT (nextval('s_id_seq')) PRIMARY KEY CONSTRAINT "integer out of range" CHECK("id" BETWEEN -2147483648 AND 2147483647), "v" TEXT) STRICT
+        \\CREATE TABLE "s"("id" INTEGER NOT NULL DEFAULT (nextval('s_id_seq')) PRIMARY KEY CONSTRAINT "integer out of range" CHECK(("id" BETWEEN -2147483648 AND 2147483647)), "v" TEXT) STRICT
         \\
     );
     try c.expectRows("SELECT name, start_value, max_value FROM xq_sequence", "s_id_seq|1|2147483647\n");
@@ -401,7 +401,7 @@ test "pg: DDL" {
         \\);
     );
     try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'child'",
-        \\CREATE TABLE "child"("id" INTEGER CONSTRAINT "integer out of range" CHECK("id" BETWEEN -2147483648 AND 2147483647), "parent_id" INTEGER REFERENCES "parent"("id") ON DELETE CASCADE CONSTRAINT "integer out of range" CHECK("parent_id" BETWEEN -2147483648 AND 2147483647), "qty" INTEGER CONSTRAINT "child_qty_check" CHECK(("qty" > 0)) DEFAULT (1) CONSTRAINT "integer out of range" CHECK("qty" BETWEEN -2147483648 AND 2147483647), "label" TEXT COLLATE BINARY, "total" INTEGER GENERATED ALWAYS AS (("qty" * 2)) STORED CONSTRAINT "integer out of range" CHECK("total" BETWEEN -2147483648 AND 2147483647), CONSTRAINT "child_pk" PRIMARY KEY("id"), UNIQUE("parent_id", "label"), CONSTRAINT "child_check" CHECK(("id" > 0))) STRICT
+        \\CREATE TABLE "child"("id" INTEGER CONSTRAINT "integer out of range" CHECK(("id" BETWEEN -2147483648 AND 2147483647)), "parent_id" INTEGER REFERENCES "parent"("id") ON DELETE CASCADE CONSTRAINT "integer out of range" CHECK(("parent_id" BETWEEN -2147483648 AND 2147483647)), "qty" INTEGER CONSTRAINT "child_qty_check" CHECK(("qty" > 0)) DEFAULT (1) CONSTRAINT "integer out of range" CHECK(("qty" BETWEEN -2147483648 AND 2147483647)), "label" TEXT COLLATE BINARY, "total" INTEGER GENERATED ALWAYS AS (("qty" * 2)) STORED CONSTRAINT "integer out of range" CHECK(("total" BETWEEN -2147483648 AND 2147483647)), CONSTRAINT "child_pk" PRIMARY KEY("id"), UNIQUE("parent_id", "label"), CONSTRAINT "child_check" CHECK(("id" > 0))) STRICT
         \\
     );
     try c.exec("CREATE TABLE IF NOT EXISTS child (x int)");

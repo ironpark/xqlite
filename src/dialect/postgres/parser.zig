@@ -1,20 +1,49 @@
 //! A recursive descent parser for the PostgreSQL statements the dialect
 //! supports (see README.md, "PostgreSQL 방언"), producing the syntax tree
-//! of ast.zig. Operator precedence is PostgreSQL's (lowest first): OR,
-//! AND, NOT, IS/ISNULL/NOTNULL, comparison, BETWEEN/IN/LIKE/ILIKE, other
-//! operators (||, ->, & ...), + -, * / %, ^, unary + - ~, ::/COLLATE.
+//! IR (src/ir/tree.zig) with PostgreSQL's semantics resolved:
+//!
+//!  - names: unquoted identifiers folded (lexer.zig); schemas mapped to
+//!    SQLite databases (`public` is main, `pg_temp` temp, an attached
+//!    database itself); information_schema and pg_catalog views replaced
+//!    by the queries of catalog_views.zig;
+//!  - casts as types.castPlan() says, '\x..'::bytea a blob; LIKE
+//!    case-sensitive and ILIKE folding, `\` their default escape; `||`
+//!    NULL if an operand is; `/` SQLite's (integer division of integers);
+//!  - functions mapped to SQLite's (substring is substr ...), the special
+//!    syntax (now(), EXTRACT, trim(... FROM ...)) rewritten, a function
+//!    of the dialect's table marked as such (tree.Func.dialect);
+//!  - ORDER BY without NULLS FIRST/LAST puts NULLs last ascending and
+//!    first descending (SQLite does the opposite);
+//!  - result columns named as PostgreSQL names them (FigureColname():
+//!    "?column?", the function, the type of a cast of a constant ...);
+//!  - INSERT with fewer values than columns fills the leading ones, a
+//!    string constant for a numeric column is the number it spells;
+//!  - DDL: types mapped to STRICT storage with the checks of types.zig,
+//!    SERIAL and GENERATED ... AS IDENTITY to tree.Identity columns.
+//!
+//! What needs the schema (schema names, catalog views, INSERT's columns)
+//! reads it through `p`, the statement being compiled.
+//!
+//! Operator precedence is PostgreSQL's (lowest first): OR, AND, NOT,
+//! IS/ISNULL/NOTNULL, comparison, BETWEEN/IN/LIKE/ILIKE, other operators
+//! (||, ->, & ...), + -, * / %, ^, unary + - ~, ::/COLLATE.
 //!
 //! A statement is lexed up to its terminating semicolon first (lexing
 //! does not depend on parsing), so lookahead never fails; `end` is the
 //! offset after the semicolon, where the next statement starts.
 
 const std = @import("std");
-const ast = @import("ast.zig");
+const tree = @import("../../ir/tree.zig");
+const ir = @import("../../ir/ir.zig");
+const int = @import("../../sql/sqlite_int.zig");
+const build = @import("../../sql/build.zig");
 const lexer = @import("lexer.zig");
+const types = @import("types.zig");
+const views = @import("catalog_views.zig");
 
 const Token = lexer.Token;
-const Name = ast.Name;
-const Expr = ast.Expr;
+const Name = tree.Name;
+const Expr = tree.Expr;
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ ParseFailed, OutOfMemory };
@@ -68,6 +97,35 @@ pub const LexError = struct {
     pos: usize = 0,
 };
 
+/// `[schema.]name` as written (the schema is PostgreSQL's).
+pub const QName = struct {
+    schema: ?Name = null,
+    name: Name,
+};
+
+/// What PostgreSQL names a result column that is this node, for nodes
+/// the parser rewrote: a call (its name as written), a cast (the name
+/// its operand gives, else the type's internal name).
+const Fig = union(enum) {
+    call: []const u8,
+    cast: struct { strong: ?[]const u8, type_name: []const u8 },
+};
+
+/// A function call as written, before it is resolved (callExpr()).
+const Call = struct {
+    name: Name,
+    args: []*Expr = &.{},
+    /// f(*)
+    star: bool = false,
+    distinct: bool = false,
+    order_by: []tree.SortItem = &.{},
+    filter: ?*Expr = null,
+    over: ?*tree.WindowSpec = null,
+    /// The name of the column of a call written with a special syntax
+    /// (substring(x FROM a) is "substring", not "substr").
+    label: ?[]const u8 = null,
+};
+
 pub const Parser = struct {
     arena: Allocator,
     src: [:0]const u8,
@@ -77,6 +135,15 @@ pub const Parser = struct {
     err_pos: usize = 0,
     /// Offset after the statement (and its semicolon).
     end: usize,
+    /// The statement being compiled, for what depends on the schema; null
+    /// to parse without it (schema names other than public and pg_temp
+    /// are then unknown, catalog views are tables).
+    p: ?*int.Parse = null,
+    /// The error is in `p` already (the schema could not be read).
+    err_in_parse: bool = false,
+    schema_read: bool = false,
+    /// Result column names of rewritten nodes.
+    figs: std.AutoHashMapUnmanaged(*const Expr, Fig) = .empty,
 
     /// Lex the statement that starts at `pos` (blank text and leading
     /// semicolons are skipped). An empty statement has no tokens but eof.
@@ -209,13 +276,94 @@ pub const Parser = struct {
     }
 
     fn new(p: *Parser, comptime T: type, v: T) Error!*T {
-        const x = try p.arena.create(T);
-        x.* = v;
-        return x;
+        return tree.new(p.arena, T, v);
     }
 
-    fn expr(p: *Parser, pos: u32, kind: ast.Kind) Error!*Expr {
-        return p.new(Expr, .{ .pos = pos, .end = p.lastEnd(), .kind = kind });
+    fn expr(p: *Parser, pos: u32, kind: tree.Kind) Error!*Expr {
+        return tree.expr(p.arena, pos, p.lastEnd(), kind);
+    }
+
+    /// A node spanning `l` to `r`.
+    fn span(p: *Parser, l: *const Expr, r: *const Expr, kind: tree.Kind) Error!*Expr {
+        return tree.expr(p.arena, l.pos, r.end, kind);
+    }
+
+    fn list(p: *Parser, items: []const *Expr) Error![]*Expr {
+        return p.arena.dupe(*Expr, items);
+    }
+
+    // ------------------------------------------------------------ schema
+
+    /// Read the schema (once) for what depends on it.
+    fn readSchema(p: *Parser) Error!void {
+        if (p.schema_read) return;
+        const ps = p.p orelse return;
+        p.schema_read = true;
+        ir.stmt.readSchema(ps) catch {
+            p.err_in_parse = true;
+            return error.ParseFailed;
+        };
+    }
+
+    /// The SQLite database of PostgreSQL schema `n`.
+    fn dbName(p: *Parser, n: Name) Error!Name {
+        if (eql(n.text, "public")) return .{ .text = "main", .pos = n.pos };
+        if (eql(n.text, "pg_temp")) return .{ .text = "temp", .pos = n.pos };
+        if (p.p) |ps| {
+            try p.readSchema();
+            if (build.findDbName(ps.db, n.text) != null) return n;
+        }
+        return p.fail(n.pos, "schema \"{s}\" does not exist", .{n.text});
+    }
+
+    /// The table (or other relation) `q` of a query or DML statement.
+    fn relation(p: *Parser, q: QName) Error!tree.QName {
+        return .{ .schema = if (q.schema) |s| try p.dbName(s) else null, .name = q.name };
+    }
+
+    /// The schema of an object DDL names: main (public, or none), temp
+    /// (pg_temp, or none for a temporary object).
+    pub fn ddlSchema(p: *Parser, q: QName, temp: bool) Error![]const u8 {
+        if (q.schema) |s| {
+            if (eql(s.text, "public")) return "main";
+            if (eql(s.text, "pg_temp")) return "temp";
+            return p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text});
+        }
+        return if (temp) "temp" else "main";
+    }
+
+    /// The query standing for an information_schema or pg_catalog view
+    /// (null: not one).
+    fn catalogView(p: *Parser, q: QName) Error!?*tree.Select {
+        const ps = p.p orelse return null;
+        try p.readSchema();
+        const schema: ?[]const u8 = if (q.schema) |s| s.text else null;
+        if (schema == null and build.findTable(ps.db, q.name.text, null) != null) return null;
+        const text = (try views.definition(ps, schema, q.name.text)) orelse {
+            if (schema) |s| if (eql(s, "information_schema") or eql(s, "pg_catalog")) {
+                return p.fail(q.name.pos, "relation \"{s}.{s}\" does not exist", .{ s, q.name.text });
+            };
+            return null;
+        };
+        var sub = Parser.init(p.arena, text, 0, null) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.ParseFailed => return p.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text}),
+        };
+        sub.p = ps;
+        sub.schema_read = true;
+        const sel = sub.select() catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.ParseFailed => {
+                if (sub.err_in_parse) {
+                    p.err_in_parse = true;
+                    return error.ParseFailed;
+                }
+                return p.fail(q.name.pos, "internal error in the definition of {s}: {s}", .{ q.name.text, sub.err_msg });
+            },
+        };
+        if (sub.peek().kind != .eof) return p.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
+        sel.src = text;
+        return sel;
     }
 
     // ------------------------------------------------------------- names
@@ -241,7 +389,7 @@ pub const Parser = struct {
         return p.syntaxError();
     }
 
-    fn qname(p: *Parser) Error!ast.QName {
+    fn qname(p: *Parser) Error!QName {
         const first = try p.colId();
         if (p.peek().kind == .dot) {
             _ = p.advance();
@@ -285,13 +433,13 @@ pub const Parser = struct {
 
     // ======================================================== statements
 
-    pub fn statement(p: *Parser) Error!ast.Stmt {
+    pub fn statement(p: *Parser) Error!tree.Stmt {
         const s = try p.stmt();
         if (p.peek().kind != .eof) return p.syntaxError();
         return s;
     }
 
-    fn stmt(p: *Parser) Error!ast.Stmt {
+    fn stmt(p: *Parser) Error!tree.Stmt {
         const t = p.peek();
         if (t.kind == .lparen) return .{ .select = try p.select() };
         if (t.kind != .ident) return p.syntaxError();
@@ -367,7 +515,7 @@ pub const Parser = struct {
                 _ = p.eatKw("analyze") or p.eatKw("analyse");
                 _ = p.eatKw("verbose");
             }
-            const inner = try p.new(ast.Stmt, try p.stmt());
+            const inner = try p.new(tree.Stmt, try p.stmt());
             return .{ .explain = inner };
         }
         return p.syntaxError();
@@ -419,16 +567,16 @@ pub const Parser = struct {
         return k > 0 and p.startsSelect(k);
     }
 
-    pub fn select(p: *Parser) Error!*ast.Select {
+    pub fn select(p: *Parser) Error!*tree.Select {
         const pos = p.peek().start;
-        var with: ?*ast.With = null;
+        var with: ?*tree.With = null;
         if (p.isKw("with")) with = try p.withClause();
         return p.selectAfterWith(with, pos);
     }
 
-    fn selectAfterWith(p: *Parser, with: ?*ast.With, pos: u32) Error!*ast.Select {
+    fn selectAfterWith(p: *Parser, with: ?*tree.With, pos: u32) Error!*tree.Select {
         const body = try p.setExpr();
-        var s: ast.Select = .{ .with = with, .body = body, .pos = pos };
+        var s: tree.Select = .{ .with = with, .body = body, .pos = pos };
         if (p.isKw("order")) {
             _ = p.advance();
             try p.expectKw("by");
@@ -474,15 +622,15 @@ pub const Parser = struct {
         if (with == null and s.order_by.len == 0 and s.limit == null and s.offset == null) {
             if (body.* == .nested) return body.nested;
         }
-        return p.new(ast.Select, s);
+        return p.new(tree.Select, s);
     }
 
-    fn withClause(p: *Parser) Error!*ast.With {
+    fn withClause(p: *Parser) Error!*tree.With {
         try p.expectKw("with");
         const recursive = p.eatKw("recursive");
-        var ctes: std.ArrayList(ast.Cte) = .empty;
+        var ctes: std.ArrayList(tree.Cte) = .empty;
         while (true) {
-            var cte: ast.Cte = .{ .name = try p.colId(), .select = undefined };
+            var cte: tree.Cte = .{ .name = try p.colId(), .select = undefined };
             if (p.peek().kind == .lparen) cte.cols = try p.parenNameList();
             try p.expectKw("as");
             if (p.eatKw("materialized")) {
@@ -501,43 +649,43 @@ pub const Parser = struct {
             try ctes.append(p.arena, cte);
             if (!p.eat(.comma)) break;
         }
-        return p.new(ast.With, .{ .recursive = recursive, .ctes = ctes.items });
+        return p.new(tree.With, .{ .recursive = recursive, .ctes = ctes.items });
     }
 
     /// UNION and EXCEPT, left to right, over INTERSECT (which binds
     /// tighter in PostgreSQL).
-    fn setExpr(p: *Parser) Error!*ast.Body {
+    fn setExpr(p: *Parser) Error!*tree.Body {
         var left = try p.intersectExpr();
         while (true) {
-            const op: ast.SetOp = if (p.eatKw("union")) .@"union" else if (p.eatKw("except")) .except else break;
+            const op: tree.SetOp = if (p.eatKw("union")) .@"union" else if (p.eatKw("except")) .except else break;
             const all = p.eatKw("all");
             if (!all) _ = p.eatKw("distinct");
             const right = try p.intersectExpr();
-            left = try p.new(ast.Body, .{ .compound = .{ .op = op, .all = all, .left = left, .right = right } });
+            left = try p.new(tree.Body, .{ .compound = .{ .op = op, .all = all, .left = left, .right = right } });
         }
         return left;
     }
 
-    fn intersectExpr(p: *Parser) Error!*ast.Body {
+    fn intersectExpr(p: *Parser) Error!*tree.Body {
         var left = try p.simpleSelect();
         while (p.eatKw("intersect")) {
             const all = p.eatKw("all");
             if (!all) _ = p.eatKw("distinct");
             const right = try p.simpleSelect();
-            left = try p.new(ast.Body, .{ .compound = .{ .op = .intersect, .all = all, .left = left, .right = right } });
+            left = try p.new(tree.Body, .{ .compound = .{ .op = .intersect, .all = all, .left = left, .right = right } });
         }
         return left;
     }
 
-    fn simpleSelect(p: *Parser) Error!*ast.Body {
+    fn simpleSelect(p: *Parser) Error!*tree.Body {
         const t = p.peek();
         if (t.kind == .lparen) {
             _ = p.advance();
             const s = try p.select();
             _ = try p.expect(.rparen);
-            return p.new(ast.Body, .{ .nested = s });
+            return p.new(tree.Body, .{ .nested = s });
         }
-        if (t.isKw("select")) return p.new(ast.Body, .{ .core = try p.core() });
+        if (t.isKw("select")) return p.new(tree.Body, .{ .core = try p.core() });
         if (t.isKw("values")) {
             _ = p.advance();
             var rows: std.ArrayList([]*Expr) = .empty;
@@ -547,23 +695,23 @@ pub const Parser = struct {
                 _ = try p.expect(.rparen);
                 if (!p.eat(.comma)) break;
             }
-            return p.new(ast.Body, .{ .values = rows.items });
+            return p.new(tree.Body, .{ .values = rows.items });
         }
         if (t.isKw("table")) {
             _ = p.advance();
             const name = try p.qname();
-            var cols = try p.arena.alloc(ast.ResultCol, 1);
+            var cols = try p.arena.alloc(tree.ResultCol, 1);
             cols[0] = .{ .star = t.start };
-            var from = try p.arena.alloc(ast.FromItem, 1);
-            from[0] = .{ .source = .{ .table = name } };
-            return p.new(ast.Body, .{ .core = try p.new(ast.Core, .{ .cols = cols, .from = from, .pos = t.start }) });
+            var from = try p.arena.alloc(tree.FromItem, 1);
+            from[0] = try p.tableItem(name);
+            return p.new(tree.Body, .{ .core = try p.new(tree.Core, .{ .cols = cols, .from = from, .pos = t.start }) });
         }
         return p.syntaxError();
     }
 
-    fn core(p: *Parser) Error!*ast.Core {
+    fn core(p: *Parser) Error!*tree.Core {
         const pos = p.advance().start; // SELECT
-        var c: ast.Core = .{ .cols = &.{}, .pos = pos };
+        var c: tree.Core = .{ .cols = &.{}, .pos = pos };
         if (p.eatKw("distinct")) {
             c.distinct = true;
             if (p.isKw("on")) return p.unsupported(p.peek().start, "DISTINCT ON");
@@ -582,7 +730,7 @@ pub const Parser = struct {
         }
         if (p.eatKw("having")) c.having = try p.expr0();
         if (p.eatKw("window")) {
-            var wins: std.ArrayList(ast.NamedWindow) = .empty;
+            var wins: std.ArrayList(tree.NamedWindow) = .empty;
             while (true) {
                 const name = try p.colId();
                 try p.expectKw("as");
@@ -591,7 +739,7 @@ pub const Parser = struct {
             }
             c.windows = wins.items;
         }
-        return p.new(ast.Core, c);
+        return p.new(tree.Core, c);
     }
 
     /// The end of the SELECT list: FROM or another clause, or the end.
@@ -603,8 +751,8 @@ pub const Parser = struct {
         return false;
     }
 
-    pub fn targetList(p: *Parser) Error![]ast.ResultCol {
-        var out: std.ArrayList(ast.ResultCol) = .empty;
+    pub fn targetList(p: *Parser) Error![]tree.ResultCol {
+        var out: std.ArrayList(tree.ResultCol) = .empty;
         while (true) {
             try out.append(p.arena, try p.target());
             if (!p.eat(.comma)) break;
@@ -612,7 +760,7 @@ pub const Parser = struct {
         return out.items;
     }
 
-    fn target(p: *Parser) Error!ast.ResultCol {
+    fn target(p: *Parser) Error!tree.ResultCol {
         const t = p.peek();
         if (t.isOp("*")) {
             _ = p.advance();
@@ -651,13 +799,71 @@ pub const Parser = struct {
                 label = .{ .text = a.text, .pos = a.start };
             }
         }
-        return .{ .expr = .{ .e = e, .alias = label } };
+        return .{ .expr = .{ .e = e, .alias = label, .name = if (label == null) p.columnName(e) else null } };
     }
 
-    pub fn sortList(p: *Parser) Error![]ast.SortItem {
-        var out: std.ArrayList(ast.SortItem) = .empty;
+    // ------------------------------------------------------------ naming
+
+    /// The name PostgreSQL gives a result column without an alias
+    /// (FigureColname()): the column, the function, the type of a cast of
+    /// a constant, "case", "exists" ..., or "?column?". Null for a column
+    /// reference, which SQLite names after the column itself.
+    fn columnName(p: *const Parser, e: *const Expr) ?[]const u8 {
+        if (p.figs.get(e)) |f| return switch (f) {
+            .call => |n| n,
+            .cast => |c| c.strong orelse types.internalName(c.type_name),
+        };
+        return switch (e.kind) {
+            .column => null,
+            .collate => |c| p.columnName(c.e),
+            .case => "case",
+            .exists => "exists",
+            .row => "row",
+            .boolean => "bool",
+            .subquery => |s| p.subqueryName(s),
+            else => "?column?",
+        };
+    }
+
+    /// A name a cast keeps (FigureColname()'s strength 2): of a column, a
+    /// call, EXISTS, ROW, a scalar subquery.
+    fn strongName(p: *const Parser, e: *const Expr) ?[]const u8 {
+        if (p.figs.get(e)) |f| return switch (f) {
+            .call => |n| n,
+            .cast => |c| c.strong,
+        };
+        return switch (e.kind) {
+            .column => |names| names[names.len - 1].text,
+            .collate => |c| p.strongName(c.e),
+            .exists => "exists",
+            .row => "row",
+            .subquery => |s| p.subqueryName(s),
+            else => null,
+        };
+    }
+
+    fn subqueryName(p: *const Parser, s: *const tree.Select) []const u8 {
+        if (s.body.* == .core) {
+            const cols = s.body.core.cols;
+            if (cols.len >= 1) switch (cols[0]) {
+                .expr => |x| {
+                    if (x.alias) |a| return a.text;
+                    return p.strongName(x.e) orelse "?column?";
+                },
+                else => {},
+            };
+        }
+        return "?column?";
+    }
+
+    fn setFig(p: *Parser, e: *const Expr, f: Fig) Error!void {
+        try p.figs.put(p.arena, e, f);
+    }
+
+    pub fn sortList(p: *Parser) Error![]tree.SortItem {
+        var out: std.ArrayList(tree.SortItem) = .empty;
         while (true) {
-            var item: ast.SortItem = .{ .expr = try p.expr0() };
+            var item: tree.SortItem = .{ .expr = try p.expr0() };
             if (p.eatKw("asc")) {
                 item.dir = .asc;
             } else if (p.eatKw("desc")) {
@@ -673,6 +879,9 @@ pub const Parser = struct {
                     try p.expectKw("last");
                     item.nulls = .last;
                 }
+            } else {
+                // PostgreSQL: NULLs sort as if larger than any value.
+                item.nulls = if (item.dir == .desc) .first else .last;
             }
             try out.append(p.arena, item);
             if (!p.eat(.comma)) break;
@@ -682,8 +891,8 @@ pub const Parser = struct {
 
     // -------------------------------------------------------------- FROM
 
-    pub fn fromList(p: *Parser) Error![]ast.FromItem {
-        var items: std.ArrayList(ast.FromItem) = .empty;
+    pub fn fromList(p: *Parser) Error![]tree.FromItem {
+        var items: std.ArrayList(tree.FromItem) = .empty;
         try p.tableRef(&items, .none);
         while (p.eat(.comma)) try p.tableRef(&items, .comma);
         return items.items;
@@ -691,14 +900,14 @@ pub const Parser = struct {
 
     /// A FROM item and the joins that follow it, appended to `items`
     /// (SQLite's FROM is a flat list, each item joined to those before).
-    fn tableRef(p: *Parser, items: *std.ArrayList(ast.FromItem), join: ast.JoinKind) Error!void {
+    fn tableRef(p: *Parser, items: *std.ArrayList(tree.FromItem), join: tree.JoinKind) Error!void {
         var first = try p.fromPrimary();
         first.join = join;
         try items.append(p.arena, first);
         while (true) {
             var natural = false;
             if (p.eatKw("natural")) natural = true;
-            var kind: ast.JoinKind = .inner;
+            var kind: tree.JoinKind = .inner;
             if (p.eatKw("join")) {} else if (p.eatKw("inner")) {
                 try p.expectKw("join");
             } else if (p.eatKw("left")) {
@@ -734,7 +943,15 @@ pub const Parser = struct {
         }
     }
 
-    fn fromPrimary(p: *Parser) Error!ast.FromItem {
+    /// A FROM item naming a table, or a catalog view.
+    fn tableItem(p: *Parser, q: QName) Error!tree.FromItem {
+        if (try p.catalogView(q)) |sel| {
+            return .{ .source = .{ .subquery = sel }, .alias = .{ .name = q.name } };
+        }
+        return .{ .source = .{ .table = try p.relation(q) } };
+    }
+
+    fn fromPrimary(p: *Parser) Error!tree.FromItem {
         const t = p.peek();
         if (t.isKw("lateral")) return p.unsupported(t.start, "LATERAL");
         if (t.kind == .lparen) {
@@ -743,37 +960,58 @@ pub const Parser = struct {
                 _ = p.advance();
                 if (p.select()) |s| {
                     if (p.eat(.rparen)) {
-                        var item: ast.FromItem = .{ .source = .{ .subquery = s } };
+                        var item: tree.FromItem = .{ .source = .{ .subquery = s } };
                         item.alias = try p.alias(true);
                         return item;
                     }
-                } else |err| if (err == error.OutOfMemory) return err;
+                } else |err| if (err == error.OutOfMemory or p.err_in_parse) return err;
                 p.i = save;
             }
             _ = p.advance();
             const inner = try p.fromList();
             _ = try p.expect(.rparen);
-            var item: ast.FromItem = .{ .source = .{ .nested = inner } };
+            var item: tree.FromItem = .{ .source = .{ .nested = inner } };
             item.alias = try p.alias(false);
             return item;
         }
         _ = p.eatKw("only");
         const name = try p.qname();
         if (p.peek().kind == .lparen) {
-            const f = try p.funcCall(name.name, name.schema);
-            var item: ast.FromItem = .{ .source = .{ .func = f } };
-            item.alias = try p.alias(true);
-            return item;
+            const c = try p.funcCall(name.name, name.schema);
+            const al = try p.alias(true);
+            if (eql(c.name.text, "generate_series")) return p.generateSeries(c, al);
+            const f = try p.new(tree.Func, .{ .name = c.name, .args = c.args });
+            return .{ .source = .{ .func = f }, .alias = al };
         }
         _ = p.eatOp("*");
-        var item: ast.FromItem = .{ .source = .{ .table = name } };
-        item.alias = try p.alias(true);
+        var item = try p.tableItem(name);
+        if (try p.alias(true)) |al| item.alias = al;
         if (p.isKw("tablesample")) return p.unsupported(p.peek().start, "TABLESAMPLE");
         return item;
     }
 
+    /// generate_series(...) in FROM: its column is named after the
+    /// function or the alias, as in PostgreSQL (SQLite's is "value"):
+    /// (SELECT value AS col FROM generate_series(...)) AS alias.
+    fn generateSeries(p: *Parser, c: Call, al: ?tree.Alias) Error!tree.FromItem {
+        const alias_cols: []const Name = if (al) |a| a.cols else &.{};
+        if (alias_cols.len > 1) return p.fail(alias_cols[1].pos, "too many column aliases for generate_series", .{});
+        const col: []const u8 = if (alias_cols.len == 1) alias_cols[0].text else if (al) |a| a.name.text else "generate_series";
+        const f = try p.new(tree.Func, .{ .name = .{ .text = "generate_series", .pos = c.name.pos }, .args = c.args });
+        var from = try p.arena.alloc(tree.FromItem, 1);
+        from[0] = .{ .source = .{ .func = f } };
+        var cols = try p.arena.alloc(tree.ResultCol, 1);
+        const value = try p.arena.alloc(Name, 1);
+        value[0] = .{ .text = "value", .pos = c.name.pos };
+        cols[0] = .{ .expr = .{ .e = try tree.expr(p.arena, c.name.pos, c.name.pos, .{ .column = value }), .alias = .{ .text = col } } };
+        const body = try p.new(tree.Body, .{ .core = try p.new(tree.Core, .{ .cols = cols, .from = from, .pos = c.name.pos }) });
+        const sub = try p.new(tree.Select, .{ .body = body, .pos = c.name.pos });
+        const label: Name = if (al) |a| a.name else .{ .text = "generate_series", .pos = c.name.pos };
+        return .{ .source = .{ .subquery = sub }, .alias = .{ .name = label } };
+    }
+
     /// `[AS] alias [(cols)]`.
-    fn alias(p: *Parser, allow_cols: bool) Error!?ast.Alias {
+    fn alias(p: *Parser, allow_cols: bool) Error!?tree.Alias {
         var name: Name = undefined;
         if (p.eatKw("as")) {
             name = try p.colId();
@@ -784,7 +1022,7 @@ pub const Parser = struct {
                 name = .{ .text = a.text, .pos = a.start };
             } else return null;
         }
-        var al: ast.Alias = .{ .name = name };
+        var al: tree.Alias = .{ .name = name };
         if (p.peek().kind == .lparen) {
             if (!allow_cols) return p.syntaxError();
             al.cols = try p.parenNameList();
@@ -856,16 +1094,17 @@ pub const Parser = struct {
                 } else if (p.eatKw("distinct")) {
                     try p.expectKw("from");
                     const r = try p.cmpExpr();
-                    l = try p.expr(l.pos, .{ .is_distinct = .{ .l = l, .r = r, .not = not } });
+                    // IS DISTINCT FROM is IS NOT, IS NOT DISTINCT FROM IS.
+                    l = try p.span(l, r, .{ .compare = .{ .op = if (not) .is else .is_not, .l = l, .r = r } });
                 } else return p.syntaxError();
             } else break;
         }
         return l;
     }
 
-    fn cmpOp(t: Token) ?ast.BinOp {
+    fn cmpOp(t: Token) ?tree.CmpOp {
         if (t.kind != .op) return null;
-        const map = [_]struct { []const u8, ast.BinOp }{
+        const map = [_]struct { []const u8, tree.CmpOp }{
             .{ "=", .eq }, .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt }, .{ "<=", .le }, .{ ">", .gt }, .{ ">=", .ge },
         };
         for (map) |m| if (std.mem.eql(u8, t.text, m[0])) return m[1];
@@ -889,7 +1128,7 @@ pub const Parser = struct {
                 continue;
             }
             const r = try p.predicate();
-            l = try p.binary(op, l, r);
+            l = try p.span(l, r, .{ .compare = .{ .op = op, .l = l, .r = r } });
         }
         return l;
     }
@@ -938,17 +1177,21 @@ pub const Parser = struct {
         return l;
     }
 
+    /// LIKE is case-sensitive, ILIKE folds ASCII letters; both escape
+    /// with `\` without an ESCAPE clause.
     fn likeRest(p: *Parser, l: *Expr, not: bool, ilike: bool) Error!*Expr {
         const pat = try p.otherExpr();
-        var esc: ?*Expr = null;
-        if (p.eatKw("escape")) esc = try p.otherExpr();
-        return p.expr(l.pos, .{ .like = .{ .e = l, .not = not, .pat = pat, .escape = esc, .ilike = ilike } });
+        var esc: tree.Escape = .backslash;
+        if (p.eatKw("escape")) esc = .{ .expr = try p.otherExpr() };
+        return p.expr(l.pos, .{ .like = .{ .e = l, .pat = pat, .not = not, .case_sensitive = !ilike, .escape = esc } });
     }
 
+    const OtherOp = enum { concat, bit_and, bit_or, shl, shr, json_get, json_get_text };
+
     /// Operators of the "any other operator" level.
-    fn otherOp(t: Token) ?ast.BinOp {
+    fn otherOp(t: Token) ?OtherOp {
         if (t.kind != .op) return null;
-        const map = [_]struct { []const u8, ast.BinOp }{
+        const map = [_]struct { []const u8, OtherOp }{
             .{ "||", .concat },   .{ "&", .bit_and },         .{ "|", .bit_or }, .{ "<<", .shl }, .{ ">>", .shr },
             .{ "->", .json_get }, .{ "->>", .json_get_text },
         };
@@ -963,7 +1206,15 @@ pub const Parser = struct {
             if (otherOp(t)) |op| {
                 _ = p.advance();
                 const r = try p.addExpr();
-                l = try p.binary(op, l, r);
+                l = switch (op) {
+                    .concat => try p.span(l, r, .{ .concat = .{ .args = try p.list(&.{ l, r }), .null_policy = .propagate } }),
+                    .bit_and => try p.binary(.bit_and, l, r),
+                    .bit_or => try p.binary(.bit_or, l, r),
+                    .shl => try p.binary(.shl, l, r),
+                    .shr => try p.binary(.shr, l, r),
+                    .json_get => try p.binary(.json_get, l, r),
+                    .json_get_text => try p.binary(.json_get_text, l, r),
+                };
             } else if (t.kind == .op and cmpOp(t) == null and !isArith(t.text) and !isLikeOp(t.text)) {
                 return p.fail(t.start, "operator does not exist: {s}", .{t.text});
             } else break;
@@ -984,7 +1235,7 @@ pub const Parser = struct {
     fn addExpr(p: *Parser) Error!*Expr {
         var l = try p.mulExpr();
         while (true) {
-            const op: ast.BinOp = if (p.isOp("+")) .add else if (p.isOp("-")) .sub else break;
+            const op: tree.BinOp = if (p.isOp("+")) .add else if (p.isOp("-")) .sub else break;
             _ = p.advance();
             const r = try p.mulExpr();
             l = try p.binary(op, l, r);
@@ -995,26 +1246,32 @@ pub const Parser = struct {
     fn mulExpr(p: *Parser) Error!*Expr {
         var l = try p.powExpr();
         while (true) {
-            const op: ast.BinOp = if (p.isOp("*")) .mul else if (p.isOp("/")) .div else if (p.isOp("%")) .mod else break;
-            _ = p.advance();
-            const r = try p.powExpr();
-            l = try p.binary(op, l, r);
+            if (p.eatOp("*")) {
+                l = try p.binary(.mul, l, try p.powExpr());
+            } else if (p.eatOp("/")) {
+                const r = try p.powExpr();
+                l = try p.span(l, r, .{ .div = .{ .kind = .sqlite, .l = l, .r = r } });
+            } else if (p.eatOp("%")) {
+                l = try p.binary(.rem, l, try p.powExpr());
+            } else break;
         }
         return l;
     }
 
+    /// a ^ b is power(a, b), PostgreSQL's (a real).
     fn powExpr(p: *Parser) Error!*Expr {
         var l = try p.unary();
         while (p.eatOp("^")) {
             const r = try p.unary();
-            l = try p.binary(.pow, l, r);
+            const f = try p.new(tree.Func, .{ .name = .{ .text = "power", .pos = l.pos }, .dialect = .postgres, .args = try p.list(&.{ l, r }) });
+            l = try p.span(l, r, .{ .func = f });
         }
         return l;
     }
 
     fn unary(p: *Parser) Error!*Expr {
         const t = p.peek();
-        const op: ast.UnOp = if (t.isOp("-")) .neg else if (t.isOp("+")) .plus else if (t.isOp("~")) .bit_not else return p.postfix();
+        const op: tree.UnOp = if (t.isOp("-")) .neg else if (t.isOp("+")) .plus else if (t.isOp("~")) .bit_not else return p.postfix();
         _ = p.advance();
         const e = try p.unary();
         return p.expr(t.start, .{ .unary = .{ .op = op, .e = e } });
@@ -1025,11 +1282,11 @@ pub const Parser = struct {
         while (true) {
             if (p.eat(.cast)) {
                 const ty = try p.typeName();
-                e = try p.expr(e.pos, .{ .cast = .{ .e = e, .ty = ty } });
+                e = try p.castExpr(e.pos, e, ty);
             } else if (p.isKw("collate")) {
                 _ = p.advance();
                 const name = try p.anyName();
-                e = try p.expr(e.pos, .{ .collate = .{ .e = e, .name = name } });
+                e = try p.expr(e.pos, .{ .collate = .{ .e = e, .collation = collationName(name.text) } });
             } else if (p.peek().kind == .lbracket) {
                 return p.unsupported(p.peek().start, "array subscripts");
             } else if (p.isKw("at") and p.isKwAt(1, "time")) {
@@ -1039,8 +1296,38 @@ pub const Parser = struct {
         return e;
     }
 
-    fn binary(p: *Parser, op: ast.BinOp, l: *Expr, r: *Expr) Error!*Expr {
-        return p.new(Expr, .{ .pos = l.pos, .end = r.end, .kind = .{ .binary = .{ .op = op, .l = l, .r = r } } });
+    fn binary(p: *Parser, op: tree.BinOp, l: *Expr, r: *Expr) Error!*Expr {
+        return p.span(l, r, .{ .binary = .{ .op = op, .l = l, .r = r } });
+    }
+
+    /// `e::ty` (and CAST, typed literals) as types.castPlan() says;
+    /// '\x0102'::bytea is a blob constant.
+    fn castExpr(p: *Parser, pos: u32, e: *Expr, ty: types.TypeName) Error!*Expr {
+        var x: *Expr = undefined;
+        if (std.mem.eql(u8, ty.name, "bytea") and !ty.array and e.kind == .string and std.mem.startsWith(u8, e.kind.string, "\\x")) {
+            const hex = e.kind.string[2..];
+            for (hex) |ch| if (!std.ascii.isHex(ch)) return p.fail(pos, "invalid hexadecimal digit: \"{c}\"", .{ch});
+            if (hex.len % 2 != 0) return p.fail(pos, "invalid hexadecimal data: odd number of digits", .{});
+            x = try p.expr(pos, .{ .blob = hex });
+        } else {
+            const plan = types.castPlan(ty) catch |err| return p.typeError(ty, err);
+            const mode: tree.CastMode = switch (plan) {
+                .sqlite => |t| .{ .affinity = t },
+                .func => |f| .{ .func = f },
+                .truncate => |n| .{ .truncate = n },
+                .round => |s| .{ .round = s },
+            };
+            x = try p.expr(pos, .{ .cast = .{ .e = e, .target_type = ty.name, .mode = mode } });
+        }
+        try p.setFig(x, .{ .cast = .{ .strong = p.strongName(e), .type_name = ty.name } });
+        return x;
+    }
+
+    pub fn typeError(p: *Parser, ty: types.TypeName, err: types.Error) Error {
+        return switch (err) {
+            error.Array => p.fail(ty.pos, "arrays are not supported", .{}),
+            error.UnknownType => p.fail(ty.pos, "type \"{s}\" does not exist", .{ty.name}),
+        };
     }
 
     fn primary(p: *Parser) Error!*Expr {
@@ -1082,7 +1369,7 @@ pub const Parser = struct {
             try p.expectKw("as");
             const ty = try p.typeName();
             _ = try p.expect(.rparen);
-            return p.expr(t.start, .{ .cast = .{ .e = e, .ty = ty } });
+            return p.castExpr(t.start, e, ty);
         }
         if (eql(w, "exists")) {
             _ = p.advance();
@@ -1113,8 +1400,7 @@ pub const Parser = struct {
                 _ = p.advance();
                 _ = p.advance();
             }
-            const f = try p.new(ast.Func, .{ .name = .{ .text = if (eql(w, "user")) "current_user" else w, .pos = t.start }, .synthetic = true });
-            return p.expr(t.start, .{ .func = f });
+            return p.callExpr(t.start, .{ .name = .{ .text = if (eql(w, "user")) "current_user" else w, .pos = t.start } });
         }
         // A typed literal: DATE '2024-01-01', INTERVAL '1 day' ...
         if (isTypeWord(w)) {
@@ -1124,7 +1410,7 @@ pub const Parser = struct {
                 if (s.kind == .string) {
                     _ = p.advance();
                     const lit = try p.expr(s.start, .{ .string = s.text });
-                    return p.expr(t.start, .{ .cast = .{ .e = lit, .ty = ty } });
+                    return p.castExpr(t.start, lit, ty);
                 }
             } else |err| if (err == error.OutOfMemory) return err;
             p.i = save;
@@ -1133,7 +1419,7 @@ pub const Parser = struct {
         return p.nameExpr();
     }
 
-    fn keywordExpr(p: *Parser, kind: ast.Kind) Error!*Expr {
+    fn keywordExpr(p: *Parser, kind: tree.Kind) Error!*Expr {
         const t = p.advance();
         return p.expr(t.start, kind);
     }
@@ -1151,10 +1437,11 @@ pub const Parser = struct {
         if (p.peek().kind == .lparen) {
             const n = names.items;
             if (n.len > 2) return p.syntaxError();
-            const f = try p.funcCall(n[n.len - 1], if (n.len == 2) n[0] else null);
-            return p.expr(start, .{ .func = f });
+            const c = try p.funcCall(n[n.len - 1], if (n.len == 2) n[0] else null);
+            return p.callExpr(start, c);
         }
         if (names.items.len > 3) return p.fail(start, "improper qualified name (too many dotted names)", .{});
+        if (names.items.len == 3) names.items[0] = try p.dbName(names.items[0]);
         return p.expr(start, .{ .column = names.items });
     }
 
@@ -1165,7 +1452,7 @@ pub const Parser = struct {
             _ = p.advance();
             if (p.select()) |s| {
                 if (p.eat(.rparen)) return p.expr(start, .{ .subquery = s });
-            } else |err| if (err == error.OutOfMemory) return err;
+            } else |err| if (err == error.OutOfMemory or p.err_in_parse) return err;
             p.i = save;
         }
         _ = p.advance();
@@ -1201,14 +1488,16 @@ pub const Parser = struct {
         return p.expr(start, .{ .case = .{ .operand = operand, .whens = whens.items, .@"else" = else_ } });
     }
 
+    // ========================================================= functions
+
     /// The call after its name: arguments, FILTER, OVER. The special
     /// syntax of substring/position/trim/extract/overlay is read here.
-    fn funcCall(p: *Parser, name: Name, schema: ?Name) Error!*ast.Func {
+    fn funcCall(p: *Parser, name: Name, schema: ?Name) Error!Call {
         if (schema) |s| if (!eql(s.text, "pg_catalog") and !eql(s.text, "public")) {
             return p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text});
         };
         _ = try p.expect(.lparen);
-        var f: ast.Func = .{ .name = name };
+        var f: Call = .{ .name = name };
         const n = name.text;
         if (eql(n, "substring") or eql(n, "position") or eql(n, "extract")) f.label = n;
         if (eql(n, "substring") or eql(n, "position") or eql(n, "trim") or eql(n, "extract") or eql(n, "overlay")) {
@@ -1231,7 +1520,7 @@ pub const Parser = struct {
         return p.finishCall(f);
     }
 
-    fn finishCall(p: *Parser, f_arg: ast.Func) Error!*ast.Func {
+    fn finishCall(p: *Parser, f_arg: Call) Error!Call {
         var f = f_arg;
         if (p.isKw("within") and p.isKwAt(1, "group")) return p.unsupported(p.peek().start, "WITHIN GROUP");
         if (p.isKw("filter") and p.peekAt(1).kind == .lparen) {
@@ -1245,16 +1534,16 @@ pub const Parser = struct {
             if (p.peek().kind == .lparen) {
                 f.over = try p.windowSpec();
             } else {
-                f.over = try p.new(ast.WindowSpec, .{ .base = try p.colId(), .name_only = true });
+                f.over = try p.new(tree.WindowSpec, .{ .base = try p.colId(), .name_only = true });
             }
         }
-        return p.new(ast.Func, f);
+        return f;
     }
 
     /// substring(x FROM a FOR b), position(a IN b), trim([BOTH|LEADING|
     /// TRAILING] [chars] FROM x), extract(field FROM x): false (nothing
     /// consumed) if the call uses the ordinary syntax.
-    fn specialCall(p: *Parser, f: *ast.Func) Error!bool {
+    fn specialCall(p: *Parser, f: *Call) Error!bool {
         const n = f.name.text;
         const save = p.i;
         var args: std.ArrayList(*Expr) = .empty;
@@ -1344,9 +1633,79 @@ pub const Parser = struct {
         return false;
     }
 
-    fn windowSpec(p: *Parser) Error!*ast.WindowSpec {
+    /// The expression a call means: PostgreSQL's name mapped to SQLite's
+    /// (funcName()), the calls that become something else (now(),
+    /// date_part() ...), a function of the dialect's table marked so.
+    fn callExpr(p: *Parser, pos: u32, c: Call) Error!*Expr {
+        const n = c.name.text;
+        var e: *Expr = undefined;
+        const plain = c.over == null and c.filter == null and c.order_by.len == 0;
+        if (if (plain) specialFunc(n) else null) |sc| {
+            e = switch (sc) {
+                .now => blk: {
+                    if (c.args.len != 0) return p.fail(c.name.pos, "function {s} does not exist", .{n});
+                    break :blk try p.now(pos);
+                },
+                .localtime => try p.call(pos, "current_time", null, &.{}),
+                .current_user => try p.call(pos, "current_user", .postgres, &.{}),
+                .current_database => try p.call(pos, "current_database", .postgres, &.{}),
+                .date_part => try p.datePart(pos, c),
+            };
+        } else {
+            const mapped = funcName(n);
+            const name: Name = if (mapped.ptr == n.ptr) c.name else .{ .text = mapped, .pos = c.name.pos };
+            const f = try p.new(tree.Func, .{
+                .name = name,
+                .dialect = if (isDialectFunction(mapped)) .postgres else null,
+                .args = c.args,
+                .star = c.star,
+                .distinct = c.distinct,
+                .order_by = c.order_by,
+                .filter = c.filter,
+                .over = c.over,
+            });
+            e = try p.expr(pos, .{ .func = f });
+        }
+        try p.setFig(e, .{ .call = c.label orelse n });
+        return e;
+    }
+
+    /// A call the parser makes: `owner` a dialect for a function of its
+    /// table.
+    fn call(p: *Parser, pos: u32, name: []const u8, owner: ?@import("../dialect.zig").Dialect, args: []const *Expr) Error!*Expr {
+        const f = try p.new(tree.Func, .{ .name = .{ .text = name, .pos = pos }, .dialect = owner, .args = try p.list(args) });
+        return p.expr(pos, .{ .func = f });
+    }
+
+    fn stringAt(p: *Parser, pos: u32, s: []const u8) Error!*Expr {
+        return p.expr(pos, .{ .string = s });
+    }
+
+    /// now(): the statement's time as 'YYYY-MM-DD HH:MM:SS.SSS' (UTC, no
+    /// zone), which SQLite's date functions read back.
+    fn now(p: *Parser, pos: u32) Error!*Expr {
+        return p.call(pos, "strftime", null, &.{ try p.stringAt(pos, "%Y-%m-%d %H:%M:%f"), try p.stringAt(pos, "now") });
+    }
+
+    /// date_part('field', x) (and EXTRACT(field FROM x)) with strftime().
+    fn datePart(p: *Parser, pos: u32, c: Call) Error!*Expr {
+        if (c.args.len != 2 or c.args[0].kind != .string) return p.fail(c.name.pos, "function date_part with these arguments is not supported", .{});
+        const plan = datePartPlan(c.args[0].kind.string) orelse
+            return p.fail(c.args[0].pos, "unit \"{s}\" not recognized for type timestamp", .{c.args[0].kind.string});
+        const x = c.args[1];
+        if (plan.func) |fname| return p.call(pos, fname, null, &.{x});
+        const s = try p.call(pos, "strftime", null, &.{ try p.stringAt(pos, plan.fmt), x });
+        var v = try p.expr(pos, .{ .cast = .{ .e = s, .target_type = plan.cast, .mode = .{ .affinity = plan.cast } } });
+        if (plan.quarter) {
+            v = try p.expr(pos, .{ .binary = .{ .op = .add, .l = v, .r = try p.expr(pos, .{ .integer = "2" }) } });
+            v = try p.expr(pos, .{ .div = .{ .kind = .sqlite, .l = v, .r = try p.expr(pos, .{ .integer = "3" }) } });
+        }
+        return v;
+    }
+
+    fn windowSpec(p: *Parser) Error!*tree.WindowSpec {
         _ = try p.expect(.lparen);
-        var w: ast.WindowSpec = .{};
+        var w: tree.WindowSpec = .{};
         const t = p.peek();
         if ((t.kind == .ident and !isReserved(t.text) and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .qident) {
             w.base = try p.colId();
@@ -1362,7 +1721,7 @@ pub const Parser = struct {
         }
         if (p.isAnyKw(&.{ "rows", "range", "groups" })) {
             const u = p.advance();
-            var fr: ast.Frame = .{ .unit = if (u.isKw("rows")) .rows else if (u.isKw("range")) .range else .groups, .start = undefined, .end = null };
+            var fr: tree.Frame = .{ .unit = if (u.isKw("rows")) .rows else if (u.isKw("range")) .range else .groups, .start = undefined, .end = null };
             if (p.eatKw("between")) {
                 fr.start = try p.frameBound();
                 try p.expectKw("and");
@@ -1387,10 +1746,10 @@ pub const Parser = struct {
             w.frame = fr;
         }
         _ = try p.expect(.rparen);
-        return p.new(ast.WindowSpec, w);
+        return p.new(tree.WindowSpec, w);
     }
 
-    fn frameBound(p: *Parser) Error!ast.Bound {
+    fn frameBound(p: *Parser) Error!tree.Bound {
         if (p.eatKw("unbounded")) {
             if (p.eatKw("preceding")) return .{ .kind = .unbounded_preceding };
             try p.expectKw("following");
@@ -1408,7 +1767,7 @@ pub const Parser = struct {
 
     // ============================================================= types
 
-    pub fn typeName(p: *Parser) Error!ast.TypeName {
+    pub fn typeName(p: *Parser) Error!types.TypeName {
         const t = p.peek();
         if (t.kind != .ident and t.kind != .qident) return p.syntaxError();
         _ = p.advance();
@@ -1420,7 +1779,7 @@ pub const Parser = struct {
             const n = try p.anyName();
             w = n.text;
         }
-        var ty: ast.TypeName = .{ .name = w, .pos = t.start };
+        var ty: types.TypeName = .{ .name = w, .pos = t.start };
         if (t.kind == .ident) {
             if (eql(w, "double")) {
                 try p.expectKw("precision");
@@ -1503,10 +1862,11 @@ pub const Parser = struct {
 
     // ============================================================== DML
 
-    fn insert(p: *Parser, with: ?*ast.With) Error!*ast.Insert {
+    fn insert(p: *Parser, with: ?*tree.With) Error!*tree.Insert {
         const pos = p.advance().start; // INSERT
         try p.expectKw("into");
-        var ins: ast.Insert = .{ .with = with, .table = try p.qname(), .source = null, .pos = pos };
+        const table = try p.relation(try p.qname());
+        var ins: tree.Insert = .{ .with = with, .table = table, .source = null, .pos = pos };
         if (p.eatKw("as")) ins.alias = try p.colId();
         if (p.peek().kind == .lparen and !p.parenStartsSelect()) ins.cols = try p.parenNameList();
         if (p.eatKw("overriding")) {
@@ -1523,14 +1883,14 @@ pub const Parser = struct {
         if (p.isKw("on") and p.isKwAt(1, "conflict")) {
             _ = p.advance();
             _ = p.advance();
-            var oc: ast.OnConflict = .{};
+            var oc: tree.OnConflict = .{};
             if (p.peek().kind == .lparen) {
                 _ = p.advance();
-                var items: std.ArrayList(ast.SortItem) = .empty;
+                var items: std.ArrayList(*Expr) = .empty;
                 while (true) {
                     var e = try p.expr0();
                     if (e.kind == .collate) e = e.kind.collate.e;
-                    try items.append(p.arena, .{ .expr = e });
+                    try items.append(p.arena, e);
                     if (!p.eat(.comma)) break;
                 }
                 _ = try p.expect(.rparen);
@@ -1548,14 +1908,44 @@ pub const Parser = struct {
                 oc.update = try p.setList();
                 if (p.eatKw("where")) oc.where = try p.expr0();
             }
-            ins.on_conflict = try p.new(ast.OnConflict, oc);
+            ins.on_conflict = try p.new(tree.OnConflict, oc);
         }
         if (p.eatKw("returning")) ins.returning = try p.targetList();
-        return p.new(ast.Insert, ins);
+        try p.insertColumns(&ins);
+        return p.new(tree.Insert, ins);
     }
 
-    fn setList(p: *Parser) Error![]ast.SetItem {
-        var out: std.ArrayList(ast.SetItem) = .empty;
+    /// PostgreSQL's INSERT semantics that depend on the table: fewer
+    /// values than columns fill the leading columns (the others get their
+    /// defaults; SQLite wants a column list), and a string constant for a
+    /// numeric column (ANY in a STRICT table) is the number it spells, as
+    /// PostgreSQL reads '1.5' for a numeric.
+    fn insertColumns(p: *Parser, ins: *tree.Insert) Error!void {
+        const ps = p.p orelse return;
+        const src = ins.source orelse return;
+        try p.readSchema();
+        const t = build.findTable(ps.db, ins.table.name.text, if (ins.table.schema) |s| s.text else null) orelse return;
+        if (ins.cols.len == 0) if (valuesWidth(src)) |n| {
+            var all: std.ArrayList(Name) = .empty;
+            for (t.cols) |*c| if (!c.col_flags.intersects(int.COLFLAG.NOINSERT)) try all.append(p.arena, .{ .text = c.name(), .pos = ins.pos });
+            if (n < all.items.len) ins.cols = all.items[0..n];
+        };
+        if (src.body.* != .values or !t.tab_flags.Strict) return;
+        for (src.body.values) |row| {
+            for (row, 0..) |*item, i| {
+                if (item.*.kind != .string) continue;
+                const c = insertColumn(t, ins.cols, i) orelse continue;
+                if (!std.ascii.eqlIgnoreCase(build.columnType(c, ""), "ANY")) continue;
+                const lit = numericLiteral(item.*.kind.string) orelse continue;
+                var x = try tree.expr(p.arena, item.*.pos, item.*.end, lit.kind);
+                if (lit.neg) x = try tree.expr(p.arena, item.*.pos, item.*.end, .{ .unary = .{ .op = .neg, .e = x } });
+                item.* = x;
+            }
+        }
+    }
+
+    fn setList(p: *Parser) Error![]tree.SetItem {
+        var out: std.ArrayList(tree.SetItem) = .empty;
         while (true) {
             if (p.peek().kind == .lparen) {
                 const cols = try p.parenNameList();
@@ -1575,10 +1965,10 @@ pub const Parser = struct {
         return out.items;
     }
 
-    fn update(p: *Parser, with: ?*ast.With) Error!*ast.Update {
+    fn update(p: *Parser, with: ?*tree.With) Error!*tree.Update {
         const pos = p.advance().start; // UPDATE
         _ = p.eatKw("only");
-        var u: ast.Update = .{ .with = with, .table = try p.qname(), .sets = &.{}, .pos = pos };
+        var u: tree.Update = .{ .with = with, .table = try p.relation(try p.qname()), .sets = &.{}, .pos = pos };
         _ = p.eatOp("*");
         if (p.eatKw("as")) {
             u.alias = try p.colId();
@@ -1597,14 +1987,14 @@ pub const Parser = struct {
             u.where = try p.expr0();
         }
         if (p.eatKw("returning")) u.returning = try p.targetList();
-        return p.new(ast.Update, u);
+        return p.new(tree.Update, u);
     }
 
-    fn delete(p: *Parser, with: ?*ast.With) Error!*ast.Delete {
+    fn delete(p: *Parser, with: ?*tree.With) Error!*tree.Delete {
         const pos = p.advance().start; // DELETE
         try p.expectKw("from");
         _ = p.eatKw("only");
-        var d: ast.Delete = .{ .with = with, .table = try p.qname(), .pos = pos };
+        var d: tree.Delete = .{ .with = with, .table = try p.relation(try p.qname()), .pos = pos };
         _ = p.eatOp("*");
         if (p.eatKw("as")) {
             d.alias = try p.colId();
@@ -1621,12 +2011,12 @@ pub const Parser = struct {
             d.where = try p.expr0();
         }
         if (p.eatKw("returning")) d.returning = try p.targetList();
-        return p.new(ast.Delete, d);
+        return p.new(tree.Delete, d);
     }
 
     // ============================================================== DDL
 
-    fn create(p: *Parser) Error!ast.Stmt {
+    fn create(p: *Parser) Error!tree.Stmt {
         const at = p.advance().start; // CREATE
         var or_replace = false;
         if (p.eatKw("or")) {
@@ -1644,7 +2034,10 @@ pub const Parser = struct {
         }
         if (p.isKw("view")) {
             _ = p.advance();
-            var v: ast.CreateView = .{ .or_replace = or_replace, .temp = temp, .name = try p.qname(), .select = undefined, .text_start = 0, .text_end = 0 };
+            const q = try p.qname();
+            const schema = try p.ddlSchema(q, temp);
+            temp = temp or eql(schema, "temp");
+            var v: tree.CreateView = .{ .or_replace = or_replace, .temp = temp, .name = .{ .schema = .{ .text = schema }, .name = q.name }, .select = undefined };
             if (p.peek().kind == .lparen) v.cols = try p.parenNameList();
             if (p.eatKw("with")) {
                 _ = try p.expect(.lparen);
@@ -1652,19 +2045,19 @@ pub const Parser = struct {
                 _ = try p.expect(.rparen);
             }
             try p.expectKw("as");
-            v.text_start = p.peek().start;
             v.select = try p.select();
-            v.text_end = p.lastEnd();
             if (p.isKw("with")) return p.unsupported(p.peek().start, "WITH CHECK OPTION");
-            return .{ .create_view = try p.new(ast.CreateView, v) };
+            return .{ .create_view = try p.new(tree.CreateView, v) };
         }
         if (p.isKw("sequence")) {
             _ = p.advance();
-            var s: ast.CreateSequence = .{ .name = undefined };
+            var s: tree.CreateSequence = .{ .name = undefined };
             s.if_not_exists = try p.ifNotExists();
-            s.name = try p.qname();
+            const q = try p.qname();
+            _ = try p.ddlSchema(q, false);
+            s.name = .{ .name = q.name };
             s.opts = try p.seqOptions();
-            return .{ .create_sequence = try p.new(ast.CreateSequence, s) };
+            return .{ .create_sequence = try p.new(tree.CreateSequence, s) };
         }
         if (p.isKw("unique") or p.isKw("index")) {
             if (or_replace or temp) return p.syntaxError();
@@ -1676,8 +2069,8 @@ pub const Parser = struct {
         return p.syntaxError();
     }
 
-    fn seqOptions(p: *Parser) Error!ast.SeqOpts {
-        var o: ast.SeqOpts = .{};
+    fn seqOptions(p: *Parser) Error!tree.SeqOpts {
+        var o: tree.SeqOpts = .{};
         while (true) {
             if (p.eatKw("as")) {
                 _ = try p.typeName();
@@ -1707,34 +2100,47 @@ pub const Parser = struct {
         return o;
     }
 
-    fn createTable(p: *Parser, temp: bool) Error!*ast.CreateTable {
+    fn createTable(p: *Parser, temp_arg: bool) Error!*tree.CreateTable {
         _ = p.advance(); // TABLE
-        var ct: ast.CreateTable = .{ .temp = temp, .name = undefined };
-        ct.if_not_exists = try p.ifNotExists();
-        ct.name = try p.qname();
+        const if_not_exists = try p.ifNotExists();
+        const q = try p.qname();
+        const schema = try p.ddlSchema(q, temp_arg);
+        const temp = temp_arg or eql(schema, "temp");
+        var ct: tree.CreateTable = .{
+            .temp = temp,
+            .if_not_exists = if_not_exists,
+            .name = .{ .schema = if (q.schema != null and !temp) Name{ .text = schema } else null, .name = q.name },
+            .strict = true,
+        };
+        const table = q.name.text;
         if (p.eatKw("as")) {
             ct.as_select = try p.select();
             if (p.eatKw("with")) {
                 _ = p.eatKw("no");
                 try p.expectKw("data");
             }
-            return p.new(ast.CreateTable, ct);
+            return p.new(tree.CreateTable, ct);
         }
         _ = try p.expect(.lparen);
-        var cols: std.ArrayList(ast.ColumnDef) = .empty;
-        var cons: std.ArrayList(ast.TableConstraint) = .empty;
+        var cols: std.ArrayList(tree.ColumnDef) = .empty;
+        var cons: std.ArrayList(tree.TableConstraint) = .empty;
         if (p.peek().kind != .rparen) while (true) {
             const t = p.peek();
             if (t.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign", "exclude" })) {
-                try cons.append(p.arena, try p.tableConstraint());
+                try cons.append(p.arena, try p.tableConstraint(table));
             } else if (t.isKw("like")) {
                 return p.unsupported(t.start, "CREATE TABLE ... LIKE");
             } else {
-                try cols.append(p.arena, try p.columnDef());
+                const c = try p.columnDef(table);
+                for (cols.items) |prev| if (eql(prev.name.text, c.name.text)) {
+                    return p.fail(c.name.pos, "column \"{s}\" specified more than once", .{c.name.text});
+                };
+                try cols.append(p.arena, c);
             }
             if (!p.eat(.comma)) break;
         };
         _ = try p.expect(.rparen);
+        if (cols.items.len == 0) return p.fail(q.name.pos, "a table must have at least one column", .{});
         ct.columns = cols.items;
         ct.constraints = cons.items;
         // Storage options are ignored.
@@ -1759,16 +2165,39 @@ pub const Parser = struct {
                 return p.unsupported(p.peek().start, "table inheritance and partitioning");
             } else break;
         }
-        return p.new(ast.CreateTable, ct);
+        return p.new(tree.CreateTable, ct);
     }
 
-    pub fn columnDef(p: *Parser) Error!ast.ColumnDef {
-        var c: ast.ColumnDef = .{ .name = try p.colId(), .ty = try p.typeName() };
-        var cons: std.ArrayList(ast.ColConstraint) = .empty;
+    /// A column constraint as written.
+    const RawConstraint = struct {
+        name: ?Name = null,
+        kind: union(enum) {
+            not_null,
+            null,
+            check: *Expr,
+            default: *Expr,
+            primary_key,
+            unique,
+            references: tree.Ref,
+            identity: struct { always: bool, opts: tree.SeqOpts },
+            /// GENERATED ALWAYS AS (expr) STORED
+            generated: *Expr,
+        },
+    };
+
+    /// A column definition of table `table`, its PostgreSQL type mapped
+    /// to a STRICT storage type (types.info()) with the type's check, a
+    /// SERIAL or identity column to a tree.Identity of sequence
+    /// <table>_<column>_seq (as PostgreSQL names it).
+    pub fn columnDef(p: *Parser, table: []const u8) Error!tree.ColumnDef {
+        const name = try p.colId();
+        const ty = try p.typeName();
+        var collate: ?Name = null;
+        var raw: std.ArrayList(RawConstraint) = .empty;
         while (true) {
-            var name: ?Name = null;
-            if (p.eatKw("constraint")) name = try p.colId();
-            var cc: ast.ColConstraint = .{ .name = name, .kind = .null };
+            var cname: ?Name = null;
+            if (p.eatKw("constraint")) cname = try p.colId();
+            var cc: RawConstraint = .{ .name = cname, .kind = .null };
             if (p.eatKw("not")) {
                 if (p.eatKw("null")) {
                     cc.kind = .not_null;
@@ -1801,7 +2230,7 @@ pub const Parser = struct {
                 } else try p.expectKw("always");
                 try p.expectKw("as");
                 if (p.eatKw("identity")) {
-                    var opts: ast.SeqOpts = .{};
+                    var opts: tree.SeqOpts = .{};
                     if (p.peek().kind == .lparen) {
                         _ = p.advance();
                         opts = try p.seqOptions();
@@ -1822,16 +2251,113 @@ pub const Parser = struct {
                 }
                 continue;
             } else if (p.eatKw("collate")) {
-                c.collate = try p.anyName();
+                collate = try p.anyName();
                 continue;
             } else {
-                if (name != null) return p.syntaxError();
+                if (cname != null) return p.syntaxError();
                 break;
             }
-            try cons.append(p.arena, cc);
+            try raw.append(p.arena, cc);
         }
-        c.constraints = cons.items;
-        return c;
+        return p.resolveColumn(table, name, ty, collate, raw.items);
+    }
+
+    fn resolveColumn(p: *Parser, table: []const u8, name: Name, ty: types.TypeName, collate: ?Name, raw: []const RawConstraint) Error!tree.ColumnDef {
+        const info = types.info(ty) catch |err| return p.typeError(ty, err);
+        var identity: ?@FieldType(@FieldType(RawConstraint, "kind"), "identity") = null;
+        var has_default = false;
+        for (raw) |cc| switch (cc.kind) {
+            .identity => |id| identity = id,
+            .default => has_default = true,
+            else => {},
+        };
+        if ((identity != null and info.serial) or ((identity != null or info.serial) and has_default)) {
+            return p.fail(name.pos, "multiple default values specified for column \"{s}\" of table \"{s}\"", .{ name.text, table });
+        }
+        if (identity != null and info.storage[0] != 'I') return p.fail(ty.pos, "identity column type must be smallint, integer, or bigint", .{});
+
+        var cons: std.ArrayList(tree.ColConstraint) = .empty;
+        if (identity != null or info.serial) {
+            var id: tree.Identity = .{ .sequence = try std.fmt.allocPrint(p.arena, "{s}_{s}_seq", .{ table, name.text }) };
+            if (identity) |x| {
+                id.always = x.always;
+                id.opts = x.opts;
+            }
+            // The range of the column's type bounds the sequence.
+            if (id.opts.max == null and (id.opts.increment orelse 1) > 0) {
+                if (info.check == .smallint_range) id.opts.max = 32767;
+                if (info.check == .integer_range) id.opts.max = 2147483647;
+            }
+            try cons.append(p.arena, .{ .kind = .{ .identity = id } });
+        }
+        for (raw) |cc| {
+            const cname: ?[]const u8 = if (cc.name) |n| n.text else null;
+            switch (cc.kind) {
+                .identity => {},
+                .not_null => try cons.append(p.arena, .{ .name = cname, .kind = .not_null }),
+                .null => try cons.append(p.arena, .{ .name = cname, .kind = .null }),
+                .check => |e| try cons.append(p.arena, .{
+                    .name = cname orelse try std.fmt.allocPrint(p.arena, "{s}_{s}_check", .{ table, name.text }),
+                    .kind = .{ .check = e },
+                }),
+                .default => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .default = e } }),
+                .primary_key => try cons.append(p.arena, .{ .name = cname, .kind = .{ .primary_key = .{} } }),
+                .unique => try cons.append(p.arena, .{ .name = cname, .kind = .unique }),
+                .references => |r| try cons.append(p.arena, .{ .name = cname, .kind = .{ .references = r } }),
+                .generated => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .generated = .{ .e = e, .stored = true } } }),
+            }
+        }
+        if (collate) |c| try cons.append(p.arena, .{ .kind = .{ .collate = collationName(c.text) } });
+        if (try p.typeCheck(name, ty, info)) |check| try cons.append(p.arena, check);
+        return .{ .name = name, .type = info.storage, .decl_type = try types.format(p.arena, ty), .constraints = cons.items };
+    }
+
+    /// The CHECK constraint of a type, named with PostgreSQL's message.
+    fn typeCheck(p: *Parser, name: Name, ty: types.TypeName, info: types.Info) Error!?tree.ColConstraint {
+        const a = p.arena;
+        const pos = name.pos;
+        const names = try a.alloc(Name, 1);
+        names[0] = .{ .text = name.text, .pos = pos };
+        const col = try tree.expr(a, pos, pos, .{ .column = names });
+        const int_ = struct {
+            fn lit(arena: Allocator, at: u32, v: i64) Error!*Expr {
+                const digits = try std.fmt.allocPrint(arena, "{d}", .{@abs(v)});
+                const x = try tree.expr(arena, at, at, .{ .integer = digits });
+                if (v >= 0) return x;
+                return tree.expr(arena, at, at, .{ .unary = .{ .op = .neg, .e = x } });
+            }
+        };
+        switch (info.check) {
+            .none => return null,
+            .smallint_range, .integer_range => {
+                const small = info.check == .smallint_range;
+                const lo: i64 = if (small) -32768 else -2147483648;
+                const hi: i64 = if (small) 32767 else 2147483647;
+                return .{
+                    .name = if (small) "smallint out of range" else "integer out of range",
+                    .kind = .{ .check = try tree.expr(a, pos, pos, .{ .between = .{ .e = col, .not = false, .lo = try int_.lit(a, pos, lo), .hi = try int_.lit(a, pos, hi) } }) },
+                };
+            },
+            .numeric => {
+                const f = try p.call(pos, "typeof", null, &.{col});
+                const items = try p.list(&.{ try p.stringAt(pos, "integer"), try p.stringAt(pos, "real"), try p.stringAt(pos, "null") });
+                return .{ .name = "invalid input syntax for type numeric", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .in_list = .{ .e = f, .not = false, .items = items } }) } };
+            },
+            .boolean => {
+                const items = try p.list(&.{ try int_.lit(a, pos, 0), try int_.lit(a, pos, 1) });
+                return .{ .name = "invalid input syntax for type boolean", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .in_list = .{ .e = col, .not = false, .items = items } }) } };
+            },
+            .length => {
+                const n = types.maxLength(ty).?;
+                const tname = if (eql(ty.name, "character")) "character" else "character varying";
+                const len = try p.call(pos, "length", null, &.{col});
+                return .{
+                    .name = try std.fmt.allocPrint(a, "value too long for type {s}({d})", .{ tname, n }),
+                    .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .le, .l = len, .r = try int_.lit(a, pos, n) } }) },
+                };
+            },
+            .json => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{col}) } },
+        }
     }
 
     fn nullsDistinct(p: *Parser) Error!void {
@@ -1845,9 +2371,11 @@ pub const Parser = struct {
         }
     }
 
-    fn references(p: *Parser) Error!ast.Ref {
+    fn references(p: *Parser) Error!tree.Ref {
         try p.expectKw("references");
-        var r: ast.Ref = .{ .table = try p.qname() };
+        const q = try p.qname();
+        _ = try p.ddlSchema(q, false);
+        var r: tree.Ref = .{ .table = q.name };
         if (p.peek().kind == .lparen) r.cols = try p.parenNameList();
         while (true) {
             if (p.eatKw("match")) {
@@ -1867,7 +2395,7 @@ pub const Parser = struct {
         return r;
     }
 
-    fn refAction(p: *Parser) Error!ast.RefAction {
+    fn refAction(p: *Parser) Error!tree.RefAction {
         if (p.eatKw("cascade")) return .cascade;
         if (p.eatKw("restrict")) return .restrict;
         if (p.eatKw("no")) {
@@ -1880,16 +2408,17 @@ pub const Parser = struct {
         return .set_default;
     }
 
-    fn tableConstraint(p: *Parser) Error!ast.TableConstraint {
+    fn tableConstraint(p: *Parser, table: []const u8) Error!tree.TableConstraint {
         var name: ?Name = null;
         if (p.eatKw("constraint")) name = try p.colId();
         const t = p.peek();
-        var tc: ast.TableConstraint = .{ .name = name, .kind = undefined };
+        var tc: tree.TableConstraint = .{ .name = if (name) |n| n.text else null, .kind = undefined };
         if (p.eatKw("check")) {
             _ = try p.expect(.lparen);
             tc.kind = .{ .check = try p.expr0() };
             _ = try p.expect(.rparen);
             if (p.eatKw("no")) try p.expectKw("inherit");
+            if (name == null) tc.name = try std.fmt.allocPrint(p.arena, "{s}_check", .{table});
         } else if (p.eatKw("unique")) {
             try p.nullsDistinct();
             tc.kind = .{ .unique = try p.parenNameList() };
@@ -1921,28 +2450,33 @@ pub const Parser = struct {
         if (p.eatKw("include")) _ = try p.parenNameList();
     }
 
-    fn createIndex(p: *Parser) Error!*ast.CreateIndex {
-        var ci: ast.CreateIndex = .{ .table = undefined, .items = &.{} };
+    /// CREATE INDEX; an index without a name gets PostgreSQL's
+    /// (ddl.zig), here an empty one.
+    fn createIndex(p: *Parser) Error!*tree.CreateIndex {
+        var ci: tree.CreateIndex = .{ .name = .{ .name = .{ .text = "" } }, .table = undefined, .items = &.{} };
         if (p.eatKw("unique")) ci.unique = true;
         try p.expectKw("index");
         _ = p.eatKw("concurrently");
         ci.if_not_exists = try p.ifNotExists();
-        if (!p.isKw("on")) ci.name = try p.colId();
+        if (!p.isKw("on")) ci.name.name = try p.colId();
         try p.expectKw("on");
         _ = p.eatKw("only");
-        ci.table = try p.qname();
+        const q = try p.qname();
+        const schema = try p.ddlSchema(q, false);
+        if (q.schema != null) ci.name.schema = .{ .text = schema };
+        ci.table = q.name;
         if (p.eatKw("using")) {
             const m = try p.anyName();
             if (!eql(m.text, "btree")) return p.fail(m.pos, "index method \"{s}\" is not supported", .{m.text});
         }
         _ = try p.expect(.lparen);
-        var items: std.ArrayList(ast.IndexItem) = .empty;
+        var items: std.ArrayList(tree.IndexItem) = .empty;
         while (true) {
-            var item: ast.IndexItem = .{ .expr = undefined };
+            var item: tree.IndexItem = .{ .expr = undefined };
             const e = try p.otherExpr();
             if (e.kind == .collate) {
                 item.expr = e.kind.collate.e;
-                item.collate = e.kind.collate.name;
+                item.collate = e.kind.collate.collation;
             } else item.expr = e;
             // An operator class.
             if (p.peek().kind == .ident and !isReserved(p.peek().text) and !p.isKw("nulls")) _ = p.advance();
@@ -1964,13 +2498,13 @@ pub const Parser = struct {
         }
         if (p.eatKw("tablespace")) _ = try p.colId();
         if (p.eatKw("where")) ci.where = try p.expr0();
-        return p.new(ast.CreateIndex, ci);
+        return p.new(tree.CreateIndex, ci);
     }
 
-    fn drop(p: *Parser) Error!*ast.Drop {
+    fn drop(p: *Parser) Error!*tree.Drop {
         _ = p.advance(); // DROP
         const t = p.peek();
-        var d: ast.Drop = .{ .kind = undefined, .names = &.{} };
+        var d: tree.Drop = .{ .kind = undefined, .name = undefined };
         if (p.eatKw("table")) {
             d.kind = .table;
         } else if (p.eatKw("view")) {
@@ -1984,17 +2518,14 @@ pub const Parser = struct {
             return p.fail(t.start, "DROP {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
         } else return p.syntaxError();
         d.if_exists = try p.ifExists();
-        var names: std.ArrayList(ast.QName) = .empty;
-        while (true) {
-            try names.append(p.arena, try p.qname());
-            if (!p.eat(.comma)) break;
-        }
-        d.names = names.items;
-        if (p.eatKw("cascade")) d.cascade = true else _ = p.eatKw("restrict");
-        return p.new(ast.Drop, d);
+        const q = try p.qname();
+        if (p.eat(.comma)) return p.fail(p.peek().start, "dropping several objects in one statement is not supported", .{});
+        d.name = .{ .schema = if (q.schema != null) Name{ .text = try p.ddlSchema(q, false), .pos = q.schema.?.pos } else null, .name = q.name };
+        if (p.eatKw("cascade")) {} else _ = p.eatKw("restrict");
+        return p.new(tree.Drop, d);
     }
 
-    fn alterTable(p: *Parser) Error!*ast.AlterTable {
+    fn alterTable(p: *Parser) Error!*tree.AlterTable {
         _ = p.advance(); // ALTER
         if (!p.isKw("table")) {
             const t = p.peek();
@@ -2002,10 +2533,11 @@ pub const Parser = struct {
             return p.syntaxError();
         }
         _ = p.advance();
-        var a: ast.AlterTable = .{ .name = undefined, .action = undefined };
+        var a: tree.AlterTable = .{ .name = undefined, .action = undefined };
         a.if_exists = try p.ifExists();
         _ = p.eatKw("only");
-        a.name = try p.qname();
+        const q = try p.qname();
+        a.name = .{ .schema = if (q.schema) |s| Name{ .text = try p.ddlSchema(q, false), .pos = s.pos } else null, .name = q.name };
         const at = p.peek().start;
         if (p.eatKw("rename")) {
             if (p.eatKw("to")) {
@@ -2023,7 +2555,7 @@ pub const Parser = struct {
             }
             _ = p.eatKw("column");
             const ine = try p.ifNotExists();
-            a.action = .{ .add_column = .{ .if_not_exists = ine, .def = try p.columnDef() } };
+            a.action = .{ .add_column = .{ .if_not_exists = ine, .def = try p.columnDef(q.name.text) } };
         } else if (p.eatKw("drop")) {
             if (p.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... DROP CONSTRAINT");
             _ = p.eatKw("column");
@@ -2034,26 +2566,23 @@ pub const Parser = struct {
             return p.unsupported(at, "ALTER TABLE ... ALTER COLUMN");
         } else return p.syntaxError();
         if (p.peek().kind == .comma) return p.unsupported(p.peek().start, "several ALTER TABLE actions");
-        return p.new(ast.AlterTable, a);
+        return p.new(tree.AlterTable, a);
     }
 
-    fn truncate(p: *Parser) Error!*ast.Truncate {
+    fn truncate(p: *Parser) Error!*tree.Truncate {
         _ = p.advance();
         _ = p.eatKw("table");
-        var names: std.ArrayList(ast.QName) = .empty;
-        while (true) {
-            _ = p.eatKw("only");
-            try names.append(p.arena, try p.qname());
-            _ = p.eatOp("*");
-            if (!p.eat(.comma)) break;
-        }
-        var t: ast.Truncate = .{ .tables = names.items };
+        _ = p.eatKw("only");
+        const q = try p.qname();
+        _ = p.eatOp("*");
+        if (p.eat(.comma)) return p.fail(p.peek().start, "TRUNCATE of several tables is not supported", .{});
+        var t: tree.Truncate = .{ .table = try p.relation(q) };
         if (p.eatKw("restart")) {
             try p.expectKw("identity");
             t.restart_identity = true;
         } else if (p.eatKw("continue")) try p.expectKw("identity");
         _ = p.eatKw("cascade") or p.eatKw("restrict");
-        return p.new(ast.Truncate, t);
+        return p.new(tree.Truncate, t);
     }
 };
 
@@ -2088,4 +2617,118 @@ fn takesMods(name: []const u8) bool {
     const names = [_][]const u8{ "character varying", "character", "numeric", "float", "timestamp", "time", "interval", "bit", "bit varying" };
     for (names) |n| if (eql(n, name)) return true;
     return false;
+}
+
+/// The SQLite collation of a PostgreSQL collation name: "C" and "POSIX"
+/// (and the default) are BINARY; SQLite's own names pass through.
+pub fn collationName(name: []const u8) []const u8 {
+    if (eql(name, "C") or eql(name, "POSIX") or std.ascii.eqlIgnoreCase(name, "default") or std.ascii.eqlIgnoreCase(name, "ucs_basic")) return "BINARY";
+    return name;
+}
+
+/// Whether `name` is a function of the dialect's table
+/// (dialect.Hooks.functions).
+fn isDialectFunction(name: []const u8) bool {
+    return @import("../dialect.zig").spec(.postgres).function_map.get(name) != null;
+}
+
+/// The calls (without OVER, FILTER or ORDER BY) that become something
+/// else: now() and its synonyms (no arguments), localtime,
+/// current_role/session_user (current_user()), current_catalog
+/// (current_database()), date_part().
+const SpecialFunc = enum { now, localtime, current_user, current_database, date_part };
+
+fn specialFunc(name: []const u8) ?SpecialFunc {
+    const map = std.StaticStringMap(SpecialFunc).initComptime(.{
+        .{ "now", .now },                   .{ "current_timestamp", .now },
+        .{ "localtimestamp", .now },        .{ "transaction_timestamp", .now },
+        .{ "statement_timestamp", .now },   .{ "clock_timestamp", .now },
+        .{ "localtime", .localtime },       .{ "current_role", .current_user },
+        .{ "session_user", .current_user }, .{ "current_catalog", .current_database },
+        .{ "date_part", .date_part },
+    });
+    return map.get(name);
+}
+
+/// The SQLite name of a PostgreSQL function, if it differs (else `n`).
+fn funcName(n: []const u8) []const u8 {
+    const map = [_]struct { []const u8, []const u8 }{
+        .{ "substring", "substr" },   .{ "strpos", "instr" },            .{ "btrim", "trim" },
+        .{ "char_length", "length" }, .{ "character_length", "length" }, .{ "bool_and", "min" },
+        .{ "bool_or", "max" },        .{ "every", "min" },               .{ "ascii", "unicode" },
+        .{ "chr", "char" },
+    };
+    for (map) |m| if (eql(m[0], n)) return m[1];
+    return n;
+}
+
+/// How date_part() (EXTRACT) reads a field with strftime().
+const DatePart = struct {
+    fmt: []const u8 = "",
+    cast: []const u8 = "INTEGER",
+    quarter: bool = false,
+    /// A function of the value instead (epoch: unixepoch()).
+    func: ?[]const u8 = null,
+};
+
+fn datePartPlan(field_arg: []const u8) ?DatePart {
+    var buf: [16]u8 = undefined;
+    if (field_arg.len > buf.len) return null;
+    const field = std.ascii.lowerString(&buf, field_arg);
+    const map = [_]struct { []const u8, DatePart }{
+        .{ "year", .{ .fmt = "%Y" } },          .{ "month", .{ .fmt = "%m" } },
+        .{ "day", .{ .fmt = "%d" } },           .{ "hour", .{ .fmt = "%H" } },
+        .{ "minute", .{ .fmt = "%M" } },        .{ "second", .{ .fmt = "%f", .cast = "REAL" } },
+        .{ "dow", .{ .fmt = "%w" } },           .{ "doy", .{ .fmt = "%j" } },
+        .{ "isodow", .{ .fmt = "%u" } },        .{ "week", .{ .fmt = "%V" } },
+        .{ "isoyear", .{ .fmt = "%G" } },       .{ "quarter", .{ .fmt = "%m", .quarter = true } },
+        .{ "epoch", .{ .func = "unixepoch" } },
+    };
+    for (map) |m| if (eql(m[0], field)) return m[1];
+    return null;
+}
+
+/// The number of values of the rows of a VALUES or SELECT source, if
+/// the tree tells (no `*`).
+fn valuesWidth(s: *const tree.Select) ?usize {
+    var b = s.body;
+    while (true) switch (b.*) {
+        .values => |rows| return rows[0].len,
+        .core => |c| {
+            for (c.cols) |rc| if (rc != .expr) return null;
+            return c.cols.len;
+        },
+        .compound => |x| b = x.left,
+        .nested => |n| b = n.body,
+    };
+}
+
+/// The column value `i` of an INSERT into `cols` of `t` is for.
+fn insertColumn(t: *int.Table, cols: []const Name, i: usize) ?*int.Column {
+    if (cols.len > 0) {
+        if (i >= cols.len) return null;
+        for (t.cols) |*c| if (std.ascii.eqlIgnoreCase(c.name(), cols[i].text)) return c;
+        return null;
+    }
+    var k: usize = 0;
+    for (t.cols) |*c| {
+        if (c.col_flags.intersects(int.COLFLAG.NOINSERT)) continue;
+        if (k == i) return c;
+        k += 1;
+    }
+    return null;
+}
+
+/// The literal a string spells as a number ('1.5'), null if none.
+fn numericLiteral(s_arg: []const u8) ?struct { kind: tree.Kind, neg: bool = false } {
+    const s = std.mem.trim(u8, s_arg, " ");
+    if (s.len == 0) return null;
+    if (std.fmt.parseInt(i64, s, 10)) |_| {
+        // The tree's integers have no sign.
+        if (s[0] == '-' or s[0] == '+') return .{ .kind = .{ .integer = s[1..] }, .neg = s[0] == '-' };
+        return .{ .kind = .{ .integer = s } };
+    } else |_| {}
+    for (s) |ch| if (!(std.ascii.isDigit(ch) or ch == '.' or ch == '-' or ch == '+' or ch == 'e' or ch == 'E')) return null;
+    _ = std.fmt.parseFloat(f64, s) catch return null;
+    return .{ .kind = .{ .float = s } };
 }

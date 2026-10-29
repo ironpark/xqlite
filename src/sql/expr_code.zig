@@ -95,6 +95,14 @@ fn dup(p: *Parse, e: ?*const Expr) ?*Expr {
     };
 }
 
+/// xqlite: `c`, or for none the default collation of the connection's
+/// dialect (null, BINARY, in the SQLite dialect): for IN, whose
+/// comparisons do not go through codeCompare().
+fn dialectColl(p: *Parse, c: ?*const int.CollSeq) ?*const int.CollSeq {
+    if (c == null and @import("../dialect/dialect.zig").defaultCollationName(p.db) != null) return coll_mod.dfltColl(p.db);
+    return c;
+}
+
 /// Port of codeCompare(): code comparison `opcode` of registers `in1`
 /// and `in2`, jumping to `dest` if true. As in C, `opcode` is the TK_
 /// code of the comparison, which numbers its opcode (OP.fromTk()).
@@ -498,7 +506,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
             const key_info = key_info_opt.?;
             for (0..n_val) |i| {
                 const x = expr_mod.vectorFieldSubexpr(left, i);
-                const c = expr_mod.binaryCompareCollSeq(p, x, e_list.at(i).expr.?);
+                const c = dialectColl(p, expr_mod.binaryCompareCollSeq(p, x, e_list.at(i).expr.?));
                 key_info.coll[i] = c;
                 if (!serial.isBinary(c)) allow_bloom = false;
             }
@@ -532,7 +540,7 @@ pub fn codeRhsOfIN(p: *Parse, e: *Expr, i_tab: i32, allow_bloom_arg: bool) void 
         } else if (aff == Aff.real) {
             aff = Aff.numeric;
         }
-        key_info_opt.?.coll[0] = expr_mod.collSeq(p, e.left);
+        key_info_opt.?.coll[0] = dialectColl(p, expr_mod.collSeq(p, e.left));
         const r1 = getTempReg(p);
         const r2 = getTempReg(p);
         const aff_str = [1]u8{aff};
@@ -680,7 +688,7 @@ fn codeIN(p: *Parse, e: *Expr, dest_if_false: i32, dest_if_null: i32) void {
     // Without a b-tree, compare with each value in turn.
     if (e_type == .NOOP) {
         const list = e.x.list.?;
-        const coll = expr_mod.collSeq(p, e.left);
+        const coll = dialectColl(p, expr_mod.collSeq(p, e.left));
         const label_ok = aux.makeLabel(p);
         var reg_ck_null: i32 = 0;
         if (dest_if_null != dest_if_false) {

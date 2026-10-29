@@ -52,6 +52,7 @@ tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 tools/pl
 - 셋업 줄 중 `.`으로 시작하는 줄은 dot-command로 따로 넘깁니다(예: `.dbconfig defensive off`). 쓰기가 있는 쿼리(SELECT/VALUES가 아니거나 `;`이 있는 쿼리)는 세 비교 모두 DB 사본에서 돌립니다. EXPLAIN도 첫 문장 뒤의 문장은 실제로 실행되기 때문입니다.
 - EXPLAIN의 P4에 나오는 `vtab:주소`는 `vtab:PTR`로 바꿔서 비교합니다.
 - `json.txt`는 JSON 함수 케이스입니다. SQLite TCL 테스트(`json1*.test`, `json50*.test`, `jsonb01.test`)에서 뽑은 쿼리와, 끝부분의 `json_each`/`json_tree` 블록(같은 테스트와 `join.test`, `join8.test`, `whereF.test`, `tabfunc01.test` 등에서 뽑은 쿼리, 조인·상관 인자·경로 인자·ORDER BY/LIMIT·JSONB 입력·오류를 다루는 쿼리)으로 이루어집니다.
+- `analyze.txt`는 `ANALYZE`와 `PRAGMA optimize` 케이스입니다. 모든 형태의 `ANALYZE`(데이터베이스, 테이블, 인덱스, TEMP, 오류)의 바이트코드와 `sqlite_stat1` 행, `analysis_limit`, sqlite3가 분석한 DB와 같은 연결에서 분석한 DB의 통계에 따라 달라지는 실행 계획, 직접 쓴 `unordered`·`sz=`·`noskipscan` 표시, 스키마 해시 순서가 드러나는 테이블 30여 개짜리 DB를 비교합니다.
 - `wal.txt`는 WAL PRAGMA(`journal_mode` 전환, 모드별 `wal_checkpoint`, `wal_autocheckpoint`) 케이스입니다. 롤백 저널 DB와 WAL DB에서 결과와 `OP_JournalMode`·`OP_Checkpoint` 바이트코드를 비교합니다.
 - `window.txt`는 윈도우 함수 케이스입니다. SQLite TCL 테스트(`window*.test`)에서 뽑은 쿼리와, 뷰·서브쿼리·조인·복합 SELECT·DML 등 select.c와 맞물리는 경로를 다루는 쿼리로 이루어집니다.
 - `gen-basic.py`, `gen-hard.py`는 시드로 무작위 케이스를 만듭니다. `gen-hard.py`는 ANALYZE 통계, 스킵 스캔, collation, 식·부분 인덱스, row value, 상관 서브쿼리, 중첩 조인, 트리거, 외래키를 다룹니다.

@@ -250,9 +250,12 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
 
     // Read the schema rows.
     data.mx_page = bt.lastPage();
-    var buf: [128]u8 = undefined;
-    const sql = std.fmt.bufPrintSentinel(&buf, "SELECT*FROM\"{s}\".{s} ORDER BY rowid", .{ pdb.name, schema_tab_name }, 0) catch unreachable;
+    const sql = @import("printf.zig").mprintf(db.gpa, "SELECT*FROM\"%w\".%s ORDER BY rowid", &.{ .{ .str = pdb.name }, .{ .str = schema_tab_name } }) catch {
+        db.oomFault();
+        return initError(db, i_db, RC.NOMEM);
+    };
     rc = legacy.execWith(db, sql, &data, initCallback, null);
+    db.gpa.free(sql);
     if (rc == RC.OK) rc = data.rc;
     if (rc == RC.OK) _ = @import("analyze.zig").analysisLoad(db, i_db);
 
@@ -532,11 +535,11 @@ pub fn reprepare(v: *Vdbe) i32 {
 pub fn parseSchemaWhere(db: *Sqlite3, i_db: usize, where: [:0]const u8, err_msg: *?[:0]u8) i32 {
     var data: InitData = .{ .db = db, .i_db = i_db, .err_msg = err_msg };
     if (db.dbs.items[i_db].bt) |bt| data.mx_page = bt.lastPage();
-    const sql = std.fmt.allocPrintSentinel(db.gpa, "SELECT*FROM\"{s}\".{s} WHERE {s} ORDER BY rowid", .{
-        db.dbs.items[i_db].name,
-        int.LEGACY_SCHEMA_TABLE,
-        where,
-    }, 0) catch return RC.NOMEM;
+    const sql = @import("printf.zig").mprintf(db.gpa, "SELECT*FROM\"%w\".%s WHERE %s ORDER BY rowid", &.{
+        .{ .str = db.dbs.items[i_db].name },
+        .{ .str = int.LEGACY_SCHEMA_TABLE },
+        .{ .str = where },
+    }) catch return RC.NOMEM;
     defer db.gpa.free(sql);
     var rc = legacy.execWith(db, sql, &data, initCallback, null);
     if (rc == RC.OK) rc = data.rc;

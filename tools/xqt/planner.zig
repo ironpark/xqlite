@@ -163,8 +163,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     var suite: xqt.Suite = .init(gpa, io, cfg, out, .{ .name = "planner", .show = .failures });
     defer suite.deinit();
     // The first chunk of every file, then the second ...: a slow query
-    // (vtab.txt has one that both engines run to the 60 s timeout) then
-    // starts early wherever its file is, instead of last.
+    // then starts early wherever its file is, instead of last.
     var rank: usize = 0;
     var added: usize = 0;
     while (added < chunks.items.len) : (rank += 1) {

@@ -113,7 +113,7 @@ select * from generate_series(1,10) where value>start+5
 select * from generate_series(null)
 select * from generate_series(1,null)
 select * from generate_series(1,5,null)
-select * from generate_series('a')
+select * from generate_series('a') limit 5
 select * from generate_series('3','5')
 select * from generate_series(1.9,4.2)
 select * from generate_series(9223372036854775800,9223372036854775807)

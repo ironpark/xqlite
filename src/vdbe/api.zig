@@ -34,7 +34,10 @@ fn stepOnce(v: *Vdbe) i32 {
         std.debug.assert(v.e_vdbe_state == .ready);
         if (v.expired != 0) {
             v.rc = RC.SCHEMA;
-            return RC.ERROR & db.err_mask;
+            // A statement with saved SQL returns SQLITE_SCHEMA, so that
+            // step() compiles it again.
+            const r = if (v.prep_flags & aux.PREPARE_SAVESQL != 0) aux.transferError(v) else RC.ERROR;
+            return r & db.err_mask;
         }
         if (db.n_vdbe_active == 0) db.is_interrupted.store(false, .monotonic);
         db.n_vdbe_active += 1;
@@ -225,7 +228,7 @@ pub fn columnNameOf(v: *Vdbe, i: usize, var_: usize) ?[:0]const u8 {
     if (v.explain != 0) {
         if (var_ != vi.COLNAME_NAME) return null;
         const names = [_][:0]const u8{
-            "addr", "opcode", "p1", "p2", "p3", "p4", "p5", "comment",
+            "addr", "opcode", "p1",      "p2",     "p3", "p4", "p5", "comment",
             "id",   "parent", "notused", "detail",
         };
         const k = if (v.explain == 2) i + 8 else i;

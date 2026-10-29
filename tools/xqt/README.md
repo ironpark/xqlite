@@ -62,7 +62,7 @@ zig build check -Dfuzz=true          # + 시드 퍼저 셋을 무작위 시드�
 zig build check -Doptimize=ReleaseSafe
 ```
 
-모든 단계가 병렬로 돕니다. `xqt`에는 같은 빌드의 xqlite(`--xq`)와 크래시 shim(`--crashshim`)을 넘기고, 빌드 루트에서 실행합니다(`build.zig`의 `addXqtRun`). 플래너는 `tools/planner/known-failures.list`의 알려진 차이를 `--known`으로 받습니다. 그 목록에 있는 실패는 `KNOWN`으로 출력하고 종료 코드에 넣지 않으며, 다시 같아진 항목은 `FIXED`로 실패시켜 목록을 지우게 합니다.
+모든 단계가 병렬로 돕니다. `-Doptimize`는 interop과 planner가 쓰는 xqlite를 정하고, fuzzcheck(코퍼스마다 프로세스 하나), slt, 시드 퍼저는 늘 ReleaseSafe 빌드를 씁니다. `xqt`에는 같은 빌드의 xqlite(`--xq`)와 크래시 shim(`--crashshim`)을 넘기고, 빌드 루트에서 실행합니다(`build.zig`의 `addXqtRun`). 플래너는 `tools/planner/known-failures.list`의 알려진 차이를 `--known`으로 받습니다. 그 목록에 있는 실패는 `KNOWN`으로 출력하고 종료 코드에 넣지 않으며, 다시 같아진 항목은 `FIXED`로 실패시켜 목록을 지우게 합니다.
 
 `xqt interop`은 이름 없이 모든 모듈을 돌리므로 **새 interop 모듈을 추가해도 `build.zig`는 고칠 필요가 없습니다.** 새 명령(예: `xqt dialect`)을 `check`에 넣을 때만 `build.zig`에 다음 세 줄을 더합니다.
 

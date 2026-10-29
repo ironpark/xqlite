@@ -272,21 +272,44 @@ pub fn build(b: *std.Build) void {
     planner_run.addArgs(&.{ "planner", "--known" });
     planner_run.addFileArg(b.path("tools/planner/known-failures.list"));
     check_step.dependOn(&planner_run.step);
+    // The long runs (sqllogictest, fuzzcheck, the fuzzers) use a ReleaseSafe
+    // build whatever -Doptimize is: safety checks on, minutes not hours.
+    // The cross-checks and the planner use the build asked for.
+    const safe_exe = if (optimize == .safe) exe else b.addExecutable(.{
+        .name = "xqlite",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .imports = &.{.{ .name = "xqlite", .module = mod }},
+        }),
+    });
     if (check_slt) {
-        const slt_run = addXqtRun(b, xqt_exe, exe, crashshim);
+        const slt_run = addXqtRun(b, xqt_exe, safe_exe, crashshim);
         slt_run.addArg("slt");
         slt_run.addDirectoryArg(b.path("ref/sqllogictest/test"));
         check_step.dependOn(&slt_run.step);
     }
-    // SQLite's corpora (tools/fetch-sqlite.sh).
-    const run_fuzzcheck = b.addRunArtifact(exe);
-    run_fuzzcheck.addArg("fuzzcheck");
-    for (1..9) |i| run_fuzzcheck.addFileArg(b.path(b.fmt("ref/sqlite/test/fuzzdata{d}.db", .{i})));
-    run_fuzzcheck.has_side_effects = true;
-    check_step.dependOn(&run_fuzzcheck.step);
+    // SQLite's corpora (tools/fetch-sqlite.sh), one process each.
+    for (1..9) |i| {
+        const run_fuzzcheck = b.addRunArtifact(safe_exe);
+        run_fuzzcheck.addArg("fuzzcheck");
+        run_fuzzcheck.addFileArg(b.path(b.fmt("ref/sqlite/test/fuzzdata{d}.db", .{i})));
+        run_fuzzcheck.has_side_effects = true;
+        check_step.dependOn(&run_fuzzcheck.step);
+    }
     if (check_fuzz) {
+        const safe_fuzz = if (optimize == .safe) fuzz_exe else b.addExecutable(.{
+            .name = "fuzz",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/fuzz_tests.zig"),
+                .target = target,
+                .optimize = .ReleaseSafe,
+                .link_libc = true,
+            }),
+        });
         for ([_][]const u8{ "btree_model", "btree_corrupt", "ir_roundtrip" }) |name| {
-            const run = b.addRunArtifact(fuzz_exe);
+            const run = b.addRunArtifact(safe_fuzz);
             run.addArg(name);
             run.has_side_effects = true;
             check_step.dependOn(&run.step);

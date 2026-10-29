@@ -95,9 +95,9 @@ zig build check -Dfuzz=true     # 시드 퍼저 셋을 무작위 시드로 한 �
 - `zig build test`의 모든 것과 `xqt` 자체의 단위 테스트
 - `xqt interop`: 옮긴 모든 interop 모듈
 - `xqt planner`: `vtablog.txt`를 뺀 모든 케이스 파일. 알려진 차이(`tools/planner/known-failures.list`)는 실패로 세지 않습니다.
-- `xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db`
+- `xqlite fuzzcheck`: `ref/sqlite/test/fuzzdata1.db`..`fuzzdata8.db`를 파일마다 프로세스 하나로
 
-같은 빌드의 xqlite와 크래시 shim을 `xqt`에 넘기므로 `zig build`를 따로 할 필요가 없습니다. 아직 옮기지 않은 셸 스크립트(`interop-btree.sh` 등)는 들어 있지 않습니다.
+`-Doptimize`는 단위 테스트, `xqt interop`, `xqt planner`가 쓰는 빌드를 정합니다. 오래 걸리는 fuzzcheck, sqllogictest(`-Dslt`), 시드 퍼저(`-Dfuzz`)는 `-Doptimize`와 상관없이 ReleaseSafe 빌드로 돕니다. 같은 빌드의 xqlite와 크래시 shim을 `xqt`에 넘기므로 `zig build`를 따로 할 필요가 없습니다. 아직 옮기지 않은 셸 스크립트(`interop-btree.sh` 등)는 들어 있지 않습니다.
 
 ## 단위 테스트
 

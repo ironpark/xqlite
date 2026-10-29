@@ -35,6 +35,10 @@ const usage =
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
+    // Not init.gpa: in Debug builds that is a DebugAllocator, whose lock
+    // the worker threads spin on (every process start allocates), which
+    // made the parallel checks several times slower.
+    const gpa = std.heap.smp_allocator;
     const args = try init.minimal.args.toSlice(arena);
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -50,21 +54,21 @@ pub fn main(init: std.process.Init) !void {
     const cmd = rest.items[0];
     const cmd_args = rest.items[1..];
     const code: u8 = if (std.mem.eql(u8, cmd, "interop"))
-        try interop.run(init.gpa, io, &cfg, out, cmd_args)
+        try interop.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "planner") and cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "gen"))
-        try planner_gen.run(init.gpa, io, &cfg, out, cmd_args[1..])
+        try planner_gen.run(gpa, io, &cfg, out, cmd_args[1..])
     else if (std.mem.eql(u8, cmd, "planner"))
-        try planner.run(init.gpa, io, &cfg, out, cmd_args)
+        try planner.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "slt"))
-        try slt.run(init.gpa, io, &cfg, out, cmd_args)
+        try slt.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "dialect-diff"))
-        try dialect_diff.run(init.gpa, io, &cfg, out, cmd_args)
+        try dialect_diff.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "bench"))
-        try bench.run(init.gpa, io, &cfg, out, cmd_args)
+        try bench.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "gen"))
-        try gen.run(init.gpa, io, &cfg, out, cmd_args)
+        try gen.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "fetch"))
-        try fetch.run(init.gpa, io, &cfg, out, cmd_args)
+        try fetch.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "list"))
         try list(io, &cfg, out)
     else if (std.mem.eql(u8, cmd, "help")) blk: {

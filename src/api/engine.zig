@@ -19,6 +19,7 @@ const int = @import("../sql/sqlite_int.zig");
 const main_mod = @import("../sql/main.zig");
 const legacy = @import("../sql/legacy.zig");
 const prepare_mod = @import("../sql/prepare.zig");
+const backup_mod = @import("../sql/backup.zig");
 const api = @import("../vdbe/api.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const mem = @import("../vdbe/mem.zig");
@@ -167,6 +168,44 @@ pub fn restoreError(h: *Handle, s: SavedError) void {
     h.err = s.message;
     h.err_code = s.code;
     h.err_byte_offset = s.offset;
+}
+
+// ================================================================ backup
+
+/// An online backup (sqlite3_backup*).
+pub const BackupHandle = backup_mod.Backup;
+
+/// sqlite3_backup_init(): the error is recorded on `dest`.
+pub fn backupInit(dest: *Handle, dest_name: []const u8, src: *Handle, src_name: []const u8) Error!*BackupHandle {
+    return backup_mod.init(dest, dest_name, src, src_name) orelse {
+        const rc = main_mod.errcode(dest);
+        return codeError(if (rc != RC.OK) rc else RC.ERROR);
+    };
+}
+
+/// sqlite3_backup_step(): true once the copy is complete (SQLITE_DONE).
+/// An error is recorded on `dest` (sqlite3_backup_step() itself leaves
+/// that to sqlite3_backup_finish()).
+pub fn backupStep(b: *BackupHandle, dest: *Handle, n_page: i32) Error!bool {
+    const rc = backup_mod.step(b, n_page);
+    if (rc == RC.DONE) return true;
+    if (rc == RC.OK) return false;
+    main_mod.setError(dest, rc);
+    return codeError(rc);
+}
+
+/// sqlite3_backup_finish().
+pub fn backupFinish(b: *BackupHandle) Error!void {
+    return int.check(backup_mod.finish(b));
+}
+
+/// sqlite3_backup_remaining() and sqlite3_backup_pagecount().
+pub fn backupRemaining(b: *const BackupHandle) u32 {
+    return @bitCast(backup_mod.remaining(b));
+}
+
+pub fn backupPagecount(b: *const BackupHandle) u32 {
+    return @bitCast(backup_mod.pagecount(b));
 }
 
 pub fn lastInsertRowid(h: *const Handle) i64 {

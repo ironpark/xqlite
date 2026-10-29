@@ -1215,3 +1215,34 @@ test "zig api: savepoint names are quoted" {
     try sp.release();
     try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT count(*) FROM t", .{}));
 }
+
+test "zig api: backup between two connections, and VACUUM" {
+    var src = try memDb();
+    defer src.close();
+    try src.exec(
+        \\CREATE TABLE t(a INTEGER PRIMARY KEY, b);
+        \\WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200)
+        \\  INSERT INTO t SELECT i, zeroblob(500) FROM n;
+    );
+    var dest = try memDb();
+    defer dest.close();
+
+    var b = try dest.backup("main", &src, "main");
+    try testing.expect(!try b.step(3));
+    try testing.expectEqual(b.pageCount() - 3, b.remaining());
+    // Neither connection closes while the backup runs.
+    try testing.expectError(error.Busy, src.tryClose());
+    try testing.expect(try b.step(null));
+    try testing.expectEqual(@as(u32, 0), b.remaining());
+    try b.finish();
+    try testing.expectEqual(@as(?i64, 200), try dest.one(i64, "SELECT count(*) FROM t", .{}));
+
+    try testing.expectError(error.Sql, dest.backup("main", &src, "nosuch"));
+    try testing.expectEqualStrings("unknown database nosuch", dest.lastError().?.message);
+    try testing.expectError(error.Sql, dest.backup("main", &dest, "main"));
+    try testing.expectEqualStrings("source and destination must be distinct", dest.lastError().?.message);
+
+    try dest.exec("DELETE FROM t WHERE a > 10; VACUUM");
+    try testing.expectEqual(@as(?i64, 0), try dest.one(i64, "PRAGMA freelist_count", .{}));
+    try testing.expectEqual(@as(?i64, 10), try dest.one(i64, "SELECT count(*) FROM t", .{}));
+}

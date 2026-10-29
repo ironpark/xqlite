@@ -30,6 +30,7 @@ const func = @import("api/func.zig");
 pub const Db = @import("api/Db.zig");
 pub const Stmt = @import("api/Stmt.zig");
 pub const Savepoint = Db.Savepoint;
+pub const Backup = Db.Backup;
 pub const OpenOptions = Db.OpenOptions;
 pub const JournalMode = Db.JournalMode;
 pub const Dialect = Db.Dialect;

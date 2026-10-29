@@ -9,7 +9,7 @@ const xqlite = @import("xqlite");
 const doc = @embedFile("zig-api.md");
 
 /// The names the doc may qualify: `xqlite` itself and these of its types.
-const roots = [_][]const u8{ "xqlite", "Db", "Stmt", "Savepoint", "ResultCode", "OpenOptions", "Diagnostics", "Value", "Args", "FilterArgs" };
+const roots = [_][]const u8{ "xqlite", "Db", "Stmt", "Savepoint", "Backup", "ResultCode", "OpenOptions", "Diagnostics", "Value", "Args", "FilterArgs" };
 
 fn isIdent(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';

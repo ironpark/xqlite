@@ -842,6 +842,9 @@ fn dotCmdError(p: *Shell, i_arg: usize, brief: ?[]const u8, detail: ?[]const u8)
 
 /// The help text of the commands supported (a subset of azHelp[]).
 const help_text = [_][]const u8{
+    ".backup ?DB? FILE        Backup DB (default \"main\") to FILE",
+    "   Options:",
+    "       --async             Write to FILE without journal and fsync()",
     ".bail on|off             Stop after hitting an error.  Default OFF",
     ".changes on|off          Show number of rows changed by SQL",
     ".dialect ?NAME?          Show or set the SQL dialect: sqlite, postgres, mariadb",
@@ -863,6 +866,8 @@ const help_text = [_][]const u8{
     ".print STRING...         Print literal STRING",
     ".quit                    Stop interpreting input stream, exit if primary.",
     ".read FILE               Read input from FILE or command output",
+    ".restore ?DB? FILE       Restore content of DB (default \"main\") from FILE",
+    ".save ?OPTIONS? FILE     Write database to FILE (an alias for .backup ...)",
     ".schema ?PATTERN?        Show the CREATE statements matching PATTERN",
     "   Options:",
     "      --indent             Try to pretty-print the schema",
@@ -930,7 +935,9 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         }
     }.f;
     var rc: u8 = 0;
-    if (c == 'b' and n >= 3 and isCmd(cmd, "bail")) {
+    if ((c == 'b' and n >= 3 and isCmd(cmd, "backup")) or (c == 's' and n >= 3 and isCmd(cmd, "save"))) {
+        rc = try dotStatus(dotBackup(p));
+    } else if (c == 'b' and n >= 3 and isCmd(cmd, "bail")) {
         if (args.len == 2) {
             p.bail = try booleanValue(p, args[1]);
         } else {
@@ -1024,6 +1031,8 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         rc = 2;
     } else if (c == 'r' and n >= 3 and isCmd(cmd, "read")) {
         rc = try dotStatus(dotRead(p));
+    } else if (c == 'r' and n >= 3 and isCmd(cmd, "restore")) {
+        rc = try dotStatus(dotRestore(p));
     } else if (c == 's' and isCmd(cmd, "schema")) {
         rc = try dotStatus(dotSchema(p));
     } else if (c == 's' and isCmd(cmd, "separator")) {
@@ -1044,6 +1053,104 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         rc = 1;
     }
     return rc;
+}
+
+/// Open `filename` for .backup and .restore, as sqlite3_open_v2() with
+/// URI names; null after reporting the error.
+fn openOther(p: *Shell, filename: []const u8) Error!?*Sqlite3 {
+    var opened: ?*Sqlite3 = null;
+    const orc = sql.main.open(p.db.vfs.?, filename, .{ .uri = true }, &opened);
+    if (orc == RC.OK) return opened.?;
+    try p.eprint("Error: cannot open \"{s}\"\n", .{filename});
+    if (opened) |db| _ = sql.main.close(db);
+    return null;
+}
+
+/// .backup ?DB? ?OPTIONS? FILE and .save: copy database DB to FILE with
+/// the backup API, 100 pages a step.
+fn dotBackup(p: *Shell) DotError!void {
+    const args = p.dot_args.items;
+    var dest_file: ?[]const u8 = null;
+    var z_db: ?[]const u8 = null;
+    var async_ = false;
+    for (args[1..], 1..) |a, j| {
+        if (a.len > 0 and a[0] == '-') {
+            const z = if (a.len > 1 and a[1] == '-') a[1..] else a;
+            if (std.mem.eql(u8, z, "-async")) {
+                async_ = true;
+            } else {
+                // (The appendvfs of --append is not ported.)
+                try dotCmdError(p, j, "unknown option", "should be -append or -async");
+                return error.CommandFailed;
+            }
+        } else if (dest_file == null) {
+            dest_file = a;
+        } else if (z_db == null) {
+            z_db = dest_file;
+            dest_file = a;
+        } else {
+            try p.eprint("Usage: .backup ?DB? ?OPTIONS? FILENAME\n", .{});
+            return error.CommandFailed;
+        }
+    }
+    const file = dest_file orelse {
+        try p.eprint("missing FILENAME argument on .backup\n", .{});
+        return error.CommandFailed;
+    };
+    const dest = try openOther(p, file) orelse return error.CommandFailed;
+    defer _ = sql.main.close(dest);
+    if (async_) _ = sql.legacy.exec(dest, "PRAGMA synchronous=OFF; PRAGMA journal_mode=OFF;", null, null, null);
+    const b = sql.backup.init(dest, "main", p.db, z_db orelse "main") orelse {
+        try p.eprint("Error: {s}\n", .{sql.main.errmsg(dest)});
+        return error.CommandFailed;
+    };
+    var rc = sql.backup.step(b, 100);
+    while (rc == RC.OK) rc = sql.backup.step(b, 100);
+    _ = sql.backup.finish(b);
+    if (rc != RC.DONE) {
+        try p.eprint("Error: {s}\n", .{sql.main.errmsg(dest)});
+        return error.CommandFailed;
+    }
+}
+
+/// .restore ?DB? FILE: copy FILE into database DB with the backup API,
+/// retrying a busy source three times.
+fn dotRestore(p: *Shell) DotError!void {
+    const args = p.dot_args.items;
+    var src_file: []const u8 = undefined;
+    var z_db: []const u8 = "main";
+    if (args.len == 2) {
+        src_file = args[1];
+    } else if (args.len == 3) {
+        src_file = args[2];
+        z_db = args[1];
+    } else {
+        try p.eprint("Usage: .restore ?DB? FILE\n", .{});
+        return error.CommandFailed;
+    }
+    const src = try openOther(p, src_file) orelse return error.CommandFailed;
+    defer _ = sql.main.close(src);
+    const b = sql.backup.init(p.db, z_db, src, "main") orelse {
+        try p.eprint("Error: {s}\n", .{sql.main.errmsg(p.db)});
+        return error.CommandFailed;
+    };
+    var n_timeout: u32 = 0;
+    var rc = sql.backup.step(b, 100);
+    while (rc == RC.OK or rc == RC.BUSY) : (rc = sql.backup.step(b, 100)) {
+        if (rc == RC.BUSY) {
+            if (n_timeout >= 3) break;
+            n_timeout += 1;
+            _ = p.db.vfs.?.sleep(100_000);
+        }
+    }
+    _ = sql.backup.finish(b);
+    if (rc == RC.DONE) return;
+    if (rc == RC.BUSY or rc == RC.LOCKED) {
+        try p.eprint("Error: source database is busy\n", .{});
+    } else {
+        try p.eprint("Error: {s}\n", .{sql.main.errmsg(p.db)});
+    }
+    return error.CommandFailed;
 }
 
 /// .read FILE

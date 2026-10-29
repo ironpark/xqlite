@@ -375,6 +375,62 @@ pub fn savepoint(db: *Db, name: []const u8) Error!Savepoint {
     return sp;
 }
 
+// ================================================================ backup
+
+/// An online backup (sqlite3_backup): copies a database into another
+/// one page by page, see backup(). The usual pattern is
+///
+///     var b = try dest.backup("main", &src, "main");
+///     defer b.finish() catch {};
+///     while (!try b.step(100)) {}
+///
+/// or step(null) to copy everything at once.
+pub const Backup = struct {
+    /// The destination connection, which reports the errors.
+    conn: Conn,
+    b: *engine.BackupHandle,
+
+    /// Copy up to `n_page` more pages, all of them if null. True once
+    /// the copy is complete and committed to the destination. error.Busy
+    /// and error.Locked (the source is being written, or the destination
+    /// is locked by another connection) leave the backup to be tried
+    /// again; other errors end it.
+    pub fn step(self: *Backup, n_page: ?u31) Error!bool {
+        return self.conn.check(engine.backupStep(self.b, self.conn.h, if (n_page) |n| n else -1));
+    }
+
+    /// Pages left to copy, as of the last step().
+    pub fn remaining(self: *const Backup) u32 {
+        return engine.backupRemaining(self.b);
+    }
+
+    /// Pages of the source, as of the last step().
+    pub fn pageCount(self: *const Backup) u32 {
+        return engine.backupPagecount(self.b);
+    }
+
+    /// End the backup and free it, rolling back the destination if the
+    /// copy is not complete. The error, if any, is the one that ended the
+    /// backup.
+    pub fn finish(self: *Backup) Error!void {
+        const conn = self.conn;
+        const b = self.b;
+        self.* = undefined;
+        return conn.check(engine.backupFinish(b));
+    }
+};
+
+/// Start copying database `src_name` ("main", "temp" or an attached
+/// name) of `src` into database `dest_name` of `db` (sqlite3_backup_init()).
+/// The two connections must differ, and no transaction may be open on the
+/// destination. While the backup runs, the source can be read and written
+/// (pages changed after they were copied are copied again), but neither
+/// connection may close until finish().
+pub fn backup(db: *Db, dest_name: []const u8, src: *Db, src_name: []const u8) Error!Backup {
+    const b = try db.conn.check(engine.backupInit(db.conn.h, dest_name, src.conn.h, src_name));
+    return .{ .conn = db.conn, .b = b };
+}
+
 /// Whether a transaction is open (not sqlite3_get_autocommit()).
 pub fn inTransaction(db: *const Db) bool {
     return !engine.autocommit(db.conn.h);

@@ -555,8 +555,11 @@ const Fuzz = struct {
                 if (try got.same(w, a, ordered)) continue;
                 // A view is not always run as the same query in a
                 // subquery is (sqlite3 too): an expression that fails
-                // (OFFSET X'', integer overflow) may not be computed.
-                const step_error = (got == .err and got.err.step and w == .rows) or (w == .err and w.err.step and got == .rows);
+                // (OFFSET X'', integer overflow) may not be computed, or
+                // another one first.
+                const got_step = got == .err and got.err.step;
+                const want_step = w == .err and w.err.step;
+                const step_error = (got_step and w == .rows) or (want_step and got == .rows) or (got_step and want_step);
                 if (step_error) {
                     f.stats.view_step_errors += 1;
                     continue;

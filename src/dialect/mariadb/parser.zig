@@ -1,49 +1,53 @@
 //! The MariaDB parser: hand-written recursive descent over lexer.zig's
-//! tokens that lowers each construct into the IR (src/ir/ir.zig) as it
-//! goes, the way SQLite's grammar actions do (src/parse/parser.zig is
-//! the model for which builder gets which arguments).
+//! tokens producing the syntax tree IR (src/ir/tree.zig) with MariaDB's
+//! semantics resolved, which src/ir/lower.zig lowers and src/ir/render.zig
+//! renders for the schema (so a query, a CHECK, a DEFAULT, a generated
+//! column and a view mean the same).
 //!
-//! This file has the parser core, expressions, SELECT and DML; DDL is in
-//! ddl.zig and the session/introspection statements in session.zig.
+//! This file has the parser core, expressions, SELECT and the metadata of
+//! a DML target; functions.zig has function calls, dml.zig the DML, ddl.zig
+//! the DDL and session.zig the session and introspection statements.
 //!
 //! Expressions follow MariaDB's precedence (lowest first): OR / || ,
 //! XOR, AND / &&, NOT, comparisons (= <=> <> != < <= > >= IS LIKE
 //! REGEXP IN BETWEEN), |, &, << >>, + -, * / DIV % MOD, ^, || under
 //! PIPES_AS_CONCAT, unary (- + ~ ! BINARY), COLLATE. Where MariaDB and
-//! SQLite disagree the lowering rewrites:
-//!  - `a / b` divides as reals (CAST(a AS REAL) / b): 7/2 is 3.5;
-//!  - `a DIV b`, `a XOR b`, `a ^ b` call the dialect's xq_div(),
-//!    xq_xor() and xq_bitxor();
-//!  - `a || b` is OR, or SQLite's || (NULL if an operand is) under
-//!    PIPES_AS_CONCAT; `a <=> b` is `a IS b`;
-//!  - LIKE has the escape character \ (also under NO_BACKSLASH_ESCAPES);
-//!  - function names MariaDB spells differently are renamed
-//!    (functionCall()).
+//! SQLite disagree the tree says what MariaDB means:
+//!  - `a / b` is a Div .real (CAST(a AS REAL) / b: 7/2 is 3.5), `a DIV b`
+//!    a Div .int (xq_div());
+//!  - `a XOR b` and `a ^ b` call the engine functions xq_xor() and
+//!    xq_bitxor();
+//!  - `a || b` is OR, or a Concat (NULL if an operand is) under
+//!    PIPES_AS_CONCAT; `a <=> b` is `a IS b`; CONCAT() of 2 or more
+//!    arguments is a Concat;
+//!  - LIKE folds ASCII letters and has the escape character \ (also
+//!    under NO_BACKSLASH_ESCAPES): SQLite's LIKE ... ESCAPE '\';
+//!  - function names MariaDB spells differently are renamed, and a
+//!    function of the dialect's table (runtime.zig) is a Func of
+//!    .mariadb (functions.zig);
+//!  - a string is decoded as sql_mode says (lexer.zig), '' is NULL under
+//!    EMPTY_STRING_IS_NULL.
+//!
+//! What the schema keeps (DEFAULT, CHECK, generated columns, views) is
+//! parsed with `stored` set: variables and parameters are refused there,
+//! as MariaDB does.
 
 const std = @import("std");
 const ctype = @import("../../util/ctype.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
+const tree = @import("../../ir/tree.zig");
+const lower = @import("../../ir/lower.zig");
 const build = @import("../../sql/build.zig");
-const expr_mod = @import("../../sql/expr.zig");
 const catalog = @import("../../catalog/catalog.zig");
+const dialect = @import("../dialect.zig");
 const lexer = @import("lexer.zig");
 const state = @import("state.zig");
-const types = @import("types.zig");
 
 const Parse = int.Parse;
-const Expr = int.Expr;
-const ExprList = int.ExprList;
-const IdList = int.IdList;
-const SrcList = int.SrcList;
-const Select = int.Select;
-const With = int.With;
-const Window = int.Window;
-const TK = int.TK;
-const OE = int.OE;
-const SF = int.SF;
-const JT = int.JT;
-const SO = int.SortOrder;
+const Expr = tree.Expr;
+const Name = tree.Name;
+const QName = tree.QName;
 
 pub const Token = lexer.Token;
 pub const Error = int.Oom || int.ParseError;
@@ -74,9 +78,20 @@ pub fn isReserved(t: Token) bool {
     return t.kind == .ident and reserved.has(t.text);
 }
 
-pub fn irTok(t: Token) int.Token {
-    return .{ .z = t.text.ptr, .n = @intCast(t.text.len) };
+/// Whether `name` is a function of the dialect's table (runtime.zig):
+/// a call of it is a Func of .mariadb, which the schema keeps as
+/// xq_mariadb_<name>.
+pub fn isDialectFunction(name: []const u8) bool {
+    return dialect.spec(.mariadb).function_map.get(name) != null;
 }
+
+/// What the parser is reading for the schema (Parser.stored).
+pub const Stored = struct {
+    /// The clause (CHECK, DEFAULT, GENERATED ALWAYS AS), "" for a view.
+    clause: []const u8 = "",
+    /// The column or constraint.
+    name: []const u8 = "",
+};
 
 pub const Parser = struct {
     p: *Parse,
@@ -89,8 +104,10 @@ pub const Parser = struct {
     /// INSERT would have stored (excluded.col).
     in_odku: bool = false,
     /// Parsing the VALUES rows or SET list of INSERT/UPDATE: DEFAULT
-    /// stands for the column's default (a TK.DEFAULT marker node).
+    /// stands for the column's default (tree.Kind.default).
     allow_default: bool = false,
+    /// Parsing what the schema keeps.
+    stored: ?Stored = null,
 
     pub fn init(p: *Parse, sql: [:0]const u8, mode: state.SqlMode) Parser {
         var s: Parser = .{
@@ -186,7 +203,7 @@ pub const Parser = struct {
         const rest = std.mem.sliceTo(t.text.ptr, 0);
         const near = rest[0..@min(rest.len, 80)];
         var line: usize = 1;
-        for (s.lx.sql[0 .. @intFromPtr(t.text.ptr) - @intFromPtr(s.lx.sql.ptr)]) |c| {
+        for (s.lx.sql[0..s.posOf(t)]) |c| {
             if (c == '\n') line += 1;
         }
         ir.stmt.errorMsgAt(s.p, t.text.ptr, "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '{s}' at line {d}", .{ near, line });
@@ -203,6 +220,51 @@ pub const Parser = struct {
     pub fn check(s: *Parser) Error!void {
         if (s.p.n_err > 0) return error.ParseFailed;
     }
+
+    // --------------------------------------------------------- positions
+
+    /// The offset of `ptr` (in the statement's text).
+    pub fn offset(s: *const Parser, ptr: [*]const u8) u32 {
+        return @intCast(@intFromPtr(ptr) - @intFromPtr(s.lx.sql.ptr));
+    }
+
+    pub fn posOf(s: *const Parser, t: Token) u32 {
+        return s.offset(t.text.ptr);
+    }
+
+    /// The offset of the current token.
+    pub fn here(s: *const Parser) u32 {
+        return s.posOf(s.tok);
+    }
+
+    /// The offset after the last token consumed.
+    pub fn endPos(s: *const Parser) u32 {
+        return s.offset(s.prev_end);
+    }
+
+    /// An expression node from `pos` to the last token consumed.
+    pub fn mk(s: *Parser, pos: u32, kind: tree.Kind) Error!*Expr {
+        return tree.expr(s.a, pos, @max(pos, s.endPos()), kind);
+    }
+
+    pub fn new(s: *Parser, comptime T: type, v: T) Error!*T {
+        return tree.new(s.a, T, v);
+    }
+
+    // ============================================================ lowering
+
+    /// A Lowerer of the statement (positions are offsets of its text).
+    pub fn lowerer(s: *Parser) lower.Lowerer {
+        return .init(s.p, s.lx.sql);
+    }
+
+    /// Lower statement `st` with the IR.
+    pub fn lowerStmt(s: *Parser, st: tree.Stmt) Error!void {
+        var l = s.lowerer();
+        l.statement(st) catch |err| return lowered(err);
+    }
+
+    // =============================================================== names
 
     /// A name: a word that is not reserved, or a quoted identifier.
     pub fn name(s: *Parser) Error!Token {
@@ -229,16 +291,14 @@ pub const Parser = struct {
         return s.tok.kind == .quoted_ident or (s.tok.kind == .ident and !isReserved(s.tok));
     }
 
-    /// The name an IR token of a name stands for (dequoted).
-    pub fn tokName(s: *Parser, t: int.Token) Error![]const u8 {
-        const z = t.slice();
-        const quoted = z.len > 0 and (z[0] == '`' or z[0] == '"');
-        return lexer.identValue(s.a, .{ .kind = if (quoted) .quoted_ident else .ident, .text = z });
-    }
-
     /// The name a name token stands for.
     pub fn nameText(s: *Parser, t: Token) Error![]const u8 {
         return lexer.identValue(s.a, t);
+    }
+
+    /// The tree name of a name token.
+    pub fn nameOf(s: *Parser, t: Token) Error!Name {
+        return .{ .text = try lexer.identValue(s.a, t), .pos = s.posOf(t) };
     }
 
     /// A string literal's value (after `_charset` introducers and with
@@ -256,30 +316,31 @@ pub const Parser = struct {
         return v;
     }
 
-    /// `[schema.]name`: (name, schema) as IR tokens in the order of
-    /// SQLite's `nm dbnm` (first, second).
-    pub fn qualifiedName(s: *Parser) Error!struct { int.Token, int.Token } {
-        const first = try s.anyName();
-        if (s.isOp(".")) {
-            s.advance();
-            const second = try s.anyName();
-            return .{ irTok(first), irTok(second) };
+    /// `[schema.]name`; a MariaDB database is a SQLite schema.
+    pub fn qualifiedName(s: *Parser) Error!QName {
+        const first = try s.nameOf(try s.anyName());
+        if (s.eatOp(".")) {
+            const second = try s.nameOf(try s.anyName());
+            return .{ .schema = first, .name = second };
         }
-        return .{ irTok(first), .{} };
+        return .{ .name = first };
     }
 
-    // ====================================================== expressions
+    // ======================================================== expressions
 
     pub fn expr(s: *Parser) Error!*Expr {
         return s.orExpr();
+    }
+
+    fn bin(s: *Parser, op: tree.BinOp, l: *Expr, r: *Expr) Error!*Expr {
+        return tree.expr(s.a, l.pos, r.end, .{ .binary = .{ .op = op, .l = l, .r = r } });
     }
 
     fn orExpr(s: *Parser) Error!*Expr {
         var l = try s.xorExpr();
         while (s.isKw("OR") or (s.isOp("||") and !s.mode.has(.PIPES_AS_CONCAT))) {
             s.advance();
-            const r = try s.xorExpr();
-            l = try ir.expr.binary(s.p, TK.OR, l, r);
+            l = try s.bin(.@"or", l, try s.xorExpr());
         }
         return l;
     }
@@ -288,7 +349,7 @@ pub const Parser = struct {
         var l = try s.andExpr();
         while (s.eatKw("XOR")) {
             const r = try s.andExpr();
-            l = try s.call("xq_xor", &.{ l, r });
+            l = try s.func(l.pos, "xq_xor", &.{ l, r });
         }
         return l;
     }
@@ -297,25 +358,25 @@ pub const Parser = struct {
         var l = try s.notExpr();
         while (s.isKw("AND") or s.isOp("&&")) {
             s.advance();
-            const r = try s.notExpr();
-            l = (try ir.expr.@"and"(s.p, l, r)).?;
+            l = try s.bin(.@"and", l, try s.notExpr());
         }
         return l;
     }
 
     fn notExpr(s: *Parser) Error!*Expr {
+        const pos = s.here();
         if (s.eatKw("NOT")) {
             const e = try s.notExpr();
-            return ir.expr.binary(s.p, TK.NOT, e, null);
+            return s.mk(pos, .{ .unary = .{ .op = .not, .e = e } });
         }
         return s.predicate();
     }
 
-    fn compareOp(t: Token) ?u8 {
+    fn compareOp(t: Token) ?tree.CmpOp {
         if (t.kind != .op) return null;
-        const ops = [_]struct { []const u8, u8 }{
-            .{ "=", TK.EQ },  .{ "<>", TK.NE }, .{ "!=", TK.NE }, .{ "<", TK.LT },
-            .{ "<=", TK.LE }, .{ ">", TK.GT },  .{ ">=", TK.GE }, .{ "<=>", TK.IS },
+        const ops = [_]struct { []const u8, tree.CmpOp }{
+            .{ "=", .eq },  .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt },
+            .{ "<=", .le }, .{ ">", .gt },  .{ ">=", .ge }, .{ "<=>", .is },
         };
         for (ops) |o| if (std.mem.eql(u8, t.text, o[0])) return o[1];
         return null;
@@ -330,19 +391,18 @@ pub const Parser = struct {
                     return s.fail("xqlite: comparisons with ANY/SOME/ALL subqueries are not supported", .{});
                 }
                 const r = try s.bitOr();
-                l = if (op == TK.IS) try ir.expr.is(s.p, TK.IS, l, r) else try ir.expr.binary(s.p, op, l, r);
+                l = try s.mk(l.pos, .{ .compare = .{ .op = op, .l = l, .r = r } });
                 continue;
             }
             if (s.isKw("IS")) {
                 s.advance();
                 const not = s.eatKw("NOT");
                 if (s.eatKw("NULL") or s.eatKw("UNKNOWN")) {
-                    l = try ir.expr.isNull(s.p, if (not) TK.NOTNULL else TK.ISNULL, l);
+                    l = try s.mk(l.pos, .{ .is_null = .{ .e = l, .not = not } });
                 } else if (s.isKw("TRUE") or s.isKw("FALSE")) {
-                    const b = try ir.expr.token(s.p, TK.ID, irTok(s.tok));
+                    const v = s.isKw("TRUE");
                     s.advance();
-                    _ = ir.expr.idToTrueFalse(b);
-                    l = try ir.expr.is(s.p, if (not) TK.ISNOT else TK.IS, l, b);
+                    l = try s.mk(l.pos, .{ .is_bool = .{ .e = l, .value = v, .not = not } });
                 } else return s.syntaxError();
                 continue;
             }
@@ -354,22 +414,21 @@ pub const Parser = struct {
                 not = true;
             }
             if (s.isKw("LIKE")) {
-                const op = s.tok;
+                const op_pos = s.here();
                 s.advance();
                 const r = try s.bitOr();
-                var esc: ?*Expr = null;
-                if (s.eatKw("ESCAPE")) {
-                    esc = try s.primaryWithCollate();
-                } else {
-                    esc = try s.stringExpr("\\");
-                }
-                l = try ir.expr.like(s.p, irTok(op), not, l, r, esc);
+                // The escape character is \ unless ESCAPE says.
+                const esc = if (s.eatKw("ESCAPE")) try s.primaryWithCollate() else try s.mk(op_pos, .{ .string = "\\" });
+                l = try s.mk(l.pos, .{ .like = .{ .e = l, .pat = r, .not = not, .case_sensitive = false, .escape = .{ .expr = esc } } });
                 continue;
             }
             if (s.isKw("REGEXP") or s.isKw("RLIKE")) {
+                const op_pos = s.here();
                 s.advance();
                 const r = try s.bitOr();
-                l = try ir.expr.like(s.p, int.Token.init("regexp"), not, l, r, null);
+                const f = try s.new(tree.Func, .{ .name = .{ .text = "regexp", .pos = op_pos }, .args = try s.a.dupe(*Expr, &.{ r, l }) });
+                l = try s.mk(l.pos, .{ .func = f });
+                if (not) l = try s.mk(l.pos, .{ .unary = .{ .op = .not, .e = l } });
                 continue;
             }
             if (s.eatKw("IN")) {
@@ -377,11 +436,11 @@ pub const Parser = struct {
                 if (s.isSelectStart()) {
                     const sub = try s.selectStmt();
                     try s.expectOp(")");
-                    l = try ir.expr.inSelect(s.p, l, not, sub);
+                    l = try s.mk(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = sub } });
                 } else {
                     const items = try s.exprList();
                     try s.expectOp(")");
-                    l = try ir.expr.inList(s.p, l, not, items);
+                    l = try s.mk(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
                 }
                 continue;
             }
@@ -389,7 +448,7 @@ pub const Parser = struct {
                 const lo = try s.bitOr();
                 try s.expectKw("AND");
                 const hi = try s.bitOr();
-                l = try ir.expr.between(s.p, l, not, lo, hi);
+                l = try s.mk(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
                 continue;
             }
             if (s.isKw("SOUNDS")) return s.fail("xqlite: SOUNDS LIKE is not supported", .{});
@@ -400,28 +459,22 @@ pub const Parser = struct {
 
     pub fn bitOr(s: *Parser) Error!*Expr {
         var l = try s.bitAnd();
-        while (s.isOp("|")) {
-            s.advance();
-            l = try ir.expr.binary(s.p, TK.BITOR, l, try s.bitAnd());
-        }
+        while (s.eatOp("|")) l = try s.bin(.bit_or, l, try s.bitAnd());
         return l;
     }
 
     fn bitAnd(s: *Parser) Error!*Expr {
         var l = try s.shift();
-        while (s.isOp("&")) {
-            s.advance();
-            l = try ir.expr.binary(s.p, TK.BITAND, l, try s.shift());
-        }
+        while (s.eatOp("&")) l = try s.bin(.bit_and, l, try s.shift());
         return l;
     }
 
     fn shift(s: *Parser) Error!*Expr {
         var l = try s.additive();
         while (s.isOp("<<") or s.isOp(">>")) {
-            const op: u8 = if (s.isOp("<<")) TK.LSHIFT else TK.RSHIFT;
+            const op: tree.BinOp = if (s.isOp("<<")) .shl else .shr;
             s.advance();
-            l = try ir.expr.binary(s.p, op, l, try s.additive());
+            l = try s.bin(op, l, try s.additive());
         }
         return l;
     }
@@ -429,20 +482,21 @@ pub const Parser = struct {
     fn additive(s: *Parser) Error!*Expr {
         var l = if (s.isKw("INTERVAL") and !s.peek().is("(")) blk: {
             // INTERVAL n unit + date
+            const pos = s.here();
             const iv = try s.interval();
             try s.expectOp("+");
             const d = try s.multiplicative();
-            break :blk try s.dateAdd(d, iv.n, iv.unit, false);
+            break :blk try s.dateAdd(pos, d, iv.n, iv.unit, false);
         } else try s.multiplicative();
         while (s.isOp("+") or s.isOp("-")) {
             const minus = s.isOp("-");
             s.advance();
             if (s.isKw("INTERVAL")) {
                 const iv = try s.interval();
-                l = try s.dateAdd(l, iv.n, iv.unit, minus);
+                l = try s.dateAdd(l.pos, l, iv.n, iv.unit, minus);
                 continue;
             }
-            l = try ir.expr.binary(s.p, if (minus) TK.MINUS else TK.PLUS, l, try s.multiplicative());
+            l = try s.bin(if (minus) .sub else .add, l, try s.multiplicative());
         }
         return l;
     }
@@ -460,29 +514,25 @@ pub const Parser = struct {
     }
 
     /// xq_date_add(d, [-]n, 'UNIT').
-    pub fn dateAdd(s: *Parser, d: *Expr, n: *Expr, unit: []const u8, negate: bool) Error!*Expr {
-        const amount = if (negate) try ir.expr.binary(s.p, TK.UMINUS, n, null) else n;
+    pub fn dateAdd(s: *Parser, pos: u32, d: *Expr, n: *Expr, unit: []const u8, negate: bool) Error!*Expr {
+        const amount = if (negate) try s.mk(n.pos, .{ .unary = .{ .op = .neg, .e = n } }) else n;
         const u = try std.ascii.allocUpperString(s.a, unit);
-        return s.call("xq_date_add", &.{ d, amount, try s.stringExpr(u) });
+        return s.func(pos, "xq_date_add", &.{ d, amount, try s.str(pos, u) });
     }
 
     fn multiplicative(s: *Parser) Error!*Expr {
         var l = try s.bitXor();
         while (true) {
-            if (s.isOp("*")) {
-                s.advance();
-                l = try ir.expr.binary(s.p, TK.STAR, l, try s.bitXor());
-            } else if (s.isOp("/")) {
-                s.advance();
+            if (s.eatOp("*")) {
+                l = try s.bin(.mul, l, try s.bitXor());
+            } else if (s.eatOp("/")) {
                 const r = try s.bitXor();
-                const real = try ir.expr.cast(s.p, l, int.Token.init("REAL"));
-                l = try ir.expr.binary(s.p, TK.SLASH, real, r);
-            } else if (s.isOp("%") or s.isKw("MOD")) {
-                s.advance();
-                l = try ir.expr.binary(s.p, TK.REM, l, try s.bitXor());
-            } else if (s.isKw("DIV")) {
-                s.advance();
-                l = try s.call("xq_div", &.{ l, try s.bitXor() });
+                l = try s.mk(l.pos, .{ .div = .{ .kind = .real, .l = l, .r = r } });
+            } else if (s.eatOp("%") or s.eatKw("MOD")) {
+                l = try s.bin(.rem, l, try s.bitXor());
+            } else if (s.eatKw("DIV")) {
+                const r = try s.bitXor();
+                l = try s.mk(l.pos, .{ .div = .{ .kind = .int, .l = l, .r = r } });
             } else break;
         }
         return l;
@@ -490,41 +540,36 @@ pub const Parser = struct {
 
     fn bitXor(s: *Parser) Error!*Expr {
         var l = try s.concat();
-        while (s.isOp("^")) {
-            s.advance();
-            l = try s.call("xq_bitxor", &.{ l, try s.concat() });
+        while (s.eatOp("^")) {
+            const r = try s.concat();
+            l = try s.func(l.pos, "xq_bitxor", &.{ l, r });
         }
         return l;
     }
 
     fn concat(s: *Parser) Error!*Expr {
-        var l = try s.unary();
-        while (s.mode.has(.PIPES_AS_CONCAT) and s.isOp("||")) {
-            s.advance();
-            l = try ir.expr.binary(s.p, TK.CONCAT, l, try s.unary());
-        }
-        return l;
+        const l = try s.unary();
+        if (!(s.mode.has(.PIPES_AS_CONCAT) and s.isOp("||"))) return l;
+        var args: std.ArrayList(*Expr) = .empty;
+        try args.append(s.a, l);
+        while (s.mode.has(.PIPES_AS_CONCAT) and s.eatOp("||")) try args.append(s.a, try s.unary());
+        return s.mk(l.pos, .{ .concat = .{ .args = args.items, .null_policy = .propagate } });
     }
 
     fn unary(s: *Parser) Error!*Expr {
+        const pos = s.here();
         if (s.isOp("-") or s.isOp("+")) {
             const minus = s.isOp("-");
             s.advance();
             const e = try s.unary();
             if (!minus) return e;
-            return ir.expr.binary(s.p, TK.UMINUS, e, null);
+            return s.mk(pos, .{ .unary = .{ .op = .neg, .e = e } });
         }
-        if (s.isOp("~")) {
-            s.advance();
-            return ir.expr.binary(s.p, TK.BITNOT, try s.unary(), null);
-        }
-        if (s.isOp("!")) {
-            s.advance();
-            return ir.expr.binary(s.p, TK.NOT, try s.unary(), null);
-        }
+        if (s.eatOp("~")) return s.mk(pos, .{ .unary = .{ .op = .bit_not, .e = try s.unary() } });
+        if (s.eatOp("!")) return s.mk(pos, .{ .unary = .{ .op = .not, .e = try s.unary() } });
         if (s.isKw("BINARY") and !s.peek().is("(")) {
             s.advance();
-            return ir.expr.collate(s.p, try s.unary(), int.Token.init("BINARY"), false);
+            return s.mk(pos, .{ .collate = .{ .e = try s.unary(), .collation = "BINARY" } });
         }
         return s.primaryWithCollate();
     }
@@ -533,7 +578,7 @@ pub const Parser = struct {
         var e = try s.primary();
         while (s.eatKw("COLLATE")) {
             const coll = try s.collationName();
-            e = try ir.expr.collate(s.p, e, int.Token.init(coll), false);
+            e = try s.mk(e.pos, .{ .collate = .{ .e = e, .collation = coll } });
         }
         return e;
     }
@@ -547,19 +592,32 @@ pub const Parser = struct {
         return mapCollation(n) orelse s.fail("Unknown collation: '{s}'", .{n});
     }
 
-    pub fn stringExpr(s: *Parser, z: []const u8) Error!*Expr {
-        return ir.expr.leaf(s.a, TK.STRING, z);
+    /// A string constant at `pos`.
+    pub fn str(s: *Parser, pos: u32, z: []const u8) Error!*Expr {
+        return tree.expr(s.a, pos, pos, .{ .string = z });
     }
 
-    pub fn intExpr(s: *Parser, v: i32) Error!*Expr {
-        return ir.expr.int32(s.a, v);
+    /// An integer constant at `pos`.
+    pub fn int_(s: *Parser, pos: u32, v: i64) Error!*Expr {
+        if (v < 0) {
+            const x = try tree.expr(s.a, pos, pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{-v}) });
+            return tree.expr(s.a, pos, pos, .{ .unary = .{ .op = .neg, .e = x } });
+        }
+        return tree.expr(s.a, pos, pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{v}) });
     }
 
-    /// A call of `name` (a function the frontend chose) with `args`.
-    pub fn call(s: *Parser, name_: []const u8, args: []const *Expr) Error!*Expr {
-        var l: ?*ExprList = null;
-        for (args) |x| l = try ir.list.append(s.p, l, x);
-        return ir.expr.functionCall(s.p, name_, l);
+    /// A call of `fname` (a function the frontend chose): of the
+    /// dialect's table if it has one of that name (isDialectFunction()),
+    /// else a SQLite built-in or an engine function.
+    pub fn func(s: *Parser, pos: u32, fname: []const u8, args: []const *Expr) Error!*Expr {
+        return s.funcNode(pos, .{ .name = .{ .text = fname, .pos = pos }, .args = try s.a.dupe(*Expr, args) });
+    }
+
+    /// A Func node (its `dialect` set as func() says).
+    pub fn funcNode(s: *Parser, pos: u32, f: tree.Func) Error!*Expr {
+        var x = f;
+        x.dialect = if (isDialectFunction(f.name.text)) .mariadb else null;
+        return s.mk(pos, .{ .func = try s.new(tree.Func, x) });
     }
 
     pub fn isSelectStart(s: *Parser) bool {
@@ -570,55 +628,62 @@ pub const Parser = struct {
         return t.isKw("SELECT") or t.isKw("WITH") or t.is("(");
     }
 
+    /// Refuse what the schema may not keep (variables, parameters):
+    /// `what` is its text.
+    fn refuseStored(s: *Parser, what: []const u8) Error!void {
+        const st = s.stored orelse return;
+        if (st.clause.len == 0) return s.fail("View's SELECT contains a variable or parameter", .{});
+        return s.fail("Function or expression '{s}' cannot be used in the {s} clause of `{s}`", .{ what, st.clause, st.name });
+    }
+
     fn primary(s: *Parser) Error!*Expr {
         const t = s.tok;
+        const pos = s.posOf(t);
         switch (t.kind) {
             .string => {
                 const v = try s.stringLiteral();
-                if (v.len == 0 and s.mode.has(.EMPTY_STRING_IS_NULL)) return ir.expr.leaf(s.a, TK.NULL, null);
-                const e = try ir.expr.leaf(s.a, TK.STRING, v);
-                e.w = .{ .ofst = ir.expr.tokenOffset(s.p, irTok(t)) };
-                return e;
+                if (v.len == 0 and s.mode.has(.EMPTY_STRING_IS_NULL)) return s.mk(pos, .null);
+                return s.mk(pos, .{ .string = v });
             },
             .integer => {
                 s.advance();
-                return ir.expr.integer(s.p, irTok(t));
+                return s.mk(pos, .{ .integer = t.text });
             },
             .float => {
                 s.advance();
-                return ir.expr.token(s.p, TK.FLOAT, irTok(t));
+                return s.mk(pos, .{ .float = t.text });
             },
             .hex => {
                 s.advance();
                 const digits = (try lexer.hexDigits(s.a, t)) orelse return s.syntaxErrorAt(t);
-                const z = try std.fmt.allocPrint(s.a, "x'{s}'", .{digits});
-                return ir.expr.leaf(s.a, TK.BLOB, z);
+                return s.mk(pos, .{ .blob = digits });
             },
             .bit => {
                 s.advance();
                 const v = lexer.bitValue(t) orelse return s.fail("bit literal out of range", .{});
-                const z = try std.fmt.allocPrint(s.a, "{d}", .{v});
-                return ir.expr.integer(s.p, int.Token.init(z));
+                if (v < 0) return s.int_(pos, v);
+                return s.mk(pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{v}) });
             },
             .param => {
+                try s.refuseStored(t.text);
                 s.advance();
-                const e = try ir.expr.token(s.p, TK.VARIABLE, irTok(t));
-                try ir.expr.assignVarNumber(s.p, e, 1);
-                return e;
+                return s.mk(pos, .{ .param = null });
             },
             .sys_var => {
+                try s.refuseStored(t.text);
                 s.advance();
                 const name_ = try sysVarName(s, t);
-                return s.call("xq_sysvar", &.{try s.stringExpr(name_)});
+                return s.func(pos, "xq_sysvar", &.{try s.str(pos, name_)});
             },
             .user_var => {
+                try s.refuseStored(t.text);
                 s.advance();
                 const name_ = try userVarName(s, t);
                 if (s.eatOp(":=")) {
                     const v = try s.expr();
-                    return s.call("xq_set_uservar", &.{ try s.stringExpr(name_), v });
+                    return s.func(pos, "xq_set_uservar", &.{ try s.str(pos, name_), v });
                 }
-                return s.call("xq_uservar", &.{try s.stringExpr(name_)});
+                return s.func(pos, "xq_uservar", &.{try s.str(pos, name_)});
             },
             .op => {
                 if (t.is("(")) return s.parenthesized();
@@ -640,52 +705,43 @@ pub const Parser = struct {
 
     /// `( ... )`: a subquery, a row value or a parenthesized expression.
     fn parenthesized(s: *Parser) Error!*Expr {
+        const pos = s.here();
         try s.expectOp("(");
         if (s.isAnyKw(&.{ "SELECT", "WITH", "VALUES" })) {
             const sub = try s.selectStmt();
             try s.expectOp(")");
-            return ir.expr.subquery(s.p, TK.SELECT, sub);
+            return s.mk(pos, .{ .subquery = sub });
         }
         const first = try s.expr();
         if (s.eatOp(")")) return first;
-        var items = try ir.list.append(s.p, null, first);
-        while (s.eatOp(",")) items = try ir.list.append(s.p, items, try s.expr());
+        var items: std.ArrayList(*Expr) = .empty;
+        try items.append(s.a, first);
+        while (s.eatOp(",")) try items.append(s.a, try s.expr());
         try s.expectOp(")");
-        return ir.expr.vector(s.p, items);
+        return s.mk(pos, .{ .row = items.items });
     }
 
     fn columnRef(s: *Parser) Error!*Expr {
-        const t1 = try s.anyName();
-        if (!s.isOp(".")) return s.idExpr(t1);
-        s.advance();
-        const t2 = try s.anyName();
-        if (!s.isOp(".")) return ir.expr.binary(s.p, TK.DOT, try s.idExpr(t1), try s.idExpr(t2));
-        s.advance();
-        const t3 = try s.anyName();
-        const right = try ir.expr.binary(s.p, TK.DOT, try s.idExpr(t2), try s.idExpr(t3));
-        return ir.expr.binary(s.p, TK.DOT, try s.idExpr(t1), right);
-    }
-
-    /// A TK.ID node for a name token (dequoted; never the string that
-    /// SQLite makes of an unknown "x").
-    pub fn idExpr(s: *Parser, t: Token) Error!*Expr {
-        const e = try ir.expr.token(s.p, TK.ID, irTok(t));
-        e.flags.DblQuoted = false;
-        return e;
+        const pos = s.here();
+        var names: std.ArrayList(Name) = .empty;
+        try names.append(s.a, try s.nameOf(try s.anyName()));
+        while (names.items.len < 3 and s.eatOp(".")) try names.append(s.a, try s.nameOf(try s.anyName()));
+        return s.mk(pos, .{ .column = names.items });
     }
 
     /// An expression starting with a word: a keyword form, a function
     /// call or a column reference.
     fn wordExpr(s: *Parser) Error!*Expr {
         const t = s.tok;
+        const pos = s.posOf(t);
         const next = s.peek();
         if (t.isKw("NULL") or t.isKw("UNKNOWN")) {
             s.advance();
-            return ir.expr.token(s.p, TK.NULL, irTok(t));
+            return s.mk(pos, .null);
         }
         if (t.isKw("TRUE") or t.isKw("FALSE")) {
             s.advance();
-            return s.intExpr(@intFromBool(t.isKw("TRUE")));
+            return s.mk(pos, .{ .boolean = t.isKw("TRUE") });
         }
         if (t.isKw("CASE")) return s.caseExpr();
         if (t.isKw("EXISTS")) {
@@ -693,11 +749,11 @@ pub const Parser = struct {
             try s.expectOp("(");
             const sub = try s.selectStmt();
             try s.expectOp(")");
-            return ir.expr.subquery(s.p, TK.EXISTS, sub);
+            return s.mk(pos, .{ .exists = sub });
         }
         if (t.isKw("DEFAULT") and s.allow_default and !next.is("(")) {
             s.advance();
-            return ir.expr.binary(s.p, TK.DEFAULT, null, null);
+            return s.mk(pos, .default);
         }
         if (t.isAnyKw(&.{ "DATE", "TIME", "TIMESTAMP" }) and next.kind == .string) {
             // DATE '2024-01-01' and the like: the string.
@@ -714,14 +770,14 @@ pub const Parser = struct {
             s.advance();
             try s.expectKw("FOR");
             const seq = try s.anyName();
-            return s.call("nextval", &.{try s.stringExpr(try s.nameText(seq))});
+            return s.func(pos, "nextval", &.{try s.str(s.posOf(seq), try s.nameText(seq))});
         }
         if ((t.isKw("PREVIOUS") or t.isKw("LASTVAL")) and next.isKw("VALUE")) {
             s.advance();
             s.advance();
             try s.expectKw("FOR");
             const seq = try s.anyName();
-            return s.call("lastval", &.{try s.stringExpr(try s.nameText(seq))});
+            return s.func(pos, "lastval", &.{try s.str(s.posOf(seq), try s.nameText(seq))});
         }
         if (next.is("(")) return @import("functions.zig").call(s);
         // Niladic functions.
@@ -732,97 +788,89 @@ pub const Parser = struct {
         };
         for (niladic) |n| if (t.isKw(n[0])) {
             s.advance();
-            return @import("functions.zig").byName(s, n[1], null, t);
+            return @import("functions.zig").byName(s, n[1], &.{}, pos);
         };
         if (isReserved(t)) return s.syntaxError();
         return s.columnRef();
     }
 
     fn caseExpr(s: *Parser) Error!*Expr {
+        const pos = s.here();
         try s.expectKw("CASE");
         const operand: ?*Expr = if (s.isKw("WHEN")) null else try s.expr();
-        var list: ?*ExprList = null;
+        var whens: std.ArrayList(*Expr) = .empty;
         while (s.eatKw("WHEN")) {
-            list = try ir.list.append(s.p, list, try s.expr());
+            try whens.append(s.a, try s.expr());
             try s.expectKw("THEN");
-            list = try ir.list.append(s.p, list, try s.expr());
+            try whens.append(s.a, try s.expr());
         }
-        if (list == null) return s.syntaxError();
+        if (whens.items.len == 0) return s.syntaxError();
         const else_: ?*Expr = if (s.eatKw("ELSE")) try s.expr() else null;
         try s.expectKw("END");
-        return ir.expr.case(s.p, operand, list, else_);
+        return s.mk(pos, .{ .case = .{ .operand = operand, .whens = whens.items, .@"else" = else_ } });
     }
 
-    pub fn exprList(s: *Parser) Error!*ExprList {
-        var l = try ir.list.append(s.p, null, try s.expr());
-        while (s.eatOp(",")) l = try ir.list.append(s.p, l, try s.expr());
-        return l;
+    pub fn exprList(s: *Parser) Error![]*Expr {
+        var l: std.ArrayList(*Expr) = .empty;
+        try l.append(s.a, try s.expr());
+        while (s.eatOp(",")) try l.append(s.a, try s.expr());
+        return l.items;
     }
 
-    // ============================================================ SELECT
+    // ============================================================= SELECT
 
     /// `[WITH ...] select_body [ORDER BY ...] [LIMIT ...] [locking]`.
-    pub fn selectStmt(s: *Parser) Error!*Select {
-        var w: ?*With = null;
+    pub fn selectStmt(s: *Parser) Error!*tree.Select {
+        const pos = s.here();
+        var w: ?*tree.With = null;
         if (s.isKw("WITH")) w = try s.withClause();
-        var sel = try s.selectBody();
+        const body = try s.selectBody();
+        const sel = try s.new(tree.Select, .{ .with = w, .body = body, .pos = pos });
         try s.orderLimit(sel);
         try s.lockingClause();
-        if (w != null) {
-            sel = ir.select.attachWith(s.p, sel, w) orelse return s.syntaxError();
-        } else ir.select.doubleLink(s.p, sel);
-        try s.check();
         return sel;
     }
 
-    /// The ORDER BY and LIMIT of a whole SELECT (the last core of a
-    /// compound carries them in SQLite's tree).
-    fn orderLimit(s: *Parser, sel: *Select) Error!void {
+    /// The ORDER BY and LIMIT of a whole SELECT.
+    fn orderLimit(s: *Parser, sel: *tree.Select) Error!void {
         if (s.isKw("ORDER") and s.peek().isKw("BY")) {
-            if (sel.order_by != null or sel.limit != null) return s.syntaxError();
             s.advance();
             s.advance();
             sel.order_by = try s.sortList();
         }
         if (s.isKw("LIMIT")) {
-            if (sel.limit != null) return s.syntaxError();
-            sel.limit = try s.limitClause();
-        } else if (s.isKw("OFFSET")) {
+            const l = try s.limitClause();
+            sel.limit = l.limit;
+            sel.offset = l.offset;
+        } else if (s.eatKw("OFFSET")) {
             // OFFSET n ROWS FETCH {FIRST|NEXT} m ROWS ONLY (MariaDB 10.6).
-            s.advance();
-            const off = try s.expr();
+            sel.offset = try s.expr();
             _ = s.eatKw("ROWS") or s.eatKw("ROW");
-            var lim: ?*Expr = null;
-            if (s.eatKw("FETCH")) lim = try s.fetchFirst();
-            sel.limit = try ir.expr.binary(s.p, TK.LIMIT, lim orelse try ir.expr.int32(s.a, -1), off);
+            if (s.eatKw("FETCH")) sel.limit = try s.fetchFirst();
         } else if (s.eatKw("FETCH")) {
-            sel.limit = try ir.expr.binary(s.p, TK.LIMIT, try s.fetchFirst(), null);
+            sel.limit = try s.fetchFirst();
         }
     }
 
     fn fetchFirst(s: *Parser) Error!*Expr {
         if (!(s.eatKw("FIRST") or s.eatKw("NEXT"))) return s.syntaxError();
-        const n = if (s.isKw("ROW") or s.isKw("ROWS")) try ir.expr.int32(s.a, 1) else try s.expr();
+        const n = if (s.isKw("ROW") or s.isKw("ROWS")) try s.int_(s.here(), 1) else try s.expr();
         if (!(s.eatKw("ROWS") or s.eatKw("ROW"))) return s.syntaxError();
         if (s.isKw("WITH")) return s.fail("xqlite: FETCH ... WITH TIES is not supported", .{});
         try s.expectKw("ONLY");
         return n;
     }
 
-    /// `LIMIT n`, `LIMIT off, n`, `LIMIT n OFFSET m`: a TK.LIMIT node.
-    pub fn limitClause(s: *Parser) Error!*Expr {
+    pub const Limit = struct { limit: *Expr, offset: ?*Expr = null };
+
+    /// `LIMIT n`, `LIMIT off, n`, `LIMIT n OFFSET m`.
+    pub fn limitClause(s: *Parser) Error!Limit {
         try s.expectKw("LIMIT");
         const first = try s.limitValue();
-        if (s.eatOp(",")) {
-            const n = try s.limitValue();
-            return ir.expr.binary(s.p, TK.LIMIT, n, first);
-        }
-        if (s.eatKw("OFFSET")) {
-            const off = try s.limitValue();
-            return ir.expr.binary(s.p, TK.LIMIT, first, off);
-        }
+        if (s.eatOp(",")) return .{ .limit = try s.limitValue(), .offset = first };
+        if (s.eatKw("OFFSET")) return .{ .limit = first, .offset = try s.limitValue() };
         if (s.isKw("ROWS")) return s.fail("xqlite: LIMIT ROWS EXAMINED is not supported", .{});
-        return ir.expr.binary(s.p, TK.LIMIT, first, null);
+        return .{ .limit = first };
     }
 
     /// A LIMIT value: a number, a parameter or (an xqlite extension) an
@@ -846,110 +894,95 @@ pub const Parser = struct {
         }
     }
 
-    fn withClause(s: *Parser) Error!*With {
-        try s.expectKw("WITH");
-        _ = s.eatKw("RECURSIVE");
-        var w: ?*With = null;
+    /// A parenthesized list of names.
+    pub fn nameList(s: *Parser) Error![]Name {
+        try s.expectOp("(");
+        var out: std.ArrayList(Name) = .empty;
         while (true) {
-            const n = try s.name();
-            s.p.has_with = true;
-            var cols: ?*ExprList = null;
-            if (s.eatOp("(")) {
-                while (true) {
-                    const c = try s.name();
-                    cols = try ir.list.addIdTerm(s.p, cols, irTok(c), false, SO.undef);
-                    if (!s.eatOp(",")) break;
-                }
-                try s.expectOp(")");
-            }
+            try out.append(s.a, try s.nameOf(try s.anyName()));
+            if (!s.eatOp(",")) break;
+        }
+        try s.expectOp(")");
+        return out.items;
+    }
+
+    fn withClause(s: *Parser) Error!*tree.With {
+        try s.expectKw("WITH");
+        const recursive = s.eatKw("RECURSIVE");
+        var ctes: std.ArrayList(tree.Cte) = .empty;
+        while (true) {
+            const n = try s.nameOf(try s.name());
+            var cols: []Name = &.{};
+            if (s.isOp("(")) cols = try s.nameList();
             try s.expectKw("AS");
             try s.expectOp("(");
             const q = try s.selectStmt();
             try s.expectOp(")");
-            const cte = try ir.with.cte(s.p, irTok(n), cols, q, .any);
-            w = try ir.with.add(s.p, w, cte);
+            try ctes.append(s.a, .{ .name = n, .cols = cols, .select = q });
             if (!s.eatOp(",")) break;
         }
-        return w.?;
+        return s.new(tree.With, .{ .recursive = recursive, .ctes = ctes.items });
     }
 
-    /// Cores joined by UNION/EXCEPT/INTERSECT.
-    fn selectBody(s: *Parser) Error!*Select {
+    /// Terms joined by UNION/EXCEPT/INTERSECT.
+    fn selectBody(s: *Parser) Error!*tree.Body {
         var lhs = try s.selectTerm();
         while (true) {
-            var op: i32 = undefined;
+            var op: tree.SetOp = undefined;
+            var all = false;
             if (s.eatKw("UNION")) {
-                op = if (s.eatKw("ALL")) TK.ALL else blk: {
-                    _ = s.eatKw("DISTINCT");
-                    break :blk TK.UNION;
-                };
+                op = .@"union";
+                all = s.eatKw("ALL");
+                if (!all) _ = s.eatKw("DISTINCT");
             } else if (s.eatKw("EXCEPT") or s.eatKw("MINUS")) {
                 if (s.eatKw("ALL")) return s.fail("xqlite: EXCEPT ALL is not supported", .{});
                 _ = s.eatKw("DISTINCT");
-                op = TK.EXCEPT;
+                op = .except;
             } else if (s.eatKw("INTERSECT")) {
                 if (s.eatKw("ALL")) return s.fail("xqlite: INTERSECT ALL is not supported", .{});
                 _ = s.eatKw("DISTINCT");
-                op = TK.INTERSECT;
+                op = .intersect;
             } else break;
-            if (lhs.order_by != null or lhs.limit != null) lhs = try s.wrapSubquery(lhs);
-            var rhs = try s.selectTerm();
-            if (rhs.order_by != null or rhs.limit != null) rhs = try s.wrapSubquery(rhs);
-            lhs = (try ir.select.compound(s.p, lhs, op, rhs)) orelse return s.syntaxError();
+            const rhs = try s.selectTerm();
+            lhs = try s.new(tree.Body, .{ .compound = .{ .op = op, .all = all, .left = lhs, .right = rhs } });
         }
         return lhs;
     }
 
-    /// `SELECT * FROM (sel)`.
-    pub fn wrapSubquery(s: *Parser, sel: *Select) Error!*Select {
-        const src = try ir.from.appendTerm(s.p, null, null, null, .{}, sel, null);
-        return ir.select.new(s.p, null, src, null, null, null, null, .{}, null);
-    }
-
-    fn selectTerm(s: *Parser) Error!*Select {
+    fn selectTerm(s: *Parser) Error!*tree.Body {
         if (s.eatOp("(")) {
             const inner = try s.selectStmt();
             try s.expectOp(")");
-            return inner;
+            return s.new(tree.Body, .{ .nested = inner });
         }
-        if (s.isKw("VALUES")) return s.valuesRows(null);
-        return s.selectCore();
+        if (s.isKw("VALUES")) return s.new(tree.Body, .{ .values = try s.valuesRows() });
+        return s.new(tree.Body, .{ .core = try s.selectCore() });
     }
 
-    /// `VALUES (row), (row) ...` as a Select (each row through `wrap` if
-    /// given: INSERT's coercion).
-    pub fn valuesRows(s: *Parser, wrap: ?*const RowWrap) Error!*Select {
+    /// `VALUES (row), (row) ...` (an empty row is allowed).
+    pub fn valuesRows(s: *Parser) Error![][]*Expr {
         if (!(s.eatKw("VALUES") or s.eatKw("VALUE"))) return s.syntaxError();
-        var sel: ?*Select = null;
-        var n: usize = 0;
+        var rows: std.ArrayList([]*Expr) = .empty;
         while (true) {
             try s.expectOp("(");
-            var row: ?*ExprList = null;
-            if (!s.isOp(")")) row = try s.exprList();
+            const row: []*Expr = if (s.isOp(")")) &.{} else try s.exprList();
             try s.expectOp(")");
-            n += 1;
-            if (wrap) |w| row = try w.apply(s, row, n);
-            sel = if (sel) |prev| try ir.select.multiValues(s.p, prev, row) else try ir.select.values(s.p, row);
+            try rows.append(s.a, row);
             if (!s.eatOp(",")) break;
         }
-        if (n > 1) {
-            ir.select.multiValuesEnd(s.p, sel.?);
-            if (wrap != null) markMultiRow(sel.?);
-        }
-        ir.select.doubleLink(s.p, sel.?);
-        try s.check();
-        return sel.?;
+        return rows.items;
     }
 
-    fn selectCore(s: *Parser) Error!*Select {
+    fn selectCore(s: *Parser) Error!*tree.Core {
+        const pos = s.here();
         try s.expectKw("SELECT");
-        var flags: SF = .{};
+        var distinct = false;
         var straight = false;
         while (true) {
             if (s.eatKw("DISTINCT") or s.eatKw("DISTINCTROW")) {
-                flags = .{ .Distinct = true };
+                distinct = true;
             } else if (s.eatKw("ALL")) {
-                flags = .{ .All = true };
+                distinct = false;
             } else if (s.eatKw("STRAIGHT_JOIN")) {
                 straight = true;
             } else if (s.eatKw("HIGH_PRIORITY") or s.eatKw("SQL_SMALL_RESULT") or s.eatKw("SQL_BIG_RESULT") or
@@ -959,320 +992,310 @@ pub const Parser = struct {
         }
         const cols = try s.resultColumns();
         if (s.isKw("INTO")) return s.fail("xqlite: SELECT ... INTO is not supported", .{});
-        var src: ?*SrcList = null;
+        var from: []tree.FromItem = &.{};
         if (s.eatKw("FROM")) {
             if (s.isKw("DUAL")) {
                 s.advance();
             } else {
-                src = try s.tableRefs();
-                ir.from.shiftJoinType(src);
-                if (straight) if (src) |l| for (l.slice()[1..]) |*item| {
-                    item.fg.jointype.CROSS = true;
+                from = try s.tableRefs();
+                // SELECT STRAIGHT_JOIN: the tables are joined in order.
+                if (straight) for (from[1..]) |*item| switch (item.join) {
+                    .comma, .inner, .cross => item.join = .straight,
+                    else => {},
                 };
             }
         }
         const where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
-        var group: ?*ExprList = null;
+        var group: std.ArrayList(*Expr) = .empty;
         if (s.isKw("GROUP")) {
             s.advance();
             try s.expectKw("BY");
             while (true) {
-                group = try ir.list.append(s.p, group, try s.expr());
+                try group.append(s.a, try s.expr());
                 _ = s.eatKw("ASC") or s.eatKw("DESC");
                 if (!s.eatOp(",")) break;
             }
             if (s.isKw("WITH") and s.peek().isKw("ROLLUP")) return s.fail("xqlite: GROUP BY ... WITH ROLLUP is not supported", .{});
         }
         const having: ?*Expr = if (s.eatKw("HAVING")) try s.expr() else null;
-        var windows: ?*Window = null;
+        var windows: []tree.NamedWindow = &.{};
         if (s.eatKw("WINDOW")) windows = try s.windowDefs();
-        const sel = try ir.select.new(s.p, cols, src, where, group, having, null, flags, null);
-        sel.win_defn = windows;
-        return sel;
+        return s.new(tree.Core, .{
+            .distinct = distinct,
+            .cols = cols,
+            .from = from,
+            .where = where,
+            .group_by = group.items,
+            .having = having,
+            .windows = windows,
+            .pos = pos,
+        });
     }
 
-    fn resultColumns(s: *Parser) Error!*ExprList {
-        var l: ?*ExprList = null;
+    fn resultColumns(s: *Parser) Error![]tree.ResultCol {
+        var l: std.ArrayList(tree.ResultCol) = .empty;
         while (true) {
             if (s.isOp("*")) {
-                l = try ir.list.star(s.p, l, irTok(s.tok));
+                try l.append(s.a, .{ .star = s.here() });
                 s.advance();
             } else if ((s.tok.kind == .ident or s.tok.kind == .quoted_ident) and s.peek().is(".") and s.peek2().is("*")) {
-                const tbl = s.tok;
+                const tbl = try s.nameOf(s.tok);
                 s.advance();
                 s.advance();
-                const star = s.tok;
+                const star = s.here();
                 s.advance();
-                l = try ir.list.tableStar(s.p, l, irTok(tbl), irTok(star));
+                try l.append(s.a, .{ .table_star = .{ .names = try s.a.dupe(Name, &.{tbl}), .star_pos = star } });
             } else {
-                const start = s.tok.text.ptr;
+                const start = s.here();
                 const e = try s.expr();
-                const end = s.prev_end;
+                const end = s.endPos();
                 const al = try s.alias(true);
-                l = try ir.list.resultColumn(s.p, l, e, al, start, end);
+                // MariaDB names a column by the expression as written, a
+                // string by its value.
+                const text: ?[]const u8 = switch (e.kind) {
+                    .column => null,
+                    .string => |v| v,
+                    else => s.lx.sql[start..end],
+                };
+                try l.append(s.a, .{ .expr = .{ .e = e, .alias = al, .name = if (al == null) text else null } });
             }
             if (!s.eatOp(",")) break;
         }
-        return l.?;
+        return l.items;
     }
 
-    /// `[AS] name` (or a string, for a column alias); an empty token if
-    /// there is none.
-    fn alias(s: *Parser, string_ok: bool) Error!int.Token {
+    /// `[AS] name` (or a string, for a column alias).
+    fn alias(s: *Parser, string_ok: bool) Error!?Name {
         if (s.eatKw("AS")) {
-            if (string_ok and s.tok.kind == .string) return s.stringAlias();
-            return irTok(try s.anyName());
+            if (string_ok and s.tok.kind == .string) return try s.stringAlias();
+            return try s.nameOf(try s.anyName());
         }
         if (s.isName()) {
             const t = s.tok;
             s.advance();
-            return irTok(t);
+            return try s.nameOf(t);
         }
-        if (string_ok and s.tok.kind == .string) return s.stringAlias();
-        return .{};
+        if (string_ok and s.tok.kind == .string) return try s.stringAlias();
+        return null;
     }
 
-    /// A string as a name: its value, quoted for the IR's dequoting.
-    fn stringAlias(s: *Parser) Error!int.Token {
-        const v = try s.stringLiteral();
-        var out: std.ArrayList(u8) = .empty;
-        try out.append(s.a, '"');
-        for (v) |c| {
-            if (c == '"') try out.append(s.a, '"');
-            try out.append(s.a, c);
-        }
-        try out.append(s.a, '"');
-        return int.Token.init(out.items);
+    /// A string as a name.
+    fn stringAlias(s: *Parser) Error!Name {
+        const pos = s.here();
+        return .{ .text = try s.stringLiteral(), .pos = pos };
     }
 
-    pub fn sortList(s: *Parser) Error!*ExprList {
-        var l: ?*ExprList = null;
+    pub fn sortList(s: *Parser) Error![]tree.SortItem {
+        var l: std.ArrayList(tree.SortItem) = .empty;
         while (true) {
-            l = try ir.list.append(s.p, l, try s.expr());
-            var order: i32 = SO.undef;
+            const e = try s.expr();
+            var item: tree.SortItem = .{ .expr = e };
             if (s.eatKw("ASC")) {
-                order = SO.asc;
-            } else if (s.eatKw("DESC")) order = SO.desc;
-            ir.list.setSortOrder(l, order, SO.undef);
+                item.dir = .asc;
+            } else if (s.eatKw("DESC")) item.dir = .desc;
+            try l.append(s.a, item);
             if (!s.eatOp(",")) break;
         }
-        return l.?;
+        return l.items;
     }
 
-    // ---------------------------------------------------------- windows
+    // ----------------------------------------------------------- windows
 
-    fn windowDefs(s: *Parser) Error!*Window {
-        var list: ?*Window = null;
+    fn windowDefs(s: *Parser) Error![]tree.NamedWindow {
+        var list: std.ArrayList(tree.NamedWindow) = .empty;
         while (true) {
-            const n = try s.name();
+            const n = try s.nameOf(try s.name());
             try s.expectKw("AS");
             try s.expectOp("(");
             const w = try s.windowSpec();
             try s.expectOp(")");
-            w.name = try s.a.dupeSentinel(u8, try s.nameText(n), 0);
-            if (list) |prev| {
-                try ir.window.chain(s.p, w, prev);
-                w.next_win = prev;
-            }
-            list = w;
+            try list.append(s.a, .{ .name = n, .spec = w });
             if (!s.eatOp(",")) break;
         }
-        return list.?;
+        return list.items;
     }
 
     /// The inside of OVER ( ... ) or WINDOW w AS ( ... ).
-    fn windowSpec(s: *Parser) Error!*Window {
-        var base: ?int.Token = null;
+    fn windowSpec(s: *Parser) Error!*tree.WindowSpec {
+        var w: tree.WindowSpec = .{};
         if (s.isName() and !s.isKw("PARTITION") and !s.isKw("ORDER") and !s.isKw("ROWS") and !s.isKw("RANGE")) {
-            base = irTok(try s.name());
+            w.base = try s.nameOf(try s.name());
         }
-        var partition: ?*ExprList = null;
         if (s.eatKw("PARTITION")) {
             try s.expectKw("BY");
-            partition = try s.exprList();
+            w.partition = try s.exprList();
         }
-        var order: ?*ExprList = null;
         if (s.isKw("ORDER")) {
             s.advance();
             try s.expectKw("BY");
-            order = try s.sortList();
+            w.order_by = try s.sortList();
         }
-        const fr = try s.frame();
-        return (try ir.window.assemble(s.p, fr, partition, order, base)) orelse s.syntaxError();
+        w.frame = try s.frame();
+        return s.new(tree.WindowSpec, w);
     }
 
-    fn frame(s: *Parser) Error!?*Window {
-        var kind: i32 = 0;
+    fn frame(s: *Parser) Error!?tree.Frame {
+        var f: tree.Frame = undefined;
         if (s.eatKw("ROWS")) {
-            kind = TK.ROWS;
+            f.unit = .rows;
         } else if (s.eatKw("RANGE")) {
-            kind = TK.RANGE;
-        } else return ir.window.alloc(s.p, 0, TK.UNBOUNDED, null, TK.CURRENT, null, 0);
-        var start: Bound = undefined;
-        var end: Bound = .{ .e_type = TK.CURRENT, .e = null };
+            f.unit = .range;
+        } else return null;
+        f.end = null;
         if (s.eatKw("BETWEEN")) {
-            start = try s.frameBound();
+            f.start = try s.frameBound();
             try s.expectKw("AND");
-            end = try s.frameBound();
-        } else start = try s.frameBound();
-        var exclude: u8 = 0;
+            f.end = try s.frameBound();
+        } else f.start = try s.frameBound();
+        f.exclude = .none;
         if (s.eatKw("EXCLUDE")) {
             if (s.eatKw("CURRENT")) {
                 try s.expectKw("ROW");
-                exclude = TK.CURRENT;
+                f.exclude = .current_row;
             } else if (s.eatKw("GROUP")) {
-                exclude = TK.GROUP;
+                f.exclude = .group;
             } else if (s.eatKw("TIES")) {
-                exclude = TK.TIES;
+                f.exclude = .ties;
             } else if (s.eatKw("NO")) {
                 try s.expectKw("OTHERS");
-                exclude = TK.NO;
+                f.exclude = .no_others;
             } else return s.syntaxError();
         }
-        return ir.window.alloc(s.p, kind, start.e_type, start.e, end.e_type, end.e, exclude);
+        return f;
     }
 
-    const Bound = struct { e_type: i32, e: ?*Expr };
-
-    fn frameBound(s: *Parser) Error!Bound {
+    fn frameBound(s: *Parser) Error!tree.Bound {
         if (s.eatKw("UNBOUNDED")) {
-            if (!(s.eatKw("PRECEDING") or s.eatKw("FOLLOWING"))) return s.syntaxError();
-            return .{ .e_type = TK.UNBOUNDED, .e = null };
+            if (s.eatKw("PRECEDING")) return .{ .kind = .unbounded_preceding };
+            if (s.eatKw("FOLLOWING")) return .{ .kind = .unbounded_following };
+            return s.syntaxError();
         }
         if (s.eatKw("CURRENT")) {
             try s.expectKw("ROW");
-            return .{ .e_type = TK.CURRENT, .e = null };
+            return .{ .kind = .current_row };
         }
         const e = try s.additive();
-        if (s.eatKw("PRECEDING")) return .{ .e_type = TK.PRECEDING, .e = e };
-        if (s.eatKw("FOLLOWING")) return .{ .e_type = TK.FOLLOWING, .e = e };
+        if (s.eatKw("PRECEDING")) return .{ .kind = .preceding, .expr = e };
+        if (s.eatKw("FOLLOWING")) return .{ .kind = .following, .expr = e };
         return s.syntaxError();
     }
 
-    /// `OVER (spec)` or `OVER name` after a function call, attached to it.
-    pub fn overClause(s: *Parser, e: *Expr) Error!void {
-        if (!s.eatKw("OVER")) return;
+    /// `OVER (spec)` or `OVER name` after a function call.
+    pub fn overClause(s: *Parser) Error!?*tree.WindowSpec {
+        if (!s.eatKw("OVER")) return null;
         if (s.eatOp("(")) {
             const w = try s.windowSpec();
             try s.expectOp(")");
-            ir.window.attach(s.p, e, w);
-        } else {
-            const n = try s.name();
-            const w = try s.a.create(Window);
-            w.* = .{ .name = try s.a.dupeSentinel(u8, try s.nameText(n), 0) };
-            ir.window.attach(s.p, e, w);
+            return w;
         }
+        const n = try s.nameOf(try s.name());
+        return s.new(tree.WindowSpec, .{ .base = n, .name_only = true });
     }
 
-    // ------------------------------------------------------------- FROM
+    // -------------------------------------------------------------- FROM
 
     /// Table references joined by commas and JOINs.
-    fn tableRefs(s: *Parser) Error!?*SrcList {
-        var list = try s.tableFactor(null, false);
+    fn tableRefs(s: *Parser) Error![]tree.FromItem {
+        var list: std.ArrayList(tree.FromItem) = .empty;
+        try list.append(s.a, try s.tableFactor());
         while (true) {
-            const jt = (try s.joinOp()) orelse break;
-            if (list) |l| if (l.len() > 0) {
-                l.at(l.len() - 1).fg.jointype = jt;
-            };
-            list = try s.tableFactor(list, true);
+            const j = (try s.joinOp()) orelse break;
+            var item = try s.tableFactor();
+            item.join = j.join;
+            item.natural = j.natural;
+            try list.append(s.a, item);
         }
-        return list;
+        return list.items;
     }
 
-    fn joinOp(s: *Parser) Error!?JT {
-        if (s.eatOp(",")) return .{ .INNER = true };
-        if (s.eatKw("JOIN")) return .{ .INNER = true };
-        if (s.eatKw("STRAIGHT_JOIN")) return .{ .INNER = true, .CROSS = true };
-        if (s.isKw("INNER") or s.isKw("CROSS")) {
-            s.advance();
+    const Join = struct { join: tree.JoinKind, natural: bool = false };
+
+    fn joinOp(s: *Parser) Error!?Join {
+        if (s.eatOp(",")) return .{ .join = .comma };
+        if (s.eatKw("JOIN")) return .{ .join = .inner };
+        if (s.eatKw("STRAIGHT_JOIN")) return .{ .join = .straight };
+        if (s.eatKw("INNER")) {
             try s.expectKw("JOIN");
-            return .{ .INNER = true };
+            return .{ .join = .inner };
         }
-        var words: [3]int.Token = .{ .{}, .{}, .{} };
-        var n: usize = 0;
-        if (s.isKw("NATURAL")) {
-            words[n] = irTok(s.tok);
-            n += 1;
-            s.advance();
+        if (s.eatKw("CROSS")) {
+            try s.expectKw("JOIN");
+            return .{ .join = .cross };
         }
+        const natural = s.eatKw("NATURAL");
+        var j: Join = .{ .join = .inner, .natural = natural };
         if (s.isKw("LEFT") or s.isKw("RIGHT")) {
-            words[n] = irTok(s.tok);
-            n += 1;
+            j.join = if (s.isKw("LEFT")) .left else .right;
             s.advance();
-            if (s.isKw("OUTER")) {
-                words[n] = irTok(s.tok);
-                n += 1;
-                s.advance();
-            }
-        } else if (n == 1 and (s.isKw("INNER") or s.isKw("OUTER"))) {
-            words[n] = irTok(s.tok);
-            n += 1;
-            s.advance();
-        }
-        if (n == 0) return null;
+            _ = s.eatKw("OUTER");
+        } else if (natural) {
+            _ = s.eatKw("INNER");
+        } else return null;
         try s.expectKw("JOIN");
-        return ir.from.joinType(s.p, words[0], if (n > 1) words[1] else null, if (n > 2) words[2] else null);
+        return j;
     }
 
-    fn onUsing(s: *Parser) Error!int.OnOrUsing {
-        if (s.eatKw("ON")) return .{ .on = try s.expr() };
-        if (s.eatKw("USING")) {
+    fn onUsing(s: *Parser, item: *tree.FromItem) Error!void {
+        if (s.eatKw("ON")) {
+            item.on = try s.expr();
+        } else if (s.eatKw("USING")) {
             try s.expectOp("(");
-            var ids: ?*IdList = null;
+            var ids: std.ArrayList(Name) = .empty;
             while (true) {
-                ids = try ir.list.idAppend(s.p, ids, irTok(try s.name()));
+                try ids.append(s.a, try s.nameOf(try s.name()));
                 if (!s.eatOp(",")) break;
             }
             try s.expectOp(")");
-            return .{ .using = ids };
+            item.using = ids.items;
         }
-        return .{};
     }
 
-    fn tableFactor(s: *Parser, prefix: ?*SrcList, joined: bool) Error!?*SrcList {
-        _ = joined;
+    fn aliasOf(s: *Parser) Error!?tree.Alias {
+        const n = (try s.alias(false)) orelse return null;
+        return .{ .name = n };
+    }
+
+    fn tableFactor(s: *Parser) Error!tree.FromItem {
+        var item: tree.FromItem = .{ .source = undefined };
         if (s.isOp("(")) {
             const n = s.peek();
             if (n.isAnyKw(&.{ "SELECT", "WITH", "VALUES" })) {
                 s.advance();
                 const sub = try s.selectStmt();
                 try s.expectOp(")");
-                const al = try s.alias(false);
-                var ou = try s.onUsing();
-                return ir.from.appendTerm(s.p, prefix, null, null, al, sub, &ou);
+                item.source = .{ .subquery = sub };
+                item.alias = try s.aliasOf();
+                try s.onUsing(&item);
+                return item;
             }
             s.advance();
             const inner = try s.tableRefs();
             try s.expectOp(")");
-            const al = try s.alias(false);
-            var ou = try s.onUsing();
-            return ir.from.nested(s.p, prefix, inner, al, &ou);
+            item.source = .{ .nested = inner };
+            item.alias = try s.aliasOf();
+            try s.onUsing(&item);
+            return item;
         }
-        const n1, const n2 = try s.qualifiedName();
+        const q = try s.qualifiedName();
         if (s.isKw("PARTITION")) return s.fail("xqlite: PARTITION is not supported", .{});
-        if (n2.n != 0 and std.ascii.eqlIgnoreCase(try s.tokName(n1), "information_schema")) {
-            const view = try s.tokName(n2);
-            const sub = (try @import("infoschema.zig").select(s, view)) orelse
-                return s.fail("Unknown table '{s}' in information_schema", .{view});
-            var al = try s.alias(false);
-            if (al.n == 0) al = n2;
-            var ou = try s.onUsing();
-            return ir.from.appendTerm(s.p, prefix, null, null, al, sub, &ou);
-        }
-        // A table-valued function (SQLite's json_each(), pragma_*()).
-        var args: ?*ExprList = null;
-        const is_func = s.isOp("(");
-        if (is_func) {
-            s.advance();
-            if (!s.isOp(")")) args = try s.exprList();
+        if (q.schema) |sch| if (std.ascii.eqlIgnoreCase(sch.text, "information_schema")) {
+            const sub = (try @import("infoschema.zig").select(s, q.name.text)) orelse
+                return s.fail("Unknown table '{s}' in information_schema", .{q.name.text});
+            item.source = .{ .subquery = sub };
+            item.alias = (try s.aliasOf()) orelse .{ .name = q.name };
+            try s.onUsing(&item);
+            return item;
+        };
+        if (s.eatOp("(")) {
+            // A table-valued function (SQLite's json_each(), pragma_*()).
+            const args: []*Expr = if (s.isOp(")")) &.{} else try s.exprList();
             try s.expectOp(")");
-        }
-        const al = try s.alias(false);
+            item.source = .{ .func = try s.new(tree.Func, .{ .name = q.name, .args = args }) };
+        } else item.source = .{ .table = q };
+        item.alias = try s.aliasOf();
         try s.indexHints();
-        var ou = try s.onUsing();
-        const l = try ir.from.appendTerm(s.p, prefix, n1, if (n2.n == 0) null else n2, al, null, &ou);
-        if (is_func) ir.from.funcArgs(l, args);
-        return l;
+        try s.onUsing(&item);
+        return item;
     }
 
     /// USE/IGNORE/FORCE {INDEX|KEY} [FOR ...] (names): accepted, ignored.
@@ -1322,11 +1345,10 @@ pub const Parser = struct {
 
     /// Look up the target table and its catalog entries (the catalog is
     /// read now, at compile time).
-    pub fn target(s: *Parser, n1: int.Token, n2: int.Token) Error!Target {
+    pub fn target(s: *Parser, q: QName) Error!Target {
         ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-        const tbl_name = try s.tokName(if (n2.n != 0) n2 else n1);
-        const schema_name: ?[]const u8 = if (n2.n != 0) try s.tokName(n1) else null;
-        var tab = build.findTable(s.p.db, tbl_name, schema_name) orelse return .{ .tab = null, .schema = "main", .cols = &.{} };
+        const schema_name: ?[]const u8 = if (q.schema) |x| x.text else null;
+        var tab = build.findTable(s.p.db, q.name.text, schema_name) orelse return .{ .tab = null, .schema = "main", .cols = &.{} };
         const schema = catalog.schemaName(s.p.db, tab);
         const stored = try s.a.dupe(u8, tab.name);
         var entries: []const catalog.Entry = &.{};
@@ -1363,51 +1385,42 @@ pub const Parser = struct {
         return null;
     }
 
-    /// Wrap a value stored into column `c`: MariaDB's conversion
-    /// (types.coerceFunc) if the column has a MariaDB type, and NULLIF(v,
-    /// 0) for an AUTO_INCREMENT column (0 generates the next value unless
-    /// NO_AUTO_VALUE_ON_ZERO). A DEFAULT marker becomes the column's
-    /// default.
-    pub fn wrapValue(s: *Parser, t: *const Target, c: *const ColMeta, e_in: *Expr, row: usize, ignore: bool) Error!*Expr {
-        return s.wrapValueX(t, c, e_in, row, ignore, false);
-    }
+    /// How a value is stored (wrapValue()).
+    pub const Wrap = struct {
+        row: u32 = 1,
+        ignore: bool = false,
+        /// The NULL for a NOT NULL column without a DEFAULT that the
+        /// INSERT leaves out.
+        missing: bool = false,
+        multi_row: bool = false,
+        /// Whether AUTO_INCREMENT's 0 means the next value (INSERT).
+        insert: bool = true,
+    };
 
-    /// wrapValue(); `missing`: the NULL for a NOT NULL column without a
-    /// DEFAULT that the INSERT leaves out.
-    pub fn wrapValueX(s: *Parser, t: *const Target, c: *const ColMeta, e_in: *Expr, row: usize, ignore: bool, missing: bool) Error!*Expr {
-        var e = e_in;
-        if (e.op == TK.DEFAULT) e = try s.columnDefault(t, c.name);
+    /// The value `e` stored into column `c`: MariaDB's conversion (a
+    /// Coerce, types.coerceFunc) if the column has a MariaDB type, and
+    /// NULLIF(v, 0) for an AUTO_INCREMENT column of an INSERT (0
+    /// generates the next value unless NO_AUTO_VALUE_ON_ZERO). A DEFAULT
+    /// in `e` is the column's default (lower.zig).
+    pub fn wrapValue(s: *Parser, t: *const Target, c: *const ColMeta, e: *Expr, w: Wrap) Error!*Expr {
+        var x = e;
+        const autoinc = c.autoinc and w.insert;
         if (c.decl_type) |ty| {
-            var flags: i32 = 0;
-            if (ignore) flags |= types.coerce_ignore;
-            if (c.not_null and !c.autoinc) flags |= types.coerce_not_null;
-            if (missing) flags |= types.coerce_missing | types.coerce_not_null;
-            e = try s.call("xq_coerce", &.{
-                e,
-                try s.stringExpr(ty),
-                try s.stringExpr(t.schema),
-                try s.stringExpr(t.name),
-                try s.stringExpr(c.name),
-                try s.intExpr(flags),
-                try s.intExpr(@intCast(@min(row, std.math.maxInt(i32)))),
-            });
-            @import("../../sql/main.zig").mayAbort(s.p);
+            x = try tree.expr(s.a, e.pos, e.end, .{ .coerce = .{
+                .e = x,
+                .decl_type = ty,
+                .schema = t.schema,
+                .table = t.name,
+                .column = c.name,
+                .ignore = w.ignore,
+                .not_null = (c.not_null and !autoinc) or w.missing,
+                .missing = w.missing,
+                .multi_row = w.multi_row,
+                .row = w.row,
+            } });
         }
-        if (c.autoinc and !s.mode.has(.NO_AUTO_VALUE_ON_ZERO)) e = try s.call("nullif", &.{ e, try s.intExpr(0) });
-        return e;
-    }
-
-    /// A copy of the DEFAULT expression of column `n`, NULL if none.
-    fn columnDefault(s: *Parser, t: *const Target, n: []const u8) Error!*Expr {
-        const tab = t.tab orelse return ir.expr.leaf(s.a, TK.NULL, null);
-        for (tab.cols, 0..) |*c, i| {
-            if (!std.ascii.eqlIgnoreCase(c.name(), n)) continue;
-            if (c.i_dflt == 0 or c.col_flags.intersects(int.COLFLAG.GENERATED) or tab.i_pkey == i) break;
-            const dl = tab.u.tab.dflt_list orelse break;
-            const d = dl.at(c.i_dflt - 1).expr orelse break;
-            return (try expr_mod.exprDup(s.a, d)).?;
-        }
-        return ir.expr.leaf(s.a, TK.NULL, null);
+        if (autoinc and !s.mode.has(.NO_AUTO_VALUE_ON_ZERO)) x = try s.func(e.pos, "nullif", &.{ x, try s.int_(e.pos, 0) });
+        return x;
     }
 
     /// The NOT NULL columns without a DEFAULT of a MariaDB table that an
@@ -1431,54 +1444,13 @@ pub const Parser = struct {
     }
 };
 
-/// Set coerce_multi_row in the xq_coerce() calls of a multi-row VALUES.
-fn markMultiRow(last: *Select) void {
-    var sel: ?*Select = last;
-    while (sel) |x| : (sel = x.prior) {
-        const l = x.e_list orelse continue;
-        for (l.slice()) |item| {
-            var e = item.expr orelse continue;
-            // nullif(xq_coerce(...), 0) for AUTO_INCREMENT.
-            if (e.op == TK.FUNCTION and std.ascii.eqlIgnoreCase(e.token(), "nullif")) e = e.x.list.?.at(0).expr.?;
-            if (e.op != TK.FUNCTION or !std.ascii.eqlIgnoreCase(e.token(), "xq_coerce")) continue;
-            const f = e.x.list.?.at(types.coerce_flags_arg).expr.?;
-            f.u = .{ .value = f.u.value | types.coerce_multi_row };
-        }
-    }
+/// A lowering failure as the frontend's error (the message is in Parse).
+pub fn lowered(err: lower.Error) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Failed => error.ParseFailed,
+    };
 }
-
-/// The per-row wrapping of INSERT's VALUES.
-pub const RowWrap = struct {
-    target: *const Parser.Target,
-    cols: []const *Parser.ColMeta,
-    ignore: bool,
-    needed: bool,
-    /// NOT NULL columns without a DEFAULT the INSERT leaves out: a NULL
-    /// for each is added to each row (and to the column list).
-    missing: []const *Parser.ColMeta = &.{},
-
-    pub fn apply(w: *const RowWrap, s: *Parser, row: ?*ExprList, n: usize) Error!?*ExprList {
-        var l = row orelse return row;
-        for (w.missing) |c| {
-            const e = try s.wrapValueX(w.target, c, try ir.expr.leaf(s.a, TK.NULL, null), n, w.ignore, true);
-            l = try ir.list.append(s.p, l, e);
-        }
-        if (l.len() != w.cols.len + w.missing.len and w.cols.len > 0) {
-            return s.fail("Column count doesn't match value count at row {d}", .{n});
-        }
-        for (l.slice(), 0..) |*item, i| {
-            const e = item.expr orelse continue;
-            if (i >= w.cols.len) {
-                // No column metadata (an unknown table or column, which
-                // the builder reports): DEFAULT is NULL.
-                if (e.op == TK.DEFAULT) item.expr = try ir.expr.leaf(s.a, TK.NULL, null);
-                continue;
-            }
-            if (w.needed or e.op == TK.DEFAULT) item.expr = try s.wrapValue(w.target, w.cols[i], e, n, w.ignore);
-        }
-        return l;
-    }
-};
 
 /// The SQLite collation of a MariaDB collation or character set name:
 /// *_bin, binary and *_cs are BINARY, *_ci (and a character set's
@@ -1514,9 +1486,9 @@ fn sysVarName(s: *Parser, t: Token) Error![]const u8 {
     for ([_][]const u8{ "global.", "session.", "local." }) |scope| {
         if (z.len > scope.len and std.ascii.startsWithIgnoreCase(z, scope)) z = z[scope.len..];
     }
-    const lower = try std.ascii.allocLowerString(s.a, z);
-    if (!@import("session.zig").isSysVar(lower)) return s.fail("Unknown system variable '{s}'", .{z});
-    return lower;
+    const lname = try std.ascii.allocLowerString(s.a, z);
+    if (!@import("session.zig").isSysVar(lname)) return s.fail("Unknown system variable '{s}'", .{z});
+    return lname;
 }
 
 /// The name of @name (case-insensitive: lower case).

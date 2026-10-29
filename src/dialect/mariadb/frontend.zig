@@ -1,6 +1,7 @@
 //! The MariaDB dialect (Phase 6): the frontend (a tokenizer and a
-//! recursive-descent parser that lower MariaDB SQL into the IR of
-//! src/ir/ir.zig) and the hooks (the dialect's functions, the
+//! recursive-descent parser that read MariaDB SQL into the syntax tree
+//! IR of src/ir/tree.zig, lowered by src/ir/lower.zig) and the hooks (the
+//! dialect's functions, the engine functions its trees use, the
 //! case-insensitive default collation).
 //!
 //! The pieces:
@@ -10,8 +11,10 @@
 //!    dialect.ConnState.mariadb;
 //!  - parser.zig: parser core, expressions, SELECT; functions.zig:
 //!    function calls; dml.zig: INSERT/REPLACE/UPDATE/DELETE; ddl.zig:
-//!    CREATE/DROP/ALTER (rendered as SQLite text + xq_catalog);
-//!    session.zig: SET, transactions, SHOW, DESCRIBE, USE;
+//!    CREATE/DROP/ALTER (the IR renders them as SQLite text and records
+//!    xq_catalog; ddl.zig adds MariaDB's indexes and catalog keys);
+//!    session.zig: SET, transactions, SHOW, DESCRIBE, USE (SHOW and
+//!    DESCRIBE are SQLite queries over the schema, lowered as text);
 //!  - infoschema.zig: information_schema.TABLES, COLUMNS, SCHEMATA;
 //!  - types.zig: MariaDB column types and the sql_mode-dependent value
 //!    conversion of INSERT/UPDATE; runtime.zig: the dialect's functions.
@@ -89,13 +92,11 @@ fn keepsWarnings(s: *Parser) bool {
 fn statement(s: *Parser) Error!void {
     const t = s.tok;
     if (t.isKw("SELECT") or t.isKw("WITH") or t.is("(") or t.isKw("VALUES")) {
-        const sel = try s.selectStmt();
-        ir.stmt.select(s.p, sel);
-        return s.check();
+        return s.lowerStmt(.{ .select = try s.selectStmt() });
     }
-    if (t.isKw("INSERT") or t.isKw("REPLACE")) return dml.insert(s);
-    if (t.isKw("UPDATE")) return dml.update(s);
-    if (t.isKw("DELETE")) return dml.delete(s);
+    if (t.isKw("INSERT") or t.isKw("REPLACE")) return s.lowerStmt(try dml.insert(s));
+    if (t.isKw("UPDATE")) return s.lowerStmt(try dml.update(s));
+    if (t.isKw("DELETE")) return s.lowerStmt(try dml.delete(s));
     if (t.isKw("TRUNCATE")) return dml.truncate(s);
     if (t.isKw("CREATE")) return create(s);
     if (t.isKw("DROP")) return drop(s);
@@ -203,22 +204,11 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("lastval", 1, .{ .unsafe = true }, lastvalFunc),
     dfunc.scalar("setval", 2, .{ .unsafe = true }, sequence.setvalFunc),
     dfunc.scalar("setval", 3, .{ .unsafe = true }, sequence.setvalFunc),
-    // Lowered operators and statements.
+    // Variables (never in the schema: MariaDB refuses them there).
     dfunc.scalar("xq_sysvar", 1, .{}, session.sysvarFunc),
     dfunc.scalar("xq_set_sysvar", 2, .{ .direct_only = true }, session.setSysvarFunc),
     dfunc.scalar("xq_uservar", 1, .{}, session.uservarFunc),
     dfunc.scalar("xq_set_uservar", 2, .{ .direct_only = true }, session.setUservarFunc),
-    dfunc.scalar("xq_date_add", 3, det, rt.dateAddFunc),
-    dfunc.scalar("xq_extract", 2, det, rt.extractFunc),
-    dfunc.scalar("xq_timestampdiff", 3, det, rt.timestampdiffFunc),
-    dfunc.scalar("xq_rand", 0, .{}, rt.randFunc),
-    dfunc.scalar("xq_rand", 1, .{}, rt.randFunc),
-    dfunc.scalar("xq_uuid", 0, .{}, rt.uuidFunc),
-    dfunc.scalar("xq_bit_length", 1, det, rt.bitLengthFunc),
-    dfunc.aggregate("xq_stddev_pop", 1, det, rt.varStep, rt.stddevPopFinal),
-    dfunc.aggregate("xq_stddev_samp", 1, det, rt.varStep, rt.stddevSampFinal),
-    dfunc.aggregate("xq_var_pop", 1, det, rt.varStep, rt.varPopFinal),
-    dfunc.aggregate("xq_var_samp", 1, det, rt.varStep, rt.varSampFinal),
     // Math.
     dfunc.scalar("floor", 1, det, rt.floorFunc),
     dfunc.scalar("ceil", 1, det, rt.ceilFunc),
@@ -286,14 +276,27 @@ const functions = [_]int.FuncDef{
 };
 
 /// The functions the IR's semantic nodes lower and render to (Coerce,
-/// Div .int, Cast .typed) and MariaDB's XOR operators: visible in every
-/// dialect (dialect.Hooks.engine_functions).
+/// Div .int, Cast .typed), MariaDB's XOR operators and the functions the
+/// parser rewrites MariaDB's syntax and names to (INTERVAL, EXTRACT,
+/// TIMESTAMPDIFF, STDDEV ...): visible in every dialect
+/// (dialect.Hooks.engine_functions), so that the schema may keep them.
 const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_coerce", 7, .{}, types.coerceFunc),
     dfunc.scalar("xq_div", 2, det, rt.divFunc),
     dfunc.scalar("xq_xor", 2, det, rt.xorFunc),
     dfunc.scalar("xq_bitxor", 2, det, rt.bitxorFunc),
     dfunc.scalar("xq_cast", 2, det, rt.castFunc),
+    dfunc.scalar("xq_date_add", 3, det, rt.dateAddFunc),
+    dfunc.scalar("xq_extract", 2, det, rt.extractFunc),
+    dfunc.scalar("xq_timestampdiff", 3, det, rt.timestampdiffFunc),
+    dfunc.scalar("xq_rand", 0, .{}, rt.randFunc),
+    dfunc.scalar("xq_rand", 1, .{}, rt.randFunc),
+    dfunc.scalar("xq_uuid", 0, .{}, rt.uuidFunc),
+    dfunc.scalar("xq_bit_length", 1, det, rt.bitLengthFunc),
+    dfunc.aggregate("xq_stddev_pop", 1, det, rt.varStep, rt.stddevPopFinal),
+    dfunc.aggregate("xq_stddev_samp", 1, det, rt.varStep, rt.stddevSampFinal),
+    dfunc.aggregate("xq_var_pop", 1, det, rt.varStep, rt.varPopFinal),
+    dfunc.aggregate("xq_var_samp", 1, det, rt.varStep, rt.varSampFinal),
 };
 
 comptime {

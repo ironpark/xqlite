@@ -29,9 +29,7 @@ const frontend = @import("frontend.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
-const Expr = int.Expr;
-const TK = int.TK;
-const irTok = parser.irTok;
+const tree = @import("../../ir/tree.zig");
 
 // ===================================================== system variables
 
@@ -240,8 +238,9 @@ pub fn set(s: *Parser) Error!void {
         return emptyStatement(s);
     }
     if (scope_global) return s.fail("xqlite: SET GLOBAL is not supported", .{});
-    var calls: std.ArrayList(*Expr) = .empty;
+    var calls: std.ArrayList(*tree.Expr) = .empty;
     while (true) {
+        const pos = s.here();
         if (s.isKw("NAMES") or ((s.isKw("CHARACTER") or s.isKw("CHARSET")))) {
             // SET NAMES cs [COLLATE c], SET CHARACTER SET cs: accepted.
             if (s.eatKw("CHARACTER")) try s.expectKw("SET") else s.advance();
@@ -257,7 +256,7 @@ pub fn set(s: *Parser) Error!void {
             if (!(s.eatOp("=") or s.eatOp(":="))) return s.syntaxError();
             const name = try std.ascii.allocLowerString(s.a, try userVarText(s, t));
             const v = try s.expr();
-            try calls.append(s.a, try s.call("xq_set_uservar", &.{ try s.stringExpr(name), v }));
+            try calls.append(s.a, try s.func(pos, "xq_set_uservar", &.{ try s.str(pos, name), v }));
         } else {
             var name_text: []const u8 = undefined;
             if (s.tok.kind == .sys_var) {
@@ -276,19 +275,20 @@ pub fn set(s: *Parser) Error!void {
             const v = findVar(name_text) orelse return s.fail("Unknown system variable '{s}'", .{name_text});
             if (!v.settable) return s.fail("Variable '{s}' is a read only variable", .{v.name});
             if (!(s.eatOp("=") or s.eatOp(":="))) return s.syntaxError();
-            var value: *Expr = undefined;
+            const vpos = s.here();
+            var value: *tree.Expr = undefined;
             if (s.isKw("DEFAULT")) {
                 s.advance();
-                value = try ir.expr.leaf(s.a, TK.NULL, null);
+                value = try s.mk(vpos, .null);
             } else if (s.isKw("ON") or s.isKw("OFF")) {
-                value = try s.intExpr(@intFromBool(s.isKw("ON")));
+                value = try s.int_(vpos, @intFromBool(s.isKw("ON")));
                 s.advance();
             } else if (s.tok.kind == .ident and !s.peek().is("(") and !s.peek().is(".") and !parser.isReserved(s.tok)) {
                 // SET sql_mode = ANSI: a word is a string.
-                value = try s.stringExpr(s.tok.text);
+                value = try s.str(vpos, s.tok.text);
                 s.advance();
             } else value = try s.expr();
-            try calls.append(s.a, try s.call("xq_set_sysvar", &.{ try s.stringExpr(v.name), value }));
+            try calls.append(s.a, try s.func(pos, "xq_set_sysvar", &.{ try s.str(pos, v.name), value }));
         }
         if (!s.eatOp(",")) break;
     }
@@ -303,11 +303,13 @@ fn userVarText(s: *Parser, t: lexer.Token) Error![]const u8 {
     return z;
 }
 
-/// Code a statement that evaluates `exprs` for their effects and
-/// returns no rows.
-fn codeEval(s: *Parser, exprs: []const *Expr) Error!void {
+/// Code a statement that evaluates `exprs` (lowered by the IR) for their
+/// effects and returns no rows.
+fn codeEval(s: *Parser, exprs: []const *tree.Expr) Error!void {
     _ = build.getVdbe(s.p) orelse return error.ParseFailed;
-    for (exprs) |e| {
+    var l = s.lowerer();
+    for (exprs) |x| {
+        const e = l.expr(x) catch |err| return parser.lowered(err);
         var nc: int.NameContext = .{ .parse = s.p };
         @import("../../sql/resolve.zig").resolveExprNames(&nc, e) catch return error.ParseFailed;
         s.p.n_mem += 1;
@@ -328,38 +330,38 @@ pub fn transaction(s: *Parser) Error!void {
     if (s.eatKw("START")) {
         try s.expectKw("TRANSACTION");
         while (!s.atStmtEnd()) s.advance(); // READ ONLY|WRITE, WITH CONSISTENT SNAPSHOT
-        return ir.txn.begin(s.p, TK.DEFERRED);
+        return s.lowerStmt(.begin);
     }
     if (s.eatKw("BEGIN")) {
         _ = s.eatKw("WORK");
-        return ir.txn.begin(s.p, TK.DEFERRED);
+        return s.lowerStmt(.begin);
     }
     if (s.eatKw("COMMIT")) {
         _ = s.eatKw("WORK");
         try chainRelease(s);
-        return ir.txn.end(s.p, TK.COMMIT);
+        return s.lowerStmt(.commit);
     }
     if (s.eatKw("ROLLBACK")) {
         _ = s.eatKw("WORK");
         if (s.eatKw("TO")) {
             _ = s.eatKw("SAVEPOINT");
-            const n = try s.name();
-            return ir.txn.savepoint(s.p, .ROLLBACK, irTok(n));
+            const n = try s.nameOf(try s.name());
+            return s.lowerStmt(.{ .rollback_to = n });
         }
         try chainRelease(s);
-        return ir.txn.end(s.p, TK.ROLLBACK);
+        return s.lowerStmt(.rollback);
     }
     if (s.eatKw("SAVEPOINT")) {
-        const n = try s.name();
+        const n = try s.nameOf(try s.name());
         // Outside a transaction a savepoint ends with its statement in
         // MariaDB; SQLite's would open a transaction.
         if (s.p.db.auto_commit) return emptyStatement(s);
-        return ir.txn.savepoint(s.p, .BEGIN, irTok(n));
+        return s.lowerStmt(.{ .savepoint = n });
     }
     if (s.eatKw("RELEASE")) {
         try s.expectKw("SAVEPOINT");
-        const n = try s.name();
-        return ir.txn.savepoint(s.p, .RELEASE, irTok(n));
+        const n = try s.nameOf(try s.name());
+        return s.lowerStmt(.{ .release = n });
     }
     return s.syntaxError();
 }
@@ -419,24 +421,24 @@ pub fn show(s: *Parser) Error!void {
     if (s.eatKw("TABLES")) return showTables(s, full);
     if (s.eatKw("COLUMNS") or s.eatKw("FIELDS")) {
         if (!(s.eatKw("FROM") or s.eatKw("IN"))) return s.syntaxError();
-        const n1, const n2 = try s.qualifiedName();
-        var schema: ?[]const u8 = if (n2.n != 0) try s.tokName(n1) else null;
+        const q = try s.qualifiedName();
+        var schema: ?[]const u8 = if (q.schema) |x| x.text else null;
         if (s.eatKw("FROM") or s.eatKw("IN")) schema = try s.nameText(try s.anyName());
         var like: ?[]const u8 = null;
         if (s.eatKw("LIKE")) like = try s.stringLiteral();
-        return showColumns(s, try s.tokName(if (n2.n != 0) n2 else n1), schema, like);
+        return showColumns(s, q.name.text, schema, like);
     }
     if (s.eatKw("INDEX") or s.eatKw("INDEXES") or s.eatKw("KEYS")) {
         if (!(s.eatKw("FROM") or s.eatKw("IN"))) return s.syntaxError();
-        const n1, const n2 = try s.qualifiedName();
-        var schema: ?[]const u8 = if (n2.n != 0) try s.tokName(n1) else null;
+        const q = try s.qualifiedName();
+        var schema: ?[]const u8 = if (q.schema) |x| x.text else null;
         if (s.eatKw("FROM") or s.eatKw("IN")) schema = try s.nameText(try s.anyName());
-        return showIndex(s, try s.tokName(if (n2.n != 0) n2 else n1), schema);
+        return showIndex(s, q.name.text, schema);
     }
     if (s.eatKw("CREATE")) {
         if (s.eatKw("TABLE") or s.eatKw("VIEW")) {
-            const n1, const n2 = try s.qualifiedName();
-            return showCreate(s, try s.tokName(if (n2.n != 0) n2 else n1), if (n2.n != 0) try s.tokName(n1) else null);
+            const q = try s.qualifiedName();
+            return showCreate(s, q.name.text, if (q.schema) |x| x.text else null);
         }
         return s.syntaxError();
     }
@@ -477,10 +479,10 @@ pub fn describe(s: *Parser) Error!bool {
         n.is("(");
     if (is_stmt) return false;
     s.advance();
-    const n1, const n2 = try s.qualifiedName();
+    const q = try s.qualifiedName();
     var like: ?[]const u8 = null;
     if (s.tok.kind == .string) like = try s.stringLiteral() else if (s.isName()) like = try s.nameText(try s.name());
-    try showColumns(s, try s.tokName(if (n2.n != 0) n2 else n1), if (n2.n != 0) try s.tokName(n1) else null, like);
+    try showColumns(s, q.name.text, if (q.schema) |x| x.text else null, like);
     return true;
 }
 

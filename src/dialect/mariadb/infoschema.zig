@@ -7,7 +7,7 @@
 //! privileges ...) are NULL.
 
 const std = @import("std");
-const int = @import("../../sql/sqlite_int.zig");
+const tree = @import("../../ir/tree.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const parser = @import("parser.zig");
 const state = @import("state.zig");
@@ -15,9 +15,9 @@ const state = @import("state.zig");
 const Parser = parser.Parser;
 const Error = parser.Error;
 
-/// The view `name` of information_schema as a Select, null if xqlite
-/// does not have it.
-pub fn select(s: *Parser, name: []const u8) Error!?*int.Select {
+/// The view `name` of information_schema as a query (whose positions are
+/// offsets of its own text, Select.src), null if xqlite does not have it.
+pub fn select(s: *Parser, name: []const u8) Error!?*tree.Select {
     const text: [:0]const u8 = if (std.ascii.eqlIgnoreCase(name, "TABLES"))
         try tables(s)
     else if (std.ascii.eqlIgnoreCase(name, "COLUMNS"))
@@ -29,6 +29,7 @@ pub fn select(s: *Parser, name: []const u8) Error!?*int.Select {
     var sub: Parser = .init(s.p, text, (state.SqlMode{}).with(.PIPES_AS_CONCAT));
     const sel = try sub.selectStmt();
     if (sub.tok.kind != .eof) return sub.syntaxError();
+    sel.src = text;
     return sel;
 }
 

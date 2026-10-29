@@ -262,7 +262,7 @@ test "mariadb: collation and case-insensitive keys" {
     try c.expectRows("SELECT name FROM u WHERE name = 'BOB'", "bob\n");
     try c.expectRows("SELECT count(*) FROM u WHERE code = 'a'", "1\n");
     try c.expectRows("SELECT name FROM u ORDER BY name", "Alice\nbob\n");
-    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'u'", "CREATE TABLE \"u\"(\"name\" TEXT NOT NULL COLLATE NOCASE,\"code\" TEXT COLLATE BINARY) STRICT\n");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'u'", "CREATE TABLE \"u\"(\"name\" TEXT NOT NULL COLLATE NOCASE, \"code\" TEXT COLLATE BINARY) STRICT\n");
     try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name", "u$code\nu$uk_name\n");
 }
 
@@ -299,7 +299,7 @@ test "mariadb: DDL, catalog, SHOW and DESCRIBE" {
     try c.expectColumns("SHOW COLUMNS FROM users", "Field|Type|Null|Key|Default|Extra");
     try c.exec("INSERT INTO users (email, meta) VALUES ('x@y', '{\"a\":1}')");
     try c.expectRows("SELECT id, status, length(created_at), updated_at FROM users", "5|active|19|NULL\n");
-    try c.expectError("INSERT INTO users (email, meta) VALUES ('z@y', 'not json')", "CHECK constraint failed: json_valid(\"meta\")");
+    try c.expectError("INSERT INTO users (email, meta) VALUES ('z@y', 'not json')", "CHECK constraint failed: meta");
     try c.exec("UPDATE users SET score = 1.5");
     try c.expectRows("SELECT score, updated_at IS NOT NULL FROM users", "1.5|1\n");
     try c.expectRows("SHOW INDEX FROM users", "users|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE|||NO\n" ++
@@ -378,7 +378,7 @@ test "mariadb: CHECK, generated columns, foreign keys, DEFAULT" {
     try c.exec("INSERT INTO p (id, start, end) VALUES (1, 2, 5)");
     try c.expectRows("SELECT price, label, span, end FROM p", "1.5|it's|3|5\n");
     try c.expectError("INSERT INTO p (id, start, end) VALUES (2, 5, 1)", "CHECK constraint failed: chk_order");
-    try c.expectError("INSERT INTO p (id, price) VALUES (3, -1)", "CHECK constraint failed: price >= 0");
+    try c.expectError("INSERT INTO p (id, price) VALUES (3, -1)", "CHECK constraint failed: price");
     try c.exec("UPDATE p SET price = 9, label = DEFAULT");
     try c.expectRows("SELECT price, label FROM p", "9.0|it's\n");
     try c.exec("CREATE TABLE ch (id INT AUTO_INCREMENT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p (id) ON DELETE CASCADE)");

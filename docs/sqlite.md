@@ -48,7 +48,21 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 - URI 파일 이름(`file:x.db?mode=ro`)은 `OpenFlags.uri`로 연 연결에서 받습니다. `xqlite sql` 셸은 sqlite3 셸처럼 켜 둡니다. `mode`, `cache`와 `%HH`를 처리합니다.
 - 붙인 데이터베이스에서도 스키마 읽기, `name.sqlite_schema`, WAL 모드, `PRAGMA name.xxx`, 스키마 인자를 받는 `pragma_*` 테이블 값 함수, 뷰·트리거의 DbFixer 검사, 붙인 테이블에 거는 TEMP 트리거가 sqlite3와 같게 동작합니다.
 - 롤백 저널 모드에서 두 개 이상의 파일에 쓰는 트랜잭션은 super journal(`<main>-mjXXXXXX9XX`)로 커밋합니다. 그래서 커밋 도중에 죽어도 모든 파일이 함께 되돌아가거나 함께 커밋됩니다. 형식이 sqlite3와 같아서 서로 남긴 super journal을 복구합니다.
-- 엔진 쪽 API: `sql.main.dbName()`, `dbFilename()`, `dbReadonly()`(`sqlite3_db_name`, `sqlite3_db_filename`, `sqlite3_db_readonly`). 엔진 코드가 데이터베이스를 붙였다 뗄 때는 `ATTACH` 문장을 실행하고 `sql.attach.closeDb()`로 뗍니다(VACUUM이 쓸 방식).
+- 엔진 쪽 API: `sql.main.dbName()`, `dbFilename()`, `dbReadonly()`(`sqlite3_db_name`, `sqlite3_db_filename`, `sqlite3_db_readonly`). 엔진 코드가 데이터베이스를 붙였다 뗄 때는 `ATTACH` 문장을 실행하고 `sql.attach.closeDb()`로 뗍니다(VACUUM이 쓰는 방식).
+
+### VACUUM과 백업 API
+
+- `VACUUM [schema]`와 `VACUUM [schema] INTO expr`는 vacuum.c 포팅입니다. `OP_Vacuum` 하나를 만드는 바이트코드가 sqlite3와 같습니다.
+  - sqlite3처럼 임시 데이터베이스를 `vacuum_XXXXXXXXXXXXXXXX`로 붙이고, 같은 스키마를 만든 뒤 테이블마다 `INSERT INTO ... SELECT * FROM ...`으로 옮깁니다. 행은 전송 최적화(insert.c의 `xferOptimization()`, `OP_RowCell`)로 레코드째 rowid 순서대로, 인덱스도 인덱스 순서대로 옮기므로 페이지 배치가 sqlite3와 같습니다.
+  - 그다음 백업 API로 원래 파일에 페이지 단위로 덮어씁니다(`sqlite3BtreeCopyFile()`). 그래서 같은 입력을 VACUUM한 파일은 sqlite3가 VACUUM한 파일과 바이트 단위로 같습니다(빈 freelist, 헤더 필드 포함).
+  - schema cookie는 1 오르고, `default_cache_size`, 텍스트 인코딩, `user_version`, `application_id`는 그대로입니다.
+  - `PRAGMA page_size`와 `PRAGMA auto_vacuum`(켜기, 끄기, FULL과 INCREMENTAL 사이 전환)은 VACUUM에서 적용됩니다. WAL 데이터베이스는 페이지 크기를 바꾸지 않습니다(`VACUUM INTO`는 바꿉니다). `":memory:"`, `""` 같은 임시 데이터베이스도 sqlite3(`sqlite3PagerIsMemdb()`)처럼 페이지 크기를 바꾸지 않습니다.
+  - `VACUUM INTO`의 대상이 URI(`file:out.db?reserve=N`)이면 `reserve=N`이 페이지 끝 예약 바이트 수가 됩니다.
+  - 오류 메시지가 같습니다: `cannot VACUUM from within a transaction`, `cannot VACUUM - SQL statements in progress`, `output file already exists`, `non-text filename`, `unknown database %s`. `VACUUM temp`는 아무것도 하지 않습니다.
+  - VACUUM이 붙이는 임시 데이터베이스는 `PRAGMA temp_store=MEMORY`여도 임시 파일입니다(sqlite3는 메모리에 둡니다). 결과 파일은 같습니다.
+- 전송 최적화는 VACUUM이 아니어도 `INSERT INTO t1 SELECT * FROM t2`(호환되는 두 테이블)에 쓰입니다. 대상이 비어 있어야 하는 경우의 실행 시 검사까지 바이트코드가 sqlite3와 같습니다.
+- 백업 API는 backup.c 포팅입니다(`src/sql/backup.zig`): `init()`, `step()`, `remaining()`, `pagecount()`, `finish()`(`sqlite3_backup_*`). 원본 pager에 등록해서, 원본 연결이 복사한 페이지를 바꾸면 다시 복사하고 다른 연결이 바꾸면 처음부터 다시 복사합니다. 페이지 크기가 다른 대상, WAL이나 임시 데이터베이스인 대상(페이지 크기가 다르면 `SQLITE_READONLY`), 오류(`source and destination must be distinct`, `destination database is in use`, `unknown database %s`)도 sqlite3와 같습니다. 백업 중에는 원본을 `DETACH`하거나 연결을 닫을 수 없습니다.
+- Zig API는 `Db.backup()`과 `Backup`입니다([Zig API](zig-api.md#백업)). `xqlite sql` 셸에는 `.backup`, `.save`, `.restore`가 있습니다(`--append`는 없음).
 
 ### 통계(ANALYZE)
 
@@ -129,6 +143,7 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 | `tools/interop-wal.sh` | WAL 파일 상호 읽기, 체크포인트, 크래시 복구, 두 엔진 프로세스 동시 접근 |
 | `tools/interop-attach.sh` | 서로의 파일을 붙여 읽고 쓰기, 여러 파일 트랜잭션, 커밋 도중 크래시와 super journal 복구 |
 | `tools/interop-analyze.sh` | 같은 데이터의 `sqlite_stat1` 행, 서로 분석한 DB의 실행 계획과 `PRAGMA optimize` |
+| `tools/interop-vacuum.sh` | 같은 DB를 두 엔진이 `VACUUM`/`VACUUM INTO`한 파일의 바이트 비교, 셸의 `.backup`/`.restore`, VACUUM 도중 크래시 복구 |
 | `tools/planner/diff.py` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드를 sqlite3와 비교 |
 | `tools/slt/run.py` | sqllogictest. 스크립트 622개, 테스트 5,939,879개를 롤백 저널과 WAL 모드에서 모두 통과합니다([tools/slt/README.md](../tools/slt/README.md)). |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`)에서 크래시·누수 |
@@ -139,7 +154,6 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 
 문장으로 쓰면 `not supported yet` 오류가 나는 것:
 
-- `VACUUM`
 - `PRAGMA locking_mode=EXCLUSIVE`. 그래서 힙 메모리 WAL 모드도 없습니다.
 - `PRAGMA journal_mode=MEMORY`
 - `PRAGMA encoding=UTF-16`
@@ -148,7 +162,6 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 
 - `sqlite_stat4`(`SQLITE_ENABLE_STAT4`). 기준 sqlite3 빌드도 끄므로 `ANALYZE`는 `sqlite_stat1`만 쓰고, `sqlite_stat4`·`sqlite_stat3`이 있으면 행을 지우기만 합니다.
 - WAL 스냅샷 API
-- 백업 API
 - 메모리 데이터베이스. `":memory:"`는 임시 파일이라 `journal_mode`가 `memory`가 아닌 `delete`입니다.
 - VFS 등록과 이름. 그래서 URI의 `vfs=`는 늘 `no such vfs: %s`입니다.
 - 공유 캐시. URI의 `cache=`는 검사만 하고 무시합니다.

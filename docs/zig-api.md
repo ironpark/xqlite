@@ -14,6 +14,7 @@
 - [바인딩과 행 매핑](#바인딩과-행-매핑)
 - [오류 모델](#오류-모델)
 - [트랜잭션](#트랜잭션)
+- [백업](#백업)
 - [확장 지점](#확장-지점)
 - [C API 대응](#c-api-대응)
 - [아직 없는 것](#아직-없는-것)
@@ -22,8 +23,8 @@
 
 | 상태 | 무엇 |
 | --- | --- |
-| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
-| 계획 | BLOB 증분 I/O, 백업 API, 훅, 가상 테이블 쓰기, C ABI, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
+| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
+| 계획 | BLOB 증분 I/O, 훅, 가상 테이블 쓰기, C ABI, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
 
 설계 원칙은 다음과 같습니다.
 
@@ -276,6 +277,22 @@ C와 다른 점이 두 가지 있습니다.
 - `savepoint(name)`은 `Savepoint`를 돌려줍니다. `release()` 또는 `rollback()`(ROLLBACK TO + RELEASE)으로 끝냅니다.
   - `errdefer sp.rollback();` 패턴을 쓰도록 `rollback()`은 오류를 돌려주지 않습니다.
 
+## 백업
+
+`db.backup(dest_name, &src, src_name)`은 `src`의 데이터베이스 `src_name`("main", "temp", 붙인 이름)을 `db`의 `dest_name`에 페이지 단위로 복사하는 `Backup`을 돌려줍니다(`sqlite3_backup_init`).
+
+```zig
+var b = try dest.backup("main", &src, "main");
+defer b.finish() catch {};
+while (!try b.step(100)) {}          // 100페이지씩, step(null)이면 한 번에 전부
+```
+
+- `Backup.step(n)`은 복사가 끝나 대상에 커밋되면 true입니다. `error.Busy`·`error.Locked`(원본에 쓰는 중이거나 대상이 잠김)이면 다시 부를 수 있고, 다른 오류는 백업을 끝냅니다. 오류는 대상 연결에 기록됩니다.
+- `Backup.remaining()`, `Backup.pageCount()`는 마지막 `step()` 때의 남은 페이지와 원본 페이지 수입니다.
+- `Backup.finish()`는 백업을 해제하고, 다 복사하지 않았으면 대상을 롤백합니다. 백업을 끝낸 오류가 있으면 그 오류를 돌려줍니다.
+- 두 연결은 달라야 하고, 대상에는 트랜잭션이 없어야 합니다. 백업 중에도 원본을 읽고 쓸 수 있습니다(복사한 뒤 바뀐 페이지는 다시 복사). `finish()` 전에는 두 연결 모두 닫을 수 없습니다(`tryClose()`가 `error.Busy`).
+- 같은 일을 하는 SQL은 `VACUUM INTO 'file'`입니다(빈 페이지를 버린 사본).
+
 ## 확장 지점
 
 모두 comptime으로 시그니처를 읽어 엔진 콜백 래퍼를 생성합니다. 사용자 데이터는 std.sort의 `context`처럼 넘깁니다(`{}` 또는 포인터).
@@ -350,13 +367,15 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_create_function_v2` / `create_window_function` | `createFunction`, `createAggregate` |
 | `sqlite3_create_collation` | `createCollation` |
 | `sqlite3_create_module_v2` | `createModule` |
+| `sqlite3_backup_init/step/finish` | `Db.backup`, `Backup.step`, `Backup.finish` |
+| `sqlite3_backup_remaining/pagecount` | `Backup.remaining`, `Backup.pageCount` |
 | (그 밖의 모든 것) | `db.raw()` / `stmt.raw()`로 엔진 핸들을 꺼내 `xqlite.sql.*` 저수준 API 사용 |
 
 ## 아직 없는 것
 
 Zig API에 아직 없는 것입니다.
 
-- BLOB 증분 I/O, 백업 API, 훅(commit/update/authorizer), `sqlite3_interrupt`
+- BLOB 증분 I/O, 훅(commit/update/authorizer), `sqlite3_interrupt`
 - 가상 테이블의 쓰기(`xUpdate`), 일반 제약 푸시다운, 트랜잭션 메서드
 - 엔진 할당자를 연결별로 고르는 기능(지금은 `configMalloc()` 하나)
 - MSSQL 방언

@@ -22,7 +22,7 @@ xqlite의 MariaDB(MySQL) 방언이 지원하는 문법과 의미, 그리고 Mari
 | Zig API | `db.setDialect(.mariadb)` |
 
 - SQLite로 돌아갈 때도 `PRAGMA xq_dialect = 'sqlite'`를 그대로 씁니다.
-- `PRAGMA`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`는 MariaDB 방언에서도 SQLite 문장으로 넘깁니다. 이 가운데 `VACUUM`은 엔진에 아직 없습니다([SQLite 호환](sqlite.md#아직-하지-않은-것)).
+- `PRAGMA`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`는 MariaDB 방언에서도 SQLite 문장으로 넘깁니다. `VACUUM`과 `VACUUM INTO`는 SQLite와 같이 동작합니다([SQLite 호환](sqlite.md#vacuum과-백업-api)).
 
 ```sql
 PRAGMA xq_dialect = 'mariadb';

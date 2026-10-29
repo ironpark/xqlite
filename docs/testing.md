@@ -31,6 +31,7 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 | `tools/interop-wal.sh` | WAL 파일 상호 읽기, 체크포인트, 크래시 복구, 두 엔진 동시 접근, 스트레스 | `SQLITE3` (3.54.1) |
 | `tools/interop-attach.sh` | 서로의 파일을 `ATTACH`해 읽고 쓰기, 여러 파일 트랜잭션, 커밋 도중 크래시와 super journal 복구 | `SQLITE3` (3.54.1), C 컴파일러(`CC`) |
 | `tools/interop-analyze.sh` | 같은 데이터에서 같은 `sqlite_stat1` 행, 서로 분석한 DB의 실행 계획·`PRAGMA optimize` | `SQLITE3` (3.54.1) |
+| `tools/interop-vacuum.sh` | 두 엔진이 `VACUUM`/`VACUUM INTO`한 파일의 바이트 비교, 셸의 `.backup`/`.save`/`.restore`, VACUUM 도중 크래시 복구 | `SQLITE3` (3.54.1), C 컴파일러(`CC`) |
 | `tools/interop-pg.sh` | PostgreSQL 방언이 쓴 DB를 sqlite3가 검사하고 같은 행·스키마를 읽음 | sqlite3 (`PATH`) |
 | `tools/interop-mariadb.sh` | MariaDB 방언이 쓴 DB를 sqlite3가 검사하고 같은 행·스키마를 읽음 | `SQLITE3` |
 | `tools/planner/diff.py` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드 | `SQ` (3.54.1, 주석 없는 빌드) |
@@ -60,7 +61,7 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 
 | 변수 | 쓰는 도구 | 기본값 |
 | --- | --- | --- |
-| `SQLITE3` | `interop-shell.sh`, `interop-pragma.sh`, `interop-wal.sh`, `interop-attach.sh`, `interop-analyze.sh`, `bench.sh` | `/tmp/xq-sqlite-build/sqlite3`가 있으면 그것, 없으면 `PATH`의 `sqlite3` |
+| `SQLITE3` | `interop-shell.sh`, `interop-pragma.sh`, `interop-wal.sh`, `interop-attach.sh`, `interop-analyze.sh`, `interop-vacuum.sh`, `bench.sh` | `/tmp/xq-sqlite-build/sqlite3`가 있으면 그것, 없으면 `PATH`의 `sqlite3` |
 | `SQLITE3` | `interop-savepoint.sh`, `interop-mariadb.sh` | `PATH`의 `sqlite3` |
 | `SQ` | `tools/planner/diff.py` | `PATH`의 `sqlite3` |
 | `XQ` | `tools/planner/diff.py`, `tools/slt/run.py` | 이 저장소의 `zig-out/bin/xqlite` |
@@ -105,6 +106,7 @@ SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-savepoint.sh
 SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-wal.sh
 SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-attach.sh
 SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-analyze.sh
+SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-vacuum.sh
 ./tools/interop-pg.sh
 SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-mariadb.sh
 ```
@@ -120,6 +122,7 @@ SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-mariadb.sh
 | `interop-wal.sh` | 체크포인트되지 않은 `-wal`의 상호 읽기, 체크포인트 모드, 페이지 크기 512..65536, 크래시 복구, 두 엔진 프로세스의 동시 접근과 무작위 스트레스(`STRESS_TXNS`, 기본 3000)를 확인합니다. |
 | `interop-attach.sh` | 두 엔진이 서로 쓴 파일을 `ATTACH`해 바꾸고 행과 `integrity_check`를 비교합니다. 붙인 데이터베이스를 쓰는 스크립트(PRAGMA, `sqlite_schema`, TEMP 트리거, 뷰, `DETACH`, 오류)의 출력이 같은지 봅니다. 세 파일에 쓰는 트랜잭션을 저널 모드(DELETE, PERSIST, TRUNCATE)마다 한쪽이 커밋하고 다른 쪽이 읽습니다. 그 커밋 도중 파일을 바꾸는 지점마다 한쪽을 죽이고, 다른 쪽이 세 파일을 모두 이전 행이나 모두 새 행으로 복구하는지 확인합니다. |
 | `interop-analyze.sh` | 30개가 넘는 테이블(스키마 해시의 가장 큰 버킷 배열)과 부분·식·NOCASE·UNIQUE·WITHOUT ROWID 인덱스가 있는 같은 DB를 두 엔진이 각각 `ANALYZE`해서 `sqlite_stat1` 행이 rowid까지 같은지, `analysis_limit`에서도 같은지 봅니다. 그다음 서로 분석한 DB를 읽어 자기가 분석한 DB와 같은 실행 계획이 나오는지, 데이터를 바꾼 뒤 `PRAGMA optimize`가 같은 행을 쓰는지 확인합니다. |
+| `interop-vacuum.sh` | 롤백 저널·auto-vacuum(FULL, INCREMENTAL)·WAL DB(어느 엔진이 만든 것이든)를 두 엔진이 같은 문장으로 `VACUUM`해서 파일이 바이트 단위로 같은지 봅니다. 문장은 `page_size`(512..65536)와 `auto_vacuum` 변경, 저널 모드를 섞습니다. DB에는 빈 자리가 있는 테이블, UNIQUE 인덱스, 오버플로 페이지, WITHOUT ROWID 테이블, AUTOINCREMENT, `sqlite_stat1`, 뷰, 트리거가 있습니다. `VACUUM INTO`(URI의 `reserve=N` 포함)와 셸의 `.backup`·`.save`·`.restore`(페이지 크기가 다른 대상 포함)도 같은 바이트를 쓰는지, 서로의 결과가 `integrity_check`를 통과하는지 봅니다. 마지막으로 VACUUM 도중 파일·저널·WAL을 바꾸는 지점마다 한쪽을 죽이고, 다른 쪽이 VACUUM 전이나 후의 파일(WAL 모드는 같은 행)로 복구하는지 확인합니다. |
 | `interop-pg.sh` | PostgreSQL 방언으로 쓴 DB(STRICT 테이블, CHECK, identity 시퀀스, `xq_catalog`/`xq_sequence`, 뷰, 인덱스)를 확인합니다. |
 | `interop-mariadb.sh` | MariaDB 방언으로 쓴 DB(STRICT 테이블, 이름 있는 CHECK, DEFAULT·생성 열, `AUTO_INCREMENT`, `"t$i"` 인덱스, 뷰, `xq_catalog`)를 확인합니다. sqlite3에 없는 엔진 함수(`xq_*`)를 쓰는 식은 xqlite 안의 테스트가 확인합니다. |
 
@@ -127,7 +130,7 @@ SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-mariadb.sh
 
 - `interop-wal.sh`: 오류를 주입하는 VFS(`src/vfs/crash.zig`)를 씁니다. N번째 쓰기에서 프로세스를 바로 끝내 전원 차단을 흉내 내고, 선택하면 그 쓰기를 절반만 기록합니다. `xqlite` 명령이 `$XQLITE_TEST_CRASH`를 받을 때만 설치하고, 라이브러리는 쓰지 않습니다.
 - `interop-hot-journal.sh`: `xqlite crash-write FILE BYTE`가 모든 페이지를 덮어쓴 뒤 커밋 1단계에서 끝나 핫 저널을 남깁니다.
-- `interop-attach.sh`: xqlite는 `$XQLITE_TEST_CRASH`(`db:N`, `journal:N`)로, sqlite3는 스크립트가 `CC`로 빌드해 미리 올리는 라이브러리(macOS `DYLD_INSERT_LIBRARIES`, Linux `LD_PRELOAD`)로 죽입니다. 이 라이브러리는 이름이 정한 접미사로 끝나는 파일의 N번째 변경(쓰기, 자르기, 삭제)에서 프로세스를 끝냅니다. 빌드할 수 없거나 sqlite3에 닿지 않으면 그 단계만 건너뜁니다.
+- `interop-attach.sh`, `interop-vacuum.sh`: xqlite는 `$XQLITE_TEST_CRASH`(`db:N`, `journal:N`, `wal:N`)로, sqlite3는 스크립트가 `CC`로 빌드해 미리 올리는 라이브러리(macOS `DYLD_INSERT_LIBRARIES`, Linux `LD_PRELOAD`)로 죽입니다. 이 라이브러리는 이름이 정한 접미사로 끝나는 파일의 N번째 변경(쓰기, 자르기, 삭제)에서 프로세스를 끝냅니다. 빌드할 수 없거나 sqlite3에 닿지 않으면 그 단계만 건너뜁니다.
 
 ## 플래너 차등 테스트
 
@@ -138,7 +141,7 @@ zig build
 SQ=/tmp/sqref/sqlite3 tools/planner/diff.py tools/planner/planner.txt -v
 ```
 
-케이스 파일 형식, 케이스 모음(`vtab.txt`, `json.txt`, `window.txt`, `wal.txt`, `attach.txt` ...), 무작위 케이스 생성기, `SQOPT`·`XQ_WHERETRACE` 같은 옵션은 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.
+케이스 파일 형식, 케이스 모음(`vtab.txt`, `json.txt`, `window.txt`, `wal.txt`, `attach.txt`, `vacuum.txt` ...), 무작위 케이스 생성기, `SQOPT`·`XQ_WHERETRACE` 같은 옵션은 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.
 
 ## sqllogictest
 

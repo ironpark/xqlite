@@ -155,12 +155,15 @@ pub const ConnState = struct {
     currval: std.StringHashMapUnmanaged(i64) = .empty,
     /// The sequence nextval() last advanced (lastval()), an owned name.
     last_sequence: ?[]u8 = null,
+    /// The MariaDB session: sql_mode, warnings, user variables.
+    mariadb: @import("mariadb/state.zig").State = .{},
 
     pub fn deinit(s: *ConnState, gpa: std.mem.Allocator) void {
         var it = s.currval.keyIterator();
         while (it.next()) |k| gpa.free(k.*);
         s.currval.deinit(gpa);
         if (s.last_sequence) |z| gpa.free(z);
+        s.mariadb.deinit(gpa);
         s.* = .{};
     }
 };

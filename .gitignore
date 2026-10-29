@@ -16,7 +16,7 @@ zig-out/
 *.exe
 coverage/
 
-# Porting reference (tools/fetch-sqlite.sh)
+# Porting reference (xqt fetch sqlite, xqt fetch slt)
 ref/
 
 # Claude Code agent worktrees

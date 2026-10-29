@@ -162,7 +162,7 @@ test {
 }
 
 /// The SQLite release this port tracks (SQLITE_VERSION_NUMBER). Keep in sync
-/// with SQLITE_VERSION in tools/fetch-sqlite.sh.
+/// with sqlite_version in tools/xqt/fetch.zig.
 pub const sqlite_version_number = 3054001;
 
 test {

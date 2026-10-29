@@ -1,0 +1,397 @@
+-- Differential cases for the MariaDB dialect (tools/dialect/maria-diff.sh).
+-- Each case starts with a "-- case:" line and runs on an empty database
+-- called main, in MariaDB (the mariadb client, batch mode) and in
+-- `xqlite sql` with `.dialect mariadb`; the rows, column names and error
+-- messages (the "ERROR:" line) must be the same. What the two print
+-- differently by design (README.md, "MariaDB 방언": DECIMAL as REAL, the
+-- engine's own error messages, NOW()) is avoided; numbers with a
+-- fraction are compared without trailing zeros.
+
+-- case: arithmetic and operators
+SELECT 1 + 1, 'a' 'b', 7 / 2, 7 DIV 2, -7 DIV 2, 7 % 3, 7 MOD 3;
+SELECT 1 || 0, 0 || 0, 1 && 0, !0, NOT 1, 1 XOR 1, 1 XOR 0, NULL XOR 1;
+SELECT NULL <=> NULL, 1 <=> NULL, 1 = NULL, 5 ^ 3, 1 << 3, 6 & 3, 6 | 1;
+SELECT NOT 1 = 2, !1 = 2, 2 + 3 * 4, (2 + 3) * 4, 10 - 2 - 3, 2 * 3 DIV 4;
+SELECT 10/4, 1/0, 5 DIV 0, '7' / 2, 7 / '2';
+
+-- case: comparisons and predicates
+SELECT 'abc' = 'ABC', 'abc' LIKE 'A%', BINARY 'abc' = 'ABC', 'a' = 'A' COLLATE utf8mb4_bin;
+SELECT 2 BETWEEN 1 AND 3, 5 NOT BETWEEN 1 AND 3, 2 IN (1,2), 2 NOT IN (1,3), NULL IS NULL, 1 IS TRUE, 0 IS NOT FALSE;
+SELECT 'a%' LIKE 'a\%', 'ab' LIKE 'a\%', 'a_b' LIKE 'a\_b', 'axb' LIKE 'a\_b', 'a%' LIKE 'a|%' ESCAPE '|';
+SELECT CASE WHEN 1 THEN 'y' ELSE 'n' END, CASE 2 WHEN 1 THEN 'a' WHEN 2 THEN 'b' END, 'a' IN ('A', 'b');
+
+-- case: literals
+SELECT TRUE, FALSE, X'41', 0x41 = X'41', b'101' + 0, 0b11 + 0, 1e3, .5;
+SELECT 1 /*! + 1 */ /*!999999 + 100 */ /*M!100100 + 10 */ AS x, 3--1;
+SELECT 9223372036854775807 + 0, -9223372036854775807 - 1;
+
+-- case: string functions
+SELECT IFNULL(NULL, 2), IF(1 > 2, 'y', 'n'), CONCAT('a', 1, 'b'), CONCAT('a', NULL), CONCAT_WS('-', 'a', NULL, 'b');
+SELECT LENGTH('abc'), CHAR_LENGTH('abc'), UCASE('a'), LCASE('B'), SUBSTRING('hello', 2, 3), SUBSTRING('hello' FROM 2), MID('hello', 2, 1);
+SELECT TRIM('  x  '), TRIM(LEADING 'x' FROM 'xxaxx'), TRIM(TRAILING FROM 'a  '), LOCATE('l', 'hello'), LOCATE('l', 'hello', 4), POSITION('l' IN 'hello');
+SELECT LPAD('5', 3, '0'), RPAD('ab', 4, '.'), LEFT('hello', 2), RIGHT('hello', 3), REPEAT('ab', 2), REVERSE('abc'), HEX(255), HEX('A');
+SELECT FORMAT(1234567.891, 2), FIND_IN_SET('b', 'a,b,c'), FIELD('b', 'a', 'b'), ELT(2, 'a', 'b');
+SELECT REPLACE('aXbX', 'X', '-'), INSTR('hello', 'l'), ASCII('A'), CHAR(65, 66), SPACE(2) = '  ', INSERT('abcd', 2, 1, 'X');
+
+-- case: numeric functions
+SELECT FLOOR(1.5), CEIL(1.2), ROUND(2.5), ROUND(-2.5), ROUND(2.567, 2), TRUNCATE(1.29, 1), ABS(-3);
+SELECT GREATEST(1, 5, 3), LEAST(4, 2), MOD(10, 3), SIGN(-4), SQRT(16), POW(2, 3);
+SELECT CAST('12abc' AS SIGNED), CAST(1.5 AS CHAR), CAST('3.456' AS DECIMAL(5,2)), CAST('2024-01-02 10:00:00' AS DATE), CONVERT('abc', CHAR(2));
+SELECT CAST(3.7 AS DECIMAL), CAST(-3.7 AS DECIMAL(5,0)), CAST(2.5 AS DECIMAL(4,1)), CAST(7 AS DOUBLE) / 2;
+
+-- case: date functions
+SELECT DATE_ADD('2024-01-31', INTERVAL 1 MONTH), '2024-01-01' + INTERVAL 1 DAY, DATE_SUB('2024-03-01 00:00:00', INTERVAL 1 SECOND);
+SELECT YEAR('2024-05-06'), MONTH('2024-05-06'), DAY('2024-05-06'), DAYOFWEEK('2024-05-06'), DATEDIFF('2024-03-01', '2024-02-01'), LAST_DAY('2023-02-10');
+SELECT DATE_FORMAT('2024-05-06 13:04:05', '%Y/%m/%d %H:%i:%s %W %M %D'), EXTRACT(YEAR FROM '2024-05-06');
+SELECT TIMESTAMPDIFF(MONTH, '2024-01-15', '2024-03-14'), TIMESTAMPDIFF(DAY, '2024-01-01', '2024-01-31'), TIMESTAMPADD(DAY, 2, '2024-02-28');
+SELECT HOUR('10:20:30'), MINUTE('2024-01-01 10:20:30'), SECOND('10:20:30'), DAYNAME('2024-05-06'), MONTHNAME('2024-05-06');
+SELECT TIME('2024-01-01 10:20:30'), DATE('2024-01-01 10:20:30'), STR_TO_DATE('01/02/2024', '%m/%d/%Y');
+SELECT ISNULL(NULL), COALESCE(NULL, 1), NULLIF(1, 1), CAST('2024-02-30' AS DATE);
+
+-- case: strict conversions
+CREATE TABLE t (i TINYINT, u INT UNSIGNED, s VARCHAR(5), d DECIMAL(5,2), e ENUM('a','b'), dt DATE);
+INSERT INTO t (i) VALUES (200);
+INSERT INTO t (u) VALUES (-1);
+INSERT INTO t (s) VALUES ('toolong');
+INSERT INTO t (i) VALUES (1), ('x');
+INSERT INTO t (e) VALUES ('c');
+INSERT INTO t (dt) VALUES ('2024-02-30');
+INSERT INTO t (d) VALUES (1000);
+SELECT count(*) FROM t;
+INSERT INTO t VALUES ('12', '7', 'ab   ', 1.235, 'B', '20240105');
+SELECT i, u, s, d, e, dt FROM t;
+UPDATE t SET i = 1000;
+
+-- case: lenient conversions and warnings
+CREATE TABLE t (i TINYINT, u INT UNSIGNED, s VARCHAR(5), d DECIMAL(5,2), e ENUM('a','b'), dt DATE);
+SET sql_mode = '';
+INSERT INTO t VALUES (200, -1, 'toolong', 1000, 'c', 'garbage');
+SHOW WARNINGS;
+SELECT @@warning_count;
+SELECT i, u, s, d, e, dt FROM t;
+SET sql_mode = DEFAULT;
+INSERT IGNORE INTO t (i, s) VALUES (-500, 'abcdefg');
+SHOW WARNINGS;
+SELECT i, s FROM t ORDER BY i;
+UPDATE IGNORE t SET i = 1000;
+SELECT i FROM t;
+
+-- case: NOT NULL columns
+CREATE TABLE nn (a INT NOT NULL, b INT NOT NULL DEFAULT 5, c VARCHAR(3));
+INSERT INTO nn (a) VALUES (NULL);
+INSERT INTO nn (c) VALUES ('x');
+INSERT IGNORE INTO nn (a) VALUES (NULL);
+SHOW WARNINGS;
+SET sql_mode = '';
+INSERT INTO nn (c) VALUES ('y');
+SHOW WARNINGS;
+INSERT INTO nn (a) VALUES (1), (NULL);
+SELECT a, b, c FROM nn ORDER BY a, c;
+
+-- case: AUTO_INCREMENT
+CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT, v VARCHAR(10), PRIMARY KEY (id));
+INSERT INTO t (v) VALUES ('a'), ('b');
+INSERT INTO t VALUES (NULL, 'c'), (0, 'd');
+INSERT INTO t VALUES (10, 'e');
+INSERT INTO t (v) VALUES ('f');
+SELECT id, v FROM t ORDER BY id;
+SELECT LAST_INSERT_ID();
+INSERT INTO t VALUES (DEFAULT, 'g');
+SELECT max(id) FROM t;
+SET sql_mode = 'NO_AUTO_VALUE_ON_ZERO';
+INSERT INTO t VALUES (0, 'zero');
+SELECT v FROM t WHERE id = 0;
+
+-- case: AUTO_INCREMENT=n and TRUNCATE
+CREATE TABLE u (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, x INT) AUTO_INCREMENT=100;
+INSERT INTO u (x) VALUES (1);
+SELECT id FROM u;
+TRUNCATE TABLE u;
+INSERT INTO u (x) VALUES (1);
+SELECT id FROM u;
+CREATE TABLE s (id SERIAL, v INT);
+INSERT INTO s (v) VALUES (1), (2);
+SELECT id, v FROM s;
+
+-- case: ON DUPLICATE KEY UPDATE, REPLACE, INSERT IGNORE
+CREATE TABLE u (id INT PRIMARY KEY, email VARCHAR(50) UNIQUE, n INT DEFAULT 0);
+INSERT INTO u VALUES (1, 'a@x', 1);
+INSERT INTO u VALUES (1, 'b@x', 5) ON DUPLICATE KEY UPDATE n = n + VALUES(n);
+INSERT INTO u VALUES (2, 'A@X', 1) ON DUPLICATE KEY UPDATE n = 100;
+SELECT id, email, n FROM u;
+REPLACE INTO u VALUES (1, 'c@x', 7);
+INSERT IGNORE INTO u VALUES (1, 'd@x', 8), (3, 'e@x', 9);
+SELECT id, email, n FROM u ORDER BY id;
+INSERT INTO u SET id = 5, email = 'f@x';
+INSERT INTO u VALUES (6, 'g@x', DEFAULT);
+SELECT id, n FROM u WHERE id >= 5 ORDER BY id;
+INSERT INTO u VALUES (7);
+UPDATE u SET n = DEFAULT WHERE id = 1;
+SELECT n FROM u WHERE id = 1;
+
+-- case: RETURNING
+CREATE TABLE r (id INT PRIMARY KEY, n INT DEFAULT 3);
+INSERT INTO r VALUES (1, 1), (2, DEFAULT) RETURNING id, n, n * 2 AS twice;
+DELETE FROM r WHERE id = 2 RETURNING id, n;
+SELECT * FROM r;
+
+-- case: INSERT ... SELECT converts
+CREATE TABLE src (n INT);
+INSERT INTO src VALUES (1), (2), (300);
+CREATE TABLE small (b TINYINT);
+INSERT INTO small SELECT n FROM src WHERE n < 10;
+SELECT b FROM small ORDER BY b;
+INSERT INTO small (b) SELECT n * 50 FROM src WHERE n = 2;
+
+-- case: UPDATE and DELETE with ORDER BY and LIMIT
+CREATE TABLE t (a INT);
+INSERT INTO t VALUES (1), (2), (3), (4), (5);
+DELETE FROM t ORDER BY a DESC LIMIT 2;
+SELECT a FROM t ORDER BY a;
+UPDATE t SET a = a * 10 ORDER BY a LIMIT 1;
+SELECT a FROM t ORDER BY a;
+UPDATE t SET a = a + 1 WHERE a > 100;
+SELECT count(*) FROM t;
+
+-- case: SELECT forms
+CREATE TABLE t (a INT, b VARCHAR(10));
+INSERT INTO t VALUES (1,'x'),(2,'y'),(3,'x'),(4,'z');
+SELECT a FROM t ORDER BY a LIMIT 2;
+SELECT a FROM t ORDER BY a LIMIT 1, 2;
+SELECT a FROM t ORDER BY a LIMIT 2 OFFSET 2;
+SELECT a FROM t ORDER BY a DESC OFFSET 1 ROWS FETCH FIRST 1 ROWS ONLY;
+SELECT b, count(*) AS n FROM t GROUP BY b HAVING n > 1;
+SELECT DISTINCT b FROM t ORDER BY b;
+SELECT a FROM t WHERE a < 2 UNION SELECT a FROM t WHERE a > 3 ORDER BY a DESC;
+SELECT b FROM t WHERE a = 1 UNION ALL SELECT b FROM t WHERE a = 3;
+(SELECT a FROM t ORDER BY a LIMIT 1) UNION ALL (SELECT a FROM t ORDER BY a DESC LIMIT 1);
+SELECT 1 FROM DUAL;
+SELECT * FROM (SELECT a FROM t) AS s WHERE s.a = 2;
+SELECT a FROM t USE INDEX () WHERE a = 3;
+SELECT a FROM t WHERE a = 1 FOR UPDATE;
+
+-- case: joins
+CREATE TABLE t (a INT, b VARCHAR(10));
+INSERT INTO t VALUES (1,'x'),(2,'y'),(3,'x'),(4,'z');
+SELECT x.a, y.a FROM t x JOIN t y ON y.a = x.a + 1 WHERE x.a = 1;
+SELECT x.a, y.a FROM t x STRAIGHT_JOIN t y ON y.a = x.a + 1 WHERE x.a = 2;
+SELECT STRAIGHT_JOIN x.a, y.a FROM t x, t y WHERE y.a = x.a + 1 AND x.a = 3;
+SELECT x.a, y.a FROM t x LEFT OUTER JOIN t y ON y.a = x.a + 10 WHERE x.a = 1;
+SELECT count(*) FROM t x, t y;
+SELECT count(*) FROM t x CROSS JOIN t y;
+SELECT x.a FROM t x NATURAL JOIN t y ORDER BY x.a;
+SELECT x.a FROM t x JOIN t y USING (b) WHERE x.a <> y.a ORDER BY x.a;
+SELECT x.a, y.a FROM t x RIGHT JOIN t y ON y.a = x.a + 3 ORDER BY y.a;
+
+-- case: subqueries and CTEs
+CREATE TABLE t (a INT, b VARCHAR(10));
+INSERT INTO t VALUES (1,'x'),(2,'y'),(3,'x'),(4,'z');
+SELECT a FROM t WHERE a IN (SELECT a FROM t WHERE b = 'x') ORDER BY 1;
+SELECT (SELECT max(a) FROM t), EXISTS(SELECT 1 FROM t WHERE a = 9);
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT GROUP_CONCAT(n ORDER BY n DESC SEPARATOR '-') FROM r;
+WITH s AS (SELECT b, max(a) AS m FROM t GROUP BY b) SELECT t.a FROM t JOIN s ON s.b = t.b AND s.m = t.a ORDER BY t.a;
+SELECT a FROM t x WHERE EXISTS (SELECT 1 FROM t y WHERE y.b = x.b AND y.a > x.a);
+
+-- case: aggregates and GROUP_CONCAT
+CREATE TABLE t (a INT, b VARCHAR(10));
+INSERT INTO t VALUES (1,'x'),(2,'y'),(3,'x'),(4,'z');
+SELECT GROUP_CONCAT(DISTINCT b ORDER BY b), GROUP_CONCAT(a, b ORDER BY a), GROUP_CONCAT(b SEPARATOR '') FROM t;
+SELECT count(*), count(DISTINCT b), sum(a), min(b), max(b), avg(a) FROM t;
+SELECT b, sum(a) FROM t GROUP BY b ORDER BY b;
+SELECT ROUND(STDDEV_POP(a), 3), VAR_POP(a), ROUND(STDDEV_SAMP(a), 3), BIT_LENGTH('ab') FROM t;
+
+-- case: window functions
+CREATE TABLE t (a INT, b VARCHAR(10));
+INSERT INTO t VALUES (1,'x'),(2,'y'),(3,'x'),(4,'z');
+SELECT a, row_number() OVER (PARTITION BY b ORDER BY a) FROM t ORDER BY a;
+SELECT a, sum(a) OVER w FROM t WINDOW w AS (ORDER BY a ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) ORDER BY a;
+SELECT a, rank() OVER (ORDER BY b), lag(a) OVER (ORDER BY a), first_value(a) OVER (PARTITION BY b ORDER BY a DESC) FROM t ORDER BY a;
+
+-- case: column names
+CREATE TABLE t (a INT, b VARCHAR(10));
+INSERT INTO t VALUES (1, 'x');
+SELECT a, t.b, a + 1, 7 / 2, count(*), UPPER(b), a AS 'x y', b `q` FROM t GROUP BY a, b;
+SELECT @x := 1, 'lit', CONCAT(b, b) FROM t;
+
+-- case: collations and case-insensitive keys
+CREATE TABLE u (name VARCHAR(20) NOT NULL, code VARCHAR(10) COLLATE utf8mb4_bin, UNIQUE KEY uk_name (name), KEY (code));
+INSERT INTO u VALUES ('Alice', 'A'), ('bob', 'a');
+SELECT name FROM u WHERE name = 'BOB';
+SELECT count(*) FROM u WHERE code = 'a';
+SELECT name FROM u ORDER BY name;
+SELECT name FROM u WHERE name LIKE 'al%';
+SELECT DISTINCT name COLLATE utf8mb4_bin FROM u ORDER BY 1;
+
+-- case: CHECK, DEFAULT and generated columns
+CREATE TABLE p (id INT PRIMARY KEY, start INT, `end` INT, price DECIMAL(6,2) NOT NULL DEFAULT 1.50, label VARCHAR(10) DEFAULT 'it''s', span INT AS (`end` - start) VIRTUAL, half DOUBLE AS (`end` / 2) STORED, q INT AS (`end` DIV 2), x INT AS (start XOR `end`), y INT AS (start ^ `end`), CONSTRAINT chk_order CHECK (start <= `end` && start >= 0));
+INSERT INTO p (id, start, `end`) VALUES (1, 2, 5);
+SELECT price, label, span, half, q, x, y, `end` FROM p;
+UPDATE p SET price = 9, label = DEFAULT;
+SELECT price, label FROM p;
+INSERT INTO p (id, start, `end`) VALUES (2, 1, 9);
+SELECT id, span, half, q, x, y FROM p ORDER BY id;
+
+-- case: DEFAULT expressions
+CREATE TABLE d (id INT, a INT DEFAULT (7 DIV 2), b DOUBLE DEFAULT (7 / 2), c VARCHAR(20) DEFAULT (CONCAT('x', 'y')), e INT DEFAULT (5 ^ 3), f VARCHAR(20) DEFAULT ('2024-01-31' + INTERVAL 1 MONTH), g INT DEFAULT (1 XOR 1), h VARCHAR(5) DEFAULT (UCASE('ab')));
+INSERT INTO d (id) VALUES (1);
+INSERT INTO d VALUES (2, DEFAULT, DEFAULT, DEFAULT, DEFAULT, DEFAULT, DEFAULT, DEFAULT);
+SELECT * FROM d ORDER BY id;
+
+-- case: views
+CREATE TABLE t (a INT, b VARCHAR(10));
+INSERT INTO t VALUES (1,'x'),(2,'y'),(3,'x'),(4,'z');
+CREATE VIEW v AS SELECT a, a / 2 AS h, a DIV 2 AS q, a XOR 1 AS x, a ^ 1 AS y, IF(b = 'x', 1, 0) AS isx, UCASE(b) AS ub, LEFT(b, 1) AS lb FROM t WHERE b <> "";
+SELECT * FROM v ORDER BY a;
+CREATE OR REPLACE VIEW v AS SELECT a FROM t WHERE a > 2;
+SELECT * FROM v ORDER BY a;
+CREATE VIEW w (n, total) AS SELECT b, sum(a) FROM t GROUP BY b;
+SELECT * FROM w ORDER BY n;
+DROP VIEW v;
+DROP VIEW w;
+
+-- case: ALTER TABLE and RENAME TABLE
+CREATE TABLE t (id INT PRIMARY KEY, a INT, b VARCHAR(5), UNIQUE KEY ua (a), KEY ib (b));
+INSERT INTO t VALUES (1, 10, 'x');
+ALTER TABLE t ADD COLUMN nick VARCHAR(3) DEFAULT 'abc';
+SELECT nick FROM t;
+UPDATE t SET nick = 'abcd';
+RENAME TABLE t TO u;
+SHOW CREATE TABLE u;
+ALTER TABLE u RENAME TO w;
+DROP INDEX ib ON w;
+ALTER TABLE w DROP INDEX ua;
+SHOW CREATE TABLE w;
+ALTER TABLE w RENAME COLUMN nick TO nk;
+ALTER TABLE w DROP COLUMN b;
+SELECT * FROM w;
+
+-- case: CREATE INDEX and DROP
+CREATE TABLE t (id INT PRIMARY KEY, score INT, name VARCHAR(10));
+CREATE INDEX idx_score ON t (score);
+CREATE UNIQUE INDEX uq_name ON t (name);
+SHOW CREATE TABLE t;
+DROP INDEX idx_score ON t;
+DROP INDEX nope ON t;
+DROP TABLE t;
+DROP TABLE t;
+DROP TABLE IF EXISTS t;
+
+-- case: SHOW and DESCRIBE
+CREATE TABLE IF NOT EXISTS `users` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `email` varchar(255) NOT NULL,
+  `status` enum('active','banned') NOT NULL DEFAULT 'active',
+  `score` decimal(10,2) DEFAULT NULL,
+  `qty` smallint NOT NULL DEFAULT 0,
+  `flag` bool DEFAULT 1,
+  `note` text,
+  `b` varbinary(16),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `email` (`email`),
+  KEY `idx_status` (`status`, `qty`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SHOW TABLES;
+DESCRIBE users;
+SHOW COLUMNS FROM users LIKE 's%';
+CREATE TABLE IF NOT EXISTS users (x INT);
+SHOW WARNINGS;
+
+-- case: information_schema
+CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20) NOT NULL DEFAULT 'x');
+CREATE VIEW v AS SELECT id FROM t;
+SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'main' ORDER BY TABLE_NAME;
+SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, EXTRA FROM information_schema.COLUMNS WHERE TABLE_NAME = 't' AND TABLE_SCHEMA = DATABASE() ORDER BY ORDINAL_POSITION;
+
+-- case: sql_mode switches
+CREATE TABLE t (a INT);
+INSERT INTO t VALUES (5);
+SELECT "a" FROM t;
+SET sql_mode = 'ANSI_QUOTES';
+SELECT "a" FROM t;
+SET sql_mode = 'PIPES_AS_CONCAT';
+SELECT 'a' || 'b', 'a' || NULL, 'a' || 'b' || 'c';
+SET sql_mode = 'NO_BACKSLASH_ESCAPES';
+SELECT LENGTH('a\nb'), LENGTH('\\');
+SELECT 'a_c' LIKE 'a\_c', 'abc' LIKE 'a\_c';
+SET sql_mode = 'EMPTY_STRING_IS_NULL';
+SELECT '' IS NULL;
+SET sql_mode = 'TRADITIONAL';
+SELECT @@sql_mode;
+SET sql_mode = DEFAULT;
+SELECT @@sql_mode;
+
+-- case: user variables
+SET @a = 10, @b := 'x';
+SELECT @a * 2, @b, @c, @d := 5, @d + 1;
+SELECT @@session.autocommit, @@sql_mode = @@SESSION.sql_mode;
+
+-- case: transactions
+CREATE TABLE t (a INT);
+START TRANSACTION;
+INSERT INTO t VALUES (1);
+SAVEPOINT s1;
+INSERT INTO t VALUES (2);
+ROLLBACK TO SAVEPOINT s1;
+COMMIT;
+SELECT a FROM t;
+BEGIN;
+INSERT INTO t VALUES (9);
+ROLLBACK WORK;
+SELECT count(*) FROM t;
+
+-- case: sequences
+CREATE SEQUENCE s START WITH 10 INCREMENT BY 5;
+SELECT NEXT VALUE FOR s, NEXTVAL(s), LASTVAL(s);
+SELECT PREVIOUS VALUE FOR s;
+CREATE TABLE t (id INT, v INT);
+INSERT INTO t VALUES (NEXT VALUE FOR s, 1);
+SELECT id, v FROM t;
+DROP SEQUENCE s;
+
+-- case: mysqldump output
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET NAMES utf8mb4 */;
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+DROP TABLE IF EXISTS `items`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE `items` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `name` varchar(50) NOT NULL,
+  `price` decimal(8,2) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `name_idx` (`name`)
+) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+LOCK TABLES `items` WRITE;
+/*!40000 ALTER TABLE `items` DISABLE KEYS */;
+INSERT INTO `items` VALUES (1,'pen',1.50),(2,'book',12.00),(3,'cup',NULL);
+/*!40000 ALTER TABLE `items` ENABLE KEYS */;
+UNLOCK TABLES;
+/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+/*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
+SELECT id, name, price FROM items ORDER BY id;
+INSERT INTO items (name) VALUES ('new');
+SELECT max(id) FROM items;
+
+-- case: foreign keys
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE ch (id INT AUTO_INCREMENT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p (id) ON DELETE CASCADE);
+SET foreign_key_checks = 1;
+INSERT INTO p VALUES (1);
+INSERT INTO ch (pid) VALUES (1), (1);
+DELETE FROM p;
+SELECT count(*) FROM ch;
+
+-- case: errors
+SELECT @@nope;
+DROP TABLE nope;
+CREATE TABLE t (a INT, a INT);
+CREATE TABLE t (a INT, KEY (b));
+CREATE TABLE t (d DECIMAL(70,2));
+CREATE TABLE t (d DECIMAL(10,40));
+CREATE TABLE t (d DECIMAL(5,6));
+SELECT * FROM information_schema.nope;

@@ -7,12 +7,14 @@ const xqt = @import("xqt");
 const build_options = @import("build_options");
 
 const interop = @import("interop.zig");
+const planner = @import("planner.zig");
 
 const usage =
     \\usage: xqt [options] <command> [args]
     \\
     \\commands:
     \\  interop [NAME...]        cross-checks against sqlite3 (all, or the modules named)
+    \\  planner [FILE...]        results, query plans and bytecode against sqlite3
     \\  list                     the interop modules and planner case files
     \\  help [COMMAND]           this text, or the options of a command
     \\
@@ -37,12 +39,16 @@ pub fn main(init: std.process.Init) !void {
     const cmd_args = rest.items[1..];
     const code: u8 = if (std.mem.eql(u8, cmd, "interop"))
         try interop.run(init.gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "planner"))
+        try planner.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "list"))
         try list(io, &cfg, out)
     else if (std.mem.eql(u8, cmd, "help")) blk: {
         const topic = if (cmd_args.len > 0) cmd_args[0] else "";
         try out.writeAll(if (std.mem.eql(u8, topic, "interop"))
             interop.usage
+        else if (std.mem.eql(u8, topic, "planner"))
+            planner.usage
         else
             usage);
         break :blk 0;
@@ -87,5 +93,6 @@ fn list(io: Io, cfg: *const xqt.Config, out: *Io.Writer) !u8 {
 
 test {
     _ = xqt;
+    _ = planner;
     _ = interop;
 }

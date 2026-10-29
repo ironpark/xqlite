@@ -341,9 +341,9 @@ fn autocheckpoint(c: *Check, n: []const u8) !void {
     var got: [2][]const u8 = undefined;
     for ([_]Engine{ .x, .s }, &got) |e, *g| {
         const db = if (e == .x) "ac-x.db" else "ac-s.db";
-        // The SQL goes to standard input, but a shell given an argument
-        // after the database runs that and does not read it (as before).
-        const out, const term = try merged(c, try e.argv(c, db, &.{nockpt}), input.written(), "ac.out");
+        // The SQL is an argument after the dot-command: a shell given
+        // arguments after the database does not read standard input.
+        const out, const term = try merged(c, try e.argv(c, db, &.{ nockpt, input.written() }), "", "ac.out");
         if (!term.success()) return c.abort("{s}: {f}: {s}", .{ e.name(), term, out });
         g.* = out;
     }

@@ -8,6 +8,7 @@ const build_options = @import("build_options");
 
 const interop = @import("interop.zig");
 const planner = @import("planner.zig");
+const slt = @import("slt.zig");
 
 const usage =
     \\usage: xqt [options] <command> [args]
@@ -15,6 +16,7 @@ const usage =
     \\commands:
     \\  interop [NAME...]        cross-checks against sqlite3 (all, or the modules named)
     \\  planner [FILE...]        results, query plans and bytecode against sqlite3
+    \\  slt [opts] PATH... [-- ARGS]  sqllogictest scripts with `xqlite slt`
     \\  list                     the interop modules and planner case files
     \\  help [COMMAND]           this text, or the options of a command
     \\
@@ -41,6 +43,8 @@ pub fn main(init: std.process.Init) !void {
         try interop.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "planner"))
         try planner.run(init.gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "slt"))
+        try slt.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "list"))
         try list(io, &cfg, out)
     else if (std.mem.eql(u8, cmd, "help")) blk: {
@@ -49,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
             interop.usage
         else if (std.mem.eql(u8, topic, "planner"))
             planner.usage
+        else if (std.mem.eql(u8, topic, "slt"))
+            slt.usage
         else
             usage);
         break :blk 0;
@@ -94,5 +100,6 @@ fn list(io: Io, cfg: *const xqt.Config, out: *Io.Writer) !u8 {
 test {
     _ = xqt;
     _ = planner;
+    _ = slt;
     _ = interop;
 }

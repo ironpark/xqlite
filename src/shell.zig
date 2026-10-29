@@ -1936,7 +1936,8 @@ fn showMode(p: *Shell, b_all: bool) Error!void {
 pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: []const []const u8, out: *Io.Writer, err_out: *Io.Writer) Error!u8 {
     const filename = path orelse ":memory:";
     var opened: ?*Sqlite3 = null;
-    const orc = sql.main.open(v, filename, .{}, &opened);
+    // As the sqlite3 shell (SQLITE_CONFIG_URI), "file:" names are URIs.
+    const orc = sql.main.open(v, filename, .{ .uri = true }, &opened);
     const db = opened orelse {
         try err_out.print("Error: unable to open database \"{s}\": out of memory\n", .{filename});
         try err_out.flush();

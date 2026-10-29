@@ -2173,6 +2173,11 @@ pub const Sqlite3 = struct {
     lookaside: Lookaside = .{},
     /// The VFS of the connection's files, also used for ephemeral tables.
     vfs: ?@import("../vfs/vfs.zig").Vfs = null,
+    /// The flags the connection was opened with (openFlags), which ATTACH
+    /// starts from.
+    open_flags: @import("main.zig").OpenFlags = .{},
+    /// The databases: main, temp, then the attached ones (aDb, nDb). The
+    /// names of attached databases are owned (from gpa).
     dbs: std.ArrayList(Db) = .empty,
     flags: DbFlag = .{
         .ShortColNames = true,

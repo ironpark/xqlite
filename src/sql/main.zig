@@ -146,6 +146,11 @@ pub fn errorOffset(db: *const Sqlite3) i32 {
 pub const OpenFlags = struct {
     read_only: bool = false,
     create: bool = true,
+    /// Filenames that start with "file:" are URIs (SQLITE_OPEN_URI), here
+    /// and in ATTACH (see uri.zig).
+    uri: bool = false,
+    /// An in-memory database (SQLITE_OPEN_MEMORY, a URI's mode=memory).
+    memory: bool = false,
 };
 
 /// Port of openDatabase() (sqlite3_open_v2()): open a connection to the
@@ -175,11 +180,21 @@ pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenF
         return oomOnOpen(db);
     };
     db.enc = 1;
+    db.open_flags = flags;
 
-    const path: ?[]const u8 = if (filename.len == 0 or std.mem.eql(u8, filename, ":memory:")) null else filename;
+    var parsed = @import("uri.zig").parse(gpa, filename, flags);
+    defer parsed.deinit(gpa);
+    if (parsed.rc != RC.OK) {
+        if (parsed.rc == RC.NOMEM) return oomOnOpen(db);
+        errorWithMsg(db, parsed.rc, "{s}", .{parsed.err_msg orelse util.errStr(parsed.rc)});
+        return parsed.rc;
+    }
+    const of = parsed.flags;
+    const name = parsed.filename();
+    const path: ?[]const u8 = if (of.memory or name.len == 0 or std.mem.eql(u8, name, ":memory:")) null else name;
     const bt = btree.Btree.open(malloc.allocator, v, path, .{
-        .read_only = flags.read_only,
-        .create = flags.create and !flags.read_only,
+        .read_only = of.read_only,
+        .create = of.create and !of.read_only,
         .n_vdbe_read = &db.n_vdbe_read,
         .busy_handler = btreeBusyHandler(db),
     }) catch |err| {

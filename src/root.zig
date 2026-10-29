@@ -133,6 +133,10 @@ test {
 }
 
 test {
+    std.testing.refAllDecls(@import("sql/uri.zig"));
+}
+
+test {
     std.testing.refAllDecls(@import("sql/complete.zig"));
 }
 

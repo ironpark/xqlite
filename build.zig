@@ -255,6 +255,44 @@ pub fn build(b: *std.Build) void {
     tools_step.dependOn(&b.addInstallArtifact(xqt_exe, .{}).step);
     tools_step.dependOn(&b.addInstallArtifact(crashshim, .{}).step);
 
+    // `zig build check`: everything at once, in parallel. The unit tests,
+    // every `xqt interop` module, every planner case file but vtablog.txt
+    // and fuzzcheck on SQLite's corpora; -Dslt=true adds sqllogictest
+    // (ref/sqllogictest), -Dfuzz=true a run of each seeded fuzzer with a
+    // random seed. A new interop module needs no change here.
+    const check_slt = b.option(bool, "slt", "zig build check: also run sqllogictest (minutes)") orelse false;
+    const check_fuzz = b.option(bool, "fuzz", "zig build check: also run each seeded fuzzer with a random seed") orelse false;
+    const check_step = b.step("check", "Run the unit tests, the cross-checks, the planner cases and fuzzcheck (-Dslt, -Dfuzz for more)");
+    check_step.dependOn(test_step);
+    check_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = xqt_exe.root_module })).step);
+    const interop_run = addXqtRun(b, xqt_exe, exe, crashshim);
+    interop_run.addArg("interop");
+    check_step.dependOn(&interop_run.step);
+    const planner_run = addXqtRun(b, xqt_exe, exe, crashshim);
+    planner_run.addArgs(&.{ "planner", "--known" });
+    planner_run.addFileArg(b.path("tools/planner/known-failures.list"));
+    check_step.dependOn(&planner_run.step);
+    if (check_slt) {
+        const slt_run = addXqtRun(b, xqt_exe, exe, crashshim);
+        slt_run.addArg("slt");
+        slt_run.addDirectoryArg(b.path("ref/sqllogictest/test"));
+        check_step.dependOn(&slt_run.step);
+    }
+    // SQLite's corpora (tools/fetch-sqlite.sh).
+    const run_fuzzcheck = b.addRunArtifact(exe);
+    run_fuzzcheck.addArg("fuzzcheck");
+    for (1..9) |i| run_fuzzcheck.addFileArg(b.path(b.fmt("ref/sqlite/test/fuzzdata{d}.db", .{i})));
+    run_fuzzcheck.has_side_effects = true;
+    check_step.dependOn(&run_fuzzcheck.step);
+    if (check_fuzz) {
+        for ([_][]const u8{ "btree_model", "btree_corrupt", "ir_roundtrip" }) |name| {
+            const run = b.addRunArtifact(fuzz_exe);
+            run.addArg(name);
+            run.has_side_effects = true;
+            check_step.dependOn(&run.step);
+        }
+    }
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
@@ -266,4 +304,17 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+}
+
+/// `xqt --xq XQLITE --crashshim SHIM`, for `zig build check`: run from
+/// the build root every time; the caller adds the command.
+fn addXqtRun(b: *std.Build, xqt: *std.Build.Step.Compile, xqlite: *std.Build.Step.Compile, crashshim: *std.Build.Step.Compile) *std.Build.Step.Run {
+    const run = b.addRunArtifact(xqt);
+    run.addArg("--xq");
+    run.addArtifactArg(xqlite);
+    run.addArg("--crashshim");
+    run.addArtifactArg(crashshim);
+    run.setCwd(b.path("."));
+    run.has_side_effects = true;
+    return run;
 }

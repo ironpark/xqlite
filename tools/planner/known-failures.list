@@ -1,0 +1,9 @@
+# Planner differences xqt planner expects (zig build check passes this
+# file with --known). One per line: CASEFILE KIND QUERY, the query as in
+# the case file. A listed query that agrees again fails the run (FIXED),
+# so that the line goes.
+#
+# sqlite3 3.54.1 runs a multi-row VALUES as a co-routine ("SCAN 3-ROW
+# VALUES CLAUSE"); xqlite still emits one ResultRow per row.
+eqp_select.txt code VALUES(1),(2),(3)
+eqp_select.txt eqp VALUES(1),(2),(3)

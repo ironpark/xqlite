@@ -780,7 +780,9 @@ test eqpTree {
 test codeNorm {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const got = try codeNorm(arena.allocator(), "addr|opcode\n0|Init|0|1|0||0|comment\n1|Halt|0|0|0||0\n0|Init|0|0|0||0\n");
+    // The comment goes; a trigger program (its address 0 again) ends it.
+    const got = try codeNorm(arena.allocator(), "0|Init|0|1|0||0|comment\n1|Halt|0|0|0||0\nERR:x\n0|Init|0|0|0||0\n");
     try std.testing.expectEqual(3, got.len);
-    try std.testing.expectEqualStrings("0|Init|0|1|0||0", got[1]);
+    try std.testing.expectEqualStrings("0|Init|0|1|0||0", got[0]);
+    try std.testing.expectEqualStrings("ERR:x", got[2]);
 }

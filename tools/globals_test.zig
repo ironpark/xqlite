@@ -1,7 +1,7 @@
-//! Checks that src/ has no hidden global state: a mutable container-level
-//! variable (a `var` at the top of a file or among the declarations of a
-//! struct, which lives as long as the process) must be one that `allowed`
-//! lists. Tests (test declarations and *_test.zig files) may keep state of
+//! Checks that src/ and tools/xqt/ have no hidden global state: a mutable
+//! container-level variable (a `var` at the top of a file or among the
+//! declarations of a struct, which lives as long as the process) must be
+//! one that `allowed` lists. Tests (test declarations and *_test.zig files) may keep state of
 //! their own. Run by `zig build test`, from the build root.
 
 const std = @import("std");
@@ -36,12 +36,12 @@ fn check(gpa: std.mem.Allocator, out: *std.ArrayList(u8), path: []const u8, tree
     var tests: std.ArrayList([2]Ast.TokenIndex) = .empty;
     defer tests.deinit(gpa);
     for (0..tree.nodes.len) |i| {
-        const node: Ast.Node.Index = @enumFromInt(i);
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(i));
         if (tree.nodeTag(node) == .test_decl) try tests.append(gpa, .{ tree.firstToken(node), tree.lastToken(node) });
     }
     for (0..tree.nodes.len) |i| {
         var buf: [2]Ast.Node.Index = undefined;
-        const container = tree.fullContainerDecl(&buf, @enumFromInt(i)) orelse continue;
+        const container = tree.fullContainerDecl(&buf, @fromBackingInt(@intCast(i))) orelse continue;
         for (container.ast.members) |member| {
             const v = tree.fullVarDecl(member) orelse continue;
             if (tree.tokenTag(v.ast.mut_token) != .keyword_var) continue;
@@ -59,13 +59,24 @@ fn check(gpa: std.mem.Allocator, out: *std.ArrayList(u8), path: []const u8, tree
 
 test "no hidden global state" {
     const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var src = try std.Io.Dir.cwd().openDir(io, "src", .{ .iterate = true });
-    defer src.close(io);
-    var walker = try src.walk(gpa);
-    defer walker.deinit();
     var found: std.ArrayList(u8) = .empty;
     defer found.deinit(gpa);
+    try std.testing.expect(try scan(gpa, "src", &found) > 50);
+    // The test tool, which runs its checks on threads.
+    try std.testing.expect(try scan(gpa, "tools/xqt", &found) > 5);
+    if (found.items.len > 0) {
+        std.debug.print("mutable globals not in tools/globals_test.zig:\n{s}", .{found.items});
+        return error.HiddenGlobalState;
+    }
+}
+
+/// Checks the .zig files under `root`; returns how many.
+fn scan(gpa: std.mem.Allocator, root: []const u8, found: *std.ArrayList(u8)) !usize {
+    const io = std.testing.io;
+    var dir = try std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
     var n_files: usize = 0;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".zig")) continue;
@@ -74,14 +85,10 @@ test "no hidden global state" {
         defer gpa.free(text);
         var tree = try Ast.parse(gpa, text, .{});
         defer tree.deinit(gpa);
-        const path = try std.fmt.allocPrint(gpa, "src/{s}", .{entry.path});
+        const path = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ root, entry.path });
         defer gpa.free(path);
-        try check(gpa, &found, path, &tree);
+        try check(gpa, found, path, &tree);
         n_files += 1;
     }
-    try std.testing.expect(n_files > 50);
-    if (found.items.len > 0) {
-        std.debug.print("mutable globals not in tools/globals_test.zig:\n{s}", .{found.items});
-        return error.HiddenGlobalState;
-    }
+    return n_files;
 }

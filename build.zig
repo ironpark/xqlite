@@ -176,7 +176,8 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(doc_tests).step);
 
-    // ... and that src/ keeps no mutable globals but the few it lists.
+    // ... and that src/ and tools/xqt keep no mutable globals but the few
+    // it lists.
     // The seeded fuzzers (src/fuzz_tests.zig): `zig build fuzz -- NAME
     // [SEED]` runs one. Their smoke test runs with the module's tests
     // (src/root.zig), which import the same files.
@@ -217,6 +218,42 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(journal_tests).step);
+
+    // The test tool (tools/xqt): `zig build tools` installs xqt next to
+    // xqlite, and tools/crashshim.c as a library to preload into sqlite3.
+    // Neither is part of the library or of `zig build test`.
+    const xqt_options = b.addOptions();
+    xqt_options.addOption([]const u8, "root", b.root.toString(b.allocator) catch @panic("OOM"));
+    const xqt_lib = b.createModule(.{
+        .root_source_file = b.path("tools/xqt/lib/xqt.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const xqt_exe = b.addExecutable(.{
+        .name = "xqt",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/xqt/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "xqt", .module = xqt_lib },
+                .{ .name = "build_options", .module = xqt_options.createModule() },
+            },
+        }),
+    });
+    const crashshim = b.addLibrary(.{
+        .name = "crashshim",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe, .link_libc = true }),
+    });
+    crashshim.root_module.addCSourceFile(.{ .file = b.path("tools/crashshim.c") });
+    if (target.result.os.tag == .linux) crashshim.root_module.linkSystemLibrary("dl", .{});
+    const tools_step = b.step("tools", "Build xqt and the crash shim of the cross-checks (tools/xqt)");
+    tools_step.dependOn(b.getInstallStep());
+    tools_step.dependOn(&b.addInstallArtifact(xqt_exe, .{}).step);
+    tools_step.dependOn(&b.addInstallArtifact(crashshim, .{}).step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

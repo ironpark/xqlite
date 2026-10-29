@@ -2,7 +2,9 @@
 ** LD_PRELOAD elsewhere) that crashes it: _exit(0) at the CRASH_AT-th
 ** change (a write, a truncation or an unlink) of a file whose name ends
 ** with CRASH_SUFFIX, before the change is made. Used by
-** tools/interop-attach.sh and tools/gen-superjournal-fixtures.sh.
+** tools/interop-attach.sh and tools/gen-superjournal-fixtures.sh; `zig
+** build tools` builds it for xqt (zig-out/lib/libcrashshim.*, see
+** tools/xqt/lib/crash.zig).
 **
 **   cc -dynamiclib -o crashshim.dylib crashshim.c         (macOS)
 **   cc -shared -fPIC -o crashshim.so crashshim.c -ldl     (Linux)

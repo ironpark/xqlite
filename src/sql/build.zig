@@ -655,6 +655,7 @@ pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
         deleteTable(db, t.*);
     }
     s.tbl_hash.clearRetainingCapacity();
+    s.tbl_order.clear(db.gpa);
     s.idx_hash.clearRetainingCapacity();
     s.fkey_hash.clearRetainingCapacity();
     s.seq_tab = null;
@@ -822,6 +823,7 @@ pub fn deleteTable(db: *Sqlite3, t: *Table) void {
 /// the schema.
 pub fn unlinkAndDeleteTable(db: *Sqlite3, i_db: usize, name: [:0]const u8) void {
     const kv = db.dbs.items[i_db].schema.tbl_hash.fetchRemove(name) orelse return;
+    db.dbs.items[i_db].schema.tbl_order.remove(db.gpa, name);
     deleteTable(db, kv.value);
     db.m_db_flags.SchemaChange = true;
 }
@@ -1828,6 +1830,10 @@ fn endTableImpl(p: *Parse, cons_arg: ?Token, end_arg: ?Token, tab_opts: TF, sel:
         const gop = try s.tbl_hash.getOrPut(db.gpa, t.name);
         std.debug.assert(!gop.found_existing);
         gop.value_ptr.* = t;
+        s.tbl_order.insert(db.gpa, t.name, t) catch |err| {
+            s.tbl_hash.removeByPtr(gop.key_ptr);
+            return err;
+        };
         p.new_table = null;
         db.m_db_flags.SchemaChange = true;
         if (std.mem.eql(u8, t.name, "sqlite_sequence")) s.seq_tab = t;

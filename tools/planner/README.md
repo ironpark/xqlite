@@ -53,6 +53,7 @@ tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 tools/pl
 - EXPLAIN의 P4에 나오는 `vtab:주소`는 `vtab:PTR`로 바꿔서 비교합니다.
 - `json.txt`는 JSON 함수 케이스입니다. SQLite TCL 테스트(`json1*.test`, `json50*.test`, `jsonb01.test`)에서 뽑은 쿼리와, 끝부분의 `json_each`/`json_tree` 블록(같은 테스트와 `join.test`, `join8.test`, `whereF.test`, `tabfunc01.test` 등에서 뽑은 쿼리, 조인·상관 인자·경로 인자·ORDER BY/LIMIT·JSONB 입력·오류를 다루는 쿼리)으로 이루어집니다.
 - `attach.txt`는 `ATTACH`/`DETACH` 문장 자체(`sqlite_attach()`/`sqlite_detach()`를 부르는 `OP_Function`, `OP_Expire`)와 붙인 데이터베이스 위의 조인, DML, 트리거, 뷰, PRAGMA, `sqlite_schema` 케이스입니다. 스키마를 해시 순서로 도는 `integrity_check`와 `table_list`는 뺐습니다. 해시 순서가 SQLite와 다르기 때문입니다.
+- `analyze.txt`는 `ANALYZE`와 `PRAGMA optimize` 케이스입니다. 모든 형태의 `ANALYZE`(데이터베이스, 테이블, 인덱스, TEMP, 오류)의 바이트코드와 `sqlite_stat1` 행, `analysis_limit`, sqlite3가 분석한 DB와 같은 연결에서 분석한 DB의 통계에 따라 달라지는 실행 계획, 직접 쓴 `unordered`·`sz=`·`noskipscan` 표시, 스키마 해시 순서가 드러나는 테이블 30여 개짜리 DB를 비교합니다.
 - `wal.txt`는 WAL PRAGMA(`journal_mode` 전환, 모드별 `wal_checkpoint`, `wal_autocheckpoint`) 케이스입니다. 롤백 저널 DB와 WAL DB에서 결과와 `OP_JournalMode`·`OP_Checkpoint` 바이트코드를 비교합니다.
 - `window.txt`는 윈도우 함수 케이스입니다. SQLite TCL 테스트(`window*.test`)에서 뽑은 쿼리와, 뷰·서브쿼리·조인·복합 SELECT·DML 등 select.c와 맞물리는 경로를 다루는 쿼리로 이루어집니다.
 - `gen-basic.py`, `gen-hard.py`는 시드로 무작위 케이스를 만듭니다. `gen-hard.py`는 ANALYZE 통계, 스킵 스캔, collation, 식·부분 인덱스, row value, 상관 서브쿼리, 중첩 조인, 트리거, 외래키를 다룹니다.

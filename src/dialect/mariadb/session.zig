@@ -1,5 +1,6 @@
 //! Session and introspection statements: SET (system and user
-//! variables), transactions, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES.
+//! variables), transactions, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES,
+//! ANALYZE TABLE.
 //! PRAGMA and SQLite's other commands go to SQLite's grammar before this
 //! frontend runs (dialect.runParser()).
 //!
@@ -393,6 +394,56 @@ pub fn use(s: *Parser) Error!void {
 pub fn lockTables(s: *Parser) Error!void {
     while (!s.atStmtEnd()) s.advance();
     return emptyStatement(s);
+}
+
+/// ANALYZE [NO_WRITE_TO_BINLOG | LOCAL] TABLE[S] t [, t ...]
+/// [PERSISTENT FOR ...]: SQLite's ANALYZE of each table, and MariaDB's
+/// result rows (Table, Op, Msg_type, Msg_text). A view or a missing table
+/// gets an error row, as in MariaDB; the others are analyzed.
+pub fn analyzeTable(s: *Parser) Error!void {
+    try s.expectKw("ANALYZE");
+    _ = s.eatKw("NO_WRITE_TO_BINLOG") or s.eatKw("LOCAL");
+    if (!s.eatKw("TABLE") and !s.eatKw("TABLES")) return s.syntaxError();
+    const Item = struct { shown: []const u8, err: ?[]const u8, tab: ?*int.Table };
+    var items: std.ArrayList(Item) = .empty;
+    while (true) {
+        const q = try s.qualifiedName();
+        const shown = try std.fmt.allocPrint(s.a, "{s}.{s}", .{ if (q.schema) |x| x.text else catalog.main_schema, q.name.text });
+        ir.stmt.readSchema(s.p) catch return error.ParseFailed;
+        const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null);
+        const err: ?[]const u8 = if (tab == null)
+            try std.fmt.allocPrint(s.a, "Table '{s}' doesn't exist", .{shown})
+        else if (tab.?.isView())
+            try std.fmt.allocPrint(s.a, "'{s}' is not of type 'BASE TABLE'", .{shown})
+        else
+            null;
+        try items.append(s.a, .{ .shown = shown, .err = err, .tab = tab });
+        if (!s.eatOp(",")) break;
+    }
+    var persistent = false;
+    if (s.eatKw("PERSISTENT")) {
+        try s.expectKw("FOR");
+        persistent = true;
+        while (!s.atStmtEnd()) s.advance(); // ALL | COLUMNS (...) INDEXES (...)
+    }
+    var w: std.Io.Writer.Allocating = .init(s.a);
+    for (items.items, 0..) |it, i| {
+        if (it.err == null) {
+            const t = it.tab.?;
+            try lowerFmt(s, "ANALYZE {f}.{f}", .{ Id{ .z = catalog.schemaName(s.p.db, t) }, Id{ .z = t.name } });
+        }
+        const rows: []const [2][]const u8 = if (it.err) |e|
+            &.{ .{ "Error", e }, .{ "status", "Operation failed" } }
+        else if (persistent)
+            &.{ .{ "status", "Engine-independent statistics collected" }, .{ "status", "OK" } }
+        else
+            &.{.{ "status", "OK" }};
+        for (rows, 0..) |r, j| {
+            if (i > 0 or j > 0) w.writer.writeAll(" UNION ALL ") catch return error.OutOfMemory;
+            w.writer.print("SELECT {f} AS \"Table\", 'analyze' AS \"Op\", {f} AS \"Msg_type\", {f} AS \"Msg_text\"", .{ Q{ .z = it.shown }, Q{ .z = r[0] }, Q{ .z = r[1] } }) catch return error.OutOfMemory;
+        }
+    }
+    try lowerText(s, try w.toOwnedSliceSentinel(0));
 }
 
 /// Lower SQLite text (in p.arena) as part of this statement.

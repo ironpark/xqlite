@@ -128,6 +128,7 @@ fn statement(s: *Parser) Error!void {
         return statement(s);
     }
     if (t.isKw("LOCK") or t.isKw("UNLOCK")) return session.lockTables(s);
+    if (t.isKw("ANALYZE")) return session.analyzeTable(s);
     if (t.isKw("DO")) {
         s.advance();
         _ = try s.exprList();

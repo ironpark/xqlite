@@ -1124,6 +1124,8 @@ pub const Schema = struct {
     schema_cookie: i32 = 0,
     i_generation: i32 = 0,
     tbl_hash: NameMap(*Table) = .empty,
+    /// The tables in the order of C's tblHash (hash.zig).
+    tbl_order: @import("hash.zig").HashOrder(*Table) = .{},
     idx_hash: NameMap(*Index) = .empty,
     trig_hash: NameMap(*Trigger) = .empty,
     fkey_hash: NameMap(*FKey) = .empty,
@@ -2264,6 +2266,8 @@ pub const Sqlite3 = struct {
     wal_arg: ?*anyopaque = null,
     /// PRAGMA analysis_limit.
     n_analysis_limit: i32 = 0,
+    /// OP_SqlExec statements running (nSqlExec).
+    n_sql_exec: i32 = 0,
     /// Registered virtual table modules (aModule).
     modules: NameMap(*Module) = .empty,
     /// Context of the virtual table constructor running (pVtabCtx).

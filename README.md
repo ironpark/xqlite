@@ -214,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
 - [x] **Phase 0 · 기반**: VFS(POSIX·메모리), 페이지 캐시, Pager(롤백 저널), 파일 헤더 파싱. Windows VFS는 아직 없음
 - [x] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기(auto-vacuum·incremental vacuum 포함), 레코드 포맷, 기존 SQLite 파일 읽기/수정
 - [x] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
-- [ ] **Phase 3 · 완성도**: WAL, 인덱스 최적화, 윈도우 함수, JSON, sqllogictest 통과. 세이브포인트·윈도우 함수·가상 테이블·WAL·JSON은 완료, sqllogictest 전체 통과가 남음 ([SQLite 호환](docs/sqlite.md))
+- [x] **Phase 3 · 완성도**: 세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`/`DETACH`와 super journal, `ANALYZE`/`PRAGMA optimize`. sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 모두 통과 ([SQLite 호환](docs/sqlite.md))
 - [x] **Phase 4 · 공통 IR**: SQLite 파스 트리와 코드 생성기 진입점을 IR로 삼고 프론트엔드를 분리. 연결 단위 방언 선택, 방언 훅, STRICT 기반 엄격한 타입, `xq_catalog`·`xq_sequence`. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 같음 ([방언 아키텍처](docs/architecture.md))
 - [x] **Phase 5 · PostgreSQL 방언**: lexer·파서, SELECT·DML 전반, `RETURNING`·`ON CONFLICT`, DDL과 엄격한 타입, `SERIAL`/`IDENTITY`, `information_schema`·`pg_catalog`. PostgreSQL 16과 차등 비교 ([PostgreSQL 호환](docs/postgres.md))
 - [x] **Phase 6 · MariaDB 방언**: 토크나이저·파서, 연결 단위 `sql_mode`, `INSERT IGNORE`/`REPLACE`/`ON DUPLICATE KEY UPDATE`, `AUTO_INCREMENT`, MariaDB 타입과 collation, `SHOW`/`information_schema`. MariaDB 11.8과 차등 비교 ([MariaDB 호환](docs/mariadb.md))

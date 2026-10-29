@@ -1,7 +1,7 @@
 //! PRAGMA statements (port of pragma.c and the generated pragma.h).
 //!
-//! Pragmas that need missing subsystems (exclusive locking, ANALYZE,
-//! UTF-16) fail with "not supported yet".
+//! Pragmas that need missing subsystems (exclusive locking, UTF-16) fail
+//! with "not supported yet".
 
 const std = @import("std");
 const flags = @import("../util/flags.zig");
@@ -1186,7 +1186,8 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // so this does nothing.
         .shrink_memory => {},
 
-        .optimize => return pending.notYet(p, "PRAGMA optimize"),
+        // PRAGMA [schema.]optimize[(MASK)]: in analyze.zig.
+        .optimize => try @import("analyze.zig").optimize(p, v, i_db, zdb == null, right),
 
         // PRAGMA busy_timeout[=N].
         .busy_timeout => {

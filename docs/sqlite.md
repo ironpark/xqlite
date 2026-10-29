@@ -50,6 +50,16 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 - 롤백 저널 모드에서 두 개 이상의 파일에 쓰는 트랜잭션은 super journal(`<main>-mjXXXXXX9XX`)로 커밋합니다. 그래서 커밋 도중에 죽어도 모든 파일이 함께 되돌아가거나 함께 커밋됩니다. 형식이 sqlite3와 같아서 서로 남긴 super journal을 복구합니다.
 - 엔진 쪽 API: `sql.main.dbName()`, `dbFilename()`, `dbReadonly()`(`sqlite3_db_name`, `sqlite3_db_filename`, `sqlite3_db_readonly`). 엔진 코드가 데이터베이스를 붙였다 뗄 때는 `ATTACH` 문장을 실행하고 `sql.attach.closeDb()`로 뗍니다(VACUUM이 쓸 방식).
 
+### 통계(ANALYZE)
+
+- `ANALYZE`, `ANALYZE schema`, `ANALYZE [schema.]table`, `ANALYZE [schema.]index`를 지원합니다. 이름 없는 `ANALYZE`는 TEMP만 빼고 모든 데이터베이스를 분석합니다.
+- `sqlite_stat1`을 만들고 채웁니다. 같은 데이터면 행(rowid 포함)이 sqlite3와 바이트 단위로 같습니다.
+  - 부분 인덱스, WITHOUT ROWID 테이블, `PRAGMA analysis_limit`을 지원합니다. 뷰, 가상 테이블, `sqlite_` 테이블은 건너뜁니다.
+  - 테이블을 sqlite3의 스키마 해시 순서(`src/sql/hash.zig`)로 돌아서 바이트코드와 행 순서가 같습니다.
+- 분석이 끝나면 `OP_LoadAnalysis`가 통계를 다시 읽으므로 같은 연결의 다음 쿼리부터 플래너가 씁니다. 다른 연결은 스키마를 읽을 때 `sqlite_stat1`을 읽습니다. 직접 쓴 `unordered`, `sz=N`, `noskipscan` 표시도 읽습니다.
+- `PRAGMA [schema.]optimize[(MASK)]`는 pragma.c 3.54.1과 같은 기준으로 분석할 테이블을 고릅니다. 마스크 `0x01`(실행하지 않고 문장만 출력), `0x02`, `0x10`(analysis_limit), `0x10000`을 지원합니다.
+- 결과와 바이트코드를 sqlite3 3.54.1과 맞췄습니다.
+
 ### 윈도우 함수
 
 - `OVER`, `WINDOW`, `FILTER` 절을 지원합니다.
@@ -118,8 +128,9 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 | `tools/interop-savepoint.sh`, `interop-hot-journal.sh` | 세이브포인트·문장 롤백, 핫 저널 복구 |
 | `tools/interop-wal.sh` | WAL 파일 상호 읽기, 체크포인트, 크래시 복구, 두 엔진 프로세스 동시 접근 |
 | `tools/interop-attach.sh` | 서로의 파일을 붙여 읽고 쓰기, 여러 파일 트랜잭션, 커밋 도중 크래시와 super journal 복구 |
+| `tools/interop-analyze.sh` | 같은 데이터의 `sqlite_stat1` 행, 서로 분석한 DB의 실행 계획과 `PRAGMA optimize` |
 | `tools/planner/diff.py` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드를 sqlite3와 비교 |
-| `tools/slt/run.py` | sqllogictest. WAL 모드로도 돌립니다([tools/slt/README.md](../tools/slt/README.md)). |
+| `tools/slt/run.py` | sqllogictest. 스크립트 622개, 테스트 5,939,879개를 롤백 저널과 WAL 모드에서 모두 통과합니다([tools/slt/README.md](../tools/slt/README.md)). |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`)에서 크래시·누수 |
 
 실행 방법은 [테스트 문서](testing.md)를 보세요.
@@ -128,13 +139,14 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 
 문장으로 쓰면 `not supported yet` 오류가 나는 것:
 
-- `VACUUM`, `ANALYZE`, `PRAGMA optimize`
+- `VACUUM`
 - `PRAGMA locking_mode=EXCLUSIVE`. 그래서 힙 메모리 WAL 모드도 없습니다.
 - `PRAGMA journal_mode=MEMORY`
 - `PRAGMA encoding=UTF-16`
 
 그 밖에 없는 것:
 
+- `sqlite_stat4`(`SQLITE_ENABLE_STAT4`). 기준 sqlite3 빌드도 끄므로 `ANALYZE`는 `sqlite_stat1`만 쓰고, `sqlite_stat4`·`sqlite_stat3`이 있으면 행을 지우기만 합니다.
 - WAL 스냅샷 API
 - 백업 API
 - 메모리 데이터베이스. `":memory:"`는 임시 파일이라 `journal_mode`가 `memory`가 아닌 `delete`입니다.
@@ -142,6 +154,5 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 - 공유 캐시. URI의 `cache=`는 검사만 하고 무시합니다.
 - 권한 콜백(authorizer). `ATTACH`/`DETACH`도 검사하지 않습니다.
 - 메모리 맵 I/O. `PRAGMA mmap_size`는 항상 0을 돌려줍니다.
-- sqllogictest 전체 통과
 - Windows VFS
 - sqlite3 호환 C ABI

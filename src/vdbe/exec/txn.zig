@@ -312,11 +312,16 @@ pub fn opCreateBtree(e: *Exec, op: *Op) Error!Flow {
 
 pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     var err_msg: ?[:0]u8 = null;
+    e.db.n_sql_exec += 1;
+    const saved_analysis_limit = e.db.n_analysis_limit;
+    if (op.p1 & 0x0002 != 0) e.db.n_analysis_limit = op.p2;
     // xqlite: the SQL is the engine's, SQLite text in any dialect.
     const dialect = @import("../../dialect/dialect.zig");
     const saved_lang = dialect.swapLang(e.db, .sqlite);
     const rc = @import("../../sql/legacy.zig").execNoCallback(e.db, std.mem.span(op.p4.z), &err_msg);
     _ = dialect.swapLang(e.db, saved_lang);
+    e.db.n_sql_exec -= 1;
+    e.db.n_analysis_limit = saved_analysis_limit;
     if (err_msg != null or rc != RC.OK) {
         aux.vdbeError(e.v, "{s}", .{err_msg orelse ""});
         if (err_msg) |m| e.db.gpa.free(m);

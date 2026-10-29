@@ -536,6 +536,13 @@ test "pg: SQLite's administrative statements; the same code as SQLite" {
     try expectSameCode(&c, "SELECT x.id FROM k LEFT JOIN k x ON x.n = k.id ORDER BY x.id", "SELECT x.id FROM k LEFT JOIN k x ON x.n = k.id ORDER BY x.id NULLS LAST");
     try c.exec("INSERT INTO k VALUES (1, 1, NULL), (2, 2, 5)");
     try c.expectRows("SELECT m AS id FROM k ORDER BY id", "5\nNULL\n");
+    // ANALYZE takes PostgreSQL's arguments: VERBOSE, schema public.
+    try c.exec("INSERT INTO t VALUES (1, 'x'), (1, 'y'), (2, 'z')");
+    try expectSameCode(&c, "ANALYZE VERBOSE public.t", "ANALYZE main.t");
+    try expectSameCode(&c, "ANALYZE t_a", "ANALYZE t_a");
+    try c.expectRows("ANALYZE public.t; SELECT tbl, idx, stat FROM sqlite_stat1", "t|t_a|3 2\n");
+    try c.expectRows("ANALYZE; SELECT count(*) FROM sqlite_stat1 WHERE tbl = 't'", "1\n");
+    try c.expectError("ANALYZE nosuch", "relation \"nosuch\" does not exist");
     // Back to SQLite.
     try c.exec("PRAGMA xq_dialect = 'sqlite'");
     try c.expectRows("SELECT 'a' LIKE 'A'", "1\n");

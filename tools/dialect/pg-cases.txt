@@ -1,4 +1,4 @@
--- Differential cases for the PostgreSQL dialect (tools/dialect/pg-diff.sh).
+-- Differential cases for the PostgreSQL dialect (xqt dialect-diff pg).
 -- Each case starts with a "-- case:" line and runs on an empty database,
 -- in PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
 -- `.dialect postgres`; the rows, column names and error messages (the

@@ -15,6 +15,7 @@ pub const modules = .{
     @import("interop/sql.zig"),
     @import("interop/hot_journal.zig"),
     @import("interop/attach.zig"),
+    @import("interop/vacuum.zig"),
 };
 
 pub const usage =

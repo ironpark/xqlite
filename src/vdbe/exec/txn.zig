@@ -404,6 +404,16 @@ pub fn opIntegrityCk(e: *Exec, op: *Op) Error!Flow {
 /// OP_Checkpoint: checkpoint database P1 (MAX_DB: all of them) in
 /// mode P2, writing to registers P3..P3+2 the busy flag, the WAL size
 /// and the frames checkpointed (-1 if not in WAL mode).
+/// OP_Vacuum: vacuum database P1, or write a vacuumed copy of it to the
+/// file named in register P2 if P2 is not 0 (VACUUM INTO).
+pub fn opVacuum(e: *Exec, op: *Op) Error!Flow {
+    std.debug.assert(!e.v.read_only);
+    const out: ?*vi.Mem = if (op.p2 != 0) e.reg(op.p2) else null;
+    const rc = @import("../../sql/vacuum.zig").runVacuum(e.v, e.db, @intCast(op.p1), out);
+    if (rc != RC.OK) return e.abort(rc);
+    return .next;
+}
+
 pub fn opCheckpoint(e: *Exec, op: *Op) Error!Flow {
     var res = [3]i32{ 0, -1, -1 };
     main_mod.checkpoint(e.db, op.p1, @fromBackingInt(@intCast(op.p2)), &res[1], &res[2]) catch |err| switch (err) {

@@ -146,6 +146,12 @@ test {
 }
 
 test {
+    std.testing.refAllDecls(@import("sql/vacuum.zig"));
+    std.testing.refAllDecls(@import("sql/backup.zig"));
+    _ = @import("sql/vacuum_test.zig");
+}
+
+test {
     // The fuzzers' smoke test (`zig build fuzz` runs them for longer).
     _ = @import("fuzz_tests.zig");
 }

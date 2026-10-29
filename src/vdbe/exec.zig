@@ -344,11 +344,11 @@ pub const Exec = struct {
                 OP.IFindKey => cursor.opIFindKey(e, op),
                 OP.Noop, OP.Explain, OP.CursorHint, OP.Abortable, OP.ReleaseReg => .next,
                 OP.RowCell => btree_ops.opRowCell(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                // Not ported (Vacuum), only with a shared cache (TableLock)
-                // or in C builds with SQLITE_ENABLE_OFFSET_SQL_FUNC (Offset)
-                // or SQLITE_ENABLE_COLUMN_USED_MASK (ColumnsUsed); never
-                // coded.
-                OP.Vacuum, OP.TableLock, OP.Offset, OP.ColumnsUsed => misc.opNotSupported(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
+                OP.Vacuum => txn.opVacuum(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
+                // Only with a shared cache (TableLock) or in C builds with
+                // SQLITE_ENABLE_OFFSET_SQL_FUNC (Offset) or
+                // SQLITE_ENABLE_COLUMN_USED_MASK (ColumnsUsed); never coded.
+                OP.TableLock, OP.Offset, OP.ColumnsUsed => misc.opNotSupported(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
             };
             switch (flow) {
                 .next, .jump_p2, .check_interrupt, .jump_p2_check_interrupt => {

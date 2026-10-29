@@ -1,0 +1,138 @@
+# VACUUM and VACUUM INTO: the bytecode of every form (OP_Vacuum, the
+# INTO expression), the errors, and the database after a VACUUM (the
+# DML check compares .dump and integrity_check) with page_size and
+# auto_vacuum changes; then INSERT INTO ... SELECT * FROM, which takes the
+# transfer optimization VACUUM relies on.
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c BLOB);
+CREATE INDEX tb ON t(b);
+CREATE UNIQUE INDEX tc ON t(c, b);
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<300) INSERT INTO t SELECT i, printf('%.*c', i % 200, 'v'), randomblob(i % 3000) FROM n;
+DELETE FROM t WHERE a % 4 = 1;
+CREATE TABLE w(k TEXT PRIMARY KEY, v) WITHOUT ROWID;
+INSERT INTO w SELECT b || a, length(c) FROM t;
+CREATE TABLE s(id INTEGER PRIMARY KEY AUTOINCREMENT, x);
+INSERT INTO s(x) VALUES(1),(2),(3);
+CREATE VIEW tv AS SELECT a, b FROM t;
+CREATE TRIGGER ttr AFTER DELETE ON t BEGIN INSERT INTO s(x) VALUES(old.a); END;
+==
+VACUUM
+VACUUM main
+VACUUM "main"
+VACUUM temp
+VACUUM nosuch
+VACUUM main.x
+VACUUM INTO 'out.db'
+VACUUM main INTO 'out.db'
+VACUUM INTO 'o' || 'ut.db'
+VACUUM INTO ?
+VACUUM INTO 1
+VACUUM INTO NULL
+VACUUM INTO x'6f75742e6462'
+VACUUM INTO (SELECT 'out.db')
+VACUUM INTO a
+VACUUM temp INTO 'out.db'
+VACUUM; SELECT count(*), sum(a), sum(length(c)) FROM t
+VACUUM; PRAGMA integrity_check; PRAGMA freelist_count; PRAGMA page_count
+PRAGMA page_size=1024; VACUUM; PRAGMA page_size; PRAGMA page_count
+PRAGMA page_size=65536; VACUUM; PRAGMA page_size; PRAGMA page_count
+PRAGMA page_size=512; PRAGMA auto_vacuum=FULL; VACUUM; PRAGMA auto_vacuum; PRAGMA page_count
+PRAGMA auto_vacuum=INCREMENTAL; VACUUM; PRAGMA auto_vacuum; PRAGMA integrity_check
+PRAGMA auto_vacuum=FULL; VACUUM; PRAGMA auto_vacuum=NONE; VACUUM; PRAGMA auto_vacuum
+PRAGMA user_version=7; PRAGMA application_id=99; VACUUM; PRAGMA user_version; PRAGMA application_id
+PRAGMA schema_version; VACUUM; PRAGMA schema_version
+VACUUM INTO 'out.db'; ATTACH 'out.db' AS o; SELECT count(*) FROM o.t; PRAGMA o.integrity_check
+PRAGMA page_size=2048; VACUUM INTO 'out.db'; ATTACH 'out.db' AS o; PRAGMA o.page_size; PRAGMA page_size
+VACUUM INTO 'out.db'; VACUUM INTO 'out.db'
+BEGIN; VACUUM
+SAVEPOINT x; VACUUM
+CREATE TEMP TABLE tt(x); VACUUM; SELECT * FROM tt
+EXPLAIN VACUUM; SELECT 1
+----
+# A WAL database: the page size cannot change by VACUUM, but can by
+# VACUUM INTO.
+PRAGMA journal_mode=wal;
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+CREATE INDEX tb ON t(b);
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<500) INSERT INTO t SELECT i, 'v' || i FROM n;
+DELETE FROM t WHERE a % 3 = 0;
+==
+VACUUM
+VACUUM; PRAGMA journal_mode; SELECT count(*) FROM t; PRAGMA page_count
+PRAGMA page_size=1024; VACUUM; PRAGMA page_size
+PRAGMA page_size=1024; VACUUM INTO 'out.db'; ATTACH 'out.db' AS o; PRAGMA o.page_size; PRAGMA o.journal_mode
+----
+# An attached database.
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+INSERT INTO t VALUES(1, 'x'), (2, 'y');
+ATTACH 'aux.db' AS aux;
+CREATE TABLE aux.u(x PRIMARY KEY, y) WITHOUT ROWID;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<200) INSERT INTO aux.u SELECT i, randomblob(100) FROM n;
+DELETE FROM aux.u WHERE x % 2 = 0;
+.each ATTACH 'aux.db' AS aux
+==
+VACUUM aux
+VACUUM aux; PRAGMA aux.integrity_check; PRAGMA aux.freelist_count; SELECT count(*) FROM aux.u
+VACUUM aux INTO 'out.db'; ATTACH 'out.db' AS o; SELECT count(*) FROM o.u
+PRAGMA aux.page_size=4096; VACUUM aux; PRAGMA aux.page_size
+VACUUM "AUX"
+----
+# The transfer optimization: compatible tables copy the records, rowids
+# included, with or without a test that the destination is empty.
+CREATE TABLE t1(a INTEGER PRIMARY KEY, b TEXT, c DEFAULT 5);
+CREATE INDEX t1b ON t1(b);
+INSERT INTO t1 VALUES(1, 'x', 1), (5, 'y', 2), (9, 'z', NULL);
+CREATE TABLE t2(a INTEGER PRIMARY KEY, b TEXT, c DEFAULT 5);
+CREATE INDEX t2b ON t2(b);
+CREATE TABLE t3(a, b TEXT, c DEFAULT 5);
+CREATE TABLE t4(a INTEGER PRIMARY KEY, b TEXT, c DEFAULT 6);
+CREATE TABLE t5(a INTEGER PRIMARY KEY, b TEXT UNIQUE, c DEFAULT 5);
+CREATE TABLE r1(a, b);
+INSERT INTO r1 VALUES(1, 2), (3, 4);
+CREATE TABLE r2(a, b);
+CREATE TABLE r3(a, b);
+CREATE INDEX r3a ON r3(a);
+CREATE TABLE w1(k PRIMARY KEY, v) WITHOUT ROWID;
+INSERT INTO w1 VALUES('a', 1), ('b', 2);
+CREATE TABLE w2(k PRIMARY KEY, v) WITHOUT ROWID;
+CREATE TABLE st1(a INT, b TEXT) STRICT;
+CREATE TABLE st2(a INTEGER, b TEXT) STRICT;
+CREATE TABLE g1(a, b AS (a + 1));
+CREATE TABLE g2(a, b AS (a + 1));
+CREATE TABLE ck1(a CHECK(a > 0));
+CREATE TABLE ck2(a CHECK(a > 0));
+CREATE TABLE ai1(a INTEGER PRIMARY KEY AUTOINCREMENT, b);
+CREATE TABLE ai2(a INTEGER PRIMARY KEY AUTOINCREMENT, b);
+INSERT INTO ai1(b) VALUES(1), (2);
+==
+INSERT INTO t2 SELECT * FROM t1
+INSERT INTO t2 SELECT * FROM t1; SELECT * FROM t2
+INSERT OR REPLACE INTO t2 SELECT * FROM t1
+INSERT OR IGNORE INTO t2 SELECT * FROM t1
+INSERT INTO t3 SELECT * FROM t1
+INSERT INTO t4 SELECT * FROM t1
+INSERT INTO t5 SELECT * FROM t1
+INSERT INTO r2 SELECT * FROM r1
+INSERT INTO r2 SELECT * FROM r1; INSERT INTO r2 SELECT * FROM r1; SELECT rowid, * FROM r2
+INSERT INTO r3 SELECT * FROM r1
+INSERT INTO r3 SELECT * FROM r1; INSERT INTO r3 SELECT * FROM r1; SELECT rowid, * FROM r3
+INSERT INTO w2 SELECT * FROM w1
+INSERT INTO w2 SELECT * FROM w1; SELECT * FROM w2
+INSERT INTO st2 SELECT * FROM st1
+INSERT INTO st1 SELECT * FROM st2
+INSERT INTO st1 SELECT * FROM r1
+INSERT INTO g2 SELECT * FROM g1
+INSERT INTO ck2 SELECT * FROM ck1
+INSERT INTO ai2 SELECT * FROM ai1
+INSERT INTO ai2 SELECT * FROM ai1; SELECT * FROM sqlite_sequence
+INSERT INTO t2 SELECT * FROM t1 WHERE a > 1
+INSERT INTO t2 SELECT * FROM t1 ORDER BY a
+INSERT INTO t2 SELECT * FROM t1 LIMIT 1
+INSERT INTO t2 SELECT DISTINCT * FROM t1
+INSERT INTO t2 SELECT a, b, c FROM t1
+INSERT INTO t2(a, b, c) SELECT * FROM t1
+INSERT INTO t2 SELECT * FROM (SELECT * FROM t1)
+INSERT INTO t2 SELECT * FROM t2
+INSERT INTO t2 SELECT * FROM tv
+WITH x AS (SELECT 1) INSERT INTO t2 SELECT * FROM t1
+PRAGMA count_changes=1; INSERT INTO t2 SELECT * FROM t1
+PRAGMA foreign_keys=1; INSERT INTO t2 SELECT * FROM t1

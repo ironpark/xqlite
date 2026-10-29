@@ -295,7 +295,8 @@ pub const Pager = struct {
         errdefer gpa.free(wal_path);
 
         const fd = try v.open(if (path_arg != null) path else null, .{
-            .kind = .main_db,
+            // A temporary database is SQLITE_OPEN_TEMP_DB, as in sqlite3BtreeOpen().
+            .kind = if (path_arg != null) .main_db else .temp_db,
             .read_write = !opts.read_only,
             .create = opts.create and !opts.read_only,
         });

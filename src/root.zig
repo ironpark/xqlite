@@ -129,6 +129,7 @@ test {
         @import("vdbe/exec/misc.zig"),      @import("util/flags.zig"),         @import("sql/sqlite_int.zig"),
         @import("util/thunk.zig"),          @import("util/cast.zig"),          @import("dialect/dialect.zig"),
         @import("ir/ir.zig"),               @import("catalog/catalog.zig"),    @import("catalog/sequence.zig"),
+        @import("sql/hash.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

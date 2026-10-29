@@ -1124,6 +1124,8 @@ pub const Schema = struct {
     schema_cookie: i32 = 0,
     i_generation: i32 = 0,
     tbl_hash: NameMap(*Table) = .empty,
+    /// The tables in the order of C's tblHash (hash.zig).
+    tbl_order: @import("hash.zig").HashOrder(*Table) = .{},
     idx_hash: NameMap(*Index) = .empty,
     trig_hash: NameMap(*Trigger) = .empty,
     fkey_hash: NameMap(*FKey) = .empty,

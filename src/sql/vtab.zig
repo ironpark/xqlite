@@ -551,6 +551,11 @@ pub fn finishParse(p: *Parse, end: ?Token) void {
             db.oomFault();
             return;
         };
+        s.tbl_order.insert(db.gpa, t.name, t) catch {
+            _ = s.tbl_hash.remove(t.name);
+            db.oomFault();
+            return;
+        };
         p.new_table = null;
     }
 }

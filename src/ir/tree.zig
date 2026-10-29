@@ -204,7 +204,7 @@ pub const Case = struct {
 /// an application function, or with `dialect` set, the function of that
 /// name in the table of that dialect (dialect.Hooks.functions), which
 /// lowering calls by its name in that dialect and render as
-/// xq_<dialect>_<name> (dialect.findQualifiedFunction()).
+/// xq_<dialect>_<name> (dialect.qualifiedFunctionSearch()).
 pub const Func = struct {
     name: Name,
     dialect: ?Dialect = null,

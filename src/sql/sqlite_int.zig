@@ -2261,6 +2261,8 @@ pub const Sqlite3 = struct {
     wal_arg: ?*anyopaque = null,
     /// PRAGMA analysis_limit.
     n_analysis_limit: i32 = 0,
+    /// OP_SqlExec statements running (nSqlExec).
+    n_sql_exec: i32 = 0,
     /// Registered virtual table modules (aModule).
     modules: NameMap(*Module) = .empty,
     /// Context of the virtual table constructor running (pVtabCtx).

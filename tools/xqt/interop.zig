@@ -15,6 +15,7 @@ pub const modules = .{
     @import("interop/sql.zig"),
     @import("interop/hot_journal.zig"),
     @import("interop/btree.zig"),
+    @import("interop/savepoint.zig"),
 };
 
 pub const usage =

@@ -5,6 +5,7 @@
 const std = @import("std");
 const btree = @import("btree.zig");
 const page = @import("page.zig");
+const header = @import("header.zig");
 const ptrmap = @import("ptrmap.zig");
 
 const Btree = btree.Btree;
@@ -403,7 +404,7 @@ pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u
         if (check_freelist) {
             c.prefix = .freelist;
             const p1 = bt.page1.?.data;
-            c.checkList(true, get4(p1 + 32), get4(p1 + 36));
+            c.checkList(true, header.get(p1, .first_freelist_trunk), header.get(p1, .freelist_count));
             c.prefix = .none;
         }
 
@@ -412,11 +413,11 @@ pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u
             if (bt.isAutoVacuum()) {
                 var mx: Pgno = 0;
                 for (roots) |r| mx = @max(mx, r);
-                const mx_in_hdr = get4(p1 + 52);
+                const mx_in_hdr = header.get(p1, .largest_root_page);
                 if (mx != mx_in_hdr) {
                     c.appendMsg("max rootpage ({d}) disagrees with header ({d})", .{ mx, mx_in_hdr });
                 }
-            } else if (get4(p1 + 64) != 0) {
+            } else if (header.get(p1, .incremental_vacuum) != 0) {
                 c.appendMsg("incremental_vacuum enabled with a max rootpage of zero", .{});
             }
         }

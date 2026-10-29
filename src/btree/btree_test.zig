@@ -53,10 +53,14 @@ fn fillPayload(buf: []u8, rowid: i64) void {
 }
 
 fn insertRow(cur: *Cursor, rowid: i64) !void {
+    return insertRowWith(cur, rowid, .{});
+}
+
+fn insertRowWith(cur: *Cursor, rowid: i64, opts: Cursor.InsertOptions) !void {
     var buf: [10000]u8 = undefined;
     const data = buf[0..payloadLen(rowid)];
     fillPayload(data, rowid);
-    try cur.insert(.{ .rowid = rowid, .data = data }, .{});
+    try cur.insert(.{ .rowid = rowid, .data = data }, opts);
 }
 
 fn expectRow(cur: *Cursor, rowid: i64) !void {
@@ -460,47 +464,43 @@ test "btree: index b-tree with record keys" {
     }
 }
 
-/// Inserts rows (tables) or keys (indexes) 1..n in ascending order, as
-/// CREATE INDEX does from its sorter. Returns the pages the tree took.
-fn loadAscending(bt: *Btree, root: Pgno, kind: btree.TableKind, ki: *const record.KeyInfo, n: usize, bulk: bool) !u32 {
+/// Inserts rows 1..n (tables, `ki` null) or index keys 1..n in ascending
+/// order, as CREATE INDEX does from its sorter. Returns the pages the tree
+/// took.
+fn loadAscending(bt: *Btree, root: Pgno, ki: ?*const record.KeyInfo, n: usize, bulk: bool) !u32 {
     const before = bt.lastPage();
     var cur: Cursor = undefined;
-    const is_index = kind == .blobkey;
-    try bt.cursor(&cur, root, .{ .write = true, .key_info = if (is_index) ki.btreeKeyInfo() else null });
+    try bt.cursor(&cur, root, .{ .write = true, .key_info = if (ki) |k| k.btreeKeyInfo() else null });
     defer cur.close();
     cur.setBulkLoad(bulk);
-    var text_buf: [400]u8 = undefined;
     for (1..n + 1) |i| {
         const k: i64 = @intCast(i);
-        if (!is_index) {
-            var buf: [10000]u8 = undefined;
-            const data = buf[0..payloadLen(k)];
-            fillPayload(data, k);
-            try cur.insert(.{ .rowid = k, .data = data }, .{ .append = true });
+        if (ki == null) {
+            try insertRowWith(&cur, k, .{ .append = true });
             continue;
         }
-        // Every 4th key overflows a 512-byte page.
-        const head = std.fmt.bufPrint(&text_buf, "key-{d:0>6}-", .{i}) catch unreachable;
-        const pad: usize = if (i % 4 == 0) 300 else i % 40;
-        @memset(text_buf[head.len..][0..pad], 'z');
-        const key = try record.encodeAlloc(gpa, &.{ .{ .text = text_buf[0 .. head.len + pad] }, .{ .int = k } });
-        defer gpa.free(key);
-        try cur.insert(.{ .key = key }, .{ .append = true });
+        // Ordered by the integer; the text makes every 4th key overflow.
+        var text_buf: [400]u8 = undefined;
+        var key_buf: [450]u8 = undefined;
+        const values = [_]Value{ .{ .int = k }, .{ .text = indexKeyText(&text_buf, i, true) } };
+        try cur.insert(.{ .key = record.encodeBuf(&values, &key_buf) }, .{ .append = true });
     }
     return bt.lastPage() - before;
 }
 
 /// Checks that two b-trees hold the same entries in the same order.
-fn expectSameEntries(bt: *Btree, a: Pgno, b: Pgno, ki: ?record.KeyInfo) !void {
+fn expectSameEntries(bt: *Btree, a: Pgno, b: Pgno, ki: ?*const record.KeyInfo) !void {
     var ca: Cursor = undefined;
     var cb: Cursor = undefined;
-    const key_info = if (ki) |*k| k.btreeKeyInfo() else null;
+    const key_info = if (ki) |k| k.btreeKeyInfo() else null;
     try bt.cursor(&ca, a, .{ .key_info = key_info });
     defer ca.close();
     try bt.cursor(&cb, b, .{ .key_info = key_info });
     defer cb.close();
     var ok_a = try ca.first();
     var ok_b = try cb.first();
+    var pa: [10000]u8 = undefined;
+    var pb: [10000]u8 = undefined;
     while (ok_a and ok_b) : ({
         ok_a = try ca.next();
         ok_b = try cb.next();
@@ -508,13 +508,9 @@ fn expectSameEntries(bt: *Btree, a: Pgno, b: Pgno, ki: ?record.KeyInfo) !void {
         if (ki == null) try testing.expectEqual(ca.integerKey(), cb.integerKey());
         const len = ca.payloadSize();
         try testing.expectEqual(len, cb.payloadSize());
-        const pa = try gpa.alloc(u8, len);
-        defer gpa.free(pa);
-        const pb = try gpa.alloc(u8, len);
-        defer gpa.free(pb);
-        try ca.payload(0, pa);
-        try cb.payload(0, pb);
-        try testing.expectEqualSlices(u8, pa, pb);
+        try ca.payload(0, pa[0..len]);
+        try cb.payload(0, pb[0..len]);
+        try testing.expectEqualSlices(u8, pa[0..len], pb[0..len]);
     }
     try testing.expectEqual(ok_a, ok_b);
 }
@@ -527,23 +523,23 @@ test "btree: bulk load packs pages and leaves a valid tree" {
             const bt = try env.open(.{ .page_size = page_size });
             defer bt.close(.{});
             const ki: record.KeyInfo = .{ .gpa = gpa, .sort_orders = &.{ .asc, .asc } };
-            const opt_ki: ?record.KeyInfo = if (kind == .blobkey) ki else null;
+            const opt_ki: ?*const record.KeyInfo = if (kind == .blobkey) &ki else null;
             const n = 2000;
 
             try bt.beginTrans(.write, 0);
             const bulk_root = try bt.createTable(kind);
             const plain_root = try bt.createTable(kind);
-            const bulk_pages = try loadAscending(bt, bulk_root, kind, &ki, n, true);
-            const plain_pages = try loadAscending(bt, plain_root, kind, &ki, n, false);
+            const bulk_pages = try loadAscending(bt, bulk_root, opt_ki, n, true);
+            const plain_pages = try loadAscending(bt, plain_root, opt_ki, n, false);
             try expectIntact(bt, &.{ bulk_root, plain_root });
             try expectSameEntries(bt, bulk_root, plain_root, opt_ki);
             // Bulk loading fills index pages instead of leaving room to
             // grow. Appends to a table already fill their leaves (balance
-            // quick), so there it can only match.
+            // quick), so there it changes nothing.
             if (kind == .blobkey) {
                 try testing.expect(bulk_pages < plain_pages);
             } else {
-                try testing.expect(bulk_pages <= plain_pages);
+                try testing.expectEqual(plain_pages, bulk_pages);
             }
             try bt.commit();
 
@@ -551,7 +547,7 @@ test "btree: bulk load packs pages and leaves a valid tree" {
             try bt.beginTrans(.write, 0);
             for ([_]Pgno{ bulk_root, plain_root }) |root| {
                 var cur: Cursor = undefined;
-                try bt.cursor(&cur, root, .{ .write = true, .key_info = if (opt_ki) |*k| k.btreeKeyInfo() else null });
+                try bt.cursor(&cur, root, .{ .write = true, .key_info = if (opt_ki) |k| k.btreeKeyInfo() else null });
                 defer cur.close();
                 var ok = try cur.first();
                 var i: usize = 0;

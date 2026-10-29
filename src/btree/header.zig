@@ -33,38 +33,51 @@ pub const FormatVersion = enum(u8) {
     }
 };
 
-/// Byte offsets of the header fields that are read or written in place on
-/// page 1.
-pub const offset = struct {
-    pub const write_version = 18;
-    pub const read_version = 19;
-    pub const reserved_space = 20;
-    pub const file_change_counter = 24;
-    pub const database_size = 28;
-    pub const first_freelist_trunk = 32;
-    pub const freelist_count = 36;
-    /// The meta values (btree.Meta), 4 bytes each, starting with the
-    /// freelist count.
-    pub const meta = 36;
-    pub const largest_root_page = 52;
-    pub const incremental_vacuum = 64;
-    pub const version_valid_for = 92;
+/// Offsets of the one-byte fields written in place on page 1.
+pub const write_version_offset = 18;
+pub const read_version_offset = 19;
+pub const reserved_space_offset = 20;
+/// Offset of the meta values (btree.Meta), 4 bytes each, starting with
+/// the freelist count.
+pub const meta_offset = 36;
+
+/// The big-endian u32 fields read and written in place on page 1, valued
+/// by their byte offset. See `get` and `put`.
+pub const Field = enum(u8) {
+    file_change_counter = 24,
+    database_size = 28,
+    first_freelist_trunk = 32,
+    freelist_count = 36,
+    largest_root_page = 52,
+    incremental_vacuum = 64,
+    version_valid_for = 92,
 };
+
+/// Reads field `f` of the header at the start of `page1`.
+pub fn get(page1: [*]const u8, f: Field) u32 {
+    return std.mem.readInt(u32, page1[@backingInt(f)..][0..4], .big);
+}
+
+/// Writes field `f` of the header at the start of `page1`, which the
+/// caller has made writable.
+pub fn put(page1: [*]u8, f: Field, v: u32) void {
+    std.mem.writeInt(u32, page1[@backingInt(f)..][0..4], v, .big);
+}
 
 /// Big-endian u32 fields of `Header` and their byte offsets.
 const u32_fields = .{
-    .{ "file_change_counter", offset.file_change_counter },
-    .{ "database_size", offset.database_size },
-    .{ "first_freelist_trunk", offset.first_freelist_trunk },
-    .{ "freelist_count", offset.freelist_count },
+    .{ "file_change_counter", @backingInt(Field.file_change_counter) },
+    .{ "database_size", @backingInt(Field.database_size) },
+    .{ "first_freelist_trunk", @backingInt(Field.first_freelist_trunk) },
+    .{ "freelist_count", @backingInt(Field.freelist_count) },
     .{ "schema_cookie", 40 },
     .{ "schema_format", 44 },
     .{ "default_cache_size", 48 },
-    .{ "largest_root_page", offset.largest_root_page },
+    .{ "largest_root_page", @backingInt(Field.largest_root_page) },
     .{ "user_version", 60 },
-    .{ "incremental_vacuum", offset.incremental_vacuum },
+    .{ "incremental_vacuum", @backingInt(Field.incremental_vacuum) },
     .{ "application_id", 68 },
-    .{ "version_valid_for", offset.version_valid_for },
+    .{ "version_valid_for", @backingInt(Field.version_valid_for) },
     .{ "sqlite_version", 96 },
 };
 
@@ -105,18 +118,18 @@ pub const Header = struct {
         if (!std.mem.eql(u8, bytes[0..16], magic)) return error.NotADatabase;
         // Readers must refuse files whose read version they do not know. An
         // unknown write version only makes the file read-only; see `readOnly`.
-        const read_version: FormatVersion = @enumFromInt(bytes[19]);
+        const read_version: FormatVersion = @enumFromInt(bytes[read_version_offset]);
         if (!read_version.known()) return error.NotADatabase;
         if (!std.mem.eql(u8, bytes[21..24], &payload_fractions)) return error.NotADatabase;
 
         const page_size = pageSize(bytes) orelse return error.NotADatabase;
-        if (page_size - bytes[20] < 480) return error.NotADatabase;
+        if (page_size - bytes[reserved_space_offset] < 480) return error.NotADatabase;
 
         var h: Header = .{
             .page_size = page_size,
-            .write_version = @enumFromInt(bytes[18]),
+            .write_version = @enumFromInt(bytes[write_version_offset]),
             .read_version = read_version,
-            .reserved_space = bytes[20],
+            .reserved_space = bytes[reserved_space_offset],
             .text_encoding = @enumFromInt(get4(bytes, 56)),
         };
         inline for (u32_fields) |f| @field(h, f[0]) = get4(bytes, f[1]);
@@ -129,9 +142,9 @@ pub const Header = struct {
         @memcpy(out[0..16], magic);
         const ps: u16 = if (h.page_size == max_page_size) 1 else @intCast(h.page_size);
         std.mem.writeInt(u16, out[16..18], ps, .big);
-        out[18] = @intFromEnum(h.write_version);
-        out[19] = @intFromEnum(h.read_version);
-        out[20] = h.reserved_space;
+        out[write_version_offset] = @intFromEnum(h.write_version);
+        out[read_version_offset] = @intFromEnum(h.read_version);
+        out[reserved_space_offset] = h.reserved_space;
         out[21..24].* = payload_fractions;
         put4(out, 56, @intFromEnum(h.text_encoding));
         @memset(out[72..92], 0);
@@ -153,14 +166,6 @@ pub const Header = struct {
     /// Otherwise the size must be derived from the file length.
     pub fn inHeaderSizeValid(h: Header) bool {
         return h.database_size != 0 and h.version_valid_for == h.file_change_counter;
-    }
-
-    pub fn autoVacuum(h: Header) bool {
-        return h.largest_root_page != 0;
-    }
-
-    pub fn incrementalVacuum(h: Header) bool {
-        return h.incremental_vacuum != 0;
     }
 };
 

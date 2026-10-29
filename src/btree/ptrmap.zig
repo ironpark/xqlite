@@ -70,8 +70,8 @@ pub fn get(bt: *Btree, key: Pgno) Error!Entry {
     defer bt.pager.unref(pg);
     const offset = offsetOf(bt, i_ptrmap, key) orelse return error.Corrupt;
     const data = pg.data.ptr;
-    const e_type = std.enums.fromInt(Type, data[offset]) orelse return error.Corrupt;
-    return .{ .e_type = e_type, .parent = get4(data + offset + 1) };
+    if (data[offset] < 1 or data[offset] > 5) return error.Corrupt;
+    return .{ .e_type = @fromBackingInt(@intCast(data[offset])), .parent = get4(data + offset + 1) };
 }
 
 /// Port of ptrmapPut(): record that page `key` is of type `e_type` and

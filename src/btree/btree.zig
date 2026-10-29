@@ -88,28 +88,29 @@ pub const Meta = enum(u4) {
     data_version = 15,
 };
 
-pub const SecureDelete = enum {
-    off,
+/// PRAGMA secure_delete; the values are what the pragma reports.
+pub const SecureDelete = enum(u2) {
+    off = 0,
     /// Overwrite deleted content, including freelist pages, with zeros.
-    on,
+    on = 1,
     /// Overwrite deleted content in b-tree pages, but do not write freelist
     /// leaves back (PRAGMA secure_delete=FAST).
-    fast,
+    fast = 2,
 };
 
 /// PRAGMA auto_vacuum (BTREE_AUTOVACUUM_*).
-pub const AutoVacuum = enum {
-    none,
+pub const AutoVacuum = enum(u2) {
+    none = 0,
     /// Free pages are removed from the file at every commit.
-    full,
+    full = 1,
     /// Free pages stay until PRAGMA incremental_vacuum.
-    incremental,
+    incremental = 2,
 
     /// The mode recorded in a header: auto-vacuum if the largest root page
     /// is set, incremental if the incremental-vacuum field is too.
-    fn fromHeader(auto: bool, incremental: bool) AutoVacuum {
-        if (!auto) return .none;
-        return if (incremental) .incremental else .full;
+    fn fromHeader(largest_root_page: u32, incremental_vacuum: u32) AutoVacuum {
+        if (largest_root_page == 0) return .none;
+        return if (incremental_vacuum != 0) .incremental else .full;
     }
 };
 
@@ -259,12 +260,9 @@ pub const Btree = struct {
         var reserve: u8 = 0;
         if (header.pageSize(&hdr)) |page_size| {
             bt.page_size = page_size;
-            reserve = hdr[header.offset.reserved_space];
+            reserve = hdr[header.reserved_space_offset];
             bt.page_size_fixed = true;
-            bt.auto_vacuum = .fromHeader(
-                get4(hdr[header.offset.largest_root_page..]) != 0,
-                get4(hdr[header.offset.incremental_vacuum..]) != 0,
-            );
+            bt.auto_vacuum = .fromHeader(header.get(&hdr, .largest_root_page), header.get(&hdr, .incremental_vacuum));
         }
         try p.setPageSize(bt.page_size, reserve);
         bt.usable_size = bt.page_size - reserve;
@@ -456,11 +454,11 @@ pub const Btree = struct {
         defer if (held) bt.pager.unrefPageOne(p1.db_page);
         const data = p1.data;
 
-        var n_page = get4(data + header.offset.database_size);
+        var n_page = header.get(data, .database_size);
         const n_page_file = bt.pager.pageCount();
         // The in-header size is only trustworthy if a 3.7.0+ writer kept
         // the version-valid-for field in sync.
-        if (n_page == 0 or !std.mem.eql(u8, data[header.offset.file_change_counter..][0..4], data[header.offset.version_valid_for..][0..4])) n_page = n_page_file;
+        if (n_page == 0 or header.get(data, .file_change_counter) != header.get(data, .version_valid_for)) n_page = n_page_file;
         if (n_page > 0) {
             const h = try header.Header.parse(data[0..header.size]);
             // Unknown write versions make the file read-only; parse()
@@ -487,7 +485,7 @@ pub const Btree = struct {
             if (n_page > n_page_file) return error.Corrupt;
             bt.page_size_fixed = true;
             bt.usable_size = h.usableSize();
-            bt.auto_vacuum = .fromHeader(h.autoVacuum(), h.incrementalVacuum());
+            bt.auto_vacuum = .fromHeader(h.largest_root_page, h.incremental_vacuum);
         }
 
         // A cell needs room for a 2-byte pointer, a header of up to 17
@@ -580,9 +578,9 @@ pub const Btree = struct {
             // Fix the in-header size if an old writer left it wrong, so that
             // a rollback can trust it.
             const p1 = bt.page1.?;
-            if (bt.n_page != get4(p1.data + header.offset.database_size)) {
+            if (bt.n_page != header.get(p1.data, .database_size)) {
                 try bt.pager.write(p1.db_page);
-                put4(p1.data + header.offset.database_size, bt.n_page);
+                header.put(p1.data, .database_size, bt.n_page);
             }
             try bt.pager.openSavepoint(n_savepoint);
         }
@@ -631,11 +629,11 @@ pub const Btree = struct {
         defer bt.no_wal = false;
         try bt.beginTrans(.read, 0);
         const data = bt.page1.?.data;
-        if (data[header.offset.write_version] != version or data[header.offset.read_version] != version) {
+        if (data[header.write_version_offset] != version or data[header.read_version_offset] != version) {
             try bt.beginTrans(.exclusive, 0);
             try bt.pager.write(bt.page1.?.db_page);
-            data[header.offset.write_version] = version;
-            data[header.offset.read_version] = version;
+            data[header.write_version_offset] = version;
+            data[header.read_version_offset] = version;
         }
     }
 
@@ -729,7 +727,7 @@ pub const Btree = struct {
 
     /// Port of btreeSetNPage().
     fn setNPage(bt: *Btree, p1: *MemPage) void {
-        const n = get4(p1.data + header.offset.database_size);
+        const n = header.get(p1.data, .database_size);
         bt.n_page = if (n == 0) bt.pager.pageCount() else n;
     }
 
@@ -841,7 +839,7 @@ pub const Btree = struct {
         std.debug.assert(mode == .any or (nearby > 0 and bt.isAutoVacuum()));
         const p1 = bt.page1.?;
         const mx_page = bt.n_page;
-        const n_free = get4(p1.data + header.offset.freelist_count);
+        const n_free = header.get(p1.data, .freelist_count);
         if (n_free >= mx_page) return error.Corrupt;
         if (n_free == 0) return bt.appendPage();
 
@@ -853,7 +851,7 @@ pub const Btree = struct {
         };
 
         try bt.pager.write(p1.db_page);
-        put4(p1.data + header.offset.freelist_count, n_free - 1);
+        header.put(p1.data, .freelist_count, n_free - 1);
 
         var trunk: ?*MemPage = null;
         var prev: ?*MemPage = null;
@@ -866,7 +864,7 @@ pub const Btree = struct {
             if (prev) |pt| releasePage(pt);
             prev = trunk;
             trunk = null;
-            const i_trunk = if (prev) |pt| get4(pt.data) else get4(p1.data + header.offset.first_freelist_trunk);
+            const i_trunk = if (prev) |pt| get4(pt.data) else header.get(p1.data, .first_freelist_trunk);
             if (i_trunk > mx_page or n_search > n_free) return error.Corrupt;
             n_search += 1;
             trunk = try bt.getUnusedPage(i_trunk, .{});
@@ -877,7 +875,7 @@ pub const Btree = struct {
                 // A trunk without leaves: allocate the trunk itself.
                 std.debug.assert(prev == null);
                 try bt.pager.write(t.db_page);
-                p1.data[header.offset.first_freelist_trunk..][0..4].* = t.data[0..4].*;
+                header.put(p1.data, .first_freelist_trunk, get4(t.data));
                 trunk = null;
                 return t;
             }
@@ -903,7 +901,7 @@ pub const Btree = struct {
                     try bt.pager.write(pt.db_page);
                     pt.data[0..4].* = next_trunk;
                 } else {
-                    p1.data[header.offset.first_freelist_trunk..][0..4].* = next_trunk;
+                    header.put(p1.data, .first_freelist_trunk, get4(&next_trunk));
                 }
                 trunk = null;
                 return t;
@@ -970,7 +968,7 @@ pub const Btree = struct {
             bt.n_page += 1;
             if (bt.pager.isLockPage(bt.n_page)) bt.n_page += 1;
         }
-        put4(p1.data + header.offset.database_size, bt.n_page);
+        header.put(p1.data, .database_size, bt.n_page);
         const pg = try bt.getUnusedPage(bt.n_page, flags);
         errdefer releasePage(pg);
         try bt.pager.write(pg.db_page);
@@ -999,8 +997,8 @@ pub const Btree = struct {
         }
 
         try bt.pager.write(p1.db_page);
-        const n_free = get4(p1.data + header.offset.freelist_count);
-        put4(p1.data + header.offset.freelist_count, n_free + 1);
+        const n_free = header.get(p1.data, .freelist_count);
+        header.put(p1.data, .freelist_count, n_free + 1);
 
         if (bt.secure_delete == .on) {
             if (pg == null) pg = try bt.getPage(pgno, .{});
@@ -1011,7 +1009,7 @@ pub const Btree = struct {
 
         var i_trunk: Pgno = 0;
         if (n_free != 0) {
-            i_trunk = get4(p1.data + header.offset.first_freelist_trunk);
+            i_trunk = header.get(p1.data, .first_freelist_trunk);
             if (i_trunk > bt.n_page) return error.Corrupt;
             trunk = try bt.getPage(i_trunk, .{});
             const t = trunk.?;
@@ -1036,7 +1034,7 @@ pub const Btree = struct {
         try bt.pager.write(x.db_page);
         put4(x.data, i_trunk);
         put4(x.data + 4, 0);
-        put4(p1.data + header.offset.first_freelist_trunk, pgno);
+        header.put(p1.data, .first_freelist_trunk, pgno);
     }
 
     fn freePage(bt: *Btree, pg: *MemPage) Error!void {
@@ -1706,7 +1704,7 @@ pub const Btree = struct {
         std.debug.assert(last_pg_arg > n_fin);
         var last_pg = last_pg_arg;
         if (!ptrmap.isReserved(bt, last_pg)) {
-            if (get4(bt.page1.?.data + header.offset.freelist_count) == 0) return false;
+            if (header.get(bt.page1.?.data, .freelist_count) == 0) return false;
             const e = try ptrmap.get(bt, last_pg);
             if (e.e_type == .root_page) return error.Corrupt;
 
@@ -1771,7 +1769,7 @@ pub const Btree = struct {
         if (!bt.isAutoVacuum()) return false;
         const p1 = bt.page1.?;
         const n_orig = bt.n_page;
-        const n_free = get4(p1.data + header.offset.freelist_count);
+        const n_free = header.get(p1.data, .freelist_count);
         const n_fin = bt.finalDbSize(n_orig, n_free);
         if (n_orig < n_fin or n_free >= n_orig) return error.Corrupt;
         if (n_free == 0) return false;
@@ -1779,7 +1777,7 @@ pub const Btree = struct {
         bt.invalidateAllOverflowCache();
         if (!try bt.incrVacuumStep(n_fin, n_orig, false)) return false;
         try bt.pager.write(p1.db_page);
-        put4(p1.data + header.offset.database_size, bt.n_page);
+        header.put(p1.data, .database_size, bt.n_page);
         return true;
     }
 
@@ -1793,7 +1791,7 @@ pub const Btree = struct {
         const n_orig = bt.n_page;
         // No database ends on a pointer-map page or the lock page.
         if (ptrmap.isReserved(bt, n_orig)) return error.Corrupt;
-        const n_free = get4(p1.data + header.offset.freelist_count);
+        const n_free = header.get(p1.data, .freelist_count);
         const n_fin = bt.finalDbSize(n_orig, n_free);
         if (n_fin > n_orig) return error.Corrupt;
 
@@ -1805,9 +1803,9 @@ pub const Btree = struct {
         }
         if (n_free > 0) {
             try bt.pager.write(p1.db_page);
-            put4(p1.data + header.offset.first_freelist_trunk, 0);
-            put4(p1.data + header.offset.freelist_count, 0);
-            put4(p1.data + header.offset.database_size, n_fin);
+            header.put(p1.data, .first_freelist_trunk, 0);
+            header.put(p1.data, .freelist_count, 0);
+            header.put(p1.data, .database_size, n_fin);
             bt.do_truncate = true;
             bt.n_page = n_fin;
         }
@@ -1948,7 +1946,7 @@ pub const Btree = struct {
     pub fn getMeta(bt: *Btree, idx: Meta) u32 {
         std.debug.assert(bt.in_trans != .none);
         if (idx == .data_version) return bt.pager.dataVersion() +% bt.data_version_bias;
-        return get4(bt.page1.?.data + header.offset.meta + @as(u32, @intFromEnum(idx)) * 4);
+        return get4(bt.page1.?.data + header.meta_offset + @as(u32, @intFromEnum(idx)) * 4);
     }
 
     /// Port of sqlite3BtreeUpdateMeta(). The free page count is read-only.
@@ -1957,7 +1955,7 @@ pub const Btree = struct {
         std.debug.assert(idx != .free_page_count and idx != .data_version);
         const p1 = bt.page1.?;
         try bt.pager.write(p1.db_page);
-        put4(p1.data + header.offset.meta + @as(u32, @intFromEnum(idx)) * 4, value);
+        put4(p1.data + header.meta_offset + @as(u32, @intFromEnum(idx)) * 4, value);
         // Switches between full and incremental; only setAutoVacuum turns
         // auto-vacuum on or off.
         if (idx == .incr_vacuum and bt.isAutoVacuum()) bt.auto_vacuum = if (value != 0) .incremental else .full;

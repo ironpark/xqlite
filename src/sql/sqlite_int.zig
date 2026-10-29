@@ -1770,6 +1770,9 @@ pub const Parse = struct {
     returning: bool = false,
     has_with: bool = false,
     check_schema: bool = false,
+    /// xqlite: SQLite's grammar does not finish the statement it parses
+    /// (ir.stmt.lowerSqliteText(): a frontend adds to it and finishes).
+    xq_hold_finish: bool = false,
     n_err: i32 = 0,
     /// Counter for Select.sel_id.
     n_select: i32 = 0,

@@ -241,7 +241,9 @@ pub fn exprFunction(p: *Parse, list: ?*ExprList, name: Token, e_distinct: SF) Oo
 /// Offset of a token from the start of the statement (Expr.w.iOfst).
 pub fn tokenOffset(p: *const Parse, t: Token) i32 {
     const z = t.z orelse return 0;
-    return @intCast(@as(isize, @bitCast(@intFromPtr(z) -% @intFromPtr(p.tail.ptr))));
+    // C: (int)(pToken->z - pParse->zTail), truncating the offset of a
+    // token from another text (one an xqlite frontend made up).
+    return @truncate(@as(isize, @bitCast(@intFromPtr(z) -% @intFromPtr(p.tail.ptr))));
 }
 
 /// Port of sqlite3ExprOrderByAggregateError().

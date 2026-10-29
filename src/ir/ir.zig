@@ -121,12 +121,12 @@ pub const stmt = struct {
 
     /// xqlite: lower SQLite text: run SQLite's grammar over `text` (one
     /// statement, without the final finishCoding()) as part of the
-    /// statement being compiled.
+    /// statement being compiled, with the connection's semantic hooks.
     /// This is how a frontend should lower anything that is stored in
     /// the schema (CREATE TABLE/INDEX/VIEW/TRIGGER), since sqlite_schema
     /// keeps the text of the statement and sqlite3 must be able to read
     /// it back: render the SQLite equivalent, lower it with this, add
-    /// to the statement and finish with finishCoding().
+    /// catalog entries (src/catalog) and finish with finishCoding().
     /// `text` must live as long as the statement (allocate it in
     /// p.arena). Errors are left in `p` as usual (their offsets are
     /// relative to `text`).
@@ -793,3 +793,6 @@ pub const admin = struct {
     /// sqlite3Reindex().
     pub const reindex = build.reindex;
 };
+
+/// The catalog of dialect metadata and the sequences (src/catalog).
+pub const catalog = @import("../catalog/catalog.zig");

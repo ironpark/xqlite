@@ -1,20 +1,24 @@
 //! The PostgreSQL dialect (Phase 5).
 //!
 //! The parser is not written yet: `run` only accepts blank text. What is
-//! here already is the engine side: the function table (version()).
+//! here already is the engine side: the function table (version() and
+//! the sequence functions nextval/currval/setval/lastval of
+//! src/catalog/sequence.zig).
 //!
 //! Where to start: replace `run` with a tokenizer and parser for
 //! PostgreSQL that lowers each statement through src/ir/ir.zig, following
 //! the contract of dialect.Frontend (one statement, p.tail, errors in the
 //! Parse, ir.stmt.finishCoding()). DDL goes through
 //! ir.stmt.lowerSqliteText() with SQLite text (types mapped with
-//! ir.ddl.strictStorageType() and STRICT). Identifiers are folded to
-//! lower case by the frontend.
+//! ir.ddl.strictStorageType() and STRICT, the declared types and
+//! identity sequences recorded with src/catalog). Identifiers are folded
+//! to lower case by the frontend.
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
 const dialect = @import("../dialect.zig");
 const dfunc = @import("../func.zig");
+const sequence = @import("../../catalog/sequence.zig");
 const api = @import("../../vdbe/api.zig");
 
 pub const frontend: dialect.Frontend = .{ .name = "postgres", .run = run };
@@ -29,7 +33,7 @@ pub const hooks: dialect.Hooks = .{
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-};
+} ++ sequence.functions;
 
 comptime {
     dfunc.checkTable(&functions);

@@ -28,9 +28,13 @@
 //! each journal (commitPhaseOneSuper); recovery plays a journal back only
 //! while its super journal exists.
 //!
+//! Backups reading the database (src/sql/backup.zig) hook into the pager
+//! (Backup): they are told of every page written, and start over when
+//! the cache is discarded.
+//!
 //! Not ported yet: journal_mode=MEMORY,
 //! locking_mode=EXCLUSIVE (and with it the heap-memory WAL mode),
-//! in-memory databases, mmap, WAL snapshots, backups.
+//! in-memory databases, mmap, WAL snapshots.
 
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
@@ -158,6 +162,16 @@ fn subRecordSize(page_size: u32) u64 {
     return @as(u64, page_size) + 4;
 }
 
+/// A backup copying the database of a pager (sqlite3_backup as the pager
+/// sees it; the list is Pager.pBackup): `update` is called with each page
+/// written to the file or the WAL, `restart` when the cache is discarded
+/// and what was copied may be stale.
+pub const Backup = struct {
+    next: ?*Backup = null,
+    update: *const fn (b: *Backup, pgno: Pgno, data: []const u8) void,
+    restart: *const fn (b: *Backup) void,
+};
+
 pub const GetFlags = struct {
     /// The caller will overwrite the page, so skip reading it (PAGER_GET_NOCONTENT).
     no_content: bool = false,
@@ -260,6 +274,8 @@ pub const Pager = struct {
     /// One journal record, so each is written or read with a single call.
     record_buf: []u8 = &.{},
     cache: PCache,
+    /// The backups reading this database (pBackup).
+    backup: ?*Backup = null,
 
     // ================================================================ open
 
@@ -551,7 +567,25 @@ pub const Pager = struct {
     /// Port of pager_reset(): discard the whole cache.
     fn reset(p: *Pager) void {
         p.data_version +%= 1;
+        p.backupRestart();
         p.cache.clear();
+    }
+
+    /// Port of sqlite3BackupUpdate(): page `pgno` now holds `data`.
+    fn backupUpdate(p: *Pager, pgno: Pgno, data: []const u8) void {
+        var it = p.backup;
+        while (it) |b| : (it = b.next) b.update(b, pgno, data);
+    }
+
+    /// Port of sqlite3BackupRestart().
+    fn backupRestart(p: *Pager) void {
+        var it = p.backup;
+        while (it) |b| : (it = b.next) b.restart(b);
+    }
+
+    /// Port of sqlite3PagerClearCache(): discard the cache.
+    pub fn clearCache(p: *Pager) void {
+        p.reset();
     }
 
     fn inJournal(p: *const Pager, pgno: Pgno) bool {
@@ -1087,9 +1121,11 @@ pub const Pager = struct {
 
     /// Port of pagerUndoCallback(): a page the rolled-back transaction
     /// wrote to the WAL is discarded from the cache, or reloaded if it is
-    /// still referenced.
+    /// still referenced. Backups start over: they may have copied what
+    /// the transaction wrote to the WAL.
     fn undoCallback(p: *Pager, pgno: Pgno) wal_mod.Error!void {
         std.debug.assert(p.wal != null);
+        defer p.backupRestart();
         const pg = p.lookup(pgno) orelse return;
         if (pg.n_ref == 1) {
             p.cache.drop(pg);
@@ -1132,6 +1168,10 @@ pub const Pager = struct {
         const head = list orelse return;
         if (head.pgno == 1) p.writeChangeCounter(head);
         try p.wal.?.frames(p.page_size, head, n_truncate, is_commit, p.wal_sync_flags);
+        if (p.backup != null) {
+            var it: ?*Page = head;
+            while (it) |pg| : (it = pg.dirty) p.backupUpdate(pg.pgno, pg.data);
+        }
     }
 
     /// Port of pagerBeginReadTransaction(): take a WAL snapshot, discarding
@@ -1433,6 +1473,7 @@ pub const Pager = struct {
                 write_err = err;
             };
             if (pgno > p.db_file_size) p.db_file_size = pgno;
+            p.backupUpdate(pgno, data);
         } else if (!is_main and page == null) {
             // Not written and not cached: the next read would see the
             // file. Cache the record's content instead, dirty.
@@ -1599,8 +1640,8 @@ pub const Pager = struct {
         }
     }
 
-    /// Port of sqlite3PagerSync().
-    fn syncDb(p: *Pager) Error!void {
+    /// Port of sqlite3PagerSync(): sync the database file.
+    pub fn syncDb(p: *Pager) Error!void {
         if (!p.no_sync) try p.fd.sync(p.sync_flags);
     }
 
@@ -1704,6 +1745,7 @@ pub const Pager = struct {
             try p.fd.write(pg.data, @as(u64, pg.pgno - 1) * p.page_size);
             if (pg.pgno == 1) @memcpy(&p.db_file_vers, pg.data[24..40]);
             if (pg.pgno > p.db_file_size) p.db_file_size = pg.pgno;
+            p.backupUpdate(pg.pgno, pg.data);
         }
     }
 

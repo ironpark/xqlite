@@ -176,7 +176,7 @@ fn detachFunc(ctx: *Context, argv: []*Mem) void {
     } else return detachError(ctx, "no such database: {s}", name);
     if (i < 2) return detachError(ctx, "cannot detach database {s}", name);
     const d = &db.dbs.items[i];
-    if (d.bt.?.txnState() != .none) return detachError(ctx, "database {s} is locked", name);
+    if (d.bt.?.txnState() != .none or d.bt.?.isInBackup()) return detachError(ctx, "database {s} is locked", name);
     closeDb(db, i);
 }
 

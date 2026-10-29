@@ -223,6 +223,9 @@ pub const Btree = struct {
     /// Size of the cell `Cursor.transferRow` left in the scratch space
     /// (nPreformatSize).
     n_preformat_size: u32 = 0,
+    /// Backups reading this b-tree (Btree.nBackup): while there are any,
+    /// it cannot be detached.
+    n_backup: u32 = 0,
 
     // ================================================================ open
 
@@ -311,8 +314,9 @@ pub const Btree = struct {
     }
 
     /// Port of sqlite3BtreeSetPageSize(). `page_size` 0 keeps the current
-    /// size. Fails with ReadOnly once the size is fixed (the database
-    /// exists). `fix` fixes it now.
+    /// size, as does any other invalid size, which only sets the reserve
+    /// (C passes -1 for that). Fails with ReadOnly once the size is fixed
+    /// (the database exists). `fix` fixes it now.
     pub fn setPageSize(bt: *Btree, page_size: u32, reserve_arg: u8, fix: bool) Error!void {
         bt.reserve_wanted = reserve_arg;
         var reserve = reserve_arg;
@@ -339,6 +343,24 @@ pub const Btree = struct {
     /// Bytes reserved at the end of every page.
     pub fn getReserve(bt: *const Btree) u32 {
         return bt.page_size - bt.usable_size;
+    }
+
+    /// Port of sqlite3BtreeGetRequestedReserve(): the reserve asked for by
+    /// the last setPageSize(), or the current one if larger.
+    pub fn getRequestedReserve(bt: *const Btree) u8 {
+        return @intCast(@max(bt.reserve_wanted, bt.getReserve()));
+    }
+
+    /// Port of sqlite3PagerIsMemdb() of the b-tree's pager: a temporary
+    /// database (":memory:", "" or TEMP), which VACUUM and the backup API
+    /// do not give another page size.
+    pub fn isMemdb(bt: *const Btree) bool {
+        return bt.pager.temp_file;
+    }
+
+    /// Port of sqlite3BtreeIsInBackup().
+    pub fn isInBackup(bt: *const Btree) bool {
+        return bt.n_backup != 0;
     }
 
     /// Pages in the database (sqlite3BtreeLastPage).

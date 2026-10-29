@@ -82,6 +82,8 @@ pub const sql = struct {
     pub const legacy = @import("sql/legacy.zig");
     pub const prepare = @import("sql/prepare.zig");
     pub const complete = @import("sql/complete.zig");
+    /// The online backup API (sqlite3_backup_*).
+    pub const backup = @import("sql/backup.zig");
     pub const api = @import("vdbe/api.zig");
     /// Virtual table modules (sqlite3_module, sqlite3_create_module()).
     pub const vtab = @import("sql/vtab.zig");

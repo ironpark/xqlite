@@ -244,13 +244,23 @@ pub fn setFrontend(db: *Sqlite3, frontend: *const @import("../dialect/dialect.zi
     db.xq.lang.frontend = frontend;
 }
 
+/// Port of connectionIsBusy(): the connection has statements not
+/// finalized or backups not finished.
+fn connectionIsBusy(db: *Sqlite3) bool {
+    if (db.vdbe != null) return true;
+    for (db.dbs.items) |d| {
+        if (d.bt) |bt| if (bt.isInBackup()) return true;
+    }
+    return false;
+}
+
 /// Port of sqlite3_close(): close the connection. Fails with BUSY if
-/// statements are not finalized.
+/// statements are not finalized or backups not finished.
 pub fn close(db: *Sqlite3) i32 {
     // Disconnect the virtual tables, and those with a transaction too.
     disconnectAllVtab(db);
     vtab.rollback(db);
-    if (db.vdbe != null) {
+    if (connectionIsBusy(db)) {
         errorWithMsg(db, RC.BUSY, "unable to close due to unfinalized statements or unfinished backups", .{});
         return RC.BUSY;
     }

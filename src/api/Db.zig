@@ -75,9 +75,7 @@ pub const OpenOptions = struct {
     busy_timeout_ms: u31 = 0,
     /// Enforce foreign key constraints (PRAGMA foreign_keys).
     foreign_keys: bool = false,
-    /// The SQL dialect of the connection (setDialect()). SQLite's and
-    /// PostgreSQL's have a parser; MariaDB's fails every statement with
-    /// "mariadb dialect: parser not implemented".
+    /// The SQL dialect of the connection (setDialect()).
     dialect: Dialect = .sqlite,
     /// Receives the details of every failed call on this connection,
     /// including open() itself. Must outlive the connection.

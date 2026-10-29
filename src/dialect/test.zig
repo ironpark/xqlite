@@ -42,7 +42,7 @@ test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {
     try c.expectError("SELECT 1 +", "syntax error at end of input");
     try c.exec("  -- only a comment\n ");
     main_mod.setDialect(c.db, .mariadb);
-    try c.expectError("SELECT 1", "mariadb dialect: parser not implemented");
+    try c.expectRows("SELECT 1", "1\n");
 
     // The schema is SQLite text in any dialect: a statement of a new
     // connection reads it with SQLite's frontend.

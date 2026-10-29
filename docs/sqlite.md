@@ -14,11 +14,11 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 
 | 보장하는 것 | 확인 방법 |
 | --- | --- |
-| 파일 포맷: 기존 SQLite 파일을 그대로 읽고 쓰고, 서로 만든 파일이 `PRAGMA integrity_check`를 통과 | `tools/interop-*.sh` |
-| 저널·WAL 호환: 서로의 핫 저널을 복구하고, 한 DB를 두 엔진 프로세스가 동시에 읽고 씀 | `tools/interop-hot-journal.sh`, `tools/interop-wal.sh` |
-| 쿼리 결과 | `tools/planner/diff.py`, sqllogictest |
-| 바이트코드(`EXPLAIN`)와 실행 계획(`EXPLAIN QUERY PLAN`) | `tools/planner/diff.py` |
-| 셸 출력 | `tools/interop-shell.sh` |
+| 파일 포맷: 기존 SQLite 파일을 그대로 읽고 쓰고, 서로 만든 파일이 `PRAGMA integrity_check`를 통과 | `xqt interop` |
+| 저널·WAL 호환: 서로의 핫 저널을 복구하고, 한 DB를 두 엔진 프로세스가 동시에 읽고 씀 | `xqt interop hot-journal`, `xqt interop wal` |
+| 쿼리 결과 | `xqt planner`, sqllogictest(`xqt slt`) |
+| 바이트코드(`EXPLAIN`)와 실행 계획(`EXPLAIN QUERY PLAN`) | `xqt planner` |
+| 셸 출력 | `xqt interop shell` |
 
 ## 구현된 기능
 
@@ -137,15 +137,15 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 
 | 도구 | 확인하는 것 |
 | --- | --- |
-| `tools/interop-btree.sh`, `interop-sql.sh` | 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check` |
-| `tools/interop-pragma.sh`, `interop-shell.sh` | PRAGMA 결과, 셸 출력·dot-command·오류, `.dump` 왕복 |
-| `tools/interop-savepoint.sh`, `interop-hot-journal.sh` | 세이브포인트·문장 롤백, 핫 저널 복구 |
-| `tools/interop-wal.sh` | WAL 파일 상호 읽기, 체크포인트, 크래시 복구, 두 엔진 프로세스 동시 접근 |
-| `tools/interop-attach.sh` | 서로의 파일을 붙여 읽고 쓰기, 여러 파일 트랜잭션, 커밋 도중 크래시와 super journal 복구 |
-| `tools/interop-analyze.sh` | 같은 데이터의 `sqlite_stat1` 행, 서로 분석한 DB의 실행 계획과 `PRAGMA optimize` |
-| `tools/interop-vacuum.sh` | 같은 DB를 두 엔진이 `VACUUM`/`VACUUM INTO`한 파일의 바이트 비교, 셸의 `.backup`/`.restore`, VACUUM 도중 크래시 복구 |
-| `tools/planner/diff.py` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드를 sqlite3와 비교 |
-| `tools/slt/run.py` | sqllogictest. 스크립트 622개, 테스트 5,939,879개를 롤백 저널과 WAL 모드에서 모두 통과합니다([tools/slt/README.md](../tools/slt/README.md)). |
+| `xqt interop btree`, `sql` | 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check` |
+| `xqt interop pragma`, `shell` | PRAGMA 결과, 셸 출력·dot-command·오류, `.dump` 왕복 |
+| `xqt interop savepoint`, `hot-journal` | 세이브포인트·문장 롤백, 핫 저널 복구 |
+| `xqt interop wal` | WAL 파일 상호 읽기, 체크포인트, 크래시 복구, 두 엔진 프로세스 동시 접근 |
+| `xqt interop attach` | 서로의 파일을 붙여 읽고 쓰기, 여러 파일 트랜잭션, 커밋 도중 크래시와 super journal 복구 |
+| `xqt interop analyze` | 같은 데이터의 `sqlite_stat1` 행, 서로 분석한 DB의 실행 계획과 `PRAGMA optimize` |
+| `xqt interop vacuum` | 같은 DB를 두 엔진이 `VACUUM`/`VACUUM INTO`한 파일의 바이트 비교, 셸의 `.backup`/`.restore`, VACUUM 도중 크래시 복구 |
+| `xqt planner` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드를 sqlite3와 비교 |
+| `xqt slt` | sqllogictest. 스크립트 622개, 테스트 5,939,879개를 롤백 저널과 WAL 모드에서 모두 통과합니다([tools/slt/README.md](../tools/slt/README.md)). |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`)에서 크래시·누수 |
 
 실행 방법은 [테스트 문서](testing.md)를 보세요.

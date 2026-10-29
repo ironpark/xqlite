@@ -198,14 +198,21 @@ pub fn main(init: std.process.Init) !void {
 
 ## 테스트
 
-호환성은 주장이 아니라 테스트로 증명합니다.
+호환성은 주장이 아니라 테스트로 증명합니다. 테스트 도구는 Zig로 쓴 `xqt` 하나입니다.
+
+```sh
+zig build tools                                # zig-out/bin/xqt, 크래시 shim, xqlite
+SQ=/tmp/sqref/sqlite3 zig build check          # 단위 테스트, xqt interop, xqt planner, fuzzcheck를 병렬로
+zig-out/bin/xqt interop                        # sqlite3 교차 검증 (모듈 이름을 주면 그것만)
+zig-out/bin/xqt help                           # 모든 명령과 옵션
+```
 
 - **단위 테스트**: `zig build test`. 시드 퍼저의 짧은 실행과 문서·예제의 이름 검사도 함께 합니다.
-- **sqlite3 교차 검증**: `xqt interop`과 `tools/interop-*.sh`가 서로 만든 DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 순정 sqlite3와 비교합니다.
+- **sqlite3 교차 검증**: `xqt interop`이 서로 만든 DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 순정 sqlite3와 비교합니다.
 - **플래너 차등 테스트**: `xqt planner`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
 - **sqllogictest**: `xqt slt`
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `ir_roundtrip`)
-- **방언 차등 테스트**: `tools/dialect/pg-diff.sh`, `maria-diff.sh`가 실제 PostgreSQL 16, MariaDB 11과 결과를 비교합니다.
+- **방언 차등 테스트**: `xqt dialect-diff pg`, `xqt dialect-diff mariadb`가 실제 PostgreSQL 16, MariaDB 11과 결과를 비교합니다.
 
 도구별 실행 방법과 필요한 기준 sqlite3 빌드는 [테스트와 검증](docs/testing.md)에 있습니다.
 
@@ -248,7 +255,7 @@ src/
 └── testing/            # 시드 퍼저 공용 도구
 docs/                   # 설계·호환성 문서
 examples/               # Zig API 예제
-tools/                  # 교차 검증·차등 테스트·코드 생성 스크립트
+tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일
 ```
 
 MSSQL 방언(`dialect/mssql/`), C ABI(`capi/`), 서버(`server/`)는 아직 없습니다.

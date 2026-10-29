@@ -340,7 +340,7 @@ pub const MemPage = extern struct {
         const bt = p.bt;
         const data = p.data;
         const hdr = p.hdr_offset;
-        if (bt.secure_delete or bt.overwrite) @memset(data[hdr..bt.usable_size], 0);
+        if (bt.secure_delete != .off) @memset(data[hdr..bt.usable_size], 0);
         data[hdr] = flags;
         const first: u16 = hdr + @as(u16, if (flags & ptf_leaf == 0) 12 else 8);
         @memset(data[hdr + 1 ..][0..4], 0);
@@ -579,7 +579,7 @@ pub const MemPage = extern struct {
             data[hdr + 7] -= @intCast(n_frag);
         }
         const content: u32 = get2(data + hdr + 5);
-        if (p.bt.secure_delete or p.bt.overwrite) @memset(data[start..][0..size], 0);
+        if (p.bt.secure_delete != .off) @memset(data[start..][0..size], 0);
         if (start <= content) {
             // The block starts the content area: grow the unallocated space
             // instead of adding a freeblock.
@@ -643,7 +643,7 @@ pub const MemPage = extern struct {
         @memcpy(p.data[idx + 4 ..][0 .. sz - 4], cell[4..sz]);
         put4(p.data + idx, child);
         p.insertCellPointer(i, idx);
-        if (p.bt.auto_vacuum) try ptrmap.putOvflPtr(p, p, p.data + idx);
+        if (p.bt.isAutoVacuum()) try ptrmap.putOvflPtr(p, p, p.data + idx);
     }
 
     /// Port of insertCellFast(): `insertCell` for leaf cells built in a
@@ -659,7 +659,7 @@ pub const MemPage = extern struct {
         p.n_free -= @intCast(2 + sz);
         @memcpy(p.data[idx..][0..sz], cell[0..sz]);
         p.insertCellPointer(i, idx);
-        if (p.bt.auto_vacuum) try ptrmap.putOvflPtr(p, p, p.data + idx);
+        if (p.bt.isAutoVacuum()) try ptrmap.putOvflPtr(p, p, p.data + idx);
     }
 
     fn addOverflowCell(p: *MemPage, i: usize, cell: [*]u8) void {

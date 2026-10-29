@@ -565,17 +565,17 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // PRAGMA [schema.]secure_delete[=ON|OFF|FAST]. Without a schema
         // name the setting applies to every database.
         .secure_delete => {
-            var b: i32 = -1;
+            var mode: ?btree.SecureDelete = null;
             if (right) |z| {
-                b = if (ctype.eqlNoCase(z, "fast")) 2 else @intFromBool(getBoolean(z, false));
+                mode = if (ctype.eqlNoCase(z, "fast")) .fast else if (getBoolean(z, false)) .on else .off;
             }
-            if (id2.n == 0 and b >= 0) {
+            if (id2.n == 0 and mode != null) {
                 for (db.dbs.items) |*d| if (d.bt) |bt| {
-                    _ = bt.secureDelete(b);
+                    _ = bt.secureDelete(mode);
                 };
             }
-            b = if (pdb.bt) |bt| bt.secureDelete(b) else 0;
-            returnSingleInt(v, b);
+            const in_effect: btree.SecureDelete = if (pdb.bt) |bt| bt.secureDelete(mode) else .off;
+            returnSingleInt(v, @backingInt(in_effect));
         },
 
         // PRAGMA [schema.]max_page_count[=N] and PRAGMA [schema.]page_count.

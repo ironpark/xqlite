@@ -94,7 +94,7 @@ const Check = struct {
     }
 
     /// Port of checkPtrmap().
-    fn checkPtrmap(c: *Check, child: Pgno, e_type: u8, parent: Pgno) void {
+    fn checkPtrmap(c: *Check, child: Pgno, e_type: ptrmap.Type, parent: Pgno) void {
         const entry = ptrmap.get(c.bt, child) catch |err| {
             if (err == error.OutOfMemory) c.oom = true;
             c.appendMsg("Failed to read ptrmap key={d}", .{child});
@@ -102,7 +102,7 @@ const Check = struct {
         };
         if (entry.e_type != e_type or entry.parent != parent) {
             c.appendMsg("Bad ptr map entry key={d} expected=({d},{d}) got=({d},{d})", .{
-                child, e_type, parent, entry.e_type, entry.parent,
+                child, @backingInt(e_type), parent, @backingInt(entry.e_type), entry.parent,
             });
         }
     }
@@ -125,21 +125,21 @@ const Check = struct {
             const data = pg.data.ptr;
             if (is_freelist) {
                 const n_leaf = get4(data + 4);
-                if (bt.auto_vacuum) c.checkPtrmap(pgno, ptrmap.free_page, 0);
+                if (bt.isAutoVacuum()) c.checkPtrmap(pgno, .free_page, 0);
                 if (n_leaf > bt.usable_size / 4 - 2) {
                     c.appendMsg("freelist leaf count too big on page {d}", .{pgno});
                     n -= 1;
                 } else {
                     for (0..n_leaf) |i| {
                         const free_page = get4(data + 8 + i * 4);
-                        if (bt.auto_vacuum) c.checkPtrmap(free_page, ptrmap.free_page, 0);
+                        if (bt.isAutoVacuum()) c.checkPtrmap(free_page, .free_page, 0);
                         _ = c.checkRef(free_page);
                     }
                     n -= n_leaf;
                 }
-            } else if (bt.auto_vacuum and n > 0) {
+            } else if (bt.isAutoVacuum() and n > 0) {
                 // The next page of the chain must point back here.
-                c.checkPtrmap(get4(data), ptrmap.overflow2, pgno);
+                c.checkPtrmap(get4(data), .overflow2, pgno);
             }
             pgno = get4(data);
         }
@@ -219,9 +219,9 @@ const Check = struct {
         var key_can_be_equal = true;
         if (!pg.leaf) {
             const right = get4(data + hdr + 8);
-            if (bt.auto_vacuum) {
+            if (bt.isAutoVacuum()) {
                 c.prefix = .tree_right_child;
-                c.checkPtrmap(right, ptrmap.btree_page, pgno);
+                c.checkPtrmap(right, .btree_page, pgno);
             }
             depth = c.checkTreePage(right, &max_key, max_key);
             key_can_be_equal = false;
@@ -263,13 +263,13 @@ const Check = struct {
             if (info.n_payload > info.n_local) {
                 const n_page = (info.n_payload - info.n_local + usable - 5) / (usable - 4);
                 const ovfl = get4(cell + info.n_size - 4);
-                if (bt.auto_vacuum) c.checkPtrmap(ovfl, ptrmap.overflow1, pgno);
+                if (bt.isAutoVacuum()) c.checkPtrmap(ovfl, .overflow1, pgno);
                 c.checkList(false, ovfl, n_page);
             }
 
             if (!pg.leaf) {
                 const child = get4(cell);
-                if (bt.auto_vacuum) c.checkPtrmap(child, ptrmap.btree_page, pgno);
+                if (bt.isAutoVacuum()) c.checkPtrmap(child, .btree_page, pgno);
                 const d2 = c.checkTreePage(child, &max_key, max_key);
                 key_can_be_equal = false;
                 if (d2 != depth) {
@@ -409,7 +409,7 @@ pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u
 
         if (!partial) {
             const p1 = bt.page1.?.data;
-            if (bt.auto_vacuum) {
+            if (bt.isAutoVacuum()) {
                 var mx: Pgno = 0;
                 for (roots) |r| mx = @max(mx, r);
                 const mx_in_hdr = get4(p1 + 52);
@@ -429,7 +429,7 @@ pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u
             if (c.mx_err == 0) break;
             c.n_row = 0;
             if (root != 0) {
-                if (bt.auto_vacuum and root > 1 and !partial) c.checkPtrmap(root, ptrmap.root_page, 0);
+                if (bt.isAutoVacuum() and root > 1 and !partial) c.checkPtrmap(root, .root_page, 0);
                 c.v0 = root;
                 var not_used: i64 = undefined;
                 _ = c.checkTreePage(root, &not_used, std.math.maxInt(i64));
@@ -440,7 +440,7 @@ pub fn check(bt: *Btree, gpa: std.mem.Allocator, roots: []const Pgno, max_err: u
         if (!partial) {
             var i: Pgno = 1;
             while (i <= c.n_ck_page and c.mx_err != 0) : (i += 1) {
-                const is_ptrmap = bt.auto_vacuum and ptrmap.isPage(bt, i);
+                const is_ptrmap = bt.isAutoVacuum() and ptrmap.isPage(bt, i);
                 if (!c.pg_ref.isSet(i) and !is_ptrmap) c.appendMsg("Page {d}: never used", .{i});
                 if (c.pg_ref.isSet(i) and is_ptrmap) c.appendMsg("Page {d}: pointer map referenced", .{i});
             }

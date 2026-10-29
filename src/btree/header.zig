@@ -33,20 +33,38 @@ pub const FormatVersion = enum(u8) {
     }
 };
 
+/// Byte offsets of the header fields that are read or written in place on
+/// page 1.
+pub const offset = struct {
+    pub const write_version = 18;
+    pub const read_version = 19;
+    pub const reserved_space = 20;
+    pub const file_change_counter = 24;
+    pub const database_size = 28;
+    pub const first_freelist_trunk = 32;
+    pub const freelist_count = 36;
+    /// The meta values (btree.Meta), 4 bytes each, starting with the
+    /// freelist count.
+    pub const meta = 36;
+    pub const largest_root_page = 52;
+    pub const incremental_vacuum = 64;
+    pub const version_valid_for = 92;
+};
+
 /// Big-endian u32 fields of `Header` and their byte offsets.
 const u32_fields = .{
-    .{ "file_change_counter", 24 },
-    .{ "database_size", 28 },
-    .{ "first_freelist_trunk", 32 },
-    .{ "freelist_count", 36 },
+    .{ "file_change_counter", offset.file_change_counter },
+    .{ "database_size", offset.database_size },
+    .{ "first_freelist_trunk", offset.first_freelist_trunk },
+    .{ "freelist_count", offset.freelist_count },
     .{ "schema_cookie", 40 },
     .{ "schema_format", 44 },
     .{ "default_cache_size", 48 },
-    .{ "largest_root_page", 52 },
+    .{ "largest_root_page", offset.largest_root_page },
     .{ "user_version", 60 },
-    .{ "incremental_vacuum", 64 },
+    .{ "incremental_vacuum", offset.incremental_vacuum },
     .{ "application_id", 68 },
-    .{ "version_valid_for", 92 },
+    .{ "version_valid_for", offset.version_valid_for },
     .{ "sqlite_version", 96 },
 };
 

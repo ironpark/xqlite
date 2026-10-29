@@ -104,6 +104,13 @@ pub const AutoVacuum = enum {
     full,
     /// Free pages stay until PRAGMA incremental_vacuum.
     incremental,
+
+    /// The mode recorded in a header: auto-vacuum if the largest root page
+    /// is set, incremental if the incremental-vacuum field is too.
+    fn fromHeader(auto: bool, incremental: bool) AutoVacuum {
+        if (!auto) return .none;
+        return if (incremental) .incremental else .full;
+    }
 };
 
 pub const Options = struct {
@@ -175,13 +182,11 @@ pub const Btree = struct {
     read_only: bool,
     /// The page size can no longer be changed (BTS_PAGESIZE_FIXED).
     page_size_fixed: bool = false,
-    secure_delete: bool,
-    overwrite: bool,
+    secure_delete: SecureDelete,
     /// The database was empty when the transaction started.
     initially_empty: bool = false,
     cell_size_check: bool,
-    auto_vacuum: bool = false,
-    incr_vacuum: bool = false,
+    auto_vacuum: AutoVacuum = .none,
     /// An incremental vacuum shrank `n_page`; truncate at commit.
     do_truncate: bool = false,
     /// Closes with its last cursor (BTREE_SINGLE).
@@ -243,23 +248,23 @@ pub const Btree = struct {
             .gpa = gpa,
             .pager = p,
             .read_only = p.isReadOnly(),
-            .secure_delete = opts.secure_delete == .on,
-            .overwrite = opts.secure_delete == .fast,
+            .secure_delete = opts.secure_delete,
             .cell_size_check = opts.cell_size_check,
             .page_size = opts.page_size,
             .usable_size = opts.page_size,
-            .auto_vacuum = opts.auto_vacuum != .none,
-            .incr_vacuum = opts.auto_vacuum == .incremental,
+            .auto_vacuum = opts.auto_vacuum,
             .single = opts.single,
             .n_vdbe_read = opts.n_vdbe_read,
         };
         var reserve: u8 = 0;
         if (header.pageSize(&hdr)) |page_size| {
             bt.page_size = page_size;
-            reserve = hdr[20];
+            reserve = hdr[header.offset.reserved_space];
             bt.page_size_fixed = true;
-            bt.auto_vacuum = get4(hdr[52..]) != 0;
-            bt.incr_vacuum = get4(hdr[64..]) != 0;
+            bt.auto_vacuum = .fromHeader(
+                get4(hdr[header.offset.largest_root_page..]) != 0,
+                get4(hdr[header.offset.incremental_vacuum..]) != 0,
+            );
         }
         try p.setPageSize(bt.page_size, reserve);
         bt.usable_size = bt.page_size - reserve;
@@ -298,15 +303,11 @@ pub const Btree = struct {
         return bt.pager.maxPageCount(mx);
     }
 
-    /// Port of sqlite3BtreeSecureDelete(): `new_flag` 0 turns secure
-    /// delete off, 1 on, 2 FAST (overwrite only); negative only queries.
-    /// Returns the setting in effect.
-    pub fn secureDelete(bt: *Btree, new_flag: i32) i32 {
-        if (new_flag >= 0) {
-            bt.secure_delete = new_flag == 1;
-            bt.overwrite = new_flag == 2;
-        }
-        return @as(i32, @intFromBool(bt.secure_delete)) | @as(i32, @intFromBool(bt.overwrite)) << 1;
+    /// Port of sqlite3BtreeSecureDelete(): change the setting unless
+    /// `mode` is null. Returns the setting in effect.
+    pub fn secureDelete(bt: *Btree, mode: ?SecureDelete) SecureDelete {
+        if (mode) |m| bt.secure_delete = m;
+        return bt.secure_delete;
     }
 
     /// Port of sqlite3BtreeSetPageSize(). `page_size` 0 keeps the current
@@ -352,16 +353,18 @@ pub const Btree = struct {
     /// Port of sqlite3BtreeSetAutoVacuum(). Fails with ReadOnly if the
     /// database exists and the change would turn auto-vacuum on or off.
     pub fn setAutoVacuum(bt: *Btree, mode: AutoVacuum) Error!void {
-        const av = mode != .none;
-        if (bt.page_size_fixed and av != bt.auto_vacuum) return error.ReadOnly;
-        bt.auto_vacuum = av;
-        bt.incr_vacuum = mode == .incremental;
+        if (bt.page_size_fixed and (mode != .none) != bt.isAutoVacuum()) return error.ReadOnly;
+        bt.auto_vacuum = mode;
     }
 
     /// Port of sqlite3BtreeGetAutoVacuum().
     pub fn getAutoVacuum(bt: *const Btree) AutoVacuum {
-        if (!bt.auto_vacuum) return .none;
-        return if (bt.incr_vacuum) .incremental else .full;
+        return bt.auto_vacuum;
+    }
+
+    /// ISAUTOVACUUM: the file has pointer-map pages (full or incremental).
+    pub fn isAutoVacuum(bt: *const Btree) bool {
+        return bt.auto_vacuum != .none;
     }
 
     // ======================================================= page helpers
@@ -448,36 +451,31 @@ pub const Btree = struct {
         std.debug.assert(bt.page1 == null);
         try bt.pager.sharedLock();
         const p1 = try bt.getPage(1, .{});
+        // Released on every path that does not keep page 1 in `page1`.
+        var held = true;
+        defer if (held) bt.pager.unrefPageOne(p1.db_page);
         const data = p1.data;
 
-        var n_page = get4(data + 28);
+        var n_page = get4(data + header.offset.database_size);
         const n_page_file = bt.pager.pageCount();
         // The in-header size is only trustworthy if a 3.7.0+ writer kept
         // the version-valid-for field in sync.
-        if (n_page == 0 or !std.mem.eql(u8, data[24..28], data[92..96])) n_page = n_page_file;
+        if (n_page == 0 or !std.mem.eql(u8, data[header.offset.file_change_counter..][0..4], data[header.offset.version_valid_for..][0..4])) n_page = n_page_file;
         if (n_page > 0) {
-            const h = header.Header.parse(data[0..header.size]) catch |err| {
-                bt.pager.unrefPageOne(p1.db_page);
-                return err;
-            };
+            const h = try header.Header.parse(data[0..header.size]);
             // Unknown write versions make the file read-only; parse()
             // refused unknown read versions.
             if (h.readOnly()) bt.read_only = true;
             // Read version 2: the database is in WAL mode. Open the WAL,
             // and let the caller retry, as page 1 may be newer there.
             if (h.read_version == .wal and !bt.no_wal) {
-                const was_open = bt.pager.openWal() catch |err| {
-                    bt.pager.unrefPageOne(p1.db_page);
-                    return err;
-                };
-                if (!was_open) {
-                    bt.pager.unrefPageOne(p1.db_page);
-                    return;
-                }
+                if (!try bt.pager.openWal()) return;
             }
             if (h.page_size != bt.page_size) {
                 // Page 1 was read with the wrong page size. Adopt the real
-                // one and let the caller try again.
+                // one and let the caller try again. The pager ignores the
+                // change while page 1 is referenced, so release it first.
+                held = false;
                 bt.pager.unrefPageOne(p1.db_page);
                 bt.page_size = h.page_size;
                 bt.usable_size = h.usableSize();
@@ -486,14 +484,10 @@ pub const Btree = struct {
                 try bt.pager.setPageSize(h.page_size, h.reserved_space);
                 return;
             }
-            if (n_page > n_page_file) {
-                bt.pager.unrefPageOne(p1.db_page);
-                return error.Corrupt;
-            }
+            if (n_page > n_page_file) return error.Corrupt;
             bt.page_size_fixed = true;
             bt.usable_size = h.usableSize();
-            bt.auto_vacuum = h.autoVacuum();
-            bt.incr_vacuum = h.incrementalVacuum();
+            bt.auto_vacuum = .fromHeader(h.autoVacuum(), h.incrementalVacuum());
         }
 
         // A cell needs room for a 2-byte pointer, a header of up to 17
@@ -505,6 +499,7 @@ pub const Btree = struct {
         bt.min_leaf = @intCast((bt.usable_size - 12) * 32 / 255 - 23);
         bt.max1byte_payload = @intCast(@min(bt.max_local, 127));
         bt.page1 = p1;
+        held = false;
         bt.n_page = n_page;
     }
 
@@ -533,8 +528,8 @@ pub const Btree = struct {
             // Left for the schema layer, as SQLite does.
             .schema_format = 0,
             .text_encoding = @enumFromInt(0),
-            .largest_root_page = @intFromBool(bt.auto_vacuum),
-            .incremental_vacuum = @intFromBool(bt.incr_vacuum),
+            .largest_root_page = @intFromBool(bt.isAutoVacuum()),
+            .incremental_vacuum = @intFromBool(bt.auto_vacuum == .incremental),
         };
         h.write(data[0..header.size]);
         p1.zero(page.table_leaf);
@@ -585,9 +580,9 @@ pub const Btree = struct {
             // Fix the in-header size if an old writer left it wrong, so that
             // a rollback can trust it.
             const p1 = bt.page1.?;
-            if (bt.n_page != get4(p1.data + 28)) {
+            if (bt.n_page != get4(p1.data + header.offset.database_size)) {
                 try bt.pager.write(p1.db_page);
-                put4(p1.data + 28, bt.n_page);
+                put4(p1.data + header.offset.database_size, bt.n_page);
             }
             try bt.pager.openSavepoint(n_savepoint);
         }
@@ -636,11 +631,11 @@ pub const Btree = struct {
         defer bt.no_wal = false;
         try bt.beginTrans(.read, 0);
         const data = bt.page1.?.data;
-        if (data[18] != version or data[19] != version) {
+        if (data[header.offset.write_version] != version or data[header.offset.read_version] != version) {
             try bt.beginTrans(.exclusive, 0);
             try bt.pager.write(bt.page1.?.db_page);
-            data[18] = version;
-            data[19] = version;
+            data[header.offset.write_version] = version;
+            data[header.offset.read_version] = version;
         }
     }
 
@@ -662,7 +657,7 @@ pub const Btree = struct {
     /// finalizing the journal remains.
     pub fn commitPhaseOne(bt: *Btree) Error!void {
         if (bt.in_trans != .write) return;
-        if (bt.auto_vacuum) try bt.autoVacuumCommit();
+        if (bt.isAutoVacuum()) try bt.autoVacuumCommit();
         if (bt.do_truncate) bt.pager.truncateImage(bt.n_page);
         try bt.pager.commitPhaseOne(false);
     }
@@ -734,26 +729,37 @@ pub const Btree = struct {
 
     /// Port of btreeSetNPage().
     fn setNPage(bt: *Btree, p1: *MemPage) void {
-        const n = get4(p1.data + 28);
+        const n = get4(p1.data + header.offset.database_size);
         bt.n_page = if (n == 0) bt.pager.pageCount() else n;
     }
 
-    /// Port of sqlite3BtreeTripAllCursors().
+    /// Port of sqlite3BtreeTripAllCursors(). With `write_only`, read
+    /// cursors only save their positions; if that fails, every cursor is
+    /// tripped with that error instead.
     pub fn tripAllCursors(bt: *Btree, err: Error, write_only: bool) Error!void {
+        if (!write_only) return bt.tripEveryCursor(err);
         var it = bt.cursors;
         while (it) |c| : (it = c.next_cursor) {
-            if (write_only and !c.flags.write) {
+            if (!c.flags.write) {
                 if (c.state == .valid or c.state == .skipnext) {
                     c.savePosition() catch |e| {
-                        bt.tripAllCursors(e, false) catch unreachable;
+                        bt.tripEveryCursor(e);
                         return e;
                     };
                 }
             } else {
-                c.clear();
-                c.state = .fault;
-                c.fault = err;
+                c.trip(err);
             }
+            c.releaseAllPages();
+        }
+    }
+
+    /// tripAllCursors() for read and write cursors alike, which cannot
+    /// fail.
+    fn tripEveryCursor(bt: *Btree, err: Error) void {
+        var it = bt.cursors;
+        while (it) |c| : (it = c.next_cursor) {
+            c.trip(err);
             c.releaseAllPages();
         }
     }
@@ -832,10 +838,10 @@ pub const Btree = struct {
     /// append one. The page is writable and referenced, its content
     /// undefined. Modes other than `any` are only for auto-vacuum.
     fn allocatePage(bt: *Btree, nearby: Pgno, mode: AllocMode) Error!*MemPage {
-        std.debug.assert(mode == .any or (nearby > 0 and bt.auto_vacuum));
+        std.debug.assert(mode == .any or (nearby > 0 and bt.isAutoVacuum()));
         const p1 = bt.page1.?;
         const mx_page = bt.n_page;
-        const n_free = get4(p1.data + 36);
+        const n_free = get4(p1.data + header.offset.freelist_count);
         if (n_free >= mx_page) return error.Corrupt;
         if (n_free == 0) return bt.appendPage();
 
@@ -843,11 +849,11 @@ pub const Btree = struct {
         const search_list = switch (mode) {
             .any => false,
             .le => true,
-            .exact => nearby <= mx_page and (try ptrmap.get(bt, nearby)).e_type == ptrmap.free_page,
+            .exact => nearby <= mx_page and (try ptrmap.get(bt, nearby)).e_type == .free_page,
         };
 
         try bt.pager.write(p1.db_page);
-        put4(p1.data + 36, n_free - 1);
+        put4(p1.data + header.offset.freelist_count, n_free - 1);
 
         var trunk: ?*MemPage = null;
         var prev: ?*MemPage = null;
@@ -860,7 +866,7 @@ pub const Btree = struct {
             if (prev) |pt| releasePage(pt);
             prev = trunk;
             trunk = null;
-            const i_trunk = if (prev) |pt| get4(pt.data) else get4(p1.data + 32);
+            const i_trunk = if (prev) |pt| get4(pt.data) else get4(p1.data + header.offset.first_freelist_trunk);
             if (i_trunk > mx_page or n_search > n_free) return error.Corrupt;
             n_search += 1;
             trunk = try bt.getUnusedPage(i_trunk, .{});
@@ -871,7 +877,7 @@ pub const Btree = struct {
                 // A trunk without leaves: allocate the trunk itself.
                 std.debug.assert(prev == null);
                 try bt.pager.write(t.db_page);
-                p1.data[32..36].* = t.data[0..4].*;
+                p1.data[header.offset.first_freelist_trunk..][0..4].* = t.data[0..4].*;
                 trunk = null;
                 return t;
             }
@@ -897,7 +903,7 @@ pub const Btree = struct {
                     try bt.pager.write(pt.db_page);
                     pt.data[0..4].* = next_trunk;
                 } else {
-                    p1.data[32..36].* = next_trunk;
+                    p1.data[header.offset.first_freelist_trunk..][0..4].* = next_trunk;
                 }
                 trunk = null;
                 return t;
@@ -957,14 +963,14 @@ pub const Btree = struct {
         try bt.pager.write(p1.db_page);
         bt.n_page += 1;
         if (bt.pager.isLockPage(bt.n_page)) bt.n_page += 1;
-        if (bt.auto_vacuum and ptrmap.isPage(bt, bt.n_page)) {
+        if (bt.isAutoVacuum() and ptrmap.isPage(bt, bt.n_page)) {
             const map = try bt.getUnusedPage(bt.n_page, flags);
             defer releasePage(map);
             try bt.pager.write(map.db_page);
             bt.n_page += 1;
             if (bt.pager.isLockPage(bt.n_page)) bt.n_page += 1;
         }
-        put4(p1.data + 28, bt.n_page);
+        put4(p1.data + header.offset.database_size, bt.n_page);
         const pg = try bt.getUnusedPage(bt.n_page, flags);
         errdefer releasePage(pg);
         try bt.pager.write(pg.db_page);
@@ -993,19 +999,19 @@ pub const Btree = struct {
         }
 
         try bt.pager.write(p1.db_page);
-        const n_free = get4(p1.data + 36);
-        put4(p1.data + 36, n_free + 1);
+        const n_free = get4(p1.data + header.offset.freelist_count);
+        put4(p1.data + header.offset.freelist_count, n_free + 1);
 
-        if (bt.secure_delete) {
+        if (bt.secure_delete == .on) {
             if (pg == null) pg = try bt.getPage(pgno, .{});
             try bt.pager.write(pg.?.db_page);
             @memset(pg.?.data[0..bt.page_size], 0);
         }
-        if (bt.auto_vacuum) try ptrmap.put(bt, pgno, ptrmap.free_page, 0);
+        if (bt.isAutoVacuum()) try ptrmap.put(bt, pgno, .free_page, 0);
 
         var i_trunk: Pgno = 0;
         if (n_free != 0) {
-            i_trunk = get4(p1.data + 32);
+            i_trunk = get4(p1.data + header.offset.first_freelist_trunk);
             if (i_trunk > bt.n_page) return error.Corrupt;
             trunk = try bt.getPage(i_trunk, .{});
             const t = trunk.?;
@@ -1017,7 +1023,7 @@ pub const Btree = struct {
                 try bt.pager.write(t.db_page);
                 put4(t.data + 4, n_leaf + 1);
                 put4(t.data + 8 + n_leaf * 4, pgno);
-                if (pg) |x| if (!bt.secure_delete) bt.pager.dontWrite(x.db_page);
+                if (pg) |x| if (bt.secure_delete != .on) bt.pager.dontWrite(x.db_page);
                 try bt.has_content.put(bt.gpa, pgno, {});
                 return;
             }
@@ -1030,7 +1036,7 @@ pub const Btree = struct {
         try bt.pager.write(x.db_page);
         put4(x.data, i_trunk);
         put4(x.data + 4, 0);
-        put4(p1.data + 32, pgno);
+        put4(p1.data + header.offset.first_freelist_trunk, pgno);
     }
 
     fn freePage(bt: *Btree, pg: *MemPage) Error!void {
@@ -1041,14 +1047,14 @@ pub const Btree = struct {
     /// `page` is `ovfl` itself, referenced, unless `want_page` is false or
     /// the pointer map answered without reading it.
     fn getOverflowPage(bt: *Btree, ovfl: Pgno, want_page: bool) Error!struct { next: Pgno, page: ?*MemPage } {
-        if (bt.auto_vacuum) {
+        if (bt.isAutoVacuum()) {
             // Guess that the chain continues on the next page and check
             // the guess against the pointer map.
             var guess = ovfl + 1;
             while (ptrmap.isReserved(bt, guess)) guess += 1;
             if (guess <= bt.n_page) {
                 const e = try ptrmap.get(bt, guess);
-                if (e.e_type == ptrmap.overflow2 and e.parent == ovfl) return .{ .next = guess, .page = null };
+                if (e.e_type == .overflow2 and e.parent == ovfl) return .{ .next = guess, .page = null };
             }
         }
         const pg = try bt.getPage(ovfl, .{});
@@ -1148,16 +1154,16 @@ pub const Btree = struct {
             if (space_left == 0) {
                 // The pointer-map entry of the previous page in the chain.
                 const pgno_ptrmap = pgno_ovfl;
-                if (bt.auto_vacuum) {
+                if (bt.isAutoVacuum()) {
                     pgno_ovfl += 1;
                     while (ptrmap.isReserved(bt, pgno_ovfl)) pgno_ovfl += 1;
                 }
                 const ovfl = try bt.allocatePage(pgno_ovfl, .any);
-                if (bt.auto_vacuum) {
+                if (bt.isAutoVacuum()) {
                     // Even the first page gets an entry now (completed when
                     // the cell is inserted), or getOverflowPage() could
                     // misread a stale one while freeing the chain.
-                    const e_type = if (pgno_ptrmap != 0) ptrmap.overflow2 else ptrmap.overflow1;
+                    const e_type: ptrmap.Type = if (pgno_ptrmap != 0) .overflow2 else .overflow1;
                     ptrmap.put(bt, ovfl.pgno, e_type, pgno_ptrmap) catch |err| {
                         releasePage(ovfl);
                         return err;
@@ -1195,8 +1201,8 @@ pub const Btree = struct {
         b.ix_nx[0] = 2;
         try rebuildPage(&b, 0, 1, new);
         new.n_free = @intCast(bt.usable_size - new.cell_offset - 2 - sizes[0]);
-        if (bt.auto_vacuum) {
-            try ptrmap.put(bt, new.pgno, ptrmap.btree_page, parent.pgno);
+        if (bt.isAutoVacuum()) {
+            try ptrmap.put(bt, new.pgno, .btree_page, parent.pgno);
             if (sizes[0] > new.min_local) try ptrmap.putOvflPtr(new, new, cells[0]);
         }
 
@@ -1232,7 +1238,7 @@ pub const Btree = struct {
         const child = try bt.allocatePage(root.pgno, .any);
         errdefer releasePage(child);
         try copyNodeContent(root, child);
-        if (bt.auto_vacuum) try ptrmap.put(bt, child.pgno, ptrmap.btree_page, root.pgno);
+        if (bt.isAutoVacuum()) try ptrmap.put(bt, child.pgno, .btree_page, root.pgno);
 
         const n = root.n_overflow;
         @memcpy(child.ai_ovfl[0..n], root.ai_ovfl[0..n]);
@@ -1324,7 +1330,7 @@ pub const Btree = struct {
                 // Dropping a cell overwrites only its first 4 bytes, which
                 // are not needed. Secure delete zeroes it all, so keep a
                 // copy in ovfl_space until aSpace1 exists.
-                if (bt.secure_delete or bt.overwrite) {
+                if (bt.secure_delete != .off) {
                     const off = parent.offsetOf(ap_div[i]);
                     if (off + sz <= usable) {
                         @memcpy(ovfl_space[off..][0..sz], ap_div[i][0..sz]);
@@ -1518,7 +1524,7 @@ pub const Btree = struct {
                 ap_new[j] = new;
                 n_new += 1;
                 cnt_old[j] = n_cell_total;
-                if (bt.auto_vacuum) try ptrmap.put(bt, new.pgno, ptrmap.btree_page, parent.pgno);
+                if (bt.isAutoVacuum()) try ptrmap.put(bt, new.pgno, .btree_page, parent.pgno);
             }
         }
 
@@ -1553,7 +1559,7 @@ pub const Btree = struct {
         // interior pages) and the start of their overflow chain. Dividers
         // inserted into the parent are handled by insertCell, the right
         // children of the siblings after the siblings are filled.
-        if (bt.auto_vacuum) {
+        if (bt.isAutoVacuum()) {
             var old = ap_new[0].?;
             var new = old;
             var cnt_old_next: u32 = @as(u32, new.n_cell) + new.n_overflow;
@@ -1575,7 +1581,7 @@ pub const Btree = struct {
                 // A cell that stays on the same page needs no update; a
                 // divider or overflow cell always does.
                 if (i_old >= n_new or new.pgno != a_pgno[i_old] or !within(cell, old.data, old.data_end)) {
-                    if (leaf_correction == 0) try ptrmap.put(bt, get4(cell), ptrmap.btree_page, new.pgno);
+                    if (leaf_correction == 0) try ptrmap.put(bt, get4(cell), .btree_page, new.pgno);
                     if (b.cellSizeAt(@intCast(ci)) > new.min_local) try ptrmap.putOvflPtr(new, old, cell);
                 }
             }
@@ -1642,9 +1648,9 @@ pub const Btree = struct {
             try child.defragment(-1);
             try copyNodeContent(child, parent);
             try bt.freePage(child);
-        } else if (bt.auto_vacuum and leaf_correction == 0) {
+        } else if (bt.isAutoVacuum() and leaf_correction == 0) {
             // The right children of the siblings.
-            for (ap_new[0..n_new]) |new| try ptrmap.put(bt, get4(new.?.data + 8), ptrmap.btree_page, new.?.pgno);
+            for (ap_new[0..n_new]) |new| try ptrmap.put(bt, get4(new.?.data + 8), .btree_page, new.?.pgno);
         }
 
         // Free old pages that were not reused.
@@ -1666,23 +1672,22 @@ pub const Btree = struct {
     /// `e_type`/`ptr_page`) to the unused location `free_pgno`, fixing the
     /// pointer to it and the pointer-map entries of the pages it points
     /// to. `pg` stays referenced. See `Pager.movePage` for `is_commit`.
-    fn relocatePage(bt: *Btree, pg: *MemPage, e_type: u8, ptr_page: Pgno, free_pgno: Pgno, is_commit: bool) Error!void {
-        std.debug.assert(e_type == ptrmap.overflow2 or e_type == ptrmap.overflow1 or
-            e_type == ptrmap.btree_page or e_type == ptrmap.root_page);
+    fn relocatePage(bt: *Btree, pg: *MemPage, e_type: ptrmap.Type, ptr_page: Pgno, free_pgno: Pgno, is_commit: bool) Error!void {
+        std.debug.assert(e_type != .free_page);
         const old_pgno = pg.pgno;
         if (old_pgno < 3) return error.Corrupt;
 
         try bt.pager.movePage(pg.db_page, free_pgno, is_commit);
         pg.pgno = free_pgno;
 
-        if (e_type == ptrmap.btree_page or e_type == ptrmap.root_page) {
+        if (e_type == .btree_page or e_type == .root_page) {
             try setChildPtrmaps(pg);
         } else {
             const next_ovfl = get4(pg.data);
-            if (next_ovfl != 0) try ptrmap.put(bt, next_ovfl, ptrmap.overflow2, free_pgno);
+            if (next_ovfl != 0) try ptrmap.put(bt, next_ovfl, .overflow2, free_pgno);
         }
 
-        if (e_type != ptrmap.root_page) {
+        if (e_type != .root_page) {
             const ptr_pg = try bt.getPage(ptr_page, .{});
             defer releasePage(ptr_pg);
             try bt.pager.write(ptr_pg.db_page);
@@ -1701,11 +1706,11 @@ pub const Btree = struct {
         std.debug.assert(last_pg_arg > n_fin);
         var last_pg = last_pg_arg;
         if (!ptrmap.isReserved(bt, last_pg)) {
-            if (get4(bt.page1.?.data + 36) == 0) return false;
+            if (get4(bt.page1.?.data + header.offset.freelist_count) == 0) return false;
             const e = try ptrmap.get(bt, last_pg);
-            if (e.e_type == ptrmap.root_page) return error.Corrupt;
+            if (e.e_type == .root_page) return error.Corrupt;
 
-            if (e.e_type == ptrmap.free_page) {
+            if (e.e_type == .free_page) {
                 // Take it off the freelist. Unneeded at commit: the whole
                 // freelist is dropped afterwards.
                 if (!at_commit) {
@@ -1763,10 +1768,10 @@ pub const Btree = struct {
     /// transaction.
     pub fn incrVacuum(bt: *Btree) Error!bool {
         std.debug.assert(bt.in_trans == .write);
-        if (!bt.auto_vacuum) return false;
+        if (!bt.isAutoVacuum()) return false;
         const p1 = bt.page1.?;
         const n_orig = bt.n_page;
-        const n_free = get4(p1.data + 36);
+        const n_free = get4(p1.data + header.offset.freelist_count);
         const n_fin = bt.finalDbSize(n_orig, n_free);
         if (n_orig < n_fin or n_free >= n_orig) return error.Corrupt;
         if (n_free == 0) return false;
@@ -1774,7 +1779,7 @@ pub const Btree = struct {
         bt.invalidateAllOverflowCache();
         if (!try bt.incrVacuumStep(n_fin, n_orig, false)) return false;
         try bt.pager.write(p1.db_page);
-        put4(p1.data + 28, bt.n_page);
+        put4(p1.data + header.offset.database_size, bt.n_page);
         return true;
     }
 
@@ -1783,12 +1788,12 @@ pub const Btree = struct {
     /// free page. Rolls the pager back on failure.
     fn autoVacuumCommit(bt: *Btree) Error!void {
         bt.invalidateAllOverflowCache();
-        if (bt.incr_vacuum) return;
+        if (bt.auto_vacuum == .incremental) return;
         const p1 = bt.page1.?;
         const n_orig = bt.n_page;
         // No database ends on a pointer-map page or the lock page.
         if (ptrmap.isReserved(bt, n_orig)) return error.Corrupt;
-        const n_free = get4(p1.data + 36);
+        const n_free = get4(p1.data + header.offset.freelist_count);
         const n_fin = bt.finalDbSize(n_orig, n_free);
         if (n_fin > n_orig) return error.Corrupt;
 
@@ -1800,9 +1805,9 @@ pub const Btree = struct {
         }
         if (n_free > 0) {
             try bt.pager.write(p1.db_page);
-            put4(p1.data + 32, 0);
-            put4(p1.data + 36, 0);
-            put4(p1.data + 28, n_fin);
+            put4(p1.data + header.offset.first_freelist_trunk, 0);
+            put4(p1.data + header.offset.freelist_count, 0);
+            put4(p1.data + header.offset.database_size, n_fin);
             bt.do_truncate = true;
             bt.n_page = n_fin;
         }
@@ -1814,7 +1819,7 @@ pub const Btree = struct {
     /// root page.
     pub fn createTable(bt: *Btree, kind: TableKind) Error!Pgno {
         std.debug.assert(bt.in_trans == .write and !bt.read_only);
-        const root = if (bt.auto_vacuum) try bt.allocateRootPage() else try bt.allocatePage(1, .any);
+        const root = if (bt.isAutoVacuum()) try bt.allocateRootPage() else try bt.allocatePage(1, .any);
         defer releasePage(root);
         root.zero(if (kind == .intkey) page.table_leaf else page.index_leaf);
         return root.pgno;
@@ -1846,7 +1851,7 @@ pub const Btree = struct {
             {
                 errdefer releasePage(root);
                 const e = try ptrmap.get(bt, pgno_root);
-                if (e.e_type == ptrmap.root_page or e.e_type == ptrmap.free_page) return error.Corrupt;
+                if (e.e_type == .root_page or e.e_type == .free_page) return error.Corrupt;
                 try bt.relocatePage(root, e.e_type, e.parent, pgno_move, false);
             }
             releasePage(root);
@@ -1854,7 +1859,7 @@ pub const Btree = struct {
         }
         errdefer releasePage(root);
         try bt.pager.write(root.db_page);
-        try ptrmap.put(bt, pgno_root, ptrmap.root_page, 0);
+        try ptrmap.put(bt, pgno_root, .root_page, 0);
         try bt.updateMeta(.largest_root_page, pgno_root);
         return root;
     }
@@ -1908,7 +1913,7 @@ pub const Btree = struct {
         if (root > bt.n_page) return error.Corrupt;
         _ = try bt.clearTable(root);
         const pg = try bt.getPage(root, .{});
-        if (!bt.auto_vacuum) {
+        if (!bt.isAutoVacuum()) {
             defer releasePage(pg);
             try bt.freePage(pg);
             return 0;
@@ -1925,7 +1930,7 @@ pub const Btree = struct {
             const move = try bt.getPage(max_root, .{});
             {
                 defer releasePage(move);
-                try bt.relocatePage(move, ptrmap.root_page, 0, root, false);
+                try bt.relocatePage(move, .root_page, 0, root, false);
             }
             const old = try bt.getPage(max_root, .{});
             defer releasePage(old);
@@ -1943,7 +1948,7 @@ pub const Btree = struct {
     pub fn getMeta(bt: *Btree, idx: Meta) u32 {
         std.debug.assert(bt.in_trans != .none);
         if (idx == .data_version) return bt.pager.dataVersion() +% bt.data_version_bias;
-        return get4(bt.page1.?.data + 36 + @as(u32, @intFromEnum(idx)) * 4);
+        return get4(bt.page1.?.data + header.offset.meta + @as(u32, @intFromEnum(idx)) * 4);
     }
 
     /// Port of sqlite3BtreeUpdateMeta(). The free page count is read-only.
@@ -1952,8 +1957,10 @@ pub const Btree = struct {
         std.debug.assert(idx != .free_page_count and idx != .data_version);
         const p1 = bt.page1.?;
         try bt.pager.write(p1.db_page);
-        put4(p1.data + 36 + @as(u32, @intFromEnum(idx)) * 4, value);
-        if (idx == .incr_vacuum) bt.incr_vacuum = value != 0;
+        put4(p1.data + header.offset.meta + @as(u32, @intFromEnum(idx)) * 4, value);
+        // Switches between full and incremental; only setAutoVacuum turns
+        // auto-vacuum on or off.
+        if (idx == .incr_vacuum and bt.isAutoVacuum()) bt.auto_vacuum = if (value != 0) .incremental else .full;
     }
 
     pub const integrityCheck = @import("integrity.zig").check;
@@ -2255,7 +2262,7 @@ fn copyNodeContent(from: *MemPage, to: *MemPage) Error!void {
     try to.init();
     try to.computeFreeSpace();
     // `to` now holds the pointers to the children and overflow chains.
-    if (to.bt.auto_vacuum) try setChildPtrmaps(to);
+    if (to.bt.isAutoVacuum()) try setChildPtrmaps(to);
 }
 
 /// Port of setChildPtrmaps(): point the pointer-map entries of every
@@ -2266,17 +2273,17 @@ fn setChildPtrmaps(pg: *MemPage) Error!void {
     for (0..pg.n_cell) |i| {
         const cell = pg.findCell(i);
         try ptrmap.putOvflPtr(pg, pg, cell);
-        if (!pg.leaf) try ptrmap.put(bt, get4(cell), ptrmap.btree_page, pg.pgno);
+        if (!pg.leaf) try ptrmap.put(bt, get4(cell), .btree_page, pg.pgno);
     }
-    if (!pg.leaf) try ptrmap.put(bt, pg.rightChild(), ptrmap.btree_page, pg.pgno);
+    if (!pg.leaf) try ptrmap.put(bt, pg.rightChild(), .btree_page, pg.pgno);
 }
 
 /// Port of modifyPagePointer(): change the pointer to `from` on `pg` to
 /// point at `to`. `e_type` says which pointer: a child (btree_page), the
 /// overflow chain of a cell (overflow1), or the next-page link of an
 /// overflow page (overflow2). `pg` must be writable.
-fn modifyPagePointer(pg: *MemPage, from: Pgno, to: Pgno, e_type: u8) Error!void {
-    if (e_type == ptrmap.overflow2) {
+fn modifyPagePointer(pg: *MemPage, from: Pgno, to: Pgno, e_type: ptrmap.Type) Error!void {
+    if (e_type == .overflow2) {
         if (get4(pg.data) != from) return error.Corrupt;
         put4(pg.data, to);
         return;
@@ -2285,7 +2292,7 @@ fn modifyPagePointer(pg: *MemPage, from: Pgno, to: Pgno, e_type: u8) Error!void 
     const usable_end = pg.data + pg.bt.usable_size;
     for (0..pg.n_cell) |i| {
         const cell = pg.findCell(i);
-        if (e_type == ptrmap.overflow1) {
+        if (e_type == .overflow1) {
             const info = pg.parseCell(cell);
             if (info.n_local < info.n_payload) {
                 if (@intFromPtr(cell + info.n_size) > @intFromPtr(usable_end)) return error.Corrupt;
@@ -2302,7 +2309,7 @@ fn modifyPagePointer(pg: *MemPage, from: Pgno, to: Pgno, e_type: u8) Error!void 
             }
         }
     }
-    if (e_type != ptrmap.btree_page or pg.rightChild() != from) return error.Corrupt;
+    if (e_type != .btree_page or pg.rightChild() != from) return error.Corrupt;
     put4(pg.data + pg.hdr_offset + 8, to);
 }
 
@@ -2311,9 +2318,9 @@ fn modifyPagePointer(pg: *MemPage, from: Pgno, to: Pgno, e_type: u8) Error!void 
 pub const Cursor = struct {
     state: State = .invalid,
     flags: Flags = .{},
-    /// With state `skipnext`: next() is a no-op if positive, previous() if
-    /// negative.
-    skip_next: i32 = 0,
+    /// With state `skipnext`: next() is a no-op if .gt (the cursor is on
+    /// the entry after the saved one), previous() if .lt.
+    skip_next: Order = .eq,
     /// The error that put the cursor in the `fault` state.
     fault: ?Error = null,
     bt: *Btree,
@@ -2380,10 +2387,10 @@ pub const Cursor = struct {
         append: bool = false,
         /// Leave the cursor where a following next()/previous() works.
         save_position: bool = false,
-        /// The result of a seek just made for this key: negative if the
-        /// cursor is on a smaller entry, positive if on a larger one, 0 if
-        /// unknown (a seek is then done here).
-        seek_result: i32 = 0,
+        /// The result of a seek just made for this key: .lt if the cursor
+        /// is on a smaller entry, .gt if on a larger one, .eq if on the
+        /// entry itself. Null if unknown (a seek is then done here).
+        seek_result: ?Order = null,
     };
 
     pub const DeleteOptions = struct {
@@ -2430,6 +2437,13 @@ pub const Cursor = struct {
         cur.state = .invalid;
     }
 
+    /// Put the cursor in the `fault` state with `err`.
+    fn trip(cur: *Cursor, err: Error) void {
+        cur.clear();
+        cur.state = .fault;
+        cur.fault = err;
+    }
+
     /// Port of saveCursorKey(): remember the current key.
     fn saveKey(cur: *Cursor) Error!void {
         std.debug.assert(cur.state == .valid and cur.saved_key == null);
@@ -2454,7 +2468,7 @@ pub const Cursor = struct {
         if (cur.state == .skipnext) {
             cur.state = .valid;
         } else {
-            cur.skip_next = 0;
+            cur.skip_next = .eq;
         }
         defer {
             cur.flags.valid_nkey = false;
@@ -2489,9 +2503,8 @@ pub const Cursor = struct {
         const res = try cur.moveto(cur.savedKey(), cur.n_key, false);
         if (cur.saved_key) |k| cur.bt.gpa.free(k);
         cur.saved_key = null;
-        const skip = orderToInt(res);
-        if (skip != 0) cur.skip_next = skip;
-        if (cur.skip_next != 0 and cur.state == .valid) cur.state = .skipnext;
+        if (res != .eq) cur.skip_next = res;
+        if (cur.skip_next != .eq and cur.state == .valid) cur.state = .skipnext;
     }
 
     fn restoreIfNeeded(cur: *Cursor) Error!void {
@@ -2825,7 +2838,7 @@ pub const Cursor = struct {
             if (cur.state == .invalid) return false;
             if (cur.state == .skipnext) {
                 cur.state = .valid;
-                if (cur.skip_next > 0) return true;
+                if (cur.skip_next == .gt) return true;
             }
         }
         var pg = cur.page;
@@ -2871,7 +2884,7 @@ pub const Cursor = struct {
             if (cur.state == .invalid) return false;
             if (cur.state == .skipnext) {
                 cur.state = .valid;
-                if (cur.skip_next < 0) return true;
+                if (cur.skip_next == .lt) return true;
             }
         }
         const pg = cur.page;
@@ -3247,14 +3260,14 @@ pub const Cursor = struct {
     /// left at an arbitrary position unless `save_position`.
     pub fn insert(cur: *Cursor, x: Payload, opts: InsertOptions) Error!void {
         const bt = cur.bt;
-        var loc = opts.seek_result;
+        var seek = opts.seek_result;
         const n_key = x.nKey();
         std.debug.assert((x.key == null) == (cur.key_info == null));
 
         if (cur.flags.multiple) {
             try bt.saveAllCursors(cur.pgno_root, cur);
             // Only possible if two b-trees share a root in a corrupt schema.
-            if (loc != 0 and cur.i_page < 0) return error.Corrupt;
+            if (seek != null and cur.i_page < 0) return error.Corrupt;
         }
         if (cur.state.atLeast(.requireseek)) _ = try cur.moveToRoot();
         std.debug.assert(cur.flags.write and bt.in_trans == .write and !bt.read_only);
@@ -3265,24 +3278,29 @@ pub const Cursor = struct {
                 if (cur.info.n_size != 0 and cur.info.n_payload == x.data.len + x.n_zero) {
                     return cur.overwriteCell(x);
                 }
-            } else if (loc == 0) {
-                loc = orderToInt(try cur.tableMoveto(n_key, opts.append));
+            } else if (seek == null) {
+                seek = try cur.tableMoveto(n_key, opts.append);
             }
         } else {
-            if (loc == 0 and !opts.save_position) {
-                loc = orderToInt(if (x.seek) |k|
+            if (seek == null and !opts.save_position) {
+                seek = if (x.seek) |k|
                     try cur.indexMoveto(k)
                 else
-                    try cur.moveto(x.key, n_key, opts.append));
+                    try cur.moveto(x.key, n_key, opts.append);
             }
-            if (loc == 0) {
+            // With save_position and no seek, the cursor is on an equal
+            // entry.
+            if ((seek orelse .eq) == .eq) {
                 cur.getCellInfo();
                 if (cur.info.n_key == n_key) {
                     return cur.overwriteCell(.{ .data = x.key.? });
                 }
             }
         }
-        std.debug.assert(cur.state == .valid or (cur.state == .invalid and loc != 0));
+        // Where the cursor is relative to the new entry. Without a seek it
+        // is on the entry being replaced.
+        const loc = seek orelse .eq;
+        std.debug.assert(cur.state == .valid or (cur.state == .invalid and loc != .eq));
 
         const pg = cur.page;
         if (pg.n_free < 0) {
@@ -3293,7 +3311,7 @@ pub const Cursor = struct {
         const sz_new = try bt.fillInCell(pg, new_cell, x);
         var idx: usize = cur.ix;
         cur.info.n_size = 0;
-        if (loc == 0) {
+        if (loc == .eq) {
             if (idx >= pg.n_cell) return error.Corrupt;
             try bt.pager.write(pg.db_page);
             const old_cell = pg.findCell(idx);
@@ -3304,7 +3322,7 @@ pub const Cursor = struct {
             // databases if the new cell might have an overflow chain, whose
             // pointer-map entry insertCell would set.
             if (info.n_size == sz_new and info.n_local == info.n_payload and
-                (!bt.auto_vacuum or sz_new < pg.min_local))
+                (!bt.isAutoVacuum() or sz_new < pg.min_local))
             {
                 if (@intFromPtr(old_cell) < @intFromPtr(pg.data + pg.hdr_offset + 10)) return error.Corrupt;
                 if (@intFromPtr(old_cell) + sz_new > @intFromPtr(pg.data_end)) return error.Corrupt;
@@ -3312,7 +3330,7 @@ pub const Cursor = struct {
                 return;
             }
             try pg.dropCell(idx, info.n_size);
-        } else if (loc < 0 and pg.n_cell > 0) {
+        } else if (loc == .lt and pg.n_cell > 0) {
             std.debug.assert(pg.leaf);
             cur.ix += 1;
             idx = cur.ix;
@@ -3358,15 +3376,14 @@ pub const Cursor = struct {
         if (@intFromPtr(cell) < @intFromPtr(pg.cell_idx + pg.n_cell)) return error.Corrupt;
 
         // With save_position: if deleting will not rebalance, the cursor can
-        // stay put (skipnext, 2); otherwise save the key (requireseek, 1).
-        var preserve: u2 = @intFromBool(opts.save_position);
-        if (preserve != 0) {
-            if (!pg.leaf or @as(i64, pg.n_free) + pg.cellSize(cell) + 2 > bt.usable_size * 2 / 3 or pg.n_cell == 1) {
-                try cur.saveKey();
-            } else {
-                preserve = 2;
-            }
-        }
+        // stay put (skipnext); otherwise save the key (requireseek).
+        const preserve: enum { none, save_key, stay } = if (!opts.save_position)
+            .none
+        else if (!pg.leaf or @as(i64, pg.n_free) + pg.cellSize(cell) + 2 > bt.usable_size * 2 / 3 or pg.n_cell == 1)
+            .save_key
+        else
+            .stay;
+        if (preserve == .save_key) try cur.saveKey();
 
         // An entry on an interior page is replaced by its predecessor, the
         // largest entry in its left subtree, which makes balancing easier.
@@ -3411,17 +3428,17 @@ pub const Cursor = struct {
             try cur.balance();
         }
 
-        if (preserve > 1) {
+        if (preserve == .stay) {
             cur.state = .skipnext;
             if (cell_idx >= pg.n_cell) {
-                cur.skip_next = -1;
+                cur.skip_next = .lt;
                 cur.ix = pg.n_cell - 1;
             } else {
-                cur.skip_next = 1;
+                cur.skip_next = .gt;
             }
         } else {
             const r = cur.moveToRoot();
-            if (preserve != 0) {
+            if (preserve == .save_key) {
                 cur.releaseAllPages();
                 cur.state = .requireseek;
             }

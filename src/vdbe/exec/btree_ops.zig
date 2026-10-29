@@ -23,6 +23,13 @@ const RC = int.RC;
 /// The largest rowid (MAX_ROWID).
 const max_rowid: i64 = std.math.maxInt(i64);
 
+/// The cursor's seek result for Cursor.insert, if OPFLAG_USESEEKRESULT
+/// says to use it (0 there means no seek was made).
+fn insertSeekResult(op: *const Op, c: *const vi.VdbeCursor) ?std.math.Order {
+    if (op.p5 & vi.OPFLAG.USESEEKRESULT == 0 or c.seek_result == 0) return null;
+    return std.math.order(c.seek_result, 0);
+}
+
 pub fn opCount(e: *Exec, op: *Op) Error!Flow {
     const cur = e.csr(op.p1).uc.cursor;
     const n = try if (op.p3 != 0) cur.rowCountEst() else cur.count();
@@ -87,7 +94,6 @@ pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
         v.n_change += 1;
         if (op.p5 & vi.OPFLAG.LASTROWID != 0) e.db.last_rowid = rowid;
     }
-    const seek_result = if (op.p5 & vi.OPFLAG.USESEEKRESULT != 0) c.seek_result else 0;
     const x: btree.Payload = .{
         .rowid = rowid,
         .data = data.bytes(),
@@ -96,7 +102,7 @@ pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
     const res = c.uc.cursor.insert(x, .{
         .append = op.p5 & vi.OPFLAG.APPEND != 0,
         .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
-        .seek_result = seek_result,
+        .seek_result = insertSeekResult(op, c),
     });
     c.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
@@ -156,7 +162,7 @@ pub fn opIdxInsert(e: *Exec, op: *Op) Error!Flow {
     const res = c.uc.cursor.insert(.{ .key = in2.bytes(), .seek = seek }, .{
         .append = op.p5 & vi.OPFLAG.APPEND != 0,
         .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0,
-        .seek_result = if (op.p5 & vi.OPFLAG.USESEEKRESULT != 0) c.seek_result else 0,
+        .seek_result = insertSeekResult(op, c),
     });
     c.cache_status = vi.cache_stale;
     try res;

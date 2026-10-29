@@ -1,0 +1,259 @@
+-- Differential cases for the PostgreSQL dialect (tools/dialect/pg-diff.sh).
+-- Each case starts with a "-- case:" line and runs on an empty database,
+-- in PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. Booleans are cast to int and floats
+-- avoided where the two print them differently.
+
+-- case: names fold to lower case, quoted ones keep it
+CREATE TABLE Mixed (Id int, "Camel" text);
+INSERT INTO MIXED VALUES (1, 'a');
+SELECT ID, "Camel" FROM mixed;
+SELECT tablename FROM pg_tables WHERE schemaname = 'public';
+
+-- case: result column names
+CREATE TABLE t (a int, b text);
+INSERT INTO t VALUES (1, 'x');
+SELECT a, t.b, a + 1, count(*), upper(b), a::text, 1::int, CASE WHEN a > 0 THEN 1 END, coalesce(a, 0), a AS "X" FROM t GROUP BY a, b;
+SELECT (SELECT b FROM t), EXISTS (SELECT 1)::int, 'lit', 2 AS two;
+
+-- case: strings and dollar quoting
+SELECT 'it''s', E'a\tb', $$dollar 'q'$$, $x$a$$b$x$, 'a'
+  'b', length('héllo');
+
+-- case: ORDER BY puts NULLs last ascending, first descending
+CREATE TABLE n (id int PRIMARY KEY, v int);
+INSERT INTO n VALUES (1, 3), (2, NULL), (3, 1), (4, NULL), (5, 2);
+SELECT id FROM n ORDER BY v, id;
+SELECT id FROM n ORDER BY v DESC, id;
+SELECT id FROM n ORDER BY v NULLS FIRST, id;
+SELECT id FROM n ORDER BY v DESC NULLS LAST, id;
+SELECT id, v FROM n ORDER BY id DESC LIMIT 2 OFFSET 1;
+SELECT id FROM n ORDER BY id OFFSET 1 ROWS FETCH FIRST 2 ROWS ONLY;
+
+-- case: joins
+CREATE TABLE e (id int PRIMARY KEY, name text, dept int);
+CREATE TABLE d (id int PRIMARY KEY, title text);
+INSERT INTO d VALUES (1, 'eng'), (2, 'ops'), (3, 'empty');
+INSERT INTO e VALUES (1, 'ann', 1), (2, 'bob', 1), (3, 'cid', 2), (4, 'dan', NULL);
+SELECT e.name, d.title FROM e LEFT JOIN d ON d.id = e.dept ORDER BY e.id;
+SELECT e.name, d.title FROM e RIGHT JOIN d ON d.id = e.dept ORDER BY d.id, e.id;
+SELECT count(*) FROM e FULL JOIN d ON d.id = e.dept;
+SELECT count(*) FROM e CROSS JOIN d;
+SELECT count(*) FROM e NATURAL JOIN d;
+SELECT title FROM d JOIN (SELECT dept AS id FROM e WHERE id = 3) s USING (id);
+
+-- case: grouping and aggregates
+CREATE TABLE s (g int, v int);
+INSERT INTO s VALUES (1, 10), (1, 20), (2, 5), (NULL, 7);
+SELECT g, count(*), sum(v), min(v), max(v) FROM s GROUP BY g ORDER BY g;
+SELECT g, sum(v) FROM s GROUP BY g HAVING sum(v) > 6 ORDER BY 1;
+SELECT count(*) FILTER (WHERE v > 6), count(DISTINCT g), string_agg(v::text, ',' ORDER BY v DESC) FROM s;
+SELECT bool_and(v > 4)::int, bool_or(v > 19)::int, every(v > 6)::int FROM s;
+
+-- case: set operations and VALUES
+SELECT 1 UNION SELECT 2 INTERSECT SELECT 3 ORDER BY 1;
+SELECT 3 EXCEPT SELECT 2;
+SELECT 1 UNION ALL SELECT 1;
+VALUES (2, 'b'), (1, 'a') ORDER BY 1;
+SELECT * FROM (VALUES (1, 'x'), (2, 'y')) AS v(n, s) WHERE n > 1;
+(SELECT 1 AS a ORDER BY 1 LIMIT 1) UNION ALL (SELECT 2);
+
+-- case: WITH and recursion
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 5) SELECT sum(n), count(*) FROM r;
+WITH a AS (SELECT 1 AS x), b AS (SELECT x + 1 AS y FROM a) SELECT * FROM a, b;
+
+-- case: window functions
+CREATE TABLE w (id int, g int, v int);
+INSERT INTO w VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, NULL);
+SELECT id, row_number() OVER (PARTITION BY g ORDER BY id), sum(v) OVER (PARTITION BY g), rank() OVER (ORDER BY v DESC) FROM w ORDER BY id;
+SELECT id, sum(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM w ORDER BY id;
+SELECT id, lag(v) OVER win, lead(v, 1, 0) OVER win FROM w WINDOW win AS (ORDER BY id) ORDER BY id;
+
+-- case: predicates
+SELECT (NULL IS NULL)::int, (1 IS NOT NULL)::int, (NULL IS DISTINCT FROM 1)::int, (NULL IS NOT DISTINCT FROM NULL)::int;
+SELECT (2 BETWEEN 1 AND 3)::int, (2 NOT BETWEEN 1 AND 3)::int, (2 IN (1, 2))::int, (3 NOT IN (1, 2))::int;
+SELECT ('abc' LIKE 'a%')::int, ('abc' LIKE 'A%')::int, ('abc' ILIKE 'A%')::int, ('a%' LIKE 'a\%')::int, ('a_' LIKE 'a!_' ESCAPE '!')::int;
+SELECT (true IS TRUE)::int, (NULL::boolean IS UNKNOWN)::int, (false IS NOT TRUE)::int;
+
+-- case: CASE, COALESCE, NULLIF, GREATEST, LEAST
+SELECT CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' END, CASE WHEN false THEN 1 END;
+SELECT coalesce(NULL, 3), nullif(1, 1), nullif(1, 2), greatest(1, NULL, 3), least(NULL, 2, 1);
+
+-- case: arithmetic
+SELECT 2 + 3 * 4, (2 + 3) * 4, 7 / 2, -7 / 2, 7 % 3, -7 % 3, mod(-7, 3), abs(-3), (2 ^ 3 ^ 2 = 64)::int;
+
+-- case: casts
+SELECT '42'::int + 1, CAST('7' AS bigint), 42::text || 'x', 'abcdef'::varchar(3), 'abc'::char(1), '2024-03-05'::date, '10:11:12'::time;
+SELECT 't'::boolean::int, 'off'::bool::int, 1::boolean::int, 'yes'::boolean::int;
+
+-- case: string functions
+SELECT substring('hello' FROM 2 FOR 3), substring('hello' FROM 3), position('l' IN 'hello'), strpos('hello', 'lo');
+SELECT trim('  x  '), trim(BOTH 'x' FROM 'xxaxx'), trim(LEADING 'x' FROM 'xxa'), btrim('xax', 'x'), ltrim('  a'), rtrim('a  ');
+SELECT left('hello', 2), left('hello', -2), right('hello', 2), right('hello', -2), char_length('ab'), octet_length('é');
+SELECT concat('a', NULL, 1), concat_ws('-', 'a', NULL, 'b'), upper('abc'), lower('ABC'), repeat('ab', 3), reverse('abc');
+SELECT lpad('7', 3, '0'), rpad('ab', 4) || '|', split_part('a,b,c', ',', 2), replace('aXbX', 'X', '-'), ascii('A'), chr(66);
+
+-- case: dates
+SELECT extract(year FROM date '2024-03-05'), extract(month FROM date '2024-03-05'), extract(day FROM date '2024-03-05'), extract(dow FROM date '2024-03-05'), extract(doy FROM date '2024-03-05');
+SELECT (now() = current_timestamp)::int, (now()::date = current_date)::int;
+
+-- case: INSERT, RETURNING, ON CONFLICT
+CREATE TABLE kv (k text PRIMARY KEY, v int NOT NULL DEFAULT 0);
+INSERT INTO kv (k, v) VALUES ('a', 1), ('b', 2) RETURNING k, v * 10;
+INSERT INTO kv VALUES ('c', DEFAULT) RETURNING *;
+INSERT INTO kv (k, v) VALUES ('a', 5) ON CONFLICT (k) DO UPDATE SET v = kv.v + EXCLUDED.v RETURNING v;
+INSERT INTO kv AS t (k, v) VALUES ('a', 5) ON CONFLICT (k) DO UPDATE SET v = t.v + 1 WHERE t.v < 0 RETURNING v;
+INSERT INTO kv (k, v) VALUES ('a', 9), ('e', 9) ON CONFLICT DO NOTHING RETURNING k;
+INSERT INTO kv (k, v) SELECT k || '2', v + 100 FROM kv WHERE k < 'c';
+SELECT * FROM kv ORDER BY k;
+
+-- case: UPDATE and DELETE
+CREATE TABLE kv (k text PRIMARY KEY, v int);
+CREATE TABLE bonus (k text, amount int);
+INSERT INTO kv VALUES ('a', 1), ('b', 2), ('c', 3);
+INSERT INTO bonus VALUES ('a', 1000), ('c', 5);
+UPDATE kv SET v = v + 1 WHERE k IN ('b', 'c') RETURNING k, v;
+UPDATE kv SET v = kv.v + b.amount FROM bonus b WHERE b.k = kv.k RETURNING kv.k, kv.v;
+UPDATE kv AS t SET (v, k) = (0, t.k || '!') WHERE t.k = 'b' RETURNING t.*;
+DELETE FROM kv k USING bonus b WHERE b.k = k.k AND b.amount > 100 RETURNING k.k;
+DELETE FROM kv WHERE v = 0 RETURNING *;
+SELECT * FROM kv;
+
+-- case: transactions and savepoints
+CREATE TABLE tx (x int);
+BEGIN;
+INSERT INTO tx VALUES (1);
+SAVEPOINT s;
+INSERT INTO tx VALUES (2);
+ROLLBACK TO SAVEPOINT s;
+INSERT INTO tx VALUES (3);
+RELEASE SAVEPOINT s;
+COMMIT;
+START TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+INSERT INTO tx VALUES (4);
+ROLLBACK;
+SELECT x FROM tx ORDER BY x;
+
+-- case: serial and identity
+CREATE TABLE s (id serial PRIMARY KEY, v text);
+INSERT INTO s (v) VALUES ('a'), ('b') RETURNING id;
+INSERT INTO s VALUES (DEFAULT, 'c') RETURNING id;
+INSERT INTO s (id, v) VALUES (10, 'd') RETURNING id;
+INSERT INTO s (v) SELECT 'e' RETURNING id;
+INSERT INTO s DEFAULT VALUES RETURNING id, v;
+SELECT currval('s_id_seq'), lastval();
+CREATE TABLE g (id bigint GENERATED ALWAYS AS IDENTITY (START WITH 100 INCREMENT BY 10) PRIMARY KEY, k int GENERATED BY DEFAULT AS IDENTITY, v text);
+INSERT INTO g (v) VALUES ('a'), ('b') RETURNING id, k;
+INSERT INTO g (k, v) VALUES (50, 'c') RETURNING id, k;
+INSERT INTO g (id, v) VALUES (1, 'x');
+UPDATE g SET id = 1;
+INSERT INTO g (id, v) OVERRIDING SYSTEM VALUE VALUES (1, 'x') RETURNING id;
+SELECT column_name, data_type, is_identity, identity_generation FROM information_schema.columns WHERE table_name = 'g' ORDER BY ordinal_position;
+
+-- case: sequences
+CREATE SEQUENCE seq START WITH 5 INCREMENT BY 5 MAXVALUE 15;
+SELECT nextval('seq'), nextval('seq'), currval('seq');
+SELECT nextval('seq');
+SELECT nextval('seq');
+CREATE SEQUENCE seq;
+CREATE SEQUENCE IF NOT EXISTS seq;
+DROP SEQUENCE seq;
+DROP SEQUENCE seq;
+DROP SEQUENCE IF EXISTS seq;
+
+-- case: strict types
+CREATE TABLE ty (i2 smallint, i4 integer, vc varchar(3), b boolean, n numeric(6,2));
+INSERT INTO ty (i2, i4, vc, b, n) VALUES (1, '2', 'abc', true, '1.5');
+SELECT i2, i4, vc, b::int, (n * 2 = 3)::int FROM ty;
+SELECT column_name, data_type, character_maximum_length, numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'ty' ORDER BY ordinal_position;
+
+-- case: DDL objects
+CREATE TABLE p (id int PRIMARY KEY, code text UNIQUE NOT NULL);
+CREATE INDEX ON p (code);
+CREATE INDEX ON p (code);
+CREATE VIEW pv AS SELECT id, upper(code) FROM p;
+INSERT INTO p VALUES (1, 'a');
+SELECT * FROM pv;
+CREATE OR REPLACE VIEW pv AS SELECT id, upper(code) FROM p WHERE id > 0;
+SELECT * FROM pv;
+SELECT indexname FROM pg_indexes WHERE indexname LIKE 'p\_code%' ORDER BY 1;
+SELECT viewname FROM pg_views WHERE schemaname = 'public';
+ALTER TABLE p ADD COLUMN note varchar(5);
+ALTER TABLE p RENAME COLUMN note TO memo;
+ALTER TABLE p RENAME TO q;
+SELECT column_name FROM information_schema.columns WHERE table_name = 'q' ORDER BY ordinal_position;
+DROP VIEW pv;
+DROP TABLE q;
+SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';
+
+-- case: errors
+CREATE TABLE t (a int);
+CREATE TABLE u (a int);
+SELECT * FROM nosuch;
+SELECT nosuch FROM t;
+SELECT a FROM t, u;
+CREATE TABLE t (x int);
+SELECT 1 +;
+SELECT * FORM t;
+
+-- case: more queries
+CREATE TABLE o (id int PRIMARY KEY, cust text, amount int, day date);
+INSERT INTO o VALUES (1, 'a', 10, '2024-01-01'), (2, 'b', 20, '2024-01-02'), (3, 'a', 30, '2024-02-01'), (4, 'c', NULL, '2024-02-03'), (5, 'b', 5, NULL);
+SELECT cust, sum(amount) AS total FROM o GROUP BY cust ORDER BY total DESC;
+SELECT cust AS c, count(*) FROM o GROUP BY c ORDER BY c;
+SELECT DISTINCT cust FROM o ORDER BY cust DESC;
+SELECT extract(month FROM day) AS m, count(*) FROM o GROUP BY 1 ORDER BY 1;
+SELECT id, amount FROM o WHERE amount > (SELECT avg(amount) FROM o) ORDER BY id;
+SELECT cust, max(amount) FILTER (WHERE day >= '2024-02-01') FROM o GROUP BY cust ORDER BY cust;
+SELECT * FROM (SELECT cust, count(*) AS n FROM o GROUP BY cust) AS x WHERE n > 1 ORDER BY cust;
+SELECT o1.id, o2.id FROM o o1 JOIN o o2 ON o1.cust = o2.cust AND o1.id < o2.id ORDER BY 1, 2;
+SELECT id, sum(amount) OVER (PARTITION BY cust ORDER BY id) AS running, avg(amount) OVER () > 15 FROM o ORDER BY id;
+SELECT id, first_value(id) OVER (PARTITION BY cust ORDER BY id DESC), ntile(2) OVER (ORDER BY id) FROM o ORDER BY id;
+SELECT cust, string_agg(id::text, '+') FROM o GROUP BY cust ORDER BY cust;
+SELECT count(*) FROM o WHERE cust IN (SELECT cust FROM o WHERE amount IS NULL);
+SELECT id FROM o WHERE amount IS NULL OR day IS NULL ORDER BY id;
+SELECT id FROM o ORDER BY amount DESC NULLS LAST, id LIMIT 3;
+SELECT id FROM o ORDER BY day NULLS FIRST LIMIT 2;
+SELECT coalesce(cust, 'none') || ':' || coalesce(amount::text, '-') FROM o ORDER BY id;
+
+-- case: more expressions
+SELECT 1 + 2 * 3 - 4 / 2, 10 - 2 - 3, 2 * 3 % 4, 1 - -1, - - 2;
+SELECT 'a' || 1 || 2.5, 'x' || NULL IS NULL, length(NULL) IS NULL;
+SELECT CASE WHEN NULL THEN 1 ELSE 2 END, CASE NULL WHEN NULL THEN 1 ELSE 2 END;
+SELECT (1, 2) = (1, 2), (1, 2) < (1, 3);
+SELECT NULL = NULL, NULL <> 1, (NULL AND false)::int, (NULL OR true)::int;
+SELECT 5 BETWEEN 1 AND 10 AND 'b' BETWEEN 'a' AND 'c';
+SELECT x, x % 2 = 0 AS even FROM generate_series(1, 4) AS x;
+SELECT upper(substring('postgres' FROM 1 FOR 4)) || lower('SQL');
+SELECT greatest('apple', 'banana'), least('b', 'a', 'c');
+SELECT nullif('', '') IS NULL, coalesce(nullif(0, 0), 7);
+
+-- case: more DML
+CREATE TABLE inv (sku text PRIMARY KEY, qty int NOT NULL CHECK (qty >= 0), updated int DEFAULT 0);
+INSERT INTO inv VALUES ('a', 1), ('b', 2);
+INSERT INTO inv (sku, qty) VALUES ('a', 5), ('c', 1) ON CONFLICT (sku) DO UPDATE SET qty = inv.qty + excluded.qty, updated = inv.updated + 1;
+SELECT * FROM inv ORDER BY sku;
+UPDATE inv SET qty = qty - 1 WHERE sku = 'a' RETURNING sku, qty;
+UPDATE inv SET updated = DEFAULT RETURNING updated;
+DELETE FROM inv WHERE qty = 0 RETURNING sku;
+WITH moved AS (SELECT sku FROM inv WHERE qty > 2) UPDATE inv SET qty = 0 WHERE sku IN (SELECT sku FROM moved) RETURNING sku;
+INSERT INTO inv (sku, qty) SELECT 'x' || g, g FROM generate_series(1, 3) g RETURNING sku, qty;
+SELECT count(*), sum(qty) FROM inv;
+
+-- case: information_schema
+CREATE TABLE person (id serial PRIMARY KEY, name varchar(40) NOT NULL, born date, score numeric(5,1), active boolean DEFAULT true, tags text);
+CREATE VIEW adults AS SELECT name FROM person;
+SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;
+SELECT column_name, ordinal_position, is_nullable, data_type, character_maximum_length, numeric_precision, numeric_scale, udt_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'person' ORDER BY ordinal_position;
+SELECT sequence_name, start_value, increment FROM information_schema.sequences;
+SELECT tablename FROM pg_tables WHERE schemaname = 'public';
+
+-- case: CTEs and correlated subqueries
+CREATE TABLE emp (id int, boss int, name text);
+INSERT INTO emp VALUES (1, NULL, 'ceo'), (2, 1, 'vp'), (3, 2, 'dev'), (4, 2, 'qa');
+WITH RECURSIVE chain(id, depth) AS (SELECT id, 0 FROM emp WHERE boss IS NULL UNION ALL SELECT e.id, c.depth + 1 FROM emp e JOIN chain c ON e.boss = c.id) SELECT id, depth FROM chain ORDER BY id;
+SELECT name, (SELECT b.name FROM emp b WHERE b.id = e.boss) AS boss FROM emp e ORDER BY id;
+SELECT name FROM emp e WHERE EXISTS (SELECT 1 FROM emp x WHERE x.boss = e.id) ORDER BY name;
+SELECT count(*) FROM emp WHERE boss NOT IN (SELECT boss FROM emp WHERE boss IS NOT NULL);
+SELECT count(*) FROM emp WHERE id NOT IN (SELECT boss FROM emp);

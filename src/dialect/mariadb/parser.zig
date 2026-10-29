@@ -50,18 +50,17 @@ pub const Error = int.Oom || int.ParseError;
 /// Words that are not names where a name is optional (aliases) or
 /// where they would make no sense as one (a column reference).
 const reserved = [_][]const u8{
-    "ALL",      "AND",         "AS",         "ASC",           "BETWEEN",   "BINARY",    "BY",        "CASE",
-    "CHECK",    "COLLATE",     "CONSTRAINT", "CREATE",        "CROSS",     "DEFAULT",   "DELETE",    "DESC",
-    "DISTINCT", "DISTINCTROW", "DIV",        "DROP",          "DUAL",      "DUPLICATE", "ELSE",      "END",
-    "ESCAPE",   "EXCEPT",      "EXISTS",     "FALSE",         "FETCH",     "FOR",       "FORCE",     "FOREIGN",
-    "FROM",     "GROUP",       "HAVING",     "HIGH_PRIORITY", "IGNORE",    "IN",        "INDEX",     "INNER",
-    "INSERT",   "INTERSECT",   "INTERVAL",   "INTO",          "IS",        "JOIN",      "KEY",       "LEFT",
-    "LIKE",     "LIMIT",       "LOCK",       "LOW_PRIORITY",  "MOD",       "NATURAL",   "NOT",       "NULL",
-    "OFFSET",   "ON",          "OR",         "ORDER",         "OUTER",     "OVER",      "PARTITION", "PRIMARY",
-    "RANGE",    "REFERENCES",  "REGEXP",     "REPLACE",       "RETURNING", "RIGHT",     "RLIKE",     "ROWS",
-    "SELECT",   "SEPARATOR",   "SET",        "STRAIGHT_JOIN", "THEN",      "TRUE",      "UNION",     "UNIQUE",
-    "UPDATE",   "USE",         "USING",      "VALUES",        "WHEN",      "WHERE",     "WINDOW",    "WITH",
-    "XOR",
+    "ALL",      "AND",           "AS",         "ASC",     "BETWEEN",   "BINARY",  "BY",     "CASE",
+    "CHECK",    "COLLATE",       "CONSTRAINT", "CREATE",  "CROSS",     "DEFAULT", "DELETE", "DESC",
+    "DISTINCT", "DISTINCTROW",   "DIV",        "DROP",    "DUAL",      "ELSE",    "ESCAPE", "EXCEPT",
+    "EXISTS",   "FALSE",         "FETCH",      "FOR",     "FORCE",     "FOREIGN", "FROM",   "GROUP",
+    "HAVING",   "HIGH_PRIORITY", "IGNORE",     "IN",      "INDEX",     "INNER",   "INSERT", "INTERSECT",
+    "INTERVAL", "INTO",          "IS",         "JOIN",    "KEY",       "LEFT",    "LIKE",   "LIMIT",
+    "LOCK",     "LOW_PRIORITY",  "MOD",        "NATURAL", "NOT",       "NULL",    "OFFSET", "ON",
+    "OR",       "ORDER",         "OUTER",      "OVER",    "PARTITION", "PRIMARY", "RANGE",  "REFERENCES",
+    "REGEXP",   "REPLACE",       "RETURNING",  "RIGHT",   "RLIKE",     "ROWS",    "SELECT", "SEPARATOR",
+    "SET",      "STRAIGHT_JOIN", "THEN",       "TRUE",    "UNION",     "UNIQUE",  "UPDATE", "USE",
+    "USING",    "VALUES",        "WHEN",       "WHERE",   "WINDOW",    "WITH",    "XOR",
 };
 
 pub fn isReserved(t: Token) bool {
@@ -1223,10 +1222,29 @@ pub const Parser = struct {
         }
         const n1, const n2 = try s.qualifiedName();
         if (s.isKw("PARTITION")) return s.fail("xqlite: PARTITION is not supported", .{});
+        if (n2.n != 0 and std.ascii.eqlIgnoreCase(try s.tokName(n1), "information_schema")) {
+            const view = try s.tokName(n2);
+            const sub = (try @import("infoschema.zig").select(s, view)) orelse
+                return s.fail("Unknown table '{s}' in information_schema", .{view});
+            var al = try s.alias(false);
+            if (al.n == 0) al = n2;
+            var ou = try s.onUsing();
+            return ir.from.appendTerm(s.p, prefix, null, null, al, sub, &ou);
+        }
+        // A table-valued function (SQLite's json_each(), pragma_*()).
+        var args: ?*ExprList = null;
+        const is_func = s.isOp("(");
+        if (is_func) {
+            s.advance();
+            if (!s.isOp(")")) args = try s.exprList();
+            try s.expectOp(")");
+        }
         const al = try s.alias(false);
         try s.indexHints();
         var ou = try s.onUsing();
-        return ir.from.appendTerm(s.p, prefix, n1, if (n2.n == 0) null else n2, al, null, &ou);
+        const l = try ir.from.appendTerm(s.p, prefix, n1, if (n2.n == 0) null else n2, al, null, &ou);
+        if (is_func) ir.from.funcArgs(l, args);
+        return l;
     }
 
     /// USE/IGNORE/FORCE {INDEX|KEY} [FOR ...] (names): accepted, ignored.
@@ -1381,6 +1399,12 @@ pub const RowWrap = struct {
         }
         for (l.slice(), 0..) |*item, i| {
             const e = item.expr orelse continue;
+            if (i >= w.cols.len) {
+                // No column metadata (an unknown table or column, which
+                // the builder reports): DEFAULT is NULL.
+                if (e.op == TK.DEFAULT) item.expr = try ir.expr.leaf(s.a, TK.NULL, null);
+                continue;
+            }
             if (w.needed or e.op == TK.DEFAULT) item.expr = try s.wrapValue(w.target, w.cols[i], e, n, w.ignore);
         }
         return l;

@@ -1180,6 +1180,12 @@ pub fn alterTable(s: *Parser) Error!void {
         try renameTable(s, schema, real, new);
         return endAlter(s);
     }
+    if (s.isKw("DISABLE") or s.isKw("ENABLE")) {
+        // DISABLE/ENABLE KEYS (mysqldump): nothing to do.
+        s.advance();
+        try s.expectKw("KEYS");
+        return session.emptyStatement(s);
+    }
     if (s.isKw("ENGINE") or s.isKw("DEFAULT") or s.isKw("CHARSET") or s.isKw("CHARACTER") or s.isKw("COMMENT") or s.isKw("AUTO_INCREMENT") or s.isKw("CONVERT")) {
         if (s.isKw("CONVERT")) {
             while (!s.atStmtEnd()) s.advance();

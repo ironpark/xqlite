@@ -90,7 +90,7 @@ pub fn insert(s: *Parser) Error!void {
             const e = try s.expr();
             id_list = try ir.list.idAppend(s.p, id_list, irTok(c));
             const m = Parser.findCol(&t, try s.nameText(c));
-            row = try ir.list.append(s.p, row, if (m) |cm| try s.wrapValue(&t, cm, e, 1, ignore) else e);
+            row = try ir.list.append(s.p, row, if (m) |cm| try s.wrapValue(&t, cm, e, 1, ignore) else try noDefault(s, e));
             if (!s.eatOp(",")) break;
         }
         s.allow_default = saved;
@@ -165,7 +165,12 @@ fn assignments(s: *Parser, t: *const Parser.Target, ignore: bool, odku: bool) Er
         const c = try columnName(s);
         try s.expectOp("=");
         var e = try s.expr();
-        if (Parser.findCol(t, try s.nameText(c))) |m| e = try s.wrapValue(t, m, e, 1, ignore);
+        if (Parser.findCol(t, try s.nameText(c))) |m| {
+            // AUTO_INCREMENT's 0 is for INSERT only.
+            var meta = m.*;
+            meta.autoinc = false;
+            e = try s.wrapValue(t, &meta, e, 1, ignore);
+        } else e = try noDefault(s, e);
         list = try ir.list.append(s.p, list, e);
         try ir.list.setName(s.p, list, irTok(c), true);
         if (!s.eatOp(",")) break;
@@ -182,6 +187,11 @@ fn assignments(s: *Parser, t: *const Parser.Target, ignore: bool, odku: bool) Er
         try ir.list.setName(s.p, list, int.Token.init(c.name), false);
     };
     return list.?;
+}
+
+/// A DEFAULT marker with no column to take the default of: NULL.
+fn noDefault(s: *Parser, e: *Expr) Error!*Expr {
+    return if (e.op == TK.DEFAULT) ir.expr.leaf(s.a, TK.NULL, null) else e;
 }
 
 fn returning(s: *Parser) Error!void {

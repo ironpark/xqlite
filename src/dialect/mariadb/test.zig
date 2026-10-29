@@ -342,3 +342,82 @@ test "mariadb: errors" {
     try c.exec("  -- just a comment\n ");
     try c.exec(";;");
 }
+
+test "mariadb: CHECK, generated columns, foreign keys, DEFAULT" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE p (
+        \\  id INT PRIMARY KEY,
+        \\  start INT, `end` INT,
+        \\  price DECIMAL(6,2) NOT NULL DEFAULT 1.50 CHECK (price >= 0),
+        \\  label VARCHAR(10) DEFAULT 'it\'s',
+        \\  span INT AS (`end` - start) VIRTUAL,
+        \\  CONSTRAINT chk_order CHECK (start <= `end` && start >= 0)
+        \\)
+    );
+    try c.exec("INSERT INTO p (id, start, end) VALUES (1, 2, 5)");
+    try c.expectRows("SELECT price, label, span, end FROM p", "1.5|it's|3|5\n");
+    try c.expectError("INSERT INTO p (id, start, end) VALUES (2, 5, 1)", "CHECK constraint failed: chk_order");
+    try c.expectError("INSERT INTO p (id, price) VALUES (3, -1)", "CHECK constraint failed: price >= 0");
+    try c.exec("UPDATE p SET price = 9, label = DEFAULT");
+    try c.expectRows("SELECT price, label FROM p", "9.0|it's\n");
+    try c.exec("CREATE TABLE ch (id INT AUTO_INCREMENT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p (id) ON DELETE CASCADE)");
+    try c.exec("SET foreign_key_checks = 1");
+    try c.expectRows("SELECT @@foreign_key_checks", "1\n");
+    try c.exec("INSERT INTO ch (pid) VALUES (1), (1)");
+    try c.expectError("INSERT INTO ch (pid) VALUES (42)", "FOREIGN KEY constraint failed");
+    try c.exec("DELETE FROM p");
+    try c.expectRows("SELECT count(*) FROM ch", "0\n");
+}
+
+test "mariadb: information_schema" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20) NOT NULL DEFAULT 'x'); CREATE VIEW v AS SELECT id FROM t");
+    try c.expectRows("SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES ORDER BY TABLE_NAME", "main|t|BASE TABLE\nmain|v|VIEW\n");
+    try c.expectRows("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA FROM information_schema.columns WHERE table_name = 'T' AND table_schema = 'main' ORDER BY ORDINAL_POSITION",
+        \\id|int|int(11)|NO|NULL|PRI|auto_increment
+        \\name|varchar|varchar(20)|NO|x||
+        \\
+    );
+    try c.expectRows("SELECT count(*) FROM information_schema.tables t JOIN information_schema.columns c ON c.table_name = t.table_name WHERE t.table_type = 'VIEW'", "1\n");
+    try c.expectRows("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA", "main\n");
+    try c.expectError("SELECT * FROM information_schema.nope", "Unknown table 'nope' in information_schema");
+}
+
+test "mariadb: names, parameters and the file seen from SQLite" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE Items (Id INT PRIMARY KEY, Label CHAR(5))");
+    try c.exec("INSERT INTO items (ID, label) VALUES (1, 'ab  ')");
+    try c.expectRows("SELECT ITEMS.LABEL, length(label) FROM ITEMS", "ab|2\n");
+    try c.expectRows("SHOW TABLES LIKE 'it%'", "Items\n");
+    try c.expectRows("SHOW CREATE TABLE items",
+        \\Items|CREATE TABLE `Items` (
+        \\  `Id` int(11) NOT NULL,
+        \\  `Label` char(5) DEFAULT NULL,
+        \\  PRIMARY KEY (`Id`)
+        \\) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        \\
+    );
+    try c.expectError("INSERT INTO items (id) VALUES (NULL)", "Column 'Id' cannot be null");
+    // A parameter is converted like a literal.
+    const api = @import("../../vdbe/api.zig");
+    var stmt: ?*@import("../../vdbe/vdbe_int.zig").Vdbe = null;
+    try testing.expectEqual(int.RC.OK, @import("../../sql/prepare.zig").prepareV2(c.db, "INSERT INTO items VALUES (?, ?)", &stmt, null));
+    _ = api.bindInt64(stmt.?, 1, 2);
+    _ = api.bindText(stmt.?, 2, "toolong");
+    try testing.expectEqual(int.RC.ERROR, api.step(stmt.?));
+    _ = api.finalize(stmt.?);
+    try c.expectRows("SELECT count(*) FROM items", "1\n");
+    // The file is SQLite's: the SQLite dialect reads it, and the STRICT
+    // types hold there too.
+    try c.reopen();
+    try c.expectRows("SELECT typeof(Id), Label FROM Items", "integer|ab\n");
+    try c.expectError("INSERT INTO Items VALUES (3, x'00')", "cannot store BLOB value in TEXT column Items.Label");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+}

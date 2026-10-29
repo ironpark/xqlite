@@ -12,6 +12,7 @@
 //!    function calls; dml.zig: INSERT/REPLACE/UPDATE/DELETE; ddl.zig:
 //!    CREATE/DROP/ALTER (rendered as SQLite text + xq_catalog);
 //!    session.zig: SET, transactions, SHOW, DESCRIBE, USE, PRAGMA;
+//!  - infoschema.zig: information_schema.TABLES, COLUMNS, SCHEMATA;
 //!  - types.zig: MariaDB column types and the sql_mode-dependent value
 //!    conversion of INSERT/UPDATE; runtime.zig: the dialect's functions.
 //!

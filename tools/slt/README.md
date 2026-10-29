@@ -7,7 +7,7 @@
 ## 준비
 
 ```sh
-./tools/fetch-slt.sh                        # ref/sqllogictest에 스크립트와 C 실행기 소스(약 1.2GB)
+zig build tools && zig-out/bin/xqt fetch slt  # ref/sqllogictest에 스크립트와 C 실행기 소스(약 1.2GB)
 zig build tools -Doptimize=ReleaseSafe      # xqlite와 xqt를 안전 검사를 켠 채 빠르게
 ```
 

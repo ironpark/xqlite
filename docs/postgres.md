@@ -245,13 +245,13 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | 도구 | 하는 일 |
 | --- | --- |
 | `src/dialect/postgres/test.zig` | 종단 테스트 |
-| `tools/dialect/pg-diff.sh` + `pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 28개 케이스가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교) |
-| `tools/interop-pg.sh` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
+| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 28개 케이스가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교) |
+| `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
 
-차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다. 두 스크립트 모두 먼저 `zig build`가 필요합니다.
+차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다(`$PG_PSQL`, 기본값 `podman exec -i xq-pg psql -U postgres`). 경우들은 병렬로 돌고, 작업자마다 자기 데이터베이스(`xqt_dialect_N`)에서 `public` 스키마를 지우고 다시 만든 뒤 시작합니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
 
 ```sh
 podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
-tools/dialect/pg-diff.sh
-tools/interop-pg.sh
+zig-out/bin/xqt dialect-diff pg
+zig-out/bin/xqt interop pg
 ```

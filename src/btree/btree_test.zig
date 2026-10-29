@@ -588,7 +588,7 @@ fn readSchema(bt: *Btree) !Schema {
     return s;
 }
 
-/// Checks one row of the fixture table against tools/gen-fixtures.sh.
+/// Checks one row of the fixture table against `xqt gen fixtures` (tools/xqt/gen.zig).
 fn expectFixtureRow(cur: *Cursor, i: i64) !void {
     try testing.expectEqual(i, cur.integerKey());
     const data = try gpa.alloc(u8, cur.payloadSize());

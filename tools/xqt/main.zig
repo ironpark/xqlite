@@ -9,7 +9,11 @@ const build_options = @import("build_options");
 const interop = @import("interop.zig");
 const planner = @import("planner.zig");
 const slt = @import("slt.zig");
+const dialect_diff = @import("dialect_diff.zig");
+const planner_gen = @import("planner_gen.zig");
+const fetch = @import("fetch.zig");
 const gen = @import("gen.zig");
+const bench = @import("bench.zig");
 
 const usage =
     \\usage: xqt [options] <command> [args]
@@ -17,8 +21,12 @@ const usage =
     \\commands:
     \\  interop [NAME...]        cross-checks against sqlite3 (all, or the modules named)
     \\  planner [FILE...]        results, query plans and bytecode against sqlite3
+    \\  planner gen basic|hard SEED NBLOCKS NQUERIES  random planner cases
     \\  slt [opts] PATH... [-- ARGS]  sqllogictest scripts with `xqlite slt`
-    \\  gen NAME [ARGS]          regenerate test data (xqt help gen)
+    \\  dialect-diff pg|mariadb [CASES]  a dialect against its server (podman)
+    \\  bench [WORKLOAD...]       xqlite against sqlite3 on timed workloads
+    \\  gen NAME [ARGS]          regenerate test data, grammar.zig, opcodes.zig (xqt help gen)
+    \\  fetch sqlite|slt [--dest DIR]  download ref/sqlite or ref/sqllogictest
     \\  list                     the interop modules and planner case files
     \\  help [COMMAND]           this text, or the options of a command
     \\
@@ -43,12 +51,20 @@ pub fn main(init: std.process.Init) !void {
     const cmd_args = rest.items[1..];
     const code: u8 = if (std.mem.eql(u8, cmd, "interop"))
         try interop.run(init.gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "planner") and cmd_args.len > 0 and std.mem.eql(u8, cmd_args[0], "gen"))
+        try planner_gen.run(init.gpa, io, &cfg, out, cmd_args[1..])
     else if (std.mem.eql(u8, cmd, "planner"))
         try planner.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "slt"))
         try slt.run(init.gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "dialect-diff"))
+        try dialect_diff.run(init.gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "bench"))
+        try bench.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "gen"))
         try gen.run(init.gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "fetch"))
+        try fetch.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "list"))
         try list(io, &cfg, out)
     else if (std.mem.eql(u8, cmd, "help")) blk: {
@@ -56,11 +72,17 @@ pub fn main(init: std.process.Init) !void {
         try out.writeAll(if (std.mem.eql(u8, topic, "interop"))
             interop.usage
         else if (std.mem.eql(u8, topic, "planner"))
-            planner.usage
+            planner.usage ++ "\n" ++ planner_gen.usage
         else if (std.mem.eql(u8, topic, "slt"))
             slt.usage
+        else if (std.mem.eql(u8, topic, "dialect-diff"))
+            dialect_diff.usage
+        else if (std.mem.eql(u8, topic, "fetch"))
+            fetch.usage
         else if (std.mem.eql(u8, topic, "gen"))
             gen.usage
+        else if (std.mem.eql(u8, topic, "bench"))
+            bench.usage
         else
             usage);
         break :blk 0;
@@ -108,5 +130,9 @@ test {
     _ = planner;
     _ = slt;
     _ = interop;
+    _ = dialect_diff;
+    _ = planner_gen;
+    _ = fetch;
     _ = gen;
+    _ = bench;
 }

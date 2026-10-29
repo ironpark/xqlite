@@ -325,7 +325,7 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
   - `View's SELECT contains a variable or parameter`
 - 엔진 함수(`xq_div` ...)나 방언 함수(`xq_mariadb_*`)를 부르는 스키마는 xqlite에서는 어느 방언으로든 같은 결과를 냅니다.
 - sqlite3는 그런 식을 계산할 수 없습니다.
-- `/`, `UCASE`, `GREATEST`, `IF`, `CONCAT`, `LIKE` 같은 식은 sqlite3에서도 같습니다(`tools/interop-mariadb.sh`).
+- `/`, `UCASE`, `GREATEST`, `IF`, `CONCAT`, `LIKE` 같은 식은 sqlite3에서도 같습니다(`xqt interop mariadb`).
 - 저장된 식의 비교는 열 collation이 없으면 읽는 연결의 기본 collation을 씁니다.
 
 | 읽는 쪽 | 기본 collation |
@@ -373,24 +373,25 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
 
 ### MariaDB 서버와 비교
 
-`tools/dialect/maria-diff.sh`는 `tools/dialect/maria-cases.txt`의 각 경우를 MariaDB 서버와 `xqlite sql`(`.dialect mariadb`)에서 실행해 결과 행, 열 이름, `ERROR:` 줄을 비교합니다.
+`xqt dialect-diff mariadb`(`tools/xqt/dialect_diff.zig`)는 `tools/dialect/maria-cases.txt`의 각 경우를 MariaDB 서버와 `xqlite sql`(`.dialect mariadb`)에서 실행해 결과 행, 열 이름, `ERROR:` 줄을 비교합니다.
 
 ```sh
-zig build
+zig build tools
 podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
-tools/dialect/maria-diff.sh [cases-file]
+zig-out/bin/xqt dialect-diff mariadb [cases-file]
 ```
 
 - 서버는 `$MARIA_CLIENT`로 연결합니다. 기본값은 `podman exec -i xq-maria mariadb -uroot`입니다.
-- 각 경우는 빈 데이터베이스 `main`(collation `utf8mb4_general_ci`)에서 시작합니다.
+- 각 경우는 빈 데이터베이스 `main`(collation `utf8mb4_general_ci`)에서 시작합니다. 경우와 MariaDB의 오류 메시지가 `main`이라는 이름을 쓰므로 서버에서는 한 번에 한 경우씩 돌고, xqlite 쪽만 병렬로 돕니다.
+- 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다. `zig build check`에는 들어 있지 않습니다.
 - 소수 부분이 있는 수는 끝의 0을 떼고 비교합니다(MariaDB `DECIMAL`은 `3.5000`, 방언의 `REAL`은 `3.5`).
 
 ### sqlite3와 교차 검사
 
-`tools/interop-mariadb.sh`는 MariaDB 방언으로 쓴 데이터베이스를 sqlite3로 확인합니다.
+`xqt interop mariadb`(`tools/xqt/interop/mariadb.zig`)는 MariaDB 방언으로 쓴 데이터베이스를 sqlite3로 확인합니다.
 
 - sqlite3의 무결성 검사를 통과해야 합니다.
 - sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
 - 다루는 것: STRICT 테이블, 이름 붙은 CHECK, DEFAULT·생성 열 식, `AUTO_INCREMENT`, 테이블과 함께 이름이 바뀌는 `"t$i"` 인덱스, 뷰, `xq_catalog`.
 - 엔진 함수(`xq_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mariadb/test.zig`에서 확인합니다.
-- `sqlite3`(또는 `$SQLITE3`)와 먼저 `zig build`가 필요합니다.
+- 먼저 `zig build tools`가 필요합니다. sqlite3는 xqt의 `cfg.sqlite3`(`--sqlite3`, `$SQLITE3`)입니다.

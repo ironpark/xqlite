@@ -1,4 +1,4 @@
--- Differential cases for the MariaDB dialect (tools/dialect/maria-diff.sh).
+-- Differential cases for the MariaDB dialect (xqt dialect-diff mariadb).
 -- Each case starts with a "-- case:" line and runs on an empty database
 -- called main, in MariaDB (the mariadb client, batch mode) and in
 -- `xqlite sql` with `.dialect mariadb`; the rows, column names and error

@@ -22,6 +22,8 @@ pub const modules = .{
     @import("interop/attach.zig"),
     @import("interop/vacuum.zig"),
     @import("interop/analyze.zig"),
+    @import("interop/pg.zig"),
+    @import("interop/mariadb.zig"),
 };
 
 pub const usage =

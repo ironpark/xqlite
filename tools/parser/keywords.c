@@ -1,5 +1,5 @@
 /* Prints every SQL keyword with its parser token code, one per line, from
-** the keywordhash.h made by mkkeywordhash. Used by tools/gen-parser.sh. */
+** the keywordhash.h made by mkkeywordhash. Used by xqt gen parser. */
 #include <stdio.h>
 #include <assert.h>
 #include "parse.h"

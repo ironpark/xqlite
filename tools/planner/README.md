@@ -28,7 +28,7 @@ zig build tools
 SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner tools/planner/planner.txt -v
 SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner -k code tools/planner/window.txt
 SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner     # vtablog.txt를 뺀 전부
-tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner /tmp/c1.txt
+zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner /tmp/c1.txt
 ```
 
 - `xqt planner`(예전 `diff.py`)는 파일마다 실패한 쿼리를 `FAIL[종류] block N: 쿼리`로, 마지막에 `N queries; failures: code=…, eqp=…, res=…`를 출력합니다. `-k res,eqp,code`로 비교할 것을 고르고, `-v`는 다른 부분을 보여 줍니다(바이트코드는 unified diff). 블록의 셋업을 모두 병렬로 만든 뒤, 쿼리를 블록 안에서도 8개씩 나눠 각자 블록 디렉터리의 사본에서 병렬로 돌립니다. 엔진은 쿼리마다 60초가 지나면 `TIMEOUT`이 됩니다.
@@ -62,6 +62,6 @@ tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 zig-out/
 - `vacuum.txt`는 `VACUUM`과 `VACUUM INTO`의 모든 형태(스키마 이름, INTO 식, TEMP, 오류)의 `OP_Vacuum` 바이트코드와, `page_size`·`auto_vacuum`을 바꾼 VACUUM 뒤의 `.dump`·`integrity_check`·PRAGMA 결과(롤백 저널, WAL, 붙인 DB)를 비교합니다. VACUUM이 행을 옮기는 전송 최적화(`INSERT INTO t1 SELECT * FROM t2`)가 쓰이는 경우와 쓰이지 않는 경우의 바이트코드도 비교합니다.
 - `wal.txt`는 WAL PRAGMA(`journal_mode` 전환, 모드별 `wal_checkpoint`, `wal_autocheckpoint`) 케이스입니다. 롤백 저널 DB와 WAL DB에서 결과와 `OP_JournalMode`·`OP_Checkpoint` 바이트코드를 비교합니다.
 - `window.txt`는 윈도우 함수 케이스입니다. SQLite TCL 테스트(`window*.test`)에서 뽑은 쿼리와, 뷰·서브쿼리·조인·복합 SELECT·DML 등 select.c와 맞물리는 경로를 다루는 쿼리로 이루어집니다.
-- `gen-basic.py`, `gen-hard.py`는 시드로 무작위 케이스를 만듭니다. `gen-hard.py`는 ANALYZE 통계, 스킵 스캔, collation, 식·부분 인덱스, row value, 상관 서브쿼리, 중첩 조인, 트리거, 외래키를 다룹니다.
+- `xqt planner gen basic|hard SEED NBLOCKS NQUERIES`(예전 `gen-basic.py`, `gen-hard.py`)는 시드로 무작위 케이스를 만듭니다. 같은 인자면 예전 스크립트와 바이트까지 같은 케이스가 나옵니다(CPython의 `random.Random`을 그대로 옮김). `hard`는 ANALYZE 통계, 스킵 스캔, collation, 식·부분 인덱스, row value, 상관 서브쿼리, 중첩 조인, 트리거, 외래키를 다룹니다.
 - `SQOPT=MASK`를 주면 기준 셸에서 `.testctrl optimizations MASK`로 해당 최적화를 끕니다. xqlite에 아직 없는 최적화를 빼고 비교할 때 씁니다.
 - Debug 빌드에서는 `XQ_WHERETRACE=1`로 플래너가 만든 WhereLoop 목록을 SQLite 디버그 빌드의 `.wheretrace`와 같은 형식으로 출력합니다. 비용 계산이 어긋날 때 `-DSQLITE_DEBUG -DSQLITE_ENABLE_WHERETRACE`로 빌드한 sqlite3의 출력과 줄 단위로 비교하면 됩니다.

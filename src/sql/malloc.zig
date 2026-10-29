@@ -150,7 +150,7 @@ const Block = struct {
 
 fn block(p: [*]u8) Block {
     const w = headerWord(p).*;
-    const a: Alignment = @enumFromInt(@as(u6, @intCast(w >> 56)));
+    const a: Alignment = @fromBackingInt(@intCast(@as(u6, @intCast(w >> 56))));
     const h = a.toByteUnits();
     const n: usize = @intCast(w & size_mask);
     return .{ .raw = (p - h)[0 .. h + n], .alignment = a, .n = n };
@@ -169,7 +169,7 @@ fn memMalloc(n: usize, alignment: Alignment, ra: usize) ?[*]u8 {
     const full = roundup(n) orelse return null;
     const raw = config.backing.rawAlloc(h + full, a, ra) orelse return null;
     const p = raw + h;
-    headerWord(p).* = full | (@as(u64, @intFromEnum(a)) << 56);
+    headerWord(p).* = full | (@as(u64, @backingInt(a)) << 56);
     return p;
 }
 
@@ -191,7 +191,7 @@ fn memResize(p: [*]u8, n: usize, ra: usize) bool {
     if (full == b.n) return true;
     const h = b.alignment.toByteUnits();
     if (!config.backing.rawResize(b.raw, b.alignment, h + full, ra)) return false;
-    headerWord(p).* = full | (@as(u64, @intFromEnum(b.alignment)) << 56);
+    headerWord(p).* = full | (@as(u64, @backingInt(b.alignment)) << 56);
     return true;
 }
 
@@ -204,7 +204,7 @@ fn memRealloc(p: [*]u8, n: usize, ra: usize) ?[*]u8 {
     const h = b.alignment.toByteUnits();
     const raw = config.backing.rawRemap(b.raw, b.alignment, h + full, ra) orelse return null;
     const q = raw + h;
-    headerWord(q).* = full | (@as(u64, @intFromEnum(b.alignment)) << 56);
+    headerWord(q).* = full | (@as(u64, @backingInt(b.alignment)) << 56);
     return q;
 }
 
@@ -675,7 +675,7 @@ pub fn dbStatus(db: *Sqlite3, op: DbStatus, current: *i64, highwater: *i64, rese
             }
         },
         .lookaside_hit, .lookaside_miss_size, .lookaside_miss_full => {
-            const i: usize = @intCast(@intFromEnum(op) - @intFromEnum(DbStatus.lookaside_hit));
+            const i: usize = @intCast(@backingInt(op) - @backingInt(DbStatus.lookaside_hit));
             current.* = 0;
             highwater.* = la.an_stat[i];
             if (reset) la.an_stat[i] = 0;

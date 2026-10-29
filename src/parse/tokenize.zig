@@ -63,7 +63,7 @@ const ai_class: [256]u8 = .{
 };
 
 fn class(c: u8) CC {
-    return @enumFromInt(ai_class[c]);
+    return @fromBackingInt(@intCast(ai_class[c]));
 }
 
 /// SQLITE_DIGIT_SEPARATOR.
@@ -219,11 +219,11 @@ pub fn getToken(z: [*:0]const u8) Scanned {
             return .{ .tk = tk, .len = i };
         },
         .kywd0 => {
-            if (ai_class[z[1]] > @intFromEnum(CC.kywd)) {
+            if (ai_class[z[1]] > @backingInt(CC.kywd)) {
                 i = 1;
             } else {
                 i = 2;
-                while (ai_class[z[i]] <= @intFromEnum(CC.kywd)) i += 1;
+                while (ai_class[z[i]] <= @backingInt(CC.kywd)) i += 1;
                 if (ctype.isIdChar(z[i])) {
                     // Started like a keyword but continues with a character
                     // keywords never contain: an identifier.

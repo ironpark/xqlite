@@ -347,7 +347,7 @@ pub fn numerify(m: *Mem) void {
         const rc = realValueRC(m, &r);
         m.u.r = r;
         var ix: i64 = 0;
-        const as_int = rc & 2 == 0 and @intFromEnum(util.atoi64(m.bytes(), &ix)) < 2;
+        const as_int = rc & 2 == 0 and @backingInt(util.atoi64(m.bytes(), &ix)) < 2;
         if (as_int) {
             m.u.i = ix;
             m.setTypeFlag(.{ .Int = true });
@@ -723,7 +723,7 @@ fn computeNumericType(m: *Mem) MEM {
     m.u = .{ .r = r };
     var ix: i64 = 0;
     if (rc <= 0) {
-        if (rc & 2 == 0 and @intFromEnum(util.atoi64(m.bytes(), &ix)) <= 1) {
+        if (rc & 2 == 0 and @backingInt(util.atoi64(m.bytes(), &ix)) <= 1) {
             m.u = .{ .i = ix };
             return .{ .Int = true };
         }

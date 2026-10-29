@@ -353,11 +353,11 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
     // The schema format must be at least 3, but one below 3 is not raised
     // to 4, which would corrupt existing DESC indexes.
     const r1 = expr_mod.getTempReg(p);
-    _ = aux.addOp3(v, OP.ReadCookie, @intCast(i_db), r1, @intFromEnum(btree.Meta.file_format));
+    _ = aux.addOp3(v, OP.ReadCookie, @intCast(i_db), r1, @backingInt(btree.Meta.file_format));
     aux.usesBtree(v, @intCast(i_db));
     _ = aux.addOp2(v, OP.AddImm, r1, -2);
     _ = aux.addOp2(v, OP.IfPos, r1, aux.currentAddr(v) + 2);
-    _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.file_format), 3);
+    _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.file_format), 3);
     expr_mod.releaseTempReg(p, r1);
 
     // Reload the table definition.

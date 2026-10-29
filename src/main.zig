@@ -145,8 +145,8 @@ fn dbinfo(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !vo
 
     const fields = .{
         .{ "page size", h.page_size },
-        .{ "write format", @intFromEnum(h.write_version) },
-        .{ "read format", @intFromEnum(h.read_version) },
+        .{ "write format", @backingInt(h.write_version) },
+        .{ "read format", @backingInt(h.read_version) },
         .{ "reserved bytes", h.reserved_space },
         .{ "file change counter", h.file_change_counter },
         .{ "database page count", h.database_size },
@@ -156,7 +156,7 @@ fn dbinfo(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !vo
         .{ "default cache size", h.default_cache_size },
         .{ "autovacuum top root", h.largest_root_page },
         .{ "incremental vacuum", h.incremental_vacuum },
-        .{ "text encoding", @intFromEnum(h.text_encoding) },
+        .{ "text encoding", @backingInt(h.text_encoding) },
         .{ "user version", h.user_version },
         .{ "application id", h.application_id },
         .{ "software version", h.sqlite_version },

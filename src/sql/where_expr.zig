@@ -1014,7 +1014,6 @@ fn exprAnalyzeTerm(src: *SrcList, wc: *WhereClause, idx_term: i32) Oom!void {
     }
 }
 
-
 /// Port of sqlite3WhereSplit(): add the `op`-connected subexpressions of
 /// `e` to `wc` (e itself is not altered).
 pub fn split(wc: *WhereClause, e: ?*Expr, op: u8) Oom!void {

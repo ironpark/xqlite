@@ -51,12 +51,12 @@ pub fn main(init: std.process.Init) !void {
     try w.writeAll("};\n\n");
 
     const constants = [_][]const u8{
-        "YYNOCODE",           "YYWILDCARD",         "YYNSTATE",          "YYNRULE",
-        "YYNRULE_WITH_ACTION", "YYNTOKEN",          "YY_MAX_SHIFT",      "YY_MIN_SHIFTREDUCE",
-        "YY_MAX_SHIFTREDUCE", "YY_ERROR_ACTION",    "YY_ACCEPT_ACTION",  "YY_NO_ACTION",
-        "YY_MIN_REDUCE",      "YY_MAX_REDUCE",      "YY_ACTTAB_COUNT",   "YY_SHIFT_COUNT",
-        "YY_SHIFT_MIN",       "YY_SHIFT_MAX",       "YY_REDUCE_COUNT",   "YY_REDUCE_MIN",
-        "YY_REDUCE_MAX",      "YYSTACKDEPTH",
+        "YYNOCODE",            "YYWILDCARD",      "YYNSTATE",         "YYNRULE",
+        "YYNRULE_WITH_ACTION", "YYNTOKEN",        "YY_MAX_SHIFT",     "YY_MIN_SHIFTREDUCE",
+        "YY_MAX_SHIFTREDUCE",  "YY_ERROR_ACTION", "YY_ACCEPT_ACTION", "YY_NO_ACTION",
+        "YY_MIN_REDUCE",       "YY_MAX_REDUCE",   "YY_ACTTAB_COUNT",  "YY_SHIFT_COUNT",
+        "YY_SHIFT_MIN",        "YY_SHIFT_MAX",    "YY_REDUCE_COUNT",  "YY_REDUCE_MIN",
+        "YY_REDUCE_MAX",       "YYSTACKDEPTH",
     };
     for (constants) |name| {
         const value = try define(parse_c, name);

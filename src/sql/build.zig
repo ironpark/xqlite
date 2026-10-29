@@ -256,7 +256,6 @@ pub fn hasExplicitNulls(p: *Parse, list: ?*ExprList) bool {
     return false;
 }
 
-
 // ======================================================= code generation
 
 const vi = @import("../vdbe/vdbe_int.zig");
@@ -1056,12 +1055,12 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         p.n_mem += 1;
         const reg3 = p.n_mem;
         p.u1 = .{ .cr = .{ .reg_rowid = reg1, .reg_root = reg2 } };
-        _ = aux.addOp3(v, OP.ReadCookie, @intCast(i_db), reg3, @intFromEnum(btree.Meta.file_format));
+        _ = aux.addOp3(v, OP.ReadCookie, @intCast(i_db), reg3, @backingInt(btree.Meta.file_format));
         aux.usesBtree(v, @intCast(i_db));
         const addr1 = aux.addOp1(v, OP.If, reg3);
         const file_format: i32 = if (db.flags.LegacyFileFmt) 1 else int.MAX_FILE_FORMAT;
-        _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.file_format), file_format);
-        _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.text_encoding), db.enc);
+        _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.file_format), file_format);
+        _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.text_encoding), db.enc);
         aux.jumpHere(v, addr1);
         if (is_view or is_virtual) {
             _ = aux.addOp2(v, OP.Integer, 0, reg2);
@@ -1414,7 +1413,7 @@ pub fn changeCookie(p: *Parse, i_db: usize) void {
     const db = p.db;
     const v = p.vdbe.?;
     const cookie: u32 = @bitCast(db.dbs.items[i_db].schema.schema_cookie);
-    _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @intFromEnum(btree.Meta.schema_version), @bitCast(cookie +% 1));
+    _ = aux.addOp3(v, OP.SetCookie, @intCast(i_db), @backingInt(btree.Meta.schema_version), @bitCast(cookie +% 1));
 }
 
 /// Port of identPut(): append an identifier, quoted if it is not a plain

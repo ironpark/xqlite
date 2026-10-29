@@ -23,7 +23,7 @@ pub inline fn intCast(comptime T: type, x: anytype) T {
 
 /// @enumFromInt(x) to `E`.
 pub inline fn enumFromInt(comptime E: type, x: anytype) E {
-    return @enumFromInt(intCast(@typeInfo(E).@"enum".tag_type, x));
+    return @fromBackingInt(@intCast(intCast(@typeInfo(E).@"enum".tag_type, x)));
 }
 
 test "values with the top bit set survive" {

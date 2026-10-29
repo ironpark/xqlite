@@ -191,8 +191,7 @@ test "sql: SELECT from a database written by sqlite3" {
     var c: Conn = undefined;
     try c.openWith(@embedFile("../testdata/sql.db"));
     defer c.close();
-    try c.expectRows("SELECT type, name, tbl_name FROM sqlite_schema ORDER BY name",
-        "table|t1|t1\nindex|t1_b|t1\ntable|t2|t2\ntable|wr|wr\n");
+    try c.expectRows("SELECT type, name, tbl_name FROM sqlite_schema ORDER BY name", "table|t1|t1\nindex|t1_b|t1\ntable|t2|t2\ntable|wr|wr\n");
     try c.expectRows("SELECT * FROM t1", "1|one|1.5\n2|two|2.5\n3|three|NULL\n4|four|4.0\n5|five|-1.0\n");
     try c.expectRows("SELECT a, b FROM t1 WHERE c > 2 OR c IS NULL", "2|two\n3|three\n4|four\n");
     try c.expectRows("SELECT rowid, upper(b) FROM t1 WHERE a = 3", "3|THREE\n");
@@ -213,7 +212,6 @@ test "sql: SELECT from a database written by sqlite3" {
     try c.expectRows("WITH c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 4) SELECT sum(n) FROM c", "10\n");
     try c.expectError("SELECT nosuch FROM t1", "no such column: nosuch");
 }
-
 
 test "sql: CREATE TABLE, INSERT, UPDATE and DELETE" {
     var c: Conn = undefined;
@@ -319,8 +317,7 @@ test "sql: views and DROP" {
     try c.expectRows("SELECT * FROM v", "20|Y\n30|Z\n");
     try c.expectRows("SELECT s, n FROM v2 ORDER BY n DESC", "Z|30\nY|20\n");
     try c.expectRows("SELECT count(*) FROM v JOIN t ON ten = a * 10", "2\n");
-    try c.expectRows("SELECT type, name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name",
-        "view|v|CREATE VIEW v AS SELECT a * 10 AS ten, upper(b) FROM t WHERE a > 1\n" ++
+    try c.expectRows("SELECT type, name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name", "view|v|CREATE VIEW v AS SELECT a * 10 AS ten, upper(b) FROM t WHERE a > 1\n" ++
         "view|v2|CREATE VIEW v2(n, s) AS SELECT ten, \"upper(b)\" FROM v\n");
     try c.expectError("INSERT INTO v VALUES(1, 2)", "cannot modify v because it is a view");
     try c.expectError("DROP TABLE v", "use DROP VIEW to delete view v");

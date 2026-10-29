@@ -150,8 +150,7 @@ fn explainScanText(w: *Writer, item: *const SrcItem, loop: *const WhereLoop, is_
             c_range_op = '<';
         }
         try w.print("{c}?)", .{c_range_op});
-    }
-    else if (flags.VIRTUALTABLE) {
+    } else if (flags.VIRTUALTABLE) {
         try w.writeAll(" VIRTUAL TABLE INDEX ");
         const idx_str: []const u8 = loop.vtab.idx_str orelse "";
         if (loop.vtab.b_idx_num_hex) {
@@ -847,8 +846,7 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
         _ = aux.addOp3(v, OP.InitCoroutine, reg_yield, 0, subq.addr_fill_sub);
         level.p2 = aux.addOp2(v, OP.Yield, reg_yield, addr_brk);
         level.op = OP.Goto;
-    }
-    else if (loop.ws_flags.VIRTUALTABLE) {
+    } else if (loop.ws_flags.VIRTUALTABLE) {
         // Case 1: a virtual table, read with OP_VFilter and OP_VNext.
         try codeVirtualLoop(p, v, w, level, i_cur, b_rev);
     } else if (loop.ws_flags.IPK and loop.ws_flags.intersects(.{ .COLUMN_IN = true, .COLUMN_EQ = true })) {

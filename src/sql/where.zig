@@ -64,7 +64,6 @@ const TERM = wi.TERM;
 const maskBit = wi.maskBit;
 const ALLBITS = wi.ALLBITS;
 
-
 pub const ONEPASS = wi.ONEPASS;
 
 const LOGEST_MIN: LogEst = std.math.minInt(LogEst);
@@ -75,7 +74,6 @@ const LOGEST_MAX: LogEst = std.math.maxInt(LogEst);
 inline fn le(x: i32) LogEst {
     return @truncate(x);
 }
-
 
 /// Port of sqlite3WhereOutputRowCount(): the estimated number of output
 /// rows.

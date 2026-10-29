@@ -29,7 +29,7 @@ pub const FormatVersion = enum(u8) {
     _,
 
     pub fn known(v: FormatVersion) bool {
-        return @intFromEnum(v) <= @intFromEnum(FormatVersion.wal);
+        return @backingInt(v) <= @backingInt(FormatVersion.wal);
     }
 };
 
@@ -118,7 +118,7 @@ pub const Header = struct {
         if (!std.mem.eql(u8, bytes[0..16], magic)) return error.NotADatabase;
         // Readers must refuse files whose read version they do not know. An
         // unknown write version only makes the file read-only; see `readOnly`.
-        const read_version: FormatVersion = @enumFromInt(bytes[read_version_offset]);
+        const read_version: FormatVersion = @fromBackingInt(@intCast(bytes[read_version_offset]));
         if (!read_version.known()) return error.NotADatabase;
         if (!std.mem.eql(u8, bytes[21..24], &payload_fractions)) return error.NotADatabase;
 
@@ -127,10 +127,10 @@ pub const Header = struct {
 
         var h: Header = .{
             .page_size = page_size,
-            .write_version = @enumFromInt(bytes[write_version_offset]),
+            .write_version = @fromBackingInt(@intCast(bytes[write_version_offset])),
             .read_version = read_version,
             .reserved_space = bytes[reserved_space_offset],
-            .text_encoding = @enumFromInt(get4(bytes, 56)),
+            .text_encoding = @fromBackingInt(@intCast(get4(bytes, 56))),
         };
         inline for (u32_fields) |f| @field(h, f[0]) = get4(bytes, f[1]);
         return h;
@@ -142,11 +142,11 @@ pub const Header = struct {
         @memcpy(out[0..16], magic);
         const ps: u16 = if (h.page_size == max_page_size) 1 else @intCast(h.page_size);
         std.mem.writeInt(u16, out[16..18], ps, .big);
-        out[write_version_offset] = @intFromEnum(h.write_version);
-        out[read_version_offset] = @intFromEnum(h.read_version);
+        out[write_version_offset] = @backingInt(h.write_version);
+        out[read_version_offset] = @backingInt(h.read_version);
         out[reserved_space_offset] = h.reserved_space;
         out[21..24].* = payload_fractions;
-        put4(out, 56, @intFromEnum(h.text_encoding));
+        put4(out, 56, @backingInt(h.text_encoding));
         @memset(out[72..92], 0);
         inline for (u32_fields) |f| put4(out, f[1], @field(h, f[0]));
     }

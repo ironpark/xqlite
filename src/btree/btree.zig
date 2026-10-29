@@ -525,7 +525,7 @@ pub const Btree = struct {
             .database_size = 1,
             // Left for the schema layer, as SQLite does.
             .schema_format = 0,
-            .text_encoding = @enumFromInt(0),
+            .text_encoding = @fromBackingInt(@intCast(0)),
             .largest_root_page = @intFromBool(bt.isAutoVacuum()),
             .incremental_vacuum = @intFromBool(bt.auto_vacuum == .incremental),
         };
@@ -1946,7 +1946,7 @@ pub const Btree = struct {
     pub fn getMeta(bt: *Btree, idx: Meta) u32 {
         std.debug.assert(bt.in_trans != .none);
         if (idx == .data_version) return bt.pager.dataVersion() +% bt.data_version_bias;
-        return get4(bt.page1.?.data + header.meta_offset + @as(u32, @intFromEnum(idx)) * 4);
+        return get4(bt.page1.?.data + header.meta_offset + @as(u32, @backingInt(idx)) * 4);
     }
 
     /// Port of sqlite3BtreeUpdateMeta(). The free page count is read-only.
@@ -1955,7 +1955,7 @@ pub const Btree = struct {
         std.debug.assert(idx != .free_page_count and idx != .data_version);
         const p1 = bt.page1.?;
         try bt.pager.write(p1.db_page);
-        put4(p1.data + header.meta_offset + @as(u32, @intFromEnum(idx)) * 4, value);
+        put4(p1.data + header.meta_offset + @as(u32, @backingInt(idx)) * 4, value);
         // Switches between full and incremental; only setAutoVacuum turns
         // auto-vacuum on or off.
         if (idx == .incr_vacuum and bt.isAutoVacuum()) bt.auto_vacuum = if (value != 0) .incremental else .full;
@@ -2357,7 +2357,7 @@ pub const Cursor = struct {
         fault,
 
         fn atLeast(a: State, b: State) bool {
-            return @intFromEnum(a) >= @intFromEnum(b);
+            return @backingInt(a) >= @backingInt(b);
         }
     };
 

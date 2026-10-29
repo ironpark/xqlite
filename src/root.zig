@@ -133,7 +133,9 @@ test {
 }
 
 test {
+    std.testing.refAllDecls(@import("sql/attach.zig"));
     std.testing.refAllDecls(@import("sql/uri.zig"));
+    _ = @import("sql/attach_test.zig");
 }
 
 test {

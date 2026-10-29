@@ -257,10 +257,11 @@ pub fn close(db: *Sqlite3) i32 {
     rollbackAll(db, null);
     closeSavepoints(db);
     const gpa = db.gpa;
-    for (db.dbs.items) |*d| {
+    for (db.dbs.items, 0..) |*d, i| {
         @import("build.zig").schemaFree(db, d.schema);
         gpa.destroy(d.schema);
         if (d.bt) |bt| bt.close(pagerConn(db));
+        if (i >= 2) gpa.free(d.name);
     }
     db.dbs.deinit(gpa);
     @import("coll.zig").freeAll(db);
@@ -385,6 +386,35 @@ pub fn dbConfigFpDigits(db: *Sqlite3, n: i32) i32 {
 /// Port of sqlite3_last_insert_rowid().
 pub fn lastInsertRowid(db: *const Sqlite3) i64 {
     return db.last_rowid;
+}
+
+/// Port of sqlite3DbNameToBtree(): the b-tree of database `name` (main
+/// if null), or null.
+pub fn dbNameToBtree(db: *Sqlite3, name: ?[]const u8) ?*btree.Btree {
+    const i_db = if (name) |n| @import("build.zig").findDbName(db, n) orelse return null else 0;
+    return db.dbs.items[i_db].bt;
+}
+
+/// Port of sqlite3_db_name(): the name of database `n` (0 main, 1 temp,
+/// then the attached ones), or null.
+pub fn dbName(db: *const Sqlite3, n: usize) ?[:0]const u8 {
+    if (n >= db.dbs.items.len) return null;
+    return db.dbs.items[n].name;
+}
+
+/// Port of sqlite3_db_filename(): the full name of the file of database
+/// `name` (main if null), "" for a temporary or in-memory database, null
+/// if there is no such database.
+pub fn dbFilename(db: *Sqlite3, name: ?[]const u8) ?[]const u8 {
+    const bt = dbNameToBtree(db, name) orelse return null;
+    return bt.pager.path;
+}
+
+/// Port of sqlite3_db_readonly(): whether database `name` (main if null)
+/// is read-only, or null if there is no such database.
+pub fn dbReadonly(db: *Sqlite3, name: ?[]const u8) ?bool {
+    const bt = dbNameToBtree(db, name) orelse return null;
+    return bt.read_only;
 }
 
 /// Port of sqlite3_get_autocommit().

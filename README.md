@@ -46,7 +46,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 │        └──────────────┴──── AST ─────┴──────────────┘         │
 │                 방언별 semantic analysis / 타입 해석          │
 └───────────────────────────────┬───────────────────────────────┘
-                                │  공통 IR (Logical Plan)
+                                │  공통 IR (SQLite 파스 트리 + 빌더)
 ┌───────────────────────────────▼───────────────────────────────┐
 │                  Planner / Optimizer → Codegen                │
 └───────────────────────────────┬───────────────────────────────┘
@@ -74,6 +74,66 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | **Planner** | 공통 IR을 받아 인덱스 선택, 조인 순서 결정, 서브쿼리 평탄화 등을 수행합니다. |
 | **Dialect Frontend** | 방언별 lexer/parser와 의미 분석기입니다. 식별자 인용 규칙, 타입 강제 변환, NULL/정렬 규칙, 함수 이름 해석이 여기서 결정됩니다. |
 | **Catalog Emulation** | `sqlite_schema`, `information_schema`, `pg_catalog`, `sys.*` 등 메타데이터 뷰를 하나의 내부 카탈로그에서 생성합니다. |
+
+### 방언 아키텍처
+
+공통 IR은 새로 만든 Logical Plan이 아니라 **SQLite의 파스 트리**(`Expr`, `ExprList`, `IdList`, `SrcList`, `Select`, `With`, `Window`, `Upsert`, `TriggerStep`)와, SQLite 문법의 reduce 액션이 부르는 **코드 생성기 진입점**(select, insert, CREATE TABLE ...)입니다. SQLite 방언 프론트엔드가 이 인터페이스로 내리기 때문에 SQLite 방언의 바이트코드는 sqlite3와 같고, 다른 방언도 같은 트리를 만들면 같은 플랜을 얻습니다.
+
+```
+SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.xq.lang)으로 디스패치
+                 ├─ dialect/sqlite    tokenize.zig + parser.zig (기준 구현)
+                 ├─ dialect/postgres  (Phase 5, 지금은 스텁)
+                 └─ dialect/mariadb   (Phase 6, 지금은 스텁)
+                          │ ir.*  (src/ir/ir.zig)
+                          ▼
+               파스 트리 + 빌더 ──▶ VDBE 바이트코드
+                          ▲
+   방언 훅(dialect.Hooks): 함수 테이블 · 추가 collation · 기본 collation
+   카탈로그(src/catalog): xq_catalog · xq_sequence
+```
+
+| 파일 | 내용 |
+| --- | --- |
+| `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`; 3은 MSSQL 자리), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
+| `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`) |
+| `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
+| `src/ir/ir.zig` | IR 빌더 파사드: `stmt`, `expr`, `list`, `from`, `select`, `with`, `window`, `dml`, `ddl`, `txn`, `admin`. 각 항목은 대응하는 C 함수(`sqlite3PExpr`, `sqlite3StartTable` ...)의 별칭이거나 parse.y에서 옮긴 도우미 |
+| `src/catalog/catalog.zig`, `sequence.zig` | 방언 메타데이터와 시퀀스 |
+
+**방언 고르기.** 연결 단위입니다. 기본값은 `sqlite`이고, 이때 동작과 바이트코드는 이전과 바이트 단위로 같습니다.
+
+- Zig API: `Db.open(..., .{ .dialect = .postgres })`, `db.setDialect(.mariadb)`, `db.dialect()`
+- SQL: `PRAGMA xq_dialect`, `PRAGMA xq_dialect = 'postgres'` (SQLite의 pragma 표 밖에 있어 `pragma_list`에 나오지 않음. 준비 시점에 적용)
+- 셸: `.dialect`, `.dialect postgres`
+- 엔진 내부: `sql.main.setDialect()`, 문법만 바꾸는 `sql.main.setFrontend()`(다른 방언의 훅으로 SQLite 문법을 돌릴 때, 테스트·개발용)
+
+문장은 컴파일된 언어(`Vdbe.xq_lang`)를 기억해서 스키마 변경 뒤 재컴파일도 같은 방언으로 합니다. 엔진이 스스로 파싱하는 텍스트(스키마, nested parse, `OP_SqlExec`, ALTER TABLE 재작성, pragma 가상 테이블, `sqlite_stat1`, 카탈로그 SQL)는 언제나 SQLite 텍스트이고 SQLite 프론트엔드로 갑니다.
+
+**프론트엔드 계약** (`dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void`, `sqlite3RunParser()` 자리):
+
+1. 시작할 때 `p.rc = OK`, `p.tail = sql`로 둡니다(토큰 오프셋이 `p.tail` 기준).
+2. `sql`의 **첫 문장**만 컴파일하고, 끝나면 `p.tail`을 그 뒤 텍스트(`sql`의 접미사)로 둡니다. 공백·주석뿐이면 아무 코드도 만들지 않습니다.
+3. `ir.*`로 파스 트리를 만들고 문장 빌더를 부른 뒤 `ir.stmt.finishCoding(p)`로 끝냅니다. 식별자 인용·대소문자 접기는 프론트엔드가 합니다.
+4. 오류는 `ir.stmt.errorMsg()`/`syntaxError()`로 Parse에 남기고 `error.ParseFailed`로 실패합니다. Zig 오류는 할당 실패뿐입니다.
+5. **스키마에 저장되는 것은 SQLite 텍스트여야 합니다.** `sqlite_schema`는 문장 텍스트를 그대로 저장하고 sqlite3가 다시 읽기 때문입니다. CREATE TABLE/INDEX/VIEW/TRIGGER는 SQLite 텍스트로 렌더링해서 `ir.stmt.lowerSqliteText(p, text)`로 내리고, 방언 정보는 같은 문장 안에서 `catalog.code*()`로 기록한 뒤 `finishCoding()`합니다.
+6. 프론트엔드가 지어낸 함수 호출은 `ir.expr.functionCall(p, "concat", args)`로 만듭니다.
+
+**방언 훅** (`dialect.Hooks`, 모든 필드의 기본값이 SQLite 동작):
+
+- `functions`: 방언 함수 테이블. 사용자 정의 함수 다음, SQLite 내장 함수 앞에서 찾으므로 함수를 더하거나(`version()`, `nextval()`) 같은 이름의 내장 함수를 가립니다(MariaDB `CONCAT()`은 인자 중 NULL이 있으면 NULL). 다른 방언과 엔진 내부 SQL(`PreferBuiltin`)에는 보이지 않습니다. `dfunc.scalar("name", n_arg, .{ .deterministic = true }, impl)`로 만들고 같은 이름의 오버로드는 붙여 둡니다(`dfunc.checkTable`이 컴파일 시점에 검사).
+- `collations`: 방언이 더하는 collation. 스키마에 쓰면 sqlite3에서 그 열을 쓸 수 없으므로 가능하면 내장(`BINARY`, `NOCASE`, `RTRIM`)으로 매핑합니다.
+- `default_collation`: collation이 없는 값의 비교(C의 `db->pDfltColl`). MariaDB 스텁은 `NOCASE`입니다. COLLATE 없는 열의 인덱스는 파일 호환을 위해 BINARY로 남으므로 DDL에서 텍스트 열마다 collation을 적어 두는 것이 좋습니다.
+
+**엄격한 타입.** SQLite의 STRICT 테이블 기계를 그대로 씁니다. 프론트엔드는 선언 타입을 `ir.ddl.strictStorageType("varchar(20)")`(→ `TEXT`)로 저장 타입에 매핑해 `... ) STRICT`로 렌더링하고, 원래 선언 타입은 `catalog.Key.decl_type`에 기록합니다. 길이·정밀도 검사는 CHECK 제약으로 내립니다.
+
+**카탈로그와 시퀀스.** `xq_catalog(tbl, col, key, value)`(WITHOUT ROWID)와 `xq_sequence(name, last_value, start_value, increment, min_value, max_value, cycle, is_called)`는 일반 테이블이라 sqlite3가 그대로 열고 검사합니다. 처음 필요할 때만 만들어지므로 방언 기능을 쓰지 않은 DB는 SQLite와 바이트 단위로 같습니다.
+
+- 문장 안에서(코드 생성, 그 문장의 트랜잭션): `catalog.codeSet(p, "main", tbl, col, key, value)`, `codeDeleteTable`, `codeRenameTable`, `sequence.codeCreate(p, "main", name, .{ .start, .increment, .min, .max, .cycle }, if_not_exists)`, `sequence.codeDrop`, `sequence.nextvalExpr(p, name)`(identity 열의 DEFAULT나 INSERT 보완용)
+- 지금 바로(열린 트랜잭션 안, 없으면 문장마다 autocommit): `catalog.set/get/deleteTable`, `sequence.create/drop/nextval/currval/setval/lastval`
+- SQL 함수: PostgreSQL은 `nextval(name)`, `currval(name)`, `setval(name, v [, is_called])`, `lastval()`, MariaDB는 `nextval(name)`, `lastval(name)`, `setval(...)`. 의미는 PostgreSQL을 따르되 트랜잭션에 묶입니다(롤백된 값은 다시 나옴). `currval`/`lastval`은 연결 단위입니다.
+- 키: `dialect`(테이블을 만든 방언), `type`(선언 타입), `identity`(번호를 매기는 시퀀스), `identity_kind`, `collation`, `default`. 방언 고유 키는 `pg.`, `mariadb.` 접두사를 씁니다.
+
+**아직 하지 않은 것.** PostgreSQL·MariaDB 파서(스텁은 공백 외 모든 문장을 "parser not implemented"로 거부), 방언별 문장 경계(`sqlite3_complete()`, 셸의 입력 분할), 시퀀스의 비트랜잭션 의미와 schema 한정 이름(지금은 `main`), `CREATE SEQUENCE` 중복 시 PostgreSQL 오류 메시지(지금은 `xq_sequence.name`의 UNIQUE 위반), `information_schema`/`pg_catalog` 뷰, 방언 함수의 `PRAGMA function_list` 노출, C ABI URI 파라미터(`?dialect=`).
 
 ## 방언 호환성
 
@@ -328,13 +388,13 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall
   - [x] 가상 테이블: `CREATE VIRTUAL TABLE`, 모듈 등록(`sql.vtab.createModule`, `sqlite3_module`에 대응하는 Zig 구조체), `xBestIndex` 기반 플래너(제약·ORDER BY·IN·LIMIT/OFFSET 전달), `xUpdate`로 INSERT/UPDATE/DELETE, `xBegin`~`xRollbackTo` 트랜잭션·세이브포인트, `xRename`, `xFindFunction` 오버로드, eponymous 테이블과 테이블 값 함수. 내장 모듈로 `pragma_*` 테이블 값 함수, `bytecode()`/`tables_used()`, 셸의 `generate_series`. 결과와 바이트코드를 sqlite3 3.54.1과 맞춤
   - [x] WAL: `PRAGMA journal_mode=WAL`과 다른 모드로 되돌리기(헤더의 파일 포맷 버전 18/19바이트 포함), `-wal`·`-shm` 파일 형식과 잠금 프로토콜(shm 바이트 락, dead-man switch)을 SQLite 3.54.1과 같게 맞춰 xqlite와 sqlite3 프로세스가 한 DB를 동시에 읽고 씀. 읽기 스냅샷과 read mark, `walIndexRecover`로 크래시 뒤 wal-index 재구성, 캐시 스필과 세이브포인트·롤백, 체크포인트(PASSIVE/FULL/RESTART/TRUNCATE/NOOP, `wal_autocheckpoint`, `sqlite3_wal_checkpoint_v2`, WAL 훅), `journal_size_limit`, 읽기 전용 shm(heap wal-index). unix VFS는 `-shm`을 mmap하고 메모리 VFS는 공유 메모리를 힙에 둠. `busy_timeout`이 실제 바쁜 핸들러(`sqliteDefaultBusyCallback`)로 동작. 결과와 바이트코드를 sqlite3 3.54.1과 맞춤. `locking_mode=EXCLUSIVE`, 스냅샷 API는 아직
   - [x] JSON: `json`/`jsonb` 계열 스칼라 함수, `->`/`->>` 연산자, `json_group_array`/`json_group_object`(윈도우 함수 포함), JSON5 입력과 JSONB 바이너리 형식, `json_each`/`json_tree`/`jsonb_each`/`jsonb_tree` 테이블 값 함수(경로 인자, 상관 인자, 조인). 결과를 sqlite3 3.54.1과 바이트 단위로 맞춤
-- [ ] **Phase 4 · 공통 IR**: 방언 독립적인 Logical Plan으로 프론트엔드 분리, 카탈로그 확장
+- [x] **Phase 4 · 공통 IR**: 프론트엔드 분리와 카탈로그 확장. SQLite 파스 트리와 코드 생성기 진입점을 IR로 삼고(`src/ir/ir.zig`, SQLite 파서도 이 파사드로 내림), 연결 단위 방언 선택(`OpenOptions.dialect`, `PRAGMA xq_dialect`, `.dialect`)과 프론트엔드 디스패치, 방언 훅(함수 테이블, 추가·기본 collation), STRICT 기반 엄격한 타입, `xq_catalog`·`xq_sequence` 카탈로그와 시퀀스(nextval/currval/setval/lastval). PostgreSQL·MariaDB는 스텁 프론트엔드와 함수 테이블만. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 그대로 같음 ([방언 아키텍처](#방언-아키텍처))
 - [ ] **Phase 5 · PostgreSQL 방언**: 파서, 엄격한 타입, `pg_catalog`, 시퀀스, `RETURNING`
 - [ ] **Phase 6 · MariaDB 방언**: 파서, `sql_mode`, collation, `AUTO_INCREMENT`
 - [ ] **Phase 7 · MSSQL 방언**: T-SQL 파서, `IDENTITY`, `TOP`, `OUTPUT`, `MERGE`
 - [ ] **Phase 8 · 서버 모드**: pgwire, MySQL protocol, TDS
 
-## 프로젝트 구조 (예정)
+## 프로젝트 구조
 
 ```
 src/
@@ -343,16 +403,19 @@ src/
 ├── vfs/                # OS 추상화
 ├── pager/              # 페이지 캐시, 저널, WAL
 ├── btree/              # B-Tree, 레코드 포맷
-├── vdbe/               # 바이트코드 VM, 내장 함수
-├── planner/            # 공통 IR, 옵티마이저, 코드 생성
-├── catalog/            # 스키마, 메타데이터 뷰
+├── vdbe/               # 바이트코드 VM
+├── parse/              # SQLite tokenizer, LALR(1) 파서
+├── sql/                # 코드 생성기, 플래너, 내장 함수 (SQLite C 포팅)
+├── ir/                 # 공통 IR 빌더 파사드
+├── catalog/            # 방언 메타데이터(xq_catalog), 시퀀스(xq_sequence)
 ├── dialect/
 │   ├── sqlite/
-│   ├── postgres/
-│   ├── mariadb/
-│   └── mssql/
-├── capi/               # sqlite3 호환 C ABI
-└── server/             # 와이어 프로토콜 (선택)
+│   ├── postgres/       # Phase 5 (스텁)
+│   ├── mariadb/        # Phase 6 (스텁)
+│   └── mssql/          # 예정
+├── api/                # Zig API
+├── capi/               # sqlite3 호환 C ABI (예정)
+└── server/             # 와이어 프로토콜 (선택, 예정)
 ```
 
 ## 기여

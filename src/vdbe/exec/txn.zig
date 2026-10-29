@@ -252,10 +252,10 @@ pub fn opSetCookie(e: *Exec, op: *Op) Error!Flow {
     const db = e.db;
     const pdb = &db.dbs.items[@intCast(op.p1)];
     const rc_err = pdb.bt.?.updateMeta(cast.enumFromInt(btree.Meta, op.p2), @bitCast(op.p3));
-    if (op.p2 == @intFromEnum(btree.Meta.schema_version)) {
+    if (op.p2 == @backingInt(btree.Meta.schema_version)) {
         pdb.schema.schema_cookie = op.p3 - op.p5;
         db.m_db_flags.SchemaChange = true;
-    } else if (op.p2 == @intFromEnum(btree.Meta.file_format)) {
+    } else if (op.p2 == @backingInt(btree.Meta.file_format)) {
         pdb.schema.file_format = @intCast(op.p3);
     }
     if (op.p1 == 1) {
@@ -312,7 +312,11 @@ pub fn opCreateBtree(e: *Exec, op: *Op) Error!Flow {
 
 pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     var err_msg: ?[:0]u8 = null;
+    // xqlite: the SQL is the engine's, SQLite text in any dialect.
+    const dialect = @import("../../dialect/dialect.zig");
+    const saved_lang = dialect.enterEngineSql(e.db);
     const rc = @import("../../sql/legacy.zig").execNoCallback(e.db, std.mem.span(op.p4.z), &err_msg);
+    dialect.leaveEngineSql(e.db, saved_lang);
     if (err_msg != null or rc != RC.OK) {
         aux.vdbeError(e.v, "{s}", .{err_msg orelse ""});
         if (err_msg) |m| e.db.gpa.free(m);
@@ -397,7 +401,7 @@ pub fn opIntegrityCk(e: *Exec, op: *Op) Error!Flow {
 /// and the frames checkpointed (-1 if not in WAL mode).
 pub fn opCheckpoint(e: *Exec, op: *Op) Error!Flow {
     var res = [3]i32{ 0, -1, -1 };
-    main_mod.checkpoint(e.db, op.p1, @enumFromInt(op.p2), &res[1], &res[2]) catch |err| switch (err) {
+    main_mod.checkpoint(e.db, op.p1, @fromBackingInt(@intCast(op.p2)), &res[1], &res[2]) catch |err| switch (err) {
         error.Busy => res[0] = 1,
         else => |other| return other,
     };

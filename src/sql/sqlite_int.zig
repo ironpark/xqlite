@@ -1770,6 +1770,9 @@ pub const Parse = struct {
     returning: bool = false,
     has_with: bool = false,
     check_schema: bool = false,
+    /// xqlite: SQLite's grammar does not finish the statement it parses
+    /// (ir.stmt.lowerSqliteText(): a frontend adds to it and finishes).
+    xq_hold_finish: bool = false,
     n_err: i32 = 0,
     /// Counter for Select.sel_id.
     n_select: i32 = 0,
@@ -1861,7 +1864,7 @@ pub const Parse = struct {
     vtab_lock: std.ArrayList(*Table) = .empty,
 
     pub fn inRenameObject(p: *const Parse) bool {
-        return @intFromEnum(p.e_parse_mode) >= @intFromEnum(ParseMode.rename);
+        return @backingInt(p.e_parse_mode) >= @backingInt(ParseMode.rename);
     }
 
     pub fn inSpecialParse(p: *const Parse) bool {
@@ -2126,7 +2129,6 @@ pub const Db = struct {
     safety_level: u8 = 3,
     sync_set: bool = false,
     schema: *Schema,
-
 };
 
 /// A free lookaside slot (LookasideSlot).
@@ -2272,6 +2274,9 @@ pub const Sqlite3 = struct {
     vtab_on_conflict: OE = .None,
     /// OP_VDestroy calls running (nVDestroy).
     n_vdestroy: i32 = 0,
+    /// xqlite: the SQL dialect of the connection and the state of its
+    /// semantic hooks (src/dialect/dialect.zig). No C counterpart.
+    xq: @import("../dialect/dialect.zig").ConnState = .{},
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

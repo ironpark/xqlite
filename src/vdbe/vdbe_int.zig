@@ -578,6 +578,9 @@ pub const Vdbe = struct {
     error_action: int.OE = .Abort,
     min_write_file_format: u8 = 255,
     prep_flags: u8 = 0,
+    /// xqlite: the language (dialect and frontend) the statement was
+    /// compiled in, and is recompiled in.
+    xq_lang: @import("../dialect/dialect.zig").Lang = .{},
     e_vdbe_state: VdbeState = .init,
     expired: u2 = 0,
     explain: u2 = 0,

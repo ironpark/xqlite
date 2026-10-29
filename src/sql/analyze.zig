@@ -101,7 +101,11 @@ pub fn analysisLoad(db: *int.Sqlite3, i_db: usize) i32 {
             return int.RC.NOMEM;
         };
         defer db.gpa.free(sql);
+        // xqlite: SQLite text, whatever the dialect.
+        const dialect = @import("../dialect/dialect.zig");
+        const saved_lang = dialect.enterEngineSql(db);
         rc = legacy.execWith(db, sql, &info, analysisLoader, null);
+        dialect.leaveEngineSql(db, saved_lang);
     };
 
     // Set appropriate defaults on all indexes not in sqlite_stat1.

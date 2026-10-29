@@ -16,6 +16,7 @@ pub const Stmt = api.Stmt;
 pub const Savepoint = api.Savepoint;
 pub const OpenOptions = api.OpenOptions;
 pub const JournalMode = api.JournalMode;
+pub const Dialect = api.Dialect;
 pub const TransactionMode = api.TransactionMode;
 pub const VfsOption = api.VfsOption;
 pub const Error = api.Error;
@@ -61,6 +62,12 @@ pub const btree = @import("btree/btree.zig");
 pub const record = @import("vdbe/record.zig");
 
 pub const tokenize = @import("parse/tokenize.zig");
+/// SQL dialects: frontends and semantic hooks (Phase 4).
+pub const dialect = @import("dialect/dialect.zig");
+/// The common IR the frontends lower into.
+pub const ir = @import("ir/ir.zig");
+/// Dialect metadata (xq_catalog) and sequences (xq_sequence).
+pub const catalog = @import("catalog/catalog.zig");
 pub const sql_util = @import("sql/util.zig");
 pub const numeric = @import("sql/numeric.zig");
 pub const printf = @import("sql/printf.zig");
@@ -103,24 +110,25 @@ pub const vdbe = struct {
 // from a public entry point.
 test {
     inline for (.{
-        @import("vdbe/mem.zig"),   @import("vdbe/aux.zig"),   @import("vdbe/serial.zig"),
-        @import("vdbe/vdbe_int.zig"), @import("sql/expr.zig"), @import("sql/build.zig"),
-        @import("sql/select.zig"), @import("sql/window.zig"), @import("sql/main.zig"),
-        @import("sql/util.zig"),   @import("sql/walker.zig"), @import("sql/trigger.zig"),
-        @import("parse/parser.zig"), @import("vdbe/exec.zig"), @import("vdbe/sorter.zig"),
-        @import("vdbe/rowset.zig"), @import("vdbe/api.zig"), @import("sql/func.zig"),
-        @import("sql/prepare.zig"), @import("sql/legacy.zig"), @import("sql/resolve.zig"),
-        @import("sql/expr_code.zig"), @import("sql/coll.zig"), @import("sql/date.zig"), @import("sql/sql_test.zig"),
-        @import("sql/pragma.zig"), @import("sql/pragma_test.zig"),
-        @import("sql/where_int.zig"), @import("sql/where.zig"), @import("sql/where_loop.zig"),
-        @import("sql/where_code.zig"), @import("sql/where_expr.zig"), @import("sql/where_test.zig"),
-        @import("sql/vtab.zig"),   @import("ext/series.zig"), @import("sql/malloc.zig"), @import("ext/vtablog.zig"),
-        @import("vdbe/vdbevtab.zig"), @import("sql/vtab_test.zig"),
-        @import("vdbe/exec/control.zig"), @import("vdbe/exec/register.zig"), @import("vdbe/exec/arith.zig"),
-        @import("vdbe/exec/record.zig"), @import("vdbe/exec/txn.zig"), @import("vdbe/exec/cursor.zig"),
-        @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"), @import("vdbe/exec/vtab_ops.zig"),
-        @import("vdbe/exec/misc.zig"), @import("util/flags.zig"), @import("sql/sqlite_int.zig"),
-        @import("util/thunk.zig"), @import("util/cast.zig"),
+        @import("vdbe/mem.zig"),            @import("vdbe/aux.zig"),           @import("vdbe/serial.zig"),
+        @import("vdbe/vdbe_int.zig"),       @import("sql/expr.zig"),           @import("sql/build.zig"),
+        @import("sql/select.zig"),          @import("sql/window.zig"),         @import("sql/main.zig"),
+        @import("sql/util.zig"),            @import("sql/walker.zig"),         @import("sql/trigger.zig"),
+        @import("parse/parser.zig"),        @import("vdbe/exec.zig"),          @import("vdbe/sorter.zig"),
+        @import("vdbe/rowset.zig"),         @import("vdbe/api.zig"),           @import("sql/func.zig"),
+        @import("sql/prepare.zig"),         @import("sql/legacy.zig"),         @import("sql/resolve.zig"),
+        @import("sql/expr_code.zig"),       @import("sql/coll.zig"),           @import("sql/date.zig"),
+        @import("sql/sql_test.zig"),        @import("sql/pragma.zig"),         @import("sql/pragma_test.zig"),
+        @import("sql/where_int.zig"),       @import("sql/where.zig"),          @import("sql/where_loop.zig"),
+        @import("sql/where_code.zig"),      @import("sql/where_expr.zig"),     @import("sql/where_test.zig"),
+        @import("sql/vtab.zig"),            @import("ext/series.zig"),         @import("sql/malloc.zig"),
+        @import("ext/vtablog.zig"),         @import("vdbe/vdbevtab.zig"),      @import("sql/vtab_test.zig"),
+        @import("vdbe/exec/control.zig"),   @import("vdbe/exec/register.zig"), @import("vdbe/exec/arith.zig"),
+        @import("vdbe/exec/record.zig"),    @import("vdbe/exec/txn.zig"),      @import("vdbe/exec/cursor.zig"),
+        @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"),      @import("vdbe/exec/vtab_ops.zig"),
+        @import("vdbe/exec/misc.zig"),      @import("util/flags.zig"),         @import("sql/sqlite_int.zig"),
+        @import("util/thunk.zig"),          @import("util/cast.zig"),          @import("dialect/dialect.zig"),
+        @import("ir/ir.zig"),               @import("catalog/catalog.zig"),    @import("catalog/sequence.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

@@ -100,10 +100,13 @@ fn dup(p: *Parse, e: ?*const Expr) ?*Expr {
 /// code of the comparison, which numbers its opcode (OP.fromTk()).
 fn codeCompare(p: *Parse, left: *Expr, right: *Expr, opcode: u8, in1: i32, in2: i32, dest: i32, jump_if_null: u16, is_commuted: bool) i32 {
     if (p.n_err != 0) return 0;
-    const p4 = if (is_commuted)
+    var p4 = if (is_commuted)
         expr_mod.binaryCompareCollSeq(p, right, left)
     else
         expr_mod.binaryCompareCollSeq(p, left, right);
+    // xqlite: no collation compares in BINARY (a null P4), unless the
+    // dialect has another default.
+    if (p4 == null and @import("../dialect/dialect.zig").defaultCollationName(p.db) != null) p4 = coll_mod.dfltColl(p.db);
     const p5 = expr_mod.binaryCompareP5(left, right, jump_if_null);
     const addr = aux.addOp4(vdbe(p), OP.fromTk(opcode), in2, dest, in1, if (p4) |c| .{ .collseq = c } else .notused);
     aux.changeP5(vdbe(p), p5);
@@ -1578,7 +1581,7 @@ fn codeFunction(p: *Parse, e: *Expr, target: i32) i32 {
         }
     }
     if (def.func_flags.NEEDCOLL) {
-        _ = aux.addOp4(v, OP.CollSeq, 0, 0, 0, .{ .collseq = coll orelse coll_mod.defaultColl() });
+        _ = aux.addOp4(v, OP.CollSeq, 0, 0, 0, .{ .collseq = coll orelse coll_mod.dfltColl(p.db) });
     }
     _ = aux.addFunctionCall(p, @bitCast(const_mask), r1, target, @intCast(n_farg), def, e.op2);
     if (n_farg != 0 and const_mask == 0) releaseTempRange(p, r1, @intCast(n_farg));

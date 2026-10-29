@@ -189,6 +189,18 @@ pub fn busyTimeout(h: *Handle, ms: i32) void {
     _ = main_mod.busyTimeout(h, ms);
 }
 
+/// The SQL dialects.
+pub const Dialect = @import("../dialect/dialect.zig").Dialect;
+
+/// xqlite: the dialect of the statements prepared from now on.
+pub fn setDialect(h: *Handle, d: Dialect) void {
+    main_mod.setDialect(h, d);
+}
+
+pub fn getDialect(h: *const Handle) Dialect {
+    return main_mod.getDialect(h);
+}
+
 /// sqlite3_db_config(SQLITE_DBCONFIG_ENABLE_FKEY).
 pub fn setForeignKeys(h: *Handle, on: bool) void {
     _ = main_mod.dbConfig(h, .enable_fkey, @intFromBool(on));

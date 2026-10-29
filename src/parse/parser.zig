@@ -10,23 +10,10 @@ const std = @import("std");
 const grammar = @import("grammar.zig");
 const int = @import("../sql/sqlite_int.zig");
 const util = @import("../sql/util.zig");
-const expr = @import("../sql/expr.zig");
-const build = @import("../sql/build.zig");
-const sel = @import("../sql/select.zig");
-const win = @import("../sql/window.zig");
-const trig = @import("../sql/trigger.zig");
-const upsert_mod = @import("../sql/upsert.zig");
-const insert_mod = @import("../sql/insert.zig");
-const delete_mod = @import("../sql/delete.zig");
-const update_mod = @import("../sql/update.zig");
-const pragma_mod = @import("../sql/pragma.zig");
-const vacuum_mod = @import("../sql/vacuum.zig");
-const attach_mod = @import("../sql/attach.zig");
-const analyze_mod = @import("../sql/analyze.zig");
-const alter = @import("../sql/alter.zig");
-const vtab = @import("../sql/vtab.zig");
-const prepare = @import("../sql/prepare.zig");
 const ctype = @import("../util/ctype.zig");
+/// The builders the actions lower into (the common IR, shared with the
+/// other dialects' frontends).
+const ir = @import("../ir/ir.zig");
 
 const Parse = int.Parse;
 const Token = int.Token;
@@ -197,7 +184,7 @@ pub const Parser = struct {
     /// Port of yy_reduce(): run the action of rule `ruleno`, then pop its
     /// right side and push its left side. Returns the new state.
     fn reduce(s: *Parser, ruleno: u16, lookahead: u8, lookahead_token: Token) Oom!u16 {
-        try s.action(@enumFromInt(ruleno), lookahead, lookahead_token);
+        try s.action(@fromBackingInt(@intCast(ruleno)), lookahead, lookahead_token);
         const goto = g.yy_rule_info_lhs[ruleno];
         const size: isize = g.yy_rule_info_nrhs[ruleno];
         const base: usize = @intCast(@as(isize, @intCast(s.tos)) + size);
@@ -216,10 +203,10 @@ pub const Parser = struct {
         const a = p.arena;
         var lhs: Minor = undefined;
         switch (rule) {
-            .@"explain ::= EXPLAIN" => p.explain = 1,
-            .@"explain ::= EXPLAIN QUERY PLAN" => p.explain = 2,
-            .@"cmdx ::= cmd" => build.finishCoding(p),
-            .@"cmd ::= BEGIN transtype trans_opt" => build.beginTransaction(p, s.m(-1).int),
+            .@"explain ::= EXPLAIN" => ir.stmt.setExplain(p, 1),
+            .@"explain ::= EXPLAIN QUERY PLAN" => ir.stmt.setExplain(p, 2),
+            .@"cmdx ::= cmd" => if (!p.xq_hold_finish) ir.stmt.finishCoding(p),
+            .@"cmd ::= BEGIN transtype trans_opt" => ir.txn.begin(p, s.m(-1).int),
             .@"transtype ::=" => s.m(1).int = TK.DEFERRED,
             .@"transtype ::= DEFERRED",
             .@"transtype ::= IMMEDIATE",
@@ -228,14 +215,14 @@ pub const Parser = struct {
             => s.m(0).int = s.major(0),
             .@"cmd ::= COMMIT|END trans_opt",
             .@"cmd ::= ROLLBACK trans_opt",
-            => build.endTransaction(p, s.major(-1)),
-            .@"cmd ::= SAVEPOINT nm" => build.savepoint(p, .BEGIN, s.m(0).tok),
-            .@"cmd ::= RELEASE savepoint_opt nm" => build.savepoint(p, .RELEASE, s.m(0).tok),
-            .@"cmd ::= ROLLBACK trans_opt TO savepoint_opt nm" => build.savepoint(p, .ROLLBACK, s.m(0).tok),
+            => ir.txn.end(p, s.major(-1)),
+            .@"cmd ::= SAVEPOINT nm" => ir.txn.savepoint(p, .BEGIN, s.m(0).tok),
+            .@"cmd ::= RELEASE savepoint_opt nm" => ir.txn.savepoint(p, .RELEASE, s.m(0).tok),
+            .@"cmd ::= ROLLBACK trans_opt TO savepoint_opt nm" => ir.txn.savepoint(p, .ROLLBACK, s.m(0).tok),
             .@"create_table ::= createkw temp TABLE ifnotexists nm dbnm" => {
-                build.startTable(p, s.m(-1).tok, s.m(0).tok, s.m(-4).int != 0, false, false, s.m(-2).int != 0);
+                ir.ddl.startTable(p, s.m(-1).tok, s.m(0).tok, s.m(-4).int != 0, false, false, s.m(-2).int != 0);
             },
-            .@"createkw ::= CREATE" => disableLookaside(p),
+            .@"createkw ::= CREATE" => ir.ddl.beginCreate(p),
             .@"ifnotexists ::=",
             .@"temp ::=",
             .@"autoinc ::=",
@@ -248,9 +235,9 @@ pub const Parser = struct {
             .@"ifnotexists ::= IF NOT EXISTS" => s.m(-2).int = 1,
             .@"temp ::= TEMP" => s.m(0).int = @intFromBool(!p.db.init.busy),
             .@"create_table_args ::= LP columnlist conslist_opt RP table_option_set" => {
-                build.endTable(p, s.m(-2).tok, s.m(-1).tok, s.m(0).tab_opts, null);
+                ir.ddl.endTable(p, s.m(-2).tok, s.m(-1).tok, s.m(0).tab_opts, null);
             },
-            .@"create_table_args ::= AS select" => build.endTable(p, null, null, .{}, s.m(0).select),
+            .@"create_table_args ::= AS select" => ir.ddl.endTable(p, null, null, .{}, s.m(0).select),
             .@"table_option_set ::=" => s.m(1).tab_opts = .{},
             .@"table_option_set ::= table_option_set COMMA table_option" => {
                 lhs.tab_opts = s.m(-2).tab_opts.with(s.m(0).tab_opts);
@@ -262,7 +249,7 @@ pub const Parser = struct {
                     s.m(-1).tab_opts = .{ .WithoutRowid = true, .NoVisibleRowid = true };
                 } else {
                     s.m(-1).tab_opts = .{};
-                    util.errorMsg(p, "unknown table option: {s}", .{x.slice()});
+                    ir.stmt.errorMsg(p, "unknown table option: {s}", .{x.slice()});
                 }
             },
             .@"table_option ::= nm" => {
@@ -271,11 +258,11 @@ pub const Parser = struct {
                     lhs.tab_opts = .{ .Strict = true };
                 } else {
                     lhs.tab_opts = .{};
-                    util.errorMsg(p, "unknown table option: {s}", .{x.slice()});
+                    ir.stmt.errorMsg(p, "unknown table option: {s}", .{x.slice()});
                 }
                 s.m(0).tab_opts = lhs.tab_opts;
             },
-            .@"columnname ::= nm typetoken" => build.addColumn(p, s.m(-1).tok, s.m(0).tok),
+            .@"columnname ::= nm typetoken" => ir.ddl.addColumn(p, s.m(-1).tok, s.m(0).tok),
             .@"typetoken ::=",
             .@"conslist_opt ::=",
             .@"as ::=",
@@ -289,38 +276,38 @@ pub const Parser = struct {
             .@"tcons ::= CONSTRAINT nm",
             => p.u1.cr.constraint_name = s.m(0).tok,
             .@"ccons ::= DEFAULT scantok term" => {
-                build.addDefaultValue(p, s.m(0).expr, s.m(-1).tok.z, tokEnd(s.m(-1).tok));
+                ir.ddl.addDefaultValue(p, s.m(0).expr, s.m(-1).tok.z, tokEnd(s.m(-1).tok));
             },
             .@"ccons ::= DEFAULT LP expr RP" => {
-                build.addDefaultValue(p, s.m(-1).expr, s.m(-2).tok.z.? + 1, s.m(0).tok.z);
+                ir.ddl.addDefaultValue(p, s.m(-1).expr, s.m(-2).tok.z.? + 1, s.m(0).tok.z);
             },
             .@"ccons ::= DEFAULT PLUS scantok term" => {
-                build.addDefaultValue(p, s.m(0).expr, s.m(-2).tok.z, tokEnd(s.m(-1).tok));
+                ir.ddl.addDefaultValue(p, s.m(0).expr, s.m(-2).tok.z, tokEnd(s.m(-1).tok));
             },
             .@"ccons ::= DEFAULT MINUS scantok term" => {
-                const e = try expr.pExpr(p, TK.UMINUS, s.m(0).expr, null);
-                build.addDefaultValue(p, e, s.m(-2).tok.z, tokEnd(s.m(-1).tok));
+                const e = try ir.expr.binary(p, TK.UMINUS, s.m(0).expr, null);
+                ir.ddl.addDefaultValue(p, e, s.m(-2).tok.z, tokEnd(s.m(-1).tok));
             },
             .@"ccons ::= DEFAULT scantok ID|INDEXED" => {
-                const e = try tokenExpr(p, TK.STRING, s.m(0).tok);
-                _ = expr.idToTrueFalse(e);
-                build.addDefaultValue(p, e, s.m(0).tok.z, tokEnd(s.m(0).tok));
+                const e = try ir.expr.token(p, TK.STRING, s.m(0).tok);
+                _ = ir.expr.idToTrueFalse(e);
+                ir.ddl.addDefaultValue(p, e, s.m(0).tok.z, tokEnd(s.m(0).tok));
             },
-            .@"ccons ::= NOT NULL onconf" => build.addNotNull(p, s.m(0).oe),
+            .@"ccons ::= NOT NULL onconf" => ir.ddl.addNotNull(p, s.m(0).oe),
             .@"ccons ::= PRIMARY KEY sortorder onconf autoinc" => {
-                build.addPrimaryKey(p, null, s.m(-1).oe, s.m(0).int != 0, s.m(-2).int);
+                ir.ddl.addPrimaryKey(p, null, s.m(-1).oe, s.m(0).int != 0, s.m(-2).int);
             },
             .@"ccons ::= UNIQUE onconf" => {
-                build.createIndex(p, null, null, null, null, s.m(0).oe, null, null, 0, false, .unique);
+                ir.ddl.createIndex(p, null, null, null, null, s.m(0).oe, null, null, 0, false, .unique);
             },
-            .@"ccons ::= CHECK LP expr RP" => build.addCheckConstraint(p, s.m(-1).expr, s.m(-2).tok.z, s.m(0).tok.z),
+            .@"ccons ::= CHECK LP expr RP" => ir.ddl.addCheckConstraint(p, s.m(-1).expr, s.m(-2).tok.z, s.m(0).tok.z),
             .@"ccons ::= REFERENCES nm eidlist_opt refargs" => {
-                build.createForeignKey(p, null, s.m(-2).tok, s.m(-1).elist, s.m(0).int);
+                ir.ddl.createForeignKey(p, null, s.m(-2).tok, s.m(-1).elist, s.m(0).int);
             },
-            .@"ccons ::= defer_subclause" => build.deferForeignKey(p, s.m(0).int != 0),
-            .@"ccons ::= COLLATE ID|STRING" => build.addCollateType(p, s.m(0).tok),
-            .@"generated ::= LP expr RP" => build.addGenerated(p, s.m(-1).expr, null),
-            .@"generated ::= LP expr RP ID" => build.addGenerated(p, s.m(-2).expr, s.m(0).tok),
+            .@"ccons ::= defer_subclause" => ir.ddl.deferForeignKey(p, s.m(0).int != 0),
+            .@"ccons ::= COLLATE ID|STRING" => ir.ddl.addCollateType(p, s.m(0).tok),
+            .@"generated ::= LP expr RP" => ir.ddl.addGenerated(p, s.m(-1).expr, null),
+            .@"generated ::= LP expr RP ID" => ir.ddl.addGenerated(p, s.m(-2).expr, s.m(0).tok),
             .@"autoinc ::= AUTOINCR" => s.m(0).int = 1,
             .@"refargs ::=" => s.m(1).int = @as(i32, OE.None.int()) * 0x0101,
             .@"refargs ::= refargs refarg" => {
@@ -349,17 +336,17 @@ pub const Parser = struct {
             .@"init_deferred_pred_opt ::= INITIALLY IMMEDIATE" => s.m(-1).int = 0,
             .@"tconscomma ::= COMMA" => p.u1.cr.constraint_name.n = 0,
             .@"tcons ::= PRIMARY KEY LP sortlist autoinc RP onconf" => {
-                build.addPrimaryKey(p, s.m(-3).elist, s.m(0).oe, s.m(-2).int != 0, 0);
+                ir.ddl.addPrimaryKey(p, s.m(-3).elist, s.m(0).oe, s.m(-2).int != 0, 0);
             },
             .@"tcons ::= UNIQUE LP sortlist RP onconf" => {
-                build.createIndex(p, null, null, null, s.m(-2).elist, s.m(0).oe, null, null, 0, false, .unique);
+                ir.ddl.createIndex(p, null, null, null, s.m(-2).elist, s.m(0).oe, null, null, 0, false, .unique);
             },
             .@"tcons ::= CHECK LP expr RP onconf" => {
-                build.addCheckConstraint(p, s.m(-2).expr, s.m(-3).tok.z, s.m(-1).tok.z);
+                ir.ddl.addCheckConstraint(p, s.m(-2).expr, s.m(-3).tok.z, s.m(-1).tok.z);
             },
             .@"tcons ::= FOREIGN KEY LP eidlist RP REFERENCES nm eidlist_opt refargs defer_subclause_opt" => {
-                build.createForeignKey(p, s.m(-6).elist, s.m(-3).tok, s.m(-2).elist, s.m(-1).int);
-                build.deferForeignKey(p, s.m(0).int != 0);
+                ir.ddl.createForeignKey(p, s.m(-6).elist, s.m(-3).tok, s.m(-2).elist, s.m(-1).int);
+                ir.ddl.deferForeignKey(p, s.m(0).int != 0);
             },
             .@"onconf ::=",
             .@"orconf ::=",
@@ -369,55 +356,37 @@ pub const Parser = struct {
             .@"resolvetype ::= REPLACE",
             .@"insert_cmd ::= REPLACE",
             => s.m(0).oe = .Replace,
-            .@"cmd ::= DROP TABLE ifexists fullname" => build.dropTable(p, s.m(0).srclist, false, s.m(-1).int != 0),
+            .@"cmd ::= DROP TABLE ifexists fullname" => ir.ddl.dropTable(p, s.m(0).srclist, false, s.m(-1).int != 0),
             .@"cmd ::= createkw temp VIEW ifnotexists nm dbnm eidlist_opt AS select" => {
-                build.createView(p, s.m(-8).tok, s.m(-4).tok, s.m(-3).tok, s.m(-2).elist, s.m(0).select, s.m(-7).int != 0, s.m(-5).int != 0);
+                ir.ddl.createView(p, s.m(-8).tok, s.m(-4).tok, s.m(-3).tok, s.m(-2).elist, s.m(0).select, s.m(-7).int != 0, s.m(-5).int != 0);
             },
-            .@"cmd ::= DROP VIEW ifexists fullname" => build.dropTable(p, s.m(0).srclist, true, s.m(-1).int != 0),
-            .@"cmd ::= select" => cmd: {
-                var dest: sel.SelectDest = .{ .e_dest = sel.SRT.Output };
-                if (!p.db.m_db_flags.EncodingFixed) prepare.readSchema(p) catch break :cmd;
-                if (s.m(0).select) |x| sel.select(p, x, &dest) catch {};
-            },
-            .@"select ::= WITH wqlist selectnowith" => s.m(-2).select = attachWithToSelect(p, s.m(0).select, s.m(-1).with),
-            .@"select ::= WITH RECURSIVE wqlist selectnowith" => s.m(-3).select = attachWithToSelect(p, s.m(0).select, s.m(-1).with),
-            .@"select ::= selectnowith" => if (s.m(0).select) |x| doubleLinkSelect(p, x),
+            .@"cmd ::= DROP VIEW ifexists fullname" => ir.ddl.dropTable(p, s.m(0).srclist, true, s.m(-1).int != 0),
+            .@"cmd ::= select" => ir.stmt.select(p, s.m(0).select),
+            .@"select ::= WITH wqlist selectnowith" => s.m(-2).select = ir.select.attachWith(p, s.m(0).select, s.m(-1).with),
+            .@"select ::= WITH RECURSIVE wqlist selectnowith" => s.m(-3).select = ir.select.attachWith(p, s.m(0).select, s.m(-1).with),
+            .@"select ::= selectnowith" => if (s.m(0).select) |x| ir.select.doubleLink(p, x),
             .@"selectnowith ::= selectnowith multiselect_op oneselect" => {
-                var rhs = s.m(0).select;
-                const lhs_sel = s.m(-2).select;
-                if (rhs) |r| if (r.prior != null) {
-                    doubleLinkSelect(p, r);
-                    const from = try build.srcListAppendFromTerm(p, null, null, null, .{}, r, null);
-                    rhs = try sel.selectNew(p, null, from, null, null, null, null, .{}, null);
-                };
-                if (rhs) |r| {
-                    r.op = @intCast(s.m(-1).int);
-                    r.prior = lhs_sel;
-                    if (lhs_sel) |l| l.sel_flags.MultiValue = false;
-                    r.sel_flags.MultiValue = false;
-                    if (s.m(-1).int != TK.ALL) p.has_compound = true;
-                }
-                s.m(-2).select = rhs;
+                s.m(-2).select = try ir.select.compound(p, s.m(-2).select, s.m(-1).int, s.m(0).select);
             },
             .@"multiselect_op ::= UNION",
             .@"multiselect_op ::= EXCEPT|INTERSECT",
             => s.m(0).int = s.major(0),
             .@"multiselect_op ::= UNION ALL" => s.m(-1).int = TK.ALL,
             .@"oneselect ::= SELECT distinct selcollist from where_opt groupby_opt having_opt orderby_opt limit_opt" => {
-                s.m(-8).select = try sel.selectNew(p, s.m(-6).elist, s.m(-5).srclist, s.m(-4).expr, s.m(-3).elist, s.m(-2).expr, s.m(-1).elist, s.m(-7).sf, s.m(0).expr);
+                s.m(-8).select = try ir.select.new(p, s.m(-6).elist, s.m(-5).srclist, s.m(-4).expr, s.m(-3).elist, s.m(-2).expr, s.m(-1).elist, s.m(-7).sf, s.m(0).expr);
             },
             .@"oneselect ::= SELECT distinct selcollist from where_opt groupby_opt having_opt window_clause orderby_opt limit_opt" => {
-                const x = try sel.selectNew(p, s.m(-7).elist, s.m(-6).srclist, s.m(-5).expr, s.m(-4).elist, s.m(-3).expr, s.m(-1).elist, s.m(-8).sf, s.m(0).expr);
+                const x = try ir.select.new(p, s.m(-7).elist, s.m(-6).srclist, s.m(-5).expr, s.m(-4).elist, s.m(-3).expr, s.m(-1).elist, s.m(-8).sf, s.m(0).expr);
                 x.win_defn = s.m(-2).window;
                 s.m(-9).select = x;
             },
             .@"values ::= VALUES LP nexprlist RP" => {
-                s.m(-3).select = try sel.selectNew(p, s.m(-1).elist, null, null, null, null, null, .{ .Values = true }, null);
+                s.m(-3).select = try ir.select.values(p, s.m(-1).elist);
             },
-            .@"oneselect ::= mvalues" => insert_mod.multiValuesEnd(p, s.m(0).select),
+            .@"oneselect ::= mvalues" => ir.select.multiValuesEnd(p, s.m(0).select),
             .@"mvalues ::= values COMMA LP nexprlist RP",
             .@"mvalues ::= mvalues COMMA LP nexprlist RP",
-            => s.m(-4).select = try insert_mod.multiValues(p, s.m(-4).select.?, s.m(-1).elist),
+            => s.m(-4).select = try ir.select.multiValues(p, s.m(-4).select.?, s.m(-1).elist),
             .@"distinct ::= DISTINCT" => s.m(0).sf = .{ .Distinct = true },
             .@"distinct ::= ALL" => s.m(0).sf = .{ .All = true },
             .@"sclp ::=",
@@ -428,22 +397,13 @@ pub const Parser = struct {
             .@"eidlist_opt ::=",
             => s.m(1).elist = null,
             .@"selcollist ::= sclp scanpt expr scanpt as" => {
-                const l = try expr.listAppend(p, s.m(-4).elist, s.m(-2).expr);
-                if (s.m(0).tok.n > 0) try expr.listSetName(p, l, s.m(0).tok, true);
-                try expr.listSetSpan(p, l, s.m(-3).str, s.m(-1).str);
-                s.m(-4).elist = l;
+                s.m(-4).elist = try ir.list.resultColumn(p, s.m(-4).elist, s.m(-2).expr, s.m(0).tok, s.m(-3).str, s.m(-1).str);
             },
             .@"selcollist ::= sclp scanpt STAR" => {
-                const e = try expr.expr(a, TK.ASTERISK, null);
-                expr.setErrorOffset(e, expr.tokenOffset(p, s.m(0).tok));
-                s.m(-2).elist = try expr.listAppend(p, s.m(-2).elist, e);
+                s.m(-2).elist = try ir.list.star(p, s.m(-2).elist, s.m(0).tok);
             },
             .@"selcollist ::= sclp scanpt nm DOT STAR" => {
-                const right = try expr.pExpr(p, TK.ASTERISK, null, null);
-                expr.setErrorOffset(right, expr.tokenOffset(p, s.m(0).tok));
-                const left = try tokenExpr(p, TK.ID, s.m(-2).tok);
-                const dot = try expr.pExpr(p, TK.DOT, left, right);
-                s.m(-4).elist = try expr.listAppend(p, s.m(-4).elist, dot);
+                s.m(-4).elist = try ir.list.tableStar(p, s.m(-4).elist, s.m(-2).tok, s.m(0).tok);
             },
             .@"as ::= AS nm",
             .@"dbnm ::= DOT nm",
@@ -455,7 +415,7 @@ pub const Parser = struct {
             => s.m(1).srclist = null,
             .@"from ::= FROM seltablist" => {
                 s.m(-1).srclist = s.m(0).srclist;
-                build.srcListShiftJoinType(s.m(-1).srclist);
+                ir.from.shiftJoinType(s.m(-1).srclist);
             },
             .@"stl_prefix ::= seltablist joinop" => {
                 if (s.m(-1).srclist) |l| if (l.len() > 0) {
@@ -463,63 +423,49 @@ pub const Parser = struct {
                 };
             },
             .@"seltablist ::= stl_prefix nm dbnm as on_using" => {
-                s.m(-4).srclist = try build.srcListAppendFromTerm(p, s.m(-4).srclist, s.m(-3).tok, s.m(-2).tok, s.m(-1).tok, null, &s.m(0).on_using);
+                s.m(-4).srclist = try ir.from.appendTerm(p, s.m(-4).srclist, s.m(-3).tok, s.m(-2).tok, s.m(-1).tok, null, &s.m(0).on_using);
             },
             .@"seltablist ::= stl_prefix nm dbnm as indexed_by on_using" => {
-                s.m(-5).srclist = try build.srcListAppendFromTerm(p, s.m(-5).srclist, s.m(-4).tok, s.m(-3).tok, s.m(-2).tok, null, &s.m(0).on_using);
-                try build.srcListIndexedBy(p, s.m(-5).srclist, s.m(-1).tok);
+                s.m(-5).srclist = try ir.from.appendTerm(p, s.m(-5).srclist, s.m(-4).tok, s.m(-3).tok, s.m(-2).tok, null, &s.m(0).on_using);
+                try ir.from.indexedBy(p, s.m(-5).srclist, s.m(-1).tok);
             },
             .@"seltablist ::= stl_prefix nm dbnm LP exprlist RP as on_using" => {
-                s.m(-7).srclist = try build.srcListAppendFromTerm(p, s.m(-7).srclist, s.m(-6).tok, s.m(-5).tok, s.m(-1).tok, null, &s.m(0).on_using);
-                build.srcListFuncArgs(s.m(-7).srclist, s.m(-3).elist);
+                s.m(-7).srclist = try ir.from.appendTerm(p, s.m(-7).srclist, s.m(-6).tok, s.m(-5).tok, s.m(-1).tok, null, &s.m(0).on_using);
+                ir.from.funcArgs(s.m(-7).srclist, s.m(-3).elist);
             },
             .@"seltablist ::= stl_prefix LP select RP as on_using" => {
-                s.m(-5).srclist = try build.srcListAppendFromTerm(p, s.m(-5).srclist, null, null, s.m(-1).tok, s.m(-3).select, &s.m(0).on_using);
+                s.m(-5).srclist = try ir.from.appendTerm(p, s.m(-5).srclist, null, null, s.m(-1).tok, s.m(-3).select, &s.m(0).on_using);
             },
-            .@"seltablist ::= stl_prefix LP seltablist RP as on_using" => try nestedFrom(s, p),
+            .@"seltablist ::= stl_prefix LP seltablist RP as on_using" => {
+                s.m(-5).srclist = try ir.from.nested(p, s.m(-5).srclist, s.m(-3).srclist, s.m(-1).tok, &s.m(0).on_using);
+            },
             .@"dbnm ::=",
             .@"indexed_opt ::=",
             => s.m(1).tok = .{},
             .@"fullname ::= nm",
             .@"xfullname ::= nm",
             => {
-                lhs.srclist = try build.srcListAppend(p, null, s.m(0).tok, null);
-                if (p.inRenameObject()) if (lhs.srclist) |l| alter.renameTokenMap(p, l.at(0).name, s.m(0).tok);
+                lhs.srclist = try ir.from.fullName(p, s.m(0).tok, .{}, .{});
                 s.m(0).srclist = lhs.srclist;
             },
             .@"fullname ::= nm DOT nm",
             .@"xfullname ::= nm DOT nm",
             => {
-                lhs.srclist = try build.srcListAppend(p, null, s.m(-2).tok, s.m(0).tok);
-                if (p.inRenameObject()) if (lhs.srclist) |l| alter.renameTokenMap(p, l.at(0).name, s.m(0).tok);
+                lhs.srclist = try ir.from.fullName(p, s.m(-2).tok, s.m(0).tok, .{});
                 s.m(-2).srclist = lhs.srclist;
             },
             .@"xfullname ::= nm AS nm" => {
-                lhs.srclist = try build.srcListAppend(p, null, s.m(-2).tok, null);
-                if (lhs.srclist) |l| {
-                    if (p.inRenameObject()) {
-                        alter.renameTokenMap(p, l.at(0).name, s.m(-2).tok);
-                    } else {
-                        l.at(0).alias = try build.nameFromToken(a, s.m(0).tok);
-                    }
-                }
+                lhs.srclist = try ir.from.fullName(p, s.m(-2).tok, .{}, s.m(0).tok);
                 s.m(-2).srclist = lhs.srclist;
             },
             .@"xfullname ::= nm DOT nm AS nm" => {
-                lhs.srclist = try build.srcListAppend(p, null, s.m(-4).tok, s.m(-2).tok);
-                if (lhs.srclist) |l| {
-                    if (p.inRenameObject()) {
-                        alter.renameTokenMap(p, l.at(0).name, s.m(-2).tok);
-                    } else {
-                        l.at(0).alias = try build.nameFromToken(a, s.m(0).tok);
-                    }
-                }
+                lhs.srclist = try ir.from.fullName(p, s.m(-4).tok, s.m(-2).tok, s.m(0).tok);
                 s.m(-4).srclist = lhs.srclist;
             },
             .@"joinop ::= COMMA|JOIN" => s.m(0).jt = .{ .INNER = true },
-            .@"joinop ::= JOIN_KW JOIN" => s.m(-1).jt = sel.joinType(p, s.m(-1).tok, null, null),
-            .@"joinop ::= JOIN_KW nm JOIN" => s.m(-2).jt = sel.joinType(p, s.m(-2).tok, s.m(-1).tok, null),
-            .@"joinop ::= JOIN_KW nm nm JOIN" => s.m(-3).jt = sel.joinType(p, s.m(-3).tok, s.m(-2).tok, s.m(-1).tok),
+            .@"joinop ::= JOIN_KW JOIN" => s.m(-1).jt = ir.from.joinType(p, s.m(-1).tok, null, null),
+            .@"joinop ::= JOIN_KW nm JOIN" => s.m(-2).jt = ir.from.joinType(p, s.m(-2).tok, s.m(-1).tok, null),
+            .@"joinop ::= JOIN_KW nm nm JOIN" => s.m(-3).jt = ir.from.joinType(p, s.m(-3).tok, s.m(-2).tok, s.m(-1).tok),
             .@"on_using ::= ON expr" => s.m(-1).on_using = .{ .on = s.m(0).expr, .using = null },
             .@"on_using ::= USING LP idlist RP" => s.m(-3).on_using = .{ .on = null, .using = s.m(-1).idlist },
             .@"on_using ::=" => s.m(1).on_using = .{},
@@ -530,12 +476,12 @@ pub const Parser = struct {
             .@"groupby_opt ::= GROUP BY nexprlist",
             => s.m(-2).elist = s.m(0).elist,
             .@"sortlist ::= sortlist COMMA expr sortorder nulls" => {
-                s.m(-4).elist = try expr.listAppend(p, s.m(-4).elist, s.m(-2).expr);
-                expr.listSetSortOrder(s.m(-4).elist, s.m(-1).int, s.m(0).int);
+                s.m(-4).elist = try ir.list.append(p, s.m(-4).elist, s.m(-2).expr);
+                ir.list.setSortOrder(s.m(-4).elist, s.m(-1).int, s.m(0).int);
             },
             .@"sortlist ::= expr sortorder nulls" => {
-                s.m(-2).elist = try expr.listAppend(p, null, s.m(-2).expr);
-                expr.listSetSortOrder(s.m(-2).elist, s.m(-1).int, s.m(0).int);
+                s.m(-2).elist = try ir.list.append(p, null, s.m(-2).expr);
+                ir.list.setSortOrder(s.m(-2).elist, s.m(-1).int, s.m(0).int);
             },
             .@"sortorder ::= ASC" => s.m(0).int = SO.asc,
             .@"sortorder ::= DESC" => s.m(0).int = SO.desc,
@@ -558,172 +504,148 @@ pub const Parser = struct {
             .@"case_else ::= ELSE expr",
             .@"vinto ::= INTO expr",
             => s.m(-1).expr = s.m(0).expr,
-            .@"limit_opt ::= LIMIT expr" => s.m(-1).expr = try expr.pExpr(p, TK.LIMIT, s.m(0).expr, null),
-            .@"limit_opt ::= LIMIT expr OFFSET expr" => s.m(-3).expr = try expr.pExpr(p, TK.LIMIT, s.m(-2).expr, s.m(0).expr),
-            .@"limit_opt ::= LIMIT expr COMMA expr" => s.m(-3).expr = try expr.pExpr(p, TK.LIMIT, s.m(0).expr, s.m(-2).expr),
+            .@"limit_opt ::= LIMIT expr" => s.m(-1).expr = try ir.expr.binary(p, TK.LIMIT, s.m(0).expr, null),
+            .@"limit_opt ::= LIMIT expr OFFSET expr" => s.m(-3).expr = try ir.expr.binary(p, TK.LIMIT, s.m(-2).expr, s.m(0).expr),
+            .@"limit_opt ::= LIMIT expr COMMA expr" => s.m(-3).expr = try ir.expr.binary(p, TK.LIMIT, s.m(0).expr, s.m(-2).expr),
             .@"cmd ::= with DELETE FROM xfullname indexed_opt where_opt_ret" => {
-                try build.srcListIndexedBy(p, s.m(-2).srclist, s.m(-1).tok);
-                delete_mod.deleteFrom(p, s.m(-2).srclist, s.m(0).expr, null, null);
+                try ir.from.indexedBy(p, s.m(-2).srclist, s.m(-1).tok);
+                ir.dml.delete(p, s.m(-2).srclist, s.m(0).expr, null, null);
             },
             .@"where_opt_ret ::= RETURNING selcollist" => {
-                build.addReturning(p, s.m(0).elist);
+                ir.dml.addReturning(p, s.m(0).elist);
                 s.m(-1).expr = null;
             },
             .@"where_opt_ret ::= WHERE expr RETURNING selcollist" => {
-                build.addReturning(p, s.m(0).elist);
+                ir.dml.addReturning(p, s.m(0).elist);
                 s.m(-3).expr = s.m(-2).expr;
             },
             .@"cmd ::= with UPDATE orconf xfullname indexed_opt SET setlist from where_opt_ret" => {
-                try build.srcListIndexedBy(p, s.m(-5).srclist, s.m(-4).tok);
-                expr.listCheckLength(p, s.m(-2).elist, "set list");
-                if (s.m(-1).srclist) |from| {
-                    var from_clause: ?*SrcList = from;
-                    if (from.len() > 1) {
-                        const sub = try sel.selectNew(p, null, from, null, null, null, null, .{ .NestedFrom = true }, null);
-                        from_clause = try build.srcListAppendFromTerm(p, null, null, null, .{}, sub, null);
-                    }
-                    if (s.m(-5).srclist) |target| s.m(-5).srclist = try build.srcListAppendList(p, target, from_clause);
-                }
-                update_mod.update(p, s.m(-5).srclist, s.m(-2).elist, s.m(0).expr, s.m(-6).oe, null, null, null);
+                try ir.from.indexedBy(p, s.m(-5).srclist, s.m(-4).tok);
+                try ir.dml.updateFrom(p, s.m(-5).srclist, s.m(-2).elist, s.m(-1).srclist, s.m(0).expr, s.m(-6).oe);
             },
             .@"setlist ::= setlist COMMA nm EQ expr" => {
-                s.m(-4).elist = try expr.listAppend(p, s.m(-4).elist, s.m(0).expr);
-                try expr.listSetName(p, s.m(-4).elist, s.m(-2).tok, true);
+                s.m(-4).elist = try ir.list.append(p, s.m(-4).elist, s.m(0).expr);
+                try ir.list.setName(p, s.m(-4).elist, s.m(-2).tok, true);
             },
             .@"setlist ::= setlist COMMA LP idlist RP EQ expr" => {
-                s.m(-6).elist = try expr.listAppendVector(p, s.m(-6).elist, s.m(-3).idlist, s.m(0).expr);
+                s.m(-6).elist = try ir.list.appendVector(p, s.m(-6).elist, s.m(-3).idlist, s.m(0).expr);
             },
             .@"setlist ::= nm EQ expr" => {
-                lhs.elist = try expr.listAppend(p, null, s.m(0).expr);
-                try expr.listSetName(p, lhs.elist, s.m(-2).tok, true);
+                lhs.elist = try ir.list.append(p, null, s.m(0).expr);
+                try ir.list.setName(p, lhs.elist, s.m(-2).tok, true);
                 s.m(-2).elist = lhs.elist;
             },
             .@"setlist ::= LP idlist RP EQ expr" => {
-                s.m(-4).elist = try expr.listAppendVector(p, null, s.m(-3).idlist, s.m(0).expr);
+                s.m(-4).elist = try ir.list.appendVector(p, null, s.m(-3).idlist, s.m(0).expr);
             },
             .@"cmd ::= with insert_cmd INTO xfullname idlist_opt select upsert" => {
-                insert_mod.insert(p, s.m(-3).srclist, s.m(-1).select, s.m(-2).idlist, s.m(-5).oe, s.m(0).upsert);
+                ir.dml.insert(p, s.m(-3).srclist, s.m(-1).select, s.m(-2).idlist, s.m(-5).oe, s.m(0).upsert);
             },
             .@"cmd ::= with insert_cmd INTO xfullname idlist_opt DEFAULT VALUES returning" => {
-                insert_mod.insert(p, s.m(-4).srclist, null, s.m(-3).idlist, s.m(-6).oe, null);
+                ir.dml.insert(p, s.m(-4).srclist, null, s.m(-3).idlist, s.m(-6).oe, null);
             },
             .@"upsert ::=" => s.m(1).upsert = null,
             .@"upsert ::= RETURNING selcollist" => {
                 s.m(-1).upsert = null;
-                build.addReturning(p, s.m(0).elist);
+                ir.dml.addReturning(p, s.m(0).elist);
             },
             .@"upsert ::= ON CONFLICT LP sortlist RP where_opt DO UPDATE SET setlist where_opt upsert" => {
-                s.m(-11).upsert = try upsert_mod.upsertNew(p, s.m(-8).elist, s.m(-6).expr, s.m(-2).elist, s.m(-1).expr, s.m(0).upsert);
+                s.m(-11).upsert = try ir.dml.upsertNew(p, s.m(-8).elist, s.m(-6).expr, s.m(-2).elist, s.m(-1).expr, s.m(0).upsert);
             },
             .@"upsert ::= ON CONFLICT LP sortlist RP where_opt DO NOTHING upsert" => {
-                s.m(-8).upsert = try upsert_mod.upsertNew(p, s.m(-5).elist, s.m(-3).expr, null, null, s.m(0).upsert);
+                s.m(-8).upsert = try ir.dml.upsertNew(p, s.m(-5).elist, s.m(-3).expr, null, null, s.m(0).upsert);
             },
             .@"upsert ::= ON CONFLICT DO NOTHING returning" => {
-                s.m(-4).upsert = try upsert_mod.upsertNew(p, null, null, null, null, null);
+                s.m(-4).upsert = try ir.dml.upsertNew(p, null, null, null, null, null);
             },
             .@"upsert ::= ON CONFLICT DO UPDATE SET setlist where_opt returning" => {
-                s.m(-7).upsert = try upsert_mod.upsertNew(p, null, null, s.m(-2).elist, s.m(-1).expr, null);
+                s.m(-7).upsert = try ir.dml.upsertNew(p, null, null, s.m(-2).elist, s.m(-1).expr, null);
             },
-            .@"returning ::= RETURNING selcollist" => build.addReturning(p, s.m(0).elist),
+            .@"returning ::= RETURNING selcollist" => ir.dml.addReturning(p, s.m(0).elist),
             .@"idlist_opt ::=" => s.m(1).idlist = null,
             .@"idlist_opt ::= LP idlist RP" => s.m(-2).idlist = s.m(-1).idlist,
-            .@"idlist ::= idlist COMMA nm" => s.m(-2).idlist = try build.idListAppend(p, s.m(-2).idlist, s.m(0).tok),
-            .@"idlist ::= nm" => s.m(0).idlist = try build.idListAppend(p, null, s.m(0).tok),
+            .@"idlist ::= idlist COMMA nm" => s.m(-2).idlist = try ir.list.idAppend(p, s.m(-2).idlist, s.m(0).tok),
+            .@"idlist ::= nm" => s.m(0).idlist = try ir.list.idAppend(p, null, s.m(0).tok),
             .@"expr ::= LP expr RP" => s.m(-2).expr = s.m(-1).expr,
-            .@"expr ::= ID|INDEXED|JOIN_KW" => s.m(0).expr = try tokenExpr(p, TK.ID, s.m(0).tok),
+            .@"expr ::= ID|INDEXED|JOIN_KW" => s.m(0).expr = try ir.expr.token(p, TK.ID, s.m(0).tok),
             .@"expr ::= nm DOT nm" => {
-                const t1 = try tokenExpr(p, TK.ID, s.m(-2).tok);
-                const t2 = try tokenExpr(p, TK.ID, s.m(0).tok);
-                lhs.expr = try expr.pExpr(p, TK.DOT, t1, t2);
+                const t1 = try ir.expr.token(p, TK.ID, s.m(-2).tok);
+                const t2 = try ir.expr.token(p, TK.ID, s.m(0).tok);
+                lhs.expr = try ir.expr.binary(p, TK.DOT, t1, t2);
                 s.m(-2).expr = lhs.expr;
             },
             .@"expr ::= nm DOT nm DOT nm" => {
-                const t1 = try tokenExpr(p, TK.ID, s.m(-4).tok);
-                const t2 = try tokenExpr(p, TK.ID, s.m(-2).tok);
-                const t3 = try tokenExpr(p, TK.ID, s.m(0).tok);
-                const t4 = try expr.pExpr(p, TK.DOT, t2, t3);
-                if (p.inRenameObject()) alter.renameTokenRemap(p, null, t1);
-                lhs.expr = try expr.pExpr(p, TK.DOT, t1, t4);
+                const t1 = try ir.expr.token(p, TK.ID, s.m(-4).tok);
+                const t2 = try ir.expr.token(p, TK.ID, s.m(-2).tok);
+                const t3 = try ir.expr.token(p, TK.ID, s.m(0).tok);
+                const t4 = try ir.expr.binary(p, TK.DOT, t2, t3);
+                if (p.inRenameObject()) ir.ddl.renameTokenRemap(p, null, t1);
+                lhs.expr = try ir.expr.binary(p, TK.DOT, t1, t4);
                 s.m(-4).expr = lhs.expr;
             },
             .@"term ::= NULL|FLOAT|BLOB",
             .@"term ::= STRING",
-            => s.m(0).expr = try tokenExpr(p, s.major(0), s.m(0).tok),
-            .@"term ::= INTEGER" => {
-                const t = s.m(0).tok;
-                const e = if (util.getInt32(t.slice())) |v|
-                    try expr.exprInt32(a, v)
-                else
-                    try expr.exprAlloc(a, TK.INTEGER, t, false);
-                e.w = .{ .ofst = expr.tokenOffset(p, t) };
-                s.m(0).expr = e;
-            },
+            => s.m(0).expr = try ir.expr.token(p, s.major(0), s.m(0).tok),
+            .@"term ::= INTEGER" => s.m(0).expr = try ir.expr.integer(p, s.m(0).tok),
             .@"expr ::= VARIABLE" => {
                 const t = s.m(0).tok;
                 const z = t.z.?;
                 if (!(z[0] == '#' and ctype.isDigit(z[1]))) {
-                    const e = try tokenExpr(p, TK.VARIABLE, t);
-                    try expr.assignVarNumber(p, e, t.n);
+                    const e = try ir.expr.token(p, TK.VARIABLE, t);
+                    try ir.expr.assignVarNumber(p, e, t.n);
                     s.m(0).expr = e;
                 } else if (p.nested == 0) {
                     // "#N" names register N, only in nested parses.
-                    syntaxError(p, t);
+                    ir.stmt.syntaxError(p, t);
                     s.m(0).expr = null;
                 } else {
-                    const e = try expr.pExpr(p, TK.REGISTER, null, null);
+                    const e = try ir.expr.binary(p, TK.REGISTER, null, null);
                     e.i_table = util.getInt32(t.slice()[1..]) orelse 0;
                     s.m(0).expr = e;
                 }
             },
             .@"expr ::= expr COLLATE ID|STRING" => {
-                s.m(-2).expr = try expr.addCollateToken(p, s.m(-2).expr.?, s.m(0).tok, true);
+                s.m(-2).expr = try ir.expr.collate(p, s.m(-2).expr.?, s.m(0).tok, true);
             },
-            .@"expr ::= CAST LP expr AS typetoken RP" => {
-                const e = try expr.exprAlloc(a, TK.CAST, s.m(-1).tok, true);
-                expr.attachSubtrees(e, s.m(-3).expr, null);
-                s.m(-5).expr = e;
-            },
+            .@"expr ::= CAST LP expr AS typetoken RP" => s.m(-5).expr = try ir.expr.cast(p, s.m(-3).expr, s.m(-1).tok),
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist RP" => {
-                lhs.expr = try expr.exprFunction(p, s.m(-1).elist, s.m(-4).tok, s.m(-2).sf);
+                lhs.expr = try ir.expr.function(p, s.m(-1).elist, s.m(-4).tok, s.m(-2).sf);
                 s.m(-4).expr = lhs.expr;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist ORDER BY sortlist RP" => {
-                const e = try expr.exprFunction(p, s.m(-4).elist, s.m(-7).tok, s.m(-5).sf);
-                if (s.m(-1).elist) |ob| try expr.addFunctionOrderBy(p, e, ob);
+                const e = try ir.expr.function(p, s.m(-4).elist, s.m(-7).tok, s.m(-5).sf);
+                if (s.m(-1).elist) |ob| try ir.expr.addFunctionOrderBy(p, e, ob);
                 s.m(-7).expr = e;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP STAR RP" => {
-                lhs.expr = try expr.exprFunction(p, null, s.m(-3).tok, .{});
+                lhs.expr = try ir.expr.function(p, null, s.m(-3).tok, .{});
                 s.m(-3).expr = lhs.expr;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist RP filter_over" => {
-                const e = try expr.exprFunction(p, s.m(-2).elist, s.m(-5).tok, s.m(-3).sf);
-                if (s.m(0).window) |w| win.windowAttach(p, e, w);
+                const e = try ir.expr.function(p, s.m(-2).elist, s.m(-5).tok, s.m(-3).sf);
+                if (s.m(0).window) |w| ir.window.attach(p, e, w);
                 s.m(-5).expr = e;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP distinct exprlist ORDER BY sortlist RP filter_over" => {
-                const e = try expr.exprFunction(p, s.m(-5).elist, s.m(-8).tok, s.m(-6).sf);
-                if (s.m(0).window) |w| win.windowAttach(p, e, w);
-                if (s.m(-2).elist) |ob| try expr.addFunctionOrderBy(p, e, ob);
+                const e = try ir.expr.function(p, s.m(-5).elist, s.m(-8).tok, s.m(-6).sf);
+                if (s.m(0).window) |w| ir.window.attach(p, e, w);
+                if (s.m(-2).elist) |ob| try ir.expr.addFunctionOrderBy(p, e, ob);
                 s.m(-8).expr = e;
             },
             .@"expr ::= ID|INDEXED|JOIN_KW LP STAR RP filter_over" => {
-                const e = try expr.exprFunction(p, null, s.m(-4).tok, .{});
-                if (s.m(0).window) |w| win.windowAttach(p, e, w);
+                const e = try ir.expr.function(p, null, s.m(-4).tok, .{});
+                if (s.m(0).window) |w| ir.window.attach(p, e, w);
                 s.m(-4).expr = e;
             },
             .@"term ::= CTIME_KW" => {
-                lhs.expr = try expr.exprFunction(p, null, s.m(0).tok, .{});
+                lhs.expr = try ir.expr.function(p, null, s.m(0).tok, .{});
                 s.m(0).expr = lhs.expr;
             },
             .@"expr ::= LP nexprlist COMMA expr RP" => {
-                const list = try expr.listAppend(p, s.m(-3).elist, s.m(-1).expr);
-                const e = try expr.pExpr(p, TK.VECTOR, null, null);
-                e.x = .{ .list = list };
-                for (list.slice()) |item| e.flags.set(item.expr.?.flags.only(EP.Propagate));
-                s.m(-4).expr = e;
+                const list = try ir.list.append(p, s.m(-3).elist, s.m(-1).expr);
+                s.m(-4).expr = try ir.expr.vector(p, list);
             },
-            .@"expr ::= expr AND expr" => s.m(-2).expr = try expr.exprAnd(p, s.m(-2).expr, s.m(0).expr),
+            .@"expr ::= expr AND expr" => s.m(-2).expr = try ir.expr.@"and"(p, s.m(-2).expr, s.m(0).expr),
             .@"expr ::= expr OR expr",
             .@"expr ::= expr LT|GT|GE|LE expr",
             .@"expr ::= expr EQ|NE expr",
@@ -731,7 +653,7 @@ pub const Parser = struct {
             .@"expr ::= expr PLUS|MINUS expr",
             .@"expr ::= expr STAR|SLASH|REM expr",
             .@"expr ::= expr CONCAT expr",
-            => s.m(-2).expr = try expr.pExpr(p, s.major(-1), s.m(-2).expr, s.m(0).expr),
+            => s.m(-2).expr = try ir.expr.binary(p, s.major(-1), s.m(-2).expr, s.m(0).expr),
             .@"likeop ::= NOT LIKE_KW|MATCH" => {
                 s.m(-1).tok = s.m(0).tok;
                 s.m(-1).tok.n |= 0x80000000;
@@ -739,33 +661,22 @@ pub const Parser = struct {
             .@"expr ::= expr likeop expr" => {
                 const not = s.m(-1).tok.n & 0x80000000 != 0;
                 s.m(-1).tok.n &= 0x7fffffff;
-                var list = try expr.listAppend(p, null, s.m(0).expr);
-                list = try expr.listAppend(p, list, s.m(-2).expr);
-                var e = try expr.exprFunction(p, list, s.m(-1).tok, .{});
-                if (not) e = try expr.pExpr(p, TK.NOT, e, null);
-                e.flags.InfixFunc = true;
-                s.m(-2).expr = e;
+                s.m(-2).expr = try ir.expr.like(p, s.m(-1).tok, not, s.m(-2).expr, s.m(0).expr, null);
             },
             .@"expr ::= expr likeop expr ESCAPE expr" => {
                 const not = s.m(-3).tok.n & 0x80000000 != 0;
                 s.m(-3).tok.n &= 0x7fffffff;
-                var list = try expr.listAppend(p, null, s.m(-2).expr);
-                list = try expr.listAppend(p, list, s.m(-4).expr);
-                list = try expr.listAppend(p, list, s.m(0).expr);
-                var e = try expr.exprFunction(p, list, s.m(-3).tok, .{});
-                if (not) e = try expr.pExpr(p, TK.NOT, e, null);
-                e.flags.InfixFunc = true;
-                s.m(-4).expr = e;
+                s.m(-4).expr = try ir.expr.like(p, s.m(-3).tok, not, s.m(-4).expr, s.m(-2).expr, s.m(0).expr);
             },
-            .@"expr ::= expr ISNULL|NOTNULL" => s.m(-1).expr = try pExprIsNull(p, s.major(0), s.m(-1).expr.?),
-            .@"expr ::= expr NOT NULL" => s.m(-2).expr = try pExprIsNull(p, TK.NOTNULL, s.m(-2).expr.?),
-            .@"expr ::= expr IS expr" => s.m(-2).expr = try pExprIs(p, TK.IS, s.m(-2).expr.?, s.m(0).expr),
-            .@"expr ::= expr IS NOT expr" => s.m(-3).expr = try pExprIs(p, TK.ISNOT, s.m(-3).expr.?, s.m(0).expr),
-            .@"expr ::= expr IS NOT DISTINCT FROM expr" => s.m(-5).expr = try pExprIs(p, TK.IS, s.m(-5).expr.?, s.m(0).expr),
-            .@"expr ::= expr IS DISTINCT FROM expr" => s.m(-4).expr = try pExprIs(p, TK.ISNOT, s.m(-4).expr.?, s.m(0).expr),
+            .@"expr ::= expr ISNULL|NOTNULL" => s.m(-1).expr = try ir.expr.isNull(p, s.major(0), s.m(-1).expr.?),
+            .@"expr ::= expr NOT NULL" => s.m(-2).expr = try ir.expr.isNull(p, TK.NOTNULL, s.m(-2).expr.?),
+            .@"expr ::= expr IS expr" => s.m(-2).expr = try ir.expr.is(p, TK.IS, s.m(-2).expr.?, s.m(0).expr),
+            .@"expr ::= expr IS NOT expr" => s.m(-3).expr = try ir.expr.is(p, TK.ISNOT, s.m(-3).expr.?, s.m(0).expr),
+            .@"expr ::= expr IS NOT DISTINCT FROM expr" => s.m(-5).expr = try ir.expr.is(p, TK.IS, s.m(-5).expr.?, s.m(0).expr),
+            .@"expr ::= expr IS DISTINCT FROM expr" => s.m(-4).expr = try ir.expr.is(p, TK.ISNOT, s.m(-4).expr.?, s.m(0).expr),
             .@"expr ::= NOT expr",
             .@"expr ::= BITNOT expr",
-            => s.m(-1).expr = try expr.pExpr(p, s.major(-1), s.m(0).expr, null),
+            => s.m(-1).expr = try ir.expr.binary(p, s.major(-1), s.m(0).expr, null),
             .@"expr ::= PLUS|MINUS expr" => {
                 const e = s.m(0).expr;
                 const op: u8 = s.major(-1) + (TK.UPLUS - TK.PLUS);
@@ -773,104 +684,77 @@ pub const Parser = struct {
                     e.?.op = op;
                     s.m(-1).expr = e;
                 } else {
-                    s.m(-1).expr = try expr.pExpr(p, op, e, null);
+                    s.m(-1).expr = try ir.expr.binary(p, op, e, null);
                 }
             },
             .@"expr ::= expr PTR expr" => {
-                var list = try expr.listAppend(p, null, s.m(-2).expr);
-                list = try expr.listAppend(p, list, s.m(0).expr);
-                lhs.expr = try expr.exprFunction(p, list, s.m(-1).tok, .{});
+                var list = try ir.list.append(p, null, s.m(-2).expr);
+                list = try ir.list.append(p, list, s.m(0).expr);
+                lhs.expr = try ir.expr.function(p, list, s.m(-1).tok, .{});
                 s.m(-2).expr = lhs.expr;
             },
             .@"between_op ::= BETWEEN",
             .@"in_op ::= IN",
             => s.m(0).int = 0,
             .@"expr ::= expr between_op expr AND expr" => {
-                var list = try expr.listAppend(p, null, s.m(-2).expr);
-                list = try expr.listAppend(p, list, s.m(0).expr);
-                var e = try expr.pExpr(p, TK.BETWEEN, s.m(-4).expr, null);
-                e.x = .{ .list = list };
-                expr.setHeightAndFlags(p, e);
-                if (s.m(-3).int != 0) e = try expr.pExpr(p, TK.NOT, e, null);
-                s.m(-4).expr = e;
+                s.m(-4).expr = try ir.expr.between(p, s.m(-4).expr, s.m(-3).int != 0, s.m(-2).expr, s.m(0).expr);
             },
-            .@"expr ::= expr in_op LP exprlist RP" => try inList(s, p),
-            .@"expr ::= LP select RP" => {
-                const e = try expr.pExpr(p, TK.SELECT, null, null);
-                expr.pExprAddSelect(p, e, s.m(-1).select);
-                s.m(-2).expr = e;
+            .@"expr ::= expr in_op LP exprlist RP" => {
+                s.m(-4).expr = try ir.expr.inList(p, s.m(-4).expr.?, s.m(-3).int != 0, s.m(-1).elist);
             },
+            .@"expr ::= LP select RP" => s.m(-2).expr = try ir.expr.subquery(p, TK.SELECT, s.m(-1).select),
             .@"expr ::= expr in_op LP select RP" => {
-                var e = try expr.pExpr(p, TK.IN, s.m(-4).expr, null);
-                expr.pExprAddSelect(p, e, s.m(-1).select);
-                if (s.m(-3).int != 0) e = try expr.pExpr(p, TK.NOT, e, null);
-                s.m(-4).expr = e;
+                s.m(-4).expr = try ir.expr.inSelect(p, s.m(-4).expr, s.m(-3).int != 0, s.m(-1).select);
             },
             .@"expr ::= expr in_op nm dbnm paren_exprlist" => {
-                const src = try build.srcListAppend(p, null, s.m(-2).tok, s.m(-1).tok);
-                const sub = try sel.selectNew(p, null, src, null, null, null, null, .{}, null);
-                if (s.m(0).elist) |args| build.srcListFuncArgs(src, args);
-                var e = try expr.pExpr(p, TK.IN, s.m(-4).expr, null);
-                expr.pExprAddSelect(p, e, sub);
-                if (s.m(-3).int != 0) e = try expr.pExpr(p, TK.NOT, e, null);
-                s.m(-4).expr = e;
+                s.m(-4).expr = try ir.expr.inTable(p, s.m(-4).expr, s.m(-3).int != 0, s.m(-2).tok, s.m(-1).tok, s.m(0).elist);
             },
-            .@"expr ::= EXISTS LP select RP" => {
-                const e = try expr.pExpr(p, TK.EXISTS, null, null);
-                s.m(-3).expr = e;
-                expr.pExprAddSelect(p, e, s.m(-1).select);
-            },
+            .@"expr ::= EXISTS LP select RP" => s.m(-3).expr = try ir.expr.subquery(p, TK.EXISTS, s.m(-1).select),
             .@"expr ::= CASE case_operand case_exprlist case_else END" => {
-                const e = try expr.pExpr(p, TK.CASE, s.m(-3).expr, null);
-                e.x = .{ .list = if (s.m(-1).expr != null)
-                    try expr.listAppend(p, s.m(-2).elist, s.m(-1).expr)
-                else
-                    s.m(-2).elist };
-                expr.setHeightAndFlags(p, e);
-                s.m(-4).expr = e;
+                s.m(-4).expr = try ir.expr.case(p, s.m(-3).expr, s.m(-2).elist, s.m(-1).expr);
             },
             .@"case_exprlist ::= case_exprlist WHEN expr THEN expr" => {
-                s.m(-4).elist = try expr.listAppend(p, s.m(-4).elist, s.m(-2).expr);
-                s.m(-4).elist = try expr.listAppend(p, s.m(-4).elist, s.m(0).expr);
+                s.m(-4).elist = try ir.list.append(p, s.m(-4).elist, s.m(-2).expr);
+                s.m(-4).elist = try ir.list.append(p, s.m(-4).elist, s.m(0).expr);
             },
             .@"case_exprlist ::= WHEN expr THEN expr" => {
-                s.m(-3).elist = try expr.listAppend(p, null, s.m(-2).expr);
-                s.m(-3).elist = try expr.listAppend(p, s.m(-3).elist, s.m(0).expr);
+                s.m(-3).elist = try ir.list.append(p, null, s.m(-2).expr);
+                s.m(-3).elist = try ir.list.append(p, s.m(-3).elist, s.m(0).expr);
             },
-            .@"nexprlist ::= nexprlist COMMA expr" => s.m(-2).elist = try expr.listAppend(p, s.m(-2).elist, s.m(0).expr),
-            .@"nexprlist ::= expr" => s.m(0).elist = try expr.listAppend(p, null, s.m(0).expr),
+            .@"nexprlist ::= nexprlist COMMA expr" => s.m(-2).elist = try ir.list.append(p, s.m(-2).elist, s.m(0).expr),
+            .@"nexprlist ::= expr" => s.m(0).elist = try ir.list.append(p, null, s.m(0).expr),
             .@"paren_exprlist ::= LP exprlist RP",
             .@"eidlist_opt ::= LP eidlist RP",
             => s.m(-2).elist = s.m(-1).elist,
             .@"cmd ::= createkw uniqueflag INDEX ifnotexists nm dbnm ON nm LP sortlist RP where_opt" => {
-                const tbl = try build.srcListAppend(p, null, s.m(-4).tok, null);
-                build.createIndex(p, s.m(-7).tok, s.m(-6).tok, tbl, s.m(-2).elist, s.m(-10).oe, s.m(-11).tok, s.m(0).expr, SO.asc, s.m(-8).int != 0, .appdef);
-                if (p.inRenameObject()) if (p.new_index) |idx| alter.renameTokenMap(p, idx.name.ptr, s.m(-4).tok);
+                const tbl = try ir.from.append(p, null, s.m(-4).tok, null);
+                ir.ddl.createIndex(p, s.m(-7).tok, s.m(-6).tok, tbl, s.m(-2).elist, s.m(-10).oe, s.m(-11).tok, s.m(0).expr, SO.asc, s.m(-8).int != 0, .appdef);
+                if (p.inRenameObject()) if (p.new_index) |idx| ir.ddl.renameTokenMap(p, idx.name.ptr, s.m(-4).tok);
             },
             .@"uniqueflag ::= UNIQUE",
             .@"raisetype ::= ABORT",
             => s.m(0).oe = .Abort,
             .@"uniqueflag ::=" => s.m(1).oe = .None,
             .@"eidlist ::= eidlist COMMA nm collate sortorder" => {
-                s.m(-4).elist = try addExprIdListTerm(p, s.m(-4).elist, s.m(-2).tok, s.m(-1).int != 0, s.m(0).int);
+                s.m(-4).elist = try ir.list.addIdTerm(p, s.m(-4).elist, s.m(-2).tok, s.m(-1).int != 0, s.m(0).int);
             },
             .@"eidlist ::= nm collate sortorder" => {
-                s.m(-2).elist = try addExprIdListTerm(p, null, s.m(-2).tok, s.m(-1).int != 0, s.m(0).int);
+                s.m(-2).elist = try ir.list.addIdTerm(p, null, s.m(-2).tok, s.m(-1).int != 0, s.m(0).int);
             },
-            .@"cmd ::= DROP INDEX ifexists fullname" => build.dropIndex(p, s.m(0).srclist, s.m(-1).int != 0),
-            .@"cmd ::= VACUUM vinto" => vacuum_mod.vacuum(p, null, s.m(0).expr),
-            .@"cmd ::= VACUUM nm vinto" => vacuum_mod.vacuum(p, s.m(-1).tok, s.m(0).expr),
-            .@"cmd ::= PRAGMA nm dbnm" => pragma_mod.pragma(p, s.m(-1).tok, s.m(0).tok, null, false),
-            .@"cmd ::= PRAGMA nm dbnm EQ nmnum" => pragma_mod.pragma(p, s.m(-3).tok, s.m(-2).tok, s.m(0).tok, false),
-            .@"cmd ::= PRAGMA nm dbnm LP nmnum RP" => pragma_mod.pragma(p, s.m(-4).tok, s.m(-3).tok, s.m(-1).tok, false),
-            .@"cmd ::= PRAGMA nm dbnm EQ minus_num" => pragma_mod.pragma(p, s.m(-3).tok, s.m(-2).tok, s.m(0).tok, true),
-            .@"cmd ::= PRAGMA nm dbnm LP minus_num RP" => pragma_mod.pragma(p, s.m(-4).tok, s.m(-3).tok, s.m(-1).tok, true),
+            .@"cmd ::= DROP INDEX ifexists fullname" => ir.ddl.dropIndex(p, s.m(0).srclist, s.m(-1).int != 0),
+            .@"cmd ::= VACUUM vinto" => ir.admin.vacuum(p, null, s.m(0).expr),
+            .@"cmd ::= VACUUM nm vinto" => ir.admin.vacuum(p, s.m(-1).tok, s.m(0).expr),
+            .@"cmd ::= PRAGMA nm dbnm" => ir.admin.pragma(p, s.m(-1).tok, s.m(0).tok, null, false),
+            .@"cmd ::= PRAGMA nm dbnm EQ nmnum" => ir.admin.pragma(p, s.m(-3).tok, s.m(-2).tok, s.m(0).tok, false),
+            .@"cmd ::= PRAGMA nm dbnm LP nmnum RP" => ir.admin.pragma(p, s.m(-4).tok, s.m(-3).tok, s.m(-1).tok, false),
+            .@"cmd ::= PRAGMA nm dbnm EQ minus_num" => ir.admin.pragma(p, s.m(-3).tok, s.m(-2).tok, s.m(0).tok, true),
+            .@"cmd ::= PRAGMA nm dbnm LP minus_num RP" => ir.admin.pragma(p, s.m(-4).tok, s.m(-3).tok, s.m(-1).tok, true),
             .@"cmd ::= createkw trigger_decl BEGIN trigger_cmd_list END" => {
                 const all: Token = .{ .z = s.m(-3).tok.z, .n = spanLen(s.m(-3).tok, s.m(0).tok) };
-                trig.finishTrigger(p, s.m(-1).trig_step, all);
+                ir.ddl.finishTrigger(p, s.m(-1).trig_step, all);
             },
             .@"trigger_decl ::= temp TRIGGER ifnotexists nm dbnm trigger_time trigger_event ON fullname foreach_clause when_clause" => {
-                trig.beginTrigger(p, s.m(-7).tok, s.m(-6).tok, s.m(-5).int, s.m(-4).trig_event.a, s.m(-4).trig_event.b, s.m(-2).srclist, s.m(0).expr, s.m(-10).int != 0, s.m(-8).int != 0);
+                ir.ddl.beginTrigger(p, s.m(-7).tok, s.m(-6).tok, s.m(-5).int, s.m(-4).trig_event.a, s.m(-4).trig_event.b, s.m(-2).srclist, s.m(0).expr, s.m(-10).int != 0, s.m(-8).int != 0);
                 s.m(-10).tok = if (s.m(-6).tok.n == 0) s.m(-7).tok else s.m(-6).tok;
                 p.is_create = false;
             },
@@ -897,104 +781,104 @@ pub const Parser = struct {
                 t.last = t;
             },
             .@"tridxby ::= INDEXED BY nm" => {
-                util.errorMsg(p, "the INDEXED BY clause is not allowed on UPDATE or DELETE statements within triggers", .{});
+                ir.stmt.errorMsg(p, "the INDEXED BY clause is not allowed on UPDATE or DELETE statements within triggers", .{});
             },
             .@"tridxby ::= NOT INDEXED" => {
-                util.errorMsg(p, "the NOT INDEXED clause is not allowed on UPDATE or DELETE statements within triggers", .{});
+                ir.stmt.errorMsg(p, "the NOT INDEXED clause is not allowed on UPDATE or DELETE statements within triggers", .{});
             },
             .@"trigger_cmd ::= UPDATE orconf xfullname tridxby SET setlist from where_opt scanpt" => {
                 lhs.trig_step = if (s.m(-6).srclist) |t|
-                    try trig.updateStep(p, t, s.m(-2).srclist, s.m(-3).elist, s.m(-1).expr, s.m(-7).oe, s.m(-8).tok.z.?, s.m(0).str.?)
+                    try ir.ddl.triggerUpdateStep(p, t, s.m(-2).srclist, s.m(-3).elist, s.m(-1).expr, s.m(-7).oe, s.m(-8).tok.z.?, s.m(0).str.?)
                 else
                     null;
                 s.m(-8).trig_step = lhs.trig_step;
             },
             .@"trigger_cmd ::= scanpt insert_cmd INTO xfullname idlist_opt select upsert scanpt" => {
                 lhs.trig_step = if (s.m(-4).srclist) |t|
-                    try trig.insertStep(p, t, s.m(-3).idlist, s.m(-2).select, s.m(-6).oe, s.m(-1).upsert, s.m(-7).str.?, s.m(0).str.?)
+                    try ir.ddl.triggerInsertStep(p, t, s.m(-3).idlist, s.m(-2).select, s.m(-6).oe, s.m(-1).upsert, s.m(-7).str.?, s.m(0).str.?)
                 else
                     null;
                 s.m(-7).trig_step = lhs.trig_step;
             },
             .@"trigger_cmd ::= DELETE FROM xfullname tridxby where_opt scanpt" => {
                 lhs.trig_step = if (s.m(-3).srclist) |t|
-                    try trig.deleteStep(p, t, s.m(-1).expr, s.m(-5).tok.z.?, s.m(0).str.?)
+                    try ir.ddl.triggerDeleteStep(p, t, s.m(-1).expr, s.m(-5).tok.z.?, s.m(0).str.?)
                 else
                     null;
                 s.m(-5).trig_step = lhs.trig_step;
             },
             .@"trigger_cmd ::= scanpt select scanpt" => {
-                lhs.trig_step = try trig.selectStep(p, s.m(-1).select, s.m(-2).str.?, s.m(0).str.?);
+                lhs.trig_step = try ir.ddl.triggerSelectStep(p, s.m(-1).select, s.m(-2).str.?, s.m(0).str.?);
                 s.m(-2).trig_step = lhs.trig_step;
             },
             .@"expr ::= RAISE LP IGNORE RP" => {
-                const e = try expr.pExpr(p, TK.RAISE, null, null);
+                const e = try ir.expr.binary(p, TK.RAISE, null, null);
                 e.aff_expr = OE.Ignore.int();
                 s.m(-3).expr = e;
             },
             .@"expr ::= RAISE LP raisetype COMMA expr RP" => {
-                const e = try expr.pExpr(p, TK.RAISE, s.m(-1).expr, null);
+                const e = try ir.expr.binary(p, TK.RAISE, s.m(-1).expr, null);
                 e.aff_expr = s.m(-3).oe.int();
                 s.m(-5).expr = e;
             },
             .@"raisetype ::= ROLLBACK" => s.m(0).oe = .Rollback,
             .@"raisetype ::= FAIL" => s.m(0).oe = .Fail,
-            .@"cmd ::= DROP TRIGGER ifexists fullname" => trig.dropTrigger(p, s.m(0).srclist, s.m(-1).int != 0),
-            .@"cmd ::= ATTACH database_kw_opt expr AS expr key_opt" => attach_mod.attach(p, s.m(-3).expr, s.m(-1).expr, s.m(0).expr),
-            .@"cmd ::= DETACH database_kw_opt expr" => attach_mod.detach(p, s.m(0).expr),
-            .@"cmd ::= REINDEX" => build.reindex(p, null, null),
-            .@"cmd ::= REINDEX nm dbnm" => build.reindex(p, s.m(-1).tok, s.m(0).tok),
-            .@"cmd ::= ANALYZE" => analyze_mod.analyze(p, null, null),
-            .@"cmd ::= ANALYZE nm dbnm" => analyze_mod.analyze(p, s.m(-1).tok, s.m(0).tok),
-            .@"cmd ::= ALTER TABLE fullname RENAME TO nm" => alter.renameTable(p, s.m(-3).srclist, s.m(0).tok),
+            .@"cmd ::= DROP TRIGGER ifexists fullname" => ir.ddl.dropTrigger(p, s.m(0).srclist, s.m(-1).int != 0),
+            .@"cmd ::= ATTACH database_kw_opt expr AS expr key_opt" => ir.admin.attach(p, s.m(-3).expr, s.m(-1).expr, s.m(0).expr),
+            .@"cmd ::= DETACH database_kw_opt expr" => ir.admin.detach(p, s.m(0).expr),
+            .@"cmd ::= REINDEX" => ir.admin.reindex(p, null, null),
+            .@"cmd ::= REINDEX nm dbnm" => ir.admin.reindex(p, s.m(-1).tok, s.m(0).tok),
+            .@"cmd ::= ANALYZE" => ir.admin.analyze(p, null, null),
+            .@"cmd ::= ANALYZE nm dbnm" => ir.admin.analyze(p, s.m(-1).tok, s.m(0).tok),
+            .@"cmd ::= ALTER TABLE fullname RENAME TO nm" => ir.ddl.renameTable(p, s.m(-3).srclist, s.m(0).tok),
             .@"cmd ::= alter_add carglist" => {
                 s.m(-1).tok.n = spanLen(s.m(-1).tok, p.last_token);
-                alter.finishAddColumn(p, s.m(-1).tok);
+                ir.ddl.finishAddColumn(p, s.m(-1).tok);
             },
             .@"alter_add ::= ALTER TABLE fullname ADD kwcolumn_opt nm typetoken" => {
-                disableLookaside(p);
-                alter.beginAddColumn(p, s.m(-4).srclist);
-                build.addColumn(p, s.m(-1).tok, s.m(0).tok);
+                ir.ddl.beginCreate(p);
+                ir.ddl.beginAddColumn(p, s.m(-4).srclist);
+                ir.ddl.addColumn(p, s.m(-1).tok, s.m(0).tok);
                 s.m(-6).tok = s.m(-1).tok;
             },
-            .@"cmd ::= ALTER TABLE fullname DROP kwcolumn_opt nm" => alter.dropColumn(p, s.m(-3).srclist, s.m(0).tok),
-            .@"cmd ::= ALTER TABLE fullname RENAME kwcolumn_opt nm TO nm" => alter.renameColumn(p, s.m(-5).srclist, s.m(-2).tok, s.m(0).tok),
-            .@"cmd ::= ALTER TABLE fullname DROP CONSTRAINT nm" => alter.dropConstraint(p, s.m(-3).srclist, s.m(0).tok, null),
-            .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm DROP NOT NULL" => alter.dropConstraint(p, s.m(-6).srclist, null, s.m(-3).tok),
-            .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm SET NOT NULL onconf" => alter.setNotNull(p, s.m(-7).srclist, s.m(-4).tok, s.m(-2).tok),
+            .@"cmd ::= ALTER TABLE fullname DROP kwcolumn_opt nm" => ir.ddl.dropColumn(p, s.m(-3).srclist, s.m(0).tok),
+            .@"cmd ::= ALTER TABLE fullname RENAME kwcolumn_opt nm TO nm" => ir.ddl.renameColumn(p, s.m(-5).srclist, s.m(-2).tok, s.m(0).tok),
+            .@"cmd ::= ALTER TABLE fullname DROP CONSTRAINT nm" => ir.ddl.dropConstraint(p, s.m(-3).srclist, s.m(0).tok, null),
+            .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm DROP NOT NULL" => ir.ddl.dropConstraint(p, s.m(-6).srclist, null, s.m(-3).tok),
+            .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm SET NOT NULL onconf" => ir.ddl.setNotNull(p, s.m(-7).srclist, s.m(-4).tok, s.m(-2).tok),
             .@"cmd ::= ALTER TABLE fullname ADD CONSTRAINT nm CHECK LP expr RP onconf" => {
                 const lp = s.m(-3).tok.z.?;
-                alter.addConstraint(p, s.m(-8).srclist, s.m(-6).tok, s.m(-5).tok, lp + 1, @intFromPtr(s.m(-1).tok.z.?) - @intFromPtr(lp) - 1, s.m(-2).expr);
+                ir.ddl.addConstraint(p, s.m(-8).srclist, s.m(-6).tok, s.m(-5).tok, lp + 1, @intFromPtr(s.m(-1).tok.z.?) - @intFromPtr(lp) - 1, s.m(-2).expr);
             },
             .@"cmd ::= ALTER TABLE fullname ADD CHECK LP expr RP onconf" => {
                 const lp = s.m(-3).tok.z.?;
-                alter.addConstraint(p, s.m(-6).srclist, s.m(-4).tok, null, lp + 1, @intFromPtr(s.m(-1).tok.z.?) - @intFromPtr(lp) - 1, s.m(-2).expr);
+                ir.ddl.addConstraint(p, s.m(-6).srclist, s.m(-4).tok, null, lp + 1, @intFromPtr(s.m(-1).tok.z.?) - @intFromPtr(lp) - 1, s.m(-2).expr);
             },
-            .@"cmd ::= create_vtab" => vtab.finishParse(p, null),
-            .@"cmd ::= create_vtab LP vtabarglist RP" => vtab.finishParse(p, s.m(0).tok),
+            .@"cmd ::= create_vtab" => ir.ddl.finishVtab(p, null),
+            .@"cmd ::= create_vtab LP vtabarglist RP" => ir.ddl.finishVtab(p, s.m(0).tok),
             .@"create_vtab ::= createkw VIRTUAL TABLE ifnotexists nm dbnm USING nm" => {
-                vtab.beginParse(p, s.m(-3).tok, s.m(-2).tok, s.m(0).tok, s.m(-4).int != 0);
+                ir.ddl.beginVtab(p, s.m(-3).tok, s.m(-2).tok, s.m(0).tok, s.m(-4).int != 0);
             },
-            .@"vtabarg ::=" => vtab.argInit(p),
+            .@"vtabarg ::=" => ir.ddl.vtabArgInit(p),
             .@"vtabargtoken ::= ANY",
             .@"vtabargtoken ::= lp anylist RP",
             .@"lp ::= LP",
-            => vtab.argExtend(p, s.m(0).tok),
+            => ir.ddl.vtabArgExtend(p, s.m(0).tok),
             .@"with ::= WITH wqlist",
             .@"with ::= WITH RECURSIVE wqlist",
-            => _ = sel.withPush(p, s.m(0).with),
-            .@"wqas ::= AS" => s.m(0).u8 = @intFromEnum(int.M10d.any),
-            .@"wqas ::= AS MATERIALIZED" => s.m(-1).u8 = @intFromEnum(int.M10d.yes),
-            .@"wqas ::= AS NOT MATERIALIZED" => s.m(-2).u8 = @intFromEnum(int.M10d.no),
+            => _ = ir.with.push(p, s.m(0).with),
+            .@"wqas ::= AS" => s.m(0).u8 = @backingInt(int.M10d.any),
+            .@"wqas ::= AS MATERIALIZED" => s.m(-1).u8 = @backingInt(int.M10d.yes),
+            .@"wqas ::= AS NOT MATERIALIZED" => s.m(-2).u8 = @backingInt(int.M10d.no),
             .@"wqitem ::= withnm eidlist_opt wqas LP select RP" => {
-                s.m(-5).cte = try build.cteNew(p, s.m(-5).tok, s.m(-4).elist, s.m(-1).select, @enumFromInt(s.m(-3).u8));
+                s.m(-5).cte = try ir.with.cte(p, s.m(-5).tok, s.m(-4).elist, s.m(-1).select, @fromBackingInt(@intCast(s.m(-3).u8)));
             },
             .@"withnm ::= nm" => p.has_with = true,
-            .@"wqlist ::= wqitem" => s.m(0).with = try build.withAdd(p, null, s.m(0).cte.?),
-            .@"wqlist ::= wqlist COMMA wqitem" => s.m(-2).with = try build.withAdd(p, s.m(-2).with, s.m(0).cte.?),
+            .@"wqlist ::= wqitem" => s.m(0).with = try ir.with.add(p, null, s.m(0).cte.?),
+            .@"wqlist ::= wqlist COMMA wqitem" => s.m(-2).with = try ir.with.add(p, s.m(-2).with, s.m(0).cte.?),
             .@"windowdefn_list ::= windowdefn_list COMMA windowdefn" => {
                 const w = s.m(0).window.?;
-                try win.windowChain(p, w, s.m(-2).window);
+                try ir.window.chain(p, w, s.m(-2).window);
                 w.next_win = s.m(-2).window;
                 s.m(-2).window = w;
             },
@@ -1004,35 +888,35 @@ pub const Parser = struct {
                 s.m(-4).window = lhs.window;
             },
             .@"window ::= PARTITION BY nexprlist orderby_opt frame_opt" => {
-                s.m(-4).window = try win.windowAssemble(p, s.m(0).window, s.m(-2).elist, s.m(-1).elist, null);
+                s.m(-4).window = try ir.window.assemble(p, s.m(0).window, s.m(-2).elist, s.m(-1).elist, null);
             },
             .@"window ::= nm PARTITION BY nexprlist orderby_opt frame_opt" => {
-                lhs.window = try win.windowAssemble(p, s.m(0).window, s.m(-2).elist, s.m(-1).elist, s.m(-5).tok);
+                lhs.window = try ir.window.assemble(p, s.m(0).window, s.m(-2).elist, s.m(-1).elist, s.m(-5).tok);
                 s.m(-5).window = lhs.window;
             },
             .@"window ::= ORDER BY sortlist frame_opt" => {
-                s.m(-3).window = try win.windowAssemble(p, s.m(0).window, null, s.m(-1).elist, null);
+                s.m(-3).window = try ir.window.assemble(p, s.m(0).window, null, s.m(-1).elist, null);
             },
             .@"window ::= nm ORDER BY sortlist frame_opt" => {
-                lhs.window = try win.windowAssemble(p, s.m(0).window, null, s.m(-1).elist, s.m(-4).tok);
+                lhs.window = try ir.window.assemble(p, s.m(0).window, null, s.m(-1).elist, s.m(-4).tok);
                 s.m(-4).window = lhs.window;
             },
             .@"window ::= nm frame_opt" => {
-                lhs.window = try win.windowAssemble(p, s.m(0).window, null, null, s.m(-1).tok);
+                lhs.window = try ir.window.assemble(p, s.m(0).window, null, null, s.m(-1).tok);
                 s.m(-1).window = lhs.window;
             },
             .@"frame_opt ::=" => {
-                s.m(1).window = try win.windowAlloc(p, 0, TK.UNBOUNDED, null, TK.CURRENT, null, 0);
+                s.m(1).window = try ir.window.alloc(p, 0, TK.UNBOUNDED, null, TK.CURRENT, null, 0);
             },
             .@"frame_opt ::= range_or_rows frame_bound_s frame_exclude_opt" => {
                 const fb = s.m(-1).frame_bound;
-                lhs.window = try win.windowAlloc(p, s.m(-2).int, fb.e_type, fb.expr, TK.CURRENT, null, s.m(0).u8);
+                lhs.window = try ir.window.alloc(p, s.m(-2).int, fb.e_type, fb.expr, TK.CURRENT, null, s.m(0).u8);
                 s.m(-2).window = lhs.window;
             },
             .@"frame_opt ::= range_or_rows BETWEEN frame_bound_s AND frame_bound_e frame_exclude_opt" => {
                 const s0 = s.m(-3).frame_bound;
                 const e0 = s.m(-1).frame_bound;
-                lhs.window = try win.windowAlloc(p, s.m(-5).int, s0.e_type, s0.expr, e0.e_type, e0.expr, s.m(0).u8);
+                lhs.window = try ir.window.alloc(p, s.m(-5).int, s0.e_type, s0.expr, e0.e_type, e0.expr, s.m(0).u8);
                 s.m(-5).window = lhs.window;
             },
             .@"frame_bound_s ::= frame_bound",
@@ -1073,8 +957,8 @@ pub const Parser = struct {
             },
             .@"filter_clause ::= FILTER LP WHERE expr RP" => s.m(-4).expr = s.m(-1).expr,
             .@"term ::= QNUMBER" => {
-                const e = try tokenExpr(p, s.major(0), s.m(0).tok);
-                util.dequoteNumber(p, e);
+                const e = try ir.expr.token(p, s.major(0), s.m(0).tok);
+                ir.expr.dequoteNumber(p, e);
                 s.m(0).expr = e;
             },
 
@@ -1175,20 +1059,10 @@ fn findReduceAction(stateno: u16, lookahead: u16) u16 {
 }
 
 // ============================================== helpers from parse.y
+// (the others are in src/ir/ir.zig, for every frontend)
 
 /// Port of parserSyntaxError().
-pub fn syntaxError(p: *Parse, t: Token) void {
-    util.errorMsgAt(p, t.z, "near \"{s}\": syntax error", .{t.slice()});
-}
-
-/// Port of disableLookaside(): starting a CREATE statement, whose objects
-/// may outlive the statement, so not in lookaside.
-fn disableLookaside(p: *Parse) void {
-    p.disable_lookaside += 1;
-    @import("../sql/malloc.zig").disableLookaside(p.db);
-    p.is_create = true;
-    p.u1 = .{ .cr = .{} };
-}
+pub const syntaxError = ir.stmt.syntaxError;
 
 /// The length of the text from the start of `from` to the end of `to`.
 fn spanLen(from: Token, to: Token) u32 {
@@ -1198,178 +1072,4 @@ fn spanLen(from: Token, to: Token) u32 {
 /// One past the end of a token.
 fn tokEnd(t: Token) ?[*]const u8 {
     return if (t.z) |z| z + t.n else null;
-}
-
-/// Port of tokenExpr(): a leaf node for one token, dequoted if quoted.
-fn tokenExpr(p: *Parse, op: u8, t: Token) Oom!*Expr {
-    const e = try p.arena.create(Expr);
-    e.* = .{
-        .op = op,
-        .flags = .{ .Leaf = true },
-        .u = .{ .token = try p.arena.dupeSentinel(u8, t.slice(), 0) },
-        .w = .{ .ofst = expr.tokenOffset(p, t) },
-        .n_height = 1,
-    };
-    if (t.n > 0 and ctype.isQuote(e.u.token.?[0])) util.dequoteExpr(e);
-    if (p.inRenameObject()) alter.renameTokenMap(p, e, t);
-    return e;
-}
-
-/// Port of parserDoubleLinkSelect(): set the `next` links of a compound
-/// and check its ORDER BY/LIMIT placement and size.
-fn doubleLinkSelect(p: *Parse, s: *Select) void {
-    if (s.prior == null) return;
-    var next: ?*Select = null;
-    var loop: *Select = s;
-    var cnt: i32 = 1;
-    while (true) {
-        loop.next = next;
-        loop.sel_flags.Compound = true;
-        next = loop;
-        loop = loop.prior orelse break;
-        cnt += 1;
-        if (loop.order_by != null or loop.limit != null) {
-            util.errorMsg(p, "{s} clause should come after {s} not before", .{
-                if (loop.order_by != null) "ORDER BY" else "LIMIT",
-                sel.selectOpName(next.?.op),
-            });
-            break;
-        }
-    }
-    const mx = p.db.limit(.compound_select);
-    if (!s.sel_flags.intersects(.{ .MultiValue = true, .Values = true }) and mx > 0 and cnt > mx) {
-        util.errorMsg(p, "too many terms in compound SELECT", .{});
-    }
-}
-
-/// Port of attachWithToSelect().
-fn attachWithToSelect(p: *Parse, s_arg: ?*Select, with: ?*With) ?*Select {
-    const s = s_arg orelse return null;
-    s.with = with;
-    doubleLinkSelect(p, s);
-    return s;
-}
-
-/// Port of parserAddExprIdListTerm(): a name in a column list where
-/// COLLATE and ASC/DESC are only accepted in an existing schema.
-fn addExprIdListTerm(p: *Parse, prior: ?*ExprList, id: Token, has_collate: bool, sort_order: i32) Oom!*ExprList {
-    const l = try expr.listAppend(p, prior, null);
-    if ((has_collate or sort_order != SO.undef) and !p.db.init.busy) {
-        util.errorMsg(p, "syntax error after column name \"{s}\"", .{id.slice()});
-    }
-    try expr.listSetName(p, l, id, true);
-    return l;
-}
-
-/// Port of sqlite3PExprIsNull(): ISNULL/NOTNULL, folded to a constant for
-/// literal operands.
-fn pExprIsNull(p: *Parse, op: u8, left: *Expr) Oom!*Expr {
-    std.debug.assert(op == TK.ISNULL or op == TK.NOTNULL);
-    var e = left;
-    while (e.op == TK.UPLUS or e.op == TK.UMINUS) e = e.left.?;
-    switch (e.op) {
-        TK.INTEGER, TK.STRING, TK.FLOAT, TK.BLOB => return expr.exprInt32(p.arena, @intFromBool(op == TK.NOTNULL)),
-        else => return expr.pExpr(p, op, left, null),
-    }
-}
-
-/// Port of sqlite3PExprIs(): IS/IS NOT, turned into ISNULL/NOTNULL when
-/// comparing with NULL.
-fn pExprIs(p: *Parse, op: u8, left: *Expr, right: ?*Expr) Oom!*Expr {
-    if (right) |r| if (r.op == TK.NULL) {
-        return pExprIsNull(p, if (op == TK.IS) TK.ISNULL else TK.NOTNULL, left);
-    };
-    return expr.pExpr(p, op, left, right);
-}
-
-/// The action of "seltablist ::= stl_prefix LP seltablist RP as on_using":
-/// a parenthesized FROM clause. A single term is merged into the outer
-/// list; several become a nested subquery.
-fn nestedFrom(s: *Parser, p: *Parse) Oom!void {
-    const inner = s.m(-3).srclist;
-    const alias = s.m(-1).tok;
-    const on_using = &s.m(0).on_using;
-    if (s.m(-5).srclist == null and alias.n == 0 and on_using.on == null and on_using.using == null) {
-        s.m(-5).srclist = inner;
-    } else if (inner != null and inner.?.len() == 1) {
-        s.m(-5).srclist = try build.srcListAppendFromTerm(p, s.m(-5).srclist, null, null, alias, null, on_using);
-        if (s.m(-5).srclist) |l| {
-            const new = l.at(l.len() - 1);
-            const old = inner.?.at(0);
-            std.debug.assert(!old.fg.fixed_schema);
-            new.name = old.name;
-            old.name = null;
-            if (old.fg.is_subquery) {
-                new.fg.is_subquery = true;
-                new.u4 = .{ .subq = old.u4.subq };
-                old.u4 = .{ .subq = null };
-                old.fg.is_subquery = false;
-                if (new.u4.subq.?.select.sel_flags.NestedFrom) new.fg.is_nested_from = true;
-            } else {
-                new.u4 = .{ .database = old.u4.database };
-                old.u4 = .{ .database = null };
-            }
-            if (old.fg.is_tab_func) {
-                new.u1 = .{ .func_arg = old.u1.func_arg };
-                old.u1 = .{ .func_arg = null };
-                old.fg.is_tab_func = false;
-                new.fg.is_tab_func = true;
-            } else if (old.fg.is_indexed_by) {
-                new.u1 = .{ .indexed_by = old.u1.indexed_by };
-                old.u1 = .{ .indexed_by = null };
-                old.fg.is_indexed_by = false;
-                new.fg.is_indexed_by = true;
-            }
-            new.fg.not_indexed = old.fg.not_indexed;
-        }
-    } else {
-        build.srcListShiftJoinType(inner);
-        const sub = try sel.selectNew(p, null, inner, null, null, null, null, .{ .NestedFrom = true }, null);
-        s.m(-5).srclist = try build.srcListAppendFromTerm(p, s.m(-5).srclist, null, null, alias, sub, on_using);
-    }
-}
-
-/// The action of "expr ::= expr in_op LP exprlist RP".
-fn inList(s: *Parser, p: *Parse) Oom!void {
-    const not = s.m(-3).int != 0;
-    const list_opt = s.m(-1).elist;
-    var lhs_e = s.m(-4).expr.?;
-    const list = list_opt orelse {
-        // "x IN ()" is false and "x NOT IN ()" true; but if x contains a
-        // function (maybe an aggregate) keep evaluating it.
-        const b = try expr.expr(p.arena, TK.STRING, if (not) "true" else "false");
-        _ = expr.idToTrueFalse(b);
-        if (!lhs_e.flags.HasFunc) {
-            expr.unmapAndDelete(p, lhs_e);
-            s.m(-4).expr = b;
-        } else {
-            s.m(-4).expr = try expr.pExpr(p, if (not) TK.OR else TK.AND, b, lhs_e);
-        }
-        return;
-    };
-    var rhs = list.at(0).expr.?;
-    if (list.len() == 1 and expr.isConstant(p, rhs) and rhs.op != TK.COLLATE and lhs_e.op != TK.VECTOR) {
-        // "x IN (y)" is "x = +y".
-        list.at(0).expr = null;
-        rhs = try expr.pExpr(p, TK.UPLUS, rhs, null);
-        lhs_e = try expr.pExpr(p, TK.EQ, lhs_e, rhs);
-    } else if (list.len() == 1 and rhs.op == TK.SELECT) {
-        lhs_e = try expr.pExpr(p, TK.IN, lhs_e, null);
-        expr.pExprAddSelect(p, lhs_e, rhs.x.select);
-        rhs.x = .{ .select = null };
-    } else {
-        lhs_e = try expr.pExpr(p, TK.IN, lhs_e, null);
-        if (lhs_e.left.?.op == TK.VECTOR) {
-            const n = lhs_e.left.?.x.list.?.len();
-            if (try expr.listToValues(p, n, list)) |values| {
-                doubleLinkSelect(p, values);
-                expr.pExprAddSelect(p, lhs_e, values);
-            }
-        } else {
-            lhs_e.x = .{ .list = list };
-            expr.setHeightAndFlags(p, lhs_e);
-        }
-    }
-    if (not) lhs_e = try expr.pExpr(p, TK.NOT, lhs_e, null);
-    s.m(-4).expr = lhs_e;
 }

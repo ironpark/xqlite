@@ -55,6 +55,9 @@ pub const VfsOption = union(enum) {
 /// PRAGMA journal_mode values (the engine's).
 pub const JournalMode = engine.JournalMode;
 
+/// The SQL dialects (src/dialect/dialect.zig).
+pub const Dialect = engine.Dialect;
+
 pub const OpenOptions = struct {
     /// Open for reading only (SQLITE_OPEN_READONLY).
     read_only: bool = false,
@@ -72,6 +75,10 @@ pub const OpenOptions = struct {
     busy_timeout_ms: u31 = 0,
     /// Enforce foreign key constraints (PRAGMA foreign_keys).
     foreign_keys: bool = false,
+    /// The SQL dialect of the connection (setDialect()). Only SQLite's
+    /// has a parser yet: the others fail every statement with "<name>
+    /// dialect: parser not implemented".
+    dialect: Dialect = .sqlite,
     /// Receives the details of every failed call on this connection,
     /// including open() itself. Must outlive the connection.
     diagnostics: ?*errors.Diagnostics = null,
@@ -115,6 +122,7 @@ pub fn open(gpa: Allocator, io: std.Io, path: []const u8, options: OpenOptions) 
     errdefer engine.close(db.conn.h) catch {};
     if (options.busy_timeout_ms > 0) engine.busyTimeout(db.conn.h, options.busy_timeout_ms);
     if (options.foreign_keys) engine.setForeignKeys(db.conn.h, true);
+    if (options.dialect != .sqlite) engine.setDialect(db.conn.h, options.dialect);
     if (options.journal_mode) |mode| try db.setJournalMode(mode);
     return db;
 }
@@ -377,6 +385,17 @@ pub fn inTransaction(db: *const Db) bool {
 // ================================================================ status
 
 /// The rowid of the last successful INSERT (sqlite3_last_insert_rowid()).
+/// Make `d` the SQL dialect of the statements prepared from now on (those
+/// prepared before keep theirs), as PRAGMA xq_dialect does.
+pub fn setDialect(db: *Db, d: Dialect) void {
+    engine.setDialect(db.conn.h, d);
+}
+
+/// The SQL dialect of the connection.
+pub fn dialect(db: *const Db) Dialect {
+    return engine.getDialect(db.conn.h);
+}
+
 pub fn lastInsertRowid(db: *const Db) i64 {
     return engine.lastInsertRowid(db.conn.h);
 }

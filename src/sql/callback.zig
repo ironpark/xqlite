@@ -297,9 +297,22 @@ pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, comptim
         return new;
     }
 
-    // Then the built-ins.
+    // xqlite: then the functions of the connection's dialect (none in
+    // the SQLite dialect, nor with PreferBuiltin), which shadow the
+    // built-ins of the same name.
     var found: ?*const FuncDef = best;
-    if (best == null or db.m_db_flags.PreferBuiltin) {
+    if (best == null) {
+        for (@import("../dialect/dialect.zig").functionSearch(db, name)) |*f| {
+            const score = matchQuality(f, n_arg, enc);
+            if (score > best_score) {
+                found = f;
+                best_score = score;
+            }
+        }
+    }
+
+    // Then the built-ins.
+    if (found == null or db.m_db_flags.PreferBuiltin) {
         best_score = 0;
         const h = funcHash(ctype.toLower(if (name.len > 0) name[0] else 0), name.len);
         for (functionSearch(h, name)) |*f| {

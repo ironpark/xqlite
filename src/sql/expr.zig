@@ -241,7 +241,9 @@ pub fn exprFunction(p: *Parse, list: ?*ExprList, name: Token, e_distinct: SF) Oo
 /// Offset of a token from the start of the statement (Expr.w.iOfst).
 pub fn tokenOffset(p: *const Parse, t: Token) i32 {
     const z = t.z orelse return 0;
-    return @intCast(@as(isize, @bitCast(@intFromPtr(z) -% @intFromPtr(p.tail.ptr))));
+    // C: (int)(pToken->z - pParse->zTail), truncating the offset of a
+    // token from another text (one an xqlite frontend made up).
+    return @truncate(@as(isize, @bitCast(@intFromPtr(z) -% @intFromPtr(p.tail.ptr))));
 }
 
 /// Port of sqlite3ExprOrderByAggregateError().
@@ -1061,7 +1063,7 @@ pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*const CollSeq {
 
 /// Port of sqlite3ExprNNCollSeq(): like collSeq(), but BINARY by default.
 pub fn nnCollSeq(p: *Parse, e: ?*const Expr) *const CollSeq {
-    return collSeq(p, e) orelse coll_mod.defaultColl();
+    return collSeq(p, e) orelse coll_mod.dfltColl(p.db);
 }
 
 /// Port of sqlite3ExprCollSeqMatch().
@@ -1240,7 +1242,7 @@ pub fn canBeNull(e_arg: *const Expr) bool {
         TK.INTEGER, TK.STRING, TK.FLOAT, TK.BLOB => false,
         TK.COLUMN => e.flags.CanBeNull or e.y.tab == null or
             (e.i_column >= 0 and e.y.tab.?.cols.len > 0 and e.i_column < e.y.tab.?.cols.len and
-            e.y.tab.?.cols[@intCast(e.i_column)].not_null == .None),
+                e.y.tab.?.cols[@intCast(e.i_column)].not_null == .None),
         else => true,
     };
 }
@@ -1642,7 +1644,6 @@ fn analyzeAggregateImpl(w: *Walker, e: *Expr) Oom!WRC {
         },
     }
 }
-
 
 /// Port of sqlite3ExprAnalyzeAggregates(): add the columns and aggregate
 /// functions of `e` to the AggInfo of `nc`.

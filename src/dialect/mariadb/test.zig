@@ -512,3 +512,36 @@ test "mariadb: variables and parameters are not kept in the schema" {
     try c.exec("SET @x = 1");
     try c.expectRows("SELECT @x + 1", "2\n");
 }
+
+test "mariadb: RENAME TABLE renames the table's indexes" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (id INT PRIMARY KEY, a INT, b VARCHAR(5), UNIQUE KEY ua (a), KEY ib (b, a DESC))");
+    try c.exec("INSERT INTO t VALUES (1, 10, 'x'), (2, 20, 'y')");
+    try c.exec("RENAME TABLE t TO u");
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name", "u$ib\nu$ua\n");
+    try c.expectRows("SHOW INDEX FROM u", "u|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE|||NO\n" ++
+        "u|0|ua|1|a|A|NULL|NULL|NULL|YES|BTREE|||NO\n" ++
+        "u|1|ib|1|b|A|NULL|NULL|NULL|YES|BTREE|||NO\n" ++
+        "u|1|ib|2|a|D|NULL|NULL|NULL|YES|BTREE|||NO\n");
+    try c.expectRows("SHOW CREATE TABLE u",
+        \\u|CREATE TABLE `u` (
+        \\  `id` int(11) NOT NULL,
+        \\  `a` int(11) DEFAULT NULL,
+        \\  `b` varchar(5) DEFAULT NULL,
+        \\  PRIMARY KEY (`id`),
+        \\  UNIQUE KEY `ua` (`a`),
+        \\  KEY `ib` (`b`,`a`)
+        \\) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        \\
+    );
+    try c.expectError("INSERT INTO u VALUES (3, 10, 'z')", "UNIQUE constraint failed: u.a");
+    try c.exec("ALTER TABLE u RENAME TO w");
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name", "w$ib\nw$ua\n");
+    try c.exec("DROP INDEX ib ON w");
+    try c.exec("ALTER TABLE w DROP INDEX ua");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE type = 'index'", "0\n");
+    try c.expectRows("SELECT a FROM w ORDER BY id", "10\n20\n");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+}

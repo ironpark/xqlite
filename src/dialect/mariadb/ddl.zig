@@ -28,6 +28,8 @@
 //!    MariaDB index `i` of table `t` is the SQLite index "t$i". KEY,
 //!    INDEX and UNIQUE definitions become CREATE INDEX statements run
 //!    (OP_SqlExec) after the table is created, in the same statement.
+//!    RENAME TABLE (and ALTER TABLE ... RENAME) renames them with the
+//!    table: "t$i" becomes "u$i" (renameTable()).
 //!  - DEFAULT, CHECK and generated-column expressions and the query of a
 //!    view are tree expressions, rendered by the IR as lowering means
 //!    them (DIV, XOR, ^, INTERVAL, the dialect's functions ...). A
@@ -1051,10 +1053,47 @@ fn endAlter(s: *Parser) Error!void {
     if (s.isOp(",")) return s.fail("xqlite: ALTER TABLE with several changes is not supported", .{});
 }
 
-/// ALTER TABLE ... RENAME TO `new` (the IR renames the catalog entries).
+/// ALTER TABLE ... RENAME TO `new` (the IR renames the catalog entries),
+/// and the table's MariaDB indexes "old$i" with it, so that SHOW INDEX,
+/// SHOW CREATE TABLE and DROP INDEX i ON new find them: after the rename
+/// the schema row of each becomes "new$i" with the text of its CREATE
+/// INDEX (a nested UPDATE of sqlite_schema, as SQLite's ALTER TABLE
+/// rewrites it; the index keeps its b-tree), and the schema is read
+/// again.
 fn renameTable(s: *Parser, tab: *int.Table, old: tree.QName, new: Name) Error!void {
-    _ = tab;
+    const schema = old.schema.?.text;
+    const prefix = try std.fmt.allocPrint(s.a, "{s}$", .{old.name.text});
+    // The indexes to rename, before the rename changes the schema.
+    const Renamed = struct { old: []const u8, new: []const u8, sql: []const u8 };
+    var renamed: std.ArrayList(Renamed) = .empty;
+    var it = tab.index;
+    while (it) |ix| : (it = ix.next) {
+        if (!std.mem.startsWith(u8, ix.name, prefix) or ix.idx_type != .appdef or ix.part_idx_where != null) continue;
+        var cols: std.ArrayList(IndexCol) = .empty;
+        const ok = for (ix.ai_column[0..ix.n_key_col], 0..) |ci, k| {
+            if (ci < 0) break false;
+            try cols.append(s.a, .{ .name = .{ .text = try s.a.dupe(u8, tab.cols[@intCast(ci)].name()) }, .desc = ix.sort_order[k] != 0 });
+        } else true;
+        if (!ok) continue;
+        const def: IndexDef = .{ .name = try s.a.dupe(u8, ix.name[prefix.len..]), .unique = ix.on_error != .None, .cols = cols.items };
+        var ci = try indexTree(s, schema, new, def, false);
+        // The schema keeps the name unqualified.
+        ci.name.schema = null;
+        const sql = render.statement(s.p, s.lx.sql, .{ .create_index = ci }) catch |err| return lowered(err);
+        try renamed.append(s.a, .{ .old = try s.a.dupe(u8, ix.name), .new = ci.name.name.text, .sql = sql });
+    }
     try s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = old, .action = .{ .rename_to = new } }) });
+    if (renamed.items.len == 0) return;
+    for (renamed.items) |x| {
+        build.nestedParse(s.p, "UPDATE \"%w\"." ++ int.LEGACY_SCHEMA_TABLE ++ " SET name = %Q, sql = %Q WHERE type = 'index' AND name = %Q", &.{
+            .{ .str = schema }, .{ .str = x.new }, .{ .str = x.sql }, .{ .str = x.old },
+        });
+    }
+    try s.check();
+    const i_db = catalog.schemaIndex(s.p, schema) orelse return error.ParseFailed;
+    const v = s.p.vdbe orelse return error.ParseFailed;
+    build.changeCookie(s.p, i_db);
+    @import("../../vdbe/aux.zig").addParseSchemaOp(v, @intCast(i_db), null, @import("../../sql/prepare.zig").INITFLAG_AlterRename);
 }
 
 /// RENAME TABLE a TO b.

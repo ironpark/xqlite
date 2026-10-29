@@ -323,6 +323,29 @@ pub fn findFunction(db: *Sqlite3, name: []const u8, n_arg: i32, enc: u8, comptim
             }
         }
     }
+    // xqlite: then the engine functions (xq_*, of every dialect) and the
+    // functions of a dialect by their qualified name (xq_postgres_left,
+    // xq_sqlite_concat for SQLite's built-in): the names the IR lowers
+    // and renders to (src/ir/lower.zig, render.zig), visible in every
+    // dialect.
+    if (found == null) {
+        const dialect = @import("../dialect/dialect.zig");
+        const sqlite_prefix = "xq_sqlite_";
+        const builtin: []const FuncDef = if (name.len > sqlite_prefix.len and ctype.eqlNoCase(name[0..sqlite_prefix.len], sqlite_prefix)) blk: {
+            const n = name[sqlite_prefix.len..];
+            break :blk functionSearch(funcHash(ctype.toLower(n[0]), n.len), n);
+        } else &.{};
+        for ([_][]const FuncDef{ dialect.engineFunctionSearch(name), dialect.qualifiedFunctionSearch(name), builtin }) |defs| {
+            for (defs) |*f| {
+                const score = matchQuality(f, n_arg, enc);
+                if (score > best_score) {
+                    found = f;
+                    best_score = score;
+                }
+            }
+            if (found != null) break;
+        }
+    }
     if (found) |f| if (f.x_sfunc != null) return f;
     return null;
 }

@@ -126,6 +126,7 @@ fn translateError(p: *int.Parse) int.Oom!void {
 
 pub const hooks: dialect.Hooks = .{
     .functions = &functions,
+    .engine_functions = &funcs.engine_functions,
 };
 
 const functions = [_]int.FuncDef{
@@ -134,6 +135,7 @@ const functions = [_]int.FuncDef{
 
 comptime {
     dfunc.checkTable(&functions);
+    dfunc.checkTable(&funcs.engine_functions);
 }
 
 /// The version string of PostgreSQL's version().

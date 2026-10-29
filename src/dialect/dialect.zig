@@ -103,6 +103,18 @@ pub const Hooks = struct {
     /// stays valid for sqlite3); the planner then does not use them for
     /// comparisons in this collation.
     default_collation: ?[:0]const u8 = null,
+    /// Engine functions: functions a frontend lowers or renders a
+    /// semantic node of the IR tree to (xq_like(), xq_pg_bool(),
+    /// xq_coerce() ...). Unlike `functions` they are visible in every
+    /// dialect, to the SQLite frontend and to the SQL the engine runs
+    /// itself, because render.zig writes them into the schema, which any
+    /// connection may read. Their names start with "xq_" (so that they
+    /// shadow nothing) and are unique across dialects (checked at compile
+    /// time). They are looked up after SQLite's built-ins; like those,
+    /// they are usable from the schema with trusted_schema off unless
+    /// `unsafe`, so they must be innocuous, and deterministic if they may
+    /// appear in an index, a CHECK or a generated column.
+    engine_functions: []const FuncDef = &.{},
 };
 
 /// Everything that makes a dialect.
@@ -284,6 +296,56 @@ pub fn functionSearch(db: *const Sqlite3, name: []const u8) []const FuncDef {
 }
 
 const FunctionMap = std.StaticStringMapWithEql([]const FuncDef, ctype.eqlNoCase);
+
+/// The engine functions of every dialect (Hooks.engine_functions) named
+/// `name`, for callback.findFunction(): visible whatever the connection's
+/// dialect.
+pub fn engineFunctionSearch(name: []const u8) []const FuncDef {
+    if (!hasEnginePrefix(name)) return &.{};
+    return engine_function_map.get(name) orelse &.{};
+}
+
+fn hasEnginePrefix(name: []const u8) bool {
+    return name.len > 3 and ctype.eqlNoCase(name[0..3], "xq_");
+}
+
+const engine_function_map = blk: {
+    @setEvalBranchQuota(100_000);
+    var all: []const FuncDef = &.{};
+    for (std.enums.values(Dialect)) |d| {
+        const defs = module(d).hooks.engine_functions;
+        for (defs, 0..) |f, i| {
+            if (!std.mem.startsWith(u8, f.name, "xq_")) @compileError("engine function " ++ f.name ++ ": the name must start with xq_");
+            // The overloads of a name are next to each other, in one table.
+            if (i > 0 and ctype.eqlNoCase(defs[i - 1].name, f.name)) continue;
+            for (all) |g| if (ctype.eqlNoCase(g.name, f.name)) @compileError("engine function " ++ f.name ++ " is defined twice");
+        }
+        all = all ++ defs;
+    }
+    break :blk functionMap(all);
+};
+
+/// The function a name qualified with a dialect means:
+/// xq_<dialect>_<name> is <name> of that dialect's Hooks.functions, in
+/// every dialect. render.zig writes a call of a dialect's function so,
+/// as the schema may be read by a connection in another dialect.
+pub fn qualifiedFunctionSearch(name: []const u8) []const FuncDef {
+    if (!hasEnginePrefix(name)) return &.{};
+    const rest = name[3..];
+    for (std.enums.values(Dialect)) |d| {
+        const n = d.name();
+        if (rest.len > n.len + 1 and ctype.eqlNoCase(rest[0..n.len], n) and rest[n.len] == '_') {
+            return spec(d).function_map.get(rest[n.len + 1 ..]) orelse &.{};
+        }
+    }
+    return &.{};
+}
+
+/// xq_<dialect>_<name>: how render.zig calls function `name` of dialect
+/// `d` (qualifiedFunctionSearch()), in `arena`.
+pub fn qualifiedFunctionName(arena: std.mem.Allocator, d: Dialect, name: []const u8) error{OutOfMemory}![]const u8 {
+    return std.fmt.allocPrint(arena, "xq_{s}_{s}", .{ d.name(), name });
+}
 
 /// The overloads of each name of `defs`, which are next to each other
 /// (func.checkTable()).

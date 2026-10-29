@@ -12,7 +12,7 @@
 //!    that cannot be NULL (so that an index still gives the order);
 //!  - result columns are named as PostgreSQL names them ("?column?",
 //!    the function name ...);
-//!  - LIKE/ILIKE call the dialect's like()/ilike(); casts follow
+//!  - LIKE/ILIKE call the engine functions xq_like()/xq_ilike(); casts follow
 //!    types.castPlan(); $n is ?n;
 //!  - INSERT fills an omitted INTEGER PRIMARY KEY that has an identity
 //!    sequence (SQLite would otherwise ignore its DEFAULT nextval());
@@ -207,7 +207,7 @@ pub const Lowerer = struct {
                 const lhs = try l.expr(x.e);
                 const rhs = try l.expr(x.pat);
                 const esc = if (x.escape) |z| try l.expr(z) else null;
-                return ir.expr.like(p, Token.init(if (x.ilike) "ilike" else "like"), x.not, lhs, rhs, esc);
+                return ir.expr.like(p, Token.init(if (x.ilike) "xq_ilike" else "xq_like"), x.not, lhs, rhs, esc);
             },
             .is_null => |x| return ir.expr.isNull(p, if (x.not) TK.NOTNULL else TK.ISNULL, try l.expr(x.e)),
             .is_distinct => |x| {

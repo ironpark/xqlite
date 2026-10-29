@@ -1,10 +1,7 @@
 //! The functions of the PostgreSQL dialect (Hooks.functions), besides
 //! version() and the sequence functions of frontend.zig. They shadow
-//! SQLite's built-ins of the same name (like(), random()).
+//! SQLite's built-ins of the same name (random(), floor() ...).
 //!
-//!  - like(pattern, s [, escape]) / ilike(): LIKE and ILIKE, which the
-//!    frontend lowers to these: case-sensitive (ILIKE: ASCII
-//!    case-insensitive), `\` the default escape;
 //!  - greatest(...), least(...): NULLs are skipped (SQLite's max()/min()
 //!    of several arguments are NULL if one is);
 //!  - left, right, repeat, reverse, lpad, rpad, split_part,
@@ -12,7 +9,14 @@
 //!  - random() in [0, 1), gen_random_uuid();
 //!  - floor, ceil/ceiling, sqrt, power/pow, exp, ln, log, mod, trunc,
 //!    sign, pi;
-//!  - current_user(), current_database(), current_schema();
+//!  - current_user(), current_database(), current_schema().
+//!
+//! The engine functions (Hooks.engine_functions, visible in every
+//! dialect, as the IR writes them into the schema):
+//!
+//!  - xq_like(pattern, s [, escape]) / xq_ilike(): the IR's Like of
+//!    PostgreSQL's LIKE and ILIKE: case-sensitive (xq_ilike: ASCII
+//!    case-insensitive), `\` the default escape, '' for none;
 //!  - xq_pg_bool(x): the cast to boolean ('t', 'yes', 'on', 1 ... are
 //!    1); xq_pg_data_type(), xq_pg_udt_name(), xq_pg_char_max(),
 //!    xq_pg_num_precision(), xq_pg_num_scale() of (catalog type, SQLite
@@ -30,10 +34,6 @@ const Mem = dfunc.Mem;
 const det: dfunc.Options = .{ .deterministic = true };
 
 pub const functions = [_]int.FuncDef{
-    dfunc.scalar("like", 2, det, likeFunc),
-    dfunc.scalar("like", 3, det, likeFunc),
-    dfunc.scalar("ilike", 2, det, ilikeFunc),
-    dfunc.scalar("ilike", 3, det, ilikeFunc),
     dfunc.scalar("greatest", -1, det, greatestFunc),
     dfunc.scalar("least", -1, det, leastFunc),
     dfunc.scalar("left", 2, det, leftFunc),
@@ -66,6 +66,13 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("current_user", 0, det, currentUserFunc),
     dfunc.scalar("current_database", 0, det, currentDatabaseFunc),
     dfunc.scalar("current_schema", 0, det, currentSchemaFunc),
+};
+
+pub const engine_functions = [_]int.FuncDef{
+    dfunc.scalar("xq_like", 2, det, likeFunc),
+    dfunc.scalar("xq_like", 3, det, likeFunc),
+    dfunc.scalar("xq_ilike", 2, det, ilikeFunc),
+    dfunc.scalar("xq_ilike", 3, det, ilikeFunc),
     dfunc.scalar("xq_pg_bool", 1, det, boolFunc),
     dfunc.scalar("xq_pg_data_type", 2, det, dataTypeFunc),
     dfunc.scalar("xq_pg_udt_name", 2, det, udtNameFunc),

@@ -189,6 +189,7 @@ fn drop(s: *Parser) Error!void {
 
 pub const hooks: dialect.Hooks = .{
     .functions = &functions,
+    .engine_functions = &engine_functions,
     // utf8mb4_general_ci and the like: case-insensitive.
     .default_collation = "NOCASE",
 };
@@ -203,16 +204,11 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("setval", 2, .{ .unsafe = true }, sequence.setvalFunc),
     dfunc.scalar("setval", 3, .{ .unsafe = true }, sequence.setvalFunc),
     // Lowered operators and statements.
-    dfunc.scalar("xq_coerce", 7, .{}, types.coerceFunc),
     dfunc.scalar("xq_sysvar", 1, .{}, session.sysvarFunc),
     dfunc.scalar("xq_set_sysvar", 2, .{ .direct_only = true }, session.setSysvarFunc),
     dfunc.scalar("xq_uservar", 1, .{}, session.uservarFunc),
     dfunc.scalar("xq_set_uservar", 2, .{ .direct_only = true }, session.setUservarFunc),
-    dfunc.scalar("xq_div", 2, det, rt.divFunc),
-    dfunc.scalar("xq_xor", 2, det, rt.xorFunc),
-    dfunc.scalar("xq_bitxor", 2, det, rt.bitxorFunc),
     dfunc.scalar("xq_date_add", 3, det, rt.dateAddFunc),
-    dfunc.scalar("xq_cast", 2, det, rt.castFunc),
     dfunc.scalar("xq_extract", 2, det, rt.extractFunc),
     dfunc.scalar("xq_timestampdiff", 3, det, rt.timestampdiffFunc),
     dfunc.scalar("xq_rand", 0, .{}, rt.randFunc),
@@ -289,8 +285,20 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("ascii", 1, det, rt.asciiFunc),
 };
 
+/// The functions the IR's semantic nodes lower and render to (Coerce,
+/// Div .int, Cast .typed) and MariaDB's XOR operators: visible in every
+/// dialect (dialect.Hooks.engine_functions).
+const engine_functions = [_]int.FuncDef{
+    dfunc.scalar("xq_coerce", 7, .{}, types.coerceFunc),
+    dfunc.scalar("xq_div", 2, det, rt.divFunc),
+    dfunc.scalar("xq_xor", 2, det, rt.xorFunc),
+    dfunc.scalar("xq_bitxor", 2, det, rt.bitxorFunc),
+    dfunc.scalar("xq_cast", 2, det, rt.castFunc),
+};
+
 comptime {
     dfunc.checkTable(&functions);
+    dfunc.checkTable(&engine_functions);
 }
 
 /// The version string of MariaDB's VERSION().

@@ -85,6 +85,23 @@ test "dialect: function tables add and replace functions" {
     try testing.expect(stmt.?.xq_lang.dialect == .mariadb);
 }
 
+test "dialect: engine functions and qualified dialect functions are visible in every dialect" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // In the SQLite dialect, as in the schema the IR renders.
+    try c.expectRows("SELECT xq_like('a%', 'abc'), xq_like('A%', 'abc'), xq_ilike('A%', 'abc'), xq_div(7, 2), xq_pg_bool('yes')", "1|0|1|3|1\n");
+    try c.expectRows("SELECT xq_postgres_greatest(1, NULL, 3), xq_mariadb_concat('a', NULL), xq_postgres_left('abc', 2)", "3|NULL|ab\n");
+    try c.expectError("SELECT xq_postgres_nosuch(1)", "no such function: xq_postgres_nosuch");
+    // Not shadowed by a dialect; xq_sqlite_<name> is SQLite's built-in.
+    useHooksOf(&c, .mariadb);
+    try c.expectRows("SELECT xq_like('a%', 'ABC'), xq_postgres_greatest(2, 1), concat('a', NULL), xq_sqlite_concat('a', NULL)", "0|2|NULL|a\n");
+    // Usable from the schema with trusted_schema off (innocuous).
+    useHooksOf(&c, .sqlite);
+    try c.exec("PRAGMA trusted_schema = OFF; CREATE TABLE t (a TEXT CHECK (xq_like('a%', a))); INSERT INTO t VALUES ('ab')");
+    try c.expectError("INSERT INTO t VALUES ('Ab')", "CHECK constraint failed: xq_like('a%', a)");
+}
+
 test "dialect: sequences" {
     var c: Conn = undefined;
     try c.open();

@@ -184,9 +184,9 @@ pub const Renderer = struct {
                 try r.put(")");
             },
             .like => |x| {
-                // LIKE calls like(); ILIKE is the dialect's ilike().
+                // The engine functions xq_like() and xq_ilike().
                 try r.put(if (x.not) "(NOT " else "(");
-                try r.put(if (x.ilike) "ilike(" else "like(");
+                try r.put(if (x.ilike) "xq_ilike(" else "xq_like(");
                 try r.expr(x.pat);
                 try r.put(", ");
                 try r.expr(x.e);

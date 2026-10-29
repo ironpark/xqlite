@@ -107,7 +107,7 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 - 방언 함수 테이블의 함수는 **방언 한정 이름** `xq_<방언>_<이름>`(`xq_postgres_greatest(...)`), 연결 방언이 가린 SQLite 내장 함수는 `xq_sqlite_<이름>`(`lower.functionName()`이 둘 다 정함). 둘 다 모든 방언에서 보입니다.
 - 예외는 `IdentityDefault`: PostgreSQL이 보여 주는 대로 `nextval('seq')`로 씁니다(identity 열은 lower가 직접 채움).
 
-`src/ir/test.zig`가 손으로 만든 트리를 lower와 render 양쪽으로 모든 방언에서 실행해 같은 행이 나오는지 확인합니다.
+`src/ir/test.zig`가 손으로 만든 트리를 lower와 render 양쪽으로 모든 방언에서 실행해 같은 행이 나오는지 확인하고, 시드 퍼저 `ir_roundtrip`(`src/ir/fuzz.zig`, [빌드](#빌드))이 무작위 트리로 같은 것을 확인합니다.
 
 | 의미 노드(`tree.Kind`) | 뜻 | lower / render |
 | --- | --- | --- |
@@ -396,10 +396,21 @@ zig-out/bin/xqlite sql test.db .dump > test.sql
 
 ```sh
 zig-out/bin/xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db  # SQLite fuzzcheck 포팅: 퍼즈 코퍼스를 돌려 크래시·메모리 누수·close 실패를 보고
-zig build fuzz -Doptimize=ReleaseSafe -- btree_model [SEED]  # 시드 기반 퍼저 (btree_model, btree_corrupt), 시드를 생략하면 무작위로 골라 출력
+zig build fuzz -Doptimize=ReleaseSafe -- btree_model [SEED]  # 시드 기반 퍼저 (btree_model, btree_corrupt, ir_roundtrip), 시드를 생략하면 무작위로 골라 출력
+zig build fuzz -Doptimize=ReleaseSafe -- ir_roundtrip [SEED] [--events N]  # 구문 트리 IR의 render ≡ lower 검사
 ```
 
 `fuzzcheck`는 크래시가 나면 케이스 번호를 출력하므로 `--start N`으로 그다음부터 이어 돌릴 수 있고, `-v`는 실행하는 케이스를 하나씩 출력합니다(세그폴트처럼 패닉 핸들러를 거치지 않는 크래시를 찾을 때 씁니다). 시드 퍼저는 같은 시드면 같은 동작을 재현하고 커밋 해시(40자리)도 시드로 받습니다. `zig build test`는 모든 시드 퍼저를 고정 시드로 짧게 돌립니다.
+
+`ir_roundtrip`은 [render ≡ lower](#방언-아키텍처) 계약을 검사합니다. `src/ir/gen.zig`가 시드로 고정된 작은 스키마(INTEGER/REAL/TEXT/BLOB/타입 없는 열, NULL·0·-0.0·i64 최솟값/최댓값·1e308·빈 문자열·대소문자 섞인 문자열·비ASCII·블롭 같은 경계값 행) 위의 무작위 트리를 만듭니다. 모든 의미 노드(`cast` 모든 방식, `concat` 두 NULL 정책, `div` 세 종류, BINARY/NOCASE/RTRIM 비교, `like`의 대소문자·이스케이프, SQLite 내장·엔진·방언 함수, `coerce`, 불리언, 바인딩된 파라미터), CASE·IN·BETWEEN·서브쿼리·집계·GROUP BY·윈도우·`NULLS FIRST/LAST` 정렬·LIMIT/OFFSET·복합 질의·CTE를 만들고, 어떤 노드가 얼마나 자주 나올지는 실행마다 무작위로 정합니다(스웜 테스트, 64 이벤트마다 새로). 이벤트마다 새 메모리 DB에서, 방언 d마다
+
+- lower(t)를 d에서 실행한 행(A)과
+- d에서 렌더링한 render(t)를 SQLite 프론트엔드가 각 방언에서 컴파일해 실행한 행(B),
+- 트리로 `CREATE VIEW`를 만들어 각 방언에서 `SELECT * FROM v`한 행(C, 기대값은 lower(`SELECT * FROM (t)`))
+
+이 같아야 하고(값의 타입과 값이 정확히 같음, 실수는 비트 단위, ORDER BY가 없으면 다중집합으로 비교, 둘 다 오류면 결과 코드가 같아야 함), render를 두 번 하면 같은 텍스트여야 합니다. 파라미터는 lower에선 바인딩하고 render(파라미터를 받지 않음)에는 그 값의 리터럴로 넣습니다. 테이블 이벤트는 CHECK·DEFAULT·생성 열이 있는 테이블을 트리로 만들고, lower한 INSERT(`DEFAULT` 항목, 빠뜨린 열)와 SQLite 텍스트 INSERT로 행을 넣어, 저장된 행과 CHECK 결과가 같은 값으로 lower한 질의가 계산한 것과 같은지 봅니다. 불일치하면 시드·이벤트 번호·렌더링한 텍스트·재현 명령을 출력합니다.
+
+일부러 검사하지 않는 것: `identity_default`(계약의 예외, 시퀀스는 읽을 때마다 증가), 결정적이지 않은 함수, 방언 d에서 렌더링한 텍스트를 제3의 방언 e가 읽는 경우 중 e가 가린 SQLite 내장 함수 이름이 텍스트에 그대로 있는 경우(계약은 SQLite 방언과 d만 다루고, e에서는 그 이름이 e의 함수를 뜻함. 예: PostgreSQL 뷰의 `concat()`은 MariaDB 연결에서 MariaDB의 `CONCAT()`), 상수가 파라미터와 다르게 해석되는 ORDER BY/GROUP BY가 있는 트리의 파라미터 비교(정수 상수는 열 번호), 뷰가 서브쿼리와 달리 실행 중 오류가 나는 식을 계산하지 않는 경우(sqlite3도 같음).
 
 포팅 기준 SQLite 소스(현재 3.54.1)는 `ref/sqlite`에 받아 두고 참고합니다. 이 디렉토리는 git에서 제외됩니다.
 

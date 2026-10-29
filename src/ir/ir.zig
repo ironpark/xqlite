@@ -809,4 +809,5 @@ pub const render = @import("render.zig");
 
 test {
     _ = @import("test.zig");
+    _ = @import("roundtrip_test.zig");
 }

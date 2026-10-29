@@ -115,6 +115,8 @@ pub fn gpa(ctx: *Context) std.mem.Allocator {
 pub fn resultOwned(ctx: *Context, out: *std.ArrayList(u8)) void {
     if (out.items.len == 0) {
         out.deinit(gpa(ctx));
+        // The caller's defer frees it again.
+        out.* = .empty;
         return api.resultText(ctx, "", .static);
     }
     api.resultText(ctx, out.items, .dynamic);

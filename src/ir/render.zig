@@ -62,6 +62,9 @@ pub const Renderer = struct {
     /// The text the positions of the tree are offsets of.
     src: [:0]const u8,
     out: std.ArrayList(u8) = .empty,
+    /// In a DEFAULT, which SQLite compiles without resolving names: `x IS
+    /// TRUE` there is `x IS 1`, not a truth test (truthTest()).
+    in_default: bool = false,
 
     fn a(r: *Renderer) std.mem.Allocator {
         return r.p.arena;
@@ -181,6 +184,13 @@ pub const Renderer = struct {
                 .int => try r.call("xq_div", &.{ d.l, d.r }),
             },
             .compare => |c| {
+                if (r.in_default and (c.op == .is or c.op == .is_not)) {
+                    var rhs = c.r;
+                    while (rhs.kind == .collate) rhs = rhs.kind.collate.e;
+                    if (rhs.kind == .boolean) return r.truthTest(c.l, rhs.kind.boolean, c.op == .is_not);
+                    // x IN () is FALSE, NOT IN () TRUE, for the parser too.
+                    if (rhs.kind == .in_list and rhs.kind.in_list.items.len == 0) return r.truthTest(c.l, rhs.kind.in_list.not, c.op == .is_not);
+                }
                 try r.put("(");
                 if (c.collation) |coll| {
                     try r.put("(");
@@ -274,6 +284,7 @@ pub const Renderer = struct {
                 try r.put(if (x.not) " IS NOT NULL)" else " IS NULL)");
             },
             .is_bool => |x| {
+                if (r.in_default) if (x.value) |v| return r.truthTest(x.e, v, x.not);
                 try r.put("(");
                 try r.expr(x.e);
                 try r.put(if (x.not) " IS NOT " else " IS ");
@@ -314,6 +325,14 @@ pub const Renderer = struct {
                 try r.put(")");
             },
         }
+    }
+
+    /// `e IS [NOT] TRUE/FALSE` as a CASE, which means the same resolved or
+    /// not.
+    fn truthTest(r: *Renderer, e: *const tree.Expr, value: bool, not: bool) Error!void {
+        try r.put(if (value) "CASE WHEN " else "CASE WHEN NOT ");
+        try r.expr(e);
+        try r.put(if (not) " THEN 0 ELSE 1 END" else " THEN 1 ELSE 0 END");
     }
 
     pub fn exprList(r: *Renderer, items: []const *tree.Expr) Error!void {
@@ -515,12 +534,9 @@ pub const Renderer = struct {
             try r.put(" ");
         }
         const ordered = s.order_by.len > 0 or s.limit != null or s.offset != null;
-        const needs_wrap = ordered and switch (s.body.*) {
-            .nested => |n| n.order_by.len > 0 or n.limit != null or n.offset != null,
-            // SQLite takes no ORDER BY/LIMIT after VALUES.
-            .values => true,
-            else => false,
-        };
+        // SQLite takes no ORDER BY/LIMIT after VALUES or after another.
+        // Nor a WITH after another.
+        const needs_wrap = (ordered and tail(s.body) != .plain) or (s.with != null and headWith(s.body));
         if (needs_wrap) {
             try r.put("SELECT * FROM (");
             try r.body(s.body);
@@ -579,16 +595,52 @@ pub const Renderer = struct {
     /// query with its own ORDER BY/LIMIT/WITH (or a compound on the
     /// right) is a subquery.
     fn operand(r: *Renderer, b: *const tree.Body, right: bool) Error!void {
-        const wrap = switch (b.*) {
-            .nested => |s| s.order_by.len > 0 or s.limit != null or s.offset != null or s.with != null or (right and s.body.* == .compound),
-            .compound => right,
-            else => false,
-        };
+        const wrap = operandWraps(b, right);
         if (wrap) {
             try r.put("SELECT * FROM (");
             try r.body(b);
             try r.put(")");
         } else try r.body(b);
+    }
+
+    /// How the text of `b` ends: a nested query without ORDER BY, LIMIT,
+    /// OFFSET is written as its body, so look through it.
+    pub fn tail(b: *const tree.Body) enum { plain, values, ordered } {
+        return switch (b.*) {
+            .core => .plain,
+            .values => .values,
+            .nested => |s| if (s.order_by.len > 0 or s.limit != null or s.offset != null) .ordered else tail(s.body),
+            .compound => |c| if (operandWraps(c.right, true)) .plain else tail(c.right),
+        };
+    }
+
+    /// Whether the text of `b` starts with WITH.
+    fn headWith(b: *const tree.Body) bool {
+        return switch (b.*) {
+            .nested => |s| s.with != null or headWith(s.body),
+            .compound => |c| !operandWraps(c.left, false) and headWith(c.left),
+            else => false,
+        };
+    }
+
+    fn operandWraps(b: *const tree.Body, right: bool) bool {
+        return switch (b.*) {
+            .nested => tail(b) == .ordered or headWith(b) or (right and plainBody(b).* == .compound),
+            .compound => right,
+            else => false,
+        };
+    }
+
+    /// The body a nested query without ORDER BY, LIMIT, OFFSET or WITH is
+    /// written as.
+    fn plainBody(b: *const tree.Body) *const tree.Body {
+        var x = b;
+        while (x.* == .nested) {
+            const s = x.nested;
+            if (s.with != null or s.order_by.len > 0 or s.limit != null or s.offset != null) break;
+            x = s.body;
+        }
+        return x;
     }
 
     fn core(r: *Renderer, c: *const tree.Core) Error!void {
@@ -775,6 +827,9 @@ pub const Renderer = struct {
                 },
                 .default => |e| {
                     try r.put(" DEFAULT (");
+                    const saved = r.in_default;
+                    r.in_default = true;
+                    defer r.in_default = saved;
                     try r.expr(e);
                     try r.put(")");
                 },

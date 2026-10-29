@@ -11,6 +11,7 @@ const planner = @import("planner.zig");
 const slt = @import("slt.zig");
 const dialect_diff = @import("dialect_diff.zig");
 const planner_gen = @import("planner_gen.zig");
+const bench = @import("bench.zig");
 
 const usage =
     \\usage: xqt [options] <command> [args]
@@ -21,6 +22,7 @@ const usage =
     \\  planner gen basic|hard SEED NBLOCKS NQUERIES  random planner cases
     \\  slt [opts] PATH... [-- ARGS]  sqllogictest scripts with `xqlite slt`
     \\  dialect-diff pg|mariadb [CASES]  a dialect against its server (podman)
+    \\  bench [WORKLOAD...]       xqlite against sqlite3 on timed workloads
     \\  list                     the interop modules and planner case files
     \\  help [COMMAND]           this text, or the options of a command
     \\
@@ -53,6 +55,8 @@ pub fn main(init: std.process.Init) !void {
         try slt.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "dialect-diff"))
         try dialect_diff.run(init.gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "bench"))
+        try bench.run(init.gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "list"))
         try list(io, &cfg, out)
     else if (std.mem.eql(u8, cmd, "help")) blk: {
@@ -65,6 +69,8 @@ pub fn main(init: std.process.Init) !void {
             slt.usage
         else if (std.mem.eql(u8, topic, "dialect-diff"))
             dialect_diff.usage
+        else if (std.mem.eql(u8, topic, "bench"))
+            bench.usage
         else
             usage);
         break :blk 0;
@@ -114,4 +120,5 @@ test {
     _ = interop;
     _ = dialect_diff;
     _ = planner_gen;
+    _ = bench;
 }

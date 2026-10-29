@@ -122,7 +122,7 @@ pub const State = enum(u8) {
     err,
 
     fn atLeast(a: State, b: State) bool {
-        return @intFromEnum(a) >= @intFromEnum(b);
+        return @backingInt(a) >= @backingInt(b);
     }
 };
 
@@ -264,15 +264,16 @@ pub const Pager = struct {
         const p = try gpa.create(Pager);
         errdefer gpa.destroy(p);
 
-        const path = path_arg orelse "";
-        const path_copy = try gpa.dupe(u8, path);
+        // The database is known by its full name (sqlite3OsFullPathname()).
+        const path_copy = if (path_arg) |a| try v.fullPathname(gpa, a) else try gpa.dupe(u8, "");
         errdefer gpa.free(path_copy);
+        const path = path_copy;
         const journal_path = if (path_arg == null) try gpa.dupe(u8, "") else try std.mem.concat(gpa, u8, &.{ path, "-journal" });
         errdefer gpa.free(journal_path);
         const wal_path = if (path_arg == null) try gpa.dupe(u8, "") else try std.mem.concat(gpa, u8, &.{ path, "-wal" });
         errdefer gpa.free(wal_path);
 
-        const fd = try v.open(path_arg, .{
+        const fd = try v.open(if (path_arg != null) path else null, .{
             .kind = .main_db,
             .read_write = !opts.read_only,
             .create = opts.create and !opts.read_only,
@@ -368,8 +369,8 @@ pub const Pager = struct {
         if (mode == old) return old;
         std.debug.assert(p.state != .err);
         p.journal_mode = mode;
-        const old_bits = @intFromEnum(old);
-        const new_bits = @intFromEnum(mode);
+        const old_bits = @backingInt(old);
+        const new_bits = @backingInt(mode);
         if (old_bits & 5 == 1 and new_bits & 1 == 0) {
             // Leaving TRUNCATE or PERSIST for DELETE or OFF: delete the
             // journal, under at least a RESERVED lock so that no other

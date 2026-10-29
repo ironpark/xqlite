@@ -143,9 +143,6 @@ compare() { # $1: label, $2: file, $3: statements, $4: sort output
       sort "$tmp/xq.out" -o "$tmp/xq.out"
       sort "$tmp/sq.out" -o "$tmp/sq.out"
     fi
-    # sqlite3 shows full paths, xqlite the path as given.
-    sed 's#|[^|]*/\([^/|]*\)$#|\1#' "$tmp/sq.out" > "$tmp/sq2.out"
-    mv "$tmp/sq2.out" "$tmp/sq.out"
     if ! cmp -s "$tmp/xq.out" "$tmp/sq.out"; then
       echo "FAIL $1: $stmt"
       diff "$tmp/xq.out" "$tmp/sq.out" | head -10

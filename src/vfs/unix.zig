@@ -51,7 +51,23 @@ pub const UnixVfs = struct {
         .access = access,
         .randomness = randomness,
         .sleep = sleep,
+        .fullPathname = fullPathname,
     };
+
+    /// Port of unixFullPathname(): `path` made absolute (against `dir`),
+    /// with "." and ".." removed and symbolic links resolved.
+    fn fullPathname(ptr: *anyopaque, path: []const u8, out: []u8) Error![]u8 {
+        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+        var p: DbPath = .{ .out = out };
+        if (path.len == 0 or path[0] != '/') {
+            var pwd: [std.fs.max_path_bytes]u8 = undefined;
+            const n = self.dir.realPath(self.io, &pwd) catch return error.CantOpen;
+            p.appendAll(pwd[0..n]);
+        }
+        p.appendAll(path);
+        if (p.failed or p.used < 2) return error.CantOpen;
+        return out[0..p.used];
+    }
 
     fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
         const self: *UnixVfs = @ptrCast(@alignCast(ptr));
@@ -160,6 +176,75 @@ pub const UnixVfs = struct {
             else => return error.IoErr,
         };
         return true;
+    }
+};
+
+/// A pathname under construction (DbPath).
+const DbPath = struct {
+    out: []u8,
+    used: usize = 0,
+    /// Symbolic links resolved (nSymlink).
+    n_symlink: u32 = 0,
+    failed: bool = false,
+
+    /// SQLITE_MAX_SYMLINK (os.h).
+    const max_symlink = 200;
+
+    /// Port of appendOnePathElement().
+    fn appendOne(p: *DbPath, name: []const u8) void {
+        std.debug.assert(name.len > 0);
+        if (name[0] == '.') {
+            if (name.len == 1) return;
+            if (name[1] == '.' and name.len == 2) {
+                if (p.used > 1) {
+                    std.debug.assert(p.out[0] == '/');
+                    p.used -= 1;
+                    while (p.out[p.used] != '/') p.used -= 1;
+                }
+                return;
+            }
+        }
+        if (p.used + name.len + 2 >= p.out.len) {
+            p.failed = true;
+            return;
+        }
+        p.out[p.used] = '/';
+        p.used += 1;
+        @memcpy(p.out[p.used..][0..name.len], name);
+        p.used += name.len;
+        if (p.failed) return;
+        // C calls lstat() and then readlink() on a link; readlink() alone
+        // tells both.
+        p.out[p.used] = 0;
+        var lnk: [std.fs.max_path_bytes + 2]u8 = undefined;
+        const got = c.readlink(p.out[0..p.used :0], &lnk, lnk.len - 2);
+        if (got < 0) {
+            switch (c.errno(got)) {
+                .INVAL, .NOENT => {},
+                else => p.failed = true,
+            }
+            return;
+        }
+        p.n_symlink += 1;
+        if (p.n_symlink > max_symlink + 1 or got == 0 or got >= lnk.len - 2) {
+            p.failed = true;
+            return;
+        }
+        const target = lnk[0..@intCast(got)];
+        if (target[0] == '/') {
+            p.used = 0;
+        } else {
+            p.used -= name.len + 1;
+        }
+        p.appendAll(target);
+    }
+
+    /// Port of appendAllPathElements().
+    fn appendAll(p: *DbPath, path: []const u8) void {
+        var it = std.mem.splitScalar(u8, path, '/');
+        while (it.next()) |name| {
+            if (name.len > 0) p.appendOne(name);
+        }
     }
 };
 

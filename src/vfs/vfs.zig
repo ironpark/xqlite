@@ -134,7 +134,7 @@ pub const LockLevel = enum(u8) {
     exclusive = 4,
 
     pub fn atLeast(a: LockLevel, b: LockLevel) bool {
-        return @intFromEnum(a) >= @intFromEnum(b);
+        return @backingInt(a) >= @backingInt(b);
     }
 };
 
@@ -362,6 +362,10 @@ pub const Vfs = struct {
         /// Sleeps for at least `microseconds` and returns the time slept
         /// (xSleep).
         sleep: *const fn (ptr: *anyopaque, microseconds: u32) u32,
+        /// Writes the canonical, absolute name of `path` into `out` and
+        /// returns it (xFullPathname). Null for a backend whose names are
+        /// already canonical: the name is used as given.
+        fullPathname: ?*const fn (ptr: *anyopaque, path: []const u8, out: []u8) Error![]u8 = null,
     };
 
     /// Opens `path`. A null path asks for an anonymous temporary file; the
@@ -400,6 +404,16 @@ pub const Vfs = struct {
     /// Port of sqlite3OsSleep().
     pub fn sleep(v: Vfs, microseconds: u32) u32 {
         return v.vtable.sleep(v.ptr, microseconds);
+    }
+
+    /// Port of sqlite3OsFullPathname(): the canonical name of `path`,
+    /// allocated with `gpa`. The pager names a database by it, and its
+    /// journal and WAL after it, as SQLite does: a super-journal records
+    /// the journals by these names.
+    pub fn fullPathname(v: Vfs, gpa: std.mem.Allocator, path: []const u8) Error![]u8 {
+        const f = v.vtable.fullPathname orelse return gpa.dupe(u8, path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        return gpa.dupe(u8, try f(v.ptr, path, &buf));
     }
 };
 

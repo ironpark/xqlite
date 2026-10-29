@@ -79,6 +79,7 @@ pub const CrashVfs = struct {
         .access = access,
         .randomness = randomness,
         .sleep = sleep,
+        .fullPathname = fullPathname,
     };
 
     fn cast(ptr: *anyopaque) *CrashVfs {
@@ -108,6 +109,16 @@ pub const CrashVfs = struct {
 
     fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
         return cast(ptr).inner.sleep(microseconds);
+    }
+
+    fn fullPathname(ptr: *anyopaque, path: []const u8, out: []u8) Error![]u8 {
+        const inner = cast(ptr).inner;
+        const f = inner.vtable.fullPathname orelse {
+            if (path.len > out.len) return error.CantOpen;
+            @memcpy(out[0..path.len], path);
+            return out[0..path.len];
+        };
+        return f(inner.ptr, path, out);
     }
 };
 

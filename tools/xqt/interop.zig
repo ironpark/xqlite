@@ -19,6 +19,9 @@ pub const modules = .{
     @import("interop/pragma.zig"),
     @import("interop/shell.zig"),
     @import("interop/wal.zig"),
+    @import("interop/attach.zig"),
+    @import("interop/vacuum.zig"),
+    @import("interop/analyze.zig"),
 };
 
 pub const usage =

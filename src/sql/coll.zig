@@ -57,15 +57,25 @@ pub fn defaultColl() *const CollSeq {
     return &builtin[0];
 }
 
-/// Port of sqlite3FindCollSeq(): the collation named `name`, or BINARY if
-/// `name` is null. With `create`, an undefined entry (null `cmp`) is made
-/// for an unknown name.
+/// db->pDfltColl: the collation of a value without one. BINARY, unless
+/// the dialect of the connection has another default (xqlite; see
+/// dialect.Hooks.default_collation).
+pub fn dfltColl(db: *Sqlite3) *const CollSeq {
+    const name = @import("../dialect/dialect.zig").defaultCollationName(db) orelse return defaultColl();
+    return findCollSeq(db, name, false) orelse defaultColl();
+}
+
+/// Port of sqlite3FindCollSeq(): the collation named `name`, or the
+/// default one (dfltColl(), BINARY) if `name` is null. With `create`, an
+/// undefined entry (null `cmp`) is made for an unknown name.
 pub fn findCollSeq(db: *Sqlite3, name: ?[]const u8, create: bool) ?*const CollSeq {
-    const z = name orelse return defaultColl();
+    const z = name orelse return dfltColl(db);
     if (db.colls.get(z)) |c| return c;
     for (&builtin) |*c| {
         if (std.ascii.eqlIgnoreCase(c.name, z)) return c;
     }
+    // xqlite: then those of the connection's dialect.
+    if (@import("../dialect/dialect.zig").findCollation(db, z)) |c| return c;
     if (!create) return null;
     return addCollSeq(db, z, .{ .name = undefined });
 }

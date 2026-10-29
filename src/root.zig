@@ -16,6 +16,7 @@ pub const Stmt = api.Stmt;
 pub const Savepoint = api.Savepoint;
 pub const OpenOptions = api.OpenOptions;
 pub const JournalMode = api.JournalMode;
+pub const Dialect = api.Dialect;
 pub const TransactionMode = api.TransactionMode;
 pub const VfsOption = api.VfsOption;
 pub const Error = api.Error;
@@ -61,6 +62,10 @@ pub const btree = @import("btree/btree.zig");
 pub const record = @import("vdbe/record.zig");
 
 pub const tokenize = @import("parse/tokenize.zig");
+/// SQL dialects: frontends and semantic hooks (Phase 4).
+pub const dialect = @import("dialect/dialect.zig");
+/// The common IR the frontends lower into.
+pub const ir = @import("ir/ir.zig");
 pub const sql_util = @import("sql/util.zig");
 pub const numeric = @import("sql/numeric.zig");
 pub const printf = @import("sql/printf.zig");
@@ -120,7 +125,8 @@ test {
         @import("vdbe/exec/record.zig"),    @import("vdbe/exec/txn.zig"),      @import("vdbe/exec/cursor.zig"),
         @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"),      @import("vdbe/exec/vtab_ops.zig"),
         @import("vdbe/exec/misc.zig"),      @import("util/flags.zig"),         @import("sql/sqlite_int.zig"),
-        @import("util/thunk.zig"),          @import("util/cast.zig"),
+        @import("util/thunk.zig"),          @import("util/cast.zig"),          @import("dialect/dialect.zig"),
+        @import("ir/ir.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

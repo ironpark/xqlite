@@ -844,6 +844,7 @@ fn dotCmdError(p: *Shell, i_arg: usize, brief: ?[]const u8, detail: ?[]const u8)
 const help_text = [_][]const u8{
     ".bail on|off             Stop after hitting an error.  Default OFF",
     ".changes on|off          Show number of rows changed by SQL",
+    ".dialect ?NAME?          Show or set the SQL dialect: sqlite, postgres, mariadb",
     ".dump ?OBJECTS?          Render database content as SQL",
     "   Options:",
     "     --data-only            Output only INSERT statements",
@@ -945,6 +946,21 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         }
     } else if (c == 'd' and n >= 3 and isCmd(cmd, "dbconfig")) {
         rc = try dotStatus(dotDbconfig(p));
+    } else if (c == 'd' and n >= 3 and isCmd(cmd, "dialect")) {
+        // xqlite: the SQL dialect of the connection (PRAGMA xq_dialect).
+        if (args.len == 1) {
+            try p.print("{s}\n", .{sql.main.getDialect(p.db).name()});
+        } else if (args.len == 2) {
+            if (xqlite.dialect.Dialect.fromName(args[1])) |d| {
+                sql.main.setDialect(p.db, d);
+            } else {
+                try p.eprint("Error: unknown dialect: {s}\n", .{args[1]});
+                rc = 1;
+            }
+        } else {
+            try p.eprint("Usage: .dialect ?sqlite|postgres|mariadb?\n", .{});
+            rc = 1;
+        }
     } else if (c == 'd' and isCmd(cmd, "dump")) {
         rc = try dotStatus(dotDump(p));
     } else if (c == 'e' and isCmd(cmd, "echo")) {

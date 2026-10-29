@@ -208,6 +208,27 @@ fn oomOnOpen(db: *Sqlite3) i32 {
     return RC.NOMEM;
 }
 
+/// xqlite: make `d` the SQL dialect of the connection, with its own
+/// frontend, for the statements prepared from now on (those prepared
+/// before keep theirs). PRAGMA xq_dialect and the shell's .dialect come
+/// here.
+pub fn setDialect(db: *Sqlite3, d: @import("../dialect/dialect.zig").Dialect) void {
+    db.xq.lang = .of(d);
+}
+
+/// xqlite: the SQL dialect of the connection.
+pub fn getDialect(db: *const Sqlite3) @import("../dialect/dialect.zig").Dialect {
+    return db.xq.lang.dialect;
+}
+
+/// xqlite: compile the statements prepared from now on with `frontend`,
+/// keeping the semantic hooks of the connection's dialect: for frontend
+/// development and tests (e.g. SQLite's grammar with PostgreSQL's
+/// functions). setDialect() goes back to the dialect's own frontend.
+pub fn setFrontend(db: *Sqlite3, frontend: *const @import("../dialect/dialect.zig").Frontend) void {
+    db.xq.lang.frontend = frontend;
+}
+
 /// Port of sqlite3_close(): close the connection. Fails with BUSY if
 /// statements are not finalized.
 pub fn close(db: *Sqlite3) i32 {
@@ -229,6 +250,7 @@ pub fn close(db: *Sqlite3) i32 {
     db.dbs.deinit(gpa);
     @import("coll.zig").freeAll(db);
     @import("callback.zig").freeFunctions(db);
+    db.xq.deinit(gpa);
     {
         vtab.unlockList(db);
         var it = db.modules.valueIterator();

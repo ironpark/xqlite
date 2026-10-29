@@ -2274,6 +2274,9 @@ pub const Sqlite3 = struct {
     vtab_on_conflict: OE = .None,
     /// OP_VDestroy calls running (nVDestroy).
     n_vdestroy: i32 = 0,
+    /// xqlite: the SQL dialect of the connection and the state of its
+    /// semantic hooks (src/dialect/dialect.zig). No C counterpart.
+    xq: @import("../dialect/dialect.zig").ConnState = .{},
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

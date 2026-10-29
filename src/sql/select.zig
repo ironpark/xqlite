@@ -1239,9 +1239,9 @@ fn multiSelectByMergeKeyInfo(p: *Parse, s: *Select, n_extra: usize) ?*KeyInfo {
         const term = item.expr.?;
         var c: *const CollSeq = undefined;
         if (term.flags.Collate) {
-            c = expr_mod.collSeq(p, term) orelse coll_mod.defaultColl();
+            c = expr_mod.collSeq(p, term) orelse coll_mod.dfltColl(p.db);
         } else {
-            c = multiSelectCollSeq(p, s, @as(usize, item.u.x.order_by_col) - 1) orelse coll_mod.defaultColl();
+            c = multiSelectCollSeq(p, s, @as(usize, item.u.x.order_by_col) - 1) orelse coll_mod.dfltColl(p.db);
             item.expr = expr_mod.addCollateString(p, term, c.name) catch {
                 oom(p);
                 return null;
@@ -1321,7 +1321,7 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
         // Keeps the recursive part's output distinct.
         n_col = @intCast(s.e_list.?.len());
         if (keyInfoAlloc(p, @intCast(n_col), 1)) |ki| {
-            for (ki.coll[0..@intCast(n_col)], 0..) |*c, i| c.* = multiSelectCollSeq(p, s, i) orelse coll_mod.defaultColl();
+            for (ki.coll[0..@intCast(n_col)], 0..) |*c, i| c.* = multiSelectCollSeq(p, s, i) orelse coll_mod.dfltColl(p.db);
             _ = aux.addOp4(v, OP.OpenEphemeral, i_distinct, n_col, 0, .{ .keyinfo = ki });
         }
     }
@@ -3267,7 +3267,7 @@ fn updateAccumulator(p: *Parse, reg_acc: i32, agg: *AggInfo, e_distinct_type: in
                     p.n_mem += 1;
                     reg_hit = p.n_mem;
                 }
-                _ = aux.addOp4(v, OP.CollSeq, reg_hit, 0, 0, .{ .collseq = c orelse coll_mod.defaultColl() });
+                _ = aux.addOp4(v, OP.CollSeq, reg_hit, 0, 0, .{ .collseq = c orelse coll_mod.dfltColl(p.db) });
             }
             _ = aux.addOp3(v, OP.AggStep, 0, reg_agg, agg.funcReg(i));
             aux.appendP4(v, .{ .funcdef = f.func.? });

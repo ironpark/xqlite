@@ -1063,7 +1063,7 @@ pub fn collSeq(p: *Parse, e_arg: ?*const Expr) ?*const CollSeq {
 
 /// Port of sqlite3ExprNNCollSeq(): like collSeq(), but BINARY by default.
 pub fn nnCollSeq(p: *Parse, e: ?*const Expr) *const CollSeq {
-    return collSeq(p, e) orelse coll_mod.defaultColl();
+    return collSeq(p, e) orelse coll_mod.dfltColl(p.db);
 }
 
 /// Port of sqlite3ExprCollSeqMatch().

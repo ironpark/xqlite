@@ -32,6 +32,7 @@ pub const Stmt = @import("api/Stmt.zig");
 pub const Savepoint = Db.Savepoint;
 pub const OpenOptions = Db.OpenOptions;
 pub const JournalMode = Db.JournalMode;
+pub const Dialect = Db.Dialect;
 pub const TransactionMode = Db.TransactionMode;
 pub const VfsOption = Db.VfsOption;
 

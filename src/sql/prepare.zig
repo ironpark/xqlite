@@ -10,7 +10,7 @@ const ctype = @import("../util/ctype.zig");
 const numeric = @import("numeric.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
-const tokenize = @import("../parse/tokenize.zig");
+const dialect = @import("../dialect/dialect.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
@@ -394,7 +394,17 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
 
     if (db.disconnect != null) @import("vtab.zig").unlockList(db);
 
-    tokenize.runParser(&p, sql) catch |err| switch (err) {
+    // Compile in the language of the statement being recompiled, else in
+    // the connection's (xqlite: sqlite3RunParser() is the frontend of the
+    // dialect, see dialect.zig). A PRAGMA xq_dialect compiled here
+    // changes the connection's language for the statements after it.
+    const lang = if (old) |r| r.xq_lang else db.xq.lang;
+    const saved_lang = db.xq.lang;
+    db.xq.lang = lang;
+    defer if (std.meta.eql(db.xq.lang, lang)) {
+        db.xq.lang = saved_lang;
+    };
+    dialect.runParser(&p, sql) catch |err| switch (err) {
         error.OutOfMemory => db.oomFault(),
         error.ParseFailed => {},
     };
@@ -417,7 +427,10 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
         }
         return int.codeError(rc);
     }
-    if (p.vdbe) |v| v.parse = null;
+    if (p.vdbe) |v| {
+        v.parse = null;
+        v.xq_lang = lang;
+    }
     stmt.* = p.vdbe;
     main_mod.errorClear(db);
 }
@@ -481,6 +494,16 @@ pub fn prepareV3Z(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, stmt: *?*Vdbe
 
 pub fn prepareV2(db: *Sqlite3, sql: []const u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
     return prepareV3(db, sql, 0, stmt, tail);
+}
+
+/// prepareV3() in the language `lang` whatever the connection's (and the
+/// statement keeps it when recompiled): Lang.sqlite for SQL that the
+/// engine or the catalog generates (xqlite; no C counterpart).
+pub fn prepareLang(db: *Sqlite3, sql: []const u8, lang: dialect.Lang, prep_flags: u8, stmt: *?*Vdbe, tail: ?*[]const u8) i32 {
+    const saved = db.xq.lang;
+    db.xq.lang = lang;
+    defer db.xq.lang = saved;
+    return prepareV3(db, sql, prep_flags, stmt, tail);
 }
 
 /// Port of sqlite3Reprepare(): recompile a statement after a schema

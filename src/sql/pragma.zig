@@ -370,6 +370,24 @@ fn setPragmaResultColumnNames(v: *Vdbe, pragma_name: *const PragmaName) void {
     }
 }
 
+/// xqlite: PRAGMA xq_dialect[=NAME]: the SQL dialect of the connection
+/// (dialect.zig), one row with its name. Setting it takes effect when the
+/// statement is prepared, for the statements prepared after it, as
+/// PRAGMA case_sensitive_like does.
+fn xqDialect(p: *Parse, v: *Vdbe, right: ?[]const u8) void {
+    const dialect = @import("../dialect/dialect.zig");
+    if (right) |z| {
+        const d = dialect.Dialect.fromName(z) orelse {
+            util.errorMsg(p, "unknown dialect: {s}", .{z});
+            return;
+        };
+        main_mod.setDialect(p.db, d);
+    }
+    aux.setNumCols(v, 1);
+    aux.setColName(v, 0, vi.COLNAME_NAME, "xq_dialect");
+    returnSingleText(v, main_mod.getDialect(p.db).name());
+}
+
 /// Port of returnSingleInt().
 fn returnSingleInt(v: *Vdbe, value: i64) void {
     _ = aux.addInt64(v, 1, value);
@@ -504,7 +522,12 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
     // layer, which is as if every VFS answered SQLITE_NOTFOUND.
 
     // Unknown pragmas are silently ignored.
-    const pn = pragmaLocate(left) orelse return;
+    const pn = pragmaLocate(left) orelse {
+        // xqlite's own, outside SQLite's table (so pragma_list and
+        // PRAGMA function_list are unchanged).
+        if (ctype.eqlNoCase(left, "xq_dialect")) xqDialect(p, v, right);
+        return;
+    };
 
     if (pn.flags.NeedSchema) {
         prepare.readSchema(p) catch return;
@@ -867,7 +890,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                     } else break;
                     const sql = try build.mprintf(p, "SELECT*FROM\"%w\"", &.{.{ .str = t.name }});
                     var dummy: ?*Vdbe = null;
-                    _ = prepare.prepareV3(db, sql, aux.PREPARE_DONT_LOG, &dummy, null);
+                    _ = prepare.prepareLang(db, sql, .sqlite, aux.PREPARE_DONT_LOG, &dummy, null);
                     if (dummy) |d| _ = api.finalize(d);
                     if (db.malloc_failed) return error.OutOfMemory;
                 }
@@ -1946,7 +1969,8 @@ fn pragmaVtabFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, argv: []*vi
     if (c.args[0]) |arg| acc.appendf("=%Q", &.{.{ .str = arg }});
     const sql = acc.finish() orelse return int.RC.NOMEM;
     defer db.gpa.free(sql);
-    const rc = prepare.prepareV2(db, sql, &c.pragma, null);
+    // xqlite: the PRAGMA is SQLite text, whatever the dialect.
+    const rc = prepare.prepareLang(db, sql, .sqlite, 0, &c.pragma, null);
     if (rc != int.RC.OK) {
         vtab.setErrMsg(db, &t.base, "{s}", .{main_mod.errmsg(db)});
         return rc;

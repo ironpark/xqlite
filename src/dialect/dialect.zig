@@ -5,8 +5,11 @@
 //!
 //!  - a **frontend** (Frontend): a lexer/parser that reads the text of a
 //!    statement and lowers it into the common IR, SQLite's parse tree,
-//!    by calling the builders of src/ir/ir.zig. SQLite's own frontend
-//!    (sqlite/frontend.zig) is the reference user of that interface;
+//!    by calling the builders of src/ir/ir.zig: SQLite's own frontend
+//!    (sqlite/frontend.zig, the reference user of that interface)
+//!    directly, the others through the syntax tree IR of src/ir/tree.zig
+//!    and its one lowering (src/ir/lower.zig) and renderer for the schema
+//!    (src/ir/render.zig);
 //!  - **semantic hooks** (Hooks): engine-side behaviour that the IR alone
 //!    does not carry: extra built-in functions, extra collations and the
 //!    default collation. The SQLite dialect has none, so a connection in

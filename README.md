@@ -43,9 +43,9 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 │   │  SQLite  │  │ PostgreSQL │  │ MariaDB  │  │   MSSQL   │   │
 │   │  parser  │  │   parser   │  │  parser  │  │  (T-SQL)  │   │
 │   └────┬─────┘  └─────┬──────┘  └────┬─────┘  └─────┬─────┘   │
-│        └──────────────┴──── AST ─────┴──────────────┘         │
-│                 방언별 semantic analysis / 타입 해석          │
-└───────────────────────────────┬───────────────────────────────┘
+│        │              └─구문 트리 IR─┴──────────────┘         │
+│        │       방언 의미를 명시한 노드 → lower / render       │
+└────────┴──────────────────────┬───────────────────────────────┘
                                 │  공통 IR (SQLite 파스 트리 + 빌더)
 ┌───────────────────────────────▼───────────────────────────────┐
 │                  Planner / Optimizer → Codegen                │
@@ -77,20 +77,53 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 ### 방언 아키텍처
 
-공통 IR은 새로 만든 Logical Plan이 아니라 **SQLite의 파스 트리**(`Expr`, `ExprList`, `IdList`, `SrcList`, `Select`, `With`, `Window`, `Upsert`, `TriggerStep`)와, SQLite 문법의 reduce 액션이 부르는 **코드 생성기 진입점**(select, insert, CREATE TABLE ...)입니다. SQLite 방언 프론트엔드가 이 인터페이스로 내리기 때문에 SQLite 방언의 바이트코드는 sqlite3와 같고, 다른 방언도 같은 트리를 만들면 같은 플랜을 얻습니다.
+공통 IR은 두 층입니다. 아래층은 새로 만든 Logical Plan이 아니라 **SQLite의 파스 트리**(`Expr`, `ExprList`, `IdList`, `SrcList`, `Select`, `With`, `Window`, `Upsert`, `TriggerStep`)와, SQLite 문법의 reduce 액션이 부르는 **코드 생성기 진입점**(select, insert, CREATE TABLE ...)입니다(`src/ir/ir.zig`). SQLite 방언 프론트엔드가 이 인터페이스로 바로 내리기 때문에 SQLite 방언의 바이트코드는 sqlite3와 같고, 다른 방언도 같은 트리를 만들면 같은 플랜을 얻습니다.
+
+위층은 방언 프론트엔드가 만드는 **구문 트리 IR**(`src/ir/tree.zig`)입니다. 방언마다 뜻이 다른 곳은 프론트엔드가 해석해 명시적인 의미 노드로 남기므로(아래 표) 트리 자체는 방언 중립이고, 이 트리를 쓰는 백엔드는 하나씩입니다.
+
+- **lower**(`src/ir/lower.zig`): 트리 → SQLite 파스 트리. 빌더를 SQLite 문법과 같은 인자로 부르므로 방언 고유 노드가 없는 질의는 SQLite와 같은 바이트코드가 됩니다.
+- **render**(`src/ir/render.zig`): 트리 → SQLite SQL 텍스트. `sqlite_schema`에 저장되는 것(CREATE TABLE/INDEX/VIEW, CHECK, DEFAULT, 생성 열, 뷰 질의)에 씁니다.
 
 ```
 SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.xq.lang)으로 디스패치
-                 ├─ dialect/sqlite    tokenize.zig + parser.zig (기준 구현)
-                 ├─ dialect/postgres  lexer → parser → AST → ir.* (DDL은 SQLite 텍스트)
-                 └─ dialect/mariadb   tokenizer → parser → ir.* (DDL은 SQLite 텍스트)
-                          │ ir.*  (src/ir/ir.zig)
-                          ▼
-               파스 트리 + 빌더 ──▶ VDBE 바이트코드
-                          ▲
-   방언 훅(dialect.Hooks): 함수 테이블 · 추가 collation · 기본 collation
+                 ├─ dialect/sqlite    tokenize.zig + parser.zig (기준 구현) ─────────────┐
+                 ├─ dialect/postgres  lexer → parser ─┐                                   │
+                 └─ dialect/mariadb   tokenizer → parser → ir.* (아직 이전 방식, 아래)    │
+                                                      ▼                                   │
+                                     구문 트리 IR (src/ir/tree.zig)                       │
+                                       ├─ lower.zig  ─────────────────────────────────────┤ ir.*
+                                       └─ render.zig ─▶ SQLite 텍스트 ─▶ lowerSqliteText ─┤
+                                                         (sqlite_schema)                  ▼
+                                                               파스 트리 + 빌더 ──▶ VDBE 바이트코드
+                                                                          ▲
+   방언 훅(dialect.Hooks): 함수 테이블 · 엔진 함수 · 추가 collation · 기본 collation
    카탈로그(src/catalog): xq_catalog · xq_sequence
 ```
+
+**render ≡ lower.** render가 받아들이는 모든 트리 `t`에 대해, SQLite 프론트엔드가 `render(t)`를 컴파일한 결과는 `lower(t)`와 같은 뜻이어야 합니다. 같은 뜻이어야 하는 연결은 SQLite 방언, 그리고 `t`를 만든 프론트엔드의 방언입니다(스키마 텍스트는 언제나 SQLite 프론트엔드가 읽지만 읽는 연결의 방언은 다를 수 있음). 그래서 render는 다음처럼 씁니다.
+
+- SQLite 문법이 있는 노드는 lower가 내리는 그대로의 SQLite 구문(식별자는 늘 인용, 연산은 전부 괄호).
+- SQLite 문법이 없는 의미 노드는 lower와 같은 **엔진 함수** 호출(`xq_like()`, `xq_ilike()`, `xq_div()`, `xq_coerce()`, `xq_cast()`, `xq_pg_bool()` ...).
+- 방언 함수 테이블의 함수는 **방언 한정 이름** `xq_<방언>_<이름>`(`xq_postgres_greatest(...)`), 연결 방언이 가린 SQLite 내장 함수는 `xq_sqlite_<이름>`(`lower.functionName()`이 둘 다 정함). 둘 다 모든 방언에서 보입니다.
+- 예외는 `IdentityDefault`: PostgreSQL이 보여 주는 대로 `nextval('seq')`로 씁니다(identity 열은 lower가 직접 채움).
+
+`src/ir/test.zig`가 손으로 만든 트리를 lower와 render 양쪽으로 모든 방언에서 실행해 같은 행이 나오는지 확인합니다.
+
+| 의미 노드(`tree.Kind`) | 뜻 | lower / render |
+| --- | --- | --- |
+| `cast{target_type, mode}` | 변환 방식: `affinity`(CAST AS), `func`(f(x)), `truncate`, `round`, `typed`(f(x, 'type')) | CAST / 함수 |
+| `concat{null_policy}` | `propagate`(NULL이면 NULL, `\|\|`), `skip`(NULL 건너뜀, `concat()`) | `\|\|` / `concat()` |
+| `div{kind}` | `sqlite`(SQLite `/`), `real`(실수 나눗셈), `int`(MariaDB `DIV`) | `/`, `CAST(l AS REAL) / r`, `xq_div()` |
+| `compare{op, collation}` | 비교와 그 collation(연결의 기본 collation과 무관) | 왼쪽 피연산자에 COLLATE |
+| `like{case_sensitive, escape}` | 대소문자 구분, 이스케이프(`none`/`backslash`/식) | SQLite LIKE, `xq_like()`, `xq_ilike()` |
+| `func{name, dialect}` | 이미 해석된 이름. `dialect`가 있으면 그 방언 함수 테이블의 함수 | 그 방언에선 이름 그대로, 아니면 `xq_<방언>_<이름>` |
+| `coerce{decl_type, ...}` | MariaDB가 열에 저장하는 값의 변환 | `xq_coerce()` |
+| `identity_default{sequence}` | identity 시퀀스의 다음 값 | `nextval('seq')` |
+| `boolean`, `param`, `default` | TRUE/FALSE, `?N`(null이면 `?`), VALUES/SET의 DEFAULT | |
+
+결과 열 이름(`ResultCol.name`), NULL 정렬(`SortItem.nulls`), DDL의 타입·검사·identity 열도 프론트엔드가 정해서 트리에 넣습니다. 노드와 문자열은 모두 문장의 arena(`Parse.arena`)나 SQL 텍스트에 있고(전역 없음), 위치(`pos`)는 lower/render에 넘긴 텍스트의 오프셋입니다(다른 텍스트에서 온 부분 트리는 `Select.src`).
+
+**DML 공통 의미**(lower 한 곳): VALUES/SET의 `DEFAULT`(Coerce 안이어도)는 그 열의 기본값입니다. identity 시퀀스가 있으면 `nextval()`, 아니면 DEFAULT 식의 복사본, 없으면 NULL(그래서 identity 없는 INTEGER PRIMARY KEY, 즉 MariaDB의 `AUTO_INCREMENT`는 다음 rowid). identity 열은 `DEFAULT nextval(...)` 텍스트가 아니라 `xq_catalog`의 `identity`/`identity_kind` 키로 찾습니다. 열 목록이 있는 INSERT와 DEFAULT VALUES가 빠뜨린 identity 열은 `nextval()`로 채우고, `GENERATED ALWAYS` 열에 값을 주면 `Insert.overriding` 없이는 실패합니다. CREATE TABLE이 `tree.Identity` 열의 시퀀스를 만들고 키를 기록하며, DROP TABLE·`TRUNCATE ... RESTART IDENTITY`가 지우고 되돌립니다.
 
 | 파일 | 내용 |
 | --- | --- |
@@ -99,6 +132,9 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 | `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 방언](#postgresql-방언)) |
 | `src/ir/ir.zig` | IR 빌더 파사드: `stmt`, `expr`, `list`, `from`, `select`, `with`, `window`, `dml`, `ddl`, `txn`, `admin`. 각 항목은 대응하는 C 함수(`sqlite3PExpr`, `sqlite3StartTable` ...)의 별칭이거나 parse.y에서 옮긴 도우미 |
+| `src/ir/tree.zig` | 구문 트리 IR: 식, SELECT(복합, CTE, 윈도우, 조인, 서브쿼리, VALUES), INSERT/UPDATE/DELETE(RETURNING, upsert, UPDATE FROM, DELETE USING, ORDER BY ... LIMIT), 트랜잭션, DDL(CREATE/DROP TABLE/INDEX/VIEW/SEQUENCE, ALTER 일부)과 의미 노드 |
+| `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록 |
+| `src/ir/render.zig` | `render.select(p, src, s)`, `render.expr()`, `render.statement()`(CREATE TABLE/INDEX/VIEW, ALTER TABLE)와 `Renderer` |
 | `src/catalog/catalog.zig`, `sequence.zig` | 방언 메타데이터와 시퀀스 |
 
 **방언 고르기.** 연결 단위입니다. 기본값은 `sqlite`이고, 이때 동작과 바이트코드는 이전과 바이트 단위로 같습니다.
@@ -114,14 +150,17 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 
 1. 시작할 때 `p.rc = OK`, `p.tail = sql`로 둡니다(토큰 오프셋이 `p.tail` 기준).
 2. `sql`의 **첫 문장**만 컴파일하고, 끝나면 `p.tail`을 그 뒤 텍스트(`sql`의 접미사)로 둡니다. 공백·주석뿐이면 아무 코드도 만들지 않습니다.
-3. `ir.*`로 파스 트리를 만들고 문장 빌더를 부른 뒤 `ir.stmt.finishCoding(p)`로 끝냅니다. 식별자 인용·대소문자 접기는 프론트엔드가 합니다.
+3. 문장을 구문 트리 IR(`ir.tree`)로 파싱하고 `ir.lower.Lowerer.init(p, sql).statement(stmt)`로 내린 뒤 `ir.stmt.finishCoding(p)`로 끝냅니다. 식별자 인용·대소문자 접기, 스키마 이름(`public` → `main` ...), 방언 의미(위 표)는 프론트엔드가 트리를 만들 때 정합니다. 트리로 나타낼 수 없는 문장(MariaDB의 `SHOW` 같은 것)은 지금처럼 `ir.*` 빌더를 직접 불러도 됩니다.
 4. 오류는 `ir.stmt.errorMsg()`/`syntaxError()`로 Parse에 남기고 `error.ParseFailed`로 실패합니다. Zig 오류는 할당 실패뿐입니다.
-5. **스키마에 저장되는 것은 SQLite 텍스트여야 합니다.** `sqlite_schema`는 문장 텍스트를 그대로 저장하고 sqlite3가 다시 읽기 때문입니다. CREATE TABLE/INDEX/VIEW/TRIGGER는 SQLite 텍스트로 렌더링해서 `ir.stmt.lowerSqliteText(p, text)`로 내리고, 방언 정보는 같은 문장 안에서 `catalog.code*()`로 기록한 뒤 `finishCoding()`합니다.
-6. 프론트엔드가 지어낸 함수 호출은 `ir.expr.functionCall(p, "concat", args)`로 만듭니다.
+5. **스키마에 저장되는 것은 SQLite 텍스트여야 합니다.** `sqlite_schema`는 문장 텍스트를 그대로 저장하고 sqlite3가 다시 읽기 때문입니다. 트리의 DDL은 lower가 render로 SQLite 텍스트를 만들어 `ir.stmt.lowerSqliteText(p, text)`로 내리고 방언·선언 타입·identity를 같은 문장 안에서 `catalog.code*()`로 기록합니다. 방언 고유의 카탈로그 키는 프론트엔드가 같은 문장에서 더 기록합니다.
+6. 프론트엔드가 지어낸 함수 호출은 트리의 `func` 노드로 만듭니다(트리를 쓰지 않는 곳은 `ir.expr.functionCall(p, "concat", args)`). 방언 함수 테이블의 이름이면 `Func.dialect`를 표시해야 render가 한정 이름으로 씁니다.
+
+**새 프론트엔드 붙이기.** `src/dialect/<방언>/frontend.zig`에 `frontend`(`run`)와 `hooks`를 두고 `dialect.Dialect`와 `module()`에 추가합니다. `run`은 렉서·파서로 `ir.tree` 트리를 만들고(스키마가 필요한 해석은 `p`로 `ir.stmt.readSchema()` 뒤에), DDL의 방언 검사·카탈로그 키를 더한 뒤 `ir.lower`로 내립니다. SQLite 문법에 없는 의미가 필요하면 의미 노드를 쓰고, 노드가 부르는 엔진 함수가 없으면 `hooks.engine_functions`에 `xq_` 이름으로 등록합니다. 그러면 lower와 render가 같은 함수를 쓰므로 render ≡ lower가 유지됩니다.
 
 **방언 훅** (`dialect.Hooks`, 모든 필드의 기본값이 SQLite 동작):
 
-- `functions`: 방언 함수 테이블. 사용자 정의 함수 다음, SQLite 내장 함수 앞에서 찾으므로 함수를 더하거나(`version()`, `nextval()`) 같은 이름의 내장 함수를 가립니다(MariaDB `CONCAT()`은 인자 중 NULL이 있으면 NULL). 다른 방언과 엔진 내부 SQL(`PreferBuiltin`)에는 보이지 않습니다. `dfunc.scalar("name", n_arg, .{ .deterministic = true }, impl)`로 만들고 같은 이름의 오버로드는 붙여 둡니다(`dfunc.checkTable`이 컴파일 시점에 검사).
+- `functions`: 방언 함수 테이블. 사용자 정의 함수 다음, SQLite 내장 함수 앞에서 찾으므로 함수를 더하거나(`version()`, `nextval()`) 같은 이름의 내장 함수를 가립니다(MariaDB `CONCAT()`은 인자 중 NULL이 있으면 NULL). 다른 방언과 엔진 내부 SQL(`PreferBuiltin`)에는 이름 그대로는 보이지 않고, 한정 이름 `xq_<방언>_<이름>`으로만 보입니다(가려진 내장 함수는 `xq_sqlite_<이름>`). `dfunc.scalar("name", n_arg, .{ .deterministic = true }, impl)`로 만들고 같은 이름의 오버로드는 붙여 둡니다(`dfunc.checkTable`이 컴파일 시점에 검사).
+- `engine_functions`: IR의 의미 노드가 내려가는 **엔진 함수**. 이름은 `xq_`로 시작하고 모든 방언에서 유일해야 합니다(컴파일 시점에 검사). SQLite 방언, 엔진 내부 SQL을 포함해 **모든 방언에서 보이고** SQLite 내장 함수 다음에 찾습니다. render가 스키마에 쓰고 어느 방언의 연결이든 그 스키마를 읽기 때문입니다. 내장 함수처럼 `unsafe`가 아니면 `trusted_schema`가 꺼져 있어도 스키마에서 쓸 수 있으므로 부작용이 없어야 하고, 인덱스·CHECK·생성 열에 들어갈 수 있으면 `deterministic`이어야 합니다. 지금은 PostgreSQL의 `xq_like`/`xq_ilike`/`xq_pg_*`, MariaDB의 `xq_coerce`/`xq_div`/`xq_xor`/`xq_bitxor`/`xq_cast`.
 - `collations`: 방언이 더하는 collation. 스키마에 쓰면 sqlite3에서 그 열을 쓸 수 없으므로 가능하면 내장(`BINARY`, `NOCASE`, `RTRIM`)으로 매핑합니다.
 - `default_collation`: collation이 없는 값의 비교(C의 `db->pDfltColl`). MariaDB 방언은 `NOCASE`입니다. COLLATE 없는 열의 인덱스는 파일 호환을 위해 BINARY로 남으므로 DDL에서 텍스트 열마다 collation을 적어 두는 것이 좋습니다.
 
@@ -196,9 +235,8 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA·VACUUM·ANALYZE는 SQLite 문법 그�
 | 파일 | 내용 |
 | --- | --- |
 | `lexer.zig` | PostgreSQL 어휘: 따옴표 없는 식별자는 소문자로 접고 `"Quoted"`는 그대로, `'...'`(`''`, 줄바꿈 사이 이어 붙이기), `E'...'` 이스케이프, `$$...$$`/`$tag$...$tag$`, `$1` 매개변수(→ `?1`), `--`·중첩 `/* */` 주석, `::`, 연산자 규칙(`a<-1`은 `a < -1`), 16진/8진/2진·`1_000` 숫자. 백틱과 `[x]`는 식별자가 아님 |
-| `parser.zig`, `ast.zig` | 재귀 하강 파서와 구문 트리. 연산자 우선순위는 PostgreSQL(OR < AND < NOT < IS < 비교 < BETWEEN/IN/LIKE < 기타 연산자(`\|\|`, `->`) < `+ -` < `* / %` < `^` < 단항 < `::`) |
-| `lower.zig` | 질의·DML·트랜잭션을 `ir.*`로 내림(SQLite 문법이 부르는 빌더를 같은 인자로) |
-| `render.zig`, `ddl.zig` | DDL을 SQLite 텍스트로 렌더링해 `lowerSqliteText()`로 내리고 같은 문장에서 카탈로그 기록 |
+| `parser.zig` | 재귀 하강 파서. 구문 트리 IR(`src/ir/tree.zig`)을 만들면서 PostgreSQL 의미를 해석함: 캐스트, LIKE/ILIKE, 함수 이름과 특수 문법, 결과 열 이름, NULL 정렬, 스키마 이름과 카탈로그 뷰, 짧은 INSERT VALUES, DDL의 타입·검사·identity. 연산자 우선순위는 PostgreSQL(OR < AND < NOT < IS < 비교 < BETWEEN/IN/LIKE < 기타 연산자(`\|\|`, `->`) < `+ -` < `* / %` < `^` < 단항 < `::`) |
+| `ddl.zig` | DDL의 PostgreSQL 문구 검사와 이름 없는 인덱스의 이름. 내림·렌더링·카탈로그 기록은 `src/ir/lower.zig`, `render.zig` |
 | `types.zig` | 타입 → STRICT 저장 타입·검사·`format_type()` 철자·캐스트 |
 | `funcs.zig`, `catalog_views.zig` | 방언 함수, `information_schema`/`pg_catalog` 뷰 |
 | `test.zig` | 종단 테스트. `tools/interop-pg.sh`(sqlite3 교차 검증), `tools/dialect/pg-diff.sh` + `pg-cases.txt`(실제 PostgreSQL과 차등 비교) |
@@ -232,7 +270,8 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA·VACUUM·ANALYZE는 SQLite 문법 그�
 - `numeric`은 고정 소수점이 아니라 SQLite 수(정수 또는 실수)입니다: `1.50`은 `1.5`로 나오고, 문자열 상수 `'1.5'`는 숫자로 바꿔 넣지만 텍스트로 바인딩한 값은 거부합니다.
 - SERIAL/IDENTITY는 Phase 4의 시퀀스(`<table>_<col>_seq`)로 번호를 매깁니다. 열은 `INTEGER NOT NULL DEFAULT (nextval('seq'))`이고 키이면 SQLite의 INTEGER PRIMARY KEY(rowid)가 됩니다. INSERT가 빠뜨린 identity 열(그리고 `DEFAULT`)은 프론트엔드가 `nextval()`로 채웁니다: SQLite는 INTEGER PRIMARY KEY의 DEFAULT를 쓰지 않고, `trusted_schema`가 꺼져 있으면 스키마의 `nextval()`은 unsafe use이기 때문입니다. `GENERATED ALWAYS`는 명시한 값을 거부합니다(`OVERRIDING SYSTEM VALUE`로 허용). `xq_catalog`에 `identity`/`identity_kind`가 남고, 테이블을 지우면 시퀀스도 지웁니다. sqlite3에서 이 테이블에 키 없이 넣으면 rowid가 번호를 매깁니다.
 - ORDER BY는 PostgreSQL처럼 NULL을 가장 큰 값으로 칩니다(ASC면 마지막, DESC면 처음). NOT NULL 열과 INTEGER PRIMARY KEY에는 붙이지 않아서 인덱스 순서를 그대로 씁니다(그때 바이트코드는 SQLite와 같음).
-- `LIKE`는 대소문자를 구분하고 기본 이스케이프가 `\`입니다(방언의 `like()`가 SQLite의 것을 가림). `ILIKE`는 ASCII 대소문자를 무시합니다.
+- `LIKE`는 대소문자를 구분하고 기본 이스케이프가 `\`입니다(엔진 함수 `xq_like()`). `ILIKE`는 ASCII 대소문자를 무시합니다(`xq_ilike()`).
+- 스키마에 저장되는 식(CHECK, DEFAULT, 생성 열, 인덱스 식, 뷰)은 IR이 렌더링하므로 SQLite 방언이나 다른 방언의 연결에서 읽어도 같은 뜻입니다. PostgreSQL 함수 테이블의 함수는 `xq_postgres_greatest(...)`처럼 저장됩니다(sqlite3에서는 그런 식을 계산할 수 없음).
 - 결과 열 이름은 PostgreSQL 규칙(`?column?`, 함수 이름, 상수 캐스트면 `int4` 같은 타입 이름, `case`, `exists`)입니다.
 - 식별자를 접지만 SQLite의 이름 비교는 대소문자를 구분하지 않으므로 `"Foo"`와 `foo`는 같은 이름입니다.
 - `now()`와 `current_timestamp`는 문장 시각의 `'YYYY-MM-DD HH:MM:SS.SSS'`(UTC, 시간대 표기 없음)여서 SQLite 날짜 함수가 그대로 읽습니다. `::date`/`::timestamp`/`::time`은 `date()`/`datetime()`/`time()`, `::int`는 실수를 버림(PostgreSQL은 반올림), `::varchar(n)`은 자름, `::numeric(p,s)`는 반올림입니다.
@@ -263,7 +302,7 @@ INSERT INTO users (email, status) VALUES ('c@x.org', 'nope');  -- '' + 경고
 SHOW WARNINGS;
 ```
 
-**구조.** `src/dialect/mariadb/`의 토크나이저(`lexer.zig`)와 재귀 하강 파서(`parser.zig`, `functions.zig`, `dml.zig`, `ddl.zig`, `session.zig`)가 문장을 `ir.*`로 바로 내립니다. 세션 상태(`sql_mode`, 경고, 사용자 변수)는 연결의 `ConnState.mariadb`(`state.zig`)에 있고, MariaDB 의미가 SQLite와 다른 연산·함수는 방언 함수 테이블(`runtime.zig`, `xq_div`, `xq_coerce` ...)로 구현합니다.
+**구조.** `src/dialect/mariadb/`의 토크나이저(`lexer.zig`)와 재귀 하강 파서(`parser.zig`, `functions.zig`, `dml.zig`, `ddl.zig`, `session.zig`)가 문장을 `ir.*`로 바로 내립니다. 아직 구문 트리 IR로 옮기지 않았습니다(다음 단계): 저장되는 식은 토큰 단위로 옮기고(`ddl.zig` translateRange), `DEFAULT` 키워드와 `xq_coerce` 감싸기는 파서가 직접 처리하므로 실행과 저장의 의미가 어긋날 수 있습니다(예: `/`는 실행 시 `CAST(l AS REAL) / r`, 저장 시 `* 1.0 /`). 세션 상태(`sql_mode`, 경고, 사용자 변수)는 연결의 `ConnState.mariadb`(`state.zig`)에 있고, MariaDB 의미가 SQLite와 다른 연산·함수는 방언 함수 테이블(`runtime.zig`, `xq_div`, `xq_coerce` ...)로 구현합니다.
 
 **저장 방식.** DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내리므로 sqlite3가 그대로 열고 `PRAGMA integrity_check`를 통과합니다.
 
@@ -513,6 +552,7 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall
 - [x] **Phase 4 · 공통 IR**: 프론트엔드 분리와 카탈로그 확장. SQLite 파스 트리와 코드 생성기 진입점을 IR로 삼고(`src/ir/ir.zig`, SQLite 파서도 이 파사드로 내림), 연결 단위 방언 선택(`OpenOptions.dialect`, `PRAGMA xq_dialect`, `.dialect`)과 프론트엔드 디스패치, 방언 훅(함수 테이블, 추가·기본 collation), STRICT 기반 엄격한 타입, `xq_catalog`·`xq_sequence` 카탈로그와 시퀀스(nextval/currval/setval/lastval). PostgreSQL·MariaDB는 스텁 프론트엔드와 함수 테이블만. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 그대로 같음 ([방언 아키텍처](#방언-아키텍처))
 - [x] **Phase 5 · PostgreSQL 방언**: PostgreSQL 어휘 규칙의 lexer와 재귀 하강 파서(구문 트리 → `ir.*`), SELECT 전반(조인, 서브쿼리, 집합 연산, `WITH [RECURSIVE]`, 윈도우, `OFFSET/FETCH`, PostgreSQL식 NULL 정렬), INSERT/UPDATE/DELETE와 `RETURNING`·`ON CONFLICT`·`UPDATE FROM`·`DELETE USING`, 트랜잭션·세이브포인트, DDL(SQLite 텍스트 + `xq_catalog`), STRICT 기반 엄격한 타입과 PostgreSQL 메시지 이름의 CHECK, `SERIAL`/`IDENTITY`(시퀀스), `CREATE SEQUENCE`, `information_schema`·`pg_catalog` 뷰, PostgreSQL 함수와 오류 문구. 실제 PostgreSQL 16과 차등 비교(`tools/dialect/pg-diff.sh`), sqlite3 교차 검증(`tools/interop-pg.sh`). `DISTINCT ON`, 배열, ENUM, 스키마, PL/pgSQL 등은 아직 ([PostgreSQL 방언](#postgresql-방언))
 - [x] **Phase 6 · MariaDB 방언**: 토크나이저(백틱, 백슬래시 이스케이프, `#`/`-- `/실행 주석)와 재귀 하강 파서가 `ir.*`로 바로 내림. 연결 단위 `sql_mode`(`ANSI_QUOTES`, `PIPES_AS_CONCAT`, `NO_BACKSLASH_ESCAPES`, `NO_AUTO_VALUE_ON_ZERO`, `EMPTY_STRING_IS_NULL`, 엄격/관대 모드의 값 변환과 MariaDB 오류·경고, 조합 모드), `SELECT`(조인, 세 가지 `LIMIT`, `UNION`, CTE, 윈도우), `INSERT [IGNORE]`/`REPLACE`/`ON DUPLICATE KEY UPDATE`/`RETURNING`, `UPDATE`/`DELETE ... LIMIT`, STRICT 테이블 + 명시적 collation으로 렌더링하는 DDL과 `xq_catalog`, `AUTO_INCREMENT`(`INTEGER PRIMARY KEY AUTOINCREMENT`), MariaDB 타입(정수 범위, `DECIMAL`, 문자열 길이, `ENUM`/`SET`, 날짜/시간), 기본 대소문자 무시 비교(`IN` 포함), `SHOW`/`DESCRIBE`/`information_schema`, 시스템·사용자 변수, 시퀀스, MariaDB 함수. MariaDB 11.8 서버와 차등 비교로 확인. 저장 프로시저·트리거·다중 테이블 DML·`ALTER TABLE CHANGE/MODIFY`·정확한 `DECIMAL`·PAD SPACE·셸의 방언별 문장 분할은 아직 ([MariaDB 방언](#mariadb-방언))
+- [ ] **구문 트리 IR**: 방언 중립 구문 트리(`src/ir/tree.zig`)와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT 처리. PostgreSQL은 옮김(`ast.zig`/`lower.zig`/`render.zig` 삭제), MariaDB는 다음 단계 ([방언 아키텍처](#방언-아키텍처))
 - [ ] **Phase 7 · MSSQL 방언**: T-SQL 파서, `IDENTITY`, `TOP`, `OUTPUT`, `MERGE`
 - [ ] **Phase 8 · 서버 모드**: pgwire, MySQL protocol, TDS
 
@@ -528,11 +568,11 @@ src/
 ├── vdbe/               # 바이트코드 VM
 ├── parse/              # SQLite tokenizer, LALR(1) 파서
 ├── sql/                # 코드 생성기, 플래너, 내장 함수 (SQLite C 포팅)
-├── ir/                 # 공통 IR 빌더 파사드
+├── ir/                 # 공통 IR: 빌더 파사드, 구문 트리, lower, render
 ├── catalog/            # 방언 메타데이터(xq_catalog), 시퀀스(xq_sequence)
 ├── dialect/
 │   ├── sqlite/
-│   ├── postgres/       # Phase 5: lexer, parser, AST, IR 내림, DDL, 카탈로그 뷰
+│   ├── postgres/       # Phase 5: lexer, parser(→ 구문 트리 IR), DDL 검사, 카탈로그 뷰
 │   ├── mariadb/        # Phase 6: 토크나이저, 파서, sql_mode, 타입 변환, 함수
 │   └── mssql/          # 예정
 ├── api/                # Zig API

@@ -10,8 +10,8 @@
 #      and sqlite3 recovers both files to the old or both to the new rows
 #      and deletes the super-journal
 #   5. sqlite3 dies at every write, truncation or delete of such a commit
-#      (a preloaded library, built with $CC, ends the process at the Nth
-#      one), and xqlite recovers
+#      (tools/crashshim.c, built with $CC and preloaded, ends the process
+#      at the Nth one), and xqlite recovers
 # Requires a prior `zig build`. SQLITE3 names the sqlite3 shell (default:
 # /tmp/xq-sqlite-build/sqlite3 if it exists, else sqlite3 on PATH).
 set -eu
@@ -146,13 +146,22 @@ done
 [ $fail = 0 ] && echo "   ok"
 
 # After a crash at write $2 of a commit, the other engine ($3) must find
-# all three files old or all new. (A crash before a journal names the
-# super-journal orphans it, in sqlite3 too.)
+# all three files old or all new. Which one the files on disk decide: a
+# journal that names a super-journal that is gone belongs to a committed
+# transaction, so then all must be new; while the super-journal exists,
+# all must be old. (A crash before a journal names the super-journal
+# orphans it, in sqlite3 too, so the transaction rolls back.)
 recovered() { # $1: label, $2: crash point, $3: reader
+  want="oldoldold ok ok ok |newnewnew ok ok ok "
+  if ls ./*-mj* > /dev/null 2>&1; then
+    want="oldoldold ok ok ok "
+  elif grep -a -q -e '-mj' ./*-journal 2>/dev/null; then
+    want="newnewnew ok ok ok "
+  fi
   got=$($3 main.db "$check3" | tr '\n' ' ')
-  case "$got" in
-    "oldoldold ok ok ok "|"newnewnew ok ok ok ") ;;
-    *) echo "FAIL $1, crash at $2: $got"; fail=1 ;;
+  case "|$want|" in
+    *"|$got|"*) ;;
+    *) echo "FAIL $1, crash at $2: $got (want ${want%% |*})"; fail=1 ;;
   esac
   return 0
 }
@@ -186,82 +195,6 @@ done
 
 echo "5) sqlite3 crashes at each change of a file in the commit, xqlite recovers"
 cc="${CC:-cc}"
-cat > "$tmp/shim.c" <<'C'
-/* _exit(0) at the CRASH_AT-th change (a write, a truncation or an unlink)
-** of a file whose name ends with CRASH_SUFFIX. */
-#define _GNU_SOURCE
-#include <dlfcn.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/types.h>
-#include <unistd.h>
-static int matches(const char *path){
-  const char *suffix = getenv("CRASH_SUFFIX");
-  size_t n, m;
-  if( suffix==0 ) return 0;
-  n = strlen(path); m = strlen(suffix);
-  return n>=m && strcmp(path+n-m, suffix)==0;
-}
-static int fd_matches(int fd){
-  char path[4096];
-#ifdef __APPLE__
-  if( fcntl(fd, F_GETPATH, path)==-1 ) return 0;
-#else
-  { char link[64]; ssize_t got;
-    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
-    got = readlink(link, path, sizeof(path)-1);
-    if( got<0 ) return 0;
-    path[got] = 0; }
-#endif
-  return matches(path);
-}
-static void tick(int hit){
-  static int count = 0;
-  const char *at = getenv("CRASH_AT");
-  if( at && hit && ++count==atoi(at) ) _exit(0);
-}
-#ifdef __APPLE__
-static ssize_t my_pwrite(int fd, const void *b, size_t n, off_t o){ tick(fd_matches(fd)); return pwrite(fd, b, n, o); }
-static ssize_t my_write(int fd, const void *b, size_t n){ tick(fd_matches(fd)); return write(fd, b, n); }
-static int my_ftruncate(int fd, off_t n){ tick(fd_matches(fd)); return ftruncate(fd, n); }
-static int my_unlink(const char *path){ tick(matches(path)); return unlink(path); }
-__attribute__((used)) static struct { const void *a, *b; } interposers[]
-  __attribute__((section("__DATA,__interpose"))) = {
-  { (const void*)my_pwrite, (const void*)pwrite },
-  { (const void*)my_write, (const void*)write },
-  { (const void*)my_ftruncate, (const void*)ftruncate },
-  { (const void*)my_unlink, (const void*)unlink },
-};
-#else
-#define NEXT(name, type) static type real; if( !real ) real = (type)dlsym(RTLD_NEXT, name)
-ssize_t pwrite(int fd, const void *b, size_t n, off_t o){
-  NEXT("pwrite", ssize_t(*)(int, const void*, size_t, off_t));
-  tick(fd_matches(fd)); return real(fd, b, n, o);
-}
-ssize_t pwrite64(int fd, const void *b, size_t n, off_t o){
-  NEXT("pwrite64", ssize_t(*)(int, const void*, size_t, off_t));
-  tick(fd_matches(fd)); return real(fd, b, n, o);
-}
-ssize_t write(int fd, const void *b, size_t n){
-  NEXT("write", ssize_t(*)(int, const void*, size_t));
-  tick(fd_matches(fd)); return real(fd, b, n);
-}
-int ftruncate(int fd, off_t n){
-  NEXT("ftruncate", int(*)(int, off_t));
-  tick(fd_matches(fd)); return real(fd, n);
-}
-int ftruncate64(int fd, off_t n){
-  NEXT("ftruncate64", int(*)(int, off_t));
-  tick(fd_matches(fd)); return real(fd, n);
-}
-int unlink(const char *path){
-  NEXT("unlink", int(*)(const char*));
-  tick(matches(path)); return real(path);
-}
-#endif
-C
 case "$(uname)" in
   Darwin) shim="$tmp/shim.dylib"; shim_flags="-dynamiclib"; preload=DYLD_INSERT_LIBRARIES ;;
   *) shim="$tmp/shim.so"; shim_flags="-shared -fPIC"; preload=LD_PRELOAD ;;
@@ -269,7 +202,7 @@ esac
 sq_crash_db() { env "$preload=$shim" CRASH_SUFFIX=.db CRASH_AT=$1 "$sq" main.db "$(txn $mode)"; }
 sq_crash_journal() { env "$preload=$shim" CRASH_SUFFIX=-journal CRASH_AT=$1 "$sq" main.db "$(txn $mode)"; }
 # shellcheck disable=SC2086
-if ! "$cc" $shim_flags -o "$shim" "$tmp/shim.c" -ldl 2>/dev/null && ! "$cc" $shim_flags -o "$shim" "$tmp/shim.c" 2>/dev/null; then
+if ! "$cc" $shim_flags -o "$shim" "$root/tools/crashshim.c" -ldl 2>/dev/null && ! "$cc" $shim_flags -o "$shim" "$root/tools/crashshim.c" 2>/dev/null; then
   echo "   skipped: cannot build the preload library with $cc"
 elif [ "$(env "$preload=$shim" CRASH_SUFFIX=probe.db CRASH_AT=1 "$sq" probe.db "CREATE TABLE t(x); SELECT 'alive';" 2>&1)" = alive ]; then
   echo "   skipped: $preload does not reach $sq"

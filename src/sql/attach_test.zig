@@ -432,3 +432,81 @@ test "attach: a transaction over several databases commits atomically" {
         }
     }
 }
+
+/// Whether tools/gen-superjournal-fixtures.sh leaves `file` in `state`.
+fn fixtureExists(comptime state: []const u8, comptime file: []const u8) bool {
+    const have = .{
+        .{ "pending", "main.db a.db b.db main.db-journal a.db-journal b.db-journal super" },
+        .{ "committed-0", "main.db a.db b.db main.db-journal a.db-journal b.db-journal" },
+        .{ "committed-1", "main.db a.db b.db a.db-journal b.db-journal" },
+        .{ "committed-2", "main.db a.db b.db b.db-journal" },
+    };
+    inline for (have) |h| {
+        if (comptime std.mem.eql(u8, h[0], state)) {
+            var it = std.mem.tokenizeScalar(u8, h[1], ' ');
+            while (it.next()) |f| if (std.mem.eql(u8, f, file)) return true;
+            return false;
+        }
+    }
+    unreachable;
+}
+
+const fixture_files = [_][]const u8{ "main.db", "a.db", "b.db", "main.db-journal", "a.db-journal", "b.db-journal", "super" };
+
+/// The files sqlite3 left when it died during the commit of a transaction
+/// over main.db, a.db and b.db, in the order of fixture_files.
+fn superJournalState(comptime state: []const u8) [fixture_files.len]?[]const u8 {
+    var out: [fixture_files.len]?[]const u8 = @splat(null);
+    inline for (fixture_files, 0..) |f, i| {
+        if (comptime fixtureExists(state, f)) out[i] = @embedFile("../testdata/superjournal/" ++ state ++ "/" ++ f);
+    }
+    return out;
+}
+
+test "attach: recovery of the super-journal and journals sqlite3 left" {
+    const journal = @import("../pager/journal.zig");
+    inline for (.{
+        // sqlite3 died before deleting the super-journal: all roll back.
+        .{ "pending", "oldoldold\n" },
+        // It died after deleting it (the commit point), while deleting
+        // the journals: none may roll back. tools/interop-attach.sh found
+        // a and b rolled back here in optimized builds, which read the
+        // checksum of the super-journal name wrong.
+        .{ "committed-0", "newnewnew\n" },
+        .{ "committed-1", "newnewnew\n" },
+        .{ "committed-2", "newnewnew\n" },
+    }) |case| {
+        const files = superJournalState(case[0]);
+        var mem = MemVfs.init(testing.allocator, testing.io);
+        defer mem.deinit();
+        const v = mem.interface();
+        for (fixture_files[0..6], files[0..6]) |n, content| {
+            const bytes = content orelse continue;
+            const f = try v.open(n, .{ .create = true });
+            defer f.close();
+            try f.write(bytes, 0);
+        }
+        if (files[6]) |super| {
+            // The super-journal goes by the name the journals give it.
+            const j = files[3].?;
+            const tail = j[j.len - journal.super_trailer_len ..][0..journal.super_trailer_len];
+            const len = journal.superNameLen(tail, j.len, 4096).?;
+            const super_name = j[j.len - journal.super_trailer_len - len ..][0..len];
+            const f = try v.open(super_name, .{ .create = true, .kind = .super_journal });
+            defer f.close();
+            try f.write(super, 0);
+        }
+        var opened: ?*int.Sqlite3 = null;
+        try testing.expectEqual(RC.OK, main_mod.open(v, "main.db", .{}, &opened));
+        var c: Conn = .{ .mem = &mem, .own = undefined, .db = opened.? };
+        defer _ = main_mod.close(c.db);
+        try c.exec("ATTACH 'a.db' AS a; ATTACH 'b.db' AS b");
+        c.expectRows("SELECT (SELECT group_concat(DISTINCT b) FROM main.t) || (SELECT group_concat(DISTINCT b) FROM a.t) || (SELECT group_concat(DISTINCT b) FROM b.t)", case[1]) catch |err| {
+            std.debug.print("state {s}\n", .{case[0]});
+            return err;
+        };
+        try c.expectRows("PRAGMA integrity_check; PRAGMA a.integrity_check; PRAGMA b.integrity_check", "ok\nok\nok\n");
+        // The journals of a committed transaction are finalized.
+        if (files[6] == null) for (fixture_files[3..6]) |n| try testing.expect(!try v.access(n, .exists));
+    }
+}

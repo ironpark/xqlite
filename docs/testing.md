@@ -41,6 +41,7 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 | `tools/dialect/pg-diff.sh` | PostgreSQL 방언을 실제 PostgreSQL 16과 차등 비교 | PostgreSQL 서버 |
 | `tools/dialect/maria-diff.sh` | MariaDB 방언을 실제 MariaDB 11과 차등 비교 | MariaDB 서버 |
 | `tools/gen-fixtures.sh` | `src/testdata`의 테스트용 DB 재생성 | sqlite3 |
+| `tools/gen-superjournal-fixtures.sh` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `SQLITE3`, C 컴파일러(`CC`) |
 
 ## 준비
 
@@ -91,6 +92,8 @@ zig build test
 - `tools/globals_test.zig`: `src/`에 허용 목록 밖의 가변 전역이 없는지 검사합니다.
 - 모든 [시드 퍼저](#시드-퍼저)의 스모크 실행(고정 시드, 적은 이벤트)
 
+모듈의 단위 테스트는 Debug로 빌드합니다. 다만 `src/pager/journal.zig`의 테스트(저널 체크섬)는 ReleaseSafe로 한 번 더 돌립니다. Zig 0.17이 super journal 이름의 체크섬 루프를 최적화 빌드에서만 잘못 컴파일했기 때문입니다. 모듈 전체를 최적화해 돌리려면 `zig test -O ReleaseSafe -lc src/root.zig`를 씁니다.
+
 ## sqlite3 교차 검증
 
 같은 작업을 xqlite와 sqlite3로 하고 결과와 파일을 비교합니다. 파일을 서로 넘겨 읽고 쓰므로 파일 포맷 호환도 함께 확인합니다.
@@ -130,7 +133,7 @@ SQLITE3=/tmp/sqref/sqlite3 ./tools/interop-mariadb.sh
 
 - `interop-wal.sh`: 오류를 주입하는 VFS(`src/vfs/crash.zig`)를 씁니다. N번째 쓰기에서 프로세스를 바로 끝내 전원 차단을 흉내 내고, 선택하면 그 쓰기를 절반만 기록합니다. `xqlite` 명령이 `$XQLITE_TEST_CRASH`를 받을 때만 설치하고, 라이브러리는 쓰지 않습니다.
 - `interop-hot-journal.sh`: `xqlite crash-write FILE BYTE`가 모든 페이지를 덮어쓴 뒤 커밋 1단계에서 끝나 핫 저널을 남깁니다.
-- `interop-attach.sh`, `interop-vacuum.sh`: xqlite는 `$XQLITE_TEST_CRASH`(`db:N`, `journal:N`, `wal:N`)로, sqlite3는 스크립트가 `CC`로 빌드해 미리 올리는 라이브러리(macOS `DYLD_INSERT_LIBRARIES`, Linux `LD_PRELOAD`)로 죽입니다. 이 라이브러리는 이름이 정한 접미사로 끝나는 파일의 N번째 변경(쓰기, 자르기, 삭제)에서 프로세스를 끝냅니다. 빌드할 수 없거나 sqlite3에 닿지 않으면 그 단계만 건너뜁니다.
+- `interop-attach.sh`, `interop-vacuum.sh`: xqlite는 `$XQLITE_TEST_CRASH`(`db:N`, `journal:N`, `wal:N`)로, sqlite3는 스크립트가 `CC`로 빌드해 미리 올리는 라이브러리(`interop-attach.sh`는 `tools/crashshim.c`, macOS `DYLD_INSERT_LIBRARIES`, Linux `LD_PRELOAD`)로 죽입니다. 이 라이브러리는 이름이 정한 접미사로 끝나는 파일의 N번째 변경(쓰기, 자르기, 삭제)에서 프로세스를 끝냅니다. 빌드할 수 없거나 sqlite3에 닿지 않으면 그 단계만 건너뜁니다.
 
 ## 플래너 차등 테스트
 
@@ -267,6 +270,7 @@ tools/dialect/maria-diff.sh [cases-file]     # 기본: tools/dialect/maria-cases
 | 도구 | 하는 일 |
 | --- | --- |
 | `tools/gen-fixtures.sh` | `src/testdata`의 테스트용 DB를 sqlite3 셸로 다시 만듭니다. 내용은 결정적이고 테스트가 같은 식으로 검사합니다. |
+| `tools/gen-superjournal-fixtures.sh` | 세 파일 트랜잭션을 커밋하던 sqlite3를 `tools/crashshim.c`로 네 지점(super journal을 지우기 직전, 지운 뒤 저널을 하나도·하나·둘 지운 때)에서 죽여 남은 파일을 `src/testdata/superjournal`에 저장합니다. `src/sql/attach_test.zig`가 xqlite로 복구해 봅니다. |
 | `tools/bench.sh [workload...]` | 같은 작업을 xqlite와 sqlite3로 재고 비율을 출력합니다. `zig build -Doptimize=ReleaseFast` 뒤에 씁니다(`RUNS`, `ROWS`, `XQLITE`, `SQLITE3`). |
 | `tools/gen-parser.sh` | SQLite 문법(`parse.y`)에서 `src/parse/grammar.zig`를 다시 만듭니다. `ref/sqlite`와 C 컴파일러가 필요합니다. |
 | `tools/gen-opcodes.sh` | `src/vdbe/opcodes.zig`를 다시 만듭니다. `ref/sqlite`, tclsh, C 컴파일러가 필요합니다. |

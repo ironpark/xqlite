@@ -22,7 +22,7 @@ xqlite의 MariaDB(MySQL) 방언이 지원하는 문법과 의미, 그리고 Mari
 | Zig API | `db.setDialect(.mariadb)` |
 
 - SQLite로 돌아갈 때도 `PRAGMA xq_dialect = 'sqlite'`를 그대로 씁니다.
-- `PRAGMA`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`는 MariaDB 방언에서도 SQLite 문장으로 넘깁니다. 이 가운데 `ATTACH`, `DETACH`, `VACUUM`은 엔진에 아직 없습니다([SQLite 호환](sqlite.md#아직-하지-않은-것)).
+- `PRAGMA`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`는 MariaDB 방언에서도 SQLite 문장으로 넘깁니다. 이 가운데 `VACUUM`은 엔진에 아직 없습니다([SQLite 호환](sqlite.md#아직-하지-않은-것)).
 
 ```sql
 PRAGMA xq_dialect = 'mariadb';
@@ -292,7 +292,7 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
 
 - 쓴 대소문자를 그대로 저장하고 대소문자 없이 비교합니다.
 - MariaDB `lower_case_table_names=2`와 같은 동작이라 `@@lower_case_table_names`는 2입니다.
-- 데이터베이스는 SQLite 스키마(`main`, `temp`)입니다. `ATTACH`가 구현되면 붙인 데이터베이스 이름도 같은 방식으로 씁니다.
+- 데이터베이스는 SQLite 스키마(`main`, `temp`, `ATTACH`로 붙인 데이터베이스)입니다. 붙인 데이터베이스도 `db.t`로 읽고 쓰고, `CREATE TABLE db.t`의 카탈로그 키는 그 데이터베이스의 `xq_catalog`에 기록합니다. `SHOW DATABASES`, `SHOW TABLES FROM db`, `information_schema`에도 나옵니다.
 
 ## MariaDB와 다른 점
 

@@ -106,7 +106,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | 윈도우 함수 | ✅ | ✅ | ✅ | 🎯 |
 | JSON | ✅ `json1` | 🚧 `json`/`jsonb` | 🚧 | 🎯 `JSON_VALUE` 등 |
 | 시퀀스 | — | ✅ | ✅ | 🎯 |
-| 스키마(네임스페이스) | 🚧 `ATTACH` 미구현 | 🚧 `public`만 | 🚧 (database) | 🎯 |
+| 스키마(네임스페이스) | ✅ `ATTACH` | 🚧 `public`, 붙인 DB는 질의·DML만 | 🚧 (database, `ATTACH`) | 🎯 |
 | 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 |
 | 트리거 | ✅ | 🎯 | 🎯 | 🎯 |
 | 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🎯 `sys.*` |

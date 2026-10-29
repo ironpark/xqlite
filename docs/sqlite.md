@@ -30,12 +30,25 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 - B-Tree 읽기/쓰기와 레코드 포맷을 구현했습니다.
 - auto-vacuum과 incremental vacuum을 지원합니다.
 - 기존 SQLite 파일을 그대로 읽고 씁니다.
+- 파일은 sqlite3처럼 전체 경로(`xFullPathname`, 심볼릭 링크를 따라감)로 부릅니다. 그래서 `PRAGMA database_list`가 같은 이름을 보여 줍니다.
 
 ### SQL
 
 - Lexer와 LALR(1) 파서는 SQLite의 `parse.y`에서 생성합니다.
 - VDBE와 쿼리 플래너를 포팅했습니다.
 - `xqlite sql`은 `sqlite3` 호환 셸입니다. 출력 모드와 자주 쓰는 dot-command(`.dump`, `.schema`, `.tables`, `.mode` 등)를 지원하며, 목록은 `.help`로 볼 수 있습니다.
+
+### ATTACH와 여러 데이터베이스
+
+- `ATTACH [DATABASE] expr AS name [KEY expr]`와 `DETACH [DATABASE] name`은 attach.c 포팅입니다. sqlite3처럼 내부 함수 `sqlite_attach()`/`sqlite_detach()`를 부르는 `OP_Function`과 `OP_Expire`를 만들므로 바이트코드가 같습니다.
+- 오류 메시지가 같습니다: `too many attached databases - max %d`(`SQLITE_LIMIT_ATTACHED`, 최대 10), `database %s is already in use`, `no such database: %s`, `cannot detach database %s`, `database %s is locked`, `unable to open database: %s`.
+- 트랜잭션 안에서도 붙이고, 읽거나 쓰는 중인 데이터베이스는 떼지 못합니다. `DETACH` 전에 준비된 문장은 다시 컴파일됩니다.
+- `":memory:"`와 `""`는 연결 전용 임시 데이터베이스입니다.
+- `SQLITE_DBCONFIG_ENABLE_ATTACH_CREATE`/`_WRITE`가 꺼져 있으면 새 파일을 만들지 않거나 읽기 전용으로 붙입니다.
+- URI 파일 이름(`file:x.db?mode=ro`)은 `OpenFlags.uri`로 연 연결에서 받습니다. `xqlite sql` 셸은 sqlite3 셸처럼 켜 둡니다. `mode`, `cache`와 `%HH`를 처리합니다.
+- 붙인 데이터베이스에서도 스키마 읽기, `name.sqlite_schema`, WAL 모드, `PRAGMA name.xxx`, 스키마 인자를 받는 `pragma_*` 테이블 값 함수, 뷰·트리거의 DbFixer 검사, 붙인 테이블에 거는 TEMP 트리거가 sqlite3와 같게 동작합니다.
+- 롤백 저널 모드에서 두 개 이상의 파일에 쓰는 트랜잭션은 super journal(`<main>-mjXXXXXX9XX`)로 커밋합니다. 그래서 커밋 도중에 죽어도 모든 파일이 함께 되돌아가거나 함께 커밋됩니다. 형식이 sqlite3와 같아서 서로 남긴 super journal을 복구합니다.
+- 엔진 쪽 API: `sql.main.dbName()`, `dbFilename()`, `dbReadonly()`(`sqlite3_db_name`, `sqlite3_db_filename`, `sqlite3_db_readonly`). 엔진 코드가 데이터베이스를 붙였다 뗄 때는 `ATTACH` 문장을 실행하고 `sql.attach.closeDb()`로 뗍니다(VACUUM이 쓸 방식).
 
 ### 윈도우 함수
 
@@ -104,6 +117,7 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 | `tools/interop-pragma.sh`, `interop-shell.sh` | PRAGMA 결과, 셸 출력·dot-command·오류, `.dump` 왕복 |
 | `tools/interop-savepoint.sh`, `interop-hot-journal.sh` | 세이브포인트·문장 롤백, 핫 저널 복구 |
 | `tools/interop-wal.sh` | WAL 파일 상호 읽기, 체크포인트, 크래시 복구, 두 엔진 프로세스 동시 접근 |
+| `tools/interop-attach.sh` | 서로의 파일을 붙여 읽고 쓰기, 여러 파일 트랜잭션, 커밋 도중 크래시와 super journal 복구 |
 | `tools/planner/diff.py` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드를 sqlite3와 비교 |
 | `tools/slt/run.py` | sqllogictest. WAL 모드로도 돌립니다([tools/slt/README.md](../tools/slt/README.md)). |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`)에서 크래시·누수 |
@@ -114,7 +128,6 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 
 문장으로 쓰면 `not supported yet` 오류가 나는 것:
 
-- `ATTACH`, `DETACH`
 - `VACUUM`, `ANALYZE`, `PRAGMA optimize`
 - `PRAGMA locking_mode=EXCLUSIVE`. 그래서 힙 메모리 WAL 모드도 없습니다.
 - `PRAGMA journal_mode=MEMORY`
@@ -124,7 +137,10 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 
 - WAL 스냅샷 API
 - 백업 API
-- 다중 DB 커밋의 super journal 쓰기. 복구할 때 읽기만 합니다.
+- 메모리 데이터베이스. `":memory:"`는 임시 파일이라 `journal_mode`가 `memory`가 아닌 `delete`입니다.
+- VFS 등록과 이름. 그래서 URI의 `vfs=`는 늘 `no such vfs: %s`입니다.
+- 공유 캐시. URI의 `cache=`는 검사만 하고 무시합니다.
+- 권한 콜백(authorizer). `ATTACH`/`DETACH`도 검사하지 않습니다.
 - 메모리 맵 I/O. `PRAGMA mmap_size`는 항상 0을 돌려줍니다.
 - sqllogictest 전체 통과
 - Windows VFS

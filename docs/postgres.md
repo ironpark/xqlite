@@ -40,7 +40,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 
 | 파일 | 내용 |
 | --- | --- |
-| `frontend.zig` | 진입점. 한 문장을 파싱해 IR로 내림. `PRAGMA`·`ATTACH`·`DETACH`·`VACUUM`·`REINDEX`는 SQLite 문법으로, `ANALYZE`는 같은 인자로 SQLite에 넘김(`ATTACH`·`DETACH`·`VACUUM`·`ANALYZE`는 엔진에 아직 없음, [SQLite 호환](sqlite.md#아직-하지-않은-것)) |
+| `frontend.zig` | 진입점. 한 문장을 파싱해 IR로 내림. `PRAGMA`·`ATTACH`·`DETACH`·`VACUUM`·`REINDEX`는 SQLite 문법으로, `ANALYZE`는 같은 인자로 SQLite에 넘김(`VACUUM`·`ANALYZE`는 엔진에 아직 없음, [SQLite 호환](sqlite.md#아직-하지-않은-것)) |
 | `lexer.zig` | PostgreSQL 어휘(아래 [어휘](#어휘)) |
 | `parser.zig` | 재귀 하강 파서. IR을 만들면서 PostgreSQL 의미를 해석함(캐스트, LIKE/ILIKE, 함수 이름과 특수 문법, 결과 열 이름, NULL 정렬, 스키마 이름과 카탈로그 뷰, 짧은 INSERT VALUES, DDL의 타입·검사·identity) |
 | `ddl.zig` | DDL의 PostgreSQL 문구 검사, 이름 없는 인덱스의 이름 |
@@ -148,6 +148,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 - 뷰 정의는 PostgreSQL 텍스트로 쓰여 있고, 프론트엔드가 FROM 자리에서 파싱해 넣습니다. 저장되는 것은 없습니다.
 - 모든 테이블은 catalog `main`, schema `public`입니다.
 - `public.t`는 `main.t`, `pg_temp.t`는 `temp.t`입니다.
+- `ATTACH`로 붙인 데이터베이스는 그 이름의 스키마입니다. 질의와 DML(`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `RETURNING`)에서 `aux.t`로 씁니다. 그 안의 DDL과 카탈로그 뷰는 아직 `main`만 다룹니다([아직 하지 않은 것](#아직-하지-않은-것)).
 
 ## 타입 매핑
 
@@ -233,10 +234,10 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | DML | 데이터를 바꾸는 CTE, `ON CONFLICT ON CONSTRAINT`, `COPY` |
 | 타입 | 배열·`ARRAY[...]`, `ENUM`·`CREATE TYPE`·도메인, 시퀀스의 데이터 타입(언제나 `bigint`) |
 | 식과 함수 | `SIMILAR TO`와 정규식 연산자(`~`), `AT TIME ZONE`, `interval` 산술, `to_char`/`date_trunc`/`age`, `U&'...'` |
-| DDL | `public` 밖의 스키마(`CREATE SCHEMA`), `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`, 임시 테이블의 시퀀스(`main`에 남음) |
+| DDL | `public` 밖의 스키마(`CREATE SCHEMA`, 붙인 데이터베이스 안의 `CREATE`/`DROP`), `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`, 임시 테이블의 시퀀스(`main`에 남음) |
 | 절차·서버 | PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `SET`/`SHOW`, 격리 수준 |
 | 오류 | 0으로 나누기·오버플로 오류, 실행 중 오류 메시지의 PostgreSQL화 |
-| 카탈로그 | INTEGER PRIMARY KEY의 인덱스(`pg_indexes`에 `t_pkey`가 없음) |
+| 카탈로그 | INTEGER PRIMARY KEY의 인덱스(`pg_indexes`에 `t_pkey`가 없음), 붙인 데이터베이스(`information_schema`·`pg_catalog` 뷰에 나오지 않음) |
 | 셸 | dollar-quote 문장 분할(셸은 SQLite 규칙으로 문장을 나눔) |
 
 ## 검증

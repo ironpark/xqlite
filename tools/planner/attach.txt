@@ -1,0 +1,101 @@
+# ATTACH and DETACH, and queries over attached databases: the bytecode
+# of the statements themselves (OP_Function of sqlite_attach() or
+# sqlite_detach(), OP_Expire), then joins, DML, triggers, views and
+# pragmas on tables of another file.
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+INSERT INTO t VALUES(1,'x'),(2,'y'),(3,'z');
+==
+ATTACH 'aux.db' AS aux
+ATTACH DATABASE 'aux.db' AS "Aux"
+ATTACH aux AS aux
+ATTACH 'a' || '.db' AS 'a' || 'b'
+ATTACH ':memory:' AS m KEY 'secret'
+ATTACH '' AS e
+ATTACH NULL AS NULL
+ATTACH ? AS ?
+ATTACH 'aux.db' AS main
+ATTACH 'aux.db' AS temp
+ATTACH x || y AS z
+ATTACH (SELECT 'q.db') AS q
+ATTACH 'aux.db' AS aux; PRAGMA database_list
+ATTACH 'aux.db' AS aux; ATTACH 'aux.db' AS AUX
+ATTACH 'aux.db' AS aux; DETACH aux; PRAGMA database_list
+ATTACH 'aux.db' AS aux; DETACH DATABASE 'aux'
+DETACH aux
+DETACH main
+DETACH temp
+DETACH ?
+DETACH x || y
+CREATE TEMP TABLE tt(x); DETACH temp
+ATTACH 'aux.db' AS aux; BEGIN; CREATE TABLE aux.t(x); DETACH aux
+ATTACH 'aux.db' AS aux; SELECT * FROM aux.sqlite_schema
+SELECT * FROM pragma_database_list
+----
+# Tables of two attached files, built by sqlite3; each query attaches
+# them first. integrity_check and table_list are left out: they visit the
+# schema in hash order, which differs from SQLite's.
+CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INT);
+CREATE INDEX tb ON t(b);
+WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<200) INSERT INTO t SELECT i, 'v' || (i % 17), i % 5 FROM c;
+ATTACH 'aux1.db' AS aux1;
+CREATE TABLE aux1.u(x INTEGER PRIMARY KEY, y TEXT, z REAL);
+CREATE INDEX aux1.uy ON u(y);
+WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<300) INSERT INTO aux1.u SELECT i, 'v' || (i % 23), i * 1.5 FROM c;
+CREATE VIEW aux1.uv AS SELECT y, count(*) AS n FROM u GROUP BY y;
+CREATE TABLE aux1.t(a INTEGER PRIMARY KEY, b TEXT);
+INSERT INTO aux1.t VALUES(1, 'aux1');
+ATTACH 'aux2.db' AS aux2;
+CREATE TABLE aux2.w(k TEXT PRIMARY KEY, v) WITHOUT ROWID;
+INSERT INTO aux2.w VALUES('v1', 1), ('v2', 2), ('v3', 3);
+CREATE TABLE aux2.log(msg);
+CREATE TRIGGER aux2.wtr AFTER INSERT ON w BEGIN INSERT INTO log VALUES('w ' || new.k); END;
+.each ATTACH 'aux1.db' AS aux1
+.each ATTACH 'aux2.db' AS aux2
+==
+SELECT * FROM t WHERE a = 5
+SELECT * FROM aux1.t
+SELECT * FROM main.t WHERE a = 1
+SELECT count(*) FROM aux1.u
+SELECT * FROM aux1.u WHERE y = 'v3' ORDER BY x
+SELECT * FROM u WHERE x BETWEEN 10 AND 12
+SELECT t.a, u.y FROM t JOIN aux1.u ON u.x = t.a WHERE t.c = 2 ORDER BY t.a LIMIT 5
+SELECT t.b, w.v FROM t, aux2.w WHERE w.k = t.b ORDER BY t.a LIMIT 4
+SELECT y, n FROM aux1.uv ORDER BY n DESC, y LIMIT 3
+SELECT * FROM aux1.uv WHERE y = 'v1'
+SELECT (SELECT count(*) FROM aux1.u WHERE u.y = t.b) FROM t WHERE a < 4
+SELECT a FROM t WHERE b IN (SELECT k FROM aux2.w) ORDER BY a
+SELECT k FROM aux2.w WHERE k > 'v1'
+SELECT name, type FROM aux1.sqlite_schema ORDER BY name
+SELECT name FROM aux2.sqlite_master ORDER BY name
+SELECT * FROM aux1.sqlite_schema WHERE type = 'index'
+SELECT schema, name, type FROM pragma_table_list WHERE schema LIKE 'aux%' ORDER BY 1, 2
+SELECT * FROM pragma_table_info('u', 'aux1')
+SELECT * FROM aux1.pragma_index_list('u')
+SELECT name FROM pragma_index_list('w') JOIN aux2.sqlite_schema USING (name)
+PRAGMA aux1.table_info(u)
+PRAGMA aux2.index_list(w)
+PRAGMA aux1.page_count
+PRAGMA aux1.user_version
+PRAGMA aux2.journal_mode
+PRAGMA aux1.schema_version
+PRAGMA aux1.foreign_key_check
+PRAGMA no_such.user_version
+INSERT INTO aux1.t VALUES(2, 'two'); SELECT * FROM aux1.t
+INSERT INTO aux1.u(y, z) SELECT b, a FROM main.t WHERE a < 4; SELECT count(*) FROM aux1.u
+UPDATE aux1.u SET z = -z WHERE x < 3; SELECT x, z FROM aux1.u WHERE x < 4
+DELETE FROM aux1.u WHERE y = 'v1'; SELECT count(*) FROM aux1.u
+INSERT INTO aux2.w VALUES('v9', 9); SELECT * FROM aux2.log
+INSERT INTO aux2.w VALUES('v1', 0) ON CONFLICT(k) DO UPDATE SET v = v + 10; SELECT * FROM aux2.w
+BEGIN; UPDATE t SET c = 0; UPDATE aux1.u SET z = 0; UPDATE aux2.w SET v = 0; COMMIT; SELECT sum(c) FROM t
+BEGIN; UPDATE t SET c = 0; UPDATE aux1.u SET z = 0; ROLLBACK; SELECT sum(c) FROM t
+CREATE TABLE aux1.n AS SELECT a, b FROM t WHERE a < 3; SELECT * FROM aux1.n
+CREATE INDEX aux2.wv ON w(v); SELECT k FROM aux2.w WHERE v = 2
+DROP TABLE aux1.t; SELECT * FROM t WHERE a = 1
+ALTER TABLE aux2.w RENAME TO w2; SELECT sql FROM aux2.sqlite_schema ORDER BY name
+CREATE VIEW aux1.v2 AS SELECT * FROM main.t
+CREATE VIEW aux1.v3 AS SELECT * FROM aux2.w
+CREATE TRIGGER aux1.tr AFTER INSERT ON u BEGIN INSERT INTO main.t VALUES(new.x, new.y, 0); END
+CREATE TEMP TRIGGER ttr AFTER INSERT ON aux1.t BEGIN INSERT INTO aux2.log VALUES('t ' || new.b); END; INSERT INTO aux1.t VALUES(5, 'five'); SELECT * FROM aux2.log
+CREATE TEMP VIEW tv AS SELECT t.a, u.z FROM t JOIN aux1.u ON u.x = t.a; SELECT * FROM tv WHERE a = 7
+DETACH aux1; SELECT * FROM aux1.u
+DETACH aux2; SELECT name FROM pragma_database_list

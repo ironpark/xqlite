@@ -49,9 +49,10 @@ tools/planner/gen-hard.py 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 tools/pl
   ```
 
   블록마다 가상 테이블을 하나만 둡니다. 스키마 해시를 도는 순서(연결을 닫을 때의 xDisconnect, integrity_check의 xIntegrity)가 SQLite의 해시와 다르기 때문입니다.
-- 셋업 줄 중 `.`으로 시작하는 줄은 dot-command로 따로 넘깁니다(예: `.dbconfig defensive off`). 쓰기가 있는 쿼리(SELECT/VALUES가 아니거나 `;`이 있는 쿼리)는 세 비교 모두 DB 사본에서 돌립니다. EXPLAIN도 첫 문장 뒤의 문장은 실제로 실행되기 때문입니다.
+- 셋업 줄 중 `.`으로 시작하는 줄은 dot-command로 따로 넘깁니다(예: `.dbconfig defensive off`). `.each SQL` 줄은 블록의 모든 쿼리 앞에 같은 연결에서 `SQL`을 실행합니다(예: `.each ATTACH 'aux.db' AS aux`). 두 엔진은 블록마다 따로 둔 디렉터리에서 실행하므로 SQL의 상대 경로 파일은 그 안에 생깁니다. 쓰기가 있는 쿼리(SELECT/VALUES가 아니거나 `;`이 있는 쿼리)는 세 비교 모두 DB 사본에서 돌립니다. EXPLAIN도 첫 문장 뒤의 문장은 실제로 실행되기 때문입니다.
 - EXPLAIN의 P4에 나오는 `vtab:주소`는 `vtab:PTR`로 바꿔서 비교합니다.
 - `json.txt`는 JSON 함수 케이스입니다. SQLite TCL 테스트(`json1*.test`, `json50*.test`, `jsonb01.test`)에서 뽑은 쿼리와, 끝부분의 `json_each`/`json_tree` 블록(같은 테스트와 `join.test`, `join8.test`, `whereF.test`, `tabfunc01.test` 등에서 뽑은 쿼리, 조인·상관 인자·경로 인자·ORDER BY/LIMIT·JSONB 입력·오류를 다루는 쿼리)으로 이루어집니다.
+- `attach.txt`는 `ATTACH`/`DETACH` 문장 자체(`sqlite_attach()`/`sqlite_detach()`를 부르는 `OP_Function`, `OP_Expire`)와 붙인 데이터베이스 위의 조인, DML, 트리거, 뷰, PRAGMA, `sqlite_schema` 케이스입니다. 스키마를 해시 순서로 도는 `integrity_check`와 `table_list`는 뺐습니다. 해시 순서가 SQLite와 다르기 때문입니다.
 - `wal.txt`는 WAL PRAGMA(`journal_mode` 전환, 모드별 `wal_checkpoint`, `wal_autocheckpoint`) 케이스입니다. 롤백 저널 DB와 WAL DB에서 결과와 `OP_JournalMode`·`OP_Checkpoint` 바이트코드를 비교합니다.
 - `window.txt`는 윈도우 함수 케이스입니다. SQLite TCL 테스트(`window*.test`)에서 뽑은 쿼리와, 뷰·서브쿼리·조인·복합 SELECT·DML 등 select.c와 맞물리는 경로를 다루는 쿼리로 이루어집니다.
 - `gen-basic.py`, `gen-hard.py`는 시드로 무작위 케이스를 만듭니다. `gen-hard.py`는 ANALYZE 통계, 스킵 스캔, collation, 식·부분 인덱스, row value, 상관 서브쿼리, 중첩 조인, 트리거, 외래키를 다룹니다.

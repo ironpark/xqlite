@@ -12,7 +12,9 @@ tools/planner/README.md.
 
 CASEFILE: blocks separated by lines '----'. In each block, lines before a
 line '==' are setup SQL (run once per check); each later non-empty line is
-one query.
+one query. A setup line '.each SQL' runs SQL before each query of the block
+on the same connection (e.g. an ATTACH). Both engines run in a directory
+of the block's own, so relative file names in the SQL land there.
 """
 import subprocess, sys, os, tempfile, shutil, re
 
@@ -24,17 +26,16 @@ SQPRE = (f".testctrl optimizations {os.environ['SQOPT']}",) if os.environ.get('S
 
 
 def run(cmd, db, q, pre=(), post=(), writes=False):
-    # A statement that writes runs on a copy, so the next one sees the
-    # block's database as set up.
+    # A statement that writes runs on a copy of the block's directory, so
+    # the next one sees the block's databases as set up.
     if writes:
-        work = db + '.work'
-        if os.path.exists(db):
-            shutil.copy(db, work)
-        elif os.path.exists(work):
-            os.remove(work)
-        db = work
+        work = os.path.dirname(db) + '.work'
+        if os.path.exists(work):
+            shutil.rmtree(work)
+        shutil.copytree(os.path.dirname(db), work)
+        db = os.path.join(work, os.path.basename(db))
     try:
-        r = subprocess.run([*cmd, db, *pre, q, *post], capture_output=True, text=True, errors='surrogateescape', timeout=60)
+        r = subprocess.run([*cmd, db, *pre, q, *post], capture_output=True, text=True, errors='surrogateescape', timeout=60, cwd=os.path.dirname(db))
     except subprocess.TimeoutExpired:
         return 'TIMEOUT'
     out = r.stdout
@@ -106,9 +107,12 @@ def main():
         else:
             setup, qs = '', block
         setup = '\n'.join(l for l in setup.splitlines() if not l.startswith('#'))
+        each = tuple(l[len('.each '):] for l in setup.splitlines() if l.startswith('.each '))
+        setup = '\n'.join(l for l in setup.splitlines() if not l.startswith('.each '))
         queries = [l for l in qs.splitlines() if l.strip() and not l.startswith('#')]
         # Build the database once with sqlite3 so both read the same file.
-        db = os.path.join(tmp, f'b{bi}.db')
+        os.mkdir(os.path.join(tmp, f'b{bi}'))
+        db = os.path.join(tmp, f'b{bi}', 'main.db')
         if setup.strip():
             # Dot-commands (".dbconfig defensive off") go as arguments of
             # their own, between the SQL of the lines around them.
@@ -123,7 +127,7 @@ def main():
                     sql.append(l)
             if sql:
                 args.append('\n'.join(sql))
-            subprocess.run([SQ, db, *args], capture_output=True, text=True)
+            subprocess.run([SQ, db, *args], capture_output=True, text=True, cwd=os.path.dirname(db))
         for q in queries:
             ntot += 1
             # Anything but a plain query may change the database: it runs
@@ -133,14 +137,14 @@ def main():
             for kind in sorted(kinds):
                 if kind == 'res':
                     post = ('.dump', 'PRAGMA integrity_check') if writes else ()
-                    a = run([XQ, 'sql'], db, q, post=post, writes=writes)
-                    b = run([SQ], db, q, pre=SQPRE, post=post, writes=writes)
+                    a = run([XQ, 'sql'], db, q, pre=each, post=post, writes=writes)
+                    b = run([SQ], db, q, pre=SQPRE + each, post=post, writes=writes)
                 elif kind == 'eqp':
-                    a = eqp_tree(run([XQ, 'sql'], db, 'EXPLAIN QUERY PLAN ' + q, pre=('.explain off',), writes=writes))
-                    b = eqp_tree(run([SQ], db, 'EXPLAIN QUERY PLAN ' + q, pre=SQPRE + ('.explain off',), writes=writes))
+                    a = eqp_tree(run([XQ, 'sql'], db, 'EXPLAIN QUERY PLAN ' + q, pre=each + ('.explain off',), writes=writes))
+                    b = eqp_tree(run([SQ], db, 'EXPLAIN QUERY PLAN ' + q, pre=SQPRE + each + ('.explain off',), writes=writes))
                 else:
-                    a = code_norm(run([XQ, 'sql'], db, 'EXPLAIN ' + q, pre=('.explain off',), writes=writes))
-                    b = code_norm(run([SQ], db, 'EXPLAIN ' + q, pre=SQPRE + ('.explain off',), writes=writes))
+                    a = code_norm(run([XQ, 'sql'], db, 'EXPLAIN ' + q, pre=each + ('.explain off',), writes=writes))
+                    b = code_norm(run([SQ], db, 'EXPLAIN ' + q, pre=SQPRE + each + ('.explain off',), writes=writes))
                 if a != b:
                     nfail[kind] += 1
                     tag = kind

@@ -541,6 +541,25 @@ test "pg: SQLite's administrative statements; the same code as SQLite" {
     try c.expectRows("SELECT 'a' LIKE 'A'", "1\n");
 }
 
+test "pg: what the schema keeps means the same in every dialect" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE w (s text, n int CHECK (greatest(n, 0) < 100));
+        \\INSERT INTO w VALUES ('Abc', 1), ('abc', 2);
+        \\CREATE VIEW wv AS SELECT s, s LIKE 'a%' AS cs, s ILIKE 'a\_%' AS ci, greatest(n, 5) AS g, 7 / 2 AS d, 'x' || NULL AS c, n::boolean AS b FROM w ORDER BY n;
+    );
+    const rows = "Abc|0|0|5|3|NULL|1\nabc|1|0|5|3|NULL|1\n";
+    try c.expectRows("SELECT * FROM wv", rows);
+    try c.expectRows("SELECT instr(sql, 'xq_postgres_greatest(') > 0 FROM sqlite_schema WHERE name = 'wv'", "1\n");
+    for ([_]@import("../dialect.zig").Dialect{ .sqlite, .mariadb }) |d| {
+        main_mod.setDialect(c.db, d);
+        try c.expectRows("SELECT * FROM wv", rows);
+        try c.expectError("INSERT INTO w VALUES ('x', 200)", "CHECK constraint failed: w_n_check");
+    }
+}
+
 test "pg: a database written in the dialect" {
     var c: Conn = undefined;
     try openPg(&c);

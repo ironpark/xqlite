@@ -206,6 +206,18 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_globals_tests.step);
     test_step.dependOn(examples_step);
 
+    // The journal's checksums once more, optimized: Zig 0.17 compiled one
+    // of them wrong in optimized builds only (see superNameChecksum() in
+    // src/pager/journal.zig), which the Debug tests above cannot see.
+    const journal_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/pager/journal.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(journal_tests).step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

@@ -140,10 +140,24 @@ pub fn superNameLen(tail: *const [super_trailer_len]u8, journal_size: u64, max_l
     return len;
 }
 
+/// Whether the trailer's checksum matches `name` (C subtracts each byte
+/// from it and checks for 0) and the name looks like a super-journal's.
 pub fn superNameValid(tail: *const [super_trailer_len]u8, name: []const u8) bool {
-    var cksum = std.mem.readInt(u32, tail[4..8], .big);
-    for (name) |c| cksum -%= @bitCast(@as(i32, @as(i8, @bitCast(c))));
-    return cksum == 0 and isSuperName(name);
+    return std.mem.readInt(u32, tail[4..8], .big) == superNameChecksum(name) and isSuperName(name);
+}
+
+/// The checksum of a super-journal name: the sum of its bytes as (signed)
+/// chars, wrapping (writeSuperJournal()).
+///
+/// This adds; it must not be written as subtracting each byte from the
+/// stored checksum: Zig 0.17 in ReleaseSafe and ReleaseFast compiles
+/// `for (name) |c| x -%= c` into a vectorized loop that gives a wrong
+/// result for names of 16 bytes or more (an add-reduction is right), so
+/// every super-journal name read back looked corrupt.
+pub fn superNameChecksum(name: []const u8) u32 {
+    var sum: u32 = 0;
+    for (name) |c| sum +%= @bitCast(@as(i32, @as(i8, @bitCast(c))));
+    return sum;
 }
 
 /// Port of pagerIsSuperJrnlName(): "<db>-mjXXXXXX9XX" with hex digits.
@@ -197,4 +211,63 @@ test "journal: header offsets and super-journal names" {
     try testing.expect(isSuperName("/tmp/a.db-mj0123AB9FF"));
     try testing.expect(!isSuperName("/tmp/a.db-journal"));
     try testing.expect(!isSuperName("/tmp/a.db-mj0123AB8FF"));
+}
+
+/// A trailer for `name` as writeSuperJournal() writes it, but for the
+/// page number.
+fn testTrailer(name: []const u8, cksum: u32) [super_trailer_len]u8 {
+    var t: [super_trailer_len]u8 = undefined;
+    std.mem.writeInt(u32, t[0..4], @intCast(name.len), .big);
+    std.mem.writeInt(u32, t[4..8], cksum, .big);
+    @memcpy(t[8..16], &magic);
+    return t;
+}
+
+test "journal: super-journal name checksums, of names of any length" {
+    // Names longer than a vector register, read at run time: the shape of
+    // loop that optimized builds got wrong (see superNameChecksum).
+    var buf: [600]u8 = undefined;
+    var prng: std.Random.DefaultPrng = .init(1);
+    const r = prng.random();
+    for ([_]usize{ 12, 15, 16, 17, 31, 32, 33, 64, 159, 511 }) |n| {
+        const name = buf[0..n];
+        for (name) |*c| c.* = "/abcxyz-_.0123456789ABCDEF\xc3\xa9"[r.uintLessThan(usize, 28)];
+        @memcpy(name[n - 12 ..], "-mj0A1B2C9D3");
+        // The sum as C computes it, one signed char at a time.
+        var want: u32 = 0;
+        for (name) |c| {
+            const s: i8 = @bitCast(c);
+            want = want +% @as(u32, @bitCast(@as(i32, s)));
+            std.mem.doNotOptimizeAway(&want);
+        }
+        try testing.expectEqual(want, superNameChecksum(name));
+        // Called through a pointer the optimizer cannot see through, as
+        // readSuperJournal() calls it on a name read from a file.
+        var valid: *const fn (*const [super_trailer_len]u8, []const u8) bool = &superNameValid;
+        std.mem.doNotOptimizeAway(&valid);
+        try testing.expect(valid(&testTrailer(name, want), name));
+        try testing.expect(!valid(&testTrailer(name, want +% 1), name));
+    }
+}
+
+test "journal: page record checksums, in every page size" {
+    // The other byte-summing loop of the journal, also checked optimized
+    // (build.zig runs this file's tests in ReleaseSafe too).
+    var page: [65536]u8 = undefined;
+    var prng: std.Random.DefaultPrng = .init(2);
+    prng.random().bytes(&page);
+    var sum: *const fn (u32, []const u8) u32 = &checksum;
+    std.mem.doNotOptimizeAway(&sum);
+    var size: usize = 512;
+    while (size <= page.len) : (size *= 2) {
+        // C's pager_cksum(): every 200th byte from the end, down from
+        // page_size - 200, while the offset is positive.
+        var want: u32 = 0x9e3779b9;
+        var i: i64 = @as(i64, @intCast(size)) - 200;
+        while (i > 0) : (i -= 200) {
+            want = want +% page[@intCast(i)];
+            std.mem.doNotOptimizeAway(&want);
+        }
+        try testing.expectEqual(want, sum(0x9e3779b9, page[0..size]));
+    }
 }

@@ -1669,9 +1669,7 @@ pub const Pager = struct {
         p.set_super = true;
         std.debug.assert(p.journal_hdr <= p.journal_off);
 
-        // The checksum adds the name's bytes as (signed) chars.
-        var cksum: u32 = 0;
-        for (super) |c| cksum +%= @bitCast(@as(i32, @as(i8, @bitCast(c))));
+        const cksum = journal.superNameChecksum(super);
 
         // In full-sync mode, go on to the next sector, in case the last
         // record written is already synced.

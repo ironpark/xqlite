@@ -66,6 +66,73 @@ pub fn aggregate(name: [:0]const u8, n_arg: i16, o: Options, step: StepFn, final
     return .{ .n_arg = n_arg, .func_flags = flags(o), .user_data = o.user_data, .x_sfunc = step, .x_finalize = final, .name = name };
 }
 
+/// The same scalar function under each argument count of `arities`, in
+/// that order: concatenate it into a table with `++`. The overloads stay
+/// adjacent, as checkTable() wants.
+///
+///     pub const functions = [_]FuncDef{
+///         dfunc.scalar("initcap", 1, det, initcapFunc),
+///     } ++
+///         dfunc.overloads("instr", &.{ 2, 3, 4 }, det, instrFunc) ++
+///         .{dfunc.scalar("translate", 3, det, translateFunc)};
+pub fn overloads(name: [:0]const u8, comptime arities: []const i16, o: Options, x: StepFn) [arities.len]FuncDef {
+    var defs: [arities.len]FuncDef = undefined;
+    for (&defs, arities) |*d, n| d.* = scalar(name, n, o, x);
+    return defs;
+}
+
+/// The StepFn calling `f(ctx, argv, extra...)`: one implementation
+/// shared by several functions that differ in fixed arguments (flags,
+/// a sign ...), without a hand-written wrapper per function. The call is
+/// inlined, so `extra` is comptime-known in the body.
+///
+///     const getJsonbText = dfunc.bind(get, .{ true, true });
+pub fn bind(comptime f: anytype, comptime extra: anytype) StepFn {
+    return struct {
+        fn call(ctx: *Context, argv: []*Mem) void {
+            @call(.always_inline, f, .{ ctx, argv } ++ extra);
+        }
+    }.call;
+}
+
+/// The StepFn calling `f(&c, argv)` with `c` a `Call` (`Call.init(ctx)`,
+/// deinit() after `f` returns): for the implementations that work in a
+/// per-call arena, which `f` reaches the context through (c.ctx). The
+/// call is inlined. Call.init() must not allocate: `f` may return before
+/// using the arena (a NULL argument).
+pub fn withArena(comptime Call: type, comptime f: fn (*Call, []*Mem) void) StepFn {
+    return struct {
+        fn call(ctx: *Context, argv: []*Mem) void {
+            var c: Call = .init(ctx);
+            defer c.deinit();
+            @call(.always_inline, f, .{ &c, argv });
+        }
+    }.call;
+}
+
+/// A scalar function `f`, `fn (*Context, A, B ...) void`, taking one
+/// argument per parameter after the context (its argument count), each
+/// converted by `Conv.arg(A, ctx, argv[i])`. The arguments are converted
+/// in order, and a conversion that gives null ends the call before the
+/// next one is read: `Conv.arg()` made the result NULL (a NULL argument,
+/// as the dialect sees it) or an error. Conversions cache the
+/// representations of a Mem, so the order is the dialect's, as its
+/// hand-written `const a = conv(argv[0]) orelse return ...` lines had it.
+/// Not for variadic functions.
+pub fn typed(name: [:0]const u8, o: Options, comptime Conv: type, comptime f: anytype) FuncDef {
+    const params = @typeInfo(@TypeOf(f)).@"fn".param_types;
+    return scalar(name, params.len - 1, o, struct {
+        fn call(ctx: *Context, argv: []*Mem) void {
+            var args: std.meta.ArgsTuple(@TypeOf(f)) = undefined;
+            args[0] = ctx;
+            inline for (params[1..], 1..) |T, i| {
+                args[i] = Conv.arg(T.?, ctx, argv[i - 1]) orelse return;
+            }
+            @call(.always_inline, f, args);
+        }
+    }.call);
+}
+
 /// Check at compile time that the overloads of each name are adjacent,
 /// which dialect.functionSearch() relies on.
 pub fn checkTable(comptime defs: []const FuncDef) void {

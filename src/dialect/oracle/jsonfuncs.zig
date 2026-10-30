@@ -57,12 +57,15 @@ fn flags(agg: bool) FUNC {
     return .{ .enc = vi.ENC.UTF8, .BUILTIN = true, .CONSTANT = true, .SUBTYPE = true, .RESULT_SUBTYPE = true };
 }
 
-fn jscalar(name: [:0]const u8, n_arg: i16, x: dfunc.StepFn) int.FuncDef {
-    return .{ .n_arg = n_arg, .func_flags = flags(false), .x_sfunc = x, .name = name };
+/// The implementations work in the arena of their call (Call).
+const Impl = fn (*Call, []*Mem) void;
+
+fn jscalar(name: [:0]const u8, n_arg: i16, comptime x: Impl) int.FuncDef {
+    return .{ .n_arg = n_arg, .func_flags = flags(false), .x_sfunc = dfunc.withArena(Call, x), .name = name };
 }
 
-fn jagg(name: [:0]const u8, n_arg: i16, step: dfunc.StepFn, final: dfunc.FinalFn) int.FuncDef {
-    return .{ .n_arg = n_arg, .func_flags = flags(true), .x_sfunc = step, .x_finalize = final, .name = name };
+fn jagg(name: [:0]const u8, n_arg: i16, comptime step: Impl, final: dfunc.FinalFn) int.FuncDef {
+    return .{ .n_arg = n_arg, .func_flags = flags(true), .x_sfunc = dfunc.withArena(Call, step), .x_finalize = final, .name = name };
 }
 
 pub const engine_functions = [_]int.FuncDef{
@@ -94,11 +97,11 @@ const Call = struct {
     msg: []const u8 = "",
     now: ?dt.DateTime = null,
 
-    fn init(ctx: *Context) Call {
+    pub fn init(ctx: *Context) Call {
         return .{ .ctx = ctx, .arena = .init(dfunc.gpa(ctx)) };
     }
 
-    fn deinit(c: *Call) void {
+    pub fn deinit(c: *Call) void {
         c.arena.deinit();
     }
 
@@ -421,44 +424,38 @@ fn scalarAs(c: *Call, v: Value, ty: types.TypeName, truncate: bool, path: []cons
 
 /// xq_ora_is_json(x, flags): flags 1 STRICT, 2 WITH UNIQUE KEYS, 4
 /// DISALLOW SCALARS.
-fn isJsonFunc(ctx: *Context, argv: []*Mem) void {
+fn isJsonFunc(c: *Call, argv: []*Mem) void {
     var buf: [64]u8 = undefined;
-    const text = docText(argv[0], &buf) orelse return api.resultNull(ctx);
+    const text = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
     const fl = api.valueInt64(argv[1]);
-    var c: Call = .init(ctx);
-    defer c.deinit();
     const v = J.parse(c.a(), text, .{ .lax = fl & 1 == 0 }) catch |err| switch (err) {
-        error.OutOfMemory => return api.resultErrorNomem(ctx),
-        error.Syntax => return api.resultInt64(ctx, 0),
+        error.OutOfMemory => return api.resultErrorNomem(c.ctx),
+        error.Syntax => return api.resultInt64(c.ctx, 0),
     };
-    if (fl & 2 != 0 and J.hasDuplicateKeys(v)) return api.resultInt64(ctx, 0);
+    if (fl & 2 != 0 and J.hasDuplicateKeys(v)) return api.resultInt64(c.ctx, 0);
     // DISALLOW SCALARS
-    if (fl & 4 != 0 and v.isScalar()) return api.resultInt64(ctx, 0);
-    api.resultInt64(ctx, 1);
+    if (fl & 4 != 0 and v.isScalar()) return api.resultInt64(c.ctx, 0);
+    api.resultInt64(c.ctx, 1);
 }
 
 /// xq_ora_json(x): x as JSON (FORMAT JSON, JSON()).
-fn jsonFunc(ctx: *Context, argv: []*Mem) void {
-    if (isJsonArg(argv[0])) return api.resultValue(ctx, argv[0]);
+fn jsonFunc(c: *Call, argv: []*Mem) void {
+    if (isJsonArg(argv[0])) return api.resultValue(c.ctx, argv[0]);
     var buf: [64]u8 = undefined;
-    const text = docText(argv[0], &buf) orelse return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const v = parseDoc(&c, text) catch |err| return c.report(err);
-    const out = J.toText(c.a(), v, .{}) catch return api.resultErrorNomem(ctx);
-    resultJson(&c, out);
+    const text = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
+    const v = parseDoc(c, text) catch |err| return c.report(err);
+    const out = J.toText(c.a(), v, .{}) catch return api.resultErrorNomem(c.ctx);
+    resultJson(c, out);
 }
 
 /// xq_ora_json_scalar(x): a number or a string as a JSON scalar.
-fn jsonScalarFunc(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    if (api.valueType(argv[0]) == vi.SQLITE_NULL) return api.resultNull(ctx);
-    var v = sqlToJson(&c, argv[0]) catch |err| return c.report(err);
-    if (v == .number) v = .{ .number = canonNumber(c.a(), v.number) catch return api.resultErrorNomem(ctx) };
-    if (v == .null) return api.resultNull(ctx);
-    const out = J.toText(c.a(), v, .{}) catch return api.resultErrorNomem(ctx);
-    resultJson(&c, out);
+fn jsonScalarFunc(c: *Call, argv: []*Mem) void {
+    if (api.valueType(argv[0]) == vi.SQLITE_NULL) return api.resultNull(c.ctx);
+    var v = sqlToJson(c, argv[0]) catch |err| return c.report(err);
+    if (v == .number) v = .{ .number = canonNumber(c.a(), v.number) catch return api.resultErrorNomem(c.ctx) };
+    if (v == .null) return api.resultNull(c.ctx);
+    const out = J.toText(c.a(), v, .{}) catch return api.resultErrorNomem(c.ctx);
+    resultJson(c, out);
 }
 
 // ============================================================ JSON_VALUE
@@ -541,22 +538,20 @@ fn valueOf(c: *Call, doc: ?Value, path_text: []const u8, path: J.Path, spec: Val
 
 /// xq_ora_json_value(doc, path, opts, empty_default, error_default,
 /// [name, value]...): opts "TYPE|empty|error|T(runcate)".
-fn jsonValueFunc(ctx: *Context, argv: []*Mem) void {
-    if (argv.len < 5) return api.resultError(ctx, "xq_ora_json_value: wrong number of arguments");
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn jsonValueFunc(c: *Call, argv: []*Mem) void {
+    if (argv.len < 5) return api.resultError(c.ctx, "xq_ora_json_value: wrong number of arguments");
     const path_text = optsText(argv[1]);
-    const path = parsePath(&c, path_text) catch |err| return c.report(err);
+    const path = parsePath(c, path_text) catch |err| return c.report(err);
     var buf: [64]u8 = undefined;
-    const text = docText(argv[0], &buf) orelse return api.resultNull(ctx);
+    const text = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
     const spec = valueSpec(optsText(argv[2]));
-    const vars = passing(&c, argv[5..]) catch |err| return c.report(err);
+    const vars = passing(c, argv[5..]) catch |err| return c.report(err);
     const doc: ?Value = J.parse(c.a(), text, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return api.resultErrorNomem(ctx),
+        error.OutOfMemory => return api.resultErrorNomem(c.ctx),
         error.Syntax => null,
     };
-    const cell = valueOf(&c, doc, path_text, path, spec, .{ .mem = argv[3] }, .{ .mem = argv[4] }, vars) catch |err| return c.report(err);
-    resultCell(ctx, cell);
+    const cell = valueOf(c, doc, path_text, path, spec, .{ .mem = argv[3] }, .{ .mem = argv[4] }, vars) catch |err| return c.report(err);
+    resultCell(c.ctx, cell);
 }
 
 // ============================================================ JSON_QUERY
@@ -639,44 +634,40 @@ fn queryCore(c: *Call, doc_opt: ?Value, path_text: []const u8, path: J.Path, spe
 
 /// xq_ora_json_query(doc, path, opts, [name, value]...): opts
 /// "TYPE|empty|error|wrapper|P(retty)|A(scii)".
-fn jsonQueryFunc(ctx: *Context, argv: []*Mem) void {
-    if (argv.len < 3) return api.resultError(ctx, "xq_ora_json_query: wrong number of arguments");
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn jsonQueryFunc(c: *Call, argv: []*Mem) void {
+    if (argv.len < 3) return api.resultError(c.ctx, "xq_ora_json_query: wrong number of arguments");
     const path_text = optsText(argv[1]);
-    const path = parsePath(&c, path_text) catch |err| return c.report(err);
+    const path = parsePath(c, path_text) catch |err| return c.report(err);
     var buf: [64]u8 = undefined;
-    const text = docText(argv[0], &buf) orelse return api.resultNull(ctx);
+    const text = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
     const spec = querySpec(optsText(argv[2]));
-    const vars = passing(&c, argv[3..]) catch |err| return c.report(err);
+    const vars = passing(c, argv[3..]) catch |err| return c.report(err);
     const doc: ?Value = J.parse(c.a(), text, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return api.resultErrorNomem(ctx),
+        error.OutOfMemory => return api.resultErrorNomem(c.ctx),
         error.Syntax => null,
     };
-    const out = queryOf(&c, doc, path_text, path, spec, vars) catch |err| return c.report(err);
-    if (out) |t| resultJson(&c, t) else api.resultNull(ctx);
+    const out = queryOf(c, doc, path_text, path, spec, vars) catch |err| return c.report(err);
+    if (out) |t| resultJson(c, t) else api.resultNull(c.ctx);
 }
 
 // =========================================================== JSON_EXISTS
 
 /// xq_ora_json_exists(doc, path, opts, [name, value]...): opts the ON
 /// ERROR handler, F(ALSE), T(RUE) or E(RROR).
-fn jsonExistsFunc(ctx: *Context, argv: []*Mem) void {
-    if (argv.len < 3) return api.resultError(ctx, "xq_ora_json_exists: wrong number of arguments");
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn jsonExistsFunc(c: *Call, argv: []*Mem) void {
+    if (argv.len < 3) return api.resultError(c.ctx, "xq_ora_json_exists: wrong number of arguments");
     const path_text = optsText(argv[1]);
-    const path = parsePath(&c, path_text) catch |err| return c.report(err);
+    const path = parsePath(c, path_text) catch |err| return c.report(err);
     var buf: [64]u8 = undefined;
-    const text = docText(argv[0], &buf) orelse return api.resultInt64(ctx, 0);
+    const text = docText(argv[0], &buf) orelse return api.resultInt64(c.ctx, 0);
     const on_error = optsField(optsText(argv[2]), 0);
-    const vars = passing(&c, argv[3..]) catch |err| return c.report(err);
-    const r = existsOf(&c, text, path, vars);
-    if (r) |b| return api.resultInt64(ctx, @intFromBool(b)) else |err| switch (err) {
-        error.OutOfMemory => return api.resultErrorNomem(ctx),
+    const vars = passing(c, argv[3..]) catch |err| return c.report(err);
+    const r = existsOf(c, text, path, vars);
+    if (r) |b| return api.resultInt64(c.ctx, @intFromBool(b)) else |err| switch (err) {
+        error.OutOfMemory => return api.resultErrorNomem(c.ctx),
         error.Ora => {
             if (std.mem.eql(u8, on_error, "E")) return c.report(err);
-            return api.resultInt64(ctx, @intFromBool(std.mem.eql(u8, on_error, "T")));
+            return api.resultInt64(c.ctx, @intFromBool(std.mem.eql(u8, on_error, "T")));
         },
     }
 }
@@ -696,33 +687,31 @@ fn existsOf(c: *Call, text: []const u8, path: J.Path, vars: []const J.Var) Fail!
 /// xq_ora_json_dot(doc, path, flags): t.col.a.b; flags 1: the column is
 /// of type JSON (scalars are JSON: "str"), 2: the path ends with an item
 /// method (the SQL value). Several values are an array.
-fn jsonDotFunc(ctx: *Context, argv: []*Mem) void {
+fn jsonDotFunc(c: *Call, argv: []*Mem) void {
     var buf: [64]u8 = undefined;
-    const text = docText(argv[0], &buf) orelse return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const path = parsePath(&c, optsText(argv[1])) catch |err| return c.report(err);
+    const text = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
+    const path = parsePath(c, optsText(argv[1])) catch |err| return c.report(err);
     const fl = api.valueInt64(argv[2]);
-    const doc = J.parse(c.a(), text, .{}) catch return api.resultNull(ctx);
+    const doc = J.parse(c.a(), text, .{}) catch return api.resultNull(c.ctx);
     var e: J.Eval = .{ .a = c.a(), .strict = false, .root = doc };
-    const items = e.run(path, doc) catch return api.resultNull(ctx);
-    if (items.len == 0) return api.resultNull(ctx);
+    const items = e.run(path, doc) catch return api.resultNull(c.ctx);
+    if (items.len == 0) return api.resultNull(c.ctx);
     const v: Value = if (items.len == 1) items[0] else .{ .array = items };
     if (fl & 2 != 0 or (fl & 1 == 0 and v.isScalar())) {
         switch (v) {
-            .null => return api.resultNull(ctx),
-            .string => |s| return if (s.len == 0) api.resultNull(ctx) else api.resultText(ctx, s, .transient),
-            .bool => |b| return api.resultText(ctx, if (b) "true" else "false", .static),
+            .null => return api.resultNull(c.ctx),
+            .string => |s| return if (s.len == 0) api.resultNull(c.ctx) else api.resultText(c.ctx, s, .transient),
+            .bool => |b| return api.resultText(c.ctx, if (b) "true" else "false", .static),
             .number => |t| {
-                const canon = canonNumber(c.a(), t) catch return api.resultErrorNomem(ctx);
-                if (fl & 2 != 0) return resultCell(ctx, numberCell(canon));
-                return api.resultText(ctx, canon, .transient);
+                const canon = canonNumber(c.a(), t) catch return api.resultErrorNomem(c.ctx);
+                if (fl & 2 != 0) return resultCell(c.ctx, numberCell(canon));
+                return api.resultText(c.ctx, canon, .transient);
             },
             else => {},
         }
     }
-    const out = J.toText(c.a(), v, .{}) catch return api.resultErrorNomem(ctx);
-    resultJson(&c, out);
+    const out = J.toText(c.a(), v, .{}) catch return api.resultErrorNomem(c.ctx);
+    resultJson(c, out);
 }
 
 // ===================================================== constructors
@@ -749,40 +738,36 @@ fn keyText(c: *Call, m: *Mem) Fail![]const u8 {
 }
 
 /// xq_ora_json_object(opts, key, value, ...).
-fn jsonObjectFunc(ctx: *Context, argv: []*Mem) void {
-    if (argv.len < 1 or argv.len % 2 != 1) return api.resultError(ctx, "xq_ora_json_object: wrong number of arguments");
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn jsonObjectFunc(c: *Call, argv: []*Mem) void {
+    if (argv.len < 1 or argv.len % 2 != 1) return api.resultError(c.ctx, "xq_ora_json_object: wrong number of arguments");
     const opts = optsText(argv[0]);
     const fl = ctorFlags(opts);
     var ms: std.ArrayList(J.Member) = .empty;
     var i: usize = 1;
     while (i < argv.len) : (i += 2) {
-        const k = keyText(&c, argv[i]) catch |err| return c.report(err);
-        const v = sqlToJson(&c, argv[i + 1]) catch |err| return c.report(err);
+        const k = keyText(c, argv[i]) catch |err| return c.report(err);
+        const v = sqlToJson(c, argv[i + 1]) catch |err| return c.report(err);
         if (v == .null and fl & 1 != 0) continue;
         if (fl & 4 != 0) for (ms.items) |m| if (std.mem.eql(u8, m.key, k)) {
             return c.report(c.fail("ORA-40473: duplicate key names '{s}' in JSON object", .{k}));
         };
-        ms.append(c.a(), .{ .key = k, .value = v }) catch return api.resultErrorNomem(ctx);
+        ms.append(c.a(), .{ .key = k, .value = v }) catch return api.resultErrorNomem(c.ctx);
     }
-    finishCtor(&c, .{ .object = ms.items }, opts);
+    finishCtor(c, .{ .object = ms.items }, opts);
 }
 
 /// xq_ora_json_array(opts, value, ...).
-fn jsonArrayFunc(ctx: *Context, argv: []*Mem) void {
-    if (argv.len < 1) return api.resultError(ctx, "xq_ora_json_array: wrong number of arguments");
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn jsonArrayFunc(c: *Call, argv: []*Mem) void {
+    if (argv.len < 1) return api.resultError(c.ctx, "xq_ora_json_array: wrong number of arguments");
     const opts = optsText(argv[0]);
     const fl = ctorFlags(opts);
     var items: std.ArrayList(Value) = .empty;
     for (argv[1..]) |m| {
-        const v = sqlToJson(&c, m) catch |err| return c.report(err);
+        const v = sqlToJson(c, m) catch |err| return c.report(err);
         if (v == .null and fl & 2 == 0) continue;
-        items.append(c.a(), v) catch return api.resultErrorNomem(ctx);
+        items.append(c.a(), v) catch return api.resultErrorNomem(c.ctx);
     }
-    finishCtor(&c, .{ .array = items.items }, opts);
+    finishCtor(c, .{ .array = items.items }, opts);
 }
 
 // ============================================================ aggregates
@@ -839,15 +824,13 @@ fn aggFinal(ctx: *Context, open: u8, close: u8) void {
 }
 
 /// xq_ora_json_arrayagg(opts, value): flags as JSON_ARRAY's.
-fn arrayAggStep(ctx: *Context, argv: []*Mem) void {
+fn arrayAggStep(c: *Call, argv: []*Mem) void {
     const fl = ctorFlags(optsText(argv[0]));
-    var c: Call = .init(ctx);
-    defer c.deinit();
     // The state exists from the first row (an empty array, not NULL).
-    _ = aggState(ctx, true) orelse return api.resultErrorNomem(ctx);
-    const v = sqlToJson(&c, argv[1]) catch |err| return c.report(err);
+    _ = aggState(c.ctx, true) orelse return api.resultErrorNomem(c.ctx);
+    const v = sqlToJson(c, argv[1]) catch |err| return c.report(err);
     if (v == .null and fl & 2 == 0) return;
-    aggAppend(ctx, null, v);
+    aggAppend(c.ctx, null, v);
 }
 
 fn arrayAggFinal(ctx: *Context) void {
@@ -855,15 +838,13 @@ fn arrayAggFinal(ctx: *Context) void {
 }
 
 /// xq_ora_json_objectagg(opts, key, value).
-fn objectAggStep(ctx: *Context, argv: []*Mem) void {
+fn objectAggStep(c: *Call, argv: []*Mem) void {
     const fl = ctorFlags(optsText(argv[0]));
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    _ = aggState(ctx, true) orelse return api.resultErrorNomem(ctx);
-    const k = keyText(&c, argv[1]) catch |err| return c.report(err);
-    const v = sqlToJson(&c, argv[2]) catch |err| return c.report(err);
+    _ = aggState(c.ctx, true) orelse return api.resultErrorNomem(c.ctx);
+    const k = keyText(c, argv[1]) catch |err| return c.report(err);
+    const v = sqlToJson(c, argv[2]) catch |err| return c.report(err);
     if (v == .null and fl & 1 != 0) return;
-    aggAppend(ctx, k, v);
+    aggAppend(c.ctx, k, v);
 }
 
 fn objectAggFinal(ctx: *Context) void {
@@ -919,35 +900,31 @@ fn finishOutput(c: *Call, v: Value, opts: []const u8) void {
 }
 
 /// xq_ora_json_mergepatch(target, patch, opts).
-fn mergePatchFunc(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn mergePatchFunc(c: *Call, argv: []*Mem) void {
     const opts = optsText(argv[2]);
     var b1: [64]u8 = undefined;
     var b2: [64]u8 = undefined;
-    const t = docText(argv[0], &b1) orelse return api.resultNull(ctx);
-    const p = docText(argv[1], &b2) orelse return api.resultNull(ctx);
-    const patch = J.parse(c.a(), p, .{}) catch return api.resultError(ctx, "ORA-40629: Patch specification is not valid JSON");
+    const t = docText(argv[0], &b1) orelse return api.resultNull(c.ctx);
+    const p = docText(argv[1], &b2) orelse return api.resultNull(c.ctx);
+    const patch = J.parse(c.a(), p, .{}) catch return api.resultError(c.ctx, "ORA-40629: Patch specification is not valid JSON");
     const target = J.parse(c.a(), t, .{}) catch {
-        if (std.mem.eql(u8, optsField(opts, 4), "E")) return api.resultError(ctx, "ORA-40441: JSON syntax error");
-        return api.resultNull(ctx);
+        if (std.mem.eql(u8, optsField(opts, 4), "E")) return api.resultError(c.ctx, "ORA-40441: JSON syntax error");
+        return api.resultNull(c.ctx);
     };
-    const v = mergePatch(c.a(), target, patch) catch return api.resultErrorNomem(ctx);
-    finishOutput(&c, v, opts);
+    const v = mergePatch(c.a(), target, patch) catch return api.resultErrorNomem(c.ctx);
+    finishOutput(c, v, opts);
 }
 
 /// xq_ora_json_serialize(x, opts).
-fn serializeFunc(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn serializeFunc(c: *Call, argv: []*Mem) void {
     const opts = optsText(argv[1]);
     var buf: [64]u8 = undefined;
-    const t = docText(argv[0], &buf) orelse return api.resultNull(ctx);
+    const t = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
     const v = J.parse(c.a(), t, .{}) catch {
-        if (std.mem.eql(u8, optsField(opts, 4), "N")) return api.resultNull(ctx);
-        return api.resultError(ctx, "ORA-40441: JSON syntax error");
+        if (std.mem.eql(u8, optsField(opts, 4), "N")) return api.resultNull(c.ctx);
+        return api.resultError(c.ctx, "ORA-40441: JSON syntax error");
     };
-    finishOutput(&c, v, opts);
+    finishOutput(c, v, opts);
 }
 
 // ========================================================= JSON_TRANSFORM
@@ -1153,39 +1130,37 @@ fn prune(c: *Call, v: *Value, kept: *std.AutoHashMapUnmanaged(*const Value, void
 
 /// xq_ora_json_transform(doc, opts, op, path, value, ...): op SET,
 /// INSERT, REPLACE, APPEND, REMOVE, RENAME (value the new name) or KEEP.
-fn transformFunc(ctx: *Context, argv: []*Mem) void {
-    if (argv.len < 2 or (argv.len - 2) % 3 != 0) return api.resultError(ctx, "xq_ora_json_transform: wrong number of arguments");
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn transformFunc(c: *Call, argv: []*Mem) void {
+    if (argv.len < 2 or (argv.len - 2) % 3 != 0) return api.resultError(c.ctx, "xq_ora_json_transform: wrong number of arguments");
     const opts = optsText(argv[1]);
     var buf: [64]u8 = undefined;
-    const text = docText(argv[0], &buf) orelse return api.resultNull(ctx);
-    var doc = parseDoc(&c, text) catch |err| return c.report(err);
+    const text = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
+    var doc = parseDoc(c, text) catch |err| return c.report(err);
     var i: usize = 2;
     var keeps: std.ArrayList(J.Path) = .empty;
     while (i < argv.len) : (i += 3) {
-        const op = opOf(optsText(argv[i])) orelse return api.resultError(ctx, "xq_ora_json_transform: bad operation");
-        const path = parsePath(&c, optsText(argv[i + 1])) catch |err| return c.report(err);
+        const op = opOf(optsText(argv[i])) orelse return api.resultError(c.ctx, "xq_ora_json_transform: bad operation");
+        const path = parsePath(c, optsText(argv[i + 1])) catch |err| return c.report(err);
         if (op == .keep) {
-            keeps.append(c.a(), path) catch return api.resultErrorNomem(ctx);
+            keeps.append(c.a(), path) catch return api.resultErrorNomem(c.ctx);
             continue;
         }
         if (keeps.items.len > 0) {
-            keep(&c, &doc, keeps.items) catch |err| return c.report(err);
+            keep(c, &doc, keeps.items) catch |err| return c.report(err);
             keeps.clearRetainingCapacity();
         }
         var value: Value = .null;
         var new_name: []const u8 = "";
         if (op == .rename) {
-            new_name = c.a().dupe(u8, optsText(argv[i + 2])) catch return api.resultErrorNomem(ctx);
+            new_name = c.a().dupe(u8, optsText(argv[i + 2])) catch return api.resultErrorNomem(c.ctx);
         } else if (op != .remove) {
-            value = sqlToJson(&c, argv[i + 2]) catch |err| return c.report(err);
-            if (value == .number) value = .{ .number = canonNumber(c.a(), value.number) catch return api.resultErrorNomem(ctx) };
+            value = sqlToJson(c, argv[i + 2]) catch |err| return c.report(err);
+            if (value == .number) value = .{ .number = canonNumber(c.a(), value.number) catch return api.resultErrorNomem(c.ctx) };
         }
-        applyOp(&c, &doc, op, path, value, new_name) catch |err| return c.report(err);
+        applyOp(c, &doc, op, path, value, new_name) catch |err| return c.report(err);
     }
-    if (keeps.items.len > 0) keep(&c, &doc, keeps.items) catch |err| return c.report(err);
-    finishOutput(&c, doc, opts);
+    if (keeps.items.len > 0) keep(c, &doc, keeps.items) catch |err| return c.report(err);
+    finishOutput(c, doc, opts);
 }
 
 // ============================================================ JSON_TABLE

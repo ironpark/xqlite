@@ -312,13 +312,8 @@ fn objectPart(ctx: *Context, argv: []*Mem, which: usize) void {
     resultCopy(ctx, if (which == 0) parts[0] else parts[1]);
 }
 
-pub fn objectNameFunc(ctx: *Context, argv: []*Mem) void {
-    objectPart(ctx, argv, 1);
-}
-
-pub fn objectSchemaNameFunc(ctx: *Context, argv: []*Mem) void {
-    objectPart(ctx, argv, 0);
-}
+pub const objectNameFunc = dfunc.bind(objectPart, .{1});
+pub const objectSchemaNameFunc = dfunc.bind(objectPart, .{0});
 
 /// xq_tsql_schema_of(name) and xq_tsql_bare_name(name): the schema of a
 /// main object named `name` and its name in it (catalog views).
@@ -333,10 +328,5 @@ fn namePart(ctx: *Context, argv: []*Mem, which: usize) void {
     resultCopy(ctx, if (which == 0) parts[0] else parts[1]);
 }
 
-pub fn schemaOfFunc(ctx: *Context, argv: []*Mem) void {
-    namePart(ctx, argv, 0);
-}
-
-pub fn bareNameFunc(ctx: *Context, argv: []*Mem) void {
-    namePart(ctx, argv, 1);
-}
+pub const schemaOfFunc = dfunc.bind(namePart, .{0});
+pub const bareNameFunc = dfunc.bind(namePart, .{1});

@@ -50,54 +50,43 @@ const det: dfunc.Options = .{ .deterministic = true };
 pub const functions = [_]int.FuncDef{
     dfunc.scalar("lengthc", 1, det, lengthcFunc),
     dfunc.scalar("lengthb", 1, det, lengthbFunc),
-    dfunc.scalar("substr", 2, det, substrFunc),
-    dfunc.scalar("substr", 3, det, substrFunc),
-    dfunc.scalar("instr", 2, det, instrFunc),
-    dfunc.scalar("instr", 3, det, instrFunc),
-    dfunc.scalar("instr", 4, det, instrFunc),
-    dfunc.scalar("initcap", 1, det, initcapFunc),
-    dfunc.scalar("lpad", 2, det, lpadFunc),
-    dfunc.scalar("lpad", 3, det, lpadFunc),
-    dfunc.scalar("rpad", 2, det, rpadFunc),
-    dfunc.scalar("rpad", 3, det, rpadFunc),
-    dfunc.scalar("ltrim", 1, det, ltrimFunc),
-    dfunc.scalar("ltrim", 2, det, ltrimFunc),
-    dfunc.scalar("rtrim", 1, det, rtrimFunc),
-    dfunc.scalar("rtrim", 2, det, rtrimFunc),
-    dfunc.scalar("trim", 1, det, trimFunc),
-    dfunc.scalar("trim", 2, det, trimFunc),
-    dfunc.scalar("replace", 2, det, replaceFunc),
-    dfunc.scalar("replace", 3, det, replaceFunc),
-    dfunc.scalar("translate", 3, det, translateFunc),
-    dfunc.scalar("greatest", -1, det, greatestFunc),
-    dfunc.scalar("least", -1, det, leastFunc),
-    dfunc.scalar("mod", 2, det, modFunc),
-    dfunc.scalar("ceil", 1, det, ceilFunc),
-    dfunc.scalar("floor", 1, det, floorFunc),
-    dfunc.scalar("power", 2, det, powerFunc),
-    dfunc.scalar("sqrt", 1, det, sqrtFunc),
-    dfunc.scalar("sign", 1, det, signFunc),
-    dfunc.scalar("exp", 1, det, expFunc),
-    dfunc.scalar("ln", 1, det, lnFunc),
-    dfunc.scalar("log", 2, det, logFunc),
-    dfunc.scalar("round", 1, det, roundFunc),
-    dfunc.scalar("round", 2, det, roundFunc),
-    dfunc.scalar("trunc", 1, det, truncFunc),
-    dfunc.scalar("trunc", 2, det, truncFunc),
-    dfunc.scalar("to_char", 1, det, toCharFunc),
-    dfunc.scalar("to_char", 2, det, toCharFunc),
-    dfunc.scalar("to_number", 1, det, toNumberFunc),
-    dfunc.scalar("to_number", 2, det, toNumberFunc),
-    dfunc.scalar("to_date", 1, det, toDateFunc),
-    dfunc.scalar("to_date", 2, det, toDateFunc),
-    dfunc.scalar("to_timestamp", 1, det, toTimestampFunc),
-    dfunc.scalar("to_timestamp", 2, det, toTimestampFunc),
-    dfunc.scalar("add_months", 2, det, addMonthsFunc),
-    dfunc.scalar("months_between", 2, det, monthsBetweenFunc),
-    dfunc.scalar("last_day", 1, det, lastDayFunc),
-    dfunc.scalar("next_day", 2, det, nextDayFunc),
-    dfunc.scalar("extract", 2, det, extractFunc),
-};
+} ++
+    dfunc.overloads("substr", &.{ 2, 3 }, det, substrFunc) ++
+    dfunc.overloads("instr", &.{ 2, 3, 4 }, det, instrFunc) ++
+    .{dfunc.scalar("initcap", 1, det, initcapFunc)} ++
+    dfunc.overloads("lpad", &.{ 2, 3 }, det, lpadFunc) ++
+    dfunc.overloads("rpad", &.{ 2, 3 }, det, rpadFunc) ++
+    dfunc.overloads("ltrim", &.{ 1, 2 }, det, ltrimFunc) ++
+    dfunc.overloads("rtrim", &.{ 1, 2 }, det, rtrimFunc) ++
+    dfunc.overloads("trim", &.{ 1, 2 }, det, trimFunc) ++
+    dfunc.overloads("replace", &.{ 2, 3 }, det, replaceFunc) ++
+    .{
+        dfunc.scalar("translate", 3, det, translateFunc),
+        dfunc.scalar("greatest", -1, det, greatestFunc),
+        dfunc.scalar("least", -1, det, leastFunc),
+        typed("mod", modFunc),
+        dfunc.scalar("ceil", 1, det, ceilFunc),
+        dfunc.scalar("floor", 1, det, floorFunc),
+        typed("power", powerFunc),
+        typed("sqrt", sqrtFunc),
+        typed("sign", signFunc),
+        dfunc.scalar("exp", 1, det, expFunc),
+        typed("ln", lnFunc),
+        typed("log", logFunc),
+    } ++
+    dfunc.overloads("round", &.{ 1, 2 }, det, roundFunc) ++
+    dfunc.overloads("trunc", &.{ 1, 2 }, det, truncFunc) ++
+    dfunc.overloads("to_char", &.{ 1, 2 }, det, toCharFunc) ++
+    dfunc.overloads("to_number", &.{ 1, 2 }, det, toNumberFunc) ++
+    dfunc.overloads("to_date", &.{ 1, 2 }, det, toDateFunc) ++
+    dfunc.overloads("to_timestamp", &.{ 1, 2 }, det, toTimestampFunc) ++
+    .{
+        typed("add_months", addMonthsFunc),
+        typed("months_between", monthsBetweenFunc),
+        typed("last_day", lastDayFunc),
+        dfunc.scalar("next_day", 2, det, nextDayFunc),
+        dfunc.scalar("extract", 2, det, extractFunc),
+    };
 
 pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_ora_coerce", 5, det, coerceFunc),
@@ -256,13 +245,6 @@ fn toF(n: Num) f64 {
     };
 }
 
-fn numArgs(ctx: *Context, argv: []*Mem, out: []f64) error{ Invalid, Null }!void {
-    for (argv, 0..) |m, i| {
-        const n = (try numArg(ctx, m)) orelse return error.Null;
-        out[i] = toF(n);
-    }
-}
-
 /// A whole-number argument (Oracle truncates fractions).
 fn intArg(ctx: *Context, m: *Mem) error{Invalid}!?i64 {
     const n = (try numArg(ctx, m)) orelse return null;
@@ -289,6 +271,31 @@ fn dateArg(ctx: *Context, m: *Mem) error{Invalid}!?DateTime {
         api.resultError(ctx, "ORA-01861: literal does not match format string");
         return error.Invalid;
     };
+}
+
+/// The arguments of the functions with typed parameters (dfunc.typed()):
+/// a number (Num, or f64), a whole number (i64) or a date (DateTime), as
+/// numArg(), intArg() and dateArg() read them; NULL (or '') makes the
+/// result NULL.
+const Arg = struct {
+    pub fn arg(comptime T: type, ctx: *Context, m: *Mem) ?T {
+        const r = switch (T) {
+            Num, f64 => numArg(ctx, m),
+            i64 => intArg(ctx, m),
+            DateTime => dateArg(ctx, m),
+            else => @compileError("no Oracle argument of type " ++ @typeName(T)),
+        };
+        const v = (r catch return null) orelse {
+            api.resultNull(ctx);
+            return null;
+        };
+        return if (T == f64) toF(v) else v;
+    }
+};
+
+/// A function of typed parameters (Arg).
+fn typed(name: [:0]const u8, comptime f: anytype) int.FuncDef {
+    return dfunc.typed(name, det, Arg, f);
 }
 
 fn resultDate(ctx: *Context, d: DateTime) void {
@@ -423,13 +430,8 @@ fn pad(ctx: *Context, argv: []*Mem, left: bool) void {
     resultOwnedStr(ctx, &out);
 }
 
-fn lpadFunc(ctx: *Context, argv: []*Mem) void {
-    pad(ctx, argv, true);
-}
-
-fn rpadFunc(ctx: *Context, argv: []*Mem) void {
-    pad(ctx, argv, false);
-}
+const lpadFunc = dfunc.bind(pad, .{true});
+const rpadFunc = dfunc.bind(pad, .{false});
 
 fn inSet(set: []const u8, s: []const u8, i: usize) ?usize {
     const end = nextChar(s, i);
@@ -473,13 +475,8 @@ fn trimCommon(ctx: *Context, argv: []*Mem, left: bool, right: bool) void {
     resultStr(ctx, trimSet(s, set, left, right));
 }
 
-fn ltrimFunc(ctx: *Context, argv: []*Mem) void {
-    trimCommon(ctx, argv, true, false);
-}
-
-fn rtrimFunc(ctx: *Context, argv: []*Mem) void {
-    trimCommon(ctx, argv, false, true);
-}
+const ltrimFunc = dfunc.bind(trimCommon, .{ true, false });
+const rtrimFunc = dfunc.bind(trimCommon, .{ false, true });
 
 /// trim(s [, c]): TRIM([BOTH] [c FROM] s), c one character.
 fn trimFunc(ctx: *Context, argv: []*Mem) void {
@@ -583,20 +580,13 @@ fn extreme(ctx: *Context, argv: []*Mem, sign_: i32) void {
     resultStr(ctx, keep.items);
 }
 
-fn greatestFunc(ctx: *Context, argv: []*Mem) void {
-    extreme(ctx, argv, 1);
-}
-
-fn leastFunc(ctx: *Context, argv: []*Mem) void {
-    extreme(ctx, argv, -1);
-}
+const greatestFunc = dfunc.bind(extreme, .{1});
+const leastFunc = dfunc.bind(extreme, .{-1});
 
 // ============================================================= numbers
 
 /// MOD(m, n): m - n * TRUNC(m / n); m for n = 0.
-fn modFunc(ctx: *Context, argv: []*Mem) void {
-    const a = (numArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
-    const b = (numArg(ctx, argv[1]) catch return) orelse return api.resultNull(ctx);
+fn modFunc(ctx: *Context, a: Num, b: Num) void {
     if (a == .int and b == .int) {
         if (b.int == 0) return api.resultInt64(ctx, a.int);
         if (b.int == -1) return api.resultInt64(ctx, 0);
@@ -624,45 +614,26 @@ fn expF(x: f64) f64 {
     return @exp(x);
 }
 
-fn ceilFunc(ctx: *Context, argv: []*Mem) void {
-    unaryMath(ctx, argv, ceilF, true);
-}
+const ceilFunc = dfunc.bind(unaryMath, .{ ceilF, true });
+const floorFunc = dfunc.bind(unaryMath, .{ floorF, true });
+const expFunc = dfunc.bind(unaryMath, .{ expF, false });
 
-fn floorFunc(ctx: *Context, argv: []*Mem) void {
-    unaryMath(ctx, argv, floorF, true);
-}
-
-fn expFunc(ctx: *Context, argv: []*Mem) void {
-    unaryMath(ctx, argv, expF, false);
-}
-
-fn sqrtFunc(ctx: *Context, argv: []*Mem) void {
-    const a = (numArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
-    const x = toF(a);
+fn sqrtFunc(ctx: *Context, x: f64) void {
     if (x < 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
     resultNumber(ctx, @sqrt(x));
 }
 
-fn lnFunc(ctx: *Context, argv: []*Mem) void {
-    const a = (numArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
-    const x = toF(a);
+fn lnFunc(ctx: *Context, x: f64) void {
     if (x <= 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
     resultNumber(ctx, @log(x));
 }
 
-fn logFunc(ctx: *Context, argv: []*Mem) void {
-    var v: [2]f64 = undefined;
-    numArgs(ctx, argv, &v) catch |err| switch (err) {
-        error.Invalid => return,
-        error.Null => return api.resultNull(ctx),
-    };
-    if (v[0] <= 0 or v[0] == 1 or v[1] <= 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
-    resultNumber(ctx, @log(v[1]) / @log(v[0]));
+fn logFunc(ctx: *Context, base: f64, x: f64) void {
+    if (base <= 0 or base == 1 or x <= 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
+    resultNumber(ctx, @log(x) / @log(base));
 }
 
-fn powerFunc(ctx: *Context, argv: []*Mem) void {
-    const a = (numArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
-    const b = (numArg(ctx, argv[1]) catch return) orelse return api.resultNull(ctx);
+fn powerFunc(ctx: *Context, a: Num, b: Num) void {
     if (a == .int and b == .int and b.int >= 0 and b.int < 64) {
         if (std.math.powi(i64, a.int, @intCast(b.int))) |r| return api.resultInt64(ctx, r) else |_| {}
     }
@@ -672,9 +643,7 @@ fn powerFunc(ctx: *Context, argv: []*Mem) void {
     resultNumber(ctx, std.math.pow(f64, x, y));
 }
 
-fn signFunc(ctx: *Context, argv: []*Mem) void {
-    const a = (numArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
-    const x = toF(a);
+fn signFunc(ctx: *Context, x: f64) void {
     api.resultInt64(ctx, if (x > 0) 1 else if (x < 0) -1 else 0);
 }
 
@@ -728,13 +697,8 @@ fn roundTrunc(ctx: *Context, argv: []*Mem, trunc: bool) void {
     resultNumber(ctx, roundTo(toF(a), places, trunc));
 }
 
-fn roundFunc(ctx: *Context, argv: []*Mem) void {
-    roundTrunc(ctx, argv, false);
-}
-
-fn truncFunc(ctx: *Context, argv: []*Mem) void {
-    roundTrunc(ctx, argv, true);
-}
+const roundFunc = dfunc.bind(roundTrunc, .{false});
+const truncFunc = dfunc.bind(roundTrunc, .{true});
 
 // ========================================================= TO_CHAR
 
@@ -1004,13 +968,8 @@ fn toDateCommon(ctx: *Context, argv: []*Mem, digits: ?u32) void {
     resultDate(ctx, d);
 }
 
-fn toDateFunc(ctx: *Context, argv: []*Mem) void {
-    toDateCommon(ctx, argv, null);
-}
-
-fn toTimestampFunc(ctx: *Context, argv: []*Mem) void {
-    toDateCommon(ctx, argv, 6);
-}
+const toDateFunc = dfunc.bind(toDateCommon, .{null});
+const toTimestampFunc = dfunc.bind(toDateCommon, .{6});
 
 /// The fractional digits a date's text has (a TIMESTAMP keeps them).
 fn fracDigitsOf(m: *Mem) u32 {
@@ -1027,20 +986,15 @@ fn fracDigitsOf(m: *Mem) u32 {
     return 0;
 }
 
-fn addMonthsFunc(ctx: *Context, argv: []*Mem) void {
-    const d = (dateArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
-    const n = (intArg(ctx, argv[1]) catch return) orelse return api.resultNull(ctx);
+fn addMonthsFunc(ctx: *Context, d: DateTime, n: i64) void {
     resultDate(ctx, dt.addMonths(d, n));
 }
 
-fn monthsBetweenFunc(ctx: *Context, argv: []*Mem) void {
-    const a = (dateArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
-    const b = (dateArg(ctx, argv[1]) catch return) orelse return api.resultNull(ctx);
+fn monthsBetweenFunc(ctx: *Context, a: DateTime, b: DateTime) void {
     resultNumber(ctx, dt.monthsBetween(a, b));
 }
 
-fn lastDayFunc(ctx: *Context, argv: []*Mem) void {
-    const d = (dateArg(ctx, argv[0]) catch return) orelse return api.resultNull(ctx);
+fn lastDayFunc(ctx: *Context, d: DateTime) void {
     resultDate(ctx, dt.lastDay(d));
 }
 

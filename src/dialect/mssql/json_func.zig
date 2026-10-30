@@ -368,15 +368,11 @@ fn insertInto(a: Allocator, z: []const u8, c: json.Item, key: ?[]const u8, v: []
 
 /// xq_tsql_json_object(options, kinds, key, value, ...): SQL Server
 /// 2022's JSON_OBJECT; options 'absent' leaves out NULL values.
-pub fn jsonObjectFunc(ctx: *Context, argv: []*Mem) void {
-    build(ctx, argv, true);
-}
+pub const jsonObjectFunc = dfunc.bind(build, .{true});
 
 /// xq_tsql_json_array(options, kinds, value, ...): JSON_ARRAY; options
 /// 'null' writes NULLs (ABSENT ON NULL is the default).
-pub fn jsonArrayFunc(ctx: *Context, argv: []*Mem) void {
-    build(ctx, argv, false);
-}
+pub const jsonArrayFunc = dfunc.bind(build, .{false});
 
 fn build(ctx: *Context, argv: []*Mem, object: bool) void {
     var ar = arena(ctx);

@@ -90,13 +90,8 @@ const cpOffset = dfunc.charOffset;
 
 // ================================================================= LIKE
 
-fn likeFunc(ctx: *Context, argv: []*Mem) void {
-    like(ctx, argv, false);
-}
-
-fn ilikeFunc(ctx: *Context, argv: []*Mem) void {
-    like(ctx, argv, true);
-}
+const likeFunc = dfunc.bind(like, .{false});
+const ilikeFunc = dfunc.bind(like, .{true});
 
 fn like(ctx: *Context, argv: []*Mem, fold: bool) void {
     if (anyNull(argv)) return api.resultNull(ctx);
@@ -187,13 +182,8 @@ pub fn likeMatch(pat: []const u8, s: []const u8, esc: ?u21, fold: bool) error{Tr
 
 // ====================================================== greatest, least
 
-fn greatestFunc(ctx: *Context, argv: []*Mem) void {
-    extreme(ctx, argv, 1);
-}
-
-fn leastFunc(ctx: *Context, argv: []*Mem) void {
-    extreme(ctx, argv, -1);
-}
+const greatestFunc = dfunc.bind(extreme, .{1});
+const leastFunc = dfunc.bind(extreme, .{-1});
 
 fn extreme(ctx: *Context, argv: []*Mem, sign_: i32) void {
     const serial = @import("../../vdbe/serial.zig");
@@ -279,13 +269,8 @@ fn pad(ctx: *Context, argv: []*Mem, left_side: bool) void {
     dfunc.resultOwned(ctx, &out);
 }
 
-fn lpadFunc(ctx: *Context, argv: []*Mem) void {
-    pad(ctx, argv, true);
-}
-
-fn rpadFunc(ctx: *Context, argv: []*Mem) void {
-    pad(ctx, argv, false);
-}
+const lpadFunc = dfunc.bind(pad, .{true});
+const rpadFunc = dfunc.bind(pad, .{false});
 
 fn splitPartFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);

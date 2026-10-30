@@ -65,27 +65,30 @@ const FuncDef = int.FuncDef;
 /// SQLite's subtype of JSON text (JSON_SUBTYPE).
 pub const J: u32 = 'J';
 
-const det: dfunc.Options = .{ .deterministic = true };
-
-/// A function that reads and sets subtypes.
-fn sub(d: FuncDef) FuncDef {
-    var x = d;
-    x.func_flags.SUBTYPE = true;
-    x.func_flags.RESULT_SUBTYPE = true;
-    return x;
-}
+/// Deterministic functions that read and set subtypes.
+const det: dfunc.Options = .{ .deterministic = true, .subtype = true, .result_subtype = true };
 
 fn s(name: [:0]const u8, n: i16, f: dfunc.StepFn) FuncDef {
-    return sub(dfunc.scalar(name, n, det, f));
+    return dfunc.scalar(name, n, det, f);
+}
+
+/// s() for each argument count of `arities`.
+fn ov(name: [:0]const u8, comptime arities: []const i16, f: dfunc.StepFn) [arities.len]FuncDef {
+    return dfunc.overloads(name, arities, det, f);
+}
+
+/// The StepFn of `f`, which works in the arena of its call (Call).
+fn inArena(comptime f: fn (*Call, []*Mem) void) dfunc.StepFn {
+    return dfunc.withArena(Call, f);
 }
 
 fn agg(name: [:0]const u8, n: i16, step: dfunc.StepFn, final: dfunc.FinalFn) FuncDef {
-    return sub(dfunc.aggregate(name, n, det, step, final));
+    return dfunc.aggregate(name, n, det, step, final);
 }
 
 pub const engine_functions = [_]FuncDef{
-    s("xq_pg_json", 1, castJson),
-    s("xq_pg_jsonb", 1, castJsonb),
+    s("xq_pg_json", 1, inArena(castJson)),
+    s("xq_pg_jsonb", 1, inArena(castJsonb)),
     s("xq_pg_json_bool", 1, jsonBool),
     s("xq_pg_json_get", 2, getJson),
     s("xq_pg_jsonb_get", 2, getJsonb),
@@ -95,32 +98,32 @@ pub const engine_functions = [_]FuncDef{
     s("xq_pg_jsonb_path", 2, pathJsonb),
     s("xq_pg_json_path_text", 2, pathJsonText),
     s("xq_pg_jsonb_path_text", 2, pathJsonbText),
-    s("xq_pg_jsonb_contains", 2, containsFunc),
-    s("xq_pg_jsonb_exists", 2, existsFunc),
+    s("xq_pg_jsonb_contains", 2, inArena(containsFunc)),
+    s("xq_pg_jsonb_exists", 2, inArena(existsFunc)),
     s("xq_pg_jsonb_exists_any", 2, existsAnyFunc),
     s("xq_pg_jsonb_exists_all", 2, existsAllFunc),
-    s("xq_pg_jsonb_concat", 2, concatFunc),
-    s("xq_pg_jsonb_delete", 2, deleteFunc),
-    s("xq_pg_jsonb_delete_keys", 2, deleteKeysFunc),
-    s("xq_pg_jsonb_delete_path", 2, deletePathFunc),
+    s("xq_pg_jsonb_concat", 2, inArena(concatFunc)),
+    s("xq_pg_jsonb_delete", 2, inArena(deleteFunc)),
+    s("xq_pg_jsonb_delete_keys", 2, inArena(deleteKeysFunc)),
+    s("xq_pg_jsonb_delete_path", 2, inArena(deletePathFunc)),
     s("xq_pg_jsonb_path_exists_op", 2, pathExistsOp),
     s("xq_pg_jsonb_path_match_op", 2, pathMatchOp),
-    s("xq_pg_text_array", 1, textArrayFunc),
-    s("xq_pg_array", -1, arrayFunc),
+    s("xq_pg_text_array", 1, inArena(textArrayFunc)),
+    s("xq_pg_array", -1, inArena(arrayFunc)),
     s("xq_pg_array_to_json", 3, arrayToJsonFunc),
-    s("xq_pg_is_json", 3, isJsonFunc),
-    s("xq_pg_row_json", -1, rowJsonFunc),
-    s("xq_pg_json_ctor_object", -1, ctorObject),
-    s("xq_pg_json_ctor_array", -1, ctorArray),
+    s("xq_pg_is_json", 3, inArena(isJsonFunc)),
+    s("xq_pg_row_json", -1, inArena(rowJsonFunc)),
+    s("xq_pg_json_ctor_object", -1, inArena(ctorObject)),
+    s("xq_pg_json_ctor_array", -1, inArena(ctorArray)),
     agg("xq_pg_json_arrayagg", 2, arrayaggStep, arrayaggFinal),
     agg("xq_pg_json_objectagg", 3, objectaggStep, objectaggFinal),
     agg("xq_pg_json_agg_rows", 1, aggRowsStep, aggFinal),
-    s("xq_pg_rows_each", 2, rowsEach),
-    s("xq_pg_rows_elements", 2, rowsElements),
-    s("xq_pg_rows_keys", 2, rowsKeys),
-    s("xq_pg_rows_path", 4, rowsPath),
-    s("xq_pg_rows_records", -1, rowsRecords),
-    s("xq_pg_rows_zip", -1, rowsZip),
+    s("xq_pg_rows_each", 2, inArena(rowsEach)),
+    s("xq_pg_rows_elements", 2, inArena(rowsElements)),
+    s("xq_pg_rows_keys", 2, inArena(rowsKeys)),
+    s("xq_pg_rows_path", 4, inArena(rowsPath)),
+    s("xq_pg_rows_records", -1, inArena(rowsRecords)),
+    s("xq_pg_rows_zip", -1, inArena(rowsZip)),
 };
 
 pub const functions = [_]FuncDef{
@@ -128,12 +131,12 @@ pub const functions = [_]FuncDef{
     s("to_jsonb", 1, toJsonb),
     s("array_to_json", 1, arrayToJson),
     s("array_to_json", 2, arrayToJson),
-    s("row_to_json", 1, rowToJson),
-    s("row_to_json", 2, rowToJson),
-    s("json_build_object", -1, buildObjectJson),
-    s("jsonb_build_object", -1, buildObjectJsonb),
-    s("json_build_array", -1, buildArrayJson),
-    s("jsonb_build_array", -1, buildArrayJsonb),
+    s("row_to_json", 1, inArena(rowToJson)),
+    s("row_to_json", 2, inArena(rowToJson)),
+    s("json_build_object", -1, inArena(buildObjectJson)),
+    s("jsonb_build_object", -1, inArena(buildObjectJsonb)),
+    s("json_build_array", -1, inArena(buildArrayJson)),
+    s("jsonb_build_array", -1, inArena(buildArrayJsonb)),
     s("json_object", 1, objectJson),
     s("json_object", 2, objectJson),
     s("jsonb_object", 1, objectJsonb),
@@ -152,27 +155,15 @@ pub const functions = [_]FuncDef{
     s("jsonb_extract_path_text", -1, extractPathJsonbText),
     s("json_strip_nulls", 1, stripNullsJson),
     s("jsonb_strip_nulls", 1, stripNullsJsonb),
-    s("jsonb_set", 3, setFunc),
-    s("jsonb_set", 4, setFunc),
-    s("jsonb_set_lax", 3, setLaxFunc),
-    s("jsonb_set_lax", 4, setLaxFunc),
-    s("jsonb_set_lax", 5, setLaxFunc),
-    s("jsonb_insert", 3, insertFunc),
-    s("jsonb_insert", 4, insertFunc),
-    s("jsonb_pretty", 1, prettyFunc),
-    s("jsonb_path_exists", 2, pathExistsFunc),
-    s("jsonb_path_exists", 3, pathExistsFunc),
-    s("jsonb_path_exists", 4, pathExistsFunc),
-    s("jsonb_path_match", 2, pathMatchFunc),
-    s("jsonb_path_match", 3, pathMatchFunc),
-    s("jsonb_path_match", 4, pathMatchFunc),
-    s("jsonb_path_query_array", 2, pathQueryArrayFunc),
-    s("jsonb_path_query_array", 3, pathQueryArrayFunc),
-    s("jsonb_path_query_array", 4, pathQueryArrayFunc),
-    s("jsonb_path_query_first", 2, pathQueryFirstFunc),
-    s("jsonb_path_query_first", 3, pathQueryFirstFunc),
-    s("jsonb_path_query_first", 4, pathQueryFirstFunc),
-};
+} ++
+    ov("jsonb_set", &.{ 3, 4 }, inArena(setFunc)) ++
+    ov("jsonb_set_lax", &.{ 3, 4, 5 }, inArena(setLaxFunc)) ++
+    ov("jsonb_insert", &.{ 3, 4 }, inArena(insertFunc)) ++
+    .{s("jsonb_pretty", 1, inArena(prettyFunc))} ++
+    ov("jsonb_path_exists", &.{ 2, 3, 4 }, pathExistsFunc) ++
+    ov("jsonb_path_match", &.{ 2, 3, 4 }, pathMatchFunc) ++
+    ov("jsonb_path_query_array", &.{ 2, 3, 4 }, inArena(pathQueryArrayFunc)) ++
+    ov("jsonb_path_query_first", &.{ 2, 3, 4 }, inArena(pathQueryFirstFunc));
 
 const isNull = dfunc.isNull;
 const anyNull = dfunc.anyNull;
@@ -184,11 +175,11 @@ const Call = struct {
     arena: std.heap.ArenaAllocator,
     ctx: *Context,
 
-    fn init(ctx: *Context) Call {
+    pub fn init(ctx: *Context) Call {
         return .{ .arena = .init(dfunc.gpa(ctx)), .ctx = ctx };
     }
 
-    fn deinit(c: *Call) void {
+    pub fn deinit(c: *Call) void {
         c.arena.deinit();
     }
 
@@ -297,19 +288,15 @@ pub fn toValue(a: Allocator, m: *Mem, jsonb: bool) json.Error!Value {
 
 // ================================================================== casts
 
-fn castJson(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn castJson(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
     const t = c.text(argv[0]) orelse return;
     _ = c.parseText(t, false) orelse return;
     c.resultJsonText(t);
 }
 
-fn castJsonb(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn castJsonb(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
     const v = c.parse(argv[0], true) orelse return;
     c.result(v, true);
 }
@@ -320,12 +307,10 @@ fn jsonBool(ctx: *Context, argv: []*Mem) void {
     api.resultSubtype(ctx, J);
 }
 
-fn textArrayFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn textArrayFunc(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
     const elems = c.textArray(argv[0]) orelse return;
-    writeArray(&c, elems);
+    writeArray(c, elems);
 }
 
 fn writeArray(c: *Call, elems: []const ?[]const u8) void {
@@ -339,14 +324,12 @@ fn writeArray(c: *Call, elems: []const ?[]const u8) void {
     api.resultText(c.ctx, out.items, .transient);
 }
 
-fn arrayFunc(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const elems = c.a().alloc(?[]const u8, argv.len) catch return api.resultErrorNomem(ctx);
+fn arrayFunc(c: *Call, argv: []*Mem) void {
+    const elems = c.a().alloc(?[]const u8, argv.len) catch return api.resultErrorNomem(c.ctx);
     for (argv, elems) |m, *e| {
-        e.* = if (isNull(m)) null else (c.a().dupe(u8, c.text(m) orelse return) catch return api.resultErrorNomem(ctx));
+        e.* = if (isNull(m)) null else (c.a().dupe(u8, c.text(m) orelse return) catch return api.resultErrorNomem(c.ctx));
     }
-    writeArray(&c, elems);
+    writeArray(c, elems);
 }
 
 // ============================================================== operators
@@ -364,18 +347,10 @@ fn get(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
     if (as_text) c.resultText(r, jsonb) else c.result(r, jsonb);
 }
 
-fn getJson(ctx: *Context, argv: []*Mem) void {
-    get(ctx, argv, false, false);
-}
-fn getJsonb(ctx: *Context, argv: []*Mem) void {
-    get(ctx, argv, true, false);
-}
-fn getJsonText(ctx: *Context, argv: []*Mem) void {
-    get(ctx, argv, false, true);
-}
-fn getJsonbText(ctx: *Context, argv: []*Mem) void {
-    get(ctx, argv, true, true);
-}
+const getJson = dfunc.bind(get, .{ false, false });
+const getJsonb = dfunc.bind(get, .{ true, false });
+const getJsonText = dfunc.bind(get, .{ false, true });
+const getJsonbText = dfunc.bind(get, .{ true, true });
 
 /// The value at `path` (keys of objects, indexes of arrays); null if
 /// there is none.
@@ -405,18 +380,10 @@ fn pathGet(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
     if (as_text) c.resultText(r, jsonb) else c.result(r, jsonb);
 }
 
-fn pathJson(ctx: *Context, argv: []*Mem) void {
-    pathGet(ctx, argv, false, false);
-}
-fn pathJsonb(ctx: *Context, argv: []*Mem) void {
-    pathGet(ctx, argv, true, false);
-}
-fn pathJsonText(ctx: *Context, argv: []*Mem) void {
-    pathGet(ctx, argv, false, true);
-}
-fn pathJsonbText(ctx: *Context, argv: []*Mem) void {
-    pathGet(ctx, argv, true, true);
-}
+const pathJson = dfunc.bind(pathGet, .{ false, false });
+const pathJsonb = dfunc.bind(pathGet, .{ true, false });
+const pathJsonText = dfunc.bind(pathGet, .{ false, true });
+const pathJsonbText = dfunc.bind(pathGet, .{ true, true });
 
 /// json_extract_path(j, VARIADIC path).
 fn extractPath(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
@@ -431,34 +398,22 @@ fn extractPath(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
     if (as_text) c.resultText(r, jsonb) else c.result(r, jsonb);
 }
 
-fn extractPathJson(ctx: *Context, argv: []*Mem) void {
-    extractPath(ctx, argv, false, false);
-}
-fn extractPathJsonText(ctx: *Context, argv: []*Mem) void {
-    extractPath(ctx, argv, false, true);
-}
-fn extractPathJsonb(ctx: *Context, argv: []*Mem) void {
-    extractPath(ctx, argv, true, false);
-}
-fn extractPathJsonbText(ctx: *Context, argv: []*Mem) void {
-    extractPath(ctx, argv, true, true);
-}
+const extractPathJson = dfunc.bind(extractPath, .{ false, false });
+const extractPathJsonText = dfunc.bind(extractPath, .{ false, true });
+const extractPathJsonb = dfunc.bind(extractPath, .{ true, false });
+const extractPathJsonbText = dfunc.bind(extractPath, .{ true, true });
 
-fn containsFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn containsFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     const y = c.parse(argv[1], true) orelse return;
-    api.resultInt64(ctx, @intFromBool(json.contains(x, y)));
+    api.resultInt64(c.ctx, @intFromBool(json.contains(x, y)));
 }
 
-fn existsFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn existsFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
-    api.resultInt64(ctx, @intFromBool(json.exists(x, c.text(argv[1]) orelse return)));
+    api.resultInt64(c.ctx, @intFromBool(json.exists(x, c.text(argv[1]) orelse return)));
 }
 
 fn existsSet(ctx: *Context, argv: []*Mem, all: bool) void {
@@ -477,23 +432,17 @@ fn existsSet(ctx: *Context, argv: []*Mem, all: bool) void {
     api.resultInt64(ctx, @intFromBool(r));
 }
 
-fn existsAnyFunc(ctx: *Context, argv: []*Mem) void {
-    existsSet(ctx, argv, false);
-}
-fn existsAllFunc(ctx: *Context, argv: []*Mem) void {
-    existsSet(ctx, argv, true);
-}
+const existsAnyFunc = dfunc.bind(existsSet, .{false});
+const existsAllFunc = dfunc.bind(existsSet, .{true});
 
 /// `||`: objects merge (the right one's values win), arrays append, a
 /// scalar is an array of itself.
-fn concatFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn concatFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     const y = c.parse(argv[1], true) orelse return;
-    var r = concat(c.a(), x, y) catch return api.resultErrorNomem(ctx);
-    json.normalize(c.a(), &r) catch return api.resultErrorNomem(ctx);
+    var r = concat(c.a(), x, y) catch return api.resultErrorNomem(c.ctx);
+    json.normalize(c.a(), &r) catch return api.resultErrorNomem(c.ctx);
     c.result(r, true);
 }
 
@@ -508,28 +457,26 @@ pub fn concat(a: Allocator, x: Value, y: Value) json.Error!Value {
 
 /// `-`: a key (or the string elements equal to it), or an element by
 /// index.
-fn deleteFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn deleteFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     if (api.valueType(argv[1]) == vi.SQLITE_INTEGER) {
         switch (x.v) {
-            .object => return api.resultError(ctx, "cannot delete from object using integer index"),
+            .object => return api.resultError(c.ctx, "cannot delete from object using integer index"),
             .array => |items| {
                 const n: i64 = @intCast(items.len);
                 var i = api.valueInt64(argv[1]);
                 if (i < 0) i += n;
                 if (i < 0 or i >= n) return c.result(x, true);
                 const k: usize = @intCast(i);
-                const out = std.mem.concat(c.a(), Value, &.{ items[0..k], items[k + 1 ..] }) catch return api.resultErrorNomem(ctx);
+                const out = std.mem.concat(c.a(), Value, &.{ items[0..k], items[k + 1 ..] }) catch return api.resultErrorNomem(c.ctx);
                 return c.result(.{ .v = .{ .array = out } }, true);
             },
-            else => return api.resultError(ctx, "cannot delete from scalar"),
+            else => return api.resultError(c.ctx, "cannot delete from scalar"),
         }
     }
     const k = c.text(argv[1]) orelse return;
-    const r = deleteKeys(c.a(), x, &.{k}) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(ctx) else api.resultError(ctx, "cannot delete from scalar");
+    const r = deleteKeys(c.a(), x, &.{k}) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(c.ctx) else api.resultError(c.ctx, "cannot delete from scalar");
     c.result(r, true);
 }
 
@@ -555,13 +502,11 @@ fn deleteKeys(a: Allocator, x: Value, keys: []const ?[]const u8) (json.Error || 
     }
 }
 
-fn deleteKeysFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn deleteKeysFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     const keys = c.textArray(argv[1]) orelse return;
-    const r = deleteKeys(c.a(), x, keys) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(ctx) else api.resultError(ctx, "cannot delete from scalar");
+    const r = deleteKeys(c.a(), x, keys) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(c.ctx) else api.resultError(c.ctx, "cannot delete from scalar");
     c.result(r, true);
 }
 
@@ -676,58 +621,50 @@ fn runSet(c: *Call, x: Value, path: []const ?[]const u8, new: Value, op: SetOp, 
     c.result(r, true);
 }
 
-fn deletePathFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn deletePathFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     const path = c.textArray(argv[1]) orelse return;
-    runSet(&c, x, path, json.null_value, .delete, false);
+    runSet(c, x, path, json.null_value, .delete, false);
 }
 
 /// jsonb_set(target, path, new [, create_missing]).
-fn setFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn setFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     const path = c.textArray(argv[1]) orelse return;
     const new = c.parse(argv[2], true) orelse return;
     const create = argv.len < 4 or api.valueInt64(argv[3]) != 0;
-    runSet(&c, x, path, new, .set, create);
+    runSet(c, x, path, new, .set, create);
 }
 
 /// jsonb_set_lax(target, path, new [, create_missing [, null_value_treatment]]).
-fn setLaxFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(ctx);
-    for (argv[3..]) |m| if (isNull(m)) return api.resultError(ctx, "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn setLaxFunc(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(c.ctx);
+    for (argv[3..]) |m| if (isNull(m)) return api.resultError(c.ctx, "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
     const x = c.parse(argv[0], true) orelse return;
     const path = c.textArray(argv[1]) orelse return;
     const create = argv.len < 4 or api.valueInt64(argv[3]) != 0;
     if (isNull(argv[2])) {
         const how = if (argv.len == 5) (c.text(argv[4]) orelse return) else "use_json_null";
-        if (std.mem.eql(u8, how, "raise_exception")) return api.resultError(ctx, "JSON value must not be null");
+        if (std.mem.eql(u8, how, "raise_exception")) return api.resultError(c.ctx, "JSON value must not be null");
         if (std.mem.eql(u8, how, "return_target")) return c.result(x, true);
-        if (std.mem.eql(u8, how, "delete_key")) return runSet(&c, x, path, json.null_value, .delete, false);
-        if (!std.mem.eql(u8, how, "use_json_null")) return api.resultError(ctx, "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
-        return runSet(&c, x, path, json.null_value, .set, create);
+        if (std.mem.eql(u8, how, "delete_key")) return runSet(c, x, path, json.null_value, .delete, false);
+        if (!std.mem.eql(u8, how, "use_json_null")) return api.resultError(c.ctx, "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
+        return runSet(c, x, path, json.null_value, .set, create);
     }
     const new = c.parse(argv[2], true) orelse return;
-    runSet(&c, x, path, new, .set, create);
+    runSet(c, x, path, new, .set, create);
 }
 
 /// jsonb_insert(target, path, new [, insert_after]).
-fn insertFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn insertFunc(c: *Call, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     const path = c.textArray(argv[1]) orelse return;
     const new = c.parse(argv[2], true) orelse return;
     const after = argv.len == 4 and api.valueInt64(argv[3]) != 0;
-    runSet(&c, x, path, new, if (after) .insert_after else .insert_before, false);
+    runSet(c, x, path, new, if (after) .insert_after else .insert_before, false);
 }
 
 // ============================================================== jsonpath
@@ -784,12 +721,8 @@ fn pathExists(ctx: *Context, argv: []*Mem, silent_default: bool) void {
     api.resultInt64(ctx, @intFromBool(items.len > 0));
 }
 
-fn pathExistsFunc(ctx: *Context, argv: []*Mem) void {
-    pathExists(ctx, argv, false);
-}
-fn pathExistsOp(ctx: *Context, argv: []*Mem) void {
-    pathExists(ctx, argv, true);
-}
+const pathExistsFunc = dfunc.bind(pathExists, .{false});
+const pathExistsOp = dfunc.bind(pathExists, .{true});
 
 fn pathMatch(ctx: *Context, argv: []*Mem, silent_default: bool) void {
     if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(ctx);
@@ -807,31 +740,23 @@ fn pathMatch(ctx: *Context, argv: []*Mem, silent_default: bool) void {
     if (r) |b| api.resultInt64(ctx, @intFromBool(b)) else api.resultNull(ctx);
 }
 
-fn pathMatchFunc(ctx: *Context, argv: []*Mem) void {
-    pathMatch(ctx, argv, false);
-}
-fn pathMatchOp(ctx: *Context, argv: []*Mem) void {
-    pathMatch(ctx, argv, true);
-}
+const pathMatchFunc = dfunc.bind(pathMatch, .{false});
+const pathMatchOp = dfunc.bind(pathMatch, .{true});
 
-fn pathQueryArrayFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const pa = pathArgs(&c, argv) orelse return;
+fn pathQueryArrayFunc(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(c.ctx);
+    const pa = pathArgs(c, argv) orelse return;
     var silent_err = false;
-    const items = pathItems(&c, pa, &silent_err) orelse return if (silent_err) c.result(.{ .v = .{ .array = &.{} } }, true) else {};
+    const items = pathItems(c, pa, &silent_err) orelse return if (silent_err) c.result(.{ .v = .{ .array = &.{} } }, true) else {};
     c.result(.{ .v = .{ .array = items } }, true);
 }
 
-fn pathQueryFirstFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const pa = pathArgs(&c, argv) orelse return;
+fn pathQueryFirstFunc(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(c.ctx);
+    const pa = pathArgs(c, argv) orelse return;
     var silent_err = false;
-    const items = pathItems(&c, pa, &silent_err) orelse return if (silent_err) api.resultNull(ctx) else {};
-    if (items.len == 0) return api.resultNull(ctx);
+    const items = pathItems(c, pa, &silent_err) orelse return if (silent_err) api.resultNull(c.ctx) else {};
+    if (items.len == 0) return api.resultNull(c.ctx);
     c.result(items[0], true);
 }
 
@@ -845,32 +770,26 @@ fn toJsonAny(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     c.result(v, jsonb);
 }
 
-fn toJson(ctx: *Context, argv: []*Mem) void {
-    toJsonAny(ctx, argv, false);
-}
-fn toJsonb(ctx: *Context, argv: []*Mem) void {
-    toJsonAny(ctx, argv, true);
-}
+const toJson = dfunc.bind(toJsonAny, .{false});
+const toJsonb = dfunc.bind(toJsonAny, .{true});
 
 /// row_to_json() of a value that is already JSON (the parser spells a
 /// row out as xq_pg_row_json()); pretty adds the line breaks.
-fn rowToJson(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn rowToJson(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
     const v = c.valueOf(argv[0], false) orelse return;
     const pretty = argv.len == 2 and api.valueInt64(argv[1]) != 0;
     if (pretty and v.v == .object) {
         var out: std.ArrayList(u8) = .empty;
         const a = c.a();
-        out.append(a, '{') catch return api.resultErrorNomem(ctx);
+        out.append(a, '{') catch return api.resultErrorNomem(c.ctx);
         for (v.v.object, 0..) |pp, i| {
-            if (i > 0) out.appendSlice(a, ",\n ") catch return api.resultErrorNomem(ctx);
-            json.writeString(a, &out, pp.key) catch return api.resultErrorNomem(ctx);
-            out.append(a, ':') catch return api.resultErrorNomem(ctx);
-            json.writeJson(a, &out, pp.value) catch return api.resultErrorNomem(ctx);
+            if (i > 0) out.appendSlice(a, ",\n ") catch return api.resultErrorNomem(c.ctx);
+            json.writeString(a, &out, pp.key) catch return api.resultErrorNomem(c.ctx);
+            out.append(a, ':') catch return api.resultErrorNomem(c.ctx);
+            json.writeJson(a, &out, pp.value) catch return api.resultErrorNomem(c.ctx);
         }
-        out.append(a, '}') catch return api.resultErrorNomem(ctx);
+        out.append(a, '}') catch return api.resultErrorNomem(c.ctx);
         return c.resultJsonText(out.items);
     }
     c.result(v, false);
@@ -878,21 +797,19 @@ fn rowToJson(ctx: *Context, argv: []*Mem) void {
 
 /// xq_pg_row_json('a', a, 'b', b ...): row_to_json() of a row,
 /// `{"a":1,"b":"x"}`.
-fn rowJsonFunc(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn rowJsonFunc(c: *Call, argv: []*Mem) void {
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '{') catch return api.resultErrorNomem(ctx);
+    out.append(a, '{') catch return api.resultErrorNomem(c.ctx);
     var i: usize = 0;
     while (i + 1 < argv.len) : (i += 2) {
-        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        json.writeString(a, &out, c.text(argv[i]) orelse return) catch return api.resultErrorNomem(ctx);
-        out.append(a, ':') catch return api.resultErrorNomem(ctx);
+        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        json.writeString(a, &out, c.text(argv[i]) orelse return) catch return api.resultErrorNomem(c.ctx);
+        out.append(a, ':') catch return api.resultErrorNomem(c.ctx);
         const v = c.valueOf(argv[i + 1], false) orelse return;
-        json.writeJson(a, &out, v) catch return api.resultErrorNomem(ctx);
+        json.writeJson(a, &out, v) catch return api.resultErrorNomem(c.ctx);
     }
-    out.append(a, '}') catch return api.resultErrorNomem(ctx);
+    out.append(a, '}') catch return api.resultErrorNomem(c.ctx);
     c.resultJsonText(out.items);
 }
 
@@ -998,25 +915,17 @@ fn buildArray(c: *Call, argv: []*Mem, o: BuildOpts) void {
     c.resultJsonText(out.items);
 }
 
-fn buildObjectJson(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    buildObject(&c, argv, .{ .jsonb = false });
+fn buildObjectJson(c: *Call, argv: []*Mem) void {
+    buildObject(c, argv, .{ .jsonb = false });
 }
-fn buildObjectJsonb(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    buildObject(&c, argv, .{ .jsonb = true });
+fn buildObjectJsonb(c: *Call, argv: []*Mem) void {
+    buildObject(c, argv, .{ .jsonb = true });
 }
-fn buildArrayJson(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    buildArray(&c, argv, .{ .jsonb = false });
+fn buildArrayJson(c: *Call, argv: []*Mem) void {
+    buildArray(c, argv, .{ .jsonb = false });
 }
-fn buildArrayJsonb(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    buildArray(&c, argv, .{ .jsonb = true });
+fn buildArrayJsonb(c: *Call, argv: []*Mem) void {
+    buildArray(c, argv, .{ .jsonb = true });
 }
 
 fn ctorFlags(m: *Mem) BuildOpts {
@@ -1024,15 +933,11 @@ fn ctorFlags(m: *Mem) BuildOpts {
     return .{ .jsonb = f & 1 != 0, .absent_on_null = f & 2 != 0, .unique = f & 4 != 0, .ctor = true };
 }
 
-fn ctorObject(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    buildObject(&c, argv[1..], ctorFlags(argv[0]));
+fn ctorObject(c: *Call, argv: []*Mem) void {
+    buildObject(c, argv[1..], ctorFlags(argv[0]));
 }
-fn ctorArray(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    buildArray(&c, argv[1..], ctorFlags(argv[0]));
+fn ctorArray(c: *Call, argv: []*Mem) void {
+    buildArray(c, argv[1..], ctorFlags(argv[0]));
 }
 
 /// json_object(text[]) and json_object(keys text[], values text[]).
@@ -1080,12 +985,8 @@ fn objectFromArrays(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     c.resultJsonText(out.items);
 }
 
-fn objectJson(ctx: *Context, argv: []*Mem) void {
-    objectFromArrays(ctx, argv, false);
-}
-fn objectJsonb(ctx: *Context, argv: []*Mem) void {
-    objectFromArrays(ctx, argv, true);
-}
+const objectJson = dfunc.bind(objectFromArrays, .{false});
+const objectJsonb = dfunc.bind(objectFromArrays, .{true});
 
 // ============================================================ aggregates
 
@@ -1201,12 +1102,8 @@ fn objectAggStep(ctx: *Context, argv: []*Mem, jsonb: bool, absent_on_null: bool)
     aggAppendText(ctx, st, ", ", out.items);
 }
 
-fn objectAggJsonStep(ctx: *Context, argv: []*Mem) void {
-    objectAggStep(ctx, argv, false, false);
-}
-fn objectAggJsonbStep(ctx: *Context, argv: []*Mem) void {
-    objectAggStep(ctx, argv, true, false);
-}
+const objectAggJsonStep = dfunc.bind(objectAggStep, .{ false, false });
+const objectAggJsonbStep = dfunc.bind(objectAggStep, .{ true, false });
 
 fn objectFinal(ctx: *Context, jsonb: bool, unique: bool, empty_null: bool) void {
     const st = aggStateFinal(ctx) orelse return if (empty_null) api.resultNull(ctx) else emptyObject(ctx, jsonb);
@@ -1280,12 +1177,8 @@ fn typeofAny(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     api.resultText(ctx, v.typeName(), .static);
 }
 
-fn typeofJson(ctx: *Context, argv: []*Mem) void {
-    typeofAny(ctx, argv, false);
-}
-fn typeofJsonb(ctx: *Context, argv: []*Mem) void {
-    typeofAny(ctx, argv, true);
-}
+const typeofJson = dfunc.bind(typeofAny, .{false});
+const typeofJsonb = dfunc.bind(typeofAny, .{true});
 
 fn arrayLength(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
@@ -1299,12 +1192,8 @@ fn arrayLength(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     }
 }
 
-fn arrayLengthJson(ctx: *Context, argv: []*Mem) void {
-    arrayLength(ctx, argv, false);
-}
-fn arrayLengthJsonb(ctx: *Context, argv: []*Mem) void {
-    arrayLength(ctx, argv, true);
-}
+const arrayLengthJson = dfunc.bind(arrayLength, .{false});
+const arrayLengthJsonb = dfunc.bind(arrayLength, .{true});
 
 fn stripNulls(a: Allocator, v: Value) json.Error!Value {
     switch (v.v) {
@@ -1334,31 +1223,23 @@ fn stripNullsAny(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     c.result(r, jsonb);
 }
 
-fn stripNullsJson(ctx: *Context, argv: []*Mem) void {
-    stripNullsAny(ctx, argv, false);
-}
-fn stripNullsJsonb(ctx: *Context, argv: []*Mem) void {
-    stripNullsAny(ctx, argv, true);
-}
+const stripNullsJson = dfunc.bind(stripNullsAny, .{false});
+const stripNullsJsonb = dfunc.bind(stripNullsAny, .{true});
 
-fn prettyFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn prettyFunc(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
     const v = c.parse(argv[0], true) orelse return;
     var out: std.ArrayList(u8) = .empty;
-    json.writePretty(c.a(), &out, v, 0) catch return api.resultErrorNomem(ctx);
-    api.resultText(ctx, out.items, .transient);
+    json.writePretty(c.a(), &out, v, 0) catch return api.resultErrorNomem(c.ctx);
+    api.resultText(c.ctx, out.items, .transient);
 }
 
 /// IS [NOT] JSON: kind 0 VALUE, 1 ARRAY, 2 OBJECT, 3 SCALAR; unique
 /// WITH UNIQUE KEYS.
-fn isJsonFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn isJsonFunc(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
     const t = c.text(argv[0]) orelse return;
-    const v = json.parse(c.a(), t, false) catch return api.resultInt64(ctx, 0);
+    const v = json.parse(c.a(), t, false) catch return api.resultInt64(c.ctx, 0);
     const kind = api.valueInt64(argv[1]);
     const ok = switch (kind) {
         1 => v.v == .array,
@@ -1366,8 +1247,8 @@ fn isJsonFunc(ctx: *Context, argv: []*Mem) void {
         3 => v.isScalar(),
         else => true,
     };
-    if (ok and api.valueInt64(argv[2]) != 0 and hasDuplicateKeys(v)) return api.resultInt64(ctx, 0);
-    api.resultInt64(ctx, @intFromBool(ok));
+    if (ok and api.valueInt64(argv[2]) != 0 and hasDuplicateKeys(v)) return api.resultInt64(c.ctx, 0);
+    api.resultInt64(c.ctx, @intFromBool(ok));
 }
 
 fn hasDuplicateKeys(v: Value) bool {
@@ -1411,60 +1292,54 @@ fn rowItem(c: *Call, out: *std.ArrayList(u8), v: Value, n: SrfName) json.Error!v
 }
 
 /// json_each(j) / jsonb_each_text(j) ...: [[key, value], ...].
-fn rowsEach(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const n = srfName(&c, argv[1]) orelse return;
+fn rowsEach(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
+    const n = srfName(c, argv[1]) orelse return;
     const v = c.parse(argv[0], n.jsonb) orelse return;
     if (v.v != .object) {
         if (n.jsonb) return c.errFmt("cannot call {s} on a non-object", .{n.name});
-        return api.resultError(ctx, if (v.v == .array) "cannot deconstruct an array as an object" else "cannot deconstruct a scalar");
+        return api.resultError(c.ctx, if (v.v == .array) "cannot deconstruct an array as an object" else "cannot deconstruct a scalar");
     }
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch return api.resultErrorNomem(ctx);
+    out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
     for (v.v.object, 0..) |pp, i| {
-        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        out.append(a, '[') catch return api.resultErrorNomem(ctx);
-        json.writeString(a, &out, pp.key) catch return api.resultErrorNomem(ctx);
-        out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        rowItem(&c, &out, pp.value, n) catch return api.resultErrorNomem(ctx);
-        out.append(a, ']') catch return api.resultErrorNomem(ctx);
+        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
+        json.writeString(a, &out, pp.key) catch return api.resultErrorNomem(c.ctx);
+        out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        rowItem(c, &out, pp.value, n) catch return api.resultErrorNomem(c.ctx);
+        out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
     }
-    out.append(a, ']') catch return api.resultErrorNomem(ctx);
-    resultRows(&c, out.items);
+    out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
+    resultRows(c, out.items);
 }
 
 /// json_array_elements(j) ...: [value, ...].
-fn rowsElements(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const n = srfName(&c, argv[1]) orelse return;
+fn rowsElements(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
+    const n = srfName(c, argv[1]) orelse return;
     const v = c.parse(argv[0], n.jsonb) orelse return;
     switch (v.v) {
         .array => {},
-        .object => return if (n.jsonb) api.resultError(ctx, "cannot extract elements from an object") else c.errFmt("cannot call {s} on a non-array", .{n.name}),
-        else => return if (n.jsonb) api.resultError(ctx, "cannot extract elements from a scalar") else c.errFmt("cannot call {s} on a scalar", .{n.name}),
+        .object => return if (n.jsonb) api.resultError(c.ctx, "cannot extract elements from an object") else c.errFmt("cannot call {s} on a non-array", .{n.name}),
+        else => return if (n.jsonb) api.resultError(c.ctx, "cannot extract elements from a scalar") else c.errFmt("cannot call {s} on a scalar", .{n.name}),
     }
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch return api.resultErrorNomem(ctx);
+    out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
     for (v.v.array, 0..) |e, i| {
-        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        rowItem(&c, &out, e, n) catch return api.resultErrorNomem(ctx);
+        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        rowItem(c, &out, e, n) catch return api.resultErrorNomem(c.ctx);
     }
-    out.append(a, ']') catch return api.resultErrorNomem(ctx);
-    resultRows(&c, out.items);
+    out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
+    resultRows(c, out.items);
 }
 
 /// json_object_keys(j): [key, ...].
-fn rowsKeys(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const n = srfName(&c, argv[1]) orelse return;
+fn rowsKeys(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
+    const n = srfName(c, argv[1]) orelse return;
     const v = c.parse(argv[0], n.jsonb) orelse return;
     switch (v.v) {
         .object => {},
@@ -1473,48 +1348,44 @@ fn rowsKeys(ctx: *Context, argv: []*Mem) void {
     }
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch return api.resultErrorNomem(ctx);
+    out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
     for (v.v.object, 0..) |pp, i| {
-        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        json.writeString(a, &out, pp.key) catch return api.resultErrorNomem(ctx);
+        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        json.writeString(a, &out, pp.key) catch return api.resultErrorNomem(c.ctx);
     }
-    out.append(a, ']') catch return api.resultErrorNomem(ctx);
-    resultRows(&c, out.items);
+    out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
+    resultRows(c, out.items);
 }
 
 /// jsonb_path_query(j, path, vars, silent): [value, ...].
-fn rowsPath(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const pa = pathArgs(&c, argv) orelse return;
+fn rowsPath(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(c.ctx);
+    const pa = pathArgs(c, argv) orelse return;
     var silent_err = false;
-    const items = pathItems(&c, pa, &silent_err) orelse return if (silent_err) api.resultNull(ctx) else {};
+    const items = pathItems(c, pa, &silent_err) orelse return if (silent_err) api.resultNull(c.ctx) else {};
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch return api.resultErrorNomem(ctx);
+    out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
     for (items, 0..) |e, i| {
-        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        rowItem(&c, &out, e, .{ .jsonb = true, .as_text = false, .name = "" }) catch return api.resultErrorNomem(ctx);
+        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        rowItem(c, &out, e, .{ .jsonb = true, .as_text = false, .name = "" }) catch return api.resultErrorNomem(c.ctx);
     }
-    out.append(a, ']') catch return api.resultErrorNomem(ctx);
-    resultRows(&c, out.items);
+    out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
+    resultRows(c, out.items);
 }
 
 /// json_to_record[set](j) / json_populate_record[set](base, j):
 /// xq_pg_rows_records(j, name, col, ...): [[field text, ...], ...], a
 /// field as the record's column reads it (a string unquoted, null NULL,
 /// anything else its json text).
-fn rowsRecords(ctx: *Context, argv: []*Mem) void {
-    if (argv.len < 2 or isNull(argv[0])) return api.resultNull(ctx);
-    var c: Call = .init(ctx);
-    defer c.deinit();
-    const n = srfName(&c, argv[1]) orelse return;
+fn rowsRecords(c: *Call, argv: []*Mem) void {
+    if (argv.len < 2 or isNull(argv[0])) return api.resultNull(c.ctx);
+    const n = srfName(c, argv[1]) orelse return;
     const v = c.parse(argv[0], n.jsonb) orelse return;
     const set = std.mem.endsWith(u8, n.name, "set");
     const a = c.a();
-    const cols = a.alloc([]const u8, argv.len - 2) catch return api.resultErrorNomem(ctx);
-    for (argv[2..], cols) |m, *col| col.* = a.dupe(u8, c.text(m) orelse return) catch return api.resultErrorNomem(ctx);
+    const cols = a.alloc([]const u8, argv.len - 2) catch return api.resultErrorNomem(c.ctx);
+    for (argv[2..], cols) |m, *col| col.* = a.dupe(u8, c.text(m) orelse return) catch return api.resultErrorNomem(c.ctx);
     var rows: []const Value = undefined;
     if (set) {
         rows = switch (v.v) {
@@ -1527,28 +1398,26 @@ fn rowsRecords(ctx: *Context, argv: []*Mem) void {
         rows = &.{v};
     }
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch return api.resultErrorNomem(ctx);
+    out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
     for (rows, 0..) |r, i| {
-        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        out.append(a, '[') catch return api.resultErrorNomem(ctx);
+        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
         for (cols, 0..) |col, k| {
-            if (k > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
+            if (k > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
             const f = r.get(col) orelse json.null_value;
-            rowItem(&c, &out, f, .{ .jsonb = n.jsonb, .as_text = true, .name = n.name }) catch return api.resultErrorNomem(ctx);
+            rowItem(c, &out, f, .{ .jsonb = n.jsonb, .as_text = true, .name = n.name }) catch return api.resultErrorNomem(c.ctx);
         }
-        out.append(a, ']') catch return api.resultErrorNomem(ctx);
+        out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
     }
-    out.append(a, ']') catch return api.resultErrorNomem(ctx);
-    resultRows(&c, out.items);
+    out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
+    resultRows(c, out.items);
 }
 
 /// xq_pg_rows_zip(rows, ...): several select-list set-returning functions
 /// in step: [[a0, b0], [a1, null], ...] as long as the longest.
-fn rowsZip(ctx: *Context, argv: []*Mem) void {
-    var c: Call = .init(ctx);
-    defer c.deinit();
+fn rowsZip(c: *Call, argv: []*Mem) void {
     const a = c.a();
-    const lists = a.alloc([]const Value, argv.len) catch return api.resultErrorNomem(ctx);
+    const lists = a.alloc([]const Value, argv.len) catch return api.resultErrorNomem(c.ctx);
     var n: usize = 0;
     for (argv, lists) |m, *l| {
         if (isNull(m)) {
@@ -1560,19 +1429,19 @@ fn rowsZip(ctx: *Context, argv: []*Mem) void {
         n = @max(n, l.len);
     }
     var out: std.ArrayList(u8) = .empty;
-    out.append(a, '[') catch return api.resultErrorNomem(ctx);
+    out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
     for (0..n) |i| {
-        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
-        out.append(a, '[') catch return api.resultErrorNomem(ctx);
+        if (i > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
+        out.append(a, '[') catch return api.resultErrorNomem(c.ctx);
         for (lists, 0..) |l, k| {
-            if (k > 0) out.append(a, ',') catch return api.resultErrorNomem(ctx);
+            if (k > 0) out.append(a, ',') catch return api.resultErrorNomem(c.ctx);
             const e = if (i < l.len) l[i] else json.null_value;
-            json.writeJson(a, &out, e) catch return api.resultErrorNomem(ctx);
+            json.writeJson(a, &out, e) catch return api.resultErrorNomem(c.ctx);
         }
-        out.append(a, ']') catch return api.resultErrorNomem(ctx);
+        out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
     }
-    out.append(a, ']') catch return api.resultErrorNomem(ctx);
-    resultRows(&c, out.items);
+    out.append(a, ']') catch return api.resultErrorNomem(c.ctx);
+    resultRows(c, out.items);
 }
 
 // ============================================================ collation

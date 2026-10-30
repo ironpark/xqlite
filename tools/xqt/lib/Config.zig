@@ -5,8 +5,11 @@
 //! | field       | flag          | variable          | default                                          |
 //! | ----------- | ------------- | ----------------- | ------------------------------------------------ |
 //! | `xq`        | `--xq`        | `XQ`              | ROOT/zig-out/bin/xqlite                          |
-//! | `sqlite3`   | `--sqlite3`   | `SQLITE3`         | /tmp/xq-sqlite-build/sqlite3 if it exists, else `sqlite3` (PATH) |
-//! | `sq`        | `--sq`        | `SQ`              | `sqlite3` (PATH)                                 |
+//! | `sqlite3`   | `--sqlite3`   | `SQLITE3`         | ROOT/zig-out/bin/sqlite3-ref if it exists, else `sqlite3` (PATH) |
+//! | `sq`        | `--sq`        | `SQ`              | ROOT/zig-out/bin/sqlite3-planner if it exists, else `sqlite3` (PATH) |
+//!
+//! `zig build tools` builds the two reference shells from the SQLite
+//! amalgamation that build.zig.zon pins, and `zig build check` passes them.
 //! | `crashshim` | `--crashshim` | `XQT_CRASHSHIM`   | ROOT/zig-out/lib/libcrashshim.{dylib,so}         |
 
 const std = @import("std");
@@ -44,9 +47,10 @@ pub const usage =
     \\  -v               print the log of every check
     \\  --keep           keep the temporary directory of a failed check
     \\  --xq PATH        xqlite under test     ($XQ, default ROOT/zig-out/bin/xqlite)
-    \\  --sqlite3 PATH   reference sqlite3     ($SQLITE3, default /tmp/xq-sqlite-build/sqlite3
+    \\  --sqlite3 PATH   reference sqlite3     ($SQLITE3, default ROOT/zig-out/bin/sqlite3-ref
     \\                                          if it exists, else sqlite3 on PATH)
-    \\  --sq PATH        planner reference     ($SQ, default sqlite3 on PATH)
+    \\  --sq PATH        planner reference     ($SQ, default ROOT/zig-out/bin/sqlite3-planner
+    \\                                          if it exists, else sqlite3 on PATH)
     \\  --crashshim PATH tools/crashshim.c built as a preload library
     \\                                         ($XQT_CRASHSHIM, default ROOT/zig-out/lib/)
     \\
@@ -104,8 +108,9 @@ pub fn parse(arena: Allocator, io: Io, environ: *const Environ.Map, root: []cons
         .xq = try absolute(arena, io, xq_flag orelse environ.get("XQ") orelse
             try std.fs.path.join(arena, &.{ root, "zig-out", "bin", "xqlite" })),
         .sqlite3 = try absolute(arena, io, sqlite3_flag orelse environ.get("SQLITE3") orelse
-            if (exists(io, reference_sqlite3)) reference_sqlite3 else "sqlite3"),
-        .sq = try absolute(arena, io, sq_flag orelse environ.get("SQ") orelse "sqlite3"),
+            try builtShell(arena, io, root, "sqlite3-ref")),
+        .sq = try absolute(arena, io, sq_flag orelse environ.get("SQ") orelse
+            try builtShell(arena, io, root, "sqlite3-planner")),
         .crashshim = try absolute(arena, io, shim_flag orelse environ.get("XQT_CRASHSHIM") orelse
             try std.fs.path.join(arena, &.{ root, "zig-out", "lib", shim_name })),
         .jobs = jobs orelse std.Thread.getCpuCount() catch 4,
@@ -116,8 +121,12 @@ pub fn parse(arena: Allocator, io: Io, environ: *const Environ.Map, root: []cons
     };
 }
 
-/// The 3.54.1 build docs/testing.md describes.
-pub const reference_sqlite3 = "/tmp/xq-sqlite-build/sqlite3";
+/// ROOT/zig-out/bin/NAME, a reference shell `zig build tools` builds, if
+/// it exists; else sqlite3 on PATH.
+fn builtShell(arena: Allocator, io: Io, root: []const u8, name: []const u8) ![]const u8 {
+    const path = try std.fs.path.join(arena, &.{ root, "zig-out", "bin", name });
+    return if (exists(io, path)) path else "sqlite3";
+}
 
 pub const shim_name = if (builtin.os.tag.isDarwin()) "libcrashshim.dylib" else "libcrashshim.so";
 

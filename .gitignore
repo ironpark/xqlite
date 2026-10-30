@@ -21,3 +21,6 @@ ref/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Packages fetched by zig build (build.zig.zon), unpacked
+zig-pkg/

@@ -230,8 +230,8 @@ pub fn main(init: std.process.Init) !void {
 호환성은 주장이 아니라 테스트로 증명합니다. 테스트 도구는 Zig로 쓴 `xqt` 하나입니다.
 
 ```sh
-zig build tools                                # zig-out/bin/xqt, 크래시 shim, xqlite
-SQ=/tmp/sqref/sqlite3 zig build check          # 단위 테스트, xqt interop, xqt planner, fuzzcheck를 병렬로
+zig build tools                                # zig-out/bin/xqt, 크래시 shim, xqlite, 기준 sqlite3 셸
+zig build check                                # 단위 테스트, xqt interop, xqt planner, fuzzcheck를 병렬로
 zig-out/bin/xqt interop                        # sqlite3 교차 검증 (모듈 이름을 주면 그것만)
 zig-out/bin/xqt help                           # 모든 명령과 옵션
 ```

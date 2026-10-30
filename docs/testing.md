@@ -74,17 +74,16 @@ zig-out/bin/xqt fetch slt       # ref/sqllogictest (약 1.2GB, git clone --depth
 
 ### 기준 sqlite3 셸
 
-교차 검증 도구는 순정 sqlite3 셸과 결과를 비교합니다. 출력 형식이 버전마다 조금씩 다르므로 포팅 기준과 같은 3.54.1 셸을 쓰는 것이 좋습니다.
+교차 검증 도구는 순정 sqlite3 셸과 결과를 비교합니다. 출력 형식이 버전마다 조금씩 다르므로 포팅 기준과 같은 3.54.1 셸을 씁니다. 이 셸은 직접 빌드하지 않아도 됩니다. `build.zig.zon`이 SQLite 3.54.1 아말감(`sqlite-amalgamation-3540100.zip`)을 해시로 고정한 lazy 의존성 `sqlite`로 두고, `zig build tools`(그리고 `zig build check`)가 처음 필요할 때 한 번 내려받아(Zig 전역 캐시) 셸 두 개를 빌드합니다.
 
-**`SQ`는 따로 빌드한 셸이어야 합니다.** sqlite3 셸의 기본 빌드는 `SQLITE_ENABLE_EXPLAIN_COMMENTS`를 켜는데, 이 옵션은 주석용 `OP_Noop`을 바이트코드에 끼워 넣습니다. 그래서 바이트코드를 비교하려면 이 옵션을 뺀 3.54.1 셸이 필요합니다. 아말감(`sqlite3.c`, `shell.c`)으로 다음처럼 빌드합니다.
+| 셸 | 설치 위치 | 컴파일 옵션 | 쓰는 곳 |
+| --- | --- | --- | --- |
+| 기준 셸 | `zig-out/bin/sqlite3-ref` | SQLite의 configure·make 빌드와 같음(`pragma_compile_options`가 같음). `SQLITE_HAVE_ZLIB`만 뺌(셸의 `.archive`만 씀) | `SQLITE3`: `interop`, `bench`, `wasi`, `gen superjournal`, `btree_sqlite3` 퍼저 |
+| 플래너 셸 | `zig-out/bin/sqlite3-planner` | `SQLITE_ENABLE_EXPLAIN_COMMENTS` 없이 `-DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_STRICT_SUBTYPE=1` | `SQ`: `planner` |
 
-```sh
-clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB \
-  -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_STRICT_SUBTYPE=1 \
-  -o /tmp/sqref/sqlite3 shell.c sqlite3.c -lpthread -lm
-```
+**플래너 셸이 따로 있는 이유.** sqlite3 셸의 기본 빌드는 `SQLITE_ENABLE_EXPLAIN_COMMENTS`를 켜는데, 이 옵션은 주석용 `OP_Noop`을 바이트코드에 끼워 넣습니다. 그래서 바이트코드를 비교하려면 이 옵션을 뺀 셸이 필요합니다.
 
-같은 셸을 `SQLITE3`에도 쓸 수 있습니다. 가상 테이블 로그(`vtablog.txt`)용 빌드는 [tools/planner/README.md](../tools/planner/README.md)에 있습니다.
+xqlite를 의존성으로 쓰는 프로젝트의 빌드는 SQLite를 내려받지 않습니다(루트 프로젝트일 때만). `SQLITE3`, `SQ`(또는 `--sqlite3`, `--sq`)를 주면 그 셸을 씁니다. 가상 테이블 로그(`vtablog.txt`)용 셸은 아말감에 없는 `ext/misc/vtablog.c`가 필요해 여전히 직접 빌드합니다([tools/planner/README.md](../tools/planner/README.md)).
 
 ## xqt 공통 옵션
 
@@ -107,8 +106,8 @@ clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB
 | 바이너리 | 옵션 | 환경 변수 | 기본값 | 쓰는 명령 |
 | --- | --- | --- | --- | --- |
 | xqlite | `--xq` | `XQ` | 이 저장소의 `zig-out/bin/xqlite` | 모든 명령 |
-| sqlite3 | `--sqlite3` | `SQLITE3` | `/tmp/xq-sqlite-build/sqlite3`가 있으면 그것, 없으면 `PATH`의 `sqlite3` | `interop`(모든 모듈), `bench`, `gen superjournal` |
-| 플래너 기준 | `--sq` | `SQ` | `PATH`의 `sqlite3` | `planner`. `SQLITE_ENABLE_EXPLAIN_COMMENTS` 없이 빌드한 3.54.1이어야 합니다([위](#기준-sqlite3-셸)) |
+| sqlite3 | `--sqlite3` | `SQLITE3` | `zig-out/bin/sqlite3-ref`가 있으면 그것, 없으면 `PATH`의 `sqlite3` | `interop`(모든 모듈), `bench`, `gen superjournal` |
+| 플래너 기준 | `--sq` | `SQ` | `zig-out/bin/sqlite3-planner`가 있으면 그것, 없으면 `PATH`의 `sqlite3` | `planner`. `SQLITE_ENABLE_EXPLAIN_COMMENTS` 없이 빌드한 3.54.1이어야 합니다([위](#기준-sqlite3-셸)) |
 | 크래시 shim | `--crashshim` | `XQT_CRASHSHIM` | 이 저장소의 `zig-out/lib/libcrashshim.dylib`(Linux는 `.so`) | `interop attach`, `interop vacuum`, `gen superjournal` |
 
 예전 스크립트는 `PATH`의 `sqlite3`를 쓰는 것과 `SQLITE3`를 쓰는 것이 섞여 있었습니다. 이제 모든 interop 모듈이 같은 sqlite3 하나를 씁니다. `XQLITE` 변수는 없어졌고 `--xq`나 `XQ`를 씁니다. `xqt list`가 실제로 고른 바이너리를 보여 줍니다.
@@ -135,11 +134,13 @@ clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB
 ## 한 번에 전부: zig build check
 
 ```sh
-SQ=/tmp/sqref/sqlite3 zig build check -Doptimize=ReleaseSafe
-SQ=/tmp/sqref/sqlite3 zig build check -Dslt=true      # sqllogictest도 (ref/sqllogictest, 몇 분)
-SQ=/tmp/sqref/sqlite3 zig build check -Dfuzz=true     # 시드 퍼저 셋을 무작위 시드로 한 번씩
-SQ=/tmp/sqref/sqlite3 zig build check -Dfast=true     # capi-fast도 (약 90초)
+zig build check -Doptimize=ReleaseSafe
+zig build check -Dslt=true      # sqllogictest도 (ref/sqllogictest, 몇 분)
+zig build check -Dfuzz=true     # 시드 퍼저를 무작위 시드로 한 번씩
+zig build check -Dfast=true     # capi-fast도 (약 90초)
 ```
+
+기준 셸 두 개는 빌드한 것을 넘깁니다([기준 sqlite3 셸](#기준-sqlite3-셸)). `SQLITE3`, `SQ`를 주면 그것을 씁니다.
 
 다음을 모두 병렬로 돌리고, 하나라도 실패하면 실패합니다.
 
@@ -237,8 +238,8 @@ zig build test -Dtest-filter=wal        # 이름에 wal이 든 테스트만
 
 ```sh
 zig build tools
-SQLITE3=/tmp/sqref/sqlite3 zig-out/bin/xqt interop               # 모든 모듈
-SQLITE3=/tmp/sqref/sqlite3 zig-out/bin/xqt interop wal attach    # 이름을 준 모듈만
+zig-out/bin/xqt interop               # 모든 모듈
+zig-out/bin/xqt interop wal attach    # 이름을 준 모듈만
 zig-out/bin/xqt interop vacuum -j 4 --keep -v
 ```
 
@@ -276,9 +277,9 @@ zig-out/bin/xqt interop vacuum -j 4 --keep -v
 
 ```sh
 zig build tools
-SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner tools/planner/planner.txt -v
-SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner -k code tools/planner/window.txt
-SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner --known tools/planner/known-failures.list   # vtablog.txt를 뺀 전부
+zig-out/bin/xqt planner tools/planner/planner.txt -v
+zig-out/bin/xqt planner -k code tools/planner/window.txt
+zig-out/bin/xqt planner --known tools/planner/known-failures.list   # vtablog.txt를 뺀 전부
 zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt    # 무작위 케이스(basic 또는 hard)
 ```
 
@@ -331,7 +332,7 @@ zig-out/bin/xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db
 ```sh
 zig build fuzz -Doptimize=ReleaseSafe -- btree_model [SEED] [--events N]
 zig build fuzz -Doptimize=ReleaseSafe -- btree_corrupt [SEED]
-SQLITE3=/tmp/xq-sqlite-build/sqlite3 zig build fuzz -Doptimize=ReleaseSafe -- btree_sqlite3 [SEED] [--events N]
+zig build fuzz -Doptimize=ReleaseSafe -- btree_sqlite3 [SEED] [--events N]
 zig build fuzz -Doptimize=ReleaseSafe -- ir_roundtrip [SEED] [--events N]
 zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 ```
@@ -342,7 +343,7 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 - `zig build test`는 모든 시드 퍼저를 고정 시드로 짧게 돌립니다.
 - `btree_model`은 유효한 DB만 다루므로 손상을 가정하지 않는 디버그 검사(`corrupt.never_corrupt`, [아키텍처](architecture.md#스토리지-패키지))를 켜고, 손상 오류가 나면 어느 검사가 걸렸는지 출력합니다. 이 검사는 런타임 안전 검사가 있는 빌드(Debug, ReleaseSafe)에서만 돕니다.
 - `btree_model`의 읽기 커서는 다른 커서가 b-tree를 바꾸는 동안 열려 있습니다. 바뀐 뒤 한 칸 움직이면 원래 있던 키의 모델상 이웃에 가야 합니다(그 키가 지워졌어도). 커서 위치 저장·복원(`saveAllCursors`, `skip_next`)을 확인합니다.
-- `btree_sqlite3`는 `btree_model`이 끝난 DB를 SQLite의 sqlite3 셸로 `PRAGMA quick_check`합니다. 모델의 b-tree는 `sqlite_schema`에 적혀 있고 행은 레코드입니다(quick_check가 행마다 열 하나를 읽으므로). `SQLITE3`가 없으면 건너뜁니다. 실패하면 DB를 `.zig-cache/btree-sqlite3-SEED.db`에 남깁니다.
+- `btree_sqlite3`는 `btree_model`이 끝난 DB를 SQLite의 sqlite3 셸로 `PRAGMA quick_check`합니다. 모델의 b-tree는 `sqlite_schema`에 적혀 있고 행은 레코드입니다(quick_check가 행마다 열 하나를 읽으므로). `SQLITE3`, 없으면 `zig-out/bin/sqlite3-ref`(`zig build fuzz`와 `check`가 먼저 설치)를 쓰고, 둘 다 없으면 건너뜁니다. 실패하면 DB를 `.zig-cache/btree-sqlite3-SEED.db`에 남깁니다.
 
 ### ir_roundtrip
 
@@ -474,16 +475,16 @@ wasm 경로는 `--wasm`, `XQ_WASM`, 기본값 `zig-out/bin/xqlite.wasm` 순으�
 `zig build test-capi`(`zig build check`에 포함)는 `tools/capi/capi_test.c`를 `include/sqlite3.h`와 함께 컴파일해 정적·공유 `libxqlite3`에 각각 링크하고 돌립니다. 실패한 검사를 출력하고 0이 아닌 코드로 끝납니다. 이 프로그램은 SQLite 아말감에 링크해도 xqlite 확장과 문서에 적은 차이 말고는 모두 통과하므로, 기대값은 SQLite의 동작입니다.
 
 ```sh
-zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test.c xqstub.c /tmp/xq-sqlite-build/sqlite3.c -lpthread -lm
+zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test.c xqstub.c "$AMALGAMATION/sqlite3.c" -lpthread -lm
 ```
 
-(`xqstub.c`는 `xqlite_set_dialect()`, `xqlite_dialect()`의 빈 구현입니다.)
+(`xqstub.c`는 `xqlite_set_dialect()`, `xqlite_dialect()`의 빈 구현입니다. `$AMALGAMATION`은 아말감 디렉터리입니다. `zig build`가 받은 것은 `zig build --fetch` 뒤 Zig 전역 캐시에 있습니다.)
 
 `zig build capi-fast`(`zig build check -Dfast=true`에 포함)는 `-Doptimize`와 상관없이 ReleaseFast로 정적 `libxqlite3`를 만들고 `capi_test.c`와 `tools/capi/bench.c`(`:memory:`에 준비된 INSERT를 한 트랜잭션에서 30만 번 실행하고 행 수와 합을 확인)를 링크해 각각 8번 돌립니다. ReleaseFast는 `undefined`로 둔 메모리를 채우지 않아(Debug·ReleaseSafe는 0xaa로 채움) 그런 값을 읽는 버그가 할당 주소에 따라 일부 실행에서만 드러나기 때문입니다. 예를 들어 OP_Function 문맥의 `out`이 앞서 해제된 같은 모양 문장의 값을 그대로 가져 인자를 묶지 않은 버그는 `capi_test` 실행의 약 40%에서 `DETACH aux`를 실패시켰습니다.
 
-`zig build capi-shell`은 SQLite 3.54.1 아말감의 `shell.c`(`-Dsqlite-shell-c`, 기본 `/tmp/xq-sqlite-build/shell.c`)를 고치지 않고 `libxqlite3`에 링크해 `zig-out/bin/sqlite3-xqlite`를 만들고, `tools/capi/shell_smoke.sql`의 표준 출력을 `tools/capi/shell_smoke.expected`와 비교합니다. `shell.c`가 저장소 밖에 있어서 `zig build check`에는 넣지 않았습니다. 자세한 것은 [C API](c-api.md#테스트)에 있습니다.
+`zig build capi-shell`은 SQLite 3.54.1 아말감의 `shell.c`(`-Dsqlite-shell-c`, 기본은 의존성 `sqlite`의 것)를 고치지 않고 `libxqlite3`에 링크해 `zig-out/bin/sqlite3-xqlite`를 만들고, `tools/capi/shell_smoke.sql`의 표준 출력을 `tools/capi/shell_smoke.expected`와 비교합니다. 자세한 것은 [C API](c-api.md#테스트)에 있습니다.
 
-`zig build capi-sortbench`는 정렬 벤치마크 `tools/capi/sortbench.c`(무작위 30만 행에 ORDER BY, GROUP BY, CREATE INDEX)를 SQLite 3.54.1 아말감의 `sqlite3.c`(`-Dsqlite-c`, 기본 `/tmp/xq-sqlite-build/sqlite3.c`)와 ReleaseFast 정적 `libxqlite3`에 각각 링크해 차례로 돌립니다. 각 질의의 결과 행을 순서대로 해시하므로, xqlite 쪽은 SQLite 쪽 출력(`-ref`)과 해시를 줄마다 비교해 다르면 `DIFFERENT`를 붙이고 실패하며, 시간 비율(`x0.65`는 SQLite 시간의 0.65배)도 함께 출력합니다. `--` 뒤의 인자는 두 실행에 모두 갑니다. `-n ROWS`는 행 수, `-spill`은 캐시를 10페이지로 줄여 정렬이 PMA를 쓰고 병합하게 합니다.
+`zig build capi-sortbench`는 정렬 벤치마크 `tools/capi/sortbench.c`(무작위 30만 행에 ORDER BY, GROUP BY, CREATE INDEX)를 SQLite 3.54.1 아말감의 `sqlite3.c`(`-Dsqlite-c`, 기본은 의존성 `sqlite`의 것)와 ReleaseFast 정적 `libxqlite3`에 각각 링크해 차례로 돌립니다. 각 질의의 결과 행을 순서대로 해시하므로, xqlite 쪽은 SQLite 쪽 출력(`-ref`)과 해시를 줄마다 비교해 다르면 `DIFFERENT`를 붙이고 실패하며, 시간 비율(`x0.65`는 SQLite 시간의 0.65배)도 함께 출력합니다. `--` 뒤의 인자는 두 실행에 모두 갑니다. `-n ROWS`는 행 수, `-spill`은 캐시를 10페이지로 줄여 정렬이 PMA를 쓰고 병합하게 합니다.
 
 ```sh
 zig build capi-sortbench                  # 메모리 정렬

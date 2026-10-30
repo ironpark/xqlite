@@ -35,7 +35,8 @@ xqlite는 SQLite 3.54.1의 `sqlite3.h`를 그대로 구현하는 C ABI를 제공
 | `-Dcapi-name=NAME` | `xqlite3` | 라이브러리 이름 `libNAME`. `sqlite3`이면 `libsqlite3.a`, `libsqlite3.so.0`(배포판과 같은 soname), `sqlite3.pc`가 되어 그대로 바꿔 끼울 수 있음 |
 | `-Dcapi=false` | `true` | `zig build`에서 C 라이브러리를 빼기 |
 | `-Ddialects=LIST`, `-Dext=LIST` | `all` | 넣을 방언과 확장. `-Dext`에 `carray`가 없으면 `sqlite3_carray_bind()`와 `carray()`도 빠짐(SQLITE_ENABLE_CARRAY 없는 SQLite처럼). [빌드에 넣을 방언과 확장](architecture.md#빌드에-넣을-방언과-확장) |
-| `-Dsqlite-shell-c=PATH` | `/tmp/xq-sqlite-build/shell.c` | `zig build capi-shell`이 빌드할 SQLite 아말감의 `shell.c` |
+| `-Dsqlite-shell-c=PATH` | 의존성 `sqlite`(3.54.1 아말감)의 `shell.c` | `zig build capi-shell`이 빌드할 SQLite 아말감의 `shell.c` |
+| `-Dsqlite-c=PATH` | 의존성 `sqlite`의 `sqlite3.c` | `zig build capi-sortbench`가 쓸 SQLite 아말감의 `sqlite3.c` |
 
 ```sh
 zig build -Doptimize=ReleaseFast                       # zig-out/lib/libxqlite3.*

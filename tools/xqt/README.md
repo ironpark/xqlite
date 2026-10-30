@@ -83,8 +83,10 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 | 필드 | 옵션 | 환경 변수 | 기본값 |
 | --- | --- | --- | --- |
 | `cfg.xq` | `--xq` | `XQ` | `ROOT/zig-out/bin/xqlite` |
-| `cfg.sqlite3` | `--sqlite3` | `SQLITE3` | `/tmp/xq-sqlite-build/sqlite3`가 있으면 그것, 없으면 `PATH`의 `sqlite3` |
-| `cfg.sq` | `--sq` | `SQ` | `PATH`의 `sqlite3` (플래너 기준, `SQLITE_ENABLE_EXPLAIN_COMMENTS` 없는 3.54.1 빌드) |
+| `cfg.sqlite3` | `--sqlite3` | `SQLITE3` | `ROOT/zig-out/bin/sqlite3-ref`가 있으면 그것, 없으면 `PATH`의 `sqlite3` |
+| `cfg.sq` | `--sq` | `SQ` | `ROOT/zig-out/bin/sqlite3-planner`가 있으면 그것, 없으면 `PATH`의 `sqlite3` (플래너 기준, `SQLITE_ENABLE_EXPLAIN_COMMENTS` 없는 3.54.1 빌드) |
+
+두 기준 셸은 `zig build tools`가 `build.zig.zon`에 고정한 SQLite 3.54.1 아말감으로 빌드합니다([테스트와 검증](../../docs/testing.md#기준-sqlite3-셸)).
 | `cfg.crashshim` | `--crashshim` | `XQT_CRASHSHIM` | `ROOT/zig-out/lib/libcrashshim.dylib`(Linux는 `.so`) |
 
 `ROOT`는 빌드할 때 넣은 저장소 루트입니다. 예전 스크립트는 `sqlite3`를 `PATH`에서 찾는 것과 `SQLITE3`를 쓰는 것이 섞여 있었는데, xqt의 모든 interop 모듈은 `cfg.sqlite3` 하나를 씁니다. 예외는 `gen fixtures`입니다. 커밋한 fixture는 헤더에 3.44.4라는 버전이 들어 있으므로 `PATH`의 `sqlite3`(또는 `--fixtures-sqlite3 PATH`)를 씁니다.
@@ -92,7 +94,7 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 ## zig build check
 
 ```sh
-SQ=/tmp/sqref/sqlite3 zig build check   # 단위 테스트, xqt 자체의 테스트, xqt interop, xqt planner, fuzzcheck
+zig build check   # 단위 테스트, xqt 자체의 테스트, xqt interop, xqt planner, fuzzcheck
 zig build check -Dslt=true           # + sqllogictest (ref/sqllogictest, 몇 분)
 zig build check -Dfuzz=true          # + 시드 퍼저 셋을 무작위 시드로 한 번씩
 zig build check -Doptimize=ReleaseSafe

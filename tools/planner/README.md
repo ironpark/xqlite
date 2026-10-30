@@ -12,22 +12,16 @@
 
 ## 기준 셸
 
-`sqlite3` 셸의 기본 빌드는 `SQLITE_ENABLE_EXPLAIN_COMMENTS`를 켜는데, 이 옵션은 주석용 `OP_Noop`을 끼워 넣습니다. 바이트코드를 비교하려면 이 옵션을 뺀 3.54.1 셸이 필요합니다. 아말감(`sqlite3.c`, `shell.c`)이 있으면 다음처럼 빌드합니다.
-
-```sh
-clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB \
-  -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_STRICT_SUBTYPE=1 \
-  -o /tmp/sqref/sqlite3 shell.c sqlite3.c -lpthread -lm
-```
+`sqlite3` 셸의 기본 빌드는 `SQLITE_ENABLE_EXPLAIN_COMMENTS`를 켜는데, 이 옵션은 주석용 `OP_Noop`을 끼워 넣습니다. 바이트코드를 비교하려면 이 옵션을 뺀 3.54.1 셸이 필요합니다. `zig build tools`가 `build.zig.zon`에 고정한 SQLite 아말감으로 그런 셸을 `zig-out/bin/sqlite3-planner`에 빌드하고, `xqt planner`는 `SQ`가 없으면 그것을 씁니다([테스트와 검증](../../docs/testing.md#기준-sqlite3-셸)).
 
 ## 사용법
 
 ```sh
 zig build tools
-SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner tools/planner/planner.txt -v
-SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner -k code tools/planner/window.txt
-SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner     # vtablog.txt를 뺀 전부
-zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt && SQ=/tmp/sqref/sqlite3 zig-out/bin/xqt planner /tmp/c1.txt
+zig-out/bin/xqt planner tools/planner/planner.txt -v
+zig-out/bin/xqt planner -k code tools/planner/window.txt
+zig-out/bin/xqt planner     # vtablog.txt를 뺀 전부
+zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt && zig-out/bin/xqt planner /tmp/c1.txt
 ```
 
 - `xqt planner`는 파일마다 실패한 쿼리를 `FAIL[종류] block N: 쿼리`로, 마지막에 `N queries; failures: code=…, eqp=…, res=…`를 출력합니다. `-k res,eqp,code`로 비교할 것을 고르고, `-v`는 다른 부분을 보여 줍니다(바이트코드는 unified diff). 블록의 셋업을 모두 병렬로 만든 뒤, 쿼리를 블록 안에서도 8개씩 나눠 각자 블록 디렉터리의 사본에서 병렬로 돌립니다. 엔진은 쿼리마다 60초가 지나면 `TIMEOUT`이 됩니다.

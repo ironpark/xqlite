@@ -66,6 +66,16 @@
         //    // actually used.
         //    .lazy = false,
         //},
+        // The SQLite release this port tracks (3.54.1), as the amalgamation:
+        // the reference sqlite3 shells of the cross-checks and the C
+        // benchmarks are built from it. Fetched only when this is the root
+        // project (see build.zig). Keep in sync with sqlite_version in
+        // tools/xqt/fetch.zig.
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip",
+            .hash = "N-V-__8AAETTsABEodUZZFAyfdAm9hEyqBXuLw9pRSO0vFh9",
+            .lazy = true,
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that

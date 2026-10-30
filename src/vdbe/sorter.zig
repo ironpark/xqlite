@@ -20,11 +20,14 @@
 //!
 //! Not in C: each in-memory record also carries a normalized key, an
 //! order-preserving 64-bit prefix of its first field (normKey(), after
-//! Turso's sorter). The in-memory sort compares those first and calls
-//! the comparator only when they are equal, which spares most of the
-//! visits to the records themselves. Not when the first field has a
-//! collation other than BINARY. The order is unchanged: a smaller
-//! normalized key always means a smaller record.
+//! Turso's sorter). The in-memory sort, and the merge of the PMAs, which
+//! computes them as it reads, compare those first and call the
+//! comparator only when they are equal, which spares most of the visits
+//! to the records themselves. Equal keys that hold the whole first field
+//! (short texts and blobs, most numbers, NULL) also spare the comparison
+//! of that field. Not when the first field has a collation other than
+//! BINARY. The order is unchanged: a smaller normalized key always means
+//! a smaller record, and the PMAs are written as in C.
 
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
@@ -178,6 +181,8 @@ const PmaReader = struct {
     /// The read buffer, a page in size.
     buffer: []u8 = &.{},
     incr: ?*IncrMerger = null,
+    /// The normalized key of `key`, if the sorter uses them and it has one.
+    norm: ?u64 = null,
 };
 
 /// IncrMerger, single-threaded: owns `mx_sz` bytes of task.file2 at
@@ -321,6 +326,7 @@ fn pmaReaderNext(t: *SortSubtask, p: *PmaReader) Error!void {
     const n_rec = try pmaReadVarint(gpa, p);
     if (n_rec > std.math.maxInt(i32)) return error.Corrupt;
     p.key = try pmaReadBlob(gpa, p, @intCast(n_rec));
+    p.norm = if (t.sorter.norm_on) normKey(t.sorter, p.key) else null;
 }
 
 /// Port of vdbePmaReaderInit(): read the PMA of `file` that starts at
@@ -444,6 +450,26 @@ fn getCompare(s: *const Sorter) CompareFn {
     return compareGeneral;
 }
 
+/// Compare two records by their normalized keys `n1` and `n2`, calling
+/// `cmp` only when those do not decide. Keys equal but for the exact bit
+/// tell nothing; equal exact keys mean equal first fields, so that only
+/// the other fields are left to compare.
+inline fn normCompare(cmp: CompareFn, t: *SortSubtask, key2_cached: *bool, n1: u64, n2: u64, key1: []const u8, key2: []const u8) i32 {
+    if (n1 >> 1 != n2 >> 1) return if (n1 < n2) -1 else 1;
+    if (n1 & n2 & 1 != 0) {
+        if (t.sorter.key_info.n_key_field == 1) return 0;
+        // compareTail() reads the header size as one byte, as in C.
+        if (key1[0] < 0x80) return compareTail(t, key2_cached, key1, key2);
+    }
+    return @call(.auto, cmp, .{ t, key2_cached, key1, key2 });
+}
+
+/// The comparison of the keys of two PmaReaders that are not at EOF.
+fn readerCompare(t: *SortSubtask, key2_cached: *bool, p1: *const PmaReader, p2: *const PmaReader) i32 {
+    if (p1.norm) |n1| if (p2.norm) |n2| return normCompare(t.cmp, t, key2_cached, n1, n2, p1.key, p2.key);
+    return t.cmp(t, key2_cached, p1.key, p2.key);
+}
+
 // ========================================================= in-memory sort
 
 /// Port of vdbeSorterMerge(): merge two sorted lists, taking from `p1`
@@ -460,14 +486,14 @@ inline fn sorterMerge(comptime cmp: CompareFn, comptime use_norm: bool, t: *Sort
     var tail: ?*u32 = null;
     var key2_cached = false;
     while (true) {
-        // Equal normalized keys leave the order to the comparator.
-        const res = if (use_norm and norms[p1] != norms[p2])
-            @as(i32, if (norms[p1] < norms[p2]) -1 else 1)
-        else blk: {
-            const r1 = records[p1];
-            const r2 = records[p2];
-            break :blk @call(.auto, cmp, .{ t, &key2_cached, data[r1.start..r1.end], data[r2.start..r2.end] });
-        };
+        const r1 = records[p1];
+        const r2 = records[p2];
+        const key1 = data[r1.start..r1.end];
+        const key2 = data[r2.start..r2.end];
+        const res = if (use_norm)
+            normCompare(cmp, t, &key2_cached, norms[p1], norms[p2], key1, key2)
+        else
+            @call(.auto, cmp, .{ t, &key2_cached, key1, key2 });
         const take = if (res <= 0) p1 else p2;
         if (tail) |tl| tl.* = take else first = take;
         tail = &links[take];
@@ -496,7 +522,9 @@ fn sorterSort(t: *SortSubtask) Error!u32 {
     const n = s.records.items.len;
     try s.links.resize(s.gpa, n);
     t.cmp = getCompare(s);
-    const p = if (s.norm_on and s.norm_ok and s.norm_varied) sortWithCompare(true, t) else sortWithCompare(false, t);
+    // Keys that are all the same decide nothing, unless they are exact.
+    const use_norm = s.norm_on and s.norm_ok and n > 0 and (s.norm_varied or s.norms.items[0] & 1 != 0);
+    const p = if (use_norm) sortWithCompare(true, t) else sortWithCompare(false, t);
     if (t.unpacked.err) |err| return err;
     return p;
 }
@@ -702,7 +730,7 @@ fn mergeEngineStep(m: *MergeEngine) Error!bool {
         else if (p2.fd == null)
             -1
         else
-            t.cmp(t, &key2_cached, p1.key, p2.key);
+            readerCompare(t, &key2_cached, p1, p2);
 
         // On a tie, the older PMA (the lower reader) comes first. If
         // reader 2 won, the unpacked record still holds its key.
@@ -801,7 +829,7 @@ fn mergeEngineCompare(m: *MergeEngine, i_out: u32) void {
     } else {
         const t = m.task.?;
         var key2_cached = false;
-        res = if (t.cmp(t, &key2_cached, p1.key, p2.key) <= 0) i_1 else i_2;
+        res = if (readerCompare(t, &key2_cached, p1, p2) <= 0) i_1 else i_2;
     }
     m.tree[i_out] = res;
 }
@@ -1019,16 +1047,27 @@ pub fn close(db: *int.Sqlite3, c: *VdbeCursor) void {
     c.uc = .none;
 }
 
-/// Bit position of the class of the first field in a normalized key.
-const norm_class_shift = 61;
+/// Bit position of the class of the first field in a normalized key,
+/// before the exact bit is appended.
+const norm_class_shift = 60;
+
+/// A normalized key before the order and the exact bit are applied.
+const NormBase = struct {
+    /// The class in the top 3 of 63 bits, the value in the other 60.
+    base: u64,
+    /// `base` holds the whole value: equal exact keys are equal fields.
+    exact: bool,
+};
 
 /// The normalized key of the record `z` (not in C): a u64 such that
 /// normKey(a) < normKey(b) implies that `a` sorts before `b`. Its top 3
 /// bits rank the type of the first field as the comparison does (NULL,
 /// numbers, text, blob, then NULL again for KEYINFO_ORDER_BIGNULL), the
-/// other 61 bits order the values of a type as far as they can, and the
-/// whole is inverted for DESC. Null if the first field cannot be mapped
-/// (a NaN or a malformed record).
+/// next 60 order the values of a type as far as they can, inverted with
+/// the class for DESC. The low bit is set if the key holds the whole
+/// first field: two keys that are equal and have it set are equal
+/// fields. Two keys that differ only in that bit decide nothing. Null if
+/// the first field cannot be mapped (a NaN or a malformed record).
 fn normKey(s: *const Sorter, z: []const u8) ?u64 {
     if (z.len < 2) return null;
     const hdr = record_fmt.getVarint32(z, 0);
@@ -1036,8 +1075,8 @@ fn normKey(s: *const Sorter, z: []const u8) ?u64 {
     if (hdr.value > z.len or hdr.len + ty.len > hdr.value) return null;
     const p = z[hdr.value..];
     const t = ty.value;
-    const norm: u64 = switch (t) {
-        0 => if (s.norm_bignull) 4 << norm_class_shift else 0,
+    const norm: NormBase = switch (t) {
+        0 => .{ .base = if (s.norm_bignull) 4 << norm_class_shift else 0, .exact = true },
         1...6, 8, 9 => blk: {
             const sizes = [_]u8{ 0, 1, 2, 3, 4, 6, 8 };
             const n: usize = if (t <= 6) sizes[t] else 0;
@@ -1050,7 +1089,10 @@ fn normKey(s: *const Sorter, z: []const u8) ?u64 {
                 const shift: u6 = @intCast(64 - 8 * n);
                 i = @as(i64, @bitCast(u << shift)) >> shift;
             }
-            break :blk numberKey(@floatFromInt(i));
+            var k = numberKey(@floatFromInt(i));
+            // Beyond 2^53 the double may not be the integer.
+            if (@abs(i) > 1 << 53) k.exact = false;
+            break :blk k;
         },
         7 => blk: {
             if (p.len < 8) return null;
@@ -1065,28 +1107,29 @@ fn normKey(s: *const Sorter, z: []const u8) ?u64 {
             break :blk bytesKey(if (t & 1 == 0) 3 else 2, p[0..n]);
         },
     };
-    return if (s.norm_desc) ~norm else norm;
+    const base = if (s.norm_desc) ~norm.base & std.math.maxInt(u63) else norm.base;
+    return base << 1 | @intFromBool(norm.exact);
 }
 
 /// The normalized key of a number: integers and reals are both mapped
 /// through the double (round to nearest is monotonic, so it never
 /// reverses the exact comparison of an integer and a real), to an
-/// unsigned integer that orders as the double, of which the top 61 bits
+/// unsigned integer that orders as the double, of which the top 60 bits
 /// are kept.
-fn numberKey(r: f64) u64 {
+fn numberKey(r: f64) NormBase {
     const bits: u64 = @bitCast(if (r == 0) 0.0 else r); // -0.0 is 0.0
     const ordered = if (bits >> 63 != 0) ~bits else bits | 1 << 63;
-    return 1 << norm_class_shift | ordered >> 3;
+    return .{ .base = 1 << norm_class_shift | ordered >> 4, .exact = ordered & 0xf == 0 };
 }
 
 /// The normalized key of a text or blob: its first 7 bytes and its length
 /// up to 8, so that a value sorts before its extensions with zero bytes.
-fn bytesKey(class: u64, b: []const u8) u64 {
+fn bytesKey(class: u64, b: []const u8) NormBase {
     var prefix: [8]u8 = @splat(0);
     const n = @min(b.len, 7);
     @memcpy(prefix[0..n], b[0..n]);
     const p56 = std.mem.readInt(u64, &prefix, .big) >> 8;
-    return class << norm_class_shift | p56 << 5 | @min(b.len, 8);
+    return .{ .base = class << norm_class_shift | p56 << 4 | @min(b.len, 8), .exact = b.len <= 7 };
 }
 
 /// Port of sqlite3VdbeSorterWrite(): add the record in `m`, first writing
@@ -1345,55 +1388,96 @@ test "sorter: tree depth" {
     try testing.expectEqual(@as(u32, 2), treeDepth(257));
 }
 
-test "sorter: normalized keys keep the order of the comparison" {
-    var c: Conn = undefined;
-    try c.open();
-    defer c.close();
-    // Values whose normalized keys tie or nearly tie: integers and reals
-    // that the double cannot tell apart, -0.0, texts and blobs around the
-    // 7-byte prefix, zero bytes. Each goes in twice, the second time in
-    // reverse order, so that ties check the order of insertion.
-    try c.exec(
-        \\CREATE TABLE v(k INTEGER PRIMARY KEY, x);
-        \\CREATE TABLE vals(x);
-        \\INSERT INTO vals VALUES (NULL), (0), (-1), (1), (3), (3.0), (2.5),
-        \\  (562949953421311), (562949953421312), (562949953421313),
-        \\  (9007199254740992), (9007199254740993), (9007199254740992.0),
-        \\  (9223372036854775807), (9223372036854775806), (-9223372036854775808),
-        \\  (-9223372036854775807), (9.2233720368547758e18), (-9.2233720368547758e18),
-        \\  (0.0), (-0.0), (0.5), (1e308), (-1e308), (1e-300), (-1e-300), (NULL),
-        \\  (''), ('a'), ('a' || char(0)), ('A'), ('abc'), ('ABC'), ('abcdefg'), ('abcdefgg'),
-        \\  ('abcdefgh'), ('abcdefgh' || char(0)), ('abcdefghi'), ('abcdefgi'), ('é'), ('Z'),
-        \\  (x''), (x'00'), (x'0000'), (x'01'), (x'ff'), (x'00000000000000'),
-        \\  (x'0000000000000000'), (x'000000000000000001'), (x'0000000000000001'),
-        \\  (x'61626364656667'), (x'6162636465666768');
-        \\INSERT INTO v(x) SELECT x FROM vals ORDER BY rowid;
-        \\INSERT INTO v(x) SELECT x FROM vals ORDER BY rowid DESC;
-        \\CREATE TABLE s(n INTEGER PRIMARY KEY, x, k);
-    );
-    // ORDER BY clause, then when two consecutive rows a and b are in
-    // order: a NULL before a value, the values in order, equal values by k.
-    const cases = [_][3][]const u8{
-        .{ "x", "a.x IS NULL AND b.x IS NOT NULL", "a.x < b.x" },
-        .{ "x DESC", "b.x IS NULL AND a.x IS NOT NULL", "b.x < a.x" },
-        .{ "x NULLS LAST", "b.x IS NULL AND a.x IS NOT NULL", "a.x < b.x" },
-        .{ "x DESC NULLS FIRST", "a.x IS NULL AND b.x IS NOT NULL", "b.x < a.x" },
-        .{ "x COLLATE NOCASE", "a.x IS NULL AND b.x IS NOT NULL", "a.x < b.x COLLATE NOCASE" },
-        .{ "x COLLATE NOCASE DESC", "b.x IS NULL AND a.x IS NOT NULL", "b.x < a.x COLLATE NOCASE" },
+/// Sort the rows of v by each ORDER BY clause into s, and check that
+/// each two consecutive rows a and b are in order: a NULL before a value,
+/// the values in order, equal values by k (descending with `x, k DESC`).
+/// Returns the number of PMAs written.
+fn expectNormOrder(c: *Conn) !u64 {
+    const before = c.db.n_pma_written;
+    // ORDER BY clause, NULL first, values in order, equal values in order.
+    const cases = [_][4][]const u8{
+        .{ "x", "a.x IS NULL AND b.x IS NOT NULL", "a.x < b.x", "a.k < b.k" },
+        .{ "x DESC", "b.x IS NULL AND a.x IS NOT NULL", "b.x < a.x", "a.k < b.k" },
+        .{ "x NULLS LAST", "b.x IS NULL AND a.x IS NOT NULL", "a.x < b.x", "a.k < b.k" },
+        .{ "x DESC NULLS FIRST", "a.x IS NULL AND b.x IS NOT NULL", "b.x < a.x", "a.k < b.k" },
+        .{ "x, k DESC", "a.x IS NULL AND b.x IS NOT NULL", "a.x < b.x", "a.k > b.k" },
+        .{ "x DESC, k DESC", "b.x IS NULL AND a.x IS NOT NULL", "b.x < a.x", "a.k > b.k" },
+        .{ "x COLLATE NOCASE", "a.x IS NULL AND b.x IS NOT NULL", "a.x < b.x COLLATE NOCASE", "a.k < b.k" },
+        .{ "x COLLATE NOCASE DESC", "b.x IS NULL AND a.x IS NOT NULL", "b.x < a.x COLLATE NOCASE", "a.k < b.k" },
     };
     for (cases) |case| {
         var buf: [600]u8 = undefined;
         try c.exec("DELETE FROM s");
-        try c.exec(try std.fmt.bufPrint(&buf, "INSERT INTO s(x, k) SELECT x, k FROM v ORDER BY {s}", .{case[0]}));
+        try c.exec(try std.fmt.bufPrint(&buf, "INSERT INTO s(x, k, pad) SELECT x, k, pad FROM v ORDER BY {s}", .{case[0]}));
         const eq = if (std.mem.indexOf(u8, case[0], "NOCASE") != null) "a.x = b.x COLLATE NOCASE" else "a.x = b.x";
         const sql = try std.fmt.bufPrint(&buf,
             \\SELECT a.n FROM s a JOIN s b ON b.n = a.n + 1
-            \\WHERE (({s}) OR ({s}) OR ((a.x IS NULL AND b.x IS NULL OR {s}) AND a.k < b.k)) IS NOT 1
-        , .{ case[1], case[2], eq });
+            \\WHERE (({s}) OR ({s}) OR ((a.x IS NULL AND b.x IS NULL OR {s}) AND {s})) IS NOT 1
+        , .{ case[1], case[2], eq, case[3] });
         c.expectRows(sql, "") catch |err| {
             std.debug.print("ORDER BY {s}\n", .{case[0]});
             return err;
         };
         try c.expectRows("SELECT count(*) = (SELECT count(*) FROM v) FROM s", "1\n");
     }
+    return c.db.n_pma_written - before;
+}
+
+/// Values whose normalized keys tie or nearly tie: integers and reals
+/// that the double cannot tell apart, -0.0, texts and blobs around the
+/// 7-byte prefix, zero bytes.
+const norm_values =
+    \\INSERT INTO vals VALUES (NULL), (0), (-1), (1), (3), (3.0), (2.5),
+    \\  (562949953421311), (562949953421312), (562949953421313),
+    \\  (9007199254740992), (9007199254740993), (9007199254740992.0),
+    \\  (9007199254740991), (9007199254740991.0), (4503599627370497), (4503599627370497.0),
+    \\  (9223372036854775807), (9223372036854775806), (-9223372036854775808),
+    \\  (-9223372036854775807), (9.2233720368547758e18), (-9.2233720368547758e18),
+    \\  (0.0), (-0.0), (0.5), (0.1), (0.30000000000000004), (0.3),
+    \\  (1e308), (-1e308), (1e-300), (-1e-300), (NULL),
+    \\  (''), ('a'), ('a' || char(0)), ('A'), ('abc'), ('ABC'), ('abcdef'), ('abcdefg'), ('abcdefgg'),
+    \\  ('abcdefgh'), ('abcdefgh' || char(0)), ('abcdefghi'), ('abcdefgi'), ('é'), ('Z'),
+    \\  (x''), (x'00'), (x'0000'), (x'01'), (x'ff'), (x'00000000000000'),
+    \\  (x'0000000000000000'), (x'000000000000000001'), (x'0000000000000001'),
+    \\  (x'61626364656667'), (x'6162636465666768');
+;
+
+test "sorter: normalized keys keep the order of the comparison" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // Each value goes in twice, the second time in reverse order, so that
+    // ties check the order of insertion.
+    try c.exec(
+        \\CREATE TABLE v(k INTEGER PRIMARY KEY, x, pad);
+        \\CREATE TABLE vals(x);
+    );
+    try c.exec(norm_values);
+    try c.exec(
+        \\INSERT INTO v(x) SELECT x FROM vals ORDER BY rowid;
+        \\INSERT INTO v(x) SELECT x FROM vals ORDER BY rowid DESC;
+        \\CREATE TABLE s(n INTEGER PRIMARY KEY, x, k, pad);
+    );
+    try testing.expectEqual(@as(u64, 0), try expectNormOrder(&c));
+}
+
+test "sorter: normalized keys keep the order of the merge" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // The same values, each 40 times in a shuffled order and padded so
+    // that the sorts spill: the PMAs are merged by their keys.
+    try c.exec("PRAGMA page_size=512; PRAGMA cache_size=10");
+    try c.exec(
+        \\CREATE TABLE v(k INTEGER PRIMARY KEY, x, pad);
+        \\CREATE TABLE vals(x);
+    );
+    try c.exec(norm_values);
+    try c.exec(
+        \\WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i<40)
+        \\INSERT INTO v(k, x, pad) SELECT (vals.rowid * 7919 + i * 104729) % 1000003, x, zeroblob(300)
+        \\  FROM vals, r;
+        \\CREATE TABLE s(n INTEGER PRIMARY KEY, x, k, pad);
+    );
+    try testing.expect(try expectNormOrder(&c) > 8 * 2);
 }

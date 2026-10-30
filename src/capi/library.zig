@@ -19,10 +19,13 @@ pub const source_id = "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a13
 
 pub export const sqlite3_version: [version.len:0]u8 = version.*;
 
-/// sqlite3_temp_directory and sqlite3_data_directory: the engine picks
-/// its own directories, so these are accepted and ignored.
-pub export var sqlite3_temp_directory: ?[*:0]u8 = null;
-pub export var sqlite3_data_directory: ?[*:0]u8 = null;
+// sqlite3_temp_directory and sqlite3_data_directory are the engine's
+// (global.zig): the unix VFS creates temporary files in the first.
+comptime {
+    const global = @import("../sql/global.zig");
+    @export(&global.temp_directory, .{ .name = "sqlite3_temp_directory" });
+    @export(&global.data_directory, .{ .name = "sqlite3_data_directory" });
+}
 
 pub export fn sqlite3_libversion() callconv(.c) [*:0]const u8 {
     return version;

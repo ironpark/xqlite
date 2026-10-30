@@ -1252,6 +1252,117 @@ static void test_stmt_explain(void){
   sqlite3_close(db);
 }
 
+static void fn_intreal(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  (void)argc;
+  sqlite3_result_int(ctx, sqlite3_value_int(argv[0]));
+  sqlite3_test_control(SQLITE_TESTCTRL_RESULT_INTREAL, ctx);
+}
+
+/* An xAltLocaltime for SQLITE_TESTCTRL_LOCALTIME_FAULT: 2000-01-02. */
+static int alt_localtime(const void *t, void *pTm){
+  struct { int sec, min, hour, mday, mon, year, wday, yday, isdst; } *p = pTm;
+  (void)t;
+  memset(p, 0, sizeof(*p));
+  p->mday = 2; p->year = 100;
+  return 0;
+}
+
+static void test_test_control(void){
+  sqlite3 *db = 0;
+  unsigned char a[16], b[16];
+  int n = 0, i1 = 0, i2 = 0;
+  sqlite3_uint64 u = 0;
+  double r = 0;
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ISINIT)==SQLITE_OK);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_BYTEORDER)==123410
+     || sqlite3_test_control(SQLITE_TESTCTRL_BYTEORDER)==432101);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_PENDING_BYTE, 0)==0x40000000);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ALWAYS, 5)==5);
+
+  /* The PRNG: save and restore, and a fixed seed. */
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SAVE);
+  sqlite3_randomness(sizeof(a), a);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_RESTORE);
+  sqlite3_randomness(sizeof(b), b);
+  CHECK(memcmp(a, b, sizeof(a))==0);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SEED, 1234, (sqlite3*)0);
+  sqlite3_randomness(sizeof(a), a);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SEED, 1234, (sqlite3*)0);
+  sqlite3_randomness(sizeof(b), b);
+  CHECK(memcmp(a, b, sizeof(a))==0);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SEED, 0, (sqlite3*)0);
+  sqlite3_randomness(sizeof(b), b);
+  CHECK(memcmp(a, b, sizeof(a))!=0);
+
+  sqlite3_test_control(SQLITE_TESTCTRL_LOGEST, 1000.0, &i1, &u, &i2);
+  CHECK(i1==99 && u==960 && i2==99);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ATOF, "1.5e3", &r)==3 && r==1500.0);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ATOF, "12x", &r)<=0 && r==12.0);
+
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  /* Optimizations. */
+  sqlite3_test_control(SQLITE_TESTCTRL_GETOPT, db, &n);
+  CHECK(n==0);
+  sqlite3_test_control(SQLITE_TESTCTRL_OPTIMIZATIONS, db, 0xffffffff);
+  sqlite3_test_control(SQLITE_TESTCTRL_GETOPT, db, &n);
+  CHECK(n==-1);
+  sqlite3_test_control(SQLITE_TESTCTRL_OPTIMIZATIONS, db, 0);
+  /* Internal functions. */
+  CHECK_STR(one(db, "SELECT sqlite_rename_quotefix('main', 'SELECT 1')"), "ERROR: no such function: sqlite_rename_quotefix");
+  sqlite3_test_control(SQLITE_TESTCTRL_INTERNAL_FUNCTIONS, db);
+  CHECK(strncmp(one(db, "SELECT sqlite_rename_quotefix('main', 'SELECT 1')"), "ERROR: no such function", 23)!=0);
+  sqlite3_test_control(SQLITE_TESTCTRL_INTERNAL_FUNCTIONS, db);
+  /* localtime() failing, or replaced. */
+  sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, 1);
+  CHECK_STR(one(db, "SELECT datetime(0, 'unixepoch', 'localtime')"), "ERROR: local time unavailable");
+  sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, 2, alt_localtime);
+  CHECK_STR(one(db, "SELECT date(0, 'unixepoch', 'localtime')"), "2000-01-02");
+  sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, 0);
+  CHECK(strncmp(one(db, "SELECT datetime(0, 'unixepoch', 'localtime')"), "19", 2)==0);
+  /* An integer result shown as a real. */
+  CHECK_RC(sqlite3_create_function(db, "intreal", 1, SQLITE_UTF8, 0, fn_intreal, 0, 0), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT typeof(intreal(5)) || ' ' || intreal(5)"), "real 5.0");
+  /* FK_NO_ACTION. */
+  exec(db, "PRAGMA foreign_keys=ON; CREATE TABLE p(id PRIMARY KEY); CREATE TABLE c(x REFERENCES p ON DELETE CASCADE);"
+           "INSERT INTO p VALUES(1); INSERT INTO c VALUES(1)");
+  sqlite3_test_control(SQLITE_TESTCTRL_FK_NO_ACTION, db, 1);
+  CHECK_STR(one(db, "DELETE FROM p"), "ERROR: FOREIGN KEY constraint failed");
+  sqlite3_test_control(SQLITE_TESTCTRL_FK_NO_ACTION, db, 0);
+  exec(db, "DELETE FROM p");
+  CHECK_STR(one(db, "SELECT count(*) FROM c"), "0");
+  /* An imposter table over an index, as the shell's .imposter makes. */
+  exec(db, "CREATE TABLE t(a, b); CREATE INDEX i ON t(b); INSERT INTO t VALUES(1, 'x'), (2, 'y')");
+  {
+    int iRoot = atoi(one(db, "SELECT rootpage FROM sqlite_schema WHERE name='i'"));
+    sqlite3_test_control(SQLITE_TESTCTRL_IMPOSTER, db, "main", 1, iRoot);
+    exec(db, "CREATE TABLE imp(b, r, PRIMARY KEY(b, r)) WITHOUT ROWID");
+    sqlite3_test_control(SQLITE_TESTCTRL_IMPOSTER, db, "main", 0, 0);
+    CHECK_STR(one(db, "SELECT group_concat(b || r) FROM imp"), "x1,y2");
+  }
+  sqlite3_close(db);
+}
+
+static void test_temp_directory(const char *zDir){
+  sqlite3 *db = 0;
+  char zSub[600];
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK_STR(one(db, "PRAGMA temp_store_directory"), "");  /* no row */
+  sqlite3_temp_directory = sqlite3_mprintf("%s", zDir);
+  CHECK_STR(one(db, "PRAGMA temp_store_directory"), zDir);
+  snprintf(zSub, sizeof(zSub), "PRAGMA temp_store_directory='%s/nosuchdir'", zDir);
+  CHECK_STR(one(db, zSub), "ERROR: not a writable directory");
+  CHECK_STR(sqlite3_temp_directory, zDir);
+  /* Temporary files go there: a temp table on file, a big sort. */
+  exec(db, "PRAGMA temp_store=FILE; CREATE TEMP TABLE tt(x); INSERT INTO tt VALUES(randomblob(100000))");
+  CHECK_STR(one(db, "SELECT length(x) FROM tt"), "100000");
+  snprintf(zSub, sizeof(zSub), "PRAGMA temp_store_directory=''");
+  CHECK_STR(one(db, zSub), "");
+  CHECK(sqlite3_temp_directory==0);
+  sqlite3_close(db);
+  /* data_directory is Windows-only, in SQLite as here. */
+  CHECK(sqlite3_data_directory==0);
+}
+
 #include <pthread.h>
 
 /* Threads sharing one serialized connection. */
@@ -1332,6 +1443,8 @@ int main(void){
   test_normalized_sql();
   test_stmt_explain();
   test_threads();
+  test_test_control();
+  test_temp_directory(zDir);
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

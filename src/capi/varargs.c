@@ -45,6 +45,14 @@ int xq_config(int, sqlite3_int64, sqlite3_int64, void*, void*);
 int xq_db_config(sqlite3*, int, sqlite3_int64, sqlite3_int64, void*, int*);
 int xq_vtab_config(sqlite3*, int, int);
 
+/* The arguments of sqlite3_test_control(), as the op takes them. */
+typedef struct XqTestArgs {
+  void *p[3];          /* pointers, in order */
+  sqlite3_int64 i[3];  /* integers, in order */
+  double r;            /* SQLITE_TESTCTRL_LOGEST */
+} XqTestArgs;
+int xq_test_control(int, XqTestArgs*);
+
 /*
 ** The arguments `zFormat` reads from `*ap`, into `*paArg` (a[] if they
 ** fit, else memory from malloc()): the same walk over the format as the
@@ -317,10 +325,82 @@ int sqlite3_vtab_config(sqlite3 *db, int op, ...){
 }
 
 int sqlite3_test_control(int op, ...){
-  /* No test hooks are built in (as in a release build of SQLite, where
-  ** an unknown op returns 0). */
-  (void)op;
-  return 0;
+  va_list ap;
+  XqTestArgs a;
+  int rc;
+  memset(&a, 0, sizeof(a));
+  va_start(ap, op);
+  switch( op ){
+    case SQLITE_TESTCTRL_PRNG_SEED:              /* int, sqlite3* */
+    case SQLITE_TESTCTRL_LOCALTIME_FAULT:        /* int [, xAltLocaltime] */
+    case SQLITE_TESTCTRL_TRACEFLAGS:             /* int, u32* */
+    case SQLITE_TESTCTRL_TUNE:                   /* int, int* */
+    case SQLITE_TESTCTRL_BITVEC_TEST:            /* int, int* */
+      a.i[0] = va_arg(ap, int);
+      if( op==SQLITE_TESTCTRL_LOCALTIME_FAULT ){
+        if( a.i[0]==2 ) a.p[0] = (void*)va_arg(ap, int(*)(const void*,void*));
+      }else{
+        a.p[0] = va_arg(ap, void*);
+      }
+      break;
+    case SQLITE_TESTCTRL_FK_NO_ACTION:           /* sqlite3*, int */
+    case SQLITE_TESTCTRL_SORTER_MMAP:
+      a.p[0] = va_arg(ap, void*);
+      a.i[0] = va_arg(ap, int);
+      break;
+    case SQLITE_TESTCTRL_OPTIMIZATIONS:          /* sqlite3*, u32 */
+      a.p[0] = va_arg(ap, void*);
+      a.i[0] = va_arg(ap, unsigned int);
+      break;
+    case SQLITE_TESTCTRL_FAULT_INSTALL:          /* int(*)(int) */
+      a.p[0] = (void*)va_arg(ap, int(*)(int));
+      break;
+    case SQLITE_TESTCTRL_BENIGN_MALLOC_HOOKS:    /* void(*)(void) x2 */
+      a.p[0] = (void*)va_arg(ap, void(*)(void));
+      a.p[1] = (void*)va_arg(ap, void(*)(void));
+      break;
+    case SQLITE_TESTCTRL_PENDING_BYTE:           /* unsigned int */
+      a.i[0] = va_arg(ap, unsigned int);
+      break;
+    case SQLITE_TESTCTRL_ASSERT:                 /* int */
+    case SQLITE_TESTCTRL_ALWAYS:
+    case SQLITE_TESTCTRL_ONCE_RESET_THRESHOLD:
+    case SQLITE_TESTCTRL_NEVER_CORRUPT:
+    case SQLITE_TESTCTRL_EXTRA_SCHEMA_CHECKS:
+      a.i[0] = va_arg(ap, int);
+      break;
+    case SQLITE_TESTCTRL_JSON_SELFCHECK:         /* int* */
+    case SQLITE_TESTCTRL_GETOPT:                 /* sqlite3*, int* */
+    case SQLITE_TESTCTRL_INTERNAL_FUNCTIONS:     /* sqlite3* */
+    case SQLITE_TESTCTRL_RESULT_INTREAL:         /* sqlite3_context* */
+    case SQLITE_TESTCTRL_PARSER_COVERAGE:        /* FILE* */
+    case SQLITE_TESTCTRL_SEEK_COUNT:             /* sqlite3*, u64* */
+    case SQLITE_TESTCTRL_ATOF:                   /* const char*, double* */
+    case SQLITE_TESTCTRL_VDBE_COVERAGE:          /* callback, void* */
+      a.p[0] = va_arg(ap, void*);
+      if( op==SQLITE_TESTCTRL_GETOPT || op==SQLITE_TESTCTRL_SEEK_COUNT
+       || op==SQLITE_TESTCTRL_ATOF || op==SQLITE_TESTCTRL_VDBE_COVERAGE ){
+        a.p[1] = va_arg(ap, void*);
+      }
+      break;
+    case SQLITE_TESTCTRL_IMPOSTER:               /* sqlite3*, char*, int, int */
+      a.p[0] = va_arg(ap, void*);
+      a.p[1] = va_arg(ap, char*);
+      a.i[0] = va_arg(ap, int);
+      a.i[1] = va_arg(ap, int);
+      break;
+    case SQLITE_TESTCTRL_LOGEST:                 /* double, int*, u64*, int* */
+      a.r = va_arg(ap, double);
+      a.p[0] = va_arg(ap, int*);
+      a.p[1] = va_arg(ap, sqlite3_uint64*);
+      a.p[2] = va_arg(ap, int*);
+      break;
+    default:
+      break;
+  }
+  va_end(ap);
+  rc = xq_test_control(op, &a);
+  return rc;
 }
 
 /* -------------------------------------------------------------- mutex */

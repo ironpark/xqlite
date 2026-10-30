@@ -404,10 +404,15 @@ extern "c" fn localtime_r(t: *const time_t, result: *Tm) ?*Tm;
 const time_t = if (@import("builtin").link_libc) std.c.time_t else i64;
 
 /// Port of osLocaltime(): localtime_r(). Returns true on error.
-/// (sqlite3GlobalConfig.bLocaltimeFault, a test hook, is not ported.)
 /// Without a C library there is no time zone: local time is UTC, as
 /// wasi-libc's localtime_r() has it too.
 fn osLocaltime(t: *const time_t, tm: *Tm) bool {
+    const tc = &@import("global.zig").testctrl;
+    if (tc.localtime_fault != 0) {
+        // SQLITE_TESTCTRL_LOCALTIME_FAULT.
+        const alt = tc.alt_localtime orelse return true;
+        return alt(t, tm) != 0;
+    }
     if (!@import("builtin").link_libc) {
         const secs = std.math.cast(u64, t.*) orelse return true;
         const es: std.time.epoch.EpochSeconds = .{ .secs = secs };

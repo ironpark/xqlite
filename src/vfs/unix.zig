@@ -34,8 +34,9 @@ pub const UnixVfs = struct {
     io: Io,
     /// Relative paths are resolved against this directory.
     dir: Io.Dir,
-    /// Where anonymous temporary files are created.
-    temp_dir: []const u8 = "/tmp",
+    /// Where anonymous temporary files are created; null for the first
+    /// usable one of unixTempFileDir() (tempFileDir()).
+    temp_dir: ?[]const u8 = null,
 
     pub fn init(gpa: Allocator, io: Io) UnixVfs {
         return .{ .gpa = gpa, .io = io, .dir = .cwd() };
@@ -79,8 +80,9 @@ pub const UnixVfs = struct {
         const name: []const u8 = path orelse blk: {
             var rand: [8]u8 = undefined;
             io.random(&rand);
+            const dir = self.temp_dir orelse tempFileDir() orelse return error.CantOpen;
             break :blk std.fmt.bufPrint(&name_buf, "{s}/etilqs_{x}", .{
-                self.temp_dir, &rand,
+                dir, &rand,
             }) catch return error.CantOpen;
         };
 
@@ -180,6 +182,32 @@ pub const UnixVfs = struct {
 };
 
 /// A pathname under construction (DbPath).
+/// Port of unixTempFileDir(): the directory of temporary files, the
+/// first of sqlite3_temp_directory (global.temp_directory, also PRAGMA
+/// temp_store_directory), $SQLITE_TMPDIR, $TMPDIR, /var/tmp, /usr/tmp,
+/// /tmp and "." that is a directory the process can write and search.
+fn tempFileDir() ?[]const u8 {
+    const temp_directory = @import("../sql/global.zig").temp_directory;
+    for (0..7) |i| {
+        const z: ?[*:0]const u8 = switch (i) {
+            0 => temp_directory,
+            1 => c.getenv("SQLITE_TMPDIR"),
+            2 => c.getenv("TMPDIR"),
+            3 => "/var/tmp",
+            4 => "/usr/tmp",
+            5 => "/tmp",
+            else => ".",
+        };
+        const dir = std.mem.span(z orelse continue);
+        // A directory: "dir/." can be searched and written (osStat()'s
+        // S_ISDIR and osAccess(zDir, 03)).
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const probe = std.fmt.bufPrintSentinel(&buf, "{s}/.", .{dir}, 0) catch continue;
+        if (c.access(probe.ptr, 3) == 0) return dir;
+    }
+    return null;
+}
+
 const DbPath = struct {
     out: []u8,
     used: usize = 0,
@@ -966,6 +994,19 @@ test "unix: delete and temp files" {
     try t.read(&buf, 0);
     try testing.expectEqualStrings("temp", &buf);
     t.close();
+}
+
+test "unix: the directory of temporary files" {
+    const global = @import("../sql/global.zig");
+    const saved = global.temp_directory;
+    defer global.temp_directory = saved;
+    // sqlite3_temp_directory comes first, if it is a writable directory.
+    var missing = "/nonexistent-xqlite-dir".*;
+    global.temp_directory = &missing;
+    try testing.expect(!std.mem.eql(u8, tempFileDir().?, "/nonexistent-xqlite-dir"));
+    var dot = ".".*;
+    global.temp_directory = &dot;
+    try testing.expectEqualStrings(".", tempFileDir().?);
 }
 
 test "unix: in-process locking protocol" {

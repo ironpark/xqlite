@@ -567,7 +567,12 @@ pub fn randomness(db: ?*const Sqlite3, buf: []u8) void {
     if (prng.s[0] == 0) {
         prng.s[0..4].* = .{ 0x61707865, 0x3320646e, 0x79622d32, 0x6b206574 };
         const seed = std.mem.sliceAsBytes(prng.s[4..15]);
-        if (db != null and db.?.vfs != null) {
+        const fixed = @import("global.zig").testctrl.prng_seed;
+        if (fixed != 0) {
+            // sqlite3OsRandomness() with SQLITE_TESTCTRL_PRNG_SEED.
+            @memset(seed, 0);
+            @memcpy(seed[0..4], std.mem.asBytes(&fixed));
+        } else if (db != null and db.?.vfs != null) {
             db.?.vfs.?.randomness(seed);
         } else {
             @memset(seed, 0);

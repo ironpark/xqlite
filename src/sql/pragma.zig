@@ -763,13 +763,31 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             if (right) |z| changeTempStorage(p, z) else returnSingleInt(v, db.temp_store);
         },
 
-        // PRAGMA temp_store_directory[=DIR]: no directory is ever set.
+        // PRAGMA temp_store_directory[=DIR]: sqlite3_temp_directory.
         .temp_store_directory => {
-            if (right != null) return pending.notYet(p, "PRAGMA temp_store_directory");
-            returnSingleText(v, null);
+            const global = @import("global.zig");
+            const z = right orelse {
+                returnSingleText(v, if (global.temp_directory) |d| std.mem.span(d) else null);
+                return;
+            };
+            if (z.len > 0) {
+                const vfs_ = db.vfs orelse return;
+                if (!(vfs_.access(z, .read_write) catch false)) {
+                    util.errorMsg(p, "not a writable directory", .{});
+                    return;
+                }
+            }
+            // SQLITE_TEMP_STORE is 1.
+            if (db.temp_store <= 1 and !invalidateTempStorage(p)) return;
+            const malloc_mod = @import("malloc.zig");
+            const new: ?[*:0]u8 = if (z.len > 0) (try malloc_mod.allocator.dupeSentinel(u8, z, 0)).ptr else null;
+            malloc_mod.free(global.temp_directory);
+            global.temp_directory = new;
         },
 
-        .data_store_directory => return pending.notYet(p, "PRAGMA data_store_directory"),
+        // PRAGMA data_store_directory: Windows only in SQLite, where it
+        // sets sqlite3_data_directory; elsewhere it does nothing.
+        .data_store_directory => {},
         .lock_proxy_file => return pending.notYet(p, "PRAGMA lock_proxy_file"),
 
         // PRAGMA [schema.]synchronous[=OFF|NORMAL|FULL|EXTRA].

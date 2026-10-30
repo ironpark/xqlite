@@ -45,6 +45,8 @@ const views = @import("catalog_views.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const nsp = catalog.schemas;
 const pg_state = @import("state.zig");
+const json = @import("json.zig");
+const Children = @import("jtype.zig").Children;
 
 const Token = lexer.Token;
 const Name = tree.Name;
@@ -159,6 +161,14 @@ pub const Parser = struct {
     no_path: bool = false,
     /// Result column names of rewritten nodes.
     figs: std.AutoHashMapUnmanaged(*const Expr, Fig) = .empty,
+    /// The JSON set-returning functions of FROM (and of select lists):
+    /// json_each() items and the columns they stand for (jtype.zig
+    /// resolves references to them).
+    srfs: std.AutoHashMapUnmanaged(*const tree.Func, Srf) = .empty,
+    /// The references to json_each() columns srfColumn() made (not to
+    /// be resolved again).
+    srf_refs: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
+    srf_count: u32 = 0,
 
     /// Lex the statement that starts at `pos` (blank text and leading
     /// semicolons are skipped). An empty statement has no tokens but eof.
@@ -906,6 +916,7 @@ pub const Parser = struct {
             }
             c.windows = wins.items;
         }
+        try p.selectListSrfs(&c);
         return p.new(tree.Core, c);
     }
 
@@ -1121,7 +1132,13 @@ pub const Parser = struct {
 
     fn fromPrimary(p: *Parser) Error!tree.FromItem {
         const t = p.peek();
-        if (t.isKw("lateral")) return p.unsupported(t.start, "LATERAL");
+        if (t.isKw("lateral")) {
+            // LATERAL function(...): a function's arguments may name the
+            // items before it anyway.
+            const n1 = p.peekAt(1);
+            if (!((n1.kind == .ident or n1.kind == .qident) and p.peekAt(2).kind == .lparen)) return p.unsupported(t.start, "LATERAL");
+            _ = p.advance();
+        }
         if (t.kind == .lparen) {
             if (p.parenStartsSelect()) {
                 const save = p.i;
@@ -1145,6 +1162,7 @@ pub const Parser = struct {
         _ = p.eatKw("only");
         const name = try p.qname();
         if (p.peek().kind == .lparen) {
+            if (name.schema == null) if (srfKind(name.name.text)) |k| return p.jsonSrf(name.name, k);
             const c = try p.funcCall(name.name, name.schema);
             const al = try p.alias(true);
             if (eql(c.name.text, "generate_series")) return p.generateSeries(c, al);
@@ -1176,6 +1194,393 @@ pub const Parser = struct {
         const sub = try p.new(tree.Select, .{ .body = body, .pos = c.name.pos });
         const label: Name = if (al) |a| a.name else .{ .text = "generate_series", .pos = c.name.pos };
         return .{ .source = .{ .subquery = sub }, .alias = .{ .name = label } };
+    }
+
+    // ===================================================== JSON functions
+
+    /// A JSON set-returning function in FROM (json_each(), jsonb_array_
+    /// elements(), json_to_recordset() AS x(a int, ...) ...): the
+    /// table-valued json_each() of the rows xq_pg_rows_*() builds, its
+    /// columns recorded in `srfs` for jtype.zig (which replaces
+    /// references to them).
+    fn jsonSrf(p: *Parser, name: Name, kind: SrfKind) Error!tree.FromItem {
+        const fname = name.text;
+        var args: []*Expr = &.{};
+        var base: ?QName = null;
+        if (kind == .populate) {
+            // (NULL::table, json): the record type is a table's.
+            _ = try p.expect(.lparen);
+            try p.expectKw("null");
+            if (!p.eat(.cast)) return p.unsupported(p.peek().start, "a record argument other than NULL::table");
+            base = try p.qname();
+            _ = try p.expect(.comma);
+            args = try p.exprList();
+            _ = try p.expect(.rparen);
+        } else {
+            const c = try p.funcCall(name, null);
+            args = c.args;
+        }
+        const want: usize = switch (kind) {
+            .path => 2,
+            else => 1,
+        };
+        if (args.len < want or (kind != .path and args.len != want) or args.len > 4) {
+            return p.fail(name.pos, "function {s} with {d} arguments does not exist", .{ fname, args.len });
+        }
+        var ordinality = false;
+        if (p.isKw("with") and p.isKwAt(1, "ordinality")) {
+            _ = p.advance();
+            _ = p.advance();
+            ordinality = true;
+        }
+        // The alias, with column definitions for json_to_record().
+        var label: Name = name;
+        var alias_cols: std.ArrayList(Name) = .empty;
+        var defs: std.ArrayList(SrfCol) = .empty;
+        const has_alias = p.isKw("as") or (p.peek().kind == .qident or (p.peek().kind == .ident and !isReserved(p.peek().text) and !p.isKw("on") and !p.isKw("using")));
+        if (has_alias) {
+            _ = p.eatKw("as");
+            label = try p.colId();
+            if (p.eat(.lparen)) {
+                while (true) {
+                    const cn = try p.colId();
+                    if (kind == .records) {
+                        const ty = try p.typeName();
+                        try defs.append(p.arena, .{ .name = cn.text, .index = @intCast(defs.items.len), .cast = ty });
+                    } else try alias_cols.append(p.arena, cn);
+                    if (!p.eat(.comma)) break;
+                }
+                _ = try p.expect(.rparen);
+            }
+        }
+        const pos = name.pos;
+        var cols: std.ArrayList(SrfCol) = .empty;
+        const jsonb = std.mem.startsWith(u8, fname, "jsonb");
+        const as_text = std.mem.endsWith(u8, fname, "_text");
+        const jtype: ?types.TypeName = if (as_text) null else .{ .name = if (jsonb) "jsonb" else "json", .pos = pos };
+        var rows_args: std.ArrayList(*Expr) = .empty;
+        try rows_args.append(p.arena, args[0]);
+        var rows_fn: []const u8 = undefined;
+        switch (kind) {
+            .each => {
+                rows_fn = "xq_pg_rows_each";
+                try cols.append(p.arena, .{ .name = "key", .index = 0 });
+                try cols.append(p.arena, .{ .name = "value", .index = 1, .cast = jtype });
+            },
+            .elements => {
+                rows_fn = "xq_pg_rows_elements";
+                try cols.append(p.arena, .{ .name = "value", .cast = jtype });
+            },
+            .keys => {
+                rows_fn = "xq_pg_rows_keys";
+                try cols.append(p.arena, .{ .name = if (has_alias) label.text else fname });
+            },
+            .path => {
+                rows_fn = "xq_pg_rows_path";
+                try cols.append(p.arena, .{ .name = if (has_alias) label.text else fname, .cast = .{ .name = "jsonb", .pos = pos } });
+            },
+            .records => {
+                rows_fn = "xq_pg_rows_records";
+                if (defs.items.len == 0) return p.fail(pos, "a column definition list is required for functions returning \"record\"", .{});
+                try cols.appendSlice(p.arena, defs.items);
+            },
+            .populate => {
+                rows_fn = "xq_pg_rows_records";
+                try p.recordColumns(base.?, &cols);
+            },
+        }
+        if (kind == .path) {
+            try rows_args.append(p.arena, args[1]);
+            try rows_args.append(p.arena, if (args.len > 2) args[2] else try p.expr(pos, .null));
+            try rows_args.append(p.arena, if (args.len > 3) args[3] else try p.expr(pos, .{ .integer = "0" }));
+        } else {
+            try rows_args.append(p.arena, try p.stringAt(pos, fname));
+        }
+        if (kind == .records or kind == .populate) {
+            if (kind == .populate) rows_args.items[1] = try p.stringAt(pos, if (std.mem.endsWith(u8, fname, "set")) "json_populate_recordset" else "json_populate_record");
+            if (jsonb and kind == .populate) rows_args.items[1] = try p.stringAt(pos, if (std.mem.endsWith(u8, fname, "set")) "jsonb_populate_recordset" else "jsonb_populate_record");
+            for (cols.items) |col| try rows_args.append(p.arena, try p.stringAt(pos, col.name));
+        }
+        if (ordinality) try cols.append(p.arena, .{ .name = "ordinality", .ordinality = true });
+        if (alias_cols.items.len > cols.items.len) return p.fail(alias_cols.items[cols.items.len].pos, "too many column aliases specified for function {s}", .{fname});
+        for (alias_cols.items, 0..) |a, i| cols.items[i].name = a.text;
+        const rows = try p.call(pos, rows_fn, null, rows_args.items);
+        const f = try p.new(tree.Func, .{ .name = .{ .text = "json_each", .pos = pos }, .args = try p.list(&.{rows}) });
+        try p.srfs.put(p.arena, f, .{ .cols = cols.items });
+        return .{ .source = .{ .func = f }, .alias = .{ .name = label } };
+    }
+
+    /// The columns of the row type of table `q` (json_populate_record()).
+    fn recordColumns(p: *Parser, q: QName, cols: *std.ArrayList(SrfCol)) Error!void {
+        const rel = try p.lookup(q, .relation);
+        const ps = p.p orelse return p.fail(q.name.pos, "type \"{s}\" does not exist", .{q.name.text});
+        const t = build.findTable(ps.db, rel.q.name.text, if (rel.q.schema) |sc| sc.text else null) orelse
+            return p.fail(q.name.pos, "type \"{s}\" does not exist", .{q.name.text});
+        const schema = catalog.schemaName(ps.db, t);
+        const entries = catalog.entries(ps.db, p.arena, schema, t.name) catch &.{};
+        for (t.cols) |*c| {
+            var decl: ?[]const u8 = null;
+            for (entries) |en| if (eql(en.key, catalog.Key.decl_type) and std.ascii.eqlIgnoreCase(en.col, c.name())) {
+                decl = en.value;
+            };
+            var ty: ?types.TypeName = null;
+            if (decl) |d| {
+                const z = try p.arena.dupeSentinel(u8, d, 0);
+                var sub = Parser.init(p.arena, z, 0, null) catch return p.fail(q.name.pos, "type \"{s}\" does not exist", .{d});
+                ty = sub.typeName() catch null;
+            }
+            try cols.append(p.arena, .{ .name = c.name(), .index = @intCast(cols.items.len), .cast = ty orelse .{ .name = "text", .pos = q.name.pos } });
+        }
+    }
+
+    /// The expression column `col` of SRF item `alias` stands for.
+    pub fn srfColumn(p: *Parser, item: []const u8, col: SrfCol, pos: u32) Error!*Expr {
+        const names = try p.arena.alloc(Name, 2);
+        names[0] = .{ .text = item, .pos = pos };
+        names[1] = .{ .text = if (col.ordinality) "key" else "value", .pos = pos };
+        var v = try p.expr(pos, .{ .column = names });
+        try p.srf_refs.put(p.arena, v, {});
+        if (col.ordinality) return p.expr(pos, .{ .binary = .{ .op = .add, .l = v, .r = try p.expr(pos, .{ .integer = "1" }) } });
+        if (col.index) |i| {
+            const path = try std.fmt.allocPrint(p.arena, "$[{d}]", .{i});
+            v = try p.call(pos, "json_extract", null, &.{ v, try p.stringAt(pos, path) });
+        }
+        if (col.cast) |ty| v = try p.castExpr(pos, v, ty);
+        return v;
+    }
+
+    /// Set-returning calls of the select list (jsonb_array_elements(j),
+    /// json_object_keys(j), jsonb_path_query(j, p)): a json_each() item
+    /// joined after the others, each call replaced by its column. Several
+    /// run in step, as in PostgreSQL (the rows of the longest, NULL past
+    /// the end of the others: xq_pg_rows_zip()).
+    fn selectListSrfs(p: *Parser, c: *tree.Core) Error!void {
+        var found: std.ArrayList(*Expr) = .empty;
+        for (c.cols) |rc| if (rc == .expr) try p.findSrfs(rc.expr.e, &found);
+        if (found.items.len == 0) return;
+        const pos = found.items[0].pos;
+        if (c.group_by.len > 0) return p.unsupported(pos, "a set-returning function in a select list with GROUP BY");
+        var rows: std.ArrayList(*Expr) = .empty;
+        var cols: std.ArrayList(SrfCol) = .empty;
+        for (found.items, 0..) |e, i| {
+            const f = e.kind.func;
+            const kind = srfKind(f.name.text).?;
+            switch (kind) {
+                .each, .records, .populate => return p.unsupported(e.pos, "a record-returning function in a select list"),
+                else => {},
+            }
+            const want: usize = if (kind == .path) 2 else 1;
+            if (f.args.len < want or (kind != .path and f.args.len != want) or f.args.len > 4) {
+                return p.fail(f.name.pos, "function {s} with {d} arguments does not exist", .{ f.name.text, f.args.len });
+            }
+            const fname = f.name.text;
+            var rows_args: std.ArrayList(*Expr) = .empty;
+            try rows_args.append(p.arena, f.args[0]);
+            var col: SrfCol = .{ .name = fname, .index = if (found.items.len > 1) @intCast(i) else null };
+            const rows_fn: []const u8 = switch (kind) {
+                .elements => blk: {
+                    if (!std.mem.endsWith(u8, fname, "_text")) col.cast = .{ .name = if (std.mem.startsWith(u8, fname, "jsonb")) "jsonb" else "json", .pos = e.pos };
+                    break :blk "xq_pg_rows_elements";
+                },
+                .keys => "xq_pg_rows_keys",
+                .path => blk: {
+                    col.cast = .{ .name = "jsonb", .pos = e.pos };
+                    break :blk "xq_pg_rows_path";
+                },
+                else => unreachable,
+            };
+            if (kind == .path) {
+                try rows_args.append(p.arena, f.args[1]);
+                try rows_args.append(p.arena, if (f.args.len > 2) f.args[2] else try p.expr(e.pos, .null));
+                try rows_args.append(p.arena, if (f.args.len > 3) f.args[3] else try p.expr(e.pos, .{ .integer = "0" }));
+            } else try rows_args.append(p.arena, try p.stringAt(e.pos, fname));
+            try rows.append(p.arena, try p.call(e.pos, rows_fn, null, rows_args.items));
+            try cols.append(p.arena, col);
+        }
+        p.srf_count += 1;
+        const label = try std.fmt.allocPrint(p.arena, "xq_srf{d}", .{p.srf_count});
+        const all = if (rows.items.len == 1) rows.items[0] else try p.call(pos, "xq_pg_rows_zip", null, rows.items);
+        const each = try p.new(tree.Func, .{ .name = .{ .text = "json_each", .pos = pos }, .args = try p.list(&.{all}) });
+        var from: std.ArrayList(tree.FromItem) = .empty;
+        try from.appendSlice(p.arena, c.from);
+        try from.append(p.arena, .{ .join = if (c.from.len > 0) .comma else .none, .source = .{ .func = each }, .alias = .{ .name = .{ .text = label, .pos = pos } } });
+        try p.srfs.put(p.arena, each, .{ .cols = &.{} });
+        c.from = from.items;
+        for (found.items, cols.items) |e, col| {
+            const v = try p.srfColumn(label, col, e.pos);
+            e.kind = v.kind;
+            if (e.kind == .column) try p.srf_refs.put(p.arena, e, {});
+        }
+    }
+
+    /// The set-returning calls in `e` (not in subqueries).
+    fn findSrfs(p: *Parser, e: *Expr, found: *std.ArrayList(*Expr)) Error!void {
+        if (e.kind == .func) {
+            const f = e.kind.func;
+            if (f.dialect == null and f.over == null and srfKind(f.name.text) != null) {
+                try found.append(p.arena, e);
+                return;
+            }
+        }
+        var it = Children.of(e);
+        while (it.next()) |x| try p.findSrfs(x, found);
+    }
+
+    /// `e IS [NOT] JSON [VALUE|ARRAY|OBJECT|SCALAR] [WITH|WITHOUT UNIQUE [KEYS]]`
+    /// (after JSON).
+    fn isJson(p: *Parser, l: *Expr, not: bool) Error!*Expr {
+        var kind: []const u8 = "0";
+        if (p.eatKw("value")) {} else if (p.eatKw("array")) {
+            kind = "1";
+        } else if (p.eatKw("object")) {
+            kind = "2";
+        } else if (p.eatKw("scalar")) kind = "3";
+        var unique: []const u8 = "0";
+        if ((p.isKw("with") or p.isKw("without")) and p.isKwAt(1, "unique")) {
+            if (p.advance().isKw("with")) unique = "1";
+            _ = p.advance();
+            _ = p.eatKw("keys");
+        }
+        const e = try p.call(l.pos, "xq_pg_is_json", null, &.{ l, try p.expr(l.pos, .{ .integer = kind }), try p.expr(l.pos, .{ .integer = unique }) });
+        if (!not) return e;
+        return p.expr(l.pos, .{ .unary = .{ .op = .not, .e = e } });
+    }
+
+    /// The DEFAULT of a json/jsonb column: a constant checked (and for
+    /// jsonb normalized) here, so that the schema keeps plain text.
+    fn jsonDefault(p: *Parser, ty: types.TypeName, e: *Expr) Error!*Expr {
+        const jsonb = eql(ty.name, "jsonb");
+        if (ty.array or !(jsonb or eql(ty.name, "json"))) return e;
+        var lit = e;
+        if (lit.kind == .cast and (eql(lit.kind.cast.target_type, "jsonb") or eql(lit.kind.cast.target_type, "json"))) lit = lit.kind.cast.e;
+        if (lit.kind != .string) return e;
+        const text = lit.kind.string;
+        const v = (if (jsonb) json.parseJsonb(p.arena, text) else json.parse(p.arena, text, false)) catch |err| {
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return p.fail(lit.pos, "invalid input syntax for type json", .{});
+        };
+        if (!jsonb) return lit;
+        const out = json.toText(p.arena, v, true) catch return error.OutOfMemory;
+        return p.expr(lit.pos, .{ .string = out });
+    }
+
+    /// JSON_OBJECT(k VALUE v | k : v, ...), JSON_ARRAY(v, ... | query),
+    /// JSON_ARRAYAGG(v [ORDER BY]), JSON_OBJECTAGG(k : v), with [NULL |
+    /// ABSENT] ON NULL, [WITH | WITHOUT] UNIQUE [KEYS], RETURNING json |
+    /// jsonb; null for json_object(text[]) and other calls.
+    fn jsonCtor(p: *Parser, start: u32, name: Name) Error!?*Expr {
+        const n = name.text;
+        const which: enum { object, array, arrayagg, objectagg } = if (eql(n, "json_object")) .object else if (eql(n, "json_array")) .array else if (eql(n, "json_arrayagg")) .arrayagg else if (eql(n, "json_objectagg")) .objectagg else return null;
+        const save = p.i;
+        _ = try p.expect(.lparen);
+        var absent = which == .array or which == .arrayagg;
+        var unique = false;
+        var jsonb = false;
+        var args: std.ArrayList(*Expr) = .empty;
+        var order_by: []tree.SortItem = &.{};
+        var query: ?*tree.Select = null;
+        if (which == .array and p.startsSelect(0)) {
+            query = try p.select();
+        } else if (p.peek().kind != .rparen and !p.isCtorClause()) {
+            while (true) {
+                const k = try p.expr0();
+                if (which == .object or which == .objectagg) {
+                    if (!p.eatKw("value") and !p.eat(.colon)) {
+                        if (which == .object and args.items.len == 0) {
+                            // json_object(text[] [, text[]]): the function.
+                            p.i = save;
+                            return null;
+                        }
+                        return p.syntaxError();
+                    }
+                    try args.append(p.arena, k);
+                    try args.append(p.arena, try p.formatJson(try p.expr0()));
+                } else try args.append(p.arena, try p.formatJson(k));
+                if (which == .arrayagg or which == .objectagg) break;
+                if (!p.eat(.comma)) break;
+            }
+        }
+        if (which == .arrayagg and p.isKw("order")) {
+            _ = p.advance();
+            try p.expectKw("by");
+            order_by = try p.sortList();
+        }
+        while (true) {
+            if ((p.isKw("null") or p.isKw("absent")) and p.isKwAt(1, "on")) {
+                absent = p.advance().isKw("absent");
+                _ = p.advance();
+                try p.expectKw("null");
+            } else if ((p.isKw("with") or p.isKw("without")) and p.isKwAt(1, "unique")) {
+                unique = p.advance().isKw("with");
+                _ = p.advance();
+                _ = p.eatKw("keys");
+            } else if (p.eatKw("returning")) {
+                const ty = try p.typeName();
+                jsonb = eql(ty.name, "jsonb");
+                if (!jsonb and !eql(ty.name, "json")) return p.unsupported(ty.pos, "RETURNING a type other than json or jsonb");
+                try p.formatClause();
+            } else break;
+        }
+        _ = try p.expect(.rparen);
+        const flags: i64 = @as(i64, @intFromBool(jsonb)) | @as(i64, if (absent) 2 else 0) | @as(i64, if (unique) 4 else 0);
+        const flag_e = try p.expr(start, .{ .integer = try std.fmt.allocPrint(p.arena, "{d}", .{flags}) });
+        var e: *Expr = undefined;
+        switch (which) {
+            .object, .array => {
+                if (query) |q| {
+                    // (SELECT JSON_ARRAYAGG(x) FROM (query) AS q(x)).
+                    const names = try p.arena.alloc(Name, 1);
+                    names[0] = .{ .text = "xq_v", .pos = start };
+                    const col = try p.expr(start, .{ .column = names });
+                    const v = try p.call(start, "xq_pg_json_arrayagg", null, &.{ col, flag_e });
+                    var from = try p.arena.alloc(tree.FromItem, 1);
+                    const cols_names = try p.arena.alloc(Name, 1);
+                    cols_names[0] = names[0];
+                    from[0] = .{ .source = .{ .subquery = q }, .alias = .{ .name = .{ .text = "xq_q", .pos = start }, .cols = cols_names } };
+                    const rcs = try p.arena.alloc(tree.ResultCol, 1);
+                    rcs[0] = .{ .expr = .{ .e = v } };
+                    const core_ = try p.new(tree.Core, .{ .cols = rcs, .from = from, .pos = start });
+                    const sel = try p.new(tree.Select, .{ .body = try p.new(tree.Body, .{ .core = core_ }), .pos = start });
+                    e = try p.expr(start, .{ .subquery = sel });
+                } else {
+                    try args.insert(p.arena, 0, flag_e);
+                    e = try p.call(start, if (which == .object) "xq_pg_json_ctor_object" else "xq_pg_json_ctor_array", null, args.items);
+                }
+            },
+            .arrayagg, .objectagg => {
+                if (args.items.len == 0) return p.syntaxError();
+                try args.append(p.arena, flag_e);
+                var c: Call = .{ .name = .{ .text = if (which == .arrayagg) "xq_pg_json_arrayagg" else "xq_pg_json_objectagg", .pos = start }, .args = args.items, .order_by = order_by };
+                c = try p.finishCall(c);
+                const f = try p.new(tree.Func, .{ .name = c.name, .args = c.args, .order_by = c.order_by, .filter = c.filter, .over = c.over });
+                e = try p.expr(start, .{ .func = f });
+            },
+        }
+        e.end = p.lastEnd();
+        try p.setFig(e, .{ .call = n });
+        return e;
+    }
+
+    fn isCtorClause(p: *const Parser) bool {
+        return ((p.isKw("null") or p.isKw("absent")) and p.isKwAt(1, "on")) or
+            ((p.isKw("with") or p.isKw("without")) and p.isKwAt(1, "unique")) or p.isKw("returning");
+    }
+
+    /// `v [FORMAT JSON [ENCODING UTF8]]`: with FORMAT JSON the text is
+    /// json.
+    fn formatJson(p: *Parser, v: *Expr) Error!*Expr {
+        if (!p.isKw("format")) return v;
+        try p.formatClause();
+        return p.castExpr(v.pos, v, .{ .name = "json", .pos = v.pos });
+    }
+
+    fn formatClause(p: *Parser) Error!void {
+        if (!p.eatKw("format")) return;
+        try p.expectKw("json");
+        if (p.eatKw("encoding")) {
+            const enc = try p.colId();
+            if (!std.ascii.eqlIgnoreCase(enc.text, "utf8")) return p.fail(enc.pos, "unsupported JSON encoding", .{});
+        }
     }
 
     /// `[AS] alias [(cols)]`.
@@ -1259,6 +1664,8 @@ pub const Parser = struct {
                     l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = false, .not = not } });
                 } else if (p.eatKw("unknown")) {
                     l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = null, .not = not } });
+                } else if (p.eatKw("json")) {
+                    l = try p.isJson(l, not);
                 } else if (p.eatKw("distinct")) {
                     try p.expectKw("from");
                     const r = try p.cmpExpr();
@@ -1354,16 +1761,16 @@ pub const Parser = struct {
         return p.expr(l.pos, .{ .like = .{ .e = l, .pat = pat, .not = not, .case_sensitive = !ilike, .escape = esc } });
     }
 
-    const OtherOp = enum { concat, bit_and, bit_or, shl, shr, json_get, json_get_text };
+    const OtherOp = enum { concat, bit_and, bit_or, shl, shr, json };
 
     /// Operators of the "any other operator" level.
     fn otherOp(t: Token) ?OtherOp {
         if (t.kind != .op) return null;
         const map = [_]struct { []const u8, OtherOp }{
-            .{ "||", .concat },   .{ "&", .bit_and },         .{ "|", .bit_or }, .{ "<<", .shl }, .{ ">>", .shr },
-            .{ "->", .json_get }, .{ "->>", .json_get_text },
+            .{ "||", .concat }, .{ "&", .bit_and }, .{ "|", .bit_or }, .{ "<<", .shl }, .{ ">>", .shr },
         };
         for (map) |m| if (std.mem.eql(u8, t.text, m[0])) return m[1];
+        if (jsonOperator(t.text) != null) return .json;
         return null;
     }
 
@@ -1380,14 +1787,22 @@ pub const Parser = struct {
                     .bit_or => try p.binary(.bit_or, l, r),
                     .shl => try p.binary(.shl, l, r),
                     .shr => try p.binary(.shr, l, r),
-                    .json_get => try p.binary(.json_get, l, r),
-                    .json_get_text => try p.binary(.json_get_text, l, r),
+                    .json => try p.jsonOp(t.text, l, r),
                 };
             } else if (t.kind == .op and cmpOp(t) == null and !isArith(t.text) and !isLikeOp(t.text)) {
                 return p.fail(t.start, "operator does not exist: {s}", .{t.text});
             } else break;
         }
         return l;
+    }
+
+    /// A json/jsonb operator: the engine function of its json variant
+    /// (jtype.zig makes it jsonb's when the left operand is jsonb).
+    fn jsonOp(p: *Parser, op: []const u8, l: *Expr, r: *Expr) Error!*Expr {
+        const f = jsonOperator(op).?;
+        const args = if (f.swap) try p.list(&.{ r, l }) else try p.list(&.{ l, r });
+        const fun = try p.new(tree.Func, .{ .name = .{ .text = f.func, .pos = l.pos }, .args = args });
+        return p.span(l, r, .{ .func = fun });
     }
 
     fn isArith(op: []const u8) bool {
@@ -1477,6 +1892,10 @@ pub const Parser = struct {
             for (hex) |ch| if (!std.ascii.isHex(ch)) return p.fail(pos, "invalid hexadecimal digit: \"{c}\"", .{ch});
             if (hex.len % 2 != 0) return p.fail(pos, "invalid hexadecimal data: odd number of digits", .{});
             x = try p.expr(pos, .{ .blob = hex });
+        } else if (ty.array and types.arrayElement(ty.name)) {
+            // A text[] (int[] ...) is its literal: the JSON operators read it.
+            const name = try std.fmt.allocPrint(p.arena, "{s}[]", .{ty.name});
+            x = try p.expr(pos, .{ .cast = .{ .e = e, .target_type = name, .mode = .{ .func = "xq_pg_text_array" } } });
         } else {
             const plan = types.castPlan(ty) catch |err| return p.typeError(ty, err);
             const mode: tree.CastMode = switch (plan) {
@@ -1546,7 +1965,16 @@ pub const Parser = struct {
             _ = try p.expect(.rparen);
             return p.expr(t.start, .{ .exists = s });
         }
-        if (eql(w, "array")) return p.unsupported(t.start, "ARRAY");
+        if (eql(w, "array")) {
+            if (p.peekAt(1).kind != .lbracket) return p.unsupported(t.start, "ARRAY");
+            _ = p.advance();
+            _ = p.advance();
+            const items: []*Expr = if (p.peek().kind == .rbracket) &.{} else try p.exprList();
+            _ = try p.expect(.rbracket);
+            const e = try p.call(t.start, "xq_pg_array", null, items);
+            try p.setFig(e, .{ .call = "array" });
+            return e;
+        }
         if (eql(w, "row") and p.peekAt(1).kind == .lparen) {
             _ = p.advance();
             _ = p.advance();
@@ -1605,6 +2033,7 @@ pub const Parser = struct {
         if (p.peek().kind == .lparen) {
             const n = names.items;
             if (n.len > 2) return p.syntaxError();
+            if (n.len == 1) if (try p.jsonCtor(start, n[0])) |e| return e;
             const c = try p.funcCall(n[n.len - 1], if (n.len == 2) n[0] else null);
             return p.callExpr(start, c);
         }
@@ -2488,7 +2917,7 @@ pub const Parser = struct {
                     .name = cname orelse try std.fmt.allocPrint(p.arena, "{s}_{s}_check", .{ table, name.text }),
                     .kind = .{ .check = e },
                 }),
-                .default => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .default = e } }),
+                .default => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .default = try p.jsonDefault(ty, e) } }),
                 .primary_key => try cons.append(p.arena, .{ .name = cname, .kind = .{ .primary_key = .{} } }),
                 .unique => try cons.append(p.arena, .{ .name = cname, .kind = .unique }),
                 .references => |r| try cons.append(p.arena, .{ .name = cname, .kind = .{ .references = r } }),
@@ -2669,7 +3098,9 @@ pub const Parser = struct {
         };
         if (p.eatKw("using")) {
             const m = try p.anyName();
-            if (!eql(m.text, "btree")) return p.fail(m.pos, "index method \"{s}\" is not supported", .{m.text});
+            // gin (and hash) indexes are B-tree indexes of the same
+            // columns: they serve equality, not @> or ?.
+            if (!eql(m.text, "btree") and !eql(m.text, "gin") and !eql(m.text, "hash")) return p.fail(m.pos, "index method \"{s}\" is not supported", .{m.text});
         }
         _ = try p.expect(.lparen);
         var items: std.ArrayList(tree.IndexItem) = .empty;
@@ -2826,6 +3257,58 @@ pub const Parser = struct {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+/// A column of a JSON set-returning function (Parser.srfColumn()): of
+/// the SQLite json_each() row of the item, `value` itself or element
+/// `index` of it, cast to `cast`; `ordinality` is WITH ORDINALITY's.
+pub const SrfCol = struct {
+    name: []const u8,
+    index: ?u32 = null,
+    cast: ?types.TypeName = null,
+    ordinality: bool = false,
+};
+
+pub const Srf = struct { cols: []SrfCol };
+
+const SrfKind = enum { each, elements, keys, path, records, populate };
+
+fn srfKind(name: []const u8) ?SrfKind {
+    const map = std.StaticStringMap(SrfKind).initComptime(.{
+        .{ "json_each", .each },                        .{ "json_each_text", .each },
+        .{ "jsonb_each", .each },                       .{ "jsonb_each_text", .each },
+        .{ "json_array_elements", .elements },          .{ "json_array_elements_text", .elements },
+        .{ "jsonb_array_elements", .elements },         .{ "jsonb_array_elements_text", .elements },
+        .{ "json_object_keys", .keys },                 .{ "jsonb_object_keys", .keys },
+        .{ "jsonb_path_query", .path },                 .{ "json_to_record", .records },
+        .{ "json_to_recordset", .records },             .{ "jsonb_to_record", .records },
+        .{ "jsonb_to_recordset", .records },            .{ "json_populate_record", .populate },
+        .{ "json_populate_recordset", .populate },      .{ "jsonb_populate_record", .populate },
+        .{ "jsonb_populate_recordset", .populate },
+    });
+    return map.get(name);
+}
+
+/// What a json/jsonb operator calls (jfuncs.zig); `swap`: with the
+/// operands the other way round.
+const JsonOperator = struct { func: []const u8, swap: bool = false };
+
+fn jsonOperator(op: []const u8) ?JsonOperator {
+    const map = std.StaticStringMap(JsonOperator).initComptime(.{
+        .{ "->", JsonOperator{ .func = "xq_pg_json_get" } },
+        .{ "->>", JsonOperator{ .func = "xq_pg_json_get_text" } },
+        .{ "#>", JsonOperator{ .func = "xq_pg_json_path" } },
+        .{ "#>>", JsonOperator{ .func = "xq_pg_json_path_text" } },
+        .{ "@>", JsonOperator{ .func = "xq_pg_jsonb_contains" } },
+        .{ "<@", JsonOperator{ .func = "xq_pg_jsonb_contains", .swap = true } },
+        .{ "?", JsonOperator{ .func = "xq_pg_jsonb_exists" } },
+        .{ "?|", JsonOperator{ .func = "xq_pg_jsonb_exists_any" } },
+        .{ "?&", JsonOperator{ .func = "xq_pg_jsonb_exists_all" } },
+        .{ "#-", JsonOperator{ .func = "xq_pg_jsonb_delete_path" } },
+        .{ "@?", JsonOperator{ .func = "xq_pg_jsonb_path_exists_op" } },
+        .{ "@@", JsonOperator{ .func = "xq_pg_jsonb_path_match_op" } },
+    });
+    return map.get(op);
 }
 
 fn isTypeWord(w: []const u8) bool {

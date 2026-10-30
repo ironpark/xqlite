@@ -17,6 +17,14 @@
 //! The in-memory sort is C's list merge sort and the merge of the PMAs
 //! prefers the older PMA on ties, so rows with equal keys come out in the
 //! same order as from SQLite: the order they were inserted.
+//!
+//! Not in C: each in-memory record also carries a normalized key, an
+//! order-preserving 64-bit prefix of its first field (normKey(), after
+//! Turso's sorter). The in-memory sort compares those first and calls
+//! the comparator only when they are equal, which spares most of the
+//! visits to the records themselves. Not when the first field has a
+//! collation other than BINARY. The order is unchanged: a smaller
+//! normalized key always means a smaller record.
 
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
@@ -85,6 +93,8 @@ pub const Sorter = struct {
     /// with their start and end in `records`, in insertion order.
     data: std.ArrayList(u8) = .empty,
     records: std.ArrayList(Span) = .empty,
+    /// The normalized key of each record of the list, if norm_on.
+    norms: std.ArrayList(u64) = .empty,
     /// Size of the list as a PMA in bytes (list.szPMA).
     sz_pma: i64 = 0,
     /// The memory C's list.aMemory would use for the list (iMemory).
@@ -99,6 +109,18 @@ pub const Sorter = struct {
     /// SORTER_TYPE_* bits: what every record's first field could be, for
     /// the fast comparators.
     type_mask: u8 = 0,
+    /// The sort uses normalized keys: the first field is not compared with
+    /// a collation other than BINARY, which they could not mirror.
+    norm_on: bool = false,
+    /// The normalized keys of the in-memory list may decide the order: no
+    /// record of the list has a first field normKey() cannot map.
+    norm_ok: bool = true,
+    /// The normalized keys of the list are not all the same (else they
+    /// decide nothing, as with a long common prefix).
+    norm_varied: bool = false,
+    /// How normKey() maps the first field, from the KeyInfo.
+    norm_desc: bool = false,
+    norm_bignull: bool = false,
     /// The one task (aTask[0]).
     task: SortSubtask,
     /// Space to unpack a record into.
@@ -425,20 +447,26 @@ fn getCompare(s: *const Sorter) CompareFn {
 
 /// Port of vdbeSorterMerge(): merge two sorted lists, taking from `p1`
 /// on ties. `cmp` is t.cmp, fixed so that it can be called directly.
-inline fn sorterMerge(comptime cmp: CompareFn, t: *SortSubtask, p1_arg: u32, p2_arg: u32) u32 {
+inline fn sorterMerge(comptime cmp: CompareFn, comptime use_norm: bool, t: *SortSubtask, p1_arg: u32, p2_arg: u32) u32 {
     const s = t.sorter;
     const links = s.links.items.ptr;
     const records = s.records.items.ptr;
     const data = s.data.items.ptr;
+    const norms = s.norms.items.ptr;
     var p1 = p1_arg;
     var p2 = p2_arg;
     var first: u32 = end_of_list;
     var tail: ?*u32 = null;
     var key2_cached = false;
     while (true) {
-        const r1 = records[p1];
-        const r2 = records[p2];
-        const res = @call(.auto, cmp, .{ t, &key2_cached, data[r1.start..r1.end], data[r2.start..r2.end] });
+        // Equal normalized keys leave the order to the comparator.
+        const res = if (use_norm and norms[p1] != norms[p2])
+            @as(i32, if (norms[p1] < norms[p2]) -1 else 1)
+        else blk: {
+            const r1 = records[p1];
+            const r2 = records[p2];
+            break :blk @call(.auto, cmp, .{ t, &key2_cached, data[r1.start..r1.end], data[r2.start..r2.end] });
+        };
         const take = if (res <= 0) p1 else p2;
         if (tail) |tl| tl.* = take else first = take;
         tail = &links[take];
@@ -467,20 +495,25 @@ fn sorterSort(t: *SortSubtask) Error!u32 {
     const n = s.records.items.len;
     try s.links.resize(s.gpa, n);
     t.cmp = getCompare(s);
-    const p = if (t.cmp == &compareInt)
-        sorterSortWith(compareInt, t)
-    else if (t.cmp == &compareText)
-        sorterSortWith(compareText, t)
-    else if (t.cmp == &compareReal)
-        sorterSortWith(compareReal, t)
-    else
-        sorterSortWith(compareGeneral, t);
+    const p = if (s.norm_on and s.norm_ok and s.norm_varied) sortWithCompare(true, t) else sortWithCompare(false, t);
     if (t.unpacked.err) |err| return err;
     return p;
 }
 
+/// sorterSortWith() for t.cmp.
+fn sortWithCompare(comptime use_norm: bool, t: *SortSubtask) u32 {
+    return if (t.cmp == &compareInt)
+        sorterSortWith(compareInt, use_norm, t)
+    else if (t.cmp == &compareText)
+        sorterSortWith(compareText, use_norm, t)
+    else if (t.cmp == &compareReal)
+        sorterSortWith(compareReal, use_norm, t)
+    else
+        sorterSortWith(compareGeneral, use_norm, t);
+}
+
 /// The body of sorterSort() for the comparator `cmp`.
-fn sorterSortWith(comptime cmp: CompareFn, t: *SortSubtask) u32 {
+fn sorterSortWith(comptime cmp: CompareFn, comptime use_norm: bool, t: *SortSubtask) u32 {
     const s = t.sorter;
     const links = s.links.items;
     // The C list is newest first.
@@ -492,7 +525,7 @@ fn sorterSortWith(comptime cmp: CompareFn, t: *SortSubtask) u32 {
         links[p] = end_of_list;
         var i: usize = 0;
         while (slots[i] != end_of_list) : (i += 1) {
-            p = sorterMerge(cmp, t, p, slots[i]);
+            p = sorterMerge(cmp, use_norm, t, p, slots[i]);
             slots[i] = end_of_list;
         }
         slots[i] = p;
@@ -500,15 +533,18 @@ fn sorterSortWith(comptime cmp: CompareFn, t: *SortSubtask) u32 {
     var p: u32 = end_of_list;
     for (slots) |slot| {
         if (slot == end_of_list) continue;
-        p = if (p == end_of_list) slot else sorterMerge(cmp, t, p, slot);
+        p = if (p == end_of_list) slot else sorterMerge(cmp, use_norm, t, p, slot);
     }
     return p;
 }
 
 /// Empty the in-memory list.
 fn listClear(s: *Sorter) void {
+    s.norm_ok = true;
+    s.norm_varied = false;
     s.data.clearRetainingCapacity();
     s.records.clearRetainingCapacity();
+    s.norms.clearRetainingCapacity();
     s.links.clearRetainingCapacity();
     s.cur = end_of_list;
 }
@@ -933,6 +969,9 @@ pub fn init(db: *int.Sqlite3, n_field: i32, c: *VdbeCursor) Error!void {
         s.data.ensureTotalCapacity(gpa, pgsz) catch {};
     }
 
+    s.norm_desc = ki.sort_flags[0] & int.KeyInfoOrder.desc != 0;
+    s.norm_bignull = ki.sort_flags[0] & int.KeyInfoOrder.bignull != 0;
+    s.norm_on = serial.isBinary(ki.coll[0]);
     if (ki.n_all_field < 13 and serial.isBinary(ki.coll[0]) and
         ki.sort_flags[0] & int.KeyInfoOrder.bignull == 0)
     {
@@ -972,10 +1011,81 @@ pub fn close(db: *int.Sqlite3, c: *VdbeCursor) void {
     const s = get(c);
     s.data.deinit(s.gpa);
     s.records.deinit(s.gpa);
+    s.norms.deinit(s.gpa);
     s.links.deinit(s.gpa);
     s.gpa.free(s.cells);
     s.gpa.destroy(s);
     c.uc = .none;
+}
+
+/// Bit position of the class of the first field in a normalized key.
+const norm_class_shift = 61;
+
+/// The normalized key of the record `z` (not in C): a u64 such that
+/// normKey(a) < normKey(b) implies that `a` sorts before `b`. Its top 3
+/// bits rank the type of the first field as the comparison does (NULL,
+/// numbers, text, blob, then NULL again for KEYINFO_ORDER_BIGNULL), the
+/// other 61 bits order the values of a type as far as they can, and the
+/// whole is inverted for DESC. Null if the first field cannot be mapped
+/// (a NaN or a malformed record).
+fn normKey(s: *const Sorter, z: []const u8) ?u64 {
+    if (z.len < 2) return null;
+    const hdr = serial.getVarint32(z, 0);
+    const ty = serial.getVarint32(z, hdr.len);
+    if (hdr.value > z.len or hdr.len + ty.len > hdr.value) return null;
+    const p = z[hdr.value..];
+    const t = ty.value;
+    const norm: u64 = switch (t) {
+        0 => if (s.norm_bignull) 4 << norm_class_shift else 0,
+        1...6, 8, 9 => blk: {
+            const sizes = [_]u8{ 0, 1, 2, 3, 4, 6, 8 };
+            const n: usize = if (t <= 6) sizes[t] else 0;
+            if (p.len < n) return null;
+            var i: i64 = if (t == 9) 1 else 0;
+            if (n > 0) {
+                var u: u64 = 0;
+                for (p[0..n]) |b| u = u << 8 | b;
+                // Sign-extend from n bytes.
+                const shift: u6 = @intCast(64 - 8 * n);
+                i = @as(i64, @bitCast(u << shift)) >> shift;
+            }
+            break :blk numberKey(@floatFromInt(i));
+        },
+        7 => blk: {
+            if (p.len < 8) return null;
+            const r: f64 = @bitCast(std.mem.readInt(u64, p[0..8], .big));
+            if (std.math.isNan(r)) return null;
+            break :blk numberKey(r);
+        },
+        10, 11 => return null,
+        else => blk: {
+            const n = (t - 12) / 2;
+            if (p.len < n) return null;
+            break :blk bytesKey(if (t & 1 == 0) 3 else 2, p[0..n]);
+        },
+    };
+    return if (s.norm_desc) ~norm else norm;
+}
+
+/// The normalized key of a number: integers and reals are both mapped
+/// through the double (round to nearest is monotonic, so it never
+/// reverses the exact comparison of an integer and a real), to an
+/// unsigned integer that orders as the double, of which the top 61 bits
+/// are kept.
+fn numberKey(r: f64) u64 {
+    const bits: u64 = @bitCast(if (r == 0) 0.0 else r); // -0.0 is 0.0
+    const ordered = if (bits >> 63 != 0) ~bits else bits | 1 << 63;
+    return 1 << norm_class_shift | ordered >> 3;
+}
+
+/// The normalized key of a text or blob: its first 7 bytes and its length
+/// up to 8, so that a value sorts before its extensions with zero bytes.
+fn bytesKey(class: u64, b: []const u8) u64 {
+    var prefix: [8]u8 = @splat(0);
+    const n = @min(b.len, 7);
+    @memcpy(prefix[0..n], b[0..n]);
+    const p56 = std.mem.readInt(u64, &prefix, .big) >> 8;
+    return class << norm_class_shift | p56 << 5 | @min(b.len, 8);
 }
 
 /// Port of sqlite3VdbeSorterWrite(): add the record in `m`, first writing
@@ -1013,6 +1123,13 @@ pub fn write(c: *VdbeCursor, m: *const Mem) Error!void {
     if (start + z.len > std.math.maxInt(u32)) return error.OutOfMemory;
     try s.records.ensureUnusedCapacity(s.gpa, 1);
     try s.data.appendSlice(s.gpa, z);
+    if (s.norm_on) {
+        try s.norms.ensureUnusedCapacity(s.gpa, 1);
+        const norm = if (s.norm_ok) normKey(s, z) else null;
+        if (norm == null) s.norm_ok = false;
+        if (s.norms.items.len > 0 and norm != s.norms.items[0]) s.norm_varied = true;
+        s.norms.appendAssumeCapacity(norm orelse 0);
+    }
     s.records.appendAssumeCapacity(.{ .start = @intCast(start), .end = @intCast(s.data.items.len) });
 }
 
@@ -1225,4 +1342,57 @@ test "sorter: tree depth" {
     try testing.expectEqual(@as(u32, 1), treeDepth(17));
     try testing.expectEqual(@as(u32, 1), treeDepth(256));
     try testing.expectEqual(@as(u32, 2), treeDepth(257));
+}
+
+test "sorter: normalized keys keep the order of the comparison" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // Values whose normalized keys tie or nearly tie: integers and reals
+    // that the double cannot tell apart, -0.0, texts and blobs around the
+    // 7-byte prefix, zero bytes. Each goes in twice, the second time in
+    // reverse order, so that ties check the order of insertion.
+    try c.exec(
+        \\CREATE TABLE v(k INTEGER PRIMARY KEY, x);
+        \\CREATE TABLE vals(x);
+        \\INSERT INTO vals VALUES (NULL), (0), (-1), (1), (3), (3.0), (2.5),
+        \\  (562949953421311), (562949953421312), (562949953421313),
+        \\  (9007199254740992), (9007199254740993), (9007199254740992.0),
+        \\  (9223372036854775807), (9223372036854775806), (-9223372036854775808),
+        \\  (-9223372036854775807), (9.2233720368547758e18), (-9.2233720368547758e18),
+        \\  (0.0), (-0.0), (0.5), (1e308), (-1e308), (1e-300), (-1e-300), (NULL),
+        \\  (''), ('a'), ('a' || char(0)), ('A'), ('abc'), ('ABC'), ('abcdefg'), ('abcdefgg'),
+        \\  ('abcdefgh'), ('abcdefgh' || char(0)), ('abcdefghi'), ('abcdefgi'), ('é'), ('Z'),
+        \\  (x''), (x'00'), (x'0000'), (x'01'), (x'ff'), (x'00000000000000'),
+        \\  (x'0000000000000000'), (x'000000000000000001'), (x'0000000000000001'),
+        \\  (x'61626364656667'), (x'6162636465666768');
+        \\INSERT INTO v(x) SELECT x FROM vals ORDER BY rowid;
+        \\INSERT INTO v(x) SELECT x FROM vals ORDER BY rowid DESC;
+        \\CREATE TABLE s(n INTEGER PRIMARY KEY, x, k);
+    );
+    // ORDER BY clause, then when two consecutive rows a and b are in
+    // order: a NULL before a value, the values in order, equal values by k.
+    const cases = [_][3][]const u8{
+        .{ "x", "a.x IS NULL AND b.x IS NOT NULL", "a.x < b.x" },
+        .{ "x DESC", "b.x IS NULL AND a.x IS NOT NULL", "b.x < a.x" },
+        .{ "x NULLS LAST", "b.x IS NULL AND a.x IS NOT NULL", "a.x < b.x" },
+        .{ "x DESC NULLS FIRST", "a.x IS NULL AND b.x IS NOT NULL", "b.x < a.x" },
+        .{ "x COLLATE NOCASE", "a.x IS NULL AND b.x IS NOT NULL", "a.x < b.x COLLATE NOCASE" },
+        .{ "x COLLATE NOCASE DESC", "b.x IS NULL AND a.x IS NOT NULL", "b.x < a.x COLLATE NOCASE" },
+    };
+    for (cases) |case| {
+        var buf: [600]u8 = undefined;
+        try c.exec("DELETE FROM s");
+        try c.exec(try std.fmt.bufPrint(&buf, "INSERT INTO s(x, k) SELECT x, k FROM v ORDER BY {s}", .{case[0]}));
+        const eq = if (std.mem.indexOf(u8, case[0], "NOCASE") != null) "a.x = b.x COLLATE NOCASE" else "a.x = b.x";
+        const sql = try std.fmt.bufPrint(&buf,
+            \\SELECT a.n FROM s a JOIN s b ON b.n = a.n + 1
+            \\WHERE (({s}) OR ({s}) OR ((a.x IS NULL AND b.x IS NULL OR {s}) AND a.k < b.k)) IS NOT 1
+        , .{ case[1], case[2], eq });
+        c.expectRows(sql, "") catch |err| {
+            std.debug.print("ORDER BY {s}\n", .{case[0]});
+            return err;
+        };
+        try c.expectRows("SELECT count(*) = (SELECT count(*) FROM v) FROM s", "1\n");
+    }
 }

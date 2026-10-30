@@ -67,16 +67,12 @@ pub const MemVfs = struct {
     }
 
     pub fn interface(self: *MemVfs) vfs.Vfs {
-        return .{ .ptr = self, .vtable = &vtable };
+        return .{ .ptr = self, .vtable = vtable };
     }
 
-    const vtable: vfs.Vfs.VTable = .{
-        .open = open,
-        .delete = delete,
-        .access = access,
-        .randomness = randomness,
-        .sleep = sleep,
-    };
+    /// The methods named after those of vfs.Vfs.VTable implement it
+    /// (vfs.VfsImpl()).
+    const vtable = &vfs.VfsImpl(MemVfs).vtable;
 
     fn freeShm(self: *MemVfs, node: *Node) void {
         for (node.shm_regions.items) |r| self.gpa.free(r);
@@ -84,8 +80,7 @@ pub const MemVfs = struct {
         node.shm_regions = .empty;
     }
 
-    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
-        const self: *MemVfs = @ptrCast(@alignCast(ptr));
+    pub fn sleep(self: *MemVfs, microseconds: u32) u32 {
         return vfs.ioSleep(self.io, microseconds);
     }
 
@@ -96,8 +91,7 @@ pub const MemVfs = struct {
         self.gpa.destroy(node);
     }
 
-    fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
-        const self: *MemVfs = @ptrCast(@alignCast(ptr));
+    pub fn open(self: *MemVfs, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -126,12 +120,11 @@ pub const MemVfs = struct {
         node.ref_count += 1;
         if (flags.delete_on_close) node.delete_on_close = true;
         handle.* = .{ .owner = self, .node = node, .read_only = !flags.read_write };
-        return .{ .ptr = handle, .vtable = &MemFile.vtable };
+        return .{ .ptr = handle, .vtable = MemFile.vtable };
     }
 
-    fn delete(ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void {
+    pub fn delete(self: *MemVfs, path: []const u8, sync_dir: bool) Error!void {
         _ = sync_dir;
-        const self: *MemVfs = @ptrCast(@alignCast(ptr));
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.unlinkLocked(path);
@@ -151,14 +144,12 @@ pub const MemVfs = struct {
         }
     }
 
-    fn randomness(ptr: *anyopaque, buf: []u8) void {
-        const self: *MemVfs = @ptrCast(@alignCast(ptr));
+    pub fn randomness(self: *MemVfs, buf: []u8) void {
         self.io.random(buf);
     }
 
-    fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {
+    pub fn access(self: *MemVfs, path: []const u8, mode: vfs.AccessMode) Error!bool {
         _ = mode;
-        const self: *MemVfs = @ptrCast(@alignCast(ptr));
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.files.contains(path);
@@ -175,28 +166,9 @@ const MemFile = struct {
     /// Shared-memory locks held by this handle.
     shm_held: vfs.ShmLockTable.Held = .{},
 
-    const vtable: vfs.File.VTable = .{
-        .close = close,
-        .read = read,
-        .write = write,
-        .truncate = truncate,
-        .sync = sync,
-        .fileSize = fileSize,
-        .lock = lock,
-        .unlock = unlock,
-        .checkReservedLock = checkReservedLock,
-        .sectorSize = sectorSize,
-        .deviceCharacteristics = deviceCharacteristics,
-        .isReadOnly = isReadOnly,
-        .shmMap = shmMap,
-        .shmLock = shmLock,
-        .shmBarrier = shmBarrier,
-        .shmUnmap = shmUnmap,
-    };
-
-    fn cast(ptr: *anyopaque) *MemFile {
-        return @ptrCast(@alignCast(ptr));
-    }
+    /// The methods named after those of vfs.File.VTable implement it
+    /// (vfs.FileImpl()).
+    const vtable = &vfs.FileImpl(MemFile).vtable;
 
     fn enter(f: *MemFile) void {
         f.owner.mutex.lockUncancelable(f.owner.io);
@@ -206,12 +178,11 @@ const MemFile = struct {
         f.owner.mutex.unlock(f.owner.io);
     }
 
-    fn close(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn close(f: *MemFile) void {
         // The WAL unmaps the shared memory before the database closes.
         std.debug.assert(!f.shm_on);
-        if (f.shm_on) shmUnmap(ptr, false);
-        unlock(ptr, .none) catch unreachable;
+        if (f.shm_on) shmUnmap(f, false);
+        unlock(f, .none) catch unreachable;
         const owner = f.owner;
         f.enter();
         const node = f.node;
@@ -223,8 +194,7 @@ const MemFile = struct {
         owner.gpa.destroy(f);
     }
 
-    fn read(ptr: *anyopaque, buf: []u8, offset: u64) Error!usize {
-        const f = cast(ptr);
+    pub fn read(f: *MemFile, buf: []u8, offset: u64) Error!usize {
         f.enter();
         defer f.leave();
         const data = f.node.data.items;
@@ -234,8 +204,7 @@ const MemFile = struct {
         return n;
     }
 
-    fn write(ptr: *anyopaque, buf: []const u8, offset: u64) Error!void {
-        const f = cast(ptr);
+    pub fn write(f: *MemFile, buf: []const u8, offset: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         f.enter();
         defer f.leave();
@@ -250,8 +219,7 @@ const MemFile = struct {
         @memcpy(list.items[@intCast(offset)..][0..buf.len], buf);
     }
 
-    fn truncate(ptr: *anyopaque, size: u64) Error!void {
-        const f = cast(ptr);
+    pub fn truncate(f: *MemFile, size: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         f.enter();
         defer f.leave();
@@ -259,10 +227,9 @@ const MemFile = struct {
         if (size < list.items.len) list.shrinkRetainingCapacity(@intCast(size));
     }
 
-    fn sync(_: *anyopaque, _: vfs.SyncFlags) Error!void {}
+    pub fn sync(_: *MemFile, _: vfs.SyncFlags) Error!void {}
 
-    fn fileSize(ptr: *anyopaque) Error!u64 {
-        const f = cast(ptr);
+    pub fn fileSize(f: *MemFile) Error!u64 {
         f.enter();
         defer f.leave();
         return f.node.data.items.len;
@@ -270,8 +237,7 @@ const MemFile = struct {
 
     /// In-process arbitration only. Follows the same transition rules as the
     /// unix VFS (vfs.LockLevel) but tracks them with per-file flags.
-    fn lock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn lock(f: *MemFile, level: LockLevel) Error!void {
         if (f.level.atLeast(level)) return;
         f.enter();
         defer f.leave();
@@ -308,8 +274,7 @@ const MemFile = struct {
         }
     }
 
-    fn unlock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn unlock(f: *MemFile, level: LockLevel) Error!void {
         if (!f.level.atLeast(level) or f.level == level) return;
         f.enter();
         defer f.leave();
@@ -320,27 +285,25 @@ const MemFile = struct {
         f.level = level;
     }
 
-    fn checkReservedLock(ptr: *anyopaque) Error!bool {
-        const f = cast(ptr);
+    pub fn checkReservedLock(f: *MemFile) Error!bool {
         f.enter();
         defer f.leave();
         return f.node.reserved;
     }
 
-    fn sectorSize(ptr: *anyopaque) u32 {
-        return cast(ptr).owner.sector_size;
+    pub fn sectorSize(f: *MemFile) u32 {
+        return f.owner.sector_size;
     }
 
-    fn deviceCharacteristics(ptr: *anyopaque) vfs.DeviceCharacteristics {
-        return cast(ptr).owner.device_characteristics;
+    pub fn deviceCharacteristics(f: *MemFile) vfs.DeviceCharacteristics {
+        return f.owner.device_characteristics;
     }
 
-    fn isReadOnly(ptr: *anyopaque) bool {
-        return cast(ptr).read_only;
+    pub fn isReadOnly(f: *MemFile) bool {
+        return f.read_only;
     }
 
-    fn shmMap(ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
-        const f = cast(ptr);
+    pub fn shmMap(f: *MemFile, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
         f.enter();
         defer f.leave();
         const node = f.node;
@@ -364,8 +327,7 @@ const MemFile = struct {
 
     /// The unix VFS's in-process lock arbitration (unixShmLock), without
     /// a file to lock.
-    fn shmLock(ptr: *anyopaque, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
-        const f = cast(ptr);
+    pub fn shmLock(f: *MemFile, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
         if (!f.shm_on) return error.ShmLock;
         if (!vfs.ShmLockTable.needed(f.shm_held, ofst, n, flags)) return;
         f.enter();
@@ -376,15 +338,13 @@ const MemFile = struct {
         return f.node.shm_locks.apply(&f.shm_held, ofst, n, flags, no_file);
     }
 
-    fn shmBarrier(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn shmBarrier(f: *MemFile) void {
         f.enter();
         f.leave();
     }
 
-    fn shmUnmap(ptr: *anyopaque, delete: bool) void {
+    pub fn shmUnmap(f: *MemFile, delete: bool) void {
         _ = delete;
-        const f = cast(ptr);
         if (!f.shm_on) return;
         f.enter();
         defer f.leave();

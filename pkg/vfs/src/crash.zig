@@ -70,49 +70,39 @@ pub const CrashVfs = struct {
     }
 
     pub fn interface(self: *CrashVfs) vfs.Vfs {
-        return .{ .ptr = self, .vtable = &vtable };
+        return .{ .ptr = self, .vtable = vtable };
     }
 
-    const vtable: vfs.Vfs.VTable = .{
-        .open = open,
-        .delete = delete,
-        .access = access,
-        .randomness = randomness,
-        .sleep = sleep,
-        .fullPathname = fullPathname,
-    };
+    /// The methods named after those of vfs.Vfs.VTable implement it
+    /// (vfs.VfsImpl()).
+    const vtable = &vfs.VfsImpl(CrashVfs).vtable;
 
-    fn cast(ptr: *anyopaque) *CrashVfs {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
-        const self = cast(ptr);
+    pub fn open(self: *CrashVfs, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
         const inner = try self.inner.open(path, flags);
         errdefer inner.close();
         const f = try self.gpa.create(CrashFile);
         f.* = .{ .owner = self, .inner = inner, .counted = self.spec.target.matches(flags.kind) };
-        return .{ .ptr = f, .vtable = if (inner.hasShm()) &CrashFile.vtable else &CrashFile.vtable_no_shm };
+        return .{ .ptr = f, .vtable = if (inner.hasShm()) CrashFile.vtable else CrashFile.vtable_no_shm };
     }
 
-    fn delete(ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void {
-        return cast(ptr).inner.delete(path, sync_dir);
+    pub fn delete(self: *CrashVfs, path: []const u8, sync_dir: bool) Error!void {
+        return self.inner.delete(path, sync_dir);
     }
 
-    fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {
-        return cast(ptr).inner.access(path, mode);
+    pub fn access(self: *CrashVfs, path: []const u8, mode: vfs.AccessMode) Error!bool {
+        return self.inner.access(path, mode);
     }
 
-    fn randomness(ptr: *anyopaque, buf: []u8) void {
-        cast(ptr).inner.randomness(buf);
+    pub fn randomness(self: *CrashVfs, buf: []u8) void {
+        self.inner.randomness(buf);
     }
 
-    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
-        return cast(ptr).inner.sleep(microseconds);
+    pub fn sleep(self: *CrashVfs, microseconds: u32) u32 {
+        return self.inner.sleep(microseconds);
     }
 
-    fn fullPathname(ptr: *anyopaque, path: []const u8, out: []u8) Error![]u8 {
-        const inner = cast(ptr).inner;
+    pub fn fullPathname(self: *CrashVfs, path: []const u8, out: []u8) Error![]u8 {
+        const inner = self.inner;
         const f = inner.vtable.fullPathname orelse {
             if (path.len > out.len) return error.CantOpen;
             @memcpy(out[0..path.len], path);
@@ -129,51 +119,23 @@ const CrashFile = struct {
     /// Writes to this file count.
     counted: bool,
 
-    const vtable_no_shm: vfs.File.VTable = .{
-        .close = close,
-        .read = read,
-        .write = write,
-        .truncate = truncate,
-        .sync = sync,
-        .fileSize = fileSize,
-        .lock = lock,
-        .unlock = unlock,
-        .checkReservedLock = checkReservedLock,
-        .sectorSize = sectorSize,
-        .deviceCharacteristics = deviceCharacteristics,
-        .isReadOnly = isReadOnly,
-    };
+    /// The methods named after those of vfs.File.VTable implement it
+    /// (vfs.FileImpl()); without the shm methods for a wrapped file that
+    /// has no shared memory.
+    const vtable = &vfs.FileImpl(CrashFile).vtable;
+    const vtable_no_shm = &vfs.FileImplWithout(CrashFile, &.{ "shmMap", "shmLock", "shmBarrier", "shmUnmap" }).vtable;
 
-    const vtable: vfs.File.VTable = blk: {
-        var t = vtable_no_shm;
-        t.shmMap = shmMap;
-        t.shmLock = shmLock;
-        t.shmBarrier = shmBarrier;
-        t.shmUnmap = shmUnmap;
-        break :blk t;
-    };
-
-    fn cast(ptr: *anyopaque) *CrashFile {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn fileOf(ptr: *anyopaque) vfs.File {
-        return cast(ptr).inner;
-    }
-
-    fn close(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn close(f: *CrashFile) void {
         f.inner.close();
         f.owner.gpa.destroy(f);
     }
 
-    fn read(ptr: *anyopaque, buf: []u8, offset: u64) Error!usize {
-        const f = fileOf(ptr);
-        return f.vtable.read(f.ptr, buf, offset);
+    pub fn read(f: *CrashFile, buf: []u8, offset: u64) Error!usize {
+        const inner = f.inner;
+        return inner.vtable.read(inner.ptr, buf, offset);
     }
 
-    fn write(ptr: *anyopaque, buf: []const u8, offset: u64) Error!void {
-        const f = cast(ptr);
+    pub fn write(f: *CrashFile, buf: []const u8, offset: u64) Error!void {
         if (!f.counted) return f.inner.write(buf, offset);
         const owner = f.owner;
         owner.count += 1;
@@ -186,56 +148,56 @@ const CrashFile = struct {
         std.process.exit(0);
     }
 
-    fn truncate(ptr: *anyopaque, size: u64) Error!void {
-        return fileOf(ptr).truncate(size);
+    pub fn truncate(f: *CrashFile, size: u64) Error!void {
+        return f.inner.truncate(size);
     }
 
-    fn sync(ptr: *anyopaque, flags: vfs.SyncFlags) Error!void {
-        return fileOf(ptr).sync(flags);
+    pub fn sync(f: *CrashFile, flags: vfs.SyncFlags) Error!void {
+        return f.inner.sync(flags);
     }
 
-    fn fileSize(ptr: *anyopaque) Error!u64 {
-        return fileOf(ptr).fileSize();
+    pub fn fileSize(f: *CrashFile) Error!u64 {
+        return f.inner.fileSize();
     }
 
-    fn lock(ptr: *anyopaque, level: vfs.LockLevel) Error!void {
-        return fileOf(ptr).lock(level);
+    pub fn lock(f: *CrashFile, level: vfs.LockLevel) Error!void {
+        return f.inner.lock(level);
     }
 
-    fn unlock(ptr: *anyopaque, level: vfs.LockLevel) Error!void {
-        return fileOf(ptr).unlock(level);
+    pub fn unlock(f: *CrashFile, level: vfs.LockLevel) Error!void {
+        return f.inner.unlock(level);
     }
 
-    fn checkReservedLock(ptr: *anyopaque) Error!bool {
-        return fileOf(ptr).checkReservedLock();
+    pub fn checkReservedLock(f: *CrashFile) Error!bool {
+        return f.inner.checkReservedLock();
     }
 
-    fn sectorSize(ptr: *anyopaque) u32 {
-        return fileOf(ptr).sectorSize();
+    pub fn sectorSize(f: *CrashFile) u32 {
+        return f.inner.sectorSize();
     }
 
-    fn deviceCharacteristics(ptr: *anyopaque) vfs.DeviceCharacteristics {
-        return fileOf(ptr).deviceCharacteristics();
+    pub fn deviceCharacteristics(f: *CrashFile) vfs.DeviceCharacteristics {
+        return f.inner.deviceCharacteristics();
     }
 
-    fn isReadOnly(ptr: *anyopaque) bool {
-        return fileOf(ptr).isReadOnly();
+    pub fn isReadOnly(f: *CrashFile) bool {
+        return f.inner.isReadOnly();
     }
 
-    fn shmMap(ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
-        return fileOf(ptr).shmMap(region, size, extend);
+    pub fn shmMap(f: *CrashFile, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
+        return f.inner.shmMap(region, size, extend);
     }
 
-    fn shmLock(ptr: *anyopaque, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
-        return fileOf(ptr).shmLock(ofst, n, flags);
+    pub fn shmLock(f: *CrashFile, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
+        return f.inner.shmLock(ofst, n, flags);
     }
 
-    fn shmBarrier(ptr: *anyopaque) void {
-        fileOf(ptr).shmBarrier();
+    pub fn shmBarrier(f: *CrashFile) void {
+        f.inner.shmBarrier();
     }
 
-    fn shmUnmap(ptr: *anyopaque, delete: bool) void {
-        fileOf(ptr).shmUnmap(delete);
+    pub fn shmUnmap(f: *CrashFile, delete: bool) void {
+        f.inner.shmUnmap(delete);
     }
 };
 
@@ -268,4 +230,17 @@ test "crash: the Nth write to a file of the target kind crashes" {
     try wal.write("2", 1);
     try testing.expectEqual(@as(u64, 2), cv.count);
     try testing.expect(!wal.isReadOnly());
+    // MemVfs has shared memory, so its files keep the shm methods.
+    try testing.expect(db.vtable == wal.vtable and wal.hasShm());
+}
+
+test "crash: the table without shared memory" {
+    const with = CrashFile.vtable;
+    const without = CrashFile.vtable_no_shm;
+    try testing.expect(with != without);
+    try testing.expect(with.shmMap != null and with.shmUnmap != null);
+    try testing.expect(without.shmMap == null and without.shmLock == null);
+    try testing.expect(without.shmBarrier == null and without.shmUnmap == null);
+    try testing.expect(with.isMemory == null and without.isMemory == null);
+    try testing.expect(with.read == without.read and with.write == without.write);
 }

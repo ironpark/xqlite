@@ -440,6 +440,100 @@ pub const Vfs = struct {
     }
 };
 
+/// The `File` of the type `T`, whose public methods named after the
+/// fields of `File.VTable` implement it with `*T` in place of the
+/// erased pointer (`pub fn read(f: *T, buf: []u8, offset: u64)
+/// Error!usize`). `&FileImpl(T).vtable` is the table: one per `T`, so
+/// comparing a file's `vtable` with it tells whether `T` is behind it.
+/// A method `T` does not declare keeps its default (null for the
+/// optional ones); a required one missing is a compile error.
+pub fn FileImpl(comptime T: type) type {
+    return Impl(File.VTable, T, &.{});
+}
+
+/// FileImpl() with the optional methods named in `omit` left null
+/// although `T` declares them (a wrapper of a file without shared
+/// memory leaves out the shm methods).
+pub fn FileImplWithout(comptime T: type, comptime omit: []const []const u8) type {
+    return Impl(File.VTable, T, omit);
+}
+
+/// The `Vfs` of the type `T`, as FileImpl() for `Vfs.VTable`.
+pub fn VfsImpl(comptime T: type) type {
+    return Impl(Vfs.VTable, T, &.{});
+}
+
+/// The table `VTable` of the methods of `T` (see FileImpl()), less
+/// those named in `omit`.
+fn Impl(comptime VTable: type, comptime T: type, comptime omit: []const []const u8) type {
+    const info = @typeInfo(VTable).@"struct";
+    for (omit) |name| {
+        const i = for (info.field_names, 0..) |field, i| {
+            if (std.mem.eql(u8, field, name)) break i;
+        } else @compileError(@typeName(VTable) ++ " has no method " ++ name);
+        if (@typeInfo(info.field_types[i]) != .optional) @compileError("the method " ++ name ++ " is required");
+    }
+    return struct {
+        /// The table, built once per (`VTable`, `T`, `omit`).
+        pub const vtable: VTable = blk: {
+            var t: VTable = undefined;
+            for (info.field_names, info.field_types, info.field_attrs) |name, Fn, attrs| {
+                const omitted = for (omit) |o| {
+                    if (std.mem.eql(u8, o, name)) break true;
+                } else false;
+                if (!omitted and @hasDecl(T, name)) {
+                    @field(t, name) = method(Fn, @field(T, name));
+                } else if (attrs.defaultValue(Fn)) |default| {
+                    @field(t, name) = default;
+                } else {
+                    @compileError(@typeName(T) ++ " has no public method " ++ name ++ " for " ++ @typeName(VTable));
+                }
+            }
+            break :blk t;
+        };
+    };
+}
+
+/// The function of the table field type `Fn` (`*const fn (ptr:
+/// *anyopaque, ...) R`, or its optional) that calls `f` inline with the
+/// same arguments, `ptr` cast back to the pointer type `f` takes first.
+/// One function per (`Fn`, `f`).
+fn method(comptime Fn: type, comptime f: anytype) Fn {
+    const Ptr = switch (@typeInfo(Fn)) {
+        .optional => |o| o.child,
+        else => Fn,
+    };
+    const sig = @typeInfo(@typeInfo(Ptr).pointer.child).@"fn";
+    const P = sig.param_types;
+    const R = sig.return_type.?;
+    const Self = @typeInfo(@TypeOf(f)).@"fn".param_types[0].?;
+    const M = struct {
+        inline fn self(ptr: *anyopaque) Self {
+            return @ptrCast(@alignCast(ptr));
+        }
+        fn m1(ptr: *anyopaque) R {
+            return @call(.always_inline, f, .{self(ptr)});
+        }
+        fn m2(ptr: *anyopaque, a1: P[1].?) R {
+            return @call(.always_inline, f, .{ self(ptr), a1 });
+        }
+        fn m3(ptr: *anyopaque, a1: P[1].?, a2: P[2].?) R {
+            return @call(.always_inline, f, .{ self(ptr), a1, a2 });
+        }
+        fn m4(ptr: *anyopaque, a1: P[1].?, a2: P[2].?, a3: P[3].?) R {
+            return @call(.always_inline, f, .{ self(ptr), a1, a2, a3 });
+        }
+    };
+    comptime std.debug.assert(P[0].? == *anyopaque);
+    return switch (P.len) {
+        1 => M.m1,
+        2 => M.m2,
+        3 => M.m3,
+        4 => M.m4,
+        else => @compileError("method: too many parameters"),
+    };
+}
+
 /// xSleep for the backends on `std.Io` (unixSleep()).
 pub fn ioSleep(io: std.Io, microseconds: u32) u32 {
     io.sleep(.fromMicroseconds(microseconds), .awake) catch {};

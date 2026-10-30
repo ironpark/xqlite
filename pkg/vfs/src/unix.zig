@@ -43,22 +43,16 @@ pub const UnixVfs = struct {
     }
 
     pub fn interface(self: *UnixVfs) vfs.Vfs {
-        return .{ .ptr = self, .vtable = &vtable };
+        return .{ .ptr = self, .vtable = vtable };
     }
 
-    const vtable: vfs.Vfs.VTable = .{
-        .open = open,
-        .delete = delete,
-        .access = access,
-        .randomness = randomness,
-        .sleep = sleep,
-        .fullPathname = fullPathname,
-    };
+    /// The methods named after those of vfs.Vfs.VTable implement it
+    /// (vfs.VfsImpl()).
+    const vtable = &vfs.VfsImpl(UnixVfs).vtable;
 
     /// Port of unixFullPathname(): `path` made absolute (against `dir`),
     /// with "." and ".." removed and symbolic links resolved.
-    fn fullPathname(ptr: *anyopaque, path: []const u8, out: []u8) Error![]u8 {
-        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+    pub fn fullPathname(self: *UnixVfs, path: []const u8, out: []u8) Error![]u8 {
         var p: DbPath = .{ .out = out };
         if (path.len == 0 or path[0] != '/') {
             var pwd: [std.fs.max_path_bytes]u8 = undefined;
@@ -70,8 +64,7 @@ pub const UnixVfs = struct {
         return out[0..p.used];
     }
 
-    fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
-        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+    pub fn open(self: *UnixVfs, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
         const io = self.io;
 
         // Vfs.open has already set create/exclusive/delete_on_close for
@@ -130,7 +123,7 @@ pub const UnixVfs = struct {
             .read_only = read_only,
             .path = path_copy,
         };
-        return .{ .ptr = handle, .vtable = &UnixFile.vtable };
+        return .{ .ptr = handle, .vtable = UnixFile.vtable };
     }
 
     fn mapOpenError(err: Io.File.OpenError) Error {
@@ -140,8 +133,7 @@ pub const UnixVfs = struct {
         };
     }
 
-    fn delete(ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void {
-        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+    pub fn delete(self: *UnixVfs, path: []const u8, sync_dir: bool) Error!void {
         const io = self.io;
         self.dir.deleteFile(io, path) catch |err| switch (err) {
             error.FileNotFound => return,
@@ -157,19 +149,16 @@ pub const UnixVfs = struct {
         }
     }
 
-    fn randomness(ptr: *anyopaque, buf: []u8) void {
-        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+    pub fn randomness(self: *UnixVfs, buf: []u8) void {
         self.io.random(buf);
     }
 
     /// Port of unixSleep().
-    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
-        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+    pub fn sleep(self: *UnixVfs, microseconds: u32) u32 {
         return vfs.ioSleep(self.io, microseconds);
     }
 
-    fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {
-        const self: *UnixVfs = @ptrCast(@alignCast(ptr));
+    pub fn access(self: *UnixVfs, path: []const u8, mode: vfs.AccessMode) Error!bool {
         self.dir.access(self.io, path, .{
             .read = mode == .read,
             .write = mode == .read_write,
@@ -559,41 +548,21 @@ const UnixFile = struct {
     /// This handle's connection to the shared memory (pShm).
     shm: ?*Shm = null,
 
-    const vtable: vfs.File.VTable = .{
-        .close = close,
-        .read = read,
-        .write = write,
-        .truncate = truncate,
-        .sync = sync,
-        .fileSize = fileSize,
-        .lock = lock,
-        .unlock = unlock,
-        .checkReservedLock = checkReservedLock,
-        .sectorSize = sectorSize,
-        .deviceCharacteristics = deviceCharacteristics,
-        .isReadOnly = isReadOnly,
-        .shmMap = shmMap,
-        .shmLock = shmLock,
-        .shmBarrier = shmBarrier,
-        .shmUnmap = shmUnmap,
-    };
-
-    fn cast(ptr: *anyopaque) *UnixFile {
-        return @ptrCast(@alignCast(ptr));
-    }
+    /// The methods named after those of vfs.File.VTable implement it
+    /// (vfs.FileImpl()).
+    const vtable = &vfs.FileImpl(UnixFile).vtable;
 
     fn fd(f: *UnixFile) fd_t {
         return f.file.handle;
     }
 
     /// Port of unixClose().
-    fn close(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn close(f: *UnixFile) void {
         const io = f.owner.io;
         // The WAL unmaps the shared memory before the database closes.
         std.debug.assert(f.shm == null);
-        if (f.shm != null) shmUnmap(ptr, false);
-        unlock(ptr, .none) catch {};
+        if (f.shm != null) shmUnmap(f, false);
+        unlock(f, .none) catch {};
         const inode = f.inode;
         inode.mutex.lockUncancelable(io);
         if (inode.n_lock != 0) {
@@ -610,13 +579,11 @@ const UnixFile = struct {
         f.owner.gpa.destroy(f);
     }
 
-    fn read(ptr: *anyopaque, buf: []u8, offset: u64) Error!usize {
-        const f = cast(ptr);
+    pub fn read(f: *UnixFile, buf: []u8, offset: u64) Error!usize {
         return f.file.readPositionalAll(f.owner.io, buf, offset) catch error.IoErr;
     }
 
-    fn write(ptr: *anyopaque, buf: []const u8, offset: u64) Error!void {
-        const f = cast(ptr);
+    pub fn write(f: *UnixFile, buf: []const u8, offset: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         f.file.writePositionalAll(f.owner.io, buf, offset) catch |err| return switch (err) {
             error.NoSpaceLeft, error.FileTooBig => error.DiskFull,
@@ -624,25 +591,21 @@ const UnixFile = struct {
         };
     }
 
-    fn truncate(ptr: *anyopaque, size: u64) Error!void {
-        const f = cast(ptr);
+    pub fn truncate(f: *UnixFile, size: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         f.file.setLength(f.owner.io, size) catch return error.IoErr;
     }
 
-    fn sync(ptr: *anyopaque, flags: vfs.SyncFlags) Error!void {
-        const f = cast(ptr);
+    pub fn sync(f: *UnixFile, flags: vfs.SyncFlags) Error!void {
         return fsyncFd(f.fd(), flags.full);
     }
 
-    fn fileSize(ptr: *anyopaque) Error!u64 {
-        const f = cast(ptr);
+    pub fn fileSize(f: *UnixFile) Error!u64 {
         return f.file.length(f.owner.io) catch error.IoErr;
     }
 
     /// Port of unixLock(). See vfs.LockLevel for the allowed transitions.
-    fn lock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn lock(f: *UnixFile, level: LockLevel) Error!void {
         if (f.level.atLeast(level)) return;
 
         const io = f.owner.io;
@@ -702,8 +665,7 @@ const UnixFile = struct {
     }
 
     /// Port of posixUnlock() without the NFS workaround.
-    fn unlock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn unlock(f: *UnixFile, level: LockLevel) Error!void {
         if (!f.level.atLeast(level) or f.level == level) return;
 
         const io = f.owner.io;
@@ -739,8 +701,7 @@ const UnixFile = struct {
     }
 
     /// Port of unixCheckReservedLock().
-    fn checkReservedLock(ptr: *anyopaque) Error!bool {
-        const f = cast(ptr);
+    pub fn checkReservedLock(f: *UnixFile) Error!bool {
         const io = f.owner.io;
         const inode = f.inode;
         inode.mutex.lockUncancelable(io);
@@ -749,17 +710,17 @@ const UnixFile = struct {
         return posixTestWriteLock(f.fd(), vfs.reserved_byte, 1);
     }
 
-    fn sectorSize(_: *anyopaque) u32 {
+    pub fn sectorSize(_: *UnixFile) u32 {
         return vfs.default_sector_size;
     }
 
-    fn deviceCharacteristics(_: *anyopaque) vfs.DeviceCharacteristics {
+    pub fn deviceCharacteristics(_: *UnixFile) vfs.DeviceCharacteristics {
         // SQLITE_POWERSAFE_OVERWRITE defaults to on in os_unix.c.
         return .{ .powersafe_overwrite = true };
     }
 
-    fn isReadOnly(ptr: *anyopaque) bool {
-        return cast(ptr).read_only;
+    pub fn isReadOnly(f: *UnixFile) bool {
+        return f.read_only;
     }
 
     /// Port of unixOpenSharedMemory(): connect this handle to the inode's
@@ -818,8 +779,7 @@ const UnixFile = struct {
 
     /// Port of unixShmMap(): region `region` of the shared memory, each
     /// region `size` bytes, extending the -shm file if `extend`.
-    fn shmMap(ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
-        const f = cast(ptr);
+    pub fn shmMap(f: *UnixFile, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
         const io = f.owner.io;
         const cant_init: vfs.ShmRegion = .{ .ptr = null, .read_only = true, .cant_init = true };
         if (f.shm == null) {
@@ -872,8 +832,7 @@ const UnixFile = struct {
 
     /// Port of unixShmLock(). Shared locks are counted per process, so
     /// the POSIX lock is only released with the last one.
-    fn shmLock(ptr: *anyopaque, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
-        const f = cast(ptr);
+    pub fn shmLock(f: *UnixFile, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
         const p = f.shm orelse return error.ShmLock;
         if (!vfs.ShmLockTable.needed(p.held, ofst, n, flags)) return;
         const node = p.node;
@@ -885,8 +844,7 @@ const UnixFile = struct {
 
     /// Port of unixShmBarrier(): a full memory barrier, plus the global
     /// mutex for redundancy, as in os_unix.c.
-    fn shmBarrier(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn shmBarrier(f: *UnixFile) void {
         _ = @atomicRmw(u32, &inodes.barrier_word, .Add, 0, .seq_cst);
         inodes.big_lock.lockUncancelable(f.owner.io);
         inodes.big_lock.unlock(f.owner.io);
@@ -894,8 +852,7 @@ const UnixFile = struct {
 
     /// Port of unixShmUnmap(): disconnect this handle from the shared
     /// memory; the last one out deletes the -shm file if `delete`.
-    fn shmUnmap(ptr: *anyopaque, delete_flag: bool) void {
-        const f = cast(ptr);
+    pub fn shmUnmap(f: *UnixFile, delete_flag: bool) void {
         const p = f.shm orelse return;
         const node = p.node;
         const io = f.owner.io;

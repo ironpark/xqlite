@@ -46,23 +46,14 @@ pub const WasiVfs = struct {
     }
 
     pub fn interface(self: *WasiVfs) vfs.Vfs {
-        return .{ .ptr = self, .vtable = &vtable };
+        return .{ .ptr = self, .vtable = vtable };
     }
 
-    const vtable: vfs.Vfs.VTable = .{
-        .open = open,
-        .delete = delete,
-        .access = access,
-        .randomness = randomness,
-        .sleep = sleep,
-    };
+    /// The methods named after those of vfs.Vfs.VTable implement it
+    /// (vfs.VfsImpl()).
+    const vtable = &vfs.VfsImpl(WasiVfs).vtable;
 
-    fn cast(ptr: *anyopaque) *WasiVfs {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
-        const self = cast(ptr);
+    pub fn open(self: *WasiVfs, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
         const io = self.io;
         const name = path orelse return self.mem.interface().open(null, flags);
 
@@ -98,7 +89,7 @@ pub const WasiVfs = struct {
         errdefer if (keep_name) |n| self.gpa.free(n);
         const handle = try self.gpa.create(WasiFile);
         handle.* = .{ .owner = self, .file = file, .node = node, .read_only = read_only, .delete_name = keep_name };
-        return .{ .ptr = handle, .vtable = &WasiFile.vtable };
+        return .{ .ptr = handle, .vtable = WasiFile.vtable };
     }
 
     fn mapOpenError(err: Io.File.OpenError) Error {
@@ -108,25 +99,23 @@ pub const WasiVfs = struct {
         };
     }
 
-    fn delete(ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void {
+    pub fn delete(self: *WasiVfs, path: []const u8, sync_dir: bool) Error!void {
         _ = sync_dir;
-        const self = cast(ptr);
         self.dir.deleteFile(self.io, path) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return error.IoErr,
         };
     }
 
-    fn randomness(ptr: *anyopaque, buf: []u8) void {
-        cast(ptr).io.random(buf);
+    pub fn randomness(self: *WasiVfs, buf: []u8) void {
+        self.io.random(buf);
     }
 
-    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
-        return vfs.ioSleep(cast(ptr).io, microseconds);
+    pub fn sleep(self: *WasiVfs, microseconds: u32) u32 {
+        return vfs.ioSleep(self.io, microseconds);
     }
 
-    fn access(ptr: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {
-        const self = cast(ptr);
+    pub fn access(self: *WasiVfs, path: []const u8, mode: vfs.AccessMode) Error!bool {
         self.dir.access(self.io, path, .{
             .read = mode == .read,
             .write = mode == .read_write,
@@ -207,28 +196,9 @@ const WasiFile = struct {
     delete_name: ?[]u8 = null,
     shm: inproc.Shm.Conn = .{},
 
-    const vtable: vfs.File.VTable = .{
-        .close = close,
-        .read = read,
-        .write = write,
-        .truncate = truncate,
-        .sync = sync,
-        .fileSize = fileSize,
-        .lock = lock,
-        .unlock = unlock,
-        .checkReservedLock = checkReservedLock,
-        .sectorSize = sectorSize,
-        .deviceCharacteristics = deviceCharacteristics,
-        .isReadOnly = isReadOnly,
-        .shmMap = shmMap,
-        .shmLock = shmLock,
-        .shmBarrier = shmBarrier,
-        .shmUnmap = shmUnmap,
-    };
-
-    fn cast(ptr: *anyopaque) *WasiFile {
-        return @ptrCast(@alignCast(ptr));
-    }
+    /// The methods named after those of vfs.File.VTable implement it
+    /// (vfs.FileImpl()).
+    const vtable = &vfs.FileImpl(WasiFile).vtable;
 
     fn enter(f: *WasiFile) void {
         files.mutex.lockUncancelable(f.owner.io);
@@ -238,12 +208,11 @@ const WasiFile = struct {
         files.mutex.unlock(f.owner.io);
     }
 
-    fn close(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn close(f: *WasiFile) void {
         const owner = f.owner;
         std.debug.assert(!f.shm.on);
-        shmUnmap(ptr, false);
-        unlock(ptr, .none) catch {};
+        shmUnmap(f, false);
+        unlock(f, .none) catch {};
         f.file.close(owner.io);
         f.node.release(owner.io);
         if (f.delete_name) |n| {
@@ -253,13 +222,11 @@ const WasiFile = struct {
         owner.gpa.destroy(f);
     }
 
-    fn read(ptr: *anyopaque, buf: []u8, offset: u64) Error!usize {
-        const f = cast(ptr);
+    pub fn read(f: *WasiFile, buf: []u8, offset: u64) Error!usize {
         return f.file.readPositionalAll(f.owner.io, buf, offset) catch error.IoErr;
     }
 
-    fn write(ptr: *anyopaque, buf: []const u8, offset: u64) Error!void {
-        const f = cast(ptr);
+    pub fn write(f: *WasiFile, buf: []const u8, offset: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         f.file.writePositionalAll(f.owner.io, buf, offset) catch |err| return switch (err) {
             error.NoSpaceLeft, error.FileTooBig => error.DiskFull,
@@ -267,80 +234,70 @@ const WasiFile = struct {
         };
     }
 
-    fn truncate(ptr: *anyopaque, size: u64) Error!void {
-        const f = cast(ptr);
+    pub fn truncate(f: *WasiFile, size: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         f.file.setLength(f.owner.io, size) catch return error.IoErr;
     }
 
-    fn sync(ptr: *anyopaque, _: vfs.SyncFlags) Error!void {
-        const f = cast(ptr);
+    pub fn sync(f: *WasiFile, _: vfs.SyncFlags) Error!void {
         f.file.sync(f.owner.io) catch return error.IoErr;
     }
 
-    fn fileSize(ptr: *anyopaque) Error!u64 {
-        const f = cast(ptr);
+    pub fn fileSize(f: *WasiFile) Error!u64 {
         return f.file.length(f.owner.io) catch error.IoErr;
     }
 
-    fn lock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn lock(f: *WasiFile, level: LockLevel) Error!void {
         if (f.level.atLeast(level)) return;
         f.enter();
         defer f.leave();
         return f.node.locks.lock(&f.level, level);
     }
 
-    fn unlock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn unlock(f: *WasiFile, level: LockLevel) Error!void {
         if (!f.level.atLeast(level) or f.level == level) return;
         f.enter();
         defer f.leave();
         f.node.locks.unlock(&f.level, level);
     }
 
-    fn checkReservedLock(ptr: *anyopaque) Error!bool {
-        const f = cast(ptr);
+    pub fn checkReservedLock(f: *WasiFile) Error!bool {
         f.enter();
         defer f.leave();
         return f.node.locks.reserved;
     }
 
-    fn sectorSize(_: *anyopaque) u32 {
+    pub fn sectorSize(_: *WasiFile) u32 {
         return vfs.default_sector_size;
     }
 
-    fn deviceCharacteristics(_: *anyopaque) vfs.DeviceCharacteristics {
+    pub fn deviceCharacteristics(_: *WasiFile) vfs.DeviceCharacteristics {
         return .{ .powersafe_overwrite = true };
     }
 
-    fn isReadOnly(ptr: *anyopaque) bool {
-        return cast(ptr).read_only;
+    pub fn isReadOnly(f: *WasiFile) bool {
+        return f.read_only;
     }
 
-    fn shmMap(ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
-        const f = cast(ptr);
+    pub fn shmMap(f: *WasiFile, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
         f.enter();
         defer f.leave();
         return f.node.shm.map(Files.gpa, &f.shm, region, size, extend);
     }
 
-    fn shmLock(ptr: *anyopaque, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
-        const f = cast(ptr);
+    pub fn shmLock(f: *WasiFile, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
         if (!try inproc.Shm.lockNeeded(&f.shm, ofst, n, flags)) return;
         f.enter();
         defer f.leave();
         return f.node.shm.lock(&f.shm, ofst, n, flags);
     }
 
-    fn shmBarrier(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn shmBarrier(f: *WasiFile) void {
         f.enter();
         f.leave();
     }
 
-    fn shmUnmap(ptr: *anyopaque, _: bool) void {
-        const f = cast(ptr);
+    pub fn shmUnmap(f: *WasiFile, _: bool) void {
         if (!f.shm.on) return;
         f.enter();
         defer f.leave();

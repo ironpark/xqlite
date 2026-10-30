@@ -86,23 +86,14 @@ pub const HostVfs = struct {
     }
 
     pub fn interface(self: *HostVfs) vfs.Vfs {
-        return .{ .ptr = self, .vtable = &vtable };
+        return .{ .ptr = self, .vtable = vtable };
     }
 
-    const vtable: vfs.Vfs.VTable = .{
-        .open = open,
-        .delete = delete,
-        .access = access,
-        .randomness = randomness,
-        .sleep = sleep,
-    };
+    /// The methods named after those of vfs.Vfs.VTable implement it
+    /// (vfs.VfsImpl()).
+    const vtable = &vfs.VfsImpl(HostVfs).vtable;
 
-    fn cast(ptr: *anyopaque) *HostVfs {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn open(ptr: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
-        const self = cast(ptr);
+    pub fn open(self: *HostVfs, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
         const name = path orelse return self.mem.interface().open(null, flags);
         const h = imports.xq_host_open(name.ptr, name.len, @bitCast(OpenBits{
             .read_write = flags.read_write,
@@ -117,15 +108,15 @@ pub const HostVfs = struct {
         errdefer node.release(self.io);
         const handle = try self.gpa.create(HostFile);
         handle.* = .{ .owner = self, .h = h, .node = node, .read_only = !flags.read_write };
-        return .{ .ptr = handle, .vtable = &HostFile.vtable };
+        return .{ .ptr = handle, .vtable = HostFile.vtable };
     }
 
-    fn delete(_: *anyopaque, path: []const u8, _: bool) Error!void {
+    pub fn delete(_: *HostVfs, path: []const u8, _: bool) Error!void {
         const rc = imports.xq_host_delete(path.ptr, path.len);
         if (rc < 0) return hostError(rc);
     }
 
-    fn access(_: *anyopaque, path: []const u8, mode: vfs.AccessMode) Error!bool {
+    pub fn access(_: *HostVfs, path: []const u8, mode: vfs.AccessMode) Error!bool {
         const rc = imports.xq_host_access(path.ptr, path.len, switch (mode) {
             .exists => 0,
             .read_write => 1,
@@ -135,12 +126,12 @@ pub const HostVfs = struct {
         return rc != 0;
     }
 
-    fn randomness(ptr: *anyopaque, buf: []u8) void {
-        cast(ptr).io.random(buf);
+    pub fn randomness(self: *HostVfs, buf: []u8) void {
+        self.io.random(buf);
     }
 
-    fn sleep(ptr: *anyopaque, microseconds: u32) u32 {
-        return vfs.ioSleep(cast(ptr).io, microseconds);
+    pub fn sleep(self: *HostVfs, microseconds: u32) u32 {
+        return vfs.ioSleep(self.io, microseconds);
     }
 };
 
@@ -203,28 +194,9 @@ const HostFile = struct {
     read_only: bool,
     shm: inproc.Shm.Conn = .{},
 
-    const vtable: vfs.File.VTable = .{
-        .close = close,
-        .read = read,
-        .write = write,
-        .truncate = truncate,
-        .sync = sync,
-        .fileSize = fileSize,
-        .lock = lock,
-        .unlock = unlock,
-        .checkReservedLock = checkReservedLock,
-        .sectorSize = sectorSize,
-        .deviceCharacteristics = deviceCharacteristics,
-        .isReadOnly = isReadOnly,
-        .shmMap = shmMap,
-        .shmLock = shmLock,
-        .shmBarrier = shmBarrier,
-        .shmUnmap = shmUnmap,
-    };
-
-    fn cast(ptr: *anyopaque) *HostFile {
-        return @ptrCast(@alignCast(ptr));
-    }
+    /// The methods named after those of vfs.File.VTable implement it
+    /// (vfs.FileImpl()).
+    const vtable = &vfs.FileImpl(HostFile).vtable;
 
     fn enter(f: *HostFile) void {
         files.mutex.lockUncancelable(f.owner.io);
@@ -234,54 +206,47 @@ const HostFile = struct {
         files.mutex.unlock(f.owner.io);
     }
 
-    fn close(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn close(f: *HostFile) void {
         const owner = f.owner;
         std.debug.assert(!f.shm.on);
-        shmUnmap(ptr, false);
-        unlock(ptr, .none) catch {};
+        shmUnmap(f, false);
+        unlock(f, .none) catch {};
         imports.xq_host_close(f.h);
         f.node.release(owner.io);
         owner.gpa.destroy(f);
     }
 
-    fn read(ptr: *anyopaque, buf: []u8, offset: u64) Error!usize {
-        const f = cast(ptr);
+    pub fn read(f: *HostFile, buf: []u8, offset: u64) Error!usize {
         const n = imports.xq_host_read(f.h, buf.ptr, buf.len, @floatFromInt(offset));
         if (n < 0) return hostError(n);
         return @intCast(n);
     }
 
-    fn write(ptr: *anyopaque, buf: []const u8, offset: u64) Error!void {
-        const f = cast(ptr);
+    pub fn write(f: *HostFile, buf: []const u8, offset: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         const rc = imports.xq_host_write(f.h, buf.ptr, buf.len, @floatFromInt(offset));
         if (rc < 0) return hostError(rc);
     }
 
-    fn truncate(ptr: *anyopaque, size: u64) Error!void {
-        const f = cast(ptr);
+    pub fn truncate(f: *HostFile, size: u64) Error!void {
         if (f.read_only) return error.ReadOnly;
         const rc = imports.xq_host_truncate(f.h, @floatFromInt(size));
         if (rc < 0) return hostError(rc);
     }
 
-    fn sync(ptr: *anyopaque, flags: vfs.SyncFlags) Error!void {
-        const f = cast(ptr);
+    pub fn sync(f: *HostFile, flags: vfs.SyncFlags) Error!void {
         const rc = imports.xq_host_sync(f.h, @as(u32, @intFromBool(flags.full)) | @as(u32, @intFromBool(flags.data_only)) << 1);
         if (rc < 0) return hostError(rc);
     }
 
-    fn fileSize(ptr: *anyopaque) Error!u64 {
-        const f = cast(ptr);
+    pub fn fileSize(f: *HostFile) Error!u64 {
         const size = imports.xq_host_size(f.h);
         if (size < 0) return hostError(@intFromFloat(size));
         return @intFromFloat(size);
     }
 
     /// The in-process arbitration first; then the host may refuse.
-    fn lock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn lock(f: *HostFile, level: LockLevel) Error!void {
         if (f.level.atLeast(level)) return;
         f.enter();
         defer f.leave();
@@ -293,8 +258,7 @@ const HostFile = struct {
         }
     }
 
-    fn unlock(ptr: *anyopaque, level: LockLevel) Error!void {
-        const f = cast(ptr);
+    pub fn unlock(f: *HostFile, level: LockLevel) Error!void {
         if (!f.level.atLeast(level) or f.level == level) return;
         f.enter();
         defer f.leave();
@@ -302,48 +266,43 @@ const HostFile = struct {
         _ = imports.xq_host_lock(f.h, @backingInt(level));
     }
 
-    fn checkReservedLock(ptr: *anyopaque) Error!bool {
-        const f = cast(ptr);
+    pub fn checkReservedLock(f: *HostFile) Error!bool {
         f.enter();
         defer f.leave();
         return f.node.locks.reserved;
     }
 
-    fn sectorSize(_: *anyopaque) u32 {
+    pub fn sectorSize(_: *HostFile) u32 {
         return vfs.default_sector_size;
     }
 
-    fn deviceCharacteristics(_: *anyopaque) vfs.DeviceCharacteristics {
+    pub fn deviceCharacteristics(_: *HostFile) vfs.DeviceCharacteristics {
         return .{ .powersafe_overwrite = true };
     }
 
-    fn isReadOnly(ptr: *anyopaque) bool {
-        return cast(ptr).read_only;
+    pub fn isReadOnly(f: *HostFile) bool {
+        return f.read_only;
     }
 
-    fn shmMap(ptr: *anyopaque, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
-        const f = cast(ptr);
+    pub fn shmMap(f: *HostFile, region: u32, size: u32, extend: bool) Error!vfs.ShmRegion {
         f.enter();
         defer f.leave();
         return f.node.shm.map(Files.gpa, &f.shm, region, size, extend);
     }
 
-    fn shmLock(ptr: *anyopaque, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
-        const f = cast(ptr);
+    pub fn shmLock(f: *HostFile, ofst: u32, n: u32, flags: vfs.ShmLockFlags) Error!void {
         if (!try inproc.Shm.lockNeeded(&f.shm, ofst, n, flags)) return;
         f.enter();
         defer f.leave();
         return f.node.shm.lock(&f.shm, ofst, n, flags);
     }
 
-    fn shmBarrier(ptr: *anyopaque) void {
-        const f = cast(ptr);
+    pub fn shmBarrier(f: *HostFile) void {
         f.enter();
         f.leave();
     }
 
-    fn shmUnmap(ptr: *anyopaque, _: bool) void {
-        const f = cast(ptr);
+    pub fn shmUnmap(f: *HostFile, _: bool) void {
         if (!f.shm.on) return;
         f.enter();
         defer f.leave();

@@ -131,25 +131,22 @@ pub fn Memdb(comptime heap: type) type {
 
         /// The memdb VFS.
         pub fn interface() vfs.Vfs {
-            return .{ .ptr = @constCast(&instance), .vtable = &vtable };
+            return .{ .ptr = @constCast(&instance), .vtable = vtable };
         }
 
         /// Port of sqlite3IsMemdb().
         pub fn isMemdb(v: vfs.Vfs) bool {
-            return v.vtable == &vtable;
+            return v.vtable == vtable;
         }
 
-        const vtable: vfs.Vfs.VTable = .{
-            .open = open,
-            .delete = delete,
-            .access = access,
-            .randomness = randomness,
-            .sleep = sleep,
-            .fullPathname = null,
-        };
+        /// The methods below named after those of vfs.Vfs.VTable (on
+        /// `instance`, which they ignore) and vfs.File.VTable (on a
+        /// MemFile) implement them (vfs.VfsImpl(), vfs.FileImpl()).
+        const vtable = &vfs.VfsImpl(@This()).vtable;
+        const file_vtable = &vfs.FileImpl(@This()).vtable;
 
         /// Port of memdbOpen().
-        fn open(_: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
+        pub fn open(_: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
             const a = heap.allocator;
             const f = try a.create(MemFile);
             errdefer a.destroy(f);
@@ -179,25 +176,25 @@ pub fn Memdb(comptime heap: type) type {
                 p.* = .{ .sz_max = state.default_max_size };
             }
             f.* = .{ .store = p, .read_only = !flags.read_write };
-            return .{ .ptr = f, .vtable = &file_vtable };
+            return .{ .ptr = f, .vtable = file_vtable };
         }
 
         /// memdb has no xDelete: the journal is never a file of its own. A
         /// journal the pager was told to keep in a named store is gone with its
         /// last handle.
-        fn delete(_: *anyopaque, _: []const u8, _: bool) Error!void {}
+        pub fn delete(_: *anyopaque, _: []const u8, _: bool) Error!void {}
 
         /// Port of memdbAccess(): no file ever exists on disk.
-        fn access(_: *anyopaque, _: []const u8, _: vfs.AccessMode) Error!bool {
+        pub fn access(_: *anyopaque, _: []const u8, _: vfs.AccessMode) Error!bool {
             return false;
         }
 
-        fn randomness(_: *anyopaque, buf: []u8) void {
+        pub fn randomness(_: *anyopaque, buf: []u8) void {
             if (state.lower) |l| return l.randomness(buf);
             @memset(buf, 0);
         }
 
-        fn sleep(_: *anyopaque, us: u32) u32 {
+        pub fn sleep(_: *anyopaque, us: u32) u32 {
             if (state.lower) |l| return l.sleep(us);
             return 0;
         }
@@ -214,31 +211,14 @@ pub fn Memdb(comptime heap: type) type {
             }
         };
 
-        const file_vtable: vfs.File.VTable = .{
-            .close = close,
-            .read = read,
-            .write = write,
-            .truncate = truncate,
-            .sync = sync,
-            .fileSize = fileSize,
-            .lock = lock,
-            .unlock = unlock,
-            .checkReservedLock = checkReservedLock,
-            .sectorSize = sectorSize,
-            .deviceCharacteristics = deviceCharacteristics,
-            .isReadOnly = isReadOnly,
-            .isMemory = isMemory,
-        };
-
         /// The handle behind `f` if it is a memdb file.
         pub fn fileOf(f: vfs.File) ?*MemFile {
-            if (f.vtable != &file_vtable) return null;
+            if (f.vtable != file_vtable) return null;
             return MemFile.of(f.ptr);
         }
 
         /// Port of memdbClose(): the store is freed with its last handle.
-        fn close(ptr: *anyopaque) void {
-            const f = MemFile.of(ptr);
+        pub fn close(f: *MemFile) void {
             const p = f.store;
             var last = false;
             if (p.name != null) {
@@ -264,8 +244,8 @@ pub fn Memdb(comptime heap: type) type {
         }
 
         /// Port of memdbRead().
-        fn read(ptr: *anyopaque, buf: []u8, offset: u64) Error!usize {
-            const p = MemFile.of(ptr).store;
+        pub fn read(f: *MemFile, buf: []u8, offset: u64) Error!usize {
+            const p = f.store;
             p.enter();
             defer p.leave();
             const sz: u64 = @intCast(p.sz);
@@ -280,8 +260,8 @@ pub fn Memdb(comptime heap: type) type {
         }
 
         /// Port of memdbWrite().
-        fn write(ptr: *anyopaque, buf: []const u8, offset_u: u64) Error!void {
-            const p = MemFile.of(ptr).store;
+        pub fn write(f: *MemFile, buf: []const u8, offset_u: u64) Error!void {
+            const p = f.store;
             p.enter();
             defer p.leave();
             // memdbLock() refuses a write lock first.
@@ -298,26 +278,25 @@ pub fn Memdb(comptime heap: type) type {
 
         /// Port of memdbTruncate(): only ever shrinks (growing is a corrupt WAL
         /// database, which memdb cannot hold).
-        fn truncate(ptr: *anyopaque, size: u64) Error!void {
-            const p = MemFile.of(ptr).store;
+        pub fn truncate(f: *MemFile, size: u64) Error!void {
+            const p = f.store;
             p.enter();
             defer p.leave();
             if (@as(i64, @intCast(size)) > p.sz) return error.IoErr;
             p.sz = @intCast(size);
         }
 
-        fn sync(_: *anyopaque, _: vfs.SyncFlags) Error!void {}
+        pub fn sync(_: *MemFile, _: vfs.SyncFlags) Error!void {}
 
-        fn fileSize(ptr: *anyopaque) Error!u64 {
-            const p = MemFile.of(ptr).store;
+        pub fn fileSize(f: *MemFile) Error!u64 {
+            const p = f.store;
             p.enter();
             defer p.leave();
             return @intCast(p.sz);
         }
 
         /// Port of memdbLock().
-        fn lock(ptr: *anyopaque, level: LockLevel) Error!void {
-            const f = MemFile.of(ptr);
+        pub fn lock(f: *MemFile, level: LockLevel) Error!void {
             const p = f.store;
             if (f.level.atLeast(level)) return;
             p.enter();
@@ -344,8 +323,7 @@ pub fn Memdb(comptime heap: type) type {
         }
 
         /// Port of memdbUnlock().
-        fn unlock(ptr: *anyopaque, level: LockLevel) Error!void {
-            const f = MemFile.of(ptr);
+        pub fn unlock(f: *MemFile, level: LockLevel) Error!void {
             const p = f.store;
             if (level.atLeast(f.level)) return;
             p.enter();
@@ -361,25 +339,25 @@ pub fn Memdb(comptime heap: type) type {
 
         /// Only used for crash recovery, which an in-memory database never
         /// needs (memdb has no xCheckReservedLock).
-        fn checkReservedLock(_: *anyopaque) Error!bool {
+        pub fn checkReservedLock(_: *MemFile) Error!bool {
             return false;
         }
 
         /// No xSectorSize: SQLITE_DEFAULT_SECTOR_SIZE.
-        fn sectorSize(_: *anyopaque) u32 {
+        pub fn sectorSize(_: *MemFile) u32 {
             return vfs.default_sector_size;
         }
 
         /// Port of memdbDeviceCharacteristics().
-        fn deviceCharacteristics(_: *anyopaque) vfs.DeviceCharacteristics {
+        pub fn deviceCharacteristics(_: *MemFile) vfs.DeviceCharacteristics {
             return .{ .atomic = true, .powersafe_overwrite = true, .safe_append = true, .sequential = true };
         }
 
-        fn isReadOnly(ptr: *anyopaque) bool {
-            return MemFile.of(ptr).read_only;
+        pub fn isReadOnly(f: *MemFile) bool {
+            return f.read_only;
         }
 
-        fn isMemory(_: *anyopaque) bool {
+        pub fn isMemory(_: *MemFile) bool {
             return true;
         }
 

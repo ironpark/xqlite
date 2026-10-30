@@ -801,3 +801,197 @@ INSERT INTO p (id, name, tags) SELECT id + 10, name, tags FROM OPENJSON((SELECT 
 SELECT id, name, tags FROM p WHERE id > 10 ORDER BY id;
 SELECT p.id, t.value AS tag FROM p CROSS APPLY OPENJSON(p.tags) AS t ORDER BY p.id, t.[key];
 GO
+
+-- case: schemas: create, resolve, DML
+CREATE SCHEMA sales
+GO
+CREATE SCHEMA hr AUTHORIZATION dbo
+GO
+CREATE TABLE sales.orders (id INT IDENTITY(1,1) PRIMARY KEY, item VARCHAR(5), qty INT);
+CREATE TABLE orders (id INT, n INT);
+INSERT INTO sales.orders (item, qty) VALUES ('a', 1), ('b', 2), ('c', 3);
+INSERT INTO dbo.orders VALUES (1, 10), (2, 20);
+SELECT IDENT_CURRENT('sales.orders') AS ic;
+SELECT orders.id, orders.item FROM sales.orders ORDER BY id;
+SELECT sales.orders.item FROM sales.orders WHERE sales.orders.id = 2;
+SELECT main.sales.orders.qty FROM main.sales.orders WHERE id = 3;
+SELECT sales.orders.* FROM sales.orders WHERE id = 1;
+SELECT s.item, o.n FROM sales.orders s JOIN dbo.orders o ON s.id = o.id ORDER BY s.id;
+SELECT o.id FROM main..orders o ORDER BY o.id;
+UPDATE sales.orders SET qty = qty * 10 WHERE sales.orders.id = 1;
+UPDATE s SET qty = s.qty + o.n FROM sales.orders s JOIN dbo.orders o ON o.id = s.id WHERE o.n = 20;
+DELETE FROM sales.orders WHERE id = 3;
+SELECT id, item, qty FROM sales.orders ORDER BY id;
+WITH c AS (SELECT id, qty FROM sales.orders) SELECT SUM(qty) AS s FROM c;
+SELECT * INTO hr.copy FROM sales.orders WHERE id = 1;
+SELECT id, item FROM hr.copy;
+MERGE INTO hr.copy AS t USING (SELECT 1 AS id, 'z' AS item) AS src ON t.id = src.id WHEN MATCHED THEN UPDATE SET item = src.item;
+SELECT id, item FROM hr.copy;
+TRUNCATE TABLE hr.copy;
+SELECT COUNT(*) AS n FROM hr.copy;
+GO
+INSERT INTO sales.orders (item) VALUES ('toolong');
+GO
+INSERT INTO sales.orders (id, item) VALUES (9, 'x');
+GO
+CREATE TABLE sales.orders (x INT);
+GO
+SELECT * FROM sales.nope;
+GO
+SELECT * FROM nope.orders;
+GO
+SELECT * FROM dbo.nope;
+GO
+INSERT INTO nope.t VALUES (1);
+GO
+CREATE TABLE nope.t (a INT);
+GO
+CREATE VIEW nope.v AS SELECT 1 AS a;
+GO
+CREATE SEQUENCE nope.q;
+GO
+DROP TABLE sales.nope;
+GO
+DROP TABLE [dbo].[nope];
+GO
+DROP VIEW sales.nope;
+GO
+DROP TABLE IF EXISTS sales.nope;
+SELECT 1 AS ok;
+GO
+
+-- case: schemas: views, sequences, indexes
+CREATE SCHEMA s1
+GO
+CREATE TABLE s1.t (id INT PRIMARY KEY, name VARCHAR(10));
+INSERT INTO s1.t VALUES (1, 'x'), (2, 'y');
+CREATE INDEX ix_name ON s1.t (name);
+CREATE TABLE t (id INT, name VARCHAR(10));
+CREATE INDEX ix_name2 ON dbo.t (name);
+GO
+CREATE VIEW s1.v AS SELECT id, name FROM s1.t WHERE id > 1;
+GO
+CREATE SEQUENCE s1.q START WITH 10 INCREMENT BY 5;
+GO
+SELECT id, name FROM s1.v;
+SELECT v.name FROM s1.v;
+SELECT NEXT VALUE FOR s1.q AS a;
+SELECT NEXT VALUE FOR s1.q AS b;
+SELECT name, SCHEMA_NAME(schema_id) AS sch, start_value, increment FROM sys.sequences;
+DROP INDEX ix_name ON s1.t;
+GO
+DROP INDEX ix_name ON s1.t;
+GO
+DROP INDEX s1.t.ix_name2;
+GO
+DROP VIEW s1.v;
+DROP SEQUENCE s1.q;
+ALTER TABLE s1.t ADD extra INT;
+GO
+SELECT id, name, extra FROM s1.t ORDER BY id;
+GO
+ALTER TABLE s1.t DROP COLUMN nope;
+GO
+
+-- case: schemas: catalog views and functions
+CREATE SCHEMA s1
+GO
+CREATE SCHEMA s2
+GO
+CREATE SCHEMA s3
+GO
+DROP SCHEMA s2
+GO
+CREATE SCHEMA s4
+GO
+CREATE TABLE s1.t (id INT IDENTITY(1,1), name VARCHAR(5));
+CREATE TABLE t (id INT, x INT);
+GO
+CREATE VIEW s4.v AS SELECT id FROM s1.t;
+GO
+SELECT name, schema_id, principal_id FROM sys.schemas ORDER BY schema_id;
+SELECT CATALOG_NAME, SCHEMA_NAME, SCHEMA_OWNER, DEFAULT_CHARACTER_SET_NAME FROM INFORMATION_SCHEMA.SCHEMATA ORDER BY SCHEMA_NAME;
+SELECT t.name, SCHEMA_NAME(t.schema_id) AS sch, t.schema_id FROM sys.tables t ORDER BY t.name, sch;
+SELECT o.name, o.schema_id FROM sys.objects o WHERE o.type IN ('U', 'V') ORDER BY o.name, o.schema_id;
+SELECT name, schema_id FROM sys.views;
+SELECT TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA, TABLE_NAME;
+SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME <> 'v' ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION;
+SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS;
+SELECT c.name, c.is_identity FROM sys.columns c WHERE c.object_id = OBJECT_ID('s1.t') ORDER BY c.column_id;
+SELECT OBJECT_ID('s1.t') - OBJECT_ID('[s1].[t]') AS z, OBJECT_SCHEMA_NAME(OBJECT_ID('s1.t')) AS a, OBJECT_SCHEMA_NAME(OBJECT_ID('t')) AS b, OBJECT_NAME(OBJECT_ID('s1.t')) AS c, OBJECT_NAME(OBJECT_ID('s4.v')) AS d;
+SELECT SCHEMA_ID('s1') AS a, SCHEMA_ID('dbo') AS b, SCHEMA_ID('nope') AS c, SCHEMA_NAME(1) AS d, SCHEMA_NAME() AS e, SCHEMA_NAME(SCHEMA_ID('s4')) AS f, SCHEMA_NAME(999) AS g, SCHEMA_ID() AS h, SCHEMA_ID('sys') AS i;
+SELECT CASE WHEN OBJECT_ID('s1.nope') IS NULL THEN 1 ELSE 0 END AS a, CASE WHEN OBJECT_ID('nope.t') IS NULL THEN 1 ELSE 0 END AS b, CASE WHEN OBJECT_ID('main.s1.t') = OBJECT_ID('s1.t') THEN 1 ELSE 0 END AS c;
+GO
+
+-- case: schemas: drop and transfer
+CREATE SCHEMA s1
+GO
+CREATE SCHEMA s2
+GO
+CREATE SEQUENCE s1.q;
+CREATE TABLE s1.zz (a INT);
+CREATE TABLE s1.aa (a INT);
+GO
+DROP SCHEMA s1;
+GO
+DROP TABLE s1.zz;
+DROP TABLE s1.aa;
+GO
+DROP SCHEMA s1;
+GO
+DROP SEQUENCE s1.q;
+DROP SCHEMA s1;
+SELECT COUNT(*) AS n FROM sys.schemas WHERE name = 's1';
+GO
+DROP SCHEMA nope;
+GO
+DROP SCHEMA IF EXISTS nope;
+SELECT 1 AS ok;
+GO
+DROP SCHEMA dbo;
+GO
+CREATE TABLE s2.u (a INT);
+INSERT INTO s2.u VALUES (7);
+CREATE TABLE t (id INT, x INT);
+INSERT INTO t VALUES (1, 10);
+GO
+CREATE SCHEMA s3
+GO
+ALTER SCHEMA s3 TRANSFER s2.u;
+SELECT a FROM s3.u;
+GO
+SELECT a FROM s2.u;
+GO
+ALTER SCHEMA s3 TRANSFER OBJECT::dbo.t;
+SELECT id, x FROM s3.t;
+GO
+ALTER SCHEMA dbo TRANSFER s3.t;
+SELECT id, x FROM t;
+GO
+CREATE TABLE s3.t (a INT);
+GO
+ALTER SCHEMA s3 TRANSFER dbo.t;
+GO
+ALTER SCHEMA s3 TRANSFER dbo.nope;
+GO
+ALTER SCHEMA nope TRANSFER dbo.t;
+GO
+SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY 1, 2;
+GO
+
+-- case: schemas: elements of CREATE SCHEMA
+CREATE TABLE t (x INT);
+INSERT INTO t VALUES (3);
+GO
+CREATE SCHEMA s6 CREATE TABLE e (a INT) CREATE VIEW ev AS SELECT a FROM e
+GO
+CREATE SCHEMA s7 AUTHORIZATION dbo CREATE TABLE e (a INT) CREATE TABLE e2 (a INT) CREATE VIEW fv AS SELECT x FROM t
+GO
+CREATE SCHEMA s8 GRANT SELECT ON SCHEMA::s8 TO public
+GO
+INSERT INTO s6.e VALUES (1);
+SELECT a FROM s6.ev;
+SELECT x FROM s7.fv;
+SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA LIKE 's%' ORDER BY 1, 2;
+SELECT name, schema_id FROM sys.schemas WHERE schema_id BETWEEN 5 AND 100 ORDER BY schema_id;
+GO

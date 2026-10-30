@@ -24,6 +24,10 @@ const allowed = [_]struct { []const u8, []const u8 }{
     // sqlite3Stat: the status counters (sqlite3_status()), which the
     // base package keeps.
     .{ "pkg/base/src/status.zig", "state" },
+    // Where the storage layer reports corruption (the engine routes it
+    // to sqlite3_log()), and sqlite3GlobalConfig.neverCorrupt.
+    .{ "pkg/storage/src/corrupt.zig", "hook" },
+    .{ "pkg/storage/src/corrupt.zig", "never_corrupt" },
     // How load_extension() loads a library, which the C ABI sets.
     .{ "src/sql/global.zig", "load_extension" },
     // The POSIX lock table, which every connection has to share.

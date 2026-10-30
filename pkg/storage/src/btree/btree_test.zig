@@ -3,6 +3,7 @@ const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 const btree = @import("btree.zig");
 const btree_fuzz = @import("btree_fuzz.zig");
 const record = @import("../record.zig");
+const corrupt = @import("../corrupt.zig");
 
 const testing = std.testing;
 const gpa = testing.allocator;
@@ -883,6 +884,10 @@ test "btree: incremental vacuum frees pages on request" {
 }
 
 test "btree: corrupt pages are reported, not trusted" {
+    // Checks that assume a valid file would fail.
+    const never = corrupt.never_corrupt;
+    corrupt.never_corrupt = false;
+    defer corrupt.never_corrupt = never;
     var env = Env.init();
     defer env.deinit();
     const fixture = @embedFile("../testdata/btree.db");

@@ -384,6 +384,17 @@ pub fn ensureInit() void {
         @import("xqlite_base").status.enable(state.memstat);
         @import("vfs.zig").initDefault();
         @import("loadext.zig").initHook();
+        @import("xqlite_storage").corrupt.hook = logCorrupt;
         @atomicStore(bool, &state.initialized, true, .release);
     }
+}
+
+/// Logs where the storage layer found the file corrupt through the
+/// SQLITE_CONFIG_LOG logger, as SQLite's SQLITE_CORRUPT_BKPT does.
+fn logCorrupt(loc: @import("xqlite_storage").corrupt.Location) void {
+    const f = state.log.f orelse return;
+    var buf: [160]u8 = undefined;
+    const msg = @import("xqlite_storage").corrupt.format(loc, buf[0 .. buf.len - 1]);
+    buf[msg.len] = 0;
+    f(state.log.arg, RC.CORRUPT, @ptrCast(&buf));
 }

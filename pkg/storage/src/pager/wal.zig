@@ -38,6 +38,7 @@
 //! sqlite3WalStat, ZIPVFS hooks.
 
 const std = @import("std");
+const corrupt = @import("../corrupt.zig").corrupt;
 const builtin = @import("builtin");
 const vfs = @import("xqlite_vfs").vfs;
 const pcache = @import("pcache.zig");
@@ -558,7 +559,7 @@ pub const Wal = struct {
         var n_collide = idx;
         var key = walHash(pgno);
         while (loc.hash[key] != 0) : (key = walNextHash(key)) {
-            if (n_collide == 0) return error.Corrupt;
+            if (n_collide == 0) return corrupt(@src());
             n_collide -= 1;
         }
         loc.pgno[(idx - 1) & (hashtable_npage - 1)] = pgno;
@@ -825,7 +826,7 @@ pub const Wal = struct {
                         // Growing by more than the WAL holds (plus a
                         // lock page) means corruption.
                         if (n_size < n_req and n_size + 65536 + @as(u64, w.hdr.mx_frame) * sz_page < n_req) {
-                            return error.Corrupt;
+                            return corrupt(@src());
                         }
 
                         while (it.next()) |e| {
@@ -928,7 +929,7 @@ pub const Wal = struct {
             result = noRetry(w.indexReadHdr(&changed));
             if (result) |_| {
                 if (w.hdr.mx_frame != 0 and w.pagesize() != buf.len) {
-                    result = error.Corrupt;
+                    result = corrupt(@src());
                 } else if (mode2 != .noop) {
                     result = w.checkpointFrames(interrupt, mode2, busy2, sync_flags, buf);
                 }
@@ -1382,7 +1383,7 @@ pub const Wal = struct {
                 if (frame <= i_last and frame >= w.min_frame and loc.pgno[(h - 1) & (hashtable_npage - 1)] == pgno) {
                     i_read = frame;
                 }
-                if (n_collide == 0) return error.Corrupt;
+                if (n_collide == 0) return corrupt(@src());
                 n_collide -= 1;
             }
             if (i_read != 0) break;
@@ -1619,7 +1620,7 @@ pub const Wal = struct {
             // could corrupt the database (ticket ff5be73dee).
             if (w.sync_header) try osSync(w.wal_fd, ckptSyncFlags(sync_flags));
         }
-        if (w.sz_page != sz_page) return error.Corrupt;
+        if (w.sz_page != sz_page) return corrupt(@src());
 
         var wr: Writer = .{ .w = w, .fd = w.wal_fd, .sync_flags = sync_flags, .sz_page = sz_page };
         var off = frameOffset(i_frame + 1, sz_page);

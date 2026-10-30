@@ -39,7 +39,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `xqt planner gen basic\|hard ...` | 무작위 플래너 케이스 생성 | — |
 | `xqt slt [PATH...]` | sqllogictest | `--ref` (선택) |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스에서 크래시·메모리 누수·close 실패 | — |
-| `zig build fuzz` | 시드 퍼저: `btree_model`, `btree_corrupt`, `ir_roundtrip` | — |
+| `zig build fuzz` | 시드 퍼저: `btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip` | — |
 | `xqt dialect-diff pg` | PostgreSQL 방언을 실제 PostgreSQL 16과 차등 비교 | PostgreSQL 서버(podman) |
 | `xqt dialect-diff mariadb` | MariaDB 방언을 실제 MariaDB 11과 차등 비교 | MariaDB 서버(podman) |
 | `xqt dialect-diff mssql` | MSSQL(T-SQL) 방언을 실제 SQL Server(Azure SQL Edge, 엔진 15.0)와 차등 비교 | SQL Server 서버(podman)와 go-sqlcmd |
@@ -150,7 +150,7 @@ SQ=/tmp/sqref/sqlite3 zig build check -Dfast=true     # capi-fast도 (약 90초)
 - `xqt planner --known tools/planner/known-failures.list`: `vtablog.txt`를 뺀 모든 케이스 파일
 - `xqlite fuzzcheck`: `ref/sqlite/test/fuzzdata1.db`..`fuzzdata8.db`를 파일마다 프로세스 하나로
 - `-Dslt=true`이면 `xqt slt ref/sqllogictest/test`
-- `-Dfuzz=true`이면 `btree_model`, `btree_corrupt`, `ir_roundtrip`을 무작위 시드로 한 번씩
+- `-Dfuzz=true`이면 `btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`을 무작위 시드로 한 번씩
 - `-Dfast=true`이면 `zig build capi-fast`: ReleaseFast 정적 라이브러리로 C 검사와 삽입 벤치마크를 여러 번
 
 플래너 부분 때문에 `SQ`에 [주석 없는 기준 셸](#기준-sqlite3-셸)을 주어야 합니다. 주지 않으면 `PATH`의 `sqlite3`와 비교하므로 바이트코드가 다릅니다. `SQLITE3`도 같은 방식으로 받습니다.
@@ -302,7 +302,8 @@ C 실행기와의 대조(`--ref`), WAL 모드 실행 같은 옵션은 [tools/slt
 | 도구 | 입력 | 찾는 것 |
 | --- | --- | --- |
 | `xqlite fuzzcheck` | SQLite의 퍼즈 코퍼스 | 크래시, 메모리 누수, close 실패 |
-| `btree_model` | 무작위 삽입·교체·삭제, 커밋 또는 롤백 | 트랜잭션마다 모델과 다른 내용 |
+| `btree_model` | 무작위 삽입·교체·삭제, 탐색, 열어 둔 읽기 커서의 이동, `transferRow` 복사, 문장 savepoint, `clearTable`, 커밋 또는 롤백 | 모델과 다른 내용(연산마다, 트랜잭션마다 양방향 스캔), 실패한 디버그 검사 |
+| `btree_sqlite3` | `btree_model`이 남긴 DB | SQLite의 `PRAGMA quick_check` 오류(`SQLITE3`가 가리키는 sqlite3로) |
 | `btree_corrupt` | 유효한 DB의 무작위 바이트를 덮어쓴 파일 | 크래시, 실패한 assert, 누수(오류는 괜찮음) |
 | `ir_roundtrip` | 무작위 구문 트리 IR | render ≡ lower 위반 |
 
@@ -330,6 +331,7 @@ zig-out/bin/xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db
 ```sh
 zig build fuzz -Doptimize=ReleaseSafe -- btree_model [SEED] [--events N]
 zig build fuzz -Doptimize=ReleaseSafe -- btree_corrupt [SEED]
+SQLITE3=/tmp/xq-sqlite-build/sqlite3 zig build fuzz -Doptimize=ReleaseSafe -- btree_sqlite3 [SEED] [--events N]
 zig build fuzz -Doptimize=ReleaseSafe -- ir_roundtrip [SEED] [--events N]
 zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 ```
@@ -338,6 +340,9 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 - 시드를 생략하면 무작위로 골라 먼저 출력합니다.
 - 커밋 해시(40자리)도 시드로 받습니다.
 - `zig build test`는 모든 시드 퍼저를 고정 시드로 짧게 돌립니다.
+- `btree_model`은 유효한 DB만 다루므로 손상을 가정하지 않는 디버그 검사(`corrupt.never_corrupt`, [아키텍처](architecture.md#스토리지-패키지))를 켜고, 손상 오류가 나면 어느 검사가 걸렸는지 출력합니다. 이 검사는 런타임 안전 검사가 있는 빌드(Debug, ReleaseSafe)에서만 돕니다.
+- `btree_model`의 읽기 커서는 다른 커서가 b-tree를 바꾸는 동안 열려 있습니다. 바뀐 뒤 한 칸 움직이면 원래 있던 키의 모델상 이웃에 가야 합니다(그 키가 지워졌어도). 커서 위치 저장·복원(`saveAllCursors`, `skip_next`)을 확인합니다.
+- `btree_sqlite3`는 `btree_model`이 끝난 DB를 SQLite의 sqlite3 셸로 `PRAGMA quick_check`합니다. 모델의 b-tree는 `sqlite_schema`에 적혀 있고 행은 레코드입니다(quick_check가 행마다 열 하나를 읽으므로). `SQLITE3`가 없으면 건너뜁니다. 실패하면 DB를 `.zig-cache/btree-sqlite3-SEED.db`에 남깁니다.
 
 ### ir_roundtrip
 

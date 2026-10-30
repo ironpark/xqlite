@@ -2,8 +2,10 @@
 //! src/fuzz_tests.zig) and, with few events, by `zig build test`.
 //!
 //! - `model`: random inserts, replacements and deletes on a table and an
-//!   index of the same rows, in transactions that commit or roll back,
-//!   checked against a model after every transaction.
+//!   index of the same rows, with seeks, read cursors left open across the
+//!   changes, rows copied by transferRow(), statement savepoints and
+//!   clearTable(), in transactions that commit or roll back, checked
+//!   against a model as it goes and after every transaction.
 //! - `corrupt`: random bytes of a valid database overwritten, then the
 //!   database read, checked and changed. Any error is fine; a crash, a
 //!   failed assertion or a leak is not.
@@ -13,8 +15,11 @@ const btree = @import("btree.zig");
 const record = @import("../record.zig");
 const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 const fuzz = @import("xqlite_base").fuzz;
+const corrupt_mod = @import("../corrupt.zig");
+const varint = @import("../varint.zig");
 
 const Allocator = std.mem.Allocator;
+const Order = std.math.Order;
 const Io = std.Io;
 const Btree = btree.Btree;
 const Cursor = btree.Cursor;
@@ -23,18 +28,40 @@ const Value = record.Value;
 
 const db_name = "fuzz.db";
 
-/// Payload bytes for a rowid, so that reads can be checked.
+/// Payload bytes for a rowid, so that reads can be checked: from 2 bytes
+/// on, a record of one blob, which SQLite's own checks can read (its
+/// quick_check reads a column of every row).
 pub fn fillPayload(buf: []u8, rowid: i64) void {
     const seed: u64 = @bitCast(rowid);
     for (buf, 0..) |*b, i| b.* = @truncate(seed *% 31 +% i);
-    // The integrity check expects a record, whose header size is >= 2.
-    if (buf.len > 0) buf[0] |= 2;
+    switch (buf.len) {
+        0 => {},
+        // Too short for a record; the integrity check wants a header
+        // size of at least 2.
+        1 => buf[0] |= 2,
+        else => {
+            // The header: its size, NULLs to pad it, then the serial type
+            // of an n-byte blob (12 + 2n), whose varint shrinks n as it
+            // grows.
+            var h: usize = 2;
+            while (1 + varint.len(12 + 2 * (buf.len - h)) > h) h += 1;
+            const st_len = varint.len(12 + 2 * (buf.len - h));
+            buf[0] = @intCast(h);
+            @memset(buf[1 .. h - st_len], 0);
+            _ = varint.put(buf[h - st_len ..], 12 + 2 * (buf.len - h));
+        },
+    }
 }
 
 fn check(ok: bool, comptime fmt: []const u8, args: anytype) error{ModelMismatch}!void {
     if (ok) return;
     std.debug.print("btree fuzz: " ++ fmt ++ "\n", args);
     return error.ModelMismatch;
+}
+
+fn printCorrupt(loc: corrupt_mod.Location) void {
+    var buf: [160]u8 = undefined;
+    std.debug.print("btree fuzz: {s}\n", .{corrupt_mod.format(loc, &buf)});
 }
 
 // =================================================================== model
@@ -71,7 +98,20 @@ pub const ModelConfig = struct {
     }
 };
 
-pub const ModelOp = enum { put, delete };
+pub const ModelOp = enum {
+    put,
+    delete,
+    /// Seek the table or the index to a random key, present or not.
+    seek,
+    /// Step a read cursor left open across the changes.
+    read,
+    /// Copy a row to a third table with transferRow().
+    copy,
+    /// Open, release or roll back a statement savepoint.
+    savepoint,
+    /// Empty the table and the index, rarely.
+    clear,
+};
 
 /// Swarm weights that keep `put` on: without inserts nothing happens.
 fn opWeights(rand: std.Random) std.enums.EnumArray(ModelOp, u32) {
@@ -88,7 +128,157 @@ pub fn model(gpa: Allocator, io: Io, seed: u64, events_max: u32) !void {
     return modelWith(gpa, io, prng.random(), config, events_max);
 }
 
+/// What the b-trees should hold: the payload length of each rowid, or null
+/// if absent, in the table (whose index holds (length, rowid) for every
+/// row) and in the table of copies.
+const Rows = struct {
+    rows: []?u32,
+    copies: []?u32,
+
+    fn init(gpa: Allocator, n: u32) !Rows {
+        const both = try gpa.alloc(?u32, 2 * n);
+        @memset(both, null);
+        return .{ .rows = both[0..n], .copies = both[n..] };
+    }
+
+    fn deinit(m: Rows, gpa: Allocator) void {
+        gpa.free(m.rows.ptr[0 .. 2 * m.rows.len]);
+    }
+
+    fn all(m: Rows) []?u32 {
+        return m.rows.ptr[0 .. 2 * m.rows.len];
+    }
+
+    fn copyFrom(m: Rows, from: Rows) void {
+        @memcpy(m.all(), from.all());
+    }
+};
+
+/// The key of a table entry (rowid, 0) or of an index entry (length,
+/// rowid), ordered as the b-tree orders them.
+const Key = struct {
+    a: i64,
+    b: i64,
+
+    fn order(x: Key, y: Key) Order {
+        const o = std.math.order(x.a, y.a);
+        return if (o != .eq) o else std.math.order(x.b, y.b);
+    }
+};
+
+const Tree = enum { table, index };
+
+/// The model's key next to `at` in direction `dir`: the smallest key
+/// greater than it (.gt) or the largest smaller (.lt). A null `at` stands
+/// before the first key (.gt) or after the last (.lt).
+fn neighbor(rows: []const ?u32, tree: Tree, at: ?Key, dir: Order) ?Key {
+    var best: ?Key = null;
+    for (rows, 1..) |m, rowid| {
+        const len = m orelse continue;
+        const k: Key = if (tree == .table) .{ .a = @intCast(rowid), .b = 0 } else .{ .a = len, .b = @intCast(rowid) };
+        if (at) |x| if (k.order(x) != dir) continue;
+        if (best) |b| if (k.order(b) != dir.invert()) continue;
+        best = k;
+    }
+    return best;
+}
+
+/// The key of the entry `cur` is on.
+fn currentKey(cur: *Cursor, tree: Tree) !Key {
+    if (tree == .table) return .{ .a = cur.integerKey(), .b = 0 };
+    var buf: [32]u8 = undefined;
+    const n = cur.payloadSize();
+    try check(n <= buf.len, "index entry of {d} bytes", .{n});
+    try cur.payload(0, buf[0..n]);
+    var values: [2]Value = undefined;
+    try check(try record.decode(buf[0..n], &values) == 2, "index entry of other than 2 values", .{});
+    return .{ .a = values[0].int, .b = values[1].int };
+}
+
+/// A cursor left open while the write cursors change its b-tree, which
+/// must save its position and restore it: stepping from the key it was
+/// on goes to that key's neighbor in the model, whatever happened to the
+/// key itself.
+const Reader = struct {
+    cur: Cursor = undefined,
+    tree: Tree,
+    /// The key the cursor is on, null if not on an entry.
+    at: ?Key = null,
+
+    fn step(r: *Reader, rand: std.Random, rows: []const ?u32) !void {
+        const dir: Order = if (rand.boolean()) .gt else .lt;
+        const ok = if (r.at == null)
+            (if (dir == .gt) try r.cur.first() else try r.cur.last())
+        else if (dir == .gt) try r.cur.next() else try r.cur.previous();
+        const want = neighbor(rows, r.tree, r.at, dir);
+        try check(ok == (want != null), "{t} reader: stepped {t} from {any}: on an entry {}, want {any}", .{ r.tree, dir, r.at, ok, want });
+        if (want) |w| {
+            const got = try currentKey(&r.cur, r.tree);
+            try check(got.order(w) == .eq, "{t} reader: stepped {t} from {any} to {any}, want {any}", .{ r.tree, dir, r.at, got, w });
+        }
+        r.at = want;
+    }
+};
+
+/// Seek `cur` to a random key, present or not, and check the result: .eq
+/// on the key itself, otherwise on its neighbor on the side it says.
+fn seekCheck(rand: std.Random, cur: *Cursor, tree: Tree, ki: *const record.KeyInfo, rows: []const ?u32) !void {
+    const n: i64 = @intCast(rows.len);
+    const key: Key = .{ .a = rand.intRangeAtMost(i64, 0, if (tree == .table) n + 1 else 260), .b = if (tree == .table) 0 else rand.intRangeAtMost(i64, 0, n + 1) };
+    const o = if (tree == .table)
+        try cur.tableMoveto(key.a, rand.boolean())
+    else o: {
+        const search: record.UnpackedRecord = .{ .info = ki, .values = &.{ .{ .int = key.a }, .{ .int = key.b } } };
+        break :o try cur.indexMoveto(search.indexKey());
+    };
+    const before = neighbor(rows, tree, key, .lt);
+    const after = neighbor(rows, tree, key, .gt);
+    const present = for (rows, 1..) |m, rowid| {
+        const len = m orelse continue;
+        const k: Key = if (tree == .table) .{ .a = @intCast(rowid), .b = 0 } else .{ .a = len, .b = @intCast(rowid) };
+        if (k.order(key) == .eq) break true;
+    } else false;
+    if (!present and before == null and after == null) {
+        try check(o == .lt and cur.eof(), "{t} seek {any} in an empty tree: {t}", .{ tree, key, o });
+        return;
+    }
+    const got = try currentKey(cur, tree);
+    const want: Key = switch (o) {
+        .eq => key,
+        .lt => before orelse return check(false, "{t} seek {any}: .lt with nothing smaller", .{ tree, key }),
+        .gt => after orelse return check(false, "{t} seek {any}: .gt with nothing larger", .{ tree, key }),
+    };
+    try check(present == (o == .eq), "{t} seek {any}: {t}, present {}", .{ tree, key, o, present });
+    try check(got.order(want) == .eq, "{t} seek {any}: {t} on {any}, want {any}", .{ tree, key, o, got, want });
+}
+
 pub fn modelWith(gpa: Allocator, io: Io, rand: std.Random, config: ModelConfig, events_max: u32) !void {
+    return modelRun(gpa, io, rand, config, events_max, null);
+}
+
+/// The `model` fuzzer with a configuration drawn from `seed`, returning
+/// the database it leaves, for a check by SQLite itself. Its b-trees are
+/// in sqlite_schema; the rows of its tables are not records.
+pub fn modelDatabase(gpa: Allocator, io: Io, seed: u64, events_max: u32) ![]u8 {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const config: ModelConfig = .random(prng.random());
+    var image: []u8 = &.{};
+    try modelRun(gpa, io, prng.random(), config, events_max, &image);
+    return image;
+}
+
+fn modelRun(gpa: Allocator, io: Io, rand: std.Random, config: ModelConfig, events_max: u32, image: ?*[]u8) !void {
+    // A valid database is never corrupt: say which check thought it was,
+    // and run the checks that assume it.
+    const old_hook = corrupt_mod.hook;
+    const old_never = corrupt_mod.never_corrupt;
+    corrupt_mod.hook = printCorrupt;
+    corrupt_mod.never_corrupt = true;
+    defer {
+        corrupt_mod.hook = old_hook;
+        corrupt_mod.never_corrupt = old_never;
+    }
+
     var mem = MemVfs.init(gpa, io);
     defer mem.deinit();
     const bt = try Btree.open(gpa, mem.interface(), db_name, .{
@@ -100,23 +290,31 @@ pub fn modelWith(gpa: Allocator, io: Io, rand: std.Random, config: ModelConfig, 
     defer bt.close(.{});
     const ki: record.KeyInfo = .{ .gpa = gpa, .sort_orders = &.{ .asc, .asc } };
 
-    // The payload length of each rowid, or null if absent. The index holds
-    // (length, rowid) for every row.
-    const rows = try gpa.alloc(?u32, config.n_keys);
-    defer gpa.free(rows);
-    @memset(rows, null);
-    const committed = try gpa.dupe(?u32, rows);
-    defer gpa.free(committed);
+    const m: Rows = try .init(gpa, config.n_keys);
+    defer m.deinit(gpa);
+    const committed: Rows = try .init(gpa, config.n_keys);
+    defer committed.deinit(gpa);
+    // The model at each open statement savepoint.
+    const max_savepoints = 4;
+    var saved: [max_savepoints]Rows = undefined;
+    for (&saved, 0..) |*s, i| s.* = Rows.init(gpa, config.n_keys) catch |err| {
+        for (saved[0..i]) |x| x.deinit(gpa);
+        return err;
+    };
+    defer for (saved) |s| s.deinit(gpa);
 
     try bt.beginTrans(.write, 0);
     const t_root = try bt.createTable(.intkey);
     const i_root = try bt.createTable(.blobkey);
+    const c_root = try bt.createTable(.intkey);
+    try writeSchema(bt, .{ t_root, i_root, c_root });
     try bt.commit();
 
     var buf: [6000]u8 = undefined;
     var events: u32 = 0;
     while (events < events_max) {
         try bt.beginTrans(.write, 0);
+        var n_savepoint: u32 = 0;
         {
             var tc: Cursor = undefined;
             try bt.cursor(&tc, t_root, .{ .write = true });
@@ -124,13 +322,83 @@ pub fn modelWith(gpa: Allocator, io: Io, rand: std.Random, config: ModelConfig, 
             var ic: Cursor = undefined;
             try bt.cursor(&ic, i_root, .{ .write = true, .key_info = ki.btreeKeyInfo() });
             defer ic.close();
+            var cc: Cursor = undefined;
+            try bt.cursor(&cc, c_root, .{ .write = true });
+            defer cc.close();
+            var readers = [_]Reader{ .{ .tree = .table }, .{ .tree = .index } };
+            try bt.cursor(&readers[0].cur, t_root, .{});
+            defer readers[0].cur.close();
+            try bt.cursor(&readers[1].cur, i_root, .{ .key_info = ki.btreeKeyInfo() });
+            defer readers[1].cur.close();
 
             for (0..config.transaction_size) |_| {
                 events += 1;
                 const k = rand.uintLessThan(u32, config.n_keys);
                 const rowid: i64 = k + 1;
                 const op = fuzz.chooseWeighted(rand, ModelOp, config.op_weights);
-                if (rows[k]) |len| {
+                switch (op) {
+                    .put, .delete => {},
+                    .seek => {
+                        if (rand.boolean())
+                            try seekCheck(rand, &tc, .table, &ki, m.rows)
+                        else
+                            try seekCheck(rand, &ic, .index, &ki, m.rows);
+                        continue;
+                    },
+                    .read => {
+                        const r = &readers[rand.uintLessThan(usize, readers.len)];
+                        try r.step(rand, m.rows);
+                        continue;
+                    },
+                    .copy => {
+                        if (m.rows[k] == null) continue;
+                        // As INSERT INTO ... SELECT copies rows (xferOptimization):
+                        // only to a rowid not there (OP_NotExists).
+                        if (m.copies[k] != null) {
+                            try check(try cc.tableMoveto(rowid, false) == .eq, "copy of rowid {d} missing", .{rowid});
+                            try cc.delete(.{});
+                        }
+                        try check(try tc.tableMoveto(rowid, false) == .eq, "rowid {d} missing", .{rowid});
+                        const o = try cc.tableMoveto(rowid, false);
+                        try cc.transferRow(&tc, rowid);
+                        try cc.insert(.{ .rowid = rowid }, .{ .preformat = true, .seek_result = o });
+                        m.copies[k] = m.rows[k];
+                        continue;
+                    },
+                    .savepoint => {
+                        // Open one, or release or roll back to a random one
+                        // (-1: the start of the transaction).
+                        if (n_savepoint < max_savepoints and rand.boolean()) {
+                            saved[n_savepoint].copyFrom(m);
+                            n_savepoint += 1;
+                            try bt.beginStmt(n_savepoint);
+                        } else if (rand.boolean()) {
+                            if (n_savepoint == 0) continue;
+                            const i = rand.uintLessThan(u32, n_savepoint);
+                            try bt.savepoint(.release, @intCast(i));
+                            n_savepoint = i;
+                        } else {
+                            const i = rand.intRangeLessThan(i32, -1, @intCast(n_savepoint));
+                            try bt.savepoint(.rollback, i);
+                            if (i < 0) {
+                                m.copyFrom(committed);
+                                n_savepoint = 0;
+                            } else {
+                                m.copyFrom(saved[@intCast(i)]);
+                                n_savepoint = @intCast(i + 1);
+                            }
+                        }
+                        continue;
+                    },
+                    .clear => {
+                        if (rand.uintLessThan(u32, 16) != 0) continue;
+                        _ = try bt.clearTable(t_root);
+                        _ = try bt.clearTable(i_root);
+                        @memset(m.rows, null);
+                        continue;
+                    },
+                }
+                if (m.rows[k]) |len| {
                     // Remove the index entry, then delete or replace the row.
                     const key: record.UnpackedRecord = .{ .info = &ki, .values = &.{ .{ .int = len }, .{ .int = rowid } } };
                     try check(try ic.indexMoveto(key.indexKey()) == .eq, "index entry of rowid {d} missing", .{rowid});
@@ -138,20 +406,20 @@ pub fn modelWith(gpa: Allocator, io: Io, rand: std.Random, config: ModelConfig, 
                     try check(try tc.tableMoveto(rowid, false) == .eq, "rowid {d} missing", .{rowid});
                     if (op == .delete) {
                         try tc.delete(.{});
-                        rows[k] = null;
+                        m.rows[k] = null;
                         continue;
                     }
                 } else if (op == .delete) continue;
                 const len: u32 = if (rand.int(u8) < config.overflow_chance)
-                    rand.uintLessThan(u32, buf.len)
+                    rand.intRangeLessThan(u32, 2, buf.len)
                 else
-                    rand.uintLessThan(u32, 200);
+                    rand.intRangeLessThan(u32, 2, 200);
                 fillPayload(buf[0..len], rowid);
                 try tc.insert(.{ .rowid = rowid, .data = buf[0..len] }, .{});
                 var key_buf: [32]u8 = undefined;
                 const values = [_]Value{ .{ .int = len }, .{ .int = rowid } };
                 try ic.insert(.{ .key = record.encodeBuf(&values, &key_buf) }, .{});
-                rows[k] = len;
+                m.rows[k] = len;
             }
         }
         if (config.auto_vacuum == .incremental) {
@@ -159,44 +427,91 @@ pub fn modelWith(gpa: Allocator, io: Io, rand: std.Random, config: ModelConfig, 
         }
         if (rand.int(u8) < config.rollback_chance) {
             try bt.rollback(null, false);
-            @memcpy(rows, committed);
+            m.copyFrom(committed);
         } else {
             try bt.commit();
-            @memcpy(committed, rows);
+            committed.copyFrom(m);
         }
-        try verifyModel(gpa, bt, &ki, t_root, i_root, rows, config.auto_vacuum);
+        try verifyModel(gpa, bt, &ki, .{ t_root, i_root, c_root }, m, config.auto_vacuum);
+    }
+    if (image) |out| {
+        const f = try mem.interface().open(db_name, .{});
+        defer f.close();
+        out.* = try gpa.alloc(u8, @intCast(try f.fileSize()));
+        errdefer gpa.free(out.*);
+        try f.read(out.*, 0);
     }
 }
 
-/// Check the table and index against the model, in a read transaction.
-fn verifyModel(gpa: Allocator, bt: *Btree, ki: *const record.KeyInfo, t_root: Pgno, i_root: Pgno, rows: []const ?u32, av: btree.AutoVacuum) !void {
+/// Describe the model's b-trees in sqlite_schema, so that SQLite counts
+/// their pages as used: the table t and its index i, and the table of
+/// copies c.
+fn writeSchema(bt: *Btree, roots: [3]Pgno) !void {
+    const entries = [_]struct { []const u8, []const u8, []const u8, []const u8 }{
+        .{ "table", "t", "t", "CREATE TABLE t(a)" },
+        .{ "index", "i", "t", "CREATE INDEX i ON t(a)" },
+        .{ "table", "c", "c", "CREATE TABLE c(a)" },
+    };
+    var cur: Cursor = undefined;
+    try bt.cursor(&cur, 1, .{ .write = true });
+    defer cur.close();
+    for (entries, roots, 1..) |e, root, rowid| {
+        const values = [_]Value{ .{ .text = e[0] }, .{ .text = e[1] }, .{ .text = e[2] }, .{ .int = root }, .{ .text = e[3] } };
+        var buf: [128]u8 = undefined;
+        try cur.insert(.{ .rowid = @intCast(rowid), .data = record.encodeBuf(&values, &buf) }, .{});
+    }
+    // A schema cookie, the schema format (BTREE_FILE_FORMAT) and UTF-8.
+    try bt.updateMeta(.schema_version, 1);
+    try bt.updateMeta(.file_format, 4);
+    try bt.updateMeta(.text_encoding, 1);
+}
+
+/// Check the tables and the index against the model, in a read
+/// transaction: every row, then every entry in both directions.
+fn verifyModel(gpa: Allocator, bt: *Btree, ki: *const record.KeyInfo, roots: [3]Pgno, m: Rows, av: btree.AutoVacuum) !void {
     try bt.beginTrans(.read, 0);
     defer bt.commit() catch unreachable;
-    var report = try bt.integrityCheck(gpa, &.{ 1, t_root, i_root }, 100);
+    var report = try bt.integrityCheck(gpa, &.{ 1, roots[0], roots[1], roots[2] }, 100);
     defer report.deinit(gpa);
     try check(report.n_err == 0, "integrity check:\n{s}", .{report.message});
     if (av == .full) try check(bt.getMeta(.free_page_count) == 0, "free pages left after a full auto-vacuum commit", .{});
 
-    var tc: Cursor = undefined;
-    try bt.cursor(&tc, t_root, .{});
-    defer tc.close();
-    var expected: i64 = 0;
-    var want: [6000]u8 = undefined;
-    var got: [6000]u8 = undefined;
-    for (rows, 1..) |m, rowid| {
-        const len = m orelse continue;
-        expected += 1;
-        try check(try tc.tableMoveto(@intCast(rowid), false) == .eq, "rowid {d} missing", .{rowid});
-        try check(tc.payloadSize() == len, "rowid {d}: payload size {d}, want {d}", .{ rowid, tc.payloadSize(), len });
-        try tc.payload(0, got[0..len]);
-        fillPayload(want[0..len], @intCast(rowid));
-        try check(std.mem.eql(u8, want[0..len], got[0..len]), "rowid {d}: wrong payload", .{rowid});
+    for ([_]Pgno{ roots[0], roots[2] }, [_][]const ?u32{ m.rows, m.copies }) |root, rows| {
+        var tc: Cursor = undefined;
+        try bt.cursor(&tc, root, .{});
+        defer tc.close();
+        var want: [6000]u8 = undefined;
+        var got: [6000]u8 = undefined;
+        for (rows, 1..) |r, rowid| {
+            const len = r orelse continue;
+            try check(try tc.tableMoveto(@intCast(rowid), false) == .eq, "table {d}: rowid {d} missing", .{ root, rowid });
+            try check(tc.payloadSize() == len, "table {d}: rowid {d}: payload size {d}, want {d}", .{ root, rowid, tc.payloadSize(), len });
+            try tc.payload(0, got[0..len]);
+            fillPayload(want[0..len], @intCast(rowid));
+            try check(std.mem.eql(u8, want[0..len], got[0..len]), "table {d}: rowid {d}: wrong payload", .{ root, rowid });
+        }
+        try scanCheck(&tc, .table, rows);
     }
-    try check(try tc.count() == expected, "table count", .{});
     var ic: Cursor = undefined;
-    try bt.cursor(&ic, i_root, .{ .key_info = ki.btreeKeyInfo() });
+    try bt.cursor(&ic, roots[1], .{ .key_info = ki.btreeKeyInfo() });
     defer ic.close();
-    try check(try ic.count() == expected, "index count", .{});
+    try scanCheck(&ic, .index, m.rows);
+}
+
+/// Walk `cur` forward and then backward, comparing each key with the
+/// model's.
+fn scanCheck(cur: *Cursor, tree: Tree, rows: []const ?u32) !void {
+    for ([_]Order{ .gt, .lt }) |dir| {
+        var want = neighbor(rows, tree, null, dir);
+        var ok = if (dir == .gt) try cur.first() else try cur.last();
+        while (ok) : (ok = if (dir == .gt) try cur.next() else try cur.previous()) {
+            const w = want orelse return check(false, "{t} scan {t}: an entry past the last", .{ tree, dir });
+            const got = try currentKey(cur, tree);
+            try check(got.order(w) == .eq, "{t} scan {t}: {any}, want {any}", .{ tree, dir, got, w });
+            want = neighbor(rows, tree, w, dir);
+        }
+        try check(want == null, "{t} scan {t}: ended before {any}", .{ tree, dir, want });
+    }
 }
 
 // ================================================================= corrupt
@@ -204,6 +519,9 @@ fn verifyModel(gpa: Allocator, bt: *Btree, ki: *const record.KeyInfo, t_root: Pg
 /// The `corrupt` fuzzer: build a database, then for each event overwrite a
 /// few random bytes of a copy and use it.
 pub fn corrupt(gpa: Allocator, io: Io, seed: u64, events_max: u32) !void {
+    const old_never = corrupt_mod.never_corrupt;
+    corrupt_mod.never_corrupt = false;
+    defer corrupt_mod.never_corrupt = old_never;
     var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random();
     const page_sizes = [_]u32{ 512, 1024, 4096 };

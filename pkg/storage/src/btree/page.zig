@@ -19,12 +19,16 @@
 //! parsers can run slightly past the end of a corrupt page without faulting.
 
 const std = @import("std");
+const corruptPage = @import("../corrupt.zig").corruptPage;
+const checking = @import("../corrupt.zig").checking;
 const pager_mod = @import("../pager/pager.zig");
 const varint = @import("../varint.zig");
 const btree = @import("btree.zig");
+const corrupt = @import("../corrupt.zig").corrupt;
 const ptrmap = @import("ptrmap.zig");
 
 const Btree = btree.Btree;
+const releasePage = btree.releasePage;
 const Error = btree.Error;
 pub const Pgno = pager_mod.Pgno;
 
@@ -211,6 +215,13 @@ pub const MemPage = extern struct {
     /// Port of the xCellSize methods: bytes the cell occupies on the page,
     /// without decoding the rest of the cell.
     pub fn cellSize(p: *const MemPage, cell: [*]u8) u16 {
+        const n = p.cellSizeFast(cell);
+        // The same as a full parse (the assert at the end of each method).
+        if (checking()) std.debug.assert(n == p.parseCell(cell).n_size);
+        return n;
+    }
+
+    inline fn cellSizeFast(p: *const MemPage, cell: [*]u8) u16 {
         switch (p.kind) {
             .table_interior => {
                 // cellSizePtrNoPayload: a child pointer and a rowid varint.
@@ -265,7 +276,7 @@ pub const MemPage = extern struct {
                 p.min_local = bt.min_leaf;
             },
             index_leaf, index_interior => {},
-            else => return error.Corrupt,
+            else => return corruptPage(p.pgno, @src()),
         }
     }
 
@@ -279,7 +290,7 @@ pub const MemPage = extern struct {
         try p.decodeFlags(hdr[0]);
         p.setLayout();
         p.n_cell = get2(hdr + 3);
-        if (p.n_cell > btree.maxCells(bt.page_size)) return error.Corrupt;
+        if (p.n_cell > btree.maxCells(bt.page_size)) return corruptPage(p.pgno, @src());
         p.n_free = -1;
         p.is_init = true;
         if (bt.cell_size_check) try p.cellSizeCheck();
@@ -300,25 +311,25 @@ pub const MemPage = extern struct {
         if (pc > 0) {
             // A well-formed page has at least one cell before the first
             // freeblock.
-            if (pc < top) return error.Corrupt;
+            if (pc < top) return corruptPage(p.pgno, @src());
             var next: u32 = undefined;
             var size: u32 = undefined;
             while (true) {
-                if (pc > last) return error.Corrupt;
+                if (pc > last) return corruptPage(p.pgno, @src());
                 next = get2(data + pc);
                 size = get2(data + pc + 2);
-                if (size < 4) return error.Corrupt;
+                if (size < 4) return corruptPage(p.pgno, @src());
                 n_free += size;
                 if (next < pc + size + 4) break;
                 pc = next;
             }
             // Freeblocks out of order, or the last one past the page end.
-            if (next > 0) return error.Corrupt;
-            if (pc + size > usable) return error.Corrupt;
+            if (next > 0) return corruptPage(p.pgno, @src());
+            if (pc + size > usable) return corruptPage(p.pgno, @src());
         }
         // n_free counts the content-area start plus free bytes inside it, so
         // this also checks that the content area starts inside the page.
-        if (n_free > usable or n_free < first) return error.Corrupt;
+        if (n_free > usable or n_free < first) return corruptPage(p.pgno, @src());
         p.n_free = @intCast(n_free - first);
     }
 
@@ -330,8 +341,8 @@ pub const MemPage = extern struct {
         if (!p.leaf) last -= 1;
         for (0..p.n_cell) |i| {
             const pc: u32 = get2(p.data + p.cell_offset + i * 2);
-            if (pc < first or pc > last) return error.Corrupt;
-            if (pc + p.cellSize(p.data + pc) > usable) return error.Corrupt;
+            if (pc < first or pc > last) return corruptPage(p.pgno, @src());
+            if (pc + p.cellSize(p.data + pc) > usable) return corruptPage(p.pgno, @src());
         }
     }
 
@@ -386,24 +397,24 @@ pub const MemPage = extern struct {
             // or two runs of cells is faster than rebuilding the page.
             if (@as(i32, data[hdr + 7]) > max_frag) break :quick;
             const free1: u32 = get2(data + hdr + 1);
-            if (free1 > usable - 4) return error.Corrupt;
+            if (free1 > usable - 4) return corruptPage(p.pgno, @src());
             if (free1 == 0) break :quick;
             const free2: u32 = get2(data + free1);
-            if (free2 > usable - 4) return error.Corrupt;
+            if (free2 > usable - 4) return corruptPage(p.pgno, @src());
             if (!(free2 == 0 or (data[free2] == 0 and data[free2 + 1] == 0))) break :quick;
 
             var sz: u32 = get2(data + free1 + 2);
             var sz2: u32 = 0;
             const top: u32 = get2(data + hdr + 5);
-            if (top >= free1) return error.Corrupt;
+            if (top >= free1) return corruptPage(p.pgno, @src());
             if (free2 != 0) {
-                if (free1 + sz > free2) return error.Corrupt;
+                if (free1 + sz > free2) return corruptPage(p.pgno, @src());
                 sz2 = get2(data + free2 + 2);
-                if (free2 + sz2 > usable) return error.Corrupt;
+                if (free2 + sz2 > usable) return corruptPage(p.pgno, @src());
                 @memmove(data[free1 + sz + sz2 .. free2 + sz2], data[free1 + sz .. free2]);
                 sz += sz2;
             } else if (free1 + sz > usable) {
-                return error.Corrupt;
+                return corruptPage(p.pgno, @src());
             }
             cbrk = top + sz;
             @memmove(data[cbrk .. cbrk + (free1 - top)], data[top..free1]);
@@ -428,11 +439,11 @@ pub const MemPage = extern struct {
             for (0..n_cell) |i| {
                 const addr = data + cell_offset + i * 2;
                 const pc: u32 = get2(addr);
-                if (pc > last) return error.Corrupt;
+                if (pc > last) return corruptPage(p.pgno, @src());
                 const size = p.cellSize(temp.ptr + pc);
-                if (size > cbrk) return error.Corrupt;
+                if (size > cbrk) return corruptPage(p.pgno, @src());
                 cbrk -= size;
-                if (cbrk < start or pc + size > usable) return error.Corrupt;
+                if (cbrk < start or pc + size > usable) return corruptPage(p.pgno, @src());
                 put2(addr, cbrk);
                 @memcpy(data[cbrk..][0..size], temp[pc..][0..size]);
             }
@@ -446,7 +457,7 @@ pub const MemPage = extern struct {
         const hdr = p.hdr_offset;
         const first: u32 = p.cell_offset + 2 * @as(u32, p.n_cell);
         std.debug.assert(p.n_free >= 0);
-        if (@as(i64, data[hdr + 7]) + cbrk - first != p.n_free or cbrk < first) return error.Corrupt;
+        if (@as(i64, data[hdr + 7]) + cbrk - first != p.n_free or cbrk < first) return corruptPage(p.pgno, @src());
         put2(data + hdr + 5, cbrk);
         data[hdr + 1] = 0;
         data[hdr + 2] = 0;
@@ -477,7 +488,7 @@ pub const MemPage = extern struct {
                     data[hdr + 7] += @intCast(x);
                     return pc;
                 } else if (x + pc > max_pc) {
-                    return error.Corrupt;
+                    return corruptPage(p.pgno, @src());
                 }
                 // Keep the front of the slot on the list.
                 put2(data + pc + 2, x);
@@ -486,11 +497,11 @@ pub const MemPage = extern struct {
             addr = pc;
             pc = get2(data + pc);
             if (pc <= addr) {
-                if (pc != 0) return error.Corrupt;
+                if (pc != 0) return corruptPage(p.pgno, @src());
                 return null;
             }
         }
-        if (pc > max_pc + n_byte - 4) return error.Corrupt;
+        if (pc > max_pc + n_byte - 4) return corruptPage(p.pgno, @src());
         return null;
     }
 
@@ -508,15 +519,15 @@ pub const MemPage = extern struct {
             if (top == 0 and p.bt.usable_size == 65536) {
                 top = 65536;
             } else {
-                return error.Corrupt;
+                return corruptPage(p.pgno, @src());
             }
         } else if (top > p.bt.usable_size) {
-            return error.Corrupt;
+            return corruptPage(p.pgno, @src());
         }
 
         if ((data[hdr + 2] != 0 or data[hdr + 1] != 0) and gap + 2 <= top) {
             if (try p.findSlot(n_byte)) |idx| {
-                if (idx <= gap) return error.Corrupt;
+                if (idx <= gap) return corruptPage(p.pgno, @src());
                 return idx;
             }
         }
@@ -551,19 +562,19 @@ pub const MemPage = extern struct {
                 if (free_blk >= start) break;
                 if (free_blk <= ptr) {
                     if (free_blk == 0) break;
-                    return error.Corrupt;
+                    return corruptPage(p.pgno, @src());
                 }
                 ptr = free_blk;
             }
-            if (free_blk > usable - 4) return error.Corrupt;
+            if (free_blk > usable - 4) return corruptPage(p.pgno, @src());
 
             // Coalesce with the following freeblock.
             var n_frag: u32 = 0;
             if (free_blk != 0 and end + 3 >= free_blk) {
-                if (end > free_blk) return error.Corrupt;
+                if (end > free_blk) return corruptPage(p.pgno, @src());
                 n_frag = free_blk - end;
                 end = free_blk + get2(data + free_blk + 2);
-                if (end > usable) return error.Corrupt;
+                if (end > usable) return corruptPage(p.pgno, @src());
                 size = end - start;
                 free_blk = get2(data + free_blk);
             }
@@ -571,13 +582,13 @@ pub const MemPage = extern struct {
             if (ptr > hdr + 1) {
                 const ptr_end = ptr + get2(data + ptr + 2);
                 if (ptr_end + 3 >= start) {
-                    if (ptr_end > start) return error.Corrupt;
+                    if (ptr_end > start) return corruptPage(p.pgno, @src());
                     n_frag += start - ptr_end;
                     size = end - ptr;
                     start = ptr;
                 }
             }
-            if (n_frag > data[hdr + 7]) return error.Corrupt;
+            if (n_frag > data[hdr + 7]) return corruptPage(p.pgno, @src());
             data[hdr + 7] -= @intCast(n_frag);
         }
         const content: u32 = get2(data + hdr + 5);
@@ -585,8 +596,8 @@ pub const MemPage = extern struct {
         if (start <= content) {
             // The block starts the content area: grow the unallocated space
             // instead of adding a freeblock.
-            if (start < content) return error.Corrupt;
-            if (ptr != hdr + 1) return error.Corrupt;
+            if (start < content) return corruptPage(p.pgno, @src());
+            if (ptr != hdr + 1) return corruptPage(p.pgno, @src());
             put2(data + hdr + 1, free_blk);
             put2(data + hdr + 5, end);
         } else {
@@ -605,7 +616,7 @@ pub const MemPage = extern struct {
         const ptr = p.cell_idx + 2 * idx;
         const pc: u32 = get2(ptr);
         const hdr = p.hdr_offset;
-        if (pc + sz > p.bt.usable_size) return error.Corrupt;
+        if (pc + sz > p.bt.usable_size) return corruptPage(p.pgno, @src());
         try p.freeSpace(pc, sz);
         p.n_cell -= 1;
         if (p.n_cell == 0) {
@@ -725,4 +736,71 @@ pub fn get4(p: [*]const u8) u32 {
 
 pub fn put4(p: [*]u8, v: u32) void {
     std.mem.writeInt(u32, p[0..4], v, .big);
+}
+
+// ====================================================== page access
+
+/// Port of btreePageFromDbPage().
+pub fn pageFromDbPage(bt: *Btree, pg: *pager_mod.Page, pgno: Pgno) *MemPage {
+    const mp = MemPage.of(pg);
+    if (pgno != mp.pgno) {
+        mp.data = pg.data.ptr;
+        mp.db_page = pg;
+        mp.bt = bt;
+        mp.pgno = pgno;
+        mp.hdr_offset = if (pgno == 1) 100 else 0;
+    }
+    return mp;
+}
+
+/// Port of btreeGetPage(). The page is not initialized.
+pub fn getPage(bt: *Btree, pgno: Pgno, flags: pager_mod.GetFlags) Error!*MemPage {
+    const pg = try bt.pager.get(pgno, flags);
+    return pageFromDbPage(bt, pg, pgno);
+}
+
+/// Port of btreePageLookup(): the page if it is cached, referenced.
+pub fn lookupPage(bt: *Btree, pgno: Pgno) ?*MemPage {
+    const pg = bt.pager.lookup(pgno) orelse return null;
+    return pageFromDbPage(bt, pg, pgno);
+}
+
+/// Port of getAndInitPage().
+pub fn getAndInitPage(bt: *Btree, pgno: Pgno) Error!*MemPage {
+    if (pgno > bt.n_page) return corrupt(@src());
+    const pg = try bt.pager.get(pgno, .{});
+    const mp = MemPage.of(pg);
+    if (!mp.is_init) {
+        _ = pageFromDbPage(bt, pg, pgno);
+        mp.init() catch |err| {
+            releasePage(mp);
+            return err;
+        };
+    }
+    return mp;
+}
+
+/// Port of btreeGetUnusedPage(): a page about to be reused, which no one
+/// else may be referencing.
+pub fn getUnusedPage(bt: *Btree, pgno: Pgno, flags: pager_mod.GetFlags) Error!*MemPage {
+    const mp = try getPage(bt, pgno, flags);
+    if (mp.db_page.n_ref > 1) {
+        releasePage(mp);
+        return corrupt(@src());
+    }
+    mp.is_init = false;
+    return mp;
+}
+
+pub fn within(p: [*]const u8, start: [*]const u8, end: [*]const u8) bool {
+    return @intFromPtr(p) >= @intFromPtr(start) and @intFromPtr(p) < @intFromPtr(end);
+}
+
+/// SQLITE_OVERFLOW(P,S,E): the range [S,E) crosses P.
+pub fn straddles(p: [*]const u8, start: [*]const u8, end: [*]const u8) bool {
+    return @intFromPtr(start) < @intFromPtr(p) and @intFromPtr(end) > @intFromPtr(p);
+}
+
+pub fn ptrDiff(a: [*]const u8, b: [*]const u8) isize {
+    return @as(isize, @intCast(@intFromPtr(a))) - @as(isize, @intCast(@intFromPtr(b)));
 }

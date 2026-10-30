@@ -37,6 +37,7 @@
 //! in-memory databases, mmap, WAL snapshots.
 
 const std = @import("std");
+const corrupt = @import("../corrupt.zig").corrupt;
 const vfs = @import("xqlite_vfs").vfs;
 const pcache_mod = @import("pcache.zig");
 const journal = @import("journal.zig");
@@ -919,7 +920,7 @@ pub const Pager = struct {
     pub fn get(p: *Pager, pgno: Pgno, flags: GetFlags) Error!*Page {
         if (p.err) |e| return e;
         std.debug.assert(p.state.atLeast(.reader));
-        if (pgno == 0) return error.Corrupt;
+        if (pgno == 0) return corrupt(@src());
 
         const pg = p.cache.fetch(pgno) catch |err| {
             p.unlockIfUnused();
@@ -951,7 +952,7 @@ pub const Pager = struct {
     }
 
     fn loadPage(p: *Pager, pg: *Page, flags: GetFlags) Error!void {
-        if (p.isLockPage(pg.pgno)) return error.Corrupt;
+        if (p.isLockPage(pg.pgno)) return corrupt(@src());
         pg.owner = p;
         if (p.db_size < pg.pgno or flags.no_content) {
             if (pg.pgno > p.mx_pgno) return error.DiskFull;
@@ -1045,7 +1046,7 @@ pub const Pager = struct {
         if (p.lookup(pgno)) |old| {
             if (old.n_ref > 1) {
                 p.unref(old);
-                return error.Corrupt;
+                return corrupt(@src());
             }
             pg.flags.need_sync = old.flags.need_sync;
             p.cache.drop(old);

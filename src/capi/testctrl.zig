@@ -131,6 +131,9 @@ pub fn xq_test_control(op: c_int, a: *const Args) callconv(.c) c_int {
             db.m_db_flags.InternalFunc = !db.m_db_flags.InternalFunc;
         },
         ONCE_RESET_THRESHOLD => tc.once_reset_threshold = @truncate(a.i[0]),
+        // The storage layer's checks of a valid file, in builds with
+        // runtime safety (SQLite's CORRUPT_DB asserts).
+        NEVER_CORRUPT => @import("xqlite_storage").corrupt.never_corrupt = a.i[0] != 0,
         ISINIT => {
             if (!@atomicLoad(bool, &c.state.initialized, .acquire)) return RC.ERROR;
         },
@@ -182,8 +185,7 @@ pub fn xq_test_control(op: c_int, a: *const Args) callconv(.c) c_int {
             return rc;
         },
         // Accepted without effect: what a release build ignores
-        // (JSON_SELFCHECK, VDBE_COVERAGE, PARSER_COVERAGE, TUNE), what
-        // only feeds assert()s (NEVER_CORRUPT), and the hooks the engine
+        // (JSON_SELFCHECK, VDBE_COVERAGE, PARSER_COVERAGE, TUNE), and the hooks the engine
         // has no counterpart for (BITVEC_TEST,
         // BENIGN_MALLOC_HOOKS, SORTER_MMAP, EXTRA_SCHEMA_CHECKS).
         else => {},

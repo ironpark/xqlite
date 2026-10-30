@@ -241,7 +241,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - **플래너 차등 테스트**: `xqt planner`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
 - **sqllogictest**: `xqt slt`
 - **C API**: `zig build test-capi`가 C 프로그램으로 `libxqlite3`를 검사하고, `zig build capi-shell`이 SQLite의 `shell.c`를 링크해 돌립니다.
-- **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `ir_roundtrip`)
+- **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`)
 - **방언 차등 테스트**: `xqt dialect-diff pg|mariadb|mssql|oracle`이 실제 PostgreSQL 16, MariaDB 11, SQL Server(Azure SQL Edge), Oracle Database 23ai와 결과를 비교합니다.
 - **WebAssembly**: `zig build test-wasi`가 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 돌리고, `xqt wasi`로 WASI 빌드를 sqlite3·네이티브 빌드와 비교합니다.
 

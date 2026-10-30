@@ -25,6 +25,7 @@
 //!   tests, the fuzzers and incremental blob I/O.
 
 const std = @import("std");
+const corrupt = @import("corrupt.zig").corrupt;
 const varint = @import("varint.zig");
 const btree = @import("btree/btree.zig");
 
@@ -218,7 +219,7 @@ pub fn encodeAlloc(gpa: Allocator, values: []const Value) Allocator.Error![]u8 {
 /// A varint in a record header, with getVarint32's one-byte fast path.
 fn headerVarint(hdr: []const u8) Error!varint.Decoded {
     if (hdr.len > 0 and hdr[0] < 0x80) return .{ .value = hdr[0], .len = 1 };
-    return varint.getChecked(hdr) catch error.Corrupt;
+    return varint.getChecked(hdr) catch corrupt(@src());
 }
 
 /// Decodes the value of serial type `t` from `data` (sqlite3VdbeSerialGet).
@@ -242,7 +243,7 @@ fn decodeValue(t: u64, data: []const u8) Value {
 pub fn decode(record: []const u8, out: []Value) Error!usize {
     const hdr = try headerVarint(record);
     const hdr_len = hdr.value;
-    if (hdr_len > record.len or hdr_len < hdr.len) return error.Corrupt;
+    if (hdr_len > record.len or hdr_len < hdr.len) return corrupt(@src());
     var h: usize = hdr.len;
     var d: u64 = hdr_len;
     var n: usize = 0;
@@ -250,7 +251,7 @@ pub fn decode(record: []const u8, out: []Value) Error!usize {
         const t = try headerVarint(record[h..@intCast(hdr_len)]);
         h += t.len;
         const len = serialTypeLen(t.value);
-        if (d + len > record.len) return error.Corrupt;
+        if (d + len > record.len) return corrupt(@src());
         out[n] = decodeValue(t.value, record[@intCast(d)..@intCast(d + len)]);
         d += len;
     }
@@ -280,7 +281,7 @@ pub const KeyInfo = struct {
         const values = if (n_all <= stack.len) stack[0..n_all] else try ki.gpa.alloc(Value, n_all);
         defer if (n_all > stack.len) ki.gpa.free(values);
         const n = try decode(key, values);
-        if (n == 0) return error.Corrupt;
+        if (n == 0) return corrupt(@src());
         const unpacked: UnpackedRecord = .{ .info = ki, .values = values[0..n] };
         return cur.indexMoveto(unpacked.indexKey());
     }
@@ -306,20 +307,20 @@ pub const UnpackedRecord = struct {
     /// Port of sqlite3VdbeRecordCompareWithSkip(): the order of the stored
     /// record relative to this key.
     pub fn compare(r: *const UnpackedRecord, stored: []const u8) Error!Order {
-        if (stored.len == 0) return error.Corrupt;
+        if (stored.len == 0) return corrupt(@src());
         const hdr = try headerVarint(stored);
         const hdr_len = hdr.value;
         var idx: u64 = hdr.len;
         var d: u64 = hdr_len;
-        if (d > stored.len) return error.Corrupt;
+        if (d > stored.len) return corrupt(@src());
 
         for (r.values, 0..) |rhs, i| {
-            if (idx >= hdr_len) return error.Corrupt;
+            if (idx >= hdr_len) return corrupt(@src());
             const tv = try headerVarint(stored[@intCast(idx)..@intCast(hdr_len)]);
             const t = tv.value;
             const len = serialTypeLen(t);
-            if (d + len > stored.len) return error.Corrupt;
-            if (rhs == .text and i >= r.info.sort_orders.len) return error.Corrupt;
+            if (d + len > stored.len) return corrupt(@src());
+            if (rhs == .text and i >= r.info.sort_orders.len) return corrupt(@src());
             const lhs = decodeValue(t, stored[@intCast(d)..@intCast(d + len)]);
             var c = compareValues(lhs, t, rhs);
             if (c != .eq) {
@@ -331,7 +332,7 @@ pub const UnpackedRecord = struct {
             if (i + 1 == r.values.len) break;
             if (d > stored.len) break;
             // A stored key with fewer columns than the search key.
-            if (idx >= hdr_len) return error.Corrupt;
+            if (idx >= hdr_len) return corrupt(@src());
         }
         return r.default_order;
     }

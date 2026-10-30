@@ -444,7 +444,7 @@ pub fn build(b: *std.Build) void {
                 .imports = engineImports(b, target, .ReleaseSafe),
             }),
         });
-        for ([_][]const u8{ "btree_model", "btree_corrupt", "ir_roundtrip" }) |name| {
+        for ([_][]const u8{ "btree_model", "btree_corrupt", "btree_sqlite3", "ir_roundtrip" }) |name| {
             const run = b.addRunArtifact(safe_fuzz);
             run.addArg(name);
             run.has_side_effects = true;

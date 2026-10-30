@@ -399,9 +399,16 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | `btree` | B-tree 층과 파일 헤더(`btree.header`) |
 | `record`, `varint` | 레코드 형식(serial type 크기, 헤더 varint, 정수 디코딩, `memcmp`, `intFloatCompare`)과 varint. 파일 형식이라 여기 있고, 엔진의 `src/vdbe/serial.zig`(Mem을 쓰는 레코드 코드)도 이 함수들을 씀 |
 | `btree_fuzz` | B-tree 퍼저(`src/fuzz_tests.zig`가 씀) |
+| `corrupt` | 손상을 찾은 위치(아래) |
 | `sqlite_version_number` | 페이저가 파일 헤더에 쓰는 `SQLITE_VERSION_NUMBER`. `src/root.zig`가 다시 내보냄 |
 
 한 파일은 한 모듈에만 속할 수 있으므로, 엔진과 스토리지가 함께 쓰는 파일 형식 코드(`record`, `varint`)는 이 패키지에 두고 엔진은 `@import("xqlite_storage").varint` 식으로 가져옵니다. 공개 Zig API(`xqlite.pager`, `xqlite.pcache`, `xqlite.btree`, `xqlite.record`, `xqlite.varint`)는 `src/root.zig`가 다시 내보내므로 그대로입니다. 패키지 디렉터리에서 `zig build test`를 하면 스토리지 테스트(B-tree, 페이저, WAL, 저널)만 돌고, `zig build bench`(루트에서는 `zig build bench-btree`)는 B-tree 커서 벤치마크(`pkg/storage/bench/btree.zig`)를 돌립니다. B-tree 테스트의 픽스처는 `pkg/storage/src/testdata`에 있습니다(`xqt gen fixtures`).
+
+**손상 보고와 검사.** 스토리지 층에서 파일이 손상된 것을 찾는 곳은 모두 `error.Corrupt`를 그냥 돌려주지 않고 `corrupt(@src())`(페이지를 알면 `corruptPage(pgno, @src())`)를 돌려줍니다(`pkg/storage/src/corrupt.zig`, SQLite의 `SQLITE_CORRUPT_BKPT`·`SQLITE_CORRUPT_PAGE`). 오류는 같고, 훅 `corrupt.hook`이 있으면 소스 위치와 페이지를 받습니다. C ABI는 이 훅을 `SQLITE_CONFIG_LOG` 로거로 보내므로(`database corruption page 2 at line 268 of [page.zig]`), SQLite처럼 로그에서 어느 검사가 걸렸는지 보입니다. 모델 퍼저는 위치를 출력합니다.
+
+`corrupt.never_corrupt`(`SQLITE_TESTCTRL_NEVER_CORRUPT`, 테스트 빌드의 기본값은 켜짐)가 켜져 있고 런타임 안전 검사가 있는 빌드이면, SQLite가 `CORRUPT_DB`로 감싼 디버그 검사가 돕니다. 손상된 파일이면 실패할 수 있는 검사들입니다. 커서가 캐시한 셀 정보(`assertCellInfo`), 부모 페이지의 자식 포인터(`assertParentIndex`), `at_last` 표시(`cursorIsAtLastEntry`), `editPage`가 만든 셀, `fillInCell`이 쓴 셀, 빠른 `cellSize`와 전체 파싱의 일치, 밸런싱 뒤의 포인터 맵(`ptrmapCheckPages`, SQLite에서는 `#if 0`)을 확인합니다. ReleaseFast에서는 comptime에 빠집니다. 손상된 파일을 다루는 테스트와 `btree_corrupt` 퍼저는 이 검사를 끕니다.
+
+B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니다. `Btree`와 `Cursor`는 서로의 내부 메서드를 많이 부르므로 `btree.zig`에 함께 두고, 따로 떨어지는 부분은 `*Btree`를 받는 함수로 다른 파일에 둡니다. `btree.zig`가 그 함수들을 비공개 별칭(`const allocatePage = alloc.allocatePage;`)으로 메서드처럼 부르고 다시 내보내지 않으므로 엔진이 보는 API는 그대로입니다.
 
 ## 공용 패키지
 
@@ -444,7 +451,12 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | `src/sql/memdb.zig` | 엔진의 memdb 인스턴스: `Memdb(malloc)` |
 | `pkg/storage/build.zig`, `build.zig.zon` | 스토리지 패키지(`xqlite_storage`): 모듈과 `zig build test`([스토리지 패키지](#스토리지-패키지)) |
 | `pkg/storage/src/pager/{pager,pcache,wal,journal}.zig` | 페이저, 페이지 캐시, WAL, 롤백 저널 |
-| `pkg/storage/src/btree/{btree,page,header,ptrmap,integrity}.zig` | B-tree 층 |
+| `pkg/storage/src/btree/btree.zig` | B-tree 층: `Btree`(열기, 잠금, 트랜잭션, 테이블)와 `Cursor` |
+| `pkg/storage/src/btree/{page,header,ptrmap,integrity}.zig` | 페이지(`MemPage`, 셀 파싱, 페이지 접근), 파일 헤더, 포인터 맵, 무결성 검사 |
+| `pkg/storage/src/btree/alloc.zig` | 페이지 할당: freelist, 셀의 overflow 체인 |
+| `pkg/storage/src/btree/balance.zig` | 밸런싱(`balance_nonroot`를 단계별 메서드로 나눈 `Balance`, `balance_quick`, `balance_deeper`, CellArray) |
+| `pkg/storage/src/btree/vacuum.zig` | auto-vacuum의 페이지 재배치 |
+| `pkg/storage/src/corrupt.zig` | 손상 위치 보고와 `never_corrupt` 검사 스위치 |
 | `pkg/storage/src/{record,varint}.zig` | 엔진과 함께 쓰는 레코드 형식과 varint |
 | `pkg/storage/bench/btree.zig` | B-tree 커서 벤치마크(`zig build bench-btree`) |
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |

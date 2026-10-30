@@ -2562,6 +2562,39 @@ static void test_b_snapshot(const char *zDir){
 
 /* ======================================================== end of group B */
 
+/* Where the storage layer finds corruption reaches SQLITE_CONFIG_LOG, as
+** SQLITE_CORRUPT_BKPT does in SQLite. */
+static int nCorruptLog;
+static char zCorruptLog[200];
+static void corruptLogger(void *pArg, int rc, const char *zMsg){
+  (void)pArg;
+  if( rc==SQLITE_CORRUPT ){
+    nCorruptLog++;
+    snprintf(zCorruptLog, sizeof(zCorruptLog), "%s", zMsg);
+  }
+}
+static void test_corrupt_log(const char *zDir){
+  sqlite3 *db = 0;
+  char zPath[512];
+  FILE *f;
+  snprintf(zPath, sizeof(zPath), "%s/corrupt.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  exec(db, "PRAGMA page_size=1024; CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+  sqlite3_close(db);
+  /* Page 2, the root of t: a page type that does not exist. */
+  f = fopen(zPath, "r+b");
+  CHECK(f!=0);
+  if( f ){ fseek(f, 1024, SEEK_SET); fputc(0x07, f); fclose(f); }
+
+  CHECK_RC(sqlite3_config(SQLITE_CONFIG_LOG, corruptLogger, (void*)0), SQLITE_OK, 0);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  CHECK_RC(sqlite3_exec(db, "SELECT * FROM t", 0, 0, 0), SQLITE_CORRUPT, db);
+  CHECK(nCorruptLog>0);
+  CHECK(strncmp(zCorruptLog, "database corruption page 2 at line ", 35)==0);
+  sqlite3_close(db);
+  CHECK_RC(sqlite3_config(SQLITE_CONFIG_LOG, (void*)0, (void*)0), SQLITE_OK, 0);
+}
+
 int main(int argc, char **argv){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
   if( argc>1 ) zExtPath = argv[1];
@@ -2602,6 +2635,7 @@ int main(int argc, char **argv){
   test_test_control();
   test_temp_directory(zDir);
   test_scanstatus();
+  test_corrupt_log(zDir);
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

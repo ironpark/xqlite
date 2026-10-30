@@ -21,6 +21,8 @@ pub const btree = @import("btree/btree.zig");
 pub const record = @import("record.zig");
 /// SQLite's variable-length integers.
 pub const varint = @import("varint.zig");
+/// Where corruption was found: `corrupt.hook`.
+pub const corrupt = @import("corrupt.zig");
 /// The b-tree fuzzers (`model`, `corrupt`).
 pub const btree_fuzz = @import("btree/btree_fuzz.zig");
 
@@ -31,7 +33,7 @@ pub const sqlite_version_number = 3054001;
 
 test {
     @import("std").testing.refAllDecls(@This());
-    inline for (.{ pager, pcache, journal, btree, record, varint, btree_fuzz }) |file| {
+    inline for (.{ pager, pcache, journal, btree, record, varint, btree_fuzz, corrupt }) |file| {
         @import("std").testing.refAllDecls(file);
     }
 }

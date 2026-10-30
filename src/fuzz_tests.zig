@@ -25,6 +25,7 @@ const Fuzzer = struct {
 const fuzzers = [_]Fuzzer{
     .{ .name = "btree_model", .run = btree_fuzz.model, .events = 50_000, .smoke_events = 2_000 },
     .{ .name = "btree_corrupt", .run = btree_fuzz.corrupt, .events = 5_000, .smoke_events = 100 },
+    .{ .name = "btree_sqlite3", .run = btreeSqlite3, .events = 50_000, .smoke_events = 2_000 },
     .{ .name = "ir_roundtrip", .run = ir_fuzz.roundtrip, .events = 2_000, .smoke_events = 30 },
 };
 
@@ -78,6 +79,29 @@ fn usageExit() noreturn {
 }
 
 const smoke_seed = 42;
+
+/// The `model` fuzzer, then SQLite's PRAGMA quick_check of the database it
+/// leaves, by the sqlite3 shell that $SQLITE3 names (skipped without it):
+/// a check of the file that shares nothing with the b-tree's own.
+fn btreeSqlite3(gpa: std.mem.Allocator, io: std.Io, seed: u64, events_max: u32) !void {
+    const sqlite3 = std.c.getenv("SQLITE3") orelse {
+        if (!@import("builtin").is_test) std.debug.print("btree_sqlite3: SQLITE3 not set, skipped\n", .{});
+        return;
+    };
+    const image = try btree_fuzz.modelDatabase(gpa, io, seed, events_max);
+    defer gpa.free(image);
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, ".zig-cache/btree-sqlite3-{d}.db", .{seed});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = image });
+    const result = try std.process.run(gpa, io, .{ .argv = &.{ std.mem.span(sqlite3), path, "PRAGMA quick_check" } });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    if (!std.mem.eql(u8, result.stdout, "ok\n") or result.stderr.len > 0) {
+        std.debug.print("btree_sqlite3: quick_check of {s}:\n{s}{s}", .{ path, result.stdout, result.stderr });
+        return error.QuickCheckFailed;
+    }
+    try std.Io.Dir.cwd().deleteFile(io, path);
+}
 
 test "fuzzers: smoke" {
     for (fuzzers) |f| try f.run(std.testing.allocator, std.testing.io, smoke_seed, f.smoke_events);

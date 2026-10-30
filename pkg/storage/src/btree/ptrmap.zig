@@ -7,6 +7,7 @@
 //! then every usableSize/5+1 pages after it (skipping the lock page).
 
 const std = @import("std");
+const corrupt = @import("../corrupt.zig").corrupt;
 const btree = @import("btree.zig");
 const page = @import("page.zig");
 
@@ -68,9 +69,9 @@ pub fn get(bt: *Btree, key: Pgno) Error!Entry {
     const i_ptrmap = pageno(bt, key);
     const pg = try bt.pager.get(i_ptrmap, .{});
     defer bt.pager.unref(pg);
-    const offset = offsetOf(bt, i_ptrmap, key) orelse return error.Corrupt;
+    const offset = offsetOf(bt, i_ptrmap, key) orelse return corrupt(@src());
     const data = pg.data.ptr;
-    if (data[offset] < 1 or data[offset] > 5) return error.Corrupt;
+    if (data[offset] < 1 or data[offset] > 5) return corrupt(@src());
     return .{ .e_type = @fromBackingInt(@intCast(data[offset])), .parent = get4(data + offset + 1) };
 }
 
@@ -78,13 +79,13 @@ pub fn get(bt: *Btree, key: Pgno) Error!Entry {
 /// pointed to by `parent`.
 pub fn put(bt: *Btree, key: Pgno, e_type: Type, parent: Pgno) Error!void {
     std.debug.assert(bt.isAutoVacuum());
-    if (key == 0) return error.Corrupt;
+    if (key == 0) return corrupt(@src());
     const i_ptrmap = pageno(bt, key);
     const pg = try bt.pager.get(i_ptrmap, .{});
     defer bt.pager.unref(pg);
     // A pointer-map page in use as a b-tree page means corruption.
-    if (MemPage.of(pg).is_init) return error.Corrupt;
-    const offset = offsetOf(bt, i_ptrmap, key) orelse return error.Corrupt;
+    if (MemPage.of(pg).is_init) return corrupt(@src());
+    const offset = offsetOf(bt, i_ptrmap, key) orelse return corrupt(@src());
     const data = pg.data.ptr;
     if (@backingInt(e_type) != data[offset] or get4(data + offset + 1) != parent) {
         try bt.pager.write(pg);
@@ -99,8 +100,21 @@ pub fn put(bt: *Btree, key: Pgno, e_type: Type, parent: Pgno) Error!void {
 pub fn putOvflPtr(pg: *MemPage, src: *const MemPage, cell: [*]u8) Error!void {
     const info = pg.parseCell(cell);
     if (info.n_local < info.n_payload) {
-        if (btree.straddles(src.data_end, cell, cell + info.n_local)) return error.Corrupt;
+        if (page.straddles(src.data_end, cell, cell + info.n_local)) return corrupt(@src());
         const ovfl = get4(cell + info.n_size - 4);
         try put(pg.bt, ovfl, .overflow1, pg.pgno);
     }
+}
+
+/// Port of setChildPtrmaps(): point the pointer-map entries of every
+/// child and overflow chain referenced from `pg` at `pg`.
+pub fn setChildPtrmaps(pg: *MemPage) Error!void {
+    if (!pg.is_init) try pg.init();
+    const bt = pg.bt;
+    for (0..pg.n_cell) |i| {
+        const cell = pg.findCell(i);
+        try putOvflPtr(pg, pg, cell);
+        if (!pg.leaf) try put(bt, get4(cell), .btree_page, pg.pgno);
+    }
+    if (!pg.leaf) try put(bt, pg.rightChild(), .btree_page, pg.pgno);
 }

@@ -28,3 +28,8 @@ pub var heap_limit: struct {
 
 /// sqlite3Prng: the generator behind sqlite3_randomness().
 pub var prng: func.Prng = .{};
+
+/// The VFS registry of the C ABI (sqlite3_vfs_find()), which resolves a
+/// URI's "vfs" parameter in ATTACH (OpenFlags.vfs_resolved). Null without
+/// a registry: ATTACH uses the connection's VFS.
+pub var find_vfs: ?*const fn (name: []const u8) ?@import("../vfs/vfs.zig").Vfs = null;

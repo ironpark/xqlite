@@ -37,7 +37,7 @@ fn openWal(v: vfs.Vfs) !struct { db: vfs.File, w: *Wal } {
     const db = try v.open("w.db", .{ .create = true });
     errdefer db.close();
     try db.lock(.shared);
-    const w = try Wal.open(testing.allocator, v, db, "w.db-wal", -1);
+    const w = try Wal.open(testing.allocator, v, db, "w.db-wal", -1, false);
     return .{ .db = db, .w = w };
 }
 

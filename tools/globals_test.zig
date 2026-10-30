@@ -13,6 +13,10 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "config" },
     .{ "src/sql/global.zig", "heap_limit" },
     .{ "src/sql/global.zig", "prng" },
+    // The C ABI's VFS registry, for ATTACH's vfs= parameter.
+    .{ "src/sql/global.zig", "find_vfs" },
+    // The shared stores of the memdb VFS (memdb_g) and its settings.
+    .{ "src/vfs/memdb.zig", "state" },
     // The POSIX lock table, which every connection has to share.
     .{ "src/vfs/unix.zig", "inodes" },
     // The C ABI's process-wide state (sqlite3_config(), the auto

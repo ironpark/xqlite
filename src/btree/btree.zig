@@ -135,6 +135,8 @@ pub const Options = struct {
     /// a database of a connection; see Btree.n_vdbe_read. Null for a
     /// b-tree used on its own.
     n_vdbe_read: ?*const i32 = null,
+    /// The URI parameters of the database, for the VFS (Pager.Options).
+    uri_params: []const u8 = "",
 };
 
 /// Compares stored index keys against a search key: call(.{stored})
@@ -245,6 +247,7 @@ pub const Btree = struct {
             .cache_size = opts.cache_size,
             .busy_handler = opts.busy_handler,
             .reiniter = pageReinit,
+            .uri_params = opts.uri_params,
         });
         errdefer p.close(.{});
 
@@ -355,7 +358,7 @@ pub const Btree = struct {
     /// database (":memory:", "" or TEMP), which VACUUM and the backup API
     /// do not give another page size.
     pub fn isMemdb(bt: *const Btree) bool {
-        return bt.pager.temp_file;
+        return bt.pager.isMemdb();
     }
 
     /// Port of sqlite3BtreeIsInBackup().

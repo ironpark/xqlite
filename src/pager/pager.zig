@@ -117,6 +117,9 @@ pub const Options = struct {
     busy_handler: ?BusyHandler = null,
     /// Called after a page's content is restored during rollback (xReiniter).
     reiniter: ?*const fn (page: *Page) void = null,
+    /// The URI parameters of the database (pairs of NUL-terminated name
+    /// and value), kept after its name in `Pager.names` for the VFS.
+    uri_params: []const u8 = "",
 };
 
 pub const State = enum(u8) {
@@ -187,6 +190,19 @@ pub const Pager = struct {
     journal_path: []u8,
     /// Name of the WAL file (zWal). Empty for a temporary database.
     wal_path: []u8,
+    /// The allocation holding the three names in SQLite's filename layout
+    /// (zFilename, which xOpen receives and sqlite3_uri_parameter() and
+    /// sqlite3_filename_*() walk):
+    ///
+    ///     slot  \0\0\0\0  database \0  (key \0 value \0)*  \0  journal \0  wal \0  \0
+    ///
+    /// `slot` is pointer-sized: where C keeps the Pager* that
+    /// sqlite3_database_file_object() follows to the database's
+    /// sqlite3_file, the C ABI's VFS bridge keeps that sqlite3_file.
+    names: []u8,
+    /// The database file is a VFS-implemented in-memory database (memVfs:
+    /// the memdb VFS): no hot journal, the journal in memory.
+    mem_vfs: bool = false,
     /// The open WAL, in WAL mode (pWal).
     wal: ?*wal_mod.Wal = null,
     /// Sync flags for the WAL (walSyncFlags): the low two bits for
@@ -286,33 +302,35 @@ pub const Pager = struct {
         errdefer gpa.destroy(p);
 
         // The database is known by its full name (sqlite3OsFullPathname()).
-        const path_copy = if (path_arg) |a| try v.fullPathname(gpa, a) else try gpa.dupe(u8, "");
-        errdefer gpa.free(path_copy);
-        const path = path_copy;
-        const journal_path = if (path_arg == null) try gpa.dupe(u8, "") else try std.mem.concat(gpa, u8, &.{ path, "-journal" });
-        errdefer gpa.free(journal_path);
-        const wal_path = if (path_arg == null) try gpa.dupe(u8, "") else try std.mem.concat(gpa, u8, &.{ path, "-wal" });
-        errdefer gpa.free(wal_path);
+        const full = if (path_arg) |a| try v.fullPathname(gpa, a) else try gpa.dupe(u8, "");
+        defer gpa.free(full);
+        const names = try makeNames(gpa, full, if (path_arg != null) opts.uri_params else "");
+        errdefer gpa.free(names.buf);
 
-        const fd = try v.open(if (path_arg != null) path else null, .{
+        const fd = try v.open(if (path_arg != null) names.path else null, .{
             // A temporary database is SQLITE_OPEN_TEMP_DB, as in sqlite3BtreeOpen().
             .kind = if (path_arg != null) .main_db else .temp_db,
             .read_write = !opts.read_only,
             .create = opts.create and !opts.read_only,
+            .sqlite_filename = true,
         });
         errdefer fd.close();
+        const mem_vfs = fd.isMemory();
 
         p.* = .{
             .gpa = gpa,
             .vfs = v,
             .fd = fd,
-            .path = path_copy,
-            .journal_path = journal_path,
-            .wal_path = wal_path,
+            .path = names.path,
+            .journal_path = names.journal,
+            .wal_path = names.wal,
+            .names = names.buf,
             .temp_file = path_arg == null,
+            .mem_vfs = mem_vfs,
             // The VFS may fall back to read-only (pOutFlags).
             .read_only = opts.read_only or fd.isReadOnly(),
-            .journal_mode = opts.journal_mode,
+            // A VFS-implemented in-memory database journals in memory.
+            .journal_mode = if (mem_vfs) .memory else opts.journal_mode,
             .busy_handler = opts.busy_handler,
             .reiniter = opts.reiniter,
             .cache = PCache.init(gpa, opts.page_size, std.mem.alignForward(u32, opts.extra_size, 8), .init(p, stressCallback)),
@@ -348,10 +366,64 @@ pub const Pager = struct {
         p.gpa.free(p.tmp_space);
         p.gpa.free(p.record_buf);
         p.cache.deinit();
-        p.gpa.free(p.path);
-        p.gpa.free(p.journal_path);
-        p.gpa.free(p.wal_path);
+        p.gpa.free(p.names);
         p.gpa.destroy(p);
+    }
+
+    const Names = struct { buf: []u8, path: []u8, journal: []u8, wal: []u8 };
+
+    /// The names of the database `path` and its journal and WAL, in the
+    /// layout of `Pager.names`.
+    fn makeNames(gpa: Allocator, path: []const u8, params: []const u8) Allocator.Error!Names {
+        const slot = @sizeOf(usize);
+        const journal_sfx = "-journal";
+        const wal_sfx = "-wal";
+        const n_j = if (path.len > 0) path.len + journal_sfx.len else 0;
+        const n_w = if (path.len > 0) path.len + wal_sfx.len else 0;
+        const buf = try gpa.alloc(u8, slot + 4 + path.len + 1 + params.len + 1 + n_j + 1 + n_w + 1 + 1);
+        @memset(buf, 0);
+        var i: usize = slot + 4;
+        const db_at = i;
+        @memcpy(buf[i..][0..path.len], path);
+        i += path.len + 1;
+        @memcpy(buf[i..][0..params.len], params);
+        i += params.len + 1;
+        const j_at = i;
+        if (n_j > 0) {
+            @memcpy(buf[i..][0..path.len], path);
+            @memcpy(buf[i + path.len ..][0..journal_sfx.len], journal_sfx);
+        }
+        i += n_j + 1;
+        const w_at = i;
+        if (n_w > 0) {
+            @memcpy(buf[i..][0..path.len], path);
+            @memcpy(buf[i + path.len ..][0..wal_sfx.len], wal_sfx);
+        }
+        return .{ .buf = buf, .path = buf[db_at..][0..path.len], .journal = buf[j_at..][0..n_j], .wal = buf[w_at..][0..n_w] };
+    }
+
+    /// Port of sqlite3PagerFilename(pPager, 1): the name of the database
+    /// as reported to the user, "" for a temporary or in-memory one.
+    pub fn filename(p: *const Pager) []const u8 {
+        if (p.mem_vfs) return "";
+        return p.path;
+    }
+
+    /// The database name in SQLite's filename layout (see `names`), which
+    /// sqlite3_db_filename() returns; with an in-memory database, an
+    /// empty name in that layout.
+    pub fn filenameZ(p: *const Pager) [*:0]const u8 {
+        const S = struct {
+            const fake: [8]u8 = @splat(0);
+        };
+        if (p.mem_vfs) return @ptrCast(&S.fake[4]);
+        return @ptrCast(p.path.ptr);
+    }
+
+    /// Port of sqlite3PagerIsMemdb(): a temporary or VFS-implemented
+    /// in-memory database.
+    pub fn isMemdb(p: *const Pager) bool {
+        return p.temp_file or p.mem_vfs;
     }
 
     /// Port of sqlite3PagerSetFlags(). `ckpt_full_fsync` is
@@ -378,14 +450,16 @@ pub const Pager = struct {
         return p.cache.setSpillSize(n);
     }
 
-    /// Port of sqlite3PagerSetJournalMode(). MEMORY is not supported yet
-    /// and leaves the mode unchanged. Opening and closing the WAL is the
-    /// caller's (OP_JournalMode's) business. Returns the mode in effect.
+    /// Port of sqlite3PagerSetJournalMode(). MEMORY is supported only by
+    /// a VFS-implemented in-memory database (memdb), whose journal is a
+    /// memdb file; elsewhere it leaves the mode unchanged. Opening and
+    /// closing the WAL is the caller's (OP_JournalMode's) business.
+    /// Returns the mode in effect.
     pub fn setJournalMode(p: *Pager, mode_arg: JournalMode) JournalMode {
         const old = p.journal_mode;
         std.debug.assert(!p.temp_file or mode_arg != .wal);
         const mode = switch (mode_arg) {
-            .memory => old,
+            .memory => if (p.mem_vfs) .memory else old,
             else => mode_arg,
         };
         if (mode == old) return old;
@@ -418,7 +492,7 @@ pub const Pager = struct {
                     p.unlock();
                 }
             }
-        } else if (mode == .off) {
+        } else if (mode == .off or mode == .memory) {
             if (p.jfd) |j| j.close();
             p.jfd = null;
         }
@@ -705,7 +779,7 @@ pub const Pager = struct {
             try p.lockDb(.exclusive);
             if (p.jfd == null and p.journal_mode != .off) {
                 if (try p.vfs.access(p.journal_path, .exists)) {
-                    p.jfd = try p.vfs.open(p.journal_path, .{ .kind = .main_journal });
+                    p.jfd = try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .sqlite_filename = true });
                 }
             }
             if (p.jfd != null) {
@@ -766,6 +840,7 @@ pub const Pager = struct {
         const j = p.jfd orelse p.vfs.open(p.journal_path, .{
             .kind = .main_journal,
             .read_write = false,
+            .sqlite_filename = true,
         }) catch |err| switch (err) {
             // Possibly a race with a writer deleting it; assume hot and let
             // playback sort it out under the EXCLUSIVE lock.
@@ -987,10 +1062,12 @@ pub const Pager = struct {
                 p.journal_off = 0;
             }
             if (p.jfd == null) {
-                p.jfd = if (p.temp_file)
-                    try p.vfs.open(null, .{ .kind = .temp_journal })
+                // A memory journal (sqlite3MemJournalOpen()) is a private
+                // file of the in-memory VFS.
+                p.jfd = if (p.temp_file or p.journal_mode == .memory)
+                    try p.vfs.open(null, .{ .kind = if (p.temp_file) .temp_journal else .main_journal })
                 else
-                    try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .create = true });
+                    try p.vfs.open(p.journal_path, .{ .kind = .main_journal, .create = true, .sqlite_filename = true });
             }
             p.n_rec = 0;
             p.journal_off = 0;
@@ -1213,7 +1290,7 @@ pub const Pager = struct {
     fn openWalHandle(p: *Pager) Error!void {
         std.debug.assert(p.wal == null and !p.temp_file);
         std.debug.assert(p.lock == .shared or p.lock == .exclusive);
-        p.wal = try wal_mod.Wal.open(p.gpa, p.vfs, p.fd, p.wal_path, p.journal_size_limit);
+        p.wal = try wal_mod.Wal.open(p.gpa, p.vfs, p.fd, p.wal_path, p.journal_size_limit, true);
     }
 
     /// Port of sqlite3PagerOpenWal(): switch to WAL mode, holding a SHARED
@@ -1595,7 +1672,11 @@ pub const Pager = struct {
                 defer p.journal_off = 0;
                 try p.zeroJournalHdr(has_super);
             },
-            .memory => unreachable,
+            // The memory journal is simply closed, which destroys it.
+            .memory => {
+                j.close();
+                p.jfd = null;
+            },
             // A journal is open in WAL mode only while the transaction
             // that switches to WAL commits through the rollback journal.
             .delete, .off, .wal => {

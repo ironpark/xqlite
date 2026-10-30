@@ -150,6 +150,7 @@ test {
 test {
     std.testing.refAllDecls(@import("sql/attach.zig"));
     std.testing.refAllDecls(@import("sql/uri.zig"));
+    std.testing.refAllDecls(@import("sql/serialize.zig"));
     _ = @import("sql/attach_test.zig");
 }
 

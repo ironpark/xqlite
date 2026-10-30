@@ -985,7 +985,6 @@ static void test_misc(void){
     CHECK(zErr!=0);
     sqlite3_free(zErr);
   }
-  CHECK(sqlite3_serialize(db, "main", 0, 0)==0);
   CHECK(sqlite3_column_table_name(0, 0)==0);
 
   nDestroy = 0;
@@ -1001,7 +1000,100 @@ static void test_misc(void){
 */
 
 static void test_b_memdb(const char *zDir){
-  (void)zDir;
+  sqlite3 *db = 0, *db2 = 0, *db3 = 0;
+  sqlite3_int64 sz = 0, lim;
+  unsigned char *p, *q;
+  char zPath[512], *zName = 0;
+  sqlite3_vfs *pMem = sqlite3_vfs_find("memdb");
+  CHECK(pMem!=0 && strcmp(pMem->zName, "memdb")==0);
+
+  /* sqlite3_serialize() of an ordinary database, through its pager. */
+  snprintf(zPath, sizeof(zPath), "%s/ser.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  p = sqlite3_serialize(db, "main", &sz, 0);
+  CHECK(p!=0 && sz==4096);         /* an empty file gets its first page */
+  sqlite3_free(p);
+  exec(db, "CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3)");
+  p = sqlite3_serialize(db, 0, &sz, 0);
+  CHECK(p!=0 && sz==8192 && memcmp(p, "SQLite format 3", 16)==0);
+  CHECK(sqlite3_serialize(db, "main", &lim, SQLITE_SERIALIZE_NOCOPY)==0 && lim==8192);
+  CHECK(sqlite3_serialize(db, "nosuch", &lim, 0)==0 && lim==-1);
+
+  /* sqlite3_deserialize() into another connection's main. */
+  CHECK_RC(sqlite3_open(":memory:", &db2), SQLITE_OK, db2);
+  q = sqlite3_malloc64(sz);
+  memcpy(q, p, sz);
+  CHECK_RC(sqlite3_deserialize(db2, "main", q, sz, sz, SQLITE_DESERIALIZE_FREEONCLOSE|SQLITE_DESERIALIZE_RESIZEABLE), SQLITE_OK, db2);
+  CHECK_STR(one(db2, "SELECT sum(x) FROM t"), "6");
+  CHECK_STR(one(db2, "PRAGMA journal_mode"), "memory");
+  CHECK_STR(one(db2, "PRAGMA journal_mode=wal"), "memory");
+  CHECK_STR(one(db2, "SELECT file FROM pragma_database_list WHERE name='main'"), "");
+  CHECK_STR(sqlite3_db_filename(db2, "main"), "");
+  exec(db2, "INSERT INTO t SELECT x+3 FROM t; BEGIN; DELETE FROM t; ROLLBACK");
+  CHECK_STR(one(db2, "SELECT sum(x) FROM t"), "21");
+  exec(db2, "CREATE TABLE big(b); INSERT INTO big VALUES(zeroblob(20000))");
+  q = sqlite3_serialize(db2, 0, &sz, SQLITE_SERIALIZE_NOCOPY);
+  CHECK(q!=0 && sz>20000);
+  CHECK(sqlite3_serialize(db2, 0, 0, SQLITE_SERIALIZE_NOCOPY)==q);
+  CHECK_RC(sqlite3_file_control(db2, "main", SQLITE_FCNTL_VFSNAME, &zName), SQLITE_OK, db2);
+  CHECK(zName!=0 && strncmp(zName, "memdb(", 6)==0);
+  sqlite3_free(zName);
+
+  /* SQLITE_FCNTL_SIZE_LIMIT: a negative limit asks, a smaller one is
+  ** raised to the size. */
+  lim = -1;
+  CHECK_RC(sqlite3_file_control(db2, "main", SQLITE_FCNTL_SIZE_LIMIT, &lim), SQLITE_OK, db2);
+  CHECK(lim==1073741824);
+  lim = 1;
+  CHECK_RC(sqlite3_file_control(db2, "main", SQLITE_FCNTL_SIZE_LIMIT, &lim), SQLITE_OK, db2);
+  CHECK(lim==sz);
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO big VALUES(zeroblob(1000000))", 0, 0, 0), SQLITE_FULL, db2);
+  CHECK_STR(one(db2, "SELECT count(*) FROM big"), "1");
+
+  /* Errors: TEMP, a database that does not exist, an open transaction. */
+  CHECK_RC(sqlite3_deserialize(db2, "temp", 0, 0, 0, 0), SQLITE_ERROR, 0);
+  CHECK_RC(sqlite3_deserialize(db2, "nosuch", 0, 0, 0, 0), SQLITE_ERROR, 0);
+  exec(db2, "BEGIN; SELECT * FROM t");
+  CHECK_RC(sqlite3_deserialize(db2, "main", 0, 0, 0, 0), SQLITE_BUSY, 0);
+  exec(db2, "COMMIT");
+
+  /* A read-only image, into an attached database. */
+  exec(db2, "ATTACH ':memory:' AS aux");
+  CHECK_RC(sqlite3_deserialize(db2, "aux", p, 8192, 8192, SQLITE_DESERIALIZE_READONLY), SQLITE_OK, db2);
+  CHECK_STR(one(db2, "SELECT sum(x) FROM aux.t"), "6");
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO aux.t VALUES(4)", 0, 0, 0), SQLITE_READONLY, db2);
+  exec(db2, "DETACH aux");
+
+  /* A fixed-size image (no RESIZEABLE) fills up. */
+  q = sqlite3_malloc64(8192);
+  memcpy(q, p, 8192);
+  CHECK_RC(sqlite3_deserialize(db2, 0, q, 8192, 8192, SQLITE_DESERIALIZE_FREEONCLOSE), SQLITE_OK, db2);
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO t VALUES(zeroblob(10000))", 0, 0, 0), SQLITE_FULL, db2);
+  CHECK_STR(one(db2, "SELECT count(*) FROM t"), "3");
+  sqlite3_free(p);
+  sqlite3_close(db2);
+  sqlite3_close(db);
+
+  /* A shared memdb database: "/name" with vfs=memdb. */
+  CHECK_RC(sqlite3_open_v2("file:/xq-shared?vfs=memdb", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_open_v2("file:/xq-shared?vfs=memdb", &db2, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db2);
+  CHECK_RC(sqlite3_open_v2("file:xq-private?vfs=memdb", &db3, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db3);
+  exec(db, "CREATE TABLE s(x); INSERT INTO s VALUES(42)");
+  CHECK_STR(one(db2, "SELECT x FROM s"), "42");
+  CHECK_STR(one(db3, "SELECT count(*) FROM sqlite_schema"), "0");
+  CHECK_STR(one(db, "PRAGMA journal_mode"), "memory");
+  exec(db, "BEGIN; INSERT INTO s VALUES(43)");
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO s VALUES(44)", 0, 0, 0), SQLITE_BUSY, db2);
+  exec(db, "COMMIT");
+  p = sqlite3_serialize(db2, 0, &sz, 0);
+  CHECK(p!=0 && sz==8192);
+  sqlite3_free(p);
+  sqlite3_close(db);
+  sqlite3_close(db2);
+  sqlite3_close(db3);
+  CHECK_RC(sqlite3_open_v2("file:/xq-shared?vfs=memdb", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM sqlite_schema"), "0");
+  sqlite3_close(db);
 }
 
 static void test_b_blob(const char *zDir){
@@ -1018,8 +1110,89 @@ static void test_b_ext(const char *zDir){
 static void test_b_carray(void){
 }
 
+static sqlite3_file *pUriMain = 0;
+static char zUriAnswer[64];
+static int nUriNames = 0, nUriJournal = 0, nUriWal = 0, nUriBad = 0;
+static int uriOpen(sqlite3_vfs *p, sqlite3_filename z, sqlite3_file *f, int flags, int *pOut){
+  sqlite3_vfs *o = sqlite3_vfs_find("unix");
+  (void)p;
+  if( z && (flags & SQLITE_OPEN_MAIN_DB) ){
+    const char *a = sqlite3_uri_parameter(z, "answer");
+    snprintf(zUriAnswer, sizeof(zUriAnswer), "%s", a ? a : "(null)");
+    pUriMain = f;
+    if( strstr(sqlite3_filename_journal(z), ".db-journal") ) nUriNames++;
+    if( strstr(sqlite3_filename_wal(z), ".db-wal") ) nUriNames++;
+  }
+  if( z && (flags & (SQLITE_OPEN_MAIN_JOURNAL|SQLITE_OPEN_WAL)) ){
+    if( flags & SQLITE_OPEN_WAL ) nUriWal++; else nUriJournal++;
+    if( sqlite3_database_file_object(z)!=pUriMain ) nUriBad++;
+    if( sqlite3_uri_int64(z, "answer", 0)!=7 ) nUriBad++;
+    if( sqlite3_filename_database(z)!=sqlite3_filename_database(sqlite3_filename_database(z)) ) nUriBad++;
+  }
+  return o->xOpen(o, z, f, flags, pOut);
+}
+static int uriDelete(sqlite3_vfs *p, const char *z, int s){ sqlite3_vfs *o = sqlite3_vfs_find("unix"); (void)p; return o->xDelete(o, z, s); }
+static int uriAccess(sqlite3_vfs *p, const char *z, int f, int *r){ sqlite3_vfs *o = sqlite3_vfs_find("unix"); (void)p; return o->xAccess(o, z, f, r); }
+static int uriFull(sqlite3_vfs *p, const char *z, int n, char *out){ sqlite3_vfs *o = sqlite3_vfs_find("unix"); (void)p; return o->xFullPathname(o, z, n, out); }
+static sqlite3_vfs uriVfs;
+
 static void test_b_vfs(const char *zDir){
-  (void)zDir;
+  sqlite3 *db = 0;
+  char zSql[700];
+  sqlite3_vfs *o = sqlite3_vfs_find("unix");
+  sqlite3_file *pFile = 0;
+  memset(&uriVfs, 0, sizeof(uriVfs));
+  uriVfs.iVersion = 1;
+  uriVfs.szOsFile = o->szOsFile;
+  uriVfs.mxPathname = o->mxPathname;
+  uriVfs.zName = "xq-uri";
+  uriVfs.xOpen = uriOpen;
+  uriVfs.xDelete = uriDelete;
+  uriVfs.xAccess = uriAccess;
+  uriVfs.xFullPathname = uriFull;
+  uriVfs.xRandomness = o->xRandomness;
+  uriVfs.xSleep = o->xSleep;
+  uriVfs.xCurrentTime = o->xCurrentTime;
+  CHECK_RC(sqlite3_vfs_register(&uriVfs, 0), SQLITE_OK, 0);
+
+  /* A C VFS sees the URI parameters, and the journal and WAL names lead
+  ** back to the database and its sqlite3_file. */
+  snprintf(zSql, sizeof(zSql), "file:%s/uri.db?vfs=xq-uri&answer=7", zDir);
+  CHECK_RC(sqlite3_open_v2(zSql, &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  CHECK_STR(zUriAnswer, "7");
+  CHECK(nUriNames==2);
+  exec(db, "CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+  CHECK(nUriJournal>=1 && nUriBad==0);
+  CHECK_RC(sqlite3_file_control(db, "main", SQLITE_FCNTL_FILE_POINTER, &pFile), SQLITE_OK, db);
+  CHECK(pFile==pUriMain);
+  CHECK_STR(one(db, "PRAGMA journal_mode=wal"), "wal");
+  exec(db, "INSERT INTO t VALUES(2)");
+  CHECK(nUriWal==1 && nUriBad==0);
+  CHECK_STR(sqlite3_uri_parameter(sqlite3_db_filename(db, 0), "answer"), "7");
+  sqlite3_close(db);
+
+  /* ATTACH's own vfs= parameter. */
+  zUriAnswer[0] = 0;
+  CHECK_RC(sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  snprintf(zSql, sizeof(zSql), "ATTACH 'file:%s/att.db?vfs=xq-uri&answer=8' AS a", zDir);
+  exec(db, zSql);
+  CHECK_STR(zUriAnswer, "8");
+  CHECK_STR(sqlite3_uri_parameter(sqlite3_db_filename(db, "a"), "answer"), "8");
+  {
+    sqlite3_vfs *pv = 0;
+    CHECK_RC(sqlite3_file_control(db, "a", SQLITE_FCNTL_VFS_POINTER, &pv), SQLITE_OK, db);
+    CHECK(pv==&uriVfs);
+  }
+  snprintf(zSql, sizeof(zSql), "ATTACH 'file:%s/att2.db?vfs=nope' AS b", zDir);
+  CHECK_RC(sqlite3_exec(db, zSql, 0, 0, 0), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such vfs: nope");
+  snprintf(zSql, sizeof(zSql), "ATTACH 'file:/xq-att?vfs=memdb' AS m");
+  exec(db, zSql);
+  exec(db, "CREATE TABLE m.t(x); INSERT INTO m.t VALUES(5)");
+  CHECK_STR(one(db, "SELECT x FROM m.t"), "5");
+  CHECK_STR(one(db, "SELECT file FROM pragma_database_list WHERE name='m'"), "");
+  sqlite3_close(db);
+  CHECK_RC(sqlite3_vfs_unregister(&uriVfs), SQLITE_OK, 0);
 }
 
 static void test_b_snapshot(const char *zDir){

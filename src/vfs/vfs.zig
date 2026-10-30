@@ -164,6 +164,14 @@ pub const OpenFlags = struct {
     exclusive: bool = false,
     /// Delete the file when the last handle is closed.
     delete_on_close: bool = false,
+    /// The path is a name of the pager's, in SQLite's filename layout
+    /// (see Pager.names): NUL-terminated, followed by the URI parameters
+    /// of the database and the journal and WAL names, so that a C VFS
+    /// can read them with sqlite3_uri_parameter() and
+    /// sqlite3_filename_*(). Before the four zero bytes in front of the
+    /// database name is a pointer-sized slot for the database's
+    /// sqlite3_file (sqlite3_database_file_object()).
+    sqlite_filename: bool = false,
 };
 
 pub const SyncFlags = struct {
@@ -256,6 +264,10 @@ pub const File = struct {
         shmLock: ?*const fn (ptr: *anyopaque, ofst: u32, n: u32, flags: ShmLockFlags) Error!void = null,
         shmBarrier: ?*const fn (ptr: *anyopaque) void = null,
         shmUnmap: ?*const fn (ptr: *anyopaque, delete: bool) void = null,
+        /// Whether the file lives in memory (SQLITE_OPEN_MEMORY in
+        /// xOpen's pOutFlags): the pager then keeps its journal in memory
+        /// too (memVfs). Null means no.
+        isMemory: ?*const fn (ptr: *anyopaque) bool = null,
     };
 
     /// Closes the handle, dropping any lock it holds.
@@ -319,6 +331,13 @@ pub const File = struct {
     /// pOutFlags).
     pub fn isReadOnly(f: File) bool {
         return f.vtable.isReadOnly(f.ptr);
+    }
+
+    /// Whether the file is a VFS-implemented in-memory database (the
+    /// memdb VFS), as SQLITE_OPEN_MEMORY in pOutFlags tells the pager.
+    pub fn isMemory(f: File) bool {
+        const m = f.vtable.isMemory orelse return false;
+        return m(f.ptr);
     }
 
     /// Whether the backend implements shared memory (xShmMap != 0).
@@ -439,6 +458,7 @@ pub const OsVfs = switch (@import("builtin").os.tag) {
 
 test {
     _ = @import("mem.zig");
+    _ = @import("memdb.zig");
     _ = @import("inproc.zig");
     switch (@import("builtin").os.tag) {
         .wasi => _ = @import("wasi.zig"),

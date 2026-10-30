@@ -5,7 +5,6 @@
 const std = @import("std");
 const c = @import("common.zig");
 const vfs_mod = @import("vfs.zig");
-const filename = @import("filename.zig");
 const stmt = @import("stmt.zig");
 const func = @import("func.zig");
 
@@ -47,21 +46,12 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
     var vfs_name = c.span(z_vfs);
     var dialect: ?c.dialect.Dialect = null;
     var bad_dialect: ?[]const u8 = null;
-    var params: []const u8 = "";
     if (parsed.rc == RC.OK) {
         if (parsed.parameter("vfs")) |v| vfs_name = v;
         if (parsed.parameter("dialect")) |d| {
             dialect = c.dialect.Dialect.fromName(d);
             if (dialect == null) bad_dialect = d;
         }
-        const f = parsed.file.?;
-        const start = parsed.filename().len + 1;
-        var end = start;
-        while (end < f.len and f[end] != 0) {
-            end += std.mem.sliceTo(f[end..], 0).len + 1;
-            end += std.mem.sliceTo(f[end..], 0).len + 1;
-        }
-        params = f[start..end];
     }
     const entry = vfs_mod.find(vfs_name);
 
@@ -88,12 +78,6 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
     if (rc == RC.OK) {
         if (flags & OPEN_EXRESCODE != 0) c.main.extendedResultCodes(db, true);
         if (dialect) |d| c.main.setDialect(db, d);
-        // Keep the URI parameters for sqlite3_db_filename().
-        if (params.len > 0) {
-            if (c.gpa.dupe(u8, params)) |p| {
-                ext.uri_params = p;
-            } else |_| {}
-        }
         rc = autoExtensions(db);
     }
     if (rc != RC.OK) return c.main.errcode(db) | (if (flags & OPEN_EXRESCODE != 0) c.main.extendedErrcode(db) else 0);
@@ -145,12 +129,6 @@ fn freeExt(e: *Ext) void {
         c.gpa.free(cd.name);
     }
     e.clientdata.deinit(c.gpa);
-    for (e.filenames.items) |f| {
-        c.gpa.free(f.name);
-        c.gpa.free(f.buf);
-    }
-    e.filenames.deinit(c.gpa);
-    if (e.uri_params) |p| c.gpa.free(p);
     if (e.errmsg16) |m| c.gpa.free(m);
     e.started.deinit(c.gpa);
     if (e.autovac_destroy) |d| d(e.autovac.arg);
@@ -477,29 +455,14 @@ pub export fn sqlite3_db_name(db: ?*Handle, n: c_int) callconv(.c) ?[*:0]const u
 }
 
 /// Port of sqlite3_db_filename(): the full name of database `z_db_name`
-/// (main if null) in the layout of sqlite3_filename, "" for a temporary
-/// or in-memory database, null if there is none.
+/// (main if null), "" for a temporary or in-memory database, null if
+/// there is none. It is the pager's own name (sqlite3PagerFilename()),
+/// the one the VFS was given, in the layout of sqlite3_filename with the
+/// URI parameters of the database.
 pub export fn sqlite3_db_filename(db_arg: ?*Handle, z_db_name: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
     const db = db_arg orelse return null;
-    const e = c.ext(db);
-    const name = c.span(z_db_name);
-    const path = c.main.dbFilename(db, name) orelse return null;
-    const key: []const u8 = name orelse "main";
-    const is_main = c.ctype.eqlNoCase(key, "main");
-    for (e.filenames.items) |f| {
-        if (c.ctype.eqlNoCase(f.name, key) and std.mem.eql(u8, std.mem.span(filename.ptr(f.buf)), path)) return filename.ptr(f.buf);
-    }
-    const buf = filename.build(path, if (is_main) e.uri_params orelse "" else "") orelse return null;
-    const kz = c.gpa.dupeSentinel(u8, key, 0) catch {
-        c.gpa.free(buf);
-        return null;
-    };
-    e.filenames.append(c.gpa, .{ .name = kz, .buf = buf }) catch {
-        c.gpa.free(kz);
-        c.gpa.free(buf);
-        return null;
-    };
-    return filename.ptr(buf);
+    const bt = c.main.dbNameToBtree(db, c.span(z_db_name)) orelse return null;
+    return bt.pager.filenameZ();
 }
 
 pub export fn sqlite3_db_readonly(db: ?*Handle, z_db_name: ?[*:0]const u8) callconv(.c) c_int {
@@ -683,18 +646,33 @@ pub fn xq_db_config(db_arg: ?*Handle, op: c_int, a: i64, b: i64, p: ?*anyopaque,
     }
 }
 
-/// sqlite3_file_control(): the engine's files have no file-control
-/// methods, so only SQLITE_FCNTL_VFS_POINTER is answered.
+/// sqlite3_file_control(): SQLITE_FCNTL_VFS_POINTER, and
+/// SQLITE_FCNTL_FILE_POINTER for a file of a C VFS. Other operations go
+/// to the file: the xFileControl of a C VFS's file, memdb's own
+/// (SQLITE_FCNTL_SIZE_LIMIT, SQLITE_FCNTL_VFSNAME); the engine's other
+/// files have none (SQLITE_NOTFOUND).
 pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, op: c_int, p_arg: ?*anyopaque) callconv(.c) c_int {
     const db = db_arg orelse return RC.MISUSE;
-    if (c.main.dbNameToBtree(db, c.span(z_db_name)) == null) return RC.ERROR;
+    const bt = c.main.dbNameToBtree(db, c.span(z_db_name)) orelse return RC.ERROR;
+    const fd = bt.pager.fd;
     switch (op) {
         27 => {
             const out: *?*vfs_mod.sqlite3_vfs = @ptrCast(@alignCast(p_arg orelse return RC.MISUSE));
-            out.* = c.ext(db).vfs.cvfs;
+            out.* = vfs_mod.cVfsOf(bt.pager.vfs) orelse c.ext(db).vfs.cvfs;
             return RC.OK;
         },
-        else => return RC.NOTFOUND,
+        7 => {
+            const out: *?*vfs_mod.sqlite3_file = @ptrCast(@alignCast(p_arg orelse return RC.MISUSE));
+            out.* = vfs_mod.cFileOf(fd) orelse return RC.NOTFOUND;
+            return RC.OK;
+        },
+        else => {
+            if (vfs_mod.cFileOf(fd)) |f| {
+                const fc = f.pMethods.?.xFileControl orelse return RC.NOTFOUND;
+                return fc(f, op, p_arg);
+            }
+            return vfs_mod.fileControl(fd, op, p_arg);
+        },
     }
 }
 
@@ -991,19 +969,22 @@ pub export fn sqlite3_backup_pagecount(p: ?*backup_mod.Backup) callconv(.c) c_in
 
 // ============================================ not supported: stubs
 
-pub export fn sqlite3_serialize(db_arg: ?*Handle, _: ?[*:0]const u8, pi_size: ?*i64, _: c_uint) callconv(.c) ?[*]u8 {
-    if (pi_size) |p| p.* = -1;
-    _ = db_arg;
-    return null;
+// ========================================================= serialization
+
+pub export fn sqlite3_serialize(db_arg: ?*Handle, z_schema: ?[*:0]const u8, pi_size: ?*i64, m_flags: c_uint) callconv(.c) ?[*]u8 {
+    const db = db_arg orelse return null;
+    const r = @import("../sql/serialize.zig").serialize(db, c.span(z_schema), m_flags);
+    if (pi_size) |p| p.* = r.size;
+    return r.data;
 }
 
-pub export fn sqlite3_deserialize(db_arg: ?*Handle, _: ?[*:0]const u8, p_data: ?[*]u8, _: i64, _: i64, m_flags: c_uint) callconv(.c) c_int {
+pub export fn sqlite3_deserialize(db_arg: ?*Handle, z_schema: ?[*:0]const u8, p_data: ?[*]u8, sz_db: i64, sz_buf: i64, m_flags: c_uint) callconv(.c) c_int {
     const db = db_arg orelse return RC.MISUSE;
-    // SQLITE_DESERIALIZE_FREEONCLOSE: the buffer is ours to free.
-    if (m_flags & 1 != 0) if (p_data) |p| c.malloc.free(p);
-    c.main.errorWithMsg(db, RC.ERROR, "xqlite does not support sqlite3_deserialize()", .{});
-    return RC.ERROR;
+    if (sz_db < 0 or sz_buf < 0) return RC.MISUSE;
+    return @import("../sql/serialize.zig").deserialize(db, c.span(z_schema), p_data, sz_db, sz_buf, m_flags);
 }
+
+// ============================================ not supported: stubs
 
 pub export fn sqlite3_snapshot_get(_: ?*Handle, _: ?[*:0]const u8, pp: ?*?*anyopaque) callconv(.c) c_int {
     if (pp) |p| p.* = null;

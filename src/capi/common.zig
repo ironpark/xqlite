@@ -213,13 +213,6 @@ pub const TRACE_CLOSE: u32 = 0x08;
 pub const Ext = struct {
     /// The VFS the connection opened its files with (its sqlite3_vfs).
     vfs: *@import("vfs.zig").Entry,
-    /// The filenames sqlite3_db_filename() returned, in the layout that
-    /// sqlite3_uri_parameter() reads (see filename.zig), by database
-    /// name; freed on close.
-    filenames: std.ArrayList(Filename) = .empty,
-    /// The URI parameters the main database was opened with (pairs of
-    /// NUL-terminated strings), for its sqlite3_filename.
-    uri_params: ?[]u8 = null,
     busy: Hook(CBusy) = .{},
     wal: Hook(CWal) = .{},
     commit: Hook(CCommit) = .{},
@@ -248,7 +241,6 @@ pub const Ext = struct {
     /// last statement or backup is gone (a zombie).
     zombie: bool = false,
 
-    pub const Filename = struct { name: [:0]u8, buf: []u8 };
     pub const ClientData = struct { name: [:0]u8, data: ?*anyopaque, x_destroy: ?CDestructor };
 };
 

@@ -678,12 +678,13 @@ pub const Wal = struct {
     /// Port of sqlite3WalOpen(): open the WAL file `wal_name` (which must
     /// outlive the Wal) of the open database `db_fd`, read-only if the
     /// VFS can only open it so. A SHARED lock must be held, so that no
-    /// one deletes the WAL meanwhile.
-    pub fn open(gpa: Allocator, v: vfs.Vfs, db_fd: vfs.File, wal_name: []const u8, mx_wal_size: i64) Error!*Wal {
+    /// one deletes the WAL meanwhile. `sqlite_filename`: the name is the
+    /// pager's, in SQLite's filename layout (vfs.OpenFlags).
+    pub fn open(gpa: Allocator, v: vfs.Vfs, db_fd: vfs.File, wal_name: []const u8, mx_wal_size: i64, sqlite_filename: bool) Error!*Wal {
         std.debug.assert(wal_name.len > 0);
         const w = try gpa.create(Wal);
         errdefer gpa.destroy(w);
-        const wal_fd = try v.open(wal_name, .{ .kind = .wal, .create = true });
+        const wal_fd = try v.open(wal_name, .{ .kind = .wal, .create = true, .sqlite_filename = sqlite_filename });
         w.* = .{
             .gpa = gpa,
             .vfs = v,

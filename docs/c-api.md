@@ -195,7 +195,7 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 
 ### 메모리 통계
 
-`sqlite3_status()`와 `sqlite3_db_status()`는 status.c를 옮긴 `pkg/storage/src/status.zig`와 페이저의 카운터로 셉니다.
+`sqlite3_status()`와 `sqlite3_db_status()`는 status.c를 옮긴 `pkg/base/src/status.zig`와 페이저의 카운터로 셉니다.
 
 - **켜고 끄기**: SQLite의 `SQLITE_CONFIG_MEMSTATUS`입니다. C ABI는 SQLite처럼 기본으로 켜서 `sqlite3_initialize()`(첫 `open`이나 `sqlite3_malloc()`이 부름) 때 시작하고, 그 전에 `sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0)`이면 끕니다. Zig API만 쓰면 꺼져 있어 할당마다 예측 가능한 분기 하나만 듭니다. 켜면 할당·해제마다 원자적 덧셈 두 번(SQLite는 뮤텍스)이 더해지는데, 30만 행 삽입 세 번(ReleaseFast)에서 켜고 끈 차이는 측정 잡음(약 1%) 안이었습니다. 할당 헤더에 센 것인지를 적어 두므로, 켜기 전에 할당한 메모리를 나중에 해제해도 값이 음수가 되지 않습니다.
 - **`status(64)`**: `MEMORY_USED`(8바이트로 올린 크기의 합, SQLite의 mem1과 같음), `MALLOC_COUNT`, `MALLOC_SIZE`(가장 큰 요청)와 각 최고치, `PAGECACHE_OVERFLOW`/`PAGECACHE_SIZE`(`SQLITE_CONFIG_PAGECACHE` 버퍼가 없으므로 페이지마다 따로 할당한 크기). `PAGECACHE_USED`, `SCRATCH_*`, `PARSER_STACK`은 0입니다. SQLite의 pcache1은 처음 몇 페이지를 한 번에 할당해 `PAGECACHE_OVERFLOW`에 넣지 않으므로 값은 SQLite와 조금 다릅니다.

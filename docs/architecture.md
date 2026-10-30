@@ -19,6 +19,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 - [카탈로그와 시퀀스](#카탈로그와-시퀀스)
 - [VFS](#vfs)
 - [스토리지 패키지](#스토리지-패키지)
+- [공용 패키지](#공용-패키지)
 - [소스 파일](#소스-파일)
 - [아직 하지 않은 것](#아직-하지-않은-것)
 
@@ -365,9 +366,9 @@ VFS는 엔진과 따로 빌드되는 Zig 패키지(`pkg/vfs/`, 모듈 이름 `xq
 
 ## 스토리지 패키지
 
-VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진과 따로 빌드되는 Zig 패키지(`pkg/storage/`, 모듈 이름 `xqlite_storage`)입니다. `std`와 `xqlite_vfs` 말고는 아무것도 import하지 않습니다. 엔진이 넣어 주는 것은 원래부터 인자였던 할당자, VFS, 콜백(busy handler, 페이지 spill, 키 비교, autovacuum_pages 등)뿐입니다.
+VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진과 따로 빌드되는 Zig 패키지(`pkg/storage/`, 모듈 이름 `xqlite_storage`)입니다. `std`, `xqlite_vfs`, `xqlite_base`(아래 [공용 패키지](#공용-패키지)) 말고는 아무것도 import하지 않습니다. 엔진이 넣어 주는 것은 원래부터 인자였던 할당자, VFS, 콜백(busy handler, 페이지 spill, 키 비교, autovacuum_pages 등)뿐입니다.
 
-루트 `build.zig.zon`이 경로 의존성(`.xqlite_storage = .{ .path = "pkg/storage" }`)으로 받고, 패키지는 자기 `build.zig.zon`에서 `../vfs`에 의존합니다. `build.zig`의 `engineImports()`가 엔진 모듈, C ABI 라이브러리, wasm 모듈, 퍼저에 `xqlite_vfs`와 `xqlite_storage`를 함께 붙입니다. `storageImport()`와 패키지의 `build.zig`가 같은 인자(`target`, `optimize`)로 VFS 패키지를 부르므로 빌드 시스템이 의존성 하나를 공유하고, 그래서 엔진과 스토리지가 같은 `xqlite_vfs` 모듈을 씁니다(다르면 같은 파일이 두 모듈에 속해 컴파일 오류).
+루트 `build.zig.zon`이 경로 의존성(`.xqlite_storage = .{ .path = "pkg/storage" }`)으로 받고, 패키지는 자기 `build.zig.zon`에서 `../vfs`와 `../base`에 의존합니다. `build.zig`의 `engineImports()`가 엔진 모듈, C ABI 라이브러리, wasm 모듈, 퍼저에 `xqlite_vfs`, `xqlite_storage`, `xqlite_base`를 함께 붙입니다. 루트와 스토리지 패키지의 `build.zig`가 같은 인자(`target`, `optimize`)로 VFS와 공용 패키지를 부르므로 빌드 시스템이 의존성을 하나씩만 만들고, 그래서 엔진과 스토리지가 같은 `xqlite_vfs`, `xqlite_base` 모듈을 씁니다(다르면 같은 파일이 두 모듈에 속해 컴파일 오류).
 
 패키지 루트(`pkg/storage/src/root.zig`)가 내보내는 것은 다음과 같습니다.
 
@@ -375,13 +376,23 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | --- | --- |
 | `pager`, `pcache`, `journal` | 페이저(`pager.wal`이 WAL), 페이지 캐시, 롤백 저널 형식 |
 | `btree` | B-tree 층과 파일 헤더(`btree.header`) |
-| `record`, `varint` | 레코드 형식과 varint. 파일 형식이라 여기 있고 엔진(VDBE)도 씀 |
-| `thunk` | 콜백 클로저. 엔진이 넘기는 콜백과 타입이 같아야 하므로 여기 있음 |
-| `status` | `sqlite3_status()` 카운터. 페이지 캐시와 엔진의 할당자가 함께 셈 |
-| `fuzz`, `btree_fuzz` | 시드 퍼저의 도우미와 B-tree 퍼저(`src/fuzz_tests.zig`가 씀) |
+| `record`, `varint` | 레코드 형식(serial type 크기, 헤더 varint, 정수 디코딩, `memcmp`, `intFloatCompare`)과 varint. 파일 형식이라 여기 있고, 엔진의 `src/vdbe/serial.zig`(Mem을 쓰는 레코드 코드)도 이 함수들을 씀 |
+| `btree_fuzz` | B-tree 퍼저(`src/fuzz_tests.zig`가 씀) |
 | `sqlite_version_number` | 페이저가 파일 헤더에 쓰는 `SQLITE_VERSION_NUMBER`. `src/root.zig`가 다시 내보냄 |
 
-한 파일은 한 모듈에만 속할 수 있으므로, 엔진과 스토리지가 함께 쓰는 `record`, `varint`, `thunk`, `status`, `fuzz`는 패키지로 옮기고 엔진은 `@import("xqlite_storage").varint` 식으로 가져옵니다. 공개 Zig API(`xqlite.pager`, `xqlite.pcache`, `xqlite.btree`, `xqlite.record`, `xqlite.varint`)는 `src/root.zig`가 다시 내보내므로 그대로입니다. 패키지 디렉터리에서 `zig build test`를 하면 스토리지 테스트(B-tree, 페이저, WAL, 저널)만 돕니다. B-tree 테스트의 픽스처는 `pkg/storage/src/testdata`에 있습니다(`xqt gen fixtures`).
+한 파일은 한 모듈에만 속할 수 있으므로, 엔진과 스토리지가 함께 쓰는 파일 형식 코드(`record`, `varint`)는 이 패키지에 두고 엔진은 `@import("xqlite_storage").varint` 식으로 가져옵니다. 공개 Zig API(`xqlite.pager`, `xqlite.pcache`, `xqlite.btree`, `xqlite.record`, `xqlite.varint`)는 `src/root.zig`가 다시 내보내므로 그대로입니다. 패키지 디렉터리에서 `zig build test`를 하면 스토리지 테스트(B-tree, 페이저, WAL, 저널)만 돕니다. B-tree 테스트의 픽스처는 `pkg/storage/src/testdata`에 있습니다(`xqt gen fixtures`).
+
+## 공용 패키지
+
+어느 층의 것도 아니면서 스토리지 패키지와 엔진이 함께 쓰는 도우미는 `pkg/base/`(모듈 이름 `xqlite_base`)에 있습니다. `std`만 import하고, 루트와 스토리지 패키지가 경로 의존성으로 받습니다.
+
+| 이름 | 내용 |
+| --- | --- |
+| `thunk` | 콜백 클로저. 엔진이 넘기는 콜백(busy handler 등)과 스토리지가 받는 타입이 같아야 함 |
+| `status` | `sqlite3_status()` 카운터와 `SQLITE_CONFIG_MEMSTATUS`. 페이지 캐시와 엔진의 할당자가 함께 셈 |
+| `fuzz` | 시드 퍼저의 도우미(시드 파싱, swarm testing). `src/fuzz_tests.zig`, IR 퍼저, B-tree 퍼저가 씀 |
+
+`zig build test-pkg`는 세 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`)의 테스트만 엔진 없이 빌드해 돌립니다.
 
 ## 소스 파일
 
@@ -408,7 +419,8 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | `pkg/storage/build.zig`, `build.zig.zon` | 스토리지 패키지(`xqlite_storage`): 모듈과 `zig build test`([스토리지 패키지](#스토리지-패키지)) |
 | `pkg/storage/src/pager/{pager,pcache,wal,journal}.zig` | 페이저, 페이지 캐시, WAL, 롤백 저널 |
 | `pkg/storage/src/btree/{btree,page,header,ptrmap,integrity}.zig` | B-tree 층 |
-| `pkg/storage/src/{record,varint,thunk,status,fuzz}.zig` | 엔진과 함께 쓰는 레코드 형식, varint, 클로저, 상태 카운터, 퍼저 도우미 |
+| `pkg/storage/src/{record,varint}.zig` | 엔진과 함께 쓰는 레코드 형식과 varint |
+| `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
 
 구문 트리 IR(`src/ir/tree.zig`)이 나타내는 문장은 다음과 같습니다.
 

@@ -153,7 +153,7 @@ zig-out/bin/xqt wasi --wasm PATH     # WASI 빌드 하나를 따로
 
 `zig build test-wasi`는 다음을 돌립니다. `zig build check`에는 들어 있지 않습니다(wasmtime이 필요하므로).
 
-- 모듈, CLI, VFS 패키지(`pkg/vfs`), 스토리지 패키지(`pkg/storage`)의 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 실행합니다. POSIX VFS와 `-shm` 파일, 파일 권한에 기대는 세 개만 건너뜁니다.
+- 모듈, CLI, VFS·스토리지·공용 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`)의 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 실행합니다. POSIX VFS와 `-shm` 파일, 파일 권한에 기대는 세 개만 건너뜁니다.
 - `xqt wasi`: ReleaseSafe로 빌드한 WASI `xqlite`를 sqlite3, 네이티브 xqlite와 비교합니다. 자세한 검사 목록은 [테스트와 검증](testing.md#webassembly)에 있습니다.
 
 ## 제한

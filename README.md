@@ -131,11 +131,12 @@ Zig **0.17.0** 이상이 필요합니다.
 ```sh
 zig build              # 라이브러리 + CLI (zig-out/bin/xqlite) + C 라이브러리 (zig-out/lib/libxqlite3.*, zig-out/include/sqlite3.h)
 zig build run          # CLI 실행
-zig build test         # 단위 테스트 (pkg/vfs, pkg/storage 패키지의 테스트 포함)
+zig build test         # 단위 테스트 (pkg/vfs, pkg/storage, pkg/base 패키지의 테스트 포함)
+zig build test-pkg     # 패키지 테스트만 (엔진을 빌드하지 않아 빠름)
 zig build test-capi    # C API 테스트
 ```
 
-VFS와 스토리지 층(페이저, B-tree)은 따로 빌드되는 Zig 패키지(`pkg/vfs`의 `xqlite_vfs`, `pkg/storage`의 `xqlite_storage`)이고 루트 빌드가 경로 의존성으로 가져옵니다. 각 디렉터리에서 `zig build test`를 하면 그 패키지의 테스트만 돕니다([VFS 패키지](docs/architecture.md#vfs-패키지), [스토리지 패키지](docs/architecture.md#스토리지-패키지)).
+VFS와 스토리지 층(페이저, B-tree), 둘이 엔진과 함께 쓰는 도우미는 따로 빌드되는 Zig 패키지(`pkg/vfs`의 `xqlite_vfs`, `pkg/storage`의 `xqlite_storage`, `pkg/base`의 `xqlite_base`)이고 루트 빌드가 경로 의존성으로 가져옵니다. 각 디렉터리에서 `zig build test`를 하면 그 패키지의 테스트만 돕니다([VFS 패키지](docs/architecture.md#vfs-패키지), [스토리지 패키지](docs/architecture.md#스토리지-패키지)).
 
 Linux 타깃과 WebAssembly로 크로스 컴파일할 수 있습니다.
 
@@ -284,7 +285,8 @@ src/
 └── wasm/               # 브라우저·JavaScript용 wasm 모듈 (xq_* 내보내기)
 pkg/
 ├── vfs/                # VFS 패키지 xqlite_vfs: OS 추상화(POSIX·WASI·호스트·메모리·memdb), 크래시 테스트용 VFS
-└── storage/            # 스토리지 패키지 xqlite_storage: pager/(페이지 캐시, 저널, WAL), btree/, 레코드 포맷, 퍼저 도구
+├── storage/            # 스토리지 패키지 xqlite_storage: pager/(페이지 캐시, 저널, WAL), btree/, 레코드 포맷
+└── base/               # 공용 패키지 xqlite_base: 콜백 클로저, sqlite3_status() 카운터, 퍼저 도구
 docs/                   # 설계·호환성 문서
 examples/               # Zig API 예제, wasm/ (JavaScript 연결 코드, Node·브라우저 예제)
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일

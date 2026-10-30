@@ -67,6 +67,8 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
         return RC.NOMEM;
     };
     db.capi = ext;
+    // The C ABI is built as with SQLITE_ENABLE_CARRAY (capi/carray.zig).
+    db.enable_carray = true;
     out.* = db;
     if (entry == null) {
         rc = RC.ERROR;
@@ -94,7 +96,7 @@ fn autoExtensions(db: *Handle) c_int {
         const p = entry orelse return RC.OK;
         const init_fn: *const fn (?*Handle, *?[*:0]u8, ?*const anyopaque) callconv(.c) c_int = @ptrCast(@alignCast(p));
         var err: ?[*:0]u8 = null;
-        const rc = init_fn(db, &err, null);
+        const rc = init_fn(db, &err, @import("loadext.zig").apis());
         if (rc != RC.OK) {
             c.main.errorWithMsg(db, rc, "automatic extension loading failed: {s}", .{std.mem.span(err orelse "")});
             if (err) |e| c.malloc.free(e);
@@ -132,6 +134,8 @@ fn freeExt(e: *Ext) void {
     if (e.errmsg16) |m| c.gpa.free(m);
     e.started.deinit(c.gpa);
     if (e.autovac_destroy) |d| d(e.autovac.arg);
+    // Last: the code of what was freed above may be the extensions'.
+    @import("loadext.zig").closeExtensions(e);
     c.gpa.destroy(e);
 }
 
@@ -897,18 +901,8 @@ pub export fn sqlite3_unlock_notify(db: ?*Handle, x_notify: ?*const fn (?[*]?*an
 
 // ============================================================ extensions
 
-pub export fn sqlite3_enable_load_extension(db: ?*Handle, on: c_int) callconv(.c) c_int {
-    _ = c.main.dbConfig(db orelse return RC.MISUSE, .enable_load_extension, @intFromBool(on != 0));
-    return RC.OK;
-}
-
-pub export fn sqlite3_load_extension(db_arg: ?*Handle, _: ?[*:0]const u8, _: ?[*:0]const u8, pz_errmsg: ?*?[*:0]u8) callconv(.c) c_int {
-    const db = db_arg orelse return RC.MISUSE;
-    const msg = "xqlite does not support loadable extensions";
-    if (pz_errmsg) |p| p.* = c.dupZ(msg);
-    c.main.errorWithMsg(db, RC.ERROR, msg, .{});
-    return RC.ERROR;
-}
+// sqlite3_load_extension() and sqlite3_enable_load_extension() are in
+// loadext.zig.
 
 pub export fn sqlite3_auto_extension(x_entry: ?*const anyopaque) callconv(.c) c_int {
     const f = x_entry orelse return RC.MISUSE;

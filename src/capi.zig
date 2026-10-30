@@ -19,4 +19,6 @@ comptime {
     _ = @import("capi/vfs.zig");
     _ = @import("capi/filename.zig");
     _ = @import("capi/blob.zig");
+    _ = @import("capi/loadext.zig");
+    _ = @import("capi/carray.zig");
 }

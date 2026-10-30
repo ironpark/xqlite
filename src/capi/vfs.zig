@@ -435,23 +435,25 @@ fn zFullPathname(_: *sqlite3_vfs, z_name: ?[*:0]const u8, n_out: c_int, z_out: [
     return RC.OK;
 }
 
-fn zDlOpen(_: *sqlite3_vfs, _: ?[*:0]const u8) callconv(.c) ?*anyopaque {
-    return null;
+// The dynamic loader (unixDlOpen() ...: dlopen(), none on WebAssembly)
+// is in loadext.zig.
+const loadext = @import("loadext.zig");
+
+fn zDlOpen(_: *sqlite3_vfs, z: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+    return loadext.osDlOpen(z orelse return null);
 }
 
 fn zDlError(_: *sqlite3_vfs, n: c_int, z: [*]u8) callconv(.c) void {
-    const msg = "loadable extensions are not supported by xqlite";
-    if (n <= 0) return;
-    const k = @min(msg.len, @as(usize, @intCast(n - 1)));
-    @memcpy(z[0..k], msg[0..k]);
-    z[k] = 0;
+    loadext.osDlError(n, z);
 }
 
-fn zDlSym(_: *sqlite3_vfs, _: ?*anyopaque, _: ?[*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void {
-    return null;
+fn zDlSym(_: *sqlite3_vfs, h: ?*anyopaque, z: ?[*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+    return loadext.osDlSym(h, z orelse return null);
 }
 
-fn zDlClose(_: *sqlite3_vfs, _: ?*anyopaque) callconv(.c) void {}
+fn zDlClose(_: *sqlite3_vfs, h: ?*anyopaque) callconv(.c) void {
+    loadext.osDlClose(h);
+}
 
 fn zRandomness(_: *sqlite3_vfs, n: c_int, z: [*]u8) callconv(.c) c_int {
     if (n <= 0) return 0;

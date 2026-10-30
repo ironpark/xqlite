@@ -2303,6 +2303,10 @@ pub const Sqlite3 = struct {
     /// xqlite: the state the C ABI (src/capi) keeps for a connection it
     /// opened (hooks, C callbacks, filenames); the engine never reads it.
     capi: ?*anyopaque = null,
+    /// xqlite: carray() is found as an eponymous virtual table (what
+    /// SQLITE_ENABLE_CARRAY compiles in; src/ext/carray.zig). The C ABI
+    /// turns it on, as it has sqlite3_carray_bind().
+    enable_carray: bool = false,
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

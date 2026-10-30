@@ -17,6 +17,8 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "find_vfs" },
     // The shared stores of the memdb VFS (memdb_g) and its settings.
     .{ "src/vfs/memdb.zig", "state" },
+    // How load_extension() loads a library, which the C ABI sets.
+    .{ "src/sql/global.zig", "load_extension" },
     // The POSIX lock table, which every connection has to share.
     .{ "src/vfs/unix.zig", "inodes" },
     // The C ABI's process-wide state (sqlite3_config(), the auto

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/uio.h>
 #include "sqlite3.h"
 #include "xqlite.h"
 
@@ -981,8 +982,9 @@ static void test_misc(void){
   CHECK(sqlite3_set_authorizer(db, 0, 0)==SQLITE_OK);
   {
     char *zErr = 0;
+    /* Off until enabled. */
     CHECK(sqlite3_load_extension(db, "x", 0, &zErr)==SQLITE_ERROR);
-    CHECK(zErr!=0);
+    CHECK_STR(zErr, "not authorized");
     sqlite3_free(zErr);
   }
   CHECK(sqlite3_column_table_name(0, 0)==0);
@@ -1263,11 +1265,194 @@ static void test_b_blob(const char *zDir){
 static void test_b_status(void){
 }
 
-static void test_b_ext(const char *zDir){
-  (void)zDir;
+/* The loadable extension tools/capi/ext_test.c (argv[1]), or null. */
+static const char *zExtPath = 0;
+
+static int nAutoApi = 0;
+static int auto_api(sqlite3 *db, char **pzErr, const void *pApi){
+  (void)db; (void)pzErr;
+  if( pApi ) nAutoApi++;
+  return SQLITE_OK;
 }
 
+static void test_b_ext(const char *zDir){
+  sqlite3 *db = 0, *db2 = 0;
+  char *zErr = 0;
+  int on = -1;
+  (void)zDir;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+
+  /* Refused until enabled, and the SQL function separately. */
+  CHECK_STR(one(db, "SELECT load_extension('x')"), "ERROR: not authorized");
+  CHECK(sqlite3_load_extension(db, "x", 0, &zErr)==SQLITE_ERROR);
+  CHECK_STR(zErr, "not authorized");
+  sqlite3_free(zErr); zErr = 0;
+  CHECK_RC(sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 1, &on), SQLITE_OK, db);
+  CHECK(on==1);
+  CHECK_STR(one(db, "SELECT load_extension('x')"), "ERROR: not authorized");
+
+  /* A library that is not there: the message is the loader's. */
+  CHECK(sqlite3_load_extension(db, "/nonexistent/xq-no-such-ext", 0, &zErr)==SQLITE_ERROR);
+  CHECK(zErr!=0 && strstr(zErr, "/nonexistent/xq-no-such-ext")!=0);
+  sqlite3_free(zErr); zErr = 0;
+  CHECK(sqlite3_load_extension(db, "", 0, &zErr)==SQLITE_ERROR);
+  CHECK(zErr!=0);
+  sqlite3_free(zErr); zErr = 0;
+
+  if( zExtPath ){
+    char zNoSuffix[600];
+    char *zDot;
+    /* No sqlite3_extension_init: the entry point is derived from the
+    ** file name (libxqexttest.so -> sqlite3_xqexttest_init). */
+    CHECK_RC(sqlite3_load_extension(db, zExtPath, 0, &zErr), SQLITE_OK, db);
+    CHECK(zErr==0);
+    CHECK_STR(one(db, "SELECT xq_ext_hello('world')"), "hello world");
+    CHECK_STR(one(db, "SELECT xq_ext_sum(value) FROM (SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 39)"), "42");
+    CHECK(atoi(one(db, "SELECT xq_ext_version()"))==SQLITE_VERSION_NUMBER);
+
+    /* Named entry points: missing, and failing. */
+    CHECK(sqlite3_load_extension(db, zExtPath, "xq_no_such_entry", &zErr)==SQLITE_ERROR);
+    CHECK(zErr!=0 && strstr(zErr, "xq_no_such_entry")!=0);
+    sqlite3_free(zErr); zErr = 0;
+    CHECK(sqlite3_load_extension(db, zExtPath, "xq_ext_fail", &zErr)==SQLITE_ERROR);
+    CHECK_STR(zErr, "error during initialization: boom 42");
+    sqlite3_free(zErr); zErr = 0;
+
+    /* The suffix is tried when the name has none. */
+    snprintf(zNoSuffix, sizeof(zNoSuffix), "%s", zExtPath);
+    zDot = strrchr(zNoSuffix, '.');
+    if( zDot && strchr(zDot, '/')==0 ) *zDot = 0;
+    CHECK_RC(sqlite3_open(":memory:", &db2), SQLITE_OK, db2);
+    CHECK_RC(sqlite3_enable_load_extension(db2, 1), SQLITE_OK, db2);
+    CHECK_RC(sqlite3_load_extension(db2, zNoSuffix, 0, 0), SQLITE_OK, db2);
+    CHECK_STR(one(db2, "SELECT xq_ext_hello('again')"), "hello again");
+    sqlite3_close(db2);
+
+    /* The SQL function, once sqlite3_enable_load_extension() allows it. */
+    CHECK_RC(sqlite3_open(":memory:", &db2), SQLITE_OK, db2);
+    CHECK_STR(one(db2, "SELECT xq_ext_hello('x')"), "ERROR: no such function: xq_ext_hello");
+    CHECK_RC(sqlite3_enable_load_extension(db2, 1), SQLITE_OK, db2);
+    {
+      char zSql[700];
+      sqlite3_snprintf(sizeof(zSql), zSql, "SELECT load_extension(%Q)", zExtPath);
+      CHECK_STR(one(db2, zSql), "NULL");
+      sqlite3_snprintf(sizeof(zSql), zSql, "SELECT load_extension(%Q, 'xq_ext_fail')", zExtPath);
+      CHECK_STR(one(db2, zSql), "ERROR: error during initialization: boom 42");
+    }
+    CHECK_STR(one(db2, "SELECT xq_ext_hello('sql')"), "hello sql");
+    CHECK_RC(sqlite3_enable_load_extension(db2, 0), SQLITE_OK, db2);
+    CHECK_STR(one(db2, "SELECT load_extension('x')"), "ERROR: not authorized");
+    sqlite3_close(db2);
+  }
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
+
+  /* Automatic extensions get the sqlite3_api_routines table too. */
+  CHECK_RC(sqlite3_auto_extension((void(*)(void))auto_api), SQLITE_OK, 0);
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK(nAutoApi==1);
+  sqlite3_close(db);
+  sqlite3_cancel_auto_extension((void(*)(void))auto_api);
+}
+
+static int nCarrayDel = 0;
+static void carray_del(void *p){ (void)p; nCarrayDel++; }
+
+/* carray() needs SQLITE_ENABLE_CARRAY in SQLite; xqlite's C ABI has it. */
 static void test_b_carray(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  static int aI32[] = { 1, 2, 3, 40 };
+  static sqlite3_int64 aI64[] = { 5000000000LL, -7 };
+  static double aDbl[] = { 1.5, -0.25 };
+  static const char *azText[] = { "a", 0, "it's" };
+  struct iovec aBlob[2];
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  aBlob[0].iov_base = (void*)"\x01\x02"; aBlob[0].iov_len = 2;
+  aBlob[1].iov_base = 0; aBlob[1].iov_len = 0;
+
+  /* carray(PTR, N [, TYPE]) with sqlite3_bind_pointer(). */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT group_concat(value, ','), group_concat(rowid, ',') FROM carray(?1, ?2)", -1, &p, 0), SQLITE_OK, db);
+  sqlite3_bind_pointer(p, 1, aI32, "carray", 0);
+  sqlite3_bind_int(p, 2, 4);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1,2,3,40");
+  CHECK_STR(sqlite3_column_text(p, 1), "1,2,3,4");
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT group_concat(value, ','), max(ctype), max(count) FROM carray(?1, 2, ?2)", -1, &p, 0), SQLITE_OK, db);
+  sqlite3_bind_pointer(p, 1, aI64, "carray", 0);
+  sqlite3_bind_text(p, 2, "INT64", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "5000000000,-7");
+  CHECK_STR(sqlite3_column_text(p, 1), "int64");
+  CHECK(sqlite3_column_int(p, 2)==2);
+  sqlite3_reset(p);
+  sqlite3_bind_pointer(p, 1, aDbl, "carray", 0);
+  sqlite3_bind_text(p, 2, "double", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1.5,-0.25");
+  sqlite3_reset(p);
+  sqlite3_bind_pointer(p, 1, (void*)azText, "carray", 0);
+  sqlite3_bind_text(p, 2, "char*", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "a");
+  sqlite3_reset(p);
+  sqlite3_bind_pointer(p, 1, aI32, "carray", 0);
+  sqlite3_bind_text(p, 2, "int8", -1, SQLITE_STATIC);
+  CHECK(sqlite3_step(p)==SQLITE_ERROR);
+  CHECK_STR(sqlite3_errmsg(db), "unknown datatype: 'int8'");
+  sqlite3_reset(p);
+  /* A pointer of another type is no array: no rows. */
+  sqlite3_bind_pointer(p, 1, aI32, "not-carray", 0);
+  sqlite3_bind_text(p, 2, "int32", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK(sqlite3_column_type(p, 0)==SQLITE_NULL);
+  sqlite3_finalize(p);
+  CHECK_STR(one(db, "SELECT count(*) FROM carray"), "0");
+
+  /* sqlite3_carray_bind(): the one-argument form. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT group_concat(quote(value), ','), max(ctype) FROM carray(?1)", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aI32, 3, SQLITE_CARRAY_INT32, SQLITE_STATIC), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1,2,3");
+  CHECK_STR(sqlite3_column_text(p, 1), "int32");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aI64, 2, SQLITE_CARRAY_INT64, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "5000000000,-7");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, (void*)azText, 3, SQLITE_CARRAY_TEXT, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "'a',NULL,'it''s'");
+  CHECK_STR(sqlite3_column_text(p, 1), "char*");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aBlob, 2, SQLITE_CARRAY_BLOB, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "X'0102',X''");
+  CHECK_STR(sqlite3_column_text(p, 1), "struct iovec");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aDbl, 2, SQLITE_CARRAY_DOUBLE, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1.5,-0.25");
+  sqlite3_reset(p);
+
+  /* Destructors: called on pDestroy when the binding goes, and at once
+  ** when the bind fails. */
+  nCarrayDel = 0;
+  CHECK_RC(sqlite3_carray_bind_v2(p, 1, aI32, 4, SQLITE_CARRAY_INT32, carray_del, aI64), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1,2,3,40");
+  sqlite3_reset(p);
+  CHECK(nCarrayDel==0);
+  sqlite3_clear_bindings(p);
+  CHECK(nCarrayDel==1);
+  CHECK(sqlite3_carray_bind(p, 1, aI32, 4, 99, carray_del)==SQLITE_ERROR);
+  CHECK(nCarrayDel==2);
+  CHECK(sqlite3_carray_bind(p, 7, aI32, 4, SQLITE_CARRAY_INT32, carray_del)==SQLITE_RANGE);
+  CHECK(nCarrayDel==3);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aI32, 2, SQLITE_CARRAY_INT32, carray_del), SQLITE_OK, db);
+  sqlite3_finalize(p);
+  CHECK(nCarrayDel==4);
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
 }
 
 static sqlite3_file *pUriMain = 0;
@@ -1361,8 +1546,9 @@ static void test_b_snapshot(const char *zDir){
 
 /* ======================================================== end of group B */
 
-int main(void){
+int main(int argc, char **argv){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
+  if( argc>1 ) zExtPath = argv[1];
   if( mkdtemp(zDir)==0 ){ perror("mkdtemp"); return 1; }
   test_library();
   test_printf();

@@ -213,6 +213,9 @@ pub const TRACE_CLOSE: u32 = 0x08;
 pub const Ext = struct {
     /// The VFS the connection opened its files with (its sqlite3_vfs).
     vfs: *@import("vfs.zig").Entry,
+    /// The shared libraries sqlite3_load_extension() opened (aExtension),
+    /// closed with the connection.
+    extensions: std.ArrayList(?*anyopaque) = .empty,
     busy: Hook(CBusy) = .{},
     wal: Hook(CWal) = .{},
     commit: Hook(CCommit) = .{},
@@ -306,6 +309,7 @@ pub fn ensureInit() void {
     defer state.lock.unlock();
     if (!state.initialized) {
         @import("vfs.zig").initDefault();
+        @import("loadext.zig").initHook();
         @atomicStore(bool, &state.initialized, true, .release);
     }
 }

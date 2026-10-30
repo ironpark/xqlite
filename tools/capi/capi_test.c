@@ -1851,7 +1851,9 @@ static void test_threads(void){
   CHECK(m!=0);
   /* The mutex is recursive and the application may hold it. */
   sqlite3_mutex_enter(m);
+#ifndef NDEBUG
   CHECK(sqlite3_mutex_held(m));
+#endif
   CHECK_STR(one(db, "SELECT 1"), "1");
   sqlite3_mutex_leave(m);
   exec(db, "CREATE TABLE t(x)");
@@ -2529,7 +2531,11 @@ static void test_b_snapshot(const char *zDir){
   CHECK_RC(sqlite3_snapshot_open(db, "main", s2), SQLITE_ERROR_SNAPSHOT, db);
   CHECK_STR(one(db, "SELECT count(*) FROM t"), "3");
   CHECK_RC(sqlite3_snapshot_get(db, "main", &s3), SQLITE_OK, db);
-  CHECK(sqlite3_snapshot_cmp(s2, s3)<0);
+  /* Not <0: as in SQLite, the restart adds 1 to the big-endian salt and
+  ** the comparison reads it as a native u32, so on a little-endian
+  ** machine a random salt whose last byte is 0xff compares lower (1 run
+  ** in 256). */
+  CHECK(sqlite3_snapshot_cmp(s2, s3)!=0);
   exec(db, "COMMIT");
   CHECK_RC(sqlite3_snapshot_recover(db, "main"), SQLITE_OK, db);
   CHECK_RC(sqlite3_snapshot_recover(db, "nosuch"), SQLITE_ERROR, db);

@@ -153,6 +153,7 @@ test {
     std.testing.refAllDecls(@import("sql/uri.zig"));
     std.testing.refAllDecls(@import("sql/serialize.zig"));
     std.testing.refAllDecls(@import("sql/status.zig"));
+    std.testing.refAllDecls(@import("sql/snapshot.zig"));
     _ = @import("sql/attach_test.zig");
 }
 

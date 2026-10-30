@@ -423,6 +423,39 @@ pub const Pager = struct {
         return @ptrCast(p.path.ptr);
     }
 
+    // SQLITE_ENABLE_SNAPSHOT: the pager's part (sqlite3PagerSnapshot*()),
+    // which fails with error.NotWal when the database is not in WAL mode.
+
+    /// Port of sqlite3PagerSnapshotGet(): the snapshot of the open read
+    /// transaction, null if it has none to tell apart.
+    pub fn snapshotGet(p: *Pager) error{NotWal}!?wal_mod.IndexHdr {
+        const w = p.wal orelse return error.NotWal;
+        return w.snapshotGet();
+    }
+
+    /// Port of sqlite3PagerSnapshotOpen().
+    pub fn snapshotOpen(p: *Pager, snap: ?*const wal_mod.IndexHdr) error{NotWal}!void {
+        const w = p.wal orelse return error.NotWal;
+        w.snapshotOpen(snap);
+    }
+
+    /// Port of sqlite3PagerSnapshotRecover().
+    pub fn snapshotRecover(p: *Pager) (Error || error{NotWal})!void {
+        const w = p.wal orelse return error.NotWal;
+        return w.snapshotRecover();
+    }
+
+    /// Port of sqlite3PagerSnapshotCheck().
+    pub fn snapshotCheck(p: *Pager, snap: *const wal_mod.IndexHdr) (Error || error{NotWal})!void {
+        const w = p.wal orelse return error.NotWal;
+        return w.snapshotCheck(snap);
+    }
+
+    /// Port of sqlite3PagerSnapshotUnlock().
+    pub fn snapshotUnlock(p: *Pager) void {
+        p.wal.?.snapshotUnlock();
+    }
+
     /// The counters of `stat` (PAGER_STAT_*).
     pub const Stat = enum(u2) { hit, miss, write, spill };
 

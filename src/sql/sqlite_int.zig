@@ -1597,6 +1597,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.Busy, RC.BUSY },
     .{ error.BusyRecovery, RC.BUSY_RECOVERY },
     .{ error.BusySnapshot, RC.BUSY_SNAPSHOT },
+    .{ error.ErrorSnapshot, RC.ERROR_SNAPSHOT },
     .{ error.Locked, RC.LOCKED },
     .{ error.OutOfMemory, RC.NOMEM },
     .{ error.ReadOnly, RC.READONLY },

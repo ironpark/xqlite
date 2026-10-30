@@ -1607,7 +1607,75 @@ static void test_b_vfs(const char *zDir){
 }
 
 static void test_b_snapshot(const char *zDir){
-  (void)zDir;
+  sqlite3 *db = 0, *db2 = 0, *mem = 0;
+  sqlite3_snapshot *s1 = 0, *s2 = 0, *s3 = 0;
+  char zPath[512];
+  snprintf(zPath, sizeof(zPath), "%s/snap.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  CHECK_RC(sqlite3_open(zPath, &db2), SQLITE_OK, db2);
+  CHECK_STR(one(db, "PRAGMA journal_mode=wal"), "wal");
+  exec(db, "CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+
+  /* Only inside a transaction, not on TEMP. */
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s1), SQLITE_ERROR, db);
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_get(db, "temp", &s1), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s1), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "1");
+  exec(db, "COMMIT");
+
+  /* Another connection writes; the snapshot still reads the old state. */
+  exec(db2, "INSERT INTO t VALUES(2)");
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "1");
+  CHECK_RC(sqlite3_exec(db, "INSERT INTO t VALUES(3)", 0, 0, 0), SQLITE_BUSY, db);
+  CHECK(sqlite3_extended_errcode(db)==SQLITE_BUSY_SNAPSHOT);
+  exec(db, "COMMIT");
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "2");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_ERROR, db);
+
+  /* A newer snapshot; moving a read transaction to another one. */
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s2), SQLITE_OK, db);
+  CHECK(sqlite3_snapshot_cmp(s1, s2)<0);
+  CHECK(sqlite3_snapshot_cmp(s2, s1)>0);
+  CHECK(sqlite3_snapshot_cmp(s1, s1)==0);
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "1");
+  exec(db, "COMMIT");
+
+  /* A checkpoint that restarts the WAL makes the snapshots unavailable. */
+  CHECK_RC(sqlite3_wal_checkpoint_v2(db2, 0, SQLITE_CHECKPOINT_TRUNCATE, 0, 0), SQLITE_OK, db2);
+  exec(db2, "INSERT INTO t VALUES(4)");
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_ERROR_SNAPSHOT, db);
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s2), SQLITE_ERROR_SNAPSHOT, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "3");
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s3), SQLITE_OK, db);
+  CHECK(sqlite3_snapshot_cmp(s2, s3)<0);
+  exec(db, "COMMIT");
+  CHECK_RC(sqlite3_snapshot_recover(db, "main"), SQLITE_OK, db);
+  CHECK_RC(sqlite3_snapshot_recover(db, "nosuch"), SQLITE_ERROR, db);
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s3), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "3");
+  exec(db, "COMMIT");
+
+  /* Not a WAL database. */
+  CHECK_RC(sqlite3_open(":memory:", &mem), SQLITE_OK, mem);
+  exec(mem, "BEGIN");
+  sqlite3_snapshot_free(s2);
+  s2 = (sqlite3_snapshot*)1;
+  CHECK_RC(sqlite3_snapshot_get(mem, "main", &s2), SQLITE_ERROR, mem);
+  CHECK_RC(sqlite3_snapshot_open(mem, "main", s3), SQLITE_ERROR, mem);
+  exec(mem, "COMMIT");
+  CHECK_RC(sqlite3_snapshot_recover(mem, "main"), SQLITE_ERROR, mem);
+  sqlite3_close(mem);
+  sqlite3_snapshot_free(s1);
+  sqlite3_snapshot_free(s3);
+  sqlite3_close(db2);
+  sqlite3_close(db);
 }
 
 /* ======================================================== end of group B */

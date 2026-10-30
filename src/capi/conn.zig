@@ -1008,23 +1008,32 @@ pub export fn sqlite3_deserialize(db_arg: ?*Handle, z_schema: ?[*:0]const u8, p_
 
 // ============================================ not supported: stubs
 
-pub export fn sqlite3_snapshot_get(_: ?*Handle, _: ?[*:0]const u8, pp: ?*?*anyopaque) callconv(.c) c_int {
-    if (pp) |p| p.* = null;
-    return RC.ERROR;
+// ============================================================ snapshots
+
+const snapshot = @import("../sql/snapshot.zig");
+
+pub export fn sqlite3_snapshot_get(db_arg: ?*Handle, z_db: ?[*:0]const u8, pp: ?*?*snapshot.Snapshot) callconv(.c) c_int {
+    const db = db_arg orelse return RC.MISUSE;
+    const out = pp orelse return RC.MISUSE;
+    return snapshot.get(db, c.span(z_db), out);
 }
 
-pub export fn sqlite3_snapshot_open(_: ?*Handle, _: ?[*:0]const u8, _: ?*anyopaque) callconv(.c) c_int {
-    return RC.ERROR;
+pub export fn sqlite3_snapshot_open(db_arg: ?*Handle, z_db: ?[*:0]const u8, p: ?*snapshot.Snapshot) callconv(.c) c_int {
+    const db = db_arg orelse return RC.MISUSE;
+    return snapshot.open(db, c.span(z_db), p orelse return RC.MISUSE);
 }
 
-pub export fn sqlite3_snapshot_free(_: ?*anyopaque) callconv(.c) void {}
-
-pub export fn sqlite3_snapshot_cmp(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) c_int {
-    return 0;
+pub export fn sqlite3_snapshot_free(p: ?*snapshot.Snapshot) callconv(.c) void {
+    c.malloc.free(p);
 }
 
-pub export fn sqlite3_snapshot_recover(_: ?*Handle, _: ?[*:0]const u8) callconv(.c) c_int {
-    return RC.ERROR;
+pub export fn sqlite3_snapshot_cmp(a: ?*snapshot.Snapshot, b: ?*snapshot.Snapshot) callconv(.c) c_int {
+    return snapshot.cmp(a.?, b.?);
+}
+
+pub export fn sqlite3_snapshot_recover(db_arg: ?*Handle, z_db: ?[*:0]const u8) callconv(.c) c_int {
+    const db = db_arg orelse return RC.MISUSE;
+    return snapshot.recover(db, c.span(z_db));
 }
 
 // ==================================================== xqlite extensions

@@ -124,7 +124,25 @@ pub const Hooks = struct {
     /// `unsafe`, so they must be innocuous, and deterministic if they may
     /// appear in an index, a CHECK or a generated column.
     engine_functions: []const FuncDef = &.{},
+    /// Engine table-valued functions (eponymous virtual tables) the
+    /// dialect's trees use, visible in every dialect for the same reason
+    /// as engine_functions: build.locateTable() calls it for an unknown
+    /// table named "xq_...", and it registers the module called `name`
+    /// on `db` and returns it, null if `name` is not one of its.
+    table_function: ?*const fn (db: *Sqlite3, name: []const u8) ?*int.Module = null,
 };
+
+/// The module of the engine table-valued function `name`
+/// (Hooks.table_function of any dialect), registered on `db`; null if
+/// there is none.
+pub fn tableFunction(db: *Sqlite3, name: []const u8) ?*int.Module {
+    inline for (comptime std.enums.values(Dialect)) |d| {
+        if (comptime module(d).hooks.table_function) |f| {
+            if (f(db, name)) |m| return m;
+        }
+    }
+    return null;
+}
 
 /// Everything that makes a dialect.
 pub const Spec = struct {

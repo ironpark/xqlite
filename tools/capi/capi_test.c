@@ -891,6 +891,52 @@ static void test_vfs(const char *zDir){
   CHECK(sqlite3_vfs_find("xq-shim")==0);
 }
 
+/* -------------------------------------------------------------------- hooks */
+
+static int nCommit = 0, nRollback = 0, nProgress = 0, vetoCommit = 0;
+static char zUpdates[256];
+static int commit_hook(void *p){ (void)p; nCommit++; return vetoCommit; }
+static void rollback_hook(void *p){ (void)p; nRollback++; }
+static void update_hook(void *p, int op, const char *zDb, const char *zTab, sqlite3_int64 rowid){
+  char buf[64];
+  (void)p;
+  snprintf(buf, sizeof(buf), "%c %s.%s %lld;", op==SQLITE_INSERT ? 'I' : op==SQLITE_UPDATE ? 'U' : op==SQLITE_DELETE ? 'D' : '?', zDb, zTab, rowid);
+  strcat(zUpdates, buf);
+}
+static int progress_cb(void *p){ (void)p; nProgress++; return nProgress>=5; }
+
+static void test_hooks(void){
+  sqlite3 *db = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, x)");
+  CHECK(sqlite3_commit_hook(db, commit_hook, 0)==0);
+  sqlite3_rollback_hook(db, rollback_hook, 0);
+  sqlite3_update_hook(db, update_hook, 0);
+  exec(db, "INSERT INTO t VALUES(1, 'a'), (2, 'b')");
+  CHECK(nCommit==1);
+  exec(db, "UPDATE t SET x = 'c' WHERE id = 2; DELETE FROM t WHERE id = 1");
+  CHECK_STR(zUpdates, "I main.t 1;I main.t 2;U main.t 2;D main.t 1;");
+  CHECK(nCommit==3);
+  exec(db, "BEGIN; INSERT INTO t VALUES(3, 'd'); ROLLBACK");
+  CHECK(nRollback==1);
+  vetoCommit = 1;
+  CHECK_RC(sqlite3_exec(db, "INSERT INTO t VALUES(4, 'e')", 0, 0, 0), SQLITE_CONSTRAINT, db);
+  CHECK(sqlite3_extended_errcode(db)==SQLITE_CONSTRAINT_COMMITHOOK);
+  CHECK(nRollback==2);
+  vetoCommit = 0;
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "1");
+  sqlite3_commit_hook(db, 0, 0);
+  sqlite3_update_hook(db, 0, 0);
+  sqlite3_rollback_hook(db, 0, 0);
+
+  sqlite3_progress_handler(db, 10, progress_cb, 0);
+  CHECK_STR(one(db, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c"), "ERROR: interrupted");
+  CHECK(nProgress==5);
+  sqlite3_progress_handler(db, 0, 0, 0);
+  CHECK_STR(one(db, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<1000) SELECT count(*) FROM c"), "1000");
+  sqlite3_close(db);
+}
+
 /* -------------------------------------------------------------------- misc */
 
 static int nAuto = 0;
@@ -959,6 +1005,7 @@ int main(void){
   test_dialects();
   test_files(zDir);
   test_trace();
+  test_hooks();
   test_vtab();
   test_vfs(zDir);
   test_misc();

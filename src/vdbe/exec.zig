@@ -265,7 +265,8 @@ pub const Exec = struct {
                 OP.IfNullRow => arith.opIfNullRow(e, op),
 
                 // Records.
-                OP.Column => record.opColumn(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
+                // In line: the most frequent opcode (3-6% on column-heavy loops).
+                OP.Column => @call(.always_inline, record.opColumn, .{ e, op }) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.TypeCheck => record.opTypeCheck(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.Affinity => record.opAffinity(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.MakeRecord => record.opMakeRecord(e, op) catch |err| return e.abortDueToError(err, n_vm_step),

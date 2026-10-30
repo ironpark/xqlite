@@ -15,7 +15,11 @@
 #ifndef _GNU_SOURCE
 # define _GNU_SOURCE /* PTHREAD_MUTEX_RECURSIVE with glibc */
 #endif
-#include <pthread.h>
+#if defined(__wasi__) && !defined(_REENTRANT)
+# define XQ_NO_THREADS 1 /* single-threaded WebAssembly: no-op mutexes */
+#else
+# include <pthread.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include "sqlite3.h"
@@ -327,6 +331,26 @@ int sqlite3_test_control(int op, ...){
 ** extensions. The library itself does not lock connections
 ** (multi-thread mode, sqlite3_threadsafe() == 2).
 */
+#ifdef XQ_NO_THREADS
+struct sqlite3_mutex { int id; int nRef; };
+static sqlite3_mutex aStatic[12];
+sqlite3_mutex *sqlite3_mutex_alloc(int id){
+  sqlite3_mutex *p;
+  if( id==SQLITE_MUTEX_FAST || id==SQLITE_MUTEX_RECURSIVE ){
+    p = malloc(sizeof(*p));
+    if( p ){ p->id = id; p->nRef = 0; }
+    return p;
+  }
+  if( id<2 || id-2>=12 ) return 0;
+  return &aStatic[id-2];
+}
+void sqlite3_mutex_free(sqlite3_mutex *p){ if( p && p->id<=1 ) free(p); }
+void sqlite3_mutex_enter(sqlite3_mutex *p){ if( p ) p->nRef++; }
+int sqlite3_mutex_try(sqlite3_mutex *p){ if( p ) p->nRef++; return SQLITE_OK; }
+void sqlite3_mutex_leave(sqlite3_mutex *p){ if( p ) p->nRef--; }
+int sqlite3_mutex_held(sqlite3_mutex *p){ return p==0 || p->nRef>0; }
+int sqlite3_mutex_notheld(sqlite3_mutex *p){ return p==0 || p->nRef==0; }
+#else
 struct sqlite3_mutex {
   pthread_mutex_t m;
   int id;
@@ -399,3 +423,4 @@ int sqlite3_mutex_held(sqlite3_mutex *p){
 int sqlite3_mutex_notheld(sqlite3_mutex *p){
   return p==0 || p->nRef==0 || !pthread_equal(p->owner, pthread_self());
 }
+#endif /* XQ_NO_THREADS */

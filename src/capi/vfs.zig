@@ -1,7 +1,8 @@
 //! sqlite3_vfs_find(), sqlite3_vfs_register() and sqlite3_vfs_unregister():
 //! the VFS registry of the C ABI, with adapters both ways.
 //!
-//! - The default VFS, "unix", is the engine's POSIX VFS (vfs/unix.zig).
+//! - The default VFS, "unix" ("wasi" on wasm32-wasi), is the engine's OS
+//!   VFS (vfs/unix.zig, vfs/wasi.zig).
 //!   Its sqlite3_vfs (unix_c) calls it, so a C VFS that wraps the
 //!   default one (a shim that delegates xOpen to sqlite3_vfs_find(0), as
 //!   SQLite's appendvfs and test VFSes do) gets working files.
@@ -176,7 +177,7 @@ pub const Entry = struct {
     registered: bool = true,
 };
 
-var unix_vfs: c.UnixVfs = undefined;
+var unix_vfs: c.OsVfs = undefined;
 var unix_c: sqlite3_vfs = undefined;
 var unix_entry: Entry = undefined;
 /// The first VFS of the list is the default.
@@ -184,13 +185,13 @@ var head: ?*Entry = null;
 
 /// Set up the default VFS (from sqlite3_initialize(), under its lock).
 pub fn initDefault() void {
-    unix_vfs = c.UnixVfs.init(c.gpa, c.io());
+    unix_vfs = c.OsVfs.init(c.gpa, c.io());
     unix_c = .{
         .iVersion = 3,
         .szOsFile = @sizeOf(ZigFile),
         .mxPathname = 1024,
         .pNext = null,
-        .zName = "unix",
+        .zName = if (@import("builtin").os.tag == .wasi) "wasi" else "unix",
         .pAppData = null,
         .xOpen = zOpen,
         .xDelete = zDelete,

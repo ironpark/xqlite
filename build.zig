@@ -453,9 +453,13 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     const static = make.lib(b, target, optimize, name, .static);
     const shared = make.lib(b, target, optimize, name, .dynamic);
 
-    if (enabled) {
+    // WebAssembly: wasm32-wasi gets the static library (a WASI program
+    // links it); wasm32-freestanding, without a C library, gets none (its
+    // module is `zig build wasm`).
+    const wasm = target.result.cpu.arch.isWasm();
+    if (enabled and target.result.os.tag != .freestanding) {
         b.installArtifact(static);
-        b.installArtifact(shared);
+        if (!wasm) b.installArtifact(shared);
         b.installFile("include/sqlite3.h", "include/sqlite3.h");
         b.installFile("include/xqlite.h", "include/xqlite.h");
         const pc = b.addWriteFiles().add(b.fmt("{s}.pc", .{name}), b.fmt(

@@ -16,7 +16,8 @@ pub const util = @import("../sql/util.zig");
 pub const ctype = @import("../util/ctype.zig");
 pub const dialect = @import("../dialect/dialect.zig");
 pub const vfs = @import("../vfs/vfs.zig");
-pub const UnixVfs = @import("../vfs/unix.zig").UnixVfs;
+/// The operating system's VFS: POSIX, or WASI on wasm32-wasi.
+pub const OsVfs = vfs.OsVfs;
 
 /// sqlite3, sqlite3_stmt, sqlite3_value and sqlite3_context are the
 /// engine's own objects: C sees them as opaque pointers.

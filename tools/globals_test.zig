@@ -14,7 +14,7 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "heap_limit" },
     .{ "src/sql/global.zig", "prng" },
     .{ "src/sql/global.zig", "testctrl" },
-    .{ "src/sql/global.zig", "temp_directory" },
+    .{ "src/vfs/root.zig", "temp_directory" },
     .{ "src/sql/global.zig", "data_directory" },
     // The C ABI's VFS registry, for ATTACH's vfs= parameter.
     .{ "src/sql/global.zig", "find_vfs" },

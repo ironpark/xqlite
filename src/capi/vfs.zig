@@ -23,7 +23,7 @@
 
 const std = @import("std");
 const c = @import("common.zig");
-const memdb = @import("../vfs/memdb.zig");
+const memdb = @import("../sql/memdb.zig");
 
 const RC = c.RC;
 const Vfs = c.vfs.Vfs;

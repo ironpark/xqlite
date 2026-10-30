@@ -19,11 +19,12 @@ pub const source_id = "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a13
 
 pub export const sqlite3_version: [version.len:0]u8 = version.*;
 
-// sqlite3_temp_directory and sqlite3_data_directory are the engine's
-// (global.zig): the unix VFS creates temporary files in the first.
+// sqlite3_temp_directory is the VFS package's (the unix VFS creates
+// temporary files there), sqlite3_data_directory the engine's
+// (global.zig).
 comptime {
     const global = @import("../sql/global.zig");
-    @export(&global.temp_directory, .{ .name = "sqlite3_temp_directory" });
+    @export(&@import("../vfs/root.zig").temp_directory, .{ .name = "sqlite3_temp_directory" });
     @export(&global.data_directory, .{ .name = "sqlite3_data_directory" });
 }
 
@@ -251,7 +252,7 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
         },
         // MEMDB_MAXSIZE: the default largest size of a memdb database.
         29 => {
-            @import("../vfs/memdb.zig").state.default_max_size = a;
+            @import("../sql/memdb.zig").state.default_max_size = a;
             return RC.OK;
         },
         // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, MUTEX, PCACHE,

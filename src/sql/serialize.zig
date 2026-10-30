@@ -19,7 +19,7 @@ const prepare = @import("prepare.zig");
 const legacy = @import("legacy.zig");
 const api = @import("../vdbe/api.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
-const memdb = @import("../vfs/memdb.zig");
+const memdb = @import("memdb.zig");
 
 const Sqlite3 = int.Sqlite3;
 const RC = int.RC;

@@ -20,7 +20,7 @@ const main_mod = @import("main.zig");
 const malloc = @import("malloc.zig");
 const uri = @import("uri.zig");
 const global = @import("global.zig");
-const memdb = @import("../vfs/memdb.zig");
+const memdb = @import("memdb.zig");
 const ctype = @import("../util/ctype.zig");
 
 const Parse = int.Parse;

@@ -765,11 +765,12 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             if (right) |z| changeTempStorage(p, z) else returnSingleInt(v, db.temp_store);
         },
 
-        // PRAGMA temp_store_directory[=DIR]: sqlite3_temp_directory.
+        // PRAGMA temp_store_directory[=DIR]: sqlite3_temp_directory, which
+        // the VFS package keeps (the POSIX VFS reads it).
         .temp_store_directory => {
-            const global = @import("global.zig");
+            const vfs_pkg = @import("../vfs/root.zig");
             const z = right orelse {
-                returnSingleText(v, if (global.temp_directory) |d| std.mem.span(d) else null);
+                returnSingleText(v, if (vfs_pkg.temp_directory) |d| std.mem.span(d) else null);
                 return;
             };
             if (z.len > 0) {
@@ -783,8 +784,8 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
             if (db.temp_store <= 1 and !invalidateTempStorage(p)) return;
             const malloc_mod = @import("malloc.zig");
             const new: ?[*:0]u8 = if (z.len > 0) (try malloc_mod.allocator.dupeSentinel(u8, z, 0)).ptr else null;
-            malloc_mod.free(global.temp_directory);
-            global.temp_directory = new;
+            malloc_mod.free(vfs_pkg.temp_directory);
+            vfs_pkg.temp_directory = new;
         },
 
         // PRAGMA data_store_directory: Windows only in SQLite, where it

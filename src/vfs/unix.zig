@@ -183,11 +183,12 @@ pub const UnixVfs = struct {
 
 /// A pathname under construction (DbPath).
 /// Port of unixTempFileDir(): the directory of temporary files, the
-/// first of sqlite3_temp_directory (global.temp_directory, also PRAGMA
-/// temp_store_directory), $SQLITE_TMPDIR, $TMPDIR, /var/tmp, /usr/tmp,
-/// /tmp and "." that is a directory the process can write and search.
+/// first of sqlite3_temp_directory (root.zig's temp_directory, which
+/// PRAGMA temp_store_directory sets), $SQLITE_TMPDIR, $TMPDIR, /var/tmp,
+/// /usr/tmp, /tmp and "." that is a directory the process can write and
+/// search.
 fn tempFileDir() ?[]const u8 {
-    const temp_directory = @import("../sql/global.zig").temp_directory;
+    const temp_directory = @import("root.zig").temp_directory;
     for (0..7) |i| {
         const z: ?[*:0]const u8 = switch (i) {
             0 => temp_directory,
@@ -997,7 +998,7 @@ test "unix: delete and temp files" {
 }
 
 test "unix: the directory of temporary files" {
-    const global = @import("../sql/global.zig");
+    const global = @import("root.zig");
     const saved = global.temp_directory;
     defer global.temp_directory = saved;
     // sqlite3_temp_directory comes first, if it is a writable directory.

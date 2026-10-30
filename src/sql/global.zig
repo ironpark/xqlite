@@ -4,7 +4,7 @@
 //! act on every connection at once. Everything else belongs to a
 //! connection or is read-only (the built-in functions are a compile-time
 //! table, callback.builtins); tools/globals_test.zig lists the few other
-//! process-wide variables, such as the POSIX lock table of vfs/unix.zig.
+//! process-wide variables, such as the POSIX lock table of the unix VFS.
 
 const std = @import("std");
 const malloc = @import("malloc.zig");
@@ -29,10 +29,8 @@ pub var heap_limit: struct {
 /// sqlite3Prng: the generator behind sqlite3_randomness().
 pub var prng: func.Prng = .{};
 
-/// sqlite3_temp_directory: where the unix VFS creates temporary files,
-/// if set (memory from sqlite3_malloc(); PRAGMA temp_store_directory).
-/// The C ABI exports it under that name.
-pub var temp_directory: ?[*:0]u8 = null;
+// sqlite3_temp_directory is the VFS package's (temp_directory of
+// vfs/root.zig), which PRAGMA temp_store_directory and the C ABI set.
 
 /// sqlite3_data_directory: in SQLite, the base of relative file names on
 /// Windows only (and PRAGMA data_store_directory, also Windows only).

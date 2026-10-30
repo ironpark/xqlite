@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const grammar = @import("grammar.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 const TK = grammar.TK;
 

@@ -18,7 +18,7 @@ const upsert_mod = @import("upsert.zig");
 const insert_mod = @import("insert.zig");
 const update_mod = @import("update.zig");
 const delete_mod = @import("delete.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 

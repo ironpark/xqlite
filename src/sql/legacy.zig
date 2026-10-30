@@ -6,7 +6,7 @@ const main_mod = @import("main.zig");
 const prepare = @import("prepare.zig");
 const api = @import("../vdbe/api.zig");
 const aux = @import("../vdbe/aux.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const thunk = @import("xqlite_base").thunk;
 
 const Sqlite3 = int.Sqlite3;

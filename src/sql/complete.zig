@@ -3,7 +3,7 @@
 //! know when to run what it has read.
 
 const std = @import("std");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const RC = @import("sqlite_int.zig").RC;
 
 // Token types of the state machine.

@@ -5,7 +5,7 @@
 const std = @import("std");
 const int = @import("sqlite_int.zig");
 const util = @import("util.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 const Allocator = std.mem.Allocator;
 const Parse = int.Parse;

@@ -13,7 +13,7 @@ pub const vi = @import("../vdbe/vdbe_int.zig");
 pub const mem = @import("../vdbe/mem.zig");
 pub const printf = @import("../sql/printf.zig");
 pub const util = @import("../sql/util.zig");
-pub const ctype = @import("../util/ctype.zig");
+pub const ctype = @import("xqlite_base").ctype;
 pub const dialect = @import("../dialect/dialect.zig");
 pub const vfs = @import("xqlite_vfs").vfs;
 /// The operating system's VFS: POSIX, or WASI on wasm32-wasi.

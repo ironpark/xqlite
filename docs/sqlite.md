@@ -70,7 +70,7 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 - `ANALYZE`, `ANALYZE schema`, `ANALYZE [schema.]table`, `ANALYZE [schema.]index`를 지원합니다. 이름 없는 `ANALYZE`는 TEMP만 빼고 모든 데이터베이스를 분석합니다.
 - `sqlite_stat1`을 만들고 채웁니다. 같은 데이터면 행(rowid 포함)이 sqlite3와 바이트 단위로 같습니다.
   - 부분 인덱스, WITHOUT ROWID 테이블, `PRAGMA analysis_limit`을 지원합니다. 뷰, 가상 테이블, `sqlite_` 테이블은 건너뜁니다.
-  - 테이블을 sqlite3의 스키마 해시 순서(`src/sql/hash.zig`)로 돌아서 바이트코드와 행 순서가 같습니다.
+  - 테이블을 sqlite3의 스키마 해시 순서(`pkg/base/src/hash.zig`)로 돌아서 바이트코드와 행 순서가 같습니다.
 - 분석이 끝나면 `OP_LoadAnalysis`가 통계를 다시 읽으므로 같은 연결의 다음 쿼리부터 플래너가 씁니다. 다른 연결은 스키마를 읽을 때 `sqlite_stat1`을 읽습니다. 직접 쓴 `unordered`, `sz=N`, `noskipscan` 표시도 읽습니다.
 - `PRAGMA [schema.]optimize[(MASK)]`는 pragma.c 3.54.1과 같은 기준으로 분석할 테이블을 고릅니다. 마스크 `0x01`(실행하지 않고 문장만 출력), `0x02`, `0x10`(analysis_limit), `0x10000`을 지원합니다.
 - 결과와 바이트코드를 sqlite3 3.54.1과 맞췄습니다.

@@ -8,7 +8,7 @@
 const std = @import("std");
 const tokenize = @import("tokenize.zig");
 const TK = @import("grammar.zig").TK;
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const util = @import("../sql/util.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 

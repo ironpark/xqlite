@@ -11,7 +11,7 @@
 //! reads none of them.
 
 const std = @import("std");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const OpenFlags = @import("main.zig").OpenFlags;
 
 const Allocator = std.mem.Allocator;

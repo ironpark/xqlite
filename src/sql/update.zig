@@ -9,7 +9,7 @@ const aux = @import("../vdbe/aux.zig");
 const mem = @import("../vdbe/mem.zig");
 const build = @import("build.zig");
 const util = @import("util.zig");
-const numeric = @import("numeric.zig");
+const numeric = @import("xqlite_base").numeric;
 
 const Expr = int.Expr;
 const Mem = vi.Mem;

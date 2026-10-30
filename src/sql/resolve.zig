@@ -11,8 +11,8 @@ const window = @import("window.zig");
 const auth = @import("auth.zig");
 const walker = @import("walker.zig");
 const callback = @import("callback.zig");
-const numeric = @import("numeric.zig");
-const ctype = @import("../util/ctype.zig");
+const numeric = @import("xqlite_base").numeric;
+const ctype = @import("xqlite_base").ctype;
 const alter = @import("alter.zig");
 
 const Parse = int.Parse;

@@ -25,7 +25,7 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
-const flags = @import("../util/flags.zig");
+const flags = @import("xqlite_base").flags;
 const OP = @import("../vdbe/opcodes.zig").OP;
 
 const Parse = int.Parse;

@@ -9,10 +9,10 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const func = @import("func.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
-const flags = @import("../util/flags.zig");
+const flags = @import("xqlite_base").flags;
 
 const Sqlite3 = int.Sqlite3;
 const FuncDef = int.FuncDef;

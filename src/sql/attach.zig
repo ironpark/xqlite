@@ -21,7 +21,7 @@ const malloc = @import("malloc.zig");
 const uri = @import("uri.zig");
 const global = @import("global.zig");
 const memdb = @import("memdb.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 const Parse = int.Parse;
 const Sqlite3 = int.Sqlite3;

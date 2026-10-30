@@ -7,7 +7,7 @@
 //! Any other name is called as written.
 
 const std = @import("std");
-const ctype = @import("../../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const tree = @import("../../ir/tree.zig");
 const parser = @import("parser.zig");
 const types = @import("types.zig");

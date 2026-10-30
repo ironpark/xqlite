@@ -54,7 +54,7 @@ const analyze_mod = @import("../sql/analyze.zig");
 const alter = @import("../sql/alter.zig");
 const vtab_mod = @import("../sql/vtab.zig");
 const prepare = @import("../sql/prepare.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 // ================================================================ types
 

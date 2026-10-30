@@ -10,7 +10,7 @@ const std = @import("std");
 const grammar = @import("grammar.zig");
 const int = @import("../sql/sqlite_int.zig");
 const util = @import("../sql/util.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 /// The builders the actions lower into (the common IR, shared with the
 /// other dialects' frontends).
 const ir = @import("../ir/ir.zig");

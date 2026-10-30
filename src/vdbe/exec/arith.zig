@@ -8,7 +8,7 @@ const vi = @import("../vdbe_int.zig");
 const mem = @import("../mem.zig");
 const serial = @import("../serial.zig");
 const int = @import("../../sql/sqlite_int.zig");
-const cast = @import("../../util/cast.zig");
+const cast = @import("xqlite_base").cast;
 
 const Exec = core.Exec;
 const Flow = core.Flow;
@@ -213,7 +213,7 @@ pub fn opMustBeInt(e: *Exec, op: *Op) Error!Flow {
         if (in1.flags.Real) {
             const r = in1.u.r;
             if (r >= -9223372036854775808.0 and r < 9223372036854775808.0) {
-                const ix = @import("../../sql/numeric.zig").realToI64(r);
+                const ix = @import("xqlite_base").numeric.realToI64(r);
                 if (@as(f64, @floatFromInt(ix)) == r) {
                     in1.u = .{ .i = ix };
                     in1.setTypeFlag(.{ .Int = true });

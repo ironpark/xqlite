@@ -33,7 +33,7 @@
 //! as MariaDB does.
 
 const std = @import("std");
-const ctype = @import("../../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
 const tree = @import("../../ir/tree.zig");

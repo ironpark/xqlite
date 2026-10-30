@@ -14,7 +14,7 @@ const Handle = c.Handle;
 const RC = c.RC;
 const global = @import("../sql/global.zig");
 const build = @import("../sql/build.zig");
-const numeric = @import("../sql/numeric.zig");
+const numeric = @import("xqlite_base").numeric;
 
 /// XqTestArgs of varargs.c.
 const Args = extern struct {

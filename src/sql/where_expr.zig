@@ -7,12 +7,12 @@ const util = @import("util.zig");
 const expr_mod = @import("expr.zig");
 const ec = @import("expr_code.zig");
 const func = @import("func.zig");
-const numeric = @import("numeric.zig");
+const numeric = @import("xqlite_base").numeric;
 const resolve = @import("resolve.zig");
 const select_mod = @import("select.zig");
 const build = @import("build.zig");
 const coll_mod = @import("coll.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const aux = @import("../vdbe/aux.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 

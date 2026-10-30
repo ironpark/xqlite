@@ -2,7 +2,7 @@
 //! dequoting and number parsing.
 
 const std = @import("std");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const int = @import("sqlite_int.zig");
 
 const Parse = int.Parse;

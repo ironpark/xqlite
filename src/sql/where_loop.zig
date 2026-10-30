@@ -10,7 +10,7 @@ const expr_mod = @import("expr.zig");
 const walker = @import("walker.zig");
 const coll_mod = @import("coll.zig");
 const serial = @import("../vdbe/serial.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const vtab = @import("vtab.zig");
 
 const Parse = int.Parse;

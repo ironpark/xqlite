@@ -8,13 +8,13 @@ const expr_mod = @import("expr.zig");
 const build = @import("build.zig");
 const select_mod = @import("select.zig");
 const callback = @import("callback.zig");
-const numeric = @import("numeric.zig");
+const numeric = @import("xqlite_base").numeric;
 const coll_mod = @import("coll.zig");
 const walker = @import("walker.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const serial = @import("../vdbe/serial.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 const Parse = int.Parse;
 const Expr = int.Expr;

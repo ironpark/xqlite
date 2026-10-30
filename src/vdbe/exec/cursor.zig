@@ -412,7 +412,7 @@ pub fn opSeekRowid(e: *Exec, op: *Op) Error!Flow {
             key = x.u.i;
         } else {
             if (!x.flags.Real or x.u.r < -9223372036854775808.0 or x.u.r > 9223372036854774784.0) return .jump_p2;
-            key = @import("../../sql/numeric.zig").realToI64(x.u.r);
+            key = @import("xqlite_base").numeric.realToI64(x.u.r);
             if (@as(f64, @floatFromInt(key)) != x.u.r) return .jump_p2;
         }
         return notExists(e, op, key);

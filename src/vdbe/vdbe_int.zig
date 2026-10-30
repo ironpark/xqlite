@@ -5,7 +5,7 @@ const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
 const btree = @import("xqlite_storage").btree;
 pub const opcodes = @import("opcodes.zig");
-const flags = @import("../util/flags.zig");
+const flags = @import("xqlite_base").flags;
 
 pub const OP = opcodes.OP;
 pub const Sqlite3 = int.Sqlite3;

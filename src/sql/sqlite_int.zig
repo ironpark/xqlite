@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const grammar = @import("../parse/grammar.zig");
-const flags = @import("../util/flags.zig");
+const flags = @import("xqlite_base").flags;
 const thunk = @import("xqlite_base").thunk;
 
 pub const TK = grammar.TK;
@@ -1125,7 +1125,7 @@ pub const Schema = struct {
     i_generation: i32 = 0,
     tbl_hash: NameMap(*Table) = .empty,
     /// The tables in the order of C's tblHash (hash.zig).
-    tbl_order: @import("hash.zig").HashOrder(*Table) = .{},
+    tbl_order: @import("xqlite_base").hash.HashOrder(*Table) = .{},
     idx_hash: NameMap(*Index) = .empty,
     trig_hash: NameMap(*Trigger) = .empty,
     fkey_hash: NameMap(*FKey) = .empty,

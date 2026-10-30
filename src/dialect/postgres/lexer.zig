@@ -21,7 +21,7 @@
 //! source).
 
 const std = @import("std");
-const ctype = @import("../../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 pub const Kind = enum {
     eof,

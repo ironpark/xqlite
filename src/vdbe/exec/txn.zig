@@ -12,7 +12,7 @@ const int = @import("../../sql/sqlite_int.zig");
 const main_mod = @import("../../sql/main.zig");
 const btree = @import("xqlite_storage").btree;
 const vtab_mod = @import("../../sql/vtab.zig");
-const cast = @import("../../util/cast.zig");
+const cast = @import("xqlite_base").cast;
 
 const Exec = core.Exec;
 const Flow = core.Flow;

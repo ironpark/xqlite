@@ -11,7 +11,7 @@
 //! call would.
 
 const std = @import("std");
-const numeric = @import("numeric.zig");
+const numeric = @import("xqlite_base").numeric;
 const int = @import("sqlite_int.zig");
 const malloc = @import("malloc.zig");
 const thunk = @import("xqlite_base").thunk;

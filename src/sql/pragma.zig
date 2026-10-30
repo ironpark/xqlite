@@ -4,7 +4,7 @@
 //! with "not supported yet".
 
 const std = @import("std");
-const flags = @import("../util/flags.zig");
+const flags = @import("xqlite_base").flags;
 const builtin = @import("builtin");
 const int = @import("sqlite_int.zig");
 const fkey = @import("fkey.zig");
@@ -22,7 +22,7 @@ const func = @import("func.zig");
 const callback = @import("callback.zig");
 const coll = @import("coll.zig");
 const main_mod = @import("main.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const btree = @import("xqlite_storage").btree;
 const pager_mod = @import("xqlite_storage").pager;
 const vi = @import("../vdbe/vdbe_int.zig");

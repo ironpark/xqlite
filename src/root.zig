@@ -83,7 +83,7 @@ pub const ir = @import("ir/ir.zig");
 /// Dialect metadata (xq_catalog) and sequences (xq_sequence).
 pub const catalog = @import("catalog/catalog.zig");
 pub const sql_util = @import("sql/util.zig");
-pub const numeric = @import("sql/numeric.zig");
+pub const numeric = @import("xqlite_base").numeric;
 pub const printf = @import("sql/printf.zig");
 /// The allocators: sqlite3_malloc() and the per-connection lookaside
 /// (malloc.c).
@@ -146,10 +146,9 @@ test {
         @import("vdbe/exec/control.zig"),   @import("vdbe/exec/register.zig"), @import("vdbe/exec/arith.zig"),
         @import("vdbe/exec/record.zig"),    @import("vdbe/exec/txn.zig"),      @import("vdbe/exec/cursor.zig"),
         @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"),      @import("vdbe/exec/vtab_ops.zig"),
-        @import("vdbe/exec/misc.zig"),      @import("util/flags.zig"),         @import("sql/sqlite_int.zig"),
-        @import("util/cast.zig"),           @import("dialect/dialect.zig"),    @import("ir/ir.zig"),
-        @import("catalog/catalog.zig"),     @import("catalog/sequence.zig"),   @import("sql/analyze.zig"),
-        @import("sql/analyze_test.zig"),    @import("sql/hash.zig"),           @import("vdbe/utf.zig"),
+        @import("vdbe/exec/misc.zig"),      @import("sql/sqlite_int.zig"),     @import("dialect/dialect.zig"),
+        @import("ir/ir.zig"),               @import("catalog/catalog.zig"),    @import("catalog/sequence.zig"),
+        @import("sql/analyze.zig"),         @import("sql/analyze_test.zig"),   @import("vdbe/utf.zig"),
         @import("parse/normalize.zig"),
     }) |file| std.testing.refAllDecls(file);
 }

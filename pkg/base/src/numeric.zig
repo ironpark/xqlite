@@ -7,7 +7,7 @@
 //! same on every platform. Integer parsing lives in util.zig.
 
 const std = @import("std");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("ctype.zig");
 
 /// SQLITE_U64_DIGITS: the most decimal digits of a u64.
 pub const u64_digits = 20;

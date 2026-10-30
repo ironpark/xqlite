@@ -21,7 +21,7 @@ const int = @import("../sql/sqlite_int.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const vtab = @import("../sql/vtab.zig");
 const api = @import("../vdbe/api.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 const Sqlite3 = int.Sqlite3;
 const Mem = vi.Mem;

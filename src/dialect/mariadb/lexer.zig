@@ -308,7 +308,7 @@ pub fn isIdentStart(c: u8) bool {
 }
 
 /// isIdentStart() and digits.
-pub const isIdentChar = @import("../../util/ctype.zig").isIdChar;
+pub const isIdentChar = @import("xqlite_base").ctype.isIdChar;
 
 /// The name an identifier token stands for: the word itself, or the
 /// text between the quotes with doubled quotes undone (in `a` if any).

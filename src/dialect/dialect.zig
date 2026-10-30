@@ -26,7 +26,7 @@
 
 const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 
 const Parse = int.Parse;
 const Sqlite3 = int.Sqlite3;

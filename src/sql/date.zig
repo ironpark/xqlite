@@ -12,8 +12,8 @@ const std = @import("std");
 const int = @import("sqlite_int.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const api = @import("../vdbe/api.zig");
-const ctype = @import("../util/ctype.zig");
-const numeric = @import("numeric.zig");
+const ctype = @import("xqlite_base").ctype;
+const numeric = @import("xqlite_base").numeric;
 const printf = @import("printf.zig");
 const FUNC = @import("callback.zig").FUNC;
 

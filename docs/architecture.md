@@ -384,13 +384,18 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 
 ## 공용 패키지
 
-어느 층의 것도 아니면서 스토리지 패키지와 엔진이 함께 쓰는 도우미는 `pkg/base/`(모듈 이름 `xqlite_base`)에 있습니다. `std`만 import하고, 루트와 스토리지 패키지가 경로 의존성으로 받습니다.
+어느 층의 것도 아니면서 스토리지 패키지와 엔진이 함께 쓰는 도우미, 그리고 엔진의 것이지만 엔진의 다른 코드가 필요 없는 도우미는 `pkg/base/`(모듈 이름 `xqlite_base`)에 있습니다. `std`만 import하고, 루트와 스토리지 패키지가 경로 의존성으로 받습니다. 엔진은 `@import("xqlite_base").ctype` 식으로 가져옵니다.
 
 | 이름 | 내용 |
 | --- | --- |
 | `thunk` | 콜백 클로저. 엔진이 넘기는 콜백(busy handler 등)과 스토리지가 받는 타입이 같아야 함 |
 | `status` | `sqlite3_status()` 카운터와 `SQLITE_CONFIG_MEMSTATUS`. 페이지 캐시와 엔진의 할당자가 함께 셈 |
 | `fuzz` | 시드 퍼저의 도우미(시드 파싱, swarm testing). `src/fuzz_tests.zig`, IR 퍼저, B-tree 퍼저가 씀 |
+| `ctype` | SQLite의 로캘 독립 문자 분류(`sqlite3CtypeMap`, `sqlite3Isxxx`), 대소문자 무시 비교 |
+| `numeric` | 수와 텍스트 사이 변환(util.c의 `sqlite3AtoF()`, `sqlite3FpDecode()` 등). `xqlite.numeric`으로도 내보냄 |
+| `hash` | SQLite `Hash`(hash.c)의 원소 순서. 스키마 해시를 C와 같은 순서로 돌 때 씀 |
+| `flags` | 비트 플래그 집합(bool의 packed struct)에 공통인 연산 |
+| `cast` | Zig 0.17의 좁히는 캐스트 오컴파일(ziglang/zig#37127)을 피하는 캐스트 |
 
 `zig build test-pkg`는 세 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`)의 테스트만 엔진 없이 빌드해 돌립니다.
 
@@ -422,6 +427,7 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | `pkg/storage/src/{record,varint}.zig` | 엔진과 함께 쓰는 레코드 형식과 varint |
 | `pkg/storage/bench/btree.zig` | B-tree 커서 벤치마크(`zig build bench-btree`) |
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
+| `pkg/base/src/{ctype,numeric,hash,flags,cast}.zig` | 공용 패키지: 문자 분류, 수 변환, Hash 순서, 플래그 연산, 캐스트 |
 
 구문 트리 IR(`src/ir/tree.zig`)이 나타내는 문장은 다음과 같습니다.
 

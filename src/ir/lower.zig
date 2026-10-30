@@ -38,7 +38,7 @@ const render = @import("render.zig");
 const int = @import("../sql/sqlite_int.zig");
 const build = @import("../sql/build.zig");
 const expr_mod = @import("../sql/expr.zig");
-const ctype = @import("../util/ctype.zig");
+const ctype = @import("xqlite_base").ctype;
 const catalog = @import("../catalog/catalog.zig");
 const dialect = @import("../dialect/dialect.zig");
 

@@ -51,6 +51,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `xqt gen fixtures\|parser\|opcodes` | `src/testdata`의 테스트용 DB, `grammar.zig`, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
 | `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사 | — |
+| `zig build capi-fast` | ReleaseFast 정적 `libxqlite3`로 C 검사와 `tools/capi/bench.c`를 8번씩 실행 | — |
 | `zig build capi-shell` | SQLite의 `shell.c`를 `libxqlite3`에 링크해 스모크 스크립트 실행 | 아말감 `shell.c` |
 | `xqt fetch sqlite\|slt` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | — |
 
@@ -140,6 +141,7 @@ SQ=/tmp/sqref/sqlite3 zig build check -Dfuzz=true     # 시드 퍼저 셋을 무
 
 - `zig build test`의 모든 것과 `xqt` 자체의 단위 테스트
 - `zig build test-capi`: C 프로그램으로 C ABI 검사
+- `zig build capi-fast`: ReleaseFast 정적 라이브러리로 C 검사와 삽입 벤치마크를 여러 번
 - `xqt interop`: 모든 interop 모듈
 - `xqt planner --known tools/planner/known-failures.list`: `vtablog.txt`를 뺀 모든 케이스 파일
 - `xqlite fuzzcheck`: `ref/sqlite/test/fuzzdata1.db`..`fuzzdata8.db`를 파일마다 프로세스 하나로
@@ -443,6 +445,8 @@ zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test
 ```
 
 (`xqstub.c`는 `xqlite_set_dialect()`, `xqlite_dialect()`의 빈 구현입니다.)
+
+`zig build capi-fast`(`zig build check`에 포함)는 `-Doptimize`와 상관없이 ReleaseFast로 정적 `libxqlite3`를 만들고 `capi_test.c`와 `tools/capi/bench.c`(`:memory:`에 준비된 INSERT를 한 트랜잭션에서 30만 번 실행하고 행 수와 합을 확인)를 링크해 각각 8번 돌립니다. ReleaseFast는 `undefined`로 둔 메모리를 채우지 않아(Debug·ReleaseSafe는 0xaa로 채움) 그런 값을 읽는 버그가 할당 주소에 따라 일부 실행에서만 드러나기 때문입니다. 예를 들어 OP_Function 문맥의 `out`이 앞서 해제된 같은 모양 문장의 값을 그대로 가져 인자를 묶지 않은 버그는 `capi_test` 실행의 약 40%에서 `DETACH aux`를 실패시켰습니다.
 
 `zig build capi-shell`은 SQLite 3.54.1 아말감의 `shell.c`(`-Dsqlite-shell-c`, 기본 `/tmp/xq-sqlite-build/shell.c`)를 고치지 않고 `libxqlite3`에 링크해 `zig-out/bin/sqlite3-xqlite`를 만들고, `tools/capi/shell_smoke.sql`의 표준 출력을 `tools/capi/shell_smoke.expected`와 비교합니다. `shell.c`가 저장소 밖에 있어서 `zig build check`에는 넣지 않았습니다. 자세한 것은 [C API](c-api.md#테스트)에 있습니다.
 

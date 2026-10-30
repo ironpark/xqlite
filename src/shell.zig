@@ -656,6 +656,16 @@ fn lineIsAllWhitespace(z: []const u8) bool {
     return true;
 }
 
+/// xqlite: whether `z` is a T-SQL GO line: GO (any case) and an optional
+/// count, between spaces.
+fn isGoLine(z: []const u8) bool {
+    const t = std.mem.trim(u8, z, " \t\r");
+    if (t.len < 2 or !std.ascii.eqlIgnoreCase(t[0..2], "GO")) return false;
+    const rest = std.mem.trim(u8, t[2..], " \t");
+    for (rest) |c| if (!std.ascii.isDigit(c)) return false;
+    return t.len == 2 or t[2] == ' ' or t[2] == '\t';
+}
+
 /// Port of line_is_complete(): `z` is complete SQL, possibly followed by
 /// white space or a "--" comment.
 fn lineIsComplete(gpa: Allocator, z: []const u8) Allocator.Error!bool {
@@ -742,6 +752,16 @@ fn processInput(p: *Shell, in: ?*Io.Reader, src: []const u8) Error!u32 {
                 const rc = try doMetaCommand(p, z);
                 if (rc == 2) break;
                 if (rc != 0) err_cnt += 1;
+            }
+            continue;
+        }
+        // xqlite: in the T-SQL dialect a line holding only GO (SQL
+        // Server's batch separator) ends the statement before it.
+        if (sql.main.getDialect(p.db) == .mssql and isGoLine(z)) {
+            if (text.items.len > 0) {
+                try echoGroupInput(p, text.items);
+                err_cnt += try runOneSqlLine(p, text.items, p.in_file, startline);
+                text.clearRetainingCapacity();
             }
             continue;
         }

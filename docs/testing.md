@@ -41,6 +41,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `zig build fuzz` | 시드 퍼저: `btree_model`, `btree_corrupt`, `ir_roundtrip` | — |
 | `xqt dialect-diff pg` | PostgreSQL 방언을 실제 PostgreSQL 16과 차등 비교 | PostgreSQL 서버(podman) |
 | `xqt dialect-diff mariadb` | MariaDB 방언을 실제 MariaDB 11과 차등 비교 | MariaDB 서버(podman) |
+| `xqt dialect-diff mssql` | MSSQL(T-SQL) 방언을 실제 SQL Server(Azure SQL Edge, 엔진 15.0)와 차등 비교 | SQL Server 서버(podman)와 go-sqlcmd |
 | `xqt bench [WORKLOAD...]` | 같은 작업의 xqlite·sqlite3 실행 시간 | `--sqlite3`/`SQLITE3` |
 | `xqt gen fixtures\|parser\|opcodes` | `src/testdata`의 테스트용 DB, `grammar.zig`, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
@@ -221,6 +222,7 @@ zig-out/bin/xqt interop vacuum -j 4 --keep -v
 | `analyze` | 30개가 넘는 테이블(스키마 해시의 가장 큰 버킷 배열)과 부분·식·NOCASE·UNIQUE·WITHOUT ROWID 인덱스가 있는 같은 DB를 두 엔진이 각각 `ANALYZE`해서 `sqlite_stat1` 행이 rowid까지 같은지, `analysis_limit`에서도 같은지 봅니다. 그다음 서로 분석한 DB를 읽어 자기가 분석한 DB와 같은 실행 계획이 나오는지, 데이터를 바꾼 뒤 `PRAGMA optimize`가 같은 행을 쓰는지 확인합니다. |
 | `pg` | PostgreSQL 방언으로 쓴 DB(STRICT 테이블, CHECK, identity 시퀀스, `xq_catalog`/`xq_sequence`, 뷰, 인덱스)가 sqlite3의 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽는지 확인합니다. |
 | `mariadb` | MariaDB 방언으로 쓴 DB(STRICT 테이블, 이름 있는 CHECK, DEFAULT·생성 열, `AUTO_INCREMENT`, `"t$i"` 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. sqlite3에 없는 엔진 함수(`xq_*`)를 쓰는 식은 xqlite 안의 테스트(`src/dialect/mariadb/test.zig`)가 확인합니다. |
+| `mssql` | MSSQL 방언으로 쓴 DB(STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열, `NOCASE`/`BINARY` 열, 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. sqlite3에 없는 엔진 함수(`xq_tsql_*`)를 쓰는 식은 `src/dialect/mssql/test.zig`가 확인합니다. |
 
 모듈별 차이 몇 가지입니다.
 
@@ -340,7 +342,7 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 
 ## 방언 차등 테스트
 
-`xqt dialect-diff pg|mariadb [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다. 서버는 기본으로 podman 컨테이너를 쓰며, 서버가 필요하므로 `zig build check`에는 들어 있지 않습니다. 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다.
+`xqt dialect-diff pg|mariadb|mssql [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다. 서버는 기본으로 podman 컨테이너를 쓰며, 서버가 필요하므로 `zig build check`에는 들어 있지 않습니다. 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다.
 
 ### PostgreSQL
 
@@ -366,7 +368,23 @@ zig-out/bin/xqt dialect-diff mariadb [cases-file]   # 기본: tools/dialect/mari
 - 케이스마다 `main`이라는 빈 데이터베이스(xqlite의 스키마 이름)에서, collation `utf8mb4_general_ci`로 시작합니다. 케이스와 MariaDB의 오류 메시지가 `main`이라는 이름을 쓰므로 서버에서는 한 번에 한 케이스씩 돌고, xqlite 쪽만 병렬로 돕니다.
 - 소수부가 있는 수는 끝의 0을 떼고 비교합니다. MariaDB의 DECIMAL은 `3.5000`, 방언의 REAL은 `3.5`로 출력하기 때문입니다.
 
-방언별 결과와 알려진 차이는 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md)에 있습니다.
+### MSSQL
+
+```sh
+podman run -d --name xq-mssql -e ACCEPT_EULA=1 -e MSSQL_SA_PASSWORD='Xq_Passw0rd!' \
+  -e MSSQL_MEMORY_LIMIT_MB=2048 mcr.microsoft.com/azure-sql-edge:latest
+podman cp sqlcmd xq-mssql:/tmp/sqlcmd                # go-sqlcmd, linux-arm64
+zig build tools
+zig-out/bin/xqt dialect-diff mssql [cases-file]     # 기본: tools/dialect/mssql-cases.txt
+```
+
+- arm64 호스트에서 `mcr.microsoft.com/mssql/server`(amd64 전용)는 qemu 에뮬레이션에서 segfault로 죽으므로, arm64 빌드가 있는 Azure SQL Edge(SQL Server 엔진)를 씁니다. 이미지에 sqlcmd가 없어 go-sqlcmd를 복사해 둡니다.
+- 서버 접속 명령은 `MSSQL_CLIENT`로 바꿉니다(기본 `podman exec -i xq-mssql /tmp/sqlcmd -S localhost -U sa -P Xq_Passw0rd! -C`, 그 뒤에 `-W -s '|' -i /dev/stdin`).
+- 케이스마다 새로 만든 데이터베이스 `main`에서 `SET NOCOUNT ON`으로 시작하고, 서버에서는 한 번에 한 케이스씩 돕니다. 케이스의 `GO`는 양쪽에서 문장(배치)을 끝냅니다.
+- sqlcmd의 점선·빈 결과의 머리글·`(n rows affected)` 같은 메시지를 빼고, 필드의 공백과 소수의 끝 0을 떼고 비교합니다.
+- 메모리(서버에 약 2GB)가 모자라면 podman 머신이 멈출 수 있으니 다른 DB 컨테이너와 동시에 띄우지 않는 것이 좋습니다.
+
+방언별 결과와 알려진 차이는 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [MSSQL 호환](mssql.md)에 있습니다.
 
 ## 그 밖의 도구
 
@@ -386,6 +404,6 @@ zig-out/bin/xqt dialect-diff mariadb [cases-file]   # 기본: tools/dialect/mari
 | --- | --- | --- |
 | SQLite | [sqllogictest](https://www.sqlite.org/sqllogictest/)와 SQLite TCL 테스트 스위트 일부를 포팅 | sqllogictest 실행기, 플래너 케이스 일부를 TCL 테스트에서 뽑음 |
 | 파일 포맷 | 순정 SQLite와 xqlite가 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check`로 검증 | `xqt interop` |
-| PostgreSQL / MariaDB / MSSQL | 같은 쿼리를 실제 서버와 xqlite에서 실행해 비교(differential testing), 각 DB의 regression test에서 필요한 부분을 가져옴 | `xqt dialect-diff pg`, `xqt dialect-diff mariadb` |
+| PostgreSQL / MariaDB / MSSQL | 같은 쿼리를 실제 서버와 xqlite에서 실행해 비교(differential testing), 각 DB의 regression test에서 필요한 부분을 가져옴 | `xqt dialect-diff pg`, `xqt dialect-diff mariadb`, `xqt dialect-diff mssql` |
 | 퍼징 | 파서, 레코드 디코더, B-Tree 페이지 디코더, IR | `fuzzcheck`, 시드 퍼저 |
 | 크래시 복구 | 오류를 주입하는 VFS로 쓰기 도중 전원 차단을 흉내 내고, sqlite3는 preload shim으로 죽임 | `src/vfs/crash.zig`, `tools/crashshim.c`, `xqlite crash-write`(`xqt interop wal`, `attach`, `vacuum`, `hot-journal`) |

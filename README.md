@@ -40,7 +40,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 ┌───────────────────────────────▼───────────────────────────────┐
 │                      Dialect Frontends                        │
 │   ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌───────────┐   │
-│   │  SQLite  │  │ PostgreSQL │  │ MariaDB  │  │  MSSQL*   │   │
+│   │  SQLite  │  │ PostgreSQL │  │ MariaDB  │  │   MSSQL   │   │
 │   │  parser  │  │   parser   │  │  parser  │  │  (T-SQL)  │   │
 │   └────┬─────┘  └─────┬──────┘  └────┬─────┘  └─────┬─────┘   │
 │        │              └─구문 트리 IR─┴──────────────┘         │
@@ -71,7 +71,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | **VDBE** | SQLite와 같은 레지스터 기반 바이트코드 VM입니다. |
 | **Planner** | 공통 IR을 받아 인덱스 선택, 조인 순서 결정, 서브쿼리 평탄화 등을 수행합니다. |
 | **Dialect Frontend** | 방언별 lexer/parser입니다. 식별자 인용, 타입 변환, NULL/정렬 규칙, 함수 이름 해석을 정해 구문 트리 IR로 만듭니다. |
-| **Catalog** | 방언 메타데이터(`xq_catalog`)와 시퀀스(`xq_sequence`)를 일반 테이블에 둡니다. `information_schema`, `pg_catalog` 같은 메타데이터 뷰가 이것을 읽습니다(MSSQL `sys.*`는 계획). |
+| **Catalog** | 방언 메타데이터(`xq_catalog`)와 시퀀스(`xq_sequence`)를 일반 테이블에 둡니다. `information_schema`, `pg_catalog`, MSSQL `sys.*` 같은 메타데이터 뷰가 이것을 읽습니다. |
 
 방언 프론트엔드, 구문 트리 IR, lower/render 계약, 방언 훅, 카탈로그는 [방언 아키텍처](docs/architecture.md)에 자세히 정리했습니다.
 
@@ -100,16 +100,16 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 | 기능 | SQLite | PostgreSQL | MariaDB | MSSQL |
 | --- | :-: | :-: | :-: | :-: |
-| DDL / DML 기본 | ✅ | ✅ | ✅ | 🎯 |
-| 트랜잭션 / 세이브포인트 | ✅ | ✅ | ✅ | 🎯 |
-| CTE / 재귀 CTE | ✅ | ✅ | ✅ | 🎯 |
-| 윈도우 함수 | ✅ | ✅ | ✅ | 🎯 |
-| JSON | ✅ `json1` | 🚧 `json`/`jsonb` | 🚧 | 🎯 `JSON_VALUE` 등 |
-| 시퀀스 | — | ✅ | ✅ | 🎯 |
-| 스키마(네임스페이스) | ✅ `ATTACH` | 🚧 `public`, 붙인 DB는 질의·DML만 | 🚧 (database, `ATTACH`) | 🎯 |
+| DDL / DML 기본 | ✅ | ✅ | ✅ | ✅ `MERGE`, `OUTPUT`, `TOP` |
+| 트랜잭션 / 세이브포인트 | ✅ | ✅ | ✅ | ✅ 중첩 `BEGIN TRAN`, `SAVE TRAN` |
+| CTE / 재귀 CTE | ✅ | ✅ | ✅ | ✅ |
+| 윈도우 함수 | ✅ | ✅ | ✅ | ✅ |
+| JSON | ✅ `json1` | 🚧 `json`/`jsonb` | 🚧 | 🚧 `JSON_VALUE`, `ISJSON` |
+| 시퀀스 | — | ✅ | ✅ | ✅ `IDENTITY`, `SEQUENCE` |
+| 스키마(네임스페이스) | ✅ `ATTACH` | 🚧 `public`, 붙인 DB는 질의·DML만 | 🚧 (database, `ATTACH`) | 🚧 `dbo`, `#temp`, `db.dbo.t` |
 | 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 |
 | 트리거 | ✅ | 🎯 | 🎯 | 🎯 |
-| 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🎯 `sys.*` |
+| 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🚧 `INFORMATION_SCHEMA`, `sys.*` 일부 |
 | 와이어 프로토콜 | — | 🔬 pgwire v3 | 🔬 MySQL protocol | 🔬 TDS 7.4 |
 
 ✅ 구현 · 🚧 일부 구현 · 🎯 목표 · 🔬 실험적 / 후순위 · — 해당 없음
@@ -119,6 +119,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 - [SQLite 호환](docs/sqlite.md): 구현 범위, sqlite3와의 교차 검증
 - [PostgreSQL 호환](docs/postgres.md): 지원 문법, 타입과 의미, PostgreSQL과 다른 점
 - [MariaDB 호환](docs/mariadb.md): 저장 방식, `sql_mode`, 지원 문법, MariaDB와 다른 점
+- [MSSQL 호환](docs/mssql.md): T-SQL 문법, 타입과 값 변환, `+`·`MERGE`의 규칙, SQL Server와 다른 점
 
 ## 빠른 시작
 
@@ -212,7 +213,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - **플래너 차등 테스트**: `xqt planner`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
 - **sqllogictest**: `xqt slt`
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `ir_roundtrip`)
-- **방언 차등 테스트**: `xqt dialect-diff pg`, `xqt dialect-diff mariadb`가 실제 PostgreSQL 16, MariaDB 11과 결과를 비교합니다.
+- **방언 차등 테스트**: `xqt dialect-diff pg`, `xqt dialect-diff mariadb`, `xqt dialect-diff mssql`이 실제 PostgreSQL 16, MariaDB 11, SQL Server(Azure SQL Edge)와 결과를 비교합니다.
 
 도구별 실행 방법과 필요한 기준 sqlite3 빌드는 [테스트와 검증](docs/testing.md)에 있습니다.
 
@@ -226,7 +227,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - [x] **Phase 5 · PostgreSQL 방언**: lexer·파서, SELECT·DML 전반, `RETURNING`·`ON CONFLICT`, DDL과 엄격한 타입, `SERIAL`/`IDENTITY`, `information_schema`·`pg_catalog`. PostgreSQL 16과 차등 비교 ([PostgreSQL 호환](docs/postgres.md))
 - [x] **Phase 6 · MariaDB 방언**: 토크나이저·파서, 연결 단위 `sql_mode`, `INSERT IGNORE`/`REPLACE`/`ON DUPLICATE KEY UPDATE`, `AUTO_INCREMENT`, MariaDB 타입과 collation, `SHOW`/`information_schema`. MariaDB 11.8과 차등 비교 ([MariaDB 호환](docs/mariadb.md))
 - [x] **구문 트리 IR**: 방언 중립 구문 트리와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT. PostgreSQL과 MariaDB 프론트엔드를 옮겨 실행과 저장의 의미가 같아짐 ([방언 아키텍처](docs/architecture.md#render와-lower의-계약))
-- [ ] **Phase 7 · MSSQL 방언**: T-SQL 파서, `IDENTITY`, `TOP`, `OUTPUT`, `MERGE`
+- [x] **Phase 7 · MSSQL 방언**: T-SQL 렉서·파서(`[x]`, `N'..'`, `@변수`, `GO`), `TOP`/`OFFSET…FETCH`, `+`의 타입별 해석, `OUTPUT`, `UPDATE/DELETE … FROM`, 한 문장의 `MERGE`, SQL Server 타입과 값 변환, `IDENTITY`/`IDENTITY_INSERT`, 변수, 중첩 트랜잭션, `INFORMATION_SCHEMA`·`sys.*`. SQL Server(Azure SQL Edge)와 차등 비교 ([MSSQL 호환](docs/mssql.md))
 - [ ] **Phase 8 · 서버 모드**: pgwire, MySQL protocol, TDS
 - [ ] **C ABI**: `sqlite3_*` 호환 C ABI와 URI 파라미터 `?dialect=` ([계획](docs/zig-api.md#아직-없는-것))
 
@@ -249,7 +250,8 @@ src/
 ├── dialect/
 │   ├── sqlite/
 │   ├── postgres/       # lexer, parser(→ 구문 트리 IR), DDL 검사, 카탈로그 뷰
-│   └── mariadb/        # 토크나이저, 파서(→ 구문 트리 IR), sql_mode, 타입 변환, 함수
+│   ├── mariadb/        # 토크나이저, 파서(→ 구문 트리 IR), sql_mode, 타입 변환, 함수
+│   └── mssql/          # T-SQL 렉서, 파서(→ 구문 트리 IR), MERGE, 타입 변환, 함수, 카탈로그 뷰
 ├── api/                # Zig API
 ├── ext/                # 셸용 확장 (generate_series, vtablog)
 └── testing/            # 시드 퍼저 공용 도구
@@ -258,7 +260,7 @@ examples/               # Zig API 예제
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일
 ```
 
-MSSQL 방언(`dialect/mssql/`), C ABI(`capi/`), 서버(`server/`)는 아직 없습니다.
+C ABI(`capi/`), 서버(`server/`)는 아직 없습니다.
 
 ## 기여
 

@@ -2,7 +2,7 @@
 
 xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 구조를 설명합니다. 방언 선택, 프론트엔드 계약, 구문 트리 IR과 그 두 백엔드(lower, render), 방언 훅, 카탈로그를 다룹니다.
 
-방언별 지원 범위는 [SQLite 호환](sqlite.md), [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md)에 있습니다.
+방언별 지원 범위는 [SQLite 호환](sqlite.md), [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md)에 있습니다. MSSQL(T-SQL)은 [MSSQL 호환](mssql.md)에 있습니다.
 
 ## 목차
 
@@ -221,6 +221,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | PostgreSQL | `xq_like`, `xq_ilike`, `xq_pg_*` |
 | MariaDB (의미 노드) | `xq_coerce`, `xq_div`, `xq_xor`, `xq_bitxor`, `xq_cast` |
 | MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_stddev_*`, `xq_var_*`, `xq_rand`, `xq_uuid` |
+| MSSQL | `xq_tsql_add`(`+`), `xq_tsql_like`, `xq_tsql_cast`, `xq_tsql_try_cast`, `xq_tsql_store`, `xq_tsql_newid`, `xq_tsql_avg`([MSSQL 호환](mssql.md)) |
 
 ### collation
 
@@ -290,6 +291,7 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 | `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres.md)) |
 | `src/dialect/mariadb/*.zig` | MariaDB 프론트엔드([MariaDB 호환](mariadb.md)) |
+| `src/dialect/mssql/*.zig` | MSSQL(T-SQL) 프론트엔드([MSSQL 호환](mssql.md)) |
 | `src/ir/ir.zig` | IR 빌더 파사드: `stmt`, `expr`, `list`, `from`, `select`, `with`, `window`, `dml`, `ddl`, `txn`, `admin`. 각 항목은 대응하는 C 함수(`sqlite3PExpr`, `sqlite3StartTable` ...)의 별칭이거나 parse.y에서 옮긴 도우미 |
 | `src/ir/tree.zig` | 구문 트리 IR과 의미 노드 (아래) |
 | `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록 |
@@ -313,4 +315,3 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 - `sequence.create()`의 중복 시 PostgreSQL 오류 메시지. PostgreSQL 프론트엔드의 `CREATE SEQUENCE`는 컴파일 시점에 검사합니다.
 - 방언 함수의 `PRAGMA function_list` 노출
 - C ABI URI 파라미터(`?dialect=`). C ABI 자체가 아직 없습니다.
-- MSSQL(T-SQL) 프론트엔드

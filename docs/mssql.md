@@ -1,0 +1,334 @@
+# MSSQL(T-SQL) 호환
+
+xqlite의 Microsoft SQL Server(T-SQL) 방언이 지원하는 문법과 의미, 그리고 SQL Server와 다른 점입니다. 방언 구조와 프론트엔드 계약은 [방언 아키텍처](architecture.md)를 보세요.
+
+## 목차
+
+- [켜는 법](#켜는-법)
+- [구조](#구조)
+- [지원 범위](#지원-범위)
+- [타입 매핑](#타입-매핑)
+- [`+`의 규칙](#의-규칙)
+- [MERGE](#merge)
+- [SQL Server와 다른 점](#sql-server와-다른-점)
+- [아직 하지 않은 것](#아직-하지-않은-것)
+- [검증](#검증)
+
+## 켜는 법
+
+| 어디서 | 방법 |
+| --- | --- |
+| SQL | `PRAGMA xq_dialect = 'mssql'`(`'sqlserver'`, `'tsql'` 별칭 허용) |
+| 셸 | `.dialect mssql` |
+| Zig API | `.dialect = .mssql`, `db.setDialect(.mssql)` |
+
+```sql
+PRAGMA xq_dialect = 'mssql';
+CREATE TABLE dbo.app_user (
+  id         INT IDENTITY(1,1) PRIMARY KEY,
+  email      NVARCHAR(100) NOT NULL UNIQUE,
+  active     BIT NOT NULL DEFAULT 1,
+  created_at DATETIME2 DEFAULT SYSDATETIME()
+);
+INSERT INTO app_user (email) OUTPUT INSERTED.id VALUES (N'a@x.org');
+SELECT SCOPE_IDENTITY();
+SELECT TOP 10 id, email FROM app_user WHERE email LIKE 'A%' ORDER BY id DESC;
+GO
+PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
+```
+
+- `PRAGMA`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`는 T-SQL 방언에서도 SQLite 문장으로 넘깁니다.
+- T-SQL처럼 세미콜론이 없어도 됩니다. 문장은 `;`, `GO`, 다른 문장을 시작하는 단어(`SELECT`, `INSERT` ...)에서 끝납니다.
+- 셸에서는 `GO`만 있는 줄이 그 앞의 문장을 실행합니다(sqlcmd의 배치 끝). `GO 2`의 횟수는 무시합니다.
+
+## 구조
+
+프론트엔드는 `src/dialect/mssql/`에 있습니다. 문장을 구문 트리 IR(`src/ir/tree.zig`)로 파싱하고, 내림·렌더링·카탈로그 기록은 공용 `src/ir/lower.zig`와 `render.zig`가 합니다.
+
+| 파일 | 내용 |
+| --- | --- |
+| `frontend.zig` | 진입점과 훅: 문장 분기, `SELECT @x = ...`·`SELECT ... INTO`, SQLite 오류 문구를 SQL Server 문구로, 방언 함수·엔진 함수 표, 기본 collation `NOCASE` |
+| `lexer.zig` | `[x]`·`"x"` 식별자, `N'..'`, `@x`·`@@x`, 중첩 주석, `0x..`, `GO` |
+| `parser.zig` | 파서 핵심, 식, SELECT(`TOP`, `OFFSET/FETCH`), `+`의 해석, DML 대상의 카탈로그 정보 |
+| `functions.zig` | 함수 호출과 특수 문법(`CAST`/`CONVERT`/`TRY_CAST`, `DATEADD` 등의 datepart, `STRING_AGG ... WITHIN GROUP`), `@@` 함수 |
+| `dml.zig` | INSERT, UPDATE, DELETE(`OUTPUT`, `FROM ... JOIN`, `TOP`), MERGE, TRUNCATE |
+| `ddl.zig` | CREATE/DROP TABLE·INDEX·VIEW·SEQUENCE, ALTER TABLE |
+| `session.zig` | `DECLARE`, `SET`, 트랜잭션, `PRINT`, `USE`, `EXEC sp_rename` |
+| `catalog_views.zig` | `INFORMATION_SCHEMA`와 `sys` 뷰 |
+| `types.zig` | SQL Server 타입 → STRICT 저장 타입·검사·철자 |
+| `runtime.zig` | 방언 함수와 엔진 함수(`xq_tsql_*`): 변환, 날짜, `LIKE`, 세션 |
+| `state.zig` | 연결 상태 `ConnState.mssql`: 변수, `IDENTITY_INSERT`, 마지막 identity, 트랜잭션 중첩 |
+| `test.zig` | 종단 테스트 |
+
+### IR 트리, lower, render
+
+- 실행할 문장은 `ir.lower`가, 스키마에 저장되는 것(CHECK, DEFAULT, 계산 열, 뷰, 인덱스)은 `ir.render`가 같은 트리에서 만듭니다.
+- SQLite 문법이 있는 것은 SQLite 구문으로 남습니다(`||`, `+`, `/`, `LIKE`, `CAST ... AS TEXT`, `substr()` ...). 그래서 그런 식만 쓰는 스키마는 sqlite3에서도 같은 뜻입니다(`xqt interop mssql`).
+- SQL Server의 의미에 SQLite 철자가 없는 것은 엔진 함수입니다. 모든 방언에서 보이므로 스키마에 써도 됩니다.
+
+| T-SQL | 트리 / SQLite |
+| --- | --- |
+| `a + b` | `\|\|`(문자열끼리), `+`(수), 모를 때 `xq_tsql_add()`([아래](#의-규칙)) |
+| `/` | SQLite `/`(정수끼리는 정수 나눗셈) |
+| `^` | `(a \| b) & ~(a & b)` |
+| `LIKE` | 상수 패턴이고 `[...]`가 없으면 SQLite `LIKE`(대소문자 무시, 이스케이프 없음), 아니면 `xq_tsql_like()` |
+| `CAST(x AS INT)` 등 | `xq_tsql_cast(x, 'int')`, `TRY_CAST`는 `xq_tsql_try_cast()` |
+| `CAST(x AS VARCHAR(n))` | `substr(CAST(x AS TEXT), 1, n)`(길이 없으면 30) |
+| 열에 저장하는 값 | `xq_tsql_store(v, 'type\|table\|column')`(상수가 이미 맞으면 그대로) |
+| `AVG(x)`(OVER 없이) | `xq_tsql_avg()`: 정수만이면 정수(몫을 0 쪽으로 자름) |
+| `NEWID()` | `xq_tsql_newid()` |
+| 방언 함수 표의 함수 | `Func.dialect = .mssql`, 스키마에는 `xq_mssql_dateadd(...)`처럼 한정 이름 |
+
+## 지원 범위
+
+### 어휘
+
+- 식별자: 단어(`#temp`, `##global` 포함), `[대괄호]`(`]]`가 `]`), `"큰따옴표"`(QUOTED_IDENTIFIER ON). 대소문자를 구분하지 않습니다.
+- 문자열 `'it''s'`, `N'유니코드'`.
+- `@변수`, `@@ROWCOUNT` 같은 시스템 함수, 매개변수 `?`.
+- 주석 `--`, 중첩되는 `/* */`.
+- 2진 상수 `0x0A1B`(홀수 자리는 앞에 0), `1e3`, `.5`.
+- 연산자 `!=`, `!<`, `!>`, 복합 대입 `+=` `-=` `*=` `/=` `%=` `&=` `|=` `^=`.
+
+### SELECT
+
+| 영역 | 지원 |
+| --- | --- |
+| 기본 | `DISTINCT`, `WHERE`, `GROUP BY`, `HAVING` |
+| 행 수 제한 | `TOP n`, `TOP (n)`, `TOP n PERCENT`, `ORDER BY ... OFFSET n ROWS [FETCH {FIRST\|NEXT} m ROWS ONLY]` |
+| 결과 열 | `expr AS a`, `expr a`, `a = expr`, `'a' = expr`. 이름 없는 식의 열 이름은 SQL Server처럼 빈 문자열 |
+| FROM | 테이블(`dbo.t`, `db.dbo.t`, `db..t`, `#t`), 서브쿼리, `(VALUES ...) AS v(a, b)`, 테이블 값 함수, 테이블 힌트 `WITH (NOLOCK)`(무시) |
+| JOIN | `[INNER]`, `LEFT/RIGHT/FULL [OUTER]`, `CROSS JOIN`, 조인 힌트(`HASH` 등, 무시) |
+| 집합 연산 | `UNION [ALL]`, `EXCEPT`, `INTERSECT`(INTERSECT가 먼저 묶임); `TOP`이 있는 피연산자 |
+| CTE | `WITH`. 자기 이름을 부르면 재귀(RECURSIVE 없이), `;WITH` |
+| 그 밖 | `SELECT ... INTO t`(새 테이블), `SELECT @x = ...`, `OPTION (...)`(무시) |
+| 윈도우 | `OVER (PARTITION BY ... ORDER BY ... ROWS/RANGE ...)`, `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `NTILE`, `LAG`, `LEAD` ... |
+
+### DML
+
+- **INSERT** `[TOP (n)] [INTO] t [(열)] [OUTPUT ...] {VALUES (...), ... | SELECT ... | DEFAULT VALUES}`
+  - `VALUES`의 `DEFAULT`
+  - 열 목록이 없으면 identity 열과 계산 열을 뺀 열에 넣습니다.
+- **UPDATE** `[TOP (n)] t SET c = v, c += v, t.c = v [OUTPUT INSERTED.*] [FROM ... JOIN ...] [WHERE]`
+  - FROM 절에서 대상을 별칭으로 부를 수 있습니다(`UPDATE x SET ... FROM t AS x JOIN ...`).
+- **DELETE** `[TOP (n)] [FROM] t [OUTPUT DELETED.*] [FROM ... JOIN ...] [WHERE]`
+- **OUTPUT** `INSERTED.*`, `INSERTED.c`, `DELETED.c`와 식은 `RETURNING`입니다.
+- **MERGE**([아래](#merge))
+- **TRUNCATE TABLE**: identity가 처음 값으로 돌아갑니다.
+- FROM 절의 대상은 FROM에서 빠지고 그 조인 조건이 WHERE로 갑니다(SQLite의 UPDATE FROM, DELETE ... USING).
+
+### DDL
+
+- **CREATE TABLE** `[dbo.]t` / `#t`(temp 스키마)
+  - 열 제약: `NULL`/`NOT NULL`, `DEFAULT`, `IDENTITY[(seed, increment)]`, `PRIMARY KEY [CLUSTERED|NONCLUSTERED]`, `UNIQUE`, `CHECK`, `REFERENCES ... ON DELETE/UPDATE`, `CONSTRAINT 이름`, `COLLATE`, `ROWGUIDCOL`·`SPARSE`(무시)
+  - 계산 열: `c AS (식) [PERSISTED]` → 생성 열(`PERSISTED`면 STORED)
+  - 테이블 제약: `[CONSTRAINT n] PRIMARY KEY (...)`, `UNIQUE (...)`, `CHECK (...)`, `FOREIGN KEY (...) REFERENCES ...`
+  - 테이블 안의 `INDEX ix (열)`
+  - `ON [PRIMARY]`, `TEXTIMAGE_ON`, `WITH (...)`는 무시합니다.
+- **CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX** `ix ON t (열 [ASC|DESC]) [INCLUDE (...)] [WHERE ...]`
+- **CREATE [OR ALTER] VIEW**, **ALTER VIEW**. 이름 없는 식 열은 SQL Server처럼 오류입니다.
+- **CREATE SEQUENCE** `[AS type] START WITH .. INCREMENT BY .. MINVALUE .. MAXVALUE .. [NO] CYCLE`, `NEXT VALUE FOR s`
+- **ALTER TABLE** `t ADD c type ...`(한 번에 하나), `DROP COLUMN [IF EXISTS] c`
+  - nullable 열을 DEFAULT와 함께 추가하면 기존 행은 `NULL`입니다(`WITH VALUES`면 기본값).
+- **DROP TABLE/VIEW/INDEX/SEQUENCE [IF EXISTS]**, `DROP INDEX ix ON t`, `DROP INDEX t.ix`
+- **EXEC sp_rename** `'t', 'u'`, `'t.c', 'd', 'COLUMN'`
+
+### 세션과 트랜잭션
+
+- `BEGIN TRAN[SACTION] [이름]`, `COMMIT`, `ROLLBACK [TRAN 이름]`, `SAVE TRAN 이름`, `@@TRANCOUNT`
+  - 열린 트랜잭션 안의 `BEGIN TRAN`은 중첩 수준만 올리고, 안쪽 `COMMIT`은 내리기만 합니다. 바깥쪽 `COMMIT`이 커밋하고 `ROLLBACK`은 전부 되돌립니다.
+  - `ROLLBACK TRAN 이름`은 바깥 트랜잭션 이름이면 전부, 아니면 그 세이브포인트까지 되돌립니다.
+- `DECLARE @x type [= v] [, ...]`, `SET @x = v`, `SET @x += v`, `SELECT @x = 식 [, @y = 식] FROM ... [ORDER BY ...]`
+  - 값은 선언 타입으로 변환합니다(문자열은 길이에서 잘림).
+  - 선언하지 않은 변수는 컴파일할 때 `Must declare the scalar variable "@x".`입니다.
+  - `SELECT @x = ...`는 행마다 대입하고(마지막 행의 값이 남음) 행을 돌려주지 않습니다. 행이 없으면 값이 그대로입니다.
+- `SET IDENTITY_INSERT t ON|OFF`(한 번에 한 테이블)
+- `SET NOCOUNT`, `ANSI_NULLS`, `QUOTED_IDENTIFIER`, `XACT_ABORT`, `TRANSACTION ISOLATION LEVEL`, `DATEFORMAT` 같은 옵션은 받아들이고 무시합니다. `SET ROWCOUNT n`(0 아님)과 `IMPLICIT_TRANSACTIONS ON`은 오류입니다.
+- `PRINT 식`은 식을 계산하고 아무것도 출력하지 않습니다.
+- `USE db`는 데이터베이스가 있는지만 봅니다.
+
+### 함수
+
+| 분류 | 함수 |
+| --- | --- |
+| NULL·조건 | `ISNULL`, `COALESCE`, `NULLIF`, `IIF`, `CHOOSE`, `CASE` |
+| 변환 | `CAST`, `CONVERT(type, x [, style])`(날짜 스타일 1-5, 8, 10-12, 20-25, 101-105, 108, 110-112, 120, 121, 126, 127), `TRY_CAST`, `TRY_CONVERT`, `PARSE`, `TRY_PARSE`, `ISNUMERIC`, `ISDATE` |
+| 문자열 | `LEN`(끝 공백 제외), `DATALENGTH`, `CHARINDEX`, `SUBSTRING`, `LEFT`, `RIGHT`, `LTRIM`, `RTRIM`, `TRIM([chars FROM] s)`, `UPPER`, `LOWER`, `REPLACE`, `REVERSE`, `REPLICATE`, `SPACE`, `STUFF`, `CONCAT`, `CONCAT_WS`, `ASCII`, `CHAR`, `NCHAR`, `UNICODE`, `QUOTENAME` |
+| 수 | `ABS`, `CEILING`, `FLOOR`, `ROUND(x, n [, f])`, `POWER`, `SQUARE`, `SQRT`, `SIGN`, `EXP`, `LOG(x [, base])`, `LOG10`, `PI`, `SIN` 등 삼각 함수, `RAND` |
+| 날짜 | `GETDATE()`, `CURRENT_TIMESTAMP`, `GETUTCDATE()`, `SYSDATETIME()`, `SYSUTCDATETIME()`, `SYSDATETIMEOFFSET()`, `DATEADD`, `DATEDIFF`, `DATEDIFF_BIG`, `DATEPART`, `DATENAME`, `YEAR`, `MONTH`, `DAY`, `EOMONTH`, `DATEFROMPARTS` |
+| 집계 | `COUNT`, `COUNT_BIG`, `SUM`, `AVG`, `MIN`, `MAX`, `STRING_AGG(x, sep) [WITHIN GROUP (ORDER BY ...)]`, `STDEV`, `STDEVP`, `VAR`, `VARP` |
+| identity | `SCOPE_IDENTITY()`, `@@IDENTITY`, `IDENT_CURRENT('t')` |
+| 그 밖 | `NEWID()`, `OBJECT_ID('t')`, `DB_NAME()`(`main`), `SCHEMA_NAME()`(`dbo`), `USER_NAME()`, `@@ROWCOUNT`, `@@TRANCOUNT`, `@@VERSION`, `@@SPID` ..., `JSON_VALUE`, `ISJSON` |
+
+- datepart 이름과 약어(`yy`, `mm`, `dd`, `hh`, `mi`, `ss`, `ms`, `dw`, `wk` ...)를 받습니다.
+- `DATEDIFF`는 SQL Server처럼 경계를 센 수입니다(`DATEDIFF(year, '2023-12-31', '2024-01-01')`은 1). 주는 일요일에 시작합니다(`@@DATEFIRST` 7).
+- `DATEADD`의 결과는 입력의 모양(날짜만, 소수 자리 수, 오프셋)을 따릅니다. 문자열 상수는 SQL Server처럼 `datetime`으로 읽습니다.
+- `CHARINDEX`와 `REPLACE`는 기본 collation처럼 대소문자를 무시합니다.
+
+### 카탈로그
+
+| 뷰 | 열 |
+| --- | --- |
+| `INFORMATION_SCHEMA.TABLES` | `TABLE_CATALOG`, `TABLE_SCHEMA`(`dbo`), `TABLE_NAME`, `TABLE_TYPE` |
+| `INFORMATION_SCHEMA.COLUMNS` | 위와 `COLUMN_NAME`, `ORDINAL_POSITION`, `COLUMN_DEFAULT`, `IS_NULLABLE`, `DATA_TYPE`, `CHARACTER_MAXIMUM_LENGTH`, `NUMERIC_PRECISION`, `NUMERIC_SCALE`, `DATETIME_PRECISION` |
+| `INFORMATION_SCHEMA.VIEWS`, `SCHEMATA` | 최소한의 열 |
+| `sys.tables`, `sys.views`, `sys.objects` | `name`, `object_id`, `schema_id`, `type`, `type_desc` |
+| `sys.columns` | `object_id`, `name`, `column_id`, `max_length`, `precision`, `scale`, `is_nullable`, `is_identity`, `is_computed` |
+| `sys.schemas` | `dbo` |
+
+- `object_id`는 `sqlite_schema`의 rowid이고 `OBJECT_ID()`가 같은 값을 돌려줍니다.
+- 데이터베이스는 SQLite의 스키마(`main`, `ATTACH`로 붙인 것)이고 스키마는 언제나 `dbo`입니다. `#temp` 테이블은 SQL Server처럼 나오지 않습니다.
+
+## 타입 매핑
+
+테이블은 `STRICT`이고 원래 타입은 `xq_catalog`(`type` 키)에 소문자 철자로 기록합니다(`varchar(20)`, `decimal(10,2)`, `datetime2(7)`).
+
+| SQL Server | 저장 타입 | 검사 |
+| --- | --- | --- |
+| `bigint` | `INTEGER` | |
+| `int`, `smallint`, `tinyint` | `INTEGER` | 범위 |
+| `bit` | `INTEGER` | 0 또는 1 |
+| `decimal(p,s)`, `numeric`, `money`, `smallmoney` | `REAL` | |
+| `float`, `real` | `REAL` | |
+| `[n]char(n)`, `[n]varchar(n)` | `TEXT` | 길이 ≤ n |
+| `[n]varchar(max)`, `[n]text`, `xml` | `TEXT` | |
+| `binary(n)`, `varbinary(n)` | `BLOB` | 길이 ≤ n |
+| `varbinary(max)`, `image` | `BLOB` | |
+| `date`, `time`, `datetime`, `datetime2`, `smalldatetime`, `datetimeoffset` | `TEXT` | |
+| `uniqueidentifier` | `TEXT` | |
+| `sql_variant` | `ANY` | |
+| 계산 열 | `ANY` | |
+
+- 검사는 이름 있는 CHECK이고 이름이 SQL Server의 문구입니다. 다른 방언이나 sqlite3가 쓴 값도 지킵니다.
+- 문자 열에는 언제나 `COLLATE`를 적습니다. 기본(`SQL_Latin1_General_CP1_CI_AS`)과 `_CI_`는 `NOCASE`, `_CS_`·`_BIN`은 `BINARY`입니다. 그래서 `UNIQUE`도 대소문자를 무시합니다.
+- **값 변환**: INSERT/UPDATE가 저장하는 값은 SQL Server처럼 열 타입으로 바뀝니다(`xq_tsql_store()`).
+  - `decimal(p,s)`은 s자리로 반올림(0에서 먼 쪽), 정밀도를 넘으면 `Arithmetic overflow error ...`.
+  - 정수 타입은 실수를 자르고, 범위 밖이면 `Arithmetic overflow error for data type tinyint, value = 300.`.
+  - `bit`는 0이 아니면 1, `'true'`/`'false'`도 받습니다.
+  - 너무 긴 문자열은 `String or binary data would be truncated in table 'main.dbo.t', column 'c'. Truncated value: '...'.`(잘리는 것이 공백뿐이면 잘라 저장).
+  - 날짜·시간은 SQL Server의 출력 형식으로 저장합니다: `date` `2024-01-02`, `datetime` `2024-01-02 03:04:05.123`(1/300초 단위), `datetime2(n)` 소수 n자리, `time(n)`, `smalldatetime`(분), `datetimeoffset` `... +02:00`. `'20240102'`, `'01/02/2024'`(mdy), `'2024-01-02T03:04'`, `AM/PM`을 읽습니다.
+  - `uniqueidentifier`는 형식을 검사하고 대문자로 저장합니다.
+- **IDENTITY(seed, increment)**: 시퀀스 `<table>_<column>_seq`로 번호를 매깁니다(PostgreSQL 방언의 identity와 같은 IR 기능). 정수 PRIMARY KEY면 SQLite의 `INTEGER PRIMARY KEY`(rowid)입니다.
+  - 열 목록에 identity 열이 있으면 `SET IDENTITY_INSERT t ON`이어야 하고, 그 값이 현재 값을 넘으면 identity가 따라갑니다.
+  - identity 열의 UPDATE는 오류입니다.
+  - `SCOPE_IDENTITY()`와 `@@IDENTITY`는 연결이 마지막으로 넣은 identity 값, `IDENT_CURRENT('t')`는 테이블 시퀀스의 마지막 값입니다.
+
+## `+`의 규칙
+
+SQL Server의 `+`는 피연산자 타입에 따라 연결이거나 덧셈입니다. 방언은 다음 순서로 정합니다.
+
+1. 파서가 아는 타입: 문자열 상수, 수 상수, `CAST`/`CONVERT`의 대상 타입, 함수의 결과 타입(`UPPER`는 문자열, `LEN`은 수 ...), 변수의 선언 타입, 그리고 FROM 절(UPDATE의 대상, CREATE TABLE 자신의 열)에 있는 테이블 열의 저장 타입.
+   - 둘 다 문자열이면 연결(`||`, NULL이면 NULL)
+   - 하나라도 수면 덧셈(`+`). SQL Server처럼 문자열은 수로 바뀝니다(`'1' + 1`은 2).
+   - 수가 아닌 문자열 상수와 모르는 타입이면 연결(SQL Server에서는 덧셈이 실패할 뿐이기 때문).
+2. 그래도 모르면(서브쿼리의 열, 매개변수, `CASE` ...) 실행할 때 `xq_tsql_add()`가 값의 저장 클래스로 정합니다. TEXT와 TEXT는 연결, BLOB과 BLOB은 이어 붙이기, 아니면 덧셈입니다. 방언의 STRICT 테이블에서는 저장 클래스가 선언 타입의 것이므로 결과가 같습니다.
+
+계산 열과 뷰처럼 스키마에 저장되는 식은 1.로 정해지면 SQLite의 `||`·`+`가 되어 sqlite3도 읽습니다.
+
+## MERGE
+
+```sql
+MERGE INTO t USING (VALUES (2, 'B'), (4, 'D')) AS s (id, v) ON t.id = s.id
+WHEN MATCHED AND s.v = 'del' THEN DELETE
+WHEN MATCHED THEN UPDATE SET v = s.v
+WHEN NOT MATCHED [BY TARGET] THEN INSERT (id, v) VALUES (s.id, s.v)
+WHEN NOT MATCHED BY SOURCE THEN UPDATE SET v = 'gone';
+```
+
+한 문장(한 VDBE 프로그램) 안에서 다음 순서로 실행합니다.
+
+1. `WHEN NOT MATCHED`: 대상에 맞는 행이 없는 원본 행을 INSERT하고, 그 원본 행을 표시합니다.
+2. `WHEN NOT MATCHED BY SOURCE`: 원본에 맞는 행이 없는 대상 행을 DELETE/UPDATE하고, 그 대상 행(rowid)을 표시합니다.
+3. `WHEN MATCHED`: DELETE를 먼저, 그다음 `UPDATE ... FROM 원본`. 1.과 2.에서 표시한 행은 건드리지 않습니다.
+
+- 그래서 각 절은 MERGE 전의 행을 기준으로 정해집니다(1.이 넣은 행이 다시 맞거나, 2.가 바꾼 행이 맞게 되어도 다시 처리하지 않음).
+- 원본에는 `row_number() OVER ()`로 번호를 붙여 표시합니다. 원본은 단계마다 다시 읽으므로 같은 행을 같은 순서로 돌려주어야 합니다(대상을 읽는 서브쿼리 원본은 그렇지 않을 수 있음).
+- 같은 종류의 절이 둘이면 SQL Server처럼 먼저 쓴 절의 조건이 참이 아닌 행만 뒤의 절이 받습니다.
+- 다른 점: 한 대상 행에 원본 행이 여럿 맞으면 SQL Server는 실패하지만, 여기서는 그중 하나로 한 번 바뀝니다.
+- 지원하지 않는 것: `OUTPUT`과 `$action`, `MERGE TOP`, `WITH ... MERGE`, `INSERT DEFAULT VALUES`, INSERT 값의 `DEFAULT`.
+- SQL Server처럼 `;`로 끝나야 합니다.
+
+## SQL Server와 다른 점
+
+### 타입과 값
+
+| 항목 | xqlite |
+| --- | --- |
+| `decimal`/`money` | `REAL`로 저장합니다. 반올림은 되지만 정확한 십진 연산이 아니고 `2.50`이 `2.5`로 보입니다. |
+| 정수 나눗셈 | `7 / 2`는 3으로 같지만, 0으로 나누면 오류가 아니라 `NULL`입니다. |
+| 문자열 → 수 | `'abc' + 1`처럼 실행 때 정해지는 덧셈과 비교는 SQLite처럼 0으로 바꿉니다(CAST와 저장은 SQL Server처럼 오류). |
+| `char(n)` | 공백으로 채우지 않습니다. |
+| 끝 공백 | 비교에서 무시하지 않습니다(`'a' = 'a '`는 거짓). `LEN`은 끝 공백을 뺍니다. |
+| collation | `NOCASE`는 ASCII만 접습니다(`'é' = 'É'`는 거짓). ASCII 밖 문자의 정렬 순서는 바이트 순서입니다. |
+| `nvarchar` | UTF-8로 저장합니다. `DATALENGTH`는 UTF-8 바이트 수라서 `DATALENGTH(N'a')`가 1입니다(SQL Server는 2). |
+| 날짜 | `datetime + 1` 같은 날짜 산술은 없습니다(`DATEADD`를 씁니다). `CAST(날짜 AS VARCHAR)`는 저장 형식 그대로입니다(SQL Server는 `Jan  2 2024 ...`). `GETDATE()`는 UTC입니다. |
+| `uniqueidentifier` | 텍스트로 정렬합니다(SQL Server는 바이트 그룹 순서). |
+
+### 문장의 동작
+
+| 항목 | xqlite |
+| --- | --- |
+| 배치 | 배치가 없습니다. 문장은 앞 문장이 실행된 뒤에 컴파일되고, 변수는 연결이 끝나거나 다시 선언할 때까지 남습니다. 오류가 배치의 나머지를 건너뛰게 하지 않습니다(셸에서는 SQLite 셸의 `.bail` 규칙). |
+| 외래 키 | SQL Server처럼 지키도록, 트랜잭션 밖에서 첫 T-SQL 문장을 컴파일할 때 연결의 `PRAGMA foreign_keys`를 켭니다. SQLite 방언으로 돌아가도 켜진 채입니다. |
+| identity | 시퀀스는 트랜잭션에 묶여서 롤백된 값이 다시 나옵니다(SQL Server는 건너뜀). |
+| `@@ROWCOUNT` | `changes()`: 마지막 INSERT/UPDATE/DELETE가 바꾼 행 수입니다(SELECT의 행 수가 아님). |
+| `OUTPUT DELETED` | DELETE에서만 됩니다. UPDATE의 `DELETED.c`(이전 값)는 `RETURNING`이 새 행만 보므로 오류입니다. |
+| UPDATE/DELETE ... FROM | 대상이 FROM의 외부 조인 쪽에 있으면 오류입니다. 대상을 부르는 다른 조인의 `ON`은 쓸 수 없습니다. |
+| DROP | 한 문장에서 둘 이상의 있는 객체를 지울 수 없습니다(`DROP TABLE IF EXISTS a, b`는 하나만 있을 때 됨). |
+| 인덱스 이름 | 데이터베이스마다 유일합니다(SQL Server는 테이블마다). |
+| 실행 중 오류 | `UNIQUE constraint failed: t.c` 같은 엔진 오류와 CHECK 위반은 SQLite 문구입니다. 컴파일 오류(`Invalid object name 'x'.`, `Invalid column name 'c'.` ...)와 변환 오류는 SQL Server 문구입니다. |
+| 결과 열 이름 | 이름 없는 식은 빈 이름입니다(sqlcmd처럼). 서브쿼리 안에서는 SQLite의 이름입니다. |
+
+### 스키마에 저장되는 식
+
+- DEFAULT, CHECK, 계산 열, 뷰에는 변수와 매개변수를 쓸 수 없습니다.
+- 엔진 함수(`xq_tsql_*`)나 방언 함수(`xq_mssql_*`)를 부르는 스키마는 xqlite에서는 어느 방언으로든 같은 결과를 내지만 sqlite3는 계산할 수 없습니다. 정수형 `CAST`, `LIKE '[a-z]%'`, 날짜 함수, 타입을 모르는 `+`가 그런 예입니다.
+- identity 열은 `DEFAULT (nextval('t_c_seq'))`로 보입니다. rowid가 아닌 identity 열은 sqlite3에서 값 없이 넣을 수 없습니다.
+
+## 아직 하지 않은 것
+
+- 제어 흐름: `IF ... ELSE`, `WHILE`, `BEGIN ... END` 블록, `TRY ... CATCH`, `THROW`/`RAISERROR`, `RETURN`, `GOTO`
+- 저장 프로시저·함수·트리거(`CREATE PROCEDURE/FUNCTION/TRIGGER`), `EXEC`(sp_rename 말고)
+- 테이블 변수(`DECLARE @t TABLE`), 커서, 임시 저장 프로시저
+- `CROSS APPLY`/`OUTER APPLY`: IR에 LATERAL 조인이 없습니다.
+- `TOP ... WITH TIES`, `GROUP BY ROLLUP/CUBE/GROUPING SETS`, `PIVOT`/`UNPIVOT`, `FOR XML`/`FOR JSON`, `OPENJSON`, `STRING_SPLIT`, `FORMAT()`
+- `= ANY/SOME/ALL (서브쿼리)`
+- `OUTPUT ... INTO`, MERGE의 `OUTPUT`
+- `ALTER TABLE ... ADD CONSTRAINT`/`ALTER COLUMN`/`DROP CONSTRAINT`, 여러 열의 ADD/DROP
+- `CREATE SCHEMA`(스키마는 `dbo`뿐), `CREATE DATABASE`
+- `SET ROWCOUNT`, `SET IMPLICIT_TRANSACTIONS ON`, 의미를 바꾸는 옵션(`ANSI_NULLS OFF`, `CONCAT_NULL_YIELDS_NULL OFF`)
+- `GO n`의 반복, `DATEFORMAT`/`LANGUAGE`에 따른 날짜 해석(언제나 us_english, mdy)
+
+## 검증
+
+### SQL Server와 비교
+
+`xqt dialect-diff mssql`(`tools/xqt/dialect_diff.zig`)은 `tools/dialect/mssql-cases.txt`의 각 경우를 SQL Server(sqlcmd)와 `xqlite sql`(`.dialect mssql`)에서 실행해 결과 행, 열 이름, `ERROR:` 줄을 비교합니다. 지금 36개 경우가 모두 같습니다.
+
+```sh
+zig build tools
+podman run -d --name xq-mssql -e ACCEPT_EULA=1 -e MSSQL_SA_PASSWORD='Xq_Passw0rd!' \
+  -e MSSQL_MEMORY_LIMIT_MB=2048 mcr.microsoft.com/azure-sql-edge:latest
+podman cp sqlcmd xq-mssql:/tmp/sqlcmd     # go-sqlcmd linux-arm64 (github.com/microsoft/go-sqlcmd 릴리스)
+zig-out/bin/xqt dialect-diff mssql [cases-file]
+```
+
+- 서버는 Azure SQL Edge(SQL Server 엔진 15.0, arm64 빌드가 있음)입니다. arm64 macOS의 podman에서 `mcr.microsoft.com/mssql/server:2022-latest`(amd64 전용)는 qemu 에뮬레이션에서 시작하자마자 segfault로 죽습니다. Rosetta를 켠 podman 머신이면 그 이미지도 쓸 수 있습니다.
+- 이미지에 sqlcmd가 없어서 go-sqlcmd를 컨테이너에 복사해 둡니다. 서버 접속 명령은 `MSSQL_CLIENT`로 바꿉니다(기본 `podman exec -i xq-mssql /tmp/sqlcmd -S localhost -U sa -P Xq_Passw0rd! -C`).
+- 각 경우는 새로 만든 데이터베이스 `main`에서 `SET NOCOUNT ON`으로 시작하고, 서버에서는 한 번에 하나씩 돕니다.
+- SQL Server는 배치를 실행하기 전에 컴파일하므로, 컴파일 오류가 나는 문장과 그 뒤 문장은 `GO`로 나눕니다.
+- 정규화: sqlcmd의 점선, 빈 결과의 머리글, `(n rows affected)`·`Changed database context`·`The statement has been terminated.` 줄을 빼고, 필드의 공백과 소수의 끝 0을 뗍니다. sqlcmd는 좁은 열의 NULL을 열 너비로 자르고(`NU`) 2진 문자열을 16진으로 쓰므로 경우가 그런 모양을 피합니다.
+
+### sqlite3와 교차 검사
+
+`xqt interop mssql`(`tools/xqt/interop/mssql.zig`)은 T-SQL 방언으로 쓴 데이터베이스를 sqlite3로 확인합니다.
+
+- sqlite3의 무결성·외래 키 검사를 통과해야 합니다.
+- sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
+- 다루는 것: STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열(`+`가 열 타입으로 `+`/`||`가 됨), `NOCASE`/`BINARY` 열, 테이블 안과 밖의 인덱스, 뷰, `xq_catalog`.
+- sqlite3가 타입·제약을 어기는 값을 거부하는지, xqlite가 sqlite3가 바꾼 값을 읽는지도 봅니다.
+- 엔진 함수(`xq_tsql_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mssql/test.zig`에서 확인합니다.
+
+### 퍼저
+
+`zig build fuzz -- ir_roundtrip SEED`의 방언 목록에 `mssql`이 있습니다. 트리를 T-SQL 방언의 훅으로 lower하고, 뷰와 저장된 텍스트를 T-SQL 프론트엔드로 읽습니다.

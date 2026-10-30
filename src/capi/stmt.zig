@@ -629,17 +629,22 @@ pub export fn sqlite3_expired(v: ?*Vdbe) callconv(.c) c_int {
     return @intFromBool((v orelse return 1).expired != 0);
 }
 
-// SQLITE_ENABLE_STMT_SCANSTATUS is not built in: no loop is reported.
+// SQLITE_ENABLE_STMT_SCANSTATUS: statements compiled while
+// SQLITE_DBCONFIG_STMT_SCANSTATUS is on (off by default, unlike SQLite
+// builds with the option) record their loops and count their
+// instructions; others report nothing.
 
-pub export fn sqlite3_stmt_scanstatus(_: ?*Vdbe, _: c_int, _: c_int, _: ?*anyopaque) callconv(.c) c_int {
-    return 1;
+pub export fn sqlite3_stmt_scanstatus_v2(v: ?*Vdbe, i_scan: c_int, op: c_int, flags: c_int, out: ?*anyopaque) callconv(.c) c_int {
+    return c.api.scanStatus(v orelse return 1, i_scan, op, flags, out orelse return 1);
 }
 
-pub export fn sqlite3_stmt_scanstatus_v2(_: ?*Vdbe, _: c_int, _: c_int, _: c_int, _: ?*anyopaque) callconv(.c) c_int {
-    return 1;
+pub export fn sqlite3_stmt_scanstatus(v: ?*Vdbe, i_scan: c_int, op: c_int, out: ?*anyopaque) callconv(.c) c_int {
+    return sqlite3_stmt_scanstatus_v2(v, i_scan, op, 0, out);
 }
 
-pub export fn sqlite3_stmt_scanstatus_reset(_: ?*Vdbe) callconv(.c) void {}
+pub export fn sqlite3_stmt_scanstatus_reset(v: ?*Vdbe) callconv(.c) void {
+    c.api.scanStatusReset(v orelse return);
+}
 
 // The carray extension (SQLITE_ENABLE_CARRAY) is not built in.
 

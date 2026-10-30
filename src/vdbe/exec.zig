@@ -81,7 +81,31 @@ pub fn exec(v: *Vdbe) i32 {
         .pc = v.pc,
         .encoding = v.db.enc,
     };
-    return e.run();
+    // A statement compiled for sqlite3_stmt_scanstatus() counts the runs
+    // and cycles of its instructions, in its own copy of the loop, so
+    // that other statements do not test for it.
+    if (v.op_stats.len > 0) return e.run(true);
+    return e.run(false);
+}
+
+/// sqlite3Hwtime(): a cycle counter (the time-stamp counter on x86, the
+/// virtual counter on ARM64; 0 elsewhere, as in C).
+inline fn hwtime() u64 {
+    switch (@import("builtin").cpu.arch) {
+        .x86_64, .x86 => {
+            var lo: u32 = undefined;
+            var hi: u32 = undefined;
+            asm volatile ("rdtsc"
+                : [lo] "={eax}" (lo),
+                  [hi] "={edx}" (hi),
+            );
+            return @as(u64, hi) << 32 | lo;
+        },
+        .aarch64 => return asm volatile ("mrs %[r], cntvct_el0"
+            : [r] "=r" (-> u64),
+        ),
+        else => return 0,
+    }
 }
 
 /// The state of a run that the handlers share (the locals of
@@ -141,7 +165,7 @@ pub const Exec = struct {
         return out;
     }
 
-    fn run(e: *Exec) i32 {
+    fn run(e: *Exec, comptime scan: bool) i32 {
         const v = e.v;
         const db = e.db;
         if (v.rc == RC.NOMEM) return e.abortDueToError(error.OutOfMemory, 0);
@@ -163,10 +187,19 @@ pub const Exec = struct {
             const prior: u64 = v.counters[vi.STMTSTATUS.VM_STEP];
             progress_limit = db.n_progress_ops - (prior % db.n_progress_ops);
         }
+        const main_ops = if (v.frame) |f| vi.rootFrame(f).ops.ptr else v.ops.items.ptr;
         while (true) {
             const op = &ops[pc];
             n_vm_step += 1;
             e.pc = @intCast(pc);
+            // pOp->nExec and pOp->nCycle, for the main program.
+            var stat: ?*vi.OpStat = null;
+            var t0: u64 = 0;
+            if (scan and ops == main_ops) {
+                stat = &v.op_stats[pc];
+                stat.?.n_exec += 1;
+                t0 = hwtime();
+            }
             // A handler that can fail has its error caught on its own arm,
             // so that the others yield a plain Flow: a catch after the
             // switch would test for an error after every instruction
@@ -356,6 +389,9 @@ pub const Exec = struct {
                 // SQLITE_ENABLE_OFFSET_SQL_FUNC (Offset) or
                 // SQLITE_ENABLE_COLUMN_USED_MASK (ColumnsUsed); never coded.
                 OP.TableLock, OP.Offset, OP.ColumnsUsed => misc.opNotSupported(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
+            };
+            if (scan) if (stat) |st| {
+                st.n_cycle +%= hwtime() -% t0;
             };
             switch (flow) {
                 .next, .jump_p2, .check_interrupt, .jump_p2_check_interrupt => {

@@ -445,6 +445,9 @@ const SortCtx = struct {
     label_ob_lopt: i32 = 0,
     sort_flags: u8 = 0,
     deferred_row_load: ?*RowLoadInfo = null,
+    /// The code pushing a row onto the sorter (scan status).
+    addr_push: i32 = 0,
+    addr_push_end: i32 = 0,
 };
 
 /// SORTFLAG_UseSorter: OP_SorterOpen instead of OP_OpenEphemeral.
@@ -485,6 +488,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, reg_data: i32, reg_orig
     const n_ob_sat = sort.n_ob_sat;
     var i_skip: i32 = 0;
 
+    sort.addr_push = aux.currentAddr(v);
     var reg_base: i32 = undefined;
     if (n_prefix_reg != 0) {
         reg_base = reg_data - n_prefix_reg;
@@ -543,6 +547,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, reg_data: i32, reg_orig
     if (i_skip != 0) {
         aux.changeP2(v, i_skip, if (sort.label_ob_lopt != 0) sort.label_ob_lopt else aux.currentAddr(v));
     }
+    sort.addr_push_end = aux.currentAddr(v) - 1;
 }
 
 /// Port of codeOffset(): skip the row while the OFFSET counter is
@@ -825,11 +830,14 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     const out_ex = s.e_list.?.slice();
     const n_key: i32 = @as(i32, @intCast(order_by.len())) - sort.n_ob_sat;
 
+    var addr_explain: i32 = undefined;
     if (sort.n_ob_sat == 0 or n_key == 1) {
-        _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}ORDER BY", .{if (sort.n_ob_sat != 0) "LAST TERM OF " else ""});
+        addr_explain = aux.explain(p, false, "USE TEMP B-TREE FOR {s}ORDER BY", .{if (sort.n_ob_sat != 0) "LAST TERM OF " else ""});
     } else {
-        _ = aux.explain(p, false, "USE TEMP B-TREE FOR LAST {d} TERMS OF ORDER BY", .{n_key});
+        addr_explain = aux.explain(p, false, "USE TEMP B-TREE FOR LAST {d} TERMS OF ORDER BY", .{n_key});
     }
+    aux.scanStatusRange(v, addr_explain, sort.addr_push, sort.addr_push_end);
+    aux.scanStatusCounters(v, addr_explain, addr_explain, sort.addr_push);
     if (sort.label_bk_out != 0) {
         _ = aux.addOp2(v, OP.Gosub, sort.reg_return, sort.label_bk_out);
         _ = aux.goto_(v, addr_break);
@@ -888,6 +896,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         }
         _ = aux.addOp3(v, OP.Column, i_sort_tab, i_read, reg_row + i);
     }
+    aux.scanStatusRange(v, addr_explain, addr_explain, -1);
     switch (e_dest) {
         SRT.Table, SRT.EphemTab => {
             _ = aux.addOp3(v, OP.Column, i_sort_tab, n_key + b_seq, reg_row);
@@ -935,6 +944,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     } else {
         _ = aux.addOp2(v, OP.Next, i_tab, addr);
     }
+    aux.scanStatusRange(v, addr_explain, aux.currentAddr(v) - 1, -1);
     if (sort.reg_return != 0) _ = aux.addOp1(v, OP.Return, sort.reg_return);
     aux.resolveLabel(v, addr_break);
 }
@@ -3859,11 +3869,12 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             // An uncorrelated subquery is computed once.
             if (!item.fg.is_correlated) once_addr = aux.addOp0(v, OP.Once);
             var d = selectDestInit(SRT.EphemTab, item.i_cursor);
-            _ = aux.explain(p, true, "MATERIALIZE {f}", .{util.srcItemNameNoAlias(item)});
+            const addr_explain = aux.explain(p, true, "MATERIALIZE {f}", .{util.srcItemNameNoAlias(item)});
             select(p, sub, &d) catch {};
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             if (once_addr != 0) aux.jumpHere(v, once_addr);
             _ = aux.addOp2(v, OP.Return, subq.reg_return, top_addr + 1);
+            aux.scanStatusRange(v, addr_explain, addr_explain, -1);
             aux.jumpHere(v, top_addr);
             expr_mod.clearTempRegCache(p);
             if (item.fg.is_cte and !item.fg.is_correlated) {
@@ -4082,7 +4093,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             if (where_mod.isOrdered(w) == n_gb) {
                 group_by_sort = false;
             } else {
-                _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{if (distinct.is_tnct != 0 and !s.sel_flags.Distinct) "DISTINCT" else "GROUP BY"});
+                const addr_exp = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{if (distinct.is_tnct != 0 and !s.sel_flags.Distinct) "DISTINCT" else "GROUP BY"});
                 group_by_sort = true;
                 var n_col: i32 = n_gb;
                 var j: i32 = n_gb;
@@ -4104,8 +4115,10 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 }
                 agg.direct_mode = false;
                 const reg_record = expr_mod.getTempReg(p);
+                aux.scanStatusCounters(v, addr_exp, 0, aux.currentAddr(v));
                 _ = aux.addOp3(v, OP.MakeRecord, reg_base, n_col, reg_record);
                 _ = aux.addOp2(v, OP.SorterInsert, agg.sorting_idx, reg_record);
+                aux.scanStatusRange(v, addr_exp, aux.currentAddr(v) - 2, -1);
                 expr_mod.releaseTempReg(p, reg_record);
                 expr_mod.releaseTempRange(p, reg_base, n_col);
                 where_mod.whereEnd(w);
@@ -4113,9 +4126,12 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 agg.sorting_idx_ptab = sort_p_tab;
                 p.n_tab += 1;
                 sort_out = expr_mod.getTempReg(p);
+                aux.scanStatusCounters(v, addr_exp, aux.currentAddr(v), 0);
                 _ = aux.addOp3(v, OP.OpenPseudo, sort_p_tab, sort_out, n_col);
                 _ = aux.addOp2(v, OP.SorterSort, agg.sorting_idx, addr_end);
                 agg.use_sorting_idx = true;
+                aux.scanStatusRange(v, addr_exp, -1, sort_p_tab);
+                aux.scanStatusRange(v, addr_exp, -1, agg.sorting_idx);
             }
 
             // The indexed subexpressions tagged by

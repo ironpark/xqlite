@@ -196,9 +196,9 @@ pub fn explainParent(p: *Parse) i32 {
 
 /// Port of sqlite3VdbeExplain(): an OP_Explain line for EXPLAIN QUERY PLAN,
 /// made the parent of later lines if `push`. Only when EXPLAIN QUERY PLAN
-/// is running.
+/// is running, or the statement records scan status.
 pub fn explain(p: *Parse, push: bool, comptime fmt: []const u8, args: anytype) i32 {
-    if (p.explain != 2) return 0;
+    if (p.explain != 2 and !isStmtScanStatus(p.db)) return 0;
     const v = p.vdbe.?;
     const msg = std.fmt.allocPrintSentinel(v.alloc(), fmt, args, 0) catch {
         p.db.oomFault();
@@ -207,7 +207,68 @@ pub fn explain(p: *Parse, push: bool, comptime fmt: []const u8, args: anytype) i
     const this = v.nOp();
     const addr = addOp4(v, OP.Explain, this, p.addr_explain, 0, .{ .z = msg });
     if (push) p.addr_explain = this;
+    scanStatus(v, this, -1, -1, 0, null);
     return addr;
+}
+
+// ============================================================ scan status
+
+/// IS_STMT_SCANSTATUS(): statements are compiled to record
+/// sqlite3_stmt_scanstatus() data (SQLITE_DBCONFIG_STMT_SCANSTATUS). In
+/// C this needs SQLITE_ENABLE_STMT_SCANSTATUS, whose builds turn it on by
+/// default; here it is off by default, so that statements are compiled
+/// as by SQLite's default build (no OP_Explain, no counters) unless asked.
+pub inline fn isStmtScanStatus(db: *const Sqlite3) bool {
+    return db.flags.StmtScanStatus;
+}
+
+/// Port of sqlite3VdbeScanStatus(): add an entry for
+/// sqlite3_stmt_scanstatus().
+pub fn scanStatus(v: *Vdbe, addr_explain: i32, addr_loop: i32, addr_visit: i32, n_est: i16, name: ?[]const u8) void {
+    if (!isStmtScanStatus(v.db)) return;
+    const z: ?[:0]const u8 = if (name) |n| v.alloc().dupeSentinel(u8, n, 0) catch null else null;
+    v.scans.append(v.alloc(), .{
+        .addr_explain = addr_explain,
+        .addr_loop = addr_loop,
+        .addr_visit = addr_visit,
+        .n_est = n_est,
+        .name = z,
+    }) catch v.db.oomFault();
+}
+
+fn findScan(v: *Vdbe, addr_explain: i32) ?*vi.ScanStatus {
+    var i = v.scans.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (v.scans.items[i].addr_explain == addr_explain) return &v.scans.items[i];
+    }
+    return null;
+}
+
+/// Port of sqlite3VdbeScanStatusRange(): add the instructions from
+/// `start` to `end` (the last one coded if negative) to the cycles of
+/// the entry of the OP_Explain at `addr_explain`.
+pub fn scanStatusRange(v: *Vdbe, addr_explain: i32, start: i32, end_arg: i32) void {
+    if (!isStmtScanStatus(v.db)) return;
+    const scan = findScan(v, addr_explain) orelse return;
+    const end = if (end_arg < 0) currentAddr(v) - 1 else end_arg;
+    var i: usize = 0;
+    while (i < scan.addr_range.len) : (i += 2) {
+        if (scan.addr_range[i] == 0) {
+            scan.addr_range[i] = start;
+            scan.addr_range[i + 1] = end;
+            break;
+        }
+    }
+}
+
+/// Port of sqlite3VdbeScanStatusCounters(): the instructions counting
+/// the loops and the rows visited of the entry at `addr_explain`.
+pub fn scanStatusCounters(v: *Vdbe, addr_explain: i32, addr_loop: i32, addr_visit: i32) void {
+    if (!isStmtScanStatus(v.db)) return;
+    const scan = findScan(v, addr_explain) orelse return;
+    if (addr_loop > 0) scan.addr_loop = addr_loop;
+    if (addr_visit > 0) scan.addr_visit = addr_visit;
 }
 
 /// Port of sqlite3VdbeExplainPop().
@@ -786,6 +847,10 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.expired = 0;
     v.mem = a.alloc(Mem, n_mem) catch return oom(v);
     v.vars = a.alloc(Mem, n_var) catch return oom(v);
+    if (isStmtScanStatus(db)) {
+        v.op_stats = a.alloc(vi.OpStat, v.ops.items.len) catch return oom(v);
+        @memset(v.op_stats, .{});
+    }
     v.ap_arg = a.alloc(*Mem, @intCast(n_arg)) catch return oom(v);
     v.csr = a.alloc(?*VdbeCursor, n_cursor) catch return oom(v);
     v.n_var = @intCast(n_var);

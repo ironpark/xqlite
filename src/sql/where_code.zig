@@ -165,7 +165,7 @@ fn explainScanText(w: *Writer, item: *const SrcItem, loop: *const WhereLoop, is_
 /// Port of sqlite3WhereAddExplainText(): set P4 of the OP_Explain at
 /// `addr` to the text describing the loop of `level`.
 pub fn addExplainText(p: *Parse, addr: i32, tab_list: *SrcList, level: *WhereLevel, wctrl_flags: int.WHERE) Oom!void {
-    if (build.toplevel(p).explain != 2) return;
+    if (build.toplevel(p).explain != 2 and !aux.isStmtScanStatus(p.db)) return;
     const v = p.vdbe.?;
     if (p.db.malloc_failed) return;
     const item = tab_list.at(level.i_from);
@@ -187,7 +187,7 @@ pub fn addExplainText(p: *Parse, addr: i32, tab_list: *SrcList, level: *WhereLev
 /// Port of sqlite3WhereExplainOneScan(): the address of the OP_Explain, or 0.
 pub fn explainOneScan(p: *Parse, tab_list: *SrcList, level: *WhereLevel, wctrl_flags: int.WHERE) Oom!i32 {
     var ret: i32 = 0;
-    if (build.toplevel(p).explain == 2) {
+    if (build.toplevel(p).explain == 2 or aux.isStmtScanStatus(p.db)) {
         const loop = level.w_loop.?;
         if (!loop.ws_flags.MULTI_OR and !wctrl_flags.OR_SUBCLAUSE) {
             const v = p.vdbe.?;
@@ -228,13 +228,38 @@ pub fn explainBloomFilter(p: *Parse, w: *WhereInfo, level: *WhereLevel) Oom!i32 
     defer out.deinit();
     explainBloomText(&out.writer, item, level.w_loop.?) catch return error.OutOfMemory;
     const msg = try out.toOwnedSliceSentinel(0);
-    return aux.addOp4(v, OP.Explain, aux.currentAddr(v), p.addr_explain, 0, .{ .z = msg });
+    const ret = aux.addOp4(v, OP.Explain, aux.currentAddr(v), p.addr_explain, 0, .{ .z = msg });
+    aux.scanStatus(v, aux.currentAddr(v) - 1, 0, 0, 0, null);
+    return ret;
 }
 
-/// Port of sqlite3WhereAddScanStatus(): scan status is not ported, so
-/// this does nothing.
+/// Port of sqlite3WhereAddScanStatus(): the sqlite3_stmt_scanstatus()
+/// entry of the loop of `level`, which reads `src_list`; `addr_explain`
+/// is its OP_Explain, or 0.
 pub fn addScanStatus(v: *Vdbe, src_list: *SrcList, level: *WhereLevel, addr_explain: i32) void {
-    _ = .{ v, src_list, level, addr_explain };
+    if (!aux.isStmtScanStatus(v.db)) return;
+    const loop = level.w_loop.?;
+    const ws_flags = loop.ws_flags;
+    var obj: ?[]const u8 = null;
+    var via_coroutine = false;
+    const item = src_list.at(level.i_from);
+    if (!ws_flags.VIRTUALTABLE and loop.btree.index != null) {
+        obj = loop.btree.index.?.name;
+    } else {
+        obj = item.name;
+        via_coroutine = item.fg.via_coroutine;
+    }
+    aux.scanStatus(v, addr_explain, level.addr_body, level.addr_visit, loop.n_out, obj);
+    if (!via_coroutine) {
+        if (!ws_flags.intersects(.{ .MULTI_OR = true, .AUTO_INDEX = true })) {
+            aux.scanStatusRange(v, addr_explain, -1, level.i_tab_cur);
+        }
+        if (ws_flags.INDEXED) aux.scanStatusRange(v, addr_explain, -1, level.i_idx_cur);
+    } else {
+        const addr = item.u4.subq.?.addr_fill_sub;
+        const op = aux.getOp(v, addr - 1);
+        aux.scanStatusRange(v, addr_explain, addr, op.p2 - 1);
+    }
 }
 
 // ======================================================== term helpers
@@ -952,6 +977,8 @@ pub fn codeOneLoopStart(p: *Parse, v: *Vdbe, w: *WhereInfo, i_level: usize, leve
             level.p5 = vi.STMTSTATUS.FULLSCAN_STEP;
         }
     }
+
+    level.addr_visit = aux.currentAddr(v);
 
     // Code every term that can be computed from the tables available now:
     // pass 1 only terms covered by the index, pass 2 the rest without

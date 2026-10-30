@@ -998,7 +998,9 @@ static void test_misc(void){
 /* Group C: statements, text encodings, threading.                      */
 /* Against SQLite these need a build with SQLITE_ENABLE_COLUMN_METADATA, */
 /* SQLITE_ENABLE_NORMALIZE, SQLITE_ENABLE_STMT_SCANSTATUS and            */
-/* SQLITE_THREADSAFE=2 (multi-thread by default, as xqlite).             */
+/* SQLITE_THREADSAFE=2 (multi-thread by default, as xqlite) and         */
+/* SQLITE_ENABLE_BYTECODE_VTAB; SQLite's scan status is on by default,   */
+/* xqlite's off (SQLITE_DBCONFIG_STMT_SCANSTATUS turns it on).           */
 /* ==================================================================== */
 
 /* sqlite3.h declares it only with SQLITE_ENABLE_NORMALIZE. */
@@ -1363,6 +1365,72 @@ static void test_temp_directory(const char *zDir){
   CHECK(sqlite3_data_directory==0);
 }
 
+static void test_scanstatus(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  sqlite3_int64 n = 0;
+  double est = 0;
+  const char *z = 0;
+  int i = 0, on = -1;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a INTEGER PRIMARY KEY, b, c); CREATE INDEX tb ON t(b); CREATE TABLE u(x, y);"
+           "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<100) INSERT INTO t SELECT i, i%10, i FROM s;"
+           "INSERT INTO u SELECT a, b FROM t WHERE a<=20");
+  /* Off by default: no entries (and the same bytecode as without). */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM t WHERE b>5", -1, &p, 0), SQLITE_OK, db);
+  while( sqlite3_step(p)==SQLITE_ROW ){}
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NLOOP, &n)==1);
+  sqlite3_finalize(p);
+
+  CHECK_RC(sqlite3_db_config(db, SQLITE_DBCONFIG_STMT_SCANSTATUS, 1, &on), SQLITE_OK, db);
+  CHECK(on==1);
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM t WHERE b>5 ORDER BY c", -1, &p, 0), SQLITE_OK, db);
+  while( sqlite3_step(p)==SQLITE_ROW ) i++;
+  CHECK(i==40);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NLOOP, &n)==0 && n==1);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NVISIT, &n)==0 && n==40);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NAME, &z)==0);
+  CHECK_STR(z, "tb");
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_EXPLAIN, &z)==0);
+  CHECK_STR(z, "SEARCH t USING INDEX tb (b>?)");
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_EST, &est)==0 && est>0);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NCYCLE, &n)==0 && n>=0);
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NLOOP, &n)==1);   /* loops only */
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_EXPLAIN, SQLITE_SCANSTAT_COMPLEX, &z)==0);
+  CHECK_STR(z, "USE TEMP B-TREE FOR ORDER BY");
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_NVISIT, SQLITE_SCANSTAT_COMPLEX, &n)==0 && n==40);
+  CHECK(sqlite3_stmt_scanstatus_v2(p, -1, SQLITE_SCANSTAT_NCYCLE, 0, &n)==0 && n>=0);
+  sqlite3_stmt_scanstatus_reset(p);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NVISIT, &n)==0 && n==0);
+  sqlite3_finalize(p);
+
+  /* An automatic index, with its Bloom filter. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM u, t WHERE u.y = t.c", -1, &p, 0), SQLITE_OK, db);
+  i = 0;
+  while( sqlite3_step(p)==SQLITE_ROW ) i++;
+  CHECK(i==18);
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_EXPLAIN, SQLITE_SCANSTAT_COMPLEX, &z)==0);
+  CHECK_STR(z, "CREATE AUTOMATIC INDEX ON t(c, b)");
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_NVISIT, SQLITE_SCANSTAT_COMPLEX, &n)==0 && n==100);
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NAME, &z)==0);
+  CHECK_STR(z, "auto-index");
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NLOOP, &n)==0 && n==20);
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NVISIT, &n)==0 && n==18);
+  sqlite3_finalize(p);
+  /* The bytecode virtual table shows the counts. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM u", -1, &p, 0), SQLITE_OK, db);
+  while( sqlite3_step(p)==SQLITE_ROW ){}
+  {
+    sqlite3_stmt *q = 0;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT max(nexec) FROM bytecode(?1)", -1, &q, 0), SQLITE_OK, db);
+    sqlite3_bind_pointer(q, 1, p, "stmt-pointer", 0);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q, 0)==20);
+    sqlite3_finalize(q);
+  }
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
 #include <pthread.h>
 
 /* Threads sharing one serialized connection. */
@@ -1445,6 +1513,7 @@ int main(void){
   test_threads();
   test_test_control();
   test_temp_directory(zDir);
+  test_scanstatus();
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

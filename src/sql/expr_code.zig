@@ -584,7 +584,8 @@ pub fn codeSubselect(p: *Parse, e: *Expr) i32 {
     // An uncorrelated subquery runs once.
     var addr_once: i32 = 0;
     if (!e.flags.VarSelect) addr_once = aux.addOp0(v, OP.Once);
-    _ = aux.explain(p, true, "{s}SCALAR SUBQUERY {d}", .{ if (addr_once != 0) "" else "CORRELATED ", sel.sel_id });
+    const addr_explain = aux.explain(p, true, "{s}SCALAR SUBQUERY {d}", .{ if (addr_once != 0) "" else "CORRELATED ", sel.sel_id });
+    aux.scanStatusCounters(v, addr_explain, addr_explain, -1);
 
     // The first row of a SELECT goes into registers; EXISTS leaves 0 or 1.
     // Either way the query gets LIMIT 1.
@@ -628,6 +629,7 @@ pub fn codeSubselect(p: *Parse, e: *Expr) i32 {
     const r_reg = dest.i_sd_parm;
     e.i_table = r_reg;
     if (addr_once != 0) aux.jumpHere(v, addr_once);
+    aux.scanStatusRange(v, addr_explain, addr_explain, -1);
 
     if (dest.e_dest == SRT.Mem and canReturnSubtype(p, sel.e_list.?.at(0).expr)) {
         _ = aux.addOp1(v, OP.ClrSubtype, r_reg);

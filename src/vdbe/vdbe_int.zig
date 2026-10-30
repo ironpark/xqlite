@@ -528,6 +528,34 @@ pub const Context = struct {
 
 // ==================================================================== vm
 
+/// Port of ScanStatus: one entry of sqlite3_stmt_scanstatus() (a loop or
+/// another EXPLAIN QUERY PLAN line), recorded while the statement is
+/// compiled with SQLITE_DBCONFIG_STMT_SCANSTATUS on
+/// (SQLITE_ENABLE_STMT_SCANSTATUS in C).
+pub const ScanStatus = struct {
+    /// The OP_Explain of the loop, or 0.
+    addr_explain: i32,
+    /// Up to three ranges [start, end] of instructions whose cycles add
+    /// up to SQLITE_SCANSTAT_NCYCLE (start 0: unused; start -1: every
+    /// instruction with OPFLG_NCYCLE on cursor `end`).
+    addr_range: [6]i32 = @splat(0),
+    /// Instructions whose execution counts are NLOOP and NVISIT.
+    addr_loop: i32,
+    addr_visit: i32,
+    /// Estimated rows per loop (LogEst).
+    n_est: i16,
+    /// The table or index scanned (in the statement's memory).
+    name: ?[:0]const u8,
+};
+
+/// Port of the nExec and nCycle of VdbeOp: per instruction of the main
+/// program, kept only by statements compiled for scan status
+/// (Vdbe.op_stats), so that others neither carry nor update them.
+pub const OpStat = struct {
+    n_exec: u64 = 0,
+    n_cycle: u64 = 0,
+};
+
 /// Vdbe.e_vdbe_state (VDBE_*_STATE).
 pub const VdbeState = enum(u8) {
     /// Under construction.
@@ -614,6 +642,11 @@ pub const Vdbe = struct {
     aux_data: ?*AuxData = null,
     /// Room for the arguments of xUpdate and xFilter (apArg).
     ap_arg: []*Mem = &.{},
+    /// sqlite3_stmt_scanstatus(): the entries (aScan) and the counters of
+    /// the instructions, both only for a statement compiled with
+    /// SQLITE_DBCONFIG_STMT_SCANSTATUS (see aux.scanStatus()).
+    scans: std.ArrayList(ScanStatus) = .empty,
+    op_stats: []OpStat = &.{},
 
     pub fn alloc(v: *Vdbe) Allocator {
         return v.arena.allocator();

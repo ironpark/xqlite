@@ -1056,3 +1056,111 @@ test "api: an OpenDup cursor outlives the original" {
     try std.testing.expectEqual(RC.DONE, step(v));
     try std.testing.expectEqual(RC.OK, finalize(v));
 }
+
+// ============================================================ scan status
+
+/// SQLITE_SCANSTAT_* metrics.
+pub const SCANSTAT = struct {
+    pub const NLOOP = 0;
+    pub const NVISIT = 1;
+    pub const EST = 2;
+    pub const NAME = 3;
+    pub const EXPLAIN = 4;
+    pub const SELECTID = 5;
+    pub const PARENTID = 6;
+    pub const NCYCLE = 7;
+    pub const COMPLEX = 1;
+};
+
+/// Port of sqlite3_stmt_scanstatus_v2(): metric `op` of entry `i_scan`
+/// (loops only, unless `flags` has SCANSTAT_COMPLEX) into `out`, whose
+/// type is the metric's (i64, f64, a C string or i32). Returns 0, or 1
+/// if there is no such entry. A statement compiled without
+/// SQLITE_DBCONFIG_STMT_SCANSTATUS has no entries.
+pub fn scanStatus(v: *Vdbe, i_scan_arg: i32, op: i32, flags: i32, out: *anyopaque) i32 {
+    if (op < SCANSTAT.NLOOP or op > SCANSTAT.NCYCLE) return 1;
+    const ops = if (v.frame) |f| vi.rootFrame(f).ops else v.ops.items;
+    const stats = v.op_stats;
+    const Out = struct {
+        fn as(comptime T: type, p: *anyopaque) *T {
+            return @ptrCast(@alignCast(p));
+        }
+    };
+    var i_scan = i_scan_arg;
+    if (i_scan < 0) {
+        if (op != SCANSTAT.NCYCLE) return 1;
+        var res: u64 = 0;
+        for (stats) |s| res +%= s.n_cycle;
+        Out.as(i64, out).* = @bitCast(res);
+        return 0;
+    }
+    var idx: usize = 0;
+    if (flags & SCANSTAT.COMPLEX != 0) {
+        idx = @intCast(i_scan);
+    } else {
+        // Without COMPLEX, only the entries of loops (with a name).
+        while (idx < v.scans.items.len) : (idx += 1) {
+            if (v.scans.items[idx].name != null) {
+                i_scan -= 1;
+                if (i_scan < 0) break;
+            }
+        }
+    }
+    if (idx >= v.scans.items.len) return 1;
+    const scan = &v.scans.items[idx];
+    const exec_count = struct {
+        fn f(st: []const vi.OpStat, addr: i32) i64 {
+            if (addr <= 0) return -1;
+            if (@as(usize, @intCast(addr)) >= st.len) return 0;
+            return @bitCast(st[@intCast(addr)].n_exec);
+        }
+    }.f;
+    switch (op) {
+        SCANSTAT.NLOOP => Out.as(i64, out).* = exec_count(stats, scan.addr_loop),
+        SCANSTAT.NVISIT => Out.as(i64, out).* = exec_count(stats, scan.addr_visit),
+        SCANSTAT.EST => {
+            var r: f64 = 1.0;
+            var x = scan.n_est;
+            while (x < 100) {
+                x += 10;
+                r *= 0.5;
+            }
+            Out.as(f64, out).* = r * @as(f64, @floatFromInt(@import("../sql/util.zig").logEstToInt(x)));
+        },
+        SCANSTAT.NAME => Out.as(?[*:0]const u8, out).* = if (scan.name) |z| z.ptr else null,
+        SCANSTAT.EXPLAIN => Out.as(?[*:0]const u8, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p4.z else null,
+        SCANSTAT.SELECTID => Out.as(i32, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p1 else -1,
+        SCANSTAT.PARENTID => Out.as(i32, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p2 else -1,
+        SCANSTAT.NCYCLE => {
+            var res: i64 = 0;
+            if (scan.addr_range[0] == 0) {
+                res = -1;
+            } else if (stats.len == ops.len) {
+                var ii: usize = 0;
+                while (ii < scan.addr_range.len) : (ii += 2) {
+                    var i_ins = scan.addr_range[ii];
+                    const i_end = scan.addr_range[ii + 1];
+                    if (i_ins == 0) break;
+                    if (i_ins > 0) {
+                        while (i_ins <= i_end) : (i_ins += 1) res +%= @bitCast(stats[@intCast(i_ins)].n_cycle);
+                    } else {
+                        // Every instruction on cursor i_end that counts.
+                        for (ops, stats) |o, s| {
+                            if (o.p1 != i_end) continue;
+                            if (o.opcode.opflags() & @import("opcodes.zig").OPFLG.NCYCLE == 0) continue;
+                            res +%= @bitCast(s.n_cycle);
+                        }
+                    }
+                }
+            }
+            Out.as(i64, out).* = res;
+        },
+        else => return 1,
+    }
+    return 0;
+}
+
+/// Port of sqlite3_stmt_scanstatus_reset(): zero the counters.
+pub fn scanStatusReset(v: *Vdbe) void {
+    @memset(v.op_stats, .{});
+}

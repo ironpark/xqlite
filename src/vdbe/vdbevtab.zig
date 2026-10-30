@@ -243,8 +243,16 @@ fn bytecodevtabColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i_arg: i32) i32 {
                 api.resultText(ctx, "(FK)", .static);
             }
         },
-        // nexec and ncycle, without SQLITE_ENABLE_STMT_SCANSTATUS.
-        9, 10 => api.resultInt(ctx, 0),
+        // nexec and ncycle: counted for the main program of a statement
+        // compiled for scan status (Vdbe.op_stats), else 0.
+        9, 10 => {
+            var n: u64 = 0;
+            if (c.stmt) |sv| if (a_op.ptr == sv.ops.items.ptr and c.i_addr < sv.op_stats.len) {
+                const st = sv.op_stats[c.i_addr];
+                n = if (i == 9) st.n_exec else st.n_cycle;
+            };
+            api.resultInt64(ctx, @bitCast(n));
+        },
         20 => api.resultText(ctx, c.z_type, .static),
         21 => api.resultText(ctx, c.z_schema, .static),
         22 => api.resultText(ctx, c.z_name, .static),

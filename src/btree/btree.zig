@@ -228,6 +228,9 @@ pub const Btree = struct {
     /// Backups reading this b-tree (Btree.nBackup): while there are any,
     /// it cannot be detached.
     n_backup: u32 = 0,
+    /// Some cursor may be an incremental blob cursor (hasIncrblobCur):
+    /// changes to table rows look for them only when set.
+    has_incrblob_cur: bool = false,
 
     // ================================================================ open
 
@@ -828,6 +831,26 @@ pub const Btree = struct {
             }
         }
         bt.cursors = cur;
+    }
+
+    /// Port of invalidateIncrblobCursors(): the row `i_row` of the table
+    /// rooted at `root` (every row, with `is_clear_table`) is being
+    /// replaced or deleted, so the incremental blob cursors on it become
+    /// invalid (sqlite3_blob_read() and _write() then fail with
+    /// SQLITE_ABORT). Called only while `has_incrblob_cur`, which it
+    /// clears when no such cursor is left.
+    fn invalidateIncrblobCursors(bt: *Btree, root: Pgno, i_row: i64, is_clear_table: bool) void {
+        std.debug.assert(bt.has_incrblob_cur);
+        bt.has_incrblob_cur = false;
+        var it = bt.cursors;
+        while (it) |c| : (it = c.next_cursor) {
+            if (c.flags.incrblob) {
+                bt.has_incrblob_cur = true;
+                if (c.pgno_root == root and (is_clear_table or c.info.n_key == i_row)) {
+                    c.state = .invalid;
+                }
+            }
+        }
     }
 
     /// Port of saveAllCursors(): save the position of every cursor on the
@@ -1930,6 +1953,9 @@ pub const Btree = struct {
     pub fn clearTable(bt: *Btree, root: Pgno) Error!i64 {
         std.debug.assert(bt.in_trans == .write);
         try bt.saveAllCursors(root, null);
+        // Every incremental blob cursor on the table is invalidated (a
+        // no-op if `root` is not a table b-tree).
+        if (bt.has_incrblob_cur) bt.invalidateIncrblobCursors(root, 0, true);
         var changes: i64 = 0;
         try bt.clearDatabasePage(root, false, 0, &changes);
         return changes;
@@ -2406,7 +2432,9 @@ pub const Cursor = struct {
         at_last: bool = false,
         /// Other cursors may be open on the same b-tree.
         multiple: bool = false,
-        _: u3 = 0,
+        /// An incremental blob cursor (BTCF_Incrblob).
+        incrblob: bool = false,
+        _: u2 = 0,
     };
 
     pub const Options = struct {
@@ -2690,6 +2718,45 @@ pub const Cursor = struct {
         }
         // The overflow chain ended early.
         return error.Corrupt;
+    }
+
+    /// Port of sqlite3BtreePayloadChecked(): payload() for an incremental
+    /// blob cursor, which may have been moved (it is restored) or
+    /// invalidated (error.Abort).
+    pub fn payloadChecked(cur: *Cursor, offset: u32, buf: []u8) Error!void {
+        if (cur.state != .valid) {
+            if (cur.state == .invalid) return error.Abort;
+            try cur.restorePosition();
+            // Port note: btreeRestoreCursorPosition() leaves a cursor whose
+            // row is gone on a neighbour; the row was deleted, which
+            // invalidated the cursor first, so it is on its row here.
+            if (cur.state != .valid) return error.Abort;
+        }
+        return cur.accessPayload(offset, buf, false);
+    }
+
+    /// Port of sqlite3BtreePutData(): overwrite `buf.len` bytes of the
+    /// payload of the current row from `offset`, for an incremental blob
+    /// cursor on a table b-tree. The size of the row cannot change.
+    pub fn putData(cur: *Cursor, offset: u32, buf: []const u8) Error!void {
+        std.debug.assert(cur.flags.incrblob);
+        try cur.restoreIfNeeded();
+        std.debug.assert(cur.state != .requireseek);
+        if (cur.state != .valid) return error.Abort;
+        // Save the positions of the other cursors on the table, which may
+        // hold the page modified below (they cannot fail to save on a
+        // table b-tree).
+        try cur.bt.saveAllCursors(cur.pgno_root, cur);
+        if (!cur.flags.write) return error.ReadOnly;
+        std.debug.assert(!cur.bt.read_only and cur.bt.in_trans == .write and cur.page.int_key);
+        return cur.accessPayload(offset, @constCast(buf), true);
+    }
+
+    /// Port of sqlite3BtreeIncrblobCursor(): mark the cursor as an
+    /// incremental blob cursor.
+    pub fn incrblobCursor(cur: *Cursor) void {
+        cur.flags.incrblob = true;
+        cur.bt.has_incrblob_cur = true;
     }
 
     fn copyPayload(cur: *Cursor, ptr: [*]u8, buf: []u8, write: bool, db_page: *pager_mod.Page) Error!void {
@@ -3306,6 +3373,9 @@ pub const Cursor = struct {
             // Only possible if two b-trees share a root in a corrupt schema.
             if (seek != null and cur.i_page < 0) return error.Corrupt;
         }
+        // An insert into a table b-tree invalidates the incremental blob
+        // cursors on the row it replaces.
+        if (cur.key_info == null and bt.has_incrblob_cur) bt.invalidateIncrblobCursors(cur.pgno_root, n_key, false);
         if (cur.state.atLeast(.requireseek)) _ = try cur.moveToRoot();
         std.debug.assert(cur.flags.write and bt.in_trans == .write and !bt.read_only);
 
@@ -3530,6 +3600,12 @@ pub const Cursor = struct {
         else
             .stay;
         if (preserve == .save_key) try cur.saveKey();
+        // Deleting a row of a table b-tree invalidates the incremental
+        // blob cursors on it.
+        if (cur.key_info == null and bt.has_incrblob_cur) {
+            cur.getCellInfo();
+            bt.invalidateIncrblobCursors(cur.pgno_root, cur.info.n_key, false);
+        }
 
         // An entry on an interior page is replaced by its predecessor, the
         // largest entry in its left subtree, which makes balancing easier.

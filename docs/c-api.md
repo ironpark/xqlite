@@ -93,7 +93,7 @@ src/capi/vtab.zig      C sqlite3_module을 엔진 Module로 감싸는 다리
 src/capi/vfs.zig       VFS 등록부, 기본 VFS의 C 뷰, C VFS의 엔진 뷰
 src/capi/filename.zig  sqlite3_filename 배치와 uri_parameter 계열
 src/capi/hooks.zig     commit/rollback/update 훅, 진행 처리기
-src/capi/blob.zig      증분 BLOB I/O (SQL로 흉내)
+src/capi/blob.zig      증분 BLOB I/O (엔진의 vdbe/blob.zig 위)
 src/capi/printf.zig    mprintf 계열과 sqlite3_str (엔진의 printf 위)
 src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sqlite3_mutex
 ```
@@ -122,7 +122,7 @@ src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sq
 | 가상 테이블 | `create_module(_v2)`, `drop_modules`, `declare_vtab`, `vtab_config`, `vtab_on_conflict`, `vtab_nochange`, `vtab_collation`, `vtab_distinct`, `vtab_in`, `vtab_in_first/next`, `vtab_rhs_value` (모듈 버전 1~4: 쓰기, 트랜잭션, 세이브포인트, `xShadowName`, `xIntegrity`) |
 | 훅 | `commit_hook`, `rollback_hook`, `update_hook`, `progress_handler`, `trace_v2`(`STMT`, `PROFILE`, `ROW`, `CLOSE`), `trace`, `profile`, `wal_hook` |
 | WAL·백업 | `wal_autocheckpoint`, `wal_checkpoint`, `wal_checkpoint_v2`(NOOP~TRUNCATE), `backup_init/step/finish/remaining/pagecount` |
-| BLOB | `blob_open/read/write/bytes/close/reopen` (SQL로 흉내, [다른 점](#sqlite와-다른-점)) |
+| BLOB | `blob_open/read/write/bytes/close/reopen` (vdbeblob.c의 포팅: 커서로 행의 페이로드를 바로 읽고 씀. 쓰기는 트리거·업데이트 훅을 부르지 않고 `changes()`에 잡히지 않으며, 행이 바뀌거나 지워지면 핸들이 만료되어 `SQLITE_ABORT`) |
 | VFS | `vfs_find`, `vfs_register`, `vfs_unregister` (기본 VFS `"unix"`의 C 메서드가 동작하므로 기본 VFS를 감싸는 C VFS도 동작) |
 | 파일 이름 | `uri_parameter/boolean/int64/key`, `filename_database/journal/wal`, `create_filename`, `free_filename` |
 | 메모리 | `malloc(64)`, `realloc(64)`, `free`, `msize`, `soft/hard_heap_limit64`, `soft_heap_limit`, `release_memory`, `db_release_memory`, `db_cacheflush` |
@@ -161,7 +161,7 @@ src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sq
 - **스레드**: 멀티스레드 모드(`sqlite3_threadsafe()` = 2)입니다. [스레드](#스레드)를 보세요.
 - **`sqlite3_prepare()`(v1)**: v2와 같습니다. 문장의 SQL을 늘 보관하므로 스키마가 바뀌면 다시 컴파일하고, 오류 코드는 `step()`에서 바로 돌려줍니다.
 - **바인딩 값은 늘 복사합니다**: `SQLITE_STATIC`도 복사하고, 사용자 소멸자는 복사한 직후 부릅니다(SQLite도 허용하는 시점). 결과값(`result_text` 등)은 `SQLITE_STATIC`과 `sqlite3_free`는 복사 없이, 다른 소멸자는 복사 후 바로 부릅니다.
-- **BLOB 증분 I/O**는 SQL로 흉내 냅니다: 읽기는 값을 SELECT하고, 쓰기는 값을 읽어 메모리에서 고친 뒤 그 행을 UPDATE합니다. 결과는 같지만 쓰기가 진짜 UPDATE라서 트리거·업데이트 훅이 돌고 `changes()`에 잡히며 값 전체 크기만큼 비용이 듭니다. 행이 바뀌어도 핸들이 만료(`SQLITE_ABORT`)되지 않습니다.
+- **BLOB 증분 I/O**는 공유 캐시가 없으므로 `OP_TableLock` 자리가 `OP_Noop`입니다(`SQLITE_OMIT_SHARED_CACHE` 빌드와 같음). 그 밖에는 SQLite와 같습니다.
 - **트레이스**: `SQLITE_TRACE_STMT`/`PROFILE`/`ROW`는 C ABI의 `sqlite3_step()`에서 부르므로, 트리거 안의 문장(`--` 주석으로 오는 것)은 보고하지 않습니다. `sqlite3_exec()`도 같은 `step()`을 쓰므로 그 문장은 보고됩니다.
 - **진행 처리기**는 SQLite처럼 N개 명령마다 점프 지점에서 부르지만, 문장이 끝날 때 남은 몫을 한 번 더 부르지는 않습니다.
 - **VFS**: C VFS의 `xRead`가 `SQLITE_IOERR_SHORT_READ`를 돌려주면 읽은 길이를 모르므로 끝의 0 바이트를 읽지 않은 것으로 칩니다. C VFS가 받는 파일 이름에는 URI 파라미터가 없습니다(`sqlite3_uri_parameter()`는 NULL). URI에서 `vfs=`를 쓴 연결이 `ATTACH`하는 URI의 `vfs=`는 무시하고 연결의 VFS를 씁니다.

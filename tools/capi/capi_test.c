@@ -1096,8 +1096,168 @@ static void test_b_memdb(const char *zDir){
   sqlite3_close(db);
 }
 
+static int nBlobUpdates = 0;
+static void blob_update_hook(void *p, int op, const char *zDb, const char *zTab, sqlite3_int64 rowid){
+  (void)p; (void)op; (void)zDb; (void)zTab; (void)rowid;
+  nBlobUpdates++;
+}
+
 static void test_b_blob(const char *zDir){
-  (void)zDir;
+  sqlite3 *db = 0;
+  sqlite3_blob *pBlob = 0;
+  char zPath[512];
+  char buf[64];
+  unsigned char *big;
+  int i, nBig = 10000, nTotal;
+  snprintf(zPath, sizeof(zPath), "%s/blob.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  exec(db, "PRAGMA page_size=1024;"
+           "CREATE TABLE t(id INTEGER PRIMARY KEY, a BLOB, b TEXT, c INT, d REAL, e, f UNIQUE);"
+           "CREATE INDEX t_c ON t(c);"
+           "INSERT INTO t VALUES(1, x'00112233', 'hello', 7, 1.5, NULL, 1);"
+           "INSERT INTO t VALUES(2, zeroblob(10000), 'world', 8, 2.5, NULL, 2);"
+           "CREATE TABLE w(k PRIMARY KEY, v) WITHOUT ROWID;"
+           "CREATE VIEW vw AS SELECT * FROM t;"
+           "CREATE TABLE g(x, y AS (x+1));"
+           "CREATE TABLE trg_log(n); CREATE TRIGGER tr AFTER UPDATE ON t BEGIN INSERT INTO trg_log VALUES(1); END;");
+
+  /* Error messages of sqlite3_blob_open(). */
+  CHECK_RC(sqlite3_blob_open(db, "main", "nosuch", "a", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such table: main.nosuch");
+  CHECK(pBlob==0);
+  CHECK_RC(sqlite3_blob_open(db, 0, "nosuch", "a", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such table: nosuch");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "zz", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such column: \"zz\"");
+  CHECK_RC(sqlite3_blob_open(db, "main", "w", "v", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open table without rowid: w");
+  CHECK_RC(sqlite3_blob_open(db, "main", "vw", "a", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open view: vw");
+  CHECK_RC(sqlite3_blob_open(db, "main", "g", "x", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open table with generated columns: g");
+  CHECK_RC(sqlite3_blob_open(db, "main", "pragma_table_list", "name", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open virtual table: pragma_table_list");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "c", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open indexed column for writing");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "f", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open indexed column for writing");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 99, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such rowid: 99");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "d", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open value of type real");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "e", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open value of type null");
+  CHECK(pBlob==0);
+  exec(db, "CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE ch(x REFERENCES p(id), y BLOB)");
+  exec(db, "INSERT INTO ch VALUES(NULL, x'01')");
+  CHECK_RC(sqlite3_blob_open(db, "main", "ch", "x", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open value of type null");
+  exec(db, "PRAGMA foreign_keys=ON");
+  CHECK_RC(sqlite3_blob_open(db, "main", "ch", "x", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open foreign key column for writing");
+  exec(db, "PRAGMA foreign_keys=OFF");
+
+  /* Text and read-only handles. */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "b", 1, 0, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==5);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 5, 0), SQLITE_OK, db);
+  CHECK(memcmp(buf, "hello", 5)==0);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 2, 4), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, -1, 0), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 1, -1), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_write(pBlob, "x", 1, 0), SQLITE_READONLY, db);
+  CHECK_RC(sqlite3_blob_reopen(pBlob, 2), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==5);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 5, 0), SQLITE_OK, db);
+  CHECK(memcmp(buf, "world", 5)==0);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  /* Writes go to the row: no trigger, update hook or change count. */
+  sqlite3_update_hook(db, blob_update_hook, 0);
+  exec(db, "DELETE FROM trg_log");
+  nTotal = sqlite3_total_changes(db);
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==4);
+  CHECK_RC(sqlite3_blob_write(pBlob, "\x44\x55", 2, 1), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 4, 0), SQLITE_OK, db);
+  CHECK(memcmp(buf, "\x00\x44\x55\x33", 4)==0);
+  CHECK_RC(sqlite3_blob_write(pBlob, "abc", 3, 2), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  CHECK(nBlobUpdates==0);
+  CHECK(sqlite3_changes(db)==0);
+  CHECK(sqlite3_total_changes(db)==nTotal);
+  CHECK_STR(one(db, "SELECT count(*) FROM trg_log"), "0");
+  CHECK_STR(one(db, "SELECT hex(a) FROM t WHERE id=1"), "00445533");
+
+  /* A blob over several overflow pages. */
+  big = malloc(nBig);
+  for(i=0; i<nBig; i++) big[i] = (unsigned char)(i*7);
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 2, 1, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==nBig);
+  for(i=0; i<nBig; i+=1000){
+    CHECK_RC(sqlite3_blob_write(pBlob, big+i, 1000, i), SQLITE_OK, db);
+  }
+  memset(buf, 0, sizeof(buf));
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 20, 4990), SQLITE_OK, db);
+  CHECK(memcmp(buf, big+4990, 20)==0);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  {
+    sqlite3_stmt *p = 0;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT a FROM t WHERE id=2", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    CHECK(sqlite3_column_bytes(p, 0)==nBig && memcmp(sqlite3_column_blob(p, 0), big, nBig)==0);
+    sqlite3_finalize(p);
+  }
+  free(big);
+
+  /* The handle expires when its row changes. */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 0, &pBlob), SQLITE_OK, db);
+  exec(db, "UPDATE t SET c = 9 WHERE id = 2");
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 4, 0), SQLITE_OK, db);
+  exec(db, "UPDATE t SET c = 10 WHERE id = 1");
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 4, 0), SQLITE_ABORT, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==0);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 0, 0), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_reopen(pBlob, 1), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 2, 1, &pBlob), SQLITE_OK, db);
+  exec(db, "DELETE FROM t WHERE id = 2");
+  CHECK_RC(sqlite3_blob_write(pBlob, "z", 1, 0), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  /* reopen() to a row that is not there invalidates the handle. */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 0, &pBlob), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_reopen(pBlob, 2), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such rowid: 2");
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 1, 0), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  /* An open handle holds a statement (and its transaction). */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_next_stmt(db, 0)!=0);
+  CHECK(sqlite3_get_autocommit(db)==1);
+  CHECK(sqlite3_txn_state(db, "main")==SQLITE_TXN_WRITE);
+  CHECK_RC(sqlite3_close(db), SQLITE_BUSY, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_txn_state(db, "main")==SQLITE_TXN_NONE);
+  CHECK(sqlite3_next_stmt(db, 0)==0);
+
+  /* A blob in a TEMP table, and blob handles inside a transaction. */
+  exec(db, "CREATE TEMP TABLE tt(x); INSERT INTO tt VALUES(x'0102')");
+  CHECK_RC(sqlite3_blob_open(db, "temp", "tt", "x", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_write(pBlob, "\x09", 1, 1), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT hex(x) FROM tt"), "0109");
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_blob_open(db, 0, "t", "a", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_write(pBlob, "\x77", 1, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  exec(db, "ROLLBACK");
+  CHECK_STR(one(db, "SELECT hex(a) FROM t WHERE id=1"), "00445533");
+  sqlite3_update_hook(db, 0, 0);
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
+  CHECK_RC(sqlite3_blob_close(0), SQLITE_OK, 0);
 }
 
 static void test_b_status(void){

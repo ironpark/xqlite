@@ -138,51 +138,36 @@ pub const PragFlg = packed struct(u8) {
     }
 };
 
-/// Names of the result columns of pragmas that return several columns,
-/// or one named differently from the pragma (pragCName).
-const prag_c_name = [_][:0]const u8{
-    // 0: foreign_key_list
-    "id",      "seq",          "table",  "from",    "to",         "on_update", "on_delete", "match",
-    // 8: table_xinfo (table_info uses the first 6)
-    "cid",     "name",         "type",   "notnull", "dflt_value", "pk",        "hidden",
-    // 15: function_list
-       "name",
-    "builtin", "type",         "enc",    "narg",    "flags",
-    // 21: table_list
-         "schema",    "name",      "type",
-    "ncol",    "wr",           "strict",
-    // 27: index_xinfo (index_info uses the first 3)
-    "seqno",   "cid",        "name",      "desc",      "coll",
-    "key",
-    // 33: index_list (collation_list uses the first 2)
-        "seq",          "name",   "unique",  "origin",     "partial",
-    // 38: stats
-      "tbl",       "idx",
-    "wdth",    "hght",         "flgs",
-    // 43: foreign_key_check
-      "table",   "rowid",      "parent",    "fkid",
-    // 47: wal_checkpoint
-         "busy",
-    "log",     "checkpointed",
-    // 50: database_list
-    "seq",    "name",    "file",
-    // 53: lock_status
-          "database",  "status",
-    // 55: default_cache_size
-       "cache_size",
-    // 56: busy_timeout
-    "timeout",
-};
+/// The result columns of pragmas that return several columns, or one
+/// named differently from the pragma (pragCName). Pragmas whose columns
+/// are a prefix of another's share its list.
+/// foreign_key_list.
+const foreign_key_list_cols = [_][:0]const u8{ "id", "seq", "table", "from", "to", "on_update", "on_delete", "match" };
+/// table_xinfo (table_info: the first 6).
+const table_xinfo_cols = [_][:0]const u8{ "cid", "name", "type", "notnull", "dflt_value", "pk", "hidden" };
+/// function_list.
+const function_list_cols = [_][:0]const u8{ "name", "builtin", "type", "enc", "narg", "flags" };
+/// table_list.
+const table_list_cols = [_][:0]const u8{ "schema", "name", "type", "ncol", "wr", "strict" };
+/// index_xinfo (index_info: the first 3).
+const index_xinfo_cols = [_][:0]const u8{ "seqno", "cid", "name", "desc", "coll", "key" };
+/// index_list (collation_list: the first 2).
+const index_list_cols = [_][:0]const u8{ "seq", "name", "unique", "origin", "partial" };
+/// foreign_key_check.
+const foreign_key_check_cols = [_][:0]const u8{ "table", "rowid", "parent", "fkid" };
+/// wal_checkpoint.
+const wal_checkpoint_cols = [_][:0]const u8{ "busy", "log", "checkpointed" };
+/// database_list.
+const database_list_cols = [_][:0]const u8{ "seq", "name", "file" };
 
 /// A built-in pragma (PragmaName).
 pub const PragmaName = struct {
     name: [:0]const u8,
     typ: PragTyp,
     flags: PragFlg = .{},
-    /// Start and number of the column names in prag_c_name; 0 names means
-    /// the one column is named after the pragma.
-    i_prag_c_name: u8 = 0,
-    n_prag_c_name: u8 = 0,
+    /// The names of the result columns; none means one column named after
+    /// the pragma.
+    cols: []const [:0]const u8 = &.{},
     i_arg: u64 = 0,
 };
 
@@ -198,37 +183,37 @@ const pragma_names = [_]PragmaName{
     .{ .name = "application_id", .typ = .header_value, .flags = .{ .NoColumns1 = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.application_id) },
     .{ .name = "auto_vacuum", .typ = .auto_vacuum, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
     .{ .name = "automatic_index", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .AutoIndex = true }) },
-    .{ .name = "busy_timeout", .typ = .busy_timeout, .flags = .{ .Result0 = true }, .i_prag_c_name = 56, .n_prag_c_name = 1 },
+    .{ .name = "busy_timeout", .typ = .busy_timeout, .flags = .{ .Result0 = true }, .cols = &.{"timeout"} },
     .{ .name = "cache_size", .typ = .cache_size, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
     .{ .name = "cache_spill", .typ = .cache_spill, .flags = .{ .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
     .{ .name = "case_sensitive_like", .typ = .case_sensitive_like, .flags = .{ .NoColumns = true } },
     .{ .name = "cell_size_check", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .CellSizeCk = true }) },
     .{ .name = "checkpoint_fullfsync", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .CkptFullFSync = true }) },
-    .{ .name = "collation_list", .typ = .collation_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 33, .n_prag_c_name = 2 },
+    .{ .name = "collation_list", .typ = .collation_list, .flags = .{ .Result0 = true }, .cols = index_list_cols[0..2] },
     .{ .name = "compile_options", .typ = .compile_options, .flags = .{ .Result0 = true } },
     .{ .name = "count_changes", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .CountRows = true }) },
 } ++ (if (builtin.os.tag == .windows) [_]PragmaName{
     .{ .name = "data_store_directory", .typ = .data_store_directory, .flags = .{ .NoColumns1 = true } },
 } else [_]PragmaName{}) ++ [_]PragmaName{
     .{ .name = "data_version", .typ = .header_value, .flags = .{ .ReadOnly = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.data_version) },
-    .{ .name = "database_list", .typ = .database_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 50, .n_prag_c_name = 3 },
-    .{ .name = "default_cache_size", .typ = .default_cache_size, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true }, .i_prag_c_name = 55, .n_prag_c_name = 1 },
+    .{ .name = "database_list", .typ = .database_list, .flags = .{ .Result0 = true }, .cols = &database_list_cols },
+    .{ .name = "default_cache_size", .typ = .default_cache_size, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true }, .cols = &.{"cache_size"} },
     .{ .name = "defer_foreign_keys", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .DeferFKs = true }) },
     .{ .name = "empty_result_callbacks", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .NullCallback = true }) },
     .{ .name = "encoding", .typ = .encoding, .flags = .{ .Result0 = true, .NoColumns1 = true } },
-    .{ .name = "foreign_key_check", .typ = .foreign_key_check, .flags = .{ .NeedSchema = true, .Result0 = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 43, .n_prag_c_name = 4 },
-    .{ .name = "foreign_key_list", .typ = .foreign_key_list, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 0, .n_prag_c_name = 8 },
+    .{ .name = "foreign_key_check", .typ = .foreign_key_check, .flags = .{ .NeedSchema = true, .Result0 = true, .Result1 = true, .SchemaOpt = true }, .cols = &foreign_key_check_cols },
+    .{ .name = "foreign_key_list", .typ = .foreign_key_list, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .cols = &foreign_key_list_cols },
     .{ .name = "foreign_keys", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .ForeignKeys = true }) },
     .{ .name = "freelist_count", .typ = .header_value, .flags = .{ .ReadOnly = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.free_page_count) },
     .{ .name = "full_column_names", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .FullColNames = true }) },
     .{ .name = "fullfsync", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .FullFSync = true }) },
-    .{ .name = "function_list", .typ = .function_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 15, .n_prag_c_name = 6 },
+    .{ .name = "function_list", .typ = .function_list, .flags = .{ .Result0 = true }, .cols = &function_list_cols },
     .{ .name = "hard_heap_limit", .typ = .hard_heap_limit, .flags = .{ .Result0 = true } },
     .{ .name = "ignore_check_constraints", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .IgnoreChecks = true }) },
     .{ .name = "incremental_vacuum", .typ = .incremental_vacuum, .flags = .{ .NeedSchema = true, .NoColumns = true } },
-    .{ .name = "index_info", .typ = .index_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 27, .n_prag_c_name = 3 },
-    .{ .name = "index_list", .typ = .index_list, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 33, .n_prag_c_name = 5 },
-    .{ .name = "index_xinfo", .typ = .index_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 27, .n_prag_c_name = 6, .i_arg = 1 },
+    .{ .name = "index_info", .typ = .index_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .cols = index_xinfo_cols[0..3] },
+    .{ .name = "index_list", .typ = .index_list, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .cols = &index_list_cols },
+    .{ .name = "index_xinfo", .typ = .index_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .cols = &index_xinfo_cols, .i_arg = 1 },
     .{ .name = "integrity_check", .typ = .integrity_check, .flags = .{ .NeedSchema = true, .Result0 = true, .Result1 = true, .SchemaOpt = true } },
     .{ .name = "journal_mode", .typ = .journal_mode, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true } },
     .{ .name = "journal_size_limit", .typ = .journal_size_limit, .flags = .{ .Result0 = true, .SchemaReq = true } },
@@ -239,11 +224,11 @@ const pragma_names = [_]PragmaName{
     .{ .name = "locking_mode", .typ = .locking_mode, .flags = .{ .Result0 = true, .SchemaReq = true } },
     .{ .name = "max_page_count", .typ = .page_count, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true } },
     .{ .name = "mmap_size", .typ = .mmap_size },
-    .{ .name = "module_list", .typ = .module_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 9, .n_prag_c_name = 1 },
+    .{ .name = "module_list", .typ = .module_list, .flags = .{ .Result0 = true }, .cols = &.{"name"} },
     .{ .name = "optimize", .typ = .optimize, .flags = .{ .Result1 = true, .NeedSchema = true } },
     .{ .name = "page_count", .typ = .page_count, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true } },
     .{ .name = "page_size", .typ = .page_size, .flags = .{ .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
-    .{ .name = "pragma_list", .typ = .pragma_list, .flags = .{ .Result0 = true }, .i_prag_c_name = 9, .n_prag_c_name = 1 },
+    .{ .name = "pragma_list", .typ = .pragma_list, .flags = .{ .Result0 = true }, .cols = &.{"name"} },
     .{ .name = "query_only", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .QueryOnly = true }) },
     .{ .name = "quick_check", .typ = .integrity_check, .flags = .{ .NeedSchema = true, .Result0 = true, .Result1 = true, .SchemaOpt = true } },
     .{ .name = "read_uncommitted", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .ReadUncommit = true }) },
@@ -255,16 +240,16 @@ const pragma_names = [_]PragmaName{
     .{ .name = "shrink_memory", .typ = .shrink_memory, .flags = .{ .NoColumns = true } },
     .{ .name = "soft_heap_limit", .typ = .soft_heap_limit, .flags = .{ .Result0 = true } },
     .{ .name = "synchronous", .typ = .synchronous, .flags = .{ .NeedSchema = true, .Result0 = true, .SchemaReq = true, .NoColumns1 = true } },
-    .{ .name = "table_info", .typ = .table_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 8, .n_prag_c_name = 6 },
-    .{ .name = "table_list", .typ = .table_list, .flags = .{ .NeedSchema = true, .Result1 = true }, .i_prag_c_name = 21, .n_prag_c_name = 6 },
-    .{ .name = "table_xinfo", .typ = .table_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .i_prag_c_name = 8, .n_prag_c_name = 7, .i_arg = 1 },
+    .{ .name = "table_info", .typ = .table_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .cols = table_xinfo_cols[0..6] },
+    .{ .name = "table_list", .typ = .table_list, .flags = .{ .NeedSchema = true, .Result1 = true }, .cols = &table_list_cols },
+    .{ .name = "table_xinfo", .typ = .table_info, .flags = .{ .NeedSchema = true, .Result1 = true, .SchemaOpt = true }, .cols = &table_xinfo_cols, .i_arg = 1 },
     .{ .name = "temp_store", .typ = .temp_store, .flags = .{ .Result0 = true, .NoColumns1 = true } },
     .{ .name = "temp_store_directory", .typ = .temp_store_directory, .flags = .{ .NoColumns1 = true } },
     .{ .name = "threads", .typ = .threads, .flags = .{ .Result0 = true } },
     .{ .name = "trusted_schema", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .TrustedSchema = true }) },
     .{ .name = "user_version", .typ = .header_value, .flags = .{ .NoColumns1 = true, .Result0 = true }, .i_arg = @backingInt(btree.Meta.user_version) },
     .{ .name = "wal_autocheckpoint", .typ = .wal_autocheckpoint },
-    .{ .name = "wal_checkpoint", .typ = .wal_checkpoint, .flags = .{ .NeedSchema = true }, .i_prag_c_name = 47, .n_prag_c_name = 3 },
+    .{ .name = "wal_checkpoint", .typ = .wal_checkpoint, .flags = .{ .NeedSchema = true }, .cols = &wal_checkpoint_cols },
     .{ .name = "writable_schema", .typ = .flag, .flags = .{ .Result0 = true, .NoColumns1 = true }, .i_arg = DbFlag.int(.{ .WriteSchema = true, .NoSchemaError = true }) },
 };
 
@@ -362,12 +347,12 @@ fn changeTempStorage(p: *Parse, storage_type: []const u8) void {
 
 /// Port of setPragmaResultColumnNames().
 fn setPragmaResultColumnNames(v: *Vdbe, pragma_name: *const PragmaName) void {
-    const n = pragma_name.n_prag_c_name;
-    aux.setNumCols(v, if (n == 0) 1 else n);
-    if (n == 0) {
+    const cols = pragma_name.cols;
+    aux.setNumCols(v, if (cols.len == 0) 1 else @intCast(cols.len));
+    if (cols.len == 0) {
         aux.setColName(v, 0, vi.COLNAME_NAME, pragma_name.name);
     } else {
-        for (0..n) |i| aux.setColName(v, i, vi.COLNAME_NAME, prag_c_name[pragma_name.i_prag_c_name + i]);
+        for (cols, 0..) |name, i| aux.setColName(v, i, vi.COLNAME_NAME, name);
     }
 }
 
@@ -1851,11 +1836,11 @@ fn pragmaVtabConnect(db: *Sqlite3, pn: *const PragmaName, _: []const [:0]const u
     var acc: std.Io.Writer = .fixed(&buf);
     var sep: u8 = '(';
     acc.writeAll("CREATE TABLE x") catch {};
-    var i: u8 = 0;
-    while (i < pn.n_prag_c_name) : (i += 1) {
-        acc.print("{c}\"{s}\"", .{ sep, prag_c_name[pn.i_prag_c_name + i] }) catch {};
+    for (pn.cols) |name| {
+        acc.print("{c}\"{s}\"", .{ sep, name }) catch {};
         sep = ',';
     }
+    var i: u8 = @intCast(pn.cols.len);
     if (i == 0) {
         acc.print("(\"{s}\"", .{pn.name}) catch {};
         i += 1;

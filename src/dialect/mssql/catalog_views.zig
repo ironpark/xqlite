@@ -52,7 +52,7 @@ pub fn select(s: *Parser, schema: []const u8, name: []const u8) Error!?*tree.Sel
     return sel;
 }
 
-const user_tables = " substr(tl.name, 1, 7) <> 'sqlite_' AND tl.name NOT IN ('xq_catalog', 'xq_sequence') AND tl.[schema] <> 'temp'";
+const user_tables = " substr(tl.name, 1, 7) <> 'sqlite_' AND tl.name" ++ catalog.not_catalog_table ++ " AND tl.[schema] <> 'temp'";
 
 /// The schema and the name within it of table tl.name of
 /// pragma_table_list (a schema of CREATE SCHEMA is main's).
@@ -119,7 +119,7 @@ const m_schema_id = "xq_tsql_schema_id(xq_tsql_schema_of(m.name))";
 
 const sys_tables =
     "SELECT " ++ m_name ++ " AS name, m.rowid AS object_id, " ++ m_schema_id ++ " AS schema_id, 'U' AS type, 'USER_TABLE' AS type_desc " ++
-    "FROM main.sqlite_schema m WHERE m.type = 'table' AND substr(m.name, 1, 7) <> 'sqlite_' AND m.name NOT IN ('xq_catalog', 'xq_sequence')";
+    "FROM main.sqlite_schema m WHERE m.type = 'table' AND substr(m.name, 1, 7) <> 'sqlite_' AND m.name" ++ catalog.not_catalog_table;
 
 const sys_views =
     "SELECT " ++ m_name ++ " AS name, m.rowid AS object_id, " ++ m_schema_id ++ " AS schema_id, 'V' AS type, 'VIEW' AS type_desc " ++
@@ -128,7 +128,7 @@ const sys_views =
 const sys_objects =
     "SELECT " ++ m_name ++ " AS name, m.rowid AS object_id, " ++ m_schema_id ++ " AS schema_id, " ++
     "CASE m.type WHEN 'view' THEN 'V' ELSE 'U' END AS type, CASE m.type WHEN 'view' THEN 'VIEW' ELSE 'USER_TABLE' END AS type_desc " ++
-    "FROM main.sqlite_schema m WHERE m.type IN ('table', 'view') AND substr(m.name, 1, 7) <> 'sqlite_' AND m.name NOT IN ('xq_catalog', 'xq_sequence')";
+    "FROM main.sqlite_schema m WHERE m.type IN ('table', 'view') AND substr(m.name, 1, 7) <> 'sqlite_' AND m.name" ++ catalog.not_catalog_table;
 
 fn sysSchemasText(comptime list: []const u8) [:0]const u8 {
     return "SELECT x.name AS name, x.schema_id AS schema_id, x.principal_id AS principal_id FROM (" ++ list ++ ") x";
@@ -161,7 +161,7 @@ fn sysColumnsText(comptime decl: []const u8, comptime ident: []const u8) [:0]con
         ident ++ " AS is_identity, " ++
         "CASE WHEN ti.hidden IN (2, 3) THEN 1 ELSE 0 END AS is_computed " ++
         "FROM main.sqlite_schema m JOIN pragma_table_xinfo(m.name, 'main') ti ON 1 = 1 " ++
-        "WHERE m.type IN ('table', 'view') AND ti.hidden IN (0, 2, 3) AND substr(m.name, 1, 7) <> 'sqlite_' AND m.name NOT IN ('xq_catalog', 'xq_sequence')";
+        "WHERE m.type IN ('table', 'view') AND ti.hidden IN (0, 2, 3) AND substr(m.name, 1, 7) <> 'sqlite_' AND m.name" ++ catalog.not_catalog_table;
 }
 
 const decl_m_cat = "coalesce((SELECT c.value FROM main.xq_catalog c WHERE c.tbl = m.name AND c.col = ti.name AND c.[key] = 'type'), lower(ti.type))";

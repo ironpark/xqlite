@@ -644,30 +644,7 @@ fn isRowidName(z: []const u8) bool {
 const DbConfig = c.main.DbConfig;
 
 fn dbConfigOp(op: c_int) ?DbConfig {
-    return switch (op) {
-        1002 => .enable_fkey,
-        1003 => .enable_trigger,
-        1004 => .enable_fts3_tokenizer,
-        1005 => .enable_load_extension,
-        1006 => .no_ckpt_on_close,
-        1007 => .enable_qpsg,
-        1008 => .trigger_eqp,
-        1009 => .reset_database,
-        1010 => .defensive,
-        1011 => .writable_schema,
-        1012 => .legacy_alter_table,
-        1013 => .dqs_dml,
-        1014 => .dqs_ddl,
-        1015 => .enable_view,
-        1016 => .legacy_file_format,
-        1017 => .trusted_schema,
-        1018 => .stmt_scanstatus,
-        1019 => .reverse_scanorder,
-        1020 => .enable_attach_create,
-        1021 => .enable_attach_write,
-        1022 => .enable_comments,
-        else => null,
-    };
+    return std.enums.fromInt(DbConfig, op);
 }
 
 /// sqlite3_db_config() with its arguments taken out of the varargs by
@@ -889,34 +866,28 @@ pub export fn sqlite3_wal_checkpoint_v2(db_arg: ?*Handle, z_db: ?[*:0]const u8, 
     return c.main.walCheckpointV2(db, c.span(z_db), @fromBackingInt(@intCast(mode)), pn_log, pn_ckpt);
 }
 
-pub export fn sqlite3_commit_hook(db: ?*Handle, f: ?c.CCommit, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+/// Set hook `field` of the connection to `f` and `arg`; returns the old
+/// argument (sqlite3_commit_hook() and the like).
+fn setHook(db: ?*Handle, comptime field: []const u8, f: anytype, arg: ?*anyopaque) ?*anyopaque {
     const lk = c.lock(db);
     defer lk.unlock();
     const e = c.extOf(db) orelse return null;
-    const old = e.commit.arg;
-    e.commit = .{ .f = f, .arg = arg };
+    const old = @field(e, field).arg;
+    @field(e, field) = .{ .f = f, .arg = arg };
     @import("hooks.zig").sync(db.?);
     return old;
+}
+
+pub export fn sqlite3_commit_hook(db: ?*Handle, f: ?c.CCommit, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    return setHook(db, "commit", f, arg);
 }
 
 pub export fn sqlite3_rollback_hook(db: ?*Handle, f: ?c.CRollback, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-    const lk = c.lock(db);
-    defer lk.unlock();
-    const e = c.extOf(db) orelse return null;
-    const old = e.rollback.arg;
-    e.rollback = .{ .f = f, .arg = arg };
-    @import("hooks.zig").sync(db.?);
-    return old;
+    return setHook(db, "rollback", f, arg);
 }
 
 pub export fn sqlite3_update_hook(db: ?*Handle, f: ?c.CUpdate, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-    const lk = c.lock(db);
-    defer lk.unlock();
-    const e = c.extOf(db) orelse return null;
-    const old = e.update.arg;
-    e.update = .{ .f = f, .arg = arg };
-    @import("hooks.zig").sync(db.?);
-    return old;
+    return setHook(db, "update", f, arg);
 }
 
 pub export fn sqlite3_progress_handler(db: ?*Handle, n_ops: c_int, f: ?c.CProgress, arg: ?*anyopaque) callconv(.c) void {

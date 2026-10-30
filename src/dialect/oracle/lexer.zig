@@ -53,9 +53,16 @@ pub const Token = struct {
         return t.kind == kind;
     }
 
-    /// Whether this is the unquoted keyword `kw` (any case).
-    pub fn isKw(t: Token, kw: []const u8) bool {
-        return t.kind == .ident and std.ascii.eqlIgnoreCase(t.text, kw);
+    /// Whether this is the unquoted keyword `kw` (any case). Identifiers
+    /// fold to upper case, so `kw` is folded once, at compile time.
+    pub fn isKw(t: Token, comptime kw: []const u8) bool {
+        const upper = comptime blk: {
+            var u: [kw.len]u8 = undefined;
+            for (kw, &u) |c, *o| o.* = std.ascii.toUpper(c);
+            const final = u;
+            break :blk final;
+        };
+        return t.kind == .ident and std.mem.eql(u8, t.text, &upper);
     }
 
     pub fn isAnyKw(t: Token, comptime kws: []const []const u8) bool {

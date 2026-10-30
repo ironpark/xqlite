@@ -321,29 +321,30 @@ fn disconnectAllVtab(db: *Sqlite3) void {
 }
 
 /// The sqlite3_db_config() options that set or clear connection flags
-/// (the aFlagOp table of sqlite3_db_config()).
-pub const DbConfig = enum {
-    enable_fkey,
-    enable_trigger,
-    enable_view,
-    enable_fts3_tokenizer,
-    enable_load_extension,
-    no_ckpt_on_close,
-    enable_qpsg,
-    trigger_eqp,
-    reset_database,
-    defensive,
-    writable_schema,
-    legacy_alter_table,
-    dqs_ddl,
-    dqs_dml,
-    legacy_file_format,
-    trusted_schema,
-    stmt_scanstatus,
-    reverse_scanorder,
-    enable_attach_create,
-    enable_attach_write,
-    enable_comments,
+/// (the aFlagOp table of sqlite3_db_config()), valued by their
+/// SQLITE_DBCONFIG_* codes.
+pub const DbConfig = enum(c_int) {
+    enable_fkey = 1002,
+    enable_trigger = 1003,
+    enable_view = 1015,
+    enable_fts3_tokenizer = 1004,
+    enable_load_extension = 1005,
+    no_ckpt_on_close = 1006,
+    enable_qpsg = 1007,
+    trigger_eqp = 1008,
+    reset_database = 1009,
+    defensive = 1010,
+    writable_schema = 1011,
+    legacy_alter_table = 1012,
+    dqs_ddl = 1014,
+    dqs_dml = 1013,
+    legacy_file_format = 1016,
+    trusted_schema = 1017,
+    stmt_scanstatus = 1018,
+    reverse_scanorder = 1019,
+    enable_attach_create = 1020,
+    enable_attach_write = 1021,
+    enable_comments = 1022,
 
     pub fn mask(op: DbConfig) int.DbFlag {
         return switch (op) {

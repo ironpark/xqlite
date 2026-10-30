@@ -207,15 +207,21 @@ fn columnMallocFailure(v: *Vdbe) void {
 }
 
 pub fn columnType(v: *Vdbe, i: usize) i32 {
-    return mem.valueType(columnMem(v, i));
+    const r = mem.valueType(columnMem(v, i));
+    columnMallocFailure(v);
+    return r;
 }
 
 pub fn columnInt64(v: *Vdbe, i: usize) i64 {
-    return valueInt64(columnMem(v, i));
+    const r = valueInt64(columnMem(v, i));
+    columnMallocFailure(v);
+    return r;
 }
 
 pub fn columnDouble(v: *Vdbe, i: usize) f64 {
-    return valueDouble(columnMem(v, i));
+    const r = valueDouble(columnMem(v, i));
+    columnMallocFailure(v);
+    return r;
 }
 
 /// Port of sqlite3_stmt_isexplain(): 1 for EXPLAIN, 2 for EXPLAIN QUERY
@@ -239,11 +245,21 @@ pub fn columnBlob(v: *Vdbe, i: usize) ?[]const u8 {
 }
 
 pub fn columnBytes(v: *Vdbe, i: usize) usize {
-    return valueBytes(columnMem(v, i));
+    const r = valueBytes(columnMem(v, i));
+    columnMallocFailure(v);
+    return r;
 }
 
+/// Port of sqlite3_column_value(): the value, whose static text or blob
+/// is marked ephemeral, as it may change with the next step.
 pub fn columnValue(v: *Vdbe, i: usize) *Mem {
-    return columnMem(v, i);
+    const r = columnMem(v, i);
+    if (r.flags.Static) {
+        r.flags.Static = false;
+        r.flags.Ephem = true;
+    }
+    columnMallocFailure(v);
+    return r;
 }
 
 /// Port of sqlite3_column_name() and friends: name `var_` (COLNAME_*) of

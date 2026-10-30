@@ -488,6 +488,7 @@ pub fn defaultCollationName(db: *const Sqlite3) ?[:0]const u8 {
 
 test {
     _ = @import("func.zig");
+    _ = @import("template.zig");
     _ = @import("test.zig");
 }
 

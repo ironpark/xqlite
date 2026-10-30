@@ -59,8 +59,11 @@ pub const Token = struct {
         return t.kind == kind;
     }
 
-    /// Whether this is the unquoted keyword `kw` (lower case).
-    pub fn isKw(t: Token, kw: []const u8) bool {
+    /// Whether this is the unquoted keyword `kw`, which must be in lower
+    /// case as identifiers fold to it: one with upper case could never
+    /// match, so it does not compile.
+    pub fn isKw(t: Token, comptime kw: []const u8) bool {
+        comptime for (kw) |c| if (std.ascii.isUpper(c)) @compileError("keyword not in lower case: " ++ kw);
         return t.kind == .ident and std.mem.eql(u8, t.text, kw);
     }
 

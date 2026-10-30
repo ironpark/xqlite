@@ -608,23 +608,53 @@ fn formatShape(w: *std.Io.Writer, mo: Moment, upgrade: bool) void {
     }
 }
 
-fn partArg(ctx: *Context, m: *Mem) ?[]const u8 {
-    return text(ctx, m);
-}
-
 fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+/// The dateparts, by the names the parser normalizes them to (DATEADD's
+/// `yy` arrives as `year`). Each function handles all of them in a
+/// switch, so that a new one cannot be forgotten in one of them.
+const Part = enum {
+    year,
+    quarter,
+    month,
+    dayofyear,
+    day,
+    week,
+    weekday,
+    hour,
+    minute,
+    second,
+    millisecond,
+    microsecond,
+    nanosecond,
+    tzoffset,
+    iso_week,
+};
+
+/// The datepart argument: its text (for error messages) and the part, if
+/// it is one.
+fn partArg(ctx: *Context, m: *Mem) ?struct { []const u8, ?Part } {
+    const name = text(ctx, m) orelse return null;
+    return .{ name, std.meta.stringToEnum(Part, name) };
 }
 
 /// dateadd(part, n, d)
 pub fn dateaddFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const part = partArg(ctx, argv[0]) orelse return;
+    const name, const part_or = partArg(ctx, argv[0]) orelse return;
     var mo = momentOf(argv[2]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
     const n: i64 = @intFromFloat(std.math.clamp(@trunc(api.valueDouble(argv[1])), -1e15, 1e15));
+    const unsupported = "The datepart {s} is not supported by date function dateadd.";
+    const part = part_or orelse return fail(ctx, unsupported, .{name});
     var upgrade = false;
-    if (eq(part, "year") or eq(part, "quarter") or eq(part, "month")) {
-        const months = if (eq(part, "year")) n * 12 else if (eq(part, "quarter")) n * 3 else n;
+    if (part == .year or part == .quarter or part == .month) {
+        const months = switch (part) {
+            .year => n * 12,
+            .quarter => n * 3,
+            else => n,
+        };
         const y, const mon, const d = mo.ymd();
         const total = y * 12 + (mon - 1) + months;
         const ny = @divFloor(total, 12);
@@ -633,24 +663,18 @@ pub fn dateaddFunc(ctx: *Context, argv: []*Mem) void {
         const nd = @min(d, daysInMonth(@intCast(ny), nm));
         mo.days = maria.daysFromCivil(ny, nm, nd);
     } else {
-        const unit: i128 = if (eq(part, "day") or eq(part, "dayofyear") or eq(part, "weekday"))
-            86400 * 10_000_000
-        else if (eq(part, "week"))
-            7 * 86400 * 10_000_000
-        else if (eq(part, "hour"))
-            3600 * 10_000_000
-        else if (eq(part, "minute"))
-            60 * 10_000_000
-        else if (eq(part, "second"))
-            10_000_000
-        else if (eq(part, "millisecond"))
-            10_000
-        else if (eq(part, "microsecond"))
-            10
-        else if (eq(part, "nanosecond"))
-            0
-        else
-            return fail(ctx, "The datepart {s} is not supported by date function dateadd.", .{part});
+        const unit: i128 = switch (part) {
+            .day, .dayofyear, .weekday => 86400 * 10_000_000,
+            .week => 7 * 86400 * 10_000_000,
+            .hour => 3600 * 10_000_000,
+            .minute => 60 * 10_000_000,
+            .second => 10_000_000,
+            .millisecond => 10_000,
+            .microsecond => 10,
+            .nanosecond => 0,
+            .tzoffset, .iso_week => return fail(ctx, unsupported, .{name}),
+            .year, .quarter, .month => unreachable,
+        };
         if (unit == 0 and @mod(n, 100) != 0) {} // below 100 ns: nothing.
         const add: i128 = if (unit == 0) @divTrunc(n, 100) else n * unit;
         const r = Moment.fromTicks(mo.ticks() + add);
@@ -677,35 +701,27 @@ fn weekIndex(days: i64) i64 {
 /// datediff(part, a, b): the boundaries of `part` crossed from a to b.
 pub fn datediffFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const part = partArg(ctx, argv[0]) orelse return;
+    const name, const part_or = partArg(ctx, argv[0]) orelse return;
     const a = momentOf(argv[1]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
     const b = momentOf(argv[2]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
+    const unsupported = "The datepart {s} is not supported by date function datediff.";
+    const part = part_or orelse return fail(ctx, unsupported, .{name});
     const ya, const ma, _ = a.ymd();
     const yb, const mb, _ = b.ymd();
-    const r: i128 = if (eq(part, "year"))
-        yb - ya
-    else if (eq(part, "quarter"))
-        (yb * 4 + @divFloor(mb - 1, 3)) - (ya * 4 + @divFloor(ma - 1, 3))
-    else if (eq(part, "month"))
-        (yb * 12 + mb) - (ya * 12 + ma)
-    else if (eq(part, "day") or eq(part, "dayofyear") or eq(part, "weekday"))
-        b.days - a.days
-    else if (eq(part, "week"))
-        weekIndex(b.days) - weekIndex(a.days)
-    else if (eq(part, "hour"))
-        (@as(i128, b.days) * 24 + b.secs / 3600) - (@as(i128, a.days) * 24 + a.secs / 3600)
-    else if (eq(part, "minute"))
-        (@as(i128, b.days) * 1440 + b.secs / 60) - (@as(i128, a.days) * 1440 + a.secs / 60)
-    else if (eq(part, "second"))
-        (@as(i128, b.days) * 86400 + b.secs) - (@as(i128, a.days) * 86400 + a.secs)
-    else if (eq(part, "millisecond"))
-        @divFloor(b.ticks(), 10_000) - @divFloor(a.ticks(), 10_000)
-    else if (eq(part, "microsecond"))
-        @divFloor(b.ticks(), 10) - @divFloor(a.ticks(), 10)
-    else if (eq(part, "nanosecond"))
-        (b.ticks() - a.ticks()) * 100
-    else
-        return fail(ctx, "The datepart {s} is not supported by date function datediff.", .{part});
+    const r: i128 = switch (part) {
+        .year => yb - ya,
+        .quarter => (yb * 4 + @divFloor(mb - 1, 3)) - (ya * 4 + @divFloor(ma - 1, 3)),
+        .month => (yb * 12 + mb) - (ya * 12 + ma),
+        .day, .dayofyear, .weekday => b.days - a.days,
+        .week => weekIndex(b.days) - weekIndex(a.days),
+        .hour => (@as(i128, b.days) * 24 + b.secs / 3600) - (@as(i128, a.days) * 24 + a.secs / 3600),
+        .minute => (@as(i128, b.days) * 1440 + b.secs / 60) - (@as(i128, a.days) * 1440 + a.secs / 60),
+        .second => (@as(i128, b.days) * 86400 + b.secs) - (@as(i128, a.days) * 86400 + a.secs),
+        .millisecond => @divFloor(b.ticks(), 10_000) - @divFloor(a.ticks(), 10_000),
+        .microsecond => @divFloor(b.ticks(), 10) - @divFloor(a.ticks(), 10),
+        .nanosecond => (b.ticks() - a.ticks()) * 100,
+        .tzoffset, .iso_week => return fail(ctx, unsupported, .{name}),
+    };
     if (r > std.math.maxInt(i64) or r < std.math.minInt(i64)) return fail(ctx, "The datediff function resulted in an overflow.", .{});
     api.resultInt64(ctx, @intCast(r));
 }
@@ -718,55 +734,60 @@ fn dow(days: i64) u32 {
     return @intCast(@mod(days + 4, 7));
 }
 
-fn datepartValue(part: []const u8, mo: Moment) ?i64 {
+fn datepartValue(part: Part, mo: Moment) i64 {
     const y, const m, const d = mo.ymd();
     const jan1 = maria.daysFromCivil(y, 1, 1);
     const doy = mo.days - jan1 + 1;
-    if (eq(part, "year")) return y;
-    if (eq(part, "quarter")) return @divFloor(m - 1, 3) + 1;
-    if (eq(part, "month")) return m;
-    if (eq(part, "dayofyear")) return doy;
-    if (eq(part, "day")) return d;
-    if (eq(part, "week")) return @divFloor(doy - 1 + dow(jan1), 7) + 1;
-    if (eq(part, "weekday")) return dow(mo.days) + 1;
-    if (eq(part, "hour")) return mo.secs / 3600;
-    if (eq(part, "minute")) return (mo.secs / 60) % 60;
-    if (eq(part, "second")) return mo.secs % 60;
-    if (eq(part, "millisecond")) return mo.frac / 10_000;
-    if (eq(part, "microsecond")) return mo.frac / 10;
-    if (eq(part, "nanosecond")) return @as(i64, mo.frac) * 100;
-    if (eq(part, "tzoffset")) return mo.off orelse 0;
-    if (eq(part, "iso_week")) {
-        // The week (Monday-based) that holds the Thursday of this one.
-        const wd: i64 = @mod(mo.days + 3, 7); // 0 = Monday
-        const thursday = mo.days - wd + 3;
-        const ty, _, _ = maria.civilFromDays(thursday);
-        return @divFloor(thursday - maria.daysFromCivil(ty, 1, 1), 7) + 1;
-    }
-    return null;
+    return switch (part) {
+        .year => y,
+        .quarter => @divFloor(m - 1, 3) + 1,
+        .month => m,
+        .dayofyear => doy,
+        .day => d,
+        .week => @divFloor(doy - 1 + dow(jan1), 7) + 1,
+        .weekday => dow(mo.days) + 1,
+        .hour => mo.secs / 3600,
+        .minute => (mo.secs / 60) % 60,
+        .second => mo.secs % 60,
+        .millisecond => mo.frac / 10_000,
+        .microsecond => mo.frac / 10,
+        .nanosecond => @as(i64, mo.frac) * 100,
+        .tzoffset => mo.off orelse 0,
+        .iso_week => blk: {
+            // The week (Monday-based) that holds the Thursday of this one.
+            const wd: i64 = @mod(mo.days + 3, 7); // 0 = Monday
+            const thursday = mo.days - wd + 3;
+            const ty, _, _ = maria.civilFromDays(thursday);
+            break :blk @divFloor(thursday - maria.daysFromCivil(ty, 1, 1), 7) + 1;
+        },
+    };
 }
 
 /// datepart(part, d)
 pub fn datepartFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const part = partArg(ctx, argv[0]) orelse return;
+    const name, const part = partArg(ctx, argv[0]) orelse return;
     const mo = momentOf(argv[1]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
-    const v = datepartValue(part, mo) orelse return fail(ctx, "The datepart {s} is not supported by date function datepart.", .{part});
-    api.resultInt64(ctx, v);
+    const p = part orelse return fail(ctx, "The datepart {s} is not supported by date function datepart.", .{name});
+    api.resultInt64(ctx, datepartValue(p, mo));
 }
 
 /// datename(part, d): the month's and the weekday's names, else the
 /// number as text.
 pub fn datenameFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const part = partArg(ctx, argv[0]) orelse return;
+    const name, const part = partArg(ctx, argv[0]) orelse return;
     const mo = momentOf(argv[1]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
-    if (eq(part, "month")) {
-        _, const m, _ = mo.ymd();
-        return api.resultText(ctx, month_names[m - 1], .static);
+    const p = part orelse return fail(ctx, "The datepart {s} is not supported by date function datename.", .{name});
+    switch (p) {
+        .month => {
+            _, const m, _ = mo.ymd();
+            return api.resultText(ctx, month_names[m - 1], .static);
+        },
+        .weekday => return api.resultText(ctx, day_names[dow(mo.days)], .static),
+        else => {},
     }
-    if (eq(part, "weekday")) return api.resultText(ctx, day_names[dow(mo.days)], .static);
-    const v = datepartValue(part, mo) orelse return fail(ctx, "The datepart {s} is not supported by date function datename.", .{part});
+    const v = datepartValue(p, mo);
     var buf: [24]u8 = undefined;
     api.resultText(ctx, std.fmt.bufPrint(&buf, "{d}", .{v}) catch "", .transient);
 }

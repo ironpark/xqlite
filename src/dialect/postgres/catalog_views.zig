@@ -19,6 +19,7 @@
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
 const catalog = @import("../../catalog/catalog.zig");
+const template = @import("../template.zig");
 
 const user_tables = " m.name NOT LIKE 'sqlite\\_%' AND m.name" ++ catalog.not_catalog_table;
 
@@ -187,23 +188,19 @@ pub fn definition(p: *int.Parse, schema: ?[]const u8, name: []const u8) error{Ou
         } else if (!std.mem.eql(u8, d.schema, "pg_catalog")) continue;
         const has_catalog = catalog.exists(p.db, catalog.main_schema);
         const has_sequences = catalog.sequence.exists(p.db, catalog.main_schema);
-        var out: std.ArrayList(u8) = .empty;
-        var rest: []const u8 = d.text;
-        while (std.mem.indexOfScalar(u8, rest, '{')) |i| {
-            try out.appendSlice(p.arena, rest[0..i]);
-            const end = std.mem.indexOfScalarPos(u8, rest, i, '}').?;
-            const key = rest[i + 1 .. end];
-            if (std.mem.eql(u8, key, "cat")) {
-                try out.appendSlice(p.arena, if (has_catalog) "xq_catalog" else empty_catalog);
-            } else if (std.mem.eql(u8, key, "ns")) {
-                try out.appendSlice(p.arena, if (has_catalog) namespaces else empty_namespaces);
-            } else {
-                try out.appendSlice(p.arena, if (has_sequences) "xq_sequence" else empty_sequence);
-            }
-            rest = rest[end + 1 ..];
-        }
-        try out.appendSlice(p.arena, rest);
-        return try p.arena.dupeSentinel(u8, out.items, 0);
+        return try template.expand(Key, p.arena, d.text, .init(.{
+            .cat = if (has_catalog) catalog.table_name else empty_catalog,
+            .ns = if (has_catalog) namespaces else empty_namespaces,
+            .seq = if (has_sequences) catalog.sequence.table_name else empty_sequence,
+        }));
     }
     return null;
+}
+
+/// The holes of the view texts: xq_catalog, the namespaces it lists, and
+/// xq_sequence, or empty tables of the same columns without them.
+const Key = enum { cat, ns, seq };
+
+comptime {
+    for (defs) |d| template.check(Key, d.text);
 }

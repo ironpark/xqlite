@@ -21,6 +21,7 @@
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
 const catalog = @import("../../catalog/catalog.zig");
+const template = @import("../template.zig");
 const state = @import("state.zig");
 
 // `{cat}`, `{seq}` and `{users}` stand for xq_catalog, xq_sequence and
@@ -159,40 +160,26 @@ pub fn definition(p: *int.Parse, name: []const u8) error{OutOfMemory}!?[:0]const
         const has_catalog = catalog.exists(p.db, catalog.main_schema);
         const has_sequences = catalog.sequence.exists(p.db, catalog.main_schema);
         const all = d.scope == .all;
-        var out: std.ArrayList(u8) = .empty;
-        var rest: []const u8 = d.text;
-        while (std.mem.indexOfScalar(u8, rest, '{')) |i| {
-            try out.appendSlice(p.arena, rest[0..i]);
-            const end = std.mem.indexOfScalarPos(u8, rest, i, '}').?;
-            const key = rest[i + 1 .. end];
-            const Sub = struct { []const u8, []const u8 };
-            const subs = [_]Sub{
-                .{ "cat", if (has_catalog) "xq_catalog" else empty_catalog },
-                .{ "seq", if (has_sequences) "xq_sequence" else empty_sequence },
-                .{ "users", if (has_catalog) registered else empty_users },
-                .{ "objects", objects },
-                .{ "owner", if (all) "o.owner AS owner," else "" },
-                .{ "mine", if (all) "" else "AND o.owner = '" ++ state.user ++ "'" },
-                .{ "seq_owner", if (all) seq_owner else "" },
-                .{ "seq_mine", if (all) "" else "AND u.col IS NULL" },
-                .{ "user_mine", if (all) "" else "AND x.username = '" ++ state.user ++ "'" },
-            };
-            var found = false;
-            for (subs) |sub| if (std.mem.eql(u8, key, sub[0])) {
-                // {objects} has {users} in it.
-                if (std.mem.indexOfScalar(u8, sub[1], '{') != null) {
-                    rest = try std.mem.concat(p.arena, u8, &.{ sub[1], rest[end + 1 ..] });
-                } else {
-                    try out.appendSlice(p.arena, sub[1]);
-                    rest = rest[end + 1 ..];
-                }
-                found = true;
-                break;
-            };
-            std.debug.assert(found);
-        }
-        try out.appendSlice(p.arena, rest);
-        return try p.arena.dupeSentinel(u8, out.items, 0);
+        return try template.expand(Key, p.arena, d.text, .init(.{
+            .cat = if (has_catalog) catalog.table_name else empty_catalog,
+            .seq = if (has_sequences) catalog.sequence.table_name else empty_sequence,
+            .users = if (has_catalog) registered else empty_users,
+            // It has {users} in it.
+            .objects = objects,
+            .owner = if (all) "o.owner AS owner," else "",
+            .mine = if (all) "" else "AND o.owner = '" ++ state.user ++ "'",
+            .seq_owner = if (all) seq_owner else "",
+            .seq_mine = if (all) "" else "AND u.col IS NULL",
+            .user_mine = if (all) "" else "AND x.username = '" ++ state.user ++ "'",
+        }));
     }
     return null;
+}
+
+/// The holes of the view texts.
+const Key = enum { cat, seq, users, objects, owner, mine, seq_owner, seq_mine, user_mine };
+
+comptime {
+    for (defs) |d| template.check(Key, d.text);
+    template.check(Key, objects);
 }

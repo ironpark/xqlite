@@ -253,21 +253,21 @@ pub const Parser = struct {
         return if (p.i == 0) p.toks[0].start else p.toks[p.i - 1].end;
     }
 
-    pub fn isKw(p: *const Parser, kw: []const u8) bool {
+    pub fn isKw(p: *const Parser, comptime kw: []const u8) bool {
         return p.peek().isKw(kw);
     }
 
-    pub fn isKwAt(p: *const Parser, k: usize, kw: []const u8) bool {
+    pub fn isKwAt(p: *const Parser, k: usize, comptime kw: []const u8) bool {
         return p.peekAt(k).isKw(kw);
     }
 
-    pub fn eatKw(p: *Parser, kw: []const u8) bool {
+    pub fn eatKw(p: *Parser, comptime kw: []const u8) bool {
         if (!p.isKw(kw)) return false;
         _ = p.advance();
         return true;
     }
 
-    pub fn expectKw(p: *Parser, kw: []const u8) Error!void {
+    pub fn expectKw(p: *Parser, comptime kw: []const u8) Error!void {
         if (!p.eatKw(kw)) return p.missing("ORA-00905: missing keyword");
     }
 
@@ -793,9 +793,7 @@ pub const Parser = struct {
     fn atClauseEnd(p: *const Parser) bool {
         const t = p.peek();
         if (t.kind == .eof or t.kind == .rparen) return true;
-        const words = [_][]const u8{ "from", "where", "group", "having", "window", "order", "offset", "fetch", "union", "intersect", "minus", "except", "into", "for", "connect", "start" };
-        for (words) |w| if (t.isKw(w)) return true;
-        return false;
+        return t.isAnyKw(&.{ "from", "where", "group", "having", "window", "order", "offset", "fetch", "union", "intersect", "minus", "except", "into", "for", "connect", "start" });
     }
 
     pub fn targetList(p: *Parser) Error![]tree.ResultCol {

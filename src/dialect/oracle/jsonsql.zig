@@ -548,7 +548,7 @@ fn transform(p: *Parser, pos: u32) Error!*Expr {
     while (p.eat(.comma)) {
         const t = p.peek();
         const ops = [_][]const u8{ "SET", "INSERT", "REPLACE", "APPEND", "REMOVE", "RENAME", "KEEP" };
-        const op = for (ops) |o| {
+        const op = inline for (ops) |o| {
             if (t.isKw(o)) break o;
         } else return p.unsupported(t.start, "this JSON_TRANSFORM operation");
         _ = p.advance();

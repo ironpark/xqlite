@@ -25,6 +25,7 @@ pub const modules = .{
     @import("interop/pg.zig"),
     @import("interop/mariadb.zig"),
     @import("interop/mssql.zig"),
+    @import("interop/oracle.zig"),
 };
 
 pub const usage =

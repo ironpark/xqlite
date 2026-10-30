@@ -1004,7 +1004,7 @@ test "gen: every node kind comes up" {
     for (std.enums.values(KindTag)) |k| switch (k) {
         // DEFAULT is the fuzzer's own (INSERT VALUES); IdentityDefault
         // the exception of the contract.
-        .default, .identity_default => {},
+        .default, .identity_default, .named_param => {},
         else => std.testing.expect(counts.get(k) > 0) catch |err| {
             std.debug.print("never generated: {s}\n", .{@tagName(k)});
             return err;

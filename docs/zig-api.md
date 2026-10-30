@@ -176,9 +176,9 @@ db.setDialect(.mariadb);            // 이후에 준비하는 문장부터 Maria
 std.debug.print("{d} {t}\n", .{ id, db.dialect() });
 ```
 
-- `xqlite.Dialect`는 `.sqlite`, `.postgres`, `.mariadb`입니다. MSSQL은 아직 없습니다.
+- `xqlite.Dialect`는 `.sqlite`, `.postgres`, `.mariadb`, `.oracle`입니다. MSSQL은 아직 없습니다.
 - `setDialect()`는 그 뒤에 준비하는 문장에만 적용됩니다. 이미 준비한 문장은 자기 방언을 유지합니다(`PRAGMA xq_dialect`와 같음).
-- 방언의 구조는 [방언 아키텍처](architecture.md), 방언별 문법은 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md)에 있습니다.
+- 방언의 구조는 [방언 아키텍처](architecture.md), 방언별 문법은 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [Oracle 호환](oracle.md)에 있습니다.
 
 ## 값의 수명 규칙
 

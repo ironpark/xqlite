@@ -42,6 +42,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `xqt dialect-diff pg` | PostgreSQL 방언을 실제 PostgreSQL 16과 차등 비교 | PostgreSQL 서버(podman) |
 | `xqt dialect-diff mariadb` | MariaDB 방언을 실제 MariaDB 11과 차등 비교 | MariaDB 서버(podman) |
 | `xqt dialect-diff mssql` | MSSQL(T-SQL) 방언을 실제 SQL Server(Azure SQL Edge, 엔진 15.0)와 차등 비교 | SQL Server 서버(podman)와 go-sqlcmd |
+| `xqt dialect-diff oracle` | Oracle 방언을 실제 Oracle Database 23ai와 차등 비교 | Oracle 서버(podman) |
 | `xqt bench [WORKLOAD...]` | 같은 작업의 xqlite·sqlite3 실행 시간 | `--sqlite3`/`SQLITE3` |
 | `xqt gen fixtures\|parser\|opcodes` | `src/testdata`의 테스트용 DB, `grammar.zig`, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
@@ -108,7 +109,7 @@ clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB
 | --- | --- |
 | `gen fixtures` | `PATH`의 `sqlite3`, 또는 `--fixtures-sqlite3 PATH`. 커밋한 fixture는 헤더에 3.44.4라는 버전이 들어 있으므로 `SQLITE3`를 따르지 않습니다 |
 | `gen parser`, `gen opcodes` | `zig cc`(lemon, mkkeywordhash), `zig run`(변환기), `opcodes`는 `tclsh`도. `ZIG`로 zig 바이너리를 바꿉니다 |
-| `dialect-diff` | podman 컨테이너의 클라이언트(`PG_PSQL`, `MARIA_CLIENT`) |
+| `dialect-diff` | podman 컨테이너의 클라이언트(`PG_PSQL`, `MARIA_CLIENT`, `ORA_SQLPLUS`) |
 | `fetch slt` | `git` |
 
 ### 그 밖의 환경 변수
@@ -163,7 +164,7 @@ SQ=/tmp/sqref/sqlite3 zig build check -Dfuzz=true     # 시드 퍼저 셋을 무
 | `interop` 안의 큰 검사 | 작은 실행이 많은 검사(`vacuum`의 문장별 사례, `attach`·`vacuum`의 크래시 지점마다 한 번씩)는 검사 안에서 다시 병렬로 돌립니다(`interop/parts.zig`). 검사 하나가 동시에 돌리는 수는 `-j`의 1/8(올림)입니다. `pragma`는 문장 목록을 덩어리로 나눠 덩어리마다 DB 사본에서 돌립니다. |
 | `planner` | 두 단계입니다. 먼저 모든 파일의 블록 셋업을 병렬로 만들고, 그다음 쿼리를 블록 안에서도 8개씩 나눠 각자 블록 디렉터리의 사본에서 돌립니다. 엔진은 쿼리마다 60초가 지나면 `TIMEOUT`입니다. |
 | `slt` | 스크립트마다 `xqlite slt` 프로세스 하나 |
-| `dialect-diff` | PostgreSQL은 작업자 데이터베이스 최대 8개(`-j`와 케이스 수로 제한)에서 케이스를 병렬로 돌립니다. MariaDB는 케이스가 데이터베이스 이름 `main`을 쓰므로 서버에서는 한 번에 한 케이스씩, xqlite 쪽만 병렬로 돕니다. |
+| `dialect-diff` | PostgreSQL은 작업자 데이터베이스 최대 8개(`-j`와 케이스 수로 제한)에서 케이스를 병렬로 돌립니다. MariaDB는 케이스가 데이터베이스 이름 `main`을 쓰므로 서버에서는 한 번에 한 케이스씩, xqlite 쪽만 병렬로 돕니다. Oracle도 케이스가 사용자 XQ의 스키마 하나를 쓰므로 서버에서는 한 번에 한 케이스씩 돕니다. |
 | `bench` | 서로 느려지지 않도록 언제나 하나씩 차례로 |
 | `gen` | 이름을 준 생성기를 동시에. `superjournal`은 따로 |
 
@@ -223,6 +224,7 @@ zig-out/bin/xqt interop vacuum -j 4 --keep -v
 | `pg` | PostgreSQL 방언으로 쓴 DB(STRICT 테이블, CHECK, identity 시퀀스, `xq_catalog`/`xq_sequence`, 뷰, 인덱스)가 sqlite3의 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽는지 확인합니다. |
 | `mariadb` | MariaDB 방언으로 쓴 DB(STRICT 테이블, 이름 있는 CHECK, DEFAULT·생성 열, `AUTO_INCREMENT`, `"t$i"` 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. sqlite3에 없는 엔진 함수(`xq_*`)를 쓰는 식은 xqlite 안의 테스트(`src/dialect/mariadb/test.zig`)가 확인합니다. |
 | `mssql` | MSSQL 방언으로 쓴 DB(STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열, `NOCASE`/`BINARY` 열, 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. sqlite3에 없는 엔진 함수(`xq_tsql_*`)를 쓰는 식은 `src/dialect/mssql/test.zig`가 확인합니다. |
+| `oracle` | Oracle 방언으로 쓴 DB(Oracle 타입의 CHECK가 있는 STRICT 테이블, identity와 시퀀스, MERGE, `(+)` 조인 뷰, `xq_catalog`/`xq_sequence`, `COMMIT`으로 끝낸 암묵적 트랜잭션)를 같은 방식으로 확인하고, sqlite3가 타입 검사를 강제하는지, `ROLLBACK`이 암묵적 트랜잭션을 되돌리는지 봅니다. |
 
 모듈별 차이 몇 가지입니다.
 
@@ -342,7 +344,7 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 
 ## 방언 차등 테스트
 
-`xqt dialect-diff pg|mariadb|mssql [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다. 서버는 기본으로 podman 컨테이너를 쓰며, 서버가 필요하므로 `zig build check`에는 들어 있지 않습니다. 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다.
+`xqt dialect-diff pg|mariadb|mssql|oracle [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다. 서버는 기본으로 podman 컨테이너를 쓰며, 서버가 필요하므로 `zig build check`에는 들어 있지 않습니다. 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다.
 
 ### PostgreSQL
 
@@ -384,7 +386,21 @@ zig-out/bin/xqt dialect-diff mssql [cases-file]     # 기본: tools/dialect/mssq
 - sqlcmd의 점선·빈 결과의 머리글·`(n rows affected)` 같은 메시지를 빼고, 필드의 공백과 소수의 끝 0을 떼고 비교합니다.
 - 메모리(서버에 약 2GB)가 모자라면 podman 머신이 멈출 수 있으니 다른 DB 컨테이너와 동시에 띄우지 않는 것이 좋습니다.
 
-방언별 결과와 알려진 차이는 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [MSSQL 호환](mssql.md)에 있습니다.
+### Oracle
+
+```sh
+podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq -e APP_USER_PASSWORD=xqpass \
+  gvenzl/oracle-free:23-slim-faststart
+zig build tools
+zig-out/bin/xqt dialect-diff oracle [cases-file]    # 기본: tools/dialect/oracle-cases.txt
+```
+
+- 서버 접속 명령은 `ORA_SQLPLUS`로 바꿉니다(기본 `podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1`). arm64 macOS의 podman(메모리 약 4 GiB)에서도 `23-slim-faststart` 이미지가 돕니다. 다른 큰 컨테이너와 함께 띄우면 메모리가 모자랄 수 있습니다.
+- SQL*Plus는 `SET MARKUP CSV ON DELIMITER |`로 행과 머리글을 내고, 케이스마다 사용자 XQ의 테이블·뷰·시퀀스를 지우고 `NLS_DATE_FORMAT`/`NLS_TIMESTAMP_FORMAT`을 방언이 저장하는 형식(`YYYY-MM-DD HH24:MI:SS[.FF6]`)으로 맞춘 뒤 시작합니다.
+- 오류는 ORA- 코드로 비교합니다. xqlite에서 SQLite 문구로 나오는 실행 중 제약 위반(`UNIQUE constraint failed` ...)은 Oracle이 같은 경우에 내는 코드(`ORA-00001` ...)로 맞춥니다.
+- Oracle의 `.5`, `TRUE`/`FALSE`와 xqlite의 `2.0`은 `0.5`, `1`/`0`, `2`로 맞춰 비교합니다.
+
+방언별 결과와 알려진 차이는 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [MSSQL 호환](mssql.md), [Oracle 호환](oracle.md)에 있습니다.
 
 ## 그 밖의 도구
 
@@ -404,6 +420,6 @@ zig-out/bin/xqt dialect-diff mssql [cases-file]     # 기본: tools/dialect/mssq
 | --- | --- | --- |
 | SQLite | [sqllogictest](https://www.sqlite.org/sqllogictest/)와 SQLite TCL 테스트 스위트 일부를 포팅 | sqllogictest 실행기, 플래너 케이스 일부를 TCL 테스트에서 뽑음 |
 | 파일 포맷 | 순정 SQLite와 xqlite가 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check`로 검증 | `xqt interop` |
-| PostgreSQL / MariaDB / MSSQL | 같은 쿼리를 실제 서버와 xqlite에서 실행해 비교(differential testing), 각 DB의 regression test에서 필요한 부분을 가져옴 | `xqt dialect-diff pg`, `xqt dialect-diff mariadb`, `xqt dialect-diff mssql` |
+| PostgreSQL / MariaDB / MSSQL / Oracle | 같은 쿼리를 실제 서버와 xqlite에서 실행해 비교(differential testing), 각 DB의 regression test에서 필요한 부분을 가져옴 | `xqt dialect-diff pg`, `xqt dialect-diff mariadb`, `xqt dialect-diff mssql`, `xqt dialect-diff oracle` |
 | 퍼징 | 파서, 레코드 디코더, B-Tree 페이지 디코더, IR | `fuzzcheck`, 시드 퍼저 |
 | 크래시 복구 | 오류를 주입하는 VFS로 쓰기 도중 전원 차단을 흉내 내고, sqlite3는 preload shim으로 죽임 | `src/vfs/crash.zig`, `tools/crashshim.c`, `xqlite crash-write`(`xqt interop wal`, `attach`, `vacuum`, `hot-journal`) |

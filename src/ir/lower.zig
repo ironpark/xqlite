@@ -336,6 +336,12 @@ pub const Lowerer = struct {
             },
             .coerce => |c| return l.coerce(c),
             .identity_default => |d| return sequence.nextvalExpr(p, d.sequence),
+            .named_param => |name| {
+                const x = try l.leaf(TK.VARIABLE, name, e.pos);
+                try ir.expr.assignVarNumber(p, x, @intCast(x.token().len));
+                try l.check();
+                return x;
+            },
         }
     }
 

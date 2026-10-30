@@ -23,7 +23,7 @@ const usage =
     \\  planner [FILE...]        results, query plans and bytecode against sqlite3
     \\  planner gen basic|hard SEED NBLOCKS NQUERIES  random planner cases
     \\  slt [opts] PATH... [-- ARGS]  sqllogictest scripts with `xqlite slt`
-    \\  dialect-diff pg|mariadb|mssql [CASES]  a dialect against its server (podman)
+    \\  dialect-diff pg|mariadb|mssql|oracle [CASES]  a dialect against its server (podman)
     \\  bench [WORKLOAD...]       xqlite against sqlite3 on timed workloads
     \\  gen NAME [ARGS]          regenerate test data, grammar.zig, opcodes.zig (xqt help gen)
     \\  fetch sqlite|slt [--dest DIR]  download ref/sqlite or ref/sqllogictest

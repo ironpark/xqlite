@@ -7,6 +7,7 @@ xqlite의 MariaDB(MySQL) 방언이 지원하는 문법과 의미, 그리고 Mari
 - [켜는 법](#켜는-법)
 - [구조](#구조)
 - [저장 방식](#저장-방식)
+- [데이터베이스](#데이터베이스)
 - [sql_mode](#sql_mode)
 - [지원 문법](#지원-문법)
 - [MariaDB와 다른 점](#mariadb와-다른-점)
@@ -53,13 +54,14 @@ SHOW WARNINGS;
 | `functions.zig` | 함수 호출과 특수 문법(`CAST`, `TRIM`, `SUBSTRING ... FROM`, `GROUP_CONCAT ... SEPARATOR` ...) |
 | `dml.zig` | INSERT, REPLACE, UPDATE, DELETE, TRUNCATE |
 | `ddl.zig` | CREATE/DROP/ALTER, 인덱스, `xq_catalog` 키 |
-| `session.zig` | SET, 트랜잭션, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES, ANALYZE TABLE |
-| `infoschema.zig` | `information_schema.TABLES`, `COLUMNS`, `SCHEMATA` |
+| `session.zig` | SET, 트랜잭션, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES, ANALYZE TABLE |
+| `databases.zig` | `CREATE/DROP DATABASE`, `USE`, `SHOW DATABASES`, `SHOW TABLES`, `SHOW CREATE DATABASE` |
+| `infoschema.zig` | `information_schema.TABLES`, `COLUMNS`, `SCHEMATA`, `VIEWS`, `STATISTICS` |
 | `types.zig` | MariaDB 열 타입, 저장 타입, INSERT/UPDATE의 값 변환(`xq_coerce()`) |
 | `runtime.zig` | 방언 함수 테이블: SQLite에 없거나 뜻이 다른 연산·함수 |
 | `json.zig` | JSON 함수(`JSON_EXTRACT`, `JSON_OBJECT`, `JSON_SET` ...): JSON 파서, 경로, MariaDB 출력 형식 |
 | `json_table.zig` | `JSON_TABLE`(엔진 테이블 값 함수 `xq_maria_json_table`), SELECT 끝에서 하는 JSON 처리 |
-| `state.zig` | 연결 상태 `ConnState.mariadb`: `sql_mode`, 경고, 사용자 변수 |
+| `state.zig` | 연결 상태 `ConnState.mariadb`: `sql_mode`, 경고, 사용자 변수, 현재 데이터베이스 |
 | `test.zig` | MariaDB 문서의 동작에 맞춘 끝에서 끝까지 테스트 |
 
 ### IR 트리, lower, render
@@ -153,6 +155,79 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
 - 열의 `CHECK`는 열 이름을 붙입니다.
 - 이름 없는 테이블 `CHECK`는 `CONSTRAINT_<n>`입니다.
 - 둘 다 MariaDB와 같은 이름이고, 오류는 `CHECK constraint failed: price`처럼 나옵니다.
+
+## 데이터베이스
+
+MariaDB의 데이터베이스는 세 가지입니다.
+
+| 데이터베이스 | xqlite |
+| --- | --- |
+| `main` | 파일의 main 데이터베이스. 새 연결의 현재 데이터베이스이고 `DATABASE()`가 `main`입니다. |
+| `ATTACH`로 붙인 데이터베이스 | 그 SQLite 데이터베이스(`temp`는 임시 테이블의 자리) |
+| `CREATE DATABASE`/`CREATE SCHEMA`로 만든 데이터베이스 | main 안의 이름 붙은 스키마([공용 설계](architecture.md#스키마네임스페이스), `src/catalog/schema.zig`) |
+
+`main`이라는 이름은 `xqt dialect-diff mariadb`가 서버에서 쓰는 데이터베이스 이름과 같습니다. 그래서 `Table 'main.t' doesn't exist` 같은 메시지와 `information_schema`의 `TABLE_SCHEMA`가 서버와 같습니다.
+
+### 저장
+
+`CREATE DATABASE sales`의 개체는 main의 개체이고 이름이 `"sales.<이름>"`입니다.
+
+| 개체 | SQLite 이름 |
+| --- | --- |
+| 테이블·뷰 `sales.orders` | `"sales.orders"` |
+| 인덱스 `ix` | `"sales.orders$ix"` |
+| `AUTO_INCREMENT` 카운터 | `sqlite_sequence`의 행 `sales.orders` |
+| 시퀀스 `sales.s` | `xq_sequence`의 행 `sales.s` |
+| 카탈로그 항목 | `main.xq_catalog`의 `tbl = 'sales.orders'` |
+| 데이터베이스 자체 | `main.xq_catalog`의 `('', 'sales', 'schema', 'root')`, `('', 'sales', 'dialect', 'mariadb')`, `('', 'sales', 'collation', <collation>)` |
+
+- 파일 하나, 트랜잭션 하나입니다. sqlite3는 `"sales.orders"`로 읽고 씁니다(`xqt interop mariadb`).
+- 데이터베이스 이름에는 `.`, `/`, `\`를 쓸 수 없습니다(`Incorrect database name 'a.b'`).
+
+### 문장
+
+- `CREATE {DATABASE | SCHEMA} [IF NOT EXISTS] db [[DEFAULT] CHARACTER SET [=] cs] [[DEFAULT] COLLATE [=] c] [COMMENT [=] '...']`
+  - 문자 집합과 collation은 기록만 합니다(`SHOW CREATE DATABASE`, `information_schema.SCHEMATA`). 테이블의 열은 언제나 방언의 기본(`NOCASE`)입니다.
+  - 아무것도 쓰지 않으면 MariaDB 11.8 서버의 기본 `utf8mb4_uca1400_ai_ci`, `CHARACTER SET cs`만 쓰면 그 문자 집합의 기본 collation(`latin1_swedish_ci` ...)입니다.
+  - `CREATE OR REPLACE DATABASE`는 있던 데이터베이스를 지우고 다시 만듭니다.
+- `DROP {DATABASE | SCHEMA} [IF EXISTS] db`는 MariaDB처럼 안의 테이블, 뷰, 인덱스, 시퀀스를 모두 지웁니다.
+  - `main`과 붙인 데이터베이스는 지울 수 없습니다(붙인 것은 `DETACH`).
+  - `auto_vacuum` 데이터베이스에서는 테이블이 둘 이상인 데이터베이스를 한 문장으로 지울 수 없습니다(공용 `schema.codeDrop()`의 제한). 테이블을 먼저 지우세요.
+  - 현재 데이터베이스를 지우면 MariaDB처럼 선택된 데이터베이스가 없어집니다. `DATABASE()`는 NULL이고 한정하지 않은 이름은 `No database selected`입니다.
+- `USE db`는 현재 데이터베이스를 바꿉니다. 문장이 실행될 때 적용하고(`xq_maria_use()`), 준비된 문장을 만료시켜 다음 실행 때 새 데이터베이스에서 다시 컴파일되게 합니다.
+
+### 이름 해석
+
+이름은 문장을 컴파일할 때 정합니다(`Parser.relation()`).
+
+- `db.t`는 그 데이터베이스의 `t`입니다. SQLite 데이터베이스 이름(`main`, `temp`, 붙인 이름)이 먼저이고, 그다음이 `CREATE DATABASE`의 데이터베이스입니다.
+- 한정하지 않은 `t`는 `WITH` 질의, 임시 테이블, 현재 데이터베이스 순서로 찾습니다.
+  - 현재 데이터베이스가 `main`이면 이름을 그대로 둡니다. SQLite의 규칙(`temp`, `main`, 붙인 데이터베이스 순서)대로 찾으므로 이전과 같습니다.
+  - 붙인 데이터베이스 `aux`이면 `aux.t`, `CREATE DATABASE`의 `sales`이면 `"sales.t"`입니다.
+- `"sales.t"`는 데이터베이스 이름 없이 쓰고 원래 이름 `t`를 별칭으로 붙입니다(FROM 항목, INSERT/UPDATE/DELETE 대상). 그래서 `t.col`과 `sales.t.col`이 그대로 됩니다. 뷰에 저장되는 텍스트도 `"sales.t" AS "t"`라서 main이 다른 이름으로 붙어도 됩니다.
+- 대상: SELECT, 조인, 서브쿼리, INSERT/REPLACE/UPDATE/DELETE/TRUNCATE, `CREATE TABLE db.t`(`AS SELECT` 포함), `CREATE VIEW db.v`, `CREATE INDEX ... ON db.t`, `DROP INDEX ... ON db.t`, `ALTER TABLE db.t`, `DROP TABLE/VIEW db.t`, `NEXT VALUE FOR db.s`, `NEXTVAL(db.s)`, `CREATE/DROP SEQUENCE db.s`, `SHOW COLUMNS/INDEX/CREATE TABLE`, `DESCRIBE`, `ANALYZE TABLE`.
+- `REFERENCES t`는 만드는 테이블의 SQLite 데이터베이스 안이어야 합니다. main과 `CREATE DATABASE`의 데이터베이스끼리는 됩니다.
+- `RENAME TABLE a TO b`와 `ALTER TABLE a RENAME TO b`에서 한정하지 않은 `b`는 MariaDB처럼 현재 데이터베이스입니다. 테이블은 main과 `CREATE DATABASE`의 데이터베이스 사이에서 옮길 수 있고(인덱스 이름, `AUTO_INCREMENT` 카운터, 카탈로그 항목이 따라갑니다), 다른 SQLite 데이터베이스로는 옮길 수 없습니다.
+
+### SHOW와 information_schema
+
+- `SHOW {DATABASES | SCHEMAS} [LIKE]`: `information_schema`, `main`, 붙인 데이터베이스, `CREATE DATABASE`의 데이터베이스(이름순). 열 이름은 MariaDB처럼 `Database (pattern)`입니다.
+- `SHOW [FULL] TABLES [{FROM | IN} db] [LIKE]`: 기본은 현재 데이터베이스입니다. `main`의 목록에는 다른 데이터베이스의 `"db.t"`가 나오지 않습니다. 열 이름은 `Tables_in_db (pattern)`입니다.
+- `SHOW CREATE {DATABASE | SCHEMA} db`: ``CREATE DATABASE `db` /*!40100 DEFAULT CHARACTER SET cs COLLATE c */``. `main`과 붙인 데이터베이스는 `utf8mb4_general_ci`입니다.
+- `information_schema`의 `TABLES`, `COLUMNS`, `VIEWS`, `STATISTICS`는 `"db.t"`를 `TABLE_SCHEMA = 'db'`, `TABLE_NAME = 't'`로 보여 주고 `main`에서는 감춥니다. `SCHEMATA`는 데이터베이스마다 한 행입니다. 이름 열은 MariaDB처럼 대소문자를 무시하고 비교합니다.
+- `DATABASE()`, `SCHEMA()`는 컴파일할 때의 현재 데이터베이스입니다(`USE`가 준비된 문장을 만료시킵니다).
+
+### 오류
+
+| 경우 | 메시지(MariaDB와 같음) |
+| --- | --- |
+| 이미 있는 데이터베이스(1007) | `Can't create database 'd'; database exists`(`IF NOT EXISTS`면 같은 문구의 Note) |
+| 없는 데이터베이스 지우기(1008) | `Can't drop database 'd'; database doesn't exist`(`IF EXISTS`면 Note) |
+| 없는 데이터베이스(1049) | `Unknown database 'd'`(`USE`, `CREATE TABLE d.t`, `SHOW TABLES FROM d`, `SHOW CREATE DATABASE`) |
+| 없는 테이블(1146) | `Table 'db.t' doesn't exist`(SQLite의 `no such table`도 이 문구로 바꿉니다) |
+| 없는 테이블 지우기(1051) | `Unknown table 'db.t'` |
+| 있는 테이블(1050) | `Table 't' already exists` |
+| 선택된 데이터베이스 없음(1046) | `No database selected` |
 
 ## `sql_mode`
 
@@ -337,25 +412,25 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 - 트랜잭션: `START TRANSACTION`, `BEGIN [WORK]`, `COMMIT`, `ROLLBACK [TO SAVEPOINT]`, `SAVEPOINT`, `RELEASE SAVEPOINT`
 - `SET`: 시스템 변수, `@사용자 변수`, `NAMES`, `CHARACTER SET`, `TRANSACTION`
 - `SET foreign_key_checks`는 `PRAGMA foreign_keys`입니다.
-- `SHOW [FULL] TABLES [LIKE]`
+- `SHOW [FULL] TABLES [{FROM | IN} db] [LIKE]`
 - `SHOW COLUMNS/FIELDS`, `DESCRIBE`/`DESC`
 - `SHOW INDEX`
 - `SHOW CREATE TABLE`, `SHOW CREATE VIEW`
 - `SHOW WARNINGS`, `SHOW ERRORS`, `SHOW COUNT(*) WARNINGS`
 - `SHOW VARIABLES [LIKE]`
-- `SHOW DATABASES`
+- `SHOW DATABASES`, `SHOW CREATE DATABASE`
 - `EXPLAIN`은 `EXPLAIN QUERY PLAN`입니다.
-- `USE db`는 존재만 확인합니다. 기본 스키마는 `main`입니다.
+- `CREATE/DROP DATABASE`, `USE db`: [데이터베이스](#데이터베이스)를 보세요.
 - `LOCK TABLES`, `UNLOCK TABLES`는 무시합니다.
 - `ANALYZE [NO_WRITE_TO_BINLOG | LOCAL] TABLE t [, ...] [PERSISTENT FOR ...]`는 테이블마다 SQLite의 `ANALYZE`를 실행하고 MariaDB와 같은 결과 행(`Table`, `Op`, `Msg_type`, `Msg_text`)을 돌려줍니다. 없는 테이블과 뷰는 MariaDB처럼 `Error` 행을 냅니다.
-- `information_schema.TABLES`, `COLUMNS`, `SCHEMATA`
+- `information_schema.TABLES`, `COLUMNS`, `SCHEMATA`, `VIEWS`, `STATISTICS`
 - mysqldump 출력을 그대로 불러올 수 있습니다.
 
 ### 이름
 
 - 쓴 대소문자를 그대로 저장하고 대소문자 없이 비교합니다.
 - MariaDB `lower_case_table_names=2`와 같은 동작이라 `@@lower_case_table_names`는 2입니다.
-- 데이터베이스는 SQLite 스키마(`main`, `temp`, `ATTACH`로 붙인 데이터베이스)입니다. 붙인 데이터베이스도 `db.t`로 읽고 쓰고, `CREATE TABLE db.t`의 카탈로그 키는 그 데이터베이스의 `xq_catalog`에 기록합니다. `SHOW DATABASES`, `SHOW TABLES FROM db`, `information_schema`에도 나옵니다.
+- 데이터베이스는 `main`, `ATTACH`로 붙인 데이터베이스, `CREATE DATABASE`의 데이터베이스입니다([데이터베이스](#데이터베이스)). 붙인 데이터베이스의 `CREATE TABLE db.t`는 카탈로그 키를 그 데이터베이스의 `xq_catalog`에 기록합니다.
 
 ## MariaDB와 다른 점
 
@@ -377,8 +452,20 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 | `LAST_INSERT_ID()` | 여러 행 INSERT에서는 마지막 행의 id입니다. 직접 넣은 id에도 바뀝니다. |
 | `ON DUPLICATE KEY UPDATE` | affected rows는 SQLite 방식(행마다 1)입니다. 한 행이 두 UNIQUE 키에서 서로 다른 두 행과 충돌하면 첫 행만 고칩니다. |
 | `SHOW WARNINGS` | 문장을 컴파일할 때(보통 직전 문장 실행 직후) 기록된 경고를 보여 줍니다. 경고는 다음 문장을 컴파일할 때 지워집니다. 최대 8개를 저장하고 개수는 전부 셉니다. |
-| 엔진 오류 | `no such table`, `UNIQUE constraint failed` ...는 SQLite 메시지 그대로입니다. |
+| 엔진 오류 | `UNIQUE constraint failed` ...는 SQLite 메시지 그대로입니다. `no such table`만 MariaDB의 `Table 'db.t' doesn't exist`로 바꿉니다. |
 | `INSERT ... SELECT` | 변환 오류 메시지의 행 번호가 언제나 1입니다. |
+
+### 데이터베이스
+
+| 항목 | xqlite |
+| --- | --- |
+| 같은 이름의 테이블 | 두 데이터베이스의 같은 이름 테이블(`main.t`와 `sales.t`)을 한 FROM에 별칭 없이 쓰면 둘 다 `t`라서 `main.t.a`, `sales.t.a`로 구별되지 않습니다(`ambiguous column name`). 별칭을 붙이세요. |
+| `main`의 한정하지 않은 이름 | SQLite의 규칙대로 붙인 데이터베이스의 테이블도 찾습니다. |
+| 시스템 데이터베이스 | `mysql`, `performance_schema`, `sys`는 없습니다. `information_schema`는 `SHOW DATABASES`에만 나옵니다. |
+| 뷰의 `DATABASE()` | 뷰를 만들 때의 값이 상수로 저장됩니다. |
+| 시퀀스 | `SHOW TABLES`, `information_schema.TABLES`에 나오지 않습니다. 붙인 데이터베이스에는 시퀀스가 없습니다(`main`과 `CREATE DATABASE`의 데이터베이스에만). |
+| `VIEWS.VIEW_DEFINITION` | MariaDB가 다시 쓴 텍스트가 아니라 저장된 SQLite 질의 텍스트입니다(붙인 데이터베이스는 NULL). |
+| 데이터베이스의 문자 집합 | 기록만 하고 테이블에 적용하지 않습니다. |
 
 ### 스키마에 저장되는 식
 
@@ -445,6 +532,7 @@ zig-out/bin/xqt dialect-diff mariadb [cases-file]
 
 - 서버는 `$MARIA_CLIENT`로 연결합니다. 기본값은 `podman exec -i xq-maria mariadb -uroot`입니다.
 - 각 경우는 빈 데이터베이스 `main`(collation `utf8mb4_general_ci`)에서 시작합니다. 경우와 MariaDB의 오류 메시지가 `main`이라는 이름을 쓰므로 서버에서는 한 번에 한 경우씩 돌고, xqlite 쪽만 병렬로 돕니다.
+- 서버의 준비 문장은 시스템 데이터베이스가 아닌 모든 데이터베이스(앞 경우가 만든 것)를 지우고 `main`을 다시 만듭니다(`BEGIN NOT ATOMIC FOR ... EXECUTE IMMEDIATE 'DROP DATABASE ...'`).
 - 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다. `zig build check`에는 들어 있지 않습니다.
 - 소수 부분이 있는 수는 끝의 0을 떼고 비교합니다(MariaDB `DECIMAL`은 `3.5000`, 방언의 `REAL`은 `3.5`).
 
@@ -454,6 +542,6 @@ zig-out/bin/xqt dialect-diff mariadb [cases-file]
 
 - sqlite3의 무결성 검사를 통과해야 합니다.
 - sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
-- 다루는 것: STRICT 테이블, 이름 붙은 CHECK, DEFAULT·생성 열 식, `AUTO_INCREMENT`, 테이블과 함께 이름이 바뀌는 `"t$i"` 인덱스, 뷰, `xq_catalog`.
+- 다루는 것: STRICT 테이블, 이름 붙은 CHECK, DEFAULT·생성 열 식, `AUTO_INCREMENT`, 테이블과 함께 이름이 바뀌는 `"t$i"` 인덱스, 뷰, `xq_catalog`, `CREATE DATABASE`의 테이블·뷰·인덱스(`"sales.orders"`를 sqlite3가 읽고 쓰고, sqlite3가 쓴 행을 방언이 `sales.orders`로 읽음).
 - 엔진 함수(`xq_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mariadb/test.zig`에서 확인합니다. JSON 함수와 `JSON_TABLE`을 쓰는 뷰·CHECK·생성 열도 여기서 확인합니다.
 - 먼저 `zig build tools`가 필요합니다. sqlite3는 xqt의 `cfg.sqlite3`(`--sqlite3`, `$SQLITE3`)입니다.

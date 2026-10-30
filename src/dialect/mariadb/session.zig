@@ -1,6 +1,6 @@
 //! Session and introspection statements: SET (system and user
-//! variables), transactions, USE, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES,
-//! ANALYZE TABLE.
+//! variables), transactions, SHOW, DESCRIBE, EXPLAIN, LOCK TABLES,
+//! ANALYZE TABLE (USE, SHOW DATABASES and SHOW TABLES: databases.zig).
 //! PRAGMA and SQLite's other commands go to SQLite's grammar before this
 //! frontend runs (dialect.runParser()).
 //!
@@ -27,6 +27,7 @@ const parser = @import("parser.zig");
 const state = @import("state.zig");
 const lexer = @import("lexer.zig");
 const frontend = @import("frontend.zig");
+const databases = @import("databases.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -306,7 +307,7 @@ fn userVarText(s: *Parser, t: lexer.Token) Error![]const u8 {
 
 /// Code a statement that evaluates `exprs` (lowered by the IR) for their
 /// effects and returns no rows.
-fn codeEval(s: *Parser, exprs: []const *tree.Expr) Error!void {
+pub fn codeEval(s: *Parser, exprs: []const *tree.Expr) Error!void {
     _ = build.getVdbe(s.p) orelse return error.ParseFailed;
     var l = s.lowerer();
     for (exprs) |x| {
@@ -380,15 +381,6 @@ fn chainRelease(s: *Parser) Error!void {
 
 // ================================================================= misc
 
-/// USE db: the database must exist; the default schema stays main.
-pub fn use(s: *Parser) Error!void {
-    try s.expectKw("USE");
-    const n = try s.anyName();
-    const name = try s.nameText(n);
-    if (build.findDbName(s.p.db, name) == null) return s.fail("Unknown database '{s}'", .{name});
-    return emptyStatement(s);
-}
-
 /// LOCK TABLES ... / UNLOCK TABLES: accepted, nothing to do (the
 /// database file is locked by transactions).
 pub fn lockTables(s: *Parser) Error!void {
@@ -408,9 +400,11 @@ pub fn analyzeTable(s: *Parser) Error!void {
     var items: std.ArrayList(Item) = .empty;
     while (true) {
         const q = try s.qualifiedName();
-        const shown = try std.fmt.allocPrint(s.a, "{s}.{s}", .{ if (q.schema) |x| x.text else catalog.main_schema, q.name.text });
         ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-        const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null);
+        // A database that does not exist has no such table.
+        const rel: ?Parser.Rel = if (q.schema != null and (try s.database(q.schema.?.text)) == null) null else try s.relation(q);
+        const shown = if (rel) |r| try r.shown(s.a) else try std.fmt.allocPrint(s.a, "{s}.{s}", .{ q.schema.?.text, q.name.text });
+        const tab = if (rel) |r| r.find(s.p.db) else null;
         const err: ?[]const u8 = if (tab == null)
             try std.fmt.allocPrint(s.a, "Table '{s}' doesn't exist", .{shown})
         else if (tab.?.isView())
@@ -469,7 +463,7 @@ pub const Id = dialect.Quoted('"');
 pub fn show(s: *Parser) Error!void {
     try s.expectKw("SHOW");
     const full = s.eatKw("FULL");
-    if (s.eatKw("TABLES")) return showTables(s, full);
+    if (s.eatKw("TABLES")) return databases.showTables(s, full);
     if (s.eatKw("COLUMNS") or s.eatKw("FIELDS")) {
         if (!(s.eatKw("FROM") or s.eatKw("IN"))) return s.syntaxError();
         const q = try s.qualifiedName();
@@ -487,6 +481,7 @@ pub fn show(s: *Parser) Error!void {
         return showIndex(s, q.name.text, schema);
     }
     if (s.eatKw("CREATE")) {
+        if (s.eatKw("DATABASE") or s.eatKw("SCHEMA")) return databases.showCreateDatabase(s);
         if (s.eatKw("TABLE") or s.eatKw("VIEW")) {
             const q = try s.qualifiedName();
             return showCreate(s, q.name.text, if (q.schema) |x| x.text else null);
@@ -495,11 +490,7 @@ pub fn show(s: *Parser) Error!void {
     }
     if (s.eatKw("WARNINGS")) return showWarnings(s, false);
     if (s.eatKw("ERRORS")) return showWarnings(s, true);
-    if (s.eatKw("DATABASES") or s.eatKw("SCHEMAS")) {
-        var like: ?[]const u8 = null;
-        if (s.eatKw("LIKE")) like = try s.stringLiteral();
-        return lowerFmt(s, "SELECT name AS \"Database\" FROM pragma_database_list{s} ORDER BY seq", .{try likeClause(s, " WHERE name", like)});
-    }
+    if (s.eatKw("DATABASES") or s.eatKw("SCHEMAS")) return databases.showDatabases(s);
     _ = s.eatKw("SESSION");
     if (s.eatKw("VARIABLES")) {
         var like: ?[]const u8 = null;
@@ -537,37 +528,25 @@ pub fn describe(s: *Parser) Error!bool {
     return true;
 }
 
-fn showTables(s: *Parser, full: bool) Error!void {
-    var schema: []const u8 = "main";
-    if (s.eatKw("FROM") or s.eatKw("IN")) schema = try s.nameText(try s.anyName());
-    if (build.findDbName(s.p.db, schema) == null) return s.fail("Unknown database '{s}'", .{schema});
-    var like: ?[]const u8 = null;
-    if (s.eatKw("LIKE")) like = try s.stringLiteral();
-    if (s.isKw("WHERE")) return s.fail("xqlite: SHOW TABLES WHERE is not supported", .{});
-    const col = try std.fmt.allocPrint(s.a, "Tables_in_{s}", .{schema});
-    return lowerFmt(s, "SELECT name AS {f}{s} FROM {f}.sqlite_schema WHERE type IN ('table','view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name" ++ catalog.not_catalog_table ++ "{s} ORDER BY name COLLATE BINARY", .{
-        Id{ .z = col },
-        if (full) ", CASE type WHEN 'view' THEN 'VIEW' ELSE 'BASE TABLE' END AS Table_type" else "",
-        Id{ .z = schema },
-        try likeClause(s, " AND name", like),
-    });
-}
-
 /// `<prefix> LIKE 'pattern'`, or nothing.
 fn likeClause(s: *Parser, prefix: []const u8, like: ?[]const u8) Error![]const u8 {
     const l = like orelse return "";
     return std.fmt.allocPrint(s.a, "{s} LIKE {f}", .{ prefix, Q{ .z = l } });
 }
 
-fn resolveTable(s: *Parser, name: []const u8, schema: ?[]const u8) Error!struct { *int.Table, []const u8 } {
+/// Table `name` of database `schema` (else of the current one): the
+/// table, its SQLite database and its name in its MariaDB database.
+fn resolveTable(s: *Parser, name: []const u8, schema: ?[]const u8) Error!struct { *int.Table, []const u8, []const u8 } {
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    const tab = build.findTable(s.p.db, name, schema) orelse
-        return s.fail("Table '{s}.{s}' doesn't exist", .{ schema orelse "main", name });
-    return .{ tab, try s.a.dupe(u8, catalog.schemaName(s.p.db, tab)) };
+    const r = try s.relation(.{ .schema = if (schema) |x| .{ .text = x } else null, .name = .{ .text = name } });
+    const tab = r.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const stored = try s.a.dupe(u8, tab.name);
+    const bare = if (r.db.named) |n| stored[@min(n.len + 1, stored.len)..] else stored;
+    return .{ tab, try s.a.dupe(u8, catalog.schemaName(s.p.db, tab)), bare };
 }
 
 fn showColumns(s: *Parser, name: []const u8, schema_in: ?[]const u8, like: ?[]const u8) Error!void {
-    const tab, const schema = try resolveTable(s, name, schema_in);
+    const tab, const schema, _ = try resolveTable(s, name, schema_in);
     const tn = try s.a.dupe(u8, tab.name);
     const has_cat = catalog.exists(s.p.db, schema);
     var w: std.Io.Writer.Allocating = .init(s.a);
@@ -597,27 +576,27 @@ fn showColumns(s: *Parser, name: []const u8, schema_in: ?[]const u8, like: ?[]co
 }
 
 fn showIndex(s: *Parser, name: []const u8, schema_in: ?[]const u8) Error!void {
-    const tab, const schema = try resolveTable(s, name, schema_in);
+    const tab, const schema, const bare = try resolveTable(s, name, schema_in);
     const tn = try s.a.dupe(u8, tab.name);
     // The rowid PRIMARY KEY has no index of its own.
     var ipk: []const u8 = "";
     if (tab.i_pkey >= 0) {
         const c = tab.cols[@intCast(tab.i_pkey)].name();
-        ipk = try std.fmt.allocPrint(s.a, "SELECT {f} AS \"Table\", 0 AS Non_unique, 'PRIMARY' AS Key_name, 1 AS Seq_in_index, {f} AS Column_name, 'A' AS Collation, NULL AS Cardinality, NULL AS Sub_part, NULL AS Packed, '' AS \"Null\", 'BTREE' AS Index_type, '' AS Comment, '' AS Index_comment, 'NO' AS Ignored, -1 AS o1, 0 AS o2 UNION ALL ", .{ Q{ .z = tn }, Q{ .z = c } });
+        ipk = try std.fmt.allocPrint(s.a, "SELECT {f} AS \"Table\", 0 AS Non_unique, 'PRIMARY' AS Key_name, 1 AS Seq_in_index, {f} AS Column_name, 'A' AS Collation, NULL AS Cardinality, NULL AS Sub_part, NULL AS Packed, '' AS \"Null\", 'BTREE' AS Index_type, '' AS Comment, '' AS Index_comment, 'NO' AS Ignored, -1 AS o1, 0 AS o2 UNION ALL ", .{ Q{ .z = bare }, Q{ .z = c } });
     }
     const prefix = try std.fmt.allocPrint(s.a, "{s}$", .{tn});
     try lowerFmt(s,
         \\SELECT "Table", Non_unique, Key_name, Seq_in_index, Column_name, Collation, Cardinality, Sub_part, Packed, "Null", Index_type, Comment, Index_comment, Ignored FROM ({s}SELECT {f} AS "Table", NOT il."unique" AS Non_unique, CASE WHEN il.origin='pk' THEN 'PRIMARY' WHEN substr(il.name,1,{d})={f} THEN substr(il.name,{d}) ELSE il.name END AS Key_name, ii.seqno+1 AS Seq_in_index, ii.name AS Column_name, CASE WHEN ii."desc" THEN 'D' ELSE 'A' END AS Collation, NULL AS Cardinality, NULL AS Sub_part, NULL AS Packed, CASE WHEN ti."notnull" OR ti.pk THEN '' ELSE 'YES' END AS "Null", 'BTREE' AS Index_type, '' AS Comment, '' AS Index_comment, 'NO' AS Ignored, il.seq AS o1, ii.seqno AS o2 FROM pragma_index_list({f},{f}) il, pragma_index_xinfo(il.name,{f}) ii LEFT JOIN pragma_table_info({f},{f}) ti ON ti.name=ii.name WHERE ii.key) ORDER BY Key_name<>'PRIMARY', Non_unique, o1 DESC, o2
-    , .{ ipk, Q{ .z = tn }, prefix.len, Q{ .z = prefix }, prefix.len + 1, Q{ .z = tn }, Q{ .z = schema }, Q{ .z = schema }, Q{ .z = tn }, Q{ .z = schema } });
+    , .{ ipk, Q{ .z = bare }, prefix.len, Q{ .z = prefix }, prefix.len + 1, Q{ .z = tn }, Q{ .z = schema }, Q{ .z = schema }, Q{ .z = tn }, Q{ .z = schema } });
 }
 
 /// SHOW CREATE TABLE: the CREATE TABLE as MariaDB would show it, made
 /// from the catalog (for a MariaDB table) or SQLite's schema text.
 fn showCreate(s: *Parser, name: []const u8, schema_in: ?[]const u8) Error!void {
-    const tab, const schema = try resolveTable(s, name, schema_in);
-    const text = try @import("ddl.zig").showCreateTable(s, tab, schema);
+    const tab, const schema, const bare = try resolveTable(s, name, schema_in);
+    const text = try @import("ddl.zig").showCreateTable(s, tab, schema, bare);
     const col = if (tab.isView()) "Create View" else "Create Table";
-    try lowerFmt(s, "SELECT {f} AS {f}, {f} AS {f}", .{ Q{ .z = tab.name }, Id{ .z = if (tab.isView()) "View" else "Table" }, Q{ .z = text }, Id{ .z = col } });
+    try lowerFmt(s, "SELECT {f} AS {f}, {f} AS {f}", .{ Q{ .z = bare }, Id{ .z = if (tab.isView()) "View" else "Table" }, Q{ .z = text }, Id{ .z = col } });
 }
 
 fn showWarnings(s: *Parser, errors_only: bool) Error!void {

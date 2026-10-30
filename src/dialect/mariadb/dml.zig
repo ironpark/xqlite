@@ -152,7 +152,8 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
     var ret: []tree.ResultCol = &.{};
     if (s.eatKw("RETURNING")) ret = try returning(s);
     return .{ .insert = try s.new(tree.Insert, .{
-        .table = q,
+        .table = t.q,
+        .alias = t.alias,
         .cols = names.items,
         .source = source,
         .on_error = if (is_replace) .replace else if (ignore) .ignore else .default,
@@ -288,8 +289,8 @@ pub fn update(s: *Parser) Error!tree.Stmt {
     const order, const limit = try orderLimit(s);
     if (s.isKw("RETURNING")) return s.fail("xqlite: UPDATE ... RETURNING is not supported by MariaDB", .{});
     return .{ .update = try s.new(tree.Update, .{
-        .table = q,
-        .alias = al,
+        .table = t.q,
+        .alias = al orelse t.alias,
         .on_error = if (ignore) .ignore else .default,
         .sets = sets,
         .where = where,
@@ -323,7 +324,7 @@ pub fn delete(s: *Parser) Error!tree.Stmt {
     while (s.eatKw("LOW_PRIORITY") or s.eatKw("QUICK") or s.eatKw("IGNORE")) {}
     if (!s.isKw("FROM")) return s.fail("xqlite: multi-table DELETE is not supported", .{});
     s.advance();
-    const q = try s.qualifiedName();
+    const r = try s.relation(try s.qualifiedName());
     const al = try targetAlias(s);
     if (s.isOp(",") or s.isKw("USING") or s.isKw("JOIN")) return s.fail("xqlite: multi-table DELETE is not supported", .{});
     const where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
@@ -331,8 +332,8 @@ pub fn delete(s: *Parser) Error!tree.Stmt {
     var ret: []tree.ResultCol = &.{};
     if (s.eatKw("RETURNING")) ret = try returning(s);
     return .{ .delete = try s.new(tree.Delete, .{
-        .table = q,
-        .alias = al,
+        .table = r.q,
+        .alias = al orelse r.alias,
         .where = where,
         .order_by = order,
         .limit = limit,
@@ -348,7 +349,7 @@ pub fn truncate(s: *Parser) Error!void {
     _ = s.eatKw("TABLE");
     const q = try s.qualifiedName();
     const t = try s.target(q);
-    try s.lowerStmt(.{ .truncate = try s.new(tree.Truncate, .{ .table = q }) });
+    try s.lowerStmt(.{ .truncate = try s.new(tree.Truncate, .{ .table = t.q }) });
     if (t.tab) |tab| if (tab.tab_flags.Autoincrement) {
         catalog.codeExecFmt(s.p, t.schema, "DELETE FROM %Q.sqlite_sequence WHERE name=%Q", &.{ .{ .str = t.schema }, .{ .str = tab.name } });
     };

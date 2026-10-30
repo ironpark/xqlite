@@ -14,7 +14,8 @@
 //! - MariaDB: every case runs in the database main, which the cases name
 //!   (information_schema queries, main.t) and so do MariaDB's error
 //!   messages ("Table 'main.x' doesn't exist"). The server runs one case
-//!   at a time; the xqlite side of the cases runs in parallel.
+//!   at a time (its prelude drops every database a case made); the
+//!   xqlite side of the cases runs in parallel.
 //!
 //! The server is reached with $PG_PSQL / $MARIA_CLIENT, split on blanks
 //! as the shell did, by default `podman exec -i` into the containers
@@ -109,7 +110,9 @@ const maria: Dialect = .{
     .default_client = "podman exec -i xq-maria mariadb -uroot",
     .container = "podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11",
     .client_args = &.{ "--batch", "--raw", "--force", "--unbuffered" },
-    .prelude = "DROP DATABASE IF EXISTS main; CREATE DATABASE main CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; USE main; SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;\n",
+    // Every database but the system ones goes (main, and those cases made).
+    .prelude = "DELIMITER //\nBEGIN NOT ATOMIC FOR r IN (SELECT SCHEMA_NAME AS n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')) DO EXECUTE IMMEDIATE CONCAT('DROP DATABASE `', r.n, '`'); END FOR; END//\nDELIMITER ;\n" ++
+        "CREATE DATABASE main CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; USE main; SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;\n",
     .xq_prelude = ".dialect mariadb\n.headers on\n.nullvalue NULL\n",
     .norm_server = normMaria,
     .norm_xq = normXqMaria,

@@ -9,7 +9,7 @@ xqlite의 테스트 도구입니다. xqlite와 sqlite3(또는 PostgreSQL·MariaD
 | 플래너 기준 sqlite3 (`--sq`) | `planner` |
 | `PATH`의 `sqlite3` (`--fixtures-sqlite3`) | `gen fixtures` |
 | C 실행기 `sqllogictest` (`--ref`, 선택) | `slt` |
-| 서버 클라이언트(`$PG_PSQL`, `$MARIA_CLIENT`, 기본 `podman exec -i ...`) | `dialect-diff` |
+| 서버 클라이언트(`$PG_PSQL`, `$MARIA_CLIENT`, `$ORA_SQLPLUS`, 기본 `podman exec -i ...`) | `dialect-diff` |
 | `zig cc`, `zig run` (`$ZIG`) | `gen parser`, `gen opcodes` (크래시 shim은 `zig build tools`가 `zig cc`로 빌드) |
 | `tclsh` | `gen opcodes` |
 | `git` | `fetch slt` (`fetch sqlite`는 내려받기와 압축 풀기를 프로세스 안에서 함) |
@@ -54,7 +54,7 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 | `planner [FILE...] [-k KINDS] [--known FILE]` | 쿼리 결과·실행 계획·바이트코드를 sqlite3와 비교 | `planner.zig` |
 | `planner gen basic\|hard SEED NBLOCKS NQUERIES` | 무작위 플래너 케이스. 예전 `gen-basic`, `gen-hard` 생성기와 바이트까지 같은 출력 | `planner_gen.zig` |
 | `slt [PATH...] [-- ARGS]` | sqllogictest를 스크립트마다 `xqlite slt` 프로세스로 | `slt.zig` |
-| `dialect-diff pg\|mariadb [CASES]` | 방언을 실제 서버와 차등 비교. 서버가 필요하므로 `zig build check`에는 없음 | `dialect_diff.zig` |
+| `dialect-diff pg\|mariadb\|oracle [CASES]` | 방언을 실제 서버와 차등 비교. 서버가 필요하므로 `zig build check`에는 없음 | `dialect_diff.zig` |
 | `bench [WORKLOAD...]` | 같은 작업의 실행 시간(`--runs`/`RUNS`, `--rows`/`ROWS`) | `bench.zig` |
 | `gen fixtures\|parser\|opcodes` | `src/testdata`의 DB, `grammar.zig`, `opcodes.zig` 재생성 | `gen.zig` |
 | `gen superjournal [DIR]` | `src/testdata/superjournal` 재생성 | `gen/superjournal.zig` |
@@ -126,12 +126,13 @@ tools/xqt/
     analyze.zig         analyze
     pg.zig              pg
     mariadb.zig         mariadb
+    oracle.zig          oracle
     parts.zig           모듈이 아닌 도우미: 검사 하나의 작은 실행들을 병렬로(크래시 지점 등)
     base_db.zig         모듈이 아닌 도우미: 여러 검사가 나눠 쓰는 시작 DB를 한 번만 만듦
   planner.zig           xqt planner
   planner_gen.zig       xqt planner gen basic|hard (CPython random.Random의 포팅 포함)
   slt.zig               xqt slt
-  dialect_diff.zig      xqt dialect-diff pg|mariadb
+  dialect_diff.zig      xqt dialect-diff pg|mariadb|oracle
   bench.zig             xqt bench
   gen.zig               xqt gen fixtures|parser|opcodes
   gen/superjournal.zig  xqt gen superjournal
@@ -266,7 +267,7 @@ try parts.crashPoints(c, 200, &ctx, crashAt, .{});  // fn (*Check, Ctx, u32) !bo
 - 검사 하나가 동시에 돌리는 부분은 `-j`의 1/8(올림)입니다. 다른 검사도 함께 돌기 때문입니다. 부분은 `std.heap.smp_allocator`로 할당합니다(Debug xqt의 할당자 잠금을 피함).
 - `parts.combined`(표준 출력과 표준 오류를 한 흐름으로, `2>&1`), `parts.oneLine`, `parts.trimmed`도 있습니다.
 
-여러 검사가 같은 시작 DB에서 출발한다면 `interop/base_db.zig`의 `BaseDb`를 씁니다. 처음 요청한 검사가 자기 디렉터리에서 한 번 만들고, 나머지는 기다렸다가 그 바이트의 사본을 받습니다(`pg`, `mariadb`).
+여러 검사가 같은 시작 DB에서 출발한다면 `interop/base_db.zig`의 `BaseDb`를 씁니다. 처음 요청한 검사가 자기 디렉터리에서 한 번 만들고, 나머지는 기다렸다가 그 바이트의 사본을 받습니다(`pg`, `mariadb`, `oracle`).
 
 ## 크래시 도우미
 

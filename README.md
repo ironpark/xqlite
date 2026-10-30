@@ -1,13 +1,13 @@
 # xqlite
 
-> SQLite를 Zig로 포팅하고, 그 위에 **SQLite / PostgreSQL / MariaDB(MySQL) / MSSQL** 호환 레이어를 얹은 임베디드 데이터베이스
+> SQLite를 Zig로 포팅하고, 그 위에 **SQLite / PostgreSQL / MariaDB(MySQL) / MSSQL / Oracle** 호환 레이어를 얹은 임베디드 데이터베이스
 
 > [!WARNING]
 > 아주 초기 단계 프로젝트입니다. 아래 내용의 상당 부분은 **목표와 설계**이며, 아직 구현되지 않았습니다. API와 파일 포맷은 예고 없이 바뀔 수 있습니다. 지금 되는 것은 [로드맵](#로드맵)을 보세요.
 
 ## 왜 xqlite인가
 
-임베디드 DB가 필요할 때 사실상 선택지는 SQLite뿐입니다. 하지만 실제 서비스는 PostgreSQL, MariaDB, MSSQL 위에서 돌아가는 경우가 많아 다음 문제가 반복됩니다.
+임베디드 DB가 필요할 때 사실상 선택지는 SQLite뿐입니다. 하지만 실제 서비스는 PostgreSQL, MariaDB, MSSQL, Oracle 위에서 돌아가는 경우가 많아 다음 문제가 반복됩니다.
 
 - 테스트는 SQLite로, 운영은 PostgreSQL로 돌리다 보니 SQL 방언 차이로 버그가 생깁니다.
 - 서버 DB용으로 작성한 쿼리와 스키마를 로컬/엣지/데스크톱 앱에서 그대로 쓸 수 없습니다.
@@ -19,7 +19,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 1. **SQLite의 Zig 포팅**: SQLite의 구조(Pager, B-Tree, VDBE)를 Zig로 다시 구현합니다. C 바인딩이 아니라 순수 Zig 구현입니다.
 2. **SQLite 파일 포맷 호환**: 기존 `.sqlite` / `.db` 파일을 그대로 읽고 씁니다.
-3. **멀티 방언 SQL**: 연결 단위로 방언을 골라 PostgreSQL, MariaDB, MSSQL의 문법과 의미를 따릅니다.
+3. **멀티 방언 SQL**: 연결 단위로 방언을 골라 PostgreSQL, MariaDB, MSSQL, Oracle의 문법과 의미를 따릅니다.
 4. **임베디드 우선**: 별도 프로세스 없이 라이브러리로 링크해 씁니다. 필요하면 와이어 프로토콜 서버 모드를 켤 수 있게 할 계획입니다.
 5. **Zig다운 설계**: 명시적 allocator, comptime을 활용한 방언 특화, 숨은 전역 상태 없음, 크로스 컴파일 지원.
 
@@ -71,7 +71,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | **VDBE** | SQLite와 같은 레지스터 기반 바이트코드 VM입니다. |
 | **Planner** | 공통 IR을 받아 인덱스 선택, 조인 순서 결정, 서브쿼리 평탄화 등을 수행합니다. |
 | **Dialect Frontend** | 방언별 lexer/parser입니다. 식별자 인용, 타입 변환, NULL/정렬 규칙, 함수 이름 해석을 정해 구문 트리 IR로 만듭니다. |
-| **Catalog** | 방언 메타데이터(`xq_catalog`)와 시퀀스(`xq_sequence`)를 일반 테이블에 둡니다. `information_schema`, `pg_catalog` 같은 메타데이터 뷰가 이것을 읽습니다(MSSQL `sys.*`는 계획). |
+| **Catalog** | 방언 메타데이터(`xq_catalog`)와 시퀀스(`xq_sequence`)를 일반 테이블에 둡니다. `information_schema`, `pg_catalog`, Oracle의 `USER_TABLES` 같은 메타데이터 뷰가 이것을 읽습니다(MSSQL `sys.*`는 계획). |
 
 방언 프론트엔드, 구문 트리 IR, lower/render 계약, 방언 훅, 카탈로그는 [방언 아키텍처](docs/architecture.md)에 자세히 정리했습니다.
 
@@ -81,16 +81,16 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 ### 방언별 주요 차이
 
-| 항목 | SQLite | PostgreSQL | MariaDB | MSSQL |
-| --- | --- | --- | --- | --- |
-| 식별자 인용 | `"x"` `[x]` `` `x` `` | `"x"` | `` `x` `` (`ANSI_QUOTES` 시 `"x"`) | `[x]` `"x"` |
-| 타입 시스템 | 동적 타입 (affinity) | 엄격한 정적 타입 | 정적 타입 + `sql_mode` 의존 | 엄격한 정적 타입 |
-| 자동 증가 | `INTEGER PRIMARY KEY` | `SERIAL` / `IDENTITY` | `AUTO_INCREMENT` | `IDENTITY(1,1)` |
-| 페이징 | `LIMIT/OFFSET` | `LIMIT/OFFSET`, `FETCH` | `LIMIT` | `TOP`, `OFFSET…FETCH` |
-| UPSERT | `ON CONFLICT` | `ON CONFLICT` | `ON DUPLICATE KEY UPDATE` | `MERGE` |
-| 반환 절 | `RETURNING` | `RETURNING` | `RETURNING` (MariaDB 10.5+) | `OUTPUT` |
-| 문자열 연결 | `\|\|` | `\|\|` | `CONCAT()` (`\|\|` = OR) | `+` |
-| 대소문자 비교 | 기본 구분 (ASCII) | 구분 | collation 의존 (기본 비구분) | collation 의존 (기본 비구분) |
+| 항목 | SQLite | PostgreSQL | MariaDB | MSSQL | Oracle |
+| --- | --- | --- | --- | --- | --- |
+| 식별자 인용 | `"x"` `[x]` `` `x` `` | `"x"` | `` `x` `` (`ANSI_QUOTES` 시 `"x"`) | `[x]` `"x"` | `"x"` (인용 없으면 대문자) |
+| 타입 시스템 | 동적 타입 (affinity) | 엄격한 정적 타입 | 정적 타입 + `sql_mode` 의존 | 엄격한 정적 타입 | 정적 타입, `''`는 NULL |
+| 자동 증가 | `INTEGER PRIMARY KEY` | `SERIAL` / `IDENTITY` | `AUTO_INCREMENT` | `IDENTITY(1,1)` | `IDENTITY`, 시퀀스 `s.NEXTVAL` |
+| 페이징 | `LIMIT/OFFSET` | `LIMIT/OFFSET`, `FETCH` | `LIMIT` | `TOP`, `OFFSET…FETCH` | `ROWNUM`, `OFFSET…FETCH` |
+| UPSERT | `ON CONFLICT` | `ON CONFLICT` | `ON DUPLICATE KEY UPDATE` | `MERGE` | `MERGE` |
+| 반환 절 | `RETURNING` | `RETURNING` | `RETURNING` (MariaDB 10.5+) | `OUTPUT` | `RETURNING … INTO` (PL/SQL) |
+| 문자열 연결 | `\|\|` | `\|\|` | `CONCAT()` (`\|\|` = OR) | `+` | `\|\|` (NULL은 건너뜀) |
+| 대소문자 비교 | 기본 구분 (ASCII) | 구분 | collation 의존 (기본 비구분) | collation 의존 (기본 비구분) | 구분 |
 
 ### 타입
 
@@ -98,19 +98,19 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 ### 지원 범위
 
-| 기능 | SQLite | PostgreSQL | MariaDB | MSSQL |
-| --- | :-: | :-: | :-: | :-: |
-| DDL / DML 기본 | ✅ | ✅ | ✅ | 🎯 |
-| 트랜잭션 / 세이브포인트 | ✅ | ✅ | ✅ | 🎯 |
-| CTE / 재귀 CTE | ✅ | ✅ | ✅ | 🎯 |
-| 윈도우 함수 | ✅ | ✅ | ✅ | 🎯 |
-| JSON | ✅ `json1` | 🚧 `json`/`jsonb` | 🚧 | 🎯 `JSON_VALUE` 등 |
-| 시퀀스 | — | ✅ | ✅ | 🎯 |
-| 스키마(네임스페이스) | ✅ `ATTACH` | 🚧 `public`, 붙인 DB는 질의·DML만 | 🚧 (database, `ATTACH`) | 🎯 |
-| 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 |
-| 트리거 | ✅ | 🎯 | 🎯 | 🎯 |
-| 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🎯 `sys.*` |
-| 와이어 프로토콜 | — | 🔬 pgwire v3 | 🔬 MySQL protocol | 🔬 TDS 7.4 |
+| 기능 | SQLite | PostgreSQL | MariaDB | MSSQL | Oracle |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| DDL / DML 기본 | ✅ | ✅ | ✅ | 🎯 | ✅ |
+| 트랜잭션 / 세이브포인트 | ✅ | ✅ | ✅ | 🎯 | ✅ |
+| CTE / 재귀 CTE | ✅ | ✅ | ✅ | 🎯 | ✅ |
+| 윈도우 함수 | ✅ | ✅ | ✅ | 🎯 | ✅ |
+| JSON | ✅ `json1` | 🚧 `json`/`jsonb` | 🚧 | 🎯 `JSON_VALUE` 등 | 🎯 |
+| 시퀀스 | — | ✅ | ✅ | 🎯 | ✅ |
+| 스키마(네임스페이스) | ✅ `ATTACH` | 🚧 `public`, 붙인 DB는 질의·DML만 | 🚧 (database, `ATTACH`) | 🎯 | 🚧 현재 사용자 스키마 = `main` |
+| 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 | 🔬 PL/SQL |
+| 트리거 | ✅ | 🎯 | 🎯 | 🎯 | 🎯 |
+| 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🎯 `sys.*` | 🚧 `USER_*`/`ALL_*` 뷰 |
+| 와이어 프로토콜 | — | 🔬 pgwire v3 | 🔬 MySQL protocol | 🔬 TDS 7.4 | — |
 
 ✅ 구현 · 🚧 일부 구현 · 🎯 목표 · 🔬 실험적 / 후순위 · — 해당 없음
 
@@ -119,6 +119,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 - [SQLite 호환](docs/sqlite.md): 구현 범위, sqlite3와의 교차 검증
 - [PostgreSQL 호환](docs/postgres.md): 지원 문법, 타입과 의미, PostgreSQL과 다른 점
 - [MariaDB 호환](docs/mariadb.md): 저장 방식, `sql_mode`, 지원 문법, MariaDB와 다른 점
+- [Oracle 호환](docs/oracle.md): 빈 문자열과 NULL, 날짜, `ROWNUM`·`MERGE`, 암묵적 트랜잭션, Oracle과 다른 점
 
 ## 빠른 시작
 
@@ -171,7 +172,7 @@ zig-out/bin/xqlite sql app.db ".dialect postgres" \
   "INSERT INTO users (email) VALUES ('hello@example.com') RETURNING id"
 ```
 
-SQL에서는 `PRAGMA xq_dialect = 'mariadb'`(`'pg'`, `'mysql'` 별칭 허용), Zig API에서는 `.{ .dialect = .postgres }`나 `db.setDialect()`를 씁니다. 자세한 규칙은 [방언 고르기](docs/architecture.md#방언-고르기)에 있습니다.
+SQL에서는 `PRAGMA xq_dialect = 'mariadb'`(`'pg'`, `'mysql'` 별칭 허용, Oracle은 `'oracle'`), Zig API에서는 `.{ .dialect = .postgres }`나 `db.setDialect()`를 씁니다. 자세한 규칙은 [방언 고르기](docs/architecture.md#방언-고르기)에 있습니다.
 
 ### Zig API
 
@@ -212,7 +213,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - **플래너 차등 테스트**: `xqt planner`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
 - **sqllogictest**: `xqt slt`
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `ir_roundtrip`)
-- **방언 차등 테스트**: `xqt dialect-diff pg`, `xqt dialect-diff mariadb`가 실제 PostgreSQL 16, MariaDB 11과 결과를 비교합니다.
+- **방언 차등 테스트**: `xqt dialect-diff pg`, `xqt dialect-diff mariadb`, `xqt dialect-diff oracle`이 실제 PostgreSQL 16, MariaDB 11, Oracle Database 23ai와 결과를 비교합니다.
 
 도구별 실행 방법과 필요한 기준 sqlite3 빌드는 [테스트와 검증](docs/testing.md)에 있습니다.
 
@@ -227,7 +228,8 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - [x] **Phase 6 · MariaDB 방언**: 토크나이저·파서, 연결 단위 `sql_mode`, `INSERT IGNORE`/`REPLACE`/`ON DUPLICATE KEY UPDATE`, `AUTO_INCREMENT`, MariaDB 타입과 collation, `SHOW`/`information_schema`. MariaDB 11.8과 차등 비교 ([MariaDB 호환](docs/mariadb.md))
 - [x] **구문 트리 IR**: 방언 중립 구문 트리와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT. PostgreSQL과 MariaDB 프론트엔드를 옮겨 실행과 저장의 의미가 같아짐 ([방언 아키텍처](docs/architecture.md#render와-lower의-계약))
 - [ ] **Phase 7 · MSSQL 방언**: T-SQL 파서, `IDENTITY`, `TOP`, `OUTPUT`, `MERGE`
-- [ ] **Phase 8 · 서버 모드**: pgwire, MySQL protocol, TDS
+- [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle.md))
+- [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS
 - [ ] **C ABI**: `sqlite3_*` 호환 C ABI와 URI 파라미터 `?dialect=` ([계획](docs/zig-api.md#아직-없는-것))
 
 ## 프로젝트 구조
@@ -249,7 +251,8 @@ src/
 ├── dialect/
 │   ├── sqlite/
 │   ├── postgres/       # lexer, parser(→ 구문 트리 IR), DDL 검사, 카탈로그 뷰
-│   └── mariadb/        # 토크나이저, 파서(→ 구문 트리 IR), sql_mode, 타입 변환, 함수
+│   ├── mariadb/        # 토크나이저, 파서(→ 구문 트리 IR), sql_mode, 타입 변환, 함수
+│   └── oracle/         # lexer, parser(→ 구문 트리 IR), 날짜·숫자 형식, 저장 변환, 데이터 사전 뷰
 ├── api/                # Zig API
 ├── ext/                # 셸용 확장 (generate_series, vtablog)
 └── testing/            # 시드 퍼저 공용 도구

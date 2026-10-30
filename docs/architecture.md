@@ -2,7 +2,7 @@
 
 xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 구조를 설명합니다. 방언 선택, 프론트엔드 계약, 구문 트리 IR과 그 두 백엔드(lower, render), 방언 훅, 카탈로그를 다룹니다.
 
-방언별 지원 범위는 [SQLite 호환](sqlite.md), [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md)에 있습니다.
+방언별 지원 범위는 [SQLite 호환](sqlite.md), [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [Oracle 호환](oracle.md)에 있습니다.
 
 ## 목차
 
@@ -106,6 +106,7 @@ SQLite 방언 프론트엔드는 이 인터페이스로 바로 내립니다. 그
 | `coerce{decl_type, ...}` | MariaDB가 열에 저장하는 값의 변환 | `xq_coerce()` |
 | `identity_default{sequence}` | identity 시퀀스의 다음 값 | `nextval('seq')` |
 | `boolean`, `param`, `default` | TRUE/FALSE, `?N`(null이면 `?`), VALUES/SET의 DEFAULT | |
+| `named_param` | 이름으로 바인딩하는 매개변수(`:name`, SQLite 철자 그대로) | 그 이름의 변수 / render는 거부(`param`과 같음) |
 
 ## render와 lower의 계약
 
@@ -221,6 +222,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | PostgreSQL | `xq_like`, `xq_ilike`, `xq_pg_*` |
 | MariaDB (의미 노드) | `xq_coerce`, `xq_div`, `xq_xor`, `xq_bitxor`, `xq_cast` |
 | MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_stddev_*`, `xq_var_*`, `xq_rand`, `xq_uuid` |
+| Oracle | `xq_ora_coerce`(열에 저장하는 값의 변환, `func` 노드), `xq_ora_cast`(`CAST`, `cast{typed}`), `xq_ora_autocommit`(암묵적 트랜잭션), `xq_ora_data_*`(`USER_TAB_COLUMNS`) |
 
 ### collation
 
@@ -260,7 +262,7 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 | `collation` | collation |
 | `default` | 기본값 |
 
-방언 고유 키는 `pg.`, `mariadb.` 접두사를 씁니다.
+방언 고유 키는 `pg.`, `mariadb.`, `oracle.` 접두사를 씁니다.
 
 ### 엔진 쪽 API
 
@@ -277,6 +279,7 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 | --- | --- |
 | PostgreSQL | `nextval(name)`, `currval(name)`, `setval(name, v [, is_called])`, `lastval()` |
 | MariaDB | `nextval(name)`, `lastval(name)`, `setval(...)` |
+| Oracle | `s.NEXTVAL`, `s.CURRVAL`(파서가 `nextval('S')`, `currval('S')`로 바꿈) |
 
 - 의미는 PostgreSQL을 따르되 트랜잭션에 묶입니다. 롤백된 값은 다시 나옵니다.
 - `currval`/`lastval`은 연결 단위입니다.
@@ -290,6 +293,7 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 | `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres.md)) |
 | `src/dialect/mariadb/*.zig` | MariaDB 프론트엔드([MariaDB 호환](mariadb.md)) |
+| `src/dialect/oracle/*.zig` | Oracle 프론트엔드([Oracle 호환](oracle.md)) |
 | `src/ir/ir.zig` | IR 빌더 파사드: `stmt`, `expr`, `list`, `from`, `select`, `with`, `window`, `dml`, `ddl`, `txn`, `admin`. 각 항목은 대응하는 C 함수(`sqlite3PExpr`, `sqlite3StartTable` ...)의 별칭이거나 parse.y에서 옮긴 도우미 |
 | `src/ir/tree.zig` | 구문 트리 IR과 의미 노드 (아래) |
 | `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록 |

@@ -994,6 +994,40 @@ static void test_misc(void){
   CHECK_RC(sqlite3_close(0), SQLITE_OK, 0);
 }
 
+/* ============================================================ group B
+** Storage and memory: serialize/deserialize and memdb, snapshots,
+** incremental blob I/O, memory accounting, loadable extensions, carray,
+** C VFS filenames. Each test_b_* function belongs to one topic.
+*/
+
+static void test_b_memdb(const char *zDir){
+  (void)zDir;
+}
+
+static void test_b_blob(const char *zDir){
+  (void)zDir;
+}
+
+static void test_b_status(void){
+}
+
+static void test_b_ext(const char *zDir){
+  (void)zDir;
+}
+
+static void test_b_carray(void){
+}
+
+static void test_b_vfs(const char *zDir){
+  (void)zDir;
+}
+
+static void test_b_snapshot(const char *zDir){
+  (void)zDir;
+}
+
+/* ======================================================== end of group B */
+
 int main(void){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
   if( mkdtemp(zDir)==0 ){ perror("mkdtemp"); return 1; }
@@ -1009,6 +1043,13 @@ int main(void){
   test_vtab();
   test_vfs(zDir);
   test_misc();
+  test_b_memdb(zDir);
+  test_b_blob(zDir);
+  test_b_status();
+  test_b_ext(zDir);
+  test_b_carray();
+  test_b_vfs(zDir);
+  test_b_snapshot(zDir);
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

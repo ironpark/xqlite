@@ -55,7 +55,7 @@ const SeriesCursor = struct {
     b_done: bool = false,
 
     fn of(cur: *vtab.VtabCursor) *SeriesCursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 

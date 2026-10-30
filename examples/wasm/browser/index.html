@@ -1,0 +1,16 @@
+<!doctype html>
+<!--
+  xqlite.wasm in the browser, the database in OPFS (worker.mjs).
+    zig build wasm
+    python3 -m http.server 8000      # from the repository root
+    open http://localhost:8000/examples/wasm/browser/
+  Each reload adds a row to demo.db, which survives in the origin's storage.
+-->
+<meta charset="utf-8">
+<title>xqlite OPFS</title>
+<pre id="out"></pre>
+<script type="module">
+  const out = document.getElementById("out");
+  const worker = new Worker("worker.mjs", { type: "module" });
+  worker.onmessage = (e) => (out.textContent += e.data + "\n");
+</script>

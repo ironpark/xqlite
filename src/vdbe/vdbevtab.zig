@@ -60,7 +60,7 @@ const BytecodeCursor = struct {
     sub: Mem,
 
     fn of(cur: *vtab.VtabCursor) *BytecodeCursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 

@@ -295,7 +295,7 @@ pub const Op = struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Op) == 24);
+    if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Op) == 24);
 }
 
 /// The type of the fourth operand (P4_*).

@@ -98,7 +98,7 @@ pub fn opFilterAdd(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
     var h = filterHash(e.regs, op);
     h %= @as(u64, @intCast(in1.n)) * 8;
-    in1.z.?[h / 8] |= @as(u8, 1) << @intCast(h & 7);
+    in1.z.?[@intCast(h / 8)] |= @as(u8, 1) << @intCast(h & 7);
     return .next;
 }
 
@@ -106,7 +106,7 @@ pub fn opFilter(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
     var h = filterHash(e.regs, op);
     h %= @as(u64, @intCast(in1.n)) * 8;
-    if (in1.z.?[h / 8] & (@as(u8, 1) << @intCast(h & 7)) == 0) {
+    if (in1.z.?[@intCast(h / 8)] & (@as(u8, 1) << @intCast(h & 7)) == 0) {
         e.v.counters[vi.STMTSTATUS.FILTER_HIT] += 1;
         return .jump_p2;
     }

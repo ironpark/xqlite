@@ -81,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     } else if (args.len >= 2 and std.mem.eql(u8, args[1], "sql")) {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
-        var unix = xqlite.UnixVfs.init(init.gpa, io);
+        var unix = xqlite.OsVfs.init(init.gpa, io);
         // $XQLITE_TEST_CRASH: crash at a chosen write (see usage).
         var crash: xqlite.crash_vfs.CrashVfs = undefined;
         var v = unix.interface();
@@ -131,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn dbinfo(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !void {
-    var unix = xqlite.UnixVfs.init(gpa, io);
+    var unix = xqlite.OsVfs.init(gpa, io);
     const vfs = unix.interface();
     const file = try vfs.open(path, .{ .read_write = false });
     defer file.close();
@@ -177,7 +177,7 @@ fn lockAndAdoptHeader(p: *xqlite.pager.Pager) !void {
 }
 
 fn recover(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !void {
-    var unix = xqlite.UnixVfs.init(gpa, io);
+    var unix = xqlite.OsVfs.init(gpa, io);
     const v = unix.interface();
     const p = try xqlite.pager.Pager.open(gpa, v, path, .{ .create = false });
     defer p.close(.{});
@@ -194,7 +194,7 @@ fn recover(gpa: std.mem.Allocator, io: Io, path: []const u8, out: *Io.Writer) !v
 }
 
 fn crashWrite(gpa: std.mem.Allocator, io: Io, path: []const u8, fill: u8) !void {
-    var unix = xqlite.UnixVfs.init(gpa, io);
+    var unix = xqlite.OsVfs.init(gpa, io);
     const p = try xqlite.pager.Pager.open(gpa, unix.interface(), path, .{ .create = false });
     try lockAndAdoptHeader(p);
     const p1 = try p.get(1, .{});
@@ -217,7 +217,7 @@ fn crashWrite(gpa: std.mem.Allocator, io: Io, path: []const u8, fill: u8) !void 
 // ============================================================= b-tree tools
 
 fn openBtree(gpa: std.mem.Allocator, io: Io, path: []const u8, opts: xqlite.btree.Options) !*Btree {
-    const unix = try gpa.create(xqlite.UnixVfs);
+    const unix = try gpa.create(xqlite.OsVfs);
     unix.* = .init(gpa, io);
     return Btree.open(gpa, unix.interface(), path, opts);
 }
@@ -266,7 +266,7 @@ const demo_objects = [_]SchemaObject{
     .{ .type = "table", .name = "t", .sql = "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c BLOB)" },
     .{ .type = "index", .name = "t_b", .sql = "CREATE INDEX t_b ON t(b)" },
 };
-const demo_key_info: record.KeyInfo = .{ .gpa = std.heap.smp_allocator, .sort_orders = &.{ .asc, .asc } };
+const demo_key_info: record.KeyInfo = .{ .gpa = std.heap.c_allocator, .sort_orders = &.{ .asc, .asc } };
 
 /// printf('v-%d', (i*7919)%n)
 fn demoB(buf: []u8, i: u64, n: u64) []const u8 {

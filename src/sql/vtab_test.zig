@@ -137,7 +137,7 @@ const KvCursor = struct {
     i: usize = 0,
 
     fn of(cur: *vtab.VtabCursor) *KvCursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 
@@ -621,30 +621,30 @@ fn epoOpen(_: *vtab.Vtab, pp: *?*vtab.VtabCursor) i32 {
 }
 
 fn epoClose(cur: *vtab.VtabCursor) i32 {
-    gpa.destroy(@as(*EpoCursor, @fieldParentPtr("base", cur)));
+    gpa.destroy(@as(*EpoCursor, @alignCast(@fieldParentPtr("base", cur))));
     return RC.OK;
 }
 
 fn epoFilter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, argv: []*Mem) i32 {
-    const c: *EpoCursor = @fieldParentPtr("base", cur);
+    const c: *EpoCursor = @alignCast(@fieldParentPtr("base", cur));
     c.n = 1;
     c.lim = if (idx_num == 1) api.valueInt64(argv[0]) else 3;
     return RC.OK;
 }
 
 fn epoNext(cur: *vtab.VtabCursor) i32 {
-    const c: *EpoCursor = @fieldParentPtr("base", cur);
+    const c: *EpoCursor = @alignCast(@fieldParentPtr("base", cur));
     c.n += 1;
     return RC.OK;
 }
 
 fn epoEof(cur: *vtab.VtabCursor) bool {
-    const c: *EpoCursor = @fieldParentPtr("base", cur);
+    const c: *EpoCursor = @alignCast(@fieldParentPtr("base", cur));
     return c.n > c.lim;
 }
 
 fn epoColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
-    const c: *EpoCursor = @fieldParentPtr("base", cur);
+    const c: *EpoCursor = @alignCast(@fieldParentPtr("base", cur));
     api.resultInt64(ctx, switch (i) {
         0 => c.n,
         1 => c.n * c.n,
@@ -654,7 +654,7 @@ fn epoColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
 }
 
 fn epoRowid(cur: *vtab.VtabCursor, rowid: *i64) i32 {
-    const c: *EpoCursor = @fieldParentPtr("base", cur);
+    const c: *EpoCursor = @alignCast(@fieldParentPtr("base", cur));
     rowid.* = c.n;
     return RC.OK;
 }
@@ -1041,22 +1041,22 @@ fn errOpen(p: *vtab.Vtab, pp: *?*vtab.VtabCursor) i32 {
 }
 
 fn errClose(cur: *vtab.VtabCursor) i32 {
-    gpa.destroy(@as(*ErrCursor, @fieldParentPtr("base", cur)));
+    gpa.destroy(@as(*ErrCursor, @alignCast(@fieldParentPtr("base", cur))));
     return RC.OK;
 }
 
 fn errFilter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, _: []*Mem) i32 {
-    @as(*ErrCursor, @fieldParentPtr("base", cur)).n = 0;
+    @as(*ErrCursor, @alignCast(@fieldParentPtr("base", cur))).n = 0;
     return errFail(cur.vtab, .filter);
 }
 
 fn errNext(cur: *vtab.VtabCursor) i32 {
-    @as(*ErrCursor, @fieldParentPtr("base", cur)).n += 1;
+    @as(*ErrCursor, @alignCast(@fieldParentPtr("base", cur))).n += 1;
     return errFail(cur.vtab, .next);
 }
 
 fn errEof(cur: *vtab.VtabCursor) bool {
-    return @as(*ErrCursor, @fieldParentPtr("base", cur)).n > 0;
+    return @as(*ErrCursor, @alignCast(@fieldParentPtr("base", cur))).n > 0;
 }
 
 fn errColumn(cur: *vtab.VtabCursor, ctx: *vi.Context, _: i32) i32 {

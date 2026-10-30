@@ -1,7 +1,7 @@
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
 const MemVfs = @import("../vfs/mem.zig").MemVfs;
-const UnixVfs = @import("../vfs/unix.zig").UnixVfs;
+const UnixVfs = if (@import("builtin").os.tag == .wasi) void else @import("../vfs/unix.zig").UnixVfs;
 const pager_mod = @import("pager.zig");
 const root = @import("../root.zig");
 
@@ -257,6 +257,8 @@ test "pager: hot journal from a crash between commit phases is rolled back" {
 }
 
 test "pager: a database without write permission opens read-only" {
+    // The POSIX VFS and permissions (WASI has neither).
+    if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var u = UnixVfs.init(testing.allocator, testing.io);

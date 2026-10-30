@@ -23,6 +23,7 @@ const main_mod = @import("main.zig");
 const where_mod = @import("where.zig");
 const ctype = @import("../util/ctype.zig");
 const coll_mod = @import("coll.zig");
+const malloc = @import("malloc.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -70,6 +71,9 @@ pub fn openTable(p: *Parse, i_cur: i32, i_db: usize, t: *Table, opcode: OP) void
 pub fn indexAffinityStr(p: *Parse, idx: *Index) ?[:0]const u8 {
     if (idx.col_aff) |s| return s;
     const t = idx.table;
+    // Schema memory: not in lookaside (C: sqlite3DbMallocRaw(0, ...)).
+    malloc.disableLookaside(p.db);
+    defer malloc.enableLookaside(p.db);
     const s = build.tableAlloc(p, t).allocSentinel(u8, idx.n_column, 0) catch {
         build.oomFault(p);
         return null;
@@ -136,6 +140,9 @@ pub fn tableAffinity(p: *Parse, t: *Table, reg: i32) void {
         return;
     }
     const aff = t.col_aff orelse blk: {
+        // Schema memory: not in lookaside (C: sqlite3DbMallocRaw(0, ...)).
+        malloc.disableLookaside(p.db);
+        defer malloc.enableLookaside(p.db);
         const s = tableAffinityStr(build.tableAlloc(p, t), t) catch return build.oomFault(p);
         t.col_aff = s;
         break :blk s;

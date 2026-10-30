@@ -15,6 +15,13 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "prng" },
     // The POSIX lock table, which every connection has to share.
     .{ "src/vfs/unix.zig", "inodes" },
+    // The in-process lock tables of the WASI and host VFSes, for the same
+    // reason (WASI has no locks the system arbitrates).
+    .{ "src/vfs/wasi.zig", "files" },
+    .{ "src/vfs/host.zig", "files" },
+    // The file systems the connections of the wasm module share.
+    .{ "src/wasm/api.zig", "mem_vfs" },
+    .{ "src/wasm/api.zig", "host_vfs" },
     // typeId(): an address per type, never read or written (a `const`
     // could be merged with another).
     .{ "src/api/Stmt.zig", "id" },

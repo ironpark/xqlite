@@ -22,7 +22,7 @@ const module = @import("module.zig");
 const Conn = @import("conn.zig").Conn;
 const Stmt = @import("Stmt.zig");
 const MemVfs = engine.MemVfs;
-const UnixVfs = engine.UnixVfs;
+const OsVfs = engine.OsVfs;
 
 const Allocator = std.mem.Allocator;
 const Error = errors.Error;
@@ -34,13 +34,15 @@ gpa: Allocator,
 owned_vfs: ?*OwnedVfs,
 
 const OwnedVfs = union(enum) {
-    unix: UnixVfs,
+    unix: OsVfs,
     memory: MemVfs,
 };
 
 /// Where the database files live.
 pub const VfsOption = union(enum) {
-    /// The operating system's file system (the POSIX VFS).
+    /// The operating system's file system: the POSIX VFS, or on
+    /// WebAssembly the WASI VFS (wasm32-wasi) or the host's files
+    /// (wasm32-freestanding, docs/wasm.md).
     unix,
     /// A private in-memory file system that belongs to this connection:
     /// a named database (and its journal or WAL) lives in RAM and
@@ -91,7 +93,7 @@ pub fn open(gpa: Allocator, io: std.Io, path: []const u8, options: OpenOptions) 
         .custom => |c| c,
         .unix => blk: {
             const o = try gpa.create(OwnedVfs);
-            o.* = .{ .unix = UnixVfs.init(gpa, io) };
+            o.* = .{ .unix = OsVfs.init(gpa, io) };
             owned = o;
             break :blk o.unix.interface();
         },

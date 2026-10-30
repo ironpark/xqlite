@@ -39,8 +39,10 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
-        // libc provides fcntl() byte-range locks for the unix VFS.
-        .link_libc = true,
+        // libc provides fcntl() byte-range locks for the unix VFS (and
+        // wasi-libc the clock and localtime_r() on wasm32-wasi);
+        // wasm32-freestanding has none (src/util/platform.zig).
+        .link_libc = target.result.os.tag != .freestanding,
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -164,6 +166,36 @@ pub fn build(b: *std.Build) void {
         b.step("example-" ++ name, "Run examples/" ++ name ++ ".zig").dependOn(&run_example.step);
     }
 
+    // `zig build wasm`: the WebAssembly module for JavaScript hosts
+    // (src/wasm/api.zig, wasm32-freestanding, no libc) in zig-out/wasm,
+    // whatever -Dtarget is; ReleaseSmall unless -Dwasm-optimize says
+    // otherwise. `zig build wasm-example` runs examples/wasm/node.mjs
+    // with it. docs/wasm.md.
+    const wasm_optimize = b.option(std.builtin.OptimizeMode, "wasm-optimize", "zig build wasm: optimization mode (default small)") orelse .small;
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm_lib = b.addExecutable(.{
+        .name = "xqlite",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm/api.zig"),
+            .target = wasm_target,
+            .optimize = wasm_optimize,
+            .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = wasm_target,
+                .optimize = wasm_optimize,
+            }) }},
+        }),
+    });
+    wasm_lib.entry = .disabled;
+    wasm_lib.rdynamic = true;
+    const install_wasm = b.addInstallArtifact(wasm_lib, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } });
+    b.step("wasm", "Build the WebAssembly module for JavaScript hosts (zig-out/wasm/xqlite.wasm)").dependOn(&install_wasm.step);
+    const run_wasm_example = b.addSystemCommand(&.{"node"});
+    run_wasm_example.addFileArg(b.path("examples/wasm/node.mjs"));
+    run_wasm_example.addArtifactArg(wasm_lib);
+    run_wasm_example.has_side_effects = true;
+    b.step("wasm-example", "Run examples/wasm/node.mjs (Node.js) with the WebAssembly module").dependOn(&run_wasm_example.step);
+
     // `zig build test` also checks that the names docs/zig-api.md and the
     // examples use exist in the module, as its users see it.
     const doc_tests = b.addTest(.{
@@ -254,6 +286,54 @@ pub fn build(b: *std.Build) void {
     tools_step.dependOn(b.getInstallStep());
     tools_step.dependOn(&b.addInstallArtifact(xqt_exe, .{}).step);
     tools_step.dependOn(&b.addInstallArtifact(crashshim, .{}).step);
+
+    // `zig build test-wasi`: the unit tests (module and CLI) built for
+    // wasm32-wasi and run under wasmtime, then `xqt wasi`, which runs an
+    // xqlite built for wasm32-wasi (ReleaseSafe) against sqlite3 and this
+    // native build. Needs wasmtime on PATH. docs/wasm.md.
+    const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const wasi_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasi_target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const wasi_exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = wasi_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "xqlite", .module = wasi_mod }},
+    });
+    const wasi_safe_exe = b.addExecutable(.{
+        .name = "xqlite",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = wasi_target,
+            .optimize = .safe,
+            .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = wasi_target,
+                .optimize = .safe,
+                .link_libc = true,
+            }) }},
+        }),
+    });
+    const test_wasi_step = b.step("test-wasi", "Run the unit tests and `xqt wasi` on wasm32-wasi under wasmtime");
+    for ([_]*std.Build.Step.Compile{
+        b.addTest(.{ .root_module = wasi_mod, .filters = test_filters }),
+        b.addTest(.{ .root_module = wasi_exe_mod, .filters = test_filters }),
+    }) |t| {
+        const run = b.addSystemCommand(&.{ "wasmtime", "run", "--dir", "." });
+        run.addArtifactArg(t);
+        // The tests make their temporary directories under .zig-cache/tmp.
+        run.setCwd(b.path("."));
+        run.has_side_effects = true;
+        test_wasi_step.dependOn(&run.step);
+    }
+    const wasi_run = addXqtRun(b, xqt_exe, exe, crashshim);
+    wasi_run.addArgs(&.{ "wasi", "--wasm" });
+    wasi_run.addArtifactArg(wasi_safe_exe);
+    test_wasi_step.dependOn(&wasi_run.step);
 
     // `zig build check`: everything at once, in parallel. The unit tests,
     // every `xqt interop` module, every planner case file but vtablog.txt

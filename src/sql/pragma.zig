@@ -1815,7 +1815,7 @@ const PragmaVtabCursor = struct {
     args: [2]?[:0]u8 = .{ null, null },
 
     fn of(cur: *vtab.VtabCursor) *PragmaVtabCursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 

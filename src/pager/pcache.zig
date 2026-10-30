@@ -291,6 +291,10 @@ pub const PCache = struct {
     /// then the extra space (like pcache1's PgHdr1 + buffer + extra).
     const Layout = struct { data: usize, extra: usize, len: usize };
 
+    /// The extra space is 8-aligned at an 8-aligned offset, so the block
+    /// is too (a Page is only 4-aligned on wasm32).
+    const block_align = std.mem.Alignment.of(Page).max(.@"8");
+
     fn layout(pc: *const PCache) Layout {
         const data = std.mem.alignForward(usize, @sizeOf(Page), 8);
         const extra = std.mem.alignForward(usize, data + pc.page_size + 8, 8);
@@ -299,7 +303,7 @@ pub const PCache = struct {
 
     fn allocPage(pc: *PCache) error{OutOfMemory}!*Page {
         const l = pc.layout();
-        const block = try pc.gpa.alignedAlloc(u8, .of(Page), l.len);
+        const block = try pc.gpa.alignedAlloc(u8, block_align, l.len);
         const p: *Page = @ptrCast(block.ptr);
         @memset(block[l.data + pc.page_size ..][0..8], 0);
         p.* = .{
@@ -312,7 +316,7 @@ pub const PCache = struct {
     }
 
     fn freePage(pc: *PCache, p: *Page) void {
-        const block: [*]align(@alignOf(Page)) u8 = @ptrCast(p);
+        const block: [*]align(block_align.toByteUnits()) u8 = @ptrCast(@alignCast(p));
         pc.gpa.free(block[0..pc.layout().len]);
     }
 

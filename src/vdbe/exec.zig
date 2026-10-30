@@ -102,6 +102,9 @@ pub const Exec = struct {
     i_compare: i32 = 0,
     /// Reset this schema (plus one) after an error.
     reset_schema_on_fault: u8 = 0,
+    /// The run's nProgressLimit as of its last change, for vdbe_return
+    /// (the run loop keeps its own copy in a local).
+    progress_limit: u64 = std.math.maxInt(u64),
 
     pub fn reg(e: *Exec, i: i32) *Mem {
         return &e.regs[@intCast(i)];
@@ -162,6 +165,7 @@ pub const Exec = struct {
         if (db.progress != null and db.n_progress_ops > 0) {
             const prior: u64 = v.counters[vi.STMTSTATUS.VM_STEP];
             progress_limit = db.n_progress_ops - (prior % db.n_progress_ops);
+            e.progress_limit = progress_limit;
         }
         while (true) {
             const op = &ops[pc];
@@ -369,13 +373,13 @@ pub const Exec = struct {
                 .jump_p2 => pc = @intCast(op.p2),
                 .check_interrupt => {
                     if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                    if (n_vm_step >= progress_limit and progressInterrupts(db, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    if (n_vm_step >= progress_limit and e.progressInterrupts(&progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
                     pc += 1;
                 },
                 .jump_p2_check_interrupt => {
                     pc = @intCast(op.p2);
                     if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                    if (n_vm_step >= progress_limit and progressInterrupts(db, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    if (n_vm_step >= progress_limit and e.progressInterrupts(&progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
                 },
                 .goto_pc => {
                     ops = e.ops.ptr;
@@ -385,7 +389,7 @@ pub const Exec = struct {
                     ops = e.ops.ptr;
                     pc = @intCast(e.pc + 1);
                     if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
-                    if (n_vm_step >= progress_limit and progressInterrupts(db, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    if (n_vm_step >= progress_limit and e.progressInterrupts(&progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
                 },
                 .ret => return e.vdbeReturn(n_vm_step),
             }
@@ -428,10 +432,13 @@ pub const Exec = struct {
         return e.vdbeReturn(n_vm_step);
     }
 
-    /// vdbe_return: leave the run with Exec.rc.
-    /// Call the progress handler, whose limit `limit` was reached;
-    /// whether it asks to interrupt the statement.
-    fn progressInterrupts(db: *Sqlite3, limit: *u64) bool {
+    /// Call the progress handler, whose limit `limit` (the run loop's
+    /// copy, or Exec.progress_limit itself) was reached; whether it asks
+    /// to interrupt the statement.
+    fn progressInterrupts(e: *Exec, limit: *u64) bool {
+        @branchHint(.cold);
+        const db = e.db;
+        defer e.progress_limit = limit.*;
         const f = db.progress orelse {
             limit.* = std.math.maxInt(u64);
             return false;
@@ -444,7 +451,12 @@ pub const Exec = struct {
         return false;
     }
 
+    /// vdbe_return: leave the run with Exec.rc, after the progress
+    /// handler calls the instructions since the last one are due.
     fn vdbeReturn(e: *Exec, n_vm_step: u64) i32 {
+        while (n_vm_step >= e.progress_limit and e.db.progress != null) {
+            if (e.progressInterrupts(&e.progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
+        }
         e.v.counters[vi.STMTSTATUS.VM_STEP] +%= @truncate(n_vm_step);
         return e.rc;
     }

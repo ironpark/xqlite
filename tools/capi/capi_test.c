@@ -1292,6 +1292,81 @@ static void test_find_function(void){
   sqlite3_close(db);
 }
 
+/* -------------------------------------------- trace and progress, engine */
+
+static char zTraceLog[1024];
+static int engine_trace(unsigned t, void *ctx, void *p, void *x){
+  char buf[200];
+  (void)ctx;
+  if( t==SQLITE_TRACE_STMT ) snprintf(buf, sizeof(buf), "S:%s;", (const char*)x);
+  else if( t==SQLITE_TRACE_PROFILE ) snprintf(buf, sizeof(buf), "P:%s;", sqlite3_sql((sqlite3_stmt*)p));
+  else snprintf(buf, sizeof(buf), "%u;", t);
+  if( strlen(zTraceLog)+strlen(buf) < sizeof(zTraceLog) ) strcat(zTraceLog, buf);
+  return 0;
+}
+static void legacy_trace(void *p, const char *z){
+  (void)p;
+  if( strlen(zTraceLog)+strlen(z)+4 < sizeof(zTraceLog) ){ strcat(zTraceLog, "L:"); strcat(zTraceLog, z); strcat(zTraceLog, ";"); }
+}
+static void fn_nested(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  (void)argc; (void)argv;
+  sqlite3_exec(sqlite3_context_db_handle(ctx), "SELECT 42", 0, 0, 0);
+  sqlite3_result_int(ctx, 1);
+}
+static int nEngineProgress = 0;
+static int engine_progress(void *p){ (void)p; nEngineProgress++; return 0; }
+
+static void test_trace_engine(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  int n;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  sqlite3_create_function(db, "fn_nested", 0, SQLITE_UTF8, 0, fn_nested, 0, 0);
+  exec(db, "CREATE TABLE t(x); CREATE TABLE log(y);"
+           "CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO log VALUES(new.x); END");
+  CHECK_RC(sqlite3_trace_v2(db, SQLITE_TRACE_STMT|SQLITE_TRACE_PROFILE, engine_trace, 0), SQLITE_OK, db);
+  /* The statements of triggers and those run by functions, as comments. */
+  zTraceLog[0] = 0;
+  exec(db, "INSERT INTO t VALUES(1)");
+  CHECK_STR(zTraceLog, "S:INSERT INTO t VALUES(1);S:-- TRIGGER tr;S:-- INSERT INTO log VALUES(new.x);P:INSERT INTO t VALUES(1);");
+  zTraceLog[0] = 0;
+  exec(db, "SELECT fn_nested()");
+  CHECK_STR(zTraceLog, "S:SELECT fn_nested();S:-- SELECT 42;P:SELECT 42;P:SELECT fn_nested();");
+  /* The profile of a statement reset before it ends. */
+  zTraceLog[0] = 0;
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT x FROM t", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  sqlite3_reset(p);
+  sqlite3_finalize(p);
+  CHECK_STR(zTraceLog, "S:SELECT x FROM t;P:SELECT x FROM t;");
+  /* sqlite3_trace() expands the parameters. */
+  sqlite3_trace(db, legacy_trace, 0);
+  zTraceLog[0] = 0;
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT ?1, ?2", -1, &p, 0), SQLITE_OK, db);
+  sqlite3_bind_int(p, 1, 7);
+  sqlite3_bind_text(p, 2, "it's", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  sqlite3_finalize(p);
+  CHECK_STR(zTraceLog, "L:SELECT 7, 'it''s';");
+  sqlite3_trace(db, 0, 0);
+
+  /* The progress handler is called once more at the end of the run for
+  ** the instructions since its last call. */
+  for(n=1; n<=6; n++){
+    int nStep;
+    nEngineProgress = 0;
+    sqlite3_progress_handler(db, n, engine_progress, 0);
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT 1", -1, &p, 0), SQLITE_OK, db);
+    while( sqlite3_step(p)==SQLITE_ROW ){}
+    nStep = sqlite3_stmt_status(p, SQLITE_STMTSTATUS_VM_STEP, 0);
+    sqlite3_finalize(p);
+    CHECK(nStep>=5);
+    CHECK(nEngineProgress==nStep/n);
+  }
+  sqlite3_progress_handler(db, 0, 0, 0);
+  sqlite3_close(db);
+}
+
 /* ================================================= end of group A */
 
 int main(void){
@@ -1314,6 +1389,7 @@ int main(void){
   test_collation_needed();
   test_autovacuum_pages(zDir);
   test_find_function();
+  test_trace_engine();
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

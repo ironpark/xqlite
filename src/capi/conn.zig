@@ -525,7 +525,7 @@ pub export fn sqlite3_txn_state(db_arg: ?*Handle, z_schema: ?[*:0]const u8) call
     }
     var state: c_int = 0;
     for (db.dbs.items[lo..hi]) |d| {
-        if (d.bt) |bt| state = @max(state, @as(c_int, @intFromEnum(bt.txnState())));
+        if (d.bt) |bt| state = @max(state, @as(c_int, @backingInt(bt.txnState())));
     }
     return state;
 }
@@ -533,7 +533,7 @@ pub export fn sqlite3_txn_state(db_arg: ?*Handle, z_schema: ?[*:0]const u8) call
 pub export fn sqlite3_limit(db_arg: ?*Handle, id: c_int, new_val: c_int) callconv(.c) c_int {
     const db = db_arg orelse return -1;
     if (id < 0 or id >= std.enums.values(c.int.Limit).len) return -1;
-    return c.main.limit(db, @enumFromInt(id), new_val);
+    return c.main.limit(db, @fromBackingInt(@intCast(id)), new_val);
 }
 
 pub export fn sqlite3_busy_timeout(db: ?*Handle, ms: c_int) callconv(.c) c_int {
@@ -809,7 +809,7 @@ pub export fn sqlite3_db_status64(db_arg: ?*Handle, op: c_int, p_cur: ?*i64, p_h
     cur.* = 0;
     hi.* = 0;
     switch (op) {
-        0, 4, 5, 6 => return c.malloc.dbStatus(db, @enumFromInt(op), cur, hi, reset != 0),
+        0, 4, 5, 6 => return c.malloc.dbStatus(db, @fromBackingInt(@intCast(op)), cur, hi, reset != 0),
         10 => {
             cur.* = @intFromBool(db.n_deferred_imm_cons > 0 or db.n_deferred_cons > 0);
             return RC.OK;
@@ -882,7 +882,7 @@ pub export fn sqlite3_wal_checkpoint_v2(db_arg: ?*Handle, z_db: ?[*:0]const u8, 
     defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     if (mode < -1 or mode > 3) return RC.MISUSE;
-    return c.main.walCheckpointV2(db, c.span(z_db), @enumFromInt(mode), pn_log, pn_ckpt);
+    return c.main.walCheckpointV2(db, c.span(z_db), @fromBackingInt(@intCast(mode)), pn_log, pn_ckpt);
 }
 
 pub export fn sqlite3_commit_hook(db: ?*Handle, f: ?c.CCommit, arg: ?*anyopaque) callconv(.c) ?*anyopaque {

@@ -654,8 +654,8 @@ const T = struct {
         const eq = std.mem.eql;
         // Operators of jsonb operands.
         const variants = [_]struct { []const u8, []const u8 }{
-            .{ "xq_pg_json_get", "xq_pg_jsonb_get" },           .{ "xq_pg_json_get_text", "xq_pg_jsonb_get_text" },
-            .{ "xq_pg_json_path", "xq_pg_jsonb_path" },         .{ "xq_pg_json_path_text", "xq_pg_jsonb_path_text" },
+            .{ "xq_pg_json_get", "xq_pg_jsonb_get" },   .{ "xq_pg_json_get_text", "xq_pg_jsonb_get_text" },
+            .{ "xq_pg_json_path", "xq_pg_jsonb_path" }, .{ "xq_pg_json_path_text", "xq_pg_jsonb_path_text" },
         };
         for (variants) |v| if (eq(u8, n, v[0])) {
             const left = t.jts.get(f.args[0]) orelse .other;
@@ -835,24 +835,23 @@ fn numeric(e: *const Expr) bool {
 /// The result type of a function by its name.
 fn funcType(n: []const u8) JT {
     const map = std.StaticStringMap(JT).initComptime(.{
-        .{ "to_jsonb", .jsonb },                 .{ "jsonb_build_object", .jsonb },     .{ "jsonb_build_array", .jsonb },
-        .{ "jsonb_object", .jsonb },             .{ "jsonb_agg", .jsonb },              .{ "jsonb_object_agg", .jsonb },
-        .{ "jsonb_set", .jsonb },                .{ "jsonb_set_lax", .jsonb },          .{ "jsonb_insert", .jsonb },
-        .{ "jsonb_strip_nulls", .jsonb },        .{ "jsonb_extract_path", .jsonb },     .{ "jsonb_path_query_array", .jsonb },
-        .{ "jsonb_path_query_first", .jsonb },   .{ "xq_pg_jsonb", .jsonb },            .{ "xq_pg_jsonb_get", .jsonb },
-        .{ "xq_pg_jsonb_path", .jsonb },         .{ "xq_pg_jsonb_concat", .jsonb },     .{ "xq_pg_jsonb_delete", .jsonb },
-        .{ "xq_pg_jsonb_delete_keys", .jsonb },  .{ "xq_pg_jsonb_delete_path", .jsonb },
-        .{ "to_json", .json },                   .{ "json_build_object", .json },       .{ "json_build_array", .json },
-        .{ "json_object", .json },               .{ "json_agg", .json },                .{ "json_object_agg", .json },
-        .{ "json_strip_nulls", .json },          .{ "json_extract_path", .json },       .{ "row_to_json", .json },
-        .{ "array_to_json", .json },             .{ "xq_pg_json", .json },              .{ "xq_pg_json_get", .json },
-        .{ "xq_pg_json_path", .json },           .{ "xq_pg_row_json", .json },          .{ "xq_pg_array_to_json", .json },
-        .{ "xq_pg_json_agg_rows", .json },       .{ "xq_pg_json_bool", .json },
-        .{ "xq_pg_jsonb_contains", .boolean },   .{ "xq_pg_jsonb_exists", .boolean },   .{ "xq_pg_jsonb_exists_any", .boolean },
-        .{ "xq_pg_jsonb_exists_all", .boolean }, .{ "xq_pg_jsonb_path_exists_op", .boolean }, .{ "xq_pg_jsonb_path_match_op", .boolean },
-        .{ "jsonb_path_exists", .boolean },      .{ "jsonb_path_match", .boolean },     .{ "xq_pg_is_json", .boolean },
-        .{ "xq_pg_bool", .boolean },             .{ "xq_like", .boolean },              .{ "xq_ilike", .boolean },
-        .{ "starts_with", .boolean },            .{ "xq_pg_text_array", .text_array },
+        .{ "to_jsonb", .jsonb },                    .{ "jsonb_build_object", .jsonb },       .{ "jsonb_build_array", .jsonb },
+        .{ "jsonb_object", .jsonb },                .{ "jsonb_agg", .jsonb },                .{ "jsonb_object_agg", .jsonb },
+        .{ "jsonb_set", .jsonb },                   .{ "jsonb_set_lax", .jsonb },            .{ "jsonb_insert", .jsonb },
+        .{ "jsonb_strip_nulls", .jsonb },           .{ "jsonb_extract_path", .jsonb },       .{ "jsonb_path_query_array", .jsonb },
+        .{ "jsonb_path_query_first", .jsonb },      .{ "xq_pg_jsonb", .jsonb },              .{ "xq_pg_jsonb_get", .jsonb },
+        .{ "xq_pg_jsonb_path", .jsonb },            .{ "xq_pg_jsonb_concat", .jsonb },       .{ "xq_pg_jsonb_delete", .jsonb },
+        .{ "xq_pg_jsonb_delete_keys", .jsonb },     .{ "xq_pg_jsonb_delete_path", .jsonb },  .{ "to_json", .json },
+        .{ "json_build_object", .json },            .{ "json_build_array", .json },          .{ "json_object", .json },
+        .{ "json_agg", .json },                     .{ "json_object_agg", .json },           .{ "json_strip_nulls", .json },
+        .{ "json_extract_path", .json },            .{ "row_to_json", .json },               .{ "array_to_json", .json },
+        .{ "xq_pg_json", .json },                   .{ "xq_pg_json_get", .json },            .{ "xq_pg_json_path", .json },
+        .{ "xq_pg_row_json", .json },               .{ "xq_pg_array_to_json", .json },       .{ "xq_pg_json_agg_rows", .json },
+        .{ "xq_pg_json_bool", .json },              .{ "xq_pg_jsonb_contains", .boolean },   .{ "xq_pg_jsonb_exists", .boolean },
+        .{ "xq_pg_jsonb_exists_any", .boolean },    .{ "xq_pg_jsonb_exists_all", .boolean }, .{ "xq_pg_jsonb_path_exists_op", .boolean },
+        .{ "xq_pg_jsonb_path_match_op", .boolean }, .{ "jsonb_path_exists", .boolean },      .{ "jsonb_path_match", .boolean },
+        .{ "xq_pg_is_json", .boolean },             .{ "xq_pg_bool", .boolean },             .{ "xq_like", .boolean },
+        .{ "xq_ilike", .boolean },                  .{ "starts_with", .boolean },            .{ "xq_pg_text_array", .text_array },
     });
     return map.get(n) orelse .other;
 }
@@ -879,10 +878,10 @@ const Builder = enum {
 
 fn builderArgs(n: []const u8) Builder {
     const map = std.StaticStringMap(Builder).initComptime(.{
-        .{ "to_json", .first },                 .{ "to_jsonb", .first },               .{ "json_agg", .first },
-        .{ "jsonb_agg", .first },               .{ "xq_pg_json_agg_rows", .first },    .{ "row_to_json", .first },
-        .{ "xq_pg_json_arrayagg", .first },     .{ "json_build_object", .all },        .{ "jsonb_build_object", .all },
-        .{ "json_build_array", .all },          .{ "jsonb_build_array", .all },        .{ "xq_pg_json_ctor_object", .after_first },
+        .{ "to_json", .first },                     .{ "to_jsonb", .first },            .{ "json_agg", .first },
+        .{ "jsonb_agg", .first },                   .{ "xq_pg_json_agg_rows", .first }, .{ "row_to_json", .first },
+        .{ "xq_pg_json_arrayagg", .first },         .{ "json_build_object", .all },     .{ "jsonb_build_object", .all },
+        .{ "json_build_array", .all },              .{ "jsonb_build_array", .all },     .{ "xq_pg_json_ctor_object", .after_first },
         .{ "xq_pg_json_ctor_array", .after_first }, .{ "json_object_agg", .first_two }, .{ "jsonb_object_agg", .first_two },
         .{ "xq_pg_json_objectagg", .first_two },
     });

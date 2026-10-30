@@ -3275,15 +3275,15 @@ const SrfKind = enum { each, elements, keys, path, records, populate };
 
 fn srfKind(name: []const u8) ?SrfKind {
     const map = std.StaticStringMap(SrfKind).initComptime(.{
-        .{ "json_each", .each },                        .{ "json_each_text", .each },
-        .{ "jsonb_each", .each },                       .{ "jsonb_each_text", .each },
-        .{ "json_array_elements", .elements },          .{ "json_array_elements_text", .elements },
-        .{ "jsonb_array_elements", .elements },         .{ "jsonb_array_elements_text", .elements },
-        .{ "json_object_keys", .keys },                 .{ "jsonb_object_keys", .keys },
-        .{ "jsonb_path_query", .path },                 .{ "json_to_record", .records },
-        .{ "json_to_recordset", .records },             .{ "jsonb_to_record", .records },
-        .{ "jsonb_to_recordset", .records },            .{ "json_populate_record", .populate },
-        .{ "json_populate_recordset", .populate },      .{ "jsonb_populate_record", .populate },
+        .{ "json_each", .each },                    .{ "json_each_text", .each },
+        .{ "jsonb_each", .each },                   .{ "jsonb_each_text", .each },
+        .{ "json_array_elements", .elements },      .{ "json_array_elements_text", .elements },
+        .{ "jsonb_array_elements", .elements },     .{ "jsonb_array_elements_text", .elements },
+        .{ "json_object_keys", .keys },             .{ "jsonb_object_keys", .keys },
+        .{ "jsonb_path_query", .path },             .{ "json_to_record", .records },
+        .{ "json_to_recordset", .records },         .{ "jsonb_to_record", .records },
+        .{ "jsonb_to_recordset", .records },        .{ "json_populate_record", .populate },
+        .{ "json_populate_recordset", .populate },  .{ "jsonb_populate_record", .populate },
         .{ "jsonb_populate_recordset", .populate },
     });
     return map.get(name);

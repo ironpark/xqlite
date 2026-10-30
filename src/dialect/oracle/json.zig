@@ -541,13 +541,13 @@ pub const Method = enum {
 };
 
 const method_names = [_]struct { []const u8, Method }{
-    .{ "size", .size },             .{ "type", .type },       .{ "length", .length },   .{ "lower", .lower },
-    .{ "upper", .upper },           .{ "number", .number },   .{ "numberOnly", .numberOnly },
-    .{ "string", .string },         .{ "stringOnly", .stringOnly }, .{ "boolean", .boolean },
-    .{ "booleanOnly", .booleanOnly }, .{ "abs", .abs },       .{ "ceiling", .ceiling }, .{ "floor", .floor },
-    .{ "double", .double },         .{ "float", .double },    .{ "count", .count },     .{ "sum", .sum },
-    .{ "avg", .avg },               .{ "min", .min },         .{ "max", .max },         .{ "minNumber", .min },
-    .{ "maxNumber", .max },         .{ "date", .date },       .{ "timestamp", .timestamp },
+    .{ "size", .size },             .{ "type", .type },       .{ "length", .length },           .{ "lower", .lower },
+    .{ "upper", .upper },           .{ "number", .number },   .{ "numberOnly", .numberOnly },   .{ "string", .string },
+    .{ "stringOnly", .stringOnly }, .{ "boolean", .boolean }, .{ "booleanOnly", .booleanOnly }, .{ "abs", .abs },
+    .{ "ceiling", .ceiling },       .{ "floor", .floor },     .{ "double", .double },           .{ "float", .double },
+    .{ "count", .count },           .{ "sum", .sum },         .{ "avg", .avg },                 .{ "min", .min },
+    .{ "max", .max },               .{ "minNumber", .min },   .{ "maxNumber", .max },           .{ "date", .date },
+    .{ "timestamp", .timestamp },
 };
 
 pub const Step = union(enum) {

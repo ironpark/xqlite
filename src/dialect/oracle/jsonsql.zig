@@ -40,7 +40,7 @@ fn eq(a: []const u8, b: []const u8) bool {
 }
 
 const function_names = [_][]const u8{
-    "JSON_VALUE",  "JSON_QUERY",      "JSON_EXISTS",    "JSON_OBJECT",    "JSON_ARRAY", "JSON_OBJECTAGG",
+    "JSON_VALUE",    "JSON_QUERY",      "JSON_EXISTS",    "JSON_OBJECT",    "JSON_ARRAY", "JSON_OBJECTAGG",
     "JSON_ARRAYAGG", "JSON_MERGEPATCH", "JSON_SERIALIZE", "JSON_TRANSFORM", "JSON",       "JSON_SCALAR",
 };
 

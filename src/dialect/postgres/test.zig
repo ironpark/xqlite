@@ -191,34 +191,48 @@ test "pg: json and jsonb" {
     try openPg(&c);
     defer c.close();
     // json keeps the text, jsonb is normalized.
-    try c.expectRows("SELECT '{\"b\":1,  \"a\":2, \"b\":3}'::json, '{\"b\":1, \"aa\":[1,2], \"a\":2, \"b\":3}'::jsonb, '1e2'::jsonb, '1.50'::jsonb",
-        "{\"b\":1,  \"a\":2, \"b\":3}|{\"a\": 2, \"b\": 3, \"aa\": [1, 2]}|100|1.50\n");
+    try c.expectRows(
+        "SELECT '{\"b\":1,  \"a\":2, \"b\":3}'::json, '{\"b\":1, \"aa\":[1,2], \"a\":2, \"b\":3}'::jsonb, '1e2'::jsonb, '1.50'::jsonb",
+        "{\"b\":1,  \"a\":2, \"b\":3}|{\"a\": 2, \"b\": 3, \"aa\": [1, 2]}|100|1.50\n",
+    );
     try c.expectError("SELECT '{'::jsonb", "invalid input syntax for type json");
     try c.expectError("SELECT '\"\\u0000\"'::jsonb", "unsupported Unicode escape sequence");
     // Operators.
-    try c.expectRows("SELECT '{\"a\": {\"y\":1,  \"x\":2}}'::json -> 'a', '{\"a\": {\"y\":1, \"x\":2}}'::jsonb -> 'a', '[1,2,3]'::jsonb -> -1, '{\"a\":\"x\"}'::jsonb ->> 'a'",
-        "{\"y\":1,  \"x\":2}|{\"x\": 2, \"y\": 1}|3|x\n");
+    try c.expectRows(
+        "SELECT '{\"a\": {\"y\":1,  \"x\":2}}'::json -> 'a', '{\"a\": {\"y\":1, \"x\":2}}'::jsonb -> 'a', '[1,2,3]'::jsonb -> -1, '{\"a\":\"x\"}'::jsonb ->> 'a'",
+        "{\"y\":1,  \"x\":2}|{\"x\": 2, \"y\": 1}|3|x\n",
+    );
     try c.expectRows("SELECT '{\"a\": {\"b\": [1,2]}}'::jsonb #> '{a,b,1}', '{\"a\": {\"b\": [1,2]}}'::json #>> '{a,b}'", "2|[1,2]\n");
-    try c.expectRows("SELECT '{\"a\":1,\"b\":2}'::jsonb @> '{\"a\":1}', '{\"a\":1}'::jsonb <@ '{\"a\":2}', '[1,2]'::jsonb @> '1', '{\"a\":1}'::jsonb ? 'a', '{\"a\":1}'::jsonb ?| array['x','a'], '{\"a\":1}'::jsonb ?& '{a,x}'",
-        "1|0|1|1|1|0\n");
-    try c.expectRows("SELECT '{\"a\":1}'::jsonb || '{\"b\":2}', '[1]'::jsonb || '2', '{\"a\":1,\"b\":2}'::jsonb - 'a', '[1,2,3]'::jsonb - 1, '{\"a\":1,\"b\":2}'::jsonb - array['a','b'], '{\"a\":{\"b\":1}}'::jsonb #- '{a,b}'",
-        "{\"a\": 1, \"b\": 2}|[1, 2]|{\"b\": 2}|[1, 3]|{}|{\"a\": {}}\n");
+    try c.expectRows(
+        "SELECT '{\"a\":1,\"b\":2}'::jsonb @> '{\"a\":1}', '{\"a\":1}'::jsonb <@ '{\"a\":2}', '[1,2]'::jsonb @> '1', '{\"a\":1}'::jsonb ? 'a', '{\"a\":1}'::jsonb ?| array['x','a'], '{\"a\":1}'::jsonb ?& '{a,x}'",
+        "1|0|1|1|1|0\n",
+    );
+    try c.expectRows(
+        "SELECT '{\"a\":1}'::jsonb || '{\"b\":2}', '[1]'::jsonb || '2', '{\"a\":1,\"b\":2}'::jsonb - 'a', '[1,2,3]'::jsonb - 1, '{\"a\":1,\"b\":2}'::jsonb - array['a','b'], '{\"a\":{\"b\":1}}'::jsonb #- '{a,b}'",
+        "{\"a\": 1, \"b\": 2}|[1, 2]|{\"b\": 2}|[1, 3]|{}|{\"a\": {}}\n",
+    );
     try c.expectError("SELECT '{\"a\":1}'::jsonb - 1", "cannot delete from object using integer index");
     try c.expectError("SELECT '[1]'::json || '[2]'::json", "operator does not exist: json || json");
     // jsonb compares and sorts as jsonb.
     try c.expectRows("SELECT '{\"b\":1,\"a\":2}'::jsonb = '{\"a\": 2, \"b\": 1}', '1.0'::jsonb = '1'::jsonb, '{}'::jsonb > '[1,2]'::jsonb, '[1]'::jsonb < '[0,0]'::jsonb", "1|1|1|1\n");
     // Functions.
-    try c.expectRows("SELECT jsonb_build_object('a', 1, 'b', true, 'c', null), json_build_object('a', 1, 'b', 'x'), json_build_array(1, 'a', null), to_json('a\"b'::text), to_jsonb(1 > 0)",
-        "{\"a\": 1, \"b\": true, \"c\": null}|{\"a\" : 1, \"b\" : \"x\"}|[1, \"a\", null]|\"a\\\"b\"|true\n");
+    try c.expectRows(
+        "SELECT jsonb_build_object('a', 1, 'b', true, 'c', null), json_build_object('a', 1, 'b', 'x'), json_build_array(1, 'a', null), to_json('a\"b'::text), to_jsonb(1 > 0)",
+        "{\"a\": 1, \"b\": true, \"c\": null}|{\"a\" : 1, \"b\" : \"x\"}|[1, \"a\", null]|\"a\\\"b\"|true\n",
+    );
     try c.expectRows("SELECT jsonb_typeof('[1]'), json_array_length('[1,2,3]'), jsonb_extract_path_text('{\"a\":{\"b\":\"x\"}}', 'a', 'b'), jsonb_strip_nulls('{\"a\":null,\"b\":1}')", "array|3|x|{\"b\": 1}\n");
     try c.expectRows("SELECT jsonb_set('{\"a\":1}', '{b}', '2'), jsonb_insert('[1,2]', '{0}', '0'), jsonb_set_lax('{\"a\":1}', '{a}', null, true, 'delete_key')", "{\"a\": 1, \"b\": 2}|[0, 1, 2]|{}\n");
     try c.expectRows("SELECT jsonb_pretty('{\"a\":[1],\"b\":{}}')", "{\n    \"a\": [\n        1\n    ],\n    \"b\": {\n    }\n}\n");
-    try c.expectRows("SELECT JSON_OBJECT('a' : 1, 'b' VALUE 'x'), JSON_ARRAY(1, null, 'a'), JSON_OBJECT('a': 1 RETURNING jsonb), json_object('{a,1}')",
-        "{\"a\" : 1, \"b\" : \"x\"}|[1, \"a\"]|{\"a\": 1}|{\"a\" : \"1\"}\n");
+    try c.expectRows(
+        "SELECT JSON_OBJECT('a' : 1, 'b' VALUE 'x'), JSON_ARRAY(1, null, 'a'), JSON_OBJECT('a': 1 RETURNING jsonb), json_object('{a,1}')",
+        "{\"a\" : 1, \"b\" : \"x\"}|[1, \"a\"]|{\"a\": 1}|{\"a\" : \"1\"}\n",
+    );
     try c.expectRows("SELECT '{\"a\":1}' IS JSON OBJECT, '[1]' IS NOT JSON, '{\"a\":1,\"a\":2}' IS JSON WITH UNIQUE KEYS", "1|0|0\n");
     // jsonpath.
-    try c.expectRows("SELECT jsonb_path_query_array('{\"a\":[1,2,3,4]}', '$.a[*] ? (@ > 2)'), '{\"a\":[1,2]}'::jsonb @? '$.a[*] ? (@ == 2)', '{\"a\":1}'::jsonb @@ '$.a == 1', jsonb_path_query_first('{\"a\":10}', '$.a / 4')",
-        "[3, 4]|1|1|2.5000000000000000\n");
+    try c.expectRows(
+        "SELECT jsonb_path_query_array('{\"a\":[1,2,3,4]}', '$.a[*] ? (@ > 2)'), '{\"a\":[1,2]}'::jsonb @? '$.a[*] ? (@ == 2)', '{\"a\":1}'::jsonb @@ '$.a == 1', jsonb_path_query_first('{\"a\":10}', '$.a / 4')",
+        "[3, 4]|1|1|2.5000000000000000\n",
+    );
     // Set-returning functions, in FROM and in the select list.
     try c.expectRows("SELECT * FROM jsonb_each('{\"b\":1, \"a\":\"x\"}')", "a|\"x\"\nb|1\n");
     try c.expectColumns("SELECT * FROM json_each_text('{\"a\":1}') AS t(k, v)", "k|v");
@@ -239,8 +253,10 @@ test "pg: json and jsonb" {
     try c.expectRows("SELECT id FROM ev WHERE data = '{\"z\":1, \"m\":0, \"a\":2}'", "3\n");
     try c.expectRows("SELECT id, t.value FROM ev, jsonb_array_elements_text(ev.data -> 'tags') AS t ORDER BY 1, 2", "1|a\n1|b\n2|c\n");
     try c.expectRows("SELECT id, jsonb_array_elements_text(data -> 'tags') AS tag FROM ev ORDER BY id, tag", "1|a\n1|b\n2|c\n");
-    try c.expectRows("SELECT json_agg(ev ORDER BY id) FROM ev WHERE id < 3",
-        "[{\"id\":1,\"data\":{\"n\": 1, \"tags\": [\"a\", \"b\"]},\"raw\":{\"b\" :  1},\"ok\":true}, \n {\"id\":2,\"data\":{\"n\": 2, \"tags\": [\"c\"]},\"raw\":[1],\"ok\":false}]\n");
+    try c.expectRows(
+        "SELECT json_agg(ev ORDER BY id) FROM ev WHERE id < 3",
+        "[{\"id\":1,\"data\":{\"n\": 1, \"tags\": [\"a\", \"b\"]},\"raw\":{\"b\" :  1},\"ok\":true}, \n {\"id\":2,\"data\":{\"n\": 2, \"tags\": [\"c\"]},\"raw\":[1],\"ok\":false}]\n",
+    );
     try c.expectRows("SELECT jsonb_agg(data -> 'n' ORDER BY id), json_object_agg(id, ok) FROM ev", "[1, 2, null]|{ \"1\" : true, \"2\" : false, \"3\" : null }\n");
     try c.expectRows("SELECT row_to_json(e) FROM (SELECT id, ok FROM ev WHERE id = 1) e", "{\"id\":1,\"ok\":true}\n");
     // A gin index is a B-tree index of the column.

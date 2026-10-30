@@ -58,7 +58,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 │     B-Tree  ·  Pager  ·  WAL / Rollback Journal  ·  Locking   │
 └───────────────────────────────┬───────────────────────────────┘
 ┌───────────────────────────────▼───────────────────────────────┐
-│              VFS (POSIX · Windows* · Memory · WASI*)          │
+│    VFS (POSIX · Windows* · Memory · WASI · Host(wasm))        │
 └───────────────────────────────────────────────────────────────┘
                                                   * 아직 없음
 ```
@@ -134,12 +134,17 @@ zig build run          # CLI 실행
 zig build test         # 단위 테스트
 ```
 
-Linux 타깃으로 크로스 컴파일할 수 있습니다. WASI는 아직 컴파일되지 않습니다(WASI VFS가 없고, 64비트 원자 연산·스레드 같은 플랫폼 차이를 다루지 않음).
+Linux 타깃과 WebAssembly로 크로스 컴파일할 수 있습니다.
 
 ```sh
-zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseFast   # 됨
-zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall        # 아직 컴파일 오류
+zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseFast   # Linux
+zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall        # WASI: 라이브러리와 셸 (zig-out/bin/xqlite.wasm, 약 1.9MiB)
+zig build wasm                                                # 브라우저·Node: zig-out/wasm/xqlite.wasm (약 1.7MiB)
 ```
+
+- **WASI** (`wasm32-wasi`): 셸을 `wasmtime run --dir . zig-out/bin/xqlite.wasm sql app.db`처럼 돌립니다. 파일은 WASI preview 1로 엽니다. WASI에는 권고 잠금이 없어서 잠금은 프로세스 안에서만 중재하므로, 한 DB 파일은 한 번에 한 프로세스만 써야 합니다. WAL의 wal-index는 `-shm` 파일 대신 힙 메모리에 둡니다.
+- **브라우저·JavaScript** (`wasm32-freestanding`): `xq_*` 함수를 내보내고, 파일 연산은 호스트가 import로 줍니다(OPFS, IndexedDB, node:fs ...). 호스트가 파일을 주지 않으면 메모리 DB로 돕니다. JavaScript 연결 코드와 Node 예제는 `examples/wasm/`에 있습니다(`zig build wasm-example`).
+- 둘 다 단일 스레드 빌드이고 시간대는 UTC뿐입니다. 자세한 내용은 [WebAssembly](docs/wasm.md)에 있습니다.
 
 ### 셸 실행
 
@@ -215,12 +220,14 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - **sqllogictest**: `xqt slt`
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `ir_roundtrip`)
 - **방언 차등 테스트**: `xqt dialect-diff pg|mariadb|mssql|oracle`이 실제 PostgreSQL 16, MariaDB 11, SQL Server(Azure SQL Edge), Oracle Database 23ai와 결과를 비교합니다.
+- **WebAssembly**: `zig build test-wasi`가 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 돌리고, `xqt wasi`로 WASI 빌드를 sqlite3·네이티브 빌드와 비교합니다.
 
 도구별 실행 방법과 필요한 기준 sqlite3 빌드는 [테스트와 검증](docs/testing.md)에 있습니다.
 
 ## 로드맵
 
 - [x] **Phase 0 · 기반**: VFS(POSIX·메모리), 페이지 캐시, Pager(롤백 저널), 파일 헤더 파싱. Windows VFS는 아직 없음
+- [x] **WebAssembly**: WASI VFS, 호스트가 파일을 주는 브라우저용 모듈(`xq_*`)과 JavaScript 연결 코드 ([WebAssembly](docs/wasm.md))
 - [x] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기(auto-vacuum·incremental vacuum 포함), 레코드 포맷, 기존 SQLite 파일 읽기/수정
 - [x] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
 - [x] **Phase 3 · 완성도**: 세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`/`DETACH`와 super journal, `ANALYZE`/`PRAGMA optimize`, `VACUUM`/`VACUUM INTO`와 백업 API. sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 모두 통과 ([SQLite 호환](docs/sqlite.md))
@@ -241,7 +248,7 @@ src/
 ├── xqlite.zig          # 공개 Zig API 이름 목록
 ├── main.zig            # CLI (sql, slt, fuzzcheck, 테스트 보조 명령)
 ├── shell.zig           # sqlite3 호환 셸
-├── vfs/                # OS 추상화, 크래시 테스트용 VFS
+├── vfs/                # OS 추상화(POSIX·WASI·호스트·메모리), 크래시 테스트용 VFS
 ├── pager/              # 페이지 캐시, 저널, WAL
 ├── btree/              # B-Tree, 레코드 포맷
 ├── vdbe/               # 바이트코드 VM
@@ -257,9 +264,10 @@ src/
 │   └── oracle/         # lexer, parser(→ 구문 트리 IR), 날짜·숫자 형식, 저장 변환, 데이터 사전 뷰
 ├── api/                # Zig API
 ├── ext/                # 셸용 확장 (generate_series, vtablog)
+├── wasm/               # 브라우저·JavaScript용 wasm 모듈 (xq_* 내보내기)
 └── testing/            # 시드 퍼저 공용 도구
 docs/                   # 설계·호환성 문서
-examples/               # Zig API 예제
+examples/               # Zig API 예제, wasm/ (JavaScript 연결 코드, Node·브라우저 예제)
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일
 ```
 

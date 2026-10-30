@@ -44,6 +44,7 @@ const lexer = @import("lexer.zig");
 const types = @import("types.zig");
 const views = @import("catalog_views.zig");
 const datetime = @import("datetime.zig");
+const jsonsql = @import("jsonsql.zig");
 
 const Token = lexer.Token;
 const Name = tree.Name;
@@ -168,6 +169,17 @@ pub const Parser = struct {
     date_nodes: std.AutoHashMapUnmanaged(*const Expr, Kind) = .empty,
     /// The declared types of the tables looked at (dates.zig).
     decl_types: std.StringHashMapUnmanaged([]const catalog.Entry) = .empty,
+    /// JSON (jsonsql.zig): the values given to JSON constructors, the
+    /// JSON_VALUE calls, dot notation placeholders, JSON_OBJECT(*) calls,
+    /// the JSON_TABLEs of FROM and the queries whose references to them
+    /// are rewritten.
+    json_values: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
+    json_text_nodes: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
+    dot_nodes: std.AutoHashMapUnmanaged(*const Expr, jsonsql.Dot) = .empty,
+    json_object_star: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
+    jt_items: std.AutoHashMapUnmanaged(*const tree.Func, *jsonsql.Table) = .empty,
+    jt_done: std.AutoHashMapUnmanaged(*const tree.Core, void) = .empty,
+    jt_count: u32 = 0,
 
     /// Lex the statement that starts at `pos` (blank text and leading
     /// semicolons are skipped). An empty statement has no tokens but eof.
@@ -216,7 +228,7 @@ pub const Parser = struct {
         return t;
     }
 
-    fn lastEnd(p: *const Parser) u32 {
+    pub fn lastEnd(p: *const Parser) u32 {
         return if (p.i == 0) p.toks[0].start else p.toks[p.i - 1].end;
     }
 
@@ -312,7 +324,7 @@ pub const Parser = struct {
         return tree.new(p.arena, T, v);
     }
 
-    fn expr(p: *Parser, pos: u32, kind: tree.Kind) Error!*Expr {
+    pub fn expr(p: *Parser, pos: u32, kind: tree.Kind) Error!*Expr {
         return tree.expr(p.arena, pos, @max(pos, p.lastEnd()), kind);
     }
 
@@ -709,8 +721,12 @@ pub const Parser = struct {
         if (e.kind == .column) return null;
         const text = p.src[@min(e.pos, p.src.len)..@min(e.end, p.src.len)];
         var out: std.ArrayList(u8) = .empty;
+        // Blanks go, and the quotes of quoted names (not those in
+        // string literals).
+        var in_string = false;
         for (text) |c| {
-            if (std.ascii.isWhitespace(c) or c == '"') continue;
+            if (c == '\'') in_string = !in_string;
+            if (std.ascii.isWhitespace(c) or (c == '"' and !in_string)) continue;
             try out.append(p.arena, std.ascii.toUpper(c));
         }
         return out.items;
@@ -855,6 +871,7 @@ pub const Parser = struct {
             return item;
         }
         if (t.isKw("table") and p.peekAt(1).kind == .lparen) return p.unsupported(t.start, "TABLE() collection expressions");
+        if (t.isKw("json_table") and p.peekAt(1).kind == .lparen) return jsonsql.jsonTable(p);
         _ = p.eatKw("only");
         const name = try p.qname();
         if (p.peek().kind == .lparen) {
@@ -873,7 +890,7 @@ pub const Parser = struct {
 
     /// `[AS] alias` (Oracle has no AS before a table alias, xqlite takes
     /// one).
-    fn alias(p: *Parser) Error!?tree.Alias {
+    pub fn alias(p: *Parser) Error!?tree.Alias {
         if (p.eatKw("as")) return .{ .name = try p.colId() };
         const a = p.peek();
         if (a.kind == .qident or (a.kind == .ident and !noAlias(a.text))) {
@@ -1194,6 +1211,8 @@ pub const Parser = struct {
                     l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = true, .not = not } });
                 } else if (p.eatKw("false")) {
                     l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = false, .not = not } });
+                } else if (p.isKw("json")) {
+                    l = try jsonsql.isJson(p, l, not);
                 } else return p.missing("ORA-00908: missing NULL keyword");
                 continue;
             }
@@ -1451,8 +1470,11 @@ pub const Parser = struct {
         const start = p.peek().start;
         var names: std.ArrayList(Name) = .empty;
         const first = p.advance();
+        if (first.kind == .ident and p.peek().kind == .lparen and jsonsql.isFunction(first.text)) return jsonsql.call(p, start, first);
         try names.append(p.arena, .{ .text = first.text, .pos = first.start });
         while (p.peek().kind == .dot) {
+            // t.col.a.size(): dot notation with an item method.
+            if (names.items.len >= 2 and jsonsql.methodAhead(p)) break;
             _ = p.advance();
             const nt = p.peek();
             try names.append(p.arena, try p.anyName());
@@ -1476,8 +1498,9 @@ pub const Parser = struct {
             const c = try p.funcCall(n[n.len - 1]);
             return p.callExpr(start, c);
         }
-        if (names.items.len > 3) return p.missing("ORA-00904: : invalid identifier");
-        if (names.items.len == 3) names.items[0] = try p.dbName(names.items[0]);
+        if (names.items.len >= 3 or (names.items.len == 2 and (p.peek().isOp("[") or jsonsql.methodAhead(p)))) {
+            return jsonsql.dotExpr(p, start, names.items);
+        }
         return p.expr(start, .{ .column = names.items });
     }
 
@@ -2031,7 +2054,7 @@ fn isFuncNameKeyword(w: []const u8) bool {
 }
 
 fn canonical(w: []const u8) []const u8 {
-    const names = [_][]const u8{ "NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "CLOB", "NCLOB", "LONG", "DATE", "TIMESTAMP", "BLOB", "RAW", "BOOLEAN", "ROWID", "UROWID", "LONG RAW" };
+    const names = [_][]const u8{ "NUMBER", "FLOAT", "BINARY_FLOAT", "BINARY_DOUBLE", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "CLOB", "NCLOB", "LONG", "DATE", "TIMESTAMP", "BLOB", "RAW", "BOOLEAN", "ROWID", "UROWID", "LONG RAW", "JSON" };
     for (names) |n| if (eq(n, w)) return n;
     return w;
 }
@@ -2087,7 +2110,7 @@ fn aggregates(e: *const Expr) bool {
     if (e.kind == .func) {
         const f = e.kind.func;
         if (f.over == null) {
-            const aggs = [_][]const u8{ "count", "sum", "avg", "min", "max", "group_concat", "xq_stddev_samp", "xq_stddev_pop", "xq_var_samp", "xq_var_pop", "total" };
+            const aggs = [_][]const u8{ "count", "sum", "avg", "min", "max", "group_concat", "xq_stddev_samp", "xq_stddev_pop", "xq_var_samp", "xq_var_pop", "total", "xq_ora_json_arrayagg", "xq_ora_json_objectagg" };
             for (aggs) |a| if (eq(a, f.name.text) and !(f.args.len > 1 and (eq(a, "min") or eq(a, "max")))) return true;
         }
     }

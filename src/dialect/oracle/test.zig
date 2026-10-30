@@ -331,3 +331,168 @@ test "oracle: data dictionary" {
     try c.expectRows("SELECT sequence_name, min_value, increment_by, cycle_flag FROM user_sequences", "Q|1|1|N\n");
     try c.expectRows("SELECT USER FROM dual", "MAIN\n");
 }
+
+test "oracle: JSON type columns and IS JSON" {
+    var c: Conn = undefined;
+    try openOra(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE j (id NUMBER, d JSON, doc VARCHAR2(200) CHECK (doc IS JSON), s CLOB CONSTRAINT strict_ck CHECK (s IS JSON STRICT WITH UNIQUE KEYS))");
+    // TEXT with json_valid() (sqlite3 checks it), the type in the catalog.
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'J'",
+        \\CREATE TABLE "J"("ID" ANY CONSTRAINT "ORA-01722: invalid number" CHECK((typeof("ID") IN ('integer', 'real', 'null'))), "D" TEXT CONSTRAINT "ORA-40441: JSON syntax error" CHECK(json_valid("D")), "DOC" TEXT CHECK(xq_ora_is_json("DOC", 0)) CONSTRAINT "ORA-12899: value too large for column (maximum: 200)" CHECK((octet_length("DOC") <= 200)), "S" TEXT CONSTRAINT "STRICT_CK" CHECK(xq_ora_is_json("S", 3))) STRICT
+        \\
+    );
+    try c.expectRows("SELECT column_name, data_type, data_length FROM user_tab_columns WHERE table_name = 'J' AND column_name = 'D'", "D|JSON|8200\n");
+    // Stored as Oracle stores JSON: lax syntax read, numbers canonical,
+    // compact.
+    try c.exec("INSERT INTO j (id, d) VALUES (1, '{\"a\" : 1, b: [1.50, 1e2, true], \"s\": \"x\"}')");
+    try c.exec("INSERT INTO j (id, d) VALUES (2, '[1, \"a\"]'); INSERT INTO j (id, d) VALUES (3, '')");
+    try c.expectRows("SELECT id, d FROM j ORDER BY id", "1|{\"a\":1,\"b\":[1.5,100,true],\"s\":\"x\"}\n2|[1,\"a\"]\n3|NULL\n");
+    try c.expectError("INSERT INTO j (d) VALUES ('bad')", "ORA-40441: JSON syntax error");
+    try c.expectError("INSERT INTO j (d) VALUES ('{\"a\":1,\"a\":2}')", "ORA-40444: JSON processing error");
+    try c.exec("INSERT INTO j (doc, s) VALUES ('{a:1}', '{\"b\":2}')");
+    try c.expectError("INSERT INTO j (doc) VALUES ('bad')", "CHECK constraint failed: xq_ora_is_json(\"DOC\", 0)");
+    try c.expectError("INSERT INTO j (s) VALUES ('{\"a\":1,\"a\":2}')", "CHECK constraint failed: STRICT_CK");
+    try c.expectError("INSERT INTO j (s) VALUES ('{a:1}')", "CHECK constraint failed: STRICT_CK");
+    // IS JSON: lax by default (Oracle's lax syntax), NULL for NULL.
+    try c.expectRows(
+        "SELECT CASE WHEN x IS JSON THEN 1 ELSE 0 END, CASE WHEN x IS JSON STRICT THEN 1 ELSE 0 END, CASE WHEN x IS NOT JSON THEN 1 ELSE 0 END FROM (SELECT '{a:1}' x FROM dual UNION ALL SELECT '[1,2,]' FROM dual UNION ALL SELECT 'abc' FROM dual UNION ALL SELECT '1' FROM dual)",
+        "1|0|0\n1|0|0\n0|0|1\n1|1|0\n",
+    );
+    try c.expectRows("SELECT '{\"a\":1,\"a\":2}' IS JSON WITH UNIQUE KEYS, '' IS JSON, '1' IS JSON DISALLOW SCALARS FROM dual", "0|NULL|0\n");
+    try c.expectError("SELECT '[1]' IS JSON (ARRAY) FROM dual", "ORA-61763: JSON modifier check on IS JSON is only supported on JSON type.");
+}
+
+test "oracle: JSON_VALUE, JSON_QUERY, JSON_EXISTS" {
+    var c: Conn = undefined;
+    try openOra(&c);
+    defer c.close();
+    try c.expectRows(
+        \\SELECT JSON_VALUE('{"a":"x"}', '$.a'), JSON_VALUE('{"b":1.50}', '$.b'), JSON_VALUE('{"c":true}', '$.c'), JSON_VALUE('{"d":{"e":1}}', '$.d'),
+        \\  JSON_VALUE('{"f":[1,2]}', '$.f[1]'), JSON_VALUE('{"f":5}', '$.f[0]'), JSON_VALUE('[{"a":1},{"a":2}]', '$.a'), JSON_VALUE('{"h":1e-2}', '$.h') FROM dual
+    , "x|1.5|true|NULL|2|5|NULL|0.01\n");
+    try c.expectRows(
+        \\SELECT JSON_VALUE('{"a":"12"}', '$.a' RETURNING NUMBER), JSON_VALUE('{"a":"x"}', '$.a' RETURNING NUMBER), JSON_VALUE('{"a":"x"}', '$.b' DEFAULT 'none' ON EMPTY),
+        \\  JSON_VALUE('{"a":{}}', '$.a' DEFAULT 'err' ON ERROR), JSON_VALUE('bad', '$.a'), JSON_VALUE('{"a":"abcdef"}', '$.a' RETURNING VARCHAR2(3) TRUNCATE),
+        \\  JSON_VALUE('{"a":1.7}', '$.a' RETURNING NUMBER(2)), JSON_VALUE('{"a":"2024-01-02"}', '$.a' RETURNING DATE), JSON_VALUE('{"a":true}', '$.a' RETURNING BOOLEAN) FROM dual
+    , "12|NULL|none|err|NULL|abc|2|2024-01-02 00:00:00|1\n");
+    try c.expectRows("SELECT JSON_VALUE('{\"a\":[1,2,3]}', '$.a.size()'), JSON_VALUE('{\"a\":[3,1,2]}', '$.a.max()'), JSON_VALUE('{\"a\":[1,2]}', '$.a[last]'), JSON_VALUE('{\"a b\":1}', '$.\"a b\"'), JSON_VALUE('{\"a\":{\"b\":7}}', '$..b') FROM dual", "3|3|2|1|7\n");
+    try c.expectError("SELECT JSON_VALUE('{\"a\":{}}', '$.a' ERROR ON ERROR) FROM dual", "ORA-40456: JSON path '$.a' evaluated to non-scalar value.");
+    try c.expectError("SELECT JSON_VALUE('{\"a\":1}', '$.b' ERROR ON EMPTY) FROM dual", "ORA-40462: JSON path '$.b' evaluated to no value.");
+    try c.expectError("SELECT JSON_VALUE('bad', '$.a' ERROR ON ERROR) FROM dual", "ORA-40441: JSON syntax error");
+    try c.expectError("SELECT JSON_VALUE('{}', 'bad path') FROM dual", "ORA-40597: JSON path expression syntax error ('bad path')");
+    try c.expectError("SELECT JSON_VALUE('{}', '$.a[') FROM dual", "ORA-40442: JSON path expression syntax error ('$.a[')");
+    // The text JSON_VALUE returns compares with a number as one.
+    try c.expectRows("SELECT 1 FROM dual WHERE JSON_VALUE('{\"a\":5}', '$.a') = 5", "1\n");
+    try c.expectColumns("SELECT JSON_VALUE('{\"a\":1}', '$.a') FROM dual", "JSON_VALUE('{\"A\":1}','$.A')");
+
+    try c.expectRows(
+        \\SELECT JSON_QUERY('{"a" : { "b" : 1, "c" : [ 1 , "x" ] }}', '$.a'), JSON_QUERY('{"a":1}', '$.a'), JSON_QUERY('{"a":1}', '$.a' WITH WRAPPER),
+        \\  JSON_QUERY('{"a":[1]}', '$.a' WITH CONDITIONAL WRAPPER), JSON_QUERY('{"a":[1,2]}', '$.a[*]' WITH WRAPPER), JSON_QUERY('{"a":[1,2]}', '$.a[*]'),
+        \\  JSON_QUERY('{"a":"x"}', '$.b' EMPTY ARRAY ON EMPTY), JSON_QUERY('{"a":"x"}', '$.b' EMPTY OBJECT ON EMPTY), JSON_QUERY('{a:1.50,b:1e2}', '$') FROM dual
+    , "{\"b\":1,\"c\":[1,\"x\"]}|1|[1]|[1]|[1,2]|NULL|[]|{}|{\"a\":1.50,\"b\":1E2}\n");
+    try c.expectRows("SELECT JSON_QUERY('{\"a\":{\"b\":1,\"c\":[1,{}]}}', '$.a' PRETTY) FROM dual", "{\n  \"b\" : 1,\n  \"c\" :\n  [\n    1,\n    {\n    }\n  ]\n}\n");
+    try c.expectError("SELECT JSON_QUERY('{\"a\":[1,2]}', '$.a[*]' ERROR ON ERROR) FROM dual", "ORA-40480: JSON array wrapper needed for result of JSON query '$.a[*]'");
+    try c.expectError("SELECT JSON_QUERY('{\"a\":{\"b\":1}}', '$.a' RETURNING VARCHAR2(5) ERROR ON ERROR) FROM dual", "ORA-40478: output value too large (maximum: 5)");
+
+    try c.expectRows(
+        \\SELECT CASE WHEN JSON_EXISTS('{"a":null}', '$.a') THEN 1 ELSE 0 END, CASE WHEN JSON_EXISTS('{"a":1}', '$.b') THEN 1 ELSE 0 END,
+        \\  CASE WHEN JSON_EXISTS('{"a":[1,2,3]}', '$.a?(@ > 2)') THEN 1 ELSE 0 END, CASE WHEN JSON_EXISTS('{"a":2}', '$?(@.a == $v)' PASSING 2 AS "v") THEN 1 ELSE 0 END,
+        \\  CASE WHEN JSON_EXISTS('[{"a":1},{"a":5}]', '$[*]?(@.a > 3 && @.a < 6)') THEN 1 ELSE 0 END, CASE WHEN JSON_EXISTS('{"a":"xy"}', '$?(@.a starts with "x" || exists(@.b))') THEN 1 ELSE 0 END,
+        \\  CASE WHEN JSON_EXISTS('bad', '$') THEN 1 ELSE 0 END, JSON_EXISTS('{"a":"abc"}', '$?(@.a like "a%" && !(@.a has substring "z"))') FROM dual
+    , "1|0|1|1|1|1|0|1\n");
+    try c.expectError("SELECT JSON_EXISTS('bad', '$' ERROR ON ERROR) FROM dual", "ORA-40441: JSON syntax error");
+}
+
+test "oracle: JSON constructors and aggregates" {
+    var c: Conn = undefined;
+    try openOra(&c);
+    defer c.close();
+    try c.expectRows(
+        \\SELECT JSON_OBJECT('a' VALUE 1, KEY 'b' VALUE 'x', 'c' : NULL, 'd' VALUE 0.5, 'e' VALUE JSON_OBJECT('f' VALUE 2), 'g' VALUE '{"h":1}',
+        \\  'i' VALUE '{"h":1}' FORMAT JSON, 'j' VALUE JSON_ARRAY(1, 'a', NULL), 'k' VALUE DATE '2024-01-02', 'l' VALUE TRUE, 'm' VALUE -1.25, 'o' VALUE 'q"u\o') FROM dual
+    , "{\"a\":1,\"b\":\"x\",\"c\":null,\"d\":0.5,\"e\":{\"f\":2},\"g\":\"{\\\"h\\\":1}\",\"i\":{\"h\":1},\"j\":[1,\"a\"],\"k\":\"2024-01-02T00:00:00\",\"l\":true,\"m\":-1.25,\"o\":\"q\\\"u\\\\o\"}\n");
+    try c.expectRows(
+        \\SELECT JSON_OBJECT('a' VALUE NULL ABSENT ON NULL), JSON_OBJECT(), JSON_ARRAY(), JSON_ARRAY(1, NULL, 2 NULL ON NULL), JSON_ARRAY('[1]' FORMAT JSON, '[1]'),
+        \\  JSON_OBJECT('a' VALUE ''), JSON_OBJECT(KEY 'a' IS 1), JSON_OBJECT('k' VALUE JSON_QUERY('{"a":[1]}', '$.a')) FROM dual
+    , "{}|{}|[]|[1,null,2]|[[1],\"[1]\"]|{\"a\":null}|{\"a\":1}|{\"k\":[1]}\n");
+    try c.expectError("SELECT JSON_OBJECT('a' VALUE 1, 'a' VALUE 2 WITH UNIQUE KEYS) FROM dual", "ORA-40473: duplicate key names 'a' in JSON object");
+    try c.expectError("SELECT JSON_ARRAY(1, 2 RETURNING VARCHAR2(3)) FROM dual", "ORA-40478: output value too large (maximum: 3)");
+    try c.exec(
+        \\CREATE TABLE v (k VARCHAR2(10), n NUMBER, s VARCHAR2(10), j JSON);
+        \\INSERT INTO v VALUES ('x', 1, 'a', '{"q":1}');
+        \\INSERT INTO v VALUES ('y', 2, NULL, '[2]');
+        \\INSERT INTO v VALUES ('z', 3, 'c', NULL);
+    );
+    // A column: its name as written; *: the columns; a JSON column is JSON.
+    try c.expectRows("SELECT JSON_OBJECT(k, v.n) FROM v WHERE k = 'x'", "{\"k\":\"x\",\"n\":1}\n");
+    try c.expectRows("SELECT JSON_OBJECT(*) FROM v WHERE k = 'x'", "{\"K\":\"x\",\"N\":1,\"S\":\"a\",\"J\":{\"q\":1}}\n");
+    try c.expectRows("SELECT JSON_ARRAY(j) FROM v WHERE k = 'y'", "[[2]]\n");
+    try c.expectRows(
+        \\SELECT JSON_ARRAYAGG(n ORDER BY n DESC), JSON_ARRAYAGG(s ORDER BY k), JSON_ARRAYAGG(s ORDER BY k NULL ON NULL), JSON_OBJECTAGG(KEY k VALUE s ABSENT ON NULL),
+        \\  JSON_ARRAYAGG(JSON_OBJECT('k' VALUE k) ORDER BY k) FROM v
+    , "[3,2,1]|[\"a\",\"c\"]|[\"a\",null,\"c\"]|{\"x\":\"a\",\"z\":\"c\"}|[{\"k\":\"x\"},{\"k\":\"y\"},{\"k\":\"z\"}]\n");
+    try c.expectRows("SELECT JSON_ARRAYAGG(n), JSON_OBJECTAGG(k VALUE n) FROM v WHERE 1 = 0", "NULL|NULL\n");
+    try c.expectRows("SELECT k, JSON_ARRAYAGG(n) FROM v GROUP BY k ORDER BY k", "x|[1]\ny|[2]\nz|[3]\n");
+}
+
+test "oracle: JSON_MERGEPATCH, JSON_SERIALIZE, JSON_TRANSFORM" {
+    var c: Conn = undefined;
+    try openOra(&c);
+    defer c.close();
+    try c.expectRows("SELECT JSON_MERGEPATCH('{\"a\":1,\"b\":{\"c\":2,\"d\":3}}', '{\"b\":{\"c\":null,\"e\":4},\"f\":5,\"a\":null}'), JSON_MERGEPATCH('[1]', '{\"a\":1}') FROM dual", "{\"b\":{\"d\":3,\"e\":4},\"f\":5}|{\"a\":1}\n");
+    try c.expectError("SELECT JSON_MERGEPATCH('{}', 'bad') FROM dual", "ORA-40629: Patch specification is not valid JSON");
+    try c.expectRows("SELECT JSON_SERIALIZE('{\"b\" : 1, a : [1, 2]}'), JSON_SERIALIZE('{\"b\":1,\"a\":2}' ORDERED), JSON_SERIALIZE('{\"a\":\"\\u00e9\"}' ASCII) FROM dual", "{\"b\":1,\"a\":[1,2]}|{\"a\":2,\"b\":1}|{\"a\":\"\\u00E9\"}\n");
+    try c.expectRows("SELECT JSON_SERIALIZE('{\"a\":[1],\"d\":{}}' PRETTY) FROM dual", "{\n  \"a\" :\n  [\n    1\n  ],\n  \"d\" :\n  {\n  }\n}\n");
+    try c.expectError("SELECT JSON_SERIALIZE('{\"a\":1}' RETURNING VARCHAR2(5)) FROM dual", "ORA-40478: output value too large (maximum: 5)");
+    try c.expectRows(
+        \\SELECT JSON_TRANSFORM('{"a":1,"b":[1,2],"c":{"d":1}}', SET '$.a' = 2, SET '$.x' = 'y', REMOVE '$.c.d', APPEND '$.b' = 3, RENAME '$.c' = 'cc', INSERT '$.z' = 5) FROM dual
+    , "{\"a\":2,\"b\":[1,2,3],\"x\":\"y\",\"cc\":{},\"z\":5}\n");
+    try c.expectRows(
+        \\SELECT JSON_TRANSFORM('{"a":1}', REPLACE '$.b' = 2), JSON_TRANSFORM('{"a":1}', SET '$.a' = '{"x":1}' FORMAT JSON), JSON_TRANSFORM('{"a":1}', SET '$.a' = NULL),
+        \\  JSON_TRANSFORM('{"a":1,"b":2}', KEEP '$.b'), JSON_TRANSFORM('{"a":[1,2,3]}', REMOVE '$.a[1]'), JSON_TRANSFORM('{"a":[1,2]}', INSERT '$.a[0]' = 0), JSON_TRANSFORM('{"a":1}', SET '$.a' = 3.50) FROM dual
+    , "{\"a\":1}|{\"a\":{\"x\":1}}|{\"a\":null}|{\"b\":2}|{\"a\":[1,3]}|{\"a\":[0,1,2]}|{\"a\":3.5}\n");
+    try c.expectError("SELECT JSON_TRANSFORM('{\"a\":1}', INSERT '$.a' = 2) FROM dual", "ORA-40763: value already exists in JSON_TRANSFORM");
+    try c.exec("CREATE TABLE j (d JSON); INSERT INTO j VALUES ('{\"n\":1}'); UPDATE j SET d = JSON_TRANSFORM(d, SET '$.n' = 5)");
+    try c.expectRows("SELECT d FROM j", "{\"n\":5}\n");
+}
+
+test "oracle: JSON dot notation and JSON_TABLE" {
+    var c: Conn = undefined;
+    try openOra(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE j (id NUMBER, d JSON, t VARCHAR2(200) CHECK (t IS JSON));
+        \\INSERT INTO j VALUES (1, '{"a":1,"b":[1,2,{"c":"x"}],"s":"str","n":null}', '{"a":"s","b":{"x":1},"d":[{"e":1},{"e":2}]}');
+        \\INSERT INTO j VALUES (2, '{"a":2}', NULL);
+    );
+    // On a JSON column the values are JSON ("str"); on a text column a
+    // scalar is its SQL value. Several values are an array.
+    try c.expectRows("SELECT x.d.a, x.d.b, x.d.b[2].c, x.d.s, x.d.n, x.d.zz, x.d.b.size() FROM j x WHERE id = 1", "1|[1,2,{\"c\":\"x\"}]|\"x\"|\"str\"|null|NULL|3\n");
+    try c.expectRows("SELECT x.t.a, x.t.b, x.t.d.e, x.t.a.string() FROM j x WHERE id = 1", "s|{\"x\":1}|[1,2]|s\n");
+    try c.expectRows("SELECT x.id FROM j x WHERE x.d.a = 2", "2\n");
+    try c.expectColumns("SELECT x.d.a, x.d.b[0] FROM j x WHERE id = 1", "A|B");
+    try c.expectError("SELECT nosuch.d.a FROM j x", "ORA-00904: \"NOSUCH\": invalid identifier");
+
+    try c.expectRows(
+        \\SELECT jt.* FROM JSON_TABLE('{"items":[{"id":1,"name":"a","tags":["x","y"]},{"id":2,"name":"b","extra":{"q":1}},{"id":"z"}]}', '$.items[*]'
+        \\  COLUMNS (rn FOR ORDINALITY, id NUMBER PATH '$.id', name VARCHAR2(10) PATH '$.name', has_tags NUMBER EXISTS PATH '$.tags',
+        \\           extra VARCHAR2(100) FORMAT JSON PATH '$.extra', NESTED PATH '$.tags[*]' COLUMNS (tag VARCHAR2(5) PATH '$'))) jt
+    , "1|1|a|1|NULL|x\n1|1|a|1|NULL|y\n2|2|b|0|{\"q\":1}|NULL\n3|NULL|NULL|0|NULL|NULL\n");
+    try c.expectColumns("SELECT * FROM JSON_TABLE('{\"a\":1}', '$' COLUMNS (a, \"b\" NUMBER, c FOR ORDINALITY))", "A|b|C");
+    try c.expectRows("SELECT * FROM JSON_TABLE('{\"A\":1,\"a\":2,\"b\":\"x\"}', '$' COLUMNS (a, \"A\", b))", "2|1|x\n");
+    try c.expectRows("SELECT * FROM JSON_TABLE('{\"x\":1,\"a\":[1,2],\"b\":[\"p\"]}', '$' COLUMNS (x NUMBER PATH '$.x', NESTED PATH '$.a[*]' COLUMNS (v NUMBER PATH '$', n FOR ORDINALITY), NESTED PATH '$.b[*]' COLUMNS (w VARCHAR2(5) PATH '$')))", "1|1|1|NULL\n1|2|2|NULL\n1|NULL|NULL|p\n");
+    try c.expectRows("SELECT * FROM JSON_TABLE('{\"a\":\"x\"}', '$' COLUMNS (a NUMBER PATH '$.a' DEFAULT -1 ON ERROR, b VARCHAR2(5) PATH '$.b' DEFAULT 'none' ON EMPTY))", "-1|none\n");
+    try c.expectRows("SELECT count(*) FROM JSON_TABLE('bad', '$' COLUMNS (a))", "0\n");
+    try c.expectError("SELECT * FROM JSON_TABLE('{\"a\":\"x\"}', '$' COLUMNS (a NUMBER PATH '$.a' ERROR ON ERROR))", "ORA-01722: unable to convert string value containing 'x' to a number");
+    // Lateral: the document from a table before it; the columns by name,
+    // qualified or not, in WHERE and ORDER BY.
+    try c.expectRows("SELECT j.id, jt.v FROM j, JSON_TABLE(j.d, '$.b[*]' COLUMNS (v VARCHAR2(20) PATH '$')) jt WHERE v IS NOT NULL ORDER BY j.id, jt.v DESC", "1|2\n1|1\n");
+    try c.expectRows("SELECT id, a FROM j, JSON_TABLE(d, '$' COLUMNS (a NUMBER PATH '$.a')) ORDER BY a DESC", "2|2\n1|1\n");
+    try c.expectRows("SELECT count(*) FROM j x WHERE EXISTS (SELECT 1 FROM JSON_TABLE(x.d, '$.b[*]' COLUMNS (v NUMBER PATH '$')) t WHERE t.v = 2)", "1\n");
+    // A view keeps the table function; it reads from any dialect.
+    try c.exec("CREATE VIEW jv AS SELECT id, jt.a FROM j, JSON_TABLE(j.d, '$' COLUMNS (a NUMBER PATH '$.a')) jt");
+    try c.expectRows("SELECT * FROM jv ORDER BY id", "1|1\n2|2\n");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT a FROM jv ORDER BY id", "1\n2\n");
+}

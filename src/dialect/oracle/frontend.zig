@@ -43,6 +43,7 @@ const stmt_mod = @import("stmt.zig");
 const dates = @import("dates.zig");
 const funcs = @import("funcs.zig");
 const jsonfuncs = @import("jsonfuncs.zig");
+const session = @import("session.zig");
 
 const RC = int.RC;
 const OP = @import("../../vdbe/vdbe_int.zig").OP;
@@ -57,7 +58,7 @@ pub const hooks: dialect.Hooks = .{
 
 const engine_functions = funcs.engine_functions ++ jsonfuncs.engine_functions;
 
-const functions = funcs.functions ++ sequence.functions;
+const functions = funcs.functions ++ sequence.functions ++ session.functions;
 
 comptime {
     dfunc.checkTable(&functions);
@@ -90,6 +91,12 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
 
 fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
     ps.p = p;
+    // CREATE/DROP/ALTER USER, ALTER SESSION SET CURRENT_SCHEMA.
+    const done = session.statement(ps) catch |err| switch (err) {
+        error.OutOfMemory, error.ParseFailed => |e| return parseError(p, sql, ps, e),
+        error.Failed => return error.Failed,
+    };
+    if (done) return;
     const s = stmt_mod.statement(ps) catch |err| return parseError(p, sql, ps, err);
     dates.statement(ps, s) catch |err| return parseError(p, sql, ps, err);
     var l: lower.Lowerer = .init(p, sql);
@@ -111,9 +118,9 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
             for (list) |t| try l.statement(t);
             implicitTransaction(p);
         },
+        .ddl => |list| for (list) |t| try ddl(&l, t),
         .comment => |c| {
-            const q: tree.QName = .{ .name = c.table };
-            const t = try l.findTable(q) orelse return l.fail(c.table.pos, "ORA-00942: table or view does not exist", .{});
+            const t = try l.findTable(c.table) orelse return l.fail(c.table.name.pos, "ORA-00942: table or view does not exist", .{});
             const col: []const u8 = if (c.column) |n| blk: {
                 const i = build.columnIndex(t, n.text);
                 if (i < 0) return l.fail(n.pos, "ORA-00904: \"{s}\": invalid identifier", .{n.text});
@@ -345,6 +352,7 @@ test {
     _ = @import("datetime.zig");
     _ = @import("funcs.zig");
     _ = @import("json.zig");
+    _ = @import("session.zig");
     _ = @import("jsonfuncs.zig");
     _ = @import("test.zig");
 }

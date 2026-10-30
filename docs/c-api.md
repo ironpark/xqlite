@@ -10,6 +10,7 @@ xqlite는 SQLite 3.54.1의 `sqlite3.h`를 그대로 구현하는 C ABI를 제공
 - [구조](#구조)
 - [지원 범위](#지원-범위)
 - [확장](#확장)
+- [메모리 데이터베이스와 스냅숏](#메모리-데이터베이스와-스냅숏)
 - [SQLite와 다른 점](#sqlite와-다른-점)
 - [스레드](#스레드)
 - [테스트](#테스트)
@@ -94,7 +95,7 @@ src/capi/stmt.zig      prepare, step(트레이스), bind, column, expanded_sql
 src/capi/func.zig      사용자 함수·집계·윈도우 함수, collation, value_*, result_*
 src/capi/vtab.zig      C sqlite3_module을 엔진 Module로 감싸는 다리
 src/capi/vfs.zig       VFS 등록부, 기본 VFS의 C 뷰, C VFS의 엔진 뷰
-src/capi/filename.zig  sqlite3_filename 배치와 uri_parameter 계열
+src/capi/filename.zig  sqlite3_filename 배치와 uri_parameter 계열, database_file_object
 src/capi/hooks.zig     commit/rollback/update 훅, 진행 처리기
 src/capi/blob.zig      증분 BLOB I/O (엔진의 vdbe/blob.zig 위)
 src/capi/printf.zig    mprintf 계열과 sqlite3_str (엔진의 printf 위)
@@ -108,18 +109,18 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - `sqlite3*`, `sqlite3_stmt*`, `sqlite3_value*`, `sqlite3_context*`는 엔진의 `Sqlite3`, `Vdbe`, `Mem`, `Context` 그 자체입니다. C ABI가 연결마다 따로 두는 상태(C 콜백, 파일 이름, 트레이스 설정 등)는 `Sqlite3.capi`에 매답니다.
 - 엔진이 부르는 콜백은 Zig 모양(슬라이스 인자)이라, C 함수·collation·가상 테이블은 트램펄린 뒤에 등록합니다. 사용자 데이터 자리에 C 콜백과 `pApp`을 담은 구조체를 두고, `sqlite3_user_data()`는 `pApp`을 돌려줍니다.
 - Zig는 모든 타깃에서 C 가변 인자 함수를 정의하지 못하므로(aarch64-linux의 LLVM 백엔드 등), 가변 인자 함수는 `varargs.c`에 있습니다. `sqlite3_mprintf()`는 형식 문자열을 엔진의 `vappendf()`와 같은 방식으로 읽어 인자를 `va_list`에서 꺼낸 뒤 Zig 쪽에 배열로 넘깁니다.
-- 엔진에 추가한 것은 C ABI가 꼭 필요로 하는 것뿐입니다: 연결별 상태 칸, URI의 `vfs=`를 호출자가 처리했다는 플래그, NUL로 끝나는 매개변수 이름, commit/rollback/update 훅과 진행 처리기(SQLite C 코드의 포팅), SQL 함수 `load_extension()`이 C ABI의 로더를 부르는 자리(`global.load_extension`), 그리고 `carray()`(연결별 `enable_carray`).
+- 엔진에 추가한 것은 C ABI가 꼭 필요로 하는 것뿐입니다: 연결별 상태 칸, URI의 `vfs=`를 호출자가 처리했다는 플래그와 `ATTACH`의 `vfs=`를 C ABI의 VFS 등록부에서 찾는 자리(`global.find_vfs`), NUL로 끝나는 매개변수 이름, commit/rollback/update 훅과 진행 처리기(SQLite C 코드의 포팅), SQL 함수 `load_extension()`이 C ABI의 로더를 부르는 자리(`global.load_extension`), 그리고 `carray()`(연결별 `enable_carray`).
 
 ## 지원 범위
 
-`sqlite3.h`가 선언한 함수 308개 가운데 297개를 내보냅니다. 내보내지 않는 11개는 SQLite의 기본 빌드에도 없는 것입니다(`sqlite3_win32_*` 3개, `sqlite3_rtree_*` 2개, `SQLITE_ENABLE_PREUPDATE_HOOK`의 `sqlite3_preupdate_*` 6개). 내보내는 함수 가운데 약 30개는 아래 표처럼 일부만 되거나 깔끔하게 실패하고, 나머지는 SQLite와 같게 동작합니다. 전역 변수 `sqlite3_version`, `sqlite3_temp_directory`, `sqlite3_data_directory`도 내보냅니다.
+`sqlite3.h`가 선언한 함수 308개 가운데 297개를 내보냅니다. 내보내지 않는 11개는 SQLite의 기본 빌드에도 없는 것입니다(`sqlite3_win32_*` 3개, `sqlite3_rtree_*` 2개, `SQLITE_ENABLE_PREUPDATE_HOOK`의 `sqlite3_preupdate_*` 6개). 내보내는 함수 가운데 약 20개는 아래 표처럼 일부만 되거나 깔끔하게 실패하고, 나머지는 SQLite와 같게 동작합니다. 전역 변수 `sqlite3_version`, `sqlite3_temp_directory`, `sqlite3_data_directory`도 내보냅니다.
 
 ### 구현된 것
 
 | 분류 | 함수 |
 | --- | --- |
 | 라이브러리 | `libversion`, `libversion_number`, `sourceid`(헤더의 `SQLITE_SOURCE_ID`와 같음), `threadsafe`, `compileoption_used/get`, `initialize`, `shutdown`, `os_init/end`, `config`(아래), `extended_result_codes` |
-| 연결 | `open`, `open_v2`(플래그, URI, `zVfs`, `SQLITE_OPEN_EXRESCODE`), `open16`, `close`, `close_v2`(좀비: 마지막 문장·백업이 끝나면 닫힘), `exec`, `get_table`/`free_table`, `db_config`(아래), `limit`, `busy_timeout`, `busy_handler`, `interrupt`, `is_interrupted`, `get_autocommit`, `txn_state`, `db_filename`(URI 파라미터 포함한 `sqlite3_filename`), `db_readonly`, `db_name`, `db_handle`, `next_stmt`, `changes(64)`, `total_changes(64)`, `last_insert_rowid`, `set_last_insert_rowid`, `table_column_metadata`, `get/set_clientdata`, `file_control`(`SQLITE_FCNTL_VFS_POINTER`만) |
+| 연결 | `open`, `open_v2`(플래그, URI, `zVfs`, `SQLITE_OPEN_EXRESCODE`), `open16`, `close`, `close_v2`(좀비: 마지막 문장·백업이 끝나면 닫힘), `exec`, `get_table`/`free_table`, `db_config`(아래), `limit`, `busy_timeout`, `busy_handler`, `interrupt`, `is_interrupted`, `get_autocommit`, `txn_state`, `db_filename`(페이저가 VFS에 준 바로 그 이름: URI 파라미터를 포함한 `sqlite3_filename`. memdb·임시 DB는 `""`), `db_readonly`, `db_name`, `db_handle`, `next_stmt`, `changes(64)`, `total_changes(64)`, `last_insert_rowid`, `set_last_insert_rowid`, `table_column_metadata`, `get/set_clientdata`, `file_control`(`VFS_POINTER`는 그 데이터베이스의 VFS, `FILE_POINTER`는 C VFS의 파일, 그 밖의 연산은 C VFS 파일의 `xFileControl`이나 memdb의 `SIZE_LIMIT`·`VFSNAME`; 엔진의 다른 파일은 `SQLITE_NOTFOUND`) |
 | 오류 | `errcode`, `extended_errcode`, `errmsg`, `errmsg16`, `errstr`, `error_offset`, `set_errmsg` |
 | 문장 | `prepare`, `prepare_v2`, `prepare_v3`(플래그), `prepare16(_v2/_v3)`, `step`, `reset`, `finalize`, `clear_bindings`, `sql`, `expanded_sql`, `stmt_readonly`, `stmt_isexplain`, `stmt_busy`, `stmt_status`, `data_count`, `expired`, `transfer_bindings` |
 | 바인딩 | `bind_null/int/int64/double/text/text16/text64/blob/blob64/zeroblob/zeroblob64/value/pointer`, `bind_parameter_count/name/index` |
@@ -129,23 +130,22 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 | 가상 테이블 | `create_module(_v2)`, `drop_modules`, `declare_vtab`, `vtab_config`, `vtab_on_conflict`, `vtab_nochange`, `vtab_collation`, `vtab_distinct`, `vtab_in`, `vtab_in_first/next`, `vtab_rhs_value` (모듈 버전 1~4: 쓰기, 트랜잭션, 세이브포인트, `xShadowName`, `xIntegrity`) |
 | 훅 | `commit_hook`, `rollback_hook`, `update_hook`, `progress_handler`, `trace_v2`(`STMT`, `PROFILE`, `ROW`, `CLOSE`), `trace`, `profile`, `wal_hook` |
 | WAL·백업 | `wal_autocheckpoint`, `wal_checkpoint`, `wal_checkpoint_v2`(NOOP~TRUNCATE), `backup_init/step/finish/remaining/pagecount` |
+| 직렬화·스냅숏 | `serialize`(`SQLITE_SERIALIZE_NOCOPY`), `deserialize`(`FREEONCLOSE`, `RESIZEABLE`, `READONLY`), memdb VFS(`"memdb"`, `file:/이름?vfs=memdb` 공유), `snapshot_get/open/cmp/free/recover` ([메모리 데이터베이스와 스냅숏](#메모리-데이터베이스와-스냅숏)) |
 | BLOB | `blob_open/read/write/bytes/close/reopen` (vdbeblob.c의 포팅: 커서로 행의 페이로드를 바로 읽고 씀. 쓰기는 트리거·업데이트 훅을 부르지 않고 `changes()`에 잡히지 않으며, 행이 바뀌거나 지워지면 핸들이 만료되어 `SQLITE_ABORT`) |
-| VFS | `vfs_find`, `vfs_register`, `vfs_unregister` (기본 VFS `"unix"`의 C 메서드가 동작하므로 기본 VFS를 감싸는 C VFS도 동작) |
-| 파일 이름 | `uri_parameter/boolean/int64/key`, `filename_database/journal/wal`, `create_filename`, `free_filename` |
-| 메모리 | `malloc(64)`, `realloc(64)`, `free`, `msize`, `soft/hard_heap_limit64`, `soft_heap_limit`, `release_memory`, `db_release_memory`, `db_cacheflush` |
+| VFS | `vfs_find`, `vfs_register`, `vfs_unregister` (기본 VFS `"unix"`의 C 메서드가 동작하므로 기본 VFS를 감싸는 C VFS도 동작). C VFS의 `xOpen`은 SQLite와 같은 배치의 이름(데이터베이스·저널·WAL)을 받으므로 `uri_parameter()`가 URI 파라미터를 읽고, `ATTACH`도 자기 URI의 `vfs=`를 씀 |
+| 파일 이름 | `uri_parameter/boolean/int64/key`, `filename_database/journal/wal`(저널·WAL 이름에서도 데이터베이스 이름으로 거슬러 감), `create_filename`, `free_filename`, `database_file_object`(C VFS로 연 데이터베이스의 `sqlite3_file`) |
+| 메모리 | `malloc(64)`, `realloc(64)`, `free`, `msize`, `soft/hard_heap_limit64`, `soft_heap_limit`, `release_memory`, `db_release_memory`, `db_cacheflush`, `memory_used`, `memory_highwater`, `status(64)` ([메모리 통계](#메모리-통계)) |
 | 문자열 | `mprintf`, `vmprintf`, `snprintf`, `vsnprintf`, `str_*` 전부, `log`, `complete`, `complete16`, `incomplete`, `stricmp`, `strnicmp`, `strglob`, `strlike`, `keyword_count/name/check`, `randomness`, `sleep` |
 | 확장 | `load_extension`, `enable_load_extension`, `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION`, SQL 함수 `load_extension()`, `carray_bind(_v2)`와 테이블 값 함수 `carray()` ([확장](#확장)) |
-| 기타 | `mutex_alloc/free/enter/try/leave/held/notheld`(POSIX 스레드), `auto_extension`(`pApi`로 `sqlite3_api_routines` 표를 줌), `cancel_auto_extension`, `reset_auto_extension`, `enable_shared_cache`(무시), `db_status(64)`(룩어사이드와 `DEFERRED_FKS`, 나머지는 0), `status(64)`(0) |
+| 기타 | `mutex_alloc/free/enter/try/leave/held/notheld`(POSIX 스레드), `auto_extension`(`pApi`로 `sqlite3_api_routines` 표를 줌), `cancel_auto_extension`, `reset_auto_extension`, `enable_shared_cache`(무시), `db_status(64)`([메모리 통계](#메모리-통계)) |
 
-`sqlite3_config()`는 `SINGLETHREAD`, `MULTITHREAD`, `MALLOC`(C 메모리 함수를 엔진 할당자로), `GETMALLOC`, `LOOKASIDE`, `LOG`, `URI`, `PCACHE_HDRSZ`를 처리하고, 성능 조정용 옵션(`PAGECACHE`, `MMAP_SIZE`, `MEMSTATUS` 등)은 받고 무시합니다. `SERIALIZED`, `GETMUTEX`, `GETPCACHE(2)`는 `SQLITE_ERROR`입니다. SQLite처럼 `sqlite3_initialize()`(첫 `open`이 자동으로 부름) 뒤에는 `LOG`, `PCACHE_HDRSZ` 말고는 `SQLITE_MISUSE`입니다. `sqlite3_db_config()`는 `MAINDBNAME`, `LOOKASIDE`, 1002~1022의 플래그 전부, `FP_DIGITS`를 처리합니다.
+`sqlite3_config()`는 `SINGLETHREAD`, `MULTITHREAD`, `MALLOC`(C 메모리 함수를 엔진 할당자로), `GETMALLOC`, `LOOKASIDE`, `LOG`, `URI`, `PCACHE_HDRSZ`, `MEMSTATUS`, `MEMDB_MAXSIZE`를 처리하고, 성능 조정용 옵션(`PAGECACHE`, `MMAP_SIZE` 등)은 받고 무시합니다. `SERIALIZED`, `GETMUTEX`, `GETPCACHE(2)`는 `SQLITE_ERROR`입니다. SQLite처럼 `sqlite3_initialize()`(첫 `open`이 자동으로 부름) 뒤에는 `LOG`, `PCACHE_HDRSZ` 말고는 `SQLITE_MISUSE`입니다. `sqlite3_db_config()`는 `MAINDBNAME`, `LOOKASIDE`, 1002~1022의 플래그 전부, `FP_DIGITS`를 처리합니다.
 
 ### 지원하지 않는 것
 
 | 함수 | 동작 |
 | --- | --- |
 | `set_authorizer` | 콜백을 주면 `SQLITE_ERROR`("xqlite does not support sqlite3_set_authorizer()"), NULL이면 `SQLITE_OK`. 엔진에 권한 검사가 없으므로, 받기만 하고 부르지 않으면 막으려던 것이 통과하기 때문 |
-| `serialize` / `deserialize` | NULL / `SQLITE_ERROR` (memdb VFS가 없음) |
-| `snapshot_get/open/cmp/free/recover` | `SQLITE_ERROR` |
 | `column_text16`, `column_name16`, `column_decltype16`, `value_text16(le/be)` | NULL. 엔진은 UTF-8만 다루고, 값만큼 사는 UTF-16 사본을 둘 곳이 없음. UTF-16 **입력**(`open16`, `prepare16*`, `bind_text16`, `result_text16*`, `create_function16`, `create_collation16`, `complete16`)과 `errmsg16`, `*_bytes16`은 됨 |
 | `column_database_name`, `column_table_name`, `column_origin_name`(16 포함) | NULL (SQLite 기본 빌드처럼 `SQLITE_ENABLE_COLUMN_METADATA` 없음) |
 | `normalized_sql` | NULL (`SQLITE_ENABLE_NORMALIZE` 없음) |
@@ -153,9 +153,9 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 | `stmt_explain` | 지금 모드와 같으면 `SQLITE_OK`, 바꾸려 하면 `SQLITE_ERROR` |
 | `collation_needed(16)` | 등록은 되지만 엔진이 부르지 않음 |
 | `autovacuum_pages` | 등록은 되지만 엔진이 부르지 않음(기본 동작) |
-| `database_file_object` | NULL (엔진의 파일은 `sqlite3_file`이 아님) |
+| `database_file_object` | 기본 VFS나 memdb로 연 데이터베이스는 NULL (엔진의 파일은 `sqlite3_file`이 아님). C VFS가 받은 이름이면 그 데이터베이스의 `sqlite3_file` |
 | `test_control` | 0 |
-| `memory_used`, `memory_highwater`, `status(64)` | 0 (메모리를 세지 않음) |
+| `db_status`의 `SCHEMA_USED`, `TEMPBUF_SPILL` | 0 ([메모리 통계](#메모리-통계)) |
 | `unlock_notify` | 공유 캐시가 없어 막히는 일이 없으므로 콜백을 바로 부름 |
 | `db_mutex` | NULL (멀티스레드 모드) |
 | 가상 테이블의 `xFindFunction` | 부르지 않음(함수 오버로드 없음) |
@@ -180,6 +180,32 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - `carray(?)`: `sqlite3_carray_bind_v2(stmt, i, aData, nData, SQLITE_CARRAY_*, xDestroy, pDestroy)`로 묶은 배열입니다. `SQLITE_TRANSIENT`면 배열을 복사하고(`char*`의 문자열, `struct iovec`의 내용까지), 아니면 바인딩이 사라질 때 `xDestroy(pDestroy)`를 부릅니다. 묶지 못하면 그 자리에서 부릅니다.
 - `PRAGMA compile_options`에는 `ENABLE_CARRAY`가 나오지 않습니다(엔진의 목록은 기본 빌드의 것).
 
+## 메모리 데이터베이스와 스냅숏
+
+**memdb와 직렬화.** SQLite의 `memdb.c`를 옮겼습니다. VFS는 엔진의 `src/vfs/memdb.zig`, `sqlite3_serialize()`/`sqlite3_deserialize()`는 `src/sql/serialize.zig`입니다.
+
+- `sqlite3_vfs_find("memdb")`가 있고(SQLite처럼 기본 VFS 다음), 데이터베이스 하나가 연속된 메모리 한 덩어리입니다. 이름이 `/`로 시작하면(`file:/name?vfs=memdb`) 프로세스 안의 연결들이 같은 저장소를 공유하고 마지막 연결이 닫힐 때 사라집니다. 다른 이름은 그 핸들만의 저장소입니다.
+- memdb 파일은 공유 메모리가 없어 WAL로 바꿀 수 없고(`journal_mode=wal`은 그대로), 페이저는 SQLite의 memVfs처럼 저널 모드를 `memory`로 시작해 저널도 memdb 파일에 둡니다. `pragma database_list`와 `sqlite3_db_filename()`의 이름은 `""`입니다.
+- `sqlite3_serialize()`: memdb 데이터베이스는 저장소를 그대로(복사하거나 `NOCOPY`면 그 포인터), 다른 데이터베이스는 페이저로 페이지를 읽어 만듭니다(`NOCOPY`면 NULL, 크기는 알려 줌). 빈 파일이면 SQLite처럼 `BEGIN IMMEDIATE; COMMIT`으로 첫 페이지를 씁니다.
+- `sqlite3_deserialize()`: SQLite처럼 `ATTACH x AS 이름`을 `db.init.reopen_memdb`로 돌려, 그 데이터베이스(main이나 붙인 것, TEMP는 `SQLITE_ERROR`)를 닫고 memdb로 다시 엽니다. 트랜잭션이 열려 있으면 `SQLITE_BUSY`입니다. `RESIZEABLE`이 없으면 버퍼 크기를 넘는 쓰기는 `SQLITE_FULL`, `READONLY`면 쓰기가 `SQLITE_READONLY`입니다.
+- `SQLITE_FCNTL_SIZE_LIMIT`(최대 크기, 음수는 묻기), `SQLITE_FCNTL_VFSNAME`(`memdb(주소,크기)`), `SQLITE_CONFIG_MEMDB_MAXSIZE`(기본 1GiB)가 SQLite와 같습니다.
+- Zig API: `db.serialize(gpa, "main")`, `db.deserialize("main", image, read_only)` ([Zig API](zig-api.md)).
+
+**스냅숏.** `SQLITE_ENABLE_SNAPSHOT`의 `wal.c`·`pager.c`·`main.c` 부분을 옮겼습니다(`src/pager/wal.zig`, `src/sql/snapshot.zig`). 스냅숏은 읽기 트랜잭션의 wal-index 헤더 사본(48바이트, `sqlite3_free()`로 해제)입니다.
+
+- `snapshot_get`은 `BEGIN` 안에서, 그 데이터베이스에 쓰기 트랜잭션이 없을 때 읽기 트랜잭션을 열고(읽기 잠금 0은 피함) 그 헤더를 돌려줍니다. WAL 모드가 아니면 `SQLITE_ERROR`입니다.
+- `snapshot_open`은 다음 읽기 트랜잭션을 그 스냅숏에서 엽니다. 이미 읽고 있으면(실행 중인 문장이 없을 때) 체크포인트 잠금을 잡고 스냅숏이 아직 있는지 본 뒤 옮깁니다. WAL이 다시 시작되었거나(솔트가 바뀜) 체크포인트가 스냅숏 너머의 프레임을 데이터베이스에 썼으면 `SQLITE_ERROR_SNAPSHOT`입니다. 스냅숏에서 쓰려 하면 SQLite처럼 `SQLITE_BUSY_SNAPSHOT`입니다.
+- `snapshot_recover`는 `nBackfillAttempted`를 데이터베이스 파일에 아직 없는 첫 프레임까지 내려 오래된 스냅숏을 다시 열 수 있게 합니다. `snapshot_cmp`는 솔트와 `mxFrame`으로 비교합니다.
+- 쓰지 않는 연결의 비용은 WAL 읽기 트랜잭션을 시작할 때 널 포인터 검사 두 번입니다. `PRAGMA compile_options`에는 `ENABLE_SNAPSHOT`이 나오지 않습니다(엔진의 목록은 기본 빌드의 것).
+
+### 메모리 통계
+
+`sqlite3_status()`와 `sqlite3_db_status()`는 status.c를 옮긴 `src/sql/status.zig`와 페이저의 카운터로 셉니다.
+
+- **켜고 끄기**: SQLite의 `SQLITE_CONFIG_MEMSTATUS`입니다. C ABI는 SQLite처럼 기본으로 켜서 `sqlite3_initialize()`(첫 `open`이나 `sqlite3_malloc()`이 부름) 때 시작하고, 그 전에 `sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0)`이면 끕니다. Zig API만 쓰면 꺼져 있어 할당마다 예측 가능한 분기 하나만 듭니다. 켜면 할당·해제마다 원자적 덧셈 두 번(SQLite는 뮤텍스)이 더해지는데, 30만 행 삽입 세 번(ReleaseFast)에서 켜고 끈 차이는 측정 잡음(약 1%) 안이었습니다. 할당 헤더에 센 것인지를 적어 두므로, 켜기 전에 할당한 메모리를 나중에 해제해도 값이 음수가 되지 않습니다.
+- **`status(64)`**: `MEMORY_USED`(8바이트로 올린 크기의 합, SQLite의 mem1과 같음), `MALLOC_COUNT`, `MALLOC_SIZE`(가장 큰 요청)와 각 최고치, `PAGECACHE_OVERFLOW`/`PAGECACHE_SIZE`(`SQLITE_CONFIG_PAGECACHE` 버퍼가 없으므로 페이지마다 따로 할당한 크기). `PAGECACHE_USED`, `SCRATCH_*`, `PARSER_STACK`은 0입니다. SQLite의 pcache1은 처음 몇 페이지를 한 번에 할당해 `PAGECACHE_OVERFLOW`에 넣지 않으므로 값은 SQLite와 조금 다릅니다.
+- **`db_status(64)`**: 룩어사이드 4가지, `CACHE_USED`(`sqlite3PagerMemUsed()`와 같은 식), `CACHE_USED_SHARED`(공유 캐시가 없어 같음), `CACHE_HIT/MISS/WRITE/SPILL`(페이저의 `aStat`, `reset`으로 0), `STMT_USED`(문장 객체와 그 아레나의 크기), `DEFERRED_FKS`. `SCHEMA_USED`와 `TEMPBUF_SPILL`은 0입니다: SQLite는 스키마를 "해제하는 척"하며 크기를 재는데(`pnBytesFreed`), 엔진의 해제 코드는 그렇게 돌 수 없습니다.
+
 ## SQLite와 다른 점
 
 - **스레드**: 멀티스레드 모드(`sqlite3_threadsafe()` = 2)입니다. [스레드](#스레드)를 보세요.
@@ -188,7 +214,7 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - **BLOB 증분 I/O**는 공유 캐시가 없으므로 `OP_TableLock` 자리가 `OP_Noop`입니다(`SQLITE_OMIT_SHARED_CACHE` 빌드와 같음). 그 밖에는 SQLite와 같습니다.
 - **트레이스**: `SQLITE_TRACE_STMT`/`PROFILE`/`ROW`는 C ABI의 `sqlite3_step()`에서 부르므로, 트리거 안의 문장(`--` 주석으로 오는 것)은 보고하지 않습니다. `sqlite3_exec()`도 같은 `step()`을 쓰므로 그 문장은 보고됩니다.
 - **진행 처리기**는 SQLite처럼 N개 명령마다 점프 지점에서 부르지만, 문장이 끝날 때 남은 몫을 한 번 더 부르지는 않습니다.
-- **VFS**: C VFS의 `xRead`가 `SQLITE_IOERR_SHORT_READ`를 돌려주면 읽은 길이를 모르므로 끝의 0 바이트를 읽지 않은 것으로 칩니다. C VFS가 받는 파일 이름에는 URI 파라미터가 없습니다(`sqlite3_uri_parameter()`는 NULL). URI에서 `vfs=`를 쓴 연결이 `ATTACH`하는 URI의 `vfs=`는 무시하고 연결의 VFS를 씁니다.
+- **VFS**: C VFS의 `xRead`가 `SQLITE_IOERR_SHORT_READ`를 돌려주면 읽은 길이를 모르므로 끝의 0 바이트를 읽지 않은 것으로 칩니다. `sqlite3_database_file_object()`는 데이터베이스 이름 앞(SQLite가 `Pager*`를 두는 자리)에 VFS 다리가 넣어 둔 `sqlite3_file`을 돌려주므로, C VFS로 연 데이터베이스에서만 NULL이 아닙니다.
 - **`sqlite3_compileoption_get()`**은 엔진의 `PRAGMA compile_options` 목록에서 `THREADSAFE`만 C ABI의 값(2)으로 바꿔 보여 줍니다.
 - `sqlite3_temp_directory`, `sqlite3_data_directory`는 내보내지만 엔진이 읽지 않습니다.
 
@@ -205,9 +231,9 @@ C ABI는 멀티스레드 모드입니다(`SQLITE_THREADSAFE=2`와 같음).
 
 | 명령 | 내용 |
 | --- | --- |
-| `zig build test-capi` | `tools/capi/capi_test.c`(검사 546개)를 정적·공유 라이브러리에 각각 링크해 실행. 로드 가능한 확장 `tools/capi/ext_test.c`(`libxqexttest`)를 함께 빌드해 그 경로를 인자로 줌. `zig build check`에 포함 |
+| `zig build test-capi` | `tools/capi/capi_test.c`(검사 922개)를 정적·공유 라이브러리에 각각 링크해 실행. 로드 가능한 확장 `tools/capi/ext_test.c`(`libxqexttest`)를 함께 빌드해 그 경로를 인자로 줌. `zig build check`에 포함 |
 | `zig build capi-shell` | SQLite 3.54.1 아말감의 `shell.c`를 고치지 않고 `include/sqlite3.h`와 `libxqlite3`로 빌드해(`zig-out/bin/sqlite3-xqlite`) `tools/capi/shell_smoke.sql`을 돌리고 출력을 `shell_smoke.expected`와 비교 |
 
-- `capi_test.c`는 `sqlite3.h`만 보고 쓴 평범한 C 프로그램입니다: 버전, 메모리, printf, 문장과 바인딩, 오류 코드, 사용자 함수·집계·윈도우 함수·auxdata·포인터 값, collation, UTF-16, 방언 URI, 파일·WAL·잠금·백업·BLOB, 트레이스, 훅과 진행 처리기, C 가상 테이블, 기본 VFS를 감싸는 C VFS, 자동 확장, 인터럽트, 지원하지 않는 함수의 실패.
-- 같은 파일을 SQLite 아말감(`sqlite3.c`)에 링크해 돌리면 xqlite 확장과 위 표의 차이(스레드 모드, 권한 검사기, serialize) 말고는 모두 통과합니다(carray 검사는 `-DSQLITE_ENABLE_CARRAY`로 빌드한 아말감에서). 기대값이 xqlite에 맞춘 것이 아니라 SQLite의 동작이라는 확인입니다.
+- `capi_test.c`는 `sqlite3.h`만 보고 쓴 평범한 C 프로그램입니다: 버전, 메모리, printf, 문장과 바인딩, 오류 코드, 사용자 함수·집계·윈도우 함수·auxdata·포인터 값, collation, UTF-16, 방언 URI, 파일·WAL·잠금·백업·BLOB, 트레이스, 훅과 진행 처리기, C 가상 테이블, 기본 VFS를 감싸는 C VFS, 자동 확장, 인터럽트, 지원하지 않는 함수의 실패, 그리고 직렬화·memdb·스냅숏·메모리 통계·URI 파라미터를 받는 C VFS·`ATTACH`의 `vfs=`.
+- 같은 파일을 SQLite 아말감(`sqlite3.c`)에 링크해 돌리면 xqlite 확장과 위 표의 차이(스레드 모드, 권한 검사기) 말고는 모두 통과합니다(carray와 스냅숏 검사는 `-DSQLITE_ENABLE_CARRAY -DSQLITE_ENABLE_SNAPSHOT`으로 빌드한 아말감에서). 기대값이 xqlite에 맞춘 것이 아니라 SQLite의 동작이라는 확인입니다.
 - `shell_smoke.sql`의 출력(`.mode box/csv/json`, `.schema`, `.dump`, 셸 내장 확장 `generate_series`·`sha3`·`decimal`, 오류)은 순정 sqlite3 3.54.1과 같고, 다른 것은 `PRAGMA xq_dialect` 부분뿐입니다.

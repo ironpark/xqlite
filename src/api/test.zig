@@ -1254,6 +1254,27 @@ test "zig api: incremental blob I/O" {
     try testing.expectEqualStrings("no such rowid: 9", db.lastError().?.message);
 }
 
+test "zig api: serialize and deserialize" {
+    var src = try memDb();
+    defer src.close();
+    try src.exec("CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3)");
+    const image = try src.serialize(testing.allocator, "main");
+    defer testing.allocator.free(image);
+    try testing.expectEqual(@as(usize, 8192), image.len);
+    try testing.expectError(error.NotFound, src.serialize(testing.allocator, "nosuch"));
+
+    var db = try memDb();
+    defer db.close();
+    try db.deserialize("main", image, false);
+    try testing.expectEqual(@as(?i64, 6), try db.one(i64, "SELECT sum(x) FROM t", .{}));
+    try db.exec("INSERT INTO t VALUES(4)");
+    try testing.expectEqual(@as(?i64, 10), try db.one(i64, "SELECT sum(x) FROM t", .{}));
+    try db.exec("ATTACH ':memory:' AS ro");
+    try db.deserialize("ro", image, true);
+    try testing.expectError(error.ReadOnly, db.exec("INSERT INTO ro.t VALUES(5)"));
+    try testing.expectError(error.Sql, db.deserialize("temp", image, false));
+}
+
 test "zig api: backup between two connections, and VACUUM" {
     var src = try memDb();
     defer src.close();

@@ -222,6 +222,33 @@ pub fn blobOpen(h: *Handle, database: ?[]const u8, table: []const u8, column: []
     return out.?;
 }
 
+/// sqlite3_serialize(): a copy of database `schema` from the library
+/// allocator (free with libFree()), or null if there is no such database
+/// (error.NotFound) or no memory.
+pub fn serialize(h: *Handle, schema: []const u8) Error![]u8 {
+    const r = @import("../sql/serialize.zig").serialize(h, schema, 0);
+    if (r.size < 0) return error.NotFound;
+    if (r.size == 0) return &.{};
+    const d = r.data orelse return error.OutOfMemory;
+    return d[0..@intCast(r.size)];
+}
+
+/// sqlite3_free() of memory from serialize().
+pub fn libFree(p: []u8) void {
+    if (p.len > 0) @import("../sql/malloc.zig").free(p.ptr);
+}
+
+/// sqlite3_deserialize() of a copy of `bytes` (resizable, or read-only).
+pub fn deserialize(h: *Handle, schema: []const u8, bytes: []const u8, read_only: bool) Error!void {
+    const ser = @import("../sql/serialize.zig");
+    const m = @import("../sql/malloc.zig");
+    const buf = m.malloc(@max(bytes.len, 1)) orelse return error.OutOfMemory;
+    @memcpy(buf[0..bytes.len], bytes);
+    const flags = ser.DESERIALIZE_FREEONCLOSE | (if (read_only) ser.DESERIALIZE_READONLY else ser.DESERIALIZE_RESIZEABLE);
+    const n: i64 = @intCast(bytes.len);
+    return int.check(ser.deserialize(h, schema, buf, n, n, flags));
+}
+
 /// sqlite3_blob_reopen(), sqlite3_blob_read() and sqlite3_blob_write().
 pub fn blobReopen(b: *BlobHandle, rowid: i64) Error!void {
     return int.check(blob_mod.reopen(b, rowid));

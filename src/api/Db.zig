@@ -490,6 +490,27 @@ pub fn openBlob(db: *Db, database: ?[]const u8, table: []const u8, column: []con
     return .{ .conn = db.conn, .b = b };
 }
 
+// ========================================================= serialization
+
+/// The content of database `schema` ("main", "temp" or an attached
+/// name) as one block of bytes, a database file image
+/// (sqlite3_serialize()), allocated with `gpa`. error.NotFound if there
+/// is no such database.
+pub fn serialize(db: *Db, gpa: Allocator, schema: []const u8) Error![]u8 {
+    const lib = try db.conn.check(engine.serialize(db.conn.h, schema));
+    defer engine.libFree(lib);
+    return gpa.dupe(u8, lib);
+}
+
+/// Replace database `schema` ("main" or an attached name, not "temp")
+/// with an in-memory database (the memdb VFS) holding a copy of
+/// `image`, a database file image such as serialize() returns
+/// (sqlite3_deserialize()). It grows as written unless `read_only`.
+/// No transaction may be open on it (error.Busy).
+pub fn deserialize(db: *Db, schema: []const u8, image: []const u8, read_only: bool) Error!void {
+    return db.conn.check(engine.deserialize(db.conn.h, schema, image, read_only));
+}
+
 /// Whether a transaction is open (not sqlite3_get_autocommit()).
 pub fn inTransaction(db: *const Db) bool {
     return !engine.autocommit(db.conn.h);

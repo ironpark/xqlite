@@ -16,6 +16,7 @@
 - [트랜잭션](#트랜잭션)
 - [백업](#백업)
 - [BLOB 증분 I/O](#blob-증분-io)
+- [직렬화](#직렬화)
 - [확장 지점](#확장-지점)
 - [C API 대응](#c-api-대응)
 - [아직 없는 것](#아직-없는-것)
@@ -24,7 +25,7 @@
 
 | 상태 | 무엇 |
 | --- | --- |
-| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), BLOB 증분 I/O(`Db.openBlob`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
+| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), BLOB 증분 I/O(`Db.openBlob`), 직렬화(`Db.serialize`, `Db.deserialize`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
 | 계획 | 훅, 가상 테이블 쓰기, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
 
 설계 원칙은 다음과 같습니다.
@@ -313,6 +314,16 @@ try b.read(&buf, 0);
 - 쓰기용으로는 인덱스에 든 열을 열 수 없고, 외래 키가 켜져 있으면 외래 키 열도 열 수 없습니다. 뷰, 가상 테이블, WITHOUT ROWID 테이블, 생성 열이 있는 테이블도 열 수 없습니다.
 - 열린 `BlobHandle`은 실행 중인 문장이라서 `close()` 전에는 연결을 닫을 수 없고(`tryClose()`가 `error.Busy`), 자동 커밋 모드면 `close()`가 그 트랜잭션을 끝냅니다.
 
+## 직렬화
+
+`db.serialize(gpa, schema)`는 데이터베이스 `schema`("main", "temp", 붙인 이름)의 파일 이미지를 `gpa`로 할당해 돌려주고(`sqlite3_serialize`), 없는 이름이면 `error.NotFound`입니다. `db.deserialize(schema, image, read_only)`는 그 데이터베이스(TEMP는 안 됨)를 닫고 `image`의 사본을 담은 메모리 데이터베이스(memdb VFS, 엔진의 `vfs/memdb.zig`)로 다시 엽니다(`sqlite3_deserialize`). 쓰면 메모리가 늘어나고, `read_only`면 쓰기가 `error.ReadOnly`, 트랜잭션이 열려 있으면 `error.Busy`입니다.
+
+```zig
+const image = try src.serialize(gpa, "main");
+defer gpa.free(image);
+try db.deserialize("main", image, false);
+```
+
 ## 확장 지점
 
 모두 comptime으로 시그니처를 읽어 엔진 콜백 래퍼를 생성합니다. 사용자 데이터는 std.sort의 `context`처럼 넘깁니다(`{}` 또는 포인터).
@@ -390,6 +401,7 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_backup_init/step/finish` | `Db.backup`, `Backup.step`, `Backup.finish` |
 | `sqlite3_backup_remaining/pagecount` | `Backup.remaining`, `Backup.pageCount` |
 | `sqlite3_blob_open/read/write/bytes/reopen/close` | `Db.openBlob`, `BlobHandle.read`, `write`, `bytes`, `reopen`, `close` |
+| `sqlite3_serialize`, `sqlite3_deserialize` | `Db.serialize`, `Db.deserialize` |
 | (그 밖의 모든 것) | `db.raw()` / `stmt.raw()`로 엔진 핸들을 꺼내 `xqlite.sql.*` 저수준 API 사용 |
 
 진짜 C 함수가 필요하면 [C API](c-api.md)(`libxqlite3`)를 링크하세요. 위 표는 Zig API가 무엇에 해당하는지를 보여 줍니다.

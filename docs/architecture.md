@@ -329,6 +329,7 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 | WASI | `vfs/wasi.zig` | 프로세스 안에서만(`vfs/inproc.zig`, 장치·inode 번호로) | 힙 메모리 |
 | 호스트(wasm32-freestanding) | `vfs/host.zig` | 프로세스 안에서(이름으로) 중재한 뒤 호스트에 물음(`xq_host_lock`) | 힙 메모리 |
 | 메모리 | `vfs/mem.zig` | `MemVfs` 객체 안에서 | 힙 메모리 |
+| memdb | `vfs/memdb.zig` | 저장소 안에서(`/이름`은 프로세스 안에서 공유) | 없음(WAL 불가, 저널은 메모리) |
 | 크래시 테스트 | `vfs/crash.zig` | 감싼 VFS의 것 | 감싼 VFS의 것 |
 
 ```

@@ -39,8 +39,10 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
-        // libc provides fcntl() byte-range locks for the unix VFS.
-        .link_libc = true,
+        // libc provides fcntl() byte-range locks for the unix VFS (and
+        // wasi-libc the clock and localtime_r() on wasm32-wasi);
+        // wasm32-freestanding has none (src/util/platform.zig).
+        .link_libc = target.result.os.tag != .freestanding,
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -163,6 +165,36 @@ pub fn build(b: *std.Build) void {
         run_example.addPassthruArgs();
         b.step("example-" ++ name, "Run examples/" ++ name ++ ".zig").dependOn(&run_example.step);
     }
+
+    // `zig build wasm`: the WebAssembly module for JavaScript hosts
+    // (src/wasm/api.zig, wasm32-freestanding, no libc) in zig-out/wasm,
+    // whatever -Dtarget is; ReleaseSmall unless -Dwasm-optimize says
+    // otherwise. `zig build wasm-example` runs examples/wasm/node.mjs
+    // with it. docs/wasm.md.
+    const wasm_optimize = b.option(std.builtin.OptimizeMode, "wasm-optimize", "zig build wasm: optimization mode (default small)") orelse .small;
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm_lib = b.addExecutable(.{
+        .name = "xqlite",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm/api.zig"),
+            .target = wasm_target,
+            .optimize = wasm_optimize,
+            .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = wasm_target,
+                .optimize = wasm_optimize,
+            }) }},
+        }),
+    });
+    wasm_lib.entry = .disabled;
+    wasm_lib.rdynamic = true;
+    const install_wasm = b.addInstallArtifact(wasm_lib, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } });
+    b.step("wasm", "Build the WebAssembly module for JavaScript hosts (zig-out/wasm/xqlite.wasm)").dependOn(&install_wasm.step);
+    const run_wasm_example = b.addSystemCommand(&.{"node"});
+    run_wasm_example.addFileArg(b.path("examples/wasm/node.mjs"));
+    run_wasm_example.addArtifactArg(wasm_lib);
+    run_wasm_example.has_side_effects = true;
+    b.step("wasm-example", "Run examples/wasm/node.mjs (Node.js) with the WebAssembly module").dependOn(&run_wasm_example.step);
 
     // `zig build test` also checks that the names docs/zig-api.md and the
     // examples use exist in the module, as its users see it.

@@ -164,6 +164,10 @@ pub fn build(b: *std.Build) void {
         b.step("example-" ++ name, "Run examples/" ++ name ++ ".zig").dependOn(&run_example.step);
     }
 
+    // The sqlite3-compatible C ABI (src/capi.zig): libxqlite3, its header
+    // and its tests. See addCapi() and docs/c-api.md.
+    const capi_test_step = addCapi(b, target, optimize);
+
     // `zig build test` also checks that the names docs/zig-api.md and the
     // examples use exist in the module, as its users see it.
     const doc_tests = b.addTest(.{
@@ -264,6 +268,7 @@ pub fn build(b: *std.Build) void {
     const check_fuzz = b.option(bool, "fuzz", "zig build check: also run each seeded fuzzer with a random seed") orelse false;
     const check_step = b.step("check", "Run the unit tests, the cross-checks, the planner cases and fuzzcheck (-Dslt, -Dfuzz for more)");
     check_step.dependOn(test_step);
+    check_step.dependOn(capi_test_step);
     check_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = xqt_exe.root_module })).step);
     const interop_run = addXqtRun(b, xqt_exe, exe, crashshim);
     interop_run.addArg("interop");
@@ -327,6 +332,109 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+}
+
+/// The C ABI: `zig build` installs libxqlite3 (static and shared) in
+/// zig-out/lib, sqlite3.h and xqlite.h in zig-out/include and a
+/// pkg-config file. `-Dcapi-name=sqlite3` names the libraries libsqlite3
+/// (a drop-in replacement), `-Dcapi=false` skips them. `zig build
+/// test-capi` runs tools/capi/capi_test.c against both libraries;
+/// `zig build capi-shell` builds SQLite's own shell (shell.c of the
+/// amalgamation, -Dsqlite-shell-c) on libxqlite3 and runs a smoke
+/// script. Returns the test-capi step.
+fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+    const enabled = b.option(bool, "capi", "Build and install the C libraries (libxqlite3) with `zig build` (default: true)") orelse true;
+    const name = b.option([]const u8, "capi-name", "Base name of the C libraries: lib<name>.a, lib<name>.so/.dylib (default: xqlite3; sqlite3 for a drop-in libsqlite3)") orelse "xqlite3";
+    const shell_c = b.option([]const u8, "sqlite-shell-c", "shell.c of the SQLite 3.54.1 amalgamation, for `zig build capi-shell` (default: /tmp/xq-sqlite-build/shell.c)") orelse "/tmp/xq-sqlite-build/shell.c";
+
+    const make = struct {
+        fn lib(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, n: []const u8, linkage: std.builtin.LinkMode) *std.Build.Step.Compile {
+            const m = bb.createModule(.{
+                .root_source_file = bb.path("src/capi.zig"),
+                .target = t,
+                .optimize = o,
+                .link_libc = true,
+                .pic = true,
+            });
+            m.addIncludePath(bb.path("include"));
+            m.addCSourceFile(.{ .file = bb.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
+            if (t.result.os.tag == .linux) m.linkSystemLibrary("pthread", .{});
+            const l = bb.addLibrary(.{
+                .name = n,
+                .linkage = linkage,
+                .root_module = m,
+                // SQLite's libtool version: libsqlite3.so.0, as on Linux
+                // distributions.
+                .version = if (linkage == .dynamic) .{ .major = 0, .minor = 8, .patch = 6 } else null,
+            });
+            if (linkage == .static) l.bundle_compiler_rt = true;
+            return l;
+        }
+    };
+    const static = make.lib(b, target, optimize, name, .static);
+    const shared = make.lib(b, target, optimize, name, .dynamic);
+
+    if (enabled) {
+        b.installArtifact(static);
+        b.installArtifact(shared);
+        b.installFile("include/sqlite3.h", "include/sqlite3.h");
+        b.installFile("include/xqlite.h", "include/xqlite.h");
+        const pc = b.addWriteFiles().add(b.fmt("{s}.pc", .{name}), b.fmt(
+            \\prefix=${{pcfiledir}}/../..
+            \\libdir=${{prefix}}/lib
+            \\includedir=${{prefix}}/include
+            \\
+            \\Name: {s}
+            \\Description: xqlite, an SQL database engine ported from SQLite to Zig, with the sqlite3 C API
+            \\Version: 3.54.1
+            \\Libs: -L${{libdir}} -l{s}
+            \\Libs.private: -lm -lpthread
+            \\Cflags: -I${{includedir}}
+            \\
+        , .{ name, name }));
+        b.getInstallStep().dependOn(&b.addInstallFileWithDir(pc, .lib, b.fmt("pkgconfig/{s}.pc", .{name})).step);
+    }
+
+    // The C test program, linked once with each library.
+    const test_step = b.step("test-capi", "Run the C API test (tools/capi/capi_test.c) against libxqlite3, static and shared");
+    for ([_]*std.Build.Step.Compile{ static, shared }, [_][]const u8{ "static", "shared" }) |lib, kind| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("capi-test-{s}", .{kind}),
+            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+        });
+        exe.root_module.addCSourceFile(.{ .file = b.path("tools/capi/capi_test.c"), .flags = &.{"-std=gnu99"} });
+        exe.root_module.addIncludePath(b.path("include"));
+        exe.root_module.linkLibrary(lib);
+        const run = b.addRunArtifact(exe);
+        run.setCwd(b.path("."));
+        run.expectExitCode(0);
+        run.has_side_effects = true;
+        test_step.dependOn(&run.step);
+    }
+
+    // SQLite's own shell on libxqlite3: the drop-in proof.
+    const shell = b.addExecutable(.{
+        .name = "sqlite3-xqlite",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    shell.root_module.addCSourceFile(.{ .file = .{ .cwd_relative = shell_c }, .flags = &.{
+        "-std=gnu99",
+        "-DSQLITE_OMIT_LOAD_EXTENSION",
+        "-DSQLITE_DQS=0",
+        "-Wno-everything",
+    } });
+    shell.root_module.addIncludePath(b.path("include"));
+    shell.root_module.linkLibrary(static);
+    const shell_step = b.step("capi-shell", "Build SQLite's shell.c (-Dsqlite-shell-c) on libxqlite3 and run tools/capi/shell_smoke.sql");
+    shell_step.dependOn(&b.addInstallArtifact(shell, .{}).step);
+    const run_shell = b.addRunArtifact(shell);
+    run_shell.addArgs(&.{ "-batch", ":memory:" });
+    run_shell.setStdIn(.{ .lazy_path = b.path("tools/capi/shell_smoke.sql") });
+    run_shell.expectStdOutEqual(@embedFile("tools/capi/shell_smoke.expected"));
+    run_shell.has_side_effects = true;
+    shell_step.dependOn(&run_shell.step);
+
+    return test_step;
 }
 
 /// `xqt --xq XQLITE --crashshim SHIM`, for `zig build check`: run from

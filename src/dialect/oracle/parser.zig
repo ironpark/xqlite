@@ -2,10 +2,13 @@
 //! supports (see docs/oracle.md), producing the syntax tree IR
 //! (src/ir/tree.zig) with Oracle's semantics resolved:
 //!
-//!  - names: unquoted identifiers folded to upper case (lexer.zig); a
-//!    schema that is not an attached database is main (the current
-//!    user's); DUAL is no table; the data dictionary views (USER_TABLES
-//!    ...) are the queries of catalog_views.zig;
+//!  - names: unquoted identifiers folded to upper case (lexer.zig);
+//!    schemas are users: MAIN (and SYS) is main, an attached database
+//!    itself, a user of CREATE USER main with the mangled name "U.T" of
+//!    catalog/schema.zig (aliased T); unqualified names resolve in the
+//!    current schema (ALTER SESSION SET CURRENT_SCHEMA, session.zig);
+//!    DUAL is no table; the data dictionary views (USER_TABLES ...) are
+//!    the queries of catalog_views.zig;
 //!  - the empty string is NULL: a '' literal is NULL, `||` and CONCAT
 //!    skip NULLs and are NULL when the result is '' (concat{skip} in
 //!    nullif(..., '')), the dialect's string functions return NULL for
@@ -45,6 +48,8 @@ const types = @import("types.zig");
 const views = @import("catalog_views.zig");
 const datetime = @import("datetime.zig");
 const jsonsql = @import("jsonsql.zig");
+const ora_state = @import("state.zig");
+const nsp = catalog.schemas;
 
 const Token = lexer.Token;
 const Name = tree.Name;
@@ -126,8 +131,10 @@ pub const Statement = union(enum) {
     /// Statements run in turn as one (MERGE, INSERT ALL, ALTER TABLE ...
     /// ADD (a, b)).
     multi: []tree.Stmt,
+    /// DDL statements run in turn as one, each checked (CREATE SCHEMA).
+    ddl: []tree.Stmt,
     /// COMMENT ON: a catalog entry.
-    comment: struct { table: Name, column: ?Name, text: ?[]const u8 },
+    comment: struct { table: tree.QName, column: ?Name, text: ?[]const u8 },
     /// Accepted and ignored (SET TRANSACTION, ALTER SESSION, LOCK TABLE).
     noop,
 };
@@ -148,6 +155,20 @@ pub const Parser = struct {
     /// The error is in `p` already (the schema could not be read).
     err_in_parse: bool = false,
     schema_read: bool = false,
+    /// The registered schemas (catalog/schema.zig), read once.
+    schemas: ?[]const nsp.Info = null,
+    /// The names of the WITH queries of the statement: an unqualified
+    /// relation with one of these names is not looked up in the current
+    /// schema.
+    cte_names: std.ArrayList([]const u8) = .empty,
+    /// The table CREATE TABLE creates (its REFERENCES may name it).
+    creating: ?nsp.Target = null,
+    /// Unqualified names stay as written (the text of a data dictionary
+    /// view).
+    no_schema: bool = false,
+    /// The statement is an element of CREATE SCHEMA: CREATE and GRANT end
+    /// a CREATE TABLE.
+    schema_element: bool = false,
     /// Column references marked (+).
     outer_marks: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
     /// The LIMIT a WHERE ROWNUM <= n puts on its query.
@@ -348,18 +369,134 @@ pub const Parser = struct {
         };
     }
 
-    /// The SQLite database of Oracle schema `n`: an attached database of
-    /// that name, TEMP, else main (the current user's schema).
-    pub fn dbName(p: *Parser, n: Name) Error!Name {
-        if (p.p) |ps| {
-            try p.readSchema();
-            if (build.findDbName(ps.db, n.text)) |i| return .{ .text = ps.db.dbs.items[i].name, .pos = n.pos };
-        }
-        return .{ .text = "main", .pos = n.pos };
+    /// The registered schemas (catalog/schema.zig: the users of CREATE
+    /// USER), read once per statement; none without the statement.
+    pub fn registered(p: *Parser) Error![]const nsp.Info {
+        if (p.schemas) |l| return l;
+        const ps = p.p orelse return &.{};
+        try p.readSchema();
+        const l = nsp.list(ps.db, p.arena) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return p.fail(0, "{s}", .{@import("../../sql/main.zig").errmsg(ps.db)}),
+        };
+        p.schemas = l;
+        return l;
     }
 
-    pub fn relation(p: *Parser, q: QName) Error!tree.QName {
-        return .{ .schema = if (q.schema) |s| try p.dbName(s) else null, .name = q.name };
+    /// The user's schema is main.
+    pub const schema_config: nsp.Config = .{ .default_schema = ora_state.user };
+
+    /// The current schema (ALTER SESSION SET CURRENT_SCHEMA) when it is
+    /// not the user's, else null.
+    pub fn currentSchema(p: *const Parser) ?[]const u8 {
+        if (p.no_schema) return null;
+        const ps = p.p orelse return null;
+        return ps.db.xq.oracle.current_schema;
+    }
+
+    /// What a missing schema fails as.
+    pub const Missing = enum { table, user, user_or_role, sequence, index };
+
+    fn noSchema(p: *Parser, s: Name, n: Name, m: Missing) Error {
+        return switch (m) {
+            .table => p.fail(s.pos, "ORA-00942: table or view \"{s}\".\"{s}\" does not exist", .{ s.text, n.text }),
+            .user => p.fail(s.pos, "ORA-01918: user '{s}' does not exist", .{s.text}),
+            .user_or_role => p.fail(s.pos, "ORA-01917: user or role '{s}' does not exist", .{s.text}),
+            .sequence => p.fail(s.pos, "ORA-02289: sequence does not exist", .{}),
+            .index => p.fail(s.pos, "ORA-01418: specified index does not exist", .{}),
+        };
+    }
+
+    /// The SQLite object of `s.n`, null if `s` is no schema: the user's
+    /// (MAIN, and SYS, whose objects are the data dictionary and DUAL)
+    /// is main, an attached database (or TEMP) itself, a user of CREATE
+    /// USER main with the mangled name "S.N".
+    pub fn schemaTarget(p: *Parser, s: Name, n: Name) Error!?nsp.Target {
+        if (std.ascii.eqlIgnoreCase(s.text, "SYS")) return .{ .db = "main", .name = n.text, .bare = n.text };
+        const ps = p.p orelse return .{ .db = "main", .name = n.text, .bare = n.text };
+        try p.readSchema();
+        return nsp.resolve(ps.db, p.arena, try p.registered(), schema_config, s.text, n.text) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.NoSuchSchema => null,
+        };
+    }
+
+    /// `s.n` resolved (schemaTarget()); no schema fails as `m` says.
+    pub fn qualified(p: *Parser, s: Name, n: Name, m: Missing) Error!nsp.Target {
+        return (try p.schemaTarget(s, n)) orelse p.noSchema(s, n, m);
+    }
+
+    pub const Lookup = enum { relation, index, sequence };
+
+    /// An unqualified name: null (as written) when the current schema is
+    /// the user's, for a WITH query, a temporary table and DUAL; else
+    /// the object of the current schema (whether it exists or not).
+    pub fn unqualified(p: *Parser, n: Name, kind: Lookup) Error!?nsp.Target {
+        const cur = p.currentSchema() orelse return null;
+        const ps = p.p.?;
+        if (kind == .relation) for (p.cte_names.items) |c| if (std.mem.eql(u8, c, n.text)) return null;
+        try p.readSchema();
+        if (kind != .sequence and objectExists(ps.db, kind, "temp", n.text)) return null;
+        const m = try nsp.mangle(p.arena, cur, n.text);
+        if (kind == .relation and std.mem.eql(u8, n.text, "DUAL") and !objectExists(ps.db, .relation, "main", m)) return null;
+        return .{ .db = "main", .name = m, .mangled = true, .bare = n.text };
+    }
+
+    /// A name resolved, and the alias a mangled one takes (so that
+    /// `t.col` finds it).
+    pub const Rel = struct { q: tree.QName, alias: ?Name = null };
+
+    /// `q` resolved: a mangled name is written without its database
+    /// (main), aliased with its bare name.
+    pub fn lookup(p: *Parser, q: QName, kind: Lookup) Error!Rel {
+        if (q.schema) |s| {
+            const t = try p.qualified(s, q.name, switch (kind) {
+                .relation => .table,
+                .index => .index,
+                .sequence => .sequence,
+            });
+            if (t.mangled) return .{ .q = .{ .name = .{ .text = t.name, .pos = q.name.pos } }, .alias = q.name };
+            return .{ .q = .{ .schema = .{ .text = t.db, .pos = s.pos }, .name = q.name } };
+        }
+        if (try p.unqualified(q.name, kind)) |t| return .{ .q = .{ .name = .{ .text = t.name, .pos = q.name.pos } }, .alias = q.name };
+        return .{ .q = .{ .name = q.name } };
+    }
+
+    /// The table (or view) `q` of a query or DML statement.
+    pub fn relation(p: *Parser, q: QName) Error!Rel {
+        return p.lookup(q, .relation);
+    }
+
+    pub const Created = struct { t: nsp.Target, schema: ?Name };
+
+    /// Where DDL creates object `q`: its schema (`no_user` says the
+    /// error if there is no such user: ORA-01918 for a table, ORA-01917
+    /// for a view or sequence), else temp for a temporary table, else the current
+    /// schema. `schema` is null for an unqualified name of the user's
+    /// schema (written as it is).
+    pub fn createTarget(p: *Parser, q: QName, temp: bool, no_user: Missing) Error!Created {
+        if (q.schema) |s| {
+            const t = try p.qualified(s, q.name, no_user);
+            if (temp and t.mangled) return p.unsupported(s.pos, "a temporary table in another user's schema");
+            return .{ .t = t, .schema = .{ .text = t.db, .pos = s.pos } };
+        }
+        const plain: nsp.Target = .{ .db = if (temp) "temp" else "main", .name = q.name.text, .bare = q.name.text };
+        if (temp) return .{ .t = plain, .schema = null };
+        const cur = p.currentSchema() orelse return .{ .t = plain, .schema = null };
+        const s = nsp.find(try p.registered(), cur) orelse return p.fail(q.name.pos, "ORA-01435: user does not exist", .{});
+        const t: nsp.Target = .{ .db = "main", .name = try nsp.mangle(p.arena, s.name, q.name.text), .mangled = true, .bare = q.name.text };
+        return .{ .t = t, .schema = .{ .text = "main", .pos = q.name.pos } };
+    }
+
+    /// The prefix "S." of a mangled name ("" for none).
+    pub fn prefixOf(t: nsp.Target) []const u8 {
+        return if (t.mangled) t.name[0 .. t.name.len - t.bare.len] else "";
+    }
+
+    /// The prefix "S." of a resolved name ("" for none).
+    pub fn relPrefix(r: Rel) []const u8 {
+        const a = r.alias orelse return "";
+        return r.q.name.text[0 .. r.q.name.text.len - a.text.len];
     }
 
     /// The table `q` names, if it exists.
@@ -375,6 +512,7 @@ pub const Parser = struct {
         try p.readSchema();
         if (q.schema) |s| if (!std.ascii.eqlIgnoreCase(s.text, "SYS")) return null;
         if (build.findTable(ps.db, q.name.text, null) != null) return null;
+        if (q.schema == null) if (try p.unqualified(q.name, .relation)) |t| if (build.findTable(ps.db, t.name, "main") != null) return null;
         const text = (try views.definition(ps, q.name.text)) orelse return null;
         var sub = Parser.init(p.arena, text, 0, null) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
@@ -382,6 +520,7 @@ pub const Parser = struct {
         };
         sub.p = ps;
         sub.schema_read = true;
+        sub.no_schema = true;
         const sel = sub.select() catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.ParseFailed => {
@@ -535,6 +674,7 @@ pub const Parser = struct {
         var ctes: std.ArrayList(tree.Cte) = .empty;
         while (true) {
             var cte: tree.Cte = .{ .name = try p.colId(), .select = undefined };
+            try p.cte_names.append(p.arena, cte.name.text);
             if (p.peek().kind == .lparen) cte.cols = try p.parenNameList();
             try p.expectKw("as");
             if (p.eatKw("materialized")) {
@@ -844,7 +984,8 @@ pub const Parser = struct {
         if (try p.catalogView(q)) |sel| {
             return .{ .source = .{ .subquery = sel }, .alias = .{ .name = q.name } };
         }
-        return .{ .source = .{ .table = try p.relation(q) } };
+        const r = try p.relation(q);
+        return .{ .source = .{ .table = r.q }, .alias = if (r.alias) |a| .{ .name = a } else null };
     }
 
     fn fromPrimary(p: *Parser) Error!tree.FromItem {
@@ -1481,12 +1622,17 @@ pub const Parser = struct {
             // seq.NEXTVAL, schema.seq.CURRVAL
             if (nt.kind == .ident and (eq(nt.text, "NEXTVAL") or eq(nt.text, "CURRVAL"))) {
                 const seq = names.items[names.items.len - 2];
-                if (p.p) |ps| if (!sequenceExists(ps.db, seq.text)) return p.fail(seq.pos, "ORA-02289: sequence does not exist", .{});
+                if (names.items.len > 3) return p.syntaxError();
+                const q: QName = .{ .schema = if (names.items.len == 3) names.items[0] else null, .name = seq };
+                const r = try p.lookup(q, .sequence);
+                // Sequences are all in main.
+                const sname = if (r.alias != null) r.q.name.text else seq.text;
+                if (p.p) |ps| if (!sequenceExists(ps.db, sname)) return p.fail(seq.pos, "ORA-02289: sequence does not exist", .{});
                 var fname: []const u8 = if (eq(nt.text, "NEXTVAL")) "nextval" else "currval";
                 if (eq(nt.text, "NEXTVAL")) {
-                    if (p.nextval_seen.contains(seq.text)) fname = "currval" else try p.nextval_seen.put(p.arena, seq.text, {});
+                    if (p.nextval_seen.contains(sname)) fname = "currval" else try p.nextval_seen.put(p.arena, sname, {});
                 }
-                const x = try p.call(start, fname, .oracle, &.{try p.stringAt(seq.pos, seq.text)});
+                const x = try p.call(start, fname, .oracle, &.{try p.stringAt(seq.pos, sname)});
                 try p.pseudo_names.put(p.arena, x, if (eq(nt.text, "NEXTVAL")) "NEXTVAL" else "CURRVAL");
                 return x;
             }
@@ -2037,6 +2183,16 @@ pub const Parser = struct {
 
 fn eq(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
+}
+
+/// Whether SQLite database `db_name` has an object `name` of kind `kind`
+/// (sequences are all in main).
+fn objectExists(db: *int.Sqlite3, kind: Parser.Lookup, db_name: []const u8, name: []const u8) bool {
+    return switch (kind) {
+        .relation => build.findTable(db, name, db_name) != null,
+        .index => build.findIndex(db, name, db_name) != null,
+        .sequence => std.mem.eql(u8, db_name, "main") and sequenceExists(db, name),
+    };
 }
 
 /// Whether sequence `name` exists (a query of xq_sequence, now).

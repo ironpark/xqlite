@@ -14,6 +14,7 @@ xqlite의 Oracle Database 방언이 지원하는 문법과 의미, 그리고 Ora
 - [트랜잭션](#트랜잭션)
 - [MERGE와 INSERT ALL](#merge와-insert-all)
 - [JSON](#json)
+- [사용자와 스키마](#사용자와-스키마)
 - [Oracle과 다른 점](#oracle과-다른-점)
 - [아직 하지 않은 것](#아직-하지-않은-것)
 - [검증](#검증)
@@ -59,6 +60,8 @@ PRAGMA xq_dialect = 'sqlite';             -- PRAGMA는 SQLite 문법 그대로 �
 | `jsonfuncs.zig` | SQL/JSON 엔진 함수(`xq_ora_json_*`)와 `JSON_TABLE`의 테이블 함수 `xq_ora_json_table` |
 | `jsonsql.zig` | SQL/JSON 문법(함수의 절, `IS JSON`, 점 표기, `JSON_TABLE`)과 파싱 뒤의 해석 |
 | `catalog_views.zig` | `USER_TABLES` 같은 데이터 사전 뷰 |
+| `session.zig` | `CREATE/DROP/ALTER USER`, `ALTER SESSION SET CURRENT_SCHEMA`, `SYS_CONTEXT` |
+| `state.zig` | 연결별 세션 상태(현재 스키마) |
 | `test.zig` | 종단 테스트 |
 
 ## 빈 문자열은 NULL
@@ -92,7 +95,7 @@ Oracle에서 `''`는 NULL입니다. 그래서 `'' IS NULL`은 참, `LENGTH('')`�
 - 따옴표 없는 식별자는 대문자로 접고(`emp` → `EMP`), `"Quoted"`는 그대로 둡니다. 그래서 이 방언이 만든 테이블과 열의 이름은 `sqlite_schema`에 대문자로 남고, `USER_TABLES.TABLE_NAME`도 Oracle처럼 `EMP`입니다.
 - SQLite의 이름 비교는 대소문자를 구분하지 않습니다. 그래서 `"Emp"`와 `EMP`는 Oracle에서는 다른 테이블이지만 xqlite에서는 같은 테이블입니다. 반대로 SQLite에서 `emp`로 만든 테이블도 이 방언에서 `EMP`, `emp`, `"emp"`로 모두 찾습니다.
 - 결과 열 이름은 Oracle 규칙을 따릅니다. 열이면 그 열 이름(만든 대로의 대소문자), 의사 열이면 `NEXTVAL`, `ROWID`, 그 밖의 식이면 식의 텍스트를 대문자로 바꾸고 공백을 뺀 것(`count(*)` → `COUNT(*)`, `NVL(b, 'x')` → `NVL(B,'X')`)입니다.
-- 스키마 이름: `schema.t`의 스키마가 붙인 데이터베이스(`ATTACH`) 이름이면 그 데이터베이스, 아니면 현재 사용자의 스키마인 `main`입니다. `USER`는 `'MAIN'`이고, `ALL_*` 뷰의 `OWNER`도 `MAIN`입니다.
+- 스키마(사용자) 이름도 같은 규칙으로 접습니다(`hr.emp`는 사용자 `HR`의 `EMP`). 스키마는 [사용자와 스키마](#사용자와-스키마)를 보세요.
 
 ## 지원 범위
 
@@ -138,7 +141,7 @@ Oracle에서 `''`는 NULL입니다. 그래서 `'' IS NULL`은 참, `LENGTH('')`�
 
 ### 트랜잭션
 
-`COMMIT [WORK]`, `ROLLBACK [WORK]`, `SAVEPOINT s`, `ROLLBACK TO [SAVEPOINT] s`. `SET TRANSACTION`, `ALTER SESSION`, `LOCK TABLE`은 받아들이고 아무것도 하지 않습니다. `EXPLAIN PLAN FOR`는 SQLite의 `EXPLAIN QUERY PLAN` 결과를 냅니다.
+`COMMIT [WORK]`, `ROLLBACK [WORK]`, `SAVEPOINT s`, `ROLLBACK TO [SAVEPOINT] s`. `SET TRANSACTION`, `ALTER SESSION`(`SET CURRENT_SCHEMA` 말고), `LOCK TABLE`은 받아들이고 아무것도 하지 않습니다. `EXPLAIN PLAN FOR`는 SQLite의 `EXPLAIN QUERY PLAN` 결과를 냅니다.
 
 ### DDL
 
@@ -187,10 +190,12 @@ Oracle에서 `''`는 NULL입니다. 그래서 `'' IS NULL`은 참, `LENGTH('')`�
 | `USER_TAB_COLUMNS`, `ALL_TAB_COLUMNS` | `COLUMN_NAME`, `DATA_TYPE`, `DATA_LENGTH`, `DATA_PRECISION`, `DATA_SCALE`, `NULLABLE`, `COLUMN_ID`, `DATA_DEFAULT`, `IDENTITY_COLUMN`, `VIRTUAL_COLUMN` |
 | `USER_VIEWS`, `ALL_VIEWS` | `VIEW_NAME`, `TEXT_LENGTH`, `TEXT`(저장된 SQLite 텍스트) |
 | `USER_SEQUENCES`, `ALL_SEQUENCES` | `SEQUENCE_NAME`, `MIN_VALUE`, `MAX_VALUE`, `INCREMENT_BY`, `CYCLE_FLAG`, `LAST_NUMBER` ... |
-| `USER_INDEXES` | `INDEX_NAME`, `TABLE_NAME`, `UNIQUENESS` |
-| `USER_TAB_COMMENTS`, `USER_COL_COMMENTS` | `COMMENT ON`의 내용 |
+| `USER_INDEXES`, `ALL_INDEXES` | `INDEX_NAME`, `TABLE_OWNER`, `TABLE_NAME`, `UNIQUENESS` |
+| `USER_TAB_COMMENTS`, `USER_COL_COMMENTS`, `ALL_*` | `COMMENT ON`의 내용 |
+| `ALL_USERS`, `DBA_USERS`, `USER_USERS` | `USERNAME`, `USER_ID`, `ACCOUNT_STATUS`, `DEFAULT_TABLESPACE` ... |
 
 - 뷰 정의는 Oracle SQL로 쓰여 있고, 프론트엔드가 FROM 자리에서 파싱해 넣습니다. 저장되는 것은 없습니다.
+- `ALL_*`은 모든 사용자의 개체를 `OWNER`(시퀀스는 `SEQUENCE_OWNER`)와 함께, `USER_*`는 연결한 사용자 `MAIN`의 개체만 보여 줍니다. `DBA_*`(`DBA_TABLES` ...)는 `ALL_*`과 같습니다. 이름은 스키마를 뗀 이름입니다(`HR.EMP`가 아니라 `EMP`).
 - 같은 이름의 테이블이 있으면 그 테이블이 먼저입니다. `SYS.USER_TABLES`처럼 `SYS`로 한정해도 됩니다.
 
 ## 타입 매핑
@@ -355,6 +360,30 @@ Oracle Database 23ai의 JSON을 지원합니다. JSON 값은 텍스트이고, �
 - `JSON` 열은 sqlite3가 그대로 읽고 씁니다. 검사는 `json_valid()`입니다. 다만 sqlite3가 넣는 값은 저장 변환을 거치지 않습니다(lax 문법은 거부되고, 숫자는 그대로).
 - `IS JSON` 검사, 그리고 SQL/JSON 함수나 `JSON_TABLE`을 쓰는 뷰·생성 열은 `xq_ora_*` 엔진 함수를 부릅니다. 그래서 sqlite3에서는 그 테이블에 쓰거나 그 뷰를 읽을 수 없습니다(다른 방언 함수와 같은 한계). xqlite는 어느 방언의 연결이든 읽습니다.
 
+## 사용자와 스키마
+
+Oracle에서 스키마는 사용자입니다. 이 방언은 사용자를 공용 스키마 구현([방언 아키텍처의 스키마](architecture.md#스키마네임스페이스))에 올립니다.
+
+- 연결한 사용자는 `MAIN`이고 그 스키마는 SQLite의 `main` 자체입니다. `USER`, `SYS_CONTEXT('USERENV', 'SESSION_USER')`, `USER_*` 뷰의 소유자, `ALL_*` 뷰의 `OWNER`가 `MAIN`입니다. 이름을 설정으로 바꾸지 않는 것은, 같은 파일을 어느 연결이 열어도 개체의 소유자가 같아야 하고 `main.t`·`MAIN.t`가 늘 같은 테이블이어야 하기 때문입니다.
+- `CREATE USER u IDENTIFIED BY p`는 스키마 `U`를 목록에 올립니다. 그 개체는 main의 `"U.T"`라는 이름의 개체이고(인덱스 `"U.I"`, 시퀀스 `"U.S"`, identity 시퀀스 `"U.ISEQ$$_T_C"`), sqlite3도 `"U.T"`로 읽고 씁니다.
+
+| 문장 | 하는 일 |
+| --- | --- |
+| `CREATE USER [IF NOT EXISTS] u IDENTIFIED ...` | 스키마 등록. 암호, `DEFAULT TABLESPACE`, `QUOTA`, `PROFILE`, `ACCOUNT` 같은 옵션은 무시. 이미 있거나 `MAIN`·`SYS`·`SYSTEM`·`PUBLIC`·붙인 데이터베이스 이름이면 `ORA-01920` |
+| `DROP USER [IF EXISTS] u [CASCADE]` | 개체(테이블, 뷰, 시퀀스, 다른 사용자 테이블의 인덱스)와 함께 지움. 개체가 있는데 `CASCADE`가 없으면 `ORA-01922`, 없는 사용자는 `ORA-01918` |
+| `ALTER USER u ...` | 사용자가 있는지만 검사(`ORA-01918`) |
+| `GRANT`, `REVOKE` | 받아들이고 무시(모든 사용자가 모든 권한을 가진 것처럼 동작) |
+| `CREATE SCHEMA AUTHORIZATION MAIN CREATE TABLE ... CREATE VIEW ... GRANT ...` | 연결한 사용자의 테이블·뷰를 한 문장(한 트랜잭션)으로 만듦. 다른 사용자 이름이면 `ORA-02421` |
+| `ALTER SESSION SET CURRENT_SCHEMA = u` | 한정하지 않은 이름의 스키마. 실행할 때 바뀌고(없는 사용자면 `ORA-01435`), 준비된 문장은 다시 컴파일됨. `MAIN`으로 되돌림 |
+| `SYS_CONTEXT('USERENV', p)` | `CURRENT_SCHEMA`는 현재 스키마, `CURRENT_USER`·`SESSION_USER`·`AUTHENTICATED_IDENTITY`는 `MAIN`, 모르는 매개변수는 `ORA-02003`. 다른 네임스페이스는 NULL |
+
+`u.t`는 어디서나 됩니다: 질의·조인·서브쿼리, INSERT·UPDATE·DELETE·MERGE·TRUNCATE, `u.t.col`, `CREATE TABLE u.t`, `REFERENCES u.t`, `CREATE INDEX u.i ON u.t`, `CREATE VIEW u.v`, `CREATE SEQUENCE u.s`와 `u.s.NEXTVAL`, `ALTER TABLE u.t`, `DROP ... u.x`, `COMMENT ON TABLE u.t`.
+
+- 이름 해석: `MAIN`(그리고 데이터 사전과 `DUAL`의 스키마 `SYS`)은 main, 붙인 데이터베이스 이름(`ATTACH`, `TEMP`)은 그 데이터베이스, 등록한 사용자는 main의 `"U.T"`입니다. 컴파일할 때 정하므로 뷰 텍스트에는 `"U.T" AS "T"`처럼 데이터베이스 이름 없이 남고, 별칭이 없는 FROM 항목·DML 대상은 원래 이름 `T`를 별칭으로 가져 `t.col`이 됩니다.
+- 현재 스키마가 `U`이면 한정하지 않은 테이블·뷰·인덱스·시퀀스 이름과 DDL이 만드는 개체는 `U`의 것입니다. 단 WITH 질의 이름, 임시 테이블, `DUAL`(`U.DUAL`이 없으면)은 그대로입니다. `USER_*` 뷰는 Oracle처럼 현재 스키마와 상관없이 `MAIN`의 개체입니다.
+- 없는 스키마의 오류는 Oracle과 같습니다: 질의·DML·DROP은 `ORA-00942`(시퀀스 `ORA-02289`, 인덱스 `ORA-01418`), `CREATE TABLE`·`CREATE INDEX`는 `ORA-01918`, `CREATE VIEW`·`CREATE SEQUENCE`는 `ORA-01917`.
+- 한계: 이름 비교가 대소문자를 구분하지 않으므로 `"hr"`와 `HR`은 같은 사용자입니다. 다른 사용자 스키마의 전역 임시 테이블, 붙인 데이터베이스의 시퀀스, 동의어(`CREATE SYNONYM`)는 지원하지 않습니다. 권한은 검사하지 않습니다. `ALL_USERS.CREATED`는 NULL입니다.
+
 ## Oracle과 다른 점
 
 | 주제 | Oracle | xqlite | 이유 |
@@ -385,7 +414,7 @@ Oracle Database 23ai의 JSON을 지원합니다. JSON 값은 텍스트이고, �
 | 쿼리 | `CONNECT BY` 계층 질의(`LEVEL`, `PRIOR`, `SYS_CONNECT_BY_PATH`), `PIVOT`/`UNPIVOT`, `MODEL`, `GROUPING SETS`/`ROLLUP`/`CUBE`, `KEEP (DENSE_RANK ...)`, `FETCH ... PERCENT`/`WITH TIES`, `SEARCH`/`CYCLE`, 플래시백(`AS OF`), `SAMPLE`, `LATERAL`/`CROSS APPLY` |
 | 함수 | 정규식(`REGEXP_LIKE` ...), `INTERVAL` 상수와 연산, `AT TIME ZONE`, `NUMTODSINTERVAL`, `TO_CHAR`의 `TH`/`SP` 접미사, NLS 매개변수, `UPPER`/`LOWER`의 ASCII 밖 문자 |
 | DML | `UPDATE t SET c = ROWNUM`, `LOG ERRORS`, `WHERE CURRENT OF` |
-| DDL | `ALTER TABLE ... MODIFY`·`ADD CONSTRAINT`·`DROP CONSTRAINT`, 한 번에 여러 열 추가·삭제, `CREATE SYNONYM`, 구체화된 뷰, 파티션, `ORGANIZATION INDEX`, `ON COMMIT DELETE ROWS`(임시 테이블은 `PRESERVE ROWS`로 동작), `ALTER SEQUENCE`, `GRANT`/`REVOKE` |
+| DDL | `ALTER TABLE ... MODIFY`·`ADD CONSTRAINT`·`DROP CONSTRAINT`, 한 번에 여러 열 추가·삭제, `CREATE SYNONYM`, 구체화된 뷰, 파티션, `ORGANIZATION INDEX`, `ON COMMIT DELETE ROWS`(임시 테이블은 `PRESERVE ROWS`로 동작), `ALTER SEQUENCE`, 권한 검사(`GRANT`/`REVOKE`는 무시) |
 | 트랜잭션 | DDL의 암묵적 커밋, 격리 수준 |
 | JSON | `IS JSON (OBJECT\|ARRAY\|SCALAR)`, `strict` 경로 모드, `JSON_TRANSFORM`의 처리기(`IGNORE ON MISSING` ...)와 `NESTED PATH`·`CASE`·`SORT` 같은 연산, `JSON_TABLE`의 `TYPE(STRICT)`와 100개가 넘는 열, 경로의 `like_regex`·`eq_regex`와 날짜 비교, `JSON_ARRAY(서브쿼리)`, `JSON_OBJECT`의 비교식 값(`'k' VALUE a > b`), JSON 검색 인덱스, `JSON_DATAGUIDE`, `JSON_EQUAL`, JSON 관계형 이중성 뷰 |
 | 오류 | 실행 중 오류의 ORA- 코드화, `ORA-01476`(0으로 나누기), `ORA-30926`(MERGE의 중복 일치) |
@@ -395,11 +424,11 @@ Oracle Database 23ai의 JSON을 지원합니다. JSON 값은 텍스트이고, �
 | 도구 | 하는 일 |
 | --- | --- |
 | `src/dialect/oracle/test.zig` | 종단 테스트(어휘, `''` 규칙, 질의, 날짜, DDL과 타입, identity·시퀀스, MERGE·INSERT ALL, 트랜잭션, 바인드 변수, 데이터 사전, JSON) |
-| `xqt dialect-diff oracle` + `tools/dialect/oracle-cases.txt` | 실제 Oracle과 차등 비교. 55개 케이스(JSON 15개)가 Oracle Database 23ai Free와 같은 행·열 이름·오류 코드를 냄 |
+| `xqt dialect-diff oracle` + `tools/dialect/oracle-cases.txt` | 실제 Oracle과 차등 비교. 61개 케이스(JSON 15개, 사용자·스키마 6개)가 Oracle Database 23ai Free와 같은 행·열 이름·오류 코드를 냄 |
 | `xqt interop oracle` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(JSON 열 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
 | `zig build fuzz -- ir_roundtrip` | 퍼저의 방언 목록에 Oracle이 있음. 다른 방언의 트리로 만든 뷰를 Oracle 프론트엔드로 읽고, Oracle의 훅으로 렌더링한 텍스트를 모든 방언에서 컴파일 |
 
-차등 비교는 Oracle 컨테이너를 띄운 뒤 실행합니다(`$ORA_SQLPLUS`, 기본값 `podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1`). 케이스는 한 번에 하나씩 돌고, 각 케이스는 사용자 XQ의 테이블·뷰·시퀀스를 지우고 날짜 형식을 이 방언의 것(`YYYY-MM-DD HH24:MI:SS`)으로 맞춘 뒤 시작합니다. 비교할 때 오류는 ORA- 코드로 맞추고(SQLite 문구의 제약 위반은 Oracle이 같은 경우에 내는 코드로), Oracle의 `.5`와 `TRUE`는 `0.5`와 `1`로 맞춥니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
+차등 비교는 Oracle 컨테이너를 띄운 뒤 실행합니다(`$ORA_SQLPLUS`, 기본값 `podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1`). 케이스는 한 번에 하나씩 돌고, 각 케이스는 SYSTEM으로 XQ에 DBA 역할을 주고 이전 케이스가 남긴 사용자(`XQ_...`)를 지운 뒤, 사용자 XQ의 테이블·뷰·시퀀스를 지우고 날짜 형식을 이 방언의 것(`YYYY-MM-DD HH24:MI:SS`)으로 맞춘 뒤 시작합니다. 비교할 때 오류는 ORA- 코드로 맞추고(SQLite 문구의 제약 위반은 Oracle이 같은 경우에 내는 코드로), Oracle의 `.5`와 `TRUE`는 `0.5`와 `1`로 맞춥니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
 
 ```sh
 podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq -e APP_USER_PASSWORD=xqpass \

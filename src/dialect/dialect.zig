@@ -229,6 +229,8 @@ pub const ConnState = struct {
     mssql: @import("mssql/state.zig").State = .{},
     /// The PostgreSQL session: search_path and the other SET parameters.
     postgres: @import("postgres/state.zig").State = .{},
+    /// The Oracle session: the current schema.
+    oracle: @import("oracle/state.zig").State = .{},
 
     pub fn deinit(s: *ConnState, gpa: std.mem.Allocator) void {
         var it = s.currval.keyIterator();
@@ -238,6 +240,7 @@ pub const ConnState = struct {
         s.mariadb.deinit(gpa);
         s.mssql.deinit(gpa);
         s.postgres.deinit(gpa);
+        s.oracle.deinit(gpa);
         s.* = .{};
     }
 };

@@ -28,7 +28,7 @@ pub fn statement(p: *Parser, s: parser.Statement) Error!void {
     var scope: Scope = .empty;
     switch (s) {
         .tree => |t| try stmt(p, t, &scope),
-        .multi => |list| for (list) |t| try stmt(p, t, &scope),
+        .multi, .ddl => |list| for (list) |t| try stmt(p, t, &scope),
         else => {},
     }
 }

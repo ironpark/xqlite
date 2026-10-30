@@ -1027,8 +1027,11 @@ fn resolveDot(p: *Parser, e: *Expr, d: Dot, scope: []const []const tree.FromItem
         return p.fail(d.names[0].pos, "ORA-00904: \"{s}\": invalid identifier", .{d.names[0].text});
     }
     const names = try p.arena.dupe(Name, d.names);
-    names[0] = try p.dbName(names[0]);
-    e.kind = .{ .column = names };
+    const t = (try p.schemaTarget(names[0], names[1])) orelse
+        return p.fail(d.names[0].pos, "ORA-00904: \"{s}\": invalid identifier", .{d.names[0].text});
+    // A table of another user's schema has its bare name as alias.
+    e.kind = .{ .column = if (t.mangled) names[1..] else names };
+    names[0] = .{ .text = t.db, .pos = names[0].pos };
     _ = p.pseudo_names.remove(e);
 }
 

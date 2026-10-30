@@ -28,6 +28,7 @@ const catalog = @import("../../catalog/catalog.zig");
 const parser = @import("parser.zig");
 const types = @import("types.zig");
 const funcs = @import("funcs.zig");
+const ora_state = @import("state.zig");
 
 const Parser = parser.Parser;
 const Statement = parser.Statement;
@@ -106,7 +107,7 @@ fn stmt(p: *Parser) Error!Statement {
         _ = p.advance();
         try p.expectKw("table");
         const q = try p.qname();
-        var tr: tree.Truncate = .{ .table = try p.relation(q) };
+        var tr: tree.Truncate = .{ .table = (try p.relation(q)).q };
         tr.restart_identity = false;
         skipRest(p);
         return .{ .tree = .{ .truncate = try p.new(tree.Truncate, tr) } };
@@ -115,8 +116,12 @@ fn stmt(p: *Parser) Error!Statement {
         _ = p.advance();
         const old = try p.colId();
         try p.expectKw("to");
-        const new = try p.colId();
-        return .{ .tree = .{ .alter_table = try p.new(tree.AlterTable, .{ .name = .{ .name = old }, .action = .{ .rename_to = new } }) } };
+        var new = try p.colId();
+        // In the current schema, where the object stays.
+        const r = try p.relation(.{ .name = old });
+        const prefix = Parser.relPrefix(r);
+        if (prefix.len > 0) new.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, new.text });
+        return .{ .tree = .{ .alter_table = try p.new(tree.AlterTable, .{ .name = r.q, .action = .{ .rename_to = new } }) } };
     }
     if (eq(w, "COMMENT")) return comment(p);
     if (eq(w, "EXPLAIN")) {
@@ -139,7 +144,12 @@ fn stmt(p: *Parser) Error!Statement {
         };
     }
     if (eq(w, "BEGIN") or eq(w, "DECLARE")) return p.unsupported(t.start, "PL/SQL");
-    if (eq(w, "GRANT") or eq(w, "REVOKE") or eq(w, "AUDIT") or eq(w, "NOAUDIT") or eq(w, "ANALYZE") or eq(w, "PURGE") or eq(w, "FLASHBACK") or eq(w, "CALL")) {
+    if (eq(w, "GRANT") or eq(w, "REVOKE")) {
+        // Privileges: every user may do everything (accepted, ignored).
+        skipRest(p);
+        return .noop;
+    }
+    if (eq(w, "AUDIT") or eq(w, "NOAUDIT") or eq(w, "ANALYZE") or eq(w, "PURGE") or eq(w, "FLASHBACK") or eq(w, "CALL")) {
         return p.unsupported(t.start, try std.ascii.allocUpperString(p.arena, w));
     }
     return p.fail(t.start, "ORA-00900: invalid SQL statement", .{});
@@ -150,8 +160,9 @@ fn stmt(p: *Parser) Error!Statement {
 /// A target: `[schema.]t [alias]`.
 fn targetTable(p: *Parser) Error!struct { table: tree.QName, alias: ?Name } {
     const q = try p.qname();
-    const table = try p.relation(q);
-    var alias: ?Name = null;
+    const r = try p.relation(q);
+    const table = r.q;
+    var alias: ?Name = r.alias;
     const a = p.peek();
     if (a.kind == .qident or (a.kind == .ident and !parser.isReserved(a.text) and !a.isAnyKw(&.{ "using", "values", "returning", "log" }))) {
         _ = p.advance();
@@ -341,7 +352,8 @@ fn merge(p: *Parser) Error!Statement {
         _ = try p.expect(.rparen);
         src = .{ .source = .{ .subquery = s } };
     } else {
-        src = .{ .source = .{ .table = try p.relation(try p.qname()) } };
+        const r = try p.relation(try p.qname());
+        src = .{ .source = .{ .table = r.q }, .alias = if (r.alias) |a| .{ .name = a } else null };
     }
     {
         const a = p.peek();
@@ -624,30 +636,15 @@ fn create(p: *Parser) Error!Statement {
         if (or_replace) return p.syntaxError();
         return .{ .tree = .{ .create_table = try createTable(p, temp) } };
     }
-    if (p.eatKw("view")) {
-        const q = try p.qname();
-        var v: tree.CreateView = .{ .or_replace = or_replace, .name = .{ .schema = .{ .text = "main" }, .name = q.name }, .select = undefined };
-        if (q.schema) |s| v.name.schema = try p.dbName(s);
-        v.if_not_exists = false;
-        if (p.peek().kind == .lparen) v.cols = try p.parenNameList();
-        try p.expectKw("as");
-        v.select = try p.select();
-        if (p.eatKw("with")) {
-            if (p.eatKw("read")) {
-                try p.expectKw("only");
-            } else {
-                try p.expectKw("check");
-                try p.expectKw("option");
-                if (p.eatKw("constraint")) _ = try p.colId();
-            }
-        }
-        return .{ .tree = .{ .create_view = try p.new(tree.CreateView, v) } };
-    }
+    if (p.eatKw("view")) return .{ .tree = .{ .create_view = try createView(p, or_replace) } };
     if (p.eatKw("sequence")) {
         var s: tree.CreateSequence = .{ .name = undefined };
         s.if_not_exists = try p.ifNotExists();
         const q = try p.qname();
-        s.name = .{ .name = q.name };
+        const c = try p.createTarget(q, false, .user_or_role);
+        // Sequences are all in main (xq_sequence).
+        if (!std.mem.eql(u8, c.t.db, "main")) return p.unsupported(q.schema.?.pos, "a sequence in an attached database");
+        s.name = .{ .name = .{ .text = c.t.name, .pos = q.name.pos } };
         s.opts = try seqOptions(p);
         return .{ .tree = .{ .create_sequence = try p.new(tree.CreateSequence, s) } };
     }
@@ -655,11 +652,65 @@ fn create(p: *Parser) Error!Statement {
         if (or_replace or temp) return p.syntaxError();
         return .{ .tree = .{ .create_index = try createIndex(p) } };
     }
+    if (p.isKw("schema")) {
+        if (or_replace or temp) return p.syntaxError();
+        return createSchema(p);
+    }
     if (p.isAnyKw(&.{ "procedure", "function", "package", "trigger", "type", "library" })) return p.unsupported(at, "PL/SQL");
     if (p.isKw("public") or p.isKw("synonym")) return p.unsupported(at, "CREATE SYNONYM");
     if (p.isKw("materialized")) return p.unsupported(at, "CREATE MATERIALIZED VIEW");
     if (p.peek().kind == .ident) return p.unsupported(at, try std.fmt.allocPrint(p.arena, "CREATE {s}", .{p.peek().text}));
     return p.fail(at, "ORA-00901: invalid CREATE command", .{});
+}
+
+/// CREATE VIEW, after VIEW.
+fn createView(p: *Parser, or_replace: bool) Error!*tree.CreateView {
+    const q = try p.qname();
+    const c = try p.createTarget(q, false, .user_or_role);
+    var v: tree.CreateView = .{ .or_replace = or_replace, .name = .{ .schema = .{ .text = c.t.db }, .name = .{ .text = c.t.name, .pos = q.name.pos } }, .select = undefined };
+    v.if_not_exists = false;
+    if (p.peek().kind == .lparen) v.cols = try p.parenNameList();
+    try p.expectKw("as");
+    v.select = try p.select();
+    if (p.eatKw("with")) {
+        if (p.eatKw("read")) {
+            try p.expectKw("only");
+        } else {
+            try p.expectKw("check");
+            try p.expectKw("option");
+            if (p.eatKw("constraint")) _ = try p.colId();
+        }
+    }
+    return p.new(tree.CreateView, v);
+}
+
+/// CREATE SCHEMA AUTHORIZATION user { CREATE TABLE ... | CREATE VIEW ...
+/// | GRANT ... } ...: the tables and views, made by one statement, of
+/// the connected user (whose name the statement must give). GRANTs are
+/// ignored.
+fn createSchema(p: *Parser) Error!Statement {
+    _ = p.advance(); // SCHEMA
+    try p.expectKw("authorization");
+    const u = try p.colId();
+    if (!eq(u.text, ora_state.user)) return p.fail(u.pos, "ORA-02421: missing or invalid schema authorization identifier", .{});
+    var out: std.ArrayList(tree.Stmt) = .empty;
+    p.schema_element = true;
+    defer p.schema_element = false;
+    while (p.peek().kind != .eof) {
+        const at = p.peek().start;
+        if (p.eatKw("grant")) {
+            while (p.peek().kind != .eof and !p.isKw("create") and !p.isKw("grant")) _ = p.advance();
+            continue;
+        }
+        if (!p.eatKw("create")) return p.fail(at, "ORA-02422: missing or invalid schema element", .{});
+        if (p.isKw("table")) {
+            try out.append(p.arena, .{ .create_table = try createTable(p, false) });
+        } else if (p.eatKw("view")) {
+            try out.append(p.arena, .{ .create_view = try createView(p, false) });
+        } else return p.fail(at, "ORA-02422: missing or invalid schema element", .{});
+    }
+    if (out.items.len == 0) return p.fail(p.peek().start, "ORA-02422: missing or invalid schema element", .{});
+    return .{ .ddl = out.items };
 }
 
 /// Sequence options; Oracle's defaults are SQLite's (xq_sequence's):
@@ -704,10 +755,12 @@ fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
     _ = p.advance(); // TABLE
     const if_not_exists = try p.ifNotExists();
     const q = try p.qname();
+    const dest = try p.createTarget(q, temp, .user);
+    p.creating = dest.t;
     var ct: tree.CreateTable = .{
         .temp = temp,
         .if_not_exists = if_not_exists,
-        .name = .{ .schema = if (q.schema != null and !temp) try p.dbName(q.schema.?) else null, .name = q.name },
+        .name = .{ .schema = if (temp) null else dest.schema, .name = .{ .text = dest.t.name, .pos = q.name.pos } },
         .strict = true,
     };
     const table = q.name.text;
@@ -736,9 +789,11 @@ fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
         for (pk_cols) |k| for (cols.items) |*c| if (eq(c.name.text, k.text)) try addNotNull(p, c);
         ct.columns = cols.items;
         ct.constraints = cons.items;
+        // The identity sequences are in the table's schema.
+        try prefixIdentity(p, Parser.prefixOf(dest.t), ct.columns);
     }
     // Physical properties are ignored; ON COMMIT of a temporary table.
-    while (p.peek().kind != .eof and !p.isKw("as")) {
+    while (p.peek().kind != .eof and !p.isKw("as") and !(p.schema_element and (p.isKw("create") or p.isKw("grant")))) {
         if (p.isKw("on") and p.isKwAt(1, "commit")) {
             _ = p.advance();
             _ = p.advance();
@@ -774,6 +829,14 @@ fn skipClause(p: *Parser) Error!void {
         }
     }
     _ = p.advance();
+}
+
+/// The identity sequences of `cols` named in schema `prefix` ("S.").
+fn prefixIdentity(p: *Parser, prefix: []const u8, cols: []tree.ColumnDef) Error!void {
+    if (prefix.len == 0) return;
+    for (cols) |c| for (c.constraints) |*cc| if (cc.kind == .identity) {
+        cc.kind.identity.sequence = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, cc.kind.identity.sequence });
+    };
 }
 
 fn addNotNull(p: *Parser, c: *tree.ColumnDef) Error!void {
@@ -975,6 +1038,12 @@ fn references(p: *Parser) Error!tree.Ref {
     try p.expectKw("references");
     const q = try p.qname();
     var r: tree.Ref = .{ .table = q.name };
+    // SQLite's REFERENCES names a table of the same database.
+    if (q.schema) |s| {
+        r.table.text = (try p.qualified(s, q.name, .table)).name;
+    } else if (p.creating != null and std.mem.eql(u8, p.creating.?.bare, q.name.text)) {
+        r.table.text = p.creating.?.name;
+    } else if (try p.unqualified(q.name, .relation)) |t| r.table.text = t.name;
     if (p.peek().kind == .lparen) r.cols = try p.parenNameList();
     if (p.isKw("on") and p.isKwAt(1, "delete")) {
         _ = p.advance();
@@ -1018,11 +1087,16 @@ fn createIndex(p: *Parser) Error!*tree.CreateIndex {
     try p.expectKw("index");
     ci.if_not_exists = try p.ifNotExists();
     const iq = try p.qname();
-    ci.name = .{ .name = iq.name };
     try p.expectKw("on");
     const q = try p.qname();
-    if (q.schema) |s| ci.name.schema = try p.dbName(s);
-    ci.table = q.name;
+    const rel = try p.relation(q);
+    ci.table = rel.q.name;
+    // The index is in its schema (else the current one), its table in
+    // the same SQLite database.
+    const idx = try p.createTarget(iq, false, .user);
+    ci.name = .{ .schema = rel.q.schema, .name = .{ .text = idx.t.name, .pos = iq.name.pos } };
+    if (idx.t.mangled or rel.alias != null) ci.name.schema = .{ .text = "main", .pos = iq.name.pos };
+    if (iq.schema != null and !idx.t.mangled) ci.name.schema = idx.schema;
     _ = try p.expect(.lparen);
     var items: std.ArrayList(tree.IndexItem) = .empty;
     while (true) {
@@ -1055,7 +1129,20 @@ fn drop(p: *Parser) Error!*tree.Drop {
     } else return p.syntaxError();
     d.if_exists = try p.ifExists();
     const q = try p.qname();
-    d.name = .{ .schema = if (q.schema) |s| try p.dbName(s) else null, .name = q.name };
+    const kind: Parser.Lookup = switch (d.kind) {
+        .table, .view => .relation,
+        .index => .index,
+        .sequence => .sequence,
+    };
+    if (d.if_exists and q.schema != null and try p.schemaTarget(q.schema.?, q.name) == null) {
+        // No such user: a name nothing has.
+        d.name = .{ .schema = .{ .text = "main" }, .name = .{ .text = try catalog.schemas.mangle(p.arena, q.schema.?.text, q.name.text), .pos = q.name.pos } };
+    } else {
+        const r = try p.lookup(q, kind);
+        d.name = r.q;
+        // Sequences are all in main.
+        if (d.kind == .sequence) d.name.schema = null;
+    }
     if (p.eatKw("cascade")) try p.expectKw("constraints");
     _ = p.eatKw("purge");
     _ = p.eatKw("online");
@@ -1067,12 +1154,17 @@ fn alterTable(p: *Parser) Error!Statement {
     _ = p.advance(); // ALTER
     _ = p.advance(); // TABLE
     const q = try p.qname();
-    const name: tree.QName = .{ .schema = if (q.schema) |s| try p.dbName(s) else null, .name = q.name };
+    const r = try p.relation(q);
+    const name = r.q;
+    const prefix = Parser.relPrefix(r);
     const at = p.peek().start;
     var a: tree.AlterTable = .{ .name = name, .action = undefined };
     if (p.eatKw("rename")) {
         if (p.eatKw("to")) {
-            a.action = .{ .rename_to = try p.colId() };
+            // The table stays in its schema.
+            var to = try p.colId();
+            if (prefix.len > 0) to.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, to.text });
+            a.action = .{ .rename_to = to };
         } else {
             if (p.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... RENAME CONSTRAINT");
             try p.expectKw("column");
@@ -1083,7 +1175,9 @@ fn alterTable(p: *Parser) Error!Statement {
     } else if (p.eatKw("add")) {
         if (p.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign" })) return p.unsupported(at, "ALTER TABLE ... ADD CONSTRAINT");
         const paren = p.eat(.lparen);
-        a.action = .{ .add_column = .{ .def = try columnDef(p, q.name.text) } };
+        var def = try columnDef(p, q.name.text);
+        try prefixIdentity(p, prefix, (&def)[0..1]);
+        a.action = .{ .add_column = .{ .def = def } };
         if (paren) {
             if (p.peek().kind == .comma) return p.unsupported(p.peek().start, "adding several columns in one ALTER TABLE (add them one at a time)");
             _ = try p.expect(.rparen);
@@ -1110,22 +1204,23 @@ fn alterTable(p: *Parser) Error!Statement {
 fn comment(p: *Parser) Error!Statement {
     _ = p.advance(); // COMMENT
     try p.expectKw("on");
-    var table: Name = undefined;
+    var q: parser.QName = undefined;
     var column: ?Name = null;
     if (p.eatKw("table")) {
-        table = (try p.qname()).name;
+        q = try p.qname();
     } else if (p.eatKw("column")) {
         const first = try p.colId();
         _ = try p.expect(.dot);
         const second = try p.anyName();
         if (p.eat(.dot)) {
-            table = second;
+            q = .{ .schema = first, .name = second };
             column = try p.anyName();
         } else {
-            table = first;
+            q = .{ .name = first };
             column = second;
         }
     } else return p.unsupported(p.peek().start, "this COMMENT ON");
+    const table = (try p.relation(q)).q;
     try p.expectKw("is");
     const t = try p.expect(.string);
     return .{ .comment = .{ .table = table, .column = column, .text = if (t.text.len == 0) null else t.text } };

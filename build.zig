@@ -287,6 +287,54 @@ pub fn build(b: *std.Build) void {
     tools_step.dependOn(&b.addInstallArtifact(xqt_exe, .{}).step);
     tools_step.dependOn(&b.addInstallArtifact(crashshim, .{}).step);
 
+    // `zig build test-wasi`: the unit tests (module and CLI) built for
+    // wasm32-wasi and run under wasmtime, then `xqt wasi`, which runs an
+    // xqlite built for wasm32-wasi (ReleaseSafe) against sqlite3 and this
+    // native build. Needs wasmtime on PATH. docs/wasm.md.
+    const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const wasi_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasi_target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const wasi_exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = wasi_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "xqlite", .module = wasi_mod }},
+    });
+    const wasi_safe_exe = b.addExecutable(.{
+        .name = "xqlite",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = wasi_target,
+            .optimize = .safe,
+            .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = wasi_target,
+                .optimize = .safe,
+                .link_libc = true,
+            }) }},
+        }),
+    });
+    const test_wasi_step = b.step("test-wasi", "Run the unit tests and `xqt wasi` on wasm32-wasi under wasmtime");
+    for ([_]*std.Build.Step.Compile{
+        b.addTest(.{ .root_module = wasi_mod, .filters = test_filters }),
+        b.addTest(.{ .root_module = wasi_exe_mod, .filters = test_filters }),
+    }) |t| {
+        const run = b.addSystemCommand(&.{ "wasmtime", "run", "--dir", "." });
+        run.addArtifactArg(t);
+        // The tests make their temporary directories under .zig-cache/tmp.
+        run.setCwd(b.path("."));
+        run.has_side_effects = true;
+        test_wasi_step.dependOn(&run.step);
+    }
+    const wasi_run = addXqtRun(b, xqt_exe, exe, crashshim);
+    wasi_run.addArgs(&.{ "wasi", "--wasm" });
+    wasi_run.addArtifactArg(wasi_safe_exe);
+    test_wasi_step.dependOn(&wasi_run.step);
+
     // `zig build check`: everything at once, in parallel. The unit tests,
     // every `xqt interop` module, every planner case file but vtablog.txt
     // and fuzzcheck on SQLite's corpora; -Dslt=true adds sqllogictest

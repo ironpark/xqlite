@@ -287,3 +287,68 @@ test "mssql: JSON in the schema" {
     main_mod.setDialect(c.db, .sqlite);
     try c.expectRows("SELECT * FROM jv", "[{\"id\":1,\"doc\":\"{\\\"a\\\":\\\"x\\\"}\"}]\n");
 }
+
+test "mssql: schemas" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec("CREATE SCHEMA sales; CREATE SCHEMA hr AUTHORIZATION dbo");
+    try c.expectRows("SELECT name, schema_id FROM sys.schemas WHERE schema_id BETWEEN 5 AND 100 ORDER BY schema_id", "sales|5\nhr|6\n");
+    try c.expectError("CREATE SCHEMA sales", "There is already an object named 'sales' in the database.");
+    try c.expectError("CREATE SCHEMA dbo", "The specified schema name \"dbo\" either does not exist or you do not have permission to use it.");
+    try c.exec("CREATE TABLE sales.orders (id INT IDENTITY(1,1) PRIMARY KEY, item VARCHAR(5)); CREATE TABLE orders (id INT, n INT)");
+    try c.exec("INSERT INTO sales.orders (item) VALUES ('a'), ('b'); INSERT INTO orders VALUES (1, 10)");
+    try c.expectRows("SELECT orders.id, orders.item FROM sales.orders ORDER BY id", "1|a\n2|b\n");
+    try c.expectRows("SELECT s.item, o.n FROM main.sales.orders s JOIN dbo.orders o ON s.id = o.id", "a|10\n");
+    try c.expectRows("SELECT sales.orders.item FROM sales.orders WHERE sales.orders.id = 2", "b\n");
+    try c.expectRows("SELECT IDENT_CURRENT('sales.orders'), SCOPE_IDENTITY()", "2|2\n");
+    try c.exec("UPDATE sales.orders SET item = 'z' WHERE id = 1; DELETE FROM sales.orders WHERE orders.id = 2");
+    try c.expectRows("SELECT * FROM sales.orders", "1|z\n");
+    try c.expectError("INSERT INTO sales.orders (item) VALUES ('toolong')", "String or binary data would be truncated in table 'main.sales.orders', column 'item'. Truncated value: 'toolo'.");
+    try c.expectError("CREATE TABLE sales.orders (x INT)", "There is already an object named 'orders' in the database.");
+    try c.expectError("CREATE TABLE nope.t (x INT)", "The specified schema name \"nope\" either does not exist or you do not have permission to use it.");
+    try c.expectError("SELECT * FROM nope.t", "Invalid object name 'nope.t'.");
+    try c.expectError("SELECT * FROM sales.nope", "Invalid object name 'sales.nope'.");
+    try c.expectError("DROP TABLE sales.nope", "Cannot drop the table 'sales.nope', because it does not exist or you do not have permission.");
+    // Views, sequences, indexes in a schema.
+    try c.exec("CREATE VIEW hr.v AS SELECT id, item FROM sales.orders; CREATE SEQUENCE hr.q START WITH 10; CREATE INDEX ix ON sales.orders (item)");
+    try c.expectRows("SELECT v.item, NEXT VALUE FOR hr.q FROM hr.v", "z|10\n");
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE name LIKE '%.%' ORDER BY name", "hr.v\nsales.ix\nsales.orders\n");
+    try c.exec("DROP INDEX ix ON sales.orders");
+    // Catalog views and functions.
+    try c.expectRows("SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES ORDER BY 1, 2", "dbo|orders\nhr|v\nsales|orders\n");
+    try c.expectRows("SELECT name, SCHEMA_NAME(schema_id) FROM sys.tables ORDER BY 2", "orders|dbo\norders|sales\n");
+    try c.expectRows("SELECT name, schema_id FROM sys.sequences", "q|6\n");
+    try c.expectRows("SELECT OBJECT_NAME(OBJECT_ID('sales.orders')), OBJECT_SCHEMA_NAME(OBJECT_ID('[sales].[orders]')), OBJECT_SCHEMA_NAME(OBJECT_ID('orders'))", "orders|sales|dbo\n");
+    try c.expectRows("SELECT SCHEMA_ID('hr'), SCHEMA_ID('dbo'), SCHEMA_ID('nope'), SCHEMA_NAME(5), SCHEMA_NAME(), SCHEMA_NAME(99)", "6|1|NULL|sales|dbo|NULL\n");
+    try c.expectRows("SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('sales.orders')", "2\n");
+    // DROP SCHEMA: only an empty one.
+    try c.expectError("DROP SCHEMA hr", "Cannot drop schema 'hr' because it is being referenced by object 'q'.");
+    try c.expectError("DROP SCHEMA nope", "Cannot drop the schema 'nope', because it does not exist or you do not have permission.");
+    try c.expectError("DROP SCHEMA dbo", "Cannot drop the schema 'dbo'.");
+    try c.exec("DROP VIEW hr.v; DROP SEQUENCE hr.q; DROP SCHEMA hr; DROP SCHEMA IF EXISTS hr");
+    try c.expectRows("SELECT COUNT(*) FROM sys.schemas WHERE name = 'hr'", "0\n");
+    // ALTER SCHEMA ... TRANSFER, sp_rename keep the schema.
+    try c.exec("CREATE SCHEMA hr; CREATE TABLE hr.emp (n INT); INSERT INTO hr.emp VALUES (1)");
+    try c.expectRows("SELECT schema_id FROM sys.schemas WHERE name = 'hr'", "6\n");
+    try c.exec("ALTER SCHEMA sales TRANSFER OBJECT::hr.emp; EXEC sp_rename 'sales.emp', 'staff'");
+    try c.expectRows("SELECT n FROM sales.staff", "1\n");
+    try c.exec("ALTER SCHEMA dbo TRANSFER sales.staff");
+    try c.expectRows("SELECT n FROM staff", "1\n");
+    try c.expectError("ALTER SCHEMA sales TRANSFER dbo.orders", "The object with name \"orders\" already exists.");
+    try c.expectError("ALTER SCHEMA nope TRANSFER dbo.orders", "Cannot alter the schema 'nope', because it does not exist or you do not have permission.");
+    try c.expectError("ALTER SCHEMA hr TRANSFER sales.orders", "xqlite: ALTER SCHEMA ... TRANSFER of a table with an IDENTITY column is not supported");
+    // Elements of CREATE SCHEMA: in the schema, which names resolve in first.
+    try c.exec("CREATE SCHEMA el CREATE TABLE e (a INT) CREATE VIEW ev AS SELECT a FROM e GRANT SELECT ON SCHEMA::el TO public");
+    try c.exec("CREATE TABLE e2 (a INT)");
+    try c.expectRows("SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME LIKE 'e%' ORDER BY 1, 2", "dbo|e2\nel|e\nel|ev\n");
+    // ALTER USER ... WITH DEFAULT_SCHEMA: the session's default schema.
+    try c.exec("ALTER USER me WITH DEFAULT_SCHEMA = el; CREATE TABLE f (a INT); INSERT INTO e VALUES (5)");
+    try c.expectRows("SELECT SCHEMA_NAME(), (SELECT a FROM ev), (SELECT COUNT(*) FROM e2)", "el|5|0\n");
+    try c.exec("ALTER USER me WITH DEFAULT_SCHEMA = dbo");
+    try c.expectRows("SELECT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'f'", "el\n");
+    try c.expectError("SELECT * FROM f", "Invalid object name 'f'.");
+    // sqlite3 reads the tables by their SQLite names.
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT item FROM \"sales.orders\"", "z\n");
+}

@@ -40,6 +40,13 @@ pub const State = struct {
     /// rowid), which its WHEN MATCHED clauses leave alone.
     merge_src: std.AutoHashMapUnmanaged(i64, void) = .empty,
     merge_tgt: std.AutoHashMapUnmanaged(i64, void) = .empty,
+    /// ALTER USER ... WITH DEFAULT_SCHEMA = s: the schema (of CREATE
+    /// SCHEMA) unqualified names resolve in before dbo, and where they
+    /// are created; null for dbo. The session's, as xqlite has no users.
+    default_schema: ?[]u8 = null,
+    /// CREATE SCHEMA s CREATE TABLE ... : the schema the elements that
+    /// follow (CREATE TABLE/VIEW up to the end of the statement) go in.
+    schema_element: ?[]u8 = null,
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         var it = s.vars.iterator();
@@ -50,6 +57,8 @@ pub const State = struct {
         s.vars.deinit(gpa);
         if (s.identity_insert) |z| gpa.free(z);
         if (s.tran_name) |z| gpa.free(z);
+        if (s.default_schema) |z| gpa.free(z);
+        if (s.schema_element) |z| gpa.free(z);
         s.merge_src.deinit(gpa);
         s.merge_tgt.deinit(gpa);
         s.* = .{};

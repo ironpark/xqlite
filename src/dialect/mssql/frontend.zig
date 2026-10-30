@@ -11,6 +11,7 @@
 //!    functions.zig: function calls, CAST/CONVERT; dml.zig: INSERT,
 //!    UPDATE, DELETE, MERGE, TRUNCATE; ddl.zig: CREATE/DROP/ALTER;
 //!    session.zig: DECLARE, SET, transactions, PRINT, USE, sp_rename;
+//!    schemas.zig: CREATE/DROP/ALTER SCHEMA and the schema functions;
 //!    catalog_views.zig: INFORMATION_SCHEMA and sys views;
 //!  - types.zig: SQL Server types, their storage and checks;
 //!    runtime.zig: the dialect's functions; state.zig: the session;
@@ -40,6 +41,7 @@ const dml = @import("dml.zig");
 const ddl = @import("ddl.zig");
 const session = @import("session.zig");
 const rt = @import("runtime.zig");
+const schemas = @import("schemas.zig");
 const jf = @import("json_func.zig");
 const maria = @import("../mariadb/runtime.zig");
 
@@ -60,6 +62,14 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
         return;
     }
     enableForeignKeys(p.db);
+    // An element of the CREATE SCHEMA compiled before: in its schema.
+    const st = &p.db.xq.mssql;
+    const element: ?[]const u8 = if (st.schema_element) |e| try p.arena.dupe(u8, e) else null;
+    if (st.schema_element) |e| {
+        p.db.gpa.free(e);
+        st.schema_element = null;
+    }
+    if (element != null and schemas.isElement(&s)) s.element_schema = element;
     const ok = blk: {
         statement(&s) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
@@ -76,6 +86,10 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
         try translateError(p);
         return error.ParseFailed;
     }
+    // More elements of the same CREATE SCHEMA follow.
+    if (s.element_schema) |e| if (schemas.isElement(&s)) {
+        @TypeOf(st.*).setText(p.db.gpa, &st.schema_element, e) catch return error.OutOfMemory;
+    };
     if (s.isOp(";") or s.tok.kind == .go) {
         s.advance();
         p.tail = sql[@intFromPtr(s.prev_end) - @intFromPtr(sql.ptr) ..];
@@ -122,6 +136,10 @@ fn statement(s: *Parser) Error!void {
     if (t.isKw("PRINT")) return session.print(s);
     if (t.isKw("USE")) return session.use(s);
     if (t.isKw("EXEC") or t.isKw("EXECUTE")) return session.exec(s);
+    if (t.isAnyKw(&.{ "GRANT", "REVOKE", "DENY" })) {
+        if (s.element_schema != null) return schemas.skipPermission(s);
+        return s.fail("xqlite: {s} is not supported (xqlite has no permissions)", .{t.text});
+    }
     if (t.isAnyKw(&.{ "IF", "WHILE", "RETURN", "GOTO", "BREAK", "CONTINUE", "TRY", "THROW", "RAISERROR", "WAITFOR" })) {
         return s.fail("xqlite: {s} is not supported (T-SQL control flow is not)", .{t.text});
     }
@@ -201,8 +219,11 @@ fn translateError(p: *int.Parse) int.Oom!void {
     };
     for (rules) |r| if (std.mem.startsWith(u8, m, r[0])) {
         var name = m[r[0].len..];
+        // main.t: the user wrote dbo.t (the parser keeps an unqualified
+        // name unqualified).
+        const dbo = std.mem.startsWith(u8, name, "main.") and std.mem.startsWith(u8, r[1], "Invalid");
         if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
-        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}", .{ r[1], name, r[2] }, 0);
+        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}{s}", .{ r[1], if (dbo) "dbo." else "", name, r[2] }, 0);
         return;
     };
     if (std.mem.startsWith(u8, m, "no such column: ")) {
@@ -297,6 +318,16 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("eomonth", 1, det, rt.eomonthFunc),
     dfunc.scalar("eomonth", 2, det, rt.eomonthFunc),
     dfunc.scalar("datefromparts", 3, det, rt.datefrompartsFunc),
+    // Schemas (schemas.zig).
+    dfunc.scalar("xq_tsql_default_schema", 1, direct, schemas.defaultSchemaFunc),
+    dfunc.scalar("xq_tsql_schema_id", 0, .{}, schemas.schemaIdFunc),
+    dfunc.scalar("xq_tsql_schema_id", 1, .{}, schemas.schemaIdFunc),
+    dfunc.scalar("xq_tsql_schema_name", 0, .{}, schemas.schemaNameFunc),
+    dfunc.scalar("xq_tsql_schema_name", 1, .{}, schemas.schemaNameFunc),
+    dfunc.scalar("xq_tsql_object_name", 1, .{}, schemas.objectNameFunc),
+    dfunc.scalar("xq_tsql_object_schema_name", 1, .{}, schemas.objectSchemaNameFunc),
+    dfunc.scalar("xq_tsql_schema_of", 1, .{}, schemas.schemaOfFunc),
+    dfunc.scalar("xq_tsql_bare_name", 1, .{}, schemas.bareNameFunc),
 };
 
 /// The functions the parser's trees call where SQL Server's semantics

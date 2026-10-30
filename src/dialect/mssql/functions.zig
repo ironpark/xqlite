@@ -384,7 +384,10 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
         return s.func(pos, "datepart", &.{ try s.str(pos, try std.ascii.allocLowerString(s.a, n)), args[0] });
     }
     if (eq(n, "db_name") or eq(n, "original_db_name")) return s.str(pos, "main");
-    if (eq(n, "schema_name")) return s.str(pos, "dbo");
+    if (eq(n, "schema_name") and k <= 1) return s.func(pos, "xq_tsql_schema_name", args);
+    if (eq(n, "schema_id") and k <= 1) return s.func(pos, "xq_tsql_schema_id", args);
+    if (eq(n, "object_name") and k == 1) return s.func(pos, "xq_tsql_object_name", args);
+    if (eq(n, "object_schema_name") and k == 1) return s.func(pos, "xq_tsql_object_schema_name", args);
     if (eq(n, "user_name") or eq(n, "suser_sname") or eq(n, "suser_name") or eq(n, "current_user") or eq(n, "session_user") or eq(n, "user")) {
         return s.str(pos, "dbo");
     }
@@ -424,17 +427,15 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
 fn objectId(s: *Parser, pos: u32, args: []const *Expr) Error!*Expr {
     if (args.len < 1 or args.len > 2) return argCount(s, "object_id");
     if (args[0].kind != .string) return s.fail("xqlite: OBJECT_ID needs a constant name", .{});
-    var z = args[0].kind.string;
-    var schema: []const u8 = "main";
-    // tempdb..#t, dbo.t, [dbo].[t]
-    var parts: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.splitScalar(u8, z, '.');
-    while (it.next()) |part| try parts.append(s.a, std.mem.trim(u8, part, "[]\""));
-    z = parts.items[parts.items.len - 1];
-    if (parts.items.len >= 2) {
-        const first = parts.items[0];
-        if (std.ascii.eqlIgnoreCase(first, "tempdb")) schema = "temp";
-    }
+    // tempdb..#t, dbo.t, [s].[t], db.s.t
+    var parts: std.ArrayList(tree.Name) = .empty;
+    var it = std.mem.splitScalar(u8, args[0].kind.string, '.');
+    while (it.next()) |part| try parts.append(s.a, .{ .text = std.mem.trim(u8, part, "[]\""), .pos = pos });
+    if (parts.items.len > 3) return s.mk(pos, .null);
+    if (parts.items.len == 3 and try s.sqliteDb(parts.items[0].text, pos) == null) return s.mk(pos, .null);
+    const q = try s.resolveParts(parts.items, .lookup);
+    const z = q.name.text;
+    var schema: []const u8 = if (q.schema) |x| x.text else "main";
     if (z.len > 0 and z[0] == '#') schema = "temp";
     const text = try std.fmt.allocPrintSentinel(s.a, "(SELECT rowid FROM {s}.sqlite_schema WHERE type IN ('table', 'view') AND name = {f} COLLATE NOCASE)", .{ schema, @import("../dialect.zig").Quoted('\''){ .z = z } }, 0);
     var sub: Parser = .init(s.p, text);

@@ -139,12 +139,12 @@ fn planColumns(s: *Parser, t: *const Target, written: ?[]Name) Error!ColumnPlan 
             try names.append(s.a, n);
             try cols.append(s.a, c);
         }
-        if (has_id and !on) return s.fail("Cannot insert explicit value for identity column in table '{s}' when IDENTITY_INSERT is set to OFF.", .{t.name});
-        if (id != null and on and !has_id) return s.fail("Explicit value must be specified for identity column in table '{s}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", .{t.name});
+        if (has_id and !on) return s.fail("Cannot insert explicit value for identity column in table '{s}' when IDENTITY_INSERT is set to OFF.", .{t.bare});
+        if (id != null and on and !has_id) return s.fail("Explicit value must be specified for identity column in table '{s}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", .{t.bare});
         return .{ .names = names.items, .cols = cols.items, .overriding = has_id };
     }
     if (t.tab == null) return .{ .names = &.{}, .cols = &.{}, .overriding = false };
-    if (id != null and on) return s.fail("An explicit value for the identity column in table '{s}' can only be specified when a column list is used and IDENTITY_INSERT is ON.", .{t.name});
+    if (id != null and on) return s.fail("An explicit value for the identity column in table '{s}' can only be specified when a column list is used and IDENTITY_INSERT is ON.", .{t.bare});
     for (try insertColumns(s, t)) |c| {
         try names.append(s.a, .{ .text = c.name });
         try cols.append(s.a, c);
@@ -253,7 +253,8 @@ const Joined = struct { target: DmlTarget, from: []tree.FromItem, cond: ?*Expr }
 
 fn takeTarget(s: *Parser, written: tree.QName, items: []tree.FromItem) Error!Joined {
     var found: ?usize = null;
-    if (written.schema == null) {
+    const auto = try s.autoAlias(written);
+    if (written.schema == null and auto == null) {
         for (items, 0..) |it, i| {
             const label: ?[]const u8 = if (it.alias) |a| a.name.text else if (it.source == .table) it.source.table.name.text else null;
             if (label) |l| if (std.ascii.eqlIgnoreCase(l, written.name.text)) {
@@ -263,10 +264,12 @@ fn takeTarget(s: *Parser, written: tree.QName, items: []tree.FromItem) Error!Joi
         }
     } else {
         for (items, 0..) |it, i| {
-            if (it.alias == null and it.source == .table and std.ascii.eqlIgnoreCase(it.source.table.name.text, written.name.text)) found = i;
+            if (it.source != .table or !std.ascii.eqlIgnoreCase(it.source.table.name.text, written.name.text)) continue;
+            // No alias, or the one a table of a schema takes (autoAlias()).
+            if (it.alias == null or it.alias.?.name.pos == it.source.table.name.pos) found = i;
         }
     }
-    const i = found orelse return .{ .target = .{ .q = written }, .from = items, .cond = null };
+    const i = found orelse return .{ .target = .{ .q = written, .alias = auto }, .from = items, .cond = null };
     const item = items[i];
     if (item.source != .table) return s.fail("xqlite: an UPDATE or DELETE of a derived table is not supported", .{});
     var rest: std.ArrayList(tree.FromItem) = .empty;
@@ -504,6 +507,7 @@ pub fn merge(s: *Parser) Error!void {
     if (s.eatKw("AS")) {
         talias = try s.nameOf(try s.anyName());
     } else if (s.isName()) talias = try s.nameOf(try s.name());
+    if (talias == null) talias = try s.autoAlias(tq);
     const t = try s.target(tq);
     if (t.tab == null) return s.fail("Invalid object name '{s}'.", .{tq.name.text});
     const tlabel = if (talias) |a| a.text else tq.name.text;

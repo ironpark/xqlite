@@ -2,8 +2,9 @@
 //! in the T-SQL dialect (STRICT tables with the CHECKs of SQL Server's
 //! types, IDENTITY columns and their sequences, computed columns, NOCASE
 //! and BINARY collations, indexes, a view, the xq_catalog/xq_sequence
-//! catalog, a JSON column checked with ISJSON) must pass sqlite3's
-//! integrity check, and sqlite3 and xqlite
+//! catalog, a JSON column checked with ISJSON, tables, a view and an
+//! index of CREATE SCHEMA sales, which are main's "sales.<name>") must
+//! pass sqlite3's integrity check, and sqlite3 and xqlite
 //! (in the SQLite dialect) must read the same rows and schema from it:
 //! what the schema keeps is SQLite text that means what the T-SQL
 //! statement meant. The expressions here need no engine function
@@ -25,6 +26,7 @@ pub fn register(s: *xqt.Suite) !void {
     try s.add("results", results, .{base});
     for (bad) |stmt| try s.add(try std.fmt.allocPrint(s.arena.allocator(), "sqlite3 rejects: {s}", .{stmt}), rejects, .{ base, stmt });
     try s.add("read back what sqlite3 wrote", readBack, .{base});
+    try s.add("schema tables", schemaTables, .{base});
 }
 
 const db = "mssql.db";
@@ -60,6 +62,18 @@ const script =
     \\CREATE TABLE gone (x INT); DROP TABLE gone;
     \\CREATE TABLE doc (id INT PRIMARY KEY, body NVARCHAR(MAX) CHECK (ISJSON(body) = 1));
     \\INSERT INTO doc VALUES (1, '{"a":[1,2]}'), (2, NULL);
+    \\GO
+    \\CREATE SCHEMA sales
+    \\GO
+    \\CREATE TABLE sales.orders (id INT IDENTITY(1,1) PRIMARY KEY, account_id INT REFERENCES account (id), amount INT CHECK (amount > 0), note VARCHAR(10));
+    \\CREATE INDEX ix_account ON sales.orders (account_id);
+    \\INSERT INTO sales.orders (account_id, amount, note) VALUES (1, 5, 'a'), (2, 70, 'B'), (2, 90, NULL);
+    \\GO
+    \\CREATE VIEW sales.big AS SELECT o.id, o.amount, a.email FROM sales.orders o JOIN dbo.account a ON a.id = o.account_id WHERE o.amount > 50
+    \\GO
+    \\CREATE SCHEMA tmp
+    \\GO
+    \\CREATE TABLE tmp.x (a INT); DROP TABLE tmp.x; DROP SCHEMA tmp;
     \\
 ;
 
@@ -69,6 +83,8 @@ const queries =
     \\SELECT * FROM totals ORDER BY email;
     \\SELECT count(*) FROM entry WHERE memo = 'aa';
     \\SELECT id, body, json_extract(body, '$.a[1]') FROM doc ORDER BY id;
+    \\SELECT count(*), sum(amount) FROM "sales.orders";
+    \\SELECT * FROM "sales.big" ORDER BY id;
     \\SELECT * FROM xq_catalog ORDER BY tbl, col, key;
     \\SELECT * FROM xq_sequence ORDER BY name;
     \\SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name;
@@ -87,6 +103,9 @@ const bad = [_][]const u8{
     // ISJSON is json_valid() and an object or array.
     "INSERT INTO doc VALUES (3, '1')",
     "INSERT INTO doc VALUES (3, '{a:1}')",
+    // A table of a schema keeps its types and checks.
+    "INSERT INTO \"sales.orders\"(account_id, amount) VALUES (1, 0)",
+    "INSERT INTO \"sales.orders\"(account_id, amount, note) VALUES (1, 1, 'much too long')",
 };
 
 fn build(c: *Check, file: []const u8) !void {
@@ -127,4 +146,19 @@ fn readBack(c: *Check, base: *BaseDb) !void {
     const got = std.mem.trimEnd(u8, out, "\n");
     _ = c.expect(std.mem.eql(u8, got, "251.5|125.75\n4|anon:new@x"), "read back: {s}", .{got});
     try integrityOk(c, "integrity_check after writes");
+}
+
+/// A table of CREATE SCHEMA sales is the table "sales.orders" of main:
+/// sqlite3 lists it and writes it, and the T-SQL dialect reads sqlite3's
+/// row as sales.orders, its identity going on.
+fn schemaTables(c: *Check, base: *BaseDb) !void {
+    try base.get(c, db);
+    const tables = try c.sqlite3(db, ".tables");
+    _ = c.expect(std.mem.indexOf(u8, tables, "sales.orders") != null and std.mem.indexOf(u8, tables, "sales.big") != null, ".tables: {s}", .{tables});
+    _ = c.expect(std.mem.indexOf(u8, tables, "tmp.x") == null, ".tables still lists tmp.x: {s}", .{tables});
+    _ = try c.sqlite3(db, "INSERT INTO \"sales.orders\" (id, account_id, amount) VALUES (100, 1, 7)");
+    const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect mssql\nSELECT amount FROM sales.orders WHERE id = 100;\nSELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'sales' ORDER BY TABLE_NAME;\n" });
+    const got = std.mem.trimEnd(u8, out, "\n");
+    _ = c.expect(std.mem.eql(u8, got, "7\nsales|big\nsales|orders"), "schema read back: {s}", .{got});
+    try integrityOk(c, "integrity_check after schema writes");
 }

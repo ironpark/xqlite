@@ -23,7 +23,8 @@
 //!    has no escape character; a pattern with [...] classes, or one that
 //!    is not a constant, is the engine function xq_tsql_like();
 //!  - names compare case-insensitively (as SQLite's), the schema dbo is
-//!    SQLite's main, a #temp table lives in temp.
+//!    SQLite's main, a #temp table lives in temp, a table t of a schema s
+//!    of CREATE SCHEMA is main's "s.t" (catalog/schema.zig), aliased t.
 //!
 //! What the schema keeps (DEFAULT, CHECK, computed columns, views) is
 //! parsed with `stored` set: variables and parameters are refused there.
@@ -40,6 +41,7 @@ const dialect = @import("../dialect.zig");
 const lexer = @import("lexer.zig");
 const types = @import("types.zig");
 const json_sql = @import("json_sql.zig");
+const nsp = catalog.schemas;
 
 const Parse = int.Parse;
 const Expr = tree.Expr;
@@ -54,20 +56,21 @@ pub const Error = int.Oom || int.ParseError;
 const reserved = blk: {
     @setEvalBranchQuota(20_000);
     const words = [_][]const u8{
-        "ADD",          "ALL",          "ALTER",             "AND",          "ANY",      "APPLY",   "AS",          "ASC",
-        "BEGIN",        "BETWEEN",      "BREAK",             "BY",           "CASCADE",  "CASE",    "CHECK",       "CLUSTERED",
-        "COLLATE",      "COLUMN",       "COMMIT",            "CONSTRAINT",   "CONTINUE", "CREATE",  "CROSS",       "CURRENT",
-        "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DECLARE",  "DEFAULT", "DELETE",      "DESC",
-        "DISTINCT",     "DROP",         "ELSE",              "END",          "ESCAPE",   "EXCEPT",  "EXEC",        "EXECUTE",
-        "EXISTS",       "FETCH",        "FOR",               "FOREIGN",      "FROM",     "FULL",    "FUNCTION",    "GOTO",
-        "GROUP",        "HAVING",       "IDENTITY",          "IF",           "IN",       "INDEX",   "INNER",       "INSERT",
-        "INTERSECT",    "INTO",         "IS",                "JOIN",         "KEY",      "LEFT",    "LIKE",        "MERGE",
-        "NONCLUSTERED", "NOT",          "NULL",              "OFFSET",       "ON",       "OPTION",  "OR",          "ORDER",
-        "OUTER",        "OUTPUT",       "OVER",              "PERCENT",      "PIVOT",    "PRIMARY", "PRINT",       "PROC",
-        "PROCEDURE",    "REFERENCES",   "RETURN",            "RIGHT",        "ROLLBACK", "SAVE",    "SELECT",      "SET",
-        "SOME",         "TABLE",        "THEN",              "TO",           "TOP",      "TRAN",    "TRANSACTION", "TRUNCATE",
-        "UNION",        "UNIQUE",       "UNPIVOT",           "UPDATE",       "USE",      "USING",   "VALUES",      "VIEW",
-        "WHEN",         "WHERE",        "WHILE",             "WINDOW",       "WITH",     "WITHIN",
+        "ADD",          "ALL",          "ALTER",             "AND",          "ANY",      "APPLY",   "AS",     "ASC",
+        "BEGIN",        "BETWEEN",      "BREAK",             "BY",           "CASCADE",  "CASE",    "CHECK",  "CLUSTERED",
+        "COLLATE",      "COLUMN",       "COMMIT",            "CONSTRAINT",   "CONTINUE", "CREATE",  "CROSS",  "CURRENT",
+        "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DECLARE",  "DEFAULT", "DELETE", "DENY",
+        "DESC",         "DISTINCT",     "DROP",              "ELSE",         "END",      "ESCAPE",  "EXCEPT", "EXEC",
+        "EXECUTE",      "EXISTS",       "FETCH",             "FOR",          "FOREIGN",  "FROM",    "FULL",   "FUNCTION",
+        "GOTO",         "GRANT",        "GROUP",             "HAVING",       "IDENTITY", "IF",      "IN",     "INDEX",
+        "INNER",        "INSERT",       "INTERSECT",         "INTO",         "IS",       "JOIN",    "KEY",    "LEFT",
+        "LIKE",         "MERGE",        "NONCLUSTERED",      "NOT",          "NULL",     "OFFSET",  "ON",     "OPTION",
+        "OR",           "ORDER",        "OUTER",             "OUTPUT",       "OVER",     "PERCENT", "PIVOT",  "PRIMARY",
+        "PRINT",        "PROC",         "PROCEDURE",         "REFERENCES",   "RETURN",   "REVOKE",  "RIGHT",  "ROLLBACK",
+        "SAVE",         "SELECT",       "SET",               "SOME",         "TABLE",    "THEN",    "TO",     "TOP",
+        "TRAN",         "TRANSACTION",  "TRUNCATE",          "UNION",        "UNIQUE",   "UNPIVOT", "UPDATE", "USE",
+        "USING",        "VALUES",       "VIEW",              "WHEN",         "WHERE",    "WHILE",   "WINDOW", "WITH",
+        "WITHIN",
     };
     var kvs: [words.len]struct { []const u8 } = undefined;
     for (words, 0..) |w, i| kvs[i] = .{w};
@@ -84,7 +87,7 @@ pub fn startsStatement(t: Token) bool {
     return t.kind == .go or t.isAnyKw(&.{
         "SELECT",  "INSERT", "UPDATE",   "DELETE", "MERGE", "CREATE",  "DROP",  "ALTER", "TRUNCATE",
         "BEGIN",   "COMMIT", "ROLLBACK", "SAVE",   "SET",   "DECLARE", "PRINT", "USE",   "EXEC",
-        "EXECUTE", "IF",     "WHILE",    "RETURN",
+        "EXECUTE", "IF",     "WHILE",    "RETURN", "GRANT", "REVOKE",  "DENY",
     });
 }
 
@@ -137,6 +140,14 @@ pub const Parser = struct {
     json_fixes: std.ArrayList(json_sql.Fix) = .empty,
     /// The columns of the OPENJSON calls parsed (json_sql.openJson()).
     openjson_cols: std.AutoHashMapUnmanaged(*const tree.Func, []const json_sql.Col) = .empty,
+    /// The schemas of CREATE SCHEMA (registered()), read once.
+    schemas: ?[]const nsp.Info = null,
+    /// The names of the WITH queries parsed: an unqualified name that is
+    /// one stays as written (unqualified()).
+    cte_names: std.ArrayList([]const u8) = .empty,
+    /// Compiling an element of CREATE SCHEMA s (CREATE TABLE ...): s,
+    /// where unqualified names are created and first looked up.
+    element_schema: ?[]const u8 = null,
 
     pub fn init(p: *Parse, sql: [:0]const u8) Parser {
         var s: Parser = .{
@@ -330,18 +341,74 @@ pub const Parser = struct {
     }
 
     /// The SQLite database a T-SQL schema name stands for: dbo (and
-    /// main) is main, temp/tempdb temp, an attached database itself.
+    /// main) is main, temp/tempdb temp, an attached database itself; a
+    /// schema of CREATE SCHEMA is not one (resolveParts() maps it).
     pub fn mapSchema(s: *Parser, n: Name) Error!Name {
-        const t = n.text;
-        if (std.ascii.eqlIgnoreCase(t, "dbo") or std.ascii.eqlIgnoreCase(t, "main") or t.len == 0) return .{ .text = "main", .pos = n.pos };
-        if (std.ascii.eqlIgnoreCase(t, "tempdb") or std.ascii.eqlIgnoreCase(t, "temp")) return .{ .text = "temp", .pos = n.pos };
-        if (build.findDbName(s.p.db, t) != null) return n;
-        return s.fail("The specified schema name \"{s}\" either does not exist or you do not have permission to use it.", .{t});
+        return (try s.sqliteDb(n.text, n.pos)) orelse s.noSchema(n.text);
     }
 
+    /// The SQLite database `t` names (dbo, main, temp, tempdb, an attached
+    /// database), null if none.
+    pub fn sqliteDb(s: *Parser, t: []const u8, pos: u32) Error!?Name {
+        if (std.ascii.eqlIgnoreCase(t, "dbo") or std.ascii.eqlIgnoreCase(t, "main") or t.len == 0) return .{ .text = "main", .pos = pos };
+        if (std.ascii.eqlIgnoreCase(t, "tempdb") or std.ascii.eqlIgnoreCase(t, "temp")) return .{ .text = "temp", .pos = pos };
+        if (build.findDbName(s.p.db, t) != null) return .{ .text = t, .pos = pos };
+        return null;
+    }
+
+    /// The schemas of CREATE SCHEMA (catalog/schema.zig), read once per
+    /// parser.
+    pub fn registered(s: *Parser) Error![]const nsp.Info {
+        if (s.schemas) |l| return l;
+        ir.stmt.readSchema(s.p) catch return error.ParseFailed;
+        const l = nsp.list(s.p.db, s.a) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+        };
+        s.schemas = l;
+        return l;
+    }
+
+    /// The registered schema called `n`, null if none (dbo, sys ... are
+    /// not registered).
+    pub fn findSchema(s: *Parser, n: []const u8) Error!?nsp.Info {
+        return nsp.find(try s.registered(), n);
+    }
+
+    /// The name within its schema of a SQLite name: "t" of a mangled
+    /// "s.t" whose s is a schema of CREATE SCHEMA, else the name itself.
+    pub fn bareName(s: *Parser, z: []const u8) Error![]const u8 {
+        const sp = nsp.split(z) orelse return z;
+        return if (try s.findSchema(sp.schema) != null) sp.name else z;
+    }
+
+    /// The alias a FROM item or DML target naming `q` takes: the name
+    /// within its schema when `q` is mangled (so that t.col finds s.t),
+    /// else null.
+    pub fn autoAlias(s: *Parser, q: QName) Error!?Name {
+        if (q.schema != null) return null;
+        const sp = nsp.split(q.name.text) orelse return null;
+        if (try s.findSchema(sp.schema) == null) return null;
+        return .{ .text = sp.name, .pos = q.name.pos };
+    }
+
+    /// What a name is read for: an object to look up, or one to create
+    /// (its schema must exist).
+    pub const NameUse = enum { lookup, create };
+
     /// `[db.][schema.]name`: dbo is main (SQLite's database), a #name is
-    /// a temporary table. `db..name` skips the schema.
+    /// a temporary table, `db..name` skips the schema. A schema of CREATE
+    /// SCHEMA is main with the mangled name "schema.name", written
+    /// without a database. An unqualified name is the session's default
+    /// schema's (ALTER USER ... WITH DEFAULT_SCHEMA) if it has one of that
+    /// name, else dbo's. A schema that does not exist fails a `create`;
+    /// a `lookup` gets a name that is no table, which fails as SQL
+    /// Server's "Invalid object name 's.t'".
     pub fn qualifiedName(s: *Parser) Error!QName {
+        return s.qualifiedNameFor(.lookup);
+    }
+
+    pub fn qualifiedNameFor(s: *Parser, use: NameUse) Error!QName {
         var parts: std.ArrayList(Name) = .empty;
         try parts.append(s.a, try s.nameOf(try s.anyName()));
         while (s.isOp(".") and parts.items.len < 3) {
@@ -353,17 +420,64 @@ pub const Parser = struct {
             }
             try parts.append(s.a, try s.nameOf(try s.anyName()));
         }
-        const ps = parts.items;
+        return s.resolveParts(parts.items, use);
+    }
+
+    /// The parts of a name (1 to 3) resolved as qualifiedName() does.
+    pub fn resolveParts(s: *Parser, ps: []const Name, use: NameUse) Error!QName {
         const last = ps[ps.len - 1];
-        if (ps.len == 1) return .{ .name = last };
-        // db.schema.name: the database decides; the schema must be dbo.
-        const sch = if (ps.len == 3) blk: {
-            if (ps[1].text.len > 0 and !std.ascii.eqlIgnoreCase(ps[1].text, "dbo")) {
-                return s.fail("The specified schema name \"{s}\" either does not exist or you do not have permission to use it.", .{ps[1].text});
-            }
-            break :blk ps[0];
-        } else ps[0];
-        return .{ .schema = try s.mapSchema(sch), .name = last };
+        if (ps.len == 1) return s.unqualified(last, use);
+        // db.schema.name: the database decides; dbo (or nothing) is its
+        // default schema, another one a schema of CREATE SCHEMA in main.
+        if (ps.len == 3) {
+            const db = (try s.sqliteDb(ps[0].text, ps[0].pos)) orelse return s.noSchema(ps[0].text);
+            if (ps[1].text.len == 0 or std.ascii.eqlIgnoreCase(ps[1].text, "dbo")) return .{ .schema = db, .name = last };
+            if (std.mem.eql(u8, db.text, "main")) return s.inSchema(ps[1], last, use);
+            if (use == .create) return s.noSchema(ps[1].text);
+            return .{ .schema = db, .name = .{ .text = try nsp.mangle(s.a, ps[1].text, last.text), .pos = last.pos } };
+        }
+        if (try s.sqliteDb(ps[0].text, ps[0].pos)) |db| return .{ .schema = db, .name = last };
+        return s.inSchema(ps[0], last, use);
+    }
+
+    /// `sch.n` where sch is no SQLite database: a schema of CREATE SCHEMA.
+    fn inSchema(s: *Parser, sch: Name, n: Name, use: NameUse) Error!QName {
+        if (try s.findSchema(sch.text)) |i| return .{ .name = .{ .text = try nsp.mangle(s.a, i.name, n.text), .pos = n.pos } };
+        if (use == .create) return s.noSchema(sch.text);
+        return .{ .name = .{ .text = try nsp.mangle(s.a, sch.text, n.text), .pos = n.pos } };
+    }
+
+    /// SQL Server's error 2760.
+    pub fn noSchema(s: *Parser, sch: []const u8) Error {
+        return s.fail("The specified schema name \"{s}\" either does not exist or you do not have permission to use it.", .{sch});
+    }
+
+    /// An unqualified name: the session's default schema's object of that
+    /// name (or, to create, the default schema's), else dbo's.
+    fn unqualified(s: *Parser, n: Name, use: NameUse) Error!QName {
+        if (n.text.len > 0 and n.text[0] == '#') return .{ .name = n };
+        const sch = s.element_schema orelse s.p.db.xq.mssql.default_schema orelse return .{ .name = n };
+        const info = (try s.findSchema(sch)) orelse return .{ .name = n };
+        const m: Name = .{ .text = try nsp.mangle(s.a, info.name, n.text), .pos = n.pos };
+        if (use == .create) return .{ .name = m };
+        for (s.cte_names.items) |c| if (std.ascii.eqlIgnoreCase(c, n.text)) return .{ .name = n };
+        if (build.findTable(s.p.db, m.text, "main") != null) return .{ .name = m };
+        if (try s.sequenceExists(m.text)) return .{ .name = m };
+        return .{ .name = n };
+    }
+
+    /// Whether main has sequence `name` (now).
+    pub fn sequenceExists(s: *Parser, seq: []const u8) Error!bool {
+        if (!catalog.sequence.exists(s.p.db, catalog.main_schema)) return false;
+        var q = catalog.Query.initFmt(s.p.db, "SELECT 1 FROM main.xq_sequence WHERE name=%Q COLLATE NOCASE", &.{.{ .str = seq }}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+        };
+        defer q.deinit();
+        return q.step() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+        };
     }
 
     // ======================================================== expressions
@@ -788,8 +902,22 @@ pub const Parser = struct {
                 return s.mk(pos, .{ .column = ns[1..] });
             }
         };
-        if (ns.len == 4) ns = ns[1..];
-        if (ns.len == 3) ns[0] = try s.mapSchema(ns[0]);
+        if (ns.len == 4) {
+            // db.schema.table.column: a schema of CREATE SCHEMA is main's.
+            if (!std.ascii.eqlIgnoreCase(ns[1].text, "dbo") and ns[1].text.len > 0 and try s.findSchema(ns[1].text) != null) {
+                if (try s.sqliteDb(ns[0].text, ns[0].pos)) |d| if (std.mem.eql(u8, d.text, "main")) return s.mk(pos, .{ .column = ns[2..] });
+            }
+            ns = ns[1..];
+        }
+        if (ns.len == 3) {
+            // schema.table.column: a table of a schema of CREATE SCHEMA is
+            // aliased to its name (autoAlias()).
+            if (try s.sqliteDb(ns[0].text, ns[0].pos)) |d| {
+                ns[0] = d;
+            } else if (try s.findSchema(ns[0].text) != null) {
+                ns = ns[1..];
+            }
+        }
         return s.mk(pos, .{ .column = ns });
     }
 
@@ -999,6 +1127,7 @@ pub const Parser = struct {
         var ctes: std.ArrayList(tree.Cte) = .empty;
         while (true) {
             const n = try s.nameOf(try s.name());
+            try s.cte_names.append(s.a, n.text);
             var cols: []Name = &.{};
             if (s.isOp("(")) cols = try s.nameList();
             try s.expectKw("AS");
@@ -1095,7 +1224,7 @@ pub const Parser = struct {
         const cols = try s.resultColumns();
         if (s.eatKw("INTO")) {
             if (s.depth != 1 or s.into != null) return s.syntaxError();
-            s.into = try s.qualifiedName();
+            s.into = try s.qualifiedNameFor(.create);
         }
         var from: []tree.FromItem = &.{};
         if (s.eatKw("FROM")) from = try s.tableRefs();
@@ -1253,6 +1382,16 @@ pub const Parser = struct {
         }
     }
 
+    /// Whether the tokens are `name . name . *`.
+    fn qualifiedStar(s: *Parser) bool {
+        var copy = s.lx;
+        _ = copy.next(); // .
+        const t = copy.next();
+        if (t.kind != .ident and t.kind != .quoted_ident) return false;
+        if (!copy.next().is(".")) return false;
+        return copy.next().is("*");
+    }
+
     fn resultColumns(s: *Parser) Error![]tree.ResultCol {
         var l: std.ArrayList(tree.ResultCol) = .empty;
         var assigns: std.ArrayList(Assign) = .empty;
@@ -1260,6 +1399,16 @@ pub const Parser = struct {
             if (s.isOp("*")) {
                 try l.append(s.a, .{ .star = s.here() });
                 s.advance();
+            } else if ((s.tok.kind == .ident or s.tok.kind == .quoted_ident) and s.peek().is(".") and s.peek2().kind != .op and s.qualifiedStar()) {
+                // schema.table.*: the table (aliased to its name).
+                s.advance();
+                s.advance();
+                const tbl = try s.nameOf(s.tok);
+                s.advance();
+                s.advance();
+                const star = s.here();
+                s.advance();
+                try l.append(s.a, .{ .table_star = .{ .names = try s.a.dupe(Name, &.{tbl}), .star_pos = star } });
             } else if ((s.tok.kind == .ident or s.tok.kind == .quoted_ident) and s.peek().is(".") and s.peek2().is("*")) {
                 const tbl = try s.nameOf(s.tok);
                 s.advance();
@@ -1522,6 +1671,9 @@ pub const Parser = struct {
         try s.tableHints();
         item.alias = try s.aliasOf(false);
         try s.tableHints();
+        if (item.alias == null and item.source == .table) {
+            if (try s.autoAlias(q.q)) |a| item.alias = .{ .name = a };
+        }
         return item;
     }
 
@@ -1553,6 +1705,8 @@ pub const Parser = struct {
         tab: ?*int.Table,
         schema: []const u8,
         name: []const u8 = "",
+        /// The name within its schema (SQL Server's messages).
+        bare: []const u8 = "",
         cols: []ColMeta,
 
         pub fn findCol(t: *const Target, n: []const u8) ?*ColMeta {
@@ -1609,12 +1763,12 @@ pub const Parser = struct {
                 if (!std.ascii.eqlIgnoreCase(en.col, cols[i].name)) continue;
                 if (std.mem.eql(u8, en.key, catalog.Key.decl_type) and is_mssql) {
                     cols[i].decl_type = en.value;
-                    cols[i].store_arg = try std.fmt.allocPrint(s.a, "{s}|{s}.dbo.{s}|{s}", .{ en.value, schema, stored, cols[i].name });
+                    cols[i].store_arg = try std.fmt.allocPrint(s.a, "{s}|{s}.{s}{s}|{s}", .{ en.value, schema, if (try s.autoAlias(.{ .name = .{ .text = stored } }) != null) "" else "dbo.", stored, cols[i].name });
                 }
                 if (std.mem.eql(u8, en.key, catalog.Key.identity)) cols[i].identity = en.value;
             }
         }
-        return .{ .tab = tab, .schema = schema, .name = stored, .cols = cols };
+        return .{ .tab = tab, .schema = schema, .name = stored, .bare = try s.bareName(stored), .cols = cols };
     }
 };
 

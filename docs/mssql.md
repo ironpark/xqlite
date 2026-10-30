@@ -11,6 +11,7 @@ xqlite의 Microsoft SQL Server(T-SQL) 방언이 지원하는 문법과 의미, �
 - [`+`의 규칙](#의-규칙)
 - [MERGE](#merge)
 - [JSON](#json)
+- [스키마](#스키마)
 - [SQL Server와 다른 점](#sql-server와-다른-점)
 - [아직 하지 않은 것](#아직-하지-않은-것)
 - [검증](#검증)
@@ -54,6 +55,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | `functions.zig` | 함수 호출과 특수 문법(`CAST`/`CONVERT`/`TRY_CAST`, `DATEADD` 등의 datepart, `STRING_AGG ... WITHIN GROUP`), `@@` 함수 |
 | `dml.zig` | INSERT, UPDATE, DELETE(`OUTPUT`, `FROM ... JOIN`, `TOP`), MERGE, TRUNCATE |
 | `ddl.zig` | CREATE/DROP TABLE·INDEX·VIEW·SEQUENCE, ALTER TABLE |
+| `schemas.zig` | CREATE/DROP SCHEMA, `ALTER SCHEMA ... TRANSFER`, `ALTER USER ... WITH DEFAULT_SCHEMA`, `SCHEMA_ID`·`SCHEMA_NAME`·`OBJECT_NAME`·`OBJECT_SCHEMA_NAME` |
 | `session.zig` | `DECLARE`, `SET`, 트랜잭션, `PRINT`, `USE`, `EXEC sp_rename` |
 | `catalog_views.zig` | `INFORMATION_SCHEMA`와 `sys` 뷰 |
 | `types.zig` | SQL Server 타입 → STRICT 저장 타입·검사·철자 |
@@ -62,7 +64,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | `json_func.zig` | JSON 엔진 함수(`xq_tsql_json_*`)와 `FOR JSON`의 집계 함수 |
 | `json_sql.zig` | 파서 쪽: JSON 함수의 특수 문법, `FOR JSON`, `FROM`의 `OPENJSON`, 값의 JSON 종류 |
 | `openjson.zig` | `OPENJSON`의 엔진 테이블 값 함수(`xq_tsql_openjson`) |
-| `state.zig` | 연결 상태 `ConnState.mssql`: 변수, `IDENTITY_INSERT`, 마지막 identity, 트랜잭션 중첩 |
+| `state.zig` | 연결 상태 `ConnState.mssql`: 변수, `IDENTITY_INSERT`, 마지막 identity, 트랜잭션 중첩, 기본 스키마 |
 | `test.zig` | 종단 테스트 |
 
 ### IR 트리, lower, render
@@ -106,7 +108,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | 기본 | `DISTINCT`, `WHERE`, `GROUP BY`, `HAVING` |
 | 행 수 제한 | `TOP n`, `TOP (n)`, `TOP n PERCENT`, `ORDER BY ... OFFSET n ROWS [FETCH {FIRST\|NEXT} m ROWS ONLY]` |
 | 결과 열 | `expr AS a`, `expr a`, `a = expr`, `'a' = expr`. 이름 없는 식의 열 이름은 SQL Server처럼 빈 문자열 |
-| FROM | 테이블(`dbo.t`, `db.dbo.t`, `db..t`, `#t`), 서브쿼리, `(VALUES ...) AS v(a, b)`, 테이블 값 함수, `OPENJSON`, 테이블 힌트 `WITH (NOLOCK)`(무시) |
+| FROM | 테이블(`dbo.t`, `s.t`, `db.dbo.t`, `db.s.t`, `db..t`, `#t`), 서브쿼리, `(VALUES ...) AS v(a, b)`, 테이블 값 함수, `OPENJSON`, 테이블 힌트 `WITH (NOLOCK)`(무시) |
 | JOIN | `[INNER]`, `LEFT/RIGHT/FULL [OUTER]`, `CROSS JOIN`, 조인 힌트(`HASH` 등, 무시), 테이블 값 함수의 `CROSS APPLY`/`OUTER APPLY` |
 | 집합 연산 | `UNION [ALL]`, `EXCEPT`, `INTERSECT`(INTERSECT가 먼저 묶임); `TOP`이 있는 피연산자 |
 | CTE | `WITH`. 자기 이름을 부르면 재귀(RECURSIVE 없이), `;WITH` |
@@ -128,7 +130,8 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 
 ### DDL
 
-- **CREATE TABLE** `[dbo.]t` / `#t`(temp 스키마)
+- **CREATE SCHEMA**, **DROP SCHEMA**, **ALTER SCHEMA ... TRANSFER**([스키마](#스키마))
+- **CREATE TABLE** `[schema.]t` / `#t`(temp 스키마)
   - 열 제약: `NULL`/`NOT NULL`, `DEFAULT`, `IDENTITY[(seed, increment)]`, `PRIMARY KEY [CLUSTERED|NONCLUSTERED]`, `UNIQUE`, `CHECK`, `REFERENCES ... ON DELETE/UPDATE`, `CONSTRAINT 이름`, `COLLATE`, `ROWGUIDCOL`·`SPARSE`(무시)
   - 계산 열: `c AS (식) [PERSISTED]` → 생성 열(`PERSISTED`면 STORED)
   - 테이블 제약: `[CONSTRAINT n] PRIMARY KEY (...)`, `UNIQUE (...)`, `CHECK (...)`, `FOREIGN KEY (...) REFERENCES ...`
@@ -139,8 +142,8 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 - **CREATE SEQUENCE** `[AS type] START WITH .. INCREMENT BY .. MINVALUE .. MAXVALUE .. [NO] CYCLE`, `NEXT VALUE FOR s`
 - **ALTER TABLE** `t ADD c type ...`(한 번에 하나), `DROP COLUMN [IF EXISTS] c`
   - nullable 열을 DEFAULT와 함께 추가하면 기존 행은 `NULL`입니다(`WITH VALUES`면 기본값).
-- **DROP TABLE/VIEW/INDEX/SEQUENCE [IF EXISTS]**, `DROP INDEX ix ON t`, `DROP INDEX t.ix`
-- **EXEC sp_rename** `'t', 'u'`, `'t.c', 'd', 'COLUMN'`
+- **DROP TABLE/VIEW/INDEX/SEQUENCE [IF EXISTS]**, `DROP INDEX ix ON t`, `DROP INDEX [s.]t.ix`
+- **EXEC sp_rename** `'[s.]t', 'u'`(스키마는 그대로), `'[s.]t.c', 'd', 'COLUMN'`
 
 ### 세션과 트랜잭션
 
@@ -155,6 +158,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 - `SET NOCOUNT`, `ANSI_NULLS`, `QUOTED_IDENTIFIER`, `XACT_ABORT`, `TRANSACTION ISOLATION LEVEL`, `DATEFORMAT` 같은 옵션은 받아들이고 무시합니다. `SET ROWCOUNT n`(0 아님)과 `IMPLICIT_TRANSACTIONS ON`은 오류입니다.
 - `PRINT 식`은 식을 계산하고 아무것도 출력하지 않습니다.
 - `USE db`는 데이터베이스가 있는지만 봅니다.
+- `ALTER USER u WITH DEFAULT_SCHEMA = s`는 연결의 기본 스키마를 바꿉니다([스키마](#스키마)).
 
 ### 함수
 
@@ -168,7 +172,8 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | 집계 | `COUNT`, `COUNT_BIG`, `SUM`, `AVG`, `MIN`, `MAX`, `STRING_AGG(x, sep) [WITHIN GROUP (ORDER BY ...)]`, `STDEV`, `STDEVP`, `VAR`, `VARP` |
 | identity | `SCOPE_IDENTITY()`, `@@IDENTITY`, `IDENT_CURRENT('t')` |
 | JSON | `ISJSON`, `JSON_VALUE`, `JSON_QUERY`, `JSON_MODIFY`, `JSON_PATH_EXISTS`, `JSON_OBJECT`, `JSON_ARRAY`, `STRING_ESCAPE(s, 'json')`([JSON](#json)) |
-| 그 밖 | `NEWID()`, `OBJECT_ID('t')`, `DB_NAME()`(`main`), `SCHEMA_NAME()`(`dbo`), `USER_NAME()`, `@@ROWCOUNT`, `@@TRANCOUNT`, `@@VERSION`, `@@SPID` ... |
+| 스키마 | `OBJECT_ID('[db.][s.]t')`, `OBJECT_NAME(id)`, `OBJECT_SCHEMA_NAME(id)`, `SCHEMA_ID(['s'])`, `SCHEMA_NAME([id])`(인자가 없으면 기본 스키마) |
+| 그 밖 | `NEWID()`, `DB_NAME()`(`main`), `USER_NAME()`, `@@ROWCOUNT`, `@@TRANCOUNT`, `@@VERSION`, `@@SPID` ... |
 
 - datepart 이름과 약어(`yy`, `mm`, `dd`, `hh`, `mi`, `ss`, `ms`, `dw`, `wk` ...)를 받습니다.
 - `DATEDIFF`는 SQL Server처럼 경계를 센 수입니다(`DATEDIFF(year, '2023-12-31', '2024-01-01')`은 1). 주는 일요일에 시작합니다(`@@DATEFIRST` 7).
@@ -179,15 +184,17 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 
 | 뷰 | 열 |
 | --- | --- |
-| `INFORMATION_SCHEMA.TABLES` | `TABLE_CATALOG`, `TABLE_SCHEMA`(`dbo`), `TABLE_NAME`, `TABLE_TYPE` |
+| `INFORMATION_SCHEMA.TABLES` | `TABLE_CATALOG`, `TABLE_SCHEMA`, `TABLE_NAME`, `TABLE_TYPE` |
 | `INFORMATION_SCHEMA.COLUMNS` | 위와 `COLUMN_NAME`, `ORDINAL_POSITION`, `COLUMN_DEFAULT`, `IS_NULLABLE`, `DATA_TYPE`, `CHARACTER_MAXIMUM_LENGTH`, `NUMERIC_PRECISION`, `NUMERIC_SCALE`, `DATETIME_PRECISION` |
-| `INFORMATION_SCHEMA.VIEWS`, `SCHEMATA` | 최소한의 열 |
+| `INFORMATION_SCHEMA.VIEWS` | 최소한의 열 |
+| `INFORMATION_SCHEMA.SCHEMATA` | `CATALOG_NAME`, `SCHEMA_NAME`, `SCHEMA_OWNER`, `DEFAULT_CHARACTER_SET_*` |
 | `sys.tables`, `sys.views`, `sys.objects` | `name`, `object_id`, `schema_id`, `type`, `type_desc` |
 | `sys.columns` | `object_id`, `name`, `column_id`, `max_length`, `precision`, `scale`, `is_nullable`, `is_identity`, `is_computed` |
-| `sys.schemas` | `dbo` |
+| `sys.schemas` | `name`, `schema_id`, `principal_id`: `dbo`(1), `guest`, `INFORMATION_SCHEMA`, `sys`, `db_*` 역할 스키마(16384~)와 `CREATE SCHEMA`의 스키마(5~) |
+| `sys.sequences` | `name`, `schema_id`, `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `current_value`(identity의 시퀀스는 빠짐) |
 
 - `object_id`는 `sqlite_schema`의 rowid이고 `OBJECT_ID()`가 같은 값을 돌려줍니다.
-- 데이터베이스는 SQLite의 스키마(`main`, `ATTACH`로 붙인 것)이고 스키마는 언제나 `dbo`입니다. `#temp` 테이블은 SQL Server처럼 나오지 않습니다.
+- 데이터베이스는 SQLite의 스키마(`main`, `ATTACH`로 붙인 것)입니다. main에는 `dbo`와 `CREATE SCHEMA`의 스키마가 있고, 붙인 데이터베이스의 스키마는 언제나 `dbo`입니다. `#temp` 테이블은 SQL Server처럼 나오지 않습니다.
 
 ## 타입 매핑
 
@@ -335,6 +342,32 @@ FROM (SELECT a AS xq_j0, b AS xq_j1 FROM t ORDER BY xq_j0 LIMIT -1) AS xq_fj HAV
 - `ISJSON(x)`만 쓰는 식(`CHECK (ISJSON(doc) = 1)`)은 SQLite의 함수라서 sqlite3도 검사합니다(`xqt interop mssql`).
 - 다른 JSON 함수는 엔진 함수(`xq_tsql_json_*`, `xq_tsql_for_json`)이고 `OPENJSON`은 엔진 테이블 값 함수입니다. 계산 열(`AS JSON_VALUE(doc, '$.a')`)이나 뷰에 써도 xqlite는 어느 방언으로든 읽지만, sqlite3는 계산하지 못합니다(`no such function`, `no such table`).
 
+## 스키마
+
+`CREATE SCHEMA`의 스키마는 공용 구현([방언 아키텍처의 스키마](architecture.md#스키마네임스페이스), `src/catalog/schema.zig`)을 씁니다. 스키마 `sales`의 테이블 `orders`는 main의 테이블 `"sales.orders"`이고, 그 인덱스·시퀀스도 `sales.ix`, `sales.orders_id_seq`처럼 이름이 붙습니다. 파일 하나, 트랜잭션 하나이고 sqlite3는 `"sales.orders"`로 읽고 씁니다.
+
+```sql
+CREATE SCHEMA sales AUTHORIZATION dbo
+GO
+CREATE TABLE sales.orders (id INT IDENTITY(1,1) PRIMARY KEY, item VARCHAR(20));
+INSERT INTO sales.orders (item) VALUES ('pen');
+SELECT orders.id, o.item FROM sales.orders JOIN main.sales.orders o ON o.id = orders.id;
+SELECT SCHEMA_NAME(schema_id), name FROM sys.tables;      -- sales | orders
+ALTER SCHEMA dbo TRANSFER sales.orders;                    -- 이제 dbo.orders
+DROP SCHEMA sales;                                         -- 비어 있어야 함
+```
+
+- 이름 해석: `dbo.t`와 한정하지 않은 `t`는 main의 `t`, `#t`·`tempdb..#t`는 temp, `db.dbo.t`·`db..t`는 그 데이터베이스(main, 붙인 데이터베이스)입니다. `s.t`·`main.s.t`는 `CREATE SCHEMA`의 스키마 `s`의 `t`(main의 `"s.t"`)이고, `t`라는 별칭이 붙어서 `t.c`와 `s.t.c`로 열을 부릅니다. DML, 조인, 뷰, `SELECT ... INTO`, `MERGE`, `TRUNCATE`, `CREATE INDEX ... ON s.t`, `NEXT VALUE FOR s.seq`, `IDENTITY`, `SET IDENTITY_INSERT s.t`, `IDENT_CURRENT('s.t')`, `OBJECT_ID('s.t')`, `sp_rename`이 모두 그렇습니다.
+- 뷰의 텍스트에는 데이터베이스 없이 `"s.t" AS "t"`로 저장됩니다.
+- `CREATE SCHEMA s [AUTHORIZATION o]`: `dbo`, `sys` 같은 내장 스키마 이름은 2760, 있는 스키마는 2714 오류입니다. 스키마 이름에는 `.`을 쓸 수 없고, 데이터베이스 이름(`main`, `temp`, 붙인 데이터베이스)도 쓸 수 없습니다.
+  - 뒤에 오는 요소 `CREATE TABLE`, `CREATE VIEW`, `GRANT`/`REVOKE`/`DENY`(받아들이고 무시)는 그 스키마에서 만들어지고, 그 안의 한정하지 않은 이름은 먼저 그 스키마에서 찾습니다(SQL Server처럼). 요소는 `CREATE SCHEMA` 다음에 따로 컴파일되므로 원자적이지 않습니다.
+  - SQL Server에서 `CREATE SCHEMA`는 배치의 첫 문장이어야 하지만(111), xqlite에는 배치가 없어서 검사하지 않습니다.
+- `DROP SCHEMA [IF EXISTS] s`: SQL Server처럼 `CASCADE`가 없어서 개체(테이블, 뷰, 시퀀스)가 있으면 `Cannot drop schema 's' because it is being referenced by object 'x'.`(3729, 이름순 첫 개체)입니다. 없는 스키마는 15151, 내장 스키마는 15150입니다.
+- `ALTER SCHEMA s TRANSFER [OBJECT::]x.t`: 테이블의 이름을 `"s.t"`(dbo면 `t`)로 바꿉니다. 대상에 같은 이름이 있으면 15530입니다. 인덱스는 이름이 그대로이고, 뷰와 `IDENTITY` 열이 있는 테이블(시퀀스 이름이 스키마를 따름)은 지원하지 않습니다.
+- `schema_id`는 SQL Server처럼 5부터 비어 있는 가장 작은 수입니다(지운 스키마의 번호를 다시 씀). `xq_catalog`의 `('', 스키마, 'schema_id', 번호)` 행에 둡니다.
+- 기본 스키마: SQL Server에서 한정하지 않은 이름은 사용자의 기본 스키마에서 먼저, 다음에 `dbo`에서 찾습니다. xqlite에는 사용자가 없으므로 `ALTER USER u WITH DEFAULT_SCHEMA = s`가 사용자 이름과 상관없이 연결의 기본 스키마를 바꿉니다(`= dbo`나 `NULL`이면 원래대로). 그 뒤 한정하지 않은 이름은 `s`에 있으면 `s`의 것이고(CTE 이름은 그대로), `CREATE TABLE t`는 `s.t`를 만들며, `SCHEMA_NAME()`·`SCHEMA_ID()`는 `s`입니다. SQL Server의 `sa`(dbo)는 기본 스키마를 바꿀 수 없어서(15150) 서버와 비교하지 않았습니다.
+- 오류: 없는 스키마의 개체를 만들면 `The specified schema name "s" either does not exist or you do not have permission to use it.`(2760), 읽으면 `Invalid object name 's.t'.`(208), 지우면 `Cannot drop the table 's.t', ...`(3701)입니다.
+
 ## SQL Server와 다른 점
 
 ### 타입과 값
@@ -364,7 +397,8 @@ FROM (SELECT a AS xq_j0, b AS xq_j1 FROM t ORDER BY xq_j0 LIMIT -1) AS xq_fj HAV
 | `OUTPUT DELETED` | DELETE에서만 됩니다. UPDATE의 `DELETED.c`(이전 값)는 `RETURNING`이 새 행만 보므로 오류입니다. |
 | UPDATE/DELETE ... FROM | 대상이 FROM의 외부 조인 쪽에 있으면 오류입니다. 대상을 부르는 다른 조인의 `ON`은 쓸 수 없습니다. |
 | DROP | 한 문장에서 둘 이상의 있는 객체를 지울 수 없습니다(`DROP TABLE IF EXISTS a, b`는 하나만 있을 때 됨). |
-| 인덱스 이름 | 데이터베이스마다 유일합니다(SQL Server는 테이블마다). |
+| 인덱스 이름 | 스키마마다 유일합니다(SQL Server는 테이블마다). |
+| 스키마 | 붙인 데이터베이스에는 `dbo`만 있습니다. `ALTER SCHEMA ... TRANSFER`는 인덱스 이름을 옮기지 않습니다. `CREATE SCHEMA ... CREATE TABLE ...`의 요소는 따로 실행됩니다. |
 | 실행 중 오류 | `UNIQUE constraint failed: t.c` 같은 엔진 오류와 CHECK 위반은 SQLite 문구입니다. 컴파일 오류(`Invalid object name 'x'.`, `Invalid column name 'c'.` ...)와 변환 오류는 SQL Server 문구입니다. |
 | 결과 열 이름 | 이름 없는 식은 빈 이름입니다(sqlcmd처럼). 서브쿼리 안에서는 SQLite의 이름입니다. |
 | JSON 타입 | 값의 JSON 여부(`JSON_QUERY` ...)는 식의 모양으로 정합니다. `ISNULL(JSON_QUERY(...), ...)`처럼 다른 함수를 거친 JSON은 문자열로 씁니다(SQL Server는 타입을 따라감). |
@@ -388,7 +422,8 @@ FROM (SELECT a AS xq_j0, b AS xq_j1 FROM t ORDER BY xq_j0 LIMIT -1) AS xq_fj HAV
 - `= ANY/SOME/ALL (서브쿼리)`
 - `OUTPUT ... INTO`, MERGE의 `OUTPUT`
 - `ALTER TABLE ... ADD CONSTRAINT`/`ALTER COLUMN`/`DROP CONSTRAINT`, 여러 열의 ADD/DROP
-- `CREATE SCHEMA`(스키마는 `dbo`뿐), `CREATE DATABASE`
+- `CREATE DATABASE`, 사용자·역할·권한(`CREATE USER`, `GRANT`; `CREATE SCHEMA`의 요소인 `GRANT`는 무시)
+- 뷰나 `IDENTITY` 열이 있는 테이블의 `ALTER SCHEMA ... TRANSFER`, 이름에 `.`이 있는 스키마
 - `SET ROWCOUNT`, `SET IMPLICIT_TRANSACTIONS ON`, 의미를 바꾸는 옵션(`ANSI_NULLS OFF`, `CONCAT_NULL_YIELDS_NULL OFF`)
 - `GO n`의 반복, `DATEFORMAT`/`LANGUAGE`에 따른 날짜 해석(언제나 us_english, mdy)
 
@@ -396,7 +431,7 @@ FROM (SELECT a AS xq_j0, b AS xq_j1 FROM t ORDER BY xq_j0 LIMIT -1) AS xq_fj HAV
 
 ### SQL Server와 비교
 
-`xqt dialect-diff mssql`(`tools/xqt/dialect_diff.zig`)은 `tools/dialect/mssql-cases.txt`의 각 경우를 SQL Server(sqlcmd)와 `xqlite sql`(`.dialect mssql`)에서 실행해 결과 행, 열 이름, `ERROR:` 줄을 비교합니다. 지금 52개 경우가 모두 같습니다.
+`xqt dialect-diff mssql`(`tools/xqt/dialect_diff.zig`)은 `tools/dialect/mssql-cases.txt`의 각 경우를 SQL Server(sqlcmd)와 `xqlite sql`(`.dialect mssql`)에서 실행해 결과 행, 열 이름, `ERROR:` 줄을 비교합니다. 지금 57개 경우가 모두 같습니다.
 
 ```sh
 zig build tools
@@ -418,7 +453,7 @@ zig-out/bin/xqt dialect-diff mssql [cases-file]
 
 - sqlite3의 무결성·외래 키 검사를 통과해야 합니다.
 - sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
-- 다루는 것: STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열(`+`가 열 타입으로 `+`/`||`가 됨), `NOCASE`/`BINARY` 열, 테이블 안과 밖의 인덱스, 뷰, `xq_catalog`, `CHECK (ISJSON(c) = 1)`.
+- 다루는 것: STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열(`+`가 열 타입으로 `+`/`||`가 됨), `NOCASE`/`BINARY` 열, 테이블 안과 밖의 인덱스, 뷰, `xq_catalog`, `CHECK (ISJSON(c) = 1)`, `CREATE SCHEMA sales`의 테이블·인덱스·뷰(sqlite3의 `.tables`에 `sales.orders`로 보이고, sqlite3가 쓴 행을 T-SQL 방언이 `sales.orders`로 읽음).
 - sqlite3가 타입·제약을 어기는 값을 거부하는지, xqlite가 sqlite3가 바꾼 값을 읽는지도 봅니다.
 - 엔진 함수(`xq_tsql_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mssql/test.zig`에서 확인합니다.
 

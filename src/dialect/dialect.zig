@@ -34,19 +34,23 @@ const FuncDef = int.FuncDef;
 const CollSeq = int.CollSeq;
 
 /// The dialects. The values are stable (they are stored by nothing yet,
-/// but keep them so); 3 is meant for MSSQL (T-SQL).
+/// but keep them so).
 pub const Dialect = enum(u8) {
     sqlite = 0,
     postgres = 1,
     mariadb = 2,
+    /// Microsoft SQL Server (T-SQL).
+    mssql = 3,
+    /// Oracle Database.
+    oracle = 4,
 
     /// The name used by PRAGMA xq_dialect, .dialect and the catalog.
     pub fn name(d: Dialect) [:0]const u8 {
         return @tagName(d);
     }
 
-    /// The dialect called `z` (case-insensitive; "pg", "postgresql" and
-    /// "mysql" are accepted as aliases), or null.
+    /// The dialect called `z` (case-insensitive; "pg", "postgresql",
+    /// "mysql", "sqlserver" and "tsql" are accepted as aliases), or null.
     pub fn fromName(z: []const u8) ?Dialect {
         for (std.enums.values(Dialect)) |d| {
             if (ctype.eqlNoCase(z, @tagName(d))) return d;
@@ -55,6 +59,8 @@ pub const Dialect = enum(u8) {
             .{ "pg", .postgres },
             .{ "postgresql", .postgres },
             .{ "mysql", .mariadb },
+            .{ "sqlserver", .mssql },
+            .{ "tsql", .mssql },
         };
         for (aliases) |a| if (ctype.eqlNoCase(z, a[0])) return a[1];
         return null;
@@ -142,6 +148,8 @@ fn module(comptime d: Dialect) type {
         .sqlite => @import("sqlite/frontend.zig"),
         .postgres => @import("postgres/frontend.zig"),
         .mariadb => @import("mariadb/frontend.zig"),
+        .mssql => @import("mssql/frontend.zig"),
+        .oracle => @import("oracle/frontend.zig"),
     };
 }
 
@@ -396,5 +404,6 @@ test "Dialect names" {
     }
     try std.testing.expectEqual(Dialect.postgres, Dialect.fromName("PG").?);
     try std.testing.expectEqual(Dialect.mariadb, Dialect.fromName("MySQL").?);
-    try std.testing.expect(Dialect.fromName("oracle") == null);
+    try std.testing.expectEqual(Dialect.mssql, Dialect.fromName("SQLServer").?);
+    try std.testing.expect(Dialect.fromName("db2") == null);
 }

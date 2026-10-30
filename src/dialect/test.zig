@@ -34,7 +34,7 @@ test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {
     try c.expectColumns("PRAGMA xq_dialect", "xq_dialect");
     // Not one of SQLite's pragmas.
     try c.expectRows("SELECT count(*) FROM pragma_pragma_list WHERE name LIKE 'xq%'", "0\n");
-    try c.expectError("PRAGMA xq_dialect = 'oracle'", "unknown dialect: oracle");
+    try c.expectError("PRAGMA xq_dialect = 'db2'", "unknown dialect: db2");
 
     try c.expectRows("PRAGMA xq_dialect = 'postgres'", "postgres\n");
     try testing.expectEqual(dialect.Dialect.postgres, main_mod.getDialect(c.db));

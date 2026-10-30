@@ -382,6 +382,10 @@ fn xqDialect(p: *Parse, v: *Vdbe, right: ?[]const u8) void {
             util.errorMsg(p, "unknown dialect: {s}", .{z});
             return;
         };
+        if (!d.built()) {
+            util.errorMsg(p, "{s}", .{dialect.not_built_message[@backingInt(d)]});
+            return;
+        }
         main_mod.setDialect(p.db, d);
     }
     aux.setNumCols(v, 1);

@@ -15,6 +15,13 @@
 //!    default collation. The SQLite dialect has none, so a connection in
 //!    the SQLite dialect behaves (and compiles) exactly as before.
 //!
+//! Every dialect but SQLite's can be left out of the build (`zig build
+//! -Ddialects=postgres,oracle`, default all): its name stays known, but
+//! choosing it fails (built()) and its frontend (disabled.zig) fails
+//! every statement. Its engine functions go with it, so a schema that a
+//! dialect wrote with them (MariaDB's column conversions, for one) needs
+//! that dialect built in, as it needs xqlite rather than sqlite3.
+//!
 //! The dialect is chosen per connection (ConnState, Sqlite3.xq): with
 //! OpenOptions.dialect of the Zig API, main.setDialect(), PRAGMA
 //! xq_dialect or the shell's .dialect. A statement remembers the dialect
@@ -27,6 +34,7 @@
 const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
 const ctype = @import("xqlite_base").ctype;
+const config = @import("xqlite_config");
 
 const Parse = int.Parse;
 const Sqlite3 = int.Sqlite3;
@@ -49,8 +57,17 @@ pub const Dialect = enum(u8) {
         return @tagName(d);
     }
 
+    /// Whether the dialect is in this build (-Ddialects).
+    pub fn built(d: Dialect) bool {
+        return switch (d) {
+            .sqlite => true,
+            inline else => |x| @field(config, "dialect_" ++ @tagName(x)),
+        };
+    }
+
     /// The dialect called `z` (case-insensitive; "pg", "postgresql",
     /// "mysql", "sqlserver" and "tsql" are accepted as aliases), or null.
+    /// It may not be built().
     pub fn fromName(z: []const u8) ?Dialect {
         for (std.enums.values(Dialect)) |d| {
             if (ctype.eqlNoCase(z, @tagName(d))) return d;
@@ -184,7 +201,17 @@ const specs = blk: {
     break :blk s;
 };
 
+/// The error of choosing dialect `d` when it is not built().
+pub const not_built_message = blk: {
+    var m: [std.enums.values(Dialect).len][]const u8 = undefined;
+    for (std.enums.values(Dialect)) |d| {
+        m[@backingInt(d)] = "dialect not built in: " ++ @tagName(d);
+    }
+    break :blk m;
+};
+
 fn module(comptime d: Dialect) type {
+    if (!d.built()) return @import("disabled.zig").Disabled(d);
     return switch (d) {
         .sqlite => @import("sqlite/frontend.zig"),
         .postgres => @import("postgres/frontend.zig"),

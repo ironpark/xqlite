@@ -25,7 +25,8 @@ ReleaseSmall 빌드입니다.
 
 | 결과물 | 크기 | gzip -9 |
 | --- | --- | --- |
-| `wasm32-freestanding` 모듈 (`zig build wasm`) | 1,790,908 B (1.7MiB) | 697,513 B |
+| `wasm32-freestanding` 모듈 (`zig build wasm`) | 2,333,702 B (2.2MiB) | 895,034 B |
+| 같은 모듈, SQLite만 (`zig build wasm -Ddialects=none -Dext=none`) | 952,458 B (0.9MiB) | 379,487 B |
 | `wasm32-wasi` 셸 (`-Doptimize=ReleaseSmall`) | 2,031,184 B (1.9MiB) | — |
 
 `zig build wasm`은 `-Doptimize`와 상관없이 ReleaseSmall로 빌드합니다. 바꾸려면 `-Dwasm-optimize=debug`(또는 `safe`, `fast`)를 줍니다.

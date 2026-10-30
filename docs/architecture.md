@@ -8,6 +8,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 
 - [개요](#개요)
 - [방언 고르기](#방언-고르기)
+- [빌드에 넣을 방언과 확장](#빌드에-넣을-방언과-확장)
 - [공통 IR의 두 층](#공통-ir의-두-층)
 - [의미 노드](#의미-노드)
 - [render와 lower의 계약](#render와-lower의-계약)
@@ -65,6 +66,26 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 - `sql.main.setFrontend()`는 다른 방언의 훅으로 SQLite 문법을 돌릴 때 씁니다(테스트·개발용).
 - 문장은 컴파일된 언어(`Vdbe.xq_lang`)를 기억합니다. 그래서 스키마 변경 뒤의 재컴파일도 같은 방언으로 합니다.
 - 엔진이 스스로 파싱하는 텍스트는 언제나 SQLite 텍스트이고 SQLite 프론트엔드로 갑니다. 스키마, nested parse, `OP_SqlExec`, ALTER TABLE 재작성, pragma 가상 테이블, `sqlite_stat1`, 카탈로그 SQL이 여기에 해당합니다.
+
+## 빌드에 넣을 방언과 확장
+
+SQLite 방언을 뺀 방언과 내장 확장은 빌드에서 뺄 수 있습니다. 기본값은 모두 넣는 것입니다.
+
+| 옵션 | 기본값 | 뜻 |
+| --- | --- | --- |
+| `-Ddialects=LIST` | `all` | 넣을 방언. `postgres`, `mariadb`, `mssql`, `oracle`을 쉼표로, 또는 `all`, `none` |
+| `-Dext=LIST` | `all` | 넣을 확장. `carray`(C ABI의 `carray()`와 `sqlite3_carray_bind()`), `series`(셸의 `generate_series()`), `vtablog`(셸의 `XQ_VTABLOG`) |
+
+```sh
+zig build -Ddialects=none -Dext=none -Doptimize=ReleaseSmall   # SQLite만
+zig build wasm -Ddialects=postgres                             # PostgreSQL 방언만 넣은 브라우저 모듈
+```
+
+- 빌드 시스템이 옵션을 `xqlite_config` 모듈(`dialect_<이름>`, `ext_<이름>` bool)로 만들어 엔진의 모든 컴파일에 붙입니다. Zig API에서는 `xqlite.config`입니다.
+- 뺀 방언은 이름은 그대로 알고, `Dialect.built()`가 거짓입니다. `PRAGMA xq_dialect`, 셸의 `.dialect`, C API의 URI 파라미터와 `xqlite_set_dialect()`, wasm의 `xq_set_dialect`는 `dialect not built in: postgres`로 실패합니다. Zig API의 `setDialect()`는 enum을 받으므로 바꾸기는 하지만, 그 뒤 문장이 같은 메시지로 실패합니다(`src/dialect/disabled.zig`의 프론트엔드).
+- 뺀 방언의 엔진 함수(`xq_coerce()` 등)도 빠지므로, 그 방언이 그런 함수를 넣어 쓴 스키마는 그 방언을 넣은 빌드가 있어야 씁니다. sqlite3로는 원래 쓸 수 없는 스키마이므로 같은 처지입니다.
+- 방언 코드는 엔진의 약 1/3입니다. 모두 넣은 빌드와 SQLite만 넣은 빌드(ReleaseSmall)를 비교하면 브라우저 wasm은 2.33MB에서 0.95MB, `libxqlite3` 공유 라이브러리는 2.48MB에서 1.20MB입니다.
+- `zig build check`는 `tools/minimal_test.zig`를 `-Ddialects=none -Dext=none`에 해당하는 엔진으로 빌드해 돌립니다(`zig build test-minimal`).
 
 ## 공통 IR의 두 층
 
@@ -428,6 +449,8 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | `pkg/storage/bench/btree.zig` | B-tree 커서 벤치마크(`zig build bench-btree`) |
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
 | `pkg/base/src/{ctype,numeric,hash,flags,cast}.zig` | 공용 패키지: 문자 분류, 수 변환, Hash 순서, 플래그 연산, 캐스트 |
+| `src/dialect/disabled.zig` | 빌드에서 뺀 방언의 프론트엔드([빌드에 넣을 방언과 확장](#빌드에-넣을-방언과-확장)) |
+| `tools/minimal_test.zig` | 방언·확장을 모두 뺀 엔진의 테스트(`zig build test-minimal`) |
 
 구문 트리 IR(`src/ir/tree.zig`)이 나타내는 문장은 다음과 같습니다.
 

@@ -6,6 +6,7 @@ const std = @import("std");
 const int = @import("sqlite_int.zig");
 const util = @import("util.zig");
 const ctype = @import("xqlite_base").ctype;
+const config = @import("xqlite_config");
 
 const Allocator = std.mem.Allocator;
 const Parse = int.Parse;
@@ -570,9 +571,9 @@ pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u
             if (m == null and name.len >= 4 and ctype.eqlNoCase(name[0..4], "json")) {
                 m = @import("json.zig").jsonVtabRegister(db, name);
             }
-            if (m == null and db.enable_carray and ctype.eqlNoCase(name, "carray")) {
+            if (comptime config.ext_carray) if (m == null and db.enable_carray and ctype.eqlNoCase(name, "carray")) {
                 m = @import("../ext/carray.zig").register(db);
-            }
+            };
             if (m == null and name.len > 3 and ctype.eqlNoCase(name[0..3], "xq_")) {
                 m = @import("../dialect/dialect.zig").engineModuleRegister(db, name) orelse
                     @import("../dialect/dialect.zig").tableFunction(db, name);

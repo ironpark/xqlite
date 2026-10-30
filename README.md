@@ -134,7 +134,10 @@ zig build run          # CLI 실행
 zig build test         # 단위 테스트 (pkg/vfs, pkg/storage, pkg/base 패키지의 테스트 포함)
 zig build test-pkg     # 패키지 테스트만 (엔진을 빌드하지 않아 빠름)
 zig build test-capi    # C API 테스트
+zig build -Ddialects=postgres,mariadb -Dext=none   # 넣을 방언·확장만 (기본 all)
 ```
+
+`-Ddialects`로 뺀 방언은 고르면 `dialect not built in` 오류가 나고, SQLite만 넣으면 브라우저 wasm이 2.3MB에서 0.95MB로 줄어듭니다([빌드에 넣을 방언과 확장](docs/architecture.md#빌드에-넣을-방언과-확장)).
 
 VFS와 스토리지 층(페이저, B-tree), 둘이 엔진과 함께 쓰는 도우미는 따로 빌드되는 Zig 패키지(`pkg/vfs`의 `xqlite_vfs`, `pkg/storage`의 `xqlite_storage`, `pkg/base`의 `xqlite_base`)이고 루트 빌드가 경로 의존성으로 가져옵니다. 각 디렉터리에서 `zig build test`를 하면 그 패키지의 테스트만 돕니다([VFS 패키지](docs/architecture.md#vfs-패키지), [스토리지 패키지](docs/architecture.md#스토리지-패키지)).
 
@@ -143,7 +146,7 @@ Linux 타깃과 WebAssembly로 크로스 컴파일할 수 있습니다.
 ```sh
 zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseFast   # Linux
 zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall        # WASI: 라이브러리와 셸 (zig-out/bin/xqlite.wasm, 약 1.9MiB)
-zig build wasm                                                # 브라우저·Node: zig-out/wasm/xqlite.wasm (약 1.7MiB)
+zig build wasm                                                # 브라우저·Node: zig-out/wasm/xqlite.wasm (약 2.2MiB)
 ```
 
 - **WASI** (`wasm32-wasi`): 셸을 `wasmtime run --dir . zig-out/bin/xqlite.wasm sql app.db`처럼 돌립니다. 파일은 WASI preview 1로 엽니다. WASI에는 권고 잠금이 없어서 잠금은 프로세스 안에서만 중재하므로, 한 DB 파일은 한 번에 한 프로세스만 써야 합니다. WAL의 wal-index는 `-shm` 파일 대신 힙 메모리에 둡니다.

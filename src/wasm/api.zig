@@ -151,6 +151,10 @@ export fn xq_set_dialect(c: *Conn, name_ptr: [*]const u8, name_len: usize) i32 {
         c.diag.set(error.Misuse, .misuse, "unknown dialect", null);
         return c.code();
     };
+    if (!d.built()) {
+        c.diag.set(error.Misuse, .misuse, "dialect not built in", null);
+        return c.code();
+    }
     c.db.setDialect(d);
     return 0;
 }

@@ -51,6 +51,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `xqt gen fixtures\|parser\|opcodes` | `src/testdata`의 테스트용 DB, `grammar.zig`, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
 | `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사 | — |
+| `zig build test-minimal` | 방언·확장을 모두 뺀 엔진(`-Ddialects=none -Dext=none`)으로 `tools/minimal_test.zig` | — |
 | `zig build capi-fast` | ReleaseFast 정적 `libxqlite3`로 C 검사와 `tools/capi/bench.c`를 8번씩 실행 | — |
 | `zig build capi-shell` | SQLite의 `shell.c`를 `libxqlite3`에 링크해 스모크 스크립트 실행 | 아말감 `shell.c` |
 | `zig build capi-sortbench` | 정렬 벤치마크(`tools/capi/sortbench.c`)를 SQLite와 ReleaseFast `libxqlite3`에서 돌려 시간과 결과 순서 비교 | 아말감 `sqlite3.c` |
@@ -144,6 +145,7 @@ SQ=/tmp/sqref/sqlite3 zig build check -Dfast=true     # capi-fast도 (약 90초)
 
 - `zig build test`의 모든 것과 `xqt` 자체의 단위 테스트
 - `zig build test-capi`: C 프로그램으로 C ABI 검사
+- `zig build test-minimal`: 방언·확장을 모두 뺀 엔진의 테스트
 - `xqt interop`: 모든 interop 모듈
 - `xqt planner --known tools/planner/known-failures.list`: `vtablog.txt`를 뺀 모든 케이스 파일
 - `xqlite fuzzcheck`: `ref/sqlite/test/fuzzdata1.db`..`fuzzdata8.db`를 파일마다 프로세스 하나로

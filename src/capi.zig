@@ -22,5 +22,6 @@ comptime {
     _ = @import("capi/callbacks.zig");
     _ = @import("capi/testctrl.zig");
     _ = @import("capi/loadext.zig");
-    _ = @import("capi/carray.zig");
+    // SQLITE_ENABLE_CARRAY: unless -Dext leaves carray out.
+    if (@import("xqlite_config").ext_carray) _ = @import("capi/carray.zig");
 }

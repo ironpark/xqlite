@@ -981,7 +981,12 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
             try p.print("{s}\n", .{sql.main.getDialect(p.db).name()});
         } else if (args.len == 2) {
             if (xqlite.dialect.Dialect.fromName(args[1])) |d| {
-                sql.main.setDialect(p.db, d);
+                if (d.built()) {
+                    sql.main.setDialect(p.db, d);
+                } else {
+                    try p.eprint("Error: {s}\n", .{xqlite.dialect.not_built_message[@backingInt(d)]});
+                    rc = 1;
+                }
             } else {
                 try p.eprint("Error: unknown dialect: {s}\n", .{args[1]});
                 rc = 1;
@@ -2084,10 +2089,10 @@ pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: [
     _ = sql.main.dbConfig(db, .trusted_schema, 0);
     _ = sql.main.dbConfig(db, .defensive, 1);
     // The extensions the sqlite3 shell builds in.
-    _ = xqlite.ext.series.init(db);
+    if (xqlite.config.ext_series) _ = xqlite.ext.series.init(db);
     // For differential testing against an sqlite3 built with vtablog.c
     // (see tools/planner/README.md).
-    if (std.c.getenv("XQ_VTABLOG") != null) {
+    if (xqlite.config.ext_vtablog and std.c.getenv("XQ_VTABLOG") != null) {
         _ = xqlite.ext.vtablog.init(db, out);
     }
 

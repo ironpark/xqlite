@@ -112,7 +112,12 @@ pub const sql = struct {
     pub const randomness = @import("sql/func.zig").randomness;
 };
 
-/// Extensions from ext/misc that the sqlite3 shell builds in.
+/// What the engine is built with (`zig build -Ddialects=... -Dext=...`):
+/// `dialect_<name>` and `ext_<name>` bools.
+pub const config = @import("xqlite_config");
+
+/// Extensions from ext/misc that the sqlite3 shell builds in (unless
+/// -Dext leaves them out: see `config`).
 pub const ext = struct {
     /// generate_series() (series.c).
     pub const series = @import("ext/series.zig");

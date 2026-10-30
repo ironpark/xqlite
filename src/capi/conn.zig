@@ -52,7 +52,7 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
         if (parsed.parameter("vfs")) |v| vfs_name = v;
         if (parsed.parameter("dialect")) |d| {
             dialect = c.dialect.Dialect.fromName(d);
-            if (dialect == null) bad_dialect = d;
+            if (dialect == null or !dialect.?.built()) bad_dialect = d;
         }
     }
     const entry = vfs_mod.find(vfs_name);
@@ -93,7 +93,11 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
         c.main.errorWithMsg(db, rc, "no such vfs: {s}", .{vfs_name.?});
     } else if (bad_dialect) |d| {
         rc = RC.ERROR;
-        c.main.errorWithMsg(db, rc, "no such dialect: {s}", .{d});
+        if (c.dialect.Dialect.fromName(d)) |known| {
+            c.main.errorWithMsg(db, rc, "{s}", .{c.dialect.not_built_message[@backingInt(known)]});
+        } else {
+            c.main.errorWithMsg(db, rc, "no such dialect: {s}", .{d});
+        }
     }
     if (rc == RC.OK) {
         if (flags & OPEN_EXRESCODE != 0) c.main.extendedResultCodes(db, true);
@@ -1081,6 +1085,10 @@ pub export fn xqlite_set_dialect(db_arg: ?*Handle, z_name: ?[*:0]const u8) callc
         c.main.errorWithMsg(db, RC.ERROR, "no such dialect: {s}", .{name});
         return RC.ERROR;
     };
+    if (!d.built()) {
+        c.main.errorWithMsg(db, RC.ERROR, "{s}", .{c.dialect.not_built_message[@backingInt(d)]});
+        return RC.ERROR;
+    }
     c.main.setDialect(db, d);
     return RC.OK;
 }

@@ -384,6 +384,22 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(capi.test_step);
     if (check_fast) check_step.dependOn(capi.fast_step);
     check_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = xqt_exe.root_module })).step);
+    // The engine with no dialect but SQLite's and no extension.
+    const minimal_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/minimal_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = engineImportsWith(b, target, optimize, minimalConfigModule(b)),
+        }) }},
+    }) });
+    const minimal_run = b.addRunArtifact(minimal_tests);
+    check_step.dependOn(&minimal_run.step);
+    b.step("test-minimal", "Run tools/minimal_test.zig on the engine built with -Ddialects=none -Dext=none").dependOn(&minimal_run.step);
     const interop_run = addXqtRun(b, xqt_exe, exe, crashshim);
     interop_run.addArg("interop");
     check_step.dependOn(&interop_run.step);
@@ -477,7 +493,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             });
             m.addIncludePath(bb.path("include"));
             m.addCSourceFile(.{ .file = bb.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
-            m.addCSourceFile(.{ .file = bb.path("src/capi/loadext.c"), .flags = &.{"-std=c99"} });
+            m.addCSourceFile(.{ .file = bb.path("src/capi/loadext.c"), .flags = if (buildConfig(bb).hasExt("carray")) &.{"-std=c99"} else &.{ "-std=c99", "-DXQ_OMIT_CARRAY" } });
             if (t.result.os.tag == .linux) {
                 m.linkSystemLibrary("pthread", .{});
                 // dlopen() for sqlite3_load_extension(), in libdl before glibc 2.34.
@@ -659,13 +675,81 @@ fn vfsImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 }
 
 /// The imports of a module of the engine for `target`: the VFS, storage
-/// and base packages.
+/// and base packages, and the build configuration.
 fn engineImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) []const std.Build.Module.Import {
+    return engineImportsWith(b, target, optimize, configModule(b));
+}
+
+fn engineImportsWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, config_module: *std.Build.Module) []const std.Build.Module.Import {
     return b.allocator.dupe(std.Build.Module.Import, &.{
         vfsImport(b, target, optimize),
         storageImport(b, target, optimize),
         baseImport(b, target, optimize),
+        .{ .name = "xqlite_config", .module = config_module },
     }) catch @panic("OOM");
+}
+
+/// `xqlite_config` with no dialect but SQLite's and no extension, for
+/// tools/minimal_test.zig whatever -Ddialects and -Dext say.
+fn minimalConfigModule(b: *std.Build) *std.Build.Module {
+    const options = b.addOptions();
+    for (Config.dialects) |name| options.addOption(bool, b.fmt("dialect_{s}", .{name}), false);
+    for (Config.exts) |name| options.addOption(bool, b.fmt("ext_{s}", .{name}), false);
+    return options.createModule();
+}
+
+/// The build configuration, from -Ddialects and -Dext (configModule()).
+const Config = struct {
+    const dialects = [_][]const u8{ "postgres", "mariadb", "mssql", "oracle" };
+    const exts = [_][]const u8{ "carray", "series", "vtablog" };
+    dialect: [dialects.len]bool,
+    ext: [exts.len]bool,
+    module: *std.Build.Module,
+
+    fn hasExt(c: Config, name: []const u8) bool {
+        for (exts, c.ext) |e, on| if (std.mem.eql(u8, e, name)) return on;
+        unreachable;
+    }
+};
+
+var config: ?Config = null;
+
+/// `xqlite_config`, what the engine is built with: a `dialect_<name>`
+/// bool for each dialect but SQLite's (-Ddialects, see
+/// src/dialect/dialect.zig) and an `ext_<name>` bool for each built-in
+/// extension (-Dext, see src/ext). The same module for every
+/// compilation of the engine.
+fn configModule(b: *std.Build) *std.Build.Module {
+    return buildConfig(b).module;
+}
+
+fn buildConfig(b: *std.Build) Config {
+    if (config) |c| return c;
+    const options = b.addOptions();
+    var on_all: [2][4]bool = undefined;
+    const lists = [_]struct { []const u8, []const u8, []const []const u8 }{
+        .{ "dialects", "dialect", &Config.dialects },
+        .{ "ext", "ext", &Config.exts },
+    };
+    for (lists, &on_all) |l, *on| {
+        const help = b.fmt("Comma-separated {s} to build in, of {s}; \"all\" or \"none\" (default: all)", .{ l[0], std.mem.join(b.allocator, ", ", l[2]) catch @panic("OOM") });
+        const value = b.option([]const u8, l[0], help) orelse "all";
+        on.* = @splat(std.mem.eql(u8, value, "all"));
+        if (!std.mem.eql(u8, value, "all") and !std.mem.eql(u8, value, "none")) {
+            var it = std.mem.tokenizeAny(u8, value, ", ");
+            while (it.next()) |name| {
+                for (l[2], 0..) |known, i| {
+                    if (std.mem.eql(u8, name, known)) {
+                        on[i] = true;
+                        break;
+                    }
+                } else std.debug.panic("-D{s}: unknown name {s} (one of {s})", .{ l[0], name, std.mem.join(b.allocator, ", ", l[2]) catch "" });
+            }
+        }
+        for (l[2], 0..) |name, i| options.addOption(bool, b.fmt("{s}_{s}", .{ l[1], name }), on[i]);
+    }
+    config = .{ .dialect = on_all[0], .ext = on_all[1][0..Config.exts.len].*, .module = options.createModule() };
+    return config.?;
 }
 
 /// The shared helpers (pkg/base, a path dependency) for `target`, as the

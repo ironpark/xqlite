@@ -26,7 +26,9 @@
 # define sqlite3_column_table_name16    0
 # define sqlite3_column_origin_name     0
 # define sqlite3_column_origin_name16   0
+#ifndef XQ_OMIT_CARRAY /* zig build -Dext without carray */
 #define SQLITE_ENABLE_CARRAY 1
+#endif
 
 __attribute__((visibility("hidden")))
 const sqlite3_api_routines xq_sqlite3_apis = {

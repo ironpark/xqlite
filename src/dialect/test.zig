@@ -24,6 +24,7 @@ fn useHooksOf(c: *Conn, d: dialect.Dialect) void {
 
 test {
     _ = @import("postgres/frontend.zig");
+    _ = @import("oracle/frontend.zig");
 }
 
 test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {

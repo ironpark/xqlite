@@ -1,11 +1,11 @@
-//! The engine's memdb VFS: the VFS package's memdb (vfs/memdb.zig) on
+//! The engine's memdb VFS: the VFS package's memdb (pkg/vfs/src/memdb.zig) on
 //! the library allocator (sqlite3_malloc(), sql/malloc.zig), so that its
 //! stores count in sqlite3_status() and toward the heap limits, as
 //! memdb.c's do. sqlite3_deserialize() (sql/serialize.zig), ATTACH's
 //! temporary databases (sql/attach.zig) and the C ABI's "memdb" VFS
 //! (capi/vfs.zig) all use this one instance and its shared stores.
 
-const memdb = @import("../vfs/memdb.zig");
+const memdb = @import("xqlite_vfs").memdb;
 const Instance = memdb.Memdb(@import("malloc.zig"));
 
 pub const FREEONCLOSE = memdb.FREEONCLOSE;

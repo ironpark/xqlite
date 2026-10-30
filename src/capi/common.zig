@@ -15,7 +15,7 @@ pub const printf = @import("../sql/printf.zig");
 pub const util = @import("../sql/util.zig");
 pub const ctype = @import("../util/ctype.zig");
 pub const dialect = @import("../dialect/dialect.zig");
-pub const vfs = @import("../vfs/vfs.zig");
+pub const vfs = @import("xqlite_vfs").vfs;
 /// The operating system's VFS: POSIX, or WASI on wasm32-wasi.
 pub const OsVfs = vfs.OsVfs;
 

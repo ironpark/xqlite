@@ -1,5 +1,5 @@
 //! sqlite3_serialize() and sqlite3_deserialize() (port of the API half of
-//! memdb.c; the memdb VFS itself is vfs/memdb.zig).
+//! memdb.c; the memdb VFS itself is pkg/vfs/src/memdb.zig).
 //!
 //! serialize() copies a database into one block of memory: the content
 //! of a memdb database as it is, any other database page by page through
@@ -168,7 +168,7 @@ fn count(db: *Sqlite3, sql: []const u8) !i64 {
 }
 
 test "serialize: round trip through deserialize" {
-    var mem = @import("../vfs/mem.zig").MemVfs.init(testing.allocator, testing.io);
+    var mem = @import("xqlite_vfs").mem.MemVfs.init(testing.allocator, testing.io);
     defer mem.deinit();
     var h: ?*Sqlite3 = null;
     try testing.expectEqual(RC.OK, main.open(mem.interface(), "file.db", .{}, &h));

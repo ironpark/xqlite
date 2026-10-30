@@ -1065,7 +1065,7 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
 }
 
 /// Write the 0-terminated name of a journal into the super-journal.
-fn writeSuperJournalEntry(sj: @import("../vfs/vfs.zig").File, name: []const u8, offset: u64) @import("../vfs/vfs.zig").Error!void {
+fn writeSuperJournalEntry(sj: @import("xqlite_vfs").vfs.File, name: []const u8, offset: u64) @import("xqlite_vfs").vfs.Error!void {
     try sj.write(name, offset);
     try sj.write(&.{0}, offset + name.len);
 }

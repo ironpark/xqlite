@@ -9,8 +9,8 @@ const prepare = @import("prepare.zig");
 const attach = @import("attach.zig");
 const legacy = @import("legacy.zig");
 const api = @import("../vdbe/api.zig");
-const vfs = @import("../vfs/vfs.zig");
-const MemVfs = @import("../vfs/mem.zig").MemVfs;
+const vfs = @import("xqlite_vfs").vfs;
+const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 const Conn = @import("sql_test.zig").Conn;
 
 const RC = int.RC;

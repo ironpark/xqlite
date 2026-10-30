@@ -11,7 +11,7 @@
 const std = @import("std");
 const btree = @import("btree.zig");
 const record = @import("../vdbe/record.zig");
-const MemVfs = @import("../vfs/mem.zig").MemVfs;
+const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 const fuzz = @import("../testing/fuzz.zig");
 
 const Allocator = std.mem.Allocator;

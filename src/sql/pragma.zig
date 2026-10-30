@@ -768,7 +768,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
         // PRAGMA temp_store_directory[=DIR]: sqlite3_temp_directory, which
         // the VFS package keeps (the POSIX VFS reads it).
         .temp_store_directory => {
-            const vfs_pkg = @import("../vfs/root.zig");
+            const vfs_pkg = @import("xqlite_vfs");
             const z = right orelse {
                 returnSingleText(v, if (vfs_pkg.temp_directory) |d| std.mem.span(d) else null);
                 return;

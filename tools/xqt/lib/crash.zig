@@ -2,7 +2,7 @@
 //!
 //! - xqlite: `$XQLITE_TEST_CRASH=KIND:N[:torn]` makes `xqlite sql` exit at
 //!   once at its N-th write to a file of KIND (db, journal or wal), with
-//!   `torn` after writing half of it (src/vfs/crash.zig). `xqlite
+//!   `torn` after writing half of it (pkg/vfs/src/crash.zig). `xqlite
 //!   crash-write FILE BYTE` instead dies in the middle of a commit.
 //! - sqlite3: tools/crashshim.c, built by `zig build tools` (and by `zig
 //!   build check`, which passes it with --crashshim) and preloaded

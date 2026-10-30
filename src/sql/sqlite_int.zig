@@ -2191,7 +2191,7 @@ pub const Sqlite3 = struct {
     gpa: Allocator,
     lookaside: Lookaside = .{},
     /// The VFS of the connection's files, also used for ephemeral tables.
-    vfs: ?@import("../vfs/vfs.zig").Vfs = null,
+    vfs: ?@import("xqlite_vfs").vfs.Vfs = null,
     /// The flags the connection was opened with (openFlags), which ATTACH
     /// starts from.
     open_flags: @import("main.zig").OpenFlags = .{},

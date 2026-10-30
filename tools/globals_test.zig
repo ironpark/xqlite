@@ -1,4 +1,4 @@
-//! Checks that src/ and tools/xqt/ have no hidden global state: a mutable
+//! Checks that src/, pkg/ and tools/xqt/ have no hidden global state: a mutable
 //! container-level variable (a `var` at the top of a file or among the
 //! declarations of a struct, which lives as long as the process) must be
 //! one that `allowed` lists. Tests (test declarations and *_test.zig files) may keep state of
@@ -14,18 +14,19 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "heap_limit" },
     .{ "src/sql/global.zig", "prng" },
     .{ "src/sql/global.zig", "testctrl" },
-    .{ "src/vfs/root.zig", "temp_directory" },
     .{ "src/sql/global.zig", "data_directory" },
+    // sqlite3_temp_directory, which the VFS package keeps.
+    .{ "pkg/vfs/src/root.zig", "temp_directory" },
     // The C ABI's VFS registry, for ATTACH's vfs= parameter.
     .{ "src/sql/global.zig", "find_vfs" },
     // The shared stores of the memdb VFS (memdb_g) and its settings.
-    .{ "src/vfs/memdb.zig", "state" },
+    .{ "pkg/vfs/src/memdb.zig", "state" },
     // sqlite3Stat: the status counters (sqlite3_status()).
     .{ "src/sql/status.zig", "state" },
     // How load_extension() loads a library, which the C ABI sets.
     .{ "src/sql/global.zig", "load_extension" },
     // The POSIX lock table, which every connection has to share.
-    .{ "src/vfs/unix.zig", "inodes" },
+    .{ "pkg/vfs/src/unix.zig", "inodes" },
     // The C ABI's process-wide state (sqlite3_config(), the auto
     // extensions), its VFS list, the sqlite3_str of a failed
     // sqlite3_str_new() and the variables sqlite3.h declares.
@@ -40,8 +41,8 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/capi/printf.zig", "oom_str" },
     // The in-process lock tables of the WASI and host VFSes, for the same
     // reason (WASI has no locks the system arbitrates).
-    .{ "src/vfs/wasi.zig", "files" },
-    .{ "src/vfs/host.zig", "files" },
+    .{ "pkg/vfs/src/wasi.zig", "files" },
+    .{ "pkg/vfs/src/host.zig", "files" },
     // The file systems the connections of the wasm module share.
     .{ "src/wasm/api.zig", "mem_vfs" },
     .{ "src/wasm/api.zig", "host_vfs" },
@@ -92,6 +93,8 @@ test "no hidden global state" {
     var found: std.ArrayList(u8) = .empty;
     defer found.deinit(gpa);
     try std.testing.expect(try scan(gpa, "src", &found) > 50);
+    // The VFS package (not its .zig-cache, if it was built alone).
+    try std.testing.expect(try scan(gpa, "pkg/vfs/src", &found) > 5);
     // The test tool, which runs its checks on threads.
     try std.testing.expect(try scan(gpa, "tools/xqt", &found) > 5);
     if (found.items.len > 0) {

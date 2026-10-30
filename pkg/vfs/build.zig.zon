@@ -1,0 +1,15 @@
+.{
+    // The OS abstraction layer of xqlite (sqlite3_vfs): the module
+    // `xqlite_vfs`. The root package (../../build.zig.zon) depends on it
+    // by path.
+    .name = .xqlite_vfs,
+    .version = "0.0.0",
+    .fingerprint = 0x807e96152fcdff60, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

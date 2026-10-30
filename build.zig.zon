@@ -32,6 +32,8 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        // The VFS layer, a package of its own in this repository.
+        .xqlite_vfs = .{ .path = "pkg/vfs" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -72,6 +74,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "pkg/vfs",
         "LICENSE",
         "README.md",
     },

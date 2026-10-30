@@ -9,7 +9,7 @@ const main_mod = @import("main.zig");
 const legacy = @import("legacy.zig");
 const prepare = @import("prepare.zig");
 const api = @import("../vdbe/api.zig");
-const MemVfs = @import("../vfs/mem.zig").MemVfs;
+const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 
 const RC = int.RC;
 
@@ -1135,14 +1135,14 @@ test "sql: the result codes of application functions reach the API" {
 /// A VFS over a MemVfs whose file reads or writes fail with `fault` while
 /// it is set.
 const FaultVfs = struct {
-    inner: @import("../vfs/vfs.zig").Vfs,
-    var fault_read: ?@import("../vfs/vfs.zig").Error = null;
-    var fault_write: ?@import("../vfs/vfs.zig").Error = null;
-    var file_vtable: @import("../vfs/vfs.zig").File.VTable = undefined;
-    var inner_read: *const fn (*anyopaque, []u8, u64) @import("../vfs/vfs.zig").Error!usize = undefined;
-    var inner_write: *const fn (*anyopaque, []const u8, u64) @import("../vfs/vfs.zig").Error!void = undefined;
+    inner: @import("xqlite_vfs").vfs.Vfs,
+    var fault_read: ?@import("xqlite_vfs").vfs.Error = null;
+    var fault_write: ?@import("xqlite_vfs").vfs.Error = null;
+    var file_vtable: @import("xqlite_vfs").vfs.File.VTable = undefined;
+    var inner_read: *const fn (*anyopaque, []u8, u64) @import("xqlite_vfs").vfs.Error!usize = undefined;
+    var inner_write: *const fn (*anyopaque, []const u8, u64) @import("xqlite_vfs").vfs.Error!void = undefined;
 
-    const V = @import("../vfs/vfs.zig");
+    const V = @import("xqlite_vfs").vfs;
     const vtable: V.Vfs.VTable = .{ .open = open, .delete = delete, .access = access, .randomness = randomness, .sleep = sleep };
 
     fn interface(self: *FaultVfs) V.Vfs {
@@ -1226,7 +1226,7 @@ test "sql: I/O errors of the VFS reach the API" {
     c.db = opened.?;
     defer _ = main_mod.close(c.db);
     try c.exec("CREATE TABLE t(x); INSERT INTO t VALUES(1)");
-    for ([_]struct { @import("../vfs/vfs.zig").Error, i32, []const u8 }{
+    for ([_]struct { @import("xqlite_vfs").vfs.Error, i32, []const u8 }{
         .{ error.IoErr, RC.IOERR, "disk I/O error" },
         .{ error.DiskFull, RC.FULL, "database or disk is full" },
         .{ error.ReadOnly, RC.READONLY, "attempt to write a readonly database" },

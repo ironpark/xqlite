@@ -24,7 +24,7 @@ pub export const sqlite3_version: [version.len:0]u8 = version.*;
 // (global.zig).
 comptime {
     const global = @import("../sql/global.zig");
-    @export(&@import("../vfs/root.zig").temp_directory, .{ .name = "sqlite3_temp_directory" });
+    @export(&@import("xqlite_vfs").temp_directory, .{ .name = "sqlite3_temp_directory" });
     @export(&global.data_directory, .{ .name = "sqlite3_data_directory" });
 }
 

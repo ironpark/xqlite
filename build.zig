@@ -43,6 +43,8 @@ pub fn build(b: *std.Build) void {
         // wasi-libc the clock and localtime_r() on wasm32-wasi);
         // wasm32-freestanding has none (src/util/platform.zig).
         .link_libc = target.result.os.tag != .freestanding,
+        // The VFS layer, a package of its own (pkg/vfs). See vfsImport().
+        .imports = &.{vfsImport(b, target, optimize)},
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -145,6 +147,9 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    // The VFS package's tests, which the module's do not include (a test
+    // binary runs the tests of its root module only).
+    test_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
 
     // Example programs of the Zig API (examples/*.zig): `zig build
     // example-<name>` runs one (arguments after `--`), `zig build examples`
@@ -186,6 +191,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/root.zig"),
                 .target = wasm_target,
                 .optimize = wasm_optimize,
+                .imports = &.{vfsImport(b, wasm_target, wasm_optimize)},
             }) }},
         }),
     });
@@ -211,7 +217,7 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(doc_tests).step);
 
-    // ... and that src/ and tools/xqt keep no mutable globals but the few
+    // ... and that src/, pkg/ and tools/xqt keep no mutable globals but the few
     // it lists.
     // The seeded fuzzers (src/fuzz_tests.zig): `zig build fuzz -- NAME
     // [SEED]` runs one. Their smoke test runs with the module's tests
@@ -221,6 +227,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{vfsImport(b, target, optimize)},
     });
     const fuzz_exe = b.addExecutable(.{ .name = "fuzz", .root_module = fuzz_module });
     const run_fuzz = b.addRunArtifact(fuzz_exe);
@@ -237,7 +244,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_globals_tests = b.addRunArtifact(globals_tests);
     run_globals_tests.setCwd(b.path("."));
-    // It reads src/ at run time, which the cache does not see.
+    // It reads src/ and pkg/ at run time, which the cache does not see.
     run_globals_tests.has_side_effects = true;
     test_step.dependOn(&run_globals_tests.step);
     test_step.dependOn(examples_step);
@@ -300,6 +307,7 @@ pub fn build(b: *std.Build) void {
         .target = wasi_target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{vfsImport(b, wasi_target, optimize)},
     });
     const wasi_exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -318,6 +326,7 @@ pub fn build(b: *std.Build) void {
                 .target = wasi_target,
                 .optimize = .safe,
                 .link_libc = true,
+                .imports = &.{vfsImport(b, wasi_target, .safe)},
             }) }},
         }),
     });
@@ -325,6 +334,7 @@ pub fn build(b: *std.Build) void {
     for ([_]*std.Build.Step.Compile{
         b.addTest(.{ .root_module = wasi_mod, .filters = test_filters }),
         b.addTest(.{ .root_module = wasi_exe_mod, .filters = test_filters }),
+        vfsTests(b, wasi_target, optimize, test_filters),
     }) |t| {
         const run = b.addSystemCommand(&.{ "wasmtime", "run", "--dir", "." });
         run.addArtifactArg(t);
@@ -391,6 +401,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = .ReleaseSafe,
                 .link_libc = true,
+                .imports = &.{vfsImport(b, target, .ReleaseSafe)},
             }),
         });
         for ([_][]const u8{ "btree_model", "btree_corrupt", "ir_roundtrip" }) |name| {
@@ -437,6 +448,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
                 .optimize = o,
                 .link_libc = true,
                 .pic = true,
+                .imports = &.{vfsImport(bb, t, o)},
             });
             m.addIncludePath(bb.path("include"));
             m.addCSourceFile(.{ .file = bb.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
@@ -577,4 +589,29 @@ fn addXqtRun(b: *std.Build, xqt: *std.Build.Step.Compile, xqlite: *std.Build.Ste
     run.setCwd(b.path("."));
     run.has_side_effects = true;
     return run;
+}
+
+/// The VFS layer (pkg/vfs, a path dependency) for `target`, as the
+/// import `xqlite_vfs` of a module. Its module takes the optimization
+/// mode of the compilation that imports it; `optimize` goes to the
+/// package for its own tests. The same arguments give the same module.
+fn vfsImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
+    const dep = b.dependency("xqlite_vfs", .{ .target = target, .optimize = optimize });
+    return .{ .name = "xqlite_vfs", .module = dep.module("xqlite_vfs") };
+}
+
+/// The VFS package's tests for `target`: those `zig build test` runs in
+/// pkg/vfs.
+fn vfsTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
+    const dep = b.dependency("xqlite_vfs", .{ .target = target, .optimize = optimize });
+    return b.addTest(.{
+        .name = "vfs-test",
+        .root_module = b.createModule(.{
+            .root_source_file = dep.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = target.result.os.tag != .freestanding,
+        }),
+        .filters = filters,
+    });
 }

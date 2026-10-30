@@ -167,7 +167,7 @@ pub const OpenFlags = struct {
 /// is null only if the connection object itself could not be allocated
 /// (C: `*ppDb = 0`). Its memory comes from sqlite3_malloc()
 /// (malloc.configMalloc() chooses the allocator).
-pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenFlags, out: *?*Sqlite3) i32 {
+pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenFlags, out: *?*Sqlite3) i32 {
     out.* = null;
     const db = malloc.allocator.create(Sqlite3) catch return RC.NOMEM;
     // Lookaside is off until set up at the end.

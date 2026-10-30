@@ -34,10 +34,10 @@ const tokenize = @import("../parse/tokenize.zig");
 const TK = @import("../parse/grammar.zig").TK;
 const thunk_mod = @import("../util/thunk.zig");
 
-pub const Vfs = @import("../vfs/vfs.zig").Vfs;
-pub const MemVfs = @import("../vfs/mem.zig").MemVfs;
+pub const Vfs = @import("xqlite_vfs").vfs.Vfs;
+pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 /// The file-system VFS of the target (UnixVfs, WasiVfs or HostVfs).
-pub const OsVfs = @import("../vfs/vfs.zig").OsVfs;
+pub const OsVfs = @import("xqlite_vfs").vfs.OsVfs;
 /// PRAGMA journal_mode values.
 pub const JournalMode = @import("../pager/pager.zig").JournalMode;
 

@@ -447,8 +447,8 @@ pub fn ioSleep(io: std.Io, microseconds: u32) u32 {
 }
 
 /// The file-system VFS of the target, chosen at compile time: the POSIX
-/// VFS (vfs/unix.zig), the WASI VFS on wasm32-wasi (vfs/wasi.zig) and the
-/// host VFS on wasm32-freestanding (vfs/host.zig). Each has
+/// VFS (unix.zig), the WASI VFS on wasm32-wasi (wasi.zig) and the
+/// host VFS on wasm32-freestanding (host.zig). Each has
 /// `init(gpa, io)` and `interface()`.
 pub const OsVfs = switch (@import("builtin").os.tag) {
     .wasi => @import("wasi.zig").WasiVfs,

@@ -907,7 +907,7 @@ test "api: run a hand-assembled program" {
 }
 
 test "api: sorter and ephemeral table" {
-    const vfs_mod = @import("../vfs/mem.zig");
+    const vfs_mod = @import("xqlite_vfs").mem;
     var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
     defer mv.deinit();
     var db: Sqlite3 = undefined;
@@ -973,7 +973,7 @@ test "api: sorter and ephemeral table" {
 }
 
 test "api: sorter order and ties for each key type" {
-    const vfs_mod = @import("../vfs/mem.zig");
+    const vfs_mod = @import("xqlite_vfs").mem;
     var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
     defer mv.deinit();
     inline for (.{ int.Aff.integer, int.Aff.text, int.Aff.real, int.Aff.blob }) |aff| {
@@ -1051,7 +1051,7 @@ test "api: sorter order and ties for each key type" {
 }
 
 test "api: an OpenDup cursor outlives the original" {
-    const vfs_mod = @import("../vfs/mem.zig");
+    const vfs_mod = @import("xqlite_vfs").mem;
     var mv = vfs_mod.MemVfs.init(std.testing.allocator, std.testing.io);
     defer mv.deinit();
     var db: Sqlite3 = undefined;

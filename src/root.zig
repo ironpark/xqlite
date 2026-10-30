@@ -50,22 +50,22 @@ comptime {
 
 pub const varint = @import("util/varint.zig");
 
-pub const vfs = @import("vfs/vfs.zig");
-pub const MemVfs = @import("vfs/mem.zig").MemVfs;
+pub const vfs = @import("xqlite_vfs").vfs;
+pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 /// The POSIX VFS; void on WebAssembly, which has no POSIX locks.
 pub const UnixVfs = switch (@import("builtin").os.tag) {
     .wasi, .freestanding => void,
-    else => @import("vfs/unix.zig").UnixVfs,
+    else => @import("xqlite_vfs").unix.UnixVfs,
 };
 /// The WASI VFS (docs/wasm.md); void but on wasm32-wasi.
-pub const WasiVfs = if (@import("builtin").os.tag == .wasi) @import("vfs/wasi.zig").WasiVfs else void;
+pub const WasiVfs = if (@import("builtin").os.tag == .wasi) @import("xqlite_vfs").wasi.WasiVfs else void;
 /// The VFS whose files the embedder supplies through imports
 /// (docs/wasm.md); void but on wasm32-freestanding.
-pub const HostVfs = if (@import("builtin").os.tag == .freestanding) @import("vfs/host.zig").HostVfs else void;
+pub const HostVfs = if (@import("builtin").os.tag == .freestanding) @import("xqlite_vfs").host.HostVfs else void;
 /// The file-system VFS of the target: UnixVfs, WasiVfs or HostVfs.
 pub const OsVfs = vfs.OsVfs;
 /// A VFS wrapper that crashes the process at a chosen write (testing aid).
-pub const crash_vfs = @import("vfs/crash.zig");
+pub const crash_vfs = @import("xqlite_vfs").crash;
 
 pub const pager = @import("pager/pager.zig");
 pub const pcache = @import("pager/pcache.zig");

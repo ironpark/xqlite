@@ -2,14 +2,14 @@
 //! the VFS registry of the C ABI, with adapters both ways.
 //!
 //! - The default VFS, "unix" ("wasi" on wasm32-wasi), is the engine's OS
-//!   VFS (vfs/unix.zig, vfs/wasi.zig).
+//!   VFS (pkg/vfs/src/unix.zig, pkg/vfs/src/wasi.zig).
 //!   Its sqlite3_vfs (unix_c) calls it, so a C VFS that wraps the
 //!   default one (a shim that delegates xOpen to sqlite3_vfs_find(0), as
 //!   SQLite's appendvfs and test VFSes do) gets working files.
 //! - A VFS registered from C becomes an engine Vfs (cVfs()) whose files
 //!   call the sqlite3_io_methods the C xOpen installed.
 //!
-//! - "memdb" is the engine's memdb VFS (vfs/memdb.zig), registered as
+//! - "memdb" is the engine's memdb VFS (sql/memdb.zig), registered as
 //!   SQLite registers it (sqlite3MemdbInit()), after the default.
 //!
 //! Connections name a VFS with the zVfs argument of sqlite3_open_v2() or

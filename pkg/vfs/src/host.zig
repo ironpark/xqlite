@@ -5,7 +5,7 @@
 //! examples/wasm/xqlite.mjs implements them; docs/wasm.md documents
 //! the contract.
 //!
-//! Locks are arbitrated in this instance (vfs/inproc.zig, by file name),
+//! Locks are arbitrated in this instance (inproc.zig, by file name),
 //! and then offered to the host (`xq_host_lock`), which may refuse a
 //! stronger lock with Busy to exclude other tabs or workers; the default
 //! glue accepts everything. The wal-index of a WAL database is heap

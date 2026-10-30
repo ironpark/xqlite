@@ -39,7 +39,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const vfs = @import("../vfs/vfs.zig");
+const vfs = @import("xqlite_vfs").vfs;
 const pcache = @import("pcache.zig");
 const thunk = @import("../util/thunk.zig");
 const journal = @import("journal.zig");

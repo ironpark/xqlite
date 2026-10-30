@@ -30,7 +30,7 @@ pub var heap_limit: struct {
 pub var prng: func.Prng = .{};
 
 // sqlite3_temp_directory is the VFS package's (temp_directory of
-// vfs/root.zig), which PRAGMA temp_store_directory and the C ABI set.
+// pkg/vfs/src/root.zig), which PRAGMA temp_store_directory and the C ABI set.
 
 /// sqlite3_data_directory: in SQLite, the base of relative file names on
 /// Windows only (and PRAGMA data_store_directory, also Windows only).
@@ -60,7 +60,7 @@ pub const TestCtrl = struct {
 /// The VFS registry of the C ABI (sqlite3_vfs_find()), which resolves a
 /// URI's "vfs" parameter in ATTACH (OpenFlags.vfs_resolved). Null without
 /// a registry: ATTACH uses the connection's VFS.
-pub var find_vfs: ?*const fn (name: []const u8) ?@import("../vfs/vfs.zig").Vfs = null;
+pub var find_vfs: ?*const fn (name: []const u8) ?@import("xqlite_vfs").vfs.Vfs = null;
 
 /// How the load_extension() SQL function loads a library: set by the C
 /// ABI (sqlite3LoadExtension(), which needs the C VFS's xDlOpen and the

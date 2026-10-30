@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const thunk = @import("../util/thunk.zig");
-const vfs = @import("../vfs/vfs.zig");
+const vfs = @import("xqlite_vfs").vfs;
 const pager_mod = @import("../pager/pager.zig");
 const varint = @import("../util/varint.zig");
 pub const header = @import("header.zig");

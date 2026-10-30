@@ -22,7 +22,7 @@
 const ROW = 100;
 const DONE = 101;
 
-/// Open flags given to files.open() (OpenBits in src/vfs/host.zig).
+/// Open flags given to files.open() (OpenBits in pkg/vfs/src/host.zig).
 export const OPEN = { READ_WRITE: 1, CREATE: 2, EXCLUSIVE: 4, DELETE_ON_CLOSE: 8 };
 
 export async function load(wasm, { files } = {}) {

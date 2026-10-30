@@ -9,7 +9,7 @@
 //! result code (0 OK, 100 ROW, 101 DONE, else the SQLite error code);
 //! xq_errmsg() has the message.
 //!
-//! Databases live in the host's files (vfs/host.zig, open flag
+//! Databases live in the host's files (pkg/vfs/src/host.zig, open flag
 //! `open_host`) or in a memory file system shared by the connections of
 //! this instance (the default): a host that implements nothing but the
 //! clock and randomness still gets a working database.

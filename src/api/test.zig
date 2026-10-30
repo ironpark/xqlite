@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const xqlite = @import("../xqlite.zig");
-const MemVfs = @import("../vfs/mem.zig").MemVfs;
+const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 
 const testing = std.testing;
 const gpa = testing.allocator;

@@ -10,7 +10,7 @@
 //! file at a time.
 //!
 //! The wal-index of a WAL database is heap memory shared by the handles
-//! of this process (vfs/inproc.zig), not a -shm file: WAL works between
+//! of this process (inproc.zig), not a -shm file: WAL works between
 //! connections of one instance, and a database left in WAL mode is
 //! recovered from its WAL file by the next opener, xqlite or sqlite3.
 //!

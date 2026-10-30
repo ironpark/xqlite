@@ -1,7 +1,7 @@
 const std = @import("std");
-const vfs = @import("../vfs/vfs.zig");
-const MemVfs = @import("../vfs/mem.zig").MemVfs;
-const UnixVfs = if (@import("builtin").os.tag == .wasi) void else @import("../vfs/unix.zig").UnixVfs;
+const vfs = @import("xqlite_vfs").vfs;
+const MemVfs = @import("xqlite_vfs").mem.MemVfs;
+const UnixVfs = if (@import("builtin").os.tag == .wasi) void else @import("xqlite_vfs").unix.UnixVfs;
 const pager_mod = @import("pager.zig");
 const root = @import("../root.zig");
 

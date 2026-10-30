@@ -37,7 +37,7 @@
 //! in-memory databases, mmap, WAL snapshots.
 
 const std = @import("std");
-const vfs = @import("../vfs/vfs.zig");
+const vfs = @import("xqlite_vfs").vfs;
 const pcache_mod = @import("pcache.zig");
 const journal = @import("journal.zig");
 const wal_mod = @import("wal.zig");

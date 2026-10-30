@@ -184,6 +184,8 @@ pub const ConnState = struct {
     last_sequence: ?[]u8 = null,
     /// The MariaDB session: sql_mode, warnings, user variables.
     mariadb: @import("mariadb/state.zig").State = .{},
+    /// The T-SQL session: variables, IDENTITY_INSERT, @@IDENTITY.
+    mssql: @import("mssql/state.zig").State = .{},
 
     pub fn deinit(s: *ConnState, gpa: std.mem.Allocator) void {
         var it = s.currval.keyIterator();
@@ -191,6 +193,7 @@ pub const ConnState = struct {
         s.currval.deinit(gpa);
         if (s.last_sequence) |z| gpa.free(z);
         s.mariadb.deinit(gpa);
+        s.mssql.deinit(gpa);
         s.* = .{};
     }
 };

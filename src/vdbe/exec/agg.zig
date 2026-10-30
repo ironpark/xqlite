@@ -22,7 +22,10 @@ pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     const ctx = op.p4.funcctx;
     const out = e.reg(op.p3);
-    if (ctx.out != out) {
+    // The first run (ctx.vdbe still null; C starts with pOut == 0), or
+    // the registers moved: point the arguments at them. ctx.out is
+    // undefined until then, and may well equal `out` by chance.
+    if (ctx.vdbe == null or ctx.out != out) {
         ctx.vdbe = v;
         ctx.out = out;
         ctx.enc = e.encoding;

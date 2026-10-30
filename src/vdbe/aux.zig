@@ -180,7 +180,12 @@ pub fn addFunctionCall(p: *Parse, p1: i32, p2: i32, p3: i32, n_arg: i32, func: *
         p.db.oomFault();
         return 0;
     };
-    ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .argv = argv, .i_op = currentAddr(v) };
+    // C sets pOut to 0 so that the first OP_Function binds the arguments;
+    // `out` cannot be null, so `vdbe` (null until then) says so instead.
+    // Do not compare `out` before that: in ReleaseFast it holds whatever
+    // the allocation held, such as the `out` of a freed context whose
+    // registers were at the same address (argv then stays unset).
+    ctx.* = .{ .out = undefined, .func = func, .argc = @intCast(n_arg), .argv = argv, .i_op = currentAddr(v), .vdbe = null };
     const addr = addOp4(v, if (e_call_ctx != 0) OP.PureFunc else OP.Function, p1, p2, p3, .{ .funcctx = ctx });
     changeP5(v, @intCast(e_call_ctx & NC_SelfRef));
     main_mod.mayAbort(p);

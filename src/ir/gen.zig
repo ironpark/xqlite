@@ -21,7 +21,7 @@
 const std = @import("std");
 const tree = @import("tree.zig");
 const Dialect = @import("../dialect/dialect.zig").Dialect;
-const fuzz = @import("xqlite_storage").fuzz;
+const fuzz = @import("xqlite_base").fuzz;
 
 const Allocator = std.mem.Allocator;
 const Expr = tree.Expr;

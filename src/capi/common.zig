@@ -381,7 +381,7 @@ pub fn ensureInit() void {
     state.lock.lock();
     defer state.lock.unlock();
     if (!state.initialized) {
-        @import("xqlite_storage").status.enable(state.memstat);
+        @import("xqlite_base").status.enable(state.memstat);
         @import("vfs.zig").initDefault();
         @import("loadext.zig").initHook();
         @atomicStore(bool, &state.initialized, true, .release);

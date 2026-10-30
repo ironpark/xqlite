@@ -43,8 +43,8 @@ pub fn build(b: *std.Build) void {
         // wasi-libc the clock and localtime_r() on wasm32-wasi);
         // wasm32-freestanding has none (src/util/platform.zig).
         .link_libc = target.result.os.tag != .freestanding,
-        // The VFS and storage layers, packages of their own (pkg/vfs,
-        // pkg/storage). See engineImports().
+        // The VFS and storage layers and the shared helpers, packages of
+        // their own (pkg/vfs, pkg/storage, pkg/base). See engineImports().
         .imports = engineImports(b, target, optimize),
     });
 
@@ -148,10 +148,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
-    // The VFS and storage packages' tests, which the module's do not
-    // include (a test binary runs the tests of its root module only).
+    // The packages' tests, which the module's do not include (a test
+    // binary runs the tests of its root module only).
     test_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
+    test_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
 
     // Example programs of the Zig API (examples/*.zig): `zig build
     // example-<name>` runs one (arguments after `--`), `zig build examples`
@@ -264,6 +265,14 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(journal_tests).step);
 
+    // The packages alone, without the engine: quick to build when working
+    // on the VFS, the pager or the b-tree. `zig build test` runs these too.
+    const pkg_step = b.step("test-pkg", "Run the tests of pkg/vfs, pkg/storage and pkg/base alone (no engine build)");
+    pkg_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
+    pkg_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
+    pkg_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
+    pkg_step.dependOn(&b.addRunArtifact(journal_tests).step);
+
     // The test tool (tools/xqt): `zig build tools` installs xqt next to
     // xqlite, and tools/crashshim.c as a library to preload into sqlite3.
     // Neither is part of the library or of `zig build test`.
@@ -339,6 +348,7 @@ pub fn build(b: *std.Build) void {
         b.addTest(.{ .root_module = wasi_exe_mod, .filters = test_filters }),
         vfsTests(b, wasi_target, optimize, test_filters),
         storageTests(b, wasi_target, optimize, test_filters),
+        baseTests(b, wasi_target, optimize, test_filters),
     }) |t| {
         const run = b.addSystemCommand(&.{ "wasmtime", "run", "--dir", "." });
         run.addArtifactArg(t);
@@ -604,19 +614,44 @@ fn vfsImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     return .{ .name = "xqlite_vfs", .module = dep.module("xqlite_vfs") };
 }
 
-/// The imports of a module of the engine for `target`: the VFS and
-/// storage packages.
+/// The imports of a module of the engine for `target`: the VFS, storage
+/// and base packages.
 fn engineImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) []const std.Build.Module.Import {
     return b.allocator.dupe(std.Build.Module.Import, &.{
         vfsImport(b, target, optimize),
         storageImport(b, target, optimize),
+        baseImport(b, target, optimize),
     }) catch @panic("OOM");
 }
 
+/// The shared helpers (pkg/base, a path dependency) for `target`, as the
+/// import `xqlite_base` of a module; the storage package gets the same
+/// module (see storageImport()).
+fn baseImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
+    const dep = b.dependency("xqlite_base", .{ .target = target, .optimize = optimize });
+    return .{ .name = "xqlite_base", .module = dep.module("xqlite_base") };
+}
+
+/// The base package's tests for `target`: those `zig build test` runs in
+/// pkg/base.
+fn baseTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
+    const dep = b.dependency("xqlite_base", .{ .target = target, .optimize = optimize });
+    return b.addTest(.{
+        .name = "base-test",
+        .root_module = b.createModule(.{
+            .root_source_file = dep.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .filters = filters,
+    });
+}
+
 /// The storage layer (pkg/storage, a path dependency) for `target`, as
-/// the import `xqlite_storage` of a module. It imports the module of
-/// vfsImport() with the same arguments: the build system makes one
-/// dependency of pkg/vfs for the root and the storage package alike.
+/// the import `xqlite_storage` of a module. It imports the modules of
+/// vfsImport() and baseImport() with the same arguments: the build system
+/// makes one dependency of pkg/vfs and of pkg/base for the root and the
+/// storage package alike.
 fn storageImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
     const dep = b.dependency("xqlite_storage", .{ .target = target, .optimize = optimize });
     return .{ .name = "xqlite_storage", .module = dep.module("xqlite_storage") };
@@ -632,7 +667,7 @@ fn storageTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             .root_source_file = dep.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{vfsImport(b, target, optimize)},
+            .imports = &.{ vfsImport(b, target, optimize), baseImport(b, target, optimize) },
         }),
         .filters = filters,
     });

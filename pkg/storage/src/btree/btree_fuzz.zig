@@ -12,7 +12,7 @@ const std = @import("std");
 const btree = @import("btree.zig");
 const record = @import("../record.zig");
 const MemVfs = @import("xqlite_vfs").mem.MemVfs;
-const fuzz = @import("../fuzz.zig");
+const fuzz = @import("xqlite_base").fuzz;
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;

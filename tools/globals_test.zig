@@ -22,8 +22,8 @@ const allowed = [_]struct { []const u8, []const u8 }{
     // The shared stores of the memdb VFS (memdb_g) and its settings.
     .{ "pkg/vfs/src/memdb.zig", "state" },
     // sqlite3Stat: the status counters (sqlite3_status()), which the
-    // storage package keeps.
-    .{ "pkg/storage/src/status.zig", "state" },
+    // base package keeps.
+    .{ "pkg/base/src/status.zig", "state" },
     // How load_extension() loads a library, which the C ABI sets.
     .{ "src/sql/global.zig", "load_extension" },
     // The POSIX lock table, which every connection has to share.
@@ -94,11 +94,10 @@ test "no hidden global state" {
     var found: std.ArrayList(u8) = .empty;
     defer found.deinit(gpa);
     try std.testing.expect(try scan(gpa, "src", &found) > 50);
-    // The VFS and storage packages (not their .zig-cache, if they were
-    // built alone).
+    // The packages (not their .zig-cache, if they were built alone).
     try std.testing.expect(try scan(gpa, "pkg/vfs/src", &found) > 5);
-    // The storage package, likewise.
     try std.testing.expect(try scan(gpa, "pkg/storage/src", &found) > 5);
+    try std.testing.expect(try scan(gpa, "pkg/base/src", &found) >= 3);
     // The test tool, which runs its checks on threads.
     try std.testing.expect(try scan(gpa, "tools/xqt", &found) > 5);
     if (found.items.len > 0) {

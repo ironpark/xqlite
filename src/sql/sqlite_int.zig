@@ -11,7 +11,7 @@
 const std = @import("std");
 const grammar = @import("../parse/grammar.zig");
 const flags = @import("../util/flags.zig");
-const thunk = @import("xqlite_storage").thunk;
+const thunk = @import("xqlite_base").thunk;
 
 pub const TK = grammar.TK;
 pub const Allocator = std.mem.Allocator;

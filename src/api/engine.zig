@@ -32,7 +32,7 @@ const util = @import("../sql/util.zig");
 const printf = @import("../sql/printf.zig");
 const tokenize = @import("../parse/tokenize.zig");
 const TK = @import("../parse/grammar.zig").TK;
-const thunk_mod = @import("xqlite_storage").thunk;
+const thunk_mod = @import("xqlite_base").thunk;
 
 pub const Vfs = @import("xqlite_vfs").vfs.Vfs;
 pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;

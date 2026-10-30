@@ -8,7 +8,7 @@ const mem = @import("../vdbe/mem.zig");
 const util = @import("util.zig");
 const vtab = @import("vtab.zig");
 const malloc = @import("malloc.zig");
-const thunk = @import("xqlite_storage").thunk;
+const thunk = @import("xqlite_base").thunk;
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;

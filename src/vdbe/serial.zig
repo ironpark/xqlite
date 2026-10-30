@@ -1,5 +1,7 @@
 //! Records: serial types, unpacking and comparison, and deferred cursor
-//! moves (port of the second half of vdbeaux.c).
+//! moves (port of the second half of vdbeaux.c). The primitives of the
+//! format (serial type sizes, header varints, integer decoding) are the
+//! storage package's (`record`); this file has what needs Mem and KeyInfo.
 //!
 //! C reads keys through raw pointers and relies on padding after the
 //! buffers; here keys are slices, and reads past the end return zero
@@ -11,6 +13,7 @@ const vi = @import("vdbe_int.zig");
 const mem = @import("mem.zig");
 const int = @import("../sql/sqlite_int.zig");
 const varint = @import("xqlite_storage").varint;
+const record = @import("xqlite_storage").record;
 const btree = @import("xqlite_storage").btree;
 
 const Mem = vi.Mem;
@@ -22,59 +25,10 @@ const CollSeq = int.CollSeq;
 const RC = int.RC;
 const KeyInfoOrder = int.KeyInfoOrder;
 
-/// sqlite3SmallTypeSizes: data sizes of serial types below 128.
-pub const small_type_sizes = blk: {
-    var t: [128]u8 = undefined;
-    const fixed = [_]u8{ 0, 1, 2, 3, 4, 6, 8, 8, 0, 0, 0, 0 };
-    for (0..128) |i| t[i] = if (i < 12) fixed[i] else (i - 12) / 2;
-    break :blk t;
-};
-
-/// Port of sqlite3VdbeSerialTypeLen().
-pub inline fn serialTypeLen(serial_type: u32) u32 {
-    if (serial_type >= 128) return (serial_type - 12) / 2;
-    return small_type_sizes[serial_type];
-}
-
-/// A byte of `s`, or 0 past its end.
-inline fn at(s: []const u8, i: usize) u8 {
-    return if (i < s.len) s[i] else 0;
-}
-
-fn get4(s: []const u8, i: usize) u32 {
-    return @as(u32, at(s, i)) << 24 | @as(u32, at(s, i + 1)) << 16 | @as(u32, at(s, i + 2)) << 8 | at(s, i + 3);
-}
-
-fn get8(s: []const u8, i: usize) u64 {
-    return @as(u64, get4(s, i)) << 32 | get4(s, i + 4);
-}
-
-pub const Varint32 = struct { value: u32, len: u32 };
-
-/// The header varint at `i`, as the getVarint32() macro reads it: the
-/// one-byte case inline, the rest out of line.
-pub inline fn getVarint32(s: []const u8, i: usize) Varint32 {
-    if (i < s.len and s[i] < 0x80) return .{ .value = s[i], .len = 1 };
-    return getVarint32Slow(s, i);
-}
-
-/// Port of sqlite3GetVarint32() for getVarint32(): a varint of two or
-/// more bytes, or one that starts past the end of `s` (which reads as 0).
-pub noinline fn getVarint32Slow(s: []const u8, i: usize) Varint32 {
-    if (i + varint.max_len <= s.len) {
-        const d = varint.get32(s[i..]);
-        return .{ .value = d.value, .len = d.len };
-    }
-    var buf: [9]u8 = undefined;
-    for (&buf, 0..) |*b, k| b.* = at(s, i + k);
-    const d = varint.get32(&buf);
-    return .{ .value = d.value, .len = d.len };
-}
-
 /// Port of sqlite3VdbeSerialGet7(): a REAL; NaN becomes NULL (returns
 /// true).
 fn serialGet7(s: []const u8, i: usize, m: *Mem) bool {
-    const x = if (i + 8 <= s.len) std.mem.readInt(u64, s[i..][0..8], .big) else get8(s, i);
+    const x = if (i + 8 <= s.len) std.mem.readInt(u64, s[i..][0..8], .big) else record.get8(s, i);
     m.u = .{ .r = @bitCast(x) };
     if (std.math.isNan(m.u.r)) {
         m.flags = .{ .Null = true };
@@ -82,48 +36,6 @@ fn serialGet7(s: []const u8, i: usize, m: *Mem) bool {
     }
     m.flags = .{ .Real = true };
     return false;
-}
-
-/// Port of vdbeRecordDecodeInt(): the integer of serial type 1-6, 8 or 9
-/// at `p`, which must hold all of its bytes (the ONE_BYTE_INT() to
-/// sqlite3Get8byte() macros).
-pub inline fn decodeIntPtr(serial_type: u32, p: [*]const u8) i64 {
-    return switch (serial_type) {
-        0, 1 => @as(i8, @bitCast(p[0])),
-        2 => std.mem.readInt(i16, p[0..2], .big),
-        3 => @as(i32, @bitCast(@as(u32, p[0]) << 24 | @as(u32, p[1]) << 16 | @as(u32, p[2]) << 8)) >> 8,
-        4 => std.mem.readInt(i32, p[0..4], .big),
-        5 => @as(i64, std.mem.readInt(i16, p[0..2], .big)) * (@as(i64, 1) << 32) + std.mem.readInt(u32, p[2..6], .big),
-        6 => std.mem.readInt(i64, p[0..8], .big),
-        else => @as(i64, serial_type) - 8,
-    };
-}
-
-/// Port of vdbeRecordDecodeInt() on a slice: bytes past the end of `s`
-/// read as 0.
-inline fn decodeInt(serial_type: u32, s: []const u8, i: usize) i64 {
-    const n: usize = if (serial_type < 2) 1 else small_type_sizes[serial_type & 0x7f];
-    if (i + n <= s.len) return decodeIntPtr(serial_type, s.ptr + i);
-    return decodeIntSlow(serial_type, s, i);
-}
-
-/// decodeInt() of a value running past the end of `s` (corrupt records).
-noinline fn decodeIntSlow(serial_type: u32, s: []const u8, i: usize) i64 {
-    return switch (serial_type) {
-        0, 1 => @as(i8, @bitCast(at(s, i))),
-        2 => @as(i16, @bitCast(@as(u16, at(s, i)) << 8 | at(s, i + 1))),
-        3 => blk: {
-            const v: u32 = @as(u32, at(s, i)) << 16 | @as(u32, at(s, i + 1)) << 8 | at(s, i + 2);
-            break :blk @as(i32, @bitCast(v << 8)) >> 8;
-        },
-        4 => @as(i32, @bitCast(get4(s, i))),
-        5 => blk: {
-            const hi: i64 = @as(i16, @bitCast(@as(u16, at(s, i)) << 8 | at(s, i + 1)));
-            break :blk hi * (@as(i64, 1) << 32) + get4(s, i + 2);
-        },
-        6 => @bitCast(get8(s, i)),
-        else => @as(i64, serial_type) - 8,
-    };
 }
 
 /// Port of sqlite3VdbeSerialGet() (the in-line switch of OP_Column) for
@@ -139,7 +51,7 @@ pub inline fn serialGetPtr(p: [*]const u8, serial_type: u32, m: *Mem) void {
         },
         0, 11 => m.flags = .{ .Null = true },
         1...6, 8, 9 => {
-            m.u = .{ .i = decodeIntPtr(serial_type, p) };
+            m.u = .{ .i = record.decodeIntPtr(serial_type, p) };
             m.flags = .{ .Int = true };
         },
         7 => {
@@ -158,7 +70,7 @@ pub inline fn serialGetPtr(p: [*]const u8, serial_type: u32, m: *Mem) void {
 /// `s[i..]`. Strings and blobs point into `s` (MEM_Ephem). Bytes of a
 /// number past the end of `s` read as 0.
 pub fn serialGet(s: []const u8, i: usize, serial_type: u32, m: *Mem) void {
-    if (serial_type >= 12 or i + small_type_sizes[serial_type] <= s.len) {
+    if (serial_type >= 12 or i + record.small_type_sizes[serial_type] <= s.len) {
         return serialGetPtr(s.ptr + i, serial_type, m);
     }
     serialGetSlow(s, i, serial_type, m);
@@ -168,7 +80,7 @@ pub fn serialGet(s: []const u8, i: usize, serial_type: u32, m: *Mem) void {
 noinline fn serialGetSlow(s: []const u8, i: usize, serial_type: u32, m: *Mem) void {
     switch (serial_type) {
         1...6 => {
-            m.u = .{ .i = decodeIntSlow(serial_type, s, i) };
+            m.u = .{ .i = record.decodeInt(serial_type, s, i) };
             m.flags = .{ .Int = true };
         },
         7 => _ = serialGet7(s, i, m),
@@ -192,21 +104,21 @@ pub fn allocUnpackedRecord(a: std.mem.Allocator, key_info: *KeyInfo) error{OutOf
 pub fn recordUnpack(key: []const u8, r: *UnpackedRecord) void {
     const ki = r.key_info;
     r.default_rc = 0;
-    const hdr = getVarint32(key, 0);
+    const hdr = record.getVarint32(key, 0);
     var idx: u32 = hdr.len;
     const sz_hdr = hdr.value;
     var d: u32 = sz_hdr;
     var u: u16 = 0;
     var m: [*]Mem = r.mem;
     while (idx < sz_hdr and d <= key.len) {
-        const st = getVarint32(key, idx);
+        const st = record.getVarint32(key, idx);
         idx += st.len;
         m[0].enc = ki.enc;
         m[0].db = ki.db;
         m[0].z_malloc = &.{};
         m[0].z = null;
         serialGet(key, d, st.value, &m[0]);
-        d += serialTypeLen(st.value);
+        d += record.serialTypeLen(st.value);
         u += 1;
         if (u >= r.n_field) break;
         m += 1;
@@ -235,27 +147,6 @@ fn isAllZero(z: []const u8) bool {
     return true;
 }
 
-/// memcmp() of two slices of the same length: the difference of the
-/// first differing bytes, or 0. Compares eight bytes at a time.
-pub fn memcmp(a: []const u8, b: []const u8) i32 {
-    std.debug.assert(a.len == b.len);
-    const n = a.len;
-    var i: usize = 0;
-    while (i + 8 <= n) : (i += 8) {
-        const x = std.mem.readInt(u64, a[i..][0..8], .big);
-        const y = std.mem.readInt(u64, b[i..][0..8], .big);
-        if (x != y) {
-            // The first differing byte is the highest one in big-endian.
-            const shift: u6 = @intCast(56 - (@clz(x ^ y) & ~@as(u7, 7)));
-            return @as(i32, @as(u8, @truncate(x >> shift))) - @as(u8, @truncate(y >> shift));
-        }
-    }
-    while (i < n) : (i += 1) {
-        if (a[i] != b[i]) return @as(i32, a[i]) - b[i];
-    }
-    return 0;
-}
-
 /// Port of sqlite3BlobCompare(): memcmp order, the shorter first when one
 /// is a prefix of the other.
 pub fn blobCompare(b1: *const Mem, b2: *const Mem) i32 {
@@ -271,22 +162,18 @@ pub fn blobCompare(b1: *const Mem, b2: *const Mem) i32 {
         return n1 - b2.u.n_zero;
     }
     const n: usize = @intCast(@min(n1, n2));
-    const c = memcmp(b1.bytes()[0..n], b2.bytes()[0..n]);
+    const c = record.memcmp(b1.bytes()[0..n], b2.bytes()[0..n]);
     if (c != 0) return c;
     return n1 - n2;
 }
 
-/// Port of sqlite3IntFloatCompare(): NaN counts as NULL (less than any
-/// integer).
+/// Port of sqlite3IntFloatCompare() as a difference (record.intFloatCompare).
 pub fn intFloatCompare(i: i64, r: f64) i32 {
-    if (std.math.isNan(r)) return 1;
-    if (r < -9223372036854775808.0) return 1;
-    if (r >= 9223372036854775808.0) return -1;
-    const y: i64 = @intFromFloat(r);
-    if (i < y) return -1;
-    if (i > y) return 1;
-    const fi: f64 = @floatFromInt(i);
-    return if (fi < r) -1 else @intFromBool(fi > r);
+    return switch (record.intFloatCompare(i, r)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
 }
 
 /// Port of sqlite3MemCompare(): NULLs first, then numbers, then text by
@@ -344,24 +231,24 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
     // Uninitialized, as in C: each use sets the fields it reads.
     var mem1: Mem = undefined;
     if (skip) {
-        var s1: u32 = at(key1, 1);
+        var s1: u32 = record.at(key1, 1);
         if (s1 < 0x80) {
             idx1 = 2;
         } else {
-            const v = getVarint32(key1, 1);
+            const v = record.getVarint32(key1, 1);
             s1 = v.value;
             idx1 = 1 + v.len;
         }
-        sz_hdr1 = at(key1, 0);
-        d1 = sz_hdr1 + serialTypeLen(s1);
+        sz_hdr1 = record.at(key1, 0);
+        d1 = sz_hdr1 + record.serialTypeLen(s1);
         i = 1;
         rhs += 1;
     } else {
-        sz_hdr1 = at(key1, 0);
+        sz_hdr1 = record.at(key1, 0);
         if (sz_hdr1 < 0x80) {
             idx1 = 1;
         } else {
-            const v = getVarint32(key1, 0);
+            const v = record.getVarint32(key1, 0);
             sz_hdr1 = v.value;
             idx1 = v.len;
         }
@@ -377,7 +264,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
     while (true) {
         const p = &rhs[0];
         if (p.flags.intersects(.{ .Int = true, .IntReal = true })) {
-            serial_type = at(key1, idx1);
+            serial_type = record.at(key1, idx1);
             if (serial_type >= 10) {
                 rc = if (serial_type == 10) -1 else 1;
             } else if (serial_type == 0) {
@@ -386,7 +273,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                 _ = serialGet7(key1, d1, &mem1);
                 rc = -intFloatCompare(p.u.i, mem1.u.r);
             } else {
-                const lhs = decodeInt(serial_type, key1, d1);
+                const lhs = record.decodeInt(serial_type, key1, d1);
                 const rhs_v = p.u.i;
                 if (lhs < rhs_v) {
                     rc = -1;
@@ -395,7 +282,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                 }
             }
         } else if (p.flags.Real) {
-            serial_type = at(key1, idx1);
+            serial_type = record.at(key1, idx1);
             if (serial_type >= 10) {
                 rc = if (serial_type == 10) -1 else 1;
             } else if (serial_type == 0) {
@@ -413,7 +300,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                 rc = intFloatCompare(mem1.u.i, p.u.r);
             }
         } else if (p.flags.Str) {
-            serial_type = getVarint32(key1, idx1).value;
+            serial_type = record.getVarint32(key1, idx1).value;
             if (serial_type < 12) {
                 rc = -1;
             } else if (serial_type & 1 == 0) {
@@ -430,12 +317,12 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                     rc = compareMemString(&mem1, p, coll);
                 } else {
                     const n_cmp: usize = @min(n, @as(u32, @intCast(p.n)));
-                    rc = memcmp(key1[d1..][0..n_cmp], p.bytes()[0..n_cmp]);
+                    rc = record.memcmp(key1[d1..][0..n_cmp], p.bytes()[0..n_cmp]);
                     if (rc == 0) rc = @as(i32, @intCast(n)) - p.n;
                 }
             }
         } else if (p.flags.Blob) {
-            serial_type = getVarint32(key1, idx1).value;
+            serial_type = record.getVarint32(key1, idx1).value;
             if (serial_type < 12 or serial_type & 1 != 0) {
                 rc = -1;
             } else {
@@ -448,12 +335,12 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
                     rc = if (!isAllZero(key1[d1..][0..n])) 1 else @as(i32, @intCast(n)) - p.u.n_zero;
                 } else {
                     const n_cmp: usize = @min(n, @as(u32, @intCast(p.n)));
-                    rc = memcmp(key1[d1..][0..n_cmp], p.bytes()[0..n_cmp]);
+                    rc = record.memcmp(key1[d1..][0..n_cmp], p.bytes()[0..n_cmp]);
                     if (rc == 0) rc = @as(i32, @intCast(n)) - p.n;
                 }
             }
         } else {
-            serial_type = at(key1, idx1);
+            serial_type = record.at(key1, idx1);
             if (!(serial_type == 0 or serial_type == 10 or (serial_type == 7 and serialGet7(key1, d1, &mem1)))) {
                 rc = 1;
             }
@@ -473,7 +360,7 @@ pub fn recordCompareWithSkip(key1: []const u8, r: *UnpackedRecord, skip: bool) i
         i += 1;
         if (i == r.n_field) break;
         rhs += 1;
-        d1 += serialTypeLen(serial_type);
+        d1 += record.serialTypeLen(serial_type);
         if (d1 > key1.len) break;
         idx1 += varint.len(serial_type);
         if (idx1 >= sz_hdr1) {
@@ -493,11 +380,11 @@ pub fn recordCompare(key1: []const u8, r: *UnpackedRecord) i32 {
 /// Port of vdbeRecordCompareInt(): when the first field of `r` is an
 /// integer and the header size fits in one byte.
 fn recordCompareInt(key1: []const u8, r: *UnpackedRecord) i32 {
-    const serial_type: u32 = at(key1, 1);
-    const off: usize = at(key1, 0) & 0x3f;
+    const serial_type: u32 = record.at(key1, 1);
+    const off: usize = record.at(key1, 0) & 0x3f;
     var lhs: i64 = undefined;
     if (serial_type >= 1 and serial_type <= 6) {
-        lhs = decodeInt(serial_type, key1, off);
+        lhs = record.decodeInt(serial_type, key1, off);
     } else if (serial_type == 8 or serial_type == 9) {
         lhs = @as(i64, serial_type) - 8;
     } else {
@@ -514,17 +401,17 @@ fn recordCompareInt(key1: []const u8, r: *UnpackedRecord) i32 {
 /// Port of vdbeRecordCompareString(): when the first field of `r` is text
 /// in the BINARY collation and the header size fits in one byte.
 fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
-    var serial_type: i32 = @as(i8, @bitCast(at(key1, 1)));
+    var serial_type: i32 = @as(i8, @bitCast(record.at(key1, 1)));
     while (true) {
         if (serial_type < 12) {
             if (serial_type < 0) {
-                serial_type = @intCast(getVarint32(key1, 1).value);
+                serial_type = @intCast(record.getVarint32(key1, 1).value);
                 if (serial_type >= 12) continue;
             }
             return r.r1;
         }
         if (serial_type & 1 == 0) return r.r2;
-        const sz_hdr: u32 = at(key1, 0);
+        const sz_hdr: u32 = record.at(key1, 0);
         const n_str: u32 = @intCast(@divTrunc(serial_type - 12, 2));
         if (sz_hdr + n_str > key1.len) {
             r.err = error.Corrupt;
@@ -532,7 +419,7 @@ fn recordCompareString(key1: []const u8, r: *UnpackedRecord) i32 {
         }
         const pn: u32 = @intCast(r.n);
         const n_cmp = @min(pn, n_str);
-        var res = memcmp(key1[sz_hdr..][0..n_cmp], r.u.z.?[0..n_cmp]);
+        var res = record.memcmp(key1[sz_hdr..][0..n_cmp], r.u.z.?[0..n_cmp]);
         if (res > 0) return r.r2;
         if (res < 0) return r.r1;
         res = @as(i32, @intCast(n_str)) - r.n;
@@ -582,7 +469,7 @@ pub fn isBinary(coll: ?*const CollSeq) bool {
 /// The BINARY collation (binCollFunc): memcmp, then length.
 pub fn binaryCollation(_: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order {
     const n = @min(a.len, b.len);
-    const c = memcmp(a[0..n], b[0..n]);
+    const c = record.memcmp(a[0..n], b[0..n]);
     if (c != 0) return if (c < 0) .lt else .gt;
     return std.math.order(a.len, b.len);
 }
@@ -595,11 +482,11 @@ pub fn idxRowid(db: *int.Sqlite3, cur: *btree.Cursor) (mem.Error || btree.Error)
     try mem.fromBtreeZeroOffset(cur, n_cell_key, &m);
     defer mem.releaseMalloc(&m);
     const z = m.bytes();
-    const sz_hdr = getVarint32(z, 0).value;
+    const sz_hdr = record.getVarint32(z, 0).value;
     if (sz_hdr < 3 or sz_hdr > z.len) return error.Corrupt;
-    const type_rowid = getVarint32(z, sz_hdr - 1).value;
+    const type_rowid = record.getVarint32(z, sz_hdr - 1).value;
     if (type_rowid < 1 or type_rowid > 9 or type_rowid == 7) return error.Corrupt;
-    const len_rowid = small_type_sizes[type_rowid];
+    const len_rowid = record.small_type_sizes[type_rowid];
     if (z.len < sz_hdr + len_rowid) return error.Corrupt;
     var v: Mem = .{};
     serialGet(z, z.len - len_rowid, type_rowid, &v);
@@ -742,7 +629,7 @@ fn isMatchingIndexKey(cur: *btree.Cursor, integrity: bool, mask: int.Bitmask, r:
     if (n_rec > 0x7fffffff) return error.Corrupt;
     // Read the record in place when it is all on the page; copy it only
     // when it spills onto overflow pages. (The C code always copies, with
-    // five zeroed spare bytes for a corrupt header varint; getVarint32()
+    // five zeroed spare bytes for a corrupt header varint; record.getVarint32()
     // and serialGet() here read 0 past the end of the slice instead.)
     const local = cur.payloadFetch();
     var copy: ?[]u8 = null;
@@ -754,7 +641,7 @@ fn isMatchingIndexKey(cur: *btree.Cursor, integrity: bool, mask: int.Bitmask, r:
         break :blk z;
     };
 
-    const hdr = getVarint32(rec, 0);
+    const hdr = record.getVarint32(rec, 0);
     const sz_hdr = hdr.value;
     if (sz_hdr > 98307) return error.Corrupt;
     var idx_hdr: u32 = hdr.len;
@@ -763,9 +650,9 @@ fn isMatchingIndexKey(cur: *btree.Cursor, integrity: bool, mask: int.Bitmask, r:
     var m: Mem = .{ .db = ki.db, .enc = ki.enc };
     for (0..ki.n_all_field) |ii| {
         if (idx_hdr >= sz_hdr) return error.Corrupt;
-        const st = getVarint32(rec, idx_hdr);
+        const st = record.getVarint32(rec, idx_hdr);
         idx_hdr += st.len;
-        const n_serial = serialTypeLen(st.value);
+        const n_serial = record.serialTypeLen(st.value);
         if (@as(u64, idx_rec) + n_serial > n_rec) return error.Corrupt;
         serialGet(rec, idx_rec, st.value, &m);
         if (!skipField(mask, ii, &r.mem[ii], &m, integrity)) {

@@ -2,11 +2,12 @@
 //! b-tree), as a package of its own: the module `xqlite_storage`
 //! (src/root.zig) and its tests.
 //!
-//! It imports `xqlite_vfs`, from the path dependency ../vfs. The root
-//! build (../../build.zig) takes this package as a path dependency too,
-//! once per target, with `target` and `optimize` as arguments, the same
-//! as its own dependency on xqlite_vfs: the build system then shares one
-//! xqlite_vfs between the two. The module's optimization mode is the
+//! It imports `xqlite_vfs` and `xqlite_base`, from the path dependencies
+//! ../vfs and ../base. The root build (../../build.zig) takes this
+//! package as a path dependency too, once per target, with `target` and
+//! `optimize` as arguments, the same as its own dependencies on the other
+//! two: the build system then shares one xqlite_vfs and one xqlite_base
+//! between them. The module's optimization mode is the
 //! importing compilation's; `optimize` only picks that of the tests here.
 //! `zig build test` in this directory runs the tests alone.
 
@@ -17,11 +18,14 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = b.option([]const []const u8, "test-filter", "Run only the tests whose names contain this text") orelse &.{};
 
-    const vfs = b.dependency("xqlite_vfs", .{ .target = target, .optimize = optimize }).module("xqlite_vfs");
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "xqlite_vfs", .module = b.dependency("xqlite_vfs", .{ .target = target, .optimize = optimize }).module("xqlite_vfs") },
+        .{ .name = "xqlite_base", .module = b.dependency("xqlite_base", .{ .target = target, .optimize = optimize }).module("xqlite_base") },
+    };
     _ = b.addModule("xqlite_storage", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .imports = &.{.{ .name = "xqlite_vfs", .module = vfs }},
+        .imports = imports,
     });
 
     const tests = b.addTest(.{
@@ -29,7 +33,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "xqlite_vfs", .module = vfs }},
+            .imports = imports,
         }),
         .filters = test_filters,
     });

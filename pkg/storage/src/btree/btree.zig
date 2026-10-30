@@ -20,7 +20,7 @@
 //! Not ported yet: shared cache and incremental blob I/O.
 
 const std = @import("std");
-const thunk = @import("../thunk.zig");
+const thunk = @import("xqlite_base").thunk;
 const vfs = @import("xqlite_vfs").vfs;
 const pager_mod = @import("../pager/pager.zig");
 const varint = @import("../varint.zig");

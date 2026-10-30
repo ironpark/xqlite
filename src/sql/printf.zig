@@ -14,7 +14,7 @@ const std = @import("std");
 const numeric = @import("numeric.zig");
 const int = @import("sqlite_int.zig");
 const malloc = @import("malloc.zig");
-const thunk = @import("xqlite_storage").thunk;
+const thunk = @import("xqlite_base").thunk;
 
 const Allocator = std.mem.Allocator;
 

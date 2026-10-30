@@ -35,7 +35,8 @@ const tokenize = @import("../parse/tokenize.zig");
 const ctype = @import("../util/ctype.zig");
 const wi = @import("where_int.zig");
 const malloc = @import("malloc.zig");
-const thunk = @import("xqlite_storage").thunk;
+const thunk = @import("xqlite_base").thunk;
+const record_fmt = @import("xqlite_storage").record;
 
 const Allocator = std.mem.Allocator;
 const Parse = int.Parse;
@@ -1269,7 +1270,7 @@ fn valueFromValueList(val_opt: ?*Mem, out: *?*Mem, b_next: bool) i32 {
         mem.fromBtreeZeroOffset(rhs.csr, sz, &s_mem) catch |err| return int.errorCode(err);
         defer mem.release(&s_mem);
         const buf = s_mem.bytes();
-        const sv = serial.getVarint32(buf, 1);
+        const sv = record_fmt.getVarint32(buf, 1);
         const p_out = rhs.out;
         serial.serialGet(buf, 1 + sv.len, sv.value, p_out);
         p_out.enc = p_out.db.?.enc;

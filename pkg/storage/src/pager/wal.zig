@@ -41,7 +41,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const vfs = @import("xqlite_vfs").vfs;
 const pcache = @import("pcache.zig");
-const thunk = @import("../thunk.zig");
+const thunk = @import("xqlite_base").thunk;
 const journal = @import("journal.zig");
 
 const Allocator = std.mem.Allocator;

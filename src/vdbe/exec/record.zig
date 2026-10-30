@@ -13,6 +13,7 @@ const aux = @import("../aux.zig");
 const serial = @import("../serial.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const varint = @import("xqlite_storage").varint;
+const record_fmt = @import("xqlite_storage").record;
 
 const Exec = core.Exec;
 const Flow = core.Flow;
@@ -117,7 +118,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
             }
             c.cache_status = v.cache_ctr;
             const row0 = c.row.?[0..c.sz_row];
-            const hd = serial.getVarint32(row0, 0);
+            const hd = record_fmt.getVarint32(row0, 0);
             end_hdr = hd.value;
             offsets[0] = end_hdr;
             c.i_hdr_offset = hd.len;
@@ -170,12 +171,12 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
                 var t: u32 = if (hdr < z_data.len) z_data[hdr] else 0;
                 if (t < 0x80) {
                     hdr += 1;
-                    offset64 += serial.small_type_sizes[t];
+                    offset64 += record_fmt.small_type_sizes[t];
                 } else {
-                    const d = serial.getVarint32Slow(z_data, hdr);
+                    const d = record_fmt.getVarint32Slow(z_data, hdr);
                     t = d.value;
                     hdr += d.len;
-                    offset64 += serial.serialTypeLen(t);
+                    offset64 += record_fmt.serialTypeLen(t);
                 }
                 types[i] = t;
                 i += 1;
@@ -241,7 +242,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
         dest.enc = e.encoding;
         const p5 = op.p5 & vi.OPFLAG.BYTELENARG;
         if ((p5 != 0 and (p5 == vi.OPFLAG.TYPEOFARG or (t >= 12 and (t & 1 == 0 or p5 == vi.OPFLAG.BYTELENARG)))) or
-            serial.serialTypeLen(t) == 0)
+            record_fmt.serialTypeLen(t) == 0)
         {
             // The content does not matter; use zeros.
             const zeros: [16]u8 = @splat(0);
@@ -260,7 +261,7 @@ pub fn opColumn(e: *Exec, op: *Op) Error!Flow {
 
 /// Port of vdbeColumnFromOverflow() (without the large-value cache).
 fn columnFromOverflow(e: *Exec, c: *VdbeCursor, t: u32, offset: u32, dest: *Mem) !void {
-    const len = serial.serialTypeLen(t);
+    const len = record_fmt.serialTypeLen(t);
     if (len > e.db.limit(.length)) return error.TooBig;
     try mem.fromBtree(c.uc.cursor, offset, len, dest);
     serial.serialGet(dest.z.?[0..len], 0, t, dest);
@@ -465,7 +466,7 @@ pub fn opMakeRecord(e: *Exec, op: *Op) Error!Flow {
         hdr += varint.put(z[hdr..], st);
         if (st >= 1 and st <= 7) {
             const bits: u64 = if (st == 7) @bitCast(rec.u.r) else @bitCast(rec.u.i);
-            const len = serial.small_type_sizes[st];
+            const len = record_fmt.small_type_sizes[st];
             var j: usize = len;
             var x = bits;
             while (j > 0) {

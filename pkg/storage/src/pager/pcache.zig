@@ -12,8 +12,8 @@
 //! non-purgeable (in-memory database) caches are not ported.
 
 const std = @import("std");
-const status = @import("../status.zig");
-const thunk = @import("../thunk.zig");
+const status = @import("xqlite_base").status;
+const thunk = @import("xqlite_base").thunk;
 
 const Allocator = std.mem.Allocator;
 

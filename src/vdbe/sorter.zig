@@ -33,6 +33,7 @@ const serial = @import("serial.zig");
 const int = @import("../sql/sqlite_int.zig");
 const vfs = @import("xqlite_vfs").vfs;
 const varint = @import("xqlite_storage").varint;
+const record_fmt = @import("xqlite_storage").record;
 
 const Allocator = std.mem.Allocator;
 const Mem = vi.Mem;
@@ -368,12 +369,12 @@ fn finishCompare(t: *SortSubtask, res: i32, key2_cached: *bool, key1: []const u8
 
 /// Port of vdbeSorterCompareText(): both first fields are TEXT, BINARY.
 fn compareText(t: *SortSubtask, key2_cached: *bool, key1: []const u8, key2: []const u8) i32 {
-    const n1 = serial.getVarint32(key1, 1).value;
-    const n2 = serial.getVarint32(key2, 1).value;
+    const n1 = record_fmt.getVarint32(key1, 1).value;
+    const n2 = record_fmt.getVarint32(key2, 1).value;
     const len = (@min(n1, n2) - 13) / 2;
     const v1 = key1[key1[0]..][0..len];
     const v2 = key2[key2[0]..][0..len];
-    const c = serial.memcmp(v1, v2);
+    const c = record_fmt.memcmp(v1, v2);
     var res: i32 = if (c < 0) -1 else @intFromBool(c > 0);
     if (res == 0) res = @as(i32, @intCast(n1)) - @as(i32, @intCast(n2));
     return finishCompare(t, res, key2_cached, key1, key2);
@@ -1030,8 +1031,8 @@ const norm_class_shift = 61;
 /// (a NaN or a malformed record).
 fn normKey(s: *const Sorter, z: []const u8) ?u64 {
     if (z.len < 2) return null;
-    const hdr = serial.getVarint32(z, 0);
-    const ty = serial.getVarint32(z, hdr.len);
+    const hdr = record_fmt.getVarint32(z, 0);
+    const ty = record_fmt.getVarint32(z, hdr.len);
     if (hdr.value > z.len or hdr.len + ty.len > hdr.value) return null;
     const p = z[hdr.value..];
     const t = ty.value;
@@ -1094,7 +1095,7 @@ pub fn write(c: *VdbeCursor, m: *const Mem) Error!void {
     const s = get(c);
     const z = m.bytes();
     // The serial type of the first field narrows the fast comparators.
-    const t = serial.getVarint32(z, 1).value;
+    const t = record_fmt.getVarint32(z, 1).value;
     if (t > 0 and t < 10) {
         s.type_mask &= if (t == 7) type_real else type_integer | type_real;
     } else if (t > 10 and t & 1 != 0) {

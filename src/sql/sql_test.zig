@@ -2,7 +2,7 @@
 //! file system, run statements, and check results and errors.
 
 const std = @import("std");
-const thunk = @import("xqlite_storage").thunk;
+const thunk = @import("xqlite_base").thunk;
 const testing = std.testing;
 const int = @import("sqlite_int.zig");
 const main_mod = @import("main.zig");

@@ -10,7 +10,7 @@
 //! cannot rot.
 
 const std = @import("std");
-const fuzz = @import("xqlite_storage").fuzz;
+const fuzz = @import("xqlite_base").fuzz;
 const btree_fuzz = @import("xqlite_storage").btree_fuzz;
 const ir_fuzz = @import("ir/fuzz.zig");
 

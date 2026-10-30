@@ -295,10 +295,10 @@ pub export fn sqlite3_msize(p: ?*anyopaque) callconv(.c) u64 {
     return c.malloc.mallocSize(p orelse return 0);
 }
 
-// The status counters (the storage package's status.zig), on unless SQLITE_CONFIG_MEMSTATUS
+// The status counters (the base package's status.zig), on unless SQLITE_CONFIG_MEMSTATUS
 // turned them off before sqlite3_initialize().
 
-const status = @import("xqlite_storage").status;
+const status = @import("xqlite_base").status;
 
 /// Port of sqlite3_memory_used().
 pub export fn sqlite3_memory_used() callconv(.c) i64 {

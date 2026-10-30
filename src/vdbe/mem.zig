@@ -14,7 +14,7 @@ const numeric = @import("../sql/numeric.zig");
 const printf = @import("../sql/printf.zig");
 const btree = @import("xqlite_storage").btree;
 const malloc = @import("../sql/malloc.zig");
-const thunk = @import("xqlite_storage").thunk;
+const thunk = @import("xqlite_base").thunk;
 const utf = @import("utf.zig");
 
 const Mem = vi.Mem;

@@ -13,8 +13,16 @@
 //! of (N-12)/2 bytes, N>=13 odd a string of (N-13)/2 bytes. 10 and 11 are
 //! reserved.
 //!
-//! Only the BINARY collating sequence is supported until the VDBE brings
-//! collation functions.
+//! The file holds two things:
+//!
+//! - The primitives of the format, which the VDBE's record code
+//!   (src/vdbe/serial.zig, on Mem values and KeyInfo collations) is built
+//!   on: serial type sizes, header varints, integer decoding, memcmp()
+//!   and sqlite3IntFloatCompare(). Reads past the end of a slice return
+//!   zero bytes, as C relies on padding after its buffers.
+//! - A small codec of its own (Value, encode(), decode() and an
+//!   UnpackedRecord with the BINARY collation only), for the b-tree
+//!   tests, the fuzzers and incremental blob I/O.
 
 const std = @import("std");
 const varint = @import("varint.zig");
@@ -35,17 +43,97 @@ pub const Value = union(enum) {
     blob: []const u8,
 };
 
-/// Bytes of data for a serial type (sqlite3VdbeSerialTypeLen).
-pub fn serialTypeLen(serial_type: u64) u64 {
+/// sqlite3SmallTypeSizes: data sizes of serial types below 128.
+pub const small_type_sizes = blk: {
+    var t: [128]u8 = undefined;
+    const fixed = [_]u8{ 0, 1, 2, 3, 4, 6, 8, 8, 0, 0, 0, 0 };
+    for (0..128) |i| t[i] = if (i < 12) fixed[i] else (i - 12) / 2;
+    break :blk t;
+};
+
+/// Port of sqlite3VdbeSerialTypeLen(): bytes of data for a serial type,
+/// u32 (header varints, as C reads them) or u64.
+pub inline fn serialTypeLen(serial_type: anytype) @TypeOf(serial_type) {
+    if (serial_type >= 128) return (serial_type - 12) / 2;
+    return small_type_sizes[@intCast(serial_type)];
+}
+
+/// A byte of `s`, or 0 past its end.
+pub inline fn at(s: []const u8, i: usize) u8 {
+    return if (i < s.len) s[i] else 0;
+}
+
+/// The big-endian u32 at `i`, bytes past the end of `s` reading as 0.
+pub fn get4(s: []const u8, i: usize) u32 {
+    return @as(u32, at(s, i)) << 24 | @as(u32, at(s, i + 1)) << 16 | @as(u32, at(s, i + 2)) << 8 | at(s, i + 3);
+}
+
+/// The big-endian u64 at `i`, bytes past the end of `s` reading as 0.
+pub fn get8(s: []const u8, i: usize) u64 {
+    return @as(u64, get4(s, i)) << 32 | get4(s, i + 4);
+}
+
+pub const Varint32 = struct { value: u32, len: u32 };
+
+/// The header varint at `i`, as the getVarint32() macro reads it: the
+/// one-byte case inline, the rest out of line.
+pub inline fn getVarint32(s: []const u8, i: usize) Varint32 {
+    if (i < s.len and s[i] < 0x80) return .{ .value = s[i], .len = 1 };
+    return getVarint32Slow(s, i);
+}
+
+/// Port of sqlite3GetVarint32() for getVarint32(): a varint of two or
+/// more bytes, or one that starts past the end of `s` (which reads as 0).
+pub noinline fn getVarint32Slow(s: []const u8, i: usize) Varint32 {
+    if (i + varint.max_len <= s.len) {
+        const d = varint.get32(s[i..]);
+        return .{ .value = d.value, .len = d.len };
+    }
+    var buf: [9]u8 = undefined;
+    for (&buf, 0..) |*b, k| b.* = at(s, i + k);
+    const d = varint.get32(&buf);
+    return .{ .value = d.value, .len = d.len };
+}
+
+/// Port of vdbeRecordDecodeInt(): the integer of serial type 1-6, 8 or 9
+/// at `p`, which must hold all of its bytes (the ONE_BYTE_INT() to
+/// sqlite3Get8byte() macros).
+pub inline fn decodeIntPtr(serial_type: u32, p: [*]const u8) i64 {
     return switch (serial_type) {
-        0, 8, 9, 10, 11 => 0,
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        4 => 4,
-        5 => 6,
-        6, 7 => 8,
-        else => (serial_type - 12) / 2,
+        0, 1 => @as(i8, @bitCast(p[0])),
+        2 => std.mem.readInt(i16, p[0..2], .big),
+        3 => @as(i32, @bitCast(@as(u32, p[0]) << 24 | @as(u32, p[1]) << 16 | @as(u32, p[2]) << 8)) >> 8,
+        4 => std.mem.readInt(i32, p[0..4], .big),
+        5 => @as(i64, std.mem.readInt(i16, p[0..2], .big)) * (@as(i64, 1) << 32) + std.mem.readInt(u32, p[2..6], .big),
+        6 => std.mem.readInt(i64, p[0..8], .big),
+        else => @as(i64, serial_type) - 8,
+    };
+}
+
+/// Port of vdbeRecordDecodeInt() on a slice: bytes past the end of `s`
+/// read as 0.
+pub inline fn decodeInt(serial_type: u32, s: []const u8, i: usize) i64 {
+    const n: usize = if (serial_type < 2) 1 else small_type_sizes[serial_type & 0x7f];
+    if (i + n <= s.len) return decodeIntPtr(serial_type, s.ptr + i);
+    return decodeIntSlow(serial_type, s, i);
+}
+
+/// decodeInt() of a value running past the end of `s` (corrupt records).
+noinline fn decodeIntSlow(serial_type: u32, s: []const u8, i: usize) i64 {
+    return switch (serial_type) {
+        0, 1 => @as(i8, @bitCast(at(s, i))),
+        2 => @as(i16, @bitCast(@as(u16, at(s, i)) << 8 | at(s, i + 1))),
+        3 => blk: {
+            const v: u32 = @as(u32, at(s, i)) << 16 | @as(u32, at(s, i + 1)) << 8 | at(s, i + 2);
+            break :blk @as(i32, @bitCast(v << 8)) >> 8;
+        },
+        4 => @as(i32, @bitCast(get4(s, i))),
+        5 => blk: {
+            const hi: i64 = @as(i16, @bitCast(@as(u16, at(s, i)) << 8 | at(s, i + 1)));
+            break :blk hi * (@as(i64, 1) << 32) + get4(s, i + 2);
+        },
+        6 => @bitCast(get8(s, i)),
+        else => @as(i64, serial_type) - 8,
     };
 }
 
@@ -140,21 +228,13 @@ fn decodeValue(t: u64, data: []const u8) Value {
         0, 10, 11 => .null,
         8 => .{ .int = 0 },
         9 => .{ .int = 1 },
-        1, 2, 3, 4, 5, 6 => .{ .int = decodeInt(t, data) },
+        1, 2, 3, 4, 5, 6 => .{ .int = decodeIntPtr(@intCast(t), data.ptr) },
         7 => blk: {
             const r: f64 = @bitCast(std.mem.readInt(u64, data[0..8], .big));
             break :blk if (std.math.isNan(r)) .null else .{ .real = r };
         },
         else => if (t & 1 == 1) .{ .text = data } else .{ .blob = data },
     };
-}
-
-/// Port of vdbeRecordDecodeInt(): a big-endian two's-complement integer.
-fn decodeInt(t: u64, data: []const u8) i64 {
-    const n: usize = @intCast(serialTypeLen(t));
-    var v: u64 = if (data[0] & 0x80 != 0) std.math.maxInt(u64) else 0;
-    for (data[0..n]) |b| v = (v << 8) | b;
-    return @bitCast(v);
 }
 
 /// Decodes up to `out.len` columns of `record`. Returns the number of
@@ -295,6 +375,27 @@ fn compareValues(lhs: Value, t: u64, rhs: Value) Order {
             else => .gt,
         },
     }
+}
+
+/// memcmp() of two slices of the same length: the difference of the
+/// first differing bytes, or 0. Compares eight bytes at a time.
+pub fn memcmp(a: []const u8, b: []const u8) i32 {
+    std.debug.assert(a.len == b.len);
+    const n = a.len;
+    var i: usize = 0;
+    while (i + 8 <= n) : (i += 8) {
+        const x = std.mem.readInt(u64, a[i..][0..8], .big);
+        const y = std.mem.readInt(u64, b[i..][0..8], .big);
+        if (x != y) {
+            // The first differing byte is the highest one in big-endian.
+            const shift: u6 = @intCast(56 - (@clz(x ^ y) & ~@as(u7, 7)));
+            return @as(i32, @as(u8, @truncate(x >> shift))) - @as(u8, @truncate(y >> shift));
+        }
+    }
+    while (i < n) : (i += 1) {
+        if (a[i] != b[i]) return @as(i32, a[i]) - b[i];
+    }
+    return 0;
 }
 
 /// Port of sqlite3IntFloatCompare(): order of an integer relative to a

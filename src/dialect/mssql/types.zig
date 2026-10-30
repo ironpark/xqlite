@@ -7,8 +7,7 @@
 //! | bigint                                       | INTEGER |                            |
 //! | int, smallint, tinyint                       | INTEGER | the type's range           |
 //! | bit                                          | INTEGER | 0 or 1                     |
-//! | decimal/numeric(p,0), p <= 18                | INTEGER | fewer than p digits        |
-//! | other decimal/numeric, money, smallmoney     | REAL    |                            |
+//! | decimal/numeric(p,s), money, smallmoney      | REAL    |                            |
 //! | float, real                                  | REAL    |                            |
 //! | [n]char(n), [n]varchar(n)                    | TEXT    | length <= n                |
 //! | [n]varchar(max), [n]text, xml, sql_variant   | TEXT    |                            |
@@ -71,7 +70,6 @@ pub const Type = struct {
     pub fn isInteger(t: Type) bool {
         return switch (t.base) {
             .bigint, .int, .smallint, .tinyint, .bit => true,
-            .decimal, .numeric => t.scale0() and t.precision() <= 18,
             else => false,
         };
     }
@@ -129,10 +127,6 @@ pub const Type = struct {
         };
     }
 
-    fn scale0(t: Type) bool {
-        return (t.scale orelse 0) == 0;
-    }
-
     /// The length limit of a character or binary type: n, 1 if not
     /// written (char, varchar, binary, varbinary in a column definition),
     /// null for MAX and the unlimited types.
@@ -163,10 +157,6 @@ pub const Type = struct {
             .smallint => .{ -32768, 32767 },
             .tinyint => .{ 0, 255 },
             .bit => .{ 0, 1 },
-            .decimal, .numeric => if (t.isInteger() and t.precision() < 18) blk: {
-                const lim = std.math.pow(i64, 10, t.precision()) - 1;
-                break :blk .{ -lim, lim };
-            } else null,
             else => null,
         };
     }
@@ -256,8 +246,8 @@ test "types: spellings and storage" {
         .{ "varchar(20)", "varchar(20)", "TEXT" },
         .{ "NVARCHAR(MAX)", "nvarchar(max)", "TEXT" },
         .{ "decimal(10, 2)", "decimal(10,2)", "REAL" },
-        .{ "numeric(9)", "numeric(9,0)", "INTEGER" },
-        .{ "decimal", "decimal(18,0)", "INTEGER" },
+        .{ "numeric(9)", "numeric(9,0)", "REAL" },
+        .{ "decimal", "decimal(18,0)", "REAL" },
         .{ "float(10)", "real", "REAL" },
         .{ "datetime2", "datetime2(7)", "TEXT" },
         .{ "varbinary(16)", "varbinary(16)", "BLOB" },

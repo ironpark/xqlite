@@ -1545,6 +1545,9 @@ pub const Parser = struct {
     pub const ColMeta = struct {
         name: []const u8,
         decl_type: ?[]const u8 = null,
+        /// The type argument of xq_tsql_store(): the declared type, the
+        /// table (as SQL Server names it in messages) and the column.
+        store_arg: []const u8 = "",
         /// The identity sequence.
         identity: ?[]const u8 = null,
         generated: bool = false,
@@ -1580,7 +1583,10 @@ pub const Parser = struct {
             };
             for (entries) |en| {
                 if (!std.ascii.eqlIgnoreCase(en.col, cols[i].name)) continue;
-                if (std.mem.eql(u8, en.key, catalog.Key.decl_type) and is_mssql) cols[i].decl_type = en.value;
+                if (std.mem.eql(u8, en.key, catalog.Key.decl_type) and is_mssql) {
+                    cols[i].decl_type = en.value;
+                    cols[i].store_arg = try std.fmt.allocPrint(s.a, "{s}|{s}.dbo.{s}|{s}", .{ en.value, schema, stored, cols[i].name });
+                }
                 if (std.mem.eql(u8, en.key, catalog.Key.identity)) cols[i].identity = en.value;
             }
         }

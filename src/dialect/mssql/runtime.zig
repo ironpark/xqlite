@@ -52,12 +52,25 @@ pub const user_cast: ?*anyopaque = @ptrFromInt(@as(usize, @backingInt(Mode.cast)
 pub const user_try: ?*anyopaque = @ptrFromInt(@as(usize, @backingInt(Mode.try_cast)) + 0x100);
 pub const user_store: ?*anyopaque = @ptrFromInt(@as(usize, @backingInt(Mode.store)) + 0x100);
 
-/// xq_tsql_cast(x, 'type') and friends (the mode is the user data).
+/// xq_tsql_cast(x, 'type') and friends (the mode is the user data). The
+/// type of xq_tsql_store() may be followed by "|table|column", for the
+/// messages.
 pub fn convertFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
-    const tz = text(ctx, argv[1]) orelse return;
+    const arg = text(ctx, argv[1]) orelse return;
+    var it = std.mem.splitScalar(u8, arg, '|');
+    const tz = it.next().?;
+    const where: Where = .{ .table = it.next() orelse "", .column = it.next() orelse "" };
     const t = types.parseText(tz) orelse return fail(ctx, "Type {s} is not a defined system type.", .{tz});
-    convert(ctx, argv[0], t, modeOf(ctx));
+    convertAt(ctx, argv[0], t, modeOf(ctx), where);
+}
+
+/// The column a value is stored into (for messages).
+pub const Where = struct { table: []const u8 = "", column: []const u8 = "" };
+
+fn truncated(ctx: *Context, w: Where, cut: []const u8) void {
+    if (w.table.len == 0) return fail(ctx, "String or binary data would be truncated.", .{});
+    fail(ctx, "String or binary data would be truncated in table '{s}', column '{s}'. Truncated value: '{s}'.", .{ w.table, w.column, clip(cut) });
 }
 
 /// A conversion failure: an error, or NULL for TRY_CAST.
@@ -77,10 +90,14 @@ fn sourceName(m: *Mem) []const u8 {
 }
 
 pub fn convert(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
+    convertAt(ctx, m, t, mode, .{});
+}
+
+fn convertAt(ctx: *Context, m: *Mem, t: types.Type, mode: Mode, where: Where) void {
     if (t.isInteger()) return toInteger(ctx, m, t, mode);
     if (t.isNumber()) return toReal(ctx, m, t, mode);
-    if (t.isChar()) return toChars(ctx, m, t, mode);
-    if (t.isBinary()) return toBinary(ctx, m, t, mode);
+    if (t.isChar()) return toChars(ctx, m, t, mode, where);
+    if (t.isBinary()) return toBinary(ctx, m, t, mode, where);
     if (t.isTemporal()) return toTemporal(ctx, m, t, mode);
     if (t.base == .uniqueidentifier) return toGuid(ctx, m, mode);
     api.resultValue(ctx, m);
@@ -173,6 +190,7 @@ fn toInteger(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
     const lo, const hi = limits(t);
     if (v < lo or v > hi) {
         if (exact) return bad(ctx, mode, "Arithmetic overflow error converting {s} to data type numeric.", .{sourceName(m)});
+        if (api.valueType(m) == vi.SQLITE_INTEGER) return bad(ctx, mode, "Arithmetic overflow error for data type {s}, value = {d}.", .{ tname, v });
         return bad(ctx, mode, "Arithmetic overflow error converting expression to data type {s}.", .{tname});
     }
     api.resultInt64(ctx, @intCast(v));
@@ -225,7 +243,7 @@ fn toReal(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
     api.resultDouble(ctx, f);
 }
 
-fn toChars(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
+fn toChars(ctx: *Context, m: *Mem, t: types.Type, mode: Mode, where: Where) void {
     const z: []const u8 = switch (api.valueType(m)) {
         vi.SQLITE_BLOB => api.valueBlob(m) orelse "",
         else => text(ctx, m) orelse return,
@@ -234,13 +252,11 @@ fn toChars(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
     const len = dfunc.charCount(z);
     if (len <= n) return api.resultText(ctx, z, .transient);
     const cut = dfunc.charOffset(z, @intCast(n));
-    if (mode == .store and std.mem.trim(u8, z[cut..], " ").len != 0) {
-        return fail(ctx, "String or binary data would be truncated.", .{});
-    }
+    if (mode == .store and std.mem.trim(u8, z[cut..], " ").len != 0) return truncated(ctx, where, z[0..cut]);
     api.resultText(ctx, z[0..cut], .transient);
 }
 
-fn toBinary(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
+fn toBinary(ctx: *Context, m: *Mem, t: types.Type, mode: Mode, where: Where) void {
     var buf: [8]u8 = undefined;
     const b: []const u8 = switch (api.valueType(m)) {
         vi.SQLITE_INTEGER => blk: {
@@ -253,7 +269,7 @@ fn toBinary(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
     };
     const n = t.maxLength() orelse return api.resultBlob(ctx, b, .transient);
     if (b.len > n) {
-        if (mode == .store) return fail(ctx, "String or binary data would be truncated.", .{});
+        if (mode == .store) return truncated(ctx, where, "");
         return api.resultBlob(ctx, b[0..@intCast(n)], .transient);
     }
     if (t.base == .binary and b.len < n) {

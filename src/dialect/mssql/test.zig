@@ -51,7 +51,7 @@ test "mssql: functions" {
     try c.expectRows("SELECT CAST('12' AS INT), CAST(1.7 AS INT), CAST(3.14159 AS DECIMAL(10,2)), CAST(5 AS BIT), CAST('abcdef' AS VARCHAR(3))", "12|1|3.14|1|abc\n");
     try c.expectRows("SELECT TRY_CAST('x' AS INT), TRY_CONVERT(DATE, 'nope'), CONVERT(VARCHAR(10), CAST('2024-03-05' AS DATE), 112)", "NULL|NULL|20240305\n");
     try c.expectError("SELECT CAST('abc' AS INT)", "Conversion failed when converting the varchar value 'abc' to data type int.");
-    try c.expectError("SELECT CAST(300 AS TINYINT)", "Arithmetic overflow error converting expression to data type tinyint.");
+    try c.expectError("SELECT CAST(300 AS TINYINT)", "Arithmetic overflow error for data type tinyint, value = 300.");
 }
 
 test "mssql: dates" {
@@ -75,7 +75,7 @@ test "mssql: tables, types and identity" {
     try c.expectRows("SELECT id, name, price, flag, d FROM t ORDER BY id", "1|a|1.01|1|2024-01-02\n2|B|NULL|NULL|NULL\n");
     try c.expectRows("SELECT SCOPE_IDENTITY(), @@IDENTITY, IDENT_CURRENT('dbo.t')", "2|2|2\n");
     try c.expectRows("SELECT name FROM t WHERE name = 'b'", "B\n");
-    try c.expectError("INSERT INTO t (name) VALUES ('toolong')", "String or binary data would be truncated.");
+    try c.expectError("INSERT INTO t (name) VALUES ('toolong')", "String or binary data would be truncated in table 'main.dbo.t', column 'name'. Truncated value: 'toolo'.");
     try c.expectError("INSERT INTO t (id, name) VALUES (9, 'x')", "Cannot insert explicit value for identity column in table 't' when IDENTITY_INSERT is set to OFF.");
     try c.exec("SET IDENTITY_INSERT t ON; INSERT INTO t (id, name) VALUES (9, 'x'); SET IDENTITY_INSERT t OFF; INSERT INTO t (name) VALUES ('y')");
     try c.expectRows("SELECT id FROM t WHERE name = 'y'", "10\n");

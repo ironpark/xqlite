@@ -78,7 +78,13 @@ fn output(s: *Parser, kind: parser.Output) Error![]tree.ResultCol {
 fn storesAsIs(e: *const Expr, t: types.Type) bool {
     return switch (e.kind) {
         .null, .default => true,
-        .integer => |z| if (t.base == .bit) (std.mem.eql(u8, z, "0") or std.mem.eql(u8, z, "1")) else t.isInteger() or t.base == .float or t.base == .real,
+        .integer => |z| blk: {
+            if (t.base == .float or t.base == .real) break :blk true;
+            if (!t.isInteger()) break :blk false;
+            const v = std.fmt.parseInt(i64, z, 10) catch break :blk false;
+            const r = t.range() orelse break :blk true;
+            break :blk v >= r[0] and v <= r[1];
+        },
         .string => |z| t.isChar() and (if (t.maxLength()) |n| z.len <= n else true),
         else => false,
     };
@@ -91,7 +97,7 @@ fn wrapValue(s: *Parser, c: *const ColMeta, e: *Expr) Error!*Expr {
     if (c.decl_type) |dt| {
         const t = types.parseText(dt);
         if (t == null or !storesAsIs(e, t.?)) {
-            x = try tree.expr(s.a, e.pos, e.end, .{ .cast = .{ .e = x, .target_type = dt, .mode = .{ .typed = .{ .func = "xq_tsql_store", .type_arg = dt } } } });
+            x = try tree.expr(s.a, e.pos, e.end, .{ .cast = .{ .e = x, .target_type = dt, .mode = .{ .typed = .{ .func = "xq_tsql_store", .type_arg = c.store_arg } } } });
         }
     }
     if (c.identity) |seq| x = try s.func(e.pos, "xq_tsql_identity_seen", &.{ try s.str(e.pos, seq), x });
@@ -322,7 +328,7 @@ fn assignments(s: *Parser, t: *const Target, label: []const u8) Error![]tree.Set
             if (m.decl_type) |dt| {
                 const ty = types.parseText(dt);
                 if (ty == null or !storesAsIs(e, ty.?)) {
-                    e = try tree.expr(s.a, e.pos, e.end, .{ .cast = .{ .e = e, .target_type = dt, .mode = .{ .typed = .{ .func = "xq_tsql_store", .type_arg = dt } } } });
+                    e = try tree.expr(s.a, e.pos, e.end, .{ .cast = .{ .e = e, .target_type = dt, .mode = .{ .typed = .{ .func = "xq_tsql_store", .type_arg = m.store_arg } } } });
                 }
             }
         }

@@ -620,7 +620,27 @@ fn alterTable(s: *Parser) Error!void {
         const def = try columnDef(s, tab.name);
         if (s.isOp(",")) return s.fail("xqlite: ALTER TABLE ... ADD of several columns is not supported (add them one at a time)", .{});
         if (build.columnIndex(tab, def.name.text) >= 0) return s.fail("Column names in each table must be unique. Column name '{s}' in table '{s}' is specified more than once.", .{ def.name.text, tab.name });
-        return s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = q, .action = .{ .add_column = .{ .def = def } } }) });
+        var with_values = false;
+        if (s.isKw("WITH") and s.peek().isKw("VALUES")) {
+            s.advance();
+            s.advance();
+            with_values = true;
+        }
+        try s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = q, .action = .{ .add_column = .{ .def = def } } }) });
+        // A nullable column's DEFAULT is for new rows: the rows there are
+        // get NULL, unless WITH VALUES (SQLite gives them the default).
+        var has_default = false;
+        var not_null = false;
+        for (def.constraints) |cc| switch (cc.kind) {
+            .default => has_default = true,
+            .not_null => not_null = true,
+            else => {},
+        };
+        if (has_default and !not_null and !with_values) {
+            const schema = @import("../../catalog/catalog.zig").schemaName(s.p.db, tab);
+            catalog.codeExecFmt(s.p, schema, "UPDATE \"%w\".\"%w\" SET \"%w\" = NULL", &.{ .{ .str = schema }, .{ .str = tab.name }, .{ .str = def.name.text } });
+        }
+        return;
     }
     if (s.eatKw("DROP")) {
         if (!s.eatKw("COLUMN")) return s.fail("xqlite: ALTER TABLE ... DROP {s} is not supported", .{s.tok.text});

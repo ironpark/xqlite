@@ -21,6 +21,7 @@ pub fn register(s: *xqt.Suite) !void {
     for (bad) |stmt| try s.add(try std.fmt.allocPrint(s.arena.allocator(), "sqlite3 rejects: {s}", .{stmt}), rejects, .{ base, stmt });
     try s.add("read back", readBack, .{base});
     try s.add("schema tables", schemaTables, .{base});
+    try s.add("json and jsonb columns", jsonColumns, .{base});
 }
 
 const db = "pg.db";
@@ -59,6 +60,11 @@ const script =
     \\INSERT INTO sales.orders (account_id, amount) SELECT n, n * 2 FROM generate_series(1, 50) AS g(n);
     \\CREATE VIEW sales.big AS SELECT o.id, o.amount FROM sales.orders o WHERE o.amount > 50;
     \\CREATE SCHEMA tmp; CREATE TABLE tmp.x (a int); DROP SCHEMA tmp CASCADE;
+    \\CREATE TABLE doc (id int PRIMARY KEY, body jsonb NOT NULL DEFAULT '{"z": 0, "a": 1}', raw json);
+    \\CREATE INDEX ON doc USING gin (body);
+    \\INSERT INTO doc VALUES (1, '{"b": [1, 2], "a": {"y": true, "x": null}}', '{"b" : 1,  "a" : 2}');
+    \\INSERT INTO doc (id) VALUES (2);
+    \\UPDATE doc SET body = body || '{"c": "x"}' WHERE id = 2;
     \\
 ;
 
@@ -79,6 +85,7 @@ const bad = [_][]const u8{
     "INSERT INTO entry(account_id, amount, tag) VALUES (1, 1, 'too long tag')",
     "INSERT INTO entry(account_id, amount) VALUES (1, 3000000000)",
     "UPDATE account SET active = 2 WHERE id = 1",
+    "INSERT INTO doc (id, body) VALUES (9, '{')",
 };
 
 fn build(c: *Check, file: []const u8) !void {
@@ -128,4 +135,21 @@ fn schemaTables(c: *Check, base: *BaseDb) !void {
     const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT amount FROM sales.orders WHERE id = 1000;\nSET search_path = sales;\nSELECT count(*) FROM orders;\n" });
     const got = std.mem.trimEnd(u8, out, "\n");
     _ = c.expect(std.mem.eql(u8, got, "7\n51"), "schema read back: {s}", .{got});
+}
+
+/// jsonb is stored normalized text that sqlite3's JSON functions read,
+/// json as written; a row sqlite3 writes (not normalized) is read by the
+/// dialect's operators.
+fn jsonColumns(c: *Check, base: *BaseDb) !void {
+    try base.get(c, db);
+    const rows = std.mem.trimEnd(u8, try c.sqlite3(db, "SELECT body, raw, json_extract(body, '$.b[1]') FROM doc ORDER BY id"), "\n");
+    const want =
+        \\{"a": {"x": null, "y": true}, "b": [1, 2]}|{"b" : 1,  "a" : 2}|2
+        \\{"a": 1, "c": "x", "z": 0}||
+    ;
+    _ = c.expect(std.mem.eql(u8, rows, want), "sqlite3 reads: {s}", .{rows});
+    _ = try c.sqlite3(db, "INSERT INTO doc (id, body) VALUES (3, '{\"z\":1,\"c\":[2]}')");
+    const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT body -> 'c', body ? 'z', body @> '{\"z\": 1}', jsonb_typeof(body -> 'c') FROM doc WHERE id = 3;\n" });
+    const got = std.mem.trimEnd(u8, out, "\n");
+    _ = c.expect(std.mem.eql(u8, got, "[2]|1|1|array"), "json read back: {s}", .{got});
 }

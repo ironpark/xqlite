@@ -193,7 +193,8 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | `engine_functions` | IR의 의미 노드가 내려가는 엔진 함수(`xq_*`) |
 | `collations` | 방언이 더하는 collation |
 | `default_collation` | collation이 없는 값의 비교에 쓰는 collation(C의 `db->pDfltColl`) |
-| `engine_modules` | 엔진 테이블 값 함수(`xq_*` 이포니머스 가상 테이블). 엔진 함수처럼 모든 방언에서 보이고, 문장이 처음 그 이름을 쓸 때 연결에 등록합니다(MariaDB `JSON_TABLE`의 `xq_maria_json_table`). |
+| `engine_modules` | 엔진 테이블 값 함수(`xq_*` 이포니머스 가상 테이블). 엔진 함수처럼 모든 방언에서 보이고, 문장이 처음 그 이름을 쓸 때 연결에 등록합니다(MariaDB `JSON_TABLE`의 `xq_maria_json_table`, Oracle `JSON_TABLE`의 `xq_ora_json_table`). |
+| `table_function` | 이름이 고정되지 않은 엔진 테이블 값 함수를 찾는 함수. `engine_modules`에 없는 `xq_*` 테이블을 만나면 부르고, 맞으면 모듈을 등록해 돌려줍니다(T-SQL `OPENJSON`은 `WITH` 열 목록을 이름에 담음). |
 
 ### 방언 함수 테이블 (`functions`)
 

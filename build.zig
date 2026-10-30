@@ -168,7 +168,7 @@ pub fn build(b: *std.Build) void {
 
     // The sqlite3-compatible C ABI (src/capi.zig): libxqlite3, its header
     // and its tests. See addCapi() and docs/c-api.md.
-    const capi_test_step = addCapi(b, target, optimize);
+    const capi = addCapi(b, target, optimize);
     // `zig build wasm`: the WebAssembly module for JavaScript hosts
     // (src/wasm/api.zig, wasm32-freestanding, no libc) in zig-out/wasm,
     // whatever -Dtarget is; ReleaseSmall unless -Dwasm-optimize says
@@ -347,7 +347,8 @@ pub fn build(b: *std.Build) void {
     const check_fuzz = b.option(bool, "fuzz", "zig build check: also run each seeded fuzzer with a random seed") orelse false;
     const check_step = b.step("check", "Run the unit tests, the cross-checks, the planner cases and fuzzcheck (-Dslt, -Dfuzz for more)");
     check_step.dependOn(test_step);
-    check_step.dependOn(capi_test_step);
+    check_step.dependOn(capi.test_step);
+    check_step.dependOn(capi.fast_step);
     check_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = xqt_exe.root_module })).step);
     const interop_run = addXqtRun(b, xqt_exe, exe, crashshim);
     interop_run.addArg("interop");
@@ -420,8 +421,10 @@ pub fn build(b: *std.Build) void {
 /// test-capi` runs tools/capi/capi_test.c against both libraries;
 /// `zig build capi-shell` builds SQLite's own shell (shell.c of the
 /// amalgamation, -Dsqlite-shell-c) on libxqlite3 and runs a smoke
-/// script. Returns the test-capi step.
-fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+/// script; `zig build capi-fast` runs the C test and tools/capi/bench.c
+/// on the ReleaseFast static library several times. Returns the
+/// test-capi and capi-fast steps.
+fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) struct { test_step: *std.Build.Step, fast_step: *std.Build.Step } {
     const enabled = b.option(bool, "capi", "Build and install the C libraries (libxqlite3) with `zig build` (default: true)") orelse true;
     const name = b.option([]const u8, "capi-name", "Base name of the C libraries: lib<name>.a, lib<name>.so/.dylib (default: xqlite3; sqlite3 for a drop-in libsqlite3)") orelse "xqlite3";
     const shell_c = b.option([]const u8, "sqlite-shell-c", "shell.c of the SQLite 3.54.1 amalgamation, for `zig build capi-shell` (default: /tmp/xq-sqlite-build/shell.c)") orelse "/tmp/xq-sqlite-build/shell.c";
@@ -511,6 +514,31 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         test_step.dependOn(&run.step);
     }
 
+    // The C test and an insert benchmark (tools/capi/bench.c) on the
+    // ReleaseFast static library, whatever -Doptimize is, each run several
+    // times: ReleaseFast leaves `undefined` memory as it was, so a read of
+    // it fails only now and then, with the addresses of the run (a
+    // function context did, in about 40% of capi_test runs).
+    const fast_step = b.step("capi-fast", "Run tools/capi/capi_test.c and tools/capi/bench.c on the ReleaseFast static libxqlite3, 8 times each");
+    const fast_lib = if (optimize == .fast) static else make.lib(b, target, .fast, name, .static);
+    for ([_][]const u8{ "capi_test", "bench" }) |prog| {
+        const exe = b.addExecutable(.{
+            .name = b.fmt("capi-fast-{s}", .{prog}),
+            .root_module = b.createModule(.{ .target = target, .optimize = .fast, .link_libc = true }),
+        });
+        exe.root_module.addCSourceFile(.{ .file = b.path(b.fmt("tools/capi/{s}.c", .{prog})), .flags = &.{"-std=gnu99"} });
+        exe.root_module.addIncludePath(b.path("include"));
+        exe.root_module.linkLibrary(fast_lib);
+        for (0..8) |_| {
+            const run = b.addRunArtifact(exe);
+            run.setCwd(b.path("."));
+            if (std.mem.eql(u8, prog, "capi_test")) run.addArtifactArg(ext);
+            run.expectExitCode(0);
+            run.has_side_effects = true;
+            fast_step.dependOn(&run.step);
+        }
+    }
+
     // SQLite's own shell on libxqlite3: the drop-in proof.
     const shell = b.addExecutable(.{
         .name = "sqlite3-xqlite",
@@ -535,7 +563,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     run_shell.has_side_effects = true;
     shell_step.dependOn(&run_shell.step);
 
-    return test_step;
+    return .{ .test_step = test_step, .fast_step = fast_step };
 }
 
 /// `xqt --xq XQLITE --crashshim SHIM`, for `zig build check`: run from

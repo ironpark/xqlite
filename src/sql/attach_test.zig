@@ -158,6 +158,30 @@ fn prep(c: *Conn, sql: []const u8) !*Vdbe {
     return stmt.?;
 }
 
+test "attach: an OP_Function context whose out already names its register" {
+    // ReleaseFast leaves the `out` of a new function context (undefined)
+    // as the allocation held it. A DETACH compiled into the memory of a
+    // finalized ATTACH found there the ATTACH's `out`, the same register,
+    // and kept its argv: the file name register, NULL, so "no such
+    // database: " (~40% of capi_test runs in ReleaseFast). Set up that
+    // state on purpose; the first run must still bind the arguments.
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    try c.exec("ATTACH 'a.db' AS a");
+    const s = try prep(&c, "DETACH a");
+    defer _ = api.finalize(s);
+    const op = for (s.ops.items) |*o| {
+        if (o.opcode == .Function) break o;
+    } else return error.TestUnexpectedResult;
+    const ctx = op.p4.funcctx;
+    ctx.out = &s.mem[@intCast(op.p3)];
+    // Register 1 holds the file name of ATTACH; DETACH leaves it NULL.
+    ctx.argv[0] = &s.mem[@intCast(op.p2 - 2)];
+    try testing.expectEqual(RC.DONE, api.step(s));
+    try c.expectRows("SELECT name FROM pragma_database_list", "main\n");
+}
+
 test "attach: DETACH while statements are prepared or running" {
     var c: Conn = undefined;
     try c.open();

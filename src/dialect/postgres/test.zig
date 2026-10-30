@@ -486,7 +486,7 @@ test "pg: information_schema and pg_catalog" {
     try c.expectRows("SELECT count(*) FROM pg_views", "0\n");
     // public is main.
     try c.expectRows("SELECT count(*) FROM public.person", "0\n");
-    try c.expectError("SELECT * FROM nosuchschema.person", "schema \"nosuchschema\" does not exist");
+    try c.expectError("SELECT * FROM nosuchschema.person", "relation \"nosuchschema.person\" does not exist");
 }
 
 test "pg: errors in PostgreSQL's words" {
@@ -582,4 +582,130 @@ test "pg: a database written in the dialect" {
     try c.expectRows("INSERT INTO app_user (email, active) VALUES ('c@x', false) RETURNING id, active", "3|0\n");
     try c.expectRows("SELECT data_type FROM information_schema.columns WHERE column_name = 'created_at'", "timestamp with time zone\n");
     try c.exec("PRAGMA integrity_check");
+}
+
+test "pg: schemas" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE SCHEMA sales;
+        \\CREATE TABLE sales.orders (id serial PRIMARY KEY, amt int, note varchar(5));
+        \\CREATE TABLE orders (id int);
+        \\CREATE INDEX ON sales.orders (amt);
+        \\CREATE INDEX by_note ON sales.orders (note);
+        \\CREATE SEQUENCE sales.tickets START 10;
+        \\INSERT INTO sales.orders (amt) VALUES (10), (20);
+        \\CREATE VIEW sales.big AS SELECT o.id FROM sales.orders o WHERE amt > 10;
+    );
+    // Objects of the schema are main objects named "sales.x"; the registry
+    // is a row of xq_catalog.
+    try c.expectRows("SELECT type, name FROM sqlite_schema WHERE name LIKE 'sales.%' ORDER BY name", "view|sales.big\nindex|sales.by_note\ntable|sales.orders\nindex|sales.orders_amt_idx\n");
+    try c.expectRows("SELECT col, value FROM xq_catalog WHERE tbl = '' AND key = 'schema'", "sales|postgres\n");
+    try c.expectRows("SELECT name FROM xq_sequence ORDER BY name", "sales.orders_id_seq\nsales.tickets\n");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'sales.big'", "CREATE VIEW \"sales.big\" AS SELECT \"o\".\"id\" FROM \"sales.orders\" AS \"o\" WHERE (\"amt\" > 10)\n");
+    // Qualified names everywhere; the table's bare name qualifies columns.
+    try c.expectRows("SELECT orders.id, sales.orders.amt FROM sales.orders ORDER BY 1", "1|10\n2|20\n");
+    try c.expectRows("UPDATE sales.orders SET amt = orders.amt + 1 WHERE id = 1 RETURNING orders.amt", "11\n");
+    try c.expectRows("SELECT * FROM sales.big ORDER BY 1", "1\n2\n");
+    try c.expectRows("SELECT nextval('sales.tickets'), nextval('SALES.TICKETS')", "10|11\n");
+    try c.expectRows("SELECT count(*) FROM orders", "0\n");
+    try c.expectRows("SELECT table_schema, table_name FROM information_schema.tables ORDER BY 1, 2", "public|orders\nsales|big\nsales|orders\n");
+    try c.expectRows("SELECT schemaname, indexname FROM pg_indexes ORDER BY 2", "sales|by_note\nsales|orders_amt_idx\n");
+    // Errors in PostgreSQL's words.
+    try c.expectError("CREATE SCHEMA sales", "schema \"sales\" already exists");
+    try c.expectError("CREATE SCHEMA pg_x", "unacceptable schema name \"pg_x\"");
+    try c.expectError("CREATE SCHEMA \"a.b\"", "xqlite: a schema name cannot contain \".\"");
+    try c.expectError("CREATE TABLE nosuch.t (a int)", "schema \"nosuch\" does not exist");
+    try c.expectError("SELECT * FROM nosuch.t", "relation \"nosuch.t\" does not exist");
+    try c.expectError("SELECT * FROM sales.nosuch", "relation \"sales.nosuch\" does not exist");
+    try c.expectError("CREATE TABLE sales.orders (a int)", "relation \"orders\" already exists");
+    try c.expectError("DROP TABLE sales.nosuch", "table \"nosuch\" does not exist");
+    try c.expectError("DROP SCHEMA sales", "cannot drop schema sales because other objects depend on it");
+    // ALTER TABLE keeps the table in its schema.
+    try c.exec("ALTER TABLE sales.orders RENAME TO ord");
+    try c.expectRows("SELECT count(*) FROM sales.ord", "2\n");
+    try c.expectRows("SELECT * FROM sales.big ORDER BY 1", "1\n2\n");
+    // DROP SCHEMA ... CASCADE drops everything, catalog and sequences too.
+    try c.exec("DROP SCHEMA sales CASCADE");
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE name LIKE 'sales.%'", "");
+    try c.expectRows("SELECT count(*) FROM xq_catalog WHERE tbl LIKE 'sales.%' OR col = 'sales'", "0\n");
+    try c.expectRows("SELECT count(*) FROM xq_sequence", "0\n");
+    try c.expectError("SELECT * FROM sales.ord", "relation \"sales.ord\" does not exist");
+    try c.exec("DROP SCHEMA IF EXISTS sales");
+    try c.exec("PRAGMA integrity_check");
+}
+
+test "pg: search_path" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE SCHEMA a;
+        \\CREATE SCHEMA b;
+        \\CREATE TABLE a.t (x int);
+        \\CREATE TABLE b.t (x int);
+        \\CREATE TABLE t (x int);
+        \\INSERT INTO a.t VALUES (1);
+        \\INSERT INTO b.t VALUES (2);
+        \\INSERT INTO t VALUES (3);
+    );
+    try c.expectRows("SHOW search_path", "\"$user\", public\n");
+    try c.expectColumns("SHOW search_path", "search_path");
+    try c.expectRows("SELECT current_schema(), current_schema, current_schemas(true)", "public|public|{pg_catalog,public}\n");
+    // A prepared statement is compiled again when search_path changes.
+    var stmt: ?*vi.Vdbe = null;
+    try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "SELECT x FROM t", &stmt, null));
+    defer _ = api.finalize(stmt.?);
+    try testing.expectEqual(RC.ROW, api.step(stmt.?));
+    try testing.expectEqual(@as(i64, 3), api.columnInt64(stmt.?, 0));
+    _ = api.reset(stmt.?);
+    try c.exec("SET search_path TO b, a");
+    try testing.expectEqual(RC.ROW, api.step(stmt.?));
+    try testing.expectEqual(@as(i64, 2), api.columnInt64(stmt.?, 0));
+    _ = api.reset(stmt.?);
+    try c.expectRows("SHOW search_path", "b, a\n");
+    try c.expectRows("SELECT current_schema(), current_schemas(false)", "b|{b,a}\n");
+    // DDL creates in the first schema of the path; names resolve along it.
+    try c.exec("SET search_path = a, public; CREATE TABLE u (y int); INSERT INTO u VALUES (5)");
+    try c.expectRows("SELECT y FROM a.u", "5\n");
+    try c.expectRows("SELECT x, y FROM t JOIN u ON true", "1|5\n");
+    try c.exec("CREATE SEQUENCE q; CREATE TABLE ser (id serial, v int); INSERT INTO ser (v) VALUES (1)");
+    try c.expectRows("SELECT nextval('q'), currval('a.q')", "1|1\n");
+    try c.expectRows("SELECT name FROM xq_sequence ORDER BY name", "a.q\na.ser_id_seq\n");
+    try c.exec("SET search_path = nonexistent");
+    try c.expectError("CREATE TABLE w (z int)", "no schema has been selected to create in");
+    try c.expectError("SELECT x FROM t", "relation \"t\" does not exist");
+    try c.expectRows("SELECT current_schema() IS NULL", "1\n");
+    try c.exec("RESET search_path");
+    try c.expectRows("SELECT x FROM t", "3\n");
+    try c.exec("SET SCHEMA 'b'");
+    try c.expectRows("SELECT x FROM t", "2\n");
+    try c.expectError("SET nosuch = 1", "unrecognized configuration parameter \"nosuch\"");
+    try c.exec("SET application_name = 'xq'");
+    try c.expectRows("SHOW application_name", "xq\n");
+    // The SQLite dialect sees the mangled names.
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT x FROM \"b.t\"", "2\n");
+}
+
+test "pg: DDL in an attached database" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\ATTACH ':memory:' AS aux;
+        \\CREATE TABLE aux.t (id int PRIMARY KEY, v varchar(3));
+        \\CREATE INDEX ON aux.t (v);
+        \\CREATE VIEW aux.tv AS SELECT v FROM aux.t;
+        \\INSERT INTO aux.t VALUES (1, 'a');
+        \\ALTER TABLE aux.t ADD COLUMN w int;
+    );
+    try c.expectRows("SELECT type, name FROM aux.sqlite_schema ORDER BY name", "table|t\nindex|t_v_idx\nview|tv\ntable|xq_catalog\n");
+    try c.expectRows("SELECT v FROM aux.tv", "a\n");
+    try c.expectError("INSERT INTO aux.t VALUES (2, 'long')", "CHECK constraint failed: value too long for type character varying(3)");
+    try c.expectError("CREATE SEQUENCE aux.s", "xqlite: sequences are only supported in public and in schemas of CREATE SCHEMA");
+    try c.expectError("CREATE SCHEMA aux", "schema \"aux\" already exists");
+    try c.exec("DROP VIEW aux.tv; DROP TABLE aux.t");
+    try c.expectRows("SELECT count(*) FROM aux.sqlite_schema WHERE name <> 'xq_catalog'", "0\n");
 }

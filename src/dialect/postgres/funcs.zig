@@ -9,7 +9,7 @@
 //!  - random() in [0, 1), gen_random_uuid();
 //!  - floor, ceil/ceiling, sqrt, power/pow, exp, ln, log, mod, trunc,
 //!    sign, pi;
-//!  - current_user(), current_database(), current_schema().
+//!  - current_user(), current_database() (current_schema() is session.zig's).
 //!
 //! The engine functions (Hooks.engine_functions, visible in every
 //! dialect, as the IR writes them into the schema):
@@ -65,7 +65,6 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("pi", 0, det, piFunc),
     dfunc.scalar("current_user", 0, det, currentUserFunc),
     dfunc.scalar("current_database", 0, det, currentDatabaseFunc),
-    dfunc.scalar("current_schema", 0, det, currentSchemaFunc),
 };
 
 pub const engine_functions = [_]int.FuncDef{
@@ -434,10 +433,6 @@ fn currentUserFunc(ctx: *Context, _: []*Mem) void {
 
 fn currentDatabaseFunc(ctx: *Context, _: []*Mem) void {
     api.resultText(ctx, "main", .static);
-}
-
-fn currentSchemaFunc(ctx: *Context, _: []*Mem) void {
-    api.resultText(ctx, "public", .static);
 }
 
 // ============================================================== casts

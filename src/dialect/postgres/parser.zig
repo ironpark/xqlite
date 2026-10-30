@@ -4,8 +4,10 @@
 //!
 //!  - names: unquoted identifiers folded (lexer.zig); schemas mapped to
 //!    SQLite databases (`public` is main, `pg_temp` temp, an attached
-//!    database itself); information_schema and pg_catalog views replaced
-//!    by the queries of catalog_views.zig;
+//!    database itself, a schema of CREATE SCHEMA main with the mangled
+//!    name "s.t" of catalog/schema.zig, aliased t), unqualified names
+//!    looked up along search_path (session.zig); information_schema and
+//!    pg_catalog views replaced by the queries of catalog_views.zig;
 //!  - casts as types.castPlan() says, '\x..'::bytea a blob; LIKE
 //!    case-sensitive and ILIKE folding, `\` their default escape; `||`
 //!    NULL if an operand is; `/` SQLite's (integer division of integers);
@@ -40,6 +42,9 @@ const build = @import("../../sql/build.zig");
 const lexer = @import("lexer.zig");
 const types = @import("types.zig");
 const views = @import("catalog_views.zig");
+const catalog = @import("../../catalog/catalog.zig");
+const nsp = catalog.schemas;
+const pg_state = @import("state.zig");
 
 const Token = lexer.Token;
 const Name = tree.Name;
@@ -142,6 +147,16 @@ pub const Parser = struct {
     /// The error is in `p` already (the schema could not be read).
     err_in_parse: bool = false,
     schema_read: bool = false,
+    /// The registered schemas (catalog/schema.zig), read once.
+    schemas: ?[]const nsp.Info = null,
+    /// The names of the WITH queries of the statement: an unqualified
+    /// relation with one of these names is not looked up in search_path.
+    cte_names: std.ArrayList([]const u8) = .empty,
+    /// The table CREATE TABLE creates (its REFERENCES may name it).
+    creating: ?nsp.Target = null,
+    /// Unqualified names are not looked up in search_path (the text of a
+    /// catalog view).
+    no_path: bool = false,
     /// Result column names of rewritten nodes.
     figs: std.AutoHashMapUnmanaged(*const Expr, Fig) = .empty,
 
@@ -178,16 +193,16 @@ pub const Parser = struct {
 
     // ------------------------------------------------------------ tokens
 
-    fn peek(p: *const Parser) Token {
+    pub fn peek(p: *const Parser) Token {
         return p.toks[p.i];
     }
 
-    fn peekAt(p: *const Parser, k: usize) Token {
+    pub fn peekAt(p: *const Parser, k: usize) Token {
         const j = @min(p.i + k, p.toks.len - 1);
         return p.toks[j];
     }
 
-    fn advance(p: *Parser) Token {
+    pub fn advance(p: *Parser) Token {
         const t = p.toks[p.i];
         if (t.kind != .eof) p.i += 1;
         return t;
@@ -198,59 +213,59 @@ pub const Parser = struct {
         return if (p.i == 0) p.toks[0].start else p.toks[p.i - 1].end;
     }
 
-    fn isKw(p: *const Parser, kw: []const u8) bool {
+    pub fn isKw(p: *const Parser, kw: []const u8) bool {
         return p.peek().isKw(kw);
     }
 
-    fn isKwAt(p: *const Parser, k: usize, kw: []const u8) bool {
+    pub fn isKwAt(p: *const Parser, k: usize, kw: []const u8) bool {
         return p.peekAt(k).isKw(kw);
     }
 
-    fn eatKw(p: *Parser, kw: []const u8) bool {
+    pub fn eatKw(p: *Parser, kw: []const u8) bool {
         if (!p.isKw(kw)) return false;
         _ = p.advance();
         return true;
     }
 
-    fn expectKw(p: *Parser, kw: []const u8) Error!void {
+    pub fn expectKw(p: *Parser, kw: []const u8) Error!void {
         if (!p.eatKw(kw)) return p.syntaxError();
     }
 
-    fn isAnyKw(p: *const Parser, comptime kws: []const []const u8) bool {
+    pub fn isAnyKw(p: *const Parser, comptime kws: []const []const u8) bool {
         return p.peek().isAnyKw(kws);
     }
 
     /// An optional IF EXISTS: whether it is there.
-    fn ifExists(p: *Parser) Error!bool {
+    pub fn ifExists(p: *Parser) Error!bool {
         if (!p.eatKw("if")) return false;
         try p.expectKw("exists");
         return true;
     }
 
     /// An optional IF NOT EXISTS: whether it is there.
-    fn ifNotExists(p: *Parser) Error!bool {
+    pub fn ifNotExists(p: *Parser) Error!bool {
         if (!p.eatKw("if")) return false;
         try p.expectKw("not");
         try p.expectKw("exists");
         return true;
     }
 
-    fn eat(p: *Parser, kind: lexer.Kind) bool {
+    pub fn eat(p: *Parser, kind: lexer.Kind) bool {
         if (p.peek().kind != kind) return false;
         _ = p.advance();
         return true;
     }
 
-    fn expect(p: *Parser, kind: lexer.Kind) Error!Token {
+    pub fn expect(p: *Parser, kind: lexer.Kind) Error!Token {
         if (p.peek().kind != kind) return p.syntaxError();
         return p.advance();
     }
 
-    fn isOp(p: *const Parser, op: []const u8) bool {
+    pub fn isOp(p: *const Parser, op: []const u8) bool {
         return p.peek().isOp(op);
     }
 
-    fn eatOp(p: *Parser, op: []const u8) bool {
+    pub fn eatOp(p: *Parser, op: []const u8) bool {
         if (!p.isOp(op)) return false;
         _ = p.advance();
         return true;
@@ -295,7 +310,7 @@ pub const Parser = struct {
     // ------------------------------------------------------------ schema
 
     /// Read the schema (once) for what depends on it.
-    fn readSchema(p: *Parser) Error!void {
+    pub fn readSchema(p: *Parser) Error!void {
         if (p.schema_read) return;
         const ps = p.p orelse return;
         p.schema_read = true;
@@ -305,31 +320,181 @@ pub const Parser = struct {
         };
     }
 
-    /// The SQLite database of PostgreSQL schema `n`.
-    fn dbName(p: *Parser, n: Name) Error!Name {
-        if (eql(n.text, "public")) return .{ .text = "main", .pos = n.pos };
-        if (eql(n.text, "pg_temp")) return .{ .text = "temp", .pos = n.pos };
-        if (p.p) |ps| {
-            try p.readSchema();
-            if (build.findDbName(ps.db, n.text) != null) return n;
-        }
-        return p.fail(n.pos, "schema \"{s}\" does not exist", .{n.text});
+    /// The registered schemas (read once per statement); none when
+    /// parsing without the statement.
+    pub fn registered(p: *Parser) Error![]const nsp.Info {
+        if (p.schemas) |l| return l;
+        const ps = p.p orelse return &.{};
+        try p.readSchema();
+        const l = nsp.list(ps.db, p.arena) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return p.fail(0, "{s}", .{@import("../../sql/main.zig").errmsg(ps.db)}),
+        };
+        p.schemas = l;
+        return l;
     }
+
+    /// The schema names of the connection's search_path.
+    pub fn searchPath(p: *Parser) Error![]const []const u8 {
+        const text = if (p.p) |ps| ps.db.xq.postgres.searchPath() else pg_state.default_search_path;
+        return pg_state.splitPath(p.arena, text);
+    }
+
+    pub const schema_config: nsp.Config = .{ .default_schema = "public", .temp_schema = "pg_temp" };
+
+    /// The SQLite object of `s.n`: public is main, pg_temp temp, an
+    /// attached database itself, a schema of CREATE SCHEMA main with the
+    /// mangled name "s.n".
+    pub fn qualified(p: *Parser, s: Name, n: Name) Error!nsp.Target {
+        const ps = p.p orelse {
+            if (eql(s.text, "public")) return .{ .db = "main", .name = n.text, .bare = n.text };
+            if (eql(s.text, "pg_temp")) return .{ .db = "temp", .name = n.text, .bare = n.text };
+            return p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text});
+        };
+        try p.readSchema();
+        return nsp.resolve(ps.db, p.arena, try p.registered(), schema_config, s.text, n.text) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.NoSuchSchema => p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text}),
+        };
+    }
+
+    pub const Lookup = enum { relation, index, sequence };
+
+    /// An unqualified name looked up in search_path: `keep` it (an object
+    /// of public or pg_temp, a WITH query, or not found while public is
+    /// on the path: SQLite's lookup gives the same answer), the `target`
+    /// in a schema of CREATE SCHEMA, or `missing` (not on the path, but
+    /// in public, which is not).
+    pub const Found = union(enum) { keep, target: nsp.Target, missing };
+
+    pub fn unqualified(p: *Parser, n: Name, kind: Lookup) Error!Found {
+        const ps = p.p orelse return .keep;
+        if (p.no_path) return .keep;
+        if (kind == .relation) for (p.cte_names.items) |c| if (eql(c, n.text)) return .keep;
+        const schemas = try p.registered();
+        const path = try p.searchPath();
+        var has_public = false;
+        for (path) |e| has_public = has_public or eql(e, "public");
+        if (schemas.len == 0 and has_public) return .keep;
+        const db = ps.db;
+        if (kind != .sequence and objectExists(db, kind, "temp", n.text)) return .keep;
+        for (path) |e| {
+            if (eql(e, "public")) {
+                if (objectExists(db, kind, "main", n.text)) return .keep;
+                continue;
+            }
+            const s = nsp.find(schemas, e) orelse continue;
+            const m = try nsp.mangle(p.arena, s.name, n.text);
+            if (objectExists(db, kind, "main", m)) return .{ .target = .{ .db = "main", .name = m, .mangled = true, .bare = n.text } };
+        }
+        if (!has_public and objectExists(db, kind, "main", n.text)) return .missing;
+        return .keep;
+    }
+
+    /// Where an object DDL creates goes: `q`'s schema, else temp for a
+    /// temporary object, else the first schema of search_path that
+    /// exists (PostgreSQL's current_schema()).
+    pub fn createTarget(p: *Parser, q: QName, temp: bool) Error!nsp.Target {
+        if (q.schema) |s| {
+            const t = try p.qualified(s, q.name);
+            if (temp and !eql(t.db, "temp")) return p.fail(s.pos, "cannot create temporary relation in non-temporary schema", .{});
+            return t;
+        }
+        if (temp) return .{ .db = "temp", .name = q.name.text, .bare = q.name.text };
+        if (p.p == null) return .{ .db = "main", .name = q.name.text, .bare = q.name.text };
+        const schemas = try p.registered();
+        for (try p.searchPath()) |e| {
+            if (eql(e, "public")) return .{ .db = "main", .name = q.name.text, .bare = q.name.text };
+            const s = nsp.find(schemas, e) orelse continue;
+            return .{ .db = "main", .name = try nsp.mangle(p.arena, s.name, q.name.text), .mangled = true, .bare = q.name.text };
+        }
+        return p.fail(q.name.pos, "no schema has been selected to create in", .{});
+    }
+
+    /// The prefix "s." of a mangled target ("" for none).
+    pub fn prefixOf(t: nsp.Target) []const u8 {
+        return if (t.mangled) t.name[0 .. t.name.len - t.bare.len] else "";
+    }
+
+    /// A relation resolved, and the alias a mangled one takes.
+    pub const Rel = struct { q: tree.QName, alias: ?Name = null };
 
     /// The table (or other relation) `q` of a query or DML statement.
-    fn relation(p: *Parser, q: QName) Error!tree.QName {
-        return .{ .schema = if (q.schema) |s| try p.dbName(s) else null, .name = q.name };
+    fn relation(p: *Parser, q: QName) Error!Rel {
+        return p.lookup(q, .relation);
     }
 
-    /// The schema of an object DDL names: main (public, or none), temp
-    /// (pg_temp, or none for a temporary object).
-    pub fn ddlSchema(p: *Parser, q: QName, temp: bool) Error![]const u8 {
-        if (q.schema) |s| {
-            if (eql(s.text, "public")) return "main";
-            if (eql(s.text, "pg_temp")) return "temp";
-            return p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text});
+    /// The constant name of nextval('name') etc. resolved as PostgreSQL's
+    /// regclass reads it ([schema.]name, unquoted parts folded, the
+    /// schema from search_path) into the name of xq_sequence, which the
+    /// sequence functions take as is.
+    fn sequenceArg(p: *Parser, e: *Expr) Error!*Expr {
+        const text = e.kind.string;
+        var parts: std.ArrayList(Name) = .empty;
+        var cur: std.ArrayList(u8) = .empty;
+        var i: usize = 0;
+        while (i <= text.len) : (i += 1) {
+            if (i == text.len or text[i] == '.') {
+                try parts.append(p.arena, .{ .text = cur.items, .pos = e.pos });
+                cur = .empty;
+                continue;
+            }
+            if (text[i] == '"') {
+                i += 1;
+                while (i < text.len) : (i += 1) {
+                    if (text[i] == '"') {
+                        if (i + 1 < text.len and text[i + 1] == '"') {
+                            i += 1;
+                        } else break;
+                    }
+                    try cur.append(p.arena, text[i]);
+                }
+                continue;
+            }
+            try cur.append(p.arena, std.ascii.toLower(text[i]));
         }
-        return if (temp) "temp" else "main";
+        const n = parts.items;
+        if (n.len > 3 or n[n.len - 1].text.len == 0) return e;
+        const name: []const u8 = if (n.len == 1) switch (try p.unqualified(n[0], .sequence)) {
+            .keep, .missing => n[0].text,
+            .target => |t| t.name,
+        } else blk: {
+            const t = try p.qualified(n[n.len - 2], n[n.len - 1]);
+            if (t.mangled) break :blk t.name;
+            // public.q: q if it exists, else the name as written (not found).
+            if (p.p) |ps| if (eql(t.db, "main") and !objectExists(ps.db, .sequence, "main", t.bare)) break :blk text;
+            break :blk t.bare;
+        };
+        return p.expr(e.pos, .{ .string = name });
+    }
+
+    /// `q` resolved (see unqualified()); an unqualified name missing from
+    /// search_path fails as PostgreSQL does.
+    /// A mangled name is written without its database (main): a view
+    /// naming it still works where main is attached under another name.
+    pub fn lookup(p: *Parser, q: QName, kind: Lookup) Error!Rel {
+        if (q.schema) |s| {
+            // PostgreSQL names the relation, not its schema, when a
+            // query's schema does not exist.
+            if (p.p != null and !eql(s.text, "public") and !eql(s.text, "pg_temp")) {
+                const ps = p.p.?;
+                try p.readSchema();
+                if (build.findDbName(ps.db, s.text) == null and nsp.find(try p.registered(), s.text) == null) {
+                    return p.fail(s.pos, "{s} \"{s}.{s}\" does not exist", .{ if (kind == .index) "index" else "relation", s.text, q.name.text });
+                }
+            }
+            const t = try p.qualified(s, q.name);
+            if (t.mangled) return .{ .q = .{ .name = .{ .text = t.name, .pos = q.name.pos } }, .alias = q.name };
+            return .{ .q = .{ .schema = .{ .text = t.db, .pos = s.pos }, .name = .{ .text = t.name, .pos = q.name.pos } } };
+        }
+        return switch (try p.unqualified(q.name, kind)) {
+            .keep => .{ .q = .{ .name = q.name } },
+            .target => |t| .{ .q = .{ .name = .{ .text = t.name, .pos = q.name.pos } }, .alias = q.name },
+            .missing => p.fail(q.name.pos, "{s} \"{s}\" does not exist", .{ switch (kind) {
+                .relation, .sequence => "relation",
+                .index => "index",
+            }, q.name.text }),
+        };
     }
 
     /// The query standing for an information_schema or pg_catalog view
@@ -351,6 +516,7 @@ pub const Parser = struct {
         };
         sub.p = ps;
         sub.schema_read = true;
+        sub.no_path = true;
         const sel = sub.select() catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.ParseFailed => {
@@ -370,7 +536,7 @@ pub const Parser = struct {
 
     /// A column or table name: a quoted identifier or an unquoted word
     /// that is not reserved.
-    fn colId(p: *Parser) Error!Name {
+    pub fn colId(p: *Parser) Error!Name {
         const t = p.peek();
         if (t.kind == .qident or (t.kind == .ident and !isReserved(t.text))) {
             _ = p.advance();
@@ -380,7 +546,7 @@ pub const Parser = struct {
     }
 
     /// Any identifier, reserved or not (after AS, after a dot).
-    fn anyName(p: *Parser) Error!Name {
+    pub fn anyName(p: *Parser) Error!Name {
         const t = p.peek();
         if (t.kind == .qident or t.kind == .ident) {
             _ = p.advance();
@@ -389,7 +555,7 @@ pub const Parser = struct {
         return p.syntaxError();
     }
 
-    fn qname(p: *Parser) Error!QName {
+    pub fn qname(p: *Parser) Error!QName {
         const first = try p.colId();
         if (p.peek().kind == .dot) {
             _ = p.advance();
@@ -421,7 +587,7 @@ pub const Parser = struct {
         return l;
     }
 
-    fn signedInt(p: *Parser) Error!i64 {
+    pub fn signedInt(p: *Parser) Error!i64 {
         var neg = false;
         if (p.eatOp("-")) neg = true else _ = p.eatOp("+");
         const t = p.peek();
@@ -631,6 +797,7 @@ pub const Parser = struct {
         var ctes: std.ArrayList(tree.Cte) = .empty;
         while (true) {
             var cte: tree.Cte = .{ .name = try p.colId(), .select = undefined };
+            try p.cte_names.append(p.arena, cte.name.text);
             if (p.peek().kind == .lparen) cte.cols = try p.parenNameList();
             try p.expectKw("as");
             if (p.eatKw("materialized")) {
@@ -948,7 +1115,8 @@ pub const Parser = struct {
         if (try p.catalogView(q)) |sel| {
             return .{ .source = .{ .subquery = sel }, .alias = .{ .name = q.name } };
         }
-        return .{ .source = .{ .table = try p.relation(q) } };
+        const r = try p.relation(q);
+        return .{ .source = .{ .table = r.q }, .alias = if (r.alias) |a| .{ .name = a } else null };
     }
 
     fn fromPrimary(p: *Parser) Error!tree.FromItem {
@@ -1441,7 +1609,13 @@ pub const Parser = struct {
             return p.callExpr(start, c);
         }
         if (names.items.len > 3) return p.fail(start, "improper qualified name (too many dotted names)", .{});
-        if (names.items.len == 3) names.items[0] = try p.dbName(names.items[0]);
+        if (names.items.len == 3) {
+            // schema.table.column: a table of a schema of CREATE SCHEMA
+            // has its bare name as alias.
+            const t = try p.qualified(names.items[0], names.items[1]);
+            if (t.mangled) return p.expr(start, .{ .column = names.items[1..] });
+            names.items[0] = .{ .text = t.db, .pos = names.items[0].pos };
+        }
         return p.expr(start, .{ .column = names.items });
     }
 
@@ -1654,6 +1828,9 @@ pub const Parser = struct {
         } else {
             const mapped = funcName(n);
             const name: Name = if (mapped.ptr == n.ptr) c.name else .{ .text = mapped, .pos = c.name.pos };
+            if ((eql(mapped, "nextval") or eql(mapped, "currval") or eql(mapped, "setval")) and c.args.len > 0 and c.args[0].kind == .string) {
+                c.args[0] = try p.sequenceArg(c.args[0]);
+            }
             const f = try p.new(tree.Func, .{
                 .name = name,
                 .dialect = if (isDialectFunction(mapped)) .postgres else null,
@@ -1865,8 +2042,8 @@ pub const Parser = struct {
     fn insert(p: *Parser, with: ?*tree.With) Error!*tree.Insert {
         const pos = p.advance().start; // INSERT
         try p.expectKw("into");
-        const table = try p.relation(try p.qname());
-        var ins: tree.Insert = .{ .with = with, .table = table, .source = null, .pos = pos };
+        const rel = try p.relation(try p.qname());
+        var ins: tree.Insert = .{ .with = with, .table = rel.q, .alias = rel.alias, .source = null, .pos = pos };
         if (p.eatKw("as")) ins.alias = try p.colId();
         if (p.peek().kind == .lparen and !p.parenStartsSelect()) ins.cols = try p.parenNameList();
         if (p.eatKw("overriding")) {
@@ -1968,7 +2145,8 @@ pub const Parser = struct {
     fn update(p: *Parser, with: ?*tree.With) Error!*tree.Update {
         const pos = p.advance().start; // UPDATE
         _ = p.eatKw("only");
-        var u: tree.Update = .{ .with = with, .table = try p.relation(try p.qname()), .sets = &.{}, .pos = pos };
+        const rel = try p.relation(try p.qname());
+        var u: tree.Update = .{ .with = with, .table = rel.q, .alias = rel.alias, .sets = &.{}, .pos = pos };
         _ = p.eatOp("*");
         if (p.eatKw("as")) {
             u.alias = try p.colId();
@@ -1994,7 +2172,8 @@ pub const Parser = struct {
         const pos = p.advance().start; // DELETE
         try p.expectKw("from");
         _ = p.eatKw("only");
-        var d: tree.Delete = .{ .with = with, .table = try p.relation(try p.qname()), .pos = pos };
+        const rel = try p.relation(try p.qname());
+        var d: tree.Delete = .{ .with = with, .table = rel.q, .alias = rel.alias, .pos = pos };
         _ = p.eatOp("*");
         if (p.eatKw("as")) {
             d.alias = try p.colId();
@@ -2035,9 +2214,9 @@ pub const Parser = struct {
         if (p.isKw("view")) {
             _ = p.advance();
             const q = try p.qname();
-            const schema = try p.ddlSchema(q, temp);
-            temp = temp or eql(schema, "temp");
-            var v: tree.CreateView = .{ .or_replace = or_replace, .temp = temp, .name = .{ .schema = .{ .text = schema }, .name = q.name }, .select = undefined };
+            const t = try p.createTarget(q, temp);
+            temp = temp or eql(t.db, "temp");
+            var v: tree.CreateView = .{ .or_replace = or_replace, .temp = temp, .name = .{ .schema = .{ .text = t.db }, .name = .{ .text = t.name, .pos = q.name.pos } }, .select = undefined };
             if (p.peek().kind == .lparen) v.cols = try p.parenNameList();
             if (p.eatKw("with")) {
                 _ = try p.expect(.lparen);
@@ -2054,8 +2233,9 @@ pub const Parser = struct {
             var s: tree.CreateSequence = .{ .name = undefined };
             s.if_not_exists = try p.ifNotExists();
             const q = try p.qname();
-            _ = try p.ddlSchema(q, false);
-            s.name = .{ .name = q.name };
+            const t = try p.createTarget(q, false);
+            if (!eql(t.db, "main")) return p.fail(q.schema.?.pos, "xqlite: sequences are only supported in public and in schemas of CREATE SCHEMA", .{});
+            s.name = .{ .name = .{ .text = t.name, .pos = q.name.pos } };
             s.opts = try p.seqOptions();
             return .{ .create_sequence = try p.new(tree.CreateSequence, s) };
         }
@@ -2104,12 +2284,16 @@ pub const Parser = struct {
         _ = p.advance(); // TABLE
         const if_not_exists = try p.ifNotExists();
         const q = try p.qname();
-        const schema = try p.ddlSchema(q, temp_arg);
-        const temp = temp_arg or eql(schema, "temp");
+        const dest = try p.createTarget(q, temp_arg);
+        const temp = temp_arg or eql(dest.db, "temp");
+        p.creating = dest;
         var ct: tree.CreateTable = .{
             .temp = temp,
             .if_not_exists = if_not_exists,
-            .name = .{ .schema = if (q.schema != null and !temp) Name{ .text = schema } else null, .name = q.name },
+            .name = .{
+                .schema = if ((q.schema != null or dest.mangled) and !temp) Name{ .text = dest.db } else null,
+                .name = .{ .text = dest.name, .pos = q.name.pos },
+            },
             .strict = true,
         };
         const table = q.name.text;
@@ -2143,6 +2327,10 @@ pub const Parser = struct {
         if (cols.items.len == 0) return p.fail(q.name.pos, "a table must have at least one column", .{});
         ct.columns = cols.items;
         ct.constraints = cons.items;
+        // The identity sequences are in the table's schema.
+        if (dest.mangled) for (ct.columns) |c| for (c.constraints) |*cc| if (cc.kind == .identity) {
+            cc.kind.identity.sequence = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefixOf(dest), cc.kind.identity.sequence });
+        };
         // Storage options are ignored.
         while (true) {
             if (p.eatKw("with")) {
@@ -2374,8 +2562,16 @@ pub const Parser = struct {
     fn references(p: *Parser) Error!tree.Ref {
         try p.expectKw("references");
         const q = try p.qname();
-        _ = try p.ddlSchema(q, false);
         var r: tree.Ref = .{ .table = q.name };
+        // SQLite's REFERENCES names a table of the same database.
+        if (q.schema) |s| {
+            r.table.text = (try p.qualified(s, q.name)).name;
+        } else if (p.creating != null and eql(p.creating.?.bare, q.name.text)) {
+            r.table.text = p.creating.?.name;
+        } else switch (try p.unqualified(q.name, .relation)) {
+            .target => |t| r.table.text = t.name,
+            else => {},
+        }
         if (p.peek().kind == .lparen) r.cols = try p.parenNameList();
         while (true) {
             if (p.eatKw("match")) {
@@ -2461,10 +2657,16 @@ pub const Parser = struct {
         if (!p.isKw("on")) ci.name.name = try p.colId();
         try p.expectKw("on");
         _ = p.eatKw("only");
-        const q = try p.qname();
-        const schema = try p.ddlSchema(q, false);
-        if (q.schema != null) ci.name.schema = .{ .text = schema };
-        ci.table = q.name;
+        // The index is in the schema of its table.
+        const iq = try p.qname();
+        if (iq.schema) |s| _ = try p.qualified(s, iq.name);
+        const rel = try p.lookup(iq, .relation);
+        if (rel.q.schema) |s| ci.name.schema = .{ .text = s.text };
+        ci.table = rel.q.name;
+        if (rel.alias) |bare| if (ci.name.name.text.len > 0) {
+            const prefix = rel.q.name.text[0 .. rel.q.name.text.len - bare.text.len];
+            ci.name.name.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, ci.name.name.text });
+        };
         if (p.eatKw("using")) {
             const m = try p.anyName();
             if (!eql(m.text, "btree")) return p.fail(m.pos, "index method \"{s}\" is not supported", .{m.text});
@@ -2520,7 +2722,25 @@ pub const Parser = struct {
         d.if_exists = try p.ifExists();
         const q = try p.qname();
         if (p.eat(.comma)) return p.fail(p.peek().start, "dropping several objects in one statement is not supported", .{});
-        d.name = .{ .schema = if (q.schema != null) Name{ .text = try p.ddlSchema(q, false), .pos = q.schema.?.pos } else null, .name = q.name };
+        const kind: Lookup = switch (d.kind) {
+            .table, .view => .relation,
+            .index => .index,
+            .sequence => .sequence,
+        };
+        if (q.schema) |s| {
+            const x = try p.qualified(s, q.name);
+            if (d.kind == .sequence and !eql(x.db, "main")) return p.fail(s.pos, "sequence \"{s}\" does not exist", .{q.name.text});
+            d.name = .{ .schema = .{ .text = x.db, .pos = s.pos }, .name = .{ .text = x.name, .pos = q.name.pos } };
+        } else switch (try p.unqualified(q.name, kind)) {
+            .keep => d.name = .{ .name = q.name },
+            .target => |x| d.name = .{ .schema = .{ .text = x.db, .pos = q.name.pos }, .name = .{ .text = x.name, .pos = q.name.pos } },
+            .missing => {
+                if (!d.if_exists) return p.fail(q.name.pos, "{s} \"{s}\" does not exist", .{ @tagName(d.kind), q.name.text });
+                // Not on search_path: a name nothing has (pg_temp's
+                // tables have no dot).
+                d.name = .{ .schema = .{ .text = "main" }, .name = .{ .text = try nsp.mangle(p.arena, "pg_temp", q.name.text), .pos = q.name.pos } };
+            },
+        }
         if (p.eatKw("cascade")) {} else _ = p.eatKw("restrict");
         return p.new(tree.Drop, d);
     }
@@ -2537,11 +2757,29 @@ pub const Parser = struct {
         a.if_exists = try p.ifExists();
         _ = p.eatKw("only");
         const q = try p.qname();
-        a.name = .{ .schema = if (q.schema) |s| Name{ .text = try p.ddlSchema(q, false), .pos = s.pos } else null, .name = q.name };
+        var prefix: []const u8 = "";
+        if (q.schema) |s| {
+            const t = try p.qualified(s, q.name);
+            prefix = prefixOf(t);
+            a.name = .{ .schema = .{ .text = t.db, .pos = s.pos }, .name = .{ .text = t.name, .pos = q.name.pos } };
+        } else switch (try p.unqualified(q.name, .relation)) {
+            .keep => a.name = .{ .name = q.name },
+            .target => |t| {
+                prefix = prefixOf(t);
+                a.name = .{ .schema = .{ .text = t.db, .pos = q.name.pos }, .name = .{ .text = t.name, .pos = q.name.pos } };
+            },
+            .missing => {
+                if (!a.if_exists) return p.fail(q.name.pos, "relation \"{s}\" does not exist", .{q.name.text});
+                a.name = .{ .schema = .{ .text = "main" }, .name = .{ .text = try nsp.mangle(p.arena, "pg_temp", q.name.text), .pos = q.name.pos } };
+            },
+        }
         const at = p.peek().start;
         if (p.eatKw("rename")) {
             if (p.eatKw("to")) {
-                a.action = .{ .rename_to = try p.colId() };
+                // The table stays in its schema.
+                var to = try p.colId();
+                if (prefix.len > 0) to.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, to.text });
+                a.action = .{ .rename_to = to };
             } else {
                 if (p.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... RENAME CONSTRAINT");
                 _ = p.eatKw("column");
@@ -2576,7 +2814,7 @@ pub const Parser = struct {
         const q = try p.qname();
         _ = p.eatOp("*");
         if (p.eat(.comma)) return p.fail(p.peek().start, "TRUNCATE of several tables is not supported", .{});
-        var t: tree.Truncate = .{ .table = try p.relation(q) };
+        var t: tree.Truncate = .{ .table = (try p.relation(q)).q };
         if (p.eatKw("restart")) {
             try p.expectKw("identity");
             t.restart_identity = true;
@@ -2597,6 +2835,16 @@ fn isTypeWord(w: []const u8) bool {
 /// Reserved words that may still name a function: left(), right().
 fn isFuncNameKeyword(w: []const u8) bool {
     return eql(w, "left") or eql(w, "right") or eql(w, "collation") or eql(w, "current_schema");
+}
+
+/// Whether SQLite database `db_name` has an object `name` of kind `kind`
+/// (sequences are all in main).
+fn objectExists(db: *int.Sqlite3, kind: Parser.Lookup, db_name: []const u8, name: []const u8) bool {
+    return switch (kind) {
+        .relation => build.findTable(db, name, db_name) != null,
+        .index => build.findIndex(db, name, db_name) != null,
+        .sequence => eql(db_name, "main") and @import("ddl.zig").sequenceExists(db, name),
+    };
 }
 
 /// The canonical spelling of a one-word type name.

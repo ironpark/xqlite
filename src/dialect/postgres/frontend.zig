@@ -19,12 +19,14 @@ const int = @import("../../sql/sqlite_int.zig");
 const dialect = @import("../dialect.zig");
 const dfunc = @import("../func.zig");
 const sequence = @import("../../catalog/sequence.zig");
+const nsp = @import("../../catalog/schema.zig");
 const api = @import("../../vdbe/api.zig");
 const ir = @import("../../ir/ir.zig");
 const lower = @import("../../ir/lower.zig");
 const parser = @import("parser.zig");
 const ddl = @import("ddl.zig");
 const funcs = @import("funcs.zig");
+const session = @import("session.zig");
 
 const RC = int.RC;
 
@@ -68,6 +70,16 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
             if (ps.toks[i].isKw("public")) schema = "main";
             if (ps.toks[i].isKw("pg_temp")) schema = "temp";
             if (schema != null) i += 2;
+            // A table of a schema of CREATE SCHEMA: main."s.t".
+            if (schema == null and i + 3 == ps.toks.len and (ps.toks[i + 2].kind == .ident or ps.toks[i + 2].kind == .qident)) {
+                ps.p = p;
+                const n = ps.toks[i + 2];
+                const t = ps.qualified(.{ .text = ps.toks[i].text, .pos = ps.toks[i].start }, .{ .text = n.text, .pos = n.start }) catch |err| return parseFailed(p, sql, ps, err);
+                if (t.mangled) {
+                    const text = try std.fmt.allocPrintSentinel(p.arena, "ANALYZE main.{f}", .{dialect.Quoted('"'){ .z = t.name }}, 0);
+                    return ir.stmt.lowerSqliteText(p, text);
+                }
+            }
         }
         var end = ps.toks[i].start;
         for (ps.toks[i..]) |t| {
@@ -83,16 +95,13 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
         return;
     }
     ps.p = p;
-    const stmt = ps.statement() catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.ParseFailed => {
-            // The schema could not be read: its error is in `p`.
-            if (ps.err_in_parse) return error.Failed;
-            const z: ?[*]const u8 = if (ps.err_pos < sql.len) sql.ptr + ps.err_pos else null;
-            ir.stmt.errorMsgAt(p, z, "{s}", .{ps.err_msg});
-            return error.Failed;
-        },
+    // CREATE/DROP SCHEMA, SET, RESET, SHOW.
+    const done = session.statement(ps) catch |err| switch (err) {
+        error.OutOfMemory, error.ParseFailed => |e| return parseFailed(p, sql, ps, e),
+        error.Failed => return error.Failed,
     };
+    if (done) return;
+    const stmt = ps.statement() catch |err| return parseFailed(p, sql, ps, err);
     switch (stmt) {
         .create_table, .create_index, .create_view, .create_sequence, .alter_table, .drop => {
             var d: ddl.Ddl = .init(p, sql);
@@ -109,6 +118,20 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     }
     var l: lower.Lowerer = .init(p, sql);
     try l.statement(stmt);
+}
+
+/// The error of the parser, left in `p`.
+fn parseFailed(p: *int.Parse, sql: [:0]const u8, ps: *const parser.Parser, err: parser.Error) lower.Error {
+    switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.ParseFailed => {
+            // The schema could not be read: its error is in `p`.
+            if (ps.err_in_parse) return error.Failed;
+            const z: ?[*]const u8 = if (ps.err_pos < sql.len) sql.ptr + ps.err_pos else null;
+            ir.stmt.errorMsgAt(p, z, "{s}", .{ps.err_msg});
+            return error.Failed;
+        },
+    }
 }
 
 /// SQLite's messages for common failures in PostgreSQL's words.
@@ -136,6 +159,10 @@ fn translateError(p: *int.Parse) int.Oom!void {
             var name = m[kind.len .. m.len - " already exists".len];
             if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
             if (name.len > 1 and name[0] == '"') name = name[1 .. name.len - 1];
+            // PostgreSQL names the relation without its schema.
+            if (nsp.split(name)) |s| if (nsp.exists(p.db, s.schema) catch false) {
+                name = s.name;
+            };
             p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "relation \"{s}\" already exists", .{name}, 0);
             return;
         }
@@ -149,7 +176,7 @@ pub const hooks: dialect.Hooks = .{
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-} ++ sequence.functions ++ funcs.functions;
+} ++ sequence.functions ++ funcs.functions ++ session.functions;
 
 comptime {
     dfunc.checkTable(&functions);
@@ -166,5 +193,6 @@ fn versionFunc(ctx: *dfunc.Context, _: []*dfunc.Mem) void {
 test {
     _ = @import("lexer.zig");
     _ = @import("funcs.zig");
+    _ = @import("state.zig");
     _ = @import("test.zig");
 }

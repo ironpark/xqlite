@@ -61,7 +61,7 @@ pub const Ddl = struct {
         if (!(ct.if_not_exists and build.findTable(p.db, ct.name.name.text, schema) != null)) {
             for (ct.columns) |c| for (c.constraints) |cc| if (cc.kind == .identity) {
                 const seq = cc.kind.identity.sequence;
-                if (sequenceExists(p.db, seq)) return d.fail(ct.name.name.pos, "relation \"{s}\" already exists", .{seq});
+                if (sequenceExists(p.db, seq)) return d.fail(ct.name.name.pos, "relation \"{s}\" already exists", .{shown(p.db, seq)});
             };
         }
         try d.l.createTable(ct);
@@ -102,7 +102,7 @@ pub const Ddl = struct {
         const name = s.name.name.text;
         if (relationExists(d.l.p.db, name, catalog.main_schema) or sequenceExists(d.l.p.db, name)) {
             if (s.if_not_exists) return;
-            return d.fail(s.name.name.pos, "relation \"{s}\" already exists", .{name});
+            return d.fail(s.name.name.pos, "relation \"{s}\" already exists", .{shown(d.l.p.db, name)});
         }
         d.l.createSequence(s);
     }
@@ -117,11 +117,11 @@ pub const Ddl = struct {
         switch (a.action) {
             .add_column => |ac| if (build.columnIndex(tab, ac.def.name.text) >= 0) {
                 if (ac.if_not_exists) return;
-                return d.fail(ac.def.name.pos, "column \"{s}\" of relation \"{s}\" already exists", .{ ac.def.name.text, table });
+                return d.fail(ac.def.name.pos, "column \"{s}\" of relation \"{s}\" already exists", .{ ac.def.name.text, shown(p.db, table) });
             },
             .drop_column => |dc| if (build.columnIndex(tab, dc.name.text) < 0) {
                 if (dc.if_exists) return;
-                return d.fail(dc.name.pos, "column \"{s}\" of relation \"{s}\" does not exist", .{ dc.name.text, table });
+                return d.fail(dc.name.pos, "column \"{s}\" of relation \"{s}\" does not exist", .{ dc.name.text, shown(p.db, table) });
             },
             else => {},
         }
@@ -135,12 +135,12 @@ pub const Ddl = struct {
             .table, .view => {
                 const db: ?[]const u8 = if (x.name.schema) |s| s.text else null;
                 if (build.findTable(p.db, name, db) == null and !x.if_exists) {
-                    return d.fail(x.name.name.pos, "{s} \"{s}\" does not exist", .{ if (x.kind == .table) "table" else "view", name });
+                    return d.fail(x.name.name.pos, "{s} \"{s}\" does not exist", .{ if (x.kind == .table) "table" else "view", shown(p.db, name) });
                 }
             },
             .sequence => if (!sequenceExists(p.db, name)) {
                 if (x.if_exists) return;
-                return d.fail(x.name.name.pos, "sequence \"{s}\" does not exist", .{name});
+                return d.fail(x.name.name.pos, "sequence \"{s}\" does not exist", .{shown(p.db, name)});
             },
             .index => {},
         }
@@ -161,4 +161,11 @@ pub fn sequenceExists(db: *int.Sqlite3, name: []const u8) bool {
     defer q.deinit();
     q.bindText(1, name) catch return false;
     return q.step() catch false;
+}
+
+/// The name PostgreSQL shows for SQLite name `name`: without its schema
+/// if it is an object of a schema of CREATE SCHEMA ("s.t" is t).
+fn shown(db: *int.Sqlite3, name: []const u8) []const u8 {
+    const s = catalog.schemas.split(name) orelse return name;
+    return if (catalog.schemas.exists(db, s.schema) catch false) s.name else name;
 }

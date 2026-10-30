@@ -295,6 +295,8 @@ zig-out/bin/xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db
 | `--sqlid N`, `--dbid N` | 그 id의 스크립트, 그 id의 DB 이미지만 실행 |
 | `--timeout MS` | 케이스를 MS 밀리초 뒤에 중단(기본 10000) |
 
+케이스마다 fuzzcheck.c처럼 힙 한도 100MB를 둡니다. 메모리 VFS의 파일도 엔진의 할당자로 잡으므로 한도에 듭니다(fuzzcheck.c의 memdb가 `sqlite3_malloc()`으로 페이지를 잡는 것과 같음). 그래서 행을 끝없이 넣는 케이스도 시간 초과 전에 메모리 부족으로 끝납니다.
+
 ### 시드 퍼저
 
 ```sh

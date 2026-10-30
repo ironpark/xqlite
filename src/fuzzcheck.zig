@@ -222,7 +222,11 @@ const Runner = struct {
         }
 
         const used_before = r.counter.used;
-        var mem = xqlite.MemVfs.init(r.gpa, r.io);
+        // After mem.deinit() below: the files' memory counts too.
+        defer r.checkLeak(name, used_before);
+        // The files are the library's memory, under the heap limit, as
+        // fuzzcheck.c's memdb takes its pages from sqlite3_malloc().
+        var mem = xqlite.MemVfs.init(r.counter.allocator(), r.io);
         defer mem.deinit();
         if (db_bytes.len > 0) {
             const f = mem.interface().open("main.db", .{ .create = true }) catch return error.OutOfMemory;
@@ -255,10 +259,12 @@ const Runner = struct {
             r.n_fail += 1;
             try r.out.print("{s}: close() returned {d}\n", .{ name, close_rc });
         }
-        if (r.counter.used != used_before) {
-            r.n_fail += 1;
-            try r.out.print("{s}: memory leak: {d} bytes\n", .{ name, @as(i64, @intCast(r.counter.used)) - @as(i64, @intCast(used_before)) });
-        }
+    }
+
+    fn checkLeak(r: *Runner, name: []const u8, used_before: usize) void {
+        if (r.counter.used == used_before) return;
+        r.n_fail += 1;
+        r.out.print("{s}: memory leak: {d} bytes\n", .{ name, @as(i64, @intCast(r.counter.used)) - @as(i64, @intCast(used_before)) }) catch {};
     }
 };
 

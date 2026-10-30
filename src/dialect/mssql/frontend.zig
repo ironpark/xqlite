@@ -13,7 +13,10 @@
 //!    session.zig: DECLARE, SET, transactions, PRINT, USE, sp_rename;
 //!    catalog_views.zig: INFORMATION_SCHEMA and sys views;
 //!  - types.zig: SQL Server types, their storage and checks;
-//!    runtime.zig: the dialect's functions; state.zig: the session.
+//!    runtime.zig: the dialect's functions; state.zig: the session;
+//!  - JSON: json.zig (text, paths), json_func.zig (the functions, FOR
+//!    JSON's aggregate), json_sql.zig (the parser's side), openjson.zig
+//!    (OPENJSON, an engine table-valued function).
 //!
 //! Names keep the case they are written in and compare
 //! case-insensitively; comparisons without a collation are

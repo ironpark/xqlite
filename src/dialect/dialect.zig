@@ -130,6 +130,12 @@ pub const Hooks = struct {
     /// connection when a statement first names one
     /// (engineModuleRegister()).
     engine_modules: []const EngineModule = &.{},
+    /// Like engine_modules, for names that are not fixed (T-SQL's OPENJSON
+    /// encodes its WITH columns in the name): build.locateTable() calls it
+    /// for an unknown table "xq_..." that no engine_modules entry names;
+    /// it registers the module called `name` on `db` and returns it, null
+    /// if `name` is not one of its.
+    table_function: ?*const fn (db: *Sqlite3, name: []const u8) ?*int.Module = null,
 };
 
 pub const EngineModule = struct {
@@ -144,6 +150,18 @@ pub fn engineModuleRegister(db: *Sqlite3, name: []const u8) ?*int.Module {
     inline for (comptime std.enums.values(Dialect)) |d| {
         for (module(d).hooks.engine_modules) |m| {
             if (ctype.eqlNoCase(m.name, name)) return @import("../sql/vtab.zig").createModuleInternal(db, m.name, m.module, null, null);
+        }
+    }
+    return null;
+}
+
+/// The module of the engine table-valued function `name`
+/// (Hooks.table_function of any dialect), registered on `db`; null if
+/// there is none.
+pub fn tableFunction(db: *Sqlite3, name: []const u8) ?*int.Module {
+    inline for (comptime std.enums.values(Dialect)) |d| {
+        if (comptime module(d).hooks.table_function) |f| {
+            if (f(db, name)) |m| return m;
         }
     }
     return null;

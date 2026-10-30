@@ -13,7 +13,10 @@
 //!    session.zig: DECLARE, SET, transactions, PRINT, USE, sp_rename;
 //!    catalog_views.zig: INFORMATION_SCHEMA and sys views;
 //!  - types.zig: SQL Server types, their storage and checks;
-//!    runtime.zig: the dialect's functions; state.zig: the session.
+//!    runtime.zig: the dialect's functions; state.zig: the session;
+//!  - JSON: json.zig (text, paths), json_func.zig (the functions, FOR
+//!    JSON's aggregate), json_sql.zig (the parser's side), openjson.zig
+//!    (OPENJSON, an engine table-valued function).
 //!
 //! Names keep the case they are written in and compare
 //! case-insensitively; comparisons without a collation are
@@ -37,6 +40,7 @@ const dml = @import("dml.zig");
 const ddl = @import("ddl.zig");
 const session = @import("session.zig");
 const rt = @import("runtime.zig");
+const jf = @import("json_func.zig");
 const maria = @import("../mariadb/runtime.zig");
 
 pub const frontend: dialect.Frontend = .{ .run = run };
@@ -226,6 +230,7 @@ fn translateError(p: *int.Parse) int.Oom!void {
 pub const hooks: dialect.Hooks = .{
     .functions = &functions,
     .engine_functions = &engine_functions,
+    .table_function = @import("openjson.zig").register,
     // SQL_Latin1_General_CP1_CI_AS: case-insensitive.
     .default_collation = "NOCASE",
 };
@@ -306,6 +311,17 @@ const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_tsql_store", 2, .{ .deterministic = true, .user_data = rt.user_store }, rt.convertFunc),
     dfunc.scalar("xq_tsql_newid", 0, .{}, rt.newidFunc),
     dfunc.aggregate("xq_tsql_avg", 1, det, rt.avgStep, rt.avgFinal),
+    // JSON (json_func.zig).
+    dfunc.scalar("xq_tsql_json_value", 2, det, jf.jsonValueFunc),
+    dfunc.scalar("xq_tsql_json_query", 1, det, jf.jsonQueryFunc),
+    dfunc.scalar("xq_tsql_json_query", 2, det, jf.jsonQueryFunc),
+    dfunc.scalar("xq_tsql_json_modify", 4, det, jf.jsonModifyFunc),
+    dfunc.scalar("xq_tsql_json_path_exists", 2, det, jf.jsonPathExistsFunc),
+    dfunc.scalar("xq_tsql_isjson", 2, det, jf.isjsonFunc),
+    dfunc.scalar("xq_tsql_json_escape", 1, det, jf.jsonEscapeFunc),
+    dfunc.scalar("xq_tsql_json_object", -1, det, jf.jsonObjectFunc),
+    dfunc.scalar("xq_tsql_json_array", -1, det, jf.jsonArrayFunc),
+    dfunc.aggregate("xq_tsql_for_json", -1, det, jf.forJsonStep, jf.forJsonFinal),
 };
 
 comptime {
@@ -335,5 +351,8 @@ test {
     _ = @import("lexer.zig");
     _ = @import("types.zig");
     _ = @import("runtime.zig");
+    _ = @import("json.zig");
+    _ = @import("json_func.zig");
+    _ = @import("openjson.zig");
     _ = @import("test.zig");
 }

@@ -570,7 +570,8 @@ pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u
                 m = @import("json.zig").jsonVtabRegister(db, name);
             }
             if (m == null and name.len > 3 and ctype.eqlNoCase(name[0..3], "xq_")) {
-                m = @import("../dialect/dialect.zig").engineModuleRegister(db, name);
+                m = @import("../dialect/dialect.zig").engineModuleRegister(db, name) orelse
+                    @import("../dialect/dialect.zig").tableFunction(db, name);
             }
             if (m) |mod| if (vtab_mod.epoTableInit(p, mod)) return mod.epo_tab;
         }

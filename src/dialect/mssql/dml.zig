@@ -374,6 +374,12 @@ pub fn update(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
     var where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
     where = try andOf(s, j.cond, where);
     try optionClause(s);
+    {
+        var items: std.ArrayList(tree.FromItem) = .empty;
+        try items.append(s.a, .{ .source = .{ .table = j.target.q }, .alias = if (j.target.alias) |a| .{ .name = a } else null });
+        try items.appendSlice(s.a, j.from);
+        try @import("json_sql.zig").resolveKinds(s, 0, items.items);
+    }
     if (s.n_plus > 0) {
         var items: std.ArrayList(tree.FromItem) = .empty;
         try items.append(s.a, .{ .source = .{ .table = j.target.q }, .alias = if (j.target.alias) |a| .{ .name = a } else null });

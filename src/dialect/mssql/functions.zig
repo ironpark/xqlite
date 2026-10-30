@@ -30,6 +30,7 @@ pub fn call(s: *Parser) Error!*Expr {
     s.advance();
     try s.expectOp("(");
     const n = name_tok.text;
+    if (try @import("json_sql.zig").call(s, n, pos)) |e| return e;
 
     if (eq(n, "CAST") or eq(n, "TRY_CAST") or eq(n, "PARSE") or eq(n, "TRY_PARSE")) {
         const e = try s.expr();
@@ -319,8 +320,6 @@ const renames = std.StaticStringMapWithEql([]const u8, ctype.eqlNoCase).initComp
     .{ "isnull", "ifnull" },
     .{ "datalength", "octet_length" },
     .{ "nchar", "char" },
-    .{ "isjson", "json_valid" },
-    .{ "json_value", "json_extract" },
     .{ "count_big", "count" },
     .{ "stdev", "xq_stddev_samp" },
     .{ "stdevp", "xq_stddev_pop" },
@@ -412,6 +411,7 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
         return s.mk(pos, .{ .concat = .{ .args = try s.a.dupe(*Expr, &.{ try s.str(pos, open), rep, try s.str(pos, close) }), .null_policy = .propagate } });
     }
     if (eq(n, "format") or eq(n, "string_split") or eq(n, "openjson")) {
+        if (eq(n, "openjson")) return s.fail("xqlite: OPENJSON is a table source (FROM, CROSS APPLY)", .{});
         return s.fail("xqlite: {s}() is not supported", .{n});
     }
     // As written: a function of the dialect's table, a SQLite built-in

@@ -201,12 +201,12 @@ zig build test
 다음을 함께 실행합니다.
 
 - 모듈의 단위 테스트
-- VFS 패키지(`pkg/vfs`)의 단위 테스트. 엔진 모듈과 다른 모듈이라 모듈의 테스트에 들어가지 않으므로 따로 빌드해 돌립니다(`vfsTests()`).
+- VFS 패키지(`pkg/vfs`)와 스토리지 패키지(`pkg/storage`)의 단위 테스트. 엔진 모듈과 다른 모듈이라 모듈의 테스트에 들어가지 않으므로 따로 빌드해 돌립니다(`vfsTests()`, `storageTests()`). B-tree, 페이저, WAL, 저널, 페이지 캐시의 테스트는 스토리지 패키지에 있습니다.
 - `docs/names_test.zig`: [docs/zig-api.md](zig-api.md)가 쓰는 이름(`xqlite.Value`, `Db.lastError` ...)과 `examples/`가 쓰는 이름이 모듈에 있는지 검사합니다.
-- `tools/globals_test.zig`: `src/`(그리고 `pkg/vfs/src`, `tools/xqt`)에 허용 목록 밖의 가변 전역이 없는지 검사합니다.
+- `tools/globals_test.zig`: `src/`(그리고 `pkg/vfs/src`, `pkg/storage/src`, `tools/xqt`)에 허용 목록 밖의 가변 전역이 없는지 검사합니다.
 - 모든 [시드 퍼저](#시드-퍼저)의 스모크 실행(고정 시드, 적은 이벤트)
 
-모듈의 단위 테스트는 Debug로 빌드합니다. 다만 `src/pager/journal.zig`의 테스트(저널 체크섬)는 ReleaseSafe로 한 번 더 돌립니다. Zig 0.17이 super journal 이름의 체크섬 루프를 최적화 빌드에서만 잘못 컴파일했기 때문입니다. 모듈 전체를 최적화해 돌리려면 VFS 패키지를 모듈로 붙여 `zig test -O ReleaseSafe -lc --dep xqlite_vfs -Mroot=src/root.zig -lc -Mxqlite_vfs=pkg/vfs/src/root.zig`를 씁니다.
+모듈의 단위 테스트는 Debug로 빌드합니다. 다만 `pkg/storage/src/pager/journal.zig`의 테스트(저널 체크섬)는 ReleaseSafe로 한 번 더 돌립니다. Zig 0.17이 super journal 이름의 체크섬 루프를 최적화 빌드에서만 잘못 컴파일했기 때문입니다. 모듈 전체를 최적화해 돌리려면 두 패키지를 모듈로 붙여 `zig test -O ReleaseSafe -lc --dep xqlite_vfs --dep xqlite_storage -Mroot=src/root.zig --dep xqlite_vfs -Mxqlite_storage=pkg/storage/src/root.zig -lc -Mxqlite_vfs=pkg/vfs/src/root.zig`를 씁니다.
 
 VFS 패키지는 혼자서도 테스트할 수 있습니다. 엔진 없이 패키지 디렉터리에서 빌드합니다.
 
@@ -217,6 +217,14 @@ zig build test -Dtest-filter=memdb      # 이름에 memdb가 든 테스트만
 ```
 
 memdb의 테스트는 C 라이브러리의 `malloc`을 힙으로 쓰는 인스턴스(`Memdb(test_heap)`)로 돌고, 엔진의 할당자로 도는 memdb는 루트의 단위 테스트(`src/sql/serialize.zig`)와 C API 테스트가 검사합니다. wasm32-wasi에서는 루트의 `zig build test-wasi`가 패키지 테스트도 wasmtime으로 돌립니다.
+
+스토리지 패키지도 같습니다. VFS 패키지에 경로 의존성이 있어서 그 디렉터리에서 바로 빌드됩니다. 엔진 없이 컴파일하므로 B-tree나 페이저를 고칠 때 루트 테스트보다 훨씬 빨리 돕니다.
+
+```sh
+cd pkg/storage
+zig build test                          # B-tree, 페이저, WAL, 저널 (저널은 ReleaseSafe로 한 번 더)
+zig build test -Dtest-filter=wal        # 이름에 wal이 든 테스트만
+```
 
 ## sqlite3 교차 검증
 
@@ -436,7 +444,7 @@ zig build wasm-example                   # wasm32-freestanding 모듈을 Node.js
 
 `zig build test-wasi`는 wasmtime(`PATH`)이 필요하고 `zig build check`에는 들어 있지 않습니다. 하는 일은 다음과 같습니다.
 
-- 모듈(`src/root.zig`), CLI(`src/main.zig`), VFS 패키지(`pkg/vfs`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
+- 모듈(`src/root.zig`), CLI(`src/main.zig`), VFS 패키지(`pkg/vfs`), 스토리지 패키지(`pkg/storage`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
 - `xqt wasi`: ReleaseSafe로 빌드한 WASI `xqlite`를 `wasmtime run --dir . xqlite.wasm ...`으로 검사 디렉터리에서 돌립니다. WASI 빌드가 쓴 파일은 모두 sqlite3의 `PRAGMA integrity_check`를 통과해야 합니다.
 
 | 검사 | 확인하는 것 |

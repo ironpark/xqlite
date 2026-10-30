@@ -18,6 +18,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 - [엄격한 타입](#엄격한-타입)
 - [카탈로그와 시퀀스](#카탈로그와-시퀀스)
 - [VFS](#vfs)
+- [스토리지 패키지](#스토리지-패키지)
 - [소스 파일](#소스-파일)
 - [아직 하지 않은 것](#아직-하지-않은-것)
 
@@ -362,6 +363,26 @@ VFS는 엔진과 따로 빌드되는 Zig 패키지(`pkg/vfs/`, 모듈 이름 `xq
 - **임시 파일 디렉터리.** `sqlite3_temp_directory`는 패키지 변수 `temp_directory`(`pkg/vfs/src/root.zig`)입니다. POSIX VFS는 읽기만 하고(`unixTempFileDir()`의 순서 그대로: 이 변수, `$SQLITE_TMPDIR`, `$TMPDIR`, `/var/tmp`, `/usr/tmp`, `/tmp`, `.`), 쓰는 쪽은 엔진입니다. `PRAGMA temp_store_directory`가 `sqlite3_malloc()` 메모리로 바꾸고, C ABI는 이 변수를 `sqlite3_temp_directory`라는 이름으로 내보내 C 프로그램이 직접 씁니다.
 - **memdb의 힙.** `memdb.Memdb(heap)`는 `heap.allocator`, `heap.realloc(p, n)`, `heap.free(p)`로 저장소와 핸들을 할당합니다(`realloc`·`free`는 `sqlite3_realloc()`·`sqlite3_free()`처럼 포인터만 받음. `sqlite3_deserialize()`가 넘긴 버퍼를 키우고 해제해야 하므로). 엔진은 `src/sql/memdb.zig`에서 라이브러리 할당자(`src/sql/malloc.zig`)로 한 번만 인스턴스를 만들고, `sqlite3_deserialize()`, ATTACH의 임시 데이터베이스, C ABI의 "memdb" VFS가 모두 그것을 씁니다. 그래서 memdb의 메모리는 예전처럼 `sqlite3_status()`와 힙 한도(fuzzcheck의 한도 포함)에 잡힙니다. comptime 인자라서 초기화 순서가 없고, 공유 저장소와 설정(`state`)은 인스턴스마다 하나입니다.
 
+## 스토리지 패키지
+
+VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진과 따로 빌드되는 Zig 패키지(`pkg/storage/`, 모듈 이름 `xqlite_storage`)입니다. `std`와 `xqlite_vfs` 말고는 아무것도 import하지 않습니다. 엔진이 넣어 주는 것은 원래부터 인자였던 할당자, VFS, 콜백(busy handler, 페이지 spill, 키 비교, autovacuum_pages 등)뿐입니다.
+
+루트 `build.zig.zon`이 경로 의존성(`.xqlite_storage = .{ .path = "pkg/storage" }`)으로 받고, 패키지는 자기 `build.zig.zon`에서 `../vfs`에 의존합니다. `build.zig`의 `engineImports()`가 엔진 모듈, C ABI 라이브러리, wasm 모듈, 퍼저에 `xqlite_vfs`와 `xqlite_storage`를 함께 붙입니다. `storageImport()`와 패키지의 `build.zig`가 같은 인자(`target`, `optimize`)로 VFS 패키지를 부르므로 빌드 시스템이 의존성 하나를 공유하고, 그래서 엔진과 스토리지가 같은 `xqlite_vfs` 모듈을 씁니다(다르면 같은 파일이 두 모듈에 속해 컴파일 오류).
+
+패키지 루트(`pkg/storage/src/root.zig`)가 내보내는 것은 다음과 같습니다.
+
+| 이름 | 내용 |
+| --- | --- |
+| `pager`, `pcache`, `journal` | 페이저(`pager.wal`이 WAL), 페이지 캐시, 롤백 저널 형식 |
+| `btree` | B-tree 층과 파일 헤더(`btree.header`) |
+| `record`, `varint` | 레코드 형식과 varint. 파일 형식이라 여기 있고 엔진(VDBE)도 씀 |
+| `thunk` | 콜백 클로저. 엔진이 넘기는 콜백과 타입이 같아야 하므로 여기 있음 |
+| `status` | `sqlite3_status()` 카운터. 페이지 캐시와 엔진의 할당자가 함께 셈 |
+| `fuzz`, `btree_fuzz` | 시드 퍼저의 도우미와 B-tree 퍼저(`src/fuzz_tests.zig`가 씀) |
+| `sqlite_version_number` | 페이저가 파일 헤더에 쓰는 `SQLITE_VERSION_NUMBER`. `src/root.zig`가 다시 내보냄 |
+
+한 파일은 한 모듈에만 속할 수 있으므로, 엔진과 스토리지가 함께 쓰는 `record`, `varint`, `thunk`, `status`, `fuzz`는 패키지로 옮기고 엔진은 `@import("xqlite_storage").varint` 식으로 가져옵니다. 공개 Zig API(`xqlite.pager`, `xqlite.pcache`, `xqlite.btree`, `xqlite.record`, `xqlite.varint`)는 `src/root.zig`가 다시 내보내므로 그대로입니다. 패키지 디렉터리에서 `zig build test`를 하면 스토리지 테스트(B-tree, 페이저, WAL, 저널)만 돕니다. B-tree 테스트의 픽스처는 `pkg/storage/src/testdata`에 있습니다(`xqt gen fixtures`).
+
 ## 소스 파일
 
 | 파일 | 내용 |
@@ -384,6 +405,10 @@ VFS는 엔진과 따로 빌드되는 Zig 패키지(`pkg/vfs/`, 모듈 이름 `xq
 | `pkg/vfs/src/vfs.zig` | VFS 인터페이스(`Vfs`, `File`, 잠금, 공유 메모리)와 `OsVfs` |
 | `pkg/vfs/src/{unix,wasi,host,mem,memdb,inproc,crash}.zig` | VFS 구현([VFS](#vfs)의 표) |
 | `src/sql/memdb.zig` | 엔진의 memdb 인스턴스: `Memdb(malloc)` |
+| `pkg/storage/build.zig`, `build.zig.zon` | 스토리지 패키지(`xqlite_storage`): 모듈과 `zig build test`([스토리지 패키지](#스토리지-패키지)) |
+| `pkg/storage/src/pager/{pager,pcache,wal,journal}.zig` | 페이저, 페이지 캐시, WAL, 롤백 저널 |
+| `pkg/storage/src/btree/{btree,page,header,ptrmap,integrity}.zig` | B-tree 층 |
+| `pkg/storage/src/{record,varint,thunk,status,fuzz}.zig` | 엔진과 함께 쓰는 레코드 형식, varint, 클로저, 상태 카운터, 퍼저 도우미 |
 
 구문 트리 IR(`src/ir/tree.zig`)이 나타내는 문장은 다음과 같습니다.
 

@@ -1374,7 +1374,7 @@ pub const Pager = struct {
         if (sz < journal.super_trailer_len) return null;
         var tail: [journal.super_trailer_len]u8 = undefined;
         try j.read(&tail, sz - journal.super_trailer_len);
-        const len = journal.superNameLen(&tail, sz, std.fs.max_path_bytes) orelse return null;
+        const len = journal.superNameLen(&tail, sz, vfs.max_path_bytes) orelse return null;
 
         const name = try p.gpa.alloc(u8, len);
         errdefer p.gpa.free(name);

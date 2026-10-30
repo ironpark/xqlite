@@ -13,6 +13,10 @@ pub const reserved_byte: u64 = pending_byte + 1;
 pub const shared_first: u64 = pending_byte + 2;
 pub const shared_size: u64 = 510;
 
+/// The longest file name (PATH_MAX); wasm32-freestanding, which has
+/// none, gets 4096.
+pub const max_path_bytes = if (@import("builtin").os.tag == .freestanding) 4096 else std.fs.max_path_bytes;
+
 /// Default sector size reported by files (SQLITE_DEFAULT_SECTOR_SIZE).
 pub const default_sector_size: u32 = 4096;
 
@@ -412,7 +416,7 @@ pub const Vfs = struct {
     /// the journals by these names.
     pub fn fullPathname(v: Vfs, gpa: std.mem.Allocator, path: []const u8) Error![]u8 {
         const f = v.vtable.fullPathname orelse return gpa.dupe(u8, path);
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        var buf: [max_path_bytes]u8 = undefined;
         return gpa.dupe(u8, try f(v.ptr, path, &buf));
     }
 };
@@ -423,8 +427,23 @@ pub fn ioSleep(io: std.Io, microseconds: u32) u32 {
     return microseconds;
 }
 
+/// The file-system VFS of the target, chosen at compile time: the POSIX
+/// VFS (vfs/unix.zig), the WASI VFS on wasm32-wasi (vfs/wasi.zig) and the
+/// host VFS on wasm32-freestanding (vfs/host.zig). Each has
+/// `init(gpa, io)` and `interface()`.
+pub const OsVfs = switch (@import("builtin").os.tag) {
+    .wasi => @import("wasi.zig").WasiVfs,
+    .freestanding => @import("host.zig").HostVfs,
+    else => @import("unix.zig").UnixVfs,
+};
+
 test {
     _ = @import("mem.zig");
-    _ = @import("unix.zig");
+    _ = @import("inproc.zig");
+    switch (@import("builtin").os.tag) {
+        .wasi => _ = @import("wasi.zig"),
+        .freestanding => {},
+        else => _ = @import("unix.zig"),
+    }
     _ = @import("crash.zig");
 }

@@ -35,7 +35,8 @@ const thunk_mod = @import("../util/thunk.zig");
 
 pub const Vfs = @import("../vfs/vfs.zig").Vfs;
 pub const MemVfs = @import("../vfs/mem.zig").MemVfs;
-pub const UnixVfs = @import("../vfs/unix.zig").UnixVfs;
+/// The file-system VFS of the target (UnixVfs, WasiVfs or HostVfs).
+pub const OsVfs = @import("../vfs/vfs.zig").OsVfs;
 /// PRAGMA journal_mode values.
 pub const JournalMode = @import("../pager/pager.zig").JournalMode;
 

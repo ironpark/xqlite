@@ -256,6 +256,8 @@ pub const Shell = struct {
     /// Port of shellScreenWidth(): the width of the terminal on standard
     /// input, output or error, or 80.
     fn screenWidth(p: *Shell) i32 {
+        // WASI has no terminal size.
+        if (@import("builtin").os.tag == .wasi) return 80;
         for ([_]Io.File{ .stdin(), .stdout(), .stderr() }) |f| {
             var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
             const r = p.io.operate(.{ .device_io_control = .{

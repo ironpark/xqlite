@@ -116,8 +116,8 @@ pub fn call(s: *Parser) Error!*Expr {
         // MariaDB passes the sequence as a name, not a string.
         var args: std.ArrayList(*Expr) = .empty;
         if (s.tok.kind == .ident or s.tok.kind == .quoted_ident) {
-            const n = try s.anyName();
-            try args.append(s.a, try s.str(s.posOf(n), try s.nameText(n)));
+            const n = try s.qualifiedName();
+            try args.append(s.a, try s.str(n.name.pos, try s.sequenceName(n)));
         } else try args.append(s.a, try s.expr());
         while (s.eatOp(",")) try args.append(s.a, try s.expr());
         try s.expectOp(")");
@@ -238,7 +238,12 @@ fn byNameAs(s: *Parser, lname: []const u8, args_in: []const *Expr, pos: u32, wri
         return s.func(pos, "datetime", &.{ args[0], try s.str(pos, "unixepoch") });
     }
     if (eq(lname, "last_insert_id") and n == 0) return s.func(pos, "last_insert_rowid", &.{});
-    if (eq(lname, "database") or eq(lname, "schema")) return s.str(pos, "main");
+    if (eq(lname, "database") or eq(lname, "schema")) {
+        // The current database when the statement is compiled (USE
+        // expires the prepared statements).
+        const d = s.p.db.xq.mariadb.currentDatabase() orelse return s.mk(pos, .null);
+        return s.str(pos, try s.a.dupe(u8, d));
+    }
     if (eq(lname, "user") or eq(lname, "current_user") or eq(lname, "session_user") or eq(lname, "system_user")) {
         return s.str(pos, "root@localhost");
     }

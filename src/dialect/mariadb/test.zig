@@ -413,7 +413,7 @@ test "mariadb: errors" {
     defer c.close();
     try c.expectError("SELEC 1", "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'SELEC 1' at line 1");
     try c.expectError("SELECT 1 FROM", "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '' at line 1");
-    try c.expectError("SELECT * FROM nope", "no such table: nope");
+    try c.expectError("SELECT * FROM nope", "Table 'main.nope' doesn't exist");
     try c.exec("  -- just a comment\n ");
     try c.exec(";;");
 }
@@ -619,4 +619,129 @@ test "mariadb: ANALYZE TABLE" {
     );
     try c.expectRows("ANALYZE LOCAL TABLE main.t PERSISTENT FOR ALL", "main.t|analyze|status|Engine-independent statistics collected\nmain.t|analyze|status|OK\n");
     try c.expectRows("SELECT tbl, idx, stat FROM sqlite_stat1", "t|t$kb|3 2\n");
+}
+
+test "mariadb: CREATE DATABASE, USE and db.t" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t (a INT);
+        \\INSERT INTO t VALUES (1);
+        \\CREATE DATABASE sales;
+        \\CREATE SCHEMA IF NOT EXISTS sales;
+    );
+    try c.expectRows("SHOW WARNINGS", "Note|1007|Can't create database 'sales'; database exists\n");
+    try c.expectError("CREATE DATABASE sales", "Can't create database 'sales'; database exists");
+    try c.expectError("CREATE DATABASE main", "Can't create database 'main'; database exists");
+    try c.expectError("CREATE DATABASE `a.b`", "Incorrect database name 'a.b'");
+    try c.exec(
+        \\CREATE TABLE sales.orders (id INT AUTO_INCREMENT PRIMARY KEY, item VARCHAR(5) NOT NULL, KEY ix (item)) AUTO_INCREMENT=10;
+        \\INSERT INTO sales.orders (item) VALUES ('a'), ('b');
+        \\CREATE TABLE sales.t (a INT);
+        \\INSERT INTO sales.t VALUES (2);
+    );
+    try c.expectColumns("SELECT DATABASE()", "DATABASE()");
+    try c.expectRows("SELECT DATABASE(), SCHEMA()", "main|main\n");
+    try c.expectRows("SELECT t.a, sales.orders.id, o.item FROM t, sales.orders JOIN sales.orders o USING (id) ORDER BY o.id", "1|10|a\n1|11|b\n");
+    try c.expectRows("SELECT a FROM sales.t", "2\n");
+    // USE: unqualified names are in the current database.
+    try c.exec("USE sales");
+    try c.expectRows("SELECT DATABASE(), a FROM t", "sales|2\n");
+    try c.expectRows("SELECT m.a, t.a FROM main.t m, t", "1|2\n");
+    try c.exec(
+        \\UPDATE orders SET item = 'z' WHERE orders.id = 10;
+        \\DELETE FROM orders WHERE item = 'b';
+        \\INSERT INTO orders (item) VALUES ('c');
+        \\INSERT INTO orders (id, item) VALUES (12, 'd') ON DUPLICATE KEY UPDATE item = CONCAT(orders.item, '!');
+    );
+    try c.expectRows("SELECT id, item FROM orders ORDER BY id", "10|z\n12|c!\n");
+    try c.expectRows("WITH t AS (SELECT 42 AS a) SELECT a FROM t", "42\n");
+    try c.exec("CREATE TEMPORARY TABLE tmp (z INT); INSERT INTO tmp VALUES (9)");
+    try c.expectRows("SELECT z FROM tmp", "9\n");
+    try c.exec("CREATE VIEW v AS SELECT t.a, m.a AS b FROM t JOIN main.t m");
+    try c.expectRows("SELECT a, b FROM v", "2|1\n");
+    try c.exec("CREATE TABLE items (id INT PRIMARY KEY, o INT, FOREIGN KEY (o) REFERENCES orders (id))");
+    try c.exec("CREATE SEQUENCE s");
+    try c.expectRows("SELECT NEXT VALUE FOR s, NEXT VALUE FOR sales.s, nextval(s)", "1|2|3\n");
+    try c.expectRows("SHOW TABLES", "items\norders\nt\nv\n");
+    try c.expectColumns("SHOW TABLES", "Tables_in_sales");
+    try c.expectRows("SHOW FULL TABLES FROM main", "t|BASE TABLE\n");
+    try c.expectRows("SHOW INDEX FROM orders", "orders|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE|||NO\norders|1|ix|1|item|A|NULL|NULL|NULL||BTREE|||NO\n");
+    try c.expectRows("SHOW COLUMNS FROM orders", "id|int(11)|NO|PRI|NULL|auto_increment\nitem|varchar(5)|NO|MUL|NULL|\n");
+    try c.expectRows("SHOW DATABASES", "information_schema\nmain\nsales\n");
+    try c.expectRows("SHOW CREATE DATABASE sales", "sales|CREATE DATABASE `sales` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_uca1400_ai_ci */\n");
+    // MariaDB's errors.
+    try c.expectError("SELECT * FROM nope", "Table 'sales.nope' doesn't exist");
+    try c.expectError("SELECT * FROM nodb.t", "Table 'nodb.t' doesn't exist");
+    try c.expectError("CREATE TABLE nodb.t (a INT)", "Unknown database 'nodb'");
+    try c.expectError("CREATE TABLE orders (a INT)", "Table 'orders' already exists");
+    try c.expectError("DROP TABLE nope", "Unknown table 'sales.nope'");
+    try c.expectError("USE nodb", "Unknown database 'nodb'");
+    try c.expectError("SHOW TABLES FROM nodb", "Unknown database 'nodb'");
+    try c.expectError("DROP DATABASE nodb", "Can't drop database 'nodb'; database doesn't exist");
+    try c.expectError("DROP DATABASE main", "xqlite: database 'main' cannot be dropped");
+    // information_schema shows the database and the bare name.
+    try c.expectRows("SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 't%' ORDER BY 2", "sales|t|BASE TABLE\n");
+    try c.expectRows("SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE TABLE_NAME = 'T' ORDER BY 1", "main|t\nsales|t\n");
+    try c.expectRows("SELECT COLUMN_NAME, COLUMN_TYPE, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'sales' AND TABLE_NAME = 'orders' ORDER BY ORDINAL_POSITION", "id|int(11)|auto_increment\nitem|varchar(5)|\n");
+    try c.expectRows("SELECT SCHEMA_NAME, DEFAULT_CHARACTER_SET_NAME FROM information_schema.SCHEMATA ORDER BY 1", "main|utf8mb4\nsales|utf8mb4\n");
+    try c.expectRows("SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = 'sales' ORDER BY 1, 2", "items|PRIMARY|id\norders|ix|item\norders|PRIMARY|id\n");
+    try c.expectRows("SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEWS", "sales|v\n");
+    // A prepared statement is compiled again in the new database.
+    const api = @import("../../vdbe/api.zig");
+    const vi = @import("../../vdbe/vdbe_int.zig");
+    var stmt: ?*vi.Vdbe = null;
+    try testing.expectEqual(int.RC.OK, @import("../../sql/prepare.zig").prepareV2(c.db, "SELECT a FROM t", &stmt, null));
+    defer _ = api.finalize(stmt.?);
+    try testing.expectEqual(int.RC.ROW, api.step(stmt.?));
+    try testing.expectEqual(@as(i64, 2), api.columnInt64(stmt.?, 0));
+    _ = api.reset(stmt.?);
+    try c.exec("USE main");
+    try testing.expectEqual(int.RC.ROW, api.step(stmt.?));
+    try testing.expectEqual(@as(i64, 1), api.columnInt64(stmt.?, 0));
+    _ = api.reset(stmt.?);
+    // Tables move between the databases of main.
+    try c.exec("ALTER TABLE sales.t RENAME TO sales.t2; RENAME TABLE sales.orders TO main.orders");
+    try c.expectRows("SHOW TABLES FROM sales", "items\nt2\nv\n");
+    try c.exec("INSERT INTO orders (item) VALUES ('e')");
+    try c.expectRows("SELECT id, item FROM orders ORDER BY id", "10|z\n12|c!\n13|e\n");
+    try c.expectRows("SHOW INDEX FROM orders", "orders|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE|||NO\norders|1|ix|1|item|A|NULL|NULL|NULL||BTREE|||NO\n");
+    // The SQLite dialect (and sqlite3) see the mangled names.
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT a FROM \"sales.t2\"", "2\n");
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE name LIKE 'sales.%' ORDER BY name", "sales.items\nsales.t2\nsales.v\n");
+    try c.expectRows("SELECT name FROM xq_sequence", "sales.s\n");
+    main_mod.setDialect(c.db, .mariadb);
+    // DROP DATABASE drops everything in it; the current database is then none.
+    try c.exec("USE sales; DROP DATABASE sales");
+    try c.expectRows("SELECT DATABASE() IS NULL", "1\n");
+    try c.expectError("SELECT * FROM t", "No database selected");
+    try c.expectError("SHOW TABLES", "No database selected");
+    try c.expectRows("SELECT a FROM main.t", "1\n");
+    try c.exec("DROP DATABASE IF EXISTS sales");
+    try c.expectRows("SHOW WARNINGS", "Note|1008|Can't drop database 'sales'; database doesn't exist\n");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'sales.%'", "0\n");
+    try c.expectRows("SELECT count(*) FROM xq_catalog WHERE tbl LIKE 'sales.%' OR col = 'sales'", "0\n");
+    try c.expectRows("SELECT count(*) FROM xq_sequence", "0\n");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+}
+
+test "mariadb: USE an attached database" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec(
+        \\ATTACH ':memory:' AS aux;
+        \\USE aux;
+        \\CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(3));
+        \\INSERT INTO t (v) VALUES ('a');
+    );
+    try c.expectRows("SELECT DATABASE(), id, v FROM t", "aux|1|a\n");
+    try c.expectRows("SELECT name FROM aux.sqlite_schema WHERE type = 'table' AND name = 't'", "t\n");
+    try c.expectRows("SHOW TABLES", "t\n");
+    try c.expectError("DROP DATABASE aux", "xqlite: database 'aux' is a SQLite database (use DETACH)");
+    try c.exec("USE main");
+    try c.expectRows("SELECT v FROM t", "a\n");
 }

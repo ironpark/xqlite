@@ -113,12 +113,13 @@ pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
     try s.expectKw("TABLE");
     const if_not_exists = try s.ifNotExists();
     const q = try s.qualifiedName();
-    const name = q.name.text;
-    const schema: []const u8 = if (temp) "temp" else if (q.schema) |x| x.text else "main";
-    if (build.findDbName(s.p.db, schema) == null) return s.fail("Unknown database '{s}'", .{schema});
-    ir.stmt.readSchema(s.p) catch return error.ParseFailed;
+    const dest = try s.createTarget(q, temp);
+    // The SQLite name: "db.t" in a database of CREATE DATABASE.
+    const name = dest.q.name.text;
+    const schema = dest.q.schema.?.text;
     if (or_replace) return s.fail("xqlite: CREATE OR REPLACE TABLE is not supported (use DROP TABLE IF EXISTS)", .{});
-    const tname: tree.QName = if (temp) .{ .name = q.name } else .{ .schema = .{ .text = schema, .pos = q.name.pos }, .name = q.name };
+    const tname: tree.QName = if (temp) .{ .name = q.name } else dest.q;
+    s.creating = dest;
 
     if (s.isKw("LIKE") or (s.isOp("(") and s.peek().isKw("LIKE"))) {
         return s.fail("xqlite: CREATE TABLE ... LIKE is not supported", .{});
@@ -142,9 +143,10 @@ pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
     if (s.isKw("PARTITION")) return s.fail("xqlite: PARTITION BY is not supported", .{});
     if (s.isSelectStart() or s.isKw("AS")) return s.fail("xqlite: CREATE TABLE with columns and a SELECT is not supported", .{});
 
-    if (if_not_exists and build.findTable(s.p.db, name, schema) != null) {
+    if (build.findTable(s.p.db, name, schema) != null) {
+        if (!if_not_exists) return s.fail("Table '{s}' already exists", .{dest.bare});
         // Nothing to do (MariaDB adds a note).
-        s.p.db.xq.mariadb.warn(.note, 1050, "Table '{s}' already exists", .{name});
+        s.p.db.xq.mariadb.warn(.note, 1050, "Table '{s}' already exists", .{dest.bare});
         return session.emptyStatement(s);
     }
     try finishTable(s, &t);
@@ -261,8 +263,27 @@ fn indexColumns(s: *Parser) Error![]const IndexCol {
 fn references(s: *Parser) Error!tree.Ref {
     try s.expectKw("REFERENCES");
     const q = try s.qualifiedName();
-    if (q.schema != null) return s.fail("xqlite: a foreign key to a table of another database is not supported", .{});
+    // SQLite's REFERENCES names a table of the same SQLite database (a
+    // database of CREATE DATABASE is in main); a temporary table's
+    // unqualified parent stays as written.
     var ref: tree.Ref = .{ .table = q.name };
+    const c = s.creating orelse {
+        if (q.schema != null) return s.fail("xqlite: a foreign key to a table of another database is not supported", .{});
+        return referencesRest(s, ref);
+    };
+    if (q.schema != null or !std.mem.eql(u8, c.db.sqlite, "temp")) {
+        const r = if (q.schema == null and std.ascii.eqlIgnoreCase(q.name.text, c.bare)) c else try s.createTarget(q, false);
+        if (!std.ascii.eqlIgnoreCase(r.q.schema.?.text, c.q.schema.?.text)) {
+            return s.fail("xqlite: a foreign key to a table of another database is not supported", .{});
+        }
+        ref.table = r.q.name;
+    }
+    return referencesRest(s, ref);
+}
+
+/// [(cols)] [MATCH ...] [ON DELETE a] [ON UPDATE a] of REFERENCES.
+fn referencesRest(s: *Parser, ref_in: tree.Ref) Error!tree.Ref {
+    var ref = ref_in;
     if (s.isOp("(")) ref.cols = try s.nameList();
     while (true) {
         if (s.eatKw("MATCH")) {
@@ -826,8 +847,8 @@ pub fn createIndex(s: *Parser, unique: bool) Error!void {
         _ = try s.anyName();
     }
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null) orelse
-        return s.fail("Table '{s}.{s}' doesn't exist", .{ if (q.schema) |x| x.text else "main", q.name.text });
+    const r = try s.relation(q);
+    const tab = r.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try r.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const table: Name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos };
     try s.lowerStmt(.{ .create_index = try indexTree(s, schema, table, .{ .name = iname, .unique = unique, .cols = cols }, if_not_exists) });
@@ -849,15 +870,16 @@ pub fn dropIndex(s: *Parser) Error!void {
     const iname = try s.nameText(try s.anyName());
     if (!s.eatKw("ON")) return s.fail("xqlite: DROP INDEX needs ON table", .{});
     const q = try s.qualifiedName();
-    const schema: ?[]const u8 = if (q.schema) |x| x.text else null;
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     if (std.ascii.eqlIgnoreCase(iname, "PRIMARY")) return s.fail("xqlite: dropping the PRIMARY KEY is not supported", .{});
-    const tab = build.findTable(s.p.db, q.name.text, schema) orelse return s.fail("Table '{s}' doesn't exist", .{q.name.text});
+    const r = try s.relation(q);
+    const tab = r.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const real = (try findIndexName(s, tab, iname, schema)) orelse {
         if (!if_exists) return s.fail("Can't DROP INDEX `{s}`; check that it exists", .{iname});
         return session.emptyStatement(s);
     };
-    try dropIndexNamed(s, q.schema, real);
+    try dropIndexNamed(s, .{ .text = schema }, real);
 }
 
 fn dropIndexNamed(s: *Parser, schema: ?Name, real: []const u8) Error!void {
@@ -874,11 +896,19 @@ pub fn dropTable(s: *Parser, view: bool) Error!void {
     const q = try s.qualifiedName();
     if (s.isOp(",")) return s.fail("xqlite: DROP {s} of several tables is not supported", .{if (view) "VIEW" else "TABLE"});
     _ = s.eatKw("RESTRICT") or s.eatKw("CASCADE");
-    const schema: ?[]const u8 = if (q.schema) |x| x.text else null;
-    if (build.findTable(s.p.db, q.name.text, schema) == null and !if_exists) {
-        return s.fail("Unknown table '{s}.{s}'", .{ schema orelse "main", q.name.text });
+    // A database that does not exist has no such table.
+    if (q.schema) |x| if ((try s.database(x.text)) == null) {
+        if (if_exists) return session.emptyStatement(s);
+        return s.fail("Unknown table '{s}.{s}'", .{ x.text, q.name.text });
+    };
+    const r = try s.relation(q);
+    if (r.find(s.p.db) == null) {
+        if (!if_exists) return s.fail("Unknown table '{s}'", .{try r.shown(s.a)});
+        return session.emptyStatement(s);
     }
-    try s.lowerStmt(.{ .drop = try s.new(tree.Drop, .{ .kind = if (view) .view else .table, .if_exists = if_exists, .name = q }) });
+    var name = r.q;
+    if (name.schema == null and r.sqliteDb() != null) name.schema = .{ .text = r.sqliteDb().?, .pos = q.name.pos };
+    try s.lowerStmt(.{ .drop = try s.new(tree.Drop, .{ .kind = if (view) .view else .table, .if_exists = if_exists, .name = name }) });
 }
 
 // =============================================================== VIEW
@@ -889,6 +919,7 @@ pub fn createView(s: *Parser, or_replace: bool, temp: bool) Error!void {
     try s.expectKw("VIEW");
     const if_not_exists = try s.ifNotExists();
     const q = try s.qualifiedName();
+    const dest = try s.createTarget(q, temp);
     var cols: []Name = &.{};
     if (s.isOp("(")) cols = try s.nameList();
     try s.expectKw("AS");
@@ -901,7 +932,7 @@ pub fn createView(s: *Parser, or_replace: bool, temp: bool) Error!void {
         try s.expectKw("CHECK");
         try s.expectKw("OPTION");
     }
-    const name: tree.QName = if (temp) .{ .name = q.name } else .{ .schema = q.schema orelse .{ .text = "main" }, .name = q.name };
+    const name: tree.QName = if (temp) .{ .name = q.name } else dest.q;
     try s.lowerStmt(.{ .create_view = try s.new(tree.CreateView, .{
         .or_replace = or_replace,
         .temp = temp,
@@ -949,7 +980,7 @@ pub fn createSequence(s: *Parser) Error!void {
     // MINVALUE to -9223372036854775807; PostgreSQL's (sequence.zig) are
     // the same.
     try session.emptyStatement(s);
-    try s.lowerStmt(.{ .create_sequence = try s.new(tree.CreateSequence, .{ .if_not_exists = if_not_exists, .name = q, .opts = o }) });
+    try s.lowerStmt(.{ .create_sequence = try s.new(tree.CreateSequence, .{ .if_not_exists = if_not_exists, .name = .{ .name = .{ .text = try s.sequenceName(q), .pos = q.name.pos } }, .opts = o }) });
 }
 
 fn signedInt(s: *Parser) Error!i64 {
@@ -969,7 +1000,7 @@ pub fn dropSequence(s: *Parser) Error!void {
     // Dropping a sequence that does not exist does nothing (MariaDB
     // fails without IF EXISTS).
     try session.emptyStatement(s);
-    try s.lowerStmt(.{ .drop = try s.new(tree.Drop, .{ .kind = .sequence, .if_exists = if_exists, .name = q }) });
+    try s.lowerStmt(.{ .drop = try s.new(tree.Drop, .{ .kind = .sequence, .if_exists = if_exists, .name = .{ .name = .{ .text = try s.sequenceName(q), .pos = q.name.pos } } }) });
 }
 
 // ============================================================= ALTER
@@ -982,7 +1013,8 @@ pub fn alterTable(s: *Parser) Error!void {
     try s.expectKw("TABLE");
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null) orelse return s.fail("Table '{s}' doesn't exist", .{q.name.text});
+    const rel = try s.relation(q);
+    const tab = rel.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try rel.shown(s.a)});
     const real = try s.a.dupe(u8, tab.name);
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const tq: tree.QName = .{ .schema = .{ .text = schema }, .name = .{ .text = real, .pos = q.name.pos } };
@@ -1040,7 +1072,7 @@ pub fn alterTable(s: *Parser) Error!void {
         if (s.isKw("INDEX") or s.isKw("KEY")) return s.fail("xqlite: ALTER TABLE RENAME INDEX is not supported", .{});
         _ = s.eatKw("TO") or s.eatKw("AS");
         const new = try s.qualifiedName();
-        try renameTable(s, tab, tq, new.name);
+        try renameTable(s, tab, tq, try renameTarget(s, tab, rel.db, new));
         return endAlter(s);
     }
     if (s.isKw("DISABLE") or s.isKw("ENABLE")) {
@@ -1113,18 +1145,37 @@ pub fn renameTableStmt(s: *Parser) Error!void {
     const m = try s.qualifiedName();
     if (s.isOp(",")) return s.fail("xqlite: RENAME TABLE of several tables is not supported", .{});
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null) orelse
-        return s.fail("Table '{s}' doesn't exist", .{q.name.text});
+    const rel = try s.relation(q);
+    const tab = rel.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try rel.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const tq: tree.QName = .{ .schema = .{ .text = schema }, .name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos } };
-    try renameTable(s, tab, tq, m.name);
+    try renameTable(s, tab, tq, try renameTarget(s, tab, rel.db, m));
+}
+
+/// The SQLite name of the new name `new` of table `tab` (of MariaDB
+/// database `db`, a temporary table keeps its database): in its
+/// database, else in the current one (as MariaDB, for RENAME TABLE and
+/// ALTER TABLE). A table moves between the databases of one SQLite
+/// database (main and those of CREATE DATABASE), not to another SQLite
+/// database.
+fn renameTarget(s: *Parser, tab: *int.Table, db: Parser.Db, new: tree.QName) Error!Name {
+    const from = catalog.schemaName(s.p.db, tab);
+    if (new.schema == null and std.mem.eql(u8, from, "temp")) {
+        return .{ .text = try db.objectName(s.a, new.name.text), .pos = new.name.pos };
+    }
+    const dest = try s.createTarget(new, false);
+    if (!std.ascii.eqlIgnoreCase(dest.q.schema.?.text, from)) {
+        return s.fail("xqlite: moving a table to another SQLite database (ATTACH) is not supported", .{});
+    }
+    if (build.findTable(s.p.db, dest.q.name.text, from) != null) return s.fail("Table '{s}' already exists", .{dest.bare});
+    return dest.q.name;
 }
 
 // ================================================== SHOW CREATE TABLE
 
 /// SHOW CREATE TABLE's text: MariaDB's form built from the catalog for a
 /// table the MariaDB dialect created, else the SQLite schema text.
-pub fn showCreateTable(s: *Parser, tab: *int.Table, schema: []const u8) Error![]const u8 {
+pub fn showCreateTable(s: *Parser, tab: *int.Table, schema: []const u8, bare: []const u8) Error![]const u8 {
     const api = @import("../../vdbe/api.zig");
     const tname = try s.a.dupe(u8, tab.name);
     var sqlite_sql: []const u8 = "";
@@ -1152,7 +1203,7 @@ pub fn showCreateTable(s: *Parser, tab: *int.Table, schema: []const u8) Error![]
     var out: Writer.Allocating = .init(s.a);
     const w = &out.writer;
     const B = @import("../dialect.zig").Quoted('`');
-    w.print("CREATE TABLE {f} (\n", .{B{ .z = tname }}) catch return error.OutOfMemory;
+    w.print("CREATE TABLE {f} (\n", .{B{ .z = bare }}) catch return error.OutOfMemory;
     for (tab2.cols, 0..) |*c, i| {
         if (i > 0) w.writeAll(",\n") catch return error.OutOfMemory;
         const lc = try std.ascii.allocLowerString(s.a, c.name());

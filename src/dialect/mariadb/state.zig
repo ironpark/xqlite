@@ -1,9 +1,10 @@
 //! The per-connection state of the MariaDB dialect: the session's
-//! sql_mode and the warnings of the last statement (SHOW WARNINGS).
+//! sql_mode, the warnings of the last statement (SHOW WARNINGS), the
+//! user variables and the current database (USE).
 //!
 //! It lives in the connection (dialect.ConnState.mariadb, reached from
 //! a Parse as p.db.xq.mariadb and from an SQL function through
-//! api.contextDbHandle()), is fixed-size (nothing to free) and exists in
+//! api.contextDbHandle()), is freed with it (deinit()) and exists in
 //! every connection whatever its dialect, so that switching a
 //! connection to MariaDB and back keeps the session's settings.
 //!
@@ -15,7 +16,10 @@
 //!  - the data modes (STRICT_TRANS_TABLES, STRICT_ALL_TABLES,
 //!    NO_ZERO_DATE, NO_ZERO_IN_DATE, ALLOW_INVALID_DATES) are read when a
 //!    statement runs, by the value coercion of INSERT and UPDATE
-//!    (types.zig), so a prepared statement follows the current mode.
+//!    (types.zig), so a prepared statement follows the current mode;
+//!  - USE is applied when the statement runs (xq_maria_use() in
+//!    databases.zig) and expires the prepared statements: names are
+//!    resolved when a statement is compiled.
 
 const std = @import("std");
 const vi = @import("../../vdbe/vdbe_int.zig");
@@ -188,10 +192,19 @@ pub const State = struct {
     /// dialect: the first `stored_max`, and how many there were.
     warnings: [stored_max]Warning = undefined,
     n_warnings: u32 = 0,
+    /// The current database (USE): null for main, the default; owned by
+    /// the connection's allocator. `no_database` after DROP DATABASE of
+    /// the current one (DATABASE() is NULL, unqualified names fail).
+    database: ?[]u8 = null,
+    no_database: bool = false,
 
     pub const stored_max = 8;
 
+    /// The name of the default database (SQLite's main).
+    pub const main_database = "main";
+
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
+        if (s.database) |z| gpa.free(z);
         var it = s.user_vars.iterator();
         while (it.next()) |e| {
             gpa.free(e.key_ptr.*);
@@ -213,6 +226,25 @@ pub const State = struct {
         const key = try gpa.dupe(u8, name);
         errdefer gpa.free(key);
         try s.user_vars.put(gpa, key, copy);
+    }
+
+    /// The current database: "main", a database of ATTACH or of CREATE
+    /// DATABASE; null if none is selected.
+    pub fn currentDatabase(s: *const State) ?[]const u8 {
+        if (s.no_database) return null;
+        return s.database orelse main_database;
+    }
+
+    /// USE `name` (null: no database, as after DROP DATABASE of the
+    /// current one).
+    pub fn setDatabase(s: *State, gpa: std.mem.Allocator, name: ?[]const u8) error{OutOfMemory}!void {
+        const copy: ?[]u8 = if (name) |n|
+            (if (std.ascii.eqlIgnoreCase(n, main_database)) null else try gpa.dupe(u8, n))
+        else
+            null;
+        if (s.database) |z| gpa.free(z);
+        s.database = copy;
+        s.no_database = name == null;
     }
 
     pub fn userVar(s: *const State, name: []const u8) ?*vi.Mem {

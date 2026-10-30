@@ -40,6 +40,7 @@ const tree = @import("../../ir/tree.zig");
 const lower = @import("../../ir/lower.zig");
 const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
+const nsp = catalog.schemas;
 const json_table = @import("json_table.zig");
 const functions = @import("functions.zig");
 const dialect = @import("../dialect.zig");
@@ -114,6 +115,15 @@ pub const Parser = struct {
     /// references that are values of JSON functions (json_table.zig).
     json_tables: std.ArrayList(json_table.JsonTable) = .empty,
     json_args: std.ArrayList(*Expr) = .empty,
+    /// The databases of CREATE DATABASE (catalog/schema.zig), read once.
+    schemas: ?[]const nsp.Info = null,
+    /// The names of the WITH queries: an unqualified one is not a table
+    /// of the current database.
+    cte_names: std.ArrayList([]const u8) = .empty,
+    /// Names are SQLite's as written (information_schema's text).
+    raw_names: bool = false,
+    /// The table CREATE TABLE creates (its REFERENCES may name it).
+    creating: ?Rel = null,
 
     pub fn init(p: *Parse, sql: [:0]const u8, mode: state.SqlMode) Parser {
         var s: Parser = .{
@@ -322,7 +332,7 @@ pub const Parser = struct {
         return v;
     }
 
-    /// `[schema.]name`; a MariaDB database is a SQLite schema.
+    /// `[database.]name`, as written (relation() resolves it).
     pub fn qualifiedName(s: *Parser) Error!QName {
         const first = try s.nameOf(try s.anyName());
         if (s.eatOp(".")) {
@@ -330,6 +340,166 @@ pub const Parser = struct {
             return .{ .schema = first, .name = second };
         }
         return .{ .name = first };
+    }
+
+    // =========================================================== databases
+    //
+    // A MariaDB database is a SQLite database (main, the default; temp;
+    // an attached one) or a database of CREATE DATABASE (databases.zig),
+    // whose objects are main objects named "<db>.<name>"
+    // (catalog/schema.zig). Unqualified names are in the current
+    // database (USE, state.zig). A mangled name is written without its
+    // SQLite database (main) and a FROM item or DML target naming it
+    // takes the bare name as its alias, so `t.col` finds it.
+
+    /// A MariaDB database as SQLite has it.
+    pub const Db = struct {
+        /// The SQLite database: main, temp or an attached one.
+        sqlite: []const u8,
+        /// A database of CREATE DATABASE (as registered): its objects
+        /// are main objects with mangled names.
+        named: ?[]const u8 = null,
+        /// The name MariaDB shows ('db.t' in messages).
+        shown: []const u8,
+
+        /// The SQLite name of object `name` of the database.
+        pub fn objectName(d: Db, a: std.mem.Allocator, obj: []const u8) Error![]const u8 {
+            const n = d.named orelse return obj;
+            return nsp.mangle(a, n, obj);
+        }
+    };
+
+    /// The databases of CREATE DATABASE (read once per statement).
+    pub fn registered(s: *Parser) Error![]const nsp.Info {
+        if (s.schemas) |l| return l;
+        ir.stmt.readSchema(s.p) catch return error.ParseFailed;
+        const l = nsp.list(s.p.db, s.a) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+        };
+        s.schemas = l;
+        return l;
+    }
+
+    /// Database `name`, null if there is none.
+    pub fn database(s: *Parser, db_name: []const u8) Error!?Db {
+        ir.stmt.readSchema(s.p) catch return error.ParseFailed;
+        if (build.findDbName(s.p.db, db_name)) |i| {
+            const n = s.p.db.dbs.items[i].name;
+            return .{ .sqlite = n, .shown = n };
+        }
+        if (nsp.find(try s.registered(), db_name)) |info| return .{ .sqlite = catalog.main_schema, .named = info.name, .shown = info.name };
+        return null;
+    }
+
+    /// The current database (USE); "No database selected" if none is.
+    pub fn currentDb(s: *Parser) Error!Db {
+        const cur = s.p.db.xq.mariadb.currentDatabase() orelse return s.fail("No database selected", .{});
+        if (build.findDbName(s.p.db, cur)) |i| {
+            const n = s.p.db.dbs.items[i].name;
+            return .{ .sqlite = n, .shown = n };
+        }
+        // A database of CREATE DATABASE (USE checked it; if another
+        // connection dropped it since, its tables are not found).
+        return .{ .sqlite = catalog.main_schema, .named = cur, .shown = cur };
+    }
+
+    /// A table (view) name resolved.
+    pub const Rel = struct {
+        /// The SQLite name. Its database is null where SQLite's lookup
+        /// finds the object (an unqualified name in main, a temporary
+        /// table) and for a mangled name (main).
+        q: QName,
+        /// The alias a FROM item or DML target naming a mangled name
+        /// takes: the bare name.
+        alias: ?Name = null,
+        db: Db,
+        /// The name within the database.
+        bare: []const u8,
+
+        /// The SQLite database to look the name up in (null: SQLite's
+        /// order, temp first).
+        pub fn sqliteDb(r: Rel) ?[]const u8 {
+            if (r.q.schema) |x| return x.text;
+            return if (r.db.named != null) catalog.main_schema else null;
+        }
+
+        /// 'db.name' as MariaDB's messages show it.
+        pub fn shown(r: Rel, a: std.mem.Allocator) Error![]const u8 {
+            return std.fmt.allocPrint(a, "{s}.{s}", .{ r.db.shown, r.bare });
+        }
+
+        /// The table or view, if it exists.
+        pub fn find(r: Rel, db: *int.Sqlite3) ?*int.Table {
+            return build.findTable(db, r.q.name.text, r.sqliteDb());
+        }
+    };
+
+    /// The object `q` names in a query, a DML statement, SHOW ...: in
+    /// its database (a missing one: "Table 'x.t' doesn't exist", as
+    /// MariaDB says), else in the current one (a WITH query and a
+    /// temporary table first).
+    pub fn relation(s: *Parser, q: QName) Error!Rel {
+        if (q.schema) |x| {
+            if (s.raw_names) return .{ .q = q, .db = .{ .sqlite = x.text, .shown = x.text }, .bare = q.name.text };
+            const d = (try s.database(x.text)) orelse return s.fail("Table '{s}.{s}' doesn't exist", .{ x.text, q.name.text });
+            return s.inDb(d, q.name, true);
+        }
+        const keep: Rel = .{ .q = q, .db = .{ .sqlite = catalog.main_schema, .shown = catalog.main_schema }, .bare = q.name.text };
+        if (s.raw_names) return keep;
+        for (s.cte_names.items) |c| if (std.ascii.eqlIgnoreCase(c, q.name.text)) return keep;
+        const d = try s.currentDb();
+        // SQLite looks in temp first.
+        if (!std.mem.eql(u8, d.sqlite, catalog.main_schema) or d.named != null) {
+            ir.stmt.readSchema(s.p) catch return error.ParseFailed;
+            if (build.findTable(s.p.db, q.name.text, "temp") != null) return .{ .q = q, .db = .{ .sqlite = "temp", .shown = d.shown }, .bare = q.name.text };
+        }
+        return s.inDb(d, q.name, false);
+    }
+
+    /// Object `n` of database `d`; `qualify`: name its SQLite database
+    /// (else main's unqualified name stays so).
+    fn inDb(s: *Parser, d: Db, n: Name, qualify: bool) Error!Rel {
+        if (d.named) |_| {
+            const m = try d.objectName(s.a, n.text);
+            return .{ .q = .{ .name = .{ .text = m, .pos = n.pos } }, .alias = n, .db = d, .bare = n.text };
+        }
+        const unq = !qualify and std.mem.eql(u8, d.sqlite, catalog.main_schema);
+        return .{
+            .q = .{ .schema = if (unq) null else .{ .text = d.sqlite, .pos = n.pos }, .name = n },
+            .db = d,
+            .bare = n.text,
+        };
+    }
+
+    /// Where CREATE puts object `q`: its database ("Unknown database"
+    /// if there is none), temp for a temporary one, else the current
+    /// database. The SQLite name always has its database.
+    pub fn createTarget(s: *Parser, q: QName, temp: bool) Error!Rel {
+        ir.stmt.readSchema(s.p) catch return error.ParseFailed;
+        if (temp) {
+            const shown = if (q.schema) |x| x.text else (s.p.db.xq.mariadb.currentDatabase() orelse catalog.main_schema);
+            return .{ .q = .{ .schema = .{ .text = "temp", .pos = q.name.pos }, .name = q.name }, .db = .{ .sqlite = "temp", .shown = shown }, .bare = q.name.text };
+        }
+        const d = if (q.schema) |x|
+            (try s.database(x.text)) orelse return s.fail("Unknown database '{s}'", .{x.text})
+        else
+            try s.currentDb();
+        var r = try s.inDb(d, q.name, true);
+        if (r.q.schema == null) r.q.schema = .{ .text = d.sqlite, .pos = q.name.pos };
+        r.alias = null;
+        return r;
+    }
+
+    /// The xq_sequence name of sequence `q` (sequences are in main; one
+    /// of a database of CREATE DATABASE is mangled).
+    pub fn sequenceName(s: *Parser, q: QName) Error![]const u8 {
+        if (s.raw_names) return q.name.text;
+        const d = if (q.schema) |x|
+            (try s.database(x.text)) orelse return s.fail("Unknown database '{s}'", .{x.text})
+        else
+            try s.currentDb();
+        return d.objectName(s.a, q.name.text);
     }
 
     // ======================================================== expressions
@@ -741,6 +911,10 @@ pub const Parser = struct {
         var names: std.ArrayList(Name) = .empty;
         try names.append(s.a, try s.nameOf(try s.anyName()));
         while (names.items.len < 3 and s.eatOp(".")) try names.append(s.a, try s.nameOf(try s.anyName()));
+        // db.t.col of a database of CREATE DATABASE: the table's alias is t.
+        if (names.items.len == 3 and !s.raw_names) {
+            if (try s.database(names.items[0].text)) |d| if (d.named != null) return s.mk(pos, .{ .column = names.items[1..] });
+        }
         return s.mk(pos, .{ .column = names.items });
     }
 
@@ -784,15 +958,15 @@ pub const Parser = struct {
             s.advance();
             s.advance();
             try s.expectKw("FOR");
-            const seq = try s.anyName();
-            return s.func(pos, "nextval", &.{try s.str(s.posOf(seq), try s.nameText(seq))});
+            const seq = try s.qualifiedName();
+            return s.func(pos, "nextval", &.{try s.str(seq.name.pos, try s.sequenceName(seq))});
         }
         if ((t.isKw("PREVIOUS") or t.isKw("LASTVAL")) and next.isKw("VALUE")) {
             s.advance();
             s.advance();
             try s.expectKw("FOR");
-            const seq = try s.anyName();
-            return s.func(pos, "lastval", &.{try s.str(s.posOf(seq), try s.nameText(seq))});
+            const seq = try s.qualifiedName();
+            return s.func(pos, "lastval", &.{try s.str(seq.name.pos, try s.sequenceName(seq))});
         }
         if (next.is("(")) return @import("functions.zig").call(s);
         // Niladic functions.
@@ -929,6 +1103,7 @@ pub const Parser = struct {
         var ctes: std.ArrayList(tree.Cte) = .empty;
         while (true) {
             const n = try s.nameOf(try s.name());
+            try s.cte_names.append(s.a, n.text);
             var cols: []Name = &.{};
             if (s.isOp("(")) cols = try s.nameList();
             try s.expectKw("AS");
@@ -1074,7 +1249,8 @@ pub const Parser = struct {
                 // string by its value.
                 const text: ?[]const u8 = switch (e.kind) {
                     .column => null,
-                    .string => |v| v,
+                    // DATABASE() is a string too.
+                    .string => |v| if (std.mem.endsWith(u8, s.lx.sql[start..end], ")")) s.lx.sql[start..end] else v,
                     else => s.lx.sql[start..end],
                 };
                 try l.append(s.a, .{ .expr = .{ .e = e, .alias = al, .name = if (al == null) text else null } });
@@ -1316,8 +1492,12 @@ pub const Parser = struct {
             const args: []*Expr = if (s.isOp(")")) &.{} else try s.exprList();
             try s.expectOp(")");
             item.source = .{ .func = try s.new(tree.Func, .{ .name = q.name, .args = args }) };
-        } else item.source = .{ .table = q };
-        item.alias = try s.aliasOf();
+            item.alias = try s.aliasOf();
+        } else {
+            const r = try s.relation(q);
+            item.source = .{ .table = r.q };
+            item.alias = (try s.aliasOf()) orelse if (r.alias) |a| tree.Alias{ .name = a } else null;
+        }
         try s.indexHints();
         try s.onUsing(&item);
         return item;
@@ -1351,6 +1531,9 @@ pub const Parser = struct {
     /// another dialect created), the AUTO_INCREMENT column.
     pub const Target = struct {
         tab: ?*int.Table,
+        /// The SQLite name to write, and the alias a mangled one takes.
+        q: QName = .{ .name = .{ .text = "" } },
+        alias: ?Name = null,
         schema: []const u8,
         /// The table name as stored.
         name: []const u8 = "",
@@ -1370,10 +1553,11 @@ pub const Parser = struct {
 
     /// Look up the target table and its catalog entries (the catalog is
     /// read now, at compile time).
-    pub fn target(s: *Parser, q: QName) Error!Target {
+    pub fn target(s: *Parser, q_in: QName) Error!Target {
         ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-        const schema_name: ?[]const u8 = if (q.schema) |x| x.text else null;
-        var tab = build.findTable(s.p.db, q.name.text, schema_name) orelse return .{ .tab = null, .schema = "main", .cols = &.{} };
+        const r = try s.relation(q_in);
+        const q = r.q;
+        var tab = r.find(s.p.db) orelse return .{ .tab = null, .q = q, .alias = r.alias, .schema = "main", .cols = &.{} };
         const schema = catalog.schemaName(s.p.db, tab);
         const stored = try s.a.dupe(u8, tab.name);
         var entries: []const catalog.Entry = &.{};
@@ -1383,7 +1567,7 @@ pub const Parser = struct {
                 else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
             };
             // The query may have reloaded the schema.
-            tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .schema = schema, .cols = &.{} };
+            tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .q = q, .alias = r.alias, .schema = schema, .cols = &.{} };
         }
         const cols = try s.a.alloc(ColMeta, tab.cols.len);
         for (tab.cols, 0..) |*c, i| {
@@ -1401,7 +1585,7 @@ pub const Parser = struct {
                 if (std.mem.eql(u8, en.key, "mariadb.on_update")) cols[i].on_update = true;
             }
         }
-        return .{ .tab = tab, .schema = schema, .name = stored, .cols = cols };
+        return .{ .tab = tab, .q = q, .alias = r.alias, .schema = schema, .name = stored, .cols = cols };
     }
 
     /// The column called `n` of the target, or null.

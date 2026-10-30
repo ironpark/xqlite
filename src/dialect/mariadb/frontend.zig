@@ -13,8 +13,11 @@
 //!    function calls; dml.zig: INSERT/REPLACE/UPDATE/DELETE; ddl.zig:
 //!    CREATE/DROP/ALTER (the IR renders them as SQLite text and records
 //!    xq_catalog; ddl.zig adds MariaDB's indexes and catalog keys);
-//!    session.zig: SET, transactions, SHOW, DESCRIBE, USE (SHOW and
+//!    session.zig: SET, transactions, SHOW, DESCRIBE (SHOW and
 //!    DESCRIBE are SQLite queries over the schema, lowered as text);
+//!  - databases.zig: CREATE/DROP DATABASE, USE, SHOW DATABASES/TABLES:
+//!    MariaDB's databases are SQLite's (main, ATTACH) and named schemas
+//!    in main (catalog/schema.zig), names resolved by Parser.relation();
 //!  - infoschema.zig: information_schema.TABLES, COLUMNS, SCHEMATA;
 //!  - types.zig: MariaDB column types and the sql_mode-dependent value
 //!    conversion of INSERT/UPDATE; runtime.zig: the dialect's functions.
@@ -38,6 +41,7 @@ const parser = @import("parser.zig");
 const dml = @import("dml.zig");
 const ddl = @import("ddl.zig");
 const session = @import("session.zig");
+const databases = @import("databases.zig");
 const types = @import("types.zig");
 const rt = @import("runtime.zig");
 const json = @import("json.zig");
@@ -70,6 +74,7 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
     };
     if (!ok) {
         p.tail = sql[sql.len..];
+        try translateError(p);
         return error.ParseFailed;
     }
     if (s.isOp(";")) {
@@ -77,6 +82,18 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
         p.tail = sql[@intFromPtr(s.prev_end) - @intFromPtr(sql.ptr) ..];
     } else p.tail = sql[sql.len..];
     ir.stmt.finishCoding(p);
+}
+
+/// SQLite's "no such table: x" (from lowering) in MariaDB's words:
+/// "Table 'db.x' doesn't exist". A name without a database is in the
+/// current one; a mangled name "db.x" (Parser.relation()) reads the same.
+fn translateError(p: *int.Parse) int.Oom!void {
+    const m: []const u8 = p.err_msg orelse return;
+    const prefix = "no such table: ";
+    if (!std.mem.startsWith(u8, m, prefix)) return;
+    const name = m[prefix.len..];
+    const db: []const u8 = if (std.mem.indexOfScalar(u8, name, '.') != null) "" else p.db.xq.mariadb.currentDatabase() orelse "main";
+    p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "Table '{s}{s}{s}' doesn't exist", .{ db, if (db.len > 0) "." else "", name }, 0);
 }
 
 /// SHOW WARNINGS and friends look at the warnings of the statement
@@ -116,7 +133,7 @@ fn statement(s: *Parser) Error!void {
     }
     if (t.isKw("SET")) return session.set(s);
     if (t.isKw("SHOW")) return session.show(s);
-    if (t.isKw("USE")) return session.use(s);
+    if (t.isKw("USE")) return databases.use(s);
     if (t.isAnyKw(&.{ "DESCRIBE", "DESC", "EXPLAIN" })) {
         if (try session.describe(s)) return;
         s.advance();
@@ -147,6 +164,7 @@ fn create(s: *Parser) Error!void {
     }
     const temp = s.eatKw("TEMPORARY") or s.eatKw("TEMP");
     if (s.isKw("TABLE")) return ddl.createTable(s, temp, or_replace);
+    if (!temp and (s.isKw("DATABASE") or s.isKw("SCHEMA"))) return databases.create(s, or_replace);
     if (s.isKw("SEQUENCE")) {
         if (or_replace) return s.fail("xqlite: CREATE OR REPLACE SEQUENCE is not supported", .{});
         return ddl.createSequence(s);
@@ -170,7 +188,6 @@ fn create(s: *Parser) Error!void {
         while (!s.atStmtEnd() and !s.isKw("VIEW") and !s.isKw("SQL") and !s.isKw("ALGORITHM")) s.advance();
     }
     if (s.isKw("VIEW")) return ddl.createView(s, or_replace, temp);
-    if (s.isKw("DATABASE") or s.isKw("SCHEMA")) return s.fail("xqlite: CREATE DATABASE is not supported (use ATTACH)", .{});
     if (s.isAnyKw(&.{ "TRIGGER", "PROCEDURE", "FUNCTION", "EVENT" })) {
         return s.fail("xqlite: CREATE {s} is not supported in the MariaDB dialect", .{s.tok.text});
     }
@@ -184,7 +201,7 @@ fn drop(s: *Parser) Error!void {
     if (s.isKw("VIEW")) return ddl.dropTable(s, true);
     if (s.isKw("INDEX")) return ddl.dropIndex(s);
     if (s.isKw("SEQUENCE")) return ddl.dropSequence(s);
-    if (s.isKw("DATABASE") or s.isKw("SCHEMA")) return s.fail("xqlite: DROP DATABASE is not supported (use DETACH)", .{});
+    if (s.isKw("DATABASE") or s.isKw("SCHEMA")) return databases.drop(s);
     return s.syntaxError();
 }
 
@@ -214,6 +231,7 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("xq_set_sysvar", 2, .{ .direct_only = true }, session.setSysvarFunc),
     dfunc.scalar("xq_uservar", 1, .{}, session.uservarFunc),
     dfunc.scalar("xq_set_uservar", 2, .{ .direct_only = true }, session.setUservarFunc),
+    dfunc.scalar("xq_maria_use", 1, .{ .direct_only = true }, databases.useFunc),
     // Math.
     dfunc.scalar("floor", 1, det, rt.floorFunc),
     dfunc.scalar("ceil", 1, det, rt.ceilFunc),

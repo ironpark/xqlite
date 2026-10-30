@@ -33,7 +33,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | 명령 | 확인하는 것 | 기준 |
 | --- | --- | --- |
 | `zig build test` | 단위 테스트, 문서·예제의 이름, 전역 상태, 시드 퍼저 스모크 | — |
-| `zig build check` | 아래의 대부분을 병렬로 한 번에: 단위 테스트, `xqt` 자체의 테스트, `xqt interop`, `xqt planner`, `fuzzcheck` (`-Dslt`, `-Dfuzz`로 더) | 아래와 같음 |
+| `zig build check` | 아래의 대부분을 병렬로 한 번에: 단위 테스트, `xqt` 자체의 테스트, `xqt interop`, `xqt planner`, `fuzzcheck` (`-Dslt`, `-Dfuzz`, `-Dfast`로 더) | 아래와 같음 |
 | `xqt interop [NAME...]` | DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 sqlite3와 교차 비교. 모듈은 [sqlite3 교차 검증](#sqlite3-교차-검증) | `--sqlite3`/`SQLITE3` (3.54.1) |
 | `xqt planner [FILE...]` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드 | `--sq`/`SQ` (3.54.1, 주석 없는 빌드) |
 | `xqt planner gen basic\|hard ...` | 무작위 플래너 케이스 생성 | — |
@@ -53,6 +53,8 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사 | — |
 | `zig build capi-fast` | ReleaseFast 정적 `libxqlite3`로 C 검사와 `tools/capi/bench.c`를 8번씩 실행 | — |
 | `zig build capi-shell` | SQLite의 `shell.c`를 `libxqlite3`에 링크해 스모크 스크립트 실행 | 아말감 `shell.c` |
+| `zig build capi-sortbench` | 정렬 벤치마크(`tools/capi/sortbench.c`)를 SQLite와 ReleaseFast `libxqlite3`에서 돌려 시간과 결과 순서 비교 | 아말감 `sqlite3.c` |
+| `zig build bench-btree` | 엔진 없이 B-tree 커서의 삽입·탐색·스캔·삭제 시간(`pkg/storage/bench/btree.zig`) | — |
 | `xqt fetch sqlite\|slt` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | — |
 
 ## 준비
@@ -135,18 +137,19 @@ clang -O1 -DSQLITE_DQS=0 -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_STMTVTAB
 SQ=/tmp/sqref/sqlite3 zig build check -Doptimize=ReleaseSafe
 SQ=/tmp/sqref/sqlite3 zig build check -Dslt=true      # sqllogictest도 (ref/sqllogictest, 몇 분)
 SQ=/tmp/sqref/sqlite3 zig build check -Dfuzz=true     # 시드 퍼저 셋을 무작위 시드로 한 번씩
+SQ=/tmp/sqref/sqlite3 zig build check -Dfast=true     # capi-fast도 (약 90초)
 ```
 
 다음을 모두 병렬로 돌리고, 하나라도 실패하면 실패합니다.
 
 - `zig build test`의 모든 것과 `xqt` 자체의 단위 테스트
 - `zig build test-capi`: C 프로그램으로 C ABI 검사
-- `zig build capi-fast`: ReleaseFast 정적 라이브러리로 C 검사와 삽입 벤치마크를 여러 번
 - `xqt interop`: 모든 interop 모듈
 - `xqt planner --known tools/planner/known-failures.list`: `vtablog.txt`를 뺀 모든 케이스 파일
 - `xqlite fuzzcheck`: `ref/sqlite/test/fuzzdata1.db`..`fuzzdata8.db`를 파일마다 프로세스 하나로
 - `-Dslt=true`이면 `xqt slt ref/sqllogictest/test`
 - `-Dfuzz=true`이면 `btree_model`, `btree_corrupt`, `ir_roundtrip`을 무작위 시드로 한 번씩
+- `-Dfast=true`이면 `zig build capi-fast`: ReleaseFast 정적 라이브러리로 C 검사와 삽입 벤치마크를 여러 번
 
 플래너 부분 때문에 `SQ`에 [주석 없는 기준 셸](#기준-sqlite3-셸)을 주어야 합니다. 주지 않으면 `PATH`의 `sqlite3`와 비교하므로 바이트코드가 다릅니다. `SQLITE3`도 같은 방식으로 받습니다.
 
@@ -469,9 +472,18 @@ zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test
 
 (`xqstub.c`는 `xqlite_set_dialect()`, `xqlite_dialect()`의 빈 구현입니다.)
 
-`zig build capi-fast`(`zig build check`에 포함)는 `-Doptimize`와 상관없이 ReleaseFast로 정적 `libxqlite3`를 만들고 `capi_test.c`와 `tools/capi/bench.c`(`:memory:`에 준비된 INSERT를 한 트랜잭션에서 30만 번 실행하고 행 수와 합을 확인)를 링크해 각각 8번 돌립니다. ReleaseFast는 `undefined`로 둔 메모리를 채우지 않아(Debug·ReleaseSafe는 0xaa로 채움) 그런 값을 읽는 버그가 할당 주소에 따라 일부 실행에서만 드러나기 때문입니다. 예를 들어 OP_Function 문맥의 `out`이 앞서 해제된 같은 모양 문장의 값을 그대로 가져 인자를 묶지 않은 버그는 `capi_test` 실행의 약 40%에서 `DETACH aux`를 실패시켰습니다.
+`zig build capi-fast`(`zig build check -Dfast=true`에 포함)는 `-Doptimize`와 상관없이 ReleaseFast로 정적 `libxqlite3`를 만들고 `capi_test.c`와 `tools/capi/bench.c`(`:memory:`에 준비된 INSERT를 한 트랜잭션에서 30만 번 실행하고 행 수와 합을 확인)를 링크해 각각 8번 돌립니다. ReleaseFast는 `undefined`로 둔 메모리를 채우지 않아(Debug·ReleaseSafe는 0xaa로 채움) 그런 값을 읽는 버그가 할당 주소에 따라 일부 실행에서만 드러나기 때문입니다. 예를 들어 OP_Function 문맥의 `out`이 앞서 해제된 같은 모양 문장의 값을 그대로 가져 인자를 묶지 않은 버그는 `capi_test` 실행의 약 40%에서 `DETACH aux`를 실패시켰습니다.
 
 `zig build capi-shell`은 SQLite 3.54.1 아말감의 `shell.c`(`-Dsqlite-shell-c`, 기본 `/tmp/xq-sqlite-build/shell.c`)를 고치지 않고 `libxqlite3`에 링크해 `zig-out/bin/sqlite3-xqlite`를 만들고, `tools/capi/shell_smoke.sql`의 표준 출력을 `tools/capi/shell_smoke.expected`와 비교합니다. `shell.c`가 저장소 밖에 있어서 `zig build check`에는 넣지 않았습니다. 자세한 것은 [C API](c-api.md#테스트)에 있습니다.
+
+`zig build capi-sortbench`는 정렬 벤치마크 `tools/capi/sortbench.c`(무작위 30만 행에 ORDER BY, GROUP BY, CREATE INDEX)를 SQLite 3.54.1 아말감의 `sqlite3.c`(`-Dsqlite-c`, 기본 `/tmp/xq-sqlite-build/sqlite3.c`)와 ReleaseFast 정적 `libxqlite3`에 각각 링크해 차례로 돌립니다. 각 질의의 결과 행을 순서대로 해시하므로, xqlite 쪽은 SQLite 쪽 출력(`-ref`)과 해시를 줄마다 비교해 다르면 `DIFFERENT`를 붙이고 실패하며, 시간 비율(`x0.65`는 SQLite 시간의 0.65배)도 함께 출력합니다. `--` 뒤의 인자는 두 실행에 모두 갑니다. `-n ROWS`는 행 수, `-spill`은 캐시를 10페이지로 줄여 정렬이 PMA를 쓰고 병합하게 합니다.
+
+```sh
+zig build capi-sortbench                  # 메모리 정렬
+zig build capi-sortbench -- -spill        # 디스크로 넘치는 정렬
+```
+
+`zig build bench-btree`(또는 `pkg/storage`에서 `zig build bench`)는 엔진 없이 `pkg/storage`의 B-tree 커서만으로 테이블과 인덱스에 무작위 순서로 넣고, 찾고, 양방향으로 훑고, 절반을 지우는 시간을 잽니다. 메모리 VFS와 데이터베이스가 다 들어가는 캐시를 써서 B-tree와 페이지 캐시만 잽니다. 줄마다 세 번 중 가장 빠른 시간, 연산당 시간, 읽은 내용의 체크섬을 출력합니다(`-- -n ROWS -page-size BYTES`).
 
 ## 그 밖의 도구
 

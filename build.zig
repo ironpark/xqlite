@@ -273,6 +273,13 @@ pub fn build(b: *std.Build) void {
     pkg_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(journal_tests).step);
 
+    // The b-tree benchmark of pkg/storage (bench/btree.zig), ReleaseFast.
+    const btree_bench = b.addRunArtifact(b.dependency("xqlite_storage", .{ .target = target, .optimize = optimize }).artifact("btree-bench"));
+    btree_bench.addPassthruArgs();
+    btree_bench.has_side_effects = true;
+    const btree_bench_step = b.step("bench-btree", "Run the b-tree benchmark of pkg/storage, ReleaseFast, without the engine (-- -n ROWS -page-size BYTES)");
+    btree_bench_step.dependOn(&btree_bench.step);
+
     // The test tool (tools/xqt): `zig build tools` installs xqt next to
     // xqlite, and tools/crashshim.c as a library to preload into sqlite3.
     // Neither is part of the library or of `zig build test`.
@@ -366,13 +373,16 @@ pub fn build(b: *std.Build) void {
     // every `xqt interop` module, every planner case file but vtablog.txt
     // and fuzzcheck on SQLite's corpora; -Dslt=true adds sqllogictest
     // (ref/sqllogictest), -Dfuzz=true a run of each seeded fuzzer with a
-    // random seed. A new interop module needs no change here.
+    // random seed, -Dfast=true the C test and benchmark on the ReleaseFast
+    // library (capi-fast, a minute and a half). A new interop module needs
+    // no change here.
     const check_slt = b.option(bool, "slt", "zig build check: also run sqllogictest (minutes)") orelse false;
     const check_fuzz = b.option(bool, "fuzz", "zig build check: also run each seeded fuzzer with a random seed") orelse false;
-    const check_step = b.step("check", "Run the unit tests, the cross-checks, the planner cases and fuzzcheck (-Dslt, -Dfuzz for more)");
+    const check_fast = b.option(bool, "fast", "zig build check: also run capi-fast (about 90 s)") orelse false;
+    const check_step = b.step("check", "Run the unit tests, the cross-checks, the planner cases and fuzzcheck (-Dslt, -Dfuzz, -Dfast for more)");
     check_step.dependOn(test_step);
     check_step.dependOn(capi.test_step);
-    check_step.dependOn(capi.fast_step);
+    if (check_fast) check_step.dependOn(capi.fast_step);
     check_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = xqt_exe.root_module })).step);
     const interop_run = addXqtRun(b, xqt_exe, exe, crashshim);
     interop_run.addArg("interop");
@@ -453,6 +463,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     const enabled = b.option(bool, "capi", "Build and install the C libraries (libxqlite3) with `zig build` (default: true)") orelse true;
     const name = b.option([]const u8, "capi-name", "Base name of the C libraries: lib<name>.a, lib<name>.so/.dylib (default: xqlite3; sqlite3 for a drop-in libsqlite3)") orelse "xqlite3";
     const shell_c = b.option([]const u8, "sqlite-shell-c", "shell.c of the SQLite 3.54.1 amalgamation, for `zig build capi-shell` (default: /tmp/xq-sqlite-build/shell.c)") orelse "/tmp/xq-sqlite-build/shell.c";
+    const sqlite_c = b.option([]const u8, "sqlite-c", "sqlite3.c of the SQLite 3.54.1 amalgamation, for `zig build capi-sortbench` (default: /tmp/xq-sqlite-build/sqlite3.c)") orelse "/tmp/xq-sqlite-build/sqlite3.c";
 
     const make = struct {
         fn lib(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, n: []const u8, linkage: std.builtin.LinkMode) *std.Build.Step.Compile {
@@ -564,6 +575,39 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             fast_step.dependOn(&run.step);
         }
     }
+
+    // The sort benchmark (tools/capi/sortbench.c), ReleaseFast, on SQLite's
+    // sqlite3.c and then on libxqlite3, which must give the same rows in
+    // the same order. Arguments after `--` go to both.
+    const sortbench_step = b.step("capi-sortbench", "Run tools/capi/sortbench.c on SQLite's sqlite3.c (-Dsqlite-c), then on the ReleaseFast libxqlite3 against its results (-- -spill to spill)");
+    const sortbench_sqlite = b.addExecutable(.{
+        .name = "sortbench-sqlite",
+        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libc = true }),
+    });
+    sortbench_sqlite.root_module.addCSourceFile(.{ .file = b.path("tools/capi/sortbench.c"), .flags = &.{"-std=gnu99"} });
+    sortbench_sqlite.root_module.addCSourceFile(.{ .file = .{ .cwd_relative = sqlite_c }, .flags = &.{
+        "-DSQLITE_OMIT_LOAD_EXTENSION",
+        "-DSQLITE_DQS=0",
+        "-Wno-everything",
+    } });
+    sortbench_sqlite.root_module.addIncludePath(.{ .cwd_relative = std.fs.path.dirname(sqlite_c) orelse "." });
+    const sortbench = b.addExecutable(.{
+        .name = "sortbench",
+        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libc = true }),
+    });
+    sortbench.root_module.addCSourceFile(.{ .file = b.path("tools/capi/sortbench.c"), .flags = &.{"-std=gnu99"} });
+    sortbench.root_module.addIncludePath(b.path("include"));
+    sortbench.root_module.linkLibrary(fast_lib);
+    const run_ref = b.addRunArtifact(sortbench_sqlite);
+    run_ref.addPassthruArgs();
+    run_ref.has_side_effects = true;
+    const run_bench = b.addRunArtifact(sortbench);
+    run_bench.addPassthruArgs();
+    run_bench.addArg("-ref");
+    run_bench.addFileArg(run_ref.captureStdOut(.{}));
+    run_bench.stdio = .inherit;
+    run_bench.has_side_effects = true;
+    sortbench_step.dependOn(&run_bench.step);
 
     // SQLite's own shell on libxqlite3: the drop-in proof.
     const shell = b.addExecutable(.{

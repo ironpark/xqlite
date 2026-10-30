@@ -380,7 +380,7 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | `btree_fuzz` | B-tree 퍼저(`src/fuzz_tests.zig`가 씀) |
 | `sqlite_version_number` | 페이저가 파일 헤더에 쓰는 `SQLITE_VERSION_NUMBER`. `src/root.zig`가 다시 내보냄 |
 
-한 파일은 한 모듈에만 속할 수 있으므로, 엔진과 스토리지가 함께 쓰는 파일 형식 코드(`record`, `varint`)는 이 패키지에 두고 엔진은 `@import("xqlite_storage").varint` 식으로 가져옵니다. 공개 Zig API(`xqlite.pager`, `xqlite.pcache`, `xqlite.btree`, `xqlite.record`, `xqlite.varint`)는 `src/root.zig`가 다시 내보내므로 그대로입니다. 패키지 디렉터리에서 `zig build test`를 하면 스토리지 테스트(B-tree, 페이저, WAL, 저널)만 돕니다. B-tree 테스트의 픽스처는 `pkg/storage/src/testdata`에 있습니다(`xqt gen fixtures`).
+한 파일은 한 모듈에만 속할 수 있으므로, 엔진과 스토리지가 함께 쓰는 파일 형식 코드(`record`, `varint`)는 이 패키지에 두고 엔진은 `@import("xqlite_storage").varint` 식으로 가져옵니다. 공개 Zig API(`xqlite.pager`, `xqlite.pcache`, `xqlite.btree`, `xqlite.record`, `xqlite.varint`)는 `src/root.zig`가 다시 내보내므로 그대로입니다. 패키지 디렉터리에서 `zig build test`를 하면 스토리지 테스트(B-tree, 페이저, WAL, 저널)만 돌고, `zig build bench`(루트에서는 `zig build bench-btree`)는 B-tree 커서 벤치마크(`pkg/storage/bench/btree.zig`)를 돌립니다. B-tree 테스트의 픽스처는 `pkg/storage/src/testdata`에 있습니다(`xqt gen fixtures`).
 
 ## 공용 패키지
 
@@ -420,6 +420,7 @@ VFS 위의 스토리지 층(페이저, 페이지 캐시, WAL, B-tree)도 엔진�
 | `pkg/storage/src/pager/{pager,pcache,wal,journal}.zig` | 페이저, 페이지 캐시, WAL, 롤백 저널 |
 | `pkg/storage/src/btree/{btree,page,header,ptrmap,integrity}.zig` | B-tree 층 |
 | `pkg/storage/src/{record,varint}.zig` | 엔진과 함께 쓰는 레코드 형식과 varint |
+| `pkg/storage/bench/btree.zig` | B-tree 커서 벤치마크(`zig build bench-btree`) |
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
 
 구문 트리 IR(`src/ir/tree.zig`)이 나타내는 문장은 다음과 같습니다.

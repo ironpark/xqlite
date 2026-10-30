@@ -53,4 +53,30 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
     test_step.dependOn(&b.addRunArtifact(journal_tests).step);
+
+    // The b-tree benchmark (bench/btree.zig), always ReleaseFast; the root
+    // build runs it too, as `zig build bench-btree`.
+    const bench = b.addExecutable(.{
+        .name = "btree-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/btree.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "xqlite_storage", .module = b.createModule(.{
+                    .root_source_file = b.path("src/root.zig"),
+                    .target = target,
+                    .optimize = .ReleaseFast,
+                    .imports = imports,
+                }) },
+                imports[0],
+            },
+        }),
+    });
+    b.installArtifact(bench);
+    const run_bench = b.addRunArtifact(bench);
+    run_bench.addPassthruArgs();
+    run_bench.has_side_effects = true;
+    const bench_step = b.step("bench", "Run the b-tree benchmark, ReleaseFast (-- -n ROWS -page-size BYTES)");
+    bench_step.dependOn(&run_bench.step);
 }

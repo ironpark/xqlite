@@ -57,6 +57,8 @@ SHOW WARNINGS;
 | `infoschema.zig` | `information_schema.TABLES`, `COLUMNS`, `SCHEMATA` |
 | `types.zig` | MariaDB 열 타입, 저장 타입, INSERT/UPDATE의 값 변환(`xq_coerce()`) |
 | `runtime.zig` | 방언 함수 테이블: SQLite에 없거나 뜻이 다른 연산·함수 |
+| `json.zig` | JSON 함수(`JSON_EXTRACT`, `JSON_OBJECT`, `JSON_SET` ...): JSON 파서, 경로, MariaDB 출력 형식 |
+| `json_table.zig` | `JSON_TABLE`(엔진 테이블 값 함수 `xq_maria_json_table`), SELECT 끝에서 하는 JSON 처리 |
 | `state.zig` | 연결 상태 `ConnState.mariadb`: `sql_mode`, 경고, 사용자 변수 |
 | `test.zig` | MariaDB 문서의 동작에 맞춘 끝에서 끝까지 테스트 |
 
@@ -223,8 +225,68 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
 | 집계 | `GROUP_CONCAT([DISTINCT] ... ORDER BY ... SEPARATOR ...)`, `STDDEV`, `VARIANCE` |
 | 수 | `FLOOR`, `CEIL`, `ROUND`, `TRUNCATE`, `POW`, `SQRT`, `LOG` ... |
 | 날짜 | `NOW()`/`CURDATE()`/`CURTIME()`(UTC), `DATE_ADD`, `DATE_SUB`, `DATEDIFF`, `TIMESTAMPDIFF`, `DATE_FORMAT`, `STR_TO_DATE`, `YEAR`/`MONTH`/`DAY`/`HOUR`/`DAYOFWEEK`/`DAYNAME` ..., `EXTRACT` |
-| JSON | `JSON_UNQUOTE`. 그 밖의 `JSON_*`는 SQLite의 json 함수입니다. |
+| JSON | 아래 [JSON](#json)을 보세요. |
 | 그 밖 | `LAST_INSERT_ID()`, `UUID()`, `RAND()` |
+
+### JSON
+
+MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현합니다(`json.zig`). `JSON` 열은 `longtext` + `CHECK(json_valid(...))`이고 `JSON_VALID`는 SQLite의 `json_valid()`입니다. 둘은 결과가 같고 sqlite3도 이 CHECK를 계산합니다.
+
+| 분류 | 함수 |
+| --- | --- |
+| 꺼내기 | `JSON_EXTRACT`, `JSON_VALUE`, `JSON_QUERY`, `JSON_UNQUOTE`, `JSON_KEYS`, `JSON_SEARCH` |
+| 만들기 | `JSON_OBJECT`, `JSON_ARRAY`, `JSON_QUOTE`, `JSON_ARRAYAGG([DISTINCT] ... [ORDER BY ...] [LIMIT n])`, `JSON_OBJECTAGG` |
+| 검사 | `JSON_CONTAINS`, `JSON_CONTAINS_PATH`, `JSON_EXISTS`, `JSON_OVERLAPS`, `JSON_EQUALS`, `JSON_VALID`, `JSON_LENGTH`, `JSON_DEPTH`, `JSON_TYPE` |
+| 고치기 | `JSON_SET`, `JSON_INSERT`, `JSON_REPLACE`, `JSON_REMOVE`, `JSON_ARRAY_APPEND`, `JSON_ARRAY_INSERT`, `JSON_MERGE`(`_PRESERVE`), `JSON_MERGE_PATCH` |
+| 형식 | `JSON_COMPACT`, `JSON_LOOSE`, `JSON_DETAILED`/`JSON_PRETTY`, `JSON_NORMALIZE` |
+| 테이블 | `JSON_TABLE(doc, path COLUMNS (... FOR ORDINALITY, ... [EXISTS] PATH ..., NESTED [PATH] ... COLUMNS (...)))`, `NULL`/`ERROR`/`DEFAULT v` `ON EMPTY`/`ON ERROR` |
+
+- 경로: `$`, `.key`, `."key"`, `.*`, `[n]`, `[*]`, `[last]`, `[last-n]`, `[-n]`, `[n to m]`, `**`, 앞의 `lax`/`strict`. 배열이 아닌 값은 `[0]`과 `[last]`에서 원소 하나인 배열입니다. 잘못된 문서나 경로는 NULL입니다(MariaDB의 경고는 기록하지 않습니다).
+- 출력 형식은 MariaDB와 같습니다.
+  - `JSON_EXTRACT`, `JSON_SET`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_LOOSE`, `JSON_MERGE` ...: `{"a": 1, "b": [1, 2]}`
+  - `JSON_COMPACT`, `JSON_NORMALIZE`: 공백 없음. `JSON_ARRAYAGG`는 `[1,2]`, `JSON_OBJECTAGG`는 `{"a":1, "b":2}`
+  - `JSON_DETAILED`: 한 줄에 값 하나, 멤버 값인 배열·객체는 키 다음 줄
+  - 수와 문자열은 쓴 그대로(`1.50`, `"\u00e9"`), `JSON_QUERY`와 JSON 인자는 원문 그대로
+- 여러 경로나 와일드카드의 `JSON_EXTRACT`는 찾은 값을 문서 순서로 배열에 담습니다.
+- 비교(`=`, `<` ..., `IN`)에서 `JSON_EXTRACT`의 값은 MariaDB처럼 SQL 값입니다(`JSON_EXTRACT('{"a":"b"}', '$.a') = 'b'`는 참). 엔진 함수 `xq_maria_json_cmp()`로 감쌉니다.
+- MySQL의 `col->'$.path'`, `col->>'$.path'`도 받습니다(`JSON_EXTRACT`, `JSON_UNQUOTE(JSON_EXTRACT(...))`). MariaDB에는 없는 확장입니다.
+
+#### 어떤 값이 JSON인가
+
+`JSON_OBJECT`, `JSON_ARRAY`, `JSON_SET` 같은 함수는 JSON 값을 문자열로 감싸지 않고 그대로 넣습니다. MariaDB가 JSON으로 보는 값을 xqlite는 이렇게 압니다.
+
+| 값 | 방법 |
+| --- | --- |
+| JSON을 돌려주는 함수의 결과 | SQLite의 JSON subtype(`'J'`, `json_object()`와 같음) |
+| `JSON` 열 | SELECT 끝에서 FROM 테이블의 열 중 `CHECK (json_valid(col))`가 있는 열을 엔진 함수 `xq_maria_json_col()`로 감쌉니다. |
+| 참/거짓 식(`1 > 2`, `TRUE`, `IS NULL`, `IN` ...) | `xq_maria_json_bool()`이 `true`/`false`로 바꿉니다. |
+| `JSON_COMPACT(x)` 같은 형식 함수 | MariaDB처럼 형식을 입히지 않은 `x` 그대로입니다. |
+| JSON 함수 하나를 고르는 스칼라 서브쿼리 | `xq_maria_json_col()`로 감쌉니다. |
+
+- subtype은 테이블, 구체화되는 서브쿼리·CTE, 정렬을 지나면 사라집니다. 거기서 나온 값은 문자열입니다.
+- SELECT 밖(`UPDATE ... SET`, CHECK, 생성 열)의 `JSON` 열은 표시하지 않으므로 `JSON_OBJECT('a', j)`의 `j`가 문자열이 됩니다. `JSON_SET(j, ...)`처럼 문서를 받는 인자는 언제나 JSON으로 읽으므로 상관없습니다.
+
+#### JSON_TABLE
+
+- `JSON_TABLE(doc, path COLUMNS (...)) AS jt`는 FROM 항목 `xq_maria_json_table(doc, 'spec') AS jt`입니다.
+  - 엔진 테이블 값 함수(이포니머스 가상 테이블, `Hooks.engine_modules`)입니다. 문장이 처음 이 이름을 쓸 때 연결에 등록합니다.
+  - `spec`은 COLUMNS 절을 JSON으로 적은 것입니다.
+  - 행마다 열 `xq_row`에 열 값의 JSON 배열이 있습니다. 값은 MariaDB처럼 열 타입으로 이미 바꿨습니다(`TINYINT` 범위 자르기, `2.5` → `3`, `'12abc'` → `12`, `VARCHAR(n)` 자르기, 잘못된 날짜 → `0000-00-00` ...).
+- 테이블 값 함수라 앞 테이블을 인자로 쓸 수 있습니다(`FROM t, JSON_TABLE(t.j, ...)`, `LEFT JOIN JSON_TABLE(...) ON 1`).
+- SELECT 끝에서 `jt.a`나 `a`는 `jt.xq_row ->> k`(k는 열 위치)로, `*`과 `jt.*`는 열 목록으로 바꿉니다. 뷰에는 이렇게 바꾼 식이 저장됩니다.
+- 별칭이 없으면 MariaDB처럼 `Every table function must have an alias.` 오류입니다.
+- `NESTED PATH` 형제는 MariaDB처럼 한 번에 하나씩 행을 만들고 나머지 열은 NULL입니다.
+
+#### MariaDB와 다른 점
+
+| 항목 | xqlite |
+| --- | --- |
+| `DECIMAL` 값 | `REAL`이므로 `JSON_ARRAY(2.50)`은 `[2.5]`, `JSON_ARRAY(1/3)`은 `[0.3333333333333333]`입니다. |
+| `UNION`의 열 타입 | 따지지 않습니다. MariaDB는 `UNION`으로 합친 수를 `JSON_ARRAYAGG`에서 문자열로 넣기도 합니다. |
+| `JSON_ARRAYAGG(DISTINCT ... LIMIT n)` | SQLite의 `DISTINCT` 집계는 인자가 하나여야 해서 안 됩니다. |
+| `JSON_SEARCH`의 대소문자 | ASCII와 Latin-1 글자만 무시합니다. |
+| 경고 | 잘못된 JSON·경로는 NULL이지만 `SHOW WARNINGS`에 남지 않습니다. |
+| sqlite3 | `xq_mariadb_json_*()`, `xq_maria_json_*()`, `xq_maria_json_table`을 쓰는 CHECK·생성 열·뷰는 sqlite3에서 계산할 수 없습니다. `JSON` 열의 `CHECK(json_valid(...))`는 계산합니다. |
 
 ### SELECT
 
@@ -393,5 +455,5 @@ zig-out/bin/xqt dialect-diff mariadb [cases-file]
 - sqlite3의 무결성 검사를 통과해야 합니다.
 - sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
 - 다루는 것: STRICT 테이블, 이름 붙은 CHECK, DEFAULT·생성 열 식, `AUTO_INCREMENT`, 테이블과 함께 이름이 바뀌는 `"t$i"` 인덱스, 뷰, `xq_catalog`.
-- 엔진 함수(`xq_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mariadb/test.zig`에서 확인합니다.
+- 엔진 함수(`xq_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mariadb/test.zig`에서 확인합니다. JSON 함수와 `JSON_TABLE`을 쓰는 뷰·CHECK·생성 열도 여기서 확인합니다.
 - 먼저 `zig build tools`가 필요합니다. sqlite3는 xqt의 `cfg.sqlite3`(`--sqlite3`, `$SQLITE3`)입니다.

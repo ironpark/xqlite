@@ -297,6 +297,8 @@ zig-out/bin/xqlite fuzzcheck ref/sqlite/test/fuzzdata*.db
 
 케이스마다 fuzzcheck.c처럼 힙 한도 100MB를 둡니다. 메모리 VFS의 파일도 엔진의 할당자로 잡으므로 한도에 듭니다(fuzzcheck.c의 memdb가 `sqlite3_malloc()`으로 페이지를 잡는 것과 같음). 그래서 행을 끝없이 넣는 케이스도 시간 초과 전에 메모리 부족으로 끝납니다.
 
+난수열도 fuzzcheck.c처럼 케이스마다 고정합니다(`SQLITE_TESTCTRL_PRNG_SEED` 1: DB 헤더의 스키마 쿠키, 없으면 1). `randomblob()` 값에 따라 끝나는 시점이 달라지는 케이스가 있어서, 고정하지 않으면 실행마다 결과가 달라집니다.
+
 ### 시드 퍼저
 
 ```sh

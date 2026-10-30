@@ -105,6 +105,10 @@ pub const sql = struct {
     pub const RC = @import("sql/sqlite_int.zig").RC;
     /// Connection flags (Sqlite3.flags; SQLITE_DBCONFIG_* and PRAGMAs).
     pub const DbFlag = @import("sql/sqlite_int.zig").DbFlag;
+    /// Process-wide state (sqlite3GlobalConfig, the PRNG, test controls).
+    pub const global = @import("sql/global.zig");
+    /// sqlite3_randomness(): an empty buffer resets the PRNG.
+    pub const randomness = @import("sql/func.zig").randomness;
 };
 
 /// Extensions from ext/misc that the sqlite3 shell builds in.

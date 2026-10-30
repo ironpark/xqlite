@@ -249,6 +249,15 @@ const Runner = struct {
             _ = sql.main.limit(db, .like_pattern_length, 50);
         }
 
+        // The same PRNG sequence in every run, as fuzzcheck.c gives each
+        // case (SQLITE_TESTCTRL_PRNG_SEED 1 with the connection: the seed
+        // is its schema cookie if it has one, else 1): what a case does
+        // may hang on random values (randomblob() rows and REPLACE).
+        const cookie = if (db_bytes.len >= 44) std.mem.readInt(u32, db_bytes[40..44], .big) else 0;
+        sql.global.testctrl.prng_seed = if (cookie != 0) cookie else 1;
+        defer sql.global.testctrl.prng_seed = 0;
+        sql.randomness(null, &.{});
+
         r.watchdog.arm(db, r.opts.timeout_ms);
         if (image == null) runStatements(db, text, r.watchdog) else runScript(db, text, r.watchdog);
         const timed_out = r.watchdog.disarm();

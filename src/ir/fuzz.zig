@@ -52,7 +52,7 @@ const Oom = error{OutOfMemory};
 
 /// The dialects whose frontends the fuzzer reads views and stored text
 /// in. A dialect joins once its frontend parses `SELECT * FROM v`.
-const dialects = [_]Dialect{ .sqlite, .postgres, .mariadb };
+const dialects = [_]Dialect{ .sqlite, .postgres, .mariadb, .oracle };
 
 /// Events that share a swarm configuration.
 const events_per_config = 64;

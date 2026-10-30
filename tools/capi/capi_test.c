@@ -1262,7 +1262,73 @@ static void test_b_blob(const char *zDir){
   CHECK_RC(sqlite3_blob_close(0), SQLITE_OK, 0);
 }
 
-static void test_b_status(void){
+static sqlite3_int64 dbStat(sqlite3 *db, int op, int reset){
+  sqlite3_int64 cur = -1, hi = -1;
+  CHECK_RC(sqlite3_db_status64(db, op, &cur, &hi, reset), SQLITE_OK, db);
+  return cur;
+}
+
+static void test_b_status(const char *zDir){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  sqlite3_int64 cur = -1, hi = -1, before;
+  int c32 = -1, h32 = -1;
+  char zPath[512];
+  void *pMem;
+
+  /* The memory counters (SQLITE_CONFIG_MEMSTATUS is on by default). */
+  before = sqlite3_memory_used();
+  CHECK(before>0);
+  pMem = sqlite3_malloc(100000);
+  CHECK(sqlite3_memory_used()>=before+100000);
+  CHECK(sqlite3_memory_highwater(0)>=before+100000);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_MALLOC_SIZE, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(hi>=100000);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_MALLOC_COUNT, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(cur>0 && hi>=cur);
+  sqlite3_free(pMem);
+  CHECK(sqlite3_memory_used()<before+100000);
+  CHECK(sqlite3_memory_highwater(1)>=before+100000);
+  CHECK(sqlite3_memory_highwater(0)<before+100000);
+  CHECK_RC(sqlite3_status(SQLITE_STATUS_MEMORY_USED, &c32, &h32, 0), SQLITE_OK, 0);
+  CHECK(c32>0 && h32>=c32);
+  CHECK_RC(sqlite3_status64(10, &cur, &hi, 0), SQLITE_MISUSE, 0);
+  CHECK_RC(sqlite3_status64(-1, &cur, &hi, 0), SQLITE_MISUSE, 0);
+  CHECK_RC(sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0), SQLITE_MISUSE, 0);
+
+  /* The page cache: every page is an overflow page without
+  ** SQLITE_CONFIG_PAGECACHE. */
+  snprintf(zPath, sizeof(zPath), "%s/status.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(x); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<2000) INSERT INTO t SELECT randomblob(1000) FROM c");
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_PAGECACHE_OVERFLOW, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(cur>0 && hi>=cur);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_PAGECACHE_SIZE, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(hi>=4096);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_PAGECACHE_USED, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(cur==0);
+
+  /* The connection's cache counters. */
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_USED, 0)>400*4096);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_USED_SHARED, 0)==dbStat(db, SQLITE_DBSTATUS_CACHE_USED, 0));
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_WRITE, 1)>=500);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_WRITE, 0)==0);
+  dbStat(db, SQLITE_DBSTATUS_CACHE_HIT, 1);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "2000");
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_HIT, 0)>0);
+  sqlite3_close(db);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "2000");
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_MISS, 0)>=500);
+  exec(db, "PRAGMA cache_size=10; BEGIN; UPDATE t SET x = randomblob(1000)");
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_SPILL, 0)>0);
+  exec(db, "COMMIT");
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT x FROM t WHERE rowid > ? ORDER BY 1", -1, &p, 0), SQLITE_OK, db);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_STMT_USED, 0)>0);
+  sqlite3_finalize(p);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_DEFERRED_FKS, 0)==0);
+  CHECK_RC(sqlite3_db_status64(db, 99, &cur, &hi, 0), SQLITE_ERROR, db);
+  sqlite3_close(db);
 }
 
 /* The loadable extension tools/capi/ext_test.c (argv[1]), or null. */
@@ -1564,7 +1630,7 @@ int main(int argc, char **argv){
   test_misc();
   test_b_memdb(zDir);
   test_b_blob(zDir);
-  test_b_status();
+  test_b_status(zDir);
   test_b_ext(zDir);
   test_b_carray();
   test_b_vfs(zDir);

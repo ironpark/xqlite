@@ -292,6 +292,9 @@ pub const Pager = struct {
     cache: PCache,
     /// The backups reading this database (pBackup).
     backup: ?*Backup = null,
+    /// Cache hits, misses, pages written and spills (aStat), for
+    /// sqlite3_db_status(); they wrap as in C.
+    stat: [4]u32 = @splat(0),
 
     // ================================================================ open
 
@@ -418,6 +421,23 @@ pub const Pager = struct {
         };
         if (p.mem_vfs) return @ptrCast(&S.fake[4]);
         return @ptrCast(p.path.ptr);
+    }
+
+    /// The counters of `stat` (PAGER_STAT_*).
+    pub const Stat = enum(u2) { hit, miss, write, spill };
+
+    /// Port of sqlite3PagerCacheStat(): counter `which`, then zeroed if
+    /// `zero`.
+    pub fn cacheStat(p: *Pager, which: Stat, zero: bool) u32 {
+        const v = p.stat[@backingInt(which)];
+        if (zero) p.stat[@backingInt(which)] = 0;
+        return v;
+    }
+
+    /// Port of sqlite3PagerMemUsed(): the memory of the page cache.
+    pub fn memUsed(p: *const Pager) i64 {
+        const per_page: i64 = p.page_size + p.cache.extra_size + @sizeOf(Page) + 5 * @sizeOf(usize);
+        return per_page * p.cache.pageCount() + @sizeOf(Pager) + p.page_size;
     }
 
     /// Port of sqlite3PagerIsMemdb(): a temporary or VFS-implemented
@@ -875,7 +895,10 @@ pub const Pager = struct {
                 error.SpillFailed => p.takeSpillError(),
             };
         };
-        if (pg.owner != null and !flags.no_content) return pg;
+        if (pg.owner != null and !flags.no_content) {
+            p.stat[@backingInt(Stat.hit)] +%= 1;
+            return pg;
+        }
 
         p.loadPage(pg, flags) catch |err| {
             if (err == error.DiskFull and pgno <= p.db_size) {
@@ -908,6 +931,7 @@ pub const Pager = struct {
             }
             @memset(pg.data, 0);
         } else {
+            p.stat[@backingInt(Stat.miss)] +%= 1;
             try p.readDbPage(pg);
         }
     }
@@ -1245,6 +1269,10 @@ pub const Pager = struct {
         }
         const head = list orelse return;
         if (head.pgno == 1) p.writeChangeCounter(head);
+        var n_list: u32 = 0;
+        var c: ?*Page = head;
+        while (c) |pg| : (c = pg.dirty) n_list += 1;
+        p.stat[@backingInt(Stat.write)] +%= n_list;
         try p.wal.?.frames(p.page_size, head, n_truncate, is_commit, p.wal_sync_flags);
         if (p.backup != null) {
             var it: ?*Page = head;
@@ -1825,6 +1853,7 @@ pub const Pager = struct {
             try p.fd.write(pg.data, @as(u64, pg.pgno - 1) * p.page_size);
             if (pg.pgno == 1) @memcpy(&p.db_file_vers, pg.data[24..40]);
             if (pg.pgno > p.db_file_size) p.db_file_size = pg.pgno;
+            p.stat[@backingInt(Stat.write)] +%= 1;
             p.backupUpdate(pg.pgno, pg.data);
         }
     }
@@ -2095,6 +2124,7 @@ pub const Pager = struct {
         if (p.err != null or p.no_spill_rollback or p.no_spill_off) return;
         if (p.no_spill_nosync and pg.flags.need_sync) return;
 
+        p.stat[@backingInt(Stat.spill)] +%= 1;
         pg.dirty = null;
         if (p.wal != null) {
             // Write the page to the WAL as a frame without a commit mark.

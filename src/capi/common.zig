@@ -279,6 +279,8 @@ pub const State = struct {
     initialized: bool = false,
     /// SQLITE_CONFIG_URI.
     uri: bool = false,
+    /// SQLITE_CONFIG_MEMSTATUS (SQLITE_DEFAULT_MEMSTATUS: on).
+    memstat: bool = true,
     /// SQLITE_CONFIG_MALLOC, and whether its xInit has run.
     mem_methods: ?@import("library.zig").MemMethods = null,
     mem_init: bool = false,
@@ -308,6 +310,7 @@ pub fn ensureInit() void {
     state.lock.lock();
     defer state.lock.unlock();
     if (!state.initialized) {
+        @import("../sql/status.zig").enable(state.memstat);
         @import("vfs.zig").initDefault();
         @import("loadext.zig").initHook();
         @atomicStore(bool, &state.initialized, true, .release);

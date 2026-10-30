@@ -753,8 +753,36 @@ pub export fn sqlite3_db_status64(db_arg: ?*Handle, op: c_int, p_cur: ?*i64, p_h
             cur.* = @intFromBool(db.n_deferred_imm_cons > 0 or db.n_deferred_cons > 0);
             return RC.OK;
         },
-        // Memory and cache counters the engine does not keep: zero.
-        1, 2, 3, 7, 8, 9, 11, 12, 13 => return RC.OK,
+        // CACHE_USED and CACHE_USED_SHARED (no shared cache: the same).
+        1, 11 => {
+            for (db.dbs.items) |d| if (d.bt) |bt| {
+                cur.* += bt.pager.memUsed();
+            };
+            return RC.OK;
+        },
+        // CACHE_HIT, CACHE_MISS, CACHE_WRITE, CACHE_SPILL.
+        7, 8, 9, 12 => {
+            const which: @import("../pager/pager.zig").Pager.Stat = switch (op) {
+                7 => .hit,
+                8 => .miss,
+                9 => .write,
+                else => .spill,
+            };
+            for (db.dbs.items) |d| if (d.bt) |bt| {
+                cur.* += bt.pager.cacheStat(which, reset != 0);
+            };
+            return RC.OK;
+        },
+        // STMT_USED: what the statements hold (the Vdbe, its arena).
+        3 => {
+            var v = db.vdbe;
+            while (v) |x| : (v = x.next) cur.* += @intCast(@sizeOf(c.Vdbe) + x.arena.queryCapacity());
+            return RC.OK;
+        },
+        // SCHEMA_USED and TEMPBUF_SPILL: not measured (SQLite measures
+        // the schema by freeing it in a dry run, which the engine's
+        // destructors do not support): zero.
+        2, 13 => return RC.OK,
         else => return RC.ERROR,
     }
 }

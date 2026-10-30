@@ -12,6 +12,7 @@
 //! non-purgeable (in-memory database) caches are not ported.
 
 const std = @import("std");
+const status = @import("../sql/status.zig");
 const thunk = @import("../util/thunk.zig");
 
 const Allocator = std.mem.Allocator;
@@ -135,6 +136,10 @@ pub const PCache = struct {
     gpa: Allocator,
     page_size: u32,
     extra_size: u32,
+    /// Pages allocated while the status counters were on, which count
+    /// as SQLITE_STATUS_PAGECACHE_OVERFLOW (no SQLITE_CONFIG_PAGECACHE
+    /// buffer: every page is an overflow page).
+    n_counted: u32 = 0,
     stress: ?Stress,
 
     map: PageHash = .{},
@@ -304,6 +309,12 @@ pub const PCache = struct {
     fn allocPage(pc: *PCache) error{OutOfMemory}!*Page {
         const l = pc.layout();
         const block = try pc.gpa.alignedAlloc(u8, block_align, l.len);
+        if (status.enabled()) {
+            // pcache1Alloc().
+            pc.n_counted += 1;
+            status.up(.pagecache_overflow, @intCast(l.len));
+            status.highwater(.pagecache_size, @intCast(l.len));
+        }
         const p: *Page = @ptrCast(block.ptr);
         @memset(block[l.data + pc.page_size ..][0..8], 0);
         p.* = .{
@@ -317,7 +328,12 @@ pub const PCache = struct {
 
     fn freePage(pc: *PCache, p: *Page) void {
         const block: [*]align(block_align.toByteUnits()) u8 = @ptrCast(@alignCast(p));
-        pc.gpa.free(block[0..pc.layout().len]);
+        const len = pc.layout().len;
+        if (pc.n_counted > 0) {
+            pc.n_counted -= 1;
+            status.down(.pagecache_overflow, @intCast(len));
+        }
+        pc.gpa.free(block[0..len]);
     }
 
     // ------------------------------------------------------- ref management

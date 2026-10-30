@@ -1261,9 +1261,24 @@ pub fn scopeIdentityFunc(ctx: *Context, _: []*Mem) void {
 /// handed out (its seed if none).
 pub fn identCurrentFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
-    var name: []const u8 = api.valueText(argv[0]) orelse return api.resultNull(ctx);
-    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| name = name[dot + 1 ..];
-    name = std.mem.trim(u8, name, "[]\"");
+    const arg: []const u8 = api.valueText(argv[0]) orelse return api.resultNull(ctx);
+    // [db.][schema.]table: a table of a schema of CREATE SCHEMA is
+    // "schema.table" (catalog/schema.zig).
+    var parts: [3][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, arg, '.');
+    while (it.next()) |part| {
+        if (n == parts.len) return api.resultNull(ctx);
+        parts[n] = std.mem.trim(u8, part, "[]\"");
+        n += 1;
+    }
+    var buf: [256]u8 = undefined;
+    var name: []const u8 = parts[n - 1];
+    if (n >= 2 and parts[n - 2].len > 0 and !std.ascii.eqlIgnoreCase(parts[n - 2], "dbo") and
+        !(n == 2 and (std.ascii.eqlIgnoreCase(parts[0], "tempdb") or std.ascii.eqlIgnoreCase(parts[0], "main"))))
+    {
+        name = std.fmt.bufPrint(&buf, "{s}.{s}", .{ parts[n - 2], name }) catch return api.resultNull(ctx);
+    }
     const schema: []const u8 = if (name.len > 0 and name[0] == '#') "temp" else "main";
     if (!catalog.exists(db, schema) or !sequence.exists(db, catalog.main_schema)) return api.resultNull(ctx);
     var q = catalog.Query.initFmt(db, "SELECT s.last_value FROM %Q.xq_catalog c JOIN main.xq_sequence s ON s.name = c.value WHERE c.tbl = ?1 COLLATE NOCASE AND c.key = 'identity'", &.{.{ .str = schema }}) catch return api.resultNull(ctx);

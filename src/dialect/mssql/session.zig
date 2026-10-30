@@ -98,7 +98,7 @@ pub fn set(s: *Parser) Error!void {
         const on = if (s.eatKw("ON")) true else if (s.eatKw("OFF")) false else return s.syntaxError();
         const t = try s.target(q);
         if (t.tab == null) return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{q.name.text});
-        if (t.identity() == null) return s.fail("Table '{s}' does not have the identity property. Cannot perform SET operation.", .{t.name});
+        if (t.identity() == null) return s.fail("Table '{s}' does not have the identity property. Cannot perform SET operation.", .{t.bare});
         const key = try std.ascii.allocLowerString(s.a, try std.fmt.allocPrint(s.a, "{s}.{s}", .{ t.schema, t.name }));
         return codeEval(s, &.{try s.func(pos, "xq_tsql_identity_insert", &.{ try s.str(pos, key), try s.int_(pos, @intFromBool(on)) })});
     }
@@ -242,14 +242,26 @@ pub fn exec(s: *Parser) Error!void {
     const pos = s.here();
     if (std.ascii.eqlIgnoreCase(kind, "COLUMN")) {
         if (ps.len < 2) return s.fail("Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
-        const table: tree.QName = if (ps.len >= 3) .{ .schema = try s.mapSchema(.{ .text = ps[ps.len - 3], .pos = pos }), .name = .{ .text = ps[ps.len - 2], .pos = pos } } else .{ .name = .{ .text = ps[0], .pos = pos } };
+        const table = try s.resolveParts(try names(s, ps[0 .. ps.len - 1], pos), .lookup);
         const at = try s.new(tree.AlterTable, .{ .name = table, .action = .{ .rename_column = .{ .old = .{ .text = ps[ps.len - 1], .pos = pos }, .new = .{ .text = args.items[1], .pos = pos } } } });
         return s.lowerStmt(.{ .alter_table = at });
     }
     if (!std.ascii.eqlIgnoreCase(kind, "OBJECT")) return s.fail("xqlite: sp_rename of an {s} is not supported", .{kind});
-    const table: tree.QName = if (ps.len >= 2) .{ .schema = try s.mapSchema(.{ .text = ps[ps.len - 2], .pos = pos }), .name = .{ .text = ps[ps.len - 1], .pos = pos } } else .{ .name = .{ .text = ps[0], .pos = pos } };
-    const at = try s.new(tree.AlterTable, .{ .name = table, .action = .{ .rename_to = .{ .text = args.items[1], .pos = pos } } });
+    if (ps.len > 3) return s.fail("xqlite: sp_rename of '{s}' is not supported", .{args.items[0]});
+    const table = try s.resolveParts(try names(s, ps, pos), .lookup);
+    // The object stays in its schema.
+    const old = table.name.text;
+    const new = try std.fmt.allocPrint(s.a, "{s}{s}", .{ old[0 .. old.len - (try s.bareName(old)).len], args.items[1] });
+    const at = try s.new(tree.AlterTable, .{ .name = table, .action = .{ .rename_to = .{ .text = new, .pos = pos } } });
     return s.lowerStmt(.{ .alter_table = at });
+}
+
+/// Parts of a name (1 to 3) as Names at `pos`.
+fn names(s: *Parser, ps: []const []const u8, pos: u32) Error![]tree.Name {
+    if (ps.len == 0 or ps.len > 3) return s.fail("Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
+    const out = try s.a.alloc(tree.Name, ps.len);
+    for (ps, out) |p, *n| n.* = .{ .text = p, .pos = pos };
+    return out;
 }
 
 /// The declared type of a variable, for types.parseText().

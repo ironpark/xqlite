@@ -36,6 +36,8 @@ const parser = @import("parser.zig");
 const functions = @import("functions.zig");
 const types = @import("types.zig");
 const session = @import("session.zig");
+const schemas = @import("schemas.zig");
+const nsp = catalog.schemas;
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -54,10 +56,11 @@ pub fn create(s: *Parser) Error!void {
     if (s.isKw("TABLE")) return createTable(s);
     if (s.isKw("VIEW")) return createView(s, or_alter, false);
     if (s.isKw("SEQUENCE")) return createSequence(s);
+    if (s.isKw("SCHEMA")) return schemas.create(s);
     const unique = s.eatKw("UNIQUE");
     _ = s.eatKw("CLUSTERED") or s.eatKw("NONCLUSTERED");
     if (s.isKw("INDEX")) return createIndex(s, unique);
-    if (s.isAnyKw(&.{ "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "TYPE", "SCHEMA", "DATABASE", "SYNONYM", "LOGIN", "USER", "ROLE" })) {
+    if (s.isAnyKw(&.{ "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "TYPE", "DATABASE", "SYNONYM", "LOGIN", "USER", "ROLE" })) {
         return s.fail("xqlite: CREATE {s} is not supported in the T-SQL dialect", .{s.tok.text});
     }
     return s.syntaxError();
@@ -68,6 +71,8 @@ pub fn alter(s: *Parser) Error!void {
     try s.expectKw("ALTER");
     if (s.isKw("VIEW")) return createView(s, true, true);
     if (s.isKw("TABLE")) return alterTable(s);
+    if (s.isKw("SCHEMA")) return schemas.transfer(s);
+    if (s.isKw("USER")) return schemas.alterUser(s);
     return s.fail("xqlite: ALTER {s} is not supported in the T-SQL dialect", .{s.tok.text});
 }
 
@@ -82,12 +87,12 @@ const Table = struct {
 
 fn createTable(s: *Parser) Error!void {
     try s.expectKw("TABLE");
-    const q = try s.qualifiedName();
+    const q = try s.qualifiedNameFor(.create);
     const name = q.name.text;
     const temp = name.len > 0 and name[0] == '#';
     const schema: []const u8 = if (temp) "temp" else if (q.schema) |x| x.text else "main";
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    if (build.findTable(s.p.db, name, schema) != null) return s.fail("There is already an object named '{s}' in the database.", .{name});
+    if (build.findTable(s.p.db, name, schema) != null) return s.fail("There is already an object named '{s}' in the database.", .{try s.bareName(name)});
     const tname: tree.QName = if (temp) .{ .name = q.name } else .{ .schema = .{ .text = schema, .pos = q.name.pos }, .name = q.name };
     try s.expectOp("(");
     var t: Table = .{ .name = name };
@@ -118,6 +123,7 @@ fn createTable(s: *Parser) Error!void {
         const i_db = catalog.schemaIndex(s.p, schema) orelse return error.ParseFailed;
         for (t.indexes.items) |*ci| {
             ci.name.schema = .{ .text = schema };
+            ci.name.name.text = try indexName(s, name, ci.name.name.text);
             var r: render.Renderer = .{ .p = s.p, .src = s.lx.sql };
             const text = r.createIndex(ci) catch |err| return parser.lowered(err);
             catalog.codeExec(s.p, i_db, text);
@@ -348,7 +354,7 @@ fn columnConstraints(s: *Parser, table: []const u8, name: Name, ty: ?types.Type,
             try cons.append(s.a, .{ .name = cname, .kind = .{ .default = e } });
         } else if (s.eatKw("IDENTITY")) {
             const t = ty orelse return s.syntaxError();
-            if (identity) return s.fail("Multiple identity columns specified for table '{s}'. Only one identity column per table is allowed.", .{table});
+            if (identity) return s.fail("Multiple identity columns specified for table '{s}'. Only one identity column per table is allowed.", .{try s.bareName(table)});
             identity = true;
             if (!t.isInteger() and !(t.isExactNumeric() and t.scaleOf() == 0)) {
                 return s.fail("Identity column '{s}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, and constrained to be nonnullable.", .{name.text});
@@ -440,8 +446,17 @@ fn createIndex(s: *Parser, unique: bool) Error!void {
     const temp = q.name.text.len > 0 and q.name.text[0] == '#';
     const schema: Name = if (temp) .{ .text = "temp" } else q.schema orelse .{ .text = "main" };
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    if (build.findTable(s.p.db, q.name.text, schema.text) == null) return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{q.name.text});
-    try s.lowerStmt(.{ .create_index = try s.new(tree.CreateIndex, .{ .unique = unique, .name = .{ .schema = schema, .name = n }, .table = q.name, .items = items, .where = where }) });
+    if (build.findTable(s.p.db, q.name.text, schema.text) == null) return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{try s.bareName(q.name.text)});
+    const iname: Name = .{ .text = try indexName(s, q.name.text, n.text), .pos = n.pos };
+    try s.lowerStmt(.{ .create_index = try s.new(tree.CreateIndex, .{ .unique = unique, .name = .{ .schema = schema, .name = iname }, .table = q.name, .items = items, .where = where }) });
+}
+
+/// The SQLite name of index `index` of table `table` (its SQLite name):
+/// in the table's schema, "s.index" for a table of schema s.
+fn indexName(s: *Parser, table: []const u8, index: []const u8) Error![]const u8 {
+    const sp = nsp.split(table) orelse return index;
+    const info = (try s.findSchema(sp.schema)) orelse return index;
+    return nsp.mangle(s.a, info.name, index);
 }
 
 // ========================================================= CREATE VIEW
@@ -450,7 +465,7 @@ fn createIndex(s: *Parser, unique: bool) Error!void {
 /// [WITH CHECK OPTION]; ALTER VIEW (`alter`): the view must exist.
 fn createView(s: *Parser, or_alter: bool, alter_only: bool) Error!void {
     try s.expectKw("VIEW");
-    const q = try s.qualifiedName();
+    const q = try s.qualifiedNameFor(if (alter_only) .lookup else .create);
     var cols: []Name = &.{};
     if (s.isOp("(")) cols = try s.nameList();
     if (s.eatKw("WITH")) {
@@ -473,8 +488,9 @@ fn createView(s: *Parser, or_alter: bool, alter_only: bool) Error!void {
     const schema = if (q.schema) |x| x.text else "main";
     const exists = build.findTable(s.p.db, q.name.text, schema) != null;
     if (alter_only and !exists) return s.fail("Invalid object name '{s}'.", .{q.name.text});
-    if (!or_alter and exists) return s.fail("There is already an object named '{s}' in the database.", .{q.name.text});
-    try s.lowerStmt(.{ .create_view = try s.new(tree.CreateView, .{ .or_replace = or_alter, .name = q, .cols = cols, .select = sel }) });
+    if (!or_alter and exists) return s.fail("There is already an object named '{s}' in the database.", .{try s.bareName(q.name.text)});
+    const vname: tree.QName = .{ .schema = q.schema orelse .{ .text = "main" }, .name = q.name };
+    try s.lowerStmt(.{ .create_view = try s.new(tree.CreateView, .{ .or_replace = or_alter, .name = vname, .cols = cols, .select = sel }) });
 }
 
 /// Every column of a view needs a name.
@@ -500,7 +516,8 @@ fn checkColumnNames(s: *Parser, b: *const tree.Body) Error!void {
 /// minimum (ascending) as in SQL Server.
 fn createSequence(s: *Parser) Error!void {
     try s.expectKw("SEQUENCE");
-    const q = try s.qualifiedName();
+    var q = try s.qualifiedNameFor(.create);
+    if (q.schema == null) q.schema = .{ .text = "main" };
     var opts: tree.SeqOpts = .{};
     var ty: types.Type = .{ .base = .bigint };
     while (!s.atStmtEnd()) {
@@ -537,8 +554,9 @@ fn createSequence(s: *Parser) Error!void {
 /// DROP SEQUENCE s.
 pub fn drop(s: *Parser) Error!void {
     try s.expectKw("DROP");
+    if (s.isKw("SCHEMA")) return schemas.drop(s);
     const kind: tree.ObjectKind = if (s.eatKw("TABLE")) .table else if (s.eatKw("VIEW")) .view else if (s.eatKw("INDEX")) .index else if (s.eatKw("SEQUENCE")) .sequence else {
-        if (s.isAnyKw(&.{ "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "TYPE", "SCHEMA", "DATABASE" })) return s.fail("xqlite: DROP {s} is not supported in the T-SQL dialect", .{s.tok.text});
+        if (s.isAnyKw(&.{ "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "TYPE", "DATABASE" })) return s.fail("xqlite: DROP {s} is not supported in the T-SQL dialect", .{s.tok.text});
         return s.syntaxError();
     };
     const if_exists = try s.ifExists();
@@ -546,6 +564,11 @@ pub fn drop(s: *Parser) Error!void {
     var found: ?tree.QName = null;
     while (true) {
         var q: tree.QName = undefined;
+        const start = s.tok;
+        // DROP INDEX: the index's table (its SQLite name), and the name
+        // SQL Server's message shows (t.i).
+        var itable: ?[]const u8 = null;
+        var iwritten: ?[]const u8 = null;
         if (kind == .index) {
             // DROP INDEX i ON t, or [schema.]t.i: the index's database is
             // its table's.
@@ -555,27 +578,35 @@ pub fn drop(s: *Parser) Error!void {
             const ps = parts.items;
             if (s.eatKw("ON")) {
                 if (ps.len != 1) return s.syntaxError();
+                const tstart = s.tok;
                 const t = try s.qualifiedName();
-                q = .{ .schema = t.schema, .name = ps[0] };
+                q = .{ .schema = t.schema, .name = .{ .text = try indexName(s, t.name.text, ps[0].text), .pos = ps[0].pos } };
                 if (t.name.text.len > 0 and t.name.text[0] == '#') q.schema = .{ .text = "temp" };
+                itable = t.name.text;
+                const tw = try writtenName(s, tstart.text.ptr[0 .. @intFromPtr(s.prev_end) - @intFromPtr(tstart.text.ptr)]);
+                iwritten = try std.fmt.allocPrint(s.a, "{s}.{s}", .{ tw, ps[0].text });
             } else {
-                if (ps.len < 2) return s.fail("xqlite: DROP INDEX needs the table: DROP INDEX i ON t", .{});
+                if (ps.len < 2 or ps.len > 4) return s.fail("xqlite: DROP INDEX needs the table: DROP INDEX i ON t", .{});
                 const table = ps[ps.len - 2];
-                q = .{ .schema = if (ps.len >= 3) try s.mapSchema(ps[ps.len - 3]) else null, .name = ps[ps.len - 1] };
+                const t = try s.resolveParts(ps[0 .. ps.len - 1], .lookup);
+                q = .{ .schema = t.schema, .name = .{ .text = try indexName(s, t.name.text, ps[ps.len - 1].text), .pos = ps[ps.len - 1].pos } };
                 if (table.text.len > 0 and table.text[0] == '#') q.schema = .{ .text = "temp" };
+                itable = t.name.text;
             }
         } else q = try s.qualifiedName();
+        // The name as written, for messages.
+        const written = start.text.ptr[0 .. @intFromPtr(s.prev_end) - @intFromPtr(start.text.ptr)];
         if (q.name.text.len > 0 and q.name.text[0] == '#' and q.schema == null) q.schema = .{ .text = "temp" };
         const exists = switch (kind) {
             .table, .view => if (build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null)) |t| (t.isView() == (kind == .view)) else false,
-            .index => indexExists(s, q),
+            .index => indexExists(s, q, itable),
             .sequence => true,
         };
         if (!exists and !if_exists) {
             return switch (kind) {
-                .table => s.fail("Cannot drop the table '{s}', because it does not exist or you do not have permission.", .{q.name.text}),
-                .view => s.fail("Cannot drop the view '{s}', because it does not exist or you do not have permission.", .{q.name.text}),
-                .index => s.fail("Cannot drop the index '{s}', because it does not exist or you do not have permission.", .{q.name.text}),
+                .table => s.fail("Cannot drop the table '{s}', because it does not exist or you do not have permission.", .{try writtenName(s, written)}),
+                .view => s.fail("Cannot drop the view '{s}', because it does not exist or you do not have permission.", .{try writtenName(s, written)}),
+                .index => s.fail("Cannot drop the index '{s}', because it does not exist or you do not have permission.", .{iwritten orelse try writtenName(s, written)}),
                 .sequence => unreachable,
             };
         }
@@ -591,13 +622,32 @@ pub fn drop(s: *Parser) Error!void {
     try s.lowerStmt(.{ .drop = try s.new(tree.Drop, .{ .kind = kind, .if_exists = if_exists, .name = q }) });
 }
 
-fn indexExists(s: *Parser, q: tree.QName) bool {
+/// A name as written ([db].[s].t ...) as SQL Server's messages show it:
+/// its parts without their quotes, joined by dots.
+fn writtenName(s: *Parser, text: []const u8) Error![]const u8 {
+    var lx: @import("lexer.zig").Lexer = .init(try s.a.dupeSentinel(u8, text, 0));
+    var out: std.ArrayList(u8) = .empty;
+    while (true) {
+        const t = lx.next();
+        switch (t.kind) {
+            .eof => break,
+            .ident, .quoted_ident => try out.appendSlice(s.a, try s.nameText(t)),
+            else => try out.appendSlice(s.a, t.text),
+        }
+    }
+    return out.items;
+}
+
+/// Whether index `q` of table `table` (any table if null) exists.
+fn indexExists(s: *Parser, q: tree.QName, table: ?[]const u8) bool {
     const db = s.p.db;
     for (db.dbs.items, 0..) |d, i| {
         if (q.schema) |x| {
             if (build.findDbName(db, x.text) != i) continue;
         }
-        if (d.schema.idx_hash.get(q.name.text) != null) return true;
+        const idx = d.schema.idx_hash.get(q.name.text) orelse continue;
+        if (table) |t| if (!std.ascii.eqlIgnoreCase(idx.table.name, t)) continue;
+        return true;
     }
     return false;
 }
@@ -611,7 +661,8 @@ fn alterTable(s: *Parser) Error!void {
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null) orelse
-        return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{q.name.text});
+        return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{try s.bareName(q.name.text)});
+    const bare = try s.bareName(tab.name);
     if (s.eatKw("ADD")) {
         if (s.isAnyKw(&.{ "CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "DEFAULT" })) {
             return s.fail("xqlite: ALTER TABLE ... ADD CONSTRAINT is not supported", .{});
@@ -619,7 +670,7 @@ fn alterTable(s: *Parser) Error!void {
         _ = s.eatKw("COLUMN");
         const def = try columnDef(s, tab.name);
         if (s.isOp(",")) return s.fail("xqlite: ALTER TABLE ... ADD of several columns is not supported (add them one at a time)", .{});
-        if (build.columnIndex(tab, def.name.text) >= 0) return s.fail("Column names in each table must be unique. Column name '{s}' in table '{s}' is specified more than once.", .{ def.name.text, tab.name });
+        if (build.columnIndex(tab, def.name.text) >= 0) return s.fail("Column names in each table must be unique. Column name '{s}' in table '{s}' is specified more than once.", .{ def.name.text, bare });
         var with_values = false;
         if (s.isKw("WITH") and s.peek().isKw("VALUES")) {
             s.advance();
@@ -649,7 +700,7 @@ fn alterTable(s: *Parser) Error!void {
         if (s.isOp(",")) return s.fail("xqlite: ALTER TABLE ... DROP COLUMN of several columns is not supported (drop them one at a time)", .{});
         if (build.columnIndex(tab, n.text) < 0) {
             if (if_exists) return session.emptyStatement(s);
-            return s.fail("ALTER TABLE DROP COLUMN failed because column '{s}' does not exist in table '{s}'.", .{ n.text, tab.name });
+            return s.fail("ALTER TABLE DROP COLUMN failed because column '{s}' does not exist in table '{s}'.", .{ n.text, bare });
         }
         return s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = q, .action = .{ .drop_column = .{ .name = n } } }) });
     }

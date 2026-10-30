@@ -12,6 +12,7 @@ const Mem = c.Mem;
 const Context = c.Context;
 const RC = c.RC;
 const vtab = @import("../sql/vtab.zig");
+const func = @import("func.zig");
 
 // ============================================================ C structs
 
@@ -68,7 +69,7 @@ pub const CModule = extern struct {
     xSync: ?XVtab,
     xCommit: ?XVtab,
     xRollback: ?XVtab,
-    xFindFunction: ?*const anyopaque,
+    xFindFunction: ?*const fn (*CVtab, c_int, [*:0]const u8, *?func.XFunc, *?*anyopaque) callconv(.c) c_int,
     xRename: ?*const fn (*CVtab, [*:0]const u8) callconv(.c) c_int,
     // iVersion 2
     xSavepoint: ?*const fn (*CVtab, c_int) callconv(.c) c_int,
@@ -107,9 +108,19 @@ const Tab = struct {
     cvt: *CVtab,
     wrap: *ModWrap,
     db: *Handle,
+    /// The functions xFindFunction handed back, as the user data of the
+    /// engine's overloads (sqlite3_user_data() answers their pArg);
+    /// they live as long as the table.
+    funcs: std.ArrayList(*func.FuncWrap) = .empty,
 
     fn of(t: *vtab.Vtab) *Tab {
         return @fieldParentPtr("base", t);
+    }
+
+    fn destroy(t: *Tab) void {
+        for (t.funcs.items) |w| c.gpa.destroy(w);
+        t.funcs.deinit(c.gpa);
+        c.gpa.destroy(t);
     }
 
     /// Move the C error message (from sqlite3_malloc()) to the engine's
@@ -224,18 +235,43 @@ fn xBestIndex(base: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
 fn xDisconnect(base: *vtab.Vtab) i32 {
     const t = Tab.of(base);
     const rc = if (t.wrap.cmod.xDisconnect) |f| f(t.cvt) else RC.OK;
-    c.gpa.destroy(t);
+    t.destroy();
     return rc;
 }
 
 fn xDestroy(base: *vtab.Vtab) i32 {
     const t = Tab.of(base);
     const f = t.wrap.cmod.xDestroy orelse t.wrap.cmod.xDisconnect orelse {
-        c.gpa.destroy(t);
+        t.destroy();
         return RC.OK;
     };
     const rc = f(t.cvt);
-    if (rc == RC.OK) c.gpa.destroy(t);
+    if (rc == RC.OK) t.destroy();
+    return rc;
+}
+
+/// xFindFunction: the C function the table overloads `name` with runs
+/// behind func.scalarThunk(), with a FuncWrap holding it and its pArg.
+fn xFindFunction(base: *vtab.Vtab, n_arg: i32, name: [:0]const u8, out_func: *?c.int.FuncDef.StepFn, out_arg: *?*anyopaque) i32 {
+    const t = Tab.of(base);
+    var x_func: ?func.XFunc = null;
+    var p_arg: ?*anyopaque = null;
+    const rc = t.wrap.cmod.xFindFunction.?(t.cvt, n_arg, name.ptr, &x_func, &p_arg);
+    if (rc == 0) return 0;
+    const f = x_func orelse return 0;
+    const w = for (t.funcs.items) |w| {
+        if (w.x_func == f and w.p_app == p_arg) break w;
+    } else blk: {
+        const w = c.gpa.create(func.FuncWrap) catch return 0;
+        w.* = .{ .x_func = f, .x_step = null, .x_final = null, .x_value = null, .x_inverse = null, .p_app = p_arg, .x_destroy = null };
+        t.funcs.append(c.gpa, w) catch {
+            c.gpa.destroy(w);
+            return 0;
+        };
+        break :blk w;
+    };
+    out_func.* = func.scalarThunk;
+    out_arg.* = w;
     return rc;
 }
 
@@ -378,8 +414,7 @@ fn createModule(db_arg: ?*Handle, z_name: ?[*:0]const u8, p: ?*const CModule, au
     m.x_sync = if (cm.xSync != null) vtabMethod("xSync") else null;
     m.x_commit = if (cm.xCommit != null) vtabMethod("xCommit") else null;
     m.x_rollback = if (cm.xRollback != null) vtabMethod("xRollback") else null;
-    // xFindFunction: C would hand back C functions, which the engine
-    // cannot call; functions are not overloaded.
+    m.x_find_function = if (cm.xFindFunction != null) xFindFunction else null;
     m.x_rename = if (cm.xRename != null) xRename else null;
     if (cm.iVersion >= 2) {
         m.x_savepoint = if (cm.xSavepoint != null) savepointMethod("xSavepoint") else null;

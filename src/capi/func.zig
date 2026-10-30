@@ -22,7 +22,7 @@ pub const XFinal = *const fn (?*Context) callconv(.c) void;
 
 // ============================================================= functions
 
-const FuncWrap = struct {
+pub const FuncWrap = struct {
     x_func: ?XFunc,
     x_step: ?XFunc,
     x_final: ?XFinal,
@@ -45,7 +45,7 @@ fn argvPtr(argv: []*Mem) ?[*]*Mem {
     return if (argv.len == 0) null else argv.ptr;
 }
 
-fn scalarThunk(ctx: *Context, argv: []*Mem) void {
+pub fn scalarThunk(ctx: *Context, argv: []*Mem) void {
     const w = FuncWrap.of(ctx);
     w.x_func.?(ctx, @intCast(argv.len), argvPtr(argv));
 }

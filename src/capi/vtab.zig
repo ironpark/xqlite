@@ -349,6 +349,8 @@ fn xIntegrity(base: *vtab.Vtab, schema: [:0]const u8, tab_name: [:0]const u8, fl
 const destroyWrap = c.int.destructor(ModWrap.destroy);
 
 fn createModule(db_arg: ?*Handle, z_name: ?[*:0]const u8, p: ?*const CModule, aux: ?*anyopaque, x_destroy: ?c.CDestructor) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const name = c.span(z_name) orelse return RC.MISUSE;
     const cm = p orelse {
@@ -404,6 +406,8 @@ pub export fn sqlite3_create_module_v2(db: ?*Handle, z_name: ?[*:0]const u8, p: 
 }
 
 pub export fn sqlite3_drop_modules(db: ?*Handle, az_keep: ?[*]const ?[*:0]const u8) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const h = db orelse return RC.MISUSE;
     const keep = az_keep orelse return vtab.dropModules(h, null);
     var n: usize = 0;
@@ -415,11 +419,15 @@ pub export fn sqlite3_drop_modules(db: ?*Handle, az_keep: ?[*]const ?[*:0]const 
 }
 
 pub export fn sqlite3_declare_vtab(db: ?*Handle, z_sql: ?[*:0]const u8) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     return vtab.declareVtab(db orelse return RC.MISUSE, std.mem.span(z_sql orelse return RC.MISUSE));
 }
 
 /// sqlite3_vtab_config() with its argument out of the varargs (C shim).
 pub fn xq_vtab_config(db: ?*Handle, op: c_int, arg: c_int) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     return vtab.config(db orelse return RC.MISUSE, op, arg);
 }
 

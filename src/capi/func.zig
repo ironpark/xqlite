@@ -90,6 +90,8 @@ fn createFunction(
     x_inverse: ?XFunc,
     x_destroy: ?c.CDestructor,
 ) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     // The combinations sqlite3CreateFunc() refuses.
     if (name == null or
@@ -145,6 +147,8 @@ pub export fn sqlite3_create_function16(db: ?*Handle, z_name: ?*const anyopaque,
 }
 
 pub export fn sqlite3_overload_function(db: ?*Handle, z_name: ?[*:0]const u8, n_arg: c_int) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const h = db orelse return RC.MISUSE;
     const name = c.span(z_name) orelse return RC.MISUSE;
     if (n_arg < -2) return RC.MISUSE;
@@ -490,6 +494,8 @@ fn compareThunk(user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order 
 }
 
 fn createCollation(db_arg: ?*Handle, name: ?[]const u8, p_arg: ?*anyopaque, x_compare: ?CCompare, x_destroy: ?c.CDestructor) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const z = name orelse return RC.MISUSE;
     const e = c.ext(db);

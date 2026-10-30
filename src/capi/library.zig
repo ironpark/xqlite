@@ -36,10 +36,11 @@ pub export fn sqlite3_libversion_number() callconv(.c) c_int {
     return version_number;
 }
 
-/// Multi-thread mode (SQLITE_THREADSAFE=2): connections and statements
-/// have no mutex, so one connection must not be used by two threads at
-/// once; separate connections may run on separate threads.
-pub const threadsafe = 2;
+/// SQLITE_THREADSAFE=2: the library has mutexes and connections are
+/// multi-thread by default; a connection is serialized (it has a mutex
+/// of its own) when sqlite3_config() or sqlite3_open_v2()'s flags ask
+/// (docs/c-api.md). Single-threaded WebAssembly has none (0).
+pub const threadsafe: c_int = if (c.have_threads) 2 else 0;
 
 pub export fn sqlite3_threadsafe() callconv(.c) c_int {
     return threadsafe;
@@ -49,7 +50,7 @@ pub export fn sqlite3_threadsafe() callconv(.c) c_int {
 /// mode of the C ABI.
 fn compileOption(n: c_int) ?[]const u8 {
     const o = func_mod.compileoptionGet(n) orelse return null;
-    if (std.mem.startsWith(u8, o, "THREADSAFE=")) return "THREADSAFE=2";
+    if (std.mem.startsWith(u8, o, "THREADSAFE=")) return if (c.have_threads) "THREADSAFE=2" else "THREADSAFE=0";
     return o;
 }
 
@@ -176,10 +177,24 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
     // time; the others only before sqlite3_initialize().
     if (@atomicLoad(bool, &c.state.initialized, .acquire) and op != 16 and op != 24) return RC.MISUSE;
     switch (op) {
-        // SINGLETHREAD and MULTITHREAD: what the library is.
-        1, 2 => return RC.OK,
-        // SERIALIZED: connections have no mutexes to serialize with.
-        3 => return RC.ERROR,
+        // SINGLETHREAD, MULTITHREAD and SERIALIZED: the mode of the
+        // connections opened from now on (bCoreMutex, bFullMutex).
+        1 => {
+            c.state.core_mutex = false;
+            c.state.full_mutex = false;
+            return RC.OK;
+        },
+        2 => {
+            c.state.core_mutex = c.have_threads;
+            c.state.full_mutex = false;
+            return RC.OK;
+        },
+        3 => {
+            if (!c.have_threads) return RC.ERROR;
+            c.state.core_mutex = true;
+            c.state.full_mutex = true;
+            return RC.OK;
+        },
         4 => {
             const m: *const MemMethods = @ptrCast(@alignCast(p orelse return RC.MISUSE));
             if (m.xMalloc == null or m.xFree == null or m.xRealloc == null) return RC.MISUSE;

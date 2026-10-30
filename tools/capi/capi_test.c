@@ -997,7 +997,8 @@ static void test_misc(void){
 /* ==================================================================== */
 /* Group C: statements, text encodings, threading.                      */
 /* Against SQLite these need a build with SQLITE_ENABLE_COLUMN_METADATA, */
-/* SQLITE_ENABLE_NORMALIZE and SQLITE_ENABLE_STMT_SCANSTATUS.            */
+/* SQLITE_ENABLE_NORMALIZE, SQLITE_ENABLE_STMT_SCANSTATUS and            */
+/* SQLITE_THREADSAFE=2 (multi-thread by default, as xqlite).             */
 /* ==================================================================== */
 
 /* sqlite3.h declares it only with SQLITE_ENABLE_NORMALIZE. */
@@ -1251,6 +1252,65 @@ static void test_stmt_explain(void){
   sqlite3_close(db);
 }
 
+#include <pthread.h>
+
+/* Threads sharing one serialized connection. */
+#define N_THREAD 4
+#define N_ROW 300
+static void *thread_main(void *pArg){
+  sqlite3 *db = (sqlite3*)pArg;
+  int i;
+  for(i=0; i<N_ROW; i++){
+    sqlite3_stmt *p = 0;
+    if( sqlite3_prepare_v2(db, "INSERT INTO t(x) VALUES(?)", -1, &p, 0)!=SQLITE_OK ) return (void*)1;
+    sqlite3_bind_int(p, 1, i);
+    if( sqlite3_step(p)!=SQLITE_DONE ){ sqlite3_finalize(p); return (void*)2; }
+    sqlite3_finalize(p);
+    if( sqlite3_prepare_v2(db, "SELECT count(*), sum(x) FROM t", -1, &p, 0)!=SQLITE_OK ) return (void*)3;
+    if( sqlite3_step(p)!=SQLITE_ROW || sqlite3_column_int(p, 0)<1 ){ sqlite3_finalize(p); return (void*)4; }
+    sqlite3_finalize(p);
+  }
+  return 0;
+}
+
+static void test_threads(void){
+  sqlite3 *db = 0;
+  pthread_t aThread[N_THREAD];
+  int i;
+  sqlite3_mutex *m;
+  /* Multi-thread mode by default: no connection mutex. */
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK(sqlite3_db_mutex(db)==0);
+  sqlite3_close(db);
+  CHECK_RC(sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_NOMUTEX, 0), SQLITE_OK, db);
+  CHECK(sqlite3_db_mutex(db)==0);
+  sqlite3_close(db);
+  /* After sqlite3_initialize(), the mode can no longer change. */
+  CHECK(sqlite3_config(SQLITE_CONFIG_SERIALIZED)==SQLITE_MISUSE);
+
+  CHECK_RC(sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_FULLMUTEX, 0), SQLITE_OK, db);
+  m = sqlite3_db_mutex(db);
+  CHECK(m!=0);
+  /* The mutex is recursive and the application may hold it. */
+  sqlite3_mutex_enter(m);
+  CHECK(sqlite3_mutex_held(m));
+  CHECK_STR(one(db, "SELECT 1"), "1");
+  sqlite3_mutex_leave(m);
+  exec(db, "CREATE TABLE t(x)");
+  for(i=0; i<N_THREAD; i++) CHECK(pthread_create(&aThread[i], 0, thread_main, db)==0);
+  for(i=0; i<N_THREAD; i++){
+    void *pRet = 0;
+    pthread_join(aThread[i], &pRet);
+    CHECK(pRet==0);
+  }
+  {
+    char zExpect[64];
+    snprintf(zExpect, sizeof(zExpect), "%d", N_THREAD*N_ROW);
+    CHECK_STR(one(db, "SELECT count(*) FROM t"), zExpect);
+  }
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
+}
+
 int main(void){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
   if( mkdtemp(zDir)==0 ){ perror("mkdtemp"); return 1; }
@@ -1271,6 +1331,7 @@ int main(void){
   test_column_metadata();
   test_normalized_sql();
   test_stmt_explain();
+  test_threads();
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

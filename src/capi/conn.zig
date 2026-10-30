@@ -21,6 +21,8 @@ const OPEN_READONLY = 0x01;
 const OPEN_CREATE = 0x04;
 const OPEN_URI = 0x40;
 const OPEN_MEMORY = 0x80;
+const OPEN_NOMUTEX = 0x8000;
+const OPEN_FULLMUTEX = 0x10000;
 const OPEN_EXRESCODE = 0x02000000;
 
 // ================================================================== open
@@ -67,12 +69,28 @@ fn openDatabase(z_filename: ?[*:0]const u8, pp_db: ?*?*Handle, flags: c_int, z_v
 
     const ext = c.gpa.create(Ext) catch return RC.NOMEM;
     ext.* = .{ .vfs = entry orelse vfs_mod.find(null).? };
+    // Serialized or multi-thread, as in SQLite's openDatabase().
+    const serialized = if (!c.state.core_mutex)
+        false
+    else if (flags & OPEN_NOMUTEX != 0)
+        false
+    else if (flags & OPEN_FULLMUTEX != 0)
+        true
+    else
+        c.state.full_mutex;
+    if (serialized) {
+        ext.mutex = c.sqlite3_mutex_alloc(c.MUTEX_RECURSIVE) orelse {
+            c.gpa.destroy(ext);
+            return RC.NOMEM;
+        };
+    }
     var h: ?*Handle = null;
     // A connection that cannot get going still comes back with its
     // error, as in SQLite: here one on a private in-memory database.
     const failing = entry == null or bad_dialect != null;
     var rc = c.main.open(ext.vfs.engine, if (failing) ":memory:" else name, if (failing) .{} else oflags, &h);
     const db = h orelse {
+        if (ext.mutex) |m| c.sqlite3_mutex_free(m);
         c.gpa.destroy(ext);
         return RC.NOMEM;
     };
@@ -154,6 +172,7 @@ fn freeExt(e: *Ext) void {
     if (e.errmsg16) |m| c.gpa.free(m);
     e.started.deinit(c.gpa);
     if (e.autovac_destroy) |d| d(e.autovac.arg);
+    if (e.mutex) |m| c.sqlite3_mutex_free(m);
     c.gpa.destroy(e);
 }
 
@@ -162,11 +181,13 @@ fn freeExt(e: *Ext) void {
 fn close(db_arg: ?*Handle, zombie: bool) c_int {
     const db = db_arg orelse return RC.OK;
     const e = c.extOf(db) orelse return c.main.close(db);
+    const lk = c.lock(db);
     if (e.trace_mask & c.TRACE_CLOSE != 0 and !e.zombie) {
         if (e.trace.f) |f| _ = f(c.TRACE_CLOSE, e.trace.arg, db, null);
     }
     const rc = c.main.close(db);
     if (rc == RC.BUSY) {
+        defer lk.unlock();
         if (zombie) {
             e.zombie = true;
             c.main.errorClear(db);
@@ -174,17 +195,20 @@ fn close(db_arg: ?*Handle, zombie: bool) c_int {
         }
         return RC.BUSY;
     }
+    // The mutex goes with the connection (sqlite3LeaveMutexAndCloseZombie()).
+    lk.unlock();
     freeExt(e);
     return rc;
 }
 
-/// A zombie connection closes once it can (after a finalize or a backup
-/// ends).
-pub fn closeZombie(db: *Handle) void {
-    const e = c.extOf(db) orelse return;
-    if (!e.zombie) return;
-    if (db.vdbe != null) return;
-    if (c.main.close(db) == RC.OK) freeExt(e);
+/// Port of sqlite3LeaveMutexAndCloseZombie(): leave the mutex taken by
+/// `lk`, closing `db` first if it is a zombie that can now close (after
+/// a finalize or a backup ends).
+pub fn leaveAndCloseZombie(db: *Handle, lk: c.Lock) void {
+    const e = c.extOf(db) orelse return lk.unlock();
+    if (!e.zombie or db.vdbe != null or c.main.close(db) != RC.OK) return lk.unlock();
+    lk.unlock();
+    freeExt(e);
 }
 
 pub export fn sqlite3_close(db: ?*Handle) callconv(.c) c_int {
@@ -198,18 +222,26 @@ pub export fn sqlite3_close_v2(db: ?*Handle) callconv(.c) c_int {
 // ================================================================ errors
 
 pub export fn sqlite3_errcode(db: ?*Handle) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     return c.main.errcode(db orelse return RC.NOMEM);
 }
 
 pub export fn sqlite3_extended_errcode(db: ?*Handle) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     return c.main.extendedErrcode(db orelse return RC.NOMEM);
 }
 
 pub export fn sqlite3_errmsg(db: ?*Handle) callconv(.c) [*:0]const u8 {
+    const lk = c.lock(db);
+    defer lk.unlock();
     return c.main.errmsg(db orelse return c.util.errStr(RC.NOMEM).ptr).ptr;
 }
 
 pub export fn sqlite3_errmsg16(db_arg: ?*Handle) callconv(.c) ?*const anyopaque {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return null;
     const e = c.ext(db);
     if (e.errmsg16) |m| c.gpa.free(m);
@@ -222,15 +254,21 @@ pub export fn sqlite3_errstr(rc: c_int) callconv(.c) [*:0]const u8 {
 }
 
 pub export fn sqlite3_error_offset(db: ?*Handle) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     return c.main.errorOffset(db orelse return -1);
 }
 
 pub export fn sqlite3_extended_result_codes(db: ?*Handle, on: c_int) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     c.main.extendedResultCodes(db orelse return RC.MISUSE, on != 0);
     return RC.OK;
 }
 
 pub export fn sqlite3_set_errmsg(db_arg: ?*Handle, code: c_int, msg: ?[*:0]const u8) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     if (msg) |m| {
         c.main.errorWithMsg(db, code, "{s}", .{std.mem.span(m)});
@@ -257,6 +295,8 @@ pub export fn sqlite3_exec(
     p_arg: ?*anyopaque,
     pz_errmsg: ?*?[*:0]u8,
 ) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     var sql: [*:0]const u8 = z_sql orelse "";
     var rc: c_int = RC.OK;
@@ -440,6 +480,8 @@ pub export fn sqlite3_last_insert_rowid(db: ?*Handle) callconv(.c) i64 {
 }
 
 pub export fn sqlite3_set_last_insert_rowid(db: ?*Handle, rowid: i64) callconv(.c) void {
+    const lk = c.lock(db);
+    defer lk.unlock();
     (db orelse return).last_rowid = rowid;
 }
 
@@ -508,6 +550,8 @@ pub export fn sqlite3_db_readonly(db: ?*Handle, z_db_name: ?[*:0]const u8) callc
 }
 
 pub export fn sqlite3_txn_state(db_arg: ?*Handle, z_schema: ?[*:0]const u8) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return -1;
     var lo: usize = 0;
     var hi: usize = db.dbs.items.len;
@@ -529,6 +573,8 @@ pub export fn sqlite3_limit(db_arg: ?*Handle, id: c_int, new_val: c_int) callcon
 }
 
 pub export fn sqlite3_busy_timeout(db: ?*Handle, ms: c_int) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const h = db orelse return RC.MISUSE;
     if (c.extOf(h)) |e| e.busy = .{};
     return c.main.busyTimeout(h, ms);
@@ -541,6 +587,8 @@ fn busyThunk(arg: ?*anyopaque, count: i32) i32 {
 }
 
 pub export fn sqlite3_busy_handler(db: ?*Handle, f: ?c.CBusy, arg: ?*anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const h = db orelse return RC.MISUSE;
     const e = c.ext(h);
     e.busy = .{ .f = f, .arg = arg };
@@ -564,6 +612,8 @@ pub export fn sqlite3_table_column_metadata(
     p_primary_key: ?*c_int,
     p_autoinc: ?*c_int,
 ) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const table_name = c.span(z_table_name) orelse return RC.MISUSE;
     var err: ?[:0]u8 = null;
@@ -656,6 +706,8 @@ fn dbConfigOp(op: c_int) ?DbConfig {
 /// the C shim (capi/varargs.c): `a` and `b` the integers, `p` the
 /// pointer, `res` the int* result.
 pub fn xq_db_config(db_arg: ?*Handle, op: c_int, a: i64, b: i64, p: ?*anyopaque, res: ?*c_int) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     switch (op) {
         1000 => {
@@ -686,6 +738,8 @@ pub fn xq_db_config(db_arg: ?*Handle, op: c_int, a: i64, b: i64, p: ?*anyopaque,
 /// sqlite3_file_control(): the engine's files have no file-control
 /// methods, so only SQLITE_FCNTL_VFS_POINTER is answered.
 pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, op: c_int, p_arg: ?*anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     if (c.main.dbNameToBtree(db, c.span(z_db_name)) == null) return RC.ERROR;
     switch (op) {
@@ -699,6 +753,8 @@ pub export fn sqlite3_file_control(db_arg: ?*Handle, z_db_name: ?[*:0]const u8, 
 }
 
 pub export fn sqlite3_get_clientdata(db_arg: ?*Handle, z_name: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const e = c.extOf(db_arg) orelse return null;
     const name = c.span(z_name) orelse return null;
     for (e.clientdata.items) |cd| if (std.mem.eql(u8, cd.name, name)) return cd.data;
@@ -706,6 +762,8 @@ pub export fn sqlite3_get_clientdata(db_arg: ?*Handle, z_name: ?[*:0]const u8) c
 }
 
 pub export fn sqlite3_set_clientdata(db_arg: ?*Handle, z_name: ?[*:0]const u8, p_data: ?*anyopaque, x_destroy: ?*const anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const e = c.extOf(db_arg) orelse return RC.MISUSE;
     const name = c.span(z_name) orelse return RC.MISUSE;
     const del = c.cDestructor(x_destroy);
@@ -743,9 +801,9 @@ pub export fn sqlite3_db_release_memory(db: ?*Handle) callconv(.c) c_int {
     return if (db == null) RC.MISUSE else RC.OK;
 }
 
-pub export fn sqlite3_db_mutex(_: ?*Handle) callconv(.c) ?*anyopaque {
-    // Multi-thread mode: connections have no mutex.
-    return null;
+/// The connection's mutex: null in multi-thread mode.
+pub export fn sqlite3_db_mutex(db: ?*Handle) callconv(.c) ?*c.Mutex {
+    return (c.extOf(db) orelse return null).mutex;
 }
 
 pub export fn sqlite3_db_status(db: ?*Handle, op: c_int, p_cur: ?*c_int, p_hiwtr: ?*c_int, reset: c_int) callconv(.c) c_int {
@@ -760,6 +818,8 @@ pub export fn sqlite3_db_status(db: ?*Handle, op: c_int, p_cur: ?*c_int, p_hiwtr
 }
 
 pub export fn sqlite3_db_status64(db_arg: ?*Handle, op: c_int, p_cur: ?*i64, p_hiwtr: ?*i64, reset: c_int) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const cur = p_cur orelse return RC.MISUSE;
     const hi = p_hiwtr orelse return RC.MISUSE;
@@ -786,6 +846,8 @@ fn walThunk(arg: ?*anyopaque, db: *Handle, name: [:0]const u8, n_frame: i32) i32
 }
 
 pub export fn sqlite3_wal_hook(db_arg: ?*Handle, f: ?c.CWal, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return null;
     const e = c.ext(db);
     const old = if (db.wal_callback == walThunk) e.wal.arg else db.wal_arg;
@@ -805,12 +867,16 @@ pub export fn sqlite3_wal_checkpoint(db: ?*Handle, z_db: ?[*:0]const u8) callcon
 }
 
 pub export fn sqlite3_wal_checkpoint_v2(db_arg: ?*Handle, z_db: ?[*:0]const u8, mode: c_int, pn_log: ?*c_int, pn_ckpt: ?*c_int) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     if (mode < -1 or mode > 3) return RC.MISUSE;
     return c.main.walCheckpointV2(db, c.span(z_db), @enumFromInt(mode), pn_log, pn_ckpt);
 }
 
 pub export fn sqlite3_commit_hook(db: ?*Handle, f: ?c.CCommit, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return null;
     const old = e.commit.arg;
     e.commit = .{ .f = f, .arg = arg };
@@ -819,6 +885,8 @@ pub export fn sqlite3_commit_hook(db: ?*Handle, f: ?c.CCommit, arg: ?*anyopaque)
 }
 
 pub export fn sqlite3_rollback_hook(db: ?*Handle, f: ?c.CRollback, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return null;
     const old = e.rollback.arg;
     e.rollback = .{ .f = f, .arg = arg };
@@ -827,6 +895,8 @@ pub export fn sqlite3_rollback_hook(db: ?*Handle, f: ?c.CRollback, arg: ?*anyopa
 }
 
 pub export fn sqlite3_update_hook(db: ?*Handle, f: ?c.CUpdate, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return null;
     const old = e.update.arg;
     e.update = .{ .f = f, .arg = arg };
@@ -835,6 +905,8 @@ pub export fn sqlite3_update_hook(db: ?*Handle, f: ?c.CUpdate, arg: ?*anyopaque)
 }
 
 pub export fn sqlite3_progress_handler(db: ?*Handle, n_ops: c_int, f: ?c.CProgress, arg: ?*anyopaque) callconv(.c) void {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return;
     if (n_ops > 0 and f != null) {
         e.progress = .{ .f = f, .arg = arg };
@@ -850,6 +922,8 @@ pub export fn sqlite3_progress_handler(db: ?*Handle, n_ops: c_int, f: ?c.CProgre
 /// checks, and accepting one it never calls would let through what the
 /// application means to deny. Clearing it is fine.
 pub export fn sqlite3_set_authorizer(db_arg: ?*Handle, f: ?c.CAuth, arg: ?*anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     if (f == null) {
         c.ext(db).authorizer = .{};
@@ -861,6 +935,8 @@ pub export fn sqlite3_set_authorizer(db_arg: ?*Handle, f: ?c.CAuth, arg: ?*anyop
 }
 
 pub export fn sqlite3_trace_v2(db: ?*Handle, mask: c_uint, f: ?c.CTraceV2, arg: ?*anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return RC.MISUSE;
     e.legacy_trace = .{};
     e.legacy_profile = .{};
@@ -875,6 +951,8 @@ pub export fn sqlite3_trace_v2(db: ?*Handle, mask: c_uint, f: ?c.CTraceV2, arg: 
 }
 
 pub export fn sqlite3_trace(db: ?*Handle, f: ?c.CTrace, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return null;
     const old = e.legacy_trace.arg;
     e.legacy_trace = .{ .f = f, .arg = arg };
@@ -882,6 +960,8 @@ pub export fn sqlite3_trace(db: ?*Handle, f: ?c.CTrace, arg: ?*anyopaque) callco
 }
 
 pub export fn sqlite3_profile(db: ?*Handle, f: ?c.CProfile, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return null;
     const old = e.legacy_profile.arg;
     e.legacy_profile = .{ .f = f, .arg = arg };
@@ -889,6 +969,8 @@ pub export fn sqlite3_profile(db: ?*Handle, f: ?c.CProfile, arg: ?*anyopaque) ca
 }
 
 pub export fn sqlite3_collation_needed(db: ?*Handle, arg: ?*anyopaque, f: ?*const anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return RC.MISUSE;
     e.coll_needed = .{ .f = @ptrCast(@alignCast(f)), .arg = arg };
     return RC.OK;
@@ -899,6 +981,8 @@ pub export fn sqlite3_collation_needed16(db: ?*Handle, arg: ?*anyopaque, f: ?*co
 }
 
 pub export fn sqlite3_autovacuum_pages(db: ?*Handle, f: ?c.CAutovac, arg: ?*anyopaque, x_destroy: ?*const anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const e = c.extOf(db) orelse return RC.MISUSE;
     if (e.autovac_destroy) |d| d(e.autovac.arg);
     e.autovac = .{ .f = f, .arg = arg };
@@ -920,11 +1004,15 @@ pub export fn sqlite3_unlock_notify(db: ?*Handle, x_notify: ?*const fn (?[*]?*an
 // ============================================================ extensions
 
 pub export fn sqlite3_enable_load_extension(db: ?*Handle, on: c_int) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     _ = c.main.dbConfig(db orelse return RC.MISUSE, .enable_load_extension, @intFromBool(on != 0));
     return RC.OK;
 }
 
 pub export fn sqlite3_load_extension(db_arg: ?*Handle, _: ?[*:0]const u8, _: ?[*:0]const u8, pz_errmsg: ?*?[*:0]u8) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const msg = "xqlite does not support loadable extensions";
     if (pz_errmsg) |p| p.* = c.dupZ(msg);
@@ -964,10 +1052,16 @@ pub export fn sqlite3_reset_auto_extension() callconv(.c) void {
 // ================================================================ backup
 
 pub export fn sqlite3_backup_init(dest: ?*Handle, z_dest: ?[*:0]const u8, src: ?*Handle, z_src: ?[*:0]const u8) callconv(.c) ?*backup_mod.Backup {
+    const lk_src = c.lock(src);
+    defer lk_src.unlock();
+    const lk_dest = c.lock(dest);
+    defer lk_dest.unlock();
     return backup_mod.init(dest orelse return null, c.span(z_dest) orelse "main", src orelse return null, c.span(z_src) orelse "main");
 }
 
 pub export fn sqlite3_backup_step(p: ?*backup_mod.Backup, n_page: c_int) callconv(.c) c_int {
+    const lk = c.lock(if (p) |b| b.src_db else null);
+    defer lk.unlock();
     return backup_mod.step(p orelse return RC.MISUSE, n_page);
 }
 
@@ -975,9 +1069,11 @@ pub export fn sqlite3_backup_finish(p_arg: ?*backup_mod.Backup) callconv(.c) c_i
     const p = p_arg orelse return RC.OK;
     const dest = p.dest_db;
     const src = p.src_db;
+    const lk_src = c.lock(src);
+    const lk_dest = c.lock(dest);
     const rc = backup_mod.finish(p);
-    closeZombie(src);
-    if (dest) |d| closeZombie(d);
+    if (dest) |d| leaveAndCloseZombie(d, lk_dest) else lk_dest.unlock();
+    leaveAndCloseZombie(src, lk_src);
     return rc;
 }
 
@@ -1030,6 +1126,8 @@ pub export fn sqlite3_snapshot_recover(_: ?*Handle, _: ?[*:0]const u8) callconv(
 /// "oracle" or an alias such as "pg" or "mysql") the SQL dialect of the
 /// statements prepared from now on, as PRAGMA xq_dialect does.
 pub export fn xqlite_set_dialect(db_arg: ?*Handle, z_name: ?[*:0]const u8) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const name = c.span(z_name) orelse return RC.MISUSE;
     const d = c.dialect.Dialect.fromName(name) orelse {

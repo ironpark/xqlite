@@ -237,6 +237,10 @@ pub const Ext = struct {
     /// handed are brought back to UTF-8 before the engine reads them
     /// again (toUtf8()).
     utf16: bool = false,
+    /// The connection's mutex (db->mutex): a recursive sqlite3_mutex
+    /// in serialized mode, held across every API call on the connection
+    /// (lock()); null in multi-thread mode.
+    mutex: ?*Mutex = null,
     /// sqlite3_close_v2() found the connection busy: it closes once the
     /// last statement or backup is gone (a zombie).
     zombie: bool = false,
@@ -275,6 +279,44 @@ pub fn extOf(db: ?*Handle) ?*Ext {
     return @ptrCast(@alignCast(d.capi orelse return null));
 }
 
+// ============================================================ threading
+
+/// sqlite3_mutex (capi/varargs.c).
+pub const Mutex = opaque {};
+pub extern fn sqlite3_mutex_alloc(id: c_int) ?*Mutex;
+pub extern fn sqlite3_mutex_free(m: ?*Mutex) void;
+pub extern fn sqlite3_mutex_enter(m: ?*Mutex) void;
+pub extern fn sqlite3_mutex_leave(m: ?*Mutex) void;
+pub const MUTEX_RECURSIVE = 1;
+
+/// Whether the library has mutexes (SQLITE_THREADSAFE != 0): not on
+/// single-threaded WebAssembly.
+pub const have_threads = !builtin.cpu.arch.isWasm();
+
+/// What sqlite3_mutex_enter(db->mutex) took, for leaving it.
+pub const Lock = struct {
+    m: ?*Mutex,
+
+    pub fn unlock(l: Lock) void {
+        if (l.m) |m| sqlite3_mutex_leave(m);
+    }
+};
+
+/// sqlite3_mutex_enter(db->mutex): in serialized mode, take the mutex
+/// of `db` (none for a null `db` or in multi-thread mode). The mutex is
+/// recursive: callbacks may call the interfaces again.
+pub inline fn lock(db: ?*Handle) Lock {
+    const e = extOf(db) orelse return .{ .m = null };
+    const m = e.mutex orelse return .{ .m = null };
+    sqlite3_mutex_enter(m);
+    return .{ .m = m };
+}
+
+/// lock() for the connection of statement `v`.
+pub inline fn lockStmt(v: ?*Vdbe) Lock {
+    return lock(if (v) |x| x.db else null);
+}
+
 // =================================================== process-wide state
 
 /// A lock for the registries of the C ABI (VFSes, auto extensions): they
@@ -298,6 +340,11 @@ pub const State = struct {
     initialized: bool = false,
     /// SQLITE_CONFIG_URI.
     uri: bool = false,
+    /// The threading mode new connections get (sqlite3GlobalConfig's
+    /// bCoreMutex and bFullMutex): SQLITE_CONFIG_SINGLETHREAD clears
+    /// both, MULTITHREAD only full_mutex, SERIALIZED sets both.
+    core_mutex: bool = have_threads,
+    full_mutex: bool = have_threads and default_serialized,
     /// SQLITE_CONFIG_MALLOC, and whether its xInit has run.
     mem_methods: ?@import("library.zig").MemMethods = null,
     mem_init: bool = false,
@@ -314,6 +361,14 @@ pub const State = struct {
 };
 
 pub var state: State = .{};
+
+/// The default threading mode: multi-thread, as SQLite built with
+/// SQLITE_THREADSAFE=2. Serialized mode (SQLite's default build) takes
+/// the connection's mutex in every call, which about doubles the cost of
+/// a loop of sqlite3_step() and sqlite3_column_*() calls (as in SQLite);
+/// it is there for the connections that ask (SQLITE_OPEN_FULLMUTEX,
+/// SQLITE_CONFIG_SERIALIZED).
+pub const default_serialized = false;
 
 /// The std.Io of the default VFS: blocking calls, no event loop or
 /// signal handlers installed in the host program.

@@ -18,6 +18,8 @@ const TK = @import("../parse/grammar.zig").TK;
 // =============================================================== prepare
 
 fn prepare(db_arg: ?*Handle, z_sql: ?[*]const u8, n_byte: c_int, prep_flags: c_uint, pp_stmt: ?*?*Vdbe, pz_tail: ?*?[*]const u8) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const out = pp_stmt orelse return RC.MISUSE;
     out.* = null;
     if (pz_tail) |t| t.* = z_sql;
@@ -98,6 +100,8 @@ fn nanoTime() i128 {
 }
 
 pub export fn sqlite3_step(v_arg: ?*Vdbe) callconv(.c) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return RC.MISUSE;
     const e = c.extOf(v.db) orelse return c.api.step(v);
     if (e.utf16) c.rowToUtf8(v);
@@ -133,6 +137,8 @@ fn forget(v: *Vdbe) void {
 }
 
 pub export fn sqlite3_reset(v_arg: ?*Vdbe) callconv(.c) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return RC.OK;
     forget(v);
     c.rowToUtf8(v);
@@ -142,13 +148,16 @@ pub export fn sqlite3_reset(v_arg: ?*Vdbe) callconv(.c) c_int {
 pub export fn sqlite3_finalize(v_arg: ?*Vdbe) callconv(.c) c_int {
     const v = v_arg orelse return RC.OK;
     const db = v.db;
+    const lk = c.lock(db);
     forget(v);
     const rc = c.api.finalize(v);
-    conn.closeZombie(db);
+    conn.leaveAndCloseZombie(db, lk);
     return rc;
 }
 
 pub export fn sqlite3_clear_bindings(v_arg: ?*Vdbe) callconv(.c) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     c.api.clearBindings(v_arg orelse return RC.OK);
     return RC.OK;
 }
@@ -166,22 +175,32 @@ fn done(del: ?*const anyopaque, p: ?*const anyopaque) void {
 }
 
 pub export fn sqlite3_bind_null(v: ?*Vdbe, i: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.bindNull(v orelse return RC.MISUSE, idx(i));
 }
 
 pub export fn sqlite3_bind_int(v: ?*Vdbe, i: c_int, x: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.bindInt64(v orelse return RC.MISUSE, idx(i), x);
 }
 
 pub export fn sqlite3_bind_int64(v: ?*Vdbe, i: c_int, x: i64) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.bindInt64(v orelse return RC.MISUSE, idx(i), x);
 }
 
 pub export fn sqlite3_bind_double(v: ?*Vdbe, i: c_int, x: f64) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.bindDouble(v orelse return RC.MISUSE, idx(i), x);
 }
 
 fn bindBlob(v_arg: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: u64, del: ?*const anyopaque) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     defer done(del, z);
     const v = v_arg orelse return RC.MISUSE;
     const p: [*]const u8 = @ptrCast(z orelse return c.api.bindNull(v, idx(i)));
@@ -203,6 +222,8 @@ pub export fn sqlite3_bind_blob64(v: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: 
 /// Bind `n` bytes of text in encoding `enc` (SQLITE_UTF8, SQLITE_UTF8_ZT
 /// or a UTF-16 one), all of it up to a NUL if `n` is negative.
 fn bindText(v_arg: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: i64, del: ?*const anyopaque, enc: u8) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     defer done(del, z);
     const v = v_arg orelse return RC.MISUSE;
     const p = z orelse return c.api.bindNull(v, idx(i));
@@ -238,21 +259,29 @@ pub export fn sqlite3_bind_text16(v: ?*Vdbe, i: c_int, z: ?*const anyopaque, n: 
 }
 
 pub export fn sqlite3_bind_value(v: ?*Vdbe, i: c_int, value: ?*const Mem) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     const vv = v orelse return RC.MISUSE;
     return c.api.bindValue(vv, idx(i), @constCast(value orelse return c.api.bindNull(vv, idx(i))));
 }
 
 pub export fn sqlite3_bind_zeroblob(v: ?*Vdbe, i: c_int, n: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.bindZeroblob(v orelse return RC.MISUSE, idx(i), @max(n, 0));
 }
 
 pub export fn sqlite3_bind_zeroblob64(v_arg: ?*Vdbe, i: c_int, n: u64) callconv(.c) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return RC.MISUSE;
     if (n > @as(u64, @intCast(v.db.limit(.length)))) return RC.TOOBIG;
     return c.api.bindZeroblob(v, idx(i), @intCast(n));
 }
 
 pub export fn sqlite3_bind_pointer(v_arg: ?*Vdbe, i: c_int, p: ?*anyopaque, z_type: ?[*:0]const u8, del: ?*const anyopaque) callconv(.c) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse {
         done(del, p);
         return RC.MISUSE;
@@ -280,6 +309,8 @@ pub export fn sqlite3_bind_parameter_index(v: ?*Vdbe, z_name: ?[*:0]const u8) ca
 }
 
 pub export fn sqlite3_transfer_bindings(from_arg: ?*Vdbe, to_arg: ?*Vdbe) callconv(.c) c_int {
+    const lk = c.lockStmt(to_arg);
+    defer lk.unlock();
     const from = from_arg orelse return RC.MISUSE;
     const to = to_arg orelse return RC.MISUSE;
     if (from.n_var != to.n_var) return RC.ERROR;
@@ -306,49 +337,71 @@ pub export fn sqlite3_data_count(v: ?*Vdbe) callconv(.c) c_int {
 }
 
 pub export fn sqlite3_column_type(v: ?*Vdbe, i: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.columnType(v orelse return c.vi.SQLITE_NULL, col(i));
 }
 
 pub export fn sqlite3_column_int(v: ?*Vdbe, i: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return @truncate(c.api.columnInt64(v orelse return 0, col(i)));
 }
 
 pub export fn sqlite3_column_int64(v: ?*Vdbe, i: c_int) callconv(.c) i64 {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.columnInt64(v orelse return 0, col(i));
 }
 
 pub export fn sqlite3_column_double(v: ?*Vdbe, i: c_int) callconv(.c) f64 {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.columnDouble(v orelse return 0, col(i));
 }
 
 pub export fn sqlite3_column_text(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]const u8 {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.cStr(c.api.columnText(v orelse return null, col(i)));
 }
 
 pub export fn sqlite3_column_blob(v: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     const b = c.api.columnBlob(v orelse return null, col(i)) orelse return null;
     return b.ptr;
 }
 
 pub export fn sqlite3_column_bytes(v: ?*Vdbe, i: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return @intCast(c.api.columnBytes(v orelse return 0, col(i)));
 }
 
 pub export fn sqlite3_column_bytes16(v_arg: ?*Vdbe, i: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return 0;
     c.noteUtf16(v.db);
     return @intCast(c.api.columnBytes16(v, col(i)));
 }
 
 pub export fn sqlite3_column_value(v: ?*Vdbe, i: c_int) callconv(.c) ?*Mem {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.api.columnValue(v orelse return null, col(i));
 }
 
 pub export fn sqlite3_column_name(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]const u8 {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.cStr(c.api.columnName(v orelse return null, col(i)));
 }
 
 pub export fn sqlite3_column_decltype(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]const u8 {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.cStr(c.api.columnDecltype(v orelse return null, col(i)));
 }
 
@@ -358,12 +411,16 @@ pub export fn sqlite3_column_decltype(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]co
 // never ask cost nothing.
 
 fn colMeta(v_arg: ?*Vdbe, i: c_int, var_: usize) ?[*:0]const u8 {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return null;
     if (i < 0 or !prepare_mod.columnMetadata(v)) return null;
     return c.cStr(c.api.columnNameOf(v, @intCast(i), var_));
 }
 
 fn colMeta16(v_arg: ?*Vdbe, i: c_int, var_: usize) ?*const anyopaque {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return null;
     if (i < 0 or !prepare_mod.columnMetadata(v)) return null;
     return c.api.columnName16(v, @intCast(i), var_);
@@ -399,18 +456,24 @@ pub export fn sqlite3_column_origin_name16(v: ?*Vdbe, i: c_int) callconv(.c) ?*c
 // converted back before it runs again (common.rowToUtf8()).
 
 pub export fn sqlite3_column_text16(v_arg: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return null;
     c.noteUtf16(v.db);
     return c.api.columnText16(v, col(i));
 }
 
 pub export fn sqlite3_column_name16(v_arg: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return null;
     if (i < 0) return null;
     return c.api.columnName16(v, @intCast(i), c.vi.COLNAME_NAME);
 }
 
 pub export fn sqlite3_column_decltype16(v_arg: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return null;
     if (i < 0) return null;
     return c.api.columnName16(v, @intCast(i), c.vi.COLNAME_DECLTYPE);
@@ -424,12 +487,16 @@ pub export fn sqlite3_sql(v: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
 
 /// SQLITE_ENABLE_NORMALIZE: made the first time it is asked for.
 pub export fn sqlite3_normalized_sql(v: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
+    const lk = c.lockStmt(v);
+    defer lk.unlock();
     return c.cStr(@import("../parse/normalize.zig").normalizedSql(v orelse return null));
 }
 
 /// Port of sqlite3VdbeExpandSql(): the SQL of the statement with its
 /// parameters replaced by their values, from sqlite3_malloc().
 pub export fn sqlite3_expanded_sql(v_arg: ?*Vdbe) callconv(.c) ?[*:0]u8 {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return null;
     const raw = v.sql orelse return null;
     var out: std.ArrayList(u8) = .empty;
@@ -528,6 +595,8 @@ pub export fn sqlite3_stmt_isexplain(v: ?*Vdbe) callconv(.c) c_int {
 }
 
 pub export fn sqlite3_stmt_explain(v_arg: ?*Vdbe, mode: c_int) callconv(.c) c_int {
+    const lk = c.lockStmt(v_arg);
+    defer lk.unlock();
     const v = v_arg orelse return RC.MISUSE;
     return prepare_mod.stmtExplain(v, mode);
 }
@@ -550,6 +619,8 @@ pub export fn sqlite3_db_handle(v: ?*Vdbe) callconv(.c) ?*Handle {
 }
 
 pub export fn sqlite3_next_stmt(db: ?*Handle, prev: ?*Vdbe) callconv(.c) ?*Vdbe {
+    const lk = c.lock(db);
+    defer lk.unlock();
     if (prev) |p| return p.next;
     return (db orelse return null).vdbe;
 }

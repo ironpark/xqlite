@@ -84,6 +84,8 @@ pub export fn sqlite3_blob_open(
     w_flag: c_int,
     pp_blob: ?*?*Blob,
 ) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const out = pp_blob orelse return RC.MISUSE;
     out.* = null;
     const db = db_arg orelse return RC.MISUSE;
@@ -124,6 +126,8 @@ pub export fn sqlite3_blob_open(
 }
 
 pub export fn sqlite3_blob_reopen(b_arg: ?*Blob, i_row: i64) callconv(.c) c_int {
+    const lk = c.lock(if (b_arg) |b| b.db else null);
+    defer lk.unlock();
     const b = b_arg orelse return RC.MISUSE;
     return seek(b, i_row);
 }
@@ -153,6 +157,8 @@ fn current(b: *Blob) ?[]const u8 {
 }
 
 pub export fn sqlite3_blob_read(b_arg: ?*Blob, z: ?*anyopaque, n: c_int, off: c_int) callconv(.c) c_int {
+    const lk = c.lock(if (b_arg) |b| b.db else null);
+    defer lk.unlock();
     const b = b_arg orelse return RC.MISUSE;
     if (n < 0 or off < 0 or @as(i64, n) + off > b.n_bytes) {
         c.main.setError(b.db, RC.ERROR);
@@ -174,6 +180,8 @@ pub export fn sqlite3_blob_read(b_arg: ?*Blob, z: ?*anyopaque, n: c_int, off: c_
 }
 
 pub export fn sqlite3_blob_write(b_arg: ?*Blob, z: ?*const anyopaque, n: c_int, off: c_int) callconv(.c) c_int {
+    const lk = c.lock(if (b_arg) |b| b.db else null);
+    defer lk.unlock();
     const b = b_arg orelse return RC.MISUSE;
     const w = b.write orelse {
         c.main.setError(b.db, RC.READONLY);

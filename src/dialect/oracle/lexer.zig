@@ -341,7 +341,7 @@ fn isIdentChar(c: u8) bool {
 }
 
 fn isOpChar(c: u8) bool {
-    return c != 0 and std.mem.indexOfScalar(u8, "+-*/<>=!^~|@%&?", c) != null;
+    return c != 0 and std.mem.indexOfScalar(u8, "+-*/<>=!^~|@%&?:[]", c) != null;
 }
 
 fn utf8Len(c: u8, rest: []const u8) usize {

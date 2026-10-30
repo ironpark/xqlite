@@ -14,6 +14,7 @@
 //! | DATE, TIMESTAMP[(p)] [WITH [LOCAL] TIME ZONE], INTERVAL | TEXT |             |
 //! | BLOB, RAW(n), LONG RAW                   | BLOB    | the length (RAW)          |
 //! | BOOLEAN                                  | INTEGER | 0 or 1                    |
+//! | JSON                                     | TEXT    | json_valid()              |
 //!
 //! A check is a named CHECK constraint whose name is Oracle's message
 //! ("ORA-12899: value too large for column (maximum: 20)").
@@ -33,6 +34,7 @@ pub const Family = enum {
     raw,
     boolean,
     rowid,
+    json,
 };
 
 /// A type as Oracle names it: `name` canonical upper case (NUMBER,
@@ -62,6 +64,8 @@ pub const Info = struct {
     /// VARCHAR2(n), CHAR(n), RAW(n): length <= n.
     length: bool = false,
     boolean: bool = false,
+    /// JSON: valid JSON text (json_valid()).
+    json: bool = false,
 };
 
 pub const Error = error{UnknownType};
@@ -90,6 +94,7 @@ const families = [_]struct { []const u8, Family }{
     .{ "BOOLEAN", .boolean },
     .{ "ROWID", .rowid },
     .{ "UROWID", .rowid },
+    .{ "JSON", .json },
 };
 
 pub fn family(name: []const u8) ?Family {
@@ -116,6 +121,7 @@ pub fn info(ty: TypeName) Error!Info {
         .blob => .{ .family = f, .storage = "BLOB" },
         .raw => .{ .family = f, .storage = "BLOB", .length = ty.precision != null },
         .boolean => .{ .family = f, .storage = "INTEGER", .boolean = true },
+        .json => .{ .family = f, .storage = "TEXT", .json = true },
     };
 }
 
@@ -216,6 +222,7 @@ pub fn dataLength(ty: TypeName) i64 {
         .raw => ty.precision orelse 2000,
         .boolean => 1,
         .rowid => 10,
+        .json => 8200,
     };
 }
 

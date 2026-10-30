@@ -459,3 +459,166 @@ SELECT count(*) FROM ic WHERE n = '5' AND i IN ('6', '8') AND n BETWEEN '1' AND 
 SELECT * FROM dual;
 SELECT d.* FROM dual d;
 SELECT dummy FROM dual;
+
+-- case: json: IS JSON, lax and strict
+SELECT x, CASE WHEN x IS JSON THEN 1 WHEN x IS NOT JSON THEN 0 END lax, CASE WHEN x IS JSON STRICT THEN 1 ELSE 0 END strict, CASE WHEN x IS JSON WITH UNIQUE KEYS THEN 1 ELSE 0 END uniq FROM (SELECT '{"a":1}' x FROM dual UNION ALL SELECT '{a:1}' FROM dual UNION ALL SELECT '[1,2,]' FROM dual UNION ALL SELECT '1' FROM dual UNION ALL SELECT 'tRUE' FROM dual UNION ALL SELECT 'abc' FROM dual UNION ALL SELECT '{''a'':.5}' FROM dual UNION ALL SELECT '{"a":1,"a":2}' FROM dual UNION ALL SELECT '{"a":0x10}' FROM dual UNION ALL SELECT '{"a":1} x' FROM dual UNION ALL SELECT NULL FROM dual);
+SELECT '{"a":1}' IS JSON AS b, '[1]' IS NOT JSON AS n FROM dual;
+
+-- case: json: JSON type columns
+CREATE TABLE jt (id NUMBER, d JSON);
+INSERT INTO jt VALUES (1, '{"a" : 1, "b" : [1, 2], "f": 1.50, "e": 1e2, "t": true}');
+INSERT INTO jt VALUES (2, '{a:1}');
+INSERT INTO jt VALUES (3, '[1, "a"]');
+INSERT INTO jt VALUES (4, '"s"');
+INSERT INTO jt VALUES (5, 'bad');
+INSERT INTO jt VALUES (6, '{"a":1,"a":2}');
+INSERT INTO jt VALUES (7, '');
+INSERT INTO jt VALUES (8, '{"x":0.5,"y":-0.0,"w":1.0,"z":123.456e1}');
+SELECT id, d FROM jt ORDER BY id;
+SELECT column_name, data_type, data_length FROM user_tab_columns WHERE table_name = 'JT' ORDER BY column_id;
+UPDATE jt SET d = JSON_TRANSFORM(d, SET '$.a' = 5) WHERE id = 1;
+SELECT JSON_VALUE(d, '$.a') a FROM jt WHERE id = 1;
+SELECT id FROM jt WHERE JSON_VALUE(d, '$.a') = 5;
+
+-- case: json: JSON_VALUE
+SELECT JSON_VALUE('{"a":"x"}', '$.a') a, JSON_VALUE('{"b":1.50}', '$.b') b, JSON_VALUE('{"c":true}', '$.c') c, JSON_VALUE('{"d":{"e":1}}', '$.d') d, JSON_VALUE('{"f":[1,2]}', '$.f') f, JSON_VALUE('{"g":null}', '$.g') g, JSON_VALUE('{"h":1e2}', '$.h') h, JSON_VALUE('{"i":-0.5}', '$.i') i, JSON_VALUE('{"f":[1,2]}', '$.f[1]') f2, JSON_VALUE('{"f":5}', '$.f[0]') f3, JSON_VALUE('[{"a":1},{"a":2}]', '$.a') l1, JSON_VALUE('[{"a":1}]', '$.a') l2 FROM dual;
+SELECT JSON_VALUE('{"a":"12"}', '$.a' RETURNING NUMBER) a, JSON_VALUE('{"a":"x"}', '$.a' RETURNING NUMBER) b, JSON_VALUE('{"a":"x"}', '$.b' DEFAULT 'none' ON EMPTY) c, JSON_VALUE('{"a":{}}', '$.a' DEFAULT 'err' ON ERROR) d, JSON_VALUE('bad', '$.a') e, JSON_VALUE('{"a":"abcdef"}', '$.a' RETURNING VARCHAR2(3)) f, JSON_VALUE('{"a":"abcdef"}', '$.a' RETURNING VARCHAR2(3) TRUNCATE) g, JSON_VALUE('{"a":1.7}', '$.a' RETURNING NUMBER(2)) h FROM dual;
+SELECT JSON_VALUE('{"a":"2024-01-02"}', '$.a' RETURNING DATE) d, JSON_VALUE('{"a":"x"}', '$.a' NULL ON EMPTY NULL ON ERROR) x, JSON_VALUE('{"a b":1}', '$."a b"') q, JSON_VALUE('{"A":1}', '$.a') cs, JSON_VALUE('{"a":[1,2,3]}', '$.a.size()') sz, JSON_VALUE('{"a":"x"}', '$.a.length()') ln, JSON_VALUE('{"a":"X"}', '$.a.lower()') lw, JSON_VALUE('{"a":[1,2]}', '$.a[last]') lst FROM dual;
+SELECT JSON_VALUE('{"a":1e-2}', '$.a') a, JSON_VALUE('{"a":"01"}', '$.a') b, JSON_VALUE('{"a":1e30}', '$.a') d, JSON_VALUE('{"a":1.23e-10}', '$.a') f FROM dual;
+SELECT JSON_VALUE('{"a":1}', '$..a') x, JSON_VALUE('{"a":{"b":7}}', '$..b') y, JSON_VALUE('{"a":"x"}', '$.a' RETURNING VARCHAR2(10)) || '!' z, JSON_VALUE('{"a":3}', '$.a' RETURNING NUMBER) * 2 w FROM dual;
+SELECT JSON_VALUE('{"a":1}', '$.a'), JSON_VALUE('{"a":true}', '$.a' RETURNING BOOLEAN) b FROM dual;
+
+-- case: json: JSON_VALUE errors
+SELECT JSON_VALUE('{"a":{}}', '$.a' ERROR ON ERROR) FROM dual;
+SELECT JSON_VALUE('{"a":1}', '$.b' ERROR ON EMPTY) FROM dual;
+SELECT JSON_VALUE('bad', '$.a' ERROR ON ERROR) FROM dual;
+SELECT JSON_VALUE('{"a":"abcdef"}', '$.a' RETURNING VARCHAR2(3) ERROR ON ERROR) FROM dual;
+SELECT JSON_VALUE('{"a":1}', 'bad path') x FROM dual;
+SELECT JSON_VALUE('{"a":1}', 'strict $.b' DEFAULT 'd' ON ERROR) x FROM dual;
+SELECT JSON_VALUE('{"a":1}', '$.a[') x FROM dual;
+
+-- case: json: JSON_QUERY
+SELECT JSON_QUERY('{"a" : { "b" : 1, "c" : [ 1 , "x" ] }}', '$.a') a, JSON_QUERY('{"a":1}', '$.a') b, JSON_QUERY('{"a":1}', '$.a' WITH WRAPPER) c, JSON_QUERY('{"a":[1]}', '$.a' WITH WRAPPER) d, JSON_QUERY('{"a":[1]}', '$.a' WITH CONDITIONAL WRAPPER) e, JSON_QUERY('{"a":[1,2]}', '$.a[*]' WITH WRAPPER) g, JSON_QUERY('{"a":[1,2]}', '$.a[*]') h, JSON_QUERY('{"a":"x"}', '$.a' WITH ARRAY WRAPPER) i FROM dual;
+SELECT JSON_QUERY('{"a":1}', '$.a' WITH CONDITIONAL WRAPPER) f, JSON_QUERY('{"a":[1,2]}', '$.a[*]' WITH UNCONDITIONAL WRAPPER) p, JSON_QUERY('{"a":1}', '$') n, JSON_QUERY('[1,{"a":[1,2]}]', '$[1].a[0]' WITH WRAPPER) o FROM dual;
+SELECT JSON_QUERY('{"a":"x"}', '$.b' EMPTY ARRAY ON EMPTY) l FROM dual;
+SELECT JSON_QUERY('{"a":"x"}', '$.b' EMPTY OBJECT ON EMPTY) m FROM dual;
+SELECT JSON_QUERY('{"a":"x"}', '$.b' EMPTY ON ERROR) m FROM dual;
+SELECT JSON_QUERY('{"a":1.50,"b":1e2,"c":0.5,"d":"x","e":"a\"b","f":"/"}', '$') FROM dual;
+SELECT JSON_QUERY('{a:1, ''b'':''x'', c:.5, d:+1, e:01}', '$') FROM dual;
+SELECT JSON_QUERY('[1,2,3]', '$[1 to 2]' WITH WRAPPER) a, JSON_QUERY('[1,2,3]', '$[last-1]') b, JSON_QUERY('[1,2,3]', '$[0,2]' WITH WRAPPER) c, JSON_QUERY('{"a":{"b":7},"c":{"b":8}}', '$.*.b' WITH WRAPPER) z FROM dual;
+SELECT JSON_QUERY('{"a":"x"}', '$.b' ERROR ON EMPTY) m FROM dual;
+SELECT JSON_QUERY('{"a":[1,2]}', '$.a[*]' ERROR ON ERROR) m FROM dual;
+SELECT JSON_QUERY('{"a":{"b":1}}', '$.a' RETURNING VARCHAR2(5) ERROR ON ERROR) FROM dual;
+SELECT JSON_QUERY('{"a":{"b":1}}', '$.a' RETURNING VARCHAR2(5)) x FROM dual;
+
+-- case: json: PRETTY
+SELECT JSON_QUERY('{"a":{"b":1,"c":[1,"x",{}],"d":[]}}', '$.a' PRETTY) p FROM dual;
+SELECT JSON_SERIALIZE('{"a" : [1, 2], "b" : {"c":"x"}, "d":{}, "e":[]}' PRETTY) p FROM dual;
+SELECT JSON_MERGEPATCH('{"a":1}', '{"b":2}' PRETTY) p FROM dual;
+
+-- case: json: JSON_EXISTS
+SELECT CASE WHEN JSON_EXISTS('{"a":1}', '$.a') THEN 1 ELSE 0 END a, CASE WHEN JSON_EXISTS('{"a":1}', '$.b') THEN 1 ELSE 0 END b, CASE WHEN JSON_EXISTS('{"a":null}', '$.a') THEN 1 ELSE 0 END c, CASE WHEN JSON_EXISTS('{"a":[1,2,3]}', '$.a?(@ > 2)') THEN 1 ELSE 0 END d, CASE WHEN JSON_EXISTS('{"a":[1,2,3]}', '$.a?(@ > 3)') THEN 1 ELSE 0 END e, CASE WHEN JSON_EXISTS('{"a":2}', '$?(@.a == $v)' PASSING 2 AS "v") THEN 1 ELSE 0 END f, CASE WHEN JSON_EXISTS('{"a":"xy"}', '$?(@.a starts with "x")') THEN 1 ELSE 0 END g FROM dual;
+SELECT CASE WHEN JSON_EXISTS('[{"a":1},{"a":5}]', '$[*]?(@.a > 3 && @.a < 6)') THEN 1 ELSE 0 END h, CASE WHEN JSON_EXISTS('{"a":[1]}', '$.a[3]') THEN 1 ELSE 0 END i, CASE WHEN JSON_EXISTS('bad', '$') THEN 1 ELSE 0 END k, CASE WHEN JSON_EXISTS('{"a":"x"}', '$?(@.a == "x" || exists(@.b))') THEN 1 ELSE 0 END l, CASE WHEN JSON_EXISTS('{"a":"abc"}', '$?(@.a like "a%")') THEN 1 ELSE 0 END m, CASE WHEN JSON_EXISTS('{"a":"abc"}', '$?(@.a has substring "b")') THEN 1 ELSE 0 END n, CASE WHEN JSON_EXISTS('{"a":5}', '$?(!(@.a < 3))') THEN 1 ELSE 0 END o FROM dual;
+SELECT JSON_EXISTS('{"a":1}', '$.a') b, JSON_EXISTS('{"a":[1,2]}', '$.a?(@ == 2)') e, JSON_EXISTS('{"a":"x"}', '$.a?(@ in ("x","y"))') f FROM dual;
+CREATE TABLE ex (id NUMBER, doc VARCHAR2(100));
+INSERT INTO ex VALUES (1, '{"tags":["a","b"]}');
+INSERT INTO ex VALUES (2, '{"tags":["c"]}');
+INSERT INTO ex VALUES (3, NULL);
+SELECT id FROM ex WHERE JSON_EXISTS(doc, '$.tags?(@ == "c")') ORDER BY id;
+SELECT CASE WHEN JSON_EXISTS('bad', '$' ERROR ON ERROR) THEN 1 ELSE 0 END FROM dual;
+
+-- case: json: JSON_OBJECT and JSON_ARRAY
+SELECT JSON_OBJECT('a' VALUE 1, KEY 'b' VALUE 'x', 'c' : NULL, 'd' VALUE 0.5, 'e' VALUE JSON_OBJECT('f' VALUE 2), 'g' VALUE '{"h":1}', 'i' VALUE '{"h":1}' FORMAT JSON) o FROM dual;
+SELECT JSON_OBJECT('j' VALUE JSON_ARRAY(1, 'a', NULL), 'k' VALUE DATE '2024-01-02', 'l' VALUE TRUE, 'm' VALUE -1.25, 'n' VALUE 1/4, 'o' VALUE 'q"u\o') o FROM dual;
+SELECT JSON_OBJECT('a' VALUE NULL ABSENT ON NULL) a, JSON_OBJECT('a' VALUE NULL NULL ON NULL) b, JSON_OBJECT() c, JSON_ARRAY() d, JSON_ARRAY(1, NULL, 2 NULL ON NULL) e, JSON_ARRAY(1, NULL) f, JSON_ARRAY('[1]' FORMAT JSON, '[1]') h, JSON_OBJECT('a' VALUE 1, 'a' VALUE 2) i FROM dual;
+SELECT JSON_OBJECT('a' VALUE 1) FROM dual;
+SELECT JSON_OBJECT(KEY 'a' IS 1) x, JSON_OBJECT('a' VALUE '') y, JSON_ARRAY('') z FROM dual;
+SELECT JSON_OBJECT('k' VALUE JSON_QUERY('{"a":[1]}', '$.a')) a, JSON_OBJECT('k' VALUE JSON_VALUE('{"a":"q"}', '$.a')) b, JSON_ARRAY(JSON_SERIALIZE('{"a":1}')) c, JSON_ARRAY(JSON_MERGEPATCH('{}', '{"b":1}')) d FROM dual;
+SELECT JSON_OBJECT('a' VALUE TO_DATE('2024-01-02 03:04:05', 'YYYY-MM-DD HH24:MI:SS')) x, JSON_OBJECT('a' VALUE TIMESTAMP '2024-01-02 03:04:05.5') y FROM dual;
+SELECT JSON_OBJECT('a' VALUE 1, 'a' VALUE 2 WITH UNIQUE KEYS) FROM dual;
+SELECT JSON_OBJECT('a' VALUE 1, 'b' VALUE 2 RETURNING VARCHAR2(5)) x FROM dual;
+SELECT JSON('{"a" : 1}') a, JSON_SCALAR(1) b, JSON_SCALAR('x') c FROM dual;
+
+-- case: json: columns in JSON_OBJECT, aggregates
+CREATE TABLE v (k VARCHAR2(10), n NUMBER, s VARCHAR2(10));
+INSERT INTO v VALUES ('x', 1, 'a');
+INSERT INTO v VALUES ('y', 2, NULL);
+INSERT INTO v VALUES ('z', 3, 'c');
+SELECT JSON_OBJECT(k, n) a, JSON_OBJECT(k VALUE s) b, JSON_OBJECT(*) c FROM v ORDER BY k;
+SELECT JSON_OBJECT(v.k, n) a, JSON_OBJECT(K) b FROM v WHERE k = 'x';
+SELECT JSON_ARRAYAGG(n ORDER BY n DESC) a, JSON_ARRAYAGG(s ORDER BY s) b, JSON_ARRAYAGG(JSON_OBJECT('k' VALUE k) ORDER BY k) f FROM v;
+SELECT JSON_OBJECTAGG(KEY k VALUE s ABSENT ON NULL) e FROM v WHERE k <> 'z';
+SELECT JSON_OBJECTAGG(k VALUE n) b FROM v WHERE k = 'x';
+SELECT JSON_ARRAYAGG(n) a, JSON_OBJECTAGG(k VALUE n) b FROM v WHERE 1 = 0;
+SELECT k, JSON_ARRAYAGG(n) a FROM v GROUP BY k ORDER BY k;
+
+-- case: json: JSON_MERGEPATCH and JSON_SERIALIZE
+SELECT JSON_MERGEPATCH('{"a":1,"b":{"c":2,"d":3}}', '{"b":{"c":null,"e":4},"f":5,"a":null}') a, JSON_MERGEPATCH('{"a":1}', '[1]') b, JSON_MERGEPATCH('[1]', '{"a":1}') c FROM dual;
+SELECT JSON_MERGEPATCH('{"a":1}', 'bad') FROM dual;
+SELECT JSON_SERIALIZE('{"a" : [1, 2], "b" : {"c":"x"}}') a, JSON_SERIALIZE('{a:1}') b, JSON_SERIALIZE('"x"' PRETTY) c FROM dual;
+SELECT JSON_SERIALIZE('{"b":1,"a":2}' ORDERED) a, JSON_SERIALIZE('{"a":"é"}' ASCII) b FROM dual;
+SELECT JSON_SERIALIZE('{"a":1}' RETURNING VARCHAR2(5)) b FROM dual;
+
+-- case: json: JSON_TRANSFORM
+SELECT JSON_TRANSFORM('{"a":1,"b":[1,2],"c":{"d":1}}', SET '$.a' = 2, SET '$.x' = 'y', REMOVE '$.c.d', APPEND '$.b' = 3, RENAME '$.c' = 'cc', INSERT '$.z' = 5) a FROM dual;
+SELECT JSON_TRANSFORM('{"a":1}', REPLACE '$.b' = 2) a FROM dual;
+SELECT JSON_TRANSFORM('{"a":1}', REPLACE '$.a' = 2) b, JSON_TRANSFORM('{"a":1}', SET '$.a' = '{"x":1}' FORMAT JSON) c, JSON_TRANSFORM('{"a":1}', SET '$.a' = NULL) d FROM dual;
+SELECT JSON_TRANSFORM('{"a":1,"b":2}', KEEP '$.b') e FROM dual;
+SELECT JSON_TRANSFORM('{"a":[1,2,3]}', REMOVE '$.a[1]') f, JSON_TRANSFORM('{"a":[1,2]}', INSERT '$.a[0]' = 0) g, JSON_TRANSFORM('{"a":1}', REMOVE '$.zz') h, JSON_TRANSFORM('{"a":1}', SET '$.a' = JSON_OBJECT('q' VALUE 1)) i FROM dual;
+SELECT JSON_TRANSFORM('{"a":1}', REMOVE '$.a') a, JSON_TRANSFORM('{"a":{"b":1}}', SET '$.a.c.d' = 1) b, JSON_TRANSFORM('{"a":1}', SET '$.b' = 'x', SET '$.c' = 3.50) c FROM dual;
+SELECT JSON_TRANSFORM('{"a":{"b":1}}', REMOVE '$.a.b', SET '$.a.c' = 'v') x FROM dual;
+SELECT JSON_TRANSFORM('{"a":1}', INSERT '$.a' = 2) FROM dual;
+SELECT JSON_TRANSFORM('bad', SET '$.a' = 1) FROM dual;
+
+-- case: json: dot notation
+CREATE TABLE j (id NUMBER, d JSON);
+INSERT INTO j VALUES (1, '{"a":1,"b":[1,2,{"c":"x"}],"s":"str","n":null,"t":true,"f":1.5}');
+INSERT INTO j VALUES (2, '{"a":2}');
+INSERT INTO j VALUES (3, '[1]');
+SELECT j.id, j.d.a, j.d.b, j.d.b[2].c, j.d.s, j.d.t, j.d.n, j.d.f, j.d.zz FROM j j ORDER BY id;
+SELECT j.d.a.number() n, j.d.s.string() s, j.d.b.size() z, j.d.b.type() t FROM j j WHERE id = 1;
+SELECT j.d.b[*] a, j.d.b.c c, j.d.b[0,1] x FROM j j WHERE id = 1;
+SELECT id FROM j j WHERE j.d.a = 2;
+CREATE TABLE c (id NUMBER, doc VARCHAR2(200) CHECK (doc IS JSON));
+INSERT INTO c VALUES (1, '{"a":"s","b":{"x":1},"c":[1,2],"d":[{"e":1},{"e":2}],"n":null,"t":true}');
+SELECT c.doc.a a, c.doc.b b, c.doc.c c, c.doc.d.e e, c.doc.n n, c.doc.t t, c.doc.c[0] c0, c.doc.zz z FROM c c;
+SELECT c.doc.a.string() s, c.doc.c.size() z FROM c c;
+
+-- case: json: CHECK (x IS JSON)
+CREATE TABLE c (id NUMBER, doc VARCHAR2(200) CHECK (doc IS JSON), doc2 CLOB CONSTRAINT strict_ck CHECK (doc2 IS JSON STRICT WITH UNIQUE KEYS));
+INSERT INTO c VALUES (1, '{"a":1}', '{"b":2}');
+INSERT INTO c VALUES (2, 'bad', NULL);
+INSERT INTO c VALUES (3, '{a:1}', '{"a":1,"a":2}');
+INSERT INTO c VALUES (4, NULL, '{a:1}');
+INSERT INTO c VALUES (5, '[1]', '[2]');
+SELECT id, JSON_VALUE(doc, '$.a') a FROM c ORDER BY id;
+
+-- case: json: JSON_TABLE
+SELECT jt.* FROM JSON_TABLE('{"items":[{"id":1,"name":"a","tags":["x","y"]},{"id":2,"name":"b","extra":{"q":1}},{"id":"z"}]}', '$.items[*]' COLUMNS (rn FOR ORDINALITY, id NUMBER PATH '$.id', name VARCHAR2(10) PATH '$.name', has_tags NUMBER EXISTS PATH '$.tags', extra VARCHAR2(100) FORMAT JSON PATH '$.extra', NESTED PATH '$.tags[*]' COLUMNS (tag VARCHAR2(5) PATH '$'))) jt;
+SELECT * FROM JSON_TABLE('[1,2,3]', '$[*]' COLUMNS (v NUMBER PATH '$'));
+SELECT * FROM JSON_TABLE('{"a":1,"b":"x"}', '$' COLUMNS (a, b, "c"));
+SELECT * FROM JSON_TABLE('{"A":1,"a":2}', '$' COLUMNS (a, "a"));
+SELECT * FROM JSON_TABLE('{"A":1,"a":2,"Ab":3}', '$' COLUMNS (A, "Ab"));
+SELECT * FROM JSON_TABLE('{"a":"x"}', '$' COLUMNS (a NUMBER PATH '$.a' DEFAULT -1 ON ERROR, b VARCHAR2(5) PATH '$.b' DEFAULT 'none' ON EMPTY));
+SELECT * FROM JSON_TABLE('bad', '$' COLUMNS (a));
+SELECT * FROM JSON_TABLE('{"a":{"b":1}}', '$.a' COLUMNS (b NUMBER));
+SELECT * FROM JSON_TABLE('{"a":[1,2]}', '$' COLUMNS (x NUMBER PATH '$.x', NESTED PATH '$.a[*]' COLUMNS (v NUMBER PATH '$', n FOR ORDINALITY)));
+SELECT * FROM JSON_TABLE('{"x":1,"a":[1,2],"b":["p"]}', '$' COLUMNS (x NUMBER PATH '$.x', NESTED PATH '$.a[*]' COLUMNS (v NUMBER PATH '$'), NESTED PATH '$.b[*]' COLUMNS (w VARCHAR2(5) PATH '$')));
+SELECT * FROM JSON_TABLE('{"x":1}', '$' COLUMNS (x NUMBER PATH '$.x', NESTED PATH '$.a[*]' COLUMNS (v NUMBER PATH '$')));
+SELECT * FROM JSON_TABLE('{"a":"x"}', '$' COLUMNS (a VARCHAR2(4000) FORMAT JSON PATH '$.a'));
+SELECT * FROM JSON_TABLE('{"a":[1]}', '$' COLUMNS (a VARCHAR2(4000) FORMAT JSON WITH WRAPPER PATH '$.a[*]', b VARCHAR2(10) FORMAT JSON PATH '$.a'));
+SELECT * FROM JSON_TABLE('{"a":true,"b":"true","c":1}', '$' COLUMNS (a VARCHAR2(5), b NUMBER EXISTS PATH '$.b', c VARCHAR2(5) EXISTS PATH '$.c', d BOOLEAN PATH '$.a'));
+SELECT * FROM JSON_TABLE('{"a":"x"}', '$' COLUMNS (a NUMBER PATH '$.a' ERROR ON ERROR));
+
+-- case: json: JSON_TABLE over a table
+CREATE TABLE j (id NUMBER, d JSON);
+INSERT INTO j VALUES (1, '{"a":1,"b":[1,2,{"c":"x"}]}');
+INSERT INTO j VALUES (2, '{"a":2,"b":[]}');
+INSERT INTO j VALUES (3, '[1]');
+SELECT j.id, jt.v FROM j, JSON_TABLE(j.d, '$.b[*]' COLUMNS (v VARCHAR2(20) PATH '$')) jt ORDER BY j.id, jt.v;
+SELECT j.id, jt.* FROM j, JSON_TABLE(j.d, '$' COLUMNS (a NUMBER PATH '$.a')) jt ORDER BY j.id;
+SELECT id, a FROM j, JSON_TABLE(d, '$' COLUMNS (a NUMBER PATH '$.a')) WHERE a > 1;
+SELECT j.id, count(*) n FROM j, JSON_TABLE(j.d, '$.b[*]' COLUMNS (v NUMBER PATH '$')) t GROUP BY j.id ORDER BY j.id;
+SELECT id FROM j x WHERE EXISTS (SELECT 1 FROM JSON_TABLE(x.d, '$.b[*]' COLUMNS (v NUMBER PATH '$')) t WHERE t.v = 2);
+CREATE VIEW jv AS SELECT j.id, jt.a FROM j, JSON_TABLE(j.d, '$' COLUMNS (a NUMBER PATH '$.a')) jt;
+SELECT * FROM jv ORDER BY id;

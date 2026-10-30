@@ -16,6 +16,7 @@
 const std = @import("std");
 const tree = @import("../../ir/tree.zig");
 const parser = @import("parser.zig");
+const jsonsql = @import("jsonsql.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -72,6 +73,7 @@ fn stmt(p: *Parser, s: tree.Stmt, scope: *Scope) Error!void {
 }
 
 fn select(p: *Parser, s: *tree.Select, scope: *Scope) Error!void {
+    if (s.body.* == .core) try jsonsql.rewriteCore(p, s.body.core, s.order_by);
     if (s.with) |w| for (w.ctes) |cte| try select(p, cte.select, scope);
     try body(p, s.body, scope);
     // ORDER BY sees the FROM of a single query.
@@ -96,6 +98,7 @@ fn body(p: *Parser, b: *tree.Body, scope: *Scope) Error!void {
 }
 
 fn core(p: *Parser, c: *tree.Core, scope: *Scope) Error!void {
+    try jsonsql.rewriteCore(p, c, &.{});
     try fromItems(p, c.from, scope);
     try scope.append(p.arena, c.from);
     defer scope.items.len -= 1;
@@ -118,6 +121,7 @@ fn fromItems(p: *Parser, items: []const tree.FromItem, scope: *Scope) Error!void
 }
 
 fn expr(p: *Parser, e: *Expr, scope: *Scope) Error!void {
+    try jsonsql.expr(p, e, scope);
     switch (e.kind) {
         .exists, .subquery => |s| return select(p, s, scope),
         .in_select => |x| {

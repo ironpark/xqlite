@@ -273,7 +273,7 @@ fn intArg(ctx: *Context, m: *Mem) error{Invalid}!?i64 {
 }
 
 /// The statement's time (SYSDATE's), as a DateTime.
-fn now(ctx: *Context) DateTime {
+pub fn now(ctx: *Context) DateTime {
     const ms = api.stmtCurrentTime(ctx);
     // Julian day * 86400000 -> seconds since 1970.
     const secs = @divFloor(ms - 210866760000000, 1000);
@@ -679,7 +679,7 @@ fn signFunc(ctx: *Context, argv: []*Mem) void {
 }
 
 /// x rounded (half away from zero) or truncated to `d` decimal places.
-fn roundTo(x: f64, d: i64, trunc: bool) f64 {
+pub fn roundTo(x: f64, d: i64, trunc: bool) f64 {
     if (!std.math.isFinite(x) or x == 0) return x;
     // On the shortest decimal text of x, as Oracle's decimal NUMBER
     // would (2.675 is 2.67499999... as a double, and rounds to 2.68).
@@ -1184,6 +1184,28 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
                 return api.resultError(ctx, "ORA-12899: value too large for column");
             };
             api.resultBlob(ctx, bytes, .transient);
+        },
+        .json => {
+            const jf = @import("jsonfuncs.zig");
+            var arena: std.heap.ArenaAllocator = .init(gpa(ctx));
+            defer arena.deinit();
+            const a = arena.allocator();
+            const text: []const u8 = switch (vt) {
+                vi.SQLITE_INTEGER, vi.SQLITE_FLOAT => blk: {
+                    var buf: [64]u8 = undefined;
+                    const t = numberText(&buf, m);
+                    break :blk (if (t.len > 0 and t[0] == '.') std.fmt.allocPrint(a, "0{s}", .{t}) else if (t.len > 1 and t[0] == '-' and t[1] == '.') std.fmt.allocPrint(a, "-0{s}", .{t[1..]}) else a.dupe(u8, t)) catch return api.resultErrorNomem(ctx);
+                },
+                vi.SQLITE_TEXT => api.valueText(m) orelse return api.resultErrorNomem(ctx),
+                else => return api.resultError(ctx, "ORA-40441: JSON syntax error"),
+            };
+            if (text.len == 0) return api.resultNull(ctx);
+            const out = jf.storageText(a, text) catch |err| return switch (err) {
+                error.OutOfMemory => api.resultErrorNomem(ctx),
+                error.Syntax => api.resultError(ctx, "ORA-40441: JSON syntax error"),
+                error.Duplicate => api.resultError(ctx, "ORA-40444: JSON processing error"),
+            };
+            api.resultText(ctx, out, .transient);
         },
         .boolean => {
             switch (vt) {

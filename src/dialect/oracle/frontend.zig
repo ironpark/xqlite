@@ -42,6 +42,7 @@ const parser = @import("parser.zig");
 const stmt_mod = @import("stmt.zig");
 const dates = @import("dates.zig");
 const funcs = @import("funcs.zig");
+const jsonfuncs = @import("jsonfuncs.zig");
 
 const RC = int.RC;
 const OP = @import("../../vdbe/vdbe_int.zig").OP;
@@ -50,14 +51,17 @@ pub const frontend: dialect.Frontend = .{ .run = run };
 
 pub const hooks: dialect.Hooks = .{
     .functions = &functions,
-    .engine_functions = &funcs.engine_functions,
+    .engine_functions = &engine_functions,
+    .engine_modules = &.{.{ .name = jsonfuncs.json_table_name, .module = &jsonfuncs.json_table_module }},
 };
+
+const engine_functions = funcs.engine_functions ++ jsonfuncs.engine_functions;
 
 const functions = funcs.functions ++ sequence.functions;
 
 comptime {
     dfunc.checkTable(&functions);
-    dfunc.checkTable(&funcs.engine_functions);
+    dfunc.checkTable(&engine_functions);
 }
 
 pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
@@ -340,5 +344,7 @@ test {
     _ = @import("types.zig");
     _ = @import("datetime.zig");
     _ = @import("funcs.zig");
+    _ = @import("json.zig");
+    _ = @import("jsonfuncs.zig");
     _ = @import("test.zig");
 }

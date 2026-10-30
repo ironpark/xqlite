@@ -960,6 +960,11 @@ fn typeChecks(p: *Parser, name: Name, ty: types.TypeName, info: types.Info, cons
             .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .le, .l = len, .r = try intLit(p, pos, @intCast(n)) } }) },
         });
     }
+    if (info.json) {
+        // RFC 8259 text, which sqlite3 checks too (xq_ora_coerce() stores
+        // JSON so).
+        try cons.append(a, .{ .name = "ORA-40441: JSON syntax error", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{col}) } });
+    }
     if (info.boolean) {
         const items = try p.list(&.{ try intLit(p, pos, 0), try intLit(p, pos, 1) });
         try cons.append(a, .{ .name = "invalid boolean value", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .in_list = .{ .e = col, .not = false, .items = items } }) } });

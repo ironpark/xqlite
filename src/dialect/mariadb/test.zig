@@ -252,6 +252,63 @@ test "mariadb: functions" {
     try c.expectRows("SELECT 'a' IN ('A', 'b'), 'a' IN ('A'), 'a' IN (SELECT 'A')", "1|1|1\n");
 }
 
+test "mariadb: JSON functions" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    // MariaDB's spacing, numbers and strings as written, several paths in
+    // document order.
+    try c.expectRows("SELECT JSON_EXTRACT('{\"a\":{\"b\" : 1,\"c\":[1 ,2]}}', '$.a'), JSON_EXTRACT('{\"a\":[1,2]}', '$.a[1]', '$.a'), JSON_EXTRACT('[1.50, \"\\\\u00e9\"]', '$[*]')", "{\"b\": 1, \"c\": [1, 2]}|[[1, 2], 2]|[1.50, \"\\u00e9\"]\n");
+    try c.expectRows("SELECT JSON_EXTRACT('[1,2,3]', '$[last]'), JSON_EXTRACT('[1,2,3]', '$[0 to 1]'), JSON_EXTRACT('{\"a\":{\"a\":1}}', '$**.a'), JSON_EXTRACT('{\"a\":1}', '$[0].a'), JSON_EXTRACT('{\"a\":1}', 'bad')", "3|[1, 2]|[{\"a\": 1}, 1]|1|NULL\n");
+    try c.expectRows("SELECT JSON_VALUE('{\"a\":\"x\\\\ny\"}', '$.a') = 'x\ny', JSON_VALUE('{\"a\":true}', '$.a'), JSON_QUERY('{\"a\":{\"b\" : 1}}', '$.a'), JSON_QUERY('{\"a\":1}', '$.a')", "1|1|{\"b\" : 1}|NULL\n");
+    try c.expectRows("SELECT JSON_UNQUOTE('\"a\\\\tb\"'), JSON_UNQUOTE('[1]'), JSON_QUOTE('a\"b'), JSON_QUOTE(1)", "a\tb|[1]|\"a\\\"b\"|NULL\n");
+    // JSON arguments are JSON, booleans true/false, other strings strings.
+    try c.expectRows("SELECT JSON_OBJECT('a', 1, 'b', 'x', 'c', NULL, 'd', TRUE, 'e', 1 > 2, 'f', JSON_ARRAY(1, 2), 'g', '[1]')", "{\"a\": 1, \"b\": \"x\", \"c\": null, \"d\": true, \"e\": false, \"f\": [1, 2], \"g\": \"[1]\"}\n");
+    try c.expectRows("SELECT JSON_ARRAY(JSON_COMPACT('{\"a\" : 1}')), JSON_ARRAY(JSON_KEYS('{\"a\":1}')), JSON_ARRAY(JSON_EXTRACT('[\"s\"]', '$[0]'))", "[{\"a\" : 1}]|[\"[\\\"a\\\"]\"]|[\"s\"]\n");
+    try c.expectRows("SELECT JSON_TYPE('1.5'), JSON_TYPE('1e3'), JSON_TYPE('true'), JSON_TYPE('x'), JSON_DEPTH('{\"a\":[1,{\"b\":2}]}'), JSON_LENGTH('{\"a\":[1,2]}', '$.a'), JSON_KEYS('{\"a\":1,\"b\":2,\"a\":3}')", "DOUBLE|INTEGER|BOOLEAN|NULL|4|2|[\"a\", \"b\"]\n");
+    try c.expectRows("SELECT JSON_CONTAINS('[1,[2,3]]', '2'), JSON_CONTAINS('{\"a\":1}', '1'), JSON_CONTAINS('{\"a\":1}', '1', '$.z'), JSON_CONTAINS_PATH('{\"a\":1}', 'one', '$.z', '$.a'), JSON_EXISTS('[1]', '$[0]'), JSON_OVERLAPS('[1,2]', '[2,3]')", "1|0|0|1|1|1\n");
+    try c.expectRows("SELECT JSON_SET('{\"a\" : 1}', '$.a', 2, '$.b', 'x'), JSON_INSERT('[1]', '$[5]', 2), JSON_REPLACE('{\"a\":1}', '$.b', 2), JSON_SET('1', '$[1]', 2), JSON_SET('{\"a\":1}', '$.*', 5)", "{\"a\": 2, \"b\": \"x\"}|[1, 2]|{\"a\": 1}|[1, 2]|NULL\n");
+    try c.expectRows("SELECT JSON_REMOVE('[1,2,3]', '$[0]', '$[0]'), JSON_ARRAY_APPEND('{\"a\":1}', '$.a', 2), JSON_ARRAY_INSERT('[1,2]', '$[0]', 0), JSON_ARRAY_APPEND('{\"a\":1}', '$.z', 2)", "[3]|{\"a\": [1, 2]}|[0, 1, 2]|NULL\n");
+    try c.expectRows("SELECT JSON_MERGE('{\"a\":1}', '{\"a\":2,\"b\":3}'), JSON_MERGE_PATCH('{\"a\":1,\"b\":2}', '{\"a\":null,\"c\":3}'), JSON_MERGE_PATCH('{\"a\":1}', NULL)", "{\"a\": [1, 2], \"b\": 3}|{\"b\": 2, \"c\": 3}|NULL\n");
+    try c.expectRows("SELECT JSON_SEARCH('[\"a\",\"b\",{\"c\":\"A\"}]', 'all', 'a'), JSON_SEARCH('[\"abc\"]', 'one', 'a%'), JSON_SEARCH('[\"a\"]', 'one', 'z')", "[\"$[0]\", \"$[2].c\"]|\"$[0]\"|NULL\n");
+    try c.expectRows("SELECT JSON_COMPACT('{ \"a\" : [ 1 , 2 ] }'), JSON_LOOSE('{\"a\":[1,2]}'), JSON_DETAILED('[1]'), JSON_NORMALIZE('{\"b\":1,\"a\":0.10}'), JSON_EQUALS('{\"a\":1,\"b\":2}', '{\"b\":2,\"a\":1.0}')", "{\"a\":[1,2]}|{\"a\": [1, 2]}|[\n    1\n]|{\"a\":1.0E-1,\"b\":1.0E0}|1\n");
+    // A comparison sees JSON_EXTRACT's string without its quotes.
+    try c.expectRows("SELECT JSON_EXTRACT('{\"a\":\"b\"}', '$.a') = 'b', JSON_EXTRACT('{\"a\":2}', '$.a') = 2, JSON_EXTRACT('{\"a\":2}', '$.a') + 1", "1|1|3\n");
+    try c.expectError("SELECT JSON_OBJECT('a')", "Incorrect parameter count in the call to native function 'JSON_OBJECT'");
+
+    // A JSON column is JSON in JSON_OBJECT/JSON_ARRAY/JSON_ARRAYAGG.
+    try c.exec("CREATE TABLE t (id INT, j JSON, s TEXT)");
+    try c.exec("INSERT INTO t VALUES (1, '{\"k\" : 3, \"l\":[1, 2]}', '{\"x\":1}'), (2, '[]', NULL)");
+    try c.expectRows("SELECT JSON_OBJECT('j', j, 's', s), JSON_ARRAY(t.j) FROM t WHERE id = 1", "{\"j\": {\"k\" : 3, \"l\":[1, 2]}, \"s\": \"{\\\"x\\\":1}\"}|[{\"k\" : 3, \"l\":[1, 2]}]\n");
+    try c.expectRows("SELECT JSON_ARRAYAGG(id ORDER BY id DESC), JSON_ARRAYAGG(j), JSON_OBJECTAGG(id, s), JSON_ARRAYAGG(id LIMIT 1) FROM t", "[2,1]|[{\"k\" : 3, \"l\":[1, 2]},[]]|{\"1\":\"{\\\"x\\\":1}\", \"2\":null}|[1]\n");
+    try c.expectRows("SELECT JSON_ARRAYAGG(id) FROM t WHERE id > 5", "NULL\n");
+    try c.expectError("SELECT JSON_ARRAYAGG(id) OVER () FROM t", "This version of MariaDB doesn't yet support 'JSON_ARRAYAGG() aggregate as window function'");
+    // MySQL's -> and ->>.
+    try c.expectRows("SELECT j->'$.k', j->>'$.l[1]' FROM t WHERE id = 1", "3|2\n");
+
+    // JSON_TABLE.
+    try c.expectRows("SELECT jt.* FROM JSON_TABLE('[{\"a\":1,\"b\":\"x\"},{\"a\":2}]', '$[*]' COLUMNS (rn FOR ORDINALITY, a INT PATH '$.a', b VARCHAR(10) PATH '$.b' DEFAULT 'dflt' ON EMPTY, e INT EXISTS PATH '$.b')) AS jt", "1|1|x|1\n2|2|dflt|0\n");
+    try c.expectRows("SELECT t.id, v FROM t, JSON_TABLE(t.j, '$.l[*]' COLUMNS (v INT PATH '$')) jt ORDER BY v DESC", "1|2\n1|1\n");
+    try c.expectRows("SELECT t.id, jt.v FROM t LEFT JOIN JSON_TABLE(t.j, '$.l[*]' COLUMNS (v INT PATH '$')) jt ON 1 WHERE t.id = 2", "2|NULL\n");
+    try c.expectRows("SELECT * FROM JSON_TABLE('[{\"a\":1,\"b\":[1,2],\"c\":[3]}]', '$[*]' COLUMNS (a INT PATH '$.a', NESTED PATH '$.b[*]' COLUMNS (b INT PATH '$'), NESTED PATH '$.c[*]' COLUMNS (c INT PATH '$', o FOR ORDINALITY))) jt", "1|1|NULL|NULL\n1|2|NULL|NULL\n1|NULL|3|1\n");
+    try c.expectRows("SELECT jt.* FROM JSON_TABLE('[300, \"12abc\", 2.5, true, null, [1]]', '$[*]' COLUMNS (ti TINYINT PATH '$', v VARCHAR(2) PATH '$', j JSON PATH '$')) jt", "127|30|300\n12|12|\"12abc\"\n3|2.|2.5\n1|tr|true\nNULL|NULL|NULL\nNULL|NULL|[1]\n");
+    try c.expectColumns("SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (v INT PATH '$')) jt, (SELECT 2 AS w) d", "v|w");
+    try c.expectError("SELECT * FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (a INT PATH '$.a' ERROR ON EMPTY)) jt", "Field 'a' can't be set for JSON_TABLE 'jt'.");
+    try c.expectError("SELECT * FROM JSON_TABLE('[[1]]', '$[*]' COLUMNS (a INT PATH '$' ERROR ON ERROR)) jt", "Can't store an array or an object in the scalar column 'a' of JSON_TABLE 'jt'.");
+    try c.expectError("SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (a INT PATH '$'))", "Every table function must have an alias.");
+    try c.expectError("SELECT * FROM JSON_TABLE('x', '$[*]' COLUMNS (a INT PATH '$')) jt", "Syntax error in JSON text in argument 1 to function 'JSON_TABLE' at position 1");
+
+    // The schema keeps the dialect's functions qualified, and the view of
+    // a JSON_TABLE its lowered form.
+    try c.exec("CREATE VIEW v AS SELECT id, JSON_OBJECT('j', j) AS o, jt.n FROM t, JSON_TABLE(t.j, '$.l[*]' COLUMNS (n INT PATH '$')) jt");
+    try c.expectRows("SELECT o, n FROM v ORDER BY n", "{\"j\": {\"k\" : 3, \"l\":[1, 2]}}|1\n{\"j\": {\"k\" : 3, \"l\":[1, 2]}}|2\n");
+    try c.expectRows("SELECT sql LIKE '%xq_mariadb_JSON_OBJECT(''j'', xq_maria_json_col(\"j\"))%\"xq_maria_json_table\"(\"t\".\"j\", ''{%' FROM sqlite_schema WHERE name = 'v'", "1\n");
+    try c.exec("CREATE TABLE g (j JSON, a INT AS (JSON_VALUE(j, '$.a')) STORED, CHECK (JSON_LENGTH(j) < 3))");
+    try c.exec("INSERT INTO g (j) VALUES ('{\"a\":5}')");
+    try c.expectRows("SELECT a FROM g", "5\n");
+    try c.expectError("INSERT INTO g (j) VALUES ('[1,2,3]')", "CHECK constraint failed: CONSTRAINT_1");
+}
+
 test "mariadb: collation and case-insensitive keys" {
     var c: Conn = undefined;
     try open(&c);

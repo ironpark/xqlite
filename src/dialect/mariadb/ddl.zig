@@ -505,6 +505,15 @@ fn columnType(s: *Parser, c: *Column) Error!types.Type {
     return ty;
 }
 
+/// The data type of a JSON_TABLE column (json_table.zig) and whether it
+/// is JSON.
+pub fn dataType(s: *Parser, name: Name) Error!struct { types.Type, bool } {
+    var c: Column = .{ .name = name, .type = undefined };
+    const ty = try columnType(s, &c);
+    if (s.eatKw("COLLATE")) _ = try s.collationName();
+    return .{ ty, c.json };
+}
+
 fn intArg(s: *Parser) Error!u32 {
     if (s.tok.kind != .integer) return s.syntaxError();
     const v = std.fmt.parseInt(u32, s.tok.text, 10) catch return s.syntaxError();

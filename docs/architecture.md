@@ -193,6 +193,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | `engine_functions` | IR의 의미 노드가 내려가는 엔진 함수(`xq_*`) |
 | `collations` | 방언이 더하는 collation |
 | `default_collation` | collation이 없는 값의 비교에 쓰는 collation(C의 `db->pDfltColl`) |
+| `engine_modules` | 엔진 테이블 값 함수(`xq_*` 이포니머스 가상 테이블). 엔진 함수처럼 모든 방언에서 보이고, 문장이 처음 그 이름을 쓸 때 연결에 등록합니다(MariaDB `JSON_TABLE`의 `xq_maria_json_table`). |
 
 ### 방언 함수 테이블 (`functions`)
 
@@ -222,6 +223,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | PostgreSQL | `xq_like`, `xq_ilike`, `xq_pg_*` |
 | MariaDB (의미 노드) | `xq_coerce`, `xq_div`, `xq_xor`, `xq_bitxor`, `xq_cast` |
 | MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_stddev_*`, `xq_var_*`, `xq_rand`, `xq_uuid` |
+| MariaDB (JSON) | `xq_maria_json_col`, `xq_maria_json_bool`, `xq_maria_json_cmp`([MariaDB 호환](mariadb.md#json)) |
 | MSSQL | `xq_tsql_add`(`+`), `xq_tsql_like`, `xq_tsql_cast`, `xq_tsql_try_cast`, `xq_tsql_store`, `xq_tsql_newid`, `xq_tsql_avg`([MSSQL 호환](mssql.md)) |
 | Oracle | `xq_ora_coerce`(열에 저장하는 값의 변환, `func` 노드), `xq_ora_cast`(`CAST`, `cast{typed}`), `xq_ora_autocommit`(암묵적 트랜잭션), `xq_ora_data_*`(`USER_TAB_COLUMNS`) |
 

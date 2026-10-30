@@ -129,9 +129,12 @@ pub fn call(s: *Parser) Error!*Expr {
         try s.expectOp(")");
         return s.func(pos, "char", args);
     }
-    if (eq(lname, "match") or eq(lname, "json_table")) {
+    if (eq(lname, "match")) {
         return s.fail("xqlite: {s}() is not supported", .{name_tok.text});
     }
+    // JSON_TABLE is a FROM item only (json_table.zig).
+    if (eq(lname, "json_table")) return s.syntaxErrorAt(name_tok);
+    if (eq(lname, "json_arrayagg") or eq(lname, "json_objectagg")) return jsonAgg(s, pos, name_tok.text, eq(lname, "json_objectagg"));
 
     // An ordinary call: [DISTINCT|ALL] args, or *.
     var distinct = false;
@@ -181,7 +184,6 @@ pub const renames = std.StaticStringMapWithEql([]const u8, ctype.eqlNoCase).init
     .{ "mid", "substr" },
     .{ "substring", "substr" },
     .{ "row_count", "changes" },
-    .{ "json_value", "json_extract" },
     .{ "std", "xq_stddev_pop" },
     .{ "stddev", "xq_stddev_pop" },
     .{ "stddev_pop", "xq_stddev_pop" },
@@ -213,6 +215,7 @@ fn byNameAs(s: *Parser, lname: []const u8, args_in: []const *Expr, pos: u32, wri
     const args = try s.a.dupe(*Expr, args_in);
     const n = args.len;
     if (renames.get(lname)) |to| return s.func(pos, to, args);
+    if (std.mem.startsWith(u8, lname, "json_")) try jsonArgs(s, lname, args, written);
     if (eq(lname, "now") or eq(lname, "sysdate") or eq(lname, "current_timestamp") or
         eq(lname, "localtime") or eq(lname, "localtimestamp") or eq(lname, "utc_timestamp"))
     {
@@ -380,4 +383,165 @@ fn groupConcat(s: *Parser, pos: u32) Error!*Expr {
     }
     const over = try s.overClause();
     return s.funcNode(pos, .{ .name = .{ .text = "group_concat", .pos = pos }, .args = args.items, .distinct = distinct, .order_by = order, .over = over });
+}
+
+// ================================================================ JSON
+
+/// The argument counts MariaDB allows its JSON functions: at least
+/// `min`, at most `max` (null: any), and an odd or even count.
+const JsonArity = struct { min: u8, max: ?u8 = null, parity: enum { any, odd, even } = .any };
+
+const json_arity = std.StaticStringMap(JsonArity).initComptime(.{
+    .{ "json_extract", JsonArity{ .min = 2 } },
+    .{ "json_value", JsonArity{ .min = 2, .max = 2 } },
+    .{ "json_query", JsonArity{ .min = 2, .max = 2 } },
+    .{ "json_unquote", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_quote", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_object", JsonArity{ .min = 0, .parity = .even } },
+    .{ "json_array", JsonArity{ .min = 0 } },
+    .{ "json_contains", JsonArity{ .min = 2, .max = 3 } },
+    .{ "json_contains_path", JsonArity{ .min = 3 } },
+    .{ "json_exists", JsonArity{ .min = 2, .max = 2 } },
+    .{ "json_keys", JsonArity{ .min = 1, .max = 2 } },
+    .{ "json_length", JsonArity{ .min = 1, .max = 2 } },
+    .{ "json_depth", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_type", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_valid", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_set", JsonArity{ .min = 3, .parity = .odd } },
+    .{ "json_insert", JsonArity{ .min = 3, .parity = .odd } },
+    .{ "json_replace", JsonArity{ .min = 3, .parity = .odd } },
+    .{ "json_remove", JsonArity{ .min = 2 } },
+    .{ "json_array_append", JsonArity{ .min = 3, .parity = .odd } },
+    .{ "json_array_insert", JsonArity{ .min = 3, .parity = .odd } },
+    .{ "json_merge", JsonArity{ .min = 2 } },
+    .{ "json_merge_preserve", JsonArity{ .min = 2 } },
+    .{ "json_merge_patch", JsonArity{ .min = 2 } },
+    .{ "json_search", JsonArity{ .min = 3 } },
+    .{ "json_compact", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_loose", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_detailed", JsonArity{ .min = 1, .max = 2 } },
+    .{ "json_pretty", JsonArity{ .min = 1, .max = 2 } },
+    .{ "json_equals", JsonArity{ .min = 2, .max = 2 } },
+    .{ "json_normalize", JsonArity{ .min = 1, .max = 1 } },
+    .{ "json_overlaps", JsonArity{ .min = 2, .max = 2 } },
+});
+
+/// Check the argument count of JSON function `lname` and mark the
+/// arguments it takes as values (jsonValue()).
+fn jsonArgs(s: *Parser, lname: []const u8, args: []*Expr, written: []const u8) Error!void {
+    const ar = json_arity.get(lname) orelse return;
+    const n = args.len;
+    const ok = n >= ar.min and (ar.max == null or n <= ar.max.?) and switch (ar.parity) {
+        .any => true,
+        .odd => n % 2 == 1,
+        .even => n % 2 == 0,
+    };
+    if (!ok) return s.fail("Incorrect parameter count in the call to native function '{s}'", .{written});
+    if (eq(lname, "json_array")) {
+        for (args) |*a| try jsonValue(s, a);
+    } else if (eq(lname, "json_object")) {
+        var i: usize = 1;
+        while (i < n) : (i += 2) try jsonValue(s, &args[i]);
+    } else if (eq(lname, "json_set") or eq(lname, "json_insert") or eq(lname, "json_replace") or
+        eq(lname, "json_array_append") or eq(lname, "json_array_insert"))
+    {
+        var i: usize = 2;
+        while (i < n) : (i += 2) try jsonValue(s, &args[i]);
+    }
+}
+
+/// A value a JSON function stores (JSON_OBJECT's values, JSON_ARRAY's
+/// items ...): a boolean expression becomes true/false
+/// (xq_maria_json_bool()), a column reference may be a JSON column
+/// (Parser.json_args, json_table.markJsonColumns()).
+fn jsonValue(s: *Parser, slot: **Expr) Error!void {
+    const e = slot.*;
+    if (e.kind == .func and e.kind.func.dialect != null and e.kind.func.args.len > 0 and isFormat(e.kind.func.name.text)) {
+        // JSON_COMPACT(x) and the like give x itself, as written, to a
+        // JSON function.
+        slot.* = try s.func(e.pos, "xq_maria_json_col", &.{e.kind.func.args[0]});
+        return;
+    }
+    if (isBoolean(e)) {
+        slot.* = try s.func(e.pos, "xq_maria_json_bool", &.{e});
+    } else if (e.kind == .column) {
+        try s.json_args.append(s.a, e);
+    } else if (e.kind == .subquery and returnsJson(e.kind.subquery)) {
+        // The value of a subquery has lost the JSON subtype.
+        slot.* = try s.func(e.pos, "xq_maria_json_col", &.{e});
+    }
+}
+
+/// Whether the single column of query `sel` is a JSON function's.
+fn returnsJson(sel: *const tree.Select) bool {
+    const core = switch (sel.body.*) {
+        .core => |c| c,
+        else => return false,
+    };
+    if (core.cols.len != 1) return false;
+    const e = switch (core.cols[0]) {
+        .expr => |x| x.e,
+        else => return false,
+    };
+    if (e.kind != .func or e.kind.func.dialect == null) return false;
+    const returning = [_][]const u8{
+        "json_extract",  "json_query",          "json_object",      "json_array",        "json_set",
+        "json_insert",   "json_replace",        "json_remove",      "json_array_append", "json_array_insert",
+        "json_merge",    "json_merge_preserve", "json_merge_patch", "json_compact",      "json_loose",
+        "json_detailed", "json_pretty",         "json_normalize",   "json_arrayagg",     "json_objectagg",
+        "json_search",
+    };
+    for (returning) |n| if (std.ascii.eqlIgnoreCase(e.kind.func.name.text, n)) return true;
+    return false;
+}
+
+fn isFormat(name: []const u8) bool {
+    for ([_][]const u8{ "json_compact", "json_loose", "json_detailed", "json_pretty" }) |f| {
+        if (std.ascii.eqlIgnoreCase(name, f)) return true;
+    }
+    return false;
+}
+
+fn isBoolean(e: *const Expr) bool {
+    return switch (e.kind) {
+        .boolean, .compare, .like, .in_list, .in_select, .between, .is_null, .is_bool, .exists => true,
+        .unary => |u| u.op == .not,
+        .binary => |b| b.op == .@"and" or b.op == .@"or",
+        else => false,
+    };
+}
+
+/// An operand of a comparison: JSON_EXTRACT's value compares as its
+/// SQL value (a string without its quotes), as in MariaDB.
+pub fn jsonCompared(s: *Parser, e: *Expr) Error!*Expr {
+    if (e.kind != .func) return e;
+    const f = e.kind.func;
+    if (f.dialect == null or !std.ascii.eqlIgnoreCase(f.name.text, "json_extract")) return e;
+    return s.func(e.pos, "xq_maria_json_cmp", &.{e});
+}
+
+/// JSON_ARRAYAGG([DISTINCT] expr [ORDER BY ...]) and
+/// JSON_OBJECTAGG(key, value).
+fn jsonAgg(s: *Parser, pos: u32, written: []const u8, object: bool) Error!*Expr {
+    var distinct = false;
+    if (s.eatKw("DISTINCT")) distinct = true else _ = s.eatKw("ALL");
+    const args = try s.exprList();
+    if (args.len != @as(usize, if (object) 2 else 1)) return s.fail("Incorrect parameter count in the call to native function '{s}'", .{written});
+    var order: []tree.SortItem = &.{};
+    if (!object and s.isKw("ORDER")) {
+        s.advance();
+        try s.expectKw("BY");
+        order = try s.sortList();
+    }
+    var limit: ?*Expr = null;
+    if (!object and s.eatKw("LIMIT")) limit = try s.expr();
+    try s.expectOp(")");
+    if (s.isKw("OVER")) {
+        return s.fail("This version of MariaDB doesn't yet support '{s}() aggregate as window function'", .{if (object) "JSON_OBJECTAGG" else "JSON_ARRAYAGG"});
+    }
+    try jsonValue(s, &args[args.len - 1]);
+    const name: []const u8 = if (object) "json_objectagg" else "json_arrayagg";
+    // LIMIT n: json_arrayagg(value, n).
+    const all = if (limit) |l| try s.a.dupe(*Expr, &.{ args[0], l }) else args;
+    return s.funcNode(pos, .{ .name = .{ .text = name, .pos = pos }, .args = all, .distinct = distinct, .order_by = order });
 }

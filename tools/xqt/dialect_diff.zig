@@ -91,7 +91,10 @@ const pg: Dialect = .{
     .default_client = "podman exec -i xq-pg psql -U postgres",
     .container = "podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine",
     .client_args = &.{ "-q", "-A", "-F|" },
-    .prelude = "SET client_min_messages = warning; DROP SCHEMA public CASCADE; CREATE SCHEMA public;\n",
+    // Also drops the schemas an earlier case of the worker created.
+    .prelude = "SET client_min_messages = warning; DROP SCHEMA public CASCADE; CREATE SCHEMA public;" ++
+        " DO $$DECLARE r record; BEGIN FOR r IN SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname NOT IN ('public', 'information_schema')" ++
+        " LOOP EXECUTE 'DROP SCHEMA ' || quote_ident(r.nspname) || ' CASCADE'; END LOOP; END$$;\n",
     .xq_prelude = ".dialect postgres\n.headers on\n",
     .norm_server = normPg,
     .norm_xq = normXqPg,

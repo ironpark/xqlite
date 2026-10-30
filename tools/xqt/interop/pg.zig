@@ -20,6 +20,7 @@ pub fn register(s: *xqt.Suite) !void {
     try s.add("results", results, .{base});
     for (bad) |stmt| try s.add(try std.fmt.allocPrint(s.arena.allocator(), "sqlite3 rejects: {s}", .{stmt}), rejects, .{ base, stmt });
     try s.add("read back", readBack, .{base});
+    try s.add("schema tables", schemaTables, .{base});
 }
 
 const db = "pg.db";
@@ -52,6 +53,12 @@ const script =
     \\SELECT nextval('ticket'), nextval('ticket');
     \\ALTER TABLE entry ADD COLUMN tag varchar(8);
     \\CREATE TABLE gone (x int); DROP TABLE gone;
+    \\CREATE SCHEMA sales;
+    \\CREATE TABLE sales.orders (id serial PRIMARY KEY, account_id bigint, amount int CHECK (amount > 0));
+    \\CREATE INDEX ON sales.orders (account_id);
+    \\INSERT INTO sales.orders (account_id, amount) SELECT n, n * 2 FROM generate_series(1, 50) AS g(n);
+    \\CREATE VIEW sales.big AS SELECT o.id, o.amount FROM sales.orders o WHERE o.amount > 50;
+    \\CREATE SCHEMA tmp; CREATE TABLE tmp.x (a int); DROP SCHEMA tmp CASCADE;
     \\
 ;
 
@@ -59,6 +66,8 @@ const queries =
     \\SELECT count(*), sum(id), sum(balance), sum(active) FROM account;
     \\SELECT count(*), sum(amount), min(memo), max(memo) FROM entry;
     \\SELECT * FROM totals LIMIT 5;
+    \\SELECT count(*), sum(amount) FROM "sales.orders";
+    \\SELECT count(*), sum(amount) FROM "sales.big";
     \\SELECT * FROM xq_catalog ORDER BY tbl, col, key;
     \\SELECT * FROM xq_sequence ORDER BY name;
     \\SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name;
@@ -105,4 +114,18 @@ fn readBack(c: *Check, base: *BaseDb) !void {
     const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT balance FROM account WHERE id = 2;\nINSERT INTO account (email) VALUES ($$new@x$$) RETURNING id;\n" });
     const got = std.mem.trimEnd(u8, out, "\n");
     _ = c.expect(std.mem.eql(u8, got, "4.0\n302"), "read back: {s}", .{got});
+}
+
+/// A table of CREATE SCHEMA sales is the table "sales.orders" of main:
+/// sqlite3 lists it, reads and writes it, and the PostgreSQL dialect reads
+/// sqlite3's row as sales.orders (and as orders on search_path sales).
+fn schemaTables(c: *Check, base: *BaseDb) !void {
+    try base.get(c, db);
+    const tables = try c.sqlite3(db, ".tables");
+    _ = c.expect(std.mem.indexOf(u8, tables, "sales.orders") != null and std.mem.indexOf(u8, tables, "sales.big") != null, ".tables: {s}", .{tables});
+    _ = c.expect(std.mem.indexOf(u8, tables, "tmp.x") == null, ".tables still lists tmp.x: {s}", .{tables});
+    _ = try c.sqlite3(db, "INSERT INTO \"sales.orders\" (id, account_id, amount) VALUES (1000, 1, 7)");
+    const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT amount FROM sales.orders WHERE id = 1000;\nSET search_path = sales;\nSELECT count(*) FROM orders;\n" });
+    const got = std.mem.trimEnd(u8, out, "\n");
+    _ = c.expect(std.mem.eql(u8, got, "7\n51"), "schema read back: {s}", .{got});
 }

@@ -381,7 +381,7 @@ test "oracle: JSON_VALUE, JSON_QUERY, JSON_EXISTS" {
     try c.expectError("SELECT JSON_VALUE('{\"a\":1}', '$.b' ERROR ON EMPTY) FROM dual", "ORA-40462: JSON path '$.b' evaluated to no value.");
     try c.expectError("SELECT JSON_VALUE('bad', '$.a' ERROR ON ERROR) FROM dual", "ORA-40441: JSON syntax error");
     try c.expectError("SELECT JSON_VALUE('{}', 'bad path') FROM dual", "ORA-40597: JSON path expression syntax error ('bad path')");
-    try c.expectError("SELECT JSON_VALUE('{}', '$.a[') FROM dual", "ORA-40442: JSON path expression syntax error ('$.a[')");
+    try c.expectError("SELECT JSON_VALUE('{}', '$.a[') FROM dual", "ORA-40597: JSON path expression syntax error ('$.a[')");
     // The text JSON_VALUE returns compares with a number as one.
     try c.expectRows("SELECT 1 FROM dual WHERE JSON_VALUE('{\"a\":5}', '$.a') = 5", "1\n");
     try c.expectColumns("SELECT JSON_VALUE('{\"a\":1}', '$.a') FROM dual", "JSON_VALUE('{\"A\":1}','$.A')");

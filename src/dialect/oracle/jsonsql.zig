@@ -105,7 +105,7 @@ fn checkPath(p: *Parser, pos: u32, text: []const u8) Error!void {
     }
     _ = J.parsePath(p.arena, text) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        error.BadPath => return p.fail(pos, "ORA-40442: JSON path expression syntax error ('{s}')", .{text}),
+        error.BadPath => return p.fail(pos, "ORA-40597: JSON path expression syntax error ('{s}')", .{text}),
     };
 }
 
@@ -643,7 +643,7 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
     var label: ?[]const u8 = null;
     for (names[2..]) |n| {
         try appendMember(p, &path, n);
-        if (label == null) label = n.text;
+        label = n.text;
     }
     var method = false;
     while (true) {
@@ -682,9 +682,7 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
         }
         break;
     }
-    if (names.len > 3 or complex) {} else {
-        // t.col.a: perhaps db.t.col (resolveDot() decides).
-    }
+    // t.col.a may still be db.t.col: resolveDot() decides.
     const col_names = try p.arena.dupe(Name, names[0..2]);
     const col = try tree.expr(p.arena, start, p.lastEnd(), .{ .column = col_names });
     const flags: i64 = if (method) 2 else 0;

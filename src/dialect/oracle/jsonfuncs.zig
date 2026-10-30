@@ -596,6 +596,13 @@ fn queryOf(c: *Call, doc_opt: ?Value, path_text: []const u8, path: J.Path, spec:
     const r = queryCore(c, doc_opt, path_text, path, spec, vars);
     if (r) |x| return x else |err| switch (err) {
         error.OutOfMemory => |e| return e,
+        error.Empty => {
+            const h = if (spec.on_empty == .inherit) spec.on_error else spec.on_empty;
+            return switch (h) {
+                .err => error.Ora,
+                else => handled(h),
+            };
+        },
         error.Ora => {},
     }
     return switch (spec.on_error) {
@@ -604,7 +611,7 @@ fn queryOf(c: *Call, doc_opt: ?Value, path_text: []const u8, path: J.Path, spec:
     };
 }
 
-fn queryCore(c: *Call, doc_opt: ?Value, path_text: []const u8, path: J.Path, spec: QuerySpec, vars: []const J.Var) Fail!?[]const u8 {
+fn queryCore(c: *Call, doc_opt: ?Value, path_text: []const u8, path: J.Path, spec: QuerySpec, vars: []const J.Var) (Fail || error{Empty})!?[]const u8 {
     const doc = doc_opt orelse return c.fail("ORA-40441: JSON syntax error", .{});
     var e: J.Eval = .{ .a = c.a(), .strict = path.strict, .root = doc, .vars = vars };
     const items = e.run(path, doc) catch |err| switch (err) {
@@ -612,11 +619,8 @@ fn queryCore(c: *Call, doc_opt: ?Value, path_text: []const u8, path: J.Path, spe
         error.Eval => return c.fail("ORA-40462: JSON path '{s}' evaluated to no value.", .{path_text}),
     };
     if (items.len == 0) {
-        const h = if (spec.on_empty == .inherit) spec.on_error else spec.on_empty;
-        return switch (h) {
-            .err => c.fail("ORA-40462: JSON path '{s}' evaluated to no value.", .{path_text}),
-            else => handled(h),
-        };
+        c.msg = try std.fmt.allocPrint(c.a(), "ORA-40462: JSON path '{s}' evaluated to no value.", .{path_text});
+        return error.Empty;
     }
     const v: Value = switch (spec.wrapper) {
         'U' => .{ .array = items },

@@ -1,7 +1,8 @@
 //! The Oracle dialect against sqlite3: a database written by `xqlite sql`
 //! in the Oracle dialect (STRICT tables with the checks of Oracle's
 //! types, an identity column and a sequence, the xq_catalog/xq_sequence
-//! catalog, views, indexes, MERGE, committed with COMMIT) must pass
+//! catalog, views, indexes, MERGE, a JSON column, committed with COMMIT)
+//! must pass
 //! sqlite3's integrity check, and sqlite3 and xqlite (in the SQLite
 //! dialect) must read the same rows and schema from it.
 
@@ -59,6 +60,10 @@ const script =
     \\CREATE VIEW totals AS SELECT a.email, count(e.id) AS n, sum(e.amount) AS total FROM account a, entry e WHERE e.account_id(+) = a.id GROUP BY a.email;
     \\ALTER TABLE entry ADD (tag VARCHAR2(8));
     \\COMMENT ON TABLE entry IS 'ledger entries';
+    \\CREATE TABLE doc (id NUMBER PRIMARY KEY, body JSON, meta VARCHAR2(100));
+    \\INSERT INTO doc VALUES (1, '{a : 1.50, "tags" : ["x", "y"]}', JSON_OBJECT('n' VALUE 1, 'd' VALUE DATE '2024-01-02'));
+    \\INSERT INTO doc VALUES (2, JSON_ARRAY(1, 'two', NULL NULL ON NULL), NULL);
+    \\UPDATE doc SET body = JSON_TRANSFORM(body, SET '$.b' = TRUE) WHERE id = 1;
     \\CREATE TABLE gone (x NUMBER);
     \\DROP TABLE gone PURGE;
     \\COMMIT;
@@ -69,6 +74,7 @@ const queries =
     \\SELECT count(*), sum(id), sum(balance), sum(active), count(note) FROM account;
     \\SELECT count(*), sum(amount), min(memo), max(memo), min(booked), max(booked) FROM entry;
     \\SELECT * FROM totals ORDER BY total DESC, email LIMIT 5;
+    \\SELECT id, body, meta, json_extract(body, '$.a'), json_valid(body) FROM doc ORDER BY id;
     \\SELECT * FROM xq_catalog ORDER BY tbl, col, key;
     \\SELECT * FROM xq_sequence ORDER BY name;
     \\SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name;
@@ -80,6 +86,7 @@ const bad = [_][]const u8{
     "INSERT INTO entry(id, account_id, amount, tag) VALUES (9002, 1, 1, 'too long tag')",
     "INSERT INTO entry(id, account_id, amount) VALUES (9003, 1, 123456789)",
     "UPDATE account SET balance = 12345678901 WHERE id = 1",
+    "INSERT INTO doc(id, body) VALUES (9, '{a:1}')",
 };
 
 fn build(c: *Check, file: []const u8) !void {

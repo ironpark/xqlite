@@ -106,7 +106,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | 윈도우 함수 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | JSON | ✅ `json1` | 🚧 `json`/`jsonb` | ✅ `JSON_*`, `JSON_TABLE` | 🚧 `JSON_VALUE`, `ISJSON` | ✅ `JSON` 타입, SQL/JSON 함수, `JSON_TABLE` |
 | 시퀀스 | — | ✅ | ✅ | ✅ `IDENTITY`, `SEQUENCE` | ✅ |
-| 스키마(네임스페이스) | ✅ `ATTACH` | ✅ `CREATE SCHEMA`, `search_path`, 붙인 DB | 🚧 (database, `ATTACH`) | 🚧 `dbo`, `#temp`, `db.dbo.t` | 🚧 현재 사용자 스키마 = `main` |
+| 스키마(네임스페이스) | ✅ `ATTACH` | ✅ `CREATE SCHEMA`, `search_path`, 붙인 DB | 🚧 (database, `ATTACH`) | 🚧 `dbo`, `#temp`, `db.dbo.t` | ✅ `CREATE USER` (사용자 = 스키마), `CURRENT_SCHEMA`, 붙인 DB |
 | 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 | 🔬 PL/SQL |
 | 트리거 | ✅ | 🎯 | 🎯 | 🎯 | 🎯 |
 | 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🚧 `INFORMATION_SCHEMA`, `sys.*` 일부 | 🚧 `USER_*`/`ALL_*` 뷰 |

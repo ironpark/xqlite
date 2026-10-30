@@ -20,6 +20,7 @@ const trigger = @import("trigger.zig");
 const fkey = @import("fkey.zig");
 const where_mod = @import("where.zig");
 const main_mod = @import("main.zig");
+const auth = @import("auth.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -104,6 +105,10 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
     build.viewGetColumnNames(p, t) catch return;
     if (isReadOnly(p, t, trig)) return;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
+    const rcauth = auth.check(p, auth.Code.DELETE, t.name, null, db.dbs.items[i_db].name);
+    if (rcauth == auth.DENY) return;
+    var s_context: auth.Context = .{};
+    defer auth.contextPop(&s_context);
 
     // Cursors for the table and its indexes.
     const i_tab_cur = p.n_tab;
@@ -115,6 +120,9 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         p.n_tab += 1;
         n_idx += 1;
     }
+
+    // The checks of the view's triggers are made on behalf of the view.
+    if (is_view) auth.contextPush(p, &s_context, t.name);
 
     const v = build.getVdbe(p) orelse return;
     if (p.nested == 0) aux.countChanges(v);
@@ -140,7 +148,7 @@ fn deleteFromImpl(p: *Parse, tab_list: *SrcList, where: ?*Expr) Oom!void {
         _ = aux.addOp2(v, OP.Integer, 0, mem_cnt);
     }
 
-    if (where == null and !b_complex and !t.isVirtual()) {
+    if (rcauth == auth.OK and where == null and !b_complex and !t.isVirtual()) {
         // Without a WHERE clause the b-trees are just cleared.
         if (t.hasRowid()) {
             _ = aux.addOp4Str(v, OP.Clear, @intCast(t.tnum), @intCast(i_db), if (mem_cnt != 0) mem_cnt else -1, t.name);

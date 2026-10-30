@@ -34,6 +34,7 @@ const OPFLAG = vi.OPFLAG;
 const expr_mod = @import("expr.zig");
 const ec = @import("expr_code.zig");
 const resolve = @import("resolve.zig");
+const auth = @import("auth.zig");
 const prepare = @import("prepare.zig");
 const insert = @import("insert.zig");
 const delete_mod = @import("delete.zig");
@@ -190,6 +191,9 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             p.check_schema = true;
             return;
         }
+        const rc = auth.check(p, auth.Code.UPDATE, t.name, if (j < 0) "ROWID" else t.cols[@intCast(j)].name(), db.dbs.items[i_db].name);
+        if (rc == auth.DENY) return;
+        if (rc == auth.IGNORE and j >= 0) ax_ref[@intCast(j)] = -1;
     }
     const chng_key = chng_rowid or chng_pk;
 
@@ -273,6 +277,11 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
         reg_new = p.n_mem + 1;
         p.n_mem += @intCast(t.cols.len);
     }
+
+    // The checks of the view's triggers are made on behalf of the view.
+    var s_context: auth.Context = .{};
+    defer auth.contextPop(&s_context);
+    if (is_view) auth.contextPush(p, &s_context, t.name);
 
     // A view (with INSTEAD OF triggers) is realized into an ephemeral
     // table.
@@ -506,6 +515,28 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     if (tmask & int.TRIGGER_BEFORE != 0) {
         insert.tableAffinity(p, t, reg_new);
         trigger.codeRowTrigger(p, trig, TK.UPDATE, changes, int.TRIGGER_BEFORE, t, reg_old_rowid, on_error, label_continue);
+
+        if (!is_view) {
+            // The trigger may have deleted the row: then go to the next.
+            if (pk != null) {
+                _ = aux.addOp4Int(v, OP.NotFound, i_data_cur, label_continue, reg_key, n_key);
+            } else {
+                _ = aux.addOp3(v, OP.NotExists, i_data_cur, label_continue, reg_old_rowid);
+            }
+            // It may also have changed the columns the UPDATE does not
+            // set: reload them (the others keep their values from before
+            // the trigger).
+            var k = reg_new;
+            for (t.cols, 0..) |c, i| {
+                defer k += 1;
+                if (c.col_flags.intersects(COLFLAG.GENERATED)) {
+                    if (c.col_flags.VIRTUAL) k -= 1;
+                } else if (ax_ref[i] < 0 and @as(i32, @intCast(i)) != t.i_pkey) {
+                    ec.codeGetColumnOfTable(v, t, i_data_cur, @intCast(i), k);
+                }
+            }
+            if (t.tab_flags.intersects(TF.HasGenerated)) insert.computeGeneratedColumns(p, reg_new, t);
+        }
     }
 
     if (!is_view) {
@@ -686,7 +717,7 @@ pub fn columnDefault(v: *vi.Vdbe, t: *int.Table, i: i32, reg: i32) void {
     const col = &t.cols[@intCast(i)];
     if (col.i_dflt != 0) {
         // columnDefaultUncommonCase().
-        const e = build.columnExpr(t, col);
+        const e = build.columnExprAuth(t, col, v.parse.?);
         if (valueFromExpr(v, e, col.affinity) catch blk: {
             v.db.oomFault();
             break :blk null;

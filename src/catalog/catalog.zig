@@ -293,6 +293,11 @@ pub const Query = struct {
 
     pub fn init(db: *Sqlite3, sql: []const u8) Error!Query {
         var stmt: ?*vi.Vdbe = null;
+        // The catalog's own statements are not the application's: the
+        // authorizer does not see them (as SQLite's reads of its schema).
+        const x_auth = db.auth;
+        db.auth = null;
+        defer db.auth = x_auth;
         try int.check(prepare.prepareLang(db, sql, .sqlite, 0, &stmt, null));
         return .{ .v = stmt orelse return error.Misuse };
     }

@@ -20,6 +20,7 @@ const legacy = @import("legacy.zig");
 const util = @import("util.zig");
 const printf = @import("printf.zig");
 const prepare = @import("prepare.zig");
+const auth = @import("auth.zig");
 const insert = @import("insert.zig");
 const expr = @import("expr.zig");
 const coll = @import("coll.zig");
@@ -279,6 +280,7 @@ fn analyzeOneTable(p: *Parse, t: *Table, only_idx: ?*Index, i_stat_cur: i32, i_m
     if (!t.isOrdinary()) return;
     if (func.strlike("sqlite\\_%", t.name.ptr, '\\') == 0) return;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
+    if (auth.check(p, auth.Code.ANALYZE, t.name, null, db.dbs.items[i_db].name) != auth.OK) return;
 
     // Open a read-only cursor on the table. Also allocate a cursor number
     // to use for scanning indexes (i_idx_cur). No index cursor is opened

@@ -269,6 +269,7 @@ const trigger_mod = @import("trigger.zig");
 const fkey_mod = @import("fkey.zig");
 const delete_mod = @import("delete.zig");
 const resolve = @import("resolve.zig");
+const auth = @import("auth.zig");
 const select_mod = @import("select.zig");
 const attach = @import("attach.zig");
 const alter = @import("alter.zig");
@@ -740,6 +741,14 @@ pub fn columnExpr(t: *Table, col: *const Column) ?*Expr {
     return list.at(col.i_dflt - 1).expr;
 }
 
+/// Port of sqlite3ColumnExprAuth(): columnExpr(), after sending the
+/// functions it calls to the authorizer.
+pub fn columnExprAuth(t: *Table, col: *const Column, p: *Parse) ?*Expr {
+    const e = columnExpr(t, col);
+    if (p.db.auth != null) auth.funcAuth(p, e);
+    return e;
+}
+
 /// The string after the NUL that ends `z`: the declared type follows the
 /// name in Column.cn_name, and the collation follows them.
 fn afterNul(z: [*:0]const u8) [*:0]const u8 {
@@ -1012,6 +1021,16 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         return;
     };
     if (db.init.i_db == 1) is_temp = true;
+    {
+        const codes = [4]i32{ auth.Code.CREATE_TABLE, auth.Code.CREATE_TEMP_TABLE, auth.Code.CREATE_VIEW, auth.Code.CREATE_TEMP_VIEW };
+        const zdb = db.dbs.items[i_db].name;
+        if (auth.check(p, auth.Code.INSERT, int.schemaTable(@intFromBool(is_temp)), null, zdb) != auth.OK or
+            (!is_virtual and auth.check(p, codes[@as(usize, @intFromBool(is_temp)) + 2 * @as(usize, @intFromBool(is_view))], name, null, zdb) != auth.OK))
+        {
+            p.check_schema = true;
+            return;
+        }
+    }
 
     // The name must not collide with a table or index of the database.
     if (!p.inSpecialParse()) {
@@ -1252,6 +1271,8 @@ fn addDefaultValueImpl(p: *Parse, e: ?*Expr, start: ?[*]const u8, end: ?[*]const
         x.u = .{ .token = try expr_mod.spanDup(p.arena, start.?, end.?) };
         const dflt = try expr_mod.exprDup(tableAlloc(p, t), &x);
         try columnSetExpr(p, t, col, dflt);
+        // Unauthorized functions are refused in DEFAULT clauses.
+        if (!db.init.busy and db.auth != null) auth.funcAuth(p, e);
     }
     if (p.inRenameObject()) alter.renameExprUnmap(p, e);
 }
@@ -2150,6 +2171,14 @@ fn createIndexImpl(
         name = z;
     }
 
+    // May the index be created?
+    if (db.auth != null and !p.inRenameObject()) {
+        const zdb = db.dbs.items[i_db].name;
+        if (auth.check(p, auth.Code.INSERT, int.schemaTable(i_db), null, zdb) != auth.OK) return;
+        const code = if (i_db == 1) auth.Code.CREATE_TEMP_INDEX else auth.Code.CREATE_INDEX;
+        if (auth.check(p, code, name, t.name, zdb) != auth.OK) return;
+    }
+
     // Without a list, the index is on the last column added.
     if (list == null) {
         const col = &t.cols[t.cols.len - 1];
@@ -2434,6 +2463,10 @@ fn viewGetColumnNamesImpl(p: *Parse, t: *Table) (Oom || int.ParseError)!void {
                 p.n_tab = n_tab;
                 p.n_select = n_select;
             }
+            // The view's columns are named without the authorizer.
+            const x_auth = db.auth;
+            db.auth = null;
+            defer db.auth = x_auth;
             break :sel_tab try select_mod.resultSetOfSelect(p, sel, Aff.none);
         };
         if (sel_tab == null) {
@@ -2508,6 +2541,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
     const i_idx = p.n_tab + 1;
     p.n_tab += 2;
     const i_db: i32 = @intCast(prepare.schemaToIndex(db, idx.schema));
+    if (auth.check(p, auth.Code.REINDEX, idx.name, null, db.dbs.items[@intCast(i_db)].name) != auth.OK) return;
     const v = getVdbe(p) orelse return;
     const tnum: i32 = if (mem_root_page >= 0) mem_root_page else @intCast(idx.tnum);
     const key = keyInfoOfIndex(p, idx);
@@ -2560,6 +2594,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
 pub fn beginTransaction(p: *Parse, kind: i32) void {
     const db = p.db;
     if (p.syntax_only) return;
+    if (auth.check(p, auth.Code.TRANSACTION, "BEGIN", null, null) != auth.OK) return;
     const v = getVdbe(p) orelse return;
     if (kind != TK.DEFERRED) {
         for (db.dbs.items, 0..) |*d, i| {
@@ -2575,6 +2610,7 @@ pub fn beginTransaction(p: *Parse, kind: i32) void {
 pub fn endTransaction(p: *Parse, op: u16) void {
     std.debug.assert(op == TK.COMMIT or op == TK.END or op == TK.ROLLBACK);
     if (p.syntax_only) return;
+    if (auth.check(p, auth.Code.TRANSACTION, if (op == TK.ROLLBACK) "ROLLBACK" else "COMMIT", null, null) != auth.OK) return;
     const v = getVdbe(p) orelse return;
     _ = aux.addOp2(v, OP.AutoCommit, 1, @intFromBool(op == TK.ROLLBACK));
 }
@@ -2587,6 +2623,8 @@ pub fn savepoint(p: *Parse, op: SAVEPOINT, name: Token) void {
     if (p.syntax_only) return;
     const z = (nameFromToken(p.arena, name) catch return oomFault(p)) orelse return;
     const v = getVdbe(p) orelse return;
+    const az = [3][]const u8{ "BEGIN", "RELEASE", "ROLLBACK" };
+    if (auth.check(p, auth.Code.SAVEPOINT, az[@intCast(op.int())], z, null) != auth.OK) return;
     _ = aux.addOp4Str(v, OP.Savepoint, op.int(), 0, 0, z);
 }
 
@@ -2818,6 +2856,22 @@ pub fn dropTable(p: *Parse, name: ?*SrcList, is_view: bool, no_err: bool) void {
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
     // Make sure a virtual table is connected.
     if (t.isVirtual()) viewGetColumnNames(p, t) catch return;
+    if (db.auth != null) {
+        const zdb = db.dbs.items[i_db].name;
+        if (auth.check(p, auth.Code.DELETE, int.schemaTable(i_db), null, zdb) != auth.OK) return;
+        var code: i32 = undefined;
+        var arg2: ?[]const u8 = null;
+        if (is_view) {
+            code = if (i_db == 1) auth.Code.DROP_TEMP_VIEW else auth.Code.DROP_VIEW;
+        } else if (t.isVirtual()) {
+            code = auth.Code.DROP_VTABLE;
+            arg2 = vtab_mod.getVTable(db, t).?.mod.name;
+        } else {
+            code = if (i_db == 1) auth.Code.DROP_TEMP_TABLE else auth.Code.DROP_TABLE;
+        }
+        if (auth.check(p, code, t.name, arg2, zdb) != auth.OK) return;
+        if (auth.check(p, auth.Code.DELETE, t.name, null, zdb) != auth.OK) return;
+    }
     if (tableMayNotBeDropped(db, t)) {
         util.errorMsg(p, "table {s} may not be dropped", .{t.name});
         return;
@@ -2906,6 +2960,12 @@ pub fn dropIndex(p: *Parse, name: ?*SrcList, if_exists: bool) void {
         return;
     }
     const i_db: usize = @intCast(prepare.schemaToIndex(db, idx.schema));
+    if (db.auth != null) {
+        const zdb = db.dbs.items[i_db].name;
+        if (auth.check(p, auth.Code.DELETE, int.schemaTable(i_db), null, zdb) != auth.OK) return;
+        const code = if (i_db == 1) auth.Code.DROP_TEMP_INDEX else auth.Code.DROP_INDEX;
+        if (auth.check(p, code, idx.name, idx.table.name, zdb) != auth.OK) return;
+    }
     const v = getVdbe(p) orelse return;
     beginWriteOperation(p, true, i_db);
     nestedParse(p, "DELETE FROM %Q." ++ int.LEGACY_SCHEMA_TABLE ++ " WHERE name=%Q AND type='index'", &.{ .{ .str = db.dbs.items[i_db].name }, .{ .str = idx.name } });

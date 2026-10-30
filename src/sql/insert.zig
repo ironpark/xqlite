@@ -24,6 +24,7 @@ const where_mod = @import("where.zig");
 const ctype = @import("../util/ctype.zig");
 const coll_mod = @import("coll.zig");
 const malloc = @import("malloc.zig");
+const auth = @import("auth.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -393,6 +394,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
 
     const t = build.srcListLookup(p, tab_list) orelse return;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
+    if (auth.check(p, auth.Code.INSERT, t.name, null, db.dbs.items[i_db].name) != auth.OK) return;
     const without_rowid = !t.hasRowid();
 
     var tmask: u8 = 0;
@@ -626,7 +628,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                     if (tmask & int.TRIGGER_BEFORE != 0) _ = aux.addOp1(v, OP.SoftNull, i_reg_store);
                     continue;
                 } else if (column == null) {
-                    ec.codeFactorable(p, build.columnExpr(t, c), i_reg_store);
+                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), i_reg_store);
                     continue;
                 }
             }
@@ -634,13 +636,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 const j = tab_col_map[ii];
                 if (j == 0) {
                     // Not in the IDLIST: the DEFAULT.
-                    ec.codeFactorable(p, build.columnExpr(t, c), i_reg_store);
+                    ec.codeFactorable(p, build.columnExprAuth(t, c, p), i_reg_store);
                     continue;
                 }
                 k = j - 1;
             } else if (n_column == 0) {
                 // DEFAULT VALUES.
-                ec.codeFactorable(p, build.columnExpr(t, c), i_reg_store);
+                ec.codeFactorable(p, build.columnExprAuth(t, c, p), i_reg_store);
                 continue;
             } else {
                 k = i - n_hidden;
@@ -908,6 +910,13 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
     // The transfer would not check foreign keys (VACUUM turns them off).
     if (db.flags.ForeignKeys and dest.u.tab.fkey != null) return false;
     if (db.flags.CountRows) return false;
+    if (db.auth != null) {
+        const i_db_src: usize = @intCast(prepare.schemaToIndex(db, src.schema));
+        if (auth.check(p, auth.Code.SELECT, null, null, null) != auth.OK) return false;
+        for (src.cols) |*sc| {
+            if (auth.readCol(p, src.name, sc.name(), i_db_src) != auth.OK) return false;
+        }
+    }
 
     // The transfer is possible, though perhaps only into an empty table.
     const i_db_src: usize = @intCast(prepare.schemaToIndex(db, src.schema));
@@ -1138,7 +1147,7 @@ fn generateConstraintChecksImpl(
                     OE.Replace => {
                         const addr1 = aux.addOp1(v, OP.NotNull, i_reg);
                         n_seen_replace += 1;
-                        ec.codeCopy(p, build.columnExpr(t, c), i_reg);
+                        ec.codeCopy(p, build.columnExprAuth(t, c, p), i_reg);
                         aux.jumpHere(v, addr1);
                     },
                     OE.Abort, OE.Rollback, OE.Fail => {

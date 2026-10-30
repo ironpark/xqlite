@@ -15,6 +15,7 @@ const select_mod = @import("select.zig");
 const resolve = @import("resolve.zig");
 const where_mod = @import("where.zig");
 const prepare = @import("prepare.zig");
+const auth = @import("auth.zig");
 const main_mod = @import("main.zig");
 const insert_mod = @import("insert.zig");
 const delete_mod = @import("delete.zig");
@@ -404,15 +405,22 @@ fn fkCheckImpl(p: *Parse, t: *Table, reg_old: i32, reg_new: i32, a_change: ?[]co
         const pt = to.?;
         var single = [1]i32{fk.cols[0].i_from};
         const ai_col: []i32 = ai_free orelse &single;
-        for (ai_col) |*c| {
+        // With the authorizer, the parent key columns must be readable;
+        // IGNORE makes them read as NULL.
+        var b_ignore = false;
+        for (ai_col, 0..) |*c, i| {
             if (c.* == t.i_pkey) c.* = -1;
+            if (db.auth != null) {
+                const col = pt.cols[@intCast(if (idx) |ix| ix.ai_column[i] else pt.i_pkey)].name();
+                b_ignore = auth.readCol(p, pt.name, col, i_db) == auth.IGNORE;
+            }
         }
 
         p.n_tab += 1;
         // A child row removed may resolve a violation; one added may
         // cause one (but not as the SET NULL action of this very key).
-        if (reg_old != 0) fkLookupParent(p, i_db, pt, idx, fk, ai_col, reg_old, -1, false);
-        if (reg_new != 0 and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, ai_col, reg_new, 1, false);
+        if (reg_old != 0) fkLookupParent(p, i_db, pt, idx, fk, ai_col, reg_old, -1, b_ignore);
+        if (reg_new != 0 and !isSetNullAction(p, fk)) fkLookupParent(p, i_db, pt, idx, fk, ai_col, reg_new, 1, b_ignore);
     }
 
     // The foreign keys referring to `t` (as the parent).
@@ -558,7 +566,7 @@ fn fkActionTrigger(p: *Parse, t: *Table, fk: *FKey, changes: ?*ExprList) Oom!?*T
                 new = try dotExpr(p, t_new, t_to_col);
             } else if (action == OE.SetDflt) {
                 const col = &fk.from.cols[@intCast(i_from_col)];
-                const dflt = if (col.col_flags.intersects(COLFLAG.GENERATED)) null else build.columnExpr(fk.from, col);
+                const dflt = if (col.col_flags.intersects(COLFLAG.GENERATED)) null else build.columnExprAuth(fk.from, col, p);
                 new = if (dflt) |d| (try expr_mod.exprDup(a, d)).? else try expr_mod.exprAlloc(a, TK.NULL, null, false);
             } else {
                 new = try expr_mod.exprAlloc(a, TK.NULL, null, false);

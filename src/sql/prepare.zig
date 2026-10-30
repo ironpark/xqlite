@@ -254,7 +254,13 @@ pub fn initOne(db: *Sqlite3, i_db: usize, err_msg: *?[:0]u8, m_flags: u32) i32 {
         db.oomFault();
         return initError(db, i_db, RC.NOMEM);
     };
-    rc = legacy.execWith(db, sql, &data, initCallback, null);
+    {
+        // The schema is read without the authorizer.
+        const x_auth = db.auth;
+        db.auth = null;
+        defer db.auth = x_auth;
+        rc = legacy.execWith(db, sql, &data, initCallback, null);
+    }
     db.gpa.free(sql);
     if (rc == RC.OK) rc = data.rc;
     if (rc == RC.OK) _ = @import("analyze.zig").analysisLoad(db, i_db);

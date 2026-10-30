@@ -26,6 +26,7 @@ const aux = @import("../vdbe/aux.zig");
 const serial = @import("../vdbe/serial.zig");
 const btree = @import("../btree/btree.zig");
 const build = @import("build.zig");
+const auth = @import("auth.zig");
 const prepare = @import("prepare.zig");
 const util = @import("util.zig");
 const main_mod = @import("main.zig");
@@ -491,6 +492,13 @@ pub fn beginParse(p: *Parse, name1: Token, name2: Token, module_name: Token, if_
     std.debug.assert((p.name_token.z == name2.z and name2.z != null) or
         (p.name_token.z == name1.z and name2.z == null));
     p.name_token.n = @intCast(@intFromPtr(module_name.z.? + module_name.n) - @intFromPtr(p.name_token.z.?));
+
+    // The second check of CREATE VIRTUAL TABLE (startTable() made the
+    // first, for the sqlite_schema row).
+    if (t.u.vtab.args.len > 0) {
+        const i_db: usize = @intCast(prepare.schemaToIndex(p.db, t.schema));
+        _ = auth.check(p, auth.Code.CREATE_VTABLE, t.name, t.u.vtab.args[0], p.db.dbs.items[i_db].name);
+    }
 }
 
 /// Port of addArgumentToVtab(): add the argument in p.s_arg.

@@ -15,6 +15,7 @@ const int = @import("sqlite_int.zig");
 const util = @import("util.zig");
 const build = @import("build.zig");
 const prepare = @import("prepare.zig");
+const auth = @import("auth.zig");
 const main_mod = @import("main.zig");
 const expr_mod = @import("expr.zig");
 const ec = @import("expr_code.zig");
@@ -164,6 +165,7 @@ fn renameTableImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
         util.errorMsg(p, "view {s} may not be altered", .{t.name});
         return;
     }
+    if (auth.check(p, auth.Code.ALTER_TABLE, zdb, t.name, null) != auth.OK) return;
     build.viewGetColumnNames(p, t) catch return;
     // A virtual table with xRename is told of its new name.
     var vt: ?*int.VTable = null;
@@ -291,6 +293,7 @@ fn finishAddColumnImpl(p: *Parse, col_def: Token) Oom!void {
     const col = &new.cols[new.cols.len - 1];
     var dflt = build.columnExpr(new, col);
     const t = build.findTable(db, z_tab, zdb).?;
+    if (auth.check(p, auth.Code.ALTER_TABLE, zdb, t.name, null) != auth.OK) return;
 
     // Not a PRIMARY KEY, UNIQUE or rowid alias; NOT NULL needs a default
     // that is not NULL.
@@ -464,6 +467,7 @@ fn renameColumnImpl(p: *Parse, src: *SrcList, old: Token, new: Token) Oom!void {
 
     const i_schema: usize = @intCast(prepare.schemaToIndex(db, t.schema));
     const zdb = db.dbs.items[i_schema].name;
+    if (auth.check(p, auth.Code.ALTER_TABLE, zdb, t.name, null) != auth.OK) return;
 
     // The old name must be a column of the table.
     const z_old = (try build.nameFromToken(p.arena, old)).?;
@@ -987,6 +991,10 @@ fn renameFuncError(ctx: *Context, rc: i32, argv: []*Mem, i_sql: usize, p: *Parse
 /// by ALTER TABLE RENAME COLUMN.
 fn renameColumnFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The statements parsed here are not authorized.
+    const x_auth = db.auth;
+    db.auth = null;
+    defer db.auth = x_auth;
     const sql = api.valueText(argv[0]);
     const zdb = api.valueText(argv[3]);
     const table = api.valueText(argv[4]);
@@ -1115,6 +1123,10 @@ fn renameTableSelectCb(w: *Walker, s: *Select) WRC {
 /// RENAME TO.
 fn renameTableFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The statements parsed here are not authorized.
+    const x_auth = db.auth;
+    db.auth = null;
+    defer db.auth = x_auth;
     const zdb = api.valueText(argv[0]);
     const input = api.valueText(argv[3]);
     const old = api.valueText(argv[4]);
@@ -1217,6 +1229,10 @@ fn renameQuotefixExprCb(w: *Walker, e: *Expr) WRC {
 /// writable_schema=ON, else the error.
 fn renameQuotefixFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The statements parsed here are not authorized.
+    const x_auth = db.auth;
+    db.auth = null;
+    defer db.auth = x_auth;
     const zdb = api.valueText(argv[0]);
     const input = api.valueText(argv[1]);
     if (zdb == null or input == null) return;
@@ -1274,6 +1290,10 @@ fn renameQuotefixFunc(ctx: *Context, argv: []*Mem) void {
 /// says SQL is from the TEMP schema; DQS disables double-quoted strings.
 fn renameTableTest(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The statements parsed here are not authorized.
+    const x_auth = db.auth;
+    db.auth = null;
+    defer db.auth = x_auth;
     const zdb = api.valueText(argv[0]);
     const input = api.valueText(argv[1]);
     const b_temp = api.valueInt(argv[4]) != 0;
@@ -1352,6 +1372,10 @@ fn getConstraintToken(z: [*:0]const u8, tk: *u8) usize {
 /// column COL. Used by ALTER TABLE DROP COLUMN.
 fn dropColumnFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
+    // The statements parsed here are not authorized.
+    const x_auth = db.auth;
+    db.auth = null;
+    defer db.auth = x_auth;
     const i_schema = api.valueInt(argv[0]);
     const sql = api.valueText(argv[1]);
     const i_col = api.valueInt(argv[2]);
@@ -1448,6 +1472,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
     // Edit the sqlite_schema table.
     const i_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
     const zdb = db.dbs.items[i_db].name;
+    if (auth.check(p, auth.Code.ALTER_TABLE, zdb, t.name, z_col) != auth.OK) return;
     renameTestSchema(p, zdb, i_db == 1, "", false);
     renameFixQuotes(p, zdb, i_db == 1);
     build.nestedParse(p, "UPDATE \"%w\"." ++ int.LEGACY_SCHEMA_TABLE ++ " SET " ++
@@ -1767,17 +1792,21 @@ fn alterFindCol(p: *Parse, t: *Table, col: Token) Oom!?usize {
         util.errorMsg(p, "no such column: {s}", .{name});
         return null;
     }
+    // A refusal leaves its error in `p`.
+    const db = p.db;
+    _ = auth.check(p, auth.Code.ALTER_TABLE, db.dbs.items[@intCast(prepare.schemaToIndex(db, t.schema))].name, t.name, t.cols[@intCast(i_col)].name());
     return @intCast(i_col);
 }
 
 /// Port of alterFindTable(): the table of `src`, and its database, unless
 /// it is a view, virtual table or system table (then null, with an
 /// error).
-fn alterFindTable(p: *Parse, src: *SrcList, i_db: *usize) ?*Table {
+fn alterFindTable(p: *Parse, src: *SrcList, i_db: *usize, b_auth: bool) ?*Table {
     const db = p.db;
     const t = build.locateTableItem(p, 0, src.at(0)) orelse return null;
     i_db.* = @intCast(prepare.schemaToIndex(db, t.schema));
     if (isRealTable(p, t, 2) or isAlterableTable(p, t)) return null;
+    if (b_auth and auth.check(p, auth.Code.ALTER_TABLE, db.dbs.items[i_db.*].name, t.name, null) != auth.OK) return null;
     return t;
 }
 
@@ -1795,7 +1824,7 @@ fn dropConstraintImpl(p: *Parse, src: *SrcList, cons: ?Token, col: ?Token) Oom!v
     std.debug.assert(src.len() == 1);
     if (p.syntax_only or db.malloc_failed) return;
     var i_db: usize = 0;
-    const t = alterFindTable(p, src, &i_db) orelse return;
+    const t = alterFindTable(p, src, &i_db, cons != null) orelse return;
     const zdb = db.dbs.items[i_db].name;
 
     var arg: [:0]const u8 = undefined;
@@ -1858,7 +1887,7 @@ fn setNotNullImpl(p: *Parse, src: *SrcList, col: Token, first: Token) Oom!void {
     std.debug.assert(src.len() == 1);
     if (p.syntax_only or db.malloc_failed) return;
     var i_db: usize = 0;
-    const t = alterFindTable(p, src, &i_db) orelse return;
+    const t = alterFindTable(p, src, &i_db, false) orelse return;
     const zdb = db.dbs.items[i_db].name;
     const i_col = (try alterFindCol(p, t, col)) orelse return;
 
@@ -1940,7 +1969,7 @@ fn addConstraintImpl(p: *Parse, src: *SrcList, first: Token, name: ?Token, text:
     std.debug.assert(src.len() == 1);
     if (p.syntax_only or db.malloc_failed) return;
     var i_db: usize = 0;
-    const t = alterFindTable(p, src, &i_db) orelse return;
+    const t = alterFindTable(p, src, &i_db, true) orelse return;
     const zdb = db.dbs.items[i_db].name;
 
     // The constraint may not use internal functions (forum post

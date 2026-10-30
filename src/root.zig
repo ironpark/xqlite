@@ -158,6 +158,10 @@ test {
 }
 
 test {
+    std.testing.refAllDecls(@import("sql/auth.zig"));
+}
+
+test {
     std.testing.refAllDecls(@import("sql/vacuum.zig"));
     std.testing.refAllDecls(@import("sql/backup.zig"));
     _ = @import("sql/vacuum_test.zig");

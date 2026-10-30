@@ -229,20 +229,24 @@ pub fn collapseDatabaseArray(db: *Sqlite3) void {
 const attach_func: FuncDef = .{ .n_arg = 3, .x_sfunc = attachFunc, .name = "sqlite_attach" };
 const detach_func: FuncDef = .{ .n_arg = 1, .x_sfunc = detachFunc, .name = "sqlite_detach" };
 
-/// SQLITE_ATTACH and SQLITE_DETACH, the authorizer codes.
+/// SQLITE_ATTACH or SQLITE_DETACH, for the authorizer.
 const AuthCode = enum { attach, detach };
 
 /// Port of codeAttach(): code one call of sqlite_attach() or
 /// sqlite_detach().
 fn codeAttach(p: *Parse, typ: AuthCode, func: *const FuncDef, auth_arg: ?*Expr, filename: ?*Expr, dbname: ?*Expr, key: ?*Expr) void {
-    // There is no authorizer: `auth_arg` would be its argument.
-    _ = auth_arg;
     prepare.readSchema(p) catch return;
     if (p.n_err != 0) return;
     var nc: int.NameContext = .{ .parse = p };
     resolveAttachExpr(&nc, filename) catch return;
     resolveAttachExpr(&nc, dbname) catch return;
     resolveAttachExpr(&nc, key) catch return;
+
+    if (auth_arg) |a| {
+        const arg: ?[]const u8 = if (a.op == TK.STRING) a.token() else null;
+        const code = if (typ == .attach) auth.Code.ATTACH else auth.Code.DETACH;
+        if (auth.check(p, code, arg, null, null) != auth.OK) return;
+    }
 
     const v = build.getVdbe(p);
     const reg_args = expr_mod.getTempRange(p, 4);
@@ -273,6 +277,7 @@ pub const dbIsNamed = build.dbIsNamed;
 
 const util = @import("util.zig");
 const build = @import("build.zig");
+const auth = @import("auth.zig");
 const walker = @import("walker.zig");
 
 const Expr = int.Expr;

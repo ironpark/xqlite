@@ -1845,6 +1845,9 @@ pub const Parse = struct {
     /// 1 for EXPLAIN, 2 for EXPLAIN QUERY PLAN.
     explain: u8 = 0,
     e_parse_mode: ParseMode = .normal,
+    /// The trigger or view the authorizer is told code is made for
+    /// (zAuthContext; see auth.zig).
+    auth_context: ?[*:0]const u8 = null,
     /// Expression tree height of the current sub-select.
     n_height: i32 = 0,
     /// SQL text after the last statement parsed.
@@ -2300,6 +2303,9 @@ pub const Sqlite3 = struct {
     progress: ?*const fn (arg: ?*anyopaque) i32 = null,
     progress_arg: ?*anyopaque = null,
     n_progress_ops: u32 = 0,
+    /// The authorizer (xAuth, pAuthArg; see auth.zig).
+    auth: ?@import("auth.zig").Callback = null,
+    auth_arg: ?*anyopaque = null,
     /// xqlite: the state the C ABI (src/capi) keeps for a connection it
     /// opened (hooks, C callbacks, filenames); the engine never reads it.
     capi: ?*anyopaque = null,

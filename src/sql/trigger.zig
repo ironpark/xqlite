@@ -11,6 +11,7 @@ const build = @import("build.zig");
 const select_mod = @import("select.zig");
 const attach = @import("attach.zig");
 const prepare = @import("prepare.zig");
+const auth = @import("auth.zig");
 const resolve = @import("resolve.zig");
 const ec = @import("expr_code.zig");
 const upsert_mod = @import("upsert.zig");
@@ -247,6 +248,15 @@ fn beginTriggerImpl(p: *Parse, name1: Token, name2: Token, tr_tm_arg: i32, op: i
         return orphanError(db);
     }
 
+    if (db.auth != null and !p.inRenameObject()) {
+        const i_tab_db: usize = @intCast(prepare.schemaToIndex(db, t.schema));
+        const code = if (i_tab_db == 1 or is_temp) auth.Code.CREATE_TEMP_TRIGGER else auth.Code.CREATE_TRIGGER;
+        const zdb = db.dbs.items[i_tab_db].name;
+        const zdb_trig = if (is_temp) db.dbs.items[1].name else zdb;
+        if (auth.check(p, code, z_name, t.name, zdb_trig) != auth.OK) return;
+        if (auth.check(p, auth.Code.INSERT, int.schemaTable(i_tab_db), null, zdb) != auth.OK) return;
+    }
+
     // INSTEAD OF works as BEFORE (views have no other kind).
     if (tr_tm == TK.INSTEAD) tr_tm = TK.BEFORE;
 
@@ -441,6 +451,12 @@ fn tableOfTrigger(trig: *const Trigger) ?*Table {
 pub fn dropTriggerPtr(p: *Parse, trig: *Trigger) void {
     const db = p.db;
     const i_db: usize = @intCast(prepare.schemaToIndex(db, trig.schema));
+    if (db.auth != null) if (tableOfTrigger(trig)) |t| {
+        const code = if (i_db == 1) auth.Code.DROP_TEMP_TRIGGER else auth.Code.DROP_TRIGGER;
+        const zdb = db.dbs.items[i_db].name;
+        if (auth.check(p, code, trig.name, t.name, zdb) != auth.OK or
+            auth.check(p, auth.Code.DELETE, int.schemaTable(i_db), null, zdb) != auth.OK) return;
+    };
     const v = build.getVdbe(p) orelse return;
     build.nestedParse(p, "DELETE FROM %Q." ++ int.LEGACY_SCHEMA_TABLE ++ " WHERE name=%Q AND type='trigger'", &.{
         .{ .str = db.dbs.items[i_db].name },
@@ -641,6 +657,7 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) Oom!?*Tr
         .arena = arena_state.allocator(),
         .trigger_tab = t,
         .toplevel = top,
+        .auth_context = trig.name.ptr,
         .e_trigger_op = trig.op,
         .n_query_loop = p.n_query_loop,
         .prep_flags = p.prep_flags,

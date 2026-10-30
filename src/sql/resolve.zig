@@ -8,6 +8,7 @@ const expr_mod = @import("expr.zig");
 const build = @import("build.zig");
 const select_mod = @import("select.zig");
 const window = @import("window.zig");
+const auth = @import("auth.zig");
 const walker = @import("walker.zig");
 const callback = @import("callback.zig");
 const numeric = @import("numeric.zig");
@@ -391,7 +392,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                     cnt = 1;
                     match = null;
                     if (p.inRenameObject()) alter.renameTokenRemap(p, null, e);
-                    return lookupNameEnd(p, top_nc, cur_nc, cnt);
+                    return lookupNameEnd(p, top_nc, cur_nc, cnt, e, schema, false);
                 }
             }
         }
@@ -429,7 +430,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                 e.x = .{ .list = fj_match };
                 e.aff_expr = Aff.@"defer";
                 cnt = 1;
-                return lookupNameEnd(p, top_nc, cur_nc, cnt);
+                return lookupNameEnd(p, top_nc, cur_nc, cnt, e, schema, true);
             }
             fj_match = null;
         }
@@ -466,14 +467,22 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     }
 
     e.op = e_new_op;
-    return lookupNameEnd(p, top_nc, cur_nc, cnt);
+    return lookupNameEnd(p, top_nc, cur_nc, cnt, e, schema, false);
 }
 
 /// The lookupname_end part of lookupName(): count the reference in every
-/// context from the top to the one that matched.
-fn lookupNameEnd(p: *Parse, top: *NameContext, matched: *NameContext, cnt: i32) WRC {
-    _ = p;
+/// context from the top to the one that matched, after asking the
+/// authorizer whether the column (each column of a coalesce() of USING
+/// columns) may be read.
+fn lookupNameEnd(p: *Parse, top: *NameContext, matched: *NameContext, cnt: i32, e: *Expr, schema: ?*Schema, fj_match: bool) WRC {
     if (cnt != 1) return WRC.Abort;
+    if (p.db.auth != null) {
+        if (fj_match) {
+            for (e.x.list.?.slice()) |*item| auth.read(p, item.expr.?, schema, matched.src_list);
+        } else if (e.op == TK.COLUMN or e.op == TK.TRIGGER) {
+            auth.read(p, e, schema, matched.src_list);
+        }
+    }
     var it = top;
     while (true) {
         it.n_ref += 1;
@@ -674,6 +683,15 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
                         // is likelihood(X,0.9375).
                         e.i_table = if (d.name[0] == 'u') 8388608 else 125829120;
                     }
+                }
+                const rc_auth = auth.check(p, auth.Code.FUNCTION, null, d.name, null);
+                if (rc_auth != auth.OK) {
+                    if (rc_auth == auth.DENY) {
+                        auth.errorAtFunction(p, e);
+                        nc.n_nc_err += 1;
+                    }
+                    e.op = TK.NULL;
+                    return WRC.Prune;
                 }
                 if (d.func_flags.SUBTYPE or e.flags.SubtArg) resolveSetExprSubtypeArg(list);
                 if (d.func_flags.intersects(.{ .CONSTANT = true, .SLOCHNG = true })) {
@@ -1068,7 +1086,10 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
         for (s.src.?.slice()) |*item| {
             if (item.fg.is_subquery and !item.u4.subq.?.select.sel_flags.Resolved) {
                 const n_ref = if (outer_nc) |o| o.n_ref else 0;
+                const saved_context = p.auth_context;
+                if (item.name) |n| p.auth_context = n.ptr;
                 resolveSelectNames(p, item.u4.subq.?.select, outer_nc);
+                p.auth_context = saved_context;
                 if (p.n_err != 0) return WRC.Abort;
                 // A changed reference count of the outer context means the
                 // subquery is correlated.

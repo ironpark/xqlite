@@ -4,6 +4,7 @@
 const std = @import("std");
 const int = @import("sqlite_int.zig");
 const util = @import("util.zig");
+const auth = @import("auth.zig");
 const expr_mod = @import("expr.zig");
 const ctype = @import("../util/ctype.zig");
 
@@ -1272,6 +1273,9 @@ fn generateWithRecursiveQuery(p: *Parse, s: *Select, dest: *SelectDest) void {
         return;
     }
 
+    // May the query be recursive?
+    if (auth.check(p, auth.Code.RECURSIVE, null, null, null) != auth.OK) return;
+
     // LIMIT and OFFSET.
     const addr_break = aux.makeLabel(p);
     s.n_select_row = 320;
@@ -2082,6 +2086,13 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
     }
 
     // Flattening is permitted.
+
+    // Authorize the subquery.
+    const saved_auth_context = p.auth_context;
+    p.auth_context = if (subitem.name) |n| n.ptr else null;
+    _ = auth.check(p, auth.Code.SELECT, null, null, null);
+    p.auth_context = saved_auth_context;
+
     const sub1 = build.subqueryDetach(subitem);
     subitem.name = null;
     subitem.alias = null;
@@ -3616,6 +3627,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
     const db = p.db;
     const v = build.getVdbe(p) orelse return error.ParseFailed;
     if (p.n_err != 0) return error.ParseFailed;
+    if (auth.check(p, auth.Code.SELECT, null, null, null) != auth.OK) return error.ParseFailed;
 
     if (ignorableDistinct(dest)) {
         // These destinations ignore ORDER BY and DISTINCT.
@@ -3760,6 +3772,18 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
 
     // Code the FROM-clause subqueries.
     for (tab_list.slice(), 0..) |*item, i| {
+        // Tables referenced but not read get an SQLITE_READ with an
+        // empty column name ("SELECT count(*) FROM t1").
+        if (db.auth != null and item.col_used == 0 and item.name != null) {
+            const zdb: ?[]const u8 = if (item.fg.fixed_schema)
+                db.dbs.items[@intCast(prepare.schemaToIndex(db, item.u4.schema))].name
+            else if (item.fg.is_subquery)
+                null
+            else
+                item.u4.database;
+            _ = auth.check(p, auth.Code.READ, item.name, "", zdb);
+        }
+
         if (!item.fg.is_subquery) continue;
         const subq = item.u4.subq.?;
         const sub = subq.select;
@@ -3777,6 +3801,9 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
 
         // Unused result columns of the subquery become NULLs.
         if (!db.optDisabled(int.OPT.NullUnusedCols)) _ = disableUnusedSubqueryResultColumns(item);
+
+        const saved_auth_context = p.auth_context;
+        p.auth_context = if (item.name) |n| n.ptr else null;
 
         if (fromClauseTermCanBeCoroutine(p, tab_list, i, s.sel_flags)) {
             // A co-routine returning one row per call.
@@ -3835,6 +3862,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
         }
         if (db.malloc_failed) return error.ParseFailed;
         p.n_height -= expr_mod.selectExprHeight(s);
+        p.auth_context = saved_auth_context;
     }
 
     var e_list = s.e_list.?;

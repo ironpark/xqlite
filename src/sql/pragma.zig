@@ -12,6 +12,7 @@ const pending = @import("pending.zig");
 const util = @import("util.zig");
 const build = @import("build.zig");
 const prepare = @import("prepare.zig");
+const auth = @import("auth.zig");
 const expr = @import("expr.zig");
 const ec = @import("expr_code.zig");
 const insert = @import("insert.zig");
@@ -516,6 +517,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
     else
         try build.nameFromToken(p.arena, value);
     const zdb: ?[:0]const u8 = if (id2.n > 0) db.dbs.items[i_db].name else null;
+    if (auth.check(p, auth.Code.PRAGMA, left, right, zdb) != auth.OK) return;
 
     db.busy_handler.n_busy = 0;
     // The SQLITE_FCNTL_PRAGMA file control is not supported by the VFS

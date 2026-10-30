@@ -10,6 +10,7 @@ xqlite는 SQLite 3.54.1의 `sqlite3.h`를 그대로 구현하는 C ABI를 제공
 - [구조](#구조)
 - [지원 범위](#지원-범위)
 - [SQLite와 다른 점](#sqlite와-다른-점)
+- [preupdate 훅](#preupdate-훅)
 - [스레드](#스레드)
 - [테스트](#테스트)
 
@@ -87,12 +88,13 @@ src/capi.zig           라이브러리 루트
 src/capi/common.zig    C 타입, 연결별 상태(Ext), 프로세스 전역 상태, UTF-16 변환
 src/capi/library.zig   버전, sqlite3_initialize/config, 메모리, 문자열 도구, 키워드
 src/capi/conn.zig      open/close, exec, get_table, 오류, 설정, 훅 등록, 백업, 스텁
-src/capi/stmt.zig      prepare, step(트레이스), bind, column, expanded_sql
+src/capi/stmt.zig      prepare, step, bind, column, expanded_sql
 src/capi/func.zig      사용자 함수·집계·윈도우 함수, collation, value_*, result_*
 src/capi/vtab.zig      C sqlite3_module을 엔진 Module로 감싸는 다리
 src/capi/vfs.zig       VFS 등록부, 기본 VFS의 C 뷰, C VFS의 엔진 뷰
 src/capi/filename.zig  sqlite3_filename 배치와 uri_parameter 계열
 src/capi/hooks.zig     commit/rollback/update 훅, 진행 처리기
+src/capi/callbacks.zig 권한 검사기, collation_needed, autovacuum_pages, 트레이스
 src/capi/blob.zig      증분 BLOB I/O (SQL로 흉내)
 src/capi/printf.zig    mprintf 계열과 sqlite3_str (엔진의 printf 위)
 src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sqlite3_mutex
@@ -101,11 +103,11 @@ src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sq
 - `sqlite3*`, `sqlite3_stmt*`, `sqlite3_value*`, `sqlite3_context*`는 엔진의 `Sqlite3`, `Vdbe`, `Mem`, `Context` 그 자체입니다. C ABI가 연결마다 따로 두는 상태(C 콜백, 파일 이름, 트레이스 설정 등)는 `Sqlite3.capi`에 매답니다.
 - 엔진이 부르는 콜백은 Zig 모양(슬라이스 인자)이라, C 함수·collation·가상 테이블은 트램펄린 뒤에 등록합니다. 사용자 데이터 자리에 C 콜백과 `pApp`을 담은 구조체를 두고, `sqlite3_user_data()`는 `pApp`을 돌려줍니다.
 - Zig는 모든 타깃에서 C 가변 인자 함수를 정의하지 못하므로(aarch64-linux의 LLVM 백엔드 등), 가변 인자 함수는 `varargs.c`에 있습니다. `sqlite3_mprintf()`는 형식 문자열을 엔진의 `vappendf()`와 같은 방식으로 읽어 인자를 `va_list`에서 꺼낸 뒤 Zig 쪽에 배열로 넘깁니다.
-- 엔진에 추가한 것은 C ABI가 꼭 필요로 하는 것뿐입니다: 연결별 상태 칸, URI의 `vfs=`를 호출자가 처리했다는 플래그, NUL로 끝나는 매개변수 이름, 그리고 commit/rollback/update 훅과 진행 처리기(SQLite C 코드의 포팅).
+- 엔진에 추가한 것은 C ABI가 꼭 필요로 하는 것뿐입니다: 연결별 상태 칸, URI의 `vfs=`를 호출자가 처리했다는 플래그, NUL로 끝나는 매개변수 이름, 그리고 commit/rollback/update 훅, 진행 처리기, 권한 검사기(`auth.c`), collation-needed 콜백, autovacuum-pages 콜백, 트레이스·프로파일 콜백(모두 SQLite C 코드의 포팅). 엔진은 이 콜백들을 Zig 모양으로 부르고, C ABI가 `Ext`를 인자로 하는 트램펄린으로 C 콜백에 잇습니다. 콜백이 없으면 엔진이 하는 일은 널 포인터 검사 하나입니다.
 
 ## 지원 범위
 
-`sqlite3.h`가 선언한 함수 308개 가운데 297개를 내보냅니다. 내보내지 않는 11개는 SQLite의 기본 빌드에도 없는 것입니다(`sqlite3_win32_*` 3개, `sqlite3_rtree_*` 2개, `SQLITE_ENABLE_PREUPDATE_HOOK`의 `sqlite3_preupdate_*` 6개). 내보내는 함수 가운데 약 30개는 아래 표처럼 일부만 되거나 깔끔하게 실패하고, 나머지는 SQLite와 같게 동작합니다. 전역 변수 `sqlite3_version`, `sqlite3_temp_directory`, `sqlite3_data_directory`도 내보냅니다.
+`sqlite3.h`가 선언한 함수 308개 가운데 297개를 내보냅니다. 내보내지 않는 11개는 SQLite의 기본 빌드에도 없는 것입니다(`sqlite3_win32_*` 3개, `sqlite3_rtree_*` 2개, `SQLITE_ENABLE_PREUPDATE_HOOK`의 `sqlite3_preupdate_*` 6개, [아래](#preupdate-훅)). 내보내는 함수 가운데 약 25개는 아래 표처럼 일부만 되거나 깔끔하게 실패하고, 나머지는 SQLite와 같게 동작합니다. 전역 변수 `sqlite3_version`, `sqlite3_temp_directory`, `sqlite3_data_directory`도 내보냅니다.
 
 ### 구현된 것
 
@@ -120,7 +122,9 @@ src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sq
 | 함수 | `create_function(_v2)`, `create_function16`, `create_window_function`, `overload_function`, `user_data`, `context_db_handle`, `aggregate_context`, `get/set_auxdata`, `value_*`(UTF-16 결과 제외), `value_dup/free`, `result_*`(UTF-16 입력 포함), `result_pointer`, `result_subtype`, `result_str` |
 | collation | `create_collation(_v2)`, `create_collation16` (교체 시 이전 `xDestroy` 호출, `xCompare`가 NULL이면 삭제) |
 | 가상 테이블 | `create_module(_v2)`, `drop_modules`, `declare_vtab`, `vtab_config`, `vtab_on_conflict`, `vtab_nochange`, `vtab_collation`, `vtab_distinct`, `vtab_in`, `vtab_in_first/next`, `vtab_rhs_value` (모듈 버전 1~4: 쓰기, 트랜잭션, 세이브포인트, `xShadowName`, `xIntegrity`) |
-| 훅 | `commit_hook`, `rollback_hook`, `update_hook`, `progress_handler`, `trace_v2`(`STMT`, `PROFILE`, `ROW`, `CLOSE`), `trace`, `profile`, `wal_hook` |
+| 훅 | `commit_hook`, `rollback_hook`, `update_hook`, `progress_handler`, `trace_v2`(`STMT`, `PROFILE`, `ROW`, `CLOSE`), `trace`, `profile`, `wal_hook` (트레이스와 진행 처리기는 SQLite처럼 엔진 안에서 부름: `OP_Init`·`OP_Trace`의 `STMT`, 트리거와 중첩 문장의 `-- ` 주석, `OP_ResultRow`의 `ROW`, 실행이 끝날 때의 `PROFILE`과 진행 처리기의 마지막 호출) |
+| 권한 검사 | `set_authorizer` (`auth.c`의 포팅: 모든 검사 지점, `SQLITE_DENY`는 `SQLITE_AUTH` 오류, `SQLITE_IGNORE`는 열을 NULL로 읽거나 그 동작을 건너뜀, 트리거·뷰 이름의 6번째 인자, 바꾸면 준비된 문장을 만료. 방언 프론트엔드가 낮춘 문장에도 같게 적용되고, 방언 카탈로그(`xq_catalog`)의 내부 문장은 보이지 않음) |
+| 콜백 | `collation_needed`, `collation_needed16`(없는 collation을 쓸 때 불러 정의할 기회를 줌), `autovacuum_pages`(FULL 자동 vacuum 커밋이 돌려줄 빈 페이지 수), 가상 테이블의 `xFindFunction`(함수 오버로드와 `SQLITE_INDEX_CONSTRAINT_FUNCTION`) |
 | WAL·백업 | `wal_autocheckpoint`, `wal_checkpoint`, `wal_checkpoint_v2`(NOOP~TRUNCATE), `backup_init/step/finish/remaining/pagecount` |
 | BLOB | `blob_open/read/write/bytes/close/reopen` (SQL로 흉내, [다른 점](#sqlite와-다른-점)) |
 | VFS | `vfs_find`, `vfs_register`, `vfs_unregister` (기본 VFS `"unix"`의 C 메서드가 동작하므로 기본 VFS를 감싸는 C VFS도 동작) |
@@ -135,7 +139,6 @@ src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sq
 
 | 함수 | 동작 |
 | --- | --- |
-| `set_authorizer` | 콜백을 주면 `SQLITE_ERROR`("xqlite does not support sqlite3_set_authorizer()"), NULL이면 `SQLITE_OK`. 엔진에 권한 검사가 없으므로, 받기만 하고 부르지 않으면 막으려던 것이 통과하기 때문 |
 | `load_extension` | `SQLITE_ERROR`와 메시지. `xDlOpen`도 없음 |
 | `serialize` / `deserialize` | NULL / `SQLITE_ERROR` (memdb VFS가 없음) |
 | `snapshot_get/open/cmp/free/recover` | `SQLITE_ERROR` |
@@ -145,14 +148,11 @@ src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sq
 | `stmt_scanstatus(_v2/_reset)` | 보고할 루프 없음 (`SQLITE_ENABLE_STMT_SCANSTATUS` 없음) |
 | `stmt_explain` | 지금 모드와 같으면 `SQLITE_OK`, 바꾸려 하면 `SQLITE_ERROR` |
 | `carray_bind(_v2)` | `SQLITE_ERROR`, 소멸자는 부름 |
-| `collation_needed(16)` | 등록은 되지만 엔진이 부르지 않음 |
-| `autovacuum_pages` | 등록은 되지만 엔진이 부르지 않음(기본 동작) |
 | `database_file_object` | NULL (엔진의 파일은 `sqlite3_file`이 아님) |
 | `test_control` | 0 |
 | `memory_used`, `memory_highwater`, `status(64)` | 0 (메모리를 세지 않음) |
 | `unlock_notify` | 공유 캐시가 없어 막히는 일이 없으므로 콜백을 바로 부름 |
 | `db_mutex` | NULL (멀티스레드 모드) |
-| 가상 테이블의 `xFindFunction` | 부르지 않음(함수 오버로드 없음) |
 | `activate_cerod` | 아무 일도 하지 않음 |
 | 내보내지 않음 | `sqlite3_win32_*`, `sqlite3_rtree_*`, `sqlite3_preupdate_*` |
 
@@ -162,11 +162,14 @@ src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sq
 - **`sqlite3_prepare()`(v1)**: v2와 같습니다. 문장의 SQL을 늘 보관하므로 스키마가 바뀌면 다시 컴파일하고, 오류 코드는 `step()`에서 바로 돌려줍니다.
 - **바인딩 값은 늘 복사합니다**: `SQLITE_STATIC`도 복사하고, 사용자 소멸자는 복사한 직후 부릅니다(SQLite도 허용하는 시점). 결과값(`result_text` 등)은 `SQLITE_STATIC`과 `sqlite3_free`는 복사 없이, 다른 소멸자는 복사 후 바로 부릅니다.
 - **BLOB 증분 I/O**는 SQL로 흉내 냅니다: 읽기는 값을 SELECT하고, 쓰기는 값을 읽어 메모리에서 고친 뒤 그 행을 UPDATE합니다. 결과는 같지만 쓰기가 진짜 UPDATE라서 트리거·업데이트 훅이 돌고 `changes()`에 잡히며 값 전체 크기만큼 비용이 듭니다. 행이 바뀌어도 핸들이 만료(`SQLITE_ABORT`)되지 않습니다.
-- **트레이스**: `SQLITE_TRACE_STMT`/`PROFILE`/`ROW`는 C ABI의 `sqlite3_step()`에서 부르므로, 트리거 안의 문장(`--` 주석으로 오는 것)은 보고하지 않습니다. `sqlite3_exec()`도 같은 `step()`을 쓰므로 그 문장은 보고됩니다.
-- **진행 처리기**는 SQLite처럼 N개 명령마다 점프 지점에서 부르지만, 문장이 끝날 때 남은 몫을 한 번 더 부르지는 않습니다.
+- **트레이스의 프로파일 시간**은 SQLite처럼 VFS 시계(밀리초)로 재므로 나노초 값의 아래 여섯 자리는 0입니다.
 - **VFS**: C VFS의 `xRead`가 `SQLITE_IOERR_SHORT_READ`를 돌려주면 읽은 길이를 모르므로 끝의 0 바이트를 읽지 않은 것으로 칩니다. C VFS가 받는 파일 이름에는 URI 파라미터가 없습니다(`sqlite3_uri_parameter()`는 NULL). URI에서 `vfs=`를 쓴 연결이 `ATTACH`하는 URI의 `vfs=`는 무시하고 연결의 VFS를 씁니다.
 - **`sqlite3_compileoption_get()`**은 엔진의 `PRAGMA compile_options` 목록에서 `THREADSAFE`만 C ABI의 값(2)으로 바꿔 보여 줍니다.
 - `sqlite3_temp_directory`, `sqlite3_data_directory`는 내보내지만 엔진이 읽지 않습니다.
+
+## preupdate 훅
+
+`sqlite3_preupdate_hook()`과 `sqlite3_preupdate_old/new/count/depth/blobwrite()`는 내보내지 않습니다(SQLite 기본 빌드처럼). `SQLITE_ENABLE_PREUPDATE_HOOK`은 런타임 콜백만이 아니라 코드 생성을 바꿉니다: UPDATE와 REPLACE가 훅만 부르는 `OP_Delete`(`OPFLAG_ISNOOP`)를 넣고, WITHOUT ROWID 테이블의 REPLACE 지름길을 쓰지 않고 따로 훅 호출 코드를 만들며, 전송 최적화가 `OP_RowCell` 대신 `OP_RowData`를 쓰고, ANALYZE가 `sqlite_stat1` 쓰기를 따로 다룹니다. xqlite는 기본 빌드와 같은 바이트코드를 내는 것을 보장하므로, 이를 포팅하려면 훅이 있을 때만 그 코드를 생성하도록(그리고 훅을 바꾸면 문장을 만료하도록) 해야 하며 아직 하지 않았습니다.
 
 ## 스레드
 
@@ -181,9 +184,9 @@ C ABI는 멀티스레드 모드입니다(`SQLITE_THREADSAFE=2`와 같음).
 
 | 명령 | 내용 |
 | --- | --- |
-| `zig build test-capi` | `tools/capi/capi_test.c`(검사 546개)를 정적·공유 라이브러리에 각각 링크해 실행. `zig build check`에 포함 |
+| `zig build test-capi` | `tools/capi/capi_test.c`(검사 678개)를 정적·공유 라이브러리에 각각 링크해 실행. `zig build check`에 포함 |
 | `zig build capi-shell` | SQLite 3.54.1 아말감의 `shell.c`를 고치지 않고 `include/sqlite3.h`와 `libxqlite3`로 빌드해(`zig-out/bin/sqlite3-xqlite`) `tools/capi/shell_smoke.sql`을 돌리고 출력을 `shell_smoke.expected`와 비교 |
 
-- `capi_test.c`는 `sqlite3.h`만 보고 쓴 평범한 C 프로그램입니다: 버전, 메모리, printf, 문장과 바인딩, 오류 코드, 사용자 함수·집계·윈도우 함수·auxdata·포인터 값, collation, UTF-16, 방언 URI, 파일·WAL·잠금·백업·BLOB, 트레이스, 훅과 진행 처리기, C 가상 테이블, 기본 VFS를 감싸는 C VFS, 자동 확장, 인터럽트, 지원하지 않는 함수의 실패.
-- 같은 파일을 SQLite 아말감(`sqlite3.c`)에 링크해 돌리면 xqlite 확장과 위 표의 차이(스레드 모드, 권한 검사기, serialize) 말고는 모두 통과합니다. 기대값이 xqlite에 맞춘 것이 아니라 SQLite의 동작이라는 확인입니다.
+- `capi_test.c`는 `sqlite3.h`만 보고 쓴 평범한 C 프로그램입니다: 버전, 메모리, printf, 문장과 바인딩, 오류 코드, 사용자 함수·집계·윈도우 함수·auxdata·포인터 값, collation, UTF-16, 방언 URI, 파일·WAL·잠금·백업·BLOB, 트레이스(트리거·중첩 문장 포함), 훅과 진행 처리기, 권한 검사기(방언 포함), collation-needed, autovacuum-pages, C 가상 테이블과 `xFindFunction`, 기본 VFS를 감싸는 C VFS, 자동 확장, 인터럽트, 지원하지 않는 함수의 실패.
+- 같은 파일을 SQLite 아말감(`sqlite3.c`)에 링크해 돌리면 xqlite 확장과 위 표의 차이(스레드 모드, serialize) 말고는 모두 통과합니다. 기대값이 xqlite에 맞춘 것이 아니라 SQLite의 동작이라는 확인입니다.
 - `shell_smoke.sql`의 출력(`.mode box/csv/json`, `.schema`, `.dump`, 셸 내장 확장 `generate_series`·`sha3`·`decimal`, 오류)은 순정 sqlite3 3.54.1과 같고, 다른 것은 `PRAGMA xq_dialect` 부분뿐입니다.

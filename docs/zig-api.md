@@ -382,7 +382,7 @@ Zig API에 아직 없는 것입니다.
 - 엔진 할당자를 연결별로 고르는 기능(지금은 `configMalloc()` 하나)
 - MSSQL 방언
 
-훅(commit/rollback/update, 진행 처리기)과 `sqlite3_interrupt`는 엔진에 있고 C ABI에서 쓸 수 있습니다([C API](c-api.md)). Zig API에는 아직 감싸지 않았습니다.
+훅(commit/rollback/update, 진행 처리기, 트레이스), 권한 검사기, collation-needed·autovacuum-pages 콜백과 `sqlite3_interrupt`는 엔진에 있고 C ABI에서 쓸 수 있습니다([C API](c-api.md)). Zig API에는 아직 감싸지 않았습니다.
 
 Zig API 밖의 인터페이스입니다.
 

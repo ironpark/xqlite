@@ -420,12 +420,18 @@ pub fn analyzeTable(s: *Parser) Error!void {
         persistent = true;
         while (!s.atStmtEnd()) s.advance(); // ALL | COLUMNS (...) INDEXES (...)
     }
+    // One analysis for all of them (analyze.analyzeTables()): one
+    // ANALYZE per table would expire this program after the first.
+    var tabs: std.ArrayList(*int.Table) = .empty;
+    for (items.items) |it| {
+        if (it.err == null and std.mem.indexOfScalar(*int.Table, tabs.items, it.tab.?) == null) try tabs.append(s.a, it.tab.?);
+    }
+    if (tabs.items.len > 0) {
+        @import("../../sql/analyze.zig").analyzeTables(s.p, tabs.items);
+        try s.check();
+    }
     var w: std.Io.Writer.Allocating = .init(s.a);
     for (items.items, 0..) |it, i| {
-        if (it.err == null) {
-            const t = it.tab.?;
-            try lowerFmt(s, "ANALYZE {f}.{f}", .{ Id{ .z = catalog.schemaName(s.p.db, t) }, Id{ .z = t.name } });
-        }
         const rows: []const [2][]const u8 = if (it.err) |e|
             &.{ .{ "Error", e }, .{ "status", "Operation failed" } }
         else if (persistent)

@@ -619,6 +619,10 @@ test "mariadb: ANALYZE TABLE" {
     );
     try c.expectRows("ANALYZE LOCAL TABLE main.t PERSISTENT FOR ALL", "main.t|analyze|status|Engine-independent statistics collected\nmain.t|analyze|status|OK\n");
     try c.expectRows("SELECT tbl, idx, stat FROM sqlite_stat1", "t|t$kb|3 2\n");
+    // Several tables in one statement.
+    try c.exec("CREATE TABLE u (x INT, KEY kx (x)); INSERT INTO u VALUES (1),(1)");
+    try c.expectRows("ANALYZE TABLE t, u, t", "main.t|analyze|status|OK\nmain.u|analyze|status|OK\nmain.t|analyze|status|OK\n");
+    try c.expectRows("SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY tbl", "t|t$kb|3 2\nu|u$kx|2 2\n");
 }
 
 test "mariadb: CREATE DATABASE, USE and db.t" {

@@ -501,6 +501,47 @@ fn analyzeTable(p: *Parse, t: *Table, only_idx: ?*Index) Oom!void {
     loadAnalysis(p, i_db);
 }
 
+/// xqlite: code the analysis of several tables in one statement (MariaDB's
+/// ANALYZE TABLE t, u), as analyzeTable() codes one: per database, the
+/// rows about each table are deleted and sqlite_stat1 is created (at
+/// most once) and opened once, as in analyzeDatabase(); then one
+/// OP_Expire at the end, which would expire the running program if it
+/// came before the next table's analysis.
+pub fn analyzeTables(p: *Parse, tables: []const *Table) void {
+    analyzeTablesImpl(p, tables) catch build.oomFault(p);
+}
+
+fn analyzeTablesImpl(p: *Parse, tables: []const *Table) Oom!void {
+    const db = p.db;
+    for (tables, 0..) |first, i| {
+        const i_db: usize = @intCast(prepare.schemaToIndex(db, first.schema));
+        // Each database once, at its first table.
+        const seen = for (tables[0..i]) |t| {
+            if (t.schema == first.schema) break true;
+        } else false;
+        if (seen) continue;
+        build.beginWriteOperation(p, false, i_db);
+        const pdb = &db.dbs.items[i_db];
+        for (tables[i + 1 ..]) |t| {
+            if (t.schema != first.schema) continue;
+            for ([_][]const u8{ "sqlite_stat1", "sqlite_stat4", "sqlite_stat3" }) |name| {
+                if (build.findTable(db, name, pdb.name) == null) continue;
+                build.nestedParse(p, "DELETE FROM %Q.%s WHERE tbl=%Q", &.{ .{ .str = pdb.name }, .{ .str = name }, .{ .str = t.name } });
+            }
+        }
+        const i_stat_cur = p.n_tab;
+        p.n_tab += 3;
+        openStatTable(p, i_db, i_stat_cur, first.name, "tbl");
+        const i_mem = p.n_mem + 1;
+        const i_tab = p.n_tab;
+        for (tables[i..]) |t| {
+            if (t.schema == first.schema) try analyzeOneTable(p, t, null, i_stat_cur, i_mem, i_tab);
+        }
+        loadAnalysis(p, i_db);
+    }
+    expireAll(p);
+}
+
 /// Port of sqlite3Analyze(): the ANALYZE command.
 ///
 ///   ANALYZE                            -- 1

@@ -1,4 +1,4 @@
-//! `xqt dialect-diff pg|mariadb [CASES]`: the differential test of a
+//! `xqt dialect-diff pg|mariadb|oracle [CASES]`: the differential test of a
 //! dialect against its real server. Each case of the cases file
 //! (tools/dialect/pg-cases.txt, maria-cases.txt) runs in the server's
 //! client and in `xqlite sql` with the dialect on; the rows, the column
@@ -21,6 +21,14 @@
 //!
 //!     podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
 //!     podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
+//!     podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq -e APP_USER_PASSWORD=xqpass gvenzl/oracle-free:23-slim-faststart
+//!
+//! - Oracle: every case runs in the schema of user XQ ($ORA_SQLPLUS), one
+//!   at a time; its prelude drops the user's tables, views and sequences
+//!   and sets the date formats to the dialect's ('YYYY-MM-DD HH24:MI:SS').
+//!   Errors compare by their ORA- code: xqlite's errors that are SQLite's
+//!   (constraint failures found while a statement runs) are mapped to the
+//!   code Oracle gives the same failure (normXqOra()).
 //!
 //! Not part of `zig build check`: it needs a server.
 
@@ -31,16 +39,20 @@ const xqt = @import("xqt");
 const Check = xqt.Check;
 
 pub const usage =
-    \\usage: xqt dialect-diff pg|mariadb [CASES-FILE]
+    \\usage: xqt dialect-diff pg|mariadb|oracle [CASES-FILE]
     \\
     \\  pg        tools/dialect/pg-cases.txt against PostgreSQL ($PG_PSQL,
     \\            default "podman exec -i xq-pg psql -U postgres")
     \\  mariadb   tools/dialect/maria-cases.txt against MariaDB ($MARIA_CLIENT,
     \\            default "podman exec -i xq-maria mariadb -uroot")
+    \\  oracle    tools/dialect/oracle-cases.txt against Oracle Database ($ORA_SQLPLUS,
+    \\            default "podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1")
     \\
     \\Start the server first:
     \\  podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
     \\  podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
+    \\  podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq \\
+    \\    -e APP_USER_PASSWORD=xqpass gvenzl/oracle-free:23-slim-faststart
     \\
 ;
 
@@ -95,6 +107,48 @@ const maria: Dialect = .{
     .databases = false,
 };
 
+const ora: Dialect = .{
+    .tag = "oracle-diff",
+    .server = "Oracle",
+    .cases = "tools/dialect/oracle-cases.txt",
+    .env = "ORA_SQLPLUS",
+    .default_client = "podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1",
+    .container = "podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq -e APP_USER_PASSWORD=xqpass gvenzl/oracle-free:23-slim-faststart",
+    .client_args = &.{},
+    .prelude = ora_prelude,
+    .xq_prelude = ".dialect oracle\n.headers on\n.nullvalue NULL\n",
+    .norm_server = normOra,
+    .norm_xq = normXqOra,
+    .databases = false,
+};
+
+/// SQL*Plus settings (unaligned rows with a header, NULL as NULL, no
+/// feedback, blank lines kept in statements, no & substitution), the
+/// dialect's date formats, and an empty schema.
+const ora_prelude =
+    \\SET MARKUP CSV ON DELIMITER | QUOTE OFF
+    \\SET FEEDBACK OFF
+    \\SET NULL NULL
+    \\SET SQLBLANKLINES ON
+    \\SET DEFINE OFF
+    \\SET LINESIZE 32767
+    \\SET NUMWIDTH 20
+    \\ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS';
+    \\ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6';
+    \\BEGIN
+    \\  FOR r IN (SELECT object_name, object_type FROM user_objects
+    \\            WHERE object_type IN ('TABLE', 'VIEW', 'SEQUENCE') AND object_name NOT LIKE 'ISEQ$$%') LOOP
+    \\    BEGIN
+    \\      EXECUTE IMMEDIATE 'DROP ' || r.object_type || ' "' || r.object_name || '"'
+    \\        || CASE r.object_type WHEN 'TABLE' THEN ' CASCADE CONSTRAINTS PURGE' END;
+    \\    EXCEPTION WHEN OTHERS THEN NULL;
+    \\    END;
+    \\  END LOOP;
+    \\END;
+    \\/
+    \\
+;
+
 /// The most databases a run makes: more workers gain nothing, and each
 /// CREATE DATABASE costs a copy of template1.
 const max_databases = 8;
@@ -148,6 +202,8 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         &pg
     else if (std.mem.eql(u8, args[0], "mariadb") or std.mem.eql(u8, args[0], "maria"))
         &maria
+    else if (std.mem.eql(u8, args[0], "oracle") or std.mem.eql(u8, args[0], "ora"))
+        &ora
     else
         return usageError(out);
     const cases_path = if (args.len == 2) args[1] else try std.fs.path.join(arena, &.{ cfg.root, d.cases });
@@ -518,6 +574,120 @@ fn trimFraction(f: []const u8) []const u8 {
     return if (std.mem.endsWith(u8, t, ".")) t[0 .. t.len - 1] else t;
 }
 
+/// SQL*Plus prints an error as the line of the statement, a `*` under
+/// the place, "ERROR at line N:", the ORA- lines and a "Help:" line:
+/// they become "ERROR: ORA-nnnnn" (the code of the first ORA- line).
+/// Booleans print as TRUE/FALSE, which the dialect returns as 1/0, and
+/// numbers without a leading zero (.5), which the dialect writes 0.5.
+fn normOra(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    // The start of each line in `out`, to take back the echoed statement.
+    var starts: std.ArrayList(usize) = .empty;
+    defer starts.deinit(gpa);
+    var in_error = false;
+    var it = lines(text);
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, "ERROR at line") or std.mem.eql(u8, line, "ERROR:")) {
+            // Take back the `*` line and the statement line above it.
+            if (starts.items.len > 0) {
+                const last = starts.items[starts.items.len - 1];
+                const marker = std.mem.trim(u8, out.items[last..], " \n");
+                if (std.mem.eql(u8, marker, "*")) {
+                    out.shrinkRetainingCapacity(last);
+                    starts.items.len -= 1;
+                    if (starts.items.len > 0) {
+                        out.shrinkRetainingCapacity(starts.items[starts.items.len - 1]);
+                        starts.items.len -= 1;
+                    }
+                }
+            }
+            in_error = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "ORA-") or std.mem.startsWith(u8, line, "SP2-")) {
+            const code_end = std.mem.indexOfScalar(u8, line, ':') orelse line.len;
+            try starts.append(gpa, out.items.len);
+            try out.print(gpa, "ERROR: {s}\n", .{line[0..code_end]});
+            // The rest of the message.
+            while (it.peek()) |next| {
+                if (next.len == 0 or std.mem.startsWith(u8, next, "Help: ")) break;
+                _ = it.next();
+            }
+            in_error = false;
+            continue;
+        }
+        if (in_error) continue;
+        if (std.mem.startsWith(u8, line, "Help: ") or line.len == 0) continue;
+        try starts.append(gpa, out.items.len);
+        var fields = std.mem.splitScalar(u8, line, '|');
+        var first = true;
+        while (fields.next()) |f| {
+            if (!first) try out.append(gpa, '|');
+            first = false;
+            if (std.mem.eql(u8, f, "TRUE")) {
+                try out.append(gpa, '1');
+            } else if (std.mem.eql(u8, f, "FALSE")) {
+                try out.append(gpa, '0');
+            } else if (f.len > 1 and f[0] == '.' and std.ascii.isDigit(f[1])) {
+                try out.print(gpa, "0{s}", .{f});
+            } else if (f.len > 2 and f[0] == '-' and f[1] == '.' and std.ascii.isDigit(f[2])) {
+                try out.print(gpa, "-0{s}", .{f[1..]});
+            } else try out.appendSlice(gpa, f);
+        }
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+/// xqlite's errors as "ERROR: ORA-nnnnn": the dialect's own carry the
+/// code; SQLite's constraint failures get the code Oracle gives them.
+/// Reals without a fraction lose their ".0" (Oracle's NUMBER has none).
+fn normXqOra(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
+    const t = try normXq(gpa, text);
+    defer gpa.free(t);
+    var out: std.ArrayList(u8) = .empty;
+    var it = lines(t);
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, "ERROR: ")) {
+            const msg = line["ERROR: ".len..];
+            const check = "CHECK constraint failed: ";
+            const code: []const u8 = if (std.mem.startsWith(u8, msg, "ORA-"))
+                msg[0 .. std.mem.indexOfScalar(u8, msg, ':') orelse msg.len]
+            else if (std.mem.startsWith(u8, msg, check ++ "ORA-") and msg.len >= check.len + 9)
+                msg[check.len..][0..9]
+            else if (std.mem.startsWith(u8, msg, "UNIQUE constraint failed"))
+                "ORA-00001"
+            else if (std.mem.startsWith(u8, msg, "NOT NULL constraint failed"))
+                "ORA-01400"
+            else if (std.mem.startsWith(u8, msg, "CHECK constraint failed"))
+                "ORA-02290"
+            else if (std.mem.startsWith(u8, msg, "FOREIGN KEY constraint failed"))
+                "ORA-02291"
+            else if (std.mem.startsWith(u8, msg, "no such savepoint"))
+                "ORA-01086"
+            else
+                msg;
+            try out.print(gpa, "ERROR: {s}\n", .{code});
+            continue;
+        }
+        var fields = std.mem.splitScalar(u8, line, '|');
+        var first = true;
+        while (fields.next()) |f| {
+            if (!first) try out.append(gpa, '|');
+            first = false;
+            if (f.len > 1 and f[0] == '.' and std.ascii.isDigit(f[1])) {
+                // TO_CHAR writes Oracle's .5
+                try out.print(gpa, "0{s}", .{f});
+            } else if (f.len > 2 and f[0] == '-' and f[1] == '.' and std.ascii.isDigit(f[2])) {
+                try out.print(gpa, "-0{s}", .{f[1..]});
+            } else try out.appendSlice(gpa, if (std.mem.endsWith(u8, f, ".0") and isFraction(f)) f[0 .. f.len - 2] else f);
+        }
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 // ---------------------------------------------------------------- processes
 
 const Merged = struct {
@@ -595,6 +765,16 @@ test normXq {
     const got = try normXqMaria(a, "x\nParse error near line 2: no such table: t\n  SELECT * FROM t;\n         ^--- error here\n2.50\n");
     defer a.free(got);
     try std.testing.expectEqualStrings("x\nERROR: no such table: t\n2.5\n", got);
+}
+
+test normOra {
+    const a = std.testing.allocator;
+    const got = try normOra(a, "A|B\n.5|TRUE\nINSERT INTO t VALUES (1)\n                      *\nERROR at line 1:\nORA-00001: unique constraint (XQ.SYS_C0) violated\nHelp: https://x\n\n\n-.25|NULL\n");
+    defer a.free(got);
+    try std.testing.expectEqualStrings("A|B\n0.5|1\nERROR: ORA-00001\n-0.25|NULL\n", got);
+    const xq = try normXqOra(a, "A\n2.0\nError near line 3: UNIQUE constraint failed: T.A\nError near line 4: ORA-01722: invalid number\n");
+    defer a.free(xq);
+    try std.testing.expectEqualStrings("A\n2\nERROR: ORA-00001\nERROR: ORA-01722\n", xq);
 }
 
 test parseCases {

@@ -15,6 +15,7 @@ pub const Db = api.Db;
 pub const Stmt = api.Stmt;
 pub const Savepoint = api.Savepoint;
 pub const Backup = api.Backup;
+pub const BlobHandle = api.BlobHandle;
 pub const OpenOptions = api.OpenOptions;
 pub const JournalMode = api.JournalMode;
 pub const Dialect = api.Dialect;

@@ -20,6 +20,7 @@ const main_mod = @import("../sql/main.zig");
 const legacy = @import("../sql/legacy.zig");
 const prepare_mod = @import("../sql/prepare.zig");
 const backup_mod = @import("../sql/backup.zig");
+const blob_mod = @import("../vdbe/blob.zig");
 const api = @import("../vdbe/api.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const mem = @import("../vdbe/mem.zig");
@@ -207,6 +208,41 @@ pub fn backupRemaining(b: *const BackupHandle) u32 {
 
 pub fn backupPagecount(b: *const BackupHandle) u32 {
     return @bitCast(backup_mod.pagecount(b));
+}
+
+// ============================================================== blobs
+
+/// An open blob (sqlite3_blob*).
+pub const BlobHandle = blob_mod.Incrblob;
+
+/// sqlite3_blob_open(): the error is recorded on `h`.
+pub fn blobOpen(h: *Handle, database: ?[]const u8, table: []const u8, column: []const u8, rowid: i64, writable: bool) Error!*BlobHandle {
+    var out: ?*BlobHandle = null;
+    try int.check(blob_mod.open(h, database, table, column, rowid, writable, &out));
+    return out.?;
+}
+
+/// sqlite3_blob_reopen(), sqlite3_blob_read() and sqlite3_blob_write().
+pub fn blobReopen(b: *BlobHandle, rowid: i64) Error!void {
+    return int.check(blob_mod.reopen(b, rowid));
+}
+
+pub fn blobRead(b: *BlobHandle, buf: []u8, offset: i32) Error!void {
+    return int.check(blob_mod.read(b, buf, offset));
+}
+
+pub fn blobWrite(b: *BlobHandle, data: []const u8, offset: i32) Error!void {
+    return int.check(blob_mod.write(b, data, offset));
+}
+
+/// sqlite3_blob_bytes(): 0 once the blob has expired.
+pub fn blobBytes(b: *const BlobHandle) i32 {
+    return blob_mod.bytes(b);
+}
+
+/// sqlite3_blob_close().
+pub fn blobClose(b: *BlobHandle) Error!void {
+    return int.check(blob_mod.close(b));
 }
 
 pub fn lastInsertRowid(h: *const Handle) i64 {

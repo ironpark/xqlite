@@ -21,9 +21,6 @@ const VdbeCursor = vi.VdbeCursor;
 const RC = int.RC;
 const OE = int.OE;
 
-/// iOnceResetThreshold of sqlite3GlobalConfig.
-const once_reset_threshold: i32 = 0x7ffffffe;
-
 pub fn opGosub(e: *Exec, op: *Op) Flow {
     const in1 = e.reg(op.p1);
     std.debug.assert(!in1.isDynamic());
@@ -141,7 +138,7 @@ pub fn opOnce(e: *Exec, op: *Op) Flow {
 /// OP_Init and OP_Trace.
 pub fn opInit(e: *Exec, op: *Op) Flow {
     if (e.db.m_trace & (int.TRACE.STMT | int.TRACE.LEGACY) != 0 and e.v.min_write_file_format != 254) traceStmt(e, op);
-    if (op.p1 >= once_reset_threshold) {
+    if (op.p1 >= @import("../../sql/global.zig").testctrl.once_reset_threshold) {
         if (op.opcode == OP.Trace) return .next;
         for (e.ops[1..]) |*o| {
             if (o.opcode == OP.Once) o.p1 = 0;

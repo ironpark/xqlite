@@ -406,6 +406,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     if (cnt == 0 and tab == null) {
         std.debug.assert(e.op == TK.ID);
         if (e.flags.DblQuoted and areDoubleQuotedStringsEnabled(db, top_nc)) {
+            if (p.vdbe) |v| @import("../parse/normalize.zig").addDblquoteStr(v, e.token());
             e.op = TK.STRING;
             e.y = .{ .tab = null };
             return WRC.Prune;

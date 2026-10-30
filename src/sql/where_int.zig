@@ -150,6 +150,8 @@ pub const WhereLevel = struct {
     addr_first: i32 = 0,
     /// Beginning of the body of this loop.
     addr_body: i32 = 0,
+    /// Address at which a row is visited (SQLITE_ENABLE_STMT_SCANSTATUS).
+    addr_visit: i32 = 0,
     /// big-null flag reg. True if a NULL-scan is needed.
     reg_bignull: i32 = 0,
     /// Jump here for next part of big-null scan.

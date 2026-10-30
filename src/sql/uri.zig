@@ -41,6 +41,19 @@ pub const Result = struct {
         return f[0..std.mem.indexOfScalar(u8, f, 0).? :0];
     }
 
+    /// The query parameters: pairs of name and value, each 0-terminated,
+    /// without the empty name that ends them.
+    pub fn params(r: *const Result) []const u8 {
+        const f = r.file orelse return "";
+        const start = std.mem.indexOfScalar(u8, f, 0).? + 1;
+        var i = start;
+        while (i < f.len and f[i] != 0) {
+            i += std.mem.sliceTo(f[i..], 0).len + 1;
+            i += std.mem.sliceTo(f[i..], 0).len + 1;
+        }
+        return f[start..i];
+    }
+
     /// The value of query parameter `name` (sqlite3_uri_parameter()).
     pub fn parameter(r: *const Result, name: []const u8) ?[:0]const u8 {
         const f = r.file orelse return null;
@@ -250,7 +263,9 @@ fn parseInto(gpa: Allocator, uri: []const u8, res: *Result) Allocator.Error!void
         res.file = z;
         is_uri = false;
     }
+    const resolved = res.flags.vfs_resolved;
     res.flags = fromBits(bits, is_uri);
+    res.flags.vfs_resolved = resolved;
 }
 
 fn hexToInt(c: u8) u8 {

@@ -437,7 +437,12 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             });
             m.addIncludePath(bb.path("include"));
             m.addCSourceFile(.{ .file = bb.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
-            if (t.result.os.tag == .linux) m.linkSystemLibrary("pthread", .{});
+            m.addCSourceFile(.{ .file = bb.path("src/capi/loadext.c"), .flags = &.{"-std=c99"} });
+            if (t.result.os.tag == .linux) {
+                m.linkSystemLibrary("pthread", .{});
+                // dlopen() for sqlite3_load_extension(), in libdl before glibc 2.34.
+                m.linkSystemLibrary("dl", .{});
+            }
             const l = bb.addLibrary(.{
                 .name = n,
                 .linkage = linkage,
@@ -461,6 +466,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         b.installArtifact(static);
         if (!wasm) b.installArtifact(shared);
         b.installFile("include/sqlite3.h", "include/sqlite3.h");
+        b.installFile("include/sqlite3ext.h", "include/sqlite3ext.h");
         b.installFile("include/xqlite.h", "include/xqlite.h");
         const pc = b.addWriteFiles().add(b.fmt("{s}.pc", .{name}), b.fmt(
             \\prefix=${{pcfiledir}}/../..
@@ -471,7 +477,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             \\Description: xqlite, an SQL database engine ported from SQLite to Zig, with the sqlite3 C API
             \\Version: 3.54.1
             \\Libs: -L${{libdir}} -l{s}
-            \\Libs.private: -lm -lpthread
+            \\Libs.private: -lm -lpthread -ldl
             \\Cflags: -I${{includedir}}
             \\
         , .{ name, name }));
@@ -480,6 +486,15 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
 
     // The C test program, linked once with each library.
     const test_step = b.step("test-capi", "Run the C API test (tools/capi/capi_test.c) against libxqlite3, static and shared");
+    // A loadable extension for its sqlite3_load_extension() checks, built
+    // against sqlite3ext.h alone (it calls through sqlite3_api_routines).
+    const ext = b.addLibrary(.{
+        .name = "xqexttest",
+        .linkage = .dynamic,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .pic = true }),
+    });
+    ext.root_module.addCSourceFile(.{ .file = b.path("tools/capi/ext_test.c"), .flags = &.{"-std=c99"} });
+    ext.root_module.addIncludePath(b.path("include"));
     for ([_]*std.Build.Step.Compile{ static, shared }, [_][]const u8{ "static", "shared" }) |lib, kind| {
         const exe = b.addExecutable(.{
             .name = b.fmt("capi-test-{s}", .{kind}),
@@ -490,6 +505,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         exe.root_module.linkLibrary(lib);
         const run = b.addRunArtifact(exe);
         run.setCwd(b.path("."));
+        run.addArtifactArg(ext);
         run.expectExitCode(0);
         run.has_side_effects = true;
         test_step.dependOn(&run.step);

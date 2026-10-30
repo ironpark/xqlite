@@ -1597,6 +1597,7 @@ const error_codes = [_]struct { Error, i32 }{
     .{ error.Busy, RC.BUSY },
     .{ error.BusyRecovery, RC.BUSY_RECOVERY },
     .{ error.BusySnapshot, RC.BUSY_SNAPSHOT },
+    .{ error.ErrorSnapshot, RC.ERROR_SNAPSHOT },
     .{ error.Locked, RC.LOCKED },
     .{ error.OutOfMemory, RC.NOMEM },
     .{ error.ReadOnly, RC.READONLY },
@@ -2302,6 +2303,11 @@ pub const Sqlite3 = struct {
     /// xqlite: the SQL dialect of the connection and the state of its
     /// semantic hooks (src/dialect/dialect.zig). No C counterpart.
     xq: @import("../dialect/dialect.zig").ConnState = .{},
+    /// xqlite: compile the origin of each result column (database,
+    /// table, column) into the statement, as SQLITE_ENABLE_COLUMN_METADATA
+    /// does in C. Set only while sqlite3_column_table_name() and friends
+    /// recompile a statement (see prepare.columnMetadata()).
+    col_metadata: bool = false,
     /// The commit, rollback and update hooks and the progress handler
     /// (xCommitCallback, xRollbackCallback, xUpdateCallback, xProgress,
     /// nProgressOps), set by the C ABI (sqlite3_commit_hook() ...).
@@ -2344,6 +2350,10 @@ pub const Sqlite3 = struct {
     /// xqlite: the state the C ABI (src/capi) keeps for a connection it
     /// opened (hooks, C callbacks, filenames); the engine never reads it.
     capi: ?*anyopaque = null,
+    /// xqlite: carray() is found as an eponymous virtual table (what
+    /// SQLITE_ENABLE_CARRAY compiles in; src/ext/carray.zig). The C ABI
+    /// turns it on, as it has sqlite3_carray_bind().
+    enable_carray: bool = false,
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

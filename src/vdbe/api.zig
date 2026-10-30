@@ -252,15 +252,39 @@ pub fn columnNameOf(v: *Vdbe, i: usize, var_: usize) ?[:0]const u8 {
     if (i >= v.n_res_column) return null;
     if (v.explain != 0) {
         if (var_ != vi.COLNAME_NAME) return null;
-        const names = [_][:0]const u8{
-            "addr", "opcode", "p1",      "p2",     "p3", "p4", "p5", "comment",
-            "id",   "parent", "notused", "detail",
-        };
         const k = if (v.explain == 2) i + 8 else i;
-        return names[k];
+        return explain_names[k];
     }
-    if (v.col_names.len == 0) return null;
-    return valueText(&v.col_names[i + var_ * v.n_res_alloc]);
+    return valueText(colNameMem(v, i, var_) orelse return null);
+}
+
+const explain_names = [_][:0]const u8{
+    "addr", "opcode", "p1",      "p2",     "p3", "p4", "p5", "comment",
+    "id",   "parent", "notused", "detail",
+};
+
+/// explain_names in native UTF-16.
+const explain_names16 = blk: {
+    var out: [explain_names.len][:0]const u16 = undefined;
+    for (explain_names, 0..) |name, j| {
+        var a: [name.len:0]u16 = undefined;
+        for (name, 0..) |ch, x| a[x] = ch;
+        const final = a;
+        out[j] = &final;
+    }
+    break :blk out;
+};
+
+/// The slot of name `var_` (COLNAME_*) of column `i`: the COLNAME_NAME and
+/// COLNAME_DECLTYPE slots of every statement, the origin slots of a
+/// statement compiled with column metadata (Vdbe.col_meta).
+fn colNameMem(v: *Vdbe, i: usize, var_: usize) ?*Mem {
+    if (var_ < vi.COLNAME_N) {
+        if (v.col_names.len == 0) return null;
+        return &v.col_names[i + var_ * v.n_res_alloc];
+    }
+    if (v.col_meta.len == 0) return null;
+    return &v.col_meta[i + (var_ - vi.COLNAME_N) * v.n_res_alloc];
 }
 
 pub fn columnName(v: *Vdbe, i: usize) ?[:0]const u8 {
@@ -293,6 +317,53 @@ pub fn valueText(m: *Mem) ?[:0]const u8 {
         return null;
     }) orelse return null;
     return z[0..@intCast(m.n) :0];
+}
+
+/// Port of sqlite3_value_text16(), sqlite3_value_text16le() and
+/// sqlite3_value_text16be(): the value as NUL-terminated UTF-16 text in
+/// `enc` (ENC.UTF16LE or UTF16BE), null for NULL. As in SQLite the value
+/// is converted in place, so the text lives until the value is converted
+/// again or changes (mem.toUtf8()).
+pub fn valueText16(m: *Mem, enc: u8) ?[*]const u8 {
+    const z = mem.valueText(m, enc) catch {
+        if (m.db) |db| db.oomFault();
+        return null;
+    };
+    return if (z) |p| @ptrCast(p) else null;
+}
+
+/// Port of sqlite3_value_bytes16(): the size of the value in UTF-16
+/// (native byte order), converting it as valueText16() does.
+pub fn valueBytes16(m: *Mem) usize {
+    return @intCast(mem.valueBytes(m, @import("utf.zig").UTF16NATIVE) catch 0);
+}
+
+/// Port of sqlite3_column_text16().
+pub fn columnText16(v: *Vdbe, i: usize) ?[*]const u8 {
+    const r = valueText16(columnMem(v, i), @import("utf.zig").UTF16NATIVE);
+    columnMallocFailure(v);
+    return r;
+}
+
+/// Port of sqlite3_column_bytes16().
+pub fn columnBytes16(v: *Vdbe, i: usize) usize {
+    const r = valueBytes16(columnMem(v, i));
+    columnMallocFailure(v);
+    return r;
+}
+
+/// Port of columnName() with useType UTF-16: name `var_` of column `i`
+/// as UTF-16, converted in place like valueText16().
+pub fn columnName16(v: *Vdbe, i: usize, var_: usize) ?[*]const u8 {
+    if (i >= v.n_res_column) return null;
+    if (v.explain != 0) {
+        // The fixed EXPLAIN names (azExplainColNames16data).
+        if (var_ != vi.COLNAME_NAME) return null;
+        const k = if (v.explain == 2) i + 8 else i;
+        return @ptrCast(explain_names16[k].ptr);
+    }
+    const m = colNameMem(v, i, var_) orelse return null;
+    return valueText16(m, @import("utf.zig").UTF16NATIVE);
 }
 
 /// Port of sqlite3_value_blob().
@@ -449,9 +520,22 @@ pub fn bindValue(v: *Vdbe, i: usize, value: *Mem) i32 {
             bindZeroblob(v, i, value.u.n_zero)
         else
             bindBlob(v, i, value.bytes()),
-        vi.SQLITE_TEXT => bindText(v, i, value.bytes()),
+        vi.SQLITE_TEXT => bindTextEnc(v, i, value.bytes(), value.enc),
         else => bindNull(v, i),
     };
+}
+
+/// bindText() of text in encoding `enc`, converted to UTF-8 (C's
+/// bindText() with an encoding: sqlite3VdbeChangeEncoding()).
+fn bindTextEnc(v: *Vdbe, i: usize, text: []const u8, enc: u8) i32 {
+    if (enc == ENC.UTF8 or enc == 0) return bindText(v, i, text);
+    const rc = bindStr(v, i, text, enc);
+    if (rc != RC.OK) return rc;
+    mem.changeEncoding(&v.vars[i - 1], ENC.UTF8) catch {
+        main_mod.setError(v.db, RC.NOMEM);
+        return RC.NOMEM;
+    };
+    return RC.OK;
 }
 
 /// Port of sqlite3_bind_parameter_count().
@@ -593,7 +677,8 @@ pub fn resultStr(ctx: *Context, p: *printf.StrAccum, own: StrOwn) void {
 
 /// Port of sqlite3_result_value(): a copy of `value`.
 pub fn resultValue(ctx: *Context, value: *const Mem) void {
-    mem.copy(ctx.out, value) catch resultErrorNomem(ctx);
+    mem.copy(ctx.out, value) catch return resultErrorNomem(ctx);
+    mem.changeEncoding(ctx.out, ctx.enc) catch resultErrorNomem(ctx);
 }
 
 /// Port of sqlite3_result_subtype().
@@ -995,4 +1080,112 @@ test "api: an OpenDup cursor outlives the original" {
     try std.testing.expectEqual(@as(i64, 1), columnInt64(v, 0));
     try std.testing.expectEqual(RC.DONE, step(v));
     try std.testing.expectEqual(RC.OK, finalize(v));
+}
+
+// ============================================================ scan status
+
+/// SQLITE_SCANSTAT_* metrics.
+pub const SCANSTAT = struct {
+    pub const NLOOP = 0;
+    pub const NVISIT = 1;
+    pub const EST = 2;
+    pub const NAME = 3;
+    pub const EXPLAIN = 4;
+    pub const SELECTID = 5;
+    pub const PARENTID = 6;
+    pub const NCYCLE = 7;
+    pub const COMPLEX = 1;
+};
+
+/// Port of sqlite3_stmt_scanstatus_v2(): metric `op` of entry `i_scan`
+/// (loops only, unless `flags` has SCANSTAT_COMPLEX) into `out`, whose
+/// type is the metric's (i64, f64, a C string or i32). Returns 0, or 1
+/// if there is no such entry. A statement compiled without
+/// SQLITE_DBCONFIG_STMT_SCANSTATUS has no entries.
+pub fn scanStatus(v: *Vdbe, i_scan_arg: i32, op: i32, flags: i32, out: *anyopaque) i32 {
+    if (op < SCANSTAT.NLOOP or op > SCANSTAT.NCYCLE) return 1;
+    const ops = if (v.frame) |f| vi.rootFrame(f).ops else v.ops.items;
+    const stats = v.op_stats;
+    const Out = struct {
+        fn as(comptime T: type, p: *anyopaque) *T {
+            return @ptrCast(@alignCast(p));
+        }
+    };
+    var i_scan = i_scan_arg;
+    if (i_scan < 0) {
+        if (op != SCANSTAT.NCYCLE) return 1;
+        var res: u64 = 0;
+        for (stats) |s| res +%= s.n_cycle;
+        Out.as(i64, out).* = @bitCast(res);
+        return 0;
+    }
+    var idx: usize = 0;
+    if (flags & SCANSTAT.COMPLEX != 0) {
+        idx = @intCast(i_scan);
+    } else {
+        // Without COMPLEX, only the entries of loops (with a name).
+        while (idx < v.scans.items.len) : (idx += 1) {
+            if (v.scans.items[idx].name != null) {
+                i_scan -= 1;
+                if (i_scan < 0) break;
+            }
+        }
+    }
+    if (idx >= v.scans.items.len) return 1;
+    const scan = &v.scans.items[idx];
+    const exec_count = struct {
+        fn f(st: []const vi.OpStat, addr: i32) i64 {
+            if (addr <= 0) return -1;
+            if (@as(usize, @intCast(addr)) >= st.len) return 0;
+            return @bitCast(st[@intCast(addr)].n_exec);
+        }
+    }.f;
+    switch (op) {
+        SCANSTAT.NLOOP => Out.as(i64, out).* = exec_count(stats, scan.addr_loop),
+        SCANSTAT.NVISIT => Out.as(i64, out).* = exec_count(stats, scan.addr_visit),
+        SCANSTAT.EST => {
+            var r: f64 = 1.0;
+            var x = scan.n_est;
+            while (x < 100) {
+                x += 10;
+                r *= 0.5;
+            }
+            Out.as(f64, out).* = r * @as(f64, @floatFromInt(@import("../sql/util.zig").logEstToInt(x)));
+        },
+        SCANSTAT.NAME => Out.as(?[*:0]const u8, out).* = if (scan.name) |z| z.ptr else null,
+        SCANSTAT.EXPLAIN => Out.as(?[*:0]const u8, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p4.z else null,
+        SCANSTAT.SELECTID => Out.as(i32, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p1 else -1,
+        SCANSTAT.PARENTID => Out.as(i32, out).* = if (scan.addr_explain != 0) ops[@intCast(scan.addr_explain)].p2 else -1,
+        SCANSTAT.NCYCLE => {
+            var res: i64 = 0;
+            if (scan.addr_range[0] == 0) {
+                res = -1;
+            } else if (stats.len == ops.len) {
+                var ii: usize = 0;
+                while (ii < scan.addr_range.len) : (ii += 2) {
+                    var i_ins = scan.addr_range[ii];
+                    const i_end = scan.addr_range[ii + 1];
+                    if (i_ins == 0) break;
+                    if (i_ins > 0) {
+                        while (i_ins <= i_end) : (i_ins += 1) res +%= @bitCast(stats[@intCast(i_ins)].n_cycle);
+                    } else {
+                        // Every instruction on cursor i_end that counts.
+                        for (ops, stats) |o, s| {
+                            if (o.p1 != i_end) continue;
+                            if (o.opcode.opflags() & @import("opcodes.zig").OPFLG.NCYCLE == 0) continue;
+                            res +%= @bitCast(s.n_cycle);
+                        }
+                    }
+                }
+            }
+            Out.as(i64, out).* = res;
+        },
+        else => return 1,
+    }
+    return 0;
+}
+
+/// Port of sqlite3_stmt_scanstatus_reset(): zero the counters.
+pub fn scanStatusReset(v: *Vdbe) void {
+    @memset(v.op_stats, .{});
 }

@@ -26,6 +26,8 @@ fn authThunk(arg: ?*anyopaque, code: i32, a1: ?[*:0]const u8, a2: ?[*:0]const u8
 /// it, and those prepared before are expired (recompiled on their next
 /// step).
 pub export fn sqlite3_set_authorizer(db_arg: ?*Handle, f: ?c.CAuth, arg: ?*anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const e = c.ext(db);
     e.authorizer = .{ .f = f, .arg = arg };
@@ -48,6 +50,8 @@ fn collNeededThunk(arg: ?*anyopaque, db: *Handle, name: [:0]const u8) void {
 const ENC_UTF8: c_int = 1;
 
 fn setCollNeeded(db_arg: ?*Handle, arg: ?*anyopaque, f: ?*const anyopaque, utf16: bool) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const e = c.ext(db);
     e.coll_needed = .{ .f = @ptrCast(@alignCast(f)), .arg = arg };
@@ -79,6 +83,8 @@ fn autovacThunk(arg: ?*anyopaque, name: [:0]const u8, n_orig: u32, n_free: u32, 
 /// commit gives back. The destructor of the previous argument runs now,
 /// that of the last one when the connection closes.
 pub export fn sqlite3_autovacuum_pages(db_arg: ?*Handle, f: ?c.CAutovac, arg: ?*anyopaque, x_destroy: ?*const anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const e = c.ext(db);
     if (e.autovac_destroy) |d| d(e.autovac.arg);
@@ -113,6 +119,8 @@ fn profileThunk(arg: ?*anyopaque, sql: [*:0]const u8, ns: u64) void {
 /// PROFILE when a run ends, CLOSE on sqlite3_close()). It replaces a
 /// callback of sqlite3_trace().
 pub export fn sqlite3_trace_v2(db_arg: ?*Handle, mask_arg: c_uint, f_arg: ?c.CTraceV2, arg: ?*anyopaque) callconv(.c) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const e = c.ext(db);
     var mask = mask_arg;
@@ -132,6 +140,8 @@ pub export fn sqlite3_trace_v2(db_arg: ?*Handle, mask_arg: c_uint, f_arg: ?c.CTr
 /// The deprecated trace callback: the SQL of each statement, with its
 /// parameters expanded. It replaces a callback of sqlite3_trace_v2().
 pub export fn sqlite3_trace(db_arg: ?*Handle, f: ?c.CTrace, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return null;
     const e = c.ext(db);
     const old = e.trace_arg;
@@ -148,6 +158,8 @@ pub export fn sqlite3_trace(db_arg: ?*Handle, f: ?c.CTrace, arg: ?*anyopaque) ca
 /// The deprecated profile callback: the SQL and running time of each
 /// statement that ends.
 pub export fn sqlite3_profile(db_arg: ?*Handle, f: ?c.CProfile, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return null;
     const e = c.ext(db);
     const old = e.legacy_profile.arg;

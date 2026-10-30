@@ -78,7 +78,9 @@ pub fn xq_vsnprintf(n_buf: c_int, buf: ?[*]u8, fmt: ?[*:0]const u8, args: ?[*]co
         b[0] = 0;
         return b;
     };
-    var acc = StrAccum.init(null, b[0..@intCast(n_buf)], 0);
+    // No growth (mxAlloc 0), but %Q and friends may need a temporary
+    // buffer from malloc, as sqlite3DbMallocRaw(0, n) gives in C.
+    var acc = StrAccum.init(c.gpa, b[0..@intCast(n_buf)], 0);
     render(&acc, f, args, n);
     b[acc.n_char] = 0;
     return b;
@@ -96,7 +98,7 @@ pub fn xq_log(code: c_int, fmt: ?[*:0]const u8, args: ?[*]const XqArg, n: c_int)
     const log = c.state.log;
     const f = log.f orelse return;
     var base: [512]u8 = undefined;
-    var acc = StrAccum.init(null, &base, 0);
+    var acc = StrAccum.init(c.gpa, &base, 0);
     render(&acc, fmt orelse return, args, n);
     base[acc.n_char] = 0;
     f(log.arg, code, @ptrCast(&base));

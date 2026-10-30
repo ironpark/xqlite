@@ -170,18 +170,6 @@ pub fn utf8ToUtf16(s: []const u8) ?[:0]u16 {
     return out.toOwnedSliceSentinel(gpa, 0) catch null;
 }
 
-/// How many bytes `s` takes in UTF-16 (sqlite3_value_bytes16()).
-pub fn utf16Bytes(s: []const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        const l = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
-        n += if (l == 4) 4 else 2;
-        i += l;
-    }
-    return n;
-}
-
 // ========================================================== the C state
 
 /// A C callback with its argument.
@@ -213,13 +201,9 @@ pub const TRACE_CLOSE: u32 = 0x08;
 pub const Ext = struct {
     /// The VFS the connection opened its files with (its sqlite3_vfs).
     vfs: *@import("vfs.zig").Entry,
-    /// The filenames sqlite3_db_filename() returned, in the layout that
-    /// sqlite3_uri_parameter() reads (see filename.zig), by database
-    /// name; freed on close.
-    filenames: std.ArrayList(Filename) = .empty,
-    /// The URI parameters the main database was opened with (pairs of
-    /// NUL-terminated strings), for its sqlite3_filename.
-    uri_params: ?[]u8 = null,
+    /// The shared libraries sqlite3_load_extension() opened (aExtension),
+    /// closed with the connection.
+    extensions: std.ArrayList(?*anyopaque) = .empty,
     busy: Hook(CBusy) = .{},
     wal: Hook(CWal) = .{},
     commit: Hook(CCommit) = .{},
@@ -246,11 +230,19 @@ pub const Ext = struct {
     clientdata: std.ArrayList(ClientData) = .empty,
     /// The buffer of sqlite3_errmsg16().
     errmsg16: ?[:0]u16 = null,
+    /// A value of the connection was turned into UTF-16 for C
+    /// (sqlite3_column_text16() ...): from then on, the registers C was
+    /// handed are brought back to UTF-8 before the engine reads them
+    /// again (toUtf8()).
+    utf16: bool = false,
+    /// The connection's mutex (db->mutex): a recursive sqlite3_mutex
+    /// in serialized mode, held across every API call on the connection
+    /// (lock()); null in multi-thread mode.
+    mutex: ?*Mutex = null,
     /// sqlite3_close_v2() found the connection busy: it closes once the
     /// last statement or backup is gone (a zombie).
     zombie: bool = false,
 
-    pub const Filename = struct { name: [:0]u8, buf: []u8 };
     pub const ClientData = struct { name: [:0]u8, data: ?*anyopaque, x_destroy: ?CDestructor };
 };
 
@@ -258,9 +250,68 @@ pub fn ext(db: *Handle) *Ext {
     return @ptrCast(@alignCast(db.capi.?));
 }
 
+/// Note that a value of `db` (if any) is being converted to UTF-16.
+pub fn noteUtf16(db: ?*Handle) void {
+    if (extOf(db)) |e| e.utf16 = true;
+}
+
+/// Bring the values the engine will read again back to UTF-8, if C may
+/// have turned them into UTF-16 (see Ext.utf16).
+pub fn toUtf8(db: ?*Handle, values: []const *Mem) void {
+    const e = extOf(db) orelse return;
+    if (!e.utf16) return;
+    for (values) |m| mem.toUtf8(m);
+}
+
+/// toUtf8() for the current row of `v`.
+pub fn rowToUtf8(v: *Vdbe) void {
+    const e = extOf(v.db) orelse return;
+    if (!e.utf16) return;
+    const row = v.result_row orelse return;
+    for (row[0..v.n_res_column]) |*m| mem.toUtf8(m);
+}
+
 pub fn extOf(db: ?*Handle) ?*Ext {
     const d = db orelse return null;
     return @ptrCast(@alignCast(d.capi orelse return null));
+}
+
+// ============================================================ threading
+
+/// sqlite3_mutex (capi/varargs.c).
+pub const Mutex = opaque {};
+pub extern fn sqlite3_mutex_alloc(id: c_int) ?*Mutex;
+pub extern fn sqlite3_mutex_free(m: ?*Mutex) void;
+pub extern fn sqlite3_mutex_enter(m: ?*Mutex) void;
+pub extern fn sqlite3_mutex_leave(m: ?*Mutex) void;
+pub const MUTEX_RECURSIVE = 1;
+
+/// Whether the library has mutexes (SQLITE_THREADSAFE != 0): not on
+/// single-threaded WebAssembly.
+pub const have_threads = !builtin.cpu.arch.isWasm();
+
+/// What sqlite3_mutex_enter(db->mutex) took, for leaving it.
+pub const Lock = struct {
+    m: ?*Mutex,
+
+    pub fn unlock(l: Lock) void {
+        if (l.m) |m| sqlite3_mutex_leave(m);
+    }
+};
+
+/// sqlite3_mutex_enter(db->mutex): in serialized mode, take the mutex
+/// of `db` (none for a null `db` or in multi-thread mode). The mutex is
+/// recursive: callbacks may call the interfaces again.
+pub inline fn lock(db: ?*Handle) Lock {
+    const e = extOf(db) orelse return .{ .m = null };
+    const m = e.mutex orelse return .{ .m = null };
+    sqlite3_mutex_enter(m);
+    return .{ .m = m };
+}
+
+/// lock() for the connection of statement `v`.
+pub inline fn lockStmt(v: ?*Vdbe) Lock {
+    return lock(if (v) |x| x.db else null);
 }
 
 // =================================================== process-wide state
@@ -286,6 +337,13 @@ pub const State = struct {
     initialized: bool = false,
     /// SQLITE_CONFIG_URI.
     uri: bool = false,
+    /// The threading mode new connections get (sqlite3GlobalConfig's
+    /// bCoreMutex and bFullMutex): SQLITE_CONFIG_SINGLETHREAD clears
+    /// both, MULTITHREAD only full_mutex, SERIALIZED sets both.
+    core_mutex: bool = have_threads,
+    full_mutex: bool = have_threads and default_serialized,
+    /// SQLITE_CONFIG_MEMSTATUS (SQLITE_DEFAULT_MEMSTATUS: on).
+    memstat: bool = true,
     /// SQLITE_CONFIG_MALLOC, and whether its xInit has run.
     mem_methods: ?@import("library.zig").MemMethods = null,
     mem_init: bool = false,
@@ -303,6 +361,14 @@ pub const State = struct {
 
 pub var state: State = .{};
 
+/// The default threading mode: multi-thread, as SQLite built with
+/// SQLITE_THREADSAFE=2. Serialized mode (SQLite's default build) takes
+/// the connection's mutex in every call, which about doubles the cost of
+/// a loop of sqlite3_step() and sqlite3_column_*() calls (as in SQLite);
+/// it is there for the connections that ask (SQLITE_OPEN_FULLMUTEX,
+/// SQLITE_CONFIG_SERIALIZED).
+pub const default_serialized = false;
+
 /// The std.Io of the default VFS: blocking calls, no event loop or
 /// signal handlers installed in the host program.
 pub fn io() std.Io {
@@ -315,7 +381,9 @@ pub fn ensureInit() void {
     state.lock.lock();
     defer state.lock.unlock();
     if (!state.initialized) {
+        @import("../sql/status.zig").enable(state.memstat);
         @import("vfs.zig").initDefault();
+        @import("loadext.zig").initHook();
         @atomicStore(bool, &state.initialized, true, .release);
     }
 }

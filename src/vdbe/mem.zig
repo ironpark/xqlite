@@ -2,8 +2,9 @@
 //! of vdbe.c). A Mem owns at most one buffer, `z_malloc`; `z` may point
 //! into it, to static or ephemeral memory, or to memory freed by `x_del`.
 //!
-//! Only UTF-8 text is supported so far: changing a value to a UTF-16
-//! encoding fails.
+//! The engine keeps text in UTF-8. A value becomes UTF-16 only when an
+//! interface asks for it (sqlite3_value_text16()), as in SQLite by
+//! translating it in place (utf.zig), and is read back as UTF-8.
 
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
@@ -14,6 +15,7 @@ const printf = @import("../sql/printf.zig");
 const btree = @import("../btree/btree.zig");
 const malloc = @import("../sql/malloc.zig");
 const thunk = @import("../util/thunk.zig");
+const utf = @import("utf.zig");
 
 const Mem = vi.Mem;
 const MEM = vi.MEM;
@@ -54,8 +56,67 @@ pub fn changeEncoding(m: *Mem, desired: u8) Oom!void {
         return;
     }
     if (m.enc == desired) return;
-    // UTF-16 is not ported yet.
-    return error.OutOfMemory;
+    return translate(m, desired);
+}
+
+/// Port of sqlite3VdbeMemTranslate(): convert the string to encoding
+/// `desired`, in a new buffer of its own.
+fn translate(m: *Mem, desired: u8) Oom!void {
+    @branchHint(.cold);
+    std.debug.assert(m.flags.Str and m.enc != desired and m.enc != 0 and m.n >= 0);
+    if (m.enc != ENC.UTF8 and desired != ENC.UTF8) {
+        // Between the two UTF-16 byte orders: swap the bytes in place.
+        try makeWriteable(m);
+        const z = m.z.?;
+        var i: usize = 0;
+        while (i + 1 < @as(usize, @intCast(m.n))) : (i += 2) std.mem.swap(u8, &z[i], &z[i + 1]);
+        m.enc = desired;
+        return;
+    }
+    if (desired == ENC.UTF8) m.n &= ~@as(i32, 1);
+    const out = try gpa(m).alloc(u8, utf.maxLen(@intCast(m.n), desired));
+    const n = utf.translate(m.bytes(), m.enc, desired, out);
+    const flags = (MEM{ .Str = true, .Term = true }).with(m.flags.only(MEM.AffMask.with(.{ .Subtype = true })));
+    release(m);
+    m.flags = flags;
+    m.enc = desired;
+    m.z = out.ptr;
+    m.n = @intCast(n);
+    ownBuffer(m, out.ptr);
+}
+
+/// The text of a UTF-16 string or blob as NUL-terminated UTF-8, for
+/// reading a number from it without changing the value (SQLite's
+/// sqlite3AtoF() and sqlite3Atoi64() read UTF-16 directly); null on OOM.
+fn utf8Copy(m: *const Mem) ?Utf8Copy {
+    @branchHint(.cold);
+    const in = m.bytes();
+    const out = gpa(m).alloc(u8, utf.maxLen(in.len, ENC.UTF8)) catch return null;
+    const n = utf.translate(in, m.enc, ENC.UTF8, out);
+    return .{ .buf = out, .s = out[0..n :0] };
+}
+
+const Utf8Copy = struct {
+    buf: []u8,
+    s: [:0]u8,
+
+    fn free(cp: Utf8Copy, m: *const Mem) void {
+        gpa(m).free(cp.buf);
+    }
+};
+
+fn isUtf16(m: *const Mem) bool {
+    return m.enc == ENC.UTF16LE or m.enc == ENC.UTF16BE;
+}
+
+/// Bring a value an interface turned into UTF-16 back to UTF-8, before
+/// the engine reads it again (the C ABI calls this on the registers it
+/// handed out). The engine itself only reads UTF-8.
+pub fn toUtf8(m: *Mem) void {
+    if (m.flags.Str and isUtf16(m)) changeEncoding(m, ENC.UTF8) catch {
+        if (m.db) |db| db.oomFault();
+        setNull(m);
+    };
 }
 
 /// Port of sqlite3VdbeMemGrow(): make `z` a writable buffer of at least
@@ -257,6 +318,12 @@ pub fn intValue(m: *const Mem) i64 {
     if (flags.Real) return numeric.realToI64(m.u.r);
     if (flags.intersects(.{ .Str = true, .Blob = true })) if (m.z) |z| {
         var v: i64 = 0;
+        if (isUtf16(m)) {
+            const copy8 = utf8Copy(m) orelse return 0;
+            defer copy8.free(m);
+            _ = util.atoi64(copy8.s, &v);
+            return v;
+        }
         _ = util.atoi64(z[0..@intCast(m.n)], &v);
         return v;
     };
@@ -273,7 +340,14 @@ pub fn realValueRC(m: *Mem, value: *f64) i32 {
         value.* = 0.0;
         return 0;
     };
-    std.debug.assert(m.enc == ENC.UTF8 or m.enc == 0);
+    if (isUtf16(m)) {
+        const copy8 = utf8Copy(m) orelse {
+            value.* = 0.0;
+            return 0;
+        };
+        defer copy8.free(m);
+        return numeric.atoF(copy8.s.ptr, value);
+    }
     if (m.flags.Term or zeroTerminateIfAble(m)) return numeric.atoF(@ptrCast(z), value);
     if (m.n == 0) {
         value.* = 0.0;
@@ -773,6 +847,20 @@ pub fn valueType(m: *const Mem) i32 {
 /// Port of sqlite3_value_numeric_type().
 pub fn valueNumericType(m: *Mem) i32 {
     var t = valueType(m);
+    if (t == vi.SQLITE_TEXT and isUtf16(m)) {
+        // UTF-16 text: a UTF-8 copy decides.
+        const copy8 = utf8Copy(m) orelse return t;
+        defer copy8.free(m);
+        var tmp: Mem = .{ .db = m.db, .flags = .{ .Str = true, .Term = true, .Static = true }, .enc = ENC.UTF8, .z = copy8.s.ptr, .n = @intCast(copy8.s.len) };
+        applyNumericAffinity(&tmp, false);
+        if (!tmp.flags.Str) {
+            m.u = tmp.u;
+            m.flags.Str = false;
+            m.flags.Int = tmp.flags.Int;
+            m.flags.Real = tmp.flags.Real;
+        }
+        return valueType(m);
+    }
     if (t == vi.SQLITE_TEXT) {
         applyNumericAffinity(m, false);
         t = valueType(m);

@@ -134,10 +134,13 @@ pub fn configLookasideDefaults() struct { sz: i32, n: i32 } {
 // ======================================== sqlite3_malloc() (mem1.c header)
 
 /// The 8 bytes in front of an allocation. They hold its size, rounded up
-/// to 8 (sqlite3MemRoundup()), and in the top byte log2 of its alignment:
-/// with an alignment above 8 the header grows to the alignment, its size
-/// word still last.
+/// to 8 (sqlite3MemRoundup()), and in the top byte log2 of its alignment
+/// and, in the top bit, whether it is in the status counters
+/// (status.zig): with an alignment above 8 the header grows to the
+/// alignment, its size word still last.
 const size_mask: u64 = (1 << 56) - 1;
+const counted_bit: u64 = 1 << 63;
+const status = @import("status.zig");
 
 fn headerWord(p: [*]u8) *u64 {
     return @ptrCast(@alignCast(p - 8));
@@ -153,7 +156,7 @@ const Block = struct {
 
 fn block(p: [*]u8) Block {
     const w = headerWord(p).*;
-    const a: Alignment = @fromBackingInt(@intCast(@as(u6, @intCast(w >> 56))));
+    const a: Alignment = @fromBackingInt(@intCast(@as(u6, @intCast((w >> 56) & 0x3f))));
     const h = a.toByteUnits();
     const n: usize = @intCast(w & size_mask);
     return .{ .raw = (p - h)[0 .. h + n], .alignment = a, .n = n };
@@ -173,13 +176,35 @@ fn memMalloc(n: usize, alignment: Alignment, ra: usize) ?[*]u8 {
     const raw = config.backing.rawAlloc(h + full, a, ra) orelse return null;
     const p = raw + h;
     headerWord(p).* = full | (@as(u64, @backingInt(a)) << 56);
+    if (status.enabled()) {
+        // mallocWithAlarm(): the memory and count in use, the largest
+        // request.
+        headerWord(p).* |= counted_bit;
+        status.up(.memory_used, @intCast(full));
+        status.up(.malloc_count, 1);
+        status.highwater(.malloc_size, @intCast(n));
+    }
     return p;
 }
 
-/// Port of sqlite3MemFree().
+/// Port of sqlite3MemFree() (and the accounting of sqlite3_free()).
 fn memFree(p: [*]u8, ra: usize) void {
+    const w = headerWord(p).*;
+    if (w & counted_bit != 0) {
+        status.down(.memory_used, @intCast(w & size_mask));
+        status.down(.malloc_count, 1);
+    }
     const b = block(p);
     config.backing.rawFree(b.raw, b.alignment, ra);
+}
+
+/// The accounting of a block resized from `old` to `full` bytes for a
+/// request of `n` (sqlite3Realloc()).
+fn countResize(w: u64, full: usize, n: usize) void {
+    if (w & counted_bit == 0) return;
+    const old: isize = @intCast(w & size_mask);
+    status.up(.memory_used, @as(isize, @intCast(full)) - old);
+    status.highwater(.malloc_size, @intCast(n));
 }
 
 /// Port of sqlite3MemSize().
@@ -194,7 +219,9 @@ fn memResize(p: [*]u8, n: usize, ra: usize) bool {
     if (full == b.n) return true;
     const h = b.alignment.toByteUnits();
     if (!config.backing.rawResize(b.raw, b.alignment, h + full, ra)) return false;
-    headerWord(p).* = full | (@as(u64, @backingInt(b.alignment)) << 56);
+    const w = headerWord(p).*;
+    headerWord(p).* = full | (@as(u64, @backingInt(b.alignment)) << 56) | (w & counted_bit);
+    countResize(w, full, n);
     return true;
 }
 
@@ -205,9 +232,11 @@ fn memRealloc(p: [*]u8, n: usize, ra: usize) ?[*]u8 {
     const full = roundup(n) orelse return null;
     if (full == b.n) return p;
     const h = b.alignment.toByteUnits();
+    const w = headerWord(p).*;
     const raw = config.backing.rawRemap(b.raw, b.alignment, h + full, ra) orelse return null;
     const q = raw + h;
-    headerWord(q).* = full | (@as(u64, @backingInt(b.alignment)) << 56);
+    headerWord(q).* = full | (@as(u64, @backingInt(b.alignment)) << 56) | (w & counted_bit);
+    countResize(w, full, n);
     return q;
 }
 

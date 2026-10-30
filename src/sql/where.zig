@@ -176,8 +176,20 @@ fn translateColumnToCopy(p: *Parse, i_start: i32, i_tab_cur: i32, i_register: i3
     }
 }
 
-// explainAutomaticIndex() is omitted: it only does anything with
-// SQLITE_ENABLE_STMT_SCANSTATUS.
+/// Port of explainAutomaticIndex(): for sqlite3_stmt_scanstatus() (but
+/// not in EXPLAIN QUERY PLAN, whose output stays as it was), an
+/// OP_Explain "CREATE AUTOMATIC INDEX ON t(cols)"; its address, or 0.
+fn explainAutomaticIndex(p: *Parse, idx: *Index, partial: bool) i32 {
+    if (!aux.isStmtScanStatus(p.db) or p.explain == 2) return 0;
+    const t = idx.table;
+    var cols: std.ArrayList(u8) = .empty;
+    defer cols.deinit(p.db.gpa);
+    for (idx.ai_column[0 .. idx.ai_column.len - 1], 0..) |i_col, ii| {
+        if (ii > 0) cols.appendSlice(p.db.gpa, ", ") catch return 0;
+        cols.appendSlice(p.db.gpa, t.cols[@intCast(i_col)].name()) catch return 0;
+    }
+    return aux.explain(p, false, "CREATE AUTOMATIC INDEX ON {s}({s}){s}", .{ t.name, cols.items, if (partial) " WHERE <expr>" else "" });
+}
 
 /// Port of constructAutomaticIndex(): code the construction of a
 /// transient index for `level` and point its WhereLoop at it.
@@ -307,6 +319,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
     }
 
     // Create the automatic index.
+    const addr_exp = explainAutomaticIndex(p, idx, partial != null);
     std.debug.assert(level.i_idx_cur >= 0);
     level.i_idx_cur = p.n_tab;
     p.n_tab += 1;
@@ -343,6 +356,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
         std.debug.assert(we.loopBloomable(loop));
         _ = aux.addOp4Int(v, OP.FilterAdd, level.reg_filter, 0, reg_base, loop.btree.n_eq);
     }
+    aux.scanStatusCounters(v, addr_exp, addr_exp, aux.currentAddr(v));
     _ = aux.addOp2(v, OP.IdxInsert, level.i_idx_cur, reg_record);
     aux.changeP5(v, vi.OPFLAG.USESEEKRESULT);
     if (partial != null) aux.resolveLabel(v, i_continue);
@@ -363,6 +377,7 @@ fn constructAutomaticIndex(p: *Parse, wc: *WhereClause, not_ready: Bitmask, leve
 
     // Jump here when skipping the initialization.
     aux.jumpHere(v, addr_init);
+    aux.scanStatusRange(v, addr_exp, addr_exp, -1);
 }
 
 /// Port of sqlite3ConstructBloomFilter(): code the initialization of the

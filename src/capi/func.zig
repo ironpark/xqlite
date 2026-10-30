@@ -45,14 +45,19 @@ fn argvPtr(argv: []*Mem) ?[*]*Mem {
     return if (argv.len == 0) null else argv.ptr;
 }
 
+// The arguments are registers: what C turned into UTF-16 goes back to
+// UTF-8 before the engine reads them again (common.toUtf8()).
+
 pub fn scalarThunk(ctx: *Context, argv: []*Mem) void {
     const w = FuncWrap.of(ctx);
     w.x_func.?(ctx, @intCast(argv.len), argvPtr(argv));
+    c.toUtf8(c.api.contextDbHandle(ctx), argv);
 }
 
 fn stepThunk(ctx: *Context, argv: []*Mem) void {
     const w = FuncWrap.of(ctx);
     w.x_step.?(ctx, @intCast(argv.len), argvPtr(argv));
+    c.toUtf8(c.api.contextDbHandle(ctx), argv);
 }
 
 fn finalThunk(ctx: *Context) void {
@@ -66,6 +71,7 @@ fn valueThunk(ctx: *Context) void {
 fn inverseThunk(ctx: *Context, argv: []*Mem) void {
     const w = FuncWrap.of(ctx);
     w.x_inverse.?(ctx, @intCast(argv.len), argvPtr(argv));
+    c.toUtf8(c.api.contextDbHandle(ctx), argv);
 }
 
 const destroyWrap = c.int.destructor(FuncWrap.destroy);
@@ -84,6 +90,8 @@ fn createFunction(
     x_inverse: ?XFunc,
     x_destroy: ?c.CDestructor,
 ) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     // The combinations sqlite3CreateFunc() refuses.
     if (name == null or
@@ -139,6 +147,8 @@ pub export fn sqlite3_create_function16(db: ?*Handle, z_name: ?*const anyopaque,
 }
 
 pub export fn sqlite3_overload_function(db: ?*Handle, z_name: ?[*:0]const u8, n_arg: c_int) callconv(.c) c_int {
+    const lk = c.lock(db);
+    defer lk.unlock();
     const h = db orelse return RC.MISUSE;
     const name = c.span(z_name) orelse return RC.MISUSE;
     if (n_arg < -2) return RC.MISUSE;
@@ -265,23 +275,31 @@ pub export fn sqlite3_value_bytes(v: ?*Mem) callconv(.c) c_int {
     return @intCast(c.api.valueBytes(v orelse return 0));
 }
 
-pub export fn sqlite3_value_bytes16(v: ?*Mem) callconv(.c) c_int {
-    const t = c.api.valueText(v orelse return 0) orelse return 0;
-    return @intCast(c.utf16Bytes(t));
+// UTF-16 results: the value is converted in place, as in SQLite (see
+// stmt.zig).
+
+pub export fn sqlite3_value_bytes16(v_arg: ?*Mem) callconv(.c) c_int {
+    const v = v_arg orelse return 0;
+    c.noteUtf16(v.db);
+    return @intCast(c.api.valueBytes16(v));
 }
 
-// UTF-16 results are not supported (see stmt.zig).
-
-pub export fn sqlite3_value_text16(_: ?*Mem) callconv(.c) ?*const anyopaque {
-    return null;
+fn valueText16(v_arg: ?*Mem, enc: u8) ?*const anyopaque {
+    const v = v_arg orelse return null;
+    c.noteUtf16(v.db);
+    return c.api.valueText16(v, enc);
 }
 
-pub export fn sqlite3_value_text16le(_: ?*Mem) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn sqlite3_value_text16(v: ?*Mem) callconv(.c) ?*const anyopaque {
+    return valueText16(v, @import("../vdbe/utf.zig").UTF16NATIVE);
 }
 
-pub export fn sqlite3_value_text16be(_: ?*Mem) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn sqlite3_value_text16le(v: ?*Mem) callconv(.c) ?*const anyopaque {
+    return valueText16(v, c.vi.ENC.UTF16LE);
+}
+
+pub export fn sqlite3_value_text16be(v: ?*Mem) callconv(.c) ?*const anyopaque {
+    return valueText16(v, c.vi.ENC.UTF16BE);
 }
 
 pub export fn sqlite3_value_pointer(v: ?*Mem, z_type: ?[*:0]const u8) callconv(.c) ?*anyopaque {
@@ -300,8 +318,9 @@ pub export fn sqlite3_value_frombind(v: ?*Mem) callconv(.c) c_int {
     return @intFromBool(c.api.valueFrombind(v orelse return 0));
 }
 
-pub export fn sqlite3_value_encoding(_: ?*Mem) callconv(.c) c_int {
-    return 1;
+pub export fn sqlite3_value_encoding(v: ?*Mem) callconv(.c) c_int {
+    const m = v orelse return 0;
+    return if (m.enc == c.vi.ENC.UTF16LE or m.enc == c.vi.ENC.UTF16BE) m.enc else c.vi.ENC.UTF8;
 }
 
 pub export fn sqlite3_value_dup(v: ?*const Mem) callconv(.c) ?*Mem {
@@ -475,6 +494,8 @@ fn compareThunk(user: ?*anyopaque, a: []const u8, b: []const u8) std.math.Order 
 }
 
 fn createCollation(db_arg: ?*Handle, name: ?[]const u8, p_arg: ?*anyopaque, x_compare: ?CCompare, x_destroy: ?c.CDestructor) c_int {
+    const lk = c.lock(db_arg);
+    defer lk.unlock();
     const db = db_arg orelse return RC.MISUSE;
     const z = name orelse return RC.MISUSE;
     const e = c.ext(db);

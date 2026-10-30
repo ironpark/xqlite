@@ -205,6 +205,7 @@ pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenF
         .n_vdbe_read = &db.n_vdbe_read,
         .autovac_pages = btreeAutovacPages(db),
         .busy_handler = btreeBusyHandler(db),
+        .uri_params = parsed.params(),
     }) catch |err| {
         const rc = int.errorCode(err);
         errorWithMsg(db, rc, "{s}", .{util.errStr(rc)});
@@ -425,7 +426,7 @@ pub fn dbName(db: *const Sqlite3, n: usize) ?[:0]const u8 {
 /// if there is no such database.
 pub fn dbFilename(db: *Sqlite3, name: ?[]const u8) ?[]const u8 {
     const bt = dbNameToBtree(db, name) orelse return null;
-    return bt.pager.path;
+    return bt.pager.filename();
 }
 
 /// Port of sqlite3_db_readonly(): whether database `name` (main if null)

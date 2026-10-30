@@ -67,6 +67,10 @@ pub const Error = vfs.Error || error{
     /// initialize it is attached, and no read mark fits
     /// (SQLITE_READONLY_CANTINIT).
     ReadOnlyCantInit,
+    /// The snapshot asked for (sqlite3_snapshot_open()) is no longer
+    /// available: the WAL was restarted, or checkpointed past it
+    /// (SQLITE_ERROR_SNAPSHOT).
+    ErrorSnapshot,
 };
 
 /// Error set of the routines that may ask to be retried (WAL_RETRY).
@@ -348,6 +352,11 @@ pub const Wal = struct {
     re_cksum: u32 = 0,
     /// Name of the WAL file, owned by the pager (zWalName).
     wal_name: []const u8,
+    /// SQLITE_ENABLE_SNAPSHOT: start the next read transaction on this
+    /// snapshot (pSnapshot), and not on read lock 0 for
+    /// sqlite3_snapshot_get() (bGetSnapshot).
+    snapshot: ?*const IndexHdr = null,
+    get_snapshot: bool = false,
     /// Checkpoint sequence number of the WAL header (nCkpt).
     n_ckpt: u32 = 0,
 
@@ -678,12 +687,13 @@ pub const Wal = struct {
     /// Port of sqlite3WalOpen(): open the WAL file `wal_name` (which must
     /// outlive the Wal) of the open database `db_fd`, read-only if the
     /// VFS can only open it so. A SHARED lock must be held, so that no
-    /// one deletes the WAL meanwhile.
-    pub fn open(gpa: Allocator, v: vfs.Vfs, db_fd: vfs.File, wal_name: []const u8, mx_wal_size: i64) Error!*Wal {
+    /// one deletes the WAL meanwhile. `sqlite_filename`: the name is the
+    /// pager's, in SQLite's filename layout (vfs.OpenFlags).
+    pub fn open(gpa: Allocator, v: vfs.Vfs, db_fd: vfs.File, wal_name: []const u8, mx_wal_size: i64, sqlite_filename: bool) Error!*Wal {
         std.debug.assert(wal_name.len > 0);
         const w = try gpa.create(Wal);
         errdefer gpa.destroy(w);
-        const wal_fd = try v.open(wal_name, .{ .kind = .wal, .create = true });
+        const wal_fd = try v.open(wal_name, .{ .kind = .wal, .create = true, .sqlite_filename = sqlite_filename });
         w.* = .{
             .gpa = gpa,
             .vfs = v,
@@ -1139,7 +1149,9 @@ pub const Wal = struct {
         std.debug.assert(w.wi_data.items.len > 0 and w.wi_data.items[0] != null);
         const info = w.ckptInfo();
         var busy = false;
-        if (!use_wal and info[ci_backfill] == w.hdr.mx_frame) {
+        if (!use_wal and info[ci_backfill] == w.hdr.mx_frame and
+            ((!w.get_snapshot and w.snapshot == null) or w.hdr.mx_frame == 0))
+        {
             // Everything is backfilled (or the WAL is empty): read the
             // database file only.
             const r = w.lockShared(readLock(0));
@@ -1164,7 +1176,10 @@ pub const Wal = struct {
         // mx_frame.
         var mx_read_mark: u32 = 0;
         var mx_i: u32 = 0;
-        const mx_frame = w.hdr.mx_frame;
+        var mx_frame = w.hdr.mx_frame;
+        if (w.snapshot) |snap| if (snap.mx_frame < mx_frame) {
+            mx_frame = snap.mx_frame;
+        };
         var i: u32 = 1;
         while (i < n_reader) : (i += 1) {
             const this_mark = info[ci_read_mark + i];
@@ -1218,6 +1233,16 @@ pub const Wal = struct {
     /// the page cache must be discarded.
     pub fn beginReadTransaction(w: *Wal) Error!bool {
         std.debug.assert(!w.ckpt_lock);
+        const snapshot = w.snapshot;
+        var snap_changed = false;
+        if (snapshot) |snap| {
+            snap_changed = !hdrEql(snap, &w.hdr);
+            // A checkpointer may have decided to checkpoint past the
+            // snapshot without having said so in nBackfillAttempted yet:
+            // keep checkpointers out while it is checked.
+            try w.lockShared(ckpt_lock);
+        }
+        defer if (snapshot != null) w.unlockShared(ckpt_lock);
         var changed = false;
         var cnt: u32 = 0;
         while (true) {
@@ -1225,7 +1250,102 @@ pub const Wal = struct {
                 error.Retry => continue,
                 else => |e| return e,
             };
-            return changed;
+            break;
+        }
+        if (snapshot) |snap| if (!hdrEql(snap, &w.hdr)) {
+            // The read lock is on a mark at or before the snapshot, but
+            // w.hdr is the head of the WAL. The snapshot is still there
+            // unless the WAL was restarted (the salt changed) or a
+            // checkpoint wrote frames past it into the database.
+            const info = w.ckptInfo();
+            const ok = std.mem.eql(u32, &snap.salt, &w.hdr.salt) and snap.mx_frame >= info[ci_backfill_attempted];
+            if (ok) {
+                std.debug.assert(w.read_lock > 0);
+                w.hdr = snap.*;
+                changed = snap_changed;
+            }
+            // A reader of an older snapshot may not skip frames at the
+            // start of the WAL: a checkpointer may have left out a frame
+            // before minFrame whose page is also in a frame after the
+            // snapshot.
+            w.min_frame = 1;
+            if (!ok) {
+                w.endReadTransaction();
+                return error.ErrorSnapshot;
+            }
+        };
+        return changed;
+    }
+
+    // ============================================== snapshots
+
+    /// Port of sqlite3WalSnapshotGet(): the header of the open read
+    /// transaction, or null if the WAL has no frame checksum yet (a
+    /// snapshot cannot be told apart then).
+    pub fn snapshotGet(w: *const Wal) ?IndexHdr {
+        std.debug.assert(w.read_lock >= 0 and w.write_lock == 0);
+        if (std.mem.allEqual(u32, &w.hdr.frame_cksum, 0) and std.mem.allEqual(u32, &w.hdr.salt, 0)) return null;
+        return w.hdr;
+    }
+
+    /// Port of sqlite3WalSnapshotOpen(): open the next read transaction
+    /// on `snap` (null: the latest). A header whose version is 0 is
+    /// sqlite3_snapshot_get()'s: do not take read lock 0 then, or a
+    /// writer could destroy the snapshot while it is read.
+    pub fn snapshotOpen(w: *Wal, snap: ?*const IndexHdr) void {
+        if (snap != null and snap.?.version == 0) {
+            w.get_snapshot = true;
+        } else {
+            w.snapshot = snap;
+            w.get_snapshot = false;
+        }
+    }
+
+    /// Port of sqlite3WalSnapshotCheck(): with a read transaction open,
+    /// take a shared checkpoint lock and check that `snap` is still
+    /// available. The lock is kept on success (snapshotUnlock()).
+    pub fn snapshotCheck(w: *Wal, snap: *const IndexHdr) Error!void {
+        try w.lockShared(ckpt_lock);
+        const info = w.ckptInfo();
+        if (!std.mem.eql(u32, &snap.salt, &w.hdr.salt) or snap.mx_frame < info[ci_backfill_attempted]) {
+            w.unlockShared(ckpt_lock);
+            return error.ErrorSnapshot;
+        }
+    }
+
+    /// Port of sqlite3WalSnapshotUnlock().
+    pub fn snapshotUnlock(w: *Wal) void {
+        w.unlockShared(ckpt_lock);
+    }
+
+    /// Port of sqlite3WalSnapshotRecover() and walSnapshotRecover():
+    /// lower nBackfillAttempted to the first frame whose content the
+    /// database file does not already hold, so that older snapshots can
+    /// be opened again. A read transaction is open.
+    pub fn snapshotRecover(w: *Wal) Error!void {
+        std.debug.assert(w.read_lock >= 0);
+        try w.lockExclusive(ckpt_lock, 1);
+        defer w.unlockExclusive(ckpt_lock, 1);
+        const sz = w.pagesize();
+        const buf1 = try w.gpa.alloc(u8, sz);
+        defer w.gpa.free(buf1);
+        const buf2 = try w.gpa.alloc(u8, sz);
+        defer w.gpa.free(buf2);
+        w.ckpt_lock = true;
+        defer w.ckpt_lock = false;
+        const sz_db = try w.db_fd.fileSize();
+        const info = w.ckptInfo();
+        var i = info[ci_backfill_attempted];
+        while (i > info[ci_backfill]) : (i -= 1) {
+            const loc = try w.hashGet(framePage(i));
+            const pgno = loc.pgno[i - loc.zero - 1];
+            const db_off = @as(u64, pgno - 1) * sz;
+            if (db_off + sz <= sz_db) {
+                try w.wal_fd.read(buf1, frameOffset(i, sz) + frame_hdr_size);
+                try w.db_fd.read(buf2, db_off);
+                if (std.mem.eql(u8, buf1, buf2)) break;
+            }
+            info[ci_backfill_attempted] = i - 1;
         }
     }
 

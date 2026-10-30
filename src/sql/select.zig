@@ -446,6 +446,9 @@ const SortCtx = struct {
     label_ob_lopt: i32 = 0,
     sort_flags: u8 = 0,
     deferred_row_load: ?*RowLoadInfo = null,
+    /// The code pushing a row onto the sorter (scan status).
+    addr_push: i32 = 0,
+    addr_push_end: i32 = 0,
 };
 
 /// SORTFLAG_UseSorter: OP_SorterOpen instead of OP_OpenEphemeral.
@@ -486,6 +489,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, reg_data: i32, reg_orig
     const n_ob_sat = sort.n_ob_sat;
     var i_skip: i32 = 0;
 
+    sort.addr_push = aux.currentAddr(v);
     var reg_base: i32 = undefined;
     if (n_prefix_reg != 0) {
         reg_base = reg_data - n_prefix_reg;
@@ -544,6 +548,7 @@ fn pushOntoSorter(p: *Parse, sort: *SortCtx, s: *Select, reg_data: i32, reg_orig
     if (i_skip != 0) {
         aux.changeP2(v, i_skip, if (sort.label_ob_lopt != 0) sort.label_ob_lopt else aux.currentAddr(v));
     }
+    sort.addr_push_end = aux.currentAddr(v) - 1;
 }
 
 /// Port of codeOffset(): skip the row while the OFFSET counter is
@@ -826,11 +831,14 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     const out_ex = s.e_list.?.slice();
     const n_key: i32 = @as(i32, @intCast(order_by.len())) - sort.n_ob_sat;
 
+    var addr_explain: i32 = undefined;
     if (sort.n_ob_sat == 0 or n_key == 1) {
-        _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}ORDER BY", .{if (sort.n_ob_sat != 0) "LAST TERM OF " else ""});
+        addr_explain = aux.explain(p, false, "USE TEMP B-TREE FOR {s}ORDER BY", .{if (sort.n_ob_sat != 0) "LAST TERM OF " else ""});
     } else {
-        _ = aux.explain(p, false, "USE TEMP B-TREE FOR LAST {d} TERMS OF ORDER BY", .{n_key});
+        addr_explain = aux.explain(p, false, "USE TEMP B-TREE FOR LAST {d} TERMS OF ORDER BY", .{n_key});
     }
+    aux.scanStatusRange(v, addr_explain, sort.addr_push, sort.addr_push_end);
+    aux.scanStatusCounters(v, addr_explain, addr_explain, sort.addr_push);
     if (sort.label_bk_out != 0) {
         _ = aux.addOp2(v, OP.Gosub, sort.reg_return, sort.label_bk_out);
         _ = aux.goto_(v, addr_break);
@@ -889,6 +897,7 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
         }
         _ = aux.addOp3(v, OP.Column, i_sort_tab, i_read, reg_row + i);
     }
+    aux.scanStatusRange(v, addr_explain, addr_explain, -1);
     switch (e_dest) {
         SRT.Table, SRT.EphemTab => {
             _ = aux.addOp3(v, OP.Column, i_sort_tab, n_key + b_seq, reg_row);
@@ -936,20 +945,35 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     } else {
         _ = aux.addOp2(v, OP.Next, i_tab, addr);
     }
+    aux.scanStatusRange(v, addr_explain, aux.currentAddr(v) - 1, -1);
     if (sort.reg_return != 0) _ = aux.addOp1(v, OP.Return, sort.reg_return);
     aux.resolveLabel(v, addr_break);
 }
 
+/// The origin of a result column (SQLITE_ENABLE_COLUMN_METADATA): the
+/// database, table and column it is read from.
+const Origin = struct {
+    db: ?[:0]const u8 = null,
+    tab: ?[:0]const u8 = null,
+    col: ?[:0]const u8 = null,
+};
+
 /// Port of columnTypeImpl(): the declared type of a result expression
 /// that is (through subqueries) a table column; INTEGER for a rowid.
-fn columnType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
+/// With `origin` (SQLITE_ENABLE_COLUMN_METADATA), also where it comes
+/// from, and then a rowid alias has the type of its column.
+fn columnType(nc_arg: *NameContext, e: *Expr, origin: ?*Origin) ?[:0]const u8 {
+    var o: Origin = .{};
+    defer if (origin) |out| {
+        out.* = o;
+    };
     switch (e.op) {
         TK.COLUMN => {
             // Find the table (or subquery) of the column.
             var t: ?*Table = null;
             var sub: ?*Select = null;
             var nc: ?*NameContext = nc_arg;
-            const i_col = e.i_column;
+            var i_col = e.i_column;
             search: while (nc) |n| {
                 for (n.src_list.?.slice()) |*item| {
                     if (item.i_cursor == e.i_table) {
@@ -966,9 +990,27 @@ fn columnType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
                 // view is always NULL).
                 if (i_col >= 0 and i_col < ss.e_list.?.len()) {
                     var snc: NameContext = .{ .parse = nc_arg.parse, .src_list = ss.src, .next = nc };
-                    return columnType(&snc, ss.e_list.?.at(@intCast(i_col)).expr.?);
+                    return columnType(&snc, ss.e_list.?.at(@intCast(i_col)).expr.?, if (origin != null) &o else null);
                 }
                 return null;
+            }
+            if (origin != null) {
+                if (i_col < 0) i_col = tab.i_pkey;
+                var z: ?[:0]const u8 = null;
+                if (i_col < 0) {
+                    z = "INTEGER";
+                    o.col = "rowid";
+                } else {
+                    o.col = tab.cols[@intCast(i_col)].name();
+                    const ty = build.columnType(&tab.cols[@intCast(i_col)], "");
+                    z = if (ty.len == 0) null else ty;
+                }
+                o.tab = tab.name;
+                if (tab.schema != null) {
+                    const db = nc_arg.parse.db;
+                    o.db = db.dbs.items[@intCast(prepare.schemaToIndex(db, tab.schema))].name;
+                }
+                return z;
             }
             if (i_col < 0) return "INTEGER";
             const z = build.columnType(&tab.cols[@intCast(i_col)], "");
@@ -978,21 +1020,30 @@ fn columnType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
             // The type of the single result column of the subquery.
             const ss = e.x.select.?;
             var snc: NameContext = .{ .parse = nc_arg.parse, .src_list = ss.src, .next = nc_arg };
-            return columnType(&snc, ss.e_list.?.at(0).expr.?);
+            return columnType(&snc, ss.e_list.?.at(0).expr.?, if (origin != null) &o else null);
         },
         else => return null,
     }
 }
 
 /// Port of generateColumnTypes(): the declared types of the result
-/// columns (sqlite3_column_decltype()).
+/// columns (sqlite3_column_decltype()), and their origins when the
+/// statement is compiled with column metadata (Vdbe.col_meta).
 fn generateColumnTypes(p: *Parse, tab_list: *SrcList, e_list: *ExprList) void {
     const v = p.vdbe.?;
     var nc: NameContext = .{ .parse = p, .src_list = tab_list };
+    const meta = v.col_meta.len > 0;
     for (e_list.slice(), 0..) |item, i| {
-        const z = columnType(&nc, item.expr.?) orelse continue;
-        if (z.len == 0) continue;
-        aux.setColName(v, i, vi.COLNAME_DECLTYPE, z);
+        var o: Origin = .{};
+        const z = columnType(&nc, item.expr.?, if (meta) &o else null);
+        if (meta) {
+            if (o.db) |x| aux.setColName(v, i, vi.COLNAME_DATABASE, x);
+            if (o.tab) |x| aux.setColName(v, i, vi.COLNAME_TABLE, x);
+            if (o.col) |x| aux.setColName(v, i, vi.COLNAME_COLUMN, x);
+        }
+        const ty = z orelse continue;
+        if (ty.len == 0) continue;
+        aux.setColName(v, i, vi.COLNAME_DECLTYPE, ty);
     }
 }
 
@@ -1125,7 +1176,7 @@ pub fn subqueryColumnTypes(p: *Parse, a: std.mem.Allocator, t: *Table, s_arg: *S
             }
             if (col.affinity >= Aff.numeric and e.op == TK.CAST) col.affinity = Aff.flexnum;
         }
-        var typ = columnType(&nc, e);
+        var typ = columnType(&nc, e, null);
         if (typ == null or col.affinity != build.affinityType(typ.?, null)) {
             if (col.affinity == Aff.numeric or col.affinity == Aff.flexnum) {
                 typ = "NUM";
@@ -3845,11 +3896,12 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             // An uncorrelated subquery is computed once.
             if (!item.fg.is_correlated) once_addr = aux.addOp0(v, OP.Once);
             var d = selectDestInit(SRT.EphemTab, item.i_cursor);
-            _ = aux.explain(p, true, "MATERIALIZE {f}", .{util.srcItemNameNoAlias(item)});
+            const addr_explain = aux.explain(p, true, "MATERIALIZE {f}", .{util.srcItemNameNoAlias(item)});
             select(p, sub, &d) catch {};
             item.s_tab.?.n_row_log_est = sub.n_select_row;
             if (once_addr != 0) aux.jumpHere(v, once_addr);
             _ = aux.addOp2(v, OP.Return, subq.reg_return, top_addr + 1);
+            aux.scanStatusRange(v, addr_explain, addr_explain, -1);
             aux.jumpHere(v, top_addr);
             expr_mod.clearTempRegCache(p);
             if (item.fg.is_cte and !item.fg.is_correlated) {
@@ -4069,7 +4121,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             if (where_mod.isOrdered(w) == n_gb) {
                 group_by_sort = false;
             } else {
-                _ = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{if (distinct.is_tnct != 0 and !s.sel_flags.Distinct) "DISTINCT" else "GROUP BY"});
+                const addr_exp = aux.explain(p, false, "USE TEMP B-TREE FOR {s}", .{if (distinct.is_tnct != 0 and !s.sel_flags.Distinct) "DISTINCT" else "GROUP BY"});
                 group_by_sort = true;
                 var n_col: i32 = n_gb;
                 var j: i32 = n_gb;
@@ -4091,8 +4143,10 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 }
                 agg.direct_mode = false;
                 const reg_record = expr_mod.getTempReg(p);
+                aux.scanStatusCounters(v, addr_exp, 0, aux.currentAddr(v));
                 _ = aux.addOp3(v, OP.MakeRecord, reg_base, n_col, reg_record);
                 _ = aux.addOp2(v, OP.SorterInsert, agg.sorting_idx, reg_record);
+                aux.scanStatusRange(v, addr_exp, aux.currentAddr(v) - 2, -1);
                 expr_mod.releaseTempReg(p, reg_record);
                 expr_mod.releaseTempRange(p, reg_base, n_col);
                 where_mod.whereEnd(w);
@@ -4100,9 +4154,12 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
                 agg.sorting_idx_ptab = sort_p_tab;
                 p.n_tab += 1;
                 sort_out = expr_mod.getTempReg(p);
+                aux.scanStatusCounters(v, addr_exp, aux.currentAddr(v), 0);
                 _ = aux.addOp3(v, OP.OpenPseudo, sort_p_tab, sort_out, n_col);
                 _ = aux.addOp2(v, OP.SorterSort, agg.sorting_idx, addr_end);
                 agg.use_sorting_idx = true;
+                aux.scanStatusRange(v, addr_exp, -1, sort_p_tab);
+                aux.scanStatusRange(v, addr_exp, -1, agg.sorting_idx);
             }
 
             // The indexed subexpressions tagged by

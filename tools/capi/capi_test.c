@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/uio.h>
 #include "sqlite3.h"
 #include "xqlite.h"
 
@@ -979,11 +980,11 @@ static void test_misc(void){
   /* Unsupported interfaces fail cleanly. */
   {
     char *zErr = 0;
+    /* Off until enabled. */
     CHECK(sqlite3_load_extension(db, "x", 0, &zErr)==SQLITE_ERROR);
-    CHECK(zErr!=0);
+    CHECK_STR(zErr, "not authorized");
     sqlite3_free(zErr);
   }
-  CHECK(sqlite3_serialize(db, "main", 0, 0)==0);
   CHECK(sqlite3_column_table_name(0, 0)==0);
 
   nDestroy = 0;
@@ -1369,8 +1370,1195 @@ static void test_trace_engine(void){
 
 /* ================================================= end of group A */
 
-int main(void){
+/* ==================================================================== */
+/* Group C: statements, text encodings, threading.                      */
+/* Against SQLite these need a build with SQLITE_ENABLE_COLUMN_METADATA, */
+/* SQLITE_ENABLE_NORMALIZE, SQLITE_ENABLE_STMT_SCANSTATUS and            */
+/* SQLITE_THREADSAFE=2 (multi-thread by default, as xqlite) and         */
+/* SQLITE_ENABLE_BYTECODE_VTAB; SQLite's scan status is on by default,   */
+/* xqlite's off (SQLITE_DBCONFIG_STMT_SCANSTATUS turns it on).           */
+/* ==================================================================== */
+
+/* sqlite3.h declares it only with SQLITE_ENABLE_NORMALIZE. */
+const char *sqlite3_normalized_sql(sqlite3_stmt *pStmt);
+
+/* UTF-16 text compared with an ASCII string. */
+static int eq16(const void *z, const char *zAscii){
+  const unsigned short *p = (const unsigned short*)z;
+  int i;
+  if( p==0 ) return zAscii==0;
+  for(i=0; zAscii[i]; i++) if( p[i]!=(unsigned char)zAscii[i] ) return 0;
+  return p[i]==0;
+}
+
+/* f16(x): the UTF-16 text of x in each byte order, read back as checks
+** on the value, then x||'' from the engine. */
+static int nF16 = 0;
+static void fn_utf16(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  const unsigned char *le, *be;
+  (void)argc;
+  le = (const unsigned char*)sqlite3_value_text16le(argv[0]);
+  if( le && le[0]=='h' && le[1]==0 && sqlite3_value_encoding(argv[0])==SQLITE_UTF16LE ) nF16++;
+  be = (const unsigned char*)sqlite3_value_text16be(argv[0]);
+  if( be && be[0]==0 && be[1]=='h' && sqlite3_value_encoding(argv[0])==SQLITE_UTF16BE ) nF16++;
+  if( sqlite3_value_bytes16(argv[0])==10 ) nF16++;
+  sqlite3_result_value(ctx, argv[0]);
+}
+
+static void test_utf16_results(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  static const unsigned short zE9[] = { 0x00e9, 0xd83d, 0xde00, 0 };
+  int i;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a INTEGER PRIMARY KEY, b VARCHAR(10), c)");
+  exec(db, "INSERT INTO t VALUES(1, 'hello', 'x'), (2, '123', 2.5), (3, NULL, x'41')");
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT b AS name, c, ' \xc3\xa9\xf0\x9f\x98\x80', 'k', 'k' || a FROM t ORDER BY a", -1, &p, 0), SQLITE_OK, db);
+  CHECK(eq16(sqlite3_column_name16(p, 0), "name"));
+  CHECK(eq16(sqlite3_column_decltype16(p, 0), "VARCHAR(10)"));
+  CHECK(sqlite3_column_decltype16(p, 1)==0);
+  CHECK_STR(sqlite3_column_name(p, 0), "name");
+  CHECK(sqlite3_column_text16(p, 0)==0); /* no row */
+  for(i=1; i<=3; i++){
+    const void *z;
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    /* The constant 'k' becomes UTF-16 on every row; 'k'||a still works. */
+    CHECK(eq16(sqlite3_column_text16(p, 3), "k"));
+    if( i==1 ){
+      z = sqlite3_column_text16(p, 0);
+      CHECK(eq16(z, "hello"));
+      CHECK(sqlite3_column_bytes16(p, 0)==10);
+      CHECK(sqlite3_column_text16(p, 0)==z);  /* cached in the value */
+      CHECK_STR(sqlite3_column_text(p, 0), "hello");
+      CHECK(sqlite3_column_bytes(p, 0)==5);
+      CHECK(eq16(sqlite3_column_text16(p, 1), "x"));
+      z = sqlite3_column_text16(p, 2);
+      CHECK(z && memcmp(z, (const unsigned short[]){ ' ', 0x00e9, 0xd83d, 0xde00, 0 }, 10)==0);
+      CHECK(sqlite3_column_bytes16(p, 2)==8);
+      CHECK_STR(sqlite3_column_text(p, 2), " \xc3\xa9\xf0\x9f\x98\x80");
+      CHECK(sqlite3_value_encoding(sqlite3_column_value(p, 2))==SQLITE_UTF8);
+    }else if( i==2 ){
+      CHECK(eq16(sqlite3_column_text16(p, 0), "123"));
+      CHECK(sqlite3_column_int(p, 0)==123);      /* read from the UTF-16 text */
+      CHECK(sqlite3_column_double(p, 0)==123.0);
+      CHECK(sqlite3_column_type(p, 0)==SQLITE_TEXT);
+      CHECK(eq16(sqlite3_column_text16(p, 1), "2.5"));
+      CHECK(sqlite3_column_bytes16(p, 1)==6);
+      CHECK(sqlite3_value_numeric_type(sqlite3_column_value(p, 0))==SQLITE_INTEGER);
+    }else{
+      CHECK(sqlite3_column_text16(p, 0)==0);
+      CHECK(sqlite3_column_bytes16(p, 0)==0);
+      CHECK(eq16(sqlite3_column_text16(p, 1), "A"));
+    }
+    {
+      char zK[8];
+      snprintf(zK, sizeof(zK), "k%d", i);
+      CHECK_STR(sqlite3_column_text(p, 4), zK);
+    }
+  }
+  CHECK_RC(sqlite3_step(p), SQLITE_DONE, db);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 4), "k1");
+  sqlite3_finalize(p);
+
+  /* Function arguments, and the values they return. */
+  CHECK_RC(sqlite3_create_function(db, "f16", 1, SQLITE_UTF8, 0, fn_utf16, 0, 0), SQLITE_OK, db);
+  nF16 = 0;
+  CHECK_STR(one(db, "SELECT f16(b) || '!' || b FROM t WHERE a=1"), "hello!hello");
+  CHECK(nF16==3);
+  {
+    sqlite3_value *v;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT ?1, typeof(?1), length(?1)", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_bind_text16(p, 1, zE9, -1, SQLITE_STATIC), SQLITE_OK, db);
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    CHECK(sqlite3_column_bytes16(p, 0)==6);
+    v = sqlite3_value_dup(sqlite3_column_value(p, 0));
+    CHECK(v && sqlite3_value_encoding(v)!=SQLITE_UTF8);
+    sqlite3_finalize(p);
+    /* Binding a UTF-16 value converts it. */
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT ?1, length(?1), hex(?1)", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_bind_value(p, 1, v), SQLITE_OK, db);
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    CHECK_STR(sqlite3_column_text(p, 0), "\xc3\xa9\xf0\x9f\x98\x80");
+    CHECK(sqlite3_column_int(p, 1)==2);
+    CHECK_STR(sqlite3_column_text(p, 2), "C3A9F09F9880");
+    sqlite3_finalize(p);
+    sqlite3_value_free(v);
+  }
+  /* EXPLAIN's column names. */
+  CHECK_RC(sqlite3_prepare_v2(db, "EXPLAIN SELECT 1", -1, &p, 0), SQLITE_OK, db);
+  CHECK(eq16(sqlite3_column_name16(p, 1), "opcode"));
+  CHECK(sqlite3_column_decltype16(p, 1)==0);
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "EXPLAIN QUERY PLAN SELECT 1", -1, &p, 0), SQLITE_OK, db);
+  CHECK(eq16(sqlite3_column_name16(p, 3), "detail"));
+  CHECK(sqlite3_column_name16(p, 4)==0);
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
+static void test_column_metadata(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT, c);"
+           "CREATE TABLE r(x);"
+           "CREATE VIEW v AS SELECT b AS bb, c+1 AS cc FROM t;"
+           "CREATE TEMP TABLE tt(z);"
+           "INSERT INTO t VALUES(1, 'one', 2)");
+  CHECK_RC(sqlite3_prepare_v2(db,
+      "SELECT id, b AS bee, c+1, r.rowid, (SELECT b FROM t), v.bb, v.cc, tt.z, s.q "
+      "FROM t, v LEFT JOIN r LEFT JOIN tt LEFT JOIN (SELECT b AS q FROM t) AS s", -1, &p, 0), SQLITE_OK, db);
+  /* Before the first step, as in SQLite. */
+  CHECK_STR(sqlite3_column_database_name(p, 0), "main");
+  CHECK_STR(sqlite3_column_table_name(p, 0), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 0), "id");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_origin_name(p, 1), "b");
+  CHECK_STR(sqlite3_column_name(p, 1), "bee");
+  CHECK(sqlite3_column_table_name(p, 2)==0);
+  CHECK(sqlite3_column_origin_name(p, 2)==0);
+  CHECK_STR(sqlite3_column_table_name(p, 3), "r");
+  CHECK_STR(sqlite3_column_origin_name(p, 3), "rowid");
+  CHECK_STR(sqlite3_column_table_name(p, 4), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 4), "b");
+  CHECK_STR(sqlite3_column_table_name(p, 5), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 5), "b");
+  CHECK(sqlite3_column_table_name(p, 6)==0);
+  CHECK_STR(sqlite3_column_database_name(p, 7), "temp");
+  CHECK_STR(sqlite3_column_table_name(p, 7), "tt");
+  CHECK_STR(sqlite3_column_origin_name(p, 8), "b");
+  CHECK(sqlite3_column_table_name(p, 9)==0);
+  CHECK(sqlite3_column_table_name(p, -1)==0);
+  CHECK(eq16(sqlite3_column_database_name16(p, 0), "main"));
+  CHECK(eq16(sqlite3_column_table_name16(p, 1), "t"));
+  CHECK(eq16(sqlite3_column_origin_name16(p, 1), "b"));
+  CHECK_STR(sqlite3_column_text(p, 1), "one");
+  CHECK_STR(sqlite3_column_decltype(p, 0), "INTEGER");
+  /* The error state of the connection is not touched. */
+  CHECK(sqlite3_errcode(db)==SQLITE_ROW);
+  sqlite3_finalize(p);
+  /* Consistent with sqlite3_table_column_metadata(). */
+  {
+    const char *zType = 0, *zColl = 0;
+    int notNull = 0, pk = 0, autoinc = 0;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT c FROM t", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_table_column_metadata(db, sqlite3_column_database_name(p, 0),
+        sqlite3_column_table_name(p, 0), sqlite3_column_origin_name(p, 0),
+        &zType, &zColl, &notNull, &pk, &autoinc), SQLITE_OK, db);
+    CHECK(zType==0 || zType[0]==0 || sqlite3_column_decltype(p, 0)==0);
+    CHECK(pk==0);
+    sqlite3_finalize(p);
+  }
+  /* Not a SELECT. */
+  CHECK_RC(sqlite3_prepare_v2(db, "PRAGMA table_info(t)", -1, &p, 0), SQLITE_OK, db);
+  CHECK(sqlite3_column_table_name(p, 0)==0);
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "INSERT INTO t(b) VALUES('x') RETURNING b, id", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_column_table_name(p, 0), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 1), "id");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  sqlite3_finalize(p);
+  /* After a schema change, the statement is recompiled. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM r", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_column_origin_name(p, 0), "x");
+  exec(db, "DROP TABLE r; CREATE TABLE r(y)");
+  CHECK_RC(sqlite3_step(p), SQLITE_DONE, db);
+  CHECK_STR(sqlite3_column_origin_name(p, 0), "y");
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
+static void test_normalized_sql(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a, b, c)");
+  CHECK_RC(sqlite3_prepare_v2(db, "select a, 'x', 12, 1.5, x'00', ?1 from T where b in (1,2,3) and c is null -- c", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_normalized_sql(p), "SELECT a,?,?,?,?,?FROM t WHERE b IN(?,?,?)AND c IS NULL;");
+  CHECK(sqlite3_normalized_sql(p)==sqlite3_normalized_sql(p));
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT \"zz\", \"A\", [b] FROM t /* x */ WHERE a NOT NULL;", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_normalized_sql(p), "SELECT?,a,b FROM t WHERE a NOT NULL;");
+  sqlite3_finalize(p);
+  CHECK(sqlite3_normalized_sql(0)==0);
+  sqlite3_close(db);
+}
+
+static void test_stmt_explain(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  int n = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES(1, 'x')");
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT b FROM t WHERE a=?", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_int(p, 1, 1), SQLITE_OK, db);
+  CHECK(sqlite3_stmt_isexplain(p)==0);
+  CHECK_RC(sqlite3_stmt_explain(p, 2), SQLITE_OK, db);
+  CHECK(sqlite3_stmt_isexplain(p)==2);
+  CHECK(sqlite3_column_count(p)==4);
+  CHECK_STR(sqlite3_column_name(p, 3), "detail");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 3), "SEARCH t USING INTEGER PRIMARY KEY (rowid=?)");
+  CHECK_RC(sqlite3_stmt_explain(p, 1), SQLITE_BUSY, db);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 1), SQLITE_OK, db);
+  CHECK(sqlite3_column_count(p)==8);
+  CHECK_STR(sqlite3_column_name(p, 1), "opcode");
+  while( sqlite3_step(p)==SQLITE_ROW ){
+    if( strcmp((const char*)sqlite3_column_text(p, 1), "ResultRow")==0 ) n++;
+  }
+  CHECK(n==1);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 0), SQLITE_OK, db);
+  CHECK(sqlite3_column_count(p)==1);
+  CHECK_STR(sqlite3_column_name(p, 0), "b");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);   /* the binding was kept */
+  CHECK_STR(sqlite3_column_text(p, 0), "x");
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 3), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 0), SQLITE_OK, db);
+  sqlite3_finalize(p);
+  /* A statement prepared as EXPLAIN runs its program normally. */
+  CHECK_RC(sqlite3_prepare_v2(db, "EXPLAIN SELECT a FROM t", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 0), SQLITE_OK, db);
+  CHECK(sqlite3_column_count(p)==1);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK(sqlite3_column_int(p, 0)==1);
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
+static void fn_intreal(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  (void)argc;
+  sqlite3_result_int(ctx, sqlite3_value_int(argv[0]));
+  sqlite3_test_control(SQLITE_TESTCTRL_RESULT_INTREAL, ctx);
+}
+
+#include <time.h>
+
+/* An xAltLocaltime for SQLITE_TESTCTRL_LOCALTIME_FAULT: 2000-01-02. */
+static int alt_localtime(const void *t, void *pTm){
+  struct tm *p = (struct tm*)pTm;
+  (void)t;
+  memset(p, 0, sizeof(*p));
+  p->tm_mday = 2;
+  p->tm_year = 100;
+  return 0;
+}
+
+static void test_test_control(void){
+  sqlite3 *db = 0;
+  unsigned char a[16], b[16];
+  int n = 0, i1 = 0, i2 = 0;
+  sqlite3_uint64 u = 0;
+  double r = 0;
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ISINIT)==SQLITE_OK);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_BYTEORDER)==123410
+     || sqlite3_test_control(SQLITE_TESTCTRL_BYTEORDER)==432101);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_PENDING_BYTE, 0)==0x40000000);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ALWAYS, 5)==5);
+
+  /* The PRNG: save and restore, and a fixed seed. */
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SAVE);
+  sqlite3_randomness(sizeof(a), a);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_RESTORE);
+  sqlite3_randomness(sizeof(b), b);
+  CHECK(memcmp(a, b, sizeof(a))==0);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SEED, 1234, (sqlite3*)0);
+  sqlite3_randomness(sizeof(a), a);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SEED, 1234, (sqlite3*)0);
+  sqlite3_randomness(sizeof(b), b);
+  CHECK(memcmp(a, b, sizeof(a))==0);
+  sqlite3_test_control(SQLITE_TESTCTRL_PRNG_SEED, 0, (sqlite3*)0);
+  sqlite3_randomness(sizeof(b), b);
+  CHECK(memcmp(a, b, sizeof(a))!=0);
+
+  sqlite3_test_control(SQLITE_TESTCTRL_LOGEST, 1000.0, &i1, &u, &i2);
+  CHECK(i1==99 && u==960 && i2==99);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ATOF, "1.5e3", &r)==3 && r==1500.0);
+  CHECK(sqlite3_test_control(SQLITE_TESTCTRL_ATOF, "12x", &r)<=0 && r==12.0);
+
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  /* Optimizations. */
+  sqlite3_test_control(SQLITE_TESTCTRL_GETOPT, db, &n);
+  CHECK(n==0);
+  sqlite3_test_control(SQLITE_TESTCTRL_OPTIMIZATIONS, db, 0xffffffff);
+  sqlite3_test_control(SQLITE_TESTCTRL_GETOPT, db, &n);
+  CHECK(n==-1);
+  sqlite3_test_control(SQLITE_TESTCTRL_OPTIMIZATIONS, db, 0);
+  /* Internal functions. */
+  CHECK_STR(one(db, "SELECT sqlite_rename_quotefix('main', 'SELECT 1')"), "ERROR: no such function: sqlite_rename_quotefix");
+  sqlite3_test_control(SQLITE_TESTCTRL_INTERNAL_FUNCTIONS, db);
+  CHECK(strncmp(one(db, "SELECT sqlite_rename_quotefix('main', 'SELECT 1')"), "ERROR: no such function", 23)!=0);
+  sqlite3_test_control(SQLITE_TESTCTRL_INTERNAL_FUNCTIONS, db);
+  /* localtime() failing, or replaced. */
+  sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, 1);
+  CHECK_STR(one(db, "SELECT datetime(0, 'unixepoch', 'localtime')"), "ERROR: local time unavailable");
+  sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, 2, alt_localtime);
+  CHECK_STR(one(db, "SELECT date(0, 'unixepoch', 'localtime')"), "2000-01-02");
+  sqlite3_test_control(SQLITE_TESTCTRL_LOCALTIME_FAULT, 0);
+  CHECK(strncmp(one(db, "SELECT datetime(0, 'unixepoch', 'localtime')"), "19", 2)==0);
+  /* An integer result shown as a real. */
+  CHECK_RC(sqlite3_create_function(db, "intreal", 1, SQLITE_UTF8, 0, fn_intreal, 0, 0), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT typeof(intreal(5)) || ' ' || intreal(5)"), "real 5.0");
+  /* FK_NO_ACTION. */
+  exec(db, "PRAGMA foreign_keys=ON; CREATE TABLE p(id PRIMARY KEY); CREATE TABLE c(x REFERENCES p ON DELETE CASCADE);"
+           "INSERT INTO p VALUES(1); INSERT INTO c VALUES(1)");
+  sqlite3_test_control(SQLITE_TESTCTRL_FK_NO_ACTION, db, 1);
+  CHECK_STR(one(db, "DELETE FROM p"), "ERROR: FOREIGN KEY constraint failed");
+  sqlite3_test_control(SQLITE_TESTCTRL_FK_NO_ACTION, db, 0);
+  exec(db, "DELETE FROM p");
+  CHECK_STR(one(db, "SELECT count(*) FROM c"), "0");
+  /* An imposter table over an index, as the shell's .imposter makes. */
+  exec(db, "CREATE TABLE t(a, b); CREATE INDEX i ON t(b); INSERT INTO t VALUES(1, 'x'), (2, 'y')");
+  {
+    int iRoot = atoi(one(db, "SELECT rootpage FROM sqlite_schema WHERE name='i'"));
+    sqlite3_test_control(SQLITE_TESTCTRL_IMPOSTER, db, "main", 1, iRoot);
+    exec(db, "CREATE TABLE imp(b, r, PRIMARY KEY(b, r)) WITHOUT ROWID");
+    sqlite3_test_control(SQLITE_TESTCTRL_IMPOSTER, db, "main", 0, 0);
+    CHECK_STR(one(db, "SELECT group_concat(b || r) FROM imp"), "x1,y2");
+  }
+  sqlite3_close(db);
+}
+
+static void test_temp_directory(const char *zDir){
+  sqlite3 *db = 0;
+  char zSub[600];
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK_STR(one(db, "PRAGMA temp_store_directory"), "");  /* no row */
+  sqlite3_temp_directory = sqlite3_mprintf("%s", zDir);
+  CHECK_STR(one(db, "PRAGMA temp_store_directory"), zDir);
+  snprintf(zSub, sizeof(zSub), "PRAGMA temp_store_directory='%s/nosuchdir'", zDir);
+  CHECK_STR(one(db, zSub), "ERROR: not a writable directory");
+  CHECK_STR(sqlite3_temp_directory, zDir);
+  /* Temporary files go there: a temp table on file, a big sort. */
+  exec(db, "PRAGMA temp_store=FILE; CREATE TEMP TABLE tt(x); INSERT INTO tt VALUES(randomblob(100000))");
+  CHECK_STR(one(db, "SELECT length(x) FROM tt"), "100000");
+  snprintf(zSub, sizeof(zSub), "PRAGMA temp_store_directory=''");
+  CHECK_STR(one(db, zSub), "");
+  CHECK(sqlite3_temp_directory==0);
+  sqlite3_close(db);
+  /* data_directory is Windows-only, in SQLite as here. */
+  CHECK(sqlite3_data_directory==0);
+}
+
+static void test_scanstatus(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  sqlite3_int64 n = 0;
+  double est = 0;
+  const char *z = 0;
+  int i = 0, on = -1;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a INTEGER PRIMARY KEY, b, c); CREATE INDEX tb ON t(b); CREATE TABLE u(x, y);"
+           "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<100) INSERT INTO t SELECT i, i%10, i FROM s;"
+           "INSERT INTO u SELECT a, b FROM t WHERE a<=20");
+  /* Off by default: no entries (and the same bytecode as without). */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM t WHERE b>5", -1, &p, 0), SQLITE_OK, db);
+  while( sqlite3_step(p)==SQLITE_ROW ){}
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NLOOP, &n)==1);
+  sqlite3_finalize(p);
+
+  CHECK_RC(sqlite3_db_config(db, SQLITE_DBCONFIG_STMT_SCANSTATUS, 1, &on), SQLITE_OK, db);
+  CHECK(on==1);
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM t WHERE b>5 ORDER BY c", -1, &p, 0), SQLITE_OK, db);
+  while( sqlite3_step(p)==SQLITE_ROW ) i++;
+  CHECK(i==40);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NLOOP, &n)==0 && n==1);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NVISIT, &n)==0 && n==40);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NAME, &z)==0);
+  CHECK_STR(z, "tb");
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_EXPLAIN, &z)==0);
+  CHECK_STR(z, "SEARCH t USING INDEX tb (b>?)");
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_EST, &est)==0 && est>0);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NCYCLE, &n)==0 && n>=0);
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NLOOP, &n)==1);   /* loops only */
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_EXPLAIN, SQLITE_SCANSTAT_COMPLEX, &z)==0);
+  CHECK_STR(z, "USE TEMP B-TREE FOR ORDER BY");
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_NVISIT, SQLITE_SCANSTAT_COMPLEX, &n)==0 && n==40);
+  CHECK(sqlite3_stmt_scanstatus_v2(p, -1, SQLITE_SCANSTAT_NCYCLE, 0, &n)==0 && n>=0);
+  sqlite3_stmt_scanstatus_reset(p);
+  CHECK(sqlite3_stmt_scanstatus(p, 0, SQLITE_SCANSTAT_NVISIT, &n)==0 && n==0);
+  sqlite3_finalize(p);
+
+  /* An automatic index, with its Bloom filter. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM u, t WHERE u.y = t.c", -1, &p, 0), SQLITE_OK, db);
+  i = 0;
+  while( sqlite3_step(p)==SQLITE_ROW ) i++;
+  CHECK(i==18);
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_EXPLAIN, SQLITE_SCANSTAT_COMPLEX, &z)==0);
+  CHECK_STR(z, "CREATE AUTOMATIC INDEX ON t(c, b)");
+  CHECK(sqlite3_stmt_scanstatus_v2(p, 1, SQLITE_SCANSTAT_NVISIT, SQLITE_SCANSTAT_COMPLEX, &n)==0 && n==100);
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NAME, &z)==0);
+  CHECK_STR(z, "auto-index");
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NLOOP, &n)==0 && n==20);
+  CHECK(sqlite3_stmt_scanstatus(p, 1, SQLITE_SCANSTAT_NVISIT, &n)==0 && n==18);
+  sqlite3_finalize(p);
+  /* The bytecode virtual table shows the counts. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM u", -1, &p, 0), SQLITE_OK, db);
+  while( sqlite3_step(p)==SQLITE_ROW ){}
+  {
+    sqlite3_stmt *q = 0;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT max(nexec) FROM bytecode(?1)", -1, &q, 0), SQLITE_OK, db);
+    sqlite3_bind_pointer(q, 1, p, "stmt-pointer", 0);
+    CHECK(sqlite3_step(q)==SQLITE_ROW && sqlite3_column_int(q, 0)==20);
+    sqlite3_finalize(q);
+  }
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
+#include <pthread.h>
+
+/* Threads sharing one serialized connection. */
+#define N_THREAD 4
+#define N_ROW 300
+static void *thread_main(void *pArg){
+  sqlite3 *db = (sqlite3*)pArg;
+  int i;
+  for(i=0; i<N_ROW; i++){
+    sqlite3_stmt *p = 0;
+    if( sqlite3_prepare_v2(db, "INSERT INTO t(x) VALUES(?)", -1, &p, 0)!=SQLITE_OK ) return (void*)1;
+    sqlite3_bind_int(p, 1, i);
+    if( sqlite3_step(p)!=SQLITE_DONE ){ sqlite3_finalize(p); return (void*)2; }
+    sqlite3_finalize(p);
+    if( sqlite3_prepare_v2(db, "SELECT count(*), sum(x) FROM t", -1, &p, 0)!=SQLITE_OK ) return (void*)3;
+    if( sqlite3_step(p)!=SQLITE_ROW || sqlite3_column_int(p, 0)<1 ){ sqlite3_finalize(p); return (void*)4; }
+    sqlite3_finalize(p);
+  }
+  return 0;
+}
+
+static void test_threads(void){
+  sqlite3 *db = 0;
+  pthread_t aThread[N_THREAD];
+  int i;
+  sqlite3_mutex *m;
+  /* Multi-thread mode by default: no connection mutex. */
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK(sqlite3_db_mutex(db)==0);
+  sqlite3_close(db);
+  CHECK_RC(sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_NOMUTEX, 0), SQLITE_OK, db);
+  CHECK(sqlite3_db_mutex(db)==0);
+  sqlite3_close(db);
+  /* After sqlite3_initialize(), the mode can no longer change. */
+  CHECK(sqlite3_config(SQLITE_CONFIG_SERIALIZED)==SQLITE_MISUSE);
+
+  CHECK_RC(sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_FULLMUTEX, 0), SQLITE_OK, db);
+  m = sqlite3_db_mutex(db);
+  CHECK(m!=0);
+  /* The mutex is recursive and the application may hold it. */
+  sqlite3_mutex_enter(m);
+  CHECK(sqlite3_mutex_held(m));
+  CHECK_STR(one(db, "SELECT 1"), "1");
+  sqlite3_mutex_leave(m);
+  exec(db, "CREATE TABLE t(x)");
+  for(i=0; i<N_THREAD; i++) CHECK(pthread_create(&aThread[i], 0, thread_main, db)==0);
+  for(i=0; i<N_THREAD; i++){
+    void *pRet = 0;
+    pthread_join(aThread[i], &pRet);
+    CHECK(pRet==0);
+  }
+  {
+    char zExpect[64];
+    snprintf(zExpect, sizeof(zExpect), "%d", N_THREAD*N_ROW);
+    CHECK_STR(one(db, "SELECT count(*) FROM t"), zExpect);
+  }
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
+}
+
+/* ======================================================== end of group C */
+
+/* ============================================================ group B
+** Storage and memory: serialize/deserialize and memdb, snapshots,
+** incremental blob I/O, memory accounting, loadable extensions, carray,
+** C VFS filenames. Each test_b_* function belongs to one topic.
+*/
+
+static void test_b_memdb(const char *zDir){
+  sqlite3 *db = 0, *db2 = 0, *db3 = 0;
+  sqlite3_int64 sz = 0, lim;
+  unsigned char *p, *q;
+  char zPath[512], *zName = 0;
+  sqlite3_vfs *pMem = sqlite3_vfs_find("memdb");
+  CHECK(pMem!=0 && strcmp(pMem->zName, "memdb")==0);
+
+  /* sqlite3_serialize() of an ordinary database, through its pager. */
+  snprintf(zPath, sizeof(zPath), "%s/ser.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  p = sqlite3_serialize(db, "main", &sz, 0);
+  CHECK(p!=0 && sz==4096);         /* an empty file gets its first page */
+  sqlite3_free(p);
+  exec(db, "CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3)");
+  p = sqlite3_serialize(db, 0, &sz, 0);
+  CHECK(p!=0 && sz==8192 && memcmp(p, "SQLite format 3", 16)==0);
+  CHECK(sqlite3_serialize(db, "main", &lim, SQLITE_SERIALIZE_NOCOPY)==0 && lim==8192);
+  CHECK(sqlite3_serialize(db, "nosuch", &lim, 0)==0 && lim==-1);
+
+  /* sqlite3_deserialize() into another connection's main. */
+  CHECK_RC(sqlite3_open(":memory:", &db2), SQLITE_OK, db2);
+  q = sqlite3_malloc64(sz);
+  memcpy(q, p, sz);
+  CHECK_RC(sqlite3_deserialize(db2, "main", q, sz, sz, SQLITE_DESERIALIZE_FREEONCLOSE|SQLITE_DESERIALIZE_RESIZEABLE), SQLITE_OK, db2);
+  CHECK_STR(one(db2, "SELECT sum(x) FROM t"), "6");
+  CHECK_STR(one(db2, "PRAGMA journal_mode"), "memory");
+  CHECK_STR(one(db2, "PRAGMA journal_mode=wal"), "memory");
+  CHECK_STR(one(db2, "SELECT file FROM pragma_database_list WHERE name='main'"), "");
+  CHECK_STR(sqlite3_db_filename(db2, "main"), "");
+  exec(db2, "INSERT INTO t SELECT x+3 FROM t; BEGIN; DELETE FROM t; ROLLBACK");
+  CHECK_STR(one(db2, "SELECT sum(x) FROM t"), "21");
+  exec(db2, "CREATE TABLE big(b); INSERT INTO big VALUES(zeroblob(20000))");
+  q = sqlite3_serialize(db2, 0, &sz, SQLITE_SERIALIZE_NOCOPY);
+  CHECK(q!=0 && sz>20000);
+  CHECK(sqlite3_serialize(db2, 0, 0, SQLITE_SERIALIZE_NOCOPY)==q);
+  CHECK_RC(sqlite3_file_control(db2, "main", SQLITE_FCNTL_VFSNAME, &zName), SQLITE_OK, db2);
+  CHECK(zName!=0 && strncmp(zName, "memdb(", 6)==0);
+  sqlite3_free(zName);
+
+  /* SQLITE_FCNTL_SIZE_LIMIT: a negative limit asks, a smaller one is
+  ** raised to the size. */
+  lim = -1;
+  CHECK_RC(sqlite3_file_control(db2, "main", SQLITE_FCNTL_SIZE_LIMIT, &lim), SQLITE_OK, db2);
+  CHECK(lim==1073741824);
+  lim = 1;
+  CHECK_RC(sqlite3_file_control(db2, "main", SQLITE_FCNTL_SIZE_LIMIT, &lim), SQLITE_OK, db2);
+  CHECK(lim==sz);
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO big VALUES(zeroblob(1000000))", 0, 0, 0), SQLITE_FULL, db2);
+  CHECK_STR(one(db2, "SELECT count(*) FROM big"), "1");
+
+  /* Errors: TEMP, a database that does not exist, an open transaction. */
+  CHECK_RC(sqlite3_deserialize(db2, "temp", 0, 0, 0, 0), SQLITE_ERROR, 0);
+  CHECK_RC(sqlite3_deserialize(db2, "nosuch", 0, 0, 0, 0), SQLITE_ERROR, 0);
+  exec(db2, "BEGIN; SELECT * FROM t");
+  CHECK_RC(sqlite3_deserialize(db2, "main", 0, 0, 0, 0), SQLITE_BUSY, 0);
+  exec(db2, "COMMIT");
+
+  /* A read-only image, into an attached database. */
+  exec(db2, "ATTACH ':memory:' AS aux");
+  CHECK_RC(sqlite3_deserialize(db2, "aux", p, 8192, 8192, SQLITE_DESERIALIZE_READONLY), SQLITE_OK, db2);
+  CHECK_STR(one(db2, "SELECT sum(x) FROM aux.t"), "6");
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO aux.t VALUES(4)", 0, 0, 0), SQLITE_READONLY, db2);
+  exec(db2, "DETACH aux");
+
+  /* A fixed-size image (no RESIZEABLE) fills up. */
+  q = sqlite3_malloc64(8192);
+  memcpy(q, p, 8192);
+  CHECK_RC(sqlite3_deserialize(db2, 0, q, 8192, 8192, SQLITE_DESERIALIZE_FREEONCLOSE), SQLITE_OK, db2);
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO t VALUES(zeroblob(10000))", 0, 0, 0), SQLITE_FULL, db2);
+  CHECK_STR(one(db2, "SELECT count(*) FROM t"), "3");
+  sqlite3_free(p);
+  sqlite3_close(db2);
+  sqlite3_close(db);
+
+  /* A shared memdb database: "/name" with vfs=memdb. */
+  CHECK_RC(sqlite3_open_v2("file:/xq-shared?vfs=memdb", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_open_v2("file:/xq-shared?vfs=memdb", &db2, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db2);
+  CHECK_RC(sqlite3_open_v2("file:xq-private?vfs=memdb", &db3, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db3);
+  exec(db, "CREATE TABLE s(x); INSERT INTO s VALUES(42)");
+  CHECK_STR(one(db2, "SELECT x FROM s"), "42");
+  CHECK_STR(one(db3, "SELECT count(*) FROM sqlite_schema"), "0");
+  CHECK_STR(one(db, "PRAGMA journal_mode"), "memory");
+  exec(db, "BEGIN; INSERT INTO s VALUES(43)");
+  CHECK_RC(sqlite3_exec(db2, "INSERT INTO s VALUES(44)", 0, 0, 0), SQLITE_BUSY, db2);
+  exec(db, "COMMIT");
+  p = sqlite3_serialize(db2, 0, &sz, 0);
+  CHECK(p!=0 && sz==8192);
+  sqlite3_free(p);
+  sqlite3_close(db);
+  sqlite3_close(db2);
+  sqlite3_close(db3);
+  CHECK_RC(sqlite3_open_v2("file:/xq-shared?vfs=memdb", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM sqlite_schema"), "0");
+  sqlite3_close(db);
+}
+
+static int nBlobUpdates = 0;
+static void blob_update_hook(void *p, int op, const char *zDb, const char *zTab, sqlite3_int64 rowid){
+  (void)p; (void)op; (void)zDb; (void)zTab; (void)rowid;
+  nBlobUpdates++;
+}
+
+static void test_b_blob(const char *zDir){
+  sqlite3 *db = 0;
+  sqlite3_blob *pBlob = 0;
+  char zPath[512];
+  char buf[64];
+  unsigned char *big;
+  int i, nBig = 10000, nTotal;
+  snprintf(zPath, sizeof(zPath), "%s/blob.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  exec(db, "PRAGMA page_size=1024;"
+           "CREATE TABLE t(id INTEGER PRIMARY KEY, a BLOB, b TEXT, c INT, d REAL, e, f UNIQUE);"
+           "CREATE INDEX t_c ON t(c);"
+           "INSERT INTO t VALUES(1, x'00112233', 'hello', 7, 1.5, NULL, 1);"
+           "INSERT INTO t VALUES(2, zeroblob(10000), 'world', 8, 2.5, NULL, 2);"
+           "CREATE TABLE w(k PRIMARY KEY, v) WITHOUT ROWID;"
+           "CREATE VIEW vw AS SELECT * FROM t;"
+           "CREATE TABLE g(x, y AS (x+1));"
+           "CREATE TABLE trg_log(n); CREATE TRIGGER tr AFTER UPDATE ON t BEGIN INSERT INTO trg_log VALUES(1); END;");
+
+  /* Error messages of sqlite3_blob_open(). */
+  CHECK_RC(sqlite3_blob_open(db, "main", "nosuch", "a", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such table: main.nosuch");
+  CHECK(pBlob==0);
+  CHECK_RC(sqlite3_blob_open(db, 0, "nosuch", "a", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such table: nosuch");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "zz", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such column: \"zz\"");
+  CHECK_RC(sqlite3_blob_open(db, "main", "w", "v", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open table without rowid: w");
+  CHECK_RC(sqlite3_blob_open(db, "main", "vw", "a", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open view: vw");
+  CHECK_RC(sqlite3_blob_open(db, "main", "g", "x", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open table with generated columns: g");
+  CHECK_RC(sqlite3_blob_open(db, "main", "pragma_table_list", "name", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open virtual table: pragma_table_list");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "c", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open indexed column for writing");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "f", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open indexed column for writing");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 99, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such rowid: 99");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "d", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open value of type real");
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "e", 1, 0, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open value of type null");
+  CHECK(pBlob==0);
+  exec(db, "CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE ch(x REFERENCES p(id), y BLOB)");
+  exec(db, "INSERT INTO ch VALUES(NULL, x'01')");
+  CHECK_RC(sqlite3_blob_open(db, "main", "ch", "x", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open value of type null");
+  exec(db, "PRAGMA foreign_keys=ON");
+  CHECK_RC(sqlite3_blob_open(db, "main", "ch", "x", 1, 1, &pBlob), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "cannot open foreign key column for writing");
+  exec(db, "PRAGMA foreign_keys=OFF");
+
+  /* Text and read-only handles. */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "b", 1, 0, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==5);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 5, 0), SQLITE_OK, db);
+  CHECK(memcmp(buf, "hello", 5)==0);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 2, 4), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, -1, 0), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 1, -1), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_write(pBlob, "x", 1, 0), SQLITE_READONLY, db);
+  CHECK_RC(sqlite3_blob_reopen(pBlob, 2), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==5);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 5, 0), SQLITE_OK, db);
+  CHECK(memcmp(buf, "world", 5)==0);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  /* Writes go to the row: no trigger, update hook or change count. */
+  sqlite3_update_hook(db, blob_update_hook, 0);
+  exec(db, "DELETE FROM trg_log");
+  nTotal = sqlite3_total_changes(db);
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==4);
+  CHECK_RC(sqlite3_blob_write(pBlob, "\x44\x55", 2, 1), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 4, 0), SQLITE_OK, db);
+  CHECK(memcmp(buf, "\x00\x44\x55\x33", 4)==0);
+  CHECK_RC(sqlite3_blob_write(pBlob, "abc", 3, 2), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  CHECK(nBlobUpdates==0);
+  CHECK(sqlite3_changes(db)==0);
+  CHECK(sqlite3_total_changes(db)==nTotal);
+  CHECK_STR(one(db, "SELECT count(*) FROM trg_log"), "0");
+  CHECK_STR(one(db, "SELECT hex(a) FROM t WHERE id=1"), "00445533");
+
+  /* A blob over several overflow pages. */
+  big = malloc(nBig);
+  for(i=0; i<nBig; i++) big[i] = (unsigned char)(i*7);
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 2, 1, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==nBig);
+  for(i=0; i<nBig; i+=1000){
+    CHECK_RC(sqlite3_blob_write(pBlob, big+i, 1000, i), SQLITE_OK, db);
+  }
+  memset(buf, 0, sizeof(buf));
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 20, 4990), SQLITE_OK, db);
+  CHECK(memcmp(buf, big+4990, 20)==0);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  {
+    sqlite3_stmt *p = 0;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT a FROM t WHERE id=2", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    CHECK(sqlite3_column_bytes(p, 0)==nBig && memcmp(sqlite3_column_blob(p, 0), big, nBig)==0);
+    sqlite3_finalize(p);
+  }
+  free(big);
+
+  /* The handle expires when its row changes. */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 0, &pBlob), SQLITE_OK, db);
+  exec(db, "UPDATE t SET c = 9 WHERE id = 2");
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 4, 0), SQLITE_OK, db);
+  exec(db, "UPDATE t SET c = 10 WHERE id = 1");
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 4, 0), SQLITE_ABORT, db);
+  CHECK(sqlite3_blob_bytes(pBlob)==0);
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 0, 0), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_reopen(pBlob, 1), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 2, 1, &pBlob), SQLITE_OK, db);
+  exec(db, "DELETE FROM t WHERE id = 2");
+  CHECK_RC(sqlite3_blob_write(pBlob, "z", 1, 0), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  /* reopen() to a row that is not there invalidates the handle. */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 0, &pBlob), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_reopen(pBlob, 2), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such rowid: 2");
+  CHECK_RC(sqlite3_blob_read(pBlob, buf, 1, 0), SQLITE_ABORT, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+
+  /* An open handle holds a statement (and its transaction). */
+  CHECK_RC(sqlite3_blob_open(db, "main", "t", "a", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_next_stmt(db, 0)!=0);
+  CHECK(sqlite3_get_autocommit(db)==1);
+  CHECK(sqlite3_txn_state(db, "main")==SQLITE_TXN_WRITE);
+  CHECK_RC(sqlite3_close(db), SQLITE_BUSY, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  CHECK(sqlite3_txn_state(db, "main")==SQLITE_TXN_NONE);
+  CHECK(sqlite3_next_stmt(db, 0)==0);
+
+  /* A blob in a TEMP table, and blob handles inside a transaction. */
+  exec(db, "CREATE TEMP TABLE tt(x); INSERT INTO tt VALUES(x'0102')");
+  CHECK_RC(sqlite3_blob_open(db, "temp", "tt", "x", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_write(pBlob, "\x09", 1, 1), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT hex(x) FROM tt"), "0109");
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_blob_open(db, 0, "t", "a", 1, 1, &pBlob), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_write(pBlob, "\x77", 1, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_blob_close(pBlob), SQLITE_OK, db);
+  exec(db, "ROLLBACK");
+  CHECK_STR(one(db, "SELECT hex(a) FROM t WHERE id=1"), "00445533");
+  sqlite3_update_hook(db, 0, 0);
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
+  CHECK_RC(sqlite3_blob_close(0), SQLITE_OK, 0);
+}
+
+static sqlite3_int64 dbStat(sqlite3 *db, int op, int reset){
+  sqlite3_int64 cur = -1, hi = -1;
+  CHECK_RC(sqlite3_db_status64(db, op, &cur, &hi, reset), SQLITE_OK, db);
+  return cur;
+}
+
+static void test_b_status(const char *zDir){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  sqlite3_int64 cur = -1, hi = -1, before;
+  int c32 = -1, h32 = -1;
+  char zPath[512];
+  void *pMem;
+
+  /* The memory counters (SQLITE_CONFIG_MEMSTATUS is on by default). */
+  before = sqlite3_memory_used();
+  CHECK(before>0);
+  pMem = sqlite3_malloc(100000);
+  CHECK(sqlite3_memory_used()>=before+100000);
+  CHECK(sqlite3_memory_highwater(0)>=before+100000);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_MALLOC_SIZE, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(hi>=100000);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_MALLOC_COUNT, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(cur>0 && hi>=cur);
+  sqlite3_free(pMem);
+  CHECK(sqlite3_memory_used()<before+100000);
+  CHECK(sqlite3_memory_highwater(1)>=before+100000);
+  CHECK(sqlite3_memory_highwater(0)<before+100000);
+  CHECK_RC(sqlite3_status(SQLITE_STATUS_MEMORY_USED, &c32, &h32, 0), SQLITE_OK, 0);
+  CHECK(c32>0 && h32>=c32);
+  CHECK_RC(sqlite3_status64(10, &cur, &hi, 0), SQLITE_MISUSE, 0);
+  CHECK_RC(sqlite3_status64(-1, &cur, &hi, 0), SQLITE_MISUSE, 0);
+  CHECK_RC(sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0), SQLITE_MISUSE, 0);
+
+  /* The page cache: every page is an overflow page without
+  ** SQLITE_CONFIG_PAGECACHE. */
+  snprintf(zPath, sizeof(zPath), "%s/status.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(x); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<2000) INSERT INTO t SELECT randomblob(1000) FROM c");
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_PAGECACHE_OVERFLOW, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(cur>0 && hi>=cur);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_PAGECACHE_SIZE, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(hi>=4096);
+  CHECK_RC(sqlite3_status64(SQLITE_STATUS_PAGECACHE_USED, &cur, &hi, 0), SQLITE_OK, 0);
+  CHECK(cur==0);
+
+  /* The connection's cache counters. */
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_USED, 0)>400*4096);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_USED_SHARED, 0)==dbStat(db, SQLITE_DBSTATUS_CACHE_USED, 0));
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_WRITE, 1)>=500);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_WRITE, 0)==0);
+  dbStat(db, SQLITE_DBSTATUS_CACHE_HIT, 1);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "2000");
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_HIT, 0)>0);
+  sqlite3_close(db);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "2000");
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_MISS, 0)>=500);
+  exec(db, "PRAGMA cache_size=10; BEGIN; UPDATE t SET x = randomblob(1000)");
+  CHECK(dbStat(db, SQLITE_DBSTATUS_CACHE_SPILL, 0)>0);
+  exec(db, "COMMIT");
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT x FROM t WHERE rowid > ? ORDER BY 1", -1, &p, 0), SQLITE_OK, db);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_STMT_USED, 0)>0);
+  sqlite3_finalize(p);
+  CHECK(dbStat(db, SQLITE_DBSTATUS_DEFERRED_FKS, 0)==0);
+  CHECK_RC(sqlite3_db_status64(db, 99, &cur, &hi, 0), SQLITE_ERROR, db);
+  sqlite3_close(db);
+}
+
+/* The loadable extension tools/capi/ext_test.c (argv[1]), or null. */
+static const char *zExtPath = 0;
+
+static int nAutoApi = 0;
+static int auto_api(sqlite3 *db, char **pzErr, const void *pApi){
+  (void)db; (void)pzErr;
+  if( pApi ) nAutoApi++;
+  return SQLITE_OK;
+}
+
+static void test_b_ext(const char *zDir){
+  sqlite3 *db = 0, *db2 = 0;
+  char *zErr = 0;
+  int on = -1;
+  (void)zDir;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+
+  /* Refused until enabled, and the SQL function separately. */
+  CHECK_STR(one(db, "SELECT load_extension('x')"), "ERROR: not authorized");
+  CHECK(sqlite3_load_extension(db, "x", 0, &zErr)==SQLITE_ERROR);
+  CHECK_STR(zErr, "not authorized");
+  sqlite3_free(zErr); zErr = 0;
+  CHECK_RC(sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 1, &on), SQLITE_OK, db);
+  CHECK(on==1);
+  CHECK_STR(one(db, "SELECT load_extension('x')"), "ERROR: not authorized");
+
+  /* A library that is not there: the message is the loader's. */
+  CHECK(sqlite3_load_extension(db, "/nonexistent/xq-no-such-ext", 0, &zErr)==SQLITE_ERROR);
+  CHECK(zErr!=0 && strstr(zErr, "/nonexistent/xq-no-such-ext")!=0);
+  sqlite3_free(zErr); zErr = 0;
+  CHECK(sqlite3_load_extension(db, "", 0, &zErr)==SQLITE_ERROR);
+  CHECK(zErr!=0);
+  sqlite3_free(zErr); zErr = 0;
+
+  if( zExtPath ){
+    char zNoSuffix[600];
+    char *zDot;
+    /* No sqlite3_extension_init: the entry point is derived from the
+    ** file name (libxqexttest.so -> sqlite3_xqexttest_init). */
+    CHECK_RC(sqlite3_load_extension(db, zExtPath, 0, &zErr), SQLITE_OK, db);
+    CHECK(zErr==0);
+    CHECK_STR(one(db, "SELECT xq_ext_hello('world')"), "hello world");
+    CHECK_STR(one(db, "SELECT xq_ext_sum(value) FROM (SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 39)"), "42");
+    CHECK(atoi(one(db, "SELECT xq_ext_version()"))==SQLITE_VERSION_NUMBER);
+
+    /* Named entry points: missing, and failing. */
+    CHECK(sqlite3_load_extension(db, zExtPath, "xq_no_such_entry", &zErr)==SQLITE_ERROR);
+    CHECK(zErr!=0 && strstr(zErr, "xq_no_such_entry")!=0);
+    sqlite3_free(zErr); zErr = 0;
+    CHECK(sqlite3_load_extension(db, zExtPath, "xq_ext_fail", &zErr)==SQLITE_ERROR);
+    CHECK_STR(zErr, "error during initialization: boom 42");
+    sqlite3_free(zErr); zErr = 0;
+
+    /* The suffix is tried when the name has none. */
+    snprintf(zNoSuffix, sizeof(zNoSuffix), "%s", zExtPath);
+    zDot = strrchr(zNoSuffix, '.');
+    if( zDot && strchr(zDot, '/')==0 ) *zDot = 0;
+    CHECK_RC(sqlite3_open(":memory:", &db2), SQLITE_OK, db2);
+    CHECK_RC(sqlite3_enable_load_extension(db2, 1), SQLITE_OK, db2);
+    CHECK_RC(sqlite3_load_extension(db2, zNoSuffix, 0, 0), SQLITE_OK, db2);
+    CHECK_STR(one(db2, "SELECT xq_ext_hello('again')"), "hello again");
+    sqlite3_close(db2);
+
+    /* The SQL function, once sqlite3_enable_load_extension() allows it. */
+    CHECK_RC(sqlite3_open(":memory:", &db2), SQLITE_OK, db2);
+    CHECK_STR(one(db2, "SELECT xq_ext_hello('x')"), "ERROR: no such function: xq_ext_hello");
+    CHECK_RC(sqlite3_enable_load_extension(db2, 1), SQLITE_OK, db2);
+    {
+      char zSql[700];
+      sqlite3_snprintf(sizeof(zSql), zSql, "SELECT load_extension(%Q)", zExtPath);
+      CHECK_STR(one(db2, zSql), "NULL");
+      sqlite3_snprintf(sizeof(zSql), zSql, "SELECT load_extension(%Q, 'xq_ext_fail')", zExtPath);
+      CHECK_STR(one(db2, zSql), "ERROR: error during initialization: boom 42");
+    }
+    CHECK_STR(one(db2, "SELECT xq_ext_hello('sql')"), "hello sql");
+    CHECK_RC(sqlite3_enable_load_extension(db2, 0), SQLITE_OK, db2);
+    CHECK_STR(one(db2, "SELECT load_extension('x')"), "ERROR: not authorized");
+    sqlite3_close(db2);
+  }
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
+
+  /* Automatic extensions get the sqlite3_api_routines table too. */
+  CHECK_RC(sqlite3_auto_extension((void(*)(void))auto_api), SQLITE_OK, 0);
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK(nAutoApi==1);
+  sqlite3_close(db);
+  sqlite3_cancel_auto_extension((void(*)(void))auto_api);
+}
+
+static int nCarrayDel = 0;
+static void carray_del(void *p){ (void)p; nCarrayDel++; }
+
+/* carray() needs SQLITE_ENABLE_CARRAY in SQLite; xqlite's C ABI has it. */
+static void test_b_carray(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  static int aI32[] = { 1, 2, 3, 40 };
+  static sqlite3_int64 aI64[] = { 5000000000LL, -7 };
+  static double aDbl[] = { 1.5, -0.25 };
+  static const char *azText[] = { "a", 0, "it's" };
+  struct iovec aBlob[2];
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  aBlob[0].iov_base = (void*)"\x01\x02"; aBlob[0].iov_len = 2;
+  aBlob[1].iov_base = 0; aBlob[1].iov_len = 0;
+
+  /* carray(PTR, N [, TYPE]) with sqlite3_bind_pointer(). */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT group_concat(value, ','), group_concat(rowid, ',') FROM carray(?1, ?2)", -1, &p, 0), SQLITE_OK, db);
+  sqlite3_bind_pointer(p, 1, aI32, "carray", 0);
+  sqlite3_bind_int(p, 2, 4);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1,2,3,40");
+  CHECK_STR(sqlite3_column_text(p, 1), "1,2,3,4");
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT group_concat(value, ','), max(ctype), max(count) FROM carray(?1, 2, ?2)", -1, &p, 0), SQLITE_OK, db);
+  sqlite3_bind_pointer(p, 1, aI64, "carray", 0);
+  sqlite3_bind_text(p, 2, "INT64", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "5000000000,-7");
+  CHECK_STR(sqlite3_column_text(p, 1), "int64");
+  CHECK(sqlite3_column_int(p, 2)==2);
+  sqlite3_reset(p);
+  sqlite3_bind_pointer(p, 1, aDbl, "carray", 0);
+  sqlite3_bind_text(p, 2, "double", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1.5,-0.25");
+  sqlite3_reset(p);
+  sqlite3_bind_pointer(p, 1, (void*)azText, "carray", 0);
+  sqlite3_bind_text(p, 2, "char*", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "a");
+  sqlite3_reset(p);
+  sqlite3_bind_pointer(p, 1, aI32, "carray", 0);
+  sqlite3_bind_text(p, 2, "int8", -1, SQLITE_STATIC);
+  CHECK(sqlite3_step(p)==SQLITE_ERROR);
+  CHECK_STR(sqlite3_errmsg(db), "unknown datatype: 'int8'");
+  sqlite3_reset(p);
+  /* A pointer of another type is no array: no rows. */
+  sqlite3_bind_pointer(p, 1, aI32, "not-carray", 0);
+  sqlite3_bind_text(p, 2, "int32", -1, SQLITE_STATIC);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK(sqlite3_column_type(p, 0)==SQLITE_NULL);
+  sqlite3_finalize(p);
+  CHECK_STR(one(db, "SELECT count(*) FROM carray"), "0");
+
+  /* sqlite3_carray_bind(): the one-argument form. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT group_concat(quote(value), ','), max(ctype) FROM carray(?1)", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aI32, 3, SQLITE_CARRAY_INT32, SQLITE_STATIC), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1,2,3");
+  CHECK_STR(sqlite3_column_text(p, 1), "int32");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aI64, 2, SQLITE_CARRAY_INT64, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "5000000000,-7");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, (void*)azText, 3, SQLITE_CARRAY_TEXT, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "'a',NULL,'it''s'");
+  CHECK_STR(sqlite3_column_text(p, 1), "char*");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aBlob, 2, SQLITE_CARRAY_BLOB, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "X'0102',X''");
+  CHECK_STR(sqlite3_column_text(p, 1), "struct iovec");
+  sqlite3_reset(p);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aDbl, 2, SQLITE_CARRAY_DOUBLE, SQLITE_TRANSIENT), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1.5,-0.25");
+  sqlite3_reset(p);
+
+  /* Destructors: called on pDestroy when the binding goes, and at once
+  ** when the bind fails. */
+  nCarrayDel = 0;
+  CHECK_RC(sqlite3_carray_bind_v2(p, 1, aI32, 4, SQLITE_CARRAY_INT32, carray_del, aI64), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 0), "1,2,3,40");
+  sqlite3_reset(p);
+  CHECK(nCarrayDel==0);
+  sqlite3_clear_bindings(p);
+  CHECK(nCarrayDel==1);
+  CHECK(sqlite3_carray_bind(p, 1, aI32, 4, 99, carray_del)==SQLITE_ERROR);
+  CHECK(nCarrayDel==2);
+  CHECK(sqlite3_carray_bind(p, 7, aI32, 4, SQLITE_CARRAY_INT32, carray_del)==SQLITE_RANGE);
+  CHECK(nCarrayDel==3);
+  CHECK_RC(sqlite3_carray_bind(p, 1, aI32, 2, SQLITE_CARRAY_INT32, carray_del), SQLITE_OK, db);
+  sqlite3_finalize(p);
+  CHECK(nCarrayDel==4);
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
+}
+
+static sqlite3_file *pUriMain = 0;
+static char zUriAnswer[64];
+static int nUriNames = 0, nUriJournal = 0, nUriWal = 0, nUriBad = 0;
+static int uriOpen(sqlite3_vfs *p, sqlite3_filename z, sqlite3_file *f, int flags, int *pOut){
+  sqlite3_vfs *o = sqlite3_vfs_find("unix");
+  (void)p;
+  if( z && (flags & SQLITE_OPEN_MAIN_DB) ){
+    const char *a = sqlite3_uri_parameter(z, "answer");
+    snprintf(zUriAnswer, sizeof(zUriAnswer), "%s", a ? a : "(null)");
+    pUriMain = f;
+    if( strstr(sqlite3_filename_journal(z), ".db-journal") ) nUriNames++;
+    if( strstr(sqlite3_filename_wal(z), ".db-wal") ) nUriNames++;
+  }
+  if( z && (flags & (SQLITE_OPEN_MAIN_JOURNAL|SQLITE_OPEN_WAL)) ){
+    if( flags & SQLITE_OPEN_WAL ) nUriWal++; else nUriJournal++;
+    if( sqlite3_database_file_object(z)!=pUriMain ) nUriBad++;
+    if( sqlite3_uri_int64(z, "answer", 0)!=7 ) nUriBad++;
+    if( sqlite3_filename_database(z)!=sqlite3_filename_database(sqlite3_filename_database(z)) ) nUriBad++;
+  }
+  return o->xOpen(o, z, f, flags, pOut);
+}
+static int uriDelete(sqlite3_vfs *p, const char *z, int s){ sqlite3_vfs *o = sqlite3_vfs_find("unix"); (void)p; return o->xDelete(o, z, s); }
+static int uriAccess(sqlite3_vfs *p, const char *z, int f, int *r){ sqlite3_vfs *o = sqlite3_vfs_find("unix"); (void)p; return o->xAccess(o, z, f, r); }
+static int uriFull(sqlite3_vfs *p, const char *z, int n, char *out){ sqlite3_vfs *o = sqlite3_vfs_find("unix"); (void)p; return o->xFullPathname(o, z, n, out); }
+static sqlite3_vfs uriVfs;
+
+static void test_b_vfs(const char *zDir){
+  sqlite3 *db = 0;
+  char zSql[700];
+  sqlite3_vfs *o = sqlite3_vfs_find("unix");
+  sqlite3_file *pFile = 0;
+  memset(&uriVfs, 0, sizeof(uriVfs));
+  uriVfs.iVersion = 1;
+  uriVfs.szOsFile = o->szOsFile;
+  uriVfs.mxPathname = o->mxPathname;
+  uriVfs.zName = "xq-uri";
+  uriVfs.xOpen = uriOpen;
+  uriVfs.xDelete = uriDelete;
+  uriVfs.xAccess = uriAccess;
+  uriVfs.xFullPathname = uriFull;
+  uriVfs.xRandomness = o->xRandomness;
+  uriVfs.xSleep = o->xSleep;
+  uriVfs.xCurrentTime = o->xCurrentTime;
+  CHECK_RC(sqlite3_vfs_register(&uriVfs, 0), SQLITE_OK, 0);
+
+  /* A C VFS sees the URI parameters, and the journal and WAL names lead
+  ** back to the database and its sqlite3_file. */
+  snprintf(zSql, sizeof(zSql), "file:%s/uri.db?vfs=xq-uri&answer=7", zDir);
+  CHECK_RC(sqlite3_open_v2(zSql, &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  CHECK_STR(zUriAnswer, "7");
+  CHECK(nUriNames==2);
+  exec(db, "CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+  CHECK(nUriJournal>=1 && nUriBad==0);
+  CHECK_RC(sqlite3_file_control(db, "main", SQLITE_FCNTL_FILE_POINTER, &pFile), SQLITE_OK, db);
+  CHECK(pFile==pUriMain);
+  CHECK_STR(one(db, "PRAGMA journal_mode=wal"), "wal");
+  exec(db, "INSERT INTO t VALUES(2)");
+  CHECK(nUriWal==1 && nUriBad==0);
+  CHECK_STR(sqlite3_uri_parameter(sqlite3_db_filename(db, 0), "answer"), "7");
+  sqlite3_close(db);
+
+  /* ATTACH's own vfs= parameter. */
+  zUriAnswer[0] = 0;
+  CHECK_RC(sqlite3_open_v2(":memory:", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0), SQLITE_OK, db);
+  snprintf(zSql, sizeof(zSql), "ATTACH 'file:%s/att.db?vfs=xq-uri&answer=8' AS a", zDir);
+  exec(db, zSql);
+  CHECK_STR(zUriAnswer, "8");
+  CHECK_STR(sqlite3_uri_parameter(sqlite3_db_filename(db, "a"), "answer"), "8");
+  {
+    sqlite3_vfs *pv = 0;
+    CHECK_RC(sqlite3_file_control(db, "a", SQLITE_FCNTL_VFS_POINTER, &pv), SQLITE_OK, db);
+    CHECK(pv==&uriVfs);
+  }
+  snprintf(zSql, sizeof(zSql), "ATTACH 'file:%s/att2.db?vfs=nope' AS b", zDir);
+  CHECK_RC(sqlite3_exec(db, zSql, 0, 0, 0), SQLITE_ERROR, db);
+  CHECK_STR(sqlite3_errmsg(db), "no such vfs: nope");
+  snprintf(zSql, sizeof(zSql), "ATTACH 'file:/xq-att?vfs=memdb' AS m");
+  exec(db, zSql);
+  exec(db, "CREATE TABLE m.t(x); INSERT INTO m.t VALUES(5)");
+  CHECK_STR(one(db, "SELECT x FROM m.t"), "5");
+  CHECK_STR(one(db, "SELECT file FROM pragma_database_list WHERE name='m'"), "");
+  sqlite3_close(db);
+  CHECK_RC(sqlite3_vfs_unregister(&uriVfs), SQLITE_OK, 0);
+}
+
+static void test_b_snapshot(const char *zDir){
+  sqlite3 *db = 0, *db2 = 0, *mem = 0;
+  sqlite3_snapshot *s1 = 0, *s2 = 0, *s3 = 0;
+  char zPath[512];
+  snprintf(zPath, sizeof(zPath), "%s/snap.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  CHECK_RC(sqlite3_open(zPath, &db2), SQLITE_OK, db2);
+  CHECK_STR(one(db, "PRAGMA journal_mode=wal"), "wal");
+  exec(db, "CREATE TABLE t(x); INSERT INTO t VALUES(1)");
+
+  /* Only inside a transaction, not on TEMP. */
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s1), SQLITE_ERROR, db);
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_get(db, "temp", &s1), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s1), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "1");
+  exec(db, "COMMIT");
+
+  /* Another connection writes; the snapshot still reads the old state. */
+  exec(db2, "INSERT INTO t VALUES(2)");
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "1");
+  CHECK_RC(sqlite3_exec(db, "INSERT INTO t VALUES(3)", 0, 0, 0), SQLITE_BUSY, db);
+  CHECK(sqlite3_extended_errcode(db)==SQLITE_BUSY_SNAPSHOT);
+  exec(db, "COMMIT");
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "2");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_ERROR, db);
+
+  /* A newer snapshot; moving a read transaction to another one. */
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s2), SQLITE_OK, db);
+  CHECK(sqlite3_snapshot_cmp(s1, s2)<0);
+  CHECK(sqlite3_snapshot_cmp(s2, s1)>0);
+  CHECK(sqlite3_snapshot_cmp(s1, s1)==0);
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "1");
+  exec(db, "COMMIT");
+
+  /* A checkpoint that restarts the WAL makes the snapshots unavailable. */
+  CHECK_RC(sqlite3_wal_checkpoint_v2(db2, 0, SQLITE_CHECKPOINT_TRUNCATE, 0, 0), SQLITE_OK, db2);
+  exec(db2, "INSERT INTO t VALUES(4)");
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s1), SQLITE_ERROR_SNAPSHOT, db);
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s2), SQLITE_ERROR_SNAPSHOT, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "3");
+  CHECK_RC(sqlite3_snapshot_get(db, "main", &s3), SQLITE_OK, db);
+  CHECK(sqlite3_snapshot_cmp(s2, s3)<0);
+  exec(db, "COMMIT");
+  CHECK_RC(sqlite3_snapshot_recover(db, "main"), SQLITE_OK, db);
+  CHECK_RC(sqlite3_snapshot_recover(db, "nosuch"), SQLITE_ERROR, db);
+  exec(db, "BEGIN");
+  CHECK_RC(sqlite3_snapshot_open(db, "main", s3), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "3");
+  exec(db, "COMMIT");
+
+  /* Not a WAL database. */
+  CHECK_RC(sqlite3_open(":memory:", &mem), SQLITE_OK, mem);
+  exec(mem, "BEGIN");
+  sqlite3_snapshot_free(s2);
+  s2 = (sqlite3_snapshot*)1;
+  CHECK_RC(sqlite3_snapshot_get(mem, "main", &s2), SQLITE_ERROR, mem);
+  CHECK_RC(sqlite3_snapshot_open(mem, "main", s3), SQLITE_ERROR, mem);
+  exec(mem, "COMMIT");
+  CHECK_RC(sqlite3_snapshot_recover(mem, "main"), SQLITE_ERROR, mem);
+  sqlite3_close(mem);
+  sqlite3_snapshot_free(s1);
+  sqlite3_snapshot_free(s3);
+  sqlite3_close(db2);
+  sqlite3_close(db);
+}
+
+/* ======================================================== end of group B */
+
+int main(int argc, char **argv){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
+  if( argc>1 ) zExtPath = argv[1];
   if( mkdtemp(zDir)==0 ){ perror("mkdtemp"); return 1; }
   test_library();
   test_printf();
@@ -1384,12 +2572,30 @@ int main(void){
   test_vtab();
   test_vfs(zDir);
   test_misc();
+  /* Group A */
   test_authorizer();
   test_authorizer_dialect();
   test_collation_needed();
   test_autovacuum_pages(zDir);
   test_find_function();
   test_trace_engine();
+  /* Group B */
+  test_b_memdb(zDir);
+  test_b_blob(zDir);
+  test_b_status(zDir);
+  test_b_ext(zDir);
+  test_b_carray();
+  test_b_vfs(zDir);
+  test_b_snapshot(zDir);
+  /* Group C */
+  test_utf16_results();
+  test_column_metadata();
+  test_normalized_sql();
+  test_stmt_explain();
+  test_threads();
+  test_test_control();
+  test_temp_directory(zDir);
+  test_scanstatus();
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

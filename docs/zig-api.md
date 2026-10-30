@@ -15,6 +15,8 @@
 - [오류 모델](#오류-모델)
 - [트랜잭션](#트랜잭션)
 - [백업](#백업)
+- [BLOB 증분 I/O](#blob-증분-io)
+- [직렬화](#직렬화)
 - [확장 지점](#확장-지점)
 - [C API 대응](#c-api-대응)
 - [아직 없는 것](#아직-없는-것)
@@ -23,8 +25,8 @@
 
 | 상태 | 무엇 |
 | --- | --- |
-| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
-| 계획 | BLOB 증분 I/O, 훅, 가상 테이블 쓰기, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
+| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), BLOB 증분 I/O(`Db.openBlob`), 직렬화(`Db.serialize`, `Db.deserialize`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
+| 계획 | 훅, 가상 테이블 쓰기, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
 
 설계 원칙은 다음과 같습니다.
 
@@ -293,6 +295,35 @@ while (!try b.step(100)) {}          // 100페이지씩, step(null)이면 한 �
 - 두 연결은 달라야 하고, 대상에는 트랜잭션이 없어야 합니다. 백업 중에도 원본을 읽고 쓸 수 있습니다(복사한 뒤 바뀐 페이지는 다시 복사). `finish()` 전에는 두 연결 모두 닫을 수 없습니다(`tryClose()`가 `error.Busy`).
 - 같은 일을 하는 SQL은 `VACUUM INTO 'file'`입니다(빈 페이지를 버린 사본).
 
+## BLOB 증분 I/O
+
+`db.openBlob(database, table, column, rowid, writable)`은 테이블 한 행의 한 값(BLOB 또는 TEXT)을 SQL 없이 조금씩 읽고 쓰는 `Db.BlobHandle`을 돌려줍니다(`sqlite3_blob_open`, 엔진의 `vdbe/blob.zig`). `database`가 null이면 main입니다.
+
+```zig
+try db.exec("INSERT INTO files(id, data) VALUES(1, zeroblob(1000000))");
+var b = try db.openBlob(null, "files", "data", 1, true);
+defer b.close() catch {};
+try b.write(chunk, 4096);            // 오프셋 4096부터 덮어씀
+try b.read(&buf, 0);
+```
+
+- `bytes()`는 값의 크기입니다. 쓰기로 크기를 바꿀 수는 없으므로 먼저 `zeroblob(N)`으로 자리를 만듭니다. 끝을 넘는 읽기·쓰기는 `error.Sql`, 읽기 전용으로 연 `BlobHandle`에 쓰면 `error.ReadOnly`입니다.
+- 쓰기는 행의 페이로드를 바로 고칩니다. 트리거와 업데이트 훅이 돌지 않고 `changes()`에 잡히지 않습니다.
+- 다른 문장이 그 행을 바꾸거나 지우면 `BlobHandle`이 만료됩니다. 그 뒤의 호출은 `error.Abort`이고 `bytes()`는 0입니다.
+- `reopen(rowid)`는 같은 테이블·열의 다른 행으로 옮깁니다. 실패하면 `BlobHandle`이 만료됩니다.
+- 쓰기용으로는 인덱스에 든 열을 열 수 없고, 외래 키가 켜져 있으면 외래 키 열도 열 수 없습니다. 뷰, 가상 테이블, WITHOUT ROWID 테이블, 생성 열이 있는 테이블도 열 수 없습니다.
+- 열린 `BlobHandle`은 실행 중인 문장이라서 `close()` 전에는 연결을 닫을 수 없고(`tryClose()`가 `error.Busy`), 자동 커밋 모드면 `close()`가 그 트랜잭션을 끝냅니다.
+
+## 직렬화
+
+`db.serialize(gpa, schema)`는 데이터베이스 `schema`("main", "temp", 붙인 이름)의 파일 이미지를 `gpa`로 할당해 돌려주고(`sqlite3_serialize`), 없는 이름이면 `error.NotFound`입니다. `db.deserialize(schema, image, read_only)`는 그 데이터베이스(TEMP는 안 됨)를 닫고 `image`의 사본을 담은 메모리 데이터베이스(memdb VFS, 엔진의 `vfs/memdb.zig`)로 다시 엽니다(`sqlite3_deserialize`). 쓰면 메모리가 늘어나고, `read_only`면 쓰기가 `error.ReadOnly`, 트랜잭션이 열려 있으면 `error.Busy`입니다.
+
+```zig
+const image = try src.serialize(gpa, "main");
+defer gpa.free(image);
+try db.deserialize("main", image, false);
+```
+
 ## 확장 지점
 
 모두 comptime으로 시그니처를 읽어 엔진 콜백 래퍼를 생성합니다. 사용자 데이터는 std.sort의 `context`처럼 넘깁니다(`{}` 또는 포인터).
@@ -369,6 +400,8 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_create_module_v2` | `createModule` |
 | `sqlite3_backup_init/step/finish` | `Db.backup`, `Backup.step`, `Backup.finish` |
 | `sqlite3_backup_remaining/pagecount` | `Backup.remaining`, `Backup.pageCount` |
+| `sqlite3_blob_open/read/write/bytes/reopen/close` | `Db.openBlob`, `BlobHandle.read`, `write`, `bytes`, `reopen`, `close` |
+| `sqlite3_serialize`, `sqlite3_deserialize` | `Db.serialize`, `Db.deserialize` |
 | (그 밖의 모든 것) | `db.raw()` / `stmt.raw()`로 엔진 핸들을 꺼내 `xqlite.sql.*` 저수준 API 사용 |
 
 진짜 C 함수가 필요하면 [C API](c-api.md)(`libxqlite3`)를 링크하세요. 위 표는 Zig API가 무엇에 해당하는지를 보여 줍니다.
@@ -377,7 +410,7 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 
 Zig API에 아직 없는 것입니다.
 
-- BLOB 증분 I/O, 훅(commit/update/authorizer), `sqlite3_interrupt`
+- 훅(commit/update/authorizer), `sqlite3_interrupt`
 - 가상 테이블의 쓰기(`xUpdate`), 일반 제약 푸시다운, 트랜잭션 메서드
 - 엔진 할당자를 연결별로 고르는 기능(지금은 `configMalloc()` 하나)
 - MSSQL 방언

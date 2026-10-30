@@ -263,6 +263,21 @@ pub fn hooks(db: *const Sqlite3) *const Hooks {
     return &spec(db.xq.lang.dialect).hooks;
 }
 
+/// Turn PRAGMA foreign_keys back off when the T-SQL dialect turned it on
+/// and the connection has moved to another dialect: before a statement
+/// the application prepares (not SQL the engine runs for a T-SQL
+/// statement, in Lang.sqlite) outside a transaction, as PRAGMA
+/// foreign_keys may only change there.
+fn restoreForeignKeys(p: *Parse) void {
+    const db = p.db;
+    if (!db.xq.mssql.foreign_keys_on or db.xq.lang.dialect == .mssql) return;
+    if (db.init.busy or p.outer_parse != null or db.n_vdbe_active != 0 or !db.auto_commit) return;
+    db.xq.mssql.foreign_keys_on = false;
+    if (!db.flags.ForeignKeys) return;
+    db.flags.ForeignKeys = false;
+    @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
+}
+
 /// Compile the first statement of `sql` with the connection's frontend
 /// (the dispatch prepare does in place of sqlite3RunParser()). Schema
 /// text is always SQLite's: while the schema is read, the SQLite
@@ -271,6 +286,7 @@ pub fn hooks(db: *const Sqlite3) *const Hooks {
 pub fn runParser(p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
     const db = p.db;
     const sqlite_frontend = spec(.sqlite).frontend;
+    restoreForeignKeys(p);
     const f = if (db.init.busy) sqlite_frontend else db.xq.lang.frontend;
     if (f == sqlite_frontend or isSqliteCommand(sql)) return sqlite_frontend.run(p, sql);
 

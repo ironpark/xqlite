@@ -100,10 +100,12 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
 }
 
 /// SQL Server enforces foreign keys: so does the connection, from its
-/// first T-SQL statement outside a transaction on.
+/// first T-SQL statement outside a transaction on, until it compiles in
+/// another dialect (dialect.restoreForeignKeys()).
 fn enableForeignKeys(db: *int.Sqlite3) void {
     if (db.flags.ForeignKeys or !db.auto_commit) return;
     db.flags.ForeignKeys = true;
+    db.xq.mssql.foreign_keys_on = true;
     @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
 }
 

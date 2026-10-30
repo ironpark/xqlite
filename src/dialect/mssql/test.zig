@@ -33,6 +33,29 @@ test "mssql: tokens and GO" {
     try c.expectError("SELECT 1 +", "Incorrect syntax near '+'.");
 }
 
+test "mssql: foreign_keys goes back off in another dialect" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.exec("SELECT 1");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("PRAGMA foreign_keys", "0\n");
+    // Not when the application had turned it on.
+    try c.exec("PRAGMA foreign_keys = ON");
+    main_mod.setDialect(c.db, .mssql);
+    try c.exec("SELECT 1");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("PRAGMA foreign_keys", "1\n");
+    // In a transaction it waits for the end of it.
+    try c.exec("PRAGMA foreign_keys = OFF");
+    main_mod.setDialect(c.db, .mssql);
+    try c.exec("SELECT 1; BEGIN TRAN");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT * FROM pragma_foreign_keys", "1\n");
+    try c.exec("COMMIT");
+    try c.expectRows("PRAGMA foreign_keys", "0\n");
+}
+
 test "mssql: LIKE patterns" {
     var c: Conn = undefined;
     try open(&c);

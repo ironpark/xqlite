@@ -391,7 +391,7 @@ DROP SCHEMA sales;                                         -- 비어 있어야 �
 | 항목 | xqlite |
 | --- | --- |
 | 배치 | 배치가 없습니다. 문장은 앞 문장이 실행된 뒤에 컴파일되고, 변수는 연결이 끝나거나 다시 선언할 때까지 남습니다. 오류가 배치의 나머지를 건너뛰게 하지 않습니다(셸에서는 SQLite 셸의 `.bail` 규칙). |
-| 외래 키 | SQL Server처럼 지키도록, 트랜잭션 밖에서 첫 T-SQL 문장을 컴파일할 때 연결의 `PRAGMA foreign_keys`를 켭니다. SQLite 방언으로 돌아가도 켜진 채입니다. |
+| 외래 키 | SQL Server처럼 지키도록, 트랜잭션 밖에서 첫 T-SQL 문장을 컴파일할 때 연결의 `PRAGMA foreign_keys`를 켭니다. 다른 방언으로 바꾸면 그 방언의 첫 문장 앞에서(트랜잭션 중이면 끝난 뒤) 다시 끕니다. 응용이 먼저 켜 둔 경우는 그대로 둡니다. |
 | identity | 시퀀스는 트랜잭션에 묶여서 롤백된 값이 다시 나옵니다(SQL Server는 건너뜀). |
 | `@@ROWCOUNT` | `changes()`: 마지막 INSERT/UPDATE/DELETE가 바꾼 행 수입니다(SELECT의 행 수가 아님). |
 | `OUTPUT DELETED` | DELETE에서만 됩니다. UPDATE의 `DELETED.c`(이전 값)는 `RETURNING`이 새 행만 보므로 오류입니다. |

@@ -324,6 +324,7 @@ pub const Renderer = struct {
                 try r.string(d.sequence);
                 try r.put(")");
             },
+            .named_param => return r.fail(e.pos, "parameters are not allowed in the schema", .{}),
         }
     }
 

@@ -112,6 +112,10 @@ pub const Kind = union(enum) {
     collate: Collate,
     coerce: Coerce,
     identity_default: IdentityDefault,
+    /// A named parameter, its SQLite spelling with the prefix (`:name`,
+    /// `@name`, `$name`): bound by that name (or the number SQLite gives
+    /// it).
+    named_param: []const u8,
 };
 
 pub const UnOp = enum { neg, plus, not, bit_not };

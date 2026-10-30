@@ -355,6 +355,63 @@ test "btree: two cursors on one table" {
     try bt.rollback(null, false);
 }
 
+test "btree: incremental blob cursors" {
+    var env = Env.init();
+    defer env.deinit();
+    const bt = try env.open(.{ .page_size = 512 });
+    defer bt.close(.{});
+
+    try bt.beginTrans(.write, 0);
+    const root = try bt.createTable(.intkey);
+    var writer: Cursor = undefined;
+    try bt.cursor(&writer, root, .{ .write = true });
+    defer writer.close();
+    for (1..100) |k| try insertRow(&writer, @intCast(k));
+    var blob: Cursor = undefined;
+    try bt.cursor(&blob, root, .{ .write = true });
+    defer blob.close();
+    try testing.expect(!bt.has_incrblob_cur);
+    try testing.expectEqual(std.math.Order.eq, try blob.tableMoveto(26, false));
+    blob.incrblobCursor();
+    try testing.expect(bt.has_incrblob_cur);
+
+    // Writes and reads go through the overflow chain, the cursor moved
+    // away by inserts elsewhere in the table.
+    const len = payloadLen(26);
+    try testing.expect(len > 2000);
+    try blob.putData(1990, "abcdefghij");
+    for (100..200) |k| try insertRow(&writer, @intCast(k));
+    var got: [10]u8 = undefined;
+    try blob.payloadChecked(1990, &got);
+    try testing.expectEqualStrings("abcdefghij", &got);
+
+    // Replacing another row leaves it valid; replacing or deleting its
+    // own row invalidates it.
+    try insertRow(&writer, 27);
+    try blob.payloadChecked(0, &got);
+    try insertRow(&writer, 26);
+    try testing.expectError(error.Abort, blob.payloadChecked(0, &got));
+    try testing.expectError(error.Abort, blob.putData(0, "x"));
+    try testing.expectEqual(std.math.Order.eq, try blob.tableMoveto(13, false));
+    try blob.payloadChecked(0, &got);
+    try testing.expectEqual(std.math.Order.eq, try writer.tableMoveto(13, false));
+    try writer.delete(.{});
+    try testing.expectError(error.Abort, blob.payloadChecked(0, &got));
+    try testing.expectEqual(std.math.Order.eq, try blob.tableMoveto(50, false));
+    _ = try bt.clearTable(root);
+    try testing.expectError(error.Abort, blob.payloadChecked(0, &got));
+
+    // A cursor opened for reading cannot write.
+    try insertRow(&writer, 5);
+    var reader: Cursor = undefined;
+    try bt.cursor(&reader, root, .{});
+    defer reader.close();
+    try testing.expectEqual(std.math.Order.eq, try reader.tableMoveto(5, false));
+    reader.incrblobCursor();
+    try testing.expectError(error.ReadOnly, reader.putData(0, "x"));
+    try bt.rollback(null, false);
+}
+
 test "btree: clear and drop tables, meta values" {
     var env = Env.init();
     defer env.deinit();

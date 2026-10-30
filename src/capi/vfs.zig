@@ -9,11 +9,21 @@
 //! - A VFS registered from C becomes an engine Vfs (cVfs()) whose files
 //!   call the sqlite3_io_methods the C xOpen installed.
 //!
+//! - "memdb" is the engine's memdb VFS (vfs/memdb.zig), registered as
+//!   SQLite registers it (sqlite3MemdbInit()), after the default.
+//!
 //! Connections name a VFS with the zVfs argument of sqlite3_open_v2() or
-//! a URI's vfs= parameter.
+//! a URI's vfs= parameter, and ATTACH with its URI's vfs= (the engine
+//! asks find() through global.find_vfs).
+//!
+//! A C VFS receives the names the pager keeps in SQLite's filename layout
+//! (Pager.names), URI parameters included, and in the slot before a
+//! database name the bridge leaves the database's sqlite3_file for
+//! sqlite3_database_file_object().
 
 const std = @import("std");
 const c = @import("common.zig");
+const memdb = @import("../vfs/memdb.zig");
 
 const RC = c.RC;
 const Vfs = c.vfs.Vfs;
@@ -91,6 +101,7 @@ const OPEN_TEMP_JOURNAL = 0x1000;
 const OPEN_SUBJOURNAL = 0x2000;
 const OPEN_SUPER_JOURNAL = 0x4000;
 const OPEN_WAL = 0x80000;
+const OPEN_MEMORY = 0x80;
 
 const kind_bits = [_]struct { c.vfs.FileKind, c_int }{
     .{ .main_db, OPEN_MAIN_DB },
@@ -180,6 +191,8 @@ pub const Entry = struct {
 var unix_vfs: c.OsVfs = undefined;
 var unix_c: sqlite3_vfs = undefined;
 var unix_entry: Entry = undefined;
+var memdb_c: sqlite3_vfs = undefined;
+var memdb_entry: Entry = undefined;
 /// The first VFS of the list is the default.
 var head: ?*Entry = null;
 
@@ -212,6 +225,55 @@ pub fn initDefault() void {
     };
     unix_entry = .{ .cvfs = &unix_c, .engine = unix_vfs.interface() };
     head = &unix_entry;
+
+    // sqlite3MemdbInit(): memdb, borrowing the rest from the default.
+    memdb.state.lower = unix_vfs.interface();
+    memdb_c = .{
+        .iVersion = 2,
+        .szOsFile = @sizeOf(ZigFile),
+        .mxPathname = 1024,
+        .pNext = null,
+        .zName = "memdb",
+        .pAppData = &unix_c,
+        .xOpen = mOpen,
+        .xDelete = null,
+        .xAccess = mAccess,
+        .xFullPathname = mFullPathname,
+        .xDlOpen = unix_c.xDlOpen,
+        .xDlError = unix_c.xDlError,
+        .xDlSym = unix_c.xDlSym,
+        .xDlClose = unix_c.xDlClose,
+        .xRandomness = zRandomness,
+        .xSleep = zSleep,
+        .xCurrentTime = null,
+        .xGetLastError = zGetLastError,
+        .xCurrentTimeInt64 = zCurrentTimeInt64,
+    };
+    memdb_entry = .{ .cvfs = &memdb_c, .engine = memdb.interface() };
+    unix_entry.next = &memdb_entry;
+    relink();
+    @import("../sql/global.zig").find_vfs = findEngine;
+}
+
+/// The sqlite3_vfs of the engine VFS `v` (a database's pager has the
+/// engine VFS it was opened with), registered or not; null if C never
+/// saw it.
+pub fn cVfsOf(v: Vfs) ?*sqlite3_vfs {
+    c.state.lock.lock();
+    defer c.state.lock.unlock();
+    if (v.vtable == unix_entry.engine.vtable and v.ptr == unix_entry.engine.ptr) return &unix_c;
+    if (memdb.isMemdb(v)) return &memdb_c;
+    var all = all_entries;
+    while (all) |x| : (all = x.all_next) {
+        if (x.entry.engine.vtable == v.vtable and x.entry.engine.ptr == v.ptr) return x.entry.cvfs;
+    }
+    return null;
+}
+
+/// global.find_vfs: the engine VFS of a registered VFS.
+fn findEngine(name: []const u8) ?Vfs {
+    const e = find(name) orelse return null;
+    return e.engine;
 }
 
 /// The default VFS (for files the engine opens without a connection).
@@ -254,6 +316,7 @@ pub export fn sqlite3_vfs_register(p: ?*sqlite3_vfs, make_dflt: c_int) callconv(
         if (x.entry.cvfs == v) found = &x.entry;
     }
     if (v == &unix_c) found = &unix_entry;
+    if (v == &memdb_c) found = &memdb_entry;
     const e = found orelse blk: {
         const a = c.gpa.create(CVfsEntry) catch return RC.NOMEM;
         a.* = .{ .entry = .{ .cvfs = v, .engine = .{ .ptr = undefined, .vtable = &c_vfs_vtable } }, .all_next = all_entries };
@@ -372,23 +435,25 @@ fn zFullPathname(_: *sqlite3_vfs, z_name: ?[*:0]const u8, n_out: c_int, z_out: [
     return RC.OK;
 }
 
-fn zDlOpen(_: *sqlite3_vfs, _: ?[*:0]const u8) callconv(.c) ?*anyopaque {
-    return null;
+// The dynamic loader (unixDlOpen() ...: dlopen(), none on WebAssembly)
+// is in loadext.zig.
+const loadext = @import("loadext.zig");
+
+fn zDlOpen(_: *sqlite3_vfs, z: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+    return loadext.osDlOpen(z orelse return null);
 }
 
 fn zDlError(_: *sqlite3_vfs, n: c_int, z: [*]u8) callconv(.c) void {
-    const msg = "loadable extensions are not supported by xqlite";
-    if (n <= 0) return;
-    const k = @min(msg.len, @as(usize, @intCast(n - 1)));
-    @memcpy(z[0..k], msg[0..k]);
-    z[k] = 0;
+    loadext.osDlError(n, z);
 }
 
-fn zDlSym(_: *sqlite3_vfs, _: ?*anyopaque, _: ?[*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void {
-    return null;
+fn zDlSym(_: *sqlite3_vfs, h: ?*anyopaque, z: ?[*:0]const u8) callconv(.c) ?*const fn () callconv(.c) void {
+    return loadext.osDlSym(h, z orelse return null);
 }
 
-fn zDlClose(_: *sqlite3_vfs, _: ?*anyopaque) callconv(.c) void {}
+fn zDlClose(_: *sqlite3_vfs, h: ?*anyopaque) callconv(.c) void {
+    loadext.osDlClose(h);
+}
 
 fn zRandomness(_: *sqlite3_vfs, n: c_int, z: [*]u8) callconv(.c) c_int {
     if (n <= 0) return 0;
@@ -424,6 +489,34 @@ fn zGetSystemCall(_: *sqlite3_vfs, _: ?[*:0]const u8) callconv(.c) ?*const anyop
 
 fn zNextSystemCall(_: *sqlite3_vfs, _: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
     return null;
+}
+
+/// Port of memdbOpen() for C: an engine memdb file behind a ZigFile.
+fn mOpen(_: *sqlite3_vfs, z_name: ?[*:0]const u8, p: *sqlite3_file, flags: c_int, out_flags: ?*c_int) callconv(.c) c_int {
+    p.pMethods = null;
+    const f = memdb.interface().open(c.span(z_name), fromCFlags(flags)) catch |err| return errCode(err);
+    const z = ZigFile.of(p);
+    z.ptr = f.ptr;
+    z.vtable = f.vtable;
+    p.pMethods = &zig_methods;
+    if (out_flags) |o| o.* = flags | OPEN_MEMORY;
+    return RC.OK;
+}
+
+/// Port of memdbAccess(): no file ever exists.
+fn mAccess(_: *sqlite3_vfs, _: ?[*:0]const u8, _: c_int, out: *c_int) callconv(.c) c_int {
+    out.* = 0;
+    return RC.OK;
+}
+
+/// Port of memdbFullPathname(): the name as it is.
+fn mFullPathname(_: *sqlite3_vfs, z_name: ?[*:0]const u8, n_out: c_int, z_out: [*]u8) callconv(.c) c_int {
+    if (n_out <= 0) return RC.OK;
+    const name = c.span(z_name) orelse "";
+    const k = @min(name.len, @as(usize, @intCast(n_out - 1)));
+    @memcpy(z_out[0..k], name[0..k]);
+    z_out[k] = 0;
+    return RC.OK;
 }
 
 const zig_methods: IoMethods = .{
@@ -519,8 +612,39 @@ fn zfCheckReservedLock(p: *sqlite3_file, out: *c_int) callconv(.c) c_int {
     return RC.OK;
 }
 
-fn zfFileControl(_: *sqlite3_file, _: c_int, _: ?*anyopaque) callconv(.c) c_int {
-    return RC.NOTFOUND;
+fn zfFileControl(p: *sqlite3_file, op: c_int, arg: ?*anyopaque) callconv(.c) c_int {
+    return fileControl(zf(p), op, arg);
+}
+
+// SQLITE_FCNTL_* answered for the engine's files.
+pub const FCNTL_VFSNAME = 12;
+pub const FCNTL_SIZE_LIMIT = 36;
+
+/// The file controls of the engine's files: those of memdb
+/// (memdbFileControl()); the other files have none.
+pub fn fileControl(f: File, op: c_int, arg: ?*anyopaque) c_int {
+    const m = memdb.fileOf(f) orelse return RC.NOTFOUND;
+    switch (op) {
+        FCNTL_VFSNAME => {
+            const d = memdb.describe(m);
+            const out: *?[*:0]u8 = @ptrCast(@alignCast(arg orelse return RC.MISUSE));
+            const z = std.fmt.allocPrintSentinel(c.gpa, "memdb(0x{x},{d})", .{ d.data, d.sz }, 0) catch return RC.NOMEM;
+            out.* = z.ptr;
+            return RC.OK;
+        },
+        FCNTL_SIZE_LIMIT => {
+            const lim: *i64 = @ptrCast(@alignCast(arg orelse return RC.MISUSE));
+            lim.* = memdb.sizeLimit(m, lim.*);
+            return RC.OK;
+        },
+        else => return RC.NOTFOUND,
+    }
+}
+
+/// The sqlite3_file of an engine file opened through a C VFS, or null.
+pub fn cFileOf(f: File) ?*sqlite3_file {
+    if (f.vtable != &c_file_vtable and f.vtable != &c_file_vtable_shm) return null;
+    return cf(f.ptr).cfile();
 }
 
 fn zfSectorSize(p: *sqlite3_file) callconv(.c) c_int {
@@ -580,7 +704,8 @@ fn cvfsOf(ptr: *anyopaque) *sqlite3_vfs {
 
 /// An open file of a C VFS: the sqlite3_file the C xOpen filled (its
 /// szOsFile bytes follow this header) and the name it was given, which
-/// must live as long as the file.
+/// must live as long as the file: the pager's own (in SQLite's layout),
+/// or a copy made in that layout.
 const CFile = struct {
     name: ?[]u8,
     read_only: bool,
@@ -595,13 +720,16 @@ const CFile = struct {
     }
 };
 
-/// A filename as SQLite passes it to xOpen: four zero bytes before it,
+/// A name the pager did not lay out, in SQLite's filename layout: the
+/// slot of sqlite3_database_file_object() and four zero bytes before it,
 /// and after it an empty list of URI parameters, so that
 /// sqlite3_uri_parameter() and sqlite3_filename_*() work on it.
+const name_prefix = @sizeOf(usize) + 4;
+
 fn makeName(path: []const u8) ?[]u8 {
-    const b = c.gpa.alloc(u8, 4 + path.len + 4) catch return null;
+    const b = c.gpa.alloc(u8, name_prefix + path.len + 4) catch return null;
     @memset(b, 0);
-    @memcpy(b[4..][0..path.len], path);
+    @memcpy(b[name_prefix..][0..path.len], path);
     return b;
 }
 
@@ -610,14 +738,14 @@ fn cOpen(ptr: *anyopaque, path: ?[]const u8, flags: c.vfs.OpenFlags) Error!File 
     const open_fn = v.xOpen orelse return error.CantOpen;
     const f = try c.gpa.create(CFile);
     errdefer c.gpa.destroy(f);
-    f.name = if (path) |p| makeName(p) orelse return error.OutOfMemory else null;
+    f.name = if (path != null and !flags.sqlite_filename) makeName(path.?) orelse return error.OutOfMemory else null;
     errdefer if (f.name) |n| c.gpa.free(n);
     f.file = try c.gpa.alignedAlloc(u8, .@"16", @intCast(@max(v.szOsFile, @sizeOf(sqlite3_file))));
     errdefer c.gpa.free(f.file);
     @memset(f.file, 0);
     var out_flags: c_int = 0;
     const cflags = toCFlags(flags);
-    const z: ?[*:0]const u8 = if (f.name) |n| @ptrCast(n[4..].ptr) else null;
+    const z: ?[*:0]const u8 = if (f.name) |n| @ptrCast(n[name_prefix..].ptr) else if (path) |p| @ptrCast(p.ptr) else null;
     const rc = open_fn(v, z, f.cfile(), cflags, &out_flags);
     if (rc != RC.OK) {
         if (f.cfile().pMethods) |m| if (m.xClose) |close| {
@@ -627,6 +755,12 @@ fn cOpen(ptr: *anyopaque, path: ?[]const u8, flags: c.vfs.OpenFlags) Error!File 
     }
     if (f.cfile().pMethods == null) return error.CantOpen;
     f.read_only = out_flags & OPEN_READONLY != 0 or !flags.read_write;
+    // sqlite3_database_file_object() finds the database's sqlite3_file in
+    // the slot before its name (C keeps the Pager* there).
+    if (flags.kind == .main_db and z != null) {
+        const slot: *align(1) usize = @ptrCast(@constCast(z.? - name_prefix));
+        slot.* = @intFromPtr(f.cfile());
+    }
     const shm = f.methods().iVersion >= 2 and f.methods().xShmMap != null;
     return .{ .ptr = f, .vtable = if (shm) &c_file_vtable_shm else &c_file_vtable };
 }

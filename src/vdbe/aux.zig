@@ -1018,7 +1018,7 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
             .delete, .persist, .truncate => true,
             .off, .memory, .wal => false,
         };
-        if (d.safety_level != PAGER_SYNCHRONOUS_OFF and mj_needed and !pager.temp_file) n_trans += 1;
+        if (d.safety_level != PAGER_SYNCHRONOUS_OFF and mj_needed and !pager.isMemdb()) n_trans += 1;
         pager.exclusiveLockForCommit() catch |err| {
             rc = int.errorCode(err);
         };
@@ -1034,7 +1034,7 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
     // The simple case: no more than one database file has a write
     // transaction, or main is a temporary database (multi-file commits
     // are then not atomic).
-    const main_file = if (db.dbs.items[0].bt) |bt| bt.pager.path else "";
+    const main_file = if (db.dbs.items[0].bt) |bt| bt.pager.filename() else "";
     if (main_file.len == 0 or n_trans <= 1) {
         if (need_xcommit) {
             for (db.dbs.items) |d| {

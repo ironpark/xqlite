@@ -646,14 +646,4 @@ pub export fn sqlite3_stmt_scanstatus_reset(v: ?*Vdbe) callconv(.c) void {
     c.api.scanStatusReset(v orelse return);
 }
 
-// The carray extension (SQLITE_ENABLE_CARRAY) is not built in.
-
-pub export fn sqlite3_carray_bind_v2(v: ?*Vdbe, _: c_int, data: ?*anyopaque, _: c_int, _: c_int, del: ?*const anyopaque, p_del: ?*anyopaque) callconv(.c) c_int {
-    if (c.cDestructor(del)) |f| f(p_del orelse data);
-    if (v) |s| c.main.errorWithMsg(s.db, RC.ERROR, "xqlite does not support sqlite3_carray_bind()", .{});
-    return RC.ERROR;
-}
-
-pub export fn sqlite3_carray_bind(v: ?*Vdbe, i: c_int, data: ?*anyopaque, n: c_int, flags: c_int, del: ?*const anyopaque) callconv(.c) c_int {
-    return sqlite3_carray_bind_v2(v, i, data, n, flags, del, null);
-}
+// sqlite3_carray_bind() and sqlite3_carray_bind_v2() are in carray.zig.

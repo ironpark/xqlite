@@ -433,6 +433,84 @@ pub fn backup(db: *Db, dest_name: []const u8, src: *Db, src_name: []const u8) Er
     return .{ .conn = db.conn, .b = b };
 }
 
+// ================================================================= blobs
+
+/// Incremental I/O on one value of a table (sqlite3_blob): reads and
+/// writes go straight to the row, without SQL, see openBlob(). A write
+/// cannot change the size of the value (set it with zeroblob(N) first),
+/// fires no trigger and does not count in changes(). When the row is
+/// changed or deleted by anything else, the blob expires: its calls fail
+/// with error.Abort (bytes() is 0) until reopen() or close().
+pub const BlobHandle = struct {
+    conn: Conn,
+    b: *engine.BlobHandle,
+
+    /// The size of the value in bytes; 0 once the blob has expired.
+    pub fn bytes(self: *const BlobHandle) u32 {
+        return @intCast(engine.blobBytes(self.b));
+    }
+
+    /// Read `buf.len` bytes from `offset`. Reading past the end is
+    /// error.Sql.
+    pub fn read(self: *BlobHandle, buf: []u8, offset: u32) Error!void {
+        return self.conn.check(engine.blobRead(self.b, buf, std.math.cast(i32, offset) orelse std.math.maxInt(i32)));
+    }
+
+    /// Overwrite `data.len` bytes at `offset` (error.ReadOnly if the blob
+    /// was not opened writable, error.Sql past the end).
+    pub fn write(self: *BlobHandle, data: []const u8, offset: u32) Error!void {
+        return self.conn.check(engine.blobWrite(self.b, data, std.math.cast(i32, offset) orelse std.math.maxInt(i32)));
+    }
+
+    /// Move to the same column of row `rowid` of the same table. On
+    /// error the blob expires.
+    pub fn reopen(self: *BlobHandle, rowid: i64) Error!void {
+        return self.conn.check(engine.blobReopen(self.b, rowid));
+    }
+
+    /// Close the blob, ending the transaction it opened if there was
+    /// none.
+    pub fn close(self: *BlobHandle) Error!void {
+        const conn = self.conn;
+        const b = self.b;
+        self.* = undefined;
+        return conn.check(engine.blobClose(b));
+    }
+};
+
+/// Open the value of column `column` in row `rowid` of table `table` of
+/// database `database` ("main" if null, "temp" or an attached name) for
+/// incremental I/O (sqlite3_blob_open()), read-only or `writable`. The
+/// value must be a BLOB or TEXT. A writable blob cannot be on an indexed
+/// column (nor, with foreign keys on, on a foreign key column). An open
+/// blob is a running statement: the connection cannot close until the
+/// blob is closed.
+pub fn openBlob(db: *Db, database: ?[]const u8, table: []const u8, column: []const u8, rowid: i64, writable: bool) Error!BlobHandle {
+    const b = try db.conn.check(engine.blobOpen(db.conn.h, database, table, column, rowid, writable));
+    return .{ .conn = db.conn, .b = b };
+}
+
+// ========================================================= serialization
+
+/// The content of database `schema` ("main", "temp" or an attached
+/// name) as one block of bytes, a database file image
+/// (sqlite3_serialize()), allocated with `gpa`. error.NotFound if there
+/// is no such database.
+pub fn serialize(db: *Db, gpa: Allocator, schema: []const u8) Error![]u8 {
+    const lib = try db.conn.check(engine.serialize(db.conn.h, schema));
+    defer engine.libFree(lib);
+    return gpa.dupe(u8, lib);
+}
+
+/// Replace database `schema` ("main" or an attached name, not "temp")
+/// with an in-memory database (the memdb VFS) holding a copy of
+/// `image`, a database file image such as serialize() returns
+/// (sqlite3_deserialize()). It grows as written unless `read_only`.
+/// No transaction may be open on it (error.Busy).
+pub fn deserialize(db: *Db, schema: []const u8, image: []const u8, read_only: bool) Error!void {
+    return db.conn.check(engine.deserialize(db.conn.h, schema, image, read_only));
+}
+
 /// Whether a transaction is open (not sqlite3_get_autocommit()).
 pub fn inTransaction(db: *const Db) bool {
     return !engine.autocommit(db.conn.h);

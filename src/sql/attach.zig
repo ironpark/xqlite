@@ -19,6 +19,8 @@ const prepare = @import("prepare.zig");
 const main_mod = @import("main.zig");
 const malloc = @import("malloc.zig");
 const uri = @import("uri.zig");
+const global = @import("global.zig");
+const memdb = @import("../vfs/memdb.zig");
 const ctype = @import("../util/ctype.zig");
 
 const Parse = int.Parse;
@@ -74,6 +76,10 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     const file: [:0]const u8 = api.valueText(argv[0]) orelse "";
     const name: [:0]const u8 = api.valueText(argv[1]) orelse "";
 
+    // Not a real ATTACH: sqlite3_deserialize() reopens database
+    // db.init.i_db as an empty memdb database.
+    if (db.init.reopen_memdb) return reopenAsMemdb(ctx, db);
+
     // Too many attached databases, or the name is taken.
     const limit = db.limit(.attached);
     if (db.dbs.items.len >= @as(usize, @intCast(limit)) + 2) {
@@ -104,15 +110,23 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     }
     const path_name = parsed.filename();
     const path: ?[]const u8 = if (flags.memory or path_name.len == 0 or std.mem.eql(u8, path_name, ":memory:")) null else path_name;
+    // The URI's own vfs=, which the registry of the caller (the C ABI)
+    // resolves; otherwise the connection's VFS.
+    var v = db.vfs.?;
+    if (flags.vfs_resolved) if (parsed.parameter("vfs")) |vfs_name| {
+        v = (if (global.find_vfs) |find| find(vfs_name) else null) orelse
+            return resultErrorFmt(ctx, "no such vfs: {s}", .{vfs_name});
+    };
     var rc: i32 = RC.OK;
     var err_dyn: ?[:0]u8 = null;
     defer if (err_dyn) |m| gpa.free(m);
-    const bt: ?*btree.Btree = btree.Btree.open(malloc.allocator, db.vfs.?, path, .{
+    const bt: ?*btree.Btree = btree.Btree.open(malloc.allocator, v, path, .{
         .read_only = flags.read_only,
         .create = flags.create and !flags.read_only,
         .cell_size_check = db.flags.CellSizeCk,
         .n_vdbe_read = &db.n_vdbe_read,
         .busy_handler = main_mod.btreeBusyHandler(db),
+        .uri_params = parsed.params(),
     }) catch |err| blk: {
         rc = int.errorCode(err);
         break :blk null;
@@ -163,6 +177,45 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         if (err_dyn) |m| api.resultError(ctx, m);
         api.resultErrorCode(ctx, rc);
     }
+}
+
+/// The REOPEN_AS_MEMDB part of attachFunc(): close database
+/// db.init.i_db and reopen it, with a new schema, on a separate store of
+/// the memdb VFS (serialize.zig fills it).
+fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
+    const gpa = db.gpa;
+    const i_db = db.init.i_db;
+    const d = &db.dbs.items[i_db];
+    const old = d.bt.?;
+    if (old.txnState() != .none or old.isInBackup()) return api.resultErrorCode(ctx, RC.BUSY);
+    const bt = btree.Btree.open(malloc.allocator, memdb.interface(), "x", .{
+        .cell_size_check = db.flags.CellSizeCk,
+        .n_vdbe_read = &db.n_vdbe_read,
+        .busy_handler = main_mod.btreeBusyHandler(db),
+    }) catch |err| return api.resultErrorCode(ctx, int.errorCode(err));
+    const schema = gpa.create(Schema) catch {
+        bt.close(main_mod.pagerConn(db));
+        return api.resultErrorCode(ctx, RC.NOMEM);
+    };
+    schema.* = .{ .enc = db.enc };
+    // Close the old database and put the memdb one in its slot.
+    detachTempTriggers(db, d.schema);
+    old.close(main_mod.pagerConn(db));
+    build.schemaFree(db, d.schema);
+    gpa.destroy(d.schema);
+    d.bt = bt;
+    d.schema = schema;
+    // The eponymous virtual tables hold pointers into the old schema.
+    if (i_db == 0) @import("vtab.zig").epoTableClearAll(db);
+    aux.expirePreparedStatements(db, 1);
+    // The pager settings of main.
+    if (db.dbs.items[0].bt) |main_bt| {
+        if (main_bt != bt) _ = bt.secureDelete(main_bt.secureDelete(null));
+    }
+    bt.setPagerFlags(.full, db.flags.FullFSync, db.flags.CkptFullFSync, db.flags.CacheSpill);
+    d.safety_level = 3;
+    db.init.i_db = 0;
+    db.m_db_flags.SchemaKnownOk = false;
 }
 
 /// Port of detachFunc(): sqlite_detach(name), the work of DETACH

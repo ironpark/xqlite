@@ -1216,6 +1216,65 @@ test "zig api: savepoint names are quoted" {
     try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT count(*) FROM t", .{}));
 }
 
+test "zig api: incremental blob I/O" {
+    var db = try memDb();
+    defer db.close();
+    try db.exec(
+        \\CREATE TABLE t(id INTEGER PRIMARY KEY, data BLOB, n INT UNIQUE, log INT DEFAULT 0);
+        \\INSERT INTO t(id, data, n) VALUES(1, zeroblob(3000), 1), (2, x'0102', 2);
+        \\CREATE TRIGGER tr AFTER UPDATE ON t BEGIN UPDATE t SET log = log + 1 WHERE id = 2; END;
+    );
+    var b = try db.openBlob(null, "t", "data", 1, true);
+    try testing.expectEqual(@as(u32, 3000), b.bytes());
+    try b.write("xqlite", 2500);
+    var buf: [8]u8 = undefined;
+    try b.read(&buf, 2498);
+    try testing.expectEqualSlices(u8, "\x00\x00xqlite", &buf);
+    try testing.expectError(error.Sql, b.read(&buf, 2995));
+    // An open blob is a running statement.
+    try testing.expectError(error.Busy, db.tryClose());
+    try b.reopen(2);
+    try testing.expectEqual(@as(u32, 2), b.bytes());
+    try b.close();
+    // No trigger ran.
+    try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT log FROM t WHERE id = 2", .{}));
+    try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT substr(data, 2501, 6) = CAST('xqlite' AS BLOB) FROM t WHERE id = 1", .{}));
+
+    // The blob expires when its row changes.
+    var r = try db.openBlob("main", "t", "data", 2, false);
+    try testing.expectError(error.ReadOnly, r.write("z", 0));
+    try db.exec("UPDATE t SET n = 3 WHERE id = 2");
+    try testing.expectError(error.Abort, r.read(buf[0..1], 0));
+    try testing.expectEqual(@as(u32, 0), r.bytes());
+    try r.close();
+
+    try testing.expectError(error.Sql, db.openBlob(null, "t", "n", 1, true));
+    try testing.expectEqualStrings("cannot open indexed column for writing", db.lastError().?.message);
+    try testing.expectError(error.Sql, db.openBlob(null, "t", "data", 9, false));
+    try testing.expectEqualStrings("no such rowid: 9", db.lastError().?.message);
+}
+
+test "zig api: serialize and deserialize" {
+    var src = try memDb();
+    defer src.close();
+    try src.exec("CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3)");
+    const image = try src.serialize(testing.allocator, "main");
+    defer testing.allocator.free(image);
+    try testing.expectEqual(@as(usize, 8192), image.len);
+    try testing.expectError(error.NotFound, src.serialize(testing.allocator, "nosuch"));
+
+    var db = try memDb();
+    defer db.close();
+    try db.deserialize("main", image, false);
+    try testing.expectEqual(@as(?i64, 6), try db.one(i64, "SELECT sum(x) FROM t", .{}));
+    try db.exec("INSERT INTO t VALUES(4)");
+    try testing.expectEqual(@as(?i64, 10), try db.one(i64, "SELECT sum(x) FROM t", .{}));
+    try db.exec("ATTACH ':memory:' AS ro");
+    try db.deserialize("ro", image, true);
+    try testing.expectError(error.ReadOnly, db.exec("INSERT INTO ro.t VALUES(5)"));
+    try testing.expectError(error.Sql, db.deserialize("temp", image, false));
+}
+
 test "zig api: backup between two connections, and VACUUM" {
     var src = try memDb();
     defer src.close();

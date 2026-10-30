@@ -16,6 +16,14 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "testctrl" },
     .{ "src/sql/global.zig", "temp_directory" },
     .{ "src/sql/global.zig", "data_directory" },
+    // The C ABI's VFS registry, for ATTACH's vfs= parameter.
+    .{ "src/sql/global.zig", "find_vfs" },
+    // The shared stores of the memdb VFS (memdb_g) and its settings.
+    .{ "src/vfs/memdb.zig", "state" },
+    // sqlite3Stat: the status counters (sqlite3_status()).
+    .{ "src/sql/status.zig", "state" },
+    // How load_extension() loads a library, which the C ABI sets.
+    .{ "src/sql/global.zig", "load_extension" },
     // The POSIX lock table, which every connection has to share.
     .{ "src/vfs/unix.zig", "inodes" },
     // The C ABI's process-wide state (sqlite3_config(), the auto
@@ -25,6 +33,8 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/capi/vfs.zig", "unix_vfs" },
     .{ "src/capi/vfs.zig", "unix_c" },
     .{ "src/capi/vfs.zig", "unix_entry" },
+    .{ "src/capi/vfs.zig", "memdb_c" },
+    .{ "src/capi/vfs.zig", "memdb_entry" },
     .{ "src/capi/vfs.zig", "head" },
     .{ "src/capi/vfs.zig", "all_entries" },
     .{ "src/capi/printf.zig", "oom_str" },

@@ -59,3 +59,14 @@ pub const TestCtrl = struct {
     saved_out: [64]u8 = @splat(0),
     saved_n: u8 = 0,
 };
+/// The VFS registry of the C ABI (sqlite3_vfs_find()), which resolves a
+/// URI's "vfs" parameter in ATTACH (OpenFlags.vfs_resolved). Null without
+/// a registry: ATTACH uses the connection's VFS.
+pub var find_vfs: ?*const fn (name: []const u8) ?@import("../vfs/vfs.zig").Vfs = null;
+
+/// How the load_extension() SQL function loads a library: set by the C
+/// ABI (sqlite3LoadExtension(), which needs the C VFS's xDlOpen and the
+/// sqlite3_api_routines table). Null without it: the function then
+/// fails. Returns null on success, else the error message (from
+/// sqlite3_malloc()).
+pub var load_extension: ?*const fn (db: *@import("sqlite_int.zig").Sqlite3, file: [:0]const u8, proc: ?[:0]const u8) ?[*:0]u8 = null;

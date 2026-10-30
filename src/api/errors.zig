@@ -220,7 +220,7 @@ pub const ResultCode = enum(i32) {
 /// their primary code; the extended code stays in the connection.
 pub fn fromEngine(err: engine.Error) SqlError {
     return switch (err) {
-        error.Error => error.Sql,
+        error.Error, error.ErrorSnapshot => error.Sql,
         error.Internal => error.Internal,
         error.Perm => error.PermissionDenied,
         error.Abort => error.Abort,

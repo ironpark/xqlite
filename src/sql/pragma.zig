@@ -1009,7 +1009,7 @@ fn pragmaImpl(p: *Parse, id1: Token, id2_arg: Token, value: ?Token, minus: bool)
                 aux.multiLoad(v, 1, &.{
                     .{ .i = @intCast(i) },
                     .{ .s = d.name },
-                    .{ .s = bt.pager.path },
+                    .{ .s = bt.pager.filename() },
                 }, false);
             }
         },

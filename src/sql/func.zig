@@ -6,8 +6,8 @@
 //! functions (SQLITE_ENABLE_MATH_FUNCTIONS), median()/percentile()
 //! (SQLITE_ENABLE_PERCENTILE), unknown(), sqlite_offset() and the
 //! SQLITE_DEBUG helpers are compiled out by default and so are omitted.
-//! load_extension() is registered but always refused, as extensions
-//! cannot be loaded.
+//! load_extension() loads through the C ABI (global.load_extension) and
+//! fails without it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -1273,9 +1273,9 @@ fn concatwsFunc(ctx: *Context, argv: []*Mem) void {
     concatFuncCore(ctx, argv[1..], sep);
 }
 
-/// loadExt(): load_extension(X[, Y]). Extensions cannot be loaded, so
-/// once allowed it fails as sqlite3_load_extension() of a build without
-/// a dynamic loader does.
+/// loadExt(): load_extension(X[, Y]), through the loader the C ABI
+/// installs (global.load_extension). Without it (the Zig API, which has
+/// no sqlite3_api_routines to hand an extension) it fails once allowed.
 fn loadExt(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
     // Only with SQLITE_LoadExtFunc (sqlite3_enable_load_extension()).
@@ -1283,7 +1283,16 @@ fn loadExt(ctx: *Context, argv: []*Mem) void {
         api.resultError(ctx, "not authorized");
         return;
     }
-    if (api.valueText(argv[0]) != null) api.resultError(ctx, "extension loading is not supported");
+    const file = api.valueText(argv[0]) orelse return;
+    const proc = if (argv.len == 2) api.valueText(argv[1]) else null;
+    const load = @import("global.zig").load_extension orelse {
+        api.resultError(ctx, "extension loading is not supported");
+        return;
+    };
+    if (load(db, file, proc)) |msg| {
+        api.resultError(ctx, std.mem.span(msg));
+        @import("malloc.zig").free(msg);
+    }
 }
 
 /// signFunc(): sign(X): -1, 0 or +1, NULL if X is not a number.

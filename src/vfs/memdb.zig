@@ -1,0 +1,445 @@
+//! The memdb VFS (port of the VFS half of memdb.c): a database held as
+//! one contiguous block of memory. sqlite3_deserialize() reopens a
+//! database on it (sql/serialize.zig), and the C ABI registers it as
+//! "memdb", so `file:/name?vfs=memdb` opens it by URI.
+//!
+//! A store is separate or shared. A shared store has a name that starts
+//! with "/" (or "\\"): every connection of the process that opens that
+//! name gets the same store, which lives until the last of them closes
+//! it. Any other name, or none, makes a store private to the handle.
+//! A shared store has a lock of its own; the list of shared stores has
+//! one too (SQLITE_MUTEX_STATIC_VFS1).
+//!
+//! The memory of a store comes from the library allocator
+//! (sqlite3_malloc()), since sqlite3_deserialize() hands over a buffer
+//! from it with SQLITE_DESERIALIZE_FREEONCLOSE. The files have no shared
+//! memory, so WAL mode is refused, and they report themselves as
+//! in-memory (File.isMemory()), so the pager keeps its rollback journal
+//! in memory (journal_mode=MEMORY), here in a private memdb store.
+
+const std = @import("std");
+const vfs = @import("vfs.zig");
+const malloc = @import("../sql/malloc.zig");
+
+const LockLevel = vfs.LockLevel;
+const Error = vfs.Error;
+
+/// SQLITE_DESERIALIZE_* flags of a store.
+pub const FREEONCLOSE: u32 = 1;
+pub const RESIZEABLE: u32 = 2;
+pub const READONLY: u32 = 4;
+
+/// A lock for the short critical sections of the shared stores; on
+/// wasm32 there is a single thread.
+const SpinLock = struct {
+    locked: std.atomic.Value(bool) = .init(false),
+
+    fn lock(l: *SpinLock) void {
+        while (l.locked.swap(true, .acquire)) std.atomic.spinLoopHint();
+    }
+
+    fn unlock(l: *SpinLock) void {
+        l.locked.store(false, .release);
+    }
+};
+
+/// Port of MemStore: the content of a memdb file.
+pub const Store = struct {
+    /// Size of the file.
+    sz: i64 = 0,
+    /// Space allocated to `data`.
+    sz_alloc: i64 = 0,
+    /// Largest allowed size of the file.
+    sz_max: i64,
+    data: ?[*]u8 = null,
+    /// SQLITE_DESERIALIZE_* flags.
+    flags: u32 = RESIZEABLE | FREEONCLOSE,
+    n_rd_lock: i32 = 0,
+    /// Writers: 0 or 1.
+    n_wr_lock: i32 = 0,
+    /// Handles open on the store.
+    n_ref: i32 = 1,
+    /// The name of a shared store (from the library allocator), null for
+    /// a separate one.
+    name: ?[]u8 = null,
+    /// Used by shared stores only.
+    mutex: SpinLock = .{},
+
+    fn enter(p: *Store) void {
+        if (p.name != null) p.mutex.lock();
+    }
+
+    fn leave(p: *Store) void {
+        if (p.name != null) p.mutex.unlock();
+    }
+
+    /// The content of the file.
+    pub fn bytes(p: *Store) []u8 {
+        const d = p.data orelse return &.{};
+        return d[0..@intCast(p.sz)];
+    }
+
+    /// Port of memdbEnlarge(): grow the allocation to hold at least
+    /// `new_sz` bytes.
+    fn enlarge(p: *Store, new_sz_arg: i64) Error!void {
+        if (p.flags & RESIZEABLE == 0) return error.DiskFull;
+        if (new_sz_arg > p.sz_max) return error.DiskFull;
+        var new_sz = new_sz_arg * 2;
+        if (new_sz > p.sz_max) new_sz = p.sz_max;
+        const q = malloc.realloc(p.data, @intCast(new_sz)) orelse return error.OutOfMemory;
+        p.data = q;
+        p.sz_alloc = new_sz;
+    }
+
+    fn destroy(p: *Store) void {
+        if (p.flags & FREEONCLOSE != 0) malloc.free(p.data);
+        if (p.name) |n| malloc.allocator.free(n);
+        malloc.allocator.destroy(p);
+    }
+};
+
+/// The process-wide state of memdb.
+pub var state: struct {
+    /// memdb_g: the shared stores, under `lock`
+    /// (SQLITE_MUTEX_STATIC_VFS1).
+    lock: SpinLock = .{},
+    stores: std.ArrayList(*Store) = .empty,
+    /// The VFS whose randomness and sleep memdb borrows (ORIGVFS():
+    /// pAppData, the default VFS when it was registered). Set once,
+    /// before use, by whoever registers it (the C ABI); without one,
+    /// randomness is zeros and sleep does not sleep.
+    lower: ?vfs.Vfs = null,
+    /// sqlite3GlobalConfig.mxMemdbSize (SQLITE_CONFIG_MEMDB_MAXSIZE):
+    /// the default largest size of a store
+    /// (SQLITE_MEMDB_DEFAULT_MAXSIZE).
+    default_max_size: i64 = 1073741824,
+} = .{};
+
+const shared = &state;
+
+const instance: u8 = 0;
+
+/// The memdb VFS.
+pub fn interface() vfs.Vfs {
+    return .{ .ptr = @constCast(&instance), .vtable = &vtable };
+}
+
+/// Port of sqlite3IsMemdb().
+pub fn isMemdb(v: vfs.Vfs) bool {
+    return v.vtable == &vtable;
+}
+
+const vtable: vfs.Vfs.VTable = .{
+    .open = open,
+    .delete = delete,
+    .access = access,
+    .randomness = randomness,
+    .sleep = sleep,
+    .fullPathname = null,
+};
+
+/// Port of memdbOpen().
+fn open(_: *anyopaque, path: ?[]const u8, flags: vfs.OpenFlags) Error!vfs.File {
+    const a = malloc.allocator;
+    const f = try a.create(MemFile);
+    errdefer a.destroy(f);
+    const name = path orelse "";
+    var p: *Store = undefined;
+    if (name.len > 1 and (name[0] == '/' or name[0] == '\\')) {
+        shared.lock.lock();
+        defer shared.lock.unlock();
+        const found = for (shared.stores.items) |s| {
+            if (std.mem.eql(u8, s.name.?, name)) break s;
+        } else null;
+        if (found) |s| {
+            s.enter();
+            s.n_ref += 1;
+            s.leave();
+            p = s;
+        } else {
+            p = try a.create(Store);
+            errdefer a.destroy(p);
+            const n = try a.dupe(u8, name);
+            errdefer a.free(n);
+            try shared.stores.append(a, p);
+            p.* = .{ .sz_max = state.default_max_size, .name = n };
+        }
+    } else {
+        p = try a.create(Store);
+        p.* = .{ .sz_max = state.default_max_size };
+    }
+    f.* = .{ .store = p, .read_only = !flags.read_write };
+    return .{ .ptr = f, .vtable = &file_vtable };
+}
+
+/// memdb has no xDelete: the journal is never a file of its own. A
+/// journal the pager was told to keep in a named store is gone with its
+/// last handle.
+fn delete(_: *anyopaque, _: []const u8, _: bool) Error!void {}
+
+/// Port of memdbAccess(): no file ever exists on disk.
+fn access(_: *anyopaque, _: []const u8, _: vfs.AccessMode) Error!bool {
+    return false;
+}
+
+fn randomness(_: *anyopaque, buf: []u8) void {
+    if (state.lower) |l| return l.randomness(buf);
+    @memset(buf, 0);
+}
+
+fn sleep(_: *anyopaque, us: u32) u32 {
+    if (state.lower) |l| return l.sleep(us);
+    return 0;
+}
+
+/// Port of MemFile: an open handle on a store.
+pub const MemFile = struct {
+    store: *Store,
+    /// Most recent lock against this file (eLock).
+    level: LockLevel = .none,
+    read_only: bool,
+
+    fn of(ptr: *anyopaque) *MemFile {
+        return @ptrCast(@alignCast(ptr));
+    }
+};
+
+const file_vtable: vfs.File.VTable = .{
+    .close = close,
+    .read = read,
+    .write = write,
+    .truncate = truncate,
+    .sync = sync,
+    .fileSize = fileSize,
+    .lock = lock,
+    .unlock = unlock,
+    .checkReservedLock = checkReservedLock,
+    .sectorSize = sectorSize,
+    .deviceCharacteristics = deviceCharacteristics,
+    .isReadOnly = isReadOnly,
+    .isMemory = isMemory,
+};
+
+/// The handle behind `f` if it is a memdb file.
+pub fn fileOf(f: vfs.File) ?*MemFile {
+    if (f.vtable != &file_vtable) return null;
+    return MemFile.of(f.ptr);
+}
+
+/// Port of memdbClose(): the store is freed with its last handle.
+fn close(ptr: *anyopaque) void {
+    const f = MemFile.of(ptr);
+    const p = f.store;
+    var last = false;
+    if (p.name != null) {
+        shared.lock.lock();
+        defer shared.lock.unlock();
+        p.enter();
+        if (p.n_ref == 1) {
+            for (shared.stores.items, 0..) |s, i| if (s == p) {
+                _ = shared.stores.swapRemove(i);
+                break;
+            };
+            if (shared.stores.items.len == 0) shared.stores.clearAndFree(malloc.allocator);
+        }
+        p.n_ref -= 1;
+        last = p.n_ref <= 0;
+        p.leave();
+    } else {
+        p.n_ref -= 1;
+        last = p.n_ref <= 0;
+    }
+    if (last) p.destroy();
+    malloc.allocator.destroy(f);
+}
+
+/// Port of memdbRead().
+fn read(ptr: *anyopaque, buf: []u8, offset: u64) Error!usize {
+    const p = MemFile.of(ptr).store;
+    p.enter();
+    defer p.leave();
+    const sz: u64 = @intCast(p.sz);
+    if (offset + buf.len > sz) {
+        if (offset >= sz) return 0;
+        const n: usize = @intCast(sz - offset);
+        @memcpy(buf[0..n], p.data.?[@intCast(offset)..][0..n]);
+        return n;
+    }
+    @memcpy(buf, p.data.?[@intCast(offset)..][0..buf.len]);
+    return buf.len;
+}
+
+/// Port of memdbWrite().
+fn write(ptr: *anyopaque, buf: []const u8, offset_u: u64) Error!void {
+    const p = MemFile.of(ptr).store;
+    p.enter();
+    defer p.leave();
+    // memdbLock() refuses a write lock first.
+    if (p.flags & READONLY != 0) return error.IoErr;
+    const offset: i64 = @intCast(offset_u);
+    const end = offset + @as(i64, @intCast(buf.len));
+    if (end > p.sz) {
+        if (end > p.sz_alloc) try p.enlarge(end);
+        if (offset > p.sz) @memset(p.data.?[@intCast(p.sz)..@intCast(offset)], 0);
+        p.sz = end;
+    }
+    @memcpy(p.data.?[@intCast(offset)..][0..buf.len], buf);
+}
+
+/// Port of memdbTruncate(): only ever shrinks (growing is a corrupt WAL
+/// database, which memdb cannot hold).
+fn truncate(ptr: *anyopaque, size: u64) Error!void {
+    const p = MemFile.of(ptr).store;
+    p.enter();
+    defer p.leave();
+    if (@as(i64, @intCast(size)) > p.sz) return error.IoErr;
+    p.sz = @intCast(size);
+}
+
+fn sync(_: *anyopaque, _: vfs.SyncFlags) Error!void {}
+
+fn fileSize(ptr: *anyopaque) Error!u64 {
+    const p = MemFile.of(ptr).store;
+    p.enter();
+    defer p.leave();
+    return @intCast(p.sz);
+}
+
+/// Port of memdbLock().
+fn lock(ptr: *anyopaque, level: LockLevel) Error!void {
+    const f = MemFile.of(ptr);
+    const p = f.store;
+    if (f.level.atLeast(level)) return;
+    p.enter();
+    defer p.leave();
+    if (level.atLeast(.reserved) and p.flags & READONLY != 0) return error.ReadOnly;
+    switch (level) {
+        .shared => {
+            if (p.n_wr_lock > 0) return error.Busy;
+            p.n_rd_lock += 1;
+        },
+        .reserved, .pending => {
+            if (f.level == .shared) {
+                if (p.n_wr_lock > 0) return error.Busy;
+                p.n_wr_lock = 1;
+            }
+        },
+        .exclusive => {
+            if (p.n_rd_lock > 1) return error.Busy;
+            if (f.level == .shared) p.n_wr_lock = 1;
+        },
+        .none => unreachable,
+    }
+    f.level = level;
+}
+
+/// Port of memdbUnlock().
+fn unlock(ptr: *anyopaque, level: LockLevel) Error!void {
+    const f = MemFile.of(ptr);
+    const p = f.store;
+    if (level.atLeast(f.level)) return;
+    p.enter();
+    defer p.leave();
+    if (level == .shared) {
+        if (f.level.atLeast(.reserved)) p.n_wr_lock -= 1;
+    } else {
+        if (f.level.atLeast(.reserved)) p.n_wr_lock -= 1;
+        p.n_rd_lock -= 1;
+    }
+    f.level = level;
+}
+
+/// Only used for crash recovery, which an in-memory database never
+/// needs (memdb has no xCheckReservedLock).
+fn checkReservedLock(_: *anyopaque) Error!bool {
+    return false;
+}
+
+/// No xSectorSize: SQLITE_DEFAULT_SECTOR_SIZE.
+fn sectorSize(_: *anyopaque) u32 {
+    return vfs.default_sector_size;
+}
+
+/// Port of memdbDeviceCharacteristics().
+fn deviceCharacteristics(_: *anyopaque) vfs.DeviceCharacteristics {
+    return .{ .atomic = true, .powersafe_overwrite = true, .safe_append = true, .sequential = true };
+}
+
+fn isReadOnly(ptr: *anyopaque) bool {
+    return MemFile.of(ptr).read_only;
+}
+
+fn isMemory(_: *anyopaque) bool {
+    return true;
+}
+
+/// Port of memdbFileControl(SQLITE_FCNTL_SIZE_LIMIT): set the largest
+/// size of the store to `limit` (but not below its size; negative only
+/// asks) and return it.
+pub fn sizeLimit(f: *MemFile, limit_arg: i64) i64 {
+    const p = f.store;
+    p.enter();
+    defer p.leave();
+    var limit = limit_arg;
+    if (limit < p.sz) limit = if (limit < 0) p.sz_max else p.sz;
+    p.sz_max = limit;
+    return limit;
+}
+
+/// For memdbFileControl(SQLITE_FCNTL_VFSNAME): the address and size of
+/// the content.
+pub fn describe(f: *MemFile) struct { data: usize, sz: i64 } {
+    const p = f.store;
+    p.enter();
+    defer p.leave();
+    return .{ .data = @intFromPtr(p.data), .sz = p.sz };
+}
+
+/// The store of a separate memdb file (memdbFromDbSchema(): null for a
+/// shared one, whose content other connections change).
+pub fn separateStore(f: *MemFile) ?*Store {
+    const p = f.store;
+    if (p.name != null) return null;
+    return p;
+}
+
+const testing = std.testing;
+
+test "memdb: separate and shared stores" {
+    const v = interface();
+    const a = try v.open("x", .{ .create = true });
+    const b = try v.open("x", .{ .create = true });
+    try a.write("hello", 0);
+    try testing.expectEqual(@as(u64, 5), try a.fileSize());
+    // Separate: "x" twice is two stores.
+    try testing.expectEqual(@as(u64, 0), try b.fileSize());
+    a.close();
+    b.close();
+
+    const s1 = try v.open("/shared", .{ .create = true });
+    const s2 = try v.open("/shared", .{ .create = true });
+    try s1.write("abc", 2);
+    var buf: [8]u8 = undefined;
+    try testing.expectError(error.ShortRead, s2.read(&buf, 0));
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 'a', 'b', 'c', 0, 0, 0 }, &buf);
+    try s1.lock(.shared);
+    try s2.lock(.shared);
+    try s1.lock(.reserved);
+    try testing.expectError(error.Busy, s2.lock(.reserved));
+    try testing.expectError(error.Busy, s1.lock(.exclusive));
+    try s2.unlock(.none);
+    try s1.lock(.exclusive);
+    try s1.unlock(.none);
+    s1.close();
+    try testing.expectEqual(@as(u64, 5), try s2.fileSize());
+    s2.close();
+    // The last handle freed it.
+    const s3 = try v.open("/shared", .{ .create = true });
+    try testing.expectEqual(@as(u64, 0), try s3.fileSize());
+    try testing.expect(s3.isMemory());
+    const mf = fileOf(s3).?;
+    try testing.expectEqual(@as(i64, 4096), sizeLimit(mf, 4096));
+    try testing.expectError(error.DiskFull, s3.write(&@as([8]u8, @splat(1)), 4092));
+    try testing.expectEqual(@as(i64, 4096), sizeLimit(mf, -1));
+    s3.close();
+}

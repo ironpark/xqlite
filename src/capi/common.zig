@@ -201,13 +201,9 @@ pub const TRACE_CLOSE: u32 = 0x08;
 pub const Ext = struct {
     /// The VFS the connection opened its files with (its sqlite3_vfs).
     vfs: *@import("vfs.zig").Entry,
-    /// The filenames sqlite3_db_filename() returned, in the layout that
-    /// sqlite3_uri_parameter() reads (see filename.zig), by database
-    /// name; freed on close.
-    filenames: std.ArrayList(Filename) = .empty,
-    /// The URI parameters the main database was opened with (pairs of
-    /// NUL-terminated strings), for its sqlite3_filename.
-    uri_params: ?[]u8 = null,
+    /// The shared libraries sqlite3_load_extension() opened (aExtension),
+    /// closed with the connection.
+    extensions: std.ArrayList(?*anyopaque) = .empty,
     busy: Hook(CBusy) = .{},
     wal: Hook(CWal) = .{},
     commit: Hook(CCommit) = .{},
@@ -245,7 +241,6 @@ pub const Ext = struct {
     /// last statement or backup is gone (a zombie).
     zombie: bool = false,
 
-    pub const Filename = struct { name: [:0]u8, buf: []u8 };
     pub const ClientData = struct { name: [:0]u8, data: ?*anyopaque, x_destroy: ?CDestructor };
 };
 
@@ -345,6 +340,8 @@ pub const State = struct {
     /// both, MULTITHREAD only full_mutex, SERIALIZED sets both.
     core_mutex: bool = have_threads,
     full_mutex: bool = have_threads and default_serialized,
+    /// SQLITE_CONFIG_MEMSTATUS (SQLITE_DEFAULT_MEMSTATUS: on).
+    memstat: bool = true,
     /// SQLITE_CONFIG_MALLOC, and whether its xInit has run.
     mem_methods: ?@import("library.zig").MemMethods = null,
     mem_init: bool = false,
@@ -382,7 +379,9 @@ pub fn ensureInit() void {
     state.lock.lock();
     defer state.lock.unlock();
     if (!state.initialized) {
+        @import("../sql/status.zig").enable(state.memstat);
         @import("vfs.zig").initDefault();
+        @import("loadext.zig").initHook();
         @atomicStore(bool, &state.initialized, true, .release);
     }
 }

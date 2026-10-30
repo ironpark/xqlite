@@ -3,41 +3,12 @@
 //!
 //!     \0\0\0\0  database \0  (key \0 value \0)*  \0  journal \0  wal \0  \0
 //!
-//! The pointer handed out is to the database name. sqlite3_db_filename()
-//! returns one, and so do the names a C VFS's xOpen receives.
+//! The pointer handed out is to the database name. The pager keeps its
+//! names in this layout (Pager.names): sqlite3_db_filename() returns its
+//! database name, and a C VFS's xOpen receives these names.
 
 const std = @import("std");
 const c = @import("common.zig");
-
-/// A filename for database `path` with URI parameters `params` (pairs
-/// of NUL-terminated strings, as uri.Result.file holds them after the
-/// filename, without the final empty name), from sqlite3_malloc(). The
-/// journal and WAL names are those SQLite derives. Null on OOM.
-pub fn build(path: []const u8, params: []const u8) ?[]u8 {
-    const journal_sfx = "-journal";
-    const wal_sfx = "-wal";
-    const n = 4 + path.len + 1 + params.len + 1 + (path.len + journal_sfx.len + 1) + (path.len + wal_sfx.len + 1) + 1;
-    const b = c.gpa.alloc(u8, n) catch return null;
-    @memset(b, 0);
-    var i: usize = 4;
-    @memcpy(b[i..][0..path.len], path);
-    i += path.len + 1;
-    @memcpy(b[i..][0..params.len], params);
-    i += params.len + 1;
-    if (path.len > 0) {
-        for ([_][]const u8{ journal_sfx, wal_sfx }) |sfx| {
-            @memcpy(b[i..][0..path.len], path);
-            @memcpy(b[i + path.len ..][0..sfx.len], sfx);
-            i += path.len + sfx.len + 1;
-        }
-    }
-    return b;
-}
-
-/// The name pointer of a filename made by build().
-pub fn ptr(b: []u8) [*:0]const u8 {
-    return @ptrCast(b[4..].ptr);
-}
 
 fn next(z: [*:0]const u8) [*:0]const u8 {
     return z + std.mem.len(z) + 1;
@@ -54,12 +25,22 @@ fn uriParameter(z_filename: [*:0]const u8, param: [*:0]const u8) ?[*:0]const u8 
     return null;
 }
 
+/// Port of databaseName(): the database name of a filename given the
+/// database, journal or WAL name of it.
+fn databaseName(z: [*:0]const u8) [*:0]const u8 {
+    var p: [*]const u8 = z;
+    while ((p - 1)[0] != 0 or (p - 2)[0] != 0 or (p - 3)[0] != 0 or (p - 4)[0] != 0) p -= 1;
+    return @ptrCast(p);
+}
+
 pub export fn sqlite3_uri_parameter(z: ?[*:0]const u8, param: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
-    return uriParameter(z orelse return null, param orelse return null);
+    const p = param orelse return null;
+    return uriParameter(databaseName(z orelse return null), p);
 }
 
 pub export fn sqlite3_uri_key(z: ?[*:0]const u8, n_arg: c_int) callconv(.c) ?[*:0]const u8 {
-    var p = next(z orelse return null);
+    if (n_arg < 0) return null;
+    var p = next(databaseName(z orelse return null));
     var n = n_arg;
     if (n < 0) return null;
     while (p[0] != 0 and n > 0) : (n -= 1) {
@@ -94,13 +75,11 @@ pub export fn sqlite3_uri_int64(z: ?[*:0]const u8, param: ?[*:0]const u8, dflt: 
 }
 
 pub export fn sqlite3_filename_database(z: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
-    var p: [*]const u8 = z orelse return null;
-    while ((p - 1)[0] != 0 or (p - 2)[0] != 0 or (p - 3)[0] != 0 or (p - 4)[0] != 0) p -= 1;
-    return @ptrCast(p);
+    return databaseName(z orelse return null);
 }
 
 pub export fn sqlite3_filename_journal(z: ?[*:0]const u8) callconv(.c) ?[*:0]const u8 {
-    var p = next(z orelse return null);
+    var p = next(databaseName(z orelse return null));
     while (p[0] != 0) p = next(next(p));
     return p + 1;
 }
@@ -143,7 +122,14 @@ pub export fn sqlite3_free_filename(z: ?[*:0]const u8) callconv(.c) void {
     c.malloc.free(@ptrCast(@constCast(db - 4)));
 }
 
-pub export fn sqlite3_database_file_object(_: ?[*:0]const u8) callconv(.c) ?*anyopaque {
-    // The engine's files are not sqlite3_file objects.
-    return null;
+/// Port of sqlite3_database_file_object(): for a name a C VFS's xOpen
+/// received (the database, its journal or its WAL), the sqlite3_file of
+/// the database, which the VFS bridge keeps in the pointer-sized slot
+/// in front of the four zero bytes (where C keeps the Pager*). Null if
+/// the database is not a file of a C VFS (the engine's own files are
+/// not sqlite3_file objects).
+pub export fn sqlite3_database_file_object(z: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+    const db = sqlite3_filename_database(z) orelse return null;
+    const slot: *align(1) const usize = @ptrCast(db - 4 - @sizeOf(usize));
+    return @ptrFromInt(slot.*);
 }

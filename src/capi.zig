@@ -20,4 +20,6 @@ comptime {
     _ = @import("capi/filename.zig");
     _ = @import("capi/blob.zig");
     _ = @import("capi/testctrl.zig");
+    _ = @import("capi/loadext.zig");
+    _ = @import("capi/carray.zig");
 }

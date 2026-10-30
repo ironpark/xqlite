@@ -15,6 +15,7 @@ pub const Db = api.Db;
 pub const Stmt = api.Stmt;
 pub const Savepoint = api.Savepoint;
 pub const Backup = api.Backup;
+pub const BlobHandle = api.BlobHandle;
 pub const OpenOptions = api.OpenOptions;
 pub const JournalMode = api.JournalMode;
 pub const Dialect = api.Dialect;
@@ -151,6 +152,9 @@ test {
 test {
     std.testing.refAllDecls(@import("sql/attach.zig"));
     std.testing.refAllDecls(@import("sql/uri.zig"));
+    std.testing.refAllDecls(@import("sql/serialize.zig"));
+    std.testing.refAllDecls(@import("sql/status.zig"));
+    std.testing.refAllDecls(@import("sql/snapshot.zig"));
     _ = @import("sql/attach_test.zig");
 }
 

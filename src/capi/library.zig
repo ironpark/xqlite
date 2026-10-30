@@ -243,11 +243,22 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
         // GETMUTEX, GETPCACHE, GETPCACHE2: the engine has neither
         // pluggable mutexes nor a pluggable page cache to describe.
         11, 15, 19 => return RC.ERROR,
-        // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, MEMSTATUS,
-        // MUTEX, PCACHE, PCACHE2, COVERING_INDEX_SCAN, SQLLOG, MMAP_SIZE,
+        // MEMSTATUS: whether sqlite3_initialize() turns on the status
+        // counters (on by default, as in SQLite).
+        9 => {
+            c.state.memstat = a != 0;
+            return RC.OK;
+        },
+        // MEMDB_MAXSIZE: the default largest size of a memdb database.
+        29 => {
+            @import("../vfs/memdb.zig").state.default_max_size = a;
+            return RC.OK;
+        },
+        // Accepted and ignored: SCRATCH, PAGECACHE, HEAP, MUTEX, PCACHE,
+        // PCACHE2, COVERING_INDEX_SCAN, SQLLOG, MMAP_SIZE,
         // WIN32_HEAPSIZE, PMASZ, STMTJRNL_SPILL, SMALL_MALLOC,
-        // SORTERREF_SIZE, MEMDB_MAXSIZE.
-        6, 7, 8, 9, 10, 14, 18, 20, 21, 22, 23, 25, 26, 27, 28, 29 => return RC.OK,
+        // SORTERREF_SIZE.
+        6, 7, 8, 10, 14, 18, 20, 21, 22, 23, 25, 26, 27, 28 => return RC.OK,
         else => return RC.ERROR,
     }
 }
@@ -255,19 +266,23 @@ pub fn xq_config(op: c_int, a: i64, b: i64, p: ?*anyopaque, q: ?*anyopaque) call
 // ================================================================ memory
 
 pub export fn sqlite3_malloc(n: c_int) callconv(.c) ?*anyopaque {
+    c.ensureInit();
     if (n <= 0) return null;
     return c.malloc.malloc(@intCast(n));
 }
 
 pub export fn sqlite3_malloc64(n: u64) callconv(.c) ?*anyopaque {
+    c.ensureInit();
     return c.malloc.malloc(n);
 }
 
 pub export fn sqlite3_realloc(p: ?*anyopaque, n: c_int) callconv(.c) ?*anyopaque {
+    c.ensureInit();
     return c.malloc.realloc(p, @intCast(@max(n, 0)));
 }
 
 pub export fn sqlite3_realloc64(p: ?*anyopaque, n: u64) callconv(.c) ?*anyopaque {
+    c.ensureInit();
     return c.malloc.realloc(p, n);
 }
 
@@ -279,28 +294,46 @@ pub export fn sqlite3_msize(p: ?*anyopaque) callconv(.c) u64 {
     return c.malloc.mallocSize(p orelse return 0);
 }
 
-// The library does not count its memory (SQLITE_CONFIG_MEMSTATUS off).
+// The status counters (sql/status.zig), on unless SQLITE_CONFIG_MEMSTATUS
+// turned them off before sqlite3_initialize().
 
+const status = @import("../sql/status.zig");
+
+/// Port of sqlite3_memory_used().
 pub export fn sqlite3_memory_used() callconv(.c) i64 {
-    return 0;
+    var cur: i64 = 0;
+    var hw: i64 = 0;
+    status.status64(.memory_used, &cur, &hw, false);
+    return cur;
 }
 
-pub export fn sqlite3_memory_highwater(_: c_int) callconv(.c) i64 {
-    return 0;
+/// Port of sqlite3_memory_highwater().
+pub export fn sqlite3_memory_highwater(reset: c_int) callconv(.c) i64 {
+    var cur: i64 = 0;
+    var hw: i64 = 0;
+    status.status64(.memory_used, &cur, &hw, reset != 0);
+    return hw;
 }
 
-pub export fn sqlite3_status(op: c_int, p_cur: ?*c_int, p_hiwtr: ?*c_int, _: c_int) callconv(.c) c_int {
+/// Port of sqlite3_status64().
+pub export fn sqlite3_status64(op: c_int, p_cur: ?*i64, p_hiwtr: ?*i64, reset: c_int) callconv(.c) c_int {
     if (op < 0 or op > 9) return RC.MISUSE;
-    if (p_cur) |p| p.* = 0;
-    if (p_hiwtr) |p| p.* = 0;
+    const cur = p_cur orelse return RC.MISUSE;
+    const hw = p_hiwtr orelse return RC.MISUSE;
+    status.status64(@fromBackingInt(@intCast(op)), cur, hw, reset != 0);
     return RC.OK;
 }
 
-pub export fn sqlite3_status64(op: c_int, p_cur: ?*i64, p_hiwtr: ?*i64, _: c_int) callconv(.c) c_int {
-    if (op < 0 or op > 9) return RC.MISUSE;
-    if (p_cur) |p| p.* = 0;
-    if (p_hiwtr) |p| p.* = 0;
-    return RC.OK;
+/// Port of sqlite3_status().
+pub export fn sqlite3_status(op: c_int, p_cur: ?*c_int, p_hiwtr: ?*c_int, reset: c_int) callconv(.c) c_int {
+    var cur: i64 = 0;
+    var hw: i64 = 0;
+    const rc = sqlite3_status64(op, &cur, &hw, reset);
+    if (rc == RC.OK) {
+        (p_cur orelse return RC.MISUSE).* = @truncate(cur);
+        (p_hiwtr orelse return RC.MISUSE).* = @truncate(hw);
+    }
+    return rc;
 }
 
 pub export fn sqlite3_release_memory(_: c_int) callconv(.c) c_int {

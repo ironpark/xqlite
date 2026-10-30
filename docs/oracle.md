@@ -13,6 +13,7 @@ xqlite의 Oracle Database 방언이 지원하는 문법과 의미, 그리고 Ora
 - [날짜](#날짜)
 - [트랜잭션](#트랜잭션)
 - [MERGE와 INSERT ALL](#merge와-insert-all)
+- [JSON](#json)
 - [Oracle과 다른 점](#oracle과-다른-점)
 - [아직 하지 않은 것](#아직-하지-않은-것)
 - [검증](#검증)
@@ -54,6 +55,9 @@ PRAGMA xq_dialect = 'sqlite';             -- PRAGMA는 SQLite 문법 그대로 �
 | `types.zig` | 타입 → STRICT 저장 타입·검사·카탈로그 철자 |
 | `datetime.zig` | 날짜 텍스트, 달력 계산, 날짜 형식 모델(`TO_CHAR`, `TO_DATE`) |
 | `funcs.zig` | 방언 함수와 엔진 함수(`xq_ora_*`) |
+| `json.zig` | JSON 값, 파서(strict·lax), 직렬화(압축·`PRETTY`), SQL/JSON 경로 언어 |
+| `jsonfuncs.zig` | SQL/JSON 엔진 함수(`xq_ora_json_*`)와 `JSON_TABLE`의 테이블 함수 `xq_ora_json_table` |
+| `jsonsql.zig` | SQL/JSON 문법(함수의 절, `IS JSON`, 점 표기, `JSON_TABLE`)과 파싱 뒤의 해석 |
 | `catalog_views.zig` | `USER_TABLES` 같은 데이터 사전 뷰 |
 | `test.zig` | 종단 테스트 |
 
@@ -202,6 +206,7 @@ Oracle에서 `''`는 NULL입니다. 그래서 `'' IS NULL`은 참, `LENGTH('')`�
 | `DATE`, `TIMESTAMP[(p)] [WITH [LOCAL] TIME ZONE]`, `INTERVAL ...` | `TEXT` | |
 | `BLOB`, `RAW(n)`, `LONG RAW` | `BLOB` | `RAW(n)`은 길이 |
 | `BOOLEAN`(23ai) | `INTEGER` | 0/1만 |
+| `JSON`(23ai) | `TEXT` | `json_valid()`(`ORA-40441`). 저장 변환이 Oracle처럼 정규화한 JSON 텍스트를 넣음([JSON](#json)) |
 
 - 선언 타입은 `xq_catalog`의 `type` 키에 Oracle 철자(`NUMBER(10,2)`, `VARCHAR2(20 CHAR)`, `NUMBER(*,0)`, `TIMESTAMP(6) WITH TIME ZONE`)로 남고, `xq_ora_coerce()`가 실행할 때 그 철자를 읽습니다.
 - identity 열은 타입이 `NUMBER`여도 `INTEGER`로 저장합니다. 키이면 SQLite의 INTEGER PRIMARY KEY(rowid)입니다.
@@ -265,6 +270,91 @@ DELETE FROM t WHERE EXISTS (SELECT 1 FROM s WHERE c [AND u] AND d);
 
 `INSERT ALL`/`INSERT FIRST`는 INTO마다 `INSERT INTO ti (cols) SELECT values FROM (subquery) [WHERE ...]` 하나입니다. `INSERT FIRST`의 조건은 `CASE WHEN c1 THEN 1 WHEN c2 THEN 2 ... ELSE 0 END = k`입니다. 서브쿼리는 INTO마다 다시 실행되므로, 비결정적인 식(`SYSTIMESTAMP`는 문장 안에서 같음, `s.NEXTVAL`은 INTO마다 늘어남)은 Oracle과 다를 수 있습니다.
 
+## JSON
+
+Oracle Database 23ai의 JSON을 지원합니다. JSON 값은 텍스트이고, 경로 언어와 함수는 이 방언이 직접 구현합니다(`json.zig`). SQLite의 `json1`과는 문법(lax), 경로(`[*]`, 필터, 항목 메서드), 숫자와 출력 형식이 달라서 쓰지 않습니다.
+
+### JSON 타입과 IS JSON
+
+- `JSON` 열은 `TEXT`로 저장하고 `CHECK (json_valid(열))`을 붙입니다. 선언 타입 `JSON`은 `xq_catalog`에 남고 `USER_TAB_COLUMNS`는 `JSON`, 길이 8200입니다.
+- INSERT·UPDATE가 넣는 값은 저장 변환(`xq_ora_coerce()`)이 Oracle처럼 바꿉니다.
+  - lax 문법을 읽고, 압축 형식(공백 없음)으로 씁니다. `'{a : 1}'` → `{"a":1}`
+  - 숫자는 Oracle `NUMBER`의 철자입니다. `1.50` → `1.5`, `1e2` → `100`, `-0.0` → `0`
+  - 문법 오류는 `ORA-40441`, 중복 키는 `ORA-40444`
+- 그래서 저장된 값은 RFC 8259 JSON이고, sqlite3도 `json_valid()` 검사와 `json_extract()`를 그대로 씁니다.
+- `x IS [NOT] JSON [STRICT|LAX] [WITH UNIQUE KEYS] [DISALLOW SCALARS]`는 `xq_ora_is_json(x, flags)`입니다. NULL이면 NULL입니다. CHECK에 쓸 수 있습니다.
+- lax 문법(기본): 따옴표 없는 키, 작은따옴표 문자열, 대소문자 무관한 `true`/`null`, `.5`·`+1`·`01`·`1.`·`0x10`·`NaN`, 끝의 쉼표, `/* */`·`//` 주석. `STRICT`는 RFC 8259입니다.
+
+### 함수
+
+| Oracle | xqlite | 지원 |
+| --- | --- | --- |
+| `JSON_VALUE` | `xq_ora_json_value()` | `RETURNING`(`VARCHAR2(n)`, `NUMBER(p,s)`, `DATE`, `TIMESTAMP`, `BOOLEAN`, `CLOB`, `JSON` ...), `TRUNCATE`, `ERROR`/`NULL`/`DEFAULT e ON ERROR`, `... ON EMPTY`(없으면 `ON ERROR`를 따름), `PASSING` |
+| `JSON_QUERY` | `xq_ora_json_query()` | `WITH [CONDITIONAL\|UNCONDITIONAL] [ARRAY] WRAPPER`, `WITHOUT WRAPPER`, `PRETTY`, `ASCII`, `RETURNING`, `ERROR`/`NULL`/`EMPTY [ARRAY\|OBJECT] ON ERROR\|EMPTY`, `PASSING` |
+| `JSON_EXISTS` | `xq_ora_json_exists()` | `PASSING e AS "v"`, `TRUE`/`FALSE`/`ERROR ON ERROR`. 조건(`WHERE`)으로도, 결과 열(23ai의 BOOLEAN)로도 |
+| `JSON_OBJECT` | `xq_ora_json_object()` | `[KEY] k VALUE v`, `k : v`, `KEY k IS v`, 열 이름만(`JSON_OBJECT(k)`는 `{"k": ...}`, 쓴 대로의 이름), `*`, `FORMAT JSON`, `NULL`/`ABSENT ON NULL`, `RETURNING`, `STRICT`, `WITH UNIQUE KEYS` |
+| `JSON_ARRAY` | `xq_ora_json_array()` | `FORMAT JSON`, `NULL`/`ABSENT ON NULL`(기본 `ABSENT`), `RETURNING` |
+| `JSON_OBJECTAGG`, `JSON_ARRAYAGG` | 집계 `xq_ora_json_objectagg()`, `xq_ora_json_arrayagg()` | `ORDER BY`(배열), `NULL`/`ABSENT ON NULL`, `RETURNING`. 행이 없으면 NULL |
+| `JSON_MERGEPATCH` | `xq_ora_json_mergepatch()` | RFC 7396, `PRETTY`, `ASCII`, `RETURNING`, `TRUNCATE`, `NULL`/`ERROR ON ERROR` |
+| `JSON_SERIALIZE` | `xq_ora_json_serialize()` | `PRETTY`, `ASCII`, `ORDERED`, `TRUNCATE`, `RETURNING` |
+| `JSON_TRANSFORM` | `xq_ora_json_transform()` | `SET`, `INSERT`(배열 위치 포함, 있으면 `ORA-40763`), `REPLACE`, `APPEND`, `REMOVE`, `RENAME`(맨 뒤로 옮김), `KEEP` |
+| `JSON(x)`, `JSON_SCALAR(x)` | `xq_ora_json()`, `xq_ora_json_scalar()` | |
+| `t.col.a.b[0].size()` | `xq_ora_json_dot()` | 점 표기([아래](#점-표기)) |
+| `JSON_TABLE` | 테이블 함수 `xq_ora_json_table()` | [아래](#json_table) |
+
+- 경로: `$`, `.key`, `."키"`, `.*`, `..key`(후손), `[n]`, `[n to m]`, `[n, m]`, `[last]`, `[last - n]`, `[*]`, 필터 `?(...)`(`== != < <= > >=`, `&&`, `\|\|`, `!`, `exists(...)`, `starts with`, `has substring`, `like`, `in (...)`, `@`, `$변수`), 항목 메서드(`size()`, `type()`, `length()`, `lower()`, `upper()`, `number()`, `string()`, `boolean()`, `abs()`, `ceiling()`, `floor()`, `double()`, `count()`, `sum()`, `avg()`, `min()`, `max()` ...). lax 모드입니다(배열의 멤버 접근은 원소마다, 스칼라의 `[0]`은 그 값).
+- 경로는 문자열 상수여야 하고, 문장을 컴파일할 때 검사합니다. `$`로 시작하지 않거나 문법이 틀리면 `ORA-40597`, `lax`/`strict` 앞말은 Oracle 23ai처럼 `ORA-40442`입니다.
+- 출력 형식은 SQL*Plus가 보여 주는 Oracle의 것입니다.
+  - 압축 형식에는 공백이 없습니다(`{"a":1,"b":[1,2]}`).
+  - `PRETTY`는 두 칸 들여쓰기, `"키" : 값`입니다. 컨테이너는 키 다음 줄에서 시작하고 빈 컨테이너는 여는 줄과 닫는 줄입니다.
+  - 제어 문자는 `\u0001`, `ASCII`는 `é`입니다.
+- 숫자
+  - `JSON_VALUE`는 `NUMBER`의 철자입니다(`1e-2` → `0.01`).
+  - `JSON_QUERY`와 다른 함수는 텍스트 문서의 철자를 지키고 지수 문자만 대문자로 씁니다(`1.50`, `1E2`).
+  - SQL 숫자는 JSON에 `0.5`처럼 씁니다(Oracle의 `.5`가 아님).
+- 오류 코드: `ORA-40441`(문법), `ORA-40456`(스칼라 아님), `ORA-40462`(값 없음), `ORA-40470`(값 여럿), `ORA-40480`(래퍼 필요), `ORA-40478`·`ORA-61723`(길이), `ORA-40473`(중복 키), `ORA-40629`(패치), `ORA-40762`·`ORA-40763`(`JSON_TRANSFORM`).
+- JSON 결과에는 SQLite의 JSON 서브타입이 붙습니다. 그래서 `JSON_OBJECT('k' VALUE JSON_QUERY(...))`처럼 JSON 생성 함수에 준 JSON 결과는 문자열이 아니라 JSON입니다. 파서가 이렇게 바꾸는 값도 있습니다.
+  - `JSON` 열은 `xq_ora_json(열)`로 감쌉니다.
+  - 날짜는 ISO 8601 텍스트입니다(`replace(d, ' ', 'T')` → `"2024-01-02T00:00:00"`).
+  - `TRUE`/`FALSE` 상수는 JSON의 `true`/`false`입니다.
+- `JSON_VALUE`의 기본 결과는 `VARCHAR2(4000)` 텍스트입니다. 숫자 상수와 비교하면(`JSON_VALUE(d, '$.a') = 5`) Oracle처럼 숫자로 바꿔 비교합니다(`xq_ora_cast(..., 'NUMBER')`).
+- `''`는 NULL입니다. `JSON_OBJECT('a' VALUE '')`는 `{"a":null}`이고 `JSON_VALUE('', ...)`는 NULL입니다.
+
+### 점 표기
+
+`t.col.a.b[0].c`, `t.col.a.size()`(테이블 별칭이 필요함)는 파싱 뒤에 FROM을 보고 정합니다. `t`가 FROM에 없으면 예전처럼 `스키마.테이블.열`입니다.
+
+| 열 | 결과 |
+| --- | --- |
+| `JSON` 타입 | JSON 텍스트. 스칼라도 JSON(`"str"`, `true`, `null`) |
+| 텍스트(`IS JSON` 검사가 있는 `VARCHAR2`·`CLOB`) | 스칼라는 SQL 값(`str`, `true`, JSON null은 NULL), 객체·배열은 JSON |
+
+값이 여럿이면 배열로 감쌉니다. 항목 메서드로 끝나면 그 SQL 값입니다. 결과 열 이름은 첫 배열 단계 앞의 마지막 키(대문자)입니다.
+
+### JSON_TABLE
+
+`JSON_TABLE(doc [FORMAT JSON], '행 경로' [ERROR|NULL ON ERROR] COLUMNS (...)) [별칭]`은 엔진의 테이블 함수(eponymous 가상 테이블) `xq_ora_json_table(doc, spec)`입니다.
+
+- `spec`은 파서가 쓰는 열 정의(JSON)입니다.
+- 가상 테이블의 열은 `c0` ... `c99`이고, 파서가 JSON_TABLE 열의 참조(`jt.a`, 다른 테이블에 없는 `a`, `*`, `jt.*`)를 그 열로 바꿉니다. 결과 열 이름은 JSON_TABLE 열의 이름입니다.
+- SQLite의 테이블 함수처럼 앞의 FROM 항목을 인자로 받습니다(`FROM t, JSON_TABLE(t.doc, ...) jt`, Oracle의 측면 조인).
+- 상관 서브쿼리에서는 한정한 이름(`jt.a`)만 바꿉니다.
+
+| 열 정의 | 뜻 |
+| --- | --- |
+| `name FOR ORDINALITY` | 그 단계의 행 번호(1부터) |
+| `name [type] [TRUNCATE] [PATH 'p'] [... ON ERROR] [... ON EMPTY]` | `JSON_VALUE`. 타입이 없으면 `VARCHAR2(4000)`, 경로가 없으면 `'$.name'`(쓴 대로의 이름: `a`는 `$.a`, `A`는 `$.A`) |
+| `name [type] FORMAT JSON [WITH ... WRAPPER] [PATH 'p']` | `JSON_QUERY` |
+| `name [type] EXISTS [PATH 'p']` | `JSON_EXISTS`. 숫자 타입이면 1/0, 문자 타입이면 `'true'`/`'false'` |
+| `NESTED [PATH] 'p' COLUMNS (...)` | 바깥 행마다 그 경로의 행(외부 조인: 없으면 NULL 한 행). 형제 `NESTED`는 Oracle처럼 합집합(다른 형제의 열은 NULL) |
+
+`DEFAULT`는 상수만 됩니다(Oracle과 같음). 문서가 JSON이 아니면 행이 없습니다(`ERROR ON ERROR`면 `ORA-40441`).
+
+### sqlite3에서
+
+- `JSON` 열은 sqlite3가 그대로 읽고 씁니다. 검사는 `json_valid()`입니다. 다만 sqlite3가 넣는 값은 저장 변환을 거치지 않습니다(lax 문법은 거부되고, 숫자는 그대로).
+- `IS JSON` 검사, 그리고 SQL/JSON 함수나 `JSON_TABLE`을 쓰는 뷰·생성 열은 `xq_ora_*` 엔진 함수를 부릅니다. 그래서 sqlite3에서는 그 테이블에 쓰거나 그 뷰를 읽을 수 없습니다(다른 방언 함수와 같은 한계). xqlite는 어느 방언의 연결이든 읽습니다.
+
 ## Oracle과 다른 점
 
 | 주제 | Oracle | xqlite | 이유 |
@@ -283,6 +373,8 @@ DELETE FROM t WHERE EXISTS (SELECT 1 FROM s WHERE c [AND u] AND d);
 | 외래 키 | 늘 강제 | `PRAGMA foreign_keys = ON`일 때만 | SQLite와 같음 |
 | `CHAR` 비교 | 공백을 채워 비교 | `COLLATE RTRIM` | 근사 |
 | 저장되는 식 | | IR이 SQLite 텍스트로 렌더링. 방언 함수는 `xq_oracle_substr(...)`처럼, 저장 변환은 쓰지 않음(DML에만) | 다른 방언에서도 같은 뜻. 단 sqlite3에서는 그런 식을 계산할 수 없음 |
+| JSON 타입 | 이진(OSON) | 정규화한 JSON 텍스트 | sqlite3가 읽음 |
+| JSON 결과 열의 순서 | `JSON_OBJECTAGG`, `ORDER BY` 없는 `JSON_ARRAYAGG`는 처리 순서 | SQLite가 행을 읽는 순서 | |
 | 셸 | | 셸은 SQLite 규칙으로 문장을 나눔. `/` 줄과 `q'[it's]'` 같은 홀수 따옴표는 한 번에 넘긴 텍스트(`exec`)에서만 | 방언별 문장 경계는 아직 없음 |
 
 ## 아직 하지 않은 것
@@ -295,15 +387,16 @@ DELETE FROM t WHERE EXISTS (SELECT 1 FROM s WHERE c [AND u] AND d);
 | DML | `UPDATE t SET c = ROWNUM`, `LOG ERRORS`, `WHERE CURRENT OF` |
 | DDL | `ALTER TABLE ... MODIFY`·`ADD CONSTRAINT`·`DROP CONSTRAINT`, 한 번에 여러 열 추가·삭제, `CREATE SYNONYM`, 구체화된 뷰, 파티션, `ORGANIZATION INDEX`, `ON COMMIT DELETE ROWS`(임시 테이블은 `PRESERVE ROWS`로 동작), `ALTER SEQUENCE`, `GRANT`/`REVOKE` |
 | 트랜잭션 | DDL의 암묵적 커밋, 격리 수준 |
+| JSON | `IS JSON (OBJECT\|ARRAY\|SCALAR)`, `strict` 경로 모드, `JSON_TRANSFORM`의 처리기(`IGNORE ON MISSING` ...)와 `NESTED PATH`·`CASE`·`SORT` 같은 연산, `JSON_TABLE`의 `TYPE(STRICT)`와 100개가 넘는 열, 경로의 `like_regex`·`eq_regex`와 날짜 비교, `JSON_ARRAY(서브쿼리)`, `JSON_OBJECT`의 비교식 값(`'k' VALUE a > b`), JSON 검색 인덱스, `JSON_DATAGUIDE`, `JSON_EQUAL`, JSON 관계형 이중성 뷰 |
 | 오류 | 실행 중 오류의 ORA- 코드화, `ORA-01476`(0으로 나누기), `ORA-30926`(MERGE의 중복 일치) |
 
 ## 검증
 
 | 도구 | 하는 일 |
 | --- | --- |
-| `src/dialect/oracle/test.zig` | 종단 테스트(어휘, `''` 규칙, 질의, 날짜, DDL과 타입, identity·시퀀스, MERGE·INSERT ALL, 트랜잭션, 바인드 변수, 데이터 사전) |
-| `xqt dialect-diff oracle` + `tools/dialect/oracle-cases.txt` | 실제 Oracle과 차등 비교. 40개 케이스가 Oracle Database 23ai Free와 같은 행·열 이름·오류 코드를 냄 |
-| `xqt interop oracle` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
+| `src/dialect/oracle/test.zig` | 종단 테스트(어휘, `''` 규칙, 질의, 날짜, DDL과 타입, identity·시퀀스, MERGE·INSERT ALL, 트랜잭션, 바인드 변수, 데이터 사전, JSON) |
+| `xqt dialect-diff oracle` + `tools/dialect/oracle-cases.txt` | 실제 Oracle과 차등 비교. 55개 케이스(JSON 15개)가 Oracle Database 23ai Free와 같은 행·열 이름·오류 코드를 냄 |
+| `xqt interop oracle` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(JSON 열 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
 | `zig build fuzz -- ir_roundtrip` | 퍼저의 방언 목록에 Oracle이 있음. 다른 방언의 트리로 만든 뷰를 Oracle 프론트엔드로 읽고, Oracle의 훅으로 렌더링한 텍스트를 모든 방언에서 컴파일 |
 
 차등 비교는 Oracle 컨테이너를 띄운 뒤 실행합니다(`$ORA_SQLPLUS`, 기본값 `podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1`). 케이스는 한 번에 하나씩 돌고, 각 케이스는 사용자 XQ의 테이블·뷰·시퀀스를 지우고 날짜 형식을 이 방언의 것(`YYYY-MM-DD HH24:MI:SS`)으로 맞춘 뒤 시작합니다. 비교할 때 오류는 ORA- 코드로 맞추고(SQLite 문구의 제약 위반은 Oracle이 같은 경우에 내는 코드로), Oracle의 `.5`와 `TRUE`는 `0.5`와 `1`로 맞춥니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.

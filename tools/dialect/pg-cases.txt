@@ -424,3 +424,252 @@ SELECT a FROM t;
 DROP SCHEMA "Mixed" CASCADE;
 DROP TABLE s.u;
 DROP TABLE IF EXISTS s.u;
+
+-- case: json: json keeps its text, jsonb is normalized
+SELECT '{"b":1, "a":[1,2,{"y":1,"x":2}], "a":3}'::jsonb, '{"b":1,  "a":2, "b":3}'::json;
+SELECT '1e2'::jsonb, '1.50'::jsonb, '-0'::jsonb, '1.5e-3'::jsonb, '12.5E1'::jsonb, '"aé\n"'::jsonb, '[]'::jsonb, ' { } '::jsonb;
+SELECT '{"aa":1,"b":2,"a":3,"ab":4}'::jsonb;
+SELECT '{"a":1}'::jsonb::text, '{"a":1}'::json::text, '{"a" : 1}'::json::jsonb;
+
+-- case: json: json keeps its text, jsonb is normalized (errors)
+SELECT '{'::jsonb;
+SELECT '[1,]'::json;
+SELECT '01'::json;
+SELECT '"\u0000"'::jsonb;
+
+-- case: json: -> ->> with keys and indexes
+SELECT '{"a": {"b": 2}}'::json -> 'a' ->> 'b', '{"a": {"y":1, "x":2}}'::jsonb -> 'a', '{"a": {"y":1,  "x":2}}'::json -> 'a';
+SELECT '[1,2,3]'::jsonb -> -1, '[1,2,3]'::jsonb ->> 0, '[1,2,3]'::jsonb -> 5, '{"a":1}'::jsonb -> 0, '[1]'::jsonb -> 'a';
+SELECT '{"a":"x","b":null,"c":true}'::jsonb ->> 'a', '{"a":"x","b":null}'::jsonb ->> 'b', '{"a":"x","b":null}'::jsonb -> 'b', '{"c":true}'::jsonb ->> 'c';
+SELECT '{"a":1,"a":2}'::json -> 'a', '{"a":1,"a":2}'::jsonb -> 'a';
+SELECT '["a", null]'::jsonb ->> 1, '{"a":"\u00e9"}'::json ->> 'a', '{"a":"\u00e9"}'::json -> 'a', '{"a":"\u00e9"}'::jsonb -> 'a';
+SELECT ('{"n": 5}'::jsonb ->> 'n')::int + 1, '{"a":[1,2]}'::jsonb -> 'a' -> 1;
+
+-- case: json: #> #>> paths
+SELECT '{"a": {"b": [1,2]}}'::jsonb #> '{a,b,1}', '{"a": {"b": [1,2]}}'::json #>> '{a,b}', '{"a": {"b": [1,2]}}'::jsonb #> '{a,b,-1}';
+SELECT '{"a": {"b": [1,2]}}'::jsonb #> '{}', '{"a":1}'::jsonb #> '{x,y}', '{"a":[1]}'::jsonb #> '{a,z}', '{"a":"s"}'::jsonb #>> '{a}';
+
+-- case: json: #> #>> paths (errors)
+SELECT '{"a":1}'::jsonb #> 'nope';
+
+-- case: json: containment and existence
+SELECT '{"a":1,"b":2}'::jsonb @> '{"a":1}', '{"a":1}'::jsonb <@ '{"a":1,"b":2}', '{"a":1}'::jsonb @> '{"a":2}';
+SELECT '[1,2,[3,4]]'::jsonb @> '[[3]]', '[1,2]'::jsonb @> '1', '1'::jsonb @> '[1]', '[[1,2]]'::jsonb @> '[1]', '{"a":[1,2,3]}'::jsonb @> '{"a":[3,1]}';
+SELECT '{"a":1}'::jsonb ? 'a', '["a","b"]'::jsonb ? 'b', '"a"'::jsonb ? 'a', '{"a":{"b":1}}'::jsonb ? 'b';
+SELECT '{"a":1,"b":2}'::jsonb ?| array['x','a'], '{"a":1,"b":2}'::jsonb ?& array['a','b'], '{"a":1}'::jsonb ?& array['a','x'], '{"a":1}'::jsonb ?| '{x,y}';
+
+-- case: json: || - #-
+SELECT '{"a":1}'::jsonb || '{"b":2}'::jsonb, '{"a":1,"b":1}'::jsonb || '{"b":2}', '[1]'::jsonb || '2', '1'::jsonb || '2'::jsonb, '{"a":1}'::jsonb || '[2]'::jsonb, '[1,2]'::jsonb || '[3]';
+SELECT '{"a":1,"b":2}'::jsonb - 'a', '["a","b","a"]'::jsonb - 'a', '[1,2,3]'::jsonb - 1, '[1,2,3]'::jsonb - -1, '[1,2,3]'::jsonb - 9, '{"a":1,"b":2,"c":3}'::jsonb - array['a','c'];
+SELECT '{"a":{"b":1,"c":2}}'::jsonb #- '{a,b}', '[1,[2,3]]'::jsonb #- '{1,0}', '{"a":1}'::jsonb #- '{x}', '{"a":1}'::jsonb #- '{}';
+
+-- case: json: || - #- (errors)
+SELECT '{"a":1}'::jsonb - 1;
+SELECT '1'::jsonb - 'a';
+SELECT '1'::jsonb #- '{a}';
+
+-- case: json: jsonb comparison and order
+SELECT '{"a":1}'::jsonb = '{"a": 1}'::jsonb, '[1,2]'::jsonb = '[2,1]', '{"b":1,"a":2}'::jsonb = '{"a":2,"b":1}', '1.0'::jsonb = '1'::jsonb;
+SELECT '{"a":1}'::jsonb > '[1,2,3]'::jsonb, '[1]'::jsonb < '[0,0]'::jsonb, 'true'::jsonb > '1'::jsonb, '1'::jsonb > '"a"'::jsonb, '"a"'::jsonb > 'null'::jsonb;
+CREATE TABLE o (j jsonb);
+INSERT INTO o VALUES ('{"a":1}'), ('[1,2]'), ('[3]'), ('true'), ('false'), ('10'), ('9.5'), ('"b"'), ('"a"'), ('null'), ('{}'), ('{"a":1,"b":2}');
+SELECT j FROM o ORDER BY j;
+SELECT j FROM o ORDER BY j DESC LIMIT 3;
+SELECT count(DISTINCT j) FROM o;
+
+-- case: json: building functions
+SELECT jsonb_build_object('a', 1, 'b', true, 'c', null, 'd', 'x', 'b', 2), json_build_object('a', 1, 'b', 'x', 'c', 1.5), json_build_object();
+SELECT json_build_array(1, 'a', null, true), jsonb_build_array(1, '{"z":1}'::jsonb, '{"z":1}'::json, '{"z":1}'), jsonb_build_array();
+SELECT json_build_object('a', '{"x" :  1}'::json, 'b', '{"y":2}'::jsonb), json_build_object(1, 2);
+SELECT to_json('a"b\c'::text), to_jsonb(42), to_json(true), to_jsonb('{"a":1}'::jsonb), to_json(NULL::text), to_jsonb('x'::text);
+SELECT json_object('{a,1,b,2}'), jsonb_object('{a,1,b,null}'), json_object('{a,b}', '{1,2}'), jsonb_object('{b,a}', '{1,2}');
+SELECT array_to_json(ARRAY[1,2,3]), array_to_json(ARRAY['a','b']), array_to_json('{1,2}'::int[]), to_json(ARRAY['x', NULL]), json_build_object('k', ARRAY[1,2]);
+
+-- case: json: building functions (errors)
+SELECT json_build_object('a');
+SELECT json_build_object(null, 1);
+SELECT jsonb_build_object(null, 1);
+SELECT json_object('{a,1,b}');
+
+-- case: json: processing functions
+SELECT jsonb_typeof('[1]'), json_typeof('{"a":1}'), jsonb_typeof('"x"'), jsonb_typeof('1.5'), jsonb_typeof('true'), json_typeof('null');
+SELECT json_array_length('[1,2,3]'), jsonb_array_length('[]');
+SELECT json_extract_path('{"a":{"b":[10,20]}}', 'a', 'b', '1'), jsonb_extract_path_text('{"a":{"b":"x"}}', 'a', 'b'), jsonb_extract_path('{"a":1}', 'z');
+SELECT json_strip_nulls('{"a": 1, "b": null, "c": [1, null, {"d": null}]}'), jsonb_strip_nulls('{"a": 1, "b": null, "c": {"d": null}}');
+SELECT jsonb_pretty('{"a":[1,2,{"x":{}}],"b":{},"c":[]}');
+SELECT jsonb_pretty('1');
+SELECT jsonb_pretty('[]'), jsonb_pretty('{}'), jsonb_pretty('[[]]');
+SELECT row_to_json(t, true) FROM (SELECT 1 AS a, 'x' AS b) t;
+SELECT array_to_json(ARRAY[1,2], true);
+SELECT json_agg(x) FROM (VALUES (ARRAY[1,2]), (ARRAY[3])) AS v(x);
+SELECT json_agg(x) FROM (VALUES ('{"a":1}'::json), ('[2]'::json)) AS v(x);
+
+-- case: json: processing functions (errors)
+SELECT jsonb_array_length('{}');
+SELECT json_array_length('5');
+
+-- case: json: jsonb_set jsonb_insert jsonb_set_lax
+SELECT jsonb_set('{"a":1}', '{b}', '2'), jsonb_set('{"a":1}', '{b}', '2', false), jsonb_set('{"a":{"b":1}}', '{a,b}', '[1]'), jsonb_set('[1,2,3]', '{1}', '"x"');
+SELECT jsonb_set('[1,2]', '{5}', '9'), jsonb_set('[1,2]', '{-5}', '0'), jsonb_set('{"a":[1]}', '{a,0}', 'null'), jsonb_set('{"a":1}', '{x,y}', '1');
+SELECT jsonb_set('{"a":1}', '{}', '2'), jsonb_set('{"a":1}', '{a}', NULL);
+SELECT jsonb_insert('[1,2]', '{0}', '0'), jsonb_insert('[1,2]', '{0}', '0', true), jsonb_insert('{"a":1}', '{b}', '2'), jsonb_insert('{"a":[1,2]}', '{a,-1}', '9', true);
+SELECT jsonb_set_lax('{"a":1}', '{a}', null, true, 'delete_key'), jsonb_set_lax('{"a":1}', '{a}', null), jsonb_set_lax('{"a":1}', '{a}', null, true, 'return_target');
+
+-- case: json: jsonb_set jsonb_insert jsonb_set_lax (errors)
+SELECT jsonb_set('1', '{a}', '2');
+SELECT jsonb_set('[1]', '{x}', '2');
+SELECT jsonb_insert('{"a":1}', '{a}', '2');
+SELECT jsonb_set_lax('{"a":1}', '{a}', null, true, 'raise_exception');
+
+-- case: json: set-returning functions in FROM
+SELECT * FROM jsonb_each('{"b":1, "a":"x", "c":{"z":null}}');
+SELECT * FROM json_each('{"b":1,  "a":"x", "b":[1,  2]}');
+SELECT * FROM json_each_text('{"b":1, "a":"x", "c":null}') AS t(k, v);
+SELECT key, value FROM jsonb_each_text('{"a":true}');
+SELECT value FROM jsonb_array_elements('[1, "a", {"x":1}, null]');
+SELECT * FROM json_array_elements_text('[1, "a", null, [2]]') AS e;
+SELECT * FROM jsonb_object_keys('{"b":1,"aa":2,"a":3}');
+SELECT k FROM json_object_keys('{"b":1,"a":2,"b":3}') AS k;
+SELECT * FROM jsonb_array_elements('[10,20]') WITH ORDINALITY AS t(v, n);
+SELECT json_array_elements('[1,2]') -> 0;
+SELECT jsonb_object_keys('{"a":1,"b":2}') ORDER BY 1 DESC;
+
+-- case: json: set-returning functions in FROM (errors)
+SELECT * FROM jsonb_each('[1]');
+SELECT * FROM jsonb_array_elements('{"a":1}');
+SELECT * FROM json_array_elements('3');
+SELECT * FROM jsonb_object_keys('[1]');
+SELECT * FROM json_each('[1]');
+SELECT * FROM json_array_elements('{}');
+
+-- case: json: set-returning functions against a table
+CREATE TABLE ev (id int PRIMARY KEY, data jsonb);
+INSERT INTO ev VALUES (1, '{"tags":["a","b"],"n":1}'), (2, '{"tags":["c"],"n":2}'), (3, '{"n":3}');
+SELECT id, jsonb_array_elements_text(data -> 'tags') AS tag FROM ev ORDER BY id, tag;
+SELECT ev.id, e.key, e.value FROM ev, jsonb_each(ev.data) e ORDER BY 1, 2;
+SELECT id, t.value FROM ev CROSS JOIN LATERAL jsonb_array_elements(ev.data -> 'tags') AS t ORDER BY 1, 2;
+SELECT id, jsonb_object_keys(data) FROM ev ORDER BY 1, 2;
+SELECT id, k FROM ev, jsonb_object_keys(data) AS k WHERE k <> 'n' ORDER BY 1, 2;
+SELECT count(*) FROM ev, jsonb_array_elements(data -> 'tags');
+
+-- case: json: records
+SELECT * FROM json_to_record('{"a":1,"b":"x","c":{"d":1},"e":[1,2]}') AS x(a int, b text, c jsonb, e json, g text);
+SELECT * FROM jsonb_to_recordset('[{"a":1,"b":"x"},{"a":2}]') AS x(a int, b text);
+CREATE TABLE rt (a int, b text, c jsonb);
+SELECT * FROM json_populate_record(NULL::rt, '{"a":5,"b":"q","c":{"z":[1]}}');
+SELECT a, b FROM jsonb_populate_recordset(NULL::rt, '[{"a":1},{"b":"y"}]');
+
+-- case: json: records (errors)
+CREATE TABLE rt (a int, b text, c jsonb);
+SELECT * FROM json_to_recordset('{"a":1}') AS x(a int);
+SELECT * FROM json_to_recordset('[1]') AS x(a int);
+SELECT * FROM json_to_record('[1]') AS x(a int);
+SELECT * FROM json_to_record('{"a":1}');
+
+-- case: json: jsonpath
+SELECT jsonb_path_query('{"a":[1,2,3,4]}', '$.a[*] ? (@ > 2)');
+SELECT * FROM jsonb_path_query('{"a":[{"b":1},{"b":5}]}', '$.a[*] ? (@.b > 2).b');
+SELECT jsonb_path_exists('{"a":[1,2]}', '$.a[*] ? (@ == 2)'), jsonb_path_match('{"a":1}', '$.a == 1'), jsonb_path_query_array('{"a":[1,2,3]}', '$.a[1 to 2]'), jsonb_path_query_first('{"a":[1,2,3]}', '$.a[last]');
+SELECT '{"a":[1,2,3]}'::jsonb @? '$.a[*] ? (@ > 2)', '{"a":[1,2,3]}'::jsonb @@ '$.a[*] > 2', '{"a":1}'::jsonb @@ '$.a == "x"', '{"a":1}'::jsonb @? '$.b';
+SELECT jsonb_path_query_array('{"a":{"b":"x","c":null}}', '$.a.*'), jsonb_path_query_array('[1,[2,3]]', '$[*].size()'), jsonb_path_query_array('{"a":[1,2]}', '$.a.type()'), jsonb_path_query_first('{"x":2.5}', '$.x.floor()');
+SELECT jsonb_path_query_array('{"a":[1,2,3]}', '$.a[*] ? (@ >= $min)', '{"min":2}'), jsonb_path_exists('{"a":"abc"}', '$.a ? (@ starts with "ab")');
+SELECT jsonb_path_query_array('["abc", "xbz", "ABC", "a1c", 5]', '$[*] ? (@ like_regex "^a.c$")'), jsonb_path_query_array('["abc", "ABC", "x"]', '$[*] ? (@ like_regex "^a[a-z]c$" flag "i")'), jsonb_path_exists('{"a":"x12y"}', '$.a ? (@ like_regex "\\d+")'), jsonb_path_query_array('["a.c", "abc"]', '$[*] ? (@ like_regex "a.c" flag "q")'), jsonb_path_query_array('["color", "colour", "colr"]', '$[*] ? (@ like_regex "^colou?r$" || @ like_regex "(ab|cd){2}")');
+SELECT jsonb_path_query_array('[1,2]', '$[*]'::jsonpath), jsonb_path_query_array('{"a":{"b":[1]}}', '$.**'), jsonb_path_query_array('{"a":[1,2,3]}', '$.a[0,2]'), jsonb_path_query_array('[1,2,3]', '$[last - 1 to last]');
+SELECT jsonb_path_query('{"a":1}', 'lax $.b');
+SELECT jsonb_path_query('{"a":10}', '$.a / 3'), jsonb_path_query('{"a":1.5}', '$.a * 2'), jsonb_path_query('{"a":7}', '$.a % 3'), jsonb_path_query('{"a":1}', '$.a / 3'), jsonb_path_query('{"a":2}', '$.a - 0.25');
+SELECT '{"a": 1}'::jsonb @? '$.a ? (@ > "x")', '{"a":1}'::jsonb @@ '$.a';
+
+-- case: json: jsonpath (errors)
+SELECT jsonb_path_query('{"a":1}', 'strict $.b');
+SELECT jsonb_path_query('{"a":1}', '$.a +');
+SELECT jsonb_path_query('{"a":1}', '@.a');
+SELECT jsonb_path_query('[1,2]', '$[*] + 1');
+SELECT jsonb_path_match('{"a":1}', '$.a');
+SELECT jsonb_path_query('{"a":[1,2]}', 'strict $.a.b');
+SELECT jsonb_path_query('[1,2,3]', 'strict $[5]');
+
+-- case: json: IS JSON
+SELECT '{"a":1}' IS JSON, '[1]' IS JSON OBJECT, '[1]' IS JSON ARRAY, '1' IS JSON SCALAR, 'x' IS NOT JSON, '{"a":1,"a":2}' IS JSON WITH UNIQUE KEYS, '{"a":1,"a":2}' IS JSON WITHOUT UNIQUE KEYS, NULL IS JSON;
+SELECT j, j IS JSON OBJECT AS obj FROM (VALUES ('{}'), ('[]'), ('nope')) AS v(j) ORDER BY 1;
+
+-- case: json: SQL/JSON constructors
+SELECT JSON_OBJECT('a' : 1, 'b' VALUE 'x'), JSON_OBJECT('a': NULL), JSON_OBJECT('a': NULL ABSENT ON NULL), JSON_OBJECT(), JSON_OBJECT('a': 1 RETURNING jsonb);
+SELECT JSON_ARRAY(1, null, 'a'), JSON_ARRAY(1, null NULL ON NULL), JSON_ARRAY(), JSON_ARRAY('{"a":1}' FORMAT JSON, '{"a":1}'), JSON_ARRAY(1, 2 RETURNING jsonb);
+SELECT JSON_ARRAY(SELECT x FROM (VALUES (3), (1), (2)) AS v(x));
+CREATE TABLE ja (k text, v int);
+INSERT INTO ja VALUES ('a', 1), ('b', NULL), ('c', 3);
+SELECT JSON_ARRAYAGG(v ORDER BY k), JSON_ARRAYAGG(v ORDER BY k NULL ON NULL), JSON_OBJECTAGG(k : v), JSON_OBJECTAGG(k VALUE v ABSENT ON NULL RETURNING jsonb) FROM ja;
+SELECT JSON_ARRAYAGG(v) FROM ja WHERE false;
+SELECT JSON_ARRAY(SELECT 1 WHERE false), JSON_OBJECT('a' VALUE '{"b":1}' FORMAT JSON), JSON_OBJECT('a': true), JSON_ARRAY(true, 1.5);
+
+-- case: json: SQL/JSON constructors (errors)
+CREATE TABLE ja (k text, v int);
+INSERT INTO ja VALUES ('a', 1), ('b', NULL), ('c', 3);
+SELECT JSON_OBJECT('a': 1, 'a': 2 WITH UNIQUE KEYS);
+SELECT JSON_OBJECT(null : 1);
+SELECT JSON_OBJECTAGG(k : v WITH UNIQUE KEYS) FROM (VALUES ('a', 1), ('a', 2)) AS x(k, v);
+
+-- case: json: aggregates and rows
+CREATE TABLE t (id int, j jsonb, k json, b boolean, s text);
+INSERT INTO t VALUES (1, '{"b":1,"a":2}', '{"b" : 1}', true, 'x'), (2, '{"x":[1,2]}', '[1]', false, NULL);
+SELECT json_agg(t ORDER BY id) FROM t;
+SELECT jsonb_agg(t ORDER BY id) FROM t;
+SELECT jsonb_agg(j ORDER BY id), json_agg(s ORDER BY id), json_object_agg(id, b), jsonb_object_agg(s, id) FILTER (WHERE s IS NOT NULL) FROM t;
+SELECT row_to_json(t) FROM t ORDER BY id;
+SELECT to_jsonb(t) FROM t ORDER BY id;
+SELECT json_build_object('id', id, 'ok', b, 'j', j) FROM t ORDER BY id;
+SELECT json_agg(x) FROM (SELECT 1 AS x WHERE false) s;
+SELECT row_to_json(q) FROM (SELECT id, s AS name FROM t ORDER BY id) q;
+SELECT k || '!' FROM t WHERE id = 2;
+
+-- case: json: aggregates and rows (errors)
+CREATE TABLE t (id int, j jsonb, k json, b boolean, s text);
+INSERT INTO t VALUES (1, '{"b":1,"a":2}', '{"b" : 1}', true, 'x'), (2, '{"x":[1,2]}', '[1]', false, NULL);
+SELECT json_object_agg(s, id) FROM t;
+SELECT k || k FROM t;
+SELECT k = k FROM t;
+
+-- case: json: columns store jsonb normalized
+CREATE TABLE d (id int PRIMARY KEY, j jsonb NOT NULL DEFAULT '{"z":1, "a":2}', k json);
+INSERT INTO d (id, j, k) VALUES (1, '{"b":1,"a":2}', '{"b" :  1}');
+INSERT INTO d (id) VALUES (2);
+INSERT INTO d SELECT 3, '[1,  2]', '[1,  2]';
+SELECT id, j, k FROM d ORDER BY id;
+UPDATE d SET j = j || '{"c": 3}' WHERE id = 1;
+UPDATE d SET j = '{"y":1,"x":2}' WHERE id = 2;
+SELECT id, j FROM d ORDER BY id;
+SELECT id FROM d WHERE j = '{"a":2, "b":1, "c":3}';
+SELECT id FROM d WHERE j @> '{"a":2}' ORDER BY id;
+SELECT id FROM d WHERE j ? 'x';
+SELECT id, j - 'a', j -> 'x', k -> 0 FROM d ORDER BY id;
+INSERT INTO d VALUES (6, '{"n":1}') ON CONFLICT (id) DO UPDATE SET j = EXCLUDED.j;
+INSERT INTO d VALUES (6, '{"n":2,"m":1}') ON CONFLICT (id) DO UPDATE SET j = d.j || EXCLUDED.j RETURNING j;
+SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'd' ORDER BY ordinal_position;
+
+-- case: json: columns store jsonb normalized (errors)
+CREATE TABLE d (id int PRIMARY KEY, j jsonb NOT NULL DEFAULT '{"z":1, "a":2}', k json);
+INSERT INTO d (id, j, k) VALUES (1, '{"b":1,"a":2}', '{"b" :  1}');
+INSERT INTO d (id) VALUES (2);
+INSERT INTO d SELECT 3, '[1,  2]', '[1,  2]';
+UPDATE d SET j = j || '{"c": 3}' WHERE id = 1;
+UPDATE d SET j = '{"y":1,"x":2}' WHERE id = 2;
+INSERT INTO d VALUES (6, '{"n":1}') ON CONFLICT (id) DO UPDATE SET j = EXCLUDED.j;
+INSERT INTO d VALUES (6, '{"n":2,"m":1}') ON CONFLICT (id) DO UPDATE SET j = d.j || EXCLUDED.j RETURNING j;
+INSERT INTO d (id, j) VALUES (4, '{');
+INSERT INTO d (id, k) VALUES (5, 'x');
+
+-- case: json: GIN and expression indexes
+CREATE TABLE g (id int, doc jsonb);
+CREATE INDEX ON g USING gin (doc);
+CREATE INDEX g_path ON g USING gin (doc jsonb_path_ops);
+CREATE INDEX g_name ON g ((doc ->> 'name'));
+INSERT INTO g VALUES (1, '{"name":"a","tags":["x"]}'), (2, '{"name":"b"}');
+SELECT id FROM g WHERE doc @> '{"tags":["x"]}';
+SELECT id FROM g WHERE doc ->> 'name' = 'b';
+SELECT indexname FROM pg_indexes WHERE tablename = 'g' ORDER BY 1;
+
+-- case: json: views keep JSON expressions
+CREATE TABLE vt (id int, j jsonb);
+INSERT INTO vt VALUES (1, '{"a":{"b":1},"tags":["x","y"]}');
+CREATE VIEW vv AS SELECT id, j -> 'a' AS a, j #>> '{a,b}' AS b, j ? 'tags' AS has, jsonb_array_length(j -> 'tags') AS n, j || '{"c":1}' AS j2 FROM vt;
+SELECT * FROM vv;

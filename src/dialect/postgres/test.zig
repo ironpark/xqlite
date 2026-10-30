@@ -163,10 +163,10 @@ test "pg: expressions and functions" {
     // Casts.
     try c.expectRows("SELECT '42'::int + 1, CAST('7' AS bigint), 42::text || 'x', 'abcdef'::varchar(3), 'abc'::char(1), 3.14159::numeric(4,2)", "43|7|42x|abc|a|3.14\n");
     try c.expectRows("SELECT 't'::boolean, 'off'::bool, 1::boolean, '2024-03-05'::date, '2024-03-05 10:11:12.5'::timestamp, '10:11'::time", "1|0|1|2024-03-05|2024-03-05 10:11:12|10:11:00\n");
-    try c.expectRows("SELECT date '2024-03-05', timestamp '2024-03-05 01:02:03', '\\x0aff'::bytea, '{\"a\": 1}'::jsonb", "2024-03-05|2024-03-05 01:02:03|\n\xff|{\"a\":1}\n");
+    try c.expectRows("SELECT date '2024-03-05', timestamp '2024-03-05 01:02:03', '\\x0aff'::bytea, '{\"a\":1}'::jsonb", "2024-03-05|2024-03-05 01:02:03|\n\xff|{\"a\": 1}\n");
     try c.expectError("SELECT 'maybe'::boolean", "invalid input syntax for type boolean: \"maybe\"");
     try c.expectError("SELECT 1::nosuchtype", "type \"nosuchtype\" does not exist");
-    try c.expectError("SELECT '{1}'::int[]", "arrays are not supported");
+    try c.expectError("SELECT '{1}'::date[]", "arrays are not supported");
     // Strings.
     try c.expectRows("SELECT substring('hello' FROM 2 FOR 3), substring('hello' FROM 3), substring('hello', 2, 2), position('l' IN 'hello'), strpos('hello', 'lo')", "ell|llo|el|3|4\n");
     try c.expectRows("SELECT trim('  x  '), trim(BOTH 'x' FROM 'xxaxx'), trim(LEADING 'x' FROM 'xxa'), trim(TRAILING FROM 'a  '), btrim('xax', 'x'), ltrim('  a'), rtrim('a  ')", "x|a|a|a|a|a|a\n");
@@ -184,6 +184,72 @@ test "pg: expressions and functions" {
     try c.expectRows("SELECT version() LIKE 'PostgreSQL %', current_user, current_database(), current_schema", "1|postgres|main|public\n");
     // JSON operators.
     try c.expectRows("SELECT '{\"a\": {\"b\": 2}}'::json -> 'a' ->> 'b'", "2\n");
+}
+
+test "pg: json and jsonb" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // json keeps the text, jsonb is normalized.
+    try c.expectRows("SELECT '{\"b\":1,  \"a\":2, \"b\":3}'::json, '{\"b\":1, \"aa\":[1,2], \"a\":2, \"b\":3}'::jsonb, '1e2'::jsonb, '1.50'::jsonb",
+        "{\"b\":1,  \"a\":2, \"b\":3}|{\"a\": 2, \"b\": 3, \"aa\": [1, 2]}|100|1.50\n");
+    try c.expectError("SELECT '{'::jsonb", "invalid input syntax for type json");
+    try c.expectError("SELECT '\"\\u0000\"'::jsonb", "unsupported Unicode escape sequence");
+    // Operators.
+    try c.expectRows("SELECT '{\"a\": {\"y\":1,  \"x\":2}}'::json -> 'a', '{\"a\": {\"y\":1, \"x\":2}}'::jsonb -> 'a', '[1,2,3]'::jsonb -> -1, '{\"a\":\"x\"}'::jsonb ->> 'a'",
+        "{\"y\":1,  \"x\":2}|{\"x\": 2, \"y\": 1}|3|x\n");
+    try c.expectRows("SELECT '{\"a\": {\"b\": [1,2]}}'::jsonb #> '{a,b,1}', '{\"a\": {\"b\": [1,2]}}'::json #>> '{a,b}'", "2|[1,2]\n");
+    try c.expectRows("SELECT '{\"a\":1,\"b\":2}'::jsonb @> '{\"a\":1}', '{\"a\":1}'::jsonb <@ '{\"a\":2}', '[1,2]'::jsonb @> '1', '{\"a\":1}'::jsonb ? 'a', '{\"a\":1}'::jsonb ?| array['x','a'], '{\"a\":1}'::jsonb ?& '{a,x}'",
+        "1|0|1|1|1|0\n");
+    try c.expectRows("SELECT '{\"a\":1}'::jsonb || '{\"b\":2}', '[1]'::jsonb || '2', '{\"a\":1,\"b\":2}'::jsonb - 'a', '[1,2,3]'::jsonb - 1, '{\"a\":1,\"b\":2}'::jsonb - array['a','b'], '{\"a\":{\"b\":1}}'::jsonb #- '{a,b}'",
+        "{\"a\": 1, \"b\": 2}|[1, 2]|{\"b\": 2}|[1, 3]|{}|{\"a\": {}}\n");
+    try c.expectError("SELECT '{\"a\":1}'::jsonb - 1", "cannot delete from object using integer index");
+    try c.expectError("SELECT '[1]'::json || '[2]'::json", "operator does not exist: json || json");
+    // jsonb compares and sorts as jsonb.
+    try c.expectRows("SELECT '{\"b\":1,\"a\":2}'::jsonb = '{\"a\": 2, \"b\": 1}', '1.0'::jsonb = '1'::jsonb, '{}'::jsonb > '[1,2]'::jsonb, '[1]'::jsonb < '[0,0]'::jsonb", "1|1|1|1\n");
+    // Functions.
+    try c.expectRows("SELECT jsonb_build_object('a', 1, 'b', true, 'c', null), json_build_object('a', 1, 'b', 'x'), json_build_array(1, 'a', null), to_json('a\"b'::text), to_jsonb(1 > 0)",
+        "{\"a\": 1, \"b\": true, \"c\": null}|{\"a\" : 1, \"b\" : \"x\"}|[1, \"a\", null]|\"a\\\"b\"|true\n");
+    try c.expectRows("SELECT jsonb_typeof('[1]'), json_array_length('[1,2,3]'), jsonb_extract_path_text('{\"a\":{\"b\":\"x\"}}', 'a', 'b'), jsonb_strip_nulls('{\"a\":null,\"b\":1}')", "array|3|x|{\"b\": 1}\n");
+    try c.expectRows("SELECT jsonb_set('{\"a\":1}', '{b}', '2'), jsonb_insert('[1,2]', '{0}', '0'), jsonb_set_lax('{\"a\":1}', '{a}', null, true, 'delete_key')", "{\"a\": 1, \"b\": 2}|[0, 1, 2]|{}\n");
+    try c.expectRows("SELECT jsonb_pretty('{\"a\":[1],\"b\":{}}')", "{\n    \"a\": [\n        1\n    ],\n    \"b\": {\n    }\n}\n");
+    try c.expectRows("SELECT JSON_OBJECT('a' : 1, 'b' VALUE 'x'), JSON_ARRAY(1, null, 'a'), JSON_OBJECT('a': 1 RETURNING jsonb), json_object('{a,1}')",
+        "{\"a\" : 1, \"b\" : \"x\"}|[1, \"a\"]|{\"a\": 1}|{\"a\" : \"1\"}\n");
+    try c.expectRows("SELECT '{\"a\":1}' IS JSON OBJECT, '[1]' IS NOT JSON, '{\"a\":1,\"a\":2}' IS JSON WITH UNIQUE KEYS", "1|0|0\n");
+    // jsonpath.
+    try c.expectRows("SELECT jsonb_path_query_array('{\"a\":[1,2,3,4]}', '$.a[*] ? (@ > 2)'), '{\"a\":[1,2]}'::jsonb @? '$.a[*] ? (@ == 2)', '{\"a\":1}'::jsonb @@ '$.a == 1', jsonb_path_query_first('{\"a\":10}', '$.a / 4')",
+        "[3, 4]|1|1|2.5000000000000000\n");
+    // Set-returning functions, in FROM and in the select list.
+    try c.expectRows("SELECT * FROM jsonb_each('{\"b\":1, \"a\":\"x\"}')", "a|\"x\"\nb|1\n");
+    try c.expectColumns("SELECT * FROM json_each_text('{\"a\":1}') AS t(k, v)", "k|v");
+    try c.expectRows("SELECT * FROM jsonb_array_elements('[10,20]') WITH ORDINALITY AS t(v, n)", "10|1\n20|2\n");
+    try c.expectRows("SELECT * FROM json_to_record('{\"a\":1,\"b\":\"x\",\"c\":{\"d\":1}}') AS x(a int, b text, c jsonb)", "1|x|{\"d\": 1}\n");
+    try c.expectRows("SELECT jsonb_array_elements_text('[1,2,3]') AS a, jsonb_object_keys('{\"x\":1}') AS b", "1|x\n2|NULL\n3|NULL\n");
+    try c.expectError("SELECT * FROM jsonb_each('[1]')", "cannot call jsonb_each on a non-object");
+    // Columns: jsonb stored normalized, json checked.
+    try c.exec(
+        \\CREATE TABLE ev (id int PRIMARY KEY, data jsonb NOT NULL DEFAULT '{"z": 1, "a": 2}', raw json, ok boolean);
+        \\INSERT INTO ev VALUES (1, '{"tags":["a","b"],"n":1}', '{"b" :  1}', true), (2, '{"tags":["c"],"n":2}', '[1]', false);
+        \\INSERT INTO ev (id) VALUES (3);
+    );
+    try c.expectRows("SELECT id, data, raw FROM ev ORDER BY id", "1|{\"n\": 1, \"tags\": [\"a\", \"b\"]}|{\"b\" :  1}\n2|{\"n\": 2, \"tags\": [\"c\"]}|[1]\n3|{\"a\": 2, \"z\": 1}|NULL\n");
+    try c.expectError("INSERT INTO ev (id, raw) VALUES (4, 'x')", "invalid input syntax for type json");
+    try c.exec("UPDATE ev SET data = data || '{\"m\": 0}' WHERE id = 3");
+    try c.expectRows("SELECT data FROM ev WHERE id = 3", "{\"a\": 2, \"m\": 0, \"z\": 1}\n");
+    try c.expectRows("SELECT id FROM ev WHERE data = '{\"z\":1, \"m\":0, \"a\":2}'", "3\n");
+    try c.expectRows("SELECT id, t.value FROM ev, jsonb_array_elements_text(ev.data -> 'tags') AS t ORDER BY 1, 2", "1|a\n1|b\n2|c\n");
+    try c.expectRows("SELECT id, jsonb_array_elements_text(data -> 'tags') AS tag FROM ev ORDER BY id, tag", "1|a\n1|b\n2|c\n");
+    try c.expectRows("SELECT json_agg(ev ORDER BY id) FROM ev WHERE id < 3",
+        "[{\"id\":1,\"data\":{\"n\": 1, \"tags\": [\"a\", \"b\"]},\"raw\":{\"b\" :  1},\"ok\":true}, \n {\"id\":2,\"data\":{\"n\": 2, \"tags\": [\"c\"]},\"raw\":[1],\"ok\":false}]\n");
+    try c.expectRows("SELECT jsonb_agg(data -> 'n' ORDER BY id), json_object_agg(id, ok) FROM ev", "[1, 2, null]|{ \"1\" : true, \"2\" : false, \"3\" : null }\n");
+    try c.expectRows("SELECT row_to_json(e) FROM (SELECT id, ok FROM ev WHERE id = 1) e", "{\"id\":1,\"ok\":true}\n");
+    // A gin index is a B-tree index of the column.
+    try c.exec("CREATE INDEX ON ev USING gin (data jsonb_path_ops)");
+    try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'ev' AND sql IS NOT NULL", "ev_data_idx\n");
+    // The schema keeps SQLite text: a view of JSON operators.
+    try c.exec("CREATE VIEW evv AS SELECT id, data -> 'n' AS n, data ? 'tags' AS has FROM ev");
+    try c.expectRows("SELECT * FROM evv ORDER BY id", "1|1|1\n2|2|1\n3|NULL|0\n");
+    try c.expectRows("SELECT sql LIKE '%xq_pg_jsonb_get(%' AND sql LIKE '%xq_pg_jsonb_exists(%' FROM sqlite_schema WHERE name = 'evv'", "1\n");
 }
 
 test "pg: parameters" {
@@ -298,7 +364,7 @@ test "pg: types are strict" {
     try c.expectError("INSERT INTO ty (i4) VALUES (3000000000)", "CHECK constraint failed: integer out of range");
     try c.expectError("INSERT INTO ty (vc) VALUES ('abcd')", "CHECK constraint failed: value too long for type character varying(3)");
     try c.expectError("INSERT INTO ty (b) VALUES (2)", "CHECK constraint failed: invalid input syntax for type boolean");
-    try c.expectError("INSERT INTO ty (j) VALUES ('{')", "CHECK constraint failed: invalid input syntax for type json");
+    try c.expectError("INSERT INTO ty (j) VALUES ('{')", "invalid input syntax for type json");
     try c.expectError("INSERT INTO ty (n) VALUES ('abc')", "CHECK constraint failed: invalid input syntax for type numeric");
     try c.expectError("INSERT INTO ty (by) VALUES (1)", "cannot store INT value in BLOB column ty.by");
     try c.expectError("CREATE TABLE bad (x nosuchtype)", "type \"nosuchtype\" does not exist");
@@ -416,7 +482,7 @@ test "pg: DDL" {
     try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL ORDER BY name", "child_lbl_desc\nchild_qty_idx\nchild_qty_idx1\nlbl\n");
     try c.exec("DROP INDEX child_qty_idx1; DROP INDEX IF EXISTS nosuch");
     try c.expectError("DROP INDEX nosuch", "index \"nosuch\" does not exist");
-    try c.expectError("CREATE INDEX x ON child USING gin (label)", "index method \"gin\" is not supported");
+    try c.expectError("CREATE INDEX x ON child USING gist (label)", "index method \"gist\" is not supported");
     // ALTER TABLE.
     try c.exec("ALTER TABLE child ADD COLUMN note varchar(5)");
     try c.exec("ALTER TABLE child ADD COLUMN IF NOT EXISTS note text");
@@ -501,7 +567,7 @@ test "pg: errors in PostgreSQL's words" {
     try c.expectError("CREATE TABLE t (x int)", "relation \"t\" already exists");
     try c.expectError("SELECT 1 FROM t WHERE", "syntax error at end of input");
     try c.expectError("SELECT a b c FROM t", "syntax error at or near \"c\"");
-    try c.expectError("SELECT ARRAY[1]", "ARRAY is not supported");
+    try c.expectError("SELECT ARRAY(SELECT 1)", "ARRAY is not supported");
     try c.expectError("SELECT 1 FROM t LATERAL", "syntax error at or near \"LATERAL\"");
     try c.expectError("CREATE TYPE mood AS ENUM ('a')", "CREATE TYPE is not supported");
     try c.expectError("LISTEN chan", "syntax error at or near \"LISTEN\"");

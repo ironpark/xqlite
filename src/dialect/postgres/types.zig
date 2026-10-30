@@ -13,7 +13,7 @@
 //! | bytea                               | BLOB    |                                        |
 //! | date, time, timestamp[tz], interval | TEXT    |                                        |
 //! | uuid                                | TEXT    |                                        |
-//! | json, jsonb                         | TEXT    | json_valid()                           |
+//! | json, jsonb                         | TEXT    | json_valid(); jsonb stored normalized  |
 //!
 //! A check is a named CHECK constraint whose name is PostgreSQL's
 //! message, so that a violation reads "CHECK constraint failed: integer
@@ -126,6 +126,22 @@ pub fn format(a: std.mem.Allocator, ty: TypeName) ![]const u8 {
     return std.mem.concat(a, u8, &.{ n, mods.items });
 }
 
+/// Whether `name[]` may be cast to: an array of these is its text literal
+/// ('{a,b}'), which the JSON operators and functions read (arrays are no
+/// column type).
+pub fn arrayElement(name: []const u8) bool {
+    const names = [_][]const u8{ "text", "character varying", "character", "name", "integer", "smallint", "bigint", "numeric", "real", "double precision" };
+    for (names) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
+}
+
+/// Whether `name` (an array's element) is a number type.
+pub fn isNumeric(name: []const u8) bool {
+    const names = [_][]const u8{ "integer", "smallint", "bigint", "numeric", "real", "double precision" };
+    for (names) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
+}
+
 /// The internal name of a type (int4, varchar, timestamptz ...): the
 /// name of a column that is a cast of a constant.
 pub fn internalName(name: []const u8) []const u8 {
@@ -155,7 +171,7 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (ty.array) return error.Array;
     const n = ty.name;
     const eql = std.mem.eql;
-    if (eql(u8, n, "regclass") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "uuid") or eql(u8, n, "interval")) return .{ .sqlite = "TEXT" };
+    if (eql(u8, n, "regclass") or eql(u8, n, "jsonpath") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "uuid") or eql(u8, n, "interval")) return .{ .sqlite = "TEXT" };
     if (eql(u8, n, "character varying") or eql(u8, n, "character")) {
         if (maxLength(ty)) |len| return .{ .truncate = len };
         return .{ .sqlite = "TEXT" };
@@ -169,7 +185,9 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (eql(u8, n, "date")) return .{ .func = "date" };
     if (eql(u8, n, "time without time zone") or eql(u8, n, "time with time zone")) return .{ .func = "time" };
     if (eql(u8, n, "timestamp without time zone") or eql(u8, n, "timestamp with time zone")) return .{ .func = "datetime" };
-    if (eql(u8, n, "json") or eql(u8, n, "jsonb")) return .{ .func = "json" };
+    // json is checked and kept as written, jsonb normalized (json.zig).
+    if (eql(u8, n, "json")) return .{ .func = "xq_pg_json" };
+    if (eql(u8, n, "jsonb")) return .{ .func = "xq_pg_jsonb" };
     const i = try info(ty);
     if (i.serial) return error.UnknownType;
     return .{ .sqlite = i.storage };

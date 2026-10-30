@@ -27,6 +27,8 @@ const parser = @import("parser.zig");
 const ddl = @import("ddl.zig");
 const funcs = @import("funcs.zig");
 const session = @import("session.zig");
+const jtype = @import("jtype.zig");
+const jfuncs = @import("jfuncs.zig");
 
 const RC = int.RC;
 
@@ -102,6 +104,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     };
     if (done) return;
     const stmt = ps.statement() catch |err| return parseFailed(p, sql, ps, err);
+    jtype.statement(ps, stmt) catch |err| return parseFailed(p, sql, ps, err);
     switch (stmt) {
         .create_table, .create_index, .create_view, .create_sequence, .alter_table, .drop => {
             var d: ddl.Ddl = .init(p, sql);
@@ -171,16 +174,19 @@ fn translateError(p: *int.Parse) int.Oom!void {
 
 pub const hooks: dialect.Hooks = .{
     .functions = &functions,
-    .engine_functions = &funcs.engine_functions,
+    .engine_functions = &engine_functions,
+    .collations = &.{.{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate }},
 };
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-} ++ sequence.functions ++ funcs.functions ++ session.functions;
+} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions;
+
+const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions;
 
 comptime {
     dfunc.checkTable(&functions);
-    dfunc.checkTable(&funcs.engine_functions);
+    dfunc.checkTable(&engine_functions);
 }
 
 /// The version string of PostgreSQL's version().
@@ -193,6 +199,9 @@ fn versionFunc(ctx: *dfunc.Context, _: []*dfunc.Mem) void {
 test {
     _ = @import("lexer.zig");
     _ = @import("funcs.zig");
+    _ = @import("json.zig");
+    _ = @import("jsonpath.zig");
+    _ = @import("regex.zig");
     _ = @import("state.zig");
     _ = @import("test.zig");
 }

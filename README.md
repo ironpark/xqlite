@@ -104,7 +104,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | 트랜잭션 / 세이브포인트 | ✅ | ✅ | ✅ | ✅ 중첩 `BEGIN TRAN`, `SAVE TRAN` | ✅ |
 | CTE / 재귀 CTE | ✅ | ✅ | ✅ | ✅ | ✅ |
 | 윈도우 함수 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| JSON | ✅ `json1` | 🚧 `json`/`jsonb` | ✅ `JSON_*`, `JSON_TABLE` | ✅ `JSON_VALUE`/`QUERY`/`MODIFY`, `OPENJSON`, `FOR JSON` | ✅ `JSON` 타입, SQL/JSON 함수, `JSON_TABLE` |
+| JSON | ✅ `json1` | ✅ `json`/`jsonb`, 연산자·함수, jsonpath 일부 | ✅ `JSON_*`, `JSON_TABLE` | ✅ `JSON_VALUE`/`QUERY`/`MODIFY`, `OPENJSON`, `FOR JSON` | ✅ `JSON` 타입, SQL/JSON 함수, `JSON_TABLE` |
 | 시퀀스 | — | ✅ | ✅ | ✅ `IDENTITY`, `SEQUENCE` | ✅ |
 | 스키마(네임스페이스) | ✅ `ATTACH` | ✅ `CREATE SCHEMA`, `search_path`, 붙인 DB | ✅ `CREATE DATABASE`, `USE`, `db.t`, 붙인 DB | 🚧 `dbo`, `#temp`, `db.dbo.t` | ✅ `CREATE USER` (사용자 = 스키마), `CURRENT_SCHEMA`, 붙인 DB |
 | 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 | 🔬 PL/SQL |

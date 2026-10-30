@@ -88,6 +88,8 @@ const reference_shell = "zig-out/bin/sqlite3-ref";
 /// build` puts in zig-out/bin (skipped without either). A check of the
 /// file that shares nothing with the b-tree's own.
 fn btreeSqlite3(gpa: std.mem.Allocator, io: std.Io, seed: u64, events_max: u32) !void {
+    // No processes to run (wasm32-wasi).
+    if (!std.process.can_spawn) return;
     const sqlite3: []const u8 = if (std.c.getenv("SQLITE3")) |p| std.mem.span(p) else if (std.Io.Dir.cwd().access(io, reference_shell, .{})) |_| reference_shell else |_| {
         if (!@import("builtin").is_test) std.debug.print("btree_sqlite3: no sqlite3 ($SQLITE3, {s}), skipped\n", .{reference_shell});
         return;

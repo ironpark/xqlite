@@ -321,16 +321,16 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 
 ## VFS
 
-방언과 상관없이 엔진 맨 아래에는 VFS(`src/vfs/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`)를 정합니다.
+방언과 상관없이 엔진 맨 아래에는 VFS(`pkg/vfs/src/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`)를 정합니다.
 
 | 구현 | 파일 | 잠금 | wal-index |
 | --- | --- | --- | --- |
-| POSIX | `vfs/unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀 | mmap한 `-shm` 파일 |
-| WASI | `vfs/wasi.zig` | 프로세스 안에서만(`vfs/inproc.zig`, 장치·inode 번호로) | 힙 메모리 |
-| 호스트(wasm32-freestanding) | `vfs/host.zig` | 프로세스 안에서(이름으로) 중재한 뒤 호스트에 물음(`xq_host_lock`) | 힙 메모리 |
-| 메모리 | `vfs/mem.zig` | `MemVfs` 객체 안에서 | 힙 메모리 |
-| memdb | `vfs/memdb.zig` | 저장소 안에서(`/이름`은 프로세스 안에서 공유) | 없음(WAL 불가, 저널은 메모리) |
-| 크래시 테스트 | `vfs/crash.zig` | 감싼 VFS의 것 | 감싼 VFS의 것 |
+| POSIX | `unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀 | mmap한 `-shm` 파일 |
+| WASI | `wasi.zig` | 프로세스 안에서만(`inproc.zig`, 장치·inode 번호로) | 힙 메모리 |
+| 호스트(wasm32-freestanding) | `host.zig` | 프로세스 안에서(이름으로) 중재한 뒤 호스트에 물음(`xq_host_lock`) | 힙 메모리 |
+| 메모리 | `mem.zig` | `MemVfs` 객체 안에서 | 힙 메모리 |
+| memdb | `memdb.zig` | 저장소 안에서(`/이름`은 프로세스 안에서 공유) | 없음(WAL 불가, 저널은 메모리) |
+| 크래시 테스트 | `crash.zig` | 감싼 VFS의 것 | 감싼 VFS의 것 |
 
 ```
 Db.open(.unix) ─▶ vfs.OsVfs ─┬─ POSIX     (네이티브)
@@ -340,6 +340,27 @@ Db.open(.memory) ─▶ MemVfs
 ```
 
 `vfs.OsVfs`는 타깃의 파일 시스템 VFS를 comptime에 고릅니다. 셋 모두 `init(gpa, io)`와 `interface()`가 있습니다. WASI와 호스트 VFS는 이름 없는 임시 파일을 메모리(`MemVfs`)에 둡니다. 잠금 표는 유닉스의 inode 표처럼 프로세스 전역이라서, 연결마다 VFS 객체가 따로 있어도 같은 파일의 잠금은 하나입니다. 다른 프로세스와의 잠금은 없습니다. 엔진이 VFS 밖에서 플랫폼에 묻는 것(시계, 환경 변수, 지역 시간, 64비트 원자 연산)은 `src/util/platform.zig` 한곳에 있습니다. 자세한 내용은 [WebAssembly](wasm.md)에 있습니다.
+
+### VFS 패키지
+
+VFS는 엔진과 따로 빌드되는 Zig 패키지(`pkg/vfs/`, 모듈 이름 `xqlite_vfs`)입니다. 위 표의 파일은 모두 `pkg/vfs/src/`에 있고, 패키지는 `std` 말고는 아무것도 import하지 않습니다. 루트 `build.zig.zon`이 경로 의존성(`.xqlite_vfs = .{ .path = "pkg/vfs" }`)으로 받고, `build.zig`의 `vfsImport()`가 타깃마다 `b.dependency("xqlite_vfs", .{ .target, .optimize })`로 모듈을 가져와 엔진 모듈(`src/root.zig`), C ABI 라이브러리(`src/capi.zig`), 퍼저에 `xqlite_vfs`라는 import로 붙입니다. 패키지 모듈은 최적화 모드를 가져다 쓰는 컴파일에서 물려받으므로(ReleaseSafe 빌드의 VFS도 ReleaseSafe), `optimize` 인자는 패키지 자체 테스트에만 쓰입니다.
+
+패키지 루트(`pkg/vfs/src/root.zig`)가 내보내는 것이 엔진과의 경계입니다.
+
+| 이름 | 내용 |
+| --- | --- |
+| `vfs` | 인터페이스: `Vfs`, `File`, `Error`, `LockLevel`, `OpenFlags`, `AccessMode`, `SyncFlags`, `ShmRegion`, `ShmLockTable`, `OsVfs` ... |
+| `mem`, `memdb`, `inproc`, `crash` | 구현. `memdb`는 힙을 받는 제네릭 `Memdb(heap)` |
+| `unix`, `wasi`, `host` | 타깃의 OS VFS. 타깃이 아니면 빈 네임스페이스 |
+| `Vfs`, `File`, `Error`, `MemVfs`, `OsVfs` | 자주 쓰는 이름의 별칭 |
+| `temp_directory` | `sqlite3_temp_directory` |
+
+엔진 파일은 `@import("xqlite_vfs").vfs`, `.mem` 식으로 가져옵니다. 공개 Zig API(`xqlite.vfs`, `xqlite.MemVfs`, `xqlite.OsVfs`, `xqlite.UnixVfs`, `xqlite.WasiVfs`, `xqlite.HostVfs`, `xqlite.crash_vfs`)는 `src/root.zig`가 패키지의 이름을 다시 내보내므로 그대로입니다. C ABI의 C VFS 다리(`src/capi/vfs.zig`)는 capi에 남고, 패키지의 인터페이스만 씁니다.
+
+엔진에서 VFS로 들어가던 두 의존성은 엔진이 넣어 주는 방식으로 바꿨습니다.
+
+- **임시 파일 디렉터리.** `sqlite3_temp_directory`는 패키지 변수 `temp_directory`(`pkg/vfs/src/root.zig`)입니다. POSIX VFS는 읽기만 하고(`unixTempFileDir()`의 순서 그대로: 이 변수, `$SQLITE_TMPDIR`, `$TMPDIR`, `/var/tmp`, `/usr/tmp`, `/tmp`, `.`), 쓰는 쪽은 엔진입니다. `PRAGMA temp_store_directory`가 `sqlite3_malloc()` 메모리로 바꾸고, C ABI는 이 변수를 `sqlite3_temp_directory`라는 이름으로 내보내 C 프로그램이 직접 씁니다.
+- **memdb의 힙.** `memdb.Memdb(heap)`는 `heap.allocator`, `heap.realloc(p, n)`, `heap.free(p)`로 저장소와 핸들을 할당합니다(`realloc`·`free`는 `sqlite3_realloc()`·`sqlite3_free()`처럼 포인터만 받음. `sqlite3_deserialize()`가 넘긴 버퍼를 키우고 해제해야 하므로). 엔진은 `src/sql/memdb.zig`에서 라이브러리 할당자(`src/sql/malloc.zig`)로 한 번만 인스턴스를 만들고, `sqlite3_deserialize()`, ATTACH의 임시 데이터베이스, C ABI의 "memdb" VFS가 모두 그것을 씁니다. 그래서 memdb의 메모리는 예전처럼 `sqlite3_status()`와 힙 한도(fuzzcheck의 한도 포함)에 잡힙니다. comptime 인자라서 초기화 순서가 없고, 공유 저장소와 설정(`state`)은 인스턴스마다 하나입니다.
 
 ## 소스 파일
 
@@ -358,6 +379,11 @@ Db.open(.memory) ─▶ MemVfs
 | `src/ir/render.zig` | `render.select(p, src, s)`, `render.expr()`, `render.statement()`(CREATE TABLE/INDEX/VIEW, ALTER TABLE)와 `Renderer` |
 | `src/ir/test.zig`, `fuzz.zig`, `gen.zig` | render ≡ lower 테스트와 퍼저 |
 | `src/catalog/catalog.zig`, `sequence.zig`, `schema.zig` | 방언 메타데이터, 시퀀스, 이름 붙은 스키마([스키마](#스키마네임스페이스)) |
+| `pkg/vfs/build.zig`, `build.zig.zon` | VFS 패키지(`xqlite_vfs`): 모듈과 `zig build test`. 루트 빌드가 경로 의존성으로 받음([VFS 패키지](#vfs-패키지)) |
+| `pkg/vfs/src/root.zig` | 패키지 루트: 인터페이스와 구현의 이름, `temp_directory`(`sqlite3_temp_directory`) |
+| `pkg/vfs/src/vfs.zig` | VFS 인터페이스(`Vfs`, `File`, 잠금, 공유 메모리)와 `OsVfs` |
+| `pkg/vfs/src/{unix,wasi,host,mem,memdb,inproc,crash}.zig` | VFS 구현([VFS](#vfs)의 표) |
+| `src/sql/memdb.zig` | 엔진의 memdb 인스턴스: `Memdb(malloc)` |
 
 구문 트리 IR(`src/ir/tree.zig`)이 나타내는 문장은 다음과 같습니다.
 

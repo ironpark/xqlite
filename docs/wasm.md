@@ -117,7 +117,7 @@ db.close();
 
 ## 잠금과 WAL
 
-WASI에는 권고 잠금(`fcntl(F_SETLK)`, `flock`)이 없고, 브라우저에는 동기 잠금이 없습니다. 그래서 두 VFS 모두 잠금을 프로세스(인스턴스) 안에서 중재합니다(`src/vfs/inproc.zig`).
+WASI에는 권고 잠금(`fcntl(F_SETLK)`, `flock`)이 없고, 브라우저에는 동기 잠금이 없습니다. 그래서 두 VFS 모두 잠금을 프로세스(인스턴스) 안에서 중재합니다(`pkg/vfs/src/inproc.zig`).
 
 - 같은 파일의 핸들은 연결이나 VFS 객체가 달라도 잠금 상태 하나를 나눠 씁니다. WASI VFS는 파일을 장치·inode 번호(`fd_filestat_get`)로, 호스트 VFS는 이름으로 구별합니다. 유닉스 VFS의 inode 표와 같은 방식입니다. 같은 인스턴스의 두 연결은 유닉스에서처럼 서로를 막고(`SQLITE_BUSY`), 한쪽이 쓰는 동안 다른 쪽이 읽습니다.
 - **다른 프로세스는 보이지 않습니다.** 두 WASI 프로세스(또는 WASI 프로세스와 sqlite3)가 같은 파일을 동시에 쓰면 DB가 깨질 수 있습니다. 한 DB 파일은 한 번에 한 프로세스만 써야 합니다. 차례로 여는 것은 괜찮습니다.
@@ -153,7 +153,7 @@ zig-out/bin/xqt wasi --wasm PATH     # WASI 빌드 하나를 따로
 
 `zig build test-wasi`는 다음을 돌립니다. `zig build check`에는 들어 있지 않습니다(wasmtime이 필요하므로).
 
-- 모듈과 CLI의 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 실행합니다. POSIX VFS와 `-shm` 파일, 파일 권한에 기대는 세 개만 건너뜁니다.
+- 모듈, CLI, VFS 패키지(`pkg/vfs`)의 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 실행합니다. POSIX VFS와 `-shm` 파일, 파일 권한에 기대는 세 개만 건너뜁니다.
 - `xqt wasi`: ReleaseSafe로 빌드한 WASI `xqlite`를 sqlite3, 네이티브 xqlite와 비교합니다. 자세한 검사 목록은 [테스트와 검증](testing.md#webassembly)에 있습니다.
 
 ## 제한

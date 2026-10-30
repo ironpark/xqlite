@@ -177,7 +177,7 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 
 ## 메모리 데이터베이스와 스냅숏
 
-**memdb와 직렬화.** SQLite의 `memdb.c`를 옮겼습니다. VFS는 엔진의 `src/vfs/memdb.zig`, `sqlite3_serialize()`/`sqlite3_deserialize()`는 `src/sql/serialize.zig`입니다.
+**memdb와 직렬화.** SQLite의 `memdb.c`를 옮겼습니다. VFS는 VFS 패키지의 `pkg/vfs/src/memdb.zig`(엔진이 `sqlite3_malloc()` 위에 만든 인스턴스는 `src/sql/memdb.zig`), `sqlite3_serialize()`/`sqlite3_deserialize()`는 `src/sql/serialize.zig`입니다.
 
 - `sqlite3_vfs_find("memdb")`가 있고(SQLite처럼 기본 VFS 다음), 데이터베이스 하나가 연속된 메모리 한 덩어리입니다. 이름이 `/`로 시작하면(`file:/name?vfs=memdb`) 프로세스 안의 연결들이 같은 저장소를 공유하고 마지막 연결이 닫힐 때 사라집니다. 다른 이름은 그 핸들만의 저장소입니다.
 - memdb 파일은 공유 메모리가 없어 WAL로 바꿀 수 없고(`journal_mode=wal`은 그대로), 페이저는 SQLite의 memVfs처럼 저널 모드를 `memory`로 시작해 저널도 memdb 파일에 둡니다. `pragma database_list`와 `sqlite3_db_filename()`의 이름은 `""`입니다.
@@ -212,7 +212,7 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - **트레이스의 프로파일 시간**은 SQLite처럼 VFS 시계(밀리초)로 재므로 나노초 값의 아래 여섯 자리는 0입니다.
 - **VFS**: C VFS의 `xRead`가 `SQLITE_IOERR_SHORT_READ`를 돌려주면 읽은 길이를 모르므로 끝의 0 바이트를 읽지 않은 것으로 칩니다. `sqlite3_database_file_object()`는 데이터베이스 이름 앞(SQLite가 `Pager*`를 두는 자리)에 VFS 다리가 넣어 둔 `sqlite3_file`을 돌려주므로, C VFS로 연 데이터베이스에서만 NULL이 아닙니다.
 - **`sqlite3_compileoption_get()`**은 엔진의 `PRAGMA compile_options` 목록에서 `THREADSAFE`만 C ABI의 값(2)으로 바꿔 보여 줍니다.
-- `sqlite3_temp_directory`는 unix VFS가 임시 파일 디렉터리로 씁니다(SQLite의 `unixTempFileDir()`처럼 그다음은 `$SQLITE_TMPDIR`, `$TMPDIR`, `/var/tmp`, `/usr/tmp`, `/tmp`, `.`). `PRAGMA temp_store_directory`로도 정합니다. `sqlite3_data_directory`는 SQLite에서도 Windows 전용이라 읽는 곳이 없고, `PRAGMA data_store_directory`는 아무 일도 하지 않습니다(Windows가 아닌 SQLite처럼).
+- `sqlite3_temp_directory`는 unix VFS가 임시 파일 디렉터리로 씁니다(SQLite의 `unixTempFileDir()`처럼 그다음은 `$SQLITE_TMPDIR`, `$TMPDIR`, `/var/tmp`, `/usr/tmp`, `/tmp`, `.`). `PRAGMA temp_store_directory`로도 정합니다. 변수 자체는 VFS 패키지의 `temp_directory`(`pkg/vfs/src/root.zig`)이고, C ABI가 이 이름으로 내보냅니다. `sqlite3_data_directory`는 SQLite에서도 Windows 전용이라 읽는 곳이 없고, `PRAGMA data_store_directory`는 아무 일도 하지 않습니다(Windows가 아닌 SQLite처럼).
 
 ## 문장 정보
 

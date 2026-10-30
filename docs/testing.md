@@ -201,11 +201,22 @@ zig build test
 다음을 함께 실행합니다.
 
 - 모듈의 단위 테스트
+- VFS 패키지(`pkg/vfs`)의 단위 테스트. 엔진 모듈과 다른 모듈이라 모듈의 테스트에 들어가지 않으므로 따로 빌드해 돌립니다(`vfsTests()`).
 - `docs/names_test.zig`: [docs/zig-api.md](zig-api.md)가 쓰는 이름(`xqlite.Value`, `Db.lastError` ...)과 `examples/`가 쓰는 이름이 모듈에 있는지 검사합니다.
-- `tools/globals_test.zig`: `src/`(그리고 `tools/xqt`)에 허용 목록 밖의 가변 전역이 없는지 검사합니다.
+- `tools/globals_test.zig`: `src/`(그리고 `pkg/vfs/src`, `tools/xqt`)에 허용 목록 밖의 가변 전역이 없는지 검사합니다.
 - 모든 [시드 퍼저](#시드-퍼저)의 스모크 실행(고정 시드, 적은 이벤트)
 
-모듈의 단위 테스트는 Debug로 빌드합니다. 다만 `src/pager/journal.zig`의 테스트(저널 체크섬)는 ReleaseSafe로 한 번 더 돌립니다. Zig 0.17이 super journal 이름의 체크섬 루프를 최적화 빌드에서만 잘못 컴파일했기 때문입니다. 모듈 전체를 최적화해 돌리려면 `zig test -O ReleaseSafe -lc src/root.zig`를 씁니다.
+모듈의 단위 테스트는 Debug로 빌드합니다. 다만 `src/pager/journal.zig`의 테스트(저널 체크섬)는 ReleaseSafe로 한 번 더 돌립니다. Zig 0.17이 super journal 이름의 체크섬 루프를 최적화 빌드에서만 잘못 컴파일했기 때문입니다. 모듈 전체를 최적화해 돌리려면 VFS 패키지를 모듈로 붙여 `zig test -O ReleaseSafe -lc --dep xqlite_vfs -Mroot=src/root.zig -lc -Mxqlite_vfs=pkg/vfs/src/root.zig`를 씁니다.
+
+VFS 패키지는 혼자서도 테스트할 수 있습니다. 엔진 없이 패키지 디렉터리에서 빌드합니다.
+
+```sh
+cd pkg/vfs
+zig build test                          # 네이티브
+zig build test -Dtest-filter=memdb      # 이름에 memdb가 든 테스트만
+```
+
+memdb의 테스트는 C 라이브러리의 `malloc`을 힙으로 쓰는 인스턴스(`Memdb(test_heap)`)로 돌고, 엔진의 할당자로 도는 memdb는 루트의 단위 테스트(`src/sql/serialize.zig`)와 C API 테스트가 검사합니다. wasm32-wasi에서는 루트의 `zig build test-wasi`가 패키지 테스트도 wasmtime으로 돌립니다.
 
 ## sqlite3 교차 검증
 
@@ -242,7 +253,7 @@ zig-out/bin/xqt interop vacuum -j 4 --keep -v
 
 크래시는 세 가지 방법으로 만듭니다.
 
-- xqlite: 오류를 주입하는 VFS(`src/vfs/crash.zig`)를 씁니다. `$XQLITE_TEST_CRASH`(`db:N`, `journal:N`, `wal:N`, 뒤에 `:torn`이면 그 쓰기를 절반만 기록)를 받으면 N번째 쓰기에서 프로세스를 바로 끝내 전원 차단을 흉내 냅니다. `xqlite` 명령이 이 변수를 받을 때만 설치하고, 라이브러리는 쓰지 않습니다. `wal`, `attach`, `vacuum`이 씁니다. `hot-journal`은 `xqlite crash-write FILE BYTE`(모든 페이지를 덮어쓴 뒤 커밋 1단계에서 끝나 핫 저널을 남김)를 씁니다.
+- xqlite: 오류를 주입하는 VFS(`pkg/vfs/src/crash.zig`)를 씁니다. `$XQLITE_TEST_CRASH`(`db:N`, `journal:N`, `wal:N`, 뒤에 `:torn`이면 그 쓰기를 절반만 기록)를 받으면 N번째 쓰기에서 프로세스를 바로 끝내 전원 차단을 흉내 냅니다. `xqlite` 명령이 이 변수를 받을 때만 설치하고, 라이브러리는 쓰지 않습니다. `wal`, `attach`, `vacuum`이 씁니다. `hot-journal`은 `xqlite crash-write FILE BYTE`(모든 페이지를 덮어쓴 뒤 커밋 1단계에서 끝나 핫 저널을 남김)를 씁니다.
 - sqlite3(`attach`, `vacuum`, `gen superjournal`): `zig build tools`가 빌드한 공유 라이브러리 `tools/crashshim.c`를 미리 올립니다(macOS `DYLD_INSERT_LIBRARIES`, Linux `LD_PRELOAD`). 이름이 정한 접미사로 끝나는 파일의 N번째 변경(쓰기, 자르기, 삭제)에서 프로세스를 끝냅니다. shim이 없거나 sqlite3에 닿지 않으면(시스템 sqlite3는 SIP 때문에 preload를 무시함) 그 검사만 건너뜁니다.
 - 프로세스 죽이기: `hot-journal`과 `wal`은 트랜잭션이나 체크포인트 도중의 sqlite3 셸을 SIGKILL로 끝냅니다.
 
@@ -425,7 +436,7 @@ zig build wasm-example                   # wasm32-freestanding 모듈을 Node.js
 
 `zig build test-wasi`는 wasmtime(`PATH`)이 필요하고 `zig build check`에는 들어 있지 않습니다. 하는 일은 다음과 같습니다.
 
-- 모듈(`src/root.zig`)과 CLI(`src/main.zig`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
+- 모듈(`src/root.zig`), CLI(`src/main.zig`), VFS 패키지(`pkg/vfs`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
 - `xqt wasi`: ReleaseSafe로 빌드한 WASI `xqlite`를 `wasmtime run --dir . xqlite.wasm ...`으로 검사 디렉터리에서 돌립니다. WASI 빌드가 쓴 파일은 모두 sqlite3의 `PRAGMA integrity_check`를 통과해야 합니다.
 
 | 검사 | 확인하는 것 |
@@ -474,4 +485,4 @@ zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test
 | 파일 포맷 | 순정 SQLite와 xqlite가 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check`로 검증 | `xqt interop` |
 | PostgreSQL / MariaDB / MSSQL / Oracle | 같은 쿼리를 실제 서버와 xqlite에서 실행해 비교(differential testing), 각 DB의 regression test에서 필요한 부분을 가져옴 | `xqt dialect-diff pg`, `xqt dialect-diff mariadb`, `xqt dialect-diff mssql`, `xqt dialect-diff oracle` |
 | 퍼징 | 파서, 레코드 디코더, B-Tree 페이지 디코더, IR | `fuzzcheck`, 시드 퍼저 |
-| 크래시 복구 | 오류를 주입하는 VFS로 쓰기 도중 전원 차단을 흉내 내고, sqlite3는 preload shim으로 죽임 | `src/vfs/crash.zig`, `tools/crashshim.c`, `xqlite crash-write`(`xqt interop wal`, `attach`, `vacuum`, `hot-journal`) |
+| 크래시 복구 | 오류를 주입하는 VFS로 쓰기 도중 전원 차단을 흉내 내고, sqlite3는 preload shim으로 죽임 | `pkg/vfs/src/crash.zig`, `tools/crashshim.c`, `xqlite crash-write`(`xqt interop wal`, `attach`, `vacuum`, `hot-journal`) |

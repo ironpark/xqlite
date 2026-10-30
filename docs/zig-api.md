@@ -136,7 +136,7 @@ defer db.close();
 | --- | --- | --- |
 | `read_only` | `false` | 읽기 전용으로 엶(`SQLITE_OPEN_READONLY`) |
 | `create` | `true` | 파일이 없으면 만듦(`SQLITE_OPEN_CREATE`). `read_only`면 무시 |
-| `vfs` | `.unix` | `.unix`(OS 파일 시스템), `.memory`(연결 전용 인메모리 파일 시스템), `.custom`(호출자가 소유한 `Vfs`, 예: 여러 연결이 공유하는 `MemVfs`) |
+| `vfs` | `.unix` | `.unix`(OS 파일 시스템), `.memory`(연결 전용 인메모리 파일 시스템), `.custom`(호출자가 소유한 `Vfs`, 예: 여러 연결이 공유하는 `MemVfs`). `Vfs`, `MemVfs`, `OsVfs`는 VFS 패키지(`pkg/vfs`, [아키텍처](architecture.md#vfs-패키지))의 타입을 `xqlite`가 다시 내보낸 것 |
 | `journal_mode` | `null` | 연 뒤 `PRAGMA journal_mode` 설정. 엔진이 다른 모드를 고르면(`:memory:`는 WAL 불가) `error.UnsupportedJournalMode` |
 | `busy_timeout_ms` | `0` | 잠겨 있을 때 다시 시도하는 시간. 0이면 바로 `error.Busy` |
 | `foreign_keys` | `false` | 외래 키 제약 강제(`PRAGMA foreign_keys`) |
@@ -316,7 +316,7 @@ try b.read(&buf, 0);
 
 ## 직렬화
 
-`db.serialize(gpa, schema)`는 데이터베이스 `schema`("main", "temp", 붙인 이름)의 파일 이미지를 `gpa`로 할당해 돌려주고(`sqlite3_serialize`), 없는 이름이면 `error.NotFound`입니다. `db.deserialize(schema, image, read_only)`는 그 데이터베이스(TEMP는 안 됨)를 닫고 `image`의 사본을 담은 메모리 데이터베이스(memdb VFS, 엔진의 `vfs/memdb.zig`)로 다시 엽니다(`sqlite3_deserialize`). 쓰면 메모리가 늘어나고, `read_only`면 쓰기가 `error.ReadOnly`, 트랜잭션이 열려 있으면 `error.Busy`입니다.
+`db.serialize(gpa, schema)`는 데이터베이스 `schema`("main", "temp", 붙인 이름)의 파일 이미지를 `gpa`로 할당해 돌려주고(`sqlite3_serialize`), 없는 이름이면 `error.NotFound`입니다. `db.deserialize(schema, image, read_only)`는 그 데이터베이스(TEMP는 안 됨)를 닫고 `image`의 사본을 담은 메모리 데이터베이스(memdb VFS, VFS 패키지의 `pkg/vfs/src/memdb.zig`)로 다시 엽니다(`sqlite3_deserialize`). 쓰면 메모리가 늘어나고, `read_only`면 쓰기가 `error.ReadOnly`, 트랜잭션이 열려 있으면 `error.Busy`입니다.
 
 ```zig
 const image = try src.serialize(gpa, "main");

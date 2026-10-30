@@ -293,7 +293,7 @@ fn xqliteDies(c: *Check, n: u32) !void {
 
 - sqlite3 쪽은 `tools/crashshim.c`입니다. `zig build tools`(그리고 `zig build check`)가 `zig cc`로 공유 라이브러리를 빌드하고, `sqliteEnv`가 `DYLD_INSERT_LIBRARIES`(macOS) 또는 `LD_PRELOAD`와 `CRASH_SUFFIX`, `CRASH_AT`을 넣습니다. 예전 스크립트가 `CC`로 직접 빌드하던 것을 대신합니다.
 - `requireShim`은 예전 스크립트의 탐침과 같습니다. `CRASH_SUFFIX=probe.db CRASH_AT=1`로 sqlite3를 돌려 `alive`가 나오면(preload가 닿지 않음) 건너뜁니다. 시스템 sqlite3(SIP)는 preload를 무시합니다.
-- xqlite 쪽은 `XQLITE_TEST_CRASH=KIND:N[:torn]`(`src/vfs/crash.zig`)이나 `xqlite crash-write FILE BYTE`(`c.xq(&.{ "crash-write", db, "0xff" })`)입니다.
+- xqlite 쪽은 `XQLITE_TEST_CRASH=KIND:N[:torn]`(`pkg/vfs/src/crash.zig`)이나 `xqlite crash-write FILE BYTE`(`c.xq(&.{ "crash-write", db, "0xff" })`)입니다.
 - 프로세스를 거래 도중에 죽이려면 `c.spawn`으로 셸을 열어 `write`로 문장을 보내고, 파일이 바뀌기를 기다린 뒤 `kill`합니다(`interop/hot_journal.zig`).
 
 ## 포팅 규칙

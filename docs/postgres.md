@@ -40,12 +40,14 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 
 | 파일 | 내용 |
 | --- | --- |
-| `frontend.zig` | 진입점. 한 문장을 파싱해 IR로 내림. `PRAGMA`·`ATTACH`·`DETACH`·`VACUUM`·`REINDEX`는 SQLite 문법으로, `ANALYZE [VERBOSE] [[schema.]name]`는 같은 인자로 SQLite에 넘김(`public`은 `main`, `VERBOSE`는 무시; `VACUUM`은 [SQLite 호환](sqlite.md#vacuum과-백업-api)의 VACUUM) |
+| `frontend.zig` | 진입점. 한 문장을 파싱해 IR로 내림. `PRAGMA`·`ATTACH`·`DETACH`·`VACUUM`·`REINDEX`는 SQLite 문법으로, `ANALYZE [VERBOSE] [[schema.]name]`는 같은 인자로 SQLite에 넘김(`public`은 `main`, `CREATE SCHEMA`의 스키마는 `main."s.t"`, `VERBOSE`는 무시; `VACUUM`은 [SQLite 호환](sqlite.md#vacuum과-백업-api)의 VACUUM) |
 | `lexer.zig` | PostgreSQL 어휘(아래 [어휘](#어휘)) |
-| `parser.zig` | 재귀 하강 파서. IR을 만들면서 PostgreSQL 의미를 해석함(캐스트, LIKE/ILIKE, 함수 이름과 특수 문법, 결과 열 이름, NULL 정렬, 스키마 이름과 카탈로그 뷰, 짧은 INSERT VALUES, DDL의 타입·검사·identity) |
+| `parser.zig` | 재귀 하강 파서. IR을 만들면서 PostgreSQL 의미를 해석함(캐스트, LIKE/ILIKE, 함수 이름과 특수 문법, 결과 열 이름, NULL 정렬, 스키마 이름과 `search_path` 해석, 카탈로그 뷰, 짧은 INSERT VALUES, DDL의 타입·검사·identity) |
 | `ddl.zig` | DDL의 PostgreSQL 문구 검사, 이름 없는 인덱스의 이름 |
 | `types.zig` | 타입 → STRICT 저장 타입·검사·`format_type()` 철자·캐스트 |
 | `funcs.zig` | 방언 함수와 엔진 함수(`xq_like` 등) |
+| `session.zig` | `CREATE SCHEMA`/`DROP SCHEMA`, `SET`/`RESET`/`SHOW`, `set_config()`/`current_setting()`/`current_schema()`/`current_schemas()` |
+| `state.zig` | 연결별 세션 상태(`search_path`와 그 밖의 매개변수) |
 | `catalog_views.zig` | `information_schema`/`pg_catalog` 뷰 |
 | `test.zig` | 종단 테스트 |
 
@@ -105,6 +107,39 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 - **CREATE SEQUENCE**: `[IF NOT EXISTS] ... START/INCREMENT/MINVALUE/MAXVALUE/[NO] CYCLE`
 - **ALTER TABLE**: `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN [IF NOT EXISTS]`, `DROP COLUMN [IF EXISTS]`
 - **DROP**: `TABLE/VIEW/INDEX/SEQUENCE [IF EXISTS] [CASCADE]`
+- **CREATE SCHEMA** `[IF NOT EXISTS] name [AUTHORIZATION role]`, `CREATE SCHEMA AUTHORIZATION role`
+- **DROP SCHEMA** `[IF EXISTS] a [, b ...] [CASCADE | RESTRICT]`
+- 모든 DDL은 `s.t`처럼 스키마로 한정한 이름을 받습니다(아래 [스키마](#스키마)).
+
+### 스키마
+
+`CREATE SCHEMA`로 만든 스키마는 SQLite 데이터베이스가 아니라 main 데이터베이스 안의 이름 공간입니다. 공용 구현은 `src/catalog/schema.zig`([방언 아키텍처](architecture.md#스키마네임스페이스))입니다.
+
+| PostgreSQL | SQLite |
+| --- | --- |
+| `public.t`, 한정하지 않은 `t` | `main.t` |
+| `pg_temp.t`, `CREATE TEMP TABLE t` | `temp.t` |
+| `aux.t`(`ATTACH ... AS aux`) | `aux.t` |
+| `sales.orders`(`CREATE SCHEMA sales`) | main의 `"sales.orders"` |
+
+- 스키마의 개체(테이블, 뷰, 인덱스, 시퀀스, `serial`의 시퀀스)는 `<스키마>.<이름>`이라는 main의 개체입니다. 파일 하나, 트랜잭션 하나이고, sqlite3에서는 `"sales.orders"`로 읽고 씁니다(`.tables`에 `sales.orders`로 나옴).
+- 스키마 목록은 `xq_catalog`의 행(`tbl = ''`, `col` = 스키마, `key = 'schema'`, `value` = 소유자)입니다.
+- 인덱스와 `serial`·identity 시퀀스는 테이블의 스키마에 있습니다(`sales.orders_id_seq`). `ALTER TABLE sales.orders RENAME TO x`는 `sales.x`가 됩니다.
+- 질의와 DML, 조인, 서브쿼리, 뷰에서 `s.t`를 씁니다. 별칭이 없으면 테이블의 이름 `t`가 별칭이 되므로 `t.col`과 `s.t.col` 모두 됩니다(`ON CONFLICT ... DO UPDATE SET v = t.v`, `RETURNING t.col`도).
+- 뷰는 SQLite 텍스트로 저장될 때 `"sales.orders"`를 이름으로 씁니다(데이터베이스 이름 없이). 그래서 sqlite3에서도 그 뷰를 읽습니다. 뷰 안의 한정하지 않은 이름은 PostgreSQL처럼 만들 때의 `search_path`로 정해집니다.
+- `nextval('s.seq')`, `currval`, `setval`의 상수 이름은 PostgreSQL의 regclass처럼 읽습니다(`[schema.]name`, 따옴표 없는 부분은 소문자로 접고, 스키마가 없으면 `search_path`).
+- `DROP SCHEMA ... CASCADE`는 뷰, 테이블(인덱스와 함께), 시퀀스, 카탈로그 항목과 목록의 행을 한 문장으로 지웁니다. `RESTRICT`(기본값)는 개체가 있으면 `cannot drop schema s because other objects depend on it`으로 실패합니다.
+- 오류는 PostgreSQL 16과 같은 문구입니다: `schema "s" already exists`, `schema "s" does not exist`(DDL), `relation "s.t" does not exist`(질의), `unacceptable schema name "pg_x"`, `role "x" does not exist`, `no schema has been selected to create in`, `cannot create temporary relation in non-temporary schema`.
+- `ATTACH`로 붙인 데이터베이스 안에서도 `CREATE`/`DROP`/`ALTER TABLE`, `CREATE INDEX`, `CREATE VIEW`를 씁니다(카탈로그 항목은 그 데이터베이스의 `xq_catalog`, identity 시퀀스는 main의 `xq_sequence`).
+
+#### search_path
+
+- `SET search_path TO a, b`, `SET search_path = DEFAULT`, `SET SCHEMA 'a'`, `RESET search_path`, `SHOW search_path`, `set_config('search_path', ..., false)`, `current_setting('search_path')`. 기본값은 `"$user", public`이고 `$user`는 `postgres`입니다.
+- 한정하지 않은 이름은 `pg_temp`(임시 개체), 그다음 `search_path`의 스키마 순서로 찾습니다. 경로에 없으면 `relation "t" does not exist`입니다. `WITH` 질의의 이름은 찾지 않습니다.
+- DDL은 경로에서 처음으로 있는 스키마(`current_schema()`)에 만듭니다. 그런 스키마가 없으면 `no schema has been selected to create in`입니다.
+- `current_schema()`(`current_schema`), `current_schemas(bool)`(`{pg_catalog,public}` 같은 텍스트)는 경로에서 있는 스키마를 보여 줍니다.
+- 이름은 문장을 컴파일할 때 정해집니다. `search_path`를 바꾸면 준비된 문장이 만료되어, 다음 실행 때 새 경로로 다시 컴파일됩니다.
+- `SET`은 이 밖에 `application_name`, `client_encoding`, `client_min_messages`, `DateStyle`, `IntervalStyle`, `TimeZone`(`SET TIME ZONE`), `standard_conforming_strings`, `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `extra_float_digits`, `bytea_output`, `transaction_isolation`을 받아 `SHOW`가 그 값을 보여 줍니다(동작은 바꾸지 않음). 모르는 이름은 `unrecognized configuration parameter "x"`입니다. `RESET ALL`, `SET TRANSACTION ...`(무시)도 됩니다.
 
 ### 식과 연산자
 
@@ -135,7 +170,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 비교 | `greatest`/`least`(NULL은 건너뜀) |
 | 수학 | `floor`, `ceil`, `sqrt`, `power`, `exp`, `ln`, `log`, `mod`, `trunc`, `sign`, `pi` |
 | 난수·UUID | `random()`(0 이상 1 미만 실수), `gen_random_uuid()` |
-| 시스템 | `version()`, `current_user`, `current_database()`, `current_schema` |
+| 시스템 | `version()`, `current_user`, `current_database()`, `current_schema`, `current_schemas(bool)`, `current_setting(name [, missing_ok])`, `set_config(name, value, false)` |
 | 시퀀스 | 시퀀스 함수(`nextval()` 등) |
 
 ### 카탈로그
@@ -143,12 +178,13 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 스키마 | 뷰 |
 | --- | --- |
 | `information_schema` | `tables`, `columns`(`xq_catalog`의 PostgreSQL 선언 타입, identity 여부), `views`, `schemata`, `sequences` |
-| `pg_catalog` | `pg_tables`, `pg_views`, `pg_indexes`, `pg_sequences`(스키마 없이도 보임) |
+| `pg_catalog` | `pg_tables`, `pg_views`, `pg_indexes`, `pg_sequences`, `pg_namespace`, `pg_class`(스키마 없이도 보임) |
 
 - 뷰 정의는 PostgreSQL 텍스트로 쓰여 있고, 프론트엔드가 FROM 자리에서 파싱해 넣습니다. 저장되는 것은 없습니다.
-- 모든 테이블은 catalog `main`, schema `public`입니다.
-- `public.t`는 `main.t`, `pg_temp.t`는 `temp.t`입니다.
-- `ATTACH`로 붙인 데이터베이스는 그 이름의 스키마입니다. 질의와 DML(`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `RETURNING`)에서 `aux.t`로 씁니다. 그 안의 DDL과 카탈로그 뷰는 아직 `main`만 다룹니다([아직 하지 않은 것](#아직-하지-않은-것)).
+- 모든 테이블은 catalog `main`입니다. `CREATE SCHEMA`의 스키마에 있는 개체(`"sales.orders"`)는 schema `sales`, 이름 `orders`로 나오고 `public`에는 나오지 않습니다. 나머지는 schema `public`입니다.
+- `information_schema.schemata`와 `pg_namespace`에는 `CREATE SCHEMA`의 스키마도 나옵니다.
+- `pg_namespace`와 `pg_class`의 oid는 지어낸 값입니다(`public` 2200, `pg_catalog` 11, 만든 스키마는 이름 순서로 16384부터). 두 뷰를 `relnamespace = oid`로 조인할 수 있습니다. `pg_class`는 `oid`, `relname`, `relnamespace`, `relkind`(`r`/`v`/`i`/`S`), `relowner`, `relpersistence`, `relhasindex`만 있습니다.
+- `ATTACH`로 붙인 데이터베이스는 그 이름의 스키마입니다(`aux.t`). 카탈로그 뷰에는 아직 나오지 않습니다.
 
 ## 타입 매핑
 
@@ -224,6 +260,7 @@ PostgreSQL 문구를 쓰는 오류입니다.
 - `relation "t" does not exist`, `column "c" does not exist`
 - `column reference "a" is ambiguous`
 - `relation "t" already exists`
+- 스키마의 오류([스키마](#스키마))
 - `cannot insert a non-DEFAULT value into column "id"`
 
 ## 아직 하지 않은 것
@@ -234,8 +271,9 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | DML | 데이터를 바꾸는 CTE, `ON CONFLICT ON CONSTRAINT`, `COPY` |
 | 타입 | 배열·`ARRAY[...]`, `ENUM`·`CREATE TYPE`·도메인, 시퀀스의 데이터 타입(언제나 `bigint`) |
 | 식과 함수 | `SIMILAR TO`와 정규식 연산자(`~`), `AT TIME ZONE`, `interval` 산술, `to_char`/`date_trunc`/`age`, `U&'...'` |
-| DDL | `public` 밖의 스키마(`CREATE SCHEMA`, 붙인 데이터베이스 안의 `CREATE`/`DROP`), `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`, 임시 테이블의 시퀀스(`main`에 남음) |
-| 절차·서버 | PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `SET`/`SHOW`, 격리 수준 |
+| DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE` |
+| 스키마 | 스키마 요소가 있는 `CREATE SCHEMA s CREATE TABLE ...`, `ALTER SCHEMA`, `ALTER TABLE ... SET SCHEMA`, `DROP SCHEMA public`, 이름에 `.`이 있는 스키마, 대소문자만 다른 두 스키마(SQLite의 이름 비교처럼 같은 이름), 다른 스키마의 뷰·외래 키가 기대는 것을 `CASCADE`가 따라 지우는 것, 여러 테이블을 지우는 `DROP SCHEMA ... CASCADE`의 auto_vacuum 데이터베이스(거부함), 상수가 아닌 `nextval(x)`의 `search_path`(이름 그대로 main에서 찾음), `public`에 이름이 `s.t`인 개체(스키마 `s`의 `t`와 겹침) |
+| 절차·서버 | PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `SET LOCAL`, `SHOW ALL`, `SET`의 트랜잭션 의미(롤백해도 남음), 격리 수준 |
 | 오류 | 0으로 나누기·오버플로 오류, 실행 중 오류 메시지의 PostgreSQL화 |
 | 카탈로그 | INTEGER PRIMARY KEY의 인덱스(`pg_indexes`에 `t_pkey`가 없음), 붙인 데이터베이스(`information_schema`·`pg_catalog` 뷰에 나오지 않음) |
 | 셸 | dollar-quote 문장 분할(셸은 SQLite 규칙으로 문장을 나눔) |
@@ -245,10 +283,10 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | 도구 | 하는 일 |
 | --- | --- |
 | `src/dialect/postgres/test.zig` | 종단 테스트 |
-| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 28개 케이스가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교) |
-| `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
+| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 35개 케이스가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교) |
+| `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(`CREATE SCHEMA`의 테이블·뷰 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함. sqlite3의 `.tables`에 `sales.orders`가 나오고, sqlite3가 넣은 행을 이 방언이 `sales.orders`로 읽음 |
 
-차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다(`$PG_PSQL`, 기본값 `podman exec -i xq-pg psql -U postgres`). 경우들은 병렬로 돌고, 작업자마다 자기 데이터베이스(`xqt_dialect_N`)에서 `public` 스키마를 지우고 다시 만든 뒤 시작합니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
+차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다(`$PG_PSQL`, 기본값 `podman exec -i xq-pg psql -U postgres`). 경우들은 병렬로 돌고, 작업자마다 자기 데이터베이스(`xqt_dialect_N`)에서 `public` 스키마를 지우고 다시 만들고, 앞 경우가 만든 스키마를 지운 뒤 시작합니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
 
 ```sh
 podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine

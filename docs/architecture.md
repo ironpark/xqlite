@@ -42,7 +42,7 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
                                                                파스 트리 + 빌더 ──▶ VDBE 바이트코드
                                                                           ▲
    방언 훅(dialect.Hooks): 함수 테이블 · 엔진 함수 · 추가 collation · 기본 collation
-   카탈로그(src/catalog): xq_catalog · xq_sequence
+   카탈로그(src/catalog): xq_catalog · xq_sequence · 이름 붙은 스키마(schema.zig)
 ```
 
 ## 방언 고르기
@@ -285,6 +285,35 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 - 의미는 PostgreSQL을 따르되 트랜잭션에 묶입니다. 롤백된 값은 다시 나옵니다.
 - `currval`/`lastval`은 연결 단위입니다.
 
+### 스키마(네임스페이스)
+
+SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키마(PostgreSQL의 `CREATE SCHEMA` ...)는 **main 데이터베이스 안**에 있습니다. 공용 구현은 `src/catalog/schema.zig`(`catalog.schemas`)입니다.
+
+- 스키마 `sales`의 개체는 이름이 `sales.orders`인 main의 개체입니다. 그 인덱스, 트리거, 시퀀스도 같은 식으로 이름을 붙입니다(`sales.orders_id_seq`). 파일 하나, 트랜잭션 하나이고, sqlite3는 `"sales.orders"`로 읽고 씁니다.
+- 스키마 목록은 `xq_catalog`의 행입니다: `tbl = ''`, `col` = 스키마, `key = 'schema'`(값은 소유자)와 `key = 'dialect'`. 어떤 방언도 길이 0인 이름을 받지 않으므로 테이블의 항목(`codeDeleteTable` ...)과 겹치지 않습니다.
+- 스키마 이름에는 `.`이 없습니다. 그래서 개체 이름은 첫 `.`에서 나뉩니다. 이름 비교는 SQLite처럼 대소문자를 무시합니다.
+- 렌더링은 바뀌지 않습니다. 프론트엔드가 이름을 `"sales.orders"`로 바꿔 트리에 넣으면 lower와 render가 그대로 씁니다(뷰 텍스트도 `"sales.orders"`). 별칭이 없는 FROM 항목·DML 대상에는 원래 이름(`orders`)을 별칭으로 붙여 `orders.col`이 그대로 됩니다.
+
+방언이 정하는 것은 셋입니다.
+
+| 방언이 정하는 것 | PostgreSQL | (2단계) T-SQL / Oracle / MariaDB |
+| --- | --- | --- |
+| 기본 스키마(그 개체는 main의 평범한 이름) | `public` | `dbo` / 현재 사용자 / 현재 데이터베이스 |
+| 연결별 기본값(한정하지 않은 이름의 해석, DDL이 만드는 곳) | `search_path`(`dialect.ConnState.postgres`) | 각 방언의 세션 상태 |
+| 오류 문구 | `schema "s" does not exist` ... | 각 방언의 문구 |
+
+`schema.zig`의 API(자세한 것은 파일 머리말):
+
+| 함수 | 하는 일 |
+| --- | --- |
+| `validName(name)`, `mangle(a, schema, name)`, `split(mangled)` | 이름 검사, `"<schema>.<name>"` 만들기·나누기(목록을 보지 않음) |
+| `list(db, a)`, `find(list, name)`, `exists(db, name)` | 목록 읽기(지금, 문장 하나에 한 번 읽어 두고 씀) |
+| `codeCreate(p, name, owner)` | 문장이 실행될 때 목록에 추가 |
+| `objects(db, a, name)`, `codeDrop(p, name, objs)` | `DROP SCHEMA`가 지울 개체(뷰, 테이블, 소유자 없는 시퀀스)와 그 삭제(개체, 남은 시퀀스·카탈로그 항목, 목록의 행) |
+| `resolve(db, a, schemas, cfg, schema, name)` | 한정한 이름 → SQLite (db, name). `Config{default_schema, temp_schema}`가 방언의 이름. SQLite 데이터베이스 이름이 먼저, 그다음 목록의 스키마(main과 바꾼 이름), 둘 다 아니면 `error.NoSuchSchema` |
+
+카탈로그 뷰(`information_schema`, `pg_namespace` ...)는 개체 이름을 목록과 조인해 스키마와 이름으로 나누고, 기본 스키마에서는 감춥니다.
+
 ## 소스 파일
 
 | 파일 | 내용 |
@@ -301,7 +330,7 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 | `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록 |
 | `src/ir/render.zig` | `render.select(p, src, s)`, `render.expr()`, `render.statement()`(CREATE TABLE/INDEX/VIEW, ALTER TABLE)와 `Renderer` |
 | `src/ir/test.zig`, `fuzz.zig`, `gen.zig` | render ≡ lower 테스트와 퍼저 |
-| `src/catalog/catalog.zig`, `sequence.zig` | 방언 메타데이터와 시퀀스 |
+| `src/catalog/catalog.zig`, `sequence.zig`, `schema.zig` | 방언 메타데이터, 시퀀스, 이름 붙은 스키마([스키마](#스키마네임스페이스)) |
 
 구문 트리 IR(`src/ir/tree.zig`)이 나타내는 문장은 다음과 같습니다.
 
@@ -315,7 +344,7 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 
 - 방언별 문장 경계: `sqlite3_complete()`와 셸의 입력 분할은 SQLite 규칙을 씁니다.
 - 시퀀스의 비트랜잭션 의미
-- 시퀀스의 schema 한정 이름(지금은 `main`)
+- 붙인 데이터베이스(`ATTACH`)의 시퀀스(시퀀스는 모두 main의 `xq_sequence`에 있음). `CREATE SCHEMA`의 스키마의 시퀀스는 `s.seq`라는 이름으로 main에 있음
 - `sequence.create()`의 중복 시 PostgreSQL 오류 메시지. PostgreSQL 프론트엔드의 `CREATE SEQUENCE`는 컴파일 시점에 검사합니다.
 - 방언 함수의 `PRAGMA function_list` 노출
 - C ABI URI 파라미터(`?dialect=`). C ABI 자체가 아직 없습니다.

@@ -534,7 +534,7 @@ pub export fn sqlite3_next_stmt(db: ?*Handle, prev: ?*Vdbe) callconv(.c) ?*Vdbe 
 }
 
 pub export fn sqlite3_expired(v: ?*Vdbe) callconv(.c) c_int {
-    return @intFromBool((v orelse return 1).expired != 0);
+    return (v orelse return 1).expired;
 }
 
 // SQLITE_ENABLE_STMT_SCANSTATUS is not built in: no loop is reported.

@@ -846,20 +846,6 @@ pub export fn sqlite3_progress_handler(db: ?*Handle, n_ops: c_int, f: ?c.CProgre
     @import("hooks.zig").sync(db.?);
 }
 
-/// The authorizer is not supported: the engine has no authorization
-/// checks, and accepting one it never calls would let through what the
-/// application means to deny. Clearing it is fine.
-pub export fn sqlite3_set_authorizer(db_arg: ?*Handle, f: ?c.CAuth, arg: ?*anyopaque) callconv(.c) c_int {
-    const db = db_arg orelse return RC.MISUSE;
-    if (f == null) {
-        c.ext(db).authorizer = .{};
-        return RC.OK;
-    }
-    _ = arg;
-    c.main.errorWithMsg(db, RC.ERROR, "xqlite does not support sqlite3_set_authorizer()", .{});
-    return RC.ERROR;
-}
-
 pub export fn sqlite3_trace_v2(db: ?*Handle, mask: c_uint, f: ?c.CTraceV2, arg: ?*anyopaque) callconv(.c) c_int {
     const e = c.extOf(db) orelse return RC.MISUSE;
     e.legacy_trace = .{};

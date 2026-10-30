@@ -41,6 +41,8 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const Quoted = @import("../dialect/dialect.zig").Quoted;
 
 pub const sequence = @import("sequence.zig");
+/// Named schemas (namespaces) inside main: schema.zig.
+pub const schemas = @import("schema.zig");
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
@@ -327,4 +329,5 @@ pub const Query = struct {
 
 test {
     _ = sequence;
+    _ = schemas;
 }

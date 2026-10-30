@@ -151,6 +151,9 @@ pub const OpenFlags = struct {
     uri: bool = false,
     /// An in-memory database (SQLITE_OPEN_MEMORY, a URI's mode=memory).
     memory: bool = false,
+    /// xqlite: the caller has resolved a URI's "vfs" parameter itself
+    /// (the C ABI's VFS registry), so uri.parse() skips it.
+    vfs_resolved: bool = false,
 };
 
 /// Port of openDatabase() (sqlite3_open_v2()): open a connection to the

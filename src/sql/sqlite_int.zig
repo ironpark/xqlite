@@ -2286,6 +2286,9 @@ pub const Sqlite3 = struct {
     /// xqlite: the SQL dialect of the connection and the state of its
     /// semantic hooks (src/dialect/dialect.zig). No C counterpart.
     xq: @import("../dialect/dialect.zig").ConnState = .{},
+    /// xqlite: the state the C ABI (src/capi) keeps for a connection it
+    /// opened (hooks, C callbacks, filenames); the engine never reads it.
+    capi: ?*anyopaque = null,
 
     pub fn limit(db: *const Sqlite3, l: Limit) i32 {
         return db.limits.get(l);

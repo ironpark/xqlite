@@ -798,7 +798,8 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
 /// Copy the variable names into the program, which outlives the Parse.
 fn copyVList(a: std.mem.Allocator, src: []const int.VListEntry) error{OutOfMemory}![]const int.VListEntry {
     const out = try a.alloc(int.VListEntry, src.len);
-    for (src, out) |e, *o| o.* = .{ .name = try a.dupe(u8, e.name), .num = e.num };
+    // NUL-terminated, for sqlite3_bind_parameter_name() in C (src/capi).
+    for (src, out) |e, *o| o.* = .{ .name = try a.dupeSentinel(u8, e.name, 0), .num = e.num };
     return out;
 }
 

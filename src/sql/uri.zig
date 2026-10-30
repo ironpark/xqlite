@@ -193,7 +193,9 @@ fn parseInto(gpa: Allocator, uri: []const u8, res: *Result) Allocator.Error!void
             const opt = std.mem.sliceTo(z[opt_at..], 0);
             const val_at = opt_at + opt.len + 1;
             const val = std.mem.sliceTo(z[val_at..], 0);
-            if (std.mem.eql(u8, opt, "vfs")) {
+            if (std.mem.eql(u8, opt, "vfs") and res.flags.vfs_resolved) {
+                // The C ABI found the VFS by this name and opens with it.
+            } else if (std.mem.eql(u8, opt, "vfs")) {
                 // There is no VFS registry: only the connection's VFS
                 // exists, and it has no name.
                 res.err_msg = try std.fmt.allocPrint(gpa, "no such vfs: {s}", .{val});

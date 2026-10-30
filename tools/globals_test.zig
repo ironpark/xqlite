@@ -15,6 +15,18 @@ const allowed = [_]struct { []const u8, []const u8 }{
     .{ "src/sql/global.zig", "prng" },
     // The POSIX lock table, which every connection has to share.
     .{ "src/vfs/unix.zig", "inodes" },
+    // The C ABI's process-wide state (sqlite3_config(), the auto
+    // extensions), its VFS list, the sqlite3_str of a failed
+    // sqlite3_str_new() and the variables sqlite3.h declares.
+    .{ "src/capi/common.zig", "state" },
+    .{ "src/capi/vfs.zig", "unix_vfs" },
+    .{ "src/capi/vfs.zig", "unix_c" },
+    .{ "src/capi/vfs.zig", "unix_entry" },
+    .{ "src/capi/vfs.zig", "head" },
+    .{ "src/capi/vfs.zig", "all_entries" },
+    .{ "src/capi/printf.zig", "oom_str" },
+    .{ "src/capi/library.zig", "sqlite3_temp_directory" },
+    .{ "src/capi/library.zig", "sqlite3_data_directory" },
     // typeId(): an address per type, never read or written (a `const`
     // could be merged with another).
     .{ "src/api/Stmt.zig", "id" },

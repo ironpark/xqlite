@@ -977,8 +977,6 @@ static void test_misc(void){
   sqlite3_finalize(p);
 
   /* Unsupported interfaces fail cleanly. */
-  CHECK(sqlite3_set_authorizer(db, (int(*)(void*,int,const char*,const char*,const char*,const char*))auto_ext, 0)==SQLITE_ERROR);
-  CHECK(sqlite3_set_authorizer(db, 0, 0)==SQLITE_OK);
   {
     char *zErr = 0;
     CHECK(sqlite3_load_extension(db, "x", 0, &zErr)==SQLITE_ERROR);
@@ -993,6 +991,308 @@ static void test_misc(void){
   CHECK(nDestroy==1); /* the client data */
   CHECK_RC(sqlite3_close(0), SQLITE_OK, 0);
 }
+
+/* ===================================================== group A: engine callbacks */
+
+/* -------------------------------------------------------------- authorizer */
+
+static char zAuthLog[2048];
+static int authDenyCode = -1, authIgnoreCode = -1;
+static const char *zAuthArg = 0;
+static int auth_cb(void *p, int code, const char *a, const char *b, const char *c, const char *d){
+  char buf[160];
+  (void)p;
+  snprintf(buf, sizeof(buf), "%d %s %s %s %s;", code, a ? a : "-", b ? b : "-", c ? c : "-", d ? d : "-");
+  if( strlen(zAuthLog)+strlen(buf) < sizeof(zAuthLog) ) strcat(zAuthLog, buf);
+  if( zAuthArg && !((a && strcmp(a, zAuthArg)==0) || (b && strcmp(b, zAuthArg)==0)) ) return SQLITE_OK;
+  if( code==authDenyCode ) return SQLITE_DENY;
+  if( code==authIgnoreCode ) return SQLITE_IGNORE;
+  return SQLITE_OK;
+}
+
+static void test_authorizer(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a INTEGER PRIMARY KEY, b, c); CREATE TABLE log(x);"
+           "CREATE VIEW v AS SELECT a, b FROM t;"
+           "CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO log VALUES(new.b); END;"
+           "INSERT INTO t VALUES(1, 2, 3)");
+  CHECK_RC(sqlite3_set_authorizer(db, auth_cb, 0), SQLITE_OK, db);
+
+  /* What each statement asks: the trigger's checks name it. */
+  zAuthLog[0] = 0;
+  exec(db, "INSERT INTO t VALUES(2, 'x', 'y')");
+  CHECK_STR(zAuthLog, "18 t - main -;18 log - main tr;20 t b main tr;");
+  zAuthLog[0] = 0;
+  CHECK_STR(one(db, "SELECT b FROM v WHERE a = 1"), "2");
+  CHECK_STR(zAuthLog, "21 - - - -;20 t a main v;20 t b main v;20 v b main -;20 v a main -;21 - - - v;");
+  zAuthLog[0] = 0;
+  CHECK_STR(one(db, "SELECT count(*) FROM t"), "2");
+  CHECK_STR(zAuthLog, "21 - - - -;31 - count - -;20 t  - -;");
+  zAuthLog[0] = 0;
+  exec(db, "UPDATE t SET c = upper(c) WHERE a = 2");
+  CHECK_STR(zAuthLog, "31 - upper - -;20 t c main -;23 t c main -;20 t a main -;");
+  zAuthLog[0] = 0;
+  exec(db, "BEGIN; SAVEPOINT s; RELEASE s; COMMIT; PRAGMA user_version");
+  CHECK_STR(zAuthLog, "22 BEGIN - - -;32 BEGIN s - -;32 RELEASE s - -;22 COMMIT - - -;19 user_version - - -;");
+  zAuthLog[0] = 0;
+  exec(db, "CREATE INDEX i ON t(b); DROP INDEX i");
+  CHECK_STR(zAuthLog, "18 sqlite_master - main -;1 i t main -;20 t b main -;18 sqlite_master - main -;27 i - main -;"
+                      "9 sqlite_master - main -;10 i t main -;9 sqlite_master - main -;20 sqlite_master name main -;"
+                      "20 sqlite_master type main -;23 sqlite_master rootpage main -;20 sqlite_master rootpage main -;");
+
+  /* IGNORE: the column reads as NULL; the UPDATE of a column is skipped. */
+  authIgnoreCode = SQLITE_READ; zAuthArg = "b";
+  CHECK_STR(one(db, "SELECT quote(b) FROM t WHERE a = 1"), "NULL");
+  CHECK_STR(one(db, "SELECT a FROM t WHERE b = 2"), "");
+  authIgnoreCode = SQLITE_UPDATE; zAuthArg = "c";
+  exec(db, "UPDATE t SET b = 20, c = 30 WHERE a = 1");
+  authIgnoreCode = -1; zAuthArg = 0;
+  CHECK_STR(one(db, "SELECT b || ',' || c FROM t WHERE a = 1"), "20,3");
+  /* IGNORE of DELETE: no truncation, the rows are deleted one by one. */
+  authIgnoreCode = SQLITE_DELETE; zAuthArg = "log";
+  exec(db, "DELETE FROM log");
+  authIgnoreCode = -1; zAuthArg = 0;
+  CHECK_STR(one(db, "SELECT count(*) FROM log"), "0");
+
+  /* DENY: an SQLITE_AUTH error. */
+  authDenyCode = SQLITE_READ; zAuthArg = "c";
+  CHECK_STR(one(db, "SELECT c FROM t"), "ERROR: access to t.c is prohibited");
+  CHECK(sqlite3_errcode(db)==SQLITE_AUTH);
+  authDenyCode = SQLITE_FUNCTION; zAuthArg = "upper";
+  CHECK_STR(one(db, "SELECT upper('a')"), "ERROR: not authorized to use function: upper");
+  CHECK_RC(sqlite3_exec(db, "CREATE TABLE d(x DEFAULT (upper('q')))", 0, 0, 0), SQLITE_ERROR, db);
+  authDenyCode = SQLITE_INSERT; zAuthArg = "t";
+  CHECK_RC(sqlite3_exec(db, "INSERT INTO t VALUES(9, 9, 9)", 0, 0, 0), SQLITE_AUTH, db);
+  CHECK_STR(sqlite3_errmsg(db), "not authorized");
+  authDenyCode = SQLITE_ATTACH; zAuthArg = 0;
+  CHECK_RC(sqlite3_exec(db, "ATTACH ':memory:' AS aux", 0, 0, 0), SQLITE_AUTH, db);
+  authDenyCode = -1;
+
+  /* A new authorizer expires the statements prepared before. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT c FROM t", -1, &p, 0), SQLITE_OK, db);
+  CHECK(sqlite3_expired(p)==0);
+  authDenyCode = SQLITE_READ; zAuthArg = "c";
+  CHECK_RC(sqlite3_set_authorizer(db, auth_cb, 0), SQLITE_OK, db);
+  CHECK(sqlite3_expired(p)!=0);
+  CHECK_RC(sqlite3_step(p), SQLITE_AUTH, db);
+  sqlite3_finalize(p);
+  authDenyCode = -1; zAuthArg = 0;
+  CHECK_RC(sqlite3_set_authorizer(db, 0, 0), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT c FROM t WHERE a = 1"), "3");
+  sqlite3_close(db);
+}
+
+/* The authorizer sees the statements a dialect frontend lowers. */
+static void test_authorizer_dialect(void){
+  sqlite3 *db = 0;
+  if( strcmp(sqlite3_sourceid(), SQLITE_SOURCE_ID)!=0 || sqlite3_libversion_number()!=SQLITE_VERSION_NUMBER ) return;
+  if( sqlite3_open_v2("file::memory:?dialect=postgres", &db, SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI, 0)!=SQLITE_OK
+   || strcmp(xqlite_dialect(db), "postgres")!=0 ){
+    sqlite3_close(db);  /* not xqlite */
+    return;
+  }
+  exec(db, "CREATE TABLE u (id bigserial PRIMARY KEY, secret text)");
+  exec(db, "INSERT INTO u (secret) VALUES ('s')");
+  CHECK_RC(sqlite3_set_authorizer(db, auth_cb, 0), SQLITE_OK, db);
+  authIgnoreCode = SQLITE_READ; zAuthArg = "secret";
+  zAuthLog[0] = 0;
+  CHECK_STR(one(db, "SELECT id::text || ':' || coalesce(secret, 'hidden') FROM u"), "1:hidden");
+  CHECK(strstr(zAuthLog, "20 u secret main -;")!=0);
+  CHECK(strstr(zAuthLog, "xq_catalog")==0);
+  authIgnoreCode = -1; authDenyCode = SQLITE_DELETE; zAuthArg = "u";
+  CHECK_RC(sqlite3_exec(db, "DELETE FROM u WHERE id = $1", 0, 0, 0), SQLITE_AUTH, db);
+  authDenyCode = -1; zAuthArg = 0;
+  sqlite3_close(db);
+}
+
+/* -------------------------------------------------------- collation needed */
+
+static int nCollNeeded = 0;
+static int needed_rev(void *p, int n1, const void *a, int n2, const void *b){
+  int r = memcmp(a, b, n1<n2 ? n1 : n2);
+  (void)p;
+  return r ? -r : n2-n1;
+}
+static void coll_needed(void *p, sqlite3 *db, int enc, const char *z){
+  (void)p;
+  nCollNeeded++;
+  CHECK(enc==SQLITE_UTF8);
+  if( strcmp(z, "rev")==0 ) sqlite3_create_collation(db, z, SQLITE_UTF8, 0, needed_rev);
+}
+static void coll_needed16(void *p, sqlite3 *db, int enc, const void *z){
+  const unsigned short *u = (const unsigned short*)z;
+  (void)p;
+  nCollNeeded++;
+  CHECK(enc==SQLITE_UTF8);
+  if( u[0]=='r' && u[1]=='2' && u[2]==0 ) sqlite3_create_collation(db, "r2", SQLITE_UTF8, 0, needed_rev);
+}
+
+static void test_collation_needed(void){
+  sqlite3 *db = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(x); INSERT INTO t VALUES('a'), ('c'), ('b')");
+  CHECK_STR(one(db, "SELECT group_concat(x, '') FROM (SELECT x FROM t ORDER BY x COLLATE rev)"), "ERROR: no such collation sequence: rev");
+  CHECK_RC(sqlite3_collation_needed(db, 0, coll_needed), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT group_concat(x, '') FROM (SELECT x FROM t ORDER BY x COLLATE rev)"), "cba");
+  CHECK(nCollNeeded==1);
+  CHECK_STR(one(db, "SELECT 'a' < 'b' COLLATE rev"), "0");
+  CHECK(nCollNeeded==1);
+  CHECK_STR(one(db, "SELECT 1 ORDER BY 1 COLLATE nope"), "ERROR: no such collation sequence: nope");
+  CHECK(sqlite3_extended_errcode(db)==SQLITE_ERROR_MISSING_COLLSEQ);
+  CHECK(nCollNeeded==2);
+  CHECK_RC(sqlite3_collation_needed16(db, 0, coll_needed16), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT max(x COLLATE r2) FROM t"), "a");
+  CHECK(nCollNeeded==3);
+  sqlite3_close(db);
+}
+
+/* -------------------------------------------------------- autovacuum pages */
+
+static int nAvKeep = 0, nAvDestroy = 0;
+static char zAvLog[256];
+static unsigned int av_pages(void *p, const char *zSchema, unsigned int nOrig, unsigned int nFree, unsigned int szPage){
+  char buf[80];
+  (void)p;
+  snprintf(buf, sizeof(buf), "%s %u %u %u;", zSchema, nOrig, nFree, szPage);
+  if( strlen(zAvLog)+strlen(buf) < sizeof(zAvLog) ) strcat(zAvLog, buf);
+  return nFree > (unsigned)nAvKeep ? nFree - nAvKeep : 0;
+}
+static void av_destroy(void *p){ (void)p; nAvDestroy++; }
+
+static void test_autovacuum_pages(const char *zDir){
+  sqlite3 *db = 0;
+  char zPath[512];
+  snprintf(zPath, sizeof(zPath), "%s/av.db", zDir);
+  CHECK_RC(sqlite3_open(zPath, &db), SQLITE_OK, db);
+  exec(db, "PRAGMA page_size=4096; PRAGMA auto_vacuum=FULL; CREATE TABLE t(x);"
+           "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<100) INSERT INTO t SELECT randomblob(1000) FROM c");
+  CHECK_STR(one(db, "PRAGMA page_count"), "28");
+  CHECK_RC(sqlite3_autovacuum_pages(db, av_pages, 0, av_destroy), SQLITE_OK, db);
+  CHECK_RC(sqlite3_autovacuum_pages(db, av_pages, 0, av_destroy), SQLITE_OK, db);
+  CHECK(nAvDestroy==1);
+  /* Keep 5 of the 12 free pages. */
+  nAvKeep = 5;
+  exec(db, "DELETE FROM t WHERE rowid > 50");
+  CHECK_STR(zAvLog, "main 28 12 4096;");
+  CHECK_STR(one(db, "PRAGMA page_count"), "21");
+  CHECK_STR(one(db, "PRAGMA freelist_count"), "5");
+  /* Keep them all. */
+  nAvKeep = 1000;
+  exec(db, "DELETE FROM t WHERE rowid > 25");
+  CHECK_STR(one(db, "PRAGMA page_count"), "21");
+  CHECK_STR(one(db, "PRAGMA freelist_count"), "11");
+  /* Give back everything. */
+  nAvKeep = 0;
+  exec(db, "DELETE FROM t WHERE rowid > 20");
+  CHECK_STR(one(db, "PRAGMA page_count"), "8");
+  CHECK_STR(one(db, "PRAGMA freelist_count"), "0");
+  CHECK_STR(one(db, "PRAGMA integrity_check"), "ok");
+  sqlite3_close(db);
+  CHECK(nAvDestroy==2);
+}
+
+/* ------------------------------------------------ xFindFunction overloads */
+
+/* fx: a table of value 1..10 whose xFindFunction overloads upper() and
+** makes fmod3(value, k) a constraint (SQLITE_INDEX_CONSTRAINT_FUNCTION). */
+typedef struct FxCursor { sqlite3_vtab_cursor base; int i, mod; } FxCursor;
+static int nFxConsFunction = 0;
+static int fxConnect(sqlite3 *db, void *pAux, int argc, const char *const*argv, sqlite3_vtab **ppVtab, char **pzErr){
+  (void)pAux; (void)argc; (void)argv; (void)pzErr;
+  sqlite3_declare_vtab(db, "CREATE TABLE x(value INTEGER)");
+  *ppVtab = sqlite3_malloc(sizeof(sqlite3_vtab));
+  memset(*ppVtab, 0, sizeof(sqlite3_vtab));
+  return SQLITE_OK;
+}
+static int fxDisconnect(sqlite3_vtab *p){ sqlite3_free(p); return SQLITE_OK; }
+static int fxOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **pp){
+  FxCursor *c = sqlite3_malloc(sizeof(*c));
+  (void)p;
+  memset(c, 0, sizeof(*c));
+  *pp = &c->base;
+  return SQLITE_OK;
+}
+static int fxClose(sqlite3_vtab_cursor *p){ sqlite3_free(p); return SQLITE_OK; }
+static int fxNext(sqlite3_vtab_cursor *p){
+  FxCursor *c = (FxCursor*)p;
+  do{ c->i++; }while( c->mod && c->i<=10 && c->i % c->mod != 0 );
+  return SQLITE_OK;
+}
+static int fxFilter(sqlite3_vtab_cursor *p, int idxNum, const char *idxStr, int argc, sqlite3_value **argv){
+  FxCursor *c = (FxCursor*)p;
+  (void)idxStr;
+  c->mod = (idxNum==1 && argc==1) ? sqlite3_value_int(argv[0]) : 0;
+  c->i = 0;
+  return fxNext(p);
+}
+static int fxEof(sqlite3_vtab_cursor *p){ return ((FxCursor*)p)->i > 10; }
+static int fxColumn(sqlite3_vtab_cursor *p, sqlite3_context *ctx, int i){
+  (void)i;
+  sqlite3_result_int(ctx, ((FxCursor*)p)->i);
+  return SQLITE_OK;
+}
+static int fxRowid(sqlite3_vtab_cursor *p, sqlite3_int64 *pRowid){ *pRowid = ((FxCursor*)p)->i; return SQLITE_OK; }
+static int fxBestIndex(sqlite3_vtab *tab, sqlite3_index_info *info){
+  int i;
+  (void)tab;
+  info->idxNum = 0;
+  for(i=0; i<info->nConstraint; i++){
+    if( info->aConstraint[i].op==SQLITE_INDEX_CONSTRAINT_FUNCTION && info->aConstraint[i].usable ){
+      nFxConsFunction++;
+      info->aConstraintUsage[i].argvIndex = 1;
+      info->aConstraintUsage[i].omit = 1;
+      info->idxNum = 1;
+    }
+  }
+  info->estimatedCost = info->idxNum ? 1 : 100;
+  return SQLITE_OK;
+}
+static void fx_upper(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  (void)argc;
+  sqlite3_result_text(ctx, (const char*)sqlite3_user_data(ctx), -1, SQLITE_TRANSIENT);
+  (void)argv;
+}
+static void fx_mod3(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  (void)argc;
+  sqlite3_result_int(ctx, sqlite3_value_int(argv[0]) % sqlite3_value_int(argv[1])==0);
+}
+static int fxFindFunction(sqlite3_vtab *p, int nArg, const char *zName, void (**pxFunc)(sqlite3_context*,int,sqlite3_value**), void **ppArg){
+  (void)p;
+  if( nArg==1 && strcmp(zName, "upper")==0 ){
+    *pxFunc = fx_upper;
+    *ppArg = (void*)"overloaded";
+    return 1;
+  }
+  if( nArg==2 && strcmp(zName, "fmod3")==0 ){
+    *pxFunc = fx_mod3;
+    *ppArg = 0;
+    return SQLITE_INDEX_CONSTRAINT_FUNCTION;
+  }
+  return 0;
+}
+static sqlite3_module fxModule = {
+  0, fxConnect, fxConnect, fxBestIndex, fxDisconnect, fxDisconnect, fxOpen, fxClose,
+  fxFilter, fxNext, fxEof, fxColumn, fxRowid,
+  0, 0, 0, 0, 0, fxFindFunction, 0, 0, 0, 0, 0, 0
+};
+
+static void test_find_function(void){
+  sqlite3 *db = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK_RC(sqlite3_create_module(db, "fx", &fxModule, 0), SQLITE_OK, db);
+  exec(db, "CREATE VIRTUAL TABLE f USING fx");
+  CHECK_STR(one(db, "SELECT upper(value) FROM f"), "overloaded");
+  CHECK_STR(one(db, "SELECT upper('x') FROM f"), "X");
+  CHECK_RC(sqlite3_overload_function(db, "fmod3", 2), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT group_concat(value) FROM f WHERE fmod3(value, 3)"), "3,6,9");
+  CHECK(nFxConsFunction>0);
+  CHECK_STR(one(db, "SELECT group_concat(value) FROM f WHERE fmod3(value, 4) OR value = 1"), "1,4,8");
+  sqlite3_close(db);
+}
+
+/* ================================================= end of group A */
 
 int main(void){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
@@ -1009,6 +1309,11 @@ int main(void){
   test_vtab();
   test_vfs(zDir);
   test_misc();
+  test_authorizer();
+  test_authorizer_dialect();
+  test_collation_needed();
+  test_autovacuum_pages(zDir);
+  test_find_function();
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

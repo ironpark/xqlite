@@ -1,6 +1,6 @@
-//! `xqt dialect-diff pg|mariadb [CASES]`: the differential test of a
+//! `xqt dialect-diff pg|mariadb|mssql [CASES]`: the differential test of a
 //! dialect against its real server. Each case of the cases file
-//! (tools/dialect/pg-cases.txt, maria-cases.txt) runs in the server's
+//! (tools/dialect/pg-cases.txt, maria-cases.txt, mssql-cases.txt) runs in the server's
 //! client and in `xqlite sql` with the dialect on; the rows, the column
 //! names (of results with rows) and the "ERROR:" lines must be the same.
 //! (Was tools/dialect/pg-diff.sh and maria-diff.sh.)
@@ -31,16 +31,22 @@ const xqt = @import("xqt");
 const Check = xqt.Check;
 
 pub const usage =
-    \\usage: xqt dialect-diff pg|mariadb [CASES-FILE]
+    \\usage: xqt dialect-diff pg|mariadb|mssql [CASES-FILE]
     \\
     \\  pg        tools/dialect/pg-cases.txt against PostgreSQL ($PG_PSQL,
     \\            default "podman exec -i xq-pg psql -U postgres")
     \\  mariadb   tools/dialect/maria-cases.txt against MariaDB ($MARIA_CLIENT,
     \\            default "podman exec -i xq-maria mariadb -uroot")
+    \\  mssql     tools/dialect/mssql-cases.txt against SQL Server ($MSSQL_CLIENT,
+    \\            default "podman exec -i xq-mssql /tmp/sqlcmd -S localhost
+    \\            -U sa -P Xq_Passw0rd! -C")
     \\
     \\Start the server first:
     \\  podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
     \\  podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
+    \\  podman run -d --name xq-mssql -e ACCEPT_EULA=1 -e MSSQL_SA_PASSWORD=Xq_Passw0rd! \\
+    \\    -e MSSQL_MEMORY_LIMIT_MB=2048 mcr.microsoft.com/azure-sql-edge:latest
+    \\  podman cp sqlcmd xq-mssql:/tmp/sqlcmd   (go-sqlcmd, linux-arm64: the image has none)
     \\
 ;
 
@@ -92,6 +98,24 @@ const maria: Dialect = .{
     .xq_prelude = ".dialect mariadb\n.headers on\n.nullvalue NULL\n",
     .norm_server = normMaria,
     .norm_xq = normXqMaria,
+    .databases = false,
+};
+
+/// SQL Server: Azure SQL Edge (the SQL Server engine, built for arm64 as
+/// well) with go-sqlcmd copied in. Every case runs in a new database
+/// main, one case at a time.
+const mssql: Dialect = .{
+    .tag = "mssql-diff",
+    .server = "SQL Server",
+    .cases = "tools/dialect/mssql-cases.txt",
+    .env = "MSSQL_CLIENT",
+    .default_client = "podman exec -i xq-mssql /tmp/sqlcmd -S localhost -U sa -P Xq_Passw0rd! -C",
+    .container = "podman run -d --name xq-mssql -e ACCEPT_EULA=1 -e MSSQL_SA_PASSWORD=Xq_Passw0rd! -e MSSQL_MEMORY_LIMIT_MB=2048 mcr.microsoft.com/azure-sql-edge:latest; podman cp sqlcmd xq-mssql:/tmp/sqlcmd",
+    .client_args = &.{ "-W", "-s", "|", "-i", "/dev/stdin" },
+    .prelude = "SET NOCOUNT ON;\nUSE master;\nDROP DATABASE IF EXISTS main;\nCREATE DATABASE main;\nGO\nUSE main;\nSET NOCOUNT ON;\nGO\n",
+    .xq_prelude = ".dialect mssql\n.headers on\n.nullvalue NULL\n",
+    .norm_server = normMssql,
+    .norm_xq = normXqMssql,
     .databases = false,
 };
 
@@ -148,6 +172,8 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         &pg
     else if (std.mem.eql(u8, args[0], "mariadb") or std.mem.eql(u8, args[0], "maria"))
         &maria
+    else if (std.mem.eql(u8, args[0], "mssql") or std.mem.eql(u8, args[0], "sqlserver") or std.mem.eql(u8, args[0], "tsql"))
+        &mssql
     else
         return usageError(out);
     const cases_path = if (args.len == 2) args[1] else try std.fs.path.join(arena, &.{ cfg.root, d.cases });
@@ -516,6 +542,111 @@ fn isFraction(f: []const u8) bool {
 fn trimFraction(f: []const u8) []const u8 {
     const t = std.mem.trimEnd(u8, f, "0");
     return if (std.mem.endsWith(u8, t, ".")) t[0 .. t.len - 1] else t;
+}
+
+/// sqlcmd (-W -s '|') prints a header line, a line of dashes and the
+/// rows of each result (the header also for an empty one), blank lines
+/// between results, and errors as "Msg N, Level L, State S, ..." with the
+/// message on the next line, which becomes "ERROR: message". The fields
+/// are trimmed (an unnamed column's header is blank) and their numbers
+/// lose the trailing zeros of a fraction, as the dialect's REAL prints
+/// none (DECIMAL(10,2) is 2.50 in SQL Server, 2.5 in xqlite). sqlcmd
+/// cuts NULL to the column's width (NU for a varchar(2)) and prints
+/// binary strings in hex: the cases avoid both.
+fn normMssql(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var all: std.ArrayList([]const u8) = .empty;
+    defer all.deinit(gpa);
+    var it = lines(text);
+    while (it.next()) |line| try all.append(gpa, std.mem.trimEnd(u8, line, "\r"));
+    const ls = all.items;
+    var header: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < ls.len) : (i += 1) {
+        const line = ls[i];
+        if (std.mem.startsWith(u8, line, "Msg ") and std.mem.indexOf(u8, line, ", Level ") != null) {
+            if (i + 1 < ls.len) {
+                try out.appendSlice(gpa, "ERROR: ");
+                try out.appendSlice(gpa, ls[i + 1]);
+                try out.append(gpa, '\n');
+                i += 1;
+            }
+            header = null;
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "Warning: Null value is eliminated")) continue;
+        if (std.mem.startsWith(u8, line, "Changed database context to ")) continue;
+        if (std.mem.eql(u8, line, "The statement has been terminated.")) continue;
+        if (rowsAffected(line)) continue;
+        if (line.len == 0) {
+            header = null;
+            continue;
+        }
+        if (i + 1 < ls.len and isDashes(ls[i + 1])) {
+            header = line;
+            i += 1;
+            continue;
+        }
+        if (header) |h| {
+            try appendFields(gpa, &out, h);
+            header = null;
+        }
+        try appendFields(gpa, &out, line);
+    }
+    return normNum(gpa, out.items);
+}
+
+/// /^\([0-9]+ rows? affected\)$/
+fn rowsAffected(line: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, "(") or !std.mem.endsWith(u8, line, " affected)")) return false;
+    return std.mem.indexOf(u8, line, " row") != null;
+}
+
+/// A line of dashes (and separators) under a header.
+fn isDashes(line: []const u8) bool {
+    if (line.len == 0) return false;
+    var dash = false;
+    for (line) |ch| switch (ch) {
+        '-' => dash = true,
+        '|', ' ' => {},
+        else => return false,
+    };
+    return dash;
+}
+
+/// The fields of a line, trimmed, joined with '|'.
+fn appendFields(gpa: Allocator, out: *std.ArrayList(u8), line: []const u8) Allocator.Error!void {
+    var fields = std.mem.splitScalar(u8, line, '|');
+    var first = true;
+    while (fields.next()) |f| {
+        if (!first) try out.append(gpa, '|');
+        first = false;
+        try out.appendSlice(gpa, std.mem.trim(u8, f, " "));
+    }
+    try out.append(gpa, '\n');
+}
+
+fn normXqMssql(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
+    const t = try normXq(gpa, text);
+    defer gpa.free(t);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var it = lines(t);
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, "ERROR: ")) {
+            try out.appendSlice(gpa, line);
+            try out.append(gpa, '\n');
+        } else try appendFields(gpa, &out, line);
+    }
+    return normNum(gpa, out.items);
+}
+
+test normMssql {
+    const a = std.testing.allocator;
+    const got = try normMssql(a, " |ab\n-|--\n2|3.50\n\nx\n-\n\nMsg 208, Level 16, State 1, Server s, Line 2\nInvalid object name 'nope'.\n(1 row affected)\n");
+    defer a.free(got);
+    try std.testing.expectEqualStrings("|ab\n2|3.5\nERROR: Invalid object name 'nope'.\n", got);
 }
 
 // ---------------------------------------------------------------- processes

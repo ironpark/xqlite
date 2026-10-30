@@ -282,8 +282,9 @@ pub const Lexer = struct {
     fn operator(lx: *Lexer) Kind {
         const s = lx.sql;
         const rest = s[lx.pos..];
-        const ops3 = [_][]const u8{"<=>"};
-        const ops2 = [_][]const u8{ "<=", ">=", "<>", "!=", "&&", "||", "<<", ">>", ":=" };
+        // -> and ->> are MySQL's JSON operators (parser.zig).
+        const ops3 = [_][]const u8{ "<=>", "->>" };
+        const ops2 = [_][]const u8{ "<=", ">=", "<>", "!=", "&&", "||", "<<", ">>", ":=", "->" };
         for (ops3) |o| if (std.mem.startsWith(u8, rest, o)) {
             lx.pos += 3;
             return .op;

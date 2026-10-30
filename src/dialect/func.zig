@@ -38,6 +38,10 @@ pub const Options = struct {
     direct_only: bool = false,
     /// The user data, sqlite3_user_data() of the implementation.
     user_data: ?*anyopaque = null,
+    /// Reads the subtypes of its arguments (SQLITE_SUBTYPE).
+    subtype: bool = false,
+    /// May give its result a subtype (SQLITE_RESULT_SUBTYPE).
+    result_subtype: bool = false,
 };
 
 fn flags(o: Options) @import("../sql/callback.zig").FUNC {
@@ -47,6 +51,8 @@ fn flags(o: Options) @import("../sql/callback.zig").FUNC {
         .CONSTANT = o.deterministic,
         .DIRECT = o.direct_only,
         .UNSAFE = o.unsafe,
+        .SUBTYPE = o.subtype,
+        .RESULT_SUBTYPE = o.result_subtype,
     };
 }
 

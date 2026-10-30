@@ -124,7 +124,30 @@ pub const Hooks = struct {
     /// `unsafe`, so they must be innocuous, and deterministic if they may
     /// appear in an index, a CHECK or a generated column.
     engine_functions: []const FuncDef = &.{},
+    /// Engine table-valued functions (eponymous virtual tables) a
+    /// frontend lowers to, as engine_functions: visible in every dialect,
+    /// named "xq_..." and unique across dialects. Registered on a
+    /// connection when a statement first names one
+    /// (engineModuleRegister()).
+    engine_modules: []const EngineModule = &.{},
 };
+
+pub const EngineModule = struct {
+    name: [:0]const u8,
+    module: *const @import("../sql/vtab.zig").Module,
+};
+
+/// Register the engine module `name` (Hooks.engine_modules) on `db`, for
+/// build.locateTable(); null if there is none of that name.
+pub fn engineModuleRegister(db: *Sqlite3, name: []const u8) ?*int.Module {
+    if (!hasEnginePrefix(name)) return null;
+    inline for (comptime std.enums.values(Dialect)) |d| {
+        for (module(d).hooks.engine_modules) |m| {
+            if (ctype.eqlNoCase(m.name, name)) return @import("../sql/vtab.zig").createModuleInternal(db, m.name, m.module, null, null);
+        }
+    }
+    return null;
+}
 
 /// Everything that makes a dialect.
 pub const Spec = struct {

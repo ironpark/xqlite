@@ -40,6 +40,8 @@ const tree = @import("../../ir/tree.zig");
 const lower = @import("../../ir/lower.zig");
 const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
+const json_table = @import("json_table.zig");
+const functions = @import("functions.zig");
 const dialect = @import("../dialect.zig");
 const lexer = @import("lexer.zig");
 const state = @import("state.zig");
@@ -108,6 +110,10 @@ pub const Parser = struct {
     allow_default: bool = false,
     /// Parsing what the schema keeps.
     stored: ?Stored = null,
+    /// The JSON_TABLEs of the FROM clauses being parsed, and the column
+    /// references that are values of JSON functions (json_table.zig).
+    json_tables: std.ArrayList(json_table.JsonTable) = .empty,
+    json_args: std.ArrayList(*Expr) = .empty,
 
     pub fn init(p: *Parse, sql: [:0]const u8, mode: state.SqlMode) Parser {
         var s: Parser = .{
@@ -391,7 +397,7 @@ pub const Parser = struct {
                     return s.fail("xqlite: comparisons with ANY/SOME/ALL subqueries are not supported", .{});
                 }
                 const r = try s.bitOr();
-                l = try s.mk(l.pos, .{ .compare = .{ .op = op, .l = l, .r = r } });
+                l = try s.mk(l.pos, .{ .compare = .{ .op = op, .l = try functions.jsonCompared(s, l), .r = try functions.jsonCompared(s, r) } });
                 continue;
             }
             if (s.isKw("IS")) {
@@ -440,7 +446,7 @@ pub const Parser = struct {
                 } else {
                     const items = try s.exprList();
                     try s.expectOp(")");
-                    l = try s.mk(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
+                    l = try s.mk(l.pos, .{ .in_list = .{ .e = try functions.jsonCompared(s, l), .not = not, .items = items } });
                 }
                 continue;
             }
@@ -576,6 +582,15 @@ pub const Parser = struct {
 
     fn primaryWithCollate(s: *Parser) Error!*Expr {
         var e = try s.primary();
+        // col->'path', col->>'path' (MySQL's; MariaDB has neither).
+        while (s.isOp("->") or s.isOp("->>")) {
+            const text = s.isOp("->>");
+            const pos = s.here();
+            s.advance();
+            const path = try s.mk(s.here(), .{ .string = try s.stringLiteral() });
+            e = try s.func(pos, "json_extract", &.{ e, path });
+            if (text) e = try s.func(pos, "json_unquote", &.{e});
+        }
         while (s.eatKw("COLLATE")) {
             const coll = try s.collationName();
             e = try s.mk(e.pos, .{ .collate = .{ .e = e, .collation = coll } });
@@ -822,12 +837,14 @@ pub const Parser = struct {
     /// `[WITH ...] select_body [ORDER BY ...] [LIMIT ...] [locking]`.
     pub fn selectStmt(s: *Parser) Error!*tree.Select {
         const pos = s.here();
+        const jm = json_table.mark(s);
         var w: ?*tree.With = null;
         if (s.isKw("WITH")) w = try s.withClause();
         const body = try s.selectBody();
         const sel = try s.new(tree.Select, .{ .with = w, .body = body, .pos = pos });
         try s.orderLimit(sel);
         try s.lockingClause();
+        try json_table.endSelect(s, jm, sel);
         return sel;
     }
 
@@ -975,6 +992,7 @@ pub const Parser = struct {
 
     fn selectCore(s: *Parser) Error!*tree.Core {
         const pos = s.here();
+        const jm = json_table.mark(s);
         try s.expectKw("SELECT");
         var distinct = false;
         var straight = false;
@@ -1020,7 +1038,7 @@ pub const Parser = struct {
         const having: ?*Expr = if (s.eatKw("HAVING")) try s.expr() else null;
         var windows: []tree.NamedWindow = &.{};
         if (s.eatKw("WINDOW")) windows = try s.windowDefs();
-        return s.new(tree.Core, .{
+        const core = try s.new(tree.Core, .{
             .distinct = distinct,
             .cols = cols,
             .from = from,
@@ -1030,6 +1048,8 @@ pub const Parser = struct {
             .windows = windows,
             .pos = pos,
         });
+        try json_table.endCore(s, jm, core);
+        return core;
     }
 
     fn resultColumns(s: *Parser) Error![]tree.ResultCol {
@@ -1065,7 +1085,7 @@ pub const Parser = struct {
     }
 
     /// `[AS] name` (or a string, for a column alias).
-    fn alias(s: *Parser, string_ok: bool) Error!?Name {
+    pub fn alias(s: *Parser, string_ok: bool) Error!?Name {
         if (s.eatKw("AS")) {
             if (string_ok and s.tok.kind == .string) return try s.stringAlias();
             return try s.nameOf(try s.anyName());
@@ -1277,6 +1297,11 @@ pub const Parser = struct {
             return item;
         }
         const q = try s.qualifiedName();
+        if (q.schema == null and s.isOp("(") and std.ascii.eqlIgnoreCase(q.name.text, "json_table")) {
+            item = try json_table.fromItem(s, q.name.pos);
+            try s.onUsing(&item);
+            return item;
+        }
         if (s.isKw("PARTITION")) return s.fail("xqlite: PARTITION is not supported", .{});
         if (q.schema) |sch| if (std.ascii.eqlIgnoreCase(sch.text, "information_schema")) {
             const sub = (try @import("infoschema.zig").select(s, q.name.text)) orelse

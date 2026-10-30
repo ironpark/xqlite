@@ -40,6 +40,7 @@ const ddl = @import("ddl.zig");
 const session = @import("session.zig");
 const types = @import("types.zig");
 const rt = @import("runtime.zig");
+const json = @import("json.zig");
 
 pub const frontend: dialect.Frontend = .{ .run = run };
 
@@ -192,11 +193,14 @@ fn drop(s: *Parser) Error!void {
 pub const hooks: dialect.Hooks = .{
     .functions = &functions,
     .engine_functions = &engine_functions,
+    .engine_modules = &.{.{ .name = "xq_maria_json_table", .module = &@import("json_table.zig").module }},
     // utf8mb4_general_ci and the like: case-insensitive.
     .default_collation = "NOCASE",
 };
 
 const det: dfunc.Options = .{ .deterministic = true };
+/// JSON functions: read and set the JSON subtype (json.zig).
+const jdet: dfunc.Options = .{ .deterministic = true, .subtype = true, .result_subtype = true };
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
@@ -252,7 +256,6 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("find_in_set", 2, det, rt.findInSetFunc),
     dfunc.scalar("field", -1, det, rt.fieldFunc),
     dfunc.scalar("elt", -1, det, rt.eltFunc),
-    dfunc.scalar("json_unquote", 1, det, rt.jsonUnquoteFunc),
     // Dates.
     dfunc.scalar("year", 1, det, rt.yearFunc),
     dfunc.scalar("month", 1, det, rt.monthFunc),
@@ -274,6 +277,46 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("monthname", 1, det, rt.monthnameFunc),
     dfunc.scalar("str_to_date", 2, det, rt.strToDateFunc),
     dfunc.scalar("ascii", 1, det, rt.asciiFunc),
+    // JSON (json.zig); JSON_VALID is SQLite's json_valid().
+    dfunc.scalar("json_extract", -1, jdet, json.extractFunc),
+    dfunc.scalar("json_value", 2, jdet, json.valueFunc),
+    dfunc.scalar("json_query", 2, jdet, json.queryFunc),
+    dfunc.scalar("json_unquote", 1, jdet, json.unquoteFunc),
+    dfunc.scalar("json_quote", 1, jdet, json.quoteFunc),
+    dfunc.scalar("json_object", -1, jdet, json.objectFunc),
+    dfunc.scalar("json_array", -1, jdet, json.arrayFunc),
+    dfunc.scalar("json_contains", 2, jdet, json.containsFunc),
+    dfunc.scalar("json_contains", 3, jdet, json.containsFunc),
+    dfunc.scalar("json_contains_path", -1, jdet, json.containsPathFunc),
+    dfunc.scalar("json_exists", 2, jdet, json.existsFunc),
+    dfunc.scalar("json_keys", 1, jdet, json.keysFunc),
+    dfunc.scalar("json_keys", 2, jdet, json.keysFunc),
+    dfunc.scalar("json_length", 1, jdet, json.lengthFunc),
+    dfunc.scalar("json_length", 2, jdet, json.lengthFunc),
+    dfunc.scalar("json_depth", 1, jdet, json.depthFunc),
+    dfunc.scalar("json_type", 1, jdet, json.typeFunc),
+    dfunc.scalar("json_set", -1, jdet, json.setFunc),
+    dfunc.scalar("json_insert", -1, jdet, json.insertFunc),
+    dfunc.scalar("json_replace", -1, jdet, json.replaceFunc),
+    dfunc.scalar("json_remove", -1, jdet, json.removeFunc),
+    dfunc.scalar("json_array_append", -1, jdet, json.arrayAppendFunc),
+    dfunc.scalar("json_array_insert", -1, jdet, json.arrayInsertFunc),
+    dfunc.scalar("json_merge", -1, jdet, json.mergePreserveFunc),
+    dfunc.scalar("json_merge_preserve", -1, jdet, json.mergePreserveFunc),
+    dfunc.scalar("json_merge_patch", -1, jdet, json.mergePatchFunc),
+    dfunc.scalar("json_search", -1, jdet, json.searchFunc),
+    dfunc.scalar("json_compact", 1, jdet, json.compactFunc),
+    dfunc.scalar("json_loose", 1, jdet, json.looseFunc),
+    dfunc.scalar("json_detailed", 1, jdet, json.detailedFunc),
+    dfunc.scalar("json_detailed", 2, jdet, json.detailedFunc),
+    dfunc.scalar("json_pretty", 1, jdet, json.detailedFunc),
+    dfunc.scalar("json_pretty", 2, jdet, json.detailedFunc),
+    dfunc.scalar("json_equals", 2, jdet, json.equalsFunc),
+    dfunc.scalar("json_normalize", 1, jdet, json.normalizeFunc),
+    dfunc.scalar("json_overlaps", 2, jdet, json.overlapsFunc),
+    dfunc.aggregate("json_arrayagg", 1, jdet, json.arrayaggStep, json.arrayaggFinal),
+    dfunc.aggregate("json_arrayagg", 2, jdet, json.arrayaggStep, json.arrayaggFinal),
+    dfunc.aggregate("json_objectagg", 2, jdet, json.objectaggStep, json.objectaggFinal),
 };
 
 /// The functions the IR's semantic nodes lower and render to (Coerce,
@@ -298,6 +341,10 @@ const engine_functions = [_]int.FuncDef{
     dfunc.aggregate("xq_stddev_samp", 1, det, rt.varStep, rt.stddevSampFinal),
     dfunc.aggregate("xq_var_pop", 1, det, rt.varStep, rt.varPopFinal),
     dfunc.aggregate("xq_var_samp", 1, det, rt.varStep, rt.varSampFinal),
+    // What the parser adds around JSON (json.zig, json_table.zig).
+    dfunc.scalar("xq_maria_json_bool", 1, jdet, json.boolFunc),
+    dfunc.scalar("xq_maria_json_col", 1, jdet, json.colFunc),
+    dfunc.scalar("xq_maria_json_cmp", 1, jdet, json.cmpFunc),
 };
 
 comptime {
@@ -340,5 +387,6 @@ test {
     _ = @import("lexer.zig");
     _ = @import("types.zig");
     _ = @import("runtime.zig");
+    _ = @import("json.zig");
     _ = @import("test.zig");
 }

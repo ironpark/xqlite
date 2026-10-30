@@ -432,17 +432,6 @@ pub fn bitLengthFunc(ctx: *Context, argv: []*Mem) void {
     api.resultInt64(ctx, @intCast(api.valueBytes(argv[0]) * 8));
 }
 
-/// JSON_UNQUOTE(s): the value of a JSON string, else s.
-pub fn jsonUnquoteFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(ctx);
-    const z = text(ctx, argv[0]) orelse return;
-    if (z.len < 2 or z[0] != '"' or z[z.len - 1] != '"') return api.resultText(ctx, z, .transient);
-    const gpa = api.contextDbHandle(ctx).gpa;
-    const v = std.json.parseFromSlice([]const u8, gpa, z, .{}) catch return api.resultText(ctx, z, .transient);
-    defer v.deinit();
-    api.resultText(ctx, v.value, .transient);
-}
-
 // ================================================================ dates
 
 /// Days since 1970-01-01 of a civil date (proleptic Gregorian).

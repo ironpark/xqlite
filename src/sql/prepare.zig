@@ -10,6 +10,7 @@ const ctype = @import("../util/ctype.zig");
 const numeric = @import("numeric.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
+const mem = @import("../vdbe/mem.zig");
 const dialect = @import("../dialect/dialect.zig");
 
 const Sqlite3 = int.Sqlite3;
@@ -507,6 +508,75 @@ pub fn prepareLang(db: *Sqlite3, sql: []const u8, lang: dialect.Lang, prep_flags
     const saved = dialect.swapLang(db, lang);
     defer _ = dialect.swapLang(db, saved);
     return prepareV3(db, sql, prep_flags, stmt, tail);
+}
+
+/// Port of sqlite3_stmt_explain(): switch `v` between running normally
+/// (0), as EXPLAIN (1) and as EXPLAIN QUERY PLAN (2), recompiling it when
+/// its program cannot be listed that way as it is.
+pub fn stmtExplain(v: *Vdbe, mode: i32) i32 {
+    var rc: i32 = RC.OK;
+    if (v.explain == mode) {
+        rc = RC.OK;
+    } else if (mode < 0 or mode > 2) {
+        rc = RC.ERROR;
+    } else if (v.prep_flags & aux.PREPARE_SAVESQL == 0) {
+        rc = RC.ERROR;
+    } else if (v.e_vdbe_state != .ready) {
+        rc = RC.BUSY;
+    } else if (v.mem.len >= 10 and (mode != 2 or v.have_eqp_ops)) {
+        // No recompile needed.
+        v.explain = @intCast(mode);
+    } else {
+        v.explain = @intCast(mode);
+        rc = reprepare(v);
+        v.have_eqp_ops = mode == 2;
+    }
+    v.n_res_column = if (v.explain != 0) 12 - 4 * @as(u16, v.explain) else v.n_res_alloc;
+    return rc;
+}
+
+/// xqlite: the origins of the result columns of `v` (Vdbe.col_meta,
+/// SQLITE_ENABLE_COLUMN_METADATA's sqlite3_column_table_name() and
+/// friends). They are compiled on first use, so that statements that
+/// never ask cost nothing: the statement's SQL is compiled again, in its
+/// language, with Sqlite3.col_metadata set, and the names are moved over.
+/// The connection's error state is left as it was. Returns whether `v`
+/// has them.
+pub fn columnMetadata(v: *Vdbe) bool {
+    if (v.col_meta.len > 0) return true;
+    if (v.n_res_column == 0 or v.explain != 0) return false;
+    const db = v.db;
+    const sql = v.sql orelse return false;
+    const saved_meta = db.col_metadata;
+    const saved_code = db.err_code;
+    const saved_offset = db.err_byte_offset;
+    const saved_err = db.err;
+    db.err = null;
+    db.col_metadata = true;
+    defer {
+        db.col_metadata = saved_meta;
+        if (db.err) |e| {
+            mem.release(e);
+            db.gpa.destroy(e);
+        }
+        db.err = saved_err;
+        db.err_code = saved_code;
+        db.err_byte_offset = saved_offset;
+    }
+    var new: ?*Vdbe = null;
+    var tail: [:0]const u8 = "";
+    if (lockAndPrepare(db, sql, v.prep_flags, v, &new, &tail) != RC.OK) return false;
+    const n = new orelse return false;
+    defer _ = aux.finalize(n);
+    if (n.col_meta.len == 0 or n.n_res_alloc != v.n_res_alloc) return false;
+    const meta = v.alloc().alloc(vi.Mem, n.col_meta.len) catch return false;
+    // The names are in buffers of their own (aux.setColName()).
+    for (meta, n.col_meta) |*to, *from| {
+        to.* = .{ .db = db };
+        mem.move(to, from);
+    }
+    v.col_meta = meta;
+    return true;
 }
 
 /// Port of sqlite3Reprepare(): recompile a statement after a schema

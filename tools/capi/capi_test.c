@@ -994,6 +994,263 @@ static void test_misc(void){
   CHECK_RC(sqlite3_close(0), SQLITE_OK, 0);
 }
 
+/* ==================================================================== */
+/* Group C: statements, text encodings, threading.                      */
+/* Against SQLite these need a build with SQLITE_ENABLE_COLUMN_METADATA, */
+/* SQLITE_ENABLE_NORMALIZE and SQLITE_ENABLE_STMT_SCANSTATUS.            */
+/* ==================================================================== */
+
+/* sqlite3.h declares it only with SQLITE_ENABLE_NORMALIZE. */
+const char *sqlite3_normalized_sql(sqlite3_stmt *pStmt);
+
+/* UTF-16 text compared with an ASCII string. */
+static int eq16(const void *z, const char *zAscii){
+  const unsigned short *p = (const unsigned short*)z;
+  int i;
+  if( p==0 ) return zAscii==0;
+  for(i=0; zAscii[i]; i++) if( p[i]!=(unsigned char)zAscii[i] ) return 0;
+  return p[i]==0;
+}
+
+/* f16(x): the UTF-16 text of x in each byte order, read back as checks
+** on the value, then x||'' from the engine. */
+static int nF16 = 0;
+static void fn_utf16(sqlite3_context *ctx, int argc, sqlite3_value **argv){
+  const unsigned char *le, *be;
+  (void)argc;
+  le = (const unsigned char*)sqlite3_value_text16le(argv[0]);
+  if( le && le[0]=='h' && le[1]==0 && sqlite3_value_encoding(argv[0])==SQLITE_UTF16LE ) nF16++;
+  be = (const unsigned char*)sqlite3_value_text16be(argv[0]);
+  if( be && be[0]==0 && be[1]=='h' && sqlite3_value_encoding(argv[0])==SQLITE_UTF16BE ) nF16++;
+  if( sqlite3_value_bytes16(argv[0])==10 ) nF16++;
+  sqlite3_result_value(ctx, argv[0]);
+}
+
+static void test_utf16_results(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  static const unsigned short zE9[] = { 0x00e9, 0xd83d, 0xde00, 0 };
+  int i;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a INTEGER PRIMARY KEY, b VARCHAR(10), c)");
+  exec(db, "INSERT INTO t VALUES(1, 'hello', 'x'), (2, '123', 2.5), (3, NULL, x'41')");
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT b AS name, c, ' \xc3\xa9\xf0\x9f\x98\x80', 'k', 'k' || a FROM t ORDER BY a", -1, &p, 0), SQLITE_OK, db);
+  CHECK(eq16(sqlite3_column_name16(p, 0), "name"));
+  CHECK(eq16(sqlite3_column_decltype16(p, 0), "VARCHAR(10)"));
+  CHECK(sqlite3_column_decltype16(p, 1)==0);
+  CHECK_STR(sqlite3_column_name(p, 0), "name");
+  CHECK(sqlite3_column_text16(p, 0)==0); /* no row */
+  for(i=1; i<=3; i++){
+    const void *z;
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    /* The constant 'k' becomes UTF-16 on every row; 'k'||a still works. */
+    CHECK(eq16(sqlite3_column_text16(p, 3), "k"));
+    if( i==1 ){
+      z = sqlite3_column_text16(p, 0);
+      CHECK(eq16(z, "hello"));
+      CHECK(sqlite3_column_bytes16(p, 0)==10);
+      CHECK(sqlite3_column_text16(p, 0)==z);  /* cached in the value */
+      CHECK_STR(sqlite3_column_text(p, 0), "hello");
+      CHECK(sqlite3_column_bytes(p, 0)==5);
+      CHECK(eq16(sqlite3_column_text16(p, 1), "x"));
+      z = sqlite3_column_text16(p, 2);
+      CHECK(z && memcmp(z, (const unsigned short[]){ ' ', 0x00e9, 0xd83d, 0xde00, 0 }, 10)==0);
+      CHECK(sqlite3_column_bytes16(p, 2)==8);
+      CHECK_STR(sqlite3_column_text(p, 2), " \xc3\xa9\xf0\x9f\x98\x80");
+      CHECK(sqlite3_value_encoding(sqlite3_column_value(p, 2))==SQLITE_UTF8);
+    }else if( i==2 ){
+      CHECK(eq16(sqlite3_column_text16(p, 0), "123"));
+      CHECK(sqlite3_column_int(p, 0)==123);      /* read from the UTF-16 text */
+      CHECK(sqlite3_column_double(p, 0)==123.0);
+      CHECK(sqlite3_column_type(p, 0)==SQLITE_TEXT);
+      CHECK(eq16(sqlite3_column_text16(p, 1), "2.5"));
+      CHECK(sqlite3_column_bytes16(p, 1)==6);
+      CHECK(sqlite3_value_numeric_type(sqlite3_column_value(p, 0))==SQLITE_INTEGER);
+    }else{
+      CHECK(sqlite3_column_text16(p, 0)==0);
+      CHECK(sqlite3_column_bytes16(p, 0)==0);
+      CHECK(eq16(sqlite3_column_text16(p, 1), "A"));
+    }
+    {
+      char zK[8];
+      snprintf(zK, sizeof(zK), "k%d", i);
+      CHECK_STR(sqlite3_column_text(p, 4), zK);
+    }
+  }
+  CHECK_RC(sqlite3_step(p), SQLITE_DONE, db);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 4), "k1");
+  sqlite3_finalize(p);
+
+  /* Function arguments, and the values they return. */
+  CHECK_RC(sqlite3_create_function(db, "f16", 1, SQLITE_UTF8, 0, fn_utf16, 0, 0), SQLITE_OK, db);
+  nF16 = 0;
+  CHECK_STR(one(db, "SELECT f16(b) || '!' || b FROM t WHERE a=1"), "hello!hello");
+  CHECK(nF16==3);
+  {
+    sqlite3_value *v;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT ?1, typeof(?1), length(?1)", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_bind_text16(p, 1, zE9, -1, SQLITE_STATIC), SQLITE_OK, db);
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    CHECK(sqlite3_column_bytes16(p, 0)==6);
+    v = sqlite3_value_dup(sqlite3_column_value(p, 0));
+    CHECK(v && sqlite3_value_encoding(v)!=SQLITE_UTF8);
+    sqlite3_finalize(p);
+    /* Binding a UTF-16 value converts it. */
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT ?1, length(?1), hex(?1)", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_bind_value(p, 1, v), SQLITE_OK, db);
+    CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+    CHECK_STR(sqlite3_column_text(p, 0), "\xc3\xa9\xf0\x9f\x98\x80");
+    CHECK(sqlite3_column_int(p, 1)==2);
+    CHECK_STR(sqlite3_column_text(p, 2), "C3A9F09F9880");
+    sqlite3_finalize(p);
+    sqlite3_value_free(v);
+  }
+  /* EXPLAIN's column names. */
+  CHECK_RC(sqlite3_prepare_v2(db, "EXPLAIN SELECT 1", -1, &p, 0), SQLITE_OK, db);
+  CHECK(eq16(sqlite3_column_name16(p, 1), "opcode"));
+  CHECK(sqlite3_column_decltype16(p, 1)==0);
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "EXPLAIN QUERY PLAN SELECT 1", -1, &p, 0), SQLITE_OK, db);
+  CHECK(eq16(sqlite3_column_name16(p, 3), "detail"));
+  CHECK(sqlite3_column_name16(p, 4)==0);
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
+static void test_column_metadata(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, b TEXT, c);"
+           "CREATE TABLE r(x);"
+           "CREATE VIEW v AS SELECT b AS bb, c+1 AS cc FROM t;"
+           "CREATE TEMP TABLE tt(z);"
+           "INSERT INTO t VALUES(1, 'one', 2)");
+  CHECK_RC(sqlite3_prepare_v2(db,
+      "SELECT id, b AS bee, c+1, r.rowid, (SELECT b FROM t), v.bb, v.cc, tt.z, s.q "
+      "FROM t, v LEFT JOIN r LEFT JOIN tt LEFT JOIN (SELECT b AS q FROM t) AS s", -1, &p, 0), SQLITE_OK, db);
+  /* Before the first step, as in SQLite. */
+  CHECK_STR(sqlite3_column_database_name(p, 0), "main");
+  CHECK_STR(sqlite3_column_table_name(p, 0), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 0), "id");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_origin_name(p, 1), "b");
+  CHECK_STR(sqlite3_column_name(p, 1), "bee");
+  CHECK(sqlite3_column_table_name(p, 2)==0);
+  CHECK(sqlite3_column_origin_name(p, 2)==0);
+  CHECK_STR(sqlite3_column_table_name(p, 3), "r");
+  CHECK_STR(sqlite3_column_origin_name(p, 3), "rowid");
+  CHECK_STR(sqlite3_column_table_name(p, 4), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 4), "b");
+  CHECK_STR(sqlite3_column_table_name(p, 5), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 5), "b");
+  CHECK(sqlite3_column_table_name(p, 6)==0);
+  CHECK_STR(sqlite3_column_database_name(p, 7), "temp");
+  CHECK_STR(sqlite3_column_table_name(p, 7), "tt");
+  CHECK_STR(sqlite3_column_origin_name(p, 8), "b");
+  CHECK(sqlite3_column_table_name(p, 9)==0);
+  CHECK(sqlite3_column_table_name(p, -1)==0);
+  CHECK(eq16(sqlite3_column_database_name16(p, 0), "main"));
+  CHECK(eq16(sqlite3_column_table_name16(p, 1), "t"));
+  CHECK(eq16(sqlite3_column_origin_name16(p, 1), "b"));
+  CHECK_STR(sqlite3_column_text(p, 1), "one");
+  CHECK_STR(sqlite3_column_decltype(p, 0), "INTEGER");
+  /* The error state of the connection is not touched. */
+  CHECK(sqlite3_errcode(db)==SQLITE_ROW);
+  sqlite3_finalize(p);
+  /* Consistent with sqlite3_table_column_metadata(). */
+  {
+    const char *zType = 0, *zColl = 0;
+    int notNull = 0, pk = 0, autoinc = 0;
+    CHECK_RC(sqlite3_prepare_v2(db, "SELECT c FROM t", -1, &p, 0), SQLITE_OK, db);
+    CHECK_RC(sqlite3_table_column_metadata(db, sqlite3_column_database_name(p, 0),
+        sqlite3_column_table_name(p, 0), sqlite3_column_origin_name(p, 0),
+        &zType, &zColl, &notNull, &pk, &autoinc), SQLITE_OK, db);
+    CHECK(zType==0 || zType[0]==0 || sqlite3_column_decltype(p, 0)==0);
+    CHECK(pk==0);
+    sqlite3_finalize(p);
+  }
+  /* Not a SELECT. */
+  CHECK_RC(sqlite3_prepare_v2(db, "PRAGMA table_info(t)", -1, &p, 0), SQLITE_OK, db);
+  CHECK(sqlite3_column_table_name(p, 0)==0);
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "INSERT INTO t(b) VALUES('x') RETURNING b, id", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_column_table_name(p, 0), "t");
+  CHECK_STR(sqlite3_column_origin_name(p, 1), "id");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  sqlite3_finalize(p);
+  /* After a schema change, the statement is recompiled. */
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT * FROM r", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_column_origin_name(p, 0), "x");
+  exec(db, "DROP TABLE r; CREATE TABLE r(y)");
+  CHECK_RC(sqlite3_step(p), SQLITE_DONE, db);
+  CHECK_STR(sqlite3_column_origin_name(p, 0), "y");
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
+static void test_normalized_sql(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a, b, c)");
+  CHECK_RC(sqlite3_prepare_v2(db, "select a, 'x', 12, 1.5, x'00', ?1 from T where b in (1,2,3) and c is null -- c", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_normalized_sql(p), "SELECT a,?,?,?,?,?FROM t WHERE b IN(?,?,?)AND c IS NULL;");
+  CHECK(sqlite3_normalized_sql(p)==sqlite3_normalized_sql(p));
+  sqlite3_finalize(p);
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT \"zz\", \"A\", [b] FROM t /* x */ WHERE a NOT NULL;", -1, &p, 0), SQLITE_OK, db);
+  CHECK_STR(sqlite3_normalized_sql(p), "SELECT?,a,b FROM t WHERE a NOT NULL;");
+  sqlite3_finalize(p);
+  CHECK(sqlite3_normalized_sql(0)==0);
+  sqlite3_close(db);
+}
+
+static void test_stmt_explain(void){
+  sqlite3 *db = 0;
+  sqlite3_stmt *p = 0;
+  int n = 0;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  exec(db, "CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES(1, 'x')");
+  CHECK_RC(sqlite3_prepare_v2(db, "SELECT b FROM t WHERE a=?", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_bind_int(p, 1, 1), SQLITE_OK, db);
+  CHECK(sqlite3_stmt_isexplain(p)==0);
+  CHECK_RC(sqlite3_stmt_explain(p, 2), SQLITE_OK, db);
+  CHECK(sqlite3_stmt_isexplain(p)==2);
+  CHECK(sqlite3_column_count(p)==4);
+  CHECK_STR(sqlite3_column_name(p, 3), "detail");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK_STR(sqlite3_column_text(p, 3), "SEARCH t USING INTEGER PRIMARY KEY (rowid=?)");
+  CHECK_RC(sqlite3_stmt_explain(p, 1), SQLITE_BUSY, db);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 1), SQLITE_OK, db);
+  CHECK(sqlite3_column_count(p)==8);
+  CHECK_STR(sqlite3_column_name(p, 1), "opcode");
+  while( sqlite3_step(p)==SQLITE_ROW ){
+    if( strcmp((const char*)sqlite3_column_text(p, 1), "ResultRow")==0 ) n++;
+  }
+  CHECK(n==1);
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 0), SQLITE_OK, db);
+  CHECK(sqlite3_column_count(p)==1);
+  CHECK_STR(sqlite3_column_name(p, 0), "b");
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);   /* the binding was kept */
+  CHECK_STR(sqlite3_column_text(p, 0), "x");
+  CHECK_RC(sqlite3_reset(p), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 3), SQLITE_ERROR, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 0), SQLITE_OK, db);
+  sqlite3_finalize(p);
+  /* A statement prepared as EXPLAIN runs its program normally. */
+  CHECK_RC(sqlite3_prepare_v2(db, "EXPLAIN SELECT a FROM t", -1, &p, 0), SQLITE_OK, db);
+  CHECK_RC(sqlite3_stmt_explain(p, 0), SQLITE_OK, db);
+  CHECK(sqlite3_column_count(p)==1);
+  CHECK_RC(sqlite3_step(p), SQLITE_ROW, db);
+  CHECK(sqlite3_column_int(p, 0)==1);
+  sqlite3_finalize(p);
+  sqlite3_close(db);
+}
+
 int main(void){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
   if( mkdtemp(zDir)==0 ){ perror("mkdtemp"); return 1; }
@@ -1009,6 +1266,11 @@ int main(void){
   test_vtab();
   test_vfs(zDir);
   test_misc();
+  /* Group C */
+  test_utf16_results();
+  test_column_metadata();
+  test_normalized_sql();
+  test_stmt_explain();
   {
     char zCmd[600];
     snprintf(zCmd, sizeof(zCmd), "rm -rf '%s'", zDir);

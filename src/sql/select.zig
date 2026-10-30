@@ -939,16 +939,30 @@ fn generateSortTail(p: *Parse, s: *Select, sort: *SortCtx, n_column_arg: i32, de
     aux.resolveLabel(v, addr_break);
 }
 
+/// The origin of a result column (SQLITE_ENABLE_COLUMN_METADATA): the
+/// database, table and column it is read from.
+const Origin = struct {
+    db: ?[:0]const u8 = null,
+    tab: ?[:0]const u8 = null,
+    col: ?[:0]const u8 = null,
+};
+
 /// Port of columnTypeImpl(): the declared type of a result expression
 /// that is (through subqueries) a table column; INTEGER for a rowid.
-fn columnType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
+/// With `origin` (SQLITE_ENABLE_COLUMN_METADATA), also where it comes
+/// from, and then a rowid alias has the type of its column.
+fn columnType(nc_arg: *NameContext, e: *Expr, origin: ?*Origin) ?[:0]const u8 {
+    var o: Origin = .{};
+    defer if (origin) |out| {
+        out.* = o;
+    };
     switch (e.op) {
         TK.COLUMN => {
             // Find the table (or subquery) of the column.
             var t: ?*Table = null;
             var sub: ?*Select = null;
             var nc: ?*NameContext = nc_arg;
-            const i_col = e.i_column;
+            var i_col = e.i_column;
             search: while (nc) |n| {
                 for (n.src_list.?.slice()) |*item| {
                     if (item.i_cursor == e.i_table) {
@@ -965,9 +979,27 @@ fn columnType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
                 // view is always NULL).
                 if (i_col >= 0 and i_col < ss.e_list.?.len()) {
                     var snc: NameContext = .{ .parse = nc_arg.parse, .src_list = ss.src, .next = nc };
-                    return columnType(&snc, ss.e_list.?.at(@intCast(i_col)).expr.?);
+                    return columnType(&snc, ss.e_list.?.at(@intCast(i_col)).expr.?, if (origin != null) &o else null);
                 }
                 return null;
+            }
+            if (origin != null) {
+                if (i_col < 0) i_col = tab.i_pkey;
+                var z: ?[:0]const u8 = null;
+                if (i_col < 0) {
+                    z = "INTEGER";
+                    o.col = "rowid";
+                } else {
+                    o.col = tab.cols[@intCast(i_col)].name();
+                    const ty = build.columnType(&tab.cols[@intCast(i_col)], "");
+                    z = if (ty.len == 0) null else ty;
+                }
+                o.tab = tab.name;
+                if (tab.schema != null) {
+                    const db = nc_arg.parse.db;
+                    o.db = db.dbs.items[@intCast(prepare.schemaToIndex(db, tab.schema))].name;
+                }
+                return z;
             }
             if (i_col < 0) return "INTEGER";
             const z = build.columnType(&tab.cols[@intCast(i_col)], "");
@@ -977,21 +1009,30 @@ fn columnType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
             // The type of the single result column of the subquery.
             const ss = e.x.select.?;
             var snc: NameContext = .{ .parse = nc_arg.parse, .src_list = ss.src, .next = nc_arg };
-            return columnType(&snc, ss.e_list.?.at(0).expr.?);
+            return columnType(&snc, ss.e_list.?.at(0).expr.?, if (origin != null) &o else null);
         },
         else => return null,
     }
 }
 
 /// Port of generateColumnTypes(): the declared types of the result
-/// columns (sqlite3_column_decltype()).
+/// columns (sqlite3_column_decltype()), and their origins when the
+/// statement is compiled with column metadata (Vdbe.col_meta).
 fn generateColumnTypes(p: *Parse, tab_list: *SrcList, e_list: *ExprList) void {
     const v = p.vdbe.?;
     var nc: NameContext = .{ .parse = p, .src_list = tab_list };
+    const meta = v.col_meta.len > 0;
     for (e_list.slice(), 0..) |item, i| {
-        const z = columnType(&nc, item.expr.?) orelse continue;
-        if (z.len == 0) continue;
-        aux.setColName(v, i, vi.COLNAME_DECLTYPE, z);
+        var o: Origin = .{};
+        const z = columnType(&nc, item.expr.?, if (meta) &o else null);
+        if (meta) {
+            if (o.db) |x| aux.setColName(v, i, vi.COLNAME_DATABASE, x);
+            if (o.tab) |x| aux.setColName(v, i, vi.COLNAME_TABLE, x);
+            if (o.col) |x| aux.setColName(v, i, vi.COLNAME_COLUMN, x);
+        }
+        const ty = z orelse continue;
+        if (ty.len == 0) continue;
+        aux.setColName(v, i, vi.COLNAME_DECLTYPE, ty);
     }
 }
 
@@ -1124,7 +1165,7 @@ pub fn subqueryColumnTypes(p: *Parse, a: std.mem.Allocator, t: *Table, s_arg: *S
             }
             if (col.affinity >= Aff.numeric and e.op == TK.CAST) col.affinity = Aff.flexnum;
         }
-        var typ = columnType(&nc, e);
+        var typ = columnType(&nc, e, null);
         if (typ == null or col.affinity != build.affinityType(typ.?, null)) {
             if (col.affinity == Aff.numeric or col.affinity == Aff.flexnum) {
                 typ = "NUM";

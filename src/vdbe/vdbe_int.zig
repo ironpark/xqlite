@@ -404,6 +404,8 @@ pub const COLNAME_DECLTYPE = 1;
 pub const COLNAME_DATABASE = 2;
 pub const COLNAME_TABLE = 3;
 pub const COLNAME_COLUMN = 4;
+/// Slots in Vdbe.col_names (the default build's COLNAME_N); the origin
+/// slots are in Vdbe.col_meta.
 pub const COLNAME_N = 2;
 
 // =============================================================== cursors
@@ -563,6 +565,10 @@ pub const Vdbe = struct {
     n_stmt_def_imm_cons: i64 = 0,
     ops: std.ArrayList(Op) = .empty,
     col_names: []Mem = &.{},
+    /// The COLNAME_DATABASE, COLNAME_TABLE and COLNAME_COLUMN names
+    /// (SQLITE_ENABLE_COLUMN_METADATA), laid out like col_names; empty
+    /// until asked for (prepare.columnMetadata()).
+    col_meta: []Mem = &.{},
     result_row: ?[*]Mem = null,
     /// What api.columnMem() returns outside a row (C: a static const
     /// nullMem, which callers may not write; here they may).
@@ -594,6 +600,11 @@ pub const Vdbe = struct {
     lock_mask: u32 = 0,
     counters: [9]u32 = @splat(0),
     sql: ?[:0]const u8 = null,
+    /// sqlite3_normalized_sql(), made on first use (zNormSql).
+    norm_sql: ?[:0]const u8 = null,
+    /// Double-quoted identifiers the resolver took as string literals,
+    /// for normalized_sql (pDblStr).
+    dbl_strs: std.ArrayList([]const u8) = .empty,
     frame: ?*VdbeFrame = null,
     del_frame: ?*VdbeFrame = null,
     n_frame: i32 = 0,

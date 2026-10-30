@@ -100,6 +100,7 @@ fn nanoTime() i128 {
 pub export fn sqlite3_step(v_arg: ?*Vdbe) callconv(.c) c_int {
     const v = v_arg orelse return RC.MISUSE;
     const e = c.extOf(v.db) orelse return c.api.step(v);
+    if (e.utf16) c.rowToUtf8(v);
     if (e.trace_mask == 0 and e.legacy_trace.f == null and e.legacy_profile.f == null) {
         return c.api.step(v);
     }
@@ -134,6 +135,7 @@ fn forget(v: *Vdbe) void {
 pub export fn sqlite3_reset(v_arg: ?*Vdbe) callconv(.c) c_int {
     const v = v_arg orelse return RC.OK;
     forget(v);
+    c.rowToUtf8(v);
     return c.api.reset(v);
 }
 
@@ -332,9 +334,10 @@ pub export fn sqlite3_column_bytes(v: ?*Vdbe, i: c_int) callconv(.c) c_int {
     return @intCast(c.api.columnBytes(v orelse return 0, col(i)));
 }
 
-pub export fn sqlite3_column_bytes16(v: ?*Vdbe, i: c_int) callconv(.c) c_int {
-    const t = c.api.columnText(v orelse return 0, col(i)) orelse return 0;
-    return @intCast(c.utf16Bytes(t));
+pub export fn sqlite3_column_bytes16(v_arg: ?*Vdbe, i: c_int) callconv(.c) c_int {
+    const v = v_arg orelse return 0;
+    c.noteUtf16(v.db);
+    return @intCast(c.api.columnBytes16(v, col(i)));
 }
 
 pub export fn sqlite3_column_value(v: ?*Vdbe, i: c_int) callconv(.c) ?*Mem {
@@ -349,46 +352,68 @@ pub export fn sqlite3_column_decltype(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]co
     return c.cStr(c.api.columnDecltype(v orelse return null, col(i)));
 }
 
-// Built without SQLITE_ENABLE_COLUMN_METADATA, as SQLite's default:
-// the statement does not record where a column comes from.
+// SQLITE_ENABLE_COLUMN_METADATA: the origin of a result column. A
+// statement is compiled without it, and compiled again the first time
+// one of these asks (prepare.columnMetadata()), so that statements that
+// never ask cost nothing.
 
-pub export fn sqlite3_column_database_name(_: ?*Vdbe, _: c_int) callconv(.c) ?[*:0]const u8 {
-    return null;
+fn colMeta(v_arg: ?*Vdbe, i: c_int, var_: usize) ?[*:0]const u8 {
+    const v = v_arg orelse return null;
+    if (i < 0 or !prepare_mod.columnMetadata(v)) return null;
+    return c.cStr(c.api.columnNameOf(v, @intCast(i), var_));
 }
 
-pub export fn sqlite3_column_table_name(_: ?*Vdbe, _: c_int) callconv(.c) ?[*:0]const u8 {
-    return null;
+fn colMeta16(v_arg: ?*Vdbe, i: c_int, var_: usize) ?*const anyopaque {
+    const v = v_arg orelse return null;
+    if (i < 0 or !prepare_mod.columnMetadata(v)) return null;
+    return c.api.columnName16(v, @intCast(i), var_);
 }
 
-pub export fn sqlite3_column_origin_name(_: ?*Vdbe, _: c_int) callconv(.c) ?[*:0]const u8 {
-    return null;
+pub export fn sqlite3_column_database_name(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]const u8 {
+    return colMeta(v, i, c.vi.COLNAME_DATABASE);
 }
 
-// The UTF-16 results: the engine keeps text in UTF-8 only, and these
-// would need a converted copy that lives as long as the column value.
-
-pub export fn sqlite3_column_text16(_: ?*Vdbe, _: c_int) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn sqlite3_column_table_name(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]const u8 {
+    return colMeta(v, i, c.vi.COLNAME_TABLE);
 }
 
-pub export fn sqlite3_column_name16(_: ?*Vdbe, _: c_int) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn sqlite3_column_origin_name(v: ?*Vdbe, i: c_int) callconv(.c) ?[*:0]const u8 {
+    return colMeta(v, i, c.vi.COLNAME_COLUMN);
 }
 
-pub export fn sqlite3_column_decltype16(_: ?*Vdbe, _: c_int) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn sqlite3_column_database_name16(v: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    return colMeta16(v, i, c.vi.COLNAME_DATABASE);
 }
 
-pub export fn sqlite3_column_database_name16(_: ?*Vdbe, _: c_int) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn sqlite3_column_table_name16(v: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    return colMeta16(v, i, c.vi.COLNAME_TABLE);
 }
 
-pub export fn sqlite3_column_table_name16(_: ?*Vdbe, _: c_int) callconv(.c) ?*const anyopaque {
-    return null;
+pub export fn sqlite3_column_origin_name16(v: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    return colMeta16(v, i, c.vi.COLNAME_COLUMN);
 }
 
-pub export fn sqlite3_column_origin_name16(_: ?*Vdbe, _: c_int) callconv(.c) ?*const anyopaque {
-    return null;
+// The UTF-16 results: as in SQLite, the value (or name) is converted to
+// UTF-16 in place, and the text lives until the next type conversion,
+// step or reset. The engine reads only UTF-8, so the registers are
+// converted back before it runs again (common.rowToUtf8()).
+
+pub export fn sqlite3_column_text16(v_arg: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    const v = v_arg orelse return null;
+    c.noteUtf16(v.db);
+    return c.api.columnText16(v, col(i));
+}
+
+pub export fn sqlite3_column_name16(v_arg: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    const v = v_arg orelse return null;
+    if (i < 0) return null;
+    return c.api.columnName16(v, @intCast(i), c.vi.COLNAME_NAME);
+}
+
+pub export fn sqlite3_column_decltype16(v_arg: ?*Vdbe, i: c_int) callconv(.c) ?*const anyopaque {
+    const v = v_arg orelse return null;
+    if (i < 0) return null;
+    return c.api.columnName16(v, @intCast(i), c.vi.COLNAME_DECLTYPE);
 }
 
 // ============================================================ statements
@@ -397,9 +422,9 @@ pub export fn sqlite3_sql(v: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
     return c.cStr((v orelse return null).sql);
 }
 
-pub export fn sqlite3_normalized_sql(_: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
-    // SQLITE_ENABLE_NORMALIZE is not built in.
-    return null;
+/// SQLITE_ENABLE_NORMALIZE: made the first time it is asked for.
+pub export fn sqlite3_normalized_sql(v: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
+    return c.cStr(@import("../parse/normalize.zig").normalizedSql(v orelse return null));
 }
 
 /// Port of sqlite3VdbeExpandSql(): the SQL of the statement with its
@@ -502,13 +527,9 @@ pub export fn sqlite3_stmt_isexplain(v: ?*Vdbe) callconv(.c) c_int {
     return c.api.stmtIsExplain(v orelse return 0);
 }
 
-/// Changing the EXPLAIN mode of a prepared statement is not supported;
-/// asking for the mode it has succeeds.
 pub export fn sqlite3_stmt_explain(v_arg: ?*Vdbe, mode: c_int) callconv(.c) c_int {
     const v = v_arg orelse return RC.MISUSE;
-    if (mode < 0 or mode > 2) return RC.ERROR;
-    if (mode == c.api.stmtIsExplain(v)) return RC.OK;
-    return RC.ERROR;
+    return prepare_mod.stmtExplain(v, mode);
 }
 
 pub export fn sqlite3_stmt_busy(v: ?*Vdbe) callconv(.c) c_int {

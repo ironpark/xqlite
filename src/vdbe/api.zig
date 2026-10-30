@@ -227,15 +227,39 @@ pub fn columnNameOf(v: *Vdbe, i: usize, var_: usize) ?[:0]const u8 {
     if (i >= v.n_res_column) return null;
     if (v.explain != 0) {
         if (var_ != vi.COLNAME_NAME) return null;
-        const names = [_][:0]const u8{
-            "addr", "opcode", "p1",      "p2",     "p3", "p4", "p5", "comment",
-            "id",   "parent", "notused", "detail",
-        };
         const k = if (v.explain == 2) i + 8 else i;
-        return names[k];
+        return explain_names[k];
     }
-    if (v.col_names.len == 0) return null;
-    return valueText(&v.col_names[i + var_ * v.n_res_alloc]);
+    return valueText(colNameMem(v, i, var_) orelse return null);
+}
+
+const explain_names = [_][:0]const u8{
+    "addr", "opcode", "p1",      "p2",     "p3", "p4", "p5", "comment",
+    "id",   "parent", "notused", "detail",
+};
+
+/// explain_names in native UTF-16.
+const explain_names16 = blk: {
+    var out: [explain_names.len][:0]const u16 = undefined;
+    for (explain_names, 0..) |name, j| {
+        var a: [name.len:0]u16 = undefined;
+        for (name, 0..) |ch, x| a[x] = ch;
+        const final = a;
+        out[j] = &final;
+    }
+    break :blk out;
+};
+
+/// The slot of name `var_` (COLNAME_*) of column `i`: the COLNAME_NAME and
+/// COLNAME_DECLTYPE slots of every statement, the origin slots of a
+/// statement compiled with column metadata (Vdbe.col_meta).
+fn colNameMem(v: *Vdbe, i: usize, var_: usize) ?*Mem {
+    if (var_ < vi.COLNAME_N) {
+        if (v.col_names.len == 0) return null;
+        return &v.col_names[i + var_ * v.n_res_alloc];
+    }
+    if (v.col_meta.len == 0) return null;
+    return &v.col_meta[i + (var_ - vi.COLNAME_N) * v.n_res_alloc];
 }
 
 pub fn columnName(v: *Vdbe, i: usize) ?[:0]const u8 {
@@ -268,6 +292,53 @@ pub fn valueText(m: *Mem) ?[:0]const u8 {
         return null;
     }) orelse return null;
     return z[0..@intCast(m.n) :0];
+}
+
+/// Port of sqlite3_value_text16(), sqlite3_value_text16le() and
+/// sqlite3_value_text16be(): the value as NUL-terminated UTF-16 text in
+/// `enc` (ENC.UTF16LE or UTF16BE), null for NULL. As in SQLite the value
+/// is converted in place, so the text lives until the value is converted
+/// again or changes (mem.toUtf8()).
+pub fn valueText16(m: *Mem, enc: u8) ?[*]const u8 {
+    const z = mem.valueText(m, enc) catch {
+        if (m.db) |db| db.oomFault();
+        return null;
+    };
+    return if (z) |p| @ptrCast(p) else null;
+}
+
+/// Port of sqlite3_value_bytes16(): the size of the value in UTF-16
+/// (native byte order), converting it as valueText16() does.
+pub fn valueBytes16(m: *Mem) usize {
+    return @intCast(mem.valueBytes(m, @import("utf.zig").UTF16NATIVE) catch 0);
+}
+
+/// Port of sqlite3_column_text16().
+pub fn columnText16(v: *Vdbe, i: usize) ?[*]const u8 {
+    const r = valueText16(columnMem(v, i), @import("utf.zig").UTF16NATIVE);
+    columnMallocFailure(v);
+    return r;
+}
+
+/// Port of sqlite3_column_bytes16().
+pub fn columnBytes16(v: *Vdbe, i: usize) usize {
+    const r = valueBytes16(columnMem(v, i));
+    columnMallocFailure(v);
+    return r;
+}
+
+/// Port of columnName() with useType UTF-16: name `var_` of column `i`
+/// as UTF-16, converted in place like valueText16().
+pub fn columnName16(v: *Vdbe, i: usize, var_: usize) ?[*]const u8 {
+    if (i >= v.n_res_column) return null;
+    if (v.explain != 0) {
+        // The fixed EXPLAIN names (azExplainColNames16data).
+        if (var_ != vi.COLNAME_NAME) return null;
+        const k = if (v.explain == 2) i + 8 else i;
+        return @ptrCast(explain_names16[k].ptr);
+    }
+    const m = colNameMem(v, i, var_) orelse return null;
+    return valueText16(m, @import("utf.zig").UTF16NATIVE);
 }
 
 /// Port of sqlite3_value_blob().
@@ -424,9 +495,22 @@ pub fn bindValue(v: *Vdbe, i: usize, value: *Mem) i32 {
             bindZeroblob(v, i, value.u.n_zero)
         else
             bindBlob(v, i, value.bytes()),
-        vi.SQLITE_TEXT => bindText(v, i, value.bytes()),
+        vi.SQLITE_TEXT => bindTextEnc(v, i, value.bytes(), value.enc),
         else => bindNull(v, i),
     };
+}
+
+/// bindText() of text in encoding `enc`, converted to UTF-8 (C's
+/// bindText() with an encoding: sqlite3VdbeChangeEncoding()).
+fn bindTextEnc(v: *Vdbe, i: usize, text: []const u8, enc: u8) i32 {
+    if (enc == ENC.UTF8 or enc == 0) return bindText(v, i, text);
+    const rc = bindStr(v, i, text, enc);
+    if (rc != RC.OK) return rc;
+    mem.changeEncoding(&v.vars[i - 1], ENC.UTF8) catch {
+        main_mod.setError(v.db, RC.NOMEM);
+        return RC.NOMEM;
+    };
+    return RC.OK;
 }
 
 /// Port of sqlite3_bind_parameter_count().
@@ -568,7 +652,8 @@ pub fn resultStr(ctx: *Context, p: *printf.StrAccum, own: StrOwn) void {
 
 /// Port of sqlite3_result_value(): a copy of `value`.
 pub fn resultValue(ctx: *Context, value: *const Mem) void {
-    mem.copy(ctx.out, value) catch resultErrorNomem(ctx);
+    mem.copy(ctx.out, value) catch return resultErrorNomem(ctx);
+    mem.changeEncoding(ctx.out, ctx.enc) catch resultErrorNomem(ctx);
 }
 
 /// Port of sqlite3_result_subtype().

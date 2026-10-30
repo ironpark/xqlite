@@ -170,18 +170,6 @@ pub fn utf8ToUtf16(s: []const u8) ?[:0]u16 {
     return out.toOwnedSliceSentinel(gpa, 0) catch null;
 }
 
-/// How many bytes `s` takes in UTF-16 (sqlite3_value_bytes16()).
-pub fn utf16Bytes(s: []const u8) usize {
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        const l = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
-        n += if (l == 4) 4 else 2;
-        i += l;
-    }
-    return n;
-}
-
 // ========================================================== the C state
 
 /// A C callback with its argument.
@@ -244,6 +232,11 @@ pub const Ext = struct {
     clientdata: std.ArrayList(ClientData) = .empty,
     /// The buffer of sqlite3_errmsg16().
     errmsg16: ?[:0]u16 = null,
+    /// A value of the connection was turned into UTF-16 for C
+    /// (sqlite3_column_text16() ...): from then on, the registers C was
+    /// handed are brought back to UTF-8 before the engine reads them
+    /// again (toUtf8()).
+    utf16: bool = false,
     /// sqlite3_close_v2() found the connection busy: it closes once the
     /// last statement or backup is gone (a zombie).
     zombie: bool = false,
@@ -254,6 +247,27 @@ pub const Ext = struct {
 
 pub fn ext(db: *Handle) *Ext {
     return @ptrCast(@alignCast(db.capi.?));
+}
+
+/// Note that a value of `db` (if any) is being converted to UTF-16.
+pub fn noteUtf16(db: ?*Handle) void {
+    if (extOf(db)) |e| e.utf16 = true;
+}
+
+/// Bring the values the engine will read again back to UTF-8, if C may
+/// have turned them into UTF-16 (see Ext.utf16).
+pub fn toUtf8(db: ?*Handle, values: []const *Mem) void {
+    const e = extOf(db) orelse return;
+    if (!e.utf16) return;
+    for (values) |m| mem.toUtf8(m);
+}
+
+/// toUtf8() for the current row of `v`.
+pub fn rowToUtf8(v: *Vdbe) void {
+    const e = extOf(v.db) orelse return;
+    if (!e.utf16) return;
+    const row = v.result_row orelse return;
+    for (row[0..v.n_res_column]) |*m| mem.toUtf8(m);
 }
 
 pub fn extOf(db: ?*Handle) ?*Ext {

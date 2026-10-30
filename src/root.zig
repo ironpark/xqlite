@@ -144,6 +144,7 @@ test {
         @import("util/thunk.zig"),          @import("util/cast.zig"),          @import("dialect/dialect.zig"),
         @import("ir/ir.zig"),               @import("catalog/catalog.zig"),    @import("catalog/sequence.zig"),
         @import("sql/analyze.zig"),         @import("sql/analyze_test.zig"),   @import("sql/hash.zig"),
+        @import("vdbe/utf.zig"),            @import("parse/normalize.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

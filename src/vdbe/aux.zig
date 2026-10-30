@@ -895,6 +895,8 @@ fn closeAllCursors(v: *Vdbe) void {
 /// Port of sqlite3VdbeSetNumCols().
 pub fn setNumCols(v: *Vdbe, n: u16) void {
     if (v.n_res_alloc != 0) releaseMemArray(v.col_names);
+    if (v.col_meta.len > 0) releaseMemArray(v.col_meta);
+    v.col_meta = &.{};
     v.n_res_column = n;
     v.n_res_alloc = n;
     v.col_names = v.alloc().alloc(Mem, @as(usize, n) * vi.COLNAME_N) catch {
@@ -903,13 +905,24 @@ pub fn setNumCols(v: *Vdbe, n: u16) void {
         return;
     };
     initMemArray(v.col_names, v.db, .{ .Null = true });
+    if (v.db.col_metadata) {
+        v.col_meta = v.alloc().alloc(Mem, @as(usize, n) * 3) catch {
+            v.db.oomFault();
+            v.col_meta = &.{};
+            return;
+        };
+        initMemArray(v.col_meta, v.db, .{ .Null = true });
+    }
 }
 
 /// Port of sqlite3VdbeSetColName(): name `var` (COLNAME_*) of column
 /// `idx`. The name is copied.
 pub fn setColName(v: *Vdbe, idx: usize, var_: usize, name: [:0]const u8) void {
     if (v.db.malloc_failed) return;
-    const m = &v.col_names[idx + var_ * v.n_res_alloc];
+    const m = if (var_ < vi.COLNAME_N)
+        &v.col_names[idx + var_ * v.n_res_alloc]
+    else
+        &v.col_meta[idx + (var_ - vi.COLNAME_N) * v.n_res_alloc];
     mem.setTextZ(m, name, .transient) catch {
         v.db.oomFault();
     };
@@ -1362,6 +1375,7 @@ pub fn deleteAuxData(db: *Sqlite3, pp_arg: *?*vi.AuxData, i_op: i32, mask: u32) 
 pub fn delete(v: *Vdbe) void {
     const db = v.db;
     if (v.col_names.len > 0) releaseMemArray(v.col_names);
+    if (v.col_meta.len > 0) releaseMemArray(v.col_meta);
     if (v.e_vdbe_state != .init) releaseMemArray(v.vars);
     if (v.prev) |prev| {
         prev.next = v.next;

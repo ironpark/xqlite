@@ -2286,6 +2286,11 @@ pub const Sqlite3 = struct {
     /// xqlite: the SQL dialect of the connection and the state of its
     /// semantic hooks (src/dialect/dialect.zig). No C counterpart.
     xq: @import("../dialect/dialect.zig").ConnState = .{},
+    /// xqlite: compile the origin of each result column (database,
+    /// table, column) into the statement, as SQLITE_ENABLE_COLUMN_METADATA
+    /// does in C. Set only while sqlite3_column_table_name() and friends
+    /// recompile a statement (see prepare.columnMetadata()).
+    col_metadata: bool = false,
     /// The commit, rollback and update hooks and the progress handler
     /// (xCommitCallback, xRollbackCallback, xUpdateCallback, xProgress,
     /// nProgressOps), set by the C ABI (sqlite3_commit_hook() ...).

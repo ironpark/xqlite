@@ -266,7 +266,9 @@ fn xClose(p: *vtab.VtabCursor) i32 {
 fn xFilter(p: *vtab.VtabCursor, idx_num: i32, idx_str: ?[:0]const u8, argv: []*Mem) i32 {
     const cu = Cursor.of(p);
     const t = cu.tab();
-    return t.call(t.wrap.cmod.xFilter.?(cu.cur, idx_num, if (idx_str) |s| s.ptr else null, @intCast(argv.len), if (argv.len == 0) null else argv.ptr));
+    const rc = t.wrap.cmod.xFilter.?(cu.cur, idx_num, if (idx_str) |s| s.ptr else null, @intCast(argv.len), if (argv.len == 0) null else argv.ptr);
+    c.toUtf8(t.db, argv);
+    return t.call(rc);
 }
 
 fn xNext(p: *vtab.VtabCursor) i32 {
@@ -292,7 +294,9 @@ fn xRowid(p: *vtab.VtabCursor, rowid: *i64) i32 {
 
 fn xUpdate(base: *vtab.Vtab, argv: []*Mem, rowid: *i64) i32 {
     const t = Tab.of(base);
-    return t.call(t.wrap.cmod.xUpdate.?(t.cvt, @intCast(argv.len), if (argv.len == 0) null else argv.ptr, rowid));
+    const rc = t.wrap.cmod.xUpdate.?(t.cvt, @intCast(argv.len), if (argv.len == 0) null else argv.ptr, rowid);
+    c.toUtf8(t.db, argv);
+    return t.call(rc);
 }
 
 fn vtabMethod(comptime field: []const u8) *const fn (*vtab.Vtab) i32 {

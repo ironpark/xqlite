@@ -3,9 +3,10 @@
 //! A filename that starts with "file:" is a URI when the connection was
 //! opened with OpenFlags.uri (C: SQLITE_OPEN_URI or SQLITE_CONFIG_URI):
 //! the authority is checked, %HH escapes are decoded, and the "mode" and
-//! "cache" query parameters change the open flags. There is no VFS
-//! registry, so a "vfs" parameter names a VFS that does not exist; there
-//! is no shared cache either, so "cache" is checked and then ignored. The
+//! "cache" query parameters change the open flags. The engine has no VFS
+//! registry (the C ABI has: it resolves a "vfs" parameter itself and sets
+//! OpenFlags.vfs_resolved), so otherwise a "vfs" parameter names a VFS
+//! that does not exist; there is no shared cache either, so "cache" is checked and then ignored. The
 //! other parameters are kept for the VFS (sqlite3_uri_parameter()), which
 //! reads none of them.
 

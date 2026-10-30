@@ -34,7 +34,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │                         Public API                            │
-│        Zig API  ·  C ABI (sqlite3 호환)*  ·  Wire Server*     │
+│        Zig API  ·  C ABI (sqlite3 호환)  ·  Wire Server*      │
 └───────────────────────────────┬───────────────────────────────┘
                                 │
 ┌───────────────────────────────▼───────────────────────────────┐
@@ -129,9 +129,10 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 Zig **0.17.0** 이상이 필요합니다.
 
 ```sh
-zig build              # 라이브러리 + CLI (zig-out/bin/xqlite)
+zig build              # 라이브러리 + CLI (zig-out/bin/xqlite) + C 라이브러리 (zig-out/lib/libxqlite3.*, zig-out/include/sqlite3.h)
 zig build run          # CLI 실행
 zig build test         # 단위 테스트
+zig build test-capi    # C API 테스트
 ```
 
 Linux 타깃과 WebAssembly로 크로스 컴파일할 수 있습니다.
@@ -145,6 +146,21 @@ zig build wasm                                                # 브라우저·No
 - **WASI** (`wasm32-wasi`): 셸을 `wasmtime run --dir . zig-out/bin/xqlite.wasm sql app.db`처럼 돌립니다. 파일은 WASI preview 1로 엽니다. WASI에는 권고 잠금이 없어서 잠금은 프로세스 안에서만 중재하므로, 한 DB 파일은 한 번에 한 프로세스만 써야 합니다. WAL의 wal-index는 `-shm` 파일 대신 힙 메모리에 둡니다.
 - **브라우저·JavaScript** (`wasm32-freestanding`): `xq_*` 함수를 내보내고, 파일 연산은 호스트가 import로 줍니다(OPFS, IndexedDB, node:fs ...). 호스트가 파일을 주지 않으면 메모리 DB로 돕니다. JavaScript 연결 코드와 Node 예제는 `examples/wasm/`에 있습니다(`zig build wasm-example`).
 - 둘 다 단일 스레드 빌드이고 시간대는 UTC뿐입니다. 자세한 내용은 [WebAssembly](docs/wasm.md)에 있습니다.
+
+### C API
+
+`libxqlite3`는 SQLite 3.54.1의 `sqlite3.h`를 구현하는 C 라이브러리(정적·공유)입니다. `-Dcapi-name=sqlite3`로 빌드하면 `libsqlite3`라는 이름이 되어 기존 프로그램에 그대로 바꿔 끼울 수 있고, SQLite의 셸(`shell.c`)도 고치지 않고 링크해 돌아갑니다(`zig build capi-shell`). 방언은 URI 파라미터로 고릅니다.
+
+```c
+sqlite3_open_v2("file:app.db?dialect=postgres", &db,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI, NULL);
+```
+
+```sh
+cc app.c -Izig-out/include zig-out/lib/libxqlite3.a -lpthread -lm
+```
+
+지원하는 함수와 SQLite와 다른 점(멀티스레드 모드, 권한 검사기·확장 로딩·serialize 미지원 등)은 [C API](docs/c-api.md)에 있습니다.
 
 ### 셸 실행
 
@@ -218,6 +234,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - **sqlite3 교차 검증**: `xqt interop`이 서로 만든 DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 순정 sqlite3와 비교합니다.
 - **플래너 차등 테스트**: `xqt planner`가 쿼리 결과, `EXPLAIN QUERY PLAN`, 바이트코드를 sqlite3 3.54.1과 비교합니다.
 - **sqllogictest**: `xqt slt`
+- **C API**: `zig build test-capi`가 C 프로그램으로 `libxqlite3`를 검사하고, `zig build capi-shell`이 SQLite의 `shell.c`를 링크해 돌립니다.
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `ir_roundtrip`)
 - **방언 차등 테스트**: `xqt dialect-diff pg|mariadb|mssql|oracle`이 실제 PostgreSQL 16, MariaDB 11, SQL Server(Azure SQL Edge), Oracle Database 23ai와 결과를 비교합니다.
 - **WebAssembly**: `zig build test-wasi`가 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 돌리고, `xqt wasi`로 WASI 빌드를 sqlite3·네이티브 빌드와 비교합니다.
@@ -238,7 +255,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - [x] **Phase 7 · MSSQL 방언**: T-SQL 렉서·파서(`[x]`, `N'..'`, `@변수`, `GO`), `TOP`/`OFFSET…FETCH`, `+`의 타입별 해석, `OUTPUT`, `UPDATE/DELETE … FROM`, 한 문장의 `MERGE`, SQL Server 타입과 값 변환, `IDENTITY`/`IDENTITY_INSERT`, 변수, 중첩 트랜잭션, `INFORMATION_SCHEMA`·`sys.*`. SQL Server(Azure SQL Edge)와 차등 비교 ([MSSQL 호환](docs/mssql.md))
 - [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle.md))
 - [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS
-- [ ] **C ABI**: `sqlite3_*` 호환 C ABI와 URI 파라미터 `?dialect=` ([계획](docs/zig-api.md#아직-없는-것))
+- [x] **C ABI**: `sqlite3_*` 호환 C ABI(`libxqlite3`, SQLite 3.54.1 헤더), URI 파라미터 `?dialect=`, commit·rollback·update 훅과 진행 처리기. SQLite의 `shell.c`가 그대로 링크되어 돌아감 ([C API](docs/c-api.md))
 
 ## 프로젝트 구조
 
@@ -263,6 +280,7 @@ src/
 │   ├── mssql/          # T-SQL 렉서, 파서(→ 구문 트리 IR), MERGE, 타입 변환, 함수, 카탈로그 뷰
 │   └── oracle/         # lexer, parser(→ 구문 트리 IR), 날짜·숫자 형식, 저장 변환, 데이터 사전 뷰
 ├── api/                # Zig API
+├── capi/               # sqlite3 호환 C ABI (루트는 capi.zig)
 ├── ext/                # 셸용 확장 (generate_series, vtablog)
 ├── wasm/               # 브라우저·JavaScript용 wasm 모듈 (xq_* 내보내기)
 └── testing/            # 시드 퍼저 공용 도구
@@ -271,7 +289,7 @@ examples/               # Zig API 예제, wasm/ (JavaScript 연결 코드, Node�
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일
 ```
 
-C ABI(`capi/`), 서버(`server/`)는 아직 없습니다.
+서버(`server/`)는 아직 없습니다.
 
 ## 기여
 

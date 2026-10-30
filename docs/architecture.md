@@ -55,6 +55,7 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 | Zig API | `Db.open(..., .{ .dialect = .postgres })`, `db.setDialect(.mariadb)`, `db.dialect()` |
 | SQL | `PRAGMA xq_dialect`, `PRAGMA xq_dialect = 'postgres'` |
 | 셸 | `.dialect`, `.dialect postgres` |
+| C API | URI 파라미터 `file:app.db?dialect=postgres`(`SQLITE_OPEN_URI`), `xqlite_set_dialect(db, "mariadb")`, `xqlite_dialect(db)` ([C API](c-api.md)) |
 | 엔진 내부 | `sql.main.setDialect()`, 문법만 바꾸는 `sql.main.setFrontend()` |
 
 - 방언 이름은 대소문자를 구분하지 않고, `pg`, `postgresql`, `mysql`을 별칭으로 받습니다.
@@ -372,4 +373,3 @@ Db.open(.memory) ─▶ MemVfs
 - 붙인 데이터베이스(`ATTACH`)의 시퀀스(시퀀스는 모두 main의 `xq_sequence`에 있음). `CREATE SCHEMA`의 스키마의 시퀀스는 `s.seq`라는 이름으로 main에 있음
 - `sequence.create()`의 중복 시 PostgreSQL 오류 메시지. PostgreSQL 프론트엔드의 `CREATE SEQUENCE`는 컴파일 시점에 검사합니다.
 - 방언 함수의 `PRAGMA function_list` 노출
-- C ABI URI 파라미터(`?dialect=`). C ABI 자체가 아직 없습니다.

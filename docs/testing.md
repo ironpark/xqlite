@@ -50,6 +50,8 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `zig build wasm-example` | 브라우저용 모듈을 Node.js에서 (`examples/wasm/node.mjs`) | node |
 | `xqt gen fixtures\|parser\|opcodes` | `src/testdata`의 테스트용 DB, `grammar.zig`, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
+| `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사 | — |
+| `zig build capi-shell` | SQLite의 `shell.c`를 `libxqlite3`에 링크해 스모크 스크립트 실행 | 아말감 `shell.c` |
 | `xqt fetch sqlite\|slt` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | — |
 
 ## 준비
@@ -137,6 +139,7 @@ SQ=/tmp/sqref/sqlite3 zig build check -Dfuzz=true     # 시드 퍼저 셋을 무
 다음을 모두 병렬로 돌리고, 하나라도 실패하면 실패합니다.
 
 - `zig build test`의 모든 것과 `xqt` 자체의 단위 테스트
+- `zig build test-capi`: C 프로그램으로 C ABI 검사
 - `xqt interop`: 모든 interop 모듈
 - `xqt planner --known tools/planner/known-failures.list`: `vtablog.txt`를 뺀 모든 케이스 파일
 - `xqlite fuzzcheck`: `ref/sqlite/test/fuzzdata1.db`..`fuzzdata8.db`를 파일마다 프로세스 하나로
@@ -430,6 +433,18 @@ zig build wasm-example                   # wasm32-freestanding 모듈을 Node.js
 | dialect postgres/mariadb/mssql/oracle | 방언마다 같은 스크립트의 출력과 다시 연 `.schema`가 네이티브 xqlite와 같음 |
 
 wasm 경로는 `--wasm`, `XQ_WASM`, 기본값 `zig-out/bin/xqlite.wasm` 순으로, 런타임은 `--runtime`, `WASMTIME`, `wasmtime` 순으로 정합니다. 브라우저용 모듈(`wasm32-freestanding`)은 `zig build wasm-example`이 Node.js에서 검사합니다(메모리 DB, 방언 넷, node:fs 위의 롤백 저널·WAL·다시 열기, `integrity_check`). 자세한 내용은 [WebAssembly](wasm.md)에 있습니다.
+
+## C API
+
+`zig build test-capi`(`zig build check`에 포함)는 `tools/capi/capi_test.c`를 `include/sqlite3.h`와 함께 컴파일해 정적·공유 `libxqlite3`에 각각 링크하고 돌립니다. 실패한 검사를 출력하고 0이 아닌 코드로 끝납니다. 이 프로그램은 SQLite 아말감에 링크해도 xqlite 확장과 문서에 적은 차이 말고는 모두 통과하므로, 기대값은 SQLite의 동작입니다.
+
+```sh
+zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test.c xqstub.c /tmp/xq-sqlite-build/sqlite3.c -lpthread -lm
+```
+
+(`xqstub.c`는 `xqlite_set_dialect()`, `xqlite_dialect()`의 빈 구현입니다.)
+
+`zig build capi-shell`은 SQLite 3.54.1 아말감의 `shell.c`(`-Dsqlite-shell-c`, 기본 `/tmp/xq-sqlite-build/shell.c`)를 고치지 않고 `libxqlite3`에 링크해 `zig-out/bin/sqlite3-xqlite`를 만들고, `tools/capi/shell_smoke.sql`의 표준 출력을 `tools/capi/shell_smoke.expected`와 비교합니다. `shell.c`가 저장소 밖에 있어서 `zig build check`에는 넣지 않았습니다. 자세한 것은 [C API](c-api.md#테스트)에 있습니다.
 
 ## 그 밖의 도구
 

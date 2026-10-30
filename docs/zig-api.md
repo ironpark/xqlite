@@ -24,7 +24,7 @@
 | 상태 | 무엇 |
 | --- | --- |
 | 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
-| 계획 | BLOB 증분 I/O, 훅, 가상 테이블 쓰기, C ABI, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
+| 계획 | BLOB 증분 I/O, 훅, 가상 테이블 쓰기, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
 
 설계 원칙은 다음과 같습니다.
 
@@ -371,6 +371,8 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_backup_remaining/pagecount` | `Backup.remaining`, `Backup.pageCount` |
 | (그 밖의 모든 것) | `db.raw()` / `stmt.raw()`로 엔진 핸들을 꺼내 `xqlite.sql.*` 저수준 API 사용 |
 
+진짜 C 함수가 필요하면 [C API](c-api.md)(`libxqlite3`)를 링크하세요. 위 표는 Zig API가 무엇에 해당하는지를 보여 줍니다.
+
 ## 아직 없는 것
 
 Zig API에 아직 없는 것입니다.
@@ -380,15 +382,13 @@ Zig API에 아직 없는 것입니다.
 - 엔진 할당자를 연결별로 고르는 기능(지금은 `configMalloc()` 하나)
 - MSSQL 방언
 
-Zig API 밖에서 계획 중인 인터페이스입니다. 둘 다 아직 코드가 없습니다.
+훅(commit/rollback/update, 진행 처리기)과 `sqlite3_interrupt`는 엔진에 있고 C ABI에서 쓸 수 있습니다([C API](c-api.md)). Zig API에는 아직 감싸지 않았습니다.
 
-- **C ABI**: `sqlite3_*` 호환 C ABI를 제공해, 기존 SQLite 바인딩(Python `sqlite3`, Go `mattn/go-sqlite3` 등)에서 라이브러리만 바꿔 쓰게 하는 것이 목표입니다. 방언은 URI 파라미터로 지정할 계획입니다.
+Zig API 밖의 인터페이스입니다.
 
-  ```
-  file:app.db?dialect=mariadb
-  ```
+- **C ABI**: 있습니다. `sqlite3_*` 호환 C ABI(`libxqlite3`)로 기존 SQLite 바인딩에서 라이브러리만 바꿔 쓸 수 있고, 방언은 URI 파라미터(`file:app.db?dialect=mariadb`)나 `xqlite_set_dialect()`로 고릅니다. [C API](c-api.md)를 보세요.
 
-- **서버 모드(선택)**: 기존 클라이언트와 ORM을 그대로 붙일 수 있도록 와이어 프로토콜 서버(pgwire, MySQL protocol, TDS)를 선택적으로 제공할 계획입니다.
+- **서버 모드(선택, 아직 코드 없음)**: 기존 클라이언트와 ORM을 그대로 붙일 수 있도록 와이어 프로토콜 서버(pgwire, MySQL protocol, TDS)를 선택적으로 제공할 계획입니다.
 
   ```sh
   xqlite serve app.db --pg 5432 --mysql 3306 --tds 1433

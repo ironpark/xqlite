@@ -6,17 +6,19 @@
 //!    `.key`, `."key"`, `.*`, `[*]`, `[n]`, `[n to m]`, `[last]`,
 //!    `[last - 1]`, `.**`;
 //!  - filters `? (predicate)`: `==`, `!=`/`<>`, `<`, `<=`, `>`, `>=`,
-//!    `&&`, `||`, `!`, `exists (path)`, `starts with`, `is unknown`;
+//!    `&&`, `||`, `!`, `exists (path)`, `starts with`, `like_regex`
+//!    (regex.zig, flags i and q), `is unknown`;
 //!  - arithmetic `+ - * / %` of single numbers, unary `-`/`+`;
 //!  - methods type(), size(), double(), abs(), floor(), ceiling().
 //!
 //! Lax mode unwraps arrays where an object or a scalar is expected and
 //! wraps a scalar where an array is, and a missing key is an empty
-//! result; strict mode makes those errors. Not supported: like_regex,
+//! result; strict mode makes those errors. Not supported:
 //! `.**{n to m}`, keyvalue(), datetime(), string methods.
 
 const std = @import("std");
 const json = @import("json.zig");
+const regex = @import("regex.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -46,6 +48,7 @@ const Node = union(enum) {
     unary: struct { op: Op, e: *Node },
     exists: *Node,
     starts_with: struct { l: *Node, r: *Node },
+    like_regex: struct { l: *Node, re: regex.Regex },
     is_unknown: *Node,
 };
 
@@ -71,7 +74,7 @@ fn isPred(n: *const Node) bool {
             else => false,
         },
         .unary => |u| u.op == .not,
-        .exists, .starts_with, .is_unknown => true,
+        .exists, .starts_with, .like_regex, .is_unknown => true,
         else => false,
     };
 }
@@ -281,8 +284,23 @@ const Parser = struct {
             return p.node(.{ .starts_with = .{ .l = l, .r = r } });
         }
         if (p.isW("like_regex")) {
-            p.diag.msg = "like_regex is not supported";
-            return error.Syntax;
+            p.i += 1;
+            const pat = p.peek();
+            if (pat.kind != .string) return p.syntax();
+            p.i += 1;
+            var flags: []const u8 = "";
+            if (p.isW("flag")) {
+                p.i += 1;
+                if (p.peek().kind != .string) return p.syntax();
+                flags = p.peek().text;
+                p.i += 1;
+            }
+            const re = regex.compile(p.a, pat.text, flags) catch |e| {
+                if (e == error.OutOfMemory) return error.OutOfMemory;
+                p.diag.msg = try std.fmt.allocPrint(p.a, "invalid regular expression: {s}", .{pat.text});
+                return error.Syntax;
+            };
+            return p.node(.{ .like_regex = .{ .l = l, .re = re } });
         }
         if (p.isW("is")) {
             p.i += 1;
@@ -574,7 +592,7 @@ pub const Exec = struct {
                 },
                 else => try out.append(x.a, try x.truthValue(try x.pred(n, cur, last))),
             },
-            .exists, .starts_with, .is_unknown => try out.append(x.a, try x.truthValue(try x.pred(n, cur, last))),
+            .exists, .starts_with, .like_regex, .is_unknown => try out.append(x.a, try x.truthValue(try x.pred(n, cur, last))),
         }
     }
 
@@ -785,6 +803,19 @@ pub const Exec = struct {
                         continue;
                     }
                     if (std.mem.startsWith(u8, v.v.string, r.items[0].v.string)) return .true;
+                }
+                return if (err) .unknown else .false;
+            },
+            .like_regex => |lr| {
+                var l: std.ArrayList(Value) = .empty;
+                x.operand(lr.l, cur, last, &l) catch |e| return x.unknownOn(e);
+                var err = false;
+                for (l.items) |v| {
+                    if (v.v != .string) {
+                        err = true;
+                        continue;
+                    }
+                    if (lr.re.search(x.a, v.v.string) catch return error.OutOfMemory) return .true;
                 }
                 return if (err) .unknown else .false;
             },
@@ -1060,6 +1091,8 @@ test "jsonpath" {
     try expectQuery(doc, "$.a[*] ? (@ == 1 || @ == 4)", "1;4");
     try expectQuery(doc, "$.b ? (exists (@.c))", "{\"c\": \"x\", \"d\": null}");
     try expectQuery(doc, "$.b.c starts with \"x\"", "true");
+    try expectQuery("[\"abc\", \"xbz\", \"ABC\"]", "$[*] ? (@ like_regex \"^a.c$\")", "\"abc\"");
+    try expectQuery("[\"abc\", \"xbz\", \"ABC\"]", "$[*] ? (@ like_regex \"^a.c$\" flag \"i\")", "\"abc\";\"ABC\"");
     try expectQuery(doc, "$.a[*] > 3", "true");
     try expectQuery(doc, "-$.a[0]", "-1");
     try expectQuery("1.5", "$.floor()", "1");

@@ -34,7 +34,7 @@ pub const usage =
     \\
 ;
 
-/// Keep in sync with sqlite_version_number in src/root.zig.
+/// Keep in sync with sqlite_version_number in pkg/storage/src/root.zig.
 const sqlite_version = "3540100";
 const sqlite_year = "2026";
 const slt_repo = "https://github.com/gregrahn/sqllogictest.git";

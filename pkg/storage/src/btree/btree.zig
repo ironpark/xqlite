@@ -20,10 +20,10 @@
 //! Not ported yet: shared cache and incremental blob I/O.
 
 const std = @import("std");
-const thunk = @import("../util/thunk.zig");
+const thunk = @import("../thunk.zig");
 const vfs = @import("xqlite_vfs").vfs;
 const pager_mod = @import("../pager/pager.zig");
-const varint = @import("../util/varint.zig");
+const varint = @import("../varint.zig");
 pub const header = @import("header.zig");
 const page = @import("page.zig");
 const ptrmap = @import("ptrmap.zig");

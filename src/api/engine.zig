@@ -32,14 +32,14 @@ const util = @import("../sql/util.zig");
 const printf = @import("../sql/printf.zig");
 const tokenize = @import("../parse/tokenize.zig");
 const TK = @import("../parse/grammar.zig").TK;
-const thunk_mod = @import("../util/thunk.zig");
+const thunk_mod = @import("xqlite_storage").thunk;
 
 pub const Vfs = @import("xqlite_vfs").vfs.Vfs;
 pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 /// The file-system VFS of the target (UnixVfs, WasiVfs or HostVfs).
 pub const OsVfs = @import("xqlite_vfs").vfs.OsVfs;
 /// PRAGMA journal_mode values.
-pub const JournalMode = @import("../pager/pager.zig").JournalMode;
+pub const JournalMode = @import("xqlite_storage").pager.JournalMode;
 
 /// A connection (sqlite3*).
 pub const Handle = int.Sqlite3;

@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const api = @import("../vdbe/api.zig");

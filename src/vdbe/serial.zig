@@ -10,8 +10,8 @@ const std = @import("std");
 const vi = @import("vdbe_int.zig");
 const mem = @import("mem.zig");
 const int = @import("../sql/sqlite_int.zig");
-const varint = @import("../util/varint.zig");
-const btree = @import("../btree/btree.zig");
+const varint = @import("xqlite_storage").varint;
+const btree = @import("xqlite_storage").btree;
 
 const Mem = vi.Mem;
 const MEM = vi.MEM;

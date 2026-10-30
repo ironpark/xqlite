@@ -32,7 +32,7 @@ const mem = @import("mem.zig");
 const serial = @import("serial.zig");
 const int = @import("../sql/sqlite_int.zig");
 const vfs = @import("xqlite_vfs").vfs;
-const varint = @import("../util/varint.zig");
+const varint = @import("xqlite_storage").varint;
 
 const Allocator = std.mem.Allocator;
 const Mem = vi.Mem;

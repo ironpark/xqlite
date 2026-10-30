@@ -2,7 +2,7 @@ const std = @import("std");
 const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 const btree = @import("btree.zig");
 const btree_fuzz = @import("btree_fuzz.zig");
-const record = @import("../vdbe/record.zig");
+const record = @import("../record.zig");
 
 const testing = std.testing;
 const gpa = testing.allocator;

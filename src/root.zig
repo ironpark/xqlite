@@ -48,7 +48,7 @@ comptime {
     }
 }
 
-pub const varint = @import("util/varint.zig");
+pub const varint = @import("xqlite_storage").varint;
 
 pub const vfs = @import("xqlite_vfs").vfs;
 pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;
@@ -67,12 +67,13 @@ pub const OsVfs = vfs.OsVfs;
 /// A VFS wrapper that crashes the process at a chosen write (testing aid).
 pub const crash_vfs = @import("xqlite_vfs").crash;
 
-pub const pager = @import("pager/pager.zig");
-pub const pcache = @import("pager/pcache.zig");
+/// The storage layer, a package of its own (pkg/storage).
+pub const pager = @import("xqlite_storage").pager;
+pub const pcache = @import("xqlite_storage").pcache;
 
-pub const btree = @import("btree/btree.zig");
+pub const btree = @import("xqlite_storage").btree;
 
-pub const record = @import("vdbe/record.zig");
+pub const record = @import("xqlite_storage").record;
 
 pub const tokenize = @import("parse/tokenize.zig");
 /// SQL dialects: frontends and semantic hooks (Phase 4).
@@ -146,10 +147,10 @@ test {
         @import("vdbe/exec/record.zig"),    @import("vdbe/exec/txn.zig"),      @import("vdbe/exec/cursor.zig"),
         @import("vdbe/exec/btree_ops.zig"), @import("vdbe/exec/agg.zig"),      @import("vdbe/exec/vtab_ops.zig"),
         @import("vdbe/exec/misc.zig"),      @import("util/flags.zig"),         @import("sql/sqlite_int.zig"),
-        @import("util/thunk.zig"),          @import("util/cast.zig"),          @import("dialect/dialect.zig"),
-        @import("ir/ir.zig"),               @import("catalog/catalog.zig"),    @import("catalog/sequence.zig"),
-        @import("sql/analyze.zig"),         @import("sql/analyze_test.zig"),   @import("sql/hash.zig"),
-        @import("vdbe/utf.zig"),            @import("parse/normalize.zig"),
+        @import("util/cast.zig"),           @import("dialect/dialect.zig"),    @import("ir/ir.zig"),
+        @import("catalog/catalog.zig"),     @import("catalog/sequence.zig"),   @import("sql/analyze.zig"),
+        @import("sql/analyze_test.zig"),    @import("sql/hash.zig"),           @import("vdbe/utf.zig"),
+        @import("parse/normalize.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 
@@ -157,7 +158,6 @@ test {
     std.testing.refAllDecls(@import("sql/attach.zig"));
     std.testing.refAllDecls(@import("sql/uri.zig"));
     std.testing.refAllDecls(@import("sql/serialize.zig"));
-    std.testing.refAllDecls(@import("sql/status.zig"));
     std.testing.refAllDecls(@import("sql/snapshot.zig"));
     _ = @import("sql/attach_test.zig");
 }
@@ -185,9 +185,9 @@ test {
     std.testing.refAllDecls(@import("sql/json.zig"));
 }
 
-/// The SQLite release this port tracks (SQLITE_VERSION_NUMBER). Keep in sync
-/// with sqlite_version in tools/xqt/fetch.zig.
-pub const sqlite_version_number = 3054001;
+/// The SQLite release this port tracks (SQLITE_VERSION_NUMBER), defined
+/// by the storage package, which writes it into the file header.
+pub const sqlite_version_number = @import("xqlite_storage").sqlite_version_number;
 
 test {
     std.testing.refAllDecls(@This());

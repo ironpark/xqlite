@@ -11,7 +11,7 @@ const int = @import("../sql/sqlite_int.zig");
 const main_mod = @import("../sql/main.zig");
 const printf = @import("../sql/printf.zig");
 const malloc = @import("../sql/malloc.zig");
-const thunk = @import("../util/thunk.zig");
+const thunk = @import("xqlite_storage").thunk;
 
 const Vdbe = vi.Vdbe;
 const Mem = vi.Mem;

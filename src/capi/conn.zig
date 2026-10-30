@@ -823,7 +823,7 @@ pub export fn sqlite3_db_status64(db_arg: ?*Handle, op: c_int, p_cur: ?*i64, p_h
         },
         // CACHE_HIT, CACHE_MISS, CACHE_WRITE, CACHE_SPILL.
         7, 8, 9, 12 => {
-            const which: @import("../pager/pager.zig").Pager.Stat = switch (op) {
+            const which: @import("xqlite_storage").pager.Pager.Stat = switch (op) {
                 7 => .hit,
                 8 => .miss,
                 9 => .write,

@@ -12,9 +12,9 @@ const int = @import("../sql/sqlite_int.zig");
 const util = @import("../sql/util.zig");
 const numeric = @import("../sql/numeric.zig");
 const printf = @import("../sql/printf.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const malloc = @import("../sql/malloc.zig");
-const thunk = @import("../util/thunk.zig");
+const thunk = @import("xqlite_storage").thunk;
 const utf = @import("utf.zig");
 
 const Mem = vi.Mem;

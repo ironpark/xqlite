@@ -11,8 +11,8 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
-const btree = @import("../btree/btree.zig");
-const pager_mod = @import("../pager/pager.zig");
+const btree = @import("xqlite_storage").btree;
+const pager_mod = @import("xqlite_storage").pager;
 const vfs = @import("xqlite_vfs").vfs;
 const main_mod = @import("main.zig");
 const build = @import("build.zig");

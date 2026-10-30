@@ -488,7 +488,7 @@ fn superJournalState(comptime state: []const u8) [fixture_files.len]?[]const u8 
 }
 
 test "attach: recovery of the super-journal and journals sqlite3 left" {
-    const journal = @import("../pager/journal.zig");
+    const journal = @import("xqlite_storage").journal;
     inline for (.{
         // sqlite3 died before deleting the super-journal: all roll back.
         .{ "pending", "oldoldold\n" },

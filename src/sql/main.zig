@@ -2,13 +2,13 @@
 
 const std = @import("std");
 const int = @import("sqlite_int.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const vi = @import("../vdbe/vdbe_int.zig");
 const mem = @import("../vdbe/mem.zig");
 const util = @import("util.zig");
 const vtab = @import("vtab.zig");
 const malloc = @import("malloc.zig");
-const thunk = @import("../util/thunk.zig");
+const thunk = @import("xqlite_storage").thunk;
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
@@ -485,7 +485,7 @@ pub fn invokeBusyHandler(p: *int.BusyHandler) bool {
 
 /// The busy handler given to the pagers of the connection (C passes
 /// sqlite3InvokeBusyHandler with &db->busyHandler).
-pub fn btreeBusyHandler(db: *Sqlite3) @import("../pager/pager.zig").BusyHandler {
+pub fn btreeBusyHandler(db: *Sqlite3) @import("xqlite_storage").pager.BusyHandler {
     return .init(db, pagerBusy);
 }
 
@@ -493,7 +493,7 @@ pub fn btreeBusyHandler(db: *Sqlite3) @import("../pager/pager.zig").BusyHandler 
 /// checkpoints (C passes db): the interrupt flag, and whether the last
 /// connection checkpoints the WAL on close (not with
 /// SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE).
-pub fn pagerConn(db: *Sqlite3) @import("../pager/pager.zig").Conn {
+pub fn pagerConn(db: *Sqlite3) @import("xqlite_storage").pager.Conn {
     return .{
         .interrupt = &db.is_interrupted,
         .no_ckpt_on_close = db.flags.NoCkptOnClose,
@@ -604,7 +604,7 @@ pub fn walAutocheckpointValue(db: *const Sqlite3) i32 {
 /// Port of sqlite3Checkpoint(): checkpoint database `i_db`, or all of them
 /// for MAX_DB. `n_log` and `n_ckpt` are only set by the first. Busy from
 /// one database does not stop the others; it is reported at the end.
-pub fn checkpoint(db: *Sqlite3, i_db: i32, mode: @import("../pager/pager.zig").CheckpointMode, n_log_arg: ?*i32, n_ckpt_arg: ?*i32) int.Error!void {
+pub fn checkpoint(db: *Sqlite3, i_db: i32, mode: @import("xqlite_storage").pager.CheckpointMode, n_log_arg: ?*i32, n_ckpt_arg: ?*i32) int.Error!void {
     var seen_busy = false;
     var n_log = n_log_arg;
     var n_ckpt = n_ckpt_arg;
@@ -626,7 +626,7 @@ pub fn checkpoint(db: *Sqlite3, i_db: i32, mode: @import("../pager/pager.zig").C
 /// Port of sqlite3_wal_checkpoint_v2(): checkpoint the database named
 /// `zdb` (all of them if null or empty). `n_log` and `n_ckpt` receive the
 /// WAL size and the frames checkpointed, or -1.
-pub fn walCheckpointV2(db: *Sqlite3, zdb: ?[]const u8, mode: @import("../pager/pager.zig").CheckpointMode, n_log: ?*i32, n_ckpt: ?*i32) i32 {
+pub fn walCheckpointV2(db: *Sqlite3, zdb: ?[]const u8, mode: @import("xqlite_storage").pager.CheckpointMode, n_log: ?*i32, n_ckpt: ?*i32) i32 {
     if (n_log) |p| p.* = -1;
     if (n_ckpt) |p| p.* = -1;
     var rc: i32 = undefined;

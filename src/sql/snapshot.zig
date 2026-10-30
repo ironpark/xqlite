@@ -14,7 +14,7 @@ const std = @import("std");
 const int = @import("sqlite_int.zig");
 const build = @import("build.zig");
 const malloc = @import("malloc.zig");
-const wal = @import("../pager/wal.zig");
+const wal = @import("xqlite_storage").pager.wal;
 
 const Sqlite3 = int.Sqlite3;
 const RC = int.RC;
@@ -24,7 +24,7 @@ pub const Snapshot = wal.IndexHdr;
 
 /// The database `z_db` names if a snapshot may be taken or opened on it:
 /// main or an attached one, not TEMP.
-fn snapshotBtree(db: *Sqlite3, z_db: ?[]const u8) ?*@import("../btree/btree.zig").Btree {
+fn snapshotBtree(db: *Sqlite3, z_db: ?[]const u8) ?*@import("xqlite_storage").btree.Btree {
     const i_db = build.findDbName(db, z_db) orelse return null;
     if (i_db == 1) return null;
     return db.dbs.items[i_db].bt;
@@ -107,7 +107,7 @@ pub fn recover(db: *Sqlite3, z_db: ?[]const u8) i32 {
 
 /// The result code of a pager snapshot error; not a WAL database is
 /// SQLITE_ERROR.
-const SnapError = @import("../pager/pager.zig").Error || error{NotWal};
+const SnapError = @import("xqlite_storage").pager.Error || error{NotWal};
 
 fn code(err: SnapError) i32 {
     return switch (err) {

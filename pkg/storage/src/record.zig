@@ -17,8 +17,8 @@
 //! collation functions.
 
 const std = @import("std");
-const varint = @import("../util/varint.zig");
-const btree = @import("../btree/btree.zig");
+const varint = @import("varint.zig");
+const btree = @import("btree/btree.zig");
 
 const Allocator = std.mem.Allocator;
 const Order = std.math.Order;

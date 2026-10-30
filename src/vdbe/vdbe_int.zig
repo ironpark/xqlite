@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 pub const opcodes = @import("opcodes.zig");
 const flags = @import("../util/flags.zig");
 

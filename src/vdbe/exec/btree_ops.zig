@@ -10,7 +10,7 @@ const aux = @import("../aux.zig");
 const serial = @import("../serial.zig");
 const sorter = @import("../sorter.zig");
 const int = @import("../../sql/sqlite_int.zig");
-const btree = @import("../../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 
 const Exec = core.Exec;
 const Flow = core.Flow;

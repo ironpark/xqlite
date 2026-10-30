@@ -140,7 +140,7 @@ pub fn configLookasideDefaults() struct { sz: i32, n: i32 } {
 /// alignment, its size word still last.
 const size_mask: u64 = (1 << 56) - 1;
 const counted_bit: u64 = 1 << 63;
-const status = @import("status.zig");
+const status = @import("xqlite_storage").status;
 
 fn headerWord(p: [*]u8) *u64 {
     return @ptrCast(@alignCast(p - 8));

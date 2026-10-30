@@ -20,7 +20,7 @@
 
 const std = @import("std");
 const pager_mod = @import("../pager/pager.zig");
-const varint = @import("../util/varint.zig");
+const varint = @import("../varint.zig");
 const btree = @import("btree.zig");
 const ptrmap = @import("ptrmap.zig");
 

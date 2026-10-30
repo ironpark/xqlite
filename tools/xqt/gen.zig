@@ -1,7 +1,8 @@
 //! `xqt gen NAME...`: regenerates committed files. The generators named
 //! run at once.
 //!
-//! - fixtures: the databases of src/testdata, made by the sqlite3 shell
+//! - fixtures: the databases of src/testdata and pkg/storage/src/testdata,
+//!   made by the sqlite3 shell
 //!   (was tools/gen-fixtures.sh).
 //! - parser: src/parse/grammar.zig from SQLite's grammar: lemon and
 //!   mkkeywordhash from ref/sqlite, run on parse.y, and the parser tables,
@@ -28,7 +29,7 @@ const superjournal = @import("gen/superjournal.zig");
 pub const usage =
     \\usage: xqt gen [--fixtures-sqlite3 PATH] NAME...
     \\
-    \\  fixtures   src/testdata/{btree,autovacuum,sql}.db with the sqlite3 on
+    \\  fixtures   pkg/storage/src/testdata/{btree,autovacuum}.db, src/testdata/sql.db with the sqlite3 on
     \\             PATH, or --fixtures-sqlite3 PATH (the committed ones are
     \\             from 3.44.4, whose version they carry in their header)
     \\  parser     src/parse/grammar.zig from ref/sqlite (lemon, mkkeywordhash)
@@ -228,17 +229,19 @@ const Gen = struct {
         return "wrote src/vdbe/opcodes.zig";
     }
 
-    /// The databases in src/testdata, made with the sqlite3 shell. The
-    /// content is deterministic; tests check it against the same formulas.
+    /// The databases in pkg/storage/src/testdata (for the b-tree tests) and
+    /// src/testdata, made with the sqlite3 shell. The content is
+    /// deterministic; tests check it against the same formulas.
     fn fixtures(g: *Gen) ![]const u8 {
+        const storage_dir = try g.root("pkg/storage/src/testdata");
+        try g.fixture(storage_dir, "btree.db", try btreeSql(g.arena, 0));
+        try g.fixture(storage_dir, "autovacuum.db", try btreeSql(g.arena, 1));
         const dir = try g.root("src/testdata");
-        try g.fixture(dir, "btree.db", try btreeSql(g.arena, 0));
-        try g.fixture(dir, "autovacuum.db", try btreeSql(g.arena, 1));
         // The schema and rows src/sql/sql_test.zig queries.
         const sql_db = try std.fs.path.join(g.arena, &.{ dir, "sql.db" });
         Io.Dir.cwd().deleteFile(g.ctx.io, sql_db) catch {};
         _ = try g.step(&.{ g.ctx.fixtures_sqlite3, "sql.db" }, .{ .cwd = dir, .stdin = sql_fixture });
-        return "wrote src/testdata/btree.db, autovacuum.db, sql.db";
+        return "wrote pkg/storage/src/testdata/btree.db, autovacuum.db, src/testdata/sql.db";
     }
 
     fn fixture(g: *Gen, dir: []const u8, file: []const u8, sql: []const u8) !void {

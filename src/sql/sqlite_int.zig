@@ -11,7 +11,7 @@
 const std = @import("std");
 const grammar = @import("../parse/grammar.zig");
 const flags = @import("../util/flags.zig");
-const thunk = @import("../util/thunk.zig");
+const thunk = @import("xqlite_storage").thunk;
 
 pub const TK = grammar.TK;
 pub const Allocator = std.mem.Allocator;
@@ -1552,7 +1552,7 @@ pub const RC = struct {
 /// Parse.rc, db.err_code): see resultCode(). The integer codes are only
 /// seen at the C-shaped API and in the callbacks of extensions, which
 /// errorCode() and codeError() convert from and to.
-pub const Error = @import("../btree/btree.zig").Error || error{
+pub const Error = @import("xqlite_storage").btree.Error || error{
     /// SQLITE_ERROR: an SQL error or missing database, and the error of
     /// any code that has no error of its own.
     Error,
@@ -2370,7 +2370,7 @@ pub const Sqlite3 = struct {
     }
 };
 
-const Btree = @import("../btree/btree.zig").Btree;
+const Btree = @import("xqlite_storage").btree.Btree;
 
 test "errorCode() and codeError() are inverse for every error" {
     inline for (@typeInfo(Error).error_set.error_names.?) |name| {

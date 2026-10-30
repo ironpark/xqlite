@@ -10,8 +10,8 @@
 //! cannot rot.
 
 const std = @import("std");
-const fuzz = @import("testing/fuzz.zig");
-const btree_fuzz = @import("btree/btree_fuzz.zig");
+const fuzz = @import("xqlite_storage").fuzz;
+const btree_fuzz = @import("xqlite_storage").btree_fuzz;
 const ir_fuzz = @import("ir/fuzz.zig");
 
 const Fuzzer = struct {

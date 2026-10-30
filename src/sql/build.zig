@@ -274,7 +274,7 @@ const select_mod = @import("select.zig");
 const attach = @import("attach.zig");
 const alter = @import("alter.zig");
 const vtab_mod = @import("vtab.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 
 const Sqlite3 = int.Sqlite3;
 const Table = int.Table;

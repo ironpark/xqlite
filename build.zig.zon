@@ -34,6 +34,8 @@
     .dependencies = .{
         // The VFS layer, a package of its own in this repository.
         .xqlite_vfs = .{ .path = "pkg/vfs" },
+        // The storage layer (pager, b-tree), which depends on the VFS one.
+        .xqlite_storage = .{ .path = "pkg/storage" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -75,6 +77,7 @@
         "build.zig.zon",
         "src",
         "pkg/vfs",
+        "pkg/storage",
         "LICENSE",
         "README.md",
     },

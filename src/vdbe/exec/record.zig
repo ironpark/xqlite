@@ -12,7 +12,7 @@ const mem = @import("../mem.zig");
 const aux = @import("../aux.zig");
 const serial = @import("../serial.zig");
 const int = @import("../../sql/sqlite_int.zig");
-const varint = @import("../../util/varint.zig");
+const varint = @import("xqlite_storage").varint;
 
 const Exec = core.Exec;
 const Flow = core.Flow;

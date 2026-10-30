@@ -1,0 +1,17 @@
+.{
+    // The storage layer of xqlite (pager, page cache, WAL, b-tree): the
+    // module `xqlite_storage`. The root package (../../build.zig.zon)
+    // depends on it by path.
+    .name = .xqlite_storage,
+    .version = "0.0.0",
+    .fingerprint = 0xc5683ca8e3738c16, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .xqlite_vfs = .{ .path = "../vfs" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

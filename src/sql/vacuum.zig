@@ -24,7 +24,7 @@ const backup = @import("backup.zig");
 const func = @import("func.zig");
 const uri = @import("uri.zig");
 const util = @import("util.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const api = @import("../vdbe/api.zig");
@@ -197,7 +197,7 @@ pub fn runVacuum(v: *Vdbe, db: *Sqlite3, i_db: usize, out: ?*Mem) i32 {
         const t = db.dbs.items[n_db].bt.?;
         temp = t;
         var n_res = main.getRequestedReserve();
-        var level: @import("../pager/pager.zig").Synchronous = .off;
+        var level: @import("xqlite_storage").pager.Synchronous = .off;
         var full_fsync = false;
         var ckpt_full_fsync = false;
         if (out != null) {

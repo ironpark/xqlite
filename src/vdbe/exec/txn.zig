@@ -10,7 +10,7 @@ const mem = @import("../mem.zig");
 const aux = @import("../aux.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const main_mod = @import("../../sql/main.zig");
-const btree = @import("../../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const vtab_mod = @import("../../sql/vtab.zig");
 const cast = @import("../../util/cast.zig");
 

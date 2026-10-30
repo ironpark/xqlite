@@ -11,7 +11,7 @@ const serial = @import("../serial.zig");
 const sorter = @import("../sorter.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const util = @import("../../sql/util.zig");
-const btree = @import("../../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const vtab_mod = @import("../../sql/vtab.zig");
 const malloc = @import("../../sql/malloc.zig");
 

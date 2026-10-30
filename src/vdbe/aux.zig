@@ -12,7 +12,7 @@ const mem = @import("mem.zig");
 const int = @import("../sql/sqlite_int.zig");
 const util = @import("../sql/util.zig");
 const main_mod = @import("../sql/main.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const opcodes = vi.opcodes;
 
 const Vdbe = vi.Vdbe;

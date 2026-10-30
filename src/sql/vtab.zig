@@ -24,7 +24,7 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const mem = @import("../vdbe/mem.zig");
 const aux = @import("../vdbe/aux.zig");
 const serial = @import("../vdbe/serial.zig");
-const btree = @import("../btree/btree.zig");
+const btree = @import("xqlite_storage").btree;
 const build = @import("build.zig");
 const auth = @import("auth.zig");
 const prepare = @import("prepare.zig");
@@ -35,7 +35,7 @@ const tokenize = @import("../parse/tokenize.zig");
 const ctype = @import("../util/ctype.zig");
 const wi = @import("where_int.zig");
 const malloc = @import("malloc.zig");
-const thunk = @import("../util/thunk.zig");
+const thunk = @import("xqlite_storage").thunk;
 
 const Allocator = std.mem.Allocator;
 const Parse = int.Parse;

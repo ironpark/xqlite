@@ -39,6 +39,7 @@ const catalog = @import("../../catalog/catalog.zig");
 const dialect = @import("../dialect.zig");
 const lexer = @import("lexer.zig");
 const types = @import("types.zig");
+const json_sql = @import("json_sql.zig");
 
 const Parse = int.Parse;
 const Expr = tree.Expr;
@@ -132,6 +133,10 @@ pub const Parser = struct {
     /// Parsing the OUTPUT clause of this statement: INSERTED.c and
     /// DELETED.c are the target's columns (RETURNING), where allowed.
     output: ?Output = null,
+    /// JSON value kinds known once the FROM clause is (json_sql.zig).
+    json_fixes: std.ArrayList(json_sql.Fix) = .empty,
+    /// The columns of the OPENJSON calls parsed (json_sql.openJson()).
+    openjson_cols: std.AutoHashMapUnmanaged(*const tree.Func, []const json_sql.Col) = .empty,
 
     pub fn init(p: *Parse, sql: [:0]const u8) Parser {
         var s: Parser = .{
@@ -590,17 +595,19 @@ pub const Parser = struct {
 
     fn funcClass(f: *const tree.Func) Class {
         const strings = [_][]const u8{
-            "upper",        "lower",  "substr",    "ltrim",    "rtrim",   "trim",   "replace",  "left",
-            "right",        "concat", "concat_ws", "char",     "reverse", "repeat", "space",    "insert",
-            "group_concat", "quote",  "datename",  "strftime", "date",    "time",   "datetime", "xq_tsql_newid",
-            "quotename",    "format", "hex",       "upper",
+            "upper",               "lower",              "substr",    "ltrim",    "rtrim",              "trim",               "replace",             "left",
+            "right",               "concat",             "concat_ws", "char",     "reverse",            "repeat",             "space",               "insert",
+            "group_concat",        "quote",              "datename",  "strftime", "date",               "time",               "datetime",            "xq_tsql_newid",
+            "quotename",           "format",             "hex",       "upper",    "xq_tsql_json_value", "xq_tsql_json_query", "xq_tsql_json_modify", "xq_tsql_json_escape",
+            "xq_tsql_json_object", "xq_tsql_json_array",
         };
         const numbers = [_][]const u8{
-            "length", "octet_length", "instr",       "charindex", "abs",            "count",         "round",             "floor",
-            "ceil",   "ceiling",      "datediff",    "datepart",  "unicode",        "ascii",         "sign",              "power",
-            "sum",    "avg",          "xq_tsql_avg", "min",       "max",            "total",         "changes",           "row_number",
-            "rank",   "dense_rank",   "ntile",       "isnumeric", "isdate",         "sqrt",          "exp",               "log",
-            "log10",  "pi",           "random",      "rand",      "scope_identity", "ident_current", "last_insert_rowid",
+            "length",                   "octet_length", "instr",       "charindex", "abs",            "count",         "round",             "floor",
+            "ceil",                     "ceiling",      "datediff",    "datepart",  "unicode",        "ascii",         "sign",              "power",
+            "sum",                      "avg",          "xq_tsql_avg", "min",       "max",            "total",         "changes",           "row_number",
+            "rank",                     "dense_rank",   "ntile",       "isnumeric", "isdate",         "sqrt",          "exp",               "log",
+            "log10",                    "pi",           "random",      "rand",      "scope_identity", "ident_current", "last_insert_rowid", "xq_tsql_isjson",
+            "xq_tsql_json_path_exists",
         };
         for (strings) |n| if (std.ascii.eqlIgnoreCase(f.name.text, n)) return .string;
         for (numbers) |n| if (std.ascii.eqlIgnoreCase(f.name.text, n)) return .number;
@@ -920,7 +927,8 @@ pub const Parser = struct {
             s.advance();
             try s.skipParens();
         }
-        if (s.isKw("FOR") and s.peek().isAnyKw(&.{ "XML", "JSON", "BROWSE" })) return s.fail("xqlite: FOR {s} is not supported", .{s.peek().text});
+        if (s.isKw("FOR") and s.peek().isKw("JSON")) return json_sql.forJson(s, sel);
+        if (s.isKw("FOR") and s.peek().isAnyKw(&.{ "XML", "BROWSE" })) return s.fail("xqlite: FOR {s} is not supported", .{s.peek().text});
         return sel;
     }
 
@@ -1068,6 +1076,7 @@ pub const Parser = struct {
 
     fn selectCore(s: *Parser) Error!*tree.Core {
         const pos = s.here();
+        const json_mark = s.json_fixes.items.len;
         try s.expectKw("SELECT");
         var distinct = false;
         if (s.eatKw("DISTINCT")) {
@@ -1113,6 +1122,7 @@ pub const Parser = struct {
             .pos = pos,
         });
         if (top) |tp| try s.tops.put(s.a, core, tp);
+        try json_sql.resolveKinds(s, json_mark, core.from);
         if (s.n_plus > 0) {
             const scope = try s.fromScope(core.from);
             for (core.cols) |rc| if (rc == .expr) s.resolvePlus(rc.expr.e, scope);
@@ -1396,6 +1406,18 @@ pub const Parser = struct {
         var list: std.ArrayList(tree.FromItem) = .empty;
         try list.append(s.a, try s.tableSource());
         while (true) {
+            if ((s.isKw("CROSS") or s.isKw("OUTER")) and s.peek().isKw("APPLY")) {
+                // CROSS/OUTER APPLY of a table-valued function (OPENJSON):
+                // a join, whose arguments may name the tables before it.
+                const outer = s.isKw("OUTER");
+                s.advance();
+                s.advance();
+                var item = try s.tableSource();
+                if (item.source != .func) return s.fail("xqlite: {s} APPLY is supported only with OPENJSON and table-valued functions", .{if (outer) "OUTER" else "CROSS"});
+                item.join = if (outer) .left else .inner;
+                try list.append(s.a, item);
+                continue;
+            }
             const j = (try s.joinOp()) orelse break;
             var item = try s.tableSource();
             item.join = j;
@@ -1410,9 +1432,6 @@ pub const Parser = struct {
 
     fn joinOp(s: *Parser) Error!?tree.JoinKind {
         if (s.eatOp(",")) return .comma;
-        if (s.isKw("CROSS") or s.isKw("OUTER")) {
-            if (s.peek().isKw("APPLY")) return s.fail("xqlite: {s} APPLY is not supported", .{s.tok.text});
-        }
         if (s.eatKw("CROSS")) {
             try s.expectKw("JOIN");
             return .cross;
@@ -1480,6 +1499,11 @@ pub const Parser = struct {
             return item;
         }
         if (s.tok.kind == .variable) return s.fail("xqlite: table variables are not supported", .{});
+        if (s.tok.kind == .ident and s.tok.isKw("OPENJSON") and s.peek().is("(")) {
+            item.source = .{ .func = try json_sql.openJson(s) };
+            item.alias = try s.aliasOf(false);
+            return item;
+        }
         const q = try s.qualifiedNameRaw();
         if (q.special) |sp| {
             const sub = (try @import("catalog_views.zig").select(s, sp, q.q.name.text)) orelse

@@ -468,3 +468,336 @@ MERGE stock AS t USING (SELECT sku FROM incoming) AS s ON t.sku = s.sku
 WHEN NOT MATCHED BY SOURCE THEN DELETE;
 SELECT sku, qty FROM stock ORDER BY sku;
 GO
+
+-- JSON (sqlcmd shows at most 256 characters of a value: results stay
+-- shorter). Each statement that fails ends its batch.
+
+-- case: isjson
+SELECT ISJSON('{"a":1}') AS a, ISJSON('[1]') AS b, ISJSON('1') AS c, ISJSON('"s"') AS d, ISJSON('x') AS e, ISJSON(NULL) AS f, ISJSON('') AS g, ISJSON(' [1] ') AS h;
+SELECT ISJSON('[01]') AS a, ISJSON('{"a":1,"a":2}') AS b, ISJSON('[1,]') AS c, ISJSON('{a:1}') AS d, ISJSON('[1e5, -0.5, 1E+2]') AS e, ISJSON('[.5]') AS f, ISJSON('["\x"]') AS g;
+SELECT ISJSON('[true,false,null]') AS a, ISJSON('[TRUE]') AS b, ISJSON('["é"]') AS c, ISJSON('[1] x') AS d, ISJSON('[1][2]') AS e, ISJSON('["\/"]') AS f, ISJSON('{"a":1}  ') AS g;
+GO
+SELECT ISJSON(1) AS a;
+GO
+
+-- case: json_value
+SELECT JSON_VALUE('{"a":{"b":[10,20,"x"]},"c":true}', '$.a.b[1]') AS a, JSON_VALUE('{"c":true}', '$.c') AS c,
+  JSON_VALUE('{"d":null}', '$.d') AS d, JSON_VALUE('{"e":1.50}', '$.e') AS e, JSON_VALUE('{"f":"q\"é\/"}', '$.f') AS f,
+  JSON_VALUE('{"a":{"b":1}}', '$.a') AS g, JSON_VALUE('{"a":1}', '$.zz') AS h, JSON_VALUE('{"a":1,"a":2}', '$.a') AS i, JSON_VALUE('{"A":1}', '$.a') AS j;
+SELECT JSON_VALUE('{"a b":1}', '$."a b"') AS a, JSON_VALUE('[1,2]', '$[1]') AS b, JSON_VALUE('{"a":[1]}', 'lax $.a[0]') AS c, JSON_VALUE('{"a":[1]}', '$.a[5]') AS d,
+  JSON_VALUE('{"a":1}', 'strict$.a') AS e, JSON_VALUE('{"a":1}', ' $.a ') AS f, JSON_VALUE('{"a":1}', 'lax  $.a') AS g;
+SELECT JSON_VALUE('{"a":1e5}', '$.a') AS a, JSON_VALUE('{"a":-0.0}', '$.a') AS b, JSON_VALUE('{"a":12345678901234567890}', '$.a') AS c, JSON_VALUE('{"a" : "x" }', '$.a') AS d, JSON_VALUE('{"$":1}', '$."$"') AS e;
+SELECT JSON_VALUE('{"a":1}', '$.a.b') AS a, JSON_VALUE('{"a":[1]}', '$.a.b') AS b, JSON_VALUE('{"a":{"b":1}}', '$.a[0]') AS c, JSON_VALUE('{"a1":1,"a_b":2}', '$.a_b') AS d, JSON_VALUE('{"ab":1}', '$."ab"') AS e, JSON_VALUE('{"ab":1}', '$.ab') AS f;
+SELECT JSON_VALUE('{"a":1', '$.a') AS a, JSON_VALUE('{"a":1} x', '$.a') AS b, JSON_VALUE('[1, 2', '$.zz') AS c, JSON_VALUE('{"a":[1,2,x]}', '$.a[0]') AS d, JSON_VALUE('{"a":{"b":1}', '$.a.b') AS e;
+SELECT JSON_VALUE('{"a":"' + REPLICATE(CAST('x' AS varchar(max)), 4001) + '"}', '$.a') AS a, LEN(JSON_VALUE('{"a":"' + REPLICATE(CAST('x' AS varchar(max)), 4000) + '"}', '$.a')) AS b;
+DECLARE @j nvarchar(max) = N'{"a":[{"b":1},{"b":2}]}';
+SELECT JSON_VALUE(@j, '$.a[1].b') AS x, JSON_VALUE(@j, '$') AS y;
+GO
+
+-- case: json_value errors
+SELECT JSON_VALUE('1', '$') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', 'strict $.b') AS a;
+GO
+SELECT JSON_VALUE('{"a":{"x":1}}', 'strict $.a') AS a;
+GO
+SELECT JSON_VALUE('xyz', '$.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":1,}', '$.zz') AS a;
+GO
+SELECT JSON_VALUE('{"a" 1}', '$.zz') AS a;
+GO
+SELECT JSON_VALUE('{"a":1} x', '$.zz') AS a;
+GO
+SELECT JSON_VALUE('{"a":1,"b":x}', '$.c') AS a;
+GO
+SELECT JSON_VALUE(N'{"é":x}', '$.c') AS a;
+GO
+SELECT JSON_VALUE('{"a":"abc', '$.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":tru}', '$.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":01}', '$.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":"x\q"}', '$.a') AS a;
+GO
+SELECT JSON_VALUE('   ', '$.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":"' + REPLICATE(CAST('x' AS varchar(max)), 4001) + '"}', 'strict $.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', NULL) AS a;
+GO
+SELECT JSON_VALUE(1, '$') AS a;
+GO
+DECLARE @p nvarchar(10) = NULL;
+SELECT JSON_VALUE('{"a":1}', @p) AS a;
+GO
+
+-- case: json paths
+SELECT JSON_VALUE('{"a":1}', 'a') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', 'ab') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', 'lax') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', 'lax ') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$a') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$.') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$.a.') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$[') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$[x]') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$["a"]') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', 'LAX $.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', 'strictly $.a') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$.a[-1]') AS a;
+GO
+SELECT JSON_VALUE('{"a":1}', '$ .a') AS a;
+GO
+SELECT JSON_VALUE('{"a":[1,2]}', '$.a[ 1 ]') AS a;
+GO
+SELECT JSON_VALUE('{"é":1}', '$.é') AS a;
+GO
+SELECT JSON_VALUE('{"1a":1}', '$.1a') AS a;
+GO
+SELECT JSON_VALUE('{"a-b":1}', '$.a-b') AS a;
+GO
+SELECT JSON_VALUE('{"$a":3}', '$.$a') AS a;
+GO
+
+-- case: json_query
+SELECT JSON_QUERY('{"a": [1, 2], "b": {"c" : 1}, "s": "x"}', '$.a') AS a, JSON_QUERY('{"a": [1, 2], "b": {"c" : 1}}', '$.b') AS b,
+  JSON_QUERY('{"s": "x"}', '$.s') AS s, JSON_QUERY('{"s": "x"}', '$.zz') AS z, JSON_QUERY(' [1, 2] ') AS w, JSON_QUERY('[1]', '$') AS d;
+SELECT JSON_QUERY('{"a":[1]}', 'strict $.a') AS a, JSON_QUERY((SELECT 1 AS x FOR JSON PATH), '$[0]') AS q;
+GO
+SELECT JSON_QUERY('{"s": "x"}', 'strict $.s') AS s;
+GO
+SELECT JSON_QUERY('{"s": "x"}', 'strict $.zz') AS s;
+GO
+SELECT JSON_QUERY('"x"') AS s;
+GO
+SELECT JSON_QUERY('{"a":1}', NULL) AS a;
+GO
+SELECT JSON_QUERY('{"a":[1]}', 'strict $.a[0]') AS b;
+GO
+
+-- case: json_modify
+SELECT JSON_MODIFY('{"a":1,"b":2}', '$.a', 5) AS a, JSON_MODIFY('{"a":1}', '$.c', 'x/y"z') AS b, JSON_MODIFY('{"a":1,"b":2}', '$.a', NULL) AS c, JSON_MODIFY('{"a":1}', 'strict $.a', NULL) AS d;
+SELECT JSON_MODIFY('{"a":[1,2]}', 'append $.a', 3) AS e, JSON_MODIFY('{"a":1}', '$.b', JSON_QUERY('[1,2]')) AS f, JSON_MODIFY('{"a":1}', '$.b', '[1,2]') AS g;
+SELECT JSON_MODIFY('{"a": 1, "b" : [1, 2] }', '$.b[0]', 9) AS a, JSON_MODIFY('{"a":1}', '$.a.b', 1) AS b, JSON_MODIFY('{"a":[1,2]}', '$.a[5]', 3) AS c, JSON_MODIFY('{"a":[1,2]}', '$.a[1]', NULL) AS d, JSON_MODIFY('{"a":1}', 'append $.n', 1) AS e, JSON_MODIFY('{"a":1}', 'append $.a', 2) AS f;
+SELECT JSON_MODIFY('[1,2]', '$[0]', 'x') AS a, JSON_MODIFY(NULL, '$.a', 1) AS b, JSON_MODIFY('{"a":1}', '$.a', N'é' + CHAR(1) + CHAR(9) + CHAR(31)) AS c, JSON_MODIFY('[1]', 'append $', 2) AS d;
+SELECT JSON_MODIFY('{"a":1,"a":2}', '$.a', 3) AS a, JSON_MODIFY('{"a":1,"b":2,"c":3}', '$.b', NULL) AS b, JSON_MODIFY('{"b":2}', '$.b', NULL) AS c, JSON_MODIFY('{"a":1}', '$."x y"', 1) AS d;
+SELECT JSON_MODIFY('{"a":1}', '$.a', JSON_QUERY('{"q" : 1}', '$')) AS a, JSON_MODIFY('{"a":[]}', 'append $.a', JSON_QUERY('{}')) AS b, JSON_MODIFY('{"a":1}', '$.b', (SELECT 1 AS x FOR JSON PATH)) AS c;
+SELECT JSON_MODIFY('{"a": 1, "b": 2}', '$.a', NULL) AS a, JSON_MODIFY('{"a": 1, "b": 2}', '$.b', NULL) AS b, JSON_MODIFY('{"a": 1 }', '$.c', 1) AS c, JSON_MODIFY('{ }', '$.c', 1) AS d, JSON_MODIFY('{}', '$.c', 1) AS e;
+SELECT JSON_MODIFY('{"a":{}}', '$.a.b', 1) AS f, JSON_MODIFY('{}', '$.x.y', 1) AS g, JSON_MODIFY('{"a":[ ]}', 'append $.a', 1) AS h, JSON_MODIFY('{"a":[1 ]}', 'append $.a', 2) AS i;
+SELECT JSON_MODIFY('{"a":[1]}', 'append $.a', NULL) AS b, JSON_MODIFY('{"a":[1]}', 'append $.zz', NULL) AS c, JSON_MODIFY('{"a":1}', 'strict $.a', 2) AS d;
+SELECT JSON_MODIFY('{"a" : "x" , "b":1}', '$.a', NULL) AS b, JSON_MODIFY('{"b":1 , "a" : "x" }', '$.a', NULL) AS c, JSON_MODIFY(JSON_MODIFY('{"a":1}', '$.b', 2), '$.c', 3) AS d;
+SELECT JSON_MODIFY('{"a":1}', '$.a', 1e1) AS a, JSON_MODIFY('{"a":1}', '$.a', -5) AS b, JSON_MODIFY('{"a":1}', '$.a', 7/2) AS c;
+SELECT JSON_MODIFY('{"a":1}', '$.b', CAST(1 AS bit)) AS a, JSON_MODIFY('{"a":1}', '$.b', CAST(1.5 AS float)) AS c, JSON_MODIFY('{"a":1}', '$.b', JSON_MODIFY('{}', '$.x', 1)) AS d, JSON_MODIFY('{"a":1}', '$.b', N'x') AS e;
+SELECT JSON_MODIFY('{"a":1}', '$.b', CAST(5 AS bigint)) AS f, JSON_MODIFY('{"a":1}', '$.b', CAST(0 AS bit)) AS h, JSON_MODIFY('{"a":1}', '$.b', CAST(1.5 AS real)) AS i;
+DECLARE @v nvarchar(max) = '[1]';
+SELECT JSON_MODIFY('{"a":1}', '$.a', @v) AS a, JSON_MODIFY('{"a":1}', '$.a', JSON_QUERY(@v)) AS b;
+GO
+
+-- case: json_modify errors
+SELECT JSON_MODIFY('{"a":1}', 'strict $.zz', 1) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1}', 'strict append $.a', 1) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1}', 'append strict $.a', 1) AS a;
+GO
+SELECT JSON_MODIFY('[1]', '$', 1) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1', '$.a', 2) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1} x', '$.a', 2) AS a;
+GO
+SELECT JSON_MODIFY('{"a":[1]}', 'strict $.a[3]', 2) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1}', 'strict $.a.b', 2) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1}', '$.a', CAST('2024-01-02' AS date)) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1}', '$.a', CAST(1 AS money)) AS a;
+GO
+SELECT JSON_MODIFY('{"a":1}', '$.a', CAST('x' AS varbinary(4))) AS a;
+GO
+
+-- case: json_modify of columns
+CREATE TABLE doc (id INT, j NVARCHAR(MAX), flag BIT, f FLOAT);
+INSERT INTO doc VALUES (1, '{"n":1}', 1, 2.5), (2, '{"n":2,"tags":[]}', 0, NULL);
+UPDATE doc SET j = JSON_MODIFY(j, '$.flag', flag);
+UPDATE doc SET j = JSON_MODIFY(j, 'append $.tags', 'x') WHERE id = 2;
+SELECT id, j, JSON_MODIFY(j, '$.f', f) AS jf FROM doc ORDER BY id;
+SELECT id FROM doc WHERE JSON_VALUE(j, '$.flag') = 'true';
+GO
+
+-- case: string_escape
+SELECT STRING_ESCAPE('a/b"c\' + CHAR(10) + CHAR(1), 'json') AS e, STRING_ESCAPE(NULL, 'json') AS n, STRING_ESCAPE('x', 'json') AS x;
+GO
+SELECT STRING_ESCAPE('x', 'xml') AS a;
+GO
+
+-- case: openjson default schema
+SELECT [key], value, type FROM OPENJSON('{"s":"x\/","n":1.50,"t":true,"f":false,"z":null,"a":[1, 2],"o":{"k" : 1}}');
+SELECT [key], value, type FROM OPENJSON('[10,"x",null]');
+SELECT [key], value, type FROM OPENJSON('{"a":{"b":[1,2]}}', '$.a.b');
+SELECT [key], value, type FROM OPENJSON('{"a":1}', '$.zz');
+SELECT [key], value, type FROM OPENJSON('{"a":1}', '$.a');
+SELECT [key], value, type FROM OPENJSON(NULL);
+SELECT [key], value, type FROM OPENJSON('{"a":1}', 'strict $');
+SELECT [key], value, type FROM OPENJSON('[1,2] x');
+SELECT [key], value, type FROM OPENJSON('{"a":1,"a":2}');
+SELECT [key] FROM OPENJSON('{"a":1}') AS j WHERE j.[key] = 'A';
+SELECT j.[key] FROM OPENJSON('{"b":1,"A":2,"a":3}') AS j ORDER BY j.[key];
+SELECT value FROM OPENJSON('[1,2,3]') ORDER BY CAST(value AS int) DESC;
+SELECT COUNT(*) AS n, SUM(CAST(value AS int)) AS s FROM OPENJSON('[1,2,3]');
+GO
+SELECT [key], value, type FROM OPENJSON('{"a":1}', 'strict $.zz');
+GO
+SELECT [key], value, type FROM OPENJSON('1');
+GO
+SELECT [key], value, type FROM OPENJSON('{"a":1}', 'strict $.a');
+GO
+SELECT COUNT(*) AS n FROM OPENJSON('[1,2,x]');
+GO
+
+-- case: openjson with
+SELECT * FROM OPENJSON('[{"id":1,"n":"a","x":{"y":2},"d":"2024-01-02"},{"id":"2","n":null}]') WITH (id int '$.id', n nvarchar(10), x nvarchar(max) '$.x' AS JSON, y int '$.x.y', d date);
+SELECT * FROM OPENJSON('{"id":1,"n":"a"}') WITH (id int, n nvarchar(10));
+SELECT * FROM OPENJSON('[{"n":"abcdef"}]') WITH (n varchar(3));
+SELECT * FROM OPENJSON('[{"b":true,"f":1.5,"t":"x"}]') WITH (b bit, f float, t nvarchar(max) '$.t' AS JSON);
+SELECT * FROM OPENJSON('[1, "a", [2]]') WITH (v nvarchar(10) '$');
+SELECT * FROM OPENJSON('[{"a":[1,2]}]') WITH (a nvarchar(max) '$.a' AS JSON, b nvarchar(max) 'strict $.a' AS JSON);
+SELECT * FROM OPENJSON('[{"a":"x"}]') WITH (a nvarchar(max) '$.a');
+SELECT * FROM OPENJSON('[{"a":{"q":1}}]') WITH (a nvarchar(max) '$.a');
+SELECT * FROM OPENJSON('[{"a":"2024-01-02T03:04:05"}]') WITH (a datetime, b datetime2(0) '$.a');
+SELECT * FROM OPENJSON('[{"a":1.5}]') WITH (b float '$.a', c varchar(5) '$.a');
+SELECT * FROM OPENJSON('[{"A":1}]') WITH (a int);
+SELECT * FROM OPENJSON('[{"a b":1}]') WITH ([a b] int);
+SELECT x.* FROM OPENJSON('[{"a":1}]') WITH (a int) AS x;
+SELECT * FROM OPENJSON('{"a":1}') WITH (a int) AS x WHERE x.a = 1;
+SELECT * FROM OPENJSON('[[1,2]]') WITH (a int '$[1]');
+SELECT * FROM OPENJSON('[{"a":1}]') WITH (a int, b varchar(5) '$.b', c varchar(5) 'lax $.c');
+DECLARE @j nvarchar(max) = N'{"a":[{"b":1},{"b":2}]}';
+SELECT b FROM OPENJSON(@j, '$.a') WITH (b int) ORDER BY b DESC;
+GO
+SELECT * FROM OPENJSON('[{"id":"abc"}]') WITH (id int);
+GO
+SELECT * FROM OPENJSON('[{"id":1}]') WITH (id int 'strict $.q');
+GO
+SELECT * FROM OPENJSON('[{"b":true}]') WITH (b int '$.b' AS JSON);
+GO
+SELECT * FROM OPENJSON('[{"a":1}]') WITH (a nvarchar(max) 'strict $.a' AS JSON);
+GO
+SELECT * FROM OPENJSON('[{"a":{"q":1}}]') WITH (a nvarchar(max) 'strict $.a');
+GO
+SELECT * FROM OPENJSON('[{"a":true,"b":false}]') WITH (a varchar(10), b int);
+GO
+
+-- case: cross apply openjson
+CREATE TABLE t (id INT, doc NVARCHAR(MAX));
+INSERT INTO t VALUES (1, '[1,2]'), (2, '{"x":"y"}'), (3, NULL), (4, '[]');
+SELECT t.id, j.[key], j.value, j.type FROM t CROSS APPLY OPENJSON(t.doc) AS j ORDER BY t.id, j.[key];
+SELECT t.id, j.[key], j.value FROM t OUTER APPLY OPENJSON(t.doc) j ORDER BY t.id, j.[key];
+SELECT t.id, j.v FROM t CROSS APPLY OPENJSON(t.doc) WITH (v int '$') AS j ORDER BY t.id, j.v;
+SELECT id FROM t CROSS APPLY OPENJSON(doc) ORDER BY id;
+SELECT t.id, COUNT(j.[key]) AS n FROM t OUTER APPLY OPENJSON(t.doc) AS j GROUP BY t.id ORDER BY t.id;
+CREATE TABLE orders (id INT, lines NVARCHAR(MAX));
+INSERT INTO orders VALUES (1, '[{"sku":"a","qty":2},{"sku":"b","qty":1}]'), (2, '[{"sku":"a","qty":5}]');
+SELECT o.id, l.sku, l.qty FROM orders o CROSS APPLY OPENJSON(o.lines) WITH (sku varchar(10), qty int) AS l ORDER BY o.id, l.sku;
+SELECT l.sku, SUM(l.qty) AS total FROM orders o CROSS APPLY OPENJSON(o.lines) WITH (sku varchar(10), qty int) AS l GROUP BY l.sku ORDER BY l.sku;
+GO
+
+-- case: for json path
+SELECT 1 AS a, 'x' AS b, NULL AS c FOR JSON PATH;
+SELECT 1 AS a, 'x' AS b, NULL AS c FOR JSON PATH, INCLUDE_NULL_VALUES;
+SELECT 1 AS a FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
+SELECT 1 AS a FOR JSON PATH, ROOT('r');
+SELECT 1 AS a FOR JSON PATH, ROOT;
+SELECT 1 AS [x.a], 2 AS [x.b], 3 AS c, 4 AS [y.z.w] FOR JSON PATH;
+SELECT NULL AS [x.a], 1 AS [x.b] FOR JSON PATH;
+SELECT NULL AS [x.a], NULL AS [x.b], 1 AS c FOR JSON PATH;
+SELECT NULL AS [x.a], NULL AS [x.b], 1 AS c FOR JSON PATH, INCLUDE_NULL_VALUES;
+SELECT 'a/b"c\d' + CHAR(10) + CHAR(1) + N'é' AS s FOR JSON PATH;
+SELECT 1 AS x WHERE 1 = 0 FOR JSON PATH;
+SELECT 1 AS a UNION ALL SELECT 2 FOR JSON PATH;
+SELECT TOP 1 1 AS a FOR JSON PATH;
+GO
+SELECT 1 AS a FOR JSON PATH, ROOT('r'), WITHOUT_ARRAY_WRAPPER;
+GO
+SELECT 1 AS [x.a], 3 AS c, 2 AS [x.b] FOR JSON PATH;
+GO
+SELECT 1 AS [x], 2 AS [x.b] FOR JSON PATH;
+GO
+SELECT 1 AS [x.b], 2 AS [x] FOR JSON PATH;
+GO
+SELECT 1 AS a, 2 AS a FOR JSON PATH;
+GO
+SELECT 1 FOR JSON PATH;
+GO
+
+-- case: for json types
+SELECT CAST(1 AS bit) AS b, CAST(1.5 AS float) AS f, CAST(1e20 AS float) AS g, CAST(0.1 AS float) AS h, CAST(-123.456 AS float) AS k, CAST(0 AS float) AS z FOR JSON PATH;
+SELECT CAST(1.5 AS real) AS r, CAST(5 AS tinyint) AS t, CAST(5 AS bigint) AS b, 1.5 AS lit, 1e1 AS e1 FOR JSON PATH;
+SELECT CAST('2024-01-02 03:04:05.123' AS datetime) AS dt, CAST('2024-01-02 03:04:05.5' AS datetime2(3)) AS dt2, CAST('2024-01-02' AS date) AS da FOR JSON PATH;
+SELECT CAST(0x0102FF AS varbinary(3)) AS bin, CAST('6F9619FF-8B86-D011-B42D-00C04FC964FF' AS uniqueidentifier) AS g FOR JSON PATH;
+SELECT CAST('2024-01-02 03:04:05 +02:00' AS datetimeoffset(0)) AS a, CAST('2024-01-02 03:04' AS smalldatetime) AS b FOR JSON PATH;
+SELECT JSON_QUERY('[1,2]') AS j, '[1,2]' AS s, (SELECT 1 AS x FOR JSON PATH) AS sub, (SELECT 1 AS x WHERE 1 = 0 FOR JSON PATH) AS nul FOR JSON PATH;
+SELECT (SELECT 1 AS x WHERE 1 = 0 FOR JSON PATH) AS nul FOR JSON PATH, INCLUDE_NULL_VALUES;
+SELECT (SELECT 1 AS x FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS a FOR JSON PATH;
+SELECT (SELECT 1 AS x WHERE 1 = 0 FOR JSON PATH) AS a, (SELECT 1 AS x FOR JSON PATH, WITHOUT_ARRAY_WRAPPER) AS b;
+SELECT JSON_VALUE((SELECT 1 AS a FOR JSON PATH, WITHOUT_ARRAY_WRAPPER), '$.a') AS v;
+GO
+
+-- case: for json of tables
+CREATE TABLE o (id INT, name VARCHAR(10), flag BIT, d DATE, amt FLOAT);
+CREATE TABLE i (oid INT, sku VARCHAR(10), qty INT);
+INSERT INTO o VALUES (1, 'a', 1, '2024-01-02', 1.5), (2, 'b', 0, NULL, NULL), (3, NULL, NULL, NULL, NULL);
+INSERT INTO i VALUES (1, 'x', 2), (1, 'y', 3), (2, 'z', 1);
+SELECT o.id FROM o ORDER BY id FOR JSON PATH;
+SELECT * FROM o WHERE id < 3 ORDER BY id FOR JSON PATH;
+SELECT id, name FROM o ORDER BY id FOR JSON AUTO;
+SELECT o.id, o.name, i.sku, i.qty FROM o JOIN i ON i.oid = o.id ORDER BY o.id, i.sku FOR JSON AUTO;
+SELECT o.id, i.sku FROM o LEFT JOIN i ON i.oid = o.id ORDER BY o.id, i.sku FOR JSON AUTO;
+SELECT o.id, i.sku FROM o LEFT JOIN i ON i.oid = o.id ORDER BY o.id, i.sku FOR JSON AUTO, INCLUDE_NULL_VALUES;
+SELECT o.id, i.sku, o.name FROM o JOIN i ON i.oid = o.id ORDER BY i.sku FOR JSON AUTO;
+SELECT o.id, i.sku, o.id + 1 AS e FROM o JOIN i ON i.oid = o.id ORDER BY o.id, i.sku FOR JSON AUTO;
+SELECT i.sku, o.id FROM o JOIN i ON i.oid = o.id ORDER BY i.sku FOR JSON AUTO;
+SELECT oo.id, ii.sku FROM o AS oo JOIN i AS ii ON ii.oid = oo.id ORDER BY 1, 2 FOR JSON AUTO;
+SELECT o.id, i.qty FROM o JOIN i ON i.oid = o.id WHERE o.id = 1 ORDER BY id, sku FOR JSON AUTO;
+SELECT id, (SELECT sku, qty FROM i WHERE i.oid = o.id ORDER BY sku FOR JSON PATH) AS items FROM o ORDER BY id FOR JSON PATH;
+SELECT id, name AS [n.x] FROM o ORDER BY id FOR JSON AUTO;
+SELECT id, name FROM o WHERE id < 3 ORDER BY id FOR JSON AUTO, ROOT('orders');
+SELECT id AS [a.b], name AS [a.c] FROM o WHERE id < 3 ORDER BY id FOR JSON PATH, WITHOUT_ARRAY_WRAPPER;
+SELECT TOP 1 id FROM o ORDER BY id DESC FOR JSON PATH;
+SELECT count(*) AS n FROM o FOR JSON PATH;
+SELECT id FROM o WHERE id > 5 FOR JSON PATH;
+SELECT id FROM o GROUP BY id HAVING id > 1 ORDER BY id FOR JSON PATH;
+SELECT id AS k FROM o ORDER BY k DESC FOR JSON PATH;
+DECLARE @x nvarchar(max) = (SELECT id, name FROM o WHERE id = 2 FOR JSON PATH, WITHOUT_ARRAY_WRAPPER);
+SELECT JSON_VALUE(@x, '$.name') AS n;
+GO
+SELECT 1 AS a, 'x' AS b FOR JSON AUTO;
+GO
+SELECT x.a FROM (SELECT 1 AS a) AS x FOR JSON AUTO;
+GO
+
+-- case: json round trip
+CREATE TABLE p (id INT PRIMARY KEY, name NVARCHAR(20), tags NVARCHAR(MAX));
+INSERT INTO p VALUES (1, 'pen', '["red","blue"]'), (2, 'cup', '[]'), (3, 'ink', NULL);
+SELECT p.id, p.name, JSON_QUERY(p.tags) AS tags FROM p ORDER BY p.id FOR JSON PATH;
+INSERT INTO p (id, name, tags) SELECT id + 10, name, tags FROM OPENJSON((SELECT id, name, JSON_QUERY(tags) AS tags FROM p WHERE id < 3 ORDER BY id FOR JSON PATH)) WITH (id int, name nvarchar(20), tags nvarchar(max) AS JSON);
+SELECT id, name, tags FROM p WHERE id > 10 ORDER BY id;
+SELECT p.id, t.value AS tag FROM p CROSS APPLY OPENJSON(p.tags) AS t ORDER BY p.id, t.[key];
+GO

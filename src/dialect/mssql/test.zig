@@ -109,7 +109,7 @@ test "mssql: select clauses" {
     try c.expectRows("SELECT AVG(n), AVG(CAST(n AS FLOAT)) FROM s", "3|3.5\n");
     try c.expectRows("WITH c (k) AS (SELECT 1 UNION ALL SELECT k + 1 FROM c WHERE k < 4) SELECT SUM(k) FROM c", "10\n");
     try c.expectRows("SELECT STRING_AGG(n, '-') WITHIN GROUP (ORDER BY n DESC) FROM s WHERE n < 4", "3-2-1\n");
-    try c.expectError("SELECT 1 FROM s CROSS APPLY s AS x", "xqlite: CROSS APPLY is not supported");
+    try c.expectError("SELECT 1 FROM s CROSS APPLY s AS x", "xqlite: CROSS APPLY is supported only with OPENJSON and table-valued functions");
 }
 
 test "mssql: DML forms" {
@@ -194,4 +194,96 @@ test "mssql: DDL" {
     try c.expectError("DROP TABLE nothere", "Cannot drop the table 'nothere', because it does not exist or you do not have permission.");
     try c.expectError("SELECT * FROM nothere", "Invalid object name 'nothere'.");
     try c.expectError("SELECT nocol FROM (SELECT 1 AS a) AS q", "Invalid column name 'nocol'.");
+}
+
+test "mssql: JSON functions" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.expectRows("SELECT ISJSON('{\"a\":1}'), ISJSON('1'), ISJSON('[01]'), ISJSON(NULL), ISJSON('1', SCALAR), ISJSON('[1]', OBJECT)", "1|0|0|NULL|1|0\n");
+    try c.expectRows("SELECT JSON_VALUE('{\"a\":{\"b\":[1,\"x\"]},\"t\":true,\"n\":1.50}', '$.a.b[1]'), JSON_VALUE('{\"t\":true}', '$.t'), JSON_VALUE('{\"n\":1.50}', '$.n'), JSON_VALUE('{\"a\":[1]}', '$.a')", "x|true|1.50|NULL\n");
+    // Read only as far as the value.
+    try c.expectRows("SELECT JSON_VALUE('{\"a\":1', '$.a'), JSON_VALUE('[1, 2', '$.zz')", "1|NULL\n");
+    try c.expectError("SELECT JSON_VALUE('{\"a\":1} x', '$.zz')", "JSON text is not properly formatted. Unexpected character 'x' is found at position 8.");
+    try c.expectError("SELECT JSON_VALUE('{\"a\":1}', 'strict $.b')", "Property cannot be found on the specified JSON path.");
+    try c.expectError("SELECT JSON_VALUE('{\"a\":1}', '$.a-b')", "JSON path is not properly formatted. Unexpected character '-' is found at position 3.");
+    try c.expectError("SELECT JSON_VALUE(N'{\"\u{e9}\":x}', '$.c')", "JSON text is not properly formatted. Unexpected character 'x' is found at position 5.");
+    try c.expectRows("SELECT JSON_QUERY('{\"a\": [1, 2]}', '$.a'), JSON_QUERY('{\"s\":\"x\"}', '$.s'), JSON_QUERY(' [1] ')", "[1, 2]|NULL|[1]\n");
+    try c.expectRows("SELECT JSON_MODIFY('{\"a\": 1, \"b\": 2}', '$.a', NULL), JSON_MODIFY('{\"a\":1}', '$.c', 'x/y'), JSON_MODIFY('{\"a\":[1]}', 'append $.a', 2)", "{ \"b\": 2}|{\"a\":1,\"c\":\"x\\/y\"}|{\"a\":[1,2]}\n");
+    try c.expectRows("SELECT JSON_MODIFY('{}', '$.j', JSON_QUERY('[1]')), JSON_MODIFY('{}', '$.s', '[1]'), JSON_MODIFY('{}', '$.b', CAST(1 AS BIT)), JSON_MODIFY('{}', '$.f', CAST(1.5 AS FLOAT))", "{\"j\":[1]}|{\"s\":\"[1]\"}|{\"b\":true}|{\"f\":1.500000000000000e+000}\n");
+    try c.expectError("SELECT JSON_MODIFY('[1]', '$', 1)", "Unsupported JSON path found in argument 2 of JSON_MODIFY.");
+    try c.expectError("SELECT JSON_MODIFY('{}', '$.a', CAST('2024-01-02' AS DATE))", "Argument data type date is invalid for argument 3 of json_modify function.");
+    try c.expectRows("SELECT STRING_ESCAPE('a/\"' + CHAR(10) + CHAR(1), 'json')", "a\\/\\\"\\n\\u0001\n");
+    // SQL Server 2022's constructors.
+    try c.expectRows("SELECT JSON_OBJECT('a': 1, 'b': 'x', 'c': NULL), JSON_OBJECT('a': NULL ABSENT ON NULL), JSON_ARRAY(1, NULL, JSON_ARRAY()), JSON_ARRAY(NULL NULL ON NULL)", "{\"a\":1,\"b\":\"x\",\"c\":null}|{}|[1,[]]|[null]\n");
+    try c.expectRows("SELECT JSON_PATH_EXISTS('{\"a\":[1]}', '$.a[0]'), JSON_PATH_EXISTS('{\"a\":[1]}', '$.b')", "1|0\n");
+    // Column types decide how JSON_MODIFY writes a value.
+    try c.exec("CREATE TABLE jd (id INT, j NVARCHAR(MAX), flag BIT, f FLOAT)");
+    try c.exec("INSERT INTO jd VALUES (1, '{}', 1, 2.5)");
+    try c.exec("UPDATE jd SET j = JSON_MODIFY(JSON_MODIFY(j, '$.flag', flag), '$.f', f)");
+    try c.expectRows("SELECT j, JSON_MODIFY(j, '$.id', id) FROM jd", "{\"flag\":true,\"f\":2.500000000000000e+000}|{\"flag\":true,\"f\":2.500000000000000e+000,\"id\":1}\n");
+}
+
+test "mssql: OPENJSON" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.expectRows("SELECT [key], value, type FROM OPENJSON('{\"s\":\"x\",\"n\":1.50,\"t\":true,\"z\":null,\"a\":[1, 2],\"o\":{}}')", "s|x|1\nn|1.50|2\nt|true|3\nz|NULL|0\na|[1, 2]|4\no|{}|5\n");
+    try c.expectRows("SELECT [key], value FROM OPENJSON('{\"a\":{\"b\":[7,8]}}', '$.a.b')", "0|7\n1|8\n");
+    try c.expectRows("SELECT COUNT(*) FROM OPENJSON('{\"a\":1}', '$.a')", "0\n");
+    // key is case-sensitive (SQL Server's BIN2).
+    try c.expectRows("SELECT COUNT(*) FROM OPENJSON('{\"a\":1}') WHERE [key] = 'A'", "0\n");
+    try c.expectError("SELECT * FROM OPENJSON('{\"a\":1}', 'strict $.a')", "Value referenced by JSON path is not an array or object and cannot be opened with OPENJSON.");
+    try c.expectRows("SELECT * FROM OPENJSON('[{\"id\":1,\"x\":{\"y\":2}},{\"id\":\"2\"}]') WITH (id INT, x NVARCHAR(MAX) AS JSON, y INT '$.x.y')", "1|{\"y\":2}|2\n2|NULL|NULL\n");
+    try c.expectColumns("SELECT * FROM OPENJSON('[]') WITH ([a b] INT, c VARCHAR(3))", "a b|c");
+    try c.expectError("SELECT * FROM OPENJSON('[{\"id\":\"abc\"}]') WITH (id INT)", "Conversion failed when converting the nvarchar value 'abc' to data type int.");
+    try c.expectError("SELECT * FROM OPENJSON('[]') WITH (j INT AS JSON)", "AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.");
+    try c.exec("CREATE TABLE od (id INT, lines NVARCHAR(MAX))");
+    try c.exec("INSERT INTO od VALUES (1, '[{\"sku\":\"a\",\"qty\":2},{\"sku\":\"b\",\"qty\":1}]'), (2, NULL)");
+    try c.expectRows("SELECT od.id, l.sku, l.qty FROM od CROSS APPLY OPENJSON(od.lines) WITH (sku VARCHAR(5), qty INT) AS l ORDER BY l.sku", "1|a|2\n1|b|1\n");
+    try c.expectRows("SELECT od.id, j.[key] FROM od OUTER APPLY OPENJSON(od.lines) AS j ORDER BY od.id, j.[key]", "1|0\n1|1\n2|NULL\n");
+    try c.expectError("SELECT * FROM od CROSS APPLY (SELECT 1 AS x) AS q", "xqlite: CROSS APPLY is supported only with OPENJSON and table-valued functions");
+    // A view keeps the spec in the function's name; it is SQLite text.
+    try c.exec("CREATE VIEW ov AS SELECT od.id, l.sku FROM od CROSS APPLY OPENJSON(od.lines) WITH (sku VARCHAR(5) '$.sku') AS l");
+    try c.expectRows("SELECT sku FROM ov ORDER BY sku", "a\nb\n");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT sku FROM ov ORDER BY sku", "a\nb\n");
+}
+
+test "mssql: FOR JSON" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    try c.expectColumns("SELECT 1 AS a FOR JSON PATH", "JSON_F52E2B61-18A1-11d1-B105-00805F49916B");
+    try c.expectRows("SELECT 1 AS [x.a], 2 AS [x.b], NULL AS c, 'q/' AS d FOR JSON PATH", "[{\"x\":{\"a\":1,\"b\":2},\"d\":\"q\\/\"}]\n");
+    try c.expectRows("SELECT NULL AS c FOR JSON PATH, INCLUDE_NULL_VALUES, ROOT('r')", "{\"r\":[{\"c\":null}]}\n");
+    try c.expectRows("SELECT 1 AS a WHERE 1 = 0 FOR JSON PATH", "");
+    try c.expectError("SELECT 1 AS [x.a], 3 AS c, 2 AS [x.b] FOR JSON PATH", "Property 'x.b' cannot be generated in JSON output due to a conflict with another column name or alias. Use different names and aliases for each column in SELECT list.");
+    try c.expectError("SELECT 1 FOR JSON PATH", "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.");
+    try c.exec("CREATE TABLE fo (id INT, name VARCHAR(10), ok BIT, at DATETIME)");
+    try c.exec("CREATE TABLE fi (oid INT, sku VARCHAR(10))");
+    try c.exec("INSERT INTO fo VALUES (1, 'a', 1, '2024-01-02 03:04:05'), (2, 'b', 0, NULL); INSERT INTO fi VALUES (1, 'x'), (1, 'y'), (2, 'z')");
+    try c.expectRows("SELECT * FROM fo ORDER BY id FOR JSON PATH", "[{\"id\":1,\"name\":\"a\",\"ok\":true,\"at\":\"2024-01-02T03:04:05.000\"},{\"id\":2,\"name\":\"b\",\"ok\":false}]\n");
+    try c.expectRows("SELECT fo.id, fi.sku FROM fo JOIN fi ON fi.oid = fo.id ORDER BY fo.id, fi.sku FOR JSON AUTO", "[{\"id\":1,\"fi\":[{\"sku\":\"x\"},{\"sku\":\"y\"}]},{\"id\":2,\"fi\":[{\"sku\":\"z\"}]}]\n");
+    // A nested FOR JSON is JSON, not a string.
+    try c.expectRows("SELECT id, (SELECT sku FROM fi WHERE fi.oid = fo.id ORDER BY sku FOR JSON PATH) AS s FROM fo ORDER BY id FOR JSON PATH", "[{\"id\":1,\"s\":[{\"sku\":\"x\"},{\"sku\":\"y\"}]},{\"id\":2,\"s\":[{\"sku\":\"z\"}]}]\n");
+    try c.expectRows("SELECT id AS k FROM fo ORDER BY k DESC FOR JSON PATH, WITHOUT_ARRAY_WRAPPER", "{\"k\":2},{\"k\":1}\n");
+    try c.expectError("SELECT 1 AS a FOR JSON AUTO", "FOR JSON AUTO requires at least one table for generating JSON objects. Use FOR JSON PATH or add a FROM clause with a table name.");
+}
+
+test "mssql: JSON in the schema" {
+    var c: Conn = undefined;
+    try open(&c);
+    defer c.close();
+    // ISJSON is SQLite's json_valid(): sqlite3 can check the constraint.
+    try c.exec("CREATE TABLE jc (doc NVARCHAR(MAX) CONSTRAINT ck_doc CHECK (ISJSON(doc) = 1))");
+    try c.expectError("INSERT INTO jc VALUES ('1')", "CHECK constraint failed: ck_doc");
+    try c.expectRows("SELECT instr(sql, 'xq_') FROM sqlite_schema WHERE name = 'jc'", "0\n");
+    try c.exec("CREATE TABLE js (id INT, doc NVARCHAR(MAX), a AS JSON_VALUE(doc, '$.a'))");
+    try c.exec("INSERT INTO js (id, doc) VALUES (1, '{\"a\":\"x\"}')");
+    try c.expectRows("SELECT a FROM js", "x\n");
+    try c.expectRows("SELECT instr(sql, 'xq_tsql_json_value') > 0 FROM sqlite_schema WHERE name = 'js'", "1\n");
+    try c.exec("CREATE VIEW jv AS SELECT id, doc FROM js FOR JSON PATH");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT * FROM jv", "[{\"id\":1,\"doc\":\"{\\\"a\\\":\\\"x\\\"}\"}]\n");
 }

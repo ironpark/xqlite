@@ -2,7 +2,8 @@
 //! in the T-SQL dialect (STRICT tables with the CHECKs of SQL Server's
 //! types, IDENTITY columns and their sequences, computed columns, NOCASE
 //! and BINARY collations, indexes, a view, the xq_catalog/xq_sequence
-//! catalog) must pass sqlite3's integrity check, and sqlite3 and xqlite
+//! catalog, a JSON column checked with ISJSON) must pass sqlite3's
+//! integrity check, and sqlite3 and xqlite
 //! (in the SQLite dialect) must read the same rows and schema from it:
 //! what the schema keeps is SQLite text that means what the T-SQL
 //! statement meant. The expressions here need no engine function
@@ -57,6 +58,8 @@ const script =
     \\GO
     \\ALTER TABLE entry ADD tag VARCHAR(8) DEFAULT 'tag';
     \\CREATE TABLE gone (x INT); DROP TABLE gone;
+    \\CREATE TABLE doc (id INT PRIMARY KEY, body NVARCHAR(MAX) CHECK (ISJSON(body) = 1));
+    \\INSERT INTO doc VALUES (1, '{"a":[1,2]}'), (2, NULL);
     \\
 ;
 
@@ -65,6 +68,7 @@ const queries =
     \\SELECT id, account_id, amount, memo, tag FROM entry ORDER BY id;
     \\SELECT * FROM totals ORDER BY email;
     \\SELECT count(*) FROM entry WHERE memo = 'aa';
+    \\SELECT id, body, json_extract(body, '$.a[1]') FROM doc ORDER BY id;
     \\SELECT * FROM xq_catalog ORDER BY tbl, col, key;
     \\SELECT * FROM xq_sequence ORDER BY name;
     \\SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name;
@@ -80,6 +84,9 @@ const bad = [_][]const u8{
     "INSERT INTO entry(account_id, amount) VALUES (1, 5000)",
     "INSERT INTO entry(account_id, amount) VALUES (1, 'x')",
     "INSERT INTO entry(account_id, amount, tag) VALUES (1, 1, 'too long tag')",
+    // ISJSON is json_valid() and an object or array.
+    "INSERT INTO doc VALUES (3, '1')",
+    "INSERT INTO doc VALUES (3, '{a:1}')",
 };
 
 fn build(c: *Check, file: []const u8) !void {

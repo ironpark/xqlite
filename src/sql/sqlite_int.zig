@@ -2286,6 +2286,20 @@ pub const Sqlite3 = struct {
     /// xqlite: the SQL dialect of the connection and the state of its
     /// semantic hooks (src/dialect/dialect.zig). No C counterpart.
     xq: @import("../dialect/dialect.zig").ConnState = .{},
+    /// The commit, rollback and update hooks and the progress handler
+    /// (xCommitCallback, xRollbackCallback, xUpdateCallback, xProgress,
+    /// nProgressOps), set by the C ABI (sqlite3_commit_hook() ...).
+    commit_hook: ?*const fn (arg: ?*anyopaque) i32 = null,
+    commit_arg: ?*anyopaque = null,
+    rollback_hook: ?*const fn (arg: ?*anyopaque) void = null,
+    rollback_arg: ?*anyopaque = null,
+    /// `op` is SQLITE_INSERT, SQLITE_UPDATE or SQLITE_DELETE.
+    update_hook: ?*const fn (arg: ?*anyopaque, op: i32, db_name: [:0]const u8, table: [:0]const u8, rowid: i64) void = null,
+    update_arg: ?*anyopaque = null,
+    /// Nonzero from the handler interrupts the statement.
+    progress: ?*const fn (arg: ?*anyopaque) i32 = null,
+    progress_arg: ?*anyopaque = null,
+    n_progress_ops: u32 = 0,
     /// xqlite: the state the C ABI (src/capi) keeps for a connection it
     /// opened (hooks, C callbacks, filenames); the engine never reads it.
     capi: ?*anyopaque = null,

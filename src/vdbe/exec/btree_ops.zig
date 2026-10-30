@@ -108,8 +108,18 @@ pub fn opInsert(e: *Exec, op: *Op) Error!Flow {
     c.deferred_moveto = false;
     c.cache_status = vi.cache_stale;
     try res;
+    if (e.db.update_hook) |f| if (op.p4type == .table) {
+        const op_code: i32 = if (op.p5 & vi.OPFLAG.ISUPDATE != 0) update_op else insert_op;
+        f(e.db.update_arg, op_code, e.db.dbs.items[@intCast(c.i_db)].name, op.p4.table.name, rowid);
+    };
     return .next;
 }
+
+/// SQLITE_INSERT, SQLITE_UPDATE and SQLITE_DELETE, the operations the
+/// update hook reports.
+const insert_op = 18;
+const update_op = 23;
+const delete_op = 9;
 
 /// OP_RowCell: build the cell for the entry of cursor P2 in cursor P1,
 /// with the rowid in register P3 for tables, for the OP_Insert or
@@ -130,11 +140,19 @@ pub fn opRowCell(e: *Exec, op: *Op) Error!Flow {
 pub fn opDelete(e: *Exec, op: *Op) Error!Flow {
     const v = e.v;
     const c = e.csr(op.p1);
+    // The rowid, for the update hook (C's movetoTarget).
+    const hook_tab: ?*const int.Table = if (e.db.update_hook != null and op.p4type == .table) op.p4.table else null;
+    const rowid: i64 = if (hook_tab != null and c.is_table) c.uc.cursor.integerKey() else 0;
     const res = c.uc.cursor.delete(.{ .save_position = op.p5 & vi.OPFLAG.SAVEPOSITION != 0 });
     c.cache_status = vi.cache_stale;
     c.seek_result = 0;
     try res;
-    if (op.p2 & vi.OPFLAG.NCHANGE != 0) v.n_change += 1;
+    if (op.p2 & vi.OPFLAG.NCHANGE != 0) {
+        v.n_change += 1;
+        if (hook_tab) |t| if (t.hasRowid()) {
+            e.db.update_hook.?(e.db.update_arg, delete_op, e.db.dbs.items[@intCast(c.i_db)].name, t.name, rowid);
+        };
+    }
     return .next;
 }
 

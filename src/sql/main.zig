@@ -19,8 +19,10 @@ const RC = int.RC;
 /// SQLITE_OK); the callers trip with error.Abort (SQLITE_ABORT_ROLLBACK).
 pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
     const schema_change = db.m_db_flags.SchemaChange and !db.init.busy;
+    var in_trans = false;
     for (db.dbs.items) |d| {
         const bt = d.bt orelse continue;
+        if (bt.txnState() == .write) in_trans = true;
         bt.rollback(trip, !schema_change) catch {};
     }
     vtab.rollback(db);
@@ -31,6 +33,8 @@ pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
     db.n_deferred_cons = 0;
     db.n_deferred_imm_cons = 0;
     db.flags.clear(.{ .DeferFKs = true, .CorruptRdOnly = true });
+    // The rollback hook, if a transaction was rolled back.
+    if (db.rollback_hook) |f| if (in_trans or !db.auto_commit) f(db.rollback_arg);
 }
 
 /// Port of sqlite3CloseSavepoints(): forget every SAVEPOINT.

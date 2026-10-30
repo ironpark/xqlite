@@ -156,6 +156,13 @@ pub const Exec = struct {
         var ops = e.ops.ptr;
         var pc: usize = @intCast(e.pc);
         var n_vm_step: u64 = 0;
+        // The progress handler runs every n_progress_ops instructions,
+        // counted across the calls of sqlite3_step() (nProgressLimit).
+        var progress_limit: u64 = std.math.maxInt(u64);
+        if (db.progress != null and db.n_progress_ops > 0) {
+            const prior: u64 = v.counters[vi.STMTSTATUS.VM_STEP];
+            progress_limit = db.n_progress_ops - (prior % db.n_progress_ops);
+        }
         while (true) {
             const op = &ops[pc];
             n_vm_step += 1;
@@ -362,11 +369,13 @@ pub const Exec = struct {
                 .jump_p2 => pc = @intCast(op.p2),
                 .check_interrupt => {
                     if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    if (n_vm_step >= progress_limit and progressInterrupts(db, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
                     pc += 1;
                 },
                 .jump_p2_check_interrupt => {
                     pc = @intCast(op.p2);
                     if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    if (n_vm_step >= progress_limit and progressInterrupts(db, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
                 },
                 .goto_pc => {
                     ops = e.ops.ptr;
@@ -376,6 +385,7 @@ pub const Exec = struct {
                     ops = e.ops.ptr;
                     pc = @intCast(e.pc + 1);
                     if (db.is_interrupted.load(.monotonic)) return e.abortDueToError(error.Interrupt, n_vm_step);
+                    if (n_vm_step >= progress_limit and progressInterrupts(db, &progress_limit)) return e.abortDueToError(error.Interrupt, n_vm_step);
                 },
                 .ret => return e.vdbeReturn(n_vm_step),
             }
@@ -419,6 +429,21 @@ pub const Exec = struct {
     }
 
     /// vdbe_return: leave the run with Exec.rc.
+    /// Call the progress handler, whose limit `limit` was reached;
+    /// whether it asks to interrupt the statement.
+    fn progressInterrupts(db: *Sqlite3, limit: *u64) bool {
+        const f = db.progress orelse {
+            limit.* = std.math.maxInt(u64);
+            return false;
+        };
+        limit.* +|= db.n_progress_ops;
+        if (f(db.progress_arg) != 0) {
+            limit.* = std.math.maxInt(u64);
+            return true;
+        }
+        return false;
+    }
+
     fn vdbeReturn(e: *Exec, n_vm_step: u64) i32 {
         e.v.counters[vi.STMTSTATUS.VM_STEP] +%= @truncate(n_vm_step);
         return e.rc;

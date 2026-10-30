@@ -947,6 +947,12 @@ fn vdbeCommit(db: *Sqlite3, v: *Vdbe) i32 {
     }
     if (rc != RC.OK) return rc;
 
+    // The commit hook, if anything was written: nonzero turns the commit
+    // into a rollback.
+    if (need_xcommit) if (db.commit_hook) |f| {
+        if (f(db.commit_arg) != 0) return RC.CONSTRAINT_COMMITHOOK;
+    };
+
     // The simple case: no more than one database file has a write
     // transaction, or main is a temporary database (multi-file commits
     // are then not atomic).

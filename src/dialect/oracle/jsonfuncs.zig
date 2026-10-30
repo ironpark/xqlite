@@ -1365,7 +1365,7 @@ const JtCursor = struct {
     spec: ?[]const u8 = null,
 
     fn of(cur: *vtab.VtabCursor) *JtCursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 
@@ -1389,13 +1389,13 @@ fn jtConnect(db: *int.Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp_vtab:
 }
 
 fn jtDisconnect(p: *vtab.Vtab) i32 {
-    const t: *JtVtab = @fieldParentPtr("base", p);
+    const t: *JtVtab = @alignCast(@fieldParentPtr("base", p));
     t.db.gpa.destroy(t);
     return RC.OK;
 }
 
 fn jtOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t: *JtVtab = @fieldParentPtr("base", p);
+    const t: *JtVtab = @alignCast(@fieldParentPtr("base", p));
     const cur = t.db.gpa.create(JtCursor) catch return RC.NOMEM;
     cur.* = .{ .db = t.db, .arena = .init(t.db.gpa) };
     pp_cursor.* = &cur.base;

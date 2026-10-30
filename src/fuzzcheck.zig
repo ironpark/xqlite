@@ -109,17 +109,18 @@ pub fn run(gpa: Allocator, io: Io, args: []const []const u8, out: *Io.Writer, er
     defer xqlite.malloc.configMalloc(saved_malloc);
 
     var watchdog: Watchdog = .{ .io = io };
-    const thread = std.Thread.spawn(.{}, Watchdog.run, .{&watchdog}) catch {
+    // Single-threaded builds (WebAssembly) run without a watchdog.
+    const thread: ?std.Thread = if (@import("builtin").single_threaded) null else std.Thread.spawn(.{}, Watchdog.run, .{&watchdog}) catch {
         try err_out.print("fuzzcheck: cannot start the watchdog thread\n", .{});
         try err_out.flush();
         return 1;
     };
-    defer {
+    defer if (thread) |t| {
         watchdog.mutex.lockUncancelable(io);
         watchdog.stop = true;
         watchdog.mutex.unlock(io);
-        thread.join();
-    }
+        t.join();
+    };
 
     var r: Runner = .{ .gpa = gpa, .io = io, .opts = opts, .out = out, .counter = &counter, .watchdog = &watchdog };
     var failed = false;
@@ -263,7 +264,7 @@ const Runner = struct {
 
 /// Read the scripts and database images of a corpus file.
 fn loadCorpus(arena: Allocator, io: Io, path: []const u8, scripts: *std.ArrayList(Blob), images: *std.ArrayList(Blob)) !void {
-    var unix = xqlite.UnixVfs.init(arena, io);
+    var unix = xqlite.OsVfs.init(arena, io);
     var opened: ?*Sqlite3 = null;
     const rc = sql.main.open(unix.interface(), path, .{ .read_only = true, .create = false }, &opened);
     const db = opened orelse return error.OutOfMemory;

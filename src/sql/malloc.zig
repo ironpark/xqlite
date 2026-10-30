@@ -59,6 +59,9 @@ pub const Config = struct {
         std.testing.allocator
     else if (builtin.link_libc)
         libc_allocator
+    else if (builtin.cpu.arch.isWasm())
+        // wasm32-freestanding: memory.grow, single-threaded.
+        std.heap.wasm_allocator
     else
         std.heap.smp_allocator,
     /// Default lookaside slot size and count (szLookaside, nLookaside).

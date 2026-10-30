@@ -15,6 +15,7 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 - [sqllogictest](#sqllogictest)
 - [퍼징](#퍼징)
 - [방언 차등 테스트](#방언-차등-테스트)
+- [WebAssembly](#webassembly)
 - [그 밖의 도구](#그-밖의-도구)
 - [테스트 전략](#테스트-전략)
 
@@ -44,6 +45,9 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `xqt dialect-diff mssql` | MSSQL(T-SQL) 방언을 실제 SQL Server(Azure SQL Edge, 엔진 15.0)와 차등 비교 | SQL Server 서버(podman)와 go-sqlcmd |
 | `xqt dialect-diff oracle` | Oracle 방언을 실제 Oracle Database 23ai와 차등 비교 | Oracle 서버(podman) |
 | `xqt bench [WORKLOAD...]` | 같은 작업의 xqlite·sqlite3 실행 시간 | `--sqlite3`/`SQLITE3` |
+| `zig build test-wasi` | wasm32-wasi 단위 테스트(wasmtime)와 `xqt wasi` | wasmtime, `--sqlite3`/`SQLITE3` |
+| `xqt wasi [--wasm PATH]` | WASI 빌드의 SQL 결과, 저널·WAL, 크래시 복구, 방언 | sqlite3, 네이티브 xqlite(`--xq`), wasmtime |
+| `zig build wasm-example` | 브라우저용 모듈을 Node.js에서 (`examples/wasm/node.mjs`) | node |
 | `xqt gen fixtures\|parser\|opcodes` | `src/testdata`의 테스트용 DB, `grammar.zig`, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
 | `xqt fetch sqlite\|slt` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | — |
@@ -401,6 +405,31 @@ zig-out/bin/xqt dialect-diff oracle [cases-file]    # 기본: tools/dialect/orac
 - Oracle의 `.5`, `TRUE`/`FALSE`와 xqlite의 `2.0`은 `0.5`, `1`/`0`, `2`로 맞춰 비교합니다.
 
 방언별 결과와 알려진 차이는 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [MSSQL 호환](mssql.md), [Oracle 호환](oracle.md)에 있습니다.
+
+## WebAssembly
+
+```sh
+zig build test-wasi                      # 단위 테스트(wasm32-wasi, wasmtime) + xqt wasi
+zig build -Dtarget=wasm32-wasi && zig-out/bin/xqt wasi --wasm zig-out/bin/xqlite.wasm
+zig build wasm-example                   # wasm32-freestanding 모듈을 Node.js에서
+```
+
+`zig build test-wasi`는 wasmtime(`PATH`)이 필요하고 `zig build check`에는 들어 있지 않습니다. 하는 일은 다음과 같습니다.
+
+- 모듈(`src/root.zig`)과 CLI(`src/main.zig`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
+- `xqt wasi`: ReleaseSafe로 빌드한 WASI `xqlite`를 `wasmtime run --dir . xqlite.wasm ...`으로 검사 디렉터리에서 돌립니다. WASI 빌드가 쓴 파일은 모두 sqlite3의 `PRAGMA integrity_check`를 통과해야 합니다.
+
+| 검사 | 확인하는 것 |
+| --- | --- |
+| runtime and module | wasmtime이 모듈을 돌리고, 버전·시계·난수가 동작함 |
+| same results as sqlite3 | WASI가 쓴 DB(오버플로 페이지, WITHOUT ROWID)에서 sqlite3와 같은 질의 결과 |
+| transactions with the rollback journal | 커밋, 롤백, 세이브포인트의 출력이 sqlite3와 같고 저널이 남지 않음 |
+| WAL: write, reopen, read by sqlite3 | WAL 모드로 쓰고, 다른 WASI 프로세스가 다시 열고, sqlite3가 쓴 것을 다시 읽고, `journal_mode=delete`로 WAL을 지움 |
+| WAL left by a killed sqlite3 is recovered | 죽은 sqlite3가 남긴 WAL을 WASI 빌드가 `-shm` 없이 복구함 |
+| hot journal left under WASI, rolled back by sqlite3 | WASI의 `xqlite crash-write`가 남긴 핫 저널을 sqlite3가 되돌림 |
+| dialect postgres/mariadb/mssql/oracle | 방언마다 같은 스크립트의 출력과 다시 연 `.schema`가 네이티브 xqlite와 같음 |
+
+wasm 경로는 `--wasm`, `XQ_WASM`, 기본값 `zig-out/bin/xqlite.wasm` 순으로, 런타임은 `--runtime`, `WASMTIME`, `wasmtime` 순으로 정합니다. 브라우저용 모듈(`wasm32-freestanding`)은 `zig build wasm-example`이 Node.js에서 검사합니다(메모리 DB, 방언 넷, node:fs 위의 롤백 저널·WAL·다시 열기, `integrity_check`). 자세한 내용은 [WebAssembly](wasm.md)에 있습니다.
 
 ## 그 밖의 도구
 

@@ -56,6 +56,7 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 | `slt [PATH...] [-- ARGS]` | sqllogictest를 스크립트마다 `xqlite slt` 프로세스로 | `slt.zig` |
 | `dialect-diff pg\|mariadb\|oracle [CASES]` | 방언을 실제 서버와 차등 비교. 서버가 필요하므로 `zig build check`에는 없음 | `dialect_diff.zig` |
 | `bench [WORKLOAD...]` | 같은 작업의 실행 시간(`--runs`/`RUNS`, `--rows`/`ROWS`) | `bench.zig` |
+| `wasi [--wasm PATH] [--runtime PROG]` | wasm32-wasi 빌드를 wasmtime에서: sqlite3·네이티브 xqlite와 비교(`zig build test-wasi`) | `wasi.zig` |
 | `gen fixtures\|parser\|opcodes` | `src/testdata`의 DB, `grammar.zig`, `opcodes.zig` 재생성 | `gen.zig` |
 | `gen superjournal [DIR]` | `src/testdata/superjournal` 재생성 | `gen/superjournal.zig` |
 | `fetch sqlite\|slt [--dest DIR]` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | `fetch.zig` |
@@ -134,6 +135,7 @@ tools/xqt/
   slt.zig               xqt slt
   dialect_diff.zig      xqt dialect-diff pg|mariadb|oracle
   bench.zig             xqt bench
+  wasi.zig              xqt wasi
   gen.zig               xqt gen fixtures|parser|opcodes
   gen/superjournal.zig  xqt gen superjournal
   fetch.zig             xqt fetch sqlite|slt

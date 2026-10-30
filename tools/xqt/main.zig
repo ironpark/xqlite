@@ -14,6 +14,7 @@ const planner_gen = @import("planner_gen.zig");
 const fetch = @import("fetch.zig");
 const gen = @import("gen.zig");
 const bench = @import("bench.zig");
+const wasi = @import("wasi.zig");
 
 const usage =
     \\usage: xqt [options] <command> [args]
@@ -25,6 +26,7 @@ const usage =
     \\  slt [opts] PATH... [-- ARGS]  sqllogictest scripts with `xqlite slt`
     \\  dialect-diff pg|mariadb|mssql|oracle [CASES]  a dialect against its server (podman)
     \\  bench [WORKLOAD...]       xqlite against sqlite3 on timed workloads
+    \\  wasi [--wasm PATH]       the wasm32-wasi build under wasmtime, against sqlite3
     \\  gen NAME [ARGS]          regenerate test data, grammar.zig, opcodes.zig (xqt help gen)
     \\  fetch sqlite|slt [--dest DIR]  download ref/sqlite or ref/sqllogictest
     \\  list                     the interop modules and planner case files
@@ -65,6 +67,8 @@ pub fn main(init: std.process.Init) !void {
         try dialect_diff.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "bench"))
         try bench.run(gpa, io, &cfg, out, cmd_args)
+    else if (std.mem.eql(u8, cmd, "wasi"))
+        try wasi.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "gen"))
         try gen.run(gpa, io, &cfg, out, cmd_args)
     else if (std.mem.eql(u8, cmd, "fetch"))
@@ -85,6 +89,8 @@ pub fn main(init: std.process.Init) !void {
             fetch.usage
         else if (std.mem.eql(u8, topic, "gen"))
             gen.usage
+        else if (std.mem.eql(u8, topic, "wasi"))
+            wasi.usage
         else if (std.mem.eql(u8, topic, "bench"))
             bench.usage
         else
@@ -139,4 +145,5 @@ test {
     _ = fetch;
     _ = gen;
     _ = bench;
+    _ = wasi;
 }

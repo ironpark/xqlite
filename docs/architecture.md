@@ -17,6 +17,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 - [방언 훅](#방언-훅)
 - [엄격한 타입](#엄격한-타입)
 - [카탈로그와 시퀀스](#카탈로그와-시퀀스)
+- [VFS](#vfs)
 - [소스 파일](#소스-파일)
 - [아직 하지 않은 것](#아직-하지-않은-것)
 
@@ -299,7 +300,7 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 
 방언이 정하는 것은 셋입니다.
 
-| 방언이 정하는 것 | PostgreSQL | (2단계) T-SQL / Oracle / MariaDB |
+| 방언이 정하는 것 | PostgreSQL | T-SQL / Oracle / MariaDB |
 | --- | --- | --- |
 | 기본 스키마(그 개체는 main의 평범한 이름) | `public` | `dbo` / 현재 사용자 / 현재 데이터베이스 |
 | 연결별 기본값(한정하지 않은 이름의 해석, DDL이 만드는 곳) | `search_path`(`dialect.ConnState.postgres`) | 각 방언의 세션 상태 |
@@ -316,6 +317,27 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 | `resolve(db, a, schemas, cfg, schema, name)` | 한정한 이름 → SQLite (db, name). `Config{default_schema, temp_schema}`가 방언의 이름. SQLite 데이터베이스 이름이 먼저, 그다음 목록의 스키마(main과 바꾼 이름), 둘 다 아니면 `error.NoSuchSchema` |
 
 카탈로그 뷰(`information_schema`, `pg_namespace` ...)는 개체 이름을 목록과 조인해 스키마와 이름으로 나누고, 기본 스키마에서는 감춥니다.
+
+## VFS
+
+방언과 상관없이 엔진 맨 아래에는 VFS(`src/vfs/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`)를 정합니다.
+
+| 구현 | 파일 | 잠금 | wal-index |
+| --- | --- | --- | --- |
+| POSIX | `vfs/unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀 | mmap한 `-shm` 파일 |
+| WASI | `vfs/wasi.zig` | 프로세스 안에서만(`vfs/inproc.zig`, 장치·inode 번호로) | 힙 메모리 |
+| 호스트(wasm32-freestanding) | `vfs/host.zig` | 프로세스 안에서(이름으로) 중재한 뒤 호스트에 물음(`xq_host_lock`) | 힙 메모리 |
+| 메모리 | `vfs/mem.zig` | `MemVfs` 객체 안에서 | 힙 메모리 |
+| 크래시 테스트 | `vfs/crash.zig` | 감싼 VFS의 것 | 감싼 VFS의 것 |
+
+```
+Db.open(.unix) ─▶ vfs.OsVfs ─┬─ POSIX     (네이티브)
+                             ├─ WASI      (wasm32-wasi)
+                             └─ 호스트    (wasm32-freestanding, env.xq_host_* import)
+Db.open(.memory) ─▶ MemVfs
+```
+
+`vfs.OsVfs`는 타깃의 파일 시스템 VFS를 comptime에 고릅니다. 셋 모두 `init(gpa, io)`와 `interface()`가 있습니다. WASI와 호스트 VFS는 이름 없는 임시 파일을 메모리(`MemVfs`)에 둡니다. 잠금 표는 유닉스의 inode 표처럼 프로세스 전역이라서, 연결마다 VFS 객체가 따로 있어도 같은 파일의 잠금은 하나입니다. 다른 프로세스와의 잠금은 없습니다. 엔진이 VFS 밖에서 플랫폼에 묻는 것(시계, 환경 변수, 지역 시간, 64비트 원자 연산)은 `src/util/platform.zig` 한곳에 있습니다. 자세한 내용은 [WebAssembly](wasm.md)에 있습니다.
 
 ## 소스 파일
 

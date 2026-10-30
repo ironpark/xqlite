@@ -51,7 +51,18 @@ pub const varint = @import("util/varint.zig");
 
 pub const vfs = @import("vfs/vfs.zig");
 pub const MemVfs = @import("vfs/mem.zig").MemVfs;
-pub const UnixVfs = @import("vfs/unix.zig").UnixVfs;
+/// The POSIX VFS; void on WebAssembly, which has no POSIX locks.
+pub const UnixVfs = switch (@import("builtin").os.tag) {
+    .wasi, .freestanding => void,
+    else => @import("vfs/unix.zig").UnixVfs,
+};
+/// The WASI VFS (docs/wasm.md); void but on wasm32-wasi.
+pub const WasiVfs = if (@import("builtin").os.tag == .wasi) @import("vfs/wasi.zig").WasiVfs else void;
+/// The VFS whose files the embedder supplies through imports
+/// (docs/wasm.md); void but on wasm32-freestanding.
+pub const HostVfs = if (@import("builtin").os.tag == .freestanding) @import("vfs/host.zig").HostVfs else void;
+/// The file-system VFS of the target: UnixVfs, WasiVfs or HostVfs.
+pub const OsVfs = vfs.OsVfs;
 /// A VFS wrapper that crashes the process at a chosen write (testing aid).
 pub const crash_vfs = @import("vfs/crash.zig");
 

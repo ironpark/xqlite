@@ -259,7 +259,7 @@ test "pg: parameters" {
     var stmt: ?*vi.Vdbe = null;
     try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "SELECT $2 - $1, $1", &stmt, null));
     defer _ = api.finalize(stmt.?);
-    try testing.expectEqual(@as(i32, 2), api.bindParameterCount(stmt.?));
+    try testing.expectEqual(@as(usize, 2), api.bindParameterCount(stmt.?));
     try testing.expectEqual(RC.OK, api.bindInt64(stmt.?, 1, 10));
     try testing.expectEqual(RC.OK, api.bindInt64(stmt.?, 2, 15));
     try testing.expectEqual(RC.ROW, api.step(stmt.?));

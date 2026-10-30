@@ -796,7 +796,7 @@ const Cursor = struct {
     i: usize = 0,
 
     fn of(cur: *vtab.VtabCursor) *Cursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 
@@ -811,7 +811,7 @@ fn connect(db: *int.Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp_vtab: *
 }
 
 fn disconnect(p: *vtab.Vtab) i32 {
-    const t: *Table = @fieldParentPtr("base", p);
+    const t: *Table = @alignCast(@fieldParentPtr("base", p));
     t.db.gpa.destroy(t);
     return RC.OK;
 }
@@ -828,7 +828,7 @@ fn bestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
     }
     for (args, 1..) |a, n| {
         const i = a orelse {
-            const t: *Table = @fieldParentPtr("base", p);
+            const t: *Table = @alignCast(@fieldParentPtr("base", p));
             vtab.setErrMsg(t.db, p, "xq_maria_json_table() takes a document and a specification", .{});
             return RC.ERROR;
         };
@@ -841,7 +841,7 @@ fn bestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
 }
 
 fn open(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t: *Table = @fieldParentPtr("base", p);
+    const t: *Table = @alignCast(@fieldParentPtr("base", p));
     const c = t.db.gpa.create(Cursor) catch return RC.NOMEM;
     c.* = .{ .db = t.db, .arena = .init(t.db.gpa) };
     pp_cursor.* = &c.base;

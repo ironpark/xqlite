@@ -1,7 +1,7 @@
 const std = @import("std");
 const vfs = @import("../vfs/vfs.zig");
 const MemVfs = @import("../vfs/mem.zig").MemVfs;
-const UnixVfs = @import("../vfs/unix.zig").UnixVfs;
+const UnixVfs = if (@import("builtin").os.tag == .wasi) void else @import("../vfs/unix.zig").UnixVfs;
 const pcache = @import("pcache.zig");
 const wal_mod = @import("wal.zig");
 const fileSize = @import("pager_test.zig").fileSize;
@@ -285,6 +285,7 @@ test "wal: many frames span several wal-index pages" {
 }
 
 test "wal: shared memory on disk (unix)" {
+    if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var u = UnixVfs.init(testing.allocator, testing.io);
@@ -314,6 +315,8 @@ test "wal: shared memory on disk (unix)" {
 }
 
 test "wal: read-only shared memory falls back to a heap wal-index" {
+    // A -shm file (the WASI VFS keeps the wal-index in memory).
+    if (@import("builtin").os.tag == .wasi) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var u = UnixVfs.init(testing.allocator, testing.io);

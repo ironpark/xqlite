@@ -123,7 +123,7 @@ pub const shim_name = if (builtin.os.tag.isDarwin()) "libcrashshim.dylib" else "
 
 /// A path with a slash in it, made absolute (checks run in directories of
 /// their own); a bare name stays, for a PATH lookup.
-fn absolute(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
+pub fn absolute(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, path, '/') == null or std.fs.path.isAbsolute(path)) return path;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const n = std.process.currentPath(io, &buf) catch return path;

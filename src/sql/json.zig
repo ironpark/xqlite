@@ -3964,7 +3964,7 @@ const JsonEachCursor = struct {
     s_parse: JsonParse = .{},
 
     fn of(cur: *vtab.VtabCursor) *JsonEachCursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 

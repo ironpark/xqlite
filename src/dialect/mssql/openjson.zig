@@ -154,7 +154,7 @@ const Cursor = struct {
     rowid: i64 = 0,
 
     fn of(c: *vtab.VtabCursor) *Cursor {
-        return @fieldParentPtr("base", c);
+        return @alignCast(@fieldParentPtr("base", c));
     }
 
     fn reset(c: *Cursor) void {
@@ -213,7 +213,7 @@ fn connect(db: *Sqlite3, aux: ?*anyopaque, _: []const [:0]const u8, pp_vtab: *?*
 }
 
 fn disconnect(p: *vtab.Vtab) i32 {
-    const t: *Table = @fieldParentPtr("base", p);
+    const t: *Table = @alignCast(@fieldParentPtr("base", p));
     t.db.gpa.destroy(t);
     return RC.OK;
 }
@@ -221,7 +221,7 @@ fn disconnect(p: *vtab.Vtab) i32 {
 /// The json argument (xq_json =) is required, the path optional; as
 /// json_each().
 fn bestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
-    const t: *Table = @fieldParentPtr("base", p);
+    const t: *Table = @alignCast(@fieldParentPtr("base", p));
     var idx = [2]i32{ -1, -1 };
     var unusable: u32 = 0;
     var usable: u32 = 0;
@@ -256,7 +256,7 @@ fn bestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
 }
 
 fn open(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t: *Table = @fieldParentPtr("base", p);
+    const t: *Table = @alignCast(@fieldParentPtr("base", p));
     const c = t.db.gpa.create(Cursor) catch return RC.NOMEM;
     c.* = .{ .gpa = t.db.gpa, .path_arena = .init(t.db.gpa) };
     pp_cursor.* = &c.base;
@@ -272,7 +272,7 @@ fn close(cur: *vtab.VtabCursor) i32 {
 }
 
 fn tableOf(cur: *vtab.VtabCursor) *Table {
-    return @fieldParentPtr("base", cur.vtab);
+    return @alignCast(@fieldParentPtr("base", cur.vtab));
 }
 
 fn setError(cur: *vtab.VtabCursor, msg: []const u8) i32 {

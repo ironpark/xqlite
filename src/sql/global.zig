@@ -9,6 +9,7 @@
 const std = @import("std");
 const malloc = @import("malloc.zig");
 const func = @import("func.zig");
+const Atomic = @import("../util/platform.zig").Atomic;
 
 // Separate variables, not one struct: a program that never calls
 // sqlite3_config() never writes `config`, so the compiler can treat the
@@ -21,8 +22,8 @@ pub var config: malloc.Config = .{};
 /// comes from the application's allocator, so they are only recorded, not
 /// enforced.
 pub var heap_limit: struct {
-    soft: std.atomic.Value(i64) = .init(0),
-    hard: std.atomic.Value(i64) = .init(0),
+    soft: Atomic(i64) = .init(0),
+    hard: Atomic(i64) = .init(0),
 } = .{};
 
 /// sqlite3Prng: the generator behind sqlite3_randomness().

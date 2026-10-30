@@ -207,11 +207,11 @@ const Runner = struct {
             r.labels.deinit(r.gpa);
         }
 
-        var unix = xqlite.UnixVfs.init(r.gpa, r.io);
+        var unix = xqlite.OsVfs.init(r.gpa, r.io);
         // A journal mode needs a file; without --db, one per script and
         // process, so that parallel runs do not collide.
         const db_path: ?[]const u8 = r.opts.db_path orelse if (r.opts.journal_mode != null)
-            try std.fmt.allocPrint(r.gpa, "/tmp/xqlite-slt-{d}-{d}.db", .{ std.c.getpid(), r.n_script })
+            try std.fmt.allocPrint(r.gpa, "/tmp/xqlite-slt-{d}-{d}.db", .{ if (@import("builtin").os.tag == .wasi) 0 else std.c.getpid(), r.n_script })
         else
             null;
         defer if (r.opts.db_path == null) if (db_path) |p| {

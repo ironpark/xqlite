@@ -43,7 +43,7 @@ const TK = int.TK;
 /// XQ_WHERETRACE environment variable is set.
 pub fn traceEnabled() bool {
     if (@import("builtin").mode != .debug) return false;
-    return std.c.getenv("XQ_WHERETRACE") != null;
+    return @import("../util/platform.zig").getenv("XQ_WHERETRACE") != null;
 }
 
 /// Port of sqlite3WhereLoopPrint() (with a WhereClause): one line

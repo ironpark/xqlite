@@ -26,6 +26,7 @@ const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
 const state_mod = @import("state.zig");
 const Quoted = @import("../dialect.zig").Quoted;
+const Coerce = @import("../../ir/tree.zig").Coerce;
 
 pub const Base = enum {
     tinyint,
@@ -239,7 +240,7 @@ pub fn baseByName(name: []const u8) ?Base {
 
 // ============================================================ coercion
 
-/// Flags of xq_coerce():
+/// Flags of xq_coerce(), set from the IR's Coerce (src/ir/tree.zig):
 ///  - coerce_ignore: INSERT/UPDATE IGNORE (never strict);
 ///  - coerce_not_null: a NOT NULL column: NULL fails ("Column 'c' cannot
 ///    be null"), or with IGNORE, or in a multi-row INSERT outside strict
@@ -248,10 +249,10 @@ pub fn baseByName(name: []const u8) ?Base {
 ///  - coerce_missing: the NULL stands for a NOT NULL column without a
 ///    DEFAULT that the INSERT leaves out ("Field 'c' doesn't have a
 ///    default value" in strict mode, else the implicit default).
-pub const coerce_ignore = 1;
-pub const coerce_not_null = 2;
-pub const coerce_multi_row = 4;
-pub const coerce_missing = 8;
+pub const coerce_ignore = Coerce.flag_ignore;
+pub const coerce_not_null = Coerce.flag_not_null;
+pub const coerce_multi_row = Coerce.flag_multi_row;
+pub const coerce_missing = Coerce.flag_missing;
 
 /// The position of the flags among the arguments of xq_coerce().
 pub const coerce_flags_arg = 5;

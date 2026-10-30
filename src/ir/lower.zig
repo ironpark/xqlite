@@ -450,19 +450,13 @@ pub const Lowerer = struct {
 
     /// xq_coerce(value, type, schema, table, column, flags, row).
     fn coerce(l: *Lowerer, c: tree.Coerce) Error!*IrExpr {
-        const mt = @import("../dialect/mariadb/types.zig");
-        var flags: i64 = 0;
-        if (c.ignore) flags |= mt.coerce_ignore;
-        if (c.not_null) flags |= mt.coerce_not_null;
-        if (c.missing) flags |= mt.coerce_missing;
-        if (c.multi_row) flags |= mt.coerce_multi_row;
         const x = try l.call("xq_coerce", &.{
             try l.expr(c.e),
             try l.strConst(c.decl_type),
             try l.strConst(c.schema),
             try l.strConst(c.table),
             try l.strConst(c.column),
-            try l.intConst(flags),
+            try l.intConst(c.flags()),
             try l.intConst(c.row),
         });
         // The conversion may fail the statement.

@@ -251,7 +251,7 @@ pub const IsBool = struct { e: *Expr, value: ?bool, not: bool };
 pub const Collate = struct { e: *Expr, collation: []const u8 };
 
 /// MariaDB's conversion of a value stored into a column (xq_coerce(),
-/// src/dialect/mariadb/types.zig): `decl_type` the column's declared
+/// registered by the MariaDB dialect, src/dialect/mariadb/types.zig): `decl_type` the column's declared
 /// type, `schema`/`table`/`column` for messages, `row` the row number of
 /// the INSERT (for messages). The strictness (sql_mode) is read when the
 /// statement runs; `ignore` is INSERT/UPDATE IGNORE.
@@ -268,6 +268,22 @@ pub const Coerce = struct {
     missing: bool = false,
     multi_row: bool = false,
     row: u32 = 1,
+
+    /// The flags argument of xq_coerce() (see coerceFunc() in
+    /// src/dialect/mariadb/types.zig).
+    pub const flag_ignore = 1;
+    pub const flag_not_null = 2;
+    pub const flag_multi_row = 4;
+    pub const flag_missing = 8;
+
+    pub fn flags(c: Coerce) i64 {
+        var f: i64 = 0;
+        if (c.ignore) f |= flag_ignore;
+        if (c.not_null) f |= flag_not_null;
+        if (c.missing) f |= flag_missing;
+        if (c.multi_row) f |= flag_multi_row;
+        return f;
+    }
 };
 
 /// The next value of the identity sequence `sequence`: nextval('seq').

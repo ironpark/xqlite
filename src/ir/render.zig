@@ -305,19 +305,13 @@ pub const Renderer = struct {
                 try r.put(")");
             },
             .coerce => |c| {
-                const mt = @import("../dialect/mariadb/types.zig");
-                var flags: i64 = 0;
-                if (c.ignore) flags |= mt.coerce_ignore;
-                if (c.not_null) flags |= mt.coerce_not_null;
-                if (c.missing) flags |= mt.coerce_missing;
-                if (c.multi_row) flags |= mt.coerce_multi_row;
                 try r.put("xq_coerce(");
                 try r.expr(c.e);
                 for ([_][]const u8{ c.decl_type, c.schema, c.table, c.column }) |s| {
                     try r.put(", ");
                     try r.string(s);
                 }
-                try r.print(", {d}, {d})", .{ flags, c.row });
+                try r.print(", {d}, {d})", .{ c.flags(), c.row });
             },
             .identity_default => |d| {
                 try r.put("nextval(");

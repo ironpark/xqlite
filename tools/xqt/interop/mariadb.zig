@@ -1,7 +1,8 @@
 //! The MariaDB dialect against sqlite3: a database written by `xqlite sql`
 //! in the MariaDB dialect (STRICT tables, named CHECKs, DEFAULT and
 //! generated-column expressions, AUTO_INCREMENT, "t$i" indexes renamed
-//! with their table, views, the xq_catalog catalog) must pass sqlite3's
+//! with their table, views, the xq_catalog catalog, the tables of CREATE
+//! DATABASE as "db.t" tables of main) must pass sqlite3's
 //! integrity check, and sqlite3 and xqlite (in the SQLite dialect) must
 //! read the same rows and schema from it: what the schema keeps is SQLite
 //! text that means what the MariaDB statement meant. The expressions here
@@ -25,6 +26,7 @@ pub fn register(s: *xqt.Suite) !void {
     try s.add("index names", indexNames, .{base});
     for (bad) |stmt| try s.add(try std.fmt.allocPrint(s.arena.allocator(), "sqlite3 rejects: {s}", .{stmt}), rejects, .{ base, stmt });
     try s.add("read back what sqlite3 wrote", readBack, .{base});
+    try s.add("tables of CREATE DATABASE", databaseTables, .{base});
 }
 
 const db = "maria.db";
@@ -62,6 +64,13 @@ const script =
     \\RENAME TABLE entry TO ledger;
     \\ALTER TABLE ledger ADD COLUMN tag varchar(8) DEFAULT 'tag';
     \\CREATE TABLE gone (x int); DROP TABLE gone;
+    \\CREATE DATABASE sales;
+    \\CREATE TABLE sales.orders (id int AUTO_INCREMENT PRIMARY KEY, account_id int, amount int CHECK (amount > 0), KEY ix_acct (account_id)) AUTO_INCREMENT=100;
+    \\INSERT INTO sales.orders (account_id, amount) VALUES (10, 5), (11, 7), (12, 60);
+    \\USE sales;
+    \\CREATE VIEW big AS SELECT o.id, o.amount FROM orders o WHERE o.amount > 50;
+    \\USE main;
+    \\CREATE DATABASE tmp; CREATE TABLE tmp.x (a int); DROP DATABASE tmp;
     \\
 ;
 
@@ -72,6 +81,8 @@ const queries =
     \\SELECT count(*) FROM ledger WHERE memo = 'aa';
     \\SELECT * FROM xq_catalog ORDER BY tbl, col, key;
     \\SELECT * FROM sqlite_sequence ORDER BY name;
+    \\SELECT id, account_id, amount FROM "sales.orders" ORDER BY id;
+    \\SELECT * FROM "sales.big";
     \\SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY name;
 ;
 
@@ -84,6 +95,7 @@ const bad = [_][]const u8{
     "INSERT INTO account(email) VALUES ('C@X.ORG')",
     "INSERT INTO ledger(account_id, amount) VALUES (10, 5000)",
     "INSERT INTO ledger(account_id, amount) VALUES (10, 'x')",
+    "INSERT INTO \"sales.orders\"(account_id, amount) VALUES (1, 0)",
 };
 
 fn build(c: *Check, file: []const u8) !void {
@@ -113,7 +125,7 @@ fn results(c: *Check, base: *BaseDb) !void {
 fn indexNames(c: *Check, base: *BaseDb) !void {
     try base.get(c, db);
     const idx = std.mem.trimEnd(u8, try c.sqlite3(db, "SELECT group_concat(name, ' ') FROM (SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name)"), "\n");
-    _ = c.expect(std.mem.eql(u8, idx, "account$idx_name account$uq_email ledger$memo"), "index names: {s}", .{idx});
+    _ = c.expect(std.mem.eql(u8, idx, "account$idx_name account$uq_email ledger$memo sales.orders$ix_acct"), "index names: {s}", .{idx});
 }
 
 fn rejects(c: *Check, base: *BaseDb, stmt: []const u8) !void {
@@ -131,4 +143,20 @@ fn readBack(c: *Check, base: *BaseDb) !void {
     const got = std.mem.trimEnd(u8, out, "\n");
     _ = c.expect(std.mem.eql(u8, got, "13|ANON|150.0|ANON:big\n3.5|tag\n14"), "read back: {s}", .{got});
     try integrityOk(c, "integrity_check after writes");
+}
+
+/// A table of CREATE DATABASE sales is the table "sales.orders" of main:
+/// sqlite3 lists it, reads and writes it (its AUTO_INCREMENT counter
+/// moves on), and the MariaDB dialect reads sqlite3's row as sales.orders
+/// (and as orders after USE sales).
+fn databaseTables(c: *Check, base: *BaseDb) !void {
+    try base.get(c, db);
+    const tables = try c.sqlite3(db, ".tables");
+    _ = c.expect(std.mem.indexOf(u8, tables, "sales.orders") != null and std.mem.indexOf(u8, tables, "sales.big") != null, ".tables: {s}", .{tables});
+    _ = c.expect(std.mem.indexOf(u8, tables, "tmp.x") == null, ".tables still lists tmp.x: {s}", .{tables});
+    _ = try c.sqlite3(db, "INSERT INTO \"sales.orders\" (account_id, amount) VALUES (1, 70)");
+    const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect mariadb\nSELECT id, amount FROM sales.orders WHERE account_id = 1;\nUSE sales;\nSELECT count(*) FROM orders;\nSELECT id FROM big ORDER BY id;\nSHOW TABLES;\n" });
+    const got = std.mem.trimEnd(u8, out, "\n");
+    _ = c.expect(std.mem.eql(u8, got, "103|70\n4\n102\n103\nbig\norders"), "database read back: {s}", .{got});
+    try integrityOk(c, "integrity_check after the database writes");
 }

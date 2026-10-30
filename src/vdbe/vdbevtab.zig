@@ -62,6 +62,16 @@ const BytecodeCursor = struct {
     fn of(cur: *vtab.VtabCursor) *BytecodeCursor {
         return @alignCast(@fieldParentPtr("base", cur));
     }
+
+    /// Port of bytecodevtabOpen().
+    pub fn init(t: *BytecodeVtab) BytecodeCursor {
+        return .{ .sub = Mem.init(t.db, .{ .Null = true }) };
+    }
+
+    /// Port of bytecodevtabClose().
+    pub fn deinit(c: *BytecodeCursor, db: *Sqlite3) void {
+        cursorClear(c, db);
+    }
 };
 
 const schemas = [2][:0]const u8{
@@ -104,21 +114,8 @@ fn bytecodevtabConnect(db: *Sqlite3, aux_data: ?*anyopaque, _: []const [:0]const
     return rc;
 }
 
-/// Port of bytecodevtabDisconnect().
-fn bytecodevtabDisconnect(p: *vtab.Vtab) i32 {
-    const t = BytecodeVtab.of(p);
-    t.db.gpa.destroy(t);
-    return RC.OK;
-}
-
-/// Port of bytecodevtabOpen().
-fn bytecodevtabOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t = BytecodeVtab.of(p);
-    const c = t.db.gpa.create(BytecodeCursor) catch return RC.NOMEM;
-    c.* = .{ .sub = Mem.init(t.db, .{ .Null = true }) };
-    pp_cursor.* = &c.base;
-    return RC.OK;
-}
+/// xDisconnect, xOpen and xClose (bytecodevtabDisconnect(), ...).
+const lifecycle = vtab.Lifecycle(BytecodeVtab, BytecodeCursor);
 
 /// Port of bytecodevtabCursorClear().
 fn cursorClear(c: *BytecodeCursor, db: *Sqlite3) void {
@@ -134,15 +131,6 @@ fn cursorClear(c: *BytecodeCursor, db: *Sqlite3) void {
     c.z_type = null;
     c.z_schema = null;
     c.z_name = null;
-}
-
-/// Port of bytecodevtabClose().
-fn bytecodevtabClose(cur: *vtab.VtabCursor) i32 {
-    const c = BytecodeCursor.of(cur);
-    const db = BytecodeVtab.of(cur.vtab).db;
-    cursorClear(c, db);
-    db.gpa.destroy(c);
-    return RC.OK;
 }
 
 /// Port of bytecodevtabNext().
@@ -327,9 +315,9 @@ const bytecodevtab_module: vtab.Module = .{
     .i_version = 0,
     .x_connect = bytecodevtabConnect,
     .x_best_index = bytecodevtabBestIndex,
-    .x_disconnect = bytecodevtabDisconnect,
-    .x_open = bytecodevtabOpen,
-    .x_close = bytecodevtabClose,
+    .x_disconnect = lifecycle.disconnect,
+    .x_open = lifecycle.open,
+    .x_close = lifecycle.close,
     .x_filter = bytecodevtabFilter,
     .x_next = bytecodevtabNext,
     .x_eof = bytecodevtabEof,

@@ -231,6 +231,11 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
   - 가려진 내장 함수는 `xq_sqlite_<이름>`으로 보입니다.
 - `dfunc.scalar("name", n_arg, .{ .deterministic = true }, impl)`로 만듭니다(`src/dialect/func.zig`, 집계는 `aggregate`).
 - 같은 이름의 오버로드는 붙여 둡니다. `dfunc.checkTable`이 컴파일 시점에 검사합니다.
+- 반복을 줄이는 comptime 도우미가 같은 파일에 있습니다.
+  - `dfunc.overloads("instr", &.{ 2, 3, 4 }, det, f)`: 인자 개수만 다른 등록을 한 번에(붙어 있음이 보장됨).
+  - `dfunc.bind(f, .{ true, false })`: 고정 인자만 다른 구현을 손으로 쓴 래퍼 없이.
+  - `dfunc.withArena(Call, f)`: 호출마다 아레나를 쓰는 구현의 `init`/`deinit`.
+  - `dfunc.typed(name, o, Conv, f)`: 인자 개수를 `f`의 매개변수에서 정하고, 인자를 차례로 변환(NULL이면 그 자리에서 끝). 변환 규칙(`Conv`)은 방언 것입니다(Oracle은 `''`도 NULL).
 
 ### 엔진 함수 (`engine_functions`)
 
@@ -346,6 +351,8 @@ SQLite 데이터베이스(main, temp, `ATTACH`)가 아닌 이름 붙은 스키�
 
 방언과 상관없이 엔진 맨 아래에는 VFS(`pkg/vfs/src/vfs.zig`)가 있습니다. sqlite3_vfs·sqlite3_io_methods를 옮긴 타입 지운 인터페이스로, 파일 열기·삭제·존재 확인, 위치 지정 읽기·쓰기, 다섯 단계 잠금, WAL의 공유 메모리(`shmMap`, `shmLock`)를 정합니다.
 
+구현은 메서드 표를 손으로 채우지 않습니다. 구체 타입을 받는 `pub` 메서드(`pub fn read(f: *MemFile, buf: []u8, offset: u64) Error!usize`)를 쓰면 `&vfs.FileImpl(MemFile).vtable`이 표를 컴파일 시점에 만들고, 타입 지운 포인터를 되돌리는 호출은 인라인됩니다. 선택 메서드를 선언하지 않으면 null로 남고, 필수 메서드가 없으면 컴파일 오류입니다. 표는 타입마다 하나라 주소로 구현을 알아볼 수 있고(memdb), `FileImplWithout(T, &.{"shmMap", ...})`은 선언된 메서드를 빼고 만듭니다(crash VFS의 공유 메모리 없는 변형).
+
 | 구현 | 파일 | 잠금 | wal-index |
 | --- | --- | --- | --- |
 | POSIX | `unix.zig` | `fcntl` 바이트 범위 잠금. sqlite3와 같은 바이트라서 sqlite3 프로세스와 파일을 함께 씀 | mmap한 `-shm` 파일 |
@@ -432,7 +439,8 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 | 파일 | 내용 |
 | --- | --- |
 | `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`; 3은 MSSQL 자리), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
-| `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`) |
+| `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena` |
+| `src/dialect/{calendar,json_text,words,lex,template,tokenized}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 예약어 집합(접힌 대소문자를 컴파일 시점에 검사), 따옴표 토큰 스캔, 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 문장을 먼저 토큰화하는 프론트엔드의 `run`. 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
 | `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres.md)) |
 | `src/dialect/mariadb/*.zig` | MariaDB 프론트엔드([MariaDB 호환](mariadb.md)) |
@@ -446,7 +454,7 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 | `src/catalog/catalog.zig`, `sequence.zig`, `schema.zig` | 방언 메타데이터, 시퀀스, 이름 붙은 스키마([스키마](#스키마네임스페이스)) |
 | `pkg/vfs/build.zig`, `build.zig.zon` | VFS 패키지(`xqlite_vfs`): 모듈과 `zig build test`. 루트 빌드가 경로 의존성으로 받음([VFS 패키지](#vfs-패키지)) |
 | `pkg/vfs/src/root.zig` | 패키지 루트: 인터페이스와 구현의 이름, `temp_directory`(`sqlite3_temp_directory`) |
-| `pkg/vfs/src/vfs.zig` | VFS 인터페이스(`Vfs`, `File`, 잠금, 공유 메모리)와 `OsVfs` |
+| `pkg/vfs/src/vfs.zig` | VFS 인터페이스(`Vfs`, `File`, 잠금, 공유 메모리), `OsVfs`, 타입 있는 메서드로 메서드 표를 만드는 `FileImpl`/`VfsImpl` |
 | `pkg/vfs/src/{unix,wasi,host,mem,memdb,inproc,crash}.zig` | VFS 구현([VFS](#vfs)의 표) |
 | `src/sql/memdb.zig` | 엔진의 memdb 인스턴스: `Memdb(malloc)` |
 | `pkg/storage/build.zig`, `build.zig.zon` | 스토리지 패키지(`xqlite_storage`): 모듈과 `zig build test`([스토리지 패키지](#스토리지-패키지)) |

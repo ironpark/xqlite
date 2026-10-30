@@ -20,6 +20,7 @@
 //! the first of duplicate keys counts.
 
 const std = @import("std");
+const json_text = @import("../json_text.zig");
 
 /// The types of values, numbered as OPENJSON's type column.
 pub const Kind = enum(u8) { null = 0, string = 1, number = 2, boolean = 3, array = 4, object = 5 };
@@ -325,23 +326,7 @@ pub fn writeString(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8)
 
 /// The body of a JSON string for `s` (STRING_ESCAPE(s, 'json')).
 pub fn writeEscaped(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) error{OutOfMemory}!void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try out.appendSlice(a, "\\\""),
-            '\\' => try out.appendSlice(a, "\\\\"),
-            '/' => try out.appendSlice(a, "\\/"),
-            8 => try out.appendSlice(a, "\\b"),
-            12 => try out.appendSlice(a, "\\f"),
-            '\n' => try out.appendSlice(a, "\\n"),
-            '\r' => try out.appendSlice(a, "\\r"),
-            '\t' => try out.appendSlice(a, "\\t"),
-            0...7, 11, 14...0x1f => {
-                var b: [6]u8 = undefined;
-                try out.appendSlice(a, std.fmt.bufPrint(&b, "\\u{x:0>4}", .{c}) catch unreachable);
-            },
-            else => try out.append(a, c),
-        }
-    }
+    try json_text.appendEscaped(.{ .slash = true }, a, out, s);
 }
 
 // ============================================================= messages

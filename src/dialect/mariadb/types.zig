@@ -21,6 +21,7 @@
 //! Writes from sqlite3 or the SQLite dialect see only the STRICT types.
 
 const std = @import("std");
+const calendar = @import("../calendar.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
@@ -798,12 +799,7 @@ pub const DateTime = struct {
 };
 
 pub fn daysInMonth(y: u32, m: u32) u32 {
-    return switch (m) {
-        1, 3, 5, 7, 8, 10, 12 => 31,
-        4, 6, 9, 11 => 30,
-        2 => if ((y % 4 == 0 and y % 100 != 0) or y % 400 == 0) 29 else 28,
-        else => 0,
-    };
+    return calendar.daysInMonth(y, m);
 }
 
 /// MariaDB's date and datetime literals: 'YYYY-MM-DD[ hh:mm:ss[.f]]'

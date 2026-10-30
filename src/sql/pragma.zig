@@ -1827,6 +1827,16 @@ const PragmaVtabCursor = struct {
     fn of(cur: *vtab.VtabCursor) *PragmaVtabCursor {
         return @alignCast(@fieldParentPtr("base", cur));
     }
+
+    /// Port of pragmaVtabOpen(): the cursor knows its table at once.
+    pub fn opened(c: *PragmaVtabCursor, t: *PragmaVtab) void {
+        c.base.vtab = &t.base;
+    }
+
+    /// Port of pragmaVtabClose().
+    pub fn deinit(c: *PragmaVtabCursor, _: *Sqlite3) void {
+        pragmaVtabCursorClear(c);
+    }
 };
 
 /// Port of pragmaVtabConnect(): declare the result columns of the pragma
@@ -1873,13 +1883,6 @@ fn pragmaVtabConnect(db: *Sqlite3, pn: *const PragmaName, _: []const [:0]const u
     return rc;
 }
 
-/// Port of pragmaVtabDisconnect().
-fn pragmaVtabDisconnect(p: *vtab.Vtab) i32 {
-    const t = PragmaVtab.of(p);
-    t.db.gpa.destroy(t);
-    return int.RC.OK;
-}
-
 /// Port of pragmaVtabBestIndex(): there is no index to choose, but ==
 /// constraints on the hidden parameters, the first above all, should be
 /// used: unconstrained ones cost much.
@@ -1912,15 +1915,8 @@ fn pragmaVtabBestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
     return int.RC.OK;
 }
 
-/// Port of pragmaVtabOpen().
-fn pragmaVtabOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t = PragmaVtab.of(p);
-    const c = t.db.gpa.create(PragmaVtabCursor) catch return int.RC.NOMEM;
-    c.* = .{};
-    c.base.vtab = p;
-    pp_cursor.* = &c.base;
-    return int.RC.OK;
-}
+/// xDisconnect, xOpen and xClose (pragmaVtabDisconnect(), ...).
+const pragma_lifecycle = vtab.Lifecycle(PragmaVtab, PragmaVtabCursor);
 
 /// Port of pragmaVtabCursorClear().
 fn pragmaVtabCursorClear(c: *PragmaVtabCursor) void {
@@ -1932,15 +1928,6 @@ fn pragmaVtabCursorClear(c: *PragmaVtabCursor) void {
         if (a.*) |z| gpa.free(z);
         a.* = null;
     }
-}
-
-/// Port of pragmaVtabClose().
-fn pragmaVtabClose(cur: *vtab.VtabCursor) i32 {
-    const c = PragmaVtabCursor.of(cur);
-    const gpa = PragmaVtab.of(cur.vtab).db.gpa;
-    pragmaVtabCursorClear(c);
-    gpa.destroy(c);
-    return int.RC.OK;
 }
 
 /// Port of pragmaVtabNext().
@@ -2018,9 +2005,9 @@ const pragma_vtab_module: vtab.Module = .{
     .i_version = 0,
     .x_connect = vtab.Module.constructor(pragmaVtabConnect),
     .x_best_index = pragmaVtabBestIndex,
-    .x_disconnect = pragmaVtabDisconnect,
-    .x_open = pragmaVtabOpen,
-    .x_close = pragmaVtabClose,
+    .x_disconnect = pragma_lifecycle.disconnect,
+    .x_open = pragma_lifecycle.open,
+    .x_close = pragma_lifecycle.close,
     .x_filter = pragmaVtabFilter,
     .x_next = pragmaVtabNext,
     .x_eof = pragmaVtabEof,

@@ -14,6 +14,7 @@
 //! (minutes), datetimeoffset(n) with '+hh:mm'.
 
 const std = @import("std");
+const calendar = @import("../calendar.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
@@ -316,7 +317,7 @@ pub const Moment = struct {
     pub const daysFrom1900: i64 = -25567;
 
     fn ymd(mo: Moment) struct { i64, u32, u32 } {
-        return maria.civilFromDays(mo.days);
+        return calendar.civilFromDays(mo.days);
     }
 
     /// Normalize after arithmetic on secs/frac (given as wide values).
@@ -392,7 +393,7 @@ pub fn parseMoment(z_in: []const u8) ?Moment {
             }
         }
         if (y < 1 or y > 9999 or mon < 1 or mon > 12 or d < 1 or d > daysInMonth(y, mon)) return null;
-        mo.days = maria.daysFromCivil(y, mon, d);
+        mo.days = calendar.daysFromCivil(y, mon, d);
         if (i < z.len and (z[i] == 'T' or z[i] == ' ')) {
             mo.t_sep = z[i] == 'T';
             while (i < z.len and (z[i] == ' ' or z[i] == 'T')) i += 1;
@@ -455,12 +456,7 @@ pub fn parseMoment(z_in: []const u8) ?Moment {
 }
 
 fn daysInMonth(y: u32, m: u32) u32 {
-    return switch (m) {
-        1, 3, 5, 7, 8, 10, 12 => 31,
-        4, 6, 9, 11 => 30,
-        2 => if ((y % 4 == 0 and y % 100 != 0) or y % 400 == 0) 29 else 28,
-        else => 0,
-    };
+    return calendar.daysInMonth(y, m);
 }
 
 /// A value as a moment (text, or days since 1900-01-01 for a number).
@@ -501,7 +497,7 @@ fn datetimeMillis(mo: Moment) struct { Moment, u32 } {
 }
 
 fn writeDate(w: *std.Io.Writer, days: i64) void {
-    const y, const m, const d = maria.civilFromDays(days);
+    const y, const m, const d = calendar.civilFromDays(days);
     w.print("{d:0>4}-{d:0>2}-{d:0>2}", .{ @as(u64, @intCast(@max(y, 0))), m, d }) catch {};
 }
 
@@ -661,7 +657,7 @@ pub fn dateaddFunc(ctx: *Context, argv: []*Mem) void {
         const nm: u32 = @intCast(@mod(total, 12) + 1);
         if (ny < 1 or ny > 9999) return fail(ctx, "Adding a value to a 'datetime' column caused an overflow.", .{});
         const nd = @min(d, daysInMonth(@intCast(ny), nm));
-        mo.days = maria.daysFromCivil(ny, nm, nd);
+        mo.days = calendar.daysFromCivil(ny, nm, nd);
     } else {
         const unit: i128 = switch (part) {
             .day, .dayofyear, .weekday => 86400 * 10_000_000,
@@ -736,7 +732,7 @@ fn dow(days: i64) u32 {
 
 fn datepartValue(part: Part, mo: Moment) i64 {
     const y, const m, const d = mo.ymd();
-    const jan1 = maria.daysFromCivil(y, 1, 1);
+    const jan1 = calendar.daysFromCivil(y, 1, 1);
     const doy = mo.days - jan1 + 1;
     return switch (part) {
         .year => y,
@@ -757,8 +753,8 @@ fn datepartValue(part: Part, mo: Moment) i64 {
             // The week (Monday-based) that holds the Thursday of this one.
             const wd: i64 = @mod(mo.days + 3, 7); // 0 = Monday
             const thursday = mo.days - wd + 3;
-            const ty, _, _ = maria.civilFromDays(thursday);
-            break :blk @divFloor(thursday - maria.daysFromCivil(ty, 1, 1), 7) + 1;
+            const ty, _, _ = calendar.civilFromDays(thursday);
+            break :blk @divFloor(thursday - calendar.daysFromCivil(ty, 1, 1), 7) + 1;
         },
     };
 }
@@ -804,7 +800,7 @@ pub fn eomonthFunc(ctx: *Context, argv: []*Mem) void {
     if (ny < 1 or ny > 9999) return fail(ctx, "Adding a value to a 'date' column caused an overflow.", .{});
     var buf: [16]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    writeDate(&w, maria.daysFromCivil(ny, nm, daysInMonth(@intCast(ny), nm)));
+    writeDate(&w, calendar.daysFromCivil(ny, nm, daysInMonth(@intCast(ny), nm)));
     api.resultText(ctx, w.buffered(), .transient);
 }
 
@@ -819,7 +815,7 @@ pub fn datefrompartsFunc(ctx: *Context, argv: []*Mem) void {
     }
     var buf: [16]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    writeDate(&w, maria.daysFromCivil(y, m, d));
+    writeDate(&w, calendar.daysFromCivil(y, m, d));
     api.resultText(ctx, w.buffered(), .transient);
 }
 

@@ -17,6 +17,7 @@
 //! it is a comment), and its closing `*/` is skipped.
 
 const std = @import("std");
+const lex = @import("../lex.zig");
 const state = @import("state.zig");
 
 pub const Kind = enum {
@@ -185,25 +186,9 @@ pub const Lexer = struct {
     /// quote ends it, a doubled one stands for one, and a backslash
     /// escapes the next character if `escapes`.
     fn quoted(lx: *Lexer, start: usize, q: u8, kind: Kind, escapes: bool) Kind {
-        const s = lx.sql;
-        var i = start + 1;
-        while (true) {
-            const c = s[i];
-            if (c == 0) {
-                lx.pos = i;
-                return .illegal;
-            }
-            if (c == '\\' and escapes and s[i + 1] != 0) {
-                i += 2;
-            } else if (c == q) {
-                if (s[i + 1] == q) {
-                    i += 2;
-                } else {
-                    lx.pos = i + 1;
-                    return kind;
-                }
-            } else i += 1;
-        }
+        const r = lex.quotedEnd(lx.sql, start, q, escapes);
+        lx.pos = r.end;
+        return if (r.closed) kind else .illegal;
     }
 
     fn number(lx: *Lexer, start: usize) Kind {

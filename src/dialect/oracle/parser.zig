@@ -37,6 +37,7 @@
 //! first, so lookahead never fails; `end` is the offset after it.
 
 const std = @import("std");
+const words = @import("../words.zig");
 const tree = @import("../../ir/tree.zig");
 const ir = @import("../../ir/ir.zig");
 const int = @import("../../sql/sqlite_int.zig");
@@ -58,17 +59,9 @@ const Allocator = std.mem.Allocator;
 
 pub const Error = error{ ParseFailed, OutOfMemory };
 
-/// A set of (upper-case) words.
-fn wordSet(comptime words: []const []const u8) std.StaticStringMap(void) {
-    @setEvalBranchQuota(20_000);
-    var kvs: [words.len]struct { []const u8 } = undefined;
-    for (words, 0..) |w, i| kvs[i] = .{w};
-    return .initComptime(kvs);
-}
-
 /// Oracle's reserved words (V$RESERVED_WORDS), which cannot name a
 /// column or table unquoted.
-const reserved = wordSet(&.{
+const reserved = words.folded(.upper, &.{
     "ACCESS",     "ADD",      "ALL",        "ALTER",    "AND",        "ANY",        "AS",        "ASC",
     "AUDIT",      "BETWEEN",  "BY",         "CHAR",     "CHECK",      "CLUSTER",    "COLUMN",    "COMMENT",
     "COMPRESS",   "CONNECT",  "CREATE",     "CURRENT",  "DATE",       "DECIMAL",    "DEFAULT",   "DELETE",
@@ -87,7 +80,7 @@ const reserved = wordSet(&.{
 
 /// Words that may not be a bare alias (reserved words and the keywords
 /// that may follow a FROM item or a result column).
-const not_alias = wordSet(&.{
+const not_alias = words.folded(.upper, &.{
     "JOIN",  "INNER",   "LEFT",      "RIGHT",  "FULL",  "OUTER",     "CROSS", "NATURAL", "USING",
     "FETCH", "OFFSET",  "RETURNING", "RETURN", "CASE",  "WHEN",      "END",   "WINDOW",  "EXCEPT",
     "PIVOT", "UNPIVOT", "MODEL",     "SAMPLE", "LIMIT", "PARTITION", "LOG",   "KEEP",    "APPLY",

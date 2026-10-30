@@ -33,6 +33,7 @@
 //! warning is not recorded).
 
 const std = @import("std");
+const json_text = @import("../json_text.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
@@ -300,17 +301,7 @@ pub fn stringValue(a: Allocator, n: *const Node) Allocator.Error![]const u8 {
 
 /// Append `s` as the text of a JSON string, without the quotes.
 pub fn appendEscaped(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Allocator.Error!void {
-    for (s) |c| switch (c) {
-        '"' => try out.appendSlice(a, "\\\""),
-        '\\' => try out.appendSlice(a, "\\\\"),
-        '\n' => try out.appendSlice(a, "\\n"),
-        '\r' => try out.appendSlice(a, "\\r"),
-        '\t' => try out.appendSlice(a, "\\t"),
-        8 => try out.appendSlice(a, "\\b"),
-        12 => try out.appendSlice(a, "\\f"),
-        0...7, 11, 14...31 => try out.print(a, "\\u{x:0>4}", .{c}),
-        else => try out.append(a, c),
-    };
+    try json_text.appendEscaped(.{}, a, out, s);
 }
 
 /// Append `s` as a JSON string.

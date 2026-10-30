@@ -17,6 +17,7 @@
 //!    count): a statement end, as `;`.
 
 const std = @import("std");
+const lex = @import("../lex.zig");
 
 pub const Kind = enum {
     eof,
@@ -137,23 +138,9 @@ pub const Lexer = struct {
     /// A quoted token from `start` (its opening quote): `q` ends it, a
     /// doubled `q` stands for one.
     fn quoted(lx: *Lexer, start: usize, q: u8, kind: Kind) Kind {
-        const s = lx.sql;
-        var i = start + 1;
-        while (true) {
-            const c = s[i];
-            if (c == 0) {
-                lx.pos = i;
-                return .illegal;
-            }
-            if (c == q) {
-                if (s[i + 1] == q) {
-                    i += 2;
-                } else {
-                    lx.pos = i + 1;
-                    return kind;
-                }
-            } else i += 1;
-        }
+        const r = lex.quotedEnd(lx.sql, start, q, false);
+        lx.pos = r.end;
+        return if (r.closed) kind else .illegal;
     }
 
     fn number(lx: *Lexer, start: usize) Kind {

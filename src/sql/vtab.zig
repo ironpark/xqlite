@@ -145,6 +145,51 @@ pub const VtabCursor = struct {
     vtab: *Vtab = undefined,
 };
 
+/// xDisconnect, xOpen and xClose of a built-in module: its table type
+/// `T` and cursor type `C` hold their base (Vtab, VtabCursor) in a field
+/// `base`, and both live in the connection's allocator, which `T` has
+/// as `db`. The declarations below are looked up with @hasDecl, so they
+/// must be pub.
+///   - disconnect frees the table;
+///   - open makes the cursor `C.init(t)` (`fn (t: *T) C`), or `.{}` if C
+///     declares no init, then calls `c.opened(t)` if C declares it, once
+///     the cursor is in place (for pointers into itself);
+///   - close calls `c.deinit(db)` if C declares it, then frees it.
+pub fn Lifecycle(comptime T: type, comptime C: type) type {
+    return struct {
+        pub fn table(p: *Vtab) *T {
+            return @alignCast(@fieldParentPtr("base", p));
+        }
+
+        pub fn cursor(p: *VtabCursor) *C {
+            return @alignCast(@fieldParentPtr("base", p));
+        }
+
+        pub fn disconnect(p: *Vtab) i32 {
+            const t = table(p);
+            t.db.gpa.destroy(t);
+            return int.RC.OK;
+        }
+
+        pub fn open(p: *Vtab, pp_cursor: *?*VtabCursor) i32 {
+            const t = table(p);
+            const c = t.db.gpa.create(C) catch return int.RC.NOMEM;
+            c.* = if (@hasDecl(C, "init")) C.init(t) else .{};
+            if (@hasDecl(C, "opened")) c.opened(t);
+            pp_cursor.* = &c.base;
+            return int.RC.OK;
+        }
+
+        pub fn close(p: *VtabCursor) i32 {
+            const c = cursor(p);
+            const db = table(p.vtab).db;
+            if (@hasDecl(C, "deinit")) c.deinit(db);
+            db.gpa.destroy(c);
+            return int.RC.OK;
+        }
+    };
+}
+
 /// sqlite3_index_info.aConstraint[] (sqlite3_index_constraint).
 pub const IndexConstraint = struct {
     /// Column constrained; -1 for the rowid.

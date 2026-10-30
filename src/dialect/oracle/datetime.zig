@@ -9,6 +9,7 @@
 //! and punctuation, in English (NLS_DATE_LANGUAGE AMERICAN).
 
 const std = @import("std");
+const calendar = @import("../calendar.zig");
 
 pub const DateTime = struct {
     year: i32 = 1,
@@ -77,37 +78,20 @@ pub const DateTime = struct {
 };
 
 pub fn isLeap(y: i32) bool {
-    return (@mod(y, 4) == 0 and @mod(y, 100) != 0) or @mod(y, 400) == 0;
+    return calendar.isLeap(y);
 }
 
 pub fn daysInMonth(y: i32, m: u8) u8 {
-    const t = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    if (m == 2 and isLeap(y)) return 29;
-    return t[m - 1];
+    return @intCast(calendar.daysInMonth(y, m));
 }
 
-/// Howard Hinnant's days_from_civil.
-pub fn daysFromCivil(y_arg: i32, m: u8, d: u8) i64 {
-    const y: i64 = if (m <= 2) @as(i64, y_arg) - 1 else y_arg;
-    const era = @divFloor(y, 400);
-    const yoe = y - era * 400;
-    const mp: i64 = if (m > 2) @as(i64, m) - 3 else @as(i64, m) + 9;
-    const doy = @divTrunc(153 * mp + 2, 5) + @as(i64, d) - 1;
-    const doe = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy;
-    return era * 146097 + doe - 719468;
+pub fn daysFromCivil(y: i32, m: u8, d: u8) i64 {
+    return calendar.daysFromCivil(y, m, d);
 }
 
-pub fn civilFromDays(z_arg: i64) struct { year: i32, month: u8, day: u8 } {
-    const z = z_arg + 719468;
-    const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
-    const yoe = @divTrunc(doe - @divTrunc(doe, 1460) + @divTrunc(doe, 36524) - @divTrunc(doe, 146096), 365);
-    const doy = doe - (365 * yoe + @divTrunc(yoe, 4) - @divTrunc(yoe, 100));
-    const mp = @divTrunc(5 * doy + 2, 153);
-    const d: u8 = @intCast(doy - @divTrunc(153 * mp + 2, 5) + 1);
-    const m: u8 = @intCast(if (mp < 10) mp + 3 else mp - 9);
-    const y = yoe + era * 400 + @as(i64, if (m <= 2) 1 else 0);
-    return .{ .year = @intCast(y), .month = m, .day = d };
+pub fn civilFromDays(z: i64) struct { year: i32, month: u8, day: u8 } {
+    const y, const m, const d = calendar.civilFromDays(z);
+    return .{ .year = @intCast(y), .month = @intCast(m), .day = @intCast(d) };
 }
 
 // ============================================================ ISO text

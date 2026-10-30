@@ -30,6 +30,7 @@
 //! parsed with `stored` set: variables and parameters are refused there.
 
 const std = @import("std");
+const words = @import("../words.zig");
 const ctype = @import("xqlite_base").ctype;
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
@@ -53,29 +54,23 @@ pub const Error = int.Oom || int.ParseError;
 
 /// SQL Server's reserved words and the words that cannot be an alias
 /// where one is optional.
-const reserved = blk: {
-    @setEvalBranchQuota(20_000);
-    const words = [_][]const u8{
-        "ADD",          "ALL",          "ALTER",             "AND",          "ANY",      "APPLY",   "AS",     "ASC",
-        "BEGIN",        "BETWEEN",      "BREAK",             "BY",           "CASCADE",  "CASE",    "CHECK",  "CLUSTERED",
-        "COLLATE",      "COLUMN",       "COMMIT",            "CONSTRAINT",   "CONTINUE", "CREATE",  "CROSS",  "CURRENT",
-        "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DECLARE",  "DEFAULT", "DELETE", "DENY",
-        "DESC",         "DISTINCT",     "DROP",              "ELSE",         "END",      "ESCAPE",  "EXCEPT", "EXEC",
-        "EXECUTE",      "EXISTS",       "FETCH",             "FOR",          "FOREIGN",  "FROM",    "FULL",   "FUNCTION",
-        "GOTO",         "GRANT",        "GROUP",             "HAVING",       "IDENTITY", "IF",      "IN",     "INDEX",
-        "INNER",        "INSERT",       "INTERSECT",         "INTO",         "IS",       "JOIN",    "KEY",    "LEFT",
-        "LIKE",         "MERGE",        "NONCLUSTERED",      "NOT",          "NULL",     "OFFSET",  "ON",     "OPTION",
-        "OR",           "ORDER",        "OUTER",             "OUTPUT",       "OVER",     "PERCENT", "PIVOT",  "PRIMARY",
-        "PRINT",        "PROC",         "PROCEDURE",         "REFERENCES",   "RETURN",   "REVOKE",  "RIGHT",  "ROLLBACK",
-        "SAVE",         "SELECT",       "SET",               "SOME",         "TABLE",    "THEN",    "TO",     "TOP",
-        "TRAN",         "TRANSACTION",  "TRUNCATE",          "UNION",        "UNIQUE",   "UNPIVOT", "UPDATE", "USE",
-        "USING",        "VALUES",       "VIEW",              "WHEN",         "WHERE",    "WHILE",   "WINDOW", "WITH",
-        "WITHIN",
-    };
-    var kvs: [words.len]struct { []const u8 } = undefined;
-    for (words, 0..) |w, i| kvs[i] = .{w};
-    break :blk std.StaticStringMapWithEql(void, ctype.eqlNoCase).initComptime(kvs);
-};
+const reserved = words.noCase(&.{
+    "ADD",          "ALL",          "ALTER",             "AND",          "ANY",      "APPLY",   "AS",     "ASC",
+    "BEGIN",        "BETWEEN",      "BREAK",             "BY",           "CASCADE",  "CASE",    "CHECK",  "CLUSTERED",
+    "COLLATE",      "COLUMN",       "COMMIT",            "CONSTRAINT",   "CONTINUE", "CREATE",  "CROSS",  "CURRENT",
+    "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DECLARE",  "DEFAULT", "DELETE", "DENY",
+    "DESC",         "DISTINCT",     "DROP",              "ELSE",         "END",      "ESCAPE",  "EXCEPT", "EXEC",
+    "EXECUTE",      "EXISTS",       "FETCH",             "FOR",          "FOREIGN",  "FROM",    "FULL",   "FUNCTION",
+    "GOTO",         "GRANT",        "GROUP",             "HAVING",       "IDENTITY", "IF",      "IN",     "INDEX",
+    "INNER",        "INSERT",       "INTERSECT",         "INTO",         "IS",       "JOIN",    "KEY",    "LEFT",
+    "LIKE",         "MERGE",        "NONCLUSTERED",      "NOT",          "NULL",     "OFFSET",  "ON",     "OPTION",
+    "OR",           "ORDER",        "OUTER",             "OUTPUT",       "OVER",     "PERCENT", "PIVOT",  "PRIMARY",
+    "PRINT",        "PROC",         "PROCEDURE",         "REFERENCES",   "RETURN",   "REVOKE",  "RIGHT",  "ROLLBACK",
+    "SAVE",         "SELECT",       "SET",               "SOME",         "TABLE",    "THEN",    "TO",     "TOP",
+    "TRAN",         "TRANSACTION",  "TRUNCATE",          "UNION",        "UNIQUE",   "UNPIVOT", "UPDATE", "USE",
+    "USING",        "VALUES",       "VIEW",              "WHEN",         "WHERE",    "WHILE",   "WINDOW", "WITH",
+    "WITHIN",
+});
 
 pub fn isReserved(t: Token) bool {
     return t.kind == .ident and reserved.has(t.text);

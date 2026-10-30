@@ -9,6 +9,7 @@
 //! nothing is freed piecemeal.
 
 const std = @import("std");
+const json_text = @import("../json_text.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ Syntax, OutOfMemory };
@@ -427,48 +428,11 @@ fn writeAt(a: Allocator, out: *std.ArrayList(u8), v: Value, opts: WriteOptions, 
     }
 }
 
+/// `s` as a JSON string; with `ascii`, the characters above U+007F as
+/// `\uXXXX`.
 pub fn writeString(a: Allocator, out: *std.ArrayList(u8), s: []const u8, ascii: bool) Allocator.Error!void {
-    try out.append(a, '"');
-    var i: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        switch (c) {
-            '"' => try out.appendSlice(a, "\\\""),
-            '\\' => try out.appendSlice(a, "\\\\"),
-            '\n' => try out.appendSlice(a, "\\n"),
-            '\r' => try out.appendSlice(a, "\\r"),
-            '\t' => try out.appendSlice(a, "\\t"),
-            8 => try out.appendSlice(a, "\\b"),
-            12 => try out.appendSlice(a, "\\f"),
-            0...7, 11, 14...0x1f => {
-                var buf: [8]u8 = undefined;
-                try out.appendSlice(a, std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch unreachable);
-            },
-            else => {
-                if (c >= 0x80 and ascii) {
-                    const n = std.unicode.utf8ByteSequenceLength(c) catch 1;
-                    if (i + n <= s.len) {
-                        if (std.unicode.utf8Decode(s[i .. i + n])) |cp| {
-                            var buf: [16]u8 = undefined;
-                            if (cp >= 0x10000) {
-                                const u = cp - 0x10000;
-                                const hi: u21 = 0xd800 + (u >> 10);
-                                const lo: u21 = 0xdc00 + (u & 0x3ff);
-                                try out.appendSlice(a, std.fmt.bufPrint(&buf, "\\u{X:0>4}\\u{X:0>4}", .{ hi, lo }) catch unreachable);
-                            } else {
-                                try out.appendSlice(a, std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{cp}) catch unreachable);
-                            }
-                            i += n;
-                            continue;
-                        } else |_| {}
-                    }
-                }
-                try out.append(a, c);
-            },
-        }
-        i += 1;
-    }
-    try out.append(a, '"');
+    if (ascii) return json_text.appendQuoted(.{ .ascii = true }, a, out, s);
+    try json_text.appendQuoted(.{}, a, out, s);
 }
 
 /// The JSON number text of a real (shortest round trip, no exponent for

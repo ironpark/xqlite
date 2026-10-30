@@ -35,6 +35,7 @@
 //! offset after the semicolon, where the next statement starts.
 
 const std = @import("std");
+const words = @import("../words.zig");
 const tree = @import("../../ir/tree.zig");
 const ir = @import("../../ir/ir.zig");
 const int = @import("../../sql/sqlite_int.zig");
@@ -57,7 +58,7 @@ pub const Error = error{ ParseFailed, OutOfMemory };
 
 /// PostgreSQL's reserved keywords and the "type_func_name" ones: neither
 /// can be a column name or a bare alias.
-const reserved = wordSet(&.{
+const reserved = words.folded(.lower, &.{
     "all",           "analyse",      "analyze",      "and",               "any",          "array",
     "as",            "asc",          "asymmetric",   "both",              "case",         "cast",
     "check",         "collate",      "column",       "constraint",        "create",       "current_catalog",
@@ -78,20 +79,12 @@ const reserved = wordSet(&.{
     "overlaps",      "right",        "similar",      "tablesample",       "verbose",
 });
 
-/// A set of (lower-case) words.
-fn wordSet(comptime words: []const []const u8) std.StaticStringMap(void) {
-    @setEvalBranchQuota(10_000);
-    var kvs: [words.len]struct { []const u8 } = undefined;
-    for (words, 0..) |w, i| kvs[i] = .{w};
-    return .initComptime(kvs);
-}
-
 pub fn isReserved(word: []const u8) bool {
     return reserved.has(word);
 }
 
 /// The words that start a type in a typed literal (`DATE '2024-01-01'`).
-const type_words = wordSet(&.{
+const type_words = words.folded(.lower, &.{
     "date",  "time",      "timestamp", "timestamptz", "timetz",  "interval", "boolean", "bool",
     "int",   "integer",   "int2",      "int4",        "int8",    "smallint", "bigint",  "real",
     "float", "float4",    "float8",    "double",      "numeric", "decimal",  "text",    "varchar",

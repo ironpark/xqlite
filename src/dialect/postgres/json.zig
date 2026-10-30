@@ -17,6 +17,7 @@
 //! `@>`), PostgreSQL's text[] literals (parseTextArray(), '{a,b}').
 
 const std = @import("std");
+const json_text = @import("../json_text.zig");
 const Allocator = std.mem.Allocator;
 
 /// Invalid: not json; UnicodeEscape: `\u0000`, which jsonb cannot hold.
@@ -406,30 +407,7 @@ fn zeros(a: Allocator, n: usize) Error![]u8 {
 
 /// A string as PostgreSQL's escape_json() writes it.
 pub fn writeString(a: Allocator, out: *std.ArrayList(u8), s: []const u8) Error!void {
-    try out.append(a, '"');
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        switch (c) {
-            '"' => try out.appendSlice(a, "\\\""),
-            '\\' => {
-                // "\u0000" kept by json input stays as written.
-                if (std.mem.startsWith(u8, s[i..], "\\u0000")) {
-                    try out.appendSlice(a, "\\u0000");
-                    i += 5;
-                } else try out.appendSlice(a, "\\\\");
-            },
-            8 => try out.appendSlice(a, "\\b"),
-            12 => try out.appendSlice(a, "\\f"),
-            '\n' => try out.appendSlice(a, "\\n"),
-            '\r' => try out.appendSlice(a, "\\r"),
-            '\t' => try out.appendSlice(a, "\\t"),
-            else => if (c < 0x20) {
-                try out.print(a, "\\u{x:0>4}", .{c});
-            } else try out.append(a, c),
-        }
-    }
-    try out.append(a, '"');
+    try json_text.appendQuoted(.{ .keep_u0000 = true }, a, out, s);
 }
 
 /// jsonb's output: `{"a": 1, "b": [1, 2]}`.

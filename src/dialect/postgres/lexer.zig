@@ -21,6 +21,7 @@
 //! source).
 
 const std = @import("std");
+const lex = @import("../lex.zig");
 const ctype = @import("xqlite_base").ctype;
 
 pub const Kind = enum {
@@ -372,32 +373,12 @@ pub const Lexer = struct {
     }
 
     fn quotedIdent(l: *Lexer) Error!Token {
-        const s = l.src;
         const start = l.pos;
-        var out: std.ArrayList(u8) = .empty;
-        var i = start + 1;
-        var seg = i;
-        var copied = false;
-        while (true) {
-            if (s[i] == 0) return l.fail(start, "unterminated quoted identifier at or near \"{s}\"", .{l.near(start)});
-            if (s[i] == '"') {
-                if (s[i + 1] == '"') {
-                    try out.appendSlice(l.arena, s[seg .. i + 1]);
-                    copied = true;
-                    i += 2;
-                    seg = i;
-                    continue;
-                }
-                try out.appendSlice(l.arena, s[seg..i]);
-                i += 1;
-                break;
-            }
-            i += 1;
-        }
-        l.pos = i;
-        const name = if (copied) out.items else s[start + 1 .. i - 1];
-        if (name.len == 0) return l.fail(start, "zero-length delimited identifier at or near \"\"\"\"", .{});
-        return l.tok(.qident, start, i, name);
+        const q = try lex.undoubled(l.arena, l.src, start, '"') orelse
+            return l.fail(start, "unterminated quoted identifier at or near \"{s}\"", .{l.near(start)});
+        l.pos = q.end;
+        if (q.text.len == 0) return l.fail(start, "zero-length delimited identifier at or near \"\"\"\"", .{});
+        return l.tok(.qident, start, q.end, q.text);
     }
 
     /// If a dollar-quote delimiter ($$ or $tag$) starts at `start`, the

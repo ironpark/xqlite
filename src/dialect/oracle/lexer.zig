@@ -20,6 +20,7 @@
 //! source).
 
 const std = @import("std");
+const lex = @import("../lex.zig");
 const ctype = @import("xqlite_base").ctype;
 
 pub const Kind = enum {
@@ -242,32 +243,10 @@ pub const Lexer = struct {
     /// A string constant whose opening quote is at `quote` (the token
     /// starts at `start`, before an N prefix).
     fn string(l: *Lexer, start: usize, quote: usize) Error!Token {
-        const s = l.src;
-        var out: std.ArrayList(u8) = .empty;
-        var i = quote + 1;
-        var copied = false;
-        var seg_start = i;
-        while (true) {
-            const ch = s[i];
-            if (ch == 0) return l.fail(start, "ORA-01756: quoted string not properly terminated", .{});
-            if (ch == '\'') {
-                if (s[i + 1] == '\'') {
-                    try out.appendSlice(l.arena, s[seg_start..i]);
-                    try out.append(l.arena, '\'');
-                    copied = true;
-                    i += 2;
-                    seg_start = i;
-                    continue;
-                }
-                try out.appendSlice(l.arena, s[seg_start..i]);
-                i += 1;
-                break;
-            }
-            i += 1;
-        }
-        l.pos = i;
-        const value = if (copied) out.items else s[quote + 1 .. i - 1];
-        return l.tok(.string, start, i, value);
+        const q = try lex.undoubled(l.arena, l.src, quote, '\'') orelse
+            return l.fail(start, "ORA-01756: quoted string not properly terminated", .{});
+        l.pos = q.end;
+        return l.tok(.string, start, q.end, q.text);
     }
 
     /// q'<d>...<d>' with the quote at `quote`.
@@ -293,32 +272,12 @@ pub const Lexer = struct {
     }
 
     fn quotedIdent(l: *Lexer) Error!Token {
-        const s = l.src;
         const start = l.pos;
-        var out: std.ArrayList(u8) = .empty;
-        var i = start + 1;
-        var seg = i;
-        var copied = false;
-        while (true) {
-            if (s[i] == 0) return l.fail(start, "ORA-01740: missing double quote in identifier", .{});
-            if (s[i] == '"') {
-                if (s[i + 1] == '"') {
-                    try out.appendSlice(l.arena, s[seg .. i + 1]);
-                    copied = true;
-                    i += 2;
-                    seg = i;
-                    continue;
-                }
-                try out.appendSlice(l.arena, s[seg..i]);
-                i += 1;
-                break;
-            }
-            i += 1;
-        }
-        l.pos = i;
-        const name = if (copied) out.items else s[start + 1 .. i - 1];
-        if (name.len == 0) return l.fail(start, "ORA-01741: illegal zero-length identifier", .{});
-        return l.tok(.qident, start, i, name);
+        const q = try lex.undoubled(l.arena, l.src, start, '"') orelse
+            return l.fail(start, "ORA-01740: missing double quote in identifier", .{});
+        l.pos = q.end;
+        if (q.text.len == 0) return l.fail(start, "ORA-01741: illegal zero-length identifier", .{});
+        return l.tok(.qident, start, q.end, q.text);
     }
 
     fn operator(l: *Lexer) Token {

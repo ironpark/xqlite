@@ -34,7 +34,6 @@ const SeriesVtab = struct {
 /// +9223372036854775808.
 const SeriesCursor = struct {
     base: vtab.VtabCursor = .{},
-    gpa: std.mem.Allocator,
     /// Original starting value ("start").
     i_obase: i64 = 0,
     /// Original terminal value ("stop").
@@ -97,28 +96,9 @@ fn seriesConnect(db: *Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp_vtab:
     return rc;
 }
 
-/// Port of seriesDisconnect().
-fn seriesDisconnect(p: *vtab.Vtab) i32 {
-    const t: *SeriesVtab = @fieldParentPtr("base", p);
-    t.db.gpa.destroy(t);
-    return RC.OK;
-}
-
-/// Port of seriesOpen().
-fn seriesOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t: *SeriesVtab = @fieldParentPtr("base", p);
-    const cur = t.db.gpa.create(SeriesCursor) catch return RC.NOMEM;
-    cur.* = .{ .gpa = t.db.gpa };
-    pp_cursor.* = &cur.base;
-    return RC.OK;
-}
-
-/// Port of seriesClose().
-fn seriesClose(cur: *vtab.VtabCursor) i32 {
-    const c = SeriesCursor.of(cur);
-    c.gpa.destroy(c);
-    return RC.OK;
-}
+/// xDisconnect, xOpen and xClose (seriesDisconnect(), seriesOpen(),
+/// seriesClose()).
+const lifecycle = vtab.Lifecycle(SeriesVtab, SeriesCursor);
 
 /// Port of seriesNext().
 fn seriesNext(cur: *vtab.VtabCursor) i32 {
@@ -524,10 +504,10 @@ pub const module: vtab.Module = .{
     .x_create = null,
     .x_connect = seriesConnect,
     .x_best_index = seriesBestIndex,
-    .x_disconnect = seriesDisconnect,
+    .x_disconnect = lifecycle.disconnect,
     .x_destroy = null,
-    .x_open = seriesOpen,
-    .x_close = seriesClose,
+    .x_open = lifecycle.open,
+    .x_close = lifecycle.close,
     .x_filter = seriesFilter,
     .x_next = seriesNext,
     .x_eof = seriesEof,

@@ -63,7 +63,6 @@ const CarrayVtab = struct {
 /// A cursor (carray_cursor).
 const CarrayCursor = struct {
     base: vtab.VtabCursor = .{},
-    gpa: std.mem.Allocator,
     i_rowid: i64 = 0,
     /// The array.
     ptr: ?*anyopaque = null,
@@ -94,28 +93,9 @@ fn carrayConnect(db: *Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp_vtab:
     return rc;
 }
 
-/// Port of carrayDisconnect().
-fn carrayDisconnect(p: *vtab.Vtab) i32 {
-    const t: *CarrayVtab = @fieldParentPtr("base", p);
-    t.db.gpa.destroy(t);
-    return RC.OK;
-}
-
-/// Port of carrayOpen().
-fn carrayOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t: *CarrayVtab = @fieldParentPtr("base", p);
-    const cur = t.db.gpa.create(CarrayCursor) catch return RC.NOMEM;
-    cur.* = .{ .gpa = t.db.gpa };
-    pp_cursor.* = &cur.base;
-    return RC.OK;
-}
-
-/// Port of carrayClose().
-fn carrayClose(cur: *vtab.VtabCursor) i32 {
-    const c = CarrayCursor.of(cur);
-    c.gpa.destroy(c);
-    return RC.OK;
-}
+/// xDisconnect, xOpen and xClose (carrayDisconnect(), carrayOpen(),
+/// carrayClose()).
+const lifecycle = vtab.Lifecycle(CarrayVtab, CarrayCursor);
 
 /// Port of carrayNext().
 fn carrayNext(cur: *vtab.VtabCursor) i32 {
@@ -270,10 +250,10 @@ pub const module: vtab.Module = .{
     .x_create = null,
     .x_connect = carrayConnect,
     .x_best_index = carrayBestIndex,
-    .x_disconnect = carrayDisconnect,
+    .x_disconnect = lifecycle.disconnect,
     .x_destroy = null,
-    .x_open = carrayOpen,
-    .x_close = carrayClose,
+    .x_open = lifecycle.open,
+    .x_close = lifecycle.close,
     .x_filter = carrayFilter,
     .x_next = carrayNext,
     .x_eof = carrayEof,

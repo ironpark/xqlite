@@ -770,9 +770,9 @@ pub const module: vtab.Module = .{
     .i_version = 0,
     .x_connect = connect,
     .x_best_index = bestIndex,
-    .x_disconnect = disconnect,
-    .x_open = open,
-    .x_close = close,
+    .x_disconnect = lifecycle.disconnect,
+    .x_open = lifecycle.open,
+    .x_close = lifecycle.close,
     .x_filter = filter,
     .x_next = next,
     .x_eof = eof,
@@ -798,7 +798,18 @@ const Cursor = struct {
     fn of(cur: *vtab.VtabCursor) *Cursor {
         return @alignCast(@fieldParentPtr("base", cur));
     }
+
+    pub fn init(t: *Table) Cursor {
+        return .{ .db = t.db, .arena = .init(t.db.gpa) };
+    }
+
+    pub fn deinit(c: *Cursor, _: *int.Sqlite3) void {
+        c.arena.deinit();
+    }
 };
+
+/// xDisconnect, xOpen and xClose.
+const lifecycle = vtab.Lifecycle(Table, Cursor);
 
 fn connect(db: *int.Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, _: *?[:0]u8) i32 {
     const rc = vtab.declareVtab(db, "CREATE TABLE x(xq_row, doc HIDDEN, spec HIDDEN)");
@@ -807,12 +818,6 @@ fn connect(db: *int.Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp_vtab: *
     t.* = .{ .db = db };
     pp_vtab.* = &t.base;
     _ = vtab.config(db, vtab.VTAB_INNOCUOUS, 0);
-    return RC.OK;
-}
-
-fn disconnect(p: *vtab.Vtab) i32 {
-    const t: *Table = @alignCast(@fieldParentPtr("base", p));
-    t.db.gpa.destroy(t);
     return RC.OK;
 }
 
@@ -837,21 +842,6 @@ fn bestIndex(p: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
     }
     info.estimated_cost = 1;
     info.estimated_rows = 100;
-    return RC.OK;
-}
-
-fn open(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t: *Table = @alignCast(@fieldParentPtr("base", p));
-    const c = t.db.gpa.create(Cursor) catch return RC.NOMEM;
-    c.* = .{ .db = t.db, .arena = .init(t.db.gpa) };
-    pp_cursor.* = &c.base;
-    return RC.OK;
-}
-
-fn close(cur: *vtab.VtabCursor) i32 {
-    const c = Cursor.of(cur);
-    c.arena.deinit();
-    c.db.gpa.destroy(c);
     return RC.OK;
 }
 

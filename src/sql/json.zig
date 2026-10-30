@@ -3966,6 +3966,21 @@ const JsonEachCursor = struct {
     fn of(cur: *vtab.VtabCursor) *JsonEachCursor {
         return @alignCast(@fieldParentPtr("base", cur));
     }
+
+    /// Port of jsonEachOpen(): a new cursor for json_each() or json_tree().
+    pub fn init(t: *JsonEachConnection) JsonEachCursor {
+        return .{ .db = t.db, .e_mode = t.e_mode, .b_recursive = t.b_recursive };
+    }
+
+    /// The path buffer points into the cursor, once it is in place.
+    pub fn opened(c: *JsonEachCursor, _: *JsonEachConnection) void {
+        jsonStringZero(&c.path);
+    }
+
+    /// Port of jsonEachClose().
+    pub fn deinit(c: *JsonEachCursor, _: *Sqlite3) void {
+        jsonEachCursorReset(c);
+    }
 };
 
 /// A json_each(), json_tree(), jsonb_each() or jsonb_tree() table
@@ -4013,24 +4028,8 @@ fn jsonEachConnect(db: *Sqlite3, _: ?*anyopaque, argv: []const [:0]const u8, pp_
     return rc;
 }
 
-/// Port of jsonEachDisconnect(): the destructor of the json_each virtual
-/// table.
-fn jsonEachDisconnect(p_vtab: *vtab.Vtab) i32 {
-    const p = JsonEachConnection.of(p_vtab);
-    p.db.gpa.destroy(p);
-    return RC.OK;
-}
-
-/// Port of jsonEachOpen(): a new JsonEachCursor for json_each() or
-/// json_tree().
-fn jsonEachOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t = JsonEachConnection.of(p);
-    const cur = t.db.gpa.create(JsonEachCursor) catch return RC.NOMEM;
-    cur.* = .{ .db = t.db, .e_mode = t.e_mode, .b_recursive = t.b_recursive };
-    jsonStringZero(&cur.path);
-    pp_cursor.* = &cur.base;
-    return RC.OK;
-}
+/// xDisconnect, xOpen and xClose (jsonEachDisconnect(), ...).
+const each_lifecycle = vtab.Lifecycle(JsonEachConnection, JsonEachCursor);
 
 /// Port of jsonEachCursorReset(): reset a JsonEachCursor to its original
 /// state, freeing the memory it holds.
@@ -4044,14 +4043,6 @@ fn jsonEachCursorReset(p: *JsonEachCursor) void {
     p.n_parent = 0;
     p.i_end = 0;
     p.e_type = 0;
-}
-
-/// Port of jsonEachClose(): the destructor of a JsonEachCursor.
-fn jsonEachClose(cur: *vtab.VtabCursor) i32 {
-    const p = JsonEachCursor.of(cur);
-    jsonEachCursorReset(p);
-    p.db.gpa.destroy(p);
-    return RC.OK;
 }
 
 /// Port of jsonEachEof(): the cursor is past the end of the JSON.
@@ -4422,9 +4413,9 @@ const json_each_module: vtab.Module = .{
     .i_version = 0,
     .x_connect = jsonEachConnect,
     .x_best_index = jsonEachBestIndex,
-    .x_disconnect = jsonEachDisconnect,
-    .x_open = jsonEachOpen,
-    .x_close = jsonEachClose,
+    .x_disconnect = each_lifecycle.disconnect,
+    .x_open = each_lifecycle.open,
+    .x_close = each_lifecycle.close,
     .x_filter = jsonEachFilter,
     .x_next = jsonEachNext,
     .x_eof = jsonEachEof,

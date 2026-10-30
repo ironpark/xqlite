@@ -1342,7 +1342,18 @@ const JtCursor = struct {
     fn of(cur: *vtab.VtabCursor) *JtCursor {
         return @alignCast(@fieldParentPtr("base", cur));
     }
+
+    pub fn init(t: *JtVtab) JtCursor {
+        return .{ .db = t.db, .arena = .init(t.db.gpa) };
+    }
+
+    pub fn deinit(c: *JtCursor, _: *int.Sqlite3) void {
+        c.arena.deinit();
+    }
 };
+
+/// xDisconnect, xOpen and xClose.
+const jt_lifecycle = vtab.Lifecycle(JtVtab, JtCursor);
 
 const schema_sql: [:0]const u8 = blk: {
     @setEvalBranchQuota(100_000);
@@ -1361,27 +1372,6 @@ fn jtConnect(db: *int.Sqlite3, _: ?*anyopaque, _: []const [:0]const u8, pp_vtab:
         _ = vtab.config(db, vtab.VTAB_INNOCUOUS, 0);
     }
     return rc;
-}
-
-fn jtDisconnect(p: *vtab.Vtab) i32 {
-    const t: *JtVtab = @alignCast(@fieldParentPtr("base", p));
-    t.db.gpa.destroy(t);
-    return RC.OK;
-}
-
-fn jtOpen(p: *vtab.Vtab, pp_cursor: *?*vtab.VtabCursor) i32 {
-    const t: *JtVtab = @alignCast(@fieldParentPtr("base", p));
-    const cur = t.db.gpa.create(JtCursor) catch return RC.NOMEM;
-    cur.* = .{ .db = t.db, .arena = .init(t.db.gpa) };
-    pp_cursor.* = &cur.base;
-    return RC.OK;
-}
-
-fn jtClose(cur: *vtab.VtabCursor) i32 {
-    const c = JtCursor.of(cur);
-    c.arena.deinit();
-    c.db.gpa.destroy(c);
-    return RC.OK;
 }
 
 /// Both hidden arguments must be given (equality constraints).
@@ -1509,9 +1499,9 @@ pub const json_table_module: vtab.Module = .{
     .i_version = 0,
     .x_connect = jtConnect,
     .x_best_index = jtBestIndex,
-    .x_disconnect = jtDisconnect,
-    .x_open = jtOpen,
-    .x_close = jtClose,
+    .x_disconnect = jt_lifecycle.disconnect,
+    .x_open = jt_lifecycle.open,
+    .x_close = jt_lifecycle.close,
     .x_filter = jtFilter,
     .x_next = jtNext,
     .x_eof = jtEof,

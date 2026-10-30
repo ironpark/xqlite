@@ -24,6 +24,7 @@ const api = @import("../../vdbe/api.zig");
 const ir = @import("../../ir/ir.zig");
 const lower = @import("../../ir/lower.zig");
 const parser = @import("parser.zig");
+const tokenized = @import("../tokenized.zig");
 const ddl = @import("ddl.zig");
 const funcs = @import("funcs.zig");
 const session = @import("session.zig");
@@ -34,30 +35,7 @@ const RC = int.RC;
 
 pub const frontend: dialect.Frontend = .{ .run = run };
 
-pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-    var lex_error: parser.LexError = .{};
-    var ps = parser.Parser.init(p.arena, sql, 0, &lex_error) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.ParseFailed => {
-            ir.stmt.errorMsgAt(p, sql.ptr + lex_error.pos, "{s}", .{lex_error.msg});
-            p.tail = sql[sql.len..];
-            return error.ParseFailed;
-        },
-    };
-    const rest = sql[ps.end..];
-    if (ps.isEmpty()) {
-        p.tail = rest;
-        return;
-    }
-    compile(p, sql, &ps) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.Failed => {},
-    };
-    if (p.n_err == 0 and p.rc == RC.OK) ir.stmt.finishCoding(p);
-    p.tail = rest;
-    // dialect.runParser() fails the statement.
-    try translateError(p);
-}
+pub const run = tokenized.run(parser, compile, translateError);
 
 fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
     // ANALYZE [VERBOSE] [[schema.]name], as written (SQLite's takes the
@@ -124,18 +102,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
 }
 
 /// The error of the parser, left in `p`.
-fn parseFailed(p: *int.Parse, sql: [:0]const u8, ps: *const parser.Parser, err: parser.Error) lower.Error {
-    switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.ParseFailed => {
-            // The schema could not be read: its error is in `p`.
-            if (ps.err_in_parse) return error.Failed;
-            const z: ?[*]const u8 = if (ps.err_pos < sql.len) sql.ptr + ps.err_pos else null;
-            ir.stmt.errorMsgAt(p, z, "{s}", .{ps.err_msg});
-            return error.Failed;
-        },
-    }
-}
+const parseFailed = tokenized.parseFailed;
 
 /// SQLite's messages for common failures in PostgreSQL's words.
 fn translateError(p: *int.Parse) int.Oom!void {

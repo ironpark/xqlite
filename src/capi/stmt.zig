@@ -91,56 +91,19 @@ pub export fn sqlite3_prepare16_v3(db: ?*Handle, z_sql: ?*const anyopaque, n_byt
 
 // ================================================ step, reset, finalize
 
-fn nanoTime() i128 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
-}
-
+/// The trace and profile callbacks are called by the engine (OP_Init,
+/// OP_Trace, OP_ResultRow, the end of the run; see callbacks.zig).
 pub export fn sqlite3_step(v_arg: ?*Vdbe) callconv(.c) c_int {
-    const v = v_arg orelse return RC.MISUSE;
-    const e = c.extOf(v.db) orelse return c.api.step(v);
-    if (e.trace_mask == 0 and e.legacy_trace.f == null and e.legacy_profile.f == null) {
-        return c.api.step(v);
-    }
-    // SQLITE_TRACE_STMT and SQLITE_TRACE_PROFILE as the statement starts,
-    // SQLITE_TRACE_ROW for each row, the profile once it stops.
-    if (v.e_vdbe_state != .run) {
-        if (e.trace_mask & c.TRACE_STMT != 0) _ = e.trace.f.?(c.TRACE_STMT, e.trace.arg, v, @ptrCast(@constCast(c.cStr(v.sql))));
-        if (e.legacy_trace.f) |f| {
-            const z = sqlite3_expanded_sql(v);
-            f(e.legacy_trace.arg, z orelse c.cStr(v.sql));
-            if (z) |p| c.malloc.free(p);
-        }
-        if (e.trace_mask & c.TRACE_PROFILE != 0 or e.legacy_profile.f != null) {
-            e.started.put(c.gpa, v, nanoTime()) catch {};
-        }
-    }
-    const rc = c.api.step(v);
-    if (rc == RC.ROW) {
-        if (e.trace_mask & c.TRACE_ROW != 0) _ = e.trace.f.?(c.TRACE_ROW, e.trace.arg, v, null);
-    } else if (e.started.fetchRemove(v)) |kv| {
-        var ns: i64 = @intCast(nanoTime() - kv.value);
-        if (e.trace_mask & c.TRACE_PROFILE != 0) _ = e.trace.f.?(c.TRACE_PROFILE, e.trace.arg, v, &ns);
-        if (e.legacy_profile.f) |f| f(e.legacy_profile.arg, c.cStr(v.sql), @intCast(ns));
-    }
-    return rc;
-}
-
-fn forget(v: *Vdbe) void {
-    if (c.extOf(v.db)) |e| _ = e.started.remove(v);
+    return c.api.step(v_arg orelse return RC.MISUSE);
 }
 
 pub export fn sqlite3_reset(v_arg: ?*Vdbe) callconv(.c) c_int {
-    const v = v_arg orelse return RC.OK;
-    forget(v);
-    return c.api.reset(v);
+    return c.api.reset(v_arg orelse return RC.OK);
 }
 
 pub export fn sqlite3_finalize(v_arg: ?*Vdbe) callconv(.c) c_int {
     const v = v_arg orelse return RC.OK;
     const db = v.db;
-    forget(v);
     const rc = c.api.finalize(v);
     conn.closeZombie(db);
     return rc;
@@ -406,7 +369,12 @@ pub export fn sqlite3_normalized_sql(_: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
 /// parameters replaced by their values, from sqlite3_malloc().
 pub export fn sqlite3_expanded_sql(v_arg: ?*Vdbe) callconv(.c) ?[*:0]u8 {
     const v = v_arg orelse return null;
-    const raw = v.sql orelse return null;
+    return expandSql(v, v.sql orelse return null);
+}
+
+/// sqlite3VdbeExpandSql() of `raw` (the statement's SQL or the comment
+/// of a trigger), from sqlite3_malloc().
+pub fn expandSql(v: *Vdbe, raw: [:0]const u8) ?[*:0]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(c.gpa);
     expand(v, raw, &out) catch {

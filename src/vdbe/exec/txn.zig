@@ -314,8 +314,12 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     var err_msg: ?[:0]u8 = null;
     e.db.n_sql_exec += 1;
     const x_auth = e.db.auth;
+    const m_trace = e.db.m_trace;
     const saved_analysis_limit = e.db.n_analysis_limit;
-    if (op.p1 & 0x0001 != 0) e.db.auth = null;
+    if (op.p1 & 0x0001 != 0) {
+        e.db.auth = null;
+        e.db.m_trace = 0;
+    }
     if (op.p1 & 0x0002 != 0) e.db.n_analysis_limit = op.p2;
     // xqlite: the SQL is the engine's, SQLite text in any dialect.
     const dialect = @import("../../dialect/dialect.zig");
@@ -324,6 +328,7 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     _ = dialect.swapLang(e.db, saved_lang);
     e.db.n_sql_exec -= 1;
     e.db.auth = x_auth;
+    e.db.m_trace = m_trace;
     e.db.n_analysis_limit = saved_analysis_limit;
     if (err_msg != null or rc != RC.OK) {
         aux.vdbeError(e.v, "{s}", .{err_msg orelse ""});

@@ -2170,6 +2170,19 @@ pub const Lookaside = struct {
     end: usize = 0,
 };
 
+/// Sqlite3.m_trace bits (SQLITE_TRACE_*).
+pub const TRACE = struct {
+    pub const STMT: u8 = 0x01;
+    pub const PROFILE: u8 = 0x02;
+    pub const ROW: u8 = 0x04;
+    pub const CLOSE: u8 = 0x08;
+    /// sqlite3_trace() (SQLITE_TRACE_LEGACY), sqlite3_profile()
+    /// (SQLITE_TRACE_XPROFILE).
+    pub const LEGACY: u8 = 0x40;
+    pub const XPROFILE: u8 = 0x80;
+    pub const NONLEGACY_MASK: u8 = 0x0f;
+};
+
 /// A database connection (sqlite3).
 pub const Sqlite3 = struct {
     /// The memory of the connection: sqlite3DbMalloc*() and
@@ -2303,6 +2316,20 @@ pub const Sqlite3 = struct {
     progress: ?*const fn (arg: ?*anyopaque) i32 = null,
     progress_arg: ?*anyopaque = null,
     n_progress_ops: u32 = 0,
+    /// The trace callbacks (mTrace, trace.xV2, trace.xLegacy, pTraceArg,
+    /// xProfile, pProfileArg), set by the C ABI: `m_trace` holds the
+    /// TRACE bits of the events traced.
+    m_trace: u8 = 0,
+    /// SQLITE_TRACE_STMT, PROFILE, ROW and CLOSE: `p` is the statement
+    /// (the connection for CLOSE), `x` the SQL text or the nanoseconds.
+    trace_v2: ?*const fn (mask: u32, arg: ?*anyopaque, p: ?*anyopaque, x: ?*anyopaque) i32 = null,
+    /// sqlite3_trace(): `v` is the statement, `sql` its SQL (or the
+    /// comment of a trigger), to be expanded with its parameters.
+    trace_legacy: ?*const fn (arg: ?*anyopaque, v: *anyopaque, sql: [*:0]const u8) void = null,
+    trace_arg: ?*anyopaque = null,
+    /// sqlite3_profile().
+    profile: ?*const fn (arg: ?*anyopaque, sql: [*:0]const u8, ns: u64) void = null,
+    profile_arg: ?*anyopaque = null,
     /// Called to define a collation that is not (xCollNeeded,
     /// pCollNeededArg).
     coll_needed: ?*const fn (arg: ?*anyopaque, db: *Sqlite3, name: [:0]const u8) void = null,

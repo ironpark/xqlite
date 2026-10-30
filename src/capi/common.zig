@@ -227,14 +227,14 @@ pub const Ext = struct {
     update: Hook(CUpdate) = .{},
     progress: Hook(CProgress) = .{},
     n_progress_ops: c_int = 0,
-    trace_mask: u32 = 0,
     trace: Hook(CTraceV2) = .{},
     /// The callbacks of the deprecated sqlite3_trace() and
     /// sqlite3_profile(), which trace_v2 hooks call.
     legacy_trace: Hook(CTrace) = .{},
+    /// pTraceArg: the argument of the last trace callback set, which
+    /// sqlite3_trace() returns.
+    trace_arg: ?*anyopaque = null,
     legacy_profile: Hook(CProfile) = .{},
-    /// When each running statement started (SQLITE_TRACE_PROFILE).
-    started: std.AutoHashMapUnmanaged(*Vdbe, i128) = .empty,
     authorizer: Hook(CAuth) = .{},
     coll_needed: Hook(CCollNeeded) = .{},
     /// `coll_needed` came from sqlite3_collation_needed16().

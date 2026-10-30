@@ -45,6 +45,9 @@ fn stepOnce(v: *Vdbe) i32 {
         if (v.is_reader) db.n_vdbe_read += 1;
         v.pc = 0;
         v.e_vdbe_state = .run;
+        if (db.m_trace & (int.TRACE.PROFILE | int.TRACE.XPROFILE) != 0 and !db.init.busy and v.sql != null) {
+            v.start_time = osCurrentTimeInt64();
+        }
     }
     if (v.explain != 0) {
         rc = aux.list(v);
@@ -57,6 +60,8 @@ fn stepOnce(v: *Vdbe) i32 {
         db.err_code = RC.ROW;
         return RC.ROW;
     }
+    // The profile callback, once the statement stops.
+    checkProfileCallback(db, v);
     v.result_row = null;
     if (rc == RC.DONE and db.auto_commit) {
         std.debug.assert(v.rc == RC.OK);
@@ -124,8 +129,27 @@ pub fn step(v: *Vdbe) i32 {
     return rc;
 }
 
+/// checkProfileCallback(): call the profile callbacks for a statement
+/// that started with one set.
+inline fn checkProfileCallback(db: *Sqlite3, v: *Vdbe) void {
+    if (v.start_time > 0) invokeProfileCallback(db, v);
+}
+
+/// Port of invokeProfileCallback().
+noinline fn invokeProfileCallback(db: *Sqlite3, v: *Vdbe) void {
+    const elapse: i64 = (osCurrentTimeInt64() - v.start_time) * 1000000;
+    v.start_time = 0;
+    const sql = (v.sql orelse return).ptr;
+    if (db.profile) |f| f(db.profile_arg, sql, @bitCast(elapse));
+    if (db.m_trace & int.TRACE.PROFILE != 0) {
+        var ns = elapse;
+        _ = db.trace_v2.?(int.TRACE.PROFILE, db.trace_arg, v, &ns);
+    }
+}
+
 /// Port of sqlite3_reset().
 pub fn reset(v: *Vdbe) i32 {
+    checkProfileCallback(v.db, v);
     const rc = aux.reset(v);
     aux.rewind(v);
     return rc;
@@ -133,6 +157,7 @@ pub fn reset(v: *Vdbe) i32 {
 
 /// Port of sqlite3_finalize().
 pub fn finalize(v: *Vdbe) i32 {
+    checkProfileCallback(v.db, v);
     return aux.finalize(v);
 }
 

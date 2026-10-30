@@ -152,7 +152,6 @@ fn freeExt(e: *Ext) void {
     e.filenames.deinit(c.gpa);
     if (e.uri_params) |p| c.gpa.free(p);
     if (e.errmsg16) |m| c.gpa.free(m);
-    e.started.deinit(c.gpa);
     if (e.autovac_destroy) |d| d(e.autovac.arg);
     c.gpa.destroy(e);
 }
@@ -162,9 +161,7 @@ fn freeExt(e: *Ext) void {
 fn close(db_arg: ?*Handle, zombie: bool) c_int {
     const db = db_arg orelse return RC.OK;
     const e = c.extOf(db) orelse return c.main.close(db);
-    if (e.trace_mask & c.TRACE_CLOSE != 0 and !e.zombie) {
-        if (e.trace.f) |f| _ = f(c.TRACE_CLOSE, e.trace.arg, db, null);
-    }
+    if (db.m_trace & c.TRACE_CLOSE != 0 and !e.zombie) _ = db.trace_v2.?(c.TRACE_CLOSE, db.trace_arg, db, null);
     const rc = c.main.close(db);
     if (rc == RC.BUSY) {
         if (zombie) {
@@ -844,34 +841,6 @@ pub export fn sqlite3_progress_handler(db: ?*Handle, n_ops: c_int, f: ?c.CProgre
         e.n_progress_ops = 0;
     }
     @import("hooks.zig").sync(db.?);
-}
-
-pub export fn sqlite3_trace_v2(db: ?*Handle, mask: c_uint, f: ?c.CTraceV2, arg: ?*anyopaque) callconv(.c) c_int {
-    const e = c.extOf(db) orelse return RC.MISUSE;
-    e.legacy_trace = .{};
-    e.legacy_profile = .{};
-    if (mask == 0 or f == null) {
-        e.trace = .{};
-        e.trace_mask = 0;
-    } else {
-        e.trace = .{ .f = f, .arg = arg };
-        e.trace_mask = mask & 0x0f;
-    }
-    return RC.OK;
-}
-
-pub export fn sqlite3_trace(db: ?*Handle, f: ?c.CTrace, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-    const e = c.extOf(db) orelse return null;
-    const old = e.legacy_trace.arg;
-    e.legacy_trace = .{ .f = f, .arg = arg };
-    return old;
-}
-
-pub export fn sqlite3_profile(db: ?*Handle, f: ?c.CProfile, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-    const e = c.extOf(db) orelse return null;
-    const old = e.legacy_profile.arg;
-    e.legacy_profile = .{ .f = f, .arg = arg };
-    return old;
 }
 
 pub export fn sqlite3_unlock_notify(db: ?*Handle, x_notify: ?*const fn (?[*]?*anyopaque, c_int) callconv(.c) void, arg: ?*anyopaque) callconv(.c) c_int {

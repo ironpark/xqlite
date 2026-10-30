@@ -161,6 +161,8 @@ pub fn runVacuum(v: *Vdbe, db: *Sqlite3, i_db: usize, out: ?*Mem) i32 {
     const saved_m_db_flags = db.m_db_flags;
     const saved_n_change = db.n_change;
     const saved_n_total_change = db.n_total_change;
+    const saved_m_trace = db.m_trace;
+    db.m_trace = 0;
     db.flags.WriteSchema = true;
     db.flags.IgnoreChecks = true;
     db.flags.Comments = true;
@@ -304,6 +306,7 @@ pub fn runVacuum(v: *Vdbe, db: *Sqlite3, i_db: usize, out: ?*Mem) i32 {
     db.flags = saved_flags;
     db.n_change = saved_n_change;
     db.n_total_change = saved_n_total_change;
+    db.m_trace = saved_m_trace;
     // (C passes -1: only the reserve, then fix the page size.)
     main.setPageSize(std.math.maxInt(u32), 0, true) catch {};
 

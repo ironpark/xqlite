@@ -140,6 +140,7 @@ pub fn opOnce(e: *Exec, op: *Op) Flow {
 
 /// OP_Init and OP_Trace.
 pub fn opInit(e: *Exec, op: *Op) Flow {
+    if (e.db.m_trace & (int.TRACE.STMT | int.TRACE.LEGACY) != 0 and e.v.min_write_file_format != 254) traceStmt(e, op);
     if (op.p1 >= once_reset_threshold) {
         if (op.opcode == OP.Trace) return .next;
         for (e.ops[1..]) |*o| {
@@ -150,6 +151,24 @@ pub fn opInit(e: *Exec, op: *Op) Flow {
     op.p1 += 1;
     e.v.counters[vi.STMTSTATUS.RUN] += 1;
     return .jump_p2;
+}
+
+/// The SQLITE_TRACE_STMT of OP_Init (the statement's SQL) and OP_Trace
+/// (the "-- " comment of a trigger or one of its statements). A
+/// statement run by another (from a function) is traced as a comment.
+noinline fn traceStmt(e: *Exec, op: *Op) void {
+    const db = e.db;
+    const v = e.v;
+    const z: [*:0]const u8 = if (op.p4type == .z) op.p4.z else if (v.sql) |s| s.ptr else return;
+    if (db.m_trace & int.TRACE.LEGACY != 0) {
+        db.trace_legacy.?(db.trace_arg, v, z);
+    } else if (db.n_vdbe_exec > 1) {
+        const c = std.fmt.allocPrintSentinel(db.gpa, "-- {s}", .{std.mem.span(z)}, 0) catch return db.oomFault();
+        defer db.gpa.free(c);
+        _ = db.trace_v2.?(int.TRACE.STMT, db.trace_arg, v, @ptrCast(@constCast(c.ptr)));
+    } else {
+        _ = db.trace_v2.?(int.TRACE.STMT, db.trace_arg, v, @ptrCast(@constCast(z)));
+    }
 }
 
 // ========================================================= trigger programs

@@ -558,6 +558,9 @@ pub const Vdbe = struct {
     n_change: i64 = 0,
     i_statement: i32 = 0,
     i_current_time: i64 = 0,
+    /// When the run started, for the profile callback (startTime;
+    /// julian day times 86400000), or 0.
+    start_time: i64 = 0,
     n_fk_constraint: i64 = 0,
     n_stmt_def_cons: i64 = 0,
     n_stmt_def_imm_cons: i64 = 0,

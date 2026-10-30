@@ -4,6 +4,7 @@
 //! function with the connection's Ext as its argument, and that calls
 //! the C callback.
 
+const std = @import("std");
 const c = @import("common.zig");
 const auth = @import("../sql/auth.zig");
 
@@ -87,3 +88,77 @@ pub export fn sqlite3_autovacuum_pages(db_arg: ?*Handle, f: ?c.CAutovac, arg: ?*
     db.autovac_pages_arg = e;
     return RC.OK;
 }
+
+// ================================================================= trace
+
+fn traceV2Thunk(mask: u32, arg: ?*anyopaque, p: ?*anyopaque, x: ?*anyopaque) i32 {
+    const e = extOf(arg);
+    return e.trace.f.?(mask, e.trace.arg, p, x);
+}
+
+fn traceLegacyThunk(arg: ?*anyopaque, v: *anyopaque, sql: [*:0]const u8) void {
+    const e = extOf(arg);
+    const z = @import("stmt.zig").expandSql(@ptrCast(@alignCast(v)), std.mem.span(sql));
+    defer if (z) |p| c.malloc.free(p);
+    e.legacy_trace.f.?(e.legacy_trace.arg, z orelse sql);
+}
+
+fn profileThunk(arg: ?*anyopaque, sql: [*:0]const u8, ns: u64) void {
+    const e = extOf(arg);
+    e.legacy_profile.f.?(e.legacy_profile.arg, sql, ns);
+}
+
+/// The trace callback: the engine calls it for the events of `mask`
+/// (SQLITE_TRACE_STMT from OP_Init and OP_Trace, ROW from OP_ResultRow,
+/// PROFILE when a run ends, CLOSE on sqlite3_close()). It replaces a
+/// callback of sqlite3_trace().
+pub export fn sqlite3_trace_v2(db_arg: ?*Handle, mask_arg: c_uint, f_arg: ?c.CTraceV2, arg: ?*anyopaque) callconv(.c) c_int {
+    const db = db_arg orelse return RC.MISUSE;
+    const e = c.ext(db);
+    var mask = mask_arg;
+    var f = f_arg;
+    if (mask == 0) f = null;
+    if (f == null) mask = 0;
+    db.m_trace = @truncate(mask);
+    e.trace = .{ .f = f, .arg = arg };
+    e.legacy_trace = .{};
+    db.trace_v2 = if (f != null) traceV2Thunk else null;
+    db.trace_legacy = null;
+    db.trace_arg = e;
+    e.trace_arg = arg;
+    return RC.OK;
+}
+
+/// The deprecated trace callback: the SQL of each statement, with its
+/// parameters expanded. It replaces a callback of sqlite3_trace_v2().
+pub export fn sqlite3_trace(db_arg: ?*Handle, f: ?c.CTrace, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const db = db_arg orelse return null;
+    const e = c.ext(db);
+    const old = e.trace_arg;
+    db.m_trace = if (f != null) TRACE_LEGACY else 0;
+    e.legacy_trace = .{ .f = f, .arg = arg };
+    e.trace = .{};
+    db.trace_legacy = if (f != null) traceLegacyThunk else null;
+    db.trace_v2 = null;
+    db.trace_arg = e;
+    e.trace_arg = arg;
+    return old;
+}
+
+/// The deprecated profile callback: the SQL and running time of each
+/// statement that ends.
+pub export fn sqlite3_profile(db_arg: ?*Handle, f: ?c.CProfile, arg: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const db = db_arg orelse return null;
+    const e = c.ext(db);
+    const old = e.legacy_profile.arg;
+    e.legacy_profile = .{ .f = f, .arg = arg };
+    db.profile = if (f != null) profileThunk else null;
+    db.profile_arg = e;
+    db.m_trace &= TRACE_NONLEGACY_MASK;
+    if (f != null) db.m_trace |= TRACE_XPROFILE;
+    return old;
+}
+
+const TRACE_LEGACY: u8 = 0x40;
+const TRACE_XPROFILE: u8 = 0x80;
+const TRACE_NONLEGACY_MASK: u8 = 0x0f;

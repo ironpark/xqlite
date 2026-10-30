@@ -176,6 +176,7 @@ pub fn opResultRow(e: *Exec, op: *Op) Error!Flow {
     v.cache_ctr = (v.cache_ctr + 2) | 1;
     v.result_row = e.regs.ptr + @as(usize, @intCast(op.p1));
     if (e.db.malloc_failed) return error.OutOfMemory;
+    if (e.db.m_trace & int.TRACE.ROW != 0) _ = e.db.trace_v2.?(int.TRACE.ROW, e.db.trace_arg, v, null);
     v.pc = @intCast(e.pc + 1);
     e.rc = RC.ROW;
     return .ret;

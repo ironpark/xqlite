@@ -514,6 +514,8 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     run_shell.addArgs(&.{ "-batch", ":memory:" });
     run_shell.setStdIn(.{ .lazy_path = b.path("tools/capi/shell_smoke.sql") });
     run_shell.expectStdOutEqual(@embedFile("tools/capi/shell_smoke.expected"));
+    // The script has two failing statements on purpose: sqlite3 exits 1.
+    run_shell.expectExitCode(1);
     run_shell.has_side_effects = true;
     shell_step.dependOn(&run_shell.step);
 

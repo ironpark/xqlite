@@ -1,1 +1,39 @@
+-- version
+3.54.1
+-- list
+1|ada|9.5
+2|linus|7.25
+3|grace|
+╭───────┬───────╮
+│ name  │ score │
+╞═══════╪═══════╡
+│ ada   │   9.5 │
+│ linus │  7.25 │
+╰───────┴───────╯
+id,name
+1,ada
+2,linus
+3,grace
+[{"id":1,"name":"ada","score":9.5}]
+-- schema
+CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL);
+t
+-- dump
+PRAGMA foreign_keys=OFF;
+BEGIN TRANSACTION;
+CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL);
+INSERT INTO t VALUES(1,'ada',9.5);
+INSERT INTO t VALUES(2,'linus',7.25);
+INSERT INTO t VALUES(3,'grace',NULL);
+COMMIT;
+-- functions and extensions of the shell
+CREATE TABLE main.x(a);
+1,2,3,4,5
 1
+0.3
+-- errors
+-- dialect
+postgres
+x42
+sqlite
+-- done

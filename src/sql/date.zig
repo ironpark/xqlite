@@ -398,11 +398,33 @@ const Tm = extern struct {
     tm_zone: ?[*:0]const u8 = null,
 };
 
-extern "c" fn localtime_r(t: *const std.c.time_t, result: *Tm) ?*Tm;
+extern "c" fn localtime_r(t: *const time_t, result: *Tm) ?*Tm;
+
+/// time_t of the C library; without one (wasm32-freestanding), seconds.
+const time_t = if (@import("builtin").link_libc) std.c.time_t else i64;
 
 /// Port of osLocaltime(): localtime_r(). Returns true on error.
 /// (sqlite3GlobalConfig.bLocaltimeFault, a test hook, is not ported.)
-fn osLocaltime(t: *const std.c.time_t, tm: *Tm) bool {
+/// Without a C library there is no time zone: local time is UTC, as
+/// wasi-libc's localtime_r() has it too.
+fn osLocaltime(t: *const time_t, tm: *Tm) bool {
+    if (!@import("builtin").link_libc) {
+        const secs = std.math.cast(u64, t.*) orelse return true;
+        const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
+        const yd = es.getEpochDay().calculateYearDay();
+        const md = yd.calculateMonthDay();
+        const ds = es.getDaySeconds();
+        tm.* = .{
+            .tm_sec = ds.getSecondsIntoMinute(),
+            .tm_min = ds.getMinutesIntoHour(),
+            .tm_hour = ds.getHoursIntoDay(),
+            .tm_mday = @as(c_int, md.day_index) + 1,
+            .tm_mon = @as(c_int, md.month.numeric()) - 1,
+            .tm_year = @as(c_int, yd.year) - 1900,
+            .tm_yday = yd.day,
+        };
+        return false;
+    }
     return localtime_r(t, tm) == null;
 }
 
@@ -416,7 +438,7 @@ const ModifierError = error{ BadModifier, LocaltimeUnavailable };
 fn toLocaltime(p: *DateTime, ctx: *Context) ModifierError!void {
     var s_local: Tm = .{};
     var i_year_diff: i32 = undefined;
-    var t: std.c.time_t = undefined;
+    var t: time_t = undefined;
     computeJD(p);
     if (p.i_jd < 2108667600 * @as(i64, 100000) // 1970-01-01
     or p.i_jd > 2130141456 * @as(i64, 100000) // 2038-01-18

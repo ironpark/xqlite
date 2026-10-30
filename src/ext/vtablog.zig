@@ -70,7 +70,7 @@ const LogCursor = struct {
     i_rowid: i64 = 0,
 
     fn of(cur: *vtab.VtabCursor) *LogCursor {
-        return @fieldParentPtr("base", cur);
+        return @alignCast(@fieldParentPtr("base", cur));
     }
 };
 

@@ -609,9 +609,8 @@ pub fn resultErrorNomem(ctx: *Context) void {
 /// yet, so every connection uses the system clock.
 pub fn osCurrentTimeInt64() i64 {
     const unix_epoch: i64 = 24405875 * @as(i64, 8640000);
-    var now: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &now);
-    return unix_epoch + 1000 * @as(i64, now.sec) + @divTrunc(@as(i64, now.nsec), 1000000);
+    const now = @import("../util/platform.zig").now();
+    return unix_epoch + 1000 * now.sec + @divTrunc(now.nsec, 1000000);
 }
 
 /// Port of sqlite3StmtCurrentTime(): the time of the current statement

@@ -101,10 +101,10 @@ pub fn create(conn: Conn, gpa: Allocator, name: []const u8, comptime T: type, co
         user: C,
 
         fn of(cur: *engine.VtabCursor) *@This() {
-            return @fieldParentPtr("base", cur);
+            return @alignCast(@fieldParentPtr("base", cur));
         }
         fn table(cur: *engine.VtabCursor) *Table {
-            return @fieldParentPtr("base", cur.vtab);
+            return @alignCast(@fieldParentPtr("base", cur.vtab));
         }
     };
 
@@ -133,7 +133,7 @@ pub fn create(conn: Conn, gpa: Allocator, name: []const u8, comptime T: type, co
         }
 
         fn xDisconnect(vt: *engine.Vtab) i32 {
-            const t: *Table = @fieldParentPtr("base", vt);
+            const t: *Table = @alignCast(@fieldParentPtr("base", vt));
             if (@hasDecl(T, "deinit")) t.user.deinit(t.gpa);
             t.gpa.destroy(t);
             return OK;
@@ -174,7 +174,7 @@ pub fn create(conn: Conn, gpa: Allocator, name: []const u8, comptime T: type, co
         }
 
         fn xOpen(vt: *engine.Vtab, out: *?*engine.VtabCursor) i32 {
-            const t: *Table = @fieldParentPtr("base", vt);
+            const t: *Table = @alignCast(@fieldParentPtr("base", vt));
             const cur = t.gpa.create(Cur) catch return NOMEM;
             const res = C.open(&t.user);
             const user = if (@typeInfo(@TypeOf(res)) == .error_union) res catch |e| {

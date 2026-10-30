@@ -75,7 +75,7 @@ pub fn serialType(v: Value) u64 {
 /// Size of the record encoding `values`.
 pub fn encodedLen(values: []const Value) usize {
     var n_body: usize = 0;
-    for (values) |v| n_body += serialTypeLen(serialType(v));
+    for (values) |v| n_body += @intCast(serialTypeLen(serialType(v)));
     return headerLen(values) + n_body;
 }
 

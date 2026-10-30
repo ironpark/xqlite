@@ -151,7 +151,10 @@ const ora: Dialect = .{
 
 /// SQL*Plus settings (unaligned rows with a header, NULL as NULL, no
 /// feedback, blank lines kept in statements, no & substitution), the
-/// dialect's date formats, and an empty schema.
+/// dialect's date formats, and an empty schema. As SYSTEM (the password
+/// of the container command), XQ gets DBA, to create and drop the users
+/// of the schema cases (named XQ_...), and the users an earlier case
+/// left are dropped.
 const ora_prelude =
     \\SET MARKUP CSV ON DELIMITER | QUOTE OFF
     \\SET FEEDBACK OFF
@@ -160,6 +163,15 @@ const ora_prelude =
     \\SET DEFINE OFF
     \\SET LINESIZE 32767
     \\SET NUMWIDTH 20
+    \\CONNECT system/xqpass@FREEPDB1
+    \\GRANT DBA TO xq;
+    \\BEGIN
+    \\  FOR r IN (SELECT username FROM dba_users WHERE username LIKE 'XQ\_%' ESCAPE '\') LOOP
+    \\    EXECUTE IMMEDIATE 'DROP USER "' || r.username || '" CASCADE';
+    \\  END LOOP;
+    \\END;
+    \\/
+    \\CONNECT xq/xqpass@FREEPDB1
     \\ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS';
     \\ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6';
     \\BEGIN

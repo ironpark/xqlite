@@ -237,6 +237,8 @@ pub const Ext = struct {
     started: std.AutoHashMapUnmanaged(*Vdbe, i128) = .empty,
     authorizer: Hook(CAuth) = .{},
     coll_needed: Hook(CCollNeeded) = .{},
+    /// `coll_needed` came from sqlite3_collation_needed16().
+    coll_needed16: bool = false,
     autovac: Hook(CAutovac) = .{},
     autovac_destroy: ?CDestructor = null,
     /// The collations made by sqlite3_create_collation*().

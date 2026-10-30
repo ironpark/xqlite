@@ -874,16 +874,6 @@ pub export fn sqlite3_profile(db: ?*Handle, f: ?c.CProfile, arg: ?*anyopaque) ca
     return old;
 }
 
-pub export fn sqlite3_collation_needed(db: ?*Handle, arg: ?*anyopaque, f: ?*const anyopaque) callconv(.c) c_int {
-    const e = c.extOf(db) orelse return RC.MISUSE;
-    e.coll_needed = .{ .f = @ptrCast(@alignCast(f)), .arg = arg };
-    return RC.OK;
-}
-
-pub export fn sqlite3_collation_needed16(db: ?*Handle, arg: ?*anyopaque, f: ?*const anyopaque) callconv(.c) c_int {
-    return sqlite3_collation_needed(db, arg, f);
-}
-
 pub export fn sqlite3_autovacuum_pages(db: ?*Handle, f: ?c.CAutovac, arg: ?*anyopaque, x_destroy: ?*const anyopaque) callconv(.c) c_int {
     const e = c.extOf(db) orelse return RC.MISUSE;
     if (e.autovac_destroy) |d| d(e.autovac.arg);

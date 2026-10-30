@@ -108,13 +108,27 @@ fn addCollSeq(db: *Sqlite3, name: []const u8, c: CollSeq) ?*CollSeq {
 /// Port of sqlite3GetCollSeq(): `coll` if defined, else look `name` up.
 /// Leaves an error in `p` if there is no such collation.
 pub fn getCollSeq(p: *Parse, coll: ?*const CollSeq, name: []const u8) ?*const CollSeq {
-    const c = coll orelse findCollSeq(p.db, name, false);
+    var c = coll orelse findCollSeq(p.db, name, false);
+    if (c == null or c.?.cmp == null) {
+        // None is defined: the collation-needed callback may define it.
+        callCollNeeded(p.db, name);
+        c = findCollSeq(p.db, name, false);
+    }
     if (c == null or c.?.cmp == null) {
         util.errorMsg(p, "no such collation sequence: {s}", .{name});
         p.rc = RC.ERROR_MISSING_COLLSEQ;
         return null;
     }
     return c;
+}
+
+/// Port of callCollNeeded(): ask the application to define collation
+/// `name` (sqlite3_collation_needed()).
+fn callCollNeeded(db: *Sqlite3, name: []const u8) void {
+    const f = db.coll_needed orelse return;
+    const z = db.gpa.dupeSentinel(u8, name, 0) catch return db.oomFault();
+    defer db.gpa.free(z);
+    f(db.coll_needed_arg, db, z);
 }
 
 /// Port of sqlite3CheckCollSeq(): fine if `coll` is null or defined;

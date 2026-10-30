@@ -2303,6 +2303,10 @@ pub const Sqlite3 = struct {
     progress: ?*const fn (arg: ?*anyopaque) i32 = null,
     progress_arg: ?*anyopaque = null,
     n_progress_ops: u32 = 0,
+    /// Called to define a collation that is not (xCollNeeded,
+    /// pCollNeededArg).
+    coll_needed: ?*const fn (arg: ?*anyopaque, db: *Sqlite3, name: [:0]const u8) void = null,
+    coll_needed_arg: ?*anyopaque = null,
     /// The authorizer (xAuth, pAuthArg; see auth.zig).
     auth: ?@import("auth.zig").Callback = null,
     auth_arg: ?*anyopaque = null,

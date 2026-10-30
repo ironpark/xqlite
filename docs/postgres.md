@@ -46,6 +46,10 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | `ddl.zig` | DDL의 PostgreSQL 문구 검사, 이름 없는 인덱스의 이름 |
 | `types.zig` | 타입 → STRICT 저장 타입·검사·`format_type()` 철자·캐스트 |
 | `funcs.zig` | 방언 함수와 엔진 함수(`xq_like` 등) |
+| `json.zig` | json/jsonb 값: PostgreSQL 규칙의 파싱, jsonb 정규화와 출력, 비교·포함 |
+| `jsonpath.zig` | jsonpath의 부분집합 |
+| `jfuncs.zig` | JSON 연산자·함수·집계·집합 반환 함수의 구현 |
+| `jtype.zig` | 파싱 뒤의 json/jsonb 타입 판단: 피연산자 타입에 따른 연산자, FROM의 JSON 집합 반환 함수 열, jsonb 열에 저장하는 값 |
 | `session.zig` | `CREATE SCHEMA`/`DROP SCHEMA`, `SET`/`RESET`/`SHOW`, `set_config()`/`current_setting()`/`current_schema()`/`current_schemas()` |
 | `state.zig` | 연결별 세션 상태(`search_path`와 그 밖의 매개변수) |
 | `catalog_views.zig` | `information_schema`/`pg_catalog` 뷰 |
@@ -68,7 +72,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | 영역 | 지원 |
 | --- | --- |
 | 기본 | `DISTINCT`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW` |
-| FROM | 테이블, 서브쿼리, `VALUES`, `generate_series()`; 서브쿼리 별칭의 열 이름 `AS t(a, b)` |
+| FROM | 테이블, 서브쿼리, `VALUES`, `generate_series()`, JSON 집합 반환 함수(아래 [JSON](#json)); 서브쿼리 별칭의 열 이름 `AS t(a, b)`; 함수 앞의 `LATERAL` |
 | JOIN | `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS`/`NATURAL`, `ON`/`USING`, 괄호 조인 |
 | 정렬 | `ORDER BY ... [ASC\|DESC] [NULLS FIRST\|LAST]` |
 | 행 수 제한 | `LIMIT`/`OFFSET`/`LIMIT ALL`, `OFFSET n ROWS FETCH FIRST n ROWS ONLY` |
@@ -149,7 +153,8 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | NULL·진리값 | `IS [NOT] NULL`/`ISNULL`/`NOTNULL`, `IS [NOT] DISTINCT FROM`, `IS [NOT] TRUE/FALSE/UNKNOWN` |
 | 술어 | `BETWEEN`, `IN (목록\|서브쿼리)`, `= ANY (서브쿼리)`/`<> ALL (서브쿼리)`, `EXISTS` |
 | 패턴 | `LIKE`/`ILIKE`/`~~`/`~~*`와 `ESCAPE` |
-| 그 밖 | `CASE`, 행 값, `->`/`->>`, `\|\|`(피연산자가 NULL이면 NULL) |
+| JSON | `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?\|`, `?&`, jsonb의 `\|\|`, `-`, `#-`, `@?`, `@@`, `IS [NOT] JSON` (아래 [JSON](#json)) |
+| 그 밖 | `CASE`, 행 값, `ARRAY[...]`(텍스트 리터럴, 아래), `\|\|`(피연산자가 NULL이면 NULL) |
 | 집계 | `count(*)`, 집계의 `DISTINCT`/`ORDER BY`/`FILTER` |
 | 윈도우 | `OVER (PARTITION BY ... ORDER BY ... ROWS/RANGE/GROUPS ... EXCLUDE ...)`, `OVER name` |
 
@@ -172,6 +177,62 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 난수·UUID | `random()`(0 이상 1 미만 실수), `gen_random_uuid()` |
 | 시스템 | `version()`, `current_user`, `current_database()`, `current_schema`, `current_schemas(bool)`, `current_setting(name [, missing_ok])`, `set_config(name, value, false)` |
 | 시퀀스 | 시퀀스 함수(`nextval()` 등) |
+| JSON | 아래 [JSON](#json) |
+
+### JSON
+
+`json`과 `jsonb`는 PostgreSQL 16과 같은 값을 냅니다. 둘 다 TEXT로 저장합니다.
+
+| 타입 | 저장하는 텍스트 | 예 |
+| --- | --- | --- |
+| `json` | 입력 그대로(공백, 중복 키, 키 순서) | `'{"b":1,  "a":2}'::json` → `{"b":1,  "a":2}` |
+| `jsonb` | 정규화한 텍스트: 키는 길이, 그다음 바이트 순서, 중복 키는 마지막 값, 수는 `numeric_out()` 철자(`1e2`는 `100`, `1.50`은 `1.50`), PostgreSQL의 공백 | `'{"b":1, "a":[1,2], "a":3}'::jsonb` → `{"a": 3, "b": 1}` |
+
+- `::json`은 검사만 하고(`xq_pg_json()`), `::jsonb`는 정규화합니다(`xq_pg_jsonb()`). 입력 규칙은 PostgreSQL의 것입니다(RFC 8259, `jsonb`의 `\u0000`은 `unsupported Unicode escape sequence`). 잘못된 값은 `invalid input syntax for type json`입니다.
+- `json`/`jsonb` 열은 CHECK `json_valid()`를 그대로 두고, INSERT·UPDATE·`ON CONFLICT DO UPDATE`가 넣는 값을 `jsonb` 열이면 정규화, `json` 열이면 검사합니다. 상수 DEFAULT는 CREATE TABLE 때 정규화해 SQLite 텍스트로 저장합니다. 선언 타입은 `xq_catalog`의 `type` 키에 `json`/`jsonb`로 남습니다.
+- 선언 타입과 피연산자 타입으로 정하는 것(`jtype.zig`): `jsonb`끼리의 `||`·`-`, `jsonb`의 `->`·`#>`(결과도 jsonb), `jsonb` 비교와 `ORDER BY`(아래), JSON을 만드는 함수의 인자(`json`/`jsonb`는 JSON으로, 불리언은 `true`/`false`로, 행은 객체로).
+
+#### 연산자
+
+| 연산자 | 뜻 | 엔진 함수 |
+| --- | --- | --- |
+| `->`, `->>` | 키(텍스트) 또는 인덱스(정수, 음수는 끝에서) | `xq_pg_json[b]_get[_text]` |
+| `#>`, `#>>` | text[] 경로(`'{a,b,0}'`) | `xq_pg_json[b]_path[_text]` |
+| `@>`, `<@` | 포함(최상위 배열은 스칼라 원소를 포함) | `xq_pg_jsonb_contains` |
+| `?`, `?\|`, `?&` | 최상위 키 또는 문자열 원소의 존재 | `xq_pg_jsonb_exists[_any\|_all]` |
+| `\|\|` | 객체 병합, 배열 연결(스칼라는 한 원소 배열) | `xq_pg_jsonb_concat` |
+| `-` | 키(배열이면 같은 문자열 원소), 정수 인덱스, text[] 키 목록 | `xq_pg_jsonb_delete[_keys]` |
+| `#-` | 경로 삭제 | `xq_pg_jsonb_delete_path` |
+| `@?`, `@@` | jsonpath의 결과 존재, 술어(오류는 NULL/false) | `xq_pg_jsonb_path_exists_op`, `_match_op` |
+
+- `json`의 `->`는 입력 텍스트의 그 부분을, `jsonb`의 `->`는 정규화한 텍스트를 돌려줍니다. `->>`는 문자열을 풀고 JSON `null`은 SQL NULL입니다.
+- `jsonb`의 `=`/`<`/`>`와 `ORDER BY`, 집계 안의 `ORDER BY`는 collation `xq_pg_jsonb`로 PostgreSQL의 순서를 씁니다: Object > Array > Boolean > Number > String > Null, 원소·쌍이 많은 컨테이너가 크고, 같으면 차례로 비교. `'1.0'::jsonb = '1'`은 참입니다. 반대쪽의 문자열 상수는 jsonb로 읽습니다.
+- `json`끼리의 `||`와 `=`는 PostgreSQL처럼 `operator does not exist: json || json`입니다.
+- text[] 인자는 리터럴 `'{a,b}'`, `'{a,b}'::text[]`, `ARRAY['a','b']`입니다. `ARRAY[...]`와 `::text[]`(int[] 등도)는 배열의 텍스트 리터럴(`{a,b}`)입니다. 배열 타입 열은 여전히 없습니다.
+
+#### 함수
+
+| 분류 | 함수 |
+| --- | --- |
+| 만들기 | `to_json`, `to_jsonb`, `row_to_json(행 [, pretty])`, `array_to_json(배열 [, pretty])`, `json_build_object`, `jsonb_build_object`, `json_build_array`, `jsonb_build_array`, `json_object(text[] [, text[]])`, `jsonb_object` |
+| 집계 | `json_agg`, `jsonb_agg`, `json_object_agg`, `jsonb_object_agg`(`DISTINCT`, `ORDER BY`, `FILTER`) |
+| 처리 | `json[b]_typeof`, `json[b]_array_length`, `json[b]_extract_path[_text]`, `json[b]_strip_nulls`, `jsonb_set`, `jsonb_set_lax`, `jsonb_insert`, `jsonb_pretty` |
+| jsonpath | `jsonb_path_exists`, `jsonb_path_match`, `jsonb_path_query`(집합), `jsonb_path_query_array`, `jsonb_path_query_first`(`vars`, `silent` 인자) |
+| 집합 반환 | `json[b]_each[_text]`, `json[b]_array_elements[_text]`, `json[b]_object_keys`, `jsonb_path_query`, `json[b]_to_record[set](...) AS x(a int, ...)`, `json[b]_populate_record[set](NULL::table, ...)` |
+| SQL/JSON | `IS [NOT] JSON [VALUE\|ARRAY\|OBJECT\|SCALAR] [WITH\|WITHOUT UNIQUE [KEYS]]`, `JSON_OBJECT(k : v \| k VALUE v ...)`, `JSON_ARRAY(v, ... \| query)`, `JSON_OBJECTAGG(k : v)`, `JSON_ARRAYAGG(v [ORDER BY])`; `NULL\|ABSENT ON NULL`, `WITH UNIQUE KEYS`, `RETURNING json\|jsonb`, `FORMAT JSON` |
+
+- 출력 철자는 PostgreSQL의 것입니다: `json_build_object`·`JSON_OBJECT`는 `{"a" : 1, "b" : 2}`, `json_object_agg`는 `{ "a" : 1 }`, `row_to_json`은 `{"a":1,"b":"x"}`, 행이나 배열의 `json_agg`는 원소 사이에 줄바꿈, `jsonb_pretty`는 네 칸 들여쓰기.
+- 행 값: FROM 항목의 이름(`row_to_json(t)`, `to_jsonb(t)`, `json_agg(t)`)은 그 열들로 펼친 `xq_pg_row_json('a', t.a, ...)`입니다.
+- 집합 반환 함수는 FROM에서(별칭의 열 이름, `WITH ORDINALITY`, 앞 항목의 열을 인자로: `FROM t, jsonb_each(t.j)`, `CROSS JOIN LATERAL ...`) 그리고 select 목록에서(`SELECT id, jsonb_array_elements(j) FROM t`, 여러 개면 PostgreSQL처럼 나란히, 짧은 쪽은 NULL) 씁니다. 구현은 `xq_pg_rows_*()`가 만든 행 배열을 SQLite의 `json_each()`가 읽는 것이고, 열 참조는 `jtype.zig`가 그 식으로 바꿉니다.
+- 레코드 열의 값은 문자열이면 푼 텍스트, 그 밖은 JSON 텍스트를 그 열의 타입으로 캐스트한 것입니다.
+
+#### jsonpath
+
+`lax`(기본)/`strict`, `$`, `@`, `$var`(`vars`), `.key`, `."key"`, `.*`, `[*]`, `[n]`, `[n to m]`, `[last]`, `[last - 1]`, 여러 첨자, `.**`, 필터 `? (...)`(`==`, `!=`/`<>`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, `exists`, `starts with`, `like_regex`(플래그 `i`, `q`; `.`, `[...]`, `\d`, `^`, `$`, `|`, `*`, `+`, `?`, `{n,m}`), `is unknown`), 산술 `+ - * / %`(numeric처럼: `10 / 3`은 `3.3333333333333333`), 메서드 `type()`, `size()`, `double()`, `abs()`, `floor()`, `ceiling()`. 오류 문구는 PostgreSQL의 것입니다(`JSON object does not contain key "b"`, `jsonpath array subscript is out of bounds`, `syntax error at end of jsonpath input` ...).
+
+#### GIN 인덱스
+
+`CREATE INDEX ... USING gin (doc [jsonb_path_ops])`(그리고 `USING hash`)는 같은 열의 B-tree 인덱스로 만듭니다. 이름은 PostgreSQL과 같고(`g_doc_idx`) `pg_indexes`에 나옵니다. 인덱스가 이 열의 검색을 빠르게 하지는 않습니다: `@>`·`?`는 테이블을 훑고, jsonb의 `=`는 collation `xq_pg_jsonb`라 BINARY 인덱스를 쓰지 않습니다. `((doc ->> 'name'))` 같은 식 인덱스는 그 식에 쓰입니다. 단 식 인덱스·CHECK·생성 열·뷰의 JSON 연산자와 함수는 스키마에 `xq_pg_*`/`xq_postgres_*` 함수로 남으므로, sqlite3에서는 그런 인덱스가 있는 테이블에 쓰거나 그 뷰를 읽을 수 없습니다(열 자체와 `gin` 인덱스는 문제없음).
 
 ### 카탈로그
 
@@ -200,7 +261,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | `varchar(n)`, `char(n)` | `TEXT` | `length() <= n`(`value too long for type character varying(n)`, `character(n)`) |
 | `bytea` | `BLOB` | |
 | `date`, `time`, `timestamp[tz]`, `interval`, `uuid` | `TEXT` | |
-| `json`, `jsonb` | `TEXT` | `json_valid()`(`invalid input syntax for type json`) |
+| `json`, `jsonb` | `TEXT` | `json_valid()`; 넣는 값은 `json`이면 검사, `jsonb`이면 정규화([JSON](#json)) |
 
 - 선언 타입은 `xq_catalog`의 `type` 키에 `format_type()` 철자(`character varying(20)`, `timestamp with time zone`)로 남습니다.
 - 다른 타입의 값을 넣으면 SQLite STRICT 오류(`cannot store TEXT value in INTEGER column t.a`)가 납니다.
@@ -215,6 +276,8 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | `::varchar(n)` | 자름 | |
 | `::numeric(p,s)` | 반올림 | |
 | `::boolean` | `'t'`/`'yes'`/`'on'` 같은 철자를 읽음 | |
+| `::json`/`::jsonb` | `xq_pg_json()`/`xq_pg_jsonb()` | |
+| `::text[]`(`int[]` 등) | `xq_pg_text_array()`: 검사한 배열 리터럴 텍스트 | 배열 값이 아니라 텍스트 |
 
 ## PostgreSQL과 다른 점
 
@@ -232,6 +295,9 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 정수 오버플로 | 오류 | 검사하지 않음 | |
 | 외래 키 | 늘 강제 | `PRAGMA foreign_keys = ON`일 때만 강제 | SQLite와 같음 |
 | 격리 수준 | 여러 수준 | 파싱만 함 | SQLite는 늘 직렬화 |
+| JSON | `jsonb`는 이진 형식 | 정규화한 TEXT. `json`은 입력 텍스트 | sqlite3가 그대로 읽고 `json_extract()` 등을 씀. sqlite3가 넣은 값은 정규화되지 않은 채 남고(연산자·함수는 읽을 때 정규화), CHECK `json_valid()`는 SQLite의 규칙 |
+| jsonb 비교 | jsonb의 순서 | 같음(collation `xq_pg_jsonb`). 인덱스는 BINARY라 `=`에 쓰이지 않음 | |
+| JSON 수 | numeric과 float8 | 실수는 SQLite 철자: `to_json(100.0::float8)`은 `100.0`(PostgreSQL은 `100`), `to_json(1e20::float8)`은 `1.0e+20`(`1e+20`) | SQLite 수에 numeric/float8 구분이 없음 |
 | 저장되는 식 | | IR이 SQLite 텍스트로 렌더링. PostgreSQL 함수는 `xq_postgres_greatest(...)`, LIKE는 `xq_like(...)`처럼 저장 | SQLite 방언이나 다른 방언의 연결에서 읽어도 같은 뜻. 단 sqlite3에서는 그런 식을 계산할 수 없음 |
 
 저장되는 식은 CHECK, DEFAULT, 생성 열, 인덱스 식, 뷰입니다.
@@ -267,9 +333,10 @@ PostgreSQL 문구를 쓰는 오류입니다.
 
 | 영역 | 항목 |
 | --- | --- |
-| 쿼리 | `DISTINCT ON`, `LATERAL`, `GROUPING SETS`/`ROLLUP`/`CUBE`, `EXCEPT ALL`/`INTERSECT ALL`, `FETCH ... WITH TIES`, 테이블·함수 별칭의 열 이름 |
+| 쿼리 | `DISTINCT ON`, `LATERAL` 서브쿼리, `GROUPING SETS`/`ROLLUP`/`CUBE`, `EXCEPT ALL`/`INTERSECT ALL`, `FETCH ... WITH TIES`, 테이블·함수 별칭의 열 이름 |
 | DML | 데이터를 바꾸는 CTE, `ON CONFLICT ON CONSTRAINT`, `COPY` |
-| 타입 | 배열·`ARRAY[...]`, `ENUM`·`CREATE TYPE`·도메인, 시퀀스의 데이터 타입(언제나 `bigint`) |
+| 타입 | 배열 타입 열과 배열 연산(`ARRAY[...]`·`::text[]`은 텍스트 리터럴뿐), `ENUM`·`CREATE TYPE`·도메인, 시퀀스의 데이터 타입(언제나 `bigint`) |
+| JSON | jsonpath `like_regex`의 POSIX 문자 클래스·역참조·플래그 `m`/`x`, `.**{n to m}`, `keyvalue()`, `datetime()`과 문자열 메서드; 복합 타입 인자의 `json_populate_record`(`NULL::table`만), `IS JSON`의 비텍스트 인자 오류, select 목록의 레코드 반환 함수(`json_each`), `WITH ORDINALITY`의 select 목록, `jsonb` 부분 쓰기 연산자(`j['a']`), GIN의 `@>`·`?` 인덱스 검색, sqlite3가 넣은 jsonb의 정규화, PostgreSQL 17의 `JSON_TABLE`/`JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS` |
 | 식과 함수 | `SIMILAR TO`와 정규식 연산자(`~`), `AT TIME ZONE`, `interval` 산술, `to_char`/`date_trunc`/`age`, `U&'...'` |
 | DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE` |
 | 스키마 | 스키마 요소가 있는 `CREATE SCHEMA s CREATE TABLE ...`, `ALTER SCHEMA`, `ALTER TABLE ... SET SCHEMA`, `DROP SCHEMA public`, 이름에 `.`이 있는 스키마, 대소문자만 다른 두 스키마(SQLite의 이름 비교처럼 같은 이름), 다른 스키마의 뷰·외래 키가 기대는 것을 `CASCADE`가 따라 지우는 것, 여러 테이블을 지우는 `DROP SCHEMA ... CASCADE`의 auto_vacuum 데이터베이스(거부함), 상수가 아닌 `nextval(x)`의 `search_path`(이름 그대로 main에서 찾음), `public`에 이름이 `s.t`인 개체(스키마 `s`의 `t`와 겹침) |
@@ -283,8 +350,8 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | 도구 | 하는 일 |
 | --- | --- |
 | `src/dialect/postgres/test.zig` | 종단 테스트 |
-| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 35개 케이스가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교) |
-| `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(`CREATE SCHEMA`의 테이블·뷰 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함. sqlite3의 `.tables`에 `sales.orders`가 나오고, sqlite3가 넣은 행을 이 방언이 `sales.orders`로 읽음 |
+| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 66개 케이스(JSON 31개)가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교). 오류를 내는 문장은 따로 모은 케이스에 있음(psql의 stderr와 stdout이 podman을 거치며 섞이는 순서가 일정하지 않음) |
+| `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(`CREATE SCHEMA`의 테이블·뷰 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함. sqlite3의 `.tables`에 `sales.orders`가 나오고, sqlite3가 넣은 행을 이 방언이 `sales.orders`로 읽음. `jsonb` 열은 sqlite3의 `json_extract()`로 읽히고, sqlite3가 넣은 JSON을 이 방언의 연산자가 읽으며, sqlite3도 잘못된 JSON을 거부함 |
 
 차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다(`$PG_PSQL`, 기본값 `podman exec -i xq-pg psql -U postgres`). 경우들은 병렬로 돌고, 작업자마다 자기 데이터베이스(`xqt_dialect_N`)에서 `public` 스키마를 지우고 다시 만들고, 앞 경우가 만든 스키마를 지운 뒤 시작합니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
 

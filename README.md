@@ -275,4 +275,4 @@ xqlite는 D. Richard Hipp과 SQLite 팀이 만들고 퍼블릭 도메인으로 �
 
 ## 라이선스
 
-TBD
+[BSD 3-Clause](LICENSE). SQLite 자체는 퍼블릭 도메인이며, 테스트에 쓰는 `ref/`의 SQLite 소스와 sqllogictest는 이 저장소에 포함되지 않고 각자의 조건을 따릅니다.

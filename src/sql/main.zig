@@ -203,6 +203,7 @@ pub fn open(v: @import("../vfs/vfs.zig").Vfs, filename: []const u8, flags: OpenF
         .read_only = of.read_only,
         .create = of.create and !of.read_only,
         .n_vdbe_read = &db.n_vdbe_read,
+        .autovac_pages = btreeAutovacPages(db),
         .busy_handler = btreeBusyHandler(db),
     }) catch |err| {
         const rc = int.errorCode(err);
@@ -496,6 +497,21 @@ pub fn pagerConn(db: *Sqlite3) @import("../pager/pager.zig").Conn {
         .interrupt = &db.is_interrupted,
         .no_ckpt_on_close = db.flags.NoCkptOnClose,
     };
+}
+
+/// The autovacuum-pages callback of the b-trees of the connection.
+pub fn btreeAutovacPages(db: *Sqlite3) btree.AutovacPages {
+    return .init(db, autovacPages);
+}
+
+/// The xAutovacPages part of autoVacuumCommit(): ask the application how
+/// many free pages of `bt` to give back.
+fn autovacPages(db: *Sqlite3, bt: *btree.Btree, n_orig: u32, n_free: u32, page_size: u32) ?u32 {
+    const f = db.autovac_pages orelse return null;
+    for (db.dbs.items) |d| {
+        if (d.bt == bt) return f(db.autovac_pages_arg, d.name, n_orig, n_free, page_size);
+    }
+    return null;
 }
 
 fn pagerBusy(db: *Sqlite3) bool {

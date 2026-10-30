@@ -874,14 +874,6 @@ pub export fn sqlite3_profile(db: ?*Handle, f: ?c.CProfile, arg: ?*anyopaque) ca
     return old;
 }
 
-pub export fn sqlite3_autovacuum_pages(db: ?*Handle, f: ?c.CAutovac, arg: ?*anyopaque, x_destroy: ?*const anyopaque) callconv(.c) c_int {
-    const e = c.extOf(db) orelse return RC.MISUSE;
-    if (e.autovac_destroy) |d| d(e.autovac.arg);
-    e.autovac = .{ .f = f, .arg = arg };
-    e.autovac_destroy = c.cDestructor(x_destroy);
-    return RC.OK;
-}
-
 pub export fn sqlite3_unlock_notify(db: ?*Handle, x_notify: ?*const fn (?[*]?*anyopaque, c_int) callconv(.c) void, arg: ?*anyopaque) callconv(.c) c_int {
     // No shared cache, so no connection is ever blocked by another:
     // the callback runs at once, as SQLite does in that case.

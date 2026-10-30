@@ -2637,6 +2637,7 @@ pub fn openTempDatabase(p: *Parse) int.ParseError!void {
         const bt = btree.Btree.open(@import("malloc.zig").allocator, db.vfs.?, null, .{
             .cell_size_check = db.flags.CellSizeCk,
             .n_vdbe_read = &db.n_vdbe_read,
+            .autovac_pages = main_mod.btreeAutovacPages(db),
         }) catch |err| {
             util.errorMsg(p, "unable to open a temporary database file for storing temporary tables", .{});
             p.rc = int.errorCode(err);

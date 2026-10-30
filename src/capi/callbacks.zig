@@ -66,3 +66,24 @@ pub export fn sqlite3_collation_needed(db: ?*Handle, arg: ?*anyopaque, f: ?*cons
 pub export fn sqlite3_collation_needed16(db: ?*Handle, arg: ?*anyopaque, f: ?*const anyopaque) callconv(.c) c_int {
     return setCollNeeded(db, arg, f, true);
 }
+
+// ====================================================== autovacuum pages
+
+fn autovacThunk(arg: ?*anyopaque, name: [:0]const u8, n_orig: u32, n_free: u32, page_size: u32) u32 {
+    const e = extOf(arg);
+    return e.autovac.f.?(e.autovac.arg, name.ptr, n_orig, n_free, page_size);
+}
+
+/// The callback that decides how many free pages a full auto-vacuum
+/// commit gives back. The destructor of the previous argument runs now,
+/// that of the last one when the connection closes.
+pub export fn sqlite3_autovacuum_pages(db_arg: ?*Handle, f: ?c.CAutovac, arg: ?*anyopaque, x_destroy: ?*const anyopaque) callconv(.c) c_int {
+    const db = db_arg orelse return RC.MISUSE;
+    const e = c.ext(db);
+    if (e.autovac_destroy) |d| d(e.autovac.arg);
+    e.autovac = .{ .f = f, .arg = arg };
+    e.autovac_destroy = c.cDestructor(x_destroy);
+    db.autovac_pages = if (f != null) autovacThunk else null;
+    db.autovac_pages_arg = e;
+    return RC.OK;
+}

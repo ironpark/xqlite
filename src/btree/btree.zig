@@ -135,7 +135,14 @@ pub const Options = struct {
     /// a database of a connection; see Btree.n_vdbe_read. Null for a
     /// b-tree used on its own.
     n_vdbe_read: ?*const i32 = null,
+    /// The connection's autovacuum-pages callback (see AutovacPages).
+    autovac_pages: ?AutovacPages = null,
 };
+
+/// How many of its `n_free` free pages a full auto-vacuum commit of `bt`
+/// gives back (xAutovacPages, sqlite3_autovacuum_pages()): null for all
+/// of them (no callback is set).
+pub const AutovacPages = thunk.Closure(*const fn (ctx: ?*anyopaque, bt: *Btree, n_orig: u32, n_free: u32, page_size: u32) ?u32);
 
 /// Compares stored index keys against a search key: call(.{stored})
 /// returns the order of `stored` relative to it. Made with
@@ -198,6 +205,7 @@ pub const Btree = struct {
     /// (p->db->nVdbeRead), if the b-tree belongs to one (Options): while
     /// others read, ending a transaction leaves a read transaction.
     n_vdbe_read: ?*const i32 = null,
+    autovac_pages: ?AutovacPages = null,
 
     page_size: u32,
     usable_size: u32,
@@ -261,6 +269,7 @@ pub const Btree = struct {
             .auto_vacuum = opts.auto_vacuum,
             .single = opts.single,
             .n_vdbe_read = opts.n_vdbe_read,
+            .autovac_pages = opts.autovac_pages,
         };
         var reserve: u8 = 0;
         if (header.pageSize(&hdr)) |page_size| {
@@ -1822,19 +1831,27 @@ pub const Btree = struct {
         // No database ends on a pointer-map page or the lock page.
         if (ptrmap.isReserved(bt, n_orig)) return error.Corrupt;
         const n_free = header.get(p1.data, .freelist_count);
-        const n_fin = bt.finalDbSize(n_orig, n_free);
+        // The application may keep some free pages.
+        var n_vac = n_free;
+        if (bt.autovac_pages) |h| if (h.call(.{ bt, n_orig, n_free, bt.page_size })) |n| {
+            n_vac = @min(n, n_free);
+            if (n_vac == 0) return;
+        };
+        const n_fin = bt.finalDbSize(n_orig, n_vac);
         if (n_fin > n_orig) return error.Corrupt;
 
         errdefer bt.pager.rollback() catch {};
         if (n_fin < n_orig) try bt.saveAllCursors(0, null);
         var i_free = n_orig;
         while (i_free > n_fin) : (i_free -= 1) {
-            if (!try bt.incrVacuumStep(n_fin, i_free, true)) break;
+            if (!try bt.incrVacuumStep(n_fin, i_free, n_vac == n_free)) break;
         }
         if (n_free > 0) {
             try bt.pager.write(p1.db_page);
-            header.put(p1.data, .first_freelist_trunk, 0);
-            header.put(p1.data, .freelist_count, 0);
+            if (n_vac == n_free) {
+                header.put(p1.data, .first_freelist_trunk, 0);
+                header.put(p1.data, .freelist_count, 0);
+            }
             header.put(p1.data, .database_size, n_fin);
             bt.do_truncate = true;
             bt.n_page = n_fin;

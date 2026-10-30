@@ -112,6 +112,7 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         .create = flags.create and !flags.read_only,
         .cell_size_check = db.flags.CellSizeCk,
         .n_vdbe_read = &db.n_vdbe_read,
+        .autovac_pages = main_mod.btreeAutovacPages(db),
         .busy_handler = main_mod.btreeBusyHandler(db),
     }) catch |err| blk: {
         rc = int.errorCode(err);

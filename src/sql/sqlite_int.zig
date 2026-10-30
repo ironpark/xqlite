@@ -2307,6 +2307,10 @@ pub const Sqlite3 = struct {
     /// pCollNeededArg).
     coll_needed: ?*const fn (arg: ?*anyopaque, db: *Sqlite3, name: [:0]const u8) void = null,
     coll_needed_arg: ?*anyopaque = null,
+    /// How many free pages a full auto-vacuum commit of database `name`
+    /// gives back (xAutovacPages, pAutovacPagesArg).
+    autovac_pages: ?*const fn (arg: ?*anyopaque, name: [:0]const u8, n_orig: u32, n_free: u32, page_size: u32) u32 = null,
+    autovac_pages_arg: ?*anyopaque = null,
     /// The authorizer (xAuth, pAuthArg; see auth.zig).
     auth: ?@import("auth.zig").Callback = null,
     auth_arg: ?*anyopaque = null,

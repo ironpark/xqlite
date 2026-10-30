@@ -151,6 +151,8 @@ pub const Parser = struct {
     outer_marks: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
     /// The LIMIT a WHERE ROWNUM <= n puts on its query.
     rownum_limits: std.AutoHashMapUnmanaged(*const tree.Core, *Expr) = .empty,
+    /// The query whose FROM is parsed selects `*`: DUAL is a row then.
+    dual_star: bool = false,
     /// The nullif(concat(...), '') nodes of `||` and CONCAT.
     concat_nodes: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
     /// The row_number() OVER () nodes of ROWNUM.
@@ -598,6 +600,15 @@ pub const Parser = struct {
         c.cols = try p.targetList();
         if (p.isKw("into")) return p.unsupported(p.peek().start, "SELECT INTO (PL/SQL)");
         if (p.eatKw("from")) {
+            const saved = p.dual_star;
+            defer p.dual_star = saved;
+            p.dual_star = false;
+            for (c.cols) |rc| switch (rc) {
+                .expr => |x| if (mentionsDummy(x.e)) {
+                    p.dual_star = true;
+                },
+                else => p.dual_star = true,
+            };
             c.from = try p.fromList();
         } else if (!p.atClauseEnd()) {
             return p.missing("ORA-00923: FROM keyword not found where expected");
@@ -737,15 +748,28 @@ pub const Parser = struct {
         var items: std.ArrayList(tree.FromItem) = .empty;
         try p.tableRef(&items, .none);
         while (p.eat(.comma)) try p.tableRef(&items, .comma);
-        // DUAL is no table.
+        // DUAL is no table; for a `*`, a row with its column DUMMY.
         var out: std.ArrayList(tree.FromItem) = .empty;
         for (items.items) |it| {
-            if (p.isDual(it)) continue;
+            if (p.isDual(it)) {
+                if (!p.dual_star) continue;
+                try out.append(p.arena, try p.dualRow(it));
+                continue;
+            }
             var x = it;
             if (out.items.len == 0) x.join = .none;
             try out.append(p.arena, x);
         }
         return out.items;
+    }
+
+    /// DUAL as (SELECT 'X' AS DUMMY) DUAL.
+    fn dualRow(p: *Parser, it: tree.FromItem) Error!tree.FromItem {
+        const pos = it.source.table.name.pos;
+        var cols = try p.arena.alloc(tree.ResultCol, 1);
+        cols[0] = .{ .expr = .{ .e = try p.stringAt(pos, "X"), .alias = .{ .text = "DUMMY", .pos = pos } } };
+        const sel = try p.new(tree.Select, .{ .body = try p.new(tree.Body, .{ .core = try p.new(tree.Core, .{ .cols = cols, .pos = pos }) }), .pos = pos });
+        return .{ .join = it.join, .source = .{ .subquery = sel }, .alias = it.alias orelse .{ .name = it.source.table.name } };
     }
 
     fn isDual(p: *Parser, it: tree.FromItem) bool {
@@ -1047,16 +1071,17 @@ pub const Parser = struct {
             outer.body = try p.new(tree.Body, .{ .nested = inner });
             return outer;
         }
-        // Grouping: FROM (SELECT * FROM t WHERE ... LIMIT n) t.
-        if (c.from.len != 1 or c.from[0].source != .table) return p.unsupported(c.pos, "ROWNUM with grouping over several tables");
+        // Grouping: FROM (SELECT * FROM t WHERE ... LIMIT n) t (one FROM item,
+        // whose qualified names keep meaning the same).
+        if (c.from.len != 1) return p.unsupported(c.pos, "ROWNUM with grouping over several tables");
         const item = c.from[0];
         var cols = try p.arena.alloc(tree.ResultCol, 1);
         cols[0] = .{ .star = c.pos };
         const inner_core = try p.new(tree.Core, .{ .cols = cols, .from = c.from, .where = c.where, .pos = c.pos });
         const inner = try p.new(tree.Select, .{ .body = try p.new(tree.Body, .{ .core = inner_core }), .limit = lim, .pos = c.pos });
         var from = try p.arena.alloc(tree.FromItem, 1);
-        const label: Name = if (item.alias) |a| a.name else item.source.table.name;
-        from[0] = .{ .source = .{ .subquery = inner }, .alias = .{ .name = label } };
+        const label: ?Name = if (item.alias) |a| a.name else if (item.source == .table) item.source.table.name else null;
+        from[0] = .{ .source = .{ .subquery = inner }, .alias = if (label) |l| .{ .name = l } else null };
         c.from = from;
         c.where = null;
         return s;
@@ -1905,6 +1930,15 @@ pub const Parser = struct {
     /// Whether `e` is a date or a timestamp, as far as the parser knows:
     /// what it made (SYSDATE, TO_DATE, date literals ...), a column of a
     /// DATE/TIMESTAMP type of a table in `scope`, date arithmetic.
+    /// The type family of the column `e` refers to (null: not a column of
+    /// a table the catalog has the type of).
+    pub fn columnFamily(p: *Parser, e: *const Expr, scope: []const []const tree.FromItem) Error!?types.Family {
+        if (e.kind != .column) return null;
+        const decl = (try p.columnDeclType(e.kind.column, scope)) orelse return null;
+        const ty = types.parse(decl) orelse return null;
+        return types.family(ty.name);
+    }
+
     pub fn dateKindOf(p: *Parser, e: *const Expr, scope: []const []const tree.FromItem) Error!Kind {
         if (p.date_nodes.get(e)) |k| return k;
         switch (e.kind) {
@@ -2026,6 +2060,17 @@ fn isSqliteAggregate(name: []const u8) bool {
 
 fn isDialectFunction(name: []const u8) bool {
     return @import("../dialect.zig").spec(.oracle).function_map.get(name) != null;
+}
+
+/// Whether `e` refers to DUAL's column DUMMY.
+fn mentionsDummy(e: *const Expr) bool {
+    if (e.kind == .column) {
+        const names = e.kind.column;
+        return std.mem.eql(u8, names[names.len - 1].text, "DUMMY");
+    }
+    var it = Children.of(e);
+    while (it.next()) |c| if (mentionsDummy(c)) return true;
+    return false;
 }
 
 /// Whether a query's result columns or HAVING aggregate.

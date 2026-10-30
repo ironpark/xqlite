@@ -128,6 +128,18 @@ fn expr(p: *Parser, e: *Expr, scope: *Scope) Error!void {
     }
     var it = parser.Children.of(e);
     while (it.next()) |child| try expr(p, @constCast(child), scope);
+    switch (e.kind) {
+        .compare => |c| {
+            try numberLiteral(p, c.l, c.r, scope);
+            try numberLiteral(p, c.r, c.l, scope);
+        },
+        .between => |b| {
+            try numberLiteral(p, b.e, b.lo, scope);
+            try numberLiteral(p, b.e, b.hi, scope);
+        },
+        .in_list => |x| for (x.items) |item| try numberLiteral(p, x.e, item, scope),
+        else => {},
+    }
     if (e.kind != .binary) return;
     const b = e.kind.binary;
     if (b.op != .add and b.op != .sub) return;
@@ -151,6 +163,31 @@ fn expr(p: *Parser, e: *Expr, scope: *Scope) Error!void {
     const f = try p.new(tree.Func, .{ .name = .{ .text = "datetime", .pos = e.pos }, .args = try p.list(&.{ d, days }) });
     e.kind = .{ .func = f };
     try p.date_nodes.put(p.arena, e, .date);
+}
+
+/// A string literal compared with a column of a number type is the number
+/// it spells, as Oracle converts it ('5' = n): a NUMBER column stores ANY
+/// in its STRICT table, which converts nothing.
+fn numberLiteral(p: *Parser, col: *const Expr, lit: *Expr, scope: *Scope) Error!void {
+    if (lit.kind != .string or col.kind != .column) return;
+    if (try p.columnFamily(col, scope.items) != .number) return;
+    const n = @import("funcs.zig").parseNum(lit.kind.string) catch return;
+    const v = n orelse return;
+    const s = std.mem.trim(u8, lit.kind.string, " ");
+    switch (v) {
+        .int => |x| {
+            if (x < 0) {
+                const abs = try tree.expr(p.arena, lit.pos, lit.end, .{ .integer = try std.fmt.allocPrint(p.arena, "{d}", .{@abs(x)}) });
+                lit.kind = .{ .unary = .{ .op = .neg, .e = abs } };
+            } else lit.kind = .{ .integer = try std.fmt.allocPrint(p.arena, "{d}", .{x}) };
+        },
+        .real => {
+            if (s[0] == '-') {
+                const abs = try tree.expr(p.arena, lit.pos, lit.end, .{ .float = s[1..] });
+                lit.kind = .{ .unary = .{ .op = .neg, .e = abs } };
+            } else lit.kind = .{ .float = if (s[0] == '+') s[1..] else s };
+        },
+    }
 }
 
 /// unixepoch(x [, 'subsec']): the seconds of a date (with the fraction).

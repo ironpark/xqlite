@@ -929,6 +929,8 @@ fn resolveColumn(p: *Parser, table: []const u8, name: Name, ty_opt: ?types.TypeN
         }
     }
     if (ty_opt) |ty| if (info) |i| try typeChecks(p, name, ty, i, &cons);
+    // CHAR(n) compares blank-padded: 'ab   ' = 'ab'.
+    if (info) |i| if (i.family == .char) try cons.append(p.arena, .{ .kind = .{ .collate = "RTRIM" } });
     return .{ .name = name, .type = storage orelse "ANY", .decl_type = decl, .constraints = cons.items };
 }
 

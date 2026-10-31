@@ -41,7 +41,8 @@ pub fn undoubled(arena: std.mem.Allocator, s: [:0]const u8, open: usize, q: u8) 
                 seg = i;
                 continue;
             }
-            try out.appendSlice(arena, s[seg..i]);
+            // Without a doubled quote the text is a slice of `s`.
+            if (copied) try out.appendSlice(arena, s[seg..i]);
             i += 1;
             break;
         }

@@ -20,7 +20,6 @@ const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const types = @import("types.zig");
-const maria = @import("../mariadb/runtime.zig");
 
 const sequence = catalog.sequence;
 const Context = dfunc.Context;

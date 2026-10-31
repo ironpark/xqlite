@@ -54,7 +54,7 @@ pub const Walker = struct {
         /// pRename: RENAME COLUMN and RENAME TABLE.
         rename: *@import("alter.zig").RenameCtx,
         /// pCovIdxCk: whereIsCoveringIndex().
-        cov_idx_ck: *@import("where_loop.zig").CoveringIndexCheck,
+        cov_idx_ck: *@import("where/where_loop.zig").CoveringIndexCheck,
         /// pSrcItem: recomputeColumnsUsed().
         src_item: *int.SrcItem,
         /// pFix: sqlite3FixInit().

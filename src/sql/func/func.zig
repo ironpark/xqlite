@@ -11,16 +11,16 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const int = @import("sqlite_int.zig");
-const callback = @import("callback.zig");
-const printf = @import("printf.zig");
+const int = @import("../sqlite_int.zig");
+const callback = @import("../callback.zig");
+const printf = @import("../printf.zig");
 const numeric = @import("xqlite_base").numeric;
-const util = @import("util.zig");
+const util = @import("../util.zig");
 const ctype = @import("xqlite_base").ctype;
-const vi = @import("../vdbe/vdbe_int.zig");
-const api = @import("../vdbe/api.zig");
-const mem = @import("../vdbe/mem.zig");
-const serial = @import("../vdbe/serial.zig");
+const vi = @import("../../vdbe/vdbe_int.zig");
+const api = @import("../../vdbe/api.zig");
+const mem = @import("../../vdbe/mem.zig");
+const serial = @import("../../vdbe/serial.zig");
 
 const Sqlite3 = int.Sqlite3;
 const FuncDef = int.FuncDef;
@@ -142,15 +142,18 @@ fn skipAccumulatorLoad(ctx: *Context) void {
     ctx.skip_flag = true;
 }
 
-/// The aggregate context as a `T`, created zeroed if `create`. The
-/// buffer comes from the connection's allocator, aligned for any `T`
-/// used here.
-pub fn aggContext(comptime T: type, ctx: *Context, create: bool) ?*T {
+/// The aggregate context (sqlite3_aggregate_context()) as a `T`, zeroed
+/// when made: made if `create` (a step), else null if no step made it (a
+/// final). Null on OOM too, with the error set. The buffer comes from the
+/// connection's allocator, aligned to 8, so a `T` aligned to more gets a
+/// pointer aligned to 8 (an i128 field is read unaligned).
+pub fn aggContext(comptime T: type, ctx: *Context, create: bool) ?*align(@min(@alignOf(T), 8)) T {
     const b = api.aggregateContext(ctx, if (create) @sizeOf(T) else 0) orelse return null;
+    if (b.len < @sizeOf(T)) return null;
     return @ptrCast(@alignCast(b.ptr));
 }
 
-const sqlite3_malloc = @import("malloc.zig").allocator;
+const sqlite3_malloc = @import("../malloc.zig").allocator;
 
 /// Port of contextMalloc(): `n_byte` bytes from sqlite3_malloc(), or null
 /// with a TOOBIG or NOMEM error set. The connection's allocator (and a
@@ -557,7 +560,7 @@ fn chachaBlock(out: *[16]u32, in: *const [16]u32) void {
 /// pseudo-random bytes. The generator is seeded on first use from the
 /// connection's VFS (C uses the default VFS); an empty `buf` resets it.
 pub fn randomness(db: ?*const Sqlite3, buf: []u8) void {
-    const prng = &@import("global.zig").prng;
+    const prng = &@import("../global.zig").prng;
     while (prng.lock.swap(true, .acquire)) std.atomic.spinLoopHint();
     defer prng.lock.store(false, .release);
     if (buf.len == 0) {
@@ -567,7 +570,7 @@ pub fn randomness(db: ?*const Sqlite3, buf: []u8) void {
     if (prng.s[0] == 0) {
         prng.s[0..4].* = .{ 0x61707865, 0x3320646e, 0x79622d32, 0x6b206574 };
         const seed = std.mem.sliceAsBytes(prng.s[4..15]);
-        const fixed = @import("global.zig").testctrl.prng_seed;
+        const fixed = @import("../global.zig").testctrl.prng_seed;
         if (fixed != 0) {
             // sqlite3OsRandomness() with SQLITE_TESTCTRL_PRNG_SEED.
             @memset(seed, 0);
@@ -1285,13 +1288,13 @@ fn loadExt(ctx: *Context, argv: []*Mem) void {
     }
     const file = api.valueText(argv[0]) orelse return;
     const proc = if (argv.len == 2) api.valueText(argv[1]) else null;
-    const load = @import("global.zig").load_extension orelse {
+    const load = @import("../global.zig").load_extension orelse {
         api.resultError(ctx, "extension loading is not supported");
         return;
     };
     if (load(db, file, proc)) |msg| {
         api.resultError(ctx, std.mem.span(msg));
-        @import("malloc.zig").free(msg);
+        @import("../malloc.zig").free(msg);
     }
 }
 
@@ -1921,7 +1924,7 @@ pub const funcs = [_]FuncDef{
 const testing = std.testing;
 
 fn testDb(db: *Sqlite3) void {
-    db.* = .{ .gpa = @import("malloc.zig").dbAllocator(db) };
+    db.* = .{ .gpa = @import("../malloc.zig").dbAllocator(db) };
 }
 
 fn tInt(db: *Sqlite3, v: i64) Mem {

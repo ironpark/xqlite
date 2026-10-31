@@ -129,7 +129,7 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 | 모듈 | 위치 | 등록 |
 | --- | --- | --- |
 | `pragma_*` 테이블 값 함수 | `src/sql/pragma.zig` | 항상 |
-| `json_each`, `json_tree`, `jsonb_each`, `jsonb_tree` | `src/sql/json.zig` | 항상 |
+| `json_each`, `json_tree`, `jsonb_each`, `jsonb_tree` | `src/sql/func/json.zig` | 항상 |
 | `bytecode()`, `tables_used()` | `src/vdbe/vdbevtab.zig` | 항상 |
 | `generate_series()` (`ext/misc/series.c` 포팅) | `src/ext/series.zig` | 셸(`xqlite sql`)이 등록합니다. sqlite3 셸과 같습니다. |
 | `vtablog` (`ext/misc/vtablog.c` 포팅, 메서드 호출을 출력) | `src/ext/vtablog.zig` | 셸에서 `XQ_VTABLOG` 환경 변수가 있을 때만 등록합니다. 차등 테스트용입니다. |

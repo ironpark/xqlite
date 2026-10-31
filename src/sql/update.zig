@@ -3,7 +3,7 @@
 const std = @import("std");
 const int = @import("sqlite_int.zig");
 const vtab = @import("vtab.zig");
-const wi = @import("where_int.zig");
+const wi = @import("where/where_int.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const mem = @import("../vdbe/mem.zig");
@@ -40,7 +40,7 @@ const insert = @import("insert.zig");
 const delete_mod = @import("delete.zig");
 const trigger = @import("trigger.zig");
 const fkey = @import("fkey.zig");
-const where_mod = @import("where.zig");
+const where_mod = @import("where/where.zig");
 const main_mod = @import("main.zig");
 const select_mod = @import("select.zig");
 const SRT = select_mod.SRT;

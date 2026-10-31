@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const vi = @import("vdbe_int.zig");
-const utf8_trans1 = @import("../sql/func.zig").utf8_trans1;
+const utf8_trans1 = @import("../sql/func/func.zig").utf8_trans1;
 
 const ENC = vi.ENC;
 

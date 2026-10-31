@@ -21,7 +21,7 @@ const prepare = @import("prepare.zig");
 const main_mod = @import("main.zig");
 const attach = @import("attach.zig");
 const backup = @import("backup.zig");
-const func = @import("func.zig");
+const func = @import("func/func.zig");
 const uri = @import("uri.zig");
 const util = @import("util.zig");
 const btree = @import("xqlite_storage").btree;
@@ -197,9 +197,7 @@ pub fn runVacuum(v: *Vdbe, db: *Sqlite3, i_db: usize, out: ?*Mem) i32 {
         const t = db.dbs.items[n_db].bt.?;
         temp = t;
         var n_res = main.getRequestedReserve();
-        var level: @import("xqlite_storage").pager.Synchronous = .off;
-        var full_fsync = false;
-        var ckpt_full_fsync = false;
+        var flags: @import("xqlite_storage").pager.Flags = .{ .level = .off };
         if (out != null) {
             const size = t.pager.fd.fileSize() catch 1;
             if (size > 0) {
@@ -210,14 +208,8 @@ pub fn runVacuum(v: *Vdbe, db: *Sqlite3, i_db: usize, out: ?*Mem) i32 {
             db.m_db_flags.VacuumInto = true;
             // The output gets the pager flags of the database vacuumed
             // (with cache spill on).
-            level = switch (db.dbs.items[i_db].safety_level & 0x07) {
-                1 => .off,
-                2 => .normal,
-                4 => .extra,
-                else => .full,
-            };
-            full_fsync = db.flags.FullFSync;
-            ckpt_full_fsync = db.flags.CkptFullFSync;
+            flags = db.pagerFlags(.fromLevel(db.dbs.items[i_db].safety_level));
+            flags.cache_spill = true;
             // A "reserve=N" parameter of a URI output sets the reserve.
             var parsed = uri.parse(db.gpa, z_out, saved_open_flags);
             defer parsed.deinit(db.gpa);
@@ -229,7 +221,7 @@ pub fn runVacuum(v: *Vdbe, db: *Sqlite3, i_db: usize, out: ?*Mem) i32 {
         }
         t.setCacheSize(db.dbs.items[i_db].schema.cache_size);
         _ = t.setSpillSize(@intCast(main.setSpillSize(0)));
-        t.setPagerFlags(.{ .level = level, .full_fsync = full_fsync, .ckpt_full_fsync = ckpt_full_fsync });
+        t.setPagerFlags(flags);
 
         // Lock the original now, before its page size is read: a WAL
         // database cannot change it.

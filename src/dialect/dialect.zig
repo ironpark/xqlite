@@ -493,6 +493,7 @@ test {
     _ = @import("words.zig");
     _ = @import("json_text.zig");
     _ = @import("lex.zig");
+    _ = @import("shared_funcs.zig");
     _ = @import("test.zig");
 }
 

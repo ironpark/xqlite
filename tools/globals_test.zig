@@ -55,7 +55,7 @@ const allowed = [_]struct { []const u8, []const u8 }{
     // could be merged with another).
     .{ "src/api/Stmt.zig", "id" },
     // The fuzz case running, for the panic handler of `xqlite fuzzcheck`.
-    .{ "src/fuzzcheck.zig", "current" },
+    .{ "src/cli/fuzzcheck.zig", "current" },
 };
 
 fn isAllowed(path: []const u8, name: []const u8) bool {

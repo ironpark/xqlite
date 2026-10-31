@@ -452,8 +452,6 @@ const ForJson = struct {
     }
 };
 
-const AggSlot = struct { st: ?*ForJson };
-
 /// The elements of the array at `it` (a valid spec).
 fn specItems(a: Allocator, spec: []const u8, it: json.Item) error{ OutOfMemory, BadSpec }![]json.Item {
     if (it.kind != .array) return error.BadSpec;
@@ -510,12 +508,12 @@ fn readSpec(st: *ForJson, spec: []const u8) error{ OutOfMemory, BadSpec }!void {
 
 /// xq_tsql_for_json(spec, v1, ..., vn): a row of FOR JSON.
 pub fn forJsonStep(ctx: *Context, argv: []*Mem) void {
-    const slot = dfunc.aggState(AggSlot, ctx, .make) orelse return;
-    const st = slot.st orelse blk: {
+    const slot = dfunc.aggState(?*ForJson, ctx, true) orelse return;
+    const st = slot.* orelse blk: {
         const gpa = dfunc.gpa(ctx);
         const st = gpa.create(ForJson) catch return api.resultErrorNomem(ctx);
         st.* = .{ .gpa = gpa, .arena = .init(gpa) };
-        slot.st = st;
+        slot.* = st;
         const spec = dfunc.text(ctx, argv[0]) orelse return;
         readSpec(st, spec) catch |err| switch (err) {
             error.OutOfMemory => return api.resultErrorNomem(ctx),
@@ -628,9 +626,9 @@ fn openLevel(st: *ForJson, j: usize, vals: []*Mem) error{OutOfMemory}!void {
 }
 
 pub fn forJsonFinal(ctx: *Context) void {
-    const slot = dfunc.aggState(AggSlot, ctx, .find) orelse return api.resultNull(ctx);
-    const st = slot.st orelse return api.resultNull(ctx);
-    slot.st = null;
+    const slot = dfunc.aggState(?*ForJson, ctx, false) orelse return api.resultNull(ctx);
+    const st = slot.* orelse return api.resultNull(ctx);
+    slot.* = null;
     defer st.deinit();
     if (st.rows == 0) return api.resultNull(ctx);
     finish(st) catch return api.resultErrorNomem(ctx);

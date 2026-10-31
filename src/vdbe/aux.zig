@@ -1093,7 +1093,7 @@ fn commitWithSuperJournal(db: *Sqlite3, main_file: []const u8) i32 {
         }
         retry_count += 1;
         var random: [4]u8 = undefined;
-        @import("../sql/func.zig").randomness(db, &random);
+        @import("../sql/func/func.zig").randomness(db, &random);
         const r = std.mem.readInt(u32, &random, .little);
         _ = std.fmt.bufPrint(super[main_file.len..], "-mj{X:0>6}9{X:0>2}", .{ (r >> 8) & 0xffffff, r & 0xff }) catch unreachable;
         const exists = v.access(super, .exists) catch |err| return int.errorCode(err);

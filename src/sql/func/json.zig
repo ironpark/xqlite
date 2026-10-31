@@ -18,17 +18,17 @@
 //! json_parse() function is compiled out by default and so is omitted.
 
 const std = @import("std");
-const int = @import("sqlite_int.zig");
-const callback = @import("callback.zig");
-const printf = @import("printf.zig");
+const int = @import("../sqlite_int.zig");
+const callback = @import("../callback.zig");
+const printf = @import("../printf.zig");
 const numeric = @import("xqlite_base").numeric;
-const util = @import("util.zig");
+const util = @import("../util.zig");
 const func = @import("func.zig");
 const ctype = @import("xqlite_base").ctype;
-const vi = @import("../vdbe/vdbe_int.zig");
-const api = @import("../vdbe/api.zig");
-const vtab = @import("vtab.zig");
-const malloc = @import("malloc.zig");
+const vi = @import("../../vdbe/vdbe_int.zig");
+const api = @import("../../vdbe/api.zig");
+const vtab = @import("../vtab.zig");
+const malloc = @import("../malloc.zig");
 
 const Allocator = std.mem.Allocator;
 const Sqlite3 = int.Sqlite3;
@@ -4527,8 +4527,8 @@ pub const funcs = [_]FuncDef{
 // ================================================================== tests
 
 const testing = std.testing;
-const Conn = @import("sql_test.zig").Conn;
-const mem = @import("../vdbe/mem.zig");
+const Conn = @import("../sql_test.zig").Conn;
+const mem = @import("../../vdbe/mem.zig");
 
 // Expected values come from the sqlite3 3.54.1 shell.
 

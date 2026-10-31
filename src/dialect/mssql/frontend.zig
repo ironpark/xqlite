@@ -43,7 +43,7 @@ const session = @import("session.zig");
 const rt = @import("runtime.zig");
 const schemas = @import("schemas.zig");
 const jf = @import("json_func.zig");
-const maria = @import("../mariadb/runtime.zig");
+const shared = @import("../shared_funcs.zig");
 
 pub const frontend: dialect.Frontend = .{ .run = run };
 
@@ -51,7 +51,7 @@ const Parser = parser.Parser;
 const Error = parser.Error;
 
 /// The version string of @@VERSION.
-pub const version = "Microsoft SQL Server 2022 (xqlite " ++ @import("../../sql/func.zig").sqlite_version ++ ")";
+pub const version = "Microsoft SQL Server 2022 (xqlite " ++ @import("../../sql/func/func.zig").sqlite_version ++ ")";
 
 /// Compile the first statement of `sql` (dialect.Frontend's contract).
 pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
@@ -282,36 +282,36 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("charindex", 2, det, rt.charindexFunc),
     dfunc.scalar("charindex", 3, det, rt.charindexFunc),
     dfunc.scalar("replace", 3, det, rt.replaceFunc),
-    dfunc.scalar("left", 2, det, maria.leftFunc),
-    dfunc.scalar("right", 2, det, maria.rightFunc),
-    dfunc.scalar("reverse", 1, det, maria.reverseFunc),
-    dfunc.scalar("replicate", 2, det, maria.repeatFunc),
-    dfunc.scalar("space", 1, det, maria.spaceFunc),
+    dfunc.scalar("left", 2, det, shared.leftFunc),
+    dfunc.scalar("right", 2, det, shared.rightFunc),
+    dfunc.scalar("reverse", 1, det, shared.reverseFunc),
+    dfunc.scalar("replicate", 2, det, shared.repeatFunc),
+    dfunc.scalar("space", 1, det, shared.spaceFunc),
     dfunc.scalar("stuff", 4, det, rt.stuffFunc),
-    dfunc.scalar("ascii", 1, det, maria.asciiFunc),
+    dfunc.scalar("ascii", 1, det, shared.asciiFunc),
     dfunc.scalar("isnumeric", 1, det, rt.isnumericFunc),
     dfunc.scalar("isdate", 1, det, rt.isdateFunc),
     // Math.
-    dfunc.scalar("floor", 1, det, maria.floorFunc),
-    dfunc.scalar("ceiling", 1, det, maria.ceilFunc),
-    dfunc.scalar("round", 1, det, maria.roundFunc),
-    dfunc.scalar("round", 2, det, maria.roundFunc),
-    dfunc.scalar("truncate", 2, det, maria.truncateFunc),
+    dfunc.scalar("floor", 1, det, shared.floorFunc),
+    dfunc.scalar("ceiling", 1, det, shared.ceilFunc),
+    dfunc.scalar("round", 1, det, shared.roundFunc),
+    dfunc.scalar("round", 2, det, shared.roundFunc),
+    dfunc.scalar("truncate", 2, det, shared.truncateFunc),
     dfunc.scalar("power", 2, det, rt.powerFunc),
-    dfunc.scalar("sqrt", 1, det, maria.sqrtFunc),
-    dfunc.scalar("exp", 1, det, maria.expFunc),
-    dfunc.scalar("ln", 1, det, maria.lnFunc),
-    dfunc.scalar("log", 2, det, maria.logFunc),
-    dfunc.scalar("log10", 1, det, maria.log10Func),
-    dfunc.scalar("pi", 0, det, maria.piFunc),
-    dfunc.scalar("sin", 1, det, maria.sinFunc),
-    dfunc.scalar("cos", 1, det, maria.cosFunc),
-    dfunc.scalar("tan", 1, det, maria.tanFunc),
-    dfunc.scalar("asin", 1, det, maria.asinFunc),
-    dfunc.scalar("acos", 1, det, maria.acosFunc),
-    dfunc.scalar("atan", 1, det, maria.atanFunc),
-    dfunc.scalar("degrees", 1, det, maria.degreesFunc),
-    dfunc.scalar("radians", 1, det, maria.radiansFunc),
+    dfunc.scalar("sqrt", 1, det, shared.sqrtFunc),
+    dfunc.scalar("exp", 1, det, shared.expFunc),
+    dfunc.scalar("ln", 1, det, shared.lnFunc),
+    dfunc.scalar("log", 2, det, shared.logFunc),
+    dfunc.scalar("log10", 1, det, shared.log10Func),
+    dfunc.scalar("pi", 0, det, shared.piFunc),
+    dfunc.scalar("sin", 1, det, shared.sinFunc),
+    dfunc.scalar("cos", 1, det, shared.cosFunc),
+    dfunc.scalar("tan", 1, det, shared.tanFunc),
+    dfunc.scalar("asin", 1, det, shared.asinFunc),
+    dfunc.scalar("acos", 1, det, shared.acosFunc),
+    dfunc.scalar("atan", 1, det, shared.atanFunc),
+    dfunc.scalar("degrees", 1, det, shared.degreesFunc),
+    dfunc.scalar("radians", 1, det, shared.radiansFunc),
     // Dates.
     dfunc.scalar("dateadd", 3, det, rt.dateaddFunc),
     dfunc.scalar("datediff", 3, det, rt.datediffFunc),

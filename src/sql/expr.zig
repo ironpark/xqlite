@@ -1347,7 +1347,7 @@ fn isIIF(db: *int.Sqlite3, e: *const Expr) bool {
 }
 
 /// The INLINEFUNC_* numbers of functions coded inline (func.zig).
-const func_mod = @import("func.zig");
+const func_mod = @import("func/func.zig");
 pub const INLINEFUNC_coalesce = func_mod.INLINEFUNC_coalesce;
 pub const INLINEFUNC_implies_nonnull_row = func_mod.INLINEFUNC_implies_nonnull_row;
 pub const INLINEFUNC_expr_implies_expr = func_mod.INLINEFUNC_expr_implies_expr;

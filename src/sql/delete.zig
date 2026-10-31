@@ -18,7 +18,7 @@ const prepare = @import("prepare.zig");
 const insert = @import("insert.zig");
 const trigger = @import("trigger.zig");
 const fkey = @import("fkey.zig");
-const where_mod = @import("where.zig");
+const where_mod = @import("where/where.zig");
 const main_mod = @import("main.zig");
 const auth = @import("auth.zig");
 

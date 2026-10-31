@@ -28,7 +28,7 @@ pub fn register(s: *xqt.Suite) !void {
 
 const n = "3000";
 
-/// The content `xqlite bt-fill` writes (see src/main.zig), with the
+/// The content `xqlite bt-fill` writes (see src/cli/main.zig), with the
 /// auto_vacuum mode `av`. printf('%.*c', 0, x) still prints one
 /// character, so no length is 0.
 fn fillSql(comptime av: []const u8) []const u8 {

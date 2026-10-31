@@ -213,7 +213,7 @@ const aux = @import("../vdbe/aux.zig");
 const build = @import("build.zig");
 const ec = @import("expr_code.zig");
 const resolve = @import("resolve.zig");
-const where_mod = @import("where.zig");
+const where_mod = @import("where/where.zig");
 const walker = @import("walker.zig");
 const window = @import("window.zig");
 const coll_mod = @import("coll.zig");
@@ -1134,7 +1134,7 @@ pub fn columnsFromExprList(p: *Parse, a: Allocator, e_list: ?*ExprList) Oom![]Co
             }
             cnt += 1;
             z = try std.fmt.allocPrintSentinel(a, "{s}:{d}", .{ z[0..n_name], cnt }, 0);
-            if (cnt > 3) @import("func.zig").randomness(p.db, std.mem.asBytes(&cnt));
+            if (cnt > 3) @import("func/func.zig").randomness(p.db, std.mem.asBytes(&cnt));
         }
         col.cn_name = z;
         if (x.fg.no_expand) col.col_flags.NOEXPAND = true;

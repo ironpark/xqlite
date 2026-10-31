@@ -2368,6 +2368,13 @@ pub const Sqlite3 = struct {
         @import("malloc.zig").oomFault(db);
     }
 
+    /// The pager settings of a database at `level`, with the connection's
+    /// PAGER_FULLFSYNC, PAGER_CKPT_FULLFSYNC and PAGER_CACHESPILL flags
+    /// (C: `level | (db->flags & PAGER_FLAGS_MASK)`).
+    pub fn pagerFlags(db: *const Sqlite3, level: Pager.Synchronous) Pager.Flags {
+        return .{ .level = level, .full_fsync = db.flags.FullFSync, .ckpt_full_fsync = db.flags.CkptFullFSync, .cache_spill = db.flags.CacheSpill };
+    }
+
     /// OptimizationDisabled().
     pub fn optDisabled(db: *const Sqlite3, mask: u32) bool {
         return db.db_opt_flags & mask != 0;
@@ -2375,6 +2382,7 @@ pub const Sqlite3 = struct {
 };
 
 const Btree = @import("xqlite_storage").btree.Btree;
+const Pager = @import("xqlite_storage").pager;
 
 test "errorCode() and codeError() are inverse for every error" {
     inline for (@typeInfo(Error).error_set.error_names.?) |name| {

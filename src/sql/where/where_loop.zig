@@ -1,17 +1,17 @@
 //! Port of where.c (loop builders): WhereScan, sqlite3WhereFindTerm(), cost estimates, whereLoopAdd*().
 
 const std = @import("std");
-const int = @import("sqlite_int.zig");
+const int = @import("../sqlite_int.zig");
 const wi = @import("where_int.zig");
 const WS = wi.WS;
 const we = @import("where_expr.zig");
-const util = @import("util.zig");
-const expr_mod = @import("expr.zig");
-const walker = @import("walker.zig");
-const coll_mod = @import("coll.zig");
-const serial = @import("../vdbe/serial.zig");
+const util = @import("../util.zig");
+const expr_mod = @import("../expr.zig");
+const walker = @import("../walker.zig");
+const coll_mod = @import("../coll.zig");
+const serial = @import("../../vdbe/serial.zig");
 const ctype = @import("xqlite_base").ctype;
-const vtab = @import("vtab.zig");
+const vtab = @import("../vtab.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -1520,7 +1520,7 @@ fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: 
                 std.debug.assert(!e.flags.IntValue);
                 e.i_column = e2.i_column;
                 if (e2.i_column < 0) continue; // the rowid has no collation
-                const z_coll = @import("build.zig").columnColl(&tab.cols[@intCast(e2.i_column)]) orelse coll_mod.str_binary;
+                const z_coll = @import("../build.zig").columnColl(&tab.cols[@intCast(e2.i_column)]) orelse coll_mod.str_binary;
                 if (ctype.strICmp(e.token(), z_coll) == 0) continue;
             };
             break;
@@ -1550,7 +1550,7 @@ fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: 
         .wc = wc,
         .parse = p,
         .e_distinct = e_distinct,
-        .rhs = try a.alloc(?*@import("../vdbe/vdbe_int.zig").Mem, n_term),
+        .rhs = try a.alloc(?*@import("../../vdbe/vdbe_int.zig").Mem, n_term),
     };
     @memset(h.rhs, null);
     @memset(h.info.usage, .{});
@@ -1558,7 +1558,7 @@ fn allocateIndexInfo(w: *WhereInfo, wc: *WhereClause, m_unusable: Bitmask, src: 
     if (!tab.hasRowid()) {
         // The bits of the PRIMARY KEY columns are always set, for RIGHT
         // joins and OR loops.
-        const pk = @import("build.zig").primaryKeyIndex(tab).?;
+        const pk = @import("../build.zig").primaryKeyIndex(tab).?;
         for (pk.ai_column[0..pk.n_key_col]) |c| {
             var i_col: i32 = c;
             std.debug.assert(i_col >= 0);
@@ -1630,7 +1630,7 @@ fn freeIdxStr(db: *int.Sqlite3, info: *vtab.IndexInfo) void {
 /// structure itself are in the statement's memory.
 fn freeIndexInfo(db: *int.Sqlite3, h: *vtab.HiddenIndexInfo) void {
     for (h.rhs) |*r| {
-        if (r.*) |m| @import("../vdbe/mem.zig").release(m);
+        if (r.*) |m| @import("../../vdbe/mem.zig").release(m);
         r.* = null;
     }
     freeIdxStr(db, &h.info);
@@ -1673,7 +1673,7 @@ fn vtabBestIndex(p: *Parse, tab: *Table, info: *vtab.IndexInfo) ParseError!BestI
 /// database (as sqlite_dbpage does): read transactions on all of them, or
 /// write transactions if it writes.
 pub fn vtabUsesAllSchemas(p: *Parse) void {
-    const build = @import("build.zig");
+    const build = @import("../build.zig");
     const n_db = p.db.dbs.items.len;
     for (0..n_db) |i| build.codeVerifySchema(p, i);
     if (p.write_mask != 0) {

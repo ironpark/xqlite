@@ -18,7 +18,7 @@ const ec = @import("expr_code.zig");
 const insert = @import("insert.zig");
 const delete = @import("delete.zig");
 const update = @import("update.zig");
-const func = @import("func.zig");
+const func = @import("func/func.zig");
 const callback = @import("callback.zig");
 const coll = @import("coll.zig");
 const main_mod = @import("main.zig");
@@ -398,13 +398,7 @@ fn setAllPagerFlags(db: *Sqlite3) void {
     if (!db.auto_commit) return;
     for (db.dbs.items) |*d| {
         const bt = d.bt orelse continue;
-        const level: pager_mod.Synchronous = switch (d.safety_level & pager_synchronous_mask) {
-            1 => .off,
-            2 => .normal,
-            4 => .extra,
-            else => .full,
-        };
-        bt.setPagerFlags(.{ .level = level, .full_fsync = db.flags.FullFSync, .ckpt_full_fsync = db.flags.CkptFullFSync, .cache_spill = db.flags.CacheSpill });
+        bt.setPagerFlags(db.pagerFlags(.fromLevel(d.safety_level)));
     }
 }
 

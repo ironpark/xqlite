@@ -152,17 +152,10 @@ pub fn checkTable(comptime defs: []const FuncDef) void {
 
 const api = @import("../vdbe/api.zig");
 
-/// The state of an aggregate in its context (sqlite3_aggregate_context()),
-/// zeroed when made: a step makes it (`.make`), a final only finds it
-/// (`.find`), null if no step ran. Null on OOM after `.make` too, the
-/// error set. A zeroed `T` must be its initial state, so pointers in it
-/// must be optional. Unaligned: the context is 8-byte aligned, and some
-/// states (an i128 sum) need more.
-pub fn aggState(comptime T: type, ctx: *Context, comptime how: enum { make, find }) ?*align(1) T {
-    const b = api.aggregateContext(ctx, if (how == .make) @sizeOf(T) else 0) orelse return null;
-    if (b.len < @sizeOf(T)) return null;
-    return @ptrCast(b.ptr);
-}
+/// The state of an aggregate in its context, zeroed when made (a zeroed
+/// `T` must be its initial state, so pointers in it are optionals): see
+/// aggContext() of src/sql/func/func.zig.
+pub const aggState = @import("../sql/func/func.zig").aggContext;
 
 pub fn isNull(m: *Mem) bool {
     return api.valueType(m) == vi.SQLITE_NULL;
@@ -239,7 +232,7 @@ pub fn charOffset(z: []const u8, n: u64) usize {
 /// A random float in [0, 1), from the connection's PRNG (randomness()).
 pub fn randomUnit(ctx: *Context) f64 {
     var buf: [8]u8 = undefined;
-    @import("../sql/func.zig").randomness(api.contextDbHandle(ctx), &buf);
+    @import("../sql/func/func.zig").randomness(api.contextDbHandle(ctx), &buf);
     const r = std.mem.readInt(u64, &buf, .little) >> 11;
     return @as(f64, @floatFromInt(r)) / @as(f64, 1 << 53);
 }
@@ -247,7 +240,7 @@ pub fn randomUnit(ctx: *Context) f64 {
 /// A random (version 4) UUID, in lower-case hexadecimal.
 pub fn uuidV4(ctx: *Context) [36]u8 {
     var b: [16]u8 = undefined;
-    @import("../sql/func.zig").randomness(api.contextDbHandle(ctx), &b);
+    @import("../sql/func/func.zig").randomness(api.contextDbHandle(ctx), &b);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     var out: [36]u8 = undefined;

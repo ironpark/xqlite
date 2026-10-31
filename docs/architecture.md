@@ -440,7 +440,7 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 | --- | --- |
 | `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`; 3은 MSSQL 자리), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
 | `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena` |
-| `src/dialect/{calendar,json_text,words,lex,template,tokenized}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 예약어 집합(접힌 대소문자를 컴파일 시점에 검사), 따옴표 토큰 스캔, 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 문장을 먼저 토큰화하는 프론트엔드의 `run`. 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
+| `src/dialect/{calendar,json_text,words,lex,template,tokenized,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 예약어 집합(접힌 대소문자를 컴파일 시점에 검사), 따옴표 토큰 스캔, 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 문장을 먼저 토큰화하는 프론트엔드의 `run`, MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
 | `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres.md)) |
 | `src/dialect/mariadb/*.zig` | MariaDB 프론트엔드([MariaDB 호환](mariadb.md)) |

@@ -9,13 +9,13 @@
 //! 2nd Edition, 1998.
 
 const std = @import("std");
-const int = @import("sqlite_int.zig");
-const vi = @import("../vdbe/vdbe_int.zig");
-const api = @import("../vdbe/api.zig");
+const int = @import("../sqlite_int.zig");
+const vi = @import("../../vdbe/vdbe_int.zig");
+const api = @import("../../vdbe/api.zig");
 const ctype = @import("xqlite_base").ctype;
 const numeric = @import("xqlite_base").numeric;
-const printf = @import("printf.zig");
-const FUNC = @import("callback.zig").FUNC;
+const printf = @import("../printf.zig");
+const FUNC = @import("../callback.zig").FUNC;
 
 const FuncDef = int.FuncDef;
 const Context = vi.Context;
@@ -407,7 +407,7 @@ const time_t = if (@import("builtin").link_libc) std.c.time_t else i64;
 /// Without a C library there is no time zone: local time is UTC, as
 /// wasi-libc's localtime_r() has it too.
 fn osLocaltime(t: *const time_t, tm: *Tm) bool {
-    const tc = &@import("global.zig").testctrl;
+    const tc = &@import("../global.zig").testctrl;
     if (tc.localtime_fault != 0) {
         // SQLITE_TESTCTRL_LOCALTIME_FAULT.
         const alt = tc.alt_localtime orelse return true;
@@ -1048,7 +1048,7 @@ fn strftimeFunc(ctx: *Context, argv: []*Mem) void {
     if (isDate(ctx, argv[1..], &x)) return;
     const db = api.contextDbHandle(ctx);
     // sqlite3_str_new(): sqlite3_malloc() memory.
-    var res = StrAccum.init(@import("malloc.zig").allocator, &.{}, @intCast(db.limit(.length)));
+    var res = StrAccum.init(@import("../malloc.zig").allocator, &.{}, @intCast(db.limit(.length)));
 
     computeJD(&x);
     computeYMD_HMS(&x);
@@ -1234,7 +1234,7 @@ fn timediffFunc(ctx: *Context, argv: []*Mem) void {
     }
     clearYMD_HMS_TZ(&d1);
     computeYMD_HMS(&d1);
-    var res = StrAccum.init(@import("malloc.zig").allocator, &.{}, 100);
+    var res = StrAccum.init(@import("../malloc.zig").allocator, &.{}, 100);
     res.appendf("%c%04d-%02d-%02d %02d:%02d:%06.3f", &.{
         .{ .int = sign },       .{ .int = y },       .{ .int = m },
         .{ .int = d1.day - 1 }, .{ .int = d1.hour }, .{ .int = d1.minute },
@@ -1282,7 +1282,7 @@ pub const funcs = [_]FuncDef{
 
 // ================================================================== tests
 
-const mem = @import("../vdbe/mem.zig");
+const mem = @import("../../vdbe/mem.zig");
 
 /// One SQL value given to a test call.
 const TestArg = union(enum) { text: []const u8, int: i64, real: f64, null };
@@ -1291,7 +1291,7 @@ const TestArg = union(enum) { text: []const u8, int: i64, real: f64, null };
 /// rendered as text ("NULL" for NULL), in `buf`.
 fn callFunc(buf: []u8, name: []const u8, args: []const TestArg) ![]const u8 {
     var db: int.Sqlite3 = .{ .gpa = undefined };
-    db.gpa = @import("malloc.zig").dbAllocator(&db);
+    db.gpa = @import("../malloc.zig").dbAllocator(&db);
     var def: FuncDef = for (funcs) |f| {
         if (std.mem.eql(u8, f.name, name)) break f;
     } else unreachable;

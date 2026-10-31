@@ -93,7 +93,7 @@ pub fn xq_test_control(op: c_int, a: *const Args) callconv(.c) c_int {
                 if (y != 0) x = y;
             }
             tc.prng_seed = x;
-            @import("../sql/func.zig").randomness(null, &.{});
+            @import("../sql/func/func.zig").randomness(null, &.{});
         },
         FK_NO_ACTION => {
             const db = dbArg(a.p[0]) orelse return 0;

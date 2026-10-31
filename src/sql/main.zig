@@ -213,7 +213,7 @@ pub fn open(v: @import("xqlite_vfs").vfs.Vfs, filename: []const u8, flags: OpenF
     };
     db.dbs.items[0].bt = bt;
     db.dbs.items[0].schema.enc = db.enc;
-    @import("func.zig").registerPerConnectionBuiltinFunctions(db);
+    @import("func/func.zig").registerPerConnectionBuiltinFunctions(db);
     // The built-in extensions (sqlite3BuiltinExtensions): the reference
     // build has SQLITE_ENABLE_BYTECODE_VTAB.
     _ = @import("../vdbe/vdbevtab.zig").init(db);

@@ -4,9 +4,9 @@
 
 const std = @import("std");
 const testing = std.testing;
-const legacy = @import("legacy.zig");
-const RC = @import("sqlite_int.zig").RC;
-const Conn = @import("sql_test.zig").Conn;
+const legacy = @import("../legacy.zig");
+const RC = @import("../sqlite_int.zig").RC;
+const Conn = @import("../sql_test.zig").Conn;
 
 /// The detail column of `EXPLAIN QUERY PLAN sql`, a line per row, indented
 /// two spaces per level as sqlite3's tree.
@@ -37,7 +37,7 @@ fn expectPlan(c: *Conn, sql: []const u8, expected: []const u8) !void {
     defer testing.allocator.free(q);
     var msg: ?[:0]u8 = null;
     const rc = legacy.execWith(c.db, q, &ctx, Ctx.row, &msg);
-    if (msg) |m| @import("malloc.zig").free(m.ptr);
+    if (msg) |m| @import("../malloc.zig").free(m.ptr);
     try testing.expectEqual(RC.OK, rc);
     testing.expectEqualStrings(expected, ctx.out.items) catch |err| {
         std.debug.print("query: {s}\n", .{sql});

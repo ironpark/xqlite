@@ -5,7 +5,7 @@ const std = @import("std");
 const c = @import("common.zig");
 
 const RC = c.RC;
-const func_mod = @import("../sql/func.zig");
+const func_mod = @import("../sql/func/func.zig");
 const complete_mod = @import("../sql/complete.zig");
 const tokenize = @import("../parse/tokenize.zig");
 const grammar = @import("../parse/grammar.zig");

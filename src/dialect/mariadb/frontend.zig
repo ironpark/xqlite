@@ -44,6 +44,7 @@ const session = @import("session.zig");
 const databases = @import("databases.zig");
 const types = @import("types.zig");
 const rt = @import("runtime.zig");
+const shared = @import("../shared_funcs.zig");
 const json = @import("json.zig");
 
 pub const frontend: dialect.Frontend = .{ .run = run };
@@ -233,36 +234,36 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("xq_set_uservar", 2, .{ .direct_only = true }, session.setUservarFunc),
     dfunc.scalar("xq_maria_use", 1, .{ .direct_only = true }, databases.useFunc),
     // Math.
-    dfunc.scalar("floor", 1, det, rt.floorFunc),
-    dfunc.scalar("ceil", 1, det, rt.ceilFunc),
-    dfunc.scalar("ceiling", 1, det, rt.ceilFunc),
+    dfunc.scalar("floor", 1, det, shared.floorFunc),
+    dfunc.scalar("ceil", 1, det, shared.ceilFunc),
+    dfunc.scalar("ceiling", 1, det, shared.ceilFunc),
     dfunc.scalar("pow", 2, det, rt.powFunc),
     dfunc.scalar("power", 2, det, rt.powFunc),
-    dfunc.scalar("sqrt", 1, det, rt.sqrtFunc),
-    dfunc.scalar("exp", 1, det, rt.expFunc),
-    dfunc.scalar("ln", 1, det, rt.lnFunc),
-    dfunc.scalar("log", 1, det, rt.logFunc),
-    dfunc.scalar("log", 2, det, rt.logFunc),
-    dfunc.scalar("log2", 1, det, rt.log2Func),
-    dfunc.scalar("log10", 1, det, rt.log10Func),
-    dfunc.scalar("pi", 0, det, rt.piFunc),
-    dfunc.scalar("sin", 1, det, rt.sinFunc),
-    dfunc.scalar("cos", 1, det, rt.cosFunc),
-    dfunc.scalar("tan", 1, det, rt.tanFunc),
-    dfunc.scalar("asin", 1, det, rt.asinFunc),
-    dfunc.scalar("acos", 1, det, rt.acosFunc),
-    dfunc.scalar("atan", 1, det, rt.atanFunc),
-    dfunc.scalar("degrees", 1, det, rt.degreesFunc),
-    dfunc.scalar("radians", 1, det, rt.radiansFunc),
-    dfunc.scalar("truncate", 2, det, rt.truncateFunc),
-    dfunc.scalar("round", 1, det, rt.roundFunc),
-    dfunc.scalar("round", 2, det, rt.roundFunc),
+    dfunc.scalar("sqrt", 1, det, shared.sqrtFunc),
+    dfunc.scalar("exp", 1, det, shared.expFunc),
+    dfunc.scalar("ln", 1, det, shared.lnFunc),
+    dfunc.scalar("log", 1, det, shared.logFunc),
+    dfunc.scalar("log", 2, det, shared.logFunc),
+    dfunc.scalar("log2", 1, det, shared.log2Func),
+    dfunc.scalar("log10", 1, det, shared.log10Func),
+    dfunc.scalar("pi", 0, det, shared.piFunc),
+    dfunc.scalar("sin", 1, det, shared.sinFunc),
+    dfunc.scalar("cos", 1, det, shared.cosFunc),
+    dfunc.scalar("tan", 1, det, shared.tanFunc),
+    dfunc.scalar("asin", 1, det, shared.asinFunc),
+    dfunc.scalar("acos", 1, det, shared.acosFunc),
+    dfunc.scalar("atan", 1, det, shared.atanFunc),
+    dfunc.scalar("degrees", 1, det, shared.degreesFunc),
+    dfunc.scalar("radians", 1, det, shared.radiansFunc),
+    dfunc.scalar("truncate", 2, det, shared.truncateFunc),
+    dfunc.scalar("round", 1, det, shared.roundFunc),
+    dfunc.scalar("round", 2, det, shared.roundFunc),
     // Strings.
-    dfunc.scalar("left", 2, det, rt.leftFunc),
-    dfunc.scalar("right", 2, det, rt.rightFunc),
-    dfunc.scalar("repeat", 2, det, rt.repeatFunc),
-    dfunc.scalar("space", 1, det, rt.spaceFunc),
-    dfunc.scalar("reverse", 1, det, rt.reverseFunc),
+    dfunc.scalar("left", 2, det, shared.leftFunc),
+    dfunc.scalar("right", 2, det, shared.rightFunc),
+    dfunc.scalar("repeat", 2, det, shared.repeatFunc),
+    dfunc.scalar("space", 1, det, shared.spaceFunc),
+    dfunc.scalar("reverse", 1, det, shared.reverseFunc),
     dfunc.scalar("lpad", 2, det, rt.lpadFunc),
     dfunc.scalar("lpad", 3, det, rt.lpadFunc),
     dfunc.scalar("rpad", 2, det, rt.rpadFunc),
@@ -294,7 +295,7 @@ const functions = [_]int.FuncDef{
     dfunc.scalar("dayname", 1, det, rt.daynameFunc),
     dfunc.scalar("monthname", 1, det, rt.monthnameFunc),
     dfunc.scalar("str_to_date", 2, det, rt.strToDateFunc),
-    dfunc.scalar("ascii", 1, det, rt.asciiFunc),
+    dfunc.scalar("ascii", 1, det, shared.asciiFunc),
     // JSON (json.zig); JSON_VALID is SQLite's json_valid().
     dfunc.scalar("json_extract", -1, jdet, json.extractFunc),
     dfunc.scalar("json_value", 2, jdet, json.valueFunc),
@@ -371,7 +372,7 @@ comptime {
 }
 
 /// The version string of MariaDB's VERSION().
-pub const version = "11.8.0-MariaDB-xqlite-" ++ @import("../../sql/func.zig").sqlite_version;
+pub const version = "11.8.0-MariaDB-xqlite-" ++ @import("../../sql/func/func.zig").sqlite_version;
 
 fn versionFunc(ctx: *dfunc.Context, _: []*dfunc.Mem) void {
     api.resultText(ctx, version, .static);

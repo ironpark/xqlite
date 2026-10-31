@@ -569,7 +569,7 @@ pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u
                 m = @import("pragma.zig").vtabRegister(db, name);
             }
             if (m == null and name.len >= 4 and ctype.eqlNoCase(name[0..4], "json")) {
-                m = @import("json.zig").jsonVtabRegister(db, name);
+                m = @import("func/json.zig").jsonVtabRegister(db, name);
             }
             if (comptime config.ext_carray) if (m == null and db.enable_carray and ctype.eqlNoCase(name, "carray")) {
                 m = @import("../ext/carray.zig").register(db);

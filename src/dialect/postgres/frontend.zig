@@ -157,7 +157,7 @@ comptime {
 }
 
 /// The version string of PostgreSQL's version().
-pub const version = "PostgreSQL 17.0 (xqlite " ++ @import("../../sql/func.zig").sqlite_version ++ ")";
+pub const version = "PostgreSQL 17.0 (xqlite " ++ @import("../../sql/func/func.zig").sqlite_version ++ ")";
 
 fn versionFunc(ctx: *dfunc.Context, _: []*dfunc.Mem) void {
     api.resultText(ctx, version, .static);

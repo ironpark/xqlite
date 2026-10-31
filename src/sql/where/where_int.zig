@@ -24,9 +24,9 @@
 //! printed).
 
 const std = @import("std");
-const int = @import("sqlite_int.zig");
+const int = @import("../sqlite_int.zig");
 const flags = @import("xqlite_base").flags;
-const OP = @import("../vdbe/opcodes.zig").OP;
+const OP = @import("../../vdbe/opcodes.zig").OP;
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -43,7 +43,7 @@ const TK = int.TK;
 /// XQ_WHERETRACE environment variable is set.
 pub fn traceEnabled() bool {
     if (@import("builtin").mode != .debug) return false;
-    return @import("../util/platform.zig").getenv("XQ_WHERETRACE") != null;
+    return @import("../../util/platform.zig").getenv("XQ_WHERETRACE") != null;
 }
 
 /// Port of sqlite3WhereLoopPrint() (with a WhereClause): one line

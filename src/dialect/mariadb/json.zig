@@ -1575,11 +1575,7 @@ const Agg = struct {
     bad: bool = false,
 };
 
-fn aggState(ctx: *Context) ?*align(1) Agg {
-    return dfunc.aggState(Agg, ctx, .make);
-}
-
-fn aggBuf(ctx: *Context, st: *align(1) Agg) ?*std.ArrayList(u8) {
+fn aggBuf(ctx: *Context, st: *Agg) ?*std.ArrayList(u8) {
     if (st.buf) |b| return b;
     const gpa = dfunc.gpa(ctx);
     const b = gpa.create(std.ArrayList(u8)) catch {
@@ -1594,7 +1590,7 @@ fn aggBuf(ctx: *Context, st: *align(1) Agg) ?*std.ArrayList(u8) {
 /// JSON_ARRAYAGG(value[, limit]): `[a,b]` (no spaces between the
 /// items), at most `limit` items.
 pub fn arrayaggStep(ctx: *Context, argv: []*Mem) void {
-    const st = aggState(ctx) orelse return;
+    const st = dfunc.aggState(Agg, ctx, true) orelse return;
     const b = aggBuf(ctx, st) orelse return;
     if (argv.len > 1 and st.n >= @max(api.valueInt64(argv[1]), 0)) return;
     const gpa = dfunc.gpa(ctx);
@@ -1605,7 +1601,7 @@ pub fn arrayaggStep(ctx: *Context, argv: []*Mem) void {
 
 /// JSON_OBJECTAGG(key, value): `{"k":v, "k2":v2}`.
 pub fn objectaggStep(ctx: *Context, argv: []*Mem) void {
-    const st = aggState(ctx) orelse return;
+    const st = dfunc.aggState(Agg, ctx, true) orelse return;
     const b = aggBuf(ctx, st) orelse return;
     const gpa = dfunc.gpa(ctx);
     if (isNull(argv[0])) {
@@ -1623,7 +1619,7 @@ pub fn objectaggStep(ctx: *Context, argv: []*Mem) void {
 fn aggFinal(comptime open: u8, comptime close: u8) dfunc.FinalFn {
     return struct {
         fn call(ctx: *Context) void {
-            const st = dfunc.aggState(Agg, ctx, .find) orelse return api.resultNull(ctx);
+            const st = dfunc.aggState(Agg, ctx, false) orelse return api.resultNull(ctx);
             const gpa = dfunc.gpa(ctx);
             const buf = st.buf orelse return api.resultNull(ctx);
             defer {

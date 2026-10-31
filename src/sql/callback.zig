@@ -10,7 +10,7 @@
 const std = @import("std");
 const int = @import("sqlite_int.zig");
 const ctype = @import("xqlite_base").ctype;
-const func = @import("func.zig");
+const func = @import("func/func.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const flags = @import("xqlite_base").flags;
 
@@ -155,7 +155,7 @@ fn funcHash(c: u8, n: usize) usize {
 /// The built-in functions, in the order sqlite3RegisterBuiltinFunctions()
 /// adds them to the table.
 const builtin_defs = @import("alter.zig").funcs ++ @import("window.zig").funcs ++
-    @import("date.zig").funcs ++ @import("json.zig").funcs ++ func.funcs;
+    @import("func/date.zig").funcs ++ @import("func/json.zig").funcs ++ func.funcs;
 
 /// sqlite3BuiltinFunctions: the hash table of the built-in functions,
 /// built at compile time as sqlite3InsertBuiltinFuncs() builds it at

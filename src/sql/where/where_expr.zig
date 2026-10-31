@@ -1,20 +1,20 @@
 //! Port of whereexpr.c: splitting and analysis of the WHERE clause.
 
 const std = @import("std");
-const int = @import("sqlite_int.zig");
+const int = @import("../sqlite_int.zig");
 const wi = @import("where_int.zig");
-const util = @import("util.zig");
-const expr_mod = @import("expr.zig");
-const ec = @import("expr_code.zig");
-const func = @import("func.zig");
+const util = @import("../util.zig");
+const expr_mod = @import("../expr.zig");
+const ec = @import("../expr_code.zig");
+const func = @import("../func/func.zig");
 const numeric = @import("xqlite_base").numeric;
-const resolve = @import("resolve.zig");
-const select_mod = @import("select.zig");
-const build = @import("build.zig");
-const coll_mod = @import("coll.zig");
+const resolve = @import("../resolve.zig");
+const select_mod = @import("../select.zig");
+const build = @import("../build.zig");
+const coll_mod = @import("../coll.zig");
 const ctype = @import("xqlite_base").ctype;
-const aux = @import("../vdbe/aux.zig");
-const vi = @import("../vdbe/vdbe_int.zig");
+const aux = @import("../../vdbe/aux.zig");
+const vi = @import("../../vdbe/vdbe_int.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -42,7 +42,7 @@ const TERM = wi.TERM;
 const WO = wi.WO;
 const getMask = wi.getMask;
 
-const INDEX_CONSTRAINT = @import("vtab.zig").INDEX_CONSTRAINT;
+const INDEX_CONSTRAINT = @import("../vtab.zig").INDEX_CONSTRAINT;
 
 /// ExprIsVtab(): a column of a virtual table.
 fn exprIsVtab(e: *const Expr) bool {
@@ -262,7 +262,7 @@ fn isAuxiliaryVtabOperator(db: *int.Sqlite3, e: *Expr, e_op2: *u8, pp_left: *?*E
         // case here).
         const col0 = list.at(0).expr.?;
         if (exprIsVtab(col0)) {
-            const vtab = @import("vtab.zig");
+            const vtab = @import("../vtab.zig");
             const pv = vtab.getVTable(db, col0.y.tab.?).?.vtab.?;
             std.debug.assert(!e.flags.IntValue);
             if (pv.module.x_find_function) |x_find| {

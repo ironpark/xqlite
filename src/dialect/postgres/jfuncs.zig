@@ -990,8 +990,8 @@ const objectJsonb = dfunc.bind(objectFromArrays, .{true});
 
 // ============================================================ aggregates
 
-/// The state of an aggregate (in the aggregate context, zeroed): a text
-/// buffer of the connection's allocator and the number of items.
+/// The state of an aggregate: a text buffer of the connection's
+/// allocator and the number of items.
 const Agg = struct {
     /// A text buffer of gpa(ctx), null before the first item.
     list: ?*std.ArrayList(u8),
@@ -1000,11 +1000,7 @@ const Agg = struct {
     kind: u64,
 };
 
-fn aggState(ctx: *Context) ?*align(1) Agg {
-    return dfunc.aggState(Agg, ctx, .make);
-}
-
-fn aggList(ctx: *Context, st: *align(1) Agg) ?*std.ArrayList(u8) {
+fn aggList(ctx: *Context, st: *Agg) ?*std.ArrayList(u8) {
     if (st.list) |l| return l;
     const l = dfunc.gpa(ctx).create(std.ArrayList(u8)) catch {
         api.resultErrorNomem(ctx);
@@ -1016,7 +1012,7 @@ fn aggList(ctx: *Context, st: *align(1) Agg) ?*std.ArrayList(u8) {
 }
 
 /// Take the buffer of the state (the caller frees it with aggFree()).
-fn aggTake(st: *align(1) Agg) ?*std.ArrayList(u8) {
+fn aggTake(st: *Agg) ?*std.ArrayList(u8) {
     const l = st.list orelse return null;
     st.list = null;
     return l;
@@ -1028,7 +1024,7 @@ fn aggFree(ctx: *Context, l: *std.ArrayList(u8)) void {
 }
 
 /// Append `sep` (unless first) and the JSON text of `m`.
-fn aggAppend(ctx: *Context, st: *align(1) Agg, sep: []const u8, m: *Mem, jsonb: bool) void {
+fn aggAppend(ctx: *Context, st: *Agg, sep: []const u8, m: *Mem, jsonb: bool) void {
     var c: Call = .init(ctx);
     defer c.deinit();
     const v = c.valueOf(m, jsonb) orelse return;
@@ -1036,7 +1032,7 @@ fn aggAppend(ctx: *Context, st: *align(1) Agg, sep: []const u8, m: *Mem, jsonb: 
     aggAppendText(ctx, st, sep, t);
 }
 
-fn aggAppendText(ctx: *Context, st: *align(1) Agg, sep: []const u8, t: []const u8) void {
+fn aggAppendText(ctx: *Context, st: *Agg, sep: []const u8, t: []const u8) void {
     const g = dfunc.gpa(ctx);
     const l = aggList(ctx, st) orelse return;
     if (st.n > 0) l.appendSlice(g, sep) catch return api.resultErrorNomem(ctx);
@@ -1045,24 +1041,24 @@ fn aggAppendText(ctx: *Context, st: *align(1) Agg, sep: []const u8, t: []const u
 }
 
 fn aggJsonStep(ctx: *Context, argv: []*Mem) void {
-    const st = aggState(ctx) orelse return;
+    const st = dfunc.aggState(Agg, ctx, true) orelse return;
     aggAppend(ctx, st, ", ", argv[0], false);
 }
 
 fn aggJsonbStep(ctx: *Context, argv: []*Mem) void {
-    const st = aggState(ctx) orelse return;
+    const st = dfunc.aggState(Agg, ctx, true) orelse return;
     aggAppend(ctx, st, ", ", argv[0], true);
 }
 
 fn aggRowsStep(ctx: *Context, argv: []*Mem) void {
-    const st = aggState(ctx) orelse return;
+    const st = dfunc.aggState(Agg, ctx, true) orelse return;
     // json_agg() puts a line break before each row but the first.
     aggAppend(ctx, st, ", \n ", argv[0], false);
 }
 
 /// '[' items ']', NULL for no rows.
 fn aggFinal(ctx: *Context) void {
-    const st = aggStateFinal(ctx) orelse return api.resultNull(ctx);
+    const st = dfunc.aggState(Agg, ctx, false) orelse return api.resultNull(ctx);
     const l = aggTake(st) orelse return api.resultNull(ctx);
     defer aggFree(ctx, l);
     if (st.n == 0) return api.resultNull(ctx);
@@ -1072,13 +1068,9 @@ fn aggFinal(ctx: *Context) void {
     c.resultJsonText(t);
 }
 
-fn aggStateFinal(ctx: *Context) ?*align(1) Agg {
-    return dfunc.aggState(Agg, ctx, .find);
-}
-
 /// json_object_agg(k, v): `{ "k" : v, ... }`.
 fn objectAggStep(ctx: *Context, argv: []*Mem, jsonb: bool, absent_on_null: bool) void {
-    const st = aggState(ctx) orelse return;
+    const st = dfunc.aggState(Agg, ctx, true) orelse return;
     if (isNull(argv[0])) return api.resultError(ctx, "null value not allowed for object key");
     if (absent_on_null and isNull(argv[1])) return;
     var c: Call = .init(ctx);
@@ -1101,7 +1093,7 @@ const objectAggJsonStep = dfunc.bind(objectAggStep, .{ false, false });
 const objectAggJsonbStep = dfunc.bind(objectAggStep, .{ true, false });
 
 fn objectFinal(ctx: *Context, jsonb: bool, unique: bool, empty_null: bool) void {
-    const st = aggStateFinal(ctx) orelse return if (empty_null) api.resultNull(ctx) else emptyObject(ctx, jsonb);
+    const st = dfunc.aggState(Agg, ctx, false) orelse return if (empty_null) api.resultNull(ctx) else emptyObject(ctx, jsonb);
     const l = aggTake(st) orelse return if (empty_null) api.resultNull(ctx) else emptyObject(ctx, jsonb);
     defer aggFree(ctx, l);
     if (st.n == 0) return if (empty_null) api.resultNull(ctx) else emptyObject(ctx, jsonb);
@@ -1141,7 +1133,7 @@ fn objectAggJsonbFinal(ctx: *Context) void {
 
 /// JSON_ARRAYAGG(x, flags): ABSENT ON NULL (flags & 2) skips NULLs.
 fn arrayaggStep(ctx: *Context, argv: []*Mem) void {
-    const st = aggState(ctx) orelse return;
+    const st = dfunc.aggState(Agg, ctx, true) orelse return;
     const o = ctorFlags(argv[1]);
     if (o.absent_on_null and isNull(argv[0])) return;
     aggAppend(ctx, st, ", ", argv[0], o.jsonb);
@@ -1153,12 +1145,12 @@ fn arrayaggFinal(ctx: *Context) void {
 
 fn objectaggStep(ctx: *Context, argv: []*Mem) void {
     const o = ctorFlags(argv[2]);
-    if (aggState(ctx)) |st| st.kind = @as(u64, if (o.jsonb) 16 else 0) | @as(u64, if (o.unique) 8 else 0);
+    if (dfunc.aggState(Agg, ctx, true)) |st| st.kind = @as(u64, if (o.jsonb) 16 else 0) | @as(u64, if (o.unique) 8 else 0);
     objectAggStep(ctx, argv[0..2], o.jsonb, o.absent_on_null);
 }
 
 fn objectaggFinal(ctx: *Context) void {
-    const st = aggStateFinal(ctx) orelse return api.resultNull(ctx);
+    const st = dfunc.aggState(Agg, ctx, false) orelse return api.resultNull(ctx);
     objectFinal(ctx, st.kind & 16 != 0, st.kind & 8 != 0, true);
 }
 

@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const malloc = @import("malloc.zig");
-const func = @import("func.zig");
+const func = @import("func/func.zig");
 const Atomic = @import("../util/platform.zig").Atomic;
 
 // Separate variables, not one struct: a program that never calls

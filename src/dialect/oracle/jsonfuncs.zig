@@ -780,7 +780,7 @@ const AggState = struct {
 };
 
 fn aggState(ctx: *Context, create: bool) ?*AggState {
-    const slot = (if (create) dfunc.aggState(?*AggState, ctx, .make) else dfunc.aggState(?*AggState, ctx, .find)) orelse return null;
+    const slot = dfunc.aggState(?*AggState, ctx, create) orelse return null;
     if (slot.*) |st| return st;
     if (!create) return null;
     const st = dfunc.gpa(ctx).create(AggState) catch return null;

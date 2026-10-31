@@ -1006,13 +1006,12 @@ pub fn newidFunc(ctx: *Context, _: []*Mem) void {
     api.resultText(ctx, &out, .transient);
 }
 
-/// Zeroed by aggregateContext().
 const Avg = struct { sum_i: i128, sum_f: f64, n: i64, has_float: bool };
 
 /// xq_tsql_avg(x): AVG of SQL Server: of integers, an integer (the
 /// quotient truncated), else a float.
 pub fn avgStep(ctx: *Context, argv: []*Mem) void {
-    const a = dfunc.aggState(Avg, ctx, .make) orelse return;
+    const a = dfunc.aggState(Avg, ctx, true) orelse return;
     if (isNull(argv[0])) return;
     switch (api.valueType(argv[0])) {
         vi.SQLITE_INTEGER => {
@@ -1029,7 +1028,7 @@ pub fn avgStep(ctx: *Context, argv: []*Mem) void {
 }
 
 pub fn avgFinal(ctx: *Context) void {
-    const a = dfunc.aggState(Avg, ctx, .find) orelse return api.resultNull(ctx);
+    const a = dfunc.aggState(Avg, ctx, false) orelse return api.resultNull(ctx);
     if (a.n == 0) return api.resultNull(ctx);
     if (!a.has_float) return api.resultInt64(ctx, @intCast(@divTrunc(a.sum_i, a.n)));
     api.resultDouble(ctx, a.sum_f / @as(f64, @floatFromInt(a.n)));

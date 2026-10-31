@@ -5,18 +5,18 @@
 //! (SQLITE_ENABLE_CURSOR_HINTS is off) and scan status.
 
 const std = @import("std");
-const int = @import("sqlite_int.zig");
-const vi = @import("../vdbe/vdbe_int.zig");
-const aux = @import("../vdbe/aux.zig");
+const int = @import("../sqlite_int.zig");
+const vi = @import("../../vdbe/vdbe_int.zig");
+const aux = @import("../../vdbe/aux.zig");
 const wi = @import("where_int.zig");
 const wl = @import("where_loop.zig");
 const where_mod = @import("where.zig");
-const build = @import("build.zig");
-const expr_mod = @import("expr.zig");
-const ec = @import("expr_code.zig");
-const insert = @import("insert.zig");
-const util = @import("util.zig");
-const vtab = @import("vtab.zig");
+const build = @import("../build.zig");
+const expr_mod = @import("../expr.zig");
+const ec = @import("../expr_code.zig");
+const insert = @import("../insert.zig");
+const util = @import("../util.zig");
+const vtab = @import("../vtab.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;

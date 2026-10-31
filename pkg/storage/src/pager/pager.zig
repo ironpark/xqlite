@@ -85,7 +85,23 @@ pub const JournalMode = enum(u3) {
     }
 };
 
-pub const Synchronous = enum { off, normal, full, extra };
+pub const Synchronous = enum {
+    off,
+    normal,
+    full,
+    extra,
+
+    /// The level of a safety level number (PAGER_SYNCHRONOUS_OFF is 1 ...
+    /// EXTRA 4, in its low 3 bits; others are FULL).
+    pub fn fromLevel(level: u8) Synchronous {
+        return switch (level & 0x07) {
+            1 => .off,
+            2 => .normal,
+            4 => .extra,
+            else => .full,
+        };
+    }
+};
 
 /// The settings of sqlite3PagerSetFlags(): PAGER_SYNCHRONOUS_*,
 /// PAGER_FULLFSYNC, PAGER_CKPT_FULLFSYNC and PAGER_CACHESPILL.

@@ -70,7 +70,7 @@ pub fn build(b: *std.Build) void {
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/cli/main.zig"),
             // Target and optimization levels must be explicitly wired in when
             // defining an executable or library (in the root module), and you
             // can also hardcode a specific target for an executable or library
@@ -336,7 +336,7 @@ pub fn build(b: *std.Build) void {
         .imports = engineImports(b, wasi_target, optimize),
     });
     const wasi_exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/cli/main.zig"),
         .target = wasi_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "xqlite", .module = wasi_mod }},
@@ -344,7 +344,7 @@ pub fn build(b: *std.Build) void {
     const wasi_safe_exe = b.addExecutable(.{
         .name = "xqlite",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/cli/main.zig"),
             .target = wasi_target,
             .optimize = .safe,
             .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
@@ -420,7 +420,7 @@ pub fn build(b: *std.Build) void {
     const safe_exe = if (optimize == .safe) exe else b.addExecutable(.{
         .name = "xqlite",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/cli/main.zig"),
             .target = target,
             .optimize = .ReleaseSafe,
             .imports = &.{.{ .name = "xqlite", .module = mod }},

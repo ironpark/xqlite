@@ -847,10 +847,10 @@ pub const Parser = struct {
             .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm DROP NOT NULL" => ir.ddl.dropConstraint(p, s.m(-6).srclist, null, s.m(-3).tok),
             .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm SET NOT NULL onconf" => ir.ddl.setNotNull(p, s.m(-7).srclist, s.m(-4).tok, s.m(-2).tok),
             .@"cmd ::= ALTER TABLE fullname ADD CONSTRAINT nm CHECK LP expr RP onconf" => {
-                ir.ddl.addConstraint(p, s.m(-8).srclist, s.m(-6).tok, s.m(-5).tok, between(s.m(-3).tok, s.m(-1).tok), s.m(-2).expr);
+                ir.ddl.addConstraint(p, s.m(-8).srclist, s.m(-6).tok, s.m(-5).tok, textBetween(s.m(-3).tok, s.m(-1).tok), s.m(-2).expr);
             },
             .@"cmd ::= ALTER TABLE fullname ADD CHECK LP expr RP onconf" => {
-                ir.ddl.addConstraint(p, s.m(-6).srclist, s.m(-4).tok, null, between(s.m(-3).tok, s.m(-1).tok), s.m(-2).expr);
+                ir.ddl.addConstraint(p, s.m(-6).srclist, s.m(-4).tok, null, textBetween(s.m(-3).tok, s.m(-1).tok), s.m(-2).expr);
             },
             .@"cmd ::= create_vtab" => ir.ddl.finishVtab(p, null),
             .@"cmd ::= create_vtab LP vtabarglist RP" => ir.ddl.finishVtab(p, s.m(0).tok),
@@ -1068,8 +1068,8 @@ fn spanLen(from: Token, to: Token) u32 {
 }
 
 /// The text between two tokens (exclusive of both).
-fn between(open: Token, close: Token) []const u8 {
-    const z = open.z.? + open.n;
+fn textBetween(open: Token, close: Token) []const u8 {
+    const z = tokEnd(open).?;
     return z[0 .. @intFromPtr(close.z.?) - @intFromPtr(z)];
 }
 

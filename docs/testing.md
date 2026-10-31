@@ -455,7 +455,7 @@ zig build wasm-example                   # wasm32-freestanding 모듈을 Node.js
 
 `zig build test-wasi`는 wasmtime(`PATH`)이 필요하고 `zig build check`에는 들어 있지 않습니다. 하는 일은 다음과 같습니다.
 
-- 모듈(`src/root.zig`), CLI(`src/main.zig`), VFS·스토리지·공용 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
+- 모듈(`src/root.zig`), CLI(`src/cli/main.zig`), VFS·스토리지·공용 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
 - `xqt wasi`: ReleaseSafe로 빌드한 WASI `xqlite`를 `wasmtime run --dir . xqlite.wasm ...`으로 검사 디렉터리에서 돌립니다. WASI 빌드가 쓴 파일은 모두 sqlite3의 `PRAGMA integrity_check`를 통과해야 합니다.
 
 | 검사 | 확인하는 것 |

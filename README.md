@@ -269,11 +269,12 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 src/
 ├── root.zig            # 모듈 루트
 ├── xqlite.zig          # 공개 Zig API 이름 목록
-├── main.zig            # CLI (sql, slt, fuzzcheck, 테스트 보조 명령)
-├── shell.zig           # sqlite3 호환 셸
+├── cli/                # CLI xqlite (main.zig: sql, slt, fuzzcheck, 테스트 보조 명령; shell.zig: sqlite3 호환 셸)
 ├── vdbe/               # 바이트코드 VM
 ├── parse/              # SQLite tokenizer, LALR(1) 파서
-├── sql/                # 코드 생성기, 플래너, 내장 함수 (SQLite C 포팅)
+├── sql/                # 코드 생성기 (SQLite C 포팅)
+│   ├── where/          # 플래너 (where.c, wherecode.c, whereexpr.c ...)
+│   └── func/           # 내장 함수 (func.c, date.c, json.c)
 ├── ir/                 # 공통 IR: 빌더 파사드, 구문 트리, lower, render
 ├── catalog/            # 방언 메타데이터(xq_catalog), 시퀀스(xq_sequence)
 ├── dialect/

@@ -87,6 +87,18 @@ pub const JournalMode = enum(u3) {
 
 pub const Synchronous = enum { off, normal, full, extra };
 
+/// The settings of sqlite3PagerSetFlags(): PAGER_SYNCHRONOUS_*,
+/// PAGER_FULLFSYNC, PAGER_CKPT_FULLFSYNC and PAGER_CACHESPILL.
+pub const Flags = struct {
+    level: Synchronous,
+    /// Full syncs (F_FULLFSYNC where there is one).
+    full_fsync: bool = false,
+    /// Full syncs for checkpoints.
+    ckpt_full_fsync: bool = false,
+    /// Dirty pages may be spilled before commit.
+    cache_spill: bool = true,
+};
+
 /// Returns true to retry.
 pub const BusyHandler = wal_mod.BusyHandler;
 
@@ -271,10 +283,10 @@ pub const Pager = struct {
     journal_on: bool = false,
 
     /// Open savepoints, outermost first (aSavepoint).
-    savepoints: std.ArrayListUnmanaged(Savepoint) = .empty,
+    savepoints: std.ArrayList(Savepoint) = .empty,
     /// The sub-journal: records of a 4-byte page number and the page's
     /// content as it was when first written after a savepoint opened.
-    sub_journal: std.ArrayListUnmanaged(u8) = .empty,
+    sub_journal: std.ArrayList(u8) = .empty,
     /// Records in the sub-journal (nSubRec).
     n_sub_rec: u32 = 0,
 
@@ -341,7 +353,7 @@ pub const Pager = struct {
         };
         errdefer p.cache.deinit();
         p.cache.setCacheSize(opts.cache_size);
-        p.setFlags(opts.synchronous, opts.full_fsync, false, true);
+        p.setFlags(.{ .level = opts.synchronous, .full_fsync = opts.full_fsync });
         p.setSectorSize();
         try p.setPageSize(opts.page_size, null);
         return p;
@@ -480,20 +492,18 @@ pub const Pager = struct {
         return p.temp_file or p.mem_vfs;
     }
 
-    /// Port of sqlite3PagerSetFlags(). `ckpt_full_fsync` is
-    /// PAGER_CKPT_FULLFSYNC: full syncs for checkpoints.
-    pub fn setFlags(p: *Pager, level: Synchronous, full_fsync: bool, ckpt_full_fsync: bool, cache_spill: bool) void {
-        p.no_sync = p.temp_file or level == .off;
-        p.full_sync = !p.no_sync and (level == .full or level == .extra);
-        p.extra_sync = !p.no_sync and level == .extra;
-        p.sync_flags = .{ .full = !p.no_sync and full_fsync };
+    /// Port of sqlite3PagerSetFlags().
+    pub fn setFlags(p: *Pager, f: Flags) void {
+        p.no_sync = p.temp_file or f.level == .off;
+        p.full_sync = !p.no_sync and (f.level == .full or f.level == .extra);
+        p.extra_sync = !p.no_sync and f.level == .extra;
+        p.sync_flags = .{ .full = !p.no_sync and f.full_fsync };
         // SQLITE_SYNC_NORMAL is 2, SQLITE_SYNC_FULL 3.
-        const sync: u8 = if (p.no_sync) 0 else if (full_fsync) 3 else 2;
+        const sync: u8 = if (p.no_sync) 0 else if (f.full_fsync) 3 else 2;
         p.wal_sync_flags = sync << 2;
         if (p.full_sync) p.wal_sync_flags |= sync;
-        if (ckpt_full_fsync and !p.no_sync) p.wal_sync_flags |= 3 << 2;
-        // PAGER_CACHESPILL: dirty pages may be spilled before commit.
-        p.no_spill_off = !cache_spill;
+        if (f.ckpt_full_fsync and !p.no_sync) p.wal_sync_flags |= 3 << 2;
+        p.no_spill_off = !f.cache_spill;
     }
 
     pub fn setCacheSize(p: *Pager, n: i32) void {

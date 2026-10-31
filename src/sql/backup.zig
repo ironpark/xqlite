@@ -265,7 +265,7 @@ pub fn step(b: *Backup, n_page: i32) i32 {
         b.src.commitPhaseOne() catch {};
         b.src.commitPhaseTwo(false) catch {};
     }
-    if (rc == RC.IOERR | (12 << 8)) rc = RC.NOMEM;
+    if (rc == RC.IOERR_NOMEM) rc = RC.NOMEM;
     b.rc = rc;
     return rc;
 }

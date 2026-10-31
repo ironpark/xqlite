@@ -84,17 +84,13 @@ pub fn register(db: *Sqlite3, name: []const u8) ?*int.Module {
         destroySpec(spec);
         return null;
     };
-    return vtab.createModuleInternal(db, name, &module, spec, &destroySpecOpaque);
+    return vtab.createModuleInternal(db, name, &module, vtab.Module.auxFor(connect, spec), int.destructor(destroySpec));
 }
 
 fn destroySpec(spec: *Spec) void {
     const gpa = spec.arena.child_allocator;
     spec.arena.deinit();
     gpa.destroy(spec);
-}
-
-fn destroySpecOpaque(p: ?*anyopaque) void {
-    destroySpec(@ptrCast(@alignCast(p.?)));
 }
 
 fn readSpec(a: std.mem.Allocator, text: []const u8) error{ OutOfMemory, Bad }![]Col {
@@ -191,8 +187,8 @@ fn appendQuoted(a: std.mem.Allocator, out: *std.ArrayList(u8), name: []const u8)
     try out.append(a, '"');
 }
 
-fn connect(db: *Sqlite3, aux: ?*anyopaque, _: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, _: *?[:0]u8) i32 {
-    const spec: ?*const Spec = @ptrCast(@alignCast(aux));
+/// `spec` is null for plain OPENJSON (no WITH).
+fn connect(db: *Sqlite3, spec: ?*const Spec, _: []const [:0]const u8, pp_vtab: *?*vtab.Vtab, _: *?[:0]u8) i32 {
     var sql: std.ArrayList(u8) = .empty;
     defer sql.deinit(db.gpa);
     const a = db.gpa;
@@ -428,7 +424,7 @@ fn column(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
 
 const module: vtab.Module = .{
     .i_version = 0,
-    .x_connect = connect,
+    .x_connect = vtab.Module.constructor(connect),
     .x_best_index = bestIndex,
     .x_disconnect = lifecycle.disconnect,
     .x_open = lifecycle.open,

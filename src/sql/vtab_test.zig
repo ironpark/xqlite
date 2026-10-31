@@ -1090,11 +1090,8 @@ test "vtab: the result codes and messages of module methods reach the API" {
     defer fail_method = .none;
     try c.expectRows("SELECT rowid, a FROM errepo", "1|7\n");
     main_mod.extendedResultCodes(c.db, true);
-    const CONSTRAINT_VTAB = RC.CONSTRAINT | (9 << 8);
-    const IOERR_WRITE = RC.IOERR | (3 << 8);
-    const CORRUPT_VTAB = RC.CORRUPT | (1 << 8);
     for ([_]ErrMethod{ .open, .filter, .next, .column, .rowid }) |m| {
-        for ([_]i32{ CONSTRAINT_VTAB, IOERR_WRITE, RC.BUSY_SNAPSHOT, CORRUPT_VTAB, RC.ERROR, RC.NOMEM, RC.TOOBIG, RC.INTERRUPT }) |code| {
+        for ([_]i32{ RC.CONSTRAINT_VTAB, RC.IOERR_WRITE, RC.BUSY_SNAPSHOT, RC.CORRUPT_VTAB, RC.ERROR, RC.NOMEM, RC.TOOBIG, RC.INTERRUPT }) |code| {
             fail_method = m;
             fail_code = code;
             var stmt: ?*vi.Vdbe = null;

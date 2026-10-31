@@ -339,7 +339,7 @@ pub fn errStr(rc: i32) [:0]const u8 {
         "warning message",
     };
     // SQLITE_ABORT_ROLLBACK = SQLITE_ABORT | (2<<8).
-    if (rc == RC.ABORT | (2 << 8)) return "abort due to ROLLBACK";
+    if (rc == RC.ABORT_ROLLBACK) return "abort due to ROLLBACK";
     if (rc == RC.ROW) return "another row available";
     if (rc == RC.DONE) return "no more rows available";
     const primary: usize = @intCast(rc & 0xff);

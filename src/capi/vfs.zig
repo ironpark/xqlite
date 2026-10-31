@@ -143,9 +143,6 @@ fn fromCFlags(b: c_int) c.vfs.OpenFlags {
     return f;
 }
 
-const IOERR_NOMEM = RC.IOERR | (12 << 8);
-const IOERR_DELETE_NOENT = RC.IOERR | (23 << 8);
-
 /// The result code of a VFS error.
 pub fn errCode(err: Error) c_int {
     return c.int.errorCode(err);
@@ -155,12 +152,12 @@ pub fn errCode(err: Error) c_int {
 fn codeErr(rc: c_int) Error {
     return switch (rc) {
         RC.IOERR_SHORT_READ => error.ShortRead,
-        RC.IOERR_LOCK, RC.IOERR | (8 << 8), RC.IOERR | (9 << 8) => error.LockErr,
+        RC.IOERR_LOCK, RC.IOERR_UNLOCK, RC.IOERR_RDLOCK => error.LockErr,
         RC.IOERR_SHMOPEN => error.ShmOpen,
         RC.IOERR_SHMSIZE => error.ShmSize,
         RC.IOERR_SHMMAP => error.ShmMap,
         RC.IOERR_SHMLOCK => error.ShmLock,
-        IOERR_NOMEM => error.OutOfMemory,
+        RC.IOERR_NOMEM => error.OutOfMemory,
         else => switch (rc & 0xff) {
             RC.BUSY, RC.LOCKED => error.Busy,
             RC.CANTOPEN => error.CantOpen,
@@ -778,7 +775,7 @@ fn cDelete(ptr: *anyopaque, path: []const u8, sync_dir: bool) Error!void {
     const S = struct {
         fn f(z: [*:0]const u8, vv: *sqlite3_vfs, s: bool) Error!void {
             const rc = (vv.xDelete orelse return error.IoErr)(vv, z, @intFromBool(s));
-            if (rc == IOERR_DELETE_NOENT) return;
+            if (rc == RC.IOERR_DELETE_NOENT) return;
             try check(rc);
         }
     };

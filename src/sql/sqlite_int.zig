@@ -1533,6 +1533,10 @@ pub const RC = struct {
     pub const IOERR_READ: i32 = IOERR | (1 << 8);
     pub const IOERR_WRITE: i32 = IOERR | (3 << 8);
     pub const IOERR_FSYNC: i32 = IOERR | (4 << 8);
+    pub const IOERR_UNLOCK: i32 = IOERR | (8 << 8);
+    pub const IOERR_RDLOCK: i32 = IOERR | (9 << 8);
+    pub const IOERR_NOMEM: i32 = IOERR | (12 << 8);
+    pub const IOERR_DELETE_NOENT: i32 = IOERR | (23 << 8);
     pub const CORRUPT_VTAB: i32 = CORRUPT | (1 << 8);
     pub const CANTOPEN_NOTEMPDIR: i32 = CANTOPEN | (1 << 8);
     pub const CANTOPEN_ISDIR: i32 = CANTOPEN | (2 << 8);
@@ -2392,13 +2396,6 @@ test "resultCode() keeps every extended code through its error" {
         try codes.append(std.testing.allocator, @field(RC, name));
     }
     for ([_]i32{
-        RC.IOERR | (3 << 8), // IOERR_WRITE
-        RC.IOERR | (12 << 8), // IOERR_NOMEM
-        RC.CORRUPT | (1 << 8), // CORRUPT_VTAB
-        RC.CANTOPEN | (1 << 8), // CANTOPEN_NOTEMPDIR
-        RC.CONSTRAINT | (2 << 8), // CONSTRAINT_COMMITHOOK
-        RC.CONSTRAINT | (4 << 8), // CONSTRAINT_FUNCTION
-        RC.CONSTRAINT | (9 << 8), // CONSTRAINT_VTAB
         RC.NOTICE | (1 << 8), // NOTICE_RECOVER_WAL
         RC.WARNING | (1 << 8), // WARNING_AUTOINDEX
         RC.AUTH | (1 << 8), // AUTH_USER
@@ -2417,13 +2414,13 @@ test "resultCode() keeps every extended code through its error" {
     }
     try std.testing.expectEqual(error.Constraint, codeError(RC.CONSTRAINT_UNIQUE));
     try std.testing.expectEqual(error.BusySnapshot, codeError(RC.BUSY_SNAPSHOT));
-    try std.testing.expectEqual(error.Busy, codeError(RC.BUSY | (3 << 8)));
+    try std.testing.expectEqual(error.Busy, codeError(RC.BUSY_TIMEOUT));
     try std.testing.expectEqual(error.Error, codeError(RC.ROW));
     try std.testing.expectEqual(error.Error, codeError(RC.ERROR_MISSING_COLLSEQ));
     try std.testing.expectEqual(RC.ERROR_MISSING_COLLSEQ, resultCode(error.Error, RC.ERROR_MISSING_COLLSEQ));
     try std.testing.expectEqual(RC.ROW, resultCode(error.Error, RC.ROW));
     try std.testing.expectEqual(RC.CORRUPT_INDEX, resultCode(error.Corrupt, RC.CORRUPT_INDEX));
-    try std.testing.expectEqual(RC.IOERR | (3 << 8), resultCode(error.IoErr, RC.IOERR | (3 << 8)));
+    try std.testing.expectEqual(RC.IOERR_WRITE, resultCode(error.IoErr, RC.IOERR_WRITE));
     // A recorded code of another error is not taken.
     try std.testing.expectEqual(RC.BUSY, resultCode(error.Busy, RC.CONSTRAINT_UNIQUE));
     try std.testing.expectEqual(RC.BUSY, resultCode(error.Busy, RC.BUSY_SNAPSHOT));

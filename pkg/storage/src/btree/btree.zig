@@ -317,8 +317,8 @@ pub const Btree = struct {
     }
 
     /// Port of sqlite3BtreeSetPagerFlags().
-    pub fn setPagerFlags(bt: *Btree, level: pager_mod.Synchronous, full_fsync: bool, ckpt_full_fsync: bool, cache_spill: bool) void {
-        bt.pager.setFlags(level, full_fsync, ckpt_full_fsync, cache_spill);
+    pub fn setPagerFlags(bt: *Btree, f: pager_mod.Flags) void {
+        bt.pager.setFlags(f);
     }
 
     /// Port of sqlite3BtreeSetSpillSize(): set the cache spill threshold

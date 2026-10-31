@@ -146,7 +146,7 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
     if (bt) |b| {
         // The pager settings of main.
         if (db.dbs.items[0].bt) |main_bt| _ = b.secureDelete(main_bt.secureDelete(null));
-        b.setPagerFlags(.full, db.flags.FullFSync, db.flags.CkptFullFSync, db.flags.CacheSpill);
+        b.setPagerFlags(.{ .level = .full, .full_fsync = db.flags.FullFSync, .ckpt_full_fsync = db.flags.CkptFullFSync, .cache_spill = db.flags.CacheSpill });
     }
     // SQLITE_DEFAULT_SYNCHRONOUS+1.
     db.dbs.items[db.dbs.items.len - 1].safety_level = 3;
@@ -168,7 +168,7 @@ fn attachFunc(ctx: *Context, argv: []*Mem) void {
         build.resetAllSchemasOfConnection(db);
         // The entry is gone unless schema resets are deferred.
         if (db.dbs.items.len > i_db) dropEntry(db, i_db);
-        if (rc == RC.NOMEM or rc == RC.IOERR | (12 << 8)) {
+        if (rc == RC.NOMEM or rc == RC.IOERR_NOMEM) {
             db.oomFault();
             if (err_dyn) |m| gpa.free(m);
             err_dyn = gpa.dupeSentinel(u8, "out of memory", 0) catch null;
@@ -213,7 +213,7 @@ fn reopenAsMemdb(ctx: *Context, db: *Sqlite3) void {
     if (db.dbs.items[0].bt) |main_bt| {
         if (main_bt != bt) _ = bt.secureDelete(main_bt.secureDelete(null));
     }
-    bt.setPagerFlags(.full, db.flags.FullFSync, db.flags.CkptFullFSync, db.flags.CacheSpill);
+    bt.setPagerFlags(.{ .level = .full, .full_fsync = db.flags.FullFSync, .ckpt_full_fsync = db.flags.CkptFullFSync, .cache_spill = db.flags.CacheSpill });
     d.safety_level = 3;
     db.init.i_db = 0;
     db.m_db_flags.SchemaKnownOk = false;

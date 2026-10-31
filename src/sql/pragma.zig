@@ -404,7 +404,7 @@ fn setAllPagerFlags(db: *Sqlite3) void {
             4 => .extra,
             else => .full,
         };
-        bt.setPagerFlags(level, db.flags.FullFSync, db.flags.CkptFullFSync, db.flags.CacheSpill);
+        bt.setPagerFlags(.{ .level = level, .full_fsync = db.flags.FullFSync, .ckpt_full_fsync = db.flags.CkptFullFSync, .cache_spill = db.flags.CacheSpill });
     }
 }
 

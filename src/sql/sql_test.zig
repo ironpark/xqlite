@@ -1109,13 +1109,11 @@ test "sql: the result codes of application functions reach the API" {
     const utf8 = @import("../vdbe/vdbe_int.zig").ENC.UTF8;
     try testing.expectEqual(RC.OK, callback.createFunction(c.db, "failcode", -1, utf8, null, failcode, null, null, null));
     var buf: [128]u8 = undefined;
-    const IOERR_WRITE = RC.IOERR | (3 << 8);
-    const CONSTRAINT_FUNCTION = RC.CONSTRAINT | (4 << 8);
     for ([_]struct { i32, []const u8 }{
-        .{ IOERR_WRITE, "disk I/O error" },
+        .{ RC.IOERR_WRITE, "disk I/O error" },
         .{ RC.BUSY_SNAPSHOT, "database is locked" },
         .{ RC.CORRUPT, "database disk image is malformed" },
-        .{ CONSTRAINT_FUNCTION, "constraint failed" },
+        .{ RC.CONSTRAINT_FUNCTION, "constraint failed" },
         .{ RC.ERROR_MISSING_COLLSEQ, "SQL logic error" },
         .{ RC.ABORT_ROLLBACK, "abort due to ROLLBACK" },
     }) |case| {

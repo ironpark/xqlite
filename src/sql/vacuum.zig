@@ -229,7 +229,7 @@ pub fn runVacuum(v: *Vdbe, db: *Sqlite3, i_db: usize, out: ?*Mem) i32 {
         }
         t.setCacheSize(db.dbs.items[i_db].schema.cache_size);
         _ = t.setSpillSize(@intCast(main.setSpillSize(0)));
-        t.setPagerFlags(level, full_fsync, ckpt_full_fsync, true);
+        t.setPagerFlags(.{ .level = level, .full_fsync = full_fsync, .ckpt_full_fsync = ckpt_full_fsync });
 
         // Lock the original now, before its page size is read: a WAL
         // database cannot change it.

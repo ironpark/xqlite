@@ -852,11 +852,18 @@ fn renameEditSql(ctx: *Context, rename: *RenameCtx, sql: [:0]const u8, new: ?[]c
             }) catch return RC.NOMEM;
             replace = tmp.?;
         }
-        const off = @intFromPtr(tz) - @intFromPtr(sql.ptr);
+        const off = offsetIn(sql, tz);
         out.replaceRange(gpa, off, best.t.n, replace) catch return RC.NOMEM;
     }
     api.resultText(ctx, out.items, .transient);
     return RC.OK;
+}
+
+/// The offset in `sql` of `z`, a pointer into it (a token's text).
+fn offsetIn(sql: []const u8, z: [*]const u8) usize {
+    const off = @intFromPtr(z) - @intFromPtr(sql.ptr);
+    std.debug.assert(off <= sql.len);
+    return off;
 }
 
 /// Port of renameSetENames(): set the e_ename of every entry of `list`.
@@ -1397,14 +1404,15 @@ fn dropColumnEdit(ctx: *Context, p: *Parse, sql: [:0]const u8, i_col_arg: i32) i
     if (t.cols.len == 1 or i_col_arg < 0 or i_col_arg >= t.cols.len) return RC.CORRUPT;
     const i_col: usize = @intCast(i_col_arg);
 
-    var start: [*]const u8 = undefined;
-    var end: [*]const u8 = undefined;
+    // The offsets in `sql` of the text cut out.
+    var start: usize = undefined;
+    var end: usize = undefined;
     if (i_col < t.cols.len - 1) {
         // From the name of the column to that of the next.
         const col = renameTokenFind(p, null, key(t.cols[i_col].cn_name)).?;
         const next = renameTokenFind(p, null, key(t.cols[i_col + 1].cn_name)).?;
-        start = col.t.z.?;
-        end = next.t.z.?;
+        start = offsetIn(sql, col.t.z.?);
+        end = offsetIn(sql, next.t.z.?);
     } else {
         // The last column: from the "," before it, found by tokenizing
         // from the name of the previous column, to the end of the column
@@ -1412,17 +1420,17 @@ fn dropColumnEdit(ctx: *Context, p: *Parse, sql: [:0]const u8, i_col_arg: i32) i
         std.debug.assert(t.isOrdinary() and i_col != 0);
         const col = renameTokenFind(p, null, key(t.cols[i_col - 1].cn_name)).?;
         var tk: u8 = 0;
-        var z: [*:0]const u8 = @ptrCast(col.t.z.?);
+        var off = offsetIn(sql, col.t.z.?);
         while (true) {
-            z += getConstraintToken(z, &tk);
+            off += getConstraintToken(sql[off..].ptr, &tk);
             if (tk == TK.COMMA) break;
         }
-        start = z - 1;
-        end = sql.ptr + @as(usize, @intCast(t.u.tab.add_col_offset));
+        start = off - 1;
+        end = @intCast(t.u.tab.add_col_offset);
     }
-    const n_start = @intFromPtr(start) - @intFromPtr(sql.ptr);
-    const rest = std.mem.span(@as([*:0]const u8, @ptrCast(end)));
-    const new = std.mem.concat(db.gpa, u8, &.{ sql[0..n_start], rest }) catch return RC.NOMEM;
+    // To the end of the text, as C's "%s" (a NUL in it ends it).
+    const rest = std.mem.sliceTo(sql[end..], 0);
+    const new = std.mem.concat(db.gpa, u8, &.{ sql[0..start], rest }) catch return RC.NOMEM;
     defer db.gpa.free(new);
     api.resultText(ctx, new, .transient);
     return RC.OK;
@@ -1960,8 +1968,8 @@ fn findConstraintFunc(ctx: *Context, argv: []*Mem) void {
 /// name] CHECK(e), where `first` is the first token of the constraint and
 /// `text` that of `e`. Any ON CONFLICT up to the end of the statement is
 /// part of the constraint.
-pub fn addConstraint(p: *Parse, src: ?*SrcList, first: Token, name: ?Token, text: [*]const u8, n: usize, e: ?*Expr) void {
-    addConstraintImpl(p, src orelse return, first, name, text[0..n], e) catch build.oomFault(p);
+pub fn addConstraint(p: *Parse, src: ?*SrcList, first: Token, name: ?Token, text: []const u8, e: ?*Expr) void {
+    addConstraintImpl(p, src orelse return, first, name, text, e) catch build.oomFault(p);
 }
 
 fn addConstraintImpl(p: *Parse, src: *SrcList, first: Token, name: ?Token, text: []const u8, e: ?*Expr) Oom!void {

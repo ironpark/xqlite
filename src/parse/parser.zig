@@ -847,12 +847,10 @@ pub const Parser = struct {
             .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm DROP NOT NULL" => ir.ddl.dropConstraint(p, s.m(-6).srclist, null, s.m(-3).tok),
             .@"cmd ::= ALTER TABLE fullname ALTER kwcolumn_opt nm SET NOT NULL onconf" => ir.ddl.setNotNull(p, s.m(-7).srclist, s.m(-4).tok, s.m(-2).tok),
             .@"cmd ::= ALTER TABLE fullname ADD CONSTRAINT nm CHECK LP expr RP onconf" => {
-                const lp = s.m(-3).tok.z.?;
-                ir.ddl.addConstraint(p, s.m(-8).srclist, s.m(-6).tok, s.m(-5).tok, lp + 1, @intFromPtr(s.m(-1).tok.z.?) - @intFromPtr(lp) - 1, s.m(-2).expr);
+                ir.ddl.addConstraint(p, s.m(-8).srclist, s.m(-6).tok, s.m(-5).tok, between(s.m(-3).tok, s.m(-1).tok), s.m(-2).expr);
             },
             .@"cmd ::= ALTER TABLE fullname ADD CHECK LP expr RP onconf" => {
-                const lp = s.m(-3).tok.z.?;
-                ir.ddl.addConstraint(p, s.m(-6).srclist, s.m(-4).tok, null, lp + 1, @intFromPtr(s.m(-1).tok.z.?) - @intFromPtr(lp) - 1, s.m(-2).expr);
+                ir.ddl.addConstraint(p, s.m(-6).srclist, s.m(-4).tok, null, between(s.m(-3).tok, s.m(-1).tok), s.m(-2).expr);
             },
             .@"cmd ::= create_vtab" => ir.ddl.finishVtab(p, null),
             .@"cmd ::= create_vtab LP vtabarglist RP" => ir.ddl.finishVtab(p, s.m(0).tok),
@@ -1067,6 +1065,12 @@ pub const syntaxError = ir.stmt.syntaxError;
 /// The length of the text from the start of `from` to the end of `to`.
 fn spanLen(from: Token, to: Token) u32 {
     return @intCast(@intFromPtr(to.z.? + to.n) - @intFromPtr(from.z.?));
+}
+
+/// The text between two tokens (exclusive of both).
+fn between(open: Token, close: Token) []const u8 {
+    const z = open.z.? + open.n;
+    return z[0 .. @intFromPtr(close.z.?) - @intFromPtr(z)];
 }
 
 /// One past the end of a token.

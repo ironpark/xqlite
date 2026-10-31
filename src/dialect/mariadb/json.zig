@@ -1576,8 +1576,7 @@ const Agg = struct {
 };
 
 fn aggState(ctx: *Context) ?*align(1) Agg {
-    const b = api.aggregateContext(ctx, @sizeOf(Agg)) orelse return null;
-    return @ptrCast(b.ptr);
+    return dfunc.aggState(Agg, ctx, .make);
 }
 
 fn aggBuf(ctx: *Context, st: *align(1) Agg) ?*std.ArrayList(u8) {
@@ -1624,9 +1623,7 @@ pub fn objectaggStep(ctx: *Context, argv: []*Mem) void {
 fn aggFinal(comptime open: u8, comptime close: u8) dfunc.FinalFn {
     return struct {
         fn call(ctx: *Context) void {
-            const b = api.aggregateContext(ctx, 0) orelse return api.resultNull(ctx);
-            if (b.len < @sizeOf(Agg)) return api.resultNull(ctx);
-            const st: *align(1) Agg = @ptrCast(b.ptr);
+            const st = dfunc.aggState(Agg, ctx, .find) orelse return api.resultNull(ctx);
             const gpa = dfunc.gpa(ctx);
             const buf = st.buf orelse return api.resultNull(ctx);
             defer {

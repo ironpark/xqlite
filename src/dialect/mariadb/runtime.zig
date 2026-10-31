@@ -873,8 +873,7 @@ const Moments = struct { n: f64 = 0, mean: f64 = 0, m2: f64 = 0 };
 
 /// Welford's running variance.
 pub fn varStep(ctx: *Context, argv: []*Mem) void {
-    const buf = api.aggregateContext(ctx, @sizeOf(Moments)) orelse return;
-    const m: *align(1) Moments = @ptrCast(buf.ptr);
+    const m = dfunc.aggState(Moments, ctx, .make) orelse return;
     if (isNull(argv[0])) return;
     const x = api.valueDouble(argv[0]);
     m.n += 1;
@@ -886,9 +885,7 @@ pub fn varStep(ctx: *Context, argv: []*Mem) void {
 fn varFinal(comptime sample: bool, comptime root: bool) dfunc.FinalFn {
     return struct {
         fn call(ctx: *Context) void {
-            const buf = api.aggregateContext(ctx, 0) orelse return api.resultNull(ctx);
-            if (buf.len < @sizeOf(Moments)) return api.resultNull(ctx);
-            const m: *align(1) Moments = @ptrCast(buf.ptr);
+            const m = dfunc.aggState(Moments, ctx, .find) orelse return api.resultNull(ctx);
             const div = if (sample) m.n - 1 else m.n;
             if (div <= 0) return api.resultNull(ctx);
             const v = m.m2 / div;

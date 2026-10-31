@@ -992,36 +992,33 @@ const objectJsonb = dfunc.bind(objectFromArrays, .{true});
 
 /// The state of an aggregate (in the aggregate context, zeroed): a text
 /// buffer of the connection's allocator and the number of items.
-const Agg = extern struct {
-    /// A *std.ArrayList(u8) of gpa(ctx), 0 before the first item.
-    list: usize,
+const Agg = struct {
+    /// A text buffer of gpa(ctx), null before the first item.
+    list: ?*std.ArrayList(u8),
     n: u64,
     /// JSON_OBJECTAGG(): 8 unique keys, 16 jsonb.
     kind: u64,
 };
 
 fn aggState(ctx: *Context) ?*align(1) Agg {
-    const buf = api.aggregateContext(ctx, @sizeOf(Agg)) orelse return null;
-    return @ptrCast(buf.ptr);
+    return dfunc.aggState(Agg, ctx, .make);
 }
 
 fn aggList(ctx: *Context, st: *align(1) Agg) ?*std.ArrayList(u8) {
-    if (st.list == 0) {
-        const l = dfunc.gpa(ctx).create(std.ArrayList(u8)) catch {
-            api.resultErrorNomem(ctx);
-            return null;
-        };
-        l.* = .empty;
-        st.list = @intFromPtr(l);
-    }
-    return @ptrFromInt(st.list);
+    if (st.list) |l| return l;
+    const l = dfunc.gpa(ctx).create(std.ArrayList(u8)) catch {
+        api.resultErrorNomem(ctx);
+        return null;
+    };
+    l.* = .empty;
+    st.list = l;
+    return l;
 }
 
 /// Take the buffer of the state (the caller frees it with aggFree()).
 fn aggTake(st: *align(1) Agg) ?*std.ArrayList(u8) {
-    if (st.list == 0) return null;
-    const l: *std.ArrayList(u8) = @ptrFromInt(st.list);
-    st.list = 0;
+    const l = st.list orelse return null;
+    st.list = null;
     return l;
 }
 
@@ -1076,9 +1073,7 @@ fn aggFinal(ctx: *Context) void {
 }
 
 fn aggStateFinal(ctx: *Context) ?*align(1) Agg {
-    const buf = api.aggregateContext(ctx, 0) orelse return null;
-    if (buf.len < @sizeOf(Agg)) return null;
-    return @ptrCast(buf.ptr);
+    return dfunc.aggState(Agg, ctx, .find);
 }
 
 /// json_object_agg(k, v): `{ "k" : v, ... }`.

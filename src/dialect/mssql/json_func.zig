@@ -510,8 +510,7 @@ fn readSpec(st: *ForJson, spec: []const u8) error{ OutOfMemory, BadSpec }!void {
 
 /// xq_tsql_for_json(spec, v1, ..., vn): a row of FOR JSON.
 pub fn forJsonStep(ctx: *Context, argv: []*Mem) void {
-    const buf = api.aggregateContext(ctx, @sizeOf(AggSlot)) orelse return;
-    const slot: *align(1) AggSlot = @ptrCast(buf.ptr);
+    const slot = dfunc.aggState(AggSlot, ctx, .make) orelse return;
     const st = slot.st orelse blk: {
         const gpa = dfunc.gpa(ctx);
         const st = gpa.create(ForJson) catch return api.resultErrorNomem(ctx);
@@ -629,9 +628,7 @@ fn openLevel(st: *ForJson, j: usize, vals: []*Mem) error{OutOfMemory}!void {
 }
 
 pub fn forJsonFinal(ctx: *Context) void {
-    const buf = api.aggregateContext(ctx, 0) orelse return api.resultNull(ctx);
-    if (buf.len < @sizeOf(AggSlot)) return api.resultNull(ctx);
-    const slot: *align(1) AggSlot = @ptrCast(buf.ptr);
+    const slot = dfunc.aggState(AggSlot, ctx, .find) orelse return api.resultNull(ctx);
     const st = slot.st orelse return api.resultNull(ctx);
     slot.st = null;
     defer st.deinit();

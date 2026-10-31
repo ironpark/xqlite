@@ -826,7 +826,12 @@ const Range = struct {
     opened: *usize,
 
     pub fn connect(_: std.mem.Allocator, opened: *usize, args: []const []const u8) !Range {
-        const hi = if (args.len > 0) try std.fmt.parseInt(i64, args[0], 10) else 5;
+        // range(hi), or with several arguments, as many as there are.
+        const hi = switch (args.len) {
+            0 => 5,
+            1 => try std.fmt.parseInt(i64, args[0], 10),
+            else => @as(i64, @intCast(args.len)),
+        };
         return .{ .default_hi = hi, .opened = opened };
     }
 
@@ -892,6 +897,9 @@ test "zig api: virtual tables: typed module, table-valued function, CREATE VIRTU
     try testing.expectError(error.Sql, db.exec("CREATE VIRTUAL TABLE bad USING range(nope)"));
     try testing.expectEqualStrings("InvalidCharacter", db.lastError().?.message);
     try db.exec("DROP TABLE r3");
+    // Every module argument reaches connect(), however many.
+    try db.exec("CREATE VIRTUAL TABLE r40 USING range(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40)");
+    try testing.expectEqual(@as(?i64, 40), try db.one(i64, "SELECT max(value) FROM r40", .{}));
     try testing.expect(opened > 0);
 }
 

@@ -113,14 +113,14 @@ pub fn create(conn: Conn, gpa: Allocator, name: []const u8, comptime T: type, co
             engine.declareVtab(h_, T.schema) catch |e| return engine.errorCode(e);
             // argv: module name, database name, table name, then the
             // module arguments.
-            var args_buf: [32][]const u8 = undefined;
-            const n_args = @min(argv.len -| 3, args_buf.len);
-            for (argv[3..][0..n_args], 0..) |z, i| args_buf[i] = z;
+            const args = a.gpa.alloc([]const u8, argv.len -| 3) catch return NOMEM;
+            defer a.gpa.free(args);
+            for (args, argv[argv.len - args.len ..]) |*arg, z| arg.* = z;
             const t = a.gpa.create(Table) catch return NOMEM;
             const res = if (Ctx == void)
-                T.connect(a.gpa, args_buf[0..n_args])
+                T.connect(a.gpa, args)
             else
-                T.connect(a.gpa, a.context, args_buf[0..n_args]);
+                T.connect(a.gpa, a.context, args);
             const user = if (@typeInfo(@TypeOf(res)) == .error_union) res catch |e| {
                 a.gpa.destroy(t);
                 if (e == error.OutOfMemory) return NOMEM;

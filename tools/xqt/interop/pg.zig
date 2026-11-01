@@ -151,5 +151,6 @@ fn jsonColumns(c: *Check, base: *BaseDb) !void {
     _ = try c.sqlite3(db, "INSERT INTO doc (id, body) VALUES (3, '{\"z\":1,\"c\":[2]}')");
     const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT body -> 'c', body ? 'z', body @> '{\"z\": 1}', jsonb_typeof(body -> 'c') FROM doc WHERE id = 3;\n" });
     const got = std.mem.trimEnd(u8, out, "\n");
-    _ = c.expect(std.mem.eql(u8, got, "[2]|1|1|array"), "json read back: {s}", .{got});
+    // The operators are booleans, shown as PostgreSQL shows them.
+    _ = c.expect(std.mem.eql(u8, got, "[2]|t|t|array"), "json read back: {s}", .{got});
 }

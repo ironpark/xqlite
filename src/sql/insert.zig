@@ -25,6 +25,7 @@ const ctype = @import("xqlite_base").ctype;
 const coll_mod = @import("coll.zig");
 const malloc = @import("malloc.zig");
 const auth = @import("auth.zig");
+const typing = @import("typing.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -38,6 +39,7 @@ const Index = int.Index;
 const Column = int.Column;
 const Upsert = int.Upsert;
 const upsert_mod = @import("upsert.zig");
+const dconstraint = @import("../dialect/constraint.zig");
 const NameContext = int.NameContext;
 const Vdbe = vi.Vdbe;
 const Oom = int.Oom;
@@ -348,6 +350,39 @@ pub fn autoincrementEnd(p: *Parse) void {
     }
 }
 
+/// xqlite: the parameters among the values `list` of an INSERT into `t`
+/// (`column` its column list) are of the type of their column
+/// (typing.assign()).
+fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void {
+    for (list.slice(), 0..) |item, i| {
+        // The column the value is for.
+        const j: usize = if (column) |cl| blk: {
+            if (i >= cl.names.items.len) return;
+            const k = build.columnIndex(t, cl.names.items[i]);
+            if (k < 0) continue;
+            break :blk @intCast(k);
+        } else blk: {
+            var n: usize = 0;
+            for (t.cols, 0..) |*c, k| {
+                if (c.col_flags.intersects(COLFLAG.NOINSERT)) continue;
+                if (n == i) break :blk k;
+                n += 1;
+            }
+            return;
+        };
+        typing.assign(p, item.expr.?, try resolve.tableColumnType(p, t, j));
+    }
+}
+
+/// xqlite: the value in register `reg`, stored into a column, through
+/// `def` (typing.storeFunctions()).
+pub fn codeStore(p: *Parse, def: *const int.FuncDef, reg: i32) void {
+    const tmp = expr_mod.getTempReg(p);
+    _ = aux.addFunctionCall(p, 0, reg, tmp, 1, def, 0);
+    _ = aux.addOp3(p.vdbe.?, OP.Move, tmp, reg, 1);
+    expr_mod.releaseTempReg(p, tmp);
+}
+
 /// Port of sqlite3MultiValuesEnd(). VALUES lists are always compound
 /// selects here (the co-routine method is not ported), so nothing to do.
 pub fn multiValuesEnd(p: *Parse, val: ?*Select) void {
@@ -478,6 +513,10 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         reg_from_select = dest.i_sdst;
         rc catch return;
         if (p.n_err != 0) return;
+        if (typing.active(db)) {
+            var it: ?*Select = s;
+            while (it) |term| : (it = term.prior) typeParams(p, t, column, term.e_list.?) catch return build.oomFault(p);
+        }
         aux.endCoroutine(v, reg_yield);
         aux.jumpHere(v, addr_top - 1);
         n_column = @intCast(s.e_list.?.len());
@@ -506,6 +545,7 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         if (list) |l| {
             n_column = @intCast(l.len());
             resolve.resolveExprListNames(&nc, l) catch return;
+            if (typing.active(db)) typeParams(p, t, column, l) catch return build.oomFault(p);
         }
     }
 
@@ -605,6 +645,9 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
     // The ordinary columns, in storage order from reg_data. The rowid and
     // the generated columns come after.
     {
+        // xqlite: the functions the values of the dialect's types go
+        // through (none in SQLite's dialect).
+        const stores = if (is_view) null else typing.storeFunctions(p, t) catch return build.oomFault(p);
         var n_hidden: i32 = 0;
         var i_reg_store = reg_data;
         for (t.cols, 0..) |*c, ii| {
@@ -656,7 +699,10 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 const x = list.?.at(@intCast(k)).expr.?;
                 const y = ec.codeTarget(p, x, i_reg_store);
                 if (y != i_reg_store) _ = aux.addOp2(v, if (x.flags.Subquery) OP.Copy else OP.SCopy, y, i_reg_store);
+                if (stores) |f| if (f[ii]) |def| if (typing.storeNeeded(db, x)) codeStore(p, def, i_reg_store);
+                continue;
             }
+            if (stores) |f| if (f[ii]) |def| codeStore(p, def, i_reg_store);
         }
     }
 
@@ -954,7 +1000,7 @@ fn xferOptimization(p: *Parse, dest: *Table, sel: *Select, on_error_arg: OE, i_d
             addr1 = aux.addOp2(v, OP.Rowid, i_src, reg_rowid);
             if (!vacuum) {
                 const addr2 = aux.addOp3(v, OP.NotExists, i_dest, 0, reg_rowid);
-                build.rowidConstraint(p, on_error, dest);
+                build.rowidConstraint(p, on_error, dest, reg_rowid);
                 aux.jumpHere(v, addr2);
             }
             autoIncStep(p, reg_autoinc, reg_rowid);
@@ -1151,6 +1197,10 @@ fn generateConstraintChecksImpl(
                         aux.jumpHere(v, addr1);
                     },
                     OE.Abort, OE.Rollback, OE.Fail => {
+                        if (dconstraint.notNull(p, t, c, is_update)) |z| {
+                            build.haltDialectConstraint(p, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, z, i_reg, 0);
+                            continue;
+                        }
                         if (on_error == OE.Abort) main_mod.mayAbort(p);
                         const msg = try std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, c.name() });
                         _ = aux.addOp4Str(v, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error.int(), i_reg, msg);
@@ -1186,7 +1236,11 @@ fn generateConstraintChecksImpl(
                 _ = aux.goto_(v, ignore_dest);
             } else {
                 if (on_error == OE.Replace) on_error = OE.Abort;
-                build.haltConstraint(p, RC.CONSTRAINT_CHECK, on_error, item.e_name, vi.P5_ConstraintCheck);
+                if (dconstraint.check(p, t, item.e_name, is_update)) |z| {
+                    build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_CHECK, on_error, z, 0, 0);
+                } else {
+                    build.haltConstraint(p, RC.CONSTRAINT_CHECK, on_error, item.e_name, vi.P5_ConstraintCheck);
+                }
             }
             aux.resolveLabel(v, all_ok);
         }
@@ -1354,8 +1408,8 @@ fn generateConstraintChecksImpl(
                 _ = aux.goto_(v, ignore_dest);
             },
             OE.Ignore => _ = aux.goto_(v, ignore_dest),
-            OE.Rollback, OE.Fail => build.rowidConstraint(p, on_error, t),
-            else => build.rowidConstraint(p, OE.Abort, t),
+            OE.Rollback, OE.Fail => build.rowidConstraint(p, on_error, t, reg_new_data),
+            else => build.rowidConstraint(p, OE.Abort, t, reg_new_data),
         }
         aux.resolveLabel(v, addr_rowid_ok);
         if (ipk_top != 0) {
@@ -1483,7 +1537,7 @@ fn generateConstraintChecksImpl(
 
         const n_conflict_end = aux.currentAddr(v);
         switch (on_error) {
-            OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx),
+            OE.Rollback, OE.Abort, OE.Fail => build.uniqueConstraint(p, on_error, idx, reg_ix),
             OE.Update => {
                 try upsert_mod.doUpdate(p, upsert.?, t, idx, i_idx_cur + @as(i32, @intCast(ix)));
                 _ = aux.goto_(v, ignore_dest);
@@ -1519,7 +1573,7 @@ fn generateConstraintChecksImpl(
                     aux.changeP5(v, x.p5);
                 }
             }
-            build.uniqueConstraint(p, OE.Abort, idx);
+            build.uniqueConstraint(p, OE.Abort, idx, reg_ix);
             aux.jumpHere(v, addr_bypass);
         }
         aux.resolveLabel(v, addr_unique_ok);
@@ -1546,7 +1600,7 @@ fn generateConstraintChecksImpl(
                 aux.changeP5(v, vi.SQLITE_NOTNULL);
             }
             _ = aux.addOp3(v, OP.NotExists, i_data_cur, addr_recheck, reg_new_data);
-            build.rowidConstraint(p, OE.Abort, t);
+            build.rowidConstraint(p, OE.Abort, t, reg_new_data);
         } else {
             _ = aux.goto_(v, addr_recheck);
         }

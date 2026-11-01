@@ -78,7 +78,25 @@ fn arithError(e: *Exec, comptime which: enum { div_zero, int_overflow }) ?Error 
     return e.abort(RC.ERROR);
 }
 
-/// OP_Add, OP_Subtract, OP_Multiply, OP_Divide and OP_Remainder.
+/// The error of an integer result `v` (or, null, one outside 64 bits)
+/// of arithmetic whose type has width `w` (P5, dialect.Arith.range()),
+/// if it is outside that type; null if it is not.
+fn rangeError(e: *Exec, w: u16, v: ?i64) ?Error {
+    @branchHint(.cold);
+    const r = dialect.spec(e.v.xq_lang.dialect).hooks.arith.range(w) orelse return null;
+    if (v) |x| if (x >= r.min and x <= r.max) return null;
+    if (r.value) if (v) |x| {
+        aux.vdbeErrorState(e.v, r.failure.state, "{s}{d}.", .{ r.failure.msg, x });
+        return e.abort(RC.ERROR);
+    };
+    aux.vdbeErrorState(e.v, r.failure.state, "{s}", .{r.failure.msg});
+    return e.abort(RC.ERROR);
+}
+
+/// OP_Add, OP_Subtract, OP_Multiply, OP_Divide and OP_Remainder. A P5
+/// that is not 0 is the width of the integer type of the result
+/// (dialect.Arith.range()): an integer result outside it is the
+/// dialect's error.
 pub fn opArith(e: *Exec, op: *Op) Error!Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
@@ -100,6 +118,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
             OP.Add => {
                 const r = @addWithOverflow(ib, ia);
                 if (r[1] != 0) {
+                    if (op.p5 != 0) if (rangeError(e, op.p5, null)) |err| return err;
                     if (arithError(e, .int_overflow)) |err| return err;
                     break :int_math;
                 }
@@ -108,6 +127,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
             OP.Subtract => {
                 const r = @subWithOverflow(ib, ia);
                 if (r[1] != 0) {
+                    if (op.p5 != 0) if (rangeError(e, op.p5, null)) |err| return err;
                     if (arithError(e, .int_overflow)) |err| return err;
                     break :int_math;
                 }
@@ -116,6 +136,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
             OP.Multiply => {
                 const r = @mulWithOverflow(ib, ia);
                 if (r[1] != 0) {
+                    if (op.p5 != 0) if (rangeError(e, op.p5, null)) |err| return err;
                     if (arithError(e, .int_overflow)) |err| return err;
                     break :int_math;
                 }
@@ -128,6 +149,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
                     return .next;
                 }
                 if (ia == -1 and ib == std.math.minInt(i64)) {
+                    if (op.p5 != 0) if (rangeError(e, op.p5, null)) |err| return err;
                     if (arithError(e, .int_overflow)) |err| return err;
                     break :int_math;
                 }
@@ -142,6 +164,7 @@ pub fn opArith(e: *Exec, op: *Op) Error!Flow {
                 ib = @rem(ib, if (ia == -1) 1 else ia);
             },
         }
+        if (op.p5 != 0) if (rangeError(e, op.p5, ib)) |err| return err;
         out.u = .{ .i = ib };
         out.setTypeFlag(.{ .Int = true });
         return .next;

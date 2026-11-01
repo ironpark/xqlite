@@ -1188,10 +1188,11 @@ pub fn showCreateTable(s: *Parser, tab: *int.Table, schema: []const u8, bare: []
         defer q.deinit();
         if (q.step() catch false) sqlite_sql = try s.a.dupe(u8, api.columnText(q.v, 0) orelse "");
     }
-    const list = catalog.entries(s.p.db, s.a, schema, tname) catch |err| switch (err) {
+    const m = catalog.meta(s.p.db, schema, tname) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         else => return s.failFrom(s.p.db),
     };
+    const list: []const catalog.Entry = if (m) |x| x.entries else &.{};
     for (list) |e| {
         const lc = try std.ascii.allocLowerString(s.a, e.col);
         if (std.mem.eql(u8, e.key, catalog.Key.decl_type)) try types_by_col.put(s.a, lc, e.value);

@@ -49,7 +49,10 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | `json.zig` | json/jsonb 값: PostgreSQL 규칙의 파싱, jsonb 정규화와 출력, 비교·포함 |
 | `jsonpath.zig` | jsonpath의 부분집합 |
 | `jfuncs.zig` | JSON 연산자·함수·집계·집합 반환 함수의 구현 |
-| `jtype.zig` | 파싱 뒤의 json/jsonb 타입 판단: 피연산자 타입에 따른 연산자, FROM의 JSON 집합 반환 함수 열, jsonb 열에 저장하는 값 |
+| `typing.zig` | 식 타입의 규칙(`Hooks.typing`, [아키텍처](architecture.md)의 코어의 타입): 리터럴·연산자·함수의 결과 타입 |
+| `overload.zig` | 피연산자 타입에 따른 선택(`Rules.overload`): `jsonb`의 `\|\|`·`-`·비교·`ORDER BY`, `->`·`#>`의 json/jsonb 함수, JSON을 만드는 함수의 인자. 이름을 해석한 코어가 부름 |
+| `jtype.zig` | 파싱 뒤, 타입이 아니라 이름과 FROM 구조로 정하는 JSON: 값으로 쓴 FROM 항목(행), FROM의 JSON 집합 반환 함수 열과 그 옆의 `*`, json/jsonb 열에 저장하는 값의 정규화 |
+| `ddltype.zig` | 스키마가 텍스트로 남기는 문장(뷰, CHECK, 생성 열, 식 인덱스)에 코어의 선택을 되돌려 씀: 식을 내리고 해석만 하는 probe |
 | `session.zig` | `CREATE SCHEMA`/`DROP SCHEMA`, `SET`/`RESET`/`SHOW`, `set_config()`/`current_setting()`/`current_schema()`/`current_schemas()` |
 | `state.zig` | 연결별 세션 상태(`search_path`와 그 밖의 매개변수) |
 | `catalog_views.zig` | `information_schema`/`pg_catalog` 뷰 |
@@ -190,7 +193,9 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 
 - `::json`은 검사만 하고(`xq_pg_json()`), `::jsonb`는 정규화합니다(`xq_pg_jsonb()`). 입력 규칙은 PostgreSQL의 것입니다(RFC 8259, `jsonb`의 `\u0000`은 `unsupported Unicode escape sequence`). 잘못된 값은 `invalid input syntax for type json`입니다.
 - `json`/`jsonb` 열은 CHECK `json_valid()`를 그대로 두고, INSERT·UPDATE·`ON CONFLICT DO UPDATE`가 넣는 값을 `jsonb` 열이면 정규화, `json` 열이면 검사합니다. 상수 DEFAULT는 CREATE TABLE 때 정규화해 SQLite 텍스트로 저장합니다. 선언 타입은 `xq_catalog`의 `type` 키에 `json`/`jsonb`로 남습니다.
-- 선언 타입과 피연산자 타입으로 정하는 것(`jtype.zig`): `jsonb`끼리의 `||`·`-`, `jsonb`의 `->`·`#>`(결과도 jsonb), `jsonb` 비교와 `ORDER BY`(아래), JSON을 만드는 함수의 인자(`json`/`jsonb`는 JSON으로, 불리언은 `true`/`false`로, 행은 객체로).
+- 피연산자 타입으로 정하는 것(`overload.zig`): `jsonb`의 `||`·`-`, `jsonb`의 `->`·`#>`(결과도 jsonb), `jsonb` 비교와 `ORDER BY`(아래), JSON을 만드는 함수의 인자(`json`/`jsonb`는 JSON으로, 불리언은 `true`/`false`로, 배열은 JSON 배열로, `double precision`·`real`·`numeric`은 PostgreSQL 철자의 수로: [PostgreSQL과 다른 점](#postgresql과-다른-점)의 JSON 수). 이름을 해석한 뒤 코어의 타입(`Expr.xq_type`)으로 고르므로 테이블 열, 서브쿼리·CTE·뷰의 열, 캐스트, 함수 결과 어디서 온 `jsonb`든 같습니다(`SELECT s.d || '{"b":2}' FROM (SELECT d FROM t) s`, 뷰의 jsonb 열 `||`). 타입을 모르는 쪽(문자열 상수, NULL, 타입 모르는 매개변수)은 다른 쪽 타입으로 읽습니다.
+- 이름과 FROM 구조로 정하는 것(`jtype.zig`, 내리기 전): 값으로 쓴 FROM 항목은 그 행(`xq_pg_row_json('a', t.a, ...)`, 값의 JSON 변환은 위처럼 코어가), JSON 집합 반환 함수의 열 참조와 그 옆의 `*`, json/jsonb 열에 넣는 값(`xq_pg_jsonb()`/`xq_pg_json()`로 감쌈; 값이 이미 그 타입의 함수 결과면 코어가 감싼 것을 뺌).
+- 스키마가 남기는 텍스트(뷰, CHECK, 생성 열, 식 인덱스, CTE 안 포함)에는 그 선택이 함수로 적힙니다(`ddltype.zig`가 같은 식을 해석만 해 보고 트리에 되돌림): `xq_pg_jsonb_concat(...)`, `COLLATE xq_pg_jsonb` ... 그래서 SQLite 방언이나 다른 방언에서 읽어도 같은 뜻이고, 이 방언에서 읽을 때 코어는 뷰·트리거의 텍스트에서 다시 고르지 않습니다(SQLite 방언으로 만든 뷰의 `||`는 이 방언에서도 텍스트 연결).
 
 #### 연산자
 
@@ -251,12 +256,12 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 
 | PostgreSQL | STRICT 저장 | 검사(이름이 PostgreSQL 메시지인 CHECK) |
 | --- | --- | --- |
-| `smallint`(`smallserial`) | `INTEGER` | 범위 → `CHECK constraint failed: smallint out of range` |
-| `integer`(`serial`) | `INTEGER` | 범위 → `CHECK constraint failed: integer out of range` |
+| `smallint`(`smallserial`) | `INTEGER` | 범위 → `smallint out of range` |
+| `integer`(`serial`) | `INTEGER` | 범위 → `integer out of range` |
 | `bigint`, `bigserial`, `oid` | `INTEGER` | |
 | `real`, `double precision`, `float(p)` | `REAL` | |
-| `numeric(p,s)`, `decimal` | `ANY` | 숫자만(`invalid input syntax for type numeric`) |
-| `boolean` | `INTEGER` | 0/1만(`invalid input syntax for type boolean`) |
+| `numeric(p,s)`, `decimal` | `ANY` | 숫자만(`invalid input syntax for type numeric`). 문자열은 그 수로 읽어 넣음(아래) |
+| `boolean` | `INTEGER` | 0/1만(`invalid input syntax for type boolean`). 문자열은 불리언 철자로 읽어 넣음(아래) |
 | `text` | `TEXT` | |
 | `varchar(n)`, `char(n)` | `TEXT` | `length() <= n`(`value too long for type character varying(n)`, `character(n)`) |
 | `bytea` | `BLOB` | |
@@ -265,6 +270,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 
 - 선언 타입은 `xq_catalog`의 `type` 키에 `format_type()` 철자(`character varying(20)`, `timestamp with time zone`)로 남습니다.
 - 다른 타입의 값을 넣으면 SQLite STRICT 오류(`cannot store TEXT value in INTEGER column t.a`)가 납니다.
+- `boolean`과 `numeric` 열에 넣는 문자열(상수, 텍스트로 바인딩한 매개변수, `INSERT ... SELECT`의 값)은 PostgreSQL이 그 타입의 입력을 읽듯 읽습니다: `'t'`, `'true'`, `'yes'`, `'on'`, `'1'`(그 접두어 `'tr'`, `'of'` ..., 대소문자·앞뒤 공백 무시)은 1/0, `' 1.50 '`은 수 1.5, `'3'`은 3. 아니면 `invalid input syntax for type boolean: "x"`/`invalid input syntax for type numeric: "x"`(22P02). `INSERT`와 `UPDATE`(`ON CONFLICT DO UPDATE` 포함)가 저장 직전에 바꿉니다([타입을 읽는 코드 생성](architecture.md#타입을-읽는-코드-생성)).
 - 배열과 모르는 타입은 `type "x" does not exist` 같은 오류입니다.
 
 ### 캐스트
@@ -283,21 +289,23 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 
 | 주제 | PostgreSQL | xqlite | 이유 |
 | --- | --- | --- | --- |
-| 불리언 | `true`/`false` | 정수 0/1. `SELECT true`는 `1`(SQLITE_INTEGER). 셸과 서버는 `boolean` 열과 불리언 식(`a = b`, `true`, `x IS NULL`)을 psql처럼 `t`/`f`로 보여 줌([값 표시](architecture.md#값-표시)). 뷰의 불리언 식 열은 1/0 | sqlite3 API로 돌아오는 결과의 타입을 바꿀 수 없음. 문자열 철자는 `::boolean` 캐스트만 읽음(INSERT에 문자열로 넣으면 STRICT 오류) |
-| `numeric` | 고정 소수점 | SQLite 수(정수 또는 실수). API로는 `1.50`이 `1.5`. 셸과 서버는 `numeric(p,s)` 열과 캐스트(`x::numeric(6,2)`)를 s자리로 보여 줌(`1.50`); 그 밖의 식의 결과는 `1.5` | 저장 타입이 `ANY`. 문자열 상수 `'1.5'`는 숫자로 바꿔 넣지만 텍스트로 바인딩한 값은 거부 |
+| 불리언 | `true`/`false` | 정수 0/1. `SELECT true`는 `1`(SQLITE_INTEGER). 셸과 서버는 `boolean` 열과 불리언 식(`a = b`, `true`, `x IS NULL`)을 psql처럼 `t`/`f`로 보여 줌([값 표시](architecture.md#값-표시)). 뷰의 불리언 식 열은 1/0. 열에 넣는 문자열은 불리언 철자로 읽음(`'yes'`, `' off '`). PostgreSQL은 타입이 `text`인 식(텍스트 열, `'a' \|\| 'b'`)을 넣으면 오류이지만 xqlite는 그것도 읽음 | sqlite3 API로 돌아오는 결과의 타입을 바꿀 수 없음. 저장 값은 값의 타입이 아니라 실행 중 값이 문자열인지로 바꿈 |
+| `numeric` | 고정 소수점 | SQLite 수(정수 또는 실수). API로는 `1.50`이 `1.5`. 셸과 서버는 `numeric(p,s)` 열, 캐스트(`x::numeric(6,2)`), 스케일을 아는 식(`1.50`, `n + 1`, `n * n`, `sum(n)`, `round(x, 2)`)을 그 자리수로 보여 줌(`1.50`, `0.1 + 0.2`는 `0.3`). PostgreSQL이 값마다 스케일을 정하는 나눗셈과 `avg()`는 `1.5`, `1.0`(PostgreSQL은 `1.5000000000000000`) | 저장 타입이 `ANY`. 넣는 문자열(상수, 텍스트로 바인딩한 값)은 수로 읽음(`'1.50'`은 1.5). `numeric(p,s)`에 넣는 값을 스케일 s로 반올림하지 않고, `'NaN'`·`'Infinity'`는 거부(SQLite에 NaN이 없음) |
+| 식의 타입 | 연산자·함수 해석이 정함 | 같은 규칙으로 매김: `integer + integer`는 `integer`, `integer + bigint`는 `bigint`, `1`은 `integer`, `1.50`은 `numeric`, `'a'`는 `text`, `count()`·`sum(int)`은 `bigint`, `avg()`는 `numeric`, `now()`은 `timestamp with time zone`([코어의 타입](architecture.md#코어의-타입)). 결과 열의 선언 타입(`sqlite3_column_decltype()`, psql `\gdesc`의 철자), 값 표시, 매개변수의 타입, 정수 산술의 범위 검사(아래 정수 오버플로), 저장 시 변환(`boolean`, `numeric`)에 씀. 오버로드는 고르지 않음 | 그 밖의 계산은 SQLite의 것 |
 | NULL 정렬 | NULL이 가장 큰 값 | 같음(ASC면 마지막, DESC면 처음) | SQLite는 반대라 방언이 맞춤. NULL일 수 없는 열(NOT NULL, INTEGER PRIMARY KEY, 외부 조인의 NULL 쪽이 아닌 것)에는 붙이지 않아 인덱스 순서를 그대로 씀(그때 바이트코드는 SQLite와 같음) |
 | `LIKE` | 대소문자 구분, 기본 이스케이프 `\` | 같음(엔진 함수 `xq_like()`). `ILIKE`는 ASCII 대소문자만 무시(`xq_ilike()`) | SQLite의 LIKE는 대소문자를 무시하고 기본 이스케이프가 없음 |
 | identity·serial | 시퀀스 | 시퀀스 `<table>_<col>_seq`. 아래 [identity](#identity와-serial) | SQLite는 INTEGER PRIMARY KEY의 DEFAULT를 쓰지 않음 |
 | `now()`, `current_timestamp` | 시간대가 있는 타임스탬프 | 문장 시각의 `'YYYY-MM-DD HH:MM:SS.SSS'`(UTC, 시간대 표기 없음). 셸과 서버는 `timestamptz` 열에 `+00`을 붙여 보여 줌 | SQLite 날짜 함수가 그대로 읽음 |
 | 이름의 대소문자 | `"Foo"`와 `foo`는 다른 이름 | 접기는 하지만 같은 이름 | SQLite의 이름 비교는 대소문자를 구분하지 않음 |
-| 오류 문구 | PostgreSQL 문구 | 싼 곳에서만 PostgreSQL 문구(아래 [오류](#오류)). 실행 중 제약 위반은 SQLite 문구(`UNIQUE constraint failed: t.a`) | |
+| 오류 문구 | PostgreSQL 문구 | 싼 곳에서만 PostgreSQL 문구(아래 [오류](#오류)). 실행 중 제약 위반도 PostgreSQL 문구(첫 줄만, `DETAIL`은 없음) | |
 | 0으로 나누기 | 오류 | 같음(`/`, `%`가 `division by zero`, 22012). 이 방언으로 컴파일한 문장에서만이고, sqlite3나 SQLite 방언에서 같은 뷰·CHECK를 계산하면 NULL | 엔진의 산술 정책(`Hooks.arith`) |
-| 정수 오버플로 | int4·int2 연산도 오류 | 64비트를 넘는 결과만 `bigint out of range`(22003). int4 값끼리의 연산은 2³¹을 넘어도 오류가 아님(열에 넣을 때는 범위 검사) | 식의 타입을 따로 추적하지 않음 |
+| 정수 오버플로 | int4·int2 연산도 오류 | 같음: 타입이 `integer`인 연산(`integer + integer`, 32비트 리터럴끼리의 `SELECT 2147483647 + 1`, 단항 `-`, `(-2147483647 - 1) / -1`)은 `integer out of range`, `smallint`끼리는 `smallint out of range`, `bigint`는 64비트를 넘으면 `bigint out of range`(모두 22003). 이 방언으로 컴파일한 문장에서만이고(뷰와 트리거 본문 포함), CHECK·생성 열의 식과 sqlite3·SQLite 방언에서는 64비트로 계산. 매개변수는 추론한 타입(`a + $1`의 `integer`)이라 클라이언트가 `int8`로 지정해도 `integer`로 검사 | 코드 생성이 연산의 P5에 폭을 적음([타입을 읽는 코드 생성](architecture.md#타입을-읽는-코드-생성)) |
+| 복합 질의의 타입 | 항들의 타입을 맞추거나 실패(`UNION types boolean and integer cannot be matched`) | 공통 타입이 있으면 그 타입, 없으면 실패하지 않고 타입을 모름(값은 저장된 대로 보임) | |
 | 외래 키 | 늘 강제 | 같음. 이 방언의 첫 문장에서 연결의 `PRAGMA foreign_keys`를 켬. 응용이 끈 것은 그대로 둠 | sqlite3는 여전히 끈 채로 씀 |
 | 격리 수준 | 여러 수준 | 파싱만 함 | SQLite는 늘 직렬화 |
 | JSON | `jsonb`는 이진 형식 | 정규화한 TEXT. `json`은 입력 텍스트 | sqlite3가 그대로 읽고 `json_extract()` 등을 씀. sqlite3가 넣은 값은 정규화되지 않은 채 남고(연산자·함수는 읽을 때 정규화), CHECK `json_valid()`는 SQLite의 규칙 |
 | jsonb 비교 | jsonb의 순서 | 같음(collation `xq_pg_jsonb`). 인덱스는 BINARY라 `=`에 쓰이지 않음 | |
-| JSON 수 | numeric과 float8 | 실수는 SQLite 철자: `to_json(100.0::float8)`은 `100.0`(PostgreSQL은 `100`), `to_json(1e20::float8)`은 `1.0e+20`(`1e+20`) | SQLite 수에 numeric/float8 구분이 없음 |
+| JSON 수 | numeric과 float8 | 같음: 타입을 아는 인자는 JSON을 만드는 함수가 PostgreSQL 철자로 씀. `double precision`/`real`은 `float8out()`처럼 되읽히는 가장 짧은 자릿수, 지수가 -4~14면 고정 소수점, 아니면 두 자리 이상의 지수(`to_json(100.0::float8)`은 `100`, `1e20::float8`은 `1e+20`, `1e-5::float8`은 `1e-05`; `xq_pg_float_json()`), 스케일을 아는 `numeric`은 그 자릿수(`to_json(1.50)`은 `1.50`, `numeric(5,2)` 열의 2는 `2.00`; `xq_pg_numeric_json()`). `row_to_json`·`json_agg`의 열도 | 스케일을 모르는 numeric(`avg()`, 나눗셈)과 타입을 모르는 값은 SQLite 철자(`2.5`, `1.0e+20`) |
 | 저장되는 식 | | IR이 SQLite 텍스트로 렌더링. PostgreSQL 함수는 `xq_postgres_greatest(...)`, LIKE는 `xq_like(...)`처럼 저장 | SQLite 방언이나 다른 방언의 연결에서 읽어도 같은 뜻. 단 sqlite3에서는 그런 식을 계산할 수 없음 |
 
 저장되는 식은 CHECK, DEFAULT, 생성 열, 인덱스 식, 뷰입니다.
@@ -329,6 +337,23 @@ PostgreSQL 문구를 쓰는 오류입니다.
 - 스키마의 오류([스키마](#스키마))
 - `cannot insert a non-DEFAULT value into column "id"`
 
+실행 중 제약 위반도 PostgreSQL 문구와 SQLSTATE입니다. psql이 보여 주는 첫 줄(`ERROR:`)과 같고, 그 아래 `DETAIL` 줄(`Key (a)=(1) already exists.`)은 없습니다.
+
+| 위반 | 메시지 | SQLSTATE |
+| --- | --- | --- |
+| UNIQUE, PRIMARY KEY, 유일 인덱스 | `duplicate key value violates unique constraint "t_a_key"` | 23505 |
+| `CREATE UNIQUE INDEX`가 중복을 찾음 | `could not create unique index "i"` | 23505 |
+| NOT NULL | `null value in column "a" of relation "t" violates not-null constraint` | 23502 |
+| CHECK | `new row for relation "t" violates check constraint "t_a_check"` | 23514 |
+| 타입 검사(위 [타입 매핑](#타입-매핑)) | `integer out of range` ... | 22003, 22001, 22P02 |
+| 외래 키(자식 행) | `insert or update on table "t" violates foreign key constraint "t_b_fkey"` | 23503 |
+| 외래 키(부모 행) | `update or delete on table "p" violates foreign key constraint "t_b_fkey" on table "t"` | 23503 |
+
+- 제약 이름은 사용자가 준 이름(`CONSTRAINT x`, 인덱스 이름)이고, 없으면 PostgreSQL이 붙이는 이름입니다: `<table>_pkey`, `<table>_<columns>_key`, `<table>_<columns>_fkey`, `<table>_<column>_check`, `<table>_check`. 같은 이름이 겹칠 때 PostgreSQL이 붙이는 번호(`t_a_key1`)는 붙이지 않습니다.
+- SQLite가 남기지 않는 UNIQUE, PRIMARY KEY, FOREIGN KEY의 이름은 CREATE TABLE이 `xq_catalog`에 적어 둡니다(키 `constraint:<종류>:<열>`). 그 뒤 RENAME COLUMN으로 열 이름이 바뀌면 기본 이름으로 돌아갑니다.
+- 문장이 끝날 때 찾는 외래 키 위반(여러 행, 부모 행 지우기)은 마지막으로 센 위반의 제약을 말합니다. COMMIT에서 찾는 지연 제약(`DEFERRABLE INITIALLY DEFERRED`)은 어느 제약인지 모르므로 `insert or update violates foreign key constraint`입니다.
+- 이 방언으로 컴파일한 문장에서만입니다. sqlite3나 SQLite 방언의 문장은 SQLite 문구(`UNIQUE constraint failed: t.a`)입니다.
+
 ## 아직 하지 않은 것
 
 | 영역 | 항목 |
@@ -341,7 +366,7 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE` |
 | 스키마 | 스키마 요소가 있는 `CREATE SCHEMA s CREATE TABLE ...`, `ALTER SCHEMA`, `ALTER TABLE ... SET SCHEMA`, `DROP SCHEMA public`, 이름에 `.`이 있는 스키마, 대소문자만 다른 두 스키마(SQLite의 이름 비교처럼 같은 이름), 다른 스키마의 뷰·외래 키가 기대는 것을 `CASCADE`가 따라 지우는 것, 여러 테이블을 지우는 `DROP SCHEMA ... CASCADE`의 auto_vacuum 데이터베이스(거부함), 상수가 아닌 `nextval(x)`의 `search_path`(이름 그대로 main에서 찾음), `public`에 이름이 `s.t`인 개체(스키마 `s`의 `t`와 겹침) |
 | 절차·서버 | PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `SET LOCAL`, `SHOW ALL`, `SET`의 트랜잭션 의미(롤백해도 남음), 격리 수준 |
-| 오류 | int4·int2 연산의 오버플로, 실행 중 오류 메시지의 PostgreSQL화 |
+| 오류 | 실행 중 오류 메시지의 PostgreSQL화 |
 | 카탈로그 | INTEGER PRIMARY KEY의 인덱스(`pg_indexes`에 `t_pkey`가 없음), 붙인 데이터베이스(`information_schema`·`pg_catalog` 뷰에 나오지 않음) |
 | 셸 | dollar-quote 문장 분할(셸은 SQLite 규칙으로 문장을 나눔) |
 
@@ -350,7 +375,7 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | 도구 | 하는 일 |
 | --- | --- |
 | `src/dialect/postgres/test.zig` | 종단 테스트 |
-| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 68개 케이스(JSON 31개)가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교). 오류를 내는 문장은 따로 모은 케이스에 있음(psql의 stderr와 stdout이 podman을 거치며 섞이는 순서가 일정하지 않음) |
+| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 76개 케이스(JSON 33개)가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교). 오류를 내는 문장은 따로 모은 케이스에 있음(psql의 stderr와 stdout이 podman을 거치며 섞이는 순서가 일정하지 않음) |
 | `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(`CREATE SCHEMA`의 테이블·뷰 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함. sqlite3의 `.tables`에 `sales.orders`가 나오고, sqlite3가 넣은 행을 이 방언이 `sales.orders`로 읽음. `jsonb` 열은 sqlite3의 `json_extract()`로 읽히고, sqlite3가 넣은 JSON을 이 방언의 연산자가 읽으며, sqlite3도 잘못된 JSON을 거부함 |
 
 차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다(`$PG_PSQL`, 기본값 `podman exec -i xq-pg psql -U postgres`). 경우들은 병렬로 돌고, 작업자마다 자기 데이터베이스(`xqt_dialect_N`)에서 `public` 스키마를 지우고 다시 만들고, 앞 경우가 만든 스키마를 지운 뒤 시작합니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.

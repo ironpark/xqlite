@@ -1,21 +1,29 @@
-//! The type of a result column, independent of the dialect that declared
-//! it.
+//! The type of a column or an expression, independent of the dialect
+//! that declared it. The engine's own: the catalog keeps the parsed
+//! declared type of every column it describes (catalog.ColumnMeta), the
+//! dialect frontends and the public API use it (xqlite.types is this
+//! file).
 //!
 //! The engine keeps a table column's type in the dialect that made the
-//! table (`Stmt.columnTypeAlloc()`: `character varying(20)`,
+//! table (xq_catalog, `Stmt.columnTypeAlloc()`: `character varying(20)`,
 //! `DATETIME2(3)`, `NUMBER(10,2)`); `parse()` reads it into a `Type`. The
 //! wire protocols map it to their own codes (PostgreSQL's RowDescription
 //! type OID, MySQL's column definition, TDS's COLMETADATA), and
-//! display.zig writes values as the dialect a client speaks shows them (a
-//! boolean that SQLite stores as 0/1 is `t`/`f` in PostgreSQL). An
-//! expression has no declared type, so it is described by the storage
+//! api/display.zig writes values as the dialect a client speaks shows
+//! them (a boolean that SQLite stores as 0/1 is `t`/`f` in PostgreSQL).
+//! An expression has no declared type, so it is described by the storage
 //! class of its value (`ofKind()`).
+//!
+//! Depends on nothing but std and the Dialect enum, so that src/sql,
+//! src/catalog and src/dialect use it without the public API.
 
 const std = @import("std");
-const engine = @import("engine.zig");
-const value = @import("value.zig");
 
-const Dialect = engine.Dialect;
+const Dialect = @import("../dialect/dialect.zig").Dialect;
+
+/// The fundamental datatypes of SQLite (sqlite3_column_type()): the
+/// storage class of a value (xqlite.Kind).
+pub const Kind = enum { integer, float, text, blob, null };
 
 /// The types the protocols tell apart. Each protocol maps every one to a
 /// code of its own (the nearest, where it has no exact one).
@@ -87,7 +95,7 @@ pub fn parse(dialect: Dialect, name: []const u8) Type {
 }
 
 /// The type of an expression from the storage class of its value.
-pub fn ofKind(kind: value.Kind) Type {
+pub fn ofKind(kind: Kind) Type {
     return .{ .logical = switch (kind) {
         .integer => .int8,
         .float => .float8,

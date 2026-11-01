@@ -440,7 +440,7 @@ zig-out/bin/xqt dialect-diff oracle [cases-file]    # 기본: tools/dialect/orac
 
 - 서버 접속 명령은 `ORA_SQLPLUS`로 바꿉니다(기본 `podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1`). arm64 macOS의 podman(메모리 약 4 GiB)에서도 `23-slim-faststart` 이미지가 돕니다. 다른 큰 컨테이너와 함께 띄우면 메모리가 모자랄 수 있습니다.
 - SQL*Plus는 `SET MARKUP CSV ON DELIMITER |`로 행과 머리글을 내고, 케이스마다 사용자 XQ의 테이블·뷰·시퀀스를 지우고 `NLS_DATE_FORMAT`/`NLS_TIMESTAMP_FORMAT`을 방언이 저장하는 형식(`YYYY-MM-DD HH24:MI:SS[.FF6]`)으로 맞춘 뒤 시작합니다.
-- 오류는 ORA- 코드로 비교합니다. xqlite에서 SQLite 문구로 나오는 실행 중 제약 위반(`UNIQUE constraint failed` ...)은 Oracle이 같은 경우에 내는 코드(`ORA-00001` ...)로 맞춥니다.
+- 오류는 ORA- 코드로 비교합니다. 실행 중 제약 위반도 ORA- 코드로 나옵니다(`ORA-00001` ...). SQLite 문구로 나오는 것(`UNIQUE constraint failed` ..., SQLite 방언으로 컴파일한 SQL)은 Oracle이 같은 경우에 내는 코드로 맞춥니다.
 - Oracle의 `.5`, `TRUE`/`FALSE`와 xqlite의 `2.0`은 `0.5`, `1`/`0`, `2`로 맞춰 비교합니다.
 
 방언별 결과와 알려진 차이는 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [MSSQL 호환](mssql.md), [Oracle 호환](oracle.md)에 있습니다.

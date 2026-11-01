@@ -15,6 +15,19 @@ SELECT 6 & 3 AS a, 6 | 1 AS b, 5 ^ 3 AS c, ~0 AS d, 10 - 2 - 3 AS e, (2 + 3) * 4
 SELECT 'a' + 'b' AS a, N'x' + 'y' + 'z' AS b, 'abcd' + NULL AS c, '1' + 1 AS d, 1 + '2' AS e;
 GO
 
+-- case: integer arithmetic out of the range of int
+CREATE TABLE ov (a INT);
+INSERT INTO ov VALUES (2147483647);
+GO
+SELECT 2147483646 + 1 AS a, CAST(2147483647 AS BIGINT) + 1 AS b, -2147483647 - 1 AS c;
+GO
+SELECT 2147483647 + 1 AS a;
+GO
+SELECT a + 1 AS a FROM ov;
+GO
+SELECT SUM(a) AS s FROM (SELECT a FROM ov UNION ALL SELECT a FROM ov) AS x;
+GO
+
 -- case: comparisons and predicates
 SELECT CASE WHEN 'abc' = 'ABC' THEN 1 ELSE 0 END AS ci, CASE WHEN 'abc' LIKE 'A%' THEN 1 ELSE 0 END AS l;
 SELECT CASE WHEN 2 BETWEEN 1 AND 3 THEN 1 ELSE 0 END AS a, CASE WHEN 5 NOT BETWEEN 1 AND 3 THEN 1 ELSE 0 END AS b,

@@ -14,6 +14,8 @@ const callback = @import("callback.zig");
 const numeric = @import("xqlite_base").numeric;
 const ctype = @import("xqlite_base").ctype;
 const alter = @import("alter.zig");
+const typing = @import("typing.zig");
+const catalog = @import("../catalog/catalog.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -329,6 +331,12 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                 if (i_col < tb.cols.len) {
                     cnt += 1;
                     match = null;
+                    // xqlite: excluded.*, new.*, old.* and RETURNING's
+                    // columns are of the table's types (typing.zig).
+                    if (typing.active(db)) {
+                        const j = build.columnIndex(tb, col);
+                        if (j >= 0) e.xq_type = try tableColumnType(p, tb, @intCast(j));
+                    }
                     if (e.i_table == EXCLUDED_TABLE_NUMBER) {
                         if (p.inRenameObject()) {
                             e.i_column = @intCast(i_col);
@@ -411,7 +419,10 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
             e.y = .{ .tab = null };
             return WRC.Prune;
         }
-        if (expr_mod.idToTrueFalse(e)) return WRC.Prune;
+        if (expr_mod.idToTrueFalse(e)) {
+            if (typing.active(db)) e.xq_type = typing.boolean;
+            return WRC.Prune;
+        }
     }
 
     // No match is an error; so are several, except for an outer join
@@ -469,7 +480,37 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     }
 
     e.op = e_new_op;
+    if (e_new_op == TK.COLUMN and cnt == 1 and typing.active(db)) if (match) |m| try typeColumn(p, m, e);
     return lookupNameEnd(p, top_nc, cur_nc, cnt, e, schema, false);
+}
+
+/// xqlite: the type (Expr.xq_type, typing.zig) of `e`, a reference to a
+/// column of FROM term `m`: a column of a subquery (a CTE, a view) is of
+/// the type of the subquery's result column, of the common type of its
+/// terms' if it is a compound (typing.columnOf()); a column of a table of a
+/// dialect of the type the catalog declares, if the catalog of its
+/// database is in memory (no query while names are resolved: the
+/// frontends of the dialects read it as they lower a statement on a
+/// table); a column of a table of SQLite's or a rowid of none.
+fn typeColumn(p: *Parse, m: *const SrcItem, e: *Expr) Oom!void {
+    if (e.i_column < 0 or m.fg.is_nested_from) return;
+    const i: usize = @intCast(e.i_column);
+    if (m.fg.is_subquery) {
+        e.xq_type = try typing.columnOf(p, m.u4.subq.?.select, i);
+        return;
+    }
+    e.xq_type = try tableColumnType(p, m.s_tab orelse return, i);
+}
+
+/// xqlite: the type of column `i` of table `t` (typing.zig): the type
+/// the catalog declares for a table of a dialect whose catalog is in
+/// memory, else unknown (see typeColumn()).
+pub fn tableColumnType(p: *Parse, t: *Table, i: usize) Oom!typing.TypeId {
+    if (!t.isOrdinary() or t.tnum == 0 or i >= t.cols.len) return typing.unknown;
+    const meta = catalog.metaCached(t) orelse return typing.unknown;
+    const c = meta.column(t.cols[i].name()) orelse return typing.unknown;
+    const z = c.decl_type orelse return typing.unknown;
+    return typing.intern(p.db, meta.dialect, z);
 }
 
 /// The lookupname_end part of lookupName(): count the reference in every
@@ -565,6 +606,70 @@ fn resolveSetExprSubtypeArg(list: ?*ExprList) void {
     }
 }
 
+/// What FuncDef `d` makes of call `e` (`n` arguments, `list`) in `nc`,
+/// the part of the TK_FUNCTION case of resolveExprStep() that only reads
+/// the definition: likelihood, the authorizer, subtype arguments,
+/// constness, and where the function may be used. `.denied`: the
+/// authorizer denied the call, which is NULL now; `.internal`: an
+/// internal function outside a nested parse.
+fn applyFuncDef(p: *Parse, nc: *NameContext, e: *Expr, d: *const int.FuncDef, n: i32, list: ?*ExprList) enum { ok, denied, internal } {
+    const id = e.token();
+    if (d.func_flags.UNLIKELY) {
+        e.flags.Unlikely = true;
+        if (n == 2) {
+            e.i_table = exprProbability(list.?.at(1).expr.?);
+            if (e.i_table < 0) {
+                errorAtExpr(p, e, "second argument to {s}() must be a constant between 0.0 and 1.0", .{id});
+                nc.n_nc_err += 1;
+            }
+        } else {
+            // unlikely(X) is likelihood(X,0.0625); likely(X) is
+            // likelihood(X,0.9375).
+            e.i_table = if (d.name[0] == 'u') 8388608 else 125829120;
+        }
+    }
+    const rc_auth = auth.check(p, auth.Code.FUNCTION, null, d.name, null);
+    if (rc_auth != auth.OK) {
+        if (rc_auth == auth.DENY) {
+            auth.errorAtFunction(p, e);
+            nc.n_nc_err += 1;
+        }
+        e.op = TK.NULL;
+        return .denied;
+    }
+    if (d.func_flags.SUBTYPE or e.flags.SubtArg) resolveSetExprSubtypeArg(list);
+    if (d.func_flags.intersects(.{ .CONSTANT = true, .SLOCHNG = true })) {
+        // Constant for the duration of one query.
+        e.flags.ConstFunc = true;
+    }
+    if (!d.func_flags.CONSTANT) {
+        resolveNotValid(p, nc, "non-deterministic functions", .{ .IdxExpr = true, .PartIdx = true, .GenCol = true }, null, e);
+    } else {
+        // The P5 of OP_PureFunc tells sqlite3_result_error() which
+        // context it is in (C: ncFlags & NC_SelfRef).
+        e.op2 = @intCast(nc.nc_flags.only(NC.SelfRef).int());
+    }
+    if (d.func_flags.INTERNAL and p.nested == 0 and !p.db.m_db_flags.InternalFunc) return .internal;
+    if (d.func_flags.intersects(.{ .DIRECT = true, .UNSAFE = true }) and !p.inRenameObject()) {
+        if (nc.nc_flags.FromDDL) e.flags.FromDDL = true;
+        expr_mod.functionUsable(p, e, d);
+    }
+    return .ok;
+}
+
+/// xqlite: resolve call `e` that a dialect's typing rules made after the
+/// names of its arguments were resolved (typing.Ctx.call()): what its
+/// FuncDef makes of it (applyFuncDef()), as if it had been resolved with
+/// them. A scalar function; one this connection does not know is left
+/// for code generation to report.
+pub fn resolveNewCall(nc: *NameContext, e: *Expr) void {
+    const p = nc.parse;
+    const list = e.x.list;
+    const n: i32 = if (list) |l| @intCast(l.len()) else 0;
+    const d = callback.findFunction(p.db, e.token(), n, p.db.enc, false) orelse return;
+    _ = applyFuncDef(p, nc, e, d, n, list);
+}
+
 /// Port of resolveExprStep(): the expression callback of the resolver.
 fn resolveExprStep(w: *Walker, e: *Expr) WRC {
     return resolveExprStepImpl(w, e) catch {
@@ -576,6 +681,9 @@ fn resolveExprStep(w: *Walker, e: *Expr) WRC {
 fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
     const nc = w.u.nc.?;
     const p = nc.parse;
+    // xqlite: the type an operator gives whatever its operands, for an
+    // Expr the frontend did not type (typing.zig).
+    if (e.xq_type == typing.unknown and typing.active(p.db)) e.xq_type = typing.ofOp(e.op);
     switch (e.op) {
         // The rowid of the first FROM term (UPDATE and DELETE).
         TK.ROW => {
@@ -672,48 +780,15 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
             } else {
                 const d = def.?;
                 is_agg = d.x_finalize != null;
-                if (d.func_flags.UNLIKELY) {
-                    e.flags.Unlikely = true;
-                    if (n == 2) {
-                        e.i_table = exprProbability(list.?.at(1).expr.?);
-                        if (e.i_table < 0) {
-                            errorAtExpr(p, e, "second argument to {s}() must be a constant between 0.0 and 1.0", .{id});
-                            nc.n_nc_err += 1;
-                        }
-                    } else {
-                        // unlikely(X) is likelihood(X,0.0625); likely(X)
-                        // is likelihood(X,0.9375).
-                        e.i_table = if (d.name[0] == 'u') 8388608 else 125829120;
-                    }
-                }
-                const rc_auth = auth.check(p, auth.Code.FUNCTION, null, d.name, null);
-                if (rc_auth != auth.OK) {
-                    if (rc_auth == auth.DENY) {
-                        auth.errorAtFunction(p, e);
-                        nc.n_nc_err += 1;
-                    }
-                    e.op = TK.NULL;
-                    return WRC.Prune;
-                }
-                if (d.func_flags.SUBTYPE or e.flags.SubtArg) resolveSetExprSubtypeArg(list);
-                if (d.func_flags.intersects(.{ .CONSTANT = true, .SLOCHNG = true })) {
-                    // Constant for the duration of one query.
-                    e.flags.ConstFunc = true;
-                }
-                if (!d.func_flags.CONSTANT) {
-                    resolveNotValid(p, nc, "non-deterministic functions", .{ .IdxExpr = true, .PartIdx = true, .GenCol = true }, null, e);
-                } else {
-                    // The P5 of OP_PureFunc tells sqlite3_result_error() which
-                    // context it is in (C: ncFlags & NC_SelfRef).
-                    e.op2 = @intCast(nc.nc_flags.only(NC.SelfRef).int());
-                }
-                if (d.func_flags.INTERNAL and p.nested == 0 and !p.db.m_db_flags.InternalFunc) {
-                    // Internal functions are unknown outside nested parses.
-                    no_such_func = 2;
-                    def = null;
-                } else if (d.func_flags.intersects(.{ .DIRECT = true, .UNSAFE = true }) and !p.inRenameObject()) {
-                    if (nc.nc_flags.FromDDL) e.flags.FromDDL = true;
-                    expr_mod.functionUsable(p, e, d);
+                switch (applyFuncDef(p, nc, e, d, n, list)) {
+                    .ok => {},
+                    .denied => return WRC.Prune,
+                    .internal => {
+                        // Internal functions are unknown outside nested
+                        // parses.
+                        no_such_func = 2;
+                        def = null;
+                    },
                 }
             }
 
@@ -800,6 +875,11 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
                     notValidImpl(p, nc, "subqueries", e, e);
                 } else {
                     _ = walker.walkSelect(w, e.x.select);
+                    // xqlite: a scalar subquery is of the type of its
+                    // first column (of the common type of a compound's).
+                    if (e.op == TK.SELECT and e.xq_type == typing.unknown and typing.active(p.db)) {
+                        e.xq_type = try typing.columnOf(p, e.x.select.?, 0);
+                    }
                 }
                 if (n_ref != nc.n_ref) {
                     e.flags.VarSelect = true;
@@ -1033,6 +1113,16 @@ fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList,
         // An ordinary expression.
         item.u = .{ .x = .{} };
         try resolveExprNames(nc, e);
+        // xqlite: the collation the dialect sorts its type with (jsonb's
+        // order, typing.zig): a COLLATE term is a result column no more.
+        if (typ[0] == 'O' and typing.active(p.db)) if (typing.orderCollation(p, e)) |coll| {
+            item.expr = expr_mod.addCollateString(p, e, coll) catch {
+                build.oomFault(p);
+                return error.ParseFailed;
+            };
+            item.expr.?.xq_type = e.xq_type;
+            continue;
+        };
         for (sel.e_list.?.slice(), 0..) |*r, j| {
             if (expr_mod.compare(null, e, r.expr, -1) == 0) {
                 windowRemoveExprFromSelect(sel, e);
@@ -1040,7 +1130,12 @@ fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList,
             }
         }
     }
-    return resolveOrderGroupBy(p, sel, order_by, typ);
+    try resolveOrderGroupBy(p, sel, order_by, typ);
+    // xqlite: a result column number or alias sorts with the collation
+    // of its type, as an expression does (above).
+    if (typ[0] == 'O' and typing.active(p.db)) for (order_by.slice()) |*item| {
+        if (item.u.x.order_by_col != 0) if (item.expr) |x| typing.orderTerm(p, item, x.xq_type);
+    };
 }
 
 /// Port of resolveSelectStep(): resolve the names of a SELECT (and its
@@ -1057,6 +1152,12 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
     const outer_nc = w.u.nc;
     const p = w.parse.?;
     const db = p.db;
+    // xqlite: a view's query is text of the schema (typing.zig).
+    const view = s_arg.sel_flags.View;
+    if (view) p.xq_schema_text += 1;
+    defer if (view) {
+        p.xq_schema_text -= 1;
+    };
 
     // A subquery in an expression is not expanded yet: let selectPrep()
     // expand and resolve it.
@@ -1196,10 +1297,18 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
         n_compound += 1;
     }
 
-    if (is_compound) resolveCompoundOrderBy(p, leftmost) catch |err| switch (err) {
-        error.ParseFailed => return WRC.Abort,
-        error.OutOfMemory => |e| return e,
-    };
+    if (is_compound) {
+        resolveCompoundOrderBy(p, leftmost) catch |err| switch (err) {
+            error.ParseFailed => return WRC.Abort,
+            error.OutOfMemory => |e| return e,
+        };
+        // xqlite: each term sorts with the collation of its column's type
+        // (typing.zig).
+        if (typing.active(p.db)) if (leftmost.order_by) |ob| for (ob.slice()) |*item| {
+            const col = item.u.x.order_by_col;
+            if (col > 0) typing.orderTerm(p, item, try typing.columnOf(p, leftmost, col - 1));
+        };
+    }
     return WRC.Prune;
 }
 
@@ -1237,6 +1346,8 @@ pub fn resolveExprNames(nc: *NameContext, e_arg: ?*Expr) int.ParseError!void {
     setAggProperties(e, nc.nc_flags);
     nc.nc_flags.set(saved_has_agg);
     if (nc.n_nc_err > 0 or p.n_err > 0) return error.ParseFailed;
+    // xqlite: the types the dialect's rules give (typing.zig).
+    if (typing.active(p.db)) try typing.typeTree(nc, e);
 }
 
 /// Port of sqlite3ResolveExprListNames().
@@ -1263,6 +1374,8 @@ pub fn resolveExprListNames(nc: *NameContext, list_arg: ?*ExprList) int.ParseErr
             nc.nc_flags.clear(found_agg);
         }
         if (p.n_err > 0) return error.ParseFailed;
+        // xqlite: the types the dialect's rules give (typing.zig).
+        if (nc.n_nc_err == 0 and typing.active(p.db)) try typing.typeTree(nc, e);
     }
     nc.nc_flags.set(saved_has_agg);
     return;

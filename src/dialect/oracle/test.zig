@@ -167,12 +167,12 @@ test "oracle: DDL, types and constraints" {
     try c.exec("INSERT INTO ty (n, i, v, vc, ch, r, b, f) VALUES (1.005, 2.6, 'abc', 'éé', 'x', '0A0B', TRUE, 1)");
     try c.expectRows("SELECT n, i, v, vc, ch, hex(r), b, f, d IS NOT NULL FROM ty", "1.01|3|abc|éé|x |0A0B|1|1.0|1\n");
     try c.expectRows("SELECT typeof(n), typeof(i), typeof(f) FROM ty", "real|integer|real\n");
-    try c.expectError("INSERT INTO ty (v) VALUES ('abcd')", "ORA-12899: value too large for column \"TY\".\"V\" (actual: 4, maximum: 3)");
-    try c.expectError("INSERT INTO ty (vc) VALUES ('ééé')", "ORA-12899: value too large for column \"TY\".\"VC\" (actual: 3, maximum: 2)");
+    try c.expectError("INSERT INTO ty (v) VALUES ('abcd')", "ORA-12899: value too large for column \"MAIN\".\"TY\".\"V\" (actual: 4, maximum: 3)");
+    try c.expectError("INSERT INTO ty (vc) VALUES ('ééé')", "ORA-12899: value too large for column \"MAIN\".\"TY\".\"VC\" (actual: 3, maximum: 2)");
     try c.expectError("INSERT INTO ty (n) VALUES (1234.5)", "ORA-01438: value larger than specified precision allowed for this column");
     try c.expectError("INSERT INTO ty (i) VALUES ('x')", "ORA-01722: invalid number");
-    try c.expectError("INSERT INTO ty (x) VALUES (0)", "CHECK constraint failed: X_POS");
-    try c.expectError("INSERT INTO ty (v) VALUES ('abc')", "UNIQUE constraint failed: TY.V");
+    try c.expectError("INSERT INTO ty (x) VALUES (0)", "ORA-02290: check constraint (MAIN.X_POS) violated");
+    try c.expectError("INSERT INTO ty (v) VALUES ('abc')", "ORA-00001: unique constraint (MAIN.TY_UQ) violated");
     try c.exec("UPDATE ty SET n = '12.5'");
     try c.expectRows("SELECT n FROM ty", "12.5\n");
     // The declared types in the catalog and USER_TAB_COLUMNS.
@@ -187,7 +187,7 @@ test "oracle: DDL, types and constraints" {
     try c.expectRows("SELECT sql LIKE '%STRICT' FROM sqlite_schema WHERE name = 'TY'", "1\n");
     // Keys are NOT NULL.
     try c.exec("CREATE TABLE k (id NUMBER(10) PRIMARY KEY, v VARCHAR2(5))");
-    try c.expectError("INSERT INTO k VALUES (NULL, 'a')", "ORA-01400: cannot insert NULL into (\"K\".\"ID\")");
+    try c.expectError("INSERT INTO k VALUES (NULL, 'a')", "ORA-01400: cannot insert NULL into (\"MAIN\".\"K\".\"ID\")");
     try c.expectError("CREATE TABLE k (x NUMBER)", "ORA-00955: name is already used by an existing object");
     // Views, indexes, ALTER, TRUNCATE, COMMENT, RENAME, DROP.
     try c.exec(
@@ -351,9 +351,9 @@ test "oracle: JSON type columns and IS JSON" {
     try c.expectError("INSERT INTO j (d) VALUES ('bad')", "ORA-40441: JSON syntax error");
     try c.expectError("INSERT INTO j (d) VALUES ('{\"a\":1,\"a\":2}')", "ORA-40444: JSON processing error");
     try c.exec("INSERT INTO j (doc, s) VALUES ('{a:1}', '{\"b\":2}')");
-    try c.expectError("INSERT INTO j (doc) VALUES ('bad')", "CHECK constraint failed: xq_ora_is_json(\"DOC\", 0)");
-    try c.expectError("INSERT INTO j (s) VALUES ('{\"a\":1,\"a\":2}')", "CHECK constraint failed: STRICT_CK");
-    try c.expectError("INSERT INTO j (s) VALUES ('{a:1}')", "CHECK constraint failed: STRICT_CK");
+    try c.expectError("INSERT INTO j (doc) VALUES ('bad')", "ORA-02290: check constraint (MAIN.SYS_C_J) violated");
+    try c.expectError("INSERT INTO j (s) VALUES ('{\"a\":1,\"a\":2}')", "ORA-02290: check constraint (MAIN.STRICT_CK) violated");
+    try c.expectError("INSERT INTO j (s) VALUES ('{a:1}')", "ORA-02290: check constraint (MAIN.STRICT_CK) violated");
     // IS JSON: lax by default (Oracle's lax syntax), NULL for NULL.
     try c.expectRows(
         "SELECT CASE WHEN x IS JSON THEN 1 ELSE 0 END, CASE WHEN x IS JSON STRICT THEN 1 ELSE 0 END, CASE WHEN x IS NOT JSON THEN 1 ELSE 0 END FROM (SELECT '{a:1}' x FROM dual UNION ALL SELECT '[1,2,]' FROM dual UNION ALL SELECT 'abc' FROM dual UNION ALL SELECT '1' FROM dual)",
@@ -585,4 +585,31 @@ test "oracle: users are schemas" {
     try c.expectRows("SELECT username FROM all_users", "MAIN\n");
     try c.expectError("SELECT * FROM hr.emp", "ORA-00942: table or view \"HR\".\"EMP\" does not exist");
     try c.expectRows("SELECT name FROM emp", "main\n");
+}
+
+test "ora: the catalog in memory sees writes without a schema change" {
+    const catalog = @import("../../catalog/catalog.zig");
+    var c: Conn = undefined;
+    try openOra(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE k (id NUMBER(5), v VARCHAR2(10))");
+    const m = (try catalog.meta(c.db, "main", "K")).?;
+    try testing.expectEqualStrings("NUMBER(5)", m.declType("id").?);
+    try testing.expectEqual(@as(?[]const u8, null), m.value("V", "oracle.comment"));
+    // COMMENT ON writes xq_catalog only.
+    try c.exec("COMMENT ON COLUMN k.v IS 'a value'");
+    try testing.expectEqualStrings("a value", (try catalog.meta(c.db, "main", "K")).?.value("V", "oracle.comment").?);
+    try c.exec("COMMENT ON TABLE k IS 'keys'");
+    try testing.expectEqualStrings("keys", (try catalog.meta(c.db, "main", "K")).?.value("", "oracle.comment").?);
+    // A comment rolled back (the SQLite dialect's transaction: Oracle's
+    // COMMENT commits).
+    main_mod.setDialect(c.db, .sqlite);
+    try c.exec("BEGIN");
+    main_mod.setDialect(c.db, .oracle);
+    try c.exec("COMMENT ON COLUMN k.v IS 'other'");
+    try testing.expectEqualStrings("other", (try catalog.meta(c.db, "main", "K")).?.value("V", "oracle.comment").?);
+    main_mod.setDialect(c.db, .sqlite);
+    try c.exec("ROLLBACK");
+    try c.expectRows("SELECT value FROM xq_catalog WHERE col = 'V' AND key = 'oracle.comment'", "a value\n");
+    try testing.expectEqualStrings("a value", (try catalog.meta(c.db, "main", "K")).?.value("V", "oracle.comment").?);
 }

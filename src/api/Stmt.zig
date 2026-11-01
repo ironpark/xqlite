@@ -18,6 +18,7 @@ const std = @import("std");
 const engine = @import("engine.zig");
 const errors = @import("errors.zig");
 const value = @import("value.zig");
+const types = @import("../sql/types.zig");
 const Conn = @import("conn.zig").Conn;
 
 const Allocator = std.mem.Allocator;
@@ -156,6 +157,12 @@ pub fn parameterName(s: *const Stmt, i: usize) ?[]const u8 {
     return engine.bindParameterName(s.vm, i);
 }
 
+/// The type the statement gives parameter `i` (1-based), if it knows one
+/// (engine.paramType(): `a = ?` of an integer column is an integer).
+pub fn parameterType(s: *const Stmt, i: usize) ?types.Type {
+    return engine.paramType(s.vm, i);
+}
+
 /// The index of the parameter named `name` (prefix included), or null.
 pub fn parameterIndex(s: *const Stmt, name: []const u8) ?usize {
     const i = engine.bindParameterIndex(s.vm, name);
@@ -202,16 +209,18 @@ pub const TypeName = struct {
 /// The declared type of result column `i`: as the table column was
 /// declared in the dialect that made the table (kept in xq_catalog:
 /// `character varying(20)` of PostgreSQL, `DATETIME2` of SQL Server), else
-/// its SQLite declared type (columnDecltype(), `.sqlite`); null for an
-/// expression.
+/// its SQLite declared type (columnDecltype(), `.sqlite`); for an
+/// expression, the type the statement gives it in the statement's
+/// dialect (`integer` of PostgreSQL's `a + 1`), null if none.
 pub fn columnTypeAlloc(s: *Stmt, gpa: Allocator, i: usize) Error!?TypeName {
+    var d: engine.Dialect = .sqlite;
     if (s.columnOrigin(i)) |o| {
-        if (try s.conn.check(engine.catalogType(s.conn.h, gpa, o.database, o.table, o.column))) |t| {
-            return .{ .text = t[0], .dialect = t[1] };
+        if (try s.conn.check(engine.catalogType(s.conn.h, o.database, o.table, o.column))) |t| {
+            return .{ .text = gpa.dupe(u8, t.name) catch return s.conn.outOfMemory(), .dialect = t.dialect };
         }
-    }
+    } else d = engine.statementDialect(s.vm);
     const t = s.columnDecltype(i) orelse return null;
-    return .{ .text = gpa.dupe(u8, t) catch return s.conn.outOfMemory(), .dialect = .sqlite };
+    return .{ .text = gpa.dupe(u8, t) catch return s.conn.outOfMemory(), .dialect = d };
 }
 
 /// Whether the statement counts the rows it changes (an INSERT, UPDATE or

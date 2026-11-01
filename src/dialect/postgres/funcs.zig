@@ -491,6 +491,72 @@ fn intFunc(ctx: *Context, argv: []*Mem, comptime t: IntType) void {
     api.resultInt64(ctx, v);
 }
 
+// ============================================================== stores
+
+/// What a value stored into a boolean column goes through
+/// (typing.Rules.store, coded by INSERT and UPDATE): a string is read as
+/// PostgreSQL reads a boolean's input ('t', 'yes', 'on', '1' ..., case
+/// and the spaces around ignored); other values are stored as they are
+/// (the column's check takes 0 and 1).
+pub const store_boolean = dfunc.scalar("xq_pg_store_boolean", 1, det, storeBooleanFunc);
+
+/// What a value stored into a numeric column goes through: a string is
+/// the number it spells ('1.50' is 1.5, '3' is 3), as numeric_in()
+/// reads it; other values are stored as they are.
+pub const store_numeric = dfunc.scalar("xq_pg_store_numeric", 1, det, storeNumericFunc);
+
+fn storeBooleanFunc(ctx: *Context, argv: []*Mem) void {
+    const m = argv[0];
+    if (api.valueType(m) != vi.SQLITE_TEXT) return api.resultValue(ctx, m);
+    const raw = text(ctx, m) orelse return;
+    if (parseBool(std.mem.trim(u8, raw, " \t\r\n\x0b\x0c"))) |b| return api.resultInt64(ctx, @intFromBool(b));
+    invalidInput(ctx, "boolean", raw);
+}
+
+fn storeNumericFunc(ctx: *Context, argv: []*Mem) void {
+    const m = argv[0];
+    if (api.valueType(m) != vi.SQLITE_TEXT) return api.resultValue(ctx, m);
+    const raw = text(ctx, m) orelse return;
+    const s = std.mem.trim(u8, raw, " \t\r\n\x0b\x0c");
+    if (!isNumericInput(s)) return invalidInput(ctx, "numeric", raw);
+    if (std.mem.indexOfAny(u8, s, ".eE") == null) {
+        if (std.fmt.parseInt(i64, s, 10)) |v| return api.resultInt64(ctx, v) else |_| {}
+    }
+    const r = std.fmt.parseFloat(f64, s) catch return invalidInput(ctx, "numeric", raw);
+    api.resultDouble(ctx, r);
+}
+
+/// Whether `s` is a number as numeric_in() reads one: a sign, digits
+/// with or without a point, an exponent. (NaN and Infinity, which
+/// PostgreSQL also reads, have no SQLite value to store.)
+fn isNumericInput(s: []const u8) bool {
+    var i: usize = 0;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+    var digits: usize = 0;
+    while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) digits += 1;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) digits += 1;
+    }
+    if (digits == 0) return false;
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        i += 1;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+        const start = i;
+        while (i < s.len and std.ascii.isDigit(s[i])) i += 1;
+        if (i == start) return false;
+    }
+    return i == s.len;
+}
+
+/// PostgreSQL's `invalid input syntax for type <t>: "<text>"` (22P02).
+fn invalidInput(ctx: *Context, comptime t: []const u8, raw: []const u8) void {
+    var buf: [128]u8 = undefined;
+    const what = "invalid input syntax for type " ++ t;
+    const msg = std.fmt.bufPrint(&buf, what ++ ": \"{s}\"", .{raw[0..@min(raw.len, 64)]}) catch what;
+    api.resultErrorState(ctx, .of("22P02"), msg);
+}
+
 pub fn parseBool(s: []const u8) ?bool {
     if (s.len == 0) return null;
     const words = [_]struct { []const u8, bool, usize }{

@@ -61,8 +61,8 @@ pub const Args = func.Args;
 pub const FilterArgs = @import("api/module.zig").FilterArgs;
 
 /// The type of a result column, independent of the dialect that declared
-/// it (types.Type, types.parse()).
-pub const types = @import("api/types.zig");
+/// it (types.Type, types.parse()): the engine's own (src/sql/types.zig).
+pub const types = @import("sql/types.zig");
 /// Values as the dialect a client speaks shows them (display.text(), and
 /// display.Columns for the types of result columns).
 pub const display = @import("api/display.zig");

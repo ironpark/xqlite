@@ -219,6 +219,11 @@ pub const Func = struct {
     order_by: []SortItem = &.{},
     filter: ?*Expr = null,
     over: ?*WindowSpec = null,
+    /// The type of the result as the frontend names it, where the
+    /// function called does not tell it (PostgreSQL's now() is SQLite's
+    /// strftime(), a text): lowering gives the call that type
+    /// (Expr.xq_type, sql/typing.zig). Metadata only.
+    result_type: []const u8 = "",
 };
 
 pub const InList = struct { e: *Expr, not: bool, items: []*Expr };

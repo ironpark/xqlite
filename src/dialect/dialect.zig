@@ -118,13 +118,147 @@ pub const Arith = struct {
     div_zero: ?Failure = null,
     /// An integer result outside 64 bits (SQLite: a real).
     int_overflow: ?Failure = null,
+    /// An integer result outside the range of its type, for arithmetic
+    /// whose type (Hooks.typing) is an integer narrower than 64 bits:
+    /// int1 (tinyint), int2 (smallint), int4 (integer). Null: no check
+    /// (the values compute in 64 bits, as MariaDB's INT arithmetic is a
+    /// BIGINT). Code generation marks such an operation with the width
+    /// (P5 of OP_Add ... OP_Remainder, arithWidth()), so that the check
+    /// costs nothing elsewhere.
+    int1: ?Range = null,
+    int2: ?Range = null,
+    int4: ?Range = null,
 
-    pub const Failure = struct { msg: []const u8, state: int.ErrorState };
+    /// The values of an integer type and the error outside them. With
+    /// `value`, the message is followed by the result and a period (SQL
+    /// Server's "..., value = 256."), when the result fits in 64 bits.
+    pub const Range = struct { min: i64, max: i64, failure: Failure, value: bool = false };
+
+    /// The Range of width `w` (P5 of an arithmetic opcode: 1 int1, 2
+    /// int2, 3 int4), null for none.
+    pub fn range(a: *const Arith, w: u16) ?Range {
+        return switch (w) {
+            1 => a.int1,
+            2 => a.int2,
+            3 => a.int4,
+            else => null,
+        };
+    }
+
+    /// The width (P5) of arithmetic of type `l` in a dialect of these
+    /// rules, 0 for no check.
+    pub fn width(a: *const Arith, l: @import("../sql/types.zig").Logical) u16 {
+        const w: u16 = switch (l) {
+            .int1 => 1,
+            .int2 => 2,
+            .int4 => 3,
+            else => return 0,
+        };
+        return if (a.range(w) != null) w else 0;
+    }
+};
+
+/// An error a dialect raises: its message and what it is.
+pub const Failure = struct { msg: []const u8, state: int.ErrorState };
+
+/// What a failed constraint says (Hooks.constraint), decided when the
+/// statement is compiled (src/dialect/constraint.zig): the message goes
+/// into the program, so the success path costs nothing.
+pub const Constraint = struct {
+    /// The error of `v` in the dialect's words, from `a` (the statement's
+    /// memory); null keeps SQLite's ("UNIQUE constraint failed: t.a").
+    /// The message may hold `value_mark` where the values of the key go
+    /// when Violation.has_value.
+    message: ?*const fn (a: std.mem.Allocator, v: Violation) error{OutOfMemory}!Failure = null,
+    /// A foreign key failure whose constraint is unknown: one found at
+    /// COMMIT (a deferred constraint), or by DROP TABLE.
+    foreign_key: ?Failure = null,
+    /// Between the values of a key put at `value_mark`.
+    value_separator: []const u8 = ", ",
+};
+
+/// Where the values of the duplicate key go in a message of
+/// Constraint.message: the program writes them there when it fails.
+pub const value_mark = '\x01';
+
+/// A constraint that fails, as Constraint.message sees it. Names are as
+/// SQLite holds them: a table of a named schema is "schema.table"
+/// (catalog.schemas.split()).
+pub const Violation = struct {
+    kind: Kind,
+    /// The statement that writes the row (CREATE UNIQUE INDEX: a unique
+    /// index built on rows that are not unique).
+    op: enum { insert, update, delete, create_index },
+    /// The SQLite database of the table ("main", "temp", an attached one).
+    database: []const u8,
+    /// The table; the child table of a foreign key.
+    table: []const u8,
+    /// The columns of the constraint (of the child, for a foreign key).
+    columns: []const []const u8 = &.{},
+    /// The constraint's name when the user gave one (recorded in the
+    /// catalog, catalog.Key.constraint), the index's of a unique index, a
+    /// CHECK's; null: the dialect names it (a CHECK whose SQLite name is
+    /// its text, `unnamedCheck`, is unnamed).
+    name: ?[]const u8 = null,
+    /// A foreign key: the parent table and its columns.
+    parent: []const u8 = "",
+    parent_columns: []const []const u8 = &.{},
+    /// A foreign key: which of the table's, from 1 in the order of CREATE
+    /// TABLE (MariaDB's t_ibfk_<n>).
+    ordinal: u32 = 0,
+    /// The message may put the key's values at value_mark.
+    has_value: bool = false,
+
+    pub const Kind = enum {
+        not_null,
+        /// A UNIQUE constraint.
+        unique,
+        primary_key,
+        /// A unique index (CREATE UNIQUE INDEX).
+        unique_index,
+        check,
+        /// A child row without its parent.
+        foreign_key,
+        /// A parent row that a child row still refers to (DELETE or
+        /// UPDATE of the parent).
+        referenced,
+    };
+
+    /// Whether the name of a CHECK is SQLite's for an unnamed one: its
+    /// text, not an identifier.
+    pub fn unnamedCheck(name: []const u8) bool {
+        if (name.len == 0 or std.ascii.isDigit(name[0])) return true;
+        for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '$' or c == '#' or c >= 0x80)) return true;
+        return false;
+    }
+
+    /// The schema of an object of a named schema ("schema.name"), else
+    /// null.
+    pub fn schemaOf(name: []const u8) ?[]const u8 {
+        return if (@import("../catalog/schema.zig").split(name)) |s| s.schema else null;
+    }
+
+    /// `name` without the schema schemaOf() finds.
+    pub fn bare(name: []const u8) []const u8 {
+        return if (@import("../catalog/schema.zig").split(name)) |s| s.name else name;
+    }
+
+    /// The columns joined by `sep`, each written `fmt` (`{s}`, `` `{s}` ``).
+    pub fn joined(a: std.mem.Allocator, cols: []const []const u8, comptime fmt: []const u8, sep: []const u8) error{OutOfMemory}![]const u8 {
+        var out: std.Io.Writer.Allocating = .init(a);
+        for (cols, 0..) |c, i| {
+            if (i > 0) out.writer.writeAll(sep) catch return error.OutOfMemory;
+            out.writer.print(fmt, .{c}) catch return error.OutOfMemory;
+        }
+        return out.written();
+    }
 };
 
 pub const Hooks = struct {
     /// Arithmetic errors (Arith).
     arith: Arith = .{},
+    /// The errors of failed constraints (Constraint).
+    constraint: Constraint = .{},
     /// The dialect's databases enforce foreign keys: the connection turns
     /// PRAGMA foreign_keys on while it compiles in the dialect
     /// (applyForeignKeys()).
@@ -177,6 +311,14 @@ pub const Hooks = struct {
     /// failed CHECK whose name starts with `prefix` is that error
     /// (checkState()).
     check_errors: []const CheckError = &.{},
+    /// The types the dialect gives literals, operators and functions
+    /// (sql/typing.zig's Rules), applied after name resolution to the
+    /// Exprs of the dialect's statements that the frontend did not type;
+    /// null types only what the frontend and the catalog type. The
+    /// declared types of result columns, display, the parameters' types;
+    /// code generation reads only the width of integer arithmetic (Arith)
+    /// and the store functions (Rules.store).
+    typing: ?*const @import("../sql/typing.zig").Rules = null,
 };
 
 pub const CheckError = struct {
@@ -315,6 +457,14 @@ pub const ConnState = struct {
     /// applyForeignKeys(): the dialect of the last application statement
     /// it saw, and whether it turned PRAGMA foreign_keys on.
     foreign_keys: struct { dialect: ?Dialect = null, ours: bool = false } = .{},
+    /// Whether the open transaction wrote xq_catalog (catalog/meta.zig):
+    /// rolling it back, or part of it, drops the catalog read into
+    /// memory, as SQLite's DBFLAG_SchemaChange does the schema.
+    catalog_written: bool = false,
+    /// The types of expressions beyond the plain ones (Expr.xq_type,
+    /// sql/typing.zig): kept as long as the connection, since Exprs of
+    /// the schema may hold their ids.
+    types: @import("../sql/typing.zig").Interner = .{},
     /// The MariaDB session: sql_mode, warnings, user variables.
     mariadb: @import("mariadb/state.zig").State = .{},
     /// The T-SQL session: variables, IDENTITY_INSERT, @@IDENTITY.
@@ -329,6 +479,7 @@ pub const ConnState = struct {
         while (it.next()) |k| gpa.free(k.*);
         s.currval.deinit(gpa);
         if (s.last_sequence) |z| gpa.free(z);
+        s.types.deinit(gpa);
         s.mariadb.deinit(gpa);
         s.mssql.deinit(gpa);
         s.postgres.deinit(gpa);
@@ -573,6 +724,7 @@ test {
     _ = @import("lex.zig");
     _ = @import("shared_funcs.zig");
     _ = @import("test.zig");
+    _ = @import("constraint.zig");
 }
 
 test "Dialect names" {

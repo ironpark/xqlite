@@ -28,6 +28,34 @@
 //!
 //! Object names are stored as given: folding case is the frontend's job.
 //! All statements are SQLite text, compiled with Lang.sqlite.
+//!
+//! The catalog in memory (meta.zig). Readers do not query xq_catalog:
+//! meta(db, schema, tbl) gives the TableMeta of a table (its dialect, each
+//! column's declared type, parsed into a types.Type, identity, collation,
+//! default, and all its entries for a dialect's own keys). The first
+//! meta() of a database reads all of its xq_catalog in one query and keeps
+//! it with that database's Schema (Schema.xq_meta). The invariant: what is
+//! in memory is what xq_catalog holds for the schema in memory, because it
+//! is dropped whenever either may change:
+//!  - with the schema (build.schemaClear(): a reload, a schema change of
+//!    another connection seen by the cookie check, the rollback of a
+//!    transaction or savepoint that changed the schema, DETACH, close);
+//!  - when the schema cookie in memory is no longer the one it was read
+//!    with (every DDL of this connection, which bumps it in place:
+//!    CREATE, DROP, ALTER, in any dialect), checked by meta();
+//!  - when the connection writes xq_catalog: every code*() function runs
+//!    its SQL by OP_SqlExec, which drops it before and after (so writes
+//!    without a schema change, such as Oracle's COMMENT ON, are seen),
+//!    and set() and deleteTable() drop it;
+//!  - when a transaction (or a savepoint, or a statement) that wrote
+//!    xq_catalog is rolled back (ConnState.catalog_written, kept as
+//!    SQLite keeps DBFLAG_SchemaChange): it may have been read with the
+//!    rolled back rows.
+//! Not seen: rows of xq_catalog written by plain SQL of the application
+//! (INSERT INTO xq_catalog) or by another connection or process without
+//! a schema change; the next schema change of the database shows them.
+//! A TableMeta is valid until it is dropped: use it while compiling, do
+//! not keep it across running a statement.
 
 const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
@@ -43,6 +71,20 @@ const Quoted = @import("../dialect/dialect.zig").Quoted;
 pub const sequence = @import("sequence.zig");
 /// Named schemas (namespaces) inside main: schema.zig.
 pub const schemas = @import("schema.zig");
+/// The catalog in memory: meta.zig.
+const meta_mod = @import("meta.zig");
+pub const TableMeta = meta_mod.TableMeta;
+pub const ColumnMeta = meta_mod.ColumnMeta;
+/// The TableMeta of table `tbl` of database `schema` ("main", "temp" or
+/// an attached name), null if the catalog has none: meta.get().
+pub const meta = meta_mod.get;
+/// meta() of a table of the schema in memory.
+pub const metaOf = meta_mod.of;
+/// metaOf() if the catalog of the table's database is in memory, without
+/// reading it: meta.cached().
+pub const metaCached = meta_mod.cached;
+/// Read the catalog of every database into memory: meta.readAll().
+pub const readAll = meta_mod.readAll;
 
 const Sqlite3 = int.Sqlite3;
 const Parse = int.Parse;
@@ -82,6 +124,13 @@ pub const Key = struct {
     pub const collation = "collation";
     /// Column: the default expression as written in the dialect.
     pub const default = "default";
+    /// Table (col ''): the name the user gave a UNIQUE, PRIMARY KEY or
+    /// FOREIGN KEY constraint, which SQLite does not keep, for the
+    /// dialect's error when it fails. The key is
+    /// "constraint:<kind>:<col>,<col>..." (the kind and the columns, of
+    /// the child for a foreign key: dialect/constraint.zig key()), the
+    /// value the name.
+    pub const constraint = "constraint";
 };
 
 /// The name of the main database, the default schema of these
@@ -200,6 +249,7 @@ pub fn exists(db: *Sqlite3, schema: []const u8) bool {
 
 /// Set (or with a null value, remove) an entry now.
 pub fn set(db: *Sqlite3, schema: []const u8, tbl: []const u8, col: []const u8, key: []const u8, value: ?[]const u8) Error!void {
+    meta_mod.written(db);
     try execFmt(db, ddl, &.{.{ .str = schema }});
     if (value) |z| {
         try execFmt(db, "INSERT OR REPLACE INTO %Q.xq_catalog VALUES(%Q,%Q,%Q,%Q)", &.{
@@ -259,6 +309,7 @@ fn dupeColumn(gpa: std.mem.Allocator, q: Query, i: usize) Error![]u8 {
 /// Remove every entry of `tbl` now.
 pub fn deleteTable(db: *Sqlite3, schema: []const u8, tbl: []const u8) Error!void {
     if (!try tableExists(db, schema, table_name)) return;
+    meta_mod.written(db);
     try execFmt(db, "DELETE FROM %Q.xq_catalog WHERE tbl=%Q", &.{ .{ .str = schema }, .{ .str = tbl } });
 }
 
@@ -335,4 +386,5 @@ pub const Query = struct {
 test {
     _ = sequence;
     _ = schemas;
+    _ = meta_mod;
 }

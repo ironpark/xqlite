@@ -9,6 +9,7 @@ const mem = @import("../mem.zig");
 const aux = @import("../aux.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const dialect = @import("../../dialect/dialect.zig");
+const constraint = @import("../../dialect/constraint.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
@@ -96,11 +97,13 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
     }
     v.rc = op.p1;
     v.error_action = .fromInt(op.p2);
-    std.debug.assert(op.p5 <= 4);
+    std.debug.assert(op.p5 <= 4 or op.p5 & vi.P5_ConstraintDialect != 0);
     if (v.rc != 0) {
         if (op.p3 > 0 and op.p4type == .notused) {
             const z = try mem.valueText(e.reg(op.p3), ENC.UTF8);
             aux.vdbeError(v, "{s}", .{if (z) |s| std.mem.span(s) else ""});
+        } else if (op.p5 & vi.P5_ConstraintDialect != 0) {
+            try dialectConstraintError(e, op);
         } else if (op.p5 != 0) {
             const types = [_][]const u8{ "NOT NULL", "UNIQUE", "CHECK", "FOREIGN KEY" };
             if (op.p4type == .z) {
@@ -124,6 +127,34 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
         e.rc = RC.BUSY;
     }
     return .ret;
+}
+
+/// The error of a constraint in the words of the dialect the statement
+/// was compiled in (P5_ConstraintDialect): P4, with the values of the
+/// key at dialect.value_mark.
+fn dialectConstraintError(e: *Exec, op: *const Op) Error!void {
+    @branchHint(.cold);
+    const v = e.v;
+    const d = constraint.decode(std.mem.span(op.p4.z));
+    const n: usize = op.p5 >> 8;
+    const mark = std.mem.indexOfScalar(u8, d.msg, dialect.value_mark) orelse
+        return aux.vdbeErrorState(v, d.state, "{s}", .{d.msg});
+    var w: std.Io.Writer.Allocating = .init(e.db.gpa);
+    defer w.deinit();
+    const sep = dialect.spec(v.xq_lang.dialect).hooks.constraint.value_separator;
+    w.writer.writeAll(d.msg[0..mark]) catch return error.OutOfMemory;
+    for (0..n) |i| {
+        if (i > 0) w.writer.writeAll(sep) catch return error.OutOfMemory;
+        const r = e.reg(op.p3 + @as(i32, @intCast(i)));
+        if (r.flags.Null) {
+            w.writer.writeAll("NULL") catch return error.OutOfMemory;
+        } else {
+            const z = try mem.valueText(r, ENC.UTF8);
+            w.writer.writeAll(if (z) |s| std.mem.span(s) else "") catch return error.OutOfMemory;
+        }
+    }
+    w.writer.writeAll(d.msg[mark + 1 ..]) catch return error.OutOfMemory;
+    aux.vdbeErrorState(v, d.state, "{s}", .{w.written()});
 }
 
 pub fn opOnce(e: *Exec, op: *Op) Flow {
@@ -273,6 +304,8 @@ pub fn opParam(e: *Exec, op: *Op) Flow {
 }
 
 pub fn opFkCounter(e: *Exec, op: *Op) Flow {
+    // xqlite: P4 is the dialect's error of the violation counted.
+    if (op.p4type == .z) e.v.xq_fk_error = op.p4.z;
     if (op.p1 != 0) {
         e.db.n_deferred_cons += op.p2;
     } else if (e.db.flags.DeferFKs) {

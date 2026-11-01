@@ -275,6 +275,7 @@ const select_mod = @import("select.zig");
 const attach = @import("attach.zig");
 const alter = @import("alter.zig");
 const vtab_mod = @import("vtab.zig");
+const dconstraint = @import("../dialect/constraint.zig");
 const btree = @import("xqlite_storage").btree;
 
 const Sqlite3 = int.Sqlite3;
@@ -668,6 +669,8 @@ pub fn schemaClear(db: *Sqlite3, s: *Schema) void {
     s.idx_hash.clearRetainingCapacity();
     s.fkey_hash.clearRetainingCapacity();
     s.seq_tab = null;
+    // xqlite: the dialect catalog read with this schema.
+    @import("../catalog/meta.zig").drop(db, s);
     if (s.schema_flags.SchemaLoaded) {
         s.i_generation +%= 1;
     }
@@ -2577,7 +2580,7 @@ fn refillIndex(p: *Parse, idx: *Index, mem_root_page: i32) void {
         const j2 = aux.goto_(v, 1);
         addr2 = aux.currentAddr(v);
         _ = aux.addOp4Int(v, OP.SorterCompare, i_sorter, j2, reg_record, idx.n_key_col);
-        uniqueConstraint(p, OE.Abort, idx);
+        uniqueConstraint(p, OE.Abort, idx, 0);
         aux.jumpHere(v, j2);
     } else {
         main_mod.mayAbort(p);
@@ -2689,14 +2692,29 @@ pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, 
     aux.changeP5(v, p5_errmsg);
 }
 
-/// Port of sqlite3UniqueConstraint(): halt for a UNIQUE or PRIMARY KEY
-/// violation of `idx`.
-pub fn uniqueConstraint(p: *Parse, on_error: OE, idx: *Index) void {
-    uniqueConstraintImpl(p, on_error, idx) catch oomFault(p);
+/// xqlite: haltConstraint() of the error of the dialect the statement is
+/// compiled in (`z`, from dialect/constraint.zig), with the `n_value`
+/// values of the key in the registers from `reg_value`.
+pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: [:0]const u8, reg_value: i32, n_value: usize) void {
+    const v = getVdbe(p) orelse return;
+    if (on_error == OE.Abort) main_mod.mayAbort(p);
+    const n: u16 = if (n_value > 255 or op != OP.Halt) 0 else @intCast(n_value);
+    _ = aux.addOp4Str(v, op, err_code, on_error.int(), if (n > 0 or op != OP.Halt) reg_value else 0, z);
+    aux.changeP5(v, vi.P5_ConstraintDialect | n << 8);
 }
 
-fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index) Oom!void {
+/// Port of sqlite3UniqueConstraint(): halt for a UNIQUE or PRIMARY KEY
+/// violation of `idx`, whose key is in the registers from `reg_key` (0:
+/// not in registers).
+pub fn uniqueConstraint(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) void {
+    uniqueConstraintImpl(p, on_error, idx, reg_key) catch oomFault(p);
+}
+
+fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) Oom!void {
     const t = idx.table;
+    if (dconstraint.unique(p, idx, reg_key != 0)) |z| {
+        return haltDialectConstraint(p, OP.Halt, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, z, reg_key, idx.n_key_col);
+    }
     var msg: std.ArrayList(u8) = .empty;
     if (idx.col_expr != null) {
         try msg.appendSlice(p.arena, try mprintf(p, "index '%q'", &.{.{ .str = idx.name }}));
@@ -2711,8 +2729,12 @@ fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index) Oom!void {
     haltConstraint(p, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, msg.items, vi.P5_ConstraintUnique);
 }
 
-/// Port of sqlite3RowidConstraint(): halt for a duplicate rowid.
-pub fn rowidConstraint(p: *Parse, on_error: OE, t: *Table) void {
+/// Port of sqlite3RowidConstraint(): halt for a duplicate rowid, the one
+/// in register `reg_rowid` (0: not in a register).
+pub fn rowidConstraint(p: *Parse, on_error: OE, t: *Table, reg_rowid: i32) void {
+    if (dconstraint.rowid(p, t, reg_rowid != 0)) |z| {
+        return haltDialectConstraint(p, OP.Halt, if (t.i_pkey >= 0) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_ROWID, on_error, z, reg_rowid, 1);
+    }
     const msg, const rc = if (t.i_pkey >= 0)
         .{ std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, t.cols[@intCast(t.i_pkey)].name() }) catch return oomFault(p), RC.CONSTRAINT_PRIMARYKEY }
     else

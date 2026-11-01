@@ -16,8 +16,9 @@
 //! | json, jsonb                         | TEXT    | json_valid(); jsonb stored normalized  |
 //!
 //! A check is a named CHECK constraint whose name is PostgreSQL's
-//! message, so that a violation reads "CHECK constraint failed: integer
-//! out of range".
+//! message (Hooks.check_errors), so that a violation in the dialect
+//! reads "integer out of range" (in SQLite's: "CHECK constraint failed:
+//! integer out of range").
 
 const std = @import("std");
 

@@ -154,7 +154,7 @@ DDL은 SQLite 텍스트로 렌더링해 `ir.stmt.lowerSqliteText()`로 내립니
 
 - 열의 `CHECK`는 열 이름을 붙입니다.
 - 이름 없는 테이블 `CHECK`는 `CONSTRAINT_<n>`입니다.
-- 둘 다 MariaDB와 같은 이름이고, 오류는 `CHECK constraint failed: price`처럼 나옵니다.
+- 둘 다 MariaDB와 같은 이름이고, 오류는 ``CONSTRAINT `price` failed for `main`.`p` ``처럼 나옵니다(4025, [제약 위반](#제약-위반)).
 
 ## 데이터베이스
 
@@ -228,6 +228,24 @@ MariaDB의 데이터베이스는 세 가지입니다.
 | 없는 테이블 지우기(1051) | `Unknown table 'db.t'` |
 | 있는 테이블(1050) | `Table 't' already exists` |
 | 선택된 데이터베이스 없음(1046) | `No database selected` |
+
+### 제약 위반
+
+이 방언으로 컴파일한 문장의 제약 위반은 MariaDB의 문구와 번호입니다. SQLSTATE는 다른 오류처럼 PostgreSQL의 코드 공간입니다(MariaDB 자신은 모두 23000).
+
+| 위반 | 메시지 | 번호 | SQLSTATE |
+| --- | --- | --- | --- |
+| PRIMARY KEY, UNIQUE 키 | `Duplicate entry '1' for key 'PRIMARY'`, `Duplicate entry 'a-1' for key 'uk'` | 1062 | 23505 |
+| NOT NULL | `Column 'a' cannot be null` | 1048 | 23502 |
+| CHECK | ``CONSTRAINT `c` failed for `db`.`t` `` | 4025 | 23514 |
+| 외래 키(자식 행) | ``Cannot add or update a child row: a foreign key constraint fails (`db`.`t`, CONSTRAINT `t_ibfk_1` FOREIGN KEY (`b`) REFERENCES `p` (`id`))`` | 1452 | 23503 |
+| 외래 키(부모 행) | ``Cannot delete or update a parent row: a foreign key constraint fails (...)`` | 1451 | 23503 |
+
+- 키 이름은 MariaDB와 같습니다: 기본 키는 `PRIMARY`, 그 밖에는 인덱스 이름(`t$uk`의 `uk`), 이름 없는 키는 첫 열 이름입니다. 여러 열 키의 값은 `-`로 잇습니다.
+- 이름 없는 외래 키는 `<table>_ibfk_<n>`(CREATE TABLE에서의 순서)입니다. 이름을 준 외래 키의 이름은 CREATE TABLE이 `xq_catalog`에 적어 둡니다(키 `constraint:foreign_key:<열>`). 외래 키 문구의 끝에 붙는 `ON DELETE CASCADE` 같은 동작은 쓰지 않습니다.
+- `CREATE UNIQUE INDEX`가 중복을 찾으면 값이 없는 `Duplicate entry for key 'i'`입니다.
+- 문장이 끝날 때 찾는 외래 키 위반은 마지막으로 센 위반의 제약을 말합니다. COMMIT에서 찾는 지연 제약은 제약을 모르므로 `Cannot add or update a child row: a foreign key constraint fails`입니다.
+- 값 변환이 내는 `Column 'a' cannot be null`(1048)은 SQL 함수의 오류라 결과 코드가 SQLITE_ERROR입니다. 엔진의 NOT NULL 검사가 내는 것은 SQLITE_CONSTRAINT_NOTNULL입니다.
 
 ## `sql_mode`
 
@@ -439,7 +457,8 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 
 | 항목 | xqlite |
 | --- | --- |
-| `DECIMAL` | `REAL`로 저장합니다(scale 0이고 정밀도 18 이하면 `INTEGER`). 반올림은 되지만 정확한 십진 연산이 아닙니다. API로는 `220.00`이 `220.0`이고, 셸과 서버는 `DECIMAL(p,s)` 열을 s자리로 보여 줍니다(`220.00`, [값 표시](architecture.md#값-표시)). `CAST(x AS DECIMAL(p,s))`도 그렇고, 그 밖의 식의 결과는 `220.0`입니다. |
+| `DECIMAL` | `REAL`로 저장합니다(scale 0이고 정밀도 18 이하면 `INTEGER`). 반올림은 되지만 정확한 십진 연산이 아닙니다. API로는 `220.00`이 `220.0`이고, 셸과 서버는 `DECIMAL(p,s)` 열을 s자리로 보여 줍니다(`220.00`, [값 표시](architecture.md#값-표시)). `CAST(x AS DECIMAL(p,s))`와 스케일을 아는 식(`1.50`, `d + 1`, `7 / 2`의 `3.5000`, `AVG(int)`의 `7.0000`, `ROUND(x, 2)`)도 그렇습니다. |
+| 식의 타입 | MariaDB의 규칙으로 매깁니다: 정수 리터럴은 `int`(64비트면 `bigint`), `1.50`은 `decimal(3,2)`, 정수의 `+ - * %`는 `bigint`, `/`는 scale이 4 더 큰 `decimal`, `DIV`는 `bigint`, `DECIMAL`끼리는 MariaDB의 scale 규칙(`+ -`는 큰 쪽, `*`는 합), 실수가 섞이면 `double`, `COUNT()`은 `bigint`, `SUM()`·`AVG()`은 `decimal`([코어의 타입](architecture.md#코어의-타입)). 결과 열의 선언 타입과 값 표시, 매개변수 타입에만 쓰고 계산에는 쓰지 않습니다. 정밀도는 단순화했습니다: 정수는 그 타입의 자릿수(`INT`는 10)로 셉니다(MariaDB는 리터럴의 자릿수, 표시 폭). |
 | 정수 값의 실수 | `POW(2,10)`이 `1024.0`처럼 SQLite 형식으로 보입니다. |
 | `BIGINT UNSIGNED`, `CAST(... AS UNSIGNED)` | 부호 있는 64비트 범위입니다. |
 | `TIMESTAMP` | 시간대 변환이 없고 범위도 `DATETIME`과 같습니다. 시간대는 UTC입니다. |
@@ -453,7 +472,7 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 | `LAST_INSERT_ID()` | 여러 행 INSERT에서는 마지막 행의 id입니다. 직접 넣은 id에도 바뀝니다. |
 | `ON DUPLICATE KEY UPDATE` | affected rows는 SQLite 방식(행마다 1)입니다. 한 행이 두 UNIQUE 키에서 서로 다른 두 행과 충돌하면 첫 행만 고칩니다. |
 | `SHOW WARNINGS` | 문장을 컴파일할 때(보통 직전 문장 실행 직후) 기록된 경고를 보여 줍니다. 경고는 다음 문장을 컴파일할 때 지워집니다. 최대 8개를 저장하고 개수는 전부 셉니다. |
-| 엔진 오류 | `UNIQUE constraint failed` ...는 SQLite 메시지 그대로입니다. `no such table`만 MariaDB의 `Table 'db.t' doesn't exist`로 바꿉니다. |
+| 엔진 오류 | 제약 위반은 MariaDB 문구입니다([제약 위반](#제약-위반)). 그 밖의 엔진 오류는 SQLite 메시지 그대로이고, `no such table`만 MariaDB의 `Table 'db.t' doesn't exist`로 바꿉니다. |
 | `INSERT ... SELECT` | 변환 오류 메시지의 행 번호가 언제나 1입니다. |
 
 ### 데이터베이스

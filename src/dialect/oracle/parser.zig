@@ -184,8 +184,6 @@ pub const Parser = struct {
     nextval_seen: std.StringHashMapUnmanaged(void) = .empty,
     /// Expressions the parser made that are dates or timestamps.
     date_nodes: std.AutoHashMapUnmanaged(*const Expr, Kind) = .empty,
-    /// The declared types of the tables looked at (dates.zig).
-    decl_types: std.StringHashMapUnmanaged([]const catalog.Entry) = .empty,
     /// JSON (jsonsql.zig): the values given to JSON constructors, the
     /// JSON_VALUE calls, dot notation placeholders, JSON_OBJECT(*) calls,
     /// the JSON_TABLEs of FROM and the queries whose references to them
@@ -1590,6 +1588,7 @@ pub const Parser = struct {
     /// SYSDATE: the statement's time, 'YYYY-MM-DD HH:MM:SS' (UTC).
     fn sysdate(p: *Parser, pos: u32) Error!*Expr {
         const e = try p.call(pos, "strftime", null, &.{ try p.stringAt(pos, "%Y-%m-%d %H:%M:%S"), try p.stringAt(pos, "now") });
+        e.kind.func.result_type = "DATE";
         try p.date_nodes.put(p.arena, e, .date);
         return e;
     }
@@ -1597,6 +1596,7 @@ pub const Parser = struct {
     /// SYSTIMESTAMP: 'YYYY-MM-DD HH:MM:SS.ffffff' (milliseconds).
     fn systimestamp(p: *Parser, pos: u32) Error!*Expr {
         const e = try p.call(pos, "strftime", null, &.{ try p.stringAt(pos, "%Y-%m-%d %H:%M:%f000"), try p.stringAt(pos, "now") });
+        e.kind.func.result_type = "TIMESTAMP WITH TIME ZONE";
         try p.date_nodes.put(p.arena, e, .timestamp);
         return e;
     }
@@ -2169,19 +2169,12 @@ pub const Parser = struct {
                     continue;
                 }
                 const schema = catalog.schemaName(ps.db, t);
-                const key = try std.fmt.allocPrint(p.arena, "{s}.{s}", .{ schema, t.name });
-                const entries = p.decl_types.get(key) orelse blk: {
-                    const es: []const catalog.Entry = if (catalog.exists(ps.db, schema))
-                        catalog.entries(ps.db, p.arena, schema, t.name) catch &.{}
-                    else
-                        &.{};
-                    try p.decl_types.put(p.arena, key, es);
-                    break :blk es;
-                };
-                for (entries) |en| {
-                    if (std.mem.eql(u8, en.key, catalog.Key.decl_type) and std.ascii.eqlIgnoreCase(en.col, names[names.len - 1].text)) return en.value;
-                }
-                return null;
+                if (!catalog.exists(ps.db, schema)) return null;
+                const m = (catalog.meta(ps.db, schema, t.name) catch null) orelse return null;
+                const decl = m.declType(names[names.len - 1].text) orelse return null;
+                // Copied: the catalog in memory may be dropped before the
+                // parse ends.
+                return try p.arena.dupe(u8, decl);
             }
         }
         return null;

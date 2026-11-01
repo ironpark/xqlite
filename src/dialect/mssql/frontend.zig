@@ -247,10 +247,15 @@ fn translateError(p: *int.Parse) int.Oom!void {
 
 pub const hooks: dialect.Hooks = .{
     .foreign_keys = true,
+    .constraint = @import("constraints.zig").constraint,
     .arith = .{
         .div_zero = .{ .msg = "Divide by zero error encountered.", .state = .numbered("22012", 8134) },
         .int_overflow = .{ .msg = "Arithmetic overflow error converting expression to data type bigint.", .state = .numbered("22003", 8115) },
+        .int1 = .{ .min = 0, .max = 255, .failure = .{ .msg = "Arithmetic overflow error for data type tinyint, value = ", .state = .numbered("22003", 220) }, .value = true },
+        .int2 = .{ .min = std.math.minInt(i16), .max = std.math.maxInt(i16), .failure = .{ .msg = "Arithmetic overflow error for data type smallint, value = ", .state = .numbered("22003", 220) }, .value = true },
+        .int4 = .{ .min = std.math.minInt(i32), .max = std.math.maxInt(i32), .failure = .{ .msg = "Arithmetic overflow error converting expression to data type int.", .state = .numbered("22003", 8115) } },
     },
+    .typing = &@import("typing.zig").rules,
     .functions = &functions,
     .engine_functions = &engine_functions,
     .table_function = @import("openjson.zig").register,
@@ -393,4 +398,5 @@ test {
     _ = @import("json_func.zig");
     _ = @import("openjson.zig");
     _ = @import("test.zig");
+    _ = @import("constraints.zig");
 }

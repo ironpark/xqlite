@@ -661,6 +661,8 @@ fn codeTriggerPrgImpl(p: *Parse, trig: *Trigger, t: *Table, orconf: OE) Oom!?*Tr
         .e_trigger_op = trig.op,
         .n_query_loop = p.n_query_loop,
         .prep_flags = p.prep_flags,
+        // xqlite: the schema's text (sql/typing.zig).
+        .xq_schema_text = 1,
     };
     defer build.releaseTableRefs(&sub);
     sub.outer_parse = db.parse;

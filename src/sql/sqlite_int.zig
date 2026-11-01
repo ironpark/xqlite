@@ -168,6 +168,9 @@ pub const Expr = struct {
     /// TK_REGISTER/TK_TRUTH: original op. TK_COLUMN: P5 of OP_Column.
     /// TK_AGG_FUNCTION: nesting depth. TK_FUNCTION: NC_SelfRef flag.
     op2: u8 = 0,
+    /// xqlite: the type of the expression (sql/typing.zig), 0 if not
+    /// known. Metadata: code generation does not read it.
+    xq_type: u16 = 0,
     flags: EP = .{},
     /// Token value (dequoted, NUL-terminated), or with EP_IntValue a
     /// non-negative integer.
@@ -269,11 +272,6 @@ pub const ExprListItem = struct {
     expr: ?*Expr,
     /// Name; meaning depends on `fg.e_ename`.
     e_name: ?[:0]u8 = null,
-    /// xqlite: the type of a result column that is an expression, in the
-    /// dialect of the statement ("boolean", "numeric(38,2)"), as its
-    /// frontend knows it: its declared type (sqlite3_column_decltype()),
-    /// which SQLite leaves NULL. Set by the lowering of the IR.
-    xq_type: ?[:0]const u8 = null,
     fg: packed struct {
         sort_flags: u8 = 0,
         e_ename: EName = .name,
@@ -1139,6 +1137,11 @@ pub const Schema = struct {
     enc: u8 = 0,
     schema_flags: DB = .{},
     cache_size: i32 = 0,
+    /// xqlite: the dialect catalog of this database read into memory
+    /// (a *catalog.meta.Cache, src/catalog/meta.zig), null until first
+    /// used. Dropped with the objects above (schemaClear()). No C
+    /// counterpart.
+    xq_meta: ?*anyopaque = null,
 };
 
 // ============================================================== functions
@@ -1815,6 +1818,16 @@ pub const Parse = struct {
     /// xqlite: SQLite's grammar does not finish the statement it parses
     /// (ir.stmt.lowerSqliteText(): a frontend adds to it and finishes).
     xq_hold_finish: bool = false,
+    /// xqlite: the type of each parameter (by number - 1) that the
+    /// statement compares, computes with or stores into a column of a
+    /// known type (sql/typing.zig); unknown (0) for the others. Up to
+    /// the highest typed number. Vdbe.xq_param_types at makeReady().
+    xq_param_types: std.ArrayList(u16) = .empty,
+    /// xqlite: nonzero while names of SQL the schema keeps are resolved (a
+    /// view's query, a trigger's program): text that means what it says
+    /// in every dialect, which the typing rules type but make no choices
+    /// in (typing.Rules.overload).
+    xq_schema_text: u32 = 0,
     n_err: i32 = 0,
     /// Counter for Select.sel_id.
     n_select: i32 = 0,

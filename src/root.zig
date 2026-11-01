@@ -159,7 +159,7 @@ test {
         @import("vdbe/exec/misc.zig"),       @import("sql/sqlite_int.zig"),       @import("dialect/dialect.zig"),
         @import("ir/ir.zig"),                @import("catalog/catalog.zig"),      @import("catalog/sequence.zig"),
         @import("sql/analyze.zig"),          @import("sql/analyze_test.zig"),     @import("vdbe/utf.zig"),
-        @import("parse/normalize.zig"),
+        @import("parse/normalize.zig"),      @import("sql/typing.zig"),
     }) |file| std.testing.refAllDecls(file);
 }
 

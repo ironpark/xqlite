@@ -139,6 +139,12 @@ fn exprSetHeight(e: *Expr) void {
     e.n_height = h + 1;
 }
 
+/// xqlite: exprSetHeight() of an Expr whose operands a dialect's typing
+/// rules changed after names were resolved (sql/typing.zig).
+pub fn setHeight(e: *Expr) void {
+    exprSetHeight(e);
+}
+
 /// Port of sqlite3ExprSetHeightAndFlags().
 pub fn setHeightAndFlags(p: *Parse, e: *Expr) void {
     if (p.n_err != 0) return;
@@ -744,7 +750,6 @@ pub fn listDup(a: Allocator, l_arg: ?*ExprList) Oom!?*ExprList {
             }
         };
         if (old.e_name) |z| item.e_name = try a.dupeSentinel(u8, z, 0);
-        if (old.xq_type) |z| item.xq_type = try a.dupeSentinel(u8, z, 0);
         n.items.appendAssumeCapacity(item);
     }
     return n;

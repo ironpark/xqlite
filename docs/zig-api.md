@@ -105,8 +105,8 @@ src/api/errors.zig      오류 집합, ResultCode, ErrorInfo, Diagnostics
 src/api/conn.zig        오류를 연결/Diagnostics에 기록하는 공용 도우미
 src/api/func.zig        스칼라 함수, 집계(윈도우) 함수, collation 래퍼
 src/api/module.zig      타입이 있는 가상 테이블 모듈 래퍼
-src/api/types.zig       방언의 선언 타입 → 방언과 무관한 열 타입(types.Type)
-src/api/display.zig     그 방언이 보이는 값의 텍스트(display.text), 결과 열의 타입 캐시(display.Columns)
+src/sql/types.zig       방언의 선언 타입 → 방언과 무관한 열 타입(types.Type). 엔진의 것을 그대로 내보냄
+src/api/display.zig     그 방언이 보이는 값의 텍스트(display.text), 결과 열의 타입(display.Columns)
 src/api/engine.zig      엔진과의 유일한 접점 (아래 참고)
 ```
 
@@ -391,6 +391,7 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_prepare_v2` | `Db.prepare(sql)` (한 문장만, 나머지가 있으면 `error.MultipleStatements`) |
 | `sqlite3_bind_*` | `Stmt.bind(args)`, `bindAt`, `bindName`, `clearBindings` |
 | `sqlite3_bind_parameter_count/name/index` | `parameterCount`, `parameterName`, `parameterIndex` |
+| (매개변수의 타입) | `Stmt.parameterType(i)` (`a = ?`의 `?`는 `a`의 타입. SQLite 방언은 늘 null, [코어의 타입](architecture.md#코어의-타입)) |
 | `sqlite3_step` | `Stmt.step() !bool`, `Stmt.next(T)`, `Iterator(T).next()` |
 | `sqlite3_column_*` | `Stmt.column(T, i)`, `columnAlloc`, `row(T)`, `rowAlloc`, `columnKind` |
 | `sqlite3_column_count/name/decltype` | `columnCount`, `columnName`, `columnDecltype`, `columnIndex` |

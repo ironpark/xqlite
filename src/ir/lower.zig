@@ -41,6 +41,8 @@ const expr_mod = @import("../sql/expr.zig");
 const ctype = @import("xqlite_base").ctype;
 const catalog = @import("../catalog/catalog.zig");
 const dialect = @import("../dialect/dialect.zig");
+const dconstraint = @import("../dialect/constraint.zig");
+const typing = @import("../sql/typing.zig");
 
 const sequence = catalog.sequence;
 const Parse = int.Parse;
@@ -69,6 +71,16 @@ pub fn functionName(p: *Parse, name: []const u8, owner: ?dialect.Dialect, schema
     return name;
 }
 
+/// The tree each lowered Expr and ORDER BY list was lowered from: for a
+/// frontend that brings back to its tree what the core decides once
+/// names are resolved (PostgreSQL's ddltype.zig, for the text of the
+/// schema).
+pub const Origins = struct {
+    exprs: std.AutoHashMapUnmanaged(*const tree.Expr, *IrExpr) = .empty,
+    /// By the address of the tree's items.
+    sort_lists: std.AutoHashMapUnmanaged([*]const tree.SortItem, *ExprList) = .empty,
+};
+
 pub const Lowerer = struct {
     p: *Parse,
     /// The text the positions of the tree are offsets of.
@@ -81,6 +93,9 @@ pub const Lowerer = struct {
     value_target: ?ValueTarget = null,
     /// The identity columns of the last table asked for.
     identity_cache: ?struct { tab: *int.Table, cols: []Identity } = null,
+    /// Where each Expr and ORDER BY list lowered comes from, if kept
+    /// (Origins).
+    origins: ?*Origins = null,
 
     const ValueTarget = struct { tab: ?*int.Table, col: ?*int.Column };
 
@@ -218,7 +233,48 @@ pub const Lowerer = struct {
 
     // ====================================================== expressions
 
+    /// The Expr of `e`, with the type the IR says it has (Expr.xq_type,
+    /// typeOf()).
     pub fn expr(l: *Lowerer, e: *const tree.Expr) Error!*IrExpr {
+        const x = try l.exprNode(e);
+        const t = try l.typeOf(e, x);
+        if (t != typing.unknown) x.xq_type = t;
+        if (l.origins) |o| try o.exprs.put(l.arena(), e, x);
+        return x;
+    }
+
+    /// The type of `e`, lowered to `x`, where the IR says it (Expr.xq_type,
+    /// sql/typing.zig): a comparison, a logical operation, IN, EXISTS,
+    /// BETWEEN, LIKE and IS are booleans in every dialect, a cast is of
+    /// its target type as the frontend spells it, a COLLATE of the type
+    /// of its operand, a call of its Func.result_type; else unknown (for
+    /// the dialect's typing rules, after names are resolved) (and an Expr the lowering passes
+    /// through, such as a parenthesized one, keeps its own).
+    fn typeOf(l: *Lowerer, e: *const tree.Expr, x: *const IrExpr) Error!typing.TypeId {
+        const db = l.p.db;
+        const d = db.xq.lang.dialect;
+        if (d == .sqlite) return typing.unknown;
+        return switch (e.kind) {
+            .boolean, .compare, .in_list, .in_select, .exists, .between, .like, .is_null, .is_bool => typing.boolean,
+            .unary => |u| if (u.op == .not) typing.boolean else typing.unknown,
+            .binary => |b| if (b.op == .@"and" or b.op == .@"or") typing.boolean else typing.unknown,
+            .collate => if (x.op == TK.COLLATE and x.left != null) x.left.?.xq_type else typing.unknown,
+            .func => |f| if (f.result_type.len > 0) typing.intern(db, d, f.result_type) else typing.unknown,
+            .cast => |c| if (c.target_type.len == 0)
+                typing.unknown
+            else switch (c.mode) {
+                // A scale the spelling leaves out (PostgreSQL's numeric).
+                .round => |sc| if (std.mem.indexOfScalar(u8, c.target_type, '(') == null and sc > 0)
+                    typing.intern(db, d, try std.fmt.allocPrint(l.arena(), "{s}(38,{d})", .{ c.target_type, sc }))
+                else
+                    typing.intern(db, d, c.target_type),
+                else => typing.intern(db, d, c.target_type),
+            },
+            else => typing.unknown,
+        };
+    }
+
+    fn exprNode(l: *Lowerer, e: *const tree.Expr) Error!*IrExpr {
         const p = l.p;
         switch (e.kind) {
             .column => |names| return l.column(names),
@@ -561,6 +617,7 @@ pub const Lowerer = struct {
             };
             ir.list.setSortOrder(list, dir, nulls);
         }
+        if (l.origins) |o| if (list) |x| try o.sort_lists.put(l.arena(), items.ptr, x);
         return list;
     }
 
@@ -742,7 +799,6 @@ pub const Lowerer = struct {
             },
             .expr => |x| {
                 list = try ir.list.append(p, list, try l.expr(x.e));
-                if (try l.resultType(x.e)) |t| list.?.items.items[list.?.len() - 1].xq_type = t;
                 if (x.alias) |a| {
                     try ir.list.setName(p, list, try l.nameTok(a), true);
                 } else if (x.name) |name| {
@@ -751,29 +807,6 @@ pub const Lowerer = struct {
             },
         };
         return list;
-    }
-
-    /// The type of the result column `e`, an expression, where the IR
-    /// says it (ExprListItem.xq_type): a comparison or a logical operation
-    /// is a boolean in every dialect, a cast is of its target type.
-    fn resultType(l: *Lowerer, e: *const tree.Expr) Error!?[:0]const u8 {
-        return switch (e.kind) {
-            .boolean, .compare, .in_list, .in_select, .exists, .between, .like, .is_null, .is_bool => "boolean",
-            .unary => |u| if (u.op == .not) "boolean" else null,
-            .binary => |b| if (b.op == .@"and" or b.op == .@"or") "boolean" else null,
-            .collate => |c| l.resultType(c.e),
-            .cast => |c| if (c.target_type.len == 0)
-                null
-            else switch (c.mode) {
-                // A scale the spelling leaves out (PostgreSQL's numeric).
-                .round => |s| if (std.mem.indexOfScalar(u8, c.target_type, '(') == null and s > 0)
-                    try std.fmt.allocPrintSentinel(l.p.arena, "{s}(38,{d})", .{ c.target_type, s }, 0)
-                else
-                    try l.p.arena.dupeSentinel(u8, c.target_type, 0),
-                else => try l.p.arena.dupeSentinel(u8, c.target_type, 0),
-            },
-            else => null,
-        };
     }
 
     fn with(l: *Lowerer, w: *const tree.With) Error!*int.With {
@@ -901,19 +934,17 @@ pub const Lowerer = struct {
         const schema = catalog.schemaName(db, t);
         var out: std.ArrayList(Identity) = .empty;
         if (catalog.exists(db, schema)) {
-            const entries = catalog.entries(db, l.arena(), schema, t.name) catch |err| switch (err) {
+            const m = catalog.meta(db, schema, t.name) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
-                else => &.{},
+                else => null,
             };
-            for (entries) |en| {
-                if (!std.mem.eql(u8, en.key, catalog.Key.identity)) continue;
-                const i = columnIndex(t, en.col) orelse continue;
-                var always = false;
-                for (entries) |k| {
-                    if (std.mem.eql(u8, k.key, catalog.Key.identity_kind) and ctype.eqlNoCase(k.col, en.col)) always = std.mem.eql(u8, k.value, "always");
-                }
-                try out.append(l.arena(), .{ .col = &t.cols[i], .sequence = en.value, .always = always });
-            }
+            if (m) |x| for (x.columns) |*c| {
+                const seq = c.identity orelse continue;
+                const i = columnIndex(t, c.name) orelse continue;
+                // Copied: the catalog in memory may be dropped before the
+                // statement is compiled.
+                try out.append(l.arena(), .{ .col = &t.cols[i], .sequence = try l.arena().dupe(u8, seq), .always = c.always() });
+            };
         }
         l.identity_cache = .{ .tab = t, .cols = out.items };
         return out.items;
@@ -1211,6 +1242,37 @@ pub const Lowerer = struct {
         catalog.codeDeleteTable(p, schema, table);
         catalog.codeSet(p, schema, table, "", catalog.Key.dialect, l.dialectName());
         for (ct.columns) |c| try l.recordColumn(schema, table, c, true);
+        try l.recordConstraintNames(schema, table, ct);
+    }
+
+    /// The names the user gave the UNIQUE, PRIMARY KEY and FOREIGN KEY
+    /// constraints of a new table, which SQLite does not keep, for the
+    /// dialect's errors (catalog.Key.constraint, dialect/constraint.zig).
+    fn recordConstraintNames(l: *Lowerer, schema: []const u8, table: []const u8, ct: *const tree.CreateTable) Error!void {
+        const p = l.p;
+        const a = l.arena();
+        for (ct.columns) |c| for (c.constraints) |cc| {
+            const name = cc.name orelse continue;
+            const kind: dialect.Violation.Kind = switch (cc.kind) {
+                .primary_key => .primary_key,
+                .unique => .unique,
+                .references => .foreign_key,
+                else => continue,
+            };
+            catalog.codeSet(p, schema, table, "", try dconstraint.key(a, kind, &.{c.name.text}), name);
+        };
+        for (ct.constraints) |tc| {
+            const name = tc.name orelse continue;
+            const kind: dialect.Violation.Kind, const names: []const tree.Name = switch (tc.kind) {
+                .primary_key => |x| .{ .primary_key, x },
+                .unique => |x| .{ .unique, x },
+                .foreign_key => |x| .{ .foreign_key, x.cols },
+                .check => continue,
+            };
+            const cols = try a.alloc([]const u8, names.len);
+            for (cols, names) |*z, n| z.* = n.text;
+            catalog.codeSet(p, schema, table, "", try dconstraint.key(a, kind, cols), name);
+        }
     }
 
     /// The catalog entries of column `c` of a new table (`create`: and

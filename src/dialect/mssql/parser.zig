@@ -1749,18 +1749,28 @@ pub const Parser = struct {
         var tab = build.findTable(s.p.db, q.name.text, schema_name) orelse return .{ .tab = null, .schema = "main", .cols = &.{} };
         const schema = catalog.schemaName(s.p.db, tab);
         const stored = try s.a.dupe(u8, tab.name);
-        var entries: []const catalog.Entry = &.{};
+        var m: ?*const catalog.TableMeta = null;
         if (catalog.exists(s.p.db, schema)) {
-            entries = catalog.entries(s.p.db, s.a, schema, stored) catch |err| switch (err) {
+            m = catalog.meta(s.p.db, schema, stored) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 else => return s.failFrom(s.p.db),
             };
             tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .schema = schema, .cols = &.{} };
         }
-        var is_mssql = false;
-        for (entries) |en| {
-            if (en.col.len == 0 and std.mem.eql(u8, en.key, catalog.Key.dialect) and std.mem.eql(u8, en.value, "mssql")) is_mssql = true;
-        }
+        const is_mssql = if (m) |x| if (x.dialect_name) |d| std.mem.eql(u8, d, "mssql") else false else false;
+        // The schema of the table as messages name it, if a column needs
+        // it (store_arg). Its lookup may run a statement, after which the
+        // catalog and the table are looked up again (cached).
+        var dbo: []const u8 = "";
+        if (is_mssql) for (m.?.columns) |cm| if (cm.decl_type != null) {
+            dbo = if (try s.autoAlias(.{ .name = .{ .text = stored } }) != null) "" else "dbo.";
+            m = catalog.meta(s.p.db, schema, stored) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                else => return s.failFrom(s.p.db),
+            };
+            tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .schema = schema, .cols = &.{} };
+            break;
+        };
         const cols = try s.a.alloc(ColMeta, tab.cols.len);
         for (tab.cols, 0..) |*c, i| {
             cols[i] = .{
@@ -1768,14 +1778,14 @@ pub const Parser = struct {
                 .generated = c.col_flags.intersects(int.COLFLAG.GENERATED),
                 .hidden = c.col_flags.HIDDEN,
             };
-            for (entries) |en| {
-                if (!std.ascii.eqlIgnoreCase(en.col, cols[i].name)) continue;
-                if (std.mem.eql(u8, en.key, catalog.Key.decl_type) and is_mssql) {
-                    cols[i].decl_type = en.value;
-                    cols[i].store_arg = try std.fmt.allocPrint(s.a, "{s}|{s}.{s}{s}|{s}", .{ en.value, schema, if (try s.autoAlias(.{ .name = .{ .text = stored } }) != null) "" else "dbo.", stored, cols[i].name });
-                }
-                if (std.mem.eql(u8, en.key, catalog.Key.identity)) cols[i].identity = en.value;
-            }
+            const cm = (if (m) |x| x.column(cols[i].name) else null) orelse continue;
+            // Copied: a statement run while parsing may drop the catalog
+            // in memory.
+            if (cm.decl_type) |t| if (is_mssql) {
+                cols[i].decl_type = try s.a.dupe(u8, t);
+                cols[i].store_arg = try std.fmt.allocPrint(s.a, "{s}|{s}.{s}{s}|{s}", .{ t, schema, dbo, stored, cols[i].name });
+            };
+            if (cm.identity) |z| cols[i].identity = try s.a.dupe(u8, z);
         }
         return .{ .tab = tab, .schema = schema, .name = stored, .bare = try s.bareName(stored), .cols = cols };
     }

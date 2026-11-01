@@ -30,6 +30,8 @@ pub fn rollbackAll(db: *Sqlite3, trip: ?btree.Error) void {
         @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
         @import("build.zig").resetAllSchemasOfConnection(db);
     }
+    // xqlite: likewise the dialect catalog read into memory.
+    @import("../catalog/meta.zig").ended(db, false);
     db.n_deferred_cons = 0;
     db.n_deferred_imm_cons = 0;
     db.flags.clear(.{ .DeferFKs = true, .CorruptRdOnly = true });

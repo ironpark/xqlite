@@ -220,7 +220,9 @@ fn byNameAs(s: *Parser, lname: []const u8, args_in: []const *Expr, pos: u32, wri
         eq(lname, "localtime") or eq(lname, "localtimestamp") or eq(lname, "utc_timestamp"))
     {
         if (n > 0 and !isZero(args[0])) {
-            return s.func(pos, "strftime", &.{ try s.str(pos, "%Y-%m-%d %H:%M:%f"), try s.str(pos, "now") });
+            const e = try s.func(pos, "strftime", &.{ try s.str(pos, "%Y-%m-%d %H:%M:%f"), try s.str(pos, "now") });
+            e.kind.func.result_type = "datetime(3)";
+            return e;
         }
         return s.func(pos, "datetime", &.{try s.str(pos, "now")});
     }
@@ -314,7 +316,7 @@ fn castTo(s: *Parser, pos: u32, e: *Expr) Error!*Expr {
         // round(e, scale), an integer without a scale.
         const real = try s.mk(pos, .{ .cast = .{ .e = e, .target_type = "DOUBLE", .mode = .{ .affinity = "REAL" } } });
         // The cast (a REAL already) keeps the type for the column
-        // (ExprListItem.xq_type: 2.50, not 2.5).
+        // (Expr.xq_type, sql/typing.zig: 2.50, not 2.5).
         if (scale) |sc| if (sc > 0) {
             const spelling = try std.fmt.allocPrint(s.a, "DECIMAL({d},{d})", .{ len orelse 10, sc });
             return s.mk(pos, .{ .cast = .{ .e = try s.func(pos, "round", &.{ real, try s.int_(pos, sc) }), .target_type = spelling, .mode = .{ .affinity = "REAL" } } });

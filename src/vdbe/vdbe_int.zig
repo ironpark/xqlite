@@ -397,6 +397,10 @@ pub const P5_ConstraintNotNull: u16 = 1;
 pub const P5_ConstraintUnique: u16 = 2;
 pub const P5_ConstraintCheck: u16 = 3;
 pub const P5_ConstraintFK: u16 = 4;
+/// xqlite: P4 is the error of the dialect the statement was compiled in
+/// (dialect/constraint.zig), with the values of the key in the P5 >> 8
+/// registers from P3 (OP_Halt).
+pub const P5_ConstraintDialect: u16 = 0x10;
 
 /// Column name slots (COLNAME_*).
 pub const COLNAME_NAME = 0;
@@ -602,6 +606,15 @@ pub const Vdbe = struct {
     /// (SQLITE_ENABLE_COLUMN_METADATA), laid out like col_names; empty
     /// until asked for (prepare.columnMetadata()).
     col_meta: []Mem = &.{},
+    /// xqlite: the type of each result column, where the statement knows
+    /// it (Expr.xq_type, sql/typing.zig): n_res_column entries, .unknown
+    /// where not known; empty if no column's is (so always for SQLite's
+    /// dialect). Values, not ids: they do not depend on the connection.
+    xq_col_types: []@import("../sql/types.zig").Type = &.{},
+    /// xqlite: the type of each parameter (by number - 1) where the
+    /// statement gives it one (Parse.xq_param_types, sql/typing.zig):
+    /// n_var entries, .unknown where not known; empty if none is known.
+    xq_param_types: []@import("../sql/types.zig").Type = &.{},
     result_row: ?[*]Mem = null,
     /// What api.columnMem() returns outside a row (C: a static const
     /// nullMem, which callers may not write; here they may).
@@ -622,6 +635,9 @@ pub const Vdbe = struct {
     /// xqlite: the language (dialect and frontend) the statement was
     /// compiled in, and is recompiled in.
     xq_lang: @import("../dialect/dialect.zig").Lang = .{},
+    /// xqlite: the dialect's error of the last foreign key violation
+    /// counted (the P4 of an OP_FkCounter, dialect/constraint.zig).
+    xq_fk_error: ?[*:0]const u8 = null,
     e_vdbe_state: VdbeState = .init,
     expired: u2 = 0,
     explain: u2 = 0,

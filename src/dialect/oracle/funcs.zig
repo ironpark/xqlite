@@ -35,6 +35,7 @@
 
 const std = @import("std");
 const dfunc = @import("../func.zig");
+const Violation = @import("../dialect.zig").Violation;
 const api = @import("../../vdbe/api.zig");
 const ora_errors = @import("errors.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
@@ -1187,7 +1188,9 @@ fn coerceFunc(ctx: *Context, argv: []*Mem) void {
     const column = api.valueText(argv[3]) orelse "";
     const flags = api.valueInt64(argv[4]);
     var nb: [256]u8 = undefined;
-    const col = std.fmt.bufPrint(&nb, "\"{s}\".\"{s}\"", .{ table, column }) catch column;
+    // "SCHEMA"."TABLE"."COLUMN": the table's schema, the user's for main.
+    const schema = Violation.schemaOf(table) orelse @import("state.zig").user;
+    const col = std.fmt.bufPrint(&nb, "\"{s}\".\"{s}\".\"{s}\"", .{ schema, Violation.bare(table), column }) catch column;
     const empty = api.valueType(argv[0]) == vi.SQLITE_TEXT and api.valueBytes(argv[0]) == 0;
     if (flags & coerce_not_null != 0 and (isNull(argv[0]) or empty)) {
         var mb: [300]u8 = undefined;

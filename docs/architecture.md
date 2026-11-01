@@ -221,9 +221,11 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | `collations` | 방언이 더하는 collation |
 | `default_collation` | collation이 없는 값의 비교에 쓰는 collation(C의 `db->pDfltColl`) |
 | `engine_modules` | 엔진 테이블 값 함수(`xq_*` 이포니머스 가상 테이블). 엔진 함수처럼 모든 방언에서 보이고, 문장이 처음 그 이름을 쓸 때 연결에 등록합니다(MariaDB `JSON_TABLE`의 `xq_maria_json_table`, Oracle `JSON_TABLE`의 `xq_ora_json_table`). |
-| `arith` | 0으로 나누기와 64비트를 넘는 정수 결과에 SQLite의 NULL·실수 대신 낼 오류(메시지와 `ErrorState`). 문장을 컴파일한 방언의 것(`Vdbe.xq_lang`)을 쓰므로, 뷰와 CHECK의 식은 그것을 쓰는 문장의 방언 규칙으로 계산됩니다. 오류 분기에서만 읽어 연산 속도에는 영향이 없습니다. |
+| `arith` | 0으로 나누기와 64비트를 넘는 정수 결과에 SQLite의 NULL·실수 대신 낼 오류(메시지와 `ErrorState`). 문장을 컴파일한 방언의 것(`Vdbe.xq_lang`)을 쓰므로, 뷰와 CHECK의 식은 그것을 쓰는 문장의 방언 규칙으로 계산됩니다. 오류 분기에서만 읽어 연산 속도에는 영향이 없습니다. `int1`/`int2`/`int4`는 타입이 그 폭의 정수인 산술의 범위와 그 밖에서 낼 오류입니다(PostgreSQL `integer out of range`, SQL Server `Arithmetic overflow error converting expression to data type int.`). 아래 [타입을 읽는 코드 생성](#타입을-읽는-코드-생성). |
+| `constraint` | 제약 위반(NOT NULL, UNIQUE·PRIMARY KEY, CHECK, 외래 키)의 오류. `message`가 위반(`dialect.Violation`: 종류, 테이블, 열, 제약 이름)을 방언의 메시지와 `ErrorState`로 바꿉니다. 문장을 컴파일할 때 정해 `OP_Halt`의 P4에 넣으므로(`src/dialect/constraint.zig`) 성공 경로의 비용은 없습니다. 중복 키의 값은 실행 중에 `value_mark` 자리에 씁니다. `foreign_key`는 어느 제약인지 모르는 외래 키 위반(COMMIT의 지연 제약)의 오류입니다. SQLite 방언과 엔진 내부 SQL은 SQLite의 메시지와 바이트코드 그대로입니다([제약 위반](#제약-위반)). |
 | `foreign_keys` | 그 방언의 데이터베이스가 외래 키를 강제함. 응용이 그 방언으로 준비하는 첫 문장(트랜잭션 밖)에서 `PRAGMA foreign_keys`를 켜고, 강제하지 않는 방언의 첫 문장에서 자기가 켠 것이면 끕니다. 그 사이 응용이 바꾼 설정은 그대로 둡니다(`dialect.applyForeignKeys()`). |
 | `check_errors` | 방언이 타입 검사에 붙인 CHECK 제약 이름의 오류 코드([오류 코드](#오류-코드)) |
+| `typing` | 리터럴·연산자·함수의 타입 규칙(`typing.Rules`, [코어의 타입](#코어의-타입)). 이름 해석 뒤에 프론트엔드가 타입을 찍지 않은 식에 적용합니다. 규칙의 `overload`는 타입으로 연산자·함수를 고릅니다(PostgreSQL의 jsonb 연산자, JSON 함수의 인자). 코드 생성은 정수 산술의 폭과 저장 함수(`Rules.store`)만 읽습니다([타입을 읽는 코드 생성](#타입을-읽는-코드-생성)). |
 | `table_function` | 이름이 고정되지 않은 엔진 테이블 값 함수를 찾는 함수. `engine_modules`에 없는 `xq_*` 테이블을 만나면 부르고, 맞으면 모듈을 등록해 돌려줍니다(T-SQL `OPENJSON`은 `WITH` 열 목록을 이름에 담음). |
 
 ### 방언 함수 테이블 (`functions`)
@@ -284,12 +286,23 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 - 무엇인지 모르는 오류는 SQLSTATE가 없습니다. 확장 결과 코드가 구분하는 오류(제약, BUSY, INTERRUPT)는 그 코드로 알 수 있습니다.
 - 새 오류를 낼 때는 그 방언의 SQLSTATE와 번호를 함께 적습니다. 실제 서버의 번호를 확신할 수 없으면 SQLSTATE만 적습니다(번호 0).
 
+### 제약 위반
+
+실행 중 제약 위반은 문장을 컴파일한 방언의 문구와 `ErrorState`입니다(`Hooks.constraint`, `src/dialect/constraint.zig`).
+
+- 코드 생성기(`insert.zig`, `build.zig`, `fkey.zig`)가 제약의 `OP_Halt`/`OP_HaltIfNull`을 만들 때 방언의 `Constraint.message`가 메시지와 `ErrorState`를 정합니다. 그것을 P4에 넣고(SQLSTATE, 번호, 메시지) P5에 `P5_ConstraintDialect`를 켭니다. 실행은 위반했을 때만 P4를 풀어 오류로 남깁니다.
+- 중복 키의 값(MariaDB `Duplicate entry '1'`, SQL Server `The duplicate key value is (1).`)은 P3부터 `P5 >> 8`개의 레지스터에 있고, 메시지의 `dialect.value_mark` 자리에 `Constraint.value_separator`로 이어 씁니다.
+- 외래 키는 대개 문장이 끝날 때 카운터(`OP_FkCounter`)로 찾습니다. 위반을 세는 `OP_FkCounter`의 P4에 그 제약의 오류를 넣고, 마지막으로 센 것(`Vdbe.xq_fk_error`)을 문장의 오류로 씁니다. 다른 문장(COMMIT)이 찾은 지연 제약은 `Constraint.foreign_key`입니다.
+- SQLite가 남기지 않는 제약 이름(UNIQUE, PRIMARY KEY, FOREIGN KEY에 사용자가 준 이름)은 CREATE TABLE이 `xq_catalog`의 `constraint:<종류>:<열>` 키에 적고(`lower.zig`), DML을 컴파일할 때 한 곳(`constraint.tableEntries()`)에서 읽습니다. 유일 인덱스는 인덱스 이름, CHECK는 SQLite가 남긴 이름을 씁니다. 이름이 없으면 방언이 짓습니다(PostgreSQL `t_a_key`, MariaDB `t_ibfk_1` ...).
+- 방언이 타입 검사에 붙인 CHECK(`Hooks.check_errors`)는 이름이 곧 메시지입니다(`integer out of range`, `ORA-12899: ...`).
+- SQLite 방언과 엔진이 직접 돌리는 SQL은 `Constraint.message`가 없으므로 SQLite의 메시지와 바이트코드 그대로입니다. 같은 테이블이어도 sqlite3나 SQLite 방언의 문장은 `UNIQUE constraint failed: t.a`입니다.
+
 ## 값 표시
 
 엔진은 값을 SQLite처럼 저장하고 돌려줍니다. 불리언은 0/1, `numeric(10,2)`는 끝의 0이 없는 수, `timestamptz`는 오프셋 없는 UTC 텍스트입니다. 셸과 와이어 프로토콜은 그 방언의 클라이언트가 보는 텍스트로 보여 줍니다. C API와 Zig API가 돌려주는 값은 그대로입니다.
 
-- `xqlite.types`(`src/api/types.zig`): 방언의 선언 타입 → 방언과 무관한 `Type`(`boolean`, `int4`, `numeric(10,2)`, `timestamp_tz` ...). 테이블을 만든 방언으로 읽으므로, PostgreSQL 연결이 MSSQL이 만든 `bit` 열을 읽어도 `boolean`입니다.
-- `xqlite.display.Columns`: 결과 열의 타입. 테이블 열이면 카탈로그(`xq_catalog`의 `type`)에서, 스키마 버전마다 한 번 읽습니다. 식이면 공용 내림(`lower.zig`의 `resultType()`)이 IR에서 정한 타입입니다: 비교, `AND`/`OR`/`NOT`, `IS`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, 불리언 상수는 어느 방언에서나 불리언이고, 캐스트는 그 대상 타입입니다(`2.5::numeric(6,2)`, `CAST(x AS DECIMAL(6,2))`). 엔진은 그것을 그 열의 선언 타입(`sqlite3_column_decltype()`)으로 남깁니다. SQLite 방언의 문장은 SQLite처럼 NULL입니다. 서브쿼리와 CTE의 열은 그 타입을 이어받습니다(평탄화한 것도). 연결이 열의 출처를 기록해야 합니다(`setColumnMetadata`, Zig API의 `OpenOptions.column_metadata`; 셸은 늘 켬).
+- `xqlite.types`(`src/sql/types.zig`, 엔진의 것): 방언의 선언 타입 → 방언과 무관한 `Type`(`boolean`, `int4`, `numeric(10,2)`, `timestamp_tz` ...). 테이블을 만든 방언으로 읽으므로, PostgreSQL 연결이 MSSQL이 만든 `bit` 열을 읽어도 `boolean`입니다.
+- `xqlite.display.Columns`: 결과 열의 타입. 테이블 열이면 메모리의 카탈로그(`catalog.meta()`, [메모리의 카탈로그](#메모리의-카탈로그))에서 읽습니다. 식이면 엔진이 그 식에 매긴 타입입니다([코어의 타입](#코어의-타입)): 비교, `AND`/`OR`/`NOT`, `IS`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, 불리언 상수는 어느 방언에서나 불리언이고, 캐스트는 그 대상 타입입니다(`2.5::numeric(6,2)`, `CAST(x AS DECIMAL(6,2))`). 리터럴, 산술, `CASE`/`COALESCE`, 함수 호출은 방언의 규칙이 정한 타입입니다(PostgreSQL의 `1.50`, `n + 1`, `sum(n)`은 스케일 2의 `numeric`, MariaDB의 `7 / 2`는 `DECIMAL(14,4)`). 서브쿼리, CTE, 뷰의 열과 스칼라 서브쿼리는 그 열의 타입을 이어받습니다. 엔진은 타입을 문장에 `Type`으로 두고(`engine.resultType()`), 그 철자를 열의 선언 타입(`sqlite3_column_decltype()`)으로 남깁니다. SQLite 방언의 문장은 SQLite처럼 NULL입니다. 연결이 열의 출처를 기록해야 합니다(`setColumnMetadata`, Zig API의 `OpenOptions.column_metadata`; 셸은 늘 켬).
 - `xqlite.display.text(viewer, type, value)`: 그 방언이 그 값을 보이는 텍스트. SQLite와 같으면 null입니다. `viewer`는 문장을 컴파일한 방언입니다.
 
 | 방언 | 불리언 | `decimal(p,s)`/`numeric(p,s)` | 시간대 있는 타임스탬프 |
@@ -300,7 +313,48 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | Oracle | `TRUE`/`FALSE` | 끝의 0 없음(`NUMBER`, SQLite와 같음) | |
 
 - 셸은 SQL이나 JSON 값을 쓰는 스타일(`quote`, `insert`, `json`, `jobject`)에서는 SQLite 그대로 씁니다.
-- 타입을 모르는 식(`a + b`, 대부분의 함수 호출)은 SQLite처럼 보입니다. 뷰의 열도 그렇습니다: 뷰는 SQLite 텍스트로 저장되었다가 다시 컴파일되므로 IR의 타입이 남지 않습니다.
+- 스케일 0의 수(`numeric(10,0)`, PostgreSQL의 `1e3`, `round(2.5)`)는 소수점 없이 보입니다(`1000`; SQLite는 실수 `1000.0`).
+- 타입을 모르는 식(SQLite 테이블의 열을 쓰는 식, 규칙이 없는 함수)은 SQLite처럼 보입니다. 값마다 스케일이 정해지는 PostgreSQL의 `numeric` 나눗셈과 `avg()`도 그렇습니다(`numeric`이지만 스케일을 모름). 뷰의 캐스트 열도 그렇습니다: 뷰는 SQLite 텍스트로 저장되었다가 다시 컴파일되고, 캐스트는 SQLite의 식(`CAST(round(x, 2) AS NUMERIC)`)으로 내려가 대상 타입이 남지 않습니다. 뷰의 비교는 다시 컴파일할 때 다시 불리언이 됩니다.
+
+### 코어의 타입
+
+식의 타입은 코어의 개념입니다: `Expr.xq_type`(`src/sql/typing.zig`의 `TypeId`, u16, 0은 모름). 대부분 메타데이터이고, 코드 생성은 두 곳에서만 읽습니다([타입을 읽는 코드 생성](#타입을-읽는-코드-생성)). 방언이 타입으로 고르는 것(오버로드, 아래 `Rules.overload`)은 해석된 식을 바꿔 두는 것이라, 코드 생성은 그 식을 여느 식처럼 컴파일합니다. SQLite 방언의 문장, 스키마, 엔진이 스스로 컴파일하는 SQL에는 매기지 않으므로(`typing.active()`) 그 바이트코드는 SQLite의 것 그대로입니다.
+
+- 매기는 곳
+  - 내림(`Lowerer.expr()`): 프론트엔드가 아는 타입을 모든 식(결과 열만이 아님)의 뿌리에 찍습니다. 비교·논리·`IN`·`EXISTS`·`BETWEEN`·`LIKE`·`IS`는 불리언, 캐스트는 대상 타입을 프론트엔드의 철자로(PostgreSQL의 스케일만 있는 `numeric`은 `numeric(38,s)`), `COLLATE`는 피연산자의 타입. 캐스트는 내린 뒤에는 되살릴 수 없으므로(`CAST(round(x,s) AS NUMERIC)`, MariaDB의 `REAL` + `round`) 여기서 찍어야 합니다.
+  - 이름 해석(`resolve.zig`): 프론트엔드가 찍지 않은 식에 연산자가 정하는 타입(`typing.ofOp()`: 비교·논리는 불리언, SQLite 텍스트인 뷰에도). FROM 서브쿼리·CTE·뷰의 열을 가리키는 `TK_COLUMN`은 그 결과 열의 타입(`lookupName`), 스칼라 `TK_SELECT`는 첫 열의 타입, 방언 테이블의 열은 카탈로그의 타입(`catalog.metaCached()`: 메모리에 있을 때만, 이름 해석 중에는 질의하지 않음. 방언 프론트엔드가 문장을 내릴 때 대개 이미 읽음. PostgreSQL 프론트엔드는 문장마다 모든 데이터베이스의 카탈로그를 메모리에 둠(`catalog.readAll()`, 스키마가 바뀌지 않으면 질의 없음): 뷰가 읽는 테이블의 열도 타입을 알도록). SQLite 방언의 테이블은 카탈로그 항목이 없으므로 모름입니다.
+  - 방언의 규칙(`Hooks.typing`, `typing.Rules`): 이름 해석이 끝난 식(`resolveExprNames`/`resolveExprListNames`의 끝)을 안쪽부터 훑어(`typing.typeTree()`, 해석 워커는 그대로) 타입이 없는 노드에 매깁니다. 프론트엔드가 찍은 타입과 열의 타입은 그대로 둡니다. 서브쿼리는 자기 해석 때 이미 매겼으므로 들어가지 않습니다.
+    - 리터럴(`Rules.literal`), 산술·연결·비트 연산(`Rules.operator`: `TK_PLUS` ... `TK_CONCAT`, 단항 `-`·`~`), 함수(`Rules.function`: 내린 이름(소문자)으로 찾는 `Ret` 표. 고정 타입, 인자 i의 타입, 인자들의 공통 타입, 방언이 계산하는 규칙. 없으면 코어의 `coalesce`/`ifnull`/`nullif`/`iif`/`min`/`max`). FuncDef가 아니라 방언의 이름 표에 두는 이유: 같은 내장 함수(`length`, `sum`)가 방언마다 다른 타입을 돌려줍니다. 엔진 함수(`xq_*`)도 같은 표에 둡니다.
+    - 코어가 정하는 것: 단항 `+`와 `COLLATE`는 피연산자, `CASE`는 `THEN`/`ELSE` 값들의 공통 타입, 스칼라 서브쿼리는 첫 열(복합이면 항들의 공통 타입). 공통 타입(`typing.common()`): 같은 타입은 그 타입, 정수끼리는 넓은 쪽, 정확한 수끼리는 큰 스케일의 `numeric`, 실수가 섞이면 `double precision`, 문자열끼리는 길이 없는 문자열. NULL 리터럴은 어느 타입과도 맞고, 모르는 값이 하나라도 있거나 공통 타입이 없으면 모름입니다. PostgreSQL은 `numeric` 값마다 스케일이 있으므로(`Rules.value_scale`) 스케일이 다른 둘의 공통 타입은 스케일을 모릅니다.
+    - 규칙이 만든 타입은 방언의 철자(`Rules.spell`)로 표에 넣습니다(`Interner.addType()`: (방언, 타입, 철자)). 철자가 타입보다 덜 말할 수 있습니다: PostgreSQL은 연산 결과의 `numeric`에 typmod를 두지 않으므로 `numeric`이라 쓰지만 스케일은 갖고 있어 그 자릿수로 보입니다.
+    - 프론트엔드가 다른 함수로 바꾼 호출의 타입은 `tree.Func.result_type`으로 찍습니다(PostgreSQL `now()`은 `strftime()`이라 텍스트이지만 `timestamp with time zone`, MariaDB `NOW(3)`, SQL Server `GETDATE()`, Oracle `SYSDATE`).
+    - PostgreSQL의 공통 타입에서 문자열 상수는 자기 타입이 없습니다(`Rules.unknown_strings`, PostgreSQL의 unknown): `coalesce(j, '{}')`, `CASE ... THEN j ELSE '[]' END`, `UNION`의 열은 다른 값들의 타입이고 모두 문자열이면 text입니다.
+  - 방언의 선택(`Rules.overload`, `Rules.order_collation`): `typeTree()`가 노드마다, 피연산자의 타입을 매긴 뒤 노드 자신의 타입을 매기기 전에 부릅니다(프론트엔드가 타입을 찍은 노드도). 피연산자 타입으로 연산자와 함수를 고르는 자리입니다(PostgreSQL의 `overload.zig`: `jsonb`의 `||`를 `xq_pg_jsonb_concat()`으로, `->`를 jsonb의 함수로, jsonb 비교에 collation, JSON을 만드는 함수의 인자를 감쌈). 바꿀 수 있는 것:
+    - 같은 종류(스칼라, 집계, 윈도우)의 다른 함수로 이름만 바꿈(`Ctx.rename()`): 해석 뒤의 코드 생성·집계 분석·상수 판단은 모두 이름과 인자 수로 FuncDef를 다시 찾으므로 이름만 바꾸면 됩니다. 집계/윈도우 여부, `NC_HasAgg`, 집계 깊이는 해석 때 정해졌으므로 종류가 같아야 하고, 윈도우 함수는 `Window.w_func`도 바꿉니다.
+    - 연산자를 호출로(`Ctx.toCall()`), 피연산자를 호출이나 `COLLATE`로 감쌈(`Ctx.call()`, `Ctx.collate()`): 새 호출은 해석기가 호출에 하는 일 중 FuncDef로 정하는 부분(`resolve.applyFuncDef()`: 권한 검사, 서브타입 인자 `EP_SubtArg`, `EP_ConstFunc`, 쓸 수 있는 곳)을 거치고(`resolve.resolveNewCall()`), 감싼 인자의 `EP_SubtArg`를 이어받습니다. 바꾼 노드 위로는 높이를 다시 셉니다. 같은 식을 내리기 전에 바꿨을 때와 바이트코드가 같습니다(PostgreSQL 테스트의 모든 문장으로 확인).
+    - 문장을 실패시킴(`Ctx.fail()`: `json || json`).
+    - `ORDER BY`(질의, 집계 안, 윈도우)는 항의 타입으로 collation을 고릅니다(`Rules.order_collation`, jsonb는 `xq_pg_jsonb`). 결과 열 번호·별칭인 항은 그 열로 바뀐 뒤에(`resolveOrderGroupByTerms`의 끝), 복합 질의의 항은 열 번호가 된 뒤 그 열의 공통 타입으로(`resolveCompoundOrderBy` 다음), 식인 항은 해석 직후(collation이 붙은 항은 결과 열과 같은 식이 아님).
+    - 한 노드를 여러 번 볼 수 있으므로(`typeTree()`는 해석마다 부름) 선택은 한 번만 하게 짭니다(바꾼 뒤의 모양에서는 다시 고르지 않음).
+    - 스키마가 남기는 SQL(뷰의 질의, 트리거의 프로그램: `Parse.xq_schema_text`)에서는 고르지 않습니다. 그 텍스트는 어느 방언에서나 적힌 뜻이어야 하므로, 방언이 고른 것은 텍스트에 함수로 적습니다(PostgreSQL의 `ddltype.zig`: 뷰·CHECK·생성 열·식 인덱스의 식을 따로 내려 해석만 해 보고(`lower.Origins`로 트리와 짝지음) 코어의 선택을 트리에 되돌린 뒤 렌더링).
+  - 매개변수(`TK_VARIABLE`): 타입을 아는 피연산자와 비교·연산하면(`a = ?`, `? + 1`, `x BETWEEN ? AND ?`, `x IN (?, ?)`, `CASE x WHEN ? ...`) 그 타입을 받습니다(`typeTree()`의 `inferParams`). `INSERT VALUES`(복합 VALUES와 `INSERT ... SELECT`의 각 항 포함)와 `UPDATE SET`에서 열에 저장되는 매개변수는 그 열의 타입입니다(`typing.assign()`: 프론트엔드가 저장 값을 감싸는 함수 `xq_coerce`, `xq_tsql_store`, `xq_ora_coerce`(`Rules.store_wrappers`)를 지나서). 번호마다 처음 정해진 타입을 `Parse.xq_param_types`에 모아 `makeReady()`에서 `Vdbe.xq_param_types`에 값으로 둡니다(`engine.paramType()`, Zig API `Stmt.parameterType()`). 와이어 서버의 확장 질의(PostgreSQL `ParameterDescription`)가 쓸 자리입니다.
+  - 결과 열(`generateColumnTypes`): 선언 타입은 테이블 열의 것이 먼저이고, 없으면 `xq_type`의 철자입니다. 복합 질의의 열은 모든 항의 공통 타입입니다(`typing.columnOf()`; SQLite의 선언 타입처럼 맨 왼쪽 항이 테이블 열이면 그 선언 타입이 철자). 타입은 `Vdbe.xq_col_types`에 값(`types.Type`)으로 둡니다(`engine.resultType()`). 값이라 연결의 표와 무관하고, 재컴파일(`aux.swap`)은 새로 계산한 것으로 바꿉니다.
+- `TypeId`: 매개변수 없는 타입은 `Logical`마다 고정 id(`typing.plain()`, 철자 `boolean`, `integer`, `numeric` ...)이고, 그 밖(매개변수가 있는 `numeric(10,2)`, `varchar(20)`, 방언의 다른 철자 `int4`, `DECIMAL(6,2)`, `SIGNED`)은 연결의 표(`ConnState.types`, `typing.Interner`)에 (방언, 철자)로 넣습니다. 표는 `Type`과 철자를 갖고 있어 선언 타입이 프론트엔드의 텍스트와 바이트 단위로 같습니다. 표는 늘기만 하고 연결과 함께 해제되므로, 스키마만큼 사는 식(CHECK, 생성 열, 인덱스 식)이 id를 들고 있어도 안전합니다.
+- 복합 질의(서브쿼리·CTE·뷰의 복합 포함)는 항들의 공통 타입입니다. 공통 타입이 없으면 모름입니다(`SELECT a = b ... UNION ALL SELECT 2`는 불리언이 아니라 저장된 대로 보임; PostgreSQL은 오류). 재귀 CTE의 재귀 항 안에서 CTE 자신의 열은 모름입니다(서브쿼리가 아니라 CTE 테이블이므로). 그래서 재귀 항이 그 열로 계산하면(`SELECT x + 1 FROM r`) 바깥에서 본 CTE의 열도 모름입니다.
+- 아직 없는 것: 해석 뒤에 새로 만든 노드(윈도우 재작성, `substExpr`의 래퍼)로의 타입 복사, 열 타입에 따른 json/jsonb 저장 값의 정규화를 코어에서(아직 `jtype.zig`가 내리기 전에 감쌈), 프론트엔드가 내리지 않고 지운 캐스트(뷰 텍스트의 `CAST(round(x,s) AS NUMERIC)`)의 타입. SQL Server의 `COUNT_BIG()`은 `count()`로 내려가 `int`입니다.
+
+#### 타입을 읽는 코드 생성
+
+방언의 문장(`typing.active()`)에서만, 타입이 요구하는 곳만 바이트코드가 달라집니다. SQLite 방언의 식에는 타입이 없고 테이블에는 저장 함수가 없으므로 SQLite의 바이트코드는 그대로입니다(EXPLAIN으로 비교).
+
+- 정수 산술의 폭: `+ - * / %`와 단항 `-`(`0 - x`)의 타입이 64비트보다 좁은 정수이고 방언이 그 폭에 오류를 두면(`dialect.Arith`의 `int1`/`int2`/`int4`, `Arith.width()`) 코드 생성(`expr_code.zig`, `typing.arithWidth()`)이 `OP_Add` ... `OP_Remainder`의 P5에 폭(1 `int1`, 2 `int2`, 3 `int4`)을 적습니다. SQLite는 이 연산들의 P5를 쓰지 않습니다. 실행(`arith.zig`의 `opArith`)은 정수 결과를 낼 때 P5가 0이 아니면 범위를 보고, 밖이면(64비트를 넘으면 그 폭의 오류로) 방언의 오류를 냅니다. 성공 경로의 비용은 P5 비교 하나입니다.
+  - PostgreSQL: `smallint`/`integer`(`integer + integer`, `smallint + smallint`; `integer + bigint`는 `bigint`라 검사 없음). 32비트 정수 리터럴은 `integer`이므로 `SELECT 2147483647 + 1`도 오류입니다(코어는 상수를 접지 않고, 상수 식은 프로그램 앞에서 한 번 계산될 뿐 같은 연산 코드). `sum()`은 `bigint`/`numeric`이라 검사 없음.
+  - SQL Server: `tinyint`(0..255), `smallint`, `int`. `SUM()` of `int`도 `int`이므로, 집계 결과를 읽을 때 `0 + sum`을 그 폭으로 계산해 검사합니다(`TK_AGG_FUNCTION`, 이름이 `sum`인 것만).
+  - MariaDB(`INT` 연산은 `BIGINT`)와 Oracle(`NUMBER`)에는 폭이 없습니다.
+  - 매개변수의 타입은 추론한 것입니다(`$1 + a`에서 `a`의 `integer`). 클라이언트가 매개변수에 더 넓은 타입을 지정해도(PostgreSQL 확장 질의의 `int8`) 아직 반영하지 않습니다.
+  - 뷰와 트리거 본문은 그것을 쓰는 문장 안에서 다시 해석되므로 그 문장 방언의 타입과 폭을 씁니다(PostgreSQL 문장이 읽는 뷰의 `a + 1`도 `integer out of range`). CHECK, 생성 열, 인덱스 식은 스키마를 읽을 때 해석되어(`init.busy`) 타입이 없으므로 64비트로 계산하고, 오류는 `Hooks.arith`의 0으로 나누기·64비트 넘침만입니다.
+- 저장 함수: `Rules.store(type)`가 그 타입(카탈로그의 열 타입, `catalog.metaOf()`) 열에 저장하는 값이 지날 함수(인자 하나의 `FuncDef`)를 줍니다. `INSERT`(VALUES, 복합 VALUES, `INSERT ... SELECT`, 기본값이 아닌 값)와 `UPDATE SET`(`ON CONFLICT DO UPDATE` 포함)이 값을 레지스터에 넣은 직후, 트리거·생성 열·제약 검사 전에 `OP_Function` + `OP_Move`로 바꿉니다(`insert.codeStore()`, `typing.storeFunctions()`). 타입을 아는 값(숫자, 불리언 식, 같은 타입의 열)은 지나지 않고(`typing.storeNeeded()`), 매개변수와 타입을 모르거나 문자열인 값만 지납니다. 그래서 텍스트로 바인딩한 매개변수(와이어 프로토콜이 보내는 값)도 읽힙니다.
+  - PostgreSQL: `boolean`은 `xq_pg_store_boolean`(`'t'`, `'yes'`, `'on'`, `'1'` ...과 그 접두어, 대소문자·앞뒤 공백 무시; 아니면 `invalid input syntax for type boolean: "x"` 22P02), `numeric`은 `xq_pg_store_numeric`(`'1.50'` → 1.5, `'3'` → 3; 아니면 `invalid input syntax for type numeric: "x"` 22P02). 문자열이 아닌 값은 그대로 두고 열의 CHECK가 봅니다.
+  - MariaDB(`xq_coerce`), SQL Server(`xq_tsql_store`), Oracle(`xq_ora_coerce`)은 프론트엔드가 저장 값을 이미 감쌉니다(`Rules.store_wrappers`). SQL Server `bit`의 `'true'`/`'false'`, Oracle `BOOLEAN`의 `'yes'`/`'no'`도 그 함수들이 읽습니다.
 
 ## 엄격한 타입
 
@@ -343,6 +397,16 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 | 지금 바로(열린 트랜잭션 안, 없으면 호출마다 autocommit) | `catalog.set/get/deleteTable`, `sequence.create/drop/nextval/currval/setval/lastval` |
 
 `sequence.nextvalExpr()`는 identity 열의 DEFAULT나 INSERT 보완에 씁니다.
+
+### 메모리의 카탈로그
+
+컴파일 중에 카탈로그를 읽는 곳(프론트엔드, `lower.zig`의 identity, `display.Columns`)은 `xq_catalog`를 질의하지 않고 `catalog.meta(db, schema, tbl)`(또는 `metaOf(db, t)`)의 `TableMeta`를 씁니다(`src/catalog/meta.zig`).
+
+- `TableMeta`: 테이블의 방언(`dialect`, `dialect_name`), 테이블 collation, 열마다 `ColumnMeta`(선언 타입 `decl_type`과 그것을 읽은 `types.Type`, `identity`, `identity_kind`, `collation`, `default`), 방언 고유 키를 위한 항목 전체(`entries`, `value(col, key)`). 열 이름은 SQLite처럼 대소문자를 무시합니다.
+- 데이터베이스(`Schema`)마다 처음 쓸 때 그 데이터베이스의 `xq_catalog` 전체를 질의 하나로 읽어 `Schema.xq_meta`에 둡니다. 카탈로그는 작고, 읽는 문장은 대부분 테이블마다 읽으므로 테이블별 질의보다 쌉니다. 항목이 없는 테이블도 질의 없이 답합니다.
+- 버리는 때: 스키마를 버릴 때(`build.schemaClear()`: 다시 읽기, 다른 연결의 스키마 변경, 스키마를 바꾼 트랜잭션의 롤백, DETACH, 닫기), 메모리의 스키마 쿠키가 읽을 때와 다를 때(이 연결의 모든 DDL), 이 연결이 `xq_catalog`에 쓸 때(`OP_SqlExec`로 실행되는 `code*()`, `set()`, `deleteTable()`. Oracle의 `COMMENT ON`처럼 스키마가 바뀌지 않는 쓰기), 그렇게 쓴 트랜잭션·세이브포인트·문장의 롤백(`ConnState.catalog_written`, SQLite의 `DBFLAG_SchemaChange`와 같은 방식).
+- 보지 못하는 것: 응용이 SQL로 직접 쓴 `xq_catalog` 행, 다른 연결·프로세스가 스키마를 바꾸지 않고 쓴 행. 그 데이터베이스의 다음 스키마 변경 뒤에 보입니다.
+- `TableMeta`는 버려질 때까지 유효합니다. 컴파일하는 동안만 쓰고, 문장을 실행한 뒤까지 들고 있지 않습니다(남길 문자열은 복사).
 
 ### 시퀀스 SQL 함수
 
@@ -485,10 +549,13 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 | `src/dialect/oracle/*.zig` | Oracle 프론트엔드([Oracle 호환](oracle.md)) |
 | `src/ir/ir.zig` | IR 빌더 파사드: `stmt`, `expr`, `list`, `from`, `select`, `with`, `window`, `dml`, `ddl`, `txn`, `admin`. 각 항목은 대응하는 C 함수(`sqlite3PExpr`, `sqlite3StartTable` ...)의 별칭이거나 parse.y에서 옮긴 도우미 |
 | `src/ir/tree.zig` | 구문 트리 IR과 의미 노드 (아래) |
-| `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록 |
+| `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록; `Origins`(내린 식과 트리의 짝) |
 | `src/ir/render.zig` | `render.select(p, src, s)`, `render.expr()`, `render.statement()`(CREATE TABLE/INDEX/VIEW, ALTER TABLE)와 `Renderer` |
 | `src/ir/test.zig`, `fuzz.zig`, `gen.zig` | render ≡ lower 테스트와 퍼저 |
-| `src/catalog/catalog.zig`, `sequence.zig`, `schema.zig` | 방언 메타데이터, 시퀀스, 이름 붙은 스키마([스키마](#스키마네임스페이스)) |
+| `src/catalog/catalog.zig`, `meta.zig`, `sequence.zig`, `schema.zig` | 방언 메타데이터와 메모리의 카탈로그([메모리의 카탈로그](#메모리의-카탈로그)), 시퀀스, 이름 붙은 스키마([스키마](#스키마네임스페이스)) |
+| `src/sql/types.zig` | 방언과 무관한 타입(`Type`, `Logical`, `parse()`, `ofKind()`). 엔진의 것이고 `xqlite.types`로 내보냄 |
+| `src/sql/typing.zig` | 식의 타입(`Expr.xq_type`의 `TypeId`, 고정 id와 연결의 `Interner`, `ofOp()`, 방언 규칙의 틀 `Rules`와 `typeTree()`, 규칙이 고르는 오버로드의 도구 `Ctx.rename()`·`toCall()`·`call()`·`collate()`, 공통 타입, 매개변수 타입)([코어의 타입](#코어의-타입)) |
+| `src/dialect/*/typing.zig` | 방언의 타입 규칙(`Hooks.typing`): 리터럴, 연산자, 함수의 반환 타입 |
 | `pkg/vfs/build.zig`, `build.zig.zon` | VFS 패키지(`xqlite_vfs`): 모듈과 `zig build test`. 루트 빌드가 경로 의존성으로 받음([VFS 패키지](#vfs-패키지)) |
 | `pkg/vfs/src/root.zig` | 패키지 루트: 인터페이스와 구현의 이름, `temp_directory`(`sqlite3_temp_directory`) |
 | `pkg/vfs/src/vfs.zig` | VFS 인터페이스(`Vfs`, `File`, 잠금, 공유 메모리), `OsVfs`, 타입 있는 메서드로 메서드 표를 만드는 `FileImpl`/`VfsImpl` |

@@ -10,13 +10,14 @@
 //! SQLite's.
 //!
 //! Columns gives the type: a table column's from the catalog, an
-//! expression's from the frontend (a comparison is a boolean, a cast of
-//! its target type); an expression of no known type is written as SQLite
+//! expression's as the statement knows it (sql/typing.zig: a comparison
+//! is a boolean, a cast of its target type, a column of a subquery of the
+//! subquery's); an expression of no known type is written as SQLite
 //! writes it.
 
 const std = @import("std");
 const engine = @import("engine.zig");
-const types = @import("types.zig");
+const types = @import("../sql/types.zig");
 const Value = @import("value.zig").Value;
 const Stmt = @import("Stmt.zig");
 
@@ -52,7 +53,6 @@ pub fn text(viewer: Dialect, t: Type, cell: Value, buf: *[max_len]u8) ?[]const u
                 .sqlite, .oracle => return null,
             }
             const scale = t.scale orelse return null;
-            if (scale == 0) return null;
             return fixed(cell, scale, buf);
         },
         .timestamp_tz => {
@@ -72,7 +72,8 @@ fn fixed(cell: Value, scale: u8, buf: *[max_len]u8) ?[]const u8 {
     // Beyond the digits a double holds the text would show noise.
     if (scale > 15) return null;
     return switch (cell) {
-        .integer => |v| std.fmt.bufPrint(buf, "{d}.{s}", .{ v, "000000000000000"[0..scale] }) catch null,
+        // As stored, without a point.
+        .integer => |v| if (scale == 0) null else std.fmt.bufPrint(buf, "{d}.{s}", .{ v, "000000000000000"[0..scale] }) catch null,
         .float => |v| if (std.math.isFinite(v) and @abs(v) < 1e15) std.fmt.bufPrint(buf, "{d:.[1]}", .{ v, scale }) catch null else null,
         else => null,
     };
@@ -95,60 +96,47 @@ fn allDigits(z: []const u8) bool {
     return true;
 }
 
-/// The types of a connection's result columns, from the catalog: read
-/// once per schema version, as describing each statement would otherwise
-/// query xq_catalog for each of its columns.
+/// The types of a connection's result columns: a table column's from the
+/// catalog the connection keeps in memory (catalog.meta(), read once per
+/// schema version), an expression's from its frontend. Holds no state of
+/// its own; init() and deinit() remain for its users.
 pub const Columns = struct {
-    arena: std.heap.ArenaAllocator,
-    /// By "database\x00table\x00column".
-    map: std.StringHashMapUnmanaged(Entry) = .empty,
-
     pub const Entry = struct {
         type: Type,
-        /// The declared type, as written in `dialect` (owned by the
-        /// cache, or by the statement for a declared type of SQLite's).
+        /// The declared type, as written in `dialect`: the connection's
+        /// catalog in memory owns it (valid until the connection's schema
+        /// or catalog next changes), or the statement for a declared type
+        /// of SQLite's.
         name: []const u8,
         dialect: Dialect,
-        /// The schema version of the column's database when it was read.
-        version: u32 = 0,
     };
 
     pub fn init(gpa: std.mem.Allocator) Columns {
-        return .{ .arena = .init(gpa) };
+        _ = gpa;
+        return .{};
     }
 
     pub fn deinit(c: *Columns) void {
-        c.arena.deinit();
+        c.* = undefined;
     }
 
     /// The declared type of result column `i` of `v`: the catalog's when
     /// it reads a table column, else SQLite's declared type; for an
-    /// expression, the type its dialect's frontend gave it
-    /// (ExprListItem.xq_type: a comparison is a boolean, a cast of its
-    /// target type), else null. Faster if `h` records column metadata
-    /// (engine.setColumnMetadata()); otherwise the statement is compiled
-    /// again for it.
+    /// expression, the type the statement gave it (engine.resultType(),
+    /// Expr.xq_type: a comparison is a boolean, a cast of its target
+    /// type) under the spelling of its declared type, else null. Faster
+    /// if `h` records column metadata (engine.setColumnMetadata());
+    /// otherwise the statement is compiled again for it.
     pub fn get(c: *Columns, h: *engine.Handle, v: *engine.Vm, i: usize) error{OutOfMemory}!?Entry {
+        _ = c;
         // An expression: the type its frontend gave it, in the dialect of
         // the statement.
         const o = engine.columnOrigin(v, i) orelse return declared(v, i, engine.statementDialect(v));
-        const version = engine.schemaVersion(h, o.database) orelse return declared(v, i, .sqlite);
-        var key_buf: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}\x00{s}", .{ o.database, o.table, o.column }) catch return declared(v, i, .sqlite);
-        if (c.map.get(key)) |e| {
-            if (e.version == version) return e;
-            // The schema changed: forget everything read before.
-            c.map = .empty;
-            _ = c.arena.reset(.retain_capacity);
-        }
-        const a = c.arena.allocator();
-        const t = engine.catalogType(h, a, o.database, o.table, o.column) catch |err| switch (err) {
+        const t = engine.catalogType(h, o.database, o.table, o.column) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return declared(v, i, .sqlite),
         } orelse return declared(v, i, .sqlite);
-        const e: Entry = .{ .type = types.parse(t[1], t[0]), .name = t[0], .dialect = t[1], .version = version };
-        try c.map.put(a, try a.dupe(u8, key), e);
-        return e;
+        return .{ .type = t.type, .name = t.name, .dialect = t.dialect };
     }
 
     /// get() of result column `i` of a statement of the Zig API.
@@ -158,7 +146,9 @@ pub const Columns = struct {
 
     fn declared(v: *engine.Vm, i: usize, d: Dialect) ?Entry {
         const name = engine.columnDecltype(v, i) orelse return null;
-        return .{ .type = types.parse(d, name), .name = name, .dialect = d };
+        // The type the statement knows, else the declared type read.
+        const t = engine.resultType(v, i) orelse types.parse(d, name);
+        return .{ .type = t, .name = name, .dialect = d };
     }
 };
 
@@ -177,6 +167,10 @@ test text {
     try t.expectEqualStrings("-0.25", text(.mssql, money, .{ .float = -0.25 }, &buf).?);
     try t.expectEqual(@as(?[]const u8, null), text(.oracle, money, .{ .float = 1.5 }, &buf));
     try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{ .logical = .numeric }, .{ .float = 1.5 }, &buf));
+    // A scale of 0: no point (1e3 is 1000 in PostgreSQL, SQLite's 1000.0).
+    const whole: Type = .{ .logical = .numeric, .scale = 0 };
+    try t.expectEqualStrings("1000", text(.postgres, whole, .{ .float = 1000.0 }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, whole, .{ .integer = 3 }, &buf));
     const tz: Type = .{ .logical = .timestamp_tz };
     try t.expectEqualStrings("2024-01-02 03:04:05+00", text(.postgres, tz, .{ .text = "2024-01-02 03:04:05" }, &buf).?);
     try t.expectEqualStrings("2024-01-02 03:04:05.123+00", text(.postgres, tz, .{ .text = "2024-01-02 03:04:05.123" }, &buf).?);

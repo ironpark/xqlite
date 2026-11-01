@@ -201,7 +201,7 @@ test "mssql: DDL" {
     // Foreign keys are enforced.
     try c.exec("DELETE FROM parent WHERE id = 1");
     try c.expectRows("SELECT id FROM child", "2\n");
-    try c.expectError("INSERT INTO child VALUES (3, 99)", "FOREIGN KEY constraint failed");
+    try c.expectError("INSERT INTO child VALUES (3, 99)", "The INSERT statement conflicted with the FOREIGN KEY constraint \"FK__child__pid\". The conflict occurred in database \"main\", table \"dbo.parent\", column 'id'.");
     try c.exec("CREATE NONCLUSTERED INDEX ix_code ON parent (code DESC); DROP INDEX ix_code ON parent; DROP INDEX child.ix_pid");
     try c.exec("ALTER TABLE child ADD note VARCHAR(10) DEFAULT 'n'; ALTER TABLE child DROP COLUMN note");
     try c.exec("CREATE VIEW v AS SELECT id FROM parent");
@@ -300,7 +300,7 @@ test "mssql: JSON in the schema" {
     defer c.close();
     // ISJSON is SQLite's json_valid(): sqlite3 can check the constraint.
     try c.exec("CREATE TABLE jc (doc NVARCHAR(MAX) CONSTRAINT ck_doc CHECK (ISJSON(doc) = 1))");
-    try c.expectError("INSERT INTO jc VALUES ('1')", "CHECK constraint failed: ck_doc");
+    try c.expectError("INSERT INTO jc VALUES ('1')", "The INSERT statement conflicted with the CHECK constraint \"ck_doc\". The conflict occurred in database \"main\", table \"dbo.jc\".");
     try c.expectRows("SELECT instr(sql, 'xq_') FROM sqlite_schema WHERE name = 'jc'", "0\n");
     try c.exec("CREATE TABLE js (id INT, doc NVARCHAR(MAX), a AS JSON_VALUE(doc, '$.a'))");
     try c.exec("INSERT INTO js (id, doc) VALUES (1, '{\"a\":\"x\"}')");

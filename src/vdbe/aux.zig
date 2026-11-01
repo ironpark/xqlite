@@ -834,6 +834,7 @@ pub fn rewind(v: *Vdbe) void {
     v.min_write_file_format = 255;
     v.i_statement = 0;
     v.n_fk_constraint = 0;
+    v.xq_fk_error = null;
 }
 
 /// Port of sqlite3VdbeMakeReady(): resolve labels and allocate registers,
@@ -866,6 +867,7 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.ap_arg = a.alloc(*Mem, @intCast(n_arg)) catch return oom(v);
     v.csr = a.alloc(?*VdbeCursor, n_cursor) catch return oom(v);
     v.n_var = @intCast(n_var);
+    v.xq_param_types = @import("../sql/typing.zig").paramTypes(p, a, n_var) catch return oom(v);
     initMemArray(v.vars, db, .{ .Null = true });
     initMemArray(v.mem, db, MEM.Undefined);
     @memset(v.csr, null);
@@ -974,6 +976,7 @@ pub fn setNumCols(v: *Vdbe, n: u16) void {
     if (v.n_res_alloc != 0) releaseMemArray(v.col_names);
     if (v.col_meta.len > 0) releaseMemArray(v.col_meta);
     v.col_meta = &.{};
+    v.xq_col_types = &.{};
     v.n_res_column = n;
     v.n_res_alloc = n;
     v.col_names = v.alloc().alloc(Mem, @as(usize, n) * vi.COLNAME_N) catch {
@@ -990,6 +993,22 @@ pub fn setNumCols(v: *Vdbe, n: u16) void {
         };
         initMemArray(v.col_meta, v.db, .{ .Null = true });
     }
+}
+
+/// xqlite: the type of result column `idx` (Vdbe.xq_col_types), after
+/// setNumCols().
+pub fn setColType(v: *Vdbe, idx: usize, t: @import("../sql/types.zig").Type) void {
+    if (idx >= v.n_res_column) return;
+    if (v.xq_col_types.len == 0) {
+        if (t.logical == .unknown) return;
+        const a = v.alloc().alloc(@import("../sql/types.zig").Type, v.n_res_column) catch {
+            v.db.oomFault();
+            return;
+        };
+        @memset(a, .{ .logical = .unknown });
+        v.xq_col_types = a;
+    }
+    v.xq_col_types[idx] = t;
 }
 
 /// Port of sqlite3VdbeSetColName(): name `var` (COLNAME_*) of column
@@ -1225,6 +1244,9 @@ fn closeStatementImpl(v: *Vdbe, e_op: SAVEPOINT) i32 {
     if (e_op == .ROLLBACK) {
         db.n_deferred_cons = v.n_stmt_def_cons;
         db.n_deferred_imm_cons = v.n_stmt_def_imm_cons;
+        // xqlite: the dialect catalog read into memory, if the statement
+        // wrote it (catalog/meta.zig).
+        @import("../catalog/meta.zig").rolledBack(db);
     }
     return rc;
 }
@@ -1252,7 +1274,15 @@ pub fn checkFkDeferred(v: *Vdbe) FkError!void {
 fn fkError(v: *Vdbe) FkError {
     v.rc = RC.CONSTRAINT_FOREIGNKEY;
     v.error_action = OE.Abort;
-    vdbeError(v, "FOREIGN KEY constraint failed", .{});
+    if (v.xq_fk_error) |z| {
+        // xqlite: the dialect's error of the last violation counted.
+        const d = @import("../dialect/constraint.zig").decode(std.mem.span(z));
+        vdbeErrorState(v, d.state, "{s}", .{d.msg});
+    } else if (@import("../dialect/dialect.zig").spec(v.xq_lang.dialect).hooks.constraint.foreign_key) |f| {
+        vdbeErrorState(v, f.state, "{s}", .{f.msg});
+    } else {
+        vdbeError(v, "FOREIGN KEY constraint failed", .{});
+    }
     if (v.prep_flags & PREPARE_SAVESQL == 0) return error.Error;
     return error.Constraint;
 }
@@ -1320,6 +1350,7 @@ pub fn halt(v: *Vdbe) error{Busy}!void {
                     db.n_deferred_imm_cons = 0;
                     db.flags.DeferFKs = false;
                     main_mod.commitInternalChanges(db);
+                    @import("../catalog/meta.zig").ended(db, true);
                 }
             } else if (v.rc == RC.SCHEMA and db.n_vdbe_active > 1) {
                 v.n_change = 0;

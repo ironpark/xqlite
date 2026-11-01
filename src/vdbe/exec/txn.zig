@@ -161,6 +161,8 @@ pub fn opSavepoint(e: *Exec, op: *Op) Error!Flow {
                 @import("../../sql/build.zig").resetAllSchemasOfConnection(db);
                 db.m_db_flags.SchemaChange = true;
             }
+            // xqlite: likewise the dialect catalog read into memory.
+            if (p1 == .ROLLBACK) @import("../../catalog/meta.zig").rolledBack(db);
         }
 
         // Savepoints nested in this one go either way.
@@ -322,11 +324,16 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
         e.db.m_trace = 0;
     }
     if (op.p1 & 0x0002 != 0) e.db.n_analysis_limit = op.p2;
-    // xqlite: the SQL is the engine's, SQLite text in any dialect.
+    // xqlite: the SQL is the engine's, SQLite text in any dialect. It is
+    // how a statement writes the dialect catalog (catalog.codeExec()), so
+    // the catalog read into memory goes (catalog.zig).
     const dialect = @import("../../dialect/dialect.zig");
+    const meta = @import("../../catalog/meta.zig");
+    meta.written(e.db);
     const saved_lang = dialect.swapLang(e.db, .sqlite);
     const rc = @import("../../sql/legacy.zig").execNoCallback(e.db, std.mem.span(op.p4.z), &err_msg);
     _ = dialect.swapLang(e.db, saved_lang);
+    meta.dropAll(e.db);
     e.db.n_sql_exec -= 1;
     e.db.auth = x_auth;
     e.db.m_trace = m_trace;

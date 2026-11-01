@@ -40,7 +40,15 @@ fn expectSameCode(c: *Conn, pg: []const u8, lite: []const u8) !void {
         try testing.expectEqual(q.opcode, o.opcode);
         try testing.expectEqual(q.p1, o.p1);
         try testing.expectEqual(q.p2, o.p2);
+        // A constraint's halt differs only in its error, PostgreSQL's
+        // (P4, and P3 and P5 that say where the key's values are).
+        if (o.p5 & vi.P5_ConstraintDialect != 0 and (o.opcode == .Halt or o.opcode == .HaltIfNull)) continue;
         try testing.expectEqual(q.p3, o.p3);
+        // Arithmetic of an integer: P5 the width PostgreSQL checks.
+        switch (o.opcode) {
+            .Add, .Subtract, .Multiply, .Divide, .Remainder => if (q.p5 == 0 and o.p5 != 0) continue,
+            else => {},
+        }
         try testing.expectEqual(q.p5, o.p5);
     }
 }
@@ -268,6 +276,82 @@ test "pg: json and jsonb" {
     try c.expectRows("SELECT sql LIKE '%xq_pg_jsonb_get(%' AND sql LIKE '%xq_pg_jsonb_exists(%' FROM sqlite_schema WHERE name = 'evv'", "1\n");
 }
 
+test "pg: jsonb's operators by the type of a column of a subquery, a CTE, a view" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE ej (id int PRIMARY KEY, d jsonb, r json);
+        \\INSERT INTO ej VALUES (1, '{"a":1,"b":[1,2]}', '{"x" :  1}'), (2, '{"a":2}', '[1]'), (3, '[0]', NULL);
+    );
+    try c.expectRows("SELECT s.d || '{\"c\":3}' FROM (SELECT d FROM ej WHERE id = 1) s", "{\"a\": 1, \"b\": [1, 2], \"c\": 3}\n");
+    try c.expectRows("WITH w AS (SELECT id, d FROM ej) SELECT w.d -> 'a', w.d - 'a', w.d #> '{b,1}' FROM w ORDER BY id", "1|{\"b\": [1, 2]}|2\n2|{}|NULL\nNULL|[0]|NULL\n");
+    try c.expectRows("SELECT id FROM (SELECT id, d AS x FROM ej) s WHERE s.x = '{\"b\":[1,2],  \"a\":1}'", "1\n");
+    try c.expectRows("SELECT x FROM (SELECT d AS x FROM ej) s ORDER BY x", "[0]\n{\"a\": 2}\n{\"a\": 1, \"b\": [1, 2]}\n");
+    try c.expectRows("SELECT d FROM ej UNION ALL SELECT '{}' ORDER BY 1 DESC LIMIT 2", "{\"a\": 1, \"b\": [1, 2]}\n{\"a\": 2}\n");
+    try c.expectRows("SELECT coalesce(d, '{}') || '{\"m\":1}', CASE WHEN id = 1 THEN d ELSE '[]' END || '[9]' FROM ej WHERE id = 2", "{\"a\": 2, \"m\": 1}|[9]\n");
+    try c.expectRows("SELECT (SELECT d FROM ej WHERE id = 2) || '{\"y\":1}', to_json(s.d) FROM (SELECT d FROM ej WHERE id = 3) s", "{\"a\": 2, \"y\": 1}|[0]\n");
+    try c.expectError("SELECT s.r || s.r FROM (SELECT r FROM ej) s", "operator does not exist: json || json");
+    // excluded.* and RETURNING's columns are of the table's types.
+    try c.expectRows("INSERT INTO ej VALUES (2, '{\"b\":3}') ON CONFLICT (id) DO UPDATE SET d = ej.d || excluded.d RETURNING d || '{\"r\":1}'", "{\"a\": 2, \"b\": 3, \"r\": 1}\n");
+    try c.exec("UPDATE ej SET d = '{\"a\":2}' WHERE id = 2");
+    // A view's column is of the type of its query's.
+    try c.exec("CREATE VIEW ev AS SELECT id, d, d || '{\"z\":0}' AS dz FROM ej");
+    try c.expectRows("SELECT dz || '{\"q\":1}', d -> 'a' FROM ev WHERE id = 2", "{\"a\": 2, \"q\": 1, \"z\": 0}|2\n");
+    try c.expectRows("SELECT id FROM ev WHERE d = '{\"a\": 2}'", "2\n");
+    // The text the schema keeps says what was chosen, inside a CTE too,
+    // so that it means the same in every dialect.
+    try c.exec("CREATE VIEW cv AS WITH w AS (SELECT id, d || '{\"c\":1}' AS e FROM ej) SELECT id, e -> 'c' AS c FROM w");
+    try c.expectRows("SELECT instr(sql, 'xq_pg_jsonb_concat(\"d\"') > 0, instr(sql, 'xq_pg_jsonb_get(\"e\"') > 0 FROM sqlite_schema WHERE name = 'cv'", "1|1\n");
+    try c.exec("CREATE VIEW ov AS SELECT x FROM (SELECT d AS x FROM ej) s ORDER BY 1");
+    try c.expectRows("SELECT instr(sql, '(1 COLLATE xq_pg_jsonb)') > 0 FROM sqlite_schema WHERE name = 'ov'", "1\n");
+    try c.exec("CREATE TABLE ck (j jsonb CHECK (j -> 'a' = '1'))");
+    try c.exec("INSERT INTO ck VALUES ('{\"a\": 1}')");
+    try c.expectError("INSERT INTO ck VALUES ('{\"a\": 2}')", "new row for relation \"ck\" violates check constraint \"ck_j_check\"");
+    try c.exec("CREATE INDEX ck_a ON ck ((j -> 'a'))");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE sql LIKE '%xq_pg_jsonb_get(\"j\", ''a'')%'", "2\n");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT id, c FROM cv ORDER BY id", "1|1\n2|1\n3|NULL\n");
+    // A view of SQLite's dialect means SQLite's operators where it is read.
+    try c.exec("CREATE VIEW sv AS SELECT d || '{\"b\":2}' AS x FROM ej WHERE id = 2");
+    main_mod.setDialect(c.db, .postgres);
+    try c.expectRows("SELECT x FROM sv", "{\"a\": 2}{\"b\":2}\n");
+}
+
+test "pg: numbers in JSON as PostgreSQL spells them" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // double precision as float8out(): the shortest digits that read back,
+    // no ".0", an exponent of two digits at least; numeric with its digits.
+    try c.expectRows(
+        "SELECT to_json(100.0::float8), to_json(1e20::float8), to_json(1e-5::float8), to_json(0.1::float8 + 0.2::float8), to_json(1e15::float8), to_json(123456789012345.0::float8), to_json(1.1::real)",
+        "100|1e+20|1e-05|0.30000000000000004|1e+15|123456789012345|1.1\n",
+    );
+    try c.expectRows("SELECT to_jsonb(100.0::float8), to_jsonb(1e20::float8), to_json(1.50), to_jsonb(1.50), json_build_array(2::numeric(5,2), 1.5 + 1)", "100|100000000000000000000|1.50|1.50|[2.00, 2.5]\n");
+    try c.exec(
+        \\CREATE TABLE fj (id int PRIMARY KEY, f float8, n numeric(6,2));
+        \\INSERT INTO fj VALUES (1, 100, 1.5), (2, 2.5e-7, 2), (3, NULL, NULL);
+    );
+    try c.expectRows("SELECT row_to_json(t) FROM fj t ORDER BY id", "{\"id\":1,\"f\":100,\"n\":1.50}\n{\"id\":2,\"f\":2.5e-07,\"n\":2.00}\n{\"id\":3,\"f\":null,\"n\":null}\n");
+    try c.expectRows("SELECT json_agg(f ORDER BY id), jsonb_agg(n ORDER BY id), json_build_object('f', max(f)) FROM fj", "[100, 2.5e-07, null]|[1.50, 2.00, null]|{\"f\" : 100}\n");
+    try c.expectRows("SELECT to_json(s.f) FROM (SELECT f FROM fj WHERE id = 2) s", "2.5e-07\n");
+}
+
+test "pg: floatText" {
+    const floatText = @import("jfuncs.zig").floatText;
+    var buf: [48]u8 = undefined;
+    const cases = [_]struct { f64, []const u8 }{
+        .{ 100.0, "100" },     .{ 1e20, "1e+20" },                                     .{ 1e-5, "1e-05" },
+        .{ 0.0001, "0.0001" }, .{ 1e14, "100000000000000" },                           .{ 1e15, "1e+15" },
+        .{ -2.5, "-2.5" },     .{ 123456789012345678.0, "1.2345678901234568e+17" },    .{ 0.0, "0" },
+        .{ 5e-324, "5e-324" }, .{ 1.7976931348623157e308, "1.7976931348623157e+308" }, .{ 0.1, "0.1" },
+    };
+    for (cases) |x| try testing.expectEqualStrings(x[1], floatText(&buf, x[0], false));
+    try testing.expectEqualStrings("1.1", floatText(&buf, 1.1, true));
+    try testing.expectEqualStrings("3.4028235e+38", floatText(&buf, std.math.floatMax(f32), true));
+}
+
 test "pg: parameters" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -300,8 +384,8 @@ test "pg: INSERT, UPDATE, DELETE, RETURNING, ON CONFLICT" {
     try c.expectRows("INSERT INTO kv (k, v) VALUES ('a', 9), ('e', 9) ON CONFLICT DO NOTHING RETURNING k", "e\n");
     try c.expectRows("INSERT INTO kv (k, v) VALUES ('e', 1) ON CONFLICT (k) DO NOTHING RETURNING k", "");
     try c.expectError("INSERT INTO kv (k, v) VALUES ('e', 1) ON CONFLICT DO UPDATE SET v = 2", "ON CONFLICT DO UPDATE requires inference specification or constraint name");
-    try c.expectError("INSERT INTO kv (k, v) VALUES ('e', 1)", "UNIQUE constraint failed: kv.k");
-    try c.expectError("INSERT INTO kv (k, v) VALUES ('f', NULL)", "NOT NULL constraint failed: kv.v");
+    try c.expectError("INSERT INTO kv (k, v) VALUES ('e', 1)", "duplicate key value violates unique constraint \"kv_pkey\"");
+    try c.expectError("INSERT INTO kv (k, v) VALUES ('f', NULL)", "null value in column \"v\" of relation \"kv\" violates not-null constraint");
     // UPDATE, with FROM and DEFAULT.
     try c.expectRows("UPDATE kv SET v = v + 1, note = 'u' WHERE k IN ('b', 'c') RETURNING k, v, note", "b|3|u\nc|1|u\n");
     try c.exec("CREATE TABLE bonus (k text, amount int); INSERT INTO bonus VALUES ('a', 1000)");
@@ -376,12 +460,16 @@ test "pg: types are strict" {
     try c.expectRows("SELECT n, typeof(n) FROM ty WHERE i2 IS NULL ORDER BY n", "1.5|real\n7|integer\n");
     try c.expectError("INSERT INTO ty (i4) VALUES ('x')", "cannot store TEXT value in INTEGER column ty.i4");
     try c.expectError("INSERT INTO ty (i4) VALUES (1.5)", "cannot store REAL value in INTEGER column ty.i4");
-    try c.expectError("INSERT INTO ty (i2) VALUES (40000)", "CHECK constraint failed: smallint out of range");
-    try c.expectError("INSERT INTO ty (i4) VALUES (3000000000)", "CHECK constraint failed: integer out of range");
-    try c.expectError("INSERT INTO ty (vc) VALUES ('abcd')", "CHECK constraint failed: value too long for type character varying(3)");
-    try c.expectError("INSERT INTO ty (b) VALUES (2)", "CHECK constraint failed: invalid input syntax for type boolean");
+    try c.expectError("INSERT INTO ty (i2) VALUES (40000)", "smallint out of range");
+    try c.expectError("INSERT INTO ty (i4) VALUES (3000000000)", "integer out of range");
+    try c.expectError("INSERT INTO ty (vc) VALUES ('abcd')", "value too long for type character varying(3)");
+    try c.expectError("INSERT INTO ty (b) VALUES (2)", "invalid input syntax for type boolean");
     try c.expectError("INSERT INTO ty (j) VALUES ('{')", "invalid input syntax for type json");
-    try c.expectError("INSERT INTO ty (n) VALUES ('abc')", "CHECK constraint failed: invalid input syntax for type numeric");
+    try c.expectError("INSERT INTO ty (n) VALUES ('abc')", "invalid input syntax for type numeric: \"abc\"");
+    // A string is read as PostgreSQL reads the column type's input.
+    try c.expectError("INSERT INTO ty (b) VALUES ('x')", "invalid input syntax for type boolean: \"x\"");
+    try c.exec("INSERT INTO ty (i2, b, n) VALUES (9, 'on', ' 2.75 ')");
+    try c.expectRows("SELECT b, n FROM ty WHERE i2 = 9", "1|2.75\n");
     try c.expectError("INSERT INTO ty (by) VALUES (1)", "cannot store INT value in BLOB column ty.by");
     try c.expectError("CREATE TABLE bad (x nosuchtype)", "type \"nosuchtype\" does not exist");
     try c.expectError("CREATE TABLE bad (x int[])", "arrays are not supported");
@@ -406,7 +494,7 @@ test "pg: SERIAL and IDENTITY" {
     try c.expectRows("INSERT INTO s (v) SELECT 'e' RETURNING id", "4\n");
     try c.expectRows("INSERT INTO s DEFAULT VALUES RETURNING id, v", "5|NULL\n");
     try c.expectRows("SELECT currval('s_id_seq'), lastval()", "5|5\n");
-    try c.expectError("INSERT INTO s (id, v) VALUES (4, 'dup')", "UNIQUE constraint failed: s.id");
+    try c.expectError("INSERT INTO s (id, v) VALUES (4, 'dup')", "duplicate key value violates unique constraint \"s_pkey\"");
 
     // bigserial that is not the key; GENERATED ... AS IDENTITY.
     try c.exec(
@@ -490,8 +578,11 @@ test "pg: DDL" {
     try c.expectError("CREATE TABLE child (x int)", "relation \"child\" already exists");
     try c.exec("INSERT INTO parent VALUES (1, 'p'); INSERT INTO child (id, parent_id, label) VALUES (1, 1, 'a')");
     try c.expectRows("SELECT qty, total FROM child", "1|2\n");
-    try c.expectError("INSERT INTO child (id, qty) VALUES (2, 0)", "CHECK constraint failed: child_qty_check");
-    try c.expectError("INSERT INTO child (id) VALUES (-1)", "CHECK constraint failed: child_check");
+    try c.expectError("INSERT INTO child (id, qty) VALUES (2, 0)", "new row for relation \"child\" violates check constraint \"child_qty_check\"");
+    try c.expectError("INSERT INTO child (id, parent_id, label) VALUES (1, 1, 'b')", "duplicate key value violates unique constraint \"child_pk\"");
+    try c.expectError("INSERT INTO child (id, parent_id, label) VALUES (2, 1, 'a')", "duplicate key value violates unique constraint \"child_parent_id_label_key\"");
+    try c.expectError("INSERT INTO child (id, parent_id) VALUES (2, 9)", "insert or update on table \"child\" violates foreign key constraint \"child_parent_id_fkey\"");
+    try c.expectError("INSERT INTO child (id) VALUES (-1)", "new row for relation \"child\" violates check constraint \"child_check\"");
     // Indexes: PostgreSQL's names when none is given.
     try c.exec("CREATE INDEX ON child (qty); CREATE INDEX ON child (qty); CREATE UNIQUE INDEX IF NOT EXISTS lbl ON child (lower(label)) WHERE label IS NOT NULL");
     try c.exec("CREATE INDEX CONCURRENTLY child_lbl_desc ON child USING btree (label DESC NULLS LAST)");
@@ -503,7 +594,7 @@ test "pg: DDL" {
     try c.exec("ALTER TABLE child ADD COLUMN note varchar(5)");
     try c.exec("ALTER TABLE child ADD COLUMN IF NOT EXISTS note text");
     try c.exec("ALTER TABLE child RENAME COLUMN note TO memo");
-    try c.expectError("INSERT INTO child (id, memo) VALUES (3, 'toolong')", "CHECK constraint failed: value too long for type character varying(5)");
+    try c.expectError("INSERT INTO child (id, memo) VALUES (3, 'toolong')", "value too long for type character varying(5)");
     try c.exec("ALTER TABLE child RENAME TO kid");
     try c.expectRows("SELECT col, value FROM xq_catalog WHERE tbl = 'kid' AND key = 'type' AND col IN ('memo', 'qty') ORDER BY col", "memo|character varying(5)\nqty|integer\n");
     try c.exec("ALTER TABLE kid DROP COLUMN memo; ALTER TABLE kid DROP COLUMN IF EXISTS memo");
@@ -645,7 +736,7 @@ test "pg: what the schema keeps means the same in every dialect" {
     for ([_]@import("../dialect.zig").Dialect{ .sqlite, .mariadb }) |d| {
         main_mod.setDialect(c.db, d);
         try c.expectRows("SELECT * FROM wv", rows);
-        try c.expectError("INSERT INTO w VALUES ('x', 200)", "CHECK constraint failed: w_n_check");
+        try c.expectError("INSERT INTO w VALUES ('x', 200)", if (d == .sqlite) "CHECK constraint failed: w_n_check" else "CONSTRAINT `w_n_check` failed for `main`.`w`");
     }
 }
 
@@ -785,9 +876,98 @@ test "pg: DDL in an attached database" {
     );
     try c.expectRows("SELECT type, name FROM aux.sqlite_schema ORDER BY name", "table|t\nindex|t_v_idx\nview|tv\ntable|xq_catalog\n");
     try c.expectRows("SELECT v FROM aux.tv", "a\n");
-    try c.expectError("INSERT INTO aux.t VALUES (2, 'long')", "CHECK constraint failed: value too long for type character varying(3)");
+    try c.expectError("INSERT INTO aux.t VALUES (2, 'long')", "value too long for type character varying(3)");
     try c.expectError("CREATE SEQUENCE aux.s", "xqlite: sequences are only supported in public and in schemas of CREATE SCHEMA");
     try c.expectError("CREATE SCHEMA aux", "schema \"aux\" already exists");
     try c.exec("DROP VIEW aux.tv; DROP TABLE aux.t");
     try c.expectRows("SELECT count(*) FROM aux.sqlite_schema WHERE name <> 'xq_catalog'", "0\n");
+}
+
+const catalog = @import("../../catalog/catalog.zig");
+const Type = @import("../../sql/types.zig").Type;
+
+/// Expect the declared type the catalog in memory has for column `col`
+/// of `tbl` (in main) to be `want`.
+fn expectDecl(c: *Conn, tbl: []const u8, col: []const u8, want: ?[]const u8) !void {
+    const m = try catalog.meta(c.db, "main", tbl);
+    const got = if (m) |x| x.declType(col) else null;
+    if (want) |w| {
+        try testing.expectEqualStrings(w, got orelse return error.TestExpectedEqual);
+    } else try testing.expectEqual(@as(?[]const u8, null), got);
+}
+
+fn expectNoMeta(c: *Conn, tbl: []const u8) !void {
+    try testing.expectEqual(@as(?*const catalog.TableMeta, null), try catalog.meta(c.db, "main", tbl));
+}
+
+test "pg: the catalog in memory follows DDL, rollbacks and other connections" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (a varchar(5), id int GENERATED ALWAYS AS IDENTITY)");
+    const m = (try catalog.meta(c.db, "main", "t")).?;
+    // Read once.
+    try testing.expectEqual(m, (try catalog.meta(c.db, "main", "t")).?);
+    try testing.expectEqual(@import("../dialect.zig").Dialect.postgres, m.dialect);
+    try testing.expectEqualStrings("postgres", m.dialect_name.?);
+    const a = m.column("A").?;
+    try testing.expectEqualStrings("character varying(5)", a.decl_type.?);
+    try testing.expectEqual(Type{ .logical = .varchar, .length = 5 }, a.type);
+    const id = m.column("id").?;
+    try testing.expectEqualStrings("t_id_seq", id.identity.?);
+    try testing.expect(id.always());
+    try testing.expectEqualStrings("always", m.value("ID", catalog.Key.identity_kind).?);
+    try expectNoMeta(&c, "nosuch");
+
+    // ALTER TABLE: ADD COLUMN, RENAME COLUMN, RENAME TO, then DROP.
+    try c.exec("ALTER TABLE t ADD COLUMN b numeric(10,2)");
+    try expectDecl(&c, "t", "b", "numeric(10,2)");
+    try testing.expectEqual(Type{ .logical = .numeric, .precision = 10, .scale = 2 }, (try catalog.meta(c.db, "main", "t")).?.column("b").?.type);
+    try c.exec("ALTER TABLE t RENAME COLUMN a TO a2");
+    try expectDecl(&c, "t", "a", null);
+    try expectDecl(&c, "t", "a2", "character varying(5)");
+    try c.exec("ALTER TABLE t RENAME TO u");
+    try expectNoMeta(&c, "t");
+    try expectDecl(&c, "u", "a2", "character varying(5)");
+    // The identity still numbers the renamed table's column.
+    try c.expectRows("INSERT INTO u (a2) VALUES ('x') RETURNING id", "1\n");
+    try c.expectError("INSERT INTO u (id) VALUES (5)", "cannot insert a non-DEFAULT value into column \"id\"");
+    try c.exec("DROP TABLE u");
+    try expectNoMeta(&c, "u");
+    // Made again, of other types.
+    try c.exec("CREATE TABLE u (a2 text)");
+    try expectDecl(&c, "u", "a2", "text");
+    try c.exec("INSERT INTO u (a2) VALUES ('long text')");
+
+    // A rolled back CREATE TABLE, and an ALTER rolled back to a
+    // savepoint.
+    try c.exec("BEGIN; CREATE TABLE r (x varchar(3))");
+    try expectDecl(&c, "r", "x", "character varying(3)");
+    try c.exec("ROLLBACK");
+    try expectNoMeta(&c, "r");
+    try c.exec("BEGIN; SAVEPOINT s; ALTER TABLE u ADD COLUMN y char(2)");
+    try expectDecl(&c, "u", "y", "character(2)");
+    try c.exec("ROLLBACK TO SAVEPOINT s");
+    try expectDecl(&c, "u", "y", null);
+    try c.exec("COMMIT");
+
+    // A write without a schema change, in a transaction rolled back.
+    try c.exec("BEGIN");
+    try catalog.set(c.db, "main", "u", "a2", "pg.note", "x");
+    try testing.expectEqualStrings("x", (try catalog.meta(c.db, "main", "u")).?.value("a2", "pg.note").?);
+    try c.exec("ROLLBACK");
+    try testing.expectEqual(@as(?[]const u8, null), (try catalog.meta(c.db, "main", "u")).?.value("a2", "pg.note"));
+
+    // The DDL of another connection, seen once this one sees the schema
+    // change.
+    var c2: Conn = undefined;
+    try c2.openOn(c.mem);
+    defer c2.close();
+    main_mod.setDialect(c2.db, .postgres);
+    try c2.exec("ALTER TABLE u ADD COLUMN z varchar(7)");
+    try c.expectRows("SELECT count(z) FROM u", "0\n");
+    try expectDecl(&c, "u", "z", "character varying(7)");
+    try c2.exec("DROP TABLE u");
+    try c.expectError("SELECT * FROM u", "relation \"u\" does not exist");
+    try expectNoMeta(&c, "u");
 }

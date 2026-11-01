@@ -238,7 +238,8 @@ fn describe(s: *Session, stmt: *xqlite.Stmt, has_row: bool) ![]Column {
         c.* = .{
             .name = stmt.columnName(i),
             .origin = stmt.columnOrigin(i),
-            .type_name = if (declared) |d| d.name else null,
+            // Copied: the connection's catalog owns it.
+            .type_name = if (declared) |d| try s.scratch.allocator().dupe(u8, d.name) else null,
             .type = if (declared) |d| d.type else if (has_row) types.ofKind(stmt.columnKind(i)) else .{ .logical = .unknown },
         };
     }
@@ -333,7 +334,7 @@ test "run: PostgreSQL's failed transactions" {
         \\
     );
     try expectRun(&s, "INSERT INTO t VALUES(1, false)",
-        \\failed 23505 UNIQUE constraint failed: t.id
+        \\failed 23505 duplicate key value violates unique constraint "t_pkey"
         \\
     );
     try testing.expectEqual(Status.aborted, s.status());
@@ -344,7 +345,7 @@ test "run: PostgreSQL's failed transactions" {
     // COMMIT rolls back.
     try expectRun(&s, "COMMIT; SELECT count(*), 1 FROM t",
         \\done ROLLBACK rows=0 changes=0
-        \\cols count:int8 ?column?:int8
+        \\cols count:int8 ?column?:int4
         \\row 0 1
         \\done SELECT rows=1 changes=0
         \\

@@ -29,7 +29,9 @@ const ddl = @import("ddl.zig");
 const funcs = @import("funcs.zig");
 const session = @import("session.zig");
 const jtype = @import("jtype.zig");
+const ddltype = @import("ddltype.zig");
 const jfuncs = @import("jfuncs.zig");
+const catalog = @import("../../catalog/catalog.zig");
 
 const RC = int.RC;
 
@@ -82,7 +84,14 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     };
     if (done) return;
     const stmt = ps.statement() catch |err| return parseFailed(p, sql, ps, err);
+    // The types of the columns of the tables, for the typing of names
+    // resolved (sql/typing.zig, overload.zig).
+    catalog.readAll(p.db) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => {},
+    };
     jtype.statement(ps, stmt) catch |err| return parseFailed(p, sql, ps, err);
+    ddltype.statement(ps, stmt) catch |err| return parseFailed(p, sql, ps, err);
     switch (stmt) {
         .create_table, .create_index, .create_view, .create_sequence, .alter_table, .drop => {
             var d: ddl.Ddl = .init(p, sql);
@@ -141,10 +150,14 @@ fn translateError(p: *int.Parse) int.Oom!void {
 
 pub const hooks: dialect.Hooks = .{
     .foreign_keys = true,
+    .constraint = @import("constraints.zig").constraint,
     .arith = .{
         .div_zero = .{ .msg = "division by zero", .state = .of("22012") },
         .int_overflow = .{ .msg = "bigint out of range", .state = .of("22003") },
+        .int2 = .{ .min = std.math.minInt(i16), .max = std.math.maxInt(i16), .failure = .{ .msg = "smallint out of range", .state = .of("22003") } },
+        .int4 = .{ .min = std.math.minInt(i32), .max = std.math.maxInt(i32), .failure = .{ .msg = "integer out of range", .state = .of("22003") } },
     },
+    .typing = &@import("typing.zig").rules,
     .functions = &functions,
     .engine_functions = &engine_functions,
     .collations = &.{.{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate }},
@@ -183,4 +196,5 @@ test {
     _ = @import("regex.zig");
     _ = @import("state.zig");
     _ = @import("test.zig");
+    _ = @import("constraints.zig");
 }

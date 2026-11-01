@@ -216,8 +216,10 @@ fn drop(s: *Parser) Error!void {
 
 pub const hooks: dialect.Hooks = .{
     .foreign_keys = true,
+    .constraint = @import("constraints.zig").constraint,
     // Division by zero is NULL, as in SQLite.
     .arith = .{ .int_overflow = .{ .msg = "BIGINT value is out of range", .state = .numbered("22003", 1690) } },
+    .typing = &@import("typing.zig").rules,
     .functions = &functions,
     .engine_functions = &engine_functions,
     .engine_modules = &.{.{ .name = "xq_maria_json_table", .module = &@import("json_table.zig").module }},
@@ -417,4 +419,5 @@ test {
     _ = @import("runtime.zig");
     _ = @import("json.zig");
     _ = @import("test.zig");
+    _ = @import("constraints.zig");
 }

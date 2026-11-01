@@ -1322,13 +1322,9 @@ pub const Parser = struct {
         const ps = p.p orelse return p.failState(q.name.pos, .of("42704"), "type \"{s}\" does not exist", .{q.name.text});
         const t = build.findTable(ps.db, rel.q.name.text, if (rel.q.schema) |sc| sc.text else null) orelse
             return p.failState(q.name.pos, .of("42704"), "type \"{s}\" does not exist", .{q.name.text});
-        const schema = catalog.schemaName(ps.db, t);
-        const entries = catalog.entries(ps.db, p.arena, schema, t.name) catch &.{};
+        const m = catalog.metaOf(ps.db, t) catch null;
         for (t.cols) |*c| {
-            var decl: ?[]const u8 = null;
-            for (entries) |en| if (eql(en.key, catalog.Key.decl_type) and std.ascii.eqlIgnoreCase(en.col, c.name())) {
-                decl = en.value;
-            };
+            const decl = if (m) |x| x.declType(c.name()) else null;
             var ty: ?types.TypeName = null;
             if (decl) |d| {
                 const z = try p.arena.dupeSentinel(u8, d, 0);
@@ -2253,9 +2249,15 @@ pub const Parser = struct {
             e = switch (sc) {
                 .now => blk: {
                     if (c.args.len != 0) return p.failState(c.name.pos, .of("42883"), "function {s} does not exist", .{n});
-                    break :blk try p.now(pos);
+                    const x = try p.now(pos);
+                    if (eql(n, "localtimestamp")) x.kind.func.result_type = "timestamp without time zone";
+                    break :blk x;
                 },
-                .localtime => try p.call(pos, "current_time", null, &.{}),
+                .localtime => blk: {
+                    const x = try p.call(pos, "current_time", null, &.{});
+                    x.kind.func.result_type = "time without time zone";
+                    break :blk x;
+                },
                 .current_user => try p.call(pos, "current_user", .postgres, &.{}),
                 .current_database => try p.call(pos, "current_database", .postgres, &.{}),
                 .date_part => try p.datePart(pos, c),
@@ -2295,8 +2297,11 @@ pub const Parser = struct {
 
     /// now(): the statement's time as 'YYYY-MM-DD HH:MM:SS.SSS' (UTC, no
     /// zone), which SQLite's date functions read back.
+    /// Of type timestamptz (Func.result_type).
     fn now(p: *Parser, pos: u32) Error!*Expr {
-        return p.call(pos, "strftime", null, &.{ try p.stringAt(pos, "%Y-%m-%d %H:%M:%f"), try p.stringAt(pos, "now") });
+        const e = try p.call(pos, "strftime", null, &.{ try p.stringAt(pos, "%Y-%m-%d %H:%M:%f"), try p.stringAt(pos, "now") });
+        e.kind.func.result_type = "timestamp with time zone";
+        return e;
     }
 
     /// date_part('field', x) (and EXTRACT(field FROM x)) with strftime().

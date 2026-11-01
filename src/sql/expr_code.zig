@@ -15,6 +15,7 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
 const serial = @import("../vdbe/serial.zig");
 const ctype = @import("xqlite_base").ctype;
+const typing = @import("typing.zig");
 
 const Parse = int.Parse;
 const Expr = int.Expr;
@@ -1309,6 +1310,12 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                     r2 = codeTemp(p, e.right, &reg_free2);
                 }
                 _ = aux.addOp3(v, OP.fromTk(op), r2, r1, target);
+                // xqlite: the width of the result's integer type, which
+                // the dialect checks (0 in SQLite's dialect).
+                if (e.xq_type != 0) switch (op) {
+                    TK.PLUS, TK.MINUS, TK.STAR, TK.SLASH, TK.REM => aux.changeP5(v, typing.arithWidth(p, e)),
+                    else => {},
+                };
                 if (addr_is_null != 0) {
                     _ = aux.addOp2(v, OP.Goto, 0, aux.currentAddr(v) + 2);
                     aux.jumpHere(v, addr_is_null);
@@ -1329,6 +1336,7 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                 r1 = codeTemp(p, &temp_x, &reg_free1);
                 r2 = codeTemp(p, e.left, &reg_free2);
                 _ = aux.addOp3(v, OP.Subtract, r2, r1, target);
+                if (e.xq_type != 0) aux.changeP5(v, typing.arithWidth(p, e));
                 return in_reg;
             },
             TK.BITNOT, TK.NOT => {
@@ -1358,7 +1366,21 @@ pub fn codeTarget(p: *Parse, e_arg: ?*Expr, target: i32) i32 {
                     expr_mod.recordErrorOffsetOfExpr(p, e);
                     return in_reg;
                 }
-                return info.?.funcReg(@intCast(e.i_agg));
+                const reg = info.?.funcReg(@intCast(e.i_agg));
+                // xqlite: a sum() of a narrow integer type (SQL Server's
+                // SUM() of an int is an int) is checked as it is read:
+                // 0 + sum, of that width.
+                if (e.xq_type != 0) {
+                    const w = typing.arithWidth(p, e);
+                    if (w != 0 and ctype.eqlNoCase(e.token(), "sum")) {
+                        var zero: Expr = .{ .op = TK.INTEGER, .flags = .{ .IntValue = true, .TokenOnly = true }, .u = .{ .value = 0 } };
+                        const r0 = codeTemp(p, &zero, &reg_free1);
+                        _ = aux.addOp3(v, OP.Add, r0, reg, target);
+                        aux.changeP5(v, w);
+                        return target;
+                    }
+                }
+                return reg;
             },
             TK.FUNCTION => return codeFunction(p, e, target),
             TK.EXISTS, TK.SELECT => {

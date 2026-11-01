@@ -870,9 +870,10 @@ test "zig api: columnOrigin and columnTypeAlloc" {
     var pg = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres, .column_metadata = true });
     defer pg.close();
     try pg.exec("CREATE TABLE t(name varchar(20), at timestamptz, flag boolean)");
-    var q = try pg.prepare("SELECT name, at, flag, 1 FROM t");
+    var q = try pg.prepare("SELECT name, at, flag, 1, NULL FROM t");
     defer q.finalize();
-    for ([_]?[]const u8{ "character varying(20)", "timestamp with time zone", "boolean", null }, 0..) |want, i| {
+    // An expression: the type the statement gives it, in its dialect.
+    for ([_]?[]const u8{ "character varying(20)", "timestamp with time zone", "boolean", "integer", null }, 0..) |want, i| {
         const got = try q.columnTypeAlloc(gpa, i);
         defer if (got) |g| gpa.free(g.text);
         if (want) |w| {
@@ -1026,6 +1027,214 @@ test "zig api: each dialect's arithmetic errors and foreign keys" {
     try expectState(&db, "SELECT 3000000000::integer", "22003", null);
 }
 
+/// `sql` (with `args` bound) fails with `msg`, `sqlstate` and `number`.
+fn expectFailure(db: *Db, sql: []const u8, args: anytype, msg: []const u8, sqlstate: []const u8, number: ?u32) !void {
+    if (db.execArgs(sql, args)) |_| {
+        std.debug.print("{s}: no error\n", .{sql});
+        return error.TestExpectedError;
+    } else |_| {}
+    const info = db.lastError().?;
+    errdefer std.debug.print("{s}: {s} ({?s}, {?d})\n", .{ sql, info.message, if (info.sqlstate) |*x| x else null, info.dialect_number });
+    try testing.expectEqualStrings(msg, info.message);
+    try testing.expectEqualStrings(sqlstate, &(info.sqlstate orelse return error.NoSqlstate));
+    try testing.expectEqual(number, info.dialect_number);
+}
+
+test "zig api: integer arithmetic fails outside the range of its type" {
+    const D = xqlite.Dialect;
+    // SQLite's (and a bigint's) integers have 64 bits.
+    {
+        var db = try memDb();
+        defer db.close();
+        try testing.expectEqual(@as(?i64, 2147483648), try db.one(i64, "SELECT 2147483647 + 1", .{}));
+        try testing.expectEqual(@as(?i64, -2147483648), try db.one(i64, "SELECT -2147483647 - 1", .{}));
+    }
+    if (D.postgres.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres });
+        defer db.close();
+        const int4 = "integer out of range";
+        const int2 = "smallint out of range";
+        // An integer literal of 32 bits is an integer, so is its sum.
+        try expectFailure(&db, "SELECT 2147483647 + 1", .{}, int4, "22003", null);
+        try expectFailure(&db, "SELECT -2147483647 - 2", .{}, int4, "22003", null);
+        try expectFailure(&db, "SELECT 65536 * 65536", .{}, int4, "22003", null);
+        try expectFailure(&db, "SELECT -(-2147483647 - 1)", .{}, int4, "22003", null);
+        try expectFailure(&db, "SELECT (-2147483647 - 1) / -1", .{}, int4, "22003", null);
+        try testing.expectEqual(@as(?i64, 2147483647), try db.one(i64, "SELECT 2147483646 + 1", .{}));
+        try testing.expectEqual(@as(?i64, -2147483648), try db.one(i64, "SELECT -2147483647 - 1", .{}));
+        // A bigint operand makes a bigint.
+        try testing.expectEqual(@as(?i64, 2147483648), try db.one(i64, "SELECT 2147483647::bigint + 1", .{}));
+        try testing.expectEqual(@as(?i64, 4294967296), try db.one(i64, "SELECT 65536 * 65536::int8", .{}));
+        try expectFailure(&db, "SELECT 32767::smallint + 1::smallint", .{}, int2, "22003", null);
+        try testing.expectEqual(@as(?i64, 32768), try db.one(i64, "SELECT 32767::smallint + 1", .{}));
+        // The 64 bits of a bigint: SQLite's overflow.
+        try expectFailure(&db, "SELECT 9223372036854775807 + 1", .{}, "bigint out of range", "22003", null);
+        try db.exec("CREATE TABLE t (a int, s smallint, g bigint); INSERT INTO t VALUES (2147483647, 32767, 2147483647)");
+        try expectFailure(&db, "SELECT a + 1 FROM t", .{}, int4, "22003", null);
+        try expectFailure(&db, "SELECT s * s FROM t", .{}, int2, "22003", null);
+        try testing.expectEqual(@as(?i64, 65534), try db.one(i64, "SELECT s * 2 FROM t", .{}));
+        try expectFailure(&db, "UPDATE t SET g = a + 1", .{}, int4, "22003", null);
+        try testing.expectEqual(@as(?i64, 2147483648), try db.one(i64, "SELECT g + 1 FROM t", .{}));
+        try testing.expectEqual(@as(?i64, 2147516414), try db.one(i64, "SELECT g + s FROM t", .{}));
+        try expectFailure(&db, "SELECT a + s FROM t", .{}, int4, "22003", null);
+        // sum() of integers is a bigint.
+        try testing.expectEqual(@as(?i64, 4294967294), try db.one(i64, "SELECT sum(a) FROM (SELECT a FROM t UNION ALL SELECT a FROM t) x", .{}));
+        // A parameter computed with an integer is an integer.
+        try expectFailure(&db, "SELECT a + $1 FROM t", .{1}, int4, "22003", null);
+        // A view computes as the statement that reads it.
+        try db.exec("CREATE VIEW v AS SELECT a + 1 AS x FROM t");
+        try expectFailure(&db, "SELECT x FROM v", .{}, int4, "22003", null);
+    }
+    if (D.mssql.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mssql });
+        defer db.close();
+        const msg = "Arithmetic overflow error converting expression to data type ";
+        try expectFailure(&db, "SELECT 2147483647 + 1", .{}, msg ++ "int.", "22003", 8115);
+        try expectFailure(&db, "SELECT CAST(32767 AS smallint) + CAST(1 AS smallint)", .{}, "Arithmetic overflow error for data type smallint, value = 32768.", "22003", 220);
+        try expectFailure(&db, "SELECT CAST(255 AS tinyint) + CAST(1 AS tinyint)", .{}, "Arithmetic overflow error for data type tinyint, value = 256.", "22003", 220);
+        try expectFailure(&db, "SELECT CAST(0 AS tinyint) - CAST(1 AS tinyint)", .{}, "Arithmetic overflow error for data type tinyint, value = -1.", "22003", 220);
+        try testing.expectEqual(@as(?i64, 2147483648), try db.one(i64, "SELECT CAST(2147483647 AS bigint) + 1", .{}));
+        try db.exec("CREATE TABLE t (a INT); INSERT INTO t VALUES (2147483647), (1)");
+        try expectFailure(&db, "SELECT a + 1 FROM t", .{}, msg ++ "int.", "22003", 8115);
+        // SUM() of an int is an int.
+        try expectFailure(&db, "SELECT SUM(a) FROM t", .{}, msg ++ "int.", "22003", 8115);
+        try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT SUM(a) FROM t WHERE a = 1", .{}));
+    }
+    // MariaDB's INT arithmetic is a BIGINT's; Oracle's NUMBER has no width.
+    if (D.mariadb.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mariadb });
+        defer db.close();
+        try db.exec("CREATE TABLE t (a INT); INSERT INTO t VALUES (2147483647)");
+        try testing.expectEqual(@as(?i64, 2147483648), try db.one(i64, "SELECT a + 1 FROM t", .{}));
+        try testing.expectEqual(@as(?i64, 2147483648), try db.one(i64, "SELECT 2147483647 + 1", .{}));
+    }
+    if (D.oracle.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .oracle });
+        defer db.close();
+        try testing.expectEqual(@as(?i64, 2147483648), try db.one(i64, "SELECT 2147483647 + 1 FROM dual", .{}));
+    }
+}
+
+test "zig api: a string stored into a PostgreSQL boolean or numeric column" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres });
+    defer db.close();
+    try db.exec("CREATE TABLE t (id int, b boolean, n numeric(6,2))");
+    try db.exec("INSERT INTO t VALUES (1, 'yes', '1.50'), (2, ' OFF ', ' 3 '), (3, 'T', '-2e1'), (4, 'of', '.5')");
+    try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT b FROM t WHERE id = 1", .{}));
+    try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT b FROM t WHERE id = 2", .{}));
+    try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT b FROM t WHERE id = 3", .{}));
+    try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT b FROM t WHERE id = 4", .{}));
+    try testing.expectEqual(@as(?f64, 1.5), try db.one(f64, "SELECT n FROM t WHERE id = 1", .{}));
+    try testing.expectEqual(@as(?i64, 3), try db.one(i64, "SELECT n FROM t WHERE id = 2 AND typeof(n) = 'integer'", .{}));
+    try testing.expectEqual(@as(?f64, -20), try db.one(f64, "SELECT n FROM t WHERE id = 3", .{}));
+    // Parameters bound as text (what the wire protocol sends).
+    try db.execArgs("INSERT INTO t VALUES ($1, $2, $3)", .{ "5", "true", "12.25" });
+    try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT b FROM t WHERE id = 5", .{}));
+    try testing.expectEqual(@as(?f64, 12.25), try db.one(f64, "SELECT n FROM t WHERE id = 5", .{}));
+    try db.execArgs("UPDATE t SET b = $1, n = $2 WHERE id = 5", .{ "f", "7" });
+    try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT b FROM t WHERE id = 5", .{}));
+    try testing.expectEqual(@as(?i64, 7), try db.one(i64, "SELECT n FROM t WHERE id = 5 AND typeof(n) = 'integer'", .{}));
+    // INSERT ... SELECT, ON CONFLICT DO UPDATE.
+    try db.exec("INSERT INTO t (id, b, n) SELECT 6, 'on', '0.25'");
+    try testing.expectEqual(@as(?f64, 0.25), try db.one(f64, "SELECT n FROM t WHERE id = 6 AND b = 1", .{}));
+    try db.exec("CREATE TABLE k (id int PRIMARY KEY, b boolean)");
+    try db.exec("INSERT INTO k VALUES (1, 'no')");
+    try db.exec("INSERT INTO k VALUES (1, 'no') ON CONFLICT (id) DO UPDATE SET b = 'yes'");
+    try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT b FROM k", .{}));
+    // Not a boolean, not a number.
+    try expectFailure(&db, "INSERT INTO t (b) VALUES ('maybe')", .{}, "invalid input syntax for type boolean: \"maybe\"", "22P02", null);
+    try expectFailure(&db, "INSERT INTO t (b) VALUES ($1)", .{"o"}, "invalid input syntax for type boolean: \"o\"", "22P02", null);
+    try expectFailure(&db, "UPDATE t SET n = '1.2.3'", .{}, "invalid input syntax for type numeric: \"1.2.3\"", "22P02", null);
+    try expectFailure(&db, "INSERT INTO t (n) VALUES ($1)", .{"abc"}, "invalid input syntax for type numeric: \"abc\"", "22P02", null);
+    // An integer other than 0 and 1 is not a boolean (the column's check).
+    try expectFailure(&db, "INSERT INTO t (b) VALUES (2)", .{}, "invalid input syntax for type boolean", "22P02", null);
+    // SQLite's dialect stores what it is given (STRICT: not text).
+    try db.exec("PRAGMA xq_dialect = 'sqlite'");
+    try testing.expectError(error.Constraint, db.exec("INSERT INTO t (b) VALUES ('yes')"));
+}
+
+test "zig api: each dialect's constraint errors" {
+    const D = xqlite.Dialect;
+    // `coerced`: raised by the conversion of the value to the column's type
+    // (an SQL function), not by the constraint.
+    const Fail = struct { sql: []const u8, msg: []const u8, state: []const u8, number: ?u32 = null, coerced: bool = false };
+    const Case = struct { d: D, ddl: []const u8, fails: []const Fail };
+    const cases = [_]Case{
+        .{ .d = .postgres, .ddl =
+        \\CREATE TABLE p (id int PRIMARY KEY, code text, CONSTRAINT p_code_uq UNIQUE (code));
+        \\CREATE TABLE c (id int PRIMARY KEY, pid int REFERENCES p (id), n int NOT NULL, q int CHECK (q > 0));
+        \\CREATE UNIQUE INDEX c_q ON c (q);
+        , .fails = &.{
+            .{ .sql = "INSERT INTO p VALUES (1, 'b')", .msg = "duplicate key value violates unique constraint \"p_pkey\"", .state = "23505" },
+            .{ .sql = "INSERT INTO p VALUES (2, 'a')", .msg = "duplicate key value violates unique constraint \"p_code_uq\"", .state = "23505" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 1)", .msg = "duplicate key value violates unique constraint \"c_q\"", .state = "23505" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, NULL, 2)", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint", .state = "23502" },
+            .{ .sql = "UPDATE c SET n = NULL", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint", .state = "23502" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 0)", .msg = "new row for relation \"c\" violates check constraint \"c_q_check\"", .state = "23514" },
+            .{ .sql = "INSERT INTO c VALUES (2, 9, 1, 2)", .msg = "insert or update on table \"c\" violates foreign key constraint \"c_pid_fkey\"", .state = "23503" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 2), (3, 9, 1, 3)", .msg = "insert or update on table \"c\" violates foreign key constraint \"c_pid_fkey\"", .state = "23503" },
+            .{ .sql = "DELETE FROM p", .msg = "update or delete on table \"p\" violates foreign key constraint \"c_pid_fkey\" on table \"c\"", .state = "23503" },
+        } },
+        .{ .d = .mariadb, .ddl =
+        \\CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), UNIQUE KEY uk (code));
+        \\CREATE TABLE c (id INT PRIMARY KEY, pid INT, n INT NOT NULL, q INT CHECK (q > 0), a INT, b INT, UNIQUE KEY ab (a, b), FOREIGN KEY (pid) REFERENCES p (id));
+        , .fails = &.{
+            .{ .sql = "INSERT INTO p VALUES (1, 'b')", .msg = "Duplicate entry '1' for key 'PRIMARY'", .state = "23505", .number = 1062 },
+            .{ .sql = "INSERT INTO p VALUES (2, 'a')", .msg = "Duplicate entry 'a' for key 'uk'", .state = "23505", .number = 1062 },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 1, 7, 8)", .msg = "Duplicate entry '7-8' for key 'ab'", .state = "23505", .number = 1062 },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, NULL, 1, 0, 0)", .msg = "Column 'n' cannot be null", .state = "23502", .number = 1048, .coerced = true },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 0, 0, 0)", .msg = "CONSTRAINT `q` failed for `main`.`c`", .state = "23514", .number = 4025 },
+            .{ .sql = "INSERT INTO c VALUES (2, 9, 1, 1, 0, 0)", .msg = "Cannot add or update a child row: a foreign key constraint fails (`main`.`c`, CONSTRAINT `c_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `p` (`id`))", .state = "23503", .number = 1452 },
+            .{ .sql = "DELETE FROM p", .msg = "Cannot delete or update a parent row: a foreign key constraint fails (`main`.`c`, CONSTRAINT `c_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `p` (`id`))", .state = "23503", .number = 1451 },
+        } },
+        .{ .d = .mssql, .ddl =
+        \\CREATE TABLE p (id INT CONSTRAINT pk_p PRIMARY KEY, code VARCHAR(5) UNIQUE);
+        \\CREATE TABLE c (id INT PRIMARY KEY, pid INT REFERENCES p (id), n INT NOT NULL, q INT CONSTRAINT ck_q CHECK (q > 0));
+        \\CREATE UNIQUE INDEX ix_q ON c (q);
+        , .fails = &.{
+            .{ .sql = "INSERT INTO p VALUES (1, 'b')", .msg = "Violation of PRIMARY KEY constraint 'pk_p'. Cannot insert duplicate key in object 'dbo.p'. The duplicate key value is (1).", .state = "23505", .number = 2627 },
+            .{ .sql = "INSERT INTO p VALUES (2, 'a')", .msg = "Violation of UNIQUE KEY constraint 'UQ__p__code'. Cannot insert duplicate key in object 'dbo.p'. The duplicate key value is (a).", .state = "23505", .number = 2627 },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 1)", .msg = "Cannot insert duplicate key row in object 'dbo.c' with unique index 'ix_q'. The duplicate key value is (1).", .state = "23505", .number = 2601 },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, NULL, 2)", .msg = "Cannot insert the value NULL into column 'n', table 'main.dbo.c'; column does not allow nulls. INSERT fails.", .state = "23502", .number = 515 },
+            .{ .sql = "UPDATE c SET n = NULL", .msg = "Cannot insert the value NULL into column 'n', table 'main.dbo.c'; column does not allow nulls. UPDATE fails.", .state = "23502", .number = 515 },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 0)", .msg = "The INSERT statement conflicted with the CHECK constraint \"ck_q\". The conflict occurred in database \"main\", table \"dbo.c\".", .state = "23514", .number = 547 },
+            .{ .sql = "INSERT INTO c VALUES (2, 9, 1, 2)", .msg = "The INSERT statement conflicted with the FOREIGN KEY constraint \"FK__c__pid\". The conflict occurred in database \"main\", table \"dbo.p\", column 'id'.", .state = "23503", .number = 547 },
+            .{ .sql = "DELETE FROM p", .msg = "The DELETE statement conflicted with the REFERENCE constraint \"FK__c__pid\". The conflict occurred in database \"main\", table \"dbo.c\", column 'pid'.", .state = "23503", .number = 547 },
+        } },
+        .{ .d = .oracle, .ddl =
+        \\CREATE TABLE p (id NUMBER CONSTRAINT p_pk PRIMARY KEY, code VARCHAR2(5) UNIQUE);
+        \\CREATE TABLE c (id NUMBER PRIMARY KEY, pid NUMBER CONSTRAINT c_fk REFERENCES p (id), n NUMBER NOT NULL, q NUMBER CONSTRAINT q_ck CHECK (q > 0));
+        , .fails = &.{
+            .{ .sql = "INSERT INTO p VALUES (1, 'b')", .msg = "ORA-00001: unique constraint (MAIN.P_PK) violated", .state = "23505", .number = 1 },
+            .{ .sql = "INSERT INTO p VALUES (2, 'a')", .msg = "ORA-00001: unique constraint (MAIN.SYS_C_P_CODE) violated", .state = "23505", .number = 1 },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, NULL, 2)", .msg = "ORA-01400: cannot insert NULL into (\"MAIN\".\"C\".\"N\")", .state = "23502", .number = 1400, .coerced = true },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 0)", .msg = "ORA-02290: check constraint (MAIN.Q_CK) violated", .state = "23514", .number = 2290 },
+            .{ .sql = "INSERT INTO c VALUES (2, 9, 1, 2)", .msg = "ORA-02291: integrity constraint (MAIN.C_FK) violated - parent key not found", .state = "23503", .number = 2291 },
+            .{ .sql = "DELETE FROM p", .msg = "ORA-02292: integrity constraint (MAIN.C_FK) violated - child record found", .state = "23503", .number = 2292 },
+        } },
+    };
+    for (cases) |c| {
+        if (!c.d.built()) continue;
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = c.d });
+        defer db.close();
+        try db.exec(c.ddl);
+        try db.exec("INSERT INTO p VALUES (1, 'a')");
+        try db.exec(if (c.d == .mariadb) "INSERT INTO c VALUES (1, 1, 1, 1, 7, 8)" else "INSERT INTO c VALUES (1, 1, 1, 1)");
+        for (c.fails) |f| {
+            errdefer std.debug.print("{s}: {s}\n", .{ @tagName(c.d), f.sql });
+            try expectState(&db, f.sql, f.state, f.number);
+            try testing.expectEqualStrings(f.msg, db.lastError().?.message);
+            if (!f.coerced) try testing.expectEqual(xqlite.ResultCode.constraint, db.lastError().?.code.primary());
+        }
+        // A statement compiled in SQLite's dialect keeps SQLite's error.
+        try db.exec("PRAGMA xq_dialect = 'sqlite'");
+        try testing.expectError(error.Constraint, db.exec("INSERT INTO p VALUES (1, 'x')"));
+        try testing.expect(std.mem.endsWith(u8, db.lastError().?.message, "constraint failed: p.id") or std.mem.endsWith(u8, db.lastError().?.message, "constraint failed: P.ID"));
+        try testing.expectEqual(@as(?[5]u8, null), db.lastError().?.sqlstate);
+    }
+}
+
 /// Column `i` of the first row of `sql` as `db`'s dialect shows it (the
 /// text in `buf`).
 fn shown(db: *Db, cols: *xqlite.display.Columns, sql: []const u8, i: usize, buf: []u8) ![]const u8 {
@@ -1079,11 +1288,13 @@ test "zig api: values as the dialect shows them, of columns and expressions" {
             errdefer std.debug.print("{s}\n", .{c[0]});
             try testing.expectEqualStrings(c[1], try shown(&db, &cols, c[0], 0, &buf));
         }
-        // The declared type of an expression is its dialect's.
+        // The declared type of an expression is its dialect's: a + b of
+        // two integers is an integer, as PostgreSQL's operator gives it
+        // (the dialect's typing rules, sql/typing.zig).
         var s = try db.prepare("SELECT a = b, a + b FROM t");
         defer s.finalize();
         try testing.expectEqualStrings("boolean", s.columnDecltype(0).?);
-        try testing.expectEqual(@as(?[:0]const u8, null), s.columnDecltype(1));
+        try testing.expectEqualStrings("integer", s.columnDecltype(1).?);
     }
     if (D.mariadb.built()) {
         var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mariadb, .column_metadata = true });
@@ -1117,6 +1328,327 @@ test "zig api: values as the dialect shows them, of columns and expressions" {
     var s = try db.prepare("SELECT 1 = 1");
     defer s.finalize();
     try testing.expectEqual(@as(?[:0]const u8, null), s.columnDecltype(0));
+}
+
+/// The declared type of column `i` of `sql` (prepared, not run).
+fn expectDecltype(db: *Db, sql: []const u8, i: usize, want: ?[]const u8) !void {
+    errdefer std.debug.print("{s}\n", .{sql});
+    var s = try db.prepare(sql);
+    defer s.finalize();
+    if (want) |w| {
+        try testing.expectEqualStrings(w, s.columnDecltype(i) orelse return error.TestExpectedEqual);
+    } else {
+        try testing.expectEqual(@as(?[]const u8, null), s.columnDecltype(i));
+    }
+}
+
+test "zig api: types of expressions through subqueries, CTEs, views and compounds" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var buf: [64]u8 = undefined;
+    var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres, .column_metadata = true });
+    defer db.close();
+    var cols: xqlite.display.Columns = .init(gpa);
+    defer cols.deinit();
+    try db.exec("CREATE TABLE t (a int, b int, ok boolean, n numeric(6,2))");
+    try db.exec("INSERT INTO t VALUES (1, 2, true, 1.5)");
+    // (PostgreSQL's frontend keeps the scale of a cast to numeric, not
+    // its precision: numeric(38,2).)
+    // A view stores SQLite text: a comparison is typed again when the
+    // view is compiled into a statement, a cast lowered to SQLite's
+    // (CAST(round(2.5, 2) AS NUMERIC)) has lost its target type.
+    try db.exec("CREATE VIEW v AS SELECT a = b AS x, 2.5::numeric(6,2) AS y, a < b AND ok AS z FROM t");
+    const cases = [_]struct { []const u8, []const u8, ?[]const u8 }{
+        // FROM subqueries, flattened or not.
+        .{ "SELECT y FROM (SELECT 2.5::numeric(6,2) AS y) s", "2.50", "numeric(38,2)" },
+        .{ "SELECT x FROM (SELECT DISTINCT a = b AS x FROM t LIMIT 1) s", "f", "boolean" },
+        // CTEs.
+        .{ "WITH c AS (SELECT a = b AS x FROM t) SELECT x FROM c", "f", "boolean" },
+        .{ "WITH c AS (SELECT 2.5::numeric(6,2) AS y) SELECT y FROM c", "2.50", "numeric(38,2)" },
+        .{ "WITH RECURSIVE r(x) AS (SELECT true UNION ALL SELECT NOT x FROM r LIMIT 3) SELECT x FROM r", "t", "boolean" },
+        // Scalar subqueries: the type of their column.
+        .{ "SELECT (SELECT a = b FROM t)", "f", "boolean" },
+        .{ "SELECT (SELECT 2.5::numeric(6,2))", "2.50", "numeric(38,2)" },
+        // Views.
+        .{ "SELECT x FROM v", "f", "boolean" },
+        .{ "SELECT z FROM v", "t", "boolean" },
+        .{ "SELECT y FROM v", "2.5", null },
+        // A compound is of the common type of its terms (integers of the
+        // widest, an integer and a numeric a numeric); of none if they
+        // have none (PostgreSQL fails: UNION types boolean and integer
+        // cannot be matched), so a boolean with an integer is shown as
+        // stored.
+        .{ "SELECT a = b FROM t UNION ALL SELECT 2", "0", null },
+        .{ "SELECT 2 UNION ALL SELECT a = b FROM t", "2", null },
+        .{ "SELECT x FROM (SELECT a = b AS x FROM t UNION ALL SELECT 2) s", "0", null },
+        .{ "SELECT a = b FROM t UNION ALL SELECT NULL", "f", "boolean" },
+        .{ "SELECT 1 UNION ALL SELECT 2::bigint", "1", "bigint" },
+        // A numeric value keeps its own scale in PostgreSQL: the common
+        // type of 1 and 2.50 is a numeric of no one scale.
+        .{ "SELECT x FROM (SELECT 1 AS x UNION ALL SELECT 2.50) s ORDER BY x LIMIT 1", "1", "numeric" },
+        .{ "SELECT (SELECT 1.50 UNION SELECT 2.25 ORDER BY 1 LIMIT 1)", "1.50", "numeric" },
+        .{ "VALUES (1), (2.25)", "1", "numeric" },
+        // COLLATE keeps the type.
+        .{ "SELECT (a = b) COLLATE \"C\" FROM t", "f", "boolean" },
+    };
+    for (cases) |c| {
+        errdefer std.debug.print("{s}\n", .{c[0]});
+        try testing.expectEqualStrings(c[1], try shown(&db, &cols, c[0], 0, &buf));
+        try expectDecltype(&db, c[0], 0, c[2]);
+    }
+    // The type is kept with the statement as a Type.
+    var s = try db.prepare("SELECT y FROM (SELECT 2.5::numeric(6,2) AS y) s");
+    defer s.finalize();
+    try testing.expectEqual(xqlite.types.Type{ .logical = .numeric, .precision = 38, .scale = 2 }, (try cols.ofStmt(&s, 0)).?.type);
+    // SQLite's dialect types nothing, not even the same view.
+    db.setDialect(.sqlite);
+    try expectDecltype(&db, "SELECT x FROM v", 0, null);
+    try expectDecltype(&db, "SELECT (SELECT 1 = 1)", 0, null);
+}
+
+/// A case of typesOfExpressions(): a query, its first column's value as
+/// the dialect shows it, and its declared type.
+const TypeCase = struct { []const u8, []const u8, ?[]const u8 };
+
+fn expectTypes(d: xqlite.Dialect, ddl: []const u8, cases: []const TypeCase) !void {
+    if (!d.built()) return;
+    var buf: [64]u8 = undefined;
+    var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = d, .column_metadata = true });
+    defer db.close();
+    var cols: xqlite.display.Columns = .init(gpa);
+    defer cols.deinit();
+    try db.exec(ddl);
+    for (cases) |c| {
+        errdefer std.debug.print("{t}: {s}\n", .{ d, c[0] });
+        try testing.expectEqualStrings(c[1], try shown(&db, &cols, c[0], 0, &buf));
+        try expectDecltype(&db, c[0], 0, c[2]);
+    }
+}
+
+test "zig api: types of literals, operators and functions in each dialect" {
+    // PostgreSQL: integers in the wider type, a numeric of the scale of
+    // its values (shown with as many digits), real only with real.
+    try expectTypes(.postgres,
+        \\CREATE TABLE t (a int, b bigint, s smallint, n numeric(6,2), f float8, r real, x text, ts timestamptz);
+        \\INSERT INTO t VALUES (1, 2, 3, 1.5, 0.5, 0.25, 'x', '2024-01-02 03:04:05');
+    , &.{
+        .{ "SELECT 1", "1", "integer" },
+        .{ "SELECT 3000000000", "3000000000", "bigint" },
+        .{ "SELECT 1.50", "1.50", "numeric" },
+        .{ "SELECT 0.1 + 0.2", "0.3", "numeric" },
+        .{ "SELECT 1e3", "1000", "numeric" },
+        .{ "SELECT 'abc'", "abc", "text" },
+        .{ "SELECT NULL", "NULL", null },
+        .{ "SELECT a + a FROM t", "2", "integer" },
+        .{ "SELECT a + b FROM t", "3", "bigint" },
+        .{ "SELECT s + s FROM t", "6", "smallint" },
+        .{ "SELECT a / 2 FROM t", "0", "integer" },
+        .{ "SELECT a + '1' FROM t", "2", "integer" },
+        .{ "SELECT n + 1 FROM t", "2.50", "numeric" },
+        .{ "SELECT n * n FROM t", "2.2500", "numeric" },
+        .{ "SELECT 1.50::numeric(6,2) + 1", "2.50", "numeric" },
+        .{ "SELECT -n FROM t", "-1.50", "numeric(6,2)" },
+        // Division picks its scale per value in PostgreSQL: none known.
+        .{ "SELECT n / 3 FROM t", "0.5", "numeric" },
+        .{ "SELECT f + a FROM t", "1.5", "double precision" },
+        .{ "SELECT r * r FROM t", "0.0625", "real" },
+        .{ "SELECT r + f FROM t", "0.75", "double precision" },
+        .{ "SELECT 'a' || x FROM t", "ax", "text" },
+        .{ "SELECT count(*) FROM t", "1", "bigint" },
+        .{ "SELECT sum(a) FROM t", "1", "bigint" },
+        .{ "SELECT sum(b) FROM t", "2", "numeric" },
+        .{ "SELECT sum(n) FROM t", "1.50", "numeric" },
+        .{ "SELECT avg(a) FROM t", "1", "numeric" },
+        .{ "SELECT max(n) FROM t", "1.50", "numeric(6,2)" },
+        .{ "SELECT length(x) FROM t", "1", "integer" },
+        .{ "SELECT upper(x) FROM t", "X", "text" },
+        .{ "SELECT round(n, 1) FROM t", "1.5", "numeric" },
+        .{ "SELECT round(2.567, 2)", "2.57", "numeric" },
+        .{ "SELECT round(2.5)", "3", "numeric" },
+        .{ "SELECT abs(n) FROM t", "1.50", "numeric(6,2)" },
+        .{ "SELECT coalesce(a, b) FROM t", "1", "bigint" },
+        .{ "SELECT CASE WHEN a > 0 THEN n END FROM t", "1.50", "numeric(6,2)" },
+        .{ "SELECT CASE WHEN a > 0 THEN 1 ELSE 2.5 END FROM t", "1", "numeric" },
+        .{ "SELECT row_number() OVER () FROM t", "1", "bigint" },
+        .{ "SELECT (SELECT a + b FROM t)", "3", "bigint" },
+    });
+    // MariaDB: integer arithmetic in BIGINT, `/` a DECIMAL of 4 more
+    // digits, DECIMAL(p,s) shown with its s digits.
+    try expectTypes(.mariadb,
+        \\CREATE TABLE t (a INT, d DECIMAL(6,2), f DOUBLE, x VARCHAR(5));
+        \\INSERT INTO t VALUES (7, 1.5, 0.5, 'x');
+    , &.{
+        .{ "SELECT 1", "1", "int" },
+        .{ "SELECT 1.50", "1.50", "decimal(3,2)" },
+        .{ "SELECT 'abc'", "abc", "varchar(3)" },
+        .{ "SELECT a + a FROM t", "14", "bigint" },
+        .{ "SELECT a / 2 FROM t", "3.5000", "decimal(14,4)" },
+        .{ "SELECT 7 / 2", "3.5000", "decimal(14,4)" },
+        .{ "SELECT a DIV 2 FROM t", "3", "bigint" },
+        .{ "SELECT d + 1 FROM t", "2.50", "decimal(13,2)" },
+        .{ "SELECT d * d FROM t", "2.2500", "decimal(12,4)" },
+        .{ "SELECT d / 2 FROM t", "0.750000", "decimal(10,6)" },
+        .{ "SELECT a + f FROM t", "7.5", "double" },
+        .{ "SELECT count(*) FROM t", "1", "bigint" },
+        .{ "SELECT avg(a) FROM t", "7.0000", "decimal(14,4)" },
+        .{ "SELECT sum(d) FROM t", "1.50", "decimal(28,2)" },
+        .{ "SELECT avg(d) FROM t", "1.500000", "decimal(10,6)" },
+        .{ "SELECT round(2.567, 2)", "2.57", "decimal(4,2)" },
+        .{ "SELECT CHAR_LENGTH(x) FROM t", "1", "int" },
+        .{ "SELECT UPPER(x) FROM t", "X", "varchar(5)" },
+        .{ "SELECT CONCAT(x, 'yz') FROM t", "xyz", "varchar(7)" },
+        .{ "SELECT CASE WHEN a > 0 THEN d ELSE 1 END FROM t", "1.50", "decimal(12,2)" },
+    });
+    // SQL Server: an int stays an int, decimals by its precision and
+    // scale rules.
+    try expectTypes(.mssql,
+        \\CREATE TABLE t (i INT, b BIGINT, d DECIMAL(5,2), f FLOAT, x VARCHAR(5));
+        \\INSERT INTO t VALUES (7, 2, 1.5, 0.5, 'x');
+    , &.{
+        .{ "SELECT 1", "1", "int" },
+        .{ "SELECT 1.50", "1.50", "numeric(3,2)" },
+        .{ "SELECT 'abc'", "abc", "varchar(3)" },
+        .{ "SELECT i / 2 FROM t", "3", "int" },
+        .{ "SELECT i + b FROM t", "9", "bigint" },
+        .{ "SELECT 7 / 2.0", "3.500000", "numeric(17,6)" },
+        .{ "SELECT d * 2 FROM t", "3.00", "numeric(16,2)" },
+        .{ "SELECT d + f FROM t", "2", "float" },
+        .{ "SELECT x + 'yz' FROM t", "xyz", "varchar(7)" },
+        .{ "SELECT COUNT(*) FROM t", "1", "int" },
+        .{ "SELECT AVG(d) FROM t", "1.500000", "numeric(38,6)" },
+        .{ "SELECT SUM(d) FROM t", "1.50", "numeric(38,2)" },
+        .{ "SELECT LEN(x) FROM t", "1", "int" },
+        .{ "SELECT UPPER(x) FROM t", "X", "varchar(5)" },
+        .{ "SELECT ISNULL(d, 0) FROM t", "1.50", "decimal(5,2)" },
+    });
+    // Oracle: NUMBER everywhere (shown without trailing zeros).
+    try expectTypes(.oracle,
+        \\CREATE TABLE t (n NUMBER(6,2), i NUMBER(5), s VARCHAR2(5), f BINARY_DOUBLE);
+        \\INSERT INTO t VALUES (1.5, 7, 'ab', 0.5);
+    , &.{
+        .{ "SELECT 1 FROM dual", "1", "NUMBER" },
+        .{ "SELECT 'abc' FROM dual", "abc", "CHAR(3)" },
+        .{ "SELECT n + 1 FROM t", "2.5", "NUMBER" },
+        .{ "SELECT i / 2 FROM t", "3.5", "NUMBER" },
+        .{ "SELECT n + f FROM t", "2", "BINARY_DOUBLE" },
+        .{ "SELECT s || 'c' FROM t", "abc", "VARCHAR2(6)" },
+        .{ "SELECT COUNT(*) FROM t", "1", "NUMBER" },
+        .{ "SELECT LENGTH(s) FROM t", "2", "NUMBER" },
+        .{ "SELECT UPPER(s) FROM t", "AB", "VARCHAR2" },
+        .{ "SELECT TO_DATE('2024-01-02', 'YYYY-MM-DD') FROM dual", "2024-01-02 00:00:00", "DATE" },
+    });
+}
+
+test "zig api: types of parameters" {
+    const D = xqlite.Dialect;
+    // SQLite's dialect types none.
+    {
+        var db = try memDb();
+        defer db.close();
+        try db.exec("CREATE TABLE t (a INTEGER, b TEXT)");
+        var s = try db.prepare("SELECT * FROM t WHERE a = ?");
+        defer s.finalize();
+        try testing.expectEqual(@as(?xqlite.types.Type, null), s.parameterType(1));
+    }
+    if (D.postgres.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres });
+        defer db.close();
+        try db.exec("CREATE TABLE t (a int, b text, n numeric(6,2), c bigint)");
+        const T = xqlite.types.Type;
+        const cases = [_]struct { []const u8, []const ?T }{
+            .{ "SELECT * FROM t WHERE a = $1 AND $2 = b", &.{ .{ .logical = .int4 }, .{ .logical = .text } } },
+            .{ "SELECT $1 + 1", &.{.{ .logical = .int4 }} },
+            .{ "SELECT a + $1 FROM t", &.{.{ .logical = .int4 }} },
+            .{ "SELECT * FROM t WHERE c BETWEEN $1 AND $2", &.{ .{ .logical = .int8 }, .{ .logical = .int8 } } },
+            .{ "SELECT * FROM t WHERE a IN ($1, $2)", &.{ .{ .logical = .int4 }, .{ .logical = .int4 } } },
+            .{ "SELECT * FROM t WHERE b IN ($1)", &.{.{ .logical = .text }} },
+            .{ "SELECT CASE a WHEN $1 THEN 1 END FROM t", &.{.{ .logical = .int4 }} },
+            .{ "INSERT INTO t VALUES ($1, $2, $3, $4)", &.{ .{ .logical = .int4 }, .{ .logical = .text }, .{ .logical = .numeric, .precision = 6, .scale = 2 }, .{ .logical = .int8 } } },
+            .{ "INSERT INTO t (c, a) VALUES ($1, $2), ($3, 4)", &.{ .{ .logical = .int8 }, .{ .logical = .int4 }, .{ .logical = .int8 } } },
+            .{ "UPDATE t SET b = $1 WHERE a = $2", &.{ .{ .logical = .text }, .{ .logical = .int4 } } },
+            // A parameter used twice is of the type of where it is first
+            // typed; one nothing types has none.
+            .{ "SELECT $1 = a, $1 FROM t", &.{.{ .logical = .int4 }} },
+            .{ "SELECT $1, $2 = a FROM t", &.{ null, .{ .logical = .int4 } } },
+        };
+        for (cases) |c| {
+            errdefer std.debug.print("{s}\n", .{c[0]});
+            var s = try db.prepare(c[0]);
+            defer s.finalize();
+            try testing.expectEqual(c[1].len, s.parameterCount());
+            for (c[1], 1..) |want, i| try testing.expectEqual(want, s.parameterType(i));
+        }
+        // A parameter compared with a column gives the result its type.
+        var s = try db.prepare("SELECT a + $1 FROM t");
+        defer s.finalize();
+        try testing.expectEqualStrings("integer", s.columnDecltype(0).?);
+    }
+    if (D.mariadb.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mariadb });
+        defer db.close();
+        try db.exec("CREATE TABLE t (a INT, d DECIMAL(6,2))");
+        var s = try db.prepare("INSERT INTO t VALUES (?, ?)");
+        defer s.finalize();
+        try testing.expectEqual(xqlite.types.Logical.int4, s.parameterType(1).?.logical);
+        try testing.expectEqual(xqlite.types.Type{ .logical = .numeric, .precision = 6, .scale = 2 }, s.parameterType(2).?);
+    }
+    if (D.mssql.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mssql });
+        defer db.close();
+        try db.exec("CREATE TABLE t (a INT, x VARCHAR(5))");
+        var s = try db.prepare("UPDATE t SET x = ? WHERE a = ?");
+        defer s.finalize();
+        try testing.expectEqual(xqlite.types.Type{ .logical = .varchar, .length = 5 }, s.parameterType(1).?);
+        try testing.expectEqual(xqlite.types.Logical.int4, s.parameterType(2).?.logical);
+    }
+    if (D.oracle.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .oracle });
+        defer db.close();
+        try db.exec("CREATE TABLE t (a NUMBER(5), s VARCHAR2(5))");
+        var s = try db.prepare("INSERT INTO t VALUES (:1, :2)");
+        defer s.finalize();
+        try testing.expectEqual(xqlite.types.Logical.int4, s.parameterType(1).?.logical);
+        try testing.expectEqual(xqlite.types.Logical.varchar, s.parameterType(2).?.logical);
+    }
+}
+
+test "zig api: types of expressions of the schema outlive their statements" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var mem = MemVfs.init(gpa, testing.io);
+    defer mem.deinit();
+    const ddl =
+        \\CREATE TABLE g (a int, b int GENERATED ALWAYS AS (a * 2) STORED,
+        \\  c boolean CHECK (c = (a > 0)), d numeric(6,2) CHECK (d::numeric(4,1) < 100))
+    ;
+    {
+        var w = try Db.open(gpa, testing.io, "types.db", .{ .vfs = .{ .custom = mem.interface() }, .dialect = .postgres });
+        defer w.close();
+        try w.exec(ddl);
+        try w.exec("CREATE INDEX gi ON g ((a < b))");
+        try w.exec("INSERT INTO g (a, c, d) VALUES (1, true, 1.5)");
+        // Another connection reads the schema, then reads it again after
+        // this one changes it.
+        var r = try Db.open(gpa, testing.io, "types.db", .{ .vfs = .{ .custom = mem.interface() }, .dialect = .postgres });
+        defer r.close();
+        try r.exec("INSERT INTO g (a, c, d) VALUES (2, true, 2.5)");
+        try w.exec("CREATE TABLE h (x int)");
+        try r.exec("INSERT INTO g (a, c, d) VALUES (3, true, 3.5)");
+        try testing.expectError(error.Constraint, r.exec("INSERT INTO g (a, c, d) VALUES (4, false, 4.5)"));
+        try testing.expectEqual(@as(?i64, 3), try r.one(i64, "SELECT count(*) FROM g WHERE a < b", .{}));
+    }
+    // Reopened, and attached to a connection of another dialect.
+    var db = try Db.open(gpa, testing.io, "types.db", .{ .vfs = .{ .custom = mem.interface() }, .dialect = .postgres });
+    defer db.close();
+    try db.exec("INSERT INTO g (a, c, d) VALUES (5, true, 5.5)");
+    try testing.expectEqual(@as(?i64, 10), try db.one(i64, "SELECT b FROM g WHERE a = 5", .{}));
+    var m = try Db.open(gpa, testing.io, ":memory:", .{ .vfs = .{ .custom = mem.interface() }, .dialect = .mariadb });
+    defer m.close();
+    try m.exec("ATTACH 'types.db' AS aux");
+    try testing.expectError(error.Constraint, m.exec("INSERT INTO aux.g (a, c, d) VALUES (6, FALSE, 6.5)"));
+    try m.exec("INSERT INTO aux.g (a, c, d) VALUES (6, TRUE, 6.5)");
+    try testing.expectEqual(@as(?i64, 5), try m.one(i64, "SELECT count(*) FROM aux.g WHERE a < b", .{}));
+    try m.exec("DETACH aux");
+    try m.exec("ATTACH 'types.db' AS aux");
+    try testing.expectEqual(@as(?i64, 12), try m.one(i64, "SELECT b FROM aux.g WHERE a = 6", .{}));
 }
 
 test "zig api: Diagnostics carry the SQLSTATE and the dialect's number" {

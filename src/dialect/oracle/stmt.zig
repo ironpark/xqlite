@@ -493,24 +493,20 @@ fn mentions(e: *const Expr, name: []const u8) bool {
 /// and NOT NULL.
 const ColumnInfo = struct { decl: ?[]const u8, not_null: bool };
 
-fn columnInfo(p: *Parser, t: *int.Table, entries: []const catalog.Entry, c: *const int.Column) ColumnInfo {
-    _ = p;
+fn columnInfo(p: *Parser, t: *int.Table, m: *const catalog.TableMeta, c: *const int.Column) Error!ColumnInfo {
     _ = t;
-    var decl: ?[]const u8 = null;
-    for (entries) |en| {
-        if (std.mem.eql(u8, en.key, catalog.Key.decl_type) and eq(en.col, c.name())) decl = en.value;
-    }
+    // Copied: the catalog in memory may be dropped before the parse ends.
+    const decl = if (m.declType(c.name())) |d| try p.arena.dupe(u8, d) else null;
     return .{ .decl = decl, .not_null = c.not_null != .None };
 }
 
-fn tableEntries(p: *Parser, q: tree.QName) Error!?struct { t: *int.Table, entries: []const catalog.Entry, table: []const u8 } {
+fn tableEntries(p: *Parser, q: tree.QName) Error!?struct { t: *int.Table, meta: *const catalog.TableMeta, table: []const u8 } {
     const ps = p.p orelse return null;
     const t = (try p.findTable(q)) orelse return null;
     const schema = catalog.schemaName(ps.db, t);
     if (!catalog.exists(ps.db, schema)) return null;
-    const entries = catalog.entries(ps.db, p.arena, schema, t.name) catch return null;
-    if (entries.len == 0) return null;
-    return .{ .t = t, .entries = entries, .table = t.name };
+    const m = (catalog.meta(ps.db, schema, t.name) catch return null) orelse return null;
+    return .{ .t = t, .meta = m, .table = t.name };
 }
 
 /// `v` as stored into column `c`: xq_ora_coerce(v, 'TYPE', 'T', 'C',
@@ -555,7 +551,7 @@ pub fn coerceInsert(p: *Parser, ins: *tree.Insert) Error!void {
     const infos = try p.arena.alloc(ColumnInfo, cols.len);
     var any = false;
     for (cols, infos) |c_opt, *info| {
-        info.* = if (c_opt) |c| columnInfo(p, te.t, te.entries, c) else .{ .decl = null, .not_null = false };
+        info.* = if (c_opt) |c| try columnInfo(p, te.t, te.meta, c) else .{ .decl = null, .not_null = false };
         if (info.decl != null) any = true;
     }
     if (!any) return;
@@ -608,7 +604,7 @@ pub fn coerceSets(p: *Parser, q: tree.QName, sets: []tree.SetItem) Error!void {
         const i = build.columnIndex(te.t, s.cols[0].text);
         if (i < 0) continue;
         const c = &te.t.cols[@intCast(i)];
-        s.value = try coerced(p, s.value, columnInfo(p, te.t, te.entries, c), te.table, c.name());
+        s.value = try coerced(p, s.value, try columnInfo(p, te.t, te.meta, c), te.table, c.name());
     }
 }
 

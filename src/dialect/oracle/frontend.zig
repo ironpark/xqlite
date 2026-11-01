@@ -54,9 +54,11 @@ pub const frontend: dialect.Frontend = .{ .run = run };
 
 pub const hooks: dialect.Hooks = .{
     .foreign_keys = true,
+    .constraint = @import("constraints.zig").constraint,
     // NUMBER holds 38 digits, so a result past 64 bits is no error (the
     // real SQLite computes is the nearer value).
     .arith = .{ .div_zero = .{ .msg = "ORA-01476: divisor is equal to zero", .state = .numbered("22012", 1476) } },
+    .typing = &@import("typing.zig").rules,
     .functions = &functions,
     .engine_functions = &engine_functions,
     .engine_modules = &.{.{ .name = jsonfuncs.json_table_name, .module = &jsonfuncs.json_table_module }},
@@ -338,4 +340,5 @@ test {
     _ = @import("session.zig");
     _ = @import("jsonfuncs.zig");
     _ = @import("test.zig");
+    _ = @import("constraints.zig");
 }

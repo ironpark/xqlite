@@ -34,6 +34,7 @@ const OPFLAG = vi.OPFLAG;
 const expr_mod = @import("expr.zig");
 const ec = @import("expr_code.zig");
 const resolve = @import("resolve.zig");
+const typing = @import("typing.zig");
 const auth = @import("auth.zig");
 const prepare = @import("prepare.zig");
 const insert = @import("insert.zig");
@@ -182,6 +183,8 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                 return;
             }
             ax_ref[ju] = i;
+            // xqlite: a parameter stored into the column is of its type.
+            if (n_change_from == 0 and typing.active(db)) typing.assign(p, item.expr.?, resolve.tableColumnType(p, t, ju) catch return build.oomFault(p));
         } else if (pk == null and resolve.isRowid(name)) {
             chng_rowid = true;
             rowid_expr = item.expr;
@@ -485,6 +488,9 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
     // The new content, from reg_new.
     const newmask = trigger.triggerColmask(p, trig, changes, true, int.TRIGGER_BEFORE, t, on_error);
     {
+        // xqlite: the functions the values of the dialect's types go
+        // through (none in SQLite's dialect).
+        const stores = if (is_view) null else typing.storeFunctions(p, t) catch return build.oomFault(p);
         var k = reg_new;
         for (t.cols, 0..) |c, i| {
             defer k += 1;
@@ -501,6 +507,9 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                     } else {
                         ec.exprCode(p, changes.at(@intCast(j)).expr, k);
                     }
+                    if (stores) |f| if (f[i]) |def| {
+                        if (n_change_from != 0 or typing.storeNeeded(db, changes.at(@intCast(j)).expr.?)) insert.codeStore(p, def, k);
+                    };
                 } else if (tmask & int.TRIGGER_BEFORE == 0 or i > 31 or newmask & (@as(u32, 1) << @intCast(i)) != 0) {
                     ec.codeGetColumnOfTable(v, t, i_data_cur, @intCast(i), k);
                     b_finish_seek = false;

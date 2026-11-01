@@ -1569,13 +1569,13 @@ pub const Parser = struct {
         var tab = r.find(s.p.db) orelse return .{ .tab = null, .q = q, .alias = r.alias, .schema = "main", .cols = &.{} };
         const schema = catalog.schemaName(s.p.db, tab);
         const stored = try s.a.dupe(u8, tab.name);
-        var entries: []const catalog.Entry = &.{};
+        var m: ?*const catalog.TableMeta = null;
         if (catalog.exists(s.p.db, schema)) {
-            entries = catalog.entries(s.p.db, s.a, schema, stored) catch |err| switch (err) {
+            m = catalog.meta(s.p.db, schema, stored) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 else => return s.failFrom(s.p.db),
             };
-            // The query may have reloaded the schema.
+            // Reading the catalog may have reloaded the schema.
             tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .q = q, .alias = r.alias, .schema = schema, .cols = &.{} };
         }
         const cols = try s.a.alloc(ColMeta, tab.cols.len);
@@ -1588,10 +1588,11 @@ pub const Parser = struct {
                 .hidden = c.col_flags.HIDDEN,
                 .has_default = c.i_dflt != 0,
             };
-            for (entries) |en| {
-                if (!std.ascii.eqlIgnoreCase(en.col, cols[i].name)) continue;
-                if (std.mem.eql(u8, en.key, catalog.Key.decl_type)) cols[i].decl_type = en.value;
-                if (std.mem.eql(u8, en.key, "mariadb.on_update")) cols[i].on_update = true;
+            if (m) |x| {
+                // Copied: a statement run while parsing may drop the
+                // catalog in memory.
+                if (x.declType(cols[i].name)) |t| cols[i].decl_type = try s.a.dupe(u8, t);
+                cols[i].on_update = x.value(cols[i].name, "mariadb.on_update") != null;
             }
         }
         return .{ .tab = tab, .q = q, .alias = r.alias, .schema = schema, .name = stored, .cols = cols };

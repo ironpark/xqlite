@@ -344,7 +344,9 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
     }
     if (eq(n, "getdate") or eq(n, "current_timestamp") or eq(n, "getutcdate")) {
         if (k != 0) return argCount(s, n);
-        return s.func(pos, "strftime", &.{ try s.str(pos, "%Y-%m-%d %H:%M:%f"), try s.str(pos, "now") });
+        const e = try s.func(pos, "strftime", &.{ try s.str(pos, "%Y-%m-%d %H:%M:%f"), try s.str(pos, "now") });
+        e.kind.func.result_type = "datetime";
+        return e;
     }
     if (eq(n, "sysdatetime") or eq(n, "sysutcdatetime") or eq(n, "sysdatetimeoffset")) {
         if (k != 0) return argCount(s, n);

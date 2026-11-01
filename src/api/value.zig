@@ -31,7 +31,7 @@ const Allocator = std.mem.Allocator;
 const UsageError = errors.UsageError;
 
 /// The fundamental datatypes of SQLite (sqlite3_column_type()).
-pub const Kind = enum { integer, float, text, blob, null };
+pub const Kind = @import("../sql/types.zig").Kind;
 
 /// A dynamically typed SQLite value. Text and blobs are borrowed unless
 /// the value came from an `*Alloc` function.

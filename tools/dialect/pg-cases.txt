@@ -197,6 +197,25 @@ CREATE TABLE t (x int);
 SELECT 1 +;
 SELECT * FORM t;
 
+-- case: constraint violations
+CREATE TABLE p (id int PRIMARY KEY, code text UNIQUE, CONSTRAINT p_code_id UNIQUE (code, id));
+CREATE TABLE c (id int PRIMARY KEY, pid int REFERENCES p (id), n int NOT NULL, q int CHECK (q > 0), CONSTRAINT c_q_max CHECK (q < 100));
+CREATE UNIQUE INDEX c_q_idx ON c (q);
+INSERT INTO p VALUES (1, 'a');
+INSERT INTO p VALUES (1, 'b');
+INSERT INTO p VALUES (2, 'a');
+INSERT INTO c VALUES (1, 1, 1, 1);
+INSERT INTO c VALUES (2, 1, 1, 1);
+INSERT INTO c VALUES (2, 1, NULL, 2);
+UPDATE c SET n = NULL;
+INSERT INTO c VALUES (2, 1, 1, 0);
+INSERT INTO c VALUES (2, 1, 1, 200);
+INSERT INTO c VALUES (2, 9, 1, 2);
+INSERT INTO c VALUES (2, 1, 1, 2), (3, 9, 1, 3);
+DELETE FROM p;
+UPDATE p SET id = 5;
+SELECT count(*) FROM c;
+
 -- case: arithmetic errors and integer casts
 SELECT 7 / 2, 7 % 3, 2.5::int, (-2.5)::int, ' 42 '::int, 2.5::bigint;
 SELECT 1 / 0;
@@ -206,11 +225,52 @@ SELECT '2.5'::int;
 SELECT 40000::smallint;
 SELECT 3000000000::integer;
 
+-- case: integer arithmetic in the range of its type
+CREATE TABLE w (a int, s smallint, g bigint);
+INSERT INTO w VALUES (2147483647, 32767, 2147483647);
+SELECT 2147483646 + 1, -2147483647 - 1, 2147483647::bigint + 1, 32767::smallint + 1, 65536 * 65536::bigint;
+SELECT g + 1, g + s, s * 2, a - 1, sum(a) FROM w GROUP BY a, s, g;
+
+-- case: integer arithmetic out of the range of its type (errors)
+CREATE TABLE w (a int, s smallint, g bigint);
+INSERT INTO w VALUES (2147483647, 32767, 2147483647);
+SELECT 2147483647 + 1;
+SELECT -2147483647 - 2;
+SELECT 65536 * 65536;
+SELECT -(-2147483647 - 1);
+SELECT (-2147483647 - 1) / -1;
+SELECT 32767::smallint + 1::smallint;
+SELECT a + 1 FROM w;
+SELECT a + s FROM w;
+SELECT s * s FROM w;
+UPDATE w SET g = a * 2;
+
+-- case: strings stored into boolean and numeric columns
+CREATE TABLE sb (id int, b boolean, n numeric(6,2));
+INSERT INTO sb VALUES (1, 'yes', '1.50'), (2, ' OFF ', ' 3 '), (3, 'T', '-2e1'), (4, 'of', '.5');
+INSERT INTO sb SELECT 5, 'true', '12.25';
+UPDATE sb SET b = 'on', n = '7' WHERE id = 2;
+SELECT id, b::int, n FROM sb ORDER BY id;
+
+-- case: strings stored into boolean and numeric columns (errors)
+CREATE TABLE sb (id int, b boolean, n numeric(6,2));
+INSERT INTO sb (b) VALUES ('maybe');
+INSERT INTO sb (b) VALUES ('o');
+INSERT INTO sb (n) VALUES ('1.2.3');
+INSERT INTO sb (id, n) VALUES (1, 'x');
+
 -- case: column values as psql shows them
 CREATE TABLE v (b boolean, n numeric(6,2), n0 numeric(6,0), m numeric, ts timestamptz);
 INSERT INTO v VALUES (true, 1.5, 3, 2.5, '2024-01-02 03:04:05'), (false, 220, 4, 3, NULL);
 SELECT b, n, n0, m, ts FROM v;
 SELECT n0 = 3, b AND true, n IS NULL, NOT b, 2.5::numeric(6,2), 2::numeric(6,3), x FROM v, (SELECT n > 2 AS x FROM v) s ORDER BY 1, 7;
+
+-- case: the scale of numeric literals, arithmetic and aggregates
+CREATE TABLE nt (n numeric(6,2), i int);
+INSERT INTO nt VALUES (1.5, 2), (2.25, 3);
+SELECT 1.50, 0.1 + 0.2, 1.50::numeric(6,2) + 1, 1.5::numeric(4,1) * 2.25::numeric(5,2), 1e3, round(2.567, 2);
+SELECT n + i, n * n, n - 1, round(n, 1) FROM nt ORDER BY n;
+SELECT sum(n), max(n), sum(n) + 1 FROM nt;
 
 -- case: more queries
 CREATE TABLE o (id int PRIMARY KEY, cust text, amount int, day date);
@@ -688,3 +748,20 @@ CREATE TABLE vt (id int, j jsonb);
 INSERT INTO vt VALUES (1, '{"a":{"b":1},"tags":["x","y"]}');
 CREATE VIEW vv AS SELECT id, j -> 'a' AS a, j #>> '{a,b}' AS b, j ? 'tags' AS has, jsonb_array_length(j -> 'tags') AS n, j || '{"c":1}' AS j2 FROM vt;
 SELECT * FROM vv;
+
+-- case: json: jsonb through a subquery, a CTE and a view
+CREATE TABLE ej (id int, d jsonb);
+INSERT INTO ej VALUES (1, '{"a":1}'), (2, '[1,2]');
+SELECT s.d || '{"b":2}' FROM (SELECT d FROM ej WHERE id = 1) s;
+WITH w AS (SELECT id, d FROM ej) SELECT id, w.d - 'a', w.d -> 'a' FROM w ORDER BY id;
+CREATE VIEW ev AS SELECT id, d, d || '[3]' AS d3 FROM ej;
+SELECT id FROM ev WHERE d = '[1, 2]';
+SELECT d FROM ev ORDER BY d;
+SELECT d3 || '{"z":0}' FROM ev ORDER BY id;
+
+-- case: json: double precision and numeric numbers
+SELECT to_json(100.0::float8), to_json(1e20::float8), to_json(1e-5::float8), to_json(0.1::float8 + 0.2::float8), to_jsonb(1e20::float8), to_json(1.50), to_jsonb(1.50);
+CREATE TABLE fj (id int, f float8, n numeric(6,2));
+INSERT INTO fj VALUES (1, 100, 1.5), (2, 2.5e-7, 2);
+SELECT row_to_json(t) FROM fj t ORDER BY id;
+SELECT json_agg(f ORDER BY id), json_agg(n ORDER BY id) FROM fj;

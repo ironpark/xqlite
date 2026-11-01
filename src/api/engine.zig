@@ -30,6 +30,7 @@ const vtab = @import("../sql/vtab.zig");
 const sql_func = @import("../sql/func/func.zig");
 const util = @import("../sql/util.zig");
 const printf = @import("../sql/printf.zig");
+const types = @import("../sql/types.zig");
 const tokenize = @import("../parse/tokenize.zig");
 const TK = @import("../parse/grammar.zig").TK;
 const thunk_mod = @import("xqlite_base").thunk;
@@ -407,6 +408,28 @@ pub fn statementDialect(v: *const Vm) Dialect {
     return v.xq_lang.dialect;
 }
 
+/// The type the statement gives result column `i`, where it knows one
+/// (sql/typing.zig: a comparison is a boolean, a cast is of its target
+/// type, a column of a subquery is of the type of the subquery's): null
+/// if it does not, and always for SQLite's dialect.
+pub fn resultType(v: *const Vm, i: usize) ?types.Type {
+    if (i >= v.xq_col_types.len) return null;
+    const t = v.xq_col_types[i];
+    return if (t.logical == .unknown) null else t;
+}
+
+/// The type the statement gives parameter `i` (1-based), where it knows
+/// one: the type of what the parameter is compared with, computed with
+/// or stored into (`a = ?`, `? + 1`, `INSERT INTO t VALUES (?)`, sql/
+/// typing.zig); null if it does not, and always for SQLite's dialect.
+/// What a protocol describes a prepared statement's parameters with
+/// (PostgreSQL's ParameterDescription).
+pub fn paramType(v: *const Vm, i: usize) ?types.Type {
+    if (i == 0 or i > v.xq_param_types.len) return null;
+    const t = v.xq_param_types[i - 1];
+    return if (t.logical == .unknown) null else t;
+}
+
 /// Whether the statement counts the rows it changes (an INSERT, UPDATE or
 /// DELETE, as the dialects lower theirs): what sqlite3_changes() reports
 /// after it.
@@ -414,16 +437,26 @@ pub fn countsChanges(v: *const Vm) bool {
     return v.change_cnt_on;
 }
 
+/// A column's type as the catalog records it.
+pub const CatalogType = struct {
+    /// The declared type, as written in `dialect`.
+    name: []const u8,
+    /// `name` read (types.parse()).
+    type: types.Type,
+    /// The dialect that made the table.
+    dialect: Dialect,
+};
+
 /// The declared type of a column in the dialect that made its table
-/// (xq_catalog), copied with `gpa`, and that dialect; null if the
-/// catalog has none.
-pub fn catalogType(h: *Handle, gpa: std.mem.Allocator, schema: []const u8, table: []const u8, column: []const u8) Error!?struct { []u8, Dialect } {
+/// (xq_catalog, read into memory once per schema version), and that
+/// dialect; null if the catalog has none. `name` is valid until the
+/// connection's schema or catalog changes (copy it to keep it).
+pub fn catalogType(h: *Handle, schema: []const u8, table: []const u8, column: []const u8) Error!?CatalogType {
     const catalog = @import("../catalog/catalog.zig");
-    const t = try catalog.get(h, gpa, schema, table, column, catalog.Key.decl_type) orelse return null;
-    errdefer gpa.free(t);
-    const d = try catalog.get(h, gpa, schema, table, "", catalog.Key.dialect);
-    defer if (d) |z| gpa.free(z);
-    return .{ t, if (d) |z| Dialect.fromName(z) orelse .sqlite else .sqlite };
+    const m = try catalog.meta(h, schema, table) orelse return null;
+    const c = m.column(column) orelse return null;
+    const name = c.decl_type orelse return null;
+    return .{ .name = name, .type = c.type, .dialect = m.dialect };
 }
 
 /// The schema version of database `name` as the connection last read it

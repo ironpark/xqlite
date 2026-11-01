@@ -1,26 +1,25 @@
-//! The json/jsonb typing of a parsed statement: what PostgreSQL decides
-//! from the types of operands, which the parser alone does not know (a
-//! column's type is in the catalog, and the select list comes before
-//! FROM). A pass over the tree, after parsing, with the scopes of FROM:
+//! What the JSON of a parsed statement needs from the structure of FROM
+//! and the names it binds, which the parser alone does not know (the
+//! select list comes before FROM): a pass over the tree, after parsing,
+//! with the scopes of FROM (the names of their columns only):
 //!
-//!  - `a || b` with a jsonb operand is xq_pg_jsonb_concat(); `a - b` with
-//!    a jsonb left operand xq_pg_jsonb_delete[_keys]();
-//!  - `->`, `#>` ... of a jsonb operand call jsonb's functions (their
-//!    results are normalized), of json json's (the text as written);
-//!  - a comparison with a jsonb operand compares in jsonb's order
-//!    (collation xq_pg_jsonb), a string constant read as jsonb; ORDER
-//!    BY a jsonb value too;
-//!  - an argument of a function that builds JSON (to_json(),
-//!    json_build_object(), json_agg() ...) that is json/jsonb (a column)
-//!    is wrapped in xq_pg_json()/xq_pg_jsonb() so that it has the JSON
-//!    subtype, a boolean in xq_pg_json_bool(), an array literal in
-//!    xq_pg_array_to_json(), a row (`t` naming a FROM item) spelled out
-//!    as xq_pg_row_json('a', t.a, ...);
+//!  - a FROM item named as a value (`row_to_json(t)`, `json_agg(t)`, an
+//!    argument of another function that builds JSON) is its row, spelled
+//!    out as xq_pg_row_json('a', t.a, ...);
 //!  - a reference to a column of a JSON set-returning function of FROM
 //!    (parser.zig's json_each() items) is replaced by its expression,
 //!    `*` spelled out where such an item is;
 //!  - a value stored into a jsonb column (INSERT, UPDATE) is normalized
-//!    (xq_pg_jsonb()), into a json column checked (xq_pg_json()).
+//!    (xq_pg_jsonb()), into a json column checked (xq_pg_json()): the
+//!    column's type is the catalog's.
+//!
+//! What depends on the types of operands (jsonb's `||` and `-`, the
+//! json/jsonb functions of `->`, jsonb's comparison and ORDER BY, the
+//! arguments of the functions that build JSON) is chosen in the core,
+//! once names are resolved and operands typed: overload.zig, which also
+//! drops the normalization of a stored value that is jsonb already. For
+//! the text the schema keeps (a view, a CHECK, an index expression),
+//! ddltype.zig brings the core's choices back to the tree.
 
 const std = @import("std");
 const tree = @import("../../ir/tree.zig");
@@ -28,18 +27,15 @@ const int = @import("../../sql/sqlite_int.zig");
 const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const parser = @import("parser.zig");
-const types = @import("types.zig");
+const overload = @import("overload.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
 const Expr = tree.Expr;
 const Name = tree.Name;
 
-pub const JT = enum { other, unknown, json, jsonb, boolean, text_array, num_array, row };
-
 const Col = struct {
     name: []const u8,
-    jt: JT,
     /// A column of a JSON set-returning function.
     srf: ?parser.SrfCol = null,
     insertable: bool = true,
@@ -77,9 +73,11 @@ pub fn statement(p: *Parser, stmt: tree.Stmt) Error!void {
     try t.stmt(stmt);
 }
 
+/// What a column stores a value as (its declared type, in the catalog).
+const Store = enum { as_is, json, jsonb };
+
 const T = struct {
     p: *Parser,
-    jts: std.AutoHashMapUnmanaged(*const Expr, JT) = .empty,
 
     fn arena(t: *T) std.mem.Allocator {
         return t.p.arena;
@@ -92,12 +90,8 @@ const T = struct {
             .update => |x| try t.update(x),
             .delete => |x| try t.delete(x),
             .create_view => |v| _ = try t.select(v.select, null),
-            .create_table => |ct| try t.createTable(ct),
-            .create_index => |ci| {
-                const q: tree.QName = .{ .schema = ci.name.schema, .name = ci.table };
-                const sc = try t.tableScope(q, ci.table.text, null);
-                for (ci.items) |*item| _ = try t.expr(item.expr, sc);
-                if (ci.where) |w| _ = try t.expr(w, sc);
+            .create_table => |ct| if (ct.as_select) |x| {
+                _ = try t.select(x, null);
             },
             .explain => |inner| try t.stmt(inner.*),
             else => {},
@@ -106,22 +100,31 @@ const T = struct {
 
     // ============================================================ scopes
 
-    /// The columns of table `q` (its catalog types), null if unknown.
+    /// The columns of table `q`, null if unknown.
     fn tableCols(t: *T, q: tree.QName) Error!?[]const Col {
         const ps = t.p.p orelse return null;
         t.p.readSchema() catch return null;
         const tbl = build.findTable(ps.db, q.name.text, if (q.schema) |s| s.text else null) orelse return null;
-        const schema = catalog.schemaName(ps.db, tbl);
-        const entries = catalog.entries(ps.db, t.arena(), schema, tbl.name) catch &.{};
         var cols: std.ArrayList(Col) = .empty;
-        for (tbl.cols) |*c| {
-            var jt: JT = .other;
-            for (entries) |en| if (std.mem.eql(u8, en.key, catalog.Key.decl_type) and std.ascii.eqlIgnoreCase(en.col, c.name())) {
-                jt = declType(en.value);
-            };
-            try cols.append(t.arena(), .{ .name = c.name(), .jt = jt, .insertable = !c.col_flags.intersects(int.COLFLAG.NOINSERT) });
-        }
+        for (tbl.cols) |*c| try cols.append(t.arena(), .{ .name = c.name(), .insertable = !c.col_flags.intersects(int.COLFLAG.NOINSERT) });
         return cols.items;
+    }
+
+    /// How the columns of table `q` store values (by the order of
+    /// tableCols()), null if no column is json or jsonb.
+    fn storeTypes(t: *T, q: tree.QName) Error!?[]const Store {
+        const ps = t.p.p orelse return null;
+        t.p.readSchema() catch return null;
+        const tbl = build.findTable(ps.db, q.name.text, if (q.schema) |s| s.text else null) orelse return null;
+        const m = (catalog.metaOf(ps.db, tbl) catch null) orelse return null;
+        const out = try t.arena().alloc(Store, tbl.cols.len);
+        var any = false;
+        for (tbl.cols, out) |*c, *st| {
+            const d = m.declType(c.name()) orelse "";
+            st.* = if (std.mem.eql(u8, d, "jsonb")) .jsonb else if (std.mem.eql(u8, d, "json")) .json else .as_is;
+            if (st.* != .as_is) any = true;
+        }
+        return if (any) out else null;
     }
 
     fn tableScope(t: *T, q: tree.QName, name: []const u8, parent: ?*const Scope) Error!*const Scope {
@@ -130,7 +133,7 @@ const T = struct {
         return tree.new(t.arena(), Scope, .{ .parent = parent, .items = items });
     }
 
-    /// The items of FROM, appended to `items` (ON conditions typed as
+    /// The items of FROM, appended to `items` (ON conditions walked as
     /// they come).
     fn fromItems(t: *T, from: []tree.FromItem, items: *std.ArrayList(Item), parent: ?*const Scope) Error!void {
         for (from) |*fi| {
@@ -151,7 +154,7 @@ const T = struct {
                     for (f.args) |a| _ = try t.expr(a, sc);
                     if (t.p.srfs.get(f)) |srf| {
                         const cs = try t.arena().alloc(Col, srf.cols.len);
-                        for (srf.cols, cs) |sc_, *c| c.* = .{ .name = sc_.name, .jt = if (sc_.cast) |ty| typeNameType(ty) else .other, .srf = sc_ };
+                        for (srf.cols, cs) |sc_, *c| c.* = .{ .name = sc_.name, .srf = sc_ };
                         cols = cs;
                     }
                 },
@@ -180,7 +183,7 @@ const T = struct {
 
     // =========================================================== queries
 
-    /// Type a query; its result columns.
+    /// Walk a query; its result columns.
     fn select(t: *T, s: *tree.Select, parent: ?*const Scope) Error![]const Col {
         var sc: *const Scope = try tree.new(t.arena(), Scope, .{ .parent = parent });
         if (s.with) |w| {
@@ -198,18 +201,14 @@ const T = struct {
         var core_scope: ?*const Scope = null;
         const cols = try t.body(s.body, sc, &core_scope);
         for (s.order_by) |*item| {
-            var jt: JT = .other;
-            if (item.expr.kind == .integer) {
-                const k = std.fmt.parseInt(usize, item.expr.kind.integer, 10) catch 0;
-                if (k >= 1 and k <= cols.len) jt = cols[k - 1].jt;
-            } else if (item.expr.kind == .column and item.expr.kind.column.len == 1 and resultCol(cols, item.expr.kind.column[0].text) != null) {
-                const rc = resultCol(cols, item.expr.kind.column[0].text).?;
-                jt = rc.jt;
+            if (item.expr.kind == .integer) continue;
+            if (item.expr.kind == .column and item.expr.kind.column.len == 1) if (findCol(cols, item.expr.kind.column[0].text)) |rc| {
                 // A name that is not an alias is the column (qualified
                 // next to json_each()).
                 if (!rc.aliased) _ = try t.expr(item.expr, core_scope orelse sc);
-            } else jt = try t.expr(item.expr, core_scope orelse sc);
-            if (jt == .jsonb) item.expr = try tree.expr(t.arena(), item.expr.pos, item.expr.end, .{ .collate = .{ .e = item.expr, .collation = "xq_pg_jsonb" } });
+                continue;
+            };
+            _ = try t.expr(item.expr, core_scope orelse sc);
         }
         if (s.limit) |x| _ = try t.expr(x, sc);
         if (s.offset) |x| _ = try t.expr(x, sc);
@@ -222,8 +221,8 @@ const T = struct {
             .values => |rows| {
                 var cols: std.ArrayList(Col) = .empty;
                 for (rows, 0..) |row, r| for (row, 0..) |e, i| {
-                    const jt = try t.expr(e, sc);
-                    if (r == 0) try cols.append(t.arena(), .{ .name = try std.fmt.allocPrint(t.arena(), "column{d}", .{i + 1}), .jt = jt });
+                    _ = try t.expr(e, sc);
+                    if (r == 0) try cols.append(t.arena(), .{ .name = try std.fmt.allocPrint(t.arena(), "column{d}", .{i + 1}) });
                 };
                 return cols.items;
             },
@@ -248,13 +247,13 @@ const T = struct {
             .expr => |*x| {
                 const aliased = x.alias != null;
                 const was: ?[]const u8 = if (x.e.kind == .column) x.e.kind.column[x.e.kind.column.len - 1].text else null;
-                const jt = try t.expr(x.e, sc);
+                _ = try t.expr(x.e, sc);
                 const name = if (x.alias) |a| a.text else if (x.name) |n| n else if (was) |w| w else "?column?";
                 // A json_each() column a reference became keeps the
                 // reference's name (SQLite would name it after json_each's
                 // column or the expression).
                 if (x.alias == null and (x.e.kind != .column and was != null or x.e.kind == .column and t.p.srf_refs.contains(x.e))) x.alias = .{ .text = name, .pos = x.e.pos };
-                try cols.append(t.arena(), .{ .name = name, .jt = jt, .aliased = aliased });
+                try cols.append(t.arena(), .{ .name = name, .aliased = aliased });
             },
             .star => for (sc.items) |it| if (it.cols) |cs| try cols.appendSlice(t.arena(), cs),
             .table_star => |ts| if (findItem(sc, ts.names[ts.names.len - 1].text)) |it| if (it.cols) |cs| try cols.appendSlice(t.arena(), cs),
@@ -300,7 +299,6 @@ const T = struct {
                         names[1] = .{ .text = col.name, .pos = pos };
                         break :blk try tree.expr(t.arena(), pos, pos, .{ .column = names });
                     };
-                    if (col.jt != .other) try t.jts.put(t.arena(), e, col.jt);
                     try out.append(t.arena(), .{ .expr = .{ .e = e, .alias = .{ .text = col.name, .pos = pos } } });
                 }
             }
@@ -311,9 +309,7 @@ const T = struct {
 
     fn window(t: *T, w: *tree.WindowSpec, sc: *const Scope) Error!void {
         for (w.partition) |e| _ = try t.expr(e, sc);
-        for (w.order_by) |*item| {
-            if (try t.expr(item.expr, sc) == .jsonb) item.expr = try tree.expr(t.arena(), item.expr.pos, item.expr.end, .{ .collate = .{ .e = item.expr, .collation = "xq_pg_jsonb" } });
-        }
+        for (w.order_by) |*item| _ = try t.expr(item.expr, sc);
     }
 
     // ============================================================== DML
@@ -331,7 +327,8 @@ const T = struct {
         if (ins.source) |src| _ = try t.select(src, sc);
         const target_name = if (ins.alias) |a| a.text else ins.table.name.text;
         const cols = (try t.tableCols(ins.table)) orelse return;
-        if (ins.source) |src| try t.coerceInsert(ins, src, cols);
+        const stores = try t.storeTypes(ins.table);
+        if (ins.source) |src| if (stores) |st| try t.coerceInsert(ins, src, cols, st);
         const tsc = try t.tableScope(ins.table, target_name, null);
         if (ins.on_conflict) |oc| {
             const items = try t.arena().alloc(Item, 2);
@@ -340,7 +337,7 @@ const T = struct {
             const csc = try tree.new(t.arena(), Scope, .{ .items = items });
             for (oc.target) |e| _ = try t.expr(e, csc);
             if (oc.target_where) |w| _ = try t.expr(w, csc);
-            if (oc.update) |items_| try t.sets(items_, cols, csc);
+            if (oc.update) |items_| try t.sets(items_, cols, stores, csc);
             if (oc.where) |w| _ = try t.expr(w, csc);
         }
         try t.returning(ins.returning, tsc);
@@ -354,7 +351,7 @@ const T = struct {
         try t.fromItems(u.from, &items, null);
         const sc = try tree.new(t.arena(), Scope, .{ .items = items.items });
         if (cols) |cs| {
-            try t.sets(u.sets, cs, sc);
+            try t.sets(u.sets, cs, try t.storeTypes(u.table), sc);
         } else for (u.sets) |s| {
             _ = try t.expr(s.value, sc);
         }
@@ -378,53 +375,50 @@ const T = struct {
         };
     }
 
-    fn sets(t: *T, items: []tree.SetItem, cols: []const Col, sc: *const Scope) Error!void {
+    fn sets(t: *T, items: []tree.SetItem, cols: []const Col, stores: ?[]const Store, sc: *const Scope) Error!void {
         for (items) |*s| {
-            const jt = try t.expr(s.value, sc);
+            _ = try t.expr(s.value, sc);
             if (s.multi) continue;
-            const col = findCol(cols, s.cols[0].text) orelse continue;
-            s.value = try t.stored(s.value, jt, col.jt);
+            const st = stores orelse continue;
+            const i = colIndex(cols, s.cols[0].text) orelse continue;
+            s.value = try t.stored(s.value, st[i]);
         }
     }
 
-    /// `v` (of type `jt`) as stored into a column of type `col`.
-    fn stored(t: *T, v: *Expr, jt: JT, col: JT) Error!*Expr {
+    /// `v` as stored into a column that stores `st`: normalized for
+    /// jsonb, checked for json, by a call no frontend types (which
+    /// overload.zig drops if `v` is a call of that type already).
+    fn stored(t: *T, v: *Expr, st: Store) Error!*Expr {
         if (v.kind == .default or v.kind == .null) return v;
-        switch (col) {
-            .jsonb => {
-                if (jt == .jsonb and v.kind == .func) return v;
-                return t.cast(v, "jsonb");
-            },
-            .json => {
-                if ((jt == .json or jt == .jsonb) and v.kind == .func) return v;
-                return t.cast(v, "json");
-            },
-            else => return v,
-        }
+        const f: []const u8 = switch (st) {
+            .jsonb => "xq_pg_jsonb",
+            .json => "xq_pg_json",
+            .as_is => return v,
+        };
+        return tree.expr(t.arena(), v.pos, v.end, .{ .cast = .{ .e = v, .mode = .{ .func = f } } });
     }
 
     /// The values of an INSERT into json/jsonb columns: VALUES items in
     /// place, a query's result columns, else the query wrapped as
     /// SELECT stored(c1) ... FROM (query) AS xq_src(c1, ...).
-    fn coerceInsert(t: *T, ins: *tree.Insert, src: *tree.Select, cols: []const Col) Error!void {
-        var targets: std.ArrayList(?Col) = .empty;
+    fn coerceInsert(t: *T, ins: *tree.Insert, src: *tree.Select, cols: []const Col, stores: []const Store) Error!void {
+        var targets: std.ArrayList(Store) = .empty;
         if (ins.cols.len > 0) {
-            for (ins.cols) |n| try targets.append(t.arena(), findCol(cols, n.text));
-        } else for (cols) |c| if (c.insertable) try targets.append(t.arena(), c);
+            for (ins.cols) |n| try targets.append(t.arena(), if (colIndex(cols, n.text)) |i| stores[i] else .as_is);
+        } else for (cols, stores) |c, st| if (c.insertable) try targets.append(t.arena(), st);
         var any = false;
-        for (targets.items) |c| if (c != null and (c.?.jt == .json or c.?.jt == .jsonb)) {
+        for (targets.items) |st| if (st != .as_is) {
             any = true;
         };
         if (!any) return;
-        const colType = struct {
-            fn f(ts: []const ?Col, i: usize) JT {
-                if (i >= ts.len) return .other;
-                return if (ts[i]) |c| c.jt else .other;
+        const colStore = struct {
+            fn f(ts: []const Store, i: usize) Store {
+                return if (i < ts.len) ts[i] else .as_is;
             }
         }.f;
         if (src.body.* == .values and src.with == null and src.order_by.len == 0 and src.limit == null) {
             for (src.body.values) |row| for (row, 0..) |*item, i| {
-                item.* = try t.stored(item.*, t.jts.get(item.*) orelse .other, colType(targets.items, i));
+                item.* = try t.stored(item.*, colStore(targets.items, i));
             };
             return;
         }
@@ -435,7 +429,7 @@ const T = struct {
                 plain = false;
             };
             if (plain) {
-                for (c.cols, 0..) |*rc, i| rc.expr.e = try t.stored(rc.expr.e, t.jts.get(rc.expr.e) orelse .other, colType(targets.items, i));
+                for (c.cols, 0..) |*rc, i| rc.expr.e = try t.stored(rc.expr.e, colStore(targets.items, i));
                 return;
             }
         }
@@ -447,7 +441,7 @@ const T = struct {
             const one = try t.arena().alloc(Name, 1);
             one[0] = nm.*;
             const col = try tree.expr(t.arena(), src.pos, src.pos, .{ .column = one });
-            rc.* = .{ .expr = .{ .e = try t.stored(col, .other, colType(targets.items, i)) } };
+            rc.* = .{ .expr = .{ .e = try t.stored(col, colStore(targets.items, i)) } };
         }
         var from = try t.arena().alloc(tree.FromItem, 1);
         from[0] = .{ .source = .{ .subquery = src }, .alias = .{ .name = .{ .text = "xq_src", .pos = src.pos }, .cols = names } };
@@ -455,157 +449,33 @@ const T = struct {
         ins.source = try tree.new(t.arena(), tree.Select, .{ .body = try tree.new(t.arena(), tree.Body, .{ .core = c }), .pos = src.pos });
     }
 
-    fn createTable(t: *T, ct: *tree.CreateTable) Error!void {
-        if (ct.as_select) |s| _ = try t.select(s, null);
-        var cols: std.ArrayList(Col) = .empty;
-        for (ct.columns) |c| try cols.append(t.arena(), .{ .name = c.name.text, .jt = if (c.decl_type) |d| declType(d) else .other });
-        const items = try t.arena().alloc(Item, 1);
-        items[0] = .{ .name = ct.name.name.text, .cols = cols.items };
-        const sc = try tree.new(t.arena(), Scope, .{ .items = items });
-        for (ct.columns) |c| for (c.constraints) |cc| switch (cc.kind) {
-            .check => |e| _ = try t.expr(e, sc),
-            .generated => |g| _ = try t.expr(g.e, sc),
-            else => {},
-        };
-        for (ct.constraints) |tc| if (tc.kind == .check) {
-            _ = try t.expr(tc.kind.check, sc);
-        };
-    }
-
     // ======================================================= expressions
 
-    fn expr(t: *T, e: *Expr, sc: ?*const Scope) Error!JT {
-        const jt = try t.exprInner(e, sc);
-        if (jt != .other) try t.jts.put(t.arena(), e, jt);
-        return jt;
-    }
-
-    fn exprInner(t: *T, e: *Expr, sc: ?*const Scope) Error!JT {
+    /// Walk expression `e`; whether it is a FROM item named as a value
+    /// (a row).
+    fn expr(t: *T, e: *Expr, sc: ?*const Scope) Error!bool {
         switch (e.kind) {
             .column => |names| return t.column(e, names, sc),
-            .string, .null, .param, .named_param => return .unknown,
-            .boolean => return .boolean,
-            .integer, .float, .blob, .default, .identity_default => return .other,
-            .cast => |c| {
-                _ = try t.expr(c.e, sc);
-                return castType(c.target_type);
-            },
-            .func => |f| return t.func(e, f, sc),
-            .concat => |c| {
-                var jts: [2]JT = .{ .other, .other };
-                for (c.args, 0..) |a, i| {
-                    const jt = try t.expr(a, sc);
-                    if (i < 2) jts[i] = jt;
-                }
-                if (c.args.len == 2 and c.null_policy == .propagate) {
-                    const l = jts[0];
-                    const r = jts[1];
-                    if (l == .json and r == .json) return t.p.failState(e.pos, .of("42883"), "operator does not exist: json || json", .{});
-                    if ((l == .jsonb and (r == .jsonb or r == .unknown)) or (r == .jsonb and l == .unknown)) {
-                        e.kind = .{ .func = try t.newFunc(e.pos, "xq_pg_jsonb_concat", c.args) };
-                        return .jsonb;
-                    }
-                }
-                return .other;
-            },
-            .binary => |b| {
-                const l = try t.expr(b.l, sc);
-                const r = try t.expr(b.r, sc);
-                if (b.op == .sub and l == .jsonb) {
-                    const name = if (r == .text_array or r == .num_array) "xq_pg_jsonb_delete_keys" else "xq_pg_jsonb_delete";
-                    e.kind = .{ .func = try t.newFunc(e.pos, name, try t.list(&.{ b.l, b.r })) };
-                    return .jsonb;
-                }
-                return if (b.op == .@"and" or b.op == .@"or") .boolean else .other;
-            },
-            .compare => |*c| {
-                const l = try t.expr(c.l, sc);
-                const r = try t.expr(c.r, sc);
-                if (l == .json and r == .json and c.op != .is and c.op != .is_not) return t.p.failState(e.pos, .of("42883"), "operator does not exist: json {s} json", .{cmpText(c.op)});
-                if ((l == .jsonb and (r == .jsonb or r == .unknown)) or (r == .jsonb and l == .unknown)) {
-                    if (l == .unknown and c.l.kind == .string) c.l = try t.cast(c.l, "jsonb");
-                    if (r == .unknown and c.r.kind == .string) c.r = try t.cast(c.r, "jsonb");
-                    c.collation = "xq_pg_jsonb";
-                }
-                return .boolean;
-            },
-            .unary => |u| {
-                _ = try t.expr(u.e, sc);
-                return if (u.op == .not) .boolean else .other;
-            },
-            .div => |d| {
-                _ = try t.expr(d.l, sc);
-                _ = try t.expr(d.r, sc);
-                return .other;
-            },
-            .case => |c| {
-                if (c.operand) |o| _ = try t.expr(o, sc);
-                var jt: JT = .unknown;
-                for (c.whens, 0..) |w, i| {
-                    const x = try t.expr(w, sc);
-                    if (i % 2 == 1 and jt == .unknown) jt = x;
-                }
-                if (c.@"else") |x| {
-                    const y = try t.expr(x, sc);
-                    if (jt == .unknown) jt = y;
-                }
-                return if (jt == .row) .other else jt;
-            },
-            .in_list => |x| {
-                _ = try t.expr(x.e, sc);
-                for (x.items) |i| _ = try t.expr(i, sc);
-                return .boolean;
-            },
+            .func => |f| try t.func(e, f, sc),
             .in_select => |x| {
                 _ = try t.expr(x.e, sc);
                 _ = try t.select(x.sel, sc);
-                return .boolean;
             },
-            .exists => |s| {
-                _ = try t.select(s, sc);
-                return .boolean;
-            },
-            .subquery => |s| {
-                const cols = try t.select(s, sc);
-                return if (cols.len > 0) cols[0].jt else .other;
-            },
-            .between => |x| {
-                _ = try t.expr(x.e, sc);
-                _ = try t.expr(x.lo, sc);
-                _ = try t.expr(x.hi, sc);
-                return .boolean;
-            },
-            .like => |x| {
-                _ = try t.expr(x.e, sc);
-                _ = try t.expr(x.pat, sc);
-                if (x.escape == .expr) _ = try t.expr(x.escape.expr, sc);
-                return .boolean;
-            },
-            .is_null => |x| {
-                _ = try t.expr(x.e, sc);
-                return .boolean;
-            },
-            .is_bool => |x| {
-                _ = try t.expr(x.e, sc);
-                return .boolean;
-            },
-            .row => |items| {
-                for (items) |i| _ = try t.expr(i, sc);
-                return .other;
-            },
-            .collate => |x| return t.expr(x.e, sc),
-            .coerce => |x| {
-                _ = try t.expr(x.e, sc);
-                return .other;
+            .exists, .subquery => |s| _ = try t.select(s, sc),
+            else => {
+                var it = Children.of(e);
+                while (it.next()) |x| _ = try t.expr(x, sc);
             },
         }
+        return false;
     }
 
-    /// A column reference: its type; a column of a JSON set-returning
-    /// function becomes its expression; `t` naming a FROM item is a row.
-    fn column(t: *T, e: *Expr, names: []const Name, sc_opt: ?*const Scope) Error!JT {
-        const sc = sc_opt orelse return .other;
-        if (t.p.srf_refs.contains(e)) return .other;
+    /// A column reference: a column of a JSON set-returning function
+    /// becomes its expression; whether it is a FROM item (`t` naming
+    /// one), a row.
+    fn column(t: *T, e: *Expr, names: []const Name, sc_opt: ?*const Scope) Error!bool {
+        const sc = sc_opt orelse return false;
+        if (t.p.srf_refs.contains(e)) return false;
         const col_name = names[names.len - 1].text;
         const item_name: ?[]const u8 = if (names.len >= 2) names[names.len - 2].text else null;
         var s: ?*const Scope = sc;
@@ -631,106 +501,30 @@ const T = struct {
                         e.kind = .{ .column = q };
                     }
                 }
-                return col.jt;
+                return false;
             }
         }
         // A FROM item as a value: its row.
-        if (names.len == 1 and findItem(sc, col_name) != null) return .row;
-        return .other;
+        return names.len == 1 and findItem(sc, col_name) != null;
     }
 
-    fn func(t: *T, e: *Expr, f: *tree.Func, sc: ?*const Scope) Error!JT {
+    fn func(t: *T, e: *Expr, f: *tree.Func, sc: ?*const Scope) Error!void {
         const n = f.name.text;
-        const builder = builderArgs(n);
+        const builder = overload.builderArgs(n);
         for (f.args, 0..) |*a, i| {
-            const jt = try t.expr(a.*, sc);
-            if (builder.takes(i, f.args.len)) a.* = try t.wrapArg(a.*, jt, sc);
+            const row = try t.expr(a.*, sc);
+            if (row and builder.takes(i)) a.* = try t.rowJson(a.*, sc.?);
         }
         if (f.filter) |x| _ = try t.expr(x, sc);
-        for (f.order_by) |*item| {
-            if (try t.expr(item.expr, sc) == .jsonb) item.expr = try tree.expr(t.arena(), item.expr.pos, item.expr.end, .{ .collate = .{ .e = item.expr, .collation = "xq_pg_jsonb" } });
-        }
+        for (f.order_by) |*item| _ = try t.expr(item.expr, sc);
         if (f.over) |w| if (sc) |s| try t.window(w, s);
-        const eq = std.mem.eql;
-        // Operators of jsonb operands.
-        const variants = [_]struct { []const u8, []const u8 }{
-            .{ "xq_pg_json_get", "xq_pg_jsonb_get" },   .{ "xq_pg_json_get_text", "xq_pg_jsonb_get_text" },
-            .{ "xq_pg_json_path", "xq_pg_jsonb_path" }, .{ "xq_pg_json_path_text", "xq_pg_jsonb_path_text" },
-        };
-        for (variants) |v| if (eq(u8, n, v[0])) {
-            const left = t.jts.get(f.args[0]) orelse .other;
-            if (left == .jsonb) f.name.text = v[1];
-            if (std.mem.endsWith(u8, n, "_text")) return .other;
-            return if (left == .jsonb) .jsonb else .json;
-        };
-        if (eq(u8, n, "row_to_json") and f.args.len == 1 and f.args[0].kind == .func and eq(u8, f.args[0].kind.func.name.text, "xq_pg_row_json")) {
+        if (std.mem.eql(u8, n, "row_to_json") and f.args.len == 1 and f.args[0].kind == .func and std.mem.eql(u8, f.args[0].kind.func.name.text, "xq_pg_row_json")) {
             e.kind = f.args[0].kind;
-            return .json;
-        }
-        if ((eq(u8, n, "json_agg") or eq(u8, n, "json_arrayagg")) and f.args.len == 1 and f.args[0].kind == .func and
-            (eq(u8, f.args[0].kind.func.name.text, "xq_pg_row_json") or eq(u8, f.args[0].kind.func.name.text, "xq_pg_array_to_json")))
-        {
-            // json_agg() of rows or arrays: a line break between them.
-            if (eq(u8, n, "json_agg")) {
-                f.name.text = "xq_pg_json_agg_rows";
-                f.dialect = null;
-            }
-            return .json;
-        }
-        if (eq(u8, n, "array_to_json") and f.args.len >= 1) {
-            const jt = t.jts.get(f.args[0]) orelse .other;
-            if (jt == .text_array or jt == .num_array) {
-                const pretty = if (f.args.len > 1) f.args[1] else try tree.expr(t.arena(), e.pos, e.pos, .{ .integer = "0" });
-                const num = try tree.expr(t.arena(), e.pos, e.pos, .{ .integer = if (jt == .num_array) "1" else "0" });
-                f.name.text = "xq_pg_array_to_json";
-                f.dialect = null;
-                f.args = try t.list(&.{ f.args[0], pretty, num });
-            }
-            return .json;
-        }
-        if (eq(u8, n, "xq_pg_array")) {
-            for (f.args) |a| {
-                const k = numeric(a);
-                if (!k) return .text_array;
-            }
-            return if (f.args.len > 0) .num_array else .text_array;
-        }
-        if (eq(u8, n, "xq_pg_json_ctor_object") or eq(u8, n, "xq_pg_json_ctor_array") or eq(u8, n, "xq_pg_json_arrayagg") or eq(u8, n, "xq_pg_json_objectagg")) {
-            const flags = f.args[if (eq(u8, n, "xq_pg_json_arrayagg")) 1 else if (eq(u8, n, "xq_pg_json_objectagg")) 2 else 0];
-            if (flags.kind == .integer and (std.fmt.parseInt(i64, flags.kind.integer, 10) catch 0) & 1 != 0) return .jsonb;
-            return .json;
-        }
-        if (eq(u8, n, "coalesce") or eq(u8, n, "nullif") or eq(u8, n, "greatest") or eq(u8, n, "least") or eq(u8, n, "ifnull")) {
-            for (f.args) |a| {
-                const jt = t.jts.get(a) orelse .other;
-                if (jt != .unknown) return jt;
-            }
-            return .other;
-        }
-        return funcType(n);
-    }
-
-    /// An argument of a function that builds JSON, so that the function
-    /// sees what it is (jfuncs.zig).
-    fn wrapArg(t: *T, a: *Expr, jt: JT, sc: ?*const Scope) Error!*Expr {
-        switch (jt) {
-            .json, .jsonb => {
-                if (a.kind == .func and funcType(a.kind.func.name.text) != .other) return a;
-                if (a.kind == .cast and castType(a.kind.cast.target_type) == jt) return a;
-                return t.cast(a, if (jt == .jsonb) "jsonb" else "json");
-            },
-            .boolean => return t.call(a, "xq_pg_json_bool", &.{a}),
-            .text_array, .num_array => {
-                const zero = try tree.expr(t.arena(), a.pos, a.pos, .{ .integer = "0" });
-                const num = try tree.expr(t.arena(), a.pos, a.pos, .{ .integer = if (jt == .num_array) "1" else "0" });
-                return t.call(a, "xq_pg_array_to_json", &.{ a, zero, num });
-            },
-            .row => return t.rowJson(a, sc.?),
-            else => return a,
         }
     }
 
-    /// xq_pg_row_json('a', t.a, ...) of FROM item `t`.
+    /// xq_pg_row_json('a', t.a, ...) of FROM item `t` (its values made
+    /// JSON by their types in the core: overload.zig).
     fn rowJson(t: *T, a: *Expr, sc: *const Scope) Error!*Expr {
         const it = findItem(sc, a.kind.column[0].text).?;
         const cs = it.cols orelse return a;
@@ -743,32 +537,10 @@ const T = struct {
                 names[1] = .{ .text = col.name, .pos = a.pos };
                 break :blk try tree.expr(t.arena(), a.pos, a.end, .{ .column = names });
             };
-            try args.append(t.arena(), try t.wrapArg(v, col.jt, sc));
+            try args.append(t.arena(), v);
         }
-        return t.call(a, "xq_pg_row_json", args.items);
-    }
-
-    // ========================================================== builders
-
-    fn list(t: *T, items: []const *Expr) Error![]*Expr {
-        return t.arena().dupe(*Expr, items);
-    }
-
-    fn newFunc(t: *T, pos: u32, name: []const u8, args: []*Expr) Error!*tree.Func {
-        return tree.new(t.arena(), tree.Func, .{ .name = .{ .text = name, .pos = pos }, .args = args });
-    }
-
-    fn call(t: *T, at: *const Expr, name: []const u8, args: []const *Expr) Error!*Expr {
-        const f = try t.newFunc(at.pos, name, try t.list(args));
-        return tree.expr(t.arena(), at.pos, at.end, .{ .func = f });
-    }
-
-    /// `v::json` / `v::jsonb`.
-    fn cast(t: *T, v: *Expr, ty: []const u8) Error!*Expr {
-        const f: []const u8 = if (std.mem.eql(u8, ty, "jsonb")) "xq_pg_jsonb" else "xq_pg_json";
-        const x = try tree.expr(t.arena(), v.pos, v.end, .{ .cast = .{ .e = v, .target_type = ty, .mode = .{ .func = f } } });
-        try t.jts.put(t.arena(), x, castType(ty));
-        return x;
+        const f = try tree.new(t.arena(), tree.Func, .{ .name = .{ .text = "xq_pg_row_json", .pos = a.pos }, .args = try t.arena().dupe(*Expr, args.items) });
+        return tree.expr(t.arena(), a.pos, a.end, .{ .func = f });
     }
 };
 
@@ -779,8 +551,9 @@ fn findCol(cols: []const Col, name: []const u8) ?Col {
     return null;
 }
 
-fn resultCol(cols: []const Col, name: []const u8) ?Col {
-    return findCol(cols, name);
+fn colIndex(cols: []const Col, name: []const u8) ?usize {
+    for (cols, 0..) |c, i| if (std.ascii.eqlIgnoreCase(c.name, name)) return i;
+    return null;
 }
 
 fn findItem(sc: *const Scope, name: []const u8) ?Item {
@@ -789,103 +562,6 @@ fn findItem(sc: *const Scope, name: []const u8) ?Item {
         for (x.items) |it| if (std.ascii.eqlIgnoreCase(it.name, name)) return it;
     }
     return null;
-}
-
-/// The type of a declared (catalog) type.
-fn declType(d: []const u8) JT {
-    if (std.mem.eql(u8, d, "jsonb")) return .jsonb;
-    if (std.mem.eql(u8, d, "json")) return .json;
-    if (std.mem.eql(u8, d, "boolean")) return .boolean;
-    return .other;
-}
-
-fn castType(target: []const u8) JT {
-    if (std.mem.eql(u8, target, "jsonb")) return .jsonb;
-    if (std.mem.eql(u8, target, "json")) return .json;
-    if (std.mem.eql(u8, target, "boolean")) return .boolean;
-    if (std.mem.endsWith(u8, target, "[]")) return if (types.isNumeric(target[0 .. target.len - 2])) .num_array else .text_array;
-    return .other;
-}
-
-fn typeNameType(ty: types.TypeName) JT {
-    if (ty.array) return if (types.isNumeric(ty.name)) .num_array else .text_array;
-    return castType(ty.name);
-}
-
-fn cmpText(op: tree.CmpOp) []const u8 {
-    return switch (op) {
-        .eq => "=",
-        .ne => "<>",
-        .lt => "<",
-        .le => "<=",
-        .gt => ">",
-        .ge => ">=",
-        else => "=",
-    };
-}
-
-fn numeric(e: *const Expr) bool {
-    return switch (e.kind) {
-        .integer, .float => true,
-        .unary => |u| (u.op == .neg or u.op == .plus) and numeric(u.e),
-        else => false,
-    };
-}
-
-/// The result type of a function by its name.
-fn funcType(n: []const u8) JT {
-    const map = std.StaticStringMap(JT).initComptime(.{
-        .{ "to_jsonb", .jsonb },                    .{ "jsonb_build_object", .jsonb },       .{ "jsonb_build_array", .jsonb },
-        .{ "jsonb_object", .jsonb },                .{ "jsonb_agg", .jsonb },                .{ "jsonb_object_agg", .jsonb },
-        .{ "jsonb_set", .jsonb },                   .{ "jsonb_set_lax", .jsonb },            .{ "jsonb_insert", .jsonb },
-        .{ "jsonb_strip_nulls", .jsonb },           .{ "jsonb_extract_path", .jsonb },       .{ "jsonb_path_query_array", .jsonb },
-        .{ "jsonb_path_query_first", .jsonb },      .{ "xq_pg_jsonb", .jsonb },              .{ "xq_pg_jsonb_get", .jsonb },
-        .{ "xq_pg_jsonb_path", .jsonb },            .{ "xq_pg_jsonb_concat", .jsonb },       .{ "xq_pg_jsonb_delete", .jsonb },
-        .{ "xq_pg_jsonb_delete_keys", .jsonb },     .{ "xq_pg_jsonb_delete_path", .jsonb },  .{ "to_json", .json },
-        .{ "json_build_object", .json },            .{ "json_build_array", .json },          .{ "json_object", .json },
-        .{ "json_agg", .json },                     .{ "json_object_agg", .json },           .{ "json_strip_nulls", .json },
-        .{ "json_extract_path", .json },            .{ "row_to_json", .json },               .{ "array_to_json", .json },
-        .{ "xq_pg_json", .json },                   .{ "xq_pg_json_get", .json },            .{ "xq_pg_json_path", .json },
-        .{ "xq_pg_row_json", .json },               .{ "xq_pg_array_to_json", .json },       .{ "xq_pg_json_agg_rows", .json },
-        .{ "xq_pg_json_bool", .json },              .{ "xq_pg_jsonb_contains", .boolean },   .{ "xq_pg_jsonb_exists", .boolean },
-        .{ "xq_pg_jsonb_exists_any", .boolean },    .{ "xq_pg_jsonb_exists_all", .boolean }, .{ "xq_pg_jsonb_path_exists_op", .boolean },
-        .{ "xq_pg_jsonb_path_match_op", .boolean }, .{ "jsonb_path_exists", .boolean },      .{ "jsonb_path_match", .boolean },
-        .{ "xq_pg_is_json", .boolean },             .{ "xq_pg_bool", .boolean },             .{ "xq_like", .boolean },
-        .{ "xq_ilike", .boolean },                  .{ "starts_with", .boolean },            .{ "xq_pg_text_array", .text_array },
-    });
-    return map.get(n) orelse .other;
-}
-
-/// Which arguments of a function are values it makes JSON of.
-const Builder = enum {
-    none,
-    first,
-    all,
-    after_first,
-    first_two,
-
-    fn takes(b: Builder, i: usize, n: usize) bool {
-        _ = n;
-        return switch (b) {
-            .none => false,
-            .first => i == 0,
-            .all => true,
-            .after_first => i > 0,
-            .first_two => i < 2,
-        };
-    }
-};
-
-fn builderArgs(n: []const u8) Builder {
-    const map = std.StaticStringMap(Builder).initComptime(.{
-        .{ "to_json", .first },                     .{ "to_jsonb", .first },            .{ "json_agg", .first },
-        .{ "jsonb_agg", .first },                   .{ "xq_pg_json_agg_rows", .first }, .{ "row_to_json", .first },
-        .{ "xq_pg_json_arrayagg", .first },         .{ "json_build_object", .all },     .{ "jsonb_build_object", .all },
-        .{ "json_build_array", .all },              .{ "jsonb_build_array", .all },     .{ "xq_pg_json_ctor_object", .after_first },
-        .{ "xq_pg_json_ctor_array", .after_first }, .{ "json_object_agg", .first_two }, .{ "jsonb_object_agg", .first_two },
-        .{ "xq_pg_json_objectagg", .first_two },
-    });
-    return map.get(n) orelse .none;
 }
 
 // =========================================================== tree walking

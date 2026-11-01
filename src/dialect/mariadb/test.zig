@@ -183,7 +183,7 @@ test "mariadb: ON DUPLICATE KEY UPDATE, REPLACE, INSERT IGNORE" {
     try c.expectRows("SELECT id, email, n FROM t", "1|c@x|7\n");
     try c.exec("INSERT IGNORE INTO t VALUES (1, 'd@x', 8), (3, 'e@x', 9)");
     try c.expectRows("SELECT id, email, n FROM t ORDER BY id", "1|c@x|7\n3|e@x|9\n");
-    try c.expectError("INSERT INTO t VALUES (4, 'C@X', 1)", "UNIQUE constraint failed: t.email");
+    try c.expectError("INSERT INTO t VALUES (4, 'C@X', 1)", "Duplicate entry 'C@X' for key 'email'");
     // INSERT ... SET, DEFAULT, RETURNING.
     try c.exec("INSERT INTO t SET id = 5, email = 'f@x'");
     try c.expectRows("INSERT INTO t VALUES (6, 'g@x', DEFAULT) RETURNING id, n", "6|0\n");
@@ -306,7 +306,7 @@ test "mariadb: JSON functions" {
     try c.exec("CREATE TABLE g (j JSON, a INT AS (JSON_VALUE(j, '$.a')) STORED, CHECK (JSON_LENGTH(j) < 3))");
     try c.exec("INSERT INTO g (j) VALUES ('{\"a\":5}')");
     try c.expectRows("SELECT a FROM g", "5\n");
-    try c.expectError("INSERT INTO g (j) VALUES ('[1,2,3]')", "CHECK constraint failed: CONSTRAINT_1");
+    try c.expectError("INSERT INTO g (j) VALUES ('[1,2,3]')", "CONSTRAINT `CONSTRAINT_1` failed for `main`.`g`");
 }
 
 test "mariadb: collation and case-insensitive keys" {
@@ -315,7 +315,7 @@ test "mariadb: collation and case-insensitive keys" {
     defer c.close();
     try c.exec("CREATE TABLE u (name VARCHAR(20) NOT NULL, code VARCHAR(10) COLLATE utf8mb4_bin, UNIQUE KEY uk_name (name), KEY (code))");
     try c.exec("INSERT INTO u VALUES ('Alice', 'A'), ('bob', 'a')");
-    try c.expectError("INSERT INTO u VALUES ('ALICE', 'x')", "UNIQUE constraint failed: u.name");
+    try c.expectError("INSERT INTO u VALUES ('ALICE', 'x')", "Duplicate entry 'ALICE' for key 'uk_name'");
     try c.expectRows("SELECT name FROM u WHERE name = 'BOB'", "bob\n");
     try c.expectRows("SELECT count(*) FROM u WHERE code = 'a'", "1\n");
     try c.expectRows("SELECT name FROM u ORDER BY name", "Alice\nbob\n");
@@ -356,7 +356,7 @@ test "mariadb: DDL, catalog, SHOW and DESCRIBE" {
     try c.expectColumns("SHOW COLUMNS FROM users", "Field|Type|Null|Key|Default|Extra");
     try c.exec("INSERT INTO users (email, meta) VALUES ('x@y', '{\"a\":1}')");
     try c.expectRows("SELECT id, status, length(created_at), updated_at FROM users", "5|active|19|NULL\n");
-    try c.expectError("INSERT INTO users (email, meta) VALUES ('z@y', 'not json')", "CHECK constraint failed: meta");
+    try c.expectError("INSERT INTO users (email, meta) VALUES ('z@y', 'not json')", "CONSTRAINT `meta` failed for `main`.`users`");
     try c.exec("UPDATE users SET score = 1.5");
     try c.expectRows("SELECT score, updated_at IS NOT NULL FROM users", "1.5|1\n");
     try c.expectRows("SHOW INDEX FROM users", "users|0|PRIMARY|1|id|A|NULL|NULL|NULL||BTREE|||NO\n" ++
@@ -434,15 +434,15 @@ test "mariadb: CHECK, generated columns, foreign keys, DEFAULT" {
     );
     try c.exec("INSERT INTO p (id, start, end) VALUES (1, 2, 5)");
     try c.expectRows("SELECT price, label, span, end FROM p", "1.5|it's|3|5\n");
-    try c.expectError("INSERT INTO p (id, start, end) VALUES (2, 5, 1)", "CHECK constraint failed: chk_order");
-    try c.expectError("INSERT INTO p (id, price) VALUES (3, -1)", "CHECK constraint failed: price");
+    try c.expectError("INSERT INTO p (id, start, end) VALUES (2, 5, 1)", "CONSTRAINT `chk_order` failed for `main`.`p`");
+    try c.expectError("INSERT INTO p (id, price) VALUES (3, -1)", "CONSTRAINT `price` failed for `main`.`p`");
     try c.exec("UPDATE p SET price = 9, label = DEFAULT");
     try c.expectRows("SELECT price, label FROM p", "9.0|it's\n");
     try c.exec("CREATE TABLE ch (id INT AUTO_INCREMENT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES p (id) ON DELETE CASCADE)");
     try c.exec("SET foreign_key_checks = 1");
     try c.expectRows("SELECT @@foreign_key_checks", "1\n");
     try c.exec("INSERT INTO ch (pid) VALUES (1), (1)");
-    try c.expectError("INSERT INTO ch (pid) VALUES (42)", "FOREIGN KEY constraint failed");
+    try c.expectError("INSERT INTO ch (pid) VALUES (42)", "Cannot add or update a child row: a foreign key constraint fails (`main`.`ch`, CONSTRAINT `ch_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `p` (`id`))");
     try c.exec("DELETE FROM p");
     try c.expectRows("SELECT count(*) FROM ch", "0\n");
 }
@@ -530,6 +530,7 @@ test "mariadb: an expression means the same in a query, a CHECK, a DEFAULT, a ge
     defer c.close();
     var buf: [1024]u8 = undefined;
     var buf2: [256]u8 = undefined;
+    var buf3: [128]u8 = undefined;
     for (same_cases, 0..) |x, i| {
         try c.exec(try std.fmt.bufPrint(&buf, "CREATE TABLE t{d} (id INT PRIMARY KEY, v {s} CHECK (v <=> ({s})), d {s} DEFAULT ({s}), g {s} AS ({s}) VIRTUAL)", .{ i, x.ty, x.e, x.ty, x.e, x.ty, x.e }));
         try c.exec(try std.fmt.bufPrint(&buf, "CREATE VIEW v{d} AS SELECT {s} AS x", .{ i, x.e }));
@@ -545,7 +546,7 @@ test "mariadb: an expression means the same in a query, a CHECK, a DEFAULT, a ge
             try c.exec(try std.fmt.bufPrint(&buf, "INSERT INTO t{d} (id, v) VALUES (2, {s})", .{ i, x.lit }));
             try c.expectRows(try std.fmt.bufPrint(&buf, "SELECT v, d, g FROM t{d} ORDER BY id", .{i}), try std.fmt.bufPrint(&buf2, "{s}|{s}|{s}\n{s}|{s}|{s}\n", .{ x.rows, x.rows, x.rows, x.rows, x.rows, x.rows }));
             try c.expectRows(try std.fmt.bufPrint(&buf, "SELECT x FROM v{d}", .{i}), try std.fmt.bufPrint(&buf2, "{s}\n", .{x.rows}));
-            try c.expectError(try std.fmt.bufPrint(&buf, "INSERT INTO t{d} (id, v) VALUES (3, {s})", .{ i, x.wrong }), "CHECK constraint failed: v");
+            try c.expectError(try std.fmt.bufPrint(&buf, "INSERT INTO t{d} (id, v) VALUES (3, {s})", .{ i, x.wrong }), if (d == .sqlite) "CHECK constraint failed: v" else try std.fmt.bufPrint(&buf3, "CONSTRAINT `v` failed for `main`.`t{d}`", .{i}));
         }
     }
     // The schema calls the engine functions lowering calls, not a
@@ -593,7 +594,7 @@ test "mariadb: RENAME TABLE renames the table's indexes" {
         \\) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
         \\
     );
-    try c.expectError("INSERT INTO u VALUES (3, 10, 'z')", "UNIQUE constraint failed: u.a");
+    try c.expectError("INSERT INTO u VALUES (3, 10, 'z')", "Duplicate entry '10' for key 'ua'");
     try c.exec("ALTER TABLE u RENAME TO w");
     try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'index' ORDER BY name", "w$ib\nw$ua\n");
     try c.exec("DROP INDEX ib ON w");

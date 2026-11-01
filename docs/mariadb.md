@@ -411,7 +411,8 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 
 - 트랜잭션: `START TRANSACTION`, `BEGIN [WORK]`, `COMMIT`, `ROLLBACK [TO SAVEPOINT]`, `SAVEPOINT`, `RELEASE SAVEPOINT`
 - `SET`: 시스템 변수, `@사용자 변수`, `NAMES`, `CHARACTER SET`, `TRANSACTION`
-- `SET foreign_key_checks`는 `PRAGMA foreign_keys`입니다.
+- 외래 키는 InnoDB처럼 강제합니다. 이 방언의 첫 문장에서 연결의 `PRAGMA foreign_keys`를 켜고, `SET foreign_key_checks`는 `PRAGMA foreign_keys`입니다. 열 정의 안의 `REFERENCES`는 MariaDB처럼 무시합니다.
+- 64비트를 넘는 정수 결과는 `BIGINT value is out of range`(1690)입니다. MariaDB는 메시지 끝에 식을 붙이지만(`... in '(a + b)'`) 이 방언은 붙이지 않습니다.
 - `SHOW [FULL] TABLES [{FROM | IN} db] [LIKE]`
 - `SHOW COLUMNS/FIELDS`, `DESCRIBE`/`DESC`
 - `SHOW INDEX`

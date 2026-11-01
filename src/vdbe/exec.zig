@@ -238,7 +238,7 @@ pub const Exec = struct {
 
                 // Arithmetic, comparisons and logic.
                 OP.Concat => arith.opConcat(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
-                OP.Add, OP.Subtract, OP.Multiply, OP.Divide, OP.Remainder => arith.opArith(e, op),
+                OP.Add, OP.Subtract, OP.Multiply, OP.Divide, OP.Remainder => arith.opArith(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.CollSeq => arith.opCollSeq(e, op),
                 OP.BitAnd, OP.BitOr, OP.ShiftLeft, OP.ShiftRight => arith.opBit(e, op),
                 OP.AddImm => arith.opAddImm(e, op),

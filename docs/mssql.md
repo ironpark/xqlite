@@ -375,7 +375,7 @@ DROP SCHEMA sales;                                         -- 비어 있어야 �
 | 항목 | xqlite |
 | --- | --- |
 | `decimal`/`money` | `REAL`로 저장합니다. 반올림은 되지만 정확한 십진 연산이 아니고 `2.50`이 `2.5`로 보입니다. |
-| 정수 나눗셈 | `7 / 2`는 3으로 같지만, 0으로 나누면 오류가 아니라 `NULL`입니다. |
+| 정수 나눗셈 | `7 / 2`는 3으로 같습니다. 0으로 나누면 SQL Server처럼 `Divide by zero error encountered.`(8134), 64비트를 넘는 정수 결과는 `Arithmetic overflow error converting expression to data type bigint.`(8115)입니다. `int` 값끼리의 연산은 2³¹을 넘어도 오류가 아닙니다. |
 | 문자열 → 수 | `'abc' + 1`처럼 실행 때 정해지는 덧셈과 비교는 SQLite처럼 0으로 바꿉니다(CAST와 저장은 SQL Server처럼 오류). |
 | `char(n)` | 공백으로 채우지 않습니다. |
 | 끝 공백 | 비교에서 무시하지 않습니다(`'a' = 'a '`는 거짓). `LEN`은 끝 공백을 뺍니다. |
@@ -391,7 +391,7 @@ DROP SCHEMA sales;                                         -- 비어 있어야 �
 | 항목 | xqlite |
 | --- | --- |
 | 배치 | 배치가 없습니다. 문장은 앞 문장이 실행된 뒤에 컴파일되고, 변수는 연결이 끝나거나 다시 선언할 때까지 남습니다. 오류가 배치의 나머지를 건너뛰게 하지 않습니다(셸에서는 SQLite 셸의 `.bail` 규칙). |
-| 외래 키 | SQL Server처럼 지키도록, 트랜잭션 밖에서 첫 T-SQL 문장을 컴파일할 때 연결의 `PRAGMA foreign_keys`를 켭니다. 다른 방언으로 바꾸면 그 방언의 첫 문장 앞에서(트랜잭션 중이면 끝난 뒤) 다시 끕니다. 응용이 먼저 켜 둔 경우는 그대로 둡니다. |
+| 외래 키 | SQL Server처럼 지키도록, 트랜잭션 밖에서 첫 T-SQL 문장을 컴파일할 때 연결의 `PRAGMA foreign_keys`를 켭니다. 외래 키를 강제하지 않는 방언으로 바꾸면 그 방언의 첫 문장 앞에서(트랜잭션 중이면 끝난 뒤) 다시 끕니다. 응용이 먼저 켜 두었거나 그 사이에 바꾼 설정은 그대로 둡니다(PostgreSQL, MariaDB, Oracle 방언도 같음). |
 | identity | 시퀀스는 트랜잭션에 묶여서 롤백된 값이 다시 나옵니다(SQL Server는 건너뜀). |
 | `@@ROWCOUNT` | `changes()`: 마지막 INSERT/UPDATE/DELETE가 바꾼 행 수입니다(SELECT의 행 수가 아님). |
 | `OUTPUT DELETED` | DELETE에서만 됩니다. UPDATE의 `DELETED.c`(이전 값)는 `RETURNING`이 새 행만 보므로 오류입니다. |

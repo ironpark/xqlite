@@ -140,6 +140,11 @@ fn translateError(p: *int.Parse) int.Oom!void {
 }
 
 pub const hooks: dialect.Hooks = .{
+    .foreign_keys = true,
+    .arith = .{
+        .div_zero = .{ .msg = "division by zero", .state = .of("22012") },
+        .int_overflow = .{ .msg = "bigint out of range", .state = .of("22003") },
+    },
     .functions = &functions,
     .engine_functions = &engine_functions,
     .collations = &.{.{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate }},

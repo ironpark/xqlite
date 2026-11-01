@@ -182,6 +182,9 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
         return .{ .sqlite = "NUMERIC" };
     }
     if (eql(u8, n, "boolean")) return .{ .func = "xq_pg_bool" };
+    if (eql(u8, n, "smallint")) return .{ .func = "xq_pg_int2" };
+    if (eql(u8, n, "integer")) return .{ .func = "xq_pg_int4" };
+    if (eql(u8, n, "bigint")) return .{ .func = "xq_pg_int8" };
     if (eql(u8, n, "date")) return .{ .func = "date" };
     if (eql(u8, n, "time without time zone") or eql(u8, n, "time with time zone")) return .{ .func = "time" };
     if (eql(u8, n, "timestamp without time zone") or eql(u8, n, "timestamp with time zone")) return .{ .func = "datetime" };

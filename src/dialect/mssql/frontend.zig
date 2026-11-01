@@ -61,7 +61,6 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
         p.tail = sql[sql.len..];
         return;
     }
-    enableForeignKeys(p.db);
     // An element of the CREATE SCHEMA compiled before: in its schema.
     const st = &p.db.xq.mssql;
     const element: ?[]const u8 = if (st.schema_element) |e| try p.arena.dupe(u8, e) else null;
@@ -97,16 +96,6 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
         p.tail = sql[sql.len..];
     } else p.tail = sql[@intFromPtr(s.tok.text.ptr) - @intFromPtr(sql.ptr) ..];
     ir.stmt.finishCoding(p);
-}
-
-/// SQL Server enforces foreign keys: so does the connection, from its
-/// first T-SQL statement outside a transaction on, until it compiles in
-/// another dialect (dialect.restoreForeignKeys()).
-fn enableForeignKeys(db: *int.Sqlite3) void {
-    if (db.flags.ForeignKeys or !db.auto_commit) return;
-    db.flags.ForeignKeys = true;
-    db.xq.mssql.foreign_keys_on = true;
-    @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
 }
 
 fn statement(s: *Parser) Error!void {
@@ -257,6 +246,11 @@ fn translateError(p: *int.Parse) int.Oom!void {
 // ================================================================ hooks
 
 pub const hooks: dialect.Hooks = .{
+    .foreign_keys = true,
+    .arith = .{
+        .div_zero = .{ .msg = "Divide by zero error encountered.", .state = .numbered("22012", 8134) },
+        .int_overflow = .{ .msg = "Arithmetic overflow error converting expression to data type bigint.", .state = .numbered("22003", 8115) },
+    },
     .functions = &functions,
     .engine_functions = &engine_functions,
     .table_function = @import("openjson.zig").register,

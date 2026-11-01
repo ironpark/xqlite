@@ -9,6 +9,8 @@ const mem = @import("../mem.zig");
 const serial = @import("../serial.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const cast = @import("xqlite_base").cast;
+const dialect = @import("../../dialect/dialect.zig");
+const aux = @import("../aux.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
@@ -66,8 +68,18 @@ pub fn opConcat(e: *Exec, op: *Op) Error!Flow {
     return .next;
 }
 
+/// The error the dialect of the statement raises instead of SQLite's
+/// result (dialect.Arith), if any.
+fn arithError(e: *Exec, comptime which: enum { div_zero, int_overflow }) ?Error {
+    @branchHint(.cold);
+    const a = &dialect.spec(e.v.xq_lang.dialect).hooks.arith;
+    const f = @field(a, @tagName(which)) orelse return null;
+    aux.vdbeErrorState(e.v, f.state, "{s}", .{f.msg});
+    return e.abort(RC.ERROR);
+}
+
 /// OP_Add, OP_Subtract, OP_Multiply, OP_Divide and OP_Remainder.
-pub fn opArith(e: *Exec, op: *Op) Flow {
+pub fn opArith(e: *Exec, op: *Op) Error!Flow {
     const in1 = e.reg(op.p1);
     const in2 = e.reg(op.p2);
     const out = e.reg(op.p3);
@@ -87,29 +99,43 @@ pub fn opArith(e: *Exec, op: *Op) Flow {
         switch (op.opcode) {
             OP.Add => {
                 const r = @addWithOverflow(ib, ia);
-                if (r[1] != 0) break :int_math;
+                if (r[1] != 0) {
+                    if (arithError(e, .int_overflow)) |err| return err;
+                    break :int_math;
+                }
                 ib = r[0];
             },
             OP.Subtract => {
                 const r = @subWithOverflow(ib, ia);
-                if (r[1] != 0) break :int_math;
+                if (r[1] != 0) {
+                    if (arithError(e, .int_overflow)) |err| return err;
+                    break :int_math;
+                }
                 ib = r[0];
             },
             OP.Multiply => {
                 const r = @mulWithOverflow(ib, ia);
-                if (r[1] != 0) break :int_math;
+                if (r[1] != 0) {
+                    if (arithError(e, .int_overflow)) |err| return err;
+                    break :int_math;
+                }
                 ib = r[0];
             },
             OP.Divide => {
                 if (ia == 0) {
+                    if (arithError(e, .div_zero)) |err| return err;
                     mem.setNull(out);
                     return .next;
                 }
-                if (ia == -1 and ib == std.math.minInt(i64)) break :int_math;
+                if (ia == -1 and ib == std.math.minInt(i64)) {
+                    if (arithError(e, .int_overflow)) |err| return err;
+                    break :int_math;
+                }
                 ib = @divTrunc(ib, ia);
             },
             else => {
                 if (ia == 0) {
+                    if (arithError(e, .div_zero)) |err| return err;
                     mem.setNull(out);
                     return .next;
                 }
@@ -129,6 +155,7 @@ pub fn opArith(e: *Exec, op: *Op) Flow {
         OP.Multiply => rb *= ra,
         OP.Divide => {
             if (ra == 0.0) {
+                if (arithError(e, .div_zero)) |err| return err;
                 mem.setNull(out);
                 return .next;
             }
@@ -138,6 +165,7 @@ pub fn opArith(e: *Exec, op: *Op) Flow {
             var ia = mem.intValue(in1);
             const ib = mem.intValue(in2);
             if (ia == 0) {
+                if (arithError(e, .div_zero)) |err| return err;
                 mem.setNull(out);
                 return .next;
             }

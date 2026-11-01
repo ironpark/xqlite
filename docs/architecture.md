@@ -220,6 +220,9 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | `collations` | 방언이 더하는 collation |
 | `default_collation` | collation이 없는 값의 비교에 쓰는 collation(C의 `db->pDfltColl`) |
 | `engine_modules` | 엔진 테이블 값 함수(`xq_*` 이포니머스 가상 테이블). 엔진 함수처럼 모든 방언에서 보이고, 문장이 처음 그 이름을 쓸 때 연결에 등록합니다(MariaDB `JSON_TABLE`의 `xq_maria_json_table`, Oracle `JSON_TABLE`의 `xq_ora_json_table`). |
+| `arith` | 0으로 나누기와 64비트를 넘는 정수 결과에 SQLite의 NULL·실수 대신 낼 오류(메시지와 `ErrorState`). 문장을 컴파일한 방언의 것(`Vdbe.xq_lang`)을 쓰므로, 뷰와 CHECK의 식은 그것을 쓰는 문장의 방언 규칙으로 계산됩니다. 오류 분기에서만 읽어 연산 속도에는 영향이 없습니다. |
+| `foreign_keys` | 그 방언의 데이터베이스가 외래 키를 강제함. 응용이 그 방언으로 준비하는 첫 문장(트랜잭션 밖)에서 `PRAGMA foreign_keys`를 켜고, 강제하지 않는 방언의 첫 문장에서 자기가 켠 것이면 끕니다. 그 사이 응용이 바꾼 설정은 그대로 둡니다(`dialect.applyForeignKeys()`). |
+| `check_errors` | 방언이 타입 검사에 붙인 CHECK 제약 이름의 오류 코드([오류 코드](#오류-코드)) |
 | `table_function` | 이름이 고정되지 않은 엔진 테이블 값 함수를 찾는 함수. `engine_modules`에 없는 `xq_*` 테이블을 만나면 부르고, 맞으면 모듈을 등록해 돌려줍니다(T-SQL `OPENJSON`은 `WITH` 열 목록을 이름에 담음). |
 
 ### 방언 함수 테이블 (`functions`)

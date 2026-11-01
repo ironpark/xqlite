@@ -18,7 +18,9 @@
 //!    PostgreSQL's LIKE and ILIKE: case-sensitive (xq_ilike: ASCII
 //!    case-insensitive), `\` the default escape, '' for none;
 //!  - xq_pg_bool(x): the cast to boolean ('t', 'yes', 'on', 1 ... are
-//!    1); xq_pg_data_type(), xq_pg_udt_name(), xq_pg_char_max(),
+//!    1); xq_pg_int2(x), xq_pg_int4(x), xq_pg_int8(x): the casts to
+//!    smallint, integer and bigint (a real rounds, text is read as an
+//!    integer, out of range is an error); xq_pg_data_type(), xq_pg_udt_name(), xq_pg_char_max(),
 //!    xq_pg_num_precision(), xq_pg_num_scale() of (catalog type, SQLite
 //!    type): the columns of information_schema.columns.
 
@@ -73,6 +75,9 @@ pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_ilike", 2, det, ilikeFunc),
     dfunc.scalar("xq_ilike", 3, det, ilikeFunc),
     dfunc.scalar("xq_pg_bool", 1, det, boolFunc),
+    dfunc.scalar("xq_pg_int2", 1, det, dfunc.bind(intFunc, .{IntType.smallint})),
+    dfunc.scalar("xq_pg_int4", 1, det, dfunc.bind(intFunc, .{IntType.integer})),
+    dfunc.scalar("xq_pg_int8", 1, det, dfunc.bind(intFunc, .{IntType.bigint})),
     dfunc.scalar("xq_pg_data_type", 2, det, dataTypeFunc),
     dfunc.scalar("xq_pg_udt_name", 2, det, udtNameFunc),
     dfunc.scalar("xq_pg_char_max", 2, det, charMaxFunc),
@@ -438,6 +443,52 @@ fn boolFunc(ctx: *Context, argv: []*Mem) void {
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "invalid input syntax for type boolean: \"{s}\"", .{raw[0..@min(raw.len, 64)]}) catch "invalid input syntax for type boolean";
     api.resultErrorState(ctx, .of("22P02"), msg);
+}
+
+pub const IntType = enum(u8) {
+    smallint = 16,
+    integer = 32,
+    bigint = 64,
+
+    fn holds(t: IntType, v: i64) bool {
+        const bits: u6 = @intCast(@backingInt(t) - 1);
+        if (t == .bigint) return true;
+        const lim = @as(i64, 1) << bits;
+        return v >= -lim and v < lim;
+    }
+};
+
+/// xq_pg_int2(), xq_pg_int4(), xq_pg_int8(): the cast to an integer type
+/// (PostgreSQL rounds a fraction half away from zero; SQLite's CAST
+/// truncates).
+fn intFunc(ctx: *Context, argv: []*Mem, comptime t: IntType) void {
+    const m = argv[0];
+    const range_msg = @tagName(t) ++ " out of range";
+    const v: i64 = switch (api.valueType(m)) {
+        vi.SQLITE_NULL => return api.resultNull(ctx),
+        vi.SQLITE_INTEGER => api.valueInt64(m),
+        vi.SQLITE_FLOAT => blk: {
+            const r = @round(api.valueDouble(m));
+            if (!(r >= -0x1p63 and r < 0x1p63)) return api.resultErrorState(ctx, .of("22003"), range_msg);
+            break :blk @intFromFloat(r);
+        },
+        vi.SQLITE_BLOB => return api.resultErrorState(ctx, .of("42846"), "cannot cast type bytea to " ++ @tagName(t)),
+        else => blk: {
+            const raw = text(ctx, m) orelse return;
+            const s = std.mem.trim(u8, raw, " \t\r\n");
+            break :blk std.fmt.parseInt(i64, s, 10) catch |err| switch (err) {
+                error.Overflow => return api.resultErrorState(ctx, .of("22003"), range_msg),
+                error.InvalidCharacter => {
+                    var buf: [128]u8 = undefined;
+                    const what = "invalid input syntax for type " ++ @tagName(t);
+                    const msg = std.fmt.bufPrint(&buf, what ++ ": \"{s}\"", .{raw[0..@min(raw.len, 64)]}) catch what;
+                    return api.resultErrorState(ctx, .of("22P02"), msg);
+                },
+            };
+        },
+    };
+    if (!t.holds(v)) return api.resultErrorState(ctx, .of("22003"), range_msg);
+    api.resultInt64(ctx, v);
 }
 
 pub fn parseBool(s: []const u8) ?bool {

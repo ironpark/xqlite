@@ -393,13 +393,13 @@ Oracle에서 스키마는 사용자입니다. 이 방언은 사용자를 공용 
 | 날짜 | `DATE` 타입, `NLS_DATE_FORMAT`으로 출력 | ISO 텍스트([날짜](#날짜)) | SQLite 날짜 함수가 그대로 읽음 |
 | 날짜 연산 | 늘 타입으로 판단 | 파서가 날짜라고 아는 피연산자만 | 식의 타입을 모름 |
 | `SYSDATE` | 서버의 시간대 | UTC | |
-| 0으로 나누기 | `ORA-01476` | NULL | `/`는 SQLite의 것 |
+| 0으로 나누기 | `ORA-01476` | 같음 | 64비트를 넘는 정수 결과는 오류가 아니라 실수(NUMBER는 38자리) |
 | 이름의 대소문자 | `"Emp"`와 `EMP`는 다름 | 같음([이름의 대소문자](#이름의-대소문자)) | SQLite의 이름 비교 |
 | `BOOLEAN`(23ai) | `TRUE`/`FALSE` | 정수 1/0 | sqlite3 API로 돌아오는 값 타입 |
 | 오류 문구 | ORA- 메시지 | 컴파일 때와 저장 변환의 오류는 ORA- 코드와 메시지. 실행 중 제약 위반은 SQLite 문구(`UNIQUE constraint failed: T.A`) | |
 | DDL | 앞뒤로 커밋 | 커밋하지 않음([트랜잭션](#트랜잭션)) | |
 | `RETURNING` | `RETURNING ... INTO`(PL/SQL) | 지원하지 않음 | |
-| 외래 키 | 늘 강제 | `PRAGMA foreign_keys = ON`일 때만 | SQLite와 같음 |
+| 외래 키 | 늘 강제 | 같음. 이 방언의 첫 문장에서 연결의 `PRAGMA foreign_keys`를 켬. 응용이 끈 것은 그대로 둠 | sqlite3는 여전히 끈 채로 씀 |
 | `CHAR` 비교 | 공백을 채워 비교 | `COLLATE RTRIM` | 근사 |
 | 저장되는 식 | | IR이 SQLite 텍스트로 렌더링. 방언 함수는 `xq_oracle_substr(...)`처럼, 저장 변환은 쓰지 않음(DML에만) | 다른 방언에서도 같은 뜻. 단 sqlite3에서는 그런 식을 계산할 수 없음 |
 | JSON 타입 | 이진(OSON) | 정규화한 JSON 텍스트 | sqlite3가 읽음 |
@@ -417,7 +417,7 @@ Oracle에서 스키마는 사용자입니다. 이 방언은 사용자를 공용 
 | DDL | `ALTER TABLE ... MODIFY`·`ADD CONSTRAINT`·`DROP CONSTRAINT`, 한 번에 여러 열 추가·삭제, `CREATE SYNONYM`, 구체화된 뷰, 파티션, `ORGANIZATION INDEX`, `ON COMMIT DELETE ROWS`(임시 테이블은 `PRESERVE ROWS`로 동작), `ALTER SEQUENCE`, 권한 검사(`GRANT`/`REVOKE`는 무시) |
 | 트랜잭션 | DDL의 암묵적 커밋, 격리 수준 |
 | JSON | `IS JSON (OBJECT\|ARRAY\|SCALAR)`, `strict` 경로 모드, `JSON_TRANSFORM`의 처리기(`IGNORE ON MISSING` ...)와 `NESTED PATH`·`CASE`·`SORT` 같은 연산, `JSON_TABLE`의 `TYPE(STRICT)`와 100개가 넘는 열, 경로의 `like_regex`·`eq_regex`와 날짜 비교, `JSON_ARRAY(서브쿼리)`, `JSON_OBJECT`의 비교식 값(`'k' VALUE a > b`), JSON 검색 인덱스, `JSON_DATAGUIDE`, `JSON_EQUAL`, JSON 관계형 이중성 뷰 |
-| 오류 | 실행 중 오류의 ORA- 코드화, `ORA-01476`(0으로 나누기), `ORA-30926`(MERGE의 중복 일치) |
+| 오류 | 실행 중 오류의 ORA- 코드화, `ORA-30926`(MERGE의 중복 일치) |
 
 ## 검증
 

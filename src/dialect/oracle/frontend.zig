@@ -53,6 +53,10 @@ const OP = @import("../../vdbe/vdbe_int.zig").OP;
 pub const frontend: dialect.Frontend = .{ .run = run };
 
 pub const hooks: dialect.Hooks = .{
+    .foreign_keys = true,
+    // NUMBER holds 38 digits, so a result past 64 bits is no error (the
+    // real SQLite computes is the nearer value).
+    .arith = .{ .div_zero = .{ .msg = "ORA-01476: divisor is equal to zero", .state = .numbered("22012", 1476) } },
     .functions = &functions,
     .engine_functions = &engine_functions,
     .engine_modules = &.{.{ .name = jsonfuncs.json_table_name, .module = &jsonfuncs.json_table_module }},

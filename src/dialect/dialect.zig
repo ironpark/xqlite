@@ -109,7 +109,26 @@ pub const Frontend = struct {
 
 /// The engine-side behaviour of a dialect. Every field defaults to what
 /// SQLite does.
+/// What arithmetic does where SQLite's yields NULL or a real: the error
+/// the dialect raises instead (null keeps SQLite's result). The policy
+/// of the dialect a statement was compiled in applies (Vdbe.xq_lang), so
+/// a view or CHECK runs with the arithmetic of the statement using it.
+pub const Arith = struct {
+    /// Division and remainder by zero (SQLite: NULL).
+    div_zero: ?Failure = null,
+    /// An integer result outside 64 bits (SQLite: a real).
+    int_overflow: ?Failure = null,
+
+    pub const Failure = struct { msg: []const u8, state: int.ErrorState };
+};
+
 pub const Hooks = struct {
+    /// Arithmetic errors (Arith).
+    arith: Arith = .{},
+    /// The dialect's databases enforce foreign keys: the connection turns
+    /// PRAGMA foreign_keys on while it compiles in the dialect
+    /// (applyForeignKeys()).
+    foreign_keys: bool = false,
     /// Built-in functions of the dialect (see func.zig for constructors):
     /// looked up after the application-defined functions and before
     /// SQLite's built-ins, so a dialect can add functions (PostgreSQL's
@@ -293,6 +312,9 @@ pub const ConnState = struct {
     currval: std.StringHashMapUnmanaged(i64) = .empty,
     /// The sequence nextval() last advanced (lastval()), an owned name.
     last_sequence: ?[]u8 = null,
+    /// applyForeignKeys(): the dialect of the last application statement
+    /// it saw, and whether it turned PRAGMA foreign_keys on.
+    foreign_keys: struct { dialect: ?Dialect = null, ours: bool = false } = .{},
     /// The MariaDB session: sql_mode, warnings, user variables.
     mariadb: @import("mariadb/state.zig").State = .{},
     /// The T-SQL session: variables, IDENTITY_INSERT, @@IDENTITY.
@@ -333,18 +355,31 @@ pub fn hooks(db: *const Sqlite3) *const Hooks {
     return &spec(db.xq.lang.dialect).hooks;
 }
 
-/// Turn PRAGMA foreign_keys back off when the T-SQL dialect turned it on
-/// and the connection has moved to another dialect: before a statement
-/// the application prepares (not SQL the engine runs for a T-SQL
-/// statement, in Lang.sqlite) outside a transaction, as PRAGMA
-/// foreign_keys may only change there.
-fn restoreForeignKeys(p: *Parse) void {
+/// PRAGMA foreign_keys for the dialect the connection compiles in
+/// (Hooks.foreign_keys): at the first statement the application prepares
+/// in a dialect that enforces foreign keys, turn it on; at the first in
+/// one that does not, turn it back off if this turned it on. A setting
+/// the application made in between (PRAGMA foreign_keys, MariaDB's SET
+/// foreign_key_checks) stays. Not for SQL the engine runs while compiling
+/// or running a statement (in Lang.sqlite), and only outside a
+/// transaction, where PRAGMA foreign_keys may change; otherwise at the
+/// next statement.
+fn applyForeignKeys(p: *Parse) void {
     const db = p.db;
-    if (!db.xq.mssql.foreign_keys_on or db.xq.lang.dialect == .mssql) return;
+    const st = &db.xq.foreign_keys;
+    const d = db.xq.lang.dialect;
+    if (st.dialect == d) return;
     if (db.init.busy or p.outer_parse != null or db.n_vdbe_active != 0 or !db.auto_commit) return;
-    db.xq.mssql.foreign_keys_on = false;
-    if (!db.flags.ForeignKeys) return;
-    db.flags.ForeignKeys = false;
+    st.dialect = d;
+    if (spec(d).hooks.foreign_keys) {
+        if (db.flags.ForeignKeys) return;
+        st.ours = true;
+    } else {
+        if (!st.ours) return;
+        st.ours = false;
+        if (!db.flags.ForeignKeys) return;
+    }
+    db.flags.ForeignKeys = !db.flags.ForeignKeys;
     @import("../vdbe/aux.zig").expirePreparedStatements(db, 0);
 }
 
@@ -356,7 +391,7 @@ fn restoreForeignKeys(p: *Parse) void {
 pub fn runParser(p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
     const db = p.db;
     const sqlite_frontend = spec(.sqlite).frontend;
-    restoreForeignKeys(p);
+    applyForeignKeys(p);
     const f = if (db.init.busy) sqlite_frontend else db.xq.lang.frontend;
     if (f == sqlite_frontend or isSqliteCommand(sql)) return sqlite_frontend.run(p, sql);
 

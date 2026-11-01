@@ -981,6 +981,51 @@ test "zig api: errors carry their SQLSTATE and the dialect's number" {
     }
 }
 
+test "zig api: each dialect's arithmetic errors and foreign keys" {
+    const D = xqlite.Dialect;
+    const Case = struct { d: D, div: ?[]const u8, div_n: ?u32, ovf: ?[]const u8, ovf_n: ?u32, from: []const u8 };
+    const cases = [_]Case{
+        .{ .d = .sqlite, .div = null, .div_n = null, .ovf = null, .ovf_n = null, .from = "" },
+        .{ .d = .postgres, .div = "22012", .div_n = null, .ovf = "22003", .ovf_n = null, .from = "" },
+        .{ .d = .mariadb, .div = null, .div_n = null, .ovf = "22003", .ovf_n = 1690, .from = "" },
+        .{ .d = .mssql, .div = "22012", .div_n = 8134, .ovf = "22003", .ovf_n = 8115, .from = "" },
+        .{ .d = .oracle, .div = "22012", .div_n = 1476, .ovf = null, .ovf_n = null, .from = " FROM dual" },
+    };
+    for (cases) |c| {
+        if (!c.d.built()) continue;
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = c.d });
+        defer db.close();
+        var buf: [96]u8 = undefined;
+        const div = try std.fmt.bufPrint(&buf, "SELECT 1 / 0{s}", .{c.from});
+        if (c.div) |st| try expectState(&db, div, st, c.div_n) else try testing.expectEqual(@as(??i64, @as(?i64, null)), try db.one(?i64, div, .{}));
+        var buf2: [96]u8 = undefined;
+        const ovf = try std.fmt.bufPrint(&buf2, "SELECT 9223372036854775807 + 1{s}", .{c.from});
+        if (c.ovf) |st| try expectState(&db, ovf, st, c.ovf_n) else _ = try db.one(f64, ovf, .{});
+        // The dialects' databases enforce foreign keys; SQLite's only on
+        // PRAGMA foreign_keys.
+        try db.exec("CREATE TABLE p(id INT PRIMARY KEY)");
+        try db.exec("CREATE TABLE c(pid INT, FOREIGN KEY (pid) REFERENCES p(id))");
+        if (c.d == .sqlite) {
+            try db.exec("INSERT INTO c VALUES(1)");
+        } else {
+            errdefer std.debug.print("{s}: no FK error\n", .{@tagName(c.d)});
+            try testing.expectError(error.Constraint, db.exec("INSERT INTO c VALUES(1)"));
+        }
+    }
+    // The setting the application makes stays.
+    var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres });
+    defer db.close();
+    try db.exec("PRAGMA foreign_keys = OFF");
+    try db.exec("CREATE TABLE p(id int PRIMARY KEY); CREATE TABLE c(pid int REFERENCES p(id)); INSERT INTO c VALUES(1)");
+    // PostgreSQL's casts to an integer round and check the range.
+    try testing.expectEqual(@as(?i64, 3), try db.one(i64, "SELECT 2.5::int", .{}));
+    try testing.expectEqual(@as(?i64, -3), try db.one(i64, "SELECT (-2.5)::bigint", .{}));
+    try testing.expectEqual(@as(?i64, 42), try db.one(i64, "SELECT ' 42 '::int", .{}));
+    try expectState(&db, "SELECT '2.5'::int", "22P02", null);
+    try expectState(&db, "SELECT 40000::smallint", "22003", null);
+    try expectState(&db, "SELECT 3000000000::integer", "22003", null);
+}
+
 test "zig api: Diagnostics carry the SQLSTATE and the dialect's number" {
     var diag: xqlite.Diagnostics = .{};
     var db = try Db.open(gpa, testing.io, ":memory:", .{ .diagnostics = &diag });

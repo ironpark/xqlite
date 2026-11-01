@@ -35,10 +35,6 @@ pub const State = struct {
     tran_nest: u32 = 0,
     /// The name of the outermost BEGIN TRANSACTION (lower case).
     tran_name: ?[]u8 = null,
-    /// The dialect turned PRAGMA foreign_keys on (it was off): it goes
-    /// back off once the connection compiles in another dialect
-    /// (dialect.runParser()).
-    foreign_keys_on: bool = false,
     /// The MERGE being run: the source rows it inserted (by number) and
     /// the target rows its WHEN NOT MATCHED BY SOURCE clauses changed (by
     /// rowid), which its WHEN MATCHED clauses leave alone.

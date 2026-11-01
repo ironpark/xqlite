@@ -215,6 +215,9 @@ fn drop(s: *Parser) Error!void {
 // ================================================================ hooks
 
 pub const hooks: dialect.Hooks = .{
+    .foreign_keys = true,
+    // Division by zero is NULL, as in SQLite.
+    .arith = .{ .int_overflow = .{ .msg = "BIGINT value is out of range", .state = .numbered("22003", 1690) } },
     .functions = &functions,
     .engine_functions = &engine_functions,
     .engine_modules = &.{.{ .name = "xq_maria_json_table", .module = &@import("json_table.zig").module }},

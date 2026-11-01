@@ -272,7 +272,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 캐스트 | xqlite | PostgreSQL과 다른 점 |
 | --- | --- | --- |
 | `::date`/`::timestamp`/`::time` | `date()`/`datetime()`/`time()` | |
-| `::int` | 실수를 버림 | PostgreSQL은 반올림 |
+| `::smallint`/`::int`/`::bigint` | `xq_pg_int2/4/8()`: 실수는 0에서 먼 쪽으로 반올림, 문자열은 정수로 읽음(`'2.5'::int`는 `invalid input syntax for type integer`), 범위 밖은 `integer out of range` | |
 | `::varchar(n)` | 자름 | |
 | `::numeric(p,s)` | 반올림 | |
 | `::boolean` | `'t'`/`'yes'`/`'on'` 같은 철자를 읽음 | |
@@ -291,9 +291,9 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | `now()`, `current_timestamp` | 시간대가 있는 타임스탬프 | 문장 시각의 `'YYYY-MM-DD HH:MM:SS.SSS'`(UTC, 시간대 표기 없음) | SQLite 날짜 함수가 그대로 읽음 |
 | 이름의 대소문자 | `"Foo"`와 `foo`는 다른 이름 | 접기는 하지만 같은 이름 | SQLite의 이름 비교는 대소문자를 구분하지 않음 |
 | 오류 문구 | PostgreSQL 문구 | 싼 곳에서만 PostgreSQL 문구(아래 [오류](#오류)). 실행 중 제약 위반은 SQLite 문구(`UNIQUE constraint failed: t.a`) | |
-| 0으로 나누기 | 오류 | `/`는 NULL. `mod(x, 0)`은 `division by zero` 오류 | `/`는 SQLite의 것(정수끼리는 정수 나눗셈) |
-| 정수 오버플로 | 오류 | 검사하지 않음 | |
-| 외래 키 | 늘 강제 | `PRAGMA foreign_keys = ON`일 때만 강제 | SQLite와 같음 |
+| 0으로 나누기 | 오류 | 같음(`/`, `%`가 `division by zero`, 22012). 이 방언으로 컴파일한 문장에서만이고, sqlite3나 SQLite 방언에서 같은 뷰·CHECK를 계산하면 NULL | 엔진의 산술 정책(`Hooks.arith`) |
+| 정수 오버플로 | int4·int2 연산도 오류 | 64비트를 넘는 결과만 `bigint out of range`(22003). int4 값끼리의 연산은 2³¹을 넘어도 오류가 아님(열에 넣을 때는 범위 검사) | 식의 타입을 따로 추적하지 않음 |
+| 외래 키 | 늘 강제 | 같음. 이 방언의 첫 문장에서 연결의 `PRAGMA foreign_keys`를 켬. 응용이 끈 것은 그대로 둠 | sqlite3는 여전히 끈 채로 씀 |
 | 격리 수준 | 여러 수준 | 파싱만 함 | SQLite는 늘 직렬화 |
 | JSON | `jsonb`는 이진 형식 | 정규화한 TEXT. `json`은 입력 텍스트 | sqlite3가 그대로 읽고 `json_extract()` 등을 씀. sqlite3가 넣은 값은 정규화되지 않은 채 남고(연산자·함수는 읽을 때 정규화), CHECK `json_valid()`는 SQLite의 규칙 |
 | jsonb 비교 | jsonb의 순서 | 같음(collation `xq_pg_jsonb`). 인덱스는 BINARY라 `=`에 쓰이지 않음 | |
@@ -341,7 +341,7 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE` |
 | 스키마 | 스키마 요소가 있는 `CREATE SCHEMA s CREATE TABLE ...`, `ALTER SCHEMA`, `ALTER TABLE ... SET SCHEMA`, `DROP SCHEMA public`, 이름에 `.`이 있는 스키마, 대소문자만 다른 두 스키마(SQLite의 이름 비교처럼 같은 이름), 다른 스키마의 뷰·외래 키가 기대는 것을 `CASCADE`가 따라 지우는 것, 여러 테이블을 지우는 `DROP SCHEMA ... CASCADE`의 auto_vacuum 데이터베이스(거부함), 상수가 아닌 `nextval(x)`의 `search_path`(이름 그대로 main에서 찾음), `public`에 이름이 `s.t`인 개체(스키마 `s`의 `t`와 겹침) |
 | 절차·서버 | PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `SET LOCAL`, `SHOW ALL`, `SET`의 트랜잭션 의미(롤백해도 남음), 격리 수준 |
-| 오류 | 0으로 나누기·오버플로 오류, 실행 중 오류 메시지의 PostgreSQL화 |
+| 오류 | int4·int2 연산의 오버플로, 실행 중 오류 메시지의 PostgreSQL화 |
 | 카탈로그 | INTEGER PRIMARY KEY의 인덱스(`pg_indexes`에 `t_pkey`가 없음), 붙인 데이터베이스(`information_schema`·`pg_catalog` 뷰에 나오지 않음) |
 | 셸 | dollar-quote 문장 분할(셸은 SQLite 규칙으로 문장을 나눔) |
 

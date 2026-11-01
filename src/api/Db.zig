@@ -605,6 +605,17 @@ pub fn schemaVersion(db: *const Db, name: []const u8) ?u32 {
     return engine.schemaVersion(db.conn.h, name);
 }
 
+/// What the schema in memory says of column `column` of table `table` in
+/// database `database` ("main", "temp", an attached one): NOT NULL,
+/// PRIMARY KEY, AUTOINCREMENT, UNIQUE, indexed
+/// (sqlite3_table_column_metadata() without reading the schema); null
+/// for a view or a table or column it does not have. For the column
+/// flags of a wire protocol (MySQL's NOT_NULL_FLAG, PRI_KEY_FLAG ...),
+/// with a Stmt.columnOrigin().
+pub fn columnConstraints(db: *const Db, database: []const u8, table: []const u8, column: []const u8) ?Stmt.ColumnConstraints {
+    return engine.columnConstraints(db.conn.h, database, table, column);
+}
+
 pub fn lastInsertRowid(db: *const Db) i64 {
     return engine.lastInsertRowid(db.conn.h);
 }

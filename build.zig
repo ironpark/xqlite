@@ -64,6 +64,16 @@ pub fn build(b: *std.Build) void {
     //
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
+    // The wire protocol servers (src/server, module xqlite_server): on
+    // the Zig API, so that the engine library has no networking. The CLI
+    // (`xqlite serve`) imports it; its wasm builds do not.
+    const server_mod = b.addModule("xqlite_server", .{
+        .root_source_file = b.path("src/server/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "xqlite", .module = mod }},
+    });
+
     const exe = b.addExecutable(.{
         .name = "xqlite",
         .root_module = b.createModule(.{
@@ -86,6 +96,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "xqlite", .module = mod },
+                .{ .name = "xqlite_server", .module = server_mod },
             },
         }),
     });
@@ -153,14 +164,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
-    // The wire protocol servers (src/server, module xqlite_server): on
-    // the Zig API, so that the engine library has no networking.
-    const server_mod = b.addModule("xqlite_server", .{
-        .root_source_file = b.path("src/server/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "xqlite", .module = mod }},
-    });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_mod, .filters = test_filters })).step);
 
     // Example programs of the Zig API (examples/*.zig): `zig build
@@ -432,7 +435,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/cli/main.zig"),
             .target = target,
             .optimize = .ReleaseSafe,
-            .imports = &.{.{ .name = "xqlite", .module = mod }},
+            .imports = &.{ .{ .name = "xqlite", .module = mod }, .{ .name = "xqlite_server", .module = server_mod } },
         }),
     });
     if (check_slt) {

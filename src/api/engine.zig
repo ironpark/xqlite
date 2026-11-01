@@ -447,6 +447,48 @@ pub const CatalogType = struct {
     dialect: Dialect,
 };
 
+/// What the schema says of a table column (sqlite3_table_column_metadata()
+/// and the table's indexes).
+pub const ColumnConstraints = struct {
+    not_null: bool,
+    /// Part of the PRIMARY KEY.
+    primary_key: bool,
+    /// The INTEGER PRIMARY KEY of an AUTOINCREMENT table.
+    autoincrement: bool,
+    /// Part of a UNIQUE index (not the PRIMARY KEY).
+    unique: bool,
+    /// The first column of an index that is not UNIQUE.
+    indexed: bool,
+};
+
+/// The constraints of column `column` of table `table` in database
+/// `schema`, from the schema in memory (it is read when a statement is
+/// compiled); null for a view, or a table or column it does not have.
+pub fn columnConstraints(h: *Handle, schema: []const u8, table: []const u8, column: []const u8) ?ColumnConstraints {
+    const build = @import("../sql/build.zig");
+    const tab = build.findTable(h, table, schema) orelse return null;
+    if (tab.isView()) return null;
+    const i = build.columnIndex(tab, column);
+    if (i < 0) return null;
+    const col = &tab.cols[@intCast(i)];
+    var c: ColumnConstraints = .{
+        .not_null = col.not_null != .None,
+        .primary_key = col.col_flags.PRIMKEY,
+        .autoincrement = tab.i_pkey == i and tab.tab_flags.Autoincrement,
+        .unique = false,
+        .indexed = false,
+    };
+    var idx = tab.index;
+    while (idx) |x| : (idx = x.next) {
+        const key = x.ai_column[0..x.n_key_col];
+        if (x.isPrimaryKey()) continue;
+        if (x.isUnique()) {
+            if (std.mem.indexOfScalar(i16, key, @intCast(i)) != null) c.unique = true;
+        } else if (key.len > 0 and key[0] == i) c.indexed = true;
+    }
+    return c;
+}
+
 /// The declared type of a column in the dialect that made its table
 /// (xq_catalog, read into memory once per schema version), and that
 /// dialect; null if the catalog has none. `name` is valid until the

@@ -10,6 +10,8 @@
 //! - Registry: the sessions by id, for cancel requests from outside.
 //! - errors: the SQLSTATE of an engine error.
 //! - command: what a statement does, for command tags and row counts.
+//! - pg: PostgreSQL's protocol, a Protocol for Server().
+//! - mysql: the MySQL/MariaDB protocol.
 //!
 //! It is built on the Zig API (module `xqlite`) only, so that the engine
 //! library has no networking. See docs/server.md.
@@ -22,6 +24,10 @@ pub const Session = @import("Session.zig");
 pub const Registry = @import("Registry.zig");
 pub const errors = @import("errors.zig");
 pub const command = @import("command.zig");
+/// PostgreSQL's v3 protocol (`xqlite serve --pg`).
+pub const pg = @import("pg/root.zig");
+/// The MySQL/MariaDB protocol (src/server/mysql).
+pub const mysql = @import("mysql/root.zig");
 
 test {
     _ = errors;
@@ -30,4 +36,6 @@ test {
     _ = Registry;
     _ = @import("Server.zig");
     _ = @import("test.zig");
+    _ = pg;
+    _ = mysql;
 }

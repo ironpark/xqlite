@@ -17,6 +17,7 @@ pub const Savepoint = api.Savepoint;
 pub const Script = api.Script;
 pub const Origin = api.Origin;
 pub const TypeName = api.TypeName;
+pub const ColumnConstraints = api.ColumnConstraints;
 pub const Backup = api.Backup;
 pub const BlobHandle = api.BlobHandle;
 pub const OpenOptions = api.OpenOptions;

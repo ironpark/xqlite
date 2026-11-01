@@ -9,7 +9,9 @@
 //!  - random() in [0, 1), gen_random_uuid();
 //!  - floor, ceil/ceiling, sqrt, power/pow, exp, ln, log, mod, trunc,
 //!    sign, pi;
-//!  - current_user(), current_database() (current_schema() is session.zig's).
+//!  - current_user(), current_database() (current_schema() is session.zig's);
+//!  - format_type(oid, typmod): the name of a type by its OID and type
+//!    modifier, as a wire protocol client sees them (psql's \gdesc).
 //!
 //! The engine functions (Hooks.engine_functions, visible in every
 //! dialect, as the IR writes them into the schema):
@@ -67,6 +69,7 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("pi", 0, det, piFunc),
     dfunc.scalar("current_user", 0, det, currentUserFunc),
     dfunc.scalar("current_database", 0, det, currentDatabaseFunc),
+    dfunc.scalar("format_type", 2, det, formatTypeFunc),
 };
 
 pub const engine_functions = [_]int.FuncDef{
@@ -423,6 +426,59 @@ fn currentUserFunc(ctx: *Context, _: []*Mem) void {
 
 fn currentDatabaseFunc(ctx: *Context, _: []*Mem) void {
     api.resultText(ctx, "main", .static);
+}
+
+/// format_type(oid, typmod): the name of the type of OID `oid` (those
+/// the server describes columns with, src/server/pg/values.zig), with the
+/// type modifier's arguments (`character varying(10)`, `numeric(10,2)`);
+/// "???" for another OID, as PostgreSQL writes one it does not know.
+fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(ctx);
+    const oid = api.valueInt64(argv[0]);
+    const mod: i64 = if (isNull(argv[1])) -1 else api.valueInt64(argv[1]);
+    const Name = struct { i64, []const u8, enum { none, length, numeric, precision } };
+    const names = [_]Name{
+        .{ 16, "boolean", .none },
+        .{ 17, "bytea", .none },
+        .{ 18, "\"char\"", .none },
+        .{ 19, "name", .none },
+        .{ 20, "bigint", .none },
+        .{ 21, "smallint", .none },
+        .{ 23, "integer", .none },
+        .{ 25, "text", .none },
+        .{ 26, "oid", .none },
+        .{ 114, "json", .none },
+        .{ 700, "real", .none },
+        .{ 701, "double precision", .none },
+        .{ 705, "unknown", .none },
+        .{ 1042, "character", .length },
+        .{ 1043, "character varying", .length },
+        .{ 1082, "date", .none },
+        .{ 1083, "time without time zone", .precision },
+        .{ 1114, "timestamp without time zone", .precision },
+        .{ 1184, "timestamp with time zone", .precision },
+        .{ 1186, "interval", .none },
+        .{ 1266, "time with time zone", .precision },
+        .{ 1700, "numeric", .numeric },
+        .{ 2950, "uuid", .none },
+        .{ 3802, "jsonb", .none },
+    };
+    const n = for (names) |n| {
+        if (n[0] == oid) break n;
+    } else return api.resultText(ctx, "???", .static);
+    var buf: [64]u8 = undefined;
+    const name = n[1];
+    const z = switch (n[2]) {
+        .none => name,
+        .length => if (mod >= 4) std.fmt.bufPrint(&buf, "{s}({d})", .{ name, mod - 4 }) catch name else name,
+        .numeric => if (mod >= 4) std.fmt.bufPrint(&buf, "{s}({d},{d})", .{ name, (mod - 4) >> 16, (mod - 4) & 0xffff }) catch name else name,
+        // "timestamp(3) without time zone": the digits after the first word.
+        .precision => if (mod >= 0) blk: {
+            const sp = std.mem.indexOfScalar(u8, name, ' ').?;
+            break :blk std.fmt.bufPrint(&buf, "{s}({d}){s}", .{ name[0..sp], mod, name[sp..] }) catch name;
+        } else name,
+    };
+    api.resultText(ctx, z, .transient);
 }
 
 // ============================================================== casts

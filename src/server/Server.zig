@@ -36,12 +36,18 @@ pub const Config = struct {
     /// another rather than fail at once.
     open: xqlite.OpenOptions = .{ .journal_mode = .wal, .busy_timeout_ms = 5000 },
     max_connections: u32 = 64,
+    /// SO_REUSEADDR (and std's SO_REUSEPORT with it): a server restarted
+    /// listens at once on its port, which the connections it closed hold
+    /// in TIME_WAIT. Off by default: with SO_REUSEPORT a second server on
+    /// the port would not fail but share the clients.
+    reuse_address: bool = false,
 };
 
 /// What a protocol chooses of its sessions.
 pub const SessionOptions = struct {
     dialect: xqlite.Dialect,
     abort_failed_transactions: bool = false,
+    implicit_transactions: bool = false,
 };
 
 /// One client.
@@ -76,10 +82,14 @@ pub const Connection = struct {
         std.debug.assert(c.session == null);
         var open = c.config.open;
         open.dialect = options.dialect;
-        c.session = .{ .s = try Session.open(c.gpa, c.io, c.config.path, .{
+        // Opened before c.session is set: a `try` inside the initializer
+        // of an optional can leave it non-null when it fails.
+        const s = try Session.open(c.gpa, c.io, c.config.path, .{
             .open = open,
             .abort_failed_transactions = options.abort_failed_transactions,
-        }), .ticket = undefined };
+            .implicit_transactions = options.implicit_transactions,
+        });
+        c.session = .{ .s = s, .ticket = undefined };
         const held = &c.session.?;
         errdefer {
             held.s.close();
@@ -125,7 +135,7 @@ pub fn Server(comptime Protocol: type) type {
                 .config = config,
                 .protocol = protocol,
                 .registry = .init(io, gpa, config.max_connections),
-                .listener = try config.address.listen(io, .{}),
+                .listener = try config.address.listen(io, .{ .reuse_address = config.reuse_address }),
             };
         }
 

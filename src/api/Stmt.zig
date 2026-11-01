@@ -199,6 +199,16 @@ pub fn columnOrigin(s: *Stmt, i: usize) ?Origin {
 
 pub const Origin = engine.Origin;
 
+pub const ColumnConstraints = engine.ColumnConstraints;
+
+/// What the schema says of the table column that result column `i`
+/// reads (Db.columnConstraints() of columnOrigin()), or null for an
+/// expression.
+pub fn columnConstraints(s: *Stmt, i: usize) ?ColumnConstraints {
+    const o = s.columnOrigin(i) orelse return null;
+    return engine.columnConstraints(s.conn.h, o.database, o.table, o.column);
+}
+
 /// A declared type and the dialect it is written in.
 pub const TypeName = struct {
     /// Owned by the caller.
@@ -228,6 +238,13 @@ pub fn columnTypeAlloc(s: *Stmt, gpa: Allocator, i: usize) Error!?TypeName {
 /// count after it ran.
 pub fn countsChanges(s: *const Stmt) bool {
     return engine.countsChanges(s.vm);
+}
+
+/// How many times a schema change has recompiled the statement
+/// (sqlite3_stmt_status(SQLITE_STMTSTATUS_REPREPARE)): its result columns
+/// may have changed when this has.
+pub fn recompileCount(s: *const Stmt) u32 {
+    return engine.reprepareCount(s.vm);
 }
 
 /// The datatype of column `i` of the current row.

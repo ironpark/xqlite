@@ -33,6 +33,7 @@ pub const Savepoint = Db.Savepoint;
 pub const Script = Db.Script;
 pub const Origin = Stmt.Origin;
 pub const TypeName = Stmt.TypeName;
+pub const ColumnConstraints = Stmt.ColumnConstraints;
 pub const Backup = Db.Backup;
 pub const BlobHandle = Db.BlobHandle;
 pub const OpenOptions = Db.OpenOptions;

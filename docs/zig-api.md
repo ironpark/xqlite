@@ -393,10 +393,12 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_bind_parameter_count/name/index` | `parameterCount`, `parameterName`, `parameterIndex` |
 | (매개변수의 타입) | `Stmt.parameterType(i)` (`a = ?`의 `?`는 `a`의 타입. SQLite 방언은 늘 null, [코어의 타입](architecture.md#코어의-타입)) |
 | `sqlite3_step` | `Stmt.step() !bool`, `Stmt.next(T)`, `Iterator(T).next()` |
+| `sqlite3_stmt_status(SQLITE_STMTSTATUS_REPREPARE)` | `Stmt.recompileCount()` (스키마 변경으로 다시 컴파일된 횟수: 결과 열이 바뀌었을 수 있음) |
 | `sqlite3_column_*` | `Stmt.column(T, i)`, `columnAlloc`, `row(T)`, `rowAlloc`, `columnKind` |
 | `sqlite3_column_count/name/decltype` | `columnCount`, `columnName`, `columnDecltype`, `columnIndex` |
 | `sqlite3_column_database/table/origin_name` | `Stmt.columnOrigin(i)` (`OpenOptions.column_metadata`면 다시 컴파일하지 않음) |
 | (방언의 선언 타입, `xq_catalog`) | `Stmt.columnTypeAlloc(gpa, i)` (`character varying(20)`과 그 방언 ...) |
+| `sqlite3_table_column_metadata`의 NOT NULL·PRIMARY KEY·AUTOINCREMENT | `Db.columnConstraints(database, table, column)`, `Stmt.columnConstraints(i)` (`ColumnConstraints`: 그 밖에 UNIQUE 인덱스, 인덱스의 첫 열인지. 메모리의 스키마만 읽음) |
 | (`Vdbe.changeCntOn`) | `Stmt.countsChanges()` |
 | `PRAGMA schema_version` (파일을 읽지 않음) | `Db.schemaVersion(name)` |
 | `sqlite3_reset` / `sqlite3_finalize` | `Stmt.reset()` / `Stmt.finalize()` |
@@ -433,7 +435,7 @@ Zig API 밖의 인터페이스입니다.
 
 - **C ABI**: 있습니다. `sqlite3_*` 호환 C ABI(`libxqlite3`)로 기존 SQLite 바인딩에서 라이브러리만 바꿔 쓸 수 있고, 방언은 URI 파라미터(`file:app.db?dialect=mariadb`)나 `xqlite_set_dialect()`로 고릅니다. [C API](c-api.md)를 보세요.
 
-- **서버 모드(선택, 기반만 있음)**: 기존 클라이언트와 ORM을 그대로 붙일 수 있도록 와이어 프로토콜 서버(pgwire, MySQL protocol, TDS)를 선택적으로 제공할 계획입니다. 프로토콜과 상관없는 부분(리스너, 세션, 타입·오류 분류)은 `xqlite_server` 모듈에 있습니다([서버](server.md)).
+- **서버 모드(선택, PostgreSQL·MySQL 프로토콜이 있음)**: 기존 클라이언트와 ORM을 그대로 붙일 수 있도록 와이어 프로토콜 서버(pgwire, MySQL protocol, TDS)를 선택적으로 제공합니다. 프로토콜과 상관없는 부분(리스너, 세션, 준비된 문장, 타입·오류 분류)과 PostgreSQL 프로토콜(`xqlite serve --pg`), MySQL 프로토콜(`xqlite serve --mysql`)은 `xqlite_server` 모듈에 있습니다([서버](server.md)). TDS는 아직 없습니다.
 
   ```sh
   xqlite serve app.db --pg 5432 --mysql 3306 --tds 1433

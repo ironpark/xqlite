@@ -249,7 +249,7 @@ fn byNameAs(s: *Parser, lname: []const u8, args_in: []const *Expr, pos: u32, wri
     if (eq(lname, "user") or eq(lname, "current_user") or eq(lname, "session_user") or eq(lname, "system_user")) {
         return s.str(pos, "root@localhost");
     }
-    if (eq(lname, "connection_id")) return s.int_(pos, 1);
+    if (eq(lname, "connection_id")) return s.int_(pos, s.p.db.xq.mariadb.connection_id);
     if ((eq(lname, "greatest") or eq(lname, "least")) and n >= 2) {
         return s.func(pos, if (eq(lname, "greatest")) "max" else "min", args);
     }

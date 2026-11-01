@@ -5,6 +5,17 @@ const xqlite = @import("xqlite");
 const shell = @import("shell.zig");
 const slt = @import("slt.zig");
 const fuzzcheck = @import("fuzzcheck.zig");
+/// The wire protocol servers: not on wasm, which has no sockets (and the
+/// wasm builds do not have the xqlite_server module).
+const serve = switch (@import("builtin").os.tag) {
+    .wasi, .freestanding => struct {
+        pub fn run(_: std.mem.Allocator, _: Io, _: []const []const u8, _: *Io.Writer, err: *Io.Writer) !u8 {
+            try err.writeAll("xqlite serve: not on this platform\n");
+            return 1;
+        }
+    },
+    else => @import("serve.zig"),
+};
 const Header = xqlite.btree.header.Header;
 const Btree = xqlite.btree.Btree;
 const Cursor = xqlite.btree.Cursor;
@@ -35,6 +46,10 @@ const usage =
     \\  fuzzcheck [options] db... run SQLite's fuzz corpora (test/fuzzdata*.db)
     \\                            and report crashes and leaks (xqlite fuzzcheck
     \\                            for help)
+    \\  serve <file> --pg <port> --mysql <port>
+    \\                            serve the database to PostgreSQL (v3) and
+    \\                            MySQL clients until SIGINT or SIGTERM
+    \\                            (xqlite serve --help for the options)
     \\
     \\environment:
     \\  XQLITE_TEST_CRASH=F:N[:torn]  sql: exit at once at the Nth write to a file
@@ -118,6 +133,15 @@ pub fn main(init: std.process.Init) !void {
         var stderr_buffer: [1024]u8 = undefined;
         var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
         const code = try fuzzcheck.run(init.gpa, io, args[2..], out, &stderr_file_writer.interface);
+        if (code != 0) {
+            out.flush() catch {};
+            std.process.exit(code);
+        }
+    } else if (args.len >= 2 and std.mem.eql(u8, args[1], "serve")) {
+        var stderr_buffer: [1024]u8 = undefined;
+        var stderr_file_writer: Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
+        const code = try serve.run(init.gpa, io, args[2..], out, &stderr_file_writer.interface);
+        stderr_file_writer.interface.flush() catch {};
         if (code != 0) {
             out.flush() catch {};
             std.process.exit(code);
@@ -407,5 +431,6 @@ test {
     _ = shell;
     _ = slt;
     _ = fuzzcheck;
+    _ = serve;
     _ = @import("qrf.zig");
 }

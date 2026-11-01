@@ -21,6 +21,7 @@ xqlite의 MariaDB(MySQL) 방언이 지원하는 문법과 의미, 그리고 Mari
 | SQL | `PRAGMA xq_dialect = 'mariadb'`(또는 `'mysql'`) |
 | 셸 | `.dialect mariadb` |
 | Zig API | `db.setDialect(.mariadb)` |
+| MySQL/MariaDB 클라이언트 | 와이어 프로토콜 서버의 세션([MySQL 프로토콜](server.md#mysql-프로토콜)) |
 
 - SQLite로 돌아갈 때도 `PRAGMA xq_dialect = 'sqlite'`를 그대로 씁니다.
 - `PRAGMA`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`는 MariaDB 방언에서도 SQLite 문장으로 넘깁니다. `VACUUM`과 `VACUUM INTO`는 SQLite와 같이 동작합니다([SQLite 호환](sqlite.md#vacuum과-백업-api)).
@@ -441,6 +442,7 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 - `EXPLAIN`은 `EXPLAIN QUERY PLAN`입니다.
 - `CREATE/DROP DATABASE`, `USE db`: [데이터베이스](#데이터베이스)를 보세요.
 - `LOCK TABLES`, `UNLOCK TABLES`는 무시합니다.
+- `CONNECTION_ID()`는 와이어 서버가 준 연결 id이고(`KILL`에 씀), 서버 밖의 연결에서는 1입니다. `KILL`은 방언이 아니라 MySQL 프로토콜이 실행합니다([KILL](server.md#kill)).
 - `ANALYZE [NO_WRITE_TO_BINLOG | LOCAL] TABLE t [, ...] [PERSISTENT FOR ...]`는 테이블마다 SQLite의 `ANALYZE`를 실행하고 MariaDB와 같은 결과 행(`Table`, `Op`, `Msg_type`, `Msg_text`)을 돌려줍니다. 없는 테이블과 뷰는 MariaDB처럼 `Error` 행을 냅니다.
 - `information_schema.TABLES`, `COLUMNS`, `SCHEMATA`, `VIEWS`, `STATISTICS`
 - mysqldump 출력을 그대로 불러올 수 있습니다.

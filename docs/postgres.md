@@ -178,7 +178,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 비교 | `greatest`/`least`(NULL은 건너뜀) |
 | 수학 | `floor`, `ceil`, `sqrt`, `power`, `exp`, `ln`, `log`, `mod`, `trunc`, `sign`, `pi` |
 | 난수·UUID | `random()`(0 이상 1 미만 실수), `gen_random_uuid()` |
-| 시스템 | `version()`, `current_user`, `current_database()`, `current_schema`, `current_schemas(bool)`, `current_setting(name [, missing_ok])`, `set_config(name, value, false)` |
+| 시스템 | `version()`, `current_user`, `current_database()`, `current_schema`, `current_schemas(bool)`, `current_setting(name [, missing_ok])`, `set_config(name, value, false)`, `format_type(oid, typmod)`(와이어 서버가 알리는 타입 OID의 이름, psql의 `\gdesc`) |
 | 시퀀스 | 시퀀스 함수(`nextval()` 등) |
 | JSON | 아래 [JSON](#json) |
 

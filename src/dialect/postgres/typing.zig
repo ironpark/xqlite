@@ -262,6 +262,7 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "current_schema", Ret{ .named = "name" } },
     .{ "current_setting", Ret{ .named = "text" } },
     .{ "set_config", Ret{ .named = "text" } },
+    .{ "format_type", Ret{ .named = "text" } },
     .{ "gen_random_uuid", Ret{ .named = "uuid" } },
     .{ "nextval", Ret{ .named = "bigint" } },
     .{ "currval", Ret{ .named = "bigint" } },

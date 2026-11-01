@@ -190,6 +190,20 @@ zig-out/bin/xqlite sql test.db .dump > test.sql
 | 실행 | `.read`, `.bail`, `.echo`, `.changes`, `.timeout`, `.dbconfig` |
 | 그 밖 | `.dialect`, `.print`, `.show`, `.help`, `.quit`/`.exit` |
 
+### 서버 실행
+
+`xqlite serve`는 DB 파일 하나를 와이어 프로토콜로 내놓습니다. PostgreSQL 프로토콜(v3, `--pg`, 세션은 PostgreSQL 방언)과 MySQL/MariaDB 프로토콜(`--mysql`, 세션은 MariaDB 방언)이 있고, 둘을 함께 띄울 수 있습니다.
+
+```sh
+XQLITE_PASSWORD=secret zig-out/bin/xqlite serve app.db --pg 5432 --mysql 3306
+psql "host=127.0.0.1 port=5432 user=app dbname=app sslmode=disable"
+mariadb -h 127.0.0.1 -P 3306 -u app -psecret --skip-ssl
+```
+
+- PostgreSQL: 단순 질의, 확장 질의(Parse/Bind/Describe/Execute, 이진 형식), 취소 요청, trust·cleartext·MD5·SCRAM-SHA-256 인증. TLS와 COPY는 없습니다.
+- MySQL: `COM_QUERY`(여러 문장), 준비된 문장(이진 프로토콜), `KILL`, `mysql_native_password` 인증. SSL과 커서는 없습니다.
+- 기본으로 `127.0.0.1`에서 받습니다. `--host 0.0.0.0`, `--max-connections N`, `--user`, `--auth`(PostgreSQL의 인증 방법), `--database`는 `xqlite serve --help`에 있습니다. 자세한 것은 [서버](docs/server.md#xqlite-serve)에 있습니다.
+
 ### 방언 고르기
 
 기본 방언은 `sqlite`입니다. 방언은 연결마다 바꿀 수 있습니다.
@@ -260,7 +274,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - [x] **구문 트리 IR**: 방언 중립 구문 트리와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT. PostgreSQL과 MariaDB 프론트엔드를 옮겨 실행과 저장의 의미가 같아짐 ([방언 아키텍처](docs/architecture.md#render와-lower의-계약))
 - [x] **Phase 7 · MSSQL 방언**: T-SQL 렉서·파서(`[x]`, `N'..'`, `@변수`, `GO`), `TOP`/`OFFSET…FETCH`, `+`의 타입별 해석, `OUTPUT`, `UPDATE/DELETE … FROM`, 한 문장의 `MERGE`, SQL Server 타입과 값 변환, `IDENTITY`/`IDENTITY_INSERT`, 변수, 중첩 트랜잭션, `INFORMATION_SCHEMA`·`sys.*`. SQL Server(Azure SQL Edge)와 차등 비교 ([MSSQL 호환](docs/mssql.md))
 - [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle.md))
-- [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS. 공통 기반(리스너, 세션, 열 타입·오류·명령 분류, 취소)은 있음 ([서버](docs/server.md))
+- [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS. 공통 기반(리스너, 세션, 열 타입·오류·명령 분류, 취소, 준비된 문장)과 PostgreSQL 프로토콜 v3(`xqlite serve --pg`: 단순·확장 질의, 이진 형식, 취소, SCRAM-SHA-256), MySQL 프로토콜(`xqlite serve --mysql`: 텍스트·이진 프로토콜, 준비된 문장, KILL)은 있음 ([서버](docs/server.md))
 - [x] **C ABI**: `sqlite3_*` 호환 C ABI(`libxqlite3`, SQLite 3.54.1 헤더), URI 파라미터 `?dialect=`, commit·rollback·update 훅과 진행 처리기. SQLite의 `shell.c`가 그대로 링크되어 돌아감 ([C API](docs/c-api.md))
 
 ## 프로젝트 구조
@@ -269,7 +283,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 src/
 ├── root.zig            # 모듈 루트
 ├── xqlite.zig          # 공개 Zig API 이름 목록
-├── cli/                # CLI xqlite (main.zig: sql, slt, fuzzcheck, 테스트 보조 명령; shell.zig: sqlite3 호환 셸)
+├── cli/                # CLI xqlite (main.zig: sql, slt, fuzzcheck, serve, 테스트 보조 명령; shell.zig: sqlite3 호환 셸)
 ├── vdbe/               # 바이트코드 VM
 ├── parse/              # SQLite tokenizer, LALR(1) 파서
 ├── sql/                # 코드 생성기 (SQLite C 포팅)
@@ -286,7 +300,7 @@ src/
 ├── api/                # Zig API
 ├── capi/               # sqlite3 호환 C ABI (루트는 capi.zig)
 ├── ext/                # 셸용 확장 (generate_series, vtablog)
-├── server/             # 와이어 프로토콜 서버의 공통 기반 xqlite_server (리스너, 세션, 타입·오류 분류)
+├── server/             # 와이어 프로토콜 서버 xqlite_server (리스너, 세션, 타입·오류 분류; pg/: PostgreSQL 프로토콜, mysql/: MySQL 프로토콜)
 └── wasm/               # 브라우저·JavaScript용 wasm 모듈 (xq_* 내보내기)
 pkg/
 ├── vfs/                # VFS 패키지 xqlite_vfs: OS 추상화(POSIX·WASI·호스트·메모리·memdb), 크래시 테스트용 VFS
@@ -297,7 +311,7 @@ examples/               # Zig API 예제, wasm/ (JavaScript 연결 코드, Node�
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일
 ```
 
-와이어 프로토콜 자체(pgwire, MySQL, TDS)는 아직 없습니다. 프로토콜과 상관없는 기반은 `src/server/`에 있습니다([서버](docs/server.md)).
+와이어 프로토콜은 PostgreSQL의 것(`src/server/pg/`)과 MySQL의 것(`src/server/mysql/`)이 있고, TDS는 아직 없습니다. 프로토콜과 상관없는 기반은 `src/server/`에 있습니다([서버](docs/server.md)).
 
 ## 기여
 

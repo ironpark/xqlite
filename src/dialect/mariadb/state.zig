@@ -197,6 +197,9 @@ pub const State = struct {
     /// the current one (DATABASE() is NULL, unqualified names fail).
     database: ?[]u8 = null,
     no_database: bool = false,
+    /// CONNECTION_ID(): the connection id a wire server gave the session
+    /// (the MySQL protocol's, for KILL), else 1.
+    connection_id: u32 = 1,
 
     pub const stored_max = 8;
 

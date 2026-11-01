@@ -291,7 +291,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | --- | --- | --- | --- |
 | 불리언 | `true`/`false` | 정수 0/1. `SELECT true`는 `1`(SQLITE_INTEGER). 셸과 서버는 `boolean` 열과 불리언 식(`a = b`, `true`, `x IS NULL`)을 psql처럼 `t`/`f`로 보여 줌([값 표시](architecture.md#값-표시)). 뷰의 불리언 식 열은 1/0. 열에 넣는 문자열은 불리언 철자로 읽음(`'yes'`, `' off '`). PostgreSQL은 타입이 `text`인 식(텍스트 열, `'a' \|\| 'b'`)을 넣으면 오류이지만 xqlite는 그것도 읽음 | sqlite3 API로 돌아오는 결과의 타입을 바꿀 수 없음. 저장 값은 값의 타입이 아니라 실행 중 값이 문자열인지로 바꿈 |
 | `numeric` | 고정 소수점 | SQLite 수(정수 또는 실수). API로는 `1.50`이 `1.5`. 셸과 서버는 `numeric(p,s)` 열, 캐스트(`x::numeric(6,2)`), 스케일을 아는 식(`1.50`, `n + 1`, `n * n`, `sum(n)`, `round(x, 2)`)을 그 자리수로 보여 줌(`1.50`, `0.1 + 0.2`는 `0.3`). PostgreSQL이 값마다 스케일을 정하는 나눗셈과 `avg()`는 `1.5`, `1.0`(PostgreSQL은 `1.5000000000000000`) | 저장 타입이 `ANY`. 넣는 문자열(상수, 텍스트로 바인딩한 값)은 수로 읽음(`'1.50'`은 1.5). `numeric(p,s)`에 넣는 값을 스케일 s로 반올림하지 않고, `'NaN'`·`'Infinity'`는 거부(SQLite에 NaN이 없음) |
-| 식의 타입 | 연산자·함수 해석이 정함 | 같은 규칙으로 매김: `integer + integer`는 `integer`, `integer + bigint`는 `bigint`, `1`은 `integer`, `1.50`은 `numeric`, `'a'`는 `text`, `count()`·`sum(int)`은 `bigint`, `avg()`는 `numeric`, `now()`은 `timestamp with time zone`([코어의 타입](architecture.md#코어의-타입)). 결과 열의 선언 타입(`sqlite3_column_decltype()`, psql `\gdesc`의 철자), 값 표시, 매개변수의 타입, 정수 산술의 범위 검사(아래 정수 오버플로), 저장 시 변환(`boolean`, `numeric`)에 씀. 오버로드는 고르지 않음 | 그 밖의 계산은 SQLite의 것 |
+| 식의 타입 | 연산자·함수 해석이 정함 | 같은 규칙으로 매김: `integer + integer`는 `integer`, `integer + bigint`는 `bigint`, `1`은 `integer`, `1.50`은 `numeric`, `'a'`는 `text`, `count()`·`sum(int)`은 `bigint`, `avg()`는 `numeric`, `now()`은 `timestamp with time zone`([코어의 타입](architecture.md#코어의-타입)). 결과 열의 선언 타입(`sqlite3_column_decltype()`, psql `\gdesc`의 철자), 값 표시, 매개변수의 타입, 정수 산술의 범위 검사(아래 정수 오버플로), 저장 시 변환(`boolean`, `numeric`)에 씀. 피연산자 타입으로 고르는 오버로드는 `jsonb` 연산자·비교·`ORDER BY`와 JSON을 만드는 함수의 인자뿐(`overload.zig`) | 그 밖의 계산은 SQLite의 것 |
 | NULL 정렬 | NULL이 가장 큰 값 | 같음(ASC면 마지막, DESC면 처음) | SQLite는 반대라 방언이 맞춤. NULL일 수 없는 열(NOT NULL, INTEGER PRIMARY KEY, 외부 조인의 NULL 쪽이 아닌 것)에는 붙이지 않아 인덱스 순서를 그대로 씀(그때 바이트코드는 SQLite와 같음) |
 | `LIKE` | 대소문자 구분, 기본 이스케이프 `\` | 같음(엔진 함수 `xq_like()`). `ILIKE`는 ASCII 대소문자만 무시(`xq_ilike()`) | SQLite의 LIKE는 대소문자를 무시하고 기본 이스케이프가 없음 |
 | identity·serial | 시퀀스 | 시퀀스 `<table>_<col>_seq`. 아래 [identity](#identity와-serial) | SQLite는 INTEGER PRIMARY KEY의 DEFAULT를 쓰지 않음 |
@@ -366,7 +366,7 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE` |
 | 스키마 | 스키마 요소가 있는 `CREATE SCHEMA s CREATE TABLE ...`, `ALTER SCHEMA`, `ALTER TABLE ... SET SCHEMA`, `DROP SCHEMA public`, 이름에 `.`이 있는 스키마, 대소문자만 다른 두 스키마(SQLite의 이름 비교처럼 같은 이름), 다른 스키마의 뷰·외래 키가 기대는 것을 `CASCADE`가 따라 지우는 것, 여러 테이블을 지우는 `DROP SCHEMA ... CASCADE`의 auto_vacuum 데이터베이스(거부함), 상수가 아닌 `nextval(x)`의 `search_path`(이름 그대로 main에서 찾음), `public`에 이름이 `s.t`인 개체(스키마 `s`의 `t`와 겹침) |
 | 절차·서버 | PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `SET LOCAL`, `SHOW ALL`, `SET`의 트랜잭션 의미(롤백해도 남음), 격리 수준 |
-| 오류 | 실행 중 오류 메시지의 PostgreSQL화 |
+| 오류 | 제약 위반·산술·저장 변환 밖의 실행 중 엔진 오류(SQLite 내장 함수가 내는 것 등)의 PostgreSQL 문구, 제약 위반의 `DETAIL` |
 | 카탈로그 | INTEGER PRIMARY KEY의 인덱스(`pg_indexes`에 `t_pkey`가 없음), 붙인 데이터베이스(`information_schema`·`pg_catalog` 뷰에 나오지 않음) |
 | 셸 | dollar-quote 문장 분할(셸은 SQLite 규칙으로 문장을 나눔) |
 

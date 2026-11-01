@@ -20,7 +20,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 1. **SQLite의 Zig 포팅**: SQLite의 구조(Pager, B-Tree, VDBE)를 Zig로 다시 구현합니다. C 바인딩이 아니라 순수 Zig 구현입니다.
 2. **SQLite 파일 포맷 호환**: 기존 `.sqlite` / `.db` 파일을 그대로 읽고 씁니다.
 3. **멀티 방언 SQL**: 연결 단위로 방언을 골라 PostgreSQL, MariaDB, MSSQL, Oracle의 문법과 의미를 따릅니다.
-4. **임베디드 우선**: 별도 프로세스 없이 라이브러리로 링크해 씁니다. 필요하면 와이어 프로토콜 서버 모드를 켤 수 있게 할 계획입니다.
+4. **임베디드 우선**: 별도 프로세스 없이 라이브러리로 링크해 씁니다. 필요하면 와이어 프로토콜 서버(`xqlite serve`)로 띄울 수도 있습니다.
 5. **Zig다운 설계**: 명시적 allocator, comptime을 활용한 방언 특화, 숨은 전역 상태 없음, 크로스 컴파일 지원.
 
 ## 비목표
@@ -34,7 +34,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │                         Public API                            │
-│        Zig API  ·  C ABI (sqlite3 호환)  ·  Wire Server*      │
+│        Zig API  ·  C ABI (sqlite3 호환)  ·  Wire Server       │
 └───────────────────────────────┬───────────────────────────────┘
                                 │
 ┌───────────────────────────────▼───────────────────────────────┐
@@ -71,7 +71,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | **VDBE** | SQLite와 같은 레지스터 기반 바이트코드 VM입니다. |
 | **Planner** | 공통 IR을 받아 인덱스 선택, 조인 순서 결정, 서브쿼리 평탄화 등을 수행합니다. |
 | **Dialect Frontend** | 방언별 lexer/parser입니다. 식별자 인용, 타입 변환, NULL/정렬 규칙, 함수 이름 해석을 정해 구문 트리 IR로 만듭니다. |
-| **Catalog** | 방언 메타데이터(`xq_catalog`)와 시퀀스(`xq_sequence`)를 일반 테이블에 둡니다. `information_schema`, `pg_catalog`, MSSQL `sys.*`, Oracle의 `USER_TABLES` 같은 메타데이터 뷰가 이것을 읽습니다. |
+| **Catalog** | 방언 메타데이터(`xq_catalog`)와 시퀀스(`xq_sequence`)를 일반 테이블에 둡니다. 연결은 카탈로그를 메모리에 읽어 두므로 문장을 컴파일할 때 질의하지 않습니다. `information_schema`, `pg_catalog`, MSSQL `sys.*`, Oracle의 `USER_TABLES` 같은 메타데이터 뷰가 이것을 읽습니다. |
 
 방언 프론트엔드, 구문 트리 IR, lower/render 계약, 방언 훅, 카탈로그는 [방언 아키텍처](docs/architecture.md)에 자세히 정리했습니다.
 
@@ -110,7 +110,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 | 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 | 🔬 PL/SQL |
 | 트리거 | ✅ | 🎯 | 🎯 | 🎯 | 🎯 |
 | 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🚧 `INFORMATION_SCHEMA`, `sys.*` 일부 | 🚧 `USER_*`/`ALL_*` 뷰 |
-| 와이어 프로토콜 | — | 🔬 pgwire v3 | 🔬 MySQL protocol | 🔬 TDS 7.4 | — |
+| 와이어 프로토콜 | — | 🚧 pgwire v3 (`xqlite serve --pg`) | 🚧 MySQL protocol (`xqlite serve --mysql`) | 🔬 TDS 7.4 | — |
 
 ✅ 구현 · 🚧 일부 구현 · 🎯 목표 · 🔬 실험적 / 후순위 · — 해당 없음
 
@@ -290,7 +290,7 @@ src/
 │   ├── where/          # 플래너 (where.c, wherecode.c, whereexpr.c ...)
 │   └── func/           # 내장 함수 (func.c, date.c, json.c)
 ├── ir/                 # 공통 IR: 빌더 파사드, 구문 트리, lower, render
-├── catalog/            # 방언 메타데이터(xq_catalog), 시퀀스(xq_sequence)
+├── catalog/            # 방언 메타데이터(xq_catalog)와 메모리의 카탈로그(meta.zig), 시퀀스(xq_sequence)
 ├── dialect/
 │   ├── sqlite/
 │   ├── postgres/       # lexer, parser(→ 구문 트리 IR), DDL 검사, 카탈로그 뷰

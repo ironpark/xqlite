@@ -64,7 +64,7 @@
 | `failed(Failure)` | 실패한 문장. 스크립트는 거기서 멈춤 | ErrorResponse | ERR | ERROR + DONE |
 
 - 표현식 열의 타입은 문장이 매긴 타입(`engine.resultType()`)이고, 없으면 첫 행 값의 저장 클래스로 정합니다. 그래서 `columns`는 첫 `step()` 뒤에 나갑니다. 행도 없으면 `unknown`입니다. 준비된 문장의 `columns`는 실행 전의 것입니다([준비된 문장](#준비된-문장)).
-- 세션은 `column_metadata`로 열므로 열의 출처를 찾으려고 문장을 다시 컴파일하지 않습니다. 테이블 열의 선언 타입은 세션의 캐시에 두고, 그 데이터베이스의 스키마 버전이 바뀌면(이 연결이든 다른 연결이든) 다시 읽습니다. 그래서 같은 테이블을 읽는 질의는 `xq_catalog`를 다시 보지 않습니다.
+- 세션은 `column_metadata`로 열므로 열의 출처를 찾으려고 문장을 다시 컴파일하지 않습니다. 테이블 열의 선언 타입은 연결이 메모리에 둔 카탈로그(`catalog/meta.zig`)에서 읽고, 그 데이터베이스의 스키마가 바뀌면(이 연결이든 다른 연결이든) 다시 읽습니다. 그래서 같은 테이블을 읽는 질의는 `xq_catalog`를 다시 보지 않습니다([메모리의 카탈로그](architecture.md#메모리의-카탈로그)).
 - 바꾼 행 수(`Complete.changes`)는 엔진이 정합니다(`Stmt.countsChanges()`). 방언이 DML로 바꾸는 문장(`MERGE`, `TRUNCATE`)도 셉니다.
 - `Row.value(i)`는 빌린 값입니다. sink가 돌아가기 전까지만 유효합니다.
 - 실패한 문장은 `run()`의 오류가 아니라 `failed` 이벤트입니다. `run()`의 오류는 sink의 오류(클라이언트가 떠남)와 메모리 부족뿐입니다.
@@ -103,7 +103,7 @@ try session.sync(&sink);                                 // 암묵적 트랜잭�
 
 - `Stmt.columnTypeAlloc(gpa, i)`: 결과 열이 테이블 열이면 그 열의 방언 타입(`character varying(20)`, `DATETIME2(3)`, `NUMBER(10,2)`)과 그 테이블을 만든 방언, 카탈로그 항목이 없으면 SQLite 선언 타입과 `.sqlite`. 세션의 방언이 아니라 테이블을 만든 방언으로 읽습니다(PostgreSQL 세션이 MariaDB가 만든 테이블을 읽을 때). 표현식이면 문장이 매긴 타입의 철자와 문장의 방언(PostgreSQL의 `a + 1`은 `integer`, `count(*)`는 `bigint`), 모르면 null.
 - `Stmt.parameterType(i)`: 문장이 매개변수에 매긴 타입(비교·연산의 상대, 저장되는 열의 타입). `Prepared.parameterType()`으로 확장 질의(`ParameterDescription`)가 씁니다.
-- 세션은 열의 타입을 `xqlite.display.Columns`로 읽습니다(카탈로그를 스키마 버전마다 한 번). 같은 것을 셸도 씁니다([값 표시](architecture.md#값-표시)).
+- 세션은 열의 타입을 `xqlite.display.Columns`로 읽습니다(상태가 없고, 테이블 열은 연결이 메모리에 둔 카탈로그에서). 같은 것을 셸도 씁니다([값 표시](architecture.md#값-표시)).
 - `xqlite.types.parse(dialect, name)`: 이름을 `Type`(`logical`, `length`, `precision`, `scale`)으로 읽습니다. 방언마다 다른 것: SQLite의 정수·실수는 모두 64비트, MariaDB·MSSQL의 `TINYINT`는 `int1`, MSSQL의 `BIT`은 `boolean`, Oracle의 `DATE`는 시각이 있어 `timestamp`, Oracle의 `NUMBER(p)`는 자릿수에 따라 정수.
 - 각 프로토콜이 `Logical`을 자기 코드로 바꿉니다(PostgreSQL의 타입 OID, MySQL의 `MYSQL_TYPE_*`, TDS의 타입 토큰). 값의 텍스트는 `xqlite.display.text()`가 그 방언의 클라이언트가 보는 대로 만듭니다(PostgreSQL의 `t`/`f`, `numeric(10,2)`의 `1.50`).
 

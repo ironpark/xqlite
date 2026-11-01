@@ -31,7 +31,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 방언은 두 가지로 이루어집니다.
 
 - **프론트엔드**: 방언의 문법을 읽어 공통 IR로 내리는 렉서·파서입니다.
-- **훅**: 방언이 엔진의 동작을 바꾸는 지점(함수 테이블, 엔진 함수, collation)입니다.
+- **훅**: 방언이 엔진의 동작을 바꾸는 지점(함수 테이블, 엔진 함수, collation, 산술·제약 위반의 오류, 식의 타입 규칙 ...)입니다([방언 훅](#방언-훅)).
 
 데이터는 하나의 SQLite 파일에 저장되고, 방언은 SQL을 해석하는 방식만 바꿉니다. 스키마에 저장되는 텍스트는 언제나 SQLite SQL이므로 sqlite3가 그 파일을 그대로 열 수 있습니다.
 
@@ -39,7 +39,9 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.xq.lang)으로 디스패치
                  ├─ dialect/sqlite    tokenize.zig + parser.zig (기준 구현) ─────────────┐
                  ├─ dialect/postgres  lexer → parser ─┐                                   │
-                 └─ dialect/mariadb   lexer → parser ─┤                                   │
+                 ├─ dialect/mariadb   lexer → parser ─┤                                   │
+                 ├─ dialect/mssql     lexer → parser ─┤                                   │
+                 └─ dialect/oracle    lexer → parser ─┤                                   │
                                                       ▼                                   │
                                      구문 트리 IR (src/ir/tree.zig)                       │
                                        ├─ lower.zig  ─────────────────────────────────────┤ ir.*
@@ -47,8 +49,8 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
                                                          (sqlite_schema)                  ▼
                                                                파스 트리 + 빌더 ──▶ VDBE 바이트코드
                                                                           ▲
-   방언 훅(dialect.Hooks): 함수 테이블 · 엔진 함수 · 추가 collation · 기본 collation
-   카탈로그(src/catalog): xq_catalog · xq_sequence · 이름 붙은 스키마(schema.zig)
+   방언 훅(dialect.Hooks): 함수 테이블 · 엔진 함수 · 추가 collation · 기본 collation · 산술·제약 오류 · 타입 규칙
+   카탈로그(src/catalog): xq_catalog와 메모리의 카탈로그(meta.zig) · xq_sequence · 이름 붙은 스키마(schema.zig)
 ```
 
 ## 방언 고르기
@@ -203,7 +205,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 ## 새 프론트엔드 붙이기
 
 1. `src/dialect/<방언>/frontend.zig`에 `frontend`(`run`)와 `hooks`를 둡니다.
-2. `dialect.Dialect`와 `module()`에 추가합니다. `Dialect`의 값 3은 MSSQL 자리로 남겨 두었습니다.
+2. `dialect.Dialect`와 `module()`에 추가합니다.
 3. `run`은 렉서·파서로 `ir.tree` 트리를 만듭니다. 스키마가 필요한 해석은 `p`로 `ir.stmt.readSchema()`를 부른 뒤에 합니다.
 4. DDL의 방언 검사와 카탈로그 키를 더한 뒤 `ir.lower`로 내립니다.
 5. SQLite 문법에 없는 의미가 필요하면 의미 노드를 씁니다. 노드가 부르는 엔진 함수가 없으면 `hooks.engine_functions`에 `xq_` 이름으로 등록합니다.
@@ -386,6 +388,7 @@ SQLite의 STRICT 테이블 기계를 그대로 씁니다.
 | `identity_kind` | identity 종류 |
 | `collation` | collation |
 | `default` | 기본값 |
+| `constraint:<종류>:<열>,...` | 사용자가 이름을 준 UNIQUE·PRIMARY KEY·FOREIGN KEY 제약의 이름(테이블 항목, `col`은 `''`). 방언의 제약 위반 오류에 씀([제약 위반](#제약-위반)) |
 
 방언 고유 키는 `pg.`, `mariadb.`, `oracle.` 접두사를 씁니다.
 
@@ -539,10 +542,11 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 
 | 파일 | 내용 |
 | --- | --- |
-| `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`; 3은 MSSQL 자리), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
+| `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`, `mssql`, `oracle`), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
 | `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena` |
 | `src/dialect/{calendar,json_text,words,lex,template,tokenized,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 예약어 집합(접힌 대소문자를 컴파일 시점에 검사), 따옴표 토큰 스캔, 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 문장을 먼저 토큰화하는 프론트엔드의 `run`, MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
-| `src/dialect/{sqlite,postgres,mariadb}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
+| `src/dialect/{sqlite,postgres,mariadb,mssql,oracle}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
+| `src/dialect/constraint.zig`, `src/dialect/*/constraints.zig` | 제약 위반의 방언 문구와 `ErrorState`(`Hooks.constraint`, [제약 위반](#제약-위반)) |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres.md)) |
 | `src/dialect/mariadb/*.zig` | MariaDB 프론트엔드([MariaDB 호환](mariadb.md)) |
 | `src/dialect/mssql/*.zig` | MSSQL(T-SQL) 프론트엔드([MSSQL 호환](mssql.md)) |

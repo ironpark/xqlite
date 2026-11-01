@@ -25,8 +25,8 @@
 
 | 상태 | 무엇 |
 | --- | --- |
-| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), BLOB 증분 I/O(`Db.openBlob`), 직렬화(`Db.serialize`, `Db.deserialize`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
-| 계획 | 훅, 가상 테이블 쓰기, 서버 모드 ([아직 없는 것](#아직-없는-것)) |
+| 있음 | 연결(`Db.open`, VFS 선택, 저널 모드, busy timeout, 외래 키, 방언), 실행과 질의(`exec`, `execArgs`, `one`, `oneAlloc`, `all`), 문장(`Stmt`, `Iterator`), comptime 바인딩·행 매핑, 오류 집합과 `Diagnostics`, 트랜잭션·세이브포인트, 백업(`Db.backup`), BLOB 증분 I/O(`Db.openBlob`), 직렬화(`Db.serialize`, `Db.deserialize`), 실행 전의 문장 설명(`columnOrigin`, `columnTypeAlloc`, `columnConstraints`, `parameterType`, `recompileCount`)과 방언의 타입·값 표시(`xqlite.types`, `xqlite.display`), 사용자 함수·집계(윈도우) 함수·collation·읽기 전용 가상 테이블 |
+| 계획 | 훅, 가상 테이블 쓰기, TDS 서버 ([아직 없는 것](#아직-없는-것)) |
 
 설계 원칙은 다음과 같습니다.
 
@@ -180,9 +180,9 @@ db.setDialect(.mariadb);            // 이후에 준비하는 문장부터 Maria
 std.debug.print("{d} {t}\n", .{ id, db.dialect() });
 ```
 
-- `xqlite.Dialect`는 `.sqlite`, `.postgres`, `.mariadb`, `.oracle`입니다. MSSQL은 아직 없습니다.
+- `xqlite.Dialect`는 `.sqlite`, `.postgres`, `.mariadb`, `.mssql`, `.oracle`입니다.
 - `setDialect()`는 그 뒤에 준비하는 문장에만 적용됩니다. 이미 준비한 문장은 자기 방언을 유지합니다(`PRAGMA xq_dialect`와 같음).
-- 방언의 구조는 [방언 아키텍처](architecture.md), 방언별 문법은 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [Oracle 호환](oracle.md)에 있습니다.
+- 방언의 구조는 [방언 아키텍처](architecture.md), 방언별 문법은 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [MSSQL 호환](mssql.md), [Oracle 호환](oracle.md)에 있습니다.
 
 ## 값의 수명 규칙
 
@@ -427,7 +427,6 @@ Zig API에 아직 없는 것입니다.
 - 훅(commit/update/authorizer)
 - 가상 테이블의 쓰기(`xUpdate`), 일반 제약 푸시다운, 트랜잭션 메서드
 - 엔진 할당자를 연결별로 고르는 기능(지금은 `configMalloc()` 하나)
-- MSSQL 방언
 
 훅(commit/rollback/update, 진행 처리기, 트레이스), 권한 검사기, collation-needed·autovacuum-pages 콜백은 엔진에 있고 C ABI에서 쓸 수 있습니다([C API](c-api.md)). Zig API에는 아직 감싸지 않았습니다.
 
@@ -438,5 +437,5 @@ Zig API 밖의 인터페이스입니다.
 - **서버 모드(선택, PostgreSQL·MySQL 프로토콜이 있음)**: 기존 클라이언트와 ORM을 그대로 붙일 수 있도록 와이어 프로토콜 서버(pgwire, MySQL protocol, TDS)를 선택적으로 제공합니다. 프로토콜과 상관없는 부분(리스너, 세션, 준비된 문장, 타입·오류 분류)과 PostgreSQL 프로토콜(`xqlite serve --pg`), MySQL 프로토콜(`xqlite serve --mysql`)은 `xqlite_server` 모듈에 있습니다([서버](server.md)). TDS는 아직 없습니다.
 
   ```sh
-  xqlite serve app.db --pg 5432 --mysql 3306 --tds 1433
+  xqlite serve app.db --pg 5432 --mysql 3306
   ```

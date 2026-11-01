@@ -474,7 +474,7 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 | `LAST_INSERT_ID()` | 여러 행 INSERT에서는 마지막 행의 id입니다. 직접 넣은 id에도 바뀝니다. |
 | `ON DUPLICATE KEY UPDATE` | affected rows는 SQLite 방식(행마다 1)입니다. 한 행이 두 UNIQUE 키에서 서로 다른 두 행과 충돌하면 첫 행만 고칩니다. |
 | `SHOW WARNINGS` | 문장을 컴파일할 때(보통 직전 문장 실행 직후) 기록된 경고를 보여 줍니다. 경고는 다음 문장을 컴파일할 때 지워집니다. 최대 8개를 저장하고 개수는 전부 셉니다. |
-| 엔진 오류 | 제약 위반은 MariaDB 문구입니다([제약 위반](#제약-위반)). 그 밖의 엔진 오류는 SQLite 메시지 그대로이고, `no such table`만 MariaDB의 `Table 'db.t' doesn't exist`로 바꿉니다. |
+| 엔진 오류 | 제약 위반은 MariaDB 문구입니다([제약 위반](#제약-위반)). 그 밖의 엔진 오류는 SQLite 메시지 그대로이고, `no such table`(MariaDB의 `Table 'db.t' doesn't exist`)과 64비트를 넘는 정수 결과(`BIGINT value is out of range`)만 MariaDB 문구입니다. |
 | `INSERT ... SELECT` | 변환 오류 메시지의 행 번호가 언제나 1입니다. |
 
 ### 데이터베이스

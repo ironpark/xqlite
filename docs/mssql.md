@@ -451,7 +451,7 @@ DROP SCHEMA sales;                                         -- 비어 있어야 �
 
 ### SQL Server와 비교
 
-`xqt dialect-diff mssql`(`tools/xqt/dialect_diff.zig`)은 `tools/dialect/mssql-cases.txt`의 각 경우를 SQL Server(sqlcmd)와 `xqlite sql`(`.dialect mssql`)에서 실행해 결과 행, 열 이름, `ERROR:` 줄을 비교합니다. 지금 57개 경우가 모두 같습니다.
+`xqt dialect-diff mssql`(`tools/xqt/dialect_diff.zig`)은 `tools/dialect/mssql-cases.txt`의 각 경우를 SQL Server(sqlcmd)와 `xqlite sql`(`.dialect mssql`)에서 실행해 결과 행, 열 이름, `ERROR:` 줄을 비교합니다. 지금 58개 경우가 모두 같습니다.
 
 ```sh
 zig build tools

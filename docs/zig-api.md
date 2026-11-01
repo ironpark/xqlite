@@ -382,18 +382,24 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_open_v2` | `Db.open(gpa, io, path, options)` |
 | `sqlite3_close` | `Db.close()` / `Db.tryClose()` |
 | `sqlite3_exec` | `Db.exec(sql)` (여러 문장), `Db.execArgs(sql, args)` (한 문장 + 바인딩) |
+| `sqlite3_prepare_v2`의 `pzTail` 반복 | `Db.script(sql)`, `Script.next()`, `Script.deinit()` (문장마다 결과를 읽는 스크립트) |
 | `sqlite3_prepare_v2` | `Db.prepare(sql)` (한 문장만, 나머지가 있으면 `error.MultipleStatements`) |
 | `sqlite3_bind_*` | `Stmt.bind(args)`, `bindAt`, `bindName`, `clearBindings` |
 | `sqlite3_bind_parameter_count/name/index` | `parameterCount`, `parameterName`, `parameterIndex` |
 | `sqlite3_step` | `Stmt.step() !bool`, `Stmt.next(T)`, `Iterator(T).next()` |
 | `sqlite3_column_*` | `Stmt.column(T, i)`, `columnAlloc`, `row(T)`, `rowAlloc`, `columnKind` |
 | `sqlite3_column_count/name/decltype` | `columnCount`, `columnName`, `columnDecltype`, `columnIndex` |
+| `sqlite3_column_database/table/origin_name` | `Stmt.columnOrigin(i)` (`OpenOptions.column_metadata`면 다시 컴파일하지 않음) |
+| (방언의 선언 타입, `xq_catalog`) | `Stmt.columnTypeAlloc(gpa, i)` (`character varying(20)`과 그 방언 ...) |
+| (`Vdbe.changeCntOn`) | `Stmt.countsChanges()` |
+| `PRAGMA schema_version` (파일을 읽지 않음) | `Db.schemaVersion(name)` |
 | `sqlite3_reset` / `sqlite3_finalize` | `Stmt.reset()` / `Stmt.finalize()` |
 | `sqlite3_sql`, `sqlite3_stmt_readonly` | `Stmt.sql()`, `Stmt.isReadOnly()` |
 | `sqlite3_errcode/extended_errcode/errmsg/error_offset` | 오류 집합 + `Db.lastError()`, `Diagnostics` |
 | `sqlite3_errstr` | `ResultCode.description()` |
 | `sqlite3_last_insert_rowid`, `sqlite3_changes64`, `sqlite3_total_changes64` | `lastInsertRowid`, `changes`, `totalChanges` |
 | `sqlite3_get_autocommit` | `!inTransaction()` |
+| `sqlite3_interrupt` | `Db.interrupt()` (다른 스레드에서 불러도 됨) |
 | `sqlite3_busy_timeout` | `OpenOptions.busy_timeout_ms`, `setBusyTimeout` |
 | `sqlite3_create_function_v2` / `create_window_function` | `createFunction`, `createAggregate` |
 | `sqlite3_create_collation` | `createCollation` |
@@ -410,18 +416,18 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 
 Zig API에 아직 없는 것입니다.
 
-- 훅(commit/update/authorizer), `sqlite3_interrupt`
+- 훅(commit/update/authorizer)
 - 가상 테이블의 쓰기(`xUpdate`), 일반 제약 푸시다운, 트랜잭션 메서드
 - 엔진 할당자를 연결별로 고르는 기능(지금은 `configMalloc()` 하나)
 - MSSQL 방언
 
-훅(commit/rollback/update, 진행 처리기, 트레이스), 권한 검사기, collation-needed·autovacuum-pages 콜백과 `sqlite3_interrupt`는 엔진에 있고 C ABI에서 쓸 수 있습니다([C API](c-api.md)). Zig API에는 아직 감싸지 않았습니다.
+훅(commit/rollback/update, 진행 처리기, 트레이스), 권한 검사기, collation-needed·autovacuum-pages 콜백은 엔진에 있고 C ABI에서 쓸 수 있습니다([C API](c-api.md)). Zig API에는 아직 감싸지 않았습니다.
 
 Zig API 밖의 인터페이스입니다.
 
 - **C ABI**: 있습니다. `sqlite3_*` 호환 C ABI(`libxqlite3`)로 기존 SQLite 바인딩에서 라이브러리만 바꿔 쓸 수 있고, 방언은 URI 파라미터(`file:app.db?dialect=mariadb`)나 `xqlite_set_dialect()`로 고릅니다. [C API](c-api.md)를 보세요.
 
-- **서버 모드(선택, 아직 코드 없음)**: 기존 클라이언트와 ORM을 그대로 붙일 수 있도록 와이어 프로토콜 서버(pgwire, MySQL protocol, TDS)를 선택적으로 제공할 계획입니다.
+- **서버 모드(선택, 기반만 있음)**: 기존 클라이언트와 ORM을 그대로 붙일 수 있도록 와이어 프로토콜 서버(pgwire, MySQL protocol, TDS)를 선택적으로 제공할 계획입니다. 프로토콜과 상관없는 부분(리스너, 세션, 타입·오류 분류)은 `xqlite_server` 모듈에 있습니다([서버](server.md)).
 
   ```sh
   xqlite serve app.db --pg 5432 --mysql 3306 --tds 1433

@@ -99,6 +99,14 @@ pub fn prepare(h: *Handle, sql: []const u8, tail: *[]const u8) Error!?*Vm {
     return vm;
 }
 
+/// prepare() of NUL-terminated text, parsed in place: for a script,
+/// whose rest `tail` points into the same text.
+pub fn prepareZ(h: *Handle, sql: [:0]const u8, tail: *[:0]const u8) Error!?*Vm {
+    var vm: ?*Vm = null;
+    try int.check(prepare_mod.prepareV3Z(h, sql, 0, &vm, tail));
+    return vm;
+}
+
 /// Whether `sql` holds no token but white space, comments and
 /// semicolons, by the rules of the SQL tokenizer.
 pub fn onlyTrivia(gpa: std.mem.Allocator, sql: []const u8) error{OutOfMemory}!bool {
@@ -356,6 +364,69 @@ pub fn sqlText(v: *const Vm) ?[]const u8 {
 /// sqlite3_stmt_readonly().
 pub fn stmtReadonly(v: *const Vm) bool {
     return v.read_only;
+}
+
+/// The table column a result column reads (Stmt.Origin).
+pub const Origin = struct {
+    /// The schema name: "main", "temp" or that of an attached database.
+    database: []const u8,
+    table: []const u8,
+    column: []const u8,
+};
+
+/// The origin of result column `i` (SQLITE_ENABLE_COLUMN_METADATA's
+/// sqlite3_column_database_name(), _table_name(), _origin_name()), or
+/// null for an expression. The names are valid until the statement is
+/// finalized.
+pub fn columnOrigin(v: *Vm, i: usize) ?Origin {
+    if (!prepare_mod.columnMetadata(v)) return null;
+    return .{
+        .database = api.columnNameOf(v, i, vi.COLNAME_DATABASE) orelse return null,
+        .table = api.columnNameOf(v, i, vi.COLNAME_TABLE) orelse return null,
+        .column = api.columnNameOf(v, i, vi.COLNAME_COLUMN) orelse return null,
+    };
+}
+
+/// Record the origins of result columns while compiling (as
+/// SQLITE_ENABLE_COLUMN_METADATA builds do), rather than compiling a
+/// statement again on its first columnOrigin().
+pub fn setColumnMetadata(h: *Handle, on: bool) void {
+    h.col_metadata = on;
+}
+
+/// Whether the statement counts the rows it changes (an INSERT, UPDATE or
+/// DELETE, as the dialects lower theirs): what sqlite3_changes() reports
+/// after it.
+pub fn countsChanges(v: *const Vm) bool {
+    return v.change_cnt_on;
+}
+
+/// The declared type of a column in the dialect that made its table
+/// (xq_catalog), copied with `gpa`, and that dialect; null if the
+/// catalog has none.
+pub fn catalogType(h: *Handle, gpa: std.mem.Allocator, schema: []const u8, table: []const u8, column: []const u8) Error!?struct { []u8, Dialect } {
+    const catalog = @import("../catalog/catalog.zig");
+    const t = try catalog.get(h, gpa, schema, table, column, catalog.Key.decl_type) orelse return null;
+    errdefer gpa.free(t);
+    const d = try catalog.get(h, gpa, schema, table, "", catalog.Key.dialect);
+    defer if (d) |z| gpa.free(z);
+    return .{ t, if (d) |z| Dialect.fromName(z) orelse .sqlite else .sqlite };
+}
+
+/// The schema version of database `name` as the connection last read it
+/// (its schema cookie, without reading the file), or null if there is no
+/// such database.
+pub fn schemaVersion(h: *const Handle, name: []const u8) ?u32 {
+    for (h.dbs.items) |*d| {
+        if (std.ascii.eqlIgnoreCase(d.name, name)) return @bitCast(d.schema.schema_cookie);
+    }
+    return null;
+}
+
+/// sqlite3_interrupt(): stop the statements running on `h` at their next
+/// check. Safe from any thread (an atomic flag).
+pub fn interrupt(h: *Handle) void {
+    h.is_interrupted.store(true, .monotonic);
 }
 
 /// How many times the statement has been compiled again after a schema

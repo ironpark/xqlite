@@ -180,6 +180,47 @@ pub fn columnDecltype(s: *Stmt, i: usize) ?[]const u8 {
     return engine.columnDecltype(s.vm, i);
 }
 
+/// The table column that result column `i` reads
+/// (SQLITE_ENABLE_COLUMN_METADATA's sqlite3_column_table_name() and
+/// friends), or null for an expression. Valid until the statement is
+/// finalized. Unless the connection was opened with
+/// OpenOptions.column_metadata, the first call compiles the statement once
+/// more to find them.
+pub fn columnOrigin(s: *Stmt, i: usize) ?Origin {
+    return engine.columnOrigin(s.vm, i);
+}
+
+pub const Origin = engine.Origin;
+
+/// A declared type and the dialect it is written in.
+pub const TypeName = struct {
+    /// Owned by the caller.
+    text: []u8,
+    dialect: engine.Dialect,
+};
+
+/// The declared type of result column `i`: as the table column was
+/// declared in the dialect that made the table (kept in xq_catalog:
+/// `character varying(20)` of PostgreSQL, `DATETIME2` of SQL Server), else
+/// its SQLite declared type (columnDecltype(), `.sqlite`); null for an
+/// expression.
+pub fn columnTypeAlloc(s: *Stmt, gpa: Allocator, i: usize) Error!?TypeName {
+    if (s.columnOrigin(i)) |o| {
+        if (try s.conn.check(engine.catalogType(s.conn.h, gpa, o.database, o.table, o.column))) |t| {
+            return .{ .text = t[0], .dialect = t[1] };
+        }
+    }
+    const t = s.columnDecltype(i) orelse return null;
+    return .{ .text = gpa.dupe(u8, t) catch return s.conn.outOfMemory(), .dialect = .sqlite };
+}
+
+/// Whether the statement counts the rows it changes (an INSERT, UPDATE or
+/// DELETE, or a statement a dialect makes one of): Db.changes() is its
+/// count after it ran.
+pub fn countsChanges(s: *const Stmt) bool {
+    return engine.countsChanges(s.vm);
+}
+
 /// The datatype of column `i` of the current row.
 pub fn columnKind(s: *Stmt, i: usize) Kind {
     return value.kindOf(engine.columnType(s.vm, i));

@@ -9,6 +9,7 @@ const MemVfs = @import("xqlite_vfs").mem.MemVfs;
 const testing = std.testing;
 const gpa = testing.allocator;
 const Db = xqlite.Db;
+const Stmt = xqlite.Stmt;
 
 fn memDb() !Db {
     return Db.open(gpa, testing.io, ":memory:", .{});
@@ -813,6 +814,96 @@ test "zig api: collations: plain and with context" {
     try db.exec("CREATE TABLE d(s TEXT COLLATE bylen UNIQUE)");
     try db.exec("INSERT INTO d VALUES('ab')");
     try testing.expectError(error.Constraint, db.exec("INSERT INTO d VALUES('xy')"));
+}
+
+// ================================================== scripts and metadata
+
+test "zig api: script: one statement at a time, empty ones skipped" {
+    var db = try memDb();
+    defer db.close();
+    var it = try db.script("CREATE TABLE t(a INTEGER); ;; -- no statement\n INSERT INTO t VALUES(1), (2); SELECT sum(a) FROM t; /* end */");
+    defer it.deinit();
+    var sums: std.ArrayList(i64) = .empty;
+    defer sums.deinit(gpa);
+    var n: usize = 0;
+    while (try it.next()) |stmt_| {
+        var stmt = stmt_;
+        defer stmt.finalize();
+        n += 1;
+        // Each statement is compiled after the one before ran: the INSERT
+        // and SELECT see the table.
+        while (try stmt.step()) try sums.append(gpa, try stmt.column(i64, 0));
+    }
+    try testing.expectEqual(@as(usize, 3), n);
+    try testing.expectEqualSlices(i64, &.{3}, sums.items);
+    try testing.expectEqual(@as(?Stmt, null), try it.next());
+
+    // An error stops at the failing statement; the rest is still there.
+    var bad = try db.script("SELECT 1; SELECT * FROM nope; SELECT 2");
+    defer bad.deinit();
+    var first = (try bad.next()).?;
+    first.finalize();
+    try testing.expectError(error.Sql, bad.next());
+    try testing.expect(std.mem.indexOf(u8, bad.rest, "SELECT * FROM nope") != null);
+}
+
+test "zig api: columnOrigin and columnTypeAlloc" {
+    var db = try memDb();
+    defer db.close();
+    try db.exec("CREATE TABLE t(id INTEGER PRIMARY KEY, name VARCHAR(20))");
+    var stmt = try db.prepare("SELECT name AS n, id + 1, id FROM t");
+    defer stmt.finalize();
+    const o = stmt.columnOrigin(0).?;
+    try testing.expectEqualStrings("main", o.database);
+    try testing.expectEqualStrings("t", o.table);
+    try testing.expectEqualStrings("name", o.column);
+    try testing.expectEqual(@as(?xqlite.Origin, null), stmt.columnOrigin(1));
+    const ty = (try stmt.columnTypeAlloc(gpa, 0)).?;
+    defer gpa.free(ty.text);
+    try testing.expectEqualStrings("VARCHAR(20)", ty.text);
+    try testing.expectEqual(xqlite.Dialect.sqlite, ty.dialect);
+    try testing.expectEqual(@as(?Stmt.TypeName, null), try stmt.columnTypeAlloc(gpa, 1));
+    try testing.expect(!stmt.countsChanges());
+
+    // A table of another dialect: its type in that dialect.
+    if (!xqlite.Dialect.postgres.built()) return;
+    var pg = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres, .column_metadata = true });
+    defer pg.close();
+    try pg.exec("CREATE TABLE t(name varchar(20), at timestamptz, flag boolean)");
+    var q = try pg.prepare("SELECT name, at, flag, 1 FROM t");
+    defer q.finalize();
+    for ([_]?[]const u8{ "character varying(20)", "timestamp with time zone", "boolean", null }, 0..) |want, i| {
+        const got = try q.columnTypeAlloc(gpa, i);
+        defer if (got) |g| gpa.free(g.text);
+        if (want) |w| {
+            try testing.expectEqualStrings(w, got.?.text);
+            try testing.expectEqual(xqlite.Dialect.postgres, got.?.dialect);
+        } else try testing.expectEqual(@as(?Stmt.TypeName, null), got);
+    }
+    const v0 = pg.schemaVersion("main").?;
+    try pg.exec("CREATE TABLE u(a int)");
+    try testing.expect(pg.schemaVersion("main").? != v0);
+    try testing.expectEqual(@as(?u32, null), pg.schemaVersion("nope"));
+    var ins = try pg.prepare("INSERT INTO u VALUES(1)");
+    defer ins.finalize();
+    try testing.expect(ins.countsChanges());
+}
+
+fn interruptAt(db: *Db, n: i64) i64 {
+    if (n == 1000) db.interrupt();
+    return n;
+}
+
+test "zig api: interrupt stops the running statement only" {
+    var db = try memDb();
+    defer db.close();
+    try db.createFunction("interrupt_at", &db, interruptAt, .{});
+    try testing.expectError(error.Interrupt, db.exec(
+        \\WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 1000000)
+        \\SELECT count(interrupt_at(n)) FROM c
+    ));
+    // The next statement runs.
+    try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT 1", .{}));
 }
 
 // ======================================================== virtual tables

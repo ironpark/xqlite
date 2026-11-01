@@ -77,6 +77,11 @@ pub const OpenOptions = struct {
     busy_timeout_ms: u31 = 0,
     /// Enforce foreign key constraints (PRAGMA foreign_keys).
     foreign_keys: bool = false,
+    /// Record where each result column comes from while compiling, so
+    /// that Stmt.columnOrigin() and columnTypeAlloc() cost nothing more
+    /// (else the first call compiles the statement again): for a caller
+    /// that describes every result, as a wire protocol server does.
+    column_metadata: bool = false,
     /// The SQL dialect of the connection (setDialect()).
     dialect: Dialect = .sqlite,
     /// Receives the details of every failed call on this connection,
@@ -122,6 +127,7 @@ pub fn open(gpa: Allocator, io: std.Io, path: []const u8, options: OpenOptions) 
     errdefer engine.close(db.conn.h) catch {};
     if (options.busy_timeout_ms > 0) engine.busyTimeout(db.conn.h, options.busy_timeout_ms);
     if (options.foreign_keys) engine.setForeignKeys(db.conn.h, true);
+    if (options.column_metadata) engine.setColumnMetadata(db.conn.h, true);
     if (options.dialect != .sqlite) engine.setDialect(db.conn.h, options.dialect);
     if (options.journal_mode) |mode| try db.setJournalMode(mode);
     return db;
@@ -185,6 +191,57 @@ pub fn prepare(db: *Db, sql: []const u8) Error!Stmt {
     }
     return .{ .vm = v, .conn = db.conn };
 }
+
+/// The statements of the script `sql`, compiled one at a time, for a
+/// caller that wants the results of each (exec() runs a script without
+/// results):
+///
+///     var it = try db.script(sql);
+///     defer it.deinit();
+///     while (try it.next()) |stmt_| {
+///         var stmt = stmt_;
+///         defer stmt.finalize();
+///         while (try stmt.step()) { ... }
+///     }
+///
+/// Each statement is compiled when next() reaches it, so it sees the
+/// schema the ones before it left. The text is copied once (the parser
+/// reads NUL-terminated text) and parsed in place.
+pub fn script(db: *Db, sql: []const u8) Error!Script {
+    const copy = db.gpa.dupeSentinel(u8, sql, 0) catch return db.conn.outOfMemory();
+    return .{ .conn = db.conn, .gpa = db.gpa, .copy = copy, .rest = copy };
+}
+
+pub const Script = struct {
+    conn: Conn,
+    gpa: Allocator,
+    copy: [:0]u8,
+    /// The text after the statement next() returned last (as long as
+    /// what is left of the caller's text).
+    rest: [:0]const u8,
+
+    pub fn deinit(s: *Script) void {
+        s.gpa.free(s.copy);
+        s.* = undefined;
+    }
+
+    /// The next statement (sqlite3_prepare_v2() of the rest of the
+    /// text), or null at the end. Finalize it with Stmt.finalize().
+    pub fn next(s: *Script) Error!?Stmt {
+        while (s.rest.len > 0) {
+            var tail: [:0]const u8 = "";
+            const v = try s.conn.check(engine.prepareZ(s.conn.h, s.rest, &tail));
+            // No statement but text left: an empty statement (";") or
+            // comments, as sqlite3_exec() skips them.
+            const progressed = tail.len < s.rest.len;
+            s.rest = tail;
+            if (v) |vm| return .{ .vm = vm, .conn = s.conn };
+            if (!progressed) break;
+        }
+        s.rest = "";
+        return null;
+    }
+};
 
 /// Run `sql` with `args` and return the first row as `T` (see
 /// Stmt.row()), or null if there is none. `T` may not borrow text or
@@ -528,6 +585,24 @@ pub fn setDialect(db: *Db, d: Dialect) void {
 /// The SQL dialect of the connection.
 pub fn dialect(db: *const Db) Dialect {
     return engine.getDialect(db.conn.h);
+}
+
+/// Stop the statements running on this connection at their next check
+/// (sqlite3_interrupt()): their step() fails with error.Interrupt, and a
+/// statement started afterwards runs normally. Safe to call from any
+/// thread while the connection is open (an atomic flag): it is how a
+/// cancel request of another thread or client stops a query.
+pub fn interrupt(db: *const Db) void {
+    engine.interrupt(db.conn.h);
+}
+
+/// The schema version of database `name` ("main", "temp" or an attached
+/// one) as the connection last read it, without reading the file (PRAGMA
+/// schema_version), or null if there is no such database. It changes with
+/// every schema change, of this connection or another: a tag for what a
+/// caller keeps of the schema.
+pub fn schemaVersion(db: *const Db, name: []const u8) ?u32 {
+    return engine.schemaVersion(db.conn.h, name);
 }
 
 pub fn lastInsertRowid(db: *const Db) i64 {

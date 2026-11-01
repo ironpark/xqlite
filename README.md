@@ -260,7 +260,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - [x] **구문 트리 IR**: 방언 중립 구문 트리와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT. PostgreSQL과 MariaDB 프론트엔드를 옮겨 실행과 저장의 의미가 같아짐 ([방언 아키텍처](docs/architecture.md#render와-lower의-계약))
 - [x] **Phase 7 · MSSQL 방언**: T-SQL 렉서·파서(`[x]`, `N'..'`, `@변수`, `GO`), `TOP`/`OFFSET…FETCH`, `+`의 타입별 해석, `OUTPUT`, `UPDATE/DELETE … FROM`, 한 문장의 `MERGE`, SQL Server 타입과 값 변환, `IDENTITY`/`IDENTITY_INSERT`, 변수, 중첩 트랜잭션, `INFORMATION_SCHEMA`·`sys.*`. SQL Server(Azure SQL Edge)와 차등 비교 ([MSSQL 호환](docs/mssql.md))
 - [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle.md))
-- [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS
+- [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS. 공통 기반(리스너, 세션, 열 타입·오류·명령 분류, 취소)은 있음 ([서버](docs/server.md))
 - [x] **C ABI**: `sqlite3_*` 호환 C ABI(`libxqlite3`, SQLite 3.54.1 헤더), URI 파라미터 `?dialect=`, commit·rollback·update 훅과 진행 처리기. SQLite의 `shell.c`가 그대로 링크되어 돌아감 ([C API](docs/c-api.md))
 
 ## 프로젝트 구조
@@ -286,6 +286,7 @@ src/
 ├── api/                # Zig API
 ├── capi/               # sqlite3 호환 C ABI (루트는 capi.zig)
 ├── ext/                # 셸용 확장 (generate_series, vtablog)
+├── server/             # 와이어 프로토콜 서버의 공통 기반 xqlite_server (리스너, 세션, 타입·오류 분류)
 └── wasm/               # 브라우저·JavaScript용 wasm 모듈 (xq_* 내보내기)
 pkg/
 ├── vfs/                # VFS 패키지 xqlite_vfs: OS 추상화(POSIX·WASI·호스트·메모리·memdb), 크래시 테스트용 VFS
@@ -296,7 +297,7 @@ examples/               # Zig API 예제, wasm/ (JavaScript 연결 코드, Node�
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일
 ```
 
-서버(`server/`)는 아직 없습니다.
+와이어 프로토콜 자체(pgwire, MySQL, TDS)는 아직 없습니다. 프로토콜과 상관없는 기반은 `src/server/`에 있습니다([서버](docs/server.md)).
 
 ## 기여
 

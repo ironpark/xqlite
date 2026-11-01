@@ -153,6 +153,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
+    // The wire protocol servers (src/server, module xqlite_server): on
+    // the Zig API, so that the engine library has no networking.
+    const server_mod = b.addModule("xqlite_server", .{
+        .root_source_file = b.path("src/server/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "xqlite", .module = mod }},
+    });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_mod, .filters = test_filters })).step);
 
     // Example programs of the Zig API (examples/*.zig): `zig build
     // example-<name>` runs one (arguments after `--`), `zig build examples`

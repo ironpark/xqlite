@@ -227,7 +227,7 @@ pub const Parser = struct {
     pub fn syntaxErrorAt(s: *Parser, t: Token) Error {
         if (s.p.n_err > 0) return error.ParseFailed;
         if (t.kind == .illegal and t.text.len > 0 and (t.text[0] == '\'' or t.text[0] == 'N' or t.text[0] == 'n')) {
-            ir.stmt.errorMsgAt(s.p, t.text.ptr, "Unclosed quotation mark after the character string '{s}'.", .{t.text[@min(t.text.len, @as(usize, if (t.text[0] == '\'') 1 else 2))..]});
+            ir.stmt.errorMsgState(s.p, t.text.ptr, .numbered("42601", 105), "Unclosed quotation mark after the character string '{s}'.", .{t.text[@min(t.text.len, @as(usize, if (t.text[0] == '\'') 1 else 2))..]});
             return error.ParseFailed;
         }
         // At the end: the token before it.
@@ -239,13 +239,27 @@ pub const Parser = struct {
             if (j == i) i = j;
             break :blk s.lx.sql[j..i];
         } else t.text;
-        ir.stmt.errorMsgAt(s.p, t.text.ptr, "Incorrect syntax near '{s}'.", .{near[0..@min(near.len, 80)]});
+        ir.stmt.errorMsgState(s.p, t.text.ptr, .numbered("42601", 102), "Incorrect syntax near '{s}'.", .{near[0..@min(near.len, 80)]});
         return error.ParseFailed;
     }
 
     /// An error with a message.
     pub fn fail(s: *Parser, comptime fmt: []const u8, args: anytype) Error {
         if (s.p.n_err == 0) ir.stmt.errorMsg(s.p, fmt, args);
+        return error.ParseFailed;
+    }
+
+    /// Fail with the error a statement run while compiling this one left
+    /// in the connection `db`, as it is (its ErrorState too).
+    pub fn failFrom(s: *Parser, db: *int.Sqlite3) Error {
+        if (s.p.n_err == 0) ir.stmt.errorMsgState(s.p, null, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
+        return error.ParseFailed;
+    }
+
+    /// fail() of an error whose ErrorState (SQL Server's error number) is
+    /// known.
+    pub fn failState(s: *Parser, st: int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
+        if (s.p.n_err == 0) ir.stmt.errorMsgState(s.p, null, st, fmt, args);
         return error.ParseFailed;
     }
 
@@ -358,7 +372,7 @@ pub const Parser = struct {
         ir.stmt.readSchema(s.p) catch return error.ParseFailed;
         const l = nsp.list(s.p.db, s.a) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+            else => return s.failFrom(s.p.db),
         };
         s.schemas = l;
         return l;
@@ -444,7 +458,7 @@ pub const Parser = struct {
 
     /// SQL Server's error 2760.
     pub fn noSchema(s: *Parser, sch: []const u8) Error {
-        return s.fail("The specified schema name \"{s}\" either does not exist or you do not have permission to use it.", .{sch});
+        return s.failState(.numbered("3F000", 2760), "The specified schema name \"{s}\" either does not exist or you do not have permission to use it.", .{sch});
     }
 
     /// An unqualified name: the session's default schema's object of that
@@ -466,12 +480,12 @@ pub const Parser = struct {
         if (!catalog.sequence.exists(s.p.db, catalog.main_schema)) return false;
         var q = catalog.Query.initFmt(s.p.db, "SELECT 1 FROM main.xq_sequence WHERE name=%Q COLLATE NOCASE", &.{.{ .str = seq }}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+            else => return s.failFrom(s.p.db),
         };
         defer q.deinit();
         return q.step() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+            else => return s.failFrom(s.p.db),
         };
     }
 
@@ -768,7 +782,7 @@ pub const Parser = struct {
         if (t.kind != .ident and t.kind != .quoted_ident) return s.syntaxError();
         const n = try s.nameText(t);
         s.advance();
-        return mapCollation(n) orelse s.fail("Invalid collation '{s}'.", .{n});
+        return mapCollation(n) orelse s.failState(.numbered("42704", 448), "Invalid collation '{s}'.", .{n});
     }
 
     pub fn str(s: *Parser, pos: u32, z: []const u8) Error!*Expr {
@@ -805,7 +819,7 @@ pub const Parser = struct {
 
     fn refuseStored(s: *Parser, what: []const u8) Error!void {
         if (!s.stored) return;
-        return s.fail("Variables are not allowed in this context: '{s}'.", .{what});
+        return s.failState(.of("42601"), "Variables are not allowed in this context: '{s}'.", .{what});
     }
 
     fn primary(s: *Parser) Error!*Expr {
@@ -853,7 +867,7 @@ pub const Parser = struct {
     /// @name: the variable's value (it must be declared).
     pub fn variableRef(s: *Parser, t: Token, pos: u32) Error!*Expr {
         const vname = try varName(s.a, t.text);
-        const v = s.p.db.xq.mssql.get(vname) orelse return s.fail("Must declare the scalar variable \"{s}\".", .{t.text});
+        const v = s.p.db.xq.mssql.get(vname) orelse return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
         const x = try s.func(pos, "xq_tsql_getvar", &.{try s.str(pos, vname)});
         try s.classes.put(s.a, x, typeClass(types.parseText(v.type)));
         return x;
@@ -891,7 +905,7 @@ pub const Parser = struct {
             const del = std.ascii.eqlIgnoreCase(ns[0].text, "deleted");
             if (ins or del) {
                 if ((ins and o == .delete) or (del and o == .insert)) {
-                    return s.fail("The multi-part identifier \"{s}.{s}\" could not be bound.", .{ ns[0].text, ns[1].text });
+                    return s.failState(.numbered("42P01", 4104), "The multi-part identifier \"{s}.{s}\" could not be bound.", .{ ns[0].text, ns[1].text });
                 }
                 if (del and o == .update) return s.fail("xqlite: OUTPUT DELETED in UPDATE is not supported (RETURNING sees the new row)", .{});
                 return s.mk(pos, .{ .column = ns[1..] });
@@ -1033,7 +1047,7 @@ pub const Parser = struct {
             sel.order_by = try s.sortList();
         }
         if (s.eatKw("OFFSET")) {
-            if (top != null) return s.fail("A TOP can not be used in the same query or sub-query as a OFFSET.", .{});
+            if (top != null) return s.failState(.numbered("42601", 10741), "A TOP can not be used in the same query or sub-query as a OFFSET.", .{});
             if (sel.order_by.len == 0) return s.syntaxError();
             sel.offset = try s.expr();
             if (!(s.eatKw("ROWS") or s.eatKw("ROW"))) return s.syntaxError();
@@ -1441,7 +1455,7 @@ pub const Parser = struct {
         }
         if (assigns.items.len > 0) {
             if (assigns.items.len != l.items.len or s.depth != 1) {
-                return s.fail("A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", .{});
+                return s.failState(.numbered("42601", 141), "A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", .{});
             }
             s.assigns = assigns.items;
         }
@@ -1651,7 +1665,7 @@ pub const Parser = struct {
         const q = try s.qualifiedNameRaw();
         if (q.special) |sp| {
             const sub = (try @import("catalog_views.zig").select(s, sp, q.q.name.text)) orelse
-                return s.fail("Invalid object name '{s}.{s}'.", .{ sp, q.q.name.text });
+                return s.failState(.numbered("42P01", 208), "Invalid object name '{s}.{s}'.", .{ sp, q.q.name.text });
             item.source = .{ .subquery = sub };
             item.alias = (try s.aliasOf(false)) orelse .{ .name = q.q.name };
             return item;
@@ -1739,7 +1753,7 @@ pub const Parser = struct {
         if (catalog.exists(s.p.db, schema)) {
             entries = catalog.entries(s.p.db, s.a, schema, stored) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
-                else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+                else => return s.failFrom(s.p.db),
             };
             tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .schema = schema, .cols = &.{} };
         }

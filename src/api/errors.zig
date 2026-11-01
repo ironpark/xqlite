@@ -261,6 +261,14 @@ pub const ErrorInfo = struct {
     /// Byte offset in the SQL text of the token that caused the error
     /// (sqlite3_error_offset()), if known.
     offset: ?usize,
+    /// The SQLSTATE of the error, in PostgreSQL's code space (`42P01` for
+    /// an undefined table, `23505` for a unique violation), if the engine
+    /// or the dialect that raised it knows it. Errors that the extended
+    /// code tells apart (constraints, BUSY, INTERRUPT ...) may have none.
+    sqlstate: ?[5]u8 = null,
+    /// The number the connection's dialect gives the error, if it has
+    /// one: MySQL's 1146, SQL Server's 208, Oracle's 942 (ORA-00942).
+    dialect_number: ?u32 = null,
 };
 
 /// A caller-owned copy of the last error, in the spirit of
@@ -278,6 +286,10 @@ pub const Diagnostics = struct {
     offset: ?usize = null,
     /// The Zig error last returned.
     err: ?Error = null,
+    /// What the error is, as in ErrorInfo: its SQLSTATE and the
+    /// dialect's own number, where the engine or the dialect knows them.
+    sqlstate: ?[5]u8 = null,
+    dialect_number: ?u32 = null,
     buf: [max_message]u8 = undefined,
     len: usize = 0,
 
@@ -288,13 +300,22 @@ pub const Diagnostics = struct {
         return d.buf[0..d.len];
     }
 
-    /// Record an error.
+    /// Record an error, without a SQLSTATE (see setInfo()).
     pub fn set(d: *Diagnostics, err: Error, code: ResultCode, msg: []const u8, offset: ?usize) void {
         d.err = err;
         d.code = code;
         d.offset = offset;
+        d.sqlstate = null;
+        d.dialect_number = null;
         d.len = @min(msg.len, d.buf.len);
         @memcpy(d.buf[0..d.len], msg[0..d.len]);
+    }
+
+    /// Record an error as ErrorInfo describes it.
+    pub fn setInfo(d: *Diagnostics, err: Error, info: ErrorInfo) void {
+        d.set(err, info.code, info.message, info.offset);
+        d.sqlstate = info.sqlstate;
+        d.dialect_number = info.dialect_number;
     }
 
     /// Forget the last error.

@@ -217,13 +217,27 @@ pub const Parser = struct {
         for (s.lx.sql[0..s.posOf(t)]) |c| {
             if (c == '\n') line += 1;
         }
-        ir.stmt.errorMsgAt(s.p, t.text.ptr, "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '{s}' at line {d}", .{ near, line });
+        ir.stmt.errorMsgState(s.p, t.text.ptr, .numbered("42601", 1064), "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '{s}' at line {d}", .{ near, line });
         return error.ParseFailed;
     }
 
     /// An error with a message.
     pub fn fail(s: *Parser, comptime fmt: []const u8, args: anytype) Error {
         if (s.p.n_err == 0) ir.stmt.errorMsg(s.p, fmt, args);
+        return error.ParseFailed;
+    }
+
+    /// Fail with the error a statement run while compiling this one left
+    /// in the connection `db`, as it is (its ErrorState too).
+    pub fn failFrom(s: *Parser, db: *int.Sqlite3) Error {
+        if (s.p.n_err == 0) ir.stmt.errorMsgState(s.p, null, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
+        return error.ParseFailed;
+    }
+
+    /// fail() of an error whose ErrorState (MariaDB's error number) is
+    /// known.
+    pub fn failState(s: *Parser, st: int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
+        if (s.p.n_err == 0) ir.stmt.errorMsgState(s.p, null, st, fmt, args);
         return error.ParseFailed;
     }
 
@@ -370,7 +384,7 @@ pub const Parser = struct {
         ir.stmt.readSchema(s.p) catch return error.ParseFailed;
         const l = nsp.list(s.p.db, s.a) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
-            else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+            else => return s.failFrom(s.p.db),
         };
         s.schemas = l;
         return l;
@@ -389,7 +403,7 @@ pub const Parser = struct {
 
     /// The current database (USE); "No database selected" if none is.
     pub fn currentDb(s: *Parser) Error!Db {
-        const cur = s.p.db.xq.mariadb.currentDatabase() orelse return s.fail("No database selected", .{});
+        const cur = s.p.db.xq.mariadb.currentDatabase() orelse return s.failState(.numbered("3D000", 1046), "No database selected", .{});
         if (build.findDbName(s.p.db, cur)) |i| {
             const n = s.p.db.dbs.items[i].name;
             return .{ .sqlite = n, .shown = n };
@@ -437,7 +451,7 @@ pub const Parser = struct {
     pub fn relation(s: *Parser, q: QName) Error!Rel {
         if (q.schema) |x| {
             if (s.raw_names) return .{ .q = q, .db = .{ .sqlite = x.text, .shown = x.text }, .bare = q.name.text };
-            const d = (try s.database(x.text)) orelse return s.fail("Table '{s}.{s}' doesn't exist", .{ x.text, q.name.text });
+            const d = (try s.database(x.text)) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}.{s}' doesn't exist", .{ x.text, q.name.text });
             return s.inDb(d, q.name, true);
         }
         const keep: Rel = .{ .q = q, .db = .{ .sqlite = catalog.main_schema, .shown = catalog.main_schema }, .bare = q.name.text };
@@ -477,7 +491,7 @@ pub const Parser = struct {
             return .{ .q = .{ .schema = .{ .text = "temp", .pos = q.name.pos }, .name = q.name }, .db = .{ .sqlite = "temp", .shown = shown }, .bare = q.name.text };
         }
         const d = if (q.schema) |x|
-            (try s.database(x.text)) orelse return s.fail("Unknown database '{s}'", .{x.text})
+            (try s.database(x.text)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{x.text})
         else
             try s.currentDb();
         var r = try s.inDb(d, q.name, true);
@@ -491,7 +505,7 @@ pub const Parser = struct {
     pub fn sequenceName(s: *Parser, q: QName) Error![]const u8 {
         if (s.raw_names) return q.name.text;
         const d = if (q.schema) |x|
-            (try s.database(x.text)) orelse return s.fail("Unknown database '{s}'", .{x.text})
+            (try s.database(x.text)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{x.text})
         else
             try s.currentDb();
         return d.objectName(s.a, q.name.text);
@@ -769,7 +783,7 @@ pub const Parser = struct {
         if (t.kind != .ident and t.kind != .quoted_ident and t.kind != .string) return s.syntaxError();
         const n = if (t.kind == .string) try lexer.stringValue(s.a, t, false) else try s.nameText(t);
         s.advance();
-        return mapCollation(n) orelse s.fail("Unknown collation: '{s}'", .{n});
+        return mapCollation(n) orelse s.failState(.numbered("42704", 1273), "Unknown collation: '{s}'", .{n});
     }
 
     /// A string constant at `pos`.
@@ -812,8 +826,8 @@ pub const Parser = struct {
     /// `what` is its text.
     fn refuseStored(s: *Parser, what: []const u8) Error!void {
         const st = s.stored orelse return;
-        if (st.clause.len == 0) return s.fail("View's SELECT contains a variable or parameter", .{});
-        return s.fail("Function or expression '{s}' cannot be used in the {s} clause of `{s}`", .{ what, st.clause, st.name });
+        if (st.clause.len == 0) return s.failState(.numbered("0A000", 1351), "View's SELECT contains a variable or parameter", .{});
+        return s.failState(.numbered("42P17", 1901), "Function or expression '{s}' cannot be used in the {s} clause of `{s}`", .{ what, st.clause, st.name });
     }
 
     fn primary(s: *Parser) Error!*Expr {
@@ -840,7 +854,7 @@ pub const Parser = struct {
             },
             .bit => {
                 s.advance();
-                const v = lexer.bitValue(t) orelse return s.fail("bit literal out of range", .{});
+                const v = lexer.bitValue(t) orelse return s.failState(.of("22003"), "bit literal out of range", .{});
                 if (v < 0) return s.int_(pos, v);
                 return s.mk(pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{v}) });
             },
@@ -1476,7 +1490,7 @@ pub const Parser = struct {
         if (s.isKw("PARTITION")) return s.fail("xqlite: PARTITION is not supported", .{});
         if (q.schema) |sch| if (std.ascii.eqlIgnoreCase(sch.text, "information_schema")) {
             const sub = (try @import("infoschema.zig").select(s, q.name.text)) orelse
-                return s.fail("Unknown table '{s}' in information_schema", .{q.name.text});
+                return s.failState(.numbered("42P01", 1109), "Unknown table '{s}' in information_schema", .{q.name.text});
             item.source = .{ .subquery = sub };
             item.alias = (try s.aliasOf()) orelse .{ .name = q.name };
             try s.onUsing(&item);
@@ -1559,7 +1573,7 @@ pub const Parser = struct {
         if (catalog.exists(s.p.db, schema)) {
             entries = catalog.entries(s.p.db, s.a, schema, stored) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
-                else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+                else => return s.failFrom(s.p.db),
             };
             // The query may have reloaded the schema.
             tab = build.findTable(s.p.db, stored, schema) orelse return .{ .tab = null, .q = q, .alias = r.alias, .schema = schema, .cols = &.{} };
@@ -1691,7 +1705,7 @@ fn sysVarName(s: *Parser, t: Token) Error![]const u8 {
         if (z.len > scope.len and std.ascii.startsWithIgnoreCase(z, scope)) z = z[scope.len..];
     }
     const lname = try std.ascii.allocLowerString(s.a, z);
-    if (!@import("session.zig").isSysVar(lname)) return s.fail("Unknown system variable '{s}'", .{z});
+    if (!@import("session.zig").isSysVar(lname)) return s.failState(.numbered("42704", 1193), "Unknown system variable '{s}'", .{z});
     return lname;
 }
 

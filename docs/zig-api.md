@@ -256,9 +256,12 @@ std.debug.print("{d} {t}\n", .{ id, db.dialect() });
 확장 코드와 메시지는 두 방법으로 얻습니다.
 
 - `db.lastError() ?ErrorInfo`: `sqlite3_extended_errcode()`, `sqlite3_errmsg()`, `sqlite3_error_offset()`에 해당합니다. 메시지는 빌린 값입니다.
+  - `sqlstate`: 그 오류의 SQLSTATE(PostgreSQL의 코드 공간)입니다. `no such table`은 어느 방언에서나 `42P01`입니다. 엔진이나 방언이 오류를 낼 때 남긴 것이고, 확장 코드가 구분하는 오류(제약, BUSY ...)에는 없을 수 있습니다.
+  - `dialect_number`: 연결의 방언이 그 오류에 매기는 번호입니다(MariaDB의 1146, SQL Server의 208, Oracle의 942).
 - `OpenOptions.diagnostics = &diag`: std.json의 Diagnostics처럼 호출자가 가진 구조체에 실패를 복사해 둡니다.
   - 그 연결과 문장의 모든 실패, 그리고 연결 객체가 없는 `open()` 실패까지 기록합니다.
   - 할당 없이 메시지를 256바이트(`Diagnostics.max_message`)까지 저장합니다. 전체 메시지는 `lastError()`에 있습니다.
+  - `sqlstate`와 `dialect_number`도 `ErrorInfo`와 같이 기록합니다. API 계층의 오류(`UsageError`)에는 없습니다.
 
 그 밖의 규칙은 다음과 같습니다.
 

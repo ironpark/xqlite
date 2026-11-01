@@ -254,10 +254,16 @@ pub fn stringify(m: *Mem, enc: u8, force: bool) Oom!void {
     try changeEncoding(m, enc);
 }
 
+/// What an aggregate's xFinal or xValue reported: the error code (0 if
+/// none) and what the error is (Context.err_state).
+pub const AggResult = struct {
+    rc: i32,
+    state: ?int.ErrorState = null,
+};
+
 /// Port of sqlite3VdbeMemFinalize(): run the finalizer of the aggregate
-/// whose context is in `m` and store the result there. Returns the error
-/// code the function reported.
-pub fn finalize(m: *Mem, func: *const FuncDef) i32 {
+/// whose context is in `m` and store the result there.
+pub fn finalize(m: *Mem, func: *const FuncDef) AggResult {
     const func_mod = @import("func.zig");
     var t: Mem = .{ .db = m.db };
     var ctx: vi.Context = .{ .out = &t, .mem = m, .func = func, .argv = &.{}, .enc = if (m.db) |db| db.enc else ENC.UTF8 };
@@ -265,17 +271,17 @@ pub fn finalize(m: *Mem, func: *const FuncDef) i32 {
     std.debug.assert(!m.flags.Dyn);
     if (m.z_malloc.len > 0) gpa(m).free(m.z_malloc);
     m.* = t;
-    return ctx.is_error;
+    return .{ .rc = ctx.is_error, .state = ctx.err_state };
 }
 
 /// Port of sqlite3VdbeMemAggValue(): the current value of a window
 /// aggregate.
-pub fn aggValue(accum: *Mem, out: *Mem, func: *const FuncDef) i32 {
+pub fn aggValue(accum: *Mem, out: *Mem, func: *const FuncDef) AggResult {
     const func_mod = @import("func.zig");
     setNull(out);
     var ctx: vi.Context = .{ .out = out, .mem = accum, .func = func, .argv = &.{}, .enc = if (accum.db) |db| db.enc else ENC.UTF8 };
     func_mod.callValue(func, &ctx);
-    return ctx.is_error;
+    return .{ .rc = ctx.is_error, .state = ctx.err_state };
 }
 
 /// Port of vdbeMemClearExternAndSetNull().

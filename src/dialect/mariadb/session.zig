@@ -178,12 +178,12 @@ pub fn setSysvarFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
         const z = api.valueText(argv[1]) orelse "";
         var bad: []const u8 = "";
         st.sql_mode = state.SqlMode.parse(z, &bad) orelse {
-            return api.resultError(ctx, std.fmt.bufPrint(&msg_buf, "Variable 'sql_mode' can't be set to the value of '{s}'", .{bad[0..@min(bad.len, 64)]}) catch "bad sql_mode");
+            return api.resultErrorState(ctx, .numbered("22023", 1231), std.fmt.bufPrint(&msg_buf, "Variable 'sql_mode' can't be set to the value of '{s}'", .{bad[0..@min(bad.len, 64)]}) catch "bad sql_mode");
         };
         return api.resultNull(ctx);
     }
     if (eq(name, "autocommit")) {
-        if (!is_default and !truthy(argv[1])) return api.resultError(ctx, "xqlite: autocommit=0 is not supported (use START TRANSACTION)");
+        if (!is_default and !truthy(argv[1])) return api.resultErrorState(ctx, .of("0A000"), "xqlite: autocommit=0 is not supported (use START TRANSACTION)");
         return api.resultNull(ctx);
     }
     if (eq(name, "foreign_key_checks")) {
@@ -274,8 +274,8 @@ pub fn set(s: *Parser) Error!void {
                 const n = try s.anyName();
                 name_text = try s.nameText(n);
             }
-            const v = findVar(name_text) orelse return s.fail("Unknown system variable '{s}'", .{name_text});
-            if (!v.settable) return s.fail("Variable '{s}' is a read only variable", .{v.name});
+            const v = findVar(name_text) orelse return s.failState(.numbered("42704", 1193), "Unknown system variable '{s}'", .{name_text});
+            if (!v.settable) return s.failState(.numbered("55P02", 1238), "Variable '{s}' is a read only variable", .{v.name});
             if (!(s.eatOp("=") or s.eatOp(":="))) return s.syntaxError();
             const vpos = s.here();
             var value: *tree.Expr = undefined;
@@ -545,7 +545,7 @@ fn likeClause(s: *Parser, prefix: []const u8, like: ?[]const u8) Error![]const u
 fn resolveTable(s: *Parser, name: []const u8, schema: ?[]const u8) Error!struct { *int.Table, []const u8, []const u8 } {
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const r = try s.relation(.{ .schema = if (schema) |x| .{ .text = x } else null, .name = .{ .text = name } });
-    const tab = r.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const tab = r.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
     const stored = try s.a.dupe(u8, tab.name);
     const bare = if (r.db.named) |n| stored[@min(n.len + 1, stored.len)..] else stored;
     return .{ tab, try s.a.dupe(u8, catalog.schemaName(s.p.db, tab)), bare };

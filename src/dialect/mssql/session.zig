@@ -86,7 +86,7 @@ pub fn set(s: *Parser) Error!void {
         if (op.kind != .op or !(op.is("=") or (op.text.len == 2 and op.text[1] == '='))) return s.syntaxError();
         s.advance();
         const name = try parser.varName(s.a, vt.text);
-        const v = s.p.db.xq.mssql.get(name) orelse return s.fail("Must declare the scalar variable \"{s}\".", .{vt.text});
+        const v = s.p.db.xq.mssql.get(name) orelse return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{vt.text});
         const ty = try s.a.dupe(u8, v.type);
         var e = try s.expr();
         if (op.text.len == 2) e = try s.compoundAssign(op.text[0], try s.variableRef(vt, pos), e);
@@ -97,8 +97,8 @@ pub fn set(s: *Parser) Error!void {
         const q = try s.qualifiedName();
         const on = if (s.eatKw("ON")) true else if (s.eatKw("OFF")) false else return s.syntaxError();
         const t = try s.target(q);
-        if (t.tab == null) return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{q.name.text});
-        if (t.identity() == null) return s.fail("Table '{s}' does not have the identity property. Cannot perform SET operation.", .{t.bare});
+        if (t.tab == null) return s.failState(.numbered("42P01", 4902), "Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{q.name.text});
+        if (t.identity() == null) return s.failState(.numbered("42809", 8106), "Table '{s}' does not have the identity property. Cannot perform SET operation.", .{t.bare});
         const key = try std.ascii.allocLowerString(s.a, try std.fmt.allocPrint(s.a, "{s}.{s}", .{ t.schema, t.name }));
         return codeEval(s, &.{try s.func(pos, "xq_tsql_identity_insert", &.{ try s.str(pos, key), try s.int_(pos, @intFromBool(on)) })});
     }
@@ -165,7 +165,7 @@ pub fn commit(s: *Parser) Error!void {
     tranWord(s);
     _ = try tranName(s);
     const st = &s.p.db.xq.mssql;
-    if (s.p.db.auto_commit) return s.fail("The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
+    if (s.p.db.auto_commit) return s.failState(.numbered("25P01", 3902), "The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
     if (st.tran_nest > 0) return tranCall(s, 2, null);
     try s.lowerStmt(.commit);
     return tranCall(s, 3, null);
@@ -178,7 +178,7 @@ pub fn rollback(s: *Parser) Error!void {
     tranWord(s);
     const name = try tranName(s);
     const st = &s.p.db.xq.mssql;
-    if (s.p.db.auto_commit) return s.fail("The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
+    if (s.p.db.auto_commit) return s.failState(.numbered("25P01", 3903), "The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
     if (name) |n| {
         const outer = if (st.tran_name) |tn| std.ascii.eqlIgnoreCase(tn, n.text) else false;
         if (!outer) return s.lowerStmt(.{ .rollback_to = n });
@@ -192,7 +192,7 @@ pub fn save(s: *Parser) Error!void {
     try s.expectKw("SAVE");
     if (!(s.eatKw("TRAN") or s.eatKw("TRANSACTION"))) return s.syntaxError();
     const name = (try tranName(s)) orelse return s.syntaxError();
-    if (s.p.db.auto_commit) return s.fail("The SAVE TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
+    if (s.p.db.auto_commit) return s.failState(.numbered("25P01", 628), "The SAVE TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
     return s.lowerStmt(.{ .savepoint = name });
 }
 
@@ -211,7 +211,7 @@ pub fn use(s: *Parser) Error!void {
     try s.expectKw("USE");
     const n = try s.nameText(try s.anyName());
     if (!std.ascii.eqlIgnoreCase(n, "master") and build.findDbName(s.p.db, n) == null) {
-        return s.fail("Database '{s}' does not exist. Make sure that the name is entered correctly.", .{n});
+        return s.failState(.numbered("3D000", 911), "Database '{s}' does not exist. Make sure that the name is entered correctly.", .{n});
     }
     return emptyStatement(s);
 }
@@ -233,7 +233,7 @@ pub fn exec(s: *Parser) Error!void {
         try args.append(s.a, try s.stringLiteral());
         if (!s.eatOp(",")) break;
     }
-    if (args.items.len < 2 or args.items.len > 3) return s.fail("Procedure or function 'sp_rename' expects parameter '@newname', which was not supplied.", .{});
+    if (args.items.len < 2 or args.items.len > 3) return s.failState(.numbered("42883", 201), "Procedure or function 'sp_rename' expects parameter '@newname', which was not supplied.", .{});
     const kind = if (args.items.len == 3) args.items[2] else "OBJECT";
     var parts: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, args.items[0], '.');
@@ -241,7 +241,7 @@ pub fn exec(s: *Parser) Error!void {
     const ps = parts.items;
     const pos = s.here();
     if (std.ascii.eqlIgnoreCase(kind, "COLUMN")) {
-        if (ps.len < 2) return s.fail("Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
+        if (ps.len < 2) return s.failState(.numbered("42704", 15248), "Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
         const table = try s.resolveParts(try names(s, ps[0 .. ps.len - 1], pos), .lookup);
         const at = try s.new(tree.AlterTable, .{ .name = table, .action = .{ .rename_column = .{ .old = .{ .text = ps[ps.len - 1], .pos = pos }, .new = .{ .text = args.items[1], .pos = pos } } } });
         return s.lowerStmt(.{ .alter_table = at });
@@ -258,7 +258,7 @@ pub fn exec(s: *Parser) Error!void {
 
 /// Parts of a name (1 to 3) as Names at `pos`.
 fn names(s: *Parser, ps: []const []const u8, pos: u32) Error![]tree.Name {
-    if (ps.len == 0 or ps.len > 3) return s.fail("Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
+    if (ps.len == 0 or ps.len > 3) return s.failState(.numbered("42704", 15248), "Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
     const out = try s.a.alloc(tree.Name, ps.len);
     for (ps, out) |p, *n| n.* = .{ .text = p, .pos = pos };
     return out;

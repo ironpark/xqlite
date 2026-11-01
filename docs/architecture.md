@@ -16,6 +16,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 - [프론트엔드 계약](#프론트엔드-계약)
 - [새 프론트엔드 붙이기](#새-프론트엔드-붙이기)
 - [방언 훅](#방언-훅)
+- [오류 코드](#오류-코드)
 - [엄격한 타입](#엄격한-타입)
 - [카탈로그와 시퀀스](#카탈로그와-시퀀스)
 - [VFS](#vfs)
@@ -264,6 +265,20 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 - `default_collation`: MariaDB 방언은 `NOCASE`입니다.
   - COLLATE 없는 열의 인덱스는 파일 호환을 위해 BINARY로 남습니다.
   - 그래서 DDL에서 텍스트 열마다 collation을 적어 두는 것이 좋습니다.
+
+## 오류 코드
+
+오류마다 메시지와 함께 무엇인지(`int.ErrorState`)를 남깁니다. 와이어 프로토콜과 ORM이 메시지가 아니라 코드로 오류를 구분하기 때문입니다.
+
+- `ErrorState`는 SQLSTATE(PostgreSQL의 코드 공간)와 방언의 번호(MySQL의 1146, SQL Server의 208, Oracle의 942; 없으면 0)입니다. 메시지에 딸린 것이라 `Parse.err_msg`, `Vdbe.err_msg`, 연결의 메시지가 각각 하나씩 갖고, 메시지가 바뀌면 함께 바뀝니다. 연결로 옮겨진 것을 Zig API가 `ErrorInfo.sqlstate`, `ErrorInfo.dialect_number`로 내보냅니다.
+- 엔진은 SQLite의 오류에 SQLSTATE를 남깁니다: `no such table` 42P01, `no such column` 42703, `no such function` 42883, 문법 오류 42601, `already exists` 42P07, 트랜잭션 상태 25001·25P01, `no such savepoint` 3B001 ...(`util.errorMsgState()`, `aux.vdbeErrorState()`).
+- 방언은 그 오류를 자기 말로 바꿀 때(`translateError()`) SQLSTATE는 두고 번호를 더합니다(`dialect.numberError()`: SQLSTATE마다 그 방언의 번호).
+- 방언이 직접 내는 오류는 낼 때 남깁니다: 파서의 `failState(state, fmt, args)`, 실행 중에는 `api.resultErrorState(ctx, state, msg)`, 가상 테이블은 `vtab.setErrState()`. 컴파일 중에 실행한 문장의 오류를 그대로 내는 곳은 `failFrom(db)`(파서)나 `api.resultErrorFrom(ctx, db)`(함수)로 그 오류의 것을 옮깁니다. Oracle의 메시지는 번호로 시작하므로(`ORA-00942: ...`) `oracle/errors.zig`가 번호를 읽습니다. 파서에서는 형식 문자열에서 컴파일 시점에, 엔진 메시지를 바꾼 것과 실행 중 오류는 메시지에서 읽습니다.
+- 번역 단계의 번호는 엔진 오류에만 붙습니다. 방언이 자기 번호를 준 오류는 그 번호를 유지합니다.
+- 방언이 타입 검사에 붙이는 CHECK 제약 이름(`value too long for type character varying(3)`)은 `Hooks.check_errors`가 SQLSTATE와 번호를 줍니다. 테이블을 만든 방언이 연결의 방언이 아니어도 됩니다.
+- `xqlite: ... is not supported` 형식의 메시지는 형식 문자열에서 컴파일 시점에 `0A000`(feature_not_supported)이 됩니다.
+- 무엇인지 모르는 오류는 SQLSTATE가 없습니다. 확장 결과 코드가 구분하는 오류(제약, BUSY, INTERRUPT)는 그 코드로 알 수 있습니다.
+- 새 오류를 낼 때는 그 방언의 SQLSTATE와 번호를 함께 적습니다. 실제 서버의 번호를 확신할 수 없으면 SQLSTATE만 적습니다(번호 0).
 
 ## 엄격한 타입
 

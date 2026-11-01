@@ -56,7 +56,7 @@ const Sink = struct {
     }
 
     pub fn failed(s: *Sink, f: Session.Failure) !void {
-        try s.w.print("error {s}\n", .{f.class.sqlstate()});
+        try s.w.print("error {s}\n", .{&f.sqlstate});
     }
 };
 

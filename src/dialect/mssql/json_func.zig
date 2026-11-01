@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const api = @import("../../vdbe/api.zig");
+const int = @import("../../sql/sqlite_int.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
 const json = @import("json.zig");
@@ -49,24 +50,34 @@ pub const Kind = enum(u8) {
     }
 };
 
-fn fail(ctx: *Context, comptime fmt: []const u8, args: anytype) void {
+fn failState(ctx: *Context, st: int.ErrorState, comptime fmt: []const u8, args: anytype) void {
     var buf: [400]u8 = undefined;
-    api.resultError(ctx, std.fmt.bufPrint(&buf, fmt, args) catch buf[0..]);
+    api.resultErrorState(ctx, st, std.fmt.bufPrint(&buf, fmt, args) catch buf[0..]);
 }
 
 fn textError(ctx: *Context, z: []const u8, pos: usize) void {
     var buf: [200]u8 = undefined;
-    api.resultError(ctx, json.textMessage(&buf, z, pos));
+    api.resultErrorState(ctx, json.text_error, json.textMessage(&buf, z, pos));
 }
 
 fn pathError(ctx: *Context, z: []const u8, pos: usize) void {
     var buf: [200]u8 = undefined;
-    api.resultError(ctx, json.pathMessage(&buf, z, pos));
+    api.resultErrorState(ctx, json.path_error, json.pathMessage(&buf, z, pos));
 }
 
-pub const not_found = "Property cannot be found on the specified JSON path.";
-pub const no_container = "Object or array cannot be found in the specified JSON path.";
-pub const no_scalar = "Scalar value cannot be found in the specified JSON path.";
+/// The errors of a strict path that finds no value of the kind wanted,
+/// with what they are (SQL Server's number).
+pub const Missing = struct {
+    msg: []const u8,
+    state: int.ErrorState,
+
+    pub fn raise(e: Missing, ctx: *Context) void {
+        api.resultErrorState(ctx, e.state, e.msg);
+    }
+};
+pub const not_found: Missing = .{ .msg = "Property cannot be found on the specified JSON path.", .state = .numbered("2203A", 13608) };
+pub const no_container: Missing = .{ .msg = "Object or array cannot be found in the specified JSON path.", .state = .numbered("2203C", 13624) };
+pub const no_scalar: Missing = .{ .msg = "Scalar value cannot be found in the specified JSON path.", .state = .numbered("2203F", 13623) };
 
 /// The text of argument `m` (its bytes for a blob); null on OOM, after
 /// making it the error.
@@ -78,7 +89,7 @@ fn argText(ctx: *Context, m: *Mem) ?[]const u8 {
 /// The path argument: an error for NULL (`func` names the function).
 fn pathArg(ctx: *Context, a: Allocator, m: *Mem, func: []const u8, allow_append: bool) ?json.Path {
     if (isNull(m)) {
-        fail(ctx, "Argument data type NULL is invalid for argument 2 of {s} function.", .{func});
+        failState(ctx, .numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of {s} function.", .{func});
         return null;
     }
     const z = argText(ctx, m) orelse return null;
@@ -114,13 +125,13 @@ pub fn jsonValueFunc(ctx: *Context, argv: []*Mem) void {
     var err: json.SyntaxError = .{};
     const found = json.find(z, path.steps, &err) catch return textError(ctx, z, err.pos);
     const it = switch (found) {
-        .missing => return if (path.strict) api.resultError(ctx, not_found) else api.resultNull(ctx),
+        .missing => return if (path.strict) not_found.raise(ctx) else api.resultNull(ctx),
         .item => |x| x,
     };
-    if (it.isContainer()) return if (path.strict) api.resultError(ctx, no_scalar) else api.resultNull(ctx);
+    if (it.isContainer()) return if (path.strict) no_scalar.raise(ctx) else api.resultNull(ctx);
     const t = (json.scalarText(a, z, it) catch return api.resultErrorNomem(ctx)) orelse return api.resultNull(ctx);
     if (dfunc.charCount(t) > 4000) {
-        if (path.strict) return api.resultError(ctx, "String value in the specified JSON path would be truncated.");
+        if (path.strict) return api.resultErrorState(ctx, .numbered("22001", 13625), "String value in the specified JSON path would be truncated.");
         return api.resultNull(ctx);
     }
     api.resultText(ctx, t, .transient);
@@ -138,10 +149,10 @@ pub fn jsonQueryFunc(ctx: *Context, argv: []*Mem) void {
     var err: json.SyntaxError = .{};
     const found = json.find(z, path.steps, &err) catch return textError(ctx, z, err.pos);
     const it = switch (found) {
-        .missing => return if (path.strict) api.resultError(ctx, not_found) else api.resultNull(ctx),
+        .missing => return if (path.strict) not_found.raise(ctx) else api.resultNull(ctx),
         .item => |x| x,
     };
-    if (!it.isContainer()) return if (path.strict) api.resultError(ctx, no_container) else api.resultNull(ctx);
+    if (!it.isContainer()) return if (path.strict) no_container.raise(ctx) else api.resultNull(ctx);
     api.resultText(ctx, it.text(z), .transient);
 }
 
@@ -271,12 +282,12 @@ pub fn jsonModifyFunc(ctx: *Context, argv: []*Mem) void {
     var err: json.SyntaxError = .{};
     const doc = json.parse(z, &err) catch return textError(ctx, z, err.pos);
     const path = pathArg(ctx, a, argv[1], "JSON_MODIFY", true) orelse return;
-    if (path.steps.len == 0 and !path.append) return api.resultError(ctx, "Unsupported JSON path found in argument 2 of JSON_MODIFY.");
+    if (path.steps.len == 0 and !path.append) return api.resultErrorState(ctx, .of("0A000"), "Unsupported JSON path found in argument 2 of JSON_MODIFY.");
     const vkind = kindArg(ctx, argv) orelse return;
     const out = modify(a, z, doc, path, argv[2], vkind) catch |e| switch (e) {
         error.OutOfMemory => return api.resultErrorNomem(ctx),
-        error.NotFound => return api.resultError(ctx, not_found),
-        error.NotArray => return api.resultError(ctx, "Array cannot be found in the specified JSON path."),
+        error.NotFound => return not_found.raise(ctx),
+        error.NotArray => return api.resultErrorState(ctx, .of("22039"), "Array cannot be found in the specified JSON path."),
     };
     api.resultText(ctx, out, .transient);
 }
@@ -396,7 +407,7 @@ fn build(ctx: *Context, argv: []*Mem, object: bool) void {
         if (!first) out.append(a, ',') catch return api.resultErrorNomem(ctx);
         first = false;
         if (object) {
-            if (isNull(argv[i])) return api.resultError(ctx, "JSON_OBJECT key cannot be NULL.");
+            if (isNull(argv[i])) return api.resultErrorState(ctx, .of("22004"), "JSON_OBJECT key cannot be NULL.");
             json.writeString(a, &out, argText(ctx, argv[i]) orelse return) catch return api.resultErrorNomem(ctx);
             out.append(a, ':') catch return api.resultErrorNomem(ctx);
         }

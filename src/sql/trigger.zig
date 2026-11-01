@@ -221,7 +221,7 @@ fn beginTriggerImpl(p: *Parse, name1: Token, name2: Token, tr_tm_arg: i32, op: i
     if (!p.inRenameObject()) {
         if (db.dbs.items[i_db].schema.trig_hash.get(z_name) != null) {
             if (!no_err) {
-                util.errorMsgAt(p, name.z, "trigger {s} already exists", .{name.slice()});
+                util.errorMsgState(p, name.z, .of("42710"), "trigger {s} already exists", .{name.slice()});
             } else if (db.init.busy) {
                 // The message comes from corruptSchema().
                 util.errorMsg(p, "", .{});
@@ -432,7 +432,7 @@ pub fn dropTrigger(p: *Parse, name: ?*SrcList, no_err: bool) void {
     }
     const trig = found orelse {
         if (!no_err) {
-            util.errorMsg(p, "no such trigger: {f}", .{util.srcItemName(item)});
+            util.errorMsgState(p, null, .of("42704"), "no such trigger: {f}", .{util.srcItemName(item)});
         } else {
             build.codeVerifyNamedSchema(p, zdb);
         }

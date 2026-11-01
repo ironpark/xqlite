@@ -68,7 +68,7 @@ pub fn create(s: *Parser) Error!void {
     if (s.eatKw("AUTHORIZATION")) owner = try s.nameText(try s.anyName());
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     if (builtinId(n.text) != null) return s.noSchema(n.text);
-    if (try s.findSchema(n.text) != null) return s.fail("There is already an object named '{s}' in the database.", .{n.text});
+    if (try s.findSchema(n.text) != null) return s.failState(.numbered("42P07", 2714), "There is already an object named '{s}' in the database.", .{n.text});
     if (!nsp.validName(n.text)) return s.fail("xqlite: a schema name cannot contain '.'", .{});
     if (try s.sqliteDb(n.text, n.pos) != null) return s.fail("xqlite: '{s}' names a database; it cannot name a schema", .{n.text});
     nsp.codeCreate(s.p, n.text, owner);
@@ -115,14 +115,14 @@ pub fn drop(s: *Parser) Error!void {
     const if_exists = try s.ifExists();
     const n = try s.nameOf(try s.anyName());
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    if (builtinId(n.text) != null) return s.fail("Cannot drop the schema '{s}'.", .{n.text});
+    if (builtinId(n.text) != null) return s.failState(.of("42501"), "Cannot drop the schema '{s}'.", .{n.text});
     const info = (try s.findSchema(n.text)) orelse {
         if (if_exists) return session.emptyStatement(s);
-        return s.fail("Cannot drop the schema '{s}', because it does not exist or you do not have permission.", .{n.text});
+        return s.failState(.numbered("3F000", 3701), "Cannot drop the schema '{s}', because it does not exist or you do not have permission.", .{n.text});
     };
     const objs = nsp.objects(s.p.db, s.a, info.name) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+        else => return s.failFrom(s.p.db),
     };
     if (objs.len > 0) {
         // SQL Server names the first by name.
@@ -130,7 +130,7 @@ pub fn drop(s: *Parser) Error!void {
         for (objs[1..]) |o| if (std.ascii.lessThanIgnoreCase(o.bare(), first)) {
             first = o.bare();
         };
-        return s.fail("Cannot drop schema '{s}' because it is being referenced by object '{s}'.", .{ n.text, first });
+        return s.failState(.numbered("2BP01", 3729), "Cannot drop schema '{s}' because it is being referenced by object '{s}'.", .{ n.text, first });
     }
     nsp.codeDrop(s.p, info.name, &.{}) catch return error.ParseFailed;
 }
@@ -154,19 +154,19 @@ pub fn transfer(s: *Parser) Error!void {
     var prefix: []const u8 = "";
     if (!std.ascii.eqlIgnoreCase(to.text, "dbo")) {
         const info = (try s.findSchema(to.text)) orelse
-            return s.fail("Cannot alter the schema '{s}', because it does not exist or you do not have permission.", .{to.text});
+            return s.failState(.numbered("3F000", 15151), "Cannot alter the schema '{s}', because it does not exist or you do not have permission.", .{to.text});
         prefix = try nsp.mangle(s.a, info.name, "");
     }
     const bare = try s.bareName(q.name.text);
     const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null) orelse
-        return s.fail("Cannot find the object '{s}', because it does not exist or you do not have permission.", .{bare});
+        return s.failState(.numbered("42P01", 4902), "Cannot find the object '{s}', because it does not exist or you do not have permission.", .{bare});
     if (!std.mem.eql(u8, catalog.schemaName(s.p.db, tab), catalog.main_schema)) return s.fail("xqlite: ALTER SCHEMA ... TRANSFER of an object of another database is not supported", .{});
     if (tab.isView()) return s.fail("xqlite: ALTER SCHEMA ... TRANSFER of a view is not supported", .{});
     const t = try s.target(q);
     if (t.identity() != null) return s.fail("xqlite: ALTER SCHEMA ... TRANSFER of a table with an IDENTITY column is not supported", .{});
     const new = try std.fmt.allocPrint(s.a, "{s}{s}", .{ prefix, bare });
     if (std.ascii.eqlIgnoreCase(new, tab.name)) return session.emptyStatement(s);
-    if (build.findTable(s.p.db, new, catalog.main_schema) != null) return s.fail("The object with name \"{s}\" already exists.", .{bare});
+    if (build.findTable(s.p.db, new, catalog.main_schema) != null) return s.failState(.of("42P07"), "The object with name \"{s}\" already exists.", .{bare});
     const at = try s.new(tree.AlterTable, .{
         .name = .{ .schema = .{ .text = catalog.main_schema }, .name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos } },
         .action = .{ .rename_to = .{ .text = new, .pos = q.name.pos } },
@@ -247,7 +247,7 @@ fn defaultSchema(db: *Sqlite3, reg: []const Entry) []const u8 {
 
 fn failed(ctx: *Context, db: *Sqlite3, err: catalog.Error) void {
     if (err == error.OutOfMemory) return api.resultErrorNomem(ctx);
-    api.resultError(ctx, @import("../../sql/main.zig").errmsg(db));
+    api.resultErrorFrom(ctx, db);
 }
 
 fn resultCopy(ctx: *Context, z: []const u8) void {

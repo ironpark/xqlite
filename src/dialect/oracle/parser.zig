@@ -41,6 +41,7 @@ const words = @import("../words.zig");
 const tree = @import("../../ir/tree.zig");
 const ir = @import("../../ir/ir.zig");
 const int = @import("../../sql/sqlite_int.zig");
+const ora_errors = @import("errors.zig");
 const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const Dialect = @import("../dialect.zig").Dialect;
@@ -140,6 +141,8 @@ pub const Parser = struct {
     toks: []Token,
     i: usize = 0,
     err_msg: []const u8 = "",
+    /// What err_msg is (int.ErrorState), if known.
+    err_state: ?int.ErrorState = null,
     err_pos: usize = 0,
     /// Offset after the statement (and its terminator).
     end: usize,
@@ -312,9 +315,22 @@ pub const Parser = struct {
     }
 
     pub fn fail(p: *Parser, pos: usize, comptime fmt: []const u8, args: anytype) Error {
+        return p.failState(pos, null, fmt, args);
+    }
+
+    /// fail() of an error whose ErrorState is known (else that of xqlite's
+    /// conventions, int.ErrorState.ofFormat()).
+    pub fn failState(p: *Parser, pos: usize, state: ?int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
         p.err_pos = pos;
         p.err_msg = try std.fmt.allocPrint(p.arena, fmt, args);
+        p.err_state = state orelse comptime ora_errors.formatState(fmt);
         return error.ParseFailed;
+    }
+
+    /// Fail with the error a statement run while compiling this one left
+    /// in the connection `db`, as it is (its ErrorState too).
+    pub fn failFrom(p: *Parser, pos: usize, db: *int.Sqlite3) Error {
+        return p.failState(pos, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
     }
 
     /// An Oracle error at the next token.
@@ -370,7 +386,7 @@ pub const Parser = struct {
         try p.readSchema();
         const l = nsp.list(ps.db, p.arena) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return p.fail(0, "{s}", .{@import("../../sql/main.zig").errmsg(ps.db)}),
+            else => return p.failFrom(0, ps.db),
         };
         p.schemas = l;
         return l;

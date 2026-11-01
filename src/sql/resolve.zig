@@ -445,6 +445,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
         } else {
             util.errorMsg(p, "{s}: {s}", .{ err, col });
         }
+        util.errorIs(p, if (cnt == 0) .of("42703") else .of("42702"));
         expr_mod.recordErrorOffsetOfExpr(p, e);
         p.check_schema = true;
         top_nc.n_nc_err += 1;
@@ -732,9 +733,11 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
                     // Unknown functions are tolerated while reading the
                     // schema.
                     errorAtExpr(p, e, "no such function: {s}", .{id});
+                    util.errorIs(p, .of("42883"));
                     nc.n_nc_err += 1;
                 } else if (wrong_num_args) {
                     errorAtExpr(p, e, "wrong number of arguments to function {s}()", .{id});
+                    util.errorIs(p, .of("42883"));
                     nc.n_nc_err += 1;
                 } else if (!is_agg and e.flags.WinFunc) {
                     errorAtExpr(p, e, "FILTER may not be used with non-aggregate {s}()", .{id});

@@ -71,6 +71,7 @@ pub fn multiWrite(p: *Parse) void {
 
 /// Store `msg` (copied) as the connection's error message, or clear it.
 pub fn setErrorMessage(db: *Sqlite3, msg: ?[:0]const u8) void {
+    db.err_state = null;
     if (msg) |m| {
         if (db.err == null) {
             const e = db.gpa.create(vi.Mem) catch return;
@@ -86,6 +87,7 @@ pub fn setErrorMessage(db: *Sqlite3, msg: ?[:0]const u8) void {
 /// Port of sqlite3Error(): set the error code; the message is cleared.
 pub fn setError(db: *Sqlite3, code: i32) void {
     db.err_code = code;
+    db.err_state = null;
     if (db.err) |e| mem.setNull(e);
     db.err_byte_offset = -1;
 }
@@ -101,6 +103,7 @@ pub fn errorWithMsg(db: *Sqlite3, code: i32, comptime fmt: []const u8, args: any
 /// Port of sqlite3ErrorClear().
 pub fn errorClear(db: *Sqlite3) void {
     db.err_code = RC.OK;
+    db.err_state = null;
     db.err_byte_offset = -1;
     if (db.err) |e| mem.setNull(e);
 }

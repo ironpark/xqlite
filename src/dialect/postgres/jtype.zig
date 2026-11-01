@@ -500,7 +500,7 @@ const T = struct {
                 if (c.args.len == 2 and c.null_policy == .propagate) {
                     const l = jts[0];
                     const r = jts[1];
-                    if (l == .json and r == .json) return t.p.fail(e.pos, "operator does not exist: json || json", .{});
+                    if (l == .json and r == .json) return t.p.failState(e.pos, .of("42883"), "operator does not exist: json || json", .{});
                     if ((l == .jsonb and (r == .jsonb or r == .unknown)) or (r == .jsonb and l == .unknown)) {
                         e.kind = .{ .func = try t.newFunc(e.pos, "xq_pg_jsonb_concat", c.args) };
                         return .jsonb;
@@ -521,7 +521,7 @@ const T = struct {
             .compare => |*c| {
                 const l = try t.expr(c.l, sc);
                 const r = try t.expr(c.r, sc);
-                if (l == .json and r == .json and c.op != .is and c.op != .is_not) return t.p.fail(e.pos, "operator does not exist: json {s} json", .{cmpText(c.op)});
+                if (l == .json and r == .json and c.op != .is and c.op != .is_not) return t.p.failState(e.pos, .of("42883"), "operator does not exist: json {s} json", .{cmpText(c.op)});
                 if ((l == .jsonb and (r == .jsonb or r == .unknown)) or (r == .jsonb and l == .unknown)) {
                     if (l == .unknown and c.l.kind == .string) c.l = try t.cast(c.l, "jsonb");
                     if (r == .unknown and c.r.kind == .string) c.r = try t.cast(c.r, "jsonb");

@@ -261,15 +261,15 @@ fn tableOf(cur: *vtab.VtabCursor) *Table {
     return @alignCast(@fieldParentPtr("base", cur.vtab));
 }
 
-fn setError(cur: *vtab.VtabCursor, msg: []const u8) i32 {
+fn setError(cur: *vtab.VtabCursor, st: int.ErrorState, msg: []const u8) i32 {
     const t = tableOf(cur);
-    vtab.setErrMsg(t.db, cur.vtab, "{s}", .{msg});
+    vtab.setErrState(t.db, cur.vtab, st, "{s}", .{msg});
     return RC.ERROR;
 }
 
 fn syntaxError(cur: *vtab.VtabCursor, z: []const u8, pos: usize) i32 {
     var buf: [200]u8 = undefined;
-    return setError(cur, json.textMessage(&buf, z, pos));
+    return setError(cur, json.text_error, json.textMessage(&buf, z, pos));
 }
 
 fn filter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, argv: []*Mem) i32 {
@@ -281,7 +281,7 @@ fn filter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, argv: []*Mem) i
     const z: []const u8 = if (api.valueType(argv[0]) == vi.SQLITE_BLOB) api.valueBlob(argv[0]) orelse "" else api.valueText(argv[0]) orelse return RC.NOMEM;
     c.doc = c.gpa.dupe(u8, z) catch return RC.NOMEM;
     if (argv.len > 1) {
-        if (api.valueType(argv[1]) == vi.SQLITE_NULL) return setError(cur, "Argument data type NULL is invalid for argument 2 of OPENJSON function.");
+        if (api.valueType(argv[1]) == vi.SQLITE_NULL) return setError(cur, .numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of OPENJSON function.");
         const pz = api.valueText(argv[1]) orelse return RC.NOMEM;
         c.path_text = c.gpa.dupe(u8, pz) catch return RC.NOMEM;
         var perr: json.PathError = .{};
@@ -289,7 +289,7 @@ fn filter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, argv: []*Mem) i
             error.OutOfMemory => return RC.NOMEM,
             error.BadPath => {
                 var buf: [200]u8 = undefined;
-                return setError(cur, json.pathMessage(&buf, c.path_text, perr.pos));
+                return setError(cur, json.path_error, json.pathMessage(&buf, c.path_text, perr.pos));
             },
         };
     }
@@ -297,11 +297,11 @@ fn filter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, argv: []*Mem) i
     var err: json.SyntaxError = .{};
     const start = json.locate(doc, c.path.steps, &err) catch return syntaxError(cur, doc, err.pos);
     const at = start orelse {
-        if (c.path.strict) return setError(cur, jf.not_found);
+        if (c.path.strict) return setError(cur, jf.not_found.state, jf.not_found.msg);
         return RC.OK;
     };
     if (doc[at] != '{' and doc[at] != '[') {
-        if (c.path.strict) return setError(cur, "Value referenced by JSON path is not an array or object and cannot be opened with OPENJSON.");
+        if (c.path.strict) return setError(cur, .of("2203C"), "Value referenced by JSON path is not an array or object and cannot be opened with OPENJSON.");
         // A bad scalar is still an error.
         _ = json.scan(doc, at, 0, &err) catch return syntaxError(cur, doc, err.pos);
         return RC.OK;
@@ -390,13 +390,13 @@ fn column(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
     const found: ?json.Item = if (col.path) |p| json.lookup(z, e.value, p.steps) else json.lookup(z, e.value, &.{.{ .key = col.name }});
     const v = found orelse {
         if (strict) {
-            api.resultError(ctx, jf.not_found);
+            jf.not_found.raise(ctx);
         } else api.resultNull(ctx);
         return RC.OK;
     };
     if (col.as_json or v.isContainer()) {
         if (!col.as_json or !v.isContainer()) {
-            if (strict) api.resultError(ctx, jf.no_container) else api.resultNull(ctx);
+            if (strict) jf.no_container.raise(ctx) else api.resultNull(ctx);
             return RC.OK;
         }
         api.resultText(ctx, v.text(z), .transient);
@@ -416,7 +416,10 @@ fn column(cur: *vtab.VtabCursor, ctx: *vi.Context, i: i32) i32 {
         const from = "converting the varchar value";
         if (std.mem.indexOf(u8, msg, from)) |at| {
             const fixed = std.mem.concat(a, u8, &.{ msg[0..at], "converting the nvarchar value", msg[at + from.len ..] }) catch return RC.NOMEM;
+            // The same error, reworded.
+            const st = ctx.err_state;
             api.resultError(ctx, fixed);
+            ctx.err_state = st;
         }
     }
     return RC.OK;

@@ -1451,6 +1451,34 @@ pub const FuncDestructor = struct {
 /// sqlite3_create_function_v2() and sqlite3_create_module_v2().
 pub const DestructorFn = *const fn (?*anyopaque) void;
 
+/// What an error is, beyond its result code, for clients that tell SQL
+/// errors apart by code (the wire protocols, ORMs): its SQLSTATE, in
+/// PostgreSQL's code space (42P01 for an undefined table), set where the
+/// error is raised; and the number of the dialect for it (MySQL's 1146,
+/// SQL Server's 208, Oracle's 942 for ORA-00942), set by the dialect.
+/// It belongs to an error message: Parse.err_msg, Vdbe.err_msg and the
+/// connection's message each have one, replaced with the message.
+pub const ErrorState = struct {
+    sqlstate: [5]u8,
+    /// 0 if the dialect has none (PostgreSQL's code is the SQLSTATE).
+    number: u32 = 0,
+
+    pub fn of(comptime sqlstate: *const [5]u8) ErrorState {
+        return .{ .sqlstate = sqlstate.* };
+    }
+
+    /// An error the dialect numbers `number`.
+    pub fn numbered(comptime sqlstate: *const [5]u8, number: u32) ErrorState {
+        return .{ .sqlstate = sqlstate.*, .number = number };
+    }
+
+    /// What a message of format `fmt` is by xqlite's conventions: "xqlite:
+    /// ..." says what xqlite does not support (feature_not_supported).
+    pub fn ofFormat(comptime fmt: []const u8) ?ErrorState {
+        return if (comptime std.mem.startsWith(u8, fmt, "xqlite: ")) .of("0A000") else null;
+    }
+};
+
 /// The DestructorFn of `f`, a typed destructor (`fn (*T) void`): it calls
 /// `f` with the pointer cast to the type of its parameter (thunk.thunk()).
 /// It is one function per `f`, so it can be compared as C compares xDel
@@ -1762,6 +1790,8 @@ pub const Parse = struct {
     /// reference (Table.n_tab_ref) until the statement is prepared.
     tab_refs: std.ArrayList(*Table) = .empty,
     err_msg: ?[:0]u8 = null,
+    /// What err_msg is (ErrorState), if known.
+    err_state: ?ErrorState = null,
     rc: i32 = RC.OK,
     nested: u8 = 0,
     disable_lookaside: u8 = 0,
@@ -2257,6 +2287,8 @@ pub const Sqlite3 = struct {
     n_deferred_imm_cons: i64 = 0,
     /// The last error message.
     err: ?*Mem = null,
+    /// What it is (ErrorState), if known.
+    err_state: ?ErrorState = null,
     /// Applied to result codes (0xff without extended codes).
     err_mask: i32 = 0xff,
     /// Significant digits when REAL values become text.

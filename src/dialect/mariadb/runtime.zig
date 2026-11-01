@@ -32,14 +32,14 @@ pub fn divFunc(ctx: *Context, argv: []*Mem) void {
         const a = api.valueInt64(argv[0]);
         const b = api.valueInt64(argv[1]);
         if (b == 0) return api.resultNull(ctx);
-        if (a == std.math.minInt(i64) and b == -1) return api.resultError(ctx, "BIGINT value is out of range in DIV");
+        if (a == std.math.minInt(i64) and b == -1) return api.resultErrorState(ctx, .numbered("22003", 1690), "BIGINT value is out of range in DIV");
         return api.resultInt64(ctx, @divTrunc(a, b));
     }
     const a = api.valueDouble(argv[0]);
     const b = api.valueDouble(argv[1]);
     if (b == 0) return api.resultNull(ctx);
     const q = @trunc(a / b);
-    if (!(q >= -9.2233720368547758e18 and q < 9.2233720368547758e18)) return api.resultError(ctx, "BIGINT value is out of range in DIV");
+    if (!(q >= -9.2233720368547758e18 and q < 9.2233720368547758e18)) return api.resultErrorState(ctx, .numbered("22003", 1690), "BIGINT value is out of range in DIV");
     api.resultInt64(ctx, @intFromFloat(q));
 }
 
@@ -62,7 +62,7 @@ pub fn bitxorFunc(ctx: *Context, argv: []*Mem) void {
 pub fn powFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const r = std.math.pow(f64, api.valueDouble(argv[0]), api.valueDouble(argv[1]));
-    if (std.math.isNan(r) or std.math.isInf(r)) return api.resultError(ctx, "DOUBLE value is out of range in 'pow'");
+    if (std.math.isNan(r) or std.math.isInf(r)) return api.resultErrorState(ctx, .numbered("22003", 1690), "DOUBLE value is out of range in 'pow'");
     api.resultDouble(ctx, r);
 }
 
@@ -342,7 +342,7 @@ pub fn dateAddFunc(ctx: *Context, argv: []*Mem) void {
         micros = if (isIntegral(argv[1])) n * 1000000 else @intFromFloat(n_f * 1e6);
     } else if (U.is(unit, "MICROSECOND")) {
         micros = n;
-    } else return api.resultError(ctx, "xqlite: unsupported INTERVAL unit");
+    } else return api.resultErrorState(ctx, .of("0A000"), "xqlite: unsupported INTERVAL unit");
     var y: i64 = dt.year;
     var m: i64 = dt.month;
     var d: i64 = dt.day;
@@ -434,7 +434,7 @@ pub fn extractFunc(ctx: *Context, argv: []*Mem) void {
         .{ "MINUTE", minuteFunc }, .{ "SECOND", secondFunc }, .{ "QUARTER", quarterFunc }, .{ "MICROSECOND", microsecondFunc },
     };
     for (map) |m| if (std.ascii.eqlIgnoreCase(unit, m[0])) return m[1](ctx, @constCast(sub));
-    api.resultError(ctx, "xqlite: unsupported EXTRACT unit");
+    api.resultErrorState(ctx, .of("0A000"), "xqlite: unsupported EXTRACT unit");
 }
 
 /// DATEDIFF(a, b): days from b to a.
@@ -467,7 +467,7 @@ pub fn timestampdiffFunc(ctx: *Context, argv: []*Mem) void {
         const div: i64 = if (U.is(unit, "MONTH")) 1 else if (U.is(unit, "QUARTER")) 3 else 12;
         return api.resultInt64(ctx, @divTrunc(months, div));
     }
-    const per: i64 = if (U.is(unit, "MICROSECOND")) 1 else if (U.is(unit, "SECOND")) 1000000 else if (U.is(unit, "MINUTE")) 60_000000 else if (U.is(unit, "HOUR")) 3600_000000 else if (U.is(unit, "DAY")) 86400_000000 else if (U.is(unit, "WEEK")) 7 * 86400_000000 else return api.resultError(ctx, "xqlite: unsupported TIMESTAMPDIFF unit");
+    const per: i64 = if (U.is(unit, "MICROSECOND")) 1 else if (U.is(unit, "SECOND")) 1000000 else if (U.is(unit, "MINUTE")) 60_000000 else if (U.is(unit, "HOUR")) 3600_000000 else if (U.is(unit, "DAY")) 86400_000000 else if (U.is(unit, "WEEK")) 7 * 86400_000000 else return api.resultErrorState(ctx, .of("0A000"), "xqlite: unsupported TIMESTAMPDIFF unit");
     api.resultInt64(ctx, @divTrunc(diff, per));
 }
 

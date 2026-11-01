@@ -94,12 +94,12 @@ fn databaseOptions(s: *Parser) Error!?[]const u8 {
         const lc = try std.ascii.allocLowerString(s.a, c);
         if (cs) |x| if (!std.ascii.startsWithIgnoreCase(lc, x) or (lc.len > x.len and lc[x.len] != '_')) {
             if (!(std.ascii.eqlIgnoreCase(x, "binary") and std.mem.eql(u8, lc, "binary"))) {
-                return s.fail("COLLATION '{s}' is not valid for CHARACTER SET '{s}'", .{ c, x });
+                return s.failState(.numbered("42P21", 1253), "COLLATION '{s}' is not valid for CHARACTER SET '{s}'", .{ c, x });
             }
         };
         return lc;
     }
-    if (cs) |x| return defaultCollation(x) orelse s.fail("Unknown character set: '{s}'", .{x});
+    if (cs) |x| return defaultCollation(x) orelse s.failState(.numbered("42704", 1115), "Unknown character set: '{s}'", .{x});
     return null;
 }
 
@@ -122,13 +122,13 @@ pub fn create(s: *Parser, or_replace: bool) Error!void {
     const coll = (try databaseOptions(s)) orelse server_collation;
     const name = n.text;
     if (!nsp.validName(name) or name.len > 64 or std.mem.indexOfAny(u8, name, "/\\") != null) {
-        return s.fail("Incorrect database name '{s}'", .{name});
+        return s.failState(.numbered("42602", 1102), "Incorrect database name '{s}'", .{name});
     }
-    if (isSystem(name)) return s.fail("Access denied for user 'root'@'localhost' to database '{s}'", .{name});
+    if (isSystem(name)) return s.failState(.numbered("42501", 1044), "Access denied for user 'root'@'localhost' to database '{s}'", .{name});
     const p = s.p;
     if (try s.database(name)) |d| {
         if (!or_replace) {
-            if (!if_not_exists) return s.fail("Can't create database '{s}'; database exists", .{name});
+            if (!if_not_exists) return s.failState(.numbered("42P04", 1007), "Can't create database '{s}'; database exists", .{name});
             p.db.xq.mariadb.warn(.note, 1007, "Can't create database '{s}'; database exists", .{name});
             return session.emptyStatement(s);
         }
@@ -148,7 +148,7 @@ fn codeDrop(s: *Parser, name: []const u8) Error!void {
     const p = s.p;
     const objs = nsp.objects(p.db, s.a, name) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(p.db)}),
+        else => return s.failFrom(p.db),
     };
     nsp.codeDrop(p, name, objs) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
@@ -166,8 +166,8 @@ pub fn drop(s: *Parser) Error!void {
     const if_exists = try s.ifExists();
     const name = try s.nameText(try s.anyName());
     const d = (try s.database(name)) orelse {
-        if (isSystem(name)) return s.fail("Access denied for user 'root'@'localhost' to database '{s}'", .{name});
-        if (!if_exists) return s.fail("Can't drop database '{s}'; database doesn't exist", .{name});
+        if (isSystem(name)) return s.failState(.numbered("42501", 1044), "Access denied for user 'root'@'localhost' to database '{s}'", .{name});
+        if (!if_exists) return s.failState(.numbered("3D000", 1008), "Can't drop database '{s}'; database doesn't exist", .{name});
         s.p.db.xq.mariadb.warn(.note, 1008, "Can't drop database '{s}'; database doesn't exist", .{name});
         return session.emptyStatement(s);
     };
@@ -182,8 +182,8 @@ pub fn drop(s: *Parser) Error!void {
 pub fn use(s: *Parser) Error!void {
     try s.expectKw("USE");
     const name = try s.nameText(try s.anyName());
-    const d = (try s.database(name)) orelse return s.fail("Unknown database '{s}'", .{name});
-    if (std.mem.eql(u8, d.sqlite, "temp")) return s.fail("Unknown database '{s}'", .{name});
+    const d = (try s.database(name)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
+    if (std.mem.eql(u8, d.sqlite, "temp")) return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
     const pos = s.here();
     try session.codeEval(s, &.{try s.func(pos, "xq_maria_use", &.{try s.str(pos, d.shown)})});
 }
@@ -231,8 +231,8 @@ pub fn showDatabases(s: *Parser) Error!void {
 pub fn showCreateDatabase(s: *Parser) Error!void {
     const if_not_exists = try s.ifNotExists();
     const name = try s.nameText(try s.anyName());
-    const d = (try s.database(name)) orelse return s.fail("Unknown database '{s}'", .{name});
-    if (std.mem.eql(u8, d.sqlite, "temp")) return s.fail("Unknown database '{s}'", .{name});
+    const d = (try s.database(name)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
+    if (std.mem.eql(u8, d.sqlite, "temp")) return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
     const coll: []const u8 = if (d.named) |n| try collationOf(s, n) else main_collation;
     const B = @import("../dialect.zig").Quoted('`');
     const text = try std.fmt.allocPrint(s.a, "CREATE DATABASE {s}{f} /*!40100 DEFAULT CHARACTER SET {s} COLLATE {s} */", .{
@@ -244,7 +244,7 @@ pub fn showCreateDatabase(s: *Parser) Error!void {
 /// The collation of database `name` (of CREATE DATABASE), read now.
 fn collationOf(s: *Parser, name: []const u8) Error![]const u8 {
     var q = catalog.Query.initFmt(s.p.db, "SELECT value FROM main.xq_catalog WHERE tbl='' AND col=%Q AND key='" ++ catalog.Key.collation ++ "'", &.{.{ .str = name }}) catch
-        return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)});
+        return s.failFrom(s.p.db);
     defer q.deinit();
     if (q.step() catch false) return s.a.dupe(u8, api.columnText(q.v, 0) orelse server_collation);
     return server_collation;
@@ -255,7 +255,7 @@ pub fn showTables(s: *Parser, full: bool) Error!void {
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const d = if (s.eatKw("FROM") or s.eatKw("IN")) blk: {
         const name = try s.nameText(try s.anyName());
-        break :blk (try s.database(name)) orelse return s.fail("Unknown database '{s}'", .{name});
+        break :blk (try s.database(name)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
     } else try s.currentDb();
     var like: ?[]const u8 = null;
     if (s.eatKw("LIKE")) like = try s.stringLiteral();

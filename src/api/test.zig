@@ -889,6 +889,117 @@ test "zig api: columnOrigin and columnTypeAlloc" {
     try testing.expect(ins.countsChanges());
 }
 
+fn expectState(db: *Db, sql: []const u8, sqlstate: []const u8, number: ?u32) !void {
+    if (db.exec(sql)) |_| {
+        std.debug.print("{s}: no error\n", .{sql});
+        return error.TestExpectedError;
+    } else |_| {}
+    const info = db.lastError().?;
+    errdefer std.debug.print("{s}: {s} ({?s}, {?d})\n", .{ sql, info.message, if (info.sqlstate) |*x| x else null, info.dialect_number });
+    try testing.expectEqualStrings(sqlstate, &(info.sqlstate orelse return error.NoSqlstate));
+    try testing.expectEqual(number, info.dialect_number);
+}
+
+test "zig api: errors carry their SQLSTATE and the dialect's number" {
+    var db = try memDb();
+    defer db.close();
+    try db.exec("CREATE TABLE t(a INTEGER)");
+    try expectState(&db, "SELECT * FROM nope", "42P01", null);
+    try expectState(&db, "SELECT nope FROM t", "42703", null);
+    try expectState(&db, "SELECT nofunc(1)", "42883", null);
+    try expectState(&db, "SELEC 1", "42601", null);
+    try expectState(&db, "CREATE TABLE t(a)", "42P07", null);
+    try expectState(&db, "COMMIT", "25P01", null);
+    try db.exec("BEGIN");
+    try expectState(&db, "BEGIN", "25001", null);
+    try db.exec("ROLLBACK");
+    // Raised by an aggregate's final step.
+    try expectState(&db, "SELECT sum(x) FROM (SELECT 9223372036854775807 AS x UNION ALL SELECT 1)", "22003", null);
+    // An error the extended code tells apart has none.
+    try db.exec("CREATE TABLE u(a UNIQUE); INSERT INTO u VALUES(1)");
+    try testing.expectError(error.Constraint, db.exec("INSERT INTO u VALUES(1)"));
+    try testing.expectEqual(@as(?[5]u8, null), db.lastError().?.sqlstate);
+
+    const D = xqlite.Dialect;
+    if (D.postgres.built()) {
+        var pg = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres });
+        defer pg.close();
+        try pg.exec("CREATE TABLE t(id integer, s varchar(3))");
+        try expectState(&pg, "SELECT * FROM nope", "42P01", null);
+        try expectState(&pg, "SELEC 1", "42601", null);
+        try expectState(&pg, "CREATE TABLE nosuch.x(a int)", "3F000", null);
+        try expectState(&pg, "INSERT INTO t VALUES(1, 'abcd')", "22001", null);
+        try expectState(&pg, "INSERT INTO t VALUES(3000000000, 'a')", "22003", null);
+        try expectState(&pg, "SELECT mod(1, 0)", "22012", null);
+        try expectState(&pg, "CREATE TABLE t(a int)", "42P07", null);
+        try expectState(&pg, "SELECT sqrt(-1.0)", "2201F", null);
+        try expectState(&pg, "SELECT jsonb_path_query('{\"a\": 1}', 'strict $.b')", "2203A", null);
+        try expectState(&pg, "SELECT jsonb_path_query('{}', '$.a[')", "42601", null);
+        try expectState(&pg, "SELECT $0", "42P02", null);
+        try expectState(&pg, "SET nosuch_parameter = 1", "42704", null);
+        try expectState(&pg, "SELECT 'x' FROM t LIMIT 1 LIMIT 2", "42601", null);
+    }
+    if (D.mariadb.built()) {
+        var my = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mariadb });
+        defer my.close();
+        try my.exec("CREATE TABLE t(id INT, s VARCHAR(3))");
+        try expectState(&my, "SELECT * FROM nope", "42P01", 1146);
+        try expectState(&my, "SELECT nope FROM t", "42703", 1054);
+        try expectState(&my, "SELEC 1", "42601", 1064);
+        try expectState(&my, "CREATE TABLE t(a INT)", "42P07", 1050);
+        try expectState(&my, "INSERT INTO t VALUES(1, 'abcd')", "22001", 1406);
+        try expectState(&my, "CREATE DATABASE main", "42P04", 1007);
+        try expectState(&my, "SELECT * FROM JSON_TABLE('[1', '$[*]' COLUMNS(a INT PATH '$')) AS j", "22032", 4038);
+    }
+    if (D.mssql.built()) {
+        var ms = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mssql });
+        defer ms.close();
+        try ms.exec("CREATE TABLE t(id INT, s VARCHAR(3))");
+        try expectState(&ms, "SELECT * FROM nope", "42P01", 208);
+        try expectState(&ms, "SELECT nope FROM t", "42703", 207);
+        try expectState(&ms, "SELEC 1", "42601", 102);
+        try expectState(&ms, "COMMIT", "25P01", 3902);
+        try expectState(&ms, "INSERT INTO t VALUES(1, 'abcd')", "22001", 2628);
+        try expectState(&ms, "INSERT INTO t VALUES('x', 'a')", "22P02", 245);
+        try expectState(&ms, "SELECT DATEADD(year, 9000, CAST('2000-01-01' AS datetime))", "22008", 517);
+        try expectState(&ms, "SELECT * FROM OPENJSON('[1', '$')", "22032", 13609);
+        try expectState(&ms, "SELECT JSON_VALUE('{\"a\": 1}', 'strict $.b')", "2203A", 13608);
+        try expectState(&ms, "SELECT CONCAT('a')", "42883", 189);
+        // xqlite's own "xqlite: ... is not supported".
+        try expectState(&ms, "SET ROWCOUNT 1", "0A000", null);
+    }
+    if (D.oracle.built()) {
+        var ora = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .oracle });
+        defer ora.close();
+        try ora.exec("CREATE TABLE t(id NUMBER(5), s VARCHAR2(3))");
+        try expectState(&ora, "SELECT * FROM nope", "42P01", 942);
+        try expectState(&ora, "SELECT nope FROM t", "42703", 904);
+        try expectState(&ora, "INSERT INTO t VALUES(1, 'abcd')", "22001", 12899);
+        try expectState(&ora, "INSERT INTO t VALUES('x', 'a')", "22P02", 1722);
+        try expectState(&ora, "SELECT FROM dual", "42601", 936);
+        try expectState(&ora, "SELECT 'abc FROM dual", "42601", 1756);
+    }
+}
+
+test "zig api: Diagnostics carry the SQLSTATE and the dialect's number" {
+    var diag: xqlite.Diagnostics = .{};
+    var db = try Db.open(gpa, testing.io, ":memory:", .{ .diagnostics = &diag });
+    defer db.close();
+    try testing.expectError(error.Sql, db.exec("SELECT * FROM nope"));
+    try testing.expectEqualStrings("42P01", &diag.sqlstate.?);
+    // An API error has none.
+    try testing.expectError(error.ColumnNotFound, db.oneAlloc(struct { b: i64 }, gpa, "SELECT 1 AS a", .{}));
+    try testing.expectEqual(@as(?[5]u8, null), diag.sqlstate);
+    if (xqlite.Dialect.mariadb.built()) {
+        var my_diag: xqlite.Diagnostics = .{};
+        var my = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mariadb, .diagnostics = &my_diag });
+        defer my.close();
+        try testing.expectError(error.Sql, my.exec("SELECT * FROM nope"));
+        try testing.expectEqualStrings("42P01", &my_diag.sqlstate.?);
+        try testing.expectEqual(@as(?u32, 1146), my_diag.dialect_number);
+    }
+}
+
 fn interruptAt(db: *Db, n: i64) i64 {
     if (n == 1000) db.interrupt();
     return n;

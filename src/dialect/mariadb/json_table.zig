@@ -60,12 +60,12 @@ pub fn fromItem(s: *Parser, pos: u32) Error!tree.FromItem {
     try b.out.appendSlice(s.a, ",\"c\":");
     try b.columns();
     try s.expectOp(")");
-    const al = (try s.alias(false)) orelse return s.fail("Every table function must have an alias.", .{});
+    const al = (try s.alias(false)) orelse return s.failState(.of("42601"), "Every table function must have an alias.", .{});
     try b.out.appendSlice(s.a, ",\"t\":");
     try json.appendQuoted(s.a, &b.out, al.text);
     try b.out.append(s.a, '}');
     for (b.names.items, 0..) |n, i| for (b.names.items[0..i]) |o| {
-        if (std.ascii.eqlIgnoreCase(n, o)) return s.fail("Duplicate column name '{s}'", .{n});
+        if (std.ascii.eqlIgnoreCase(n, o)) return s.failState(.numbered("42701", 1060), "Duplicate column name '{s}'", .{n});
     };
     try s.json_tables.append(s.a, .{ .alias = al.text, .cols = b.names.items });
     const f = try s.new(tree.Func, .{ .name = .{ .text = "xq_maria_json_table", .pos = pos }, .args = try s.a.dupe(*Expr, &.{ doc, try s.str(pos, b.out.items) }) });
@@ -290,7 +290,7 @@ const Rewriter = struct {
                 try r.s.a.dupe(Name, &.{a.name})
             else switch (item.source) {
                 .table => |q| if (q.schema) |sc| try r.s.a.dupe(Name, &.{ sc, q.name }) else try r.s.a.dupe(Name, &.{q.name}),
-                else => return r.s.fail("Every derived table must have its own alias", .{}),
+                else => return r.s.failState(.numbered("42601", 1248), "Every derived table must have its own alias", .{}),
             };
             if (label.len == 1) if (r.table(label[0].text)) |jt| {
                 try r.listColumns(out, jt, pos);
@@ -537,14 +537,21 @@ const Runner = struct {
     /// The rows: JSON arrays of the column values.
     rows: std.ArrayList([]const u8) = .empty,
     msg: []const u8 = "",
+    /// What the error is.
+    state: ?int.ErrorState = null,
 
     fn fail(r: *Runner, comptime fmt: []const u8, args: anytype) Failure {
+        return r.failState(comptime int.ErrorState.ofFormat(fmt), fmt, args);
+    }
+
+    fn failState(r: *Runner, st: ?int.ErrorState, comptime fmt: []const u8, args: anytype) Failure {
         r.msg = try std.fmt.allocPrint(r.a, fmt, args);
+        r.state = st;
         return error.Failed;
     }
 
     fn badPath(r: *Runner) Failure {
-        return r.fail("Syntax error in JSON path in argument 2 to function 'JSON_TABLE' at position 1", .{});
+        return r.failState(.numbered("42601", 4042), "Syntax error in JSON path in argument 2 to function 'JSON_TABLE' at position 1", .{});
     }
 
     fn level(r: *Runner, spec: *const json.Node) Failure!*Level {
@@ -647,7 +654,7 @@ const Runner = struct {
     fn onEmpty(r: *Runner, c: *const Col) Failure!?[]const u8 {
         return switch (c.on_empty) {
             .null => null,
-            .err => r.fail("Field '{s}' can't be set for JSON_TABLE '{s}'.", .{ c.name, r.alias }),
+            .err => r.failState(.of("22035"), "Field '{s}' can't be set for JSON_TABLE '{s}'.", .{ c.name, r.alias }),
             .default => |d| try r.convert(c, d, .string),
         };
     }
@@ -655,7 +662,7 @@ const Runner = struct {
     fn onError(r: *Runner, c: *const Col, comptime msg: []const u8) Failure!?[]const u8 {
         return switch (c.on_error) {
             .null => null,
-            .err => r.fail(msg, .{ c.name, r.alias }),
+            .err => r.failState(.of("22000"), msg, .{ c.name, r.alias }),
             .default => |d| try r.convert(c, d, .string),
         };
     }
@@ -752,7 +759,7 @@ fn runTable(r: *Runner, doc_text: ?[]const u8, spec_text: []const u8) Failure!vo
     var pos: usize = 0;
     var doc = json.parseAt(a, z, &pos) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        error.Invalid => return r.fail("Syntax error in JSON text in argument 1 to function 'JSON_TABLE' at position {d}", .{pos + 1}),
+        error.Invalid => return r.failState(.numbered("22032", 4038), "Syntax error in JSON text in argument 1 to function 'JSON_TABLE' at position {d}", .{pos + 1}),
     };
     const base = try a.alloc(?[]const u8, r.n_out);
     @memset(base, null);
@@ -858,6 +865,7 @@ fn filter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, argv: []*Mem) i32 {
         error.OutOfMemory => return RC.NOMEM,
         error.Failed => {
             vtab.setErrMsg(c.db, cur.vtab, "{s}", .{r.msg});
+            cur.vtab.err_state = r.state;
             return RC.ERROR;
         },
     };

@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const json = @import("json.zig");
+const int = @import("../../sql/sqlite_int.zig");
 const regex = @import("regex.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
@@ -27,6 +28,8 @@ pub const Error = error{ OutOfMemory, Syntax, Eval };
 /// What went wrong, for the message of the SQL function.
 pub const Diag = struct {
     msg: []const u8 = "",
+    /// What the error is; null for a syntax error of the path.
+    state: ?int.ErrorState = null,
 };
 
 const Node = union(enum) {
@@ -298,6 +301,7 @@ const Parser = struct {
             const re = regex.compile(p.a, pat.text, flags) catch |e| {
                 if (e == error.OutOfMemory) return error.OutOfMemory;
                 p.diag.msg = try std.fmt.allocPrint(p.a, "invalid regular expression: {s}", .{pat.text});
+                p.diag.state = .of("2201B");
                 return error.Syntax;
             };
             return p.node(.{ .like_regex = .{ .l = l, .re = re } });
@@ -359,6 +363,7 @@ const Parser = struct {
                     };
                     if (!ok) {
                         p.diag.msg = try std.fmt.allocPrint(p.a, "jsonpath method {s}() is not supported", .{t.text});
+                        p.diag.state = .of("0A000");
                         return error.Syntax;
                     }
                     e = try p.node(.{ .method = .{ .base = e, .name = t.text } });
@@ -487,7 +492,8 @@ pub const Exec = struct {
     strict: bool,
     diag: *Diag,
 
-    fn fail(x: *Exec, comptime fmt: []const u8, args: anytype) Error {
+    fn fail(x: *Exec, comptime st: *const [5]u8, comptime fmt: []const u8, args: anytype) Error {
+        x.diag.state = .of(st);
         x.diag.msg = try std.fmt.allocPrint(x.a, fmt, args);
         return error.Eval;
     }
@@ -501,8 +507,8 @@ pub const Exec = struct {
             .last => try out.append(x.a, .{ .v = .{ .number = try std.fmt.allocPrint(x.a, "{d}", .{last orelse 0}) } }),
             .literal => |v| try out.append(x.a, v),
             .variable => |name| {
-                const vars = x.vars orelse return x.fail("could not find jsonpath variable \"{s}\"", .{name});
-                const v = vars.get(name) orelse return x.fail("could not find jsonpath variable \"{s}\"", .{name});
+                const vars = x.vars orelse return x.fail("42704", "could not find jsonpath variable \"{s}\"", .{name});
+                const v = vars.get(name) orelse return x.fail("42704", "could not find jsonpath variable \"{s}\"", .{name});
                 try out.append(x.a, v);
             },
             .key => |k| {
@@ -525,7 +531,7 @@ pub const Exec = struct {
                 try x.eval(b, cur, last, &base);
                 for (base.items) |v| switch (v.v) {
                     .array => |items| try out.appendSlice(x.a, items),
-                    else => if (x.strict) return x.fail("jsonpath wildcard array accessor can only be applied to an array", .{}) else try out.append(x.a, v),
+                    else => if (x.strict) return x.fail("22039", "jsonpath wildcard array accessor can only be applied to an array", .{}) else try out.append(x.a, v),
                 };
             },
             .subscript => |s| {
@@ -535,7 +541,7 @@ pub const Exec = struct {
                     const items: []const Value = switch (v.v) {
                         .array => |it| it,
                         else => blk: {
-                            if (x.strict) return x.fail("jsonpath array accessor can only be applied to an array", .{});
+                            if (x.strict) return x.fail("22039", "jsonpath array accessor can only be applied to an array", .{});
                             break :blk &.{v};
                         },
                     };
@@ -543,7 +549,7 @@ pub const Exec = struct {
                     for (s.items) |r| {
                         const from = try x.index(r.from, cur, lst);
                         const to = if (r.to) |t| try x.index(t, cur, lst) else from;
-                        if (x.strict and (from < 0 or to > lst or from > to)) return x.fail("jsonpath array subscript is out of bounds", .{});
+                        if (x.strict and (from < 0 or to > lst or from > to)) return x.fail("22033", "jsonpath array subscript is out of bounds", .{});
                         var i = @max(from, 0);
                         while (i <= @min(to, lst)) : (i += 1) try out.append(x.a, items[@intCast(i)]);
                     }
@@ -579,13 +585,13 @@ pub const Exec = struct {
                     for (base.items) |v| {
                         const items: []const Value = if (!x.strict and v.v == .array) v.v.array else &.{v};
                         for (items) |e| {
-                            if (e.v != .number) return x.fail("operand of unary jsonpath operator {s} is not a numeric value", .{if (u.op == .neg) "-" else "+"});
+                            if (e.v != .number) return x.fail("22036", "operand of unary jsonpath operator {s} is not a numeric value", .{if (u.op == .neg) "-" else "+"});
                             if (u.op == .plus) {
                                 try out.append(x.a, e);
                             } else {
                                 const t = e.v.number;
                                 const neg = if (t[0] == '-') t[1..] else try std.mem.concat(x.a, u8, &.{ "-", t });
-                                try out.append(x.a, .{ .v = .{ .number = json.numericOut(x.a, neg) catch return x.fail("numeric value out of range", .{}) } });
+                                try out.append(x.a, .{ .v = .{ .number = json.numericOut(x.a, neg) catch return x.fail("22003", "numeric value out of range", .{}) } });
                             }
                         }
                     }
@@ -610,13 +616,13 @@ pub const Exec = struct {
             .object => {
                 if (v.get(name)) |f| {
                     try out.append(x.a, f);
-                } else if (x.strict) return x.fail("JSON object does not contain key \"{s}\"", .{name});
+                } else if (x.strict) return x.fail("2203A", "JSON object does not contain key \"{s}\"", .{name});
             },
             .array => |items| {
-                if (x.strict or !unwrap) return x.fail("jsonpath member accessor can only be applied to an object", .{});
+                if (x.strict or !unwrap) return x.fail("2203C", "jsonpath member accessor can only be applied to an object", .{});
                 for (items) |e| try x.keyOf(e, name, out, false);
             },
-            else => if (x.strict) return x.fail("jsonpath member accessor can only be applied to an object", .{}),
+            else => if (x.strict) return x.fail("2203C", "jsonpath member accessor can only be applied to an object", .{}),
         }
     }
 
@@ -633,19 +639,19 @@ pub const Exec = struct {
         switch (v.v) {
             .object => |pairs| for (pairs) |pp| try out.append(x.a, pp.value),
             .array => |items| {
-                if (x.strict or !unwrap) return x.fail("jsonpath wildcard member accessor can only be applied to an object", .{});
+                if (x.strict or !unwrap) return x.fail("2203C", "jsonpath wildcard member accessor can only be applied to an object", .{});
                 for (items) |e| try x.anyKey(e, out, false);
             },
-            else => if (x.strict) return x.fail("jsonpath wildcard member accessor can only be applied to an object", .{}),
+            else => if (x.strict) return x.fail("2203C", "jsonpath wildcard member accessor can only be applied to an object", .{}),
         }
     }
 
     fn index(x: *Exec, n: *const Node, cur: Value, last: i64) Error!i64 {
         var r: std.ArrayList(Value) = .empty;
         try x.eval(n, cur, last, &r);
-        if (r.items.len != 1 or r.items[0].v != .number) return x.fail("jsonpath array subscript is not a single numeric value", .{});
-        const f = std.fmt.parseFloat(f64, r.items[0].v.number) catch return x.fail("jsonpath array subscript is not a single numeric value", .{});
-        if (!(f > -2147483648.0 and f < 2147483648.0)) return x.fail("jsonpath array subscript is out of integer range", .{});
+        if (r.items.len != 1 or r.items[0].v != .number) return x.fail("22033", "jsonpath array subscript is not a single numeric value", .{});
+        const f = std.fmt.parseFloat(f64, r.items[0].v.number) catch return x.fail("22033", "jsonpath array subscript is not a single numeric value", .{});
+        if (!(f > -2147483648.0 and f < 2147483648.0)) return x.fail("22033", "jsonpath array subscript is out of integer range", .{});
         return @intFromFloat(@trunc(f));
     }
 
@@ -655,7 +661,7 @@ pub const Exec = struct {
         var items = r.items;
         if (!x.strict and items.len == 1 and items[0].v == .array) items = items[0].v.array;
         if (items.len != 1 or items[0].v != .number) {
-            return x.fail("{s} operand of jsonpath operator {s} is not a single numeric value", .{ side, opText(op) });
+            return x.fail("22038", "{s} operand of jsonpath operator {s} is not a single numeric value", .{ side, opText(op) });
         }
         return items[0].v.number;
     }
@@ -666,7 +672,7 @@ pub const Exec = struct {
     fn arith(x: *Exec, op: Op, l: []const u8, r: []const u8) Error!Value {
         const fl = std.fmt.parseFloat(f64, l) catch 0;
         const fr = std.fmt.parseFloat(f64, r) catch 0;
-        if ((op == .div or op == .mod) and fr == 0) return x.fail("division by zero", .{});
+        if ((op == .div or op == .mod) and fr == 0) return x.fail("22012", "division by zero", .{});
         const dl = Dec.parse(l) orelse return x.floatResult(op, fl, fr);
         const dr = Dec.parse(r) orelse return x.floatResult(op, fl, fr);
         const res = Dec.apply(op, dl, dr) orelse return x.floatResult(op, fl, fr);
@@ -694,7 +700,7 @@ pub const Exec = struct {
             const n: usize = switch (v.v) {
                 .array => |items| items.len,
                 else => blk: {
-                    if (x.strict) return x.fail("jsonpath item method .size() can only be applied to an array", .{});
+                    if (x.strict) return x.fail("22039", "jsonpath item method .size() can only be applied to an array", .{});
                     break :blk 1;
                 },
             };
@@ -708,12 +714,12 @@ pub const Exec = struct {
         if (eq(u8, name, "double")) {
             const f: f64 = switch (v.v) {
                 .number => |n| std.fmt.parseFloat(f64, n) catch 0,
-                .string => |s| std.fmt.parseFloat(f64, s) catch return x.fail("argument \"{s}\" of jsonpath item method .double() is invalid for type double precision", .{s}),
-                else => return x.fail("jsonpath item method .double() can only be applied to a string or numeric value", .{}),
+                .string => |s| std.fmt.parseFloat(f64, s) catch return x.fail("22036", "argument \"{s}\" of jsonpath item method .double() is invalid for type double precision", .{s}),
+                else => return x.fail("22036", "jsonpath item method .double() can only be applied to a string or numeric value", .{}),
             };
             return out.append(x.a, .{ .v = .{ .number = try formatNumber(x.a, f) } });
         }
-        if (v.v != .number) return x.fail("jsonpath item method .{s}() can only be applied to a numeric value", .{name});
+        if (v.v != .number) return x.fail("22036", "jsonpath item method .{s}() can only be applied to a numeric value", .{name});
         const t = v.v.number;
         const neg = t[0] == '-';
         const abs = if (neg) t[1..] else t;
@@ -865,7 +871,7 @@ pub const Exec = struct {
             .null => return null,
             else => {},
         };
-        return x.fail("single boolean result is expected", .{});
+        return x.fail("22038", "single boolean result is expected", .{});
     }
 };
 

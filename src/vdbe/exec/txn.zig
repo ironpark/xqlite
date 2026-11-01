@@ -53,7 +53,8 @@ pub fn opAutoCommit(e: *Exec, op: *Op) Error!Flow {
         e.rc = if (v.rc == RC.OK) RC.DONE else RC.ERROR;
         return .ret;
     }
-    aux.vdbeError(v, "{s}", .{if (!desired)
+    // active_sql_transaction, no_active_sql_transaction.
+    aux.vdbeErrorState(v, if (!desired) .of("25001") else .of("25P01"), "{s}", .{if (!desired)
         "cannot start a transaction within a transaction"
     else if (rollback)
         "cannot rollback - no transaction is active"
@@ -115,7 +116,7 @@ pub fn opSavepoint(e: *Exec, op: *Op) Error!Flow {
             i_savepoint += 1;
         }
         const sp = it orelse {
-            aux.vdbeError(v, "no such savepoint: {s}", .{name});
+            aux.vdbeErrorState(v, .of("3B001"), "no such savepoint: {s}", .{name});
             return error.Error;
         };
         if (db.n_vdbe_write > 0 and p1 == .RELEASE) {

@@ -105,10 +105,14 @@ pub const stmt = struct {
     /// sqlite3ErrorMsg() with %T: the error is about the text at `z`,
     /// whose offset sqlite3_error_offset() reports.
     pub const errorMsgAt = util.errorMsgAt;
+    /// errorMsgAt() of an error whose ErrorState is known.
+    pub const errorMsgState = util.errorMsgState;
+    /// The error just recorded is this ErrorState.
+    pub const errorIs = util.errorIs;
 
     /// parse.y parserSyntaxError(): `near "X": syntax error`.
     pub fn syntaxError(p: *Parse, t: Token) void {
-        util.errorMsgAt(p, t.z, "near \"{s}\": syntax error", .{t.slice()});
+        util.errorMsgState(p, t.z, .of("42601"), "near \"{s}\": syntax error", .{t.slice()});
     }
 
     /// EXPLAIN (1) or EXPLAIN QUERY PLAN (2) of the statement: set before

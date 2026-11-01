@@ -29,8 +29,25 @@ pub const Conn = struct {
     /// Copy the connection's error into the Diagnostics, if any.
     fn record(c: Conn, err: Error) void {
         const d = c.diag orelse return;
+        d.setInfo(err, c.info(.of(engine.extendedErrcode(c.h))));
+    }
+
+    /// The connection's last error, null if the last call succeeded.
+    pub fn lastError(c: Conn) ?errors.ErrorInfo {
+        const code: ResultCode = .of(engine.extendedErrcode(c.h));
+        return if (code.isError()) c.info(code) else null;
+    }
+
+    fn info(c: Conn, code: ResultCode) errors.ErrorInfo {
         const off = engine.errorOffset(c.h);
-        d.set(err, .of(engine.extendedErrcode(c.h)), engine.errmsg(c.h), if (off >= 0) @intCast(off) else null);
+        const state = engine.errorState(c.h);
+        return .{
+            .code = code,
+            .message = engine.errmsg(c.h),
+            .offset = if (off >= 0) @intCast(off) else null,
+            .sqlstate = if (state) |st| st.sqlstate else null,
+            .dialect_number = if (state) |st| if (st.number != 0) st.number else null else null,
+        };
     }
 
     /// The one entry point for errors that the API layer itself detects:

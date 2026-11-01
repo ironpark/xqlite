@@ -23,6 +23,7 @@
 const std = @import("std");
 const calendar = @import("../calendar.zig");
 const api = @import("../../vdbe/api.zig");
+const int = @import("../../sql/sqlite_int.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
 const state_mod = @import("state.zig");
@@ -290,7 +291,7 @@ pub fn coerceFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
         const lenient = flags & coerce_ignore != 0 or (!c.strict and flags & coerce_multi_row != 0);
         if (!lenient) {
             var msg: [state_mod.Warning.msg_max + 32]u8 = undefined;
-            return api.resultError(ctx, std.fmt.bufPrint(&msg, "Column '{s}' cannot be null", .{c.col}) catch "Column cannot be null");
+            return api.resultErrorState(ctx, errorState(1048), std.fmt.bufPrint(&msg, "Column '{s}' cannot be null", .{c.col}) catch "Column cannot be null");
         }
         st.warn(.warning, 1048, "Column '{s}' cannot be null", .{c.col});
         return implicitDefault(ctx, t);
@@ -372,7 +373,7 @@ const Coercion = struct {
         if (c.strict) {
             var buf: [state_mod.Warning.msg_max + 64]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, fmt, args) catch &buf;
-            api.resultError(c.ctx, msg);
+            api.resultErrorState(c.ctx, errorState(code), msg);
             c.failed = true;
             return true;
         }
@@ -986,6 +987,20 @@ fn fraction(z: []const u8) ?u32 {
         scale /= 10;
     }
     return micro;
+}
+
+/// The ErrorState of MariaDB's error `number` (its SQLSTATE in
+/// PostgreSQL's code space) for the errors of storing a value.
+fn errorState(code: u16) int.ErrorState {
+    const sqlstate: *const [5]u8 = switch (code) {
+        1048, 1364 => "23502",
+        1264 => "22003",
+        1265, 1406 => "22001",
+        1366 => "22P02",
+        1292 => "22007",
+        else => "22000",
+    };
+    return .{ .sqlstate = sqlstate.*, .number = code };
 }
 
 test "types: format and parse" {

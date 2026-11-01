@@ -209,14 +209,14 @@ const Call = struct {
     fn fail(c: *Call, e: anyerror) void {
         switch (e) {
             error.OutOfMemory => api.resultErrorNomem(c.ctx),
-            error.UnicodeEscape => api.resultError(c.ctx, "unsupported Unicode escape sequence"),
-            else => api.resultError(c.ctx, "invalid input syntax for type json"),
+            error.UnicodeEscape => api.resultErrorState(c.ctx, .of("22P05"), "unsupported Unicode escape sequence"),
+            else => api.resultErrorState(c.ctx, .of("22P02"), "invalid input syntax for type json"),
         }
     }
 
-    fn errFmt(c: *Call, comptime fmt: []const u8, args: anytype) void {
+    fn errFmt(c: *Call, comptime st: *const [5]u8, comptime fmt: []const u8, args: anytype) void {
         const msg = std.fmt.allocPrint(c.a(), fmt, args) catch return api.resultErrorNomem(c.ctx);
-        api.resultError(c.ctx, msg);
+        api.resultErrorState(c.ctx, .of(st), msg);
     }
 
     /// Make `v` the result: json's text or jsonb's, with the subtype.
@@ -242,7 +242,7 @@ const Call = struct {
         return json.parseTextArray(c.a(), t) catch |e| {
             if (e == error.OutOfMemory) {
                 api.resultErrorNomem(c.ctx);
-            } else c.errFmt("malformed array literal: \"{s}\"", .{t});
+            } else c.errFmt("22P02", "malformed array literal: \"{s}\"", .{t});
             return null;
         };
     }
@@ -387,7 +387,7 @@ const pathJsonbText = dfunc.bind(pathGet, .{ true, true });
 
 /// json_extract_path(j, VARIADIC path).
 fn extractPath(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
-    if (argv.len == 0) return api.resultError(ctx, "function json_extract_path() does not exist");
+    if (argv.len == 0) return api.resultErrorState(ctx, .of("42883"), "function json_extract_path() does not exist");
     if (anyNull(argv)) return api.resultNull(ctx);
     var c: Call = .init(ctx);
     defer c.deinit();
@@ -462,7 +462,7 @@ fn deleteFunc(c: *Call, argv: []*Mem) void {
     const x = c.parse(argv[0], true) orelse return;
     if (api.valueType(argv[1]) == vi.SQLITE_INTEGER) {
         switch (x.v) {
-            .object => return api.resultError(c.ctx, "cannot delete from object using integer index"),
+            .object => return api.resultErrorState(c.ctx, .of("22023"), "cannot delete from object using integer index"),
             .array => |items| {
                 const n: i64 = @intCast(items.len);
                 var i = api.valueInt64(argv[1]);
@@ -472,11 +472,11 @@ fn deleteFunc(c: *Call, argv: []*Mem) void {
                 const out = std.mem.concat(c.a(), Value, &.{ items[0..k], items[k + 1 ..] }) catch return api.resultErrorNomem(c.ctx);
                 return c.result(.{ .v = .{ .array = out } }, true);
             },
-            else => return api.resultError(c.ctx, "cannot delete from scalar"),
+            else => return api.resultErrorState(c.ctx, .of("22023"), "cannot delete from scalar"),
         }
     }
     const k = c.text(argv[1]) orelse return;
-    const r = deleteKeys(c.a(), x, &.{k}) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(c.ctx) else api.resultError(c.ctx, "cannot delete from scalar");
+    const r = deleteKeys(c.a(), x, &.{k}) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(c.ctx) else api.resultErrorState(c.ctx, .of("22023"), "cannot delete from scalar");
     c.result(r, true);
 }
 
@@ -506,7 +506,7 @@ fn deleteKeysFunc(c: *Call, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(c.ctx);
     const x = c.parse(argv[0], true) orelse return;
     const keys = c.textArray(argv[1]) orelse return;
-    const r = deleteKeys(c.a(), x, keys) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(c.ctx) else api.resultError(c.ctx, "cannot delete from scalar");
+    const r = deleteKeys(c.a(), x, keys) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(c.ctx) else api.resultErrorState(c.ctx, .of("22023"), "cannot delete from scalar");
     c.result(r, true);
 }
 
@@ -522,7 +522,7 @@ const SetError = json.Error || error{Reported};
 fn setPath(c: *Call, v: Value, path: []const ?[]const u8, level: usize, new: Value, op: SetOp, create: bool) SetError!Value {
     if (level >= path.len) return v;
     const step = path[level] orelse {
-        c.errFmt("path element at position {d} is null", .{level + 1});
+        c.errFmt("22004", "path element at position {d} is null", .{level + 1});
         return error.Reported;
     };
     const last = level + 1 == path.len;
@@ -540,7 +540,7 @@ fn setPath(c: *Call, v: Value, path: []const ?[]const u8, level: usize, new: Val
                             continue;
                         },
                         .insert_before, .insert_after => {
-                            c.errFmt("cannot replace existing key", .{});
+                            c.errFmt("22023", "cannot replace existing key", .{});
                             return error.Reported;
                         },
                     };
@@ -558,7 +558,7 @@ fn setPath(c: *Call, v: Value, path: []const ?[]const u8, level: usize, new: Val
         },
         .array => |items| {
             const idx_raw = std.fmt.parseInt(i64, std.mem.trim(u8, step, " "), 10) catch {
-                c.errFmt("path element at position {d} is not an integer: \"{s}\"", .{ level + 1, step });
+                c.errFmt("22P02", "path element at position {d} is not an integer: \"{s}\"", .{ level + 1, step });
                 return error.Reported;
             };
             const n: i64 = @intCast(items.len);
@@ -606,7 +606,7 @@ fn setPath(c: *Call, v: Value, path: []const ?[]const u8, level: usize, new: Val
         else => {
             // A scalar inside the document: nothing to do.
             if (level > 0) return v;
-            c.errFmt("{s}", .{if (op == .delete) "cannot delete path in scalar" else "cannot set path in scalar"});
+            c.errFmt("22023", "{s}", .{if (op == .delete) "cannot delete path in scalar" else "cannot set path in scalar"});
             return error.Reported;
         },
     }
@@ -641,16 +641,16 @@ fn setFunc(c: *Call, argv: []*Mem) void {
 /// jsonb_set_lax(target, path, new [, create_missing [, null_value_treatment]]).
 fn setLaxFunc(c: *Call, argv: []*Mem) void {
     if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(c.ctx);
-    for (argv[3..]) |m| if (isNull(m)) return api.resultError(c.ctx, "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
+    for (argv[3..]) |m| if (isNull(m)) return api.resultErrorState(c.ctx, .of("22023"), "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
     const x = c.parse(argv[0], true) orelse return;
     const path = c.textArray(argv[1]) orelse return;
     const create = argv.len < 4 or api.valueInt64(argv[3]) != 0;
     if (isNull(argv[2])) {
         const how = if (argv.len == 5) (c.text(argv[4]) orelse return) else "use_json_null";
-        if (std.mem.eql(u8, how, "raise_exception")) return api.resultError(c.ctx, "JSON value must not be null");
+        if (std.mem.eql(u8, how, "raise_exception")) return api.resultErrorState(c.ctx, .of("22004"), "JSON value must not be null");
         if (std.mem.eql(u8, how, "return_target")) return c.result(x, true);
         if (std.mem.eql(u8, how, "delete_key")) return runSet(c, x, path, json.null_value, .delete, false);
-        if (!std.mem.eql(u8, how, "use_json_null")) return api.resultError(c.ctx, "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
+        if (!std.mem.eql(u8, how, "use_json_null")) return api.resultErrorState(c.ctx, .of("22023"), "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
         return runSet(c, x, path, json.null_value, .set, create);
     }
     const new = c.parse(argv[2], true) orelse return;
@@ -679,14 +679,14 @@ fn pathArgs(c: *Call, argv: []*Mem) ?PathArgs {
     const path = jsonpath.compile(c.a(), ptext, &diag) catch |e| {
         if (e == error.OutOfMemory) {
             api.resultErrorNomem(c.ctx);
-        } else api.resultError(c.ctx, diag.msg);
+        } else api.resultErrorState(c.ctx, diag.state orelse .of("42601"), diag.msg);
         return null;
     };
     var vars: ?Value = null;
     if (argv.len > 2 and !isNull(argv[2])) {
         const v = c.parse(argv[2], true) orelse return null;
         if (v.v != .object) {
-            api.resultError(c.ctx, "\"vars\" argument is not an object");
+            api.resultErrorState(c.ctx, .of("22023"), "\"vars\" argument is not an object");
             return null;
         }
         vars = v;
@@ -705,7 +705,7 @@ fn pathItems(c: *Call, pa: PathArgs, silent_empty: *bool) ?[]Value {
             api.resultErrorNomem(c.ctx);
         } else if (pa.silent) {
             silent_empty.* = true;
-        } else api.resultError(c.ctx, diag.msg);
+        } else api.resultErrorState(c.ctx, diag.state.?, diag.msg);
         return null;
     };
 }
@@ -735,7 +735,7 @@ fn pathMatch(ctx: *Context, argv: []*Mem, silent_default: bool) void {
     const r = x.match(pa.path) catch |e| {
         if (e == error.OutOfMemory) return api.resultErrorNomem(ctx);
         if (pa.silent) return api.resultNull(ctx);
-        return api.resultError(ctx, diag.msg);
+        return api.resultErrorState(ctx, diag.state.?, diag.msg);
     };
     if (r) |b| api.resultInt64(ctx, @intFromBool(b)) else api.resultNull(ctx);
 }
@@ -844,7 +844,7 @@ fn arrayToJsonImpl(ctx: *Context, arr: *Mem, pretty: bool, numeric: ?bool) void 
         if (i > 0) out.appendSlice(a, if (pretty) ",\n " else ",") catch return api.resultErrorNomem(ctx);
         if (e) |t| {
             if (num) {
-                const v = json.parse(a, t, false) catch return api.resultError(ctx, "invalid input syntax for type numeric");
+                const v = json.parse(a, t, false) catch return api.resultErrorState(ctx, .of("22P02"), "invalid input syntax for type numeric");
                 json.writeJson(a, &out, v) catch return api.resultErrorNomem(ctx);
             } else json.writeString(a, &out, t) catch return api.resultErrorNomem(ctx);
         } else out.appendSlice(a, "null") catch return api.resultErrorNomem(ctx);
@@ -858,13 +858,13 @@ const BuildOpts = struct { jsonb: bool, absent_on_null: bool = false, unique: bo
 /// json_build_object(k, v, ...): `{"a" : 1, "b" : 2}` (jsonb: normalized).
 fn buildObject(c: *Call, argv: []*Mem, o: BuildOpts) void {
     const a = c.a();
-    if (argv.len % 2 != 0) return api.resultError(c.ctx, "argument list must have even number of elements");
+    if (argv.len % 2 != 0) return api.resultErrorState(c.ctx, .of("22023"), "argument list must have even number of elements");
     var pairs: std.ArrayList(json.Pair) = .empty;
     var i: usize = 0;
     while (i < argv.len) : (i += 2) {
         if (isNull(argv[i])) {
-            if (o.jsonb and !o.ctor) return c.errFmt("argument {d}: key must not be null", .{i + 1});
-            return api.resultError(c.ctx, "null value not allowed for object key");
+            if (o.jsonb and !o.ctor) return c.errFmt("22004", "argument {d}: key must not be null", .{i + 1});
+            return api.resultErrorState(c.ctx, .of("22004"), "null value not allowed for object key");
         }
         const kv = c.valueOf(argv[i], false) orelse return;
         const key = switch (kv.v) {
@@ -874,7 +874,7 @@ fn buildObject(c: *Call, argv: []*Mem, o: BuildOpts) void {
         if (o.absent_on_null and isNull(argv[i + 1])) continue;
         const v = c.valueOf(argv[i + 1], o.jsonb) orelse return;
         if (o.unique) for (pairs.items) |pp| if (std.mem.eql(u8, pp.key, key)) {
-            return c.errFmt("duplicate JSON object key value: \"{s}\"", .{key});
+            return c.errFmt("22030", "duplicate JSON object key value: \"{s}\"", .{key});
         };
         pairs.append(a, .{ .key = key, .value = v }) catch return api.resultErrorNomem(c.ctx);
     }
@@ -950,7 +950,7 @@ fn objectFromArrays(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     var vals: []?[]const u8 = undefined;
     const first = c.textArray(argv[0]) orelse return;
     if (argv.len == 1) {
-        if (first.len % 2 != 0) return api.resultError(ctx, "array must have even number of elements");
+        if (first.len % 2 != 0) return api.resultErrorState(ctx, .of("2202E"), "array must have even number of elements");
         keys = a.alloc(?[]const u8, first.len / 2) catch return api.resultErrorNomem(ctx);
         vals = a.alloc(?[]const u8, first.len / 2) catch return api.resultErrorNomem(ctx);
         for (keys, vals, 0..) |*k, *v, i| {
@@ -960,11 +960,11 @@ fn objectFromArrays(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     } else {
         keys = first;
         vals = c.textArray(argv[1]) orelse return;
-        if (keys.len != vals.len) return api.resultError(ctx, "mismatched array dimensions");
+        if (keys.len != vals.len) return api.resultErrorState(ctx, .of("2202E"), "mismatched array dimensions");
     }
     var pairs: std.ArrayList(json.Pair) = .empty;
     for (keys, vals) |k_opt, v_opt| {
-        const k = k_opt orelse return api.resultError(ctx, "null value not allowed for object key");
+        const k = k_opt orelse return api.resultErrorState(ctx, .of("22004"), "null value not allowed for object key");
         const v: Value = if (v_opt) |t| .{ .v = .{ .string = t } } else json.null_value;
         pairs.append(a, .{ .key = k, .value = v }) catch return api.resultErrorNomem(ctx);
     }
@@ -1071,7 +1071,7 @@ fn aggFinal(ctx: *Context) void {
 /// json_object_agg(k, v): `{ "k" : v, ... }`.
 fn objectAggStep(ctx: *Context, argv: []*Mem, jsonb: bool, absent_on_null: bool) void {
     const st = dfunc.aggState(Agg, ctx, true) orelse return;
-    if (isNull(argv[0])) return api.resultError(ctx, "null value not allowed for object key");
+    if (isNull(argv[0])) return api.resultErrorState(ctx, .of("22004"), "null value not allowed for object key");
     if (absent_on_null and isNull(argv[1])) return;
     var c: Call = .init(ctx);
     defer c.deinit();
@@ -1108,7 +1108,7 @@ fn objectFinal(ctx: *Context, jsonb: bool, unique: bool, empty_null: bool) void 
     if (unique) {
         const pairs = v.v.object;
         for (pairs, 0..) |pp, i| for (pairs[i + 1 ..]) |q| if (std.mem.eql(u8, pp.key, q.key)) {
-            return c.errFmt("duplicate JSON object key value: \"{s}\"", .{pp.key});
+            return c.errFmt("22030", "duplicate JSON object key value: \"{s}\"", .{pp.key});
         };
     }
     if (!jsonb) {
@@ -1174,8 +1174,8 @@ fn arrayLength(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     const v = c.parse(argv[0], jsonb) orelse return;
     switch (v.v) {
         .array => |items| api.resultInt64(ctx, @intCast(items.len)),
-        .object => api.resultError(ctx, "cannot get array length of a non-array"),
-        else => api.resultError(ctx, "cannot get array length of a scalar"),
+        .object => api.resultErrorState(ctx, .of("22023"), "cannot get array length of a non-array"),
+        else => api.resultErrorState(ctx, .of("22023"), "cannot get array length of a scalar"),
     }
 }
 
@@ -1284,8 +1284,8 @@ fn rowsEach(c: *Call, argv: []*Mem) void {
     const n = srfName(c, argv[1]) orelse return;
     const v = c.parse(argv[0], n.jsonb) orelse return;
     if (v.v != .object) {
-        if (n.jsonb) return c.errFmt("cannot call {s} on a non-object", .{n.name});
-        return api.resultError(c.ctx, if (v.v == .array) "cannot deconstruct an array as an object" else "cannot deconstruct a scalar");
+        if (n.jsonb) return c.errFmt("22023", "cannot call {s} on a non-object", .{n.name});
+        return api.resultErrorState(c.ctx, .of("22023"), if (v.v == .array) "cannot deconstruct an array as an object" else "cannot deconstruct a scalar");
     }
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
@@ -1309,8 +1309,8 @@ fn rowsElements(c: *Call, argv: []*Mem) void {
     const v = c.parse(argv[0], n.jsonb) orelse return;
     switch (v.v) {
         .array => {},
-        .object => return if (n.jsonb) api.resultError(c.ctx, "cannot extract elements from an object") else c.errFmt("cannot call {s} on a non-array", .{n.name}),
-        else => return if (n.jsonb) api.resultError(c.ctx, "cannot extract elements from a scalar") else c.errFmt("cannot call {s} on a scalar", .{n.name}),
+        .object => return if (n.jsonb) api.resultErrorState(c.ctx, .of("22023"), "cannot extract elements from an object") else c.errFmt("22023", "cannot call {s} on a non-array", .{n.name}),
+        else => return if (n.jsonb) api.resultErrorState(c.ctx, .of("22023"), "cannot extract elements from a scalar") else c.errFmt("22023", "cannot call {s} on a scalar", .{n.name}),
     }
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
@@ -1330,8 +1330,8 @@ fn rowsKeys(c: *Call, argv: []*Mem) void {
     const v = c.parse(argv[0], n.jsonb) orelse return;
     switch (v.v) {
         .object => {},
-        .array => return c.errFmt("cannot call {s} on an array", .{n.name}),
-        else => return c.errFmt("cannot call {s} on a scalar", .{n.name}),
+        .array => return c.errFmt("22023", "cannot call {s} on an array", .{n.name}),
+        else => return c.errFmt("22023", "cannot call {s} on a scalar", .{n.name}),
     }
     const a = c.a();
     var out: std.ArrayList(u8) = .empty;
@@ -1377,11 +1377,11 @@ fn rowsRecords(c: *Call, argv: []*Mem) void {
     if (set) {
         rows = switch (v.v) {
             .array => |items| items,
-            else => return c.errFmt("cannot call {s} on {s}", .{ n.name, if (v.v == .object) "an object" else "a scalar" }),
+            else => return c.errFmt("22023", "cannot call {s} on {s}", .{ n.name, if (v.v == .object) "an object" else "a scalar" }),
         };
-        for (rows) |r| if (r.v != .object) return c.errFmt("argument of {s} must be an array of objects", .{n.name});
+        for (rows) |r| if (r.v != .object) return c.errFmt("22023", "argument of {s} must be an array of objects", .{n.name});
     } else {
-        if (v.v != .object) return c.errFmt("cannot call populate_composite on {s}", .{if (v.v == .array) "an array" else "a scalar"});
+        if (v.v != .object) return c.errFmt("22023", "cannot call populate_composite on {s}", .{if (v.v == .array) "an array" else "a scalar"});
         rows = &.{v};
     }
     var out: std.ArrayList(u8) = .empty;

@@ -90,6 +90,12 @@ pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
 /// current one; a mangled name "db.x" (Parser.relation()) reads the same.
 fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
+    // MariaDB's numbers of the engine's errors.
+    dialect.numberError(p, &.{
+        .{ "42P01".*, 1146 }, .{ "42703".*, 1054 }, .{ "42702".*, 1052 },
+        .{ "42883".*, 1305 }, .{ "42P07".*, 1050 }, .{ "42601".*, 1064 },
+        .{ "42704".*, 1176 },
+    }, null);
     const prefix = "no such table: ";
     if (!std.mem.startsWith(u8, m, prefix)) return;
     const name = m[prefix.len..];

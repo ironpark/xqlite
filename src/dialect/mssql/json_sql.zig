@@ -251,7 +251,7 @@ pub fn call(s: *Parser, n: []const u8, pos: u32) Error!?*Expr {
     if (eq(n, "JSON_VALUE") or eq(n, "JSON_PATH_EXISTS")) {
         if (k != 2) return argCount(s, n);
         try badArg(s, args[0], 1, if (eq(n, "JSON_VALUE")) "json_value" else "json_path_exists");
-        if (args[1].kind == .null and eq(n, "JSON_VALUE")) return s.fail("Argument data type NULL is invalid for argument 2 of json_value function.", .{});
+        if (args[1].kind == .null and eq(n, "JSON_VALUE")) return s.failState(.numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of json_value function.", .{});
         return try s.func(pos, if (eq(n, "JSON_VALUE")) "xq_tsql_json_value" else "xq_tsql_json_path_exists", args);
     }
     if (eq(n, "JSON_QUERY")) {
@@ -270,12 +270,12 @@ pub fn call(s: *Parser, n: []const u8, pos: u32) Error!?*Expr {
     }
     // STRING_ESCAPE(x, 'json')
     if (k != 2) return argCount(s, n);
-    if (args[1].kind != .string or !eq(args[1].kind.string, "json")) return s.fail("An invalid value was specified for argument 2.", .{});
+    if (args[1].kind != .string or !eq(args[1].kind.string, "json")) return s.failState(.of("22023"), "An invalid value was specified for argument 2.", .{});
     return try s.func(pos, "xq_tsql_json_escape", args[0..1]);
 }
 
 fn argCount(s: *Parser, n: []const u8) Error {
-    return s.fail("The {s} function requires a different number of arguments.", .{n});
+    return s.failState(.numbered("42883", 174), "The {s} function requires a different number of arguments.", .{n});
 }
 
 /// A number constant where text is required: SQL Server's compile error.
@@ -285,7 +285,7 @@ fn badArg(s: *Parser, e: *const Expr, i: u32, func: []const u8) Error!void {
         .float => |f| if (std.mem.indexOfAny(u8, f, "eE") != null) "float" else "numeric",
         else => null,
     };
-    if (t) |tn| return s.fail("Argument data type {s} is invalid for argument {d} of {s} function.", .{ tn, i, func });
+    if (t) |tn| return s.failState(.numbered("42804", 8116), "Argument data type {s} is invalid for argument {d} of {s} function.", .{ tn, i, func });
 }
 
 /// A value of a type JSON has no form for (dates, money, binary,
@@ -297,7 +297,7 @@ fn badValue(s: *Parser, e: *const Expr, i: u32, func: []const u8) Error!void {
         .cast => |c| c.mode == .affinity and std.mem.eql(u8, c.mode.affinity, "BLOB"),
         else => false,
     };
-    if (blob) return s.fail("Argument data type varbinary is invalid for argument {d} of {s} function.", .{ i, func });
+    if (blob) return s.failState(.numbered("42804", 8116), "Argument data type varbinary is invalid for argument {d} of {s} function.", .{ i, func });
     if (e.kind != .cast) return;
     const c = e.kind.cast;
     const ty = (switch (c.mode) {
@@ -306,7 +306,7 @@ fn badValue(s: *Parser, e: *const Expr, i: u32, func: []const u8) Error!void {
     }) orelse return;
     switch (ty.base) {
         .money, .smallmoney, .date, .time, .datetime, .datetime2, .smalldatetime, .datetimeoffset, .binary, .varbinary, .image, .uniqueidentifier => {
-            return s.fail("Argument data type {s} is invalid for argument {d} of {s} function.", .{ @tagName(ty.base), i, func });
+            return s.failState(.numbered("42804", 8116), "Argument data type {s} is invalid for argument {d} of {s} function.", .{ @tagName(ty.base), i, func });
         },
         else => {},
     }
@@ -383,9 +383,9 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
     try s.expectOp("(");
     const args = try s.exprList();
     try s.expectOp(")");
-    if (args.len < 1 or args.len > 2) return s.fail("The openjson function requires 1 to 2 arguments.", .{});
+    if (args.len < 1 or args.len > 2) return s.failState(.numbered("42883", 174), "The openjson function requires 1 to 2 arguments.", .{});
     try badArg(s, args[0], 1, "openjson");
-    if (args.len == 2 and args[1].kind == .null) return s.fail("Argument data type NULL is invalid for argument 2 of openjson function.", .{});
+    if (args.len == 2 and args[1].kind == .null) return s.failState(.numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of openjson function.", .{});
     if (!(s.isKw("WITH") and s.peek().is("("))) {
         const f = try s.new(tree.Func, .{ .name = .{ .text = openjson.default_name, .pos = pos }, .args = args });
         try s.openjson_cols.put(s.a, f, try s.a.dupe(Col, &.{ .{ .name = "key", .kind = 's' }, .{ .name = "value", .kind = 's' }, .{ .name = "type", .kind = 'a' } }));
@@ -406,7 +406,7 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
             s.advance();
             s.advance();
             if (!(ty.t.base == .nvarchar and ty.t.len == types.max_len)) {
-                return s.fail("AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.", .{});
+                return s.failState(.of("42601"), "AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.", .{});
             }
             as_json = true;
         }
@@ -416,7 +416,7 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
                 error.OutOfMemory => |e| return e,
                 error.BadPath => {
                     var buf: [200]u8 = undefined;
-                    return s.fail("{s}", .{json.pathMessage(&buf, p, perr.pos)});
+                    return s.failState(json.path_error, "{s}", .{json.pathMessage(&buf, p, perr.pos)});
                 },
             };
         }
@@ -480,7 +480,7 @@ pub fn forJson(s: *Parser, sel: *tree.Select) Error!*tree.Select {
             nowrap = true;
         } else return s.syntaxError();
     }
-    if (root != null and nowrap) return s.fail("ROOT option and WITHOUT_ARRAY_WRAPPER option cannot be used together in FOR JSON. Remove one of these options.", .{});
+    if (root != null and nowrap) return s.failState(.of("42601"), "ROOT option and WITHOUT_ARRAY_WRAPPER option cannot be used together in FOR JSON. Remove one of these options.", .{});
     const core = leftCore(sel.body) orelse return s.fail("xqlite: FOR JSON of VALUES is not supported", .{});
     const scope = try scopeOf(s, core.from);
 
@@ -496,8 +496,8 @@ pub fn forJson(s: *Parser, sel: *tree.Select) Error!*tree.Select {
         },
         .expr => |x| {
             const n: ?[]const u8 = if (x.alias) |a| a.text else if (x.e.kind == .column) x.e.kind.column[x.e.kind.column.len - 1].text else null;
-            const nm = n orelse return s.fail("Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
-            if (nm.len == 0) return s.fail("Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
+            const nm = n orelse return s.failState(.numbered("42601", 1038), "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
+            if (nm.len == 0) return s.failState(.numbered("42601", 1038), "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
             const src: ?usize = if (x.e.kind == .column) (if (findColumn(scope, x.e.kind.column)) |f| f.src else null) else null;
             try cols.append(s.a, .{ .name = nm, .kind = valueKind(s, x.e, scope), .src = src, .e = x.e });
         },
@@ -507,7 +507,7 @@ pub fn forJson(s: *Parser, sel: *tree.Select) Error!*tree.Select {
     var levels: std.ArrayList([]const u8) = .empty;
     var level_of = try s.a.alloc(u32, cols.items.len);
     if (auto) {
-        if (scope.len == 0) return s.fail("FOR JSON AUTO requires at least one table for generating JSON objects. Use FOR JSON PATH or add a FROM clause with a table name.", .{});
+        if (scope.len == 0) return s.failState(.of("42601"), "FOR JSON AUTO requires at least one table for generating JSON objects. Use FOR JSON PATH or add a FROM clause with a table name.", .{});
         var srcs: std.ArrayList(usize) = .empty;
         var last: u32 = 0;
         for (cols.items, 0..) |c, i| {
@@ -611,7 +611,7 @@ fn checkNames(s: *Parser, cols: []const OutCol, level_of: []const u32, auto: boo
             if (!is_open) {
                 for (props.items) |p| {
                     if (p.level == lv and std.mem.eql(u8, p.path, prefix)) {
-                        return s.fail("Property '{s}' cannot be generated in JSON output due to a conflict with another column name or alias. Use different names and aliases for each column in SELECT list.", .{name});
+                        return s.failState(.of("42701"), "Property '{s}' cannot be generated in JSON output due to a conflict with another column name or alias. Use different names and aliases for each column in SELECT list.", .{name});
                     }
                 }
                 try props.append(s.a, .{ .level = lv, .path = prefix, .object = object });

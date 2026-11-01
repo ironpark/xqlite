@@ -433,6 +433,7 @@ fn prepareInternal(db: *Sqlite3, sql: [:0]const u8, prep_flags: u8, old: ?*Vdbe,
         const rc = p.rc;
         if (p.err_msg) |m| {
             main_mod.errorWithMsg(db, rc, "{s}", .{m});
+            db.err_state = p.err_state;
         } else {
             main_mod.setError(db, rc);
         }

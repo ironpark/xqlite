@@ -132,6 +132,8 @@ pub const Parser = struct {
     toks: []Token,
     i: usize = 0,
     err_msg: []const u8 = "",
+    /// What err_msg is (int.ErrorState), if known.
+    err_state: ?int.ErrorState = null,
     err_pos: usize = 0,
     /// Offset after the statement (and its semicolon).
     end: usize,
@@ -275,22 +277,35 @@ pub const Parser = struct {
     }
 
     pub fn fail(p: *Parser, pos: usize, comptime fmt: []const u8, args: anytype) Error {
+        return p.failState(pos, null, fmt, args);
+    }
+
+    /// fail() of an error whose ErrorState is known (else that of xqlite's
+    /// conventions, int.ErrorState.ofFormat()).
+    pub fn failState(p: *Parser, pos: usize, state: ?int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
         p.err_pos = pos;
         p.err_msg = try std.fmt.allocPrint(p.arena, fmt, args);
+        p.err_state = state orelse comptime int.ErrorState.ofFormat(fmt);
         return error.ParseFailed;
+    }
+
+    /// Fail with the error a statement run while compiling this one left
+    /// in the connection `db`, as it is (its ErrorState too).
+    pub fn failFrom(p: *Parser, pos: usize, db: *int.Sqlite3) Error {
+        return p.failState(pos, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
     }
 
     /// PostgreSQL's `syntax error at or near "X"` for the next token.
     pub fn syntaxError(p: *Parser) Error {
         const t = p.peek();
         // The end of a statement: PostgreSQL names its semicolon.
-        if (t.kind == .eof and t.start < p.src.len and p.src[t.start] == ';') return p.fail(t.start, "syntax error at or near \";\"", .{});
-        if (t.kind == .eof) return p.fail(t.start, "syntax error at end of input", .{});
-        return p.fail(t.start, "syntax error at or near \"{s}\"", .{p.src[t.start..t.end]});
+        if (t.kind == .eof and t.start < p.src.len and p.src[t.start] == ';') return p.failState(t.start, .of("42601"), "syntax error at or near \";\"", .{});
+        if (t.kind == .eof) return p.failState(t.start, .of("42601"), "syntax error at end of input", .{});
+        return p.failState(t.start, .of("42601"), "syntax error at or near \"{s}\"", .{p.src[t.start..t.end]});
     }
 
     fn unsupported(p: *Parser, pos: usize, what: []const u8) Error {
-        return p.fail(pos, "{s} is not supported", .{what});
+        return p.failState(pos, .of("0A000"), "{s} is not supported", .{what});
     }
 
     fn new(p: *Parser, comptime T: type, v: T) Error!*T {
@@ -331,7 +346,7 @@ pub const Parser = struct {
         try p.readSchema();
         const l = nsp.list(ps.db, p.arena) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return p.fail(0, "{s}", .{@import("../../sql/main.zig").errmsg(ps.db)}),
+            else => return p.failFrom(0, ps.db),
         };
         p.schemas = l;
         return l;
@@ -352,12 +367,12 @@ pub const Parser = struct {
         const ps = p.p orelse {
             if (eql(s.text, "public")) return .{ .db = "main", .name = n.text, .bare = n.text };
             if (eql(s.text, "pg_temp")) return .{ .db = "temp", .name = n.text, .bare = n.text };
-            return p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text});
+            return p.failState(s.pos, .of("3F000"), "schema \"{s}\" does not exist", .{s.text});
         };
         try p.readSchema();
         return nsp.resolve(ps.db, p.arena, try p.registered(), schema_config, s.text, n.text) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
-            error.NoSuchSchema => p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text}),
+            error.NoSuchSchema => p.failState(s.pos, .of("3F000"), "schema \"{s}\" does not exist", .{s.text}),
         };
     }
 
@@ -400,7 +415,7 @@ pub const Parser = struct {
     pub fn createTarget(p: *Parser, q: QName, temp: bool) Error!nsp.Target {
         if (q.schema) |s| {
             const t = try p.qualified(s, q.name);
-            if (temp and !eql(t.db, "temp")) return p.fail(s.pos, "cannot create temporary relation in non-temporary schema", .{});
+            if (temp and !eql(t.db, "temp")) return p.failState(s.pos, .of("42P16"), "cannot create temporary relation in non-temporary schema", .{});
             return t;
         }
         if (temp) return .{ .db = "temp", .name = q.name.text, .bare = q.name.text };
@@ -411,7 +426,7 @@ pub const Parser = struct {
             const s = nsp.find(schemas, e) orelse continue;
             return .{ .db = "main", .name = try nsp.mangle(p.arena, s.name, q.name.text), .mangled = true, .bare = q.name.text };
         }
-        return p.fail(q.name.pos, "no schema has been selected to create in", .{});
+        return p.failState(q.name.pos, .of("3F000"), "no schema has been selected to create in", .{});
     }
 
     /// The prefix "s." of a mangled target ("" for none).
@@ -483,7 +498,7 @@ pub const Parser = struct {
                 const ps = p.p.?;
                 try p.readSchema();
                 if (build.findDbName(ps.db, s.text) == null and nsp.find(try p.registered(), s.text) == null) {
-                    return p.fail(s.pos, "{s} \"{s}.{s}\" does not exist", .{ if (kind == .index) "index" else "relation", s.text, q.name.text });
+                    return p.failState(s.pos, .of("42P01"), "{s} \"{s}.{s}\" does not exist", .{ if (kind == .index) "index" else "relation", s.text, q.name.text });
                 }
             }
             const t = try p.qualified(s, q.name);
@@ -493,7 +508,7 @@ pub const Parser = struct {
         return switch (try p.unqualified(q.name, kind)) {
             .keep => .{ .q = .{ .name = q.name } },
             .target => |t| .{ .q = .{ .name = .{ .text = t.name, .pos = q.name.pos } }, .alias = q.name },
-            .missing => p.fail(q.name.pos, "{s} \"{s}\" does not exist", .{ switch (kind) {
+            .missing => p.failState(q.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ switch (kind) {
                 .relation, .sequence => "relation",
                 .index => "index",
             }, q.name.text }),
@@ -509,13 +524,13 @@ pub const Parser = struct {
         if (schema == null and build.findTable(ps.db, q.name.text, null) != null) return null;
         const text = (try views.definition(ps, schema, q.name.text)) orelse {
             if (schema) |s| if (eql(s, "information_schema") or eql(s, "pg_catalog")) {
-                return p.fail(q.name.pos, "relation \"{s}.{s}\" does not exist", .{ s, q.name.text });
+                return p.failState(q.name.pos, .of("42P01"), "relation \"{s}.{s}\" does not exist", .{ s, q.name.text });
             };
             return null;
         };
         var sub = Parser.init(p.arena, text, 0, null) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
-            error.ParseFailed => return p.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text}),
+            error.ParseFailed => return p.failState(q.name.pos, .of("XX000"), "internal error in the definition of {s}", .{q.name.text}),
         };
         sub.p = ps;
         sub.schema_read = true;
@@ -527,10 +542,10 @@ pub const Parser = struct {
                     p.err_in_parse = true;
                     return error.ParseFailed;
                 }
-                return p.fail(q.name.pos, "internal error in the definition of {s}: {s}", .{ q.name.text, sub.err_msg });
+                return p.failState(q.name.pos, .of("XX000"), "internal error in the definition of {s}: {s}", .{ q.name.text, sub.err_msg });
             },
         };
-        if (sub.peek().kind != .eof) return p.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
+        if (sub.peek().kind != .eof) return p.failState(q.name.pos, .of("XX000"), "internal error in the definition of {s}", .{q.name.text});
         sel.src = text;
         return sel;
     }
@@ -596,7 +611,7 @@ pub const Parser = struct {
         const t = p.peek();
         if (t.kind != .integer) return p.syntaxError();
         _ = p.advance();
-        const v = std.fmt.parseInt(i64, t.text, 10) catch return p.fail(t.start, "value \"{s}\" is out of range for type bigint", .{t.text});
+        const v = std.fmt.parseInt(i64, t.text, 10) catch return p.failState(t.start, .of("22003"), "value \"{s}\" is out of range for type bigint", .{t.text});
         return if (neg) -v else v;
     }
 
@@ -754,17 +769,17 @@ pub const Parser = struct {
         // LIMIT/OFFSET/FETCH in any order, and locking clauses.
         while (true) {
             if (p.eatKw("limit")) {
-                if (s.limit != null) return p.fail(p.toks[p.i - 1].start, "multiple LIMIT clauses not allowed", .{});
+                if (s.limit != null) return p.failState(p.toks[p.i - 1].start, .of("42601"), "multiple LIMIT clauses not allowed", .{});
                 if (p.eatKw("all")) continue;
                 s.limit = try p.expr0();
-                if (p.eat(.comma)) return p.fail(p.toks[p.i - 1].start, "LIMIT #,# syntax is not supported", .{});
+                if (p.eat(.comma)) return p.failState(p.toks[p.i - 1].start, .of("0A000"), "LIMIT #,# syntax is not supported", .{});
             } else if (p.eatKw("offset")) {
-                if (s.offset != null) return p.fail(p.toks[p.i - 1].start, "multiple OFFSET clauses not allowed", .{});
+                if (s.offset != null) return p.failState(p.toks[p.i - 1].start, .of("42601"), "multiple OFFSET clauses not allowed", .{});
                 s.offset = try p.expr0();
                 _ = p.eatKw("row") or p.eatKw("rows");
             } else if (p.isKw("fetch")) {
                 const at = p.advance().start;
-                if (s.limit != null) return p.fail(at, "multiple LIMIT clauses not allowed", .{});
+                if (s.limit != null) return p.failState(at, .of("42601"), "multiple LIMIT clauses not allowed", .{});
                 if (!p.eatKw("first")) try p.expectKw("next");
                 if (p.isKw("row") or p.isKw("rows")) {
                     s.limit = try p.expr(at, .{ .integer = "1" });
@@ -1172,7 +1187,7 @@ pub const Parser = struct {
     /// (SELECT value AS col FROM generate_series(...)) AS alias.
     fn generateSeries(p: *Parser, c: Call, al: ?tree.Alias) Error!tree.FromItem {
         const alias_cols: []const Name = if (al) |a| a.cols else &.{};
-        if (alias_cols.len > 1) return p.fail(alias_cols[1].pos, "too many column aliases for generate_series", .{});
+        if (alias_cols.len > 1) return p.failState(alias_cols[1].pos, .of("42601"), "too many column aliases for generate_series", .{});
         const col: []const u8 = if (alias_cols.len == 1) alias_cols[0].text else if (al) |a| a.name.text else "generate_series";
         const f = try p.new(tree.Func, .{ .name = .{ .text = "generate_series", .pos = c.name.pos }, .args = c.args });
         var from = try p.arena.alloc(tree.FromItem, 1);
@@ -1216,7 +1231,7 @@ pub const Parser = struct {
             else => 1,
         };
         if (args.len < want or (kind != .path and args.len != want) or args.len > 4) {
-            return p.fail(name.pos, "function {s} with {d} arguments does not exist", .{ fname, args.len });
+            return p.failState(name.pos, .of("42883"), "function {s} with {d} arguments does not exist", .{ fname, args.len });
         }
         var ordinality = false;
         if (p.isKw("with") and p.isKwAt(1, "ordinality")) {
@@ -1272,7 +1287,7 @@ pub const Parser = struct {
             },
             .records => {
                 rows_fn = "xq_pg_rows_records";
-                if (defs.items.len == 0) return p.fail(pos, "a column definition list is required for functions returning \"record\"", .{});
+                if (defs.items.len == 0) return p.failState(pos, .of("42601"), "a column definition list is required for functions returning \"record\"", .{});
                 try cols.appendSlice(p.arena, defs.items);
             },
             .populate => {
@@ -1293,7 +1308,7 @@ pub const Parser = struct {
             for (cols.items) |col| try rows_args.append(p.arena, try p.stringAt(pos, col.name));
         }
         if (ordinality) try cols.append(p.arena, .{ .name = "ordinality", .ordinality = true });
-        if (alias_cols.items.len > cols.items.len) return p.fail(alias_cols.items[cols.items.len].pos, "too many column aliases specified for function {s}", .{fname});
+        if (alias_cols.items.len > cols.items.len) return p.failState(alias_cols.items[cols.items.len].pos, .of("42601"), "too many column aliases specified for function {s}", .{fname});
         for (alias_cols.items, 0..) |a, i| cols.items[i].name = a.text;
         const rows = try p.call(pos, rows_fn, null, rows_args.items);
         const f = try p.new(tree.Func, .{ .name = .{ .text = "json_each", .pos = pos }, .args = try p.list(&.{rows}) });
@@ -1304,9 +1319,9 @@ pub const Parser = struct {
     /// The columns of the row type of table `q` (json_populate_record()).
     fn recordColumns(p: *Parser, q: QName, cols: *std.ArrayList(SrfCol)) Error!void {
         const rel = try p.lookup(q, .relation);
-        const ps = p.p orelse return p.fail(q.name.pos, "type \"{s}\" does not exist", .{q.name.text});
+        const ps = p.p orelse return p.failState(q.name.pos, .of("42704"), "type \"{s}\" does not exist", .{q.name.text});
         const t = build.findTable(ps.db, rel.q.name.text, if (rel.q.schema) |sc| sc.text else null) orelse
-            return p.fail(q.name.pos, "type \"{s}\" does not exist", .{q.name.text});
+            return p.failState(q.name.pos, .of("42704"), "type \"{s}\" does not exist", .{q.name.text});
         const schema = catalog.schemaName(ps.db, t);
         const entries = catalog.entries(ps.db, p.arena, schema, t.name) catch &.{};
         for (t.cols) |*c| {
@@ -1317,7 +1332,7 @@ pub const Parser = struct {
             var ty: ?types.TypeName = null;
             if (decl) |d| {
                 const z = try p.arena.dupeSentinel(u8, d, 0);
-                var sub = Parser.init(p.arena, z, 0, null) catch return p.fail(q.name.pos, "type \"{s}\" does not exist", .{d});
+                var sub = Parser.init(p.arena, z, 0, null) catch return p.failState(q.name.pos, .of("42704"), "type \"{s}\" does not exist", .{d});
                 ty = sub.typeName() catch null;
             }
             try cols.append(p.arena, .{ .name = c.name(), .index = @intCast(cols.items.len), .cast = ty orelse .{ .name = "text", .pos = q.name.pos } });
@@ -1362,7 +1377,7 @@ pub const Parser = struct {
             }
             const want: usize = if (kind == .path) 2 else 1;
             if (f.args.len < want or (kind != .path and f.args.len != want) or f.args.len > 4) {
-                return p.fail(f.name.pos, "function {s} with {d} arguments does not exist", .{ f.name.text, f.args.len });
+                return p.failState(f.name.pos, .of("42883"), "function {s} with {d} arguments does not exist", .{ f.name.text, f.args.len });
             }
             const fname = f.name.text;
             var rows_args: std.ArrayList(*Expr) = .empty;
@@ -1448,7 +1463,7 @@ pub const Parser = struct {
         const text = lit.kind.string;
         const v = (if (jsonb) json.parseJsonb(p.arena, text) else json.parse(p.arena, text, false)) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            return p.fail(lit.pos, "invalid input syntax for type json", .{});
+            return p.failState(lit.pos, .of("22P02"), "invalid input syntax for type json", .{});
         };
         if (!jsonb) return lit;
         const out = json.toText(p.arena, v, true) catch return error.OutOfMemory;
@@ -1570,7 +1585,7 @@ pub const Parser = struct {
         try p.expectKw("json");
         if (p.eatKw("encoding")) {
             const enc = try p.colId();
-            if (!std.ascii.eqlIgnoreCase(enc.text, "utf8")) return p.fail(enc.pos, "unsupported JSON encoding", .{});
+            if (!std.ascii.eqlIgnoreCase(enc.text, "utf8")) return p.failState(enc.pos, .of("0A000"), "unsupported JSON encoding", .{});
         }
     }
 
@@ -1781,7 +1796,7 @@ pub const Parser = struct {
                     .json => try p.jsonOp(t.text, l, r),
                 };
             } else if (t.kind == .op and cmpOp(t) == null and !isArith(t.text) and !isLikeOp(t.text)) {
-                return p.fail(t.start, "operator does not exist: {s}", .{t.text});
+                return p.failState(t.start, .of("42883"), "operator does not exist: {s}", .{t.text});
             } else break;
         }
         return l;
@@ -1880,8 +1895,8 @@ pub const Parser = struct {
         var x: *Expr = undefined;
         if (std.mem.eql(u8, ty.name, "bytea") and !ty.array and e.kind == .string and std.mem.startsWith(u8, e.kind.string, "\\x")) {
             const hex = e.kind.string[2..];
-            for (hex) |ch| if (!std.ascii.isHex(ch)) return p.fail(pos, "invalid hexadecimal digit: \"{c}\"", .{ch});
-            if (hex.len % 2 != 0) return p.fail(pos, "invalid hexadecimal data: odd number of digits", .{});
+            for (hex) |ch| if (!std.ascii.isHex(ch)) return p.failState(pos, .of("22023"), "invalid hexadecimal digit: \"{c}\"", .{ch});
+            if (hex.len % 2 != 0) return p.failState(pos, .of("22023"), "invalid hexadecimal data: odd number of digits", .{});
             x = try p.expr(pos, .{ .blob = hex });
         } else if (ty.array and types.arrayElement(ty.name)) {
             // A text[] (int[] ...) is its literal: the JSON operators read it.
@@ -1903,8 +1918,8 @@ pub const Parser = struct {
 
     pub fn typeError(p: *Parser, ty: types.TypeName, err: types.Error) Error {
         return switch (err) {
-            error.Array => p.fail(ty.pos, "arrays are not supported", .{}),
-            error.UnknownType => p.fail(ty.pos, "type \"{s}\" does not exist", .{ty.name}),
+            error.Array => p.failState(ty.pos, .of("0A000"), "arrays are not supported", .{}),
+            error.UnknownType => p.failState(ty.pos, .of("42704"), "type \"{s}\" does not exist", .{ty.name}),
         };
     }
 
@@ -1925,8 +1940,8 @@ pub const Parser = struct {
             },
             .param => {
                 _ = p.advance();
-                const n = std.fmt.parseInt(u32, t.text, 10) catch return p.fail(t.start, "there is no parameter ${s}", .{t.text});
-                if (n == 0) return p.fail(t.start, "there is no parameter $0", .{});
+                const n = std.fmt.parseInt(u32, t.text, 10) catch return p.failState(t.start, .of("42P02"), "there is no parameter ${s}", .{t.text});
+                if (n == 0) return p.failState(t.start, .of("42P02"), "there is no parameter $0", .{});
                 return p.expr(t.start, .{ .param = n });
             },
             .lparen => return p.parenExpr(),
@@ -2028,7 +2043,7 @@ pub const Parser = struct {
             const c = try p.funcCall(n[n.len - 1], if (n.len == 2) n[0] else null);
             return p.callExpr(start, c);
         }
-        if (names.items.len > 3) return p.fail(start, "improper qualified name (too many dotted names)", .{});
+        if (names.items.len > 3) return p.failState(start, .of("42601"), "improper qualified name (too many dotted names)", .{});
         if (names.items.len == 3) {
             // schema.table.column: a table of a schema of CREATE SCHEMA
             // has its bare name as alias.
@@ -2088,7 +2103,7 @@ pub const Parser = struct {
     /// syntax of substring/position/trim/extract/overlay is read here.
     fn funcCall(p: *Parser, name: Name, schema: ?Name) Error!Call {
         if (schema) |s| if (!eql(s.text, "pg_catalog") and !eql(s.text, "public")) {
-            return p.fail(s.pos, "schema \"{s}\" does not exist", .{s.text});
+            return p.failState(s.pos, .of("3F000"), "schema \"{s}\" does not exist", .{s.text});
         };
         _ = try p.expect(.lparen);
         var f: Call = .{ .name = name };
@@ -2237,7 +2252,7 @@ pub const Parser = struct {
         if (if (plain) specialFunc(n) else null) |sc| {
             e = switch (sc) {
                 .now => blk: {
-                    if (c.args.len != 0) return p.fail(c.name.pos, "function {s} does not exist", .{n});
+                    if (c.args.len != 0) return p.failState(c.name.pos, .of("42883"), "function {s} does not exist", .{n});
                     break :blk try p.now(pos);
                 },
                 .localtime => try p.call(pos, "current_time", null, &.{}),
@@ -2286,9 +2301,9 @@ pub const Parser = struct {
 
     /// date_part('field', x) (and EXTRACT(field FROM x)) with strftime().
     fn datePart(p: *Parser, pos: u32, c: Call) Error!*Expr {
-        if (c.args.len != 2 or c.args[0].kind != .string) return p.fail(c.name.pos, "function date_part with these arguments is not supported", .{});
+        if (c.args.len != 2 or c.args[0].kind != .string) return p.failState(c.name.pos, .of("0A000"), "function date_part with these arguments is not supported", .{});
         const plan = datePartPlan(c.args[0].kind.string) orelse
-            return p.fail(c.args[0].pos, "unit \"{s}\" not recognized for type timestamp", .{c.args[0].kind.string});
+            return p.failState(c.args[0].pos, .of("22023"), "unit \"{s}\" not recognized for type timestamp", .{c.args[0].kind.string});
         const x = c.args[1];
         if (plan.func) |fname| return p.call(pos, fname, null, &.{x});
         const s = try p.call(pos, "strftime", null, &.{ try p.stringAt(pos, plan.fmt), x });
@@ -2371,7 +2386,7 @@ pub const Parser = struct {
         var w = t.text;
         // pg_catalog.int4
         if (p.peek().kind == .dot) {
-            if (!eql(w, "pg_catalog") and !eql(w, "public")) return p.fail(t.start, "type \"{s}\" does not exist", .{p.src[t.start..p.peekAt(1).end]});
+            if (!eql(w, "pg_catalog") and !eql(w, "public")) return p.failState(t.start, .of("42704"), "type \"{s}\" does not exist", .{p.src[t.start..p.peekAt(1).end]});
             _ = p.advance();
             const n = try p.anyName();
             w = n.text;
@@ -2401,7 +2416,7 @@ pub const Parser = struct {
                 _ = p.advance();
                 const bits = try p.signedInt();
                 _ = try p.expect(.rparen);
-                if (bits < 1 or bits > 53) return p.fail(t.start, "precision for type float must be between 1 and 53 bits", .{});
+                if (bits < 1 or bits > 53) return p.failState(t.start, .of("22023"), "precision for type float must be between 1 and 53 bits", .{});
                 real = bits <= 24;
             }
             ty.name = if (real) "real" else "double precision";
@@ -2500,7 +2515,7 @@ pub const Parser = struct {
             if (p.eatKw("nothing")) {} else {
                 const at = p.peek().start;
                 try p.expectKw("update");
-                if (oc.target.len == 0) return p.fail(at, "ON CONFLICT DO UPDATE requires inference specification or constraint name", .{});
+                if (oc.target.len == 0) return p.failState(at, .of("42601"), "ON CONFLICT DO UPDATE requires inference specification or constraint name", .{});
                 try p.expectKw("set");
                 oc.update = try p.setList();
                 if (p.eatKw("where")) oc.where = try p.expr0();
@@ -2664,7 +2679,7 @@ pub const Parser = struct {
             return .{ .create_index = try p.createIndex() };
         }
         if (p.isAnyKw(&.{ "schema", "database", "extension", "type", "function", "trigger", "domain", "procedure", "role", "user" })) {
-            return p.fail(at, "CREATE {s} is not supported", .{std.ascii.allocUpperString(p.arena, p.peek().text) catch return error.OutOfMemory});
+            return p.failState(at, .of("0A000"), "CREATE {s} is not supported", .{std.ascii.allocUpperString(p.arena, p.peek().text) catch return error.OutOfMemory});
         }
         return p.syntaxError();
     }
@@ -2737,14 +2752,14 @@ pub const Parser = struct {
             } else {
                 const c = try p.columnDef(table);
                 for (cols.items) |prev| if (eql(prev.name.text, c.name.text)) {
-                    return p.fail(c.name.pos, "column \"{s}\" specified more than once", .{c.name.text});
+                    return p.failState(c.name.pos, .of("42701"), "column \"{s}\" specified more than once", .{c.name.text});
                 };
                 try cols.append(p.arena, c);
             }
             if (!p.eat(.comma)) break;
         };
         _ = try p.expect(.rparen);
-        if (cols.items.len == 0) return p.fail(q.name.pos, "a table must have at least one column", .{});
+        if (cols.items.len == 0) return p.failState(q.name.pos, .of("42P16"), "a table must have at least one column", .{});
         ct.columns = cols.items;
         ct.constraints = cons.items;
         // The identity sequences are in the table's schema.
@@ -2880,9 +2895,9 @@ pub const Parser = struct {
             else => {},
         };
         if ((identity != null and info.serial) or ((identity != null or info.serial) and has_default)) {
-            return p.fail(name.pos, "multiple default values specified for column \"{s}\" of table \"{s}\"", .{ name.text, table });
+            return p.failState(name.pos, .of("42601"), "multiple default values specified for column \"{s}\" of table \"{s}\"", .{ name.text, table });
         }
-        if (identity != null and info.storage[0] != 'I') return p.fail(ty.pos, "identity column type must be smallint, integer, or bigint", .{});
+        if (identity != null and info.storage[0] != 'I') return p.failState(ty.pos, .of("42804"), "identity column type must be smallint, integer, or bigint", .{});
 
         var cons: std.ArrayList(tree.ColConstraint) = .empty;
         if (identity != null or info.serial) {
@@ -3091,7 +3106,7 @@ pub const Parser = struct {
             const m = try p.anyName();
             // gin (and hash) indexes are B-tree indexes of the same
             // columns: they serve equality, not @> or ?.
-            if (!eql(m.text, "btree") and !eql(m.text, "gin") and !eql(m.text, "hash")) return p.fail(m.pos, "index method \"{s}\" is not supported", .{m.text});
+            if (!eql(m.text, "btree") and !eql(m.text, "gin") and !eql(m.text, "hash")) return p.failState(m.pos, .of("0A000"), "index method \"{s}\" is not supported", .{m.text});
         }
         _ = try p.expect(.lparen);
         var items: std.ArrayList(tree.IndexItem) = .empty;
@@ -3139,11 +3154,11 @@ pub const Parser = struct {
         } else if (p.eatKw("sequence")) {
             d.kind = .sequence;
         } else if (t.kind == .ident and t.isAnyKw(&.{ "schema", "database", "extension", "type", "function", "trigger" })) {
-            return p.fail(t.start, "DROP {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
+            return p.failState(t.start, .of("0A000"), "DROP {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
         } else return p.syntaxError();
         d.if_exists = try p.ifExists();
         const q = try p.qname();
-        if (p.eat(.comma)) return p.fail(p.peek().start, "dropping several objects in one statement is not supported", .{});
+        if (p.eat(.comma)) return p.failState(p.peek().start, .of("0A000"), "dropping several objects in one statement is not supported", .{});
         const kind: Lookup = switch (d.kind) {
             .table, .view => .relation,
             .index => .index,
@@ -3151,13 +3166,13 @@ pub const Parser = struct {
         };
         if (q.schema) |s| {
             const x = try p.qualified(s, q.name);
-            if (d.kind == .sequence and !eql(x.db, "main")) return p.fail(s.pos, "sequence \"{s}\" does not exist", .{q.name.text});
+            if (d.kind == .sequence and !eql(x.db, "main")) return p.failState(s.pos, .of("42704"), "sequence \"{s}\" does not exist", .{q.name.text});
             d.name = .{ .schema = .{ .text = x.db, .pos = s.pos }, .name = .{ .text = x.name, .pos = q.name.pos } };
         } else switch (try p.unqualified(q.name, kind)) {
             .keep => d.name = .{ .name = q.name },
             .target => |x| d.name = .{ .schema = .{ .text = x.db, .pos = q.name.pos }, .name = .{ .text = x.name, .pos = q.name.pos } },
             .missing => {
-                if (!d.if_exists) return p.fail(q.name.pos, "{s} \"{s}\" does not exist", .{ @tagName(d.kind), q.name.text });
+                if (!d.if_exists) return p.failState(q.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ @tagName(d.kind), q.name.text });
                 // Not on search_path: a name nothing has (pg_temp's
                 // tables have no dot).
                 d.name = .{ .schema = .{ .text = "main" }, .name = .{ .text = try nsp.mangle(p.arena, "pg_temp", q.name.text), .pos = q.name.pos } };
@@ -3171,7 +3186,7 @@ pub const Parser = struct {
         _ = p.advance(); // ALTER
         if (!p.isKw("table")) {
             const t = p.peek();
-            if (t.kind == .ident) return p.fail(t.start, "ALTER {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
+            if (t.kind == .ident) return p.failState(t.start, .of("0A000"), "ALTER {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
             return p.syntaxError();
         }
         _ = p.advance();
@@ -3191,7 +3206,7 @@ pub const Parser = struct {
                 a.name = .{ .schema = .{ .text = t.db, .pos = q.name.pos }, .name = .{ .text = t.name, .pos = q.name.pos } };
             },
             .missing => {
-                if (!a.if_exists) return p.fail(q.name.pos, "relation \"{s}\" does not exist", .{q.name.text});
+                if (!a.if_exists) return p.failState(q.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{q.name.text});
                 a.name = .{ .schema = .{ .text = "main" }, .name = .{ .text = try nsp.mangle(p.arena, "pg_temp", q.name.text), .pos = q.name.pos } };
             },
         }
@@ -3235,7 +3250,7 @@ pub const Parser = struct {
         _ = p.eatKw("only");
         const q = try p.qname();
         _ = p.eatOp("*");
-        if (p.eat(.comma)) return p.fail(p.peek().start, "TRUNCATE of several tables is not supported", .{});
+        if (p.eat(.comma)) return p.failState(p.peek().start, .of("0A000"), "TRUNCATE of several tables is not supported", .{});
         var t: tree.Truncate = .{ .table = (try p.relation(q)).q };
         if (p.eatKw("restart")) {
             try p.expectKw("identity");

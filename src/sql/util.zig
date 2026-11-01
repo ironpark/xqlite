@@ -22,6 +22,17 @@ pub fn errorMsg(p: *Parse, comptime fmt: []const u8, args: anytype) void {
 /// %T in the C code): its offset in the statement is recorded for
 /// sqlite3_error_offset().
 pub fn errorMsgAt(p: *Parse, z: ?[*]const u8, comptime fmt: []const u8, args: anytype) void {
+    errorMsgState(p, z, null, fmt, args);
+}
+
+/// The error just recorded in `p` (by errorMsg()) is `state`.
+pub fn errorIs(p: *Parse, state: int.ErrorState) void {
+    if (p.err_msg != null) p.err_state = state;
+}
+
+/// `errorMsgAt` of an error whose ErrorState is known (`state`): the
+/// SQLSTATE, and the number of a dialect.
+pub fn errorMsgState(p: *Parse, z: ?[*]const u8, state: ?int.ErrorState, comptime fmt: []const u8, args: anytype) void {
     const db = p.db;
     db.err_byte_offset = -2;
     if (z) |zp| recordErrorByteOffset(p, zp);
@@ -40,6 +51,7 @@ pub fn errorMsgAt(p: *Parse, z: ?[*]const u8, comptime fmt: []const u8, args: an
     }
     p.n_err += 1;
     p.err_msg = msg;
+    p.err_state = state orelse comptime int.ErrorState.ofFormat(fmt);
     p.rc = RC.ERROR;
     p.with = null;
 }
@@ -112,7 +124,7 @@ pub fn dequoteNumber(p: *Parse, e: *Expr) void {
                 i > 0 and ctype.isXdigit(z[i - 1]) and ctype.isXdigit(z[i + 1])
             else
                 i > 0 and ctype.isDigit(z[i - 1]) and ctype.isDigit(z[i + 1]);
-            if (!ok) errorMsg(p, "unrecognized token: \"{s}\"", .{std.mem.sliceTo(z, 0)});
+            if (!ok) errorMsgState(p, null, .of("42601"), "unrecognized token: \"{s}\"", .{std.mem.sliceTo(z, 0)});
         }
         if (c == 0) break;
     }

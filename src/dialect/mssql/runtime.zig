@@ -16,6 +16,7 @@
 const std = @import("std");
 const calendar = @import("../calendar.zig");
 const api = @import("../../vdbe/api.zig");
+const int = @import("../../sql/sqlite_int.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
 const catalog = @import("../../catalog/catalog.zig");
@@ -29,9 +30,15 @@ const anyNull = dfunc.anyNull;
 const text = dfunc.text;
 
 fn fail(ctx: *Context, comptime fmt: []const u8, args: anytype) void {
+    failState(ctx, comptime int.ErrorState.ofFormat(fmt), fmt, args);
+}
+
+/// fail() of an error whose ErrorState (SQL Server's error number) is
+/// known.
+fn failState(ctx: *Context, st: ?int.ErrorState, comptime fmt: []const u8, args: anytype) void {
     var buf: [400]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
-    api.resultError(ctx, msg);
+    if (st) |x| api.resultErrorState(ctx, x, msg) else api.resultError(ctx, msg);
 }
 
 /// At most 60 bytes of a value for a message.
@@ -61,7 +68,7 @@ pub fn convertFunc(ctx: *Context, argv: []*Mem) void {
     var it = std.mem.splitScalar(u8, arg, '|');
     const tz = it.next().?;
     const where: Where = .{ .table = it.next() orelse "", .column = it.next() orelse "" };
-    const t = types.parseText(tz) orelse return fail(ctx, "Type {s} is not a defined system type.", .{tz});
+    const t = types.parseText(tz) orelse return failState(ctx, .numbered("42704", 243), "Type {s} is not a defined system type.", .{tz});
     convertAt(ctx, argv[0], t, modeOf(ctx), where);
 }
 
@@ -69,14 +76,18 @@ pub fn convertFunc(ctx: *Context, argv: []*Mem) void {
 pub const Where = struct { table: []const u8 = "", column: []const u8 = "" };
 
 fn truncated(ctx: *Context, w: Where, cut: []const u8) void {
-    if (w.table.len == 0) return fail(ctx, "String or binary data would be truncated.", .{});
-    fail(ctx, "String or binary data would be truncated in table '{s}', column '{s}'. Truncated value: '{s}'.", .{ w.table, w.column, clip(cut) });
+    if (w.table.len == 0) return failState(ctx, .numbered("22001", 8152), "String or binary data would be truncated.", .{});
+    failState(ctx, .numbered("22001", 2628), "String or binary data would be truncated in table '{s}', column '{s}'. Truncated value: '{s}'.", .{ w.table, w.column, clip(cut) });
 }
 
 /// A conversion failure: an error, or NULL for TRY_CAST.
 fn bad(ctx: *Context, mode: Mode, comptime fmt: []const u8, args: anytype) void {
+    badState(ctx, mode, null, fmt, args);
+}
+
+fn badState(ctx: *Context, mode: Mode, st: ?int.ErrorState, comptime fmt: []const u8, args: anytype) void {
     if (mode == .try_cast) return api.resultNull(ctx);
-    fail(ctx, fmt, args);
+    failState(ctx, st, fmt, args);
 }
 
 /// The SQL Server name of the type of a value, for messages.
@@ -162,7 +173,7 @@ fn toInteger(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
         vi.SQLITE_FLOAT => {
             const f = api.valueDouble(m);
             const r = if (exact) roundHalfAway(f, 0) else @trunc(f);
-            if (!(r > -1.8e19 and r < 1.8e19)) return bad(ctx, mode, "Arithmetic overflow error converting float to data type {s}.", .{tname});
+            if (!(r > -1.8e19 and r < 1.8e19)) return badState(ctx, mode, .numbered("22003", 8115), "Arithmetic overflow error converting float to data type {s}.", .{tname});
             v = @intFromFloat(r);
         },
         vi.SQLITE_BLOB => {
@@ -176,22 +187,22 @@ fn toInteger(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
             if (parseIntText(z)) |x| {
                 v = x;
             } else if (exact) {
-                const f = parseDecText(z, false) orelse return bad(ctx, mode, "Error converting data type varchar to numeric.", .{});
+                const f = parseDecText(z, false) orelse return badState(ctx, mode, .numbered("22P02", 8114), "Error converting data type varchar to numeric.", .{});
                 v = @intFromFloat(std.math.clamp(roundHalfAway(f, 0), -1.7e19, 1.7e19));
-            } else return bad(ctx, mode, "Conversion failed when converting the varchar value '{s}' to data type {s}.", .{ clip(z), tname });
+            } else return badState(ctx, mode, .numbered("22P02", 245), "Conversion failed when converting the varchar value '{s}' to data type {s}.", .{ clip(z), tname });
             const lo, const hi = limits(t);
             if (v < lo or v > hi) {
-                if (exact) return bad(ctx, mode, "Arithmetic overflow error converting varchar to data type numeric.", .{});
-                return bad(ctx, mode, "The conversion of the varchar value '{s}' overflowed an {s} column.", .{ clip(z), tname });
+                if (exact) return badState(ctx, mode, .numbered("22003", 8115), "Arithmetic overflow error converting varchar to data type numeric.", .{});
+                return badState(ctx, mode, .numbered("22003", 248), "The conversion of the varchar value '{s}' overflowed an {s} column.", .{ clip(z), tname });
             }
             return api.resultInt64(ctx, @intCast(v));
         },
     }
     const lo, const hi = limits(t);
     if (v < lo or v > hi) {
-        if (exact) return bad(ctx, mode, "Arithmetic overflow error converting {s} to data type numeric.", .{sourceName(m)});
-        if (api.valueType(m) == vi.SQLITE_INTEGER) return bad(ctx, mode, "Arithmetic overflow error for data type {s}, value = {d}.", .{ tname, v });
-        return bad(ctx, mode, "Arithmetic overflow error converting expression to data type {s}.", .{tname});
+        if (exact) return badState(ctx, mode, .numbered("22003", 8115), "Arithmetic overflow error converting {s} to data type numeric.", .{sourceName(m)});
+        if (api.valueType(m) == vi.SQLITE_INTEGER) return badState(ctx, mode, .numbered("22003", 8115), "Arithmetic overflow error for data type {s}, value = {d}.", .{ tname, v });
+        return badState(ctx, mode, .numbered("22003", 8115), "Arithmetic overflow error converting expression to data type {s}.", .{tname});
     }
     api.resultInt64(ctx, @intCast(v));
 }
@@ -213,7 +224,7 @@ fn toBit(ctx: *Context, m: *Mem, mode: Mode) void {
             const z = std.mem.trim(u8, text(ctx, m) orelse return, " ");
             if (std.ascii.eqlIgnoreCase(z, "true")) return api.resultInt64(ctx, 1);
             if (std.ascii.eqlIgnoreCase(z, "false")) return api.resultInt64(ctx, 0);
-            const f = parseDecText(z, true) orelse return bad(ctx, mode, "Conversion failed when converting the varchar value '{s}' to data type bit.", .{clip(z)});
+            const f = parseDecText(z, true) orelse return badState(ctx, mode, .numbered("22P02", 245), "Conversion failed when converting the varchar value '{s}' to data type bit.", .{clip(z)});
             api.resultInt64(ctx, @intFromBool(f != 0));
         },
     }
@@ -224,21 +235,21 @@ fn toReal(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
     var f: f64 = undefined;
     switch (api.valueType(m)) {
         vi.SQLITE_INTEGER, vi.SQLITE_FLOAT => f = api.valueDouble(m),
-        vi.SQLITE_BLOB => return bad(ctx, mode, "Explicit conversion from data type varbinary to {s} is not allowed.", .{@tagName(t.base)}),
+        vi.SQLITE_BLOB => return badState(ctx, mode, .numbered("42846", 529), "Explicit conversion from data type varbinary to {s} is not allowed.", .{@tagName(t.base)}),
         else => {
             const z = text(ctx, m) orelse return;
             var zz = std.mem.trim(u8, z, " ");
             if ((t.base == .money or t.base == .smallmoney) and zz.len > 0 and zz[0] == '$') zz = zz[1..];
             f = parseDecText(zz, !exact) orelse {
-                if (exact) return bad(ctx, mode, "Error converting data type varchar to numeric.", .{});
-                return bad(ctx, mode, "Error converting data type varchar to float.", .{});
+                if (exact) return badState(ctx, mode, .numbered("22P02", 8114), "Error converting data type varchar to numeric.", .{});
+                return badState(ctx, mode, .numbered("22P02", 8114), "Error converting data type varchar to float.", .{});
             };
         },
     }
     if (exact) {
         f = roundHalfAway(f, t.scaleOf());
         const lim = std.math.pow(f64, 10, @floatFromInt(t.precision() - t.scaleOf()));
-        if (@abs(f) >= lim) return bad(ctx, mode, "Arithmetic overflow error converting {s} to data type numeric.", .{sourceName(m)});
+        if (@abs(f) >= lim) return badState(ctx, mode, .numbered("22003", 8115), "Arithmetic overflow error converting {s} to data type numeric.", .{sourceName(m)});
     }
     api.resultDouble(ctx, f);
 }
@@ -294,7 +305,7 @@ fn toGuid(ctx: *Context, m: *Mem, mode: Mode) void {
         } else if (!std.ascii.isHex(c)) break false;
         out[i] = std.ascii.toUpper(c);
     } else true;
-    if (!ok) return bad(ctx, mode, "Conversion failed when converting from a character string to uniqueidentifier.", .{});
+    if (!ok) return badState(ctx, mode, .numbered("22P02", 8169), "Conversion failed when converting from a character string to uniqueidentifier.", .{});
     api.resultText(ctx, &out, .transient);
 }
 
@@ -576,13 +587,13 @@ fn formatAs(w: *std.Io.Writer, mo_in: Moment, t: types.Type) bool {
 }
 
 fn toTemporal(ctx: *Context, m: *Mem, t: types.Type, mode: Mode) void {
-    if (api.valueType(m) == vi.SQLITE_BLOB) return bad(ctx, mode, "Explicit conversion from data type varbinary to {s} is not allowed.", .{@tagName(t.base)});
-    if (t.base == .date and api.valueType(m) != vi.SQLITE_TEXT) return bad(ctx, mode, "Explicit conversion from data type {s} to date is not allowed.", .{sourceName(m)});
-    const mo = momentOf(m) orelse return bad(ctx, mode, "Conversion failed when converting date and/or time from character string.", .{});
+    if (api.valueType(m) == vi.SQLITE_BLOB) return badState(ctx, mode, .numbered("42846", 529), "Explicit conversion from data type varbinary to {s} is not allowed.", .{@tagName(t.base)});
+    if (t.base == .date and api.valueType(m) != vi.SQLITE_TEXT) return badState(ctx, mode, .numbered("42846", 529), "Explicit conversion from data type {s} to date is not allowed.", .{sourceName(m)});
+    const mo = momentOf(m) orelse return badState(ctx, mode, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
     var buf: [64]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     if (!formatAs(&w, mo, t)) {
-        return bad(ctx, mode, "The conversion of a {s} data type to a {s} data type resulted in an out-of-range value.", .{ sourceName(m), @tagName(t.base) });
+        return badState(ctx, mode, .numbered("22008", 242), "The conversion of a {s} data type to a {s} data type resulted in an out-of-range value.", .{ sourceName(m), @tagName(t.base) });
     }
     api.resultText(ctx, w.buffered(), .transient);
 }
@@ -639,7 +650,7 @@ fn partArg(ctx: *Context, m: *Mem) ?struct { []const u8, ?Part } {
 pub fn dateaddFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const name, const part_or = partArg(ctx, argv[0]) orelse return;
-    var mo = momentOf(argv[2]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
+    var mo = momentOf(argv[2]) orelse return failState(ctx, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
     const n: i64 = @intFromFloat(std.math.clamp(@trunc(api.valueDouble(argv[1])), -1e15, 1e15));
     const unsupported = "The datepart {s} is not supported by date function dateadd.";
     const part = part_or orelse return fail(ctx, unsupported, .{name});
@@ -654,7 +665,7 @@ pub fn dateaddFunc(ctx: *Context, argv: []*Mem) void {
         const total = y * 12 + (mon - 1) + months;
         const ny = @divFloor(total, 12);
         const nm: u32 = @intCast(@mod(total, 12) + 1);
-        if (ny < 1 or ny > 9999) return fail(ctx, "Adding a value to a 'datetime' column caused an overflow.", .{});
+        if (ny < 1 or ny > 9999) return failState(ctx, .numbered("22008", 517), "Adding a value to a 'datetime' column caused an overflow.", .{});
         const nd = @min(d, daysInMonth(@intCast(ny), nm));
         mo.days = calendar.daysFromCivil(ny, nm, nd);
     } else {
@@ -674,7 +685,7 @@ pub fn dateaddFunc(ctx: *Context, argv: []*Mem) void {
         const add: i128 = if (unit == 0) @divTrunc(n, 100) else n * unit;
         const r = Moment.fromTicks(mo.ticks() + add);
         const y, _, _ = r.ymd();
-        if (y < 1 or y > 9999) return fail(ctx, "Adding a value to a 'datetime' column caused an overflow.", .{});
+        if (y < 1 or y > 9999) return failState(ctx, .numbered("22008", 517), "Adding a value to a 'datetime' column caused an overflow.", .{});
         upgrade = !mo.has_time and unit < 86400 * 10_000_000;
         mo.days = r.days;
         mo.secs = r.secs;
@@ -697,8 +708,8 @@ fn weekIndex(days: i64) i64 {
 pub fn datediffFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const name, const part_or = partArg(ctx, argv[0]) orelse return;
-    const a = momentOf(argv[1]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
-    const b = momentOf(argv[2]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
+    const a = momentOf(argv[1]) orelse return failState(ctx, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
+    const b = momentOf(argv[2]) orelse return failState(ctx, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
     const unsupported = "The datepart {s} is not supported by date function datediff.";
     const part = part_or orelse return fail(ctx, unsupported, .{name});
     const ya, const ma, _ = a.ymd();
@@ -717,7 +728,7 @@ pub fn datediffFunc(ctx: *Context, argv: []*Mem) void {
         .nanosecond => (b.ticks() - a.ticks()) * 100,
         .tzoffset, .iso_week => return fail(ctx, unsupported, .{name}),
     };
-    if (r > std.math.maxInt(i64) or r < std.math.minInt(i64)) return fail(ctx, "The datediff function resulted in an overflow.", .{});
+    if (r > std.math.maxInt(i64) or r < std.math.minInt(i64)) return failState(ctx, .numbered("22003", 535), "The datediff function resulted in an overflow.", .{});
     api.resultInt64(ctx, @intCast(r));
 }
 
@@ -762,8 +773,8 @@ fn datepartValue(part: Part, mo: Moment) i64 {
 pub fn datepartFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const name, const part = partArg(ctx, argv[0]) orelse return;
-    const mo = momentOf(argv[1]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
-    const p = part orelse return fail(ctx, "The datepart {s} is not supported by date function datepart.", .{name});
+    const mo = momentOf(argv[1]) orelse return failState(ctx, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
+    const p = part orelse return failState(ctx, .numbered("22023", 9810), "The datepart {s} is not supported by date function datepart.", .{name});
     api.resultInt64(ctx, datepartValue(p, mo));
 }
 
@@ -772,8 +783,8 @@ pub fn datepartFunc(ctx: *Context, argv: []*Mem) void {
 pub fn datenameFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const name, const part = partArg(ctx, argv[0]) orelse return;
-    const mo = momentOf(argv[1]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
-    const p = part orelse return fail(ctx, "The datepart {s} is not supported by date function datename.", .{name});
+    const mo = momentOf(argv[1]) orelse return failState(ctx, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
+    const p = part orelse return failState(ctx, .numbered("22023", 9810), "The datepart {s} is not supported by date function datename.", .{name});
     switch (p) {
         .month => {
             _, const m, _ = mo.ymd();
@@ -790,13 +801,13 @@ pub fn datenameFunc(ctx: *Context, argv: []*Mem) void {
 /// eomonth(d [, months]): the last day of the month.
 pub fn eomonthFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
-    const mo = momentOf(argv[0]) orelse return fail(ctx, "Conversion failed when converting date and/or time from character string.", .{});
+    const mo = momentOf(argv[0]) orelse return failState(ctx, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
     const add: i64 = if (argv.len > 1) api.valueInt64(argv[1]) else 0;
     const y, const m, _ = mo.ymd();
     const total = y * 12 + (m - 1) + add;
     const ny = @divFloor(total, 12);
     const nm: u32 = @intCast(@mod(total, 12) + 1);
-    if (ny < 1 or ny > 9999) return fail(ctx, "Adding a value to a 'date' column caused an overflow.", .{});
+    if (ny < 1 or ny > 9999) return failState(ctx, .numbered("22008", 517), "Adding a value to a 'date' column caused an overflow.", .{});
     var buf: [16]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     writeDate(&w, calendar.daysFromCivil(ny, nm, daysInMonth(@intCast(ny), nm)));
@@ -810,7 +821,7 @@ pub fn datefrompartsFunc(ctx: *Context, argv: []*Mem) void {
     const m = api.valueInt64(argv[1]);
     const d = api.valueInt64(argv[2]);
     if (y < 1 or y > 9999 or m < 1 or m > 12 or d < 1 or d > daysInMonth(@intCast(y), @intCast(m))) {
-        return fail(ctx, "Cannot construct data type date, some of the arguments have values which are not valid.", .{});
+        return failState(ctx, .numbered("22008", 289), "Cannot construct data type date, some of the arguments have values which are not valid.", .{});
     }
     var buf: [16]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -852,7 +863,7 @@ fn numOf(ctx: *Context, m: *Mem) ?Num {
             const z = text(ctx, m) orelse return null;
             if (parseIntText(z)) |v| if (v >= std.math.minInt(i64) and v <= std.math.maxInt(i64)) return .{ .int = @intCast(v) };
             if (parseDecText(z, true)) |f| return .{ .float = f };
-            fail(ctx, "Conversion failed when converting the varchar value '{s}' to data type int.", .{clip(z)});
+            failState(ctx, .numbered("22P02", 245), "Conversion failed when converting the varchar value '{s}' to data type int.", .{clip(z)});
             return null;
         },
     }
@@ -878,7 +889,7 @@ pub fn addFunc(ctx: *Context, argv: []*Mem) void {
     if (x == .int and y == .int) {
         const r, const o = @addWithOverflow(x.int, y.int);
         if (o == 0) return api.resultInt64(ctx, r);
-        return fail(ctx, "Arithmetic overflow error converting expression to data type bigint.", .{});
+        return failState(ctx, .numbered("22003", 8115), "Arithmetic overflow error converting expression to data type bigint.", .{});
     }
     const fx: f64 = switch (x) {
         .int => |v| @floatFromInt(v),
@@ -992,7 +1003,7 @@ pub fn likeFunc(ctx: *Context, argv: []*Mem) void {
     var esc: u21 = 0;
     if (argv.len > 2) {
         const e = text(ctx, argv[2]) orelse return;
-        if (dfunc.charCount(e) != 1) return fail(ctx, "The invalid escape character \"{s}\" was specified in a LIKE predicate.", .{clip(e)});
+        if (dfunc.charCount(e) != 1) return failState(ctx, .numbered("22019", 506), "The invalid escape character \"{s}\" was specified in a LIKE predicate.", .{clip(e)});
         var i: usize = 0;
         esc = nextFolded(e, &i);
     }
@@ -1106,7 +1117,7 @@ pub fn powerFunc(ctx: *Context, argv: []*Mem) void {
             var k: i64 = 0;
             while (k < e) : (k += 1) {
                 const x, const o = @mulWithOverflow(r, b);
-                if (o != 0) return fail(ctx, "Arithmetic overflow error converting expression to data type int.", .{});
+                if (o != 0) return failState(ctx, .numbered("22003", 8115), "Arithmetic overflow error converting expression to data type int.", .{});
                 r = x;
             }
             return api.resultInt64(ctx, r);
@@ -1114,7 +1125,7 @@ pub fn powerFunc(ctx: *Context, argv: []*Mem) void {
         return api.resultInt64(ctx, 0);
     }
     const r = std.math.pow(f64, api.valueDouble(argv[0]), api.valueDouble(argv[1]));
-    if (std.math.isNan(r)) return fail(ctx, "An invalid floating point operation occurred.", .{});
+    if (std.math.isNan(r)) return failState(ctx, .numbered("2201E", 3623), "An invalid floating point operation occurred.", .{});
     api.resultDouble(ctx, r);
 }
 
@@ -1190,7 +1201,7 @@ pub fn setvarFunc(ctx: *Context, argv: []*Mem) void {
     const name = api.valueText(argv[0]) orelse return api.resultNull(ctx);
     state(ctx).assign(name, argv[1]) catch |err| switch (err) {
         error.OutOfMemory => return api.resultErrorNomem(ctx),
-        error.Undeclared => return fail(ctx, "Must declare the scalar variable \"@{s}\".", .{name}),
+        error.Undeclared => return failState(ctx, .numbered("42P02", 137), "Must declare the scalar variable \"@{s}\".", .{name}),
     };
     api.resultNull(ctx);
 }
@@ -1214,7 +1225,7 @@ pub fn identityInsertFunc(ctx: *Context, argv: []*Mem) void {
     const st = &db.xq.mssql;
     if (on) {
         if (st.identity_insert) |cur| if (!std.mem.eql(u8, cur, key)) {
-            return fail(ctx, "IDENTITY_INSERT is already ON for table '{s}'. Cannot perform SET operation for table '{s}'.", .{ cur, key });
+            return failState(ctx, .numbered("55000", 8107), "IDENTITY_INSERT is already ON for table '{s}'. Cannot perform SET operation for table '{s}'.", .{ cur, key });
         };
         @TypeOf(st.*).setText(db.gpa, &st.identity_insert, key) catch return api.resultErrorNomem(ctx);
     } else if (st.identity_insert) |cur| if (std.mem.eql(u8, cur, key)) {
@@ -1230,7 +1241,7 @@ pub fn nextvalFunc(ctx: *Context, argv: []*Mem) void {
     const name = api.valueText(argv[0]) orelse return api.resultNull(ctx);
     const v = sequence.nextval(db, catalog.main_schema, name) catch |err| {
         if (err == error.OutOfMemory) return api.resultErrorNomem(ctx);
-        return api.resultError(ctx, @import("../../sql/main.zig").errmsg(db));
+        return api.resultErrorFrom(ctx, db);
     };
     db.xq.mssql.last_identity = v;
     api.resultInt64(ctx, v);
@@ -1256,7 +1267,7 @@ pub fn identitySeenFunc(ctx: *Context, argv: []*Mem) void {
         };
         if (past) _ = sequence.setval(db, catalog.main_schema, name, v, true) catch |err| {
             if (err == error.OutOfMemory) return api.resultErrorNomem(ctx);
-            return api.resultError(ctx, @import("../../sql/main.zig").errmsg(db));
+            return api.resultErrorFrom(ctx, db);
         };
     }
     db.xq.mssql.last_identity = v;

@@ -138,6 +138,8 @@ pub const Vtab = struct {
     n_ref: i32 = 0,
     /// An error message for the core to report (from db.gpa).
     err_msg: ?[:0]u8 = null,
+    /// What that error is (int.ErrorState), if known.
+    err_state: ?int.ErrorState = null,
 };
 
 /// The base of a virtual table cursor (sqlite3_vtab_cursor).
@@ -284,6 +286,13 @@ pub fn setErrMsg(db: *Sqlite3, vtab: *Vtab, comptime fmt: []const u8, args: anyt
 pub fn setErrMsgOwned(db: *Sqlite3, vtab: *Vtab, msg: ?[:0]u8) void {
     freeErrMsg(db, vtab);
     vtab.err_msg = msg;
+    vtab.err_state = null;
+}
+
+/// setErrMsg() of an error whose ErrorState is known.
+pub fn setErrState(db: *Sqlite3, vtab: *Vtab, state: int.ErrorState, comptime fmt: []const u8, args: anytype) void {
+    setErrMsg(db, vtab, fmt, args);
+    vtab.err_state = state;
 }
 
 /// Free the error message of `vtab`, if any. The core does this before
@@ -1137,8 +1146,10 @@ pub fn epoTableClearAll(db: *Sqlite3) void {
 pub fn importErrmsg(v: *vi.Vdbe, vtab: *Vtab) void {
     if (vtab.err_msg) |msg| {
         aux.setErrMsg(v, v.db.gpa.dupeSentinel(u8, msg, 0) catch null);
+        v.err_state = vtab.err_state;
         v.db.gpa.free(msg);
         vtab.err_msg = null;
+        vtab.err_state = null;
     }
 }
 

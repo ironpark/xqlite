@@ -2563,7 +2563,7 @@ pub fn indexedByLookup(p: *Parse, from: *SrcItem) bool {
         if (ctype.eqlNoCase(ix.name, name)) break;
     }
     const found = idx orelse {
-        util.errorMsg(p, "no such index: {s}", .{name});
+        util.errorMsgState(p, null, .of("42704"), "no such index: {s}", .{name});
         p.check_schema = true;
         return true;
     };
@@ -2694,7 +2694,7 @@ fn resolveFromTermToCte(p: *Parse, w: *Walker, from: *SrcItem) Oom!u8 {
     const sel = from.u4.subq.?.select;
     sel.sel_flags.CopyCte = true;
     if (from.fg.is_indexed_by) {
-        util.errorMsg(p, "no such index: \"{s}\"", .{from.u1.indexed_by.?});
+        util.errorMsgState(p, null, .of("42704"), "no such index: \"{s}\"", .{from.u1.indexed_by.?});
         return 2;
     }
     from.fg.is_cte = true;
@@ -3047,7 +3047,7 @@ fn selectExpanderImpl(w: *Walker, s: *Select) Oom!WRC {
             }
             if (!table_seen) {
                 if (tname) |tn| {
-                    util.errorMsg(p, "no such table: {s}", .{tn});
+                    util.errorMsgState(p, null, .of("42P01"), "no such table: {s}", .{tn});
                 } else {
                     util.errorMsg(p, "no tables specified", .{});
                 }

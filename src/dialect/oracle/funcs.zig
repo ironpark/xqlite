@@ -36,6 +36,7 @@
 const std = @import("std");
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
+const ora_errors = @import("errors.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const types = @import("types.zig");
@@ -204,7 +205,7 @@ fn resultOwnedStr(ctx: *Context, out: *std.ArrayList(u8)) void {
 /// A number result: an integer when it is integral (as Oracle's NUMBER
 /// prints), else a real.
 pub fn resultNumber(ctx: *Context, x: f64) void {
-    if (std.math.isNan(x)) return api.resultError(ctx, "ORA-01426: numeric overflow");
+    if (std.math.isNan(x)) return ora_errors.resultError(ctx, "ORA-01426: numeric overflow");
     if (x == @trunc(x) and @abs(x) < 9.007199254740992e15) return api.resultInt64(ctx, @intFromFloat(x));
     api.resultDouble(ctx, x);
 }
@@ -221,7 +222,7 @@ fn numArg(ctx: *Context, m: *Mem) error{Invalid}!?Num {
         else => {
             const z = api.valueText(m) orelse return null;
             return parseNum(z) catch {
-                api.resultError(ctx, "ORA-01722: invalid number");
+                ora_errors.resultError(ctx, "ORA-01722: invalid number");
                 return error.Invalid;
             };
         },
@@ -268,7 +269,7 @@ fn dateArg(ctx: *Context, m: *Mem) error{Invalid}!?DateTime {
     var buf: [64]u8 = undefined;
     const s = str(ctx, m, &buf) orelse return null;
     return dt.parseDefault(s, now(ctx)) orelse {
-        api.resultError(ctx, "ORA-01861: literal does not match format string");
+        ora_errors.resultError(ctx, "ORA-01861: literal does not match format string");
         return error.Invalid;
     };
 }
@@ -359,7 +360,7 @@ fn instrFunc(ctx: *Context, argv: []*Mem) void {
     var occ: i64 = 1;
     if (argv.len >= 3) pos = (intArg(ctx, argv[2]) catch return) orelse return api.resultNull(ctx);
     if (argv.len == 4) occ = (intArg(ctx, argv[3]) catch return) orelse return api.resultNull(ctx);
-    if (occ <= 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
+    if (occ <= 0) return ora_errors.resultError(ctx, "ORA-01428: argument is out of range");
     if (pos == 0) return api.resultInt64(ctx, 0);
     // Character start offsets.
     var starts: std.ArrayList(usize) = .empty;
@@ -483,7 +484,7 @@ fn trimFunc(ctx: *Context, argv: []*Mem) void {
     if (argv.len == 2) {
         var b: [64]u8 = undefined;
         const c = str(ctx, argv[1], &b) orelse return api.resultNull(ctx);
-        if (charCount(c) != 1) return api.resultError(ctx, "ORA-30001: trim set should have only one character");
+        if (charCount(c) != 1) return ora_errors.resultError(ctx, "ORA-30001: trim set should have only one character");
     }
     trimCommon(ctx, argv, true, true);
 }
@@ -619,17 +620,17 @@ const floorFunc = dfunc.bind(unaryMath, .{ floorF, true });
 const expFunc = dfunc.bind(unaryMath, .{ expF, false });
 
 fn sqrtFunc(ctx: *Context, x: f64) void {
-    if (x < 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
+    if (x < 0) return ora_errors.resultError(ctx, "ORA-01428: argument is out of range");
     resultNumber(ctx, @sqrt(x));
 }
 
 fn lnFunc(ctx: *Context, x: f64) void {
-    if (x <= 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
+    if (x <= 0) return ora_errors.resultError(ctx, "ORA-01428: argument is out of range");
     resultNumber(ctx, @log(x));
 }
 
 fn logFunc(ctx: *Context, base: f64, x: f64) void {
-    if (base <= 0 or base == 1 or x <= 0) return api.resultError(ctx, "ORA-01428: argument is out of range");
+    if (base <= 0 or base == 1 or x <= 0) return ora_errors.resultError(ctx, "ORA-01428: argument is out of range");
     resultNumber(ctx, @log(x) / @log(base));
 }
 
@@ -639,7 +640,7 @@ fn powerFunc(ctx: *Context, a: Num, b: Num) void {
     }
     const x = toF(a);
     const y = toF(b);
-    if (x < 0 and y != @trunc(y)) return api.resultError(ctx, "ORA-01428: argument is out of range");
+    if (x < 0 and y != @trunc(y)) return ora_errors.resultError(ctx, "ORA-01428: argument is out of range");
     resultNumber(ctx, std.math.pow(f64, x, y));
 }
 
@@ -686,7 +687,7 @@ fn roundTrunc(ctx: *Context, argv: []*Mem, trunc: bool) void {
             var unit: []const u8 = "DD";
             var ub: [64]u8 = undefined;
             if (argv.len == 2) unit = str(ctx, argv[1], &ub) orelse return api.resultNull(ctx);
-            const r = dt.truncate(d, unit, !trunc) orelse return api.resultError(ctx, "ORA-01898: too many precision specifiers");
+            const r = dt.truncate(d, unit, !trunc) orelse return ora_errors.resultError(ctx, "ORA-01898: too many precision specifiers");
             return resultDate(ctx, r);
         }
     }
@@ -714,7 +715,7 @@ fn toCharFunc(ctx: *Context, argv: []*Mem) void {
         defer out.deinit();
         formatNumber(&out.writer, toF((numArg(ctx, argv[0]) catch return).?), f) catch |err| switch (err) {
             error.WriteFailed => return api.resultErrorNomem(ctx),
-            error.BadFormat => return api.resultError(ctx, "ORA-01481: invalid number format model"),
+            error.BadFormat => return ora_errors.resultError(ctx, "ORA-01481: invalid number format model"),
         };
         return resultStr(ctx, out.written());
     }
@@ -724,12 +725,12 @@ fn toCharFunc(ctx: *Context, argv: []*Mem) void {
         // TO_CHAR of a string is the string; with a number format, the
         // number it spells.
         if (fmt) |f| {
-            const n = parseNum(s) catch return api.resultError(ctx, "ORA-01722: invalid number");
+            const n = parseNum(s) catch return ora_errors.resultError(ctx, "ORA-01722: invalid number");
             var out: std.Io.Writer.Allocating = .init(gpa(ctx));
             defer out.deinit();
             formatNumber(&out.writer, toF(n.?), f) catch |err| switch (err) {
                 error.WriteFailed => return api.resultErrorNomem(ctx),
-                error.BadFormat => return api.resultError(ctx, "ORA-01481: invalid number format model"),
+                error.BadFormat => return ora_errors.resultError(ctx, "ORA-01481: invalid number format model"),
             };
             return resultStr(ctx, out.written());
         }
@@ -740,7 +741,7 @@ fn toCharFunc(ctx: *Context, argv: []*Mem) void {
     defer out.deinit();
     dt.format(&out.writer, d, f) catch |err| switch (err) {
         error.WriteFailed => return api.resultErrorNomem(ctx),
-        error.BadFormat => return api.resultError(ctx, "ORA-01821: date format not recognized"),
+        error.BadFormat => return ora_errors.resultError(ctx, "ORA-01821: date format not recognized"),
     };
     resultStr(ctx, out.written());
 }
@@ -917,7 +918,7 @@ fn toNumberFunc(ctx: *Context, argv: []*Mem) void {
         hex = std.mem.indexOfAny(u8, f, "xX") != null;
     }
     if (hex) {
-        const v = std.fmt.parseInt(i64, std.mem.trim(u8, s, " "), 16) catch return api.resultError(ctx, "ORA-01722: invalid number");
+        const v = std.fmt.parseInt(i64, std.mem.trim(u8, s, " "), 16) catch return ora_errors.resultError(ctx, "ORA-01722: invalid number");
         return api.resultInt64(ctx, v);
     }
     const t = std.mem.trim(u8, s, " ");
@@ -934,7 +935,7 @@ fn toNumberFunc(ctx: *Context, argv: []*Mem) void {
         }
         clean.append(gpa(ctx), c) catch return api.resultErrorNomem(ctx);
     }
-    const n = (parseNum(clean.items) catch return api.resultError(ctx, "ORA-01722: invalid number")) orelse return api.resultNull(ctx);
+    const n = (parseNum(clean.items) catch return ora_errors.resultError(ctx, "ORA-01722: invalid number")) orelse return api.resultNull(ctx);
     switch (n) {
         .int => |v| api.resultInt64(ctx, if (neg) -v else v),
         .real => |v| resultNumber(ctx, if (neg) -v else v),
@@ -952,17 +953,17 @@ fn toDateCommon(ctx: *Context, argv: []*Mem, digits: ?u32) void {
             var fb: [256]u8 = undefined;
             const f = str(ctx, argv[1], &fb) orelse return api.resultNull(ctx);
             break :blk dt.parse(s, f, n) catch |err| switch (err) {
-                error.BadFormat => return api.resultError(ctx, "ORA-01821: date format not recognized"),
-                error.NoMatch => return api.resultError(ctx, "ORA-01861: literal does not match format string"),
-                error.BadMonth => return api.resultError(ctx, "ORA-01843: not a valid month"),
-                error.BadDay => return api.resultError(ctx, "ORA-01847: day of month must be between 1 and last day of month"),
-                error.BadHour => return api.resultError(ctx, "ORA-01850: hour must be between 0 and 23"),
-                error.BadHour12 => return api.resultError(ctx, "ORA-01849: hour must be between 1 and 12"),
-                error.BadMinute => return api.resultError(ctx, "ORA-01851: minutes must be between 0 and 59"),
-                error.BadSecond => return api.resultError(ctx, "ORA-01852: seconds must be between 0 and 59"),
+                error.BadFormat => return ora_errors.resultError(ctx, "ORA-01821: date format not recognized"),
+                error.NoMatch => return ora_errors.resultError(ctx, "ORA-01861: literal does not match format string"),
+                error.BadMonth => return ora_errors.resultError(ctx, "ORA-01843: not a valid month"),
+                error.BadDay => return ora_errors.resultError(ctx, "ORA-01847: day of month must be between 1 and last day of month"),
+                error.BadHour => return ora_errors.resultError(ctx, "ORA-01850: hour must be between 0 and 23"),
+                error.BadHour12 => return ora_errors.resultError(ctx, "ORA-01849: hour must be between 1 and 12"),
+                error.BadMinute => return ora_errors.resultError(ctx, "ORA-01851: minutes must be between 0 and 59"),
+                error.BadSecond => return ora_errors.resultError(ctx, "ORA-01852: seconds must be between 0 and 59"),
             };
         }
-        break :blk dt.parseDefault(s, n) orelse return api.resultError(ctx, "ORA-01861: literal does not match format string");
+        break :blk dt.parseDefault(s, n) orelse return ora_errors.resultError(ctx, "ORA-01861: literal does not match format string");
     };
     if (digits) |k| return resultTimestamp(ctx, d, k);
     resultDate(ctx, d);
@@ -1011,7 +1012,7 @@ fn nextDayFunc(ctx: *Context, argv: []*Mem) void {
             return resultDate(ctx, d.withDays(d.days() + delta));
         }
     }
-    api.resultError(ctx, "ORA-01846: not a valid day of the week");
+    ora_errors.resultError(ctx, "ORA-01846: not a valid day of the week");
 }
 
 /// extract(field, d): EXTRACT(field FROM d).
@@ -1029,7 +1030,7 @@ fn extractFunc(ctx: *Context, argv: []*Mem) void {
         if (d.nanos == 0) return api.resultInt64(ctx, d.second);
         return api.resultDouble(ctx, @as(f64, @floatFromInt(d.second)) + @as(f64, @floatFromInt(d.nanos)) / 1e9);
     }
-    api.resultError(ctx, "ORA-00907: missing right parenthesis");
+    ora_errors.resultError(ctx, "ORA-00907: missing right parenthesis");
 }
 
 // ===================================================== coerce, cast
@@ -1051,10 +1052,10 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
             switch (vt) {
                 vi.SQLITE_INTEGER => n = .{ .int = api.valueInt64(m) },
                 vi.SQLITE_FLOAT => n = .{ .real = api.valueDouble(m) },
-                vi.SQLITE_BLOB => return api.resultError(ctx, "ORA-00932: inconsistent datatypes: expected NUMBER got BINARY"),
+                vi.SQLITE_BLOB => return ora_errors.resultError(ctx, "ORA-00932: inconsistent datatypes: expected NUMBER got BINARY"),
                 else => {
                     const z = api.valueText(m) orelse return api.resultErrorNomem(ctx);
-                    n = (parseNum(z) catch return api.resultError(ctx, "ORA-01722: invalid number")) orelse return api.resultNull(ctx);
+                    n = (parseNum(z) catch return ora_errors.resultError(ctx, "ORA-01722: invalid number")) orelse return api.resultNull(ctx);
                 },
             }
             if (fam == .binary_float) return api.resultDouble(ctx, toF(n));
@@ -1065,8 +1066,8 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
             }
             if (std.mem.eql(u8, ty.name, "NUMBER")) if (types.precisionBound(ty)) |bound| {
                 if (@abs(x) >= bound) {
-                    if (col.len > 0) return api.resultError(ctx, "ORA-01438: value larger than specified precision allowed for this column");
-                    return api.resultError(ctx, "ORA-01438: value larger than specified precision allowed for this column");
+                    if (col.len > 0) return ora_errors.resultError(ctx, "ORA-01438: value larger than specified precision allowed for this column");
+                    return ora_errors.resultError(ctx, "ORA-01438: value larger than specified precision allowed for this column");
                 }
             };
             if (n == .int and (scale == null or scale.? >= 0)) return api.resultInt64(ctx, n.int);
@@ -1079,10 +1080,10 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
                 const max: usize = @intCast(ty.precision.?);
                 const len = if (ty.char_semantics) dfunc.charCount(s) else s.len;
                 if (len > max) {
-                    if (col.len == 0) return api.resultError(ctx, "ORA-25137: Data value out of range");
+                    if (col.len == 0) return ora_errors.resultError(ctx, "ORA-25137: Data value out of range");
                     var mb: [256]u8 = undefined;
                     const msg = std.fmt.bufPrint(&mb, "ORA-12899: value too large for column {s} (actual: {d}, maximum: {d})", .{ col, len, max }) catch "ORA-12899: value too large for column";
-                    return api.resultError(ctx, msg);
+                    return ora_errors.resultError(ctx, msg);
                 }
                 if (fam == .char and len < max) {
                     // CHAR(n) is blank-padded.
@@ -1095,10 +1096,10 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
             api.resultText(ctx, s, .transient);
         },
         .date, .timestamp => {
-            if (vt != vi.SQLITE_TEXT) return api.resultError(ctx, "ORA-00932: inconsistent datatypes: expected DATE got NUMBER");
+            if (vt != vi.SQLITE_TEXT) return ora_errors.resultError(ctx, "ORA-00932: inconsistent datatypes: expected DATE got NUMBER");
             const z = api.valueText(m) orelse return api.resultErrorNomem(ctx);
             if (z.len == 0) return api.resultNull(ctx);
-            const d = dt.parseDefault(z, now(ctx)) orelse return api.resultError(ctx, "ORA-01861: literal does not match format string");
+            const d = dt.parseDefault(z, now(ctx)) orelse return ora_errors.resultError(ctx, "ORA-01861: literal does not match format string");
             if (fam == .date) return resultDate(ctx, d);
             // Six digits whatever the precision (the fraction cut to it),
             // so that timestamps compare as text.
@@ -1124,7 +1125,7 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
                 var k: usize = 0;
                 var acc: u8 = 0;
                 for (z) |c| {
-                    const v = std.fmt.charToDigit(c, 16) catch return api.resultError(ctx, "ORA-01465: invalid hex number");
+                    const v = std.fmt.charToDigit(c, 16) catch return ora_errors.resultError(ctx, "ORA-01465: invalid hex number");
                     if (hi) {
                         out[k] = acc | v;
                         k += 1;
@@ -1133,9 +1134,9 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
                     hi = !hi;
                 }
                 bytes = out;
-            } else return api.resultError(ctx, "ORA-00932: inconsistent datatypes: expected BINARY got NUMBER");
+            } else return ora_errors.resultError(ctx, "ORA-00932: inconsistent datatypes: expected BINARY got NUMBER");
             if (fam == .raw) if (ty.precision) |max| if (bytes.len > max) {
-                return api.resultError(ctx, "ORA-12899: value too large for column");
+                return ora_errors.resultError(ctx, "ORA-12899: value too large for column");
             };
             api.resultBlob(ctx, bytes, .transient);
         },
@@ -1151,13 +1152,13 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
                     break :blk (if (t.len > 0 and t[0] == '.') std.fmt.allocPrint(a, "0{s}", .{t}) else if (t.len > 1 and t[0] == '-' and t[1] == '.') std.fmt.allocPrint(a, "-0{s}", .{t[1..]}) else a.dupe(u8, t)) catch return api.resultErrorNomem(ctx);
                 },
                 vi.SQLITE_TEXT => api.valueText(m) orelse return api.resultErrorNomem(ctx),
-                else => return api.resultError(ctx, "ORA-40441: JSON syntax error"),
+                else => return ora_errors.resultError(ctx, "ORA-40441: JSON syntax error"),
             };
             if (text.len == 0) return api.resultNull(ctx);
             const out = jf.storageText(a, text) catch |err| return switch (err) {
                 error.OutOfMemory => api.resultErrorNomem(ctx),
-                error.Syntax => api.resultError(ctx, "ORA-40441: JSON syntax error"),
-                error.Duplicate => api.resultError(ctx, "ORA-40444: JSON processing error"),
+                error.Syntax => ora_errors.resultError(ctx, "ORA-40441: JSON syntax error"),
+                error.Duplicate => ora_errors.resultError(ctx, "ORA-40444: JSON processing error"),
             };
             api.resultText(ctx, out, .transient);
         },
@@ -1171,9 +1172,9 @@ fn convert(ctx: *Context, m: *Mem, ty: types.TypeName, col: []const u8) void {
                     const no = [_][]const u8{ "FALSE", "F", "NO", "N", "OFF", "0" };
                     for (yes) |w| if (std.ascii.eqlIgnoreCase(z, w)) return api.resultInt64(ctx, 1);
                     for (no) |w| if (std.ascii.eqlIgnoreCase(z, w)) return api.resultInt64(ctx, 0);
-                    return api.resultError(ctx, "ORA-61800: invalid boolean value");
+                    return ora_errors.resultError(ctx, "ORA-61800: invalid boolean value");
                 },
-                else => return api.resultError(ctx, "ORA-00932: inconsistent datatypes: expected BOOLEAN got BINARY"),
+                else => return ora_errors.resultError(ctx, "ORA-00932: inconsistent datatypes: expected BOOLEAN got BINARY"),
             }
         },
     }
@@ -1191,7 +1192,7 @@ fn coerceFunc(ctx: *Context, argv: []*Mem) void {
     if (flags & coerce_not_null != 0 and (isNull(argv[0]) or empty)) {
         var mb: [300]u8 = undefined;
         const msg = std.fmt.bufPrint(&mb, "ORA-01400: cannot insert NULL into ({s})", .{col}) catch "ORA-01400: cannot insert NULL";
-        return api.resultError(ctx, msg);
+        return ora_errors.resultError(ctx, msg);
     }
     const ty = types.parse(spelling) orelse return api.resultValue(ctx, argv[0]);
     convert(ctx, argv[0], ty, col);

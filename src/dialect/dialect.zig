@@ -153,6 +153,16 @@ pub const Hooks = struct {
     /// it registers the module called `name` on `db` and returns it, null
     /// if `name` is not one of its.
     table_function: ?*const fn (db: *Sqlite3, name: []const u8) ?*int.Module = null,
+    /// The errors of the CHECK constraints the frontend names after its
+    /// type checks (`value too long for type character varying(3)`): a
+    /// failed CHECK whose name starts with `prefix` is that error
+    /// (checkState()).
+    check_errors: []const CheckError = &.{},
+};
+
+pub const CheckError = struct {
+    prefix: []const u8,
+    state: int.ErrorState,
 };
 
 pub const EngineModule = struct {
@@ -179,6 +189,39 @@ pub fn tableFunction(db: *Sqlite3, name: []const u8) ?*int.Module {
     inline for (comptime std.enums.values(Dialect)) |d| {
         if (comptime module(d).hooks.table_function) |f| {
             if (f(db, name)) |m| return m;
+        }
+    }
+    return null;
+}
+
+/// The number a dialect gives the error of an SQLSTATE.
+pub const Number = struct { [5]u8, u32 };
+
+/// Give the error of `p` its number in the dialect (from `numbers`, by
+/// the SQLSTATE the engine set where it raised it), for a frontend's
+/// translateError(). `number` overrides it when the dialect tells two
+/// errors of one SQLSTATE apart. An error the dialect raised itself keeps
+/// the number it gave it.
+pub fn numberError(p: *int.Parse, numbers: []const Number, number: ?u32) void {
+    const st = &(p.err_state orelse return);
+    if (st.number != 0) return;
+    if (number) |n| {
+        st.number = n;
+        return;
+    }
+    for (numbers) |e| if (std.mem.eql(u8, &e[0], &st.sqlstate)) {
+        st.number = e[1];
+        return;
+    };
+}
+
+/// The ErrorState of the failure of the CHECK constraint `name`, if a
+/// dialect named it after one of its errors (Hooks.check_errors). The
+/// dialect that made the table need not be the connection's.
+pub fn checkState(name: []const u8) ?int.ErrorState {
+    inline for (comptime std.enums.values(Dialect)) |d| {
+        for (module(d).hooks.check_errors) |c| {
+            if (std.mem.startsWith(u8, name, c.prefix)) return c.state;
         }
     }
     return null;

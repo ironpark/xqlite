@@ -623,14 +623,7 @@ pub fn totalChanges(db: *const Db) i64 {
 /// The message is borrowed: it is valid until the next call that uses
 /// the connection or one of its statements.
 pub fn lastError(db: *const Db) ?errors.ErrorInfo {
-    const code: errors.ResultCode = .of(engine.extendedErrcode(db.conn.h));
-    if (!code.isError()) return null;
-    const off = engine.errorOffset(db.conn.h);
-    return .{
-        .code = code,
-        .message = engine.errmsg(db.conn.h),
-        .offset = if (off >= 0) @intCast(off) else null,
-    };
+    return db.conn.lastError();
 }
 
 /// Change the busy timeout (see OpenOptions.busy_timeout_ms).

@@ -183,7 +183,7 @@ fn assignStatement(s: *Parser, sel: *tree.Select, as: []const parser.Assign) Err
     var cols: std.ArrayList(tree.ResultCol) = .empty;
     var args: std.ArrayList(*tree.Expr) = .empty;
     for (as, 0..) |a, i| {
-        const v = s.p.db.xq.mssql.get(a.name) orelse return s.fail("Must declare the scalar variable \"@{s}\".", .{a.name});
+        const v = s.p.db.xq.mssql.get(a.name) orelse return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"@{s}\".", .{a.name});
         const ty = try s.a.dupe(u8, v.type);
         const al: tree.Name = .{ .text = try std.fmt.allocPrint(s.a, "xq_a{d}", .{i}), .pos = pos };
         const value = try session.asType(s, a.value, ty);
@@ -211,6 +211,12 @@ fn assignStatement(s: *Parser, sel: *tree.Select, as: []const parser.Assign) Err
 /// SQLite's messages for common failures in SQL Server's words.
 fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
+    // SQL Server's numbers of the engine's errors.
+    dialect.numberError(p, &.{
+        .{ "42P01".*, 208 },  .{ "42703".*, 207 },  .{ "42702".*, 209 },
+        .{ "42883".*, 195 },  .{ "42P07".*, 2714 }, .{ "42601".*, 102 },
+        .{ "42704".*, 3701 },
+    }, if (std.mem.startsWith(u8, m, "no such column: ") and std.mem.indexOfScalar(u8, m["no such column: ".len..], '.') != null) 4104 else null);
     const rules = [_]struct { []const u8, []const u8, []const u8 }{
         // prefix, before the name, after it
         .{ "no such table: ", "Invalid object name '", "'." },
@@ -256,6 +262,11 @@ pub const hooks: dialect.Hooks = .{
     .table_function = @import("openjson.zig").register,
     // SQL_Latin1_General_CP1_CI_AS: case-insensitive.
     .default_collation = "NOCASE",
+    // The names of the type checks (ddl.zig's typeCheck()).
+    .check_errors = &.{
+        .{ .prefix = "String or binary data would be truncated", .state = .numbered("22001", 8152) },
+        .{ .prefix = "Arithmetic overflow error converting", .state = .numbered("22003", 8115) },
+    },
 };
 
 const det: dfunc.Options = .{ .deterministic = true };
@@ -373,7 +384,7 @@ fn assignFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
             error.OutOfMemory => return api.resultErrorNomem(ctx),
             error.Undeclared => {
                 var buf: [160]u8 = undefined;
-                return api.resultError(ctx, std.fmt.bufPrint(&buf, "Must declare the scalar variable \"@{s}\".", .{name[0..@min(name.len, 100)]}) catch "undeclared variable");
+                return api.resultErrorState(ctx, .numbered("42P02", 137), std.fmt.bufPrint(&buf, "Must declare the scalar variable \"@{s}\".", .{name[0..@min(name.len, 100)]}) catch "undeclared variable");
             },
         };
     }

@@ -38,10 +38,12 @@ pub fn opFunction(e: *Exec, op: *Op) Error!Flow {
         var rc: i32 = RC.OK;
         if (ctx.is_error > 0) {
             aux.vdbeErrorFromMem(v, out);
+            v.err_state = ctx.err_state;
             rc = ctx.is_error;
         }
         aux.deleteAuxData(e.db, &v.aux_data, ctx.i_op, @bitCast(op.p1));
         ctx.is_error = 0;
+        ctx.err_state = null;
         try e.check(rc);
     }
     return .next;
@@ -92,8 +94,10 @@ pub fn opAggStep(e: *Exec, op: *Op) Error!Flow {
         var rc: i32 = RC.OK;
         if (ctx.is_error > 0) {
             aux.vdbeErrorFromMem(v, ctx.out);
+            v.err_state = ctx.err_state;
             rc = ctx.is_error;
         }
+        ctx.err_state = null;
         if (ctx.skip_flag) {
             const i = e.ops[@intCast(e.pc - 1)].p1;
             if (i != 0) mem.setInt64(e.reg(i), 1);
@@ -110,16 +114,17 @@ pub fn opAggStep(e: *Exec, op: *Op) Error!Flow {
 /// OP_AggFinal and OP_AggValue.
 pub fn opAggFinal(e: *Exec, op: *Op) Error!Flow {
     var m = e.reg(op.p1);
-    var rc: i32 = undefined;
+    var r: mem.AggResult = undefined;
     if (op.p3 != 0) {
-        rc = mem.aggValue(m, e.reg(op.p3), op.p4.funcdef);
+        r = mem.aggValue(m, e.reg(op.p3), op.p4.funcdef);
         m = e.reg(op.p3);
     } else {
-        rc = mem.finalize(m, op.p4.funcdef);
+        r = mem.finalize(m, op.p4.funcdef);
     }
-    if (rc != 0) {
+    if (r.rc != 0) {
         aux.vdbeErrorFromMem(e.v, m);
-        return e.abort(rc);
+        e.v.err_state = r.state;
+        return e.abort(r.rc);
     }
     try mem.changeEncoding(m, e.encoding);
     return .next;

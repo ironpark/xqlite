@@ -27,6 +27,7 @@ const catalog = @import("../../catalog/catalog.zig");
 const nsp = catalog.schemas;
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
+const ora_errors = @import("errors.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const parser = @import("parser.zig");
 const state = @import("state.zig");
@@ -115,7 +116,7 @@ fn dropUser(ps: *Parser) Error!void {
     };
     const objs = nsp.objects(p.db, ps.arena, s.name) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        else => return ps.fail(name.pos, "{s}", .{@import("../../sql/main.zig").errmsg(p.db)}),
+        else => return ps.failFrom(name.pos, p.db),
     };
     // The user's indexes on other users' tables (those on its own tables
     // go with them).
@@ -203,7 +204,7 @@ pub const functions = [_]int.FuncDef{
 /// the name.
 fn setCurrentSchemaFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
-    const name = api.valueText(argv[0]) orelse return api.resultError(ctx, "ORA-01435: user does not exist");
+    const name = api.valueText(argv[0]) orelse return ora_errors.resultError(ctx, "ORA-01435: user does not exist");
     const st = &db.xq.oracle;
     if (eq(name, state.user)) {
         st.setCurrentSchema(db.gpa, null) catch return api.resultErrorNomem(ctx);
@@ -212,9 +213,9 @@ fn setCurrentSchemaFunc(ctx: *Context, argv: []*Mem) void {
         defer arena.deinit();
         const schemas = nsp.list(db, arena.allocator()) catch |err| {
             if (err == error.OutOfMemory) return api.resultErrorNomem(ctx);
-            return api.resultError(ctx, "xqlite: cannot read the users");
+            return ora_errors.resultError(ctx, "xqlite: cannot read the users");
         };
-        const s = nsp.find(schemas, name) orelse return api.resultError(ctx, "ORA-01435: user does not exist");
+        const s = nsp.find(schemas, name) orelse return ora_errors.resultError(ctx, "ORA-01435: user does not exist");
         st.setCurrentSchema(db.gpa, s.name) catch return api.resultErrorNomem(ctx);
     }
     @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
@@ -239,5 +240,5 @@ fn sysContextFunc(ctx: *Context, argv: []*Mem) void {
     if (eq(param, "DB_NAME") or eq(param, "CON_NAME") or eq(param, "INSTANCE_NAME")) return api.resultText(ctx, "XQLITE", .static);
     if (eq(param, "LANG")) return api.resultText(ctx, "US", .static);
     if (eq(param, "LANGUAGE")) return api.resultText(ctx, "AMERICAN_AMERICA.AL32UTF8", .static);
-    api.resultError(ctx, "ORA-02003: invalid USERENV parameter");
+    ora_errors.resultError(ctx, "ORA-02003: invalid USERENV parameter");
 }

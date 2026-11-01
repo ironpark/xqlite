@@ -894,7 +894,7 @@ const Impl = fn (a: Allocator, argv: []*Mem) Allocator.Error!Result;
 fn wrap(comptime f: Impl, comptime min: usize) dfunc.StepFn {
     return struct {
         fn call(ctx: *Context, argv: []*Mem) void {
-            if (argv.len < min) return api.resultError(ctx, "wrong number of arguments");
+            if (argv.len < min) return api.resultErrorState(ctx, .numbered("42883", 1582), "wrong number of arguments");
             var arena = std.heap.ArenaAllocator.init(dfunc.gpa(ctx));
             defer arena.deinit();
             const r = f(arena.allocator(), argv) catch return api.resultErrorNomem(ctx);

@@ -115,7 +115,7 @@ pub fn getCollSeq(p: *Parse, coll: ?*const CollSeq, name: []const u8) ?*const Co
         c = findCollSeq(p.db, name, false);
     }
     if (c == null or c.?.cmp == null) {
-        util.errorMsg(p, "no such collation sequence: {s}", .{name});
+        util.errorMsgState(p, null, .of("42704"), "no such collation sequence: {s}", .{name});
         p.rc = RC.ERROR_MISSING_COLLSEQ;
         return null;
     }

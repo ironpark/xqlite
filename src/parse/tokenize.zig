@@ -462,7 +462,7 @@ pub fn runParser(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!v
                 z += t.len;
                 continue;
             } else if (t.tk != TK.QNUMBER) {
-                util.errorMsgAt(p, z, "unrecognized token: \"{s}\"", .{z[0..t.len]});
+                util.errorMsgState(p, z, .of("42601"), "unrecognized token: \"{s}\"", .{z[0..t.len]});
                 break;
             }
         }

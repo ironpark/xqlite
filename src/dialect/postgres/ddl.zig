@@ -36,6 +36,10 @@ pub const Ddl = struct {
         return d.l.fail(pos, fmt, args);
     }
 
+    fn failState(d: *Ddl, pos: u32, state: int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
+        return d.l.failState(pos, state, fmt, args);
+    }
+
     fn readSchema(d: *Ddl) Error!void {
         ir.stmt.readSchema(d.l.p) catch return error.Failed;
     }
@@ -61,7 +65,7 @@ pub const Ddl = struct {
         if (!(ct.if_not_exists and build.findTable(p.db, ct.name.name.text, schema) != null)) {
             for (ct.columns) |c| for (c.constraints) |cc| if (cc.kind == .identity) {
                 const seq = cc.kind.identity.sequence;
-                if (sequenceExists(p.db, seq)) return d.fail(ct.name.name.pos, "relation \"{s}\" already exists", .{shown(p.db, seq)});
+                if (sequenceExists(p.db, seq)) return d.failState(ct.name.name.pos, .of("42P07"), "relation \"{s}\" already exists", .{shown(p.db, seq)});
             };
         }
         try d.l.createTable(ct);
@@ -102,7 +106,7 @@ pub const Ddl = struct {
         const name = s.name.name.text;
         if (relationExists(d.l.p.db, name, catalog.main_schema) or sequenceExists(d.l.p.db, name)) {
             if (s.if_not_exists) return;
-            return d.fail(s.name.name.pos, "relation \"{s}\" already exists", .{shown(d.l.p.db, name)});
+            return d.failState(s.name.name.pos, .of("42P07"), "relation \"{s}\" already exists", .{shown(d.l.p.db, name)});
         }
         d.l.createSequence(s);
     }
@@ -112,16 +116,16 @@ pub const Ddl = struct {
         const table = a.name.name.text;
         const tab = build.findTable(p.db, table, if (a.name.schema) |s| s.text else null) orelse {
             if (a.if_exists) return;
-            return d.fail(a.name.name.pos, "relation \"{s}\" does not exist", .{table});
+            return d.failState(a.name.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{table});
         };
         switch (a.action) {
             .add_column => |ac| if (build.columnIndex(tab, ac.def.name.text) >= 0) {
                 if (ac.if_not_exists) return;
-                return d.fail(ac.def.name.pos, "column \"{s}\" of relation \"{s}\" already exists", .{ ac.def.name.text, shown(p.db, table) });
+                return d.failState(ac.def.name.pos, .of("42710"), "column \"{s}\" of relation \"{s}\" already exists", .{ ac.def.name.text, shown(p.db, table) });
             },
             .drop_column => |dc| if (build.columnIndex(tab, dc.name.text) < 0) {
                 if (dc.if_exists) return;
-                return d.fail(dc.name.pos, "column \"{s}\" of relation \"{s}\" does not exist", .{ dc.name.text, shown(p.db, table) });
+                return d.failState(dc.name.pos, .of("42703"), "column \"{s}\" of relation \"{s}\" does not exist", .{ dc.name.text, shown(p.db, table) });
             },
             else => {},
         }
@@ -135,12 +139,12 @@ pub const Ddl = struct {
             .table, .view => {
                 const db: ?[]const u8 = if (x.name.schema) |s| s.text else null;
                 if (build.findTable(p.db, name, db) == null and !x.if_exists) {
-                    return d.fail(x.name.name.pos, "{s} \"{s}\" does not exist", .{ if (x.kind == .table) "table" else "view", shown(p.db, name) });
+                    return d.failState(x.name.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ if (x.kind == .table) "table" else "view", shown(p.db, name) });
                 }
             },
             .sequence => if (!sequenceExists(p.db, name)) {
                 if (x.if_exists) return;
-                return d.fail(x.name.name.pos, "sequence \"{s}\" does not exist", .{shown(p.db, name)});
+                return d.failState(x.name.name.pos, .of("42704"), "sequence \"{s}\" does not exist", .{shown(p.db, name)});
             },
             .index => {},
         }

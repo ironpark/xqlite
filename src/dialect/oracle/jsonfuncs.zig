@@ -34,6 +34,7 @@
 const std = @import("std");
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
+const ora_errors = @import("errors.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const vtab = @import("../../sql/vtab.zig");
@@ -118,7 +119,7 @@ const Call = struct {
     fn report(c: *Call, err: Fail) void {
         switch (err) {
             error.OutOfMemory => api.resultErrorNomem(c.ctx),
-            error.Ora => api.resultError(c.ctx, c.msg),
+            error.Ora => ora_errors.resultError(c.ctx, c.msg),
         }
     }
 };
@@ -539,7 +540,7 @@ fn valueOf(c: *Call, doc: ?Value, path_text: []const u8, path: J.Path, spec: Val
 /// xq_ora_json_value(doc, path, opts, empty_default, error_default,
 /// [name, value]...): opts "TYPE|empty|error|T(runcate)".
 fn jsonValueFunc(c: *Call, argv: []*Mem) void {
-    if (argv.len < 5) return api.resultError(c.ctx, "xq_ora_json_value: wrong number of arguments");
+    if (argv.len < 5) return ora_errors.resultError(c.ctx, "xq_ora_json_value: wrong number of arguments");
     const path_text = optsText(argv[1]);
     const path = parsePath(c, path_text) catch |err| return c.report(err);
     var buf: [64]u8 = undefined;
@@ -635,7 +636,7 @@ fn queryCore(c: *Call, doc_opt: ?Value, path_text: []const u8, path: J.Path, spe
 /// xq_ora_json_query(doc, path, opts, [name, value]...): opts
 /// "TYPE|empty|error|wrapper|P(retty)|A(scii)".
 fn jsonQueryFunc(c: *Call, argv: []*Mem) void {
-    if (argv.len < 3) return api.resultError(c.ctx, "xq_ora_json_query: wrong number of arguments");
+    if (argv.len < 3) return ora_errors.resultError(c.ctx, "xq_ora_json_query: wrong number of arguments");
     const path_text = optsText(argv[1]);
     const path = parsePath(c, path_text) catch |err| return c.report(err);
     var buf: [64]u8 = undefined;
@@ -655,7 +656,7 @@ fn jsonQueryFunc(c: *Call, argv: []*Mem) void {
 /// xq_ora_json_exists(doc, path, opts, [name, value]...): opts the ON
 /// ERROR handler, F(ALSE), T(RUE) or E(RROR).
 fn jsonExistsFunc(c: *Call, argv: []*Mem) void {
-    if (argv.len < 3) return api.resultError(c.ctx, "xq_ora_json_exists: wrong number of arguments");
+    if (argv.len < 3) return ora_errors.resultError(c.ctx, "xq_ora_json_exists: wrong number of arguments");
     const path_text = optsText(argv[1]);
     const path = parsePath(c, path_text) catch |err| return c.report(err);
     var buf: [64]u8 = undefined;
@@ -739,7 +740,7 @@ fn keyText(c: *Call, m: *Mem) Fail![]const u8 {
 
 /// xq_ora_json_object(opts, key, value, ...).
 fn jsonObjectFunc(c: *Call, argv: []*Mem) void {
-    if (argv.len < 1 or argv.len % 2 != 1) return api.resultError(c.ctx, "xq_ora_json_object: wrong number of arguments");
+    if (argv.len < 1 or argv.len % 2 != 1) return ora_errors.resultError(c.ctx, "xq_ora_json_object: wrong number of arguments");
     const opts = optsText(argv[0]);
     const fl = ctorFlags(opts);
     var ms: std.ArrayList(J.Member) = .empty;
@@ -758,7 +759,7 @@ fn jsonObjectFunc(c: *Call, argv: []*Mem) void {
 
 /// xq_ora_json_array(opts, value, ...).
 fn jsonArrayFunc(c: *Call, argv: []*Mem) void {
-    if (argv.len < 1) return api.resultError(c.ctx, "xq_ora_json_array: wrong number of arguments");
+    if (argv.len < 1) return ora_errors.resultError(c.ctx, "xq_ora_json_array: wrong number of arguments");
     const opts = optsText(argv[0]);
     const fl = ctorFlags(opts);
     var items: std.ArrayList(Value) = .empty;
@@ -904,9 +905,9 @@ fn mergePatchFunc(c: *Call, argv: []*Mem) void {
     var b2: [64]u8 = undefined;
     const t = docText(argv[0], &b1) orelse return api.resultNull(c.ctx);
     const p = docText(argv[1], &b2) orelse return api.resultNull(c.ctx);
-    const patch = J.parse(c.a(), p, .{}) catch return api.resultError(c.ctx, "ORA-40629: Patch specification is not valid JSON");
+    const patch = J.parse(c.a(), p, .{}) catch return ora_errors.resultError(c.ctx, "ORA-40629: Patch specification is not valid JSON");
     const target = J.parse(c.a(), t, .{}) catch {
-        if (std.mem.eql(u8, optsField(opts, 4), "E")) return api.resultError(c.ctx, "ORA-40441: JSON syntax error");
+        if (std.mem.eql(u8, optsField(opts, 4), "E")) return ora_errors.resultError(c.ctx, "ORA-40441: JSON syntax error");
         return api.resultNull(c.ctx);
     };
     const v = mergePatch(c.a(), target, patch) catch return api.resultErrorNomem(c.ctx);
@@ -920,7 +921,7 @@ fn serializeFunc(c: *Call, argv: []*Mem) void {
     const t = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
     const v = J.parse(c.a(), t, .{}) catch {
         if (std.mem.eql(u8, optsField(opts, 4), "N")) return api.resultNull(c.ctx);
-        return api.resultError(c.ctx, "ORA-40441: JSON syntax error");
+        return ora_errors.resultError(c.ctx, "ORA-40441: JSON syntax error");
     };
     finishOutput(c, v, opts);
 }
@@ -1129,7 +1130,7 @@ fn prune(c: *Call, v: *Value, kept: *std.AutoHashMapUnmanaged(*const Value, void
 /// xq_ora_json_transform(doc, opts, op, path, value, ...): op SET,
 /// INSERT, REPLACE, APPEND, REMOVE, RENAME (value the new name) or KEEP.
 fn transformFunc(c: *Call, argv: []*Mem) void {
-    if (argv.len < 2 or (argv.len - 2) % 3 != 0) return api.resultError(c.ctx, "xq_ora_json_transform: wrong number of arguments");
+    if (argv.len < 2 or (argv.len - 2) % 3 != 0) return ora_errors.resultError(c.ctx, "xq_ora_json_transform: wrong number of arguments");
     const opts = optsText(argv[1]);
     var buf: [64]u8 = undefined;
     const text = docText(argv[0], &buf) orelse return api.resultNull(c.ctx);
@@ -1137,7 +1138,7 @@ fn transformFunc(c: *Call, argv: []*Mem) void {
     var i: usize = 2;
     var keeps: std.ArrayList(J.Path) = .empty;
     while (i < argv.len) : (i += 3) {
-        const op = opOf(optsText(argv[i])) orelse return api.resultError(c.ctx, "xq_ora_json_transform: bad operation");
+        const op = opOf(optsText(argv[i])) orelse return ora_errors.resultError(c.ctx, "xq_ora_json_transform: bad operation");
         const path = parsePath(c, optsText(argv[i + 1])) catch |err| return c.report(err);
         if (op == .keep) {
             keeps.append(c.a(), path) catch return api.resultErrorNomem(c.ctx);

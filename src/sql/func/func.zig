@@ -274,7 +274,7 @@ fn absFunc(ctx: *Context, argv: []*Mem) void {
             var i_val = api.valueInt64(argv[0]);
             if (i_val < 0) {
                 if (i_val == smallest_int64) {
-                    api.resultError(ctx, "integer overflow");
+                    api.resultErrorState(ctx, .of("22003"), "integer overflow");
                     return;
                 }
                 i_val = -i_val;
@@ -1436,7 +1436,7 @@ fn sumFinalize(ctx: *Context) void {
     if (s.cnt <= 0) return;
     if (s.approx) {
         if (s.ovrfl) {
-            api.resultError(ctx, "integer overflow");
+            api.resultErrorState(ctx, .of("22003"), "integer overflow");
         } else if (!numeric.isOverflow(s.r_err)) {
             api.resultDouble(ctx, s.r_sum + s.r_err);
         } else {
@@ -2062,12 +2062,12 @@ const Agg = struct {
     /// xValue into `out`.
     fn value(a: *Agg, out: *Mem) i32 {
         out.* = .{ .db = a.db };
-        return mem.aggValue(&a.acc, out, a.def);
+        return mem.aggValue(&a.acc, out, a.def).rc;
     }
 
     /// xFinal; the result is in `a.acc`. Release it with deinit().
     fn final(a: *Agg) i32 {
-        return mem.finalize(&a.acc, a.def);
+        return mem.finalize(&a.acc, a.def).rc;
     }
 
     fn deinit(a: *Agg) void {

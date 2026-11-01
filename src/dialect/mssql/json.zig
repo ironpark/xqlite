@@ -20,6 +20,7 @@
 //! the first of duplicate keys counts.
 
 const std = @import("std");
+const int = @import("../../sql/sqlite_int.zig");
 const json_text = @import("../json_text.zig");
 
 /// The types of values, numbered as OPENJSON's type column.
@@ -351,6 +352,10 @@ pub fn charAt(z: []const u8, pos: usize) []const u8 {
 }
 
 /// SQL Server's message of a syntax error at byte `pos` of `z`.
+/// What the errors of textMessage() and pathMessage() are.
+pub const text_error: int.ErrorState = .numbered("22032", 13609);
+pub const path_error: int.ErrorState = .numbered("42601", 13607);
+
 pub fn textMessage(buf: []u8, z: []const u8, pos: usize) []const u8 {
     return std.fmt.bufPrint(buf, "JSON text is not properly formatted. Unexpected character '{s}' is found at position {d}.", .{ charAt(z, pos), charPos(z, pos) }) catch buf;
 }

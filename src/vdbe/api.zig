@@ -706,7 +706,22 @@ pub fn resultSubtype(ctx: *Context, subtype: u32) void {
 /// Port of sqlite3_result_error(): fail the function with `msg`.
 pub fn resultError(ctx: *Context, msg: []const u8) void {
     ctx.is_error = RC.ERROR;
+    ctx.err_state = null;
     mem.setStr(ctx.out, msg, ENC.UTF8, .transient) catch {};
+}
+
+/// resultError() of an error whose ErrorState is known: the SQLSTATE,
+/// and the number of a dialect (int.ErrorState).
+pub fn resultErrorState(ctx: *Context, state: int.ErrorState, msg: []const u8) void {
+    resultError(ctx, msg);
+    ctx.err_state = state;
+}
+
+/// resultError() of the error the connection `db` holds (one a statement
+/// the function ran left), with its ErrorState.
+pub fn resultErrorFrom(ctx: *Context, db: *const int.Sqlite3) void {
+    resultError(ctx, main_mod.errmsg(@constCast(db)));
+    ctx.err_state = if (db.err_code != RC.OK) db.err_state else null;
 }
 
 /// Port of sqlite3_result_error_code().

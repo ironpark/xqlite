@@ -104,11 +104,11 @@ fn like(ctx: *Context, argv: []*Mem, fold: bool) void {
             esc = null;
         } else {
             const n = std.unicode.utf8ByteSequenceLength(e[0]) catch 1;
-            if (n != e.len) return api.resultError(ctx, "invalid escape string");
+            if (n != e.len) return api.resultErrorState(ctx, .of("22025"), "invalid escape string");
             esc = std.unicode.utf8Decode(e) catch e[0];
         }
     }
-    const r = likeMatch(pat, s, esc, fold) catch return api.resultError(ctx, "LIKE pattern must not end with escape character");
+    const r = likeMatch(pat, s, esc, fold) catch return api.resultErrorState(ctx, .of("22025"), "LIKE pattern must not end with escape character");
     api.resultInt64(ctx, @intFromBool(r));
 }
 
@@ -277,7 +277,7 @@ fn splitPartFunc(ctx: *Context, argv: []*Mem) void {
     const s = text(ctx, argv[0]) orelse return;
     const d = text(ctx, argv[1]) orelse return;
     const n = api.valueInt64(argv[2]);
-    if (n == 0) return api.resultError(ctx, "field position must not be zero");
+    if (n == 0) return api.resultErrorState(ctx, .of("22023"), "field position must not be zero");
     if (d.len == 0) {
         return api.resultText(ctx, if (n == 1 or n == -1) s else "", .transient);
     }
@@ -338,7 +338,7 @@ fn truncFunc(ctx: *Context, argv: []*Mem) void {
 fn sqrtFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const x = api.valueDouble(argv[0]);
-    if (x < 0) return api.resultError(ctx, "cannot take square root of a negative number");
+    if (x < 0) return api.resultErrorState(ctx, .of("2201F"), "cannot take square root of a negative number");
     api.resultDouble(ctx, @sqrt(x));
 }
 
@@ -346,8 +346,8 @@ fn powerFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const x = api.valueDouble(argv[0]);
     const y = api.valueDouble(argv[1]);
-    if (x == 0 and y < 0) return api.resultError(ctx, "zero raised to a negative power is undefined");
-    if (x < 0 and @floor(y) != y) return api.resultError(ctx, "a negative number raised to a non-integer power yields a complex result");
+    if (x == 0 and y < 0) return api.resultErrorState(ctx, .of("2201F"), "zero raised to a negative power is undefined");
+    if (x < 0 and @floor(y) != y) return api.resultErrorState(ctx, .of("2201F"), "a negative number raised to a non-integer power yields a complex result");
     api.resultDouble(ctx, std.math.pow(f64, x, y));
 }
 
@@ -358,11 +358,11 @@ fn expFunc(ctx: *Context, argv: []*Mem) void {
 
 fn checkLog(ctx: *Context, x: f64) bool {
     if (x == 0) {
-        api.resultError(ctx, "cannot take logarithm of zero");
+        api.resultErrorState(ctx, .of("2201E"), "cannot take logarithm of zero");
         return false;
     }
     if (x < 0) {
-        api.resultError(ctx, "cannot take logarithm of a negative number");
+        api.resultErrorState(ctx, .of("2201E"), "cannot take logarithm of a negative number");
         return false;
     }
     return true;
@@ -383,7 +383,7 @@ fn logFunc(ctx: *Context, argv: []*Mem) void {
     if (argv.len == 1) return api.resultDouble(ctx, @log10(x));
     const b = api.valueDouble(argv[0]);
     if (!checkLog(ctx, b)) return;
-    if (b == 1) return api.resultError(ctx, "division by zero");
+    if (b == 1) return api.resultErrorState(ctx, .of("22012"), "division by zero");
     api.resultDouble(ctx, @log(x) / @log(b));
 }
 
@@ -391,12 +391,12 @@ fn modFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     if (isInt(argv[0]) and isInt(argv[1])) {
         const b = api.valueInt64(argv[1]);
-        if (b == 0) return api.resultError(ctx, "division by zero");
+        if (b == 0) return api.resultErrorState(ctx, .of("22012"), "division by zero");
         if (b == -1) return api.resultInt64(ctx, 0);
         return api.resultInt64(ctx, @rem(api.valueInt64(argv[0]), b));
     }
     const b = api.valueDouble(argv[1]);
-    if (b == 0) return api.resultError(ctx, "division by zero");
+    if (b == 0) return api.resultErrorState(ctx, .of("22012"), "division by zero");
     api.resultDouble(ctx, @rem(api.valueDouble(argv[0]), b));
 }
 
@@ -429,7 +429,7 @@ fn boolFunc(ctx: *Context, argv: []*Mem) void {
     switch (api.valueType(m)) {
         vi.SQLITE_NULL => return api.resultNull(ctx),
         vi.SQLITE_INTEGER => return api.resultInt64(ctx, @intFromBool(api.valueInt64(m) != 0)),
-        vi.SQLITE_FLOAT => return api.resultError(ctx, "cannot cast type double precision to boolean"),
+        vi.SQLITE_FLOAT => return api.resultErrorState(ctx, .of("42846"), "cannot cast type double precision to boolean"),
         else => {},
     }
     const raw = text(ctx, m) orelse return;
@@ -437,7 +437,7 @@ fn boolFunc(ctx: *Context, argv: []*Mem) void {
     if (parseBool(s)) |b| return api.resultInt64(ctx, @intFromBool(b));
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "invalid input syntax for type boolean: \"{s}\"", .{raw[0..@min(raw.len, 64)]}) catch "invalid input syntax for type boolean";
-    api.resultError(ctx, msg);
+    api.resultErrorState(ctx, .of("22P02"), msg);
 }
 
 pub fn parseBool(s: []const u8) ?bool {

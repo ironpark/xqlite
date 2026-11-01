@@ -8,6 +8,7 @@ const vi = @import("../vdbe_int.zig");
 const mem = @import("../mem.zig");
 const aux = @import("../aux.zig");
 const int = @import("../../sql/sqlite_int.zig");
+const dialect = @import("../../dialect/dialect.zig");
 
 const Exec = core.Exec;
 const Flow = core.Flow;
@@ -103,7 +104,12 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
         } else if (op.p5 != 0) {
             const types = [_][]const u8{ "NOT NULL", "UNIQUE", "CHECK", "FOREIGN KEY" };
             if (op.p4type == .z) {
-                aux.vdbeError(v, "{s} constraint failed: {s}", .{ types[op.p5 - 1], std.mem.span(op.p4.z) });
+                const name = std.mem.span(op.p4.z);
+                aux.vdbeError(v, "{s} constraint failed: {s}", .{ types[op.p5 - 1], name });
+                // P5_ConstraintCheck: a dialect's type check.
+                if (op.p5 == 3) if (dialect.checkState(name)) |st| {
+                    v.err_state = st;
+                };
             } else {
                 aux.vdbeError(v, "{s} constraint failed", .{types[op.p5 - 1]});
             }

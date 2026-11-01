@@ -56,6 +56,13 @@ pub fn vdbeError(v: *Vdbe, comptime fmt: []const u8, args: anytype) void {
 pub fn setErrMsg(v: *Vdbe, msg: ?[:0]u8) void {
     if (v.err_msg) |old| v.db.gpa.free(old);
     v.err_msg = msg;
+    v.err_state = null;
+}
+
+/// vdbeError() of an error whose ErrorState is known.
+pub fn vdbeErrorState(v: *Vdbe, state: int.ErrorState, comptime fmt: []const u8, args: anytype) void {
+    vdbeError(v, fmt, args);
+    if (v.err_msg != null) v.err_state = state;
 }
 
 /// Port of sqlite3VdbeSetSql().
@@ -1393,6 +1400,7 @@ pub fn transferError(v: *Vdbe) i32 {
     const db = v.db;
     const rc = v.rc;
     main_mod.setErrorMessage(db, v.err_msg);
+    db.err_state = v.err_state;
     db.err_code = rc;
     db.err_byte_offset = -1;
     return rc;

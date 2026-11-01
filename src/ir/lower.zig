@@ -94,8 +94,13 @@ pub const Lowerer = struct {
 
     /// Leave an error about the text at `pos` and fail.
     pub fn fail(l: *Lowerer, pos: u32, comptime fmt: []const u8, args: anytype) Error {
+        return l.failState(pos, null, fmt, args);
+    }
+
+    /// fail() of an error whose ErrorState is known.
+    pub fn failState(l: *Lowerer, pos: u32, state: ?int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
         const z: ?[*]const u8 = if (pos < l.src.len) l.src.ptr + pos else null;
-        ir.stmt.errorMsgAt(l.p, z, fmt, args);
+        ir.stmt.errorMsgState(l.p, z, state, fmt, args);
         return error.Failed;
     }
 
@@ -1136,7 +1141,7 @@ pub const Lowerer = struct {
 
     fn truncate(l: *Lowerer, t: *const tree.Truncate) Error!void {
         const p = l.p;
-        const tab = try l.findTable(t.table) orelse return l.fail(t.table.name.pos, "no such table: {s}", .{t.table.name.text});
+        const tab = try l.findTable(t.table) orelse return l.failState(t.table.name.pos, .of("42P01"), "no such table: {s}", .{t.table.name.text});
         ir.dml.delete(p, try l.target(t.table, null), null, null, null);
         try l.check();
         if (t.restart_identity) {
@@ -1251,7 +1256,7 @@ pub const Lowerer = struct {
         const p = l.p;
         const tab = try l.findTable(a.name) orelse {
             if (a.if_exists) return;
-            return l.fail(a.name.name.pos, "no such table: {s}", .{a.name.name.text});
+            return l.failState(a.name.name.pos, .of("42P01"), "no such table: {s}", .{a.name.name.text});
         };
         const db_name = catalog.schemaName(p.db, tab);
         const table = tab.name;

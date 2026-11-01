@@ -135,7 +135,7 @@ const aggregates = std.StaticStringMapWithEql([]const u8, ctype.eqlNoCase).initC
 });
 
 fn argCount(s: *Parser, n: []const u8) Error {
-    return s.fail("The {s} function requires a different number of arguments.", .{n});
+    return s.failState(.numbered("42883", 174), "The {s} function requires a different number of arguments.", .{n});
 }
 
 /// A datepart word of DATEADD/DATEDIFF/DATEPART/DATENAME, its canonical
@@ -145,7 +145,7 @@ fn datePart(s: *Parser) Error![]const u8 {
     if (t.kind != .ident and t.kind != .quoted_ident and t.kind != .string) return s.syntaxError();
     const w = if (t.kind == .string) try lexer.stringValue(s.a, t) else try s.nameText(t);
     s.advance();
-    return canonicalPart(w) orelse s.fail("'{s}' is not a recognized datepart option.", .{w});
+    return canonicalPart(w) orelse s.failState(.numbered("22023", 155), "'{s}' is not a recognized datepart option.", .{w});
 }
 
 /// The canonical name of a datepart or its abbreviation.
@@ -235,7 +235,7 @@ pub fn typeNameOf(s: *Parser, column: bool) Error!TypeName {
         try s.expectKw("PRECISION");
         tname = "float";
     }
-    const base = types.baseByName(tname) orelse return s.fail("Column, parameter, or variable #1: Cannot find data type {s}.", .{tname});
+    const base = types.baseByName(tname) orelse return s.failState(.numbered("42704", 2715), "Column, parameter, or variable #1: Cannot find data type {s}.", .{tname});
     var ty: types.Type = .{ .base = base };
     if (s.eatOp("(")) {
         if (s.eatKw("MAX")) {
@@ -255,7 +255,7 @@ pub fn typeNameOf(s: *Parser, column: bool) Error!TypeName {
     }
     if (ty.base == .decimal or ty.base == .numeric) {
         const p = ty.len orelse 18;
-        if (p < 1 or p > 38 or (ty.scale orelse 0) > p or (ty.scale orelse 0) < 0) return s.fail("The scale must be less than or equal to the precision.", .{});
+        if (p < 1 or p > 38 or (ty.scale orelse 0) > p or (ty.scale orelse 0) < 0) return s.failState(.numbered("22023", 192), "The scale must be less than or equal to the precision.", .{});
     }
     return .{ .t = ty, .text = try types.format(s.a, ty), .written = tname };
 }
@@ -311,7 +311,7 @@ pub fn systemFunction(s: *Parser, t: Token, pos: u32) Error!*Expr {
         .{ "SERVERNAME", "xqlite" }, .{ "SERVICENAME", "MSSQLSERVER" }, .{ "LANGUAGE", "us_english" },
     };
     for (strs) |x| if (eq(n, x[0])) return s.str(pos, x[1]);
-    return s.fail("Must declare the scalar variable \"{s}\".", .{t.text});
+    return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
 }
 
 /// Functions with SQLite's semantics under another name.
@@ -367,7 +367,7 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
         return s.mk(pos, .{ .case = .{ .operand = args[0], .whens = whens.items, .@"else" = null } });
     }
     if (eq(n, "concat")) {
-        if (k < 2) return s.fail("The concat function requires 2 to 254 arguments.", .{});
+        if (k < 2) return s.failState(.numbered("42883", 189), "The concat function requires 2 to 254 arguments.", .{});
         return s.mk(pos, .{ .concat = .{ .args = args, .null_policy = .skip } });
     }
     if (eq(n, "square") and k == 1) return s.bin(.mul, args[0], args[0]);

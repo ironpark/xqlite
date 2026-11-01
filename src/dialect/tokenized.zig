@@ -19,8 +19,10 @@ pub fn run(comptime parser: type, comptime compile: anytype, comptime translateE
             var ps = parser.Parser.init(p.arena, sql, 0, &lex_error) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.ParseFailed => {
-                    ir.stmt.errorMsgAt(p, sql.ptr + lex_error.pos, "{s}", .{lex_error.msg});
+                    // A lexical error is a syntax error.
+                    ir.stmt.errorMsgState(p, sql.ptr + lex_error.pos, .of("42601"), "{s}", .{lex_error.msg});
                     p.tail = sql[sql.len..];
+                    try translateError(p);
                     return error.ParseFailed;
                 },
             };
@@ -50,7 +52,7 @@ pub fn parseFailed(p: *int.Parse, sql: [:0]const u8, ps: anytype, err: anytype) 
         error.ParseFailed => {
             if (ps.err_in_parse) return error.Failed;
             const z: ?[*]const u8 = if (ps.err_pos < sql.len) sql.ptr + ps.err_pos else null;
-            ir.stmt.errorMsgAt(p, z, "{s}", .{ps.err_msg});
+            ir.stmt.errorMsgState(p, z, ps.err_state, "{s}", .{ps.err_msg});
             return error.Failed;
         },
     }

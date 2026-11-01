@@ -30,6 +30,7 @@
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
 const dialect = @import("../dialect.zig");
+const ora_errors = @import("errors.zig");
 const dfunc = @import("../func.zig");
 const sequence = @import("../../catalog/sequence.zig");
 const catalog = @import("../../catalog/catalog.zig");
@@ -55,6 +56,7 @@ pub const hooks: dialect.Hooks = .{
     .functions = &functions,
     .engine_functions = &engine_functions,
     .engine_modules = &.{.{ .name = jsonfuncs.json_table_name, .module = &jsonfuncs.json_table_module }},
+    .check_errors = &ora_errors.check_errors,
 };
 
 const engine_functions = funcs.engine_functions ++ jsonfuncs.engine_functions;
@@ -256,6 +258,14 @@ const sequenceExists = parser.sequenceExists;
 /// SQLite's messages for common failures at compile time in Oracle's
 /// words.
 fn translateError(p: *int.Parse) int.Oom!void {
+    try translateMessage(p);
+    // Oracle's message carries its number.
+    if (p.err_msg) |m| if (ora_errors.stateOf(m)) |st| {
+        p.err_state = st;
+    };
+}
+
+fn translateMessage(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
     if (std.mem.startsWith(u8, m, "ORA-") or std.mem.startsWith(u8, m, "xqlite:")) return;
     const Rule = struct { []const u8, []const u8, []const u8 };
@@ -315,6 +325,7 @@ fn valuesFewer(m: []const u8) bool {
 }
 
 test {
+    _ = ora_errors;
     _ = @import("lexer.zig");
     _ = @import("types.zig");
     _ = @import("datetime.zig");

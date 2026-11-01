@@ -4622,13 +4622,13 @@ fn windowCalls(out: *std.ArrayList(u8), name: []const u8, ops: []const union(enu
                 try testing.expectEqual(@as(i32, 0), ctx.is_error);
             },
             .value => {
-                try testing.expectEqual(@as(i32, 0), mem.aggValue(&accum, &res, def));
+                try testing.expectEqual(@as(i32, 0), mem.aggValue(&accum, &res, def).rc);
                 try out.appendSlice(testing.allocator, api.valueText(&res).?);
                 try out.append(testing.allocator, ' ');
             },
         }
     }
-    try testing.expectEqual(@as(i32, 0), mem.finalize(&accum, def));
+    try testing.expectEqual(@as(i32, 0), mem.finalize(&accum, def).rc);
     defer mem.release(&accum);
     try out.appendSlice(testing.allocator, api.valueText(&accum) orelse "NULL");
 }

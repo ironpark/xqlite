@@ -91,7 +91,11 @@ pub const Complete = struct {
 };
 
 pub const Failure = struct {
-    class: errors.Class,
+    /// The SQLSTATE (errors.sqlstate()).
+    sqlstate: [5]u8,
+    /// The number the dialect gives the error (MySQL's 1146, SQL Server's
+    /// 208, Oracle's 942), if it has one.
+    number: ?u32,
     /// The engine's extended code (`.error` for errors of the session).
     code: xqlite.ResultCode,
     /// Valid until the sink returns.
@@ -148,7 +152,8 @@ pub fn run(s: *Session, sql: []const u8, sink: anytype) !void {
         const cmd = command.classify(it.rest);
         const verdict = s.admit(cmd);
         if (verdict == .refuse) return sink.failed(.{
-            .class = .in_failed_transaction,
+            .sqlstate = errors.in_failed_transaction.*,
+            .number = null,
             .code = .@"error",
             .message = "current transaction is aborted, commands ignored until end of transaction block",
             .offset = null,
@@ -214,7 +219,8 @@ fn fail(s: *Session, sink: anytype, at: usize, cmd: command.Command) !void {
     const info = s.db.lastError() orelse xqlite.ErrorInfo{ .code = .@"error", .message = "unknown error", .offset = null };
     if (s.abort_failed_transactions and s.db.inTransaction()) s.aborted = true;
     try sink.failed(.{
-        .class = errors.classify(s.dialect(), info.code, info.message),
+        .sqlstate = errors.sqlstate(info.code, info.sqlstate),
+        .number = info.dialect_number,
         .code = info.code,
         .message = info.message,
         .offset = if (info.offset) |o| at + o else null,
@@ -320,7 +326,7 @@ const Log = struct {
     }
 
     fn failed(l: *Log, f: Failure) !void {
-        try l.out.print(testing.allocator, "failed {s} {s}\n", .{ f.class.sqlstate(), f.message });
+        try l.out.print(testing.allocator, "failed {s} {s}\n", .{ &f.sqlstate, f.message });
     }
 };
 

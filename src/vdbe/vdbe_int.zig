@@ -520,6 +520,8 @@ pub const Context = struct {
     i_op: i32 = 0,
     /// Error code returned by the function.
     is_error: i32 = 0,
+    /// What its error is (api.resultErrorState()), if known.
+    err_state: ?int.ErrorState = null,
     enc: u8 = ENC.UTF8,
     skip_flag: bool = false,
     argc: u16 = 0,
@@ -608,6 +610,8 @@ pub const Vdbe = struct {
     /// VdbeOp), so that writes through it go nowhere.
     dummy_op: Op = .{ .opcode = @fromBackingInt(0) },
     err_msg: ?[:0]u8 = null,
+    /// What err_msg is (int.ErrorState), if known.
+    err_state: ?int.ErrorState = null,
     /// Names of named parameters.
     vlist: []const int.VListEntry = &.{},
     n_res_column: u16 = 0,

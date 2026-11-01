@@ -92,7 +92,7 @@ fn createTable(s: *Parser) Error!void {
     const temp = name.len > 0 and name[0] == '#';
     const schema: []const u8 = if (temp) "temp" else if (q.schema) |x| x.text else "main";
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    if (build.findTable(s.p.db, name, schema) != null) return s.fail("There is already an object named '{s}' in the database.", .{try s.bareName(name)});
+    if (build.findTable(s.p.db, name, schema) != null) return s.failState(.numbered("42P07", 2714), "There is already an object named '{s}' in the database.", .{try s.bareName(name)});
     const tname: tree.QName = if (temp) .{ .name = q.name } else .{ .schema = .{ .text = schema, .pos = q.name.pos }, .name = q.name };
     try s.expectOp("(");
     var t: Table = .{ .name = name };
@@ -354,10 +354,10 @@ fn columnConstraints(s: *Parser, table: []const u8, name: Name, ty: ?types.Type,
             try cons.append(s.a, .{ .name = cname, .kind = .{ .default = e } });
         } else if (s.eatKw("IDENTITY")) {
             const t = ty orelse return s.syntaxError();
-            if (identity) return s.fail("Multiple identity columns specified for table '{s}'. Only one identity column per table is allowed.", .{try s.bareName(table)});
+            if (identity) return s.failState(.numbered("42P16", 2744), "Multiple identity columns specified for table '{s}'. Only one identity column per table is allowed.", .{try s.bareName(table)});
             identity = true;
             if (!t.isInteger() and !(t.isExactNumeric() and t.scaleOf() == 0)) {
-                return s.fail("Identity column '{s}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, and constrained to be nonnullable.", .{name.text});
+                return s.failState(.numbered("42P16", 2749), "Identity column '{s}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, and constrained to be nonnullable.", .{name.text});
             }
             var seed: i64 = 1;
             var inc: i64 = 1;
@@ -446,7 +446,7 @@ fn createIndex(s: *Parser, unique: bool) Error!void {
     const temp = q.name.text.len > 0 and q.name.text[0] == '#';
     const schema: Name = if (temp) .{ .text = "temp" } else q.schema orelse .{ .text = "main" };
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    if (build.findTable(s.p.db, q.name.text, schema.text) == null) return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{try s.bareName(q.name.text)});
+    if (build.findTable(s.p.db, q.name.text, schema.text) == null) return s.failState(.numbered("42P01", 4902), "Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{try s.bareName(q.name.text)});
     const iname: Name = .{ .text = try indexName(s, q.name.text, n.text), .pos = n.pos };
     try s.lowerStmt(.{ .create_index = try s.new(tree.CreateIndex, .{ .unique = unique, .name = .{ .schema = schema, .name = iname }, .table = q.name, .items = items, .where = where }) });
 }
@@ -481,14 +481,14 @@ fn createView(s: *Parser, or_alter: bool, alter_only: bool) Error!void {
     s.stored = saved;
     if (s.isKw("WITH") and s.peek().isKw("CHECK")) return s.fail("xqlite: WITH CHECK OPTION is not supported", .{});
     if (sel.order_by.len > 0 and sel.limit == null and sel.offset == null) {
-        return s.fail("The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.", .{});
+        return s.failState(.numbered("42601", 1033), "The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.", .{});
     }
     if (cols.len == 0) try checkColumnNames(s, sel.body);
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const schema = if (q.schema) |x| x.text else "main";
     const exists = build.findTable(s.p.db, q.name.text, schema) != null;
-    if (alter_only and !exists) return s.fail("Invalid object name '{s}'.", .{q.name.text});
-    if (!or_alter and exists) return s.fail("There is already an object named '{s}' in the database.", .{try s.bareName(q.name.text)});
+    if (alter_only and !exists) return s.failState(.numbered("42P01", 208), "Invalid object name '{s}'.", .{q.name.text});
+    if (!or_alter and exists) return s.failState(.numbered("42P07", 2714), "There is already an object named '{s}' in the database.", .{try s.bareName(q.name.text)});
     const vname: tree.QName = .{ .schema = q.schema orelse .{ .text = "main" }, .name = q.name };
     try s.lowerStmt(.{ .create_view = try s.new(tree.CreateView, .{ .or_replace = or_alter, .name = vname, .cols = cols, .select = sel }) });
 }
@@ -498,7 +498,7 @@ fn checkColumnNames(s: *Parser, b: *const tree.Body) Error!void {
     switch (b.*) {
         .core => |c| for (c.cols, 1..) |rc, i| switch (rc) {
             .expr => |x| if (x.alias == null and x.e.kind != .column) {
-                return s.fail("Create View or Function failed because no column name was specified for column {d}.", .{i});
+                return s.failState(.numbered("42P16", 4511), "Create View or Function failed because no column name was specified for column {d}.", .{i});
             },
             else => {},
         },
@@ -604,9 +604,9 @@ pub fn drop(s: *Parser) Error!void {
         };
         if (!exists and !if_exists) {
             return switch (kind) {
-                .table => s.fail("Cannot drop the table '{s}', because it does not exist or you do not have permission.", .{try writtenName(s, written)}),
-                .view => s.fail("Cannot drop the view '{s}', because it does not exist or you do not have permission.", .{try writtenName(s, written)}),
-                .index => s.fail("Cannot drop the index '{s}', because it does not exist or you do not have permission.", .{iwritten orelse try writtenName(s, written)}),
+                .table => s.failState(.numbered("42P01", 3701), "Cannot drop the table '{s}', because it does not exist or you do not have permission.", .{try writtenName(s, written)}),
+                .view => s.failState(.numbered("42P01", 3701), "Cannot drop the view '{s}', because it does not exist or you do not have permission.", .{try writtenName(s, written)}),
+                .index => s.failState(.numbered("42704", 3701), "Cannot drop the index '{s}', because it does not exist or you do not have permission.", .{iwritten orelse try writtenName(s, written)}),
                 .sequence => unreachable,
             };
         }
@@ -661,7 +661,7 @@ fn alterTable(s: *Parser) Error!void {
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null) orelse
-        return s.fail("Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{try s.bareName(q.name.text)});
+        return s.failState(.numbered("42P01", 4902), "Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{try s.bareName(q.name.text)});
     const bare = try s.bareName(tab.name);
     if (s.eatKw("ADD")) {
         if (s.isAnyKw(&.{ "CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "DEFAULT" })) {
@@ -670,7 +670,7 @@ fn alterTable(s: *Parser) Error!void {
         _ = s.eatKw("COLUMN");
         const def = try columnDef(s, tab.name);
         if (s.isOp(",")) return s.fail("xqlite: ALTER TABLE ... ADD of several columns is not supported (add them one at a time)", .{});
-        if (build.columnIndex(tab, def.name.text) >= 0) return s.fail("Column names in each table must be unique. Column name '{s}' in table '{s}' is specified more than once.", .{ def.name.text, bare });
+        if (build.columnIndex(tab, def.name.text) >= 0) return s.failState(.numbered("42701", 2705), "Column names in each table must be unique. Column name '{s}' in table '{s}' is specified more than once.", .{ def.name.text, bare });
         var with_values = false;
         if (s.isKw("WITH") and s.peek().isKw("VALUES")) {
             s.advance();
@@ -700,7 +700,7 @@ fn alterTable(s: *Parser) Error!void {
         if (s.isOp(",")) return s.fail("xqlite: ALTER TABLE ... DROP COLUMN of several columns is not supported (drop them one at a time)", .{});
         if (build.columnIndex(tab, n.text) < 0) {
             if (if_exists) return session.emptyStatement(s);
-            return s.fail("ALTER TABLE DROP COLUMN failed because column '{s}' does not exist in table '{s}'.", .{ n.text, bare });
+            return s.failState(.numbered("42703", 4924), "ALTER TABLE DROP COLUMN failed because column '{s}' does not exist in table '{s}'.", .{ n.text, bare });
         }
         return s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = q, .action = .{ .drop_column = .{ .name = n } } }) });
     }

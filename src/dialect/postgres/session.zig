@@ -74,7 +74,7 @@ fn role(ps: *Parser) parser.Error![]const u8 {
         return state.user;
     }
     const n = try ps.anyName();
-    if (!eql(n.text, state.user)) return ps.fail(n.pos, "role \"{s}\" does not exist", .{n.text});
+    if (!eql(n.text, state.user)) return ps.failState(n.pos, .of("42704"), "role \"{s}\" does not exist", .{n.text});
     return n.text;
 }
 
@@ -98,13 +98,13 @@ fn createSchema(ps: *Parser) Error!void {
     }
     if (ps.peek().kind != .eof) {
         if (ps.isKw("create") or ps.isKw("grant")) {
-            if (if_not_exists) return ps.fail(ps.peek().start, "CREATE SCHEMA IF NOT EXISTS cannot include schema elements", .{});
+            if (if_not_exists) return ps.failState(ps.peek().start, .of("0A000"), "CREATE SCHEMA IF NOT EXISTS cannot include schema elements", .{});
             return ps.fail(ps.peek().start, "xqlite: CREATE SCHEMA with schema elements is not supported", .{});
         }
         return ps.syntaxError();
     }
     const n = name.text;
-    if (std.mem.startsWith(u8, n, "pg_")) return ps.fail(name.pos, "unacceptable schema name \"{s}\"", .{n});
+    if (std.mem.startsWith(u8, n, "pg_")) return ps.failState(name.pos, .of("42939"), "unacceptable schema name \"{s}\"", .{n});
     if (!nsp.validName(n)) return ps.fail(name.pos, "xqlite: a schema name cannot contain \".\"", .{});
     const p = ps.p.?;
     try ps.readSchema();
@@ -112,7 +112,7 @@ fn createSchema(ps: *Parser) Error!void {
         @import("../../sql/build.zig").findDbName(p.db, n) != null;
     if (taken) {
         if (if_not_exists) return emptyStatement(p);
-        return ps.fail(name.pos, "schema \"{s}\" already exists", .{n});
+        return ps.failState(name.pos, .of("42P06"), "schema \"{s}\" already exists", .{n});
     }
     nsp.codeCreate(p, n, owner);
     if (p.n_err > 0) return error.Failed;
@@ -137,22 +137,22 @@ fn dropSchema(ps: *Parser) Error!void {
     for (names.items) |n| {
         const s = nsp.find(schemas, n.text) orelse {
             if (eql(n.text, "pg_catalog") or eql(n.text, "information_schema") or eql(n.text, "pg_toast")) {
-                return ps.fail(n.pos, "cannot drop schema {s} because it is required by the database system", .{n.text});
+                return ps.failState(n.pos, .of("2BP01"), "cannot drop schema {s} because it is required by the database system", .{n.text});
             }
             if (eql(n.text, "public")) return ps.fail(n.pos, "xqlite: schema public cannot be dropped", .{});
             if (@import("../../sql/build.zig").findDbName(p.db, n.text) != null) {
                 return ps.fail(n.pos, "xqlite: schema \"{s}\" is an attached database (use DETACH)", .{n.text});
             }
             if (if_exists) continue;
-            return ps.fail(n.pos, "schema \"{s}\" does not exist", .{n.text});
+            return ps.failState(n.pos, .of("3F000"), "schema \"{s}\" does not exist", .{n.text});
         };
         const objs = nsp.objects(p.db, ps.arena, s.name) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
-            else => return ps.fail(n.pos, "{s}", .{@import("../../sql/main.zig").errmsg(p.db)}),
+            else => return ps.failFrom(n.pos, p.db),
         };
         if (objs.len > 0 and !cascade) {
-            if (names.items.len > 1) return ps.fail(n.pos, "cannot drop desired object(s) because other objects depend on them", .{});
-            return ps.fail(n.pos, "cannot drop schema {s} because other objects depend on it", .{s.name});
+            if (names.items.len > 1) return ps.failState(n.pos, .of("2BP01"), "cannot drop desired object(s) because other objects depend on them", .{});
+            return ps.failState(n.pos, .of("2BP01"), "cannot drop schema {s} because other objects depend on it", .{s.name});
         }
         try drops.append(ps.arena, .{ .name = s.name, .objs = objs });
     }
@@ -284,13 +284,13 @@ fn set(ps: *Parser) Error!void {
                     _ = ps.advance();
                     if (!ps.eat(.comma)) break;
                 }
-                if (n > 0 and !(p_ != null and p_.?.list)) return ps.fail(ps.peek().start, "SET {s} takes only one argument", .{name});
+                if (n > 0 and !(p_ != null and p_.?.list)) return ps.failState(ps.peek().start, .of("22023"), "SET {s} takes only one argument", .{name});
                 value = out.items;
             }
         }
     }
     if (ps.peek().kind != .eof) return ps.syntaxError();
-    const prm = findParam(name) orelse return ps.fail(0, "unrecognized configuration parameter \"{s}\"", .{name});
+    const prm = findParam(name) orelse return ps.failState(0, .of("42704"), "unrecognized configuration parameter \"{s}\"", .{name});
     var q: std.ArrayList(u8) = .empty;
     try q.appendSlice(a, "SELECT 1 WHERE set_config(");
     try literal(&q, a, prm.name);
@@ -310,7 +310,7 @@ fn show(ps: *Parser) Error!void {
     if (eql(name, "time") and ps.eatKw("zone")) name = "timezone";
     if (eql(name, "all")) return ps.fail(0, "xqlite: SHOW ALL is not supported", .{});
     if (ps.peek().kind != .eof) return ps.syntaxError();
-    const prm = findParam(name) orelse return ps.fail(0, "unrecognized configuration parameter \"{s}\"", .{name});
+    const prm = findParam(name) orelse return ps.failState(0, .of("42704"), "unrecognized configuration parameter \"{s}\"", .{name});
     var q: std.ArrayList(u8) = .empty;
     try q.appendSlice(a, "SELECT current_setting(");
     try literal(&q, a, prm.name);
@@ -328,7 +328,7 @@ fn lowerPg(ps: *Parser, text: [:0]const u8) Error!void {
     sub.p = ps.p;
     const stmt = sub.statement() catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        error.ParseFailed => return ps.fail(0, "{s}", .{sub.err_msg}),
+        error.ParseFailed => return ps.failState(0, sub.err_state, "{s}", .{sub.err_msg}),
     };
     var l: lower.Lowerer = .init(ps.p.?, text);
     try l.statement(stmt);
@@ -355,9 +355,9 @@ fn expire(db: *int.Sqlite3) void {
 /// default; name 'all' with NULL: every one) and return its value.
 fn setConfigFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
-    const name = api.valueText(argv[0]) orelse return api.resultError(ctx, "NULL value not allowed for parameter name");
+    const name = api.valueText(argv[0]) orelse return api.resultErrorState(ctx, .of("22004"), "NULL value not allowed for parameter name");
     if (api.valueType(argv[2]) != vi.SQLITE_NULL and api.valueInt64(argv[2]) != 0) {
-        return api.resultError(ctx, "xqlite: SET LOCAL is not supported");
+        return api.resultErrorState(ctx, .of("0A000"), "xqlite: SET LOCAL is not supported");
     }
     const value: ?[]const u8 = if (api.valueType(argv[1]) == vi.SQLITE_NULL) null else api.valueText(argv[1]) orelse "";
     const st = &db.xq.postgres;
@@ -368,7 +368,7 @@ fn setConfigFunc(ctx: *Context, argv: []*Mem) void {
     }
     const prm = findParam(name) orelse {
         var buf: [200]u8 = undefined;
-        return api.resultError(ctx, std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
+        return api.resultErrorState(ctx, .of("42704"), std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
     };
     st.set(db.gpa, prm.name, value) catch return api.resultErrorNomem(ctx);
     if (prm.list) expire(db);
@@ -383,7 +383,7 @@ fn currentSettingFunc(ctx: *Context, argv: []*Mem) void {
     const prm = findParam(name) orelse {
         if (argv.len > 1 and api.valueInt64(argv[1]) != 0) return api.resultNull(ctx);
         var buf: [200]u8 = undefined;
-        return api.resultError(ctx, std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
+        return api.resultErrorState(ctx, .of("42704"), std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
     };
     api.resultText(ctx, db.xq.postgres.get(prm.name) orelse prm.default, .transient);
 }

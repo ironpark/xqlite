@@ -187,7 +187,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
             rowid_expr = item.expr;
             i_rowid_expr = i;
         } else {
-            util.errorMsg(p, "no such column: {s}", .{name});
+            util.errorMsgState(p, null, .of("42703"), "no such column: {s}", .{name});
             p.check_schema = true;
             return;
         }

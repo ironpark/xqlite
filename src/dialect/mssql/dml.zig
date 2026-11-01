@@ -51,7 +51,7 @@ fn output(s: *Parser, kind: parser.Output) Error![]tree.ResultCol {
     while (true) {
         if ((s.isKw("INSERTED") or s.isKw("DELETED")) and s.peek().is(".") and s.peek2().is("*")) {
             const ins = s.isKw("INSERTED");
-            if ((ins and kind == .delete) or (!ins and kind == .insert)) return s.fail("The multi-part identifier \"{s}.*\" could not be bound.", .{s.tok.text});
+            if ((ins and kind == .delete) or (!ins and kind == .insert)) return s.failState(.numbered("42P01", 4104), "The multi-part identifier \"{s}.*\" could not be bound.", .{s.tok.text});
             if (!ins and kind == .update) return s.fail("xqlite: OUTPUT DELETED in UPDATE is not supported (RETURNING sees the new row)", .{});
             s.advance();
             s.advance();
@@ -139,12 +139,12 @@ fn planColumns(s: *Parser, t: *const Target, written: ?[]Name) Error!ColumnPlan 
             try names.append(s.a, n);
             try cols.append(s.a, c);
         }
-        if (has_id and !on) return s.fail("Cannot insert explicit value for identity column in table '{s}' when IDENTITY_INSERT is set to OFF.", .{t.bare});
-        if (id != null and on and !has_id) return s.fail("Explicit value must be specified for identity column in table '{s}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", .{t.bare});
+        if (has_id and !on) return s.failState(.numbered("428C9", 544), "Cannot insert explicit value for identity column in table '{s}' when IDENTITY_INSERT is set to OFF.", .{t.bare});
+        if (id != null and on and !has_id) return s.failState(.numbered("428C9", 545), "Explicit value must be specified for identity column in table '{s}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", .{t.bare});
         return .{ .names = names.items, .cols = cols.items, .overriding = has_id };
     }
     if (t.tab == null) return .{ .names = &.{}, .cols = &.{}, .overriding = false };
-    if (id != null and on) return s.fail("An explicit value for the identity column in table '{s}' can only be specified when a column list is used and IDENTITY_INSERT is ON.", .{t.bare});
+    if (id != null and on) return s.failState(.numbered("428C9", 8101), "An explicit value for the identity column in table '{s}' can only be specified when a column list is used and IDENTITY_INSERT is ON.", .{t.bare});
     for (try insertColumns(s, t)) |c| {
         try names.append(s.a, .{ .text = c.name });
         try cols.append(s.a, c);
@@ -179,7 +179,7 @@ pub fn insert(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
         s.allow_default = saved;
         for (rows) |*row| {
             if (plan.cols.len > 0 and row.len != plan.cols.len) {
-                return s.fail("There are {s} columns in the INSERT statement than values specified in the VALUES clause. The number of values in the VALUES clause must match the number of columns specified in the INSERT statement.", .{if (row.len < plan.cols.len) "more" else "fewer"});
+                return s.failState(.of("42601"), "There are {s} columns in the INSERT statement than values specified in the VALUES clause. The number of values in the VALUES clause must match the number of columns specified in the INSERT statement.", .{if (row.len < plan.cols.len) "more" else "fewer"});
             }
             var out: std.ArrayList(*Expr) = .empty;
             for (row.*, 0..) |e, i| {
@@ -258,7 +258,7 @@ fn takeTarget(s: *Parser, written: tree.QName, items: []tree.FromItem) Error!Joi
         for (items, 0..) |it, i| {
             const label: ?[]const u8 = if (it.alias) |a| a.name.text else if (it.source == .table) it.source.table.name.text else null;
             if (label) |l| if (std.ascii.eqlIgnoreCase(l, written.name.text)) {
-                if (found != null) return s.fail("The table '{s}' is ambiguous.", .{written.name.text});
+                if (found != null) return s.failState(.numbered("42702", 8154), "The table '{s}' is ambiguous.", .{written.name.text});
                 found = i;
             };
         }
@@ -315,7 +315,7 @@ fn assignments(s: *Parser, t: *const Target, label: []const u8) Error![]tree.Set
         if (s.tok.kind == .variable) return s.fail("xqlite: assigning variables in UPDATE is not supported", .{});
         var c = try s.nameOf(try s.anyName());
         if (s.eatOp(".")) {
-            if (!std.ascii.eqlIgnoreCase(c.text, label)) return s.fail("The multi-part identifier \"{s}\" could not be bound.", .{c.text});
+            if (!std.ascii.eqlIgnoreCase(c.text, label)) return s.failState(.numbered("42P01", 4104), "The multi-part identifier \"{s}\" could not be bound.", .{c.text});
             c = try s.nameOf(try s.anyName());
         }
         const op = s.tok;
@@ -327,7 +327,7 @@ fn assignments(s: *Parser, t: *const Target, label: []const u8) Error![]tree.Set
             e = try s.compoundAssign(op.text[0], ref, e);
         }
         if (t.findCol(c.text)) |m| {
-            if (m.identity != null) return s.fail("Cannot update identity column '{s}'.", .{m.name});
+            if (m.identity != null) return s.failState(.numbered("428C9", 8102), "Cannot update identity column '{s}'.", .{m.name});
             if (m.decl_type) |dt| {
                 const ty = types.parseText(dt);
                 if (ty == null or !storesAsIs(e, ty.?)) {
@@ -509,7 +509,7 @@ pub fn merge(s: *Parser) Error!void {
     } else if (s.isName()) talias = try s.nameOf(try s.name());
     if (talias == null) talias = try s.autoAlias(tq);
     const t = try s.target(tq);
-    if (t.tab == null) return s.fail("Invalid object name '{s}'.", .{tq.name.text});
+    if (t.tab == null) return s.failState(.numbered("42P01", 208), "Invalid object name '{s}'.", .{tq.name.text});
     const tlabel = if (talias) |a| a.text else tq.name.text;
     try s.expectKw("USING");
 
@@ -560,18 +560,18 @@ pub fn merge(s: *Parser) Error!void {
         const c: Clause = .{ .cond = cond, .action = action };
         switch (kind) {
             .matched => {
-                if (matched.items.len == 2) return s.fail("An action of type 'WHEN MATCHED' cannot appear more than once in a 'UPDATE' clause of a MERGE statement.", .{});
+                if (matched.items.len == 2) return s.failState(.of("42601"), "An action of type 'WHEN MATCHED' cannot appear more than once in a 'UPDATE' clause of a MERGE statement.", .{});
                 if (matched.items.len == 1 and (std.meta.activeTag(matched.items[0].action) == std.meta.activeTag(action) or matched.items[0].cond == null)) {
-                    return s.fail("An action of type '{s}' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{if (action == .delete) "DELETE" else "UPDATE"});
+                    return s.failState(.of("42601"), "An action of type '{s}' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{if (action == .delete) "DELETE" else "UPDATE"});
                 }
                 try matched.append(s.a, c);
             },
             .by_source => {
-                if (by_source.items.len == 2) return s.fail("An action of type 'WHEN NOT MATCHED BY SOURCE' cannot appear more than once in a MERGE statement.", .{});
+                if (by_source.items.len == 2) return s.failState(.of("42601"), "An action of type 'WHEN NOT MATCHED BY SOURCE' cannot appear more than once in a MERGE statement.", .{});
                 try by_source.append(s.a, c);
             },
             .not_matched => {
-                if (not_matched != null) return s.fail("An action of type 'INSERT' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{});
+                if (not_matched != null) return s.failState(.of("42601"), "An action of type 'INSERT' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{});
                 not_matched = c;
             },
         }
@@ -579,7 +579,7 @@ pub fn merge(s: *Parser) Error!void {
     if (matched.items.len == 0 and by_source.items.len == 0 and not_matched == null) return s.syntaxError();
     if (s.isKw("OUTPUT")) return s.fail("xqlite: MERGE ... OUTPUT is not supported", .{});
     try optionClause(s);
-    if (!s.isOp(";")) return s.fail("A MERGE statement must be terminated by a semi-colon (;).", .{});
+    if (!s.isOp(";")) return s.failState(.numbered("42601", 10713), "A MERGE statement must be terminated by a semi-colon (;).", .{});
 
     // The source numbered: (SELECT row_number() OVER () AS xq_n, *
     // FROM source) AS label.
@@ -603,7 +603,7 @@ pub fn merge(s: *Parser) Error!void {
     if (not_matched) |c| {
         const ins = c.action.insert;
         const plan = try planColumns(s, &t, ins.cols);
-        if (plan.cols.len > 0 and ins.values.len != plan.cols.len) return s.fail("The MERGE statement has more or fewer values than columns.", .{});
+        if (plan.cols.len > 0 and ins.values.len != plan.cols.len) return s.failState(.of("42601"), "The MERGE statement has more or fewer values than columns.", .{});
         var out: std.ArrayList(tree.ResultCol) = .empty;
         for (ins.values, 0..) |e, i| {
             const cm: ?*ColMeta = if (i < plan.cols.len) plan.cols[i] else null;

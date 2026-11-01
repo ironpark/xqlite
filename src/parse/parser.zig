@@ -174,7 +174,7 @@ pub const Parser = struct {
                 if (minor.z != null and minor.z.?[0] != 0) {
                     syntaxError(s.p, minor);
                 } else {
-                    util.errorMsg(s.p, "incomplete input", .{});
+                    util.errorMsgState(s.p, null, .of("42601"), "incomplete input", .{});
                 }
                 break;
             }

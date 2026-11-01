@@ -89,7 +89,7 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
         if (!unknown_col) missing = try s.missingColumns(&t, cols.items);
         for (rows, 0..) |*row, ri| {
             if (cols.items.len > 0 and row.len != cols.items.len) {
-                return s.fail("Column count doesn't match value count at row {d}", .{ri + 1});
+                return s.failState(.numbered("42601", 1136), "Column count doesn't match value count at row {d}", .{ri + 1});
             }
             var w = base;
             w.row = @intCast(@min(ri + 1, std.math.maxInt(u32)));

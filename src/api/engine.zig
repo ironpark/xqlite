@@ -130,6 +130,11 @@ pub fn onlyTrivia(gpa: std.mem.Allocator, sql: []const u8) error{OutOfMemory}!bo
     return true;
 }
 
+/// What the last error is beyond its code (int.ErrorState), if known.
+pub fn errorState(h: *const Handle) ?int.ErrorState {
+    return if (h.err_code != RC.OK) h.err_state else null;
+}
+
 pub fn extendedErrcode(h: *const Handle) i32 {
     return main_mod.extendedErrcode(h);
 }
@@ -158,13 +163,15 @@ pub const SavedError = struct {
     code: i32,
     offset: i32,
     message: ?*Mem,
+    state: ?int.ErrorState,
 };
 
 /// Take the error of `h` out of the connection: calls made until
 /// restoreError() start from a connection without a message.
 pub fn saveError(h: *Handle) SavedError {
-    const s: SavedError = .{ .code = h.err_code, .offset = h.err_byte_offset, .message = h.err };
+    const s: SavedError = .{ .code = h.err_code, .offset = h.err_byte_offset, .message = h.err, .state = h.err_state };
     h.err = null;
+    h.err_state = null;
     return s;
 }
 
@@ -178,6 +185,7 @@ pub fn restoreError(h: *Handle, s: SavedError) void {
     h.err = s.message;
     h.err_code = s.code;
     h.err_byte_offset = s.offset;
+    h.err_state = s.state;
 }
 
 // ================================================================ backup

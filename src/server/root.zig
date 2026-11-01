@@ -10,7 +10,7 @@
 //! - Registry: the sessions by id, for cancel requests from outside.
 //! - types: the type of a result column from its declared type in the
 //!   dialect (boolean, int4, varchar(20), timestamp_tz ...).
-//! - errors: the class (and SQLSTATE) of an engine error.
+//! - errors: the SQLSTATE of an engine error.
 //! - command: what a statement does, for command tags and row counts.
 //!
 //! It is built on the Zig API (module `xqlite`) only, so that the engine

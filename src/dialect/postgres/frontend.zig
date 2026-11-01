@@ -143,6 +143,13 @@ pub const hooks: dialect.Hooks = .{
     .functions = &functions,
     .engine_functions = &engine_functions,
     .collations = &.{.{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate }},
+    // The names of the type checks (parser.zig's typeCheck()).
+    .check_errors = &.{
+        .{ .prefix = "smallint out of range", .state = .of("22003") },
+        .{ .prefix = "integer out of range", .state = .of("22003") },
+        .{ .prefix = "invalid input syntax for type ", .state = .of("22P02") },
+        .{ .prefix = "value too long for type ", .state = .of("22001") },
+    },
 };
 
 const functions = [_]int.FuncDef{

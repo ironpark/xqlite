@@ -144,7 +144,7 @@ pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
     if (s.isSelectStart() or s.isKw("AS")) return s.fail("xqlite: CREATE TABLE with columns and a SELECT is not supported", .{});
 
     if (build.findTable(s.p.db, name, schema) != null) {
-        if (!if_not_exists) return s.fail("Table '{s}' already exists", .{dest.bare});
+        if (!if_not_exists) return s.failState(.numbered("42P07", 1050), "Table '{s}' already exists", .{dest.bare});
         // Nothing to do (MariaDB adds a note).
         s.p.db.xq.mariadb.warn(.note, 1050, "Table '{s}' already exists", .{dest.bare});
         return session.emptyStatement(s);
@@ -175,7 +175,7 @@ fn createDefinition(s: *Parser, t: *Table) Error!void {
     if (s.eatKw("PRIMARY")) {
         try s.expectKw("KEY");
         try indexType(s);
-        if (t.primary != null) return s.fail("Multiple primary key defined", .{});
+        if (t.primary != null) return s.failState(.numbered("42P16", 1068), "Multiple primary key defined", .{});
         t.primary = try indexColumns(s);
         try indexOptions(s);
         return;
@@ -417,7 +417,7 @@ fn charsetClause(s: *Parser, c: *Column) Error!void {
     s.advance();
     const cs = try collName(s, t0);
     if (c.collation == null) {
-        c.collation = parser.charsetCollation(cs) orelse return s.fail("Unknown character set: '{s}'", .{cs});
+        c.collation = parser.charsetCollation(cs) orelse return s.failState(.numbered("42704", 1115), "Unknown character set: '{s}'", .{cs});
     }
 }
 
@@ -503,10 +503,10 @@ fn columnType(s: *Parser, c: *Column) Error!types.Type {
         if (ty.len == null) return s.syntaxError();
     }
     if (b == .decimal) {
-        if (ty.len) |p| if (p > 65) return s.fail("Too big precision specified for '{s}'. Maximum is 65", .{c.name.text});
+        if (ty.len) |p| if (p > 65) return s.failState(.numbered("42611", 1426), "Too big precision specified for '{s}'. Maximum is 65", .{c.name.text});
         if (ty.scale) |sc| {
-            if (sc > 38) return s.fail("Too big scale specified for '{s}'. Maximum is 38", .{c.name.text});
-            if (sc > (ty.len orelse 10)) return s.fail("For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '{s}')", .{c.name.text});
+            if (sc > 38) return s.failState(.numbered("42611", 1425), "Too big scale specified for '{s}'. Maximum is 38", .{c.name.text});
+            if (sc > (ty.len orelse 10)) return s.failState(.numbered("22023", 1427), "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '{s}')", .{c.name.text});
         }
     }
     while (true) {
@@ -628,7 +628,7 @@ fn tableOptions(s: *Parser, t: ?*Table) Error!void {
             const t0 = s.tok;
             s.advance();
             const cs = try collName(s, t0);
-            const coll = parser.charsetCollation(cs) orelse return s.fail("Unknown character set: '{s}'", .{cs});
+            const coll = parser.charsetCollation(cs) orelse return s.failState(.numbered("42704", 1115), "Unknown character set: '{s}'", .{cs});
             if (t) |tt| if (tt.default_collation_name == null) {
                 tt.default_collation = coll;
             };
@@ -664,7 +664,7 @@ fn finishTable(s: *Parser, t: *Table) Error!void {
     if (t.columns.items.len == 0) return s.syntaxError();
     // The column-level PRIMARY KEY.
     for (t.columns.items) |*c| if (c.primary) {
-        if (t.primary != null) return s.fail("Multiple primary key defined", .{});
+        if (t.primary != null) return s.failState(.numbered("42P16", 1068), "Multiple primary key defined", .{});
         t.primary = try s.a.dupe(IndexCol, &.{.{ .name = c.name, .desc = false }});
     };
     for (t.columns.items) |*c| {
@@ -678,21 +678,21 @@ fn finishTable(s: *Parser, t: *Table) Error!void {
         if (t.primary) |pk| for (pk) |k| {
             if (std.ascii.eqlIgnoreCase(k.name.text, c.name.text)) c.not_null = true;
         };
-        if (findColumn(t, c.name.text) != c) return s.fail("Duplicate column name '{s}'", .{c.name.text});
+        if (findColumn(t, c.name.text) != c) return s.failState(.numbered("42701", 1060), "Duplicate column name '{s}'", .{c.name.text});
     }
     // Keys refer to existing columns.
     for (t.indexes.items) |ix| for (ix.cols) |k| {
-        if (findColumn(t, k.name.text) == null) return s.fail("Key column '{s}' doesn't exist in table", .{k.name.text});
+        if (findColumn(t, k.name.text) == null) return s.failState(.numbered("42703", 1072), "Key column '{s}' doesn't exist in table", .{k.name.text});
     };
     if (t.primary) |pk| for (pk) |k| {
-        if (findColumn(t, k.name.text) == null) return s.fail("Key column '{s}' doesn't exist in table", .{k.name.text});
+        if (findColumn(t, k.name.text) == null) return s.failState(.numbered("42703", 1072), "Key column '{s}' doesn't exist in table", .{k.name.text});
     };
     // AUTO_INCREMENT: the rowid.
     var n_auto: usize = 0;
     for (t.columns.items) |*c| {
         if (!c.autoinc) continue;
         n_auto += 1;
-        if (!c.type.base.isInteger()) return s.fail("Incorrect column specifier for column '{s}'", .{c.name.text});
+        if (!c.type.base.isInteger()) return s.failState(.numbered("42P16", 1063), "Incorrect column specifier for column '{s}'", .{c.name.text});
         const is_pk = if (t.primary) |pk| pk.len == 1 and std.ascii.eqlIgnoreCase(pk[0].name.text, c.name.text) else false;
         if (!is_pk) {
             var unique = c.unique;
@@ -704,7 +704,7 @@ fn finishTable(s: *Parser, t: *Table) Error!void {
             c.unique = false;
         }
     }
-    if (n_auto > 1) return s.fail("Incorrect table definition; there can be only one auto column and it must be defined as a key", .{});
+    if (n_auto > 1) return s.failState(.numbered("42P16", 1075), "Incorrect table definition; there can be only one auto column and it must be defined as a key", .{});
     // Unique columns become named unique indexes.
     for (t.columns.items) |*c| if (c.unique) {
         try t.indexes.append(s.a, .{ .name = c.name.text, .unique = true, .cols = try s.a.dupe(IndexCol, &.{.{ .name = c.name, .desc = false }}) });
@@ -720,7 +720,7 @@ fn finishTable(s: *Parser, t: *Table) Error!void {
     }
     for (t.indexes.items, 0..) |ix, i| {
         if (indexNameUsed(t.indexes.items[0..i], ix.name.?) or std.ascii.eqlIgnoreCase(ix.name.?, "PRIMARY")) {
-            return s.fail("Duplicate key name '{s}'", .{ix.name.?});
+            return s.failState(.numbered("42P07", 1061), "Duplicate key name '{s}'", .{ix.name.?});
         }
     }
 }
@@ -848,7 +848,7 @@ pub fn createIndex(s: *Parser, unique: bool) Error!void {
     }
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const r = try s.relation(q);
-    const tab = r.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const tab = r.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const table: Name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos };
     try s.lowerStmt(.{ .create_index = try indexTree(s, schema, table, .{ .name = iname, .unique = unique, .cols = cols }, if_not_exists) });
@@ -873,10 +873,10 @@ pub fn dropIndex(s: *Parser) Error!void {
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     if (std.ascii.eqlIgnoreCase(iname, "PRIMARY")) return s.fail("xqlite: dropping the PRIMARY KEY is not supported", .{});
     const r = try s.relation(q);
-    const tab = r.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const tab = r.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const real = (try findIndexName(s, tab, iname, schema)) orelse {
-        if (!if_exists) return s.fail("Can't DROP INDEX `{s}`; check that it exists", .{iname});
+        if (!if_exists) return s.failState(.numbered("42704", 1091), "Can't DROP INDEX `{s}`; check that it exists", .{iname});
         return session.emptyStatement(s);
     };
     try dropIndexNamed(s, .{ .text = schema }, real);
@@ -899,11 +899,11 @@ pub fn dropTable(s: *Parser, view: bool) Error!void {
     // A database that does not exist has no such table.
     if (q.schema) |x| if ((try s.database(x.text)) == null) {
         if (if_exists) return session.emptyStatement(s);
-        return s.fail("Unknown table '{s}.{s}'", .{ x.text, q.name.text });
+        return s.failState(.numbered("42P01", 1051), "Unknown table '{s}.{s}'", .{ x.text, q.name.text });
     };
     const r = try s.relation(q);
     if (r.find(s.p.db) == null) {
-        if (!if_exists) return s.fail("Unknown table '{s}'", .{try r.shown(s.a)});
+        if (!if_exists) return s.failState(.numbered("42P01", 1051), "Unknown table '{s}'", .{try r.shown(s.a)});
         return session.emptyStatement(s);
     }
     var name = r.q;
@@ -1014,7 +1014,7 @@ pub fn alterTable(s: *Parser) Error!void {
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const rel = try s.relation(q);
-    const tab = rel.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try rel.shown(s.a)});
+    const tab = rel.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try rel.shown(s.a)});
     const real = try s.a.dupe(u8, tab.name);
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const tq: tree.QName = .{ .schema = .{ .text = schema }, .name = .{ .text = real, .pos = q.name.pos } };
@@ -1048,7 +1048,7 @@ pub fn alterTable(s: *Parser) Error!void {
     if (s.eatKw("DROP")) {
         if (s.eatKw("INDEX") or s.eatKw("KEY")) {
             const iname = try s.nameText(try s.anyName());
-            const idx = (try findIndexName(s, tab, iname, schema)) orelse return s.fail("Can't DROP INDEX `{s}`; check that it exists", .{iname});
+            const idx = (try findIndexName(s, tab, iname, schema)) orelse return s.failState(.numbered("42704", 1091), "Can't DROP INDEX `{s}`; check that it exists", .{iname});
             try dropIndexNamed(s, tq.schema, idx);
             return endAlter(s);
         }
@@ -1146,7 +1146,7 @@ pub fn renameTableStmt(s: *Parser) Error!void {
     if (s.isOp(",")) return s.fail("xqlite: RENAME TABLE of several tables is not supported", .{});
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const rel = try s.relation(q);
-    const tab = rel.find(s.p.db) orelse return s.fail("Table '{s}' doesn't exist", .{try rel.shown(s.a)});
+    const tab = rel.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try rel.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const tq: tree.QName = .{ .schema = .{ .text = schema }, .name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos } };
     try renameTable(s, tab, tq, try renameTarget(s, tab, rel.db, m));
@@ -1167,7 +1167,7 @@ fn renameTarget(s: *Parser, tab: *int.Table, db: Parser.Db, new: tree.QName) Err
     if (!std.ascii.eqlIgnoreCase(dest.q.schema.?.text, from)) {
         return s.fail("xqlite: moving a table to another SQLite database (ATTACH) is not supported", .{});
     }
-    if (build.findTable(s.p.db, dest.q.name.text, from) != null) return s.fail("Table '{s}' already exists", .{dest.bare});
+    if (build.findTable(s.p.db, dest.q.name.text, from) != null) return s.failState(.numbered("42P07", 1050), "Table '{s}' already exists", .{dest.bare});
     return dest.q.name;
 }
 
@@ -1184,13 +1184,13 @@ pub fn showCreateTable(s: *Parser, tab: *int.Table, schema: []const u8, bare: []
     var autoinc: ?[]const u8 = null;
     {
         var q = catalog.Query.initFmt(s.p.db, "SELECT sql FROM %Q.sqlite_schema WHERE name=%Q", &.{ .{ .str = schema }, .{ .str = tname } }) catch
-            return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)});
+            return s.failFrom(s.p.db);
         defer q.deinit();
         if (q.step() catch false) sqlite_sql = try s.a.dupe(u8, api.columnText(q.v, 0) orelse "");
     }
     const list = catalog.entries(s.p.db, s.a, schema, tname) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        else => return s.fail("{s}", .{@import("../../sql/main.zig").errmsg(s.p.db)}),
+        else => return s.failFrom(s.p.db),
     };
     for (list) |e| {
         const lc = try std.ascii.allocLowerString(s.a, e.col);

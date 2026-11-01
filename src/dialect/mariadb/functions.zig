@@ -441,7 +441,7 @@ fn jsonArgs(s: *Parser, lname: []const u8, args: []*Expr, written: []const u8) E
         .odd => n % 2 == 1,
         .even => n % 2 == 0,
     };
-    if (!ok) return s.fail("Incorrect parameter count in the call to native function '{s}'", .{written});
+    if (!ok) return s.failState(.numbered("42883", 1582), "Incorrect parameter count in the call to native function '{s}'", .{written});
     if (eq(lname, "json_array")) {
         for (args) |*a| try jsonValue(s, a);
     } else if (eq(lname, "json_object")) {
@@ -531,7 +531,7 @@ fn jsonAgg(s: *Parser, pos: u32, written: []const u8, object: bool) Error!*Expr 
     var distinct = false;
     if (s.eatKw("DISTINCT")) distinct = true else _ = s.eatKw("ALL");
     const args = try s.exprList();
-    if (args.len != @as(usize, if (object) 2 else 1)) return s.fail("Incorrect parameter count in the call to native function '{s}'", .{written});
+    if (args.len != @as(usize, if (object) 2 else 1)) return s.failState(.numbered("42883", 1582), "Incorrect parameter count in the call to native function '{s}'", .{written});
     var order: []tree.SortItem = &.{};
     if (!object and s.isKw("ORDER")) {
         s.advance();
@@ -542,7 +542,7 @@ fn jsonAgg(s: *Parser, pos: u32, written: []const u8, object: bool) Error!*Expr 
     if (!object and s.eatKw("LIMIT")) limit = try s.expr();
     try s.expectOp(")");
     if (s.isKw("OVER")) {
-        return s.fail("This version of MariaDB doesn't yet support '{s}() aggregate as window function'", .{if (object) "JSON_OBJECTAGG" else "JSON_ARRAYAGG"});
+        return s.failState(.numbered("0A000", 1235), "This version of MariaDB doesn't yet support '{s}() aggregate as window function'", .{if (object) "JSON_OBJECTAGG" else "JSON_ARRAYAGG"});
     }
     try jsonValue(s, &args[args.len - 1]);
     const name: []const u8 = if (object) "json_objectagg" else "json_arrayagg";

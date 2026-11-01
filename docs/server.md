@@ -36,7 +36,7 @@
 | `Session.zig` | 한 클라이언트의 연결. 스크립트를 문장 단위로 돌려 이벤트로 알림. 트랜잭션 상태, PostgreSQL의 실패한 트랜잭션 |
 | `Registry.zig` | 세션 id와 비밀 키, 바깥에서 오는 취소 요청, 연결 수 |
 | `types.zig` | 방언의 선언 타입 → `Type`(`boolean`, `int4`, `varchar(20)`, `timestamp_tz` ...) |
-| `errors.zig` | 엔진 오류(확장 코드 + 방언의 메시지) → `Class`와 SQLSTATE |
+| `errors.zig` | 오류의 SQLSTATE: 엔진·방언이 남긴 것, 없으면 확장 결과 코드의 것 |
 | `command.zig` | 문장 텍스트 → 명령(`INSERT`, `CREATE INDEX` ...) |
 | `test.zig` | 루프백 TCP 위의 테스트용 줄 프로토콜 |
 
@@ -69,12 +69,11 @@
 
 ## 오류 분류
 
-클라이언트와 ORM은 메시지가 아니라 코드로 오류를 구분합니다. 유일성 위반은 PostgreSQL에서 `23505`, MySQL에서 1062, SQL Server에서 2627입니다. `errors.classify(dialect, code, message)`가 엔진의 오류를 `Class`로 읽고, `Class.sqlstate()`가 SQLSTATE를 줍니다. MySQL과 TDS의 오류 번호는 각 프로토콜이 `Class`에서 정합니다.
+클라이언트와 ORM은 메시지가 아니라 코드로 오류를 구분합니다. 유일성 위반은 PostgreSQL에서 `23505`, MySQL에서 1062, SQL Server에서 2627입니다. 엔진과 방언이 오류를 낼 때 그 오류가 무엇인지 함께 남기므로(`ErrorInfo.sqlstate`, `ErrorInfo.dialect_number`, [방언 아키텍처의 오류 코드](architecture.md#오류-코드)), 서버는 메시지를 읽지 않습니다.
 
-- 확장 결과 코드가 정확한 곳은 코드로 정합니다: `CONSTRAINT_UNIQUE`/`PRIMARYKEY` → `23505`, `NOTNULL` → `23502`, `FOREIGNKEY` → `23503`, `BUSY` → `55P03`, `BUSY_SNAPSHOT` → `40001`, `INTERRUPT` → `57014`, `READONLY` → `25006` ...
-- `SQLITE_ERROR`는 모든 SQL 오류를 덮으므로 메시지로 정합니다. 그 방언의 문구를 먼저 보고(`relation "t" does not exist`, `Table 'db.t' doesn't exist`, `Invalid object name`, `ORA-00942`), 다음에 SQLite의 문구를 봅니다(`no such table`). 방언도 엔진의 오류는 SQLite 문구로 내기 때문입니다.
-- 방언은 타입 검사를 이름 붙은 CHECK 제약으로 합니다(`value too long for type character varying(3)`). 그래서 `CONSTRAINT_CHECK`도 제약 이름을 먼저 보고, 아는 이름이 아니면 `23514`입니다.
-- 아는 문구가 없으면 `.other`(`HY000`)입니다. 메시지 문구에 기대는 것은 임시입니다. 방언이 오류를 낼 때 자기 코드를 함께 남기면 이 표는 필요 없어집니다([다음 단계](#다음-단계)).
+- `Failure.sqlstate`는 `errors.sqlstate(code, recorded)`입니다. 남긴 SQLSTATE가 있으면 그것이고, 없으면 확장 결과 코드가 구분하는 것입니다: `CONSTRAINT_UNIQUE`/`PRIMARYKEY` → `23505`, `NOTNULL` → `23502`, `FOREIGNKEY` → `23503`, `CHECK` → `23514`, `BUSY` → `55P03`, `BUSY_SNAPSHOT` → `40001`, `INTERRUPT` → `57014`, `READONLY` → `25006` ... 둘 다 없으면 일반 오류 `HY000`입니다.
+- `Failure.number`는 방언의 번호입니다(MariaDB 세션의 1146, MSSQL 세션의 208, Oracle 세션의 942). MySQL 프로토콜과 TDS는 이 번호를 그대로 보내고, 없으면 SQLSTATE에서 정합니다.
+- 세션이 스스로 내는 것: 실패한 트랜잭션의 `25P02`, 연결 수 초과의 `53300`(`errors.in_failed_transaction`, `errors.too_many_connections`).
 
 ## 명령 분류
 
@@ -108,8 +107,7 @@
 ## 다음 단계
 
 1. **pgwire v3**: startup·인증(trust, cleartext/MD5/SCRAM), 단순 질의, 확장 질의(Parse/Bind/Describe/Execute/Sync, 이름 붙은 문장과 포털), 텍스트 형식 값, CancelRequest, `xqlite serve --pg PORT`. `psql`과 드라이버(libpq, pgjdbc, psycopg)로 검증합니다.
-2. **방언의 오류 코드**: 방언 프론트엔드가 오류를 낼 때 자기 코드(SQLSTATE, MySQL 번호, SQL Server 번호, ORA-)를 함께 남겨, 메시지 문구로 분류하는 표를 없앱니다.
-3. **문장의 종류를 엔진이 기록**: `Parse`에 동사와 객체 종류를 두고 빌더 진입점이 기본값을, 방언 프론트엔드가 다르게 낮추는 문장(`SET`, `SHOW`, `TRUNCATE`, `MERGE` ...)을 덮어써 `Stmt.command()`로 내보냅니다. 명령 태그가 첫 소비자입니다.
-4. **방언의 타입 서술자**: 선언 타입 텍스트를 프로토콜 중립 타입으로 바꾸는 방언 훅. 각 방언의 타입 enum 위의 망라적 switch라서 `types.zig`의 이름 표가 필요 없어지고, `UNSIGNED`, `enum`, `year`, `xml`, 배열 같은 것도 다룹니다.
-5. **확장 질의의 Describe**: 실행 전 파라미터 타입과 결과 열 타입. 지금은 표현식 열의 타입을 첫 행에서 정합니다.
-6. MySQL 프로토콜, TDS.
+2. **문장의 종류를 엔진이 기록**: `Parse`에 동사와 객체 종류를 두고 빌더 진입점이 기본값을, 방언 프론트엔드가 다르게 낮추는 문장(`SET`, `SHOW`, `TRUNCATE`, `MERGE` ...)을 덮어써 `Stmt.command()`로 내보냅니다. 명령 태그가 첫 소비자입니다.
+3. **방언의 타입 서술자**: 선언 타입 텍스트를 프로토콜 중립 타입으로 바꾸는 방언 훅. 각 방언의 타입 enum 위의 망라적 switch라서 `types.zig`의 이름 표가 필요 없어지고, `UNSIGNED`, `enum`, `year`, `xml`, 배열 같은 것도 다룹니다.
+4. **확장 질의의 Describe**: 실행 전 파라미터 타입과 결과 열 타입. 지금은 표현식 열의 타입을 첫 행에서 정합니다.
+5. MySQL 프로토콜, TDS.

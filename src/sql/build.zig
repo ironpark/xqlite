@@ -592,6 +592,7 @@ pub fn locateTable(p: *Parse, flags: u32, name: []const u8, database: ?[]const u
         } else {
             util.errorMsg(p, "{s}: {s}", .{ what, name });
         }
+        util.errorIs(p, .of("42P01"));
     }
     return t;
 }
@@ -1045,7 +1046,7 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
         };
         if (findTable(db, name, zdb)) |t| {
             if (!no_err) {
-                util.errorMsgAt(p, name_tok.z, "{s} {s} already exists", .{ if (t.isView()) "view" else "table", name_tok.slice() });
+                util.errorMsgState(p, name_tok.z, .of("42P07"), "{s} {s} already exists", .{ if (t.isView()) "view" else "table", name_tok.slice() });
             } else {
                 std.debug.assert(!db.init.busy);
                 codeVerifySchema(p, i_db);
@@ -2155,7 +2156,7 @@ fn createIndexImpl(
             }
             if (findIndex(db, name, pdb.name) != null) {
                 if (!if_not_exist) {
-                    util.errorMsg(p, "index {s} already exists", .{name});
+                    util.errorMsgState(p, null, .of("42P07"), "index {s} already exists", .{name});
                 } else if (db.init.busy) {
                     util.errorMsg(p, "", .{});
                 } else {
@@ -2952,7 +2953,7 @@ pub fn dropIndex(p: *Parse, name: ?*SrcList, if_exists: bool) void {
     const item = src.at(0);
     const idx = findIndex(db, item.name.?, item.u4.database) orelse {
         if (!if_exists) {
-            util.errorMsg(p, "no such index: {s}", .{item.name.?});
+            util.errorMsgState(p, null, .of("42704"), "no such index: {s}", .{item.name.?});
         } else {
             codeVerifyNamedSchema(p, item.u4.database);
             forceNotReadOnly(p);

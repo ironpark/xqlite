@@ -473,7 +473,7 @@ fn renameColumnImpl(p: *Parse, src: *SrcList, old: Token, new: Token) Oom!void {
     const z_old = (try build.nameFromToken(p.arena, old)).?;
     const i_col = build.columnIndex(t, z_old);
     if (i_col < 0) {
-        util.errorMsgAt(p, old.z, "no such column: \"{s}\"", .{old.slice()});
+        util.errorMsgState(p, old.z, .of("42703"), "no such column: \"{s}\"", .{old.slice()});
         return;
     }
 
@@ -1455,7 +1455,7 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
     const z_col = (try build.nameFromToken(p.arena, name)).?;
     const i_col_i = build.columnIndex(t, z_col);
     if (i_col_i < 0) {
-        util.errorMsgAt(p, name.z, "no such column: \"{s}\"", .{name.slice()});
+        util.errorMsgState(p, name.z, .of("42703"), "no such column: \"{s}\"", .{name.slice()});
         return;
     }
     const i_col: usize = @intCast(i_col_i);
@@ -1797,7 +1797,7 @@ fn alterFindCol(p: *Parse, t: *Table, col: Token) Oom!?usize {
     const name = (try build.nameFromToken(p.arena, col)).?;
     const i_col = build.columnIndex(t, name);
     if (i_col < 0) {
-        util.errorMsg(p, "no such column: {s}", .{name});
+        util.errorMsgState(p, null, .of("42703"), "no such column: {s}", .{name});
         return null;
     }
     // A refusal leaves its error in `p`.

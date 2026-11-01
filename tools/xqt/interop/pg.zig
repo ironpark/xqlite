@@ -120,7 +120,7 @@ fn readBack(c: *Check, base: *BaseDb) !void {
     _ = try c.sqlite3(db, "UPDATE account SET balance = balance + 1 WHERE id = 2");
     const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT balance FROM account WHERE id = 2;\nINSERT INTO account (email) VALUES ($$new@x$$) RETURNING id;\n" });
     const got = std.mem.trimEnd(u8, out, "\n");
-    _ = c.expect(std.mem.eql(u8, got, "4.0\n302"), "read back: {s}", .{got});
+    _ = c.expect(std.mem.eql(u8, got, "4.00\n302"), "read back: {s}", .{got});
 }
 
 /// A table of CREATE SCHEMA sales is the table "sales.orders" of main:

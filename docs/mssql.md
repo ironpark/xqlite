@@ -374,7 +374,7 @@ DROP SCHEMA sales;                                         -- 비어 있어야 �
 
 | 항목 | xqlite |
 | --- | --- |
-| `decimal`/`money` | `REAL`로 저장합니다. 반올림은 되지만 정확한 십진 연산이 아니고 `2.50`이 `2.5`로 보입니다. |
+| `decimal`/`money` | `REAL`로 저장합니다. 반올림은 되지만 정확한 십진 연산이 아닙니다. API로는 `2.50`이 `2.5`이고, 셸과 서버는 `decimal(p,s)` 열을 s자리로 보여 줍니다(`2.50`, [값 표시](architecture.md#값-표시)). `CAST(x AS decimal(p,s))`도 그렇고, 그 밖의 식의 결과는 `2.5`입니다. |
 | 정수 나눗셈 | `7 / 2`는 3으로 같습니다. 0으로 나누면 SQL Server처럼 `Divide by zero error encountered.`(8134), 64비트를 넘는 정수 결과는 `Arithmetic overflow error converting expression to data type bigint.`(8115)입니다. `int` 값끼리의 연산은 2³¹을 넘어도 오류가 아닙니다. |
 | 문자열 → 수 | `'abc' + 1`처럼 실행 때 정해지는 덧셈과 비교는 SQLite처럼 0으로 바꿉니다(CAST와 저장은 SQL Server처럼 오류). |
 | `char(n)` | 공백으로 채우지 않습니다. |

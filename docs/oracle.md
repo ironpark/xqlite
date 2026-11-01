@@ -395,7 +395,7 @@ Oracle에서 스키마는 사용자입니다. 이 방언은 사용자를 공용 
 | `SYSDATE` | 서버의 시간대 | UTC | |
 | 0으로 나누기 | `ORA-01476` | 같음 | 64비트를 넘는 정수 결과는 오류가 아니라 실수(NUMBER는 38자리) |
 | 이름의 대소문자 | `"Emp"`와 `EMP`는 다름 | 같음([이름의 대소문자](#이름의-대소문자)) | SQLite의 이름 비교 |
-| `BOOLEAN`(23ai) | `TRUE`/`FALSE` | 정수 1/0 | sqlite3 API로 돌아오는 값 타입 |
+| `BOOLEAN`(23ai) | `TRUE`/`FALSE` | 정수 1/0. 셸과 서버는 `BOOLEAN` 열과 불리언 식을 `TRUE`/`FALSE`로 보여 줌([값 표시](architecture.md#값-표시)) | sqlite3 API로 돌아오는 값 타입 |
 | 오류 문구 | ORA- 메시지 | 컴파일 때와 저장 변환의 오류는 ORA- 코드와 메시지. 실행 중 제약 위반은 SQLite 문구(`UNIQUE constraint failed: T.A`) | |
 | DDL | 앞뒤로 커밋 | 커밋하지 않음([트랜잭션](#트랜잭션)) | |
 | `RETURNING` | `RETURNING ... INTO`(PL/SQL) | 지원하지 않음 | |

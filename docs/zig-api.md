@@ -105,6 +105,8 @@ src/api/errors.zig      오류 집합, ResultCode, ErrorInfo, Diagnostics
 src/api/conn.zig        오류를 연결/Diagnostics에 기록하는 공용 도우미
 src/api/func.zig        스칼라 함수, 집계(윈도우) 함수, collation 래퍼
 src/api/module.zig      타입이 있는 가상 테이블 모듈 래퍼
+src/api/types.zig       방언의 선언 타입 → 방언과 무관한 열 타입(types.Type)
+src/api/display.zig     그 방언이 보이는 값의 텍스트(display.text), 결과 열의 타입 캐시(display.Columns)
 src/api/engine.zig      엔진과의 유일한 접점 (아래 참고)
 ```
 

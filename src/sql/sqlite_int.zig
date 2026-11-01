@@ -269,6 +269,11 @@ pub const ExprListItem = struct {
     expr: ?*Expr,
     /// Name; meaning depends on `fg.e_ename`.
     e_name: ?[:0]u8 = null,
+    /// xqlite: the type of a result column that is an expression, in the
+    /// dialect of the statement ("boolean", "numeric(38,2)"), as its
+    /// frontend knows it: its declared type (sqlite3_column_decltype()),
+    /// which SQLite leaves NULL. Set by the lowering of the IR.
+    xq_type: ?[:0]const u8 = null,
     fg: packed struct {
         sort_flags: u8 = 0,
         e_ename: EName = .name,

@@ -197,6 +197,21 @@ CREATE TABLE t (x int);
 SELECT 1 +;
 SELECT * FORM t;
 
+-- case: arithmetic errors and integer casts
+SELECT 7 / 2, 7 % 3, 2.5::int, (-2.5)::int, ' 42 '::int, 2.5::bigint;
+SELECT 1 / 0;
+SELECT 1 % 0;
+SELECT 9223372036854775807 + 1;
+SELECT '2.5'::int;
+SELECT 40000::smallint;
+SELECT 3000000000::integer;
+
+-- case: column values as psql shows them
+CREATE TABLE v (b boolean, n numeric(6,2), n0 numeric(6,0), m numeric, ts timestamptz);
+INSERT INTO v VALUES (true, 1.5, 3, 2.5, '2024-01-02 03:04:05'), (false, 220, 4, 3, NULL);
+SELECT b, n, n0, m, ts FROM v;
+SELECT n0 = 3, b AND true, n IS NULL, NOT b, 2.5::numeric(6,2), 2::numeric(6,3), x FROM v, (SELECT n > 2 AS x FROM v) s ORDER BY 1, 7;
+
 -- case: more queries
 CREATE TABLE o (id int PRIMARY KEY, cust text, amount int, day date);
 INSERT INTO o VALUES (1, 'a', 10, '2024-01-01'), (2, 'b', 20, '2024-01-02'), (3, 'a', 30, '2024-02-01'), (4, 'c', NULL, '2024-02-03'), (5, 'b', 5, NULL);

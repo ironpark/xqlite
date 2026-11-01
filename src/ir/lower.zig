@@ -742,6 +742,7 @@ pub const Lowerer = struct {
             },
             .expr => |x| {
                 list = try ir.list.append(p, list, try l.expr(x.e));
+                if (try l.resultType(x.e)) |t| list.?.items.items[list.?.len() - 1].xq_type = t;
                 if (x.alias) |a| {
                     try ir.list.setName(p, list, try l.nameTok(a), true);
                 } else if (x.name) |name| {
@@ -750,6 +751,29 @@ pub const Lowerer = struct {
             },
         };
         return list;
+    }
+
+    /// The type of the result column `e`, an expression, where the IR
+    /// says it (ExprListItem.xq_type): a comparison or a logical operation
+    /// is a boolean in every dialect, a cast is of its target type.
+    fn resultType(l: *Lowerer, e: *const tree.Expr) Error!?[:0]const u8 {
+        return switch (e.kind) {
+            .boolean, .compare, .in_list, .in_select, .exists, .between, .like, .is_null, .is_bool => "boolean",
+            .unary => |u| if (u.op == .not) "boolean" else null,
+            .binary => |b| if (b.op == .@"and" or b.op == .@"or") "boolean" else null,
+            .collate => |c| l.resultType(c.e),
+            .cast => |c| if (c.target_type.len == 0)
+                null
+            else switch (c.mode) {
+                // A scale the spelling leaves out (PostgreSQL's numeric).
+                .round => |s| if (std.mem.indexOfScalar(u8, c.target_type, '(') == null and s > 0)
+                    try std.fmt.allocPrintSentinel(l.p.arena, "{s}(38,{d})", .{ c.target_type, s }, 0)
+                else
+                    try l.p.arena.dupeSentinel(u8, c.target_type, 0),
+                else => try l.p.arena.dupeSentinel(u8, c.target_type, 0),
+            },
+            else => null,
+        };
     }
 
     fn with(l: *Lowerer, w: *const tree.With) Error!*int.With {

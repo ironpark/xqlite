@@ -515,8 +515,24 @@ fn xqError(line: []const u8) ?[]const u8 {
     return null;
 }
 
+/// The shell shows a boolean column as psql does (t/f) and a boolean
+/// expression as 1/0: t/f become 1/0, as in normPg().
 fn normXqPg(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
-    return normXq(gpa, text);
+    const t = try normXq(gpa, text);
+    defer gpa.free(t);
+    var out: std.ArrayList(u8) = .empty;
+    var it = lines(t);
+    while (it.next()) |line| {
+        var fields = std.mem.splitScalar(u8, line, '|');
+        var first = true;
+        while (fields.next()) |f| {
+            if (!first) try out.append(gpa, '|');
+            first = false;
+            try out.appendSlice(gpa, if (std.mem.eql(u8, f, "t")) "1" else if (std.mem.eql(u8, f, "f")) "0" else f);
+        }
+        try out.append(gpa, '\n');
+    }
+    return out.toOwnedSlice(gpa);
 }
 
 fn normXqMaria(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
@@ -792,6 +808,8 @@ fn normOra(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
 /// xqlite's errors as "ERROR: ORA-nnnnn": the dialect's own carry the
 /// code; SQLite's constraint failures get the code Oracle gives them.
 /// Reals without a fraction lose their ".0" (Oracle's NUMBER has none).
+/// A BOOLEAN column shows TRUE/FALSE (an expression 1/0): 1/0, as in
+/// normOra().
 fn normXqOra(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
     const t = try normXq(gpa, text);
     defer gpa.free(t);
@@ -825,7 +843,9 @@ fn normXqOra(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
         while (fields.next()) |f| {
             if (!first) try out.append(gpa, '|');
             first = false;
-            if (f.len > 1 and f[0] == '.' and std.ascii.isDigit(f[1])) {
+            if (std.mem.eql(u8, f, "TRUE") or std.mem.eql(u8, f, "FALSE")) {
+                try out.append(gpa, if (f[0] == 'T') '1' else '0');
+            } else if (f.len > 1 and f[0] == '.' and std.ascii.isDigit(f[1])) {
                 // TO_CHAR writes Oracle's .5
                 try out.print(gpa, "0{s}", .{f});
             } else if (f.len > 2 and f[0] == '-' and f[1] == '.' and std.ascii.isDigit(f[2])) {

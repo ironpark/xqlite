@@ -17,6 +17,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 - [새 프론트엔드 붙이기](#새-프론트엔드-붙이기)
 - [방언 훅](#방언-훅)
 - [오류 코드](#오류-코드)
+- [값 표시](#값-표시)
 - [엄격한 타입](#엄격한-타입)
 - [카탈로그와 시퀀스](#카탈로그와-시퀀스)
 - [VFS](#vfs)
@@ -282,6 +283,24 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 - `xqlite: ... is not supported` 형식의 메시지는 형식 문자열에서 컴파일 시점에 `0A000`(feature_not_supported)이 됩니다.
 - 무엇인지 모르는 오류는 SQLSTATE가 없습니다. 확장 결과 코드가 구분하는 오류(제약, BUSY, INTERRUPT)는 그 코드로 알 수 있습니다.
 - 새 오류를 낼 때는 그 방언의 SQLSTATE와 번호를 함께 적습니다. 실제 서버의 번호를 확신할 수 없으면 SQLSTATE만 적습니다(번호 0).
+
+## 값 표시
+
+엔진은 값을 SQLite처럼 저장하고 돌려줍니다. 불리언은 0/1, `numeric(10,2)`는 끝의 0이 없는 수, `timestamptz`는 오프셋 없는 UTC 텍스트입니다. 셸과 와이어 프로토콜은 그 방언의 클라이언트가 보는 텍스트로 보여 줍니다. C API와 Zig API가 돌려주는 값은 그대로입니다.
+
+- `xqlite.types`(`src/api/types.zig`): 방언의 선언 타입 → 방언과 무관한 `Type`(`boolean`, `int4`, `numeric(10,2)`, `timestamp_tz` ...). 테이블을 만든 방언으로 읽으므로, PostgreSQL 연결이 MSSQL이 만든 `bit` 열을 읽어도 `boolean`입니다.
+- `xqlite.display.Columns`: 결과 열의 타입. 테이블 열이면 카탈로그(`xq_catalog`의 `type`)에서, 스키마 버전마다 한 번 읽습니다. 식이면 공용 내림(`lower.zig`의 `resultType()`)이 IR에서 정한 타입입니다: 비교, `AND`/`OR`/`NOT`, `IS`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, 불리언 상수는 어느 방언에서나 불리언이고, 캐스트는 그 대상 타입입니다(`2.5::numeric(6,2)`, `CAST(x AS DECIMAL(6,2))`). 엔진은 그것을 그 열의 선언 타입(`sqlite3_column_decltype()`)으로 남깁니다. SQLite 방언의 문장은 SQLite처럼 NULL입니다. 서브쿼리와 CTE의 열은 그 타입을 이어받습니다(평탄화한 것도). 연결이 열의 출처를 기록해야 합니다(`setColumnMetadata`, Zig API의 `OpenOptions.column_metadata`; 셸은 늘 켬).
+- `xqlite.display.text(viewer, type, value)`: 그 방언이 그 값을 보이는 텍스트. SQLite와 같으면 null입니다. `viewer`는 문장을 컴파일한 방언입니다.
+
+| 방언 | 불리언 | `decimal(p,s)`/`numeric(p,s)` | 시간대 있는 타임스탬프 |
+| --- | --- | --- | --- |
+| PostgreSQL | `t`/`f` | s자리(`1.50`) | `+00`을 붙임 |
+| MariaDB | 1/0(`TINYINT(1)`) | s자리(`220.00`) | |
+| MSSQL | 1/0(`bit`) | s자리(`2.50`) | 저장할 때 이미 SQL Server 형식 |
+| Oracle | `TRUE`/`FALSE` | 끝의 0 없음(`NUMBER`, SQLite와 같음) | |
+
+- 셸은 SQL이나 JSON 값을 쓰는 스타일(`quote`, `insert`, `json`, `jobject`)에서는 SQLite 그대로 씁니다.
+- 타입을 모르는 식(`a + b`, 대부분의 함수 호출)은 SQLite처럼 보입니다. 뷰의 열도 그렇습니다: 뷰는 SQLite 텍스트로 저장되었다가 다시 컴파일되므로 IR의 타입이 남지 않습니다.
 
 ## 엄격한 타입
 

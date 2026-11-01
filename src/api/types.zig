@@ -1,19 +1,21 @@
-//! The type of a result column, as the wire protocols describe it.
+//! The type of a result column, independent of the dialect that declared
+//! it.
 //!
-//! A protocol announces each column's type before the rows (PostgreSQL's
-//! RowDescription type OID, MySQL's column definition, TDS's COLMETADATA),
-//! and the client decodes the values by it: a boolean column that SQLite
-//! stores as 0/1 must reach a PostgreSQL client as `t`/`f`. The engine
-//! keeps a table column's type in the dialect that made the table
-//! (`Stmt.columnTypeAlloc()`: `character varying(20)`, `DATETIME2(3)`,
-//! `NUMBER(10,2)`); `parse()` reads it into a `Type`, which each protocol
-//! maps to its own codes. An expression has no declared type, so it is
-//! described by the storage class of its value (`ofKind()`).
+//! The engine keeps a table column's type in the dialect that made the
+//! table (`Stmt.columnTypeAlloc()`: `character varying(20)`,
+//! `DATETIME2(3)`, `NUMBER(10,2)`); `parse()` reads it into a `Type`. The
+//! wire protocols map it to their own codes (PostgreSQL's RowDescription
+//! type OID, MySQL's column definition, TDS's COLMETADATA), and
+//! display.zig writes values as the dialect a client speaks shows them (a
+//! boolean that SQLite stores as 0/1 is `t`/`f` in PostgreSQL). An
+//! expression has no declared type, so it is described by the storage
+//! class of its value (`ofKind()`).
 
 const std = @import("std");
-const xqlite = @import("xqlite");
+const engine = @import("engine.zig");
+const value = @import("value.zig");
 
-const Dialect = xqlite.Dialect;
+const Dialect = engine.Dialect;
 
 /// The types the protocols tell apart. Each protocol maps every one to a
 /// code of its own (the nearest, where it has no exact one).
@@ -85,7 +87,7 @@ pub fn parse(dialect: Dialect, name: []const u8) Type {
 }
 
 /// The type of an expression from the storage class of its value.
-pub fn ofKind(kind: xqlite.Kind) Type {
+pub fn ofKind(kind: value.Kind) Type {
     return .{ .logical = switch (kind) {
         .integer => .int8,
         .float => .float8,

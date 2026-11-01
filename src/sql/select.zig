@@ -1026,6 +1026,31 @@ fn columnType(nc_arg: *NameContext, e: *Expr, origin: ?*Origin) ?[:0]const u8 {
     }
 }
 
+/// xqlite: the type the frontend gave a result column of a subquery
+/// (ExprListItem.xq_type) that the expression `e` reads, for a statement
+/// where the subquery stays one (not flattened).
+fn xqType(nc_arg: *NameContext, e: *Expr) ?[:0]const u8 {
+    switch (e.op) {
+        TK.COLUMN => {
+            var nc: ?*NameContext = nc_arg;
+            while (nc) |n| : (nc = n.next) {
+                for (n.src_list.?.slice()) |*item| {
+                    if (item.i_cursor != e.i_table) continue;
+                    if (!item.fg.is_subquery) return null;
+                    const ss = item.u4.subq.?.select;
+                    if (e.i_column < 0 or e.i_column >= ss.e_list.?.len()) return null;
+                    const si = ss.e_list.?.at(@intCast(e.i_column));
+                    var snc: NameContext = .{ .parse = nc_arg.parse, .src_list = ss.src, .next = n };
+                    return si.xq_type orelse xqType(&snc, si.expr.?);
+                }
+            }
+            return null;
+        },
+        TK.SELECT => return e.x.select.?.e_list.?.at(0).xq_type,
+        else => return null,
+    }
+}
+
 /// Port of generateColumnTypes(): the declared types of the result
 /// columns (sqlite3_column_decltype()), and their origins when the
 /// statement is compiled with column metadata (Vdbe.col_meta).
@@ -1041,7 +1066,7 @@ fn generateColumnTypes(p: *Parse, tab_list: *SrcList, e_list: *ExprList) void {
             if (o.tab) |x| aux.setColName(v, i, vi.COLNAME_TABLE, x);
             if (o.col) |x| aux.setColName(v, i, vi.COLNAME_COLUMN, x);
         }
-        const ty = z orelse continue;
+        const ty = z orelse item.xq_type orelse xqType(&nc, item.expr.?) orelse continue;
         if (ty.len == 0) continue;
         aux.setColName(v, i, vi.COLNAME_DECLTYPE, ty);
     }
@@ -2244,6 +2269,14 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
                 .n_sel_depth = 0,
                 .e_list = sx.e_list.?,
                 .c_list = findLeftmostExprlist(sx),
+            };
+            // xqlite: a result column that was a column of the subquery
+            // takes its type (ExprListItem.xq_type).
+            if (parent.e_list) |el| for (el.items.items) |*item| {
+                const e = item.expr orelse continue;
+                if (item.xq_type == null and e.op == TK.COLUMN and e.i_table == i_parent and e.i_column >= 0 and e.i_column < sx.e_list.?.len()) {
+                    item.xq_type = sx.e_list.?.at(@intCast(e.i_column)).xq_type;
+                }
             };
             try substSelect(&x, parent, false);
         }

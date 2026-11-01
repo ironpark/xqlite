@@ -178,8 +178,12 @@ pub const Shell = struct {
     dot_copy: std.ArrayList(u8) = .empty,
     dot_args: std.ArrayList([]const u8) = .empty,
     dot_ofst: std.ArrayList(usize) = .empty,
+    /// xqlite: the types of result columns, for showing the values of a
+    /// dialect's statement as that dialect does (qrf.Spec.columns).
+    columns: xqlite.display.Columns,
 
     fn deinit(p: *Shell) void {
+        p.columns.deinit();
         p.mode.deinit(p.gpa);
         for (p.mode_stack.items) |*m| m.deinit(p.gpa);
         p.mode_stack.deinit(p.gpa);
@@ -545,6 +549,7 @@ fn saveErrMsg(p: *Shell, phase: []const u8, rc: i32, z: ?[]const u8) Allocator.E
 fn shellExec(p: *Shell, mode: *const Mode, text: []const u8, err_msg: ?*?[]u8) Error!i32 {
     if (err_msg) |e| e.* = null;
     var spec = mode.spec;
+    spec.columns = &p.columns;
     const style = mode_info[mode.e_mode].style;
     if (mode.auto_screen_width) spec.screen_width = p.screenWidth();
     if (spec.blob == .auto) {
@@ -2088,6 +2093,9 @@ pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: [
     // defensive mode (SQLITE_DBCONFIG_DEFENSIVE on).
     _ = sql.main.dbConfig(db, .trusted_schema, 0);
     _ = sql.main.dbConfig(db, .defensive, 1);
+    // xqlite: result columns know the table column they read, which gives
+    // their declared type in the dialect (Shell.columns).
+    db.col_metadata = true;
     // The extensions the sqlite3 shell builds in.
     if (xqlite.config.ext_series) _ = xqlite.ext.series.init(db);
     // For differential testing against an sqlite3 built with vtablog.c
@@ -2108,6 +2116,7 @@ pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: [
         .stdin = &stdin_reader.interface,
         .stdin_is_interactive = std.c.isatty(0) != 0 and cmds.len == 0,
         .stdout_is_console = std.c.isatty(1) != 0,
+        .columns = .init(gpa),
     };
     defer p.deinit();
     // Port of modeDefault().

@@ -402,6 +402,11 @@ pub fn setColumnMetadata(h: *Handle, on: bool) void {
     h.col_metadata = on;
 }
 
+/// The dialect the statement was compiled in.
+pub fn statementDialect(v: *const Vm) Dialect {
+    return v.xq_lang.dialect;
+}
+
 /// Whether the statement counts the rows it changes (an INSERT, UPDATE or
 /// DELETE, as the dialects lower theirs): what sqlite3_changes() reports
 /// after it.

@@ -38,6 +38,8 @@ pub const EnumStorage = api.EnumStorage;
 pub const free = api.free;
 pub const FunctionOptions = api.FunctionOptions;
 pub const Args = api.Args;
+pub const types = api.types;
+pub const display = api.display;
 pub const FilterArgs = api.FilterArgs;
 
 comptime {

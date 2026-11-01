@@ -1026,6 +1026,99 @@ test "zig api: each dialect's arithmetic errors and foreign keys" {
     try expectState(&db, "SELECT 3000000000::integer", "22003", null);
 }
 
+/// Column `i` of the first row of `sql` as `db`'s dialect shows it (the
+/// text in `buf`).
+fn shown(db: *Db, cols: *xqlite.display.Columns, sql: []const u8, i: usize, buf: []u8) ![]const u8 {
+    var s = try db.prepare(sql);
+    defer s.finalize();
+    try testing.expect(try s.step());
+    const cell = try s.column(xqlite.Value, i);
+    var tbuf: [xqlite.display.max_len]u8 = undefined;
+    const t = (try cols.ofStmt(&s, i)) orelse return std.fmt.bufPrint(buf, "{f}", .{fmtCell(cell)});
+    const z = xqlite.display.text(db.dialect(), t.type, cell, &tbuf) orelse return std.fmt.bufPrint(buf, "{f}", .{fmtCell(cell)});
+    return std.fmt.bufPrint(buf, "{s}", .{z});
+}
+
+fn fmtCell(c: xqlite.Value) std.fmt.Alt(xqlite.Value, writeCell) {
+    return .{ .data = c };
+}
+
+fn writeCell(c: xqlite.Value, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (c) {
+        .null => try w.writeAll("NULL"),
+        .integer => |v| try w.print("{d}", .{v}),
+        .float => |v| try w.print("{d}", .{v}),
+        .text, .blob => |v| try w.writeAll(v),
+    }
+}
+
+test "zig api: values as the dialect shows them, of columns and expressions" {
+    const D = xqlite.Dialect;
+    var buf: [64]u8 = undefined;
+    if (D.postgres.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres, .column_metadata = true });
+        defer db.close();
+        var cols: xqlite.display.Columns = .init(gpa);
+        defer cols.deinit();
+        try db.exec("CREATE TABLE t (a int, b int, ok boolean, n numeric(6,2), ts timestamptz)");
+        try db.exec("INSERT INTO t VALUES (1, 2, true, 1.5, '2024-01-02 03:04:05')");
+        const cases = [_]struct { []const u8, []const u8 }{
+            .{ "SELECT ok FROM t", "t" },
+            .{ "SELECT n FROM t", "1.50" },
+            .{ "SELECT ts FROM t", "2024-01-02 03:04:05+00" },
+            .{ "SELECT a = b FROM t", "f" },
+            .{ "SELECT true", "t" },
+            .{ "SELECT a < b AND ok FROM t", "t" },
+            .{ "SELECT a IS NULL FROM t", "f" },
+            .{ "SELECT 2.5::numeric(6,2)", "2.50" },
+            .{ "SELECT x FROM (SELECT a = b AS x FROM t) s", "f" },
+            .{ "SELECT x FROM (SELECT DISTINCT a = b AS x FROM t LIMIT 1) s", "f" },
+            .{ "SELECT a + b FROM t", "3" },
+        };
+        for (cases) |c| {
+            errdefer std.debug.print("{s}\n", .{c[0]});
+            try testing.expectEqualStrings(c[1], try shown(&db, &cols, c[0], 0, &buf));
+        }
+        // The declared type of an expression is its dialect's.
+        var s = try db.prepare("SELECT a = b, a + b FROM t");
+        defer s.finalize();
+        try testing.expectEqualStrings("boolean", s.columnDecltype(0).?);
+        try testing.expectEqual(@as(?[:0]const u8, null), s.columnDecltype(1));
+    }
+    if (D.mariadb.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .mariadb, .column_metadata = true });
+        defer db.close();
+        var cols: xqlite.display.Columns = .init(gpa);
+        defer cols.deinit();
+        try db.exec("CREATE TABLE t (b BOOLEAN, d DECIMAL(6,2))");
+        try db.exec("INSERT INTO t VALUES (TRUE, 220)");
+        try testing.expectEqualStrings("1", try shown(&db, &cols, "SELECT b FROM t", 0, &buf));
+        try testing.expectEqualStrings("220.00", try shown(&db, &cols, "SELECT d FROM t", 0, &buf));
+        try testing.expectEqualStrings("2.50", try shown(&db, &cols, "SELECT CAST(2.5 AS DECIMAL(6,2))", 0, &buf));
+    }
+    if (D.oracle.built()) {
+        var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .oracle, .column_metadata = true });
+        defer db.close();
+        var cols: xqlite.display.Columns = .init(gpa);
+        defer cols.deinit();
+        try db.exec("CREATE TABLE t (b BOOLEAN, n NUMBER(6,2))");
+        try db.exec("INSERT INTO t VALUES (TRUE, 1.5)");
+        try testing.expectEqualStrings("TRUE", try shown(&db, &cols, "SELECT b FROM t", 0, &buf));
+        try testing.expectEqualStrings("1.5", try shown(&db, &cols, "SELECT n FROM t", 0, &buf));
+    }
+    // SQLite's: as stored, and no declared type for an expression.
+    var db = try Db.open(gpa, testing.io, ":memory:", .{ .column_metadata = true });
+    defer db.close();
+    var cols: xqlite.display.Columns = .init(gpa);
+    defer cols.deinit();
+    try db.exec("CREATE TABLE t (ok BOOLEAN, n NUMERIC(6,2)); INSERT INTO t VALUES (1, 1.5)");
+    try testing.expectEqualStrings("1", try shown(&db, &cols, "SELECT ok FROM t", 0, &buf));
+    try testing.expectEqualStrings("1.5", try shown(&db, &cols, "SELECT n FROM t", 0, &buf));
+    var s = try db.prepare("SELECT 1 = 1");
+    defer s.finalize();
+    try testing.expectEqual(@as(?[:0]const u8, null), s.columnDecltype(0));
+}
+
 test "zig api: Diagnostics carry the SQLSTATE and the dialect's number" {
     var diag: xqlite.Diagnostics = .{};
     var db = try Db.open(gpa, testing.io, ":memory:", .{ .diagnostics = &diag });

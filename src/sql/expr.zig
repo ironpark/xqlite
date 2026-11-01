@@ -744,6 +744,7 @@ pub fn listDup(a: Allocator, l_arg: ?*ExprList) Oom!?*ExprList {
             }
         };
         if (old.e_name) |z| item.e_name = try a.dupeSentinel(u8, z, 0);
+        if (old.xq_type) |z| item.xq_type = try a.dupeSentinel(u8, z, 0);
         n.items.appendAssumeCapacity(item);
     }
     return n;

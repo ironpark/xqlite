@@ -313,7 +313,12 @@ fn castTo(s: *Parser, pos: u32, e: *Expr) Error!*Expr {
     if (t.isAnyKw(&.{ "DECIMAL", "DEC", "NUMERIC", "FIXED" })) {
         // round(e, scale), an integer without a scale.
         const real = try s.mk(pos, .{ .cast = .{ .e = e, .target_type = "DOUBLE", .mode = .{ .affinity = "REAL" } } });
-        if (scale) |sc| if (sc > 0) return s.func(pos, "round", &.{ real, try s.int_(pos, sc) });
+        // The cast (a REAL already) keeps the type for the column
+        // (ExprListItem.xq_type: 2.50, not 2.5).
+        if (scale) |sc| if (sc > 0) {
+            const spelling = try std.fmt.allocPrint(s.a, "DECIMAL({d},{d})", .{ len orelse 10, sc });
+            return s.mk(pos, .{ .cast = .{ .e = try s.func(pos, "round", &.{ real, try s.int_(pos, sc) }), .target_type = spelling, .mode = .{ .affinity = "REAL" } } });
+        };
         const r = try s.func(pos, "round", &.{real});
         return s.mk(pos, .{ .cast = .{ .e = r, .target_type = t.text, .mode = .{ .affinity = "INTEGER" } } });
     }

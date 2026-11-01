@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const xqlite = @import("xqlite");
-const types = @import("types.zig");
+const types = xqlite.types;
 const errors = @import("errors.zig");
 const command = @import("command.zig");
 
@@ -32,7 +32,7 @@ aborted: bool = false,
 /// The columns of the statement being described.
 scratch: std.heap.ArenaAllocator,
 /// The declared types of the table columns described so far.
-type_cache: TypeCache,
+type_cache: xqlite.display.Columns,
 
 pub const Options = struct {
     /// How to open the database; `dialect` is the client's.
@@ -234,66 +234,16 @@ fn fail(s: *Session, sink: anytype, at: usize, cmd: command.Command) !void {
 fn describe(s: *Session, stmt: *xqlite.Stmt, has_row: bool) ![]Column {
     const cols = try s.scratch.allocator().alloc(Column, stmt.columnCount());
     for (cols, 0..) |*c, i| {
-        const origin = stmt.columnOrigin(i);
-        const declared: ?TypeCache.Entry = if (origin) |o| try s.type_cache.get(&s.db, stmt, i, o) else null;
+        const declared = try s.type_cache.ofStmt(stmt, i);
         c.* = .{
             .name = stmt.columnName(i),
-            .origin = origin,
+            .origin = stmt.columnOrigin(i),
             .type_name = if (declared) |d| d.name else null,
             .type = if (declared) |d| d.type else if (has_row) types.ofKind(stmt.columnKind(i)) else .{ .logical = .unknown },
         };
     }
     return cols;
 }
-
-/// The declared types of table columns, read from the catalog once per
-/// schema version: describing a result would otherwise query xq_catalog
-/// for each column of each statement.
-const TypeCache = struct {
-    arena: std.heap.ArenaAllocator,
-    /// By "database\x00table\x00column".
-    map: std.StringHashMapUnmanaged(Entry) = .empty,
-
-    const Entry = struct {
-        /// The schema version of the column's database when it was read.
-        version: u32,
-        type: types.Type,
-        name: []const u8,
-    };
-
-    fn init(gpa: Allocator) TypeCache {
-        return .{ .arena = .init(gpa) };
-    }
-
-    fn deinit(c: *TypeCache) void {
-        c.arena.deinit();
-    }
-
-    /// The declared type of result column `i` of `stmt`, which reads `o`.
-    fn get(c: *TypeCache, db: *const xqlite.Db, stmt: *xqlite.Stmt, i: usize, o: xqlite.Origin) !?Entry {
-        const version = db.schemaVersion(o.database) orelse return null;
-        var key_buf: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&key_buf, "{s}\x00{s}\x00{s}", .{ o.database, o.table, o.column }) catch return c.read(stmt, i, version);
-        if (c.map.get(key)) |e| {
-            if (e.version == version) return e;
-            // The schema changed: forget everything read before.
-            c.map = .empty;
-            _ = c.arena.reset(.retain_capacity);
-        }
-        const e = try c.read(stmt, i, version) orelse return null;
-        const a = c.arena.allocator();
-        try c.map.put(a, try a.dupe(u8, key), e);
-        return e;
-    }
-
-    fn read(c: *TypeCache, stmt: *xqlite.Stmt, i: usize, version: u32) !?Entry {
-        const t = stmt.columnTypeAlloc(c.arena.allocator(), i) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return null,
-        } orelse return null;
-        return .{ .version = version, .type = types.parse(t.dialect, t.text), .name = t.text };
-    }
-};
 
 // ================================================================== tests
 

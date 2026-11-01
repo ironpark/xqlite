@@ -439,7 +439,7 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 
 | 항목 | xqlite |
 | --- | --- |
-| `DECIMAL` | `REAL`로 저장합니다(scale 0이고 정밀도 18 이하면 `INTEGER`). 반올림은 되지만 정확한 십진 연산이 아니고 `220.00`이 `220.0`으로 보입니다. |
+| `DECIMAL` | `REAL`로 저장합니다(scale 0이고 정밀도 18 이하면 `INTEGER`). 반올림은 되지만 정확한 십진 연산이 아닙니다. API로는 `220.00`이 `220.0`이고, 셸과 서버는 `DECIMAL(p,s)` 열을 s자리로 보여 줍니다(`220.00`, [값 표시](architecture.md#값-표시)). `CAST(x AS DECIMAL(p,s))`도 그렇고, 그 밖의 식의 결과는 `220.0`입니다. |
 | 정수 값의 실수 | `POW(2,10)`이 `1024.0`처럼 SQLite 형식으로 보입니다. |
 | `BIGINT UNSIGNED`, `CAST(... AS UNSIGNED)` | 부호 있는 64비트 범위입니다. |
 | `TIMESTAMP` | 시간대 변환이 없고 범위도 `DATETIME`과 같습니다. 시간대는 UTC입니다. |

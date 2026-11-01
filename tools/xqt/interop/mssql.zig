@@ -144,7 +144,7 @@ fn readBack(c: *Check, base: *BaseDb) !void {
     _ = try c.sqlite3(db, "UPDATE account SET balance = balance + 1 WHERE id = 2");
     const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect mssql\nSELECT balance, half FROM account WHERE id = 2;\nINSERT INTO account (email) OUTPUT INSERTED.id, INSERTED.label VALUES ('new@x');\n" });
     const got = std.mem.trimEnd(u8, out, "\n");
-    _ = c.expect(std.mem.eql(u8, got, "251.5|125.75\n4|anon:new@x"), "read back: {s}", .{got});
+    _ = c.expect(std.mem.eql(u8, got, "251.50|125.75\n4|anon:new@x"), "read back: {s}", .{got});
     try integrityOk(c, "integrity_check after writes");
 }
 

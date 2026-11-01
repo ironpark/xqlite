@@ -35,7 +35,6 @@
 | `Server.zig` | `Server(Protocol)`: 리슨, 연결마다 태스크, 연결 수 제한, 종료. `Connection`(소켓의 reader·writer, `openSession()`), `Config` |
 | `Session.zig` | 한 클라이언트의 연결. 스크립트를 문장 단위로 돌려 이벤트로 알림. 트랜잭션 상태, PostgreSQL의 실패한 트랜잭션 |
 | `Registry.zig` | 세션 id와 비밀 키, 바깥에서 오는 취소 요청, 연결 수 |
-| `types.zig` | 방언의 선언 타입 → `Type`(`boolean`, `int4`, `varchar(20)`, `timestamp_tz` ...) |
 | `errors.zig` | 오류의 SQLSTATE: 엔진·방언이 남긴 것, 없으면 확장 결과 코드의 것 |
 | `command.zig` | 문장 텍스트 → 명령(`INSERT`, `CREATE INDEX` ...) |
 | `test.zig` | 루프백 TCP 위의 테스트용 줄 프로토콜 |
@@ -64,8 +63,9 @@
 클라이언트는 행 앞에 받은 열 타입으로 값을 읽습니다. 예를 들어 PostgreSQL 방언의 `boolean` 열은 SQLite에 0/1로 저장되지만 PostgreSQL 클라이언트에는 `t`/`f`로 가야 합니다. 그래서 열의 타입은 SQLite의 선언 타입이 아니라 테이블을 만든 방언의 선언 타입(`xq_catalog`의 `type` 키)에서 옵니다.
 
 - `Stmt.columnTypeAlloc(gpa, i)`: 결과 열이 테이블 열이면 그 열의 방언 타입(`character varying(20)`, `DATETIME2(3)`, `NUMBER(10,2)`)과 그 테이블을 만든 방언, 카탈로그 항목이 없으면 SQLite 선언 타입과 `.sqlite`, 표현식이면 null. 세션의 방언이 아니라 테이블을 만든 방언으로 읽습니다(PostgreSQL 세션이 MariaDB가 만든 테이블을 읽을 때).
-- `types.parse(dialect, name)`: 이름을 `Type`(`logical`, `length`, `precision`, `scale`)으로 읽습니다. 방언마다 다른 것: SQLite의 정수·실수는 모두 64비트, MariaDB·MSSQL의 `TINYINT`는 `int1`, MSSQL의 `BIT`은 `boolean`, Oracle의 `DATE`는 시각이 있어 `timestamp`, Oracle의 `NUMBER(p)`는 자릿수에 따라 정수.
-- 각 프로토콜이 `Logical`을 자기 코드로 바꿉니다(PostgreSQL의 타입 OID, MySQL의 `MYSQL_TYPE_*`, TDS의 타입 토큰). 값의 텍스트 형식(불리언, 날짜, 바이트열)도 프로토콜이 정합니다.
+- 세션은 열의 타입을 `xqlite.display.Columns`로 읽습니다(카탈로그를 스키마 버전마다 한 번). 같은 것을 셸도 씁니다([값 표시](architecture.md#값-표시)).
+- `xqlite.types.parse(dialect, name)`: 이름을 `Type`(`logical`, `length`, `precision`, `scale`)으로 읽습니다. 방언마다 다른 것: SQLite의 정수·실수는 모두 64비트, MariaDB·MSSQL의 `TINYINT`는 `int1`, MSSQL의 `BIT`은 `boolean`, Oracle의 `DATE`는 시각이 있어 `timestamp`, Oracle의 `NUMBER(p)`는 자릿수에 따라 정수.
+- 각 프로토콜이 `Logical`을 자기 코드로 바꿉니다(PostgreSQL의 타입 OID, MySQL의 `MYSQL_TYPE_*`, TDS의 타입 토큰). 값의 텍스트는 `xqlite.display.text()`가 그 방언의 클라이언트가 보는 대로 만듭니다(PostgreSQL의 `t`/`f`, `numeric(10,2)`의 `1.50`).
 
 ## 오류 분류
 

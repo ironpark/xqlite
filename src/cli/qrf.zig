@@ -82,6 +82,12 @@ pub const Spec = struct {
     /// A printf format for floating point values (e.g. "%0.16g"), or null
     /// to use the text conversion of the value.
     fp_fmt: ?[]const u8 = null,
+    /// xqlite: the types of result columns (the connection's cache). With
+    /// it, a statement compiled in a dialect other than SQLite's shows the
+    /// values of table columns as that dialect does (xqlite.display: a
+    /// PostgreSQL boolean is t/f, a numeric(10,2) 1.50), except in the
+    /// styles that write SQL or JSON values (quote, insert, json, jobject).
+    columns: ?*xqlite.display.Columns = null,
 };
 
 pub const Error = error{ OutOfMemory, WriteFailed };
@@ -424,6 +430,41 @@ const Qrf = struct {
     n_ins: u32 = 0,
     /// The EXPLAIN QUERY PLAN rows collected so far (qrfEQPGraph).
     eqp_rows: std.ArrayList(EqpRow) = .empty,
+    /// xqlite: the type of each result column for display.text(), when
+    /// the statement's dialect shows values otherwise than SQLite (else
+    /// empty), and that dialect.
+    col_types: []?xqlite.types.Type = &.{},
+    viewer: xqlite.Dialect = .sqlite,
+
+    /// xqlite: the value of column `i_col` as the statement's dialect
+    /// shows it, if not as SQLite does.
+    fn displayText(p: *Qrf, i_col: usize, buf: *[xqlite.display.max_len]u8) ?[]const u8 {
+        if (i_col >= p.col_types.len) return null;
+        const t = p.col_types[i_col] orelse return null;
+        const cell: xqlite.Value = switch (api.columnType(p.stmt, i_col)) {
+            SQLITE_INTEGER => .{ .integer = api.columnInt64(p.stmt, i_col) },
+            SQLITE_FLOAT => .{ .float = api.columnDouble(p.stmt, i_col) },
+            SQLITE_TEXT => .{ .text = if (api.columnText(p.stmt, i_col)) |z| cstr(z) else "" },
+            else => return null,
+        };
+        return xqlite.display.text(p.viewer, t, cell, buf);
+    }
+
+    /// xqlite: col_types, for a statement of a dialect other than
+    /// SQLite's in a style that shows values as text.
+    fn initDisplay(p: *Qrf) Error!void {
+        const columns = p.spec.columns orelse return;
+        const viewer = p.stmt.xq_lang.dialect;
+        if (viewer == .sqlite or p.n_col == 0) return;
+        switch (p.spec.style) {
+            .quote, .insert, .json, .jobject, .explain, .eqp, .count, .off, .stats, .stats_est, .stats_vm => return,
+            else => {},
+        }
+        const t = try p.gpa.alloc(?xqlite.types.Type, p.n_col);
+        for (t, 0..) |*x, i| x.* = if (try columns.get(p.stmt.db, p.stmt, i)) |e| e.type else null;
+        p.col_types = t;
+        p.viewer = viewer;
+    }
 
     /// Port of qrfError().
     fn setError(p: *Qrf, code: i32, msg: []const u8) Error!void {
@@ -561,7 +602,8 @@ const hex_digits = "0123456789abcdef";
 /// Port of qrfRenderValue(): append the value of column `i_col`.
 fn renderValue(p: *Qrf, s: *Str, i_col: usize) Error!void {
     const start = s.len();
-    switch (api.columnType(p.stmt, i_col)) {
+    var display_buf: [xqlite.display.max_len]u8 = undefined;
+    if (p.displayText(i_col, &display_buf)) |z| try s.append(z) else switch (api.columnType(p.stmt, i_col)) {
         SQLITE_INTEGER => {
             try s.print("{d}", .{api.columnInt64(p.stmt, i_col)});
         },
@@ -1766,6 +1808,7 @@ pub fn format(gpa: Allocator, stmt: *Stmt, spec: Spec, w: *Writer, err_msg: *?[]
         p.line_val.deinit();
         eqpReset(&p);
         p.eqp_rows.deinit(gpa);
+        gpa.free(p.col_types);
         if (p.line_cols) |cols| {
             for (cols) |c| gpa.free(c);
             gpa.free(cols);
@@ -1773,6 +1816,7 @@ pub fn format(gpa: Allocator, stmt: *Stmt, spec: Spec, w: *Writer, err_msg: *?[]
     }
     errdefer if (p.err_msg) |m| gpa.free(m);
     initialize(&p);
+    try p.initDisplay();
     switch (p.spec.style) {
         .box, .column, .markdown, .table => try columnar(&p),
         .explain => try explain(&p),

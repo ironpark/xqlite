@@ -124,14 +124,30 @@ pub fn unique(p: *Parse, idx: *Index, has_value: bool) ?[:0]const u8 {
         .unique_index => idx.name,
         else => recordedName(p, t, kind, cols),
     };
-    return violation(p, .{ .kind = kind, .op = if (has_value) .insert else .create_index, .database = database(p, t), .table = t.name, .columns = cols, .name = name, .has_value = has_value });
+    const value_types = if (has_value) keyTypes(p, t, cols) else &.{};
+    return violation(p, .{ .kind = kind, .op = if (has_value) .insert else .create_index, .database = database(p, t), .table = t.name, .columns = cols, .name = name, .has_value = has_value, .value_types = value_types });
 }
 
 /// A duplicate rowid of `t`: its INTEGER PRIMARY KEY.
 pub fn rowid(p: *Parse, t: *Table, has_value: bool) ?[:0]const u8 {
     if (hooksOf(p) == null) return null;
     const cols = p.arena.dupe([]const u8, &.{columnName(t, -1)}) catch return oom(p);
-    return violation(p, .{ .kind = .primary_key, .op = .insert, .database = database(p, t), .table = t.name, .columns = cols, .name = recordedName(p, t, .primary_key, cols), .has_value = has_value });
+    const value_types = if (has_value) keyTypes(p, t, cols) else &.{};
+    return violation(p, .{ .kind = .primary_key, .op = .insert, .database = database(p, t), .table = t.name, .columns = cols, .name = recordedName(p, t, .primary_key, cols), .has_value = has_value, .value_types = value_types });
+}
+
+/// The types of columns `cols` of `t` in the catalog (Violation.value_types).
+fn keyTypes(p: *Parse, t: *Table, cols: []const []const u8) []const ?@import("../sql/types.zig").Type {
+    const out = p.arena.alloc(?@import("../sql/types.zig").Type, cols.len) catch return &.{};
+    @memset(out, null);
+    const m = (catalog.metaOf(p.db, t) catch return out) orelse return out;
+    for (cols, out) |c, *o| {
+        for (m.columns) |*col| if (ctype.eqlNoCase(col.name, c)) {
+            o.* = col.type;
+            break;
+        };
+    }
+    return out;
 }
 
 /// Foreign key `fk` of a child row (`kind` foreign_key) or of a parent

@@ -388,7 +388,7 @@ test "pg: startup, simple queries, errors, transactions" {
         \\
     , try c.query("SELECT 'é', ) FROM t; SELECT 1"));
     try testing.expectEqualStrings(
-        \\E 42P01 relation "nope" does not exist
+        \\E 42P01 relation "nope" does not exist @15
         \\Z I
         \\
     , try c.query("SELECT * FROM nope; SELECT 1"));
@@ -497,7 +497,7 @@ test "pg: extended queries" {
     try c.bind("", "nope", &.{}, &.{});
     try testing.expectEqualStrings("E 26000 prepared statement \"nope\" does not exist\nZ I\n", try c.sync());
     try c.parse("", "SELECT * FROM nope", &.{});
-    try testing.expectEqualStrings("E 42P01 relation \"nope\" does not exist\nZ I\n", try c.sync());
+    try testing.expectEqualStrings("E 42P01 relation \"nope\" does not exist @15\nZ I\n", try c.sync());
     try c.parse("", "", &.{});
     try c.bind("", "", &.{}, &.{});
     try c.describe('P', "");

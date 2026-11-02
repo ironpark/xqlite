@@ -603,7 +603,7 @@ fn rowCount(line: []const u8) ?u64 {
 }
 
 /// xqlite's error lines become "ERROR: message", without the lines of
-/// context under them.
+/// context under them (the caret, DETAIL, HINT, CONTEXT).
 fn normXq(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var skip = false;
@@ -616,7 +616,7 @@ fn normXq(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
             skip = true;
             continue;
         }
-        if (skip and std.mem.startsWith(u8, line, "  ")) continue;
+        if (skip and (std.mem.startsWith(u8, line, "  ") or startsWithAny(line, &.{ "DETAIL:", "HINT:", "CONTEXT:" }))) continue;
         skip = false;
         try out.appendSlice(gpa, line);
         try out.append(gpa, '\n');

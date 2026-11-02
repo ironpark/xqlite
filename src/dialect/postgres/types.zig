@@ -28,6 +28,7 @@
 //! integer out of range").
 
 const std = @import("std");
+const integer = @import("integer.zig");
 
 /// A type as PostgreSQL names it: `name` is the canonical spelling
 /// ("integer", "character varying", "timestamp with time zone" ...),
@@ -35,6 +36,9 @@ const std = @import("std");
 pub const TypeName = struct {
     name: []const u8,
     mods: []const i64 = &.{},
+    /// The fields of an interval type ("year to month", "second"; the
+    /// precision of `second(3)` is mods[0]).
+    fields: []const u8 = "",
     array: bool = false,
     pos: u32,
 };
@@ -152,7 +156,8 @@ pub fn format(a: std.mem.Allocator, ty: TypeName) ![]const u8 {
         el.array = false;
         return std.mem.concat(a, u8, &.{ try format(a, el), "[]" });
     }
-    const n = if (std.mem.endsWith(u8, ty.name, "serial")) serialBase(ty.name) else ty.name;
+    var n = if (std.mem.endsWith(u8, ty.name, "serial")) serialBase(ty.name) else ty.name;
+    if (ty.fields.len > 0) n = try std.mem.concat(a, u8, &.{ n, " ", ty.fields });
     if (std.mem.eql(u8, n, "character") and ty.mods.len == 0) return "character(1)";
     if (ty.mods.len == 0) return n;
     var mods: std.ArrayList(u8) = .empty;
@@ -228,7 +233,18 @@ pub const CastPlan = union(enum) {
     round: i64,
     /// xq_dec(x, p, s): numeric(p, s)
     numeric: [2]i64,
+    /// xq_pg_iv_in(x, typmod): an interval of the type modifier
+    /// (intervalTypmod(), -1 for none).
+    interval: i64,
 };
+
+/// The type modifier of interval type `ty` (ivinput.zig: PostgreSQL's
+/// INTERVAL_TYPMOD() of its fields and precision), -1 for none.
+pub fn intervalTypmod(ty: TypeName) i32 {
+    const ivinput = @import("ivinput.zig");
+    const range = ivinput.rangeOfText(ty.fields) orelse ivinput.full_range;
+    return ivinput.typmodOf(range, if (ty.mods.len > 0) ty.mods[0] else null);
+}
 
 pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (ty.array) return error.Array;
@@ -248,14 +264,13 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
         return .{ .func = "xq_dec" };
     }
     if (eql(u8, n, "boolean")) return .{ .func = "xq_pg_bool" };
-    if (eql(u8, n, "smallint")) return .{ .func = "xq_pg_int2" };
-    if (eql(u8, n, "integer")) return .{ .func = "xq_pg_int4" };
-    if (eql(u8, n, "bigint")) return .{ .func = "xq_pg_int8" };
+    // int2in() ... (integer.zig): 0x1F, 1_000; a real rounds to even.
+    if (integer.Width.named(n)) |w| return .{ .func = integer.castName(w) };
     // PostgreSQL's input and output of the value (datetime.zig: an
     // error for what it does not read, the fraction of a second kept, a
     // timestamptz in UTC, '90 minutes' as '01:30:00').
     if (eql(u8, n, "date")) return .{ .func = "xq_pg_date" };
-    if (eql(u8, n, "interval")) return .{ .func = "xq_pg_iv" };
+    if (eql(u8, n, "interval")) return .{ .interval = intervalTypmod(ty) };
     if (eql(u8, n, "time without time zone")) return .{ .func = "xq_pg_time" };
     if (eql(u8, n, "time with time zone")) return .{ .func = "time" };
     if (eql(u8, n, "timestamp without time zone")) return .{ .func = "xq_pg_timestamp" };

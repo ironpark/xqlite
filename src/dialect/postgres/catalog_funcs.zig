@@ -22,6 +22,7 @@
 //!    xq_pg_dt_precision() for information_schema.
 
 const std = @import("std");
+const deparse = @import("deparse.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
@@ -66,6 +67,7 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("obj_description", 2, none, objDescriptionFunc),
     dfunc.scalar("col_description", 2, none, colDescriptionFunc),
     dfunc.scalar("shobj_description", 2, det, nullFunc),
+    dfunc.scalar("pg_get_functiondef", 1, det, nullFunc),
     dfunc.scalar("pg_get_triggerdef", 1, det, nullFunc),
     dfunc.scalar("pg_get_triggerdef", 2, det, nullFunc),
     dfunc.scalar("pg_get_ruledef", 1, det, nullFunc),
@@ -398,7 +400,18 @@ fn typeVisibleFunc(ctx: *Context, argv: []*Mem) void {
     api.resultNull(ctx);
 }
 
+/// pg_get_expr(text, relation [, pretty]): conbin's and adbin's text is
+/// already PostgreSQL's; pretty, the snapshot's pretty text of it.
 fn getExprFunc(ctx: *Context, argv: []*Mem) void {
+    if (!prettyArg(argv, 2) or isNull(argv[0])) return api.resultValue(ctx, argv[0]);
+    const rel = oidArg(argv[1]) orelse return api.resultValue(ctx, argv[0]);
+    const z = dfunc.text(ctx, argv[0]) orelse return;
+    var c: Call = .init(ctx);
+    defer c.deinit();
+    const s = c.get() orelse return;
+    for (s.defs) |d| if (d.rel == rel and eql(d.bin, z)) if (d.pretty) |p| return c.text(p);
+    for (s.cons) |k| if (k.rel == rel and k.bin != null and eql(k.bin.?, z)) if (k.pretty) |p| return c.text(p);
+    for (s.indexes) |x| if (x.table == rel and x.pred != null and eql(x.pred.?, z)) if (x.pred_pretty) |p| return c.text(p);
     api.resultValue(ctx, argv[0]);
 }
 
@@ -409,18 +422,28 @@ fn indexDefFunc(ctx: *Context, argv: []*Mem) void {
     defer c.deinit();
     const s = c.get() orelse return;
     const x = s.index(oid) orelse return api.resultNull(ctx);
+    const pretty_mode = prettyArg(argv, 2);
     if (col > 0) {
         if (col > x.coldefs.len) return c.text("");
-        const d = x.coldefs[@intCast(col - 1)];
+        const defs = if (pretty_mode) x.coldefs_pretty orelse x.coldefs else x.coldefs;
+        const d = defs[@intCast(col - 1)];
         return c.text(if (std.mem.endsWith(u8, d, " DESC")) d[0 .. d.len - 5] else d);
     }
-    const z = indexDef(c.a(), s, x, prettyArg(argv, 2)) catch return c.oom();
+    const p = c.path(s) orelse return;
+    const z = indexDef(c.a(), s, x, pretty_mode, p) catch return c.oom();
     c.text(z);
 }
 
 /// The `pretty` argument at `i`, false without one.
 fn prettyArg(argv: []*Mem, i: usize) bool {
-    return argv.len > i and !isNull(argv[i]) and api.valueInt64(argv[i]) != 0;
+    if (argv.len <= i or isNull(argv[i])) return false;
+    // A boolean bound as text ('t', 'true').
+    if (api.valueType(argv[i]) == vi.SQLITE_TEXT) {
+        const z = api.valueText(argv[i]) orelse return false;
+        for ([_][]const u8{ "t", "true", "y", "yes", "on", "1" }) |w| if (std.ascii.eqlIgnoreCase(z, w)) return true;
+        return false;
+    }
+    return api.valueInt64(argv[i]) != 0;
 }
 
 /// `z` without one pair of parentheses around all of it, if it has one
@@ -499,17 +522,24 @@ fn pretty(a: Allocator, z0: []const u8) error{OutOfMemory}![]const u8 {
     return out.items;
 }
 
-pub fn indexDef(a: Allocator, s: *const Snapshot, x: *const pgc.IndexRow, pretty_mode: bool) error{OutOfMemory}![]const u8 {
+/// pg_get_indexdef(): the table qualified, pretty only where the search
+/// path does not find it (`path`).
+pub fn indexDef(a: Allocator, s: *const Snapshot, x: *const pgc.IndexRow, pretty_mode: bool, path: []const u32) error{OutOfMemory}![]const u8 {
     const ir = s.rel(x.rel) orelse return "";
     const tr = s.rel(x.table) orelse return "";
     var out: std.ArrayList(u8) = .empty;
-    try out.print(a, "CREATE {s}INDEX {s} ON {s} USING btree (", .{ if (x.unique) "UNIQUE " else "", try pgc.quoteIdent(a, ir.name), try relQualified(a, s, tr) });
-    for (x.coldefs, 0..) |d, i| {
+    const table = if (pretty_mode) try relText(a, s, path, tr) else try relQualified(a, s, tr);
+    try out.print(a, "CREATE {s}INDEX {s} ON {s} USING btree (", .{ if (x.unique) "UNIQUE " else "", try pgc.quoteIdent(a, ir.name), table });
+    const defs = if (pretty_mode) x.coldefs_pretty orelse x.coldefs else x.coldefs;
+    for (defs, 0..) |d, i| {
         if (i > 0) try out.appendSlice(a, ", ");
         try out.appendSlice(a, d);
     }
     try out.append(a, ')');
-    if (x.pred) |p| {
+    if (x.pred_pretty) |pp| {
+        // deparse.zig's: as PostgreSQL prints it.
+        try out.print(a, " WHERE {s}", .{if (pretty_mode) pp else x.pred.?});
+    } else if (x.pred) |p| {
         if (pretty_mode) {
             try out.print(a, " WHERE {s}", .{try pretty(a, p)});
         } else if (unwrap(p) != null) try out.print(a, " WHERE {s}", .{p}) else try out.print(a, " WHERE ({s})", .{p});
@@ -563,7 +593,10 @@ pub fn constraintDef(a: Allocator, s: *const Snapshot, p: []const u32, k: *const
         },
         'c' => {
             const b = k.bin orelse "";
-            if (pretty_mode) {
+            if (k.pretty) |pz| {
+                // deparse.zig's: as PostgreSQL prints it.
+                try out.print(a, "CHECK ({s})", .{if (pretty_mode) pz else b});
+            } else if (pretty_mode) {
                 try out.print(a, "CHECK ({s})", .{try pretty(a, b)});
             } else if (unwrap(b) != null) try out.print(a, "CHECK ({s})", .{b}) else try out.print(a, "CHECK (({s}))", .{b});
         },
@@ -586,8 +619,39 @@ fn viewDefFunc(ctx: *Context, argv: []*Mem) void {
         break :blk s.rel(oid orelse return api.resultNull(ctx)) orelse return api.resultNull(ctx);
     };
     const sql = r.sql orelse return api.resultNull(ctx);
-    const z = viewQuery(c.a(), s, sql) catch return c.oom();
+    const p = c.path(s) orelse return;
+    const z = viewDef(c.a(), s, p, r, sql, prettyArg(argv, 1)) catch return c.oom();
     c.text(z);
+}
+
+/// The columns of relation `oid` (contiguous in the snapshot).
+fn relAttrs(s: *const Snapshot, oid: u32) []const pgc.Attr {
+    var i: usize = 0;
+    while (i < s.attrs.len and s.attrs[i].rel != oid) i += 1;
+    var j = i;
+    while (j < s.attrs.len and s.attrs[j].rel == oid and s.attrs[j].num > 0) j += 1;
+    return s.attrs[i..j];
+}
+
+const ViewCtx = struct { a: Allocator, s: *const Snapshot, p: []const u32, db: []const u8 };
+
+fn viewSource(c: ViewCtx, name: []const u8) error{OutOfMemory}!?deparse.Resolved {
+    for (c.s.rels) |*r| {
+        if ((r.kind != 'r' and r.kind != 'v') or !eql(r.db, c.db) or !std.ascii.eqlIgnoreCase(r.sqlite_name, name)) continue;
+        return .{ .shown = try relText(c.a, c.s, c.p, r), .attrs = relAttrs(c.s, r.oid) };
+    }
+    return null;
+}
+
+/// pg_get_viewdef() of view `r` (CREATE VIEW text `sql`): deparse.zig's,
+/// else the query as the schema has it.
+fn viewDef(a: Allocator, s: *const Snapshot, p: []const u32, r: *const pgc.Rel, sql: []const u8, pretty_mode: bool) error{OutOfMemory}![]const u8 {
+    const attrs = relAttrs(s, r.oid);
+    const names = try a.alloc([]const u8, attrs.len);
+    for (attrs, names) |at, *n| n.* = at.name;
+    const ctx: ViewCtx = .{ .a = a, .s = s, .p = p, .db = r.db };
+    if (try deparse.viewDef(a, sql, names, ctx, viewSource, pretty_mode)) |z| return z;
+    return viewQuery(a, s, sql);
 }
 
 /// The query of a view's CREATE VIEW text, as pg_get_viewdef() writes it

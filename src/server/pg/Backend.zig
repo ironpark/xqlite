@@ -835,7 +835,9 @@ fn dataRow(b: *Backend, r: *Session.Row, types: []const xqlite.types.Type, oids:
 fn commandComplete(b: *Backend, c: Session.Complete) !void {
     try b.out.begin('C');
     switch (c.command.verb) {
-        .select, .values => try b.out.print("SELECT {d}", .{c.rows}),
+        // SELECT ... INTO: the rows it stored (counted changes).
+        .select, .values => try b.out.print("SELECT {d}", .{c.rows + c.changes}),
+        .create => if (c.command.as_query) try b.out.print("SELECT {d}", .{c.changes}) else try b.out.print("{f}", .{c.command}),
         .insert => try b.out.print("INSERT 0 {d}", .{c.changes}),
         .update => try b.out.print("UPDATE {d}", .{c.changes}),
         .delete => try b.out.print("DELETE {d}", .{c.changes}),
@@ -867,12 +869,26 @@ fn errorResponse(b: *Backend, severity: []const u8, code: *const [5]u8, message:
     }
     try b.out.int(u8, 'C');
     try b.out.string(code);
+    // A message's DETAIL, HINT and CONTEXT lines are fields of their own.
+    const f = xqlite.ErrorInfo.fields(message);
     try b.out.int(u8, 'M');
-    try b.out.string(message);
+    try b.out.string(f.message);
+    if (f.detail) |d| {
+        try b.out.int(u8, 'D');
+        try b.out.string(d);
+    }
+    if (f.hint) |h| {
+        try b.out.int(u8, 'H');
+        try b.out.string(h);
+    }
     if (position) |p| {
         try b.out.int(u8, 'P');
         try b.out.print("{d}", .{p});
         try b.out.string("");
+    }
+    if (f.context) |w| {
+        try b.out.int(u8, 'W');
+        try b.out.string(w);
     }
     try b.out.int(u8, 0);
     try b.out.end();

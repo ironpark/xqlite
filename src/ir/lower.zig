@@ -237,10 +237,31 @@ pub const Lowerer = struct {
     /// typeOf()).
     pub fn expr(l: *Lowerer, e: *const tree.Expr) Error!*IrExpr {
         const x = try l.exprNode(e);
+        // An operator is at its own text: an error about it (an operator
+        // that does not exist) points there.
+        const operands: ?[2]*const tree.Expr = switch (e.kind) {
+            .binary => |b| .{ b.l, b.r },
+            .div => |d| .{ d.l, d.r },
+            .compare => |c| .{ c.l, c.r },
+            else => null,
+        };
+        if (operands) |o| l.markOperator(x, o[0], o[1]);
+        if (e.kind == .unary and x.w.ofst == 0 and !x.useWJoin() and (x.op == TK.UMINUS or x.op == TK.BITNOT)) {
+            x.w = .{ .ofst = expr_mod.tokenOffset(l.p, l.tokAt(e.pos, 0)) };
+        }
         const t = try l.typeOf(e, x);
         if (t != typing.unknown) x.xq_type = t;
         if (l.origins) |o| try o.exprs.put(l.arena(), e, x);
         return x;
+    }
+
+    /// The offset of operator `x` of operands `a` and `b`: the text
+    /// between them (after a closing parenthesis).
+    fn markOperator(l: *Lowerer, x: *IrExpr, a: *const tree.Expr, b: *const tree.Expr) void {
+        if (x.w.ofst != 0 or x.useWJoin() or x.left == null) return;
+        var i: usize = a.end;
+        while (i < b.pos and i < l.src.len and (std.ascii.isWhitespace(l.src[i]) or l.src[i] == ')')) i += 1;
+        if (i < b.pos and i < l.src.len) x.w = .{ .ofst = expr_mod.tokenOffset(l.p, l.tokAt(@intCast(i), 0)) };
     }
 
     /// The type of `e`, lowered to `x`, where the IR says it (Expr.xq_type,
@@ -349,7 +370,10 @@ pub const Lowerer = struct {
                 switch (c.null_policy) {
                     .propagate => {
                         var x = try l.expr(c.args[0]);
-                        for (c.args[1..]) |a| x = try ir.expr.binary(p, TK.CONCAT, x, try l.expr(a));
+                        for (c.args[1..], c.args[0 .. c.args.len - 1]) |a, prev| {
+                            x = try ir.expr.binary(p, TK.CONCAT, x, try l.expr(a));
+                            l.markOperator(x, prev, a);
+                        }
                         return x;
                     },
                     .skip => return ir.expr.functionCall(p, try functionName(p, "concat", null, false), try l.exprList(c.args)),
@@ -480,7 +504,10 @@ pub const Lowerer = struct {
         const x = try l.expr(c.e);
         switch (c.mode) {
             .affinity => |t| return ir.expr.cast(p, x, Token.init(t)),
-            .func => |f| return l.call(f, &.{x}),
+            .func => |f| {
+                try l.readLiteral(f, x);
+                return l.call(f, &.{x});
+            },
             .truncate => |n| return l.call("substr", &.{ try ir.expr.cast(p, x, Token.init("TEXT")), try l.intConst(1), try l.intConst(n) }),
             .round => |s| return ir.expr.cast(p, try l.call("round", &.{ x, try l.intConst(s) }), Token.init("NUMERIC")),
             .typed => |t| return l.call(t.func, &.{ x, try l.strConst(t.type_arg) }),
@@ -488,9 +515,17 @@ pub const Lowerer = struct {
                 var args: std.ArrayList(*IrExpr) = .empty;
                 try args.append(l.arena(), x);
                 for (f.args) |v| try args.append(l.arena(), try l.intConst(v));
+                try l.readLiteral(f.func, x);
                 return l.call(f.func, args.items);
             },
         }
+    }
+
+    /// A string literal cast with engine function `name` is read now
+    /// where the dialect reads it so (typing.readLiteral()): an error
+    /// fails the statement at the literal.
+    fn readLiteral(l: *Lowerer, name: []const u8, x: *const IrExpr) Error!void {
+        if (try typing.readLiteralWith(l.p, name, x)) try l.check();
     }
 
     /// LIKE: SQLite's operator when it means the same (ASCII letters
@@ -892,6 +927,7 @@ pub const Lowerer = struct {
                     } else {
                         list = try ir.from.appendTerm(p, list, try l.nameTok(q.name), null, alias, null, &ou);
                     }
+                    l.markName(list, q);
                 },
                 .subquery => |s| {
                     var sel = try l.select(s);
@@ -999,8 +1035,21 @@ pub const Lowerer = struct {
     /// The target of INSERT/UPDATE/DELETE.
     fn target(l: *Lowerer, q: tree.QName, alias: ?tree.Name) Error!?*SrcList {
         const a: Token = if (alias) |x| try l.nameTok(x) else .{};
-        if (q.schema) |s| return ir.from.fullName(l.p, try l.nameTok(s), try l.nameTok(q.name), a);
-        return ir.from.fullName(l.p, try l.nameTok(q.name), .{}, a);
+        const list = if (q.schema) |s|
+            try ir.from.fullName(l.p, try l.nameTok(s), try l.nameTok(q.name), a)
+        else
+            try ir.from.fullName(l.p, try l.nameTok(q.name), .{}, a);
+        l.markName(list, q);
+        return list;
+    }
+
+    /// The offset of table name `q` on the last item of `list`
+    /// (SrcItem.xq_ofst), where an error about it points.
+    fn markName(l: *Lowerer, list: ?*SrcList, q: tree.QName) void {
+        const sl = list orelse return;
+        if (sl.len() == 0) return;
+        const pos = if (q.schema) |s| s.pos else q.name.pos;
+        sl.at(sl.len() - 1).xq_ofst = expr_mod.tokenOffset(l.p, l.tokAt(pos, 0));
     }
 
     /// The table named by `q`, if it exists (the schema is read first).
@@ -1385,9 +1434,13 @@ pub const Lowerer = struct {
     /// DROP TABLE/VIEW (with its catalog entries and identity sequences),
     /// INDEX or SEQUENCE.
     pub fn drop(l: *Lowerer, d: *const tree.Drop) Error!void {
+        try l.dropOne(d, d.name);
+        for (d.others) |q| try l.dropOne(d, q);
+    }
+
+    fn dropOne(l: *Lowerer, d: *const tree.Drop, q: tree.QName) Error!void {
         const p = l.p;
         try l.readSchema();
-        const q = d.name;
         const name = q.name.text;
         const db: ?[]const u8 = if (q.schema) |s| s.text else null;
         switch (d.kind) {

@@ -1,0 +1,83 @@
+-- Differential cases of PostgreSQL's integers and character(n)/varchar(n)
+-- as values come in (xqt dialect-diff pg
+-- tools/dialect/pg-integer-cases.txt), in the format of pg-cases.txt:
+-- each case starts with a "-- case:" line and runs on an empty database,
+-- in PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. The expected output is PostgreSQL 18's.
+
+-- case: integer input of casts
+SELECT '  123  '::int2, '-32768'::int2, '+42'::int4, int4 '0x42F', int8 '-0x8000000000000000';
+SELECT int2 '0b100101', int4 '0o273', int8 '1_000_000', int2 '0b_10_0101', int4 '0x1EEE_FFFF';
+SELECT '0x7FFF'::int2, '-0o20000000000'::int4, '0x7FFFFFFFFFFFFFFF'::int8;
+SELECT '34.5'::int2;
+SELECT '32768'::int2;
+SELECT '0x8000'::int2;
+SELECT '9223372036854775808'::int8;
+SELECT '- 1234'::int4;
+SELECT '4 444'::int4;
+SELECT ''::int8;
+SELECT '    '::int8;
+SELECT '0x'::int4;
+SELECT '0b'::int4;
+SELECT '_100'::int4;
+SELECT '100_'::int4;
+SELECT '10__000'::int4;
+SELECT '1e3'::int4;
+SELECT '100000x'::int2;
+SELECT '32769x'::int2;
+
+-- case: reals and numerics made integers
+SELECT (-2.5::float8)::int2, (-0.5::float8)::int4, (0.5::float8)::int8, (2.5::float8)::int2, (3.5::float4)::int4;
+SELECT 2.5::int2, (-2.5)::int4, 0.5::int8, 1.5::int2;
+SELECT 1e10::float8::int4;
+SELECT 40000.4::int2;
+
+-- case: strings stored into integer columns
+CREATE TABLE t (a int2, b int4, c int8);
+INSERT INTO t VALUES ('  12  ', '0x10', '-1_000'), ('+7', ' 0b11 ', '9223372036854775807');
+INSERT INTO t (a) VALUES (34.5), (-2.5), ('3');
+INSERT INTO t (b) VALUES (2.5::float8), (3.5::float8);
+UPDATE t SET c = '42' WHERE a = 7;
+SELECT * FROM t ORDER BY a, b;
+INSERT INTO t (a) VALUES ('34.5');
+INSERT INTO t (a) VALUES ('100000');
+INSERT INTO t (a) VALUES ('');
+INSERT INTO t (a) VALUES ('    ');
+INSERT INTO t (a) VALUES ('- 1234');
+INSERT INTO t (a) VALUES ('123 dt');
+INSERT INTO t (b) VALUES ('1000000000000');
+INSERT INTO t (c) VALUES ('3908203590239580293850293850329485');
+INSERT INTO t (a) VALUES (100000);
+INSERT INTO t (a) VALUES (1e10::float8);
+UPDATE t SET b = 'x';
+
+-- case: integer literals
+SELECT 0x42F, 0o273, 0b100101, 1_000_000, 0x_1F, 1_000.5, 1_0e1_0;
+SELECT 0x7FFFFFFF, 0x80000000, -0x8000000000000000;
+SELECT 0x;
+SELECT 0x_;
+SELECT 0b102;
+SELECT 0x1g;
+SELECT 0x1__F;
+SELECT 1__0;
+SELECT 100_;
+
+-- case: bit operators of integers
+SELECT 123::int8 # 456, 5 # 3, int2 '6' # int2 '3', -1 # 5, '5' # 3::int2, 7::int2 # 1::int4;
+SELECT 123::int8 & 456, 123::int8 | 456, ~123::int8, 1::int2 << 3, 256 >> 4;
+SELECT 'a'::text # 1;
+SELECT 1.5 # 1;
+
+-- case: character(n) and varchar(n) drop the spaces past n
+CREATE TABLE c (f char(4), v varchar(4));
+INSERT INTO c VALUES ('a', 'a'), ('ab  ', 'ab  '), ('abcd    ', 'abcd    '), ('', '');
+SELECT '[' || f || ']' AS f, '[' || v || ']' AS v, length(f), length(v), f = 'ab' AS eq FROM c ORDER BY v;
+SELECT CAST(f AS text) AS t, CAST(f AS varchar) AS vc FROM c ORDER BY v;
+INSERT INTO c (f) VALUES ('abcde');
+INSERT INTO c (v) VALUES ('abcde');
+INSERT INTO c (v) VALUES ('ab  c');
+SELECT count(*) FROM c;
+
+-- case: casts to character(n) and varchar(n)
+SELECT CAST('doh!' AS char(10)) || '|' AS c, 'hi de ho neighbor'::char(10) || '|' AS d, 'abcdef'::varchar(3) AS v;

@@ -134,21 +134,37 @@ pub const Ddl = struct {
 
     fn drop(d: *Ddl, x: *const tree.Drop) Error!void {
         const p = d.l.p;
-        const name = x.name.name.text;
-        switch (x.kind) {
-            .table, .view => {
-                const db: ?[]const u8 = if (x.name.schema) |s| s.text else null;
-                if (build.findTable(p.db, name, db) == null and !x.if_exists) {
-                    return d.failState(x.name.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ if (x.kind == .table) "table" else "view", shown(p.db, name) });
-                }
-            },
-            .sequence => if (!sequenceExists(p.db, name)) {
-                if (x.if_exists) return;
-                return d.failState(x.name.name.pos, .of("42704"), "sequence \"{s}\" does not exist", .{shown(p.db, name)});
-            },
-            .index => {},
+        // Each name checked; a missing sequence of IF EXISTS left out.
+        var names: std.ArrayList(tree.QName) = .empty;
+        for (0..x.others.len + 1) |i| {
+            const q = if (i == 0) x.name else x.others[i - 1];
+            const name = q.name.text;
+            switch (x.kind) {
+                .table, .view => {
+                    const db: ?[]const u8 = if (q.schema) |s| s.text else null;
+                    if (build.findTable(p.db, name, db) == null and !x.if_exists) {
+                        return d.failState(q.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ if (x.kind == .table) "table" else "view", shown(p.db, name) });
+                    }
+                    // Several tables of an auto-vacuum database: dropping one
+                    // may move the root pages of the next (SQLite drops one
+                    // table a statement).
+                    if (x.others.len > 0) if (build.findDbName(p.db, db orelse "main")) |di| if (p.db.dbs.items[di].bt) |bt| if (@backingInt(bt.getAutoVacuum()) != 0) {
+                        return d.failState(q.name.pos, .of("0A000"), "dropping several tables of an auto-vacuum database in one statement is not supported", .{});
+                    };
+                },
+                .sequence => if (!sequenceExists(p.db, name)) {
+                    if (x.if_exists) continue;
+                    return d.failState(q.name.pos, .of("42704"), "sequence \"{s}\" does not exist", .{shown(p.db, name)});
+                },
+                .index => {},
+            }
+            try names.append(p.arena, q);
         }
-        try d.l.drop(x);
+        if (names.items.len == 0) return;
+        var all = x.*;
+        all.name = names.items[0];
+        all.others = names.items[1..];
+        try d.l.drop(&all);
     }
 };
 

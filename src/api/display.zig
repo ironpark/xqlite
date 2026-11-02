@@ -74,6 +74,21 @@ pub fn text(viewer: Dialect, t: Type, cell: Value, buf: *[max_len]u8) ?[]const u
             };
             return utc(z, buf);
         },
+        .char => {
+            // PostgreSQL's character(n) is padded with spaces to n
+            // characters; the value is kept without them.
+            if (viewer != .postgres) return null;
+            const n = t.length orelse return null;
+            const z = switch (cell) {
+                .text => |z| z,
+                else => return null,
+            };
+            const have = std.unicode.utf8CountCodepoints(z) catch return null;
+            if (have >= n or z.len + (n - have) > max_len) return null;
+            @memcpy(buf[0..z.len], z);
+            @memset(buf[z.len..][0 .. n - have], ' ');
+            return buf[0 .. z.len + n - have];
+        },
         // uuid, interval: the text of an older table's TEXT column as
         // stored.
         else => return null,

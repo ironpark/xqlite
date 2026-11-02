@@ -1,6 +1,7 @@
 //! PostgreSQL's errors of failed constraints (Hooks.constraint): the
-//! primary line of psql's ERROR (the DETAIL line, `Key (a)=(1) already
-//! exists.`, is not kept). An unnamed constraint has PostgreSQL's name:
+//! primary line of psql's ERROR, and for a duplicate key of integer and
+//! text columns its DETAIL line (`Key (a)=(1) already exists.`; the
+//! others are not kept). An unnamed constraint has PostgreSQL's name:
 //! <table>_pkey, <table>_<columns>_key, <table>_<columns>_fkey (CHECKs
 //! are named by the parser, <table>_<column>_check and <table>_check).
 
@@ -27,7 +28,7 @@ fn message(a: Allocator, v: Violation) error{OutOfMemory}!Failure {
             .msg = try std.fmt.allocPrint(a, "could not create unique index \"{s}\"", .{try name(a, v)}),
             .state = .of("23505"),
         } else .{
-            .msg = try std.fmt.allocPrint(a, "duplicate key value violates unique constraint \"{s}\"", .{try name(a, v)}),
+            .msg = try std.fmt.allocPrint(a, "duplicate key value violates unique constraint \"{s}\"{s}", .{ try name(a, v), try keyDetail(a, v) }),
             .state = .of("23505"),
         },
         .check => .{
@@ -43,6 +44,19 @@ fn message(a: Allocator, v: Violation) error{OutOfMemory}!Failure {
             .state = .of("23503"),
         },
     };
+}
+
+/// The DETAIL of a duplicate key, `Key (a, b)=(1, x) already exists.`,
+/// its values written at dialect.value_mark: only of columns whose values
+/// the engine prints as PostgreSQL does (integers, text), else "".
+fn keyDetail(a: Allocator, v: Violation) error{OutOfMemory}![]const u8 {
+    if (!v.has_value or v.value_types.len != v.columns.len) return "";
+    for (v.value_types) |t| switch ((t orelse return "").logical) {
+        .int2, .int4, .int8, .text, .varchar => {},
+        else => return "",
+    };
+    const util = @import("../../sql/util.zig");
+    return std.fmt.allocPrint(a, "{s}Key ({s})=({c}) already exists.", .{ util.detail_mark, try Violation.joined(a, v.columns, "{s}", ", "), dialect.value_mark });
 }
 
 /// The constraint's name: the user's, else PostgreSQL's.
@@ -66,6 +80,8 @@ test message {
     var f = try message(a, .{ .kind = .unique, .op = .insert, .database = "main", .table = "t", .columns = cols });
     try t.expectEqualStrings("duplicate key value violates unique constraint \"t_a_key\"", f.msg);
     try t.expectEqualStrings("23505", &f.state.sqlstate);
+    f = try message(a, .{ .kind = .unique, .op = .insert, .database = "main", .table = "t", .columns = cols, .has_value = true, .value_types = &.{.{ .logical = .text }} });
+    try t.expectEqualStrings("duplicate key value violates unique constraint \"t_a_key\"\nDETAIL:  Key (a)=(\x01) already exists.", f.msg);
     f = try message(a, .{ .kind = .primary_key, .op = .insert, .database = "main", .table = "s.t", .columns = cols });
     try t.expectEqualStrings("duplicate key value violates unique constraint \"t_pkey\"", f.msg);
     f = try message(a, .{ .kind = .referenced, .op = .delete, .database = "main", .table = "c", .columns = &.{"pid"}, .parent = "p", .parent_columns = cols });

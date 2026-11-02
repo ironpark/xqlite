@@ -12,6 +12,56 @@ const EP = int.EP;
 const TK = int.TK;
 const RC = int.RC;
 
+/// xqlite: an error message says more after its first line in lines of
+/// PostgreSQL's fields, as psql prints them: "\nDETAIL:  ...",
+/// "\nHINT:  ...", "\nCONTEXT:  ..." (in that order, each at most once).
+/// The message (sqlite3_errmsg()) keeps them, so the shell shows them;
+/// errorFields() takes them apart (the wire protocol's ErrorResponse).
+pub const detail_mark = "\nDETAIL:  ";
+pub const hint_mark = "\nHINT:  ";
+pub const context_mark = "\nCONTEXT:  ";
+
+/// The fields of an error message (see detail_mark).
+pub const ErrorFields = struct {
+    message: []const u8,
+    detail: ?[]const u8 = null,
+    hint: ?[]const u8 = null,
+    context: ?[]const u8 = null,
+};
+
+/// Take error message `msg` apart into its fields (detail_mark).
+pub fn errorFields(msg: []const u8) ErrorFields {
+    var f: ErrorFields = .{ .message = msg };
+    var rest = msg;
+    // From the last field back: each is the text after its mark.
+    if (std.mem.lastIndexOf(u8, rest, context_mark)) |i| {
+        f.context = rest[i + context_mark.len ..];
+        rest = rest[0..i];
+    }
+    if (std.mem.lastIndexOf(u8, rest, hint_mark)) |i| {
+        f.hint = rest[i + hint_mark.len ..];
+        rest = rest[0..i];
+    }
+    if (std.mem.lastIndexOf(u8, rest, detail_mark)) |i| {
+        f.detail = rest[i + detail_mark.len ..];
+        rest = rest[0..i];
+    }
+    f.message = rest;
+    return f;
+}
+
+test errorFields {
+    const f = errorFields("invalid input syntax for type json\nDETAIL:  Token \"bad\" is invalid.\nCONTEXT:  JSON data, line 1: {bad");
+    try std.testing.expectEqualStrings("invalid input syntax for type json", f.message);
+    try std.testing.expectEqualStrings("Token \"bad\" is invalid.", f.detail.?);
+    try std.testing.expect(f.hint == null);
+    try std.testing.expectEqualStrings("JSON data, line 1: {bad", f.context.?);
+    const g = errorFields("function f() does not exist\nHINT:  No function matches.");
+    try std.testing.expectEqualStrings("function f() does not exist", g.message);
+    try std.testing.expectEqualStrings("No function matches.", g.hint.?);
+    try std.testing.expectEqualStrings("no such table: t", errorFields("no such table: t").message);
+}
+
 /// Port of sqlite3ErrorMsg(): record a compile error in `p`. The format
 /// uses Zig syntax; messages must still match SQLite's word for word.
 pub fn errorMsg(p: *Parse, comptime fmt: []const u8, args: anytype) void {

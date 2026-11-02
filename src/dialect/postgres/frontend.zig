@@ -33,9 +33,12 @@ const ddltype = @import("ddltype.zig");
 const jfuncs = @import("jfuncs.zig");
 const catalog_funcs = @import("catalog_funcs.zig");
 const datetime = @import("datetime.zig");
+const ivinput = @import("ivinput.zig");
 const array = @import("array.zig");
 const uuid = @import("uuid.zig");
+const integer = @import("integer.zig");
 const catalog = @import("../../catalog/catalog.zig");
+const util = @import("../../sql/util.zig");
 
 const RC = int.RC;
 
@@ -118,6 +121,9 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
 /// The error of the parser, left in `p`.
 const parseFailed = tokenized.parseFailed;
 
+/// The HINT of a function call no function matches (util.hint_mark).
+pub const function_hint = util.hint_mark ++ "No function matches the given name and argument types. You might need to add explicit type casts.";
+
 /// SQLite's messages for common failures in PostgreSQL's words.
 fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
@@ -134,9 +140,16 @@ fn translateError(p: *int.Parse) int.Oom!void {
     for (rules) |r| if (std.mem.startsWith(u8, m, r[0])) {
         var name = m[r[0].len..];
         if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
-        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}", .{ r[1], name, r[2] }, 0);
+        const hint = if (std.mem.eql(u8, r[0], "no such function: ")) function_hint else "";
+        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}{s}", .{ r[1], name, r[2], hint }, 0);
         return;
     };
+    // A function of another number of arguments: PostgreSQL finds none.
+    const wrong = "wrong number of arguments to function ";
+    if (std.mem.startsWith(u8, m, wrong) and std.mem.endsWith(u8, m, "()")) {
+        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "function {s} does not exist{s}", .{ m[wrong.len..], function_hint }, 0);
+        return;
+    }
     // "table t already exists", "index i already exists"
     inline for (.{ "table ", "index ", "view " }) |kind| {
         if (std.mem.startsWith(u8, m, kind) and std.mem.endsWith(u8, m, " already exists")) {
@@ -155,6 +168,7 @@ fn translateError(p: *int.Parse) int.Oom!void {
 
 pub const hooks: dialect.Hooks = .{
     .foreign_keys = true,
+    .count_create_as = true,
     .constraint = @import("constraints.zig").constraint,
     .arith = .{
         .div_zero = .{ .msg = "division by zero", .state = .of("22012") },
@@ -184,9 +198,17 @@ pub const hooks: dialect.Hooks = .{
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions ++ uuid.functions ++ datetime.functions;
+} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions ++ uuid.functions ++ datetime.functions ++ ivinput.functions ++
+    formatting.functions ++ builtins.functions ++ inputinfo.functions ++ dtfuncs.functions;
 
-const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions ++ uuid.engine_functions;
+const engine_functions = funcs.engine_functions ++ integer.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions ++ uuid.engine_functions ++ ivinput.engine_functions ++
+    formatting.engine_functions ++ builtins.engine_functions ++ inputinfo.engine_functions ++ dtfuncs.engine_functions;
+
+// to_char(), gcd(), pg_input_is_valid(), date_trunc() ...
+const formatting = @import("formatting.zig");
+const builtins = @import("builtins.zig");
+const inputinfo = @import("inputinfo.zig");
+const dtfuncs = @import("dtfuncs.zig");
 
 comptime {
     dfunc.checkTable(&functions);
@@ -213,6 +235,12 @@ test {
     _ = @import("constraints.zig");
     _ = @import("pgcatalog.zig");
     _ = @import("catalog_funcs.zig");
+    _ = @import("deparse.zig");
     _ = @import("array.zig");
     _ = @import("uuid.zig");
+    _ = @import("integer.zig");
+    _ = @import("numformat.zig");
+    _ = @import("dtformat.zig");
+    _ = @import("builtins.zig");
+    _ = @import("dtfuncs.zig");
 }

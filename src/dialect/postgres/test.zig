@@ -632,7 +632,7 @@ test "pg: types are strict" {
     try c.expectRows("SELECT i2, i4, r, n::text, b, vc FROM ty WHERE i2 = 1", "1|2|4.0|5.25|1|abc\n");
     // A numeric is stored as decimal.zig's key.
     try c.expectRows("SELECT n::text, typeof(n) FROM ty WHERE i2 IS NULL ORDER BY n", "1.50|blob\n7.00|blob\n");
-    try c.expectError("INSERT INTO ty (i4) VALUES ('x')", "cannot store TEXT value in INTEGER column ty.i4");
+    try c.expectError("INSERT INTO ty (i4) VALUES ('x')", "invalid input syntax for type integer: \"x\"");
     // A numeric stored into an integer is rounded (PostgreSQL's assignment
     // cast).
     try c.exec("INSERT INTO ty (i4, vc) VALUES (1.5, 'r')");
@@ -803,7 +803,11 @@ test "pg: DDL" {
     try c.exec("DROP TABLE copy; DROP TABLE copy_t");
     // A scalar subquery's error is its own, not a syntax error.
     try c.expectError("SELECT (SELECT 1 FROM pg_catalog.nosuch)", "relation \"pg_catalog.nosuch\" does not exist");
-    try c.expectError("DROP TABLE kid, parent", "dropping several objects in one statement is not supported");
+    // Several tables in one statement, in order.
+    try c.exec("CREATE TABLE d1 (a int); CREATE TABLE d2 (b int GENERATED ALWAYS AS IDENTITY)");
+    try c.exec("DROP TABLE d1, d2");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name IN ('d1', 'd2')", "0\n");
+    try c.expectError("DROP TABLE kid, nosuch", "table \"nosuch\" does not exist");
     try c.exec("PRAGMA integrity_check");
 }
 
@@ -854,6 +858,44 @@ test "pg: information_schema and pg_catalog" {
     try c.expectError("SELECT * FROM nosuchschema.person", "relation \"nosuchschema.person\" does not exist");
 }
 
+test "pg: error positions and DETAIL, HINT, CONTEXT lines" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (a int, b bool, n numeric(4,4), j jsonb, s text UNIQUE)");
+    // The offsets psql shows as LINE 1 and its caret (from 0 here).
+    for ([_]struct { []const u8, []const u8, i32 }{
+        .{ "SELECT * FROM nosuch", "relation \"nosuch\" does not exist", 14 },
+        .{ "INSERT INTO nosuch VALUES (1)", "relation \"nosuch\" does not exist", 12 },
+        .{ "SELECT 'x'::int", "invalid input syntax for type integer: \"x\"", 7 },
+        .{ "SELECT 'a' + 1", "invalid input syntax for type integer: \"a\"", 7 },
+        .{ "SELECT bool 'maybe'", "invalid input syntax for type boolean: \"maybe\"", 12 },
+        // Even where no row reads it, as PostgreSQL's parser.
+        .{ "SELECT 'x'::int FROM t WHERE false", "invalid input syntax for type integer: \"x\"", 7 },
+        .{ "INSERT INTO t (b) VALUES ('maybe')", "invalid input syntax for type boolean: \"maybe\"", 26 },
+        .{ "UPDATE t SET n = 'abc'", "invalid input syntax for type numeric: \"abc\"", 17 },
+        .{ "SELECT '{bad'::jsonb", "invalid input syntax for type json\nDETAIL:  Token \"bad\" is invalid.\nCONTEXT:  JSON data, line 1: {bad", 7 },
+        .{ "SELECT true + 1", "operator does not exist: boolean + integer\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.", 12 },
+        .{ "SELECT nosuchfunc(1)", "function nosuchfunc() does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.", 7 },
+    }) |case| {
+        var stmt: ?*vi.Vdbe = null;
+        try testing.expectEqual(RC.ERROR, prepare.prepareV2(c.db, case[0], &stmt, null));
+        errdefer std.debug.print("{s}\n", .{case[0]});
+        try testing.expectEqualStrings(case[1], main_mod.errmsg(c.db));
+        try testing.expectEqual(case[2], main_mod.errorOffset(c.db));
+    }
+    // Run-time errors have no position: a numeric(4,4)'s overflow is one
+    // (PostgreSQL reads the literal without the type's parameters).
+    try c.expectError("INSERT INTO t (n) VALUES ('1.0')", "numeric field overflow\nDETAIL:  A field with precision 4, scale 4 must round to an absolute value less than 1.");
+    try testing.expectEqual(@as(i32, -1), main_mod.errorOffset(c.db));
+    try c.exec("INSERT INTO t (s) VALUES ('x')");
+    try c.expectError("INSERT INTO t (s) VALUES ('x')", "duplicate key value violates unique constraint \"t_s_key\"\nDETAIL:  Key (s)=(x) already exists.");
+    // The fields of the message.
+    const f = @import("../../sql/util.zig").errorFields(main_mod.errmsg(c.db));
+    try testing.expectEqualStrings("duplicate key value violates unique constraint \"t_s_key\"", f.message);
+    try testing.expectEqualStrings("Key (s)=(x) already exists.", f.detail.?);
+}
+
 test "pg: errors in PostgreSQL's words" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -870,7 +912,7 @@ test "pg: errors in PostgreSQL's words" {
     try c.expectError("SELECT 1 FROM t LATERAL", "syntax error at or near \"LATERAL\"");
     try c.expectError("CREATE TYPE mood AS ENUM ('a')", "CREATE TYPE is not supported");
     try c.expectError("LISTEN chan", "syntax error at or near \"LISTEN\"");
-    try c.expectError("SELECT 1 # 2", "operator does not exist: #");
+    try c.expectError("SELECT 1 ## 2", "operator does not exist: ##");
 }
 
 test "pg: SQLite's administrative statements; the same code as SQLite" {
@@ -1165,6 +1207,34 @@ test "pg: the catalog in memory follows DDL, rollbacks and other connections" {
     try expectNoMeta(&c, "u");
 }
 
+test "pg: the schema's expressions in PostgreSQL's words" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // The engine's calls the frontend stored (xq_dec_key(), xq_pg_iv()
+    // ...) shown as PostgreSQL's deparser prints the expressions.
+    try c.exec("CREATE TABLE d (id int, n numeric(10,2) CHECK (n >= 0), iv interval DEFAULT '2 hours', v varchar(5), j jsonb, ok boolean, g numeric GENERATED ALWAYS AS (n * 2) STORED, CONSTRAINT dc CHECK (v = 'x' OR (j ->> 'a') = 'b' AND ok = 't'))");
+    try c.exec("CREATE INDEX d_n ON d ((n + 1)) WHERE iv > '1 hour'");
+    try c.exec("CREATE VIEW dv AS SELECT id, n FROM d WHERE n < 10");
+    try c.expectRows("SELECT conname, pg_get_constraintdef(oid), pg_get_constraintdef(oid, true), conkey FROM pg_constraint WHERE conrelid = 'd'::regclass AND contype = 'c' ORDER BY 1",
+        \\d_n_check|CHECK ((n >= (0)::numeric))|CHECK (n >= 0::numeric)|{2}
+        \\dc|CHECK ((((v)::text = 'x'::text) OR (((j ->> 'a'::text) = 'b'::text) AND (ok = true))))|CHECK (v::text = 'x'::text OR (j ->> 'a'::text) = 'b'::text AND ok = true)|{4,5,6}
+        \\
+    );
+    try c.expectRows("SELECT a.attname, pg_get_expr(adbin, adrelid), pg_get_expr(adbin, adrelid, true) FROM pg_attrdef JOIN pg_attribute a ON a.attrelid = adrelid AND a.attnum = adnum WHERE adrelid = 'd'::regclass ORDER BY 1",
+        \\g|(n * (2)::numeric)|n * 2::numeric
+        \\iv|'02:00:00'::interval|'02:00:00'::interval
+        \\
+    );
+    try c.expectRows("SELECT pg_get_indexdef('d_n'::regclass), pg_get_indexdef('d_n'::regclass, 1, true)",
+        \\CREATE INDEX d_n ON public.d USING btree (((n + (1)::numeric))) WHERE (iv > '01:00:00'::interval)|(n + 1::numeric)
+        \\
+    );
+    try c.expectRows("SELECT pg_get_viewdef('dv'::regclass, true)", " SELECT id,\n    n\n   FROM d\n  WHERE n < 10::numeric;\n");
+    // What is stored stays the engine's.
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name = 'dv' AND sql LIKE '%xq_dec_key(10)%'", "1\n");
+}
+
 test "pg: system catalogs" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -1191,7 +1261,7 @@ test "pg: system catalogs" {
         \\
     );
     // One OID in every catalog, the reg* casts and ::oid.
-    try c.expectRows("SELECT 't'::regclass::oid = (SELECT oid FROM pg_class WHERE relname = 't'), (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname = 't'), (SELECT count(*) FROM pg_index WHERE indrelid = 't'::regclass), 'pg_class'::regclass::oid, 'public'::regnamespace::oid, 'integer'::regtype::oid, 'character varying'::regtype::oid", "1|4|3|1259|2200|23|1043\n");
+    try c.expectRows("SELECT 't'::regclass::oid = (SELECT oid FROM pg_class WHERE relname = 't'), (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname = 't'), (SELECT count(*) FROM pg_index WHERE indrelid = 't'::regclass), 'pg_class'::regclass::oid, 'public'::regnamespace::oid, 'integer'::regtype::oid, 'character varying'::regtype::oid", "1|10|3|1259|2200|23|1043\n");
     try c.expectRows("SELECT 't'::regclass, 'sales.orders'::regclass, 'p'::regclass::text, 23::regtype, 2200::regnamespace, 'pg_catalog.array_in'::regproc", "t|sales.orders|p|integer|public|array_in\n");
     try c.expectError("SELECT 'nosuch'::regclass", "relation \"nosuch\" does not exist");
     try c.expectRows("SELECT to_regclass('nosuch') IS NULL, to_regclass('t') = 't'::regclass", "1|1\n");
@@ -1232,13 +1302,13 @@ test "pg: system catalogs" {
         \\
     );
     try c.expectRows("SELECT c2.relname, i.indisprimary, i.indisunique, i.indkey, pg_get_indexdef(i.indexrelid, 0, true) FROM pg_index i JOIN pg_class c2 ON c2.oid = i.indexrelid WHERE i.indrelid = 't'::regclass ORDER BY 1",
-        \\t_b|0|0|0|CREATE INDEX t_b ON public.t USING btree (lower(b)) WHERE a > 5
-        \\t_b_c_key|0|1|2 3|CREATE UNIQUE INDEX t_b_c_key ON public.t USING btree (b, c)
-        \\t_pkey|1|1|1|CREATE UNIQUE INDEX t_pkey ON public.t USING btree (a)
+        \\t_b|0|0|0|CREATE INDEX t_b ON t USING btree (lower(b)) WHERE a > 5
+        \\t_b_c_key|0|1|2 3|CREATE UNIQUE INDEX t_b_c_key ON t USING btree (b, c)
+        \\t_pkey|1|1|1|CREATE UNIQUE INDEX t_pkey ON t USING btree (a)
         \\
     );
     try c.expectRows("SELECT pg_get_constraintdef(oid), pg_get_indexdef('t_b'::regclass) FROM pg_constraint WHERE conname = 'ck'", "CHECK (((a > 0) AND (c IS NOT NULL)))|CREATE INDEX t_b ON public.t USING btree (lower(b)) WHERE (a > 5)\n");
-    try c.expectRows("SELECT pg_get_viewdef('v'::regclass)", " SELECT a, b FROM t WHERE (a > 1);\n");
+    try c.expectRows("SELECT pg_get_viewdef('v'::regclass)", " SELECT a,\n    b\n   FROM t\n  WHERE (a > 1);\n");
     try c.expectRows("SELECT pg_get_serial_sequence('p', 'id'), pg_get_serial_sequence('sales.orders', 'id'), pg_get_serial_sequence('t', 'a')", "public.p_id_seq|sales.orders_id_seq|NULL\n");
     try c.expectRows("SELECT d.refobjid = 'p'::regclass, d.refobjsubid, d.deptype FROM pg_depend d WHERE d.objid = 'p_id_seq'::regclass", "1|1|a\n");
     // Visibility follows search_path; a name off the path is qualified.
@@ -1432,4 +1502,23 @@ test "pg: numeric columns of numbers (made before numerics were keys) keep numbe
     try c.expectRows("SELECT id, n, typeof(n) FROM old ORDER BY id", "1|1.5|real\n2|2.25|real\n3|7.1|real\n4|3|integer\n");
     try c.expectRows("SELECT id FROM old WHERE n = 3", "4\n");
     try c.expectRows("SELECT (n * n)::text FROM old WHERE id = 2", "5.0625\n");
+}
+
+test "pg: to_char, to_number, pg_input_is_valid and the calls told an argument's type" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE f (i int, b bigint, n numeric, d float8, t timestamp, z timestamptz, v interval)");
+    try c.exec("INSERT INTO f VALUES (-42, 4567890123456789, -34338492.215397047, 0.125, '2001-02-16 20:38:40', '2001-02-16 20:38:40+02', '1 year 2 mons 3 days 04:05:06')");
+    try c.expectRows("SELECT to_char(i, 'S999'), to_char(b, '9G999G999G999G999G999'), to_char(n, 'FM999999999.999'), to_char(d, '9.99') FROM f", " -42| 4,567,890,123,456,789|-34338492.215|  .12\n");
+    try c.expectRows("SELECT to_char(t, 'YYYY-MM-DD HH24:MI TZ'), to_char(z, 'HH24:MI TZ'), to_char(v, 'YYYY MM DD HH24:MI:SS') FROM f", "2001-02-16 20:38 |18:38 UTC|0001 02 03 04:05:06\n");
+    try c.expectRows("SELECT to_char(i, 'FMRN'), to_char(12, '99th'), to_number('-34,338,492.654,878', '99G999G999D999G999')::text FROM f", "###############| 12th|-34338492.654878\n");
+    try c.expectError("SELECT to_char(1, '9.9.9')", "multiple decimal points");
+    try c.expectError("SELECT to_char(3, '9V999999999')", "integer out of range");
+    try c.expectRows("SELECT pg_input_is_valid('34', 'int4'), pg_input_is_valid('asdf', 'int4'), pg_input_is_valid('1234.567', 'numeric(7,4)')", "1|0|0\n");
+    try c.expectRows("SELECT message, detail, sql_error_code FROM pg_input_error_info('1234.567', 'numeric(7,4)')", "numeric field overflow|A field with precision 7, scale 4 must round to an absolute value less than 10^3.|22003\n");
+    try c.expectRows("SELECT gcd(i, 18), lcm(b, 2), gcd(4331.250::numeric, 463.75000::numeric)::text FROM f", "6|9135780246913578|8.75000\n");
+    try c.expectError("SELECT gcd((-2147483648)::int4, 0::int4)", "integer out of range");
+    try c.expectRows("SELECT date_trunc('hour', t), (t AT TIME ZONE 'UTC')::text, z AT TIME ZONE 'EST' FROM f", "2001-02-16 20:00:00|2001-02-16 20:38:40|2001-02-16 13:38:40\n");
+    try c.expectRows("SELECT to_date('20100309', 'YYYYMMDD'), booleq(true, false), float8(b) = 4567890123456789 FROM f", "2010-03-09|0|1\n");
 }

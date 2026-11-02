@@ -40,7 +40,8 @@
 const std = @import("std");
 
 pub const usecs_per_sec: i64 = 1_000_000;
-pub const usecs_per_hour: i64 = 3600 * usecs_per_sec;
+pub const usecs_per_minute: i64 = 60 * usecs_per_sec;
+pub const usecs_per_hour: i64 = 60 * usecs_per_minute;
 pub const usecs_per_day: i64 = 24 * usecs_per_hour;
 pub const days_per_month: i32 = 30;
 

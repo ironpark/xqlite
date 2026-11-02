@@ -1,0 +1,178 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-format-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case f21a44abc147ba43 to_char of numerics: digits, groups, signs, fill mode
+a|b|c|d
+   -34,338,492.215|1,234.500|  .50|.5
+(1 row)
+a|b|c|d|e
+ <12.5>| +12.50| 12.50-|+ 13|+  12
+(1 row)
+a|b|c|d
+ 0007|0007.2500| ###|100
+(1 row)
+a|b|c
+ 1.235e-10|-9.88e+04| 0.0e+00
+(1 row)
+a|b|c
+ #.######| NaN|-##.##
+(1 row)
+==== case 29f8115155570d06 to_char of integers: ordinals, Roman numerals, V, text
+a|b|c|d|e
+ 1st|  2ND|13th|23rd|111th
+(1 row)
+a|b|c|d
+        MCMXCIX|iv|###############|MMMDCCCLXXXVIII
+(1 row)
+a|b|c|d
+  123400|-5000|num:   42|f"oo 42
+(1 row)
+a|b|c
+ 4,567,890,123,456,789|-4567890123456789| 1.23e+03
+(1 row)
+==== case e7c50d61d17e7070 to_char of integers: ordinals, Roman numerals, V, text: errors
+ERROR:  bigint out of range
+==== case f3ac0d5181337850 to_char of floats: printf's rounding and the digits of a double
+a|b|c|d
+  .12| 2.67| 2| 2
+(1 row)
+a|b|c
+##########.####|  123456| 1234.57
+(1 row)
+a|b|c
+       mccxxxvi|-4.200e+00| 1.0e+300
+(1 row)
+a|b|c
+ ####.##|-##.|   Infinity
+(1 row)
+==== case 969f1fbfff1d6ac0 a template of RN and digits
+to_char
+              I
+(1 row)
+==== case a98ba5574a435836 template errors
+ERROR:  multiple decimal points
+ERROR:  cannot use "S" twice
+ERROR:  cannot use "S" and "PL"/"MI"/"SG"/"PR" together
+ERROR:  "9" must be ahead of "PR"
+ERROR:  cannot use "V" and decimal point together
+ERROR:  "EEEE" must be the last pattern used
+ERROR:  "EEEE" not supported for input
+==== case 1a0b88ab1f80be83 to_number
+a|b|c
+-34338492.654878|-564646.654564|-5.01
+(1 row)
+a|b|c|d
+1234.56|42|1234.560000000000000000|0.01
+(1 row)
+a|b|c
+2024|14|0
+(1 row)
+==== case 3543ff6fe7b690fd to_number: errors
+ERROR:  invalid Roman numeral
+ERROR:  invalid input syntax for type numeric: " "
+to_number
+12
+(1 row)
+==== case def3378c54206e0b to_char of timestamps, dates and intervals
+a|b
+2001-02-16 20:38:40.123456|Friday   , 16 February  2001 08:38 PM
+(1 row)
+a|b|c
+Friday 16th February|2025-01-1 365 2460675 4 XII |0044 BC
+(1 row)
+a|b
+2001-02-16 20:38:40 UTC +00|
+(1 row)
+a|b|c
+0001 02 03 04 05 06 789|-36:00|100 00
+(1 row)
+a|b
+t|t
+(1 row)
+==== case d011c99baa40cbe8 to_date and to_timestamp
+a|b|c|d
+2010-03-09|2000-12-05|2016-12-31|2011-12-18
+(1 row)
+a|b
+2011-12-18 23:38:00+00|2011-12-18 23:38:15.123+00
+(1 row)
+a|b|c
+2000-01-01 06:30:00+00|1970-01-01 00:00:00+00|2010-09-13 04:32:03.5+00
+(1 row)
+==== case 2fcaf8cc442a3d4f to_date and to_timestamp: errors
+ERROR:  date/time field value out of range: "2016-13-01"
+ERROR:  date/time field value out of range: "2016-02-30"
+ERROR:  invalid value "/Feb/16" for "Mon"
+DETAIL:  The given value did not match any of the allowed values for this field.
+ERROR:  hour "13" is invalid for the 12-hour clock
+HINT:  Use the 24-hour clock, or give an hour between 1 and 12.
+==== case a24307fa84e8d351 pg_input_is_valid and pg_input_error_info
+a|b|c|d
+t|f|t|f
+(1 row)
+a|b|c|d|e
+t|f|f|t|f
+(1 row)
+a|b|c
+f|t|t
+(1 row)
+message|detail|hint|sql_error_code
+numeric field overflow|A field with precision 7, scale 4 must round to an absolute value less than 10^3.||22003
+(1 row)
+message|detail|hint|sql_error_code
+invalid input syntax for type numeric: "0x1234.567"|||22P02
+(1 row)
+message|detail|hint|sql_error_code
+invalid input syntax for type boolean: "junk"|||22P02
+(1 row)
+message|detail|hint|sql_error_code
+value too long for type character varying(4)|||22001
+(1 row)
+message|detail|hint|sql_error_code
+invalid hexadecimal data: odd number of digits|||22023
+(1 row)
+message|detail|hint|sql_error_code
+|||
+(1 row)
+==== case c8c00fb9a0acb1cd pg_input_is_valid and pg_input_error_info: errors
+ERROR:  type "nosuchtype" does not exist
+==== case 9ab6b8d09e6f64e5 gcd and lcm of integers and numerics
+a|b|c|d|e
+1466|1466|11851896|0|0
+(1 row)
+a|b|c
+8.75000|1185189.6|NaN
+(1 row)
+==== case da2d5e6a1e21544a gcd and lcm of integers and numerics: errors
+ERROR:  integer out of range
+ERROR:  bigint out of range
+ERROR:  integer out of range
+==== case bf8a4e3901fc9fab date_trunc, date_bin and AT TIME ZONE
+a|b|c|d
+2001-02-16 20:00:00|2001-02-12 00:00:00|2001-04-01 00:00:00|2001-01-01 00:00:00
+(1 row)
+a|b
+2001-02-16 20:38:40.123|1990-01-01 00:00:00
+(1 row)
+a|b
+2 days 03:00:00|3 years
+(1 row)
+a|b
+2020-02-11 15:30:00|2001-01-01 00:00:00
+(1 row)
+a|b|c
+2001-02-16 20:38:40+00|2001-02-16 15:38:40|2001-02-17 02:08:40
+(1 row)
+==== case bd67ec6308d41624 date_trunc, date_bin and AT TIME ZONE: errors
+ERROR:  unit "week" not supported for type interval
+DETAIL:  Months usually have fractional weeks.
+ERROR:  unit "ago" not recognized for type timestamp without time zone
+ERROR:  timestamps cannot be binned into intervals containing months or years
+ERROR:  stride must be greater than zero
+ERROR:  interval time zone "infinity" must be finite
+==== case 593ffebe477816b2 float8(), float4(), booleq, boolne, interval_hash
+a|b|c|d|e|f
+t|t|t|t|t|t
+(1 row)
+t
+t
+(1 row)

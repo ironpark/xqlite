@@ -5,8 +5,10 @@
 //!    ones keep their case ("" is a quote); backticks and [brackets] are
 //!    not identifiers;
 //!  - strings: '...' ('' is a quote, and two strings separated by
-//!    whitespace with a newline are one), E'...' with backslash escapes,
-//!    N'...', and dollar quoting $$...$$ / $tag$...$tag$;
+//!    whitespace with a newline are one), E'...' with backslash escapes
+//!    (\uXXXX surrogate pairs one character), U&'...' and U&"..." with
+//!    Unicode escapes [UESCAPE 'c'], N'...', and dollar quoting $$...$$ /
+//!    $tag$...$tag$;
 //!  - numbers: 42, 4.2, .5, 1e10, 0x1F, 0o17, 0b101, 1_000;
 //!  - $1 positional parameters;
 //!  - comments: -- to the end of the line and nested /* ... */;
@@ -23,6 +25,7 @@
 const std = @import("std");
 const lex = @import("../lex.zig");
 const ctype = @import("xqlite_base").ctype;
+const digitOf = @import("integer.zig").digitOf;
 
 pub const Kind = enum {
     eof,
@@ -181,6 +184,7 @@ pub const Lexer = struct {
             '0'...'9' => return l.number(),
             else => {},
         }
+        if ((c == 'u' or c == 'U') and s[start + 1] == '&' and (s[start + 2] == '\'' or s[start + 2] == '"')) return l.unicodeLiteral(start);
         if (isIdentStart(c)) {
             // E'...', N'...' (one letter right before a quote).
             if (s[start + 1] == '\'') {
@@ -226,19 +230,35 @@ pub const Lexer = struct {
                 'o', 'O' => 8,
                 else => 2,
             };
+            // PostgreSQL's scanner: 0x(_?hexdigit)+, longest match first;
+            // "0x" or "0x_" alone is hexfail, a digit or letter after the
+            // number (0x1g, 0b102: "0" and an identifier) is junk.
             e += 2;
-            const ds = e;
-            while (std.ascii.isAlphanumeric(s[e]) or s[e] == '_') e += 1;
-            l.pos = e;
             var digits: std.ArrayList(u8) = .empty;
-            for (s[ds..e]) |ch| if (ch != '_') try digits.append(l.arena, ch);
-            const v = std.fmt.parseInt(i64, digits.items, base) catch
+            while (true) {
+                const u: usize = @intFromBool(s[e] == '_');
+                if (digitOf(s[e + u]) >= base) break;
+                try digits.append(l.arena, s[e + u]);
+                e += u + 1;
+            }
+            var j = start + 1;
+            while (isIdentChar(s[j])) j += 1;
+            if (j > e and !(digits.items.len == 0 and j == e + 1 and s[e] == '_')) {
+                return l.fail(start, "trailing junk after numeric literal at or near \"{s}\"", .{s[start..j]});
+            }
+            if (digits.items.len == 0) {
+                if (s[e] == '_') e += 1;
+                l.pos = e;
                 return l.fail(start, "invalid {s} integer at or near \"{s}\"", .{ switch (base) {
                     16 => "hexadecimal",
                     8 => "octal",
                     else => "binary",
                 }, s[start..e] });
-            return l.tok(.integer, start, e, try std.fmt.allocPrint(l.arena, "{d}", .{v}));
+            }
+            l.pos = e;
+            // Its decimal digits: a number beyond a bigint is a numeric,
+            // as a decimal one is.
+            return l.tok(.integer, start, e, try toDecimal(l.arena, digits.items, base));
         }
         while (isDigit(s[e]) or (s[e] == '_' and isDigit(s[e + 1]))) : (e += 1) {
             if (s[e] == '_') underscores = true;
@@ -253,7 +273,9 @@ pub const Lexer = struct {
         if ((s[e] == 'e' or s[e] == 'E') and (isDigit(s[e + 1]) or ((s[e + 1] == '+' or s[e + 1] == '-') and isDigit(s[e + 2])))) {
             is_float = true;
             e += 2;
-            while (isDigit(s[e])) e += 1;
+            while (isDigit(s[e]) or (s[e] == '_' and isDigit(s[e + 1]))) : (e += 1) {
+                if (s[e] == '_') underscores = true;
+            }
         }
         if (isIdentStart(s[e])) {
             var j = e;
@@ -353,23 +375,102 @@ pub const Lexer = struct {
                 return j;
             },
             'u', 'U' => {
-                const n: usize = if (c == 'u') 4 else 8;
-                var v: u21 = 0;
-                for (0..n) |k| {
-                    const d = std.fmt.charToDigit(s[i + 2 + k], 16) catch
-                        return l.fail(i, "invalid Unicode escape at or near \"{s}\"", .{s[i..@min(s.len, i + 2 + k + 1)]});
-                    v = std.math.cast(u21, @as(u32, v) * 16 + d) orelse
-                        return l.fail(i, "invalid Unicode escape value at or near \"{s}\"", .{s[i .. i + 2 + n]});
+                var v = unicodeEscape(s, i) orelse return l.fail(i, "invalid Unicode escape", .{});
+                var end = i + 2 + @as(usize, if (c == 'u') 4 else 8);
+                if (isSurrogateSecond(v)) return l.fail(i, "invalid Unicode surrogate pair at or near \"{s}\"", .{s[i..end]});
+                if (isSurrogateFirst(v)) {
+                    // The second half must follow: \uDC00 ... as an escape.
+                    const w = if (s[end] == '\\') unicodeEscape(s, end) else null;
+                    const w_end = if (w != null) end + 2 + @as(usize, if (s[end + 1] == 'u') 4 else 8) else end;
+                    if (w == null or !isSurrogateSecond(w.?)) {
+                        const tok_near = if (w != null) s[end..w_end] else s[end .. end + utf8Len(s[end], s[end..])];
+                        return l.fail(end, "invalid Unicode surrogate pair at or near \"{s}\"", .{tok_near});
+                    }
+                    v = 0x10000 + ((v & 0x3FF) << 10) + (w.? & 0x3FF);
+                    end = w_end;
                 }
                 var buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(v, &buf) catch
-                    return l.fail(i, "invalid Unicode escape value at or near \"{s}\"", .{s[i .. i + 2 + n]});
-                try out.appendSlice(l.arena, buf[0..len]);
-                return i + 2 + n;
+                const len = if (v == 0 or v > 0x10FFFF) null else std.unicode.utf8Encode(@intCast(v), &buf) catch null;
+                try out.appendSlice(l.arena, buf[0 .. len orelse
+                    return l.fail(i, "invalid Unicode escape value at or near \"{s}\"", .{s[i..end]})]);
+                return end;
             },
             else => try out.append(l.arena, c),
         }
         return i + 2;
+    }
+
+    /// U&'...' and U&"..." with Unicode escapes (\XXXX, \+XXXXXX, \\),
+    /// the escape character another after UESCAPE 'c' (PostgreSQL's
+    /// str_udeescape()). Errors point at the escape.
+    fn unicodeLiteral(l: *Lexer, start: usize) Error!Token {
+        const s = l.src;
+        var t: Token = undefined;
+        if (s[start + 2] == '\'') {
+            t = try l.string(start, start + 2, false);
+        } else {
+            l.pos = start + 2;
+            t = try l.quotedIdent();
+            t.start = @intCast(start);
+        }
+        // UESCAPE 'c'.
+        var esc: u8 = '\\';
+        const after = l.pos;
+        try l.skipSpace();
+        const w = l.pos;
+        if (w + 7 <= s.len and std.ascii.eqlIgnoreCase(s[w .. w + 7], "uescape") and !isIdentChar(s[w + 7])) {
+            l.pos = w + 7;
+            const e = try l.next();
+            const raw = s[e.start..e.end];
+            if (e.kind != .string or raw[0] != '\'') return l.fail(e.start, "UESCAPE must be followed by a simple string literal at or near \"{s}\"", .{raw});
+            if (e.text.len != 1 or std.ascii.isHex(e.text[0]) or std.mem.indexOfScalar(u8, "+'\" \t\n\r\x0b\x0c", e.text[0]) != null)
+                return l.fail(e.start, "invalid Unicode escape character at or near \"{s}\"", .{raw});
+            esc = e.text[0];
+        } else l.pos = after;
+        const in = t.text;
+        var out: std.ArrayList(u8) = .empty;
+        var pair_first: u32 = 0;
+        var i: usize = 0;
+        // Offsets in `in` from the token's start: U& and the quote.
+        const base = start + 3;
+        while (i < in.len) {
+            if (in[i] != esc) {
+                if (pair_first != 0) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
+                try out.append(l.arena, in[i]);
+                i += 1;
+                continue;
+            }
+            if (i + 1 < in.len and in[i + 1] == esc) {
+                if (pair_first != 0) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
+                try out.append(l.arena, esc);
+                i += 2;
+                continue;
+            }
+            const n: usize = if (i + 1 < in.len and in[i + 1] == '+') 6 else 4;
+            const digits_at = i + 1 + @as(usize, if (n == 6) 1 else 0);
+            if (digits_at + n > in.len) return l.fail(base + i, "invalid Unicode escape", .{});
+            var v: u32 = 0;
+            for (in[digits_at .. digits_at + n]) |ch| v = v * 16 + (std.fmt.charToDigit(ch, 16) catch return l.fail(base + i, "invalid Unicode escape", .{}));
+            if (v == 0 or v > 0x10FFFF) return l.fail(base + i, "invalid Unicode escape value", .{});
+            if (pair_first != 0) {
+                if (!isSurrogateSecond(v)) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
+                v = 0x10000 + ((pair_first & 0x3FF) << 10) + (v & 0x3FF);
+                pair_first = 0;
+            } else if (isSurrogateSecond(v)) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
+            i = digits_at + n;
+            if (isSurrogateFirst(v)) {
+                pair_first = v;
+                continue;
+            }
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(@intCast(v), &buf) catch return l.fail(base + i, "invalid Unicode escape value", .{});
+            try out.appendSlice(l.arena, buf[0..len]);
+        }
+        if (pair_first != 0) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
+        if (t.kind == .qident and out.items.len == 0) return l.fail(start, "zero-length delimited identifier at or near \"\"\"\"", .{});
+        t.text = out.items;
+        t.end = @intCast(@max(t.end, l.pos));
+        return t;
     }
 
     fn quotedIdent(l: *Lexer) Error!Token {
@@ -426,6 +527,27 @@ pub const Lexer = struct {
     }
 };
 
+/// The code point of the escape \uXXXX or \UXXXXXXXX at `i`, null if
+/// its hex digits are too few.
+fn unicodeEscape(s: [:0]const u8, i: usize) ?u32 {
+    const n: usize = switch (s[i + 1]) {
+        'u' => 4,
+        'U' => 8,
+        else => return null,
+    };
+    var v: u32 = 0;
+    for (0..n) |k| v = v * 16 + (std.fmt.charToDigit(s[i + 2 + k], 16) catch return null);
+    return v;
+}
+
+fn isSurrogateFirst(c: u32) bool {
+    return c >= 0xD800 and c <= 0xDBFF;
+}
+
+fn isSurrogateSecond(c: u32) bool {
+    return c >= 0xDC00 and c <= 0xDFFF;
+}
+
 const isSpace = ctype.isSpace;
 const isDigit = ctype.isDigit;
 /// isIdentStart(), digits and `$`.
@@ -433,6 +555,25 @@ const isIdentChar = ctype.isIdChar;
 
 fn isIdentStart(c: u8) bool {
     return std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80;
+}
+
+/// Digits of base `base` written in decimal, of any length.
+fn toDecimal(a: std.mem.Allocator, digits: []const u8, base: u8) error{OutOfMemory}![]const u8 {
+    // Little-endian decimal digits.
+    var dec: std.ArrayList(u8) = .empty;
+    for (digits) |ch| {
+        var carry: u32 = @intCast(digitOf(ch));
+        for (dec.items) |*d| {
+            const x = @as(u32, d.*) * base + carry;
+            d.* = @intCast(x % 10);
+            carry = x / 10;
+        }
+        while (carry > 0) : (carry /= 10) try dec.append(a, @intCast(carry % 10));
+    }
+    if (dec.items.len == 0) try dec.append(a, 0);
+    std.mem.reverse(u8, dec.items);
+    for (dec.items) |*d| d.* += '0';
+    return dec.items;
 }
 
 fn isOpChar(c: u8) bool {
@@ -519,4 +660,18 @@ test "pg lexer: numbers, parameters, operators, comments" {
     try expectTokens("a+/*c*/b", &.{ .{ .ident, "a" }, .{ .op, "+" }, .{ .ident, "b" } });
     try expectLexError("/* a /* b */", "unterminated /* comment at or near \"/* a /* b */\"");
     try expectLexError("SELECT 123abc", "trailing junk after numeric literal at or near \"123abc\"");
+}
+
+test "pg lexer: Unicode escapes" {
+    try expectTokens("U&'d\\0061t\\+000061' U&\"d!0061\" UESCAPE '!' E'\\uD83D\\uDE00' u&'a\\\\b'", &.{
+        .{ .string, "data" }, .{ .qident, "da" }, .{ .string, "\u{1F600}" }, .{ .string, "a\\b" },
+    });
+    try expectLexError("SELECT U&'wrong: \\061'", "invalid Unicode escape");
+    try expectLexError("SELECT U&'wrong: \\db99xy'", "invalid Unicode surrogate pair");
+    try expectLexError("SELECT U&'wrong: \\+2FFFFF'", "invalid Unicode escape value");
+    try expectLexError("SELECT U&'x' UESCAPE +", "UESCAPE must be followed by a simple string literal at or near \"+\"");
+    try expectLexError("SELECT U&'x' UESCAPE '+'", "invalid Unicode escape character at or near \"'+'\"");
+    try expectLexError("SELECT E'wrong: \\u061'", "invalid Unicode escape");
+    try expectLexError("SELECT E'\\udb99\\u0061'", "invalid Unicode surrogate pair at or near \"\\u0061\"");
+    try expectLexError("SELECT E'\\udb99'", "invalid Unicode surrogate pair at or near \"'\"");
 }

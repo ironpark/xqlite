@@ -1,0 +1,110 @@
+-- Differential cases of PostgreSQL's formatting functions and the
+-- functions told the type of an argument (xqt dialect-diff pg
+-- tools/dialect/pg-format-cases.txt), in the format of pg-cases.txt: each
+-- case starts with a "-- case:" line and runs on an empty database, in
+-- PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. The expected output is PostgreSQL 18's.
+
+-- case: to_char of numerics: digits, groups, signs, fill mode
+SELECT to_char(-34338492.215397047::numeric, '9G999G999G999D999') AS a, to_char(1234.5::numeric, 'FM9,999.990') AS b, to_char(0.5::numeric, '9.99') AS c, to_char(0.5::numeric, 'FM9.99') AS d;
+SELECT to_char(-12.5::numeric, '999.9PR') AS a, to_char(12.5::numeric, 'S999.99') AS b, to_char(-12.5::numeric, '999.99S') AS c, to_char(12.5::numeric, 'SG999') AS d, to_char(12::numeric, 'PL999') AS e;
+SELECT to_char(7::numeric, '0009') AS a, to_char(7.25::numeric, 'FM0009.0900') AS b, to_char(123456::numeric, '999') AS c, to_char(100::numeric, 'FM999.') AS d;
+SELECT to_char(1.2345e-10::numeric, '9.999EEEE') AS a, to_char(-98765.4321::numeric, '9.99eeee') AS b, to_char(0::numeric, '9.9EEEE') AS c;
+SELECT to_char('Infinity'::numeric, '9.99EEEE') AS a, to_char('NaN'::numeric, '999.9') AS b, to_char('-Infinity'::numeric, 'MI99.99') AS c;
+
+-- case: to_char of integers: ordinals, Roman numerals, V, text
+SELECT to_char(1, '9th') AS a, to_char(2, '99TH') AS b, to_char(13, 'FM99th') AS c, to_char(23, 'FM99th') AS d, to_char(111, 'FM999th') AS e;
+SELECT to_char(1999, 'RN') AS a, to_char(4, 'FMrn') AS b, to_char(4000, 'RN') AS c, to_char(3888::int8, 'FMRN') AS d;
+SELECT to_char(1234, '99999V99') AS a, to_char(-5::int8, '9V999') AS b, to_char(42, '"num: "999') AS c, to_char(42, 'f\"oo99') AS d;
+SELECT to_char(4567890123456789::int8, '9G999G999G999G999G999') AS a, to_char(-4567890123456789::int8, 'FMS9999999999999999') AS b, to_char(1234::int8, '9.99EEEE') AS c;
+
+-- case: to_char of integers: ordinals, Roman numerals, V, text: errors
+SELECT to_char(1::int8, '9V9999999999999999999');
+
+-- case: to_char of floats: printf's rounding and the digits of a double
+SELECT to_char(0.125::float8, '9.99') AS a, to_char(2.675::float8, '9.99') AS b, to_char(1.5::float8, '9') AS c, to_char(2.5::float8, '9') AS d;
+SELECT to_char(12345678901::float8, 'FM9999999999D9999900000000000000000') AS a, to_char(1234.56::float4, '99999V99') AS b, to_char(1234.5678::float4, '9999.9999') AS c;
+SELECT to_char(1236::float8, 'rn') AS a, to_char(-4.2::float8, '9.999EEEE') AS b, to_char(1e300::float8, '9.9EEEE') AS c;
+SELECT to_char('inf'::numeric::float8, 'MI9999.99') AS a, to_char('-inf'::numeric::float4, 'MI99.99') AS b, to_char('inf'::numeric::float8, 'MI9999999999.99') AS c;
+
+-- case: a template of RN and digits
+SELECT to_char(1, 'RN9');
+
+-- case: template errors
+SELECT to_char(1, '9.9.9');
+SELECT to_char(1, 'S9S');
+SELECT to_char(1, 'MI9S');
+SELECT to_char(1, '9PR9');
+SELECT to_char(1, '9.9V9');
+SELECT to_char(1, '9EEEEPR');
+SELECT to_number('1', '9EEEE');
+
+-- case: to_number
+SELECT to_number('-34,338,492.654,878', '99G999G999D999G999') AS a, to_number('<564646.654564>', '999999.999999PR') AS b, to_number('5.01-', 'FM9.999999MI') AS c;
+SELECT to_number('$1,234.56', 'L99,999.99') AS a, to_number('42nd', '99th') AS b, to_number('123456', '99999V99') AS c, to_number('.01', 'FM9.99') AS d;
+SELECT to_number('MMXXIV', 'RN') AS a, to_number('  xiv', 'rn') AS b, to_number('0', '99.99') AS c;
+
+-- case: to_number: errors
+SELECT to_number('IIII', 'RN');
+SELECT to_number('', 'RN');
+SELECT to_number('12345', '99');
+
+-- case: to_char of timestamps, dates and intervals
+SELECT to_char(timestamp '2001-02-16 20:38:40.123456', 'YYYY-MM-DD HH24:MI:SS.US') AS a, to_char(timestamp '2001-02-16 20:38:40', 'Day, DD Month YYYY HH12:MI AM') AS b;
+SELECT to_char(timestamp '2001-02-16 20:38:40', 'FMDay FMDDth FMMonth') AS a, to_char(date '2024-12-30', 'IYYY-IW-ID DDD J Q RM') AS b, to_char(timestamp '0044-03-15 12:00:00 BC', 'YYYY BC') AS c;
+SELECT to_char(timestamptz '2001-02-16 20:38:40+00', 'YYYY-MM-DD HH24:MI:SS TZ OF') AS a, to_char(timestamp '2001-02-16 20:38:40', 'TZ') AS b;
+SELECT to_char(interval '1 year 2 months 3 days 04:05:06.789', 'YYYY MM DD HH24 MI SS MS') AS a, to_char(interval '-36 hours', 'HH24:MI') AS b, to_char(interval '100 hours', 'HH24 DD') AS c;
+SELECT to_char(timestamp '2001-02-16 20:38:40', '') IS NULL AS a, to_char('infinity'::interval, 'YYYY') IS NULL AS b;
+
+-- case: to_date and to_timestamp
+SELECT to_date('20100309', 'YYYYMMDD') AS a, to_date('05 Dec 2000', 'DD Mon YYYY') AS b, to_date('2016-366', 'YYYY-DDD') AS c, to_date('2011 12  18', 'YYYY MM DD') AS d;
+SELECT to_timestamp('2011-12-18 11:38 PM', 'YYYY-MM-DD HH12:MI PM') AS a, to_timestamp('2011-12-18 23:38:15.123', 'YYYY-MM-DD HH24:MI:SS.MS') AS b;
+SELECT to_timestamp('2000-01-01 12:00 +05:30', 'YYYY-MM-DD HH24:MI TZH:TZM') AS a, to_timestamp(0) AS b, to_timestamp(1284352323.5) AS c;
+
+-- case: to_date and to_timestamp: errors
+SELECT to_date('2016-13-01', 'YYYY-MM-DD');
+SELECT to_date('2016-02-30', 'YYYY-MM-DD');
+SELECT to_timestamp('97/Feb/16', 'YYMonDD');
+SELECT to_timestamp('2011-12-18 13:38', 'YYYY-MM-DD HH12:MI');
+
+-- case: pg_input_is_valid and pg_input_error_info
+SELECT pg_input_is_valid('34', 'int4') AS a, pg_input_is_valid('asdf', 'int4') AS b, pg_input_is_valid('1234.567', 'numeric(8,4)') AS c, pg_input_is_valid('1234.567', 'numeric(7,4)') AS d;
+SELECT pg_input_is_valid('true', 'bool') AS a, pg_input_is_valid('garbage', 'interval') AS b, pg_input_is_valid('11', 'uuid') AS c, pg_input_is_valid('abcd  ', 'varchar(4)') AS d, pg_input_is_valid('abcde', 'varchar(4)') AS e;
+SELECT pg_input_is_valid('1e400', 'float8') AS a, pg_input_is_valid(' 1 3  5 ', 'int2vector') AS b, pg_input_is_valid('anything', 'text') AS c;
+SELECT * FROM pg_input_error_info('1234.567', 'numeric(7,4)');
+SELECT * FROM pg_input_error_info('0x1234.567', 'numeric');
+SELECT * FROM pg_input_error_info('junk', 'bool');
+SELECT * FROM pg_input_error_info('abcde', 'varchar(4)');
+SELECT * FROM pg_input_error_info(E'\\xDeAdBeE', 'bytea');
+SELECT * FROM pg_input_error_info('42', 'int4');
+
+-- case: pg_input_is_valid and pg_input_error_info: errors
+SELECT pg_input_is_valid('1', 'nosuchtype');
+
+-- case: gcd and lcm of integers and numerics
+SELECT gcd(61866666, 6410818) AS a, gcd(-61866666, 6410818) AS b, lcm(423282::int8, 13272) AS c, gcd(0, 0) AS d, lcm(0, 5) AS e;
+SELECT gcd(4331.250::numeric, 463.75000::numeric) AS a, lcm(42328.2::numeric, 1327.2::numeric) AS b, gcd('NaN'::numeric, 2::numeric) AS c;
+
+-- case: gcd and lcm of integers and numerics: errors
+SELECT gcd((-2147483648)::int4, 0::int4);
+SELECT gcd((-9223372036854775808)::int8, 0::int8);
+SELECT lcm(2147483647::int4, 2147483646::int4);
+
+-- case: date_trunc, date_bin and AT TIME ZONE
+SELECT date_trunc('hour', timestamp '2001-02-16 20:38:40') AS a, date_trunc('week', timestamp '2001-02-16 20:38:40') AS b, date_trunc('quarter', timestamp '2001-05-16 20:38:40') AS c, date_trunc('century', timestamp '2001-02-16 20:38:40') AS d;
+SELECT date_trunc('milliseconds', timestamp '2001-02-16 20:38:40.123456') AS a, date_trunc('decade', timestamp '1999-02-16 20:38:40') AS b;
+SELECT date_trunc('hour', interval '2 days 03:04:05') AS a, date_trunc('year', interval '3 years 4 months') AS b;
+SELECT date_bin('15 minutes', timestamp '2020-02-11 15:44:17', timestamp '2001-01-01') AS a, date_bin('1 hour', timestamp '2001-01-01 00:30:00', timestamp '2001-01-01 01:00:00') AS b;
+SELECT timestamp '2001-02-16 20:38:40' AT TIME ZONE 'UTC' AS a, timestamptz '2001-02-16 20:38:40+00' AT TIME ZONE 'EST' AS b, timestamptz '2001-02-16 20:38:40+00' AT TIME ZONE interval '05:30' AS c;
+
+-- case: date_trunc, date_bin and AT TIME ZONE: errors
+SELECT date_trunc('week', interval '2 days');
+SELECT date_trunc('ago', timestamp '2001-02-16 20:38:40');
+SELECT date_bin('1 month', timestamp '2001-02-16 20:38:40', timestamp '2001-01-01');
+SELECT date_bin('0 days', timestamp '2001-02-16 20:38:40', timestamp '2001-01-01');
+SELECT timezone('infinity'::interval, timestamp '1995-08-06 12:12:12');
+
+-- case: float8(), float4(), booleq, boolne, interval_hash
+SELECT float8(123::int8) = 123 AS a, float8(1.5::numeric) = 1.5 AS b, float4(0.1) = 0.1::float4 AS c, booleq(true, true) AS d, boolne(true, false) AS e, booleq(false, NULL) IS NULL AS f;
+SELECT interval_hash('30 days'::interval) = interval_hash('1 month'::interval) AS t;

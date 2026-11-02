@@ -1,0 +1,174 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-integer-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 70f9e483bc5d38aa integer input of casts
+int2|int2|int4|int4|int8
+123|-32768|42|1071|-9223372036854775808
+(1 row)
+int2|int4|int8|int2|int4
+37|187|1000000|37|518979583
+(1 row)
+int2|int4|int8
+32767|-2147483648|9223372036854775807
+(1 row)
+ERROR:  invalid input syntax for type smallint: "34.5"
+LINE 1: SELECT '34.5'::int2;
+               ^
+ERROR:  value "32768" is out of range for type smallint
+LINE 1: SELECT '32768'::int2;
+               ^
+ERROR:  value "0x8000" is out of range for type smallint
+LINE 1: SELECT '0x8000'::int2;
+               ^
+ERROR:  value "9223372036854775808" is out of range for type bigint
+LINE 1: SELECT '9223372036854775808'::int8;
+               ^
+ERROR:  invalid input syntax for type integer: "- 1234"
+LINE 1: SELECT '- 1234'::int4;
+               ^
+ERROR:  invalid input syntax for type integer: "4 444"
+LINE 1: SELECT '4 444'::int4;
+               ^
+ERROR:  invalid input syntax for type bigint: ""
+LINE 1: SELECT ''::int8;
+               ^
+ERROR:  invalid input syntax for type bigint: "    "
+LINE 1: SELECT '    '::int8;
+               ^
+ERROR:  invalid input syntax for type integer: "0x"
+LINE 1: SELECT '0x'::int4;
+               ^
+ERROR:  invalid input syntax for type integer: "0b"
+LINE 1: SELECT '0b'::int4;
+               ^
+ERROR:  invalid input syntax for type integer: "_100"
+LINE 1: SELECT '_100'::int4;
+               ^
+ERROR:  invalid input syntax for type integer: "100_"
+LINE 1: SELECT '100_'::int4;
+               ^
+ERROR:  invalid input syntax for type integer: "10__000"
+LINE 1: SELECT '10__000'::int4;
+               ^
+ERROR:  invalid input syntax for type integer: "1e3"
+LINE 1: SELECT '1e3'::int4;
+               ^
+ERROR:  value "100000x" is out of range for type smallint
+LINE 1: SELECT '100000x'::int2;
+               ^
+ERROR:  invalid input syntax for type smallint: "32769x"
+LINE 1: SELECT '32769x'::int2;
+               ^
+==== case d37c9734ee35e8d3 reals and numerics made integers
+int2|int4|int8|int2|int4
+-2|0|0|2|4
+(1 row)
+int2|int4|int8|int2
+3|-3|1|2
+(1 row)
+ERROR:  integer out of range
+ERROR:  smallint out of range
+==== case 772cc19576eaa830 strings stored into integer columns
+a|b|c
+-3||
+3||
+7|3|42
+12|16|-1000
+35||
+|2|
+|4|
+(7 rows)
+ERROR:  invalid input syntax for type smallint: "34.5"
+LINE 1: INSERT INTO t (a) VALUES ('34.5');
+                                  ^
+ERROR:  value "100000" is out of range for type smallint
+LINE 1: INSERT INTO t (a) VALUES ('100000');
+                                  ^
+ERROR:  invalid input syntax for type smallint: ""
+LINE 1: INSERT INTO t (a) VALUES ('');
+                                  ^
+ERROR:  invalid input syntax for type smallint: "    "
+LINE 1: INSERT INTO t (a) VALUES ('    ');
+                                  ^
+ERROR:  invalid input syntax for type smallint: "- 1234"
+LINE 1: INSERT INTO t (a) VALUES ('- 1234');
+                                  ^
+ERROR:  invalid input syntax for type smallint: "123 dt"
+LINE 1: INSERT INTO t (a) VALUES ('123 dt');
+                                  ^
+ERROR:  value "1000000000000" is out of range for type integer
+LINE 1: INSERT INTO t (b) VALUES ('1000000000000');
+                                  ^
+ERROR:  value "3908203590239580293850293850329485" is out of range for type bigint
+LINE 1: INSERT INTO t (c) VALUES ('390820359023958029385029385032948...
+                                  ^
+ERROR:  smallint out of range
+ERROR:  smallint out of range
+ERROR:  invalid input syntax for type integer: "x"
+LINE 1: UPDATE t SET b = 'x';
+                         ^
+==== case ee32569a8e6bb23e integer literals
+?column?|?column?|?column?|?column?|?column?|?column?|?column?
+1071|187|37|1000000|31|1000.5|100000000000
+(1 row)
+?column?|?column?|?column?
+2147483647|2147483648|-9223372036854775808
+(1 row)
+ERROR:  invalid hexadecimal integer at or near "0x"
+LINE 1: SELECT 0x;
+               ^
+ERROR:  invalid hexadecimal integer at or near "0x_"
+LINE 1: SELECT 0x_;
+               ^
+ERROR:  trailing junk after numeric literal at or near "0b102"
+LINE 1: SELECT 0b102;
+               ^
+ERROR:  trailing junk after numeric literal at or near "0x1g"
+LINE 1: SELECT 0x1g;
+               ^
+ERROR:  trailing junk after numeric literal at or near "0x1__F"
+LINE 1: SELECT 0x1__F;
+               ^
+ERROR:  trailing junk after numeric literal at or near "1__0"
+LINE 1: SELECT 1__0;
+               ^
+ERROR:  trailing junk after numeric literal at or near "100_"
+LINE 1: SELECT 100_;
+               ^
+==== case 8bba163f65b31102 bit operators of integers
+?column?|?column?|?column?|?column?|?column?|?column?
+435|6|5|-6|6|6
+(1 row)
+?column?|?column?|?column?|?column?|?column?
+72|507|-124|8|16
+(1 row)
+ERROR:  operator does not exist: text # integer
+LINE 1: SELECT 'a'::text # 1;
+                         ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: numeric # integer
+LINE 1: SELECT 1.5 # 1;
+                   ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+==== case 7c8fe0dc38527f8a character(n) and varchar(n) drop the spaces past n
+f|v|length|length|eq
+[]|[]|0|0|f
+[a]|[a]|1|1|f
+[ab]|[ab  ]|2|4|t
+[abcd]|[abcd]|4|4|f
+(4 rows)
+t|vc
+|
+a|a
+ab|ab
+abcd|abcd
+(4 rows)
+ERROR:  value too long for type character(4)
+ERROR:  value too long for type character varying(4)
+ERROR:  value too long for type character varying(4)
+count
+4
+(1 row)
+==== case 7800ad35a982d292 casts to character(n) and varchar(n)
+c|d|v
+doh!||hi de ho n||abc
+(1 row)

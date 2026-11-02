@@ -49,6 +49,7 @@ const dialect = @import("../dialect.zig");
 const nsp_mod = catalog.schemas;
 const state = @import("state.zig");
 const parser = @import("parser.zig");
+const deparse = @import("deparse.zig");
 
 const Allocator = std.mem.Allocator;
 const Sqlite3 = int.Sqlite3;
@@ -158,6 +159,149 @@ const base_types = [_]BuiltinType{
     .{ .oid = 4072, .name = "jsonpath", .fmt = "jsonpath", .len = -1, .byval = false, .cat = 'U', .storage = 'x', .io = "jsonpath_", .array = 4073 },
 };
 
+/// pg_opclass's rows, as PostgreSQL 18 has them (in their order on disk,
+/// which a query without ORDER BY shows): oid, opcmethod (403 btree,
+/// 405 hash ...), opcname, opcfamily, opcintype, opcdefault, opckeytype.
+pub const OpClass = struct { u32, u32, []const u8, u32, u32, bool, u32 };
+
+pub const opclasses = [_]OpClass{
+    .{ 10000, 403, "array_ops", 397, 2277, true, 0 },                          .{ 10001, 405, "array_ops", 627, 2277, true, 0 },
+    .{ 10002, 403, "bit_ops", 423, 1560, true, 0 },                            .{ 10003, 403, "bool_ops", 424, 16, true, 0 },
+    .{ 10004, 403, "bpchar_ops", 426, 1042, true, 0 },                         .{ 10005, 405, "bpchar_ops", 427, 1042, true, 0 },
+    .{ 10006, 403, "bytea_ops", 428, 17, true, 0 },                            .{ 10007, 403, "char_ops", 429, 18, true, 0 },
+    .{ 10008, 405, "char_ops", 431, 18, true, 0 },                             .{ 10009, 403, "cidr_ops", 1974, 869, false, 0 },
+    .{ 10010, 405, "cidr_ops", 1975, 869, false, 0 },                          .{ 3122, 403, "date_ops", 434, 1082, true, 0 },
+    .{ 10011, 405, "date_ops", 435, 1082, true, 0 },                           .{ 10012, 403, "float4_ops", 1970, 700, true, 0 },
+    .{ 10013, 405, "float4_ops", 1971, 700, true, 0 },                         .{ 3123, 403, "float8_ops", 1970, 701, true, 0 },
+    .{ 10014, 405, "float8_ops", 1971, 701, true, 0 },                         .{ 10015, 403, "inet_ops", 1974, 869, true, 0 },
+    .{ 10016, 405, "inet_ops", 1975, 869, true, 0 },                           .{ 10017, 783, "inet_ops", 3550, 869, false, 0 },
+    .{ 10018, 4000, "inet_ops", 3794, 869, true, 0 },                          .{ 1979, 403, "int2_ops", 1976, 21, true, 0 },
+    .{ 10019, 405, "int2_ops", 1977, 21, true, 0 },                            .{ 1978, 403, "int4_ops", 1976, 23, true, 0 },
+    .{ 10020, 405, "int4_ops", 1977, 23, true, 0 },                            .{ 3124, 403, "int8_ops", 1976, 20, true, 0 },
+    .{ 10021, 405, "int8_ops", 1977, 20, true, 0 },                            .{ 10022, 403, "interval_ops", 1982, 1186, true, 0 },
+    .{ 10023, 405, "interval_ops", 1983, 1186, true, 0 },                      .{ 10024, 403, "macaddr_ops", 1984, 829, true, 0 },
+    .{ 10025, 405, "macaddr_ops", 1985, 829, true, 0 },                        .{ 10026, 403, "macaddr8_ops", 3371, 774, true, 0 },
+    .{ 10027, 405, "macaddr8_ops", 3372, 774, true, 0 },                       .{ 10028, 403, "name_ops", 1994, 19, true, 2275 },
+    .{ 10029, 405, "name_ops", 1995, 19, true, 0 },                            .{ 3125, 403, "numeric_ops", 1988, 1700, true, 0 },
+    .{ 10030, 405, "numeric_ops", 1998, 1700, true, 0 },                       .{ 1981, 403, "oid_ops", 1989, 26, true, 0 },
+    .{ 10031, 405, "oid_ops", 1990, 26, true, 0 },                             .{ 10032, 403, "oidvector_ops", 1991, 30, true, 0 },
+    .{ 10033, 405, "oidvector_ops", 1992, 30, true, 0 },                       .{ 10034, 403, "record_ops", 2994, 2249, true, 0 },
+    .{ 10035, 405, "record_ops", 6194, 2249, true, 0 },                        .{ 10036, 403, "record_image_ops", 3194, 2249, false, 0 },
+    .{ 3126, 403, "text_ops", 1994, 25, true, 0 },                             .{ 10037, 405, "text_ops", 1995, 25, true, 0 },
+    .{ 10038, 403, "time_ops", 1996, 1083, true, 0 },                          .{ 10039, 405, "time_ops", 1997, 1083, true, 0 },
+    .{ 3127, 403, "timestamptz_ops", 434, 1184, true, 0 },                     .{ 10040, 405, "timestamptz_ops", 1999, 1184, true, 0 },
+    .{ 10041, 403, "timetz_ops", 2000, 1266, true, 0 },                        .{ 10042, 405, "timetz_ops", 2001, 1266, true, 0 },
+    .{ 10043, 403, "varbit_ops", 2002, 1562, true, 0 },                        .{ 10044, 403, "varchar_ops", 1994, 25, false, 0 },
+    .{ 10045, 405, "varchar_ops", 1995, 25, false, 0 },                        .{ 3128, 403, "timestamp_ops", 434, 1114, true, 0 },
+    .{ 10046, 405, "timestamp_ops", 2040, 1114, true, 0 },                     .{ 4217, 403, "text_pattern_ops", 2095, 25, false, 0 },
+    .{ 4218, 403, "varchar_pattern_ops", 2095, 25, false, 0 },                 .{ 4219, 403, "bpchar_pattern_ops", 2097, 1042, false, 0 },
+    .{ 10047, 403, "money_ops", 2099, 790, true, 0 },                          .{ 10048, 405, "bool_ops", 2222, 16, true, 0 },
+    .{ 10049, 405, "bytea_ops", 2223, 17, true, 0 },                           .{ 10050, 403, "tid_ops", 2789, 27, true, 0 },
+    .{ 10051, 405, "xid_ops", 2225, 28, true, 0 },                             .{ 10052, 405, "xid8_ops", 5032, 5069, true, 0 },
+    .{ 10053, 403, "xid8_ops", 5067, 5069, true, 0 },                          .{ 10054, 405, "cid_ops", 2226, 29, true, 0 },
+    .{ 10055, 405, "tid_ops", 2227, 27, true, 0 },                             .{ 10056, 405, "text_pattern_ops", 2229, 25, false, 0 },
+    .{ 10057, 405, "varchar_pattern_ops", 2229, 25, false, 0 },                .{ 10058, 405, "bpchar_pattern_ops", 2231, 1042, false, 0 },
+    .{ 10059, 405, "aclitem_ops", 2235, 1033, true, 0 },                       .{ 10060, 783, "box_ops", 2593, 603, true, 0 },
+    .{ 10061, 783, "point_ops", 1029, 600, true, 603 },                        .{ 10062, 783, "poly_ops", 2594, 604, true, 603 },
+    .{ 10063, 783, "circle_ops", 2595, 718, true, 603 },                       .{ 10064, 2742, "array_ops", 2745, 2277, true, 2283 },
+    .{ 10065, 403, "uuid_ops", 2968, 2950, true, 0 },                          .{ 10066, 405, "uuid_ops", 2969, 2950, true, 0 },
+    .{ 10067, 403, "pg_lsn_ops", 3253, 3220, true, 0 },                        .{ 10068, 405, "pg_lsn_ops", 3254, 3220, true, 0 },
+    .{ 10069, 403, "enum_ops", 3522, 3500, true, 0 },                          .{ 10070, 405, "enum_ops", 3523, 3500, true, 0 },
+    .{ 10071, 403, "tsvector_ops", 3626, 3614, true, 0 },                      .{ 10072, 783, "tsvector_ops", 3655, 3614, true, 3642 },
+    .{ 10073, 2742, "tsvector_ops", 3659, 3614, true, 25 },                    .{ 10074, 403, "tsquery_ops", 3683, 3615, true, 0 },
+    .{ 10075, 783, "tsquery_ops", 3702, 3615, true, 20 },                      .{ 10076, 403, "range_ops", 3901, 3831, true, 0 },
+    .{ 10077, 405, "range_ops", 3903, 3831, true, 0 },                         .{ 10078, 783, "range_ops", 3919, 3831, true, 0 },
+    .{ 10079, 4000, "range_ops", 3474, 3831, true, 0 },                        .{ 10080, 403, "multirange_ops", 4199, 4537, true, 0 },
+    .{ 10081, 405, "multirange_ops", 4225, 4537, true, 0 },                    .{ 10082, 783, "multirange_ops", 6158, 4537, true, 3831 },
+    .{ 10083, 4000, "box_ops", 5000, 603, true, 0 },                           .{ 10084, 4000, "quad_point_ops", 4015, 600, true, 0 },
+    .{ 10085, 4000, "kd_point_ops", 4016, 600, false, 0 },                     .{ 10086, 4000, "text_ops", 4017, 25, true, 0 },
+    .{ 10087, 4000, "poly_ops", 5008, 604, true, 603 },                        .{ 10088, 403, "jsonb_ops", 4033, 3802, true, 0 },
+    .{ 10089, 405, "jsonb_ops", 4034, 3802, true, 0 },                         .{ 10090, 2742, "jsonb_ops", 4036, 3802, true, 25 },
+    .{ 10091, 2742, "jsonb_path_ops", 4037, 3802, false, 23 },                 .{ 10092, 3580, "bytea_minmax_ops", 4064, 17, true, 17 },
+    .{ 10093, 3580, "bytea_bloom_ops", 4578, 17, false, 17 },                  .{ 10094, 3580, "char_minmax_ops", 4062, 18, true, 18 },
+    .{ 10095, 3580, "char_bloom_ops", 4577, 18, false, 18 },                   .{ 10096, 3580, "name_minmax_ops", 4065, 19, true, 19 },
+    .{ 10097, 3580, "name_bloom_ops", 4579, 19, false, 19 },                   .{ 10098, 3580, "int8_minmax_ops", 4054, 20, true, 20 },
+    .{ 10099, 3580, "int8_minmax_multi_ops", 4602, 20, false, 20 },            .{ 10100, 3580, "int8_bloom_ops", 4572, 20, false, 20 },
+    .{ 10101, 3580, "int2_minmax_ops", 4054, 21, true, 21 },                   .{ 10102, 3580, "int2_minmax_multi_ops", 4602, 21, false, 21 },
+    .{ 10103, 3580, "int2_bloom_ops", 4572, 21, false, 21 },                   .{ 10104, 3580, "int4_minmax_ops", 4054, 23, true, 23 },
+    .{ 10105, 3580, "int4_minmax_multi_ops", 4602, 23, false, 23 },            .{ 10106, 3580, "int4_bloom_ops", 4572, 23, false, 23 },
+    .{ 10107, 3580, "text_minmax_ops", 4056, 25, true, 25 },                   .{ 10108, 3580, "text_bloom_ops", 4573, 25, false, 25 },
+    .{ 10109, 3580, "oid_minmax_ops", 4068, 26, true, 26 },                    .{ 10110, 3580, "oid_minmax_multi_ops", 4606, 26, false, 26 },
+    .{ 10111, 3580, "oid_bloom_ops", 4580, 26, false, 26 },                    .{ 10112, 3580, "tid_minmax_ops", 4069, 27, true, 27 },
+    .{ 10113, 3580, "tid_bloom_ops", 4581, 27, false, 27 },                    .{ 10114, 3580, "tid_minmax_multi_ops", 4607, 27, false, 27 },
+    .{ 10115, 3580, "float4_minmax_ops", 4070, 700, true, 700 },               .{ 10116, 3580, "float4_minmax_multi_ops", 4608, 700, false, 700 },
+    .{ 10117, 3580, "float4_bloom_ops", 4582, 700, false, 700 },               .{ 10118, 3580, "float8_minmax_ops", 4070, 701, true, 701 },
+    .{ 10119, 3580, "float8_minmax_multi_ops", 4608, 701, false, 701 },        .{ 10120, 3580, "float8_bloom_ops", 4582, 701, false, 701 },
+    .{ 10121, 3580, "macaddr_minmax_ops", 4074, 829, true, 829 },              .{ 10122, 3580, "macaddr_minmax_multi_ops", 4609, 829, false, 829 },
+    .{ 10123, 3580, "macaddr_bloom_ops", 4583, 829, false, 829 },              .{ 10124, 3580, "macaddr8_minmax_ops", 4109, 774, true, 774 },
+    .{ 10125, 3580, "macaddr8_minmax_multi_ops", 4610, 774, false, 774 },      .{ 10126, 3580, "macaddr8_bloom_ops", 4584, 774, false, 774 },
+    .{ 10127, 3580, "inet_minmax_ops", 4075, 869, false, 869 },                .{ 10128, 3580, "inet_minmax_multi_ops", 4611, 869, false, 869 },
+    .{ 10129, 3580, "inet_bloom_ops", 4585, 869, false, 869 },                 .{ 10130, 3580, "inet_inclusion_ops", 4102, 869, true, 869 },
+    .{ 10131, 3580, "bpchar_minmax_ops", 4076, 1042, true, 1042 },             .{ 10132, 3580, "bpchar_bloom_ops", 4586, 1042, false, 1042 },
+    .{ 10133, 3580, "time_minmax_ops", 4077, 1083, true, 1083 },               .{ 10134, 3580, "time_minmax_multi_ops", 4612, 1083, false, 1083 },
+    .{ 10135, 3580, "time_bloom_ops", 4587, 1083, false, 1083 },               .{ 10136, 3580, "date_minmax_ops", 4059, 1082, true, 1082 },
+    .{ 10137, 3580, "date_minmax_multi_ops", 4605, 1082, false, 1082 },        .{ 10138, 3580, "date_bloom_ops", 4576, 1082, false, 1082 },
+    .{ 10139, 3580, "timestamp_minmax_ops", 4059, 1114, true, 1114 },          .{ 10140, 3580, "timestamp_minmax_multi_ops", 4605, 1114, false, 1114 },
+    .{ 10141, 3580, "timestamp_bloom_ops", 4576, 1114, false, 1114 },          .{ 10142, 3580, "timestamptz_minmax_ops", 4059, 1184, true, 1184 },
+    .{ 10143, 3580, "timestamptz_minmax_multi_ops", 4605, 1184, false, 1184 }, .{ 10144, 3580, "timestamptz_bloom_ops", 4576, 1184, false, 1184 },
+    .{ 10145, 3580, "interval_minmax_ops", 4078, 1186, true, 1186 },           .{ 10146, 3580, "interval_minmax_multi_ops", 4613, 1186, false, 1186 },
+    .{ 10147, 3580, "interval_bloom_ops", 4588, 1186, false, 1186 },           .{ 10148, 3580, "timetz_minmax_ops", 4058, 1266, true, 1266 },
+    .{ 10149, 3580, "timetz_minmax_multi_ops", 4604, 1266, false, 1266 },      .{ 10150, 3580, "timetz_bloom_ops", 4575, 1266, false, 1266 },
+    .{ 10151, 3580, "bit_minmax_ops", 4079, 1560, true, 1560 },                .{ 10152, 3580, "varbit_minmax_ops", 4080, 1562, true, 1562 },
+    .{ 10153, 3580, "numeric_minmax_ops", 4055, 1700, true, 1700 },            .{ 10154, 3580, "numeric_minmax_multi_ops", 4603, 1700, false, 1700 },
+    .{ 10155, 3580, "numeric_bloom_ops", 4574, 1700, false, 1700 },            .{ 10156, 3580, "uuid_minmax_ops", 4081, 2950, true, 2950 },
+    .{ 10157, 3580, "uuid_minmax_multi_ops", 4614, 2950, false, 2950 },        .{ 10158, 3580, "uuid_bloom_ops", 4589, 2950, false, 2950 },
+    .{ 10159, 3580, "range_inclusion_ops", 4103, 3831, true, 3831 },           .{ 10160, 3580, "pg_lsn_minmax_ops", 4082, 3220, true, 3220 },
+    .{ 10161, 3580, "pg_lsn_minmax_multi_ops", 4615, 3220, false, 3220 },      .{ 10162, 3580, "pg_lsn_bloom_ops", 4590, 3220, false, 3220 },
+    .{ 10163, 3580, "box_inclusion_ops", 4104, 603, true, 603 },
+};
+
+/// pg_opfamily's rows (in their order on disk): oid, opfmethod, opfname.
+pub const opfamilies = [_]struct { u32, u32, []const u8 }{
+    .{ 397, 403, "array_ops" },                  .{ 627, 405, "array_ops" },                   .{ 423, 403, "bit_ops" },                     .{ 424, 403, "bool_ops" },                   .{ 426, 403, "bpchar_ops" },
+    .{ 427, 405, "bpchar_ops" },                 .{ 428, 403, "bytea_ops" },                   .{ 429, 403, "char_ops" },                    .{ 431, 405, "char_ops" },                   .{ 434, 403, "datetime_ops" },
+    .{ 435, 405, "date_ops" },                   .{ 1970, 403, "float_ops" },                  .{ 1971, 405, "float_ops" },                  .{ 1974, 403, "network_ops" },               .{ 1975, 405, "network_ops" },
+    .{ 3550, 783, "network_ops" },               .{ 3794, 4000, "network_ops" },               .{ 1976, 403, "integer_ops" },                .{ 1977, 405, "integer_ops" },               .{ 1982, 403, "interval_ops" },
+    .{ 1983, 405, "interval_ops" },              .{ 1984, 403, "macaddr_ops" },                .{ 1985, 405, "macaddr_ops" },                .{ 3371, 403, "macaddr8_ops" },              .{ 3372, 405, "macaddr8_ops" },
+    .{ 1988, 403, "numeric_ops" },               .{ 1998, 405, "numeric_ops" },                .{ 1989, 403, "oid_ops" },                    .{ 1990, 405, "oid_ops" },                   .{ 1991, 403, "oidvector_ops" },
+    .{ 1992, 405, "oidvector_ops" },             .{ 2994, 403, "record_ops" },                 .{ 6194, 405, "record_ops" },                 .{ 3194, 403, "record_image_ops" },          .{ 1994, 403, "text_ops" },
+    .{ 1995, 405, "text_ops" },                  .{ 1996, 403, "time_ops" },                   .{ 1997, 405, "time_ops" },                   .{ 1999, 405, "timestamptz_ops" },           .{ 2000, 403, "timetz_ops" },
+    .{ 2001, 405, "timetz_ops" },                .{ 2002, 403, "varbit_ops" },                 .{ 2040, 405, "timestamp_ops" },              .{ 2095, 403, "text_pattern_ops" },          .{ 2097, 403, "bpchar_pattern_ops" },
+    .{ 2099, 403, "money_ops" },                 .{ 2222, 405, "bool_ops" },                   .{ 2223, 405, "bytea_ops" },                  .{ 2789, 403, "tid_ops" },                   .{ 2225, 405, "xid_ops" },
+    .{ 5032, 405, "xid8_ops" },                  .{ 5067, 403, "xid8_ops" },                   .{ 2226, 405, "cid_ops" },                    .{ 2227, 405, "tid_ops" },                   .{ 2229, 405, "text_pattern_ops" },
+    .{ 2231, 405, "bpchar_pattern_ops" },        .{ 2235, 405, "aclitem_ops" },                .{ 2593, 783, "box_ops" },                    .{ 2594, 783, "poly_ops" },                  .{ 2595, 783, "circle_ops" },
+    .{ 1029, 783, "point_ops" },                 .{ 2745, 2742, "array_ops" },                 .{ 2968, 403, "uuid_ops" },                   .{ 2969, 405, "uuid_ops" },                  .{ 3253, 403, "pg_lsn_ops" },
+    .{ 3254, 405, "pg_lsn_ops" },                .{ 3522, 403, "enum_ops" },                   .{ 3523, 405, "enum_ops" },                   .{ 3626, 403, "tsvector_ops" },              .{ 3655, 783, "tsvector_ops" },
+    .{ 3659, 2742, "tsvector_ops" },             .{ 3683, 403, "tsquery_ops" },                .{ 3702, 783, "tsquery_ops" },                .{ 3901, 403, "range_ops" },                 .{ 3903, 405, "range_ops" },
+    .{ 3919, 783, "range_ops" },                 .{ 3474, 4000, "range_ops" },                 .{ 4015, 4000, "quad_point_ops" },            .{ 4016, 4000, "kd_point_ops" },             .{ 4017, 4000, "text_ops" },
+    .{ 4033, 403, "jsonb_ops" },                 .{ 4034, 405, "jsonb_ops" },                  .{ 4036, 2742, "jsonb_ops" },                 .{ 4037, 2742, "jsonb_path_ops" },           .{ 4054, 3580, "integer_minmax_ops" },
+    .{ 4602, 3580, "integer_minmax_multi_ops" }, .{ 4572, 3580, "integer_bloom_ops" },         .{ 4055, 3580, "numeric_minmax_ops" },        .{ 4603, 3580, "numeric_minmax_multi_ops" }, .{ 4056, 3580, "text_minmax_ops" },
+    .{ 4573, 3580, "text_bloom_ops" },           .{ 4574, 3580, "numeric_bloom_ops" },         .{ 4058, 3580, "timetz_minmax_ops" },         .{ 4604, 3580, "timetz_minmax_multi_ops" },  .{ 4575, 3580, "timetz_bloom_ops" },
+    .{ 4059, 3580, "datetime_minmax_ops" },      .{ 4605, 3580, "datetime_minmax_multi_ops" }, .{ 4576, 3580, "datetime_bloom_ops" },        .{ 4062, 3580, "char_minmax_ops" },          .{ 4577, 3580, "char_bloom_ops" },
+    .{ 4064, 3580, "bytea_minmax_ops" },         .{ 4578, 3580, "bytea_bloom_ops" },           .{ 4065, 3580, "name_minmax_ops" },           .{ 4579, 3580, "name_bloom_ops" },           .{ 4068, 3580, "oid_minmax_ops" },
+    .{ 4606, 3580, "oid_minmax_multi_ops" },     .{ 4580, 3580, "oid_bloom_ops" },             .{ 4069, 3580, "tid_minmax_ops" },            .{ 4581, 3580, "tid_bloom_ops" },            .{ 4607, 3580, "tid_minmax_multi_ops" },
+    .{ 4070, 3580, "float_minmax_ops" },         .{ 4608, 3580, "float_minmax_multi_ops" },    .{ 4582, 3580, "float_bloom_ops" },           .{ 4074, 3580, "macaddr_minmax_ops" },       .{ 4609, 3580, "macaddr_minmax_multi_ops" },
+    .{ 4583, 3580, "macaddr_bloom_ops" },        .{ 4109, 3580, "macaddr8_minmax_ops" },       .{ 4610, 3580, "macaddr8_minmax_multi_ops" }, .{ 4584, 3580, "macaddr8_bloom_ops" },       .{ 4075, 3580, "network_minmax_ops" },
+    .{ 4611, 3580, "network_minmax_multi_ops" }, .{ 4102, 3580, "network_inclusion_ops" },     .{ 4585, 3580, "network_bloom_ops" },         .{ 4076, 3580, "bpchar_minmax_ops" },        .{ 4586, 3580, "bpchar_bloom_ops" },
+    .{ 4077, 3580, "time_minmax_ops" },          .{ 4612, 3580, "time_minmax_multi_ops" },     .{ 4587, 3580, "time_bloom_ops" },            .{ 4078, 3580, "interval_minmax_ops" },      .{ 4613, 3580, "interval_minmax_multi_ops" },
+    .{ 4588, 3580, "interval_bloom_ops" },       .{ 4079, 3580, "bit_minmax_ops" },            .{ 4080, 3580, "varbit_minmax_ops" },         .{ 4081, 3580, "uuid_minmax_ops" },          .{ 4614, 3580, "uuid_minmax_multi_ops" },
+    .{ 4589, 3580, "uuid_bloom_ops" },           .{ 4103, 3580, "range_inclusion_ops" },       .{ 4082, 3580, "pg_lsn_minmax_ops" },         .{ 4615, 3580, "pg_lsn_minmax_multi_ops" },  .{ 4590, 3580, "pg_lsn_bloom_ops" },
+    .{ 4104, 3580, "box_inclusion_ops" },        .{ 5000, 4000, "box_ops" },                   .{ 5008, 4000, "poly_ops" },                  .{ 4199, 403, "multirange_ops" },            .{ 4225, 405, "multirange_ops" },
+    .{ 6158, 783, "multirange_ops" },
+};
+
+/// The default btree operator class of a column of type `oid` (pg_index
+/// .indclass): its type's, else text's for a string type (varchar's
+/// text_ops), array_ops for an array, 0 for none.
+pub fn defaultOpclass(oid: u32) u32 {
+    for (opclasses) |c| if (c[1] == 403 and c[5] and c[4] == oid) return c[0];
+    if (builtinType(oid)) |t| {
+        if (t.cat == 'S') return 3126;
+        if (t.cat == 'A') return 10000;
+    }
+    return 0;
+}
+
 /// Every built-in type: the base types and an array type of each that
 /// has one (_int4, "integer[]").
 pub const builtin_types: []const BuiltinType = blk: {
@@ -263,6 +407,8 @@ pub fn columnType(d: dialect.Dialect, decl: []const u8) struct { u32, i32 } {
     if (d == .postgres and t.logical == .numeric) if (@import("repr.zig").numeric.typmodOf(decl)) |m| {
         return .{ oidOfLogical(t), ((m[0] << 16) | (m[1] & 0x7ff)) + 4 };
     };
+    // interval year to month, interval(2): INTERVAL_TYPMOD().
+    if (d == .postgres and t.logical == .interval) return .{ oidOfLogical(t), @import("ivinput.zig").typmodOfDecl(decl) };
     return .{ oidOfLogical(t), typmodOfLogical(t) };
 }
 
@@ -362,11 +508,14 @@ pub const IndexRow = struct {
     /// The attribute numbers of the table, 0 for an expression.
     keys: []const i16,
     desc: []const bool,
-    /// Each column's definition, as pg_get_indexdef(oid, n) gives it.
+    /// Each column's definition, as pg_get_indexdef(oid, n) gives it
+    /// (and pretty).
     coldefs: []const []const u8,
+    coldefs_pretty: ?[]const []const u8 = null,
     /// The expressions (indexprs) and the predicate (indpred), as text.
     exprs: ?[]const u8 = null,
     pred: ?[]const u8 = null,
+    pred_pretty: ?[]const u8 = null,
 };
 
 pub const Con = struct {
@@ -384,11 +533,13 @@ pub const Con = struct {
     del: u8 = ' ',
     deferrable: bool = false,
     deferred: bool = false,
-    /// A CHECK's expression (conbin, as text).
+    /// A CHECK's expression (conbin, as text), and pretty
+    /// (deparse.zig; null where it kept the older text).
     bin: ?[]const u8 = null,
+    pretty: ?[]const u8 = null,
 };
 
-pub const Def = struct { oid: u32, rel: u32, num: i16, bin: []const u8 };
+pub const Def = struct { oid: u32, rel: u32, num: i16, bin: []const u8, pretty: ?[]const u8 = null };
 
 /// The catalog key of a comment of COMMENT ON (session.zig), on the
 /// table's entry or the column's.
@@ -534,6 +685,23 @@ fn freeCache(gpa: Allocator, p: *anyopaque) void {
 
 // ============================================================= building
 
+/// The relations a view's query reads, while building (deparse.zig's
+/// viewSources()).
+const ViewScope = struct {
+    b: *Builder,
+    db: []const u8,
+
+    fn resolve(c: ViewScope, name: []const u8) Oom!?deparse.Resolved {
+        const r = c.b.tableRel(c.db, name) orelse return null;
+        const all = c.b.attrs.items;
+        var i: usize = 0;
+        while (i < all.len and all[i].rel != r.oid) i += 1;
+        var j = i;
+        while (j < all.len and all[j].rel == r.oid) j += 1;
+        return .{ .shown = "", .attrs = all[i..j] };
+    }
+};
+
 const Builder = struct {
     db: *Sqlite3,
     a: Allocator,
@@ -616,6 +784,28 @@ const Builder = struct {
         for (typed.items, toids) |i, o| b.rels.items[i].rowtype = o;
 
         for (b.tables.items) |w| try b.describe(w);
+        // A foreign key's conindid: the referenced table's unique index
+        // of its columns.
+        for (b.cons.items) |*f| if (f.type == 'f') {
+            for (b.cons.items) |k| if ((k.type == 'p' or k.type == 'u') and k.rel == f.frel and std.mem.eql(i16, k.keys, f.fkeys)) {
+                f.index = k.index;
+                break;
+            };
+        };
+        // A view's column that is a table's column has its type (the
+        // core's type of it is its storage's: bigint, text, bytea).
+        for (b.rels.items) |*v| if (v.kind == 'v') if (v.sql) |sql| {
+            const srcs = try deparse.viewSources(a, sql, ViewScope{ .b = b, .db = v.db }, ViewScope.resolve) orelse continue;
+            var k: usize = 0;
+            for (b.attrs.items) |*at| if (at.rel == v.oid) {
+                if (k < srcs.len) if (srcs[k]) |src| {
+                    at.type_oid = src.type_oid;
+                    at.typmod = src.typmod;
+                    at.collation = src.collation;
+                };
+                k += 1;
+            };
+        };
         const coids = try assign(a, 'c', b.con_keys.items);
         for (b.cons.items, coids) |*c, o| c.oid = o;
         const doids = try assign(a, 'd', b.def_keys.items);
@@ -814,6 +1004,9 @@ const Builder = struct {
         checks = kept.items;
         r.checks = @intCast(checks.len);
         const pk = build.primaryKeyIndex(t);
+        const first_attr = b.attrs.items.len;
+        const Pending = struct { def: usize, text: []const u8, type_oid: u32, generated: bool, col_type: ?ctypes.Type };
+        var pending: std.ArrayList(Pending) = .empty;
         for (t.cols, 0..) |*col, ci| {
             const num: i16 = @intCast(ci + 1);
             const cm: ?*const catalog.ColumnMeta = if (m) |x| x.column(col.name()) else null;
@@ -836,10 +1029,12 @@ const Builder = struct {
             };
             if (cm) |c| if (c.identity != null and c.identity_kind == null) try b.ownedSequence(c.identity.?, r.oid, num, 'a');
             if (at.identity == 0) if (build.columnExpr(t, col)) |e| {
-                const text = std.mem.sliceTo(e.token(), 0);
-                const bin = try defaultText(a, text, ty[0], generated, b.registered, if (cm) |c| c.type else null);
+                // A generated column's expression is no span of the
+                // text: the CREATE TABLE's.
+                const text = if (generated) try generatedText(a, r.sql orelse "", col.name()) else null;
                 at.hasdef = true;
-                try b.defs.append(a, .{ .oid = 0, .rel = r.oid, .num = num, .bin = bin });
+                try pending.append(a, .{ .def = b.defs.items.len, .text = text orelse std.mem.sliceTo(e.token(), 0), .type_oid = ty[0], .generated = generated, .col_type = if (cm) |c| c.type else null });
+                try b.defs.append(a, .{ .oid = 0, .rel = r.oid, .num = num, .bin = "" });
                 try b.def_keys.append(a, try std.fmt.allocPrint(a, "{s}\x00{d}", .{ key, num }));
             };
             try b.attrs.append(a, at);
@@ -852,6 +1047,34 @@ const Builder = struct {
                 .type = 'n',
                 .rel = r.oid,
                 .keys = try a.dupe(i16, &.{num}),
+            });
+        }
+        // The defaults, over the table's columns.
+        const own: deparse.Scope = .{ .items = &.{.{ .name = t.name, .attrs = b.attrs.items[first_attr..][0..t.cols.len] }} };
+        for (pending.items) |pd| {
+            const def = &b.defs.items[pd.def];
+            var as = own;
+            as.as_type = pd.type_oid;
+            if (pd.generated) {
+                def.bin = try deparse.expr(a, pd.text, as, false) orelse try pgText(a, pd.text, b.registered);
+                def.pretty = try deparse.expr(a, pd.text, as, true);
+            } else {
+                def.bin = try defaultTextIn(a, pd.text, pd.type_oid, false, b.registered, pd.col_type, as, false);
+                def.pretty = try defaultTextIn(a, pd.text, pd.type_oid, false, b.registered, pd.col_type, as, true);
+            }
+        }
+        // The CHECK constraints (PostgreSQL makes them before the keys).
+        for (checks) |c| {
+            const plain = try deparse.expr(a, c.text, own, false);
+            try b.addCon(key, .{
+                .oid = 0,
+                .name = c.name,
+                .nsp = r.nsp,
+                .type = 'c',
+                .rel = r.oid,
+                .keys = try deparse.columns(a, c.text, own),
+                .bin = plain orelse try pgText(a, c.text, b.registered),
+                .pretty = if (plain != null) try deparse.expr(a, c.text, own, true) else null,
             });
         }
         // The INTEGER PRIMARY KEY's index and constraint.
@@ -878,35 +1101,51 @@ const Builder = struct {
             var keys = try a.alloc(i16, n);
             var desc = try a.alloc(bool, n);
             var coldefs = try a.alloc([]const u8, n);
+            var coldefs_pretty = try a.alloc([]const u8, n);
             var exprs: std.ArrayList(u8) = .empty;
+            const tscope: deparse.Scope = .{ .items = &.{.{ .name = t.name, .attrs = b.attrs.items[first_attr..][0..t.cols.len] }} };
             for (0..n) |k| {
                 const c = x.ai_column[k];
                 desc[k] = k < x.sort_order.len and x.sort_order[k] != 0;
                 var attname: []const u8 = undefined;
                 var type_oid: u32 = 25;
+                var typmod: i32 = -1;
                 if (c >= 0) {
                     keys[k] = c + 1;
                     attname = t.cols[@intCast(c)].name();
                     coldefs[k] = try quoteIdent(a, attname);
-                    if (b.attrOf(r.oid, keys[k])) |at| type_oid = at.type_oid;
+                    coldefs_pretty[k] = coldefs[k];
+                    if (b.attrOf(r.oid, keys[k])) |at| {
+                        type_oid = at.type_oid;
+                        typmod = at.typmod;
+                    }
                 } else if (c == int.XN_ROWID) {
                     keys[k] = 0;
                     attname = "rowid";
                     coldefs[k] = "rowid";
+                    coldefs_pretty[k] = "rowid";
                     type_oid = 20;
                 } else {
                     keys[k] = 0;
                     const item = if (k < items.len) items[k] else "?";
-                    const e = try pgText(a, stripParens(stripOrder(item)), b.registered);
+                    const src = stripParens(stripOrder(item));
+                    const old = try pgText(a, src, b.registered);
+                    const e = try deparse.expr(a, src, tscope, false) orelse old;
                     attname = exprName(e);
-                    coldefs[k] = if (looksLikeCall(e)) e else try std.fmt.allocPrint(a, "({s})", .{e});
+                    coldefs[k] = try deparse.indexColumn(a, src, tscope, false) orelse if (looksLikeCall(old)) old else try std.fmt.allocPrint(a, "({s})", .{old});
+                    coldefs_pretty[k] = try deparse.indexColumn(a, src, tscope, true) orelse coldefs[k];
                     if (exprs.items.len > 0) try exprs.appendSlice(a, ", ");
                     try exprs.appendSlice(a, e);
                 }
-                if (desc[k]) coldefs[k] = try std.fmt.allocPrint(a, "{s} DESC", .{coldefs[k]});
-                try b.attrs.append(a, .{ .rel = ir.oid, .name = try a.dupe(u8, attname), .num = @intCast(k + 1), .type_oid = type_oid });
+                if (desc[k]) {
+                    coldefs[k] = try std.fmt.allocPrint(a, "{s} DESC", .{coldefs[k]});
+                    coldefs_pretty[k] = try std.fmt.allocPrint(a, "{s} DESC", .{coldefs_pretty[k]});
+                }
+                try b.attrs.append(a, .{ .rel = ir.oid, .name = try a.dupe(u8, attname), .num = @intCast(k + 1), .type_oid = type_oid, .typmod = typmod });
             }
-            const pred: ?[]const u8 = if (ir.sql) |z| if (whereOf(z)) |wz| try pgText(a, stripParens(wz), b.registered) else null else null;
+            const where_text: ?[]const u8 = if (ir.sql) |z| whereOf(z) else null;
+            const pred: ?[]const u8 = if (where_text) |wz| try deparse.expr(a, wz, tscope, false) orelse try pgText(a, stripParens(wz), b.registered) else null;
+            const pred_pretty: ?[]const u8 = if (where_text) |wz| try deparse.expr(a, wz, tscope, true) else null;
             try b.indexes.append(a, .{
                 .rel = ir.oid,
                 .table = r.oid,
@@ -915,8 +1154,10 @@ const Builder = struct {
                 .keys = keys,
                 .desc = desc,
                 .coldefs = coldefs,
+                .coldefs_pretty = coldefs_pretty,
                 .exprs = if (exprs.items.len > 0) exprs.items else null,
                 .pred = pred,
+                .pred_pretty = pred_pretty,
             });
             if (x.idx_type == .primarykey or x.idx_type == .unique) {
                 try b.addCon(key, .{ .oid = 0, .name = ir.name, .nsp = r.nsp, .type = if (x.idx_type == .primarykey) 'p' else 'u', .rel = r.oid, .index = ir.oid, .keys = try a.dupe(i16, keys) });
@@ -973,9 +1214,6 @@ const Builder = struct {
                 .deferrable = f.is_deferred,
                 .deferred = f.is_deferred,
             });
-        }
-        for (checks) |c| {
-            try b.addCon(key, .{ .oid = 0, .name = c.name, .nsp = r.nsp, .type = 'c', .rel = r.oid, .bin = try pgText(a, c.text, b.registered) });
         }
         try b.comments(m, r.oid);
     }
@@ -1227,12 +1465,18 @@ pub fn pgText(a: Allocator, z: []const u8, registered: []const nsp_mod.Info) Oom
 /// constant cast to the column's type ('x'::text), a negative integer
 /// quoted ('-1'::integer), nextval()'s argument a regclass.
 pub fn defaultText(a: Allocator, text: []const u8, type_oid: u32, generated: bool, registered: []const nsp_mod.Info, col_type: ?ctypes.Type) Oom![]const u8 {
+    return defaultTextIn(a, text, type_oid, generated, registered, col_type, .{}, false);
+}
+
+/// defaultText() of a column of the relation of `scope`, pretty or not
+/// (an expression's text: deparse.zig's).
+pub fn defaultTextIn(a: Allocator, text: []const u8, type_oid: u32, generated: bool, registered: []const nsp_mod.Info, col_type: ?ctypes.Type, scope: deparse.Scope, pretty: bool) Oom![]const u8 {
     const z = std.mem.trim(u8, text, " ");
     if (generated) return pgText(a, z, registered);
     if (col_type) |ty| if (try blobDefault(a, z, ty, type_oid)) |d| return d;
     // A DEFAULT stored as a function of the type's form (an interval's
     // xq_pg_iv('2 hours')): the constant.
-    inline for (repr.all) |r| if (r.default_text) |f| if (try f(a, z)) |d| return d;
+    inline for (repr.all) |r| if (r.default_text) |f| if (try f(a, z)) |d| return try deparse.expr(a, z, scope, pretty) orelse d;
     if (eql(z, "strftime('%Y-%m-%d %H:%M:%f', 'now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_TIMESTAMP")) return "now()";
     if (eql(z, "date('now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_DATE")) return "CURRENT_DATE";
     if (std.mem.startsWith(u8, z, "nextval('") and std.mem.endsWith(u8, z, "')")) {
@@ -1250,7 +1494,64 @@ pub fn defaultText(a: Allocator, text: []const u8, type_oid: u32, generated: boo
         for (z[1..]) |c| digits = digits and (std.ascii.isDigit(c) or c == '.');
         if (digits) return std.fmt.allocPrint(a, "'{s}'::{s}", .{ z, tname });
     }
+    if (try deparse.expr(a, z, scope, pretty)) |d| return d;
     return pgText(a, z, registered);
+}
+
+/// The expression of generated column `col` in CREATE TABLE text `sql`
+/// (its GENERATED ALWAYS AS (...)), null if there is none.
+fn generatedText(a: Allocator, sql: []const u8, col: []const u8) Oom!?[]const u8 {
+    var s: Scanner = .{ .z = sql };
+    while (true) {
+        const t = s.next();
+        if (t.kind == .eof) return null;
+        if (t.kind == .punct and t.text[0] == '(') break;
+    }
+    var depth: usize = 1;
+    var seg_start = true;
+    var current: ?[]const u8 = null;
+    while (depth > 0) {
+        const t = s.next();
+        if (t.kind == .eof) return null;
+        if (t.kind == .punct) switch (t.text[0]) {
+            '(' => {
+                depth += 1;
+                continue;
+            },
+            ')' => {
+                depth -= 1;
+                continue;
+            },
+            ',' => {
+                if (depth == 1) seg_start = true;
+                continue;
+            },
+            else => {},
+        };
+        if (depth != 1) continue;
+        if (seg_start) {
+            seg_start = false;
+            current = try identText(a, t);
+            continue;
+        }
+        if (t.kind == .word and std.ascii.eqlIgnoreCase(t.text, "as")) {
+            const name = current orelse continue;
+            if (!std.ascii.eqlIgnoreCase(name, col)) continue;
+            const open = s.next();
+            if (open.kind != .punct or open.text[0] != '(') return null;
+            var d: usize = 1;
+            while (true) {
+                const x = s.next();
+                if (x.kind == .eof) return null;
+                if (x.kind == .punct and x.text[0] == '(') d += 1;
+                if (x.kind == .punct and x.text[0] == ')') {
+                    d -= 1;
+                    if (d == 0) return std.mem.trim(u8, sql[open.end..x.start], " ");
+                }
+            }
+        }
+    }
+    return null;
 }
 
 /// A constant DEFAULT the dialect stored as its column's BLOB (X'..': a
@@ -1650,22 +1951,38 @@ fn relam(kind: u8) u32 {
 
 fn fillClass(s: *const Snapshot, r: *Rows) Oom!void {
     for (s.rels) |x| try r.row(.{
-        x.oid,       x.name, x.nsp,               x.rowtype,    0,       oid_superuser, relam(x.kind), x.oid,          0,     0,     @as(f64, -1), 0,    0,
-        x.has_index, false,  char(x.persistence), char(x.kind), x.natts, x.checks,      false,         x.has_triggers, false, false, false,        true, char(if (x.kind == 'r') 'd' else 'n'),
+        x.oid,       x.name, x.nsp,               x.rowtype,    0,       oid_superuser, relam(x.kind), x.oid,          0,     @as(i32, if (x.kind == 'i') 1 else 0), @as(f64, if (x.kind == 'i') 0 else -1), 0,    0,
+        x.has_index, false,  char(x.persistence), char(x.kind), x.natts, x.checks,      false,         x.has_triggers, false, false,                                 false,                                  true, char(if (x.kind == 'r') 'd' else 'n'),
         false,       0,      "0",                 "1",          null,    null,          null,          0,
     });
 }
 
 fn fillAttribute(s: *const Snapshot, r: *Rows) Oom!void {
-    for (s.attrs) |x| {
+    for (s.attrs, 0..) |x, i| {
         const t = builtinType(x.type_oid);
         try r.row(.{
             x.rel,                         x.name,                               x.type_oid,                          -1,          if (t) |b| b.len else -1, x.num,    0,     -1,               x.typmod,
             if (t) |b| b.byval else false, char(if (t) |b| b.@"align" else 'i'), char(if (t) |b| b.storage else 'x'), char(0),     x.notnull,                x.hasdef, false, char(x.identity), char(x.generated),
             false,                         true,                                 0,                                   x.collation, null,                     null,     null,  null,
         });
+        // A table's system columns, after its own (attnum < 0).
+        if (i + 1 < s.attrs.len and s.attrs[i + 1].rel == x.rel) continue;
+        const rel = s.rel(x.rel) orelse continue;
+        if (rel.kind != 'r') continue;
+        for (system_columns) |c| try r.row(.{
+            x.rel, c[0],       c[1],      -1,      c[3], c[2],  0,     -1,      -1,
+            c[4],  char(c[5]), char('p'), char(0), true, false, false, char(0), char(0),
+            false, true,       0,         0,       null, null,  null,  null,
+        });
     }
 }
+
+/// PostgreSQL's system columns of a table: name, type, attnum, attlen,
+/// attbyval, attalign.
+const system_columns = [_]struct { []const u8, u32, i16, i16, bool, u8 }{
+    .{ "ctid", 27, -1, 6, false, 's' }, .{ "xmin", 28, -2, 4, true, 'i' }, .{ "cmin", 29, -3, 4, true, 'i' },
+    .{ "xmax", 28, -4, 4, true, 'i' },  .{ "cmax", 29, -5, 4, true, 'i' }, .{ "tableoid", 26, -6, 4, true, 'i' },
+};
 
 fn procOf(a: Allocator, stem: []const u8, suffix: []const u8) Oom![]const u8 {
     if (stem.len == 0) return "-";
@@ -1701,7 +2018,7 @@ fn fillIndex(s: *const Snapshot, r: *Rows) Oom!void {
         const colls = try a.alloc(u32, n);
         for (colls, x.keys) |*c, k| c.* = if (k > 0) (if (s.attr(x.table, k)) |at| at.collation else 0) else 0;
         const classes = try a.alloc(u32, n);
-        @memset(classes, 0);
+        for (classes, 0..) |*c, i| c.* = if (s.attr(x.rel, @intCast(i + 1))) |at| defaultOpclass(at.type_oid) else 0;
         try r.row(.{
             x.rel,                        x.table,                     n,                             n,                          x.unique, false,  x.primary, false, true, false, true, false, true, true, false,
             try vector(a, x.keys, false), try vector(a, colls, false), try vector(a, classes, false), try vector(a, opts, false), x.exprs,  x.pred,

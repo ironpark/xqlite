@@ -135,6 +135,7 @@ pub fn intervalPair(c: *const Ctx, a: *const Expr, b: *const Expr) bool {
 /// whether that changed the operands of `e`, null for another call.
 pub fn intervalCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) Error!?bool {
     const eql = std.mem.eql;
+    if (eql(u8, n, "xq_pg_part") and items.len == 4) return try datePart(c, e, items);
     if ((eql(u8, n, "sum") or eql(u8, n, "avg")) and items.len == 1 and logical(c, items[0].expr.?) == .interval) {
         try c.rename(e, if (n[0] == 's') "xq_pg_iv_sum" else "xq_pg_iv_avg");
         return false;
@@ -150,6 +151,31 @@ pub fn intervalCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem)
     return null;
 }
 
+/// EXTRACT(field FROM x) and date_part(field, x) (the parser's
+/// xq_pg_part(field, x, timestamp's part, extract)): of an interval
+/// xq_pg_iv_extract() (numeric) or xq_pg_iv_date_part() (double
+/// precision), of another value the timestamp's part, an error if that
+/// field is none.
+fn datePart(c: *Ctx, e: *Expr, items: []int.ExprListItem) Error!bool {
+    const field = items[0].expr.?;
+    const x = items[1].expr.?;
+    if (logical(c, x) == .interval) {
+        const extract = (typing.intLiteral(items[3].expr.?) orelse 0) == 1;
+        try c.toCall(e, if (extract) "xq_pg_iv_extract" else "xq_pg_iv_date_part", &.{ field, x });
+        e.xq_type = try c.named(if (extract) "numeric" else "double precision");
+        return true;
+    }
+    const t = items[2].expr.?;
+    if (t.op == TK.NULL) {
+        const z: []const u8 = if (field.op == TK.STRING) field.token() else "?";
+        return c.fail(field, .of("22023"), "unit \"{s}\" not recognized for type timestamp", .{z});
+    }
+    const subt = e.flags.SubtArg;
+    e.* = t.*;
+    e.flags.SubtArg = subt;
+    return true;
+}
+
 pub const desc: repr.TypeRepr = .{
     .logical = .interval,
     .store = store,
@@ -161,17 +187,18 @@ pub const desc: repr.TypeRepr = .{
     .default_text = defaultText,
 };
 
-/// A value stored into an interval column: a BLOB (xq_pg_iv()), in an
-/// older database's table TEXT (its text, no infinity: what the
-/// collation xq_pg_interval reads).
+/// A value stored into an interval column: a BLOB of the column's type
+/// modifier (xq_pg_iv_in(x, typmod): `interval day to hour` keeps whole
+/// hours), in an older database's table TEXT (its text, no infinity:
+/// what the collation xq_pg_interval reads).
 fn store(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     _ = t;
-    _ = decl;
     if (storage == .TEXT) return .{ .def = &datetime.store_interval_text };
-    return .{ .def = datetime.cast_iv };
+    return .{ .def = &ivinput.in_def, .consts = .{ ivinput.typmodOfDecl(decl), 0 }, .n_consts = 1 };
 }
 
 const datetime = @import("../datetime.zig");
+const ivinput = @import("../ivinput.zig");
 
 /// GROUP BY and DISTINCT group intervals by their key ('1 mon' and '30
 /// days' are one group).
@@ -198,11 +225,20 @@ fn jsonArg(c: *Ctx, item: *int.ExprListItem) Error!bool {
 /// hours'): parser.zig), as pg_get_expr() shows it: the constant
 /// ('2 hours'::interval); null for another.
 fn defaultText(a: std.mem.Allocator, z: []const u8) error{OutOfMemory}!?[]const u8 {
-    if (!std.mem.startsWith(u8, z, "xq_pg_iv('") or !std.mem.endsWith(u8, z, "')")) return null;
-    var s: pgcatalog.Scanner = .{ .z = z["xq_pg_iv(".len .. z.len - 1] };
+    // xq_pg_iv('...') of older tables, xq_pg_iv_in('...', typmod).
+    const open = if (std.mem.startsWith(u8, z, "xq_pg_iv('")) "xq_pg_iv(".len else if (std.mem.startsWith(u8, z, "xq_pg_iv_in('")) "xq_pg_iv_in(".len else return null;
+    if (!std.mem.endsWith(u8, z, ")")) return null;
+    var s: pgcatalog.Scanner = .{ .z = z[open .. z.len - 1] };
     const t = s.next();
-    if (t.end != z.len - "xq_pg_iv(".len - 1) return null;
-    return try std.fmt.allocPrint(a, "{s}::interval", .{z["xq_pg_iv(".len .. z.len - 1]});
+    var end = open + t.end;
+    if (open != "xq_pg_iv(".len) {
+        const rest = z[end .. z.len - 1];
+        if (!std.mem.startsWith(u8, rest, ", ")) return null;
+        _ = std.fmt.parseInt(i32, rest[2..], 10) catch return null;
+        end = z.len - 1;
+    }
+    if (end != z.len - 1) return null;
+    return try std.fmt.allocPrint(a, "{s}::interval", .{z[open .. open + t.end]});
 }
 
 const pgcatalog = @import("../pgcatalog.zig");

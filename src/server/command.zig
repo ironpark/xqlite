@@ -54,6 +54,8 @@ pub const Command = struct {
     /// REPLACE VIEW` is "VIEW"); empty for another verb or a kind not
     /// known. Static.
     object: []const u8 = "",
+    /// CREATE TABLE ... AS query (PostgreSQL's tag is `SELECT n`).
+    as_query: bool = false,
 
     /// The words of the command upper case, as PostgreSQL's command tag
     /// has them ("CREATE TABLE", "SELECT"; START TRANSACTION is "BEGIN").
@@ -121,7 +123,20 @@ pub fn classify(sql: []const u8) Command {
     if (std.mem.eql(u8, first, "with")) return .{ .verb = afterWith(&s) };
     const verb = aliases.get(first) orelse std.meta.stringToEnum(Verb, first) orelse return .{ .verb = .other };
     return switch (verb) {
-        .create, .drop, .alter => .{ .verb = verb, .object = object(&s) },
+        .create => blk: {
+            const obj = object(&s);
+            var as_query = false;
+            // AS outside the column list: CREATE TABLE ... AS SELECT.
+            if (std.mem.eql(u8, obj, "TABLE")) while (s.next()) |tok| switch (tok) {
+                .word => |w| if (std.ascii.eqlIgnoreCase(w, "as")) {
+                    as_query = true;
+                    break;
+                },
+                else => {},
+            };
+            break :blk .{ .verb = verb, .object = obj, .as_query = as_query };
+        },
+        .drop, .alter => .{ .verb = verb, .object = object(&s) },
         else => .{ .verb = verb },
     };
 }
@@ -257,6 +272,8 @@ test "classify" {
     try T.expect("CREATE UNIQUE INDEX i ON t(a)", .create, "INDEX");
     try T.expect("create or replace view v as select 1", .create, "VIEW");
     try T.expect("CREATE TEMP TABLE IF NOT EXISTS t(a)", .create, "TABLE");
+    try std.testing.expect(classify("CREATE TABLE t AS SELECT 1").as_query);
+    try std.testing.expect(!classify("CREATE TABLE t (a int GENERATED ALWAYS AS (1) STORED)").as_query);
     try T.expect("CREATE MATERIALIZED VIEW m AS SELECT 1", .create, "MATERIALIZED VIEW");
     try T.expect("CREATE FROBNICATOR x", .create, "");
     try T.expect("DROP TABLE IF EXISTS t", .drop, "TABLE");

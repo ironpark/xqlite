@@ -406,6 +406,10 @@ pub const SrcItem = struct {
     /// The database name, the schema (fg.fixed_schema), or the subquery
     /// (fg.is_subquery).
     u4: union { schema: ?*Schema, database: ?[:0]u8, subq: ?*Subquery } = .{ .database = null },
+    /// xqlite: the offset of the name in the statement, 0 if not known
+    /// (set by the IR's lowering): the offset of a table not found
+    /// (sqlite3_error_offset()).
+    xq_ofst: i32 = 0,
 
     pub fn subquery(it: *SrcItem) ?*Select {
         return if (it.fg.is_subquery) it.u4.subq.?.select else null;

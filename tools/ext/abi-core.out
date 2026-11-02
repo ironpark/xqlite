@@ -14,5 +14,6 @@ line 11: LIKE pattern must not end with escape character
 line 12: invalid escape string
 line 19: invalid input syntax for type numeric: "x"
 line 20: numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
 line 21: division by zero
 line 22: smallint out of range

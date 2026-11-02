@@ -115,12 +115,12 @@ for row in con.execute("SELECT * FROM doc_v"):             # 엔진 함수를 �
 
 PostgreSQL의 `jsonb` 열은 SQLite의 JSONB(BLOB)라서 값 자체는 확장 없이 읽힙니다(`json(j)`, `json_extract(j, '$.a')`, `j ->> '$.a'`). 확장이 드는 것은 jsonb의 연산자·비교·정렬이 남긴 식입니다: `xq_pg_jsonb_get()` ...과 `xq_pg_jsonb_key()`(비교와 `ORDER BY`의 정렬 키), `xq_pg_jsonb_bin()`(정준 JSONB: 상수가 아닌 DEFAULT, 생성 열), `xq_pg_jsonb_text()`(`jsonb::text`). sqlite3가 jsonb 열에 넣을 때는 `jsonb('...')`(정준이 아닐 수 있음, 방언이 읽을 때 정규화) 또는 확장의 `xq_pg_jsonb_bin('...')`을 씁니다. TEXT는 STRICT BLOB 열이 받지 않습니다.
 
-방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 674개, 빠지는 것 65개). 이 표의 수는 `src/dialect/abi.zig`의 테스트가 카탈로그와 맞춰 봅니다:
+방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 705개, 빠지는 것 65개). 이 표의 수는 `src/dialect/abi.zig`의 테스트가 카탈로그와 맞춰 봅니다:
 
 | 방언 | 엔진 함수 | 한정 이름 | 시퀀스 | 빠짐 | collation |
 | --- | --- | --- | --- | --- | --- |
 | 공통 | 39(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 34) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
-| PostgreSQL | 158 | 174 | 5 | 36 | 4 |
+| PostgreSQL | 170 | 193 | 5 | 36 | 4 |
 | MariaDB | 19 | 101 | 4 | 5 | |
 | SQL Server | 18 | 40 | 2 | 20 | |
 | Oracle | 20 | 49 | 5 | 4 | |

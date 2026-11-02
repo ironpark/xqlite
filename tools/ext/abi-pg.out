@@ -39,12 +39,16 @@ X'80000000000000000000025B7F3D400080000001800000008000000000000000'|X'8000000000
     "a": [
     ]
 }
+32767|42|-1000|2|4|-2|NULL
+435|-6|NULL
 -- errors
 line 5: invalid input syntax for type boolean: "maybe"
 line 7: smallint out of range
 line 8: invalid input syntax for type integer: "1e3"
 line 9: bigint out of range
 line 11: invalid input syntax for type json
+DETAIL:  The input string ended unexpectedly.
+CONTEXT:  JSON data, line 1: {
 line 19: invalid regular expression: (
 line 21: invalid input syntax for type interval: "soon"
 line 23: invalid input syntax for type date: "20240229"
@@ -60,3 +64,6 @@ line 51: invalid input syntax for type interval: "soon"
 line 52: invalid interval value
 line 53: interval out of range
 line 56: cannot add infinite interval to time
+line 66: value "32768" is out of range for type smallint
+line 67: invalid input syntax for type integer: "1__0"
+line 68: bigint out of range

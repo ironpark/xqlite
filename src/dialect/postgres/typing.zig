@@ -44,10 +44,11 @@ pub const rules: typing.Rules = .{
     .function = function,
     .value_scale = true,
     .store = store,
-    .store_column = repr.storeColumn,
+    .store_column = storeColumn,
     .store_forms = repr.store_forms,
     .exact_types = repr.exact_types,
     .unknown_strings = true,
+    .literal_input = true,
     .overload = overload.overload,
     .order_collation = overload.orderCollation,
     .group_key = repr.groupKey,
@@ -57,6 +58,24 @@ pub const rules: typing.Rules = .{
 /// The types stored in a BLOB form of their own (numeric, interval, uuid,
 /// jsonb): their store functions, grouping and ordering.
 const repr = @import("repr.zig");
+
+/// A value stored into an integer column is read as the type's input
+/// ('12' is 12, '1.5' an error), a real rounded, a numeric as a numeric
+/// (integer.zig); the other types' by their descriptors.
+fn storeColumn(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
+    if (integer.storeColumn(t)) |s| return s;
+    // varchar(n), character(n): the spaces past n dropped (funcs.zig); a
+    // numeric as its text.
+    if ((t.logical == .varchar or t.logical == .char) and t.length != null) return .{
+        .def = if (t.logical == .char) &funcs.store_bpchar else &funcs.store_varchar,
+        .consts = .{ @intCast(@min(t.length.?, std.math.maxInt(i32))), 0 },
+        .n_consts = 1,
+        .alt = .{ .types = .initOne(.numeric), .def = @import("../decimal_sql.zig").def("xq_dec_text", 1) },
+    };
+    return repr.storeColumn(t, decl, storage);
+}
+
+const integer = @import("integer.zig");
 
 /// A string stored into a boolean, date, time or timestamp column is
 /// read as the type's input (funcs.zig's store functions, datetime.zig's
@@ -382,6 +401,11 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_pg_int2", Ret{ .named = "smallint" } },
     .{ "xq_pg_int4", Ret{ .named = "integer" } },
     .{ "xq_pg_int8", Ret{ .named = "bigint" } },
+    .{ integer.castName(.int2), Ret{ .named = integer.Width.int2.name() } },
+    .{ integer.castName(.int4), Ret{ .named = integer.Width.int4.name() } },
+    .{ integer.castName(.int8), Ret{ .named = integer.Width.int8.name() } },
+    // `a # b` (integer.zig): as `a | b`.
+    .{ "xq_pg_int_xor", Ret{ .rule = intXor } },
     .{ "xq_pg_bool", Ret{ .named = "boolean" } },
     .{ "xq_pg_interval", Ret{ .named = "interval" } },
     // interval BLOB (datetime.zig).
@@ -392,6 +416,11 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_pg_iv_valid", Ret{ .named = "boolean" } },
     .{ "xq_pg_iv_sum", Ret{ .named = "interval" } },
     .{ "xq_pg_iv_avg", Ret{ .named = "interval" } },
+    // ivinput.zig.
+    .{ "xq_pg_iv_in", Ret{ .named = "interval" } },
+    .{ "xq_pg_iv_extract", Ret{ .named = "numeric" } },
+    .{ "xq_pg_iv_date_part", Ret{ .named = "double precision" } },
+    .{ "make_interval", Ret{ .named = "interval" } },
     .{ "justify_hours", Ret{ .named = "interval" } },
     .{ "justify_days", Ret{ .named = "interval" } },
     .{ "justify_interval", Ret{ .named = "interval" } },
@@ -496,7 +525,57 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "array_to_string", Ret{ .named = "text" } },
     .{ "string_to_array", Ret{ .named = "text[]" } },
     .{ "current_schemas", Ret{ .named = "name[]" } },
+    // formatting.zig, builtins.zig, inputinfo.zig, dtfuncs.zig.
+    .{ "to_char", Ret{ .named = "text" } },
+    .{ "xq_pg_to_char", Ret{ .named = "text" } },
+    .{ "to_number", Ret{ .named = "numeric" } },
+    .{ "to_date", Ret{ .named = "date" } },
+    .{ "to_timestamp", Ret{ .named = "timestamp with time zone" } },
+    .{ "gcd", Ret{ .common = 0 } },
+    .{ "lcm", Ret{ .common = 0 } },
+    .{ "xq_pg_gcd", Ret{ .rule = gcdType } },
+    .{ "xq_pg_lcm", Ret{ .rule = gcdType } },
+    .{ "float8", Ret{ .named = "double precision" } },
+    .{ "float4", Ret{ .named = "real" } },
+    .{ "booleq", Ret{ .named = "boolean" } },
+    .{ "boolne", Ret{ .named = "boolean" } },
+    .{ "interval_hash", Ret{ .named = "integer" } },
+    .{ "pg_input_is_valid", Ret{ .named = "boolean" } },
+    .{ "xq_pg_rows_input_error", Ret{ .named = "text" } },
+    .{ "date_trunc", Ret{ .rule = truncType } },
+    .{ "date_bin", Ret{ .named = "timestamp without time zone" } },
+    .{ "timezone", Ret{ .rule = zoneType } },
+    .{ "xq_pg_timezone", Ret{ .rule = zoneType } },
 } ++ numeric_functions);
+
+/// xq_pg_gcd(a, b, bits): of `bits` 0 a numeric, else the common type.
+fn gcdType(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len != 3) return unknown;
+    if ((typing.intArg(args[2]) orelse 0) == 0) return c.make(.{ .logical = .numeric });
+    return typing.commonOf(c, args[0..2]);
+}
+
+/// date_trunc(unit, x): of a date a timestamptz, else x's type.
+fn truncType(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len != 2) return unknown;
+    return switch (args[1].logical()) {
+        .date => c.named("timestamp with time zone"),
+        .timestamp, .timestamp_tz, .interval => args[1].id,
+        else => unknown,
+    };
+}
+
+/// timezone(zone, x): of a timestamp a timestamptz, of a timestamptz (a
+/// date) a timestamp, of a time a timetz.
+fn zoneType(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len < 2) return unknown;
+    return switch (args[1].logical()) {
+        .timestamp => c.named("timestamp with time zone"),
+        .timestamp_tz, .date => c.named("timestamp without time zone"),
+        .time, .time_tz => c.named("time with time zone"),
+        else => unknown,
+    };
+}
 
 /// The spelling of the array of each element type (array.Elem).
 const array_names = blk: {
@@ -608,6 +687,12 @@ fn avg(c: *Ctx, args: []const Operand) Oom!TypeId {
 fn mod(c: *Ctx, args: []const Operand) Oom!TypeId {
     if (args.len != 2) return unknown;
     return operator(c, TK.REM, args[0], args[1]);
+}
+
+/// xq_pg_int_xor(a, b): the type of `a | b`.
+fn intXor(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len != 2) return unknown;
+    return operator(c, TK.BITOR, args[0], args[1]);
 }
 
 /// round(x) and trunc(x): of a numeric a numeric of scale 0, else a

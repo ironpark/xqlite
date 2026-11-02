@@ -127,15 +127,14 @@ fn invalid(ctx: *Context, z: []const u8) void {
 
 const det: dfunc.Options = .{ .deterministic = true };
 
-pub const engine_functions = [_]int.FuncDef{
-    dfunc.scalar("xq_pg_uuid", 1, det, uuidFunc),
-    dfunc.scalar("xq_pg_uuid_text", 1, det, uuidTextFunc),
-};
-
 /// The store function of a uuid column (typing.zig).
-pub const store = &engine_functions[0];
+pub const store_def = dfunc.scalar("xq_pg_uuid", 1, det, uuidFunc);
 /// The store function of a uuid column stored as TEXT.
-pub const store_text = &engine_functions[1];
+pub const store_text_def = dfunc.scalar("xq_pg_uuid_text", 1, det, uuidTextFunc);
+pub const store = &store_def;
+pub const store_text = &store_text_def;
+
+pub const engine_functions = [_]int.FuncDef{ store_def, store_text_def };
 
 fn uuidFunc(ctx: *Context, argv: []*Mem) void {
     if (dfunc.isNull(argv[0])) return api.resultNull(ctx);

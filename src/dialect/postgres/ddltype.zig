@@ -27,6 +27,7 @@ const parser = @import("parser.zig");
 const Children = @import("jtype.zig").Children;
 const operators = @import("operators.zig");
 const typing = @import("../../sql/typing.zig");
+const integer = @import("integer.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -523,17 +524,15 @@ const Back = struct {
     }
 
     /// A string literal operand `t` of an operator the core read as an
-    /// integer (`w`: xq_pg_int4('1')): that cast.
+    /// integer (`w`: xq_pg_cast_int4('1')): that cast.
     fn literalInput(b: *Back, t: **Expr, w_: ?*IrExpr) Error!void {
         const w = w_ orelse return;
         if (t.*.kind != .string or !isCall(w)) return;
         const name = w.token();
         const list = w.x.list orelse return;
         if (list.len() != 1 or list.at(0).expr != b.of(t.*)) return;
-        const types = [_]struct { []const u8, []const u8 }{ .{ "xq_pg_int2", "smallint" }, .{ "xq_pg_int4", "integer" }, .{ "xq_pg_int8", "bigint" } };
-        for (types) |ty| if (std.mem.eql(u8, ty[0], name)) {
-            t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = ty[1], .mode = .{ .func = ty[0] } } });
-        };
+        const iw = integer.castOf(name) orelse return;
+        t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = iw.name(), .mode = .{ .func = integer.castName(iw) } } });
     }
 
     /// A string literal operand `t` the core read as an array (`w`:

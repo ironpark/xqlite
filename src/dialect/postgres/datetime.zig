@@ -30,9 +30,10 @@ const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
 
-pub const usecs_per_sec: i64 = 1_000_000;
-pub const usecs_per_hour: i64 = 3600 * usecs_per_sec;
-pub const usecs_per_day: i64 = 24 * usecs_per_hour;
+pub const usecs_per_sec = ivl.usecs_per_sec;
+pub const usecs_per_minute = ivl.usecs_per_minute;
+pub const usecs_per_hour = ivl.usecs_per_hour;
+pub const usecs_per_day = ivl.usecs_per_day;
 
 pub const Error = error{
     /// Not the text of a value of the type.
@@ -70,6 +71,7 @@ pub fn checkTimestamp(t: i64) Error!i64 {
 /// An interval's months, days and microseconds, its arithmetic and its
 /// BLOB (src/dialect/interval.zig).
 pub const ivl = @import("../interval.zig");
+const ivinput = @import("ivinput.zig");
 pub const Interval = ivl.Interval;
 
 // ============================================================ arithmetic
@@ -414,7 +416,7 @@ fn apply(f: *Fields, u: Unit, n: Num) Error!void {
                 .microsecond => 1,
                 .millisecond => 1000,
                 .second => usecs_per_sec,
-                .minute => 60 * usecs_per_sec,
+                .minute => usecs_per_minute,
                 else => usecs_per_hour,
             };
             f.time = std.math.add(i64, f.time, std.math.mul(i64, w, per) catch return ov) catch return ov;
@@ -767,16 +769,22 @@ pub const Op = enum {
 
 const det: dfunc.Options = .{ .deterministic = true };
 
-/// The casts (castFunc()), also what a value stored into a column of
-/// the type goes through (typing.Rules.store): of an interval column
-/// stored as TEXT (an older database's) the text, of a BLOB one
-/// (cast_iv) the BLOB.
-pub const cast_interval = &engine_functions[0];
-pub const cast_date = &engine_functions[1];
-pub const cast_time = &engine_functions[2];
-pub const cast_timestamp = &engine_functions[3];
-pub const cast_timestamptz = &engine_functions[4];
-pub const cast_iv = &engine_functions[5];
+/// The casts (castFunc()), by name; date's ... also what a value stored
+/// into a column of the type goes through (typing.Rules.store).
+/// xq_pg_interval() is the cast of an interval stored as TEXT (an older
+/// database's), xq_pg_iv() of a BLOB one.
+const casts = struct {
+    const interval = dfunc.scalar("xq_pg_interval", 1, det, dfunc.bind(castFunc, .{ Kind.interval, false }));
+    const date = dfunc.scalar("xq_pg_date", 1, det, dfunc.bind(castFunc, .{ Kind.date, false }));
+    const time = dfunc.scalar("xq_pg_time", 1, det, dfunc.bind(castFunc, .{ Kind.time, false }));
+    const timestamp = dfunc.scalar("xq_pg_timestamp", 1, det, dfunc.bind(castFunc, .{ Kind.timestamp, false }));
+    const timestamptz = dfunc.scalar("xq_pg_timestamptz", 1, det, dfunc.bind(castFunc, .{ Kind.timestamptz, false }));
+    const iv = dfunc.scalar("xq_pg_iv", 1, det, dfunc.bind(castFunc, .{ Kind.interval, true }));
+};
+pub const cast_date = &casts.date;
+pub const cast_time = &casts.time;
+pub const cast_timestamp = &casts.timestamp;
+pub const cast_timestamptz = &casts.timestamptz;
 
 /// The functions of interval BLOBs besides the operators' (their names
 /// are part of the ABI: docs/extension.md):
@@ -791,12 +799,12 @@ pub const cast_iv = &engine_functions[5];
 pub const engine_functions = blk: {
     const ops = std.enums.values(Op);
     const fixed = [_]int.FuncDef{
-        dfunc.scalar("xq_pg_interval", 1, det, dfunc.bind(castFunc, .{ Kind.interval, false })),
-        dfunc.scalar("xq_pg_date", 1, det, dfunc.bind(castFunc, .{ Kind.date, false })),
-        dfunc.scalar("xq_pg_time", 1, det, dfunc.bind(castFunc, .{ Kind.time, false })),
-        dfunc.scalar("xq_pg_timestamp", 1, det, dfunc.bind(castFunc, .{ Kind.timestamp, false })),
-        dfunc.scalar("xq_pg_timestamptz", 1, det, dfunc.bind(castFunc, .{ Kind.timestamptz, false })),
-        dfunc.scalar("xq_pg_iv", 1, det, dfunc.bind(castFunc, .{ Kind.interval, true })),
+        casts.interval,
+        casts.date,
+        casts.time,
+        casts.timestamp,
+        casts.timestamptz,
+        casts.iv,
         dfunc.scalar("xq_pg_iv_text", 1, det, dfunc.bind(ivFunc, .{IvFn.text})),
         dfunc.scalar("xq_pg_iv_key", 1, det, dfunc.bind(ivFunc, .{IvFn.key})),
         dfunc.scalar("xq_pg_iv_high", 1, det, dfunc.bind(ivFunc, .{IvFn.high})),
@@ -973,14 +981,11 @@ fn arg(ctx: *Context, m: *Mem, k: Kind, comptime pg: bool) ?Value {
     return v;
 }
 
-/// The interval argument `m` is, an interval's BLOB or its text (an
-/// older database's TEXT column, a string): its months, days and
-/// microseconds; null after making the error (PostgreSQL's input
-/// messages) the result. For the functions that take an interval
-/// (uuidv7(interval) ...). `m` is not NULL.
-pub fn intervalArg(ctx: *Context, m: *Mem) ?Interval {
-    return (arg(ctx, m, .interval, true) orelse return null).iv;
-}
+/// The interval argument of the functions that take one (uuidv7(interval),
+/// to_char() ...): PostgreSQL 18's input (ivinput.zig). Not the
+/// operators' engine functions (arg()), which keep their meaning for the
+/// schemas that call them.
+pub const intervalArg = ivinput.intervalArg;
 
 fn failed(ctx: *Context, err: Error, k: Kind, raw: []const u8, pg: bool) ?Value {
     fail(ctx, err, k, raw, pg);
@@ -1033,10 +1038,7 @@ fn opFunc(ctx: *Context, argv: []*Mem, comptime o: Op, comptime pg: bool) void {
     api.resultText(ctx, z, .transient);
 }
 
-fn resultInterval(ctx: *Context, iv: Interval) void {
-    const b = iv.encode();
-    api.resultBlob(ctx, &b, .transient);
-}
+const resultInterval = ivinput.resultInterval;
 
 fn compute(comptime o: Op, a: Value, b: Value, comptime pg: bool) Error!Value {
     const day = usecs_per_day;

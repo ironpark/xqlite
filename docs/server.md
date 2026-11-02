@@ -159,8 +159,8 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 ### 단순 질의
 
 - `Query`의 텍스트는 스크립트입니다(`Session.run()`): 문장마다 `RowDescription`, `DataRow`, `CommandComplete`. 문장이 실패하면 `ErrorResponse`를 보내고 나머지는 돌리지 않으며, 암묵적 트랜잭션이면 앞의 문장도 롤백됩니다. 문장이 없으면 `EmptyQueryResponse`. 끝에 `ReadyForQuery`.
-- 명령 태그: `SELECT n`(VALUES도), `INSERT 0 n`, `UPDATE n`, `DELETE n`, `MERGE n`, `TRUNCATE TABLE`, `CALL`, 나머지는 명령 분류의 단어(`CREATE TABLE`, `BEGIN`, `SET`, `RESET`, `COMMENT` ...). `SET`과 `RESET`은 행을 보내지 않습니다.
-- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`)입니다.
+- 명령 태그: `SELECT n`(VALUES도, `CREATE TABLE ... AS`·`SELECT ... INTO`는 넣은 행 수: PostgreSQL 방언의 CREATE TABLE AS는 `Hooks.count_create_as`로 행을 `changes()`에 셈), `INSERT 0 n`, `UPDATE n`, `DELETE n`, `MERGE n`, `TRUNCATE TABLE`, `CALL`, 나머지는 명령 분류의 단어(`CREATE TABLE`, `BEGIN`, `SET`, `RESET`, `COMMENT` ...). `SET`과 `RESET`은 행을 보내지 않습니다.
+- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)([PostgreSQL 호환](postgres.md#위치와-detailhintcontext)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`)입니다.
 - 단순 질의는 이름 없는 문장과 포털을 지웁니다.
 
 ### 확장 질의

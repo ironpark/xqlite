@@ -122,7 +122,10 @@ pub const Conn = struct {
         const rc = legacy.exec(c.db, sql, null, null, &msg);
         defer if (msg) |m| @import("malloc.zig").free(m.ptr);
         try testing.expect(rc != RC.OK);
-        try testing.expectEqualStrings(expected, msg.?);
+        // Without lines of its own, `expected` is the message without its
+        // DETAIL, HINT and CONTEXT (util.errorFields()).
+        const got = if (std.mem.indexOfScalar(u8, expected, '\n') == null) @import("util.zig").errorFields(msg.?).message else msg.?;
+        try testing.expectEqualStrings(expected, got);
     }
 
     /// The result column names of `sql`, separated by "|".

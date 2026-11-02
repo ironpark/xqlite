@@ -374,6 +374,12 @@ pub const Rules = struct {
     /// a compound, which can only be result columns, are left as they
     /// are.
     order_key: ?*const fn (c: *Ctx, id: TypeId) ?[:0]const u8 = null,
+    /// A string literal given a type (a cast, the operand of an operator
+    /// whose other operand is typed, the column a value is stored into)
+    /// is read when the statement is compiled (readLiteral()):
+    /// PostgreSQL's unknown literal, which fails the statement at the
+    /// literal ("LINE 1: ..." and its caret) even where no row reads it.
+    literal_input: bool = false,
 };
 
 /// The functions whose type is the same in every dialect.
@@ -492,6 +498,14 @@ pub const Ctx = struct {
             x = next;
         }
         expr_mod.recordErrorOffsetOfExpr(c.p, x);
+        if (c.nc) |nc| nc.n_nc_err += 1;
+        return error.Failed;
+    }
+
+    /// readLiteral() of string literal `x` with function `name` (of one
+    /// argument), which a rule wraps it in.
+    pub fn readInput(c: *Ctx, name: []const u8, x: *const Expr) Error!void {
+        if (!try readLiteralWith(c.p, name, x)) return;
         if (c.nc) |nc| nc.n_nc_err += 1;
         return error.Failed;
     }
@@ -1003,19 +1017,46 @@ pub const Store = struct {
     /// Only the values of this type (PostgreSQL's numeric stored into a
     /// column of another type: a key made a number or text).
     only: ?Logical = null,
+    /// The values of these types go through another function, of no
+    /// constants (PostgreSQL's double precision into an integer column:
+    /// rounded to even, where `def` rounds a real, which may be a
+    /// numeric's literal, half away from zero).
+    alt: ?Alt = null,
 
-    /// Whether value `e` goes through it.
-    pub fn needed(s: Store, db: *const int.Sqlite3, e: *const Expr) bool {
-        if (s.only) |l| return typeOf(db, e.xq_type).logical == l;
-        return s.always or storeNeeded(db, e);
+    pub const Alt = struct { types: std.EnumSet(Logical), def: *const int.FuncDef };
+
+    /// What value `e` goes through, null for nothing.
+    pub fn pick(s: Store, db: *const int.Sqlite3, e: *const Expr) ?Store {
+        return s.ofType(typeOf(db, e.xq_type).logical, s.always or storeNeeded(db, e));
     }
 
-    /// Whether the values of column `i` of query `sel` (INSERT ... SELECT)
-    /// go through it.
-    pub fn neededColumn(s: Store, p: *int.Parse, sel: *int.Select, i: usize) bool {
-        const l = s.only orelse return true;
-        const id = columnOf(p, sel, i) catch return true;
-        return typeOf(p.db, id).logical == l;
+    /// What the values of column `i` of query `sel` (INSERT ... SELECT)
+    /// go through.
+    pub fn pickColumn(s: Store, p: *int.Parse, sel: *int.Select, i: usize) ?Store {
+        if (s.only == null and s.alt == null) return s;
+        const id = columnOf(p, sel, i) catch return if (s.only == null) s else null;
+        const l = typeOf(p.db, id).logical;
+        // A store with an alternative is needed as for one value: by the
+        // column's type, or by a value of a term (a string literal, which
+        // the column's type leaves out; a parameter).
+        const needed = s.alt == null or s.always or storeNeededType(p.db, l) or termNeeds(p.db, sel, i);
+        return s.ofType(l, needed);
+    }
+
+    fn termNeeds(db: *const int.Sqlite3, sel: *int.Select, i: usize) bool {
+        var it: ?*int.Select = sel;
+        while (it) |term| : (it = term.prior) {
+            const list = term.e_list orelse return true;
+            if (i >= list.len()) return true;
+            if (storeNeeded(db, list.at(i).expr.?)) return true;
+        }
+        return false;
+    }
+
+    fn ofType(s: Store, l: Logical, needed: bool) ?Store {
+        if (s.alt) |a| if (a.types.contains(l)) return .{ .def = a.def };
+        if (s.only) |o| return if (o == l) s else null;
+        return if (needed) s else null;
     }
 };
 
@@ -1060,11 +1101,86 @@ pub fn storeFunctions(p: *int.Parse, t: *int.Table) Oom!?[]const ?Store {
 /// BLOB), stored as the column keeps it.
 pub fn storeNeeded(db: *const int.Sqlite3, e: *const Expr) bool {
     if (e.op == TK.VARIABLE) return true;
-    const l = typeOf(db, e.xq_type).logical;
+    return storeNeededType(db, typeOf(db, e.xq_type).logical);
+}
+
+fn storeNeededType(db: *const int.Sqlite3, l: Logical) bool {
     return switch (l) {
         .unknown, .text, .varchar, .char => true,
         else => if (dialect_mod.hooks(db).typing) |rules| rules.store_forms.contains(l) else false,
     };
+}
+
+// ============================================================ literals
+
+/// Whether the dialect of the statement reads a string literal given a
+/// type when it compiles it (Rules.literal_input).
+pub fn literalInput(db: *const int.Sqlite3) bool {
+    if (!active(db)) return false;
+    const rules = dialect_mod.hooks(db).typing orelse return false;
+    return rules.literal_input;
+}
+
+/// Read string literal `lit` now, as the conversion `def` of one
+/// argument (a cast, a store function) reads it when the statement
+/// runs (Rules.literal_input): if it fails, the statement fails with its
+/// error (message and ErrorState) at the literal's offset, as
+/// PostgreSQL's parser fails on an unknown literal it cannot read as the
+/// type. As PostgreSQL's parser, it reads the literal without the type's
+/// parameters (`numeric(4,4)`'s overflow fails when the statement runs).
+/// Returns whether it failed. Nothing is read for a literal not in the
+/// text (no offset), with a function that is not deterministic (it may
+/// read the database: regclass's input), or after an error.
+pub fn readLiteral(p: *int.Parse, def: *const int.FuncDef, lit: *const Expr) Oom!bool {
+    if (!literalReadable(p, lit)) return false;
+    const db = p.db;
+    if (!def.func_flags.CONSTANT or def.x_finalize != null or (def.n_arg >= 0 and def.n_arg != 1)) return false;
+    const f = def.x_sfunc orelse return false;
+    const vi = @import("../vdbe/vdbe_int.zig");
+    const mem = @import("../vdbe/mem.zig");
+    var arg: vi.Mem = .{ .db = db };
+    var out: vi.Mem = .{ .db = db };
+    defer {
+        mem.release(&arg);
+        mem.release(&out);
+    }
+    mem.setStr(&arg, lit.token(), vi.ENC.UTF8, .static) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return false,
+    };
+    var argv = [_]*vi.Mem{&arg};
+    var ctx: vi.Context = .{ .out = &out, .func = def, .argc = 1, .argv = &argv };
+    f(&ctx, &argv);
+    if (ctx.is_error == 0) return false;
+    if (ctx.is_error == int.RC.NOMEM) return error.OutOfMemory;
+    const msg: []const u8 = if (out.flags.Str) out.bytes() else "unknown error";
+    util.errorMsgState(p, null, ctx.err_state, "{s}", .{msg});
+    p.db.err_byte_offset = lit.w.ofst;
+    return true;
+}
+
+/// Whether readLiteral() reads `lit`: a string literal at an offset of
+/// the statement's text, not FromDDL, in a dialect that reads literals,
+/// before an error, outside ALTER TABLE RENAME.
+fn literalReadable(p: *int.Parse, lit: *const Expr) bool {
+    if (!literalInput(p.db) or p.n_err > 0 or p.inRenameObject()) return false;
+    return lit.op == TK.STRING and !lit.flags.FromDDL and !lit.useWJoin() and lit.w.ofst > 0;
+}
+
+/// readLiteral() of value `e` stored through `st` (INSERT VALUES, UPDATE
+/// SET).
+pub fn readStoredLiteral(p: *int.Parse, st: Store, e: *const Expr) Oom!bool {
+    if (st.n_consts > 0) return readLiteralWith(p, st.def.name, e);
+    return readLiteral(p, st.def, e);
+}
+
+/// readLiteral() with the function called `name` (of one argument: the
+/// form without the type's parameters of a conversion that takes them).
+pub fn readLiteralWith(p: *int.Parse, name: []const u8, lit: *const Expr) Oom!bool {
+    // The function looked up only for a literal readLiteral() reads.
+    if (!literalReadable(p, lit)) return false;
+    const def = callback.findFunction(p.db, name, 1, p.db.enc, false) orelse return false;
+    return readLiteral(p, def, lit);
 }
 
 // ============================================================ parameters

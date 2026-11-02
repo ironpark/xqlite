@@ -256,7 +256,9 @@ pub fn fromEngine(err: engine.Error) SqlError {
 pub const ErrorInfo = struct {
     /// The extended result code (sqlite3_extended_errcode()).
     code: ResultCode,
-    /// The message (sqlite3_errmsg()).
+    /// The message (sqlite3_errmsg()). After its first line it may say
+    /// more in lines of PostgreSQL's fields, "\nDETAIL:  ...",
+    /// "\nHINT:  ...", "\nCONTEXT:  ..." (fields()).
     message: [:0]const u8,
     /// Byte offset in the SQL text of the token that caused the error
     /// (sqlite3_error_offset()), if known.
@@ -269,6 +271,16 @@ pub const ErrorInfo = struct {
     /// The number the connection's dialect gives the error, if it has
     /// one: MySQL's 1146, SQL Server's 208, Oracle's 942 (ORA-00942).
     dialect_number: ?u32 = null,
+
+    /// The fields of an error message: the message itself, and its
+    /// DETAIL, HINT and CONTEXT if it has them (PostgreSQL's
+    /// ErrorResponse fields D, H and W).
+    pub const Fields = @import("../sql/util.zig").ErrorFields;
+
+    /// The fields of `message` (an ErrorInfo's, or one copied from it).
+    pub fn fields(message: []const u8) Fields {
+        return @import("../sql/util.zig").errorFields(message);
+    }
 };
 
 /// A caller-owned copy of the last error, in the spirit of

@@ -709,10 +709,13 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 const x = list.?.at(@intCast(k)).expr.?;
                 const y = ec.codeTarget(p, x, i_reg_store);
                 if (y != i_reg_store) _ = aux.addOp2(v, if (x.flags.Subquery) OP.Copy else OP.SCopy, y, i_reg_store);
-                if (stores) |f| if (f[ii]) |st| if (st.needed(db, x)) codeStore(p, st, i_reg_store);
+                if (stores) |f| if (f[ii]) |st| if (st.pick(db, x)) |s| {
+                    if (typing.readStoredLiteral(p, s, x) catch return build.oomFault(p)) return;
+                    codeStore(p, s, i_reg_store);
+                };
                 continue;
             }
-            if (stores) |f| if (f[ii]) |st| if (sel == null or st.neededColumn(p, sel.?, @intCast(k))) codeStore(p, st, i_reg_store);
+            if (stores) |f| if (f[ii]) |st| if (if (sel) |q| st.pickColumn(p, q, @intCast(k)) else st) |s| codeStore(p, s, i_reg_store);
         }
     }
 

@@ -206,6 +206,8 @@ pub const Op = enum {
     bit_or,
     shl,
     shr,
+    /// `#` (the parser's xq_pg_int_xor(a, b): no opcode of its own).
+    bit_xor,
 
     pub fn text(o: Op) []const u8 {
         return switch (o) {
@@ -218,6 +220,7 @@ pub const Op = enum {
             .bit_or => "|",
             .shl => "<<",
             .shr => ">>",
+            .bit_xor => "#",
         };
     }
 
@@ -282,6 +285,7 @@ pub const entries = blk: {
     for (ints) |a| list = list ++ [_]Entry{
         native(.bit_and, &.{ a, a }, a),
         native(.bit_or, &.{ a, a }, a),
+        .{ .op = .bit_xor, .args = &.{ a, a }, .result = a, .func = @import("integer.zig").defs.int_xor.name },
         native(.shl, &.{ a, .int4 }, a),
         native(.shr, &.{ a, .int4 }, a),
     };
@@ -483,6 +487,16 @@ const functions = blk: {
     };
     break :blk std.StaticStringMap(T).initComptime(kvs);
 };
+
+/// The HINT of a resolution that failed (util.hint_mark), to follow its
+/// message.
+pub fn hint(r: Resolution) []const u8 {
+    const util = @import("../../sql/util.zig");
+    return if (r == .not_unique)
+        util.hint_mark ++ "Could not choose a best candidate operator. You might need to add explicit type casts."
+    else
+        util.hint_mark ++ "No operator matches the given name and argument types. You might need to add explicit type casts.";
+}
 
 /// The message of a resolution that failed: "operator does not exist:
 /// date + text", "operator is not unique: date + unknown".

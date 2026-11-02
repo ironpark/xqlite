@@ -214,6 +214,10 @@ pub const Violation = struct {
     ordinal: u32 = 0,
     /// The message may put the key's values at value_mark.
     has_value: bool = false,
+    /// With has_value: the type of each column of the key, as the
+    /// catalog has it (null: not known), by which the dialect may tell
+    /// whether the values print as it shows them.
+    value_types: []const ?@import("../sql/types.zig").Type = &.{},
 
     pub const Kind = enum {
         not_null,
@@ -269,6 +273,10 @@ pub const Hooks = struct {
     /// PRAGMA foreign_keys on while it compiles in the dialect
     /// (applyForeignKeys()).
     foreign_keys: bool = false,
+    /// CREATE TABLE ... AS SELECT counts the rows it inserts
+    /// (Db.changes(): PostgreSQL's command tag `SELECT n`); SQLite's does
+    /// not.
+    count_create_as: bool = false,
     /// Built-in functions of the dialect (see func.zig for constructors):
     /// looked up after the application-defined functions and before
     /// SQLite's built-ins, so a dialect can add functions (PostgreSQL's

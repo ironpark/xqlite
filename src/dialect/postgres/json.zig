@@ -293,6 +293,317 @@ pub fn parse(a: Allocator, text: []const u8, jsonb: bool) Error!Value {
     return v;
 }
 
+// ============================================================ input errors
+
+/// What PostgreSQL says of json input `text` it cannot read, after the
+/// message: the DETAIL (json_errdetail(): `Token "bad" is invalid.`)
+/// and CONTEXT (report_json_context(): `JSON data, line 1: {bad`)
+/// lines (util.detail_mark), found by reading `text` again as its lexer
+/// and parser do; "" where they find no error (or nest too deep).
+pub fn errorReport(a: Allocator, text: []const u8, jsonb: bool) Allocator.Error![]const u8 {
+    // PostgreSQL's text has no NUL (and a C string's message ends there).
+    if (std.mem.indexOfScalar(u8, text, 0) != null) return "";
+    var d: Diag = .{ .s = text, .jsonb = jsonb };
+    d.parse() catch {};
+    const code = d.code orelse return "";
+    var buf: [160]u8 = undefined;
+    const tok = text[d.start..d.term];
+    const detail = switch (code) {
+        .invalid_token => std.fmt.bufPrint(&buf, "Token \"{s}\" is invalid.", .{tok}),
+        .escaping_invalid => std.fmt.bufPrint(&buf, "Escape sequence \"\\{s}\" is invalid.", .{tok}),
+        .escaping_required => std.fmt.bufPrint(&buf, "Character with value 0x{x:0>2} must be escaped.", .{text[d.term]}),
+        .unicode_format => std.fmt.bufPrint(&buf, "\"\\u\" must be followed by four hexadecimal digits.", .{}),
+        .high_surrogate => std.fmt.bufPrint(&buf, "Unicode high surrogate must not follow a high surrogate.", .{}),
+        .low_surrogate => std.fmt.bufPrint(&buf, "Unicode low surrogate must follow a high surrogate.", .{}),
+        .code_point_zero => std.fmt.bufPrint(&buf, "\\u0000 cannot be converted to text.", .{}),
+        .expected_more => std.fmt.bufPrint(&buf, "The input string ended unexpectedly.", .{}),
+        .expected_json => std.fmt.bufPrint(&buf, "Expected JSON value, but found \"{s}\".", .{tok}),
+        .expected_end => std.fmt.bufPrint(&buf, "Expected end of input, but found \"{s}\".", .{tok}),
+        .expected_colon => std.fmt.bufPrint(&buf, "Expected \":\", but found \"{s}\".", .{tok}),
+        .expected_string => std.fmt.bufPrint(&buf, "Expected string, but found \"{s}\".", .{tok}),
+        .expected_object_first => std.fmt.bufPrint(&buf, "Expected string or \"}}\", but found \"{s}\".", .{tok}),
+        .expected_object_next => std.fmt.bufPrint(&buf, "Expected \",\" or \"}}\", but found \"{s}\".", .{tok}),
+        .expected_array_next => std.fmt.bufPrint(&buf, "Expected \",\" or \"]\", but found \"{s}\".", .{tok}),
+    } catch "";
+    // The line up to the end of the token, at most 49 bytes of it.
+    const end = d.term;
+    var start = d.line_start;
+    while (end - start >= 50) start += charLen(text, start);
+    const more = !d.at_end and end < text.len and text[end] != '\n' and text[end] != '\r';
+    const util = @import("../../sql/util.zig");
+    return std.fmt.allocPrint(a, "{s}{s}{s}JSON data, line {d}: {s}{s}{s}", .{
+        util.detail_mark,                        detail,
+        util.context_mark,                       d.line,
+        if (start > d.line_start) "..." else "", text[start..end],
+        if (more) "..." else "",
+    });
+}
+
+/// pg_mblen() of UTF-8: the bytes of the character at `i`, within `s`
+/// (1 at its end, or for a byte that starts none).
+pub fn charLen(s: []const u8, i: usize) usize {
+    if (i >= s.len) return 1;
+    const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+    return @min(n, s.len - i);
+}
+
+/// PostgreSQL's json lexer and recursive parser (common/jsonapi.c),
+/// for the error only.
+const Diag = struct {
+    s: []const u8,
+    jsonb: bool,
+    i: usize = 0,
+    line: u32 = 1,
+    line_start: usize = 0,
+    tok: Tok = .none,
+    /// The token (or the part of it the error names), the end of the
+    /// text the error's context shows.
+    start: usize = 0,
+    term: usize = 0,
+    depth: u32 = 0,
+    code: ?Code = null,
+    /// The error is about the end of the input.
+    at_end: bool = false,
+
+    const Tok = enum { none, obj_start, obj_end, arr_start, arr_end, comma, colon, string, number, true, false, null, end };
+    const Code = enum {
+        invalid_token,
+        escaping_invalid,
+        escaping_required,
+        unicode_format,
+        high_surrogate,
+        low_surrogate,
+        code_point_zero,
+        expected_more,
+        expected_json,
+        expected_end,
+        expected_colon,
+        expected_string,
+        expected_object_first,
+        expected_object_next,
+        expected_array_next,
+    };
+    const Fail = error{Fail};
+
+    /// A lexer error: the token ends at `term`.
+    fn lexFail(d: *Diag, code: Code, term: usize) Fail {
+        d.code = code;
+        d.term = @min(term, d.s.len);
+        return error.Fail;
+    }
+
+    /// A parser error at the current token (the end of the input:
+    /// "ended unexpectedly").
+    fn parseFail(d: *Diag, code: Code) Fail {
+        d.at_end = d.tok == .end;
+        d.code = if (d.at_end) .expected_more else code;
+        return error.Fail;
+    }
+
+    fn lex(d: *Diag) Fail!void {
+        const s = d.s;
+        while (d.i < s.len) : (d.i += 1) switch (s[d.i]) {
+            ' ', '\t', '\r' => {},
+            '\n' => {
+                d.line += 1;
+                d.line_start = d.i + 1;
+            },
+            else => break,
+        };
+        d.start = d.i;
+        if (d.i >= s.len) {
+            d.tok = .end;
+            d.term = d.i;
+            return;
+        }
+        const c = s[d.i];
+        const punct: ?Tok = switch (c) {
+            '{' => .obj_start,
+            '}' => .obj_end,
+            '[' => .arr_start,
+            ']' => .arr_end,
+            ',' => .comma,
+            ':' => .colon,
+            else => null,
+        };
+        if (punct) |t| {
+            d.i += 1;
+            d.term = d.i;
+            d.tok = t;
+            return;
+        }
+        switch (c) {
+            '"' => try d.string(),
+            '-', '0'...'9' => try d.number(),
+            else => {
+                var p = d.i;
+                while (p < s.len and isWordChar(s[p])) p += 1;
+                if (p == d.i) return d.lexFail(.invalid_token, p + charLen(s, p));
+                const w = s[d.i..p];
+                d.tok = if (std.mem.eql(u8, w, "true")) .true else if (std.mem.eql(u8, w, "false")) .false else if (std.mem.eql(u8, w, "null")) .null else return d.lexFail(.invalid_token, p);
+                d.i = p;
+                d.term = p;
+            },
+        }
+    }
+
+    fn number(d: *Diag) Fail!void {
+        const s = d.s;
+        var p = d.i;
+        var bad = false;
+        if (s[p] == '-') p += 1;
+        if (p < s.len and s[p] == '0') {
+            p += 1;
+        } else if (p < s.len and s[p] >= '1' and s[p] <= '9') {
+            while (p < s.len and std.ascii.isDigit(s[p])) p += 1;
+        } else bad = true;
+        if (p < s.len and s[p] == '.') {
+            p += 1;
+            if (p >= s.len or !std.ascii.isDigit(s[p])) bad = true;
+            while (p < s.len and std.ascii.isDigit(s[p])) p += 1;
+        }
+        if (p < s.len and (s[p] == 'e' or s[p] == 'E')) {
+            p += 1;
+            if (p < s.len and (s[p] == '+' or s[p] == '-')) p += 1;
+            if (p >= s.len or !std.ascii.isDigit(s[p])) bad = true;
+            while (p < s.len and std.ascii.isDigit(s[p])) p += 1;
+        }
+        while (p < s.len and isWordChar(s[p])) : (p += 1) bad = true;
+        if (bad) return d.lexFail(.invalid_token, p);
+        d.i = p;
+        d.term = p;
+        d.tok = .number;
+    }
+
+    fn string(d: *Diag) Fail!void {
+        const s = d.s;
+        var p = d.i + 1;
+        var hi = false;
+        while (true) : (p += 1) {
+            if (p >= s.len) return d.lexFail(.invalid_token, p);
+            const c = s[p];
+            if (c == '"') {
+                if (hi) return d.lexFail(.low_surrogate, p + 1);
+                break;
+            }
+            if (c == '\\') {
+                p += 1;
+                if (p >= s.len) return d.lexFail(.invalid_token, p);
+                if (s[p] == 'u') {
+                    var cp: u32 = 0;
+                    for (0..4) |_| {
+                        p += 1;
+                        if (p >= s.len) return d.lexFail(.invalid_token, p);
+                        const h = std.fmt.charToDigit(s[p], 16) catch return d.lexFail(.unicode_format, p + charLen(s, p));
+                        cp = cp * 16 + h;
+                    }
+                    if (cp >= 0xD800 and cp <= 0xDBFF) {
+                        if (hi) return d.lexFail(.high_surrogate, p + 1);
+                        hi = true;
+                        continue;
+                    }
+                    if (cp >= 0xDC00 and cp <= 0xDFFF) {
+                        if (!hi) return d.lexFail(.low_surrogate, p + 1);
+                        hi = false;
+                    }
+                    if (hi) return d.lexFail(.low_surrogate, p + 1);
+                    if (cp == 0 and d.jsonb) return d.lexFail(.code_point_zero, p + 1);
+                    continue;
+                }
+                if (hi) return d.lexFail(.low_surrogate, p + charLen(s, p));
+                if (std.mem.indexOfScalar(u8, "\"\\/bfnrt", s[p]) == null) {
+                    d.start = p;
+                    return d.lexFail(.escaping_invalid, p + charLen(s, p));
+                }
+                continue;
+            }
+            if (c < 0x20) return d.lexFail(.escaping_required, p);
+            if (hi) return d.lexFail(.low_surrogate, p + charLen(s, p));
+        }
+        d.i = p + 1;
+        d.term = d.i;
+        d.tok = .string;
+    }
+
+    fn parse(d: *Diag) Fail!void {
+        try d.lex();
+        try d.value();
+        if (d.tok != .end) return d.parseFail(.expected_end);
+    }
+
+    fn value(d: *Diag) Fail!void {
+        switch (d.tok) {
+            .string, .number, .true, .false, .null => try d.lex(),
+            .obj_start => try d.object(),
+            .arr_start => try d.array(),
+            else => return d.parseFail(.expected_json),
+        }
+    }
+
+    fn object(d: *Diag) Fail!void {
+        d.depth += 1;
+        // PostgreSQL's stack depth limit: another error.
+        if (d.depth > 6400) return error.Fail;
+        try d.lex();
+        switch (d.tok) {
+            .string => while (true) {
+                try d.lex();
+                if (d.tok != .colon) return d.parseFail(.expected_colon);
+                try d.lex();
+                try d.value();
+                if (d.tok != .comma) break;
+                try d.lex();
+                if (d.tok != .string) return d.parseFail(.expected_string);
+            },
+            .obj_end => {},
+            else => return d.parseFail(.expected_object_first),
+        }
+        if (d.tok != .obj_end) return d.parseFail(.expected_object_next);
+        try d.lex();
+        d.depth -= 1;
+    }
+
+    fn array(d: *Diag) Fail!void {
+        d.depth += 1;
+        if (d.depth > 6400) return error.Fail;
+        try d.lex();
+        if (d.tok != .arr_end) {
+            try d.value();
+            while (d.tok == .comma) {
+                try d.lex();
+                try d.value();
+            }
+        }
+        if (d.tok != .arr_end) return d.parseFail(.expected_array_next);
+        try d.lex();
+        d.depth -= 1;
+    }
+};
+
+test "json input errors as PostgreSQL reports them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_][3][]const u8{
+        .{ "{bad", "Token \"bad\" is invalid.", "JSON data, line 1: {bad" },
+        .{ "{\"a\":1", "The input string ended unexpectedly.", "JSON data, line 1: {\"a\":1" },
+        .{ "[1,2", "The input string ended unexpectedly.", "JSON data, line 1: [1,2" },
+        .{ "{\"a\" 1}", "Expected \":\", but found \"1\".", "JSON data, line 1: {\"a\" 1..." },
+        .{ "[1 2]", "Expected \",\" or \"]\", but found \"2\".", "JSON data, line 1: [1 2..." },
+        .{ "{1}", "Expected string or \"}\", but found \"1\".", "JSON data, line 1: {1..." },
+        .{ "1 2", "Expected end of input, but found \"2\".", "JSON data, line 1: 1 2" },
+        .{ "\"\\x\"", "Escape sequence \"\\x\" is invalid.", "JSON data, line 1: \"\\x..." },
+        .{ "[1,\n}", "Expected JSON value, but found \"}\".", "JSON data, line 2: }" },
+        .{ "01", "Token \"01\" is invalid.", "JSON data, line 1: 01" },
+    };
+    for (cases) |c| {
+        const r = try errorReport(a, c[0], true);
+        const f = @import("../../sql/util.zig").errorFields(r);
+        try std.testing.expectEqualStrings(c[1], f.detail.?);
+        try std.testing.expectEqualStrings(c[2], f.context.?);
+    }
+}
+
 /// Parse `text` as jsonb: parsed and normalized.
 pub fn parseJsonb(a: Allocator, text: []const u8) Error!Value {
     var v = try parse(a, text, true);

@@ -132,7 +132,7 @@ fn intervalBlobText(viewer: Dialect, t: Type, b: []const u8, buf: *[max_len]u8) 
 /// the build.
 pub fn parseInterval(z: []const u8) ?Interval {
     if (comptime !Dialect.postgres.built()) return null;
-    return pg_datetime.parseIntervalOpts(z, .{ .pg = true }) catch null;
+    return @import("postgres/ivinput.zig").decode(z, -1) catch null;
 }
 
 /// The text of `iv` in PostgreSQL's default output style; null if

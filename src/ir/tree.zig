@@ -662,6 +662,9 @@ pub const Drop = struct {
     kind: ObjectKind,
     if_exists: bool = false,
     name: QName,
+    /// The names after the first (PostgreSQL's DROP TABLE a, b), dropped
+    /// in order in the one statement.
+    others: []const QName = &.{},
 };
 
 test "tree nodes" {

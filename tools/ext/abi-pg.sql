@@ -62,3 +62,8 @@ SELECT hex(xq_pg_jsonb_bin(jsonb('{"z":1,"a":1e2,"a":"A"}'))), xq_pg_jsonb_text(
 SELECT hex(xq_pg_jsonb_key('{"a":[1.0,"x",true,null]}')), xq_pg_jsonb_key('1.0') = xq_pg_jsonb_key(xq_pg_jsonb_bin('1')), xq_pg_jsonb_key('[]') < xq_pg_jsonb_key('null'), xq_pg_jsonb_key('-2.5') < xq_pg_jsonb_key('-2'), quote(xq_pg_jsonb_key(NULL));
 SELECT hex(xq_pg_jsonb_get(xq_pg_jsonb_bin('{"a":{"b":[1]}}'), 'a')), xq_pg_jsonb_get_text(jsonb('{"a":"x","a":"y"}'), 'a'), xq_pg_jsonb_path_text(xq_pg_jsonb_bin('{"a":[1,{"c":"d"}]}'), '{a,1,c}'), xq_pg_jsonb_exists(jsonb('["a"]'), 'a'), xq_pg_jsonb_contains(jsonb('{"a":[1,2]}'), '{"a":[2]}');
 SELECT hex(xq_pg_jsonb_concat(xq_pg_jsonb_bin('{"a":1}'), '{"b":2}')), xq_pg_jsonb_concat('{"a":1}', '{"b":2}'), hex(xq_pg_jsonb_delete_path(xq_pg_jsonb_bin('{"a":{"b":1,"c":2}}'), '{a,b}')), xq_postgres_jsonb_typeof(jsonb('1.5')), xq_postgres_jsonb_pretty(xq_pg_jsonb_bin('{"a":[]}'));
+SELECT xq_pg_cast_int2(32767), xq_pg_cast_int4('  0x2A '), xq_pg_cast_int8('-1_000'), xq_pg_cast_int8(2.5), xq_pg_cast_int8(3.5), xq_pg_cast_int4(-2.5), quote(xq_pg_cast_int2(NULL));
+SELECT xq_pg_cast_int2('32768');
+SELECT xq_pg_cast_int4('1__0');
+SELECT xq_pg_cast_int8(9.3e18);
+SELECT xq_pg_int_xor(123, 456), xq_pg_int_xor(-1, 5), quote(xq_pg_int_xor(NULL, 1));

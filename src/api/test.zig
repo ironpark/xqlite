@@ -1168,9 +1168,9 @@ test "zig api: each dialect's constraint errors" {
         \\CREATE TABLE c (id int PRIMARY KEY, pid int REFERENCES p (id), n int NOT NULL, q int CHECK (q > 0));
         \\CREATE UNIQUE INDEX c_q ON c (q);
         , .fails = &.{
-            .{ .sql = "INSERT INTO p VALUES (1, 'b')", .msg = "duplicate key value violates unique constraint \"p_pkey\"", .state = "23505" },
-            .{ .sql = "INSERT INTO p VALUES (2, 'a')", .msg = "duplicate key value violates unique constraint \"p_code_uq\"", .state = "23505" },
-            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 1)", .msg = "duplicate key value violates unique constraint \"c_q\"", .state = "23505" },
+            .{ .sql = "INSERT INTO p VALUES (1, 'b')", .msg = "duplicate key value violates unique constraint \"p_pkey\"\nDETAIL:  Key (id)=(1) already exists.", .state = "23505" },
+            .{ .sql = "INSERT INTO p VALUES (2, 'a')", .msg = "duplicate key value violates unique constraint \"p_code_uq\"\nDETAIL:  Key (code)=(a) already exists.", .state = "23505" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 1)", .msg = "duplicate key value violates unique constraint \"c_q\"\nDETAIL:  Key (q)=(1) already exists.", .state = "23505" },
             .{ .sql = "INSERT INTO c VALUES (2, 1, NULL, 2)", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint", .state = "23502" },
             .{ .sql = "UPDATE c SET n = NULL", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint", .state = "23502" },
             .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 0)", .msg = "new row for relation \"c\" violates check constraint \"c_q_check\"", .state = "23514" },

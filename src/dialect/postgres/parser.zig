@@ -49,6 +49,7 @@ const pg_state = @import("state.zig");
 const json = @import("json.zig");
 const array = @import("array.zig");
 const uuid = @import("uuid.zig");
+const ivinput = @import("ivinput.zig");
 const ctypes = @import("../../sql/types.zig");
 const Children = @import("jtype.zig").Children;
 
@@ -1233,6 +1234,7 @@ pub const Parser = struct {
         if (p.peek().kind == .lparen) {
             if (arraySrfKind(name)) |k| return p.arraySrf(name, k);
             if (name.schema == null) if (srfKind(name.name.text)) |k| return p.jsonSrf(name.name, k);
+            if (name.schema == null and eql(name.name.text, "pg_input_error_info")) return p.inputErrorSrf(name.name);
             const c = try p.funcCall(name.name, name.schema);
             if (eql(c.name.text, "pg_partition_ancestors") and c.args.len == 1) {
                 const ord = p.isKw("with") and p.isKwAt(1, "ordinality");
@@ -1472,6 +1474,31 @@ pub const Parser = struct {
         return .{ .source = .{ .func = f }, .alias = .{ .name = label } };
     }
 
+    /// pg_input_error_info(text, type) in FROM: the json_each() of the one
+    /// row xq_pg_rows_input_error() makes (inputinfo.zig), as jsonSrf().
+    fn inputErrorSrf(p: *Parser, name: Name) Error!tree.FromItem {
+        const c = try p.funcCall(name, null);
+        if (c.args.len != 2) return p.failState(name.pos, .of("42883"), "function pg_input_error_info with {d} arguments does not exist", .{c.args.len});
+        var label: Name = name;
+        var alias_cols: []const Name = &.{};
+        const has_alias = p.isKw("as") or (p.peek().kind == .qident or (p.peek().kind == .ident and !isReserved(p.peek().text) and !p.isKw("on") and !p.isKw("using")));
+        if (has_alias) {
+            _ = p.eatKw("as");
+            label = try p.colId();
+            if (p.peek().kind == .lparen) alias_cols = try p.parenNameList();
+        }
+        var cols: std.ArrayList(SrfCol) = .empty;
+        for ([_][]const u8{ "message", "detail", "hint", "sql_error_code" }, 0..) |cn, i| {
+            try cols.append(p.arena, .{ .name = cn, .index = @intCast(i), .cast = .{ .name = "text", .pos = name.pos } });
+        }
+        if (alias_cols.len > cols.items.len) return p.failState(alias_cols[cols.items.len].pos, .of("42601"), "too many column aliases specified for function {s}", .{name.text});
+        for (alias_cols, 0..) |a, i| cols.items[i].name = a.text;
+        const rows = try p.call(name.pos, "xq_pg_rows_input_error", null, c.args);
+        const f = try p.new(tree.Func, .{ .name = .{ .text = "json_each", .pos = name.pos }, .args = try p.list(&.{rows}) });
+        try p.srfs.put(p.arena, f, .{ .cols = cols.items });
+        return .{ .source = .{ .func = f }, .alias = .{ .name = label } };
+    }
+
     /// The columns of the row type of table `q` (json_populate_record()).
     fn recordColumns(p: *Parser, q: QName, cols: *std.ArrayList(SrfCol)) Error!void {
         const rel = try p.lookup(q, .relation);
@@ -1537,7 +1564,12 @@ pub const Parser = struct {
                         else => try p.call(e.pos, "xq_pg_rows_expand", null, &.{ f.args[0], try p.expr(e.pos, .{ .integer = "1" }) }),
                     };
                     try rows.append(p.arena, r);
-                    try cols.append(p.arena, .{ .name = f.name.text, .index = if (found.items.len > 1) @intCast(i) else null });
+                    try cols.append(p.arena, .{
+                        .name = f.name.text,
+                        .index = if (found.items.len > 1) @intCast(i) else null,
+                        // A subscript is an integer (json_extract()'s is no type).
+                        .cast = if (kind == .subscripts) .{ .name = "integer", .pos = e.pos } else null,
+                    });
                     continue;
                 },
                 else => {},
@@ -1657,12 +1689,13 @@ pub const Parser = struct {
     /// jsonb made its JSONB blob) here, so that the schema keeps a
     /// literal sqlite3 reads; another jsonb expression made a blob
     /// (jsonbStored()).
-    /// The DEFAULT of an interval column: a BLOB (xq_pg_iv(e)), as the
-    /// values stored into it.
+    /// The DEFAULT of an interval column: a BLOB (xq_pg_iv_in(e,
+    /// typmod)), as the values stored into it.
     fn jsonDefault(p: *Parser, ty: types.TypeName, e: *Expr) Error!*Expr {
         if (!ty.array and eql(ty.name, "interval") and e.kind != .null) {
-            if (e.kind == .cast and eql(e.kind.cast.target_type, "interval")) return e;
-            return p.expr(e.pos, .{ .cast = .{ .e = e, .target_type = "interval", .mode = .{ .func = "xq_pg_iv" } } });
+            const tm = types.intervalTypmod(ty);
+            if (tm < 0 and e.kind == .cast and eql(e.kind.cast.target_type, "interval")) return e;
+            return p.expr(e.pos, .{ .cast = .{ .e = e, .target_type = "interval", .mode = .{ .func_args = .{ .func = "xq_pg_iv_in", .args = try p.arena.dupe(i64, &.{tm}) } } } });
         }
         const jsonb = eql(ty.name, "jsonb");
         if (ty.array or !(jsonb or eql(ty.name, "json"))) return e;
@@ -2010,13 +2043,13 @@ pub const Parser = struct {
         return p.expr(l.pos, .{ .like = .{ .e = l, .pat = pat, .not = not, .case_sensitive = !ilike, .escape = esc } });
     }
 
-    const OtherOp = enum { concat, bit_and, bit_or, shl, shr, json, regex };
+    const OtherOp = enum { concat, bit_and, bit_or, bit_xor, shl, shr, json, regex };
 
     /// Operators of the "any other operator" level.
     fn otherOp(t: Token) ?OtherOp {
         if (t.kind != .op) return null;
         const map = [_]struct { []const u8, OtherOp }{
-            .{ "||", .concat }, .{ "&", .bit_and }, .{ "|", .bit_or }, .{ "<<", .shl }, .{ ">>", .shr },
+            .{ "||", .concat }, .{ "&", .bit_and }, .{ "|", .bit_or }, .{ "#", .bit_xor }, .{ "<<", .shl }, .{ ">>", .shr },
         };
         for (map) |m| if (std.mem.eql(u8, t.text, m[0])) return m[1];
         if (jsonOperator(t.text) != null) return .json;
@@ -2045,13 +2078,16 @@ pub const Parser = struct {
                     .concat => try p.span(l, r, .{ .concat = .{ .args = try p.list(&.{ l, r }), .null_policy = .propagate } }),
                     .bit_and => try p.binary(.bit_and, l, r),
                     .bit_or => try p.binary(.bit_or, l, r),
+                    // No opcode: integer.zig's function, of the types
+                    // overload.zig checks.
+                    .bit_xor => try p.span(l, r, .{ .func = try p.new(tree.Func, .{ .name = .{ .text = "xq_pg_int_xor", .pos = l.pos }, .args = try p.list(&.{ l, r }) }) }),
                     .shl => try p.binary(.shl, l, r),
                     .shr => try p.binary(.shr, l, r),
                     .json => try p.jsonOp(t.text, l, r),
                     .regex => try p.regexOp(regexOperator(t.text).?, l, r),
                 };
             } else if (t.kind == .op and cmpOp(t) == null and !isArith(t.text) and !isLikeOp(t.text)) {
-                return p.failState(t.start, .of("42883"), "operator does not exist: {s}", .{t.text});
+                return p.failState(t.start, .of("42883"), "operator does not exist: {s}{s}", .{ t.text, @import("operators.zig").hint(.not_exist) });
             } else break;
         }
         return l;
@@ -2146,8 +2182,18 @@ pub const Parser = struct {
                 x.end = p.lastEnd();
                 try p.setFig(x, .{ .call = field.text });
                 e = x;
-            } else if (p.isKw("at") and p.isKwAt(1, "time")) {
-                return p.unsupported(p.peek().start, "AT TIME ZONE");
+            } else if (p.isKw("at") and p.isKwAt(1, "time") and p.isKwAt(2, "zone")) {
+                // x AT TIME ZONE z: timezone(z, x) (dtfuncs.zig).
+                _ = p.advance();
+                _ = p.advance();
+                _ = p.advance();
+                const z = try p.unary();
+                e = try p.call(e.pos, "timezone", .postgres, &.{ z, e });
+            } else if (p.isKw("at") and p.isKwAt(1, "local")) {
+                // The session's zone, UTC.
+                _ = p.advance();
+                _ = p.advance();
+                e = try p.call(e.pos, "timezone", .postgres, &.{ try p.stringAt(e.pos, "UTC"), e });
             } else break;
         }
         return e;
@@ -2190,9 +2236,11 @@ pub const Parser = struct {
                 .truncate => |n| .{ .truncate = n },
                 .round => |s| .{ .round = s },
                 .numeric => |m| .{ .func_args = .{ .func = "xq_dec", .args = try p.arena.dupe(i64, &m) } },
+                .interval => |m| .{ .func_args = .{ .func = "xq_pg_iv_in", .args = try p.arena.dupe(i64, &.{m}) } },
             };
-            // numeric(p, s) is of its precision and scale.
-            const target_type = if (plan == .numeric) try types.format(p.arena, ty) else ty.name;
+            // numeric(p, s) is of its precision and scale, character(n) of
+            // its length (shown padded to it).
+            const target_type = if (plan == .numeric or plan == .truncate) try types.format(p.arena, ty) else ty.name;
             x = try p.expr(pos, .{ .cast = .{ .e = e, .target_type = target_type, .mode = mode } });
         }
         try p.setFig(x, .{ .cast = .{ .strong = p.strongName(e), .type_name = ty.name } });
@@ -2429,10 +2477,13 @@ pub const Parser = struct {
         // A typed literal: DATE '2024-01-01', INTERVAL '1 day' ...
         if (isTypeWord(w)) {
             const save = p.i;
-            if (p.typeName()) |ty| {
+            if (p.typeName()) |ty_arg| {
+                var ty = ty_arg;
                 const s = p.peek();
                 if (s.kind == .string) {
                     _ = p.advance();
+                    // INTERVAL '1' YEAR TO MONTH: the fields after the string.
+                    if (eql(ty.name, "interval") and ty.mods.len == 0 and ty.fields.len == 0 and !ty.array) try p.intervalFields(&ty);
                     const lit = try p.expr(s.start, .{ .string = s.text });
                     return p.castExpr(t.start, lit, ty);
                 }
@@ -2542,16 +2593,161 @@ pub const Parser = struct {
             f.star = true;
         } else if (p.peek().kind != .rparen) {
             if (p.eatKw("distinct")) f.distinct = true else _ = p.eatKw("all");
-            if (p.isKw("variadic")) return p.unsupported(p.peek().start, "VARIADIC");
-            f.args = try p.exprList();
+            try p.callArgs(&f);
             if (p.isKw("order")) {
                 _ = p.advance();
                 try p.expectKw("by");
                 f.order_by = try p.sortList();
             }
-        }
+        } else try p.placeArgs(&f, &.{}, false);
         _ = try p.expect(.rparen);
         return p.finishCall(f);
+    }
+
+    /// The arguments of a call: positional ones, then named ones (`name
+    /// := v`, `name => v`) put in the places of the parameters of the
+    /// built-in function (namedParams(), its defaults for those not
+    /// given); a last `VARIADIC array` (variadicCall()).
+    fn callArgs(p: *Parser, f: *Call) Error!void {
+        var args: std.ArrayList(*Expr) = .empty;
+        var names: std.ArrayList(?Name) = .empty;
+        var named = false;
+        var variadic: ?u32 = null;
+        while (true) {
+            const t = p.peek();
+            if (variadic != null) return p.syntaxError();
+            if (t.isKw("variadic")) {
+                _ = p.advance();
+                variadic = p.peek().start;
+            }
+            if ((t.kind == .ident or t.kind == .qident) and (p.peekAt(1).isOp(":=") or p.peekAt(1).isOp("=>"))) {
+                _ = p.advance();
+                _ = p.advance();
+                for (names.items) |n| if (n) |x| if (eql(x.text, t.text))
+                    return p.failState(t.start, .of("42601"), "argument name \"{s}\" used more than once", .{t.text});
+                try names.append(p.arena, .{ .text = t.text, .pos = t.start });
+                named = true;
+            } else {
+                if (named) return p.failState(t.start, .of("42601"), "positional argument cannot follow named argument", .{});
+                try names.append(p.arena, null);
+            }
+            try args.append(p.arena, try p.expr0());
+            if (!p.eat(.comma)) break;
+        }
+        f.args = args.items;
+        if (variadic) |pos| return p.variadicCall(f, pos);
+        return p.placeArgs(f, names.items, named);
+    }
+
+    /// The arguments of `f` (named as `names` says) in the places of the
+    /// parameters of its function (namedParams()).
+    fn placeArgs(p: *Parser, f: *Call, names: []const ?Name, named: bool) Error!void {
+        const params = namedParams(f.name.text) orelse {
+            if (named) return p.noFunction(f.name, f.args, names);
+            return;
+        };
+        if (!named and params.defaults == 0) return;
+        // The arguments by the parameters' places.
+        const out = try p.arena.alloc(?*Expr, params.names.len);
+        @memset(out, null);
+        for (f.args, names, 0..) |a, n, i| {
+            const at = if (n) |x| for (params.names, 0..) |pn, k| {
+                if (eql(pn, x.text)) break k;
+            } else null else if (i < out.len) i else null;
+            const k = at orelse return p.noFunction(f.name, f.args, names);
+            out[k] = a;
+        }
+        var placed: std.ArrayList(*Expr) = .empty;
+        for (out, 0..) |a, k| {
+            if (a) |x| {
+                try placed.append(p.arena, x);
+                continue;
+            }
+            // A parameter not given: its default, if it has one.
+            if (k < params.names.len - params.defaults) return p.noFunction(f.name, f.args, names);
+            try placed.append(p.arena, try p.expr(f.name.pos, .{ .integer = "0" }));
+        }
+        f.args = placed.items;
+    }
+
+    /// "function f(a => integer, ...) does not exist", the arguments'
+    /// types as their literals tell (argTypeName()).
+    fn noFunction(p: *Parser, name: Name, args: []const *Expr, names: []const ?Name) Error {
+        var sig: std.ArrayList(u8) = .empty;
+        for (args, 0..) |a, i| {
+            if (i > 0) try sig.appendSlice(p.arena, ", ");
+            if (i < names.len) if (names[i]) |n| try sig.print(p.arena, "{s} => ", .{n.text});
+            try sig.appendSlice(p.arena, try p.argTypeName(a));
+        }
+        return p.failState(name.pos, .of("42883"), "function {s}({s}) does not exist", .{ name.text, sig.items });
+    }
+
+    /// The type of argument `e` as far as the parser knows it: of a
+    /// literal, a cast, an ARRAY[...] of literals; "unknown" for a string
+    /// or another expression.
+    fn argTypeName(p: *Parser, e: *const Expr) Error![]const u8 {
+        return switch (e.kind) {
+            .integer => "integer",
+            .float => "numeric",
+            .boolean => "boolean",
+            .cast => |c| c.target_type,
+            .func => |f| if (eql(f.name.text, "xq_pg_array") and f.args.len > 0)
+                try std.mem.concat(p.arena, u8, &.{ if (f.args[0].kind == .string) "text" else try p.argTypeName(f.args[0]), "[]" })
+            else
+                "unknown",
+            else => "unknown",
+        };
+    }
+
+    /// f(..., VARIADIC a): concat() and concat_ws() of the elements of
+    /// array a (array_to_string(), NULL for a NULL array); format() and
+    /// the JSON builders of the elements of an ARRAY[...] as the
+    /// arguments themselves.
+    fn variadicCall(p: *Parser, f: *Call, pos: u32) Error!void {
+        const n = f.name.text;
+        const fixed: usize = if (eql(n, "concat") or eql(n, "json_build_array") or eql(n, "json_build_object") or
+            eql(n, "jsonb_build_array") or eql(n, "jsonb_build_object"))
+            0
+        else if (eql(n, "concat_ws") or eql(n, "format"))
+            1
+        else
+            return p.noFunction(f.name, f.args, &.{});
+        if (f.args.len != fixed + 1) return p.noFunction(f.name, f.args, &.{});
+        const a = f.args[fixed];
+        // Not an array.
+        switch (a.kind) {
+            .integer, .float, .boolean, .string => return p.failState(pos, .of("42804"), "VARIADIC argument must be an array", .{}),
+            .cast => |c| if (!std.mem.endsWith(u8, c.target_type, "[]")) return p.failState(pos, .of("42804"), "VARIADIC argument must be an array", .{}),
+            else => {},
+        }
+        if (eql(n, "concat") or eql(n, "concat_ws")) {
+            f.label = n;
+            const sep = if (fixed == 1) f.args[0] else try p.stringAt(pos, "");
+            f.name = .{ .text = "array_to_string", .pos = f.name.pos };
+            f.args = try p.list(&.{ a, sep });
+            return;
+        }
+        // The elements of ARRAY[...] (cast: each element cast).
+        var arr = a;
+        var elem_type: ?types.TypeName = null;
+        if (arr.kind == .cast and arr.kind.cast.e.kind == .func) {
+            const tn = arr.kind.cast.target_type;
+            elem_type = .{ .name = tn[0 .. tn.len - 2], .pos = arr.pos };
+            arr = arr.kind.cast.e;
+        }
+        if (arr.kind == .func and eql(arr.kind.func.name.text, "xq_pg_array")) {
+            var placed: std.ArrayList(*Expr) = .empty;
+            try placed.appendSlice(p.arena, f.args[0..fixed]);
+            for (arr.kind.func.args) |x| try placed.append(p.arena, if (elem_type) |ty| try p.castExpr(x.pos, x, ty) else x);
+            f.args = placed.items;
+            return;
+        }
+        // VARIADIC NULL: no arguments.
+        if (arr.kind == .null or (arr.kind == .cast and arr.kind.cast.e.kind == .null)) {
+            f.args = f.args[0..fixed];
+            return;
+        }
+        return p.unsupported(pos, "VARIADIC of this argument");
     }
 
     fn finishCall(p: *Parser, f_arg: Call) Error!Call {
@@ -2736,8 +2932,15 @@ pub const Parser = struct {
     /// date_part('field', x) (and EXTRACT(field FROM x)) with strftime().
     fn datePart(p: *Parser, pos: u32, c: Call) Error!*Expr {
         if (c.args.len != 2 or c.args[0].kind != .string) return p.failState(c.name.pos, .of("0A000"), "function date_part with these arguments is not supported", .{});
-        const plan = datePartPlan(c.args[0].kind.string) orelse
-            return p.failState(c.args[0].pos, .of("22023"), "unit \"{s}\" not recognized for type timestamp", .{c.args[0].kind.string});
+        // Of an interval or of a timestamp, as the type of x chooses
+        // (repr/interval.zig): xq_pg_part(field, x, the timestamp's part
+        // or NULL, whether EXTRACT).
+        const t = try p.timestampPart(pos, c) orelse try p.expr(pos, .null);
+        return p.call(pos, "xq_pg_part", .postgres, &.{ c.args[0], c.args[1], t, try p.expr(pos, .{ .integer = if (c.label != null) "1" else "0" }) });
+    }
+
+    fn timestampPart(p: *Parser, pos: u32, c: Call) Error!?*Expr {
+        const plan = datePartPlan(c.args[0].kind.string) orelse return null;
         const x = c.args[1];
         if (plan.func) |fname| return p.call(pos, fname, null, &.{x});
         const s = try p.call(pos, "strftime", null, &.{ try p.stringAt(pos, plan.fmt), x });
@@ -2820,6 +3023,49 @@ pub const Parser = struct {
         if (mods.len == 2 and (mods[1] < -1000 or mods[1] > 1000)) return p.failState(pos, .of("22023"), "NUMERIC scale {d} must be between -1000 and 1000", .{mods[1]});
     }
 
+    /// The fields of an interval type or literal (PostgreSQL's
+    /// opt_interval): YEAR, ..., SECOND[(p)], YEAR TO MONTH, DAY TO HOUR,
+    /// DAY TO MINUTE, DAY TO SECOND[(p)], HOUR TO MINUTE, HOUR TO
+    /// SECOND[(p)], MINUTE TO SECOND[(p)]: ty.fields, the precision
+    /// ty.mods.
+    fn intervalFields(p: *Parser, ty: *types.TypeName) Error!void {
+        const iv_words = [_][]const u8{ "year", "month", "day", "hour", "minute", "second" };
+        const first = p.peek();
+        const a = for (iv_words) |w| {
+            if (first.kind == .ident and eql(first.text, w)) break w;
+        } else return;
+        _ = p.advance();
+        var b: []const u8 = "";
+        if (p.isKw("to")) {
+            const to = p.peekAt(1);
+            const ok = for (iv_words) |w| {
+                if (to.kind == .ident and eql(to.text, w)) break true;
+            } else false;
+            if (!ok or ivinput.rangeOfFields(a, to.text) == null) {
+                _ = p.advance();
+                return p.syntaxError();
+            }
+            _ = p.advance();
+            b = p.advance().text;
+        }
+        const last = if (b.len > 0) b else a;
+        if (eql(last, "second") and p.peek().kind == .lparen) {
+            const lp = p.advance();
+            const n = try p.signedInt();
+            _ = try p.expect(.rparen);
+            ty.mods = try p.arena.dupe(i64, &.{n});
+            try p.intervalPrecision(lp.start, ty.mods);
+        }
+        ty.fields = if (b.len > 0) try std.mem.concat(p.arena, u8, &.{ a, " to ", b }) else a;
+    }
+
+    /// intervaltypmodin()'s check of a precision: negative is an error,
+    /// more than 6 is 6.
+    fn intervalPrecision(p: *Parser, pos: u32, mods: []const i64) Error!void {
+        if (mods.len != 1) return p.failState(pos, .of("22023"), "invalid INTERVAL type modifier", .{});
+        if (mods[0] < 0) return p.failState(pos, .of("22023"), "INTERVAL({d}) precision must not be negative", .{mods[0]});
+    }
+
     pub fn typeName(p: *Parser) Error!types.TypeName {
         const t = p.peek();
         if (t.kind != .ident and t.kind != .qident) return p.syntaxError();
@@ -2890,16 +3136,9 @@ pub const Parser = struct {
             else
                 (if (tz) "time with time zone" else "time without time zone");
         } else if (eql(ty.name, "interval")) {
-            // INTERVAL YEAR TO MONTH and the like: the fields are ignored.
-            const fields = [_][]const u8{ "year", "month", "day", "hour", "minute", "second" };
-            var any = true;
-            while (any) {
-                any = false;
-                inline for (fields) |fw| if (p.eatKw(fw)) {
-                    any = true;
-                };
-                if (p.eatKw("to")) any = true;
-            }
+            if (ty.mods.len > 0) {
+                try p.intervalPrecision(t.start, ty.mods);
+            } else try p.intervalFields(&ty);
         }
         while (p.peek().kind == .lbracket) {
             _ = p.advance();
@@ -3628,27 +3867,34 @@ pub const Parser = struct {
             return p.failState(t.start, .of("0A000"), "DROP {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
         } else return p.syntaxError();
         d.if_exists = try p.ifExists();
-        const q = try p.qname();
-        if (p.eat(.comma)) return p.failState(p.peek().start, .of("0A000"), "dropping several objects in one statement is not supported", .{});
         const kind: Lookup = switch (d.kind) {
             .table, .view => .relation,
             .index => .index,
             .sequence => .sequence,
         };
-        if (q.schema) |s| {
-            const x = try p.qualified(s, q.name);
-            if (d.kind == .sequence and !eql(x.db, "main")) return p.failState(s.pos, .of("42704"), "sequence \"{s}\" does not exist", .{q.name.text});
-            d.name = .{ .schema = .{ .text = x.db, .pos = s.pos }, .name = .{ .text = x.name, .pos = q.name.pos } };
-        } else switch (try p.unqualified(q.name, kind)) {
-            .keep => d.name = .{ .name = q.name },
-            .target => |x| d.name = .{ .schema = .{ .text = x.db, .pos = q.name.pos }, .name = .{ .text = x.name, .pos = q.name.pos } },
-            .missing => {
-                if (!d.if_exists) return p.failState(q.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ @tagName(d.kind), q.name.text });
-                // Not on search_path: a name nothing has (pg_temp's
-                // tables have no dot).
-                d.name = .{ .schema = .{ .text = "main" }, .name = .{ .text = try nsp.mangle(p.arena, "pg_temp", q.name.text), .pos = q.name.pos } };
-            },
+        // DROP TABLE a, b: each name resolved (d.others after the first).
+        var names: std.ArrayList(tree.QName) = .empty;
+        while (true) {
+            const q = try p.qname();
+            const name: tree.QName = if (q.schema) |s| blk: {
+                const x = try p.qualified(s, q.name);
+                if (d.kind == .sequence and !eql(x.db, "main")) return p.failState(s.pos, .of("42704"), "sequence \"{s}\" does not exist", .{q.name.text});
+                break :blk .{ .schema = .{ .text = x.db, .pos = s.pos }, .name = .{ .text = x.name, .pos = q.name.pos } };
+            } else switch (try p.unqualified(q.name, kind)) {
+                .keep => .{ .name = q.name },
+                .target => |x| .{ .schema = .{ .text = x.db, .pos = q.name.pos }, .name = .{ .text = x.name, .pos = q.name.pos } },
+                .missing => blk: {
+                    if (!d.if_exists) return p.failState(q.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ @tagName(d.kind), q.name.text });
+                    // Not on search_path: a name nothing has (pg_temp's
+                    // tables have no dot).
+                    break :blk .{ .schema = .{ .text = "main" }, .name = .{ .text = try nsp.mangle(p.arena, "pg_temp", q.name.text), .pos = q.name.pos } };
+                },
+            };
+            try names.append(p.arena, name);
+            if (!p.eat(.comma)) break;
         }
+        d.name = names.items[0];
+        d.others = names.items[1..];
         if (p.eatKw("cascade")) {} else _ = p.eatKw("restrict");
         return p.new(tree.Drop, d);
     }
@@ -3875,6 +4121,21 @@ pub fn regexOperator(op: []const u8) ?RegexOp {
 /// current_role/session_user (current_user()), current_catalog
 /// (current_database()), date_part().
 const SpecialFunc = enum { now, localtime, current_user, current_database, date_part };
+
+/// The parameters of a built-in function that takes arguments by name,
+/// the last `defaults` of them with a default (0).
+const Params = struct { names: []const []const u8, defaults: usize = 0 };
+
+fn namedParams(name: []const u8) ?Params {
+    const map = [_]struct { []const u8, Params }{
+        .{ "make_interval", .{ .names = &.{ "years", "months", "weeks", "days", "hours", "mins", "secs" }, .defaults = 7 } },
+        .{ "make_date", .{ .names = &.{ "year", "month", "day" } } },
+        .{ "make_time", .{ .names = &.{ "hour", "min", "sec" } } },
+        .{ "make_timestamp", .{ .names = &.{ "year", "month", "mday", "hour", "min", "sec" } } },
+    };
+    for (map) |m| if (eql(m[0], name)) return m[1];
+    return null;
+}
 
 fn specialFunc(name: []const u8) ?SpecialFunc {
     const map = std.StaticStringMap(SpecialFunc).initComptime(.{

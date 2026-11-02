@@ -359,7 +359,7 @@ fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
         is_array = true;
     };
     if (oid == 22 or oid == 30) return api.resultText(ctx, if (oid == 22) "int2vector" else "oidvector", .static);
-    const Name = struct { i64, []const u8, enum { none, length, numeric, precision } };
+    const Name = struct { i64, []const u8, enum { none, length, numeric, precision, interval } };
     const names = [_]Name{
         .{ 16, "boolean", .none },
         .{ 17, "bytea", .none },
@@ -380,7 +380,7 @@ fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
         .{ 1083, "time without time zone", .precision },
         .{ 1114, "timestamp without time zone", .precision },
         .{ 1184, "timestamp with time zone", .precision },
-        .{ 1186, "interval", .none },
+        .{ 1186, "interval", .interval },
         .{ 1266, "time with time zone", .precision },
         .{ 1700, "numeric", .numeric },
         .{ 2950, "uuid", .none },
@@ -401,6 +401,12 @@ fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
             const sp = std.mem.indexOfScalar(u8, name, ' ').?;
             break :blk std.fmt.bufPrint(&buf, "{s}({d}){s}", .{ name[0..sp], mod, name[sp..] }) catch name;
         } else name,
+        // "interval day to second(3)" (ivinput.zig).
+        .interval => blk: {
+            var tb: [48]u8 = undefined;
+            const tail = @import("ivinput.zig").typmodText(&tb, std.math.cast(i32, mod) orelse -1);
+            break :blk std.fmt.bufPrint(&buf, "{s}{s}", .{ name, tail }) catch name;
+        },
     };
     if (is_array) {
         var abuf: [80]u8 = undefined;
@@ -488,6 +494,30 @@ pub const store_boolean = dfunc.scalar("xq_pg_store_boolean", 1, det, storeBoole
 /// the number it spells ('1.50' is 1.5, '3' is 3), as numeric_in()
 /// reads it; other values are stored as they are.
 pub const store_numeric = dfunc.scalar("xq_pg_store_numeric", 1, det, storeNumericFunc);
+
+/// What a string stored into a varchar(n) column goes through (with n):
+/// spaces past the n-th character are dropped, as varchar_input() does
+/// ('abcd    ' into varchar(4) is 'abcd'); a longer string is left to
+/// the column's check (value too long).
+pub const store_varchar = dfunc.scalar("xq_pg_store_varchar", 2, det, dfunc.bind(storeCharFunc, .{false}));
+
+/// The same of a character(n) column, whose trailing spaces mean nothing
+/// (bpchar's comparisons, its cast to text): all of them are dropped, and
+/// the text a client sees pads the value to n (api/display.zig).
+pub const store_bpchar = dfunc.scalar("xq_pg_store_bpchar", 2, det, dfunc.bind(storeCharFunc, .{true}));
+
+fn storeCharFunc(ctx: *Context, argv: []*Mem, comptime bpchar: bool) void {
+    const m = argv[0];
+    if (api.valueType(m) != vi.SQLITE_TEXT) return api.resultValue(ctx, m);
+    const z = text(ctx, m) orelse return;
+    const n = api.valueInt64(argv[1]);
+    const end = if (n >= 0) cpOffset(z, @intCast(n)) else z.len;
+    const rest = z[end..];
+    if (std.mem.trimEnd(u8, rest, " ").len != 0) return api.resultValue(ctx, m);
+    const kept = if (bpchar) std.mem.trimEnd(u8, z[0..end], " ") else z[0..end];
+    if (kept.len == z.len) return api.resultValue(ctx, m);
+    api.resultText(ctx, kept, .transient);
+}
 
 fn storeBooleanFunc(ctx: *Context, argv: []*Mem) void {
     const m = argv[0];

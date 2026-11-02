@@ -1,0 +1,138 @@
+-- Differential cases of PostgreSQL syntax around values (xqt dialect-diff
+-- pg tools/dialect/pg-syntax-cases.txt), in the format of pg-cases.txt:
+-- interval field qualifiers and type modifiers, PostgreSQL 18's interval
+-- input, EXTRACT and date_part() of intervals, make_interval(), named
+-- arguments, VARIADIC, U&'' and E'' Unicode escapes. Each case runs on an
+-- empty database in PostgreSQL and in `xqlite sql` with `.dialect
+-- postgres`; the rows, column names and error messages must be the same.
+-- The expected output is PostgreSQL 18's.
+
+-- case: interval literals with fields
+SELECT interval '999' second, interval '999' minute, interval '999' hour, interval '999' day, interval '999' month;
+SELECT interval '1' year, interval '2' month, interval '3' day, interval '4' hour, interval '5' minute, interval '6' second;
+SELECT interval '1' year to month, interval '1-2' year to month, interval '1 2' day to hour, interval '1 2:03' day to hour, interval '1 2:03:04' day to hour;
+SELECT interval '1 2:03' day to minute, interval '1 2:03:04' day to minute, interval '1 2:03' day to second, interval '1 2:03:04' day to second;
+SELECT interval '1 2:03' hour to minute, interval '1 2:03:04' hour to second, interval '1 2:03' minute to second, interval '1 2:03:04' minute to second;
+SELECT interval '1 +2:03' minute to second, interval '1 -2:03' minute to second, interval '1 -2:03:04' minute to second, interval '123 11' day to hour;
+SELECT interval '1 2' day to minute;
+SELECT interval '1 2' minute to second;
+SELECT interval '123 11' day;
+SELECT interval '123 11';
+SELECT interval '123 2:03 -2:04';
+
+-- case: interval precision
+SELECT interval(0) '1 day 01:23:45.6789', interval(2) '1 day 01:23:45.6789', interval '12:34.5678' minute to second(2);
+SELECT interval '1.234' second, interval '1.234' second(2), interval '1 2:03.4567' day to second(2), interval '1 2:03:04.5678' hour to second(2);
+SELECT interval '1 2.345' day to second(2);
+SELECT interval '2562047788:00:54.775807' second(2);
+SELECT interval '-2562047788:00:54.775807' second(2);
+
+-- case: casts to interval types
+SELECT '1 day 02:03:04.5'::interval day to minute, CAST('5 mons 12:00' AS interval month), '34 years 3 mons'::interval year, '1.555 sec'::interval(1);
+SELECT ('1 day 02:03'::interval + interval '1 month')::interval month::interval year;
+SELECT 'infinity'::interval hour, '-infinity'::interval day to second(0);
+
+-- case: interval columns with fields
+CREATE TABLE ti (id int, a interval year to month, b interval(0), c interval day to second(2), d interval hour);
+INSERT INTO ti VALUES (1, '1 year 2 mons 3 days', '1.6 seconds', '1 day 01:02:03.456', '2 days 03:04:05');
+INSERT INTO ti VALUES (2, interval '13 months 1 hour', interval '-1.4 sec', interval '-00:00:00.005', interval '90 minutes');
+UPDATE ti SET b = '2.5 sec' WHERE id = 2;
+SELECT * FROM ti ORDER BY id;
+SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'ti'::regclass AND attnum > 1 ORDER BY attnum;
+
+-- case: interval input of PostgreSQL 18
+SELECT interval '1-2', interval '-1-2', interval '+1-2 -3 +4:05:06.789', interval '-1-2 +3 -4:05:06.789';
+SELECT interval '@ 1 minute ago', interval '1 day 2 hours ago', interval '@ 14 seconds ago', interval '1 d 2 h', interval '.5';
+SELECT interval '4 millenniums 5 centuries 4 decades 1 year 4 months 4 days 17 minutes 31 seconds', interval '1 millisecondsxyz';
+SELECT interval 'P0002-10-15T10:30:20', interval 'P00021015T103020', interval 'PT10:30', interval 'P1.5Y', interval 'P10.5e4Y', interval 'P0.1-2147483647-00';
+SELECT interval '02:00 1.5 days', interval '1:2:60', interval '1 week 2 days', interval '-2147483648 months -2147483648 days -9223372036854775808 us';
+SELECT interval '1 2 days';
+SELECT interval 'infinity ago';
+SELECT interval '1 hour 02:00';
+SELECT interval '5 ago';
+SELECT interval '1,5 days';
+SELECT interval 'p1y';
+
+-- case: interval input out of range
+SELECT interval '2147483648 days';
+SELECT interval '2147483647 years';
+SELECT interval '-2147483649 years';
+SELECT interval '9223372036855 seconds';
+SELECT interval '-2147483648 months ago';
+SELECT interval 'P2147483648';
+SELECT interval 'P1-2147483647-2147483647';
+SELECT interval 'PT2562047789';
+SELECT interval '2147483647 weeks';
+SELECT interval '1 week 2147483647 days';
+SELECT interval '2562047788.1:0:54.775807';
+
+-- case: EXTRACT and date_part of intervals
+SELECT EXTRACT(MICROSECOND FROM i) AS us, EXTRACT(MILLISECOND FROM i) AS ms, EXTRACT(SECOND FROM i) AS s, EXTRACT(MINUTE FROM i) AS mi, EXTRACT(HOUR FROM i) AS h, EXTRACT(DAY FROM i) AS d, EXTRACT(WEEK FROM i) AS w, EXTRACT(MONTH FROM i) AS mon, EXTRACT(QUARTER FROM i) AS q, EXTRACT(YEAR FROM i) AS y, EXTRACT(DECADE FROM i) AS dec, EXTRACT(CENTURY FROM i) AS c, EXTRACT(MILLENNIUM FROM i) AS mil, EXTRACT(EPOCH FROM i) AS e
+  FROM (VALUES (interval '1 min'), (interval '10 days'), (interval '34 years 5 mons'), (interval '14 secs ago'), (interval '1 day 2 hours 3 mins 4.5 secs'), (interval '-6 years -5 mons'), (interval 'infinity'), (interval '-infinity')) AS v(i);
+SELECT date_part('microsecond', i) = -14000000, date_part('millisecond', i) = -14000, date_part('second', i) = -14, date_part('epoch', i) = -14, date_part('quarter', i) = 1
+  FROM (VALUES (interval '14 secs ago')) AS v(i);
+SELECT date_part('epoch', interval '5 mons 12 hours') = 13003200, date_part('epoch', interval '1 year') = 31557600, date_part('hour', interval 'infinity') > 1e308, date_part('second', interval 'infinity') IS NULL;
+SELECT EXTRACT(DECADE FROM INTERVAL '-99 y'), EXTRACT(CENTURY FROM INTERVAL '100 y'), EXTRACT(CENTURY FROM INTERVAL '-100 y'), extract('hour' from interval '25 hours');
+SELECT EXTRACT(year FROM date '2024-05-06'), date_part('month', timestamp '2024-05-06 07:08:09') = 5;
+CREATE TABLE tiv (v interval);
+INSERT INTO tiv VALUES ('1 day 02:03:04.5'), ('-3 mons'), (NULL);
+SELECT v, extract(epoch FROM v), date_part('hour', v) = 2 FROM tiv ORDER BY v;
+SELECT EXTRACT(FORTNIGHT FROM INTERVAL '2 days');
+SELECT EXTRACT(TIMEZONE FROM INTERVAL '2 days');
+SELECT date_part('dow', interval '2 days');
+
+-- case: make_interval and named arguments
+SELECT make_interval(years := 2), make_interval(years := 1, months := 6), make_interval(years := 1, months := -1, weeks := 5, days := -7, hours := 25, mins := -180);
+SELECT make_interval() = make_interval(years := 0, months := 0, weeks := 0, days := 0, mins := 0, secs := 0.0), make_interval(hours := -2, mins := -10, secs := -25.3);
+SELECT make_interval(1, 2, 3), make_interval(1, days => 2), make_interval(secs => '1.5'), make_interval(mins := 1, secs := 9223372036800.0);
+SELECT make_interval(years := 178956971);
+SELECT make_interval(weeks := -1, days := -2147483648);
+SELECT make_interval(secs := 1e308);
+SELECT make_interval(secs := 'inf');
+SELECT make_interval(secs := 'NaN');
+SELECT make_interval(foo := 1);
+SELECT make_interval(years := 1, 2);
+SELECT make_interval(years := 1, years => 2);
+SELECT upper(x => 'a');
+
+-- case: VARIADIC
+SELECT concat(variadic array[1,2,3]), concat_ws(',', variadic array[1,2,3]), concat(variadic NULL::int[]) IS NULL, concat(variadic '{}'::int[]) = '';
+SELECT concat_ws(',', variadic NULL::int[]), concat(variadic array[true, false]), concat_ws('-', variadic array[1.50, null, 2]), concat_ws(NULL, variadic array['a']);
+SELECT format('%s, %s', variadic array['Hello','World']), format('%s, %s', variadic array[1, 2]), format('Hello', variadic NULL::int[]);
+SELECT json_build_array(variadic array[1,2]), json_build_object(variadic array['a','b']), jsonb_build_array(variadic array['x']);
+SELECT concat_ws(',', variadic 10);
+SELECT concat(variadic '{a,b}');
+SELECT upper(variadic array['a']);
+
+-- case: Unicode escapes
+SELECT U&'d\0061t\+000061' AS U&"d\0061t\+000061";
+SELECT U&'d!0061t\+000061' UESCAPE '!' AS U&"d*0061t\+000061" UESCAPE '*';
+SELECT U&'a\\b' AS "a\b", U&' \' UESCAPE '!' AS "tricky", U&'\D83D\DE00' AS smile, u&'\+01F600' AS smile2;
+SELECT 'tricky' AS U&"\" UESCAPE '!';
+SELECT E'dat\U00000061' AS "data", E'😀' AS smile;
+SELECT U&'wrong: \061';
+SELECT U&'wrong: \+0061';
+SELECT U&'wrong: +0061' UESCAPE +;
+SELECT U&'wrong: +0061' UESCAPE '+';
+SELECT U&'wrong: \db99';
+SELECT U&'wrong: \db99xy';
+SELECT U&'wrong: \db99\0061';
+SELECT U&'wrong: \+2FFFFF';
+SELECT E'wrong: \u061';
+SELECT E'wrong: \udb99';
+SELECT E'wrong: \udb99xy';
+SELECT E'wrong: \udb99\\';
+SELECT E'wrong: \udb99a';
+SELECT E'wrong: \U0000db99\U00000061';
+SELECT E'wrong: \U002FFFFF';
+
+-- case: string continuation
+SELECT 'first line'
+' - next line'
+	' - third line'
+	AS "Three lines to one";
+SELECT 'first line'
+' - next line' /* this comment is not allowed here */
+' - third line'
+	AS "Illegal comment within continuation";
+SELECT 'a' 'b';

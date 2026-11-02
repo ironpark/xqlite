@@ -76,15 +76,19 @@ const columns =
     \\  current_database() AS udt_catalog, 'pg_catalog' AS udt_schema,
     \\  xq_pg_udt_name(k.value, c.type) AS udt_name,
     \\  NULL AS scope_catalog, NULL AS scope_schema, NULL AS scope_name,
-    \\  NULL::integer AS maximum_cardinality, (c.cid + 1)::integer AS dtd_identifier, 'NO' AS is_self_referencing,
+    \\  NULL::integer AS maximum_cardinality, (c.cid + 1)::text AS dtd_identifier, 'NO' AS is_self_referencing,
     \\  CASE WHEN i.value IS NULL THEN 'NO' ELSE 'YES' END AS is_identity,
     \\  CASE i.value WHEN 'always' THEN 'ALWAYS' WHEN 'by default' THEN 'BY DEFAULT' END AS identity_generation,
-    \\  NULL AS identity_start, NULL AS identity_increment, NULL AS identity_maximum, NULL AS identity_minimum, NULL AS identity_cycle,
+    \\  NULL AS identity_start, NULL AS identity_increment, NULL AS identity_maximum, NULL AS identity_minimum, 'NO' AS identity_cycle,
     \\  CASE WHEN c.hidden IN (2, 3) THEN 'ALWAYS' ELSE 'NEVER' END AS is_generated,
     \\  NULL AS generation_expression,
     \\  CASE WHEN m.type = 'view' THEN 'NO' ELSE 'YES' END AS is_updatable
     \\FROM sqlite_schema m, pragma_table_xinfo(m.name) c
-    \\  LEFT JOIN {cat} k ON k.tbl = m.name AND k.col = c.name AND k.key = 'type'
+    \\  LEFT JOIN (SELECT tbl, col, value FROM {cat} WHERE key = 'type'
+    \\    UNION ALL SELECT CASE WHEN vn.nspname = 'public' THEN vc.relname ELSE vn.nspname || '.' || vc.relname END,
+    \\      va.attname, format_type(va.atttypid, va.atttypmod)
+    \\    FROM pg_class vc JOIN pg_namespace vn ON vn.oid = vc.relnamespace JOIN pg_attribute va ON va.attrelid = vc.oid AND va.attnum > 0
+    \\    WHERE vc.relkind = 'v') k ON k.tbl = m.name AND k.col = c.name
     \\  LEFT JOIN {cat} i ON i.tbl = m.name AND i.col = c.name AND i.key = 'identity_kind'
 ++ nsJoin("m.name") ++
     \\
@@ -94,7 +98,8 @@ const columns =
 const views_ =
     \\SELECT current_database() AS table_catalog,
 ++ " " ++ schema_of ++ " AS table_schema, " ++ bare("m.name") ++ " AS table_name," ++
-    \\  m.sql AS view_definition, 'NONE' AS check_option, 'NO' AS is_updatable, 'NO' AS is_insertable_into
+    " pg_get_viewdef(quote_ident(" ++ schema_of ++ ") || '.' || quote_ident(" ++ bare("m.name") ++ ")) AS view_definition," ++
+    \\  'NONE' AS check_option, 'NO' AS is_updatable, 'NO' AS is_insertable_into
     \\FROM sqlite_schema m
 ++ nsJoin("m.name") ++ " WHERE m.type = 'view' AND" ++ user_tables;
 
@@ -219,6 +224,67 @@ const pg_user =
     \\  true AS userepl, true AS usebypassrls, '********' AS passwd, NULL::timestamptz AS valuntil, NULL AS useconfig
 ;
 
+/// information_schema.constraint_column_usage: the columns a constraint
+/// uses, of its table (a CHECK's, a key's) or of the referenced table (a
+/// FOREIGN KEY's).
+const constraint_column_usage =
+    \\SELECT current_database() AS table_catalog, rn.nspname AS table_schema, r.relname AS table_name,
+    \\  a.attname AS column_name, current_database() AS constraint_catalog, n.nspname AS constraint_schema,
+    \\  c.conname AS constraint_name
+    \\FROM pg_constraint c LEFT JOIN pg_namespace n ON n.oid = c.connamespace
+    \\  JOIN pg_class r ON r.oid = CASE c.contype WHEN 'f' THEN c.confrelid ELSE c.conrelid END
+    \\  LEFT JOIN pg_namespace rn ON rn.oid = r.relnamespace
+    \\  JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum > 0
+    \\    AND xq_pg_array_position(CASE c.contype WHEN 'f' THEN c.confkey ELSE c.conkey END, a.attnum) IS NOT NULL
+    \\WHERE c.contype IN ('c', 'p', 'u', 'f') AND r.relkind IN ('r', 'p')
+;
+
+/// pg_statio_all_tables (and _user_): every table, no I/O counted.
+const pg_statio_all_tables =
+    \\SELECT c.oid AS relid, n.nspname AS schemaname, c.relname AS relname,
+    \\  0::bigint AS heap_blks_read, 0::bigint AS heap_blks_hit, 0::bigint AS idx_blks_read, 0::bigint AS idx_blks_hit,
+    \\  NULL::bigint AS toast_blks_read, NULL::bigint AS toast_blks_hit, NULL::bigint AS tidx_blks_read, NULL::bigint AS tidx_blks_hit
+    \\FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+    \\WHERE c.relkind IN ('r', 't', 'm')
+;
+
+const pg_statio_user_tables = "SELECT * FROM pg_statio_all_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')";
+
+/// pg_extension: plpgsql, which PostgreSQL installs in every database.
+const pg_extension =
+    \\SELECT 13603::oid AS oid, 'plpgsql'::name AS extname, 10::oid AS extowner, 11::oid AS extnamespace,
+    \\  false AS extrelocatable, '1.0' AS extversion, NULL::oid[] AS extconfig, NULL::text[] AS extcondition
+;
+
+/// pg_opfamily: PostgreSQL's operator families (pgcatalog.opfamilies).
+const pg_opfamily = blk: {
+    @setEvalBranchQuota(200_000);
+    var z: []const u8 =
+        \\SELECT o::oid AS oid, m::oid AS opfmethod, n::name AS opfname, 11::oid AS opfnamespace, 10::oid AS opfowner
+        \\FROM (VALUES
+    ;
+    for (pgc.opfamilies, 0..) |c, i| {
+        if (i > 0) z = z ++ ", ";
+        z = z ++ std.fmt.comptimePrint("({d}, {d}, '{s}')", .{ c[0], c[1], c[2] });
+    }
+    break :blk z ++ ") AS x(o, m, n)";
+};
+
+/// pg_opclass: PostgreSQL's operator classes (pgcatalog.opclasses).
+const pg_opclass = blk: {
+    @setEvalBranchQuota(200_000);
+    var z: []const u8 =
+        \\SELECT o::oid AS oid, m::oid AS opcmethod, n::name AS opcname, 11::oid AS opcnamespace, 10::oid AS opcowner,
+        \\  f::oid AS opcfamily, t::oid AS opcintype, d::boolean AS opcdefault, k::oid AS opckeytype
+        \\FROM (VALUES
+    ;
+    for (pgc.opclasses, 0..) |c, i| {
+        if (i > 0) z = z ++ ", ";
+        z = z ++ std.fmt.comptimePrint("({d}, {d}, '{s}', {d}, {d}, {s}, {d})", .{ c[0], c[1], c[2], c[3], c[4], if (c[5]) "true" else "false", c[6] });
+    }
+    break :blk z ++ ") AS x(o, m, n, f, t, d, k)";
+};
+
 const pg_am =
     \\SELECT o::oid AS oid, n::name AS amname, h AS amhandler, t AS amtype
     \\FROM (VALUES (2, 'heap', 'heap_tableam_handler', 't'), (403, 'btree', 'bthandler', 'i'), (405, 'hash', 'hashhandler', 'i'),
@@ -308,6 +374,7 @@ const defs = [_]Def{
     .{ .schema = "information_schema", .name = "key_column_usage", .text = key_column_usage },
     .{ .schema = "information_schema", .name = "referential_constraints", .text = referential_constraints },
     .{ .schema = "information_schema", .name = "check_constraints", .text = check_constraints },
+    .{ .schema = "information_schema", .name = "constraint_column_usage", .text = constraint_column_usage },
     .{ .schema = "pg_catalog", .name = "pg_tables", .text = pg_tables },
     .{ .schema = "pg_catalog", .name = "pg_views", .text = pg_views },
     .{ .schema = "pg_catalog", .name = "pg_indexes", .text = pg_indexes },
@@ -327,6 +394,10 @@ const defs = [_]Def{
     .{ .schema = "pg_catalog", .name = "pg_authid", .text = pg_authid },
     .{ .schema = "pg_catalog", .name = "pg_user", .text = pg_user },
     .{ .schema = "pg_catalog", .name = "pg_am", .text = pg_am },
+    .{ .schema = "pg_catalog", .name = "pg_opclass", .text = pg_opclass },
+    .{ .schema = "pg_catalog", .name = "pg_opfamily", .text = pg_opfamily },
+    .{ .schema = "pg_catalog", .name = "pg_statio_all_tables", .text = pg_statio_all_tables },
+    .{ .schema = "pg_catalog", .name = "pg_statio_user_tables", .text = pg_statio_user_tables },
     .{ .schema = "pg_catalog", .name = "pg_tablespace", .text = pg_tablespace },
     .{ .schema = "pg_catalog", .name = "pg_collation", .text = pg_collation },
     .{ .schema = "pg_catalog", .name = "pg_language", .text = pg_language },
@@ -359,10 +430,7 @@ const defs = [_]Def{
     .{ .schema = "pg_catalog", .name = "pg_publication_rel", .text = empty(&.{ .{ "oid", .oid }, .{ "prpubid", .oid }, .{ "prrelid", .oid }, .{ "prqual", .text }, .{ "prattrs", .text } }) },
     .{ .schema = "pg_catalog", .name = "pg_publication_namespace", .text = empty(&.{ .{ "oid", .oid }, .{ "pnpubid", .oid }, .{ "pnnspid", .oid } }) },
     .{ .schema = "pg_catalog", .name = "pg_enum", .text = empty(&.{ .{ "oid", .oid }, .{ "enumtypid", .oid }, .{ "enumsortorder", .float4 }, .{ "enumlabel", .name } }) },
-    .{ .schema = "pg_catalog", .name = "pg_extension", .text = empty(&.{
-        .{ "oid", .oid },         .{ "extname", .name },   .{ "extowner", .oid },      .{ "extnamespace", .oid }, .{ "extrelocatable", .bool },
-        .{ "extversion", .text }, .{ "extconfig", .text }, .{ "extcondition", .text },
-    }) },
+    .{ .schema = "pg_catalog", .name = "pg_extension", .text = pg_extension },
     .{ .schema = "pg_catalog", .name = "pg_auth_members", .text = empty(&.{ .{ "oid", .oid }, .{ "roleid", .oid }, .{ "member", .oid }, .{ "grantor", .oid }, .{ "admin_option", .bool }, .{ "inherit_option", .bool }, .{ "set_option", .bool } }) },
     .{ .schema = "pg_catalog", .name = "pg_partitioned_table", .text = empty(&.{
         .{ "partrelid", .oid },  .{ "partstrat", .char },     .{ "partnatts", .int2 }, .{ "partdefid", .oid }, .{ "partattrs", .text },

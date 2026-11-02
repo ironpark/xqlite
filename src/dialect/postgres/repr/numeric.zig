@@ -43,6 +43,7 @@ const Type = @import("../../../sql/types.zig").Type;
 const expr_mod = @import("../../../sql/expr.zig");
 const operators = @import("../operators.zig");
 const overload = @import("../overload.zig");
+const integer = @import("../integer.zig");
 const logical = operand.logical;
 const untyped = operand.untyped;
 const nameOf = operand.nameOf;
@@ -487,9 +488,15 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
             if (eql(n, "avg") and items.len == 1 and (l == .numeric or typing.intWidth(l) != null)) break :blk "xq_dec_avg";
         }
         if (first and items.len == 1) {
-            if (eql(n, "xq_pg_int2")) break :blk "xq_dec_int2";
-            if (eql(n, "xq_pg_int4")) break :blk "xq_dec_int4";
-            if (eql(n, "xq_pg_int8")) break :blk "xq_dec_int8";
+            // The casts to an integer type, those of funcs.zig's too.
+            for (std.enums.values(integer.Width)) |w| {
+                const old: []const u8 = switch (w) {
+                    .int2 => "xq_pg_int2",
+                    .int4 => "xq_pg_int4",
+                    .int8 => "xq_pg_int8",
+                };
+                if (eql(n, old) or eql(n, integer.castName(w))) break :blk integer.decimalInt(w).name;
+            }
         }
         break :blk null;
     };
@@ -544,7 +551,7 @@ const numeric_engine = std.StaticStringMap(void).initComptime(.{
     .{"xq_pg_array_nested"},     .{"xq_pg_array_agg"},       .{"xq_pg_any"},           .{"xq_pg_array_append"},
     .{"xq_pg_array_prepend"},    .{"xq_pg_array_set"},       .{"xq_pg_array_cat2"},    .{"xq_pg_row_json"},
     .{"xq_pg_json_ctor_object"}, .{"xq_pg_json_ctor_array"}, .{"xq_pg_json_arrayagg"}, .{"xq_pg_json_objectagg"},
-    .{"xq_pg_json_agg_rows"},
+    .{"xq_pg_json_agg_rows"},    .{"xq_pg_to_char"},         .{"xq_pg_gcd"},           .{"xq_pg_lcm"},
 });
 
 /// The functions of text a numeric is its text for (PostgreSQL's
@@ -606,15 +613,13 @@ fn numericStore(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
 }
 
 /// A numeric stored into a column of a number or a string of type `t` is
-/// made one (PostgreSQL's assignment cast).
+/// made one (PostgreSQL's assignment cast; into an integer column:
+/// integer.zig's storeColumn()).
 fn storeInto(t: Type) ?*const int.FuncDef {
     const d = decimal_sql.def;
     return switch (t.logical) {
         .float8 => d("xq_dec_float8", 1),
         .float4 => d("xq_dec_float4", 1),
-        .int1, .int2 => d("xq_dec_int2", 1),
-        .int4 => d("xq_dec_int4", 1),
-        .int8 => d("xq_dec_int8", 1),
         .text, .varchar, .char => d("xq_dec_text", 1),
         else => null,
     };

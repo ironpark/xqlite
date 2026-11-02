@@ -228,7 +228,21 @@ const Call = struct {
 
     fn parseText(c: *Call, t: []const u8, jsonb: bool) ?Value {
         const v = (if (jsonb) json.parseJsonb(c.a(), t) else json.parse(c.a(), t, false)) catch |e| {
-            c.fail(e);
+            if (e == error.OutOfMemory) {
+                c.fail(e);
+                return null;
+            }
+            // PostgreSQL's DETAIL and CONTEXT after the message.
+            const report = json.errorReport(c.a(), t, jsonb) catch {
+                c.fail(error.OutOfMemory);
+                return null;
+            };
+            const msg = if (e == error.UnicodeEscape) "unsupported Unicode escape sequence" else "invalid input syntax for type json";
+            const full = std.mem.concat(c.a(), u8, &.{ msg, report }) catch {
+                c.fail(error.OutOfMemory);
+                return null;
+            };
+            api.resultErrorState(c.ctx, if (e == error.UnicodeEscape) .of("22P05") else .of("22P02"), full);
             return null;
         };
         return v;

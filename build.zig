@@ -445,7 +445,7 @@ pub fn build(b: *std.Build) void {
     // this list once its recording is made.
     // Each with its case files beside the default one (null).
     const recorded_dialects = [_]struct { []const u8, []const u8, []const ?[]const u8 }{
-        .{ "postgres", "pg", &.{ null, "tools/dialect/pg-array-cases.txt", "tools/dialect/pg-uuid-cases.txt", "tools/dialect/pg-interval-cases.txt", "tools/dialect/pg-jsonb-cases.txt", "tools/dialect/pg-numeric-cases.txt" } },
+        .{ "postgres", "pg", &.{ null, "tools/dialect/pg-array-cases.txt", "tools/dialect/pg-uuid-cases.txt", "tools/dialect/pg-interval-cases.txt", "tools/dialect/pg-jsonb-cases.txt", "tools/dialect/pg-numeric-cases.txt", "tools/dialect/pg-integer-cases.txt", "tools/dialect/pg-syntax-cases.txt", "tools/dialect/pg-format-cases.txt" } },
     };
     for (recorded_dialects) |rd| {
         const on = for (Config.dialects, buildConfig(b).dialect) |name, built| {

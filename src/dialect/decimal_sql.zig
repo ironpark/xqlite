@@ -137,17 +137,21 @@ fn report(ctx: *Context, err: Fail) void {
 
 /// The number of argument `m`, null for NULL.
 fn value(c: *Call, m: *Mem) Fail!?Dec {
+    return valueIn(c.ctx, c.a(), m);
+}
+
+fn valueIn(ctx: *Context, a: Allocator, m: *Mem) Fail!?Dec {
     switch (api.valueType(m)) {
         vi.SQLITE_NULL => return null,
-        vi.SQLITE_INTEGER => return try dec.fromInt(c.a(), api.valueInt64(m)),
-        vi.SQLITE_FLOAT => return try dec.fromFloat(c.a(), api.valueDouble(m)),
+        vi.SQLITE_INTEGER => return try dec.fromInt(a, api.valueInt64(m)),
+        vi.SQLITE_FLOAT => return try dec.fromFloat(a, api.valueDouble(m)),
         vi.SQLITE_BLOB => {
             const b = api.valueBlob(m) orelse "";
-            const r = dec.decodeKey(c.a(), b) catch |err| switch (err) {
+            const r = dec.decodeKey(a, b) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
-                    const msg = std.fmt.allocPrint(c.a(), "invalid input syntax for type numeric: \"\\x{x}\"", .{b[0..@min(b.len, 64)]}) catch return error.OutOfMemory;
-                    api.resultErrorState(c.ctx, .of("22P02"), msg);
+                    const msg = std.fmt.allocPrint(a, "invalid input syntax for type numeric: \"\\x{x}\"", .{b[0..@min(b.len, 64)]}) catch return error.OutOfMemory;
+                    api.resultErrorState(ctx, .of("22P02"), msg);
                     return error.Reported;
                 },
             };
@@ -155,16 +159,29 @@ fn value(c: *Call, m: *Mem) Fail!?Dec {
         },
         else => {
             const z = api.valueText(m) orelse return error.OutOfMemory;
-            return dec.parse(c.a(), z) catch |err| switch (err) {
+            return dec.parse(a, z) catch |err| switch (err) {
                 error.Invalid => {
-                    const msg = std.fmt.allocPrint(c.a(), "invalid input syntax for type numeric: \"{s}\"", .{z}) catch return error.OutOfMemory;
-                    api.resultErrorState(c.ctx, .of("22P02"), msg);
+                    const msg = std.fmt.allocPrint(a, "invalid input syntax for type numeric: \"{s}\"", .{z}) catch return error.OutOfMemory;
+                    api.resultErrorState(ctx, .of("22P02"), msg);
                     return error.Reported;
                 },
                 else => |e| return e,
             };
         },
     }
+}
+
+/// value() for other functions: the number of argument `m` (in `a`);
+/// null once the result is set (NULL for NULL, or the error).
+pub fn numArg(ctx: *Context, a: Allocator, m: *Mem) ?Dec {
+    const d = valueIn(ctx, a, m) catch |err| {
+        report(ctx, err);
+        return null;
+    };
+    return d orelse {
+        api.resultNull(ctx);
+        return null;
+    };
 }
 
 /// An integer argument, null for NULL.
@@ -194,7 +211,12 @@ fn typmod(c: *Call, d: Dec, argv: []*Mem) Fail!Dec {
     }
     return dec.applyTypmod(c.a(), d, @intCast(p), @intCast(s)) catch |err| switch (err) {
         error.Overflow => {
-            api.resultErrorState(c.ctx, .of("22003"), "numeric field overflow");
+            // PostgreSQL's DETAIL.
+            var dbuf: [160]u8 = undefined;
+            var buf: [200]u8 = undefined;
+            const detail_mark = @import("../sql/util.zig").detail_mark;
+            const msg = std.fmt.bufPrint(&buf, "numeric field overflow" ++ detail_mark ++ "{s}", .{dec.overflowDetail(&dbuf, d, p, s)}) catch "numeric field overflow";
+            api.resultErrorState(c.ctx, .of("22003"), msg);
             return error.Reported;
         },
         else => |e| return e,

@@ -1,0 +1,296 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-syntax-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case a5eabb23c8957701 interval literals with fields
+interval|interval|interval|interval|interval
+00:16:39|16:39:00|999:00:00|999 days|83 years 3 mons
+(1 row)
+interval|interval|interval|interval|interval|interval
+1 year|2 mons|3 days|04:00:00|00:05:00|00:00:06
+(1 row)
+interval|interval|interval|interval|interval
+1 mon|1 year 2 mons|1 day 02:00:00|1 day 02:00:00|1 day 02:00:00
+(1 row)
+interval|interval|interval|interval
+1 day 02:03:00|1 day 02:03:00|1 day 02:03:00|1 day 02:03:04
+(1 row)
+interval|interval|interval|interval
+1 day 02:03:00|1 day 02:03:04|1 day 00:02:03|1 day 02:03:04
+(1 row)
+interval|interval|interval|interval
+1 day 00:02:03|1 day -00:02:03|1 day -02:03:04|123 days 11:00:00
+(1 row)
+ERROR:  invalid input syntax for type interval: "1 2"
+LINE 1: SELECT interval '1 2' day to minute;
+                        ^
+ERROR:  invalid input syntax for type interval: "1 2"
+LINE 1: SELECT interval '1 2' minute to second;
+                        ^
+ERROR:  invalid input syntax for type interval: "123 11"
+LINE 1: SELECT interval '123 11' day;
+                        ^
+ERROR:  invalid input syntax for type interval: "123 11"
+LINE 1: SELECT interval '123 11';
+                        ^
+ERROR:  invalid input syntax for type interval: "123 2:03 -2:04"
+LINE 1: SELECT interval '123 2:03 -2:04';
+                        ^
+==== case b42fed4c7feb54c8 interval precision
+interval|interval|interval
+1 day 01:23:46|1 day 01:23:45.68|00:12:34.57
+(1 row)
+interval|interval|interval|interval
+00:00:01.234|00:00:01.23|1 day 00:02:03.46|1 day 02:03:04.57
+(1 row)
+ERROR:  invalid input syntax for type interval: "1 2.345"
+LINE 1: SELECT interval '1 2.345' day to second(2);
+                        ^
+ERROR:  interval out of range
+LINE 1: SELECT interval '2562047788:00:54.775807' second(2);
+                        ^
+ERROR:  interval out of range
+LINE 1: SELECT interval '-2562047788:00:54.775807' second(2);
+                        ^
+==== case fc773d80a25e7d35 casts to interval types
+interval|interval|interval|interval
+1 day 02:03:00|5 mons|34 years|00:00:01.6
+(1 row)
+interval
+00:00:00
+(1 row)
+interval|interval
+infinity|-infinity
+(1 row)
+==== case 20f509e789e2ba12 interval columns with fields
+id|a|b|c|d
+1|1 year 2 mons|00:00:02|1 day 01:02:03.46|2 days 03:00:00
+2|1 year 1 mon|00:00:03|-00:00:00.01|01:00:00
+(2 rows)
+format_type
+interval year to month
+interval(0)
+interval day to second(2)
+interval hour
+(4 rows)
+==== case ae5e0b3883b8fed3 interval input of PostgreSQL 18
+interval|interval|interval|interval
+1 year 2 mons|-1 years -2 mons|1 year 2 mons -3 days +04:05:06.789|-1 years -2 mons +3 days -04:05:06.789
+(1 row)
+interval|interval|interval|interval|interval
+-00:01:00|-1 days -02:00:00|-00:00:14|1 day 02:00:00|00:00:00.5
+(1 row)
+interval|interval
+4541 years 4 mons 4 days 00:17:31|00:00:00.001
+(1 row)
+ERROR:  interval field value out of range: "P0.1-2147483647-00"
+LINE 1: ..., interval 'P1.5Y', interval 'P10.5e4Y', interval 'P0.1-2147...
+                                                             ^
+interval|interval|interval|interval
+1 day 02:00:00|01:03:00|9 days|-infinity
+(1 row)
+ERROR:  invalid input syntax for type interval: "1 2 days"
+LINE 1: SELECT interval '1 2 days';
+                        ^
+ERROR:  invalid input syntax for type interval: "infinity ago"
+LINE 1: SELECT interval 'infinity ago';
+                        ^
+ERROR:  invalid input syntax for type interval: "1 hour 02:00"
+LINE 1: SELECT interval '1 hour 02:00';
+                        ^
+ERROR:  invalid input syntax for type interval: "5 ago"
+LINE 1: SELECT interval '5 ago';
+                        ^
+ERROR:  invalid input syntax for type interval: "1,5 days"
+LINE 1: SELECT interval '1,5 days';
+                        ^
+ERROR:  invalid input syntax for type interval: "p1y"
+LINE 1: SELECT interval 'p1y';
+                        ^
+==== case fe5322ff609f5cd8 interval input out of range
+ERROR:  interval field value out of range: "2147483648 days"
+LINE 1: SELECT interval '2147483648 days';
+                        ^
+ERROR:  interval out of range
+LINE 1: SELECT interval '2147483647 years';
+                        ^
+ERROR:  interval field value out of range: "-2147483649 years"
+LINE 1: SELECT interval '-2147483649 years';
+                        ^
+ERROR:  interval field value out of range: "9223372036855 seconds"
+LINE 1: SELECT interval '9223372036855 seconds';
+                        ^
+ERROR:  interval field value out of range: "-2147483648 months ago"
+LINE 1: SELECT interval '-2147483648 months ago';
+                        ^
+ERROR:  interval field value out of range: "P2147483648"
+LINE 1: SELECT interval 'P2147483648';
+                        ^
+ERROR:  interval out of range
+LINE 1: SELECT interval 'P1-2147483647-2147483647';
+                        ^
+ERROR:  interval field value out of range: "PT2562047789"
+LINE 1: SELECT interval 'PT2562047789';
+                        ^
+ERROR:  interval field value out of range: "2147483647 weeks"
+LINE 1: SELECT interval '2147483647 weeks';
+                        ^
+ERROR:  interval field value out of range: "1 week 2147483647 days"
+LINE 1: SELECT interval '1 week 2147483647 days';
+                        ^
+ERROR:  interval field value out of range: "2562047788.1:0:54.775807"
+LINE 1: SELECT interval '2562047788.1:0:54.775807';
+                        ^
+==== case 6b6d9c23a4fd1ef1 EXTRACT and date_part of intervals
+us|ms|s|mi|h|d|w|mon|q|y|dec|c|mil|e
+0|0.000|0.000000|1|0|0|0|0|1|0|0|0|0|60.000000
+0|0.000|0.000000|0|0|10|1|0|1|0|0|0|0|864000.000000
+0|0.000|0.000000|0|0|0|0|5|2|34|3|0|0|1085918400.000000
+-14000000|-14000.000|-14.000000|0|0|0|0|0|1|0|0|0|0|-14.000000
+4500000|4500.000|4.500000|3|2|1|0|0|1|0|0|0|0|93784.500000
+0|0.000|0.000000|0|0|0|0|-5|-2|-6|0|0|0|-202305600.000000
+||||Infinity|Infinity||||Infinity|Infinity|Infinity|Infinity|Infinity
+||||-Infinity|-Infinity||||-Infinity|-Infinity|-Infinity|-Infinity|-Infinity
+(8 rows)
+?column?|?column?|?column?|?column?|?column?
+t|t|t|t|t
+(1 row)
+?column?|?column?|?column?|?column?
+t|t|t|t
+(1 row)
+extract|extract|extract|extract
+-9|1|-1|25
+(1 row)
+extract|?column?
+2024|t
+(1 row)
+v|extract|?column?
+-3 mons|-7776000.000000|f
+1 day 02:03:04.5|93784.500000|t
+||
+(3 rows)
+ERROR:  unit "fortnight" not recognized for type interval
+ERROR:  unit "timezone" not supported for type interval
+ERROR:  unit "dow" not supported for type interval
+==== case 56cf78871a5014c6 make_interval and named arguments
+make_interval|make_interval|make_interval
+2 years|1 year 6 mons|11 mons 28 days 22:00:00
+(1 row)
+?column?|make_interval
+t|-02:10:25.3
+(1 row)
+ERROR:  interval out of range
+ERROR:  interval out of range
+ERROR:  interval out of range
+ERROR:  value out of range: overflow
+ERROR:  interval out of range
+ERROR:  interval out of range
+ERROR:  function make_interval(foo => integer) does not exist
+LINE 1: SELECT make_interval(foo := 1);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  positional argument cannot follow named argument
+LINE 1: SELECT make_interval(years := 1, 2);
+                                         ^
+ERROR:  argument name "years" used more than once
+LINE 1: SELECT make_interval(years := 1, years => 2);
+                                         ^
+ERROR:  function upper(x => unknown) does not exist
+LINE 1: SELECT upper(x => 'a');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+==== case f9dda0c4dd0cc64f VARIADIC
+concat|concat_ws|?column?|?column?
+123|1,2,3|t|t
+(1 row)
+concat_ws|concat|concat_ws|concat_ws
+|tf|1.50-2|
+(1 row)
+format|format|format
+Hello, World|1, 2|Hello
+(1 row)
+json_build_array|json_build_object|jsonb_build_array
+[1, 2]|{"a" : "b"}|["x"]
+(1 row)
+ERROR:  VARIADIC argument must be an array
+LINE 1: SELECT concat_ws(',', variadic 10);
+                                       ^
+ERROR:  VARIADIC argument must be an array
+LINE 1: SELECT concat(variadic '{a,b}');
+                               ^
+ERROR:  function upper(text[]) does not exist
+LINE 1: SELECT upper(variadic array['a']);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+==== case a4edf93e0b55b0c4 Unicode escapes
+data
+data
+(1 row)
+dat\+000061
+dat\+000061
+(1 row)
+a\b|tricky|smile|smile2
+a\b| \|😀|😀
+(1 row)
+\
+tricky
+(1 row)
+data|smile
+data|😀
+(1 row)
+ERROR:  invalid Unicode escape
+LINE 1: SELECT U&'wrong: \061';
+                         ^
+HINT:  Unicode escapes must be \XXXX or \+XXXXXX.
+ERROR:  invalid Unicode escape
+LINE 1: SELECT U&'wrong: \+0061';
+                         ^
+HINT:  Unicode escapes must be \XXXX or \+XXXXXX.
+ERROR:  UESCAPE must be followed by a simple string literal at or near "+"
+LINE 1: SELECT U&'wrong: +0061' UESCAPE +;
+                                        ^
+ERROR:  invalid Unicode escape character at or near "'+'"
+LINE 1: SELECT U&'wrong: +0061' UESCAPE '+';
+                                        ^
+ERROR:  invalid Unicode surrogate pair
+LINE 1: SELECT U&'wrong: \db99';
+                              ^
+ERROR:  invalid Unicode surrogate pair
+LINE 1: SELECT U&'wrong: \db99xy';
+                              ^
+ERROR:  invalid Unicode surrogate pair
+LINE 1: SELECT U&'wrong: \db99\0061';
+                              ^
+ERROR:  invalid Unicode escape value
+LINE 1: SELECT U&'wrong: \+2FFFFF';
+                         ^
+ERROR:  invalid Unicode escape
+LINE 1: SELECT E'wrong: \u061';
+                        ^
+HINT:  Unicode escapes must be \uXXXX or \UXXXXXXXX.
+ERROR:  invalid Unicode surrogate pair at or near "'"
+LINE 1: SELECT E'wrong: \udb99';
+                              ^
+ERROR:  invalid Unicode surrogate pair at or near "x"
+LINE 1: SELECT E'wrong: \udb99xy';
+                              ^
+ERROR:  invalid Unicode surrogate pair at or near "\"
+LINE 1: SELECT E'wrong: \udb99\\';
+                              ^
+ERROR:  invalid Unicode surrogate pair at or near "a"
+LINE 1: SELECT E'wrong: \udb99a';
+                              ^
+ERROR:  invalid Unicode surrogate pair at or near "\U00000061"
+LINE 1: SELECT E'wrong: \U0000db99\U00000061';
+                                  ^
+ERROR:  invalid Unicode escape value at or near "\U002FFFFF"
+LINE 1: SELECT E'wrong: \U002FFFFF';
+                        ^
+==== case 7ea84dbe0a134d07 string continuation
+Three lines to one
+first line - next line - third line
+(1 row)
+ERROR:  syntax error at or near "' - third line'"
+LINE 3: ' - third line'
+        ^
+ERROR:  syntax error at or near "'b'"
+LINE 1: SELECT 'a' 'b';
+                   ^

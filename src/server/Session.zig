@@ -691,6 +691,7 @@ test "run: PostgreSQL's failed transactions" {
     );
     try expectRun(&s, "INSERT INTO t VALUES(1, false)",
         \\failed 23505 duplicate key value violates unique constraint "t_pkey"
+        \\DETAIL:  Key (id)=(1) already exists.
         \\
     );
     try testing.expectEqual(Status.aborted, s.status());
@@ -736,6 +737,7 @@ test "run: PostgreSQL's implicit transactions" {
     try expectRun(&s, "INSERT INTO t VALUES(1); INSERT INTO t VALUES(1)",
         \\done INSERT rows=0 changes=1
         \\failed 23505 duplicate key value violates unique constraint "t_pkey"
+        \\DETAIL:  Key (id)=(1) already exists.
         \\
     );
     try testing.expectEqual(Status.idle, s.status());

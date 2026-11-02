@@ -1084,6 +1084,19 @@ pub fn applyTypmod(a: Allocator, d: Dec, p: i32, s: i32) Error!Dec {
     return r;
 }
 
+/// The DETAIL of applyTypmod()'s "numeric field overflow" of `d`
+/// (apply_typmod()'s), in `buf` (160 bytes hold any).
+pub fn overflowDetail(buf: []u8, d: Dec, p: i64, s: i64) []const u8 {
+    const head = "A field with precision {d}, scale {d} ";
+    const maxdigits = p - s;
+    return (if (d.kind != .finite)
+        std.fmt.bufPrint(buf, head ++ "cannot hold an infinite value.", .{ p, s })
+    else if (maxdigits != 0)
+        std.fmt.bufPrint(buf, head ++ "must round to an absolute value less than 10^{d}.", .{ p, s, maxdigits })
+    else
+        std.fmt.bufPrint(buf, head ++ "must round to an absolute value less than 1.", .{ p, s })) catch "";
+}
+
 /// Whether finite `d` is a value of numeric(p, s) as is: no digit after
 /// power -s, at most p - s digits before the point.
 pub fn fitsTypmod(d: Dec, p: i32, s: i32) bool {

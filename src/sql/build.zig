@@ -604,7 +604,10 @@ pub fn locateTableItem(p: *Parse, flags: u32, item: *SrcItem) ?*Table {
         p.db.dbs.items[@intCast(prepare.schemaToIndex(p.db, item.u4.schema))].name
     else
         item.u4.database;
-    return locateTable(p, flags, item.name.?, zdb);
+    const t = locateTable(p, flags, item.name.?, zdb);
+    // xqlite: at the name, where the lowering knows it.
+    if (t == null and item.xq_ofst > 0 and p.n_err > 0) p.db.err_byte_offset = item.xq_ofst;
+    return t;
 }
 
 /// Port of sqlite3PreferredTableName().
@@ -1921,6 +1924,11 @@ fn codeCreateTableAsSelect(p: *Parse, t: *Table, sel: *Select, i_db: usize) Oom!
     insert_mod.tableAffinity(p, t, 0);
     _ = aux.addOp2(v, OP.NewRowid, i_csr, reg_rowid);
     _ = aux.addOp3(v, OP.Insert, i_csr, reg_rec, reg_rowid);
+    // xqlite: a dialect that counts the rows (Hooks.count_create_as).
+    if (@import("../dialect/dialect.zig").hooks(p.db).count_create_as) {
+        aux.changeP5(v, OPFLAG.NCHANGE);
+        aux.countChanges(v);
+    }
     _ = aux.goto_(v, addr_ins_loop);
     aux.jumpHere(v, addr_ins_loop);
     _ = aux.addOp1(v, OP.Close, i_csr);

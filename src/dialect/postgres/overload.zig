@@ -65,6 +65,7 @@ const uuid = @import("repr/uuid.zig");
 const jsonb = @import("repr/jsonb.zig");
 const numeric = @import("repr/numeric.zig");
 const operand = @import("operand.zig");
+const integer = @import("integer.zig");
 
 const TK = int.TK;
 const Expr = int.Expr;
@@ -119,7 +120,7 @@ fn concat(c: *Ctx, e: *Expr) Error!bool {
         if (logical(c, r) == .interval) e.right = try interval.ivText(c, r);
         return true;
     }
-    if (logical(c, l) == .json and logical(c, r) == .json) return c.fail(e, .of("42883"), "operator does not exist: json || json", .{});
+    if (logical(c, l) == .json and logical(c, r) == .json) return c.fail(e, .of("42883"), "operator does not exist: json || json{s}", .{operators.hint(.not_exist)});
     return jsonb.concat(c, e, l, r);
 }
 
@@ -167,16 +168,43 @@ fn arith(c: *Ctx, e: *Expr) Error!bool {
         else => return false,
     };
     var operands: [2]*Expr = undefined;
-    var ops: [2]operators.Arg = undefined;
     operands[0] = e.left orelse return false;
     // -1.5: a literal (a number until a numeric's operator reads it).
     if (op == .neg and numeric.numericLiteral(operands[0])) return false;
     const n: usize = if (op == .neg) 1 else 2;
     if (n == 2) operands[1] = e.right orelse return false;
+    const row = try operatorRow(c, e, op, operands[0..n]) orelse return false;
+    if (try numeric.numericOperands(c, row, operands[0..n]) and row.func == null) return true;
+    const f = row.func orelse {
+        // A string literal is read as the integer the row takes ('a' + 1
+        // is invalid input for type integer, as in PostgreSQL), not by
+        // SQLite's affinity.
+        const changed = try intLiterals(c, row, operands[0..n]);
+        e.left = operands[0];
+        if (n == 2) e.right = operands[1];
+        return changed;
+    };
+    // A string literal of an interval operand: PostgreSQL 18's input
+    // (xq_pg_iv_in(x, -1)), as a cast reads it. The operators' functions
+    // read text as the schemas that call them were written for.
+    for (operands[0..n], row.args) |*x, t| if (t == .interval and x.*.op == TK.STRING) {
+        x.* = try c.call(@import("ivinput.zig").in_def.name, &.{ x.*, try int32(c, -1) });
+    };
+    try c.toCall(e, f, operands[0..n]);
+    return true;
+}
+
+/// The row of operator `op` (of expression `e`) for `operands` by
+/// operators.zig's table, a parameter given the type of the row's
+/// operand (`ts + $1`: an interval); null where the table leaves the
+/// operator to SQLite (an operand of no type it knows, literals only, a
+/// parameter or NULL that matches no row).
+fn operatorRow(c: *Ctx, e: *Expr, op: operators.Op, operands: []const *Expr) Error!?*const operators.Entry {
+    var ops: [2]operators.Arg = undefined;
     var known = false;
     var loose = false;
-    for (operands[0..n], ops[0..n]) |x, *a| {
-        a.* = argOf(c, x) orelse return false;
+    for (operands, ops[0..operands.len]) |x, *a| {
+        a.* = argOf(c, x) orelse return null;
         switch (a.*) {
             .known => known = true,
             .loose => loose = true,
@@ -184,45 +212,55 @@ fn arith(c: *Ctx, e: *Expr) Error!bool {
         }
     }
     // Literals only: SQLite's.
-    if (!known) return false;
-    const r = operators.resolve(op, ops[0..n]);
+    if (!known) return null;
+    const given = ops[0..operands.len];
+    const r = operators.resolve(op, given);
     const row = switch (r) {
         .entry => |row| row,
         else => {
             // A parameter or NULL may be of any type.
-            if (loose) return false;
+            if (loose) return null;
             var buf: [160]u8 = undefined;
-            const msg = operators.message(r, op, ops[0..n], &buf);
-            return c.fail(e, if (r == .not_unique) .of("42725") else .of("42883"), "{s}", .{msg});
+            const msg = operators.message(r, op, given, &buf);
+            return c.fail(e, if (r == .not_unique) .of("42725") else .of("42883"), "{s}{s}", .{ msg, operators.hint(r) });
         },
     };
-    for (operands[0..n], ops[0..n], row.args) |x, a, t| if (a == .loose and x.op == TK.VARIABLE and logical(c, x) != t.logical()) {
+    for (operands, given, row.args) |x, a, t| if (a == .loose and x.op == TK.VARIABLE and logical(c, x) != t.logical()) {
         try typing.retypeParam(c.p, x, try c.named(t.name()));
     };
-    if (try numeric.numericOperands(c, row, operands[0..n]) and row.func == null) return true;
-    const f = row.func orelse {
-        // A string literal is read as the integer the row takes ('a' + 1
-        // is invalid input for type integer, as in PostgreSQL), not by
-        // SQLite's affinity.
-        var changed = false;
-        for (operands[0..n], ops[0..n], row.args, 0..) |x, a, t, i| if (a == .literal) {
-            const cast = intInput(t) orelse continue;
-            const w = try c.call(cast, &.{x});
-            if (i == 0) e.left = w else e.right = w;
-            changed = true;
-        };
-        return changed;
+    return row;
+}
+
+/// The string literals of `operands` read as the integer `row` takes
+/// there (a literal of another type is left); whether one was.
+fn intLiterals(c: *Ctx, row: *const operators.Entry, operands: []*Expr) Error!bool {
+    var changed = false;
+    for (operands, row.args) |*x, t| if (x.*.op == TK.STRING) {
+        const cast = intInput(t) orelse continue;
+        try c.readInput(cast, x.*);
+        x.* = try c.call(cast, &.{x.*});
+        changed = true;
     };
-    try c.toCall(e, f, operands[0..n]);
-    return true;
+    return changed;
+}
+
+/// `a # b` (the parser's xq_pg_int_xor(a, b)): resolved as arith()'s
+/// operators, of the table's rows of two integers of a type (`text #
+/// text` does not exist); a string literal read as the row's integer.
+fn xorCall(c: *Ctx, e: *Expr, items: []int.ExprListItem) Error!bool {
+    var operands: [2]*Expr = .{ items[0].expr.?, items[1].expr.? };
+    const row = try operatorRow(c, e, .bit_xor, &operands) orelse return false;
+    const changed = try intLiterals(c, row, &operands);
+    for (items, operands) |*item, x| item.expr = x;
+    return changed;
 }
 
 /// The cast that reads a string as an integer of type `t`.
 pub fn intInput(t: operators.T) ?[]const u8 {
     return switch (t) {
-        .int2 => "xq_pg_int2",
-        .int4 => "xq_pg_int4",
-        .int8 => "xq_pg_int8",
+        .int2 => integer.castName(.int2),
+        .int4 => integer.castName(.int4),
+        .int8 => integer.castName(.int8),
         else => null,
     };
 }
@@ -231,9 +269,19 @@ fn compare(c: *Ctx, e: *Expr) Error!bool {
     const l = e.left orelse return false;
     const r = e.right orelse return false;
     if (isArray(c, l) or isArray(c, r)) return arrayCompare(c, e, l, r);
+    // A boolean against a string literal: the literal read as a boolean
+    // (relispartition = 'f'), not compared as text.
+    if (logical(c, l) == .boolean and r.op == TK.STRING) {
+        e.right = try c.call("xq_pg_bool", &.{r});
+        return true;
+    }
+    if (logical(c, r) == .boolean and l.op == TK.STRING) {
+        e.left = try c.call("xq_pg_bool", &.{l});
+        return true;
+    }
     if (try uuid.uuidCompare(c, e)) return true;
     if (e.op != TK.IS and e.op != TK.ISNOT and logical(c, l) == .json and logical(c, r) == .json) {
-        return c.fail(e, .of("42883"), "operator does not exist: json {s} json", .{opText(e.op)});
+        return c.fail(e, .of("42883"), "operator does not exist: json {s} json{s}", .{ opText(e.op), operators.hint(.not_exist) });
     }
     if (try numeric.numericCompare(c, l, r)) return true;
     // Chosen already.
@@ -258,6 +306,9 @@ fn call(c: *Ctx, e: *Expr) Error!bool {
     var buf: [64]u8 = undefined;
     const n = nameOf(e, &buf);
     const items = args(e);
+    if (std.mem.eql(u8, n, integer.defs.int_xor.name) and items.len == 2) return xorCall(c, e, items);
+    // to_char(), gcd(), timezone() ... told the type of an argument.
+    if (try @import("kindcalls.zig").call(c, e, n, items)) return true;
     // The operators of jsonb operands.
     for (variants) |v| if (std.mem.eql(u8, n, v[0])) {
         if (items.len > 0 and logical(c, items[0].expr.?) == .jsonb) try c.rename(e, v[1]);

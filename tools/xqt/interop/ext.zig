@@ -474,13 +474,19 @@ fn writes(c: *Check, base: *BaseDb, sp: *const Spec) !void {
 
 /// The error lines of a shell's standard error, without the shells'
 /// differences: "Error near line 3: msg" and "Parse error near line 3:
-/// msg" are "line 3: msg", the lines that point at the error go.
+/// msg" are "line 3: msg", the lines that point at the error go, the
+/// DETAIL, HINT and CONTEXT lines stay.
 fn errors(c: *Check, stderr: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.splitScalar(u8, stderr, '\n');
     while (it.next()) |line| {
         if (line.len == 0 or line[0] == ' ') continue;
-        var z = if (std.mem.indexOf(u8, line, "line ")) |i| line[i..] else if (std.mem.indexOf(u8, line, "argument: ")) |i| line[i + "argument: ".len ..] else line;
+        // The lines a message says more in (DETAIL, HINT, CONTEXT) as
+        // they are.
+        const field = for ([_][]const u8{ "DETAIL:  ", "HINT:  ", "CONTEXT:  " }) |f| {
+            if (std.mem.startsWith(u8, line, f)) break true;
+        } else false;
+        var z = if (field) line else if (std.mem.indexOf(u8, line, "line ")) |i| line[i..] else if (std.mem.indexOf(u8, line, "argument: ")) |i| line[i + "argument: ".len ..] else line;
         // sqlite3 keeps a message up to a NUL (a C string), xqlite whole.
         if (std.mem.indexOfScalar(u8, z, 0)) |i| z = z[0..i];
         try out.appendSlice(c.arena, z);

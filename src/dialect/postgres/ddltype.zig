@@ -23,6 +23,7 @@ const build = @import("../../sql/build.zig");
 const select_mod = @import("../../sql/select.zig");
 const parser = @import("parser.zig");
 const Children = @import("jtype.zig").Children;
+const operators = @import("operators.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -196,7 +197,7 @@ const Back = struct {
             if (i >= list.len()) break;
             const x = list.at(i).expr orelse continue;
             if (!isCollate(x) or item.expr.kind == .collate) continue;
-            item.expr = try tree.expr(b.a, item.expr.pos, item.expr.end, .{ .collate = .{ .e = item.expr, .collation = jsonb_collation } });
+            item.expr = try tree.expr(b.a, item.expr.pos, item.expr.end, .{ .collate = .{ .e = item.expr, .collation = collationOf(x) } });
         }
     }
 
@@ -223,8 +224,22 @@ const Back = struct {
             .concat => |c| if (c.args.len == 2 and calls(x, "xq_pg_jsonb_concat")) {
                 e.kind = .{ .func = try b.func(e.pos, x.token(), c.args) };
             },
-            .binary => |bin| if (bin.op == .sub and (calls(x, "xq_pg_jsonb_delete") or calls(x, "xq_pg_jsonb_delete_keys"))) {
+            // An operator the table made a call (operators.zig, jsonb's
+            // `-` of an operand of no type).
+            .binary => |*bin| if (operatorCall(x)) {
                 e.kind = .{ .func = try b.func(e.pos, x.token(), try b.a.dupe(*Expr, &.{ bin.l, bin.r })) };
+            } else {
+                try b.literalInput(&bin.l, x.left);
+                try b.literalInput(&bin.r, x.right);
+            },
+            .div => |*d| if (operatorCall(x)) {
+                e.kind = .{ .func = try b.func(e.pos, x.token(), try b.a.dupe(*Expr, &.{ d.l, d.r })) };
+            } else {
+                try b.literalInput(&d.l, x.left);
+                try b.literalInput(&d.r, x.right);
+            },
+            .unary => |u| if (u.op == .neg and operatorCall(x)) {
+                e.kind = .{ .func = try b.func(e.pos, x.token(), try b.a.dupe(*Expr, &.{u.e})) };
             },
             .compare => |*c| if (c.collation == null) {
                 switch (x.op) {
@@ -233,7 +248,8 @@ const Back = struct {
                 }
                 const l = x.left orelse return;
                 if (!isCollate(l)) return;
-                c.collation = jsonb_collation;
+                c.collation = collationOf(l);
+                if (!std.mem.eql(u8, c.collation.?, jsonb_collation)) return;
                 if (c.l.kind == .string) if (l.left) |w| if (isCall(w)) {
                     c.l = try b.jsonb(c.l);
                 };
@@ -244,6 +260,20 @@ const Back = struct {
             .func => |f| try b.call(f, x),
             else => {},
         }
+    }
+
+    /// A string literal operand `t` of an operator the core read as an
+    /// integer (`w`: xq_pg_int4('1')): that cast.
+    fn literalInput(b: *Back, t: **Expr, w_: ?*IrExpr) Error!void {
+        const w = w_ orelse return;
+        if (t.*.kind != .string or !isCall(w)) return;
+        const name = w.token();
+        const list = w.x.list orelse return;
+        if (list.len() != 1 or list.at(0).expr != b.of(t.*)) return;
+        const types = [_]struct { []const u8, []const u8 }{ .{ "xq_pg_int2", "smallint" }, .{ "xq_pg_int4", "integer" }, .{ "xq_pg_int8", "bigint" } };
+        for (types) |ty| if (std.mem.eql(u8, ty[0], name)) {
+            t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = ty[1], .mode = .{ .func = ty[0] } } });
+        };
     }
 
     /// A call: another function, wrapped arguments, more arguments.
@@ -308,12 +338,29 @@ const renames = std.StaticStringMap(void).initComptime(.{
     .{"xq_pg_jsonb_path_text"}, .{"xq_pg_json_agg_rows"},  .{"xq_pg_array_to_json"},
 });
 
+const interval_collation = "xq_pg_interval";
+
+/// Whether `x` is the COLLATE of a type's order overload.zig chose
+/// (jsonb's, intervals').
 fn isCollate(x: *const IrExpr) bool {
-    return x.op == TK.COLLATE and std.ascii.eqlIgnoreCase(x.token(), jsonb_collation);
+    return x.op == TK.COLLATE and (std.ascii.eqlIgnoreCase(x.token(), jsonb_collation) or std.ascii.eqlIgnoreCase(x.token(), interval_collation));
+}
+
+fn collationOf(x: *const IrExpr) []const u8 {
+    return if (std.ascii.eqlIgnoreCase(x.token(), interval_collation)) interval_collation else jsonb_collation;
 }
 
 fn isCall(x: *const IrExpr) bool {
     return (x.op == TK.FUNCTION or x.op == TK.AGG_FUNCTION) and x.useUToken() and x.useXList();
+}
+
+/// Whether `x` is the call of an operator's function (operators.zig).
+fn operatorCall(x: *const IrExpr) bool {
+    if (!isCall(x)) return false;
+    var buf: [64]u8 = undefined;
+    const z = x.token();
+    if (z.len > buf.len) return false;
+    return operators.isFunction(std.ascii.lowerString(&buf, z));
 }
 
 fn calls(x: *const IrExpr, name: []const u8) bool {

@@ -316,6 +316,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "xqt", .module = xqt_lib },
                 .{ .name = "build_options", .module = xqt_options.createModule() },
+                // The dialects the xqlite it checks is built with: the
+                // interop modules of the others are left out.
+                .{ .name = "xqlite_config", .module = configModule(b) },
             },
         }),
     });

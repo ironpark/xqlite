@@ -1,0 +1,10 @@
+A few of PostgreSQL's own regression tests, for `xqt wire-diff pg --regress`
+(tools/xqt/wire_diff.zig, docs/testing.md).
+
+sql/NAME.sql and expected/NAME.out are src/test/regress/sql/NAME.sql and
+src/test/regress/expected/NAME.out of PostgreSQL's REL_16_STABLE branch,
+unchanged; setup.sql is the part of src/test/regress/sql/test_setup.sql that
+they need. They are under the PostgreSQL Licence, in COPYRIGHT:
+
+  Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+  Portions Copyright (c) 1994, The Regents of the University of California

@@ -156,6 +156,25 @@ pub fn internalName(name: []const u8) []const u8 {
     return name;
 }
 
+/// The output function of a reg* type whose values are OIDs (regclass
+/// ...): what turns one into its text (catalog_funcs.zig); null for
+/// another type.
+pub fn regOutput(name: []const u8) ?[:0]const u8 {
+    const map = [_]struct { []const u8, [:0]const u8 }{
+        .{ "regclass", "xq_pg_regclass_out" },         .{ "regtype", "xq_pg_regtype_out" },
+        .{ "regnamespace", "xq_pg_regnamespace_out" }, .{ "regrole", "xq_pg_regrole_out" },
+    };
+    for (map) |m| if (std.mem.eql(u8, m[0], name)) return m[1];
+    return null;
+}
+
+fn regInput(name: []const u8) [:0]const u8 {
+    if (std.mem.eql(u8, name, "regclass")) return "xq_pg_regclass";
+    if (std.mem.eql(u8, name, "regtype")) return "xq_pg_regtype";
+    if (std.mem.eql(u8, name, "regnamespace")) return "xq_pg_regnamespace";
+    return "xq_pg_regrole";
+}
+
 /// What a cast to a type does.
 pub const CastPlan = union(enum) {
     /// CAST(x AS type)
@@ -172,7 +191,9 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (ty.array) return error.Array;
     const n = ty.name;
     const eql = std.mem.eql;
-    if (eql(u8, n, "regclass") or eql(u8, n, "jsonpath") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "uuid") or eql(u8, n, "interval")) return .{ .sqlite = "TEXT" };
+    if (regOutput(n)) |_| return .{ .func = regInput(n) };
+    if (eql(u8, n, "regproc") or eql(u8, n, "regprocedure")) return .{ .func = "xq_pg_regproc" };
+    if (eql(u8, n, "jsonpath") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "uuid")) return .{ .sqlite = "TEXT" };
     if (eql(u8, n, "character varying") or eql(u8, n, "character")) {
         if (maxLength(ty)) |len| return .{ .truncate = len };
         return .{ .sqlite = "TEXT" };
@@ -186,9 +207,15 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (eql(u8, n, "smallint")) return .{ .func = "xq_pg_int2" };
     if (eql(u8, n, "integer")) return .{ .func = "xq_pg_int4" };
     if (eql(u8, n, "bigint")) return .{ .func = "xq_pg_int8" };
-    if (eql(u8, n, "date")) return .{ .func = "date" };
-    if (eql(u8, n, "time without time zone") or eql(u8, n, "time with time zone")) return .{ .func = "time" };
-    if (eql(u8, n, "timestamp without time zone") or eql(u8, n, "timestamp with time zone")) return .{ .func = "datetime" };
+    // PostgreSQL's input and output of the value (datetime.zig: an
+    // error for what it does not read, the fraction of a second kept, a
+    // timestamptz in UTC, '90 minutes' as '01:30:00').
+    if (eql(u8, n, "date")) return .{ .func = "xq_pg_date" };
+    if (eql(u8, n, "interval")) return .{ .func = "xq_pg_interval" };
+    if (eql(u8, n, "time without time zone")) return .{ .func = "xq_pg_time" };
+    if (eql(u8, n, "time with time zone")) return .{ .func = "time" };
+    if (eql(u8, n, "timestamp without time zone")) return .{ .func = "xq_pg_timestamp" };
+    if (eql(u8, n, "timestamp with time zone")) return .{ .func = "xq_pg_timestamptz" };
     // json is checked and kept as written, jsonb normalized (json.zig).
     if (eql(u8, n, "json")) return .{ .func = "xq_pg_json" };
     if (eql(u8, n, "jsonb")) return .{ .func = "xq_pg_jsonb" };

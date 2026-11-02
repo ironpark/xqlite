@@ -16,6 +16,7 @@ const Check = xqt.Check;
 const BaseDb = @import("base_db.zig");
 
 pub const name = "mariadb";
+pub const dialect = "mariadb";
 pub const about = "a MariaDB-dialect database read by sqlite3: integrity, rows, CHECKs, defaults";
 
 pub fn register(s: *xqt.Suite) !void {

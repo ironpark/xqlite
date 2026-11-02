@@ -1014,6 +1014,7 @@ test "zig api: each dialect's arithmetic errors and foreign keys" {
         }
     }
     // The setting the application makes stays.
+    if (!D.postgres.built()) return;
     var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres });
     defer db.close();
     try db.exec("PRAGMA foreign_keys = OFF");
@@ -1470,6 +1471,13 @@ test "zig api: types of literals, operators and functions in each dialect" {
         .{ "SELECT CASE WHEN a > 0 THEN 1 ELSE 2.5 END FROM t", "1", "numeric" },
         .{ "SELECT row_number() OVER () FROM t", "1", "bigint" },
         .{ "SELECT (SELECT a + b FROM t)", "3", "bigint" },
+        // Dates, timestamps and intervals by their operators' rows.
+        .{ "SELECT ts + interval '1 day' FROM t", "2024-01-03 03:04:05+00", "timestamp with time zone" },
+        .{ "SELECT ts - ts FROM t", "00:00:00", "interval" },
+        .{ "SELECT date '2024-01-31' + 1", "2024-02-01", "date" },
+        .{ "SELECT date '2024-03-01' - date '2024-02-01'", "29", "integer" },
+        .{ "SELECT date '2024-01-31' + interval '1 month'", "2024-02-29 00:00:00", "timestamp without time zone" },
+        .{ "SELECT interval '1 day' * 2", "2 days", "interval" },
     });
     // MariaDB: integer arithmetic in BIGINT, `/` a DECIMAL of 4 more
     // digits, DECIMAL(p,s) shown with its s digits.
@@ -1552,7 +1560,7 @@ test "zig api: types of parameters" {
     if (D.postgres.built()) {
         var db = try Db.open(gpa, testing.io, ":memory:", .{ .dialect = .postgres });
         defer db.close();
-        try db.exec("CREATE TABLE t (a int, b text, n numeric(6,2), c bigint)");
+        try db.exec("CREATE TABLE t (a int, b text, n numeric(6,2), c bigint, ts timestamptz)");
         const T = xqlite.types.Type;
         const cases = [_]struct { []const u8, []const ?T }{
             .{ "SELECT * FROM t WHERE a = $1 AND $2 = b", &.{ .{ .logical = .int4 }, .{ .logical = .text } } },
@@ -1569,6 +1577,10 @@ test "zig api: types of parameters" {
             // typed; one nothing types has none.
             .{ "SELECT $1 = a, $1 FROM t", &.{.{ .logical = .int4 }} },
             .{ "SELECT $1, $2 = a FROM t", &.{ null, .{ .logical = .int4 } } },
+            // Of the operand of the operator chosen: timestamptz +
+            // interval, timestamptz - timestamptz.
+            .{ "SELECT ts + $1 FROM t", &.{.{ .logical = .interval }} },
+            .{ "SELECT ts - $1 FROM t", &.{.{ .logical = .timestamp_tz }} },
         };
         for (cases) |c| {
             errdefer std.debug.print("{s}\n", .{c[0]});
@@ -1640,6 +1652,7 @@ test "zig api: types of expressions of the schema outlive their statements" {
     defer db.close();
     try db.exec("INSERT INTO g (a, c, d) VALUES (5, true, 5.5)");
     try testing.expectEqual(@as(?i64, 10), try db.one(i64, "SELECT b FROM g WHERE a = 5", .{}));
+    if (!xqlite.Dialect.mariadb.built()) return;
     var m = try Db.open(gpa, testing.io, ":memory:", .{ .vfs = .{ .custom = mem.interface() }, .dialect = .mariadb });
     defer m.close();
     try m.exec("ATTACH 'types.db' AS aux");

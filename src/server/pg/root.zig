@@ -38,8 +38,8 @@ pub const Config = struct {
     /// its one file whatever the name).
     database: ?[]const u8 = null,
     /// The version reported (ParameterStatus server_version), as the
-    /// dialect's version() says.
-    server_version: []const u8 = "17.0 (xqlite)",
+    /// dialect's SHOW server_version and version() say (a test compares).
+    server_version: []const u8 = "16.15 (xqlite)",
 };
 
 pub const Protocol = struct {

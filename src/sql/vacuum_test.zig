@@ -10,6 +10,7 @@ const prepare = @import("prepare.zig");
 const backup = @import("backup.zig");
 const api = @import("../vdbe/api.zig");
 const Conn = @import("sql_test.zig").Conn;
+const Dialect = @import("../dialect/dialect.zig").Dialect;
 
 const RC = int.RC;
 const Vdbe = @import("../vdbe/vdbe_int.zig").Vdbe;
@@ -322,6 +323,7 @@ test "vacuum: a backup restarts when another connection changes the source" {
 }
 
 test "vacuum: the PostgreSQL and MariaDB dialects pass VACUUM to SQLite" {
+    try Dialect.requireBuilt(&.{ .postgres, .mariadb });
     var c: Conn = undefined;
     try c.open();
     defer c.close();

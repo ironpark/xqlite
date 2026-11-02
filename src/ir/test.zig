@@ -226,6 +226,8 @@ fn rowsOf(c: *Conn, d: dialect.Dialect, f: *const dialect.Frontend, case: usize)
 }
 
 test "ir: lowering and the rendered text mean the same, in every dialect" {
+    // The cases use functions of each dialect (xq_div, ...).
+    try dialect.Dialect.requireBuilt(&.{ .postgres, .mariadb, .mssql, .oracle });
     var c: Conn = undefined;
     try c.open();
     defer c.close();
@@ -253,6 +255,7 @@ test "ir: lowering and the rendered text mean the same, in every dialect" {
 }
 
 test "ir: render text" {
+    try dialect.Dialect.requireBuilt(&.{ .postgres, .mariadb });
     var c: Conn = undefined;
     try c.open();
     defer c.close();

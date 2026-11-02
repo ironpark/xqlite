@@ -24,6 +24,7 @@ const typing = @import("../../sql/typing.zig");
 const types = @import("../../sql/types.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const funcs = @import("funcs.zig");
+const datetime = @import("datetime.zig");
 
 const TK = int.TK;
 const Ctx = typing.Ctx;
@@ -47,12 +48,20 @@ pub const rules: typing.Rules = .{
     .order_collation = overload.orderCollation,
 };
 
-/// A string stored into a boolean or numeric column is read as the
-/// type's input (funcs.zig's store functions).
+/// A string stored into a boolean, numeric, date, time, timestamp or
+/// interval column is read as the type's input (funcs.zig's store
+/// functions, datetime.zig's casts).
 fn store(t: Type) ?*const int.FuncDef {
     return switch (t.logical) {
         .boolean => &funcs.store_boolean,
         .numeric => &funcs.store_numeric,
+        // Read and written as PostgreSQL does: '2 hours' is '02:00:00',
+        // a timestamptz is kept in UTC, '2024-02-30' is an error.
+        .date => datetime.cast_date,
+        .time => datetime.cast_time,
+        .timestamp => datetime.cast_timestamp,
+        .timestamp_tz => datetime.cast_timestamptz,
+        .interval => datetime.cast_interval,
         else => null,
     };
 }
@@ -91,7 +100,7 @@ fn operator(c: *Ctx, op: u8, a_arg: Operand, b_arg: ?Operand) Oom!TypeId {
     var b = b_arg orelse {
         // -x, ~x.
         if (op == TK.BITNOT) return if (typing.intWidth(a.logical()) != null) a.id else unknown;
-        return if (typing.isNumber(a.logical()) or a.logical() == .interval) a.id else unknown;
+        return if (typing.isNumber(a.logical())) a.id else unknown;
     };
     // A string literal is of the type of the other operand.
     if (a.e.op == TK.STRING and b.e.op != TK.STRING) a = b;
@@ -109,7 +118,8 @@ fn operator(c: *Ctx, op: u8, a_arg: Operand, b_arg: ?Operand) Oom!TypeId {
         },
         else => {},
     }
-    if (dateTime(c, op, la, lb)) |t| return t;
+    // The rest are numbers; the operators of other types are engine
+    // functions (operators.zig), typed by their rows.
     if (typing.intWidth(la)) |wa| if (typing.intWidth(lb)) |wb| {
         // PostgreSQL has no 1-byte integer.
         const w = @max(wa, wb, 2);
@@ -134,36 +144,6 @@ fn operator(c: *Ctx, op: u8, a_arg: Operand, b_arg: ?Operand) Oom!TypeId {
     return unknown;
 }
 
-/// Date and time arithmetic: a timestamp plus or minus an interval, a
-/// date plus or minus days, the difference of two dates (days) or two
-/// timestamps (an interval).
-fn dateTime(c: *Ctx, op: u8, la: Logical, lb: Logical) ?TypeId {
-    _ = c;
-    const ts = struct {
-        fn is(l: Logical) bool {
-            return l == .timestamp or l == .timestamp_tz;
-        }
-    }.is;
-    switch (op) {
-        TK.PLUS, TK.MINUS => {},
-        TK.STAR, TK.SLASH => {
-            if (la == .interval and typing.isNumber(lb)) return typing.plain(.interval);
-            if (op == TK.STAR and lb == .interval and typing.isNumber(la)) return typing.plain(.interval);
-            return null;
-        },
-        else => return null,
-    }
-    if (ts(la) and lb == .interval) return typing.plain(la);
-    if (op == TK.PLUS and la == .interval and ts(lb)) return typing.plain(lb);
-    if (la == .date and lb == .interval) return typing.plain(.timestamp);
-    if (la == .date and typing.intWidth(lb) != null) return typing.plain(.date);
-    if (op == TK.PLUS and lb == .date and typing.intWidth(la) != null) return typing.plain(.date);
-    if (op == TK.MINUS and la == .date and lb == .date) return typing.plain(.int4);
-    if (op == TK.MINUS and ts(la) and ts(lb)) return typing.plain(.interval);
-    if (la == .interval and lb == .interval) return typing.plain(.interval);
-    return null;
-}
-
 fn isExact(l: Logical) bool {
     return l == .numeric or typing.intWidth(l) != null;
 }
@@ -177,8 +157,14 @@ fn exactScale(t: Type) ?u8 {
 }
 
 fn function(name: []const u8) ?Ret {
-    return functions.get(ownName(name));
+    const n = ownName(name);
+    if (functions.get(n)) |r| return r;
+    // The engine functions of operators (xq_pg_date_pli() ...).
+    if (operators.functionResult(n)) |t| return Ret{ .named = t.name() };
+    return null;
 }
+
+const operators = @import("operators.zig");
 
 /// `name` (lower case) without the prefix that calls a function of
 /// PostgreSQL's table from the text of the schema (xq_postgres_to_json()).
@@ -274,6 +260,11 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_pg_int4", Ret{ .named = "integer" } },
     .{ "xq_pg_int8", Ret{ .named = "bigint" } },
     .{ "xq_pg_bool", Ret{ .named = "boolean" } },
+    .{ "xq_pg_interval", Ret{ .named = "interval" } },
+    .{ "xq_pg_date", Ret{ .named = "date" } },
+    .{ "xq_pg_time", Ret{ .named = "time without time zone" } },
+    .{ "xq_pg_timestamp", Ret{ .named = "timestamp without time zone" } },
+    .{ "xq_pg_timestamptz", Ret{ .named = "timestamp with time zone" } },
     // JSON (jfuncs.zig).
     .{ "to_jsonb", Ret{ .named = "jsonb" } },
     .{ "jsonb_build_object", Ret{ .named = "jsonb" } },
@@ -329,6 +320,7 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_pg_is_json", Ret{ .named = "boolean" } },
     .{ "xq_like", Ret{ .named = "boolean" } },
     .{ "xq_ilike", Ret{ .named = "boolean" } },
+    .{ "xq_pg_regex", Ret{ .named = "boolean" } },
     // Arrays are no column type: their text literal, of the type spelled
     // with [] (an unknown type of that name).
     .{ "xq_pg_text_array", Ret{ .named = "text[]" } },

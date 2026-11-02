@@ -17,6 +17,7 @@ const Check = xqt.Check;
 const BaseDb = @import("base_db.zig");
 
 pub const name = "mssql";
+pub const dialect = "mssql";
 pub const about = "a T-SQL-dialect database read by sqlite3: integrity, rows, CHECKs, computed columns";
 
 pub fn register(s: *xqt.Suite) !void {

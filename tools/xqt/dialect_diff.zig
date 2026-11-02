@@ -859,7 +859,7 @@ fn normXqOra(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
 
 // ---------------------------------------------------------------- processes
 
-const Merged = struct {
+pub const Merged = struct {
     /// It exited with status 0.
     ok: bool,
     /// Standard output and standard error, as one pipe got them (`2>&1`).
@@ -869,7 +869,7 @@ const Merged = struct {
 /// Runs `argv` with `input` on its standard input and its standard output
 /// and error on one pipe, as `2>&1` in a shell pipeline: the order in
 /// which the program wrote them is kept.
-fn runMerged(gpa: Allocator, io: Io, argv: []const []const u8, input: []const u8) !Merged {
+pub fn runMerged(gpa: Allocator, io: Io, argv: []const []const u8, input: []const u8) !Merged {
     const fds = try std.Io.Threaded.pipe2(.{ .CLOEXEC = true });
     const r: Io.File = .{ .handle = fds[0], .flags = .{ .nonblocking = false } };
     const w: Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };

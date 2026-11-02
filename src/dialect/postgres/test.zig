@@ -170,7 +170,7 @@ test "pg: expressions and functions" {
     try c.expectRows("SELECT coalesce(NULL, NULL, 3), nullif(1, 1), nullif(1, 2), greatest(1, NULL, 3), least(NULL, 2, 1), greatest(NULL, NULL)", "3|NULL|1|3|1|NULL\n");
     // Casts.
     try c.expectRows("SELECT '42'::int + 1, CAST('7' AS bigint), 42::text || 'x', 'abcdef'::varchar(3), 'abc'::char(1), 3.14159::numeric(4,2)", "43|7|42x|abc|a|3.14\n");
-    try c.expectRows("SELECT 't'::boolean, 'off'::bool, 1::boolean, '2024-03-05'::date, '2024-03-05 10:11:12.5'::timestamp, '10:11'::time", "1|0|1|2024-03-05|2024-03-05 10:11:12|10:11:00\n");
+    try c.expectRows("SELECT 't'::boolean, 'off'::bool, 1::boolean, '2024-03-05'::date, '2024-03-05 10:11:12.5'::timestamp, '10:11'::time", "1|0|1|2024-03-05|2024-03-05 10:11:12.5|10:11:00\n");
     try c.expectRows("SELECT date '2024-03-05', timestamp '2024-03-05 01:02:03', '\\x0aff'::bytea, '{\"a\":1}'::jsonb", "2024-03-05|2024-03-05 01:02:03|\n\xff|{\"a\": 1}\n");
     try c.expectError("SELECT 'maybe'::boolean", "invalid input syntax for type boolean: \"maybe\"");
     try c.expectError("SELECT 1::nosuchtype", "type \"nosuchtype\" does not exist");
@@ -189,9 +189,104 @@ test "pg: expressions and functions" {
     // Dates.
     try c.expectRows("SELECT extract(year FROM date '2024-03-05'), extract(month FROM '2024-03-05'::date), date_part('day', '2024-03-05'), extract(quarter FROM '2024-08-01'), extract(epoch FROM '1970-01-02')", "2024|3|5|3|86400\n");
     try c.expectRows("SELECT now() = current_timestamp, length(now()::text) > 18, current_date = date('now'), now()::date = current_date", "1|1|1|1\n");
-    try c.expectRows("SELECT version() LIKE 'PostgreSQL %', current_user, current_database(), current_schema", "1|postgres|main|public\n");
+    try c.expectRows("SELECT version() LIKE 'PostgreSQL %', current_user, current_database(), current_schema", "1|postgres|postgres|public\n");
     // JSON operators.
     try c.expectRows("SELECT '{\"a\": {\"b\": 2}}'::json -> 'a' ->> 'b'", "2\n");
+}
+
+test "pg: operators of dates, timestamps and intervals" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // Dates: days, the difference of two, an interval makes a timestamp.
+    try c.expectRows("SELECT '2024-01-01'::date + 1, 1 + date '2024-12-31', date '2024-03-01' - 1, date '2024-03-01' - date '2024-02-01', date '2024-01-02' - '2024-01-01'", "2024-01-02|2025-01-01|2024-02-29|29|1\n");
+    try c.expectRows("SELECT date '2024-01-31' + interval '1 month', date '2023-01-31' + interval '1 month', date '2024-01-01' - interval '1 hour', date '2024-01-01' + time '10:30'", "2024-02-29 00:00:00|2023-02-28 00:00:00|2023-12-31 23:00:00|2024-01-01 10:30:00\n");
+    // Timestamps: months clamped to the end of the month, then days,
+    // then time; the difference an interval of days and time.
+    try c.expectRows("SELECT timestamp '2024-01-31 10:00' + interval '1 month 1 day', timestamp '2024-01-01' + '1 day', timestamp '2024-01-02 02:00' - timestamp '2024-01-01', timestamp '2024-01-01' - timestamp '2024-01-02 02:00'", "2024-03-01 10:00:00|2024-01-02 00:00:00|1 day 02:00:00|-1 days -02:00:00\n");
+    try c.expectRows("SELECT timestamp '2024-01-01 10:00' - date '2024-01-01', '2024-01-01 10:00:00+02:00'::timestamptz + interval '1 day'", "10:00:00|2024-01-02 08:00:00\n");
+    try c.expectRows("SELECT now() - interval '1 day' < now(), now() + '1 hour' > now(), current_date + 1 > current_date", "1|1|1\n");
+    // Times wrap around midnight.
+    try c.expectRows("SELECT time '23:00' + interval '2 hours', time '10:00' - time '08:30', time '01:00' - interval '2 hours'", "01:00:00|01:30:00|23:00:00\n");
+    // Intervals in PostgreSQL's output style.
+    try c.expectRows("SELECT interval '1 day', interval '1 day 2 hours', interval '38 months', interval '90 minutes', -interval '1 month', interval '-1 day' + interval '1 hour'", "1 day|1 day 02:00:00|3 years 2 mons|01:30:00|-1 mons|-1 days +01:00:00\n");
+    try c.expectRows("SELECT interval '1 year 2 months' + interval '1 year', interval '1 day' - interval '2 hours', interval '1 day' * 2, 2 * interval '1 hour', interval '1 month' / 2, interval '1 day' / 3, interval '1 hour' * 1.5", "2 years 2 mons|1 day -02:00:00|2 days|02:00:00|15 days|08:00:00|01:30:00\n");
+    // Intervals compare and sort in their order, not their text's.
+    try c.expectRows("SELECT interval '1 day' > interval '2 hours', interval '1 mon' = interval '30 days', interval '25 hours' > '1 day'", "1|1|1\n");
+    try c.exec("CREATE TABLE ev (id int, d date, ts timestamp, iv interval)");
+    try c.exec("INSERT INTO ev VALUES (1, '2024-01-31', '2024-01-31 10:00:00', '1 day'), (2, '2024-02-29', '2024-02-29 00:00:00', '2 hours'), (3, '2024-03-01', '2024-03-01 12:00:00', '1 mon')");
+    try c.expectRows("SELECT id FROM ev ORDER BY iv", "2\n1\n3\n");
+    // Stored as PostgreSQL reads and writes the type: '2 hours' is
+    // '02:00:00', a timestamptz in UTC; what it does not read is an error.
+    try c.expectRows("SELECT iv FROM ev ORDER BY id", "1 day\n02:00:00\n1 mon\n");
+    try c.exec("CREATE TABLE stamp (tz timestamptz, d date)");
+    try c.exec("INSERT INTO stamp VALUES ('2024-01-01 10:00:00+02', '2024-1-5')");
+    try c.expectRows("SELECT * FROM stamp", "2024-01-01 08:00:00|2024-01-05\n");
+    try c.expectError("INSERT INTO stamp (d) VALUES ('nope')", "invalid input syntax for type date: \"nope\"");
+    try c.expectRows("SELECT d + id, ts + iv, d - date '2024-01-01' FROM ev ORDER BY id", "2024-02-01|2024-02-01 10:00:00|30\n2024-03-02|2024-02-29 02:00:00|59\n2024-03-04|2024-04-01 12:00:00|60\n");
+    // Comparisons of dates and timestamps are of their ISO text.
+    try c.expectRows("SELECT id FROM ev WHERE d > '2024-02-01' AND ts < timestamp '2024-03-01 12:00' ORDER BY id", "2\n");
+    try c.expectRows("SELECT count(*) FROM ev WHERE d BETWEEN date '2024-01-01' AND '2024-02-29'", "2\n");
+    // A view, a CHECK keep the functions the operators chose: what they
+    // mean in every dialect.
+    try c.exec("CREATE VIEW ev_next AS SELECT id, d + 1 AS next, ts - interval '1 hour' AS before, -iv AS neg FROM ev WHERE id < 3");
+    try c.expectRows("SELECT * FROM ev_next ORDER BY id", "1|2024-02-01|2024-01-31 09:00:00|-1 days\n2|2024-03-01|2024-02-28 23:00:00|-02:00:00\n");
+    // Its interval comparison is in the collation (the dialect's, as
+    // jsonb's: not seen by SQLite's dialect).
+    try c.exec("CREATE VIEW ev_short AS SELECT id FROM ev WHERE iv < interval '1 week'");
+    try c.expectRows("SELECT * FROM ev_short ORDER BY id", "1\n2\n");
+    try c.exec("CREATE TABLE span (a date, b date CHECK (b - a <= 7))");
+    try c.exec("INSERT INTO span VALUES ('2024-01-01', '2024-01-08')");
+    try c.expectError("INSERT INTO span VALUES ('2024-01-01', '2024-01-09')", "new row for relation \"span\" violates check constraint \"span_b_check\"");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT next FROM ev_next WHERE id = 1", "2024-02-01\n");
+    try c.expectRows("SELECT d + 1 FROM ev WHERE id = 1", "2025\n");
+    main_mod.setDialect(c.db, .postgres);
+    // Casts read PostgreSQL's input and write its output.
+    try c.expectRows("SELECT timestamp '2024-01-02 03:04:05.50', '2024-01-01 10:00:00+02'::timestamptz, '10:11:12.25'::time, 'epoch'::date, 'today'::date = current_date", "2024-01-02 03:04:05.5|2024-01-01 08:00:00|10:11:12.25|1970-01-01|1\n");
+    try c.expectError("SELECT '2024-02-30'::date", "date/time field value out of range: \"2024-02-30\"");
+    // A string literal with an integer is read as an integer.
+    try c.expectRows("SELECT '2' + 1, 10 - '3'", "3|7\n");
+    try c.expectError("SELECT 'a' + 1", "invalid input syntax for type integer: \"a\"");
+    // No operator for the types: PostgreSQL's errors.
+    try c.expectError("SELECT date '2024-01-01' + 'abc'::text", "operator does not exist: date + text");
+    try c.expectError("SELECT timestamp '2024-01-01' + 1", "operator does not exist: timestamp without time zone + integer");
+    try c.expectError("SELECT d + ts FROM ev", "operator does not exist: date + timestamp without time zone");
+    try c.expectError("SELECT true + 1", "operator does not exist: boolean + integer");
+    try c.expectError("SELECT 1.5::float8 % 2", "operator does not exist: double precision % integer");
+    try c.expectError("SELECT -'a'::text", "operator does not exist: - text");
+    try c.expectError("SELECT date '2024-01-01' + '1 day'", "operator is not unique: date + unknown");
+    // Bad values, results out of range.
+    try c.expectError("SELECT d + interval 'abc' FROM ev", "invalid input syntax for type interval: \"abc\"");
+    try c.expectError("SELECT 'x'::date + 1", "invalid input syntax for type date: \"x\"");
+    try c.expectError("SELECT interval '1 day' / 0", "division by zero");
+    try c.expectError("SELECT date '5874897-12-31' + 1", "date out of range");
+    // An operand of no known type (a SQLite table's column), a parameter
+    // or NULL never fails: the operator is SQLite's or the row they fit.
+    try c.exec("PRAGMA xq_dialect = 'sqlite'; CREATE TABLE lite (a); INSERT INTO lite VALUES ('2024-01-01'); PRAGMA xq_dialect = 'postgres'");
+    try c.expectRows("SELECT a + 1, a || 'x' FROM lite", "2025|2024-01-01x\n");
+    try c.expectRows("SELECT date '2024-01-01' + NULL, timestamp '2024-01-01' + NULL", "NULL|NULL\n");
+    var stmt: ?*vi.Vdbe = null;
+    try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "SELECT timestamp '2024-01-01' + $1", &stmt, null));
+    defer _ = api.finalize(stmt.?);
+    try testing.expectEqual(RC.OK, api.bindText(stmt.?, 1, "1 day 2 hours"));
+    try testing.expectEqual(RC.ROW, api.step(stmt.?));
+    try testing.expectEqualStrings("2024-01-02 02:00:00", api.columnText(stmt.?, 0).?);
+}
+
+test "pg: regular expression operators" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.expectRows("SELECT 'abc' ~ '^a', 'abc' ~ '^b', 'ABC' ~* '^a', 'abc' !~ 'z', 'abc' !~* 'A', 'pg_toast' ~ '^(pg_toast)$', NULL ~ 'a'", "1|0|1|1|0|1|NULL\n");
+    try c.exec("CREATE TABLE names (n text)");
+    try c.exec("INSERT INTO names VALUES ('pg_x'), ('abc'), ('Abd')");
+    try c.expectRows("SELECT n FROM names WHERE n !~ '^pg_' AND n ~* '^a' ORDER BY n", "Abd\nabc\n");
+    try c.exec("CREATE VIEW names_a AS SELECT n FROM names WHERE n ~ '^a'");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT n FROM names_a", "abc\n");
+    main_mod.setDialect(c.db, .postgres);
+    try c.expectError("SELECT 'a' ~ '('", "invalid regular expression: (");
 }
 
 test "pg: json and jsonb" {
@@ -647,7 +742,12 @@ test "pg: information_schema and pg_catalog" {
     try c.expectRows("SELECT schemaname, tablename, hasindexes FROM pg_catalog.pg_tables ORDER BY 2", "public|lite|0\npublic|person|1\n");
     try c.expectRows("SELECT tablename FROM pg_tables WHERE tablename LIKE 'p%'", "person\n");
     try c.expectRows("SELECT viewname FROM pg_views", "adults\n");
-    try c.expectRows("SELECT indexname, indexdef FROM pg_indexes", "person_name_idx|CREATE INDEX \"person_name_idx\" ON \"person\"(\"name\")\n");
+    // The INTEGER PRIMARY KEY has its index, as in PostgreSQL.
+    try c.expectRows("SELECT indexname, indexdef FROM pg_indexes ORDER BY 1",
+        \\person_name_idx|CREATE INDEX person_name_idx ON public.person USING btree (name)
+        \\person_pkey|CREATE UNIQUE INDEX person_pkey ON public.person USING btree (id)
+        \\
+    );
     try c.expectRows("SELECT sequencename, last_value FROM pg_sequences", "person_id_seq|NULL\n");
     try c.expectRows("SELECT schema_name FROM information_schema.schemata ORDER BY 1", "information_schema\npg_catalog\npublic\n");
     try c.expectError("SELECT * FROM information_schema.nosuch", "relation \"information_schema.nosuch\" does not exist");
@@ -722,6 +822,7 @@ test "pg: SQLite's administrative statements; the same code as SQLite" {
 }
 
 test "pg: what the schema keeps means the same in every dialect" {
+    try @import("../dialect.zig").Dialect.requireBuilt(&.{.mariadb});
     var c: Conn = undefined;
     try openPg(&c);
     defer c.close();
@@ -784,7 +885,7 @@ test "pg: schemas" {
     try c.expectRows("SELECT nextval('sales.tickets'), nextval('SALES.TICKETS')", "10|11\n");
     try c.expectRows("SELECT count(*) FROM orders", "0\n");
     try c.expectRows("SELECT table_schema, table_name FROM information_schema.tables ORDER BY 1, 2", "public|orders\nsales|big\nsales|orders\n");
-    try c.expectRows("SELECT schemaname, indexname FROM pg_indexes ORDER BY 2", "sales|by_note\nsales|orders_amt_idx\n");
+    try c.expectRows("SELECT schemaname, indexname FROM pg_indexes ORDER BY 2", "sales|by_note\nsales|orders_amt_idx\nsales|orders_pkey\n");
     // Errors in PostgreSQL's words.
     try c.expectError("CREATE SCHEMA sales", "schema \"sales\" already exists");
     try c.expectError("CREATE SCHEMA pg_x", "unacceptable schema name \"pg_x\"");
@@ -970,4 +1071,139 @@ test "pg: the catalog in memory follows DDL, rollbacks and other connections" {
     try c2.exec("DROP TABLE u");
     try c.expectError("SELECT * FROM u", "relation \"u\" does not exist");
     try expectNoMeta(&c, "u");
+}
+
+test "pg: system catalogs" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE p (id serial PRIMARY KEY, name varchar(20) NOT NULL UNIQUE)");
+    try c.exec("CREATE TABLE t (a int PRIMARY KEY, b text DEFAULT 'x' CHECK (length(b) > 1), c numeric(10,2), p int REFERENCES p(id) ON DELETE CASCADE, CONSTRAINT ck CHECK (a > 0 AND c IS NOT NULL), UNIQUE (b, c))");
+    try c.exec("CREATE INDEX t_b ON t (lower(b)) WHERE a > 5");
+    try c.exec("CREATE VIEW v AS SELECT a, b FROM t WHERE a > 1");
+    try c.exec("CREATE SCHEMA sales");
+    try c.exec("CREATE TABLE sales.orders (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, at timestamptz DEFAULT now(), flag boolean NOT NULL DEFAULT false)");
+    try c.expectRows("SELECT n.nspname, c.relname, c.relkind, c.relnatts, c.relchecks, c.relhasindex, c.relhastriggers FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ORDER BY 1, 2",
+        \\public|p|r|2|0|1|1
+        \\public|p_id_seq|S|3|0|0|0
+        \\public|p_name_key|i|1|0|0|0
+        \\public|p_pkey|i|1|0|0|0
+        \\public|t|r|4|2|1|1
+        \\public|t_b|i|1|0|0|0
+        \\public|t_b_c_key|i|2|0|0|0
+        \\public|t_pkey|i|1|0|0|0
+        \\public|v|v|2|0|0|0
+        \\sales|orders|r|3|0|1|0
+        \\sales|orders_id_seq|S|3|0|0|0
+        \\sales|orders_pkey|i|1|0|0|0
+        \\
+    );
+    // One OID in every catalog, the reg* casts and ::oid.
+    try c.expectRows("SELECT 't'::regclass::oid = (SELECT oid FROM pg_class WHERE relname = 't'), (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname = 't'), (SELECT count(*) FROM pg_index WHERE indrelid = 't'::regclass), 'pg_class'::regclass::oid, 'public'::regnamespace::oid, 'integer'::regtype::oid, 'character varying'::regtype::oid", "1|4|3|1259|2200|23|1043\n");
+    try c.expectRows("SELECT 't'::regclass, 'sales.orders'::regclass, 'p'::regclass::text, 23::regtype, 2200::regnamespace, 'pg_catalog.array_in'::regproc", "t|sales.orders|p|integer|public|array_in\n");
+    try c.expectError("SELECT 'nosuch'::regclass", "relation \"nosuch\" does not exist");
+    try c.expectRows("SELECT to_regclass('nosuch') IS NULL, to_regclass('t') = 't'::regclass", "1|1\n");
+    // An OID stays when other objects come and go.
+    const before = try c.query("SELECT 't'::regclass::oid");
+    defer testing.allocator.free(before);
+    try c.exec("CREATE TABLE zz (x int); DROP TABLE zz; CREATE TABLE aa (x int)");
+    const after = try c.query("SELECT 't'::regclass::oid");
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(before, after);
+    try c.exec("DROP TABLE aa");
+    // Built-in types are PostgreSQL's.
+    try c.expectRows("SELECT oid, typname, typlen, typcategory FROM pg_type WHERE typname IN ('int4', 'text', 'varchar', '_int4', 'jsonb') ORDER BY oid", "23|int4|4|N\n25|text|-1|S\n1007|_int4|-1|A\n1043|varchar|-1|S\n3802|jsonb|-1|U\n");
+    try c.expectRows("SELECT count(*) FROM pg_type WHERE typrelid = 't'::regclass AND typname = 't' AND typtype = 'c'", "1\n");
+    // Columns, as psql's \d reads them.
+    try c.expectRows(
+        \\SELECT a.attname, format_type(a.atttypid, a.atttypmod),
+        \\  (SELECT pg_get_expr(d.adbin, d.adrelid, true) FROM pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+        \\  a.attnotnull, a.attidentity
+        \\FROM pg_attribute a WHERE a.attrelid = 'sales.orders'::regclass AND a.attnum > 0 ORDER BY a.attnum
+    ,
+        \\id|bigint|NULL|1|a
+        \\at|timestamp with time zone|now()|0|
+        \\flag|boolean|false|1|
+        \\
+    );
+    try c.expectRows("SELECT attname, pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE d.adrelid IN ('p'::regclass, 't'::regclass) ORDER BY 1", "b|'x'::text\nid|nextval('p_id_seq'::regclass)\n");
+    try c.expectRows("SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'v'::regclass ORDER BY attnum", "a|integer\nb|text\n");
+    try c.expectRows("SELECT conname, contype, pg_get_constraintdef(oid, true) FROM pg_constraint WHERE conrelid = 't'::regclass ORDER BY 1",
+        \\ck|c|CHECK (a > 0 AND c IS NOT NULL)
+        \\t_b_c_key|u|UNIQUE (b, c)
+        \\t_b_check|c|CHECK (length(b) > 1)
+        \\t_p_fkey|f|FOREIGN KEY (p) REFERENCES p(id) ON DELETE CASCADE
+        \\t_pkey|p|PRIMARY KEY (a)
+        \\
+    );
+    try c.expectRows("SELECT c2.relname, i.indisprimary, i.indisunique, i.indkey, pg_get_indexdef(i.indexrelid, 0, true) FROM pg_index i JOIN pg_class c2 ON c2.oid = i.indexrelid WHERE i.indrelid = 't'::regclass ORDER BY 1",
+        \\t_b|0|0|0|CREATE INDEX t_b ON public.t USING btree (lower(b)) WHERE a > 5
+        \\t_b_c_key|0|1|2 3|CREATE UNIQUE INDEX t_b_c_key ON public.t USING btree (b, c)
+        \\t_pkey|1|1|1|CREATE UNIQUE INDEX t_pkey ON public.t USING btree (a)
+        \\
+    );
+    try c.expectRows("SELECT pg_get_constraintdef(oid), pg_get_indexdef('t_b'::regclass) FROM pg_constraint WHERE conname = 'ck'", "CHECK (((a > 0) AND (c IS NOT NULL)))|CREATE INDEX t_b ON public.t USING btree (lower(b)) WHERE (a > 5)\n");
+    try c.expectRows("SELECT pg_get_viewdef('v'::regclass)", " SELECT a, b FROM t WHERE (a > 1);\n");
+    try c.expectRows("SELECT pg_get_serial_sequence('p', 'id'), pg_get_serial_sequence('sales.orders', 'id'), pg_get_serial_sequence('t', 'a')", "public.p_id_seq|sales.orders_id_seq|NULL\n");
+    try c.expectRows("SELECT d.refobjid = 'p'::regclass, d.refobjsubid, d.deptype FROM pg_depend d WHERE d.objid = 'p_id_seq'::regclass", "1|1|a\n");
+    // Visibility follows search_path; a name off the path is qualified.
+    try c.expectRows("SELECT relname, pg_table_is_visible(oid) FROM pg_class WHERE relname IN ('t', 'orders') ORDER BY 1", "orders|0\nt|1\n");
+    try c.exec("SET search_path TO sales, public");
+    try c.expectRows("SELECT 'orders'::regclass, pg_table_is_visible('orders'::regclass)", "orders|1\n");
+    try c.exec("RESET search_path");
+    // psql's spellings: OPERATOR(), COLLATE pg_catalog.default, three-part
+    // column names.
+    try c.expectRows("SELECT pg_catalog.pg_class.relname FROM pg_catalog.pg_class WHERE relname OPERATOR(pg_catalog.=) 't' COLLATE pg_catalog.default", "t\n");
+    // information_schema's constraints.
+    try c.expectRows("SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 't' ORDER BY 1", "ck|CHECK\nt_b_c_key|UNIQUE\nt_b_check|CHECK\nt_p_fkey|FOREIGN KEY\nt_pkey|PRIMARY KEY\n");
+    try c.expectRows("SELECT constraint_name, column_name, ordinal_position FROM information_schema.key_column_usage WHERE table_name = 't' ORDER BY 1, 3", "t_b_c_key|b|1\nt_b_c_key|c|2\nt_p_fkey|p|1\nt_pkey|a|1\n");
+    try c.expectRows("SELECT typeof(ordinal_position), typeof(character_maximum_length), table_catalog FROM information_schema.columns WHERE table_name = 'p' AND column_name = 'name'", "integer|integer|postgres\n");
+    // COMMENT ON, for obj_description() and col_description().
+    try c.exec("COMMENT ON TABLE t IS 'the t'");
+    try c.exec("COMMENT ON COLUMN sales.orders.at IS 'when'");
+    try c.expectRows("SELECT obj_description('t'::regclass, 'pg_class'), col_description('sales.orders'::regclass, 2), (SELECT count(*) FROM pg_description)", "the t|when|2\n");
+    try c.exec("COMMENT ON TABLE t IS NULL");
+    try c.expectRows("SELECT obj_description('t'::regclass)", "NULL\n");
+    try c.expectError("COMMENT ON COLUMN t.nosuch IS 'x'", "column \"nosuch\" of relation \"t\" does not exist");
+    // The constant and empty relations psql and drivers read.
+    try c.expectRows("SELECT datname, pg_encoding_to_char(encoding) FROM pg_database", "postgres|UTF8\n");
+    try c.expectRows("SELECT rolname, rolsuper, pg_get_userbyid(oid) FROM pg_roles", "postgres|1|postgres\n");
+    try c.expectRows("SELECT amname FROM pg_am WHERE oid = 403", "btree\n");
+    try c.expectRows("SELECT count(*) FROM pg_trigger UNION ALL SELECT count(*) FROM pg_policy UNION ALL SELECT count(*) FROM pg_inherits", "0\n0\n0\n");
+    try c.expectRows("SELECT has_table_privilege('t', 'SELECT'), has_schema_privilege('public', 'USAGE'), pg_size_pretty(20000::bigint)", "1|1|20 kB\n");
+    // Nothing of this is in the file, nor seen by SQLite's dialect.
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name LIKE 'pg%'", "0\n");
+    try c.expectError("SELECT * FROM pg_class", "no such table: pg_class");
+    main_mod.setDialect(c.db, .postgres);
+    try c.exec("PRAGMA integrity_check");
+}
+
+test "pg: settings" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.expectRows("SHOW server_version", "16.15 (xqlite)\n");
+    try c.expectRows("SHOW server_version_num", "160015\n");
+    try c.expectRows("SELECT current_setting('server_version_num')::int >= 160000, version() LIKE 'PostgreSQL 16.%'", "1|1\n");
+    try c.expectColumns("SHOW DateStyle", "DateStyle");
+    try c.expectRows("SHOW TRANSACTION ISOLATION LEVEL", "read committed\n");
+    try c.expectRows("SHOW integer_datetimes", "on\n");
+    try c.expectRows("SHOW standard_conforming_strings", "on\n");
+    try c.expectError("SET server_version = '1'", "parameter \"server_version\" cannot be changed");
+    try c.exec("SET extra_float_digits = 3");
+    try c.exec("SET TIME ZONE INTERVAL '+00:00' HOUR TO MINUTE");
+    try c.expectRows("SHOW TimeZone", "+00:00\n");
+    try c.exec("SET TIME ZONE LOCAL");
+    try c.expectRows("SHOW timezone", "UTC\n");
+    try c.expectRows("SELECT setting, source FROM pg_settings WHERE name = 'extra_float_digits'", "3|session\n");
+    try c.expectRows("SELECT count(*) > 40, count(*) FILTER (WHERE name LIKE 'xqlite%') FROM pg_settings", "1|0\n");
+    try c.expectRows("SELECT count(*) > 0 FROM (SELECT 1) x", "1\n");
+    // A startup setting is what RESET goes back to.
+    try c.expectRows("SELECT xq_pg_startup_setting('application_name', 'app1')", "app1\n");
+    try c.exec("SET application_name = 'other'");
+    try c.exec("RESET application_name");
+    try c.expectRows("SHOW application_name", "app1\n");
+    try c.exec("RESET ALL");
+    try c.expectRows("SHOW application_name", "app1\n");
 }

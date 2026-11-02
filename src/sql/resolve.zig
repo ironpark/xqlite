@@ -493,7 +493,15 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
 /// frontends of the dialects read it as they lower a statement on a
 /// table); a column of a table of SQLite's or a rowid of none.
 fn typeColumn(p: *Parse, m: *const SrcItem, e: *Expr) Oom!void {
-    if (e.i_column < 0 or m.fg.is_nested_from) return;
+    if (m.fg.is_nested_from) return;
+    if (e.i_column < 0) {
+        // The rowid: of the INTEGER PRIMARY KEY's type, if it has one.
+        if (m.fg.is_subquery) return;
+        const t = m.s_tab orelse return;
+        if (t.i_pkey < 0) return;
+        e.xq_type = try tableColumnType(p, t, @intCast(t.i_pkey));
+        return;
+    }
     const i: usize = @intCast(e.i_column);
     if (m.fg.is_subquery) {
         e.xq_type = try typing.columnOf(p, m.u4.subq.?.select, i);

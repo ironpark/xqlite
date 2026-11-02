@@ -31,6 +31,8 @@ const session = @import("session.zig");
 const jtype = @import("jtype.zig");
 const ddltype = @import("ddltype.zig");
 const jfuncs = @import("jfuncs.zig");
+const catalog_funcs = @import("catalog_funcs.zig");
+const datetime = @import("datetime.zig");
 const catalog = @import("../../catalog/catalog.zig");
 
 const RC = int.RC;
@@ -84,6 +86,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     };
     if (done) return;
     const stmt = ps.statement() catch |err| return parseFailed(p, sql, ps, err);
+    ps.regOutputs(stmt) catch |err| return parseFailed(p, sql, ps, err);
     // The types of the columns of the tables, for the typing of names
     // resolved (sql/typing.zig, overload.zig).
     catalog.readAll(p.db) catch |err| switch (err) {
@@ -160,7 +163,11 @@ pub const hooks: dialect.Hooks = .{
     .typing = &@import("typing.zig").rules,
     .functions = &functions,
     .engine_functions = &engine_functions,
-    .collations = &.{.{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate }},
+    .engine_modules = &@import("pgcatalog.zig").modules,
+    .collations = &.{
+        .{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate },
+        .{ .name = "xq_pg_interval", .cmp = datetime.collateInterval },
+    },
     // The names of the type checks (parser.zig's typeCheck()).
     .check_errors = &.{
         .{ .prefix = "smallint out of range", .state = .of("22003") },
@@ -172,9 +179,9 @@ pub const hooks: dialect.Hooks = .{
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions;
+} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions;
 
-const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions;
+const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions;
 
 comptime {
     dfunc.checkTable(&functions);
@@ -182,7 +189,7 @@ comptime {
 }
 
 /// The version string of PostgreSQL's version().
-pub const version = "PostgreSQL 17.0 (xqlite " ++ @import("../../sql/func/func.zig").sqlite_version ++ ")";
+pub const version = "PostgreSQL " ++ @import("state.zig").release ++ " (xqlite " ++ @import("../../sql/func/func.zig").sqlite_version ++ ")";
 
 fn versionFunc(ctx: *dfunc.Context, _: []*dfunc.Mem) void {
     api.resultText(ctx, version, .static);
@@ -194,7 +201,11 @@ test {
     _ = @import("json.zig");
     _ = @import("jsonpath.zig");
     _ = @import("regex.zig");
+    _ = @import("datetime.zig");
+    _ = @import("operators.zig");
     _ = @import("state.zig");
     _ = @import("test.zig");
     _ = @import("constraints.zig");
+    _ = @import("pgcatalog.zig");
+    _ = @import("catalog_funcs.zig");
 }

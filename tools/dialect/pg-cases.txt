@@ -765,3 +765,50 @@ CREATE TABLE fj (id int, f float8, n numeric(6,2));
 INSERT INTO fj VALUES (1, 100, 1.5), (2, 2.5e-7, 2);
 SELECT row_to_json(t) FROM fj t ORDER BY id;
 SELECT json_agg(f ORDER BY id), json_agg(n ORDER BY id) FROM fj;
+
+-- case: system catalogs: constraints, indexes, columns, reg* casts
+CREATE TABLE cp (id serial PRIMARY KEY, name varchar(20) NOT NULL UNIQUE);
+CREATE TABLE ct (a int PRIMARY KEY, b text DEFAULT 'x' CHECK (length(b) > 1), p int REFERENCES cp(id) ON DELETE CASCADE, UNIQUE (b, p));
+CREATE INDEX ct_lb ON ct (lower(b)) WHERE a > 5;
+SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'ct'::regclass ORDER BY 1;
+SELECT c.relname, pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE i.indrelid = 'ct'::regclass ORDER BY 1;
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull::int, coalesce(pg_get_expr(d.adbin, d.adrelid), '-') FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE a.attrelid = 'cp'::regclass AND a.attnum > 0 ORDER BY a.attnum;
+SELECT 'pg_class'::regclass::oid::int, 'int4'::regtype::oid::int, 'text'::regtype, 'pg_catalog'::regnamespace::oid::int;
+
+-- case: date, timestamp and time operators
+SELECT date '2024-01-01' + 1 AS a, 1 + date '2024-12-31' AS b, date '2024-03-01' - 1 AS c, date '2024-03-01' - date '2024-02-01' AS d, date '2024-01-02' - '2024-01-01' AS e;
+SELECT date '2024-01-31' + interval '1 month' AS a, date '2023-01-31' + interval '1 month' AS b, date '2024-01-01' - interval '1 hour' AS c, date '2024-01-01' + time '10:30' AS d;
+SELECT timestamp '2024-01-31 10:00' + interval '1 month 1 day' AS a, timestamp '2024-01-01' + '1 day' AS b, timestamp '2024-01-02 02:00' - timestamp '2024-01-01' AS c, timestamp '2024-01-01' - timestamp '2024-01-02 02:00' AS d;
+SELECT timestamp '2024-01-01 10:00' - date '2024-01-01' AS a, timestamp '2024-01-02 03:04:05.5' AS b, time '23:00' + interval '2 hours' AS c, time '10:00' - time '08:30' AS d;
+
+-- case: interval operators and output
+SELECT interval '1 day' AS a, interval '1 day 2 hours' AS b, interval '38 months' AS c, interval '90 minutes' AS d, -interval '1 month' AS e, interval '-1 day' + interval '1 hour' AS f;
+SELECT interval '1 year 2 months' + interval '1 year' AS a, interval '1 day' - interval '2 hours' AS b, interval '1 day' * 2 AS c, 2 * interval '1 hour' AS d, interval '1 month' / 2 AS e, interval '1 day' / 3 AS f, interval '1 hour' * 1.5 AS g;
+SELECT (interval '1 day' > interval '2 hours')::int AS a, (interval '1 mon' = interval '30 days')::int AS b, (interval '25 hours' > '1 day')::int AS c;
+
+-- case: date, timestamp and interval columns
+CREATE TABLE ev (id int, d date, ts timestamp, iv interval);
+INSERT INTO ev VALUES (1, '2024-01-31', '2024-01-31 10:00', '1 day'), (2, '2024-02-29', '2024-02-29 00:00:00', '2 hours'), (3, '2024-03-01', '2024-03-01 12:00:00', '1 mon');
+SELECT id, d, ts, iv FROM ev ORDER BY id;
+SELECT id, d + id AS a, ts + iv AS b, d - date '2024-01-01' AS c, ts - interval '1 hour' AS e FROM ev ORDER BY id;
+SELECT id FROM ev ORDER BY iv;
+SELECT id FROM ev WHERE d > '2024-02-01' AND ts < timestamp '2024-03-01 12:00' ORDER BY id;
+CREATE VIEW ev_next AS SELECT id, d + 1 AS next, -iv AS neg FROM ev WHERE iv < interval '1 week';
+SELECT * FROM ev_next ORDER BY id;
+
+-- case: operators of no row for their types (errors)
+SELECT date '2024-01-01' + 'abc'::text;
+SELECT timestamp '2024-01-01' + 1;
+SELECT true + 1;
+SELECT 1.5::float8 % 2;
+SELECT 'a' + 1;
+SELECT '2024-02-30'::date;
+SELECT 'nope'::date + 1;
+SELECT interval '1 day' / 0;
+
+-- case: regular expression operators
+CREATE TABLE names (n text);
+INSERT INTO names VALUES ('pg_x'), ('abc'), ('Abd');
+SELECT ('abc' ~ '^a')::int AS a, ('abc' ~ '^b')::int AS b, ('ABC' ~* '^a')::int AS c, ('abc' !~ 'z')::int AS d, ('abc' !~* 'A')::int AS e, ('pg_toast' ~ '^(pg_toast)$')::int AS f;
+SELECT count(*) FROM names WHERE n !~ '^pg_' AND n ~* '^a';
+SELECT n FROM names WHERE n ~ '^a';

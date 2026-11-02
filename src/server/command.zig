@@ -29,7 +29,11 @@ pub const Verb = enum {
     savepoint,
     release,
     set,
+    /// RESET (PostgreSQL's), a SET of the default.
+    reset,
     show,
+    /// COMMENT ON (PostgreSQL's, Oracle's).
+    comment,
     explain,
     pragma,
     attach,

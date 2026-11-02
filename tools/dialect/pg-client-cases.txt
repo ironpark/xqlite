@@ -1,0 +1,933 @@
+-- xqt wire-diff pg: the queries real clients send, against PostgreSQL 16
+-- and `xqlite serve --pg` (tools/xqt/wire_diff.zig). Captured from the
+-- log of PostgreSQL 16 (log_statement=all) while each client introspected
+-- the schema below; see docs/testing.md "wire-diff":
+--
+--   node-*     node-postgres 8.x (query with parameters), knex 3.x (hasTable,
+--              hasColumn, columnInfo), Sequelize 6 (showAllTables,
+--              describeTable, showIndex, getForeignKeyReferencesForTable,
+--              showAllSchemas)
+--   python-*   SQLAlchemy 2.1 Inspector over psycopg2 and psycopg 3.3
+--              (get_table_names ... get_check_constraints, has_table) and
+--              Django 6.1 introspection (get_table_list,
+--              get_table_description, get_sequences, get_relations,
+--              get_constraints, inspectdb)
+--   pgjdbc-*   pgjdbc 42.7 DatabaseMetaData (getTables, getColumns,
+--              getPrimaryKeys, getImportedKeys, getIndexInfo, getSchemas)
+--              and a PreparedStatement's metadata
+--   asyncpg-*  asyncpg 0.32 fetch with parameters
+--   prisma-*   Prisma 6 `prisma db pull`
+--
+-- Statements a driver sent with the extended protocol are run with
+-- psql's \bind (\bind has no NULL: NULL parameters became ''). The OIDs
+-- of the objects in the queries became psql variables that \gset sets
+-- first. Every case masks OIDs in its output. Lines before the first
+-- case are the setup of every case.
+CREATE TABLE author (id serial PRIMARY KEY, name text NOT NULL UNIQUE, born date);
+CREATE TABLE book (
+  id integer PRIMARY KEY,
+  author_id integer NOT NULL REFERENCES author (id) ON DELETE CASCADE,
+  title varchar(200) NOT NULL,
+  price numeric(10,2) DEFAULT 0 CHECK (price >= 0),
+  tags jsonb,
+  published boolean DEFAULT false
+);
+CREATE INDEX book_title ON book (title);
+CREATE UNIQUE INDEX book_author_title ON book (author_id, title);
+CREATE VIEW cheap_book AS SELECT id, title, price FROM book WHERE price < 10;
+CREATE SEQUENCE ticket START 100;
+INSERT INTO author (name, born) VALUES ('Ann', '1960-01-02'), ('Bob', NULL);
+INSERT INTO book VALUES (1, 1, 'Alpha', 9.50, '{"a": 1}', true), (2, 1, 'Beta', 12, NULL, false), (3, 2, 'Gamma', NULL, '[1, 2]', NULL);
+-- case: node-01
+-- xqt: mask-oids
+SELECT $1::int + 1 AS x
+\bind '41' \g
+
+-- case: node-02
+-- xqt: mask-oids
+SELECT id, title FROM book WHERE id = $1
+\bind '1' \g
+
+-- case: node-03
+-- xqt: mask-oids
+select version();
+
+-- case: node-04
+-- xqt: mask-oids
+select * from information_schema.tables where table_name = $1 and table_schema = current_schema()
+\bind 'book' \g
+
+-- case: node-05
+-- xqt: mask-oids
+select * from information_schema.columns where table_name = $1 and column_name = $2 and table_schema = current_schema()
+\bind 'book' 'title' \g
+
+-- case: node-06
+-- xqt: mask-oids
+select * from information_schema.columns where table_name = $1 and table_catalog = current_database() and table_schema = current_schema()
+\bind 'book' \g
+
+-- case: node-07
+-- xqt: mask-oids
+SET client_min_messages TO warning;SET TIME ZONE INTERVAL '+00:00' HOUR TO MINUTE;
+
+-- case: node-08
+-- xqt: mask-oids
+WITH ranges AS (  SELECT pg_range.rngtypid, pg_type.typname AS rngtypname,         pg_type.typarray AS rngtyparray, pg_range.rngsubtype    FROM pg_range LEFT OUTER JOIN pg_type ON pg_type.oid = pg_range.rngtypid)SELECT pg_type.typname, pg_type.typtype, pg_type.oid, pg_type.typarray,       ranges.rngtypname, ranges.rngtypid, ranges.rngtyparray  FROM pg_type LEFT OUTER JOIN ranges ON pg_type.oid = ranges.rngsubtype WHERE (pg_type.typtype IN('b', 'e'));
+
+-- case: node-09
+-- xqt: mask-oids
+SELECT 1+1 AS result;
+
+-- case: node-10
+-- xqt: mask-oids
+SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type LIKE '%TABLE' AND table_name != 'spatial_ref_sys';
+
+-- case: node-11
+-- xqt: mask-oids
+SELECT pk.constraint_type as "Constraint",c.column_name as "Field", c.column_default as "Default",c.is_nullable as "Null", (CASE WHEN c.udt_name = 'hstore' THEN c.udt_name ELSE c.data_type END) || (CASE WHEN c.character_maximum_length IS NOT NULL THEN '(' || c.character_maximum_length || ')' ELSE '' END) as "Type", (SELECT array_agg(e.enumlabel) FROM pg_catalog.pg_type t JOIN pg_catalog.pg_enum e ON t.oid=e.enumtypid WHERE t.typname=c.udt_name) AS "special", (SELECT pgd.description FROM pg_catalog.pg_statio_all_tables AS st INNER JOIN pg_catalog.pg_description pgd on (pgd.objoid=st.relid) WHERE c.ordinal_position=pgd.objsubid AND c.table_name=st.relname) AS "Comment" FROM information_schema.columns c LEFT JOIN (SELECT tc.table_schema, tc.table_name, cu.column_name, tc.constraint_type FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.KEY_COLUMN_USAGE  cu ON tc.table_schema=cu.table_schema and tc.table_name=cu.table_name and tc.constraint_name=cu.constraint_name and tc.constraint_type='PRIMARY KEY') pk ON pk.table_schema=c.table_schema AND pk.table_name=c.table_name AND pk.column_name=c.column_name WHERE c.table_name = 'book' AND c.table_schema = 'public';
+
+-- case: node-12
+-- xqt: mask-oids
+SELECT i.relname AS name, ix.indisprimary AS primary, ix.indisunique AS unique, ix.indkey AS indkey, array_agg(a.attnum) as column_indexes, array_agg(a.attname) AS column_names, pg_get_indexdef(ix.indexrelid) AS definition FROM pg_class t, pg_class i, pg_index ix, pg_attribute a WHERE t.oid = ix.indrelid AND i.oid = ix.indexrelid AND a.attrelid = t.oid AND t.relkind = 'r' and t.relname = 'book' GROUP BY i.relname, ix.indexrelid, ix.indisprimary, ix.indisunique, ix.indkey ORDER BY i.relname;
+
+-- case: node-13
+-- xqt: mask-oids
+SELECT DISTINCT tc.constraint_name as constraint_name, tc.constraint_schema as constraint_schema, tc.constraint_catalog as constraint_catalog, tc.table_name as table_name,tc.table_schema as table_schema,tc.table_catalog as table_catalog,tc.initially_deferred as initially_deferred,tc.is_deferrable as is_deferrable,kcu.column_name as column_name,ccu.table_schema  AS referenced_table_schema,ccu.table_catalog  AS referenced_table_catalog,ccu.table_name  AS referenced_table_name,ccu.column_name AS referenced_column_name FROM information_schema.table_constraints AS tc JOIN information_schema.key_column_usage AS kcu ON tc.constraint_name = kcu.constraint_name JOIN information_schema.constraint_column_usage AS ccu ON ccu.constraint_name = tc.constraint_name WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name = 'book' AND tc.table_catalog = 'corpus';
+
+-- case: node-14
+-- xqt: mask-oids
+SELECT schema_name FROM information_schema.schemata WHERE schema_name <> 'information_schema' AND schema_name != 'public' AND schema_name !~ E'^pg_';
+
+-- case: python-01
+-- xqt: mask-oids
+BEGIN;
+SELECT t.oid, typarray
+	FROM pg_type t JOIN pg_namespace ns
+	    ON typnamespace = ns.oid
+	WHERE typname = 'hstore';
+ROLLBACK;
+
+-- case: python-02
+-- xqt: mask-oids
+BEGIN;
+select pg_catalog.version();
+select current_schema();
+show transaction isolation level;
+show standard_conforming_strings;
+ROLLBACK;
+
+-- case: python-03
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p']) AND pg_catalog.pg_class.relpersistence != 't' AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog';
+ROLLBACK;
+
+-- case: python-04
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['v']) AND pg_catalog.pg_class.relpersistence != 't' AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog';
+ROLLBACK;
+
+-- case: python-05
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['S']) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog';
+ROLLBACK;
+
+-- case: python-06
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_attribute.attname AS name, pg_catalog.format_type(pg_catalog.pg_attribute.atttypid, pg_catalog.pg_attribute.atttypmod) AS format_type, CASE WHEN pg_catalog.pg_attribute.atthasdef THEN (SELECT pg_catalog.pg_get_expr(pg_catalog.pg_attrdef.adbin, pg_catalog.pg_attrdef.adrelid) AS pg_get_expr_1 
+	FROM pg_catalog.pg_attrdef 
+	WHERE pg_catalog.pg_attribute.atthasdef AND pg_catalog.pg_attrdef.adrelid = pg_catalog.pg_attribute.attrelid AND pg_catalog.pg_attrdef.adnum = pg_catalog.pg_attribute.attnum) ELSE NULL END AS "default", pg_catalog.pg_attribute.attnotnull AS not_null, pg_catalog.pg_class.relname AS table_name, pg_catalog.pg_description.description AS comment, pg_catalog.pg_attribute.attgenerated AS generated, CASE WHEN (pg_catalog.pg_attribute.attidentity != '') THEN (SELECT json_build_object('always', pg_catalog.pg_attribute.attidentity = 'a', 'start', pg_catalog.pg_sequence.seqstart, 'increment', pg_catalog.pg_sequence.seqincrement, 'minvalue', pg_catalog.pg_sequence.seqmin, 'maxvalue', pg_catalog.pg_sequence.seqmax, 'cache', pg_catalog.pg_sequence.seqcache, 'cycle', pg_catalog.pg_sequence.seqcycle) AS json_build_object_1 
+	FROM pg_catalog.pg_sequence 
+	WHERE pg_catalog.pg_attribute.attidentity != '' AND pg_catalog.pg_sequence.seqrelid = CAST(CAST(pg_catalog.pg_get_serial_sequence(CAST(CAST(pg_catalog.pg_attribute.attrelid AS REGCLASS) AS TEXT), pg_catalog.pg_attribute.attname) AS REGCLASS) AS OID)) ELSE NULL END AS identity_options, CASE WHEN (pg_catalog.pg_attribute.attcollation != 0 AND (SELECT pg_catalog.pg_type.typcollation 
+	FROM pg_catalog.pg_type 
+	WHERE pg_catalog.pg_type.oid = pg_catalog.pg_attribute.atttypid) != pg_catalog.pg_attribute.attcollation) THEN (SELECT json_build_object('name', pg_catalog.pg_collation.collname, 'schema', CASE WHEN pg_catalog.pg_collation_is_visible(pg_catalog.pg_collation.oid) THEN NULL ELSE pg_catalog.pg_namespace.nspname END) AS json_build_object_9 
+	FROM pg_catalog.pg_collation JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_collation.collnamespace 
+	WHERE pg_catalog.pg_collation.oid = pg_catalog.pg_attribute.attcollation) ELSE NULL END AS collation 
+	FROM pg_catalog.pg_class LEFT OUTER JOIN pg_catalog.pg_attribute ON pg_catalog.pg_class.oid = pg_catalog.pg_attribute.attrelid AND pg_catalog.pg_attribute.attnum > 0 AND NOT pg_catalog.pg_attribute.attisdropped LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_attribute.attrelid AND pg_catalog.pg_description.objsubid = pg_catalog.pg_attribute.attnum JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm']) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog' AND pg_catalog.pg_class.relname IN ('book') ORDER BY pg_catalog.pg_class.relname, pg_catalog.pg_attribute.attnum;
+ROLLBACK;
+
+-- case: python-07
+-- xqt: mask-oids
+SELECT oid AS oid_book FROM pg_class WHERE relname = 'book' \gset
+BEGIN;
+SELECT pg_catalog.pg_class.oid, pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm']) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog' AND pg_catalog.pg_class.relname IN ('book');
+SELECT attr.conrelid, array_agg(CAST(attr.attname AS TEXT) ORDER BY attr.ord) AS cols, attr.conname, min(attr.description) AS description, min(attr.indnkeyatts) AS indnkeyatts, bool_and(attr.indnullsnotdistinct) AS indnullsnotdistinct 
+	FROM (SELECT con.conrelid AS conrelid, con.conname AS conname, con.description AS description, con.ord AS ord, con.indnkeyatts AS indnkeyatts, con.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_attribute.attname AS attname 
+	FROM pg_catalog.pg_attribute JOIN (SELECT pg_catalog.pg_constraint.conrelid AS conrelid, pg_catalog.pg_constraint.conname AS conname, unnest(pg_catalog.pg_index.indkey) AS attnum, generate_subscripts(pg_catalog.pg_index.indkey, 1) AS ord, pg_catalog.pg_index.indnkeyatts AS indnkeyatts, pg_catalog.pg_index.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_description.description AS description 
+	FROM pg_catalog.pg_constraint JOIN pg_catalog.pg_index ON pg_catalog.pg_constraint.conindid = pg_catalog.pg_index.indexrelid LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST('pg_catalog.pg_constraint' AS REGCLASS) 
+	WHERE pg_catalog.pg_constraint.contype = 'p' AND pg_catalog.pg_constraint.conrelid IN (:oid_book)) AS con ON pg_catalog.pg_attribute.attnum = con.attnum AND pg_catalog.pg_attribute.attrelid = con.conrelid 
+	WHERE con.conrelid IN (:oid_book)) AS attr GROUP BY attr.conrelid, attr.conname ORDER BY attr.conrelid, attr.conname;
+ROLLBACK;
+
+-- case: python-08
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname, CASE WHEN (pg_catalog.pg_constraint.oid IS NOT NULL) THEN pg_catalog.pg_get_constraintdef(pg_catalog.pg_constraint.oid, true) END AS anon_1, nsp_ref.nspname, pg_catalog.pg_description.description 
+	FROM pg_catalog.pg_class LEFT OUTER JOIN pg_catalog.pg_constraint ON pg_catalog.pg_class.oid = pg_catalog.pg_constraint.conrelid AND pg_catalog.pg_constraint.contype = 'f' LEFT OUTER JOIN pg_catalog.pg_class AS cls_ref ON cls_ref.oid = pg_catalog.pg_constraint.confrelid LEFT OUTER JOIN pg_catalog.pg_namespace AS nsp_ref ON cls_ref.relnamespace = nsp_ref.oid LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST('pg_catalog.pg_constraint' AS REGCLASS) JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm']) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog' AND pg_catalog.pg_class.relname IN ('book') ORDER BY pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname;
+ROLLBACK;
+
+-- case: python-09
+-- xqt: mask-oids
+SELECT oid AS oid_book FROM pg_class WHERE relname = 'book' \gset
+BEGIN;
+SELECT pg_catalog.pg_am.oid, pg_catalog.pg_am.amname 
+	FROM pg_catalog.pg_am 
+	WHERE pg_catalog.pg_am.amname = 'btree';
+SELECT pg_catalog.pg_opclass.oid, pg_catalog.pg_opclass.opcname 
+	FROM pg_catalog.pg_opclass 
+	WHERE NOT pg_catalog.pg_opclass.opcdefault;
+SELECT pg_catalog.pg_index.indrelid, pg_catalog.pg_class.relname, pg_catalog.pg_index.indisunique, pg_catalog.pg_index.indisvalid, pg_catalog.pg_constraint.conrelid IS NOT NULL AS has_constraint, pg_catalog.pg_index.indoption, pg_catalog.pg_class.reloptions, pg_catalog.pg_class.relam, CASE WHEN (pg_catalog.pg_index.indpred IS NOT NULL) THEN pg_catalog.pg_get_expr(pg_catalog.pg_index.indpred, pg_catalog.pg_index.indrelid) END AS filter_definition, pg_catalog.pg_index.indnkeyatts, pg_catalog.pg_index.indnullsnotdistinct, idx_cols.elements, idx_cols.elements_is_expr, idx_cols.elements_opclass 
+	FROM pg_catalog.pg_index JOIN pg_catalog.pg_class ON pg_catalog.pg_index.indexrelid = pg_catalog.pg_class.oid LEFT OUTER JOIN (SELECT idx_attr.indexrelid AS indexrelid, min(idx_attr.indrelid) AS min_1, array_agg(idx_attr.element ORDER BY idx_attr.ord) AS elements, array_agg(idx_attr.is_expr ORDER BY idx_attr.ord) AS elements_is_expr, array_agg(idx_attr.att_opclass ORDER BY idx_attr.ord) AS elements_opclass 
+	FROM (SELECT idx.indexrelid AS indexrelid, idx.indrelid AS indrelid, idx.ord AS ord, CASE WHEN (idx.attnum = 0) THEN pg_catalog.pg_get_indexdef(idx.indexrelid, idx.ord + 1, true) ELSE CAST(pg_catalog.pg_attribute.attname AS TEXT) END AS element, idx.attnum = 0 AS is_expr, CAST(idx.att_opclass AS BIGINT) AS att_opclass 
+	FROM (SELECT pg_catalog.pg_index.indexrelid AS indexrelid, pg_catalog.pg_index.indrelid AS indrelid, unnest(pg_catalog.pg_index.indkey) AS attnum, unnest(pg_catalog.pg_index.indclass) AS att_opclass, generate_subscripts(pg_catalog.pg_index.indkey, 1) AS ord 
+	FROM pg_catalog.pg_index 
+	WHERE NOT pg_catalog.pg_index.indisprimary AND pg_catalog.pg_index.indrelid IN (:oid_book)) AS idx LEFT OUTER JOIN pg_catalog.pg_attribute ON pg_catalog.pg_attribute.attnum = idx.attnum AND pg_catalog.pg_attribute.attrelid = idx.indrelid 
+	WHERE idx.indrelid IN (:oid_book)) AS idx_attr GROUP BY idx_attr.indexrelid) AS idx_cols ON pg_catalog.pg_index.indexrelid = idx_cols.indexrelid LEFT OUTER JOIN pg_catalog.pg_constraint ON pg_catalog.pg_index.indrelid = pg_catalog.pg_constraint.conrelid AND pg_catalog.pg_index.indexrelid = pg_catalog.pg_constraint.conindid AND pg_catalog.pg_constraint.contype = ANY (ARRAY['p', 'u', 'x']) 
+	WHERE pg_catalog.pg_index.indrelid IN (:oid_book) AND NOT pg_catalog.pg_index.indisprimary ORDER BY pg_catalog.pg_index.indrelid, pg_catalog.pg_class.relname;
+ROLLBACK;
+
+-- case: python-10
+-- xqt: mask-oids
+SELECT oid AS oid_author FROM pg_class WHERE relname = 'author' \gset
+BEGIN;
+SELECT pg_catalog.pg_class.oid, pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm']) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog' AND pg_catalog.pg_class.relname IN ('author');
+SELECT attr.conrelid, array_agg(CAST(attr.attname AS TEXT) ORDER BY attr.ord) AS cols, attr.conname, min(attr.description) AS description, min(attr.indnkeyatts) AS indnkeyatts, bool_and(attr.indnullsnotdistinct) AS indnullsnotdistinct 
+	FROM (SELECT con.conrelid AS conrelid, con.conname AS conname, con.description AS description, con.ord AS ord, con.indnkeyatts AS indnkeyatts, con.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_attribute.attname AS attname 
+	FROM pg_catalog.pg_attribute JOIN (SELECT pg_catalog.pg_constraint.conrelid AS conrelid, pg_catalog.pg_constraint.conname AS conname, unnest(pg_catalog.pg_index.indkey) AS attnum, generate_subscripts(pg_catalog.pg_index.indkey, 1) AS ord, pg_catalog.pg_index.indnkeyatts AS indnkeyatts, pg_catalog.pg_index.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_description.description AS description 
+	FROM pg_catalog.pg_constraint JOIN pg_catalog.pg_index ON pg_catalog.pg_constraint.conindid = pg_catalog.pg_index.indexrelid LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST('pg_catalog.pg_constraint' AS REGCLASS) 
+	WHERE pg_catalog.pg_constraint.contype = 'u' AND pg_catalog.pg_constraint.conrelid IN (:oid_author)) AS con ON pg_catalog.pg_attribute.attnum = con.attnum AND pg_catalog.pg_attribute.attrelid = con.conrelid 
+	WHERE con.conrelid IN (:oid_author)) AS attr GROUP BY attr.conrelid, attr.conname ORDER BY attr.conrelid, attr.conname;
+ROLLBACK;
+
+-- case: python-11
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname, CASE WHEN (pg_catalog.pg_constraint.oid IS NOT NULL) THEN pg_catalog.pg_get_constraintdef(pg_catalog.pg_constraint.oid, true) END AS anon_1, pg_catalog.pg_description.description 
+	FROM pg_catalog.pg_class LEFT OUTER JOIN pg_catalog.pg_constraint ON pg_catalog.pg_class.oid = pg_catalog.pg_constraint.conrelid AND pg_catalog.pg_constraint.contype = 'c' LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST('pg_catalog.pg_constraint' AS REGCLASS) JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm']) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog' AND pg_catalog.pg_class.relname IN ('book') ORDER BY pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname;
+ROLLBACK;
+
+-- case: python-12
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relname IN ('book') AND pg_catalog.pg_class.relkind = ANY (ARRAY['r', 'p', 'f', 'v', 'm']) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != 'pg_catalog';
+ROLLBACK;
+
+-- case: python-13
+-- xqt: mask-oids
+BEGIN;
+SELECT id, title FROM book WHERE id = 1;
+ROLLBACK;
+
+-- case: python-14
+-- xqt: mask-oids
+BEGIN;
+select pg_catalog.version();
+select current_schema();
+show transaction isolation level;
+show standard_conforming_strings;
+SAVEPOINT "_pg3_1";
+SELECT
+	    typname AS name, oid, typarray AS array_oid,
+	    oid::regtype::text AS regtype, typdelim AS delimiter
+	FROM pg_type t
+	WHERE t.oid = to_regtype($1)
+	ORDER BY t.oid
+\bind 'hstore' \g
+RELEASE "_pg3_1";
+ROLLBACK;
+
+-- case: python-15
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$1::VARCHAR, $2::VARCHAR]) AND pg_catalog.pg_class.relpersistence != $3::VARCHAR AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $4::VARCHAR
+\bind 'r' 'p' 't' 'pg_catalog' \g
+ROLLBACK;
+
+-- case: python-16
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$1::VARCHAR]) AND pg_catalog.pg_class.relpersistence != $2::VARCHAR AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $3::VARCHAR
+\bind 'v' 't' 'pg_catalog' \g
+ROLLBACK;
+
+-- case: python-17
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$1::VARCHAR]) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $2::VARCHAR
+\bind 'S' 'pg_catalog' \g
+ROLLBACK;
+
+-- case: python-18
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_attribute.attname AS name, pg_catalog.format_type(pg_catalog.pg_attribute.atttypid, pg_catalog.pg_attribute.atttypmod) AS format_type, CASE WHEN pg_catalog.pg_attribute.atthasdef THEN (SELECT pg_catalog.pg_get_expr(pg_catalog.pg_attrdef.adbin, pg_catalog.pg_attrdef.adrelid) AS pg_get_expr_1 
+	FROM pg_catalog.pg_attrdef 
+	WHERE pg_catalog.pg_attribute.atthasdef AND pg_catalog.pg_attrdef.adrelid = pg_catalog.pg_attribute.attrelid AND pg_catalog.pg_attrdef.adnum = pg_catalog.pg_attribute.attnum) ELSE NULL END AS "default", pg_catalog.pg_attribute.attnotnull AS not_null, pg_catalog.pg_class.relname AS table_name, pg_catalog.pg_description.description AS comment, pg_catalog.pg_attribute.attgenerated AS generated, CASE WHEN (pg_catalog.pg_attribute.attidentity != $1::VARCHAR) THEN (SELECT json_build_object($2::VARCHAR, pg_catalog.pg_attribute.attidentity = $3::VARCHAR, $4::VARCHAR, pg_catalog.pg_sequence.seqstart, $5::VARCHAR, pg_catalog.pg_sequence.seqincrement, $6::VARCHAR, pg_catalog.pg_sequence.seqmin, $7::VARCHAR, pg_catalog.pg_sequence.seqmax, $8::VARCHAR, pg_catalog.pg_sequence.seqcache, $9::VARCHAR, pg_catalog.pg_sequence.seqcycle) AS json_build_object_1 
+	FROM pg_catalog.pg_sequence 
+	WHERE pg_catalog.pg_attribute.attidentity != $10::VARCHAR AND pg_catalog.pg_sequence.seqrelid = CAST(CAST(pg_catalog.pg_get_serial_sequence(CAST(CAST(pg_catalog.pg_attribute.attrelid AS REGCLASS) AS TEXT), pg_catalog.pg_attribute.attname) AS REGCLASS) AS OID)) ELSE NULL END AS identity_options, CASE WHEN (pg_catalog.pg_attribute.attcollation != $11::INTEGER AND (SELECT pg_catalog.pg_type.typcollation 
+	FROM pg_catalog.pg_type 
+	WHERE pg_catalog.pg_type.oid = pg_catalog.pg_attribute.atttypid) != pg_catalog.pg_attribute.attcollation) THEN (SELECT json_build_object($12::VARCHAR, pg_catalog.pg_collation.collname, $13::VARCHAR, CASE WHEN pg_catalog.pg_collation_is_visible(pg_catalog.pg_collation.oid) THEN NULL ELSE pg_catalog.pg_namespace.nspname END) AS json_build_object_9 
+	FROM pg_catalog.pg_collation JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_collation.collnamespace 
+	WHERE pg_catalog.pg_collation.oid = pg_catalog.pg_attribute.attcollation) ELSE NULL END AS collation 
+	FROM pg_catalog.pg_class LEFT OUTER JOIN pg_catalog.pg_attribute ON pg_catalog.pg_class.oid = pg_catalog.pg_attribute.attrelid AND pg_catalog.pg_attribute.attnum > $14::SMALLINT AND NOT pg_catalog.pg_attribute.attisdropped LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_attribute.attrelid AND pg_catalog.pg_description.objsubid = pg_catalog.pg_attribute.attnum JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$15::VARCHAR, $16::VARCHAR, $17::VARCHAR, $18::VARCHAR, $19::VARCHAR]) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $20::VARCHAR AND pg_catalog.pg_class.relname IN ($21::VARCHAR) ORDER BY pg_catalog.pg_class.relname, pg_catalog.pg_attribute.attnum
+\bind '' 'always' 'a' 'start' 'increment' 'minvalue' 'maxvalue' 'cache' 'cycle' '' '0' 'name' 'schema' '0' 'r' 'p' 'f' 'v' 'm' 'pg_catalog' 'book' \g
+ROLLBACK;
+
+-- case: python-19
+-- xqt: mask-oids
+SELECT oid AS oid_book FROM pg_class WHERE relname = 'book' \gset
+BEGIN;
+SELECT pg_catalog.pg_class.oid, pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$1::VARCHAR, $2::VARCHAR, $3::VARCHAR, $4::VARCHAR, $5::VARCHAR]) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $6::VARCHAR AND pg_catalog.pg_class.relname IN ($7::VARCHAR)
+\bind 'r' 'p' 'f' 'v' 'm' 'pg_catalog' 'book' \g
+SELECT attr.conrelid, array_agg(CAST(attr.attname AS TEXT) ORDER BY attr.ord) AS cols, attr.conname, min(attr.description) AS description, min(attr.indnkeyatts) AS indnkeyatts, bool_and(attr.indnullsnotdistinct) AS indnullsnotdistinct 
+	FROM (SELECT con.conrelid AS conrelid, con.conname AS conname, con.description AS description, con.ord AS ord, con.indnkeyatts AS indnkeyatts, con.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_attribute.attname AS attname 
+	FROM pg_catalog.pg_attribute JOIN (SELECT pg_catalog.pg_constraint.conrelid AS conrelid, pg_catalog.pg_constraint.conname AS conname, unnest(pg_catalog.pg_index.indkey) AS attnum, generate_subscripts(pg_catalog.pg_index.indkey, $1::INTEGER) AS ord, pg_catalog.pg_index.indnkeyatts AS indnkeyatts, pg_catalog.pg_index.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_description.description AS description 
+	FROM pg_catalog.pg_constraint JOIN pg_catalog.pg_index ON pg_catalog.pg_constraint.conindid = pg_catalog.pg_index.indexrelid LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST($2 AS REGCLASS) 
+	WHERE pg_catalog.pg_constraint.contype = $3::VARCHAR AND pg_catalog.pg_constraint.conrelid IN ($4)) AS con ON pg_catalog.pg_attribute.attnum = con.attnum AND pg_catalog.pg_attribute.attrelid = con.conrelid 
+	WHERE con.conrelid IN ($4)) AS attr GROUP BY attr.conrelid, attr.conname ORDER BY attr.conrelid, attr.conname
+\bind '1' 'pg_constraint' 'p' :oid_book \g
+ROLLBACK;
+
+-- case: python-20
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname, CASE WHEN (pg_catalog.pg_constraint.oid IS NOT NULL) THEN pg_catalog.pg_get_constraintdef(pg_catalog.pg_constraint.oid, $1) END AS anon_1, nsp_ref.nspname, pg_catalog.pg_description.description 
+	FROM pg_catalog.pg_class LEFT OUTER JOIN pg_catalog.pg_constraint ON pg_catalog.pg_class.oid = pg_catalog.pg_constraint.conrelid AND pg_catalog.pg_constraint.contype = $2::VARCHAR LEFT OUTER JOIN pg_catalog.pg_class AS cls_ref ON cls_ref.oid = pg_catalog.pg_constraint.confrelid LEFT OUTER JOIN pg_catalog.pg_namespace AS nsp_ref ON cls_ref.relnamespace = nsp_ref.oid LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST($3 AS REGCLASS) JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$4::VARCHAR, $5::VARCHAR, $6::VARCHAR, $7::VARCHAR, $8::VARCHAR]) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $9::VARCHAR AND pg_catalog.pg_class.relname IN ($10::VARCHAR) ORDER BY pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname
+\bind 't' 'f' 'pg_constraint' 'r' 'p' 'f' 'v' 'm' 'pg_catalog' 'book' \g
+ROLLBACK;
+
+-- case: python-21
+-- xqt: mask-oids
+SELECT oid AS oid_book FROM pg_class WHERE relname = 'book' \gset
+BEGIN;
+SELECT pg_catalog.pg_am.oid, pg_catalog.pg_am.amname 
+	FROM pg_catalog.pg_am 
+	WHERE pg_catalog.pg_am.amname = $1::VARCHAR
+\bind 'btree' \g
+SELECT pg_catalog.pg_opclass.oid, pg_catalog.pg_opclass.opcname 
+	FROM pg_catalog.pg_opclass 
+	WHERE NOT pg_catalog.pg_opclass.opcdefault;
+SELECT pg_catalog.pg_index.indrelid, pg_catalog.pg_class.relname, pg_catalog.pg_index.indisunique, pg_catalog.pg_index.indisvalid, pg_catalog.pg_constraint.conrelid IS NOT NULL AS has_constraint, pg_catalog.pg_index.indoption, pg_catalog.pg_class.reloptions, pg_catalog.pg_class.relam, CASE WHEN (pg_catalog.pg_index.indpred IS NOT NULL) THEN pg_catalog.pg_get_expr(pg_catalog.pg_index.indpred, pg_catalog.pg_index.indrelid) END AS filter_definition, pg_catalog.pg_index.indnkeyatts, pg_catalog.pg_index.indnullsnotdistinct, idx_cols.elements, idx_cols.elements_is_expr, idx_cols.elements_opclass 
+	FROM pg_catalog.pg_index JOIN pg_catalog.pg_class ON pg_catalog.pg_index.indexrelid = pg_catalog.pg_class.oid LEFT OUTER JOIN (SELECT idx_attr.indexrelid AS indexrelid, min(idx_attr.indrelid) AS min_1, array_agg(idx_attr.element ORDER BY idx_attr.ord) AS elements, array_agg(idx_attr.is_expr ORDER BY idx_attr.ord) AS elements_is_expr, array_agg(idx_attr.att_opclass ORDER BY idx_attr.ord) AS elements_opclass 
+	FROM (SELECT idx.indexrelid AS indexrelid, idx.indrelid AS indrelid, idx.ord AS ord, CASE WHEN (idx.attnum = $1::INTEGER) THEN pg_catalog.pg_get_indexdef(idx.indexrelid, idx.ord + $2::INTEGER, $3) ELSE CAST(pg_catalog.pg_attribute.attname AS TEXT) END AS element, idx.attnum = $4::INTEGER AS is_expr, CAST(idx.att_opclass AS BIGINT) AS att_opclass 
+	FROM (SELECT pg_catalog.pg_index.indexrelid AS indexrelid, pg_catalog.pg_index.indrelid AS indrelid, unnest(pg_catalog.pg_index.indkey) AS attnum, unnest(pg_catalog.pg_index.indclass) AS att_opclass, generate_subscripts(pg_catalog.pg_index.indkey, $5::INTEGER) AS ord 
+	FROM pg_catalog.pg_index 
+	WHERE NOT pg_catalog.pg_index.indisprimary AND pg_catalog.pg_index.indrelid IN ($6)) AS idx LEFT OUTER JOIN pg_catalog.pg_attribute ON pg_catalog.pg_attribute.attnum = idx.attnum AND pg_catalog.pg_attribute.attrelid = idx.indrelid 
+	WHERE idx.indrelid IN ($6)) AS idx_attr GROUP BY idx_attr.indexrelid) AS idx_cols ON pg_catalog.pg_index.indexrelid = idx_cols.indexrelid LEFT OUTER JOIN pg_catalog.pg_constraint ON pg_catalog.pg_index.indrelid = pg_catalog.pg_constraint.conrelid AND pg_catalog.pg_index.indexrelid = pg_catalog.pg_constraint.conindid AND pg_catalog.pg_constraint.contype = ANY (ARRAY[$7::VARCHAR, $8::VARCHAR, $9::VARCHAR]) 
+	WHERE pg_catalog.pg_index.indrelid IN ($6) AND NOT pg_catalog.pg_index.indisprimary ORDER BY pg_catalog.pg_index.indrelid, pg_catalog.pg_class.relname
+\bind '0' '1' 't' '0' '1' :oid_book 'p' 'u' 'x' \g
+ROLLBACK;
+
+-- case: python-22
+-- xqt: mask-oids
+SELECT oid AS oid_author FROM pg_class WHERE relname = 'author' \gset
+BEGIN;
+SELECT pg_catalog.pg_class.oid, pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$1::VARCHAR, $2::VARCHAR, $3::VARCHAR, $4::VARCHAR, $5::VARCHAR]) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $6::VARCHAR AND pg_catalog.pg_class.relname IN ($7::VARCHAR)
+\bind 'r' 'p' 'f' 'v' 'm' 'pg_catalog' 'author' \g
+SELECT attr.conrelid, array_agg(CAST(attr.attname AS TEXT) ORDER BY attr.ord) AS cols, attr.conname, min(attr.description) AS description, min(attr.indnkeyatts) AS indnkeyatts, bool_and(attr.indnullsnotdistinct) AS indnullsnotdistinct 
+	FROM (SELECT con.conrelid AS conrelid, con.conname AS conname, con.description AS description, con.ord AS ord, con.indnkeyatts AS indnkeyatts, con.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_attribute.attname AS attname 
+	FROM pg_catalog.pg_attribute JOIN (SELECT pg_catalog.pg_constraint.conrelid AS conrelid, pg_catalog.pg_constraint.conname AS conname, unnest(pg_catalog.pg_index.indkey) AS attnum, generate_subscripts(pg_catalog.pg_index.indkey, $1::INTEGER) AS ord, pg_catalog.pg_index.indnkeyatts AS indnkeyatts, pg_catalog.pg_index.indnullsnotdistinct AS indnullsnotdistinct, pg_catalog.pg_description.description AS description 
+	FROM pg_catalog.pg_constraint JOIN pg_catalog.pg_index ON pg_catalog.pg_constraint.conindid = pg_catalog.pg_index.indexrelid LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST($2 AS REGCLASS) 
+	WHERE pg_catalog.pg_constraint.contype = $3::VARCHAR AND pg_catalog.pg_constraint.conrelid IN ($4)) AS con ON pg_catalog.pg_attribute.attnum = con.attnum AND pg_catalog.pg_attribute.attrelid = con.conrelid 
+	WHERE con.conrelid IN ($4)) AS attr GROUP BY attr.conrelid, attr.conname ORDER BY attr.conrelid, attr.conname
+\bind '1' 'pg_constraint' 'u' :oid_author \g
+ROLLBACK;
+
+-- case: python-23
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname, CASE WHEN (pg_catalog.pg_constraint.oid IS NOT NULL) THEN pg_catalog.pg_get_constraintdef(pg_catalog.pg_constraint.oid, $1) END AS anon_1, pg_catalog.pg_description.description 
+	FROM pg_catalog.pg_class LEFT OUTER JOIN pg_catalog.pg_constraint ON pg_catalog.pg_class.oid = pg_catalog.pg_constraint.conrelid AND pg_catalog.pg_constraint.contype = $2::VARCHAR LEFT OUTER JOIN pg_catalog.pg_description ON pg_catalog.pg_description.objoid = pg_catalog.pg_constraint.oid AND pg_catalog.pg_description.classoid = CAST($3 AS REGCLASS) JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relkind = ANY (ARRAY[$4::VARCHAR, $5::VARCHAR, $6::VARCHAR, $7::VARCHAR, $8::VARCHAR]) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $9::VARCHAR AND pg_catalog.pg_class.relname IN ($10::VARCHAR) ORDER BY pg_catalog.pg_class.relname, pg_catalog.pg_constraint.conname
+\bind 't' 'c' 'pg_constraint' 'r' 'p' 'f' 'v' 'm' 'pg_catalog' 'book' \g
+ROLLBACK;
+
+-- case: python-24
+-- xqt: mask-oids
+BEGIN;
+SELECT pg_catalog.pg_class.relname 
+	FROM pg_catalog.pg_class JOIN pg_catalog.pg_namespace ON pg_catalog.pg_namespace.oid = pg_catalog.pg_class.relnamespace 
+	WHERE pg_catalog.pg_class.relname IN ($1::VARCHAR) AND pg_catalog.pg_class.relkind = ANY (ARRAY[$2::VARCHAR, $3::VARCHAR, $4::VARCHAR, $5::VARCHAR, $6::VARCHAR]) AND pg_catalog.pg_table_is_visible(pg_catalog.pg_class.oid) AND pg_catalog.pg_namespace.nspname != $7::VARCHAR
+\bind 'book' 'r' 'p' 'f' 'v' 'm' 'pg_catalog' \g
+ROLLBACK;
+
+-- case: python-25
+-- xqt: mask-oids
+BEGIN;
+SELECT id, title FROM book WHERE id = $1
+\bind '1' \g
+ROLLBACK;
+
+-- case: python-26
+-- xqt: mask-oids
+SELECT
+	                c.relname,
+	                CASE
+	                    WHEN c.relispartition THEN 'p'
+	                    WHEN c.relkind IN ('m', 'v') THEN 'v'
+	                    ELSE 't'
+	                END,
+	                obj_description(c.oid, 'pg_class')
+	            FROM pg_catalog.pg_class c
+	            LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	            WHERE c.relkind IN ('f', 'm', 'p', 'r', 'v')
+	                AND n.nspname NOT IN ('pg_catalog', 'pg_toast')
+	                AND pg_catalog.pg_table_is_visible(c.oid);
+
+-- case: python-27
+-- xqt: mask-oids
+SELECT
+	                a.attname AS column_name,
+	                NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable,
+	                pg_get_expr(ad.adbin, ad.adrelid) AS column_default,
+	                CASE WHEN collname = 'default' THEN NULL ELSE collname END AS collation,
+	                a.attidentity != '' AS is_autofield,
+	                col_description(a.attrelid, a.attnum) AS column_comment
+	            FROM pg_attribute a
+	            LEFT JOIN pg_attrdef ad ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+	            LEFT JOIN pg_collation co ON a.attcollation = co.oid
+	            JOIN pg_type t ON a.atttypid = t.oid
+	            JOIN pg_class c ON a.attrelid = c.oid
+	            JOIN pg_namespace n ON c.relnamespace = n.oid
+	            WHERE c.relkind IN ('f', 'm', 'p', 'r', 'v')
+	                AND c.relname = 'book'
+	                AND n.nspname NOT IN ('pg_catalog', 'pg_toast')
+	                AND pg_catalog.pg_table_is_visible(c.oid);
+
+-- case: python-28
+-- xqt: mask-oids
+SELECT * FROM "book" LIMIT 1;
+
+-- case: python-29
+-- xqt: mask-oids
+SELECT
+	                s.relname AS sequence_name,
+	                a.attname AS colname
+	            FROM
+	                pg_class s
+	                JOIN pg_depend d ON d.objid = s.oid
+	                    AND d.classid = 'pg_class'::regclass
+	                    AND d.refclassid = 'pg_class'::regclass
+	                JOIN pg_attribute a ON d.refobjid = a.attrelid
+	                    AND d.refobjsubid = a.attnum
+	                JOIN pg_class tbl ON tbl.oid = d.refobjid
+	                    AND tbl.relname = 'author'
+	                    AND pg_catalog.pg_table_is_visible(tbl.oid)
+	            WHERE
+	                s.relkind = 'S';
+
+-- case: python-30
+-- xqt: mask-oids
+SELECT a1.attname, c2.relname, a2.attname, con.confdeltype
+	            FROM pg_constraint con
+	            LEFT JOIN pg_class c1 ON con.conrelid = c1.oid
+	            LEFT JOIN pg_class c2 ON con.confrelid = c2.oid
+	            LEFT JOIN
+	                pg_attribute a1 ON c1.oid = a1.attrelid AND a1.attnum = con.conkey[1]
+	            LEFT JOIN
+	                pg_attribute a2 ON c2.oid = a2.attrelid AND a2.attnum = con.confkey[1]
+	            WHERE
+	                c1.relname = 'book' AND
+	                con.contype = 'f' AND
+	                c1.relnamespace = c2.relnamespace AND
+	                pg_catalog.pg_table_is_visible(c1.oid);
+
+-- case: python-31
+-- xqt: mask-oids
+SELECT
+	                c.conname,
+	                array(
+	                    SELECT attname
+	                    FROM unnest(c.conkey) WITH ORDINALITY cols(colid, arridx)
+	                    JOIN pg_attribute AS ca ON cols.colid = ca.attnum
+	                    WHERE ca.attrelid = c.conrelid
+	                    ORDER BY cols.arridx
+	                ),
+	                c.contype,
+	                (SELECT fkc.relname || '.' || fka.attname
+	                FROM pg_attribute AS fka
+	                JOIN pg_class AS fkc ON fka.attrelid = fkc.oid
+	                WHERE fka.attrelid = c.confrelid AND fka.attnum = c.confkey[1]),
+	                cl.reloptions
+	            FROM pg_constraint AS c
+	            JOIN pg_class AS cl ON c.conrelid = cl.oid
+	            WHERE cl.relname = 'book'
+	                AND pg_catalog.pg_table_is_visible(cl.oid)
+	                AND c.contype != 'n';
+
+-- case: python-32
+-- xqt: mask-oids
+SELECT
+	                indexname,
+	                array_agg(attname ORDER BY arridx),
+	                indisunique,
+	                indisprimary,
+	                array_agg(ordering ORDER BY arridx),
+	                amname,
+	                exprdef,
+	                s2.attoptions
+	            FROM (
+	                SELECT
+	                    c2.relname as indexname, idx.*, attr.attname, am.amname,
+	                    CASE
+	                        WHEN idx.indexprs IS NOT NULL THEN
+	                            pg_get_indexdef(idx.indexrelid)
+	                    END AS exprdef,
+	                    CASE am.amname
+	                        WHEN 'btree' THEN
+	                            CASE (option & 1)
+	                                WHEN 1 THEN 'DESC' ELSE 'ASC'
+	                            END
+	                    END as ordering,
+	                    c2.reloptions as attoptions
+	                FROM (
+	                    SELECT *
+	                    FROM
+	                        pg_index i,
+	                        unnest(i.indkey, i.indoption)
+	                            WITH ORDINALITY koi(key, option, arridx)
+	                ) idx
+	                LEFT JOIN pg_class c ON idx.indrelid = c.oid
+	                LEFT JOIN pg_class c2 ON idx.indexrelid = c2.oid
+	                LEFT JOIN pg_am am ON c2.relam = am.oid
+	                LEFT JOIN
+	                    pg_attribute attr ON attr.attrelid = c.oid AND attr.attnum = idx.key
+	                WHERE c.relname = 'book' AND pg_catalog.pg_table_is_visible(c.oid)
+	            ) s2
+	            GROUP BY indexname, indisunique, indisprimary, amname, exprdef, attoptions;
+
+-- case: python-33
+-- xqt: mask-oids
+SELECT
+	                c.conname,
+	                array(
+	                    SELECT attname
+	                    FROM unnest(c.conkey) WITH ORDINALITY cols(colid, arridx)
+	                    JOIN pg_attribute AS ca ON cols.colid = ca.attnum
+	                    WHERE ca.attrelid = c.conrelid
+	                    ORDER BY cols.arridx
+	                ),
+	                c.contype,
+	                (SELECT fkc.relname || '.' || fka.attname
+	                FROM pg_attribute AS fka
+	                JOIN pg_class AS fkc ON fka.attrelid = fkc.oid
+	                WHERE fka.attrelid = c.confrelid AND fka.attnum = c.confkey[1]),
+	                cl.reloptions
+	            FROM pg_constraint AS c
+	            JOIN pg_class AS cl ON c.conrelid = cl.oid
+	            WHERE cl.relname = 'author'
+	                AND pg_catalog.pg_table_is_visible(cl.oid)
+	                AND c.contype != 'n';
+
+-- case: python-34
+-- xqt: mask-oids
+SELECT
+	                indexname,
+	                array_agg(attname ORDER BY arridx),
+	                indisunique,
+	                indisprimary,
+	                array_agg(ordering ORDER BY arridx),
+	                amname,
+	                exprdef,
+	                s2.attoptions
+	            FROM (
+	                SELECT
+	                    c2.relname as indexname, idx.*, attr.attname, am.amname,
+	                    CASE
+	                        WHEN idx.indexprs IS NOT NULL THEN
+	                            pg_get_indexdef(idx.indexrelid)
+	                    END AS exprdef,
+	                    CASE am.amname
+	                        WHEN 'btree' THEN
+	                            CASE (option & 1)
+	                                WHEN 1 THEN 'DESC' ELSE 'ASC'
+	                            END
+	                    END as ordering,
+	                    c2.reloptions as attoptions
+	                FROM (
+	                    SELECT *
+	                    FROM
+	                        pg_index i,
+	                        unnest(i.indkey, i.indoption)
+	                            WITH ORDINALITY koi(key, option, arridx)
+	                ) idx
+	                LEFT JOIN pg_class c ON idx.indrelid = c.oid
+	                LEFT JOIN pg_class c2 ON idx.indexrelid = c2.oid
+	                LEFT JOIN pg_am am ON c2.relam = am.oid
+	                LEFT JOIN
+	                    pg_attribute attr ON attr.attrelid = c.oid AND attr.attnum = idx.key
+	                WHERE c.relname = 'author' AND pg_catalog.pg_table_is_visible(c.oid)
+	            ) s2
+	            GROUP BY indexname, indisunique, indisprimary, amname, exprdef, attoptions;
+
+-- case: pgjdbc-01
+-- xqt: mask-oids
+SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM, c.relname AS TABLE_NAME,  CASE n.nspname ~ '^pg_' OR n.nspname = 'information_schema'  WHEN true THEN CASE  WHEN n.nspname = 'pg_catalog' OR n.nspname = 'information_schema' THEN CASE c.relkind   WHEN 'r' THEN 'SYSTEM TABLE'   WHEN 'v' THEN 'SYSTEM VIEW'   WHEN 'i' THEN 'SYSTEM INDEX'   ELSE NULL   END  WHEN n.nspname = 'pg_toast' THEN CASE c.relkind   WHEN 'r' THEN 'SYSTEM TOAST TABLE'   WHEN 'i' THEN 'SYSTEM TOAST INDEX'   ELSE NULL   END  ELSE CASE c.relkind   WHEN 'r' THEN 'TEMPORARY TABLE'   WHEN 'p' THEN 'TEMPORARY TABLE'   WHEN 'i' THEN 'TEMPORARY INDEX'   WHEN 'S' THEN 'TEMPORARY SEQUENCE'   WHEN 'v' THEN 'TEMPORARY VIEW'   ELSE NULL   END  END  WHEN false THEN CASE c.relkind  WHEN 'r' THEN 'TABLE'  WHEN 'p' THEN 'PARTITIONED TABLE'  WHEN 'i' THEN 'INDEX'  WHEN 'P' then 'PARTITIONED INDEX'  WHEN 'S' THEN 'SEQUENCE'  WHEN 'v' THEN 'VIEW'  WHEN 'c' THEN 'TYPE'  WHEN 'f' THEN 'FOREIGN TABLE'  WHEN 'm' THEN 'MATERIALIZED VIEW'  ELSE NULL  END  ELSE NULL  END  AS TABLE_TYPE, d.description AS REMARKS,  '' as TYPE_CAT, '' as TYPE_SCHEM, '' as TYPE_NAME, '' AS SELF_REFERENCING_COL_NAME, '' AS REF_GENERATION  FROM pg_catalog.pg_namespace n, pg_catalog.pg_class c  LEFT JOIN pg_catalog.pg_description d ON (c.oid = d.objoid AND d.objsubid = 0  and d.classoid = 'pg_class'::regclass)  WHERE c.relnamespace = n.oid  AND n.nspname LIKE 'public' AND c.relname LIKE '%' AND (false  OR ( c.relkind = 'r' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' )  OR ( c.relkind = 'v' AND n.nspname <> 'pg_catalog' AND n.nspname <> 'information_schema' ) )  ORDER BY TABLE_TYPE,TABLE_SCHEM,TABLE_NAME
+\bind \g
+
+-- case: pgjdbc-02
+-- xqt: mask-oids
+SELECT * FROM (SELECT n.nspname,c.relname,a.attname,a.atttypid,a.attnotnull OR (t.typtype = 'd' AND t.typnotnull) AS attnotnull,a.atttypmod,a.attlen,t.typtypmod,row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum) AS attnum, nullif(a.attidentity, '') as attidentity,nullif(a.attgenerated, '') as attgenerated,pg_catalog.pg_get_expr(def.adbin, def.adrelid) AS adsrc,dsc.description,t.typbasetype,t.typtype  FROM pg_catalog.pg_namespace n  JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid)  JOIN pg_catalog.pg_attribute a ON (a.attrelid=c.oid)  JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid)  LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid=def.adrelid AND a.attnum = def.adnum)  LEFT JOIN pg_catalog.pg_description dsc ON (c.oid=dsc.objoid AND a.attnum = dsc.objsubid)  LEFT JOIN pg_catalog.pg_class dc ON (dc.oid=dsc.classoid AND dc.relname='pg_class')  LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace=dn.oid AND dn.nspname='pg_catalog')  WHERE c.relkind in ('r','p','v','f','m') and a.attnum > 0 AND NOT a.attisdropped  AND n.nspname LIKE 'public' AND c.relname LIKE 'book') c WHERE true  AND attname LIKE '%' ORDER BY nspname,c.relname,attnum
+\bind \g
+
+-- case: pgjdbc-03
+-- xqt: mask-oids
+SELECT typinput='pg_catalog.array_in'::regproc as is_array, typtype, typname, pg_type.oid   FROM pg_catalog.pg_type   LEFT JOIN (select ns.oid as nspoid, ns.nspname, r.r           from pg_namespace as ns           join ( select s.r, (current_schemas(false))[s.r] as nspname                    from generate_series(1, array_upper(current_schemas(false), 1)) as s(r) ) as r          using ( nspname )        ) as sp     ON sp.nspoid = typnamespace  WHERE pg_type.oid = $1  ORDER BY sp.r, pg_type.oid DESC
+\bind '3802' \g
+
+-- case: pgjdbc-04
+-- xqt: mask-oids
+SELECT n.nspname = ANY(current_schemas(true)), n.nspname, t.typname FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON t.typnamespace = n.oid WHERE t.oid = $1
+\bind '3802' \g
+
+-- case: pgjdbc-05
+-- xqt: mask-oids
+SELECT        result.TABLE_CAT,        result.TABLE_SCHEM,        result.TABLE_NAME,        result.COLUMN_NAME,        result.KEY_SEQ,        result.PK_NAME FROM      (SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM,   ct.relname AS TABLE_NAME, a.attname AS COLUMN_NAME,   (information_schema._pg_expandarray(i.indkey)).n AS KEY_SEQ, ci.relname AS PK_NAME,   information_schema._pg_expandarray(i.indkey) AS KEYS, a.attnum AS A_ATTNUM FROM pg_catalog.pg_class ct   JOIN pg_catalog.pg_attribute a ON (ct.oid = a.attrelid)   JOIN pg_catalog.pg_namespace n ON (ct.relnamespace = n.oid)   JOIN pg_catalog.pg_index i ON ( a.attrelid = i.indrelid)   JOIN pg_catalog.pg_class ci ON (ci.oid = i.indexrelid) WHERE true  AND n.nspname = 'public' AND ct.relname = 'book' AND i.indisprimary  ) result where  result.A_ATTNUM = (result.KEYS).x  ORDER BY result.table_name, result.pk_name, result.key_seq
+\bind \g
+
+-- case: pgjdbc-06
+-- xqt: mask-oids
+SELECT setting FROM pg_catalog.pg_settings WHERE name='max_index_keys'
+\bind \g
+
+-- case: pgjdbc-07
+-- xqt: mask-oids
+SELECT NULL::text AS PKTABLE_CAT, pkn.nspname AS PKTABLE_SCHEM, pkc.relname AS PKTABLE_NAME, pka.attname AS PKCOLUMN_NAME, NULL::text AS FKTABLE_CAT, fkn.nspname AS FKTABLE_SCHEM, fkc.relname AS FKTABLE_NAME, fka.attname AS FKCOLUMN_NAME, pos.n AS KEY_SEQ, CASE con.confupdtype  WHEN 'c' THEN 0 WHEN 'n' THEN 2 WHEN 'd' THEN 4 WHEN 'r' THEN 1 WHEN 'p' THEN 1 WHEN 'a' THEN 3 ELSE NULL END AS UPDATE_RULE, CASE con.confdeltype  WHEN 'c' THEN 0 WHEN 'n' THEN 2 WHEN 'd' THEN 4 WHEN 'r' THEN 1 WHEN 'p' THEN 1 WHEN 'a' THEN 3 ELSE NULL END AS DELETE_RULE, con.conname AS FK_NAME, pkic.relname AS PK_NAME, CASE  WHEN con.condeferrable AND con.condeferred THEN 5 WHEN con.condeferrable THEN 6 ELSE 7 END AS DEFERRABILITY  FROM  pg_catalog.pg_namespace pkn, pg_catalog.pg_class pkc, pg_catalog.pg_attribute pka,  pg_catalog.pg_namespace fkn, pg_catalog.pg_class fkc, pg_catalog.pg_attribute fka,  pg_catalog.pg_constraint con,  pg_catalog.generate_series(1, 32) pos(n),  pg_catalog.pg_class pkic WHERE pkn.oid = pkc.relnamespace AND pkc.oid = pka.attrelid AND pka.attnum = con.confkey[pos.n] AND con.confrelid = pkc.oid  AND fkn.oid = fkc.relnamespace AND fkc.oid = fka.attrelid AND fka.attnum = con.conkey[pos.n] AND con.conrelid = fkc.oid  AND con.contype = 'f' AND (pkic.relkind = 'i' OR pkic.relkind = 'I') AND pkic.oid = con.conindid  AND fkn.nspname = 'public' AND fkc.relname = 'book' ORDER BY pkn.nspname,pkc.relname, con.conname,pos.n
+\bind \g
+
+-- case: pgjdbc-08
+-- xqt: mask-oids
+SELECT     tmp.TABLE_CAT,     tmp.TABLE_SCHEM,     tmp.TABLE_NAME,     tmp.NON_UNIQUE,     tmp.INDEX_QUALIFIER,     tmp.INDEX_NAME,     tmp.TYPE,     tmp.ORDINAL_POSITION,     trim(both '"' from pg_catalog.pg_get_indexdef(tmp.CI_OID, tmp.ORDINAL_POSITION, false)) AS COLUMN_NAME,   CASE tmp.AM_NAME     WHEN 'btree' THEN CASE tmp.I_INDOPTION[tmp.ORDINAL_POSITION - 1] & 1::smallint       WHEN 1 THEN 'D'       ELSE 'A'     END     ELSE NULL   END AS ASC_OR_DESC,     tmp.CARDINALITY,     tmp.PAGES,     tmp.FILTER_CONDITION FROM (SELECT NULL AS TABLE_CAT, n.nspname AS TABLE_SCHEM,   ct.relname AS TABLE_NAME, NOT i.indisunique AS NON_UNIQUE,   NULL AS INDEX_QUALIFIER, ci.relname AS INDEX_NAME,   CASE i.indisclustered     WHEN true THEN 1    ELSE CASE am.amname       WHEN 'hash' THEN 2      ELSE 3    END   END AS TYPE,   (information_schema._pg_expandarray(i.indkey)).n AS ORDINAL_POSITION,   ci.reltuples AS CARDINALITY,   ci.relpages AS PAGES,   pg_catalog.pg_get_expr(i.indpred, i.indrelid) AS FILTER_CONDITION,   ci.oid AS CI_OID,   i.indoption AS I_INDOPTION,   am.amname AS AM_NAME FROM pg_catalog.pg_class ct   JOIN pg_catalog.pg_namespace n ON (ct.relnamespace = n.oid)   JOIN pg_catalog.pg_index i ON (ct.oid = i.indrelid)   JOIN pg_catalog.pg_class ci ON (ci.oid = i.indexrelid)   JOIN pg_catalog.pg_am am ON (ci.relam = am.oid) WHERE true  AND n.nspname = 'public' AND ct.relname = 'book') AS tmp ORDER BY NON_UNIQUE, TYPE, INDEX_NAME, ORDINAL_POSITION
+\bind \g
+
+-- case: pgjdbc-09
+-- xqt: mask-oids
+SELECT nspname AS TABLE_SCHEM, NULL AS TABLE_CATALOG FROM pg_catalog.pg_namespace  WHERE nspname <> 'pg_toast' AND (nspname !~ '^pg_temp_'  OR nspname = (pg_catalog.current_schemas(true))[1]) AND (nspname !~ '^pg_toast_temp_'  OR nspname = replace((pg_catalog.current_schemas(true))[1], 'pg_temp_', 'pg_toast_temp_'))  ORDER BY TABLE_SCHEM
+\bind \g
+
+-- case: pgjdbc-10
+-- xqt: mask-oids
+SELECT id, title, price, tags, published FROM book WHERE id = $1
+\bind '1' \g
+
+-- case: pgjdbc-11
+-- xqt: mask-oids
+SELECT oid AS oid_book FROM pg_class WHERE relname = 'book' \gset
+SELECT c.oid, a.attnum, a.attname, c.relname, n.nspname, a.attnotnull OR (t.typtype = 'd' AND t.typnotnull), a.attidentity != '' OR pg_catalog.pg_get_expr(d.adbin, d.adrelid) LIKE '%nextval(%' FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON (c.relnamespace = n.oid) JOIN pg_catalog.pg_attribute a ON (c.oid = a.attrelid) JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) LEFT JOIN pg_catalog.pg_attrdef d ON (d.adrelid = a.attrelid AND d.adnum = a.attnum) JOIN (SELECT :oid_book AS oid , 1 AS attnum UNION ALL SELECT :oid_book, 3 UNION ALL SELECT :oid_book, 4 UNION ALL SELECT :oid_book, 5 UNION ALL SELECT :oid_book, 6) vals ON (c.oid = vals.oid AND a.attnum = vals.attnum)
+\bind \g
+
+-- case: asyncpg-01
+-- xqt: mask-oids
+SELECT $1::numeric(10,2)
+\bind '1' \g
+
+-- case: prisma-01
+-- xqt: mask-oids
+SET search_path = "public";
+
+-- case: prisma-02
+-- xqt: mask-oids
+SELECT version()
+\bind \g
+
+-- case: prisma-03
+-- xqt: mask-oids
+SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname = $1), version(), current_setting('server_version_num')::integer as numeric_version
+\bind 'public' \g
+
+-- case: prisma-04
+-- xqt: mask-oids
+SELECT namespace.nspname as namespace_name
+	FROM pg_namespace as namespace
+	WHERE namespace.nspname = ANY ( $1 )
+	ORDER BY namespace_name
+\bind '{public}' \g
+
+-- case: prisma-05
+-- xqt: mask-oids
+SELECT
+	  tbl.relname AS table_name,
+	  namespace.nspname as namespace,
+	  (tbl.relhassubclass and tbl.relkind = 'p') as is_partition,
+	  (tbl.relhassubclass and tbl.relkind = 'r') as has_subclass,
+	  tbl.relrowsecurity as has_row_level_security,
+	  reloptions,
+	  obj_description(tbl.oid, 'pg_class') as description
+	FROM pg_class AS tbl
+	INNER JOIN pg_namespace AS namespace ON namespace.oid = tbl.relnamespace
+	WHERE
+	  ( -- (relkind = 'r' and relispartition = 't') matches partition table "duplicates"
+	    (tbl.relkind = 'r' AND tbl.relispartition = 'f')
+	      OR -- when it's a partition
+	    tbl.relkind = 'p'
+	  )
+	  AND namespace.nspname = ANY ( $1 )
+	ORDER BY namespace, table_name
+\bind '{public}' \g
+
+-- case: prisma-06
+-- xqt: mask-oids
+SELECT
+	    schemainfo.nspname AS namespace,
+	    tableinfo.relname AS table_name,
+		constr.conname AS constraint_name,
+		constr.contype AS constraint_type,
+		pg_get_constraintdef(constr.oid) AS constraint_definition,
+		constr.condeferrable AS is_deferrable,
+		constr.condeferred AS is_deferred
+	FROM pg_constraint constr
+	JOIN pg_class AS tableinfo
+		ON tableinfo.oid = constr.conrelid
+	JOIN pg_namespace AS schemainfo
+		ON schemainfo.oid = tableinfo.relnamespace
+	WHERE schemainfo.nspname = ANY ( $1 )
+		AND contype NOT IN ('p', 'u', 'f')
+	ORDER BY namespace, table_name, constr.contype, constraint_name
+\bind '{public}' \g
+
+-- case: prisma-07
+-- xqt: mask-oids
+SELECT
+	    views.viewname AS view_name,
+	    views.definition AS view_sql,
+	    views.schemaname AS namespace,
+	    obj_description(class.oid, 'pg_class') AS description
+	FROM pg_catalog.pg_views views
+	INNER JOIN pg_catalog.pg_namespace ns ON views.schemaname = ns.nspname
+	INNER JOIN pg_catalog.pg_class class ON class.relnamespace = ns.oid AND class.relname = views.viewname
+	WHERE schemaname = ANY ( $1 )
+\bind '{public}' \g
+
+-- case: prisma-08
+-- xqt: mask-oids
+SELECT
+	                t.typname AS name,
+	                e.enumlabel AS value,
+	                n.nspname AS namespace,
+	                obj_description(t.oid, 'pg_type') AS description
+	            FROM pg_type t
+	            JOIN pg_enum e ON t.oid = e.enumtypid
+	            JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+	            WHERE n.nspname = ANY ( $1 )
+	            ORDER BY e.enumsortorder
+\bind '{public}' \g
+
+-- case: prisma-09
+-- xqt: mask-oids
+SELECT
+	                t.typname AS name,
+	                n.nspname AS namespace
+	            FROM pg_type t
+	            JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+	            WHERE n.nspname = ANY ( $1 )
+	              AND t.typtype = 'b' -- only base types
+	              AND t.typinput::regproc::text <> 'array_in' -- exclude array types
+\bind '{public}' \g
+
+-- case: prisma-10
+-- xqt: mask-oids
+SELECT
+	                oid.namespace,
+	                info.table_name,
+	                info.column_name,
+	                format_type(att.atttypid, att.atttypmod) as formatted_type,
+	                info.numeric_precision,
+	                info.numeric_scale,
+	                info.numeric_precision_radix,
+	                info.datetime_precision,
+	                info.data_type,
+	                info.udt_schema as type_schema_name,
+	                info.udt_name as full_data_type,
+	                pg_get_expr(attdef.adbin, attdef.adrelid) AS column_default,
+	                info.is_nullable,
+	                info.is_identity,
+	                info.character_maximum_length,
+	                col_description(att.attrelid, ordinal_position) AS description
+	            FROM information_schema.columns info
+	            JOIN pg_attribute att ON att.attname = info.column_name
+	            JOIN (
+	                 SELECT pg_class.oid, relname, pg_namespace.nspname as namespace
+	                 FROM pg_class
+	                 JOIN pg_namespace on pg_namespace.oid = pg_class.relnamespace
+	                 AND pg_namespace.nspname = ANY ( $1 )
+	                 WHERE reltype > 0
+	                ) as oid on oid.oid = att.attrelid
+	                  AND relname = info.table_name
+	                  AND namespace = info.table_schema
+	            LEFT OUTER JOIN pg_attrdef attdef ON attdef.adrelid = att.attrelid AND attdef.adnum = att.attnum AND table_schema = namespace
+	            WHERE table_schema = ANY ( $1 ) 
+	            ORDER BY namespace, table_name, ordinal_position
+\bind '{public}' \g
+
+-- case: prisma-11
+-- xqt: mask-oids
+SELECT
+	                con.oid         AS "con_id",
+	                att2.attname    AS "child_column",
+	                cl.relname      AS "parent_table",
+	                att.attname     AS "parent_column",
+	                con.confdeltype,
+	                con.confupdtype,
+	                rel_ns.nspname  AS "referenced_schema_name",
+	                conname         AS constraint_name,
+	                child,
+	                parent,
+	                table_name,
+	                namespace,
+	                condeferrable,
+	                condeferred
+	            FROM (SELECT
+	                        ns.nspname AS "namespace",
+	                        unnest(con1.conkey)                AS "parent",
+	                        unnest(con1.confkey)                AS "child",
+	                        cl.relname                          AS table_name,
+	                        ns.nspname                          AS schema_name,
+	                        generate_subscripts(con1.conkey, 1) AS colidx,
+	                        con1.oid,
+	                        con1.confrelid,
+	                        con1.conrelid,
+	                        con1.conname,
+	                        con1.confdeltype,
+	                        con1.confupdtype,
+	                        con1.condeferrable                  AS condeferrable,
+	                        con1.condeferred                    AS condeferred
+	                FROM pg_class cl
+	                        join pg_constraint con1 on con1.conrelid = cl.oid
+	                        join pg_namespace ns on cl.relnamespace = ns.oid
+	                WHERE
+	                    ns.nspname = ANY ( $1 )
+	                    and con1.contype = 'f'
+	                ORDER BY colidx
+	                ) con
+	                    JOIN pg_attribute att on att.attrelid = con.confrelid and att.attnum = con.child
+	                    JOIN pg_class cl on cl.oid = con.confrelid
+	                    JOIN pg_attribute att2 on att2.attrelid = con.conrelid and att2.attnum = con.parent
+	                    JOIN pg_class rel_cl on con.confrelid = rel_cl.oid
+	                    JOIN pg_namespace rel_ns on rel_cl.relnamespace = rel_ns.oid
+	            ORDER BY namespace, table_name, constraint_name, con_id, con.colidx
+\bind '{public}' \g
+
+-- case: prisma-12
+-- xqt: mask-oids
+WITH rawindex AS (
+	    SELECT
+	        indrelid, 
+	        indexrelid,
+	        indisunique,
+	        indisprimary,
+	        unnest(indkey) AS indkeyid,
+	        generate_subscripts(indkey, 1) AS indkeyidx,
+	        unnest(indclass) AS indclass,
+	        unnest(indoption) AS indoption
+	    FROM pg_index -- https://www.postgresql.org/docs/current/catalog-pg-index.html
+	    WHERE
+	        indpred IS NULL -- filter out partial indexes
+	        AND NOT indisexclusion -- filter out exclusion constraints
+	)
+	SELECT
+	    schemainfo.nspname AS namespace,
+	    indexinfo.relname AS index_name,
+	    tableinfo.relname AS table_name,
+	    columninfo.attname AS column_name,
+	    rawindex.indisunique AS is_unique,
+	    rawindex.indisprimary AS is_primary_key,
+	    rawindex.indkeyidx AS column_index,
+	    opclass.opcname AS opclass,
+	    opclass.opcdefault AS opcdefault,
+	    indexaccess.amname AS index_algo,
+	    CASE rawindex.indoption & 1
+	        WHEN 1 THEN 'DESC'
+	        ELSE 'ASC' END
+	        AS column_order,
+	    CASE rawindex.indoption & 2
+	        WHEN 2 THEN true
+	        ELSE false END
+	        AS nulls_first,
+	    pc.condeferrable AS condeferrable,
+	    pc.condeferred AS condeferred
+	FROM
+	    rawindex
+	    INNER JOIN pg_class AS tableinfo ON tableinfo.oid = rawindex.indrelid
+	    INNER JOIN pg_class AS indexinfo ON indexinfo.oid = rawindex.indexrelid
+	    INNER JOIN pg_namespace AS schemainfo ON schemainfo.oid = tableinfo.relnamespace
+	    LEFT JOIN pg_attribute AS columninfo
+	        ON columninfo.attrelid = tableinfo.oid AND columninfo.attnum = rawindex.indkeyid
+	    INNER JOIN pg_am AS indexaccess ON indexaccess.oid = indexinfo.relam
+	    LEFT JOIN pg_opclass AS opclass -- left join because crdb has no opclasses
+	        ON opclass.oid = rawindex.indclass
+	    LEFT JOIN pg_constraint pc ON rawindex.indexrelid = pc.conindid AND pc.contype <> 'f'
+	WHERE schemainfo.nspname = ANY ( $1 )
+	ORDER BY namespace, table_name, index_name, column_index
+\bind '{public}' \g
+
+-- case: prisma-13
+-- xqt: mask-oids
+SELECT p.proname AS name, n.nspname as namespace,
+	                CASE WHEN l.lanname = 'internal' THEN p.prosrc
+	                     ELSE pg_get_functiondef(p.oid)
+	                     END as definition
+	            FROM pg_proc p
+	            LEFT JOIN pg_namespace n ON p.pronamespace = n.oid
+	            LEFT JOIN pg_language l ON p.prolang = l.oid
+	            WHERE n.nspname = ANY ( $1 )
+\bind '{public}' \g
+
+-- case: prisma-14
+-- xqt: mask-oids
+SELECT
+	    ext.extname AS extension_name,
+	    ext.extversion AS extension_version,
+	    ext.extrelocatable AS extension_relocatable,
+	    pn.nspname AS extension_schema
+	FROM pg_extension ext
+	INNER JOIN pg_namespace pn ON ext.extnamespace = pn.oid
+	ORDER BY ext.extname ASC
+\bind \g
+
+-- case: prisma-15
+-- xqt: mask-oids
+SELECT
+	                  sequence_name,
+	                  sequence_schema AS namespace,
+	                  start_value::INT8,
+	                  minimum_value::INT8 AS min_value,
+	                  maximum_value::INT8 AS max_value,
+	                  increment::INT8 AS increment_by,
+	                  (CASE cycle_option WHEN 'yes' THEN TRUE ELSE FALSE END) AS cycle,
+	                  0::INT8 AS cache_size
+	              FROM information_schema.sequences
+	              WHERE sequence_schema = ANY ( $1 )
+	              ORDER BY sequence_name
+\bind '{public}' \g
+

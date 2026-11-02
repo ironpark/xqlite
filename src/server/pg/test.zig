@@ -352,7 +352,7 @@ test "pg: startup, simple queries, errors, transactions" {
     defer c.deinit();
     try testing.expectEqual(@as(?[]const u8, null), try c.connect(f.srv.address(), "alice", ""));
     defer c.close();
-    try testing.expectEqualStrings("17.0 (xqlite)", c.server_version[0..c.server_version_len]);
+    try testing.expectEqualStrings("16.15 (xqlite)", c.server_version[0..c.server_version_len]);
     try testing.expect(c.pid != 0);
 
     try testing.expectEqualStrings(
@@ -618,4 +618,36 @@ test "pg: password authentication" {
             c.close();
         }
     }
+}
+
+test "pg: catalogs and settings" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var f: Fixture = undefined;
+    try f.start(.{});
+    defer f.stop();
+    var c: Client = .{};
+    defer c.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), try c.connect(f.srv.address(), "dave", ""));
+    defer c.close();
+    // ParameterStatus, SHOW and version() name one release.
+    var want: [64]u8 = undefined;
+    const shown = try std.fmt.bufPrint(&want, "T server_version:25\nD {s}\nC SHOW\nZ I\n", .{c.server_version[0..c.server_version_len]});
+    try testing.expectEqualStrings(shown, try c.query("SHOW server_version"));
+    try testing.expectEqualStrings("T ?column?:16\nD t\nC SELECT 1\nZ I\n", try c.query("SELECT version() LIKE 'PostgreSQL 16.%' AND current_setting('server_version_num') = '160015'"));
+    // The database the client named.
+    try testing.expectEqualStrings("T current_database:25\nD x\nC SELECT 1\nZ I\n", try c.query("SELECT current_database()"));
+    // RESET: its tag, and the startup packet's value.
+    try testing.expectEqualStrings("C SET\nC RESET\nT application_name:25\nD pgtest\nC SHOW\nZ I\n", try c.query("SET application_name = 'x'; RESET application_name; SHOW application_name"));
+    // The catalogs: OIDs agree, booleans are t/f, the type OIDs are the
+    // ones RowDescription uses.
+    _ = try c.query("CREATE TABLE book (id integer PRIMARY KEY, title varchar(20))");
+    try testing.expectEqualStrings("T ?column?:16 relname:25 relhasindex:16\nD t book t\nC SELECT 1\nZ I\n", try c.query("SELECT c.oid = 'book'::regclass::oid, c.relname, c.relhasindex FROM pg_catalog.pg_class c WHERE c.relname = 'book'"));
+    var buf: [256]u8 = undefined;
+    const types_ = try std.fmt.bufPrint(&buf, "T attname:25 atttypid:23 atttypmod:23\nD id {d} -1\nD title {d} 24\nC SELECT 2\nZ I\n", .{ pg.values.oid.int4, pg.values.oid.varchar });
+    try testing.expectEqualStrings(types_, try c.query("SELECT attname, atttypid, atttypmod FROM pg_attribute WHERE attrelid = 'book'::regclass AND attnum > 0 ORDER BY attnum"));
+    // A parameter compared with an INTEGER PRIMARY KEY is an integer.
+    try c.parse("q", "SELECT title FROM book WHERE id = $1", &.{});
+    try c.describe('S', "q");
+    try testing.expectEqualStrings("1\nt 23\nT title:1043(24)\nZ I\n", try c.sync());
+    try c.terminate();
 }

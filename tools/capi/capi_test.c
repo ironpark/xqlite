@@ -563,22 +563,32 @@ static void test_utf16(void){
 
 /* ----------------------------------------------------------------- dialects */
 
+/* Whether the library has dialect `name` (-Ddialects). */
+static int dialect_built(const char *name){
+  sqlite3 *db = 0;
+  int ok = sqlite3_open(":memory:", &db)==SQLITE_OK && xqlite_set_dialect(db, name)==SQLITE_OK;
+  sqlite3_close(db);
+  return ok;
+}
+
 static void test_dialects(void){
   sqlite3 *db = 0;
   const int flags = SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE|SQLITE_OPEN_URI;
-  CHECK_RC(sqlite3_open_v2("file::memory:?dialect=postgres", &db, flags, 0), SQLITE_OK, db);
-  CHECK_STR(xqlite_dialect(db), "postgres");
-  CHECK_STR(one(db, "SELECT 'a' || 1::text"), "a1");
-  exec(db, "CREATE TABLE users (id bigserial PRIMARY KEY, email text NOT NULL)");
-  CHECK_STR(one(db, "INSERT INTO users (email) VALUES ('x@y') RETURNING id"), "1");
-  CHECK_RC(xqlite_set_dialect(db, "mysql"), SQLITE_OK, db);
-  CHECK_STR(xqlite_dialect(db), "mariadb");
-  CHECK_STR(one(db, "SELECT CONCAT('a', 'b', 1)"), "ab1");
-  CHECK_RC(xqlite_set_dialect(db, "klingon"), SQLITE_ERROR, db);
-  CHECK_STR(sqlite3_errmsg(db), "no such dialect: klingon");
-  exec(db, "PRAGMA xq_dialect = 'sqlite'");
-  CHECK_STR(xqlite_dialect(db), "sqlite");
-  sqlite3_close(db);
+  if( dialect_built("postgres") && dialect_built("mariadb") ){
+    CHECK_RC(sqlite3_open_v2("file::memory:?dialect=postgres", &db, flags, 0), SQLITE_OK, db);
+    CHECK_STR(xqlite_dialect(db), "postgres");
+    CHECK_STR(one(db, "SELECT 'a' || 1::text"), "a1");
+    exec(db, "CREATE TABLE users (id bigserial PRIMARY KEY, email text NOT NULL)");
+    CHECK_STR(one(db, "INSERT INTO users (email) VALUES ('x@y') RETURNING id"), "1");
+    CHECK_RC(xqlite_set_dialect(db, "mysql"), SQLITE_OK, db);
+    CHECK_STR(xqlite_dialect(db), "mariadb");
+    CHECK_STR(one(db, "SELECT CONCAT('a', 'b', 1)"), "ab1");
+    CHECK_RC(xqlite_set_dialect(db, "klingon"), SQLITE_ERROR, db);
+    CHECK_STR(sqlite3_errmsg(db), "no such dialect: klingon");
+    exec(db, "PRAGMA xq_dialect = 'sqlite'");
+    CHECK_STR(xqlite_dialect(db), "sqlite");
+    sqlite3_close(db);
+  }
 
   db = 0;
   CHECK_RC(sqlite3_open_v2("file::memory:?dialect=klingon", &db, flags, 0), SQLITE_ERROR, db);
@@ -592,9 +602,11 @@ static void test_dialects(void){
   CHECK_STR(xqlite_dialect(db), "sqlite");
   sqlite3_close(db);
 
-  CHECK_RC(sqlite3_open_v2("file::memory:?dialect=oracle&mode=memory", &db, flags, 0), SQLITE_OK, db);
-  CHECK_STR(one(db, "SELECT 1 FROM dual"), "1");
-  sqlite3_close(db);
+  if( dialect_built("oracle") ){
+    CHECK_RC(sqlite3_open_v2("file::memory:?dialect=oracle&mode=memory", &db, flags, 0), SQLITE_OK, db);
+    CHECK_STR(one(db, "SELECT 1 FROM dual"), "1");
+    sqlite3_close(db);
+  }
 }
 
 /* ----------------------------------------------------- files, WAL, backup */

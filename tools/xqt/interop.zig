@@ -6,10 +6,15 @@
 //!     pub fn register(s: *xqt.Suite) !void { try s.add("...", check, .{}); }
 //!
 //! and is listed in `modules` below; its checks run in parallel with those
-//! of every other module.
+//! of every other module. A module that checks a dialect also declares
+//!
+//!     pub const dialect = "mariadb";     // a -Ddialects name
+//!
+//! and is left out when the xqlite under test is built without it.
 
 const std = @import("std");
 const xqt = @import("xqt");
+const xqlite_config = @import("xqlite_config");
 
 pub const modules = .{
     @import("interop/sql.zig"),
@@ -45,7 +50,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: *const xqt.Config, out: *std
     var suite: xqt.Suite = .init(gpa, io, cfg, out, .{ .name = "interop" });
     defer suite.deinit();
     inline for (modules) |m| {
-        if (args.len == 0 or contains(args, m.name)) {
+        if (comptime !built(m)) {
+            if (contains(args, m.name)) try out.print("xqt interop: {s}: xqlite is built without the {s} dialect\n", .{ m.name, m.dialect });
+        } else if (args.len == 0 or contains(args, m.name)) {
             suite.prefix = m.name ++ ": ";
             try m.register(&suite);
         }
@@ -54,6 +61,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, cfg: *const xqt.Config, out: *std
     suite.run();
     try suite.summary();
     return @intFromBool(suite.failed() > 0);
+}
+
+/// Whether the xqlite under test has the dialect `m` checks (true for a
+/// module that checks none).
+fn built(comptime m: type) bool {
+    if (!@hasDecl(m, "dialect")) return true;
+    return @field(xqlite_config, "dialect_" ++ m.dialect);
 }
 
 /// One line per module, for `xqt list`.

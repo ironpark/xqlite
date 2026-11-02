@@ -1,6 +1,7 @@
 //! The PostgreSQL session of a connection (dialect.ConnState.postgres):
 //! the run-time parameters SET changes (search_path and the few others
-//! session.zig knows). Values are owned by the connection's allocator.
+//! session.zig knows), and the last snapshot of the system catalogs
+//! (pgcatalog.zig). Values are owned by the connection's allocator.
 
 const std = @import("std");
 
@@ -10,24 +11,57 @@ pub const default_search_path = "\"$user\", public";
 /// The role $user stands for in search_path (current_user).
 pub const user = "postgres";
 
+/// The PostgreSQL release the dialect follows: server_version,
+/// server_version_num, version() and the wire server's ParameterStatus.
+pub const release = "16.15";
+pub const server_version = release ++ " (xqlite)";
+pub const server_version_num = "160015";
+
 pub const State = struct {
     /// Parameters set in this session, by name (lower case), as SHOW
     /// prints them; a parameter not here has its default.
     params: std.StringHashMapUnmanaged([]u8) = .empty,
+    /// The values RESET goes back to instead of the default: those the
+    /// client's startup packet gave (the wire server's setStartup()).
+    reset_values: std.StringHashMapUnmanaged([]u8) = .empty,
+    /// The catalogs' snapshot kept for the next statement (a
+    /// *pgcatalog.Snapshot), and what releases it.
+    catalog: ?*anyopaque = null,
+    catalog_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
 
-    pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
-        var it = s.params.iterator();
+    /// Forget the parameters set (RESET ALL).
+    pub fn resetParams(s: *State, gpa: std.mem.Allocator) void {
+        freeMap(gpa, &s.params);
+    }
+
+    fn freeMap(gpa: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]u8)) void {
+        var it = m.iterator();
         while (it.next()) |e| {
             gpa.free(e.key_ptr.*);
             gpa.free(e.value_ptr.*);
         }
-        s.params.deinit(gpa);
+        m.deinit(gpa);
+        m.* = .empty;
+    }
+
+    /// Make `value` the value of `name` RESET goes back to (and its value
+    /// now).
+    pub fn setReset(s: *State, gpa: std.mem.Allocator, name: []const u8, value: []const u8) error{OutOfMemory}!void {
+        try put(gpa, &s.reset_values, name, value);
+        try s.set(gpa, name, null);
+    }
+
+    pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
+        s.resetParams(gpa);
+        freeMap(gpa, &s.reset_values);
+        if (s.catalog) |p| if (s.catalog_free) |f| f(gpa, p);
         s.* = .{};
     }
 
-    /// The value of parameter `name` set in this session, or null.
+    /// The value of parameter `name` set in this session (or given at
+    /// startup), or null.
     pub fn get(s: *const State, name: []const u8) ?[]const u8 {
-        return s.params.get(name);
+        return s.params.get(name) orelse s.reset_values.get(name);
     }
 
     /// Set (or with null, reset) parameter `name`.
@@ -39,14 +73,18 @@ pub const State = struct {
             }
             return;
         };
+        try put(gpa, &s.params, name, v);
+    }
+
+    fn put(gpa: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]u8), name: []const u8, v: []const u8) error{OutOfMemory}!void {
         const copy = try gpa.dupe(u8, v);
         errdefer gpa.free(copy);
-        const gop = try s.params.getOrPut(gpa, name);
+        const gop = try m.getOrPut(gpa, name);
         if (gop.found_existing) {
             gpa.free(gop.value_ptr.*);
         } else {
             gop.key_ptr.* = gpa.dupe(u8, name) catch |err| {
-                s.params.removeByPtr(gop.key_ptr);
+                m.removeByPtr(gop.key_ptr);
                 return err;
             };
         }

@@ -202,6 +202,8 @@ fn startup(b: *Backend) !bool {
             return false;
         },
     };
+    // current_database() is the name the client gave.
+    try b.setStartup("xqlite.database", database);
     if (app_name.len > 0) try b.setStartup("application_name", app_name);
     if (!try b.applyOptions(options)) return false;
 
@@ -237,16 +239,22 @@ fn parameterStatus(b: *Backend, name: []const u8, value: []const u8) !void {
     try b.out.end();
 }
 
-/// Run `SET name = 'value'` for a setting of the startup packet.
+/// Set a setting of the startup packet: its value, and the one RESET
+/// goes back to (the dialect's xq_pg_startup_setting()).
 fn setStartup(b: *Backend, name: []const u8, value: []const u8) !void {
     var sql: std.ArrayList(u8) = .empty;
     defer sql.deinit(b.gpa);
-    try sql.print(b.gpa, "SET {s} = '", .{name});
-    for (value) |ch| {
-        if (ch == '\'') try sql.append(b.gpa, '\'');
-        try sql.append(b.gpa, ch);
+    try sql.appendSlice(b.gpa, "SELECT xq_pg_startup_setting(");
+    for ([_][]const u8{ name, value }, 0..) |z, i| {
+        if (i > 0) try sql.appendSlice(b.gpa, ", ");
+        try sql.append(b.gpa, '\'');
+        for (z) |ch| {
+            if (ch == '\'') try sql.append(b.gpa, '\'');
+            try sql.append(b.gpa, ch);
+        }
+        try sql.append(b.gpa, '\'');
     }
-    try sql.append(b.gpa, '\'');
+    try sql.append(b.gpa, ')');
     var sink: StartupSink = .{};
     try b.session.run(sql.items, &sink);
     if (sink.bad) return error.BadStartupSetting;

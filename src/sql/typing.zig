@@ -905,6 +905,21 @@ fn bindParam(p: *int.Parse, v: *Expr, id: TypeId) Oom!void {
     if (list.items[i] == unknown) list.items[i] = id;
 }
 
+/// Give parameter `v` the type `id` a dialect's rule chose for it rather
+/// than the type of the operand it met (inferParams(): PostgreSQL's
+/// `ts + $1` is timestamp + interval), and record it as the type of its
+/// number unless another Expr gave that number another type first.
+pub fn retypeParam(p: *int.Parse, v: *Expr, id: TypeId) Oom!void {
+    if (v.op != TK.VARIABLE or id == unknown) return;
+    const old = v.xq_type;
+    v.xq_type = id;
+    if (v.i_column < 1) return;
+    const i: usize = @intCast(v.i_column - 1);
+    const list = &p.xq_param_types;
+    if (list.items.len <= i) try list.appendNTimes(p.arena, unknown, i + 1 - list.items.len);
+    if (list.items[i] == unknown or list.items[i] == old) list.items[i] = id;
+}
+
 /// `e` is stored into a column of type `id` (INSERT VALUES, UPDATE SET):
 /// a parameter that is the value gets that type, through the functions
 /// the frontend wraps stored values in (Rules.store_wrappers). For a

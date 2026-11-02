@@ -65,6 +65,12 @@ pub const Dialect = enum(u8) {
         };
     }
 
+    /// For tests: error.SkipZigTest unless every dialect of `ds` is
+    /// built().
+    pub fn requireBuilt(ds: []const Dialect) error{SkipZigTest}!void {
+        for (ds) |d| if (!d.built()) return error.SkipZigTest;
+    }
+
     /// The dialect called `z` (case-insensitive; "pg", "postgresql",
     /// "mysql", "sqlserver" and "tsql" are accepted as aliases), or null.
     /// It may not be built().
@@ -645,8 +651,12 @@ fn hasEnginePrefix(name: []const u8) bool {
 const engine_function_map = blk: {
     @setEvalBranchQuota(100_000);
     var all: []const FuncDef = &.{};
-    for (std.enums.values(Dialect)) |d| {
-        const defs = module(d).hooks.engine_functions;
+    const tables = blk2: {
+        var t: []const []const FuncDef = &.{&@import("like.zig").engine_functions};
+        for (std.enums.values(Dialect)) |d| t = t ++ &[_][]const FuncDef{module(d).hooks.engine_functions};
+        break :blk2 t;
+    };
+    for (tables) |defs| {
         for (defs, 0..) |f, i| {
             if (!std.mem.startsWith(u8, f.name, "xq_")) @compileError("engine function " ++ f.name ++ ": the name must start with xq_");
             // The overloads of a name are next to each other, in one table.
@@ -723,6 +733,7 @@ test {
     _ = @import("json_text.zig");
     _ = @import("lex.zig");
     _ = @import("shared_funcs.zig");
+    _ = @import("like.zig");
     _ = @import("test.zig");
     _ = @import("constraint.zig");
 }

@@ -51,8 +51,20 @@ const RC = int.RC;
 const Oom = error{OutOfMemory};
 
 /// The dialects whose frontends the fuzzer reads views and stored text
-/// in. A dialect joins once its frontend parses `SELECT * FROM v`.
-const dialects = [_]Dialect{ .sqlite, .postgres, .mariadb, .mssql, .oracle };
+/// in. A dialect joins once its frontend parses `SELECT * FROM v`; one
+/// left out of the build (-Ddialects) is not read in.
+const dialects = blk: {
+    const all = [_]Dialect{ .sqlite, .postgres, .mariadb, .mssql, .oracle };
+    var n: usize = 0;
+    for (all) |d| n += @intFromBool(d.built());
+    var built: [n]Dialect = undefined;
+    var i: usize = 0;
+    for (all) |d| if (d.built()) {
+        built[i] = d;
+        i += 1;
+    };
+    break :blk built;
+};
 
 /// Events that share a swarm configuration.
 const events_per_config = 64;
@@ -522,6 +534,8 @@ const Fuzz = struct {
             // SQLite folds constants (`'a' IS NOT NULL OR f(x)` is 1, f
             // not called): an error with one only is not a difference.
             if ((bound == .err) != (w.* == .err)) continue;
+            // A literal is typed where a parameter is not.
+            if (typeRefused(bound) or typeRefused(w.*)) continue;
             if (!try bound.same(w.*, a, ordered)) {
                 db.useText(d);
                 return f.mismatch("bound parameters, lowered in {s}", .{@tagName(d)}, try f.renderQuery(a, db), bound, w.*);
@@ -542,6 +556,7 @@ const Fuzz = struct {
                 if (!f.readable(text, d, e, text_e)) continue;
                 db.useText(e);
                 const got = try db.run(a, text, &.{});
+                if (typeRefused(got) or typeRefused(w)) continue;
                 if (!try got.same(w, a, ordered)) return f.mismatch("rendered in {s}, compiled in {s}", .{ @tagName(d), @tagName(e) }, text, got, w);
             }
             // C: a view created from the tree in d, read in every dialect.
@@ -568,9 +583,27 @@ const Fuzz = struct {
                     f.stats.view_step_errors += 1;
                     continue;
                 }
+                // The tree lowered in a dialect that types operators
+                // (PostgreSQL's `boolean + integer`) fails where the
+                // SQLite text of a view another dialect created, which
+                // is not typed, means what it means in SQLite (rows, or
+                // another error).
+                if (typeRefused(w)) continue;
                 return f.mismatch("view created in {s}, read in {s}", .{ @tagName(d), @tagName(e) }, text, got, w);
             }
         }
+    }
+
+    /// Whether `o` is the error of a dialect that types operators and
+    /// found none for the operands' types (PostgreSQL's `operator does
+    /// not exist: boolean + integer`). The types of an expression may
+    /// differ between the tree lowered, its text compiled and the SQLite
+    /// text the schema keeps (read untyped), so such an error on one
+    /// side only is no difference of meaning.
+    fn typeRefused(o: Outcome) bool {
+        if (o != .err) return false;
+        const msg = o.err.msg;
+        return std.mem.startsWith(u8, msg, "operator does not exist: ") or std.mem.startsWith(u8, msg, "operator is not unique: ");
     }
 
     /// Whether text rendered in `d` is to mean in `e` what lowering means
@@ -673,11 +706,16 @@ const Fuzz = struct {
     /// what the lowered queries over s expect.
     fn checkRow(f: *Fuzz, a: Allocator, spec: gen.TableSpec, expected: Outcome, inserted: Outcome, stored: Outcome, args: anytype, ddl: []const u8) !void {
         const what = "table created in {s}, row inserted in {s} ({s}), row {d}";
+        if (typeRefused(stored)) return;
         // An expression that fails: the INSERT or the reading fails (with
         // which error depends on what is computed first), unless SQLite
         // did not compute it there: it may compute a constant ahead in a
         // query (a CASE branch not taken) and not in a DEFAULT.
         if (expected == .err) {
+            // The queries over s lowered in a dialect that types
+            // operators may fail (`- bytea`) where the table's SQLite
+            // text, read untyped, computes.
+            if (typeRefused(expected)) return;
             if (stored != .err) {
                 if (!expected.err.step) return f.mismatch(what, args, ddl, stored, expected);
                 f.stats.row_step_errors += 1;

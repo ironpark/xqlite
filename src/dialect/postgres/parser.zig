@@ -189,7 +189,29 @@ pub const Parser = struct {
             try toks.append(arena, t);
             if (t.kind == .eof) break;
         }
-        return .{ .arena = arena, .src = src, .toks = toks.items, .end = end };
+        return .{ .arena = arena, .src = src, .toks = operatorSyntax(toks.items), .end = end };
+    }
+
+    /// `OPERATOR(pg_catalog.~)` (psql writes it) is the operator itself.
+    fn operatorSyntax(toks: []Token) []Token {
+        var out: usize = 0;
+        var i: usize = 0;
+        while (i < toks.len) {
+            if (toks[i].isKw("operator") and i + 1 < toks.len and toks[i + 1].kind == .lparen) {
+                var j = i + 2;
+                while (j + 1 < toks.len and toks[j].kind == .ident and toks[j + 1].kind == .dot) j += 2;
+                if (j + 1 < toks.len and toks[j].kind == .op and toks[j + 1].kind == .rparen) {
+                    toks[out] = toks[j];
+                    out += 1;
+                    i = j + 2;
+                    continue;
+                }
+            }
+            toks[out] = toks[i];
+            out += 1;
+            i += 1;
+        }
+        return toks[0..out];
     }
 
     pub fn isEmpty(p: *const Parser) bool {
@@ -1170,6 +1192,14 @@ pub const Parser = struct {
         if (p.peek().kind == .lparen) {
             if (name.schema == null) if (srfKind(name.name.text)) |k| return p.jsonSrf(name.name, k);
             const c = try p.funcCall(name.name, name.schema);
+            if (eql(c.name.text, "pg_partition_ancestors") and c.args.len == 1) {
+                const ord = p.isKw("with") and p.isKwAt(1, "ordinality");
+                if (ord) {
+                    _ = p.advance();
+                    _ = p.advance();
+                }
+                return p.partitionAncestors(c, try p.alias(true), ord);
+            }
             const al = try p.alias(true);
             if (eql(c.name.text, "generate_series")) return p.generateSeries(c, al);
             const f = try p.new(tree.Func, .{ .name = c.name, .args = c.args });
@@ -1180,6 +1210,24 @@ pub const Parser = struct {
         if (try p.alias(true)) |al| item.alias = al;
         if (p.isKw("tablesample")) return p.unsupported(p.peek().start, "TABLESAMPLE");
         return item;
+    }
+
+    /// pg_partition_ancestors(rel) [WITH ORDINALITY] in FROM: the relation
+    /// itself, its only ancestor (xqlite has no partitions):
+    /// (SELECT rel AS relid [, 1 AS ordinality]) AS alias.
+    fn partitionAncestors(p: *Parser, c: Call, al: ?tree.Alias, ord: bool) Error!tree.FromItem {
+        const pos = c.name.pos;
+        const alias_cols: []const Name = if (al) |a| a.cols else &.{};
+        const n: usize = if (ord) 2 else 1;
+        if (alias_cols.len > n) return p.failState(alias_cols[n].pos, .of("42601"), "too many column aliases", .{});
+        var cols = try p.arena.alloc(tree.ResultCol, n);
+        const rel = try p.castExpr(pos, c.args[0], .{ .name = "regclass", .pos = pos });
+        cols[0] = .{ .expr = .{ .e = rel, .alias = .{ .text = if (alias_cols.len > 0) alias_cols[0].text else if (al) |a| a.name.text else "pg_partition_ancestors" } } };
+        if (ord) cols[1] = .{ .expr = .{ .e = try p.expr(pos, .{ .integer = "1" }), .alias = .{ .text = if (alias_cols.len > 1) alias_cols[1].text else "ordinality" } } };
+        const body = try p.new(tree.Body, .{ .core = try p.new(tree.Core, .{ .cols = cols, .pos = pos }) });
+        const sub = try p.new(tree.Select, .{ .body = body, .pos = pos });
+        const label: Name = if (al) |a| a.name else .{ .text = "pg_partition_ancestors", .pos = pos };
+        return .{ .source = .{ .subquery = sub }, .alias = .{ .name = label } };
     }
 
     /// generate_series(...) in FROM: its column is named after the
@@ -1763,7 +1811,7 @@ pub const Parser = struct {
         return p.expr(l.pos, .{ .like = .{ .e = l, .pat = pat, .not = not, .case_sensitive = !ilike, .escape = esc } });
     }
 
-    const OtherOp = enum { concat, bit_and, bit_or, shl, shr, json };
+    const OtherOp = enum { concat, bit_and, bit_or, shl, shr, json, regex };
 
     /// Operators of the "any other operator" level.
     fn otherOp(t: Token) ?OtherOp {
@@ -1773,7 +1821,18 @@ pub const Parser = struct {
         };
         for (map) |m| if (std.mem.eql(u8, t.text, m[0])) return m[1];
         if (jsonOperator(t.text) != null) return .json;
+        if (regexOperator(t.text) != null) return .regex;
         return null;
+    }
+
+    /// `l op r` of regular expression operator `op` (regexOperator()):
+    /// xq_pg_regex(l, r, flags), under NOT for `!~` and `!~*`.
+    pub fn regexOp(p: *Parser, op: RegexOp, l: *Expr, r: *Expr) Error!*Expr {
+        const flags = try p.expr(r.pos, .{ .string = if (op.fold) "i" else "" });
+        const fun = try p.new(tree.Func, .{ .name = .{ .text = "xq_pg_regex", .pos = l.pos }, .args = try p.list(&.{ l, r, flags }) });
+        const x = try p.span(l, r, .{ .func = fun });
+        if (!op.negate) return x;
+        return p.span(l, r, .{ .unary = .{ .op = .not, .e = x } });
     }
 
     fn otherExpr(p: *Parser) Error!*Expr {
@@ -1790,6 +1849,7 @@ pub const Parser = struct {
                     .shl => try p.binary(.shl, l, r),
                     .shr => try p.binary(.shr, l, r),
                     .json => try p.jsonOp(t.text, l, r),
+                    .regex => try p.regexOp(regexOperator(t.text).?, l, r),
                 };
             } else if (t.kind == .op and cmpOp(t) == null and !isArith(t.text) and !isLikeOp(t.text)) {
                 return p.failState(t.start, .of("42883"), "operator does not exist: {s}", .{t.text});
@@ -1870,7 +1930,12 @@ pub const Parser = struct {
                 e = try p.castExpr(e.pos, e, ty);
             } else if (p.isKw("collate")) {
                 _ = p.advance();
-                const name = try p.anyName();
+                var name = try p.anyName();
+                // pg_catalog."C", pg_catalog.default
+                if (p.peek().kind == .dot and eql(name.text, "pg_catalog")) {
+                    _ = p.advance();
+                    name = try p.anyName();
+                }
                 e = try p.expr(e.pos, .{ .collate = .{ .e = e, .collation = collationName(name.text) } });
             } else if (p.peek().kind == .lbracket) {
                 return p.unsupported(p.peek().start, "array subscripts");
@@ -1887,8 +1952,17 @@ pub const Parser = struct {
 
     /// `e::ty` (and CAST, typed literals) as types.castPlan() says;
     /// '\x0102'::bytea is a blob constant.
-    fn castExpr(p: *Parser, pos: u32, e: *Expr, ty: types.TypeName) Error!*Expr {
+    fn castExpr(p: *Parser, pos: u32, e_arg: *Expr, ty: types.TypeName) Error!*Expr {
         var x: *Expr = undefined;
+        var e = e_arg;
+        // A reg* value (an OID) cast to text is its name.
+        if (!ty.array and (eql(ty.name, "text") or eql(ty.name, "name") or eql(ty.name, "character varying") or eql(ty.name, "character"))) {
+            if (regOutputOf(e)) |f| {
+                const strong = p.strongName(e);
+                e = try p.call(e.pos, f, null, &.{e});
+                if (strong) |n| try p.setFig(e, .{ .call = n });
+            }
+        }
         if (std.mem.eql(u8, ty.name, "bytea") and !ty.array and e.kind == .string and std.mem.startsWith(u8, e.kind.string, "\\x")) {
             const hex = e.kind.string[2..];
             for (hex) |ch| if (!std.ascii.isHex(ch)) return p.failState(pos, .of("22023"), "invalid hexadecimal digit: \"{c}\"", .{ch});
@@ -1910,6 +1984,42 @@ pub const Parser = struct {
         }
         try p.setFig(x, .{ .cast = .{ .strong = p.strongName(e), .type_name = ty.name } });
         return x;
+    }
+
+    /// The output function of `e` if it is a cast to a reg* type of
+    /// OIDs (types.regOutput()).
+    fn regOutputOf(e: *const Expr) ?[:0]const u8 {
+        return switch (e.kind) {
+            .cast => |c| types.regOutput(c.target_type),
+            else => null,
+        };
+    }
+
+    /// The result columns of the statement's query that are reg* casts
+    /// show the object's name, as PostgreSQL prints a regclass; inside
+    /// the query they stay OIDs (to compare with oid columns).
+    pub fn regOutputs(p: *Parser, st: tree.Stmt) Error!void {
+        switch (st) {
+            .select => |s| try p.regBody(s.body),
+            else => {},
+        }
+    }
+
+    fn regBody(p: *Parser, b: *tree.Body) Error!void {
+        switch (b.*) {
+            .core => |c| for (c.cols) |*col| switch (col.*) {
+                .expr => |*x| if (regOutputOf(x.e)) |f| {
+                    x.e = try p.call(x.e.pos, f, null, &.{x.e});
+                },
+                else => {},
+            },
+            .compound => |c| {
+                try p.regBody(c.left);
+                try p.regBody(c.right);
+            },
+            .nested => |s| try p.regBody(s.body),
+            .values => {},
+        }
     }
 
     pub fn typeError(p: *Parser, ty: types.TypeName, err: types.Error) Error {
@@ -2042,7 +2152,10 @@ pub const Parser = struct {
         if (names.items.len > 3) return p.failState(start, .of("42601"), "improper qualified name (too many dotted names)", .{});
         if (names.items.len == 3) {
             // schema.table.column: a table of a schema of CREATE SCHEMA
-            // has its bare name as alias.
+            // has its bare name as alias, as has a catalog view.
+            if (eql(names.items[0].text, "pg_catalog") or eql(names.items[0].text, "information_schema")) {
+                return p.expr(start, .{ .column = names.items[1..] });
+            }
             const t = try p.qualified(names.items[0], names.items[1]);
             if (t.mangled) return p.expr(start, .{ .column = names.items[1..] });
             names.items[0] = .{ .text = t.db, .pos = names.items[0].pos };
@@ -3372,6 +3485,21 @@ pub fn collationName(name: []const u8) []const u8 {
 /// (dialect.Hooks.functions).
 fn isDialectFunction(name: []const u8) bool {
     return @import("../dialect.zig").spec(.postgres).function_map.get(name) != null;
+}
+
+/// A regular expression operator: `~` (`fold`: `~*`, case-insensitive;
+/// `negate`: `!~`, `!~*`).
+pub const RegexOp = struct { fold: bool, negate: bool };
+
+/// The regular expression operator named `op` (`~`, `~*`, `!~`, `!~*`),
+/// also for OPERATOR(pg_catalog.~); null for another.
+pub fn regexOperator(op: []const u8) ?RegexOp {
+    const map = [_]struct { []const u8, RegexOp }{
+        .{ "~", .{ .fold = false, .negate = false } }, .{ "~*", .{ .fold = true, .negate = false } },
+        .{ "!~", .{ .fold = false, .negate = true } }, .{ "!~*", .{ .fold = true, .negate = true } },
+    };
+    for (map) |m| if (std.mem.eql(u8, op, m[0])) return m[1];
+    return null;
 }
 
 /// The calls (without OVER, FILTER or ORDER BY) that become something

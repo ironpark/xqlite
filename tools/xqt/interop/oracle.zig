@@ -12,6 +12,7 @@ const Check = xqt.Check;
 const BaseDb = @import("base_db.zig");
 
 pub const name = "oracle";
+pub const dialect = "oracle";
 pub const about = "an Oracle-dialect database read by sqlite3: integrity, rows, STRICT types";
 
 pub fn register(s: *xqt.Suite) !void {

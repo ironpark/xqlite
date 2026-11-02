@@ -11,6 +11,7 @@ const Check = xqt.Check;
 const BaseDb = @import("base_db.zig");
 
 pub const name = "pg";
+pub const dialect = "postgres";
 pub const about = "a PostgreSQL-dialect database read by sqlite3: integrity, rows, STRICT types";
 
 pub fn register(s: *xqt.Suite) !void {

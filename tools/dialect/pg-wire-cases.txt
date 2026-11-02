@@ -1,0 +1,274 @@
+-- xqt wire-diff pg: what a psql user sees, against PostgreSQL 16 and
+-- `xqlite serve --pg` (tools/xqt/wire_diff.zig). The lines before the
+-- first case are the setup of every case (run quietly); "-- case: NAME"
+-- starts a case. psql echoes each case's input.
+CREATE TABLE author (id serial PRIMARY KEY, name text NOT NULL UNIQUE, born date);
+CREATE TABLE book (
+  id integer PRIMARY KEY,
+  author_id integer NOT NULL REFERENCES author (id) ON DELETE CASCADE,
+  title varchar(200) NOT NULL,
+  price numeric(10,2) DEFAULT 0 CHECK (price >= 0),
+  tags jsonb,
+  published boolean DEFAULT false
+);
+CREATE INDEX book_title ON book (title);
+CREATE UNIQUE INDEX book_author_title ON book (author_id, title);
+CREATE VIEW cheap_book AS SELECT id, title, price FROM book WHERE price < 10;
+CREATE SEQUENCE ticket START 100;
+INSERT INTO author (name, born) VALUES ('Ann', '1960-01-02'), ('Bob', NULL);
+INSERT INTO book VALUES (1, 1, 'Alpha', 9.50, '{"a": 1}', true), (2, 1, 'Beta', 12, NULL, false), (3, 2, 'Gamma', NULL, '[1, 2]', NULL);
+
+-- case: session-show
+SHOW search_path;
+SHOW standard_conforming_strings;
+SHOW client_encoding;
+SHOW DateStyle;
+SHOW integer_datetimes;
+SHOW transaction_isolation;
+SHOW IntervalStyle;
+SHOW TimeZone;
+
+-- case: session-identity
+SELECT current_database(), current_user, session_user, current_schema();
+SELECT current_schemas(false);
+
+-- case: session-version
+SHOW server_version_num;
+SELECT split_part(version(), ' ', 1);
+
+-- case: session-set
+SET search_path TO public;
+SHOW search_path;
+SET application_name = 'xqt';
+SHOW application_name;
+RESET application_name;
+SHOW application_name;
+SELECT set_config('TimeZone', 'UTC', false);
+
+-- case: meta-dt
+\dt
+
+-- case: meta-dt-pattern
+\dt b*
+\dt nosuch
+
+-- case: meta-d
+\d
+
+-- case: meta-d-table
+\d book
+
+-- case: meta-d-table-referenced
+\d author
+
+-- case: meta-d-view
+\d cheap_book
+
+-- case: meta-d-sequence
+\d ticket
+
+-- case: meta-d-index
+\d book_title
+
+-- case: meta-d-plus
+\d+ book
+
+-- case: meta-d-nosuch
+\d nosuch
+
+-- case: meta-di
+\di
+
+-- case: meta-dv
+\dv
+
+-- case: meta-ds
+\ds
+
+-- case: meta-dn
+\dn
+
+-- case: meta-dn-schema
+CREATE SCHEMA sales;
+CREATE TABLE sales.orders (id int PRIMARY KEY, amount numeric);
+\dn
+\dt sales.*
+\d sales.orders
+
+-- case: meta-df
+\df
+
+-- case: meta-dT
+\dT
+
+-- case: meta-du
+\du
+
+-- case: meta-dx
+\dx
+
+-- case: meta-dp
+\dp book
+
+-- case: meta-dd
+COMMENT ON TABLE book IS 'books';
+\dd book
+\dt+ book
+
+-- case: meta-l
+\l
+
+-- case: meta-dS-small
+\dS pg_namespace
+
+-- case: gdesc
+SELECT id, title, price, tags, published FROM book \gdesc
+SELECT 1 AS one, 'x'::text AS t, 1.5::float8 AS f, now() AS ts \gdesc
+
+-- case: bind
+SELECT $1::int + 1 AS x \bind 41 \g
+SELECT title FROM book WHERE id = $1 \bind 2 \g
+SELECT $1 AS untyped \bind 'hello' \g
+INSERT INTO author (name) VALUES ($1) \bind 'Cid' \g
+SELECT count(*) FROM author;
+
+-- case: gset
+SELECT max(id) AS maxid FROM book \gset
+SELECT :maxid + 1 AS next;
+
+-- case: gx-expanded
+SELECT * FROM book WHERE id = 1 \gx
+
+-- case: x-expanded
+\x on
+SELECT id, name FROM author ORDER BY id;
+\x off
+
+-- case: pset-unaligned
+\pset format unaligned
+SELECT id, title, price FROM book ORDER BY id;
+
+-- case: pset-csv
+\pset format csv
+SELECT id, title, price, tags FROM book ORDER BY id;
+
+-- case: pset-null
+\pset null '(null)'
+SELECT id, price, published FROM book ORDER BY id;
+
+-- case: select-types
+SELECT 1::smallint AS i2, 2::int AS i4, 3::bigint AS i8, 1.5::real AS f4, 2.25::float8 AS f8, 1.10::numeric(5,2) AS num;
+SELECT true AS t, false AS f, NULL::boolean AS n;
+SELECT 'héllo'::text AS t, 'ab'::varchar(5) AS v, 'x'::char(3) AS c;
+SELECT '\x0102ff'::bytea AS b;
+SELECT '{"b": 2, "a": [1, 2]}'::jsonb AS jb, '{"b": 2, "a": 1}'::json AS j;
+SELECT date '2024-02-29' AS d, timestamp '2024-01-02 03:04:05.5' AS ts, time '10:11:12' AS t;
+SELECT '6bd0b4b4-5e5f-4a2e-9a1a-2b2f4a9e2b11'::uuid AS u;
+
+-- case: select-rows
+SELECT * FROM book ORDER BY id;
+SELECT a.name, count(b.id) AS books FROM author a LEFT JOIN book b ON b.author_id = a.id GROUP BY a.name ORDER BY a.name;
+
+-- case: command-tags
+INSERT INTO author (name) VALUES ('Dee'), ('Eve');
+UPDATE book SET price = price + 1 WHERE price IS NOT NULL;
+DELETE FROM book WHERE id = 3;
+CREATE TABLE copy1 AS SELECT * FROM author;
+SELECT * INTO copy2 FROM author;
+INSERT INTO author (name) VALUES ('Fay') RETURNING id, name;
+TRUNCATE copy1;
+DROP TABLE copy1, copy2;
+
+-- case: transactions
+BEGIN;
+INSERT INTO author (name) VALUES ('Gus');
+SAVEPOINT a;
+INSERT INTO author (name) VALUES ('Gus');
+ROLLBACK TO SAVEPOINT a;
+COMMIT;
+SELECT count(*) FROM author;
+COMMIT;
+ROLLBACK;
+
+-- case: transaction-aborted
+BEGIN;
+SELECT 1/0;
+SELECT 1;
+ROLLBACK;
+
+-- case: errors-constraints
+INSERT INTO author (name) VALUES ('Ann');
+INSERT INTO book (id, author_id, title) VALUES (9, 99, 'X');
+INSERT INTO book (id, author_id, title, price) VALUES (9, 1, 'X', -1);
+INSERT INTO book (id, author_id) VALUES (9, 1);
+DELETE FROM author WHERE id = 1;
+SELECT count(*) FROM book;
+
+-- case: errors-syntax
+SELEC 1;
+SELECT * FROM nosuch;
+SELECT nosuch FROM book;
+SELECT 1 +;
+SELECT 'a' + 1;
+
+-- case: errors-runtime
+SELECT 1/0;
+SELECT 'x'::int;
+SELECT 2147483647::int + 1;
+SELECT '{bad'::jsonb;
+
+-- case: notices
+DROP TABLE IF EXISTS nosuch;
+CREATE TABLE IF NOT EXISTS book (id int);
+DROP VIEW IF EXISTS nosuch;
+
+-- case: multi-statement
+SELECT 1 AS a \; SELECT 2 AS b;
+SELECT 1 AS a; SELECT 2 AS b
+
+-- case: empty-result
+SELECT * FROM book WHERE false;
+SELECT;
+
+-- case: ddl-alter
+ALTER TABLE author ADD COLUMN email text;
+ALTER TABLE author RENAME COLUMN email TO mail;
+ALTER TABLE author DROP COLUMN mail;
+ALTER TABLE book RENAME TO volume;
+\dt
+
+-- case: ddl-identity
+CREATE TABLE ev (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, at timestamptz DEFAULT now(), n int GENERATED ALWAYS AS (id * 2) STORED);
+\d ev
+
+-- case: catalog-version-queries
+SELECT count(*) > 0 AS has_tables FROM pg_catalog.pg_tables WHERE schemaname = 'public';
+SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY 1;
+SELECT viewname FROM pg_catalog.pg_views WHERE schemaname = 'public';
+SELECT indexname FROM pg_catalog.pg_indexes WHERE tablename = 'book' ORDER BY 1;
+SELECT sequencename, start_value FROM pg_catalog.pg_sequences;
+
+-- case: info-schema-tables
+SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;
+
+-- case: info-schema-columns
+SELECT column_name, ordinal_position, data_type, is_nullable, column_default, character_maximum_length, numeric_precision, numeric_scale
+FROM information_schema.columns WHERE table_name = 'book' ORDER BY ordinal_position;
+
+-- case: info-schema-constraints
+SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'book' AND constraint_type <> 'CHECK' ORDER BY constraint_name;
+SELECT kcu.column_name, ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
+FROM information_schema.key_column_usage kcu
+JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = kcu.constraint_name
+JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name
+WHERE tc.constraint_type = 'FOREIGN KEY' AND kcu.table_name = 'book';
+
+-- case: regclass
+SELECT 'book'::regclass;
+SELECT 'book'::regclass::oid = (SELECT oid FROM pg_class WHERE relname = 'book') AS same;
+SELECT 'int4'::regtype, 23::regtype, 'pg_catalog.text'::regtype;
+SELECT pg_get_serial_sequence('author', 'id');
+
+-- case: format-type
+SELECT format_type(23, -1), format_type(1043, 204), format_type(1700, 655366), format_type(25, NULL);
+SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE a.attrelid = 'book'::regclass AND a.attnum > 0 ORDER BY a.attnum;

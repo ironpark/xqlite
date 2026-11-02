@@ -23,11 +23,12 @@ fn useHooksOf(c: *Conn, d: dialect.Dialect) void {
 }
 
 test {
-    _ = @import("postgres/frontend.zig");
-    _ = @import("oracle/frontend.zig");
+    if (comptime dialect.Dialect.postgres.built()) _ = @import("postgres/frontend.zig");
+    if (comptime dialect.Dialect.oracle.built()) _ = @import("oracle/frontend.zig");
 }
 
 test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {
+    try dialect.Dialect.requireBuilt(&.{ .postgres, .mariadb });
     var c: Conn = undefined;
     try c.open();
     defer c.close();
@@ -57,6 +58,7 @@ test "dialect: SQLite by default, PRAGMA xq_dialect and frontend dispatch" {
 }
 
 test "dialect: function tables add and replace functions" {
+    try dialect.Dialect.requireBuilt(&.{ .postgres, .mariadb });
     var c: Conn = undefined;
     try c.open();
     defer c.close();
@@ -87,6 +89,7 @@ test "dialect: function tables add and replace functions" {
 }
 
 test "dialect: engine functions and qualified dialect functions are visible in every dialect" {
+    try dialect.Dialect.requireBuilt(&.{ .postgres, .mariadb });
     var c: Conn = undefined;
     try c.open();
     defer c.close();
@@ -104,6 +107,7 @@ test "dialect: engine functions and qualified dialect functions are visible in e
 }
 
 test "dialect: sequences" {
+    try dialect.Dialect.requireBuilt(&.{ .postgres, .mariadb });
     var c: Conn = undefined;
     try c.open();
     defer c.close();
@@ -170,6 +174,7 @@ fn ddlFrontendRun(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!
 const ddl_frontend: dialect.Frontend = .{ .run = ddlFrontendRun };
 
 test "dialect: DDL lowered as SQLite text, with catalog entries in the same statement" {
+    try dialect.Dialect.requireBuilt(&.{.postgres});
     var c: Conn = undefined;
     try c.open();
     defer c.close();
@@ -204,6 +209,7 @@ test "dialect: DDL lowered as SQLite text, with catalog entries in the same stat
 }
 
 test "dialect: the default collation hook" {
+    try dialect.Dialect.requireBuilt(&.{.mariadb});
     var c: Conn = undefined;
     try c.open();
     defer c.close();

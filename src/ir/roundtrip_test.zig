@@ -232,6 +232,7 @@ test "ir roundtrip: IS TRUE in a DEFAULT, which SQLite does not resolve" {
 }
 
 test "ir roundtrip: dialect functions on edge values" {
+    try dialect.Dialect.requireBuilt(&.{ .postgres, .mariadb });
     var c: Conn = undefined;
     try c.open();
     defer c.close();

@@ -597,7 +597,8 @@ test "mysql: prepared statements" {
     try expectLines("err 1062 23000 Duplicate entry '2' for key 'PRIMARY'\n", try a.execute(ins.id, &.{ .{ .int = 2 }, .null, .null, .null, .null, .null }));
 
     const sel = try a.prepare("SELECT id, f, s, at, d, b, id * 2 AS twice FROM t WHERE id >= ? ORDER BY id");
-    try expectLines("params ?:VAR_STRING\ncols id:LONGLONG@main.t f:DOUBLE@main.t s:VAR_STRING@main.t at:DATETIME@main.t d:TIME@main.t b:BLOB@main.t twice:VAR_STRING\n", sel.text);
+    // The parameter compared with the INTEGER PRIMARY KEY is of its type.
+    try expectLines("params ?:LONGLONG\ncols id:LONGLONG@main.t f:DOUBLE@main.t s:VAR_STRING@main.t at:DATETIME@main.t d:TIME@main.t b:BLOB@main.t twice:LONGLONG\n", sel.text);
     try expectLines(
         \\cols id:LONGLONG@main.t f:DOUBLE@main.t s:VAR_STRING@main.t at:DATETIME@main.t d:TIME@main.t b:BLOB@main.t twice:LONGLONG
         \\row 1|2.5|héllo|2024-2-29 23:59:58.123456|-1d6:1:2|
@@ -613,8 +614,8 @@ test "mysql: prepared statements" {
     try expectLines("cols at:DATETIME@main.t d:TIME@main.t\nrow 2024-02-29 23:59:58.123456|-30:01:02\nend\n", try a.query("SELECT at, d FROM t WHERE id = 1"));
     // The types the statement knows are described before it runs.
     const typed = try a.prepare("SELECT id = ? AS eq, CAST(id AS CHAR) AS c, id + 0.5 AS h FROM t WHERE id = 1");
-    try expectLines("params ?:VAR_STRING\ncols eq:TINY c:STRING h:VAR_STRING\n", typed.text);
-    try expectLines("cols eq:TINY c:STRING h:DOUBLE\nrow 1|1|1.5\nend\n", try a.execute(typed.id, &.{.{ .int = 1 }}));
+    try expectLines("params ?:LONGLONG\ncols eq:TINY c:STRING h:NEWDECIMAL,1\n", typed.text);
+    try expectLines("cols eq:TINY c:STRING h:NEWDECIMAL,1\nrow 1|1|1.5\nend\n", try a.execute(typed.id, &.{.{ .int = 1 }}));
     // A statement prepared before a schema change is compiled again, and
     // described again.
     const star = try a.prepare("SELECT * FROM t WHERE id = ?");

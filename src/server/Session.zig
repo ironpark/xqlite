@@ -138,9 +138,13 @@ pub const Notice = struct {
 pub fn open(gpa: Allocator, io: std.Io, path: []const u8, options: Options) xqlite.Error!Session {
     var o = options.open;
     o.column_metadata = true;
+    var db = try xqlite.Db.open(gpa, io, path, o);
+    // generate_series(), as the shell has it (PostgreSQL's is built in;
+    // psql's \d asks for it).
+    if (xqlite.config.ext_series) _ = xqlite.ext.series.init(db.raw());
     return .{
         .gpa = gpa,
-        .db = try xqlite.Db.open(gpa, io, path, o),
+        .db = db,
         .abort_failed_transactions = options.abort_failed_transactions,
         .implicit_transactions = options.implicit_transactions,
         .scratch = .init(gpa),
@@ -277,7 +281,7 @@ fn enter(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, more: bool, sink
             return .done;
         },
         // What cannot run in a transaction, or needs none.
-        .savepoint, .release, .vacuum, .attach, .detach, .pragma, .set, .show, .use => {},
+        .savepoint, .release, .vacuum, .attach, .detach, .pragma, .set, .reset, .show, .use => {},
         else => if (!in_tx and more) {
             s.db.exec("BEGIN") catch {
                 try s.fail(sink, null, cmd);
@@ -351,7 +355,7 @@ fn runOne(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, sink: anytype) 
 /// Whether a statement's rows are its result: a SET has none, though a
 /// dialect may run it as a query (PostgreSQL's set_config()).
 fn hasResult(stmt: *const xqlite.Stmt, cmd: command.Command) bool {
-    return stmt.columnCount() > 0 and cmd.verb != .set;
+    return stmt.columnCount() > 0 and cmd.verb != .set and cmd.verb != .reset;
 }
 
 /// Report the connection's last error for the statement at `at` (null:

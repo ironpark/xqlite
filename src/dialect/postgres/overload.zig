@@ -3,11 +3,17 @@
 //! statement once its operands are typed: a column of a table, of a
 //! subquery, a CTE or a view, a cast, a function's result.
 //!
+//!  - an arithmetic or bit operator (+ - * / %, unary -, & | << >>) is
+//!    the row of operators.zig's table its operands' types choose: the
+//!    engine's own operator for numbers, an engine function for dates,
+//!    times, timestamps, intervals and jsonb's `-` (date + 1 is
+//!    xq_pg_date_pli(d, 1)); `date + text` is an error. An operand of no
+//!    known type leaves the operator to SQLite, except jsonb's `-`, which
+//!    takes any right operand (as before the table: a SQLite column);
 //!  - `a || b` with a jsonb operand (the other jsonb or of no type: a
 //!    string literal, NULL, a parameter) is xq_pg_jsonb_concat(a, b);
-//!    `a - b` with a jsonb left operand xq_pg_jsonb_delete(), or
-//!    xq_pg_jsonb_delete_keys() if b is an array; `json || json` is an
-//!    error, as in PostgreSQL;
+//!    `json || json` is an error, as in PostgreSQL. `||` is not in the
+//!    table: PostgreSQL's is text || anynonarray, of any type;
 //!  - `->`, `->>`, `#>`, `#>>` (xq_pg_json_get() ...) of a jsonb operand
 //!    call jsonb's functions (their results are normalized), of json
 //!    json's (the text as written);
@@ -15,7 +21,9 @@
 //!    (collation xq_pg_jsonb on the left operand), a string literal read
 //!    as jsonb (xq_pg_jsonb()); `json = json` is an error; ORDER BY a
 //!    jsonb value sorts in jsonb's order (orderCollation(), for the
-//!    ORDER BY of a query, an aggregate and a window);
+//!    ORDER BY of a query, an aggregate and a window); intervals compare
+//!    and sort in theirs (collation xq_pg_interval: '1 mon' is
+//!    '30 days', '1 day' more than '02:00:00');
 //!  - an argument of a function that builds JSON (to_json(),
 //!    json_build_object(), json_agg(), xq_pg_row_json() ... : builders)
 //!    is wrapped so that the function sees what it is (jfuncs.zig):
@@ -40,6 +48,7 @@ const int = @import("../../sql/sqlite_int.zig");
 const expr_mod = @import("../../sql/expr.zig");
 const pg_typing = @import("typing.zig");
 const types = @import("types.zig");
+const operators = @import("operators.zig");
 
 const TK = int.TK;
 const Expr = int.Expr;
@@ -48,9 +57,14 @@ const Error = typing.Error;
 const Logical = @import("../../sql/types.zig").Logical;
 
 pub fn overload(c: *Ctx, e: *Expr) Error!bool {
+    // An Expr of the schema's text (a view's, moved out of it by a
+    // window's rewrite or a flattening) means what that text says: the
+    // choices of this dialect are written there as functions.
+    if (e.flags.FromDDL) return false;
     return switch (e.op) {
         TK.CONCAT => concat(c, e),
         TK.MINUS => minus(c, e),
+        TK.PLUS, TK.STAR, TK.SLASH, TK.REM, TK.UMINUS, TK.BITAND, TK.BITOR, TK.LSHIFT, TK.RSHIFT => arith(c, e),
         TK.EQ, TK.NE, TK.LT, TK.LE, TK.GT, TK.GE, TK.IS, TK.ISNOT => compare(c, e),
         TK.FUNCTION, TK.AGG_FUNCTION => call(c, e),
         else => false,
@@ -59,10 +73,16 @@ pub fn overload(c: *Ctx, e: *Expr) Error!bool {
 
 /// ORDER BY a jsonb value: in jsonb's order.
 pub fn orderCollation(c: *Ctx, id: typing.TypeId) ?[:0]const u8 {
-    return if (typing.typeOf(c.p.db, id).logical == .jsonb) jsonb_collation else null;
+    return switch (typing.typeOf(c.p.db, id).logical) {
+        .jsonb => jsonb_collation,
+        .interval => interval_collation,
+        else => null,
+    };
 }
 
 const jsonb_collation = "xq_pg_jsonb";
+/// Intervals in PostgreSQL's order (datetime.collateInterval()).
+const interval_collation = "xq_pg_interval";
 
 fn logical(c: *const Ctx, e: *const Expr) Logical {
     return typing.typeOf(c.p.db, e.xq_type).logical;
@@ -77,9 +97,15 @@ fn untyped(e: *const Expr) bool {
 /// Whether `a op b` is jsonb's operator: a jsonb operand, the other
 /// jsonb or of no type.
 fn jsonbPair(c: *const Ctx, a: *const Expr, b: *const Expr) bool {
+    return pairOf(c, a, b, .jsonb);
+}
+
+/// Whether `a op b` is an operator of type `l`: an operand of `l`, the
+/// other of `l` or of no type.
+fn pairOf(c: *const Ctx, a: *const Expr, b: *const Expr, l: Logical) bool {
     const la = logical(c, a);
     const lb = logical(c, b);
-    return (la == .jsonb and (lb == .jsonb or untyped(b))) or (lb == .jsonb and untyped(a));
+    return (la == l and (lb == l or untyped(b))) or (lb == l and untyped(a));
 }
 
 fn concat(c: *Ctx, e: *Expr) Error!bool {
@@ -91,12 +117,105 @@ fn concat(c: *Ctx, e: *Expr) Error!bool {
     return true;
 }
 
+/// `a - b`: the table's, but jsonb minus an operand of no type the table
+/// knows (a SQLite column, an int[]) deletes it, a key or the keys of
+/// an array.
 fn minus(c: *Ctx, e: *Expr) Error!bool {
     const l = e.left orelse return false;
     const r = e.right orelse return false;
-    if (logical(c, l) != .jsonb) return false;
-    try c.toCall(e, if (arrayOf(c, r) != null) "xq_pg_jsonb_delete_keys" else "xq_pg_jsonb_delete", &.{ l, r });
+    if (logical(c, l) == .jsonb and argOf(c, r) == null) {
+        try c.toCall(e, if (arrayOf(c, r) != null) "xq_pg_jsonb_delete_keys" else "xq_pg_jsonb_delete", &.{ l, r });
+        return true;
+    }
+    return arith(c, e);
+}
+
+/// What operand `x` is to the table: a string literal PostgreSQL's
+/// unknown, a parameter or NULL one that never fails the statement, null
+/// for an operand of no type the table knows.
+fn argOf(c: *const Ctx, x: *const Expr) ?operators.Arg {
+    switch (x.op) {
+        TK.STRING => return .literal,
+        TK.NULL, TK.VARIABLE => return .loose,
+        else => {},
+    }
+    const t = operators.T.of(logical(c, x), typing.spelling(c.p.db, x.xq_type)) orelse return null;
+    return .{ .known = t };
+}
+
+/// An arithmetic or bit operator by operators.zig's table: an engine
+/// function's row makes it a call; a parameter takes the type of the
+/// row's operand (`ts + $1`: an interval).
+fn arith(c: *Ctx, e: *Expr) Error!bool {
+    const op: operators.Op = switch (e.op) {
+        TK.PLUS => .add,
+        TK.MINUS => .sub,
+        TK.STAR => .mul,
+        TK.SLASH => .div,
+        TK.REM => .mod,
+        TK.UMINUS => .neg,
+        TK.BITAND => .bit_and,
+        TK.BITOR => .bit_or,
+        TK.LSHIFT => .shl,
+        TK.RSHIFT => .shr,
+        else => return false,
+    };
+    var operands: [2]*Expr = undefined;
+    var ops: [2]operators.Arg = undefined;
+    operands[0] = e.left orelse return false;
+    const n: usize = if (op == .neg) 1 else 2;
+    if (n == 2) operands[1] = e.right orelse return false;
+    var known = false;
+    var loose = false;
+    for (operands[0..n], ops[0..n]) |x, *a| {
+        a.* = argOf(c, x) orelse return false;
+        switch (a.*) {
+            .known => known = true,
+            .loose => loose = true,
+            .literal => {},
+        }
+    }
+    // Literals only: SQLite's.
+    if (!known) return false;
+    const r = operators.resolve(op, ops[0..n]);
+    const row = switch (r) {
+        .entry => |row| row,
+        else => {
+            // A parameter or NULL may be of any type.
+            if (loose) return false;
+            var buf: [160]u8 = undefined;
+            const msg = operators.message(r, op, ops[0..n], &buf);
+            return c.fail(e, if (r == .not_unique) .of("42725") else .of("42883"), "{s}", .{msg});
+        },
+    };
+    for (operands[0..n], ops[0..n], row.args) |x, a, t| if (a == .loose and x.op == TK.VARIABLE and logical(c, x) != t.logical()) {
+        try typing.retypeParam(c.p, x, try c.named(t.name()));
+    };
+    const f = row.func orelse {
+        // A string literal is read as the integer the row takes ('a' + 1
+        // is invalid input for type integer, as in PostgreSQL), not by
+        // SQLite's affinity.
+        var changed = false;
+        for (operands[0..n], ops[0..n], row.args, 0..) |x, a, t, i| if (a == .literal) {
+            const cast = intInput(t) orelse continue;
+            const w = try c.call(cast, &.{x});
+            if (i == 0) e.left = w else e.right = w;
+            changed = true;
+        };
+        return changed;
+    };
+    try c.toCall(e, f, operands[0..n]);
     return true;
+}
+
+/// The cast that reads a string as an integer of type `t`.
+pub fn intInput(t: operators.T) ?[]const u8 {
+    return switch (t) {
+        .int2 => "xq_pg_int2",
+        .int4 => "xq_pg_int4",
+        .int8 => "xq_pg_int8",
+        else => null,
+    };
 }
 
 fn compare(c: *Ctx, e: *Expr) Error!bool {
@@ -106,7 +225,11 @@ fn compare(c: *Ctx, e: *Expr) Error!bool {
         return c.fail(e, .of("42883"), "operator does not exist: json {s} json", .{opText(e.op)});
     }
     // Chosen already.
-    if (l.op == TK.COLLATE and std.ascii.eqlIgnoreCase(l.token(), jsonb_collation)) return false;
+    if (l.op == TK.COLLATE and (std.ascii.eqlIgnoreCase(l.token(), jsonb_collation) or std.ascii.eqlIgnoreCase(l.token(), interval_collation))) return false;
+    if (pairOf(c, l, r, .interval)) {
+        e.left = try c.collate(l, interval_collation);
+        return true;
+    }
     if (!jsonbPair(c, l, r)) return false;
     // The literal is read as jsonb.
     var left = l;

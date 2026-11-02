@@ -238,6 +238,9 @@ fn lookup(dialect: Dialect, base: []const u8) Logical {
         },
         .postgres => {
             if (std.mem.eql(u8, base, "float")) return .float8;
+            // An OID is 4 bytes, as int4 on the wire (the catalogs' are
+            // below 2^31).
+            if (std.mem.eql(u8, base, "oid")) return .int4;
         },
     }
     if (std.mem.startsWith(u8, base, "interval")) return .interval;

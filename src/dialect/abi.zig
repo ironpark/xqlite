@@ -344,3 +344,95 @@ test "abi: xq_ext_version()" {
     try std.testing.expectEqual(@as(i64, 1), version);
     try std.testing.expect(dialect.engineFunctionSearch("xq_ext_version").len == 1);
 }
+
+// ================================================================ counts
+
+/// The counts docs/extension.md gives by dialect: the functions the
+/// extension registers by kind, the ones it leaves out, the collations.
+const Counts = struct { engine: usize = 0, qualified: usize = 0, sequence: usize = 0, excluded: usize = 0, collation: usize = 0 };
+
+/// The row of docs/extension.md's table: `d` a dialect, null the
+/// functions of every dialect (like.zig's, decimal_sql.zig's, this
+/// file's, the sequence functions), `builtins` SQLite's (xq_sqlite_*).
+fn countsOf(d: ?Dialect, builtins: bool) Counts {
+    var c: Counts = .{};
+    for (catalogue) |e| {
+        if (e.dialect != d or (e.origin == .sqlite) != builtins) continue;
+        if (e.unportable != null) {
+            c.excluded += 1;
+            continue;
+        }
+        switch (e.origin) {
+            .engine => c.engine += 1,
+            .qualified, .sqlite => if (e.sequence != null) {
+                c.sequence += 1;
+            } else {
+                c.qualified += 1;
+            },
+            .sequence => c.sequence += 1,
+        }
+    }
+    if (d) |x| for (collations) |k| {
+        if (k.dialect == x) c.collation += 1;
+    };
+    return c;
+}
+
+/// The leading number of a table cell, 0 for an empty one.
+fn cellNumber(cell: []const u8) usize {
+    const z = std.mem.trim(u8, cell, " ");
+    var n: usize = 0;
+    for (z) |ch| {
+        if (!std.ascii.isDigit(ch)) break;
+        n = n * 10 + (ch - '0');
+    }
+    return n;
+}
+
+test "abi: docs/extension.md counts the functions as the catalogue has them" {
+    try Dialect.requireBuilt(&.{ .postgres, .mariadb, .mssql, .oracle });
+    const gpa = std.testing.allocator;
+    // Read from the build root, as `zig build test` runs (the fuzz tests
+    // read ref/ so too); a run elsewhere (wasi) has no docs to check.
+    const doc = std.Io.Dir.cwd().readFileAlloc(std.testing.io, "docs/extension.md", gpa, .unlimited) catch return error.SkipZigTest;
+    defer gpa.free(doc);
+    const rows = [_]struct { []const u8, ?Dialect, bool }{
+        .{ "공통", null, false },
+        .{ "PostgreSQL", .postgres, false },
+        .{ "MariaDB", .mariadb, false },
+        .{ "SQL Server", .mssql, false },
+        .{ "Oracle", .oracle, false },
+        .{ "SQLite 내장", null, true },
+    };
+    var failures: usize = 0;
+    var registered: usize = 0;
+    var excluded: usize = 0;
+    for (rows) |r| {
+        const want = countsOf(r[1], r[2]);
+        registered += want.engine + want.qualified + want.sequence;
+        excluded += want.excluded;
+        var lines = std.mem.tokenizeScalar(u8, doc, '\n');
+        const line = while (lines.next()) |l| {
+            if (std.mem.startsWith(u8, l, "| ") and std.mem.startsWith(u8, l[2..], r[0]) and l.len > 2 + r[0].len and (l[2 + r[0].len] == ' ' or l[2 + r[0].len] == '(')) break l;
+        } else {
+            std.debug.print("docs/extension.md: no row {s}\n", .{r[0]});
+            failures += 1;
+            continue;
+        };
+        var cells = std.mem.splitScalar(u8, line[1..], '|');
+        _ = cells.next();
+        var got: Counts = .{};
+        inline for (.{ "engine", "qualified", "sequence", "excluded", "collation" }) |f| @field(got, f) = cellNumber(cells.next() orelse "");
+        if (!std.meta.eql(got, want)) {
+            std.debug.print("docs/extension.md: row {s} says {any}, the catalogue has {any}\n", .{ r[0], got, want });
+            failures += 1;
+        }
+    }
+    const total = try std.fmt.allocPrint(gpa, "모두 {d}개, 빠지는 것 {d}개", .{ registered, excluded });
+    defer gpa.free(total);
+    if (std.mem.indexOf(u8, doc, total) == null) {
+        std.debug.print("docs/extension.md: the totals should read \"{s}\"\n", .{total});
+        failures += 1;
+    }
+    if (failures > 0) return error.TestUnexpectedResult;
+}

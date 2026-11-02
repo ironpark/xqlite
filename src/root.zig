@@ -42,6 +42,7 @@ pub const Args = api.Args;
 pub const types = api.types;
 pub const display = api.display;
 pub const decimal = api.decimal;
+pub const repr = api.repr;
 pub const FilterArgs = api.FilterArgs;
 
 comptime {

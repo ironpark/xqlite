@@ -274,7 +274,7 @@ const Db = struct {
     mem: MemVfs,
     db: *int.Sqlite3,
     /// Whether the statement run() last prepared computes PostgreSQL's
-    /// exact numerics (calls an xq_dec_* function): exactNumeric().
+    /// exact numerics (calls a FUNC.XQ_EXACT function): exactNumeric().
     exact: bool = false,
 
     fn open(gpa: Allocator, io: std.Io) !*Db {
@@ -358,7 +358,7 @@ const Db = struct {
     }
 
     /// Whether statement `v` computes PostgreSQL's exact numerics: the
-    /// typing rules chose an xq_dec_* function for an expression
+    /// typing rules chose a FUNC.XQ_EXACT function for an expression
     /// (Parse.xq_exact_numeric; the call may be folded to a constant). A
     /// dialect that types its literals (PostgreSQL: `2.5` is numeric)
     /// computes such an expression exactly and by its own functions
@@ -369,12 +369,12 @@ const Db = struct {
     fn exactNumeric(v: *vi.Vdbe) bool {
         if (v.xq_exact_numeric) return true;
         for (v.ops.items) |*op| {
-            const name: [:0]const u8 = switch (op.p4type) {
-                .funcdef => op.p4.funcdef.name,
-                .funcctx => op.p4.funcctx.func.name,
+            const f = switch (op.p4type) {
+                .funcdef => op.p4.funcdef,
+                .funcctx => op.p4.funcctx.func,
                 else => continue,
             };
-            if (std.mem.startsWith(u8, name, "xq_dec")) return true;
+            if (f.func_flags.XQ_EXACT) return true;
         }
         return false;
     }

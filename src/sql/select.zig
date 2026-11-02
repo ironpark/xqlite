@@ -2814,6 +2814,9 @@ pub fn expandSubquery(p: *Parse, from: *SrcItem) Oom!bool {
         .n_row_log_est = 200,
         .e_tab_type = .view,
         .tab_flags = .{ .Ephemeral = true, .NoVisibleRowid = true },
+        // A view's union member, as its type says (C's zeroed u.view:
+        // pSelect NULL), so a reader of u.view finds it active.
+        .u = .{ .view = .{} },
     };
     t.cols = try columnsFromExprList(p, p.arena, sel.e_list);
     t.n_nv_col = @intCast(t.cols.len);

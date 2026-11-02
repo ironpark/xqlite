@@ -42,6 +42,8 @@ pub const Options = struct {
     subtype: bool = false,
     /// May give its result a subtype (SQLITE_RESULT_SUBTYPE).
     result_subtype: bool = false,
+    /// Computes exact numerics where SQLite computes doubles (FUNC.XQ_EXACT).
+    exact: bool = false,
 };
 
 fn flags(o: Options) @import("../sql/callback.zig").FUNC {
@@ -53,6 +55,7 @@ fn flags(o: Options) @import("../sql/callback.zig").FUNC {
         .UNSAFE = o.unsafe,
         .SUBTYPE = o.subtype,
         .RESULT_SUBTYPE = o.result_subtype,
+        .XQ_EXACT = o.exact,
     };
 }
 

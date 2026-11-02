@@ -52,7 +52,13 @@ pub const FUNC = packed struct(u32) {
     SELFORDER1: bool = false,
     _26: u1 = 0,
     ANYORDER: bool = false,
-    _28: u4 = 0,
+    /// xqlite: computes PostgreSQL's exact numerics (decimal_sql.zig),
+    /// where SQLite computes doubles: a statement that calls one
+    /// computes as its dialect chose (Parse.xq_exact_numeric). Not
+    /// SQLite's (pragma function_list masks it; the extension does not
+    /// register it).
+    XQ_EXACT: bool = false,
+    _29: u3 = 0,
 
     /// octet_length(): LENGTH and TYPEOF.
     pub const BYTELEN: FUNC = .{ .LENGTH = true, .TYPEOF = true };
@@ -100,6 +106,8 @@ pub const FUNC = packed struct(u32) {
             .RESULT_SUBTYPE = 0x01000000,
             .SELFORDER1 = 0x02000000,
             .ANYORDER = 0x08000000,
+            // xqlite's, in a bit SQLite leaves unused.
+            .XQ_EXACT = 0x10000000,
         });
     }
 };

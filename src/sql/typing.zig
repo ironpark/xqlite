@@ -318,6 +318,13 @@ pub const Rules = struct {
     /// number of an integer column). Asked before `store`; null to ask
     /// `store`.
     store_column: ?*const fn (t: Type, decl: []const u8, storage: int.COLTYPE) ?Store = null,
+    /// The types whose values may be in more than one form, so that a
+    /// value of the type, stored into a column with a store function,
+    /// goes through it too (storeNeeded()): PostgreSQL's uuid is a
+    /// column's 16 bytes or an older column's text, an interval a BLOB or
+    /// an older database's text, jsonb JSONB or text, a numeric a key or
+    /// a number (its postgres/repr.zig).
+    store_forms: std.EnumSet(Logical) = .empty,
     /// A numeric value has a scale of its own (PostgreSQL's: 1 and 2.50
     /// together are 1 and 2.50), so that the common type of numerics of
     /// different scales has none; else the common type has the larger
@@ -348,6 +355,10 @@ pub const Rules = struct {
     /// which the collation may differ (PostgreSQL's interval: a BLOB
     /// sorts as it is, text in a collation).
     order_collation: ?*const fn (c: *Ctx, id: TypeId, e: *const Expr) ?[:0]const u8 = null,
+    /// The types whose number literals compute exactly where SQLite's
+    /// doubles do not (PostgreSQL's numeric: 1.5 is a decimal):
+    /// Parse.xq_exact_numeric, as for a call of a FUNC.XQ_EXACT function.
+    exact_types: std.EnumSet(types.Logical) = .empty,
     /// The function (of one argument) a GROUP BY or DISTINCT groups
     /// values of type `id` by, null for the values themselves:
     /// PostgreSQL's interval, whose equal values ('1 mon', '30 days') are
@@ -427,7 +438,7 @@ pub const Ctx = struct {
             };
             list = try expr_mod.listAppend(p, list, a);
         }
-        if (std.mem.startsWith(u8, name, "xq_dec")) p.xq_exact_numeric = true;
+        if (exactFunction(p, name, args.len)) p.xq_exact_numeric = true;
         const e = try expr_mod.exprAlloc(p.arena, TK.FUNCTION, int.Token.init(name), true);
         e.x = .{ .list = list };
         e.flags.HasFunc = true;
@@ -454,7 +465,7 @@ pub const Ctx = struct {
     /// window of a window function is told.
     pub fn rename(c: *Ctx, e: *Expr, name: []const u8) Oom!void {
         const p = c.p;
-        if (std.mem.startsWith(u8, name, "xq_dec")) p.xq_exact_numeric = true;
+        if (exactFunction(p, name, if (e.x.list) |l| l.len() else 0)) p.xq_exact_numeric = true;
         e.u = .{ .token = try p.arena.dupeSentinel(u8, name, 0) };
         if (e.isWindowFunc()) {
             const n: i32 = if (e.x.list) |l| @intCast(l.len()) else 0;
@@ -728,7 +739,7 @@ fn exprType(c: *Ctx, e: *Expr) Oom!TypeId {
             const id = try c.rules.literal(c, e);
             // A number literal of PostgreSQL's numeric (1.5, 1e3, an
             // integer past bigint) is exact (Parse.xq_exact_numeric).
-            if (e.op != TK.STRING and typeOf(c.p.db, id).logical == .numeric) c.p.xq_exact_numeric = true;
+            if (e.op != TK.STRING and c.rules.exact_types.contains(typeOf(c.p.db, id).logical)) c.p.xq_exact_numeric = true;
             return id;
         },
         TK.UPLUS, TK.COLLATE => return if (e.left) |l| l.xq_type else unknown,
@@ -989,22 +1000,22 @@ pub const Store = struct {
     n_consts: u2 = 0,
     /// Every value, not only those storeNeeded() picks.
     always: bool = false,
-    /// Only the values of type numeric (PostgreSQL's numeric stored into
-    /// a column of another type: a key made a number or text).
-    only_numeric: bool = false,
+    /// Only the values of this type (PostgreSQL's numeric stored into a
+    /// column of another type: a key made a number or text).
+    only: ?Logical = null,
 
     /// Whether value `e` goes through it.
     pub fn needed(s: Store, db: *const int.Sqlite3, e: *const Expr) bool {
-        if (s.only_numeric) return typeOf(db, e.xq_type).logical == .numeric;
+        if (s.only) |l| return typeOf(db, e.xq_type).logical == l;
         return s.always or storeNeeded(db, e);
     }
 
     /// Whether the values of column `i` of query `sel` (INSERT ... SELECT)
     /// go through it.
     pub fn neededColumn(s: Store, p: *int.Parse, sel: *int.Select, i: usize) bool {
-        if (!s.only_numeric) return true;
+        const l = s.only orelse return true;
         const id = columnOf(p, sel, i) catch return true;
-        return typeOf(p.db, id).logical == .numeric;
+        return typeOf(p.db, id).logical == l;
     }
 };
 
@@ -1044,17 +1055,15 @@ pub fn storeFunctions(p: *int.Parse, t: *int.Table) Oom!?[]const ?Store {
 /// Whether value `e`, stored into a column with a store function, may
 /// need it: a parameter, or a value of no known type or of a string
 /// type (a number, a boolean expression, a column of the same type are
-/// stored as they are). An interval may be text or a BLOB (PostgreSQL's
-/// interval columns of older databases are TEXT), stored as the column
-/// keeps it; jsonb JSONB or text, as the column keeps it.
+/// stored as they are), or of a type whose values may be in more than
+/// one form (Rules.store_forms: PostgreSQL's interval may be text or a
+/// BLOB), stored as the column keeps it.
 pub fn storeNeeded(db: *const int.Sqlite3, e: *const Expr) bool {
     if (e.op == TK.VARIABLE) return true;
-    return switch (typeOf(db, e.xq_type).logical) {
-        // A uuid may be a column's 16 bytes or an older column's text, an
-        // interval a BLOB or an older database's text, a numeric a key or
-        // a number (Rules.store).
-        .unknown, .text, .varchar, .char, .uuid, .interval, .jsonb, .numeric => true,
-        else => false,
+    const l = typeOf(db, e.xq_type).logical;
+    return switch (l) {
+        .unknown, .text, .varchar, .char => true,
+        else => if (dialect_mod.hooks(db).typing) |rules| rules.store_forms.contains(l) else false,
     };
 }
 
@@ -1324,4 +1333,12 @@ test decimalLiteral {
     const e: Expr = .{ .op = TK.INTEGER, .flags = .{ .IntValue = true }, .u = .{ .value = 1234 } };
     try std.testing.expectEqual(@as(u32, 4), decimalLiteral(&e).?.precision());
     try std.testing.expectEqual(@as(?i64, 1234), intLiteral(&e));
+}
+
+/// Whether `name` with `n_arg` arguments is a function that computes
+/// exact numerics (FUNC.XQ_EXACT: decimal_sql.zig's), which makes the
+/// statement compute as its dialect chose (Parse.xq_exact_numeric).
+fn exactFunction(p: *int.Parse, name: []const u8, n_arg: usize) bool {
+    const d = callback.findFunction(p.db, name, @intCast(n_arg), p.db.enc, false) orelse return false;
+    return d.func_flags.XQ_EXACT;
 }

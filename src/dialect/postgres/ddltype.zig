@@ -659,7 +659,7 @@ const Back = struct {
 };
 
 const jsonb_collation = "xq_pg_jsonb";
-const jsonb_key = @import("overload.zig").jsonb_key;
+const jsonb_key = @import("repr.zig").jsonb.jsonb_key;
 
 /// The functions overload.zig calls in the place of another.
 const renames = std.StaticStringMap(void).initComptime(.{

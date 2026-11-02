@@ -70,6 +70,11 @@ pub const display = @import("api/display.zig");
 /// Exact decimal numbers and the key a numeric column stores them as (a
 /// BLOB in the order of the numbers: decimal.decodeKey(), keyText()).
 pub const decimal = @import("dialect/decimal.zig");
+/// The values a dialect stores as a BLOB of its own form (a numeric's
+/// key, a uuid's bytes, an interval, jsonb as JSONB) and their text
+/// (repr.text(), repr.intervalOf() ...): what display.text() writes them
+/// with.
+pub const repr = @import("dialect/repr.zig");
 
 test {
     _ = errors;

@@ -298,47 +298,114 @@ pub fn writeBinary(o: *Out, o_id: Oid, t: Type, v: Value) !void {
             .text => |z| try o.field(z),
             else => return error.Unencodable,
         },
-        oid.uuid => {
-            // Its 16 bytes, or the text of an older table's column.
-            const b: [16]u8 = switch (v) {
-                .blob => |x| if (x.len == 16) x[0..16].* else return error.Unencodable,
-                .text => |z| parseUuid(z) orelse return error.Unencodable,
-                else => return error.Unencodable,
-            };
-            try o.field(&b);
-        },
-        oid.numeric => try writeNumeric(o, t, v),
-        // interval BLOB: PostgreSQL's interval_send(): the microseconds
-        // (int64), the days and the months (int32); an older database's
-        // TEXT read.
-        oid.interval => {
-            const iv = xqlite.display.intervalOf(v) orelse switch (v) {
-                .text => |z| xqlite.display.parseInterval(z) orelse return error.Unencodable,
-                else => return error.Unencodable,
-            };
-            try o.int(i32, 16);
-            try o.int(i64, iv.time);
-            try o.int(i32, iv.days);
-            try o.int(i32, iv.months);
-        },
-        oid.jsonb => {
-            var buf: [xqlite.display.max_len]u8 = undefined;
-            // Version 1 and the text; of JSONB, its JSON text.
-            const owned = try xqlite.display.textAlloc(o.gpa, .postgres, t, v);
-            defer if (owned) |z| o.gpa.free(z);
-            const z = owned orelse textOf(t, v, &buf) orelse return error.Unencodable;
-            try o.int(i32, @intCast(1 + z.len));
-            try o.int(u8, 1);
-            try o.bytes(z);
-        },
         else => {
+            if (formOf(o_id)) |f| return f.send(o, t, v);
             std.debug.assert(textual(o_id));
             try writeText(o, t, v);
         },
     }
 }
 
-// ================================================================ numeric
+// ============================================================ BLOB forms
+//
+// The binary form of the types a dialect stores as a BLOB of its own form
+// (xqlite.repr: a numeric's key, a uuid's 16 bytes, an interval, jsonb as
+// JSONB), each also as the text or number of an older table's column:
+// one codec per type.
+
+const Form = struct {
+    oid: Oid,
+    /// The binary form of `v` (not NULL), a value of type `t`.
+    send: *const fn (o: *Out, t: Type, v: Value) error{ OutOfMemory, Unencodable }!void,
+    /// The value of a parameter in the binary form.
+    recv: *const fn (a: std.mem.Allocator, b: []const u8) DecodeError!Value,
+};
+
+const forms = [_]Form{
+    .{ .oid = oid.numeric, .send = writeNumeric, .recv = decodeNumeric },
+    .{ .oid = oid.uuid, .send = uuid_form.send, .recv = uuid_form.recv },
+    .{ .oid = oid.interval, .send = interval_form.send, .recv = interval_form.recv },
+    .{ .oid = oid.jsonb, .send = jsonb_form.send, .recv = jsonb_form.recv },
+};
+
+fn formOf(o: Oid) ?*const Form {
+    for (&forms) |*f| if (f.oid == o) return f;
+    return null;
+}
+
+const uuid_form = struct {
+    /// Its 16 bytes, or the text of an older table's column.
+    fn send(o: *Out, t: Type, v: Value) error{ OutOfMemory, Unencodable }!void {
+        _ = t;
+        const b: [16]u8 = switch (v) {
+            .blob => |x| if (x.len == 16) x[0..16].* else return error.Unencodable,
+            .text => |z| parseUuid(z) orelse return error.Unencodable,
+            else => return error.Unencodable,
+        };
+        try o.field(&b);
+    }
+
+    /// The 16 bytes, as a uuid column keeps them (the statement reads
+    /// them into an older table's text column: xq_pg_uuid_text()).
+    fn recv(a: std.mem.Allocator, b: []const u8) DecodeError!Value {
+        _ = a;
+        return if (b.len == 16) .{ .blob = b } else error.InvalidBinary;
+    }
+};
+
+const interval_form = struct {
+    /// interval BLOB: PostgreSQL's interval_send(): the microseconds
+    /// (int64), the days and the months (int32); an older database's
+    /// TEXT read.
+    fn send(o: *Out, t: Type, v: Value) error{ OutOfMemory, Unencodable }!void {
+        _ = t;
+        const iv = switch (v) {
+            .blob => |b| repr.intervalOf(b) orelse return error.Unencodable,
+            .text => |z| repr.parseInterval(z) orelse return error.Unencodable,
+            else => return error.Unencodable,
+        };
+        try o.int(i32, 16);
+        try o.int(i64, iv.time);
+        try o.int(i32, iv.days);
+        try o.int(i32, iv.months);
+    }
+
+    /// interval_recv()'s fields, as text (the input of a BLOB or an older
+    /// database's TEXT column alike).
+    fn recv(a: std.mem.Allocator, b: []const u8) DecodeError!Value {
+        if (b.len != 16) return error.InvalidBinary;
+        const iv: repr.Interval = .{
+            .time = std.mem.readInt(i64, b[0..8], .big),
+            .days = std.mem.readInt(i32, b[8..12], .big),
+            .months = std.mem.readInt(i32, b[12..16], .big),
+        };
+        var buf: [repr.max_len]u8 = undefined;
+        const z = repr.intervalText(iv, &buf) orelse return error.UnsupportedBinary;
+        return .{ .text = try a.dupe(u8, z) };
+    }
+};
+
+const jsonb_form = struct {
+    /// Version 1 and the text; of JSONB, its JSON text.
+    fn send(o: *Out, t: Type, v: Value) error{ OutOfMemory, Unencodable }!void {
+        var buf: [xqlite.display.max_len]u8 = undefined;
+        const owned = try xqlite.display.textAlloc(o.gpa, .postgres, t, v);
+        defer if (owned) |z| o.gpa.free(z);
+        const z = owned orelse textOf(t, v, &buf) orelse return error.Unencodable;
+        try o.int(i32, @intCast(1 + z.len));
+        try o.int(u8, 1);
+        try o.bytes(z);
+    }
+
+    fn recv(a: std.mem.Allocator, b: []const u8) DecodeError!Value {
+        _ = a;
+        return if (b.len >= 1 and b[0] == 1) .{ .text = b[1..] } else error.InvalidBinary;
+    }
+};
+
+const repr = xqlite.repr;
+
+// numeric ---------------------------------------------------------------
 
 const decimal = xqlite.decimal;
 
@@ -412,27 +479,12 @@ pub fn decodeBinary(a: std.mem.Allocator, o: Oid, b: []const u8) DecodeError!Val
         oid.float4 => return if (b.len == 4) .{ .float = @as(f32, @bitCast(std.mem.readInt(u32, b[0..4], .big))) } else error.InvalidBinary,
         oid.float8 => return if (b.len == 8) .{ .float = @bitCast(std.mem.readInt(u64, b[0..8], .big)) } else error.InvalidBinary,
         oid.bytea => return .{ .blob = b },
-        // The 16 bytes, as a uuid column keeps them (the statement reads
-        // them into an older table's text column: xq_pg_uuid_text()).
-        oid.uuid => return if (b.len == 16) .{ .blob = b } else error.InvalidBinary,
-        oid.jsonb => return if (b.len >= 1 and b[0] == 1) .{ .text = b[1..] } else error.InvalidBinary,
-        // interval BLOB: interval_recv()'s fields, as text (the input of a
-        // BLOB or an older database's TEXT column alike).
-        oid.interval => {
-            if (b.len != 16) return error.InvalidBinary;
-            const iv: xqlite.display.Interval = .{
-                .time = std.mem.readInt(i64, b[0..8], .big),
-                .days = std.mem.readInt(i32, b[8..12], .big),
-                .months = std.mem.readInt(i32, b[12..16], .big),
-            };
-            var buf: [xqlite.display.max_len]u8 = undefined;
-            const z = xqlite.display.intervalText(iv, &buf) orelse return error.UnsupportedBinary;
-            return .{ .text = try a.dupe(u8, z) };
-        },
-        oid.numeric => return decodeNumeric(a, b),
         // An unspecified type: as text, as libpq's clients send strings.
         0 => return .{ .text = b },
-        else => return if (textual(o)) .{ .text = b } else error.UnsupportedBinary,
+        else => {
+            if (formOf(o)) |f| return f.recv(a, b);
+            return if (textual(o)) .{ .text = b } else error.UnsupportedBinary;
+        },
     }
 }
 

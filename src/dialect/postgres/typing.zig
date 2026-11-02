@@ -44,94 +44,44 @@ pub const rules: typing.Rules = .{
     .function = function,
     .value_scale = true,
     .store = store,
-    .store_column = numericStore,
+    .store_column = repr.storeColumn,
+    .store_forms = repr.store_forms,
+    .exact_types = repr.exact_types,
     .unknown_strings = true,
     .overload = overload.overload,
     .order_collation = overload.orderCollation,
-    .group_key = overload.groupKey,
-    .order_key = overload.orderKey,
+    .group_key = repr.groupKey,
+    .order_key = repr.orderKey,
 };
 
-/// A string stored into a boolean, numeric, date, time, timestamp or
-/// interval column is read as the type's input (funcs.zig's store
-/// functions, datetime.zig's casts). An interval column is a BLOB
-/// (xq_pg_iv()), in an older database's table TEXT (its text, no
-/// infinity: what the collation xq_pg_interval reads). A uuid column is
-/// 16 bytes, an older table's TEXT column its text; jsonb JSONB in a
-/// BLOB column, normalized text in a TEXT one.
+/// The types stored in a BLOB form of their own (numeric, interval, uuid,
+/// jsonb): their store functions, grouping and ordering.
+const repr = @import("repr.zig");
+
+/// A string stored into a boolean, date, time or timestamp column is
+/// read as the type's input (funcs.zig's store functions, datetime.zig's
+/// casts). The types stored in a BLOB form of their own (numeric,
+/// interval, uuid, jsonb) have theirs in their descriptors
+/// (repr.storeColumn(), asked first).
 fn store(t: Type, storage: int.COLTYPE) ?*const int.FuncDef {
-    if (storage == .TEXT) switch (t.logical) {
-        .interval => return &datetime.store_interval_text,
-        // A uuid column of an older table keeps its text.
-        .uuid => return uuid.store_text,
-        else => {},
-    };
+    _ = storage;
     return switch (t.logical) {
-        // jsonb as the column keeps it: JSONB in a BLOB column, normalized
-        // text in a TEXT one (a table made before), whatever the value
-        // (a column, a function's blob or text: typing.storeNeeded()).
-        .jsonb => if (storage == .BLOB) &jfuncs.store_jsonb_bin else &jfuncs.store_jsonb_text,
         .boolean => &funcs.store_boolean,
-        // A numeric column of keys (BLOB) or of numbers (ANY, a table made
-        // before numerics were keys): numericStore() (store_column), which
-        // also gives numeric(p, s); this is the same without it.
-        .numeric => if (storage == .BLOB) decimal_sql.def("xq_dec_key", 1) else decimal_sql.def("xq_dec_number", 1),
         // Read and written as PostgreSQL does: '2 hours' is '02:00:00',
         // a timestamptz is kept in UTC, '2024-02-30' is an error.
         .date => datetime.cast_date,
         .time => datetime.cast_time,
         .timestamp => datetime.cast_timestamp,
         .timestamp_tz => datetime.cast_timestamptz,
-        .interval => datetime.cast_iv,
         // Read as the elements' type reads them, written canonical.
         .array => array.inputFunction(t.element),
-        // uuid: its 16 bytes (uuid.zig).
-        .uuid => uuid.store,
         else => null,
     };
 }
-
-const uuid = @import("uuid.zig");
 
 const array = @import("array.zig");
 
 // ================================================================ numeric
-
-const decimal_sql = @import("../decimal_sql.zig");
-
-/// A value stored into a numeric column: into one stored as keys (BLOB)
-/// every value as the key of numeric(p, s) (xq_dec_key(v, p, s)), into one
-/// of a table made before numerics were keys (ANY) as a number
-/// (xq_dec_number(v)). A numeric stored into a column of a number or a
-/// string is made one (PostgreSQL's assignment cast).
-fn numericStore(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
-    const d = decimal_sql.def;
-    const cast: ?*const int.FuncDef = switch (t.logical) {
-        .numeric => {
-            if (storage != .BLOB) return .{ .def = d("xq_dec_number", 1), .always = true };
-            if (typmodOf(decl)) |m| return .{ .def = d("xq_dec_key", 3), .consts = m, .n_consts = 2, .always = true };
-            return .{ .def = d("xq_dec_key", 1), .always = true };
-        },
-        .float8 => d("xq_dec_float8", 1),
-        .float4 => d("xq_dec_float4", 1),
-        .int1, .int2 => d("xq_dec_int2", 1),
-        .int4 => d("xq_dec_int4", 1),
-        .int8 => d("xq_dec_int8", 1),
-        .text, .varchar, .char => d("xq_dec_text", 1),
-        else => null,
-    };
-    return .{ .def = cast orelse return null, .only_numeric = true };
-}
-
-/// The precision and scale of a declared `numeric(p [, s])`.
-pub fn typmodOf(decl: []const u8) ?[2]i32 {
-    const open = std.mem.indexOfScalar(u8, decl, '(') orelse return null;
-    const close = std.mem.indexOfScalarPos(u8, decl, open, ')') orelse return null;
-    var it = std.mem.splitScalar(u8, decl[open + 1 .. close], ',');
-    const p = std.fmt.parseInt(i32, std.mem.trim(u8, it.next() orelse return null, " "), 10) catch return null;
-    const s = if (it.next()) |z| std.fmt.parseInt(i32, std.mem.trim(u8, z, " "), 10) catch return null else 0;
-    return .{ p, s };
-}
 
 /// xq_dec(x [, p, s]) and xq_dec_key(): numeric(p, s), else of the scale
 /// of x (a string literal's digits: '1.50' has 2; an integer's none).

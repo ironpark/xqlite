@@ -46,7 +46,7 @@ const Mem = dfunc.Mem;
 const Dec = dec.Dec;
 const Allocator = std.mem.Allocator;
 
-const det: dfunc.Options = .{ .deterministic = true };
+const det: dfunc.Options = .{ .deterministic = true, .exact = true };
 
 /// Hooks.engine_functions of no dialect: dialect.zig adds them.
 pub const engine_functions = [_]int.FuncDef{

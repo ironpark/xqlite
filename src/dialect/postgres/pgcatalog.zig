@@ -260,7 +260,7 @@ pub fn columnType(d: dialect.Dialect, decl: []const u8) struct { u32, i32 } {
     const t = ctypes.parse(d, decl);
     // numeric(p, s) of any p and s (Type's are bytes): PostgreSQL's
     // modifier, the scale in 11 bits.
-    if (d == .postgres and t.logical == .numeric) if (@import("typing.zig").typmodOf(decl)) |m| {
+    if (d == .postgres and t.logical == .numeric) if (@import("repr.zig").numeric.typmodOf(decl)) |m| {
         return .{ oidOfLogical(t), ((m[0] << 16) | (m[1] & 0x7ff)) + 4 };
     };
     return .{ oidOfLogical(t), typmodOfLogical(t) };
@@ -1098,11 +1098,11 @@ const Tok = struct {
     end: usize,
 };
 
-const Scanner = struct {
+pub const Scanner = struct {
     z: []const u8,
     i: usize = 0,
 
-    fn next(s: *Scanner) Tok {
+    pub fn next(s: *Scanner) Tok {
         const z = s.z;
         while (s.i < z.len) {
             if (std.ascii.isWhitespace(z[s.i])) {
@@ -1230,12 +1230,9 @@ pub fn defaultText(a: Allocator, text: []const u8, type_oid: u32, generated: boo
     const z = std.mem.trim(u8, text, " ");
     if (generated) return pgText(a, z, registered);
     if (col_type) |ty| if (try blobDefault(a, z, ty, type_oid)) |d| return d;
-    // An interval's DEFAULT, stored as its BLOB's input: the constant.
-    if (std.mem.startsWith(u8, z, "xq_pg_iv('") and std.mem.endsWith(u8, z, "')")) {
-        var s: Scanner = .{ .z = z["xq_pg_iv(".len .. z.len - 1] };
-        const t = s.next();
-        if (t.end == z.len - "xq_pg_iv(".len - 1) return std.fmt.allocPrint(a, "{s}::interval", .{z["xq_pg_iv(".len .. z.len - 1]});
-    }
+    // A DEFAULT stored as a function of the type's form (an interval's
+    // xq_pg_iv('2 hours')): the constant.
+    inline for (repr.all) |r| if (r.default_text) |f| if (try f(a, z)) |d| return d;
     if (eql(z, "strftime('%Y-%m-%d %H:%M:%f', 'now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_TIMESTAMP")) return "now()";
     if (eql(z, "date('now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_DATE")) return "CURRENT_DATE";
     if (std.mem.startsWith(u8, z, "nextval('") and std.mem.endsWith(u8, z, "')")) {
@@ -1267,12 +1264,13 @@ fn blobDefault(a: Allocator, z: []const u8, t: ctypes.Type, type_oid: u32) Oom!?
     if (hex.len % 2 != 0) return null;
     const bytes = try a.alloc(u8, hex.len / 2);
     _ = std.fmt.hexToBytes(bytes, hex) catch return null;
+    const bare = if (repr.of(t.logical)) |r| r.default_bare else false;
     var shown = t;
-    if (t.logical == .numeric) shown.scale = null;
-    var buf: [display.max_len]u8 = undefined;
-    const owned = try display.textAlloc(a, .postgres, shown, .{ .blob = bytes });
-    const v = owned orelse display.text(.postgres, shown, .{ .blob = bytes }, &buf) orelse return null;
-    if (t.logical == .numeric) return try a.dupe(u8, v);
+    if (bare) shown.scale = null;
+    var buf: [blob_forms.max_len]u8 = undefined;
+    const owned = try blob_forms.textAlloc(a, .postgres, shown, bytes);
+    const v = owned orelse blob_forms.text(.postgres, shown, bytes, &buf) orelse return null;
+    if (bare) return try a.dupe(u8, v);
     const tname: []const u8 = if (builtinType(type_oid)) |bt| bt.fmt else "text";
     var q: std.ArrayList(u8) = .empty;
     try q.append(a, '\'');
@@ -1284,7 +1282,10 @@ fn blobDefault(a: Allocator, z: []const u8, t: ctypes.Type, type_oid: u32) Oom!?
     return try std.fmt.allocPrint(a, "{s}::{s}", .{ q.items, tname });
 }
 
-const display = @import("../../api/display.zig");
+/// The text of the BLOB forms (src/dialect/repr.zig), and what PostgreSQL
+/// does with them (repr.zig).
+const blob_forms = @import("../repr.zig");
+const repr = @import("repr.zig");
 
 const Check = struct { name: []const u8, text: []const u8 };
 

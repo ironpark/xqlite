@@ -40,6 +40,8 @@ zig-out/bin/xqt dialect-diff pg tools/dialect/pg-array-cases.txt
 zig-out/bin/xqt interop pg                             # 한 모듈만
 ```
 
+`-Ddialects=X`로 특정 구성만 직접 빌드하면 `zig-out/bin/xqlite`가 그 구성으로 바뀝니다. 그 뒤에는 `zig build && zig build tools`로 되돌립니다. `check-matrix`는 zig-out을 건드리지 않습니다.
+
 ### 2. 표준 단계 (작업을 마칠 때)
 
 ```sh
@@ -52,16 +54,10 @@ zig fmt --check src tools
 ### 3. 전체 단계 (통합할 때만)
 
 ```sh
-zig build check -Dfuzz=true
+zig build check check-matrix -Dfuzz=true   # 기본 구성 전부 + 방언 없음·방언 하나씩의 다섯 구성 (한 빌드, 약 6분)
 zig build test-wasi
 zig build test-pkg
 zig build wasm
-zig build check -Ddialects=postgres
-zig build check -Ddialects=none
-zig build check -Ddialects=oracle
-zig build check -Ddialects=mssql
-zig build check -Ddialects=mariadb
-zig build && zig build tools     # -Ddialects 빌드가 zig-out/bin/xqlite를 덮어쓰므로 일반 빌드로 되돌림
 zig-out/bin/xqt wire-diff pg     # psql 18 필요(없으면 일회용 클라이언트 컨테이너)
 zig-out/bin/xqt wire-diff pg --regress
 ```

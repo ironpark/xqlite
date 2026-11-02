@@ -308,22 +308,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    const xqt_exe = b.addExecutable(.{
-        .name = "xqt",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/xqt/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "xqt", .module = xqt_lib },
-                .{ .name = "build_options", .module = xqt_options.createModule() },
-                // The dialects the xqlite it checks is built with: the
-                // interop modules of the others are left out.
-                .{ .name = "xqlite_config", .module = configModule(b) },
-            },
-        }),
-    });
+    const xqt_options_module = xqt_options.createModule();
+    const xqt = struct {
+        /// xqt for an xqlite of configuration `cfg`: the interop modules
+        /// of the dialects it lacks are left out.
+        fn build(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, lib: *std.Build.Module, options: *std.Build.Module, cfg: Config) *std.Build.Step.Compile {
+            return bb.addExecutable(.{
+                .name = "xqt",
+                .root_module = bb.createModule(.{
+                    .root_source_file = bb.path("tools/xqt/main.zig"),
+                    .target = t,
+                    .optimize = o,
+                    .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "xqt", .module = lib },
+                        .{ .name = "build_options", .module = options },
+                        .{ .name = "xqlite_config", .module = cfg.module },
+                    },
+                }),
+            });
+        }
+    };
+    const xqt_exe = xqt.build(b, target, optimize, xqt_lib, xqt_options_module, buildConfig(b));
     const crashshim = b.addLibrary(.{
         .name = "crashshim",
         .linkage = .dynamic,
@@ -453,6 +459,67 @@ pub fn build(b: *std.Build) void {
             check_step.dependOn(&dialect_run.step);
         }
     }
+    // `zig build check-matrix`: the engine built with no dialect but
+    // SQLite's and with each dialect alone, as -Ddialects=none,
+    // -Ddialects=postgres ... would build it, all in this one build (in
+    // parallel, one cache): for each, the unit tests (module, CLI,
+    // servers), the C API test on the static library, `xqt interop` with
+    // the extension of that build, and the recorded dialect-diff of the
+    // dialect. What does not depend on the dialects (fuzzcheck, the
+    // planner, the packages, wasm) runs in `check` only; `zig build
+    // check check-matrix` runs both.
+    const matrix_step = b.step("check-matrix", "Run the unit tests, the C API test, xqt interop and dialect-diff on the engine built with each dialect alone and with none");
+    {
+        const current = buildConfig(b);
+        var variants: [Config.dialects.len + 1][Config.dialects.len]bool = @splat(@splat(false));
+        for (variants[1..], 0..) |*v, i| v[i] = true;
+        for (variants) |on| {
+            const cfg: Config = .make(b, on, current.ext);
+            const label = cfg.label(b);
+            const m = b.createModule(.{
+                .root_source_file = b.path("src/root.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = engineImportsWith(b, target, optimize, cfg.module),
+            });
+            const sm = b.createModule(.{
+                .root_source_file = b.path("src/server/root.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "xqlite", .module = m }},
+            });
+            const e = b.addExecutable(.{ .name = "xqlite", .root_module = b.createModule(.{
+                .root_source_file = b.path("src/cli/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{ .{ .name = "xqlite", .module = m }, .{ .name = "xqlite_server", .module = sm } },
+            }) });
+            for ([_]*std.Build.Module{ m, e.root_module, sm }, [_][]const u8{ "engine", "cli", "server" }) |root, what| {
+                const t = b.addTest(.{ .name = b.fmt("test-{s}-{s}", .{ what, label }), .root_module = root, .filters = test_filters });
+                matrix_step.dependOn(&b.addRunArtifact(t).step);
+            }
+            const x = extLib(b, target, optimize, cfg);
+            const lib = capiLib(b, target, optimize, b.fmt("xqlite3-{s}", .{label}), .static, cfg);
+            matrix_step.dependOn(&capiTestRun(b, target, optimize, b.fmt("capi-test-{s}", .{label}), lib, capi.ext_test, x).step);
+            const q = xqt.build(b, target, optimize, xqt_lib, xqt_options_module, cfg);
+            const interop = addXqtRun(b, q, e, crashshim, sqlite_ref, x);
+            interop.addArg("interop");
+            matrix_step.dependOn(&interop.step);
+            for (recorded_dialects) |rd| {
+                const built = for (Config.dialects, cfg.dialect) |name, d_on| {
+                    if (std.mem.eql(u8, name, rd[0])) break d_on;
+                } else unreachable;
+                if (!built) continue;
+                for (rd[2]) |cases| {
+                    const dialect_run = addXqtRun(b, q, e, crashshim, sqlite_ref, null);
+                    dialect_run.addArgs(&.{ "dialect-diff", rd[1] });
+                    if (cases) |f| dialect_run.addFileArg(b.path(f));
+                    matrix_step.dependOn(&dialect_run.step);
+                }
+            }
+        }
+    }
     // The long runs (sqllogictest, fuzzcheck, the fuzzers) use a ReleaseSafe
     // build whatever -Doptimize is: safety checks on, minutes not hours.
     // The cross-checks and the planner use the build asked for.
@@ -527,7 +594,7 @@ pub fn build(b: *std.Build) void {
 /// script; `zig build capi-fast` runs the C test and tools/capi/bench.c
 /// on the ReleaseFast static library several times. Returns the
 /// test-capi and capi-fast steps.
-fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_ref: ?SqliteRef, xqlite_ext: ?*std.Build.Step.Compile) struct { test_step: *std.Build.Step, fast_step: *std.Build.Step } {
+fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_ref: ?SqliteRef, xqlite_ext: ?*std.Build.Step.Compile) struct { test_step: *std.Build.Step, fast_step: *std.Build.Step, ext_test: *std.Build.Step.Compile } {
     const enabled = b.option(bool, "capi", "Build and install the C libraries (libxqlite3) with `zig build` (default: true)") orelse true;
     const name = b.option([]const u8, "capi-name", "Base name of the C libraries: lib<name>.a, lib<name>.so/.dylib (default: xqlite3; sqlite3 for a drop-in libsqlite3)") orelse "xqlite3";
     // The amalgamation's files, from the `sqlite` dependency unless given.
@@ -544,32 +611,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
 
     const make = struct {
         fn lib(bb: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, n: []const u8, linkage: std.builtin.LinkMode) *std.Build.Step.Compile {
-            const m = bb.createModule(.{
-                .root_source_file = bb.path("src/capi.zig"),
-                .target = t,
-                .optimize = o,
-                .link_libc = true,
-                .pic = true,
-                .imports = engineImports(bb, t, o),
-            });
-            m.addIncludePath(bb.path("include"));
-            m.addCSourceFile(.{ .file = bb.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
-            m.addCSourceFile(.{ .file = bb.path("src/capi/loadext.c"), .flags = if (buildConfig(bb).hasExt("carray")) &.{"-std=c99"} else &.{ "-std=c99", "-DXQ_OMIT_CARRAY" } });
-            if (t.result.os.tag == .linux) {
-                m.linkSystemLibrary("pthread", .{});
-                // dlopen() for sqlite3_load_extension(), in libdl before glibc 2.34.
-                m.linkSystemLibrary("dl", .{});
-            }
-            const l = bb.addLibrary(.{
-                .name = n,
-                .linkage = linkage,
-                .root_module = m,
-                // SQLite's libtool version: libsqlite3.so.0, as on Linux
-                // distributions.
-                .version = if (linkage == .dynamic) .{ .major = 0, .minor = 8, .patch = 6 } else null,
-            });
-            if (linkage == .static) l.bundle_compiler_rt = true;
-            return l;
+            return capiLib(bb, t, o, n, linkage, buildConfig(bb));
         }
     };
     const static = make.lib(b, target, optimize, name, .static);
@@ -613,21 +655,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     ext.root_module.addCSourceFile(.{ .file = b.path("tools/capi/ext_test.c"), .flags = &.{"-std=c99"} });
     ext.root_module.addIncludePath(b.path("include"));
     for ([_]*std.Build.Step.Compile{ static, shared }, [_][]const u8{ "static", "shared" }) |lib, kind| {
-        const exe = b.addExecutable(.{
-            .name = b.fmt("capi-test-{s}", .{kind}),
-            .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
-        });
-        exe.root_module.addCSourceFile(.{ .file = b.path("tools/capi/capi_test.c"), .flags = &.{"-std=gnu99"} });
-        exe.root_module.addIncludePath(b.path("include"));
-        exe.root_module.linkLibrary(lib);
-        const run = b.addRunArtifact(exe);
-        run.setCwd(b.path("."));
-        run.addArtifactArg(ext);
-        // The xqlite extension (docs/extension.md), loaded into libxqlite3.
-        if (xqlite_ext) |x| run.addArtifactArg(x);
-        run.expectExitCode(0);
-        run.has_side_effects = true;
-        test_step.dependOn(&run.step);
+        test_step.dependOn(&capiTestRun(b, target, optimize, b.fmt("capi-test-{s}", .{kind}), lib, ext, xqlite_ext).step);
     }
 
     // The C test and an insert benchmark (tools/capi/bench.c) on the
@@ -716,7 +744,7 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         shell_step.dependOn(&run_shell.step);
     }
 
-    return .{ .test_step = test_step, .fast_step = fast_step };
+    return .{ .test_step = test_step, .fast_step = fast_step, .ext_test = ext };
 }
 
 /// The loadable extension (src/loadable.zig, docs/extension.md):
@@ -727,20 +755,76 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
 /// no libraries (lib null).
 fn addExt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) struct { lib: ?*std.Build.Step.Compile, install: *std.Build.Step } {
     const step = b.step("ext", "Build the SQLite loadable extension zig-out/lib/libxqlite_ext.{so,dylib} (docs/extension.md)");
-    if (target.result.cpu.arch.isWasm()) return .{ .lib = null, .install = step };
+    const lib = extLib(b, target, optimize, buildConfig(b)) orelse return .{ .lib = null, .install = step };
+    step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+    return .{ .lib = lib, .install = step };
+}
+
+/// The loadable extension of configuration `cfg`; null on wasm (no
+/// dynamic loader).
+fn extLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cfg: Config) ?*std.Build.Step.Compile {
+    if (target.result.cpu.arch.isWasm()) return null;
     const m = b.createModule(.{
         .root_source_file = b.path("src/loadable.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .pic = true,
-        .imports = engineImports(b, target, optimize),
+        .imports = engineImportsWith(b, target, optimize, cfg.module),
     });
     m.addIncludePath(b.path("include"));
     m.addCSourceFile(.{ .file = b.path("src/loadable/entry.c"), .flags = &.{ "-std=c99", "-fvisibility=hidden" } });
-    const lib = b.addLibrary(.{ .name = "xqlite_ext", .linkage = .dynamic, .root_module = m });
-    step.dependOn(&b.addInstallArtifact(lib, .{}).step);
-    return .{ .lib = lib, .install = step };
+    return b.addLibrary(.{ .name = "xqlite_ext", .linkage = .dynamic, .root_module = m });
+}
+
+/// libxqlite3 (src/capi.zig) of configuration `cfg`.
+fn capiLib(b: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, n: []const u8, linkage: std.builtin.LinkMode, cfg: Config) *std.Build.Step.Compile {
+    const m = b.createModule(.{
+        .root_source_file = b.path("src/capi.zig"),
+        .target = t,
+        .optimize = o,
+        .link_libc = true,
+        .pic = true,
+        .imports = engineImportsWith(b, t, o, cfg.module),
+    });
+    m.addIncludePath(b.path("include"));
+    m.addCSourceFile(.{ .file = b.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
+    m.addCSourceFile(.{ .file = b.path("src/capi/loadext.c"), .flags = if (cfg.hasExt("carray")) &.{"-std=c99"} else &.{ "-std=c99", "-DXQ_OMIT_CARRAY" } });
+    if (t.result.os.tag == .linux) {
+        m.linkSystemLibrary("pthread", .{});
+        // dlopen() for sqlite3_load_extension(), in libdl before glibc 2.34.
+        m.linkSystemLibrary("dl", .{});
+    }
+    const l = b.addLibrary(.{
+        .name = n,
+        .linkage = linkage,
+        .root_module = m,
+        // SQLite's libtool version: libsqlite3.so.0, as on Linux
+        // distributions.
+        .version = if (linkage == .dynamic) .{ .major = 0, .minor = 8, .patch = 6 } else null,
+    });
+    if (linkage == .static) l.bundle_compiler_rt = true;
+    return l;
+}
+
+/// The C API test (tools/capi/capi_test.c) linked with `lib`, run with
+/// the test extension `ext_test` and, if any, the xqlite extension.
+fn capiTestRun(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, name: []const u8, lib: *std.Build.Step.Compile, ext_test: *std.Build.Step.Compile, xqlite_ext: ?*std.Build.Step.Compile) *std.Build.Step.Run {
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    exe.root_module.addCSourceFile(.{ .file = b.path("tools/capi/capi_test.c"), .flags = &.{"-std=gnu99"} });
+    exe.root_module.addIncludePath(b.path("include"));
+    exe.root_module.linkLibrary(lib);
+    const run = b.addRunArtifact(exe);
+    run.setCwd(b.path("."));
+    run.addArtifactArg(ext_test);
+    // The xqlite extension (docs/extension.md), loaded into libxqlite3.
+    if (xqlite_ext) |x| run.addArtifactArg(x);
+    run.expectExitCode(0);
+    run.has_side_effects = true;
+    return run;
 }
 
 /// The reference sqlite3 shells of the cross-checks, built from the
@@ -901,6 +985,27 @@ const Config = struct {
         for (exts, c.ext) |e, on| if (std.mem.eql(u8, e, name)) return on;
         unreachable;
     }
+
+    /// The configuration with the dialects `dialect` and the extensions
+    /// `ext` (in the order of `dialects` and `exts`), with a module of
+    /// its own: what `-Ddialects` and `-Dext` would give.
+    fn make(b: *std.Build, dialect: [dialects.len]bool, ext: [exts.len]bool) Config {
+        const options = b.addOptions();
+        for (dialects, dialect) |name, on| options.addOption(bool, b.fmt("dialect_{s}", .{name}), on);
+        for (exts, ext) |name, on| options.addOption(bool, b.fmt("ext_{s}", .{name}), on);
+        return .{ .dialect = dialect, .ext = ext, .module = options.createModule() };
+    }
+
+    /// "none", or the names of the dialects, joined by commas.
+    fn label(c: Config, b: *std.Build) []const u8 {
+        var names: std.ArrayList(u8) = .empty;
+        for (dialects, c.dialect) |name, on| {
+            if (!on) continue;
+            if (names.items.len > 0) names.append(b.allocator, ',') catch @panic("OOM");
+            names.appendSlice(b.allocator, name) catch @panic("OOM");
+        }
+        return if (names.items.len == 0) "none" else names.items;
+    }
 };
 
 var config: ?Config = null;
@@ -916,7 +1021,6 @@ fn configModule(b: *std.Build) *std.Build.Module {
 
 fn buildConfig(b: *std.Build) Config {
     if (config) |c| return c;
-    const options = b.addOptions();
     var on_all: [2][4]bool = undefined;
     const lists = [_]struct { []const u8, []const u8, []const []const u8 }{
         .{ "dialects", "dialect", &Config.dialects },
@@ -937,9 +1041,8 @@ fn buildConfig(b: *std.Build) Config {
                 } else std.debug.panic("-D{s}: unknown name {s} (one of {s})", .{ l[0], name, std.mem.join(b.allocator, ", ", l[2]) catch "" });
             }
         }
-        for (l[2], 0..) |name, i| options.addOption(bool, b.fmt("{s}_{s}", .{ l[1], name }), on[i]);
     }
-    config = .{ .dialect = on_all[0], .ext = on_all[1][0..Config.exts.len].*, .module = options.createModule() };
+    config = .make(b, on_all[0], on_all[1][0..Config.exts.len].*);
     return config.?;
 }
 

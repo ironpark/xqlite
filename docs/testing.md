@@ -55,6 +55,7 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
 | `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사. sqlite3용 확장을 올리는 것도 | — |
 | `zig build ext` | sqlite3용 확장 `libxqlite_ext`([sqlite3용 확장](extension.md)). `xqt interop ext`가 씀 | — |
+| `zig build check-matrix` | 방언 없이, 그리고 방언 하나씩 빌드한 엔진 다섯 가지(`-Ddialects=none`, `postgres`, `mariadb`, `mssql`, `oracle`이 빌드하는 것)를 한 빌드에서 병렬로: 구성마다 단위 테스트(엔진·CLI·서버), 정적 라이브러리의 C API 검사, 그 구성의 확장으로 `xqt interop`, 그 방언의 기록된 `dialect-diff`. 방언과 상관없는 것(fuzzcheck, planner, 패키지)은 `check`에만 있음. `zig build check check-matrix`로 함께 | — |
 | `zig build test-minimal` | 방언·확장을 모두 뺀 엔진(`-Ddialects=none -Dext=none`)으로 `tools/minimal_test.zig` | — |
 | `zig build capi-fast` | ReleaseFast 정적 `libxqlite3`로 C 검사와 `tools/capi/bench.c`를 8번씩 실행 | — |
 | `zig build capi-shell` | SQLite의 `shell.c`를 `libxqlite3`에 링크해 스모크 스크립트 실행 | 아말감 `shell.c` |
@@ -195,6 +196,16 @@ zig build check -Dfast=true     # capi-fast도 (약 90초)
 | `gen` | 이름을 준 생성기를 동시에. `superjournal`은 따로 |
 
 `zig build check`는 각 단계(단위 테스트, `xqt interop`, `xqt planner`, fuzzcheck 코퍼스 8개 ...)를 Zig 빌드 시스템이 병렬로 돌립니다.
+
+방언 구성마다 `zig build check -Ddialects=X`를 따로 돌리면, 구성마다 엔진 전체를 다시 빌드하고 방언과 상관없는 검사(fuzzcheck와 그 ReleaseSafe 빌드, planner)도 되풀이합니다. `check-matrix`는 다섯 구성을 한 빌드 그래프에서 병렬로 컴파일하고, 방언에 따라 달라지는 검사만 구성마다 돌립니다. 소스 한 줄을 고친 뒤 잰 시간입니다(Debug, CPU 20개).
+
+| 실행 | 시간 |
+| --- | --- |
+| `check -Ddialects=X`를 다섯 구성 차례로 | 835초 (구성마다 약 165초) |
+| `check-matrix` | 191초 |
+| `check` | 173초 |
+| `check`와 다섯 구성 따로(예전의 전체 검사) | 약 1008초 |
+| `check check-matrix` (한 빌드) | 367초 |
 
 예전의 차례로 도는 스크립트와 `xqt`의 실행 시간입니다(Debug xqlite, CPU 20개).
 

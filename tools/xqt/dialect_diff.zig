@@ -1,16 +1,30 @@
-//! `xqt dialect-diff pg|mariadb|mssql|oracle [CASES]`: the differential test of a
-//! dialect against its real server. Each case of the cases file
-//! (tools/dialect/pg-cases.txt, maria-cases.txt, mssql-cases.txt) runs in the server's
-//! client and in `xqlite sql` with the dialect on; the rows, the column
-//! names (of results with rows) and the "ERROR:" lines must be the same.
-//! (Was tools/dialect/pg-diff.sh and maria-diff.sh.)
+//! `xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record] [CASES]`:
+//! the differential test of a dialect against its real server. Each case
+//! of the cases file (tools/dialect/pg-cases.txt, maria-cases.txt,
+//! mssql-cases.txt) runs in the server's client and in `xqlite sql` with
+//! the dialect on; the rows, the column names (of results with rows) and
+//! the "ERROR:" lines must be the same. (Was tools/dialect/pg-diff.sh and
+//! maria-diff.sh.)
+//!
+//! The server's side comes from one of:
+//!
+//! - a recording (the default): what the server's client printed for each
+//!   case, kept in the repository (tools/dialect/pg-expected/pg-cases.out
+//!   for tools/dialect/pg-cases.txt, see Recording). Only xqlite runs, so
+//!   `zig build check` runs it (for the dialects recorded). A case the
+//!   recording does not have, or has for another text of the case (a
+//!   hash of the text is kept with it), is reported, and fails the run.
+//! - `--live`: the server, now.
+//! - `--record`: the server, now, and what it printed becomes the
+//!   recording (with the server's version), compared as with --live.
 //!
 //! A case starts with a line "-- case: NAME" and runs on an empty
 //! database. The cases run in parallel:
 //!
-//! - PostgreSQL: each worker has a database of its own (xqt_dialect_N,
-//!   made before and dropped after the run), and each case starts, as
-//!   before, by dropping and making its schema public.
+//! - PostgreSQL: each worker has a database of its own
+//!   (xqt_dialect_PID_N, with the process id so that two runs on one
+//!   server do not meet; made before and dropped after the run), and each
+//!   case starts, as before, by dropping and making its schema public.
 //! - MariaDB: every case runs in the database main, which the cases name
 //!   (information_schema queries, main.t) and so do MariaDB's error
 //!   messages ("Table 'main.x' doesn't exist"). The server runs one case
@@ -20,7 +34,7 @@
 //! The server is reached with $PG_PSQL / $MARIA_CLIENT, split on blanks
 //! as the shell did, by default `podman exec -i` into the containers
 //!
-//!     podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
+//!     podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine
 //!     podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
 //!     podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq -e APP_USER_PASSWORD=xqpass gvenzl/oracle-free:23-slim-faststart
 //!
@@ -31,7 +45,8 @@
 //!   (constraint failures found while a statement runs) are mapped to the
 //!   code Oracle gives the same failure (normXqOra()).
 //!
-//! Not part of `zig build check`: it needs a server.
+//! With --live and --record, not part of `zig build check`: they need a
+//! server.
 
 const std = @import("std");
 const Io = std.Io;
@@ -40,7 +55,14 @@ const xqt = @import("xqt");
 const Check = xqt.Check;
 
 pub const usage =
-    \\usage: xqt dialect-diff pg|mariadb|mssql|oracle [CASES-FILE]
+    \\usage: xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record] [CASES-FILE]
+    \\
+    \\  (default)  compare xqlite with the server's recorded outputs
+    \\             (tools/dialect/pg-expected/pg-cases.out for pg-cases.txt ...):
+    \\             no server needed
+    \\  --live     compare xqlite with the server, now
+    \\  --record   run the cases on the server and write its outputs as the
+    \\             recording (then compare as --live)
     \\
     \\  pg        tools/dialect/pg-cases.txt against PostgreSQL ($PG_PSQL,
     \\            default "podman exec -i xq-pg psql -U postgres")
@@ -53,7 +75,7 @@ pub const usage =
     \\            default "podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1")
     \\
     \\Start the server first:
-    \\  podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
+    \\  podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine
     \\  podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
     \\  podman run -d --name xq-mssql -e ACCEPT_EULA=1 -e MSSQL_SA_PASSWORD=Xq_Passw0rd! \\
     \\    -e MSSQL_MEMORY_LIMIT_MB=2048 mcr.microsoft.com/azure-sql-edge:latest
@@ -82,6 +104,11 @@ const Dialect = struct {
     /// Whether each worker gets a database of its own (else all share
     /// the prelude's database and the server runs one case at a time).
     databases: bool,
+    /// The directory of the recordings, NAME.out for a cases file
+    /// NAME.txt.
+    expected: []const u8,
+    /// Says the server's version (in the recording's header).
+    version_sql: []const u8,
 };
 
 const pg: Dialect = .{
@@ -90,7 +117,7 @@ const pg: Dialect = .{
     .cases = "tools/dialect/pg-cases.txt",
     .env = "PG_PSQL",
     .default_client = "podman exec -i xq-pg psql -U postgres",
-    .container = "podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine",
+    .container = "podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine",
     .client_args = &.{ "-q", "-A", "-F|" },
     // Also drops the schemas an earlier case of the worker created.
     .prelude = "SET client_min_messages = warning; DROP SCHEMA public CASCADE; CREATE SCHEMA public;" ++
@@ -100,6 +127,8 @@ const pg: Dialect = .{
     .norm_server = normPg,
     .norm_xq = normXqPg,
     .databases = true,
+    .expected = "tools/dialect/pg-expected",
+    .version_sql = "SELECT version();\n",
 };
 
 const maria: Dialect = .{
@@ -117,6 +146,8 @@ const maria: Dialect = .{
     .norm_server = normMaria,
     .norm_xq = normXqMaria,
     .databases = false,
+    .expected = "tools/dialect/maria-expected",
+    .version_sql = "SELECT VERSION();\n",
 };
 
 /// SQL Server: Azure SQL Edge (the SQL Server engine, built for arm64 as
@@ -135,6 +166,8 @@ const mssql: Dialect = .{
     .norm_server = normMssql,
     .norm_xq = normXqMssql,
     .databases = false,
+    .expected = "tools/dialect/mssql-expected",
+    .version_sql = "SELECT @@VERSION;\nGO\n",
 };
 
 const ora: Dialect = .{
@@ -150,6 +183,8 @@ const ora: Dialect = .{
     .norm_server = normOra,
     .norm_xq = normXqOra,
     .databases = false,
+    .expected = "tools/dialect/oracle-expected",
+    .version_sql = ora_prelude ++ "SELECT banner_full FROM v$version;\n",
 };
 
 /// SQL*Plus settings (unaligned rows with a header, NULL as NULL, no
@@ -198,10 +233,19 @@ const max_databases = 8;
 const Case = struct {
     name: []const u8,
     sql: []const u8,
+    /// What the server's client printed (recorded, or now).
+    raw: []const u8 = "",
     /// The normalized outputs, set by the check.
     server: []const u8 = "",
     xq: []const u8 = "",
+    /// The recording has no output of the case, or one of another text
+    /// of it (replay only: xqlite does not run).
+    recording: RecordingState = .ok,
+    /// The check got both outputs.
+    ran: bool = false,
 };
+
+pub const Mode = enum { replay, live, record };
 
 /// The server's databases, one per worker; a case takes a free one. With
 /// one database, the cases take turns.
@@ -230,6 +274,7 @@ const Slots = struct {
 
 const Ctx = struct {
     d: *const Dialect,
+    mode: Mode,
     client: []const []const u8,
     slots: *Slots,
 };
@@ -239,7 +284,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    if (args.len < 1 or args.len > 2) return usageError(out);
+    if (args.len < 1) return usageError(out);
     const d: *const Dialect = if (std.mem.eql(u8, args[0], "pg") or std.mem.eql(u8, args[0], "postgres"))
         &pg
     else if (std.mem.eql(u8, args[0], "mariadb") or std.mem.eql(u8, args[0], "maria"))
@@ -250,12 +295,46 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         &ora
     else
         return usageError(out);
-    const cases_path = if (args.len == 2) args[1] else try std.fs.path.join(arena, &.{ cfg.root, d.cases });
+    var mode: Mode = .replay;
+    var cases_arg: ?[]const u8 = null;
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "--live")) {
+            mode = .live;
+        } else if (std.mem.eql(u8, a, "--record")) {
+            mode = .record;
+        } else if (cases_arg == null and !std.mem.startsWith(u8, a, "--")) {
+            cases_arg = a;
+        } else return usageError(out);
+    }
+    const cases_path = cases_arg orelse try std.fs.path.join(arena, &.{ cfg.root, d.cases });
     const text = Io.Dir.cwd().readFileAlloc(io, cases_path, arena, .unlimited) catch |err| {
         try out.print("xqt dialect-diff: cannot read {s}: {t}\n", .{ cases_path, err });
         return 2;
     };
     const cases = try parseCases(arena, text);
+    const rec_path = try recordingPath(arena, cfg.root, d.expected, cases_path);
+
+    if (mode == .replay) {
+        const rec_text = Io.Dir.cwd().readFileAlloc(io, rec_path, arena, .unlimited) catch |err| {
+            try out.print(
+                \\xqt dialect-diff: cannot read the recording {s}: {t}
+                \\Make it with `xqt dialect-diff {s} --record` (the server is needed),
+                \\or compare with the server itself with --live.
+                \\
+            , .{ rec_path, err, args[0] });
+            try out.flush();
+            return 1;
+        };
+        var rec = try Recording.parse(arena, rec_text);
+        for (cases) |*cs| switch (rec.lookup(cs.name, caseHash(&.{cs.sql}))) {
+            .found => |raw| cs.raw = raw,
+            .missing => cs.recording = .missing,
+            .stale => cs.recording = .stale,
+        };
+        var slots: Slots = .{ .names = &.{}, .free = .empty };
+        var ctx: Ctx = .{ .d = d, .mode = mode, .client = &.{}, .slots = &slots };
+        return runCases(gpa, io, cfg, out, &ctx, cases, try std.fmt.allocPrint(arena, "the recording of {s}", .{rec.note("server")}));
+    }
 
     // The client command, split as the shell splits an unquoted variable.
     const client_text = cfg.environ.get(d.env) orelse d.default_client;
@@ -264,8 +343,8 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     while (words.next()) |w| try client.append(arena, w);
     try client.appendSlice(arena, d.client_args);
 
-    // Is the server there?
-    const probe = runMerged(arena, io, client.items, "SELECT 1;\n") catch |err|
+    // Is the server there? (Its answer is its version.)
+    const probe = runMerged(arena, io, client.items, d.version_sql) catch |err|
         Merged{ .ok = false, .out = try std.fmt.allocPrint(arena, "cannot run {s}: {t}", .{ client.items[0], err }) };
     if (!probe.ok) {
         try out.print(
@@ -279,6 +358,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         try out.flush();
         return 1;
     }
+    const version = versionLine(probe.out);
 
     const n_slots = if (d.databases) @max(1, @min(cfg.jobs, cases.len, max_databases)) else 1;
     var slots: Slots = .{
@@ -286,11 +366,12 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         .free = try .initCapacity(arena, n_slots),
     };
     for (0..n_slots) |i| slots.free.appendAssumeCapacity(n_slots - 1 - i);
-    if (d.databases) {
+    var ctx: Ctx = .{ .d = d, .mode = mode, .client = client.items, .slots = &slots };
+    const code = if (d.databases) code: {
         var make: Io.Writer.Allocating = .init(arena);
         var drop: Io.Writer.Allocating = .init(arena);
         for (slots.names, 0..) |*name, i| {
-            name.* = try std.fmt.allocPrint(arena, "xqt_dialect_{d}", .{i});
+            name.* = try std.fmt.allocPrint(arena, "xqt_dialect_{d}_{d}", .{ std.c.getpid(), i });
             try make.writer.print("DROP DATABASE IF EXISTS {s};\nCREATE DATABASE {s};\n", .{ name.*, name.* });
             try drop.writer.print("DROP DATABASE IF EXISTS {s};\n", .{name.*});
         }
@@ -300,23 +381,51 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
             return 1;
         }
         defer _ = runMerged(arena, io, client.items, drop.written()) catch {};
-        return runCases(gpa, io, cfg, out, d, client.items, &slots, cases);
+        break :code try runCases(gpa, io, cfg, out, &ctx, cases, version);
+    } else try runCases(gpa, io, cfg, out, &ctx, cases, version);
+    if (mode != .record) return code;
+
+    var entries: std.ArrayList(Recording.Entry) = .empty;
+    for (cases) |cs| {
+        if (!cs.ran) {
+            try out.print("xqt dialect-diff: {s} could not run: the recording is not written\n", .{cs.name});
+            try out.flush();
+            return 1;
+        }
+        try entries.append(arena, .{ .name = cs.name, .hash = caseHash(&.{cs.sql}), .out = cs.raw });
     }
-    return runCases(gpa, io, cfg, out, d, client.items, &slots, cases);
+    const notes = [_][]const u8{
+        try std.fmt.allocPrint(arena, "xqt dialect-diff {s} --record: what {s}'s client printed for each case of {s}", .{ args[0], d.server, std.fs.path.basename(cases_path) }),
+        try std.fmt.allocPrint(arena, "server: {s}", .{version}),
+    };
+    Recording.write(arena, io, rec_path, &notes, entries.items) catch |err| {
+        try out.print("xqt dialect-diff: cannot write {s}: {t}\n", .{ rec_path, err });
+        try out.flush();
+        return 1;
+    };
+    try out.print("recorded {d} cases of {s} in {s}\n", .{ entries.items.len, version, rec_path });
+    try out.flush();
+    return code;
 }
 
-fn runCases(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, d: *const Dialect, client: []const []const u8, slots: *Slots, cases: []Case) !u8 {
-    var ctx: Ctx = .{ .d = d, .client = client, .slots = slots };
+fn runCases(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, ctx: *Ctx, cases: []Case, against: []const u8) !u8 {
+    const d = ctx.d;
     var suite: xqt.Suite = .init(gpa, io, cfg, out, .{ .name = "dialect-diff", .show = .failures });
     defer suite.deinit();
-    for (cases) |*cs| try suite.add(cs.name, runCase, .{ &ctx, cs });
+    for (cases) |*cs| try suite.add(cs.name, runCase, .{ ctx, cs });
     suite.run();
 
     var fail: usize = 0;
     var errors: usize = 0;
+    var unrecorded: [2]usize = .{ 0, 0 };
     var dw: Io.Writer.Allocating = .init(gpa);
     defer dw.deinit();
     for (cases, 0..) |cs, i| {
+        if (cs.recording != .ok) {
+            unrecorded[@intFromBool(cs.recording == .stale)] += 1;
+            try out.print("{s} {s}\n", .{ cs.recording.label(), cs.name });
+            continue;
+        }
         if (suite.outcome(i).status == .failed) {
             errors += 1;
             continue;
@@ -335,15 +444,31 @@ fn runCases(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, d: 
             try out.print("  {s}\n", .{line});
         }
     }
-    try out.print("{s}: {d}/{d} cases agree", .{ d.tag, cases.len - fail - errors, cases.len });
+    const bad = fail + errors + unrecorded[0] + unrecorded[1];
+    try out.print("{s}: {d}/{d} cases agree with {s}", .{ d.tag, cases.len - bad, cases.len, against });
     if (errors > 0) try out.print(" ({d} could not run)", .{errors});
+    try writeUnrecorded(out, unrecorded);
     try out.writeAll("\n");
     try out.flush();
-    return @intFromBool(fail + errors > 0);
+    return @intFromBool(bad > 0);
+}
+
+/// " (N not recorded, M recorded for another text: ...)" when there are any.
+pub fn writeUnrecorded(out: *Io.Writer, n: [2]usize) !void {
+    if (n[0] + n[1] == 0) return;
+    try out.print(" ({d} not recorded, {d} recorded for another text of the case: --record again)", .{ n[0], n[1] });
 }
 
 fn runCase(c: *Check, ctx: *Ctx, cs: *Case) !void {
     const d = ctx.d;
+    if (cs.recording != .ok) return;
+    if (ctx.mode == .replay) {
+        const xq_in = try std.mem.concat(c.arena, u8, &.{ d.xq_prelude, cs.sql });
+        const xq_raw = (try runMerged(c.arena, c.io, &.{ c.cfg.xq, "sql" }, xq_in)).out;
+        cs.server = try d.norm_server(c.keep, cs.raw);
+        cs.xq = try d.norm_xq(c.keep, xq_raw);
+        return;
+    }
     const server_in = try std.mem.concat(c.arena, u8, &.{ d.prelude, cs.sql });
     const server_raw = blk: {
         const slot = ctx.slots.acquire(c.io);
@@ -356,8 +481,10 @@ fn runCase(c: *Check, ctx: *Ctx, cs: *Case) !void {
     };
     const xq_in = try std.mem.concat(c.arena, u8, &.{ d.xq_prelude, cs.sql });
     const xq_raw = (try runMerged(c.arena, c.io, &.{ c.cfg.xq, "sql" }, xq_in)).out;
-    cs.server = try d.norm_server(c.keep, server_raw);
+    cs.raw = try withNewline(c.keep, server_raw);
+    cs.server = try d.norm_server(c.keep, cs.raw);
     cs.xq = try d.norm_xq(c.keep, xq_raw);
+    cs.ran = true;
 }
 
 fn usageError(out: *Io.Writer) !u8 {
@@ -855,6 +982,169 @@ fn normXqOra(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
         try out.append(gpa, '\n');
     }
     return out.toOwnedSlice(gpa);
+}
+
+// ---------------------------------------------------------------- recordings
+
+/// A recording: what a server's client printed for each case of a cases
+/// file, kept in the repository so that the comparison runs without the
+/// server (`xqt dialect-diff` and `xqt wire-diff` without --live). The
+/// file is text, one per cases file, made to diff well:
+///
+///     # xqt dialect-diff pg --record: what PostgreSQL's client printed ...
+///     # server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, ...
+///     ==== case 3f2a9c0d17e4b6a1 NAME
+///     the client's output, as it printed it
+///     ==== case ...
+///
+/// The "# " lines before the first case are notes ("server: ..." the
+/// server's version; wire-diff adds "client: ..."). The hash is
+/// caseHash() of the text the case had when it was recorded: a case
+/// whose text is not that any more has a stale recording. An output is
+/// its lines up to the next "==== case " line, each ended by a newline.
+pub const Recording = struct {
+    notes: []const []const u8,
+    entries: []Entry,
+
+    pub const Entry = struct {
+        name: []const u8,
+        hash: Hash,
+        out: []const u8,
+        /// Taken by lookup() (a cases file may name two cases alike).
+        used: bool = false,
+    };
+
+    pub const Lookup = union(enum) { found: []const u8, missing, stale };
+
+    pub fn parse(arena: Allocator, text: []const u8) !Recording {
+        var notes: std.ArrayList([]const u8) = .empty;
+        var entries: std.ArrayList(Entry) = .empty;
+        var body: std.ArrayList(u8) = .empty;
+        var it = lines(text);
+        while (it.next()) |line| {
+            if (std.mem.startsWith(u8, line, case_mark)) {
+                if (entries.items.len > 0) entries.items[entries.items.len - 1].out = try body.toOwnedSlice(arena);
+                const rest = line[case_mark.len..];
+                if (rest.len < hash_len + 1 or rest[hash_len] != ' ') return error.BadRecording;
+                try entries.append(arena, .{ .name = rest[hash_len + 1 ..], .hash = rest[0..hash_len].*, .out = "" });
+            } else if (entries.items.len > 0) {
+                try body.appendSlice(arena, line);
+                try body.append(arena, '\n');
+            } else if (std.mem.startsWith(u8, line, "# ")) {
+                try notes.append(arena, line[2..]);
+            }
+        }
+        if (entries.items.len > 0) entries.items[entries.items.len - 1].out = try body.toOwnedSlice(arena);
+        return .{ .notes = notes.items, .entries = entries.items };
+    }
+
+    /// The value of the note "KEY: VALUE", or "?".
+    pub fn note(r: *const Recording, key: []const u8) []const u8 {
+        for (r.notes) |n| {
+            if (n.len > key.len + 1 and std.mem.startsWith(u8, n, key) and std.mem.startsWith(u8, n[key.len..], ": "))
+                return n[key.len + 2 ..];
+        }
+        return "?";
+    }
+
+    /// The output recorded for the case NAME with the text of `hash`
+    /// (the first of that name not taken yet).
+    pub fn lookup(r: *Recording, name: []const u8, hash: Hash) Lookup {
+        for (r.entries) |*e| {
+            if (e.used or !std.mem.eql(u8, e.name, name)) continue;
+            e.used = true;
+            return if (std.mem.eql(u8, &e.hash, &hash)) .{ .found = e.out } else .stale;
+        }
+        return .missing;
+    }
+
+    /// Writes the recording to `path` (making its directory).
+    pub fn write(arena: Allocator, io: Io, path: []const u8, notes: []const []const u8, entries: []const Entry) !void {
+        var w: Io.Writer.Allocating = .init(arena);
+        for (notes) |n| try w.writer.print("# {s}\n", .{n});
+        for (entries) |e| {
+            try w.writer.print("{s}{s} {s}\n", .{ case_mark, &e.hash, e.name });
+            var it = lines(e.out);
+            while (it.next()) |line| if (std.mem.startsWith(u8, line, case_mark)) return error.OutputLooksLikeACase;
+            try w.writer.writeAll(e.out);
+        }
+        if (std.fs.path.dirname(path)) |dir| try Io.Dir.cwd().createDirPath(io, dir);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = w.written() });
+    }
+};
+
+const case_mark = "==== case ";
+const hash_len = 16;
+pub const Hash = [hash_len]u8;
+
+pub const RecordingState = enum {
+    ok,
+    missing,
+    stale,
+
+    pub fn label(s: RecordingState) []const u8 {
+        return switch (s) {
+            .ok => "",
+            .missing => "NOT RECORDED",
+            .stale => "STALE RECORDING",
+        };
+    }
+};
+
+/// The first 8 bytes of the SHA-256 of `parts` (each followed by a zero
+/// byte), in hex: what a recorded output was the output of.
+pub fn caseHash(parts: []const []const u8) Hash {
+    var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+    for (parts) |p| {
+        h.update(p);
+        h.update(&.{0});
+    }
+    var digest: [32]u8 = undefined;
+    h.final(&digest);
+    return std.fmt.bytesToHex(digest[0 .. hash_len / 2].*, .lower);
+}
+
+/// ROOT/DIR/NAME.out for a cases file .../NAME.txt.
+pub fn recordingPath(arena: Allocator, root: []const u8, dir: []const u8, cases_path: []const u8) ![]const u8 {
+    const base = std.fs.path.basename(cases_path);
+    const stem = if (std.mem.endsWith(u8, base, ".txt")) base[0 .. base.len - 4] else base;
+    return std.fmt.allocPrint(arena, "{s}/{s}/{s}.out", .{ root, dir, stem });
+}
+
+/// A copy of `text` that ends with a newline (unless it is empty), as a
+/// recorded output does.
+pub fn withNewline(gpa: Allocator, text: []const u8) ![]u8 {
+    if (text.len == 0 or std.mem.endsWith(u8, text, "\n")) return gpa.dupe(u8, text);
+    return std.mem.concat(gpa, u8, &.{ text, "\n" });
+}
+
+/// The line of a client's answer to a version query that says the
+/// version: the first with a digit that is not a row count.
+pub fn versionLine(text: []const u8) []const u8 {
+    var it = lines(text);
+    while (it.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '(' or std.mem.startsWith(u8, line, "--")) continue;
+        if (std.mem.indexOfAny(u8, line, "0123456789") != null) return line;
+    }
+    return "?";
+}
+
+test Recording {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const h1 = caseHash(&.{"SELECT 1;\n"});
+    const text = try std.fmt.allocPrint(a, "# made by a test\n# server: PostgreSQL 18.6 on x\n==== case {s} one\n?column?\n1\n(1 row)\n==== case {s} two words\n==== case {s} three\nx\n", .{ &h1, &h1, &caseHash(&.{"old"}) });
+    var r = try Recording.parse(a, text);
+    try std.testing.expectEqualStrings("PostgreSQL 18.6 on x", r.note("server"));
+    try std.testing.expectEqualStrings("?", r.note("client"));
+    try std.testing.expectEqualStrings("?column?\n1\n(1 row)\n", r.lookup("one", h1).found);
+    try std.testing.expectEqualStrings("", r.lookup("two words", h1).found);
+    try std.testing.expect(r.lookup("three", h1) == .stale);
+    try std.testing.expect(r.lookup("one", h1) == .missing);
+    try std.testing.expect(r.lookup("four", h1) == .missing);
+    try std.testing.expectEqualStrings("PostgreSQL 18.6 on x, 64-bit", versionLine("version\nPostgreSQL 18.6 on x, 64-bit\n(1 row)\n"));
 }
 
 // ---------------------------------------------------------------- processes

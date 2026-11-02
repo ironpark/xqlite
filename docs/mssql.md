@@ -429,8 +429,8 @@ DROP SCHEMA sales;                                         -- 비어 있어야 �
 ### 스키마에 저장되는 식
 
 - DEFAULT, CHECK, 계산 열, 뷰에는 변수와 매개변수를 쓸 수 없습니다.
-- 엔진 함수(`xq_tsql_*`)나 방언 함수(`xq_mssql_*`)를 부르는 스키마는 xqlite에서는 어느 방언으로든 같은 결과를 내지만 sqlite3는 계산할 수 없습니다. 정수형 `CAST`, `LIKE '[a-z]%'`, 날짜 함수, 타입을 모르는 `+`, `ISJSON(x)` 말고의 JSON 함수, `OPENJSON`, `FOR JSON`이 그런 예입니다.
-- identity 열은 `DEFAULT (nextval('t_c_seq'))`로 보입니다. rowid가 아닌 identity 열은 sqlite3에서 값 없이 넣을 수 없습니다.
+- 엔진 함수(`xq_tsql_*`)나 방언 함수(`xq_mssql_*`)를 부르는 스키마는 xqlite에서는 어느 방언으로든 같은 결과를 내지만 평범한 sqlite3는 계산할 수 없습니다. 정수형 `CAST`, `LIKE '[a-z]%'`, 날짜 함수, 타입을 모르는 `+`, `ISJSON(x)` 말고의 JSON 함수, `OPENJSON`, `FOR JSON`이 그런 예입니다. [확장](extension.md)을 올린 sqlite3는 `OPENJSON`(엔진의 테이블 값 함수)과 세션·스키마 카탈로그를 읽는 함수(`SCOPE_IDENTITY()`, `SCHEMA_NAME()` ...) 말고는 모두 xqlite와 같은 결과로 계산합니다.
+- identity 열은 `DEFAULT (nextval('t_c_seq'))`로 보입니다. rowid가 아닌 identity 열은 평범한 sqlite3에서는 값 없이 넣을 수 없고, 확장을 올리면 `PRAGMA trusted_schema=ON`에서 xqlite와 같은 시퀀스(`xq_sequence`)로 번호를 받습니다. `NEXT VALUE FOR`의 DEFAULT(`xq_mssql_xq_tsql_next_value`)도 같습니다.
 
 ## 아직 하지 않은 것
 
@@ -458,7 +458,7 @@ zig build tools
 podman run -d --name xq-mssql -e ACCEPT_EULA=1 -e MSSQL_SA_PASSWORD='Xq_Passw0rd!' \
   -e MSSQL_MEMORY_LIMIT_MB=2048 mcr.microsoft.com/azure-sql-edge:latest
 podman cp sqlcmd xq-mssql:/tmp/sqlcmd     # go-sqlcmd linux-arm64 (github.com/microsoft/go-sqlcmd 릴리스)
-zig-out/bin/xqt dialect-diff mssql [cases-file]
+zig-out/bin/xqt dialect-diff mssql --live [cases-file]
 ```
 
 - 서버는 Azure SQL Edge(SQL Server 엔진 15.0, arm64 빌드가 있음)입니다. arm64 macOS의 podman에서 `mcr.microsoft.com/mssql/server:2022-latest`(amd64 전용)는 qemu 에뮬레이션에서 시작하자마자 segfault로 죽습니다. Rosetta를 켠 podman 머신이면 그 이미지도 쓸 수 있습니다.
@@ -475,7 +475,7 @@ zig-out/bin/xqt dialect-diff mssql [cases-file]
 - sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
 - 다루는 것: STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열(`+`가 열 타입으로 `+`/`||`가 됨), `NOCASE`/`BINARY` 열, 테이블 안과 밖의 인덱스, 뷰, `xq_catalog`, `CHECK (ISJSON(c) = 1)`, `CREATE SCHEMA sales`의 테이블·인덱스·뷰(sqlite3의 `.tables`에 `sales.orders`로 보이고, sqlite3가 쓴 행을 T-SQL 방언이 `sales.orders`로 읽음).
 - sqlite3가 타입·제약을 어기는 값을 거부하는지, xqlite가 sqlite3가 바꾼 값을 읽는지도 봅니다.
-- 엔진 함수(`xq_tsql_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mssql/test.zig`에서 확인합니다.
+- 엔진 함수(`xq_tsql_*`)를 쓰는 식(JSON 계산 열과 그 인덱스, `DATEPART` CHECK, `TRY_CAST`·`CONVERT` 뷰, identity)은 `xqt interop ext`가 [확장](extension.md)을 올린 sqlite3로 확인합니다. `OPENJSON`은 `src/dialect/mssql/test.zig`에서 확인합니다.
 
 ### 퍼저
 

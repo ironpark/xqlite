@@ -2264,7 +2264,7 @@ static void test_b_ext(const char *zDir){
     CHECK(zErr==0);
     CHECK_STR(one(db, "SELECT xq_ext_hello('world')"), "hello world");
     CHECK_STR(one(db, "SELECT xq_ext_sum(value) FROM (SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 39)"), "42");
-    CHECK(atoi(one(db, "SELECT xq_ext_version()"))==SQLITE_VERSION_NUMBER);
+    CHECK(atoi(one(db, "SELECT xq_ext_libversion()"))==SQLITE_VERSION_NUMBER);
 
     /* Named entry points: missing, and failing. */
     CHECK(sqlite3_load_extension(db, zExtPath, "xq_no_such_entry", &zErr)==SQLITE_ERROR);
@@ -2308,6 +2308,46 @@ static void test_b_ext(const char *zDir){
   CHECK(nAutoApi==1);
   sqlite3_close(db);
   sqlite3_cancel_auto_extension((void(*)(void))auto_api);
+}
+
+/* The xqlite extension (zig build ext, docs/extension.md), the second
+** argument, loaded as an application loads it into a real sqlite3 --
+** here into libxqlite3, through the same sqlite3_api_routines table: its
+** functions are application-defined functions on this connection, which
+** come before the engine's own. */
+static const char *zXqliteExt = 0;
+
+static void test_b_xqlite_ext(void){
+  sqlite3 *db = 0;
+  char *zErr = 0;
+  if( zXqliteExt==0 ) return;
+  CHECK_RC(sqlite3_open(":memory:", &db), SQLITE_OK, db);
+  CHECK_RC(sqlite3_enable_load_extension(db, 1), SQLITE_OK, db);
+  /* libxqlite_ext.so: the entry point sqlite3_xqliteext_init (also
+  ** sqlite3_extension_init, which the loader tries first). */
+  CHECK_RC(sqlite3_load_extension(db, zXqliteExt, 0, &zErr), SQLITE_OK, db);
+  CHECK(zErr==0);
+  CHECK_RC(sqlite3_load_extension(db, zXqliteExt, "sqlite3_xqliteext_init", &zErr), SQLITE_OK, db);
+  CHECK_STR(one(db, "SELECT xq_ext_version()"), "1");
+  CHECK_STR(one(db, "SELECT xq_like('a%', 'abc') || xq_ilike('A_C', 'abc')"), "11");
+  CHECK_STR(one(db, "SELECT xq_like('a\\', 'a')"), "ERROR: LIKE pattern must not end with escape character");
+  /* The PostgreSQL dialect's, when it is built in. */
+  if( atoi(one(db, "SELECT count(*) FROM pragma_function_list WHERE name='xq_pg_jsonb'"))>0 ){
+    exec(db, "CREATE TABLE doc(body TEXT CHECK(xq_pg_jsonb_exists(body, 'kind')), span TEXT);"
+             "CREATE INDEX doc_kind ON doc(xq_pg_jsonb_get_text(body, 'kind'));"
+             "INSERT INTO doc VALUES (xq_pg_jsonb('{\"kind\":\"b\",\"a\":1}'), '25 hours'), ('{\"kind\":\"a\"}', '1 day');"
+             "CREATE TABLE xq_sequence(name TEXT PRIMARY KEY NOT NULL,last_value INTEGER NOT NULL,start_value INTEGER NOT NULL,increment INTEGER NOT NULL,min_value INTEGER NOT NULL,max_value INTEGER NOT NULL,cycle INTEGER NOT NULL,is_called INTEGER NOT NULL);"
+             "INSERT INTO xq_sequence VALUES ('s', 10, 10, 5, 1, 100, 0, 0)");
+    CHECK_STR(one(db, "PRAGMA integrity_check"), "ok");
+    CHECK_STR(one(db, "SELECT group_concat(body, ';') FROM doc"), "{\"a\": 1, \"kind\": \"b\"};{\"kind\":\"a\"}");
+    CHECK_STR(one(db, "SELECT group_concat(span) FROM (SELECT span FROM doc ORDER BY span COLLATE xq_pg_interval)"), "1 day,25 hours");
+    CHECK_STR(one(db, "SELECT xq_pg_jsonb_get_text(body, 'kind') FROM doc INDEXED BY doc_kind ORDER BY 1 LIMIT 1"), "a");
+    CHECK_STR(one(db, "INSERT INTO doc VALUES ('{}', NULL)"), "ERROR: CHECK constraint failed: xq_pg_jsonb_exists(body, 'kind')");
+    CHECK_STR(one(db, "SELECT nextval('s') + nextval('s') + currval('s')"), "40");
+    CHECK_STR(one(db, "SELECT nextval('nope')"), "ERROR: relation \"nope\" does not exist");
+  }
+  /* The functions go with the connection. */
+  CHECK_RC(sqlite3_close(db), SQLITE_OK, 0);
 }
 
 static int nCarrayDel = 0;
@@ -2610,6 +2650,7 @@ static void test_corrupt_log(const char *zDir){
 int main(int argc, char **argv){
   char zDir[] = "/tmp/xqlite-capi-XXXXXX";
   if( argc>1 ) zExtPath = argv[1];
+  if( argc>2 ) zXqliteExt = argv[2];
   if( mkdtemp(zDir)==0 ){ perror("mkdtemp"); return 1; }
   test_library();
   test_printf();
@@ -2635,6 +2676,7 @@ int main(int argc, char **argv){
   test_b_blob(zDir);
   test_b_status(zDir);
   test_b_ext(zDir);
+  test_b_xqlite_ext();
   test_b_carray();
   test_b_vfs(zDir);
   test_b_snapshot(zDir);

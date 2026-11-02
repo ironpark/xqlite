@@ -22,7 +22,7 @@ xqlite의 호환성을 확인하는 테스트와 도구, 그리고 실행 방법
 
 ## 도구 한눈에 보기
 
-xqlite 밖에서 돌리는 테스트 도구는 모두 Zig로 쓴 `xqt` 하나입니다(셸·Python 스크립트는 없습니다). `zig build tools`가 `zig-out/bin/xqt`, 크래시 shim(`zig-out/lib/libcrashshim.dylib`, Linux는 `.so`), 그리고 xqlite를 빌드합니다. 구조와 검사를 추가하는 방법은 [tools/xqt/README.md](../tools/xqt/README.md)에 있습니다.
+xqlite 밖에서 돌리는 테스트 도구는 모두 Zig로 쓴 `xqt` 하나입니다(셸·Python 스크립트는 없습니다). `zig build tools`가 `zig-out/bin/xqt`, 크래시 shim(`zig-out/lib/libcrashshim.dylib`, Linux는 `.so`), sqlite3용 확장(`zig-out/lib/libxqlite_ext.dylib`, [sqlite3용 확장](extension.md)), 그리고 xqlite를 빌드합니다. 구조와 검사를 추가하는 방법은 [tools/xqt/README.md](../tools/xqt/README.md)에 있습니다.
 
 ```sh
 zig build tools
@@ -34,26 +34,27 @@ zig-out/bin/xqt list            # interop 모듈, 플래너 케이스 파일, �
 | 명령 | 확인하는 것 | 기준 |
 | --- | --- | --- |
 | `zig build test` | 단위 테스트, 문서·예제의 이름, 전역 상태, 시드 퍼저 스모크 | — |
-| `zig build check` | 아래의 대부분을 병렬로 한 번에: 단위 테스트, `xqt` 자체의 테스트, `xqt interop`, `xqt planner`, `fuzzcheck` (`-Dslt`, `-Dfuzz`, `-Dfast`로 더) | 아래와 같음 |
+| `zig build check` | 아래의 대부분을 병렬로 한 번에: 단위 테스트, `xqt` 자체의 테스트, `xqt interop`, `xqt planner`, `xqt dialect-diff pg`(기록과), `fuzzcheck` (`-Dslt`, `-Dfuzz`, `-Dfast`로 더) | 아래와 같음 |
 | `xqt interop [NAME...]` | DB 파일, SQL 결과, 셸 출력, PRAGMA, WAL, 크래시 복구를 sqlite3와 교차 비교. 모듈은 [sqlite3 교차 검증](#sqlite3-교차-검증) | `--sqlite3`/`SQLITE3` (3.54.1) |
 | `xqt planner [FILE...]` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드 | `--sq`/`SQ` (3.54.1, 주석 없는 빌드) |
 | `xqt planner gen basic\|hard ...` | 무작위 플래너 케이스 생성 | — |
 | `xqt slt [PATH...]` | sqllogictest | `--ref` (선택) |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스에서 크래시·메모리 누수·close 실패 | — |
-| `zig build fuzz` | 시드 퍼저: `btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip` | — |
-| `xqt dialect-diff pg` | PostgreSQL 방언을 실제 PostgreSQL 16과 차등 비교 | PostgreSQL 서버(podman) |
-| `xqt dialect-diff mariadb` | MariaDB 방언을 실제 MariaDB 11과 차등 비교 | MariaDB 서버(podman) |
-| `xqt dialect-diff mssql` | MSSQL(T-SQL) 방언을 실제 SQL Server(Azure SQL Edge, 엔진 15.0)와 차등 비교 | SQL Server 서버(podman)와 go-sqlcmd |
-| `xqt dialect-diff oracle` | Oracle 방언을 실제 Oracle Database 23ai와 차등 비교 | Oracle 서버(podman) |
-| `xqt wire-diff pg` | psql로 실제 PostgreSQL 16과 `xqlite serve --pg`를 차등 비교(메타 명령, 클라이언트·ORM의 카탈로그 질의) | PostgreSQL 서버와 그 psql(podman) |
-| `xqt wire-diff pg --regress` | PostgreSQL 회귀 테스트 일부를 `xqlite serve --pg`에서 돌려 문장별 통과율 | psql(podman) |
+| `zig build fuzz` | 시드 퍼저: `btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`, `ir_ext`(`$XQT_EXT`의 확장으로) | — |
+| `xqt dialect-diff pg [--live\|--record]` | PostgreSQL 방언을 PostgreSQL 18의 출력과 차등 비교. 기본은 저장소의 기록(`tools/dialect/pg-expected`)과 | 기록; `--live`·`--record`는 PostgreSQL 서버(podman) |
+| `xqt dialect-diff mariadb --live` | MariaDB 방언을 실제 MariaDB 11과 차등 비교 | MariaDB 서버(podman) |
+| `xqt dialect-diff mssql --live` | MSSQL(T-SQL) 방언을 실제 SQL Server(Azure SQL Edge, 엔진 15.0)와 차등 비교 | SQL Server 서버(podman)와 go-sqlcmd |
+| `xqt dialect-diff oracle --live` | Oracle 방언을 실제 Oracle Database 23ai와 차등 비교 | Oracle 서버(podman) |
+| `xqt wire-diff pg [--live\|--record]` | psql로 PostgreSQL 18과 `xqlite serve --pg`를 차등 비교(메타 명령, 클라이언트·ORM의 카탈로그 질의). 기본은 기록과 | psql 18(호스트, 없으면 podman); `--live`·`--record`는 PostgreSQL 서버(podman) |
+| `xqt wire-diff pg --regress` | PostgreSQL 18 회귀 테스트 일부를 `xqlite serve --pg`에서 돌려 문장별 통과율 | psql 18(호스트, 없으면 podman) |
 | `xqt bench [WORKLOAD...]` | 같은 작업의 xqlite·sqlite3 실행 시간 | `--sqlite3`/`SQLITE3` |
 | `zig build test-wasi` | wasm32-wasi 단위 테스트(wasmtime)와 `xqt wasi` | wasmtime, `--sqlite3`/`SQLITE3` |
 | `xqt wasi [--wasm PATH]` | WASI 빌드의 SQL 결과, 저널·WAL, 크래시 복구, 방언 | sqlite3, 네이티브 xqlite(`--xq`), wasmtime |
 | `zig build wasm-example` | 브라우저용 모듈을 Node.js에서 (`examples/wasm/node.mjs`) | node |
 | `xqt gen fixtures\|parser\|opcodes` | `src/testdata`의 테스트용 DB, `grammar.zig`, `opcodes.zig` 재생성 | `PATH`의 sqlite3(fixtures) |
 | `xqt gen superjournal [DIR]` | `src/testdata/superjournal`(여러 파일 커밋 도중 죽은 sqlite3가 남긴 파일) 재생성 | `--sqlite3`/`SQLITE3`, 크래시 shim |
-| `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사 | — |
+| `zig build test-capi` | C 프로그램으로 C ABI(`libxqlite3`, 정적·공유) 검사. sqlite3용 확장을 올리는 것도 | — |
+| `zig build ext` | sqlite3용 확장 `libxqlite_ext`([sqlite3용 확장](extension.md)). `xqt interop ext`가 씀 | — |
 | `zig build test-minimal` | 방언·확장을 모두 뺀 엔진(`-Ddialects=none -Dext=none`)으로 `tools/minimal_test.zig` | — |
 | `zig build capi-fast` | ReleaseFast 정적 `libxqlite3`로 C 검사와 `tools/capi/bench.c`를 8번씩 실행 | — |
 | `zig build capi-shell` | SQLite의 `shell.c`를 `libxqlite3`에 링크해 스모크 스크립트 실행 | 아말감 `shell.c` |
@@ -101,6 +102,7 @@ xqlite를 의존성으로 쓰는 프로젝트의 빌드는 SQLite를 내려받�
 | `--sqlite3 PATH` | 교차 검증의 기준 sqlite3 |
 | `--sq PATH` | 플래너의 기준 sqlite3 |
 | `--crashshim PATH` | `tools/crashshim.c`를 빌드한 preload 라이브러리 |
+| `--ext PATH` | sqlite3용 확장(`zig build ext`) |
 
 ### 바이너리 고르기
 
@@ -112,6 +114,7 @@ xqlite를 의존성으로 쓰는 프로젝트의 빌드는 SQLite를 내려받�
 | sqlite3 | `--sqlite3` | `SQLITE3` | `zig-out/bin/sqlite3-ref`가 있으면 그것, 없으면 `PATH`의 `sqlite3` | `interop`(모든 모듈), `bench`, `gen superjournal` |
 | 플래너 기준 | `--sq` | `SQ` | `zig-out/bin/sqlite3-planner`가 있으면 그것, 없으면 `PATH`의 `sqlite3` | `planner`. `SQLITE_ENABLE_EXPLAIN_COMMENTS` 없이 빌드한 3.54.1이어야 합니다([위](#기준-sqlite3-셸)) |
 | 크래시 shim | `--crashshim` | `XQT_CRASHSHIM` | 이 저장소의 `zig-out/lib/libcrashshim.dylib`(Linux는 `.so`) | `interop attach`, `interop vacuum`, `gen superjournal` |
+| sqlite3용 확장 | `--ext` | `XQT_EXT` | 이 저장소의 `zig-out/lib/libxqlite_ext.dylib`(Linux는 `.so`) | `interop ext`(sqlite3에 `-cmd .load`로 올림) |
 
 예전 스크립트는 `PATH`의 `sqlite3`를 쓰는 것과 `SQLITE3`를 쓰는 것이 섞여 있었습니다. 이제 모든 interop 모듈이 같은 sqlite3 하나를 씁니다. `XQLITE` 변수는 없어졌고 `--xq`나 `XQ`를 씁니다. `xqt list`가 실제로 고른 바이너리를 보여 줍니다.
 
@@ -134,6 +137,8 @@ xqlite를 의존성으로 쓰는 프로젝트의 빌드는 SQLite를 내려받�
 | `SQOPT` | `planner` | 기준 셸에서 `.testctrl optimizations MASK`로 끌 최적화 |
 | `XQ_VTABLOG`, `XQ_WHERETRACE` | `planner` | [tools/planner/README.md](../tools/planner/README.md) |
 | `SQLITE_VERSION`, `SQLITE_YEAR`, `SLT_REPO` | `fetch` | 내려받을 SQLite 릴리스, sqllogictest 저장소 |
+| `XQT_SEED` | `interop ext` | `generated calls`의 시드(기본은 고정) |
+| `XQT_EXT_RECORD` | `interop ext` | 있으면 `tools/ext/abi-*.out`을 xqlite의 출력으로 다시 기록(함수를 더했을 때만, [ABI 규칙](extension.md#abi-규칙)) |
 
 ## 한 번에 전부: zig build check
 
@@ -151,16 +156,17 @@ zig build check -Dfast=true     # capi-fast도 (약 90초)
 - `zig build test`의 모든 것과 `xqt` 자체의 단위 테스트
 - `zig build test-capi`: C 프로그램으로 C ABI 검사
 - `zig build test-minimal`: 방언·확장을 모두 뺀 엔진의 테스트
-- `xqt interop`: 모든 interop 모듈
+- `xqt interop`: 모든 interop 모듈(`ext`에는 같은 빌드의 확장을 `--ext`로 넘김)
 - `xqt planner --known tools/planner/known-failures.list`: `vtablog.txt`를 뺀 모든 케이스 파일
+- `xqt dialect-diff pg`: PostgreSQL 방언이 빌드에 들어 있으면 기록해 둔 PostgreSQL의 출력과 비교(서버 없이, [방언 차등 테스트](#방언-차등-테스트))
 - `xqlite fuzzcheck`: `ref/sqlite/test/fuzzdata1.db`..`fuzzdata8.db`를 파일마다 프로세스 하나로
 - `-Dslt=true`이면 `xqt slt ref/sqllogictest/test`
-- `-Dfuzz=true`이면 `btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`을 무작위 시드로 한 번씩
+- `-Dfuzz=true`이면 `btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`, `ir_ext`(같은 빌드의 확장으로)를 무작위 시드로 한 번씩
 - `-Dfast=true`이면 `zig build capi-fast`: ReleaseFast 정적 라이브러리로 C 검사와 삽입 벤치마크를 여러 번
 
 플래너 부분 때문에 `SQ`에 [주석 없는 기준 셸](#기준-sqlite3-셸)을 주어야 합니다. 주지 않으면 `PATH`의 `sqlite3`와 비교하므로 바이트코드가 다릅니다. `SQLITE3`도 같은 방식으로 받습니다.
 
-`-Doptimize`는 단위 테스트, `xqt interop`, `xqt planner`가 쓰는 빌드를 정합니다. 오래 걸리는 fuzzcheck, sqllogictest(`-Dslt`), 시드 퍼저(`-Dfuzz`)는 `-Doptimize`와 상관없이 따로 만든 ReleaseSafe 빌드로 돕니다. `xqt`에는 같은 빌드의 xqlite(`--xq`)와 크래시 shim(`--crashshim`)을 넘기고 저장소 루트에서 실행하므로 `zig build tools`를 따로 할 필요가 없습니다. `xqt dialect-diff`·`xqt wire-diff`(서버 필요)와 `xqt bench`는 들어 있지 않습니다.
+`-Doptimize`는 단위 테스트, `xqt interop`, `xqt planner`가 쓰는 빌드를 정합니다. 오래 걸리는 fuzzcheck, sqllogictest(`-Dslt`), 시드 퍼저(`-Dfuzz`)는 `-Doptimize`와 상관없이 따로 만든 ReleaseSafe 빌드로 돕니다. `xqt`에는 같은 빌드의 xqlite(`--xq`), 크래시 shim(`--crashshim`), 확장(`--ext`, interop만)을 넘기고 저장소 루트에서 실행하므로 `zig build tools`를 따로 할 필요가 없습니다. 서버에 붙는 `xqt dialect-diff --live`/`--record`, psql이 필요한 `xqt wire-diff`, 그리고 `xqt bench`는 들어 있지 않습니다.
 
 ### known-failures.list
 
@@ -261,8 +267,9 @@ zig-out/bin/xqt interop vacuum -j 4 --keep -v
 | `vacuum` | 롤백 저널·auto-vacuum(FULL, INCREMENTAL)·WAL DB(어느 엔진이 만든 것이든)를 두 엔진이 같은 문장으로 `VACUUM`해서 파일이 바이트 단위로 같은지 봅니다. 문장은 `page_size`(512..65536)와 `auto_vacuum` 변경, 저널 모드를 섞습니다. DB에는 빈 자리가 있는 테이블, UNIQUE 인덱스, 오버플로 페이지, WITHOUT ROWID 테이블, AUTOINCREMENT, `sqlite_stat1`, 뷰, 트리거가 있습니다. `VACUUM INTO`(URI의 `reserve=N` 포함)와 셸의 `.backup`·`.save`·`.restore`(페이지 크기가 다른 대상 포함)도 같은 바이트를 쓰는지, 서로의 결과가 `integrity_check`를 통과하는지 봅니다. 마지막으로 VACUUM 도중 파일·저널·WAL을 바꾸는 지점마다 한쪽을 죽이고, 다른 쪽이 VACUUM 전이나 후의 파일(WAL 모드는 같은 행)로 복구하는지 확인합니다. |
 | `analyze` | 30개가 넘는 테이블(스키마 해시의 가장 큰 버킷 배열)과 부분·식·NOCASE·UNIQUE·WITHOUT ROWID 인덱스가 있는 같은 DB를 두 엔진이 각각 `ANALYZE`해서 `sqlite_stat1` 행이 rowid까지 같은지, `analysis_limit`에서도 같은지 봅니다. 그다음 서로 분석한 DB를 읽어 자기가 분석한 DB와 같은 실행 계획이 나오는지, 데이터를 바꾼 뒤 `PRAGMA optimize`가 같은 행을 쓰는지 확인합니다. |
 | `pg` | PostgreSQL 방언으로 쓴 DB(STRICT 테이블, CHECK, identity 시퀀스, `xq_catalog`/`xq_sequence`, 뷰, 인덱스)가 sqlite3의 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽는지 확인합니다. |
-| `mariadb` | MariaDB 방언으로 쓴 DB(STRICT 테이블, 이름 있는 CHECK, DEFAULT·생성 열, `AUTO_INCREMENT`, `"t$i"` 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. sqlite3에 없는 엔진 함수(`xq_*`)를 쓰는 식은 xqlite 안의 테스트(`src/dialect/mariadb/test.zig`)가 확인합니다. |
-| `mssql` | MSSQL 방언으로 쓴 DB(STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열, `NOCASE`/`BINARY` 열, 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. sqlite3에 없는 엔진 함수(`xq_tsql_*`)를 쓰는 식은 `src/dialect/mssql/test.zig`가 확인합니다. |
+| `mariadb` | MariaDB 방언으로 쓴 DB(STRICT 테이블, 이름 있는 CHECK, DEFAULT·생성 열, `AUTO_INCREMENT`, `"t$i"` 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. 엔진 함수(`xq_*`)를 쓰는 식은 `ext`가 확인합니다. |
+| `mssql` | MSSQL 방언으로 쓴 DB(STRICT 테이블과 타입의 CHECK, identity 시퀀스, 계산 열, `NOCASE`/`BINARY` 열, 인덱스, 뷰, `xq_catalog`)를 같은 방식으로 확인합니다. 엔진 함수(`xq_tsql_*`)를 쓰는 식은 `ext`가 확인합니다. |
+| `ext` | [sqlite3용 확장](extension.md#검증)을 올린 sqlite3로, 빌드에 있는 방언마다 엔진 함수의 CHECK·생성 열·식 인덱스·뷰·collation이 있는 DB를 검사(`integrity_check`; 확장 없는 sqlite3는 통과하지 못해야 함), 같은 결과, 방언 CHECK 위반의 같은 오류, sqlite3가 쓴 jsonb·배열·interval·numeric·boolean·identity 행을 xqlite가 `integrity_check`하고 방언으로 다시 읽음, 시스템 Python의 `sqlite3`로 같은 읽기(없으면 건너뜀). 그리고 기록된 ABI 케이스(`tools/ext/abi-*.sql`과 `.out`, 두 엔진 모두 기록과 같아야 함)와 생성한 호출(결정적인 `xq_*` 함수마다 가장자리 값의 인자로, 두 엔진의 결과와 오류 문구를 비교, `XQT_SEED`). 방언 모듈이 아니라 방언마다 검사를 넣고 뺍니다. |
 | `oracle` | Oracle 방언으로 쓴 DB(Oracle 타입의 CHECK가 있는 STRICT 테이블, identity와 시퀀스, MERGE, `(+)` 조인 뷰, `xq_catalog`/`xq_sequence`, `COMMIT`으로 끝낸 암묵적 트랜잭션)를 같은 방식으로 확인하고, sqlite3가 타입 검사를 강제하는지, `ROLLBACK`이 암묵적 트랜잭션을 되돌리는지 봅니다. |
 
 모듈별 차이 몇 가지입니다.
@@ -339,6 +346,7 @@ zig build fuzz -Doptimize=ReleaseSafe -- btree_model [SEED] [--events N]
 zig build fuzz -Doptimize=ReleaseSafe -- btree_corrupt [SEED]
 zig build fuzz -Doptimize=ReleaseSafe -- btree_sqlite3 [SEED] [--events N]
 zig build fuzz -Doptimize=ReleaseSafe -- ir_roundtrip [SEED] [--events N]
+zig build fuzz -- ir_ext [SEED] --ext zig-out/lib/libxqlite_ext.dylib   # 또는 $XQT_EXT
 zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 ```
 
@@ -381,6 +389,8 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 
 불일치하면 시드, 이벤트 번호, 렌더링한 텍스트, 재현 명령을 출력합니다. 찾은 문제의 회귀 테스트는 `src/ir/roundtrip_test.zig`에 있습니다.
 
+`ir_ext`는 같은 테이블 이벤트를 [sqlite3용 확장](extension.md#ir_ext-퍼저-렌더링한-텍스트를-sqlite3확장으로)을 올린 sqlite3로 봅니다: xqlite가 쓴 파일의 `integrity_check`와 저장된 행, sqlite3+확장이 같은 INSERT를 돌렸을 때 거부하는 행과 저장하는 행이 xqlite와 같아야 합니다. 확장(`--ext PATH` 또는 `$XQT_EXT`)을 주어야 돌고(`zig build check -Dfuzz=true`는 같은 빌드의 것을 줌), 없으면 건너뜁니다.
+
 **일부러 검사하지 않는 것.**
 
 - `identity_default`: 계약의 예외이고, 시퀀스는 읽을 때마다 증가합니다.
@@ -392,18 +402,34 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 
 ## 방언 차등 테스트
 
-`xqt dialect-diff pg|mariadb|mssql|oracle [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다. 서버는 기본으로 podman 컨테이너를 쓰며, 서버가 필요하므로 `zig build check`에는 들어 있지 않습니다. 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다.
+`xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record] [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다.
+
+서버 쪽 출력은 세 가지 중 하나에서 옵니다.
+
+| 모드 | 서버 쪽 | 필요한 것 |
+| --- | --- | --- |
+| 기본 | 저장소에 기록해 둔 서버 클라이언트의 출력(`tools/dialect/pg-expected/pg-cases.out`: 케이스 파일 `NAME.txt`마다 `NAME.out`) | xqlite만 |
+| `--live` | 서버에서 지금 돌린 출력 | 서버(podman 컨테이너) |
+| `--record` | 서버에서 지금 돌린 출력. 그것으로 기록을 다시 쓰고 `--live`처럼 비교 | 서버(podman 컨테이너) |
+
+- 기록은 케이스 파일마다 텍스트 파일 하나입니다. 머리의 `# ` 줄은 어느 명령이 어느 서버로 만들었는지(`# server: PostgreSQL 18.6 on ...`, wire-diff는 `# client: psql (PostgreSQL) 18.6`도), 그 뒤로 케이스마다 `==== case HASH NAME` 줄과 클라이언트가 찍은 출력 그대로입니다. 정규화는 비교할 때 하므로 정규화를 고쳐도 다시 기록할 필요가 없고, git diff로 서버 출력이 어떻게 바뀌었는지 그대로 보입니다.
+- `HASH`는 기록할 때 케이스 글(wire-diff는 파일의 셋업과 `mask-oids`도)의 SHA-256 앞 8바이트입니다. 기록에 없는 케이스는 `NOT RECORDED`, 글이 바뀐 케이스는 `STALE RECORDING`으로 따로 찍고 실패로 셉니다. 케이스를 고치거나 더하면 `--record`로 다시 기록합니다.
+- 기록이 있는 방언(지금은 PostgreSQL, `build.zig`의 `recorded_dialects`)은 `zig build check`에서 기본 모드로 돕니다. 나머지 방언은 아직 기록이 없어 `--live`로 돌리고, 서버를 띄운 뒤 `--record`로 기록을 만들면 됩니다(`tools/dialect/maria-expected` ...).
+- `--live`·`--record`는 서버에 닿지 않으면 바로 실패하고 컨테이너를 띄우는 명령을 알려 줍니다.
 
 ### PostgreSQL
 
 ```sh
-podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
 zig build tools
-zig-out/bin/xqt dialect-diff pg [cases-file]        # 기본: tools/dialect/pg-cases.txt
+zig-out/bin/xqt dialect-diff pg [cases-file]        # 기본: tools/dialect/pg-cases.txt, 기록과
+podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine
+zig-out/bin/xqt dialect-diff pg --live              # PostgreSQL 18과 지금
+zig-out/bin/xqt dialect-diff pg --record            # tools/dialect/pg-expected/pg-cases.out을 다시 씀
 ```
 
+- 기준은 PostgreSQL 18(`postgres:18-alpine`, 기록은 18.6)입니다.
 - 서버 접속 명령은 `PG_PSQL`로 바꿉니다(기본 `podman exec -i xq-pg psql -U postgres`).
-- 케이스는 작업자 데이터베이스(`xqt_dialect_N`, 최대 8개, 실행 전에 만들고 뒤에 지움)에서 병렬로 돌고, 케이스마다 `public` 스키마를 지우고 다시 만든 뒤 시작합니다.
+- 케이스는 작업자 데이터베이스(`xqt_dialect_PID_N`, 최대 8개, 실행 전에 만들고 뒤에 지움)에서 병렬로 돌고, 케이스마다 `public` 스키마를 지우고 다시 만든 뒤 시작합니다. 이름에 프로세스 ID가 들어가므로 같은 서버에서 동시에 돈 두 실행(또는 서버를 함께 쓰는 다른 작업)이 서로의 데이터베이스를 건드리지 않습니다.
 - psql의 불리언 `t`/`f`는 방언이 돌려주는 1/0으로 맞춰 비교합니다.
 
 ### MariaDB
@@ -411,7 +437,7 @@ zig-out/bin/xqt dialect-diff pg [cases-file]        # 기본: tools/dialect/pg-c
 ```sh
 podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
 zig build tools
-zig-out/bin/xqt dialect-diff mariadb [cases-file]   # 기본: tools/dialect/maria-cases.txt
+zig-out/bin/xqt dialect-diff mariadb --live [cases-file]   # 기본: tools/dialect/maria-cases.txt (기록은 아직 없음)
 ```
 
 - 서버 접속 명령은 `MARIA_CLIENT`로 바꿉니다(기본 `podman exec -i xq-maria mariadb -uroot`).
@@ -425,7 +451,7 @@ podman run -d --name xq-mssql -e ACCEPT_EULA=1 -e MSSQL_SA_PASSWORD='Xq_Passw0rd
   -e MSSQL_MEMORY_LIMIT_MB=2048 mcr.microsoft.com/azure-sql-edge:latest
 podman cp sqlcmd xq-mssql:/tmp/sqlcmd                # go-sqlcmd, linux-arm64
 zig build tools
-zig-out/bin/xqt dialect-diff mssql [cases-file]     # 기본: tools/dialect/mssql-cases.txt
+zig-out/bin/xqt dialect-diff mssql --live [cases-file]     # 기본: tools/dialect/mssql-cases.txt (기록은 아직 없음)
 ```
 
 - arm64 호스트에서 `mcr.microsoft.com/mssql/server`(amd64 전용)는 qemu 에뮬레이션에서 segfault로 죽으므로, arm64 빌드가 있는 Azure SQL Edge(SQL Server 엔진)를 씁니다. 이미지에 sqlcmd가 없어 go-sqlcmd를 복사해 둡니다.
@@ -440,7 +466,7 @@ zig-out/bin/xqt dialect-diff mssql [cases-file]     # 기본: tools/dialect/mssq
 podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq -e APP_USER_PASSWORD=xqpass \
   gvenzl/oracle-free:23-slim-faststart
 zig build tools
-zig-out/bin/xqt dialect-diff oracle [cases-file]    # 기본: tools/dialect/oracle-cases.txt
+zig-out/bin/xqt dialect-diff oracle --live [cases-file]    # 기본: tools/dialect/oracle-cases.txt (기록은 아직 없음)
 ```
 
 - 서버 접속 명령은 `ORA_SQLPLUS`로 바꿉니다(기본 `podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1`). arm64 macOS의 podman(메모리 약 4 GiB)에서도 `23-slim-faststart` 이미지가 돕니다. 다른 큰 컨테이너와 함께 띄우면 메모리가 모자랄 수 있습니다.
@@ -452,26 +478,33 @@ zig-out/bin/xqt dialect-diff oracle [cases-file]    # 기본: tools/dialect/orac
 
 ### 와이어 차등 테스트 (PostgreSQL)
 
-`dialect-diff pg`가 `xqlite sql`의 행을 비교한다면, `xqt wire-diff pg`는 psql 사용자가 보는 것을 비교합니다. 같은 psql(`postgres:16-alpine` 컨테이너의 psql 16)이 같은 스크립트를 실제 PostgreSQL과 `xqlite serve --pg`(케이스마다 새 서버와 빈 DB 파일)에 보내고, 정렬된 표, 명령 태그, NOTICE, `LINE`/`DETAIL`/`HINT`가 붙은 `ERROR`, 메타 명령(`\d`, `\dt`, `\gdesc`, `\bind` ...)의 출력 전체가 같아야 합니다.
+`dialect-diff pg`가 `xqlite sql`의 행을 비교한다면, `xqt wire-diff pg`는 psql 사용자가 보는 것을 비교합니다. 같은 psql 18(`postgres:18-alpine`)이 같은 스크립트를 PostgreSQL 18과 `xqlite serve --pg`(케이스마다 새 서버와 빈 DB 파일)에 보내고, 정렬된 표, 명령 태그, NOTICE, `LINE`/`DETAIL`/`HINT`가 붙은 `ERROR`, 메타 명령(`\d`, `\dt`, `\gdesc`, `\bind` ...)의 출력 전체가 같아야 합니다.
 
 ```sh
-podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
 zig build && zig build tools
-zig-out/bin/xqt wire-diff pg [--out DIR] [cases-file...]
-zig-out/bin/xqt wire-diff pg --regress [--out DIR] [TEST...]
+zig-out/bin/xqt wire-diff pg [--out DIR] [cases-file...]     # 기록과: psql만 필요
+zig-out/bin/xqt wire-diff pg --regress [--out DIR] [TEST...] # PostgreSQL의 기대 출력과: psql만 필요
+podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine
+zig-out/bin/xqt wire-diff pg --live                          # PostgreSQL 18과 지금
+zig-out/bin/xqt wire-diff pg --record                        # tools/dialect/pg-expected/pg-wire-cases.out, pg-client-cases.out을 다시 씀
 ```
+
+- PostgreSQL 쪽은 `dialect-diff`처럼 기본으로 기록(`tools/dialect/pg-expected/NAME.out`, [방언 차등 테스트](#방언-차등-테스트)의 형식, `# client: psql (PostgreSQL) 18.6`도 적음)에서 옵니다. 케이스의 해시에는 그 파일의 셋업과 `mask-oids`도 들어가므로 셋업을 고치면 그 파일의 케이스가 모두 `STALE RECORDING`이 됩니다. 기록할 때 실행마다 달라지는 것(`psql:<stdin>:N:`의 줄 번호, `mask-oids` 케이스의 OID)은 지우고 적으므로, 다시 기록해도 서버의 답이 같으면 파일이 바뀌지 않습니다.
+- 기본 모드에는 서버가 필요 없고 psql만 있으면 됩니다. `PATH`에 psql 18이 있으면 그것을(xqlite는 `127.0.0.1`에서 받음), 없으면 케이스마다 잠깐 띄우는 컨테이너 `podman run --rm -i postgres:18-alpine`의 psql을 씁니다(macOS podman에서 컨테이너가 호스트를 `host.containers.internal`로 찾음, xqlite는 `0.0.0.0`에서 받음). 기록한 psql과 버전이 다르면 그렇다고 알려 줍니다. psql이 podman에 기대므로 `zig build check`에는 들어 있지 않습니다.
+- `--live`·`--record`의 서버 쪽은 작업자마다 데이터베이스 `xqt_wire_PID_N`(프로세스 ID를 7자리로 넣음, 실행 전에 만들고 뒤에 지움)을 씁니다. 출력에서는 그 이름을 같은 길이의 `xqt_wire_recording`으로 바꾸므로(표의 너비가 그대로), 기록을 재생할 때 xqlite는 그 이름으로 붙습니다. `\l`은 서버의 모든 데이터베이스를 보이므로 케이스는 `\l :DBNAME`(자기 데이터베이스만)입니다.
 
 - 기본 케이스는 `tools/dialect/pg-wire-cases.txt`(세션 설정, psql 메타 명령 `\d` 계열·`\l`·`\du`·`\dx`·`\dp`, `\gdesc`·`\bind`·`\gset`·`\gx`·`\pset`, 값의 출력 형식, 명령 태그, 트랜잭션, 오류와 NOTICE, `information_schema`·`regclass`·`format_type`)와 `tools/dialect/pg-client-cases.txt`입니다.
 - `pg-client-cases.txt`는 실제 클라이언트가 보내는 질의입니다. PostgreSQL 16을 `log_statement=all`로 띄우고 node-postgres·knex·Sequelize, SQLAlchemy(psycopg2, psycopg 3)·Django, pgjdbc `DatabaseMetaData`, asyncpg, `prisma db pull`이 파일 머리의 스키마를 들여다보게 한 뒤 서버 로그에서 모았습니다. 확장 질의로 온 문장은 psql의 `\bind ... \g`로, 한 연결의 `BEGIN`…`COMMIT`/`ROLLBACK`은 케이스 하나로 옮겼고, 질의 안의 개체 OID는 `\gset`으로 먼저 구한 psql 변수로 바꿨습니다.
 - 케이스 파일: `-- case: NAME`이 케이스를 시작하고, 첫 케이스 앞의 줄은 그 파일의 모든 케이스 앞에 조용히(`QUIET`) 도는 셋업입니다. psql은 케이스의 입력을 되풀이해 찍습니다(`ECHO all`). 케이스 안의 `-- xqt: mask-oids`는 출력에서 다섯 자리 이상의 수를 `<oid>`로 바꿉니다(양쪽이 만든 개체의 OID가 다름).
-- 양쪽 모두 `-U postgres -d xqt_wire_N`으로 붙으므로 psql이 찍는 소유자·데이터베이스 이름은 같습니다. 줄 앞의 `psql:<stdin>:N:`은 지우고 비교합니다. psql의 표준 출력과 오류는 컨테이너 안에서 `2>&1`로 합쳐 psql이 쓴 순서를 지킵니다.
+- 양쪽 모두 `-U postgres -d DB`로 붙으므로 psql이 찍는 소유자·데이터베이스 이름은 같습니다. 줄 앞의 `psql:<stdin>:N:`은 지우고 비교합니다. psql의 표준 출력과 오류는 컨테이너 안에서 `2>&1`로 합쳐 psql이 쓴 순서를 지킵니다.
 - 다른 케이스는 `DIFF [class] NAME`으로 나오고, 마지막 줄이 세 가지로 센 수입니다. psql이 되풀이한 입력 줄로 출력을 문장별로 나눠, 다른 문장마다 아래 중 하나로 정하고 케이스는 가장 나쁜 것(result, error, format 순)을 받습니다.
   - `result`: xqlite가 답했지만 PostgreSQL과 다른 답(또는 PostgreSQL이 오류를 낸 문장에 답함)
   - `error`: PostgreSQL이 답한 문장에 xqlite가 오류를 냄
   - `format`: 대소문자, 공백, 표의 선(`-`, `+`, `|`), 오류 문구와 그 주변 줄(`LINE`과 `^`, `DETAIL`, `HINT`, `CONTEXT`, `NOTICE`, `WARNING`), 서버의 `version()` 문자열만 다름
 - `--out DIR`은 케이스마다 두 출력을 `DIR/NAME.pg`, `DIR/NAME.xq`에 씁니다.
-- psql을 돌리는 명령은 `PG_WIRE_EXEC`(기본 `podman exec -i xq-pg`, 그 뒤에 `sh -c "psql ... 2>&1"`), 컨테이너에서 본 호스트는 `PG_WIRE_HOST`(기본 `host.containers.internal`, macOS podman), xqlite가 받는 주소는 `PG_WIRE_LISTEN`(기본 `0.0.0.0`)으로 바꿉니다.
-- `--regress`는 `tools/dialect/pg-regress`(`PG_REGRESS_DIR`)의 PostgreSQL 회귀 테스트(REL_16_STABLE의 `boolean`, `int2`, `int4`, `int8`, `text`, `varchar`, `case`, `strings`, PostgreSQL 라이선스는 그 디렉터리의 `COPYRIGHT`)를 pg_regress처럼(`psql -X -a -q`, `PGTZ=PST8PDT`, `PGDATESTYLE='Postgres, MDY'`) xqlite에서만 돌리고 `expected/TEST.out`과 문장별로 비교합니다. `setup.sql`(`test_setup.sql`의 `INT4_TBL` 등)이 테스트마다 먼저 돕니다. 출력이 있는 문장 중 기대 출력과 같은 것의 비율과, 다른 것의 세 가지 분류를 찍습니다.
+- psql을 돌리는 명령은 `PG_WIRE_EXEC`(주면 모든 모드에서 그것을, 그 뒤에 `sh -c "psql ... 2>&1"`; `--live`·`--record`의 기본은 `podman exec -i xq-pg`), psql이 xqlite를 찾는 호스트는 `PG_WIRE_HOST`(기본 `host.containers.internal`, 호스트의 psql이면 `127.0.0.1`), xqlite가 받는 주소는 `PG_WIRE_LISTEN`(기본 `0.0.0.0`, 호스트의 psql이면 `127.0.0.1`)으로 바꿉니다.
+- `--regress`는 `tools/dialect/pg-regress`(`PG_REGRESS_DIR`)의 PostgreSQL 회귀 테스트(REL_18_STABLE의 `boolean`, `int2`, `int4`, `int8`, `text`, `varchar`, `case`, `strings`, PostgreSQL 라이선스는 그 디렉터리의 `COPYRIGHT`)를 pg_regress처럼(`psql -X -a -q`, `PGTZ=PST8PDT`, `PGDATESTYLE='Postgres, MDY'`) xqlite에서만 돌리고 `expected/TEST.out`과 문장별로 비교합니다. `setup.sql`(`test_setup.sql`의 `INT4_TBL` 등)이 테스트마다 먼저 돕니다. 출력이 있는 문장 중 기대 출력과 같은 것의 비율과, 다른 것의 세 가지 분류를 찍습니다. psql은 기본 모드처럼 고르고(`--live`이면 `xq-pg` 안의 것), 서버는 쓰지 않습니다.
+- 회귀 테스트는 따로 기록하지 않고 PostgreSQL이 테스트와 함께 내놓는 `expected/*.out`을 그대로 기준으로 씁니다. 그 파일이 곧 pg_regress가 서버를 판정하는 기준이고 같은 브랜치(REL_18_STABLE)의 `sql/*.sql`과 짝이므로, 다시 기록하면 같은 것을 한 벌 더 두는 셈입니다. 게다가 기록하려면 pg_regress가 하는 대로(데이터베이스 `regression`, 앞 테스트들이 만든 개체, 시간대·날짜 형식) 서버를 맞춰야 하는데, 받은 파일은 그럴 필요가 없습니다. 고른 8개 테스트에는 로캘·플랫폼별 대체 기대 파일(`*_1.out`)이 없습니다.
 
 ## WebAssembly
 
@@ -500,7 +533,7 @@ wasm 경로는 `--wasm`, `XQ_WASM`, 기본값 `zig-out/bin/xqlite.wasm` 순으�
 
 ## C API
 
-`zig build test-capi`(`zig build check`에 포함)는 `tools/capi/capi_test.c`를 `include/sqlite3.h`와 함께 컴파일해 정적·공유 `libxqlite3`에 각각 링크하고 돌립니다. 실패한 검사를 출력하고 0이 아닌 코드로 끝납니다. 이 프로그램은 SQLite 아말감에 링크해도 xqlite 확장과 문서에 적은 차이 말고는 모두 통과하므로, 기대값은 SQLite의 동작입니다.
+`zig build test-capi`(`zig build check`에 포함)는 `tools/capi/capi_test.c`를 `include/sqlite3.h`와 함께 컴파일해 정적·공유 `libxqlite3`에 각각 링크하고 돌립니다. 인자로 테스트용 확장(`tools/capi/ext_test.c`)과 sqlite3용 확장(`libxqlite_ext`)을 받아, 둘 다 `sqlite3_load_extension()`으로 올려 봅니다(`test_b_ext()`, `test_b_xqlite_ext()`). 실패한 검사를 출력하고 0이 아닌 코드로 끝납니다. 이 프로그램은 SQLite 아말감에 링크해도 xqlite 확장과 문서에 적은 차이 말고는 모두 통과하므로, 기대값은 SQLite의 동작입니다.
 
 ```sh
 zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test.c xqstub.c "$AMALGAMATION/sqlite3.c" -lpthread -lm

@@ -95,6 +95,26 @@ pub fn bind(comptime f: anytype, comptime extra: anytype) StepFn {
     }.call;
 }
 
+/// The StepFn of a variadic function (-1 arguments) that needs `min` of
+/// them: fewer is SQLite's "wrong number of arguments" error, as when the
+/// call is compiled, rather than an argument read past the end. The
+/// frontends call these functions right; a hand-written call in SQL or a
+/// sqlite3 with the extension (docs/extension.md) may not.
+pub fn atLeast(comptime min: usize, comptime f: StepFn) StepFn {
+    return struct {
+        fn call(ctx: *Context, argv: []*Mem) void {
+            if (argv.len < min) return wrongArgs(ctx);
+            @call(.always_inline, f, .{ ctx, argv });
+        }
+    }.call;
+}
+
+fn wrongArgs(ctx: *Context) void {
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "wrong number of arguments to function {s}()", .{ctx.func.name}) catch "wrong number of arguments";
+    api.resultError(ctx, msg);
+}
+
 /// The StepFn calling `f(&c, argv)` with `c` a `Call` (`Call.init(ctx)`,
 /// deinit() after `f` returns): for the implementations that work in a
 /// per-call arena, which `f` reaches the context through (c.ctx). The

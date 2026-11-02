@@ -1,0 +1,1540 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 3c8faf126fe24e44 names fold to lower case, quoted ones keep it
+id|Camel
+1|a
+(1 row)
+tablename
+mixed
+(1 row)
+==== case e2ec1c4fb7f247b0 result column names
+a|b|?column?|count|upper|a|int4|case|coalesce|X
+1|x|2|1|X|1|1|1|1|1
+(1 row)
+b|exists|?column?|two
+x|1|lit|2
+(1 row)
+==== case b33c414a9483bbd1 strings and dollar quoting
+?column?|?column?|?column?|?column?|?column?|length
+it's|a	b|dollar 'q'|a$$b|ab|5
+(1 row)
+==== case 6a5dc8a5826e75e3 ORDER BY puts NULLs last ascending, first descending
+id
+3
+5
+1
+2
+4
+(5 rows)
+id
+2
+4
+1
+5
+3
+(5 rows)
+id
+2
+4
+3
+5
+1
+(5 rows)
+id
+1
+5
+3
+2
+4
+(5 rows)
+id|v
+4|
+3|1
+(2 rows)
+id
+2
+3
+(2 rows)
+==== case 88b69d5e674feaa7 joins
+name|title
+ann|eng
+bob|eng
+cid|ops
+dan|
+(4 rows)
+name|title
+ann|eng
+bob|eng
+cid|ops
+|empty
+(4 rows)
+count
+5
+(1 row)
+count
+12
+(1 row)
+count
+3
+(1 row)
+title
+ops
+(1 row)
+==== case 8efff81e08b1e9b2 grouping and aggregates
+g|count|sum|min|max
+1|2|30|10|20
+2|1|5|5|5
+|1|7|7|7
+(3 rows)
+g|sum
+1|30
+|7
+(2 rows)
+count|count|string_agg
+3|2|20,10,7,5
+(1 row)
+bool_and|bool_or|every
+1|1|0
+(1 row)
+==== case 77d6b7dc7f8c2671 set operations and VALUES
+?column?
+1
+(1 row)
+?column?
+3
+(1 row)
+?column?
+1
+1
+(2 rows)
+column1|column2
+1|a
+2|b
+(2 rows)
+n|s
+2|y
+(1 row)
+a
+1
+2
+(2 rows)
+==== case f1ea97625a127ede WITH and recursion
+sum|count
+15|5
+(1 row)
+x|y
+1|2
+(1 row)
+==== case cab5d5c903f0ce95 window functions
+id|row_number|sum|rank
+1|1|30|4
+2|2|30|3
+3|1|30|2
+4|2|30|1
+(4 rows)
+id|sum
+1|10
+2|30
+3|50
+4|30
+(4 rows)
+id|lag|lead
+1||20
+2|10|30
+3|20|
+4|30|0
+(4 rows)
+==== case 5ea5ceee322c5c1a predicates
+int4|int4|int4|int4
+1|1|1|1
+(1 row)
+int4|int4|int4|int4
+1|0|1|1
+(1 row)
+int4|int4|int4|int4|int4
+1|0|1|1|1
+(1 row)
+int4|int4|int4
+1|1|1
+(1 row)
+==== case 1ea3bf77d97bd381 CASE, COALESCE, NULLIF, GREATEST, LEAST
+case|case
+two|
+(1 row)
+coalesce|nullif|nullif|greatest|least
+3||1|3|1
+(1 row)
+==== case b8af65388eb314b0 arithmetic
+?column?|?column?|?column?|?column?|?column?|?column?|mod|abs|int4
+14|20|3|-3|1|-1|-1|3|1
+(1 row)
+==== case 2f968651ef6b4e7d casts
+?column?|int8|?column?|varchar|bpchar|date|time
+43|7|42x|abc|a|2024-03-05|10:11:12
+(1 row)
+int4|int4|int4|int4
+1|0|1|1
+(1 row)
+==== case e58df64977d533dd string functions
+substring|substring|position|strpos
+ell|llo|3|4
+(1 row)
+btrim|btrim|ltrim|btrim|ltrim|rtrim
+x|a|a|a|a|a
+(1 row)
+left|left|right|right|char_length|octet_length
+he|hel|lo|llo|2|2
+(1 row)
+concat|concat_ws|upper|lower|repeat|reverse
+a1|a-b|ABC|abc|ababab|cba
+(1 row)
+lpad|?column?|split_part|replace|ascii|chr
+007|ab  ||b|a-b-|65|B
+(1 row)
+==== case 815c521a8a499b19 dates
+extract|extract|extract|extract|extract
+2024|3|5|2|65
+(1 row)
+int4|int4
+1|1
+(1 row)
+==== case 46c1d21533ea4813 INSERT, RETURNING, ON CONFLICT
+k|?column?
+a|10
+b|20
+(2 rows)
+k|v
+c|0
+(1 row)
+v
+6
+(1 row)
+v
+(0 rows)
+k
+e
+(1 row)
+k|v
+a|6
+a2|106
+b|2
+b2|102
+c|0
+e|9
+(6 rows)
+==== case 457d2f4561c4b402 UPDATE and DELETE
+k|v
+b|3
+c|4
+(2 rows)
+k|v
+a|1001
+c|9
+(2 rows)
+k|v
+b!|0
+(1 row)
+k
+a
+(1 row)
+k|v
+b!|0
+(1 row)
+k|v
+c|9
+(1 row)
+==== case 494ebf9180053a77 transactions and savepoints
+x
+1
+3
+(2 rows)
+==== case eb14d394088b27f3 serial and identity
+id
+1
+2
+(2 rows)
+id
+3
+(1 row)
+id
+10
+(1 row)
+id
+4
+(1 row)
+id|v
+5|
+(1 row)
+currval|lastval
+5|5
+(1 row)
+id|k
+100|1
+110|2
+(2 rows)
+id|k
+120|50
+(1 row)
+ERROR:  cannot insert a non-DEFAULT value into column "id"
+DETAIL:  Column "id" is an identity column defined as GENERATED ALWAYS.
+HINT:  Use OVERRIDING SYSTEM VALUE to override.
+ERROR:  column "id" can only be updated to DEFAULT
+DETAIL:  Column "id" is an identity column defined as GENERATED ALWAYS.
+id
+1
+(1 row)
+column_name|data_type|is_identity|identity_generation
+id|bigint|YES|ALWAYS
+k|integer|YES|BY DEFAULT
+v|text|NO|
+(3 rows)
+==== case c4b882bec2c5ce46 sequences
+nextval|nextval|currval
+5|10|10
+(1 row)
+nextval
+15
+(1 row)
+ERROR:  nextval: reached maximum value of sequence "seq" (15)
+ERROR:  relation "seq" already exists
+ERROR:  sequence "seq" does not exist
+==== case a8566475731281d9 strict types
+i2|i4|vc|b|int4
+1|2|abc|1|1
+(1 row)
+column_name|data_type|character_maximum_length|numeric_precision|numeric_scale
+i2|smallint||16|0
+i4|integer||32|0
+vc|character varying|3||
+b|boolean|||
+n|numeric||6|2
+(5 rows)
+==== case cbb1066a82ee8d36 DDL objects
+id|upper
+1|A
+(1 row)
+id|upper
+1|A
+(1 row)
+indexname
+p_code_idx
+p_code_idx1
+p_code_key
+(3 rows)
+viewname
+pv
+(1 row)
+column_name
+id
+code
+memo
+(3 rows)
+count
+0
+(1 row)
+==== case d682dc03fab6bb0c errors
+ERROR:  relation "nosuch" does not exist
+LINE 1: SELECT * FROM nosuch;
+                      ^
+ERROR:  column "nosuch" does not exist
+LINE 1: SELECT nosuch FROM t;
+               ^
+ERROR:  column reference "a" is ambiguous
+LINE 1: SELECT a FROM t, u;
+               ^
+ERROR:  relation "t" already exists
+ERROR:  syntax error at or near ";"
+LINE 1: SELECT 1 +;
+                  ^
+ERROR:  syntax error at or near "FORM"
+LINE 1: SELECT * FORM t;
+                 ^
+==== case 5c37f58a24f1df79 constraint violations
+ERROR:  duplicate key value violates unique constraint "p_pkey"
+DETAIL:  Key (id)=(1) already exists.
+ERROR:  duplicate key value violates unique constraint "p_code_key"
+DETAIL:  Key (code)=(a) already exists.
+ERROR:  duplicate key value violates unique constraint "c_q_idx"
+DETAIL:  Key (q)=(1) already exists.
+ERROR:  null value in column "n" of relation "c" violates not-null constraint
+DETAIL:  Failing row contains (2, 1, null, 2).
+ERROR:  null value in column "n" of relation "c" violates not-null constraint
+DETAIL:  Failing row contains (1, 1, null, 1).
+ERROR:  new row for relation "c" violates check constraint "c_q_check"
+DETAIL:  Failing row contains (2, 1, 1, 0).
+ERROR:  new row for relation "c" violates check constraint "c_q_max"
+DETAIL:  Failing row contains (2, 1, 1, 200).
+ERROR:  insert or update on table "c" violates foreign key constraint "c_pid_fkey"
+DETAIL:  Key (pid)=(9) is not present in table "p".
+ERROR:  insert or update on table "c" violates foreign key constraint "c_pid_fkey"
+DETAIL:  Key (pid)=(9) is not present in table "p".
+ERROR:  update or delete on table "p" violates foreign key constraint "c_pid_fkey" on table "c"
+DETAIL:  Key (id)=(1) is still referenced from table "c".
+ERROR:  update or delete on table "p" violates foreign key constraint "c_pid_fkey" on table "c"
+DETAIL:  Key (id)=(1) is still referenced from table "c".
+count
+1
+(1 row)
+==== case c64cbfaa14dba573 arithmetic errors and integer casts
+?column?|?column?|int4|int4|int4|int8
+3|1|3|-3|42|3
+(1 row)
+ERROR:  division by zero
+ERROR:  division by zero
+ERROR:  bigint out of range
+ERROR:  invalid input syntax for type integer: "2.5"
+LINE 1: SELECT '2.5'::int;
+               ^
+ERROR:  smallint out of range
+ERROR:  integer out of range
+==== case 9d75e37bab231527 integer arithmetic in the range of its type
+?column?|?column?|?column?|?column?|?column?
+2147483647|-2147483648|2147483648|32768|4294967296
+(1 row)
+?column?|?column?|?column?|?column?|sum
+2147483648|2147516414|65534|2147483646|2147483647
+(1 row)
+==== case ae34ad2d74ea1c8a integer arithmetic out of the range of its type (errors)
+ERROR:  integer out of range
+ERROR:  integer out of range
+ERROR:  integer out of range
+ERROR:  integer out of range
+ERROR:  integer out of range
+ERROR:  smallint out of range
+ERROR:  integer out of range
+ERROR:  integer out of range
+ERROR:  smallint out of range
+ERROR:  integer out of range
+==== case 60d119372ac93cca strings stored into boolean and numeric columns
+id|b|n
+1|1|1.50
+2|1|7.00
+3|1|-20.00
+4|0|0.50
+5|1|12.25
+(5 rows)
+==== case 84379301c1c1f9b0 strings stored into boolean and numeric columns (errors)
+ERROR:  invalid input syntax for type boolean: "maybe"
+LINE 1: INSERT INTO sb (b) VALUES ('maybe');
+                                   ^
+ERROR:  invalid input syntax for type boolean: "o"
+LINE 1: INSERT INTO sb (b) VALUES ('o');
+                                   ^
+ERROR:  invalid input syntax for type numeric: "1.2.3"
+LINE 1: INSERT INTO sb (n) VALUES ('1.2.3');
+                                   ^
+ERROR:  invalid input syntax for type numeric: "x"
+LINE 1: INSERT INTO sb (id, n) VALUES (1, 'x');
+                                          ^
+==== case a48b64bf1387e0c2 column values as psql shows them
+b|n|n0|m|ts
+t|1.50|3|2.5|2024-01-02 03:04:05+00
+f|220.00|4|3|
+(2 rows)
+?column?|?column?|?column?|?column?|numeric|numeric|x
+f|f|f|t|2.50|2.000|f
+f|f|f|t|2.50|2.000|t
+t|t|f|f|2.50|2.000|f
+t|t|f|f|2.50|2.000|t
+(4 rows)
+==== case 33adcc742461291e the scale of numeric literals, arithmetic and aggregates
+?column?|?column?|?column?|?column?|?column?|round
+1.50|0.3|2.50|3.375|1000|2.57
+(1 row)
+?column?|?column?|?column?|round
+3.50|2.2500|0.50|1.5
+5.25|5.0625|1.25|2.3
+(2 rows)
+sum|max|?column?
+3.75|2.25|4.75
+(1 row)
+==== case c8d36c1170448143 more queries
+cust|total
+c|
+a|40
+b|25
+(3 rows)
+c|count
+a|2
+b|2
+c|1
+(3 rows)
+cust
+c
+b
+a
+(3 rows)
+m|count
+1|2
+2|2
+|1
+(3 rows)
+id|amount
+2|20
+3|30
+(2 rows)
+cust|max
+a|30
+b|
+c|
+(3 rows)
+cust|n
+a|2
+b|2
+(2 rows)
+id|id
+1|3
+2|5
+(2 rows)
+id|running|?column?
+1|10|t
+2|20|t
+3|40|t
+4||t
+5|25|t
+(5 rows)
+id|first_value|ntile
+1|3|1
+2|5|1
+3|3|1
+4|4|2
+5|5|2
+(5 rows)
+cust|string_agg
+a|1+3
+b|2+5
+c|4
+(3 rows)
+count
+1
+(1 row)
+id
+4
+5
+(2 rows)
+id
+3
+2
+1
+(3 rows)
+id
+5
+1
+(2 rows)
+?column?
+a:10
+b:20
+a:30
+c:-
+b:5
+(5 rows)
+==== case e9616f46391407ce more expressions
+?column?|?column?|?column?|?column?|?column?
+5|5|2|2|2
+(1 row)
+?column?|?column?|?column?
+a12.5|t|t
+(1 row)
+case|case
+2|2
+(1 row)
+?column?|?column?
+t|t
+(1 row)
+?column?|?column?|int4|int4
+||0|1
+(1 row)
+?column?
+t
+(1 row)
+x|even
+1|f
+2|t
+3|f
+4|t
+(4 rows)
+?column?
+POSTsql
+(1 row)
+greatest|least
+banana|a
+(1 row)
+?column?|coalesce
+t|7
+(1 row)
+==== case 2c8bcf44830afcd4 more DML
+sku|qty|updated
+a|6|1
+b|2|0
+c|1|0
+(3 rows)
+sku|qty
+a|5
+(1 row)
+updated
+0
+0
+0
+(3 rows)
+sku
+(0 rows)
+sku
+a
+(1 row)
+sku|qty
+x1|1
+x2|2
+x3|3
+(3 rows)
+count|sum
+6|9
+(1 row)
+==== case a395ae376bb5c1fb information_schema
+table_name|table_type
+adults|VIEW
+person|BASE TABLE
+(2 rows)
+column_name|ordinal_position|is_nullable|data_type|character_maximum_length|numeric_precision|numeric_scale|udt_name
+id|1|NO|integer||32|0|int4
+name|2|NO|character varying|40|||varchar
+born|3|YES|date||||date
+score|4|YES|numeric||5|1|numeric
+active|5|YES|boolean||||bool
+tags|6|YES|text||||text
+(6 rows)
+sequence_name|start_value|increment
+person_id_seq|1|1
+(1 row)
+tablename
+person
+(1 row)
+==== case 97697800340d2173 CTEs and correlated subqueries
+id|depth
+1|0
+2|1
+3|2
+4|2
+(4 rows)
+name|boss
+ceo|
+vp|ceo
+dev|vp
+qa|vp
+(4 rows)
+name
+ceo
+vp
+(2 rows)
+count
+0
+(1 row)
+count
+0
+(1 row)
+==== case 43ceef4e5390600a schemas: qualified names in queries and DML
+id|amt
+1|10
+2|20
+(2 rows)
+id|amt
+1|10
+2|20
+(2 rows)
+id|amt
+1|90
+2|90
+(2 rows)
+id
+2
+(1 row)
+amt
+11
+(1 row)
+id
+2
+(1 row)
+count
+1
+(1 row)
+v
+6
+(1 row)
+ERROR:  relation "orders" already exists
+ERROR:  relation "sales.missing" does not exist
+LINE 1: SELECT * FROM sales.missing;
+                      ^
+count
+0
+(1 row)
+==== case 2868b8f25f91f90f schemas: CREATE SCHEMA and DROP SCHEMA errors
+ERROR:  schema "s1" already exists
+ERROR:  unacceptable schema name "pg_foo"
+DETAIL:  The prefix "pg_" is reserved for system schemas.
+ERROR:  schema "public" already exists
+ERROR:  role "nobody" does not exist
+ERROR:  schema "nosuch" does not exist
+LINE 1: CREATE TABLE nosuch.t (a int);
+                     ^
+ERROR:  relation "nosuch.t" does not exist
+LINE 1: SELECT * FROM nosuch.t;
+                      ^
+ERROR:  schema "nosuch" does not exist
+ERROR:  cannot drop schema s1 because other objects depend on it
+DETAIL:  table s1.t depends on schema s1
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+ERROR:  cannot drop schema s1 because other objects depend on it
+DETAIL:  table s1.t depends on schema s1
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+ERROR:  relation "s1.t" does not exist
+LINE 1: SELECT * FROM s1.t;
+                      ^
+nspname
+s2
+(1 row)
+schema_name|schema_owner
+public|postgres
+s2|postgres
+(2 rows)
+==== case 3e0c9427c7e827b5 schemas: search_path
+search_path
+"$user", public
+(1 row)
+current_schema|current_schemas
+public|{public}
+(1 row)
+x
+3
+(1 row)
+search_path
+b, a
+(1 row)
+current_schema|current_schemas|current_schemas
+b|{b,a}|{pg_catalog,b,a}
+(1 row)
+x
+2
+(1 row)
+x
+1
+(1 row)
+table_schema|table_name
+a|u
+(1 row)
+y
+5
+(1 row)
+x|y
+1|5
+(1 row)
+?column?
+t
+(1 row)
+ERROR:  no schema has been selected to create in
+LINE 1: CREATE TABLE w (z int);
+                     ^
+ERROR:  relation "t" does not exist
+LINE 1: SELECT x FROM t;
+                      ^
+x
+3
+(1 row)
+search_path
+b
+(1 row)
+x
+2
+(1 row)
+search_path
+"B", "$user", public
+(1 row)
+current_setting
+"B", "$user", public
+(1 row)
+search_path
+"$user", public
+(1 row)
+ERROR:  unrecognized configuration parameter "nosuch_param"
+ERROR:  unrecognized configuration parameter "nosuch_param"
+==== case 5630b3fe7bc2a8a4 schemas: sequences and serial
+id
+1
+2
+(2 rows)
+nextval|nextval
+10|11
+(1 row)
+currval
+11
+(1 row)
+nextval
+12
+(1 row)
+id
+3
+(1 row)
+sequencename
+counter
+items_id_seq
+(2 rows)
+sequence_schema|sequence_name
+app|counter
+app|items_id_seq
+(2 rows)
+ERROR:  relation "app.counter" does not exist
+LINE 1: SELECT nextval('app.counter');
+                       ^
+ERROR:  relation "items_id_seq" already exists
+==== case 1b46720d289c648f schemas: views, indexes and ALTER TABLE
+name
+ann
+(1 row)
+name
+ann
+(1 row)
+schemaname|tablename|indexname
+hr|emp|emp_dept
+hr|emp|emp_name_idx
+(2 rows)
+schemaname|viewname
+hr|names
+public|names2
+(2 rows)
+table_schema|table_name|table_type
+hr|emp|BASE TABLE
+hr|names|VIEW
+(2 rows)
+column_name|data_type
+id|integer
+name|text
+dept|integer
+(3 rows)
+ERROR:  column "salary" of relation "emp" already exists
+tablename
+staff
+(1 row)
+id|salary
+1|
+2|
+(2 rows)
+indexname
+emp_name_idx
+(1 row)
+ERROR:  table "nosuch" does not exist
+count
+0
+(1 row)
+==== case ca5a236a1703cacc schemas: pg_namespace, pg_class and DROP SCHEMA CASCADE
+ERROR:  cannot drop desired object(s) because other objects depend on them
+DETAIL:  table d1.tab depends on schema d1
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+relname|relkind
+s|S
+tab|r
+(2 rows)
+count
+0
+(1 row)
+==== case 8894a61921351c7b schemas: more errors and names
+ERROR:  schema "nosuch" does not exist
+ERROR:  cannot create temporary relation in non-temporary schema
+LINE 1: CREATE TEMP TABLE s.tt (a int);
+                          ^
+ERROR:  schema "nosuch" does not exist
+ERROR:  relation "nosuch.t" does not exist
+LINE 1: INSERT INTO nosuch.t VALUES (1);
+                    ^
+a
+1
+(1 row)
+current_schema
+public
+(1 row)
+nextval|nextval|nextval
+1|2|3
+(1 row)
+ERROR:  relation "public.q" does not exist
+LINE 1: SELECT nextval('public.q');
+                       ^
+a
+1
+(1 row)
+a
+1
+(1 row)
+client_encoding
+UTF8
+(1 row)
+application_name
+xq
+(1 row)
+a
+7
+(1 row)
+table_schema
+Mixed
+(1 row)
+search_path
+"Mixed"
+(1 row)
+a
+7
+(1 row)
+==== case 50e38e4081dce992 json: json keeps its text, jsonb is normalized
+jsonb|json
+{"a": 3, "b": 1}|{"b":1,  "a":2, "b":3}
+(1 row)
+jsonb|jsonb|jsonb|jsonb|jsonb|jsonb|jsonb|jsonb
+100|1.50|0|0.0015|125|"aé\n"|[]|{}
+(1 row)
+jsonb
+{"a": 3, "b": 2, "aa": 1, "ab": 4}
+(1 row)
+text|text|jsonb
+{"a": 1}|{"a":1}|{"a": 1}
+(1 row)
+==== case ae6541997f0213cc json: json keeps its text, jsonb is normalized (errors)
+ERROR:  invalid input syntax for type json
+LINE 1: SELECT '{'::jsonb;
+               ^
+DETAIL:  The input string ended unexpectedly.
+CONTEXT:  JSON data, line 1: {
+ERROR:  invalid input syntax for type json
+LINE 1: SELECT '[1,]'::json;
+               ^
+DETAIL:  Expected JSON value, but found "]".
+CONTEXT:  JSON data, line 1: [1,]
+ERROR:  invalid input syntax for type json
+LINE 1: SELECT '01'::json;
+               ^
+DETAIL:  Token "01" is invalid.
+CONTEXT:  JSON data, line 1: 01
+ERROR:  unsupported Unicode escape sequence
+LINE 1: SELECT '"\u0000"'::jsonb;
+               ^
+DETAIL:  \u0000 cannot be converted to text.
+CONTEXT:  JSON data, line 1: "\u0000...
+==== case 63f6accc6d43c0df json: -> ->> with keys and indexes
+?column?|?column?|?column?
+2|{"x": 2, "y": 1}|{"y":1,  "x":2}
+(1 row)
+?column?|?column?|?column?|?column?|?column?
+3|1|||
+(1 row)
+?column?|?column?|?column?|?column?
+x||null|true
+(1 row)
+?column?|?column?
+2|2
+(1 row)
+?column?|?column?|?column?|?column?
+|é|"\u00e9"|"é"
+(1 row)
+?column?|?column?
+6|2
+(1 row)
+==== case 2a46eba375b04f03 json: #> #>> paths
+?column?|?column?|?column?
+2|[1,2]|2
+(1 row)
+?column?|?column?|?column?|?column?
+{"a": {"b": [1, 2]}}|||s
+(1 row)
+==== case 62e36a3990c9a774 json: #> #>> paths (errors)
+ERROR:  malformed array literal: "nope"
+LINE 1: SELECT '{"a":1}'::jsonb #> 'nope';
+                                   ^
+DETAIL:  Array value must start with "{" or dimension information.
+==== case 9c1675636f74f324 json: containment and existence
+?column?|?column?|?column?
+t|t|f
+(1 row)
+?column?|?column?|?column?|?column?|?column?
+t|t|f|f|t
+(1 row)
+?column?|?column?|?column?|?column?
+t|t|t|f
+(1 row)
+?column?|?column?|?column?|?column?
+t|t|f|f
+(1 row)
+==== case 1e802be7d4933ced json: || - #-
+?column?|?column?|?column?|?column?|?column?|?column?
+{"a": 1, "b": 2}|{"a": 1, "b": 2}|[1, 2]|[1, 2]|[{"a": 1}, 2]|[1, 2, 3]
+(1 row)
+?column?|?column?|?column?|?column?|?column?|?column?
+{"b": 2}|["b"]|[1, 3]|[1, 2]|[1, 2, 3]|{"b": 2}
+(1 row)
+?column?|?column?|?column?|?column?
+{"a": {"c": 2}}|[1, [3]]|{"a": 1}|{"a": 1}
+(1 row)
+==== case 543e2a825176bd08 json: || - #- (errors)
+ERROR:  cannot delete from object using integer index
+ERROR:  cannot delete from scalar
+ERROR:  cannot delete path in scalar
+==== case 5e49a80637821eae json: jsonb comparison and order
+?column?|?column?|?column?|?column?
+t|f|t|t
+(1 row)
+?column?|?column?|?column?|?column?|?column?
+t|t|t|t|t
+(1 row)
+j
+null
+"a"
+"b"
+9.5
+10
+false
+true
+[3]
+[1, 2]
+{}
+{"a": 1}
+{"a": 1, "b": 2}
+(12 rows)
+j
+{"a": 1, "b": 2}
+{"a": 1}
+{}
+(3 rows)
+count
+12
+(1 row)
+==== case e4324d39066c757c json: building functions
+jsonb_build_object|json_build_object|json_build_object
+{"a": 1, "b": 2, "c": null, "d": "x"}|{"a" : 1, "b" : "x", "c" : 1.5}|{}
+(1 row)
+json_build_array|jsonb_build_array|jsonb_build_array
+[1, "a", null, true]|[1, {"z": 1}, {"z": 1}, "{\"z\":1}"]|[]
+(1 row)
+json_build_object|json_build_object
+{"a" : {"x" :  1}, "b" : {"y": 2}}|{"1" : 2}
+(1 row)
+to_json|to_jsonb|to_json|to_jsonb|to_json|to_jsonb
+"a\"b\\c"|42|true|{"a": 1}||"x"
+(1 row)
+json_object|jsonb_object|json_object|jsonb_object
+{"a" : "1", "b" : "2"}|{"a": "1", "b": null}|{"a" : "1", "b" : "2"}|{"a": "2", "b": "1"}
+(1 row)
+array_to_json|array_to_json|array_to_json|to_json|json_build_object
+[1,2,3]|["a","b"]|[1,2]|["x",null]|{"k" : [1,2]}
+(1 row)
+==== case e466be58d071c0ab json: building functions (errors)
+ERROR:  argument list must have even number of elements
+HINT:  The arguments of json_build_object() must consist of alternating keys and values.
+ERROR:  null value not allowed for object key
+ERROR:  argument 1: key must not be null
+ERROR:  array must have even number of elements
+==== case dec2f376d31bc4b9 json: processing functions
+jsonb_typeof|json_typeof|jsonb_typeof|jsonb_typeof|jsonb_typeof|json_typeof
+array|object|string|number|boolean|null
+(1 row)
+json_array_length|jsonb_array_length
+3|0
+(1 row)
+json_extract_path|jsonb_extract_path_text|jsonb_extract_path
+20|x|
+(1 row)
+json_strip_nulls|jsonb_strip_nulls
+{"a":1,"c":[1,null,{}]}|{"a": 1, "c": {}}
+(1 row)
+jsonb_pretty
+{
+    "a": [
+        1,
+        2,
+        {
+            "x": {
+            }
+        }
+    ],
+    "b": {
+    },
+    "c": [
+    ]
+}
+(1 row)
+jsonb_pretty
+1
+(1 row)
+jsonb_pretty|jsonb_pretty|jsonb_pretty
+[
+]|{
+}|[
+    [
+    ]
+]
+(1 row)
+row_to_json
+{"a":1,
+ "b":"x"}
+(1 row)
+array_to_json
+[1,
+ 2]
+(1 row)
+json_agg
+[[1,2], 
+ [3]]
+(1 row)
+json_agg
+[{"a":1}, [2]]
+(1 row)
+==== case 445a1f43f99563e6 json: processing functions (errors)
+ERROR:  cannot get array length of a non-array
+ERROR:  cannot get array length of a scalar
+==== case a783602d378fdec7 json: jsonb_set jsonb_insert jsonb_set_lax
+jsonb_set|jsonb_set|jsonb_set|jsonb_set
+{"a": 1, "b": 2}|{"a": 1}|{"a": {"b": [1]}}|[1, "x", 3]
+(1 row)
+jsonb_set|jsonb_set|jsonb_set|jsonb_set
+[1, 2, 9]|[0, 1, 2]|{"a": [null]}|{"a": 1}
+(1 row)
+jsonb_set|jsonb_set
+{"a": 1}|
+(1 row)
+jsonb_insert|jsonb_insert|jsonb_insert|jsonb_insert
+[0, 1, 2]|[1, 0, 2]|{"a": 1, "b": 2}|{"a": [1, 2, 9]}
+(1 row)
+jsonb_set_lax|jsonb_set_lax|jsonb_set_lax
+{}|{"a": null}|{"a": 1}
+(1 row)
+==== case cc1440f6d832c89d json: jsonb_set jsonb_insert jsonb_set_lax (errors)
+ERROR:  cannot set path in scalar
+ERROR:  path element at position 1 is not an integer: "x"
+ERROR:  cannot replace existing key
+HINT:  Try using the function jsonb_set to replace key value.
+ERROR:  JSON value must not be null
+DETAIL:  Exception was raised because null_value_treatment is "raise_exception".
+HINT:  To avoid, either change the null_value_treatment argument or ensure that an SQL NULL is not passed.
+==== case 22776d5186a7b634 json: set-returning functions in FROM
+key|value
+a|"x"
+b|1
+c|{"z": null}
+(3 rows)
+key|value
+b|1
+a|"x"
+b|[1,  2]
+(3 rows)
+k|v
+b|1
+a|x
+c|
+(3 rows)
+key|value
+a|true
+(1 row)
+value
+1
+"a"
+{"x": 1}
+null
+(4 rows)
+value
+1
+a
+
+[2]
+(4 rows)
+jsonb_object_keys
+a
+b
+aa
+(3 rows)
+k
+b
+a
+b
+(3 rows)
+v|n
+10|1
+20|2
+(2 rows)
+?column?
+
+
+(2 rows)
+jsonb_object_keys
+b
+a
+(2 rows)
+==== case aa5982607357b8f9 json: set-returning functions in FROM (errors)
+ERROR:  cannot call jsonb_each on a non-object
+ERROR:  cannot extract elements from an object
+ERROR:  cannot call json_array_elements on a scalar
+ERROR:  cannot call jsonb_object_keys on an array
+ERROR:  cannot deconstruct an array as an object
+ERROR:  cannot call json_array_elements on a non-array
+==== case 3fc0c5d57693814a json: set-returning functions against a table
+id|tag
+1|a
+1|b
+2|c
+(3 rows)
+id|key|value
+1|n|1
+1|tags|["a", "b"]
+2|n|2
+2|tags|["c"]
+3|n|3
+(5 rows)
+id|value
+1|"a"
+1|"b"
+2|"c"
+(3 rows)
+id|jsonb_object_keys
+1|n
+1|tags
+2|n
+2|tags
+3|n
+(5 rows)
+id|k
+1|tags
+2|tags
+(2 rows)
+count
+3
+(1 row)
+==== case 3c79286de143d0af json: records
+a|b|c|e|g
+1|x|{"d": 1}|[1,2]|
+(1 row)
+a|b
+1|x
+2|
+(2 rows)
+a|b|c
+5|q|{"z": [1]}
+(1 row)
+a|b
+1|
+|y
+(2 rows)
+==== case 4b351da1cf63f21d json: records (errors)
+ERROR:  cannot call json_to_recordset on an object
+ERROR:  argument of json_to_recordset must be an array of objects
+ERROR:  cannot call populate_composite on an array
+ERROR:  a column definition list is required for functions returning "record"
+LINE 1: SELECT * FROM json_to_record('{"a":1}');
+                      ^
+==== case 383369fce019727c json: jsonpath
+jsonb_path_query
+3
+4
+(2 rows)
+jsonb_path_query
+5
+(1 row)
+jsonb_path_exists|jsonb_path_match|jsonb_path_query_array|jsonb_path_query_first
+t|t|[2, 3]|3
+(1 row)
+?column?|?column?|?column?|?column?
+t|t||f
+(1 row)
+jsonb_path_query_array|jsonb_path_query_array|jsonb_path_query_array|jsonb_path_query_first
+["x", null]|[1, 2]|["array"]|2
+(1 row)
+jsonb_path_query_array|jsonb_path_exists
+[2, 3]|t
+(1 row)
+jsonb_path_query_array|jsonb_path_query_array|jsonb_path_exists|jsonb_path_query_array|jsonb_path_query_array
+["abc", "a1c"]|["abc", "ABC"]|t|["a.c"]|["color", "colour"]
+(1 row)
+jsonb_path_query_array|jsonb_path_query_array|jsonb_path_query_array|jsonb_path_query_array
+[1, 2]|[{"a": {"b": [1]}}, {"b": [1]}, [1], 1]|[1, 3]|[2, 3]
+(1 row)
+jsonb_path_query
+(0 rows)
+jsonb_path_query|jsonb_path_query|jsonb_path_query|jsonb_path_query|jsonb_path_query
+3.3333333333333333|3.0|1|0.33333333333333333333|1.75
+(1 row)
+?column?|?column?
+f|
+(1 row)
+==== case c0ba9f790511283f json: jsonpath (errors)
+ERROR:  JSON object does not contain key "b"
+ERROR:  syntax error at end of jsonpath input
+LINE 1: SELECT jsonb_path_query('{"a":1}', '$.a +');
+                                           ^
+ERROR:  @ is not allowed in root expressions
+LINE 1: SELECT jsonb_path_query('{"a":1}', '@.a');
+                                           ^
+ERROR:  left operand of jsonpath operator + is not a single numeric value
+ERROR:  single boolean result is expected
+ERROR:  jsonpath member accessor can only be applied to an object
+ERROR:  jsonpath array subscript is out of bounds
+==== case 63b40bd81cb08156 json: IS JSON
+?column?|?column?|?column?|?column?|?column?|?column?|?column?|?column?
+t|f|t|t|t|f|t|
+(1 row)
+j|obj
+[]|f
+nope|f
+{}|t
+(3 rows)
+==== case c2e3fe311a5403a6 json: SQL/JSON constructors
+json_object|json_object|json_object|json_object|json_object
+{"a" : 1, "b" : "x"}|{"a" : null}|{}|{}|{"a": 1}
+(1 row)
+json_array|json_array|json_array|json_array|json_array
+[1, "a"]|[1, null]|[]|[{"a":1}, "{\"a\":1}"]|[1, 2]
+(1 row)
+json_array
+[3, 1, 2]
+(1 row)
+json_arrayagg|json_arrayagg|json_objectagg|json_objectagg
+[1, 3]|[1, null, 3]|{ "a" : 1, "b" : null, "c" : 3 }|{"a": 1, "c": 3}
+(1 row)
+json_arrayagg
+
+(1 row)
+json_array|json_object|json_object|json_array
+|{"a" : {"b":1}}|{"a" : true}|[true, 1.5]
+(1 row)
+==== case c9064b374b54397b json: SQL/JSON constructors (errors)
+ERROR:  duplicate JSON object key value: "a"
+ERROR:  null value not allowed for object key
+ERROR:  duplicate JSON object key value: "a"
+==== case fab9125f5c630ac8 json: aggregates and rows
+json_agg
+[{"id":1,"j":{"a": 2, "b": 1},"k":{"b" : 1},"b":true,"s":"x"}, 
+ {"id":2,"j":{"x": [1, 2]},"k":[1],"b":false,"s":null}]
+(1 row)
+jsonb_agg
+[{"b": true, "j": {"a": 2, "b": 1}, "k": {"b": 1}, "s": "x", "id": 1}, {"b": false, "j": {"x": [1, 2]}, "k": [1], "s": null, "id": 2}]
+(1 row)
+jsonb_agg|json_agg|json_object_agg|jsonb_object_agg
+[{"a": 2, "b": 1}, {"x": [1, 2]}]|["x", null]|{ "1" : true, "2" : false }|{"x": 1}
+(1 row)
+row_to_json
+{"id":1,"j":{"a": 2, "b": 1},"k":{"b" : 1},"b":true,"s":"x"}
+{"id":2,"j":{"x": [1, 2]},"k":[1],"b":false,"s":null}
+(2 rows)
+to_jsonb
+{"b": true, "j": {"a": 2, "b": 1}, "k": {"b": 1}, "s": "x", "id": 1}
+{"b": false, "j": {"x": [1, 2]}, "k": [1], "s": null, "id": 2}
+(2 rows)
+json_build_object
+{"id" : 1, "ok" : true, "j" : {"a": 2, "b": 1}}
+{"id" : 2, "ok" : false, "j" : {"x": [1, 2]}}
+(2 rows)
+json_agg
+
+(1 row)
+row_to_json
+{"id":1,"name":"x"}
+{"id":2,"name":null}
+(2 rows)
+?column?
+[1]!
+(1 row)
+==== case ce12f5460d1689e7 json: aggregates and rows (errors)
+ERROR:  null value not allowed for object key
+ERROR:  operator does not exist: json || json
+LINE 1: SELECT k || k FROM t;
+                 ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: json = json
+LINE 1: SELECT k = k FROM t;
+                 ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+==== case 17c88fcd319df31f json: columns store jsonb normalized
+id|j|k
+1|{"a": 2, "b": 1}|{"b" :  1}
+2|{"a": 2, "z": 1}|
+3|[1, 2]|[1,  2]
+(3 rows)
+id|j
+1|{"a": 2, "b": 1, "c": 3}
+2|{"x": 2, "y": 1}
+3|[1, 2]
+(3 rows)
+id
+1
+(1 row)
+id
+1
+(1 row)
+id
+2
+(1 row)
+id|?column?|?column?|?column?
+1|{"b": 1, "c": 3}||
+2|{"x": 2, "y": 1}|2|
+3|[1, 2]||1
+(3 rows)
+j
+{"m": 1, "n": 2}
+(1 row)
+column_name|data_type
+id|integer
+j|jsonb
+k|json
+(3 rows)
+==== case 111515df50e22de1 json: columns store jsonb normalized (errors)
+j
+{"m": 1, "n": 2}
+(1 row)
+ERROR:  invalid input syntax for type json
+LINE 1: INSERT INTO d (id, j) VALUES (4, '{');
+                                         ^
+DETAIL:  The input string ended unexpectedly.
+CONTEXT:  JSON data, line 1: {
+ERROR:  invalid input syntax for type json
+LINE 1: INSERT INTO d (id, k) VALUES (5, 'x');
+                                         ^
+DETAIL:  Token "x" is invalid.
+CONTEXT:  JSON data, line 1: x
+==== case d2d084d2c655fa10 json: GIN and expression indexes
+id
+1
+(1 row)
+id
+2
+(1 row)
+indexname
+g_doc_idx
+g_name
+g_path
+(3 rows)
+==== case 2df1d16ac2416a6d json: views keep JSON expressions
+id|a|b|has|n|j2
+1|{"b": 1}|1|t|2|{"a": {"b": 1}, "c": 1, "tags": ["x", "y"]}
+(1 row)
+==== case 220f62bdc59ceef4 json: jsonb through a subquery, a CTE and a view
+?column?
+{"a": 1, "b": 2}
+(1 row)
+id|?column?|?column?
+1|{}|1
+2|[1, 2]|
+(2 rows)
+id
+2
+(1 row)
+d
+[1, 2]
+{"a": 1}
+(2 rows)
+?column?
+[{"a": 1}, 3, {"z": 0}]
+[1, 2, 3, {"z": 0}]
+(2 rows)
+==== case 358ce2d55f473e8e json: double precision and numeric numbers
+to_json|to_json|to_json|to_json|to_jsonb|to_json|to_jsonb
+100|1e+20|1e-05|0.30000000000000004|100000000000000000000|1.50|1.50
+(1 row)
+row_to_json
+{"id":1,"f":100,"n":1.50}
+{"id":2,"f":2.5e-07,"n":2.00}
+(2 rows)
+json_agg|json_agg
+[100, 2.5e-07]|[1.50, 2.00]
+(1 row)
+==== case b25390a46be63d91 system catalogs: constraints, indexes, columns, reg* casts
+conname|contype|pg_get_constraintdef
+ct_a_not_null|n|NOT NULL a
+ct_b_check|c|CHECK ((length(b) > 1))
+ct_b_p_key|u|UNIQUE (b, p)
+ct_p_fkey|f|FOREIGN KEY (p) REFERENCES cp(id) ON DELETE CASCADE
+ct_pkey|p|PRIMARY KEY (a)
+(5 rows)
+relname|pg_get_indexdef
+ct_b_p_key|CREATE UNIQUE INDEX ct_b_p_key ON public.ct USING btree (b, p)
+ct_lb|CREATE INDEX ct_lb ON public.ct USING btree (lower(b)) WHERE (a > 5)
+ct_pkey|CREATE UNIQUE INDEX ct_pkey ON public.ct USING btree (a)
+(3 rows)
+attname|format_type|attnotnull|coalesce
+id|integer|1|nextval('cp_id_seq'::regclass)
+name|character varying(20)|1|-
+(2 rows)
+int4|int4|regtype|int4
+1259|23|text|11
+(1 row)
+==== case 2e3ad86e378961a1 date, timestamp and time operators
+a|b|c|d|e
+2024-01-02|2025-01-01|2024-02-29|29|1
+(1 row)
+a|b|c|d
+2024-02-29 00:00:00|2023-02-28 00:00:00|2023-12-31 23:00:00|2024-01-01 10:30:00
+(1 row)
+a|b|c|d
+2024-03-01 10:00:00|2024-01-02 00:00:00|1 day 02:00:00|-1 days -02:00:00
+(1 row)
+a|b|c|d
+10:00:00|2024-01-02 03:04:05.5|01:00:00|01:30:00
+(1 row)
+==== case ddc53a9724ef42ed interval operators and output
+a|b|c|d|e|f
+1 day|1 day 02:00:00|3 years 2 mons|01:30:00|-1 mons|-1 days +01:00:00
+(1 row)
+a|b|c|d|e|f|g
+2 years 2 mons|1 day -02:00:00|2 days|02:00:00|15 days|08:00:00|01:30:00
+(1 row)
+a|b|c
+1|1|1
+(1 row)
+==== case 00607ed3bbb36d42 date, timestamp and interval columns
+id|d|ts|iv
+1|2024-01-31|2024-01-31 10:00:00|1 day
+2|2024-02-29|2024-02-29 00:00:00|02:00:00
+3|2024-03-01|2024-03-01 12:00:00|1 mon
+(3 rows)
+id|a|b|c|e
+1|2024-02-01|2024-02-01 10:00:00|30|2024-01-31 09:00:00
+2|2024-03-02|2024-02-29 02:00:00|59|2024-02-28 23:00:00
+3|2024-03-04|2024-04-01 12:00:00|60|2024-03-01 11:00:00
+(3 rows)
+id
+2
+1
+3
+(3 rows)
+id
+2
+(1 row)
+id|next|neg
+1|2024-02-01|-1 days
+2|2024-03-01|-02:00:00
+(2 rows)
+==== case 72dc5e976977b5f8 operators of no row for their types (errors)
+ERROR:  operator does not exist: date + text
+LINE 1: SELECT date '2024-01-01' + 'abc'::text;
+                                 ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: timestamp without time zone + integer
+LINE 1: SELECT timestamp '2024-01-01' + 1;
+                                      ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: boolean + integer
+LINE 1: SELECT true + 1;
+                    ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: double precision % integer
+LINE 1: SELECT 1.5::float8 % 2;
+                           ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: SELECT 'a' + 1;
+               ^
+ERROR:  date/time field value out of range: "2024-02-30"
+LINE 1: SELECT '2024-02-30'::date;
+               ^
+ERROR:  invalid input syntax for type date: "nope"
+LINE 1: SELECT 'nope'::date + 1;
+               ^
+ERROR:  division by zero
+==== case 2c61811482ad01e4 regular expression operators
+a|b|c|d|e|f
+1|0|1|1|0|1
+(1 row)
+count
+2
+(1 row)
+n
+abc
+(1 row)

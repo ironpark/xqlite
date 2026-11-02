@@ -7,7 +7,8 @@
 //! read the same rows and schema from it: what the schema keeps is SQLite
 //! text that means what the MariaDB statement meant. The expressions here
 //! need no engine function (xq_*), which sqlite3 lacks; those are checked
-//! inside xqlite (src/dialect/mariadb/test.zig).
+//! with the loadable extension by ext.zig, and inside xqlite
+//! (src/dialect/mariadb/test.zig).
 //! (Was tools/interop-mariadb.sh.)
 
 const std = @import("std");

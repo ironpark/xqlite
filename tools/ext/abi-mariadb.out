@@ -1,0 +1,23 @@
+3|-3|3|NULL|NULL|2
+1|0|NULL|6|-2
+||2024-02-29||
+2024-02-29|2024-03-01 00:00:00|2023-02-28|NULL
+60|0|3601
+24|16|NULL
+12|ab|2024-02-29 10:11:12|1.56
+green|127
+true|false|{"a":1}|[1]
+2|[1, 2]|x
+y|3|OBJECT
+x|NULL|1|{"a": 1, "b": 2}|{"a":1}
+a12.5|NULL|ab|007|3|-3|1.23|1.9
+2024/02/29 13:04:05 Thursday February +60|2024-02-29|2024-02-29|5
+1.247219128924647|1.5275252316519465|1.5555555555555554|2.333333333333333
+NULL
+["a","b"]|{"a":"a", "b":"b"}
+-- errors
+line 7: xqlite: unsupported EXTRACT unit
+line 11: Incorrect integer value: 'x' for column `main`.`t`.`c` at row 1
+line 12: Data too long for column 'c' at row 1
+line 13: Column 'c' cannot be null
+line 23: relation "nope" does not exist

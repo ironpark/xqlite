@@ -14,6 +14,7 @@
 //! | date, time, timestamp[tz], interval | TEXT    |                                        |
 //! | uuid                                | TEXT    |                                        |
 //! | json, jsonb                         | TEXT    | json_valid(); jsonb stored normalized  |
+//! | integer[], text[] ... (any T[])     | TEXT    | an array literal (array.zig); stored canonical |
 //!
 //! A check is a named CHECK constraint whose name is PostgreSQL's
 //! message (Hooks.check_errors), so that a violation in the dialect
@@ -40,6 +41,8 @@ pub const Check = enum {
     boolean,
     length,
     json,
+    /// An array literal (xq_pg_array_valid()).
+    array,
 };
 
 pub const Info = struct {
@@ -55,7 +58,14 @@ pub const Error = error{ UnknownType, Array };
 
 /// The storage of declared type `ty`.
 pub fn info(ty: TypeName) Error!Info {
-    if (ty.array) return error.Array;
+    if (ty.array) {
+        // An array of a type there is (serial[] is none).
+        var el = ty;
+        el.array = false;
+        const e = info(el) catch |err| return if (err == error.UnknownType and arrayOnly(ty.name)) .{ .storage = "TEXT", .check = .array } else err;
+        if (e.serial) return error.Array;
+        return .{ .storage = "TEXT", .check = .array };
+    }
     const n = ty.name;
     const table = [_]struct { []const u8, Info }{
         .{ "smallint", .{ .storage = "INTEGER", .check = .smallint_range } },
@@ -83,6 +93,9 @@ pub fn info(ty: TypeName) Error!Info {
         .{ "json", .{ .storage = "TEXT", .check = .json } },
         .{ "jsonb", .{ .storage = "TEXT", .check = .json } },
         .{ "oid", .{ .storage = "INTEGER" } },
+        // The catalog's vectors (`1 2`).
+        .{ "int2vector", .{ .storage = "TEXT" } },
+        .{ "oidvector", .{ .storage = "TEXT" } },
     };
     for (table) |e| if (std.mem.eql(u8, e[0], n)) {
         var r = e[1];
@@ -91,6 +104,14 @@ pub fn info(ty: TypeName) Error!Info {
         return r;
     };
     return error.UnknownType;
+}
+
+/// The element types of no column type of their own that an array may be
+/// of (name[] of the catalog's columns).
+fn arrayOnly(name: []const u8) bool {
+    const names = [_][]const u8{ "name", "regclass", "regtype", "regproc", "char", "aclitem" };
+    for (names) |x| if (std.mem.eql(u8, x, name)) return true;
+    return false;
 }
 
 /// The length limit of varchar(n)/char(n) (char is char(1)).
@@ -110,6 +131,11 @@ pub fn serialBase(name: []const u8) []const u8 {
 /// format_type(): "character varying(20)", "numeric(10,2)",
 /// "timestamp(3) without time zone", "integer" for serial ...
 pub fn format(a: std.mem.Allocator, ty: TypeName) ![]const u8 {
+    if (ty.array) {
+        var el = ty;
+        el.array = false;
+        return std.mem.concat(a, u8, &.{ try format(a, el), "[]" });
+    }
     const n = if (std.mem.endsWith(u8, ty.name, "serial")) serialBase(ty.name) else ty.name;
     if (std.mem.eql(u8, n, "character") and ty.mods.len == 0) return "character(1)";
     if (ty.mods.len == 0) return n;
@@ -127,13 +153,12 @@ pub fn format(a: std.mem.Allocator, ty: TypeName) ![]const u8 {
     return std.mem.concat(a, u8, &.{ n, mods.items });
 }
 
-/// Whether `name[]` may be cast to: an array of these is its text literal
-/// ('{a,b}'), which the JSON operators and functions read (arrays are no
-/// column type).
-pub fn arrayElement(name: []const u8) bool {
-    const names = [_][]const u8{ "text", "character varying", "character", "name", "integer", "smallint", "bigint", "numeric", "real", "double precision" };
-    for (names) |x| if (std.mem.eql(u8, x, name)) return true;
-    return false;
+/// Whether `name[]` may be cast to: an array of a type there is.
+pub fn arrayElement(ty: TypeName) bool {
+    var el = ty;
+    el.array = true;
+    _ = info(el) catch return false;
+    return true;
 }
 
 /// Whether `name` (an array's element) is a number type.
@@ -193,7 +218,7 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     const eql = std.mem.eql;
     if (regOutput(n)) |_| return .{ .func = regInput(n) };
     if (eql(u8, n, "regproc") or eql(u8, n, "regprocedure")) return .{ .func = "xq_pg_regproc" };
-    if (eql(u8, n, "jsonpath") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "uuid")) return .{ .sqlite = "TEXT" };
+    if (eql(u8, n, "jsonpath") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "uuid") or eql(u8, n, "int2vector") or eql(u8, n, "oidvector")) return .{ .sqlite = "TEXT" };
     if (eql(u8, n, "character varying") or eql(u8, n, "character")) {
         if (maxLength(ty)) |len| return .{ .truncate = len };
         return .{ .sqlite = "TEXT" };

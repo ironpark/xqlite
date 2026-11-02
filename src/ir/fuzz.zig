@@ -741,6 +741,185 @@ const Fuzz = struct {
     }
 };
 
+// ===================================================== the extension (ir_ext)
+
+/// Where the `ir_ext` fuzzer finds its programs: $SQLITE3 else
+/// zig-out/bin/sqlite3-ref, and the loadable extension $XQT_EXT (only
+/// that, which `zig build fuzz -- ir_ext --ext PATH` sets: a library of
+/// an older build would differ for no fault of the sources under test).
+/// Null: skipped.
+const ExtTools = struct {
+    sqlite3: []const u8,
+    ext: []const u8,
+
+    fn find(io: std.Io) ?ExtTools {
+        if (!std.process.can_spawn) return null;
+        const ext = std.mem.span(std.c.getenv("XQT_EXT") orelse return null);
+        const shell = "zig-out/bin/sqlite3-ref";
+        const sqlite3: []const u8 = if (std.c.getenv("SQLITE3")) |z| std.mem.span(z) else if (std.Io.Dir.cwd().access(io, shell, .{})) |_| shell else |_| return null;
+        return .{ .sqlite3 = sqlite3, .ext = ext };
+    }
+};
+
+/// SELECT hex(quote(c) || '|' || ...) of the base and generated columns
+/// FROM t in rowid order: one text per row that the sqlite3 shell prints
+/// as xqlite holds it (hex: no NUL or newline in the way).
+fn quotedQuery(a: Allocator, spec: gen.TableSpec) Oom![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, "SELECT hex(");
+    var first = true;
+    for (spec.base) |bc| {
+        try out.print(a, "{s}quote(\"{s}\")", .{ if (first) "" else " || '|' || ", bc.name });
+        first = false;
+    }
+    for (spec.gens) |gc| try out.print(a, "{s}quote(\"{s}\")", .{ if (first) "" else " || '|' || ", gc.name });
+    try out.appendSlice(a, ") FROM t ORDER BY rowid");
+    return out.items;
+}
+
+/// The database file `name` of the connection's memory VFS, written to
+/// `path`.
+fn saveImage(db: *Db, io: std.Io, gpa: Allocator, name: []const u8, path: []const u8) !void {
+    const file = try db.mem.open(name, .{ .read_write = false });
+    defer file.close();
+    const n = try file.fileSize();
+    const bytes = try gpa.alloc(u8, @intCast(n));
+    defer gpa.free(bytes);
+    try file.read(bytes, 0);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+    try db.mem.delete(name, false);
+}
+
+const ExtStats = struct {
+    tables: u32 = 0,
+    /// Tables whose text calls an engine or dialect function (xq_*).
+    engine: u32 = 0,
+    rows: u32 = 0,
+    refused: u32 = 0,
+};
+
+fn extMismatch(f: *Fuzz, what: []const u8, d: Dialect, ddl: []const u8, got: []const u8, want: []const u8) error{Mismatch} {
+    std.debug.print("\nir_ext: {s} differ: table created in {s}\n  seed={d} event={d} (cfg_seed={d} tree_seed={d})\n  table: {s}\n  sqlite3+ext:\n{s}\n  xqlite:\n{s}\n  repro: XQT_EXT=... zig build fuzz -- ir_ext {d} --events {d}\n", .{ what, @tagName(d), f.seed, f.event, f.cfg_seed, f.tree_seed, ddl, got, want, f.seed, f.event + 1 });
+    return error.Mismatch;
+}
+
+/// A table event read by sqlite3 with the extension: for each dialect d,
+/// the table of gen.TableSpec created from the tree in d (CHECKs,
+/// DEFAULTs and generated columns rendered as SQLite text calling engine
+/// functions) and rows inserted as SQLite text in xqlite; then
+///
+///   A  that file in sqlite3+ext: PRAGMA integrity_check is ok and the
+///      stored rows (base and generated columns) are xqlite's;
+///   B  the file emptied, the same INSERTs run by sqlite3+ext: the same
+///      rows are refused (a CHECK, a STRICT type) and the same stored.
+fn extEvent(f: *Fuzz, a: Allocator, tools: ExtTools, stats: *ExtStats) !void {
+    const cfg = (Job{ .kind = .table, .cfg_seed = f.cfg_seed, .seed = f.tree_seed }).config();
+    var prng: std.Random.DefaultPrng = .init(f.tree_seed);
+    var g: gen.Gen = .init(a, prng.random(), &cfg, true);
+    const spec = try g.table();
+    var buf: [96]u8 = undefined;
+    const load = try std.fmt.allocPrint(a, ".load \"{s}\"", .{tools.ext});
+    for (dialects) |d| {
+        const db = try Db.open(f.gpa, f.io);
+        defer db.close(f.gpa);
+        db.useTree(d);
+        const created = try db.run(a, f.job(.table, 0, &buf), &.{});
+        if (created == .err) continue;
+        db.useText(.sqlite);
+        const ddl = blk: {
+            const r = try db.run(a, "SELECT sql FROM sqlite_schema WHERE name = 't'", &.{});
+            break :blk if (r == .rows and r.rows.len == 1 and r.rows[0][0] == .text) r.rows[0][0].text else "?";
+        };
+        var inserts: std.ArrayList(u8) = .empty;
+        var refused: usize = 0;
+        for (0..rows_per_table) |ri| {
+            const row = try Row.of(a, spec, f.tree_seed, ri);
+            var p: int.Parse = .{ .db = db.db, .arena = a };
+            const text = try row.text(&p, spec);
+            try inserts.print(a, "{s};\n", .{text});
+            if (try db.run(a, text, &.{}) == .err) refused += 1;
+        }
+        const q = try quotedQuery(a, spec);
+        const stored = try db.run(a, q, &.{});
+        if (stored == .err) continue;
+        var want: std.ArrayList(u8) = .empty;
+        try want.appendSlice(a, "ok\n");
+        for (stored.rows) |r| try want.print(a, "{s}\n", .{if (r[0] == .text) r[0].text else ""});
+        stats.tables += 1;
+        if (std.mem.indexOf(u8, ddl, "xq_") != null) stats.engine += 1;
+        stats.rows += rows_per_table;
+        stats.refused += @intCast(refused);
+
+        var path_buf: [96]u8 = undefined;
+        // A: the file as xqlite wrote it.
+        try db.exec("VACUUM INTO 'ir-ext-a.db'");
+        const path_a = try std.fmt.bufPrint(&path_buf, ".zig-cache/ir-ext-{d}-{d}.db", .{ f.seed, f.event });
+        try saveImage(db, f.io, f.gpa, "ir-ext-a.db", path_a);
+        {
+            const r = try std.process.run(a, f.io, .{ .argv = &.{ tools.sqlite3, "-cmd", load, path_a, try std.fmt.allocPrint(a, "PRAGMA integrity_check; {s}", .{q}) } });
+            if (!std.mem.eql(u8, r.stdout, want.items) or r.stderr.len > 0) {
+                return extMismatch(f, "the rows xqlite wrote, read by sqlite3+ext,", d, ddl, try std.mem.concat(a, u8, &.{ r.stdout, r.stderr }), want.items);
+            }
+        }
+        // B: sqlite3+ext writes the same rows into the emptied table.
+        try db.exec("DELETE FROM t");
+        try db.exec("VACUUM INTO 'ir-ext-b.db'");
+        try saveImage(db, f.io, f.gpa, "ir-ext-b.db", path_a);
+        {
+            const script = try std.mem.concat(a, u8, &.{ inserts.items, "PRAGMA integrity_check;\n", q, ";\n" });
+            var child = try std.process.spawn(f.io, .{ .argv = &.{ tools.sqlite3, "-cmd", load, path_a }, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
+            var stdin_buf: [4096]u8 = undefined;
+            var w = child.stdin.?.writer(f.io, &stdin_buf);
+            try w.interface.writeAll(script);
+            try w.interface.flush();
+            child.stdin.?.close(f.io);
+            child.stdin = null;
+            var out: std.ArrayList(u8) = .empty;
+            var err: std.ArrayList(u8) = .empty;
+            var rbuf: [4096]u8 = undefined;
+            var ro = child.stdout.?.reader(f.io, &rbuf);
+            try ro.interface.appendRemainingUnlimited(a, &out);
+            var ebuf: [4096]u8 = undefined;
+            var re = child.stderr.?.reader(f.io, &ebuf);
+            try re.interface.appendRemainingUnlimited(a, &err);
+            _ = try child.wait(f.io);
+            var n_err: usize = 0;
+            var it = std.mem.splitScalar(u8, err.items, '\n');
+            while (it.next()) |line| {
+                if (std.mem.indexOf(u8, line, "rror near line") != null) n_err += 1;
+            }
+            if (!std.mem.eql(u8, out.items, want.items) or n_err != refused) {
+                return extMismatch(f, try std.fmt.allocPrint(a, "the rows sqlite3+ext wrote ({d} refused, xqlite {d})", .{ n_err, refused }), d, ddl, try std.mem.concat(a, u8, &.{ out.items, err.items }), want.items);
+            }
+        }
+        try std.Io.Dir.cwd().deleteFile(f.io, path_a);
+    }
+}
+
+/// The `ir_ext` fuzzer (docs/extension.md): the table events of
+/// ir_roundtrip (extEvent()), with sqlite3 and the loadable extension of
+/// $XQT_EXT; skipped without them.
+pub fn extRoundtrip(gpa: Allocator, io: std.Io, seed: u64, events_max: u32) !void {
+    const tools = ExtTools.find(io) orelse {
+        if (!@import("builtin").is_test) std.debug.print("ir_ext: no $XQT_EXT (zig build ext) or sqlite3 ($SQLITE3, zig-out/bin/sqlite3-ref), skipped\n", .{});
+        return;
+    };
+    var prng: std.Random.DefaultPrng = .init(seed);
+    const rand = prng.random();
+    var f: Fuzz = .{ .gpa = gpa, .io = io, .seed = seed, .event = 0, .cfg_seed = 0, .tree_seed = 0 };
+    var stats: ExtStats = .{};
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    for (0..events_max) |i| {
+        if (i % events_per_config == 0) f.cfg_seed = rand.int(u64);
+        f.event = @intCast(i);
+        f.tree_seed = rand.int(u64);
+        _ = arena.reset(.retain_capacity);
+        try extEvent(&f, arena.allocator(), tools, &stats);
+    }
+    if (!@import("builtin").is_test) std.debug.print("ir_ext: {d} tables ({d} calling xq_* functions), {d} rows ({d} refused) read and written by sqlite3+ext\n", .{ stats.tables, stats.engine, stats.rows, stats.refused });
+}
+
 /// SELECT the base and generated columns FROM t.
 fn storedQuery(a: Allocator, spec: gen.TableSpec) Oom![]const u8 {
     var out: std.ArrayList(u8) = .empty;

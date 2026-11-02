@@ -8,8 +8,8 @@
 //! (in the SQLite dialect) must read the same rows and schema from it:
 //! what the schema keeps is SQLite text that means what the T-SQL
 //! statement meant. The expressions here need no engine function
-//! (xq_tsql_*), which sqlite3 lacks; those are checked inside xqlite
-//! (src/dialect/mssql/test.zig).
+//! (xq_tsql_*), which sqlite3 lacks; those are checked with the loadable
+//! extension by ext.zig, and inside xqlite (src/dialect/mssql/test.zig).
 
 const std = @import("std");
 const xqt = @import("xqt");

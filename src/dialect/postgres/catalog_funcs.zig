@@ -98,8 +98,6 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("quote_ident", 1, det, quoteIdentFunc),
     dfunc.scalar("quote_literal", 1, det, dfunc.bind(quoteLiteralFunc, .{false})),
     dfunc.scalar("quote_nullable", 1, det, dfunc.bind(quoteLiteralFunc, .{true})),
-    dfunc.scalar("array_to_string", 2, det, arrayToStringFunc),
-    dfunc.scalar("array_to_string", 3, det, arrayToStringFunc),
 } ++ privileges;
 
 /// has_table_privilege() and its kin, with and without the role.
@@ -262,9 +260,10 @@ fn sizePrettyFunc(ctx: *Context, argv: []*Mem) void {
     var buf: [48]u8 = undefined;
     const units = [_][]const u8{ "bytes", "kB", "MB", "GB", "TB", "PB" };
     // The next unit from 10240 of one, rounded half away from zero.
-    var v: i64 = api.valueInt64(argv[0]);
+    // In 128 bits: the rounding of the largest bigint does not overflow.
+    var v: i128 = api.valueInt64(argv[0]);
     var k: usize = 0;
-    while (k + 1 < units.len and @abs(v) >= 10240) : (k += 1) v = @divTrunc(v + (if (v < 0) @as(i64, -512) else @as(i64, 512)), 1024);
+    while (k + 1 < units.len and @abs(v) >= 10240) : (k += 1) v = @divTrunc(v + (if (v < 0) @as(i128, -512) else @as(i128, 512)), 1024);
     api.resultText(ctx, std.fmt.bufPrint(&buf, "{d} {s}", .{ v, units[k] }) catch "?", .transient);
 }
 
@@ -308,28 +307,6 @@ fn quoteLiteralFunc(ctx: *Context, argv: []*Mem, nullable: bool) void {
     }
     out.append(a, '\'') catch return c.oom();
     c.text(out.items);
-}
-
-/// array_to_string(array, sep [, null_string]) of an array literal
-/// ('{a,b}', as the dialect's arrays are text).
-fn arrayToStringFunc(ctx: *Context, argv: []*Mem) void {
-    if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(ctx);
-    const z = dfunc.text(ctx, argv[0]) orelse return;
-    const sep = dfunc.text(ctx, argv[1]) orelse return;
-    const null_text: ?[]const u8 = if (argv.len > 2 and !isNull(argv[2])) dfunc.text(ctx, argv[2]) orelse return else null;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(dfunc.gpa(ctx));
-    var it = Elements{ .z = z };
-    var first = true;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(dfunc.gpa(ctx));
-    while (it.next(dfunc.gpa(ctx), &buf) catch return api.resultErrorNomem(ctx)) |e| {
-        const v: []const u8 = if (e) |x| x else null_text orelse continue;
-        if (!first) out.appendSlice(dfunc.gpa(ctx), sep) catch return api.resultErrorNomem(ctx);
-        first = false;
-        out.appendSlice(dfunc.gpa(ctx), v) catch return api.resultErrorNomem(ctx);
-    }
-    dfunc.resultOwned(ctx, &out);
 }
 
 /// The elements of a one-dimensional array literal: each its text, null
@@ -575,6 +552,11 @@ pub fn constraintDef(a: Allocator, s: *const Snapshot, p: []const u32, k: *const
             for (actions) |x| if (x[0] == k.del) try out.print(a, " ON DELETE {s}", .{x[1]});
             if (k.deferrable) try out.appendSlice(a, " DEFERRABLE");
             if (k.deferred) try out.appendSlice(a, " INITIALLY DEFERRED");
+        },
+        'n' => {
+            try out.appendSlice(a, "NOT NULL ");
+            const at = if (k.keys.len > 0) s.attr(k.rel, k.keys[0]) else null;
+            try out.appendSlice(a, if (at) |x| try pgc.quoteIdent(a, x.name) else "?");
         },
         'c' => {
             const b = k.bin orelse "";

@@ -190,7 +190,9 @@ pub fn build(b: *std.Build) void {
     const sqlite_ref = sqliteRef(b, target);
     // The sqlite3-compatible C ABI (src/capi.zig): libxqlite3, its header
     // and its tests. See addCapi() and docs/c-api.md.
-    const capi = addCapi(b, target, optimize, sqlite_ref);
+    // `zig build ext`: the loadable extension (addExt()).
+    const ext = addExt(b, target, optimize);
+    const capi = addCapi(b, target, optimize, sqlite_ref, ext.lib);
     // `zig build wasm`: the WebAssembly module for JavaScript hosts
     // (src/wasm/api.zig, wasm32-freestanding, no libc) in zig-out/wasm,
     // whatever -Dtarget is; ReleaseSmall unless -Dwasm-optimize says
@@ -329,10 +331,11 @@ pub fn build(b: *std.Build) void {
     });
     crashshim.root_module.addCSourceFile(.{ .file = b.path("tools/crashshim.c") });
     if (target.result.os.tag == .linux) crashshim.root_module.linkSystemLibrary("dl", .{});
-    const tools_step = b.step("tools", "Build xqt, the crash shim and the reference sqlite3 shells of the cross-checks (tools/xqt)");
+    const tools_step = b.step("tools", "Build xqt, the crash shim, the loadable extension and the reference sqlite3 shells of the cross-checks (tools/xqt)");
     tools_step.dependOn(b.getInstallStep());
     tools_step.dependOn(&b.addInstallArtifact(xqt_exe, .{}).step);
     tools_step.dependOn(&b.addInstallArtifact(crashshim, .{}).step);
+    tools_step.dependOn(ext.install);
     if (sqlite_ref) |ref| {
         tools_step.dependOn(&ref.install_shell.step);
         tools_step.dependOn(&b.addInstallArtifact(ref.planner, .{}).step);
@@ -386,7 +389,7 @@ pub fn build(b: *std.Build) void {
         run.has_side_effects = true;
         test_wasi_step.dependOn(&run.step);
     }
-    const wasi_run = addXqtRun(b, xqt_exe, exe, crashshim, sqlite_ref);
+    const wasi_run = addXqtRun(b, xqt_exe, exe, crashshim, sqlite_ref, null);
     wasi_run.addArgs(&.{ "wasi", "--wasm" });
     wasi_run.addArtifactArg(wasi_safe_exe);
     test_wasi_step.dependOn(&wasi_run.step);
@@ -422,13 +425,34 @@ pub fn build(b: *std.Build) void {
     const minimal_run = b.addRunArtifact(minimal_tests);
     check_step.dependOn(&minimal_run.step);
     b.step("test-minimal", "Run tools/minimal_test.zig on the engine built with -Ddialects=none -Dext=none").dependOn(&minimal_run.step);
-    const interop_run = addXqtRun(b, xqt_exe, exe, crashshim, sqlite_ref);
+    const interop_run = addXqtRun(b, xqt_exe, exe, crashshim, sqlite_ref, ext.lib);
+    // (Only interop loads the extension; the other runs do not build it.)
     interop_run.addArg("interop");
     check_step.dependOn(&interop_run.step);
-    const planner_run = addXqtRun(b, xqt_exe, exe, crashshim, sqlite_ref);
+    const planner_run = addXqtRun(b, xqt_exe, exe, crashshim, sqlite_ref, null);
     planner_run.addArgs(&.{ "planner", "--known" });
     planner_run.addFileArg(b.path("tools/planner/known-failures.list"));
     check_step.dependOn(&planner_run.step);
+    // Each dialect built in whose server's outputs are recorded
+    // (tools/dialect/*-expected, `xqt dialect-diff NAME --record`):
+    // xqlite against the recording, no server needed. A dialect goes in
+    // this list once its recording is made.
+    // Each with its case files beside the default one (null).
+    const recorded_dialects = [_]struct { []const u8, []const u8, []const ?[]const u8 }{
+        .{ "postgres", "pg", &.{ null, "tools/dialect/pg-array-cases.txt" } },
+    };
+    for (recorded_dialects) |rd| {
+        const on = for (Config.dialects, buildConfig(b).dialect) |name, built| {
+            if (std.mem.eql(u8, name, rd[0])) break built;
+        } else unreachable;
+        if (!on) continue;
+        for (rd[2]) |cases| {
+            const dialect_run = addXqtRun(b, xqt_exe, exe, crashshim, sqlite_ref, null);
+            dialect_run.addArgs(&.{ "dialect-diff", rd[1] });
+            if (cases) |f| dialect_run.addFileArg(b.path(f));
+            check_step.dependOn(&dialect_run.step);
+        }
+    }
     // The long runs (sqllogictest, fuzzcheck, the fuzzers) use a ReleaseSafe
     // build whatever -Doptimize is: safety checks on, minutes not hours.
     // The cross-checks and the planner use the build asked for.
@@ -442,7 +466,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (check_slt) {
-        const slt_run = addXqtRun(b, xqt_exe, safe_exe, crashshim, sqlite_ref);
+        const slt_run = addXqtRun(b, xqt_exe, safe_exe, crashshim, sqlite_ref, null);
         slt_run.addArg("slt");
         slt_run.addDirectoryArg(b.path("ref/sqllogictest/test"));
         check_step.dependOn(&slt_run.step);
@@ -466,10 +490,15 @@ pub fn build(b: *std.Build) void {
                 .imports = engineImports(b, target, .ReleaseSafe),
             }),
         });
-        for ([_][]const u8{ "btree_model", "btree_corrupt", "btree_sqlite3", "ir_roundtrip" }) |name| {
+        for ([_][]const u8{ "btree_model", "btree_corrupt", "btree_sqlite3", "ir_roundtrip", "ir_ext" }) |name| {
             const run = b.addRunArtifact(safe_fuzz);
             run.addArg(name);
             installSqliteRef(run, sqlite_ref);
+            // ir_ext loads the extension of this build into sqlite3.
+            if (std.mem.eql(u8, name, "ir_ext")) if (ext.lib) |lib| {
+                run.addArg("--ext");
+                run.addArtifactArg(lib);
+            };
             run.has_side_effects = true;
             check_step.dependOn(&run.step);
         }
@@ -498,7 +527,7 @@ pub fn build(b: *std.Build) void {
 /// script; `zig build capi-fast` runs the C test and tools/capi/bench.c
 /// on the ReleaseFast static library several times. Returns the
 /// test-capi and capi-fast steps.
-fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_ref: ?SqliteRef) struct { test_step: *std.Build.Step, fast_step: *std.Build.Step } {
+fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_ref: ?SqliteRef, xqlite_ext: ?*std.Build.Step.Compile) struct { test_step: *std.Build.Step, fast_step: *std.Build.Step } {
     const enabled = b.option(bool, "capi", "Build and install the C libraries (libxqlite3) with `zig build` (default: true)") orelse true;
     const name = b.option([]const u8, "capi-name", "Base name of the C libraries: lib<name>.a, lib<name>.so/.dylib (default: xqlite3; sqlite3 for a drop-in libsqlite3)") orelse "xqlite3";
     // The amalgamation's files, from the `sqlite` dependency unless given.
@@ -594,6 +623,8 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         const run = b.addRunArtifact(exe);
         run.setCwd(b.path("."));
         run.addArtifactArg(ext);
+        // The xqlite extension (docs/extension.md), loaded into libxqlite3.
+        if (xqlite_ext) |x| run.addArtifactArg(x);
         run.expectExitCode(0);
         run.has_side_effects = true;
         test_step.dependOn(&run.step);
@@ -688,6 +719,30 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     return .{ .test_step = test_step, .fast_step = fast_step };
 }
 
+/// The loadable extension (src/loadable.zig, docs/extension.md):
+/// libxqlite_ext.so or .dylib in zig-out/lib, the engine functions and
+/// collations of the dialects built in (-Ddialects) for a real sqlite3.
+/// `zig build ext` builds it, `zig build tools` too, and `zig build
+/// check` hands it to `xqt interop`. None for WebAssembly, which loads
+/// no libraries (lib null).
+fn addExt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) struct { lib: ?*std.Build.Step.Compile, install: *std.Build.Step } {
+    const step = b.step("ext", "Build the SQLite loadable extension zig-out/lib/libxqlite_ext.{so,dylib} (docs/extension.md)");
+    if (target.result.cpu.arch.isWasm()) return .{ .lib = null, .install = step };
+    const m = b.createModule(.{
+        .root_source_file = b.path("src/loadable.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .pic = true,
+        .imports = engineImports(b, target, optimize),
+    });
+    m.addIncludePath(b.path("include"));
+    m.addCSourceFile(.{ .file = b.path("src/loadable/entry.c"), .flags = &.{ "-std=c99", "-fvisibility=hidden" } });
+    const lib = b.addLibrary(.{ .name = "xqlite_ext", .linkage = .dynamic, .root_module = m });
+    step.dependOn(&b.addInstallArtifact(lib, .{}).step);
+    return .{ .lib = lib, .install = step };
+}
+
 /// The reference sqlite3 shells of the cross-checks, built from the
 /// SQLite release this port tracks (the lazy dependency `sqlite`, the
 /// 3.54.1 amalgamation), so that no sqlite3 has to be built by hand.
@@ -773,15 +828,19 @@ fn installSqliteRef(run: *std.Build.Step.Run, ref: ?SqliteRef) void {
     run.step.dependOn(&r.install_shell.step);
 }
 
-/// `xqt --xq XQLITE --crashshim SHIM --sqlite3 REF --sq PLANNER`, for
+/// `xqt --xq XQLITE --crashshim SHIM --ext EXT --sqlite3 REF --sq PLANNER`, for
 /// `zig build check`: run from the build root every time; the caller adds
 /// the command. $SQLITE3 and $SQ, if set, still choose the shells.
-fn addXqtRun(b: *std.Build, xqt: *std.Build.Step.Compile, xqlite: *std.Build.Step.Compile, crashshim: *std.Build.Step.Compile, ref: ?SqliteRef) *std.Build.Step.Run {
+fn addXqtRun(b: *std.Build, xqt: *std.Build.Step.Compile, xqlite: *std.Build.Step.Compile, crashshim: *std.Build.Step.Compile, ref: ?SqliteRef, ext: ?*std.Build.Step.Compile) *std.Build.Step.Run {
     const run = b.addRunArtifact(xqt);
     run.addArg("--xq");
     run.addArtifactArg(xqlite);
     run.addArg("--crashshim");
     run.addArtifactArg(crashshim);
+    if (ext) |e| if (b.graph.environ_map.get("XQT_EXT") == null) {
+        run.addArg("--ext");
+        run.addArtifactArg(e);
+    };
     if (ref) |r| {
         if (b.graph.environ_map.get("SQLITE3") == null) {
             run.addArg("--sqlite3");

@@ -342,8 +342,15 @@ fn currentDatabaseFunc(ctx: *Context, _: []*Mem) void {
 /// "???" for another OID, as PostgreSQL writes one it does not know.
 fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
-    const oid = api.valueInt64(argv[0]);
+    var oid = api.valueInt64(argv[0]);
     const mod: i64 = if (isNull(argv[1])) -1 else api.valueInt64(argv[1]);
+    // An array type: its element's, then [] (character varying(10)[]).
+    var is_array = false;
+    if (@import("pgcatalog.zig").builtinType(std.math.cast(u32, oid) orelse 0)) |t| if (t.cat == 'A' and t.elem != 0 and t.oid != 22 and t.oid != 30) {
+        oid = t.elem;
+        is_array = true;
+    };
+    if (oid == 22 or oid == 30) return api.resultText(ctx, if (oid == 22) "int2vector" else "oidvector", .static);
     const Name = struct { i64, []const u8, enum { none, length, numeric, precision } };
     const names = [_]Name{
         .{ 16, "boolean", .none },
@@ -386,6 +393,10 @@ fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
             break :blk std.fmt.bufPrint(&buf, "{s}({d}){s}", .{ name[0..sp], mod, name[sp..] }) catch name;
         } else name,
     };
+    if (is_array) {
+        var abuf: [80]u8 = undefined;
+        return api.resultText(ctx, std.fmt.bufPrint(&abuf, "{s}[]", .{z}) catch z, .transient);
+    }
     api.resultText(ctx, z, .transient);
 }
 
@@ -596,6 +607,7 @@ fn declArg(ctx: *Context, argv: []*Mem, d: *Decl) bool {
 fn dataTypeFunc(ctx: *Context, argv: []*Mem) void {
     var d: Decl = undefined;
     if (!declArg(ctx, argv, &d)) return;
+    if (std.mem.endsWith(u8, d.base, "]")) return api.resultText(ctx, "ARRAY", .static);
     var lower: [64]u8 = undefined;
     if (d.base.len <= lower.len) {
         api.resultText(ctx, std.ascii.lowerString(&lower, d.base), .transient);
@@ -605,6 +617,12 @@ fn dataTypeFunc(ctx: *Context, argv: []*Mem) void {
 fn udtNameFunc(ctx: *Context, argv: []*Mem) void {
     var d: Decl = undefined;
     if (!declArg(ctx, argv, &d)) return;
+    if (std.mem.endsWith(u8, d.base, "]")) {
+        // An array's is its element's internal name after _ (_int4).
+        const base = std.mem.trimEnd(u8, d.base[0 .. std.mem.indexOfScalar(u8, d.base, '[') orelse d.base.len], " ");
+        var buf: [80]u8 = undefined;
+        return api.resultText(ctx, std.fmt.bufPrint(&buf, "_{s}", .{@import("types.zig").internalName(base)}) catch base, .transient);
+    }
     api.resultText(ctx, @import("types.zig").internalName(d.base), .transient);
 }
 

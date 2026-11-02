@@ -49,6 +49,8 @@ const expr_mod = @import("../../sql/expr.zig");
 const pg_typing = @import("typing.zig");
 const types = @import("types.zig");
 const operators = @import("operators.zig");
+const array = @import("array.zig");
+const ctypes = @import("../../sql/types.zig");
 
 const TK = int.TK;
 const Expr = int.Expr;
@@ -73,7 +75,9 @@ pub fn overload(c: *Ctx, e: *Expr) Error!bool {
 
 /// ORDER BY a jsonb value: in jsonb's order.
 pub fn orderCollation(c: *Ctx, id: typing.TypeId) ?[:0]const u8 {
-    return switch (typing.typeOf(c.p.db, id).logical) {
+    const t = typing.typeOf(c.p.db, id);
+    if (t.logical == .array) return arrayCollation(t);
+    return switch (t.logical) {
         .jsonb => jsonb_collation,
         .interval => interval_collation,
         else => null,
@@ -111,6 +115,7 @@ fn pairOf(c: *const Ctx, a: *const Expr, b: *const Expr, l: Logical) bool {
 fn concat(c: *Ctx, e: *Expr) Error!bool {
     const l = e.left orelse return false;
     const r = e.right orelse return false;
+    if (isArray(c, l) or isArray(c, r)) return arrayConcat(c, e, l, r);
     if (logical(c, l) == .json and logical(c, r) == .json) return c.fail(e, .of("42883"), "operator does not exist: json || json", .{});
     if (!jsonbPair(c, l, r)) return false;
     try c.toCall(e, "xq_pg_jsonb_concat", &.{ l, r });
@@ -139,7 +144,7 @@ fn argOf(c: *const Ctx, x: *const Expr) ?operators.Arg {
         TK.NULL, TK.VARIABLE => return .loose,
         else => {},
     }
-    const t = operators.T.of(logical(c, x), typing.spelling(c.p.db, x.xq_type)) orelse return null;
+    const t = operators.T.of(typing.typeOf(c.p.db, x.xq_type), typing.spelling(c.p.db, x.xq_type)) orelse return null;
     return .{ .known = t };
 }
 
@@ -221,6 +226,7 @@ pub fn intInput(t: operators.T) ?[]const u8 {
 fn compare(c: *Ctx, e: *Expr) Error!bool {
     const l = e.left orelse return false;
     const r = e.right orelse return false;
+    if (isArray(c, l) or isArray(c, r)) return arrayCompare(c, e, l, r);
     if (e.op != TK.IS and e.op != TK.ISNOT and logical(c, l) == .json and logical(c, r) == .json) {
         return c.fail(e, .of("42883"), "operator does not exist: json {s} json", .{opText(e.op)});
     }
@@ -284,6 +290,7 @@ fn call(c: *Ctx, e: *Expr) Error!bool {
         if (items.len > 0 and logical(c, items[0].expr.?) == .jsonb) try c.rename(e, v[1]);
         return false;
     };
+    if (try arrayCall(c, e, n, items)) return true;
     var changed = false;
     const b = builderArgs(n);
     for (items, 0..) |*item, i| if (b.takes(i)) {
@@ -297,7 +304,7 @@ fn call(c: *Ctx, e: *Expr) Error!bool {
             const p = c.p;
             var list = try expr_mod.listAppend(p, null, items[0].expr.?);
             list = try expr_mod.listAppend(p, list, if (items.len > 1) items[1].expr.? else try int32(c, 0));
-            list = try expr_mod.listAppend(p, list, try int32(c, @intFromBool(num)));
+            list = try expr_mod.listAppend(p, list, try int32(c, num));
             e.x = .{ .list = list };
             try c.rename(e, "xq_pg_array_to_json");
             changed = true;
@@ -332,12 +339,204 @@ fn int32(c: *Ctx, v: i32) Error!*Expr {
     return x;
 }
 
-/// If `e` is an array (text[], int[] ..., ARRAY[...]: of a type spelled
-/// with []), whether its elements are numbers.
-fn arrayOf(c: *const Ctx, e: *const Expr) ?bool {
-    const z = typing.spelling(c.p.db, e.xq_type) orelse return null;
-    if (!std.mem.endsWith(u8, z, "[]")) return null;
-    return types.isNumeric(z[0 .. z.len - 2]);
+/// If `e` is an array (text[], int[] ..., ARRAY[...]), what its elements
+/// are as JSON: 0 strings, 1 numbers, 2 booleans (xq_pg_array_to_json()).
+fn arrayOf(c: *const Ctx, e: *const Expr) ?i32 {
+    const t = typing.typeOf(c.p.db, e.xq_type);
+    if (t.logical != .array) return null;
+    const el = array.Elem.of(t.element);
+    return if (el.isNumber()) 1 else if (el == .boolean) 2 else 0;
+}
+
+// ================================================================ arrays
+
+fn isArray(c: *const Ctx, e: *const Expr) bool {
+    return logical(c, e) == .array;
+}
+
+fn typeOfExpr(c: *const Ctx, e: *const Expr) ctypes.Type {
+    return typing.typeOf(c.p.db, e.xq_type);
+}
+
+/// The collation arrays of type `t` compare and sort with: element by
+/// element, numbers by value.
+fn arrayCollation(t: ctypes.Type) [:0]const u8 {
+    const el = array.Elem.of(t.element);
+    return if (el.isNumber()) array.collation_number else array.collation_text;
+}
+
+/// An integer literal of `code`.
+fn codeExpr(c: *Ctx, code: array.Code) Error!*Expr {
+    const x = try expr_mod.exprInt32(c.p.arena, @intCast(code.encode()));
+    x.xq_type = typing.plain(.int4);
+    return x;
+}
+
+/// Whether a value of type `t` stored as an element of `code` needs its
+/// text made (xq_pg_elem()): a boolean's t/f, a real's digits, a
+/// numeric's scale, a string read as the element type.
+fn needsElem(code: array.Code, e: *const Expr, t: ctypes.Type) bool {
+    if (e.op == TK.NULL) return false;
+    if (e.op == TK.STRING) return code.elem != .text and code.elem != .unknown;
+    return switch (code.elem) {
+        .boolean, .float4 => true,
+        .numeric => code.scale != null and code.scale.? > 0 and t.logical != .text,
+        .bytea => t.logical == .bytes,
+        else => false,
+    };
+}
+
+/// Wrap `item` in xq_pg_elem(item, code) if it needs it; whether it did.
+fn wrapElem(c: *Ctx, item: *int.ExprListItem, code_arg: array.Code) Error!bool {
+    const x = item.expr.?;
+    if (calls(x, "xq_pg_elem")) return false;
+    const t = typeOfExpr(c, x);
+    var code = code_arg;
+    // A numeric keeps its own scale (1.50 and 2 together are 1.50, 2).
+    if (code.elem == .numeric and code.scale == null and t.logical == .numeric) code.scale = t.scale;
+    if (!needsElem(code, x, t)) return false;
+    item.expr = try c.call("xq_pg_elem", &.{ x, try codeExpr(c, code) });
+    return true;
+}
+
+/// `a || b` with an array operand: of two arrays (or an array and a
+/// string literal or NULL, which PostgreSQL reads as an array)
+/// array_cat(), of an array and an element array_append() or
+/// array_prepend().
+fn arrayConcat(c: *Ctx, e: *Expr, l: *Expr, r: *Expr) Error!bool {
+    const la = isArray(c, l) or l.op == TK.STRING or l.op == TK.NULL;
+    const ra = isArray(c, r) or r.op == TK.STRING or r.op == TK.NULL;
+    if (la and ra) {
+        try c.toCall(e, "xq_pg_array_cat2", &.{ l, r });
+        return true;
+    }
+    if (isArray(c, l)) {
+        const code = array.Code.ofArray(typeOfExpr(c, l));
+        const v = if (needsElem(code, r, typeOfExpr(c, r))) try c.call("xq_pg_elem", &.{ r, try codeExpr(c, code) }) else r;
+        try c.toCall(e, "xq_pg_array_append", &.{ l, v });
+        return true;
+    }
+    const code = array.Code.ofArray(typeOfExpr(c, r));
+    const v = if (needsElem(code, l, typeOfExpr(c, l))) try c.call("xq_pg_elem", &.{ l, try codeExpr(c, code) }) else l;
+    try c.toCall(e, "xq_pg_array_prepend", &.{ v, r });
+    return true;
+}
+
+/// A comparison of arrays: a string literal read as the other's type,
+/// the arrays in PostgreSQL's order (collation xq_pg_array[_num]).
+fn arrayCompare(c: *Ctx, e: *Expr, l: *Expr, r: *Expr) Error!bool {
+    if (l.op == TK.COLLATE and (std.ascii.eqlIgnoreCase(l.token(), array.collation_text) or std.ascii.eqlIgnoreCase(l.token(), array.collation_number))) return false;
+    const t = if (isArray(c, l)) typeOfExpr(c, l) else typeOfExpr(c, r);
+    var left = l;
+    if (l.op == TK.STRING) left = try c.call(array.inputName(t.element), &.{l});
+    if (r.op == TK.STRING) e.right = try c.call(array.inputName(t.element), &.{r});
+    e.left = try c.collate(left, arrayCollation(t));
+    return true;
+}
+
+/// The choices of the calls of arrays; whether one changed `e`.
+fn arrayCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) Error!bool {
+    const eql = struct {
+        fn f(a: []const u8, b: []const u8) bool {
+            return std.mem.eql(u8, a, b);
+        }
+    }.f;
+    if (eql(n, "xq_pg_array")) {
+        if (items.len == 0) return false;
+        var nested = false;
+        for (items) |item| if (isArray(c, item.expr.?)) {
+            nested = true;
+        };
+        if (nested) {
+            try c.rename(e, "xq_pg_array_nested");
+            return false;
+        }
+        var ops: [64]typing.Operand = undefined;
+        if (items.len > ops.len) return false;
+        for (items, 0..) |item, i| ops[i] = c.operand(item.expr.?);
+        const id = try typing.commonOf(c, ops[0..items.len]);
+        if (id == typing.unknown) return false;
+        const code = array.Code.ofValue(typing.typeOf(c.p.db, id));
+        var changed = false;
+        for (items) |*item| changed = try wrapElem(c, item, code) or changed;
+        return changed;
+    }
+    if (eql(n, "xq_pg_array_agg") or eql(n, "array_agg")) {
+        if (items.len != 1) return false;
+        const x = items[0].expr.?;
+        if (isArray(c, x)) {
+            try c.rename(e, "xq_pg_array_agg_arrays");
+            return false;
+        }
+        return wrapElem(c, &items[0], array.Code.ofValue(typeOfExpr(c, x)));
+    }
+    if (eql(n, "xq_pg_jsonb_contains")) {
+        if (items.len == 2 and (isArray(c, items[0].expr.?) or isArray(c, items[1].expr.?))) try c.rename(e, "xq_pg_array_contains");
+        return false;
+    }
+    if (eql(n, "xq_pg_any")) {
+        if (items.len != 4) return false;
+        const x = items[0].expr.?;
+        const a = items[1].expr.?;
+        const ta = typeOfExpr(c, a);
+        const tx = typeOfExpr(c, x);
+        // (A text may be an array's text: the catalog's columns of types
+        // it has not, an expression of a SQLite table.)
+        if (typing.isNumber(ta.logical) or ta.logical == .boolean) {
+            return c.fail(e, .of("42809"), "op ANY/ALL (array) requires array on right side", .{});
+        }
+        // A parameter of no type is of the other's.
+        if (a.op == TK.VARIABLE and a.xq_type == typing.unknown and tx.logical != .array and x.xq_type != typing.unknown) {
+            // (Of a type of no Logical, name: a text[].)
+            try typing.retypeParam(c.p, a, if (tx.logical == .unknown) try c.named("text[]") else try c.make(tx.arrayOf()));
+        } else if (x.op == TK.VARIABLE and x.xq_type == typing.unknown and ta.logical == .array and ta.element != .unknown) {
+            try typing.retypeParam(c.p, x, try c.make(ta.elementType()));
+        }
+        var code = array.Code.ofArray(typeOfExpr(c, a));
+        if (code.elem == .unknown and x.op != TK.STRING) code = array.Code.ofValue(typeOfExpr(c, x));
+        if (code.elem == .unknown or code.nested) return false;
+        var list = e.x.list;
+        list = try expr_mod.listAppend(c.p, list, try codeExpr(c, code));
+        e.x = .{ .list = list };
+        return true;
+    }
+    if (eql(n, "xq_pg_subscript")) {
+        if (items.len < 2) return false;
+        const t = typeOfExpr(c, items[0].expr.?);
+        if (t.logical != .array or t.element == .unknown) return false;
+        var list = e.x.list;
+        list = try expr_mod.listAppend(c.p, list, try codeExpr(c, array.Code.ofArray(t)));
+        e.x = .{ .list = list };
+        try c.rename(e, "xq_pg_subscript_k");
+        return true;
+    }
+    if (eql(n, "xq_pg_rows_unnest")) {
+        if (items.len != 1) return false;
+        const t = typeOfExpr(c, items[0].expr.?);
+        if (t.logical != .array or t.element == .unknown) return false;
+        var list = e.x.list;
+        list = try expr_mod.listAppend(c.p, list, try codeExpr(c, array.Code.ofArray(t)));
+        e.x = .{ .list = list };
+        return true;
+    }
+    // The value made an element of an array of a type.
+    const value_arg: ?struct { usize, usize } = if (eql(n, "array_append") or eql(n, "xq_pg_array_append"))
+        .{ 0, 1 }
+    else if (eql(n, "array_prepend") or eql(n, "xq_pg_array_prepend"))
+        .{ 1, 0 }
+    else if (eql(n, "array_replace"))
+        .{ 0, 2 }
+    else if (eql(n, "xq_pg_array_set"))
+        .{ 0, 1 }
+    else
+        null;
+    if (value_arg) |va| {
+        if (items.len <= @max(va[0], va[1])) return false;
+        const t = typeOfExpr(c, items[va[0]].expr.?);
+        if (t.logical != .array) return false;
+        return wrapElem(c, &items[va[1]], array.Code.ofArray(t));
+    }
+    return false;
 }
 
 /// Wrap argument `item` of a function that builds JSON so that the
@@ -359,7 +558,7 @@ fn wrapArg(c: *Ctx, item: *int.ExprListItem) Error!bool {
         },
         else => blk: {
             const num = arrayOf(c, a) orelse return false;
-            break :blk try c.call("xq_pg_array_to_json", &.{ a, try int32(c, 0), try int32(c, @intFromBool(num)) });
+            break :blk try c.call("xq_pg_array_to_json", &.{ a, try int32(c, 0), try int32(c, num) });
         },
     };
     return true;

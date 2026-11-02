@@ -222,11 +222,13 @@ pub fn oidOfLogical(t: ctypes.Type) u32 {
         .uuid => 2950,
         .json => 114,
         .jsonb => 3802,
+        .array => if (builtinType(oidOfLogical(t.elementType()))) |e| e.array else 1009,
     };
 }
 
 /// The type modifier (atttypmod) of `t`, as the wire server's typeMod().
 pub fn typmodOfLogical(t: ctypes.Type) i32 {
+    if (t.logical == .array) return typmodOfLogical(t.elementType());
     return switch (t.logical) {
         .varchar, .char => if (t.length) |n| if (n < std.math.maxInt(i32) - 4) @as(i32, @intCast(n)) + 4 else -1 else -1,
         .numeric => if (t.precision) |p| ((@as(i32, p) << 16) | (t.scale orelse 0)) + 4 else -1,
@@ -242,8 +244,10 @@ pub fn columnType(d: dialect.Dialect, decl: []const u8) struct { u32, i32 } {
     const trimmed = std.mem.trim(u8, lower, " ");
     // The names no types.Logical stands for.
     const named = [_]struct { []const u8, u32 }{
-        .{ "oid", 26 },     .{ "name", 19 }, .{ "\"char\"", 18 }, .{ "regclass", 2205 }, .{ "regtype", 2206 },
-        .{ "regproc", 24 }, .{ "xid", 28 },  .{ "inet", 869 },    .{ "money", 790 },     .{ "jsonpath", 4072 },
+        .{ "oid", 26 },        .{ "name", 19 },      .{ "\"char\"", 18 },     .{ "regclass", 2205 },  .{ "regtype", 2206 },
+        .{ "regproc", 24 },    .{ "xid", 28 },       .{ "inet", 869 },        .{ "money", 790 },      .{ "jsonpath", 4072 },
+        .{ "name[]", 1003 },   .{ "oid[]", 1028 },   .{ "\"char\"[]", 1002 }, .{ "regtype[]", 2211 }, .{ "regclass[]", 2210 },
+        .{ "int2vector", 22 }, .{ "oidvector", 30 }, .{ "aclitem[]", 1034 },
     };
     if (d == .postgres) for (named) |n| if (eql(n[0], trimmed)) return .{ n[1], -1 };
     const t = ctypes.parse(d, decl);
@@ -357,7 +361,7 @@ pub const Con = struct {
     oid: u32,
     name: []const u8,
     nsp: u32,
-    /// 'p', 'u', 'f', 'c'.
+    /// 'p', 'u', 'f', 'c', 'n' (NOT NULL, a constraint since PostgreSQL 18).
     type: u8,
     rel: u32,
     index: u32 = 0,
@@ -827,6 +831,16 @@ const Builder = struct {
                 try b.def_keys.append(a, try std.fmt.allocPrint(a, "{s}\x00{d}", .{ key, num }));
             };
             try b.attrs.append(a, at);
+            // PostgreSQL 18 makes a constraint of each NOT NULL (and of a
+            // primary key's columns): <table>_<column>_not_null.
+            if (at.notnull) try b.addCon(key, .{
+                .oid = 0,
+                .name = try std.fmt.allocPrint(a, "{s}_{s}_not_null", .{ r.name, at.name }),
+                .nsp = r.nsp,
+                .type = 'n',
+                .rel = r.oid,
+                .keys = try a.dupe(i16, &.{num}),
+            });
         }
         // The INTEGER PRIMARY KEY's index and constraint.
         if (w.ipk) |ii| {
@@ -1471,11 +1485,19 @@ pub const Type = enum {
     int4,
     int8,
     float4,
+    /// Arrays, their text (`{1,2}`; int2vector and oidvector `1 2`).
+    int2_array,
+    oid_array,
+    text_array,
+    char_array,
+    acl_array,
+    int2vector,
+    oidvector,
 
     /// The SQLite type of the virtual table's column.
     pub fn sqlite(t: Type) []const u8 {
         return switch (t) {
-            .name, .text, .char => "TEXT",
+            .name, .text, .char, .int2_array, .oid_array, .text_array, .char_array, .acl_array, .int2vector, .oidvector => "TEXT",
             .float4 => "REAL",
             else => "INTEGER",
         };
@@ -1491,6 +1513,13 @@ pub const Type = enum {
             .int4 => "::integer",
             .int8 => "::bigint",
             .float4 => "::real",
+            .int2_array => "::smallint[]",
+            .oid_array => "::oid[]",
+            .text_array => "::text[]",
+            .char_array => "::\"char\"[]",
+            .acl_array => "::aclitem[]",
+            .int2vector => "::int2vector",
+            .oidvector => "::oidvector",
             .text, .char => "",
         };
     }
@@ -1573,7 +1602,7 @@ fn fillClass(s: *const Snapshot, r: *Rows) Oom!void {
     for (s.rels) |x| try r.row(.{
         x.oid,       x.name, x.nsp,               x.rowtype,    0,       oid_superuser, relam(x.kind), x.oid,          0,     0,     @as(f64, -1), 0,    0,
         x.has_index, false,  char(x.persistence), char(x.kind), x.natts, x.checks,      false,         x.has_triggers, false, false, false,        true, char(if (x.kind == 'r') 'd' else 'n'),
-        false,       0,      "0",                 "1",          null,    null,          null,
+        false,       0,      "0",                 "1",          null,    null,          null,          0,
     });
 }
 
@@ -1636,7 +1665,7 @@ fn fillConstraint(s: *const Snapshot, r: *Rows) Oom!void {
         try r.row(.{
             c.oid,       c.name,      c.nsp,                                 char(c.type), c.deferrable, c.deferred, true,                                                      c.rel,                                                       0,    c.index, 0,    c.frel,
             char(c.upd), char(c.del), char(if (c.type == 'f') 's' else ' '), true,         0,            false,      if (c.keys.len > 0) try vector(a, c.keys, true) else null, if (c.fkeys.len > 0) try vector(a, c.fkeys, true) else null, null, null,    null, null,
-            null,        c.bin,
+            null,        c.bin,       true,                                  false,
         });
     }
 }
@@ -1696,7 +1725,7 @@ pub fn procName(a: Allocator, oid: u32) Oom!?[]const u8 {
 
 pub const relations = [_]Relation{
     .{ .name = "xq_pg_namespace", .fill = fillNamespace, .cols = &.{
-        .{ "oid", .oid }, .{ "nspname", .name }, .{ "nspowner", .oid }, .{ "nspacl", .text },
+        .{ "oid", .oid }, .{ "nspname", .name }, .{ "nspowner", .oid }, .{ "nspacl", .acl_array },
     } },
     .{ .name = "xq_pg_class", .fill = fillClass, .cols = &.{
         .{ "oid", .oid },             .{ "relname", .name },        .{ "relnamespace", .oid },    .{ "reltype", .oid },
@@ -1706,17 +1735,17 @@ pub const relations = [_]Relation{
         .{ "relkind", .char },        .{ "relnatts", .int2 },       .{ "relchecks", .int2 },      .{ "relhasrules", .bool },
         .{ "relhastriggers", .bool }, .{ "relhassubclass", .bool }, .{ "relrowsecurity", .bool }, .{ "relforcerowsecurity", .bool },
         .{ "relispopulated", .bool }, .{ "relreplident", .char },   .{ "relispartition", .bool }, .{ "relrewrite", .oid },
-        .{ "relfrozenxid", .text },   .{ "relminmxid", .text },     .{ "relacl", .text },         .{ "reloptions", .text },
-        .{ "relpartbound", .text },
+        .{ "relfrozenxid", .text },   .{ "relminmxid", .text },     .{ "relacl", .acl_array },    .{ "reloptions", .text_array },
+        .{ "relpartbound", .text },   .{ "relallfrozen", .int4 },
     } },
     .{ .name = "xq_pg_attribute", .fill = fillAttribute, .cols = &.{
-        .{ "attrelid", .oid },        .{ "attname", .name },       .{ "atttypid", .oid },      .{ "attstattarget", .int4 },
-        .{ "attlen", .int2 },         .{ "attnum", .int2 },        .{ "attndims", .int4 },     .{ "attcacheoff", .int4 },
-        .{ "atttypmod", .int4 },      .{ "attbyval", .bool },      .{ "attalign", .char },     .{ "attstorage", .char },
-        .{ "attcompression", .char }, .{ "attnotnull", .bool },    .{ "atthasdef", .bool },    .{ "atthasmissing", .bool },
-        .{ "attidentity", .char },    .{ "attgenerated", .char },  .{ "attisdropped", .bool }, .{ "attislocal", .bool },
-        .{ "attinhcount", .int2 },    .{ "attcollation", .oid },   .{ "attacl", .text },       .{ "attoptions", .text },
-        .{ "attfdwoptions", .text },  .{ "attmissingval", .text },
+        .{ "attrelid", .oid },             .{ "attname", .name },       .{ "atttypid", .oid },      .{ "attstattarget", .int4 },
+        .{ "attlen", .int2 },              .{ "attnum", .int2 },        .{ "attndims", .int4 },     .{ "attcacheoff", .int4 },
+        .{ "atttypmod", .int4 },           .{ "attbyval", .bool },      .{ "attalign", .char },     .{ "attstorage", .char },
+        .{ "attcompression", .char },      .{ "attnotnull", .bool },    .{ "atthasdef", .bool },    .{ "atthasmissing", .bool },
+        .{ "attidentity", .char },         .{ "attgenerated", .char },  .{ "attisdropped", .bool }, .{ "attislocal", .bool },
+        .{ "attinhcount", .int2 },         .{ "attcollation", .oid },   .{ "attacl", .acl_array },  .{ "attoptions", .text_array },
+        .{ "attfdwoptions", .text_array }, .{ "attmissingval", .text },
     } },
     .{ .name = "xq_pg_type", .fill = fillType, .cols = &.{
         .{ "oid", .oid },             .{ "typname", .name },       .{ "typnamespace", .oid }, .{ "typowner", .oid },
@@ -1726,24 +1755,24 @@ pub const relations = [_]Relation{
         .{ "typoutput", .text },      .{ "typreceive", .text },    .{ "typsend", .text },     .{ "typmodin", .text },
         .{ "typmodout", .text },      .{ "typanalyze", .text },    .{ "typalign", .char },    .{ "typstorage", .char },
         .{ "typnotnull", .bool },     .{ "typbasetype", .oid },    .{ "typtypmod", .int4 },   .{ "typndims", .int4 },
-        .{ "typcollation", .oid },    .{ "typdefaultbin", .text }, .{ "typdefault", .text },  .{ "typacl", .text },
+        .{ "typcollation", .oid },    .{ "typdefaultbin", .text }, .{ "typdefault", .text },  .{ "typacl", .acl_array },
     } },
     .{ .name = "xq_pg_index", .fill = fillIndex, .cols = &.{
-        .{ "indexrelid", .oid },    .{ "indrelid", .oid },             .{ "indnatts", .int2 },       .{ "indnkeyatts", .int2 },
-        .{ "indisunique", .bool },  .{ "indnullsnotdistinct", .bool }, .{ "indisprimary", .bool },   .{ "indisexclusion", .bool },
-        .{ "indimmediate", .bool }, .{ "indisclustered", .bool },      .{ "indisvalid", .bool },     .{ "indcheckxmin", .bool },
-        .{ "indisready", .bool },   .{ "indislive", .bool },           .{ "indisreplident", .bool }, .{ "indkey", .text },
-        .{ "indcollation", .text }, .{ "indclass", .text },            .{ "indoption", .text },      .{ "indexprs", .text },
+        .{ "indexrelid", .oid },         .{ "indrelid", .oid },             .{ "indnatts", .int2 },        .{ "indnkeyatts", .int2 },
+        .{ "indisunique", .bool },       .{ "indnullsnotdistinct", .bool }, .{ "indisprimary", .bool },    .{ "indisexclusion", .bool },
+        .{ "indimmediate", .bool },      .{ "indisclustered", .bool },      .{ "indisvalid", .bool },      .{ "indcheckxmin", .bool },
+        .{ "indisready", .bool },        .{ "indislive", .bool },           .{ "indisreplident", .bool },  .{ "indkey", .int2vector },
+        .{ "indcollation", .oidvector }, .{ "indclass", .oidvector },       .{ "indoption", .int2vector }, .{ "indexprs", .text },
         .{ "indpred", .text },
     } },
     .{ .name = "xq_pg_constraint", .fill = fillConstraint, .cols = &.{
-        .{ "oid", .oid },            .{ "conname", .name },      .{ "connamespace", .oid },   .{ "contype", .char },
-        .{ "condeferrable", .bool }, .{ "condeferred", .bool },  .{ "convalidated", .bool },  .{ "conrelid", .oid },
-        .{ "contypid", .oid },       .{ "conindid", .oid },      .{ "conparentid", .oid },    .{ "confrelid", .oid },
-        .{ "confupdtype", .char },   .{ "confdeltype", .char },  .{ "confmatchtype", .char }, .{ "conislocal", .bool },
-        .{ "coninhcount", .int2 },   .{ "connoinherit", .bool }, .{ "conkey", .text },        .{ "confkey", .text },
-        .{ "conpfeqop", .text },     .{ "conppeqop", .text },    .{ "conffeqop", .text },     .{ "confdelsetcols", .text },
-        .{ "conexclop", .text },     .{ "conbin", .text },
+        .{ "oid", .oid },             .{ "conname", .name },        .{ "connamespace", .oid },    .{ "contype", .char },
+        .{ "condeferrable", .bool },  .{ "condeferred", .bool },    .{ "convalidated", .bool },   .{ "conrelid", .oid },
+        .{ "contypid", .oid },        .{ "conindid", .oid },        .{ "conparentid", .oid },     .{ "confrelid", .oid },
+        .{ "confupdtype", .char },    .{ "confdeltype", .char },    .{ "confmatchtype", .char },  .{ "conislocal", .bool },
+        .{ "coninhcount", .int2 },    .{ "connoinherit", .bool },   .{ "conkey", .int2_array },   .{ "confkey", .int2_array },
+        .{ "conpfeqop", .oid_array }, .{ "conppeqop", .oid_array }, .{ "conffeqop", .oid_array }, .{ "confdelsetcols", .int2_array },
+        .{ "conexclop", .oid_array }, .{ "conbin", .text },         .{ "conenforced", .bool },    .{ "conperiod", .bool },
     } },
     .{ .name = "xq_pg_attrdef", .fill = fillAttrdef, .cols = &.{
         .{ "oid", .oid }, .{ "adrelid", .oid }, .{ "adnum", .int2 }, .{ "adbin", .text },
@@ -1760,14 +1789,14 @@ pub const relations = [_]Relation{
         .{ "objoid", .oid }, .{ "classoid", .oid }, .{ "objsubid", .int4 }, .{ "description", .text },
     } },
     .{ .name = "xq_pg_proc", .fill = fillProc, .cols = &.{
-        .{ "oid", .oid },             .{ "proname", .name },         .{ "pronamespace", .oid }, .{ "proowner", .oid },
-        .{ "prolang", .oid },         .{ "procost", .float4 },       .{ "prorows", .float4 },   .{ "provariadic", .oid },
-        .{ "prosupport", .text },     .{ "prokind", .char },         .{ "prosecdef", .bool },   .{ "proleakproof", .bool },
-        .{ "proisstrict", .bool },    .{ "proretset", .bool },       .{ "provolatile", .char }, .{ "proparallel", .char },
-        .{ "pronargs", .int2 },       .{ "pronargdefaults", .int2 }, .{ "prorettype", .oid },   .{ "proargtypes", .text },
-        .{ "proallargtypes", .text }, .{ "proargmodes", .text },     .{ "proargnames", .text }, .{ "proargdefaults", .text },
-        .{ "protrftypes", .text },    .{ "prosrc", .text },          .{ "probin", .text },      .{ "prosqlbody", .text },
-        .{ "proconfig", .text },      .{ "proacl", .text },
+        .{ "oid", .oid },                  .{ "proname", .name },           .{ "pronamespace", .oid },       .{ "proowner", .oid },
+        .{ "prolang", .oid },              .{ "procost", .float4 },         .{ "prorows", .float4 },         .{ "provariadic", .oid },
+        .{ "prosupport", .text },          .{ "prokind", .char },           .{ "prosecdef", .bool },         .{ "proleakproof", .bool },
+        .{ "proisstrict", .bool },         .{ "proretset", .bool },         .{ "provolatile", .char },       .{ "proparallel", .char },
+        .{ "pronargs", .int2 },            .{ "pronargdefaults", .int2 },   .{ "prorettype", .oid },         .{ "proargtypes", .oidvector },
+        .{ "proallargtypes", .oid_array }, .{ "proargmodes", .char_array }, .{ "proargnames", .text_array }, .{ "proargdefaults", .text },
+        .{ "protrftypes", .oid_array },    .{ "prosrc", .text },            .{ "probin", .text },            .{ "prosqlbody", .text },
+        .{ "proconfig", .text_array },     .{ "proacl", .acl_array },
     } },
 };
 

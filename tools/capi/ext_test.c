@@ -31,7 +31,7 @@ static void sumFinal(sqlite3_context *ctx){
   sqlite3_result_int64(ctx, p ? *p : 0);
 }
 
-/* xq_ext_version(): sqlite3_libversion_number(). */
+/* xq_ext_libversion(): sqlite3_libversion_number() (not xq_ext_version(), the engine function of src/dialect/abi.zig). */
 static void versionFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv){
   (void)argc; (void)argv;
   sqlite3_result_int(ctx, sqlite3_libversion_number());
@@ -47,7 +47,7 @@ int sqlite3_xqexttest_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routi
     rc = sqlite3_create_function(db, "xq_ext_sum", 1, SQLITE_UTF8, 0, 0, sumStep, sumFinal);
   }
   if( rc==SQLITE_OK ){
-    rc = sqlite3_create_function(db, "xq_ext_version", 0, SQLITE_UTF8, 0, versionFunc, 0, 0);
+    rc = sqlite3_create_function(db, "xq_ext_libversion", 0, SQLITE_UTF8, 0, versionFunc, 0, 0);
   }
   return rc;
 }

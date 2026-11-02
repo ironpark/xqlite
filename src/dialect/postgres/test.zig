@@ -174,7 +174,7 @@ test "pg: expressions and functions" {
     try c.expectRows("SELECT date '2024-03-05', timestamp '2024-03-05 01:02:03', '\\x0aff'::bytea, '{\"a\":1}'::jsonb", "2024-03-05|2024-03-05 01:02:03|\n\xff|{\"a\": 1}\n");
     try c.expectError("SELECT 'maybe'::boolean", "invalid input syntax for type boolean: \"maybe\"");
     try c.expectError("SELECT 1::nosuchtype", "type \"nosuchtype\" does not exist");
-    try c.expectError("SELECT '{1}'::date[]", "arrays are not supported");
+    try c.expectError("SELECT '{1}'::date[]", "invalid input syntax for type date: \"1\"");
     // Strings.
     try c.expectRows("SELECT substring('hello' FROM 2 FOR 3), substring('hello' FROM 3), substring('hello', 2, 2), position('l' IN 'hello'), strpos('hello', 'lo')", "ell|llo|el|3|4\n");
     try c.expectRows("SELECT trim('  x  '), trim(BOTH 'x' FROM 'xxaxx'), trim(LEADING 'x' FROM 'xxa'), trim(TRAILING FROM 'a  '), btrim('xax', 'x'), ltrim('  a'), rtrim('a  ')", "x|a|a|a|a|a|a\n");
@@ -567,7 +567,8 @@ test "pg: types are strict" {
     try c.expectRows("SELECT b, n FROM ty WHERE i2 = 9", "1|2.75\n");
     try c.expectError("INSERT INTO ty (by) VALUES (1)", "cannot store INT value in BLOB column ty.by");
     try c.expectError("CREATE TABLE bad (x nosuchtype)", "type \"nosuchtype\" does not exist");
-    try c.expectError("CREATE TABLE bad (x int[])", "arrays are not supported");
+    try c.expectError("CREATE TABLE bad (x serial[])", "array of serial is not implemented");
+    try c.expectError("CREATE TABLE bad (x nosuch[])", "type \"nosuch[]\" does not exist");
     try c.expectError("CREATE TABLE bad (x int, x text)", "column \"x\" specified more than once");
 }
 
@@ -711,6 +712,14 @@ test "pg: DDL" {
     try c.expectRows("SELECT * FROM copy", "1|a\n");
     try c.exec("DROP TABLE copy; DROP TABLE IF EXISTS copy CASCADE");
     try c.expectError("DROP TABLE copy", "table \"copy\" does not exist");
+    // SELECT ... INTO is CREATE TABLE AS.
+    try c.exec("SELECT id, label INTO copy FROM kid WHERE id > 0");
+    try c.exec("WITH k AS (SELECT label FROM kid) SELECT label INTO TEMP TABLE copy_t FROM k");
+    try c.expectRows("SELECT * FROM copy; SELECT * FROM copy_t", "1|a\na\n");
+    try c.expectError("INSERT INTO copy SELECT 2, 'b' INTO other", "SELECT ... INTO is not allowed here");
+    try c.exec("DROP TABLE copy; DROP TABLE copy_t");
+    // A scalar subquery's error is its own, not a syntax error.
+    try c.expectError("SELECT (SELECT 1 FROM pg_catalog.nosuch)", "relation \"pg_catalog.nosuch\" does not exist");
     try c.expectError("DROP TABLE kid, parent", "dropping several objects in one statement is not supported");
     try c.exec("PRAGMA integrity_check");
 }
@@ -774,7 +783,7 @@ test "pg: errors in PostgreSQL's words" {
     try c.expectError("CREATE TABLE t (x int)", "relation \"t\" already exists");
     try c.expectError("SELECT 1 FROM t WHERE", "syntax error at end of input");
     try c.expectError("SELECT a b c FROM t", "syntax error at or near \"c\"");
-    try c.expectError("SELECT ARRAY(SELECT 1)", "ARRAY is not supported");
+    try c.expectError("SELECT ARRAY[]", "cannot determine type of empty array");
     try c.expectError("SELECT 1 FROM t LATERAL", "syntax error at or near \"LATERAL\"");
     try c.expectError("CREATE TYPE mood AS ENUM ('a')", "CREATE TYPE is not supported");
     try c.expectError("LISTEN chan", "syntax error at or near \"LISTEN\"");
@@ -1128,8 +1137,11 @@ test "pg: system catalogs" {
     );
     try c.expectRows("SELECT attname, pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE d.adrelid IN ('p'::regclass, 't'::regclass) ORDER BY 1", "b|'x'::text\nid|nextval('p_id_seq'::regclass)\n");
     try c.expectRows("SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'v'::regclass ORDER BY attnum", "a|integer\nb|text\n");
+    // PostgreSQL 18: a NOT NULL (and a primary key's column) is a
+    // constraint too.
     try c.expectRows("SELECT conname, contype, pg_get_constraintdef(oid, true) FROM pg_constraint WHERE conrelid = 't'::regclass ORDER BY 1",
         \\ck|c|CHECK (a > 0 AND c IS NOT NULL)
+        \\t_a_not_null|n|NOT NULL a
         \\t_b_c_key|u|UNIQUE (b, c)
         \\t_b_check|c|CHECK (length(b) > 1)
         \\t_p_fkey|f|FOREIGN KEY (p) REFERENCES p(id) ON DELETE CASCADE
@@ -1155,7 +1167,7 @@ test "pg: system catalogs" {
     // column names.
     try c.expectRows("SELECT pg_catalog.pg_class.relname FROM pg_catalog.pg_class WHERE relname OPERATOR(pg_catalog.=) 't' COLLATE pg_catalog.default", "t\n");
     // information_schema's constraints.
-    try c.expectRows("SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 't' ORDER BY 1", "ck|CHECK\nt_b_c_key|UNIQUE\nt_b_check|CHECK\nt_p_fkey|FOREIGN KEY\nt_pkey|PRIMARY KEY\n");
+    try c.expectRows("SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 't' ORDER BY 1", "ck|CHECK\nt_a_not_null|CHECK\nt_b_c_key|UNIQUE\nt_b_check|CHECK\nt_p_fkey|FOREIGN KEY\nt_pkey|PRIMARY KEY\n");
     try c.expectRows("SELECT constraint_name, column_name, ordinal_position FROM information_schema.key_column_usage WHERE table_name = 't' ORDER BY 1, 3", "t_b_c_key|b|1\nt_b_c_key|c|2\nt_p_fkey|p|1\nt_pkey|a|1\n");
     try c.expectRows("SELECT typeof(ordinal_position), typeof(character_maximum_length), table_catalog FROM information_schema.columns WHERE table_name = 'p' AND column_name = 'name'", "integer|integer|postgres\n");
     // COMMENT ON, for obj_description() and col_description().
@@ -1183,9 +1195,9 @@ test "pg: settings" {
     var c: Conn = undefined;
     try openPg(&c);
     defer c.close();
-    try c.expectRows("SHOW server_version", "16.15 (xqlite)\n");
-    try c.expectRows("SHOW server_version_num", "160015\n");
-    try c.expectRows("SELECT current_setting('server_version_num')::int >= 160000, version() LIKE 'PostgreSQL 16.%'", "1|1\n");
+    try c.expectRows("SHOW server_version", "18.6 (xqlite)\n");
+    try c.expectRows("SHOW server_version_num", "180006\n");
+    try c.expectRows("SELECT current_setting('server_version_num')::int >= 180000, version() LIKE 'PostgreSQL 18.%'", "1|1\n");
     try c.expectColumns("SHOW DateStyle", "DateStyle");
     try c.expectRows("SHOW TRANSACTION ISOLATION LEVEL", "read committed\n");
     try c.expectRows("SHOW integer_datetimes", "on\n");
@@ -1206,4 +1218,94 @@ test "pg: settings" {
     try c.expectRows("SHOW application_name", "app1\n");
     try c.exec("RESET ALL");
     try c.expectRows("SHOW application_name", "app1\n");
+}
+
+test "pg: arrays" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // The text of an array of a type is canonical: its elements read and
+    // written as the type does.
+    try c.expectRows("SELECT '{ 1 , 01, NULL}'::int[], '{yes,off}'::bool[], '{1.50,1e2}'::numeric[], '{\"a b\",c}'::text[], '[0:1]={1,2}'::int[], '{{1,2},{3,4}}'::int[]", "{1,1,NULL}|{t,f}|{1.50,100}|{\"a b\",c}|[0:1]={1,2}|{{1,2},{3,4}}\n");
+    try c.expectError("SELECT '{a}'::int[]", "invalid input syntax for type integer: \"a\"");
+    try c.expectError("SELECT '{1,2'::int[]", "malformed array literal: \"{1,2\"");
+    try c.expectError("SELECT '{{1},{2,3}}'::int[]", "malformed array literal: \"{{1},{2,3}}\"");
+    try c.expectColumns("SELECT '{1}'::int[], ARRAY[1], '{a}'::text[]", "int4|array|text");
+    // Columns: TEXT with a check, the declared type in the catalog, values
+    // stored canonical.
+    try c.exec("CREATE TABLE t (id int, a int[], b bool[], s varchar(10)[])");
+    try c.exec("INSERT INTO t VALUES (1, '{3, 1, 2}', '{yes}', '{x,y}'), (2, NULL, ARRAY[false], '{}')");
+    try c.expectError("INSERT INTO t VALUES (3, '{x}', NULL, NULL)", "invalid input syntax for type integer: \"x\"");
+    try c.expectError("INSERT INTO t VALUES (3, 'x', NULL, NULL)", "malformed array literal: \"x\"");
+    try c.expectRows("SELECT id, a, b, s FROM t ORDER BY id", "1|{3,1,2}|{t}|{x,y}\n2|NULL|{f}|{}\n");
+    try c.expectRows("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 1 ORDER BY attnum", "integer[]\nboolean[]\ncharacter varying(10)[]\n");
+    try c.expectRows("SELECT instr(sql, '\"a\" TEXT') > 0 FROM sqlite_schema WHERE name = 't'", "1\n");
+    // Constructors.
+    try c.expectRows("SELECT ARRAY[1,2], ARRAY[true,false], ARRAY['a','b c'], ARRAY[[1,2],[3,4]], ARRAY[1.50, 2], ARRAY[]::int[]", "{1,2}|{t,f}|{a,\"b c\"}|{{1,2},{3,4}}|{1.50,2}|{}\n");
+    try c.expectRows("SELECT ARRAY(SELECT id FROM t ORDER BY id DESC), ARRAY(SELECT 1 WHERE false), (SELECT array_agg(id ORDER BY id DESC) FROM t)", "{2,1}|{}|{2,1}\n");
+    try c.expectRows("SELECT array_agg(b ORDER BY id) FROM t", "{{t},{f}}\n");
+    try c.expectError("SELECT ARRAY[]", "cannot determine type of empty array");
+    // ANY and ALL.
+    try c.expectRows("SELECT 1 = ANY(ARRAY[1,2]), 3 = ANY(ARRAY[1,NULL]), 1 = ALL(ARRAY[1,NULL]), 2 = ALL(ARRAY[1,NULL]), 1 = ANY('{}'::int[]), 1 = ALL('{}'::int[]), 1 < ANY(ARRAY[0,2])", "1|NULL|NULL|0|0|1|1\n");
+    try c.expectRows("SELECT id FROM t WHERE 2 = ANY(a)", "1\n");
+    try c.expectRows("SELECT 'ab' LIKE ANY(ARRAY['a%','x']), 'AB' ILIKE ALL(ARRAY['a%','%b']), 'public' = ANY(current_schemas(true)), true = ANY(ARRAY[false, true])", "1|1|1|1\n");
+    try c.expectRows("SELECT id FROM t WHERE id > ANY(SELECT id FROM t)", "2\n");
+    try c.expectError("SELECT 1 = ANY(1)", "op ANY/ALL (array) requires array on right side");
+    // Subscripts and slices, as the element type's values.
+    try c.expectRows("SELECT a[1], a[2] + 1, a[5], a[2:3], a[:1], b[1], typeof(a[1]) FROM t WHERE id = 1", "3|2|NULL|{1,2}|{3}|1|integer\n");
+    try c.expectRows("SELECT ('{{1,2},{3,4}}'::int[])[2][1], ('{{1,2},{3,4}}'::int[])[2], ('[0:1]={7,8}'::int[])[0], (current_schemas(true))[1]", "3|NULL|7|pg_catalog\n");
+    try c.exec("UPDATE t SET a[2] = 10, b[3] = true WHERE id = 1");
+    try c.expectRows("SELECT a, b FROM t WHERE id = 1", "{3,10,2}|{t,NULL,t}\n");
+    // Operators and functions.
+    try c.expectRows("SELECT ARRAY[1,2] || 3, 0 || ARRAY[1,2], ARRAY[1] || ARRAY[2,3], ARRAY[1,2] @> ARRAY[2], ARRAY[1] <@ ARRAY[1,2], ARRAY[1,2] && ARRAY[3]", "{1,2,3}|{0,1,2}|{1,2,3}|1|1|0\n");
+    try c.expectRows("SELECT ARRAY[10] > ARRAY[9], ARRAY[1,2] = '{1, 2}', ARRAY['b'] > ARRAY['a','z'], ARRAY[1] < ARRAY[1,0]", "1|1|1|1\n");
+    try c.expectRows("SELECT array_length('{{1,2,3},{4,5,6}}'::int[], 2), array_lower('[0:1]={1,2}'::int[], 1), array_dims('{{1,2,3},{4,5,6}}'::int[]), cardinality(ARRAY[1,2]), array_ndims(ARRAY[[1]])", "3|0|[1:2][1:3]|2|2\n");
+    try c.expectRows("SELECT array_position(ARRAY['a','b'], 'b'), array_positions(ARRAY[1,2,1], 1), array_append(ARRAY[true], false), array_remove(ARRAY[1,2,1], 1), array_replace(ARRAY[1,2,1], 1, 9)", "2|{1,3}|{t,f}|{2}|{9,2,9}\n");
+    try c.expectRows("SELECT string_to_array('a,b,,c', ',', ''), array_to_string(ARRAY[1,NULL,3], ',', '*'), array_to_json(ARRAY[true])", "{a,b,NULL,c}|1,*,3|[true]\n");
+    try c.expectRows("SELECT a FROM (VALUES ('{10}'::int[]), ('{9}'), ('{1,2}')) v(a) ORDER BY a", "{1,2}\n{9}\n{10}\n");
+    // unnest(), generate_subscripts(), _pg_expandarray().
+    try c.expectRows("SELECT * FROM unnest(ARRAY[1,2], ARRAY['a','b','c'])", "1|a\n2|b\nNULL|c\n");
+    try c.expectRows("SELECT x, n FROM unnest(ARRAY['a','b']) WITH ORDINALITY AS u(x, n)", "a|1\nb|2\n");
+    try c.expectRows("SELECT t.id, u FROM t, unnest(t.s) u ORDER BY 1, 2", "1|x\n1|y\n");
+    try c.expectRows("SELECT unnest(ARRAY[1,2]), generate_subscripts(ARRAY['a','b'], 1)", "1|1\n2|2\n");
+    try c.expectRows("SELECT (information_schema._pg_expandarray(ARRAY[5,6])).n, (information_schema._pg_expandarray(ARRAY[5,6])).x", "1|5\n2|6\n");
+    // The catalog's arrays.
+    try c.exec("CREATE TABLE p (id int PRIMARY KEY, k int, UNIQUE (k, id))");
+    try c.expectRows("SELECT conkey, conkey[1] FROM pg_constraint WHERE conrelid = 'p'::regclass AND contype = 'u'", "{2,1}|2\n");
+    try c.expectRows("SELECT indkey, indkey[0], indkey[1] FROM pg_index WHERE indrelid = 'p'::regclass ORDER BY indkey::text", "1|1|NULL\n2 1|2|1\n");
+    try c.expectRows("SELECT a.attname FROM pg_constraint con JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey) WHERE con.conrelid = 'p'::regclass AND con.contype = 'u' ORDER BY a.attnum", "id\nk\n");
+    // The types: of the columns, of a parameter compared with ANY.
+    var stmt: ?*vi.Vdbe = null;
+    try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "SELECT b, a[1], ARRAY[true] FROM t WHERE id = ANY($1)", &stmt, null));
+    defer _ = api.finalize(stmt.?);
+    const engine = @import("../../api/engine.zig");
+    try testing.expectEqual(@as(?Type, .{ .logical = .array, .element = .boolean }), engine.resultType(stmt.?, 0));
+    try testing.expectEqualStrings("integer", api.columnDecltype(stmt.?, 1).?);
+    try testing.expectEqualStrings("boolean[]", api.columnDecltype(stmt.?, 2).?);
+    try testing.expectEqual(@as(?Type, .{ .logical = .array, .element = .int4 }), engine.paramType(stmt.?, 1));
+    try testing.expectEqual(RC.OK, api.bindText(stmt.?, 1, "{2,3}"));
+    try testing.expectEqual(RC.ROW, api.step(stmt.?));
+    try testing.expectEqualStrings("{f}", api.columnText(stmt.?, 0).?);
+}
+
+test "pg: arrays in the text the schema keeps" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t (id int, a int[], b bool[], s text[]);
+        \\INSERT INTO t VALUES (1, '{3,1,2}', '{t,f}', '{x,y}');
+        \\CREATE VIEW v AS SELECT id, a[1] AS first, 2 = ANY(a) AS has2, b[1] AS b1, s || 'z'::text AS s2, ARRAY[true, b[2]] AS bb FROM t;
+        \\CREATE VIEW w AS SELECT a > '{3}' AS gt, a < '{10}' AS lt FROM t;
+    );
+    const rows = "1|3|1|1|{x,y,z}|{t,f}\n";
+    try c.expectRows("SELECT * FROM v", rows);
+    // Arrays compare in their collation (the dialect's: a view that
+    // compares arrays is not read in another dialect).
+    try c.expectRows("SELECT * FROM w", "1|1\n");
+    try c.expectRows("SELECT instr(sql, 'xq_pg_subscript_k(') > 0 FROM sqlite_schema WHERE name = 'v'", "1\n");
+    try c.expectRows("SELECT instr(sql, 'COLLATE xq_pg_array_num') > 0 FROM sqlite_schema WHERE name = 'w'", "1\n");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT * FROM v", rows);
+    try c.expectError("INSERT INTO t (a) VALUES ('x')", "CHECK constraint failed: malformed array literal");
 }

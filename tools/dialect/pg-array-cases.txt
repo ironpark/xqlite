@@ -1,0 +1,206 @@
+-- Differential cases of PostgreSQL arrays and ANY/ALL (xqt dialect-diff pg
+-- tools/dialect/pg-array-cases.txt), in the format of pg-cases.txt: each
+-- case starts with a "-- case:" line and runs on an empty database, in
+-- PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. The expected output is PostgreSQL 18's.
+
+-- case: array literals cast to array types
+SELECT '{1,2,NULL}'::int[], '{"a b",c,""}'::text[], '{{1,2},{3,4}}'::int[], '[0:1]={1,2}'::int[], '{ 1 , 2 }'::int[];
+SELECT '{t,yes,false}'::bool[], '{1.50,2}'::numeric[], '{1.0,1e20}'::float8[], '{01,-0}'::bigint[], '{"x\\"y",NULL,"NULL"}'::text[];
+SELECT '{}'::int[], cardinality('{}'::int[]), '{a,b}'::varchar(5)[], CAST('{1}' AS integer ARRAY);
+
+-- case: element input errors
+SELECT '{a}'::int[];
+SELECT '{1,2'::int[];
+SELECT '{{1},{2,3}}'::int[];
+SELECT 'x'::int[];
+SELECT '{70000}'::smallint[];
+SELECT '{maybe}'::boolean[];
+SELECT '{1,x}'::numeric[];
+
+-- case: array columns and their catalog types
+CREATE TABLE t (id int, a int[], b text[], c varchar(10)[], d int ARRAY, e int[3][3], f boolean[]);
+INSERT INTO t VALUES (1, '{1, 2}', '{x,"y z"}', '{a}', '{{1}}', NULL, '{yes,f}');
+INSERT INTO t VALUES (2, '{}', ARRAY['q'], NULL, NULL, NULL, ARRAY[true]);
+SELECT * FROM t ORDER BY id;
+SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname = 't' AND a.attnum > 0 ORDER BY a.attnum;
+SELECT column_name, data_type, udt_name FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position;
+
+-- case: storing into array columns is checked
+CREATE TABLE t (a int[], b bool[]);
+INSERT INTO t VALUES ('{a}', NULL);
+INSERT INTO t VALUES ('x', NULL);
+INSERT INTO t VALUES (NULL, '{nope}');
+INSERT INTO t VALUES ('{ 3 , 04 }', '{on,off}');
+UPDATE t SET a = '{5,6}' WHERE b = '{t,f}';
+SELECT * FROM t;
+
+-- case: ARRAY constructors
+SELECT ARRAY[1,2], ARRAY[true,false], ARRAY['a','b c'], ARRAY[1.5,2], ARRAY[[1,2],[3,4]], ARRAY[ARRAY[1],ARRAY[2]];
+SELECT ARRAY[]::int[], ARRAY[1,NULL], ARRAY[NULL,NULL], ARRAY[1,2.5], ARRAY[1.50, 2.00];
+SELECT ARRAY['1','2']::int[], ARRAY[1,2]::text[];
+
+-- case: ARRAY constructor errors
+SELECT ARRAY[];
+SELECT ARRAY[1,'a'];
+SELECT ARRAY[[1,2],[3]];
+
+-- case: ARRAY of a query
+SELECT ARRAY(SELECT x FROM (VALUES (3),(1),(2)) v(x) ORDER BY x);
+SELECT ARRAY(SELECT x FROM (VALUES (3),(1),(2)) v(x) ORDER BY x DESC) AS d;
+SELECT ARRAY(SELECT 1 WHERE false), ARRAY(SELECT 'a' UNION ALL SELECT 'b');
+CREATE TABLE t (id int, name text);
+INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, NULL);
+SELECT id, ARRAY(SELECT name FROM t t2 WHERE t2.id >= t.id ORDER BY t2.id) FROM t ORDER BY id;
+
+-- case: array_agg
+SELECT array_agg(x ORDER BY x DESC) FROM (VALUES (1),(3),(2)) v(x);
+SELECT array_agg(x) FROM (VALUES (true),(NULL),(false)) v(x);
+SELECT array_agg(x) FROM (VALUES ('a'),('b c')) v(x);
+SELECT array_agg(x) FROM (VALUES (1)) v(x) WHERE false;
+SELECT g, array_agg(x ORDER BY x) FROM (VALUES (1, 'b'), (1, 'a'), (2, 'c')) v(g, x) GROUP BY g ORDER BY g;
+SELECT array_agg(a ORDER BY a) FROM (VALUES (ARRAY[1,2]), (ARRAY[3,4])) v(a);
+
+-- case: string_to_array and array_to_string
+SELECT string_to_array('a,b,,c', ','), string_to_array('a,b,,c', ',', ''), string_to_array('abc', NULL), string_to_array('', ',');
+SELECT string_to_array('a b c', ' ')::text, array_to_string(ARRAY[1,NULL,3],',','*'), array_to_string(ARRAY[1,NULL,3],','), array_to_string(ARRAY[[1,2],[3,4]], '-');
+
+-- case: ANY and ALL of arrays
+SELECT 1 = ANY(ARRAY[1,2]), 3 = ANY(ARRAY[1,2]), 3 = ANY(ARRAY[1,NULL]), 1 = ALL(ARRAY[1,1]), 1 = ALL(ARRAY[1,NULL]), 2 = ALL(ARRAY[1,NULL]);
+SELECT NULL = ANY(ARRAY[1]), 1 = ANY('{}'::int[]), 1 = ALL('{}'::int[]), 1 < ANY(ARRAY[0,2]), 1 <> ALL(ARRAY[2,3]), 2 >= ALL(ARRAY[1,2]), 1 = SOME(ARRAY[1]);
+SELECT 1 = ANY(NULL::int[]), 'a' = ANY('{a,b}'), 'c' = ANY('{a,b}'::text[]), 1 = ANY('{1,2}'), true = ANY(ARRAY[false, true]);
+SELECT 'ab' LIKE ANY(ARRAY['a%','x']), 'AB' ILIKE ALL(ARRAY['a%','%b']), 'ab' NOT LIKE ALL(ARRAY['x%', 'y%']), 'ab' LIKE ALL(ARRAY['a%', 'x%']);
+SELECT 1 = ANY(1);
+
+-- case: ANY and ALL of table columns
+CREATE TABLE t (id int, tags text[], nums int[]);
+INSERT INTO t VALUES (1, '{a,b}', '{1,2}'), (2, '{c}', '{3}'), (3, NULL, '{}');
+SELECT id FROM t WHERE 'a' = ANY(tags) ORDER BY id;
+SELECT id FROM t WHERE 2 = ANY(nums) OR id = ANY(ARRAY[3]) ORDER BY id;
+SELECT id, 'c' = ANY(tags), 5 > ALL(nums) FROM t ORDER BY id;
+SELECT id FROM t WHERE id = ANY(SELECT unnest(nums) FROM t) ORDER BY id;
+SELECT id FROM t WHERE id > ANY(SELECT id FROM t) ORDER BY id;
+SELECT id FROM t WHERE id <= ALL(SELECT id FROM t) ORDER BY id;
+
+-- case: ANY of a function's array
+SELECT 'public' = ANY(current_schemas(true)), 'nope' = ANY(current_schemas(false)), (current_schemas(true))[1];
+CREATE TABLE t (a int);
+SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = ANY (ARRAY['r', 'p', 'v']) AND n.nspname = ANY(current_schemas(false));
+
+-- case: subscripts and slices
+SELECT (ARRAY[1,2,3])[2], (ARRAY[1,2,3])[5], (ARRAY[1,2,3])[0], (ARRAY[1,2,3])[2:3], (ARRAY[1,2,3])[:2], (ARRAY[1,2,3])[2:];
+SELECT ('{{1,2},{3,4}}'::int[])[2][1], ('{{1,2},{3,4}}'::int[])[2], ('{{1,2},{3,4}}'::int[])[1:1][2:2], ('[0:1]={7,8}'::int[])[0];
+SELECT (ARRAY['a','b'])[1] || 'x', (ARRAY[1,2])[1] + 1, (ARRAY[1,2])[NULL], ('{a,b}'::text[])[2:1];
+CREATE TABLE t (id int, a int[], s text[]);
+INSERT INTO t VALUES (1, '{10,20,30}', '{x,y}'), (2, '{40}', NULL);
+SELECT id, a[1], a[2], s[1], a[1:2] FROM t ORDER BY id;
+SELECT id FROM t WHERE a[1] = 40;
+SELECT id FROM t WHERE s[2] = 'y';
+
+-- case: array functions
+SELECT array_length('{{1,2,3},{4,5,6}}'::int[],1), array_length('{{1,2,3},{4,5,6}}'::int[],2), array_length('{1}'::int[],3), array_length(ARRAY[]::int[],1);
+SELECT array_lower('[0:1]={1,2}'::int[],1), array_upper('[0:1]={1,2}'::int[],1), array_dims('{{1,2,3},{4,5,6}}'::int[]), cardinality('{{1,2,3},{4,5,6}}'::int[]), array_ndims('{{1}}'::int[]);
+SELECT array_position(ARRAY['a','b','c'],'b'), array_position(ARRAY[1,2,1],1,2), array_positions(ARRAY[1,2,1],1), array_position(ARRAY[1,NULL],NULL), array_position(ARRAY[1,2],3);
+SELECT array_append(ARRAY[1,2],3), array_prepend(0,ARRAY[1]), array_cat(ARRAY[1],ARRAY[2,3]), array_remove(ARRAY[1,2,1],1), array_replace(ARRAY[1,2,1],1,9);
+SELECT array_append(ARRAY[true], false), array_append(NULL::int[], 1), array_cat(NULL, ARRAY[1]), array_remove(ARRAY['a',NULL], NULL);
+
+-- case: array operators
+SELECT ARRAY[1,2] || 3, 0 || ARRAY[1,2], ARRAY[1] || ARRAY[2,3], ARRAY[[1,2]] || ARRAY[3,4], ARRAY['a'] || 'b'::text;
+SELECT ARRAY[1,2] @> ARRAY[2], ARRAY[1] <@ ARRAY[1,2], ARRAY[1,2] && ARRAY[2,3], ARRAY[1,2] && ARRAY[3], ARRAY[1,NULL] @> ARRAY[NULL::int];
+SELECT ARRAY[1,2] = ARRAY[1,2], ARRAY[1,2] < ARRAY[1,3], ARRAY[10] > ARRAY[9], ARRAY[1,2] <> '{1, 2}', ARRAY[1] < ARRAY[1,0], ARRAY['b'] > ARRAY['a','z'];
+SELECT ARRAY[1,2] || NULL, ARRAY[1,2] || '{3}';
+
+-- case: ORDER BY and DISTINCT arrays
+CREATE TABLE t (a int[]);
+INSERT INTO t VALUES ('{10}'), ('{9}'), ('{1,2}'), ('{1}'), (NULL), ('{1}');
+SELECT a FROM t ORDER BY a;
+SELECT DISTINCT a FROM t ORDER BY a DESC;
+
+-- case: unnest in FROM
+SELECT * FROM unnest(ARRAY[1,2,3]);
+SELECT * FROM unnest(ARRAY[1,2], ARRAY['a','b','c']);
+SELECT * FROM unnest(ARRAY['a','b']) WITH ORDINALITY AS t(x, n);
+SELECT u FROM unnest('{{1,2},{3,4}}'::int[]) AS u;
+SELECT x + 1 FROM unnest(ARRAY[1,2]) x ORDER BY 1 DESC;
+SELECT count(*) FROM unnest(NULL::int[]);
+
+-- case: unnest of a table's arrays
+CREATE TABLE t (id int, tags text[]);
+INSERT INTO t VALUES (1, '{a,b}'), (2, '{c}'), (3, NULL);
+SELECT t.id, u.tag FROM t, unnest(t.tags) AS u(tag) ORDER BY 1, 2;
+SELECT id, unnest(tags) FROM t ORDER BY 1, 2;
+SELECT tag, count(*) FROM t CROSS JOIN LATERAL unnest(t.tags) tag GROUP BY tag ORDER BY tag;
+
+-- case: unnest and generate_subscripts in the select list
+SELECT unnest(ARRAY[1,2]), generate_subscripts(ARRAY['a','b'],1);
+SELECT unnest(ARRAY[1,2,3]) AS x, unnest(ARRAY['a']) AS y;
+SELECT * FROM generate_subscripts('[0:1]={1,2}'::int[], 1) g;
+SELECT generate_subscripts(ARRAY[[1,2],[3,4],[5,6]], 1) AS r, generate_subscripts(ARRAY[[1,2],[3,4],[5,6]], 2) AS c;
+SELECT * FROM generate_subscripts(ARRAY['a','b','c'], 1, true) AS s;
+
+-- case: arrays of the catalog
+CREATE TABLE p (id int PRIMARY KEY, k int, UNIQUE (id, k));
+CREATE TABLE c (id int, p_id int REFERENCES p (id));
+SELECT conname, conkey, confkey, conkey[1] AS first FROM pg_constraint WHERE conrelid IN ('p'::regclass, 'c'::regclass) AND contype <> 'n' ORDER BY conname;
+SELECT i.indkey, i.indkey[0] AS k0, array_length(i.indkey, 1) FROM pg_index i WHERE i.indrelid = 'p'::regclass ORDER BY i.indkey::text;
+SELECT a.attname FROM pg_constraint con JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey) WHERE con.conrelid = 'p'::regclass AND con.contype = 'u' ORDER BY a.attnum;
+SELECT con.conname, a.attname, k.n FROM pg_constraint con, unnest(con.conkey) WITH ORDINALITY k(attnum, n) JOIN pg_attribute a ON a.attnum = k.attnum WHERE a.attrelid = con.conrelid AND con.conrelid = 'p'::regclass AND con.contype <> 'n' ORDER BY 1, 3;
+
+-- case: _pg_expandarray
+CREATE TABLE p (a int, b int, c int, PRIMARY KEY (c, a));
+SELECT (information_schema._pg_expandarray(i.indkey)).n AS n, (information_schema._pg_expandarray(i.indkey)).x AS x FROM pg_index i WHERE i.indrelid = 'p'::regclass;
+SELECT a.attname, (k.keys).n FROM (SELECT information_schema._pg_expandarray(i.indkey) AS keys, i.indrelid FROM pg_index i WHERE i.indrelid = 'p'::regclass) k JOIN pg_attribute a ON a.attrelid = k.indrelid AND a.attnum = (k.keys).x ORDER BY 2;
+SELECT * FROM information_schema._pg_expandarray(ARRAY['a','b']);
+
+-- case: array_to_json of arrays of a type
+SELECT array_to_json(ARRAY[1,2]), array_to_json('{a,b}'::text[]), array_to_json(ARRAY[true]), to_json(ARRAY[1.5]), json_build_object('k', ARRAY['x']);
+
+-- case: assigning to an element in UPDATE
+CREATE TABLE t (id int, a int[], b bool[], m int[]);
+INSERT INTO t VALUES (1, '{1,2,3}', '{t}', '{{1,2},{3,4}}'), (2, NULL, NULL, NULL), (3, '{}', '{}', '{}');
+UPDATE t SET a[2] = 20, b[1] = false, m[2][1] = 30 WHERE id = 1;
+UPDATE t SET a[3] = 7, b[2] = true WHERE id = 2;
+UPDATE t SET a[5] = 9 WHERE id = 1;
+UPDATE t SET a[0] = 0 WHERE id = 3;
+SELECT * FROM t ORDER BY id;
+UPDATE t SET m[3][1] = 1 WHERE id = 1;
+
+-- case: views and checks over arrays
+CREATE TABLE t (id int, a int[], b bool[], s text[]);
+INSERT INTO t VALUES (1, '{3,1,2}', '{t,f}', '{x,y}');
+CREATE VIEW v AS SELECT id, a[1] AS first, a[2:3] AS rest, 2 = ANY(a) AS has2, b[1] AS b1, s || 'z'::text AS s2, ARRAY[true, b[2]] AS bb, array_agg(id) OVER () AS ids, a > '{3}' AS gt FROM t;
+SELECT * FROM v;
+SELECT first + 1, has2 FROM v WHERE first = 3;
+CREATE TABLE c (a int[] CHECK (cardinality(a) < 3), b int[]);
+INSERT INTO c VALUES ('{1,2,3}', NULL);
+INSERT INTO c VALUES ('{1,2}', '{5}');
+CREATE INDEX ci ON c ((a[1]));
+SELECT a[1], b FROM c WHERE a[1] = 1;
+
+-- case: arrays of dates, numerics and json
+SELECT '{2024-01-02, 2024-02-30}'::date[];
+SELECT '{2024-01-02,"2024-03-04"}'::date[], '{1.5, 2.250}'::numeric[], '{"{\"a\":1}"}'::jsonb[], '{12:00}'::time[], '{1 day}'::interval[];
+SELECT ARRAY[date '2024-01-02'], ARRAY[1.50::numeric(4,2), 2], (ARRAY[2.50])[1], '2024-01-02'::date = ANY('{2024-01-02}'::date[]);
+SELECT ARRAY['a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid], '{A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11}'::uuid[];
+
+-- case: array_agg as a window function
+SELECT x, array_agg(x) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM (VALUES (1),(2),(3)) v(x) ORDER BY x;
+
+-- case: introspection queries of clients: Django's constraints and indexes
+CREATE TABLE author (id int PRIMARY KEY, name text UNIQUE);
+CREATE TABLE book (id int PRIMARY KEY, author_id int REFERENCES author (id), title text, UNIQUE (title, author_id));
+CREATE INDEX book_title_desc ON book (title DESC, id);
+SELECT c.conname, array(SELECT attname FROM unnest(c.conkey) WITH ORDINALITY cols(colid, arridx) JOIN pg_attribute AS ca ON cols.colid = ca.attnum WHERE ca.attrelid = c.conrelid ORDER BY cols.arridx), c.contype, (SELECT fkc.relname || '.' || fka.attname FROM pg_attribute AS fka JOIN pg_class AS fkc ON fka.attrelid = fkc.oid WHERE fka.attrelid = c.confrelid AND fka.attnum = c.confkey[1]) FROM pg_constraint AS c JOIN pg_class AS cl ON c.conrelid = cl.oid WHERE cl.relname = 'book' AND c.contype IN ('p', 'u', 'f') ORDER BY 1;
+SELECT indexname, array_agg(attname ORDER BY arridx), indisunique, indisprimary, array_agg(ordering ORDER BY arridx) FROM (SELECT c2.relname AS indexname, idx.*, attr.attname, CASE (option & 1) WHEN 1 THEN 'DESC' ELSE 'ASC' END AS ordering FROM (SELECT * FROM pg_index i, unnest(i.indkey, i.indoption) WITH ORDINALITY koi(key, option, arridx)) idx LEFT JOIN pg_class c ON idx.indrelid = c.oid LEFT JOIN pg_class c2 ON idx.indexrelid = c2.oid LEFT JOIN pg_attribute attr ON attr.attrelid = c.oid AND attr.attnum = idx.key WHERE c.relname = 'book') s2 GROUP BY indexname, indisunique, indisprimary ORDER BY indexname;
+
+-- case: introspection queries of clients: SQLAlchemy's primary key, pgjdbc's keys
+CREATE TABLE book (a int, b int, c text, PRIMARY KEY (b, a));
+SELECT attr.conname, array_agg(CAST(attr.attname AS TEXT) ORDER BY attr.ord) AS cols FROM (SELECT con.conrelid AS conrelid, con.conname AS conname, con.ord AS ord, pg_catalog.pg_attribute.attname AS attname FROM pg_catalog.pg_attribute JOIN (SELECT pg_catalog.pg_constraint.conrelid AS conrelid, pg_catalog.pg_constraint.conname AS conname, unnest(pg_catalog.pg_index.indkey) AS attnum, generate_subscripts(pg_catalog.pg_index.indkey, 1) AS ord FROM pg_catalog.pg_constraint JOIN pg_catalog.pg_index ON pg_catalog.pg_constraint.conindid = pg_catalog.pg_index.indexrelid WHERE pg_catalog.pg_constraint.contype = 'p' AND pg_catalog.pg_constraint.conrelid IN ('book'::regclass)) AS con ON pg_catalog.pg_attribute.attnum = con.attnum AND pg_catalog.pg_attribute.attrelid = con.conrelid) AS attr GROUP BY attr.conrelid, attr.conname;
+SELECT result.COLUMN_NAME, result.KEY_SEQ, result.PK_NAME FROM (SELECT a.attname AS COLUMN_NAME, (information_schema._pg_expandarray(i.indkey)).n AS KEY_SEQ, ci.relname AS PK_NAME, information_schema._pg_expandarray(i.indkey) AS KEYS, a.attnum AS A_ATTNUM FROM pg_catalog.pg_class ct JOIN pg_catalog.pg_attribute a ON (ct.oid = a.attrelid) JOIN pg_catalog.pg_namespace n ON (ct.relnamespace = n.oid) JOIN pg_catalog.pg_index i ON (a.attrelid = i.indrelid) JOIN pg_catalog.pg_class ci ON (ci.oid = i.indexrelid) WHERE true AND n.nspname = 'public' AND ct.relname = 'book' AND i.indisprimary) result WHERE result.A_ATTNUM = (result.KEYS).x ORDER BY result.pk_name, result.key_seq;
+
+-- case: introspection queries of clients: psql's reloptions, pgjdbc's schemas
+CREATE TABLE t (a int);
+SELECT pg_catalog.array_to_string(c.reloptions || array(select 'toast.' || x from pg_catalog.unnest(tc.reloptions) x), ', ') FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_class tc ON (c.reltoastrelid = tc.oid) WHERE c.relname = 't';
+SELECT nspname AS TABLE_SCHEM FROM pg_catalog.pg_namespace WHERE nspname <> 'pg_toast' AND (nspname !~ '^pg_temp_' OR nspname = (pg_catalog.current_schemas(true))[1]) AND nspname = ANY(ARRAY['public', 'pg_catalog']) ORDER BY TABLE_SCHEM;
+SELECT s.r, (current_schemas(false))[s.r] AS nspname FROM generate_series(1, array_upper(current_schemas(false), 1)) AS s(r);

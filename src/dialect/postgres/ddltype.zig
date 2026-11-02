@@ -223,6 +223,11 @@ const Back = struct {
         switch (e.kind) {
             .concat => |c| if (c.args.len == 2 and calls(x, "xq_pg_jsonb_concat")) {
                 e.kind = .{ .func = try b.func(e.pos, x.token(), c.args) };
+            } else if (c.args.len == 2 and (calls(x, "xq_pg_array_cat2") or calls(x, "xq_pg_array_append") or calls(x, "xq_pg_array_prepend"))) {
+                // || of arrays (an element wrapped as the call's argument).
+                const f = try b.func(e.pos, x.token(), c.args);
+                try b.call(f, x);
+                e.kind = .{ .func = f };
             },
             // An operator the table made a call (operators.zig, jsonb's
             // `-` of an operand of no type).
@@ -249,6 +254,12 @@ const Back = struct {
                 const l = x.left orelse return;
                 if (!isCollate(l)) return;
                 c.collation = collationOf(l);
+                if (isArrayCollation(c.collation.?)) {
+                    // A string literal read as the array type.
+                    try b.literalArray(&c.l, l.left);
+                    try b.literalArray(&c.r, x.right);
+                    return;
+                }
                 if (!std.mem.eql(u8, c.collation.?, jsonb_collation)) return;
                 if (c.l.kind == .string) if (l.left) |w| if (isCall(w)) {
                     c.l = try b.jsonb(c.l);
@@ -274,6 +285,17 @@ const Back = struct {
         for (types) |ty| if (std.mem.eql(u8, ty[0], name)) {
             t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = ty[1], .mode = .{ .func = ty[0] } } });
         };
+    }
+
+    /// A string literal operand `t` the core read as an array (`w`:
+    /// xq_pg_array_int4('{1}')): that cast.
+    fn literalArray(b: *Back, t: **Expr, w_: ?*IrExpr) Error!void {
+        const w = w_ orelse return;
+        if (t.*.kind != .string or !isCall(w)) return;
+        const list = w.x.list orelse return;
+        if (list.len() != 1 or list.at(0).expr != b.of(t.*)) return;
+        const name = try b.a.dupe(u8, w.token());
+        t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = "", .mode = .{ .func = name } } });
     }
 
     /// A call: another function, wrapped arguments, more arguments.
@@ -304,8 +326,9 @@ const Back = struct {
             for (wl.slice()[1..]) |c| try args.append(b.a, try b.constant(arg.*, c.expr.?) orelse continue);
             arg.* = try tree.expr(b.a, arg.*.pos, arg.*.end, .{ .func = try b.func(arg.*.pos, name, args.items) });
         }
-        // Arguments the core added (array_to_json()'s).
-        if (items.len > f.args.len and f.args.len > 0 and calls(x, "xq_pg_array_to_json")) {
+        // Arguments the core added (array_to_json()'s, the element type of
+        // an array's: array.Code).
+        if (items.len > f.args.len and f.args.len > 0 and adds_args.has(x.token())) {
             var args: std.ArrayList(*Expr) = .empty;
             try args.appendSlice(b.a, f.args);
             for (items[f.args.len..]) |c| try args.append(b.a, try b.constant(f.args[0], c.expr.?) orelse return);
@@ -334,20 +357,40 @@ const jsonb_collation = "xq_pg_jsonb";
 
 /// The functions overload.zig calls in the place of another.
 const renames = std.StaticStringMap(void).initComptime(.{
-    .{"xq_pg_jsonb_get"},       .{"xq_pg_jsonb_get_text"}, .{"xq_pg_jsonb_path"},
-    .{"xq_pg_jsonb_path_text"}, .{"xq_pg_json_agg_rows"},  .{"xq_pg_array_to_json"},
+    .{"xq_pg_jsonb_get"},       .{"xq_pg_jsonb_get_text"},   .{"xq_pg_jsonb_path"},
+    .{"xq_pg_jsonb_path_text"}, .{"xq_pg_json_agg_rows"},    .{"xq_pg_array_to_json"},
+    .{"xq_pg_array_nested"},    .{"xq_pg_array_agg_arrays"}, .{"xq_pg_subscript_k"},
+    .{"xq_pg_array_contains"},
 });
+
+/// The functions overload.zig gives more arguments.
+const adds_args = std.StaticStringMap(void).initComptime(.{
+    .{"xq_pg_array_to_json"}, .{"xq_pg_any"}, .{"xq_pg_subscript_k"}, .{"xq_pg_rows_unnest"},
+});
+
+const array = @import("array.zig");
+
+fn isArrayCollation(z: []const u8) bool {
+    return std.mem.eql(u8, z, array.collation_text) or std.mem.eql(u8, z, array.collation_number);
+}
 
 const interval_collation = "xq_pg_interval";
 
 /// Whether `x` is the COLLATE of a type's order overload.zig chose
 /// (jsonb's, intervals').
 fn isCollate(x: *const IrExpr) bool {
-    return x.op == TK.COLLATE and (std.ascii.eqlIgnoreCase(x.token(), jsonb_collation) or std.ascii.eqlIgnoreCase(x.token(), interval_collation));
+    if (x.op != TK.COLLATE) return false;
+    for ([_][]const u8{ jsonb_collation, interval_collation, array.collation_text, array.collation_number }) |n| {
+        if (std.ascii.eqlIgnoreCase(x.token(), n)) return true;
+    }
+    return false;
 }
 
 fn collationOf(x: *const IrExpr) []const u8 {
-    return if (std.ascii.eqlIgnoreCase(x.token(), interval_collation)) interval_collation else jsonb_collation;
+    for ([_][]const u8{ interval_collation, array.collation_text, array.collation_number }) |n| {
+        if (std.ascii.eqlIgnoreCase(x.token(), n)) return n;
+    }
+    return jsonb_collation;
 }
 
 fn isCall(x: *const IrExpr) bool {

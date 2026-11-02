@@ -175,7 +175,8 @@ pub fn repeatFunc(ctx: *Context, argv: []*Mem) void {
     const z = text(ctx, argv[0]) orelse return;
     const n = api.valueInt64(argv[1]);
     if (n <= 0 or z.len == 0) return api.resultText(ctx, "", .static);
-    if (@as(u64, @intCast(n)) * z.len > 1 << 30) return api.resultErrorTooBig(ctx);
+    const total = std.math.mul(u64, @intCast(n), z.len) catch return api.resultErrorTooBig(ctx);
+    if (total > 1 << 30) return api.resultErrorTooBig(ctx);
     var out: std.ArrayList(u8) = .empty;
     out.ensureTotalCapacityPrecise(gpa, @as(usize, @intCast(n)) * z.len) catch return api.resultErrorNomem(ctx);
     for (0..@intCast(n)) |_| out.appendSliceAssumeCapacity(z);

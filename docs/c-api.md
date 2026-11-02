@@ -171,6 +171,8 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 - 진입점이 `SQLITE_OK_LOAD_PERMANENTLY`를 돌려주면 라이브러리를 닫지 않습니다. 나머지는 연결을 닫을 때(그 함수·collation·모듈을 모두 정리한 뒤) `xDlClose`로 닫습니다.
 - WebAssembly에는 동적 로더가 없어 `xDlOpen`이 늘 실패합니다. Zig API(엔진만 쓸 때)의 SQL 함수 `load_extension()`은 넘길 표가 없으므로, 켜져 있어도 "extension loading is not supported"로 실패합니다.
 
+**sqlite3용 확장.** 방향이 반대인 것도 있습니다. `zig build ext`의 `libxqlite_ext`는 방언으로 만든 데이터베이스의 엔진 함수와 collation을 실제 sqlite3에 등록하는 로더블 확장입니다([sqlite3용 확장](extension.md)). `sqlite3ext.h`로 빌드되어 `libxqlite3`에도 그대로 올라갑니다(`capi_test.c`의 `test_b_xqlite_ext()`). 진입점은 `sqlite3_xqliteext_init`(파일 이름에서 만든 이름)과 `sqlite3_extension_init`입니다.
+
 **carray.** C ABI는 `SQLITE_ENABLE_CARRAY`로 빌드한 SQLite처럼 테이블 값 함수 `carray()`와 `sqlite3_carray_bind()`/`sqlite3_carray_bind_v2()`를 갖습니다. `carray()`는 SQLite 3.54의 `carray.c`를 옮긴 엔진 가상 테이블(`src/ext/carray.zig`)이고, SQLite처럼 문장이 처음 `carray`라는 이름을 쓸 때 등록합니다. 엔진에서는 연결별 `Sqlite3.enable_carray`로 켜고, C ABI가 여는 연결은 켜져 있습니다. Zig API의 연결은 기본 빌드처럼 꺼져 있습니다.
 
 - `carray(PTR, N [, TYPE])`: `PTR`은 `sqlite3_bind_pointer(..., "carray", ...)`로 묶은 배열입니다. `TYPE`은 `'int32'`(기본), `'int64'`, `'double'`, `'char*'`, `'struct iovec'`이고, 모르는 타입이면 `unknown datatype: 'X'`입니다.

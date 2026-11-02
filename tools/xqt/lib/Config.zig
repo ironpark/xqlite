@@ -11,6 +11,7 @@
 //! `zig build tools` builds the two reference shells from the SQLite
 //! amalgamation that build.zig.zon pins, and `zig build check` passes them.
 //! | `crashshim` | `--crashshim` | `XQT_CRASHSHIM`   | ROOT/zig-out/lib/libcrashshim.{dylib,so}         |
+//! | `ext`       | `--ext`       | `XQT_EXT`         | ROOT/zig-out/lib/libxqlite_ext.{dylib,so}        |
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -30,6 +31,9 @@ sqlite3: []const u8,
 sq: []const u8,
 /// The preload library of tools/crashshim.c (see crash.zig).
 crashshim: []const u8,
+/// The loadable extension (`zig build ext`, docs/extension.md), for the
+/// checks that load it into sqlite3 (Check.sqlite3Ext()).
+ext: []const u8,
 /// Checks to run at once (-j N, default: the CPU count).
 jobs: usize,
 /// -v: print the log of every check, not only of failed ones.
@@ -53,6 +57,8 @@ pub const usage =
     \\                                          if it exists, else sqlite3 on PATH)
     \\  --crashshim PATH tools/crashshim.c built as a preload library
     \\                                         ($XQT_CRASHSHIM, default ROOT/zig-out/lib/)
+    \\  --ext PATH       the loadable extension ($XQT_EXT, default
+    \\                                          ROOT/zig-out/lib/libxqlite_ext.{dylib,so})
     \\
 ;
 
@@ -66,6 +72,7 @@ pub fn parse(arena: Allocator, io: Io, environ: *const Environ.Map, root: []cons
     var sqlite3_flag: ?[]const u8 = null;
     var sq_flag: ?[]const u8 = null;
     var shim_flag: ?[]const u8 = null;
+    var ext_flag: ?[]const u8 = null;
     var jobs: ?usize = null;
     var verbose = false;
     var keep = false;
@@ -97,6 +104,9 @@ pub fn parse(arena: Allocator, io: Io, environ: *const Environ.Map, root: []cons
         } else if (std.mem.eql(u8, a, "--crashshim") and has_value) {
             i += 1;
             shim_flag = args[i];
+        } else if (std.mem.eql(u8, a, "--ext") and has_value) {
+            i += 1;
+            ext_flag = args[i];
         } else {
             try rest.append(arena, a);
         }
@@ -113,6 +123,8 @@ pub fn parse(arena: Allocator, io: Io, environ: *const Environ.Map, root: []cons
             try builtShell(arena, io, root, "sqlite3-planner")),
         .crashshim = try absolute(arena, io, shim_flag orelse environ.get("XQT_CRASHSHIM") orelse
             try std.fs.path.join(arena, &.{ root, "zig-out", "lib", shim_name })),
+        .ext = try absolute(arena, io, ext_flag orelse environ.get("XQT_EXT") orelse
+            try std.fs.path.join(arena, &.{ root, "zig-out", "lib", ext_name })),
         .jobs = jobs orelse std.Thread.getCpuCount() catch 4,
         .verbose = verbose,
         .keep = keep,
@@ -129,6 +141,7 @@ fn builtShell(arena: Allocator, io: Io, root: []const u8, name: []const u8) ![]c
 }
 
 pub const shim_name = if (builtin.os.tag.isDarwin()) "libcrashshim.dylib" else "libcrashshim.so";
+pub const ext_name = if (builtin.os.tag.isDarwin()) "libxqlite_ext.dylib" else "libxqlite_ext.so";
 
 /// A path with a slash in it, made absolute (checks run in directories of
 /// their own); a bare name stays, for a PATH lookup.

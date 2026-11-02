@@ -128,6 +128,19 @@ pub fn sqlite3(c: *Check, db: []const u8, sql: []const u8) ![]const u8 {
     return c.runOk(&.{ c.cfg.sqlite3, db, sql }, .{});
 }
 
+/// `sqlite3 -cmd ".load EXT" DB SQL`: the reference shell with the
+/// loadable extension (Config.ext) loaded; must succeed.
+pub fn sqlite3Ext(c: *Check, db: []const u8, sql: []const u8) ![]const u8 {
+    return c.runOk(try c.sqlite3ExtArgv(db, sql), .{});
+}
+
+/// The argv of sqlite3Ext() (SQL null: read standard input), for `run`.
+pub fn sqlite3ExtArgv(c: *Check, db: []const u8, sql: ?[]const u8) ![]const []const u8 {
+    const load = try std.fmt.allocPrint(c.arena, ".load \"{s}\"", .{c.cfg.ext});
+    if (sql) |s| return c.arena.dupe([]const u8, &.{ c.cfg.sqlite3, "-cmd", load, db, s });
+    return c.arena.dupe([]const u8, &.{ c.cfg.sqlite3, "-cmd", load, db });
+}
+
 /// `sqlite3 ARGS...`; must succeed.
 pub fn sqlite3Args(c: *Check, args: []const []const u8) ![]const u8 {
     return c.runOk(try c.command(c.cfg.sqlite3, args), .{});

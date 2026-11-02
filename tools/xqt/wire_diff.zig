@@ -1,19 +1,37 @@
-//! `xqt wire-diff pg [CASES-FILE...]`: the differential test of the
-//! PostgreSQL wire server (`xqlite serve --pg`) against a real
-//! PostgreSQL, with psql as the client on both sides.
+//! `xqt wire-diff pg [--live|--record] [CASES-FILE...]`: the
+//! differential test of the PostgreSQL wire server (`xqlite serve --pg`)
+//! against a real PostgreSQL, with psql as the client on both sides.
 //!
 //! Where `xqt dialect-diff pg` compares the rows of `xqlite sql`, this one
-//! compares what a user of psql sees: the same psql (16, from the
-//! postgres:16-alpine container) runs the same script against the
-//! server and against `xqlite serve --pg` on a new, empty database, and
-//! its whole output (aligned tables, command tags, NOTICEs, ERROR lines
-//! with LINE/DETAIL/HINT, the meta-commands \d, \dt, \gdesc, \bind ...)
-//! must be the same. Each case gets its own xqlite server (port 0, the
-//! port read from its "listening on" line) and database file; on the
-//! PostgreSQL side each worker has a database of its own
-//! (xqt_wire_N), which each case empties first, as dialect-diff does.
-//! Both sides connect with `-U postgres -d xqt_wire_N`, so the names
-//! psql prints (owner, database) are the same.
+//! compares what a user of psql sees: the same psql (18, from the
+//! postgres:18-alpine image) runs the same script against the server and
+//! against `xqlite serve --pg` on a new, empty database, and its whole
+//! output (aligned tables, command tags, NOTICEs, ERROR lines with
+//! LINE/DETAIL/HINT, the meta-commands \d, \dt, \gdesc, \bind ...) must
+//! be the same. Each case gets its own xqlite server (port 0, the port
+//! read from its "listening on" line) and database file.
+//!
+//! PostgreSQL's side comes from one of:
+//!
+//! - a recording (the default): what psql printed against PostgreSQL for
+//!   each case, tools/dialect/pg-expected/NAME.out for a cases file
+//!   NAME.txt (dialect_diff.Recording, with a hash of the case's text and
+//!   of its file's setup: a case changed since is reported, as is one not
+//!   recorded). No server runs, only psql against xqlite: a psql 18 of
+//!   the host if there is one, else one in a short-lived container
+//!   (`podman run --rm -i postgres:18-alpine`, which reaches the host at
+//!   host.containers.internal).
+//! - `--live`: the server, now, with psql inside its container (xq-pg).
+//! - `--record`: as --live, and what psql printed against PostgreSQL
+//!   becomes the recording, with the server's and psql's versions.
+//!
+//! On the server (--live, --record) each worker has a database of its own
+//! (xqt_wire_PID_N, with the process id, so that two runs on one server
+//! do not meet), which each case empties first, as dialect-diff does.
+//! Both sides connect with `-U postgres -d DB`, so the names psql prints
+//! (owner, database) are the same; in the outputs the database's name
+//! becomes xqt_wire_recording (as long, so that tables keep their
+//! widths), the name xqlite gets when the recording is replayed.
 //!
 //! A cases file is a list of cases: a line "-- case: NAME" starts one,
 //! and the lines up to the next are its psql input. The lines before the
@@ -33,14 +51,19 @@
 //!   caret, DETAIL, HINT, CONTEXT, NOTICE, WARNING) and the server's
 //!   version() string are ignored.
 //!
-//! The client is reached with $PG_WIRE_EXEC (default "podman exec -i
-//! xq-pg"), which must run `sh -c` next to a psql: the standard output
-//! and error are merged inside the container so that their order is
-//! psql's. The container reaches xqlite at $PG_WIRE_HOST (default
-//! host.containers.internal, the host under macOS podman), and xqlite
-//! listens on $PG_WIRE_LISTEN (default 0.0.0.0).
+//! psql runs through $PG_WIRE_EXEC when it is set (with --live and
+//! --record, by default "podman exec -i xq-pg"), which must run `sh -c`
+//! next to a psql: the standard output and error are merged there so that
+//! their order is psql's. psql reaches xqlite at $PG_WIRE_HOST (default
+//! host.containers.internal, the host under macOS podman; 127.0.0.1 for
+//! the host's psql), and xqlite listens on $PG_WIRE_LISTEN (default
+//! 0.0.0.0; 127.0.0.1 for the host's psql).
 //!
-//! Not part of `zig build check`: it needs a server.
+//! `--regress` runs PostgreSQL's regression tests instead: against the
+//! expected outputs PostgreSQL ships with them, so only psql is needed.
+//!
+//! Not part of `zig build check`: psql comes from podman unless the host
+//! has a psql 18.
 
 const std = @import("std");
 const Io = std.Io;
@@ -48,16 +71,23 @@ const Allocator = std.mem.Allocator;
 const xqt = @import("xqt");
 const Check = xqt.Check;
 const dialect_diff = @import("dialect_diff.zig");
+const Recording = dialect_diff.Recording;
+const Mode = dialect_diff.Mode;
 
 pub const usage =
-    \\usage: xqt wire-diff pg [--out DIR] [CASES-FILE...]
-    \\       xqt wire-diff pg --regress [--out DIR] [TEST...]
+    \\usage: xqt wire-diff pg [--live|--record] [--out DIR] [CASES-FILE...]
+    \\       xqt wire-diff pg --regress [--live] [--out DIR] [TEST...]
     \\
-    \\  Runs each case with psql against PostgreSQL and against `xqlite serve
-    \\  --pg` (a server and database per case) and compares psql's output.
-    \\  Default cases: tools/dialect/pg-wire-cases.txt and
+    \\  Runs each case with psql against `xqlite serve --pg` (a server and
+    \\  database per case) and compares psql's output with what it printed
+    \\  against PostgreSQL. Default cases: tools/dialect/pg-wire-cases.txt and
     \\  tools/dialect/pg-client-cases.txt.
     \\
+    \\  (default)   against the recording (tools/dialect/pg-expected/NAME.out
+    \\              for NAME.txt): no server, psql 18 of the host or of
+    \\              `podman run --rm -i postgres:18-alpine`
+    \\  --live      against PostgreSQL, now (psql in its container)
+    \\  --record    against PostgreSQL, now, and write the recording
     \\  --regress   instead run PostgreSQL's regression tests in
     \\              tools/dialect/pg-regress ($PG_REGRESS_DIR): sql/TEST.sql
     \\              against xqlite, scored per statement against
@@ -65,17 +95,25 @@ pub const usage =
     \\  --out DIR   write each case's outputs to DIR/NAME.pg and DIR/NAME.xq
     \\              (with --regress: xqlite's output to DIR/TEST.out)
     \\
-    \\  $PG_WIRE_EXEC    runs `sh -c ...` next to psql (default "podman exec -i xq-pg")
-    \\  $PG_WIRE_HOST    the host where psql reaches xqlite (default host.containers.internal)
-    \\  $PG_WIRE_LISTEN  the address xqlite listens on (default 0.0.0.0)
+    \\  $PG_WIRE_EXEC    runs `sh -c ...` next to psql (with --live and --record,
+    \\                   default "podman exec -i xq-pg")
+    \\  $PG_WIRE_HOST    the host where psql reaches xqlite (default
+    \\                   host.containers.internal; 127.0.0.1 for the host's psql)
+    \\  $PG_WIRE_LISTEN  the address xqlite listens on (default 0.0.0.0;
+    \\                   127.0.0.1 for the host's psql)
     \\
-    \\Start the server first:
-    \\  podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
+    \\For --live and --record, start the server first:
+    \\  podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine
     \\
 ;
 
 const default_files = [_][]const u8{ "tools/dialect/pg-wire-cases.txt", "tools/dialect/pg-client-cases.txt" };
-const container = "podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine";
+const container = "podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine";
+const live_exec = "podman exec -i xq-pg";
+/// psql for a replay, when the host has no psql 18.
+const client_exec = "podman run --rm -i postgres:18-alpine";
+const client_major = "18";
+const expected_dir = "tools/dialect/pg-expected";
 
 /// Empties the worker's database, as dialect-diff's prelude, quietly.
 const pg_reset = "\\set QUIET on\n" ++
@@ -91,11 +129,23 @@ pub const Class = enum { result, @"error", format };
 const Case = struct {
     name: []const u8,
     file: []const u8,
+    /// Its cases file, in the list of them.
+    file_index: usize = 0,
     setup: []const u8,
     sql: []const u8,
     mask_oids: bool,
+    /// What psql printed against PostgreSQL (recorded, or now), with the
+    /// database named canonical_db and normalize()d (no "psql:<stdin>:N:",
+    /// the OIDs masked in a mask-oids case).
+    raw: []const u8 = "",
     server: []const u8 = "",
     xq: []const u8 = "",
+    recording: dialect_diff.RecordingState = .ok,
+    ran: bool = false,
+
+    fn hash(cs: *const Case) dialect_diff.Hash {
+        return dialect_diff.caseHash(&.{ cs.setup, cs.sql, if (cs.mask_oids) "mask-oids" else "" });
+    }
 };
 
 const Slots = struct {
@@ -121,6 +171,8 @@ const Slots = struct {
 };
 
 const Ctx = struct {
+    mode: Mode,
+    /// Runs `sh -c CMD` next to psql (empty: on the host).
     exec: []const []const u8,
     host: []const u8,
     listen: []const u8,
@@ -138,6 +190,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     }
     var out_dir: ?[]const u8 = null;
     var regress = false;
+    var mode: Mode = .replay;
     var files: std.ArrayList([]const u8) = .empty;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -150,40 +203,44 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
             out_dir = args[i];
         } else if (std.mem.eql(u8, args[i], "--regress")) {
             regress = true;
+        } else if (std.mem.eql(u8, args[i], "--live")) {
+            mode = .live;
+        } else if (std.mem.eql(u8, args[i], "--record")) {
+            mode = .record;
+        } else if (std.mem.startsWith(u8, args[i], "--")) {
+            try out.writeAll(usage);
+            return 2;
         } else try files.append(arena, args[i]);
+    }
+    if (regress and mode == .record) {
+        try out.writeAll("xqt wire-diff: --regress compares with PostgreSQL's own expected outputs: there is nothing to record\n");
+        return 2;
     }
     if (files.items.len == 0 and !regress) for (default_files) |f| try files.append(arena, try std.fs.path.join(arena, &.{ cfg.root, f }));
 
     var cases: std.ArrayList(Case) = .empty;
-    if (!regress) for (files.items) |path| {
+    if (!regress) for (files.items, 0..) |path, fi| {
         const text = Io.Dir.cwd().readFileAlloc(io, path, arena, .unlimited) catch |err| {
             try out.print("xqt wire-diff: cannot read {s}: {t}\n", .{ path, err });
             return 2;
         };
+        const first = cases.items.len;
         try parseCases(arena, std.fs.path.basename(path), text, &cases);
+        for (cases.items[first..]) |*cs| cs.file_index = fi;
     };
 
-    const exec_text = cfg.environ.get("PG_WIRE_EXEC") orelse "podman exec -i xq-pg";
-    var exec: std.ArrayList([]const u8) = .empty;
-    var words = std.mem.tokenizeAny(u8, exec_text, " \t\n");
-    while (words.next()) |w| try exec.append(arena, w);
-    var ctx: Ctx = .{
-        .exec = exec.items,
-        .host = cfg.environ.get("PG_WIRE_HOST") orelse "host.containers.internal",
-        .listen = cfg.environ.get("PG_WIRE_LISTEN") orelse "0.0.0.0",
-        .slots = undefined,
+    var ctx: Ctx = .{ .mode = mode, .exec = &.{}, .host = "", .listen = "", .slots = undefined };
+    const client = pickClient(arena, io, cfg, &ctx) catch |err| {
+        try out.print("xqt wire-diff: cannot run psql ({t})\n", .{err});
+        return 1;
     };
-
-    const probe = dialect_diff.runMerged(arena, io, try psqlArgv(arena, &ctx, null, "postgres"), "SELECT 1;\n") catch |err|
-        dialect_diff.Merged{ .ok = false, .out = try std.fmt.allocPrint(arena, "cannot run {s}: {t}", .{ exec.items[0], err }) };
-    if (!probe.ok) {
+    if (client.version == null) {
         try out.print(
-            \\xqt wire-diff: cannot reach PostgreSQL with "{s} sh -c psql" ($PG_WIRE_EXEC):
+            \\xqt wire-diff: cannot run psql with "{s} sh -c psql":
             \\{s}
-            \\Start it with
-            \\  {s}
             \\
-        , .{ exec_text, std.mem.trimEnd(u8, probe.out, "\n"), container });
+        , .{ client.exec_text, client.failure });
+        if (mode != .replay) try out.print("Start the server with\n  {s}\n", .{container});
         try out.flush();
         return 1;
     }
@@ -192,23 +249,65 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         return runRegress(gpa, io, cfg, out, &ctx, dir, files.items, out_dir);
     }
 
-    const n_slots = @max(1, @min(cfg.jobs, cases.items.len, max_databases));
+    var recs: []Recording = &.{};
+    var server_version: []const u8 = "?";
+    if (mode == .replay) {
+        recs = try arena.alloc(Recording, files.items.len);
+        for (files.items, recs) |path, *rec| {
+            const rec_path = try dialect_diff.recordingPath(arena, cfg.root, expected_dir, path);
+            const text = Io.Dir.cwd().readFileAlloc(io, rec_path, arena, .unlimited) catch |err| {
+                try out.print("xqt wire-diff: cannot read the recording {s} ({t}): make it with `xqt wire-diff pg --record` (the server is needed)\n", .{ rec_path, err });
+                rec.* = .{ .notes = &.{}, .entries = &.{} };
+                continue;
+            };
+            rec.* = try Recording.parse(arena, text);
+            server_version = rec.note("server");
+            const recorded_client = rec.note("client");
+            if (!std.mem.eql(u8, recorded_client, client.version.?))
+                try out.print("note: {s} was recorded with {s}, psql here is {s}\n", .{ std.fs.path.basename(rec_path), recorded_client, client.version.? });
+        }
+        for (cases.items) |*cs| switch (recs[cs.file_index].lookup(cs.name, cs.hash())) {
+            .found => |raw| cs.raw = raw,
+            .missing => cs.recording = .missing,
+            .stale => cs.recording = .stale,
+        };
+    }
+
+    const n_slots = if (mode == .replay) 0 else @max(1, @min(cfg.jobs, cases.items.len, max_databases));
     var slots: Slots = .{ .free = try .initCapacity(arena, n_slots) };
     for (0..n_slots) |s| slots.free.appendAssumeCapacity(n_slots - 1 - s);
     ctx.slots = &slots;
-    var make: Io.Writer.Allocating = .init(arena);
+    const admin = try psqlArgv(arena, &ctx, null, "postgres", "");
     var drop: Io.Writer.Allocating = .init(arena);
-    for (0..n_slots) |s| {
-        try make.writer.print("DROP DATABASE IF EXISTS xqt_wire_{d};\nCREATE DATABASE xqt_wire_{d};\n", .{ s, s });
-        try drop.writer.print("DROP DATABASE IF EXISTS xqt_wire_{d};\n", .{s});
+    if (mode != .replay) {
+        const v = try dialect_diff.runMerged(arena, io, try psqlArgv(arena, &ctx, null, "postgres", "-At"), "SELECT version();\n");
+        if (!v.ok) {
+            try out.print(
+                \\xqt wire-diff: cannot reach PostgreSQL with "{s} sh -c psql" ($PG_WIRE_EXEC):
+                \\{s}
+                \\Start it with
+                \\  {s}
+                \\
+            , .{ client.exec_text, std.mem.trimEnd(u8, v.out, "\n"), container });
+            try out.flush();
+            return 1;
+        }
+        server_version = try arena.dupe(u8, dialect_diff.versionLine(v.out));
+        var make: Io.Writer.Allocating = .init(arena);
+        for (0..n_slots) |s| {
+            const db = try dbName(arena, s);
+            try make.writer.print("DROP DATABASE IF EXISTS {s};\nCREATE DATABASE {s};\n", .{ db, db });
+            try drop.writer.print("DROP DATABASE IF EXISTS {s};\n", .{db});
+        }
+        const r = try dialect_diff.runMerged(arena, io, admin, make.written());
+        if (!r.ok) {
+            try out.print("xqt wire-diff: cannot make the databases of the workers:\n{s}", .{r.out});
+            return 1;
+        }
     }
-    const admin = try psqlArgv(arena, &ctx, null, "postgres");
-    const r = try dialect_diff.runMerged(arena, io, admin, make.written());
-    if (!r.ok) {
-        try out.print("xqt wire-diff: cannot make the databases of the workers:\n{s}", .{r.out});
-        return 1;
-    }
-    defer _ = dialect_diff.runMerged(arena, io, admin, drop.written()) catch {};
+    defer if (mode != .replay) {
+        _ = dialect_diff.runMerged(arena, io, admin, drop.written()) catch {};
+    };
 
     var suite: xqt.Suite = .init(gpa, io, cfg, out, .{ .name = "wire-diff", .show = .failures });
     defer suite.deinit();
@@ -218,6 +317,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     if (out_dir) |dir| {
         try Io.Dir.cwd().createDirPath(io, dir);
         for (cases.items) |cs| {
+            if (cs.recording != .ok) continue;
             const base = try std.fs.path.join(arena, &.{ dir, cs.name });
             try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.mem.concat(arena, u8, &.{ base, ".pg" }), .data = cs.server });
             try Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.mem.concat(arena, u8, &.{ base, ".xq" }), .data = cs.xq });
@@ -226,9 +326,15 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
 
     var counts: [3]usize = .{ 0, 0, 0 };
     var errors: usize = 0;
+    var unrecorded: [2]usize = .{ 0, 0 };
     var dw: Io.Writer.Allocating = .init(gpa);
     defer dw.deinit();
     for (cases.items, 0..) |cs, n| {
+        if (cs.recording != .ok) {
+            unrecorded[@intFromBool(cs.recording == .stale)] += 1;
+            try out.print("{s} {s} ({s})\n", .{ cs.recording.label(), cs.name, cs.file });
+            continue;
+        }
         if (suite.outcome(n).status == .failed) {
             errors += 1;
             continue;
@@ -249,17 +355,107 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         }
     }
     const fail = counts[0] + counts[1] + counts[2];
-    try out.print("pg-wire-diff: {d}/{d} cases agree", .{ cases.items.len - fail - errors, cases.items.len });
+    const bad = fail + errors + unrecorded[0] + unrecorded[1];
+    try out.print("pg-wire-diff: {d}/{d} cases agree with {s}{s}", .{ cases.items.len - bad, cases.items.len, if (mode == .replay) "the recording of " else "", server_version });
     if (fail > 0) try out.print(" (differ: {d} result, {d} error, {d} format)", .{ counts[0], counts[1], counts[2] });
     if (errors > 0) try out.print(" ({d} could not run)", .{errors});
+    try dialect_diff.writeUnrecorded(out, unrecorded);
     try out.writeAll("\n");
     try out.flush();
-    return @intFromBool(fail + errors > 0);
+    if (mode == .record) {
+        for (files.items, 0..) |path, fi| {
+            var entries: std.ArrayList(Recording.Entry) = .empty;
+            for (cases.items) |cs| {
+                if (cs.file_index != fi) continue;
+                if (!cs.ran) {
+                    try out.print("xqt wire-diff: {s} could not run: {s} is not recorded\n", .{ cs.name, path });
+                    try out.flush();
+                    return 1;
+                }
+                try entries.append(arena, .{ .name = cs.name, .hash = cs.hash(), .out = cs.raw });
+            }
+            const rec_path = try dialect_diff.recordingPath(arena, cfg.root, expected_dir, path);
+            const notes = [_][]const u8{
+                try std.fmt.allocPrint(arena, "xqt wire-diff pg --record: what psql printed against PostgreSQL for each case of {s}", .{std.fs.path.basename(path)}),
+                try std.fmt.allocPrint(arena, "server: {s}", .{server_version}),
+                try std.fmt.allocPrint(arena, "client: {s}", .{client.version.?}),
+            };
+            Recording.write(arena, io, rec_path, &notes, entries.items) catch |err| {
+                try out.print("xqt wire-diff: cannot write {s}: {t}\n", .{ rec_path, err });
+                try out.flush();
+                return 1;
+            };
+            try out.print("recorded {d} cases in {s}\n", .{ entries.items.len, rec_path });
+        }
+        try out.flush();
+    }
+    return @intFromBool(bad > 0);
+}
+
+const Client = struct {
+    exec_text: []const u8,
+    /// `psql --version`; null if psql could not run.
+    version: ?[]const u8,
+    failure: []const u8 = "",
+};
+
+/// Where psql runs (ctx.exec, .host, .listen): $PG_WIRE_EXEC; else with
+/// --live and --record in the server's container; else the host's psql
+/// if it is psql 18, else a container of its own.
+fn pickClient(arena: Allocator, io: Io, cfg: *const xqt.Config, ctx: *Ctx) !Client {
+    const env = cfg.environ;
+    var exec_text: []const u8 = env.get("PG_WIRE_EXEC") orelse if (ctx.mode == .replay) "" else live_exec;
+    var host: []const u8 = "host.containers.internal";
+    var listen: []const u8 = "0.0.0.0";
+    if (exec_text.len == 0) {
+        const v = dialect_diff.runMerged(arena, io, &.{ "sh", "-c", "psql --version" }, "") catch null;
+        if (v != null and v.?.ok and isMajor(v.?.out, client_major)) {
+            host = "127.0.0.1";
+            listen = "127.0.0.1";
+        } else exec_text = client_exec;
+    }
+    var exec: std.ArrayList([]const u8) = .empty;
+    var words = std.mem.tokenizeAny(u8, exec_text, " \t\n");
+    while (words.next()) |w| try exec.append(arena, w);
+    ctx.exec = exec.items;
+    ctx.host = env.get("PG_WIRE_HOST") orelse host;
+    ctx.listen = env.get("PG_WIRE_LISTEN") orelse listen;
+    const argv = try std.mem.concat(arena, []const u8, &.{ ctx.exec, &.{ "sh", "-c", "psql --version 2>&1" } });
+    const v = dialect_diff.runMerged(arena, io, argv, "") catch |err|
+        dialect_diff.Merged{ .ok = false, .out = try std.fmt.allocPrint(arena, "cannot run {s}: {t}", .{ argv[0], err }) };
+    const text = std.mem.trim(u8, v.out, " \n");
+    return .{ .exec_text = if (exec_text.len == 0) "(the host)" else exec_text, .version = if (v.ok) text else null, .failure = text };
+}
+
+/// "psql (PostgreSQL) 18.6": whether the major version is `major`.
+fn isMajor(version: []const u8, major: []const u8) bool {
+    const at = std.mem.indexOf(u8, version, ") ") orelse return false;
+    const rest = version[at + 2 ..];
+    return std.mem.startsWith(u8, rest, major) and rest.len > major.len and rest[major.len] == '.';
+}
+
+/// The database of worker `slot` on the server: xqt_wire_PPPPPPP_S, with
+/// the process id, so that runs at the same time on one server do not
+/// meet. Its length is that of canonical_db, which it becomes in the
+/// outputs (aligned tables keep their widths).
+fn dbName(arena: Allocator, slot: usize) ![]const u8 {
+    return std.fmt.allocPrint(arena, "xqt_wire_{d:0>7}_{d}", .{ @as(u32, @intCast(std.c.getpid())), slot });
+}
+
+const canonical_db = "xqt_wire_recording";
+
+/// `text` with every `db` named canonical_db.
+fn canonical(gpa: Allocator, text: []const u8, db: []const u8) ![]u8 {
+    std.debug.assert(db.len == canonical_db.len);
+    const copy = try dialect_diff.withNewline(gpa, text);
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, copy, at, db)) |k| : (at = k + db.len) @memcpy(copy[k..][0..db.len], canonical_db);
+    return copy;
 }
 
 /// `EXEC... sh -c "psql ... 2>&1"` to PostgreSQL itself.
-fn psqlArgv(arena: Allocator, ctx: *const Ctx, env: ?[]const u8, db: []const u8) ![]const []const u8 {
-    const cmd = try std.fmt.allocPrint(arena, "{s} 2>&1", .{try psqlCommand(arena, env, db, "")});
+fn psqlArgv(arena: Allocator, ctx: *const Ctx, env: ?[]const u8, db: []const u8, flags: []const u8) ![]const []const u8 {
+    const cmd = try std.fmt.allocPrint(arena, "{s} 2>&1", .{try psqlCommand(arena, env, db, flags)});
     return std.mem.concat(arena, []const u8, &.{ ctx.exec, &.{ "sh", "-c", cmd } });
 }
 
@@ -269,22 +465,34 @@ fn psqlCommand(arena: Allocator, env: ?[]const u8, db: []const u8, flags: []cons
 }
 
 fn runCase(c: *Check, ctx: *Ctx, cs: *Case) !void {
+    if (cs.recording != .ok) return;
     // The setup runs quietly; the case echoes its input, so that each
     // output says what it answers.
     const quiet_setup = try std.mem.concat(c.arena, u8, &.{ "\\set QUIET on\n", cs.setup, "\\set QUIET off\n\\set ECHO all\n" });
+    const xq_in = try std.mem.concat(c.arena, u8, &.{ quiet_setup, cs.sql });
+    if (ctx.mode == .replay) {
+        const xq_raw = try runXq(c, ctx, try psqlCommand(c.arena, null, canonical_db, ""), xq_in);
+        cs.server = try normalize(c.keep, cs.raw, cs.mask_oids);
+        cs.xq = try normalize(c.keep, try dialect_diff.withNewline(c.arena, xq_raw), cs.mask_oids);
+        cs.ran = true;
+        return;
+    }
     // Both sides name the worker's database, so that psql prints the
     // same name; xqlite takes any.
     const slot = ctx.slots.acquire(c.io);
-    const db = try std.fmt.allocPrint(c.arena, "xqt_wire_{d}", .{slot});
+    const db = try dbName(c.arena, slot);
     const server_in = try std.mem.concat(c.arena, u8, &.{ pg_reset, quiet_setup, cs.sql });
-    const server_raw = dialect_diff.runMerged(c.arena, c.io, try psqlArgv(c.arena, ctx, null, db), server_in);
+    const server_raw = dialect_diff.runMerged(c.arena, c.io, try psqlArgv(c.arena, ctx, null, db, ""), server_in);
     ctx.slots.release(c.io, slot);
 
-    const xq_in = try std.mem.concat(c.arena, u8, &.{ quiet_setup, cs.sql });
     const xq_raw = try runXq(c, ctx, try psqlCommand(c.arena, null, db, ""), xq_in);
 
-    cs.server = try normalize(c.keep, (try server_raw).out, cs.mask_oids);
-    cs.xq = try normalize(c.keep, xq_raw, cs.mask_oids);
+    // Recorded without what changes from run to run: the line numbers of
+    // "psql:<stdin>:N:" (after pg_reset), the OIDs of a mask-oids case.
+    cs.raw = try normalize(c.keep, try canonical(c.arena, (try server_raw).out, db), cs.mask_oids);
+    cs.server = try normalize(c.keep, cs.raw, cs.mask_oids);
+    cs.xq = try normalize(c.keep, try canonical(c.arena, xq_raw, db), cs.mask_oids);
+    cs.ran = true;
 }
 
 /// Starts `xqlite serve --pg 0` on a new database in the check's
@@ -571,8 +779,8 @@ fn loose(arena: Allocator, text: []const u8) ![]u8 {
             try out.appendSlice(arena, "error");
             continue;
         }
-        // version(): "PostgreSQL 16.4 on aarch64-..." against "PostgreSQL
-        // 17.0 (xqlite 3.54.1)", the server saying what it is.
+        // version(): "PostgreSQL 18.6 on aarch64-..." against "PostgreSQL
+        // 18.6 (xqlite 3.54.1)", the server saying what it is.
         const t = std.mem.trimStart(u8, line, " ");
         if (std.mem.startsWith(u8, t, "PostgreSQL ") and t.len > 11 and std.ascii.isDigit(t[11])) {
             try out.appendSlice(arena, "version()");
@@ -622,7 +830,7 @@ test classify {
     try std.testing.expectEqual(Class.result, try classify(a, "", "ERROR:  no\n", "INSERT 0 1\n"));
     try std.testing.expectEqual(Class.format, try classify(a, "", "ERROR:  dup\nDETAIL:  Key (a)=(1)\nNOTICE:  x\n", "ERROR:  UNIQUE failed\n"));
     try std.testing.expectEqual(Class.format, try classify(a, "", "ERROR:  no\nLINE 1: SELECT x;\n               ^\n", "ERROR:  no\n"));
-    try std.testing.expectEqual(Class.format, try classify(a, "", " PostgreSQL 16.4 on x, 64-bit\n", " PostgreSQL 17.0 (xqlite 3.54.1)\n"));
+    try std.testing.expectEqual(Class.format, try classify(a, "", " PostgreSQL 18.6 on x, 64-bit\n", " PostgreSQL 18.6 (xqlite 3.54.1)\n"));
     // Per input line: an error in one answer, a wrong row in another.
     const input = "SELECT a;\nSELECT b;\n";
     try std.testing.expectEqual(Class.result, try classify(a, input, "SELECT a;\n 1\nSELECT b;\n 2\n", "SELECT a;\nERROR:  x\nSELECT b;\n 3\n"));

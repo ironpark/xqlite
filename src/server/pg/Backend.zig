@@ -221,8 +221,15 @@ fn startup(b: *Backend) !bool {
         .{ "application_name", app_name },
         .{ "default_transaction_read_only", "off" },
         .{ "in_hot_standby", "off" },
+        .{ "scram_iterations", "4096" },
     };
     for (reported) |r| try b.parameterStatus(r[0], r[1]);
+    // PostgreSQL 18 reports search_path too: the session's, which the
+    // startup options may have set.
+    var path: SettingSink = .{ .gpa = b.gpa };
+    defer if (path.value) |v| b.gpa.free(v);
+    try b.session.run("SELECT current_setting('search_path')", &path);
+    try b.parameterStatus("search_path", path.value orelse "\"$user\", public");
     const t = b.c.ticket();
     try b.out.begin('K');
     try b.out.int(u32, t.id);
@@ -268,6 +275,22 @@ const StartupSink = struct {
     pub fn failed(s: *StartupSink, _: Session.Failure) !void {
         s.bad = true;
     }
+};
+
+/// The text of a one-row, one-column result.
+const SettingSink = struct {
+    gpa: std.mem.Allocator,
+    value: ?[]u8 = null,
+    pub fn columns(_: *SettingSink, _: []const Column) !void {}
+    pub fn row(s: *SettingSink, r: *Session.Row) !void {
+        if (s.value != null or r.len() == 0) return;
+        switch (try r.value(0)) {
+            .text => |t| s.value = try s.gpa.dupe(u8, t),
+            else => {},
+        }
+    }
+    pub fn complete(_: *SettingSink, _: Session.Complete) !void {}
+    pub fn failed(_: *SettingSink, _: Session.Failure) !void {}
 };
 
 /// The `options` of the startup packet: `-c name=value` and
@@ -865,6 +888,17 @@ fn fatal(b: *Backend, code: *const [5]u8, comptime fmt: []const u8, args: anytyp
 
 /// The name of a type OID, for messages.
 fn typeName(o: Oid) []const u8 {
+    if (values.elementOf(o)) |e| return switch (e) {
+        values.oid.bool => "boolean[]",
+        values.oid.int2 => "smallint[]",
+        values.oid.int4 => "integer[]",
+        values.oid.int8 => "bigint[]",
+        values.oid.float8 => "double precision[]",
+        values.oid.numeric => "numeric[]",
+        values.oid.varchar => "character varying[]",
+        values.oid.name => "name[]",
+        else => "text[]",
+    };
     return switch (o) {
         values.oid.bool => "boolean",
         values.oid.int2 => "smallint",

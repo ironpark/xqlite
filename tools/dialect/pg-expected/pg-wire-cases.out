@@ -1,0 +1,836 @@
+# xqt wire-diff pg --record: what psql printed against PostgreSQL for each case of pg-wire-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+# client: psql (PostgreSQL) 18.6
+==== case 55e104c3faebf780 session-show
+SHOW search_path;
+   search_path   
+-----------------
+ "$user", public
+(1 row)
+
+SHOW standard_conforming_strings;
+ standard_conforming_strings 
+-----------------------------
+ on
+(1 row)
+
+SHOW client_encoding;
+ client_encoding 
+-----------------
+ UTF8
+(1 row)
+
+SHOW DateStyle;
+ DateStyle 
+-----------
+ ISO, MDY
+(1 row)
+
+SHOW integer_datetimes;
+ integer_datetimes 
+-------------------
+ on
+(1 row)
+
+SHOW transaction_isolation;
+ transaction_isolation 
+-----------------------
+ read committed
+(1 row)
+
+SHOW IntervalStyle;
+ IntervalStyle 
+---------------
+ postgres
+(1 row)
+
+SHOW TimeZone;
+ TimeZone 
+----------
+ UTC
+(1 row)
+
+==== case 9bed18935befa6f4 session-identity
+SELECT current_database(), current_user, session_user, current_schema();
+  current_database  | current_user | session_user | current_schema 
+--------------------+--------------+--------------+----------------
+ xqt_wire_recording | postgres     | postgres     | public
+(1 row)
+
+SELECT current_schemas(false);
+ current_schemas 
+-----------------
+ {public}
+(1 row)
+
+==== case 0fbd2373580e2435 session-version
+SHOW server_version_num;
+ server_version_num 
+--------------------
+ 180006
+(1 row)
+
+SELECT split_part(version(), ' ', 1);
+ split_part 
+------------
+ PostgreSQL
+(1 row)
+
+==== case 0680c9fc59017f74 session-set
+SET search_path TO public;
+SET
+SHOW search_path;
+ search_path 
+-------------
+ public
+(1 row)
+
+SET application_name = 'xqt';
+SET
+SHOW application_name;
+ application_name 
+------------------
+ xqt
+(1 row)
+
+RESET application_name;
+RESET
+SHOW application_name;
+ application_name 
+------------------
+ psql
+(1 row)
+
+SELECT set_config('TimeZone', 'UTC', false);
+ set_config 
+------------
+ UTC
+(1 row)
+
+==== case b9e6a3036945bf8c meta-dt
+\dt
+           List of tables
+ Schema |  Name  | Type  |  Owner   
+--------+--------+-------+----------
+ public | author | table | postgres
+ public | book   | table | postgres
+(2 rows)
+
+==== case 0768af43c42fc91a meta-dt-pattern
+\dt b*
+          List of tables
+ Schema | Name | Type  |  Owner   
+--------+------+-------+----------
+ public | book | table | postgres
+(1 row)
+
+\dt nosuch
+Did not find any tables named "nosuch".
+==== case e4dac749b50e267d meta-d
+\d
+              List of relations
+ Schema |     Name      |   Type   |  Owner   
+--------+---------------+----------+----------
+ public | author        | table    | postgres
+ public | author_id_seq | sequence | postgres
+ public | book          | table    | postgres
+ public | cheap_book    | view     | postgres
+ public | ticket        | sequence | postgres
+(5 rows)
+
+==== case c51bf8e318aeccb8 meta-d-table
+\d book
+                         Table "public.book"
+  Column   |          Type          | Collation | Nullable | Default 
+-----------+------------------------+-----------+----------+---------
+ id        | integer                |           | not null | 
+ author_id | integer                |           | not null | 
+ title     | character varying(200) |           | not null | 
+ price     | numeric(10,2)          |           |          | 0
+ tags      | jsonb                  |           |          | 
+ published | boolean                |           |          | false
+Indexes:
+    "book_pkey" PRIMARY KEY, btree (id)
+    "book_author_title" UNIQUE, btree (author_id, title)
+    "book_title" btree (title)
+Check constraints:
+    "book_price_check" CHECK (price >= 0::numeric)
+Foreign-key constraints:
+    "book_author_id_fkey" FOREIGN KEY (author_id) REFERENCES author(id) ON DELETE CASCADE
+
+==== case 069e4b12bd6ab54b meta-d-table-referenced
+\d author
+                            Table "public.author"
+ Column |  Type   | Collation | Nullable |              Default               
+--------+---------+-----------+----------+------------------------------------
+ id     | integer |           | not null | nextval('author_id_seq'::regclass)
+ name   | text    |           | not null | 
+ born   | date    |           |          | 
+Indexes:
+    "author_pkey" PRIMARY KEY, btree (id)
+    "author_name_key" UNIQUE CONSTRAINT, btree (name)
+Referenced by:
+    TABLE "book" CONSTRAINT "book_author_id_fkey" FOREIGN KEY (author_id) REFERENCES author(id) ON DELETE CASCADE
+
+==== case 36724a0541763778 meta-d-view
+\d cheap_book
+                     View "public.cheap_book"
+ Column |          Type          | Collation | Nullable | Default 
+--------+------------------------+-----------+----------+---------
+ id     | integer                |           |          | 
+ title  | character varying(200) |           |          | 
+ price  | numeric(10,2)          |           |          | 
+
+==== case c522433b59db4672 meta-d-sequence
+\d ticket
+                           Sequence "public.ticket"
+  Type  | Start | Minimum |       Maximum       | Increment | Cycles? | Cache 
+--------+-------+---------+---------------------+-----------+---------+-------
+ bigint |   100 |       1 | 9223372036854775807 |         1 | no      |     1
+
+==== case 52ad891242557caa meta-d-index
+\d book_title
+              Index "public.book_title"
+ Column |          Type          | Key? | Definition 
+--------+------------------------+------+------------
+ title  | character varying(200) | yes  | title
+btree, for table "public.book"
+
+==== case 78f3448699706a09 meta-d-plus
+\d+ book
+                                                    Table "public.book"
+  Column   |          Type          | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+-----------+------------------------+-----------+----------+---------+----------+-------------+--------------+-------------
+ id        | integer                |           | not null |         | plain    |             |              | 
+ author_id | integer                |           | not null |         | plain    |             |              | 
+ title     | character varying(200) |           | not null |         | extended |             |              | 
+ price     | numeric(10,2)          |           |          | 0       | main     |             |              | 
+ tags      | jsonb                  |           |          |         | extended |             |              | 
+ published | boolean                |           |          | false   | plain    |             |              | 
+Indexes:
+    "book_pkey" PRIMARY KEY, btree (id)
+    "book_author_title" UNIQUE, btree (author_id, title)
+    "book_title" btree (title)
+Check constraints:
+    "book_price_check" CHECK (price >= 0::numeric)
+Foreign-key constraints:
+    "book_author_id_fkey" FOREIGN KEY (author_id) REFERENCES author(id) ON DELETE CASCADE
+Not-null constraints:
+    "book_id_not_null" NOT NULL "id"
+    "book_author_id_not_null" NOT NULL "author_id"
+    "book_title_not_null" NOT NULL "title"
+Access method: heap
+
+==== case 3307ffe24ee707e0 meta-d-nosuch
+\d nosuch
+Did not find any relation named "nosuch".
+==== case 9c205f37a68b5bd7 meta-di
+\di
+                    List of indexes
+ Schema |       Name        | Type  |  Owner   | Table  
+--------+-------------------+-------+----------+--------
+ public | author_name_key   | index | postgres | author
+ public | author_pkey       | index | postgres | author
+ public | book_author_title | index | postgres | book
+ public | book_pkey         | index | postgres | book
+ public | book_title        | index | postgres | book
+(5 rows)
+
+==== case 831f54a108b1b782 meta-dv
+\dv
+             List of views
+ Schema |    Name    | Type |  Owner   
+--------+------------+------+----------
+ public | cheap_book | view | postgres
+(1 row)
+
+==== case 8277dd5479706b2c meta-ds
+\ds
+              List of sequences
+ Schema |     Name      |   Type   |  Owner   
+--------+---------------+----------+----------
+ public | author_id_seq | sequence | postgres
+ public | ticket        | sequence | postgres
+(2 rows)
+
+==== case 0487ccdc656584ab meta-dn
+\dn
+  List of schemas
+  Name  |  Owner   
+--------+----------
+ public | postgres
+(1 row)
+
+==== case 5aca508d1abda35c meta-dn-schema
+CREATE SCHEMA sales;
+CREATE SCHEMA
+CREATE TABLE sales.orders (id int PRIMARY KEY, amount numeric);
+CREATE TABLE
+\dn
+  List of schemas
+  Name  |  Owner   
+--------+----------
+ public | postgres
+ sales  | postgres
+(2 rows)
+
+\dt sales.*
+           List of tables
+ Schema |  Name  | Type  |  Owner   
+--------+--------+-------+----------
+ sales  | orders | table | postgres
+(1 row)
+
+\d sales.orders
+               Table "sales.orders"
+ Column |  Type   | Collation | Nullable | Default 
+--------+---------+-----------+----------+---------
+ id     | integer |           | not null | 
+ amount | numeric |           |          | 
+Indexes:
+    "orders_pkey" PRIMARY KEY, btree (id)
+
+==== case e212f514d5120437 meta-df
+\df
+                       List of functions
+ Schema | Name | Result data type | Argument data types | Type 
+--------+------+------------------+---------------------+------
+(0 rows)
+
+==== case 961945660d19a2ef meta-dT
+\dT
+     List of data types
+ Schema | Name | Description 
+--------+------+-------------
+(0 rows)
+
+==== case a666571528e05181 meta-du
+\du
+                             List of roles
+ Role name |                         Attributes                         
+-----------+------------------------------------------------------------
+ postgres  | Superuser, Create role, Create DB, Replication, Bypass RLS
+
+==== case f90854e04e2728aa meta-dx
+\dx
+                          List of installed extensions
+  Name   | Version | Default version |   Schema   |         Description          
+---------+---------+-----------------+------------+------------------------------
+ plpgsql | 1.0     | 1.0             | pg_catalog | PL/pgSQL procedural language
+(1 row)
+
+==== case 98d53791785a9847 meta-dp
+\dp book
+                            Access privileges
+ Schema | Name | Type  | Access privileges | Column privileges | Policies 
+--------+------+-------+-------------------+-------------------+----------
+ public | book | table |                   |                   | 
+(1 row)
+
+==== case d1edd00d3fc9c013 meta-dd
+COMMENT ON TABLE book IS 'books';
+COMMENT
+\dd book
+         Object descriptions
+ Schema | Name | Object | Description 
+--------+------+--------+-------------
+(0 rows)
+
+\dt+ book
+                                    List of tables
+ Schema | Name | Type  |  Owner   | Persistence | Access method | Size  | Description 
+--------+------+-------+----------+-------------+---------------+-------+-------------
+ public | book | table | postgres | permanent   | heap          | 16 kB | books
+(1 row)
+
+==== case 69172ecb6a846915 meta-l
+\l :DBNAME
+                                                       List of databases
+        Name        |  Owner   | Encoding | Locale Provider |  Collate   |   Ctype    | Locale | ICU Rules | Access privileges 
+--------------------+----------+----------+-----------------+------------+------------+--------+-----------+-------------------
+ xqt_wire_recording | postgres | UTF8     | libc            | en_US.utf8 | en_US.utf8 |        |           | 
+(1 row)
+
+==== case 977b2fced002e3a0 meta-dS-small
+\dS pg_namespace
+            Table "pg_catalog.pg_namespace"
+  Column  |   Type    | Collation | Nullable | Default 
+----------+-----------+-----------+----------+---------
+ oid      | oid       |           | not null | 
+ nspname  | name      |           | not null | 
+ nspowner | oid       |           | not null | 
+ nspacl   | aclitem[] |           |          | 
+Indexes:
+    "pg_namespace_oid_index" PRIMARY KEY, btree (oid)
+    "pg_namespace_nspname_index" UNIQUE CONSTRAINT, btree (nspname)
+
+==== case e3c408812dfeba64 gdesc
+SELECT id, title, price, tags, published FROM book \gdesc
+  Column   |          Type          
+-----------+------------------------
+ id        | integer
+ title     | character varying(200)
+ price     | numeric(10,2)
+ tags      | jsonb
+ published | boolean
+(5 rows)
+
+SELECT 1 AS one, 'x'::text AS t, 1.5::float8 AS f, now() AS ts \gdesc
+ Column |           Type           
+--------+--------------------------
+ one    | integer
+ t      | text
+ f      | double precision
+ ts     | timestamp with time zone
+(4 rows)
+
+==== case 0772908c0361e12d bind
+SELECT $1::int + 1 AS x \bind 41 \g
+ x  
+----
+ 42
+(1 row)
+
+SELECT title FROM book WHERE id = $1 \bind 2 \g
+ title 
+-------
+ Beta
+(1 row)
+
+SELECT $1 AS untyped \bind 'hello' \g
+ untyped 
+---------
+ hello
+(1 row)
+
+INSERT INTO author (name) VALUES ($1) \bind 'Cid' \g
+INSERT 0 1
+SELECT count(*) FROM author;
+ count 
+-------
+     3
+(1 row)
+
+==== case 645db1d163e9df78 gset
+SELECT max(id) AS maxid FROM book \gset
+SELECT :maxid + 1 AS next;
+ next 
+------
+    4
+(1 row)
+
+==== case 131615aa50515f21 gx-expanded
+SELECT * FROM book WHERE id = 1 \gx
+-[ RECORD 1 ]-------
+id        | 1
+author_id | 1
+title     | Alpha
+price     | 9.50
+tags      | {"a": 1}
+published | t
+
+==== case 98a3dafe72de4d2b x-expanded
+\x on
+Expanded display is on.
+SELECT id, name FROM author ORDER BY id;
+-[ RECORD 1 ]
+id   | 1
+name | Ann
+-[ RECORD 2 ]
+id   | 2
+name | Bob
+
+\x off
+Expanded display is off.
+==== case 085102dd6e0d6908 pset-unaligned
+\pset format unaligned
+Output format is unaligned.
+SELECT id, title, price FROM book ORDER BY id;
+id|title|price
+1|Alpha|9.50
+2|Beta|12.00
+3|Gamma|
+(3 rows)
+==== case dd94c9b9391cdb29 pset-csv
+\pset format csv
+Output format is csv.
+SELECT id, title, price, tags FROM book ORDER BY id;
+id,title,price,tags
+1,Alpha,9.50,"{""a"": 1}"
+2,Beta,12.00,
+3,Gamma,,"[1, 2]"
+==== case c035f5b039fe95b7 pset-null
+\pset null '(null)'
+Null display is "(null)".
+SELECT id, price, published FROM book ORDER BY id;
+ id | price  | published 
+----+--------+-----------
+  1 |   9.50 | t
+  2 |  12.00 | f
+  3 | (null) | (null)
+(3 rows)
+
+==== case c566d48f4eddd81f select-types
+SELECT 1::smallint AS i2, 2::int AS i4, 3::bigint AS i8, 1.5::real AS f4, 2.25::float8 AS f8, 1.10::numeric(5,2) AS num;
+ i2 | i4 | i8 | f4  |  f8  | num  
+----+----+----+-----+------+------
+  1 |  2 |  3 | 1.5 | 2.25 | 1.10
+(1 row)
+
+SELECT true AS t, false AS f, NULL::boolean AS n;
+ t | f | n 
+---+---+---
+ t | f | 
+(1 row)
+
+SELECT 'héllo'::text AS t, 'ab'::varchar(5) AS v, 'x'::char(3) AS c;
+   t   | v  |  c  
+-------+----+-----
+ héllo | ab | x  
+(1 row)
+
+SELECT '\x0102ff'::bytea AS b;
+    b     
+----------
+ \x0102ff
+(1 row)
+
+SELECT '{"b": 2, "a": [1, 2]}'::jsonb AS jb, '{"b": 2, "a": 1}'::json AS j;
+          jb           |        j         
+-----------------------+------------------
+ {"a": [1, 2], "b": 2} | {"b": 2, "a": 1}
+(1 row)
+
+SELECT date '2024-02-29' AS d, timestamp '2024-01-02 03:04:05.5' AS ts, time '10:11:12' AS t;
+     d      |          ts           |    t     
+------------+-----------------------+----------
+ 2024-02-29 | 2024-01-02 03:04:05.5 | 10:11:12
+(1 row)
+
+SELECT '6bd0b4b4-5e5f-4a2e-9a1a-2b2f4a9e2b11'::uuid AS u;
+                  u                   
+--------------------------------------
+ 6bd0b4b4-5e5f-4a2e-9a1a-2b2f4a9e2b11
+(1 row)
+
+==== case 95be031835f65c5e select-rows
+SELECT * FROM book ORDER BY id;
+ id | author_id | title | price |   tags   | published 
+----+-----------+-------+-------+----------+-----------
+  1 |         1 | Alpha |  9.50 | {"a": 1} | t
+  2 |         1 | Beta  | 12.00 |          | f
+  3 |         2 | Gamma |       | [1, 2]   | 
+(3 rows)
+
+SELECT a.name, count(b.id) AS books FROM author a LEFT JOIN book b ON b.author_id = a.id GROUP BY a.name ORDER BY a.name;
+ name | books 
+------+-------
+ Ann  |     2
+ Bob  |     1
+(2 rows)
+
+==== case 169bdf80c3041d29 command-tags
+INSERT INTO author (name) VALUES ('Dee'), ('Eve');
+INSERT 0 2
+UPDATE book SET price = price + 1 WHERE price IS NOT NULL;
+UPDATE 2
+DELETE FROM book WHERE id = 3;
+DELETE 1
+CREATE TABLE copy1 AS SELECT * FROM author;
+SELECT 4
+SELECT * INTO copy2 FROM author;
+SELECT 4
+INSERT INTO author (name) VALUES ('Fay') RETURNING id, name;
+ id | name 
+----+------
+  5 | Fay
+(1 row)
+
+INSERT 0 1
+TRUNCATE copy1;
+TRUNCATE TABLE
+DROP TABLE copy1, copy2;
+DROP TABLE
+==== case 030af52700ffa292 transactions
+BEGIN;
+BEGIN
+INSERT INTO author (name) VALUES ('Gus');
+INSERT 0 1
+SAVEPOINT a;
+SAVEPOINT
+INSERT INTO author (name) VALUES ('Gus');
+ERROR:  duplicate key value violates unique constraint "author_name_key"
+DETAIL:  Key (name)=(Gus) already exists.
+ROLLBACK TO SAVEPOINT a;
+ROLLBACK
+COMMIT;
+COMMIT
+SELECT count(*) FROM author;
+ count 
+-------
+     3
+(1 row)
+
+COMMIT;
+WARNING:  there is no transaction in progress
+COMMIT
+ROLLBACK;
+WARNING:  there is no transaction in progress
+ROLLBACK
+==== case 5b0a9779ca2b11be transaction-aborted
+BEGIN;
+BEGIN
+SELECT 1/0;
+ERROR:  division by zero
+SELECT 1;
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+ROLLBACK;
+ROLLBACK
+==== case 7b0e0f01ee333648 errors-constraints
+INSERT INTO author (name) VALUES ('Ann');
+ERROR:  duplicate key value violates unique constraint "author_name_key"
+DETAIL:  Key (name)=(Ann) already exists.
+INSERT INTO book (id, author_id, title) VALUES (9, 99, 'X');
+ERROR:  insert or update on table "book" violates foreign key constraint "book_author_id_fkey"
+DETAIL:  Key (author_id)=(99) is not present in table "author".
+INSERT INTO book (id, author_id, title, price) VALUES (9, 1, 'X', -1);
+ERROR:  new row for relation "book" violates check constraint "book_price_check"
+DETAIL:  Failing row contains (9, 1, X, -1.00, null, f).
+INSERT INTO book (id, author_id) VALUES (9, 1);
+ERROR:  null value in column "title" of relation "book" violates not-null constraint
+DETAIL:  Failing row contains (9, 1, null, 0.00, null, f).
+DELETE FROM author WHERE id = 1;
+DELETE 1
+SELECT count(*) FROM book;
+ count 
+-------
+     1
+(1 row)
+
+==== case 1ed6c67f7e203d8e errors-syntax
+SELEC 1;
+ERROR:  syntax error at or near "SELEC"
+LINE 1: SELEC 1;
+        ^
+SELECT * FROM nosuch;
+ERROR:  relation "nosuch" does not exist
+LINE 1: SELECT * FROM nosuch;
+                      ^
+SELECT nosuch FROM book;
+ERROR:  column "nosuch" does not exist
+LINE 1: SELECT nosuch FROM book;
+               ^
+SELECT 1 +;
+ERROR:  syntax error at or near ";"
+LINE 1: SELECT 1 +;
+                  ^
+SELECT 'a' + 1;
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: SELECT 'a' + 1;
+               ^
+==== case 6aa8495fab64117b errors-runtime
+SELECT 1/0;
+ERROR:  division by zero
+SELECT 'x'::int;
+ERROR:  invalid input syntax for type integer: "x"
+LINE 1: SELECT 'x'::int;
+               ^
+SELECT 2147483647::int + 1;
+ERROR:  integer out of range
+SELECT '{bad'::jsonb;
+ERROR:  invalid input syntax for type json
+LINE 1: SELECT '{bad'::jsonb;
+               ^
+DETAIL:  Token "bad" is invalid.
+CONTEXT:  JSON data, line 1: {bad
+==== case a79caa89b96e03d2 notices
+DROP TABLE IF EXISTS nosuch;
+NOTICE:  table "nosuch" does not exist, skipping
+DROP TABLE
+CREATE TABLE IF NOT EXISTS book (id int);
+NOTICE:  relation "book" already exists, skipping
+CREATE TABLE
+DROP VIEW IF EXISTS nosuch;
+NOTICE:  view "nosuch" does not exist, skipping
+DROP VIEW
+==== case 2fd2c94d0b9bf024 multi-statement
+SELECT 1 AS a \; SELECT 2 AS b;
+ a 
+---
+ 1
+(1 row)
+
+ b 
+---
+ 2
+(1 row)
+
+SELECT 1 AS a; SELECT 2 AS b
+ a 
+---
+ 1
+(1 row)
+
+ b 
+---
+ 2
+(1 row)
+
+==== case a56688c74cdd6cc7 empty-result
+SELECT * FROM book WHERE false;
+ id | author_id | title | price | tags | published 
+----+-----------+-------+-------+------+-----------
+(0 rows)
+
+SELECT;
+--
+(1 row)
+
+==== case fb4d93a682967981 ddl-alter
+ALTER TABLE author ADD COLUMN email text;
+ALTER TABLE
+ALTER TABLE author RENAME COLUMN email TO mail;
+ALTER TABLE
+ALTER TABLE author DROP COLUMN mail;
+ALTER TABLE
+ALTER TABLE book RENAME TO volume;
+ALTER TABLE
+\dt
+           List of tables
+ Schema |  Name  | Type  |  Owner   
+--------+--------+-------+----------
+ public | author | table | postgres
+ public | volume | table | postgres
+(2 rows)
+
+==== case b29719ab2eff1460 ddl-identity
+CREATE TABLE ev (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, at timestamptz DEFAULT now(), n int GENERATED ALWAYS AS (id * 2) STORED);
+CREATE TABLE
+\d ev
+                                        Table "public.ev"
+ Column |           Type           | Collation | Nullable |                Default                
+--------+--------------------------+-----------+----------+---------------------------------------
+ id     | bigint                   |           | not null | generated always as identity
+ at     | timestamp with time zone |           |          | now()
+ n      | integer                  |           |          | generated always as ((id * 2)) stored
+Indexes:
+    "ev_pkey" PRIMARY KEY, btree (id)
+
+==== case 8974e16e07ba4da6 catalog-version-queries
+SELECT count(*) > 0 AS has_tables FROM pg_catalog.pg_tables WHERE schemaname = 'public';
+ has_tables 
+------------
+ t
+(1 row)
+
+SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' ORDER BY 1;
+ tablename 
+-----------
+ author
+ book
+(2 rows)
+
+SELECT viewname FROM pg_catalog.pg_views WHERE schemaname = 'public';
+  viewname  
+------------
+ cheap_book
+(1 row)
+
+SELECT indexname FROM pg_catalog.pg_indexes WHERE tablename = 'book' ORDER BY 1;
+     indexname     
+-------------------
+ book_author_title
+ book_pkey
+ book_title
+(3 rows)
+
+SELECT sequencename, start_value FROM pg_catalog.pg_sequences;
+ sequencename  | start_value 
+---------------+-------------
+ author_id_seq |           1
+ ticket        |         100
+(2 rows)
+
+==== case 937e7a0b1ef714e3 info-schema-tables
+SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;
+ table_schema | table_name | table_type 
+--------------+------------+------------
+ public       | author     | BASE TABLE
+ public       | book       | BASE TABLE
+ public       | cheap_book | VIEW
+(3 rows)
+
+==== case 307a2193c97dcc73 info-schema-columns
+SELECT column_name, ordinal_position, data_type, is_nullable, column_default, character_maximum_length, numeric_precision, numeric_scale
+FROM information_schema.columns WHERE table_name = 'book' ORDER BY ordinal_position;
+ column_name | ordinal_position |     data_type     | is_nullable | column_default | character_maximum_length | numeric_precision | numeric_scale 
+-------------+------------------+-------------------+-------------+----------------+--------------------------+-------------------+---------------
+ id          |                1 | integer           | NO          |                |                          |                32 |             0
+ author_id   |                2 | integer           | NO          |                |                          |                32 |             0
+ title       |                3 | character varying | NO          |                |                      200 |                   |              
+ price       |                4 | numeric           | YES         | 0              |                          |                10 |             2
+ tags        |                5 | jsonb             | YES         |                |                          |                   |              
+ published   |                6 | boolean           | YES         | false          |                          |                   |              
+(6 rows)
+
+==== case 9085a8c6e71d09f4 info-schema-constraints
+SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE table_name = 'book' AND constraint_type <> 'CHECK' ORDER BY constraint_name;
+   constraint_name   | constraint_type 
+---------------------+-----------------
+ book_author_id_fkey | FOREIGN KEY
+ book_pkey           | PRIMARY KEY
+(2 rows)
+
+SELECT kcu.column_name, ccu.table_name AS foreign_table, ccu.column_name AS foreign_column
+FROM information_schema.key_column_usage kcu
+JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = kcu.constraint_name
+JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name
+WHERE tc.constraint_type = 'FOREIGN KEY' AND kcu.table_name = 'book';
+ column_name | foreign_table | foreign_column 
+-------------+---------------+----------------
+ author_id   | author        | id
+(1 row)
+
+==== case 69229cd26fc76765 regclass
+SELECT 'book'::regclass;
+ regclass 
+----------
+ book
+(1 row)
+
+SELECT 'book'::regclass::oid = (SELECT oid FROM pg_class WHERE relname = 'book') AS same;
+ same 
+------
+ t
+(1 row)
+
+SELECT 'int4'::regtype, 23::regtype, 'pg_catalog.text'::regtype;
+ regtype | regtype | regtype 
+---------+---------+---------
+ integer | integer | text
+(1 row)
+
+SELECT pg_get_serial_sequence('author', 'id');
+ pg_get_serial_sequence 
+------------------------
+ public.author_id_seq
+(1 row)
+
+==== case f8a8d0dda17b1bcb format-type
+SELECT format_type(23, -1), format_type(1043, 204), format_type(1700, 655366), format_type(25, NULL);
+ format_type |      format_type       |  format_type  | format_type 
+-------------+------------------------+---------------+-------------
+ integer     | character varying(200) | numeric(10,2) | text
+(1 row)
+
+SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE a.attrelid = 'book'::regclass AND a.attnum > 0 ORDER BY a.attnum;
+  attname  |      format_type       
+-----------+------------------------
+ id        | integer
+ author_id | integer
+ title     | character varying(200)
+ price     | numeric(10,2)
+ tags      | jsonb
+ published | boolean
+(6 rows)
+

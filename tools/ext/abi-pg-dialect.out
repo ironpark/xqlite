@@ -1,0 +1,9 @@
+1|1|1|1|1
+1|1|1
+1|1|1|0
+0|1|1|1|1
+-- errors
+line 11: relation "nope" does not exist
+line 12: currval of sequence "nope" is not yet defined in this session
+line 13: lastval is not yet defined in this session
+line 14: relation "nope" does not exist

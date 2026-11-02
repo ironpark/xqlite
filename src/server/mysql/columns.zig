@@ -54,7 +54,7 @@ pub fn field(t_in: types.Type, name: ?[]const u8) Field {
     if (eq(base, "mediumint")) return .{ .type = .int24, .flags = num, .charset = c.Charset.binary, .length = if (unsigned != 0) 8 else 9, .t = t };
     const signed: u32 = if (unsigned != 0) 0 else 1;
     return switch (t.logical) {
-        .unknown, .interval => .{ .type = .var_string, .t = t },
+        .unknown, .interval, .array => .{ .type = .var_string, .t = t },
         .boolean => .{ .type = .tiny, .flags = num, .charset = c.Charset.binary, .length = 1, .t = t },
         .int1 => .{ .type = .tiny, .flags = num, .charset = c.Charset.binary, .length = 3 + signed, .t = t },
         .int2 => .{ .type = .short, .flags = num, .charset = c.Charset.binary, .length = 5 + signed, .t = t },

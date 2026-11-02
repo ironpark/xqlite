@@ -1,0 +1,667 @@
+# The functions and collations the schema text of a dialect may call
+# (src/dialect/abi.zig, docs/extension.md): name, argument count, where
+# it comes from, its flags. A line is never changed or removed (a
+# database that calls it would break); a new function is a new line.
+# The test "abi: ..." of src/dialect/abi.zig prints the lines missing.
+version 1
+xq_like 2 engine deterministic
+xq_like 3 engine deterministic
+xq_ilike 2 engine deterministic
+xq_ilike 3 engine deterministic
+xq_ext_version 0 engine deterministic
+xq_pg_bool 1 engine deterministic
+xq_pg_int2 1 engine deterministic
+xq_pg_int4 1 engine deterministic
+xq_pg_int8 1 engine deterministic
+xq_pg_data_type 2 engine deterministic
+xq_pg_udt_name 2 engine deterministic
+xq_pg_char_max 2 engine deterministic
+xq_pg_num_precision 2 engine deterministic
+xq_pg_num_scale 2 engine deterministic
+xq_pg_regex 3 engine deterministic
+xq_pg_json 1 engine deterministic subtype result_subtype
+xq_pg_jsonb 1 engine deterministic subtype result_subtype
+xq_pg_json_bool 1 engine deterministic subtype result_subtype
+xq_pg_float_json 2 engine deterministic subtype result_subtype
+xq_pg_numeric_json 2 engine deterministic subtype result_subtype
+xq_pg_json_get 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_get 2 engine deterministic subtype result_subtype
+xq_pg_json_get_text 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_get_text 2 engine deterministic subtype result_subtype
+xq_pg_json_path 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_path 2 engine deterministic subtype result_subtype
+xq_pg_json_path_text 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_path_text 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_contains 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_exists 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_exists_any 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_exists_all 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_concat 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_delete 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_delete_keys 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_delete_path 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_path_exists_op 2 engine deterministic subtype result_subtype
+xq_pg_jsonb_path_match_op 2 engine deterministic subtype result_subtype
+xq_pg_array_to_json 3 engine deterministic subtype result_subtype
+xq_pg_is_json 3 engine deterministic subtype result_subtype
+xq_pg_row_json -1 engine deterministic subtype result_subtype
+xq_pg_json_ctor_object -1 engine deterministic subtype result_subtype
+xq_pg_json_ctor_array -1 engine deterministic subtype result_subtype
+xq_pg_json_arrayagg 2 engine aggregate deterministic subtype result_subtype
+xq_pg_json_objectagg 3 engine aggregate deterministic subtype result_subtype
+xq_pg_json_agg_rows 1 engine aggregate deterministic subtype result_subtype
+xq_pg_rows_each 2 engine deterministic subtype result_subtype
+xq_pg_rows_elements 2 engine deterministic subtype result_subtype
+xq_pg_rows_keys 2 engine deterministic subtype result_subtype
+xq_pg_rows_path 4 engine deterministic subtype result_subtype
+xq_pg_rows_records -1 engine deterministic subtype result_subtype
+xq_pg_rows_zip -1 engine deterministic subtype result_subtype
+xq_pg_regclass 1 engine xqlite-only:catalog
+xq_pg_regtype 1 engine xqlite-only:catalog
+xq_pg_regnamespace 1 engine xqlite-only:catalog
+xq_pg_regrole 1 engine xqlite-only:catalog
+xq_pg_regproc 1 engine xqlite-only:catalog
+xq_pg_regclass_out 1 engine xqlite-only:catalog
+xq_pg_regtype_out 1 engine xqlite-only:catalog
+xq_pg_regnamespace_out 1 engine xqlite-only:catalog
+xq_pg_regrole_out 1 engine xqlite-only:catalog
+xq_pg_array_position 2 engine deterministic
+xq_pg_dt_precision 2 engine deterministic
+xq_pg_interval 1 engine deterministic
+xq_pg_date 1 engine deterministic
+xq_pg_time 1 engine deterministic
+xq_pg_timestamp 1 engine deterministic
+xq_pg_timestamptz 1 engine deterministic
+xq_pg_date_pli 2 engine deterministic
+xq_pg_integer_pl_date 2 engine deterministic
+xq_pg_date_mii 2 engine deterministic
+xq_pg_date_mi 2 engine deterministic
+xq_pg_date_pl_interval 2 engine deterministic
+xq_pg_interval_pl_date 2 engine deterministic
+xq_pg_date_mi_interval 2 engine deterministic
+xq_pg_datetime_pl 2 engine deterministic
+xq_pg_timedate_pl 2 engine deterministic
+xq_pg_timestamp_pl_interval 2 engine deterministic
+xq_pg_interval_pl_timestamp 2 engine deterministic
+xq_pg_timestamp_mi_interval 2 engine deterministic
+xq_pg_timestamp_mi 2 engine deterministic
+xq_pg_timestamptz_pl_interval 2 engine deterministic
+xq_pg_interval_pl_timestamptz 2 engine deterministic
+xq_pg_timestamptz_mi_interval 2 engine deterministic
+xq_pg_timestamptz_mi 2 engine deterministic
+xq_pg_time_pl_interval 2 engine deterministic
+xq_pg_interval_pl_time 2 engine deterministic
+xq_pg_time_mi_interval 2 engine deterministic
+xq_pg_time_mi_time 2 engine deterministic
+xq_pg_interval_pl 2 engine deterministic
+xq_pg_interval_mi 2 engine deterministic
+xq_pg_interval_um 1 engine deterministic
+xq_pg_interval_mul 2 engine deterministic
+xq_pg_mul_d_interval 2 engine deterministic
+xq_pg_interval_div 2 engine deterministic
+xq_pg_array_any 1 engine deterministic
+xq_pg_array_bool 1 engine deterministic
+xq_pg_array_int2 1 engine deterministic
+xq_pg_array_int4 1 engine deterministic
+xq_pg_array_int8 1 engine deterministic
+xq_pg_array_float4 1 engine deterministic
+xq_pg_array_float8 1 engine deterministic
+xq_pg_array_numeric 1 engine deterministic
+xq_pg_array_text 1 engine deterministic
+xq_pg_array_bytea 1 engine deterministic
+xq_pg_array_date 1 engine deterministic
+xq_pg_array_time 1 engine deterministic
+xq_pg_array_timetz 1 engine deterministic
+xq_pg_array_timestamp 1 engine deterministic
+xq_pg_array_timestamptz 1 engine deterministic
+xq_pg_array_interval 1 engine deterministic
+xq_pg_array_uuid 1 engine deterministic
+xq_pg_array_json 1 engine deterministic
+xq_pg_array_jsonb 1 engine deterministic
+xq_pg_array_valid 1 engine deterministic
+xq_pg_text_array 1 engine deterministic
+xq_pg_elem 2 engine deterministic
+xq_pg_array -1 engine deterministic
+xq_pg_array_nested -1 engine deterministic
+xq_pg_any 4 engine deterministic
+xq_pg_any 5 engine deterministic
+xq_pg_subscript -1 engine deterministic
+xq_pg_subscript_k -1 engine deterministic
+xq_pg_slice -1 engine deterministic
+xq_pg_array_set -1 engine deterministic
+xq_pg_array_cat2 2 engine deterministic
+xq_pg_array_append 2 engine deterministic
+xq_pg_array_prepend 2 engine deterministic
+xq_pg_array_contains 2 engine deterministic
+xq_pg_array_overlap 2 engine deterministic
+xq_pg_array_agg 1 engine window deterministic
+xq_pg_array_agg_arrays 1 engine window deterministic
+xq_pg_rows_unnest 1 engine deterministic
+xq_pg_rows_unnest 2 engine deterministic
+xq_pg_rows_subscripts 3 engine deterministic
+xq_pg_rows_expand 2 engine deterministic
+xq_pg_record_field 2 engine deterministic
+xq_pg_record -1 engine deterministic
+xq_coerce 7 engine
+xq_div 2 engine deterministic
+xq_xor 2 engine deterministic
+xq_bitxor 2 engine deterministic
+xq_cast 2 engine deterministic
+xq_date_add 3 engine deterministic
+xq_extract 2 engine deterministic
+xq_timestampdiff 3 engine deterministic
+xq_rand 0 engine
+xq_rand 1 engine
+xq_uuid 0 engine
+xq_bit_length 1 engine deterministic
+xq_stddev_pop 1 engine aggregate deterministic
+xq_stddev_samp 1 engine aggregate deterministic
+xq_var_pop 1 engine aggregate deterministic
+xq_var_samp 1 engine aggregate deterministic
+xq_maria_json_bool 1 engine deterministic subtype result_subtype
+xq_maria_json_col 1 engine deterministic subtype result_subtype
+xq_maria_json_cmp 1 engine deterministic subtype result_subtype
+xq_tsql_add 2 engine deterministic
+xq_tsql_like 2 engine deterministic
+xq_tsql_like 3 engine deterministic
+xq_tsql_cast 2 engine deterministic
+xq_tsql_try_cast 2 engine deterministic
+xq_tsql_store 2 engine deterministic
+xq_tsql_newid 0 engine
+xq_tsql_avg 1 engine aggregate deterministic
+xq_tsql_json_value 2 engine deterministic
+xq_tsql_json_query 1 engine deterministic
+xq_tsql_json_query 2 engine deterministic
+xq_tsql_json_modify 4 engine deterministic
+xq_tsql_json_path_exists 2 engine deterministic
+xq_tsql_isjson 2 engine deterministic
+xq_tsql_json_escape 1 engine deterministic
+xq_tsql_json_object -1 engine deterministic
+xq_tsql_json_array -1 engine deterministic
+xq_tsql_for_json -1 engine aggregate deterministic
+xq_ora_coerce 5 engine deterministic
+xq_ora_cast 2 engine deterministic
+xq_ora_autocommit 0 engine xqlite-only:session
+xq_ora_data_type 2 engine deterministic
+xq_ora_data_length 2 engine deterministic
+xq_ora_data_precision 2 engine deterministic
+xq_ora_data_scale 2 engine deterministic
+xq_ora_is_json 2 engine deterministic subtype result_subtype
+xq_ora_json 1 engine deterministic subtype result_subtype
+xq_ora_json_scalar 1 engine deterministic subtype result_subtype
+xq_ora_json_value -1 engine deterministic subtype result_subtype
+xq_ora_json_query -1 engine deterministic subtype result_subtype
+xq_ora_json_exists -1 engine deterministic subtype result_subtype
+xq_ora_json_dot 3 engine deterministic subtype result_subtype
+xq_ora_json_object -1 engine deterministic subtype result_subtype
+xq_ora_json_array -1 engine deterministic subtype result_subtype
+xq_ora_json_objectagg 3 engine aggregate deterministic subtype result_subtype
+xq_ora_json_arrayagg 2 engine aggregate deterministic subtype result_subtype
+xq_ora_json_mergepatch 3 engine deterministic subtype result_subtype
+xq_ora_json_serialize 2 engine deterministic subtype result_subtype
+xq_ora_json_transform -1 engine deterministic subtype result_subtype
+xq_postgres_version 0 qualified
+xq_postgres_nextval 1 qualified unsafe sequence:nextval
+xq_postgres_currval 1 qualified unsafe sequence:currval
+xq_postgres_setval 2 qualified unsafe sequence:setval
+xq_postgres_setval 3 qualified unsafe sequence:setval
+xq_postgres_lastval 0 qualified unsafe sequence:lastval
+xq_postgres_greatest -1 qualified deterministic
+xq_postgres_least -1 qualified deterministic
+xq_postgres_left 2 qualified deterministic
+xq_postgres_right 2 qualified deterministic
+xq_postgres_repeat 2 qualified deterministic
+xq_postgres_reverse 1 qualified deterministic
+xq_postgres_lpad 2 qualified deterministic
+xq_postgres_lpad 3 qualified deterministic
+xq_postgres_rpad 2 qualified deterministic
+xq_postgres_rpad 3 qualified deterministic
+xq_postgres_split_part 3 qualified deterministic
+xq_postgres_starts_with 2 qualified deterministic
+xq_postgres_random 0 qualified
+xq_postgres_gen_random_uuid 0 qualified
+xq_postgres_floor 1 qualified deterministic
+xq_postgres_ceil 1 qualified deterministic
+xq_postgres_ceiling 1 qualified deterministic
+xq_postgres_sqrt 1 qualified deterministic
+xq_postgres_power 2 qualified deterministic
+xq_postgres_pow 2 qualified deterministic
+xq_postgres_exp 1 qualified deterministic
+xq_postgres_ln 1 qualified deterministic
+xq_postgres_log 1 qualified deterministic
+xq_postgres_log 2 qualified deterministic
+xq_postgres_mod 2 qualified deterministic
+xq_postgres_trunc 1 qualified deterministic
+xq_postgres_trunc 2 qualified deterministic
+xq_postgres_sign 1 qualified deterministic
+xq_postgres_pi 0 qualified deterministic
+xq_postgres_current_user 0 qualified deterministic
+xq_postgres_current_database 0 qualified deterministic xqlite-only:session
+xq_postgres_format_type 2 qualified deterministic
+xq_postgres_set_config 3 qualified unsafe xqlite-only:session
+xq_postgres_current_setting 1 qualified xqlite-only:session
+xq_postgres_current_setting 2 qualified xqlite-only:session
+xq_postgres_current_schema 0 qualified xqlite-only:session
+xq_postgres_current_schemas 1 qualified xqlite-only:session
+xq_postgres_xq_pg_startup_setting 2 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_to_json 1 qualified deterministic subtype result_subtype
+xq_postgres_to_jsonb 1 qualified deterministic subtype result_subtype
+xq_postgres_array_to_json 1 qualified deterministic subtype result_subtype
+xq_postgres_array_to_json 2 qualified deterministic subtype result_subtype
+xq_postgres_row_to_json 1 qualified deterministic subtype result_subtype
+xq_postgres_row_to_json 2 qualified deterministic subtype result_subtype
+xq_postgres_json_build_object -1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_build_object -1 qualified deterministic subtype result_subtype
+xq_postgres_json_build_array -1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_build_array -1 qualified deterministic subtype result_subtype
+xq_postgres_json_object 1 qualified deterministic subtype result_subtype
+xq_postgres_json_object 2 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_object 1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_object 2 qualified deterministic subtype result_subtype
+xq_postgres_json_agg 1 qualified aggregate deterministic subtype result_subtype
+xq_postgres_jsonb_agg 1 qualified aggregate deterministic subtype result_subtype
+xq_postgres_json_object_agg 2 qualified aggregate deterministic subtype result_subtype
+xq_postgres_jsonb_object_agg 2 qualified aggregate deterministic subtype result_subtype
+xq_postgres_json_typeof 1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_typeof 1 qualified deterministic subtype result_subtype
+xq_postgres_json_array_length 1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_array_length 1 qualified deterministic subtype result_subtype
+xq_postgres_json_extract_path -1 qualified deterministic subtype result_subtype
+xq_postgres_json_extract_path_text -1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_extract_path -1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_extract_path_text -1 qualified deterministic subtype result_subtype
+xq_postgres_json_strip_nulls 1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_strip_nulls 1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_set 3 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_set 4 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_set_lax 3 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_set_lax 4 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_set_lax 5 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_insert 3 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_insert 4 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_pretty 1 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_exists 2 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_exists 3 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_exists 4 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_match 2 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_match 3 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_match 4 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_query_array 2 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_query_array 3 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_query_array 4 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_query_first 2 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_query_first 3 qualified deterministic subtype result_subtype
+xq_postgres_jsonb_path_query_first 4 qualified deterministic subtype result_subtype
+xq_postgres_pg_get_userbyid 1 qualified deterministic
+xq_postgres_pg_table_is_visible 1 qualified xqlite-only:catalog
+xq_postgres_pg_type_is_visible 1 qualified xqlite-only:catalog
+xq_postgres_pg_function_is_visible 1 qualified deterministic
+xq_postgres_pg_collation_is_visible 1 qualified deterministic
+xq_postgres_pg_opclass_is_visible 1 qualified deterministic
+xq_postgres_pg_operator_is_visible 1 qualified deterministic
+xq_postgres_pg_conversion_is_visible 1 qualified deterministic
+xq_postgres_pg_statistics_obj_is_visible 1 qualified deterministic
+xq_postgres_pg_ts_config_is_visible 1 qualified deterministic
+xq_postgres_pg_get_expr 2 qualified deterministic xqlite-only:catalog
+xq_postgres_pg_get_expr 3 qualified deterministic xqlite-only:catalog
+xq_postgres_pg_get_indexdef 1 qualified xqlite-only:catalog
+xq_postgres_pg_get_indexdef 3 qualified xqlite-only:catalog
+xq_postgres_pg_get_constraintdef 1 qualified xqlite-only:catalog
+xq_postgres_pg_get_constraintdef 2 qualified xqlite-only:catalog
+xq_postgres_pg_get_viewdef 1 qualified xqlite-only:catalog
+xq_postgres_pg_get_viewdef 2 qualified xqlite-only:catalog
+xq_postgres_pg_get_serial_sequence 2 qualified xqlite-only:catalog
+xq_postgres_obj_description 1 qualified xqlite-only:catalog
+xq_postgres_obj_description 2 qualified xqlite-only:catalog
+xq_postgres_col_description 2 qualified xqlite-only:catalog
+xq_postgres_shobj_description 2 qualified deterministic
+xq_postgres_pg_get_triggerdef 1 qualified deterministic
+xq_postgres_pg_get_triggerdef 2 qualified deterministic
+xq_postgres_pg_get_ruledef 1 qualified deterministic
+xq_postgres_pg_get_ruledef 2 qualified deterministic
+xq_postgres_pg_get_partkeydef 1 qualified deterministic
+xq_postgres_pg_get_partition_constraintdef 1 qualified deterministic
+xq_postgres_pg_get_statisticsobjdef_columns 1 qualified deterministic
+xq_postgres_pg_get_function_result 1 qualified deterministic
+xq_postgres_pg_get_function_arguments 1 qualified deterministic
+xq_postgres_pg_get_function_identity_arguments 1 qualified deterministic
+xq_postgres_pg_partition_ancestors 1 qualified deterministic
+xq_postgres_pg_partition_root 1 qualified deterministic
+xq_postgres_pg_relation_is_publishable 1 qualified deterministic
+xq_postgres_pg_is_in_recovery 0 qualified deterministic
+xq_postgres_pg_backend_pid 0 qualified deterministic xqlite-only:session
+xq_postgres_pg_encoding_to_char 1 qualified deterministic
+xq_postgres_pg_char_to_encoding 1 qualified deterministic
+xq_postgres_pg_size_pretty 1 qualified deterministic
+xq_postgres_pg_table_size 1 qualified deterministic
+xq_postgres_pg_relation_size 1 qualified deterministic
+xq_postgres_pg_relation_size 2 qualified deterministic
+xq_postgres_pg_total_relation_size 1 qualified deterministic
+xq_postgres_pg_indexes_size 1 qualified deterministic
+xq_postgres_pg_database_size 1 qualified deterministic
+xq_postgres_pg_typeof 1 qualified deterministic
+xq_postgres_to_regclass 1 qualified xqlite-only:catalog
+xq_postgres_to_regtype 1 qualified xqlite-only:catalog
+xq_postgres_to_regnamespace 1 qualified xqlite-only:catalog
+xq_postgres_to_regrole 1 qualified xqlite-only:catalog
+xq_postgres_quote_ident 1 qualified deterministic
+xq_postgres_quote_literal 1 qualified deterministic
+xq_postgres_quote_nullable 1 qualified deterministic
+xq_postgres_has_table_privilege 2 qualified deterministic
+xq_postgres_has_table_privilege 3 qualified deterministic
+xq_postgres_has_schema_privilege 2 qualified deterministic
+xq_postgres_has_schema_privilege 3 qualified deterministic
+xq_postgres_has_database_privilege 2 qualified deterministic
+xq_postgres_has_database_privilege 3 qualified deterministic
+xq_postgres_has_column_privilege 3 qualified deterministic
+xq_postgres_has_column_privilege 4 qualified deterministic
+xq_postgres_has_any_column_privilege 2 qualified deterministic
+xq_postgres_has_any_column_privilege 3 qualified deterministic
+xq_postgres_has_sequence_privilege 2 qualified deterministic
+xq_postgres_has_sequence_privilege 3 qualified deterministic
+xq_postgres_has_function_privilege 2 qualified deterministic
+xq_postgres_has_function_privilege 3 qualified deterministic
+xq_postgres_has_type_privilege 2 qualified deterministic
+xq_postgres_has_type_privilege 3 qualified deterministic
+xq_postgres_has_tablespace_privilege 2 qualified deterministic
+xq_postgres_has_tablespace_privilege 3 qualified deterministic
+xq_postgres_has_language_privilege 2 qualified deterministic
+xq_postgres_has_language_privilege 3 qualified deterministic
+xq_postgres_has_foreign_data_wrapper_privilege 2 qualified deterministic
+xq_postgres_has_foreign_data_wrapper_privilege 3 qualified deterministic
+xq_postgres_has_server_privilege 2 qualified deterministic
+xq_postgres_has_server_privilege 3 qualified deterministic
+xq_postgres_pg_has_role 2 qualified deterministic
+xq_postgres_pg_has_role 3 qualified deterministic
+xq_postgres_array_length 2 qualified deterministic
+xq_postgres_array_lower 2 qualified deterministic
+xq_postgres_array_upper 2 qualified deterministic
+xq_postgres_array_ndims 1 qualified deterministic
+xq_postgres_cardinality 1 qualified deterministic
+xq_postgres_array_dims 1 qualified deterministic
+xq_postgres_array_append 2 qualified deterministic
+xq_postgres_array_prepend 2 qualified deterministic
+xq_postgres_array_cat 2 qualified deterministic
+xq_postgres_array_remove 2 qualified deterministic
+xq_postgres_array_replace 3 qualified deterministic
+xq_postgres_array_position 2 qualified deterministic
+xq_postgres_array_position 3 qualified deterministic
+xq_postgres_array_positions 2 qualified deterministic
+xq_postgres_array_to_string 2 qualified deterministic
+xq_postgres_array_to_string 3 qualified deterministic
+xq_postgres_string_to_array 2 qualified deterministic
+xq_postgres_string_to_array 3 qualified deterministic
+xq_postgres_array_agg 1 qualified window deterministic
+xq_mariadb_version 0 qualified
+xq_mariadb_concat -1 qualified deterministic
+xq_mariadb_nextval 1 qualified unsafe sequence:nextval
+xq_mariadb_lastval 1 qualified unsafe sequence:lastval_of
+xq_mariadb_setval 2 qualified unsafe sequence:setval
+xq_mariadb_setval 3 qualified unsafe sequence:setval
+xq_mariadb_xq_sysvar 1 qualified xqlite-only:session
+xq_mariadb_xq_set_sysvar 2 qualified direct xqlite-only:direct_only
+xq_mariadb_xq_uservar 1 qualified xqlite-only:session
+xq_mariadb_xq_set_uservar 2 qualified direct xqlite-only:direct_only
+xq_mariadb_xq_maria_use 1 qualified direct xqlite-only:direct_only
+xq_mariadb_floor 1 qualified deterministic
+xq_mariadb_ceil 1 qualified deterministic
+xq_mariadb_ceiling 1 qualified deterministic
+xq_mariadb_pow 2 qualified deterministic
+xq_mariadb_power 2 qualified deterministic
+xq_mariadb_sqrt 1 qualified deterministic
+xq_mariadb_exp 1 qualified deterministic
+xq_mariadb_ln 1 qualified deterministic
+xq_mariadb_log 1 qualified deterministic
+xq_mariadb_log 2 qualified deterministic
+xq_mariadb_log2 1 qualified deterministic
+xq_mariadb_log10 1 qualified deterministic
+xq_mariadb_pi 0 qualified deterministic
+xq_mariadb_sin 1 qualified deterministic
+xq_mariadb_cos 1 qualified deterministic
+xq_mariadb_tan 1 qualified deterministic
+xq_mariadb_asin 1 qualified deterministic
+xq_mariadb_acos 1 qualified deterministic
+xq_mariadb_atan 1 qualified deterministic
+xq_mariadb_degrees 1 qualified deterministic
+xq_mariadb_radians 1 qualified deterministic
+xq_mariadb_truncate 2 qualified deterministic
+xq_mariadb_round 1 qualified deterministic
+xq_mariadb_round 2 qualified deterministic
+xq_mariadb_left 2 qualified deterministic
+xq_mariadb_right 2 qualified deterministic
+xq_mariadb_repeat 2 qualified deterministic
+xq_mariadb_space 1 qualified deterministic
+xq_mariadb_reverse 1 qualified deterministic
+xq_mariadb_lpad 2 qualified deterministic
+xq_mariadb_lpad 3 qualified deterministic
+xq_mariadb_rpad 2 qualified deterministic
+xq_mariadb_rpad 3 qualified deterministic
+xq_mariadb_hex 1 qualified deterministic
+xq_mariadb_format 2 qualified deterministic
+xq_mariadb_insert 4 qualified deterministic
+xq_mariadb_locate 3 qualified deterministic
+xq_mariadb_find_in_set 2 qualified deterministic
+xq_mariadb_field -1 qualified deterministic
+xq_mariadb_elt -1 qualified deterministic
+xq_mariadb_year 1 qualified deterministic
+xq_mariadb_month 1 qualified deterministic
+xq_mariadb_day 1 qualified deterministic
+xq_mariadb_dayofmonth 1 qualified deterministic
+xq_mariadb_hour 1 qualified deterministic
+xq_mariadb_minute 1 qualified deterministic
+xq_mariadb_second 1 qualified deterministic
+xq_mariadb_microsecond 1 qualified deterministic
+xq_mariadb_dayofweek 1 qualified deterministic
+xq_mariadb_weekday 1 qualified deterministic
+xq_mariadb_dayofyear 1 qualified deterministic
+xq_mariadb_quarter 1 qualified deterministic
+xq_mariadb_to_days 1 qualified deterministic
+xq_mariadb_datediff 2 qualified deterministic
+xq_mariadb_last_day 1 qualified deterministic
+xq_mariadb_date_format 2 qualified deterministic
+xq_mariadb_dayname 1 qualified deterministic
+xq_mariadb_monthname 1 qualified deterministic
+xq_mariadb_str_to_date 2 qualified deterministic
+xq_mariadb_ascii 1 qualified deterministic
+xq_mariadb_json_extract -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_value 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_query 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_unquote 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_quote 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_object -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_array -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_contains 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_contains 3 qualified deterministic subtype result_subtype
+xq_mariadb_json_contains_path -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_exists 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_keys 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_keys 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_length 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_length 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_depth 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_type 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_set -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_insert -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_replace -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_remove -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_array_append -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_array_insert -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_merge -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_merge_preserve -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_merge_patch -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_search -1 qualified deterministic subtype result_subtype
+xq_mariadb_json_compact 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_loose 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_detailed 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_detailed 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_pretty 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_pretty 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_equals 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_normalize 1 qualified deterministic subtype result_subtype
+xq_mariadb_json_overlaps 2 qualified deterministic subtype result_subtype
+xq_mariadb_json_arrayagg 1 qualified aggregate deterministic subtype result_subtype
+xq_mariadb_json_arrayagg 2 qualified aggregate deterministic subtype result_subtype
+xq_mariadb_json_objectagg 2 qualified aggregate deterministic subtype result_subtype
+xq_mssql_nextval 1 qualified unsafe sequence:nextval
+xq_mssql_xq_tsql_next_value 1 qualified unsafe sequence:nextval
+xq_mssql_scope_identity 0 qualified xqlite-only:session
+xq_mssql_ident_current 1 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_getvar 1 qualified xqlite-only:session
+xq_mssql_xq_tsql_setvar 2 qualified direct xqlite-only:direct_only
+xq_mssql_xq_tsql_declare 3 qualified direct xqlite-only:direct_only
+xq_mssql_xq_tsql_assign -1 qualified direct xqlite-only:direct_only
+xq_mssql_xq_tsql_identity_insert 2 qualified direct xqlite-only:direct_only
+xq_mssql_xq_tsql_identity_seen 2 qualified direct xqlite-only:direct_only
+xq_mssql_xq_tsql_trancount 0 qualified xqlite-only:session
+xq_mssql_xq_tsql_tran 2 qualified direct xqlite-only:direct_only
+xq_mssql_xq_tsql_merge 2 qualified direct xqlite-only:direct_only
+xq_mssql_typeinfo 2 qualified deterministic
+xq_mssql_charindex 2 qualified deterministic
+xq_mssql_charindex 3 qualified deterministic
+xq_mssql_replace 3 qualified deterministic
+xq_mssql_left 2 qualified deterministic
+xq_mssql_right 2 qualified deterministic
+xq_mssql_reverse 1 qualified deterministic
+xq_mssql_replicate 2 qualified deterministic
+xq_mssql_space 1 qualified deterministic
+xq_mssql_stuff 4 qualified deterministic
+xq_mssql_ascii 1 qualified deterministic
+xq_mssql_isnumeric 1 qualified deterministic
+xq_mssql_isdate 1 qualified deterministic
+xq_mssql_floor 1 qualified deterministic
+xq_mssql_ceiling 1 qualified deterministic
+xq_mssql_round 1 qualified deterministic
+xq_mssql_round 2 qualified deterministic
+xq_mssql_truncate 2 qualified deterministic
+xq_mssql_power 2 qualified deterministic
+xq_mssql_sqrt 1 qualified deterministic
+xq_mssql_exp 1 qualified deterministic
+xq_mssql_ln 1 qualified deterministic
+xq_mssql_log 2 qualified deterministic
+xq_mssql_log10 1 qualified deterministic
+xq_mssql_pi 0 qualified deterministic
+xq_mssql_sin 1 qualified deterministic
+xq_mssql_cos 1 qualified deterministic
+xq_mssql_tan 1 qualified deterministic
+xq_mssql_asin 1 qualified deterministic
+xq_mssql_acos 1 qualified deterministic
+xq_mssql_atan 1 qualified deterministic
+xq_mssql_degrees 1 qualified deterministic
+xq_mssql_radians 1 qualified deterministic
+xq_mssql_dateadd 3 qualified deterministic
+xq_mssql_datediff 3 qualified deterministic
+xq_mssql_datepart 2 qualified deterministic
+xq_mssql_datename 2 qualified deterministic
+xq_mssql_eomonth 1 qualified deterministic
+xq_mssql_eomonth 2 qualified deterministic
+xq_mssql_datefromparts 3 qualified deterministic
+xq_mssql_xq_tsql_default_schema 1 qualified direct xqlite-only:direct_only
+xq_mssql_xq_tsql_schema_id 0 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_schema_id 1 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_schema_name 0 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_schema_name 1 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_object_name 1 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_object_schema_name 1 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_schema_of 1 qualified xqlite-only:catalog
+xq_mssql_xq_tsql_bare_name 1 qualified xqlite-only:catalog
+xq_oracle_lengthc 1 qualified deterministic
+xq_oracle_lengthb 1 qualified deterministic
+xq_oracle_substr 2 qualified deterministic
+xq_oracle_substr 3 qualified deterministic
+xq_oracle_instr 2 qualified deterministic
+xq_oracle_instr 3 qualified deterministic
+xq_oracle_instr 4 qualified deterministic
+xq_oracle_initcap 1 qualified deterministic
+xq_oracle_lpad 2 qualified deterministic
+xq_oracle_lpad 3 qualified deterministic
+xq_oracle_rpad 2 qualified deterministic
+xq_oracle_rpad 3 qualified deterministic
+xq_oracle_ltrim 1 qualified deterministic
+xq_oracle_ltrim 2 qualified deterministic
+xq_oracle_rtrim 1 qualified deterministic
+xq_oracle_rtrim 2 qualified deterministic
+xq_oracle_trim 1 qualified deterministic
+xq_oracle_trim 2 qualified deterministic
+xq_oracle_replace 2 qualified deterministic
+xq_oracle_replace 3 qualified deterministic
+xq_oracle_translate 3 qualified deterministic
+xq_oracle_greatest -1 qualified deterministic
+xq_oracle_least -1 qualified deterministic
+xq_oracle_mod 2 qualified deterministic
+xq_oracle_ceil 1 qualified deterministic
+xq_oracle_floor 1 qualified deterministic
+xq_oracle_power 2 qualified deterministic
+xq_oracle_sqrt 1 qualified deterministic
+xq_oracle_sign 1 qualified deterministic
+xq_oracle_exp 1 qualified deterministic
+xq_oracle_ln 1 qualified deterministic
+xq_oracle_log 2 qualified deterministic
+xq_oracle_round 1 qualified deterministic
+xq_oracle_round 2 qualified deterministic
+xq_oracle_trunc 1 qualified deterministic
+xq_oracle_trunc 2 qualified deterministic
+xq_oracle_to_char 1 qualified deterministic
+xq_oracle_to_char 2 qualified deterministic
+xq_oracle_to_number 1 qualified deterministic
+xq_oracle_to_number 2 qualified deterministic
+xq_oracle_to_date 1 qualified deterministic
+xq_oracle_to_date 2 qualified deterministic
+xq_oracle_to_timestamp 1 qualified deterministic
+xq_oracle_to_timestamp 2 qualified deterministic
+xq_oracle_add_months 2 qualified deterministic
+xq_oracle_months_between 2 qualified deterministic
+xq_oracle_last_day 1 qualified deterministic
+xq_oracle_next_day 2 qualified deterministic
+xq_oracle_extract 2 qualified deterministic
+xq_oracle_nextval 1 qualified unsafe sequence:nextval
+xq_oracle_currval 1 qualified unsafe sequence:currval
+xq_oracle_setval 2 qualified unsafe sequence:setval
+xq_oracle_setval 3 qualified unsafe sequence:setval
+xq_oracle_lastval 0 qualified unsafe sequence:lastval
+xq_oracle_set_current_schema 1 qualified unsafe xqlite-only:session
+xq_oracle_sys_context 2 qualified xqlite-only:session
+xq_oracle_sys_context 3 qualified xqlite-only:session
+xq_sqlite_random 0 sqlite
+xq_sqlite_sign 1 sqlite deterministic
+xq_sqlite_json_object -1 sqlite deterministic subtype result_subtype
+xq_sqlite_jsonb_object -1 sqlite deterministic subtype result_subtype
+xq_sqlite_json_array_length 1 sqlite deterministic
+xq_sqlite_json_array_length 2 sqlite deterministic
+xq_sqlite_jsonb_set -1 sqlite deterministic subtype
+xq_sqlite_jsonb_insert -1 sqlite deterministic subtype
+xq_sqlite_concat -3 sqlite deterministic
+xq_sqlite_round 1 sqlite deterministic
+xq_sqlite_round 2 sqlite deterministic
+xq_sqlite_hex 1 sqlite deterministic
+xq_sqlite_format -1 sqlite deterministic
+xq_sqlite_json_extract -1 sqlite deterministic result_subtype
+xq_sqlite_json_quote 1 sqlite deterministic subtype result_subtype
+xq_sqlite_json_array -1 sqlite deterministic subtype result_subtype
+xq_sqlite_json_type 1 sqlite deterministic
+xq_sqlite_json_type 2 sqlite deterministic
+xq_sqlite_json_set -1 sqlite deterministic subtype result_subtype
+xq_sqlite_json_insert -1 sqlite deterministic subtype result_subtype
+xq_sqlite_json_replace -1 sqlite deterministic subtype result_subtype
+xq_sqlite_json_remove -1 sqlite deterministic result_subtype
+xq_sqlite_json_array_insert -1 sqlite deterministic subtype result_subtype
+xq_sqlite_json_pretty 1 sqlite deterministic
+xq_sqlite_json_pretty 2 sqlite deterministic
+xq_sqlite_replace 3 sqlite deterministic
+xq_sqlite_substr 2 sqlite deterministic
+xq_sqlite_substr 3 sqlite deterministic
+xq_sqlite_instr 2 sqlite deterministic
+xq_sqlite_ltrim 1 sqlite deterministic
+xq_sqlite_ltrim 2 sqlite deterministic
+xq_sqlite_rtrim 1 sqlite deterministic
+xq_sqlite_rtrim 2 sqlite deterministic
+xq_sqlite_trim 1 sqlite deterministic
+xq_sqlite_trim 2 sqlite deterministic
+nextval 1 sequence unsafe sequence:nextval
+currval 1 sequence unsafe sequence:currval
+setval 2 sequence unsafe sequence:setval
+setval 3 sequence unsafe sequence:setval
+lastval 0 sequence unsafe sequence:lastval
+collation xq_pg_jsonb postgres
+collation xq_pg_interval postgres
+collation xq_pg_array postgres
+collation xq_pg_array_num postgres

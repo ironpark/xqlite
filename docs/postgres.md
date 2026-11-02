@@ -50,14 +50,15 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | `json.zig` | json/jsonb 값: PostgreSQL 규칙의 파싱, jsonb 정규화와 출력, 비교·포함 |
 | `jsonpath.zig` | jsonpath의 부분집합 |
 | `jfuncs.zig` | JSON 연산자·함수·집계·집합 반환 함수의 구현 |
+| `array.zig` | 배열 값(PostgreSQL의 텍스트: `{1,2,NULL}`)의 읽기·쓰기, 원소 타입의 입력·출력, 배열의 엔진 함수(캐스트와 저장, `ARRAY[...]`, `ANY`/`ALL`, 첨자, `unnest()`의 행 ...)와 방언 함수(`array_length()` ...), collation `xq_pg_array`/`xq_pg_array_num` |
 | `typing.zig` | 식 타입의 규칙(`Hooks.typing`, [아키텍처](architecture.md)의 코어의 타입): 리터럴·연산자·함수의 결과 타입 |
 | `operators.zig` | 연산자 표(`pg_operator`처럼 연산자, 피연산자 타입, 결과 타입, 구현)와 PostgreSQL 규칙의 연산자 해석(아래 [연산자 해석](#연산자-해석)) |
 | `datetime.zig` | `date`/`time`/`timestamp[tz]`/`interval` 값의 PostgreSQL 입력·출력, 그 연산자의 엔진 함수(`xq_pg_date_pli()` ...)와 캐스트(`xq_pg_date()` ...), collation `xq_pg_interval` |
-| `overload.zig` | 피연산자 타입에 따른 선택(`Rules.overload`): 산술·비트 연산자를 연산자 표로, `jsonb`의 `\|\|`·비교·`ORDER BY`, interval의 비교·`ORDER BY`, `->`·`#>`의 json/jsonb 함수, JSON을 만드는 함수의 인자. 이름을 해석한 코어가 부름 |
+| `overload.zig` | 피연산자 타입에 따른 선택(`Rules.overload`): 산술·비트 연산자를 연산자 표로, `jsonb`의 `\|\|`·비교·`ORDER BY`, interval의 비교·`ORDER BY`, `->`·`#>`의 json/jsonb 함수, JSON을 만드는 함수의 인자, 배열의 `\|\|`·비교·`ORDER BY`와 원소 타입을 알아야 하는 배열 함수(아래 [배열](#배열)). 이름을 해석한 코어가 부름 |
 | `jtype.zig` | 파싱 뒤, 타입이 아니라 이름과 FROM 구조로 정하는 JSON: 값으로 쓴 FROM 항목(행), FROM의 JSON 집합 반환 함수 열과 그 옆의 `*`, json/jsonb 열에 저장하는 값의 정규화 |
 | `ddltype.zig` | 스키마가 텍스트로 남기는 문장(뷰, CHECK, 생성 열, 식 인덱스)에 코어의 선택을 되돌려 씀: 식을 내리고 해석만 하는 probe |
 | `session.zig` | `CREATE SCHEMA`/`DROP SCHEMA`, `SET`/`RESET`/`SHOW`, `COMMENT ON`, `set_config()`/`current_setting()`/`current_schema()`/`current_schemas()` |
-| `state.zig` | 연결별 세션 상태(`search_path`와 그 밖의 매개변수, 시작 값, 카탈로그 스냅숏), 따르는 릴리스(16.15) |
+| `state.zig` | 연결별 세션 상태(`search_path`와 그 밖의 매개변수, 시작 값, 카탈로그 스냅숏), 따르는 릴리스(18.6) |
 | `catalog_views.zig` | `information_schema`/`pg_catalog` 뷰 |
 | `pgcatalog.zig` | 시스템 카탈로그: 메모리의 스키마에서 만든 스냅숏, OID, 엔진 테이블 값 함수 `xq_pg_class` ... |
 | `catalog_funcs.zig` | 카탈로그 함수(`pg_get_indexdef()`, `pg_table_is_visible()` ...)와 reg* 타입의 입출력 |
@@ -80,13 +81,13 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | 영역 | 지원 |
 | --- | --- |
 | 기본 | `DISTINCT`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW` |
-| FROM | 테이블, 서브쿼리, `VALUES`, `generate_series()`, JSON 집합 반환 함수(아래 [JSON](#json)); 서브쿼리 별칭의 열 이름 `AS t(a, b)`; 함수 앞의 `LATERAL` |
+| FROM | 테이블, 서브쿼리, `VALUES`, `generate_series()`, JSON 집합 반환 함수(아래 [JSON](#json)), `unnest()`·`generate_subscripts()`(아래 [배열](#배열)); 서브쿼리 별칭의 열 이름 `AS t(a, b)`; 함수 앞의 `LATERAL` |
 | JOIN | `INNER`/`LEFT`/`RIGHT`/`FULL`/`CROSS`/`NATURAL`, `ON`/`USING`, 괄호 조인 |
 | 정렬 | `ORDER BY ... [ASC\|DESC] [NULLS FIRST\|LAST]` |
 | 행 수 제한 | `LIMIT`/`OFFSET`/`LIMIT ALL`, `OFFSET n ROWS FETCH FIRST n ROWS ONLY` |
 | 집합 연산 | `UNION`/`INTERSECT`/`EXCEPT`(INTERSECT가 먼저 묶임) |
 | CTE | `WITH [RECURSIVE]`, `[NOT] MATERIALIZED` |
-| 그 밖 | 단독 `VALUES`, `TABLE t`, `FOR UPDATE/SHARE`(무시) |
+| 그 밖 | 단독 `VALUES`, `TABLE t`, `FOR UPDATE/SHARE`(무시), `SELECT ... INTO [TEMP] [TABLE] t`(`CREATE TABLE t AS`) |
 
 ### DML
 
@@ -95,7 +96,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
   - `INSERT ... SELECT`, `DEFAULT VALUES`
   - `OVERRIDING SYSTEM VALUE`
   - `ON CONFLICT (cols) [WHERE] DO NOTHING | DO UPDATE SET ... EXCLUDED.x [WHERE]`
-- **UPDATE**: `SET a = ...`, `SET (a, b) = (...)`, `= DEFAULT`, `FROM`
+- **UPDATE**: `SET a = ...`, `SET (a, b) = (...)`, `= DEFAULT`, `FROM`, 배열 원소 `SET a[i] = ...`
 - **DELETE**: `USING`
 - **공통**: `RETURNING`(대상의 별칭으로 한정한 열 포함), 앞에 붙는 `WITH`
 - **TRUNCATE** `[RESTART IDENTITY]`
@@ -142,7 +143,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 - 뷰는 SQLite 텍스트로 저장될 때 `"sales.orders"`를 이름으로 씁니다(데이터베이스 이름 없이). 그래서 sqlite3에서도 그 뷰를 읽습니다. 뷰 안의 한정하지 않은 이름은 PostgreSQL처럼 만들 때의 `search_path`로 정해집니다.
 - `nextval('s.seq')`, `currval`, `setval`의 상수 이름은 PostgreSQL의 regclass처럼 읽습니다(`[schema.]name`, 따옴표 없는 부분은 소문자로 접고, 스키마가 없으면 `search_path`).
 - `DROP SCHEMA ... CASCADE`는 뷰, 테이블(인덱스와 함께), 시퀀스, 카탈로그 항목과 목록의 행을 한 문장으로 지웁니다. `RESTRICT`(기본값)는 개체가 있으면 `cannot drop schema s because other objects depend on it`으로 실패합니다.
-- 오류는 PostgreSQL 16과 같은 문구입니다: `schema "s" already exists`, `schema "s" does not exist`(DDL), `relation "s.t" does not exist`(질의), `unacceptable schema name "pg_x"`, `role "x" does not exist`, `no schema has been selected to create in`, `cannot create temporary relation in non-temporary schema`.
+- 오류는 PostgreSQL 18과 같은 문구입니다: `schema "s" already exists`, `schema "s" does not exist`(DDL), `relation "s.t" does not exist`(질의), `unacceptable schema name "pg_x"`, `role "x" does not exist`, `no schema has been selected to create in`, `cannot create temporary relation in non-temporary schema`.
 - `ATTACH`로 붙인 데이터베이스 안에서도 `CREATE`/`DROP`/`ALTER TABLE`, `CREATE INDEX`, `CREATE VIEW`를 씁니다(카탈로그 항목은 그 데이터베이스의 `xq_catalog`, identity 시퀀스는 main의 `xq_sequence`).
 
 #### search_path
@@ -153,7 +154,7 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 - `current_schema()`(`current_schema`), `current_schemas(bool)`(`{pg_catalog,public}` 같은 텍스트)는 경로에서 있는 스키마를 보여 줍니다.
 - 이름은 문장을 컴파일할 때 정해집니다. `search_path`를 바꾸면 준비된 문장이 만료되어, 다음 실행 때 새 경로로 다시 컴파일됩니다.
 - `SET`은 이 밖에 드라이버가 연결할 때 쓰는 매개변수(`application_name`, `client_encoding`, `client_min_messages`, `DateStyle`, `IntervalStyle`, `TimeZone`, `extra_float_digits`, `standard_conforming_strings`, `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `bytea_output`, `default_transaction_isolation`, `transaction_isolation`, `transaction_read_only`, `lc_messages` ... 40여 개)를 받아 `SHOW`가 그 값을 보여 줍니다(동작은 바꾸지 않음). `SET TIME ZONE 'UTC' | LOCAL | INTERVAL '+00:00' HOUR TO MINUTE`도 됩니다. 모르는 이름은 `unrecognized configuration parameter "x"`입니다. `RESET ALL`, `SET TRANSACTION ...`(무시)도 됩니다.
-- 읽기 전용: `server_version`(`16.15 (xqlite)`), `server_version_num`(`160015`), `server_encoding`, `integer_datetimes`, `is_superuser`, `in_hot_standby`, `max_identifier_length`, `block_size`, `lc_collate`, `lc_ctype` .... `SET`하면 `parameter "server_version" cannot be changed`(55P02)입니다. `version()`은 `PostgreSQL 16.15 (xqlite 3.54.1)`입니다.
+- 읽기 전용: `server_version`(`18.6 (xqlite)`), `server_version_num`(`180006`), `server_encoding`, `integer_datetimes`, `is_superuser`, `in_hot_standby`, `max_identifier_length`, `block_size`, `lc_collate`, `lc_ctype` .... `SET`하면 `parameter "server_version" cannot be changed`(55P02)입니다. `version()`은 `PostgreSQL 18.6 (xqlite 3.54.1)`입니다.
 - `SHOW`의 열 이름은 PostgreSQL의 철자(`DateStyle`, `TimeZone`)이고, `SHOW TRANSACTION ISOLATION LEVEL`(`read committed`), `SHOW SESSION AUTHORIZATION`, `SHOW ALL`(`pg_settings`의 이름·값·설명)도 됩니다. `transaction_isolation`은 PostgreSQL의 기본값 `read committed`를 보여 줍니다(실제로는 SQLite의 직렬화).
 - 와이어 서버가 시작 패킷의 값(`application_name`, `options`)을 정하면 `RESET`은 기본값이 아니라 그 값으로 돌아갑니다(`xq_pg_startup_setting()`). `current_database()`는 클라이언트가 준 데이터베이스 이름이고 서버 밖에서는 `postgres`입니다.
 
@@ -163,11 +164,12 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | --- | --- |
 | 캐스트 | `::type`, `CAST`, 타입 리터럴(`DATE '2024-01-01'`) |
 | NULL·진리값 | `IS [NOT] NULL`/`ISNULL`/`NOTNULL`, `IS [NOT] DISTINCT FROM`, `IS [NOT] TRUE/FALSE/UNKNOWN` |
-| 술어 | `BETWEEN`, `IN (목록\|서브쿼리)`, `= ANY (서브쿼리)`/`<> ALL (서브쿼리)`, `EXISTS` |
+| 술어 | `BETWEEN`, `IN (목록\|서브쿼리)`, `x op ANY\|SOME\|ALL (배열\|서브쿼리)`(`= <> < <= > >=`, `[NOT] LIKE`, `[NOT] ILIKE`), `EXISTS` |
 | 패턴 | `LIKE`/`ILIKE`/`~~`/`~~*`와 `ESCAPE`, 정규식 `~`/`~*`/`!~`/`!~*`(`xq_pg_regex()`, `regex.zig`의 POSIX 확장 정규식 부분집합: 어디서든 맞으면 참) |
 | 날짜·시각 | `date ± integer`, `date - date`, `date ± interval`, `date + time`, `timestamp[tz] ± interval`, `timestamp[tz] - timestamp[tz]`, `time ± interval`, `time - time`, `interval ± interval`, `-interval`, `interval * 수`, `interval / 수`(아래 [연산자 해석](#연산자-해석)) |
 | JSON | `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?\|`, `?&`, jsonb의 `\|\|`, `-`, `#-`, `@?`, `@@`, `IS [NOT] JSON` (아래 [JSON](#json)) |
-| 그 밖 | `CASE`, 행 값, `ARRAY[...]`(텍스트 리터럴, 아래), `\|\|`(피연산자가 NULL이면 NULL) |
+| 배열 | `ARRAY[...]`, `ARRAY(서브쿼리)`, `a[i]`, `a[i][j]`, `a[lo:hi]`, `\|\|`, `@>`, `<@`, `&&`, 비교와 `ORDER BY`(아래 [배열](#배열)) |
+| 그 밖 | `CASE`, 행 값, `(레코드).필드`(`_pg_expandarray()`의 `x`, `n`), `\|\|`(피연산자가 NULL이면 NULL) |
 | 집계 | `count(*)`, 집계의 `DISTINCT`/`ORDER BY`/`FILTER` |
 | 윈도우 | `OVER (PARTITION BY ... ORDER BY ... ROWS/RANGE/GROUPS ... EXCLUDE ...)`, `OVER name` |
 
@@ -205,7 +207,8 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 날짜·시각 | `now()`, `current_timestamp`, `localtimestamp`, `current_date`, `extract(field FROM x)`/`date_part`; 연산자는 위 [연산자 해석](#연산자-해석) |
 | 문자열 특수 문법 | `substring(x FROM a FOR b)`, `position(a IN b)`, `trim([BOTH\|LEADING\|TRAILING] [c] FROM x)` |
 | 문자열 | `strpos`, `left`/`right`, `concat`/`concat_ws`, `lpad`/`rpad`, `repeat`, `reverse`, `split_part`, `starts_with`, `btrim`, `char_length`, `ascii`/`chr` |
-| 집계 | `string_agg`, `bool_and`/`bool_or`/`every` |
+| 집계 | `string_agg`, `bool_and`/`bool_or`/`every`, `array_agg`(윈도우 함수로도) |
+| 배열 | 아래 [배열](#배열) |
 | 비교 | `greatest`/`least`(NULL은 건너뜀) |
 | 수학 | `floor`, `ceil`, `sqrt`, `power`, `exp`, `ln`, `log`, `mod`, `trunc`, `sign`, `pi` |
 | 난수·UUID | `random()`(0 이상 1 미만 실수), `gen_random_uuid()` |
@@ -216,7 +219,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 
 ### JSON
 
-`json`과 `jsonb`는 PostgreSQL 16과 같은 값을 냅니다. 둘 다 TEXT로 저장합니다.
+`json`과 `jsonb`는 PostgreSQL 18과 같은 값을 냅니다. 둘 다 TEXT로 저장합니다.
 
 | 타입 | 저장하는 텍스트 | 예 |
 | --- | --- | --- |
@@ -245,7 +248,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 - `json`의 `->`는 입력 텍스트의 그 부분을, `jsonb`의 `->`는 정규화한 텍스트를 돌려줍니다. `->>`는 문자열을 풀고 JSON `null`은 SQL NULL입니다.
 - `jsonb`의 `=`/`<`/`>`와 `ORDER BY`, 집계 안의 `ORDER BY`는 collation `xq_pg_jsonb`로 PostgreSQL의 순서를 씁니다: Object > Array > Boolean > Number > String > Null, 원소·쌍이 많은 컨테이너가 크고, 같으면 차례로 비교. `'1.0'::jsonb = '1'`은 참입니다. 반대쪽의 문자열 상수는 jsonb로 읽습니다.
 - `json`끼리의 `||`와 `=`는 PostgreSQL처럼 `operator does not exist: json || json`입니다.
-- text[] 인자는 리터럴 `'{a,b}'`, `'{a,b}'::text[]`, `ARRAY['a','b']`입니다. `ARRAY[...]`와 `::text[]`(int[] 등도)는 배열의 텍스트 리터럴(`{a,b}`)입니다. 배열 타입 열은 여전히 없습니다.
+- text[] 인자는 리터럴 `'{a,b}'`, `'{a,b}'::text[]`, `ARRAY['a','b']`, text[] 열입니다(아래 [배열](#배열)). `array_to_json()`과 JSON을 만드는 함수는 타입을 아는 배열의 원소를 그 타입대로 씁니다(`int[]`는 수, `boolean[]`은 `true`/`false`).
 
 #### 함수
 
@@ -269,7 +272,31 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 
 #### GIN 인덱스
 
-`CREATE INDEX ... USING gin (doc [jsonb_path_ops])`(그리고 `USING hash`)는 같은 열의 B-tree 인덱스로 만듭니다. 이름은 PostgreSQL과 같고(`g_doc_idx`) `pg_indexes`에 나옵니다. 인덱스가 이 열의 검색을 빠르게 하지는 않습니다: `@>`·`?`는 테이블을 훑고, jsonb의 `=`는 collation `xq_pg_jsonb`라 BINARY 인덱스를 쓰지 않습니다. `((doc ->> 'name'))` 같은 식 인덱스는 그 식에 쓰입니다. 단 식 인덱스·CHECK·생성 열·뷰의 JSON 연산자와 함수는 스키마에 `xq_pg_*`/`xq_postgres_*` 함수로 남으므로, sqlite3에서는 그런 인덱스가 있는 테이블에 쓰거나 그 뷰를 읽을 수 없습니다(열 자체와 `gin` 인덱스는 문제없음).
+`CREATE INDEX ... USING gin (doc [jsonb_path_ops])`(그리고 `USING hash`)는 같은 열의 B-tree 인덱스로 만듭니다. 이름은 PostgreSQL과 같고(`g_doc_idx`) `pg_indexes`에 나옵니다. 인덱스가 이 열의 검색을 빠르게 하지는 않습니다: `@>`·`?`는 테이블을 훑고, jsonb의 `=`는 collation `xq_pg_jsonb`라 BINARY 인덱스를 쓰지 않습니다. `((doc ->> 'name'))` 같은 식 인덱스는 그 식에 쓰입니다. 단 식 인덱스·CHECK·생성 열·뷰의 JSON 연산자와 함수는 스키마에 `xq_pg_*`/`xq_postgres_*` 함수로 남으므로, 평범한 sqlite3에서는 그런 인덱스가 있는 테이블에 쓰거나 그 뷰를 읽을 수 없습니다(열 자체와 `gin` 인덱스는 문제없음). [확장](extension.md)을 올린 sqlite3는 같은 결과로 계산합니다.
+
+### 배열
+
+배열 값은 PostgreSQL이 그 배열을 쓰는 텍스트(`array_out()`)입니다: `{1,2,NULL}`, `{"a b",c}`, `{{1,2},{3,4}}`, 하한이 1이 아니면 앞에 범위(`[0:1]={1,2}`). 원소 타입은 코어의 타입입니다(`Expr.xq_type`의 `Type`: `logical = .array`와 `Type.element`, [아키텍처](architecture.md#코어의-타입)). 카탈로그의 `int2vector`·`oidvector`도 PostgreSQL의 텍스트(`1 2`, 하한 0)입니다.
+
+- 이 표현을 고른 이유: 와이어 프로토콜의 텍스트 형식, psql, 값 표시, 카탈로그가 이미 이 텍스트이고, sqlite3에서도 그대로 텍스트로 읽히며, `array_to_json()`으로 JSON이 됩니다. 원소 타입은 값에 없고 식의 타입에 있으므로, 원소 타입을 알아야 하는 엔진 함수(첨자, `ANY`, `unnest()`)에는 `overload.zig`가 원소 타입을 정수 인자(`array.Code`)로 덧붙입니다.
+- 타입의 배열 입력(캐스트 `'{ 1, 01}'::int[]`, 배열 열에 넣는 값)은 원소마다 그 타입의 입력으로 읽고 출력으로 씁니다: `{1,1}`, `'{yes}'::bool[]`은 `{t}`, `'{1.50,1e2}'::numeric[]`은 `{1.50,100}`, `'{1.0,1e20}'::float8[]`은 `{1,1e+20}`, 날짜·시각·interval·uuid·jsonb도 그 타입의 정규 텍스트. 그래서 같은 타입의 두 배열은 텍스트가 같으면 같은 값입니다. 읽지 못하면 PostgreSQL의 오류: `malformed array literal: "{1,2"`(22P02), `invalid input syntax for type integer: "a"`, `value "70000" is out of range for type smallint`, `date/time field value out of range: "2024-02-30"`.
+- 원소 타입을 모르는 곳(뷰의 텍스트 안에서 원소 타입을 덧붙이지 않은 호출, 타입 모르는 매개변수)에서는 원소를 적힌 대로 두고 값으로 비교합니다(수와 수, 텍스트와 텍스트, `t`/`f`와 불리언 1/0).
+
+| 영역 | 지원 |
+| --- | --- |
+| 타입 | `int[]`, `integer[]`, `text[]`, `varchar(n)[]`, `int[3]`, `int ARRAY`, `int[][]`(차원 수는 PostgreSQL처럼 타입에 없음), 그 밖의 타입의 배열, `name[]`·`oid[]`·`"char"[]`·`aclitem[]`·`regtype[]`, `int2vector`·`oidvector` |
+| 열 | STRICT `TEXT`, CHECK `xq_pg_array_valid()`(이름 `malformed array literal`), 선언 타입 `integer[]`(`format_type()`, `pg_attribute.atttypid` 1007, `information_schema.columns`의 `ARRAY`/`_int4`). 넣는 값은 그 타입의 배열 입력(`Rules.store`: `xq_pg_array_int4()` ...)을 지나 정규 텍스트로 저장 |
+| 만들기 | `ARRAY[1,2]`(값들의 공통 타입의 배열: `ARRAY[1,2.5]`는 `numeric[]`, `ARRAY[true]`는 `{t}`, `ARRAY[1.50, 2]`는 `{1.50,2}`), `ARRAY[[1,2],[3,4]]`, `ARRAY[ARRAY[1],ARRAY[2]]`, `ARRAY[]::int[]`(캐스트 없는 `ARRAY[]`는 `cannot determine type of empty array`), `ARRAY(서브쿼리)`(그 순서대로, 행이 없으면 `{}`), `array_agg(x [ORDER BY ...])`(배열의 `array_agg`는 차원이 하나 많은 배열), `string_to_array(s, sep [, null])` |
+| `ANY`/`ALL` | `x op ANY (배열)`, `ALL`, `SOME`의 `= <> < <= > >=`, `LIKE`/`ILIKE`/`NOT LIKE`/`NOT ILIKE`(`xq_pg_any()`). 배열은 열, 캐스트, `ARRAY[...]`, 함수 결과(`current_schemas(true)`), 매개변수, 문자열 상수(`'a' = ANY('{a,b}')`), 서브쿼리(`id > ANY (SELECT ...)`; `= ANY`·`<> ALL`의 서브쿼리는 전처럼 `IN`). NULL은 PostgreSQL처럼: 참인 원소가 없고 NULL이 있으면 NULL, 빈 배열의 `ANY`는 거짓·`ALL`은 참, 배열이 NULL이면 NULL. 배열이 아닌 수·불리언은 `op ANY/ALL (array) requires array on right side`(42809). 타입 모르는 매개변수는 반대쪽의 타입을 받음(`id = ANY($1)`의 `$1`은 `integer[]`, `x`가 `name`이면 `text[]`) |
+| 첨자 | `a[i]`, `a[i][j]`, `(식)[i]`, 슬라이스 `a[lo:hi]`, `a[:hi]`, `a[lo:]`(슬라이스가 있으면 첨자 `i`는 `1:i`). 범위 밖, 차원보다 적은 첨자, NULL 첨자는 NULL. 원소는 그 타입의 값(`int[]`의 원소는 정수라 `attnum = conkey[1]`이 됨; 타입을 모르면 정수로 읽히는 텍스트는 정수). 결과 열 이름은 바탕 식의 것(`a`, `array`, `int4`). `int2vector`는 0부터 |
+| 쓰기 | `UPDATE t SET a[i] = v`, `a[i][j] = v`(`xq_pg_array_set()`): 1차원 배열(NULL, 빈 배열 포함)은 사이를 NULL로 채우며 늘어남(`[0:3]={...}`처럼 하한도), 다차원은 범위 안만(`array subscript out of range`) |
+| 연산자 | `\|\|`(배열과 배열 `array_cat()`, 배열과 원소 `array_append()`/`array_prepend()`, 문자열 상수와 NULL은 배열로), `@>`, `<@`, `&&`, `=`·`<>`·`<`·`>` ...(collation `xq_pg_array_num`/`xq_pg_array`: 원소마다, 수는 값으로, NULL은 모든 값 뒤, 같으면 짧은 쪽이 먼저; 반대쪽 문자열 상수는 그 배열 타입으로 읽음), `ORDER BY`·`DISTINCT`(같은 collation) |
+| 함수 | `array_length`, `array_lower`, `array_upper`, `array_dims`, `array_ndims`, `cardinality`, `array_position(a, x [, start])`, `array_positions`, `array_append`, `array_prepend`, `array_cat`, `array_remove`, `array_replace`, `array_to_string(a, sep [, null])`(모든 차원) |
+| 집합 반환 | FROM의 `unnest(a [, b ...])`(여러 배열은 나란히, 짧은 쪽은 NULL), `WITH ORDINALITY`, 별칭 `AS u(x, n)`, 앞 항목의 열(`FROM t, unnest(t.tags) tag`, `CROSS JOIN LATERAL`), `generate_subscripts(a, dim [, reverse])`, `information_schema._pg_expandarray(a)`(열 `x`, `n`). select 목록의 `unnest(a)`, `generate_subscripts()`, `_pg_expandarray()`와 그 필드 `(…).x`·`(…).n`(여러 개면 나란히). JSON 집합 반환 함수처럼 `xq_pg_rows_unnest()` ... 가 만든 행을 `json_each()`가 읽음 |
+| 카탈로그 | `pg_constraint.conkey`·`confkey`(`smallint[]`), `pg_index.indkey`·`indoption`(`int2vector`, `1 2`)·`indclass`·`indcollation`(`oidvector`), `pg_proc.proargtypes`(`oidvector`)·`proargnames`(`text[]`)·`proargmodes`(`"char"[]`), `pg_class.relacl`·`reloptions`, `pg_attribute.attoptions` ... 이 그 배열 타입. SQLAlchemy의 `unnest(conkey)`·`generate_subscripts(indkey, 1)`, pgjdbc의 `_pg_expandarray(i.indkey)`·`conkey[pos.n]`, Django의 `array(SELECT ... FROM unnest(c.conkey) WITH ORDINALITY ...)`, psql `\d+`의 `unnest(tc.reloptions)`를 읽음 |
+| 와이어 | `RowDescription`·`ParameterDescription`의 배열 OID(`int4[]` 1007, `text[]` 1009, `bool[]` 1000 ...), 텍스트 형식 그대로, 배열의 이진 형식(매개변수와 결과, 원소가 이진 형식이 되는 타입: [서버](server.md#값과-타입)) |
+
+- 뷰, CHECK, 식 인덱스의 텍스트에는 고른 함수가 남습니다(`xq_pg_subscript_k("a", 1, 3)`, `xq_pg_any(2, "a", 0, 0, 3)`, `xq_pg_array_append("s", ...)`, `COLLATE xq_pg_array_num`). 배열 비교의 collation은 jsonb의 것처럼 방언의 것이라, 배열을 비교하는 뷰는 SQLite 방언에서 읽을 수 없습니다(첨자·`ANY`·`||` 같은 함수는 엔진 함수라 어느 방언에서나 읽힘).
 
 ### 카탈로그
 
@@ -278,15 +305,16 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | `information_schema` | `tables`, `columns`(`xq_catalog`의 PostgreSQL 선언 타입, identity 여부, 정수 열은 `integer`), `views`, `schemata`, `sequences`, `table_constraints`, `key_column_usage`, `referential_constraints`, `check_constraints` |
 | `pg_catalog`(스키마 없이도 보임) | 스키마에서 만드는 것: `pg_namespace`, `pg_class`, `pg_attribute`, `pg_type`, `pg_index`, `pg_constraint`, `pg_attrdef`, `pg_sequence`, `pg_depend`(identity·serial 시퀀스의 소유), `pg_description`, `pg_proc`(내장 타입의 입출력 함수). 그 위의 뷰: `pg_tables`, `pg_views`, `pg_indexes`, `pg_sequences`. 상수: `pg_database`, `pg_roles`, `pg_authid`, `pg_user`, `pg_am`, `pg_tablespace`, `pg_collation`, `pg_language`, `pg_settings`(세션의 값). 빈 것: `pg_trigger`, `pg_policy`, `pg_inherits`, `pg_rewrite`, `pg_statistic_ext`, `pg_publication*`, `pg_extension`, `pg_enum`, `pg_range`, `pg_shdescription`, `pg_auth_members`, `pg_partitioned_table`, `pg_foreign_table`, `pg_matviews`, `pg_event_trigger` |
 
-psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\d 테이블`(열, 기본값, identity, 인덱스, CHECK, 외래 키, Referenced by), `\d 인덱스`, `\d 시퀀스`가 와이어 서버로 PostgreSQL 16과 같은 출력을 냅니다([서버](server.md#xqlite-serve)).
+psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\d 테이블`(열, 기본값, identity, 인덱스, CHECK, 외래 키, Referenced by), `\d 인덱스`, `\d 시퀀스`가 와이어 서버로 PostgreSQL 16과 같은 출력을 냈습니다([서버](server.md#xqlite-serve)). psql 18의 질의가 읽는 PostgreSQL 17·18의 열(`pg_constraint.conenforced`·`conperiod`, `pg_class.relallfrozen`, `pg_database.datlocale`·`dathasloginevt`, `pg_collation.colllocale`, `pg_publication.pubgencols`)도 있습니다. 다만 psql 18도 `\d` 계열에 배열 문법(`array(...)`, `= any(...)`, 배열 첨자)을 함께 보내므로, 지금은 그것이 들어가기 전까지 오류입니다.
 
 **만드는 법.** 스키마에서 만드는 관계는 엔진 테이블 값 함수(이름 있는 가상 테이블, `Hooks.engine_modules`의 `xq_pg_class` ...)이고, 뷰 텍스트가 열마다 PostgreSQL 타입으로 캐스트합니다(`relhasindex::boolean`이라 클라이언트에 `t`/`f`). 행은 스냅숏(`pgcatalog.zig`)에서 옵니다. 스냅숏은 각 데이터베이스의 메모리 스키마(`Table`, `Index`, 외래 키), 메모리의 카탈로그(선언 타입, identity, 제약 이름, 주석), `xq_sequence`, `sqlite_schema`의 SQL 텍스트(CHECK, 인덱스 식, 뷰)에서 한 번에 읽어 자기 아레나에 복사합니다. 연결은 마지막 스냅숏을 두고, 어느 데이터베이스의 스키마(쿠키·세대)도, 바뀐 행 수(`n_total_change`)도 그대로이면 다시 씁니다. 그래서 행마다 부르는 함수(`pg_table_is_visible()`, reg* 캐스트)도 문장마다 한 번 읽습니다. 뷰 텍스트를 키우는 대신 이렇게 한 이유: `pg_attribute`·`pg_constraint`·`pg_index`는 SQLite의 pragma로는 CHECK 텍스트, 제약 이름, INTEGER PRIMARY KEY의 인덱스, 식 인덱스, 정의 텍스트(`pg_get_constraintdef()`)를 모두 얻지 못하고, psql의 질의마다 여러 번 조인되는 관계를 pragma 질의의 합집합으로 만들면 느립니다. 파일에는 아무것도 쓰지 않으므로 DB는 SQLite 그대로이고, sqlite3와 SQLite 방언에는 `pg_class` 같은 이름이 없습니다(엔진 함수 `xq_pg_*`만 보임).
 
 - 데이터베이스와 스키마: main은 `public`, `CREATE SCHEMA`의 스키마(`"sales.orders"`)는 `sales`, temp의 개체는 `pg_temp_1`, `ATTACH`한 데이터베이스는 그 이름의 스키마입니다. xqlite 자신의 테이블(`sqlite_*`, `xq_*`)은 없습니다.
+- NOT NULL 열(PRIMARY KEY의 열 포함)마다 PostgreSQL 18처럼 NOT NULL 제약 `<table>_<column>_not_null`(`contype` `n`, `pg_get_constraintdef()`는 `NOT NULL a`)이 있고, `information_schema.table_constraints`에는 `CHECK`, `check_constraints`에는 `a IS NOT NULL`로 나옵니다.
 - INTEGER PRIMARY KEY에도 PostgreSQL처럼 `<table>_pkey` 인덱스와 PRIMARY KEY 제약이 있습니다. UNIQUE·PRIMARY KEY의 자동 인덱스는 제약 이름(`t_b_c_key`, 사용자가 준 이름)입니다. 타입 검사용 CHECK(`integer out of range` ...)는 제약에 나오지 않습니다.
 - `pg_attribute`의 타입은 선언 타입의 OID와 typmod(와이어 서버의 RowDescription과 같은 표)이고, SQLite가 만든 테이블은 `information_schema`처럼 `INTEGER`가 `bigint`입니다. 뷰의 열은 그 뷰를 이 방언으로 컴파일한 결과 열의 타입입니다.
 - 기본값(`pg_attrdef.adbin`, `pg_get_expr()`)은 저장된 SQLite 텍스트를 PostgreSQL처럼 씁니다: `'x'::text`, `now()`, `false`, `nextval('t_id_seq'::regclass)`. CHECK·인덱스 식·뷰도 따옴표가 필요 없는 이름은 따옴표 없이(`CHECK ((length(b) > 1))`, `lower(b)`).
-- 함수: `pg_get_userbyid()`, `pg_table_is_visible()`·`pg_type_is_visible()`(`search_path`대로), `pg_function_is_visible()` 등(참), `pg_get_expr()`, `pg_get_indexdef(oid [, n, pretty])`, `pg_get_constraintdef()`, `pg_get_viewdef()`, `pg_get_serial_sequence()`, `obj_description()`, `col_description()`, `shobj_description()`(NULL), `has_table_privilege()`·`has_schema_privilege()` ... ·`pg_has_role()`(참: 역할은 슈퍼유저 하나), `to_regclass()`·`to_regtype()`·`to_regnamespace()`·`to_regrole()`, `pg_encoding_to_char()`, `pg_size_pretty()`, `pg_table_size()` 등(0), `pg_typeof()`(값의 저장 형식으로: `integer`, `bigint`, `numeric`, `text` ...), `array_to_string()`(배열 리터럴), psql이 빈 관계에 부르는 `pg_get_triggerdef()`·`pg_partition_ancestors()` 등.
+- 함수: `pg_get_userbyid()`, `pg_table_is_visible()`·`pg_type_is_visible()`(`search_path`대로), `pg_function_is_visible()` 등(참), `pg_get_expr()`, `pg_get_indexdef(oid [, n, pretty])`, `pg_get_constraintdef()`, `pg_get_viewdef()`, `pg_get_serial_sequence()`, `obj_description()`, `col_description()`, `shobj_description()`(NULL), `has_table_privilege()`·`has_schema_privilege()` ... ·`pg_has_role()`(참: 역할은 슈퍼유저 하나), `to_regclass()`·`to_regtype()`·`to_regnamespace()`·`to_regrole()`, `pg_encoding_to_char()`, `pg_size_pretty()`, `pg_table_size()` 등(0), `pg_typeof()`(값의 저장 형식으로: `integer`, `bigint`, `numeric`, `text` ...), `current_schemas()`(`name[]`), psql이 빈 관계에 부르는 `pg_get_triggerdef()`·`pg_partition_ancestors()` 등.
 - `'t'::regclass`, `::regtype`, `::regnamespace`, `::regrole`은 이름(또는 숫자)을 `search_path`를 따라 OID로 읽습니다(`relation "x" does not exist`). 값은 OID라 `attrelid = 't'::regclass`처럼 비교하고, 질의의 결과 열이거나 `::text`로 캐스트하면 이름입니다(경로에서 찾을 수 없으면 `sales.orders`처럼 스키마를 붙임). `::regproc`은 함수 이름 텍스트입니다.
 - psql의 철자: `OPERATOR(pg_catalog.=)`은 그 연산자, `COLLATE pg_catalog.default`, 세 부분 열 이름(`pg_catalog.pg_class.relname`).
 
@@ -308,12 +336,13 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 | `date`, `time`, `timestamp[tz]`, `interval` | `TEXT` | 넣는 문자열은 PostgreSQL이 읽고 쓰는 텍스트로(아래) |
 | `uuid` | `TEXT` | |
 | `json`, `jsonb` | `TEXT` | `json_valid()`; 넣는 값은 `json`이면 검사, `jsonb`이면 정규화([JSON](#json)) |
+| 배열(`integer[]`, `text[]`, `varchar(n)[]` ...) | `TEXT` | 배열 리터럴(`malformed array literal`); 넣는 값은 원소 타입으로 읽어 정규 텍스트로([배열](#배열)) |
 
 - 선언 타입은 `xq_catalog`의 `type` 키에 `format_type()` 철자(`character varying(20)`, `timestamp with time zone`)로 남습니다.
 - 다른 타입의 값을 넣으면 SQLite STRICT 오류(`cannot store TEXT value in INTEGER column t.a`)가 납니다.
 - `boolean`과 `numeric` 열에 넣는 문자열(상수, 텍스트로 바인딩한 매개변수, `INSERT ... SELECT`의 값)은 PostgreSQL이 그 타입의 입력을 읽듯 읽습니다: `'t'`, `'true'`, `'yes'`, `'on'`, `'1'`(그 접두어 `'tr'`, `'of'` ..., 대소문자·앞뒤 공백 무시)은 1/0, `' 1.50 '`은 수 1.5, `'3'`은 3. 아니면 `invalid input syntax for type boolean: "x"`/`invalid input syntax for type numeric: "x"`(22P02). `INSERT`와 `UPDATE`(`ON CONFLICT DO UPDATE` 포함)가 저장 직전에 바꿉니다([타입을 읽는 코드 생성](architecture.md#타입을-읽는-코드-생성)).
 - `date`, `time`, `timestamp`, `timestamptz`, `interval` 열에 넣는 문자열도 그 타입의 입력으로 읽어 PostgreSQL의 출력 텍스트로 넣습니다: `'2024-1-5'`는 `2024-01-05`, `'2 hours'`는 `02:00:00`, `timestamptz`의 `'2024-01-01 10:00:00+02'`는 UTC의 `2024-01-01 08:00:00`. 읽지 못하면 `invalid input syntax for type date: "x"`(22007), 범위 밖의 필드는 `date/time field value out of range: "2024-02-30"`(22008). 텍스트는 그대로 sqlite3의 날짜 함수가 읽습니다.
-- 배열과 모르는 타입은 `type "x" does not exist` 같은 오류입니다.
+- 모르는 타입은 `type "x" does not exist`(배열이면 `type "x[]" does not exist`), `serial[]`은 `array of serial is not implemented`입니다.
 
 ### 캐스트
 
@@ -325,7 +354,7 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 | `::numeric(p,s)` | 반올림 | |
 | `::boolean` | `'t'`/`'yes'`/`'on'` 같은 철자를 읽음 | |
 | `::json`/`::jsonb` | `xq_pg_json()`/`xq_pg_jsonb()` | |
-| `::text[]`(`int[]` 등) | `xq_pg_text_array()`: 검사한 배열 리터럴 텍스트 | 배열 값이 아니라 텍스트 |
+| `::int[]`(`text[]`, `numeric[]` ...) | `xq_pg_array_int4()` ...: 배열 입력, 원소마다 그 타입으로 읽어 정규 텍스트로(위 [배열](#배열)) | 원소 타입의 typmod(`numeric(10,2)[]`의 반올림, `varchar(3)[]`의 길이)는 적용하지 않음 |
 
 ## PostgreSQL과 다른 점
 
@@ -338,7 +367,7 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 | `LIKE` | 대소문자 구분, 기본 이스케이프 `\` | 같음(엔진 함수 `xq_like()`). `ILIKE`는 ASCII 대소문자만 무시(`xq_ilike()`) | SQLite의 LIKE는 대소문자를 무시하고 기본 이스케이프가 없음 |
 | identity·serial | 시퀀스 | 시퀀스 `<table>_<col>_seq`. 아래 [identity](#identity와-serial) | SQLite는 INTEGER PRIMARY KEY의 DEFAULT를 쓰지 않음 |
 | `now()`, `current_timestamp` | 시간대가 있는 타임스탬프 | 문장 시각의 `'YYYY-MM-DD HH:MM:SS.SSS'`(UTC, 시간대 표기 없음). 셸과 서버는 `timestamptz` 열에 `+00`을 붙여 보여 줌 | SQLite 날짜 함수가 그대로 읽음 |
-| 날짜·시각 연산 | 세션 시간대로 계산 | 같은 결과(위 [연산자 해석](#연산자-해석)). `timestamptz`는 늘 UTC로 계산(`SET TIME ZONE`은 보여 주기만 함). 날짜와 타임스탬프의 비교는 ISO 텍스트의 비교(같은 타입끼리와 문자열 상수는 PostgreSQL과 같음; `timestamp = date`는 시각 `00:00:00`이 없는 텍스트라 다름). interval의 비교와 `ORDER BY`는 collation `xq_pg_interval`(한 달은 30일: `'1 mon' = '30 days'`). 그 collation은 jsonb의 것처럼 방언의 것이라, interval을 비교하는 뷰는 SQLite 방언에서 읽을 수 없음 | 저장은 sqlite3가 읽는 TEXT |
+| 날짜·시각 연산 | 세션 시간대로 계산 | 같은 결과(위 [연산자 해석](#연산자-해석)). `timestamptz`는 늘 UTC로 계산(`SET TIME ZONE`은 보여 주기만 함). 날짜와 타임스탬프의 비교는 ISO 텍스트의 비교(같은 타입끼리와 문자열 상수는 PostgreSQL과 같음; `timestamp = date`는 시각 `00:00:00`이 없는 텍스트라 다름). interval의 비교와 `ORDER BY`는 collation `xq_pg_interval`(한 달은 30일: `'1 mon' = '30 days'`). 그 collation은 jsonb의 것처럼 방언의 것이라, interval을 비교하는 뷰는 SQLite 방언과 평범한 sqlite3에서 읽을 수 없음. [확장](extension.md)을 올린 sqlite3는 collation과 interval 함수(`xq_pg_interval*`)를 가짐 | 저장은 sqlite3가 읽는 TEXT |
 | 이름의 대소문자 | `"Foo"`와 `foo`는 다른 이름 | 접기는 하지만 같은 이름 | SQLite의 이름 비교는 대소문자를 구분하지 않음 |
 | 오류 문구 | PostgreSQL 문구 | 싼 곳에서만 PostgreSQL 문구(아래 [오류](#오류)). 실행 중 제약 위반도 PostgreSQL 문구(첫 줄만, `DETAIL`은 없음) | |
 | 0으로 나누기 | 오류 | 같음(`/`, `%`가 `division by zero`, 22012). 이 방언으로 컴파일한 문장에서만이고, sqlite3나 SQLite 방언에서 같은 뷰·CHECK를 계산하면 NULL | 엔진의 산술 정책(`Hooks.arith`) |
@@ -346,10 +375,11 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 | 복합 질의의 타입 | 항들의 타입을 맞추거나 실패(`UNION types boolean and integer cannot be matched`) | 공통 타입이 있으면 그 타입, 없으면 실패하지 않고 타입을 모름(값은 저장된 대로 보임) | |
 | 외래 키 | 늘 강제 | 같음. 이 방언의 첫 문장에서 연결의 `PRAGMA foreign_keys`를 켬. 응용이 끈 것은 그대로 둠 | sqlite3는 여전히 끈 채로 씀 |
 | 격리 수준 | 여러 수준 | 파싱만 함 | SQLite는 늘 직렬화 |
-| JSON | `jsonb`는 이진 형식 | 정규화한 TEXT. `json`은 입력 텍스트 | sqlite3가 그대로 읽고 `json_extract()` 등을 씀. sqlite3가 넣은 값은 정규화되지 않은 채 남고(연산자·함수는 읽을 때 정규화), CHECK `json_valid()`는 SQLite의 규칙 |
+| JSON | `jsonb`는 이진 형식 | 정규화한 TEXT. `json`은 입력 텍스트 | sqlite3가 그대로 읽고 `json_extract()` 등을 씀. sqlite3가 넣은 값은 정규화되지 않은 채 남고(연산자·함수는 읽을 때 정규화; 확장을 올린 sqlite3는 `xq_pg_jsonb(x)`로 정규화해 넣을 수 있음), CHECK `json_valid()`는 SQLite의 규칙. 연산자(`->`, `@>`, `?` ...)의 식 인덱스·CHECK·뷰는 [확장](extension.md)을 올린 sqlite3가 같은 결과로 계산 |
 | jsonb 비교 | jsonb의 순서 | 같음(collation `xq_pg_jsonb`). 인덱스는 BINARY라 `=`에 쓰이지 않음 | |
 | JSON 수 | numeric과 float8 | 같음: 타입을 아는 인자는 JSON을 만드는 함수가 PostgreSQL 철자로 씀. `double precision`/`real`은 `float8out()`처럼 되읽히는 가장 짧은 자릿수, 지수가 -4~14면 고정 소수점, 아니면 두 자리 이상의 지수(`to_json(100.0::float8)`은 `100`, `1e20::float8`은 `1e+20`, `1e-5::float8`은 `1e-05`; `xq_pg_float_json()`), 스케일을 아는 `numeric`은 그 자릿수(`to_json(1.50)`은 `1.50`, `numeric(5,2)` 열의 2는 `2.00`; `xq_pg_numeric_json()`). `row_to_json`·`json_agg`의 열도 | 스케일을 모르는 numeric(`avg()`, 나눗셈)과 타입을 모르는 값은 SQLite 철자(`2.5`, `1.0e+20`) |
-| 저장되는 식 | | IR이 SQLite 텍스트로 렌더링. PostgreSQL 함수는 `xq_postgres_greatest(...)`, LIKE는 `xq_like(...)`처럼 저장 | SQLite 방언이나 다른 방언의 연결에서 읽어도 같은 뜻. 단 sqlite3에서는 그런 식을 계산할 수 없음 |
+| 배열 | 원소 타입이 있는 이진 값 | PostgreSQL의 배열 텍스트(`{1,2}`)를 TEXT로. 원소 타입은 식의 타입([배열](#배열)). API로도 텍스트. 원소 타입을 모르는 곳(타입 모르는 매개변수, `ANY`의 문자열 상수 밖)에서는 원소를 적힌 대로 값으로 비교. `name[]`은 원소 타입이 없어 와이어에서 `text[]`(1009, PostgreSQL은 1003) | sqlite3가 그대로 읽고, 와이어·psql·카탈로그가 이미 이 텍스트를 씀. 배열 열의 CHECK(`xq_pg_array_valid()`)와 첨자·연산자의 식, collation `xq_pg_array`·`xq_pg_array_num`의 정렬은 [확장](extension.md)을 올린 sqlite3가 계산 |
+| 저장되는 식 | | IR이 SQLite 텍스트로 렌더링. PostgreSQL 함수는 `xq_postgres_greatest(...)`, LIKE는 `xq_like(...)`처럼 저장 | SQLite 방언이나 다른 방언의 연결에서 읽어도 같은 뜻. 평범한 sqlite3에서는 그런 식을 계산할 수 없고, [확장](extension.md)(`libxqlite_ext`)을 올린 sqlite3·Python·Datasette는 같은 결과로 계산(세션·카탈로그를 읽는 `current_setting()`, `pg_get_viewdef()` 같은 것만 빠짐). 그 함수들의 뜻은 파일 형식의 일부라 바뀌지 않음([ABI 규칙](extension.md#abi-규칙)) |
 
 저장되는 식은 CHECK, DEFAULT, 생성 열, 인덱스 식, 뷰입니다.
 
@@ -364,6 +394,7 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 - `GENERATED ALWAYS`는 명시한 값을 거부합니다(`cannot insert a non-DEFAULT value into column "id"`). `OVERRIDING SYSTEM VALUE`로 허용합니다.
 - 테이블을 지우면 시퀀스도 지웁니다. `TRUNCATE ... RESTART IDENTITY`는 시퀀스를 다시 시작합니다.
 - sqlite3에서 이 테이블에 키 없이 넣으면 rowid가 번호를 매깁니다.
+- 키가 아닌 identity 열은 DEFAULT의 `nextval()`이 번호를 매깁니다. [확장](extension.md)을 올린 sqlite3는 `PRAGMA trusted_schema=ON`에서 같은 시퀀스(`xq_sequence`)로 번호를 매기므로, 두 엔진이 번갈아 넣어도 겹치지 않습니다.
 
 ### 결과 열 이름
 
@@ -401,18 +432,19 @@ PostgreSQL 문구를 쓰는 오류입니다.
 
 | 영역 | 항목 |
 | --- | --- |
-| 쿼리 | `DISTINCT ON`, `LATERAL` 서브쿼리, `GROUPING SETS`/`ROLLUP`/`CUBE`, `EXCEPT ALL`/`INTERSECT ALL`, `FETCH ... WITH TIES`, 테이블·함수 별칭의 열 이름 |
+| 쿼리 | 결과 열이 없는 `SELECT;`, `DISTINCT ON`, `LATERAL` 서브쿼리, `GROUPING SETS`/`ROLLUP`/`CUBE`, `EXCEPT ALL`/`INTERSECT ALL`, `FETCH ... WITH TIES`, 테이블·함수 별칭의 열 이름 |
 | DML | 데이터를 바꾸는 CTE, `ON CONFLICT ON CONSTRAINT`, `COPY` |
-| 타입 | 배열 타입 열과 배열 연산(`ARRAY[...]`·`::text[]`은 텍스트 리터럴뿐), `ENUM`·`CREATE TYPE`·도메인, 시퀀스의 데이터 타입(언제나 `bigint`) |
+| 타입 | `char(n)`의 공백 채움(`'x'::char(3)`, 저장한 `'ab'`는 `'ab  '`로 보여야 함)과 n을 넘는 뒤 공백 자르기(`'abcd    '`를 `char(4)`·`varchar(4)`에 넣으면 오류), `ENUM`·`CREATE TYPE`·도메인, 시퀀스의 데이터 타입(언제나 `bigint`) |
+| 배열 | 배열의 원소 typmod(`numeric(10,2)[]`의 반올림, `varchar(3)[]`의 길이 검사), 배열 슬라이스에 쓰기(`a[1:2] = ...`), `array_fill()`·`trim_array()`·`array_sample()`·`array_shuffle()`, 다차원 배열의 `array_to_json()`, 다른 배열 타입 사이의 캐스트의 원소 변환(`int[]::text[]`는 텍스트를 다시 읽음), `ARRAY[...]`의 원소에 쓰인 타입 모르는 매개변수, 레코드 일반(`_pg_expandarray()`의 `(x,n)`만), `name[]`의 OID 1003, 원소 타입이 다른 배열의 `\|\|`·비교에서의 오류(PostgreSQL은 `operator does not exist`) |
 | JSON | jsonpath `like_regex`의 POSIX 문자 클래스·역참조·플래그 `m`/`x`, `.**{n to m}`, `keyvalue()`, `datetime()`과 문자열 메서드; 복합 타입 인자의 `json_populate_record`(`NULL::table`만), `IS JSON`의 비텍스트 인자 오류, select 목록의 레코드 반환 함수(`json_each`), `WITH ORDINALITY`의 select 목록, `jsonb` 부분 쓰기 연산자(`j['a']`), GIN의 `@>`·`?` 인덱스 검색, sqlite3가 넣은 jsonb의 정규화, PostgreSQL 17의 `JSON_TABLE`/`JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS` |
 | 식과 함수 | `SIMILAR TO`, 정규식의 역참조·POSIX 문자 클래스·`regexp_*` 함수, `AT TIME ZONE`, `to_char`/`date_trunc`/`age`/`justify_*`, `extract`의 interval, `U&'...'` |
 | 날짜·시각 | `infinity`/`-infinity`, 세션 시간대(`timestamptz`는 UTC로만), `timetz`의 연산(표에 없어 SQLite의 연산), `sum()`/`avg()`의 interval(타입은 `interval`이지만 SQLite의 수 계산), `GROUP BY`/`DISTINCT`의 interval(텍스트로 같은 것끼리: 넣는 값은 정규화되므로 `'2 hours'`와 `'120 minutes'`는 같음, `'1 mon'`과 `'30 days'`는 다름), `timestamp`와 `date`의 비교, `interval '1' day`처럼 필드를 붙인 interval 리터럴(필드를 무시하고 `'1'`은 1초), 타임스탬프의 범위 294247년부터(PostgreSQL은 294276년까지), 타입을 아는 값(`now()`)을 `date` 열에 넣을 때의 변환(문자열만 읽음) |
 | 연산자 해석 | `numeric`·실수와 만난 문자열 상수를 그 타입의 입력으로 읽기(정수만 읽음), `OPERATOR(schema.op)` 문법, 사용자 정의 연산자 |
-| DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE` |
+| DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE`, `CREATE TABLE AS`·`SELECT ... INTO`의 명령 태그 `SELECT n`(와이어 서버는 `CREATE TABLE`, `SELECT 0`: SQLite의 CREATE TABLE AS는 넣은 행을 `changes()`에 세지 않음) |
 | 스키마 | 스키마 요소가 있는 `CREATE SCHEMA s CREATE TABLE ...`, `ALTER SCHEMA`, `ALTER TABLE ... SET SCHEMA`, `DROP SCHEMA public`, 이름에 `.`이 있는 스키마, 대소문자만 다른 두 스키마(SQLite의 이름 비교처럼 같은 이름), 다른 스키마의 뷰·외래 키가 기대는 것을 `CASCADE`가 따라 지우는 것, 여러 테이블을 지우는 `DROP SCHEMA ... CASCADE`의 auto_vacuum 데이터베이스(거부함), 상수가 아닌 `nextval(x)`의 `search_path`(이름 그대로 main에서 찾음), `public`에 이름이 `s.t`인 개체(스키마 `s`의 `t`와 겹침) |
 | 절차·서버 | PL/pgSQL·`CREATE FUNCTION`·트리거, `LISTEN`/`NOTIFY`, `SET LOCAL`, `SET`의 트랜잭션 의미(롤백해도 남음), 격리 수준 |
 | 오류 | 제약 위반·산술·저장 변환 밖의 실행 중 엔진 오류(SQLite 내장 함수가 내는 것 등)의 PostgreSQL 문구, 제약 위반의 `DETAIL` |
-| 카탈로그 | 붙인 데이터베이스의 `information_schema`(`pg_catalog`에는 나옴), `pg_catalog`의 시스템 관계 자신(`pg_class`에 `pg_class`가 없음; `'pg_class'::regclass`는 1259), 시스템 열(`attnum < 0`), 시퀀스의 타입(`seqtypid` 언제나 `bigint`), 인덱스 방식(`USING gin`도 `btree`), `\d+ 테이블`(`unnest()`), 정규식 연산자·배열 문법이 들어가기 전의 `\d 이름`(psql이 `OPERATOR(pg_catalog.~)`, `array(...)`, `= any(...)`, 배열 첨자를 보냄), 드라이버의 배열 질의(SQLAlchemy의 `unnest(conkey)`, pgjdbc의 `_pg_expandarray`), `pg_get_viewdef()`의 줄 바꿈, `pg_typeof()`의 식 타입(값으로 정함), 크기 함수(0), `COMMENT ON`의 인덱스·시퀀스·스키마·함수 |
+| 카탈로그 | 붙인 데이터베이스의 `information_schema`(`pg_catalog`에는 나옴), `pg_catalog`의 시스템 관계 자신(`pg_class`에 `pg_class`가 없음; `'pg_class'::regclass`는 1259), 시스템 열(`attnum < 0`), 시퀀스의 타입(`seqtypid` 언제나 `bigint`), 인덱스 방식(`USING gin`도 `btree`), 외래 키의 `conindid`(언제나 0: pgjdbc의 `getImportedKeys`가 `pkic.oid = con.conindid`로 조인해 행이 없음), CHECK 제약의 `conkey`(빈 배열), `pg_get_viewdef()`의 줄 바꿈, `pg_typeof()`의 식 타입(값으로 정함), 크기 함수(0), `COMMENT ON`의 인덱스·시퀀스·스키마·함수 |
 | 셸 | dollar-quote 문장 분할(셸은 SQLite 규칙으로 문장을 나눔) |
 
 ## 검증
@@ -420,17 +452,21 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | 도구 | 하는 일 |
 | --- | --- |
 | `src/dialect/postgres/test.zig` | 종단 테스트 |
-| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | 실제 PostgreSQL과 차등 비교. 77개 케이스(JSON 33개, 시스템 카탈로그 1개)가 PostgreSQL 16과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교). 오류를 내는 문장은 따로 모은 케이스에 있음(psql의 stderr와 stdout이 podman을 거치며 섞이는 순서가 일정하지 않음) |
-| `xqt wire-diff pg` + `tools/dialect/pg-wire-cases.txt`, `pg-client-cases.txt` | 와이어 서버(`xqlite serve --pg`)를 psql로 실제 PostgreSQL 16과 차등 비교. psql 출력 전체(메타 명령 `\d` 계열, `\gdesc`, `\bind`, 명령 태그, 오류와 NOTICE)를 비교하고, 다른 케이스를 result(조용히 다른 답)·error(거부)·format(표기만 다름)으로 나눔. `pg-client-cases.txt`는 node-postgres·knex·Sequelize·SQLAlchemy·Django·pgjdbc·asyncpg·Prisma가 실제로 보낸 카탈로그 질의(서버 로그에서 모음). 처음 잰 값은 129개 중 22개가 같음(result 11, error 89, format 7): psql의 `\d` 계열과 ORM의 카탈로그 질의는 거의 모두 `pg_am`·`pg_type`·`pg_attribute`·`pg_index`가 없거나 `OPERATOR(pg_catalog.~)`·`!~`·`= ANY($1)`·`schema.table.column` 참조를 못 읽어 거부됨 |
-| `xqt wire-diff pg --regress` + `tools/dialect/pg-regress` | PostgreSQL 회귀 테스트 8개(`boolean`, `int2`, `int4`, `int8`, `text`, `varchar`, `case`, `strings`)를 와이어 서버에서 돌려 문장별 통과율을 잼. 처음 잰 값은 951개 중 431개(45.3%) |
+| `xqt dialect-diff pg tools/dialect/pg-array-cases.txt` | 배열과 `ANY`/`ALL`의 차등 비교. 기록(`tools/dialect/pg-expected/pg-array-cases.out`, PostgreSQL 18.6)과 비교하고 `zig build check`에 들어 있음. 29개 케이스 모두 같음 |
+| `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | PostgreSQL과 차등 비교. 기본은 저장소에 기록해 둔 PostgreSQL 18.6의 출력(`tools/dialect/pg-expected/pg-cases.out`)과 비교하므로 서버가 필요 없고 `zig build check`에 들어 있음. 82개 케이스 모두 PostgreSQL 18과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교; PostgreSQL 18로 옮길 때 81/82, NOT NULL 제약을 더해 82/82). 오류를 내는 문장은 따로 모은 케이스에 있음(psql의 stderr와 stdout이 podman을 거치며 섞이는 순서가 일정하지 않음) |
+| `xqt wire-diff pg` + `tools/dialect/pg-wire-cases.txt`, `pg-client-cases.txt` | 와이어 서버(`xqlite serve --pg`)를 psql 18로 PostgreSQL 18과 차등 비교(기본은 기록 `tools/dialect/pg-expected/pg-wire-cases.out`, `pg-client-cases.out`과: psql만 필요). psql 출력 전체(메타 명령 `\d` 계열, `\gdesc`, `\bind`, 명령 태그, 오류와 NOTICE)를 비교하고, 다른 케이스를 result(조용히 다른 답)·error(거부)·format(표기만 다름)으로 나눔. `pg-client-cases.txt`는 node-postgres·knex·Sequelize·SQLAlchemy·Django·pgjdbc·asyncpg·Prisma가 실제로 보낸 카탈로그 질의(서버 로그에서 모음). 처음 잰 값은 129개 중 22개가 같음(result 11, error 89, format 7): psql의 `\d` 계열과 ORM의 카탈로그 질의는 거의 모두 `pg_am`·`pg_type`·`pg_attribute`·`pg_index`가 없거나 `OPERATOR(pg_catalog.~)`·`!~`·`= ANY($1)`·`schema.table.column` 참조를 못 읽어 거부됨. PostgreSQL 16으로 52개, 18로 옮길 때 51개(psql 18이 `conperiod`·`datlocale`을 읽고, 버전이 16이었음), 지금 52개(result 11, error 55, format 11). 남은 error는 대부분 배열 문법(`= ANY`, `ARRAY(...)`, 첨자, `unnest`) |
+| `xqt wire-diff pg --regress` + `tools/dialect/pg-regress` | PostgreSQL 회귀 테스트 8개(`boolean`, `int2`, `int4`, `int8`, `text`, `varchar`, `case`, `strings`)를 와이어 서버에서 돌려 PostgreSQL이 함께 내놓는 기대 출력과 문장별 통과율을 잼(psql만 필요). 처음 잰 값은 REL_16_STABLE의 951개 중 431개(45.3%), 그 뒤 440개. REL_18_STABLE의 파일(문장 1005개: `to_bin`/`to_oct`, `crc32`, bytea와 정수 변환, `reverse(bytea)` ... 이 더해짐)로 448개(44.5%) |
+| `xqt interop ext` | [확장](extension.md)을 올린 sqlite3로: jsonb·배열·interval·numeric·boolean 열과 엔진 함수의 CHECK·생성 열·식 인덱스·뷰·collation이 있는 데이터베이스의 무결성, 같은 결과, CHECK 위반의 같은 오류, sqlite3가 쓴 행을 xqlite가 검사하고 읽음, 엔진 함수의 기록된 결과(`tools/ext/abi-pg*.sql`) |
 | `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(`CREATE SCHEMA`의 테이블·뷰 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함. sqlite3의 `.tables`에 `sales.orders`가 나오고, sqlite3가 넣은 행을 이 방언이 `sales.orders`로 읽음. `jsonb` 열은 sqlite3의 `json_extract()`로 읽히고, sqlite3가 넣은 JSON을 이 방언의 연산자가 읽으며, sqlite3도 잘못된 JSON을 거부함 |
 
-차등 비교는 PostgreSQL 컨테이너를 띄운 뒤 실행합니다(`$PG_PSQL`, 기본값 `podman exec -i xq-pg psql -U postgres`). 경우들은 병렬로 돌고, 작업자마다 자기 데이터베이스(`xqt_dialect_N`)에서 `public` 스키마를 지우고 다시 만들고, 앞 경우가 만든 스키마를 지운 뒤 시작합니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
+기준은 PostgreSQL 18(`postgres:18-alpine`, 18.6)입니다. 차등 비교는 기본으로 저장소에 기록해 둔 PostgreSQL의 출력(`tools/dialect/pg-expected`, 케이스 파일마다 하나)과 비교하므로 서버가 없어도 됩니다. `dialect-diff`는 xqlite만 필요해 `zig build check`에 들어 있고, `wire-diff`는 psql 18(호스트에 없으면 `podman run --rm -i postgres:18-alpine`)이 필요해 들어 있지 않습니다. 기록에는 서버의 `version()`과 psql의 버전, 케이스마다 그 글의 해시가 있어서, 기록에 없는 케이스(`NOT RECORDED`)와 글이 바뀐 케이스(`STALE RECORDING`)는 따로 찍고 실패로 셉니다. 케이스를 고치면 서버를 띄우고 `--record`로 다시 기록하고, `--live`는 서버와 지금 비교합니다(`$PG_PSQL`, 기본값 `podman exec -i xq-pg psql -U postgres`). 서버 쪽 경우들은 병렬로 돌고, 작업자마다 자기 데이터베이스(`xqt_dialect_PID_N`, `xqt_wire_PID_N`: 프로세스 ID가 들어가 같은 서버를 쓰는 다른 실행과 겹치지 않음)에서 `public` 스키마를 지우고 다시 만들고, 앞 경우가 만든 스키마를 지운 뒤 시작합니다. 회귀 테스트(`--regress`)는 기록하지 않고 PostgreSQL이 내놓는 `expected/*.out`을 그대로 씁니다([테스트](testing.md#와이어-차등-테스트-postgresql)). 모두 먼저 `zig build tools`가 필요합니다.
 
 ```sh
-podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16-alpine
-zig-out/bin/xqt dialect-diff pg
-zig-out/bin/xqt wire-diff pg            # 와이어 서버 + psql ([테스트](testing.md#와이어-차등-테스트-postgresql))
-zig-out/bin/xqt wire-diff pg --regress  # PostgreSQL 회귀 테스트 일부
+zig-out/bin/xqt dialect-diff pg         # 기록과 (서버 없이)
+zig-out/bin/xqt wire-diff pg            # 와이어 서버 + psql, 기록과 ([테스트](testing.md#와이어-차등-테스트-postgresql))
+zig-out/bin/xqt wire-diff pg --regress  # PostgreSQL 회귀 테스트 일부, 기대 출력과
 zig-out/bin/xqt interop pg
+podman run -d --name xq-pg -e POSTGRES_HOST_AUTH_METHOD=trust postgres:18-alpine
+zig-out/bin/xqt dialect-diff pg --live  # 서버와 지금
+zig-out/bin/xqt dialect-diff pg --record && zig-out/bin/xqt wire-diff pg --record  # 기록을 다시 씀
 ```

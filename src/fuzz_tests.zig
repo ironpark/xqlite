@@ -2,7 +2,7 @@
 //! function of a seed and a number of events, deterministic for a seed, so
 //! that a failure can be replayed:
 //!
-//!   zig build fuzz -Doptimize=ReleaseSafe -- NAME [SEED] [--events N]
+//!   zig build fuzz -Doptimize=ReleaseSafe -- NAME [SEED] [--events N] [--ext PATH]
 //!
 //! Without a seed a random one is used; the seed is printed first either
 //! way. A 40-digit commit hash is accepted as a seed. `zig build test` runs
@@ -27,10 +27,16 @@ const fuzzers = [_]Fuzzer{
     .{ .name = "btree_corrupt", .run = btree_fuzz.corrupt, .events = 5_000, .smoke_events = 100 },
     .{ .name = "btree_sqlite3", .run = btreeSqlite3, .events = 50_000, .smoke_events = 2_000 },
     .{ .name = "ir_roundtrip", .run = ir_fuzz.roundtrip, .events = 2_000, .smoke_events = 30 },
+    // The tables of ir_roundtrip read and written by sqlite3 with the
+    // loadable extension of $XQT_EXT (docs/extension.md); skipped
+    // without it.
+    .{ .name = "ir_ext", .run = ir_fuzz.extRoundtrip, .events = 300, .smoke_events = 5 },
 };
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
 const usage =
-    \\usage: zig build fuzz -- NAME [SEED] [--events N]
+    \\usage: zig build fuzz -- NAME [SEED] [--events N] [--ext LIBXQLITE_EXT]
     \\       zig build fuzz -- smoke
     \\
     \\fuzzers:
@@ -55,6 +61,12 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, args[i], "--events") and i + 1 < args.len) {
             i += 1;
             events = std.fmt.parseUnsigned(u32, args[i], 10) catch return usageExit();
+        } else if (std.mem.eql(u8, args[i], "--ext") and i + 1 < args.len) {
+            // The loadable extension for ir_ext, as $XQT_EXT (which
+            // `zig build check` cannot set to a built file).
+            i += 1;
+            const z = try init.arena.allocator().dupeSentinel(u8, args[i], 0);
+            if (setenv("XQT_EXT", z.ptr, 1) != 0) return error.SetenvFailed;
         } else {
             seed = fuzz.parseSeed(args[i]) orelse return usageExit();
         }

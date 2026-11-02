@@ -1,4 +1,4 @@
--- The tables of src/test/regress/sql/test_setup.sql (PostgreSQL 16) that
+-- The tables of src/test/regress/sql/test_setup.sql (PostgreSQL 18) that
 -- the tests here use, without POINT_TBL and the VACUUMs. Run quietly
 -- before each test by `xqt wire-diff pg --regress`.
 

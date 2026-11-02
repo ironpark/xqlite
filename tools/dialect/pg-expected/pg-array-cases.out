@@ -1,0 +1,421 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-array-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case e39df469eb4629ac array literals cast to array types
+int4|text|int4|int4|int4
+{1,2,NULL}|{"a b",c,""}|{{1,2},{3,4}}|[0:1]={1,2}|{1,2}
+(1 row)
+ERROR:  malformed array literal: "{"x\\"y",NULL,"NULL"}"
+LINE 1: ...c[], '{1.0,1e20}'::float8[], '{01,-0}'::bigint[], '{"x\\"y",...
+                                                             ^
+DETAIL:  Incorrectly quoted array element.
+int4|cardinality|varchar|int4
+{}|0|{a,b}|{1}
+(1 row)
+==== case 8b35bc425ec0dee2 element input errors
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: SELECT '{a}'::int[];
+               ^
+ERROR:  malformed array literal: "{1,2"
+LINE 1: SELECT '{1,2'::int[];
+               ^
+DETAIL:  Unexpected end of input.
+ERROR:  malformed array literal: "{{1},{2,3}}"
+LINE 1: SELECT '{{1},{2,3}}'::int[];
+               ^
+DETAIL:  Multidimensional arrays must have sub-arrays with matching dimensions.
+ERROR:  malformed array literal: "x"
+LINE 1: SELECT 'x'::int[];
+               ^
+DETAIL:  Array value must start with "{" or dimension information.
+ERROR:  value "70000" is out of range for type smallint
+LINE 1: SELECT '{70000}'::smallint[];
+               ^
+ERROR:  invalid input syntax for type boolean: "maybe"
+LINE 1: SELECT '{maybe}'::boolean[];
+               ^
+ERROR:  invalid input syntax for type numeric: "x"
+LINE 1: SELECT '{1,x}'::numeric[];
+               ^
+==== case 56e1142f6c66cc11 array columns and their catalog types
+id|a|b|c|d|e|f
+1|{1,2}|{x,"y z"}|{a}|{{1}}||{t,f}
+2|{}|{q}||||{t}
+(2 rows)
+attname|format_type
+id|integer
+a|integer[]
+b|text[]
+c|character varying(10)[]
+d|integer[]
+e|integer[]
+f|boolean[]
+(7 rows)
+column_name|data_type|udt_name
+id|integer|int4
+a|ARRAY|_int4
+b|ARRAY|_text
+c|ARRAY|_varchar
+d|ARRAY|_int4
+e|ARRAY|_int4
+f|ARRAY|_bool
+(7 rows)
+==== case ea83020587930cc8 storing into array columns is checked
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: INSERT INTO t VALUES ('{a}', NULL);
+                              ^
+ERROR:  malformed array literal: "x"
+LINE 1: INSERT INTO t VALUES ('x', NULL);
+                              ^
+DETAIL:  Array value must start with "{" or dimension information.
+ERROR:  invalid input syntax for type boolean: "nope"
+LINE 1: INSERT INTO t VALUES (NULL, '{nope}');
+                                    ^
+a|b
+{5,6}|{t,f}
+(1 row)
+==== case 0e2ffd8ead1663f3 ARRAY constructors
+array|array|array|array|array|array
+{1,2}|{t,f}|{a,"b c"}|{1.5,2}|{{1,2},{3,4}}|{{1},{2}}
+(1 row)
+array|array|array|array|array
+{}|{1,NULL}|{NULL,NULL}|{1,2.5}|{1.50,2.00}
+(1 row)
+array|array
+{1,2}|{1,2}
+(1 row)
+==== case 41cc0ed9a6cc1a3e ARRAY constructor errors
+ERROR:  cannot determine type of empty array
+LINE 1: SELECT ARRAY[];
+               ^
+HINT:  Explicitly cast to the desired type, for example ARRAY[]::integer[].
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: SELECT ARRAY[1,'a'];
+                       ^
+ERROR:  multidimensional arrays must have array expressions with matching dimensions
+==== case 03602086832d1882 ARRAY of a query
+array
+{1,2,3}
+(1 row)
+d
+{3,2,1}
+(1 row)
+array|array
+{}|{a,b}
+(1 row)
+id|array
+1|{x,y,NULL}
+2|{y,NULL}
+3|{NULL}
+(3 rows)
+==== case c535a556d4a6a226 array_agg
+array_agg
+{3,2,1}
+(1 row)
+array_agg
+{t,NULL,f}
+(1 row)
+array_agg
+{a,"b c"}
+(1 row)
+array_agg
+
+(1 row)
+g|array_agg
+1|{a,b}
+2|{c}
+(2 rows)
+array_agg
+{{1,2},{3,4}}
+(1 row)
+==== case 052763248e2ec698 string_to_array and array_to_string
+string_to_array|string_to_array|string_to_array|string_to_array
+{a,b,"",c}|{a,b,NULL,c}|{a,b,c}|{}
+(1 row)
+string_to_array|array_to_string|array_to_string|array_to_string
+{a,b,c}|1,*,3|1,3|1-2-3-4
+(1 row)
+==== case 3ec1e91a79e44132 ANY and ALL of arrays
+?column?|?column?|?column?|?column?|?column?|?column?
+t|f||t||f
+(1 row)
+?column?|?column?|?column?|?column?|?column?|?column?|?column?
+|f|t|t|t|t|t
+(1 row)
+?column?|?column?|?column?|?column?|?column?
+|t|f|t|t
+(1 row)
+?column?|?column?|?column?|?column?
+t|t|t|f
+(1 row)
+ERROR:  op ANY/ALL (array) requires array on right side
+LINE 1: SELECT 1 = ANY(1);
+                 ^
+==== case ab2c0e2999d36c54 ANY and ALL of table columns
+id
+1
+(1 row)
+id
+1
+3
+(2 rows)
+id|?column?|?column?
+1|f|t
+2|t|t
+3||t
+(3 rows)
+id
+1
+2
+3
+(3 rows)
+id
+2
+3
+(2 rows)
+id
+1
+(1 row)
+==== case e44332aebced0822 ANY of a function's array
+?column?|?column?|current_schemas
+t|f|pg_catalog
+(1 row)
+relname
+t
+(1 row)
+==== case c5974e6aabf04965 subscripts and slices
+array|array|array|array|array|array
+2|||{2,3}|{1,2}|{2,3}
+(1 row)
+int4|int4|int4|int4
+3||{{2}}|7
+(1 row)
+?column?|?column?|array|text
+ax|2||{}
+(1 row)
+id|a|a|s|a
+1|10|20|x|{10,20}
+2|40|||{40}
+(2 rows)
+id
+2
+(1 row)
+id
+1
+(1 row)
+==== case 18b7d633ac33edb3 array functions
+array_length|array_length|array_length|array_length
+2|3||
+(1 row)
+array_lower|array_upper|array_dims|cardinality|array_ndims
+0|1|[1:2][1:3]|6|2
+(1 row)
+array_position|array_position|array_positions|array_position|array_position
+2|3|{1,3}|2|
+(1 row)
+array_append|array_prepend|array_cat|array_remove|array_replace
+{1,2,3}|{0,1}|{1,2,3}|{2}|{9,2,9}
+(1 row)
+array_append|array_append|array_cat|array_remove
+{t,f}|{1}|{1}|{a}
+(1 row)
+==== case e0098d1e721f6260 array operators
+?column?|?column?|?column?|?column?|?column?
+{1,2,3}|{0,1,2}|{1,2,3}|{{1,2},{3,4}}|{a,b}
+(1 row)
+?column?|?column?|?column?|?column?|?column?
+t|t|t|f|f
+(1 row)
+?column?|?column?|?column?|?column?|?column?|?column?
+t|t|t|f|t|t
+(1 row)
+?column?|?column?
+{1,2}|{1,2,3}
+(1 row)
+==== case d8a10e4433256c75 ORDER BY and DISTINCT arrays
+a
+{1}
+{1}
+{1,2}
+{9}
+{10}
+
+(6 rows)
+a
+
+{10}
+{9}
+{1,2}
+{1}
+(5 rows)
+==== case 9076b02e389b8520 unnest in FROM
+unnest
+1
+2
+3
+(3 rows)
+unnest|unnest
+1|a
+2|b
+|c
+(3 rows)
+x|n
+a|1
+b|2
+(2 rows)
+u
+1
+2
+3
+4
+(4 rows)
+?column?
+3
+2
+(2 rows)
+count
+0
+(1 row)
+==== case d58da4c91dc6329e unnest of a table's arrays
+id|tag
+1|a
+1|b
+2|c
+(3 rows)
+id|unnest
+1|a
+1|b
+2|c
+(3 rows)
+tag|count
+a|1
+b|1
+c|1
+(3 rows)
+==== case 198345e255831a49 unnest and generate_subscripts in the select list
+unnest|generate_subscripts
+1|1
+2|2
+(2 rows)
+x|y
+1|a
+2|
+3|
+(3 rows)
+g
+0
+1
+(2 rows)
+r|c
+1|1
+2|2
+3|
+(3 rows)
+s
+3
+2
+1
+(3 rows)
+==== case 0aa9ea0d72611da0 arrays of the catalog
+conname|conkey|confkey|first
+c_p_id_fkey|{2}|{1}|2
+p_id_k_key|{1,2}||1
+p_pkey|{1}||1
+(3 rows)
+indkey|k0|array_length
+1|1|1
+1 2|1|2
+(2 rows)
+attname
+id
+k
+(2 rows)
+conname|attname|n
+p_id_k_key|id|1
+p_id_k_key|k|2
+p_pkey|id|1
+(3 rows)
+==== case 64d5099943ac5c28 _pg_expandarray
+n|x
+1|3
+2|1
+(2 rows)
+attname|n
+c|1
+a|2
+(2 rows)
+x|n
+a|1
+b|2
+(2 rows)
+==== case b7011ff53615e614 array_to_json of arrays of a type
+array_to_json|array_to_json|array_to_json|to_json|json_build_object
+[1,2]|["a","b"]|[true]|[1.5]|{"k" : ["x"]}
+(1 row)
+==== case e7a7c32c67147db2 assigning to an element in UPDATE
+id|a|b|m
+1|{1,20,3,NULL,9}|{f}|{{1,2},{30,4}}
+2|[3:3]={7}|[2:2]={t}|
+3|[0:0]={0}|{}|{}
+(3 rows)
+ERROR:  array subscript out of range
+==== case 5afeaa50781f95d9 views and checks over arrays
+id|first|rest|has2|b1|s2|bb|ids|gt
+1|3|{1,2}|t|t|{x,y,z}|{t,f}|{1}|t
+(1 row)
+?column?|has2
+4|t
+(1 row)
+ERROR:  new row for relation "c" violates check constraint "c_a_check"
+DETAIL:  Failing row contains ({1,2,3}, null).
+a|b
+1|{5}
+(1 row)
+==== case 77c0732f6fac45e8 arrays of dates, numerics and json
+ERROR:  date/time field value out of range: "2024-02-30"
+LINE 1: SELECT '{2024-01-02, 2024-02-30}'::date[];
+               ^
+date|numeric|jsonb|time|interval
+{2024-01-02,2024-03-04}|{1.5,2.250}|{"{\"a\": 1}"}|{12:00:00}|{"1 day"}
+(1 row)
+array|array|array|?column?
+{2024-01-02}|{1.50,2}|2.50|t
+(1 row)
+array|uuid
+{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}|{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}
+(1 row)
+==== case 63e4d1d503324a0f array_agg as a window function
+x|array_agg
+1|{1}
+2|{1,2}
+3|{2,3}
+(3 rows)
+==== case ff631bf9f7227322 introspection queries of clients: Django's constraints and indexes
+conname|array|contype|?column?
+book_author_id_fkey|{author_id}|f|author.id
+book_pkey|{id}|p|
+book_title_author_id_key|{title,author_id}|u|
+(3 rows)
+indexname|array_agg|indisunique|indisprimary|array_agg
+book_pkey|{id}|t|t|{ASC}
+book_title_author_id_key|{title,author_id}|t|f|{ASC,ASC}
+book_title_desc|{title,id}|f|f|{DESC,ASC}
+(3 rows)
+==== case 5416b32210f3d266 introspection queries of clients: SQLAlchemy's primary key, pgjdbc's keys
+conname|cols
+book_pkey|{b,a}
+(1 row)
+column_name|key_seq|pk_name
+b|1|book_pkey
+a|2|book_pkey
+(2 rows)
+==== case c3c55e8793274710 introspection queries of clients: psql's reloptions, pgjdbc's schemas
+array_to_string
+
+(1 row)
+table_schem
+pg_catalog
+public
+(2 rows)
+r|nspname
+1|public
+(1 row)

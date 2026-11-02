@@ -1,0 +1,8 @@
+1
+1|0|1|1|1|0
+1|1|1||
+1|0|1|NULL
+1|1|1|1
+-- errors
+line 10: LIKE pattern must not end with escape character
+line 11: invalid escape string

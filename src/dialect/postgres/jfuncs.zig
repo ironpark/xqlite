@@ -31,8 +31,6 @@
 //!   xq_pg_jsonb_delete_path(a, p)       #-
 //!   xq_pg_jsonb_path_exists_op(a, q)    @?
 //!   xq_pg_jsonb_path_match_op(a, q)     @@
-//!   xq_pg_text_array(x)                 ::text[] (the literal, checked)
-//!   xq_pg_array(...)                    ARRAY[...] as its text '{1,2}'
 //!   xq_pg_array_to_json(a, pretty, num) array_to_json() of a text[] literal
 //!   xq_pg_is_json(x, kind, unique)      IS JSON [VALUE|ARRAY|OBJECT|SCALAR]
 //!   xq_pg_row_json(name, value, ...)    row_to_json() of a row the parser
@@ -115,13 +113,11 @@ pub const engine_functions = [_]FuncDef{
     s("xq_pg_jsonb_delete_path", 2, inArena(deletePathFunc)),
     s("xq_pg_jsonb_path_exists_op", 2, pathExistsOp),
     s("xq_pg_jsonb_path_match_op", 2, pathMatchOp),
-    s("xq_pg_text_array", 1, inArena(textArrayFunc)),
-    s("xq_pg_array", -1, inArena(arrayFunc)),
     s("xq_pg_array_to_json", 3, arrayToJsonFunc),
     s("xq_pg_is_json", 3, inArena(isJsonFunc)),
     s("xq_pg_row_json", -1, inArena(rowJsonFunc)),
-    s("xq_pg_json_ctor_object", -1, inArena(ctorObject)),
-    s("xq_pg_json_ctor_array", -1, inArena(ctorArray)),
+    s("xq_pg_json_ctor_object", -1, dfunc.atLeast(1, inArena(ctorObject))),
+    s("xq_pg_json_ctor_array", -1, dfunc.atLeast(1, inArena(ctorArray))),
     agg("xq_pg_json_arrayagg", 2, arrayaggStep, arrayaggFinal),
     agg("xq_pg_json_objectagg", 3, objectaggStep, objectaggFinal),
     agg("xq_pg_json_agg_rows", 1, aggRowsStep, aggFinal),
@@ -417,31 +413,6 @@ fn numericJson(ctx: *Context, argv: []*Mem) void {
     };
     api.resultText(ctx, t, .transient);
     api.resultSubtype(ctx, J);
-}
-
-fn textArrayFunc(c: *Call, argv: []*Mem) void {
-    if (isNull(argv[0])) return api.resultNull(c.ctx);
-    const elems = c.textArray(argv[0]) orelse return;
-    writeArray(c, elems);
-}
-
-fn writeArray(c: *Call, elems: []const ?[]const u8) void {
-    var out: std.ArrayList(u8) = .empty;
-    out.append(c.a(), '{') catch return api.resultErrorNomem(c.ctx);
-    for (elems, 0..) |e, i| {
-        if (i > 0) out.append(c.a(), ',') catch return api.resultErrorNomem(c.ctx);
-        json.writeArrayElem(c.a(), &out, e) catch return api.resultErrorNomem(c.ctx);
-    }
-    out.append(c.a(), '}') catch return api.resultErrorNomem(c.ctx);
-    api.resultText(c.ctx, out.items, .transient);
-}
-
-fn arrayFunc(c: *Call, argv: []*Mem) void {
-    const elems = c.a().alloc(?[]const u8, argv.len) catch return api.resultErrorNomem(c.ctx);
-    for (argv, elems) |m, *e| {
-        e.* = if (isNull(m)) null else (c.a().dupe(u8, c.text(m) orelse return) catch return api.resultErrorNomem(c.ctx));
-    }
-    writeArray(c, elems);
 }
 
 // ============================================================== operators
@@ -929,21 +900,24 @@ fn rowJsonFunc(c: *Call, argv: []*Mem) void {
 /// numbers are numbers (the parser says xq_pg_array_to_json() when it
 /// knows the element type).
 fn arrayToJson(ctx: *Context, argv: []*Mem) void {
-    arrayToJsonImpl(ctx, argv[0], argv.len == 2 and !isNull(argv[1]) and api.valueInt64(argv[1]) != 0, null);
+    arrayToJsonImpl(ctx, argv[0], argv.len == 2 and !isNull(argv[1]) and api.valueInt64(argv[1]) != 0, null, false);
 }
 
+/// xq_pg_array_to_json(a, pretty, kind): kind 1 numbers, 2 booleans
+/// (t/f), else strings.
 fn arrayToJsonFunc(ctx: *Context, argv: []*Mem) void {
-    arrayToJsonImpl(ctx, argv[0], !isNull(argv[1]) and api.valueInt64(argv[1]) != 0, api.valueInt64(argv[2]) != 0);
+    const kind = api.valueInt64(argv[2]);
+    arrayToJsonImpl(ctx, argv[0], !isNull(argv[1]) and api.valueInt64(argv[1]) != 0, if (kind == 2) null else kind == 1, kind == 2);
 }
 
-fn arrayToJsonImpl(ctx: *Context, arr: *Mem, pretty: bool, numeric: ?bool) void {
+fn arrayToJsonImpl(ctx: *Context, arr: *Mem, pretty: bool, numeric: ?bool, booleans: bool) void {
     if (isNull(arr)) return api.resultNull(ctx);
     var c: Call = .init(ctx);
     defer c.deinit();
     const a = c.a();
     const elems = c.textArray(arr) orelse return;
-    var num = numeric orelse true;
-    if (numeric == null) for (elems) |e| if (e) |t| {
+    var num = numeric orelse !booleans;
+    if (numeric == null and !booleans) for (elems) |e| if (e) |t| {
         _ = json.parse(a, t, false) catch {
             num = false;
             continue;
@@ -955,7 +929,9 @@ fn arrayToJsonImpl(ctx: *Context, arr: *Mem, pretty: bool, numeric: ?bool) void 
     for (elems, 0..) |e, i| {
         if (i > 0) out.appendSlice(a, if (pretty) ",\n " else ",") catch return api.resultErrorNomem(ctx);
         if (e) |t| {
-            if (num) {
+            if (booleans) {
+                out.appendSlice(a, if (std.mem.eql(u8, t, "t")) "true" else "false") catch return api.resultErrorNomem(ctx);
+            } else if (num) {
                 const v = json.parse(a, t, false) catch return api.resultErrorState(ctx, .of("22P02"), "invalid input syntax for type numeric");
                 json.writeJson(a, &out, v) catch return api.resultErrorNomem(ctx);
             } else json.writeString(a, &out, t) catch return api.resultErrorNomem(ctx);

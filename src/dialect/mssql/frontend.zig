@@ -362,9 +362,9 @@ const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_tsql_json_path_exists", 2, det, jf.jsonPathExistsFunc),
     dfunc.scalar("xq_tsql_isjson", 2, det, jf.isjsonFunc),
     dfunc.scalar("xq_tsql_json_escape", 1, det, jf.jsonEscapeFunc),
-    dfunc.scalar("xq_tsql_json_object", -1, det, jf.jsonObjectFunc),
-    dfunc.scalar("xq_tsql_json_array", -1, det, jf.jsonArrayFunc),
-    dfunc.aggregate("xq_tsql_for_json", -1, det, jf.forJsonStep, jf.forJsonFinal),
+    dfunc.scalar("xq_tsql_json_object", -1, det, dfunc.atLeast(2, jf.jsonObjectFunc)),
+    dfunc.scalar("xq_tsql_json_array", -1, det, dfunc.atLeast(2, jf.jsonArrayFunc)),
+    dfunc.aggregate("xq_tsql_for_json", -1, det, dfunc.atLeast(1, jf.forJsonStep), jf.forJsonFinal),
 };
 
 comptime {

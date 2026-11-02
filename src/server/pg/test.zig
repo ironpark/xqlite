@@ -352,7 +352,7 @@ test "pg: startup, simple queries, errors, transactions" {
     defer c.deinit();
     try testing.expectEqual(@as(?[]const u8, null), try c.connect(f.srv.address(), "alice", ""));
     defer c.close();
-    try testing.expectEqualStrings("16.15 (xqlite)", c.server_version[0..c.server_version_len]);
+    try testing.expectEqualStrings("18.6 (xqlite)", c.server_version[0..c.server_version_len]);
     try testing.expect(c.pid != 0);
 
     try testing.expectEqualStrings(
@@ -552,6 +552,55 @@ test "pg: extended queries" {
     try c.terminate();
 }
 
+test "pg: arrays on the wire" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var f: Fixture = undefined;
+    try f.start(.{});
+    defer f.stop();
+    var c: Client = .{};
+    defer c.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), try c.connect(f.srv.address(), "bob", ""));
+    defer c.close();
+    _ = try c.query("CREATE TABLE t (id int, tags text[], nums int[], flags bool[]); INSERT INTO t VALUES (1, '{a,\"b c\"}', '{1,2}', '{t}'), (2, '{c}', NULL, '{f,NULL}')");
+    try testing.expectEqualStrings("T array:1000 int4:1007 text:1009 array:1231\nD {t,f} {1,NULL} {a} {1.50}\nC SELECT 1\nZ I\n", try c.query("SELECT ARRAY[true, false], '{1,NULL}'::int[], '{a}'::text[], ARRAY[1.50]"));
+
+    // The types of arrays: of a parameter compared with ANY, of the
+    // columns; a text parameter read as the array it spells.
+    try c.parse("q", "SELECT id, tags, nums, nums[1], flags FROM t WHERE id = ANY($1) ORDER BY id", &.{});
+    try c.describe('S', "q");
+    try c.bind("p", "q", &.{.{ .text = "{1,2}" }}, &.{});
+    try c.execute("p", 0);
+    try testing.expectEqualStrings(
+        \\1
+        \\t 1007
+        \\T id:23 tags:1009 nums:1007 nums:23 flags:1000
+        \\2
+        \\D 1 {a,"b c"} {1,2} 1 {t}
+        \\D 2 {c} NULL NULL {f,NULL}
+        \\C SELECT 2
+        \\Z I
+        \\
+    , try c.sync());
+
+    // The binary format of arrays: a parameter (an int4[] of 2 and 1),
+    // the results.
+    const param = "\x00\x00\x00\x01" ++ "\x00\x00\x00\x00" ++ "\x00\x00\x00\x17" ++ "\x00\x00\x00\x02\x00\x00\x00\x01" ++
+        "\x00\x00\x00\x04\x00\x00\x00\x02" ++ "\x00\x00\x00\x04\x00\x00\x00\x01";
+    try c.parse("", "SELECT nums, flags, $1::int[] FROM t WHERE id = ANY($1) ORDER BY id", &.{1007});
+    try c.bind("", "", &.{.{ .binary = param }}, &.{1});
+    try c.execute("", 0);
+    try testing.expectEqualStrings(
+        \\1
+        \\2
+        \\D 0x000000010000000000000017000000020000000100000004000000010000000400000002 0x00000001000000000000001000000001000000010000000101 0x000000010000000000000017000000020000000100000004000000020000000400000001
+        \\D NULL 0x00000001000000010000001000000002000000010000000100ffffffff 0x000000010000000000000017000000020000000100000004000000020000000400000001
+        \\C SELECT 2
+        \\Z I
+        \\
+    , try c.sync());
+    try c.terminate();
+}
+
 fn canceler(addr: std.Io.net.IpAddress, pid: u32, key: u32, stop: *std.atomic.Value(bool)) void {
     // The interrupt is cleared when a statement starts, so ask until the
     // query fails.
@@ -633,7 +682,7 @@ test "pg: catalogs and settings" {
     var want: [64]u8 = undefined;
     const shown = try std.fmt.bufPrint(&want, "T server_version:25\nD {s}\nC SHOW\nZ I\n", .{c.server_version[0..c.server_version_len]});
     try testing.expectEqualStrings(shown, try c.query("SHOW server_version"));
-    try testing.expectEqualStrings("T ?column?:16\nD t\nC SELECT 1\nZ I\n", try c.query("SELECT version() LIKE 'PostgreSQL 16.%' AND current_setting('server_version_num') = '160015'"));
+    try testing.expectEqualStrings("T ?column?:16\nD t\nC SELECT 1\nZ I\n", try c.query("SELECT version() LIKE 'PostgreSQL 18.%' AND current_setting('server_version_num') = '180006'"));
     // The database the client named.
     try testing.expectEqualStrings("T current_database:25\nD x\nC SELECT 1\nZ I\n", try c.query("SELECT current_database()"));
     // RESET: its tag, and the startup packet's value.

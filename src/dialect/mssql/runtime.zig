@@ -804,7 +804,8 @@ pub fn eomonthFunc(ctx: *Context, argv: []*Mem) void {
     const mo = momentOf(argv[0]) orelse return failState(ctx, .numbered("22007", 241), "Conversion failed when converting date and/or time from character string.", .{});
     const add: i64 = if (argv.len > 1) api.valueInt64(argv[1]) else 0;
     const y, const m, _ = mo.ymd();
-    const total = y * 12 + (m - 1) + add;
+    // Past the year 9999 either way: the overflow below.
+    const total = std.math.add(i64, y * 12 + (m - 1), std.math.clamp(add, -1_000_000, 1_000_000)) catch unreachable;
     const ny = @divFloor(total, 12);
     const nm: u32 = @intCast(@mod(total, 12) + 1);
     if (ny < 1 or ny > 9999) return failState(ctx, .numbered("22008", 517), "Adding a value to a 'date' column caused an overflow.", .{});

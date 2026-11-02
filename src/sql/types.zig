@@ -56,6 +56,10 @@ pub const Logical = enum {
     json,
     /// PostgreSQL's binary JSON (its text form on the wire).
     jsonb,
+    /// An array (PostgreSQL's `integer[]`) of elements of `Type.element`,
+    /// whose parameters (a `varchar(20)[]`'s length) are the type's own;
+    /// stored as its text (`{1,2,NULL}`).
+    array,
 };
 
 pub const Type = struct {
@@ -67,12 +71,34 @@ pub const Type = struct {
     /// digits of a time or timestamp in `scale`.
     precision: ?u8 = null,
     scale: ?u8 = null,
+    /// The type of the elements of an `array` (`.unknown` for another
+    /// type, or for an array of elements of no known type).
+    element: Logical = .unknown,
+
+    /// The type of the elements of an array (its parameters are the
+    /// array's); the type itself if it is no array.
+    pub fn elementType(t: Type) Type {
+        if (t.logical != .array) return t;
+        return .{ .logical = t.element, .length = t.length, .precision = t.precision, .scale = t.scale };
+    }
+
+    /// The array of elements of type `t`.
+    pub fn arrayOf(t: Type) Type {
+        if (t.logical == .array) return t;
+        return .{ .logical = .array, .element = t.logical, .length = t.length, .precision = t.precision, .scale = t.scale };
+    }
 };
 
 /// The type of a column declared as `name` in `dialect` (the text of
 /// Stmt.columnTypeAlloc()). Names are case-insensitive; an unknown name
 /// is `.unknown`, which protocols send as text.
 pub fn parse(dialect: Dialect, name: []const u8) Type {
+    if (arrayBase(dialect, name)) |base| {
+        // PostgreSQL's int2vector and oidvector are arrays of int2, oid.
+        if (std.ascii.eqlIgnoreCase(base, "int2vector")) return .{ .logical = .array, .element = .int2 };
+        if (std.ascii.eqlIgnoreCase(base, "oidvector")) return .{ .logical = .array, .element = .int4 };
+        return parse(dialect, base).arrayOf();
+    }
     var buf: [64]u8 = undefined;
     const base, const a0, const a1 = split(name, &buf);
     const l = lookup(dialect, base);
@@ -92,6 +118,27 @@ pub fn parse(dialect: Dialect, name: []const u8) Type {
         else => {},
     }
     return t;
+}
+
+/// The element type's name of an array type `name` of `dialect`
+/// (PostgreSQL's `integer[]`, `int[3][3]`, `integer ARRAY`,
+/// `character varying(20)[]`; its `int2vector` and `oidvector` are
+/// themselves), null for another type.
+fn arrayBase(dialect: Dialect, name: []const u8) ?[]const u8 {
+    if (dialect != .postgres) return null;
+    var z = std.mem.trim(u8, name, " \t");
+    if (std.ascii.eqlIgnoreCase(z, "int2vector") or std.ascii.eqlIgnoreCase(z, "oidvector")) return z;
+    var found = false;
+    while (z.len > 0 and z[z.len - 1] == ']') {
+        const open = std.mem.lastIndexOfScalar(u8, z, '[') orelse return null;
+        z = std.mem.trimEnd(u8, z[0..open], " \t");
+        found = true;
+    }
+    if (!found and z.len > 6 and std.ascii.eqlIgnoreCase(z[z.len - 6 ..], " array")) {
+        z = std.mem.trimEnd(u8, z[0 .. z.len - 6], " \t");
+        found = true;
+    }
+    return if (found and z.len > 0) z else null;
 }
 
 /// The type of an expression from the storage class of its value.
@@ -271,4 +318,12 @@ test "parse: the declared types of each dialect" {
     try T.expect(.sqlite, "VARCHAR(20)", .{ .logical = .varchar, .length = 20 });
     try T.expect(.sqlite, "whatever", .{ .logical = .unknown });
     try T.expect(.postgres, "  Character   Varying ( 8 ) ", .{ .logical = .varchar, .length = 8 });
+    try T.expect(.postgres, "integer[]", .{ .logical = .array, .element = .int4 });
+    try T.expect(.postgres, "int[3][3]", .{ .logical = .array, .element = .int4 });
+    try T.expect(.postgres, "integer ARRAY", .{ .logical = .array, .element = .int4 });
+    try T.expect(.postgres, "character varying(20)[]", .{ .logical = .array, .element = .varchar, .length = 20 });
+    try T.expect(.postgres, "numeric(10,2)[]", .{ .logical = .array, .element = .numeric, .precision = 10, .scale = 2 });
+    try T.expect(.postgres, "int2vector", .{ .logical = .array, .element = .int2 });
+    try T.expect(.postgres, "name[]", .{ .logical = .array });
+    try T.expect(.sqlite, "integer[]", .{ .logical = .int8 });
 }

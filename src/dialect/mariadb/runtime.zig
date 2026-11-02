@@ -183,7 +183,7 @@ pub fn insertFunc(ctx: *Context, argv: []*Mem) void {
     const n = utf8Len(z);
     if (pos < 1 or pos > n) return api.resultText(ctx, z, .transient);
     const a = utf8Offset(z, @intCast(pos - 1));
-    const b = if (len < 0) z.len else utf8Offset(z, @intCast(@min(@as(i64, @intCast(n)), pos - 1 + len)));
+    const b = if (len < 0) z.len else utf8Offset(z, @intCast(@min(@as(i64, @intCast(n)), (pos - 1) +| len)));
     var out: std.ArrayList(u8) = .empty;
     out.appendSlice(gpa, z[0..a]) catch return api.resultErrorNomem(ctx);
     out.appendSlice(gpa, new) catch return api.resultErrorNomem(ctx);

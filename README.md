@@ -121,6 +121,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 - [MariaDB 호환](docs/mariadb.md): 저장 방식, `sql_mode`, 지원 문법, MariaDB와 다른 점
 - [MSSQL 호환](docs/mssql.md): T-SQL 문법, 타입과 값 변환, `+`·`MERGE`의 규칙, SQL Server와 다른 점
 - [Oracle 호환](docs/oracle.md): 빈 문자열과 NULL, 날짜, `ROWNUM`·`MERGE`, 암묵적 트랜잭션, Oracle과 다른 점
+- [sqlite3용 확장](docs/extension.md): 방언으로 만든 데이터베이스의 엔진 함수와 collation을 sqlite3·Python·Datasette에 올리는 `libxqlite_ext`, 함수 목록, ABI 규칙
 
 ## 빠른 시작
 
@@ -134,6 +135,7 @@ zig build run          # CLI 실행
 zig build test         # 단위 테스트 (pkg/vfs, pkg/storage, pkg/base 패키지의 테스트 포함)
 zig build test-pkg     # 패키지 테스트만 (엔진을 빌드하지 않아 빠름)
 zig build test-capi    # C API 테스트
+zig build ext          # sqlite3용 확장 (zig-out/lib/libxqlite_ext.*, docs/extension.md)
 zig build -Ddialects=postgres,mariadb -Dext=none   # 넣을 방언·확장만 (기본 all)
 ```
 
@@ -167,6 +169,17 @@ cc app.c -Izig-out/include zig-out/lib/libxqlite3.a -lpthread -lm
 ```
 
 지원하는 함수와 SQLite와 다른 점(멀티스레드 모드, 권한 검사기·확장 로딩·serialize 미지원 등)은 [C API](docs/c-api.md)에 있습니다.
+
+### sqlite3에서 읽기
+
+방언으로 만든 데이터베이스는 SQLite 파일이지만, 스키마의 CHECK·생성 열·식 인덱스·뷰가 엔진 함수(`xq_pg_jsonb_get_text()`, `xq_like()` ...)와 collation(`xq_pg_jsonb` ...)을 부릅니다. 평범한 sqlite3는 그 식에서 `no such function`으로 실패하므로, 같은 소스로 만든 로더블 확장을 올립니다.
+
+```sh
+zig build ext
+sqlite3 app.db -cmd '.load ./zig-out/lib/libxqlite_ext' 'PRAGMA integrity_check'
+```
+
+Python은 `con.enable_load_extension(True); con.load_extension("./zig-out/lib/libxqlite_ext")`입니다. 뜻이 xqlite와 같고(같은 구현), 스키마가 부르는 함수는 이름이 바뀌지 않는 한 뜻도 바뀌지 않습니다([sqlite3용 확장](docs/extension.md)).
 
 ### 셸 실행
 
@@ -276,6 +289,7 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle.md))
 - [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS. 공통 기반(리스너, 세션, 열 타입·오류·명령 분류, 취소, 준비된 문장)과 PostgreSQL 프로토콜 v3(`xqlite serve --pg`: 단순·확장 질의, 이진 형식, 취소, SCRAM-SHA-256), MySQL 프로토콜(`xqlite serve --mysql`: 텍스트·이진 프로토콜, 준비된 문장, KILL)은 있음 ([서버](docs/server.md))
 - [x] **C ABI**: `sqlite3_*` 호환 C ABI(`libxqlite3`, SQLite 3.54.1 헤더), URI 파라미터 `?dialect=`, commit·rollback·update 훅과 진행 처리기. SQLite의 `shell.c`가 그대로 링크되어 돌아감 ([C API](docs/c-api.md))
+- [x] **sqlite3용 확장**: 방언의 엔진 함수·collation·시퀀스 함수를 실제 sqlite3에 등록하는 `libxqlite_ext`, 엔진과 같은 구현, 스키마 함수의 ABI(`xq_ext_version()`, `src/dialect/abi.txt`) ([sqlite3용 확장](docs/extension.md))
 
 ## 프로젝트 구조
 
@@ -299,6 +313,7 @@ src/
 │   └── oracle/         # lexer, parser(→ 구문 트리 IR), 날짜·숫자 형식, 저장 변환, 데이터 사전 뷰
 ├── api/                # Zig API
 ├── capi/               # sqlite3 호환 C ABI (루트는 capi.zig)
+├── loadable/           # sqlite3용 로더블 확장 libxqlite_ext (루트는 loadable.zig, docs/extension.md)
 ├── ext/                # 셸용 확장 (generate_series, vtablog)
 ├── server/             # 와이어 프로토콜 서버 xqlite_server (리스너, 세션, 타입·오류 분류; pg/: PostgreSQL 프로토콜, mysql/: MySQL 프로토콜)
 └── wasm/               # 브라우저·JavaScript용 wasm 모듈 (xq_* 내보내기)

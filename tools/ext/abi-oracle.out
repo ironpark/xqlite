@@ -1,0 +1,19 @@
+12|NULL|1.26|2024-02-29 00:00:00
+12.5|12.5|2024-02-29 00:00:00|.5
+1|0|1|NULL
+x|NULL|{"b":"x"}
+bcd|ef|NULL|5|5
+007|a|a|a|ac|xc|Hello World
+3|-3|1.23|-1|-1|1.4142135623730952|-1
+ 1,234.50|.5|2024-02-29 13:04:05 THU|1234.5|2024-02-29 00:00:00
+2024-02-29 00:00:00|1|2024-02-29 00:00:00|2024-03-04 00:00:00|2024
+3|NULL|a|2|1
+NUMBER|20|5|2
+[1,2]
+-- errors
+line 4: ORA-12899: value too large for column "MAIN"."T"."C" (actual: 6, maximum: 3)
+line 5: ORA-01722: invalid number
+line 6: ORA-01438: value larger than specified precision allowed for this column
+line 7: ORA-01400: cannot insert NULL into ("MAIN"."T"."C")
+line 15: ORA-01722: invalid number
+line 20: relation "NOPE" does not exist

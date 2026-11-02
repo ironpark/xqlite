@@ -147,11 +147,11 @@ const pg_sequences =
 ++ nsJoin("s.name");
 
 /// information_schema.table_constraints: PRIMARY KEY, UNIQUE, FOREIGN
-/// KEY and CHECK constraints of pg_constraint.
+/// KEY and CHECK constraints of pg_constraint (NOT NULL ones are CHECK).
 const table_constraints =
     \\SELECT current_database() AS constraint_catalog, n.nspname AS constraint_schema, c.conname AS constraint_name,
     \\  current_database() AS table_catalog, n.nspname AS table_schema, r.relname AS table_name,
-    \\  CASE c.contype WHEN 'c' THEN 'CHECK' WHEN 'f' THEN 'FOREIGN KEY' WHEN 'p' THEN 'PRIMARY KEY' WHEN 'u' THEN 'UNIQUE' END AS constraint_type,
+    \\  CASE c.contype WHEN 'c' THEN 'CHECK' WHEN 'n' THEN 'CHECK' WHEN 'f' THEN 'FOREIGN KEY' WHEN 'p' THEN 'PRIMARY KEY' WHEN 'u' THEN 'UNIQUE' END AS constraint_type,
     \\  CASE WHEN c.condeferrable THEN 'YES' ELSE 'NO' END AS is_deferrable,
     \\  CASE WHEN c.condeferred THEN 'YES' ELSE 'NO' END AS initially_deferred,
     \\  'YES' AS enforced, CASE WHEN c.contype = 'u' THEN 'YES' END AS nulls_distinct
@@ -186,16 +186,17 @@ const referential_constraints =
 /// information_schema.check_constraints.
 const check_constraints =
     \\SELECT current_database() AS constraint_catalog, n.nspname AS constraint_schema, c.conname AS constraint_name,
-    \\  pg_get_constraintdef(c.oid) AS check_clause
+    \\  CASE c.contype WHEN 'n' THEN replace(trim(substr(pg_get_constraintdef(c.oid), 10), '"'), '""', '"') || ' IS NOT NULL'
+    \\    ELSE pg_get_expr(c.conbin, c.conrelid) END AS check_clause
     \\FROM pg_constraint c LEFT JOIN pg_namespace n ON n.oid = c.connamespace
-    \\WHERE c.contype = 'c'
+    \\WHERE c.contype IN ('c', 'n')
 ;
 
 const pg_database =
     \\SELECT 5::oid AS oid, current_database()::name AS datname, 10::oid AS datdba, 6 AS encoding,
-    \\  'c' AS datlocprovider, false AS datistemplate, true AS datallowconn, -1 AS datconnlimit,
+    \\  'c' AS datlocprovider, false AS datistemplate, true AS datallowconn, false AS dathasloginevt, -1 AS datconnlimit,
     \\  '722' AS datfrozenxid, '1' AS datminmxid, 1663::oid AS dattablespace, 'C' AS datcollate, 'C' AS datctype,
-    \\  NULL AS daticulocale, NULL AS daticurules, NULL AS datcollversion, NULL AS datacl
+    \\  NULL AS datlocale, NULL AS daticurules, NULL AS datcollversion, NULL AS datacl
 ;
 
 const pg_roles =
@@ -231,7 +232,7 @@ const pg_tablespace =
 const pg_collation =
     \\SELECT o::oid AS oid, n::name AS collname, 11::oid AS collnamespace, 10::oid AS collowner, p AS collprovider,
     \\  true AS collisdeterministic, e AS collencoding, c AS collcollate, c AS collctype,
-    \\  NULL AS colliculocale, NULL AS collicurules, NULL AS collversion
+    \\  NULL AS colllocale, NULL AS collicurules, NULL AS collversion
     \\FROM (VALUES (100, 'default', 'd', -1, NULL), (950, 'C', 'c', -1, 'C'), (951, 'POSIX', 'c', -1, 'POSIX')) AS x(o, n, p, e, c)
 ;
 
@@ -346,12 +347,12 @@ const defs = [_]Def{
         .{ "is_instead", .bool }, .{ "ev_qual", .text },  .{ "ev_action", .text },
     }) },
     .{ .schema = "pg_catalog", .name = "pg_statistic_ext", .text = empty(&.{
-        .{ "oid", .oid },            .{ "stxrelid", .oid }, .{ "stxname", .name }, .{ "stxnamespace", .oid }, .{ "stxowner", .oid },
-        .{ "stxstattarget", .int4 }, .{ "stxkeys", .text }, .{ "stxkind", .text }, .{ "stxexprs", .text },
+        .{ "oid", .oid },      .{ "stxrelid", .oid },       .{ "stxname", .name }, .{ "stxnamespace", .oid }, .{ "stxowner", .oid },
+        .{ "stxkeys", .text }, .{ "stxstattarget", .int2 }, .{ "stxkind", .text }, .{ "stxexprs", .text },
     }) },
     .{ .schema = "pg_catalog", .name = "pg_publication", .text = empty(&.{
         .{ "oid", .oid },        .{ "pubname", .name },   .{ "pubowner", .oid },     .{ "puballtables", .bool }, .{ "pubinsert", .bool },
-        .{ "pubupdate", .bool }, .{ "pubdelete", .bool }, .{ "pubtruncate", .bool }, .{ "pubviaroot", .bool },
+        .{ "pubupdate", .bool }, .{ "pubdelete", .bool }, .{ "pubtruncate", .bool }, .{ "pubviaroot", .bool },   .{ "pubgencols", .char },
     }) },
     .{ .schema = "pg_catalog", .name = "pg_publication_rel", .text = empty(&.{ .{ "oid", .oid }, .{ "prpubid", .oid }, .{ "prrelid", .oid }, .{ "prqual", .text }, .{ "prattrs", .text } }) },
     .{ .schema = "pg_catalog", .name = "pg_publication_namespace", .text = empty(&.{ .{ "oid", .oid }, .{ "pnpubid", .oid }, .{ "pnnspid", .oid } }) },

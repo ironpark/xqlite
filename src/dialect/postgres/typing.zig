@@ -62,15 +62,25 @@ fn store(t: Type) ?*const int.FuncDef {
         .timestamp => datetime.cast_timestamp,
         .timestamp_tz => datetime.cast_timestamptz,
         .interval => datetime.cast_interval,
+        // Read as the elements' type reads them, written canonical.
+        .array => array.inputFunction(t.element),
         else => null,
     };
 }
+
+const array = @import("array.zig");
 
 /// PostgreSQL's choices by the types of operands (jsonb's operators, the
 /// arguments of the functions that make JSON): overload.zig.
 const overload = @import("overload.zig");
 
 fn spell(t: Type, buf: *[64]u8) []const u8 {
+    if (t.logical == .array) {
+        if (t.element == .unknown or t.element == .array) return "text[]";
+        var eb: [64]u8 = undefined;
+        const z = spell(t.elementType(), &eb);
+        return std.fmt.bufPrint(buf, "{s}[]", .{z}) catch "text[]";
+    }
     return switch (t.logical) {
         // An operator's numeric has no typmod.
         .numeric => "numeric",
@@ -159,6 +169,8 @@ fn exactScale(t: Type) ?u8 {
 fn function(name: []const u8) ?Ret {
     const n = ownName(name);
     if (functions.get(n)) |r| return r;
+    // The casts to arrays (xq_pg_array_int4 ...), in the text of views.
+    if (array.inputElem(n)) |e| return if (e == .unknown) null else Ret{ .named = array_names[@backingInt(e)] };
     // The engine functions of operators (xq_pg_date_pli() ...).
     if (operators.functionResult(n)) |t| return Ret{ .named = t.name() };
     return null;
@@ -321,11 +333,99 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_like", Ret{ .named = "boolean" } },
     .{ "xq_ilike", Ret{ .named = "boolean" } },
     .{ "xq_pg_regex", Ret{ .named = "boolean" } },
-    // Arrays are no column type: their text literal, of the type spelled
-    // with [] (an unknown type of that name).
+    // Arrays (array.zig).
     .{ "xq_pg_text_array", Ret{ .named = "text[]" } },
-    .{ "xq_pg_array", Ret{ .rule = arrayLiteral } },
+    .{ "xq_pg_array", Ret{ .rule = arrayOfArgs } },
+    .{ "xq_pg_array_nested", Ret{ .common = 0 } },
+    .{ "xq_pg_elem", Ret{ .arg = 0 } },
+    .{ "xq_pg_any", Ret{ .named = "boolean" } },
+    .{ "xq_pg_array_valid", Ret{ .named = "boolean" } },
+    .{ "xq_pg_array_contains", Ret{ .named = "boolean" } },
+    .{ "xq_pg_array_overlap", Ret{ .named = "boolean" } },
+    .{ "xq_pg_subscript", Ret{ .rule = elementOf(0) } },
+    .{ "xq_pg_subscript_k", Ret{ .rule = elementOf(0) } },
+    .{ "xq_pg_slice", Ret{ .arg = 0 } },
+    .{ "xq_pg_array_set", Ret{ .arg = 0 } },
+    .{ "xq_pg_array_cat2", Ret{ .rule = firstKnown } },
+    .{ "xq_pg_array_append", Ret{ .rule = appendType(0, 1) } },
+    .{ "xq_pg_array_prepend", Ret{ .rule = appendType(1, 0) } },
+    .{ "xq_pg_rows_unnest", Ret{ .named = "text" } },
+    .{ "array_cat", Ret{ .rule = firstKnown } },
+    .{ "xq_pg_array_agg", Ret{ .rule = arrayOf(0) } },
+    .{ "array_agg", Ret{ .rule = arrayOf(0) } },
+    .{ "xq_pg_array_agg_arrays", Ret{ .arg = 0 } },
+    .{ "array_append", Ret{ .rule = appendType(0, 1) } },
+    .{ "array_prepend", Ret{ .rule = appendType(1, 0) } },
+    .{ "array_remove", Ret{ .arg = 0 } },
+    .{ "array_replace", Ret{ .arg = 0 } },
+    .{ "array_length", Ret{ .named = "integer" } },
+    .{ "array_lower", Ret{ .named = "integer" } },
+    .{ "array_upper", Ret{ .named = "integer" } },
+    .{ "array_ndims", Ret{ .named = "integer" } },
+    .{ "cardinality", Ret{ .named = "integer" } },
+    .{ "array_position", Ret{ .named = "integer" } },
+    .{ "array_positions", Ret{ .named = "integer[]" } },
+    .{ "array_dims", Ret{ .named = "text" } },
+    .{ "array_to_string", Ret{ .named = "text" } },
+    .{ "string_to_array", Ret{ .named = "text[]" } },
+    .{ "current_schemas", Ret{ .named = "name[]" } },
 });
+
+/// The spelling of the array of each element type (array.Elem).
+const array_names = blk: {
+    var names: [std.enums.values(array.Elem).len][]const u8 = undefined;
+    for (std.enums.values(array.Elem), 0..) |e, i| names[i] = e.typeName() ++ "[]";
+    break :blk names;
+};
+
+/// The type of the elements of the array that argument `i` is.
+fn elementOf(comptime i: usize) *const fn (c: *Ctx, args: []const Operand) Oom!TypeId {
+    return struct {
+        fn f(c: *Ctx, args: []const Operand) Oom!TypeId {
+            if (i >= args.len) return unknown;
+            const t = args[i].type;
+            if (t.logical != .array or t.element == .unknown) return unknown;
+            return c.make(t.elementType());
+        }
+    }.f;
+}
+
+/// The array of the type of argument `i`.
+fn arrayOf(comptime i: usize) *const fn (c: *Ctx, args: []const Operand) Oom!TypeId {
+    return struct {
+        fn f(c: *Ctx, args: []const Operand) Oom!TypeId {
+            if (i >= args.len) return unknown;
+            return arrayOfType(c, args[i]);
+        }
+    }.f;
+}
+
+fn arrayOfType(c: *Ctx, o: Operand) Oom!TypeId {
+    if (o.e.op == TK.STRING) return c.named("text[]");
+    const t = o.type;
+    if (t.logical == .unknown) return unknown;
+    // An array of arrays is an array of a dimension more.
+    if (t.logical == .array) return o.id;
+    return c.make(t.arrayOf());
+}
+
+/// array_append(a, x): the array's type, else the array of x's.
+fn appendType(comptime arr: usize, comptime elem: usize) *const fn (c: *Ctx, args: []const Operand) Oom!TypeId {
+    return struct {
+        fn f(c: *Ctx, args: []const Operand) Oom!TypeId {
+            if (args.len != 2) return unknown;
+            if (args[arr].type.logical == .array) return args[arr].id;
+            return arrayOfType(c, args[elem]);
+        }
+    }.f;
+}
+
+/// The type of the first argument of a known type.
+fn firstKnown(c: *Ctx, args: []const Operand) Oom!TypeId {
+    _ = c;
+    for (args) |a| if (a.id != unknown) return a.id;
+    return unknown;
+}
 
 /// The type of the JSON constructors of SQL/JSON (JSON_OBJECT() ...):
 /// jsonb if bit 1 of their flags argument (`i`) is set (RETURNING
@@ -341,21 +441,17 @@ fn ctorType(comptime i: usize) *const fn (c: *Ctx, args: []const Operand) Oom!Ty
     }.f;
 }
 
-/// ARRAY[...] (xq_pg_array()): an integer[] of integer literals, a
-/// numeric[] of number literals, else a text[].
-fn arrayLiteral(c: *Ctx, args: []const Operand) Oom!TypeId {
-    var all_int = true;
-    for (args) |a| {
-        var e = a.e;
-        while ((e.op == TK.UMINUS or e.op == TK.UPLUS) and e.left != null) e = e.left.?;
-        switch (e.op) {
-            TK.INTEGER => {},
-            TK.FLOAT => all_int = false,
-            else => return c.named("text[]"),
-        }
+/// ARRAY[...] (xq_pg_array()): the array of the common type of the
+/// values; a text[] of strings and NULLs.
+fn arrayOfArgs(c: *Ctx, args: []const Operand) Oom!TypeId {
+    const id = try typing.commonOf(c, args);
+    if (id == unknown) {
+        for (args) |a| if (a.e.op != TK.STRING and a.e.op != TK.NULL) return unknown;
+        return c.named("text[]");
     }
-    if (args.len == 0) return c.named("text[]");
-    return c.named(if (all_int) "integer[]" else "numeric[]");
+    const t = typing.typeOf(c.p.db, id);
+    if (t.logical == .array) return id;
+    return c.make(t.arrayOf());
 }
 
 /// sum(): of a smallint or an integer a bigint, of a bigint a numeric, of

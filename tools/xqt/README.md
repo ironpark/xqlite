@@ -7,10 +7,11 @@ xqlite의 테스트 도구입니다. xqlite와 sqlite3(또는 PostgreSQL·MariaD
 | xqlite (`--xq`) | 모든 명령 |
 | sqlite3 (`--sqlite3`) | `interop`, `bench`, `gen superjournal` |
 | 플래너 기준 sqlite3 (`--sq`) | `planner` |
+| sqlite3용 확장 `libxqlite_ext` (`--ext`) | `interop ext`(sqlite3에 `-cmd .load`), 시스템 `python3`의 `sqlite3`(있으면) |
 | `PATH`의 `sqlite3` (`--fixtures-sqlite3`) | `gen fixtures` |
 | C 실행기 `sqllogictest` (`--ref`, 선택) | `slt` |
-| 서버 클라이언트(`$PG_PSQL`, `$MARIA_CLIENT`, `$ORA_SQLPLUS`, 기본 `podman exec -i ...`) | `dialect-diff` |
-| psql을 돌리는 명령(`$PG_WIRE_EXEC`, 기본 `podman exec -i xq-pg`)과 `xqlite serve` | `wire-diff` |
+| 서버 클라이언트(`$PG_PSQL`, `$MARIA_CLIENT`, `$ORA_SQLPLUS`, 기본 `podman exec -i ...`) | `dialect-diff --live`/`--record` (기본은 기록과 비교하므로 서버가 필요 없음) |
+| psql을 돌리는 명령(`$PG_WIRE_EXEC`; 기본은 호스트의 psql 18, 없으면 `podman run --rm -i postgres:18-alpine`, `--live`/`--record`는 `podman exec -i xq-pg`)과 `xqlite serve` | `wire-diff` |
 | `zig cc`, `zig run` (`$ZIG`) | `gen parser`, `gen opcodes` (크래시 shim은 `zig build tools`가 `zig cc`로 빌드) |
 | `tclsh` | `gen opcodes` |
 | `git` | `fetch slt` (`fetch sqlite`는 내려받기와 압축 풀기를 프로세스 안에서 함) |
@@ -41,8 +42,11 @@ zig-out/bin/xqt planner tools/planner/window.txt -k code -v
 zig-out/bin/xqt planner --known tools/planner/known-failures.list
 zig-out/bin/xqt planner gen hard 1 8 15 > /tmp/c1.txt
 zig-out/bin/xqt slt ref/sqllogictest/test -- --wal
-zig-out/bin/xqt dialect-diff pg  # podman 컨테이너가 필요
-zig-out/bin/xqt wire-diff pg     # podman 컨테이너가 필요
+zig-out/bin/xqt dialect-diff pg           # 기록(tools/dialect/pg-expected)과 비교, 서버 없이
+zig-out/bin/xqt dialect-diff pg --live    # 서버와 지금 비교 (podman 컨테이너)
+zig-out/bin/xqt dialect-diff pg --record  # 서버의 출력을 다시 기록
+zig-out/bin/xqt wire-diff pg              # 기록과 비교, psql만 필요
+zig-out/bin/xqt wire-diff pg --record     # 서버의 출력을 다시 기록 (podman 컨테이너)
 zig-out/bin/xqt bench insert scan
 zig-out/bin/xqt gen parser opcodes
 zig-out/bin/xqt gen superjournal
@@ -56,8 +60,8 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 | `planner [FILE...] [-k KINDS] [--known FILE]` | 쿼리 결과·실행 계획·바이트코드를 sqlite3와 비교 | `planner.zig` |
 | `planner gen basic\|hard SEED NBLOCKS NQUERIES` | 무작위 플래너 케이스. 예전 `gen-basic`, `gen-hard` 생성기와 바이트까지 같은 출력 | `planner_gen.zig` |
 | `slt [PATH...] [-- ARGS]` | sqllogictest를 스크립트마다 `xqlite slt` 프로세스로 | `slt.zig` |
-| `dialect-diff pg\|mariadb\|oracle [CASES]` | 방언을 실제 서버와 차등 비교. 서버가 필요하므로 `zig build check`에는 없음 | `dialect_diff.zig` |
-| `wire-diff pg [CASES...]`, `wire-diff pg --regress [TEST...]` | 와이어 서버(`xqlite serve --pg`)를 psql로 실제 서버와 차등 비교, PostgreSQL 회귀 테스트 일부의 문장별 통과율. 서버가 필요하므로 `zig build check`에는 없음 | `wire_diff.zig` |
+| `dialect-diff pg\|mariadb\|mssql\|oracle [--live\|--record] [CASES]` | 방언을 실제 서버의 출력과 차등 비교. 기본은 저장소에 기록해 둔 서버의 출력(`tools/dialect/pg-expected/pg-cases.out`)과 비교하므로 서버가 필요 없고, 기록이 있는 방언(지금은 pg)은 `zig build check`에 들어 있음. `--live`는 서버와 지금, `--record`는 서버에서 돌려 기록을 다시 씀 | `dialect_diff.zig` |
+| `wire-diff pg [--live\|--record] [CASES...]`, `wire-diff pg --regress [TEST...]` | 와이어 서버(`xqlite serve --pg`)를 psql로 PostgreSQL의 출력과 차등 비교(기본은 기록과), PostgreSQL 회귀 테스트 일부의 문장별 통과율(PostgreSQL이 함께 내놓는 기대 출력과). psql이 필요하고 호스트에 psql 18이 없으면 podman으로 돌리므로 `zig build check`에는 없음 | `wire_diff.zig` |
 | `bench [WORKLOAD...]` | 같은 작업의 실행 시간(`--runs`/`RUNS`, `--rows`/`ROWS`) | `bench.zig` |
 | `wasi [--wasm PATH] [--runtime PROG]` | wasm32-wasi 빌드를 wasmtime에서: sqlite3·네이티브 xqlite와 비교(`zig build test-wasi`) | `wasi.zig` |
 | `gen fixtures\|parser\|opcodes` | `src/testdata`의 DB, `grammar.zig`, `opcodes.zig` 재생성 | `gen.zig` |
@@ -75,7 +79,7 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 | `-j N` | 동시에 돌릴 검사 수(기본: CPU 수) |
 | `-v` | 통과한 검사의 로그도 출력. `planner`에서는 다른 부분을 출력 |
 | `--keep` | 실패한 검사의 임시 디렉터리를 남기고 경로를 출력 |
-| `--xq PATH`, `--sqlite3 PATH`, `--sq PATH`, `--crashshim PATH` | [바이너리 고르기](#바이너리-고르기) |
+| `--xq PATH`, `--sqlite3 PATH`, `--sq PATH`, `--crashshim PATH`, `--ext PATH` | [바이너리 고르기](#바이너리-고르기) |
 
 검사마다 끝나는 순간 결과를 한 덩어리로 출력합니다(`ok`, `FAIL`과 로그, `skip`과 이유). 그래서 병렬로 돌아도 출력이 섞이지 않습니다. 끝나는 순서는 실행마다 다르지만, 마지막 요약은 실패한 검사를 추가한 순서대로 나열하고 개수를 셉니다. 실패가 하나라도 있으면 종료 코드는 1입니다.
 
@@ -91,19 +95,20 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 
 두 기준 셸은 `zig build tools`가 `build.zig.zon`에 고정한 SQLite 3.54.1 아말감으로 빌드합니다([테스트와 검증](../../docs/testing.md#기준-sqlite3-셸)).
 | `cfg.crashshim` | `--crashshim` | `XQT_CRASHSHIM` | `ROOT/zig-out/lib/libcrashshim.dylib`(Linux는 `.so`) |
+| `cfg.ext` | `--ext` | `XQT_EXT` | `ROOT/zig-out/lib/libxqlite_ext.dylib`(Linux는 `.so`). `Check.sqlite3Ext()`가 올림([sqlite3용 확장](../../docs/extension.md)) |
 
 `ROOT`는 빌드할 때 넣은 저장소 루트입니다. 예전 스크립트는 `sqlite3`를 `PATH`에서 찾는 것과 `SQLITE3`를 쓰는 것이 섞여 있었는데, xqt의 모든 interop 모듈은 `cfg.sqlite3` 하나를 씁니다. 예외는 `gen fixtures`입니다. 커밋한 fixture는 헤더에 3.44.4라는 버전이 들어 있으므로 `PATH`의 `sqlite3`(또는 `--fixtures-sqlite3 PATH`)를 씁니다.
 
 ## zig build check
 
 ```sh
-zig build check   # 단위 테스트, xqt 자체의 테스트, xqt interop, xqt planner, fuzzcheck
+zig build check   # 단위 테스트, xqt 자체의 테스트, xqt interop, xqt planner, xqt dialect-diff pg(기록과), fuzzcheck
 zig build check -Dslt=true           # + sqllogictest (ref/sqllogictest, 몇 분)
 zig build check -Dfuzz=true          # + 시드 퍼저 셋을 무작위 시드로 한 번씩
 zig build check -Doptimize=ReleaseSafe
 ```
 
-모든 단계가 병렬로 돕니다. `-Doptimize`는 interop과 planner가 쓰는 xqlite를 정하고, fuzzcheck(코퍼스마다 프로세스 하나), slt, 시드 퍼저는 늘 ReleaseSafe 빌드를 씁니다. `xqt`에는 같은 빌드의 xqlite(`--xq`)와 크래시 shim(`--crashshim`)을 넘기고, 빌드 루트에서 실행합니다(`build.zig`의 `addXqtRun`). 플래너는 `tools/planner/known-failures.list`의 알려진 차이를 `--known`으로 받습니다. 그 목록에 있는 실패는 `KNOWN`으로 출력하고 종료 코드에 넣지 않으며, 다시 같아진 항목은 `FIXED`로 실패시켜 목록을 지우게 합니다. 항목 하나는 실패 하나(파일, 종류, 쿼리)와 정확히 맞아야 하고, 목록에 없는 실패는 모두 실패입니다. 플래너는 `SQ`(`--sq`)로 주석 없는 기준 셸을 받아야 바이트코드가 맞습니다. `dialect-diff`·`wire-diff`(서버 필요), `bench`, `gen`, `fetch`는 `check`에 들어 있지 않습니다.
+모든 단계가 병렬로 돕니다. `-Doptimize`는 interop과 planner가 쓰는 xqlite를 정하고, fuzzcheck(코퍼스마다 프로세스 하나), slt, 시드 퍼저는 늘 ReleaseSafe 빌드를 씁니다. `xqt`에는 같은 빌드의 xqlite(`--xq`)와 크래시 shim(`--crashshim`), interop에는 확장(`--ext`)도 넘기고, 빌드 루트에서 실행합니다(`build.zig`의 `addXqtRun`). 플래너는 `tools/planner/known-failures.list`의 알려진 차이를 `--known`으로 받습니다. 그 목록에 있는 실패는 `KNOWN`으로 출력하고 종료 코드에 넣지 않으며, 다시 같아진 항목은 `FIXED`로 실패시켜 목록을 지우게 합니다. 항목 하나는 실패 하나(파일, 종류, 쿼리)와 정확히 맞아야 하고, 목록에 없는 실패는 모두 실패입니다. 플래너는 `SQ`(`--sq`)로 주석 없는 기준 셸을 받아야 바이트코드가 맞습니다. 서버의 출력을 기록해 둔 방언(`build.zig`의 `recorded_dialects`, 지금은 PostgreSQL)이 빌드에 들어 있으면 `xqt dialect-diff pg`(기록과 비교, 서버 없이)도 돕니다. 기록에 없거나 케이스의 글이 바뀐 뒤의 기록(`NOT RECORDED`, `STALE RECORDING`)은 실패이므로, 케이스를 고치면 `--record`로 다시 기록합니다. `dialect-diff --live`/`--record`(서버 필요), `wire-diff`(psql 필요), `bench`, `gen`, `fetch`는 `check`에 들어 있지 않습니다.
 
 `xqt interop`은 이름 없이 모든 모듈을 돌리므로 **새 interop 모듈을 추가해도 `build.zig`는 고칠 필요가 없습니다.** 새 명령(예: `xqt foo`)을 `check`에 넣을 때만 `build.zig`에 다음 세 줄을 더합니다.
 
@@ -133,13 +138,14 @@ tools/xqt/
     pg.zig              pg
     mariadb.zig         mariadb
     oracle.zig          oracle
+    ext.zig             ext (sqlite3용 확장, 방언마다의 검사, tools/ext의 ABI 케이스, 생성한 호출)
     parts.zig           모듈이 아닌 도우미: 검사 하나의 작은 실행들을 병렬로(크래시 지점 등)
     base_db.zig         모듈이 아닌 도우미: 여러 검사가 나눠 쓰는 시작 DB를 한 번만 만듦
   planner.zig           xqt planner
   planner_gen.zig       xqt planner gen basic|hard (CPython random.Random의 포팅 포함)
   slt.zig               xqt slt
-  dialect_diff.zig      xqt dialect-diff pg|mariadb|oracle
-  wire_diff.zig         xqt wire-diff pg [--regress]
+  dialect_diff.zig      xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record], 기록(Recording)
+  wire_diff.zig         xqt wire-diff pg [--live|--record] [--regress]
   bench.zig             xqt bench
   wasi.zig              xqt wasi
   gen.zig               xqt gen fixtures|parser|opcodes

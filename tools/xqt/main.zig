@@ -137,7 +137,7 @@ fn list(io: Io, cfg: *const xqt.Config, out: *Io.Writer) !u8 {
         }
     }.f);
     for (names.items) |n| try out.print("  tools/planner/{s}\n", .{n});
-    try out.print("binaries:\n  xq        {s}\n  sqlite3   {s}\n  sq        {s}\n  crashshim {s}\n", .{ cfg.xq, cfg.sqlite3, cfg.sq, cfg.crashshim });
+    try out.print("binaries:\n  xq        {s}\n  sqlite3   {s}\n  sq        {s}\n  crashshim {s}\n  ext       {s}\n", .{ cfg.xq, cfg.sqlite3, cfg.sq, cfg.crashshim, cfg.ext });
     return 0;
 }
 

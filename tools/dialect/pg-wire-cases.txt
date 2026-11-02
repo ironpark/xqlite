@@ -1,4 +1,4 @@
--- xqt wire-diff pg: what a psql user sees, against PostgreSQL 16 and
+-- xqt wire-diff pg: what a psql user sees, against PostgreSQL 18 and
 -- `xqlite serve --pg` (tools/xqt/wire_diff.zig). The lines before the
 -- first case are the setup of every case (run quietly); "-- case: NAME"
 -- starts a case. psql echoes each case's input.
@@ -116,7 +116,7 @@ COMMENT ON TABLE book IS 'books';
 \dt+ book
 
 -- case: meta-l
-\l
+\l :DBNAME
 
 -- case: meta-dS-small
 \dS pg_namespace

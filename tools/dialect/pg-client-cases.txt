@@ -1,4 +1,4 @@
--- xqt wire-diff pg: the queries real clients send, against PostgreSQL 16
+-- xqt wire-diff pg: the queries real clients send, against PostgreSQL 18
 -- and `xqlite serve --pg` (tools/xqt/wire_diff.zig). Captured from the
 -- log of PostgreSQL 16 (log_statement=all) while each client introspected
 -- the schema below; see docs/testing.md "wire-diff":

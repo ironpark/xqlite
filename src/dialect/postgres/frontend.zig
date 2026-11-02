@@ -33,6 +33,7 @@ const ddltype = @import("ddltype.zig");
 const jfuncs = @import("jfuncs.zig");
 const catalog_funcs = @import("catalog_funcs.zig");
 const datetime = @import("datetime.zig");
+const array = @import("array.zig");
 const catalog = @import("../../catalog/catalog.zig");
 
 const RC = int.RC;
@@ -167,6 +168,8 @@ pub const hooks: dialect.Hooks = .{
     .collations = &.{
         .{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate },
         .{ .name = "xq_pg_interval", .cmp = datetime.collateInterval },
+        .{ .name = array.collation_text, .cmp = array.collateText },
+        .{ .name = array.collation_number, .cmp = array.collateNumber },
     },
     // The names of the type checks (parser.zig's typeCheck()).
     .check_errors = &.{
@@ -174,14 +177,15 @@ pub const hooks: dialect.Hooks = .{
         .{ .prefix = "integer out of range", .state = .of("22003") },
         .{ .prefix = "invalid input syntax for type ", .state = .of("22P02") },
         .{ .prefix = "value too long for type ", .state = .of("22001") },
+        .{ .prefix = "malformed array literal", .state = .of("22P02") },
     },
 };
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions;
+} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions;
 
-const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions;
+const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions;
 
 comptime {
     dfunc.checkTable(&functions);
@@ -208,4 +212,5 @@ test {
     _ = @import("constraints.zig");
     _ = @import("pgcatalog.zig");
     _ = @import("catalog_funcs.zig");
+    _ = @import("array.zig");
 }

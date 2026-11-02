@@ -114,8 +114,8 @@ pub const T = enum {
 
     /// The type of the core's `l` (spelled `spelling`), null if the table
     /// has none (time with time zone, a type of no Logical but text[]).
-    pub fn of(l: Logical, spelling: ?[]const u8) ?T {
-        return switch (l) {
+    pub fn of(ty: types.Type, spelling: ?[]const u8) ?T {
+        return switch (ty.logical) {
             .int1, .int2 => .int2,
             .int4 => .int4,
             .int8 => .int8,
@@ -135,12 +135,12 @@ pub const T = enum {
             .uuid => .uuid,
             .json => .json,
             .jsonb => .jsonb,
-            .time_tz => null,
-            .unknown => {
-                const z = spelling orelse return null;
-                const strings = [_][]const u8{ "text[]", "character varying[]", "character[]", "name[]" };
-                for (strings) |s| if (std.mem.eql(u8, z, s)) return .text_array;
-                return null;
+            .time_tz, .unknown => null,
+            // An array of strings (name[]: of no Logical).
+            .array => switch (ty.element) {
+                .text, .varchar, .char => .text_array,
+                .unknown => if (spelling) |z| (if (std.mem.eql(u8, z, "name[]")) .text_array else null) else null,
+                else => null,
             },
         };
     }

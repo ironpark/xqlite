@@ -1,0 +1,18 @@
+3|ab|3|NULL|3.5
+1|1|1|1|1
+123|1|abc|2024-02-29 10:11:12.123|2024-02-29 00:00:00.000
+NULL|12|NULL|12.3|1
+abc|ab|12.5|1
+x|NULL|{"b":"x"}|1|1|1
+{"a":1,"b":"x"}|1|a\"b\\|{"b":null}|[null]
+ab|4|ababab|aXef|2.6|3|1|0
+2024-02-29|2024-02-29 10:00:00|60|5|2024-02-29|February
+2
+2.3333333333333335
+40|3|datetime2
+-- errors
+line 4: Conversion failed when converting the varchar value 'a' to data type int.
+line 7: Conversion failed when converting the varchar value 'x' to data type int.
+line 10: String or binary data would be truncated in table 't', column 'c'. Truncated value: 'abc'.
+line 11: Arithmetic overflow error for data type smallint, value = 70000.
+line 13: Property cannot be found on the specified JSON path.

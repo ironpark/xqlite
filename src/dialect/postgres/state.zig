@@ -13,9 +13,9 @@ pub const user = "postgres";
 
 /// The PostgreSQL release the dialect follows: server_version,
 /// server_version_num, version() and the wire server's ParameterStatus.
-pub const release = "16.15";
+pub const release = "18.6";
 pub const server_version = release ++ " (xqlite)";
-pub const server_version_num = "160015";
+pub const server_version_num = "180006";
 
 pub const State = struct {
     /// Parameters set in this session, by name (lower case), as SHOW

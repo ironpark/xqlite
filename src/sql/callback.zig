@@ -148,7 +148,7 @@ pub const max_function_arg = 1000;
 pub const func_hash_sz = 23;
 
 /// SQLITE_FUNC_HASH().
-fn funcHash(c: u8, n: usize) usize {
+pub fn funcHash(c: u8, n: usize) usize {
     return (@as(usize, c) + n) % func_hash_sz;
 }
 

@@ -380,7 +380,7 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 | `JSON_ARRAYAGG(DISTINCT ... LIMIT n)` | SQLite의 `DISTINCT` 집계는 인자가 하나여야 해서 안 됩니다. |
 | `JSON_SEARCH`의 대소문자 | ASCII와 Latin-1 글자만 무시합니다. |
 | 경고 | 잘못된 JSON·경로는 NULL이지만 `SHOW WARNINGS`에 남지 않습니다. |
-| sqlite3 | `xq_mariadb_json_*()`, `xq_maria_json_*()`, `xq_maria_json_table`을 쓰는 CHECK·생성 열·뷰는 sqlite3에서 계산할 수 없습니다. `JSON` 열의 `CHECK(json_valid(...))`는 계산합니다. |
+| sqlite3 | `xq_mariadb_json_*()`, `xq_maria_json_*()`를 쓰는 CHECK·생성 열·뷰는 평범한 sqlite3에서 계산할 수 없고, [확장](extension.md)을 올리면 계산합니다. `xq_maria_json_table`(`JSON_TABLE`)은 엔진의 테이블 값 함수라 확장에도 없습니다. `JSON` 열의 `CHECK(json_valid(...))`는 확장 없이도 계산합니다. |
 
 ### SELECT
 
@@ -495,7 +495,7 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
   - `Function or expression '@x' cannot be used in the CHECK clause of ...`
   - `View's SELECT contains a variable or parameter`
 - 엔진 함수(`xq_div` ...)나 방언 함수(`xq_mariadb_*`)를 부르는 스키마는 xqlite에서는 어느 방언으로든 같은 결과를 냅니다.
-- sqlite3는 그런 식을 계산할 수 없습니다.
+- 평범한 sqlite3는 그런 식을 계산할 수 없고, [확장](extension.md)(`libxqlite_ext`)을 올린 sqlite3는 xqlite와 같은 결과로 계산합니다(시스템 변수·사용자 변수를 읽는 함수만 빠짐). 그 함수들의 뜻은 파일 형식의 일부라 바뀌지 않습니다([ABI 규칙](extension.md#abi-규칙)).
 - `/`, `UCASE`, `GREATEST`, `IF`, `CONCAT`, `LIKE` 같은 식은 sqlite3에서도 같습니다(`xqt interop mariadb`).
 - 저장된 식의 비교는 열 collation이 없으면 읽는 연결의 기본 collation을 씁니다.
 
@@ -549,7 +549,7 @@ MariaDB 11의 JSON 함수를 MariaDB가 계산하고 출력하는 대로 구현�
 ```sh
 zig build tools
 podman run -d --name xq-maria -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1 mariadb:11
-zig-out/bin/xqt dialect-diff mariadb [cases-file]
+zig-out/bin/xqt dialect-diff mariadb --live [cases-file]
 ```
 
 - 서버는 `$MARIA_CLIENT`로 연결합니다. 기본값은 `podman exec -i xq-maria mariadb -uroot`입니다.
@@ -565,5 +565,5 @@ zig-out/bin/xqt dialect-diff mariadb [cases-file]
 - sqlite3의 무결성 검사를 통과해야 합니다.
 - sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 합니다.
 - 다루는 것: STRICT 테이블, 이름 붙은 CHECK, DEFAULT·생성 열 식, `AUTO_INCREMENT`, 테이블과 함께 이름이 바뀌는 `"t$i"` 인덱스, 뷰, `xq_catalog`, `CREATE DATABASE`의 테이블·뷰·인덱스(`"sales.orders"`를 sqlite3가 읽고 쓰고, sqlite3가 쓴 행을 방언이 `sales.orders`로 읽음).
-- 엔진 함수(`xq_*`)를 쓰는 식은 sqlite3에 없으므로 `src/dialect/mariadb/test.zig`에서 확인합니다. JSON 함수와 `JSON_TABLE`을 쓰는 뷰·CHECK·생성 열도 여기서 확인합니다.
+- 엔진 함수(`xq_*`)를 쓰는 식(`DIV`, `XOR`, `DATE_ADD`, `JSON_VALUE`의 생성 열과 그 인덱스, `STDDEV_POP` 뷰 ...)은 `xqt interop ext`가 [확장](extension.md)을 올린 sqlite3로 확인합니다. `JSON_TABLE`을 쓰는 뷰는 `src/dialect/mariadb/test.zig`에서 확인합니다.
 - 먼저 `zig build tools`가 필요합니다. sqlite3는 xqt의 `cfg.sqlite3`(`--sqlite3`, `$SQLITE3`)입니다.

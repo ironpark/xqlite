@@ -78,6 +78,8 @@ const plain_names = blk: {
         .uuid => "uuid",
         .json => "json",
         .jsonb => "jsonb",
+        // An array of elements of no known type.
+        .array => "anyarray",
     };
     break :blk names;
 };
@@ -97,7 +99,7 @@ pub fn plainName(l: Logical) [:0]const u8 {
 pub const boolean = plain(.boolean);
 
 fn isPlain(t: Type) bool {
-    return t.length == null and t.precision == null and t.scale == null;
+    return t.length == null and t.precision == null and t.scale == null and t.element == .unknown;
 }
 
 /// A type of the interner: what the id means.
@@ -158,14 +160,16 @@ pub const Interner = struct {
         if (t.logical == .unknown) return unknown;
         if (std.meta.eql(types.parse(dialect, name), t)) return in.add(gpa, dialect, name);
         // The key: the dialect's byte with the high bit set, the type
-        // (logical, which parameters, the parameters), then the spelling.
-        var head: [9]u8 = undefined;
+        // (logical, which parameters, the parameters, an array's
+        // element), then the spelling.
+        var head: [10]u8 = undefined;
         head[0] = @backingInt(dialect) | 0x80;
         head[1] = @backingInt(t.logical);
         head[2] = @as(u8, @intFromBool(t.length != null)) | @as(u8, @intFromBool(t.precision != null)) << 1 | @as(u8, @intFromBool(t.scale != null)) << 2;
         head[3] = t.precision orelse 0;
         head[4] = t.scale orelse 0;
         std.mem.writeInt(u32, head[5..9], t.length orelse 0, .little);
+        head[9] = @backingInt(t.element);
         const owned = try gpa.alloc(u8, head.len + name.len + 1);
         var keep = false;
         defer if (!keep) gpa.free(owned);
@@ -735,6 +739,8 @@ pub fn common(c: *Ctx, a: Operand, b: Operand) Oom!?TypeId {
             return try c.make(.{ .logical = .numeric, .precision = clampU8(@max(x.p -| x.s, y.p -| y.s) + s), .scale = clampU8(s) });
         },
         .varchar, .char, .bytes => return try c.make(.{ .logical = la, .length = if (a.type.length != null and b.type.length != null) @max(a.type.length.?, b.type.length.?) else null }),
+        // Arrays of the same element type.
+        .array => return if (a.type.element == b.type.element and a.type.element != .unknown) a.id else null,
         // The same type under two spellings, or with other parameters.
         else => return a.id,
     };

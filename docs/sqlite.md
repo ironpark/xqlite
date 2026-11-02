@@ -134,6 +134,8 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 | `generate_series()` (`ext/misc/series.c` 포팅) | `src/ext/series.zig` | 셸(`xqlite sql`)이 등록합니다. sqlite3 셸과 같습니다. |
 | `vtablog` (`ext/misc/vtablog.c` 포팅, 메서드 호출을 출력) | `src/ext/vtablog.zig` | 셸에서 `XQ_VTABLOG` 환경 변수가 있을 때만 등록합니다. 차등 테스트용입니다. |
 
+반대 방향의 확장도 있습니다. 방언으로 만든 데이터베이스의 스키마는 엔진 함수(`xq_*`)와 방언의 collation을 부르는데, 평범한 sqlite3에는 그것이 없습니다. `zig build ext`가 만드는 `libxqlite_ext`를 sqlite3(`.load`), Python의 `sqlite3`, 시스템 SQLite를 쓰는 프로그램에 올리면 같은 구현으로 계산합니다. SQLite 방언의 동작과 바이트코드는 이것과 상관없이 그대로이고, 엔진 함수 하나 `xq_ext_version()`(확장과 같은 ABI 버전)이 더해졌을 뿐입니다([sqlite3용 확장](extension.md)).
+
 ## 검증 도구
 
 | 도구 | 확인하는 것 |
@@ -148,6 +150,7 @@ xqlite의 기본 방언은 SQLite 3.54.1입니다. 순수 Zig 포팅이지만 �
 | `xqt planner` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드를 sqlite3와 비교 |
 | `xqt slt` | sqllogictest. 스크립트 622개, 테스트 5,939,879개를 롤백 저널과 WAL 모드에서 모두 통과합니다([tools/slt/README.md](../tools/slt/README.md)). |
 | `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`)에서 크래시·누수 |
+| `xqt interop ext` | 방언으로 만든 DB를 확장을 올린 sqlite3가 검사·읽기·쓰기, 엔진 함수의 결과를 xqlite와 비교(기록된 ABI 케이스, 생성한 호출) ([sqlite3용 확장](extension.md#검증)) |
 
 실행 방법은 [테스트 문서](testing.md)를 보세요.
 

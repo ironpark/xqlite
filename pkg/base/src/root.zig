@@ -15,6 +15,8 @@ pub const status = @import("status.zig");
 pub const fuzz = @import("fuzz.zig");
 /// SQLite's locale-independent character classes (sqlite3CtypeMap).
 pub const ctype = @import("ctype.zig");
+/// Byte loops sixteen bytes at a time (@Vector) for long strings.
+pub const simd = @import("simd.zig");
 /// Conversions between numbers and text (util.c's sqlite3AtoF() and
 /// friends).
 pub const numeric = @import("numeric.zig");

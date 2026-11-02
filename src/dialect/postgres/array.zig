@@ -44,6 +44,7 @@
 //! The dialect's functions (array_length() ...) are at the end.
 
 const std = @import("std");
+const simd = @import("xqlite_base").simd;
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
@@ -735,7 +736,7 @@ pub fn compareElems(e: Elem, x: []const u8, y: []const u8) std.math.Order {
         .unknown => if (compareNumbers(x, y)) |o| return o,
         else => {},
     }
-    return std.mem.order(u8, x, y);
+    return simd.order(x, y);
 }
 
 fn compareNumbers(x: []const u8, y: []const u8) ?std.math.Order {
@@ -773,7 +774,7 @@ fn compareValue(a: Allocator, c: Code, m: *Mem, z: []const u8, fail: *Fail) Elem
             else => {},
         }
         const x = api.valueText(m) orelse return error.OutOfMemory;
-        return std.mem.order(u8, x, z);
+        return simd.order(x, z);
     }
     const x = (try valueElem(a, c, m, fail)).?;
     return compareElems(c.elem, x, z);
@@ -1688,12 +1689,12 @@ fn collateImpl(x: []const u8, y: []const u8, el: Elem) std.math.Order {
     if (collateIn(fba.allocator(), x, y, el)) |o| return o else |_| {}
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
-    return collateIn(arena.allocator(), x, y, el) catch std.mem.order(u8, x, y);
+    return collateIn(arena.allocator(), x, y, el) catch simd.order(x, y);
 }
 
 fn collateIn(a: Allocator, x: []const u8, y: []const u8, el: Elem) error{OutOfMemory}!std.math.Order {
-    const ax = parse(a, x, true) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else std.mem.order(u8, x, y);
-    const ay = parse(a, y, true) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else std.mem.order(u8, x, y);
+    const ax = parse(a, x, true) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else simd.order(x, y);
+    const ay = parse(a, y, true) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else simd.order(x, y);
     const n = @min(ax.elems.len, ay.elems.len);
     for (ax.elems[0..n], ay.elems[0..n]) |ex, ey| {
         const o: std.math.Order = if (ex == null and ey == null) .eq else if (ex == null) .gt else if (ey == null) .lt else compareElems(el, ex.?, ey.?);

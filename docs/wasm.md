@@ -4,7 +4,7 @@ xqlite를 WebAssembly로 빌드해 WASI 런타임(wasmtime 등)과 브라우저�
 
 | 타깃 | 빌드 | 결과물 | 파일 | 용도 |
 | --- | --- | --- | --- | --- |
-| `wasm32-wasi` | `zig build -Dtarget=wasm32-wasi` | `zig-out/bin/xqlite.wasm` (셸), 라이브러리 | WASI VFS (preview 1) | wasmtime·wasmer, 서버 쪽 샌드박스 |
+| `wasm32-wasi` | `zig build -Dtarget=wasm32-wasi -Dcpu=generic+simd128` | `zig-out/bin/xqlite.wasm` (셸), 라이브러리 | WASI VFS (preview 1) | wasmtime·wasmer, 서버 쪽 샌드박스 |
 | `wasm32-freestanding` | `zig build wasm` | `zig-out/wasm/xqlite.wasm` (`xq_*` 내보내기) | 호스트 VFS 또는 메모리 | 브라우저, Node.js, 그 밖의 JavaScript 호스트 |
 
 ## 목차
@@ -34,7 +34,7 @@ ReleaseSmall 빌드입니다.
 ## WASI
 
 ```sh
-zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall
+zig build -Dtarget=wasm32-wasi -Dcpu=generic+simd128 -Doptimize=ReleaseSmall
 wasmtime run --dir . zig-out/bin/xqlite.wasm sql app.db "CREATE TABLE t(a)" "INSERT INTO t VALUES(1)" "SELECT * FROM t"
 wasmtime run --dir . zig-out/bin/xqlite.wasm sql app.db ".dialect postgres" "SELECT 7 / 2"
 ```
@@ -141,6 +141,7 @@ WASI에는 권고 잠금(`fcntl(F_SETLK)`, `flock`)이 없고, 브라우저에�
 | mmap | 쓰지 않음. 데이터 파일 mmap은 원래 없고, `-shm`은 힙 메모리 |
 | 확장 로드 | `load_extension()`은 네이티브에서도 언제나 거절하므로(dlopen 없음) 차이 없음 |
 | `PATH_MAX` | freestanding은 4096(`vfs.max_path_bytes`) |
+| SIMD | WebAssembly SIMD(`simd128`)를 씀. WAL 체크섬, JSON 문자열 스캔, 텍스트 함수(`length`, `substr`, `instr`, `replace`, `upper`/`lower`, `hex`, `unhex`, `LIKE`), NOCASE 비교, 레코드 비교, UTF-8↔UTF-16 변환, 셸 출력이 `@Vector`로 돎(`pkg/base/src/simd.zig`). `zig build wasm`과 `test-wasi`는 스스로 켜고(끄려면 `-Dwasm-simd=false`), `-Dtarget=wasm32-wasi`로 직접 빌드할 때는 `-Dcpu=generic+simd128`을 줌. 빼면 같은 코드가 스칼라로 풀려 결과는 같고 느려짐. SIMD가 없는 런타임(오래된 브라우저 등)에서는 기본 `zig build wasm` 모듈이 로드되지 않으므로 `-Dwasm-simd=false`로 빌드함 |
 | 32비트 | 포인터가 4바이트이므로 페이지 블록 정렬, 레코드 길이 등에서 `usize` 가정을 고침 |
 
 ## 테스트

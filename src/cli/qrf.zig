@@ -280,11 +280,23 @@ fn vt100Len(z: []const u8, i: usize) usize {
     return k + 1;
 }
 
+/// Skip the run of printable ASCII at z[i.*] (one column a byte), adding
+/// its width to n.*; only tried at such a byte, so that text of other
+/// characters does not pay a failed search each.
+inline fn printableRun(z: []const u8, i: *usize, n: *i32) void {
+    if (i.* >= z.len or z[i.*] < 0x20 or z[i.*] >= 0x80) return;
+    const run = xqlite.simd.indexOfPred(z[i.*..], Escapes.notPrintable);
+    n.* += @intCast(run);
+    i.* += run;
+}
+
 /// Port of sqlite3_qrf_wcswidth(): the display width of `z`.
 pub fn wcswidth(z: []const u8) i32 {
     var n: i32 = 0;
     var i: usize = 0;
     while (at(z, i) != 0) {
+        printableRun(z, &i, &n);
+        if (at(z, i) == 0) break;
         const c = z[i];
         if (c < ' ') {
             const k = if (c == 0x1b) vt100Len(z, i) else 0;
@@ -309,6 +321,8 @@ fn displayWidth(z: []const u8, n_nl: ?*i32) i32 {
     var nl: i32 = 0;
     var i: usize = 0;
     while (i < z.len) {
+        printableRun(z, &i, &n);
+        if (i == z.len) break;
         const c = z[i];
         if (c < ' ') {
             const k = if (c == 0x1b) vt100Len(z, i) else 0;
@@ -347,6 +361,8 @@ fn isEscapedCtrl(z: []const u8, i: usize) bool {
 /// newline and CR-LF) of s[start..] as ^X (ascii) or U+24xx (symbol).
 pub fn escape(esc: Escape, s: *Str, start: usize) Error!void {
     const tail = s.list.items[start..];
+    // Most text has no control characters other than tab and newline.
+    if (xqlite.simd.indexOfPred(tail, Escapes.escapable) == tail.len) return;
     var n_ctrl: usize = 0;
     for (0..tail.len) |i| {
         if (isEscapedCtrl(tail, i)) n_ctrl += 1;
@@ -540,10 +556,77 @@ fn relaxable(p: *const Qrf, z: []const u8) bool {
     return at(z, i) != 0;
 }
 
-/// Characters that make a CSV field need quoting (qrfCsvQuote[]).
-fn csvNeedsQuote(c: u8) bool {
-    return c <= 0x20 or c == '"' or c == '\'' or c >= 0x7f;
+/// Append `z` with each byte `pred` picks written by `emit`, and the runs
+/// of other bytes between them appended whole (found sixteen at a time).
+fn appendRuns(s: *Str, z: []const u8, comptime pred: fn (Bytes) Mask, p: *Qrf, comptime emit: fn (*Qrf, *Str, u8) Error!void) Error!void {
+    var rest = z;
+    while (true) {
+        const k = xqlite.simd.indexOfPred(rest, pred);
+        try s.append(rest[0..k]);
+        if (k == rest.len) return;
+        try emit(p, s, rest[k]);
+        rest = rest[k + 1 ..];
+    }
 }
+
+const Bytes = xqlite.simd.Bytes;
+const Mask = xqlite.simd.Mask;
+
+/// The special bytes of encodeText()'s modes, as vector predicates for
+/// appendRuns(), and how each is written.
+const Escapes = struct {
+    const sp = xqlite.simd.splat;
+    /// What is not printable ASCII (0x20 to 0x7f, one column each).
+    fn notPrintable(v: Bytes) Mask {
+        return (v < sp(0x20)) | (v >= sp(0x80));
+    }
+    /// Control characters but tab and newline (CR is escaped unless a
+    /// newline follows, which isEscapedCtrl() decides).
+    fn escapable(v: Bytes) Mask {
+        return (v < sp(0x20)) & (v != sp('\t')) & (v != sp('\n'));
+    }
+    /// Characters that make a CSV field need quoting (qrfCsvQuote[]).
+    fn csvNeedsQuote(v: Bytes) Mask {
+        return (v <= sp(0x20)) | (v == sp('"')) | (v == sp('\'')) | (v >= sp(0x7f));
+    }
+    fn dquote(v: Bytes) Mask {
+        return v == sp('"');
+    }
+    fn csv(_: *Qrf, s: *Str, _: u8) Error!void {
+        try s.append("\"\"");
+    }
+    fn htmlSpecial(v: Bytes) Mask {
+        return (v == sp('>')) | (v == sp('&')) | (v == sp('<')) | (v == sp('"')) | (v == sp('\''));
+    }
+    fn html(_: *Qrf, s: *Str, c: u8) Error!void {
+        try s.append(switch (c) {
+            '>' => "&gt;",
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '"' => "&quot;",
+            else => "&#39;",
+        });
+    }
+    fn jsonSpecial(v: Bytes) Mask {
+        return (v < sp(0x20)) | (v == sp('"')) | (v == sp('\\'));
+    }
+    fn json(p: *Qrf, s: *Str, c: u8) Error!void {
+        switch (c) {
+            '"' => try s.append("\\\""),
+            '\\' => try s.append("\\\\"),
+            0x08 => try s.append("\\b"),
+            0x0c => try s.append("\\f"),
+            '\n' => try s.append("\\n"),
+            '\r' => try s.append("\\r"),
+            '\t' => try s.append("\\t"),
+            else => if (p.spec.text == .json) {
+                try s.print("\\u{x:0>4}", .{c});
+            } else {
+                try s.print("\\{o:0>3}", .{c});
+            },
+        }
+    }
+};
 
 /// Port of qrfEncodeText(): append text `z` encoded as spec.text says.
 fn encodeText(p: *Qrf, s: *Str, z: []const u8) Error!void {
@@ -559,49 +642,21 @@ fn encodeText(p: *Qrf, s: *Str, z: []const u8) Error!void {
         .sql => try s.appendf(if (p.spec.esc == .off) "%Q" else "%#Q", &.{.{ .str = z }}),
         .csv => {
             // (An empty field is quoted too.)
-            var quote = z.len == 0 or std.mem.indexOf(u8, z, p.colSep()) != null;
-            for (z) |c| {
-                if (csvNeedsQuote(c)) quote = true;
-            }
+            const sep = p.colSep();
+            const quote = z.len == 0 or xqlite.simd.indexOfPred(z, Escapes.csvNeedsQuote) < z.len or
+                (if (sep.len == 1) std.mem.indexOfScalar(u8, z, sep[0]) else std.mem.indexOf(u8, z, sep)) != null;
             if (quote) {
                 try s.append("\"");
-                for (z) |c| {
-                    if (c == '"') try s.append("\"");
-                    try s.append(&.{c});
-                }
+                try appendRuns(s, z, Escapes.dquote, p, Escapes.csv);
                 try s.append("\"");
             } else {
                 try s.append(z);
             }
         },
-        .html => {
-            for (z) |c| switch (c) {
-                '>' => try s.append("&gt;"),
-                '&' => try s.append("&amp;"),
-                '<' => try s.append("&lt;"),
-                '"' => try s.append("&quot;"),
-                '\'' => try s.append("&#39;"),
-                else => try s.append(&.{c}),
-            };
-        },
+        .html => try appendRuns(s, z, Escapes.htmlSpecial, p, Escapes.html),
         .tcl, .json => {
             try s.append("\"");
-            for (z) |c| switch (c) {
-                '"' => try s.append("\\\""),
-                '\\' => try s.append("\\\\"),
-                0x08 => try s.append("\\b"),
-                0x0c => try s.append("\\f"),
-                '\n' => try s.append("\\n"),
-                '\r' => try s.append("\\r"),
-                '\t' => try s.append("\\t"),
-                else => if (c < 0x20) {
-                    if (p.spec.text == .json) {
-                        try s.print("\\u{x:0>4}", .{c});
-                    } else {
-                        try s.print("\\{o:0>3}", .{c});
-                    }
-                } else try s.append(&.{c}),
-            };
+            try appendRuns(s, z, Escapes.jsonSpecial, p, Escapes.json);
             try s.append("\"");
         },
         else => try s.append(z),
@@ -636,7 +691,7 @@ fn renderValue(p: *Qrf, s: *Str, i_col: usize) Error!void {
             switch (p.spec.blob) {
                 .hex, .sql => {
                     if (p.spec.blob == .sql) try s.append("x'");
-                    for (a) |c| try s.append(&.{ hex_digits[c >> 4], hex_digits[c & 0xf] });
+                    xqlite.simd.hexEncode(try s.list.addManyAsSlice(s.gpa, 2 * a.len), a, false);
                     if (p.spec.blob == .sql) try s.append("'");
                 },
                 .tcl, .json => {

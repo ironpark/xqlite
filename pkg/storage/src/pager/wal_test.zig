@@ -89,6 +89,20 @@ test "wal: checksums match the reference algorithm" {
     try testing.expectEqual(@as(u64, 32 + 1048), wal_mod.frameOffset(2, 1024));
 }
 
+test "wal: vector checksums equal the word-by-word ones" {
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+    var data: [65536]u8 = undefined;
+    rand.bytes(&data);
+    const lens = [_]usize{ 8, 24, 40, 56, 64, 72, 120, 128, 136, 512, 1024, 4096, 4104, 65536 };
+    for (lens) |n| for ([_]std.builtin.Endian{ .big, .little }) |endian| {
+        const off = rand.uintLessThan(usize, data.len - n + 1) & ~@as(usize, 7);
+        const start: [2]u32 = .{ rand.int(u32), rand.int(u32) };
+        const a = data[off..][0..n];
+        try testing.expectEqual(wal_mod.checksumScalar(endian, a, start), wal_mod.checksumBytes(endian, a, start));
+    };
+}
+
 test "wal: write, read back and recover" {
     var mem = MemVfs.init(testing.allocator, testing.io);
     defer mem.deinit();

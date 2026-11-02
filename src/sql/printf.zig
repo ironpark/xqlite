@@ -1074,14 +1074,20 @@ pub fn vappendf(acc: *StrAccum, fmt: []const u8, args: Args) void {
                 var k: i64 = precision;
                 var i: usize = 0;
                 var n: usize = 0;
-                while (k != 0 and i < escarg.len) : ({
-                    i += 1;
-                    k -= 1;
-                }) {
-                    const ch = escarg[i];
-                    if (ch == q) n += 1;
-                    if (flag_altform2 and ch & 0xc0 == 0xc0) {
-                        while (i + 1 < escarg.len and escarg[i + 1] & 0xc0 == 0x80) i += 1;
+                if (k < 0 and !flag_altform2) {
+                    // All of it, so only the quotes need counting.
+                    i = escarg.len;
+                    n = std.mem.count(u8, escarg, &.{q});
+                } else {
+                    while (k != 0 and i < escarg.len) : ({
+                        i += 1;
+                        k -= 1;
+                    }) {
+                        const ch = escarg[i];
+                        if (ch == q) n += 1;
+                        if (flag_altform2 and ch & 0xc0 == 0xc0) {
+                            while (i + 1 < escarg.len and escarg[i + 1] & 0xc0 == 0x80) i += 1;
+                        }
                     }
                 }
                 if (flag_alternateform) {
@@ -1144,14 +1150,16 @@ pub fn vappendf(acc: *StrAccum, fmt: []const u8, args: Args) void {
                         }
                     }
                 } else {
-                    for (escarg[0..kk]) |ch| {
-                        z[j] = ch;
-                        j += 1;
-                        if (ch == q) {
-                            z[j] = ch;
-                            j += 1;
-                        }
+                    // Runs up to and with each quote, then the quote again.
+                    var rest = escarg[0..kk];
+                    while (std.mem.indexOfScalar(u8, rest, q)) |p| {
+                        @memcpy(z[j..][0 .. p + 1], rest[0 .. p + 1]);
+                        z[j + p + 1] = q;
+                        j += p + 2;
+                        rest = rest[p + 1 ..];
                     }
+                    @memcpy(z[j..][0..rest.len], rest);
+                    j += rest.len;
                 }
                 if (need_quote != 0) {
                     z[j] = '\'';

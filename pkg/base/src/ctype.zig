@@ -71,7 +71,9 @@ pub fn strICmp(a: []const u8, b: []const u8) i32 {
 /// ignoring ASCII case, stopping early at a NUL in `a`. Both slices must
 /// hold at least `n` bytes, except that a slice may end at its NUL.
 pub fn strNICmp(a: []const u8, b: []const u8, n: usize) i32 {
-    var i: usize = 0;
+    // Where both slices go on, sixteen bytes at a time.
+    const both = @min(n, a.len, b.len);
+    var i = @import("simd.zig").noCasePrefix(a[0..both], b[0..both]);
     while (i < n) : (i += 1) {
         const x = if (i < a.len) a[i] else 0;
         const y = if (i < b.len) b[i] else 0;

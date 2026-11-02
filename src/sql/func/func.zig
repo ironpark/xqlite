@@ -17,6 +17,7 @@ const printf = @import("../printf.zig");
 const numeric = @import("xqlite_base").numeric;
 const util = @import("../util.zig");
 const ctype = @import("xqlite_base").ctype;
+const simd = @import("xqlite_base").simd;
 const vi = @import("../../vdbe/vdbe_int.zig");
 const api = @import("../../vdbe/api.zig");
 const mem = @import("../../vdbe/mem.zig");
@@ -228,23 +229,8 @@ fn lengthFunc(ctx: *Context, argv: []*Mem) void {
         },
         SQLITE_TEXT => {
             const s = api.valueText(argv[0]) orelse return;
-            var z: [*:0]const u8 = s.ptr;
-            var z0: [*:0]const u8 = s.ptr;
-            while (true) {
-                // See tag-20260418-01.
-                if (z[0] -% 1 < 0x80 - 1) {
-                    z += 1;
-                } else if (z[0] == 0) {
-                    break;
-                } else {
-                    z += 1;
-                    while (z[0] & 0xc0 == 0x80) {
-                        z += 1;
-                        z0 += 1;
-                    }
-                }
-            }
-            api.resultInt64(ctx, @intCast(ptrDiff(z, z0)));
+            // Up to its first NUL, if it has one.
+            api.resultInt64(ctx, @intCast(simd.lengthChars(s)));
         },
         else => api.resultNull(ctx),
     }
@@ -330,21 +316,36 @@ fn instrFunc(ctx: *Context, argv: []*Mem) void {
             is_text = true;
         }
         if (needle == null or (n_haystack != 0 and haystack == null)) return api.resultErrorNomem(ctx);
-        const nd = needle.?;
-        const nn: usize = @intCast(n_needle);
-        const first_char = nd[0];
-        var h = haystack orelse nd;
-        while (n_needle <= n_haystack and (h[0] != first_char or !std.mem.eql(u8, h[0..nn], nd[0..nn]))) {
-            n += 1;
-            while (true) {
-                n_haystack -= 1;
-                h += 1;
-                if (!(is_text and h[0] & 0xc0 == 0x80)) break;
-            }
-        }
-        if (n_needle > n_haystack) n = 0;
+        const nd = needle.?[0..@intCast(n_needle)];
+        const hay = (haystack orelse nd.ptr)[0..@intCast(n_haystack)];
+        // C steps through the haystack a character at a time from its
+        // first byte, a character being a byte and the continuation bytes
+        // after it, and compares at each step. A needle that starts with
+        // anything but a continuation byte can only match at such a step,
+        // so the first match of the bytes is the one, and n is one more
+        // than the characters before it.
+        if (!is_text) {
+            n = if (firstMatch(hay, nd)) |at| @intCast(at + 1) else 0;
+        } else if (nd[0] & 0xc0 == 0x80) {
+            n = @intFromBool(std.mem.startsWith(u8, hay, nd));
+        } else if (firstMatch(hay, nd)) |at| {
+            n = if (at == 0) 1 else @intCast(1 + simd.countNonCont(hay[1 .. at + 1]));
+        } else n = 0;
     }
     api.resultInt(ctx, n);
+}
+
+/// The first offset of `needle` (not empty) in `hay`: its first byte found
+/// sixteen at a time, then compared there (std.mem.indexOf() compares at
+/// every offset of a short haystack, or builds a skip table each call).
+fn firstMatch(hay: []const u8, needle: []const u8) ?usize {
+    if (needle.len > hay.len) return null;
+    const last = hay.len - needle.len;
+    var at: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, hay[0 .. last + 1], at, needle[0])) |k| : (at = k + 1) {
+        if (std.mem.eql(u8, hay[k..][0..needle.len], needle)) return k;
+    }
+    return null;
 }
 
 /// The arguments of printf() after the format (PrintfArguments).
@@ -381,18 +382,16 @@ fn substrFunc(ctx: *Context, argv: []*Mem) void {
     var p1 = api.valueInt64(argv[1]);
     var len: i64 = 0;
     var z_blob: [*]const u8 = undefined;
-    var z_text: [*:0]const u8 = undefined;
+    // The walks below stop at its first NUL.
+    var text: []const u8 = undefined;
     if (p0type == SQLITE_BLOB) {
         len = @intCast(api.valueBytes(argv[0]));
         const b = api.valueBlob(argv[0]) orelse return;
         z_blob = b.ptr;
     } else {
         const t = api.valueText(argv[0]) orelse return;
-        z_text = t.ptr;
-        if (p1 < 0) {
-            var z2 = z_text;
-            while (z2[0] != 0) : (len += 1) skipUtf8(&z2);
-        }
+        text = t;
+        if (p1 < 0) len = @intCast(simd.countSkipUtf8(t[0 .. std.mem.indexOfScalar(u8, t, 0) orelse t.len]));
     }
     var p2: i64 = undefined;
     if (argv.len == 3) {
@@ -431,30 +430,12 @@ fn substrFunc(ctx: *Context, argv: []*Mem) void {
     }
     std.debug.assert(p1 >= 0 and p2 >= 0);
     if (p0type != SQLITE_BLOB) {
-        var z = z_text;
-        while (p1 > 0) : (p1 -= 1) {
-            // See tag-20260418-01.
-            if (z[0] -% 1 < 0x80 - 1) {
-                z += 1;
-            } else if (z[0] == 0) {
-                break;
-            } else {
-                z += 1;
-                while (z[0] & 0xc0 == 0x80) z += 1;
-            }
-        }
-        var z2 = z;
-        while (p2 > 0) : (p2 -= 1) {
-            if (z2[0] -% 1 < 0x80 - 1) {
-                z2 += 1;
-            } else if (z2[0] == 0) {
-                break;
-            } else {
-                z2 += 1;
-                while (z2[0] & 0xc0 == 0x80) z2 += 1;
-            }
-        }
-        api.resultText64(ctx, z[0..ptrDiff(z2, z)], .transient);
+        // See tag-20260418-01 for how the walks step over characters.
+        // No more characters than bytes (and p2 can be the largest i64,
+        // which a 32-bit usize does not hold).
+        const from = simd.skipChars(text, 0, @intCast(@min(p1, text.len)));
+        const to = simd.skipChars(text, from, @intCast(@min(p2, text.len)));
+        api.resultText64(ctx, text[from..to], .transient);
     } else {
         if (p1 >= len) {
             p1 = 0;
@@ -498,21 +479,21 @@ fn roundFunc(ctx: *Context, argv: []*Mem) void {
 }
 
 /// upperFunc() and lowerFunc(): ASCII-only case conversion.
-fn caseFunc(ctx: *Context, argv: []*Mem, comptime conv: fn (u8) u8) void {
+fn caseFunc(ctx: *Context, argv: []*Mem, comptime upper: bool) void {
     const z2 = api.valueText(argv[0]) orelse return;
     const n = z2.len;
     const z1 = contextMalloc(ctx, @as(i64, @intCast(n)) + 1) orelse return;
-    for (z2, 0..) |c, i| z1[i] = conv(c);
+    simd.asciiCase(z1[0..n], z2, upper);
     z1[n] = 0;
     api.resultTextZ(ctx, z1[0..n :0], .dynamic);
 }
 
 fn upperFunc(ctx: *Context, argv: []*Mem) void {
-    caseFunc(ctx, argv, ctype.toUpper);
+    caseFunc(ctx, argv, true);
 }
 
 fn lowerFunc(ctx: *Context, argv: []*Mem) void {
-    caseFunc(ctx, argv, ctype.toLower);
+    caseFunc(ctx, argv, false);
 }
 
 /// The PRNG shared by all connections (sqlite3Prng, global.prng):
@@ -670,7 +651,9 @@ const SQLITE_NOWILDCARDMATCH = 2;
 /// pattern `pattern`. `match_other` is the LIKE escape character, or '['
 /// for GLOB. Returns SQLITE_MATCH, SQLITE_NOMATCH or
 /// SQLITE_NOWILDCARDMATCH (no match in spite of wildcards).
-fn patternCompare(pattern: [*:0]const u8, string: [*:0]const u8, info: *const CompareInfo, match_other: u32) i32 {
+/// `end` is the address of the NUL that ends `string` (at or after its
+/// first NUL), so the search after a "*" can read ahead safely.
+fn patternCompare(pattern: [*:0]const u8, string: [*:0]const u8, end: usize, info: *const CompareInfo, match_other: u32) i32 {
     var z_pattern = pattern;
     var z_string = string;
     const match_one: u32 = info.match_one;
@@ -698,7 +681,7 @@ fn patternCompare(pattern: [*:0]const u8, string: [*:0]const u8, info: *const Co
                     // "[...]" right after "*": a slow recursive search.
                     std.debug.assert(match_other < 0x80);
                     while (z_string[0] != 0) {
-                        const b = patternCompare(z_pattern - 1, z_string, info, match_other);
+                        const b = patternCompare(z_pattern - 1, z_string, end, info, match_other);
                         if (b != SQLITE_NOMATCH) return b;
                         skipUtf8(&z_string);
                     }
@@ -709,20 +692,17 @@ fn patternCompare(pattern: [*:0]const u8, string: [*:0]const u8, info: *const Co
             // c is the first pattern character after the "*": look for it
             // (in either case if case-insensitive) and recurse from there.
             if (c < 0x80) {
-                var stop: [2]u8 = undefined;
-                var n_stop: usize = 1;
-                if (no_case) {
-                    stop = .{ ctype.toUpper(@intCast(c)), ctype.toLower(@intCast(c)) };
-                    n_stop = 2;
-                } else {
-                    stop[0] = @intCast(c);
-                }
+                // Either case if case-insensitive.
+                const stop: [2]u8 = if (no_case)
+                    .{ ctype.toUpper(@intCast(c)), ctype.toLower(@intCast(c)) }
+                else
+                    .{ @intCast(c), @intCast(c) };
                 while (true) {
-                    // strcspn()
-                    while (z_string[0] != 0 and std.mem.indexOfScalar(u8, stop[0..n_stop], z_string[0]) == null) z_string += 1;
+                    // strcspn(), sixteen bytes at a time.
+                    z_string += simd.indexOfAny2OrNul(z_string[0 .. end - @intFromPtr(z_string)], stop[0], stop[1]);
                     if (z_string[0] == 0) break;
                     z_string += 1;
-                    const b = patternCompare(z_pattern, z_string, info, match_other);
+                    const b = patternCompare(z_pattern, z_string, end, info, match_other);
                     if (b != SQLITE_NOMATCH) return b;
                 }
             } else {
@@ -730,7 +710,7 @@ fn patternCompare(pattern: [*:0]const u8, string: [*:0]const u8, info: *const Co
                     const c2 = utf8Read(&z_string);
                     if (c2 == 0) break;
                     if (c2 != c) continue;
-                    const b = patternCompare(z_pattern, z_string, info, match_other);
+                    const b = patternCompare(z_pattern, z_string, end, info, match_other);
                     if (b != SQLITE_NOMATCH) return b;
                 }
             }
@@ -784,7 +764,7 @@ fn patternCompare(pattern: [*:0]const u8, string: [*:0]const u8, info: *const Co
 pub fn strglob(pattern: ?[*:0]const u8, string: ?[*:0]const u8) i32 {
     const s = string orelse return @intFromBool(pattern != null);
     const p = pattern orelse return 1;
-    return patternCompare(p, s, &glob_info, '[');
+    return patternCompare(p, s, @intFromPtr(s) + std.mem.len(s), &glob_info, '[');
 }
 
 /// Port of sqlite3_strlike(): 0 if `string` matches the LIKE `pattern`
@@ -792,7 +772,7 @@ pub fn strglob(pattern: ?[*:0]const u8, string: ?[*:0]const u8) i32 {
 pub fn strlike(pattern: ?[*:0]const u8, string: ?[*:0]const u8, esc: u32) i32 {
     const s = string orelse return @intFromBool(pattern != null);
     const p = pattern orelse return 1;
-    return patternCompare(p, s, &like_info_norm, esc);
+    return patternCompare(p, s, @intFromPtr(s) + std.mem.len(s), &like_info_norm, esc);
 }
 
 /// likeFunc(): like(PATTERN, STRING[, ESCAPE]), which implements
@@ -830,7 +810,7 @@ fn likeFunc(ctx: *Context, argv: []*Mem, user_info: *const CompareInfo) void {
     const z_b = api.valueText(argv[0]);
     const z_a = api.valueText(argv[1]);
     if (z_a != null and z_b != null) {
-        api.resultInt(ctx, @intFromBool(patternCompare(z_b.?.ptr, z_a.?.ptr, info, escape) == SQLITE_MATCH));
+        api.resultInt(ctx, @intFromBool(patternCompare(z_b.?.ptr, z_a.?.ptr, @intFromPtr(z_a.?.ptr) + z_a.?.len, info, escape) == SQLITE_MATCH));
     }
 }
 
@@ -905,9 +885,6 @@ fn compileoptiongetFunc(ctx: *Context, argv: []*Mem) void {
     if (compileoptionGet(n)) |z| api.resultText(ctx, z, .static) else api.resultNull(ctx);
 }
 
-/// Nybbles to upper-case hex digits.
-const hexdigits = "0123456789ABCDEF";
-
 /// Port of sqlite3QuoteValue(): append the SQL literal for `value` to the
 /// empty `str`. With `escape`, control characters in text use unistr().
 pub fn quoteValue(str: *printf.StrAccum, value: *Mem, escape: bool) void {
@@ -924,10 +901,7 @@ pub fn quoteValue(str: *printf.StrAccum, value: *Mem, escape: bool) void {
             _ = str.enlarge(n_blob * 2 + 4);
             if (str.acc_error == 0) {
                 const z = str.buf;
-                for (0..n_blob) |i| {
-                    z[i * 2 + 2] = hexdigits[(blob[i] >> 4) & 0x0F];
-                    z[i * 2 + 3] = hexdigits[blob[i] & 0x0F];
-                }
+                simd.hexEncode(z[2..][0 .. n_blob * 2], blob[0..n_blob], true);
                 z[n_blob * 2 + 2] = '\'';
                 z[n_blob * 2 + 3] = 0;
                 z[0] = 'X';
@@ -1049,11 +1023,7 @@ fn hexFunc(ctx: *Context, argv: []*Mem) void {
     const blob = api.valueBlob(argv[0]) orelse "";
     const n = api.valueBytes(argv[0]);
     const z_hex = contextMalloc(ctx, @as(i64, @intCast(n)) * 2 + 1) orelse return;
-    for (0..n) |i| {
-        const c = blob[i];
-        z_hex[i * 2] = hexdigits[(c >> 4) & 0xf];
-        z_hex[i * 2 + 1] = hexdigits[c & 0xf];
-    }
+    simd.hexEncode(z_hex[0 .. n * 2], blob[0..n], true);
     z_hex[n * 2] = 0;
     api.resultTextZ(ctx, z_hex[0 .. n * 2 :0], .dynamic);
 }
@@ -1087,6 +1057,11 @@ fn unhexFunc(ctx: *Context, argv: []*Mem) void {
     var z_hex: [*:0]const u8 = hx.ptr;
     var p: usize = 0;
     outer: while (true) {
+        // Runs of hex digit pairs sixteen digits at a time.
+        const at = ptrDiff(z_hex, hx.ptr);
+        const used = simd.hexDecodeBlocks(blob[p..@intCast(n_hex / 2)], hx[at..n_hex]);
+        z_hex += used;
+        p += used / 2;
         var c = z_hex[0]; // most significant digit of the next byte
         if (c == 0) break;
         while (!ctype.isXdigit(c)) {
@@ -1142,8 +1117,17 @@ fn replaceFunc(ctx: *Context, argv: []*Mem) void {
     var i: i64 = 0;
     var j: usize = 0;
     while (i <= loop_limit) : (i += 1) {
-        const at: usize = @intCast(i);
-        if (z_str[at] != z_pattern[0] or !std.mem.eql(u8, z_str[at..][0..@intCast(n_pattern)], z_pattern)) {
+        // Copy the bytes before the next one that could start a match in
+        // one go (std's scalar search runs on vectors).
+        const limit: usize = @intCast(loop_limit + 1);
+        const next = std.mem.indexOfScalarPos(u8, z_str[0..limit], @intCast(i), z_pattern[0]) orelse limit;
+        const run = next - @as(usize, @intCast(i));
+        @memcpy(z_out[j..][0..run], z_str[@intCast(i)..next]);
+        j += run;
+        i = @intCast(next);
+        if (next == limit) break;
+        const at: usize = next;
+        if (!std.mem.eql(u8, z_str[at..][0..@intCast(n_pattern)], z_pattern)) {
             z_out[j] = z_str[at];
             j += 1;
         } else {

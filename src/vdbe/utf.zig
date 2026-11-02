@@ -5,6 +5,7 @@
 //! to UTF-8 when the engine reads them again.
 
 const std = @import("std");
+const simd = @import("xqlite_base").simd;
 const vi = @import("vdbe_int.zig");
 const utf8_trans1 = @import("../sql/func/func.zig").utf8_trans1;
 
@@ -32,6 +33,13 @@ pub fn translate(in: []const u8, from: u8, desired: u8, out: []u8) usize {
     if (from == ENC.UTF8) {
         // READ_UTF8, WRITE_UTF16LE/BE.
         while (i < in.len) {
+            if (in[i] < 0x80) {
+                // A run of ASCII, sixteen bytes at a time.
+                const run = simd.asciiToUtf16(in[i..], out[o..], desired == ENC.UTF16BE);
+                i += run;
+                o += 2 * run;
+                if (i == in.len) break;
+            }
             var c: u32 = in[i];
             i += 1;
             if (c >= 0xc0) {
@@ -74,6 +82,13 @@ pub fn translate(in: []const u8, from: u8, desired: u8, out: []u8) usize {
     const big = from == ENC.UTF16BE;
     const n = in.len & ~@as(usize, 1);
     while (i < n) {
+        if (unit(in, i, big) < 0x80) {
+            // A run of units below 0x80, sixteen at a time.
+            const run = simd.utf16ToAscii(in[i..n], out[o..], big);
+            i += run;
+            o += run / 2;
+            if (i == n) break;
+        }
         var c: u32 = unit(in, i, big);
         i += 2;
         if (c >= 0xd800 and c < 0xe000) {
@@ -131,4 +146,56 @@ test "utf: UTF-8 to UTF-16 and back" {
     // A lone continuation byte and an encoded surrogate read as U+FFFD.
     const n = translate("\xc3\xed\xa0\x80", ENC.UTF8, ENC.UTF16LE, &buf16);
     try std.testing.expectEqualSlices(u8, &.{ 0xfd, 0xff, 0xfd, 0xff }, buf16[0..n]);
+}
+
+test "utf: the ASCII runs translate as the character loop does" {
+    const testing = std.testing;
+    var prng = std.Random.DefaultPrng.init(0x7f16);
+    const rand = prng.random();
+    const pool = [_]u8{ 'a', 'Z', 0, 0x7f, 0x80, 0xbf, 0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xed, 0xa0, 0xf0, 0x9f, 0xff };
+    var in: [600]u8 = undefined;
+    var got: [1300]u8 = undefined;
+    var want: [1300]u8 = undefined;
+    for (0..1500) |round| {
+        const n = rand.uintLessThan(usize, in.len / 2) * 2;
+        // Mostly ASCII, so that runs of sixteen occur.
+        for (in[0..n]) |*b| b.* = if (rand.uintLessThan(u8, 8) != 0) rand.intRangeAtMost(u8, 0x20, 0x7e) else pool[rand.uintLessThan(usize, pool.len)];
+        const z = in[0..n];
+        if (round % 2 == 0) {
+            // UTF-8 to UTF-16: pieces shorter than sixteen bytes, cut only
+            // before a byte that is no continuation byte.
+            inline for (.{ ENC.UTF16LE, ENC.UTF16BE }) |enc| {
+                const g = translate(z, ENC.UTF8, enc, &got);
+                var w: usize = 0;
+                var start: usize = 0;
+                var i: usize = 1;
+                while (i <= n) : (i += 1) {
+                    if (i == n or (z[i] & 0xc0 != 0x80 and i - start >= 1 + rand.uintLessThan(usize, 15))) {
+                        w += translate(z[start..i], ENC.UTF8, enc, want[w..]);
+                        start = i;
+                    }
+                }
+                try testing.expectEqualSlices(u8, want[0..w], got[0..g]);
+            }
+        } else {
+            // UTF-16 to UTF-8: pieces under sixteen units, cut only where
+            // a unit does not pair with the one before it.
+            inline for (.{ ENC.UTF16LE, ENC.UTF16BE }) |enc| {
+                const big = enc == ENC.UTF16BE;
+                const g = translate(z, enc, ENC.UTF8, &got);
+                var w: usize = 0;
+                var start: usize = 0;
+                var i: usize = 0;
+                while (i < n) {
+                    const c = unit(z, i, big);
+                    i += if (c >= 0xd800 and c < 0xe000 and i + 2 < n) 4 else 2;
+                    if (i >= n or i - start >= 2 * (1 + rand.uintLessThan(usize, 15))) {
+                        w += translate(z[start..@min(i, n)], enc, ENC.UTF8, want[w..]);
+                        start = @min(i, n);
+                    }
+                }
+                try testing.expectEqualSlices(u8, want[0..w], got[0..g]);
+            }
+        }
+    }
 }

@@ -25,6 +25,7 @@
 //!   tests, the fuzzers and incremental blob I/O.
 
 const std = @import("std");
+const simd = @import("xqlite_base").simd;
 const corrupt = @import("corrupt.zig").corrupt;
 const varint = @import("varint.zig");
 const btree = @import("btree/btree.zig");
@@ -364,11 +365,11 @@ fn compareValues(lhs: Value, t: u64, rhs: Value) Order {
         },
         .text => |rs| return switch (lhs) {
             .null, .int, .real => .lt,
-            .text => |ls| std.mem.order(u8, ls, rs),
+            .text => |ls| simd.order(ls, rs),
             .blob => .gt,
         },
         .blob => |rb| return switch (lhs) {
-            .blob => |lb| std.mem.order(u8, lb, rb),
+            .blob => |lb| simd.order(lb, rb),
             else => .lt,
         },
         .null => return switch (lhs) {
@@ -379,24 +380,11 @@ fn compareValues(lhs: Value, t: u64, rhs: Value) Order {
 }
 
 /// memcmp() of two slices of the same length: the difference of the
-/// first differing bytes, or 0. Compares eight bytes at a time.
+/// first differing bytes, or 0.
 pub fn memcmp(a: []const u8, b: []const u8) i32 {
     std.debug.assert(a.len == b.len);
-    const n = a.len;
-    var i: usize = 0;
-    while (i + 8 <= n) : (i += 8) {
-        const x = std.mem.readInt(u64, a[i..][0..8], .big);
-        const y = std.mem.readInt(u64, b[i..][0..8], .big);
-        if (x != y) {
-            // The first differing byte is the highest one in big-endian.
-            const shift: u6 = @intCast(56 - (@clz(x ^ y) & ~@as(u7, 7)));
-            return @as(i32, @as(u8, @truncate(x >> shift))) - @as(u8, @truncate(y >> shift));
-        }
-    }
-    while (i < n) : (i += 1) {
-        if (a[i] != b[i]) return @as(i32, a[i]) - b[i];
-    }
-    return 0;
+    const k = simd.firstDiff(a, b) orelse return 0;
+    return @as(i32, a[k]) - b[k];
 }
 
 /// Port of sqlite3IntFloatCompare(): order of an integer relative to a

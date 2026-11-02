@@ -164,7 +164,7 @@ pub fn writeText(o: *Out, t: Type, v: Value) !void {
         const b = v.blob;
         try o.int(i32, @intCast(2 + 2 * b.len));
         try o.bytes("\\x");
-        try o.print("{x}", .{b});
+        xqlite.simd.hexEncode(try o.buf.addManyAsSlice(o.gpa, 2 * b.len), b, false);
         return;
     };
     try o.field(z);
@@ -723,8 +723,14 @@ fn parseFloat(z0: []const u8) ?f64 {
 fn decodeBytea(a: std.mem.Allocator, z: []const u8) DecodeError![]const u8 {
     if (std.mem.startsWith(u8, z, "\\x")) {
         var out: std.ArrayList(u8) = .empty;
+        try out.ensureTotalCapacity(a, z.len / 2);
         var i: usize = 2;
         while (i < z.len) {
+            // Runs of digit pairs sixteen digits at a time.
+            const used = xqlite.simd.hexDecodeBlocks(out.unusedCapacitySlice(), z[i..]);
+            out.items.len += used / 2;
+            i += used;
+            if (i >= z.len) break;
             if (std.ascii.isWhitespace(z[i])) {
                 i += 1;
                 continue;
@@ -802,6 +808,10 @@ test "decode parameters" {
     try t.expectEqual(@as(i64, 1), (try decodeText(a, .{ .logical = .boolean }, "yes")).integer);
     try t.expectEqual(@as(i64, 0), (try decodeText(a, .{ .logical = .boolean }, "F")).integer);
     try t.expectEqualSlices(u8, "\x01\xab", (try decodeText(a, .{ .logical = .bytes }, "\\x01AB")).blob);
+    // Blocks of sixteen digits, whitespace between pairs, an odd tail.
+    try t.expectEqualSlices(u8, "\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff\x01\x23", (try decodeText(a, .{ .logical = .bytes }, "\\x00112233445566778899AaBbCcDdEeFf 01 23")).blob);
+    try t.expectError(error.InvalidText, decodeText(a, .{ .logical = .bytes }, "\\x00112233445566778899aabbccddeeff0"));
+    try t.expectError(error.InvalidText, decodeText(a, .{ .logical = .bytes }, "\\x0011223344556677889g"));
     try t.expectEqualSlices(u8, "a\\\x07", (try decodeText(a, .{ .logical = .bytes }, "a\\\\\\007")).blob);
     try t.expectEqualStrings("1.50", (try decodeText(a, .{ .logical = .numeric }, "1.50")).text);
     try t.expectEqual(@as(i64, -2), (try decodeBinary(a, oid.int2, "\xff\xfe")).integer);

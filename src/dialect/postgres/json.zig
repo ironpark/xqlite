@@ -17,6 +17,7 @@
 //! `@>`), PostgreSQL's text[] literals (parseTextArray(), '{a,b}').
 
 const std = @import("std");
+const simd = @import("xqlite_base").simd;
 const json_text = @import("../json_text.zig");
 const bin = @import("../jsonb.zig");
 const Allocator = std.mem.Allocator;
@@ -627,7 +628,7 @@ fn keyLess(_: void, x: Pair, y: Pair) bool {
 /// jsonb's order of keys: shorter first, then by bytes.
 pub fn keyOrder(x: []const u8, y: []const u8) std.math.Order {
     if (x.len != y.len) return std.math.order(x.len, y.len);
-    return std.mem.order(u8, x, y);
+    return simd.order(x, y);
 }
 
 /// Make `v` a jsonb value: keys sorted, duplicates removed (the last one
@@ -858,7 +859,7 @@ fn absCompare(x: []const u8, y: []const u8) std.math.Order {
     const ix = std.mem.indexOfScalar(u8, x, '.') orelse x.len;
     const iy = std.mem.indexOfScalar(u8, y, '.') orelse y.len;
     if (ix != iy) return std.math.order(ix, iy);
-    const o = std.mem.order(u8, x[0..ix], y[0..iy]);
+    const o = simd.order(x[0..ix], y[0..iy]);
     if (o != .eq) return o;
     const fx = if (ix < x.len) x[ix + 1 ..] else "";
     const fy = if (iy < y.len) y[iy + 1 ..] else "";
@@ -894,7 +895,7 @@ pub fn compare(x: Value, y: Value) std.math.Order {
         .null => return .eq,
         .bool => |b| return std.math.order(@intFromBool(b), @intFromBool(y.v.bool)),
         .number => |n| return numCompare(n, y.v.number),
-        .string => |s| return std.mem.order(u8, s, y.v.string),
+        .string => |s| return simd.order(s, y.v.string),
         .array => |items| {
             const other = y.v.array;
             if (items.len != other.len) return std.math.order(items.len, other.len);
@@ -908,7 +909,7 @@ pub fn compare(x: Value, y: Value) std.math.Order {
             const other = y.v.object;
             if (pairs.len != other.len) return std.math.order(pairs.len, other.len);
             for (pairs, other) |p, q| {
-                var o = std.mem.order(u8, p.key, q.key);
+                var o = simd.order(p.key, q.key);
                 if (o != .eq) return o;
                 o = compare(p.value, q.value);
                 if (o != .eq) return o;

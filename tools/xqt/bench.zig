@@ -30,6 +30,8 @@ const Needs = enum {
     filled,
     /// The column-heavy tables w and o.
     wide,
+    /// The table s of long text (mostly ASCII, some UTF-8) and JSON.
+    text,
 };
 
 const Workload = struct {
@@ -72,6 +74,15 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     }
     const fill2 = try std.fmt.allocPrint(arena, "CREATE TABLE w({s}); CREATE TABLE o(a INTEGER PRIMARY KEY, b BLOB, c INT); BEGIN; WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i<{d}) INSERT INTO w SELECT {s} FROM r; WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i<{d}) INSERT INTO o SELECT i, zeroblob(6000), i FROM r; COMMIT;", .{ wcols.written(), rows / 2, wvals.written(), rows / 100 });
 
+    // Long text and JSON, for the text functions, LIKE and the JSON
+    // parser: a tenth of the rows, 'needle' in one row of a hundred.
+    const fill3 = try std.fmt.allocPrint(arena, "CREATE TABLE s(a INTEGER PRIMARY KEY, s TEXT, j TEXT); BEGIN; WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i<{d}) INSERT INTO s SELECT i, 'Row ' || i || ' ' || printf('%.200c', 'x') || ' é한글 ' || CASE WHEN i%100=0 THEN 'needle' ELSE 'hay' END, json_object('n', i, 'pad', printf('%.300c', 'p'), 'tag', 't' || i) FROM r; COMMIT;", .{@max(rows / 10, 1)});
+    // Commits in WAL mode: every page written goes through the frame
+    // checksum.
+    var wal_sql: Io.Writer.Allocating = .init(arena);
+    try wal_sql.writer.writeAll("PRAGMA journal_mode=WAL; CREATE TABLE t(a INTEGER PRIMARY KEY, b BLOB);");
+    for (0..200) |k| try wal_sql.writer.print(" BEGIN; WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM r WHERE i<500) INSERT INTO t(b) SELECT zeroblob(400) FROM r; UPDATE t SET b=zeroblob(300) WHERE a%{d}=0; COMMIT;", .{k % 7 + 2});
+
     const workloads = [_]Workload{
         .{ .name = "insert", .needs = .empty, .sql = fill },
         .{ .name = "index", .needs = .filled, .sql = "CREATE INDEX tb ON t(b);" },
@@ -87,6 +98,11 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         .{ .name = "window", .needs = .filled, .sql = "SELECT sum(r) FROM (SELECT row_number() OVER (PARTITION BY b ORDER BY a) r FROM t);" },
         .{ .name = "wide", .needs = .wide, .sql = "SELECT sum(c20), sum(c19) FROM w;" },
         .{ .name = "overflow", .needs = .wide, .sql = "SELECT sum(length(b)), sum(c) FROM o;" },
+        .{ .name = "textfn", .needs = .text, .sql = "SELECT sum(length(s)), sum(length(upper(s))), sum(instr(s, 'needle')), sum(length(replace(s, 'é', 'e'))), sum(length(substr(s, 100, 50))), sum(length(substr(s, -20))) FROM s;" },
+        .{ .name = "like", .needs = .text, .sql = "SELECT count(*), sum(s LIKE '%NEEDLE%'), sum(s GLOB '*needle') FROM s WHERE s LIKE '%needle%' OR a%2=0;" },
+        .{ .name = "hex", .needs = .text, .sql = "SELECT sum(length(hex(s))), sum(length(unhex(hex(j)))) FROM s;" },
+        .{ .name = "jsonparse", .needs = .text, .sql = "SELECT sum(json_extract(j, '$.n')), sum(length(j ->> '$.tag')), sum(json_valid(j)) FROM s;" },
+        .{ .name = "wal", .needs = .empty, .sql = wal_sql.written() },
     };
 
     const dir = try std.fmt.allocPrint(arena, "{s}/bench", .{cfg.tmp});
@@ -97,9 +113,9 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
     }
     var b: Bench = .{ .gpa = gpa, .arena = arena, .io = io, .cfg = cfg, .out = out, .dir = dir, .runs = runs };
 
-    // The two starting databases, built by sqlite3 at once.
-    var setups = [_]Setup{ .{ .b = &b, .db = "base.db", .sql = fill }, .{ .b = &b, .db = "base2.db", .sql = fill2 } };
-    xqt.pool.forEach(2, setups.len, &setups, Setup.run);
+    // The starting databases, built by sqlite3 at once.
+    var setups = [_]Setup{ .{ .b = &b, .db = "base.db", .sql = fill }, .{ .b = &b, .db = "base2.db", .sql = fill2 }, .{ .b = &b, .db = "base3.db", .sql = fill3 } };
+    xqt.pool.forEach(3, setups.len, &setups, Setup.run);
     for (setups) |s| if (s.err) |e| {
         try out.print("xqt bench: {s}: {s}\n", .{ s.db, e });
         return 1;
@@ -126,7 +142,7 @@ const Setup = struct {
     sql: []const u8,
     err: ?[]const u8 = null,
 
-    fn run(setups: *[2]Setup, i: usize) void {
+    fn run(setups: *[3]Setup, i: usize) void {
         const s = &setups[i];
         s.err = s.b.sqlite3(s.db, s.sql) catch |err| @errorName(err);
     }
@@ -172,6 +188,7 @@ const Bench = struct {
                 .empty => null,
                 .filled => "base.db",
                 .wide => "base2.db",
+                .text => "base3.db",
             };
             if (from) |f| {
                 const src = try std.fs.path.join(b.arena, &.{ b.dir, f });

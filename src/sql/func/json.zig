@@ -25,6 +25,7 @@ const numeric = @import("xqlite_base").numeric;
 const util = @import("../util.zig");
 const func = @import("func.zig");
 const ctype = @import("xqlite_base").ctype;
+const simd = @import("xqlite_base").simd;
 const vi = @import("../../vdbe/vdbe_int.zig");
 const api = @import("../../vdbe/api.zig");
 const vtab = @import("../vtab.zig");
@@ -112,6 +113,23 @@ const json_is_ok: [256]bool = blk: {
     t['\\'] = false;
     break :blk t;
 };
+
+/// Bytes at the start of `z` that json_is_ok[] passes (with `quote_ok`,
+/// '\'' passes too), sixteen at a time: the scan for the end of a run of
+/// plain string characters in the parser, the validity check and the
+/// string writers.
+fn okLen(z: []const u8, comptime quote_ok: bool) usize {
+    const P = struct {
+        const sp = simd.splat;
+        fn special(v: simd.Bytes) simd.Mask {
+            return (v < sp(0x20)) | (v == sp('"')) | (v == sp('\\'));
+        }
+        fn specialOrQuote(v: simd.Bytes) simd.Mask {
+            return special(v) | (v == sp('\''));
+        }
+    };
+    return simd.indexOfPred(z, if (quote_ok) P.special else P.specialOrQuote);
+}
 
 /// Magic number of the JSON parse cache in sqlite3_get_auxdata()
 /// (JSON_CACHE_ID).
@@ -620,30 +638,7 @@ fn jsonAppendString(p: *JsonString, z_in: ?[]const u8) void {
     p.buf()[@intCast(p.n_used)] = '"';
     p.n_used += 1;
     while (true) {
-        var k: u32 = 0;
-        // The 4-way unwound equivalent of
-        //     while (k < n and json_is_ok[z[k]]) k += 1;
-        while (true) {
-            if (k + 3 >= n) {
-                while (k < n and json_is_ok[z[k]]) k += 1;
-                break;
-            }
-            if (!json_is_ok[z[k]]) break;
-            if (!json_is_ok[z[k + 1]]) {
-                k += 1;
-                break;
-            }
-            if (!json_is_ok[z[k + 2]]) {
-                k += 2;
-                break;
-            }
-            if (!json_is_ok[z[k + 3]]) {
-                k += 3;
-                break;
-            } else {
-                k += 4;
-            }
-        }
+        const k: u32 = @intCast(okLen(z[0..n], false));
         if (k >= n) {
             if (k > 0) {
                 @memcpy(p.buf()[@intCast(p.n_used)..][0..k], z[0..k]);
@@ -1167,11 +1162,8 @@ fn jsonbValidityCheck(parse: *const JsonParse, i: u32, i_end: u32, i_depth: u32)
         JSONB.TEXT => {
             j = i + n;
             k = j + sz;
-            while (j < k) {
-                if (!json_is_ok[z[j]] and z[j] != '\'') return j + 1;
-                j += 1;
-            }
-            return 0;
+            j += @intCast(okLen(z[j..k], true));
+            return if (j < k) j + 1 else 0;
         },
         JSONB.TEXTJ, JSONB.TEXT5 => {
             j = i + n;
@@ -1376,16 +1368,10 @@ fn jsonParseString(parse: *JsonParse, i: u32, opcode_arg: u8) i32 {
     const c_delim = z[i];
     var j: u32 = i + 1;
     while (true) {
-        if (json_is_ok[z[j]]) {
-            if (!json_is_ok[z[j + 1]]) {
-                j += 1;
-            } else if (!json_is_ok[z[j + 2]]) {
-                j += 2;
-            } else {
-                j += 3;
-                continue;
-            }
-        }
+        // The text ends in a NUL at z[n_json], which the code below stops
+        // at; a plain byte past n_json would go one at a time as before.
+        const n: u32 = @intCast(parse.n_json);
+        if (j < n) j += @intCast(okLen(z[j..n], false));
         var c = z[j];
         if (c == c_delim) {
             break;
@@ -1921,8 +1907,7 @@ fn jsonTranslateBlobToText(parse: *JsonParse, i: u32, out: *JsonString) u32 {
                 var sz2 = sz;
                 jsonAppendChar(out, '"');
                 while (sz2 > 0) {
-                    var k: u32 = 0;
-                    while (k < sz2 and (json_is_ok[z_in[k]] or z_in[k] == '\'')) k += 1;
+                    const k: u32 = @intCast(okLen(z_in[0..sz2], true));
                     if (k > 0) {
                         jsonAppendRawNZ(out, z_in[0..k]);
                         if (k >= sz2) break;
@@ -4682,4 +4667,21 @@ test "json: json_each errors and registration" {
     try c.exec("CREATE TABLE obj(x)");
     try c.expectError("SELECT key FROM json_tree(obj.x) LEFT JOIN obj", "table-function argument references tables to its right");
     try c.expectError("CREATE VIRTUAL TABLE v USING json_each", "no such module: json_each");
+}
+
+test "json: the vector scan of plain string bytes stops where json_is_ok does" {
+    var prng = std.Random.DefaultPrng.init(0x15);
+    const rand = prng.random();
+    var buf: [300]u8 = undefined;
+    for (0..2000) |_| {
+        const n = rand.uintLessThan(usize, buf.len);
+        for (buf[0..n]) |*b| b.* = rand.intRangeAtMost(u8, 0x20, 0xff);
+        // Now and then one special byte somewhere.
+        if (n > 0 and rand.boolean()) buf[rand.uintLessThan(usize, n)] = "\"'\\\x00\x1f"[rand.uintLessThan(usize, 5)];
+        inline for (.{ false, true }) |quote_ok| {
+            var k: usize = 0;
+            while (k < n and (json_is_ok[buf[k]] or (quote_ok and buf[k] == '\''))) k += 1;
+            try std.testing.expectEqual(k, okLen(buf[0..n], quote_ok));
+        }
+    }
 }

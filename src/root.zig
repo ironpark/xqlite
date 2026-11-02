@@ -57,6 +57,9 @@ comptime {
 }
 
 pub const varint = @import("xqlite_storage").varint;
+/// Byte loops sixteen bytes at a time (hex digits, searches) that the
+/// wire servers and the shell share with the engine.
+pub const simd = @import("xqlite_base").simd;
 
 pub const vfs = @import("xqlite_vfs").vfs;
 pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;

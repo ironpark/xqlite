@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// WebAssembly SIMD (simd128) for the wasm32 targets this build picks
+/// itself, so the @Vector loops (WAL checksums, JSON and UTF-8 scans)
+/// compile to vector instructions there instead of being scalarized.
+const wasm_simd = std.Target.wasm.featureSet(&.{.simd128});
+
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
 // executed by an external runner. The functions in `std.Build` implement a DSL
@@ -199,7 +204,9 @@ pub fn build(b: *std.Build) void {
     // otherwise. `zig build wasm-example` runs examples/wasm/node.mjs
     // with it. docs/wasm.md.
     const wasm_optimize = b.option(std.builtin.OptimizeMode, "wasm-optimize", "zig build wasm: optimization mode (default small)") orelse .small;
-    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    // -Dwasm-simd=false for runtimes without WebAssembly SIMD.
+    const wasm_features = if (b.option(bool, "wasm-simd", "zig build wasm, test-wasi: use WebAssembly SIMD (default true)") orelse true) wasm_simd else std.Target.Cpu.Feature.Set.empty;
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding, .cpu_features_add = wasm_features });
     const wasm_lib = b.addExecutable(.{
         .name = "xqlite",
         .root_module = b.createModule(.{
@@ -351,7 +358,7 @@ pub fn build(b: *std.Build) void {
     // wasm32-wasi and run under wasmtime, then `xqt wasi`, which runs an
     // xqlite built for wasm32-wasi (ReleaseSafe) against sqlite3 and this
     // native build. Needs wasmtime on PATH. docs/wasm.md.
-    const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi, .cpu_features_add = wasm_features });
     const wasi_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = wasi_target,

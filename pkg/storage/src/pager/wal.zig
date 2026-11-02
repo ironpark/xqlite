@@ -43,6 +43,7 @@ const builtin = @import("builtin");
 const vfs = @import("xqlite_vfs").vfs;
 const pcache = @import("pcache.zig");
 const thunk = @import("xqlite_base").thunk;
+const simd = @import("xqlite_base").simd;
 const journal = @import("journal.zig");
 
 const Allocator = std.mem.Allocator;
@@ -254,8 +255,64 @@ fn hdrEql(a: *const IndexHdr, b: *const IndexHdr) bool {
 
 /// Port of walChecksumBytes(): extend the checksum `in` over `a`, read as
 /// 32-bit words in byte order `endian`. `a.len` is a multiple of 8.
+///
+/// Each step (s1 += x + s2; s2 += y + s1) depends on the one before, but
+/// it is linear modulo 2^32: over a block of `cksum_words` words the new
+/// state is a fixed 2x2 matrix times the old one plus a fixed weighted sum
+/// of the words. So whole blocks go as two vector multiply-and-sums, and
+/// only the tail goes word pair by word pair (checksumScalar()).
 pub fn checksumBytes(endian: std.builtin.Endian, a: []const u8, in: [2]u32) [2]u32 {
     std.debug.assert(a.len >= 8 and a.len % 8 == 0 and a.len <= 65536);
+    const block = cksum_words * 4;
+    var s = in;
+    var i: usize = 0;
+    while (i + block <= a.len) : (i += block) {
+        var v = simd.loadAs(CksumVec, a[i..][0..block]);
+        if (endian != native_endian) v = @byteSwap(v);
+        const r1 = @reduce(.Add, v *% cksum_weights.w1);
+        const r2 = @reduce(.Add, v *% cksum_weights.w2);
+        const m = cksum_weights.m;
+        // Both from the old state (an aggregate assigned to `s` in place
+        // would see the new s[0] in the second line).
+        const s1 = m[0][0] *% s[0] +% m[0][1] *% s[1] +% r1;
+        const s2 = m[1][0] *% s[0] +% m[1][1] *% s[1] +% r2;
+        s = .{ s1, s2 };
+    }
+    return if (i < a.len) checksumScalar(endian, a[i..], s) else s;
+}
+
+/// Words in one vector block of checksumBytes() (an even number).
+const cksum_words = 32;
+const CksumVec = @Vector(cksum_words, u32);
+
+/// The block step of checksumBytes(): `m` maps the incoming state to the
+/// outgoing one, and word j of the block adds w1[j] to s1 and w2[j] to s2.
+/// Found by running checksumScalar() on unit inputs, since it is linear.
+const CksumWeights = struct { m: [2][2]u32, w1: CksumVec, w2: CksumVec };
+const cksum_weights: CksumWeights = blk: {
+    @setEvalBranchQuota(100_000);
+    var r: CksumWeights = undefined;
+    const zero: [cksum_words * 4]u8 = @splat(0);
+    const e1 = checksumScalar(native_endian, &zero, .{ 1, 0 });
+    const e2 = checksumScalar(native_endian, &zero, .{ 0, 1 });
+    r.m = .{ .{ e1[0], e2[0] }, .{ e1[1], e2[1] } };
+    var w1: [cksum_words]u32 = undefined;
+    var w2: [cksum_words]u32 = undefined;
+    for (0..cksum_words) |j| {
+        var unit = zero;
+        std.mem.writeInt(u32, unit[j * 4 ..][0..4], 1, native_endian);
+        const c = checksumScalar(native_endian, &unit, .{ 0, 0 });
+        w1[j] = c[0];
+        w2[j] = c[1];
+    }
+    r.w1 = w1;
+    r.w2 = w2;
+    break :blk r;
+};
+
+/// walChecksumBytes() as written: one pair of words at a time. The tail
+/// of checksumBytes(), and the reference the tests check it against.
+pub fn checksumScalar(endian: std.builtin.Endian, a: []const u8, in: [2]u32) [2]u32 {
     var s1 = in[0];
     var s2 = in[1];
     var i: usize = 0;

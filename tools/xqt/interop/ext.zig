@@ -124,9 +124,11 @@ const pg: Spec = .{
     \\CREATE INDEX doc_span2 ON doc ((span + interval '1 day'));
     \\CREATE INDEX doc_nums1 ON doc ((nums[1]));
     \\CREATE INDEX doc_seen ON doc ((seen + 7));
+    \\CREATE INDEX doc_price ON doc (price);
+    \\CREATE INDEX doc_price2 ON doc ((price * 2 + 1));
     \\CREATE INDEX doc_path ON doc ((body #>> '{a,b}'));
     \\CREATE INDEX doc_contains ON doc ((body @> '{"kind":"a"}'), (tags && '{x,c}'));
-    \\CREATE VIEW doc_v AS SELECT id, body -> 'kind' AS kind_json, body @> '{"kind":"a"}' AS is_a, tags[1] AS tag1, array_length(nums, 1) AS n, span * 2 AS span2, price / 3 AS third, left(name, 2) AS l2, seen + interval '1 month' AS next_month, jsonb_typeof(body) AS t, 7 / 2 AS idiv, name ILIKE 'A%' AS ia, jsonb_set(body, '{z}', '5') AS z5 FROM doc;
+    \\CREATE VIEW doc_v AS SELECT id, body -> 'kind' AS kind_json, body @> '{"kind":"a"}' AS is_a, tags[1] AS tag1, array_length(nums, 1) AS n, (span * 2)::text AS span2, (price / 3)::text AS third, left(name, 2) AS l2, seen + interval '1 month' AS next_month, jsonb_typeof(body) AS t, 7 / 2 AS idiv, name ILIKE 'A%' AS ia, jsonb_set(body, '{z}', '5') AS z5 FROM doc;
     \\CREATE VIEW doc_order AS SELECT id FROM doc ORDER BY body, span, tags, nums, id;
     \\CREATE VIEW kinds AS SELECT kind, count(*) AS n, array_agg(id ORDER BY id) AS ids, jsonb_agg(body ORDER BY id) AS bodies, string_agg(name, ',' ORDER BY name) AS names FROM doc GROUP BY kind;
     \\INSERT INTO doc (k, body, tags, nums, span, price, name, title, seen, at, pat) VALUES
@@ -135,17 +137,24 @@ const pg: Spec = .{
     \\ (5, '{"kind":"a"}', DEFAULT, '{}', '1 year 2 mons 3 days 04:05:06.5', 1.25, 'mm', NULL, '2000-01-01', NULL, NULL),
     \\ (7, '{"kind":"c","a":{"b":"y"}}', '{c}', '{-1,5}', '00:00:30', 99.99, 'q', 't', '1999-12-31', '1999-12-31 12:00:00+00', 'pp');
     \\INSERT INTO item (doc_id, note) VALUES (1, 'n1'), (1, 'n2'), (2, 'n3');
+    \\CREATE TABLE tok (u uuid PRIMARY KEY DEFAULT gen_random_uuid(), v uuid UNIQUE CHECK (v <> '00000000-0000-0000-0000-000000000000'), t uuid DEFAULT uuidv7());
+    \\CREATE INDEX tok_text ON tok ((v::text));
+    \\INSERT INTO tok (v) VALUES ('A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'), ('{11111111111111111111111111111111}');
     \\
     ,
     .reads =
     \\PRAGMA integrity_check;
-    \\SELECT * FROM doc_v ORDER BY id;
+    \\SELECT id, json(kind_json), is_a, tag1, n, span2, third, l2, next_month, t, idiv, ia, json(z5) FROM doc_v ORDER BY id;
     \\SELECT * FROM kinds ORDER BY kind;
     \\SELECT id, kind, half, tags, active FROM doc ORDER BY id;
-    \\SELECT id FROM doc INDEXED BY doc_span2 WHERE xq_pg_interval_pl(span, xq_pg_interval('1 day')) > xq_pg_interval('1 day') ORDER BY id;
+    \\SELECT id FROM doc INDEXED BY doc_span2 WHERE xq_pg_iv_interval_pl(span, xq_pg_iv('1 day')) > xq_pg_iv_high('1 day') ORDER BY id;
     \\SELECT id FROM doc INDEXED BY doc_kind WHERE xq_pg_jsonb_get_text(body, 'kind') = 'a' ORDER BY id;
+    \\SELECT id, xq_dec_text(price, 2) FROM doc INDEXED BY doc_price WHERE price > xq_dec_key('1.25') AND price <= xq_dec_key(99.99) ORDER BY price;
+    \\SELECT id FROM doc INDEXED BY doc_price2 WHERE xq_dec_key(xq_dec_add(xq_dec_mul(xq_dec(price, 1000, 2), 2), 1)) = xq_dec_key(22) ORDER BY id;
     \\SELECT doc_id, id, note FROM item ORDER BY 1, 2;
     \\SELECT xq_pg_jsonb_exists(body, 'kind'), xq_pg_regex(name, '^[a-z]+$', ''), xq_pg_array_valid(tags) FROM doc ORDER BY id;
+    \\SELECT hex(v), length(u), xq_postgres_uuid_extract_version(u), xq_postgres_uuid_extract_version(t) FROM tok ORDER BY v;
+    \\SELECT hex(v) FROM tok INDEXED BY tok_text WHERE xq_pg_uuid_text(v) = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
     \\
     ,
     .dialect_reads =
@@ -156,20 +165,23 @@ const pg: Spec = .{
     \\
     ,
     .rejects = &.{
-        "INSERT INTO doc (k, body) VALUES (1, '{\"no\":1}')",
-        "INSERT INTO doc (k, body, name) VALUES (1, '{\"kind\":1}', 'ABC')",
-        "INSERT INTO doc (k, body, tags) VALUES (1, '{\"kind\":1}', '{a,')",
-        "INSERT INTO doc (k, body, pat) VALUES (1, '{\"kind\":1}', 'zz')",
-        "INSERT INTO doc (k, body, price) VALUES (1, '{\"kind\":1}', -1)",
+        "INSERT INTO doc (k, body) VALUES (1, xq_pg_jsonb_bin('{\"no\":1}'))",
+        "INSERT INTO doc (k, body, name) VALUES (1, jsonb('{\"kind\":1}'), 'ABC')",
+        "INSERT INTO doc (k, body, tags) VALUES (1, jsonb('{\"kind\":1}'), '{a,')",
+        "INSERT INTO doc (k, body, pat) VALUES (1, jsonb('{\"kind\":1}'), 'zz')",
+        "INSERT INTO doc (k, body, price) VALUES (1, jsonb('{\"kind\":1}'), -1)",
         "UPDATE doc SET k = 3000000000 WHERE id = 1",
+        "INSERT INTO tok (v) VALUES (x'0102')",
+        "INSERT INTO tok (v) VALUES (x'00000000000000000000000000000000')",
     },
     .writes =
     \\INSERT INTO doc (id, k, body, tags, nums, span, price, active, name, title, seen, at, pat) VALUES
-    \\ (11, 11, xq_pg_jsonb('{"z":0,"kind":"w","a":{"b":"q"}}'), '{w,"x y"}', '{9,8}', xq_pg_interval('3 days 1 hour'), 7.25, 0, 'www', 'sq', '2024-03-01', '2024-03-01 00:00:00', 'pz');
-    \\INSERT INTO doc (id, k, body, nums, span) VALUES (12, 12, '{"kind":"v","a":{"b":"r"}}', '{-3}', xq_pg_interval('-2 days'));
-    \\UPDATE doc SET span = xq_pg_interval_pl(span, xq_pg_interval('1 hour')), tags = xq_pg_array_append(tags, 'n') WHERE id = 1;
+    \\ (11, 11, xq_pg_jsonb_bin('{"z":0,"kind":"w","a":{"b":"q"}}'), '{w,"x y"}', '{9,8}', xq_pg_iv('3 days 1 hour'), xq_dec_key(7.25), 0, 'www', 'sq', '2024-03-01', '2024-03-01 00:00:00', 'pz');
+    \\INSERT INTO doc (id, k, body, nums, span) VALUES (12, 12, jsonb('{"kind":"v","a":{"b":"r"}}'), '{-3}', xq_pg_iv('-2 days'));
+    \\UPDATE doc SET span = xq_pg_iv_interval_pl(span, xq_pg_iv('1 hour')), tags = xq_pg_array_append(tags, 'n') WHERE id = 1;
     \\INSERT INTO item (doc_id, note) VALUES (11, 'by sqlite3'), (11, 'again');
     \\SELECT nextval('item_id_seq'), currval('item_id_seq'), lastval();
+    \\INSERT INTO tok (v) VALUES (xq_pg_uuid('22222222-2222-2222-2222-222222222222'));
     \\
     ,
     .read_back =
@@ -178,6 +190,7 @@ const pg: Spec = .{
     \\SELECT doc_id, id, note FROM item ORDER BY doc_id, id;
     \\INSERT INTO item (doc_id, note) VALUES (12, 'xqlite') RETURNING id;
     \\SELECT id FROM doc WHERE body @> '{"kind":"w"}';
+    \\SELECT v, uuid_extract_version(u) FROM tok WHERE v > '1fffffff-ffff-ffff-ffff-ffffffffffff' ORDER BY v;
     \\
     ,
     .want =
@@ -191,6 +204,8 @@ const pg: Spec = .{
     \\11|5|again
     \\7
     \\11
+    \\22222222-2222-2222-2222-222222222222|4
+    \\a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|4
     \\
     ,
 };

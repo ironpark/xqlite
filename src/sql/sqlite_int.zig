@@ -189,8 +189,11 @@ pub const Expr = struct {
     i_column: YnVar = 0,
     i_agg: i16 = 0,
     /// The right table of an ON/USING term (EP_OuterON/EP_InnerON), else
-    /// the token's offset in the statement.
-    w: union { join: i32, ofst: i32 } = .{ .ofst = 0 },
+    /// the token's offset in the statement. An extern union, as SQLite's
+    /// (one int): code that clears an ON flag leaves the table number,
+    /// which a reader of the offset then takes (recordErrorOffsetOfExpr()
+    /// tests the flags, not which field was written last).
+    w: extern union { join: i32, ofst: i32 } = .{ .ofst = 0 },
     agg_info: ?*AggInfo = null,
     y: union {
         tab: ?*Table,
@@ -1823,6 +1826,11 @@ pub const Parse = struct {
     /// known type (sql/typing.zig); unknown (0) for the others. Up to
     /// the highest typed number. Vdbe.xq_param_types at makeReady().
     xq_param_types: std.ArrayList(u16) = .empty,
+    /// xqlite: the typing rules chose a function of PostgreSQL's exact
+    /// numerics (xq_dec_*) for an expression (typing.Ctx.call()): the
+    /// statement computes numbers as the dialect types them, not as
+    /// SQLite does. Vdbe.xq_exact_numeric at makeReady(); for tests.
+    xq_exact_numeric: bool = false,
     /// xqlite: nonzero while names of SQL the schema keeps are resolved (a
     /// view's query, a trigger's program): text that means what it says
     /// in every dialect, which the typing rules type but make no choices

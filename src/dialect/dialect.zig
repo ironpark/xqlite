@@ -652,7 +652,7 @@ const engine_function_map = blk: {
     @setEvalBranchQuota(100_000);
     var all: []const FuncDef = &.{};
     const tables = blk2: {
-        var t: []const []const FuncDef = &.{ &@import("like.zig").engine_functions, &@import("abi.zig").engine_functions };
+        var t: []const []const FuncDef = &.{ &@import("like.zig").engine_functions, &@import("abi.zig").engine_functions, &@import("decimal_sql.zig").engine_functions };
         for (std.enums.values(Dialect)) |d| t = t ++ &[_][]const FuncDef{module(d).hooks.engine_functions};
         break :blk2 t;
     };
@@ -731,9 +731,12 @@ test {
     _ = @import("calendar.zig");
     _ = @import("words.zig");
     _ = @import("json_text.zig");
+    _ = @import("jsonb.zig");
     _ = @import("lex.zig");
     _ = @import("shared_funcs.zig");
     _ = @import("like.zig");
+    _ = @import("decimal.zig");
+    _ = @import("decimal_sql.zig");
     _ = @import("abi.zig");
     _ = @import("test.zig");
     _ = @import("constraint.zig");

@@ -156,7 +156,7 @@ pub fn typed(name: [:0]const u8, o: Options, comptime Conv: type, comptime f: an
 /// Check at compile time that the overloads of each name are adjacent,
 /// which dialect.functionSearch() relies on.
 pub fn checkTable(comptime defs: []const FuncDef) void {
-    @setEvalBranchQuota(100_000);
+    @setEvalBranchQuota(1_000_000);
     for (defs, 0..) |a, i| {
         for (defs[i + 1 ..], i + 1..) |b, j| {
             if (std.ascii.eqlIgnoreCase(a.name, b.name) and j > i + 1 and

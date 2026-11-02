@@ -507,8 +507,8 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                     } else {
                         ec.exprCode(p, changes.at(@intCast(j)).expr, k);
                     }
-                    if (stores) |f| if (f[i]) |def| {
-                        if (n_change_from != 0 or typing.storeNeeded(db, changes.at(@intCast(j)).expr.?)) insert.codeStore(p, def, k);
+                    if (stores) |f| if (f[i]) |st| {
+                        if (n_change_from != 0 or st.needed(db, changes.at(@intCast(j)).expr.?)) insert.codeStore(p, st, k);
                     };
                 } else if (tmask & int.TRIGGER_BEFORE == 0 or i > 31 or newmask & (@as(u32, 1) << @intCast(i)) != 0) {
                     ec.codeGetColumnOfTable(v, t, i_data_cur, @intCast(i), k);

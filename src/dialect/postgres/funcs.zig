@@ -70,7 +70,15 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("current_user", 0, det, currentUserFunc),
     dfunc.scalar("current_database", 0, det, currentDatabaseFunc),
     dfunc.scalar("format_type", 2, det, formatTypeFunc),
+    // numeric's (decimal_sql.zig's; overload.zig calls them by their
+    // engine names).
+    dfunc.scalar("div", 2, det, decimal_sql.def("xq_dec_div_trunc", 2).x_sfunc.?),
+    dfunc.scalar("scale", 1, det, decimal_sql.def("xq_dec_scale", 1).x_sfunc.?),
+    dfunc.scalar("min_scale", 1, det, decimal_sql.def("xq_dec_min_scale", 1).x_sfunc.?),
+    dfunc.scalar("trim_scale", 1, det, decimal_sql.def("xq_dec_trim_scale", 1).x_sfunc.?),
 };
+
+const decimal_sql = @import("../decimal_sql.zig");
 
 pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_bool", 1, det, boolFunc),
@@ -386,7 +394,8 @@ fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
     const z = switch (n[2]) {
         .none => name,
         .length => if (mod >= 4) std.fmt.bufPrint(&buf, "{s}({d})", .{ name, mod - 4 }) catch name else name,
-        .numeric => if (mod >= 4) std.fmt.bufPrint(&buf, "{s}({d},{d})", .{ name, (mod - 4) >> 16, (mod - 4) & 0xffff }) catch name else name,
+        // The scale is 11 bits, signed (numeric(3,-6)).
+        .numeric => if (mod >= 4) std.fmt.bufPrint(&buf, "{s}({d},{d})", .{ name, (mod - 4) >> 16, @as(i64, @as(i11, @bitCast(@as(u11, @truncate(@as(u64, @bitCast(mod - 4))))))) }) catch name else name,
         // "timestamp(3) without time zone": the digits after the first word.
         .precision => if (mod >= 0) blk: {
             const sp = std.mem.indexOfScalar(u8, name, ' ').?;

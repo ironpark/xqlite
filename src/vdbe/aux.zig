@@ -868,6 +868,7 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.csr = a.alloc(?*VdbeCursor, n_cursor) catch return oom(v);
     v.n_var = @intCast(n_var);
     v.xq_param_types = @import("../sql/typing.zig").paramTypes(p, a, n_var) catch return oom(v);
+    v.xq_exact_numeric = p.xq_exact_numeric;
     initMemArray(v.vars, db, .{ .Null = true });
     initMemArray(v.mem, db, MEM.Undefined);
     @memset(v.csr, null);

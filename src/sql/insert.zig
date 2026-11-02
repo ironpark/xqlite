@@ -375,10 +375,20 @@ fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void 
 }
 
 /// xqlite: the value in register `reg`, stored into a column, through
-/// `def` (typing.storeFunctions()).
-pub fn codeStore(p: *Parse, def: *const int.FuncDef, reg: i32) void {
+/// `st` (typing.storeFunctions()).
+pub fn codeStore(p: *Parse, st: typing.Store, reg: i32) void {
     const tmp = expr_mod.getTempReg(p);
-    _ = aux.addFunctionCall(p, 0, reg, tmp, 1, def, 0);
+    if (st.n_consts == 0) {
+        _ = aux.addFunctionCall(p, 0, reg, tmp, 1, st.def, 0);
+    } else {
+        // The value and the constants after it.
+        const n: i32 = 1 + @as(i32, st.n_consts);
+        const base = expr_mod.getTempRange(p, n);
+        _ = aux.addOp2(p.vdbe.?, OP.Copy, reg, base);
+        for (st.consts[0..st.n_consts], 0..) |c, i| _ = aux.addOp2(p.vdbe.?, OP.Integer, c, base + 1 + @as(i32, @intCast(i)));
+        _ = aux.addFunctionCall(p, 0, base, tmp, n, st.def, 0);
+        expr_mod.releaseTempRange(p, base, n);
+    }
     _ = aux.addOp3(p.vdbe.?, OP.Move, tmp, reg, 1);
     expr_mod.releaseTempReg(p, tmp);
 }
@@ -699,10 +709,10 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 const x = list.?.at(@intCast(k)).expr.?;
                 const y = ec.codeTarget(p, x, i_reg_store);
                 if (y != i_reg_store) _ = aux.addOp2(v, if (x.flags.Subquery) OP.Copy else OP.SCopy, y, i_reg_store);
-                if (stores) |f| if (f[ii]) |def| if (typing.storeNeeded(db, x)) codeStore(p, def, i_reg_store);
+                if (stores) |f| if (f[ii]) |st| if (st.needed(db, x)) codeStore(p, st, i_reg_store);
                 continue;
             }
-            if (stores) |f| if (f[ii]) |def| codeStore(p, def, i_reg_store);
+            if (stores) |f| if (f[ii]) |st| if (sel == null or st.neededColumn(p, sel.?, @intCast(k))) codeStore(p, st, i_reg_store);
         }
     }
 

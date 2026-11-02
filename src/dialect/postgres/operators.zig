@@ -240,6 +240,19 @@ fn native(op: Op, args: []const T, result: T) Entry {
     return .{ .op = op, .args = args, .result = result };
 }
 
+/// numeric's row: decimal_sql.zig's function of a key (xq_dec_add() ...).
+fn numericRow(op: Op, args: []const T) Entry {
+    return .{ .op = op, .args = args, .result = .numeric, .func = switch (op) {
+        .add => "xq_dec_add",
+        .sub => "xq_dec_sub",
+        .mul => "xq_dec_mul",
+        .div => "xq_dec_div",
+        .mod => "xq_dec_mod",
+        .neg => "xq_dec_neg",
+        else => unreachable,
+    } };
+}
+
 fn func(op: Op, args: []const T, result: T, comptime o: datetime.Op) Entry {
     return .{ .op = op, .args = args, .result = result, .func = o.name() };
 }
@@ -255,7 +268,7 @@ pub const entries = blk: {
             list = list ++ [_]Entry{native(op, &.{ a, b }, ints[@max(i, j)])};
         };
         list = list ++ [_]Entry{
-            native(op, &.{ .numeric, .numeric }, .numeric),
+            numericRow(op, &.{ .numeric, .numeric }),
             native(op, &.{ .float4, .float4 }, .float4),
             native(op, &.{ .float8, .float8 }, .float8),
             native(op, &.{ .float4, .float8 }, .float8),
@@ -263,8 +276,9 @@ pub const entries = blk: {
         };
     }
     // % of the same type (no float's).
-    for ([_]T{ .int2, .int4, .int8, .numeric }) |a| list = list ++ [_]Entry{native(.mod, &.{ a, a }, a)};
-    for ([_]T{ .int2, .int4, .int8, .numeric, .float4, .float8 }) |a| list = list ++ [_]Entry{native(.neg, &.{a}, a)};
+    for ([_]T{ .int2, .int4, .int8 }) |a| list = list ++ [_]Entry{native(.mod, &.{ a, a }, a)};
+    list = list ++ [_]Entry{ numericRow(.mod, &.{ .numeric, .numeric }), numericRow(.neg, &.{.numeric}) };
+    for ([_]T{ .int2, .int4, .int8, .float4, .float8 }) |a| list = list ++ [_]Entry{native(.neg, &.{a}, a)};
     for (ints) |a| list = list ++ [_]Entry{
         native(.bit_and, &.{ a, a }, a),
         native(.bit_or, &.{ a, a }, a),
@@ -459,6 +473,14 @@ const functions = blk: {
             if (std.mem.eql(u8, kv[0], f)) break;
         } else kvs = kvs ++ &[_]KV{.{ f, e.result }};
     };
+    // interval BLOB: the text intervals' functions of the rows, which the
+    // schemas of older databases call (datetime.Op.legacyName()).
+    for (std.enums.values(datetime.Op)) |o| if (o.ofInterval()) {
+        for (entries) |e| if (e.func) |f| if (std.mem.eql(u8, f, o.name())) {
+            kvs = kvs ++ &[_]KV{.{ o.legacyName(), e.result }};
+            break;
+        };
+    };
     break :blk std.StaticStringMap(T).initComptime(kvs);
 };
 
@@ -497,7 +519,9 @@ test "operators resolve as PostgreSQL's" {
     }.of;
     try expectRow(.add, &.{ k(.int4), k(.int4) }, .int4, null);
     try expectRow(.add, &.{ k(.int2), k(.int8) }, .int8, null);
-    try expectRow(.add, &.{ k(.int4), k(.numeric) }, .numeric, null);
+    try expectRow(.add, &.{ k(.int4), k(.numeric) }, .numeric, "xq_dec_add");
+    try expectRow(.neg, &.{k(.numeric)}, .numeric, "xq_dec_neg");
+    try expectRow(.mod, &.{ k(.int8), k(.numeric) }, .numeric, "xq_dec_mod");
     try expectRow(.add, &.{ k(.int4), k(.float8) }, .float8, null);
     try expectRow(.add, &.{ k(.float4), k(.int4) }, .float8, null);
     try expectRow(.add, &.{ k(.float4), k(.float4) }, .float4, null);
@@ -508,14 +532,14 @@ test "operators resolve as PostgreSQL's" {
     try expectRow(.add, &.{ k(.date), k(.int4) }, .date, "xq_pg_date_pli");
     try expectRow(.add, &.{ k(.int2), k(.date) }, .date, "xq_pg_integer_pl_date");
     try expectRow(.sub, &.{ k(.date), .literal }, .int4, "xq_pg_date_mi");
-    try expectRow(.sub, &.{ k(.date), k(.timestamp) }, .interval, "xq_pg_timestamp_mi");
-    try expectRow(.sub, &.{ k(.timestamptz), k(.date) }, .interval, "xq_pg_timestamptz_mi");
-    try expectRow(.add, &.{ k(.timestamptz), .literal }, .timestamptz, "xq_pg_timestamptz_pl_interval");
-    try expectRow(.add, &.{ k(.timestamp), .literal }, .timestamp, "xq_pg_timestamp_pl_interval");
-    try expectRow(.mul, &.{ k(.interval), k(.int4) }, .interval, "xq_pg_interval_mul");
-    try expectRow(.mul, &.{ k(.numeric), k(.interval) }, .interval, "xq_pg_mul_d_interval");
-    try expectRow(.neg, &.{k(.interval)}, .interval, "xq_pg_interval_um");
-    try expectRow(.add, &.{ k(.time), k(.interval) }, .time, "xq_pg_time_pl_interval");
+    try expectRow(.sub, &.{ k(.date), k(.timestamp) }, .interval, "xq_pg_iv_timestamp_mi");
+    try expectRow(.sub, &.{ k(.timestamptz), k(.date) }, .interval, "xq_pg_iv_timestamptz_mi");
+    try expectRow(.add, &.{ k(.timestamptz), .literal }, .timestamptz, "xq_pg_iv_timestamptz_pl_interval");
+    try expectRow(.add, &.{ k(.timestamp), .literal }, .timestamp, "xq_pg_iv_timestamp_pl_interval");
+    try expectRow(.mul, &.{ k(.interval), k(.int4) }, .interval, "xq_pg_iv_interval_mul");
+    try expectRow(.mul, &.{ k(.numeric), k(.interval) }, .interval, "xq_pg_iv_mul_d_interval");
+    try expectRow(.neg, &.{k(.interval)}, .interval, "xq_pg_iv_interval_um");
+    try expectRow(.add, &.{ k(.time), k(.interval) }, .time, "xq_pg_iv_time_pl_interval");
     try expectRow(.sub, &.{ k(.jsonb), .literal }, .jsonb, "xq_pg_jsonb_delete");
     try expectRow(.sub, &.{ k(.jsonb), k(.text_array) }, .jsonb, "xq_pg_jsonb_delete_keys");
     try testing.expectEqual(Resolution.not_exist, resolve(.add, &.{ k(.date), k(.text) }));

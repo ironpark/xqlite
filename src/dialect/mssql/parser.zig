@@ -705,7 +705,7 @@ pub const Parser = struct {
             .affinity => |t| if (std.mem.eql(u8, t, "TEXT")) .string else if (std.mem.eql(u8, t, "BLOB")) .unknown else .number,
             .func => .string,
             .typed => |t| typeClass(types.parseText(t.type_arg)),
-            .round => .number,
+            .round, .func_args => .number,
         };
     }
 

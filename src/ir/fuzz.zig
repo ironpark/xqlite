@@ -273,6 +273,9 @@ fn stagingText(a: Allocator, spec: gen.TableSpec) Oom![]const u8 {
 const Db = struct {
     mem: MemVfs,
     db: *int.Sqlite3,
+    /// Whether the statement run() last prepared computes PostgreSQL's
+    /// exact numerics (calls an xq_dec_* function): exactNumeric().
+    exact: bool = false,
 
     fn open(gpa: Allocator, io: std.Io) !*Db {
         const d = try gpa.create(Db);
@@ -321,9 +324,11 @@ const Db = struct {
     fn run(d: *Db, a: Allocator, sql: []const u8, binds: []const gen.Value) Oom!Outcome {
         var stmt: ?*vi.Vdbe = null;
         var rc = prepare.prepareV2(d.db, sql, &stmt, null);
+        d.exact = false;
         if (rc != RC.OK) return d.failure(a, rc, false);
         const v = stmt orelse return .{ .rows = &.{} };
         defer _ = api.finalize(v);
+        d.exact = exactNumeric(v);
         for (binds, 1..) |b, i| {
             if (i > api.bindParameterCount(v)) break;
             _ = switch (b) {
@@ -350,6 +355,28 @@ const Db = struct {
             try rows.append(a, row);
         }
         return .{ .rows = rows.items };
+    }
+
+    /// Whether statement `v` computes PostgreSQL's exact numerics: the
+    /// typing rules chose an xq_dec_* function for an expression
+    /// (Parse.xq_exact_numeric; the call may be folded to a constant). A
+    /// dialect that types its literals (PostgreSQL: `2.5` is numeric)
+    /// computes such an expression exactly and by its own functions
+    /// (round(x, -2) rounds to hundreds), where the untyped SQLite text
+    /// of the same tree computes doubles by SQLite's: a choice of the
+    /// dialect, as typeRefused()'s errors are, not a difference of
+    /// meaning.
+    fn exactNumeric(v: *vi.Vdbe) bool {
+        if (v.xq_exact_numeric) return true;
+        for (v.ops.items) |*op| {
+            const name: [:0]const u8 = switch (op.p4type) {
+                .funcdef => op.p4.funcdef.name,
+                .funcctx => op.p4.funcctx.func.name,
+                else => continue,
+            };
+            if (std.mem.startsWith(u8, name, "xq_dec")) return true;
+        }
+        return false;
     }
 
     fn failure(d: *Db, a: Allocator, rc: i32, step: bool) Oom!Outcome {
@@ -473,6 +500,9 @@ const Stats = struct {
     /// Views that failed while running where the subquery did not, or
     /// the other way around.
     view_step_errors: u32 = 0,
+    /// Comparisons left out as one side computed PostgreSQL's exact
+    /// numerics and the other SQLite's doubles (Db.exactNumeric()).
+    exact_skipped: u32 = 0,
     /// Rows whose expected values failed while the table took them.
     row_step_errors: u32 = 0,
 };
@@ -522,15 +552,27 @@ const Fuzz = struct {
         var buf: [96]u8 = undefined;
         var want: [dialects.len]Outcome = undefined;
         var want_view: [dialects.len]Outcome = undefined;
-        for (dialects, &want, &want_view) |d, *w, *wv| {
+        // Whether each was computed with exact numerics (Db.exactNumeric()).
+        var want_exact: [dialects.len]bool = undefined;
+        var want_view_exact: [dialects.len]bool = undefined;
+        for (dialects, &want, &want_view, &want_exact, &want_view_exact) |d, *w, *wv, *we, *wve| {
             db.useTree(d);
             // The tree that is rendered: parameters as literals.
             w.* = try db.run(a, f.job(.literal, 0, &buf), &.{});
+            we.* = db.exact;
             wv.* = try db.run(a, f.job(.wrapped, 0, &buf), &.{});
+            wve.* = db.exact;
             // The same with the parameters bound, where a constant means
             // what a parameter of its value means.
             if (binds.len == 0 or g.sort_keys) continue;
             const bound = try db.run(a, f.job(.query, 0, &buf), binds);
+            // A numeric literal is exact where a parameter bound as a
+            // double is a double, and a value of PostgreSQL's numeric is
+            // a key here, a number there (Db.exactNumeric()).
+            if (db.exact or we.*) {
+                f.stats.exact_skipped += 1;
+                continue;
+            }
             // SQLite folds constants (`'a' IS NOT NULL OR f(x)` is 1, f
             // not called): an error with one only is not a difference.
             if ((bound == .err) != (w.* == .err)) continue;
@@ -552,11 +594,15 @@ const Fuzz = struct {
         for (dialects, 0..) |d, di| {
             // B: the text rendered in d, compiled in every dialect.
             const text = texts[di] orelse continue;
-            for (dialects, want, texts) |e, w, text_e| {
+            for (dialects, want, texts, want_exact) |e, w, text_e, w_exact| {
                 if (!f.readable(text, d, e, text_e)) continue;
                 db.useText(e);
                 const got = try db.run(a, text, &.{});
                 if (typeRefused(got) or typeRefused(w)) continue;
+                if (db.exact or w_exact) {
+                    f.stats.exact_skipped += 1;
+                    continue;
+                }
                 if (!try got.same(w, a, ordered)) return f.mismatch("rendered in {s}, compiled in {s}", .{ @tagName(d), @tagName(e) }, text, got, w);
             }
             // C: a view created from the tree in d, read in every dialect.
@@ -567,11 +613,18 @@ const Fuzz = struct {
                 continue;
             }
             const sel = try std.fmt.allocPrint(a, "SELECT * FROM v{d}", .{di});
-            for (dialects, want_view, texts) |e, w, text_e| {
+            for (dialects, want_view, texts, want_view_exact) |e, w, text_e, w_exact| {
                 if (!f.readable(text, d, e, text_e)) continue;
                 main_mod.setDialect(db.db, e);
                 const got = try db.run(a, sel, &.{});
                 if (try got.same(w, a, ordered)) continue;
+                // PostgreSQL's exact numerics on either side: keys or
+                // exact values where the other path computes numbers
+                // (Db.exactNumeric()).
+                if (db.exact or w_exact) {
+                    f.stats.exact_skipped += 1;
+                    continue;
+                }
                 // A view is not always run as the same query in a
                 // subquery is (sqlite3 too): an expression that fails
                 // (OFFSET X'', integer overflow) may not be computed, or
@@ -603,7 +656,11 @@ const Fuzz = struct {
     fn typeRefused(o: Outcome) bool {
         if (o != .err) return false;
         const msg = o.err.msg;
-        return std.mem.startsWith(u8, msg, "operator does not exist: ") or std.mem.startsWith(u8, msg, "operator is not unique: ");
+        return std.mem.startsWith(u8, msg, "operator does not exist: ") or std.mem.startsWith(u8, msg, "operator is not unique: ") or
+            // A string literal given a numeric type (a CASE of numbers and
+            // strings, read as numeric) that is no number: PostgreSQL's
+            // input error, where untyped text computes.
+            std.mem.startsWith(u8, msg, "invalid input syntax for type numeric: ");
     }
 
     /// Whether text rendered in `d` is to mean in `e` what lowering means
@@ -684,14 +741,28 @@ const Fuzz = struct {
                     try db.exec("DELETE FROM s");
                     db.useTree(e);
                     const staged = try db.run(a, f.job(.staging, ri, &buf), &.{});
+                    var expected_exact = db.exact;
                     const expected = if (staged == .err) staged else try db.run(a, f.job(.expected, 0, &buf), &.{});
+                    expected_exact = expected_exact or db.exact;
                     // Lowered, then as SQLite text.
                     for (0..2) |how| {
                         var p: int.Parse = .{ .db = db.db, .arena = a };
                         const text: [:0]const u8 = if (how == 0) f.job(.insert, ri, &buf) else try row.text(&p, spec);
                         if (how == 0) db.useTree(e) else db.useText(e);
                         const inserted = try db.run(a, text, &.{});
+                        // PostgreSQL's tree computes exact numerics
+                        // (Db.exactNumeric()) where the table's text (of
+                        // another dialect, or a DEFAULT of a dialect
+                        // function) and SQLite compute numbers, and a key
+                        // is no truth value (PostgreSQL refuses a numeric
+                        // CHECK): the dialect's choice, not compared.
+                        const skip = expected_exact or db.exact;
                         db.useText(e);
+                        if (skip) {
+                            try db.exec("DELETE FROM t");
+                            f.stats.exact_skipped += 1;
+                            continue;
+                        }
                         const stored = if (inserted == .err) inserted else try db.run(a, try storedQuery(a, spec), &.{});
                         try db.exec("DELETE FROM t");
                         try f.checkRow(a, spec, expected, inserted, stored, .{ @tagName(d), @tagName(e), if (how == 0) "lowered" else "text", ri }, ddl);
@@ -947,8 +1018,8 @@ pub fn roundtrip(gpa: Allocator, io: std.Io, seed: u64, events_max: u32) !void {
     }
     const s = f.stats;
     if (!@import("builtin").is_test) std.debug.print(
-        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors, {d} row errors\n",
-        .{ s.queries, s.query_errors, s.params_checked, s.tables, s.table_errors, s.rows_checked, s.check_failures, s.cross_skipped, s.view_step_errors, s.row_step_errors },
+        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors, {d} row errors, {d} exact numerics\n",
+        .{ s.queries, s.query_errors, s.params_checked, s.tables, s.table_errors, s.rows_checked, s.check_failures, s.cross_skipped, s.view_step_errors, s.row_step_errors, s.exact_skipped },
     );
 }
 

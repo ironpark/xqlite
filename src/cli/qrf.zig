@@ -445,9 +445,21 @@ const Qrf = struct {
             SQLITE_INTEGER => .{ .integer = api.columnInt64(p.stmt, i_col) },
             SQLITE_FLOAT => .{ .float = api.columnDouble(p.stmt, i_col) },
             SQLITE_TEXT => .{ .text = if (api.columnText(p.stmt, i_col)) |z| cstr(z) else "" },
+            // A BLOB of a type (PostgreSQL's interval, numeric).
+            SQLITE_BLOB => .{ .blob = api.columnBlob(p.stmt, i_col) orelse "" },
             else => return null,
         };
         return xqlite.display.text(p.viewer, t, cell, buf);
+    }
+
+    /// xqlite: a blob of column `i_col` as the statement's dialect shows
+    /// it (a jsonb value's JSON text, a numeric key's digits:
+    /// display.textAlloc()), in `gpa`.
+    fn displayBlob(p: *Qrf, gpa: Allocator, i_col: usize) Error!?[]u8 {
+        if (i_col >= p.col_types.len) return null;
+        const t = p.col_types[i_col] orelse return null;
+        const cell: xqlite.Value = .{ .blob = api.columnBlob(p.stmt, i_col) orelse "" };
+        return xqlite.display.textAlloc(gpa, p.viewer, t, cell);
     }
 
     /// xqlite: col_types, for a statement of a dialect other than
@@ -614,7 +626,12 @@ fn renderValue(p: *Qrf, s: *Str, i_col: usize) Error!void {
                 try s.append(if (api.columnText(p.stmt, i_col)) |z| cstr(z) else "");
             }
         },
-        SQLITE_BLOB => {
+        SQLITE_BLOB => blob: {
+            if (try p.displayBlob(s.gpa, i_col)) |z| {
+                defer s.gpa.free(z);
+                try s.append(z);
+                break :blob;
+            }
             const a = api.columnBlob(p.stmt, i_col) orelse "";
             switch (p.spec.blob) {
                 .hex, .sql => {

@@ -1,0 +1,120 @@
+-- Differential cases of PostgreSQL intervals (xqt dialect-diff pg
+-- tools/dialect/pg-interval-cases.txt), in the format of pg-cases.txt: each
+-- case starts with a "-- case:" line and runs on an empty database, in
+-- PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. The expected output is PostgreSQL 18's.
+-- xqlite stores an interval as a BLOB (src/dialect/interval.zig).
+
+-- case: input and output in the default style
+SELECT interval '1 day', interval '1 day 2 hours', interval '38 months', interval '90 minutes', interval '-1 month';
+SELECT interval '1 year 2 months 3 days 04:05:06.5', interval '-1 day +1 hour', interval '1 day -1 hour', interval '0', interval '10';
+SELECT interval '1.5 days', interval '1.5 months', interval '1.5 years', interval '2 weeks', interval '@ 1 day ago', interval '25:00:00';
+SELECT interval 'P1Y2M3DT4H5M6S', interval '-1 years 2 mons', interval '-1 mons 2 days', interval '1ms', interval '01:00', interval '-08:00';
+SELECT interval '-1 +02:03', interval '-1 days +02:03', interval '1.5 weeks', interval '10 years -11 month -12 days +13:14';
+SELECT interval 'infinity', interval '-infinity', '+infinity'::interval;
+
+-- case: input errors
+SELECT interval 'abc';
+SELECT interval '';
+SELECT interval '@ 30 eons ago';
+SELECT interval '10 milliseconds 20 milliseconds';
+SELECT interval '1:20:05 5 microseconds';
+SELECT interval '2147483648 days';
+SELECT interval '2147483648 months';
+SELECT interval '-2147483648 days ago';
+
+-- case: a table of intervals
+CREATE TABLE t (id int, v interval);
+INSERT INTO t VALUES (1, '1 mon'), (2, '30 days'), (3, '1 day'), (4, '-1 day'), (5, '2 hours'), (6, 'infinity'), (7, '-infinity'), (8, NULL), (9, '720 hours');
+SELECT * FROM t ORDER BY id;
+SELECT id, v FROM t ORDER BY v, id;
+SELECT id, v FROM t ORDER BY v DESC, id;
+SELECT id FROM t WHERE v = '30 days' ORDER BY id;
+SELECT id FROM t WHERE v <> '1 mon' ORDER BY id;
+SELECT id FROM t WHERE v < '1 day' ORDER BY id;
+SELECT id FROM t WHERE v <= '1 mon' ORDER BY id;
+SELECT id FROM t WHERE v > interval '29 days' ORDER BY id;
+SELECT id FROM t WHERE '1 day' >= v ORDER BY id;
+SELECT id FROM t WHERE v BETWEEN '1 day' AND '1 mon' ORDER BY id;
+SELECT id FROM t WHERE v IN ('1 mon', '2 hours') ORDER BY id;
+SELECT id FROM t WHERE v NOT IN ('1 mon') ORDER BY id;
+SELECT id FROM t WHERE v IS NOT DISTINCT FROM '30 days' ORDER BY id;
+
+-- case: an index of intervals
+CREATE TABLE t (id int, v interval);
+CREATE INDEX t_v ON t (v);
+INSERT INTO t VALUES (1, '1 mon'), (2, '30 days'), (3, '1 day'), (4, '-1 day'), (5, '2 hours'), (6, 'infinity');
+SELECT id FROM t WHERE v >= '1 day' AND v < '1 year' ORDER BY id;
+SELECT id FROM t WHERE v > '1 day' ORDER BY id;
+SELECT v FROM t WHERE v <= '30 days' ORDER BY v, id;
+UPDATE t SET v = v + interval '1 hour' WHERE v < '1 day';
+SELECT id, v FROM t ORDER BY id;
+DELETE FROM t WHERE v = '1 mon';
+SELECT id FROM t ORDER BY id;
+
+-- case: grouping, DISTINCT and joins by the length
+CREATE TABLE t (id int, v interval);
+INSERT INTO t VALUES (1, '1 mon'), (2, '30 days'), (3, '1 day'), (4, '24 hours'), (5, NULL), (6, '1 day');
+SELECT count(*), min(id) FROM t GROUP BY v ORDER BY 2;
+SELECT count(DISTINCT id), count(*) FROM (SELECT DISTINCT v, 1 AS id FROM t) AS d;
+SELECT a.id, b.id FROM t a JOIN t b ON a.v = b.v AND a.id < b.id ORDER BY 1, 2;
+SELECT id, rank() OVER (ORDER BY v) FROM t ORDER BY id;
+SELECT id, count(*) OVER (PARTITION BY v) FROM t ORDER BY id;
+
+-- case: arithmetic
+SELECT interval '1 year 2 months' + interval '1 year', interval '1 day' - interval '2 hours', -interval '1 day 2 hours', interval '1 day' * 2, 2 * interval '1 hour';
+SELECT interval '1 month' / 2, interval '1 day' / 3, interval '1 hour' * 1.5, interval '1 month' * 1.5, interval '41 mon 12 days 360:00' * 0.3;
+SELECT interval '-3 years 482 days 76:54:32.189' * 8.2, interval '999 mon 999 days' / 100, interval '9 mon -27 days 12:34:56' / 10;
+SELECT interval 'infinity' + interval '1 day', interval '1 day' - interval 'infinity', -interval 'infinity', interval 'infinity' * -2, interval 'infinity' / 3;
+SELECT interval '1 day' / 0;
+SELECT interval 'infinity' - interval 'infinity';
+SELECT interval 'infinity' * 0;
+SELECT -('-2147483648 months'::interval);
+SELECT interval '2147483647 days' + interval '1 day';
+
+-- case: dates, timestamps and times with intervals
+SELECT date '2024-01-31' + interval '1 month', timestamp '2024-01-31 10:00' + interval '1 month 1 day', timestamp '2024-03-31' - interval '1 mon';
+SELECT timestamp '2024-01-02 02:00' - timestamp '2024-01-01', timestamp '2024-01-01' - timestamp '2024-01-02 02:00', time '10:00' - time '08:30';
+SELECT time '23:00' + interval '2 hours', time '01:00' - interval '2 hours', interval '1 day' + date '2024-02-28';
+SELECT timestamp '2024-01-31' + interval '1 mon' = timestamp '2024-01-31' + interval '30 days';
+SELECT time '10:00' + interval 'infinity';
+
+-- case: casts and text
+SELECT interval '1 day'::text, '2 hours'::interval::text, interval '1 mon' || ' later', concat('in ', interval '3 days'), length(interval '90 minutes'::text);
+SELECT CAST('1 week' AS interval), CAST(interval '1 day' AS varchar), format('%s!', interval '1 hour');
+SELECT to_json(interval '1 day 2 hours'), jsonb_build_object('d', interval '1 mon'), json_agg(v ORDER BY v) FROM (VALUES (interval '1 day'), (interval '2 hours')) AS x(v);
+
+-- case: sum() and avg()
+CREATE TABLE t (id int, v interval);
+INSERT INTO t VALUES (1, '1 mon'), (2, '31 days'), (3, '1 day 02:00:00'), (4, '-12 days'), (5, NULL);
+SELECT sum(v), avg(v), min(v), max(v), count(v) FROM t;
+SELECT id, sum(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW), avg(v) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t ORDER BY id;
+SELECT sum(v), avg(v) FROM t WHERE id > 10;
+INSERT INTO t VALUES (6, 'infinity');
+SELECT sum(v), avg(v) FROM t;
+INSERT INTO t VALUES (7, '-infinity');
+SELECT sum(v) FROM t;
+
+-- case: justify_hours(), justify_days(), justify_interval(), isfinite()
+SELECT justify_hours(interval '6 months 3 days 52 hours 3 minutes 2 seconds'), justify_days(interval '6 months 36 days 5 hours 4 minutes 3 seconds');
+SELECT justify_interval(interval '1 month -1 hour'), justify_interval(interval '-1 month 1 hour'), justify_hours(interval '-27 hours'), justify_days(interval '-35 days');
+SELECT justify_hours(interval 'infinity'), justify_interval(interval '-infinity'), isfinite(interval '1 day'), isfinite(interval 'infinity');
+SELECT justify_days(interval '2147483647 months 30 days');
+
+-- case: arrays of intervals
+SELECT ARRAY[interval '1 day', interval '2 hours'], '{1 day,"2 hours"}'::interval[], (ARRAY[interval '1 mon'])[1];
+SELECT array_agg(v ORDER BY v) FROM (VALUES (interval '1 day'), (interval '1 hour')) AS x(v);
+SELECT interval '1 day' = ANY (ARRAY[interval '24 hours', interval '1 hour']), ARRAY[interval '1 mon'] || interval '1 day';
+
+-- case: views, defaults and checks keep the choices
+CREATE TABLE t (id int, v interval DEFAULT '1 hour' CHECK (v < interval '1 year'));
+INSERT INTO t (id) VALUES (1);
+INSERT INTO t VALUES (2, '1 mon'), (3, '30 days');
+INSERT INTO t VALUES (4, '2 years');
+CREATE VIEW w AS SELECT id, v * 2 AS d, v::text AS s, v = '30 days' AS e FROM t WHERE v >= '1 hour' ORDER BY v, id;
+SELECT * FROM w;
+CREATE VIEW g AS SELECT v, count(*) AS n, sum(v) AS s FROM t GROUP BY v;
+SELECT n, s FROM g ORDER BY n;
+CREATE VIEW dv AS SELECT DISTINCT v FROM t;
+SELECT count(*) FROM dv;

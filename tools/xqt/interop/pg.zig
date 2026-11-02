@@ -2,7 +2,9 @@
 //! `xqlite sql` in the PostgreSQL dialect (STRICT tables, CHECKs, identity
 //! sequences, the xq_catalog/xq_sequence catalog, views, indexes) must pass
 //! sqlite3's integrity check, and sqlite3 and xqlite (in the SQLite
-//! dialect) must read the same rows and schema from it.
+//! dialect) must read the same rows and schema from it. A numeric column
+//! stores keys whose CHECK calls an engine function (xq_dec_valid()), so
+//! the integrity check and writes to it are sqlite3 with the extension's.
 //! (Was tools/interop-pg.sh.)
 
 const std = @import("std");
@@ -87,6 +89,9 @@ const bad = [_][]const u8{
     "INSERT INTO entry(account_id, amount) VALUES (1, 3000000000)",
     "UPDATE account SET active = 2 WHERE id = 1",
     "INSERT INTO doc (id, body) VALUES (9, '{')",
+    // jsonb is a JSONB blob: text is no value of it, a blob not JSONB neither.
+    "INSERT INTO doc (id, body) VALUES (9, '{}')",
+    "INSERT INTO doc (id, body) VALUES (9, X'7b7d')",
 };
 
 fn build(c: *Check, file: []const u8) !void {
@@ -95,7 +100,7 @@ fn build(c: *Check, file: []const u8) !void {
 
 fn integrity(c: *Check, base: *BaseDb) !void {
     try base.get(c, db);
-    const ok = std.mem.trimEnd(u8, try c.sqlite3(db, "PRAGMA integrity_check"), "\n");
+    const ok = std.mem.trimEnd(u8, try c.sqlite3Ext(db, "PRAGMA integrity_check"), "\n");
     _ = c.expect(std.mem.eql(u8, ok, "ok"), "integrity_check: {s}", .{ok});
     const fk = std.mem.trimEnd(u8, try c.sqlite3(db, "PRAGMA foreign_key_check"), "\n");
     _ = c.expect(fk.len == 0, "foreign_key_check: {s}", .{fk});
@@ -118,7 +123,7 @@ fn rejects(c: *Check, base: *BaseDb, stmt: []const u8) !void {
 /// 302: the INSERT ... ON CONFLICT DO UPDATE took 301, as in PostgreSQL.
 fn readBack(c: *Check, base: *BaseDb) !void {
     try base.get(c, db);
-    _ = try c.sqlite3(db, "UPDATE account SET balance = balance + 1 WHERE id = 2");
+    _ = try c.sqlite3Ext(db, "UPDATE account SET balance = xq_dec_key(xq_dec_add(balance, 1), 12, 2) WHERE id = 2");
     const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT balance FROM account WHERE id = 2;\nINSERT INTO account (email) VALUES ($$new@x$$) RETURNING id;\n" });
     const got = std.mem.trimEnd(u8, out, "\n");
     _ = c.expect(std.mem.eql(u8, got, "4.00\n302"), "read back: {s}", .{got});
@@ -143,15 +148,19 @@ fn schemaTables(c: *Check, base: *BaseDb) !void {
 /// dialect's operators.
 fn jsonColumns(c: *Check, base: *BaseDb) !void {
     try base.get(c, db);
-    const rows = std.mem.trimEnd(u8, try c.sqlite3(db, "SELECT body, raw, json_extract(body, '$.b[1]') FROM doc ORDER BY id"), "\n");
+    // jsonb is SQLite's JSONB: sqlite3 reads it with its own functions.
+    const rows = std.mem.trimEnd(u8, try c.sqlite3(db, "SELECT json(body), raw, json_extract(body, '$.b[1]'), body ->> '$.a.y', json_type(body) FROM doc ORDER BY id"), "\n");
     const want =
-        \\{"a": {"x": null, "y": true}, "b": [1, 2]}|{"b" : 1,  "a" : 2}|2
-        \\{"a": 1, "c": "x", "z": 0}||
+        \\{"a":{"x":null,"y":true},"b":[1,2]}|{"b" : 1,  "a" : 2}|2|1|object
+        \\{"a":1,"c":"x","z":0}||||object
     ;
     _ = c.expect(std.mem.eql(u8, rows, want), "sqlite3 reads: {s}", .{rows});
-    _ = try c.sqlite3(db, "INSERT INTO doc (id, body) VALUES (3, '{\"z\":1,\"c\":[2]}')");
-    const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT body -> 'c', body ? 'z', body @> '{\"z\": 1}', jsonb_typeof(body -> 'c') FROM doc WHERE id = 3;\n" });
+    // What sqlite3 writes (keys as written, a duplicate, an escape) reads
+    // as the jsonb value.
+    _ = try c.sqlite3(db, "INSERT INTO doc (id, body) VALUES (3, jsonb('{\"z\":1,\"c\":[2],\"z\":1.0,\"s\":\"\\u0041\"}'))");
+    const out = try c.runOk(&.{ c.cfg.xq, "sql", db }, .{ .stdin = ".dialect postgres\nSELECT body, body -> 'c', body ? 'z', body @> '{\"z\": 1}', jsonb_typeof(body -> 'c'), body = '{\"c\":[2],\"s\":\"A\",\"z\":1}' FROM doc WHERE id = 3;\n" });
     const got = std.mem.trimEnd(u8, out, "\n");
-    // The operators are booleans, shown as PostgreSQL shows them.
-    _ = c.expect(std.mem.eql(u8, got, "[2]|t|t|array"), "json read back: {s}", .{got});
+    // The operators are booleans, shown as PostgreSQL shows them. The
+    // value shows as sqlite3 wrote it.
+    _ = c.expect(std.mem.eql(u8, got, "{\"z\": 1, \"c\": [2], \"z\": 1.0, \"s\": \"A\"}|[2]|t|t|array|t"), "json read back: {s}", .{got});
 }

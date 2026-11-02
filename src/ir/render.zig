@@ -363,6 +363,12 @@ pub const Renderer = struct {
                 try r.expr(c.e);
                 try r.print(", {d}) AS NUMERIC)", .{s});
             },
+            .func_args => |f| {
+                try r.print("{s}(", .{try r.functionName(f.func, null)});
+                try r.expr(c.e);
+                for (f.args) |v| try r.print(", {d}", .{v});
+                try r.put(")");
+            },
             .typed => |t| {
                 try r.print("{s}(", .{try r.functionName(t.func, null)});
                 try r.expr(c.e);

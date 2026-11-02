@@ -601,6 +601,42 @@ test "pg: arrays on the wire" {
     try c.terminate();
 }
 
+test "pg: uuid on the wire" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var f: Fixture = undefined;
+    try f.start(.{});
+    defer f.stop();
+    var c: Client = .{};
+    defer c.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), try c.connect(f.srv.address(), "bob", ""));
+    defer c.close();
+    _ = try c.query("CREATE TABLE t (id int, u uuid PRIMARY KEY); INSERT INTO t VALUES (1, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11')");
+    // Its text and OID; its 16 bytes as a parameter and a result, a text
+    // parameter read as uuid_in() reads it.
+    try testing.expectEqualStrings("T id:23 u:2950\nD 1 a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11\nC SELECT 1\nZ I\n", try c.query("SELECT id, u FROM t"));
+    const ones: [16]u8 = @splat(0x11);
+    const bytes = "\xa0\xee\xbc\x99\x9c\x0b\x4e\xf8\xbb\x6d\x6b\xb9\xbd\x38\x0a\x11";
+    try c.parse("", "INSERT INTO t VALUES ($1, $2)", &.{ 23, 2950 });
+    try c.bind("", "", &.{ .{ .text = "2" }, .{ .binary = &ones } }, &.{});
+    try c.execute("", 0);
+    try c.parse("", "SELECT id, u FROM t WHERE u = $1 OR u = $2 ORDER BY u", &.{ 2950, 0 });
+    try c.bind("", "", &.{ .{ .binary = bytes }, .{ .text = "{11111111111111111111111111111111}" } }, &.{ 0, 1 });
+    try c.execute("", 0);
+    try testing.expectEqualStrings(
+        \\1
+        \\2
+        \\C INSERT 0 1
+        \\1
+        \\2
+        \\D 2 0x11111111111111111111111111111111
+        \\D 1 0xa0eebc999c0b4ef8bb6d6bb9bd380a11
+        \\C SELECT 2
+        \\Z I
+        \\
+    , try c.sync());
+    try c.terminate();
+}
+
 fn canceler(addr: std.Io.net.IpAddress, pid: u32, key: u32, stop: *std.atomic.Value(bool)) void {
     // The interrupt is cleared when a statement starts, so ask until the
     // query fails.

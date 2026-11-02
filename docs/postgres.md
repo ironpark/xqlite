@@ -47,13 +47,13 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 | `types.zig` | 타입 → STRICT 저장 타입·검사·`format_type()` 철자·캐스트 |
 | `funcs.zig` | 방언 함수와 엔진 함수(`xq_like`, 정규식 연산자의 `xq_pg_regex` 등) |
 | `regex.zig` | 정규식(jsonpath `like_regex`와 `~` 연산자) |
-| `json.zig` | json/jsonb 값: PostgreSQL 규칙의 파싱, jsonb 정규화와 출력, 비교·포함 |
+| `json.zig` | json/jsonb 값: PostgreSQL 규칙의 파싱, jsonb 정규화와 출력, 비교·포함, jsonb의 정준 JSONB(`toBlob()`, `fromBlob()`)와 정렬 키(`appendKey()`). JSONB 노드 읽기·검사·텍스트는 방언 밖의 `dialect/jsonb.zig`(값 표시도 씀) |
 | `jsonpath.zig` | jsonpath의 부분집합 |
 | `jfuncs.zig` | JSON 연산자·함수·집계·집합 반환 함수의 구현 |
 | `array.zig` | 배열 값(PostgreSQL의 텍스트: `{1,2,NULL}`)의 읽기·쓰기, 원소 타입의 입력·출력, 배열의 엔진 함수(캐스트와 저장, `ARRAY[...]`, `ANY`/`ALL`, 첨자, `unnest()`의 행 ...)와 방언 함수(`array_length()` ...), collation `xq_pg_array`/`xq_pg_array_num` |
 | `typing.zig` | 식 타입의 규칙(`Hooks.typing`, [아키텍처](architecture.md)의 코어의 타입): 리터럴·연산자·함수의 결과 타입 |
 | `operators.zig` | 연산자 표(`pg_operator`처럼 연산자, 피연산자 타입, 결과 타입, 구현)와 PostgreSQL 규칙의 연산자 해석(아래 [연산자 해석](#연산자-해석)) |
-| `datetime.zig` | `date`/`time`/`timestamp[tz]`/`interval` 값의 PostgreSQL 입력·출력, 그 연산자의 엔진 함수(`xq_pg_date_pli()` ...)와 캐스트(`xq_pg_date()` ...), collation `xq_pg_interval` |
+| `datetime.zig` | `date`/`time`/`timestamp[tz]`/`interval` 값의 PostgreSQL 입력·출력, 그 연산자의 엔진 함수(`xq_pg_date_pli()`, `xq_pg_iv_interval_pl()` ...)와 캐스트(`xq_pg_date()`, `xq_pg_iv()` ...), interval BLOB의 함수(`xq_pg_iv_key()`, `xq_pg_iv_sum()`, `justify_*()` ...), 예전 텍스트 interval의 함수와 collation `xq_pg_interval`. interval 값 자체(필드, 연산, BLOB 인코딩)는 방언 밖의 `src/dialect/interval.zig` |
 | `overload.zig` | 피연산자 타입에 따른 선택(`Rules.overload`): 산술·비트 연산자를 연산자 표로, `jsonb`의 `\|\|`·비교·`ORDER BY`, interval의 비교·`ORDER BY`, `->`·`#>`의 json/jsonb 함수, JSON을 만드는 함수의 인자, 배열의 `\|\|`·비교·`ORDER BY`와 원소 타입을 알아야 하는 배열 함수(아래 [배열](#배열)). 이름을 해석한 코어가 부름 |
 | `jtype.zig` | 파싱 뒤, 타입이 아니라 이름과 FROM 구조로 정하는 JSON: 값으로 쓴 FROM 항목(행), FROM의 JSON 집합 반환 함수 열과 그 옆의 `*`, json/jsonb 열에 저장하는 값의 정규화 |
 | `ddltype.zig` | 스키마가 텍스트로 남기는 문장(뷰, CHECK, 생성 열, 식 인덱스)에 코어의 선택을 되돌려 씀: 식을 내리고 해석만 하는 probe |
@@ -188,12 +188,14 @@ PRAGMA xq_dialect = 'sqlite';   -- PRAGMA는 SQLite 문법 그대로 통과
 
 | 행 | 구현 |
 | --- | --- |
-| 정수(`smallint`/`integer`/`bigint`의 모든 쌍, 넓은 쪽), `numeric`, `real`, `double precision`의 `+ - * /`; 같은 타입의 `%`(실수의 `%`는 없음); 단항 `-`; 정수의 `& \|`와 `<< >>`(오른쪽 `integer`) | 엔진의 연산 코드(SQLite의 바이트코드). 문자열 상수는 그 정수 타입으로 읽음(`xq_pg_int4('a')`: `'a' + 1`은 `invalid input syntax for type integer: "a"`) |
+| 정수(`smallint`/`integer`/`bigint`의 모든 쌍, 넓은 쪽), `real`, `double precision`의 `+ - * /`; 같은 타입의 `%`(실수의 `%`는 없음); 단항 `-`; 정수의 `& \|`와 `<< >>`(오른쪽 `integer`) | 엔진의 연산 코드(SQLite의 바이트코드). 문자열 상수는 그 정수 타입으로 읽음(`xq_pg_int4('a')`: `'a' + 1`은 `invalid input syntax for type integer: "a"`) |
+| `numeric`의 `+ - * / %`, 단항 `-` | `xq_dec_add()` ... `xq_dec_neg()`: 정확한 키([numeric](#numeric)) |
 | `date ± integer` → `date`, `date - date` → `integer`, `date ± interval`·`date + time` → `timestamp`, `timestamp[tz] ± interval` → 같은 타입, `timestamp[tz] - timestamp[tz]` → `interval`, `time ± interval` → `time`, `time - time`, `interval ± interval`, `-interval`, `interval * double precision`, `interval / double precision` → `interval`(교환한 행 포함) | `datetime.zig`의 엔진 함수 `xq_pg_<PostgreSQL 구현 이름>`(`xq_pg_date_pli`, `xq_pg_timestamp_pl_interval`, `xq_pg_interval_mul` ...) |
 | `jsonb - text`, `jsonb - integer`, `jsonb - text[]` | `xq_pg_jsonb_delete()`, `xq_pg_jsonb_delete_keys()` |
 
 - 달 더하기는 PostgreSQL처럼 달, 날, 시간 순서이고 달의 마지막 날로 맞춥니다(`date '2024-01-31' + interval '1 month'`은 `2024-02-29 00:00:00`). 타임스탬프의 차는 날과 시간의 interval입니다(`justify_hours()`: `1 day 02:00:00`, `-1 days -02:00:00`). `interval * 수`·`/ 수`는 달의 나머지를 30일로, 날의 나머지를 시간으로 내립니다(`interval '1 month' / 2`는 `15 days`).
-- interval은 PostgreSQL의 기본 출력 형식(`IntervalStyle` postgres)입니다: `1 day`, `1 day 02:00:00`, `-1 mons`, `3 years 2 mons`, `-1 days +01:00:00`.
+- interval은 PostgreSQL의 기본 출력 형식(`IntervalStyle` postgres)입니다: `1 day`, `1 day 02:00:00`, `-1 mons`, `3 years 2 mons`, `-1 days +01:00:00`, `infinity`/`-infinity`.
+- interval 연산은 PostgreSQL 18의 것입니다: 무한의 규칙(`infinity + 1 day`는 `infinity`, `infinity - infinity`와 `infinity * 0`은 `interval out of range`, `time + infinity`는 `cannot add infinite interval to time`), 필드가 넘치면 `interval out of range`, 곱셈·나눗셈의 반올림은 `rint()`(짝수 쪽).
 - 피연산자 하나라도 타입을 모르면(SQLite 테이블의 열, 규칙이 없는 함수) 표를 보지 않고 SQLite의 연산입니다(오류 없음). 매개변수와 NULL은 문자열 상수처럼 어느 타입과도 맞지만 문장을 실패시키지 않고, 행이 정해지면 매개변수는 그 행의 타입을 받습니다(`ts + $1`의 `$1`은 `interval`). 문자열 상수끼리(`'1' + '2'`)도 SQLite의 연산입니다.
 - `||`는 표에 없습니다(PostgreSQL의 `text || anynonarray`는 어느 타입이나 받으므로). jsonb의 `||`와 비교는 `overload.zig`의 따로 된 선택이고, jsonb `-`의 오른쪽이 표가 모르는 타입(SQLite 열, `int[]`)일 때도 그쪽이 고릅니다.
 - 뷰, CHECK, 생성 열, 식 인덱스의 텍스트에는 고른 함수가 남습니다(`xq_pg_date_pli("d", 1)`). 어느 방언의 연결에서 읽어도 같은 뜻입니다.
@@ -211,26 +213,45 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 배열 | 아래 [배열](#배열) |
 | 비교 | `greatest`/`least`(NULL은 건너뜀) |
 | 수학 | `floor`, `ceil`, `sqrt`, `power`, `exp`, `ln`, `log`, `mod`, `trunc`, `sign`, `pi` |
-| 난수·UUID | `random()`(0 이상 1 미만 실수), `gen_random_uuid()` |
+| 난수·UUID | `random()`(0 이상 1 미만 실수), `gen_random_uuid()`, `uuidv4()`, `uuidv7([shift interval])`, `uuid_extract_version()`, `uuid_extract_timestamp()`(아래 [uuid](#uuid)) |
 | 시스템 | `version()`, `current_user`, `current_database()`, `current_schema`, `current_schemas(bool)`, `current_setting(name [, missing_ok])`, `set_config(name, value, false)`, `format_type(oid, typmod)`(와이어 서버가 알리는 타입 OID의 이름, psql의 `\gdesc`), `pg_backend_pid()`, `pg_is_in_recovery()`, `quote_ident`/`quote_literal`/`quote_nullable` |
 | 카탈로그 | 아래 [카탈로그](#카탈로그)의 함수 |
 | 시퀀스 | 시퀀스 함수(`nextval()` 등) |
 | JSON | 아래 [JSON](#json) |
 
+### uuid
+
+`uuid`는 16바이트 BLOB으로 저장합니다(`src/dialect/postgres/uuid.zig`). PostgreSQL의 uuid 순서(`uuid_cmp()`)는 바이트 순서이므로 SQLite의 BLOB 비교(memcmp)가 곧 PostgreSQL의 순서입니다. 그래서 인덱스, 범위 검색, `ORDER BY`, `PRIMARY KEY`/`UNIQUE`/외래 키가 값 그대로 동작하고, `uuidv7()` 키는 시간 순서라 인덱스에 거의 끝에만 붙습니다.
+
+- 입력은 PostgreSQL의 `uuid_in()`과 같습니다: 16진수 32자리(대소문자 무관), 네 자리마다(마지막 뒤 말고) 하이픈 하나를 둘 수 있음, 전체를 `{}`로 감쌀 수 있음, 공백은 없음. 아니면 `invalid input syntax for type uuid: "x"`(22P02). 출력은 소문자의 `8-4-4-4-12`입니다.
+- 열에 넣는 값(상수, 텍스트·이진으로 바인딩한 매개변수, `INSERT ... SELECT`의 값)은 저장 함수 `xq_pg_uuid()`가 16바이트로 바꿉니다. 열의 CHECK `length(u) = 16`(이름 `invalid input syntax for type uuid`)은 다른 BLOB을 막습니다. `DEFAULT '...'`은 CREATE TABLE에서 읽어 `X'..'`로 남고, `DEFAULT gen_random_uuid()`는 `xq_postgres_uuidv4()`입니다.
+- 캐스트: `'...'::uuid`는 `xq_pg_uuid('...')`(상수라 한 번 계산), `u::text`와 `u || 'x'`, `concat()`·`format()`의 인자, JSON을 만드는 함수의 인자(`to_json(u)`는 `"a0eebc99-..."`), 배열의 원소(`ARRAY[u]`, `array_agg(u)`, `u = ANY(arr)`)는 그 텍스트(`xq_pg_uuid_text()`)입니다. `uuid[]`는 다른 배열처럼 원소의 텍스트로 저장합니다.
+- 비교(`=`, `<` ..., `IN`, `BETWEEN`)는 문자열 상수와 매개변수를 열의 형태로 바꿉니다(`u = xq_pg_uuid('...')`, `u = xq_pg_uuid($1)`). 열은 그대로 두므로 인덱스를 씁니다. 뷰·CHECK·식 인덱스의 텍스트에도 그 함수가 남습니다.
+- 셸과 와이어 서버는 텍스트로 보여 줍니다([값 표시](architecture.md#값-표시)). 와이어의 열 OID는 2950, 이진 형식은 16바이트(결과와 매개변수), API로 돌아오는 값은 16바이트 BLOB입니다.
+- **예전 테이블**: uuid를 TEXT로 저장하던 때에 만든 테이블의 열(선언 타입 `uuid`, 저장 `TEXT`)은 그 표현을 유지합니다. 열마다 저장 타입으로 정합니다: 넣는 값은 `xq_pg_uuid_text()`가 정규 텍스트로 바꾸고(`Rules.store_text`), 비교는 상수를 텍스트로 바꿔(`u = xq_pg_uuid_text('...')`) 그 열의 인덱스를 씁니다. 텍스트 열과 BLOB 열의 비교(`old.u = new.u`)는 BLOB 쪽을 텍스트로 바꿔 맞습니다. 새 테이블(`ALTER TABLE ADD COLUMN` 포함)은 BLOB입니다.
+- PostgreSQL 18의 함수:
+  - `gen_random_uuid()`와 `uuidv4()`: 무작위 버전 4. 파서가 `gen_random_uuid()`를 `uuidv4()`로 부릅니다. 예전 스키마의 `xq_postgres_gen_random_uuid()`는 뜻 그대로(36자 텍스트) 남습니다.
+  - `uuidv7([shift interval])`: 앞 48비트가 Unix 밀리초, 다음 12비트가 밀리초 안의 1/4096(RFC 9562의 방법 3), 나머지가 무작위인 버전 7. PostgreSQL처럼 연결(세션)마다 시계가 호출마다 적어도 1/4096밀리초 앞으로 가므로(`get_real_time_ns_ascending()`) 한 연결이 만든 값은 순서대로입니다. `shift`는 `timestamptz + interval`처럼 더하고, 1970년 전이나 48비트 밖이면 `timestamp out of range for UUID version 7`(22008). 확장을 올린 sqlite3도 연결마다 그 시계를 둡니다.
+  - `uuid_extract_version(u)`: 버전(`smallint`), RFC 9562 변형이 아니면 NULL.
+  - `uuid_extract_timestamp(u)`: 버전 1과 7의 시각(`timestamptz`), 그 밖은 NULL.
+  - `gen_random_uuid()`와 `uuidv7()`은 결정적이지 않으므로 인덱스·CHECK에는 쓸 수 없고 DEFAULT에는 씁니다.
+
 ### JSON
 
-`json`과 `jsonb`는 PostgreSQL 18과 같은 값을 냅니다. 둘 다 TEXT로 저장합니다.
+`json`과 `jsonb`는 PostgreSQL 18과 같은 값을 냅니다. `json`은 TEXT로, `jsonb`는 SQLite 고유의 JSONB(SQLite 3.45+의 이진 JSON, `jsonb()`가 만드는 것)로 저장합니다.
 
-| 타입 | 저장하는 텍스트 | 예 |
+| 타입 | 저장하는 것 | 예 |
 | --- | --- | --- |
-| `json` | 입력 그대로(공백, 중복 키, 키 순서) | `'{"b":1,  "a":2}'::json` → `{"b":1,  "a":2}` |
-| `jsonb` | 정규화한 텍스트: 키는 길이, 그다음 바이트 순서, 중복 키는 마지막 값, 수는 `numeric_out()` 철자(`1e2`는 `100`, `1.50`은 `1.50`), PostgreSQL의 공백 | `'{"b":1, "a":[1,2], "a":3}'::jsonb` → `{"a": 3, "b": 1}` |
+| `json` | 입력 그대로의 TEXT(공백, 중복 키, 키 순서) | `'{"b":1,  "a":2}'::json` → `{"b":1,  "a":2}` |
+| `jsonb` | 정규화한 값의 JSONB BLOB: 키는 길이, 그다음 바이트 순서, 중복 키는 마지막 값, 수는 `numeric_out()` 철자(`1e2`는 `100`, `1.50`은 `1.50`). 보이는 것은 PostgreSQL의 텍스트(공백 포함) | `'{"b":1, "a":[1,2], "a":3}'::jsonb` → `{"a": 3, "b": 1}` |
 
 - `::json`은 검사만 하고(`xq_pg_json()`), `::jsonb`는 정규화합니다(`xq_pg_jsonb()`). 입력 규칙은 PostgreSQL의 것입니다(RFC 8259, `jsonb`의 `\u0000`은 `unsupported Unicode escape sequence`). 잘못된 값은 `invalid input syntax for type json`입니다.
-- `json`/`jsonb` 열은 CHECK `json_valid()`를 그대로 두고, INSERT·UPDATE·`ON CONFLICT DO UPDATE`가 넣는 값을 `jsonb` 열이면 정규화, `json` 열이면 검사합니다. 상수 DEFAULT는 CREATE TABLE 때 정규화해 SQLite 텍스트로 저장합니다. 선언 타입은 `xq_catalog`의 `type` 키에 `json`/`jsonb`로 남습니다.
-- 피연산자 타입으로 정하는 것(`overload.zig`): `jsonb`의 `||`·`-`, `jsonb`의 `->`·`#>`(결과도 jsonb), `jsonb` 비교와 `ORDER BY`(아래), JSON을 만드는 함수의 인자(`json`/`jsonb`는 JSON으로, 불리언은 `true`/`false`로, 배열은 JSON 배열로, `double precision`·`real`·`numeric`은 PostgreSQL 철자의 수로: [PostgreSQL과 다른 점](#postgresql과-다른-점)의 JSON 수). 이름을 해석한 뒤 코어의 타입(`Expr.xq_type`)으로 고르므로 테이블 열, 서브쿼리·CTE·뷰의 열, 캐스트, 함수 결과 어디서 온 `jsonb`든 같습니다(`SELECT s.d || '{"b":2}' FROM (SELECT d FROM t) s`, 뷰의 jsonb 열 `||`). 타입을 모르는 쪽(문자열 상수, NULL, 타입 모르는 매개변수)은 다른 쪽 타입으로 읽습니다.
-- 이름과 FROM 구조로 정하는 것(`jtype.zig`, 내리기 전): 값으로 쓴 FROM 항목은 그 행(`xq_pg_row_json('a', t.a, ...)`, 값의 JSON 변환은 위처럼 코어가), JSON 집합 반환 함수의 열 참조와 그 옆의 `*`, json/jsonb 열에 넣는 값(`xq_pg_jsonb()`/`xq_pg_json()`로 감쌈; 값이 이미 그 타입의 함수 결과면 코어가 감싼 것을 뺌).
-- 스키마가 남기는 텍스트(뷰, CHECK, 생성 열, 식 인덱스, CTE 안 포함)에는 그 선택이 함수로 적힙니다(`ddltype.zig`가 같은 식을 해석만 해 보고 트리에 되돌림): `xq_pg_jsonb_concat(...)`, `COLLATE xq_pg_jsonb` ... 그래서 SQLite 방언이나 다른 방언에서 읽어도 같은 뜻이고, 이 방언에서 읽을 때 코어는 뷰·트리거의 텍스트에서 다시 고르지 않습니다(SQLite 방언으로 만든 뷰의 `||`는 이 방언에서도 텍스트 연결).
+- `json` 열은 TEXT와 CHECK `json_valid()`, `jsonb` 열은 BLOB과 CHECK `json_valid(j, 8)`(JSONB인 BLOB)입니다. INSERT·UPDATE·`ON CONFLICT DO UPDATE`가 넣는 값은 `json` 열이면 검사하고(`jtype.zig`), `jsonb` 열이면 저장 변환(`Rules.store`)이 열의 저장 타입대로 바꿉니다: BLOB 열은 정준 JSONB(`xq_pg_jsonb_bin()`), 이 저장 방식 전에 만든 데이터베이스의 TEXT 열은 지금처럼 정규화한 텍스트(`xq_pg_jsonb_text()`). 상수 DEFAULT는 CREATE TABLE 때 JSONB BLOB 리터럴(`X'...'`)로, 상수가 아닌 DEFAULT와 생성 열은 `xq_pg_jsonb_bin(...)`으로 적습니다. 선언 타입은 `xq_catalog`의 `type` 키에 `json`/`jsonb`로 남습니다.
+- 정준 JSONB: 값 하나에 바이트열 하나라서 같은 값은 같은 바이트(UNIQUE, `GROUP BY`, `DISTINCT`가 memcmp로 맞음). 노드마다 가장 작은 헤더, null/true/false, 수는 소수점이 없으면 INT 있으면 FLOAT(지수 없이 `numeric_out()`의 자릿수), 문자열은 이스케이프할 것이 없으면 TEXT 있으면 TEXTRAW(문자 그대로), 객체는 jsonb의 키 순서(`json.zig`의 `toBlob()`). sqlite3 자신의 함수(`jsonb()`, `json_set()` ...)가 쓴 JSONB는 정준이 아닐 수 있습니다(TEXTJ·TEXT5 문자열, JSON5 수, 쓴 순서의 키, 중복 키, 큰 헤더). 연산자와 함수는 그런 값을 읽을 때 정규화하고(`fromBlob()`), 결과는 정준 JSONB입니다. 표시는 저장된 그대로(키 순서, 수의 철자)이고, 그런 값과 정준 값은 바이트가 달라 UNIQUE·`GROUP BY`·`DISTINCT`에서 다른 값입니다(비교 연산자는 같음). `UPDATE t SET j = j`로 정준이 됩니다.
+- 표현: jsonb 값이 들어 있는 곳에 따라 BLOB(열에서 온 값과 그 연산자·함수의 결과)이거나 TEXT(상수의 캐스트 `'...'::jsonb`, `to_jsonb()`·`jsonb_build_object()`·`jsonb_agg()` 같은 만드는 함수의 결과, `jsonb[]`의 원소, 예전 TEXT 열)입니다. 엔진 함수는 둘 다 받고, jsonb 인자 중 하나가 JSONB BLOB이면 jsonb 결과도 BLOB입니다(그래서 예전 스키마의 식은 같은 텍스트를 냄). 셸, 와이어 서버(텍스트 형식, 이진 형식은 버전 바이트 1과 텍스트), `jsonb::text`(`xq_pg_jsonb_text()`), `concat()`·`format()`, `jsonb || text`, 배열의 원소는 BLOB의 텍스트를 씁니다(`api/display.zig`의 `textAlloc()`).
+- 피연산자 타입으로 정하는 것(`overload.zig`): `jsonb`의 `||`·`-`, `jsonb`의 `->`·`#>`(결과도 jsonb), `jsonb` 비교와 `ORDER BY`(아래), 첨자 `j['a'][0]`(`#>`의 경로, 읽기만), JSON을 만드는 함수의 인자(`json`/`jsonb`는 JSON으로, 불리언은 `true`/`false`로, 배열은 JSON 배열로, `double precision`·`real`·`numeric`은 PostgreSQL 철자의 수로: [PostgreSQL과 다른 점](#postgresql과-다른-점)의 JSON 수). 이름을 해석한 뒤 코어의 타입(`Expr.xq_type`)으로 고르므로 테이블 열, 서브쿼리·CTE·뷰의 열, 캐스트, 함수 결과 어디서 온 `jsonb`든 같습니다(`SELECT s.d || '{"b":2}' FROM (SELECT d FROM t) s`, 뷰의 jsonb 열 `||`). 타입을 모르는 쪽(문자열 상수, NULL, 타입 모르는 매개변수)은 다른 쪽 타입으로 읽습니다.
+- 이름과 FROM 구조로 정하는 것(`jtype.zig`, 내리기 전): 값으로 쓴 FROM 항목은 그 행(`xq_pg_row_json('a', t.a, ...)`, 값의 JSON 변환은 위처럼 코어가), JSON 집합 반환 함수의 열 참조와 그 옆의 `*`, json 열에 넣는 값(`xq_pg_json()`로 감쌈; 값이 이미 json인 함수 결과면 코어가 감싼 것을 뺌).
+- 스키마가 남기는 텍스트(뷰, CHECK, 생성 열, 식 인덱스, CTE 안 포함)에는 그 선택이 함수로 적힙니다(`ddltype.zig`가 같은 식을 해석만 해 보고 트리에 되돌림): `xq_pg_jsonb_concat(...)`, `xq_pg_jsonb_key(j) = xq_pg_jsonb_key(...)`, `CAST(xq_pg_jsonb_text(j) AS TEXT)` ... 그래서 SQLite 방언이나 다른 방언에서 읽어도 같은 뜻이고, 이 방언에서 읽을 때 코어는 뷰·트리거의 텍스트에서 다시 고르지 않습니다(SQLite 방언으로 만든 뷰의 `||`는 이 방언에서도 텍스트 연결).
 
 #### 연산자
 
@@ -245,8 +266,8 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | `#-` | 경로 삭제 | `xq_pg_jsonb_delete_path` |
 | `@?`, `@@` | jsonpath의 결과 존재, 술어(오류는 NULL/false) | `xq_pg_jsonb_path_exists_op`, `_match_op` |
 
-- `json`의 `->`는 입력 텍스트의 그 부분을, `jsonb`의 `->`는 정규화한 텍스트를 돌려줍니다. `->>`는 문자열을 풀고 JSON `null`은 SQL NULL입니다.
-- `jsonb`의 `=`/`<`/`>`와 `ORDER BY`, 집계 안의 `ORDER BY`는 collation `xq_pg_jsonb`로 PostgreSQL의 순서를 씁니다: Object > Array > Boolean > Number > String > Null, 원소·쌍이 많은 컨테이너가 크고, 같으면 차례로 비교. `'1.0'::jsonb = '1'`은 참입니다. 반대쪽의 문자열 상수는 jsonb로 읽습니다.
+- `json`의 `->`는 입력 텍스트의 그 부분을, `jsonb`의 `->`는 정규화한 값을 돌려줍니다(JSONB 값이면 그 노드의 바이트를 그대로: 키만 읽어 찾고 정준이면 복사만 함). `->>`는 문자열을 풀고 JSON `null`은 SQL NULL입니다.
+- `jsonb`의 `=`/`<>`/`<`/`>`, `IN`, `BETWEEN`, `ORDER BY`(집계·윈도우 안 포함)는 PostgreSQL의 순서인 정렬 키를 비교합니다(`xq_pg_jsonb_key()`, `Rules.order_key`): Object > Array > Boolean > Number > String > Null, 원소·쌍이 많은 컨테이너가 크고, 같으면 차례로 비교, 맨 위의 빈 배열은 어느 값보다 작음. 키는 BLOB이고 그 바이트 순서(memcmp)가 jsonb의 순서라 SQLite의 비교와 정렬이 그대로 씁니다(collation은 TEXT에만 걸리므로 JSONB BLOB에 쓸 수 없음). 수는 값으로 같아서 `'1.0'::jsonb = '1'`은 참입니다. 반대쪽의 문자열 상수는 jsonb로 읽습니다. 키 인코딩은 파일 형식의 일부라 바뀌지 않습니다(`json.zig`의 `appendKey()`). 복합 질의(`UNION` ...)의 `ORDER BY`는 항이 열이어야 해서 키 함수를 씌울 수 없으므로 collation `xq_pg_jsonb`를 씁니다: TEXT 값은 jsonb의 순서, JSONB BLOB은 바이트 순서(밖에서 `SELECT ... FROM (복합) s ORDER BY x`로 감싸면 jsonb의 순서). 예전 스키마의 collation `xq_pg_jsonb`(TEXT의 jsonb 순서)는 그대로 등록되어 있습니다.
 - `json`끼리의 `||`와 `=`는 PostgreSQL처럼 `operator does not exist: json || json`입니다.
 - text[] 인자는 리터럴 `'{a,b}'`, `'{a,b}'::text[]`, `ARRAY['a','b']`, text[] 열입니다(아래 [배열](#배열)). `array_to_json()`과 JSON을 만드는 함수는 타입을 아는 배열의 원소를 그 타입대로 씁니다(`int[]`는 수, `boolean[]`은 `true`/`false`).
 
@@ -272,7 +293,7 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 
 #### GIN 인덱스
 
-`CREATE INDEX ... USING gin (doc [jsonb_path_ops])`(그리고 `USING hash`)는 같은 열의 B-tree 인덱스로 만듭니다. 이름은 PostgreSQL과 같고(`g_doc_idx`) `pg_indexes`에 나옵니다. 인덱스가 이 열의 검색을 빠르게 하지는 않습니다: `@>`·`?`는 테이블을 훑고, jsonb의 `=`는 collation `xq_pg_jsonb`라 BINARY 인덱스를 쓰지 않습니다. `((doc ->> 'name'))` 같은 식 인덱스는 그 식에 쓰입니다. 단 식 인덱스·CHECK·생성 열·뷰의 JSON 연산자와 함수는 스키마에 `xq_pg_*`/`xq_postgres_*` 함수로 남으므로, 평범한 sqlite3에서는 그런 인덱스가 있는 테이블에 쓰거나 그 뷰를 읽을 수 없습니다(열 자체와 `gin` 인덱스는 문제없음). [확장](extension.md)을 올린 sqlite3는 같은 결과로 계산합니다.
+`CREATE INDEX ... USING gin (doc [jsonb_path_ops])`(그리고 `USING hash`)는 같은 열의 B-tree 인덱스로 만듭니다. 이름은 PostgreSQL과 같고(`g_doc_idx`) `pg_indexes`에 나옵니다. 인덱스가 이 열의 검색을 빠르게 하지는 않습니다: `@>`·`?`는 테이블을 훑고, jsonb의 `=`는 정렬 키(`xq_pg_jsonb_key()`)의 비교라 열의 인덱스를 쓰지 않습니다(`((xq_pg_jsonb_key(doc)))`의 식 인덱스는 쓸 수 있음). 열 자체는 평범한 sqlite3가 `json()`, `json_extract()`, `->>`로 읽습니다. `((doc ->> 'name'))` 같은 식 인덱스는 그 식에 쓰입니다. 단 식 인덱스·CHECK·생성 열·뷰의 JSON 연산자와 함수는 스키마에 `xq_pg_*`/`xq_postgres_*` 함수로 남으므로, 평범한 sqlite3에서는 그런 인덱스가 있는 테이블에 쓰거나 그 뷰를 읽을 수 없습니다(열 자체와 `gin` 인덱스는 문제없음). [확장](extension.md)을 올린 sqlite3는 같은 결과로 계산합니다.
 
 ### 배열
 
@@ -297,6 +318,37 @@ SQLite 내장 함수에 더해 다음을 지원합니다. 같은 이름의 SQLit
 | 와이어 | `RowDescription`·`ParameterDescription`의 배열 OID(`int4[]` 1007, `text[]` 1009, `bool[]` 1000 ...), 텍스트 형식 그대로, 배열의 이진 형식(매개변수와 결과, 원소가 이진 형식이 되는 타입: [서버](server.md#값과-타입)) |
 
 - 뷰, CHECK, 식 인덱스의 텍스트에는 고른 함수가 남습니다(`xq_pg_subscript_k("a", 1, 3)`, `xq_pg_any(2, "a", 0, 0, 3)`, `xq_pg_array_append("s", ...)`, `COLLATE xq_pg_array_num`). 배열 비교의 collation은 jsonb의 것처럼 방언의 것이라, 배열을 비교하는 뷰는 SQLite 방언에서 읽을 수 없습니다(첨자·`ANY`·`||` 같은 함수는 엔진 함수라 어느 방언에서나 읽힘).
+
+### interval
+
+interval은 정렬 키와 필드를 붙인 32바이트 BLOB입니다(`src/dialect/interval.zig`). 앞 16바이트는 PostgreSQL의 `interval_cmp_value()`(한 달 = 30일, 하루 = 24시간인 마이크로초, 128비트, 부호 비트를 뒤집은 big-endian)이고, 뒤 16바이트는 필드(달 `i32`, 날 `i32`, 마이크로초 `i64`, 같은 방식)입니다. 그래서 `memcmp`의 순서가 PostgreSQL의 순서입니다. `'1 mon'`과 `'30 days'`는 길이가 같지만 다른 값이라(`date + '1 mon'`과 `date + '30 days'`는 다름) 필드를 남깁니다. 이 인코딩은 파일 형식이라 바뀌지 않습니다.
+
+| 쓰는 곳 | xqlite |
+| --- | --- |
+| 정렬, 인덱스, `min`/`max` | BLOB 그대로(SQLite의 BINARY). BLOB 열의 인덱스가 `ORDER BY`와 범위 검색을 맡음 |
+| `=`, `<>`, `IS [NOT] DISTINCT FROM`, `IN (...)`, `BETWEEN` | 키(`xq_pg_iv_key()`)끼리: `'1 mon' = '30 days'` |
+| BLOB 열과 `<`, `<=`, `>`, `>=` | 열은 그대로, 상대는 그 길이의 경계(`< xq_pg_iv_key(x)`, `<= xq_pg_iv_high(x)`): 인덱스 범위 검색 |
+| `GROUP BY`, `DISTINCT`, 창의 `PARTITION BY`·`ORDER BY`, 여러 항의 `ORDER BY`의 마지막이 아닌 항 | 키로(같은 길이는 같은 그룹·동점). `DISTINCT`는 결과 열의 `GROUP BY`가 됨 |
+| `::text`, `\|\|`, `concat()`, `format()`, JSON, 배열의 원소 | 텍스트(`xq_pg_iv_text()`) |
+| `sum()`, `avg()` | `xq_pg_iv_sum()`/`xq_pg_iv_avg()`: PostgreSQL처럼 필드별 합, 평균은 `interval / 개수`, 무한은 같은 부호면 그 무한·다르면 `interval out of range`. 창 함수로도 |
+| `justify_hours()`, `justify_days()`, `justify_interval()`, `isfinite()` | 방언 함수(BLOB을 돌려줌) |
+| 셸, 서버 | 값 표시 계층이 BLOB을 텍스트로. 서버의 바이너리 형식은 PostgreSQL의 `interval_send`(마이크로초 `int64`, 날 `int32`, 달 `int32`), 매개변수도 |
+
+- 뷰, CHECK, 식 인덱스의 텍스트에는 이 함수들이 남고(`xq_pg_iv_key("v") = xq_pg_iv_key('30 days')`, `GROUP BY xq_pg_iv_key("v")`), 모두 엔진 함수라 SQLite 방언과 [확장](extension.md)을 올린 sqlite3도 읽습니다. 연산자의 함수는 `xq_pg_iv_<연산>`(`xq_pg_iv_timestamp_pl_interval()` ...)입니다.
+- UNIQUE와 PRIMARY KEY, `UNION`/`INTERSECT`/`EXCEPT`, `count(DISTINCT v)`, `IN (SELECT ...)`는 바이트로 비교하므로 `'1 mon'`과 `'30 days'`를 다르게 봅니다(PostgreSQL은 같음). 같은 길이의 `max()`/`min()`이 어느 철자를 돌려주는지도 다를 수 있습니다.
+- 예전 데이터베이스(interval을 텍스트로 저장하던 xqlite)의 `TEXT` 열은 그대로입니다. 열마다 선언된 저장 타입으로 구분해, `TEXT` 열에 넣는 값은 텍스트로(무한은 `interval out of range`) 넣고, 정렬은 예전처럼 collation `xq_pg_interval`, 비교와 연산은 위의 함수(텍스트와 BLOB을 모두 읽음)입니다. 예전 스키마가 부르는 `xq_pg_interval()`, `xq_pg_interval_pl()` ...와 collation은 뜻이 그대로 남습니다. 옮기려면 테이블을 다시 만듭니다.
+
+### numeric
+
+`numeric`/`decimal`은 정확한 십진수입니다(`src/dialect/decimal.zig`, 엔진 함수 `src/dialect/decimal_sql.zig`). PostgreSQL처럼 계산하고(반올림은 0에서 먼 쪽, `NaN`과 `±Infinity`, 나눗셈의 스케일은 `select_div_scale()`, 오류와 SQLSTATE), 저장은 값 자체가 정렬 키인 `BLOB`입니다.
+
+- **키**: 바이트 비교(memcmp, SQLite의 BINARY) 순서가 수의 순서이고 같은 수는 같은 바이트열입니다(`1.50`과 `1.5`는 한 키). 그래서 범위 검색, `ORDER BY`, `GROUP BY`, `DISTINCT`, `min`/`max`, PRIMARY KEY, UNIQUE, 외래 키가 SQLite 그대로 인덱스를 씁니다. 형식은 `decimal.zig` 머리말과 [확장](extension.md#numeric-키)에 있습니다. 확장 없는 sqlite3는 값을 바이트로만 보고 쓰지 못합니다(`xq_dec_valid` CHECK).
+- **저장**: 열에 넣는 모든 값(수, 문자열, 매개변수, `INSERT ... SELECT`, `UPDATE`)은 `xq_dec_key(v, p, s)`를 지납니다: `numeric(p,s)`는 s자리로 반올림하고 p - s자리를 넘으면 `numeric field overflow`(22003), 무한대도 그 오류. 스케일 없는 `numeric`은 끝의 0을 버립니다(`'1.50'`은 `1.5`로 보임; 비교·유일성·그룹은 PostgreSQL과 같음). `DEFAULT` 상수는 키의 BLOB 상수(`X'40810364'`)로, 그 밖의 기본값과 생성 열은 `xq_dec_key(식, p, s)`로 스키마에 씁니다. 다른 타입(`integer`, `double precision`, `text` ...)의 열에 넣는 numeric은 그 타입으로 바꿉니다(PostgreSQL의 대입 캐스트: `1.5`를 `integer` 열에 넣으면 2).
+- **이전 데이터베이스**: 이 변경 전에 만든 테이블의 `numeric` 열(STRICT 저장 `ANY`)은 지금처럼 수를 저장합니다(`xq_dec_number()`). 저장 방식은 열마다 선언된 SQLite 타입(`ANY`/`BLOB`)으로 정해 한 열에서 섞이지 않습니다. 옮기려면 테이블을 다시 만듭니다.
+- **식**: `numeric` 연산자는 키의 함수입니다(`a + b` → `xq_dec_add(a, b)`; 리터럴은 `xq_dec('1.50')`로 자릿수와 스케일을 지킴). 비교는 키를 스케일 없이 비교합니다(`n = 1.5` → `n = xq_dec_key('1.5')`: 상수라 인덱스를 씀; 식 인덱스는 `xq_dec_key(식)`으로 저장해 같은 식의 비교가 그 인덱스를 씀). 실수와 만나면 실수로(`xq_dec_float8()`). `round`/`trunc`/`ceil`/`floor`/`abs`/`sign`/`mod`/`div`/`scale`/`min_scale`/`trim_scale`, `sum`/`avg`(윈도우 포함, `sum(bigint)`·`avg(integer)`도 numeric), 정수·실수·텍스트로의 캐스트, `||`·`concat()`·`format()`, JSON(`to_json` ...), 배열 원소(`ARRAY[n]`, `array_agg`)가 키를 읽습니다. 그 밖의 함수에는 수로(`xq_dec_number()`) 넘깁니다.
+- **표시 스케일**: 계산한 값은 PostgreSQL의 표시 스케일(dscale)을 키 뒤에 붙여 들고 다닙니다(`10.0 / 4`는 `2.5000000000000000`, `avg()`도). 셸과 서버는 타입의 스케일(`numeric(10,2)` 열, `n + 1`), 없으면 키의 스케일로 보여 줍니다. 저장한 값(스케일 없음)에서 나온 값은 자기 자릿수입니다. 비교, `IN`, `GROUP BY`, `DISTINCT`는 스케일을 떼고 비교·그룹합니다(`xq_dec_key()`, `Rules.group_key`: `VALUES (1.5), (1.50)`은 한 그룹). `UNION`·`INTERSECT`·`EXCEPT`, `count(DISTINCT x)`는 바이트로 비교하므로 스케일만 다른 계산 값을 다른 값으로 봅니다.
+- **입력**: `numeric_in()`의 문법(앞뒤 공백, `NaN`, `Infinity`/`inf`, `_` 자리 구분, `0x`/`0o`/`0b` 정수, 지수), 범위(소수점 앞 131072자리, 뒤 16383자리; 넘으면 `value overflows numeric format`). 실수는 15자리(`float8_numeric()`).
+- **서버**: 텍스트 형식은 위 표시, 이진 형식은 PostgreSQL의 NBASE 10000 형식(결과와 매개변수).
 
 ### 카탈로그
 
@@ -328,32 +380,36 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 | `integer`(`serial`) | `INTEGER` | 범위 → `integer out of range` |
 | `bigint`, `bigserial`, `oid` | `INTEGER` | |
 | `real`, `double precision`, `float(p)` | `REAL` | |
-| `numeric(p,s)`, `decimal` | `ANY` | 숫자만(`invalid input syntax for type numeric`). 문자열은 그 수로 읽어 넣음(아래) |
+| `numeric(p,s)`, `decimal` | `BLOB` | 정렬 키만(`xq_dec_valid(n, p, s)` → `invalid input syntax for type numeric`). 넣는 모든 값을 `numeric(p,s)`의 키로 바꿈(아래 [numeric](#numeric)) |
 | `boolean` | `INTEGER` | 0/1만(`invalid input syntax for type boolean`). 문자열은 불리언 철자로 읽어 넣음(아래) |
 | `text` | `TEXT` | |
 | `varchar(n)`, `char(n)` | `TEXT` | `length() <= n`(`value too long for type character varying(n)`, `character(n)`) |
 | `bytea` | `BLOB` | |
-| `date`, `time`, `timestamp[tz]`, `interval` | `TEXT` | 넣는 문자열은 PostgreSQL이 읽고 쓰는 텍스트로(아래) |
-| `uuid` | `TEXT` | |
-| `json`, `jsonb` | `TEXT` | `json_valid()`; 넣는 값은 `json`이면 검사, `jsonb`이면 정규화([JSON](#json)) |
+| `date`, `time`, `timestamp[tz]` | `TEXT` | 넣는 문자열은 PostgreSQL이 읽고 쓰는 텍스트로(아래) |
+| `interval` | `BLOB` | `xq_pg_iv_valid()`(`invalid input syntax for type interval`); 넣는 값은 interval의 BLOB으로([interval](#interval)). 예전 데이터베이스의 열은 `TEXT` |
+| `uuid` | `BLOB` | 16바이트(`invalid input syntax for type uuid`). 넣는 문자열은 `uuid_in()`처럼 읽음([uuid](#uuid)). 예전 테이블의 `TEXT` 열은 텍스트 그대로 |
+| `json` | `TEXT` | `json_valid()`; 넣는 값은 검사([JSON](#json)) |
+| `jsonb` | `BLOB` | `json_valid(j, 8)`; 넣는 값은 정준 JSONB(이 방식 전에 만든 TEXT 열은 정규화한 텍스트, [JSON](#json)) |
 | 배열(`integer[]`, `text[]`, `varchar(n)[]` ...) | `TEXT` | 배열 리터럴(`malformed array literal`); 넣는 값은 원소 타입으로 읽어 정규 텍스트로([배열](#배열)) |
 
 - 선언 타입은 `xq_catalog`의 `type` 키에 `format_type()` 철자(`character varying(20)`, `timestamp with time zone`)로 남습니다.
 - 다른 타입의 값을 넣으면 SQLite STRICT 오류(`cannot store TEXT value in INTEGER column t.a`)가 납니다.
-- `boolean`과 `numeric` 열에 넣는 문자열(상수, 텍스트로 바인딩한 매개변수, `INSERT ... SELECT`의 값)은 PostgreSQL이 그 타입의 입력을 읽듯 읽습니다: `'t'`, `'true'`, `'yes'`, `'on'`, `'1'`(그 접두어 `'tr'`, `'of'` ..., 대소문자·앞뒤 공백 무시)은 1/0, `' 1.50 '`은 수 1.5, `'3'`은 3. 아니면 `invalid input syntax for type boolean: "x"`/`invalid input syntax for type numeric: "x"`(22P02). `INSERT`와 `UPDATE`(`ON CONFLICT DO UPDATE` 포함)가 저장 직전에 바꿉니다([타입을 읽는 코드 생성](architecture.md#타입을-읽는-코드-생성)).
+- `boolean` 열에 넣는 문자열(상수, 텍스트로 바인딩한 매개변수, `INSERT ... SELECT`의 값)은 PostgreSQL이 그 타입의 입력을 읽듯 읽습니다: `'t'`, `'true'`, `'yes'`, `'on'`, `'1'`(그 접두어 `'tr'`, `'of'` ..., 대소문자·앞뒤 공백 무시)은 1/0. 아니면 `invalid input syntax for type boolean: "x"`(22P02). `numeric` 열에 넣는 값은 모두 `xq_dec_key(v, p, s)`를 지납니다(아래 [numeric](#numeric)). `INSERT`와 `UPDATE`(`ON CONFLICT DO UPDATE` 포함)가 저장 직전에 바꿉니다([타입을 읽는 코드 생성](architecture.md#타입을-읽는-코드-생성)).
 - `date`, `time`, `timestamp`, `timestamptz`, `interval` 열에 넣는 문자열도 그 타입의 입력으로 읽어 PostgreSQL의 출력 텍스트로 넣습니다: `'2024-1-5'`는 `2024-01-05`, `'2 hours'`는 `02:00:00`, `timestamptz`의 `'2024-01-01 10:00:00+02'`는 UTC의 `2024-01-01 08:00:00`. 읽지 못하면 `invalid input syntax for type date: "x"`(22007), 범위 밖의 필드는 `date/time field value out of range: "2024-02-30"`(22008). 텍스트는 그대로 sqlite3의 날짜 함수가 읽습니다.
+- `interval` 열에 넣는 값(문자열, 텍스트나 바이너리로 바인딩한 매개변수, interval 식)은 `xq_pg_iv()`로 BLOB이 됩니다. `DEFAULT '1 hour'`는 `DEFAULT (xq_pg_iv('1 hour'))`로 남습니다.
 - 모르는 타입은 `type "x" does not exist`(배열이면 `type "x[]" does not exist`), `serial[]`은 `array of serial is not implemented`입니다.
 
 ### 캐스트
 
 | 캐스트 | xqlite | PostgreSQL과 다른 점 |
 | --- | --- | --- |
-| `::date`/`::time`/`::timestamp`/`::timestamptz`/`::interval` | `xq_pg_date()`/`xq_pg_time()`/`xq_pg_timestamp()`/`xq_pg_timestamptz()`/`xq_pg_interval()`: PostgreSQL의 입력(ISO 날짜, `T`나 공백 뒤의 시각, 오프셋, `BC`; interval의 단위·시각·`ago`·ISO 8601 `P1DT2H`; `now`, `today`, `tomorrow`, `yesterday`, `epoch`)을 읽어 그 출력으로(초의 소수는 끝의 0 없이: `03:04:05.5`). 읽지 못하면 오류 | `infinity`, 시간대 이름(`Asia/Seoul`), `DateStyle`이 바꾸는 입력·출력은 없음. `timestamptz`는 UTC. `::timetz`는 `time()` |
+| `::date`/`::time`/`::timestamp`/`::timestamptz`/`::interval` | `xq_pg_date()`/`xq_pg_time()`/`xq_pg_timestamp()`/`xq_pg_timestamptz()`/`xq_pg_iv()`(interval의 BLOB; `::text`는 `xq_pg_iv_text()`): PostgreSQL의 입력(ISO 날짜, `T`나 공백 뒤의 시각, 오프셋, `BC`; interval의 단위·시각·`ago`·ISO 8601 `P1DT2H`; `now`, `today`, `tomorrow`, `yesterday`, `epoch`)을 읽어 그 출력으로(초의 소수는 끝의 0 없이: `03:04:05.5`). 읽지 못하면 오류 | `infinity`, 시간대 이름(`Asia/Seoul`), `DateStyle`이 바꾸는 입력·출력은 없음. `timestamptz`는 UTC. `::timetz`는 `time()` |
 | `::smallint`/`::int`/`::bigint` | `xq_pg_int2/4/8()`: 실수는 0에서 먼 쪽으로 반올림, 문자열은 정수로 읽음(`'2.5'::int`는 `invalid input syntax for type integer`), 범위 밖은 `integer out of range` | |
 | `::varchar(n)` | 자름 | |
-| `::numeric(p,s)` | 반올림 | |
+| `::numeric`, `::numeric(p,s)` | `xq_dec(x [, p, s])`: 정확한 키, s로 반올림, p - s자리를 넘으면 `numeric field overflow`(22003) | |
 | `::boolean` | `'t'`/`'yes'`/`'on'` 같은 철자를 읽음 | |
 | `::json`/`::jsonb` | `xq_pg_json()`/`xq_pg_jsonb()` | |
+| `::uuid`, uuid의 `::text` | `xq_pg_uuid()`(16바이트), `xq_pg_uuid_text()`([uuid](#uuid)) | `bytea`·정수에서의 캐스트는 실행 중 오류(PostgreSQL은 해석 중 `cannot cast type`) |
 | `::int[]`(`text[]`, `numeric[]` ...) | `xq_pg_array_int4()` ...: 배열 입력, 원소마다 그 타입으로 읽어 정규 텍스트로(위 [배열](#배열)) | 원소 타입의 typmod(`numeric(10,2)[]`의 반올림, `varchar(3)[]`의 길이)는 적용하지 않음 |
 
 ## PostgreSQL과 다른 점
@@ -361,7 +417,7 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 | 주제 | PostgreSQL | xqlite | 이유 |
 | --- | --- | --- | --- |
 | 불리언 | `true`/`false` | 정수 0/1. `SELECT true`는 `1`(SQLITE_INTEGER). 셸과 서버는 `boolean` 열과 불리언 식(`a = b`, `true`, `x IS NULL`)을 psql처럼 `t`/`f`로 보여 줌([값 표시](architecture.md#값-표시)). 뷰의 불리언 식 열은 1/0. 열에 넣는 문자열은 불리언 철자로 읽음(`'yes'`, `' off '`). PostgreSQL은 타입이 `text`인 식(텍스트 열, `'a' \|\| 'b'`)을 넣으면 오류이지만 xqlite는 그것도 읽음 | sqlite3 API로 돌아오는 결과의 타입을 바꿀 수 없음. 저장 값은 값의 타입이 아니라 실행 중 값이 문자열인지로 바꿈 |
-| `numeric` | 고정 소수점 | SQLite 수(정수 또는 실수). API로는 `1.50`이 `1.5`. 셸과 서버는 `numeric(p,s)` 열, 캐스트(`x::numeric(6,2)`), 스케일을 아는 식(`1.50`, `n + 1`, `n * n`, `sum(n)`, `round(x, 2)`)을 그 자리수로 보여 줌(`1.50`, `0.1 + 0.2`는 `0.3`). PostgreSQL이 값마다 스케일을 정하는 나눗셈과 `avg()`는 `1.5`, `1.0`(PostgreSQL은 `1.5000000000000000`) | 저장 타입이 `ANY`. 넣는 문자열(상수, 텍스트로 바인딩한 값)은 수로 읽음(`'1.50'`은 1.5). `numeric(p,s)`에 넣는 값을 스케일 s로 반올림하지 않고, `'NaN'`·`'Infinity'`는 거부(SQLite에 NaN이 없음) |
+| `numeric` | 정확한 십진수 | 정확함(정렬 키 BLOB, [numeric](#numeric)). API로는 값이 키(BLOB, `xqlite.decimal.keyText()`로 읽음). 스케일 없는 `numeric` 열은 끝의 0을 버리고 저장(`'1.50'`은 `1.5`로 보임). 이전에 만든 테이블의 `ANY` 열은 수 그대로 | `power`/`sqrt`/`exp`/`ln`/`log`/`^`는 실수로 계산(PostgreSQL은 높은 정밀도), `to_char`·`to_number`·`width_bucket`·`stddev`·`variance` 없음 |
 | 식의 타입 | 연산자·함수 해석이 정함 | 같은 규칙으로 매김: `integer + integer`는 `integer`, `integer + bigint`는 `bigint`, `1`은 `integer`, `1.50`은 `numeric`, `'a'`는 `text`, `count()`·`sum(int)`은 `bigint`, `avg()`는 `numeric`, `now()`은 `timestamp with time zone`, `date + 1`은 `date`([코어의 타입](architecture.md#코어의-타입)). 결과 열의 선언 타입(`sqlite3_column_decltype()`, psql `\gdesc`의 철자), 값 표시, 매개변수의 타입, 정수 산술의 범위 검사(아래 정수 오버플로), 저장 시 변환(`boolean`, `numeric`, 날짜·시각)에 씀. 산술·비트 연산자는 연산자 표로 고르고([연산자 해석](#연산자-해석)), 그 밖에 피연산자 타입으로 고르는 것은 `jsonb` 연산자·비교·`ORDER BY`, interval의 비교·`ORDER BY`, JSON을 만드는 함수의 인자(`overload.zig`) | 함수 해석은 이름으로(인자 타입으로 오버로드를 고르지 않음) |
 | NULL 정렬 | NULL이 가장 큰 값 | 같음(ASC면 마지막, DESC면 처음) | SQLite는 반대라 방언이 맞춤. NULL일 수 없는 열(NOT NULL, INTEGER PRIMARY KEY, 외부 조인의 NULL 쪽이 아닌 것)에는 붙이지 않아 인덱스 순서를 그대로 씀(그때 바이트코드는 SQLite와 같음) |
 | `LIKE` | 대소문자 구분, 기본 이스케이프 `\` | 같음(엔진 함수 `xq_like()`). `ILIKE`는 ASCII 대소문자만 무시(`xq_ilike()`) | SQLite의 LIKE는 대소문자를 무시하고 기본 이스케이프가 없음 |
@@ -375,9 +431,9 @@ psql의 `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`와 `\
 | 복합 질의의 타입 | 항들의 타입을 맞추거나 실패(`UNION types boolean and integer cannot be matched`) | 공통 타입이 있으면 그 타입, 없으면 실패하지 않고 타입을 모름(값은 저장된 대로 보임) | |
 | 외래 키 | 늘 강제 | 같음. 이 방언의 첫 문장에서 연결의 `PRAGMA foreign_keys`를 켬. 응용이 끈 것은 그대로 둠 | sqlite3는 여전히 끈 채로 씀 |
 | 격리 수준 | 여러 수준 | 파싱만 함 | SQLite는 늘 직렬화 |
-| JSON | `jsonb`는 이진 형식 | 정규화한 TEXT. `json`은 입력 텍스트 | sqlite3가 그대로 읽고 `json_extract()` 등을 씀. sqlite3가 넣은 값은 정규화되지 않은 채 남고(연산자·함수는 읽을 때 정규화; 확장을 올린 sqlite3는 `xq_pg_jsonb(x)`로 정규화해 넣을 수 있음), CHECK `json_valid()`는 SQLite의 규칙. 연산자(`->`, `@>`, `?` ...)의 식 인덱스·CHECK·뷰는 [확장](extension.md)을 올린 sqlite3가 같은 결과로 계산 |
-| jsonb 비교 | jsonb의 순서 | 같음(collation `xq_pg_jsonb`). 인덱스는 BINARY라 `=`에 쓰이지 않음 | |
-| JSON 수 | numeric과 float8 | 같음: 타입을 아는 인자는 JSON을 만드는 함수가 PostgreSQL 철자로 씀. `double precision`/`real`은 `float8out()`처럼 되읽히는 가장 짧은 자릿수, 지수가 -4~14면 고정 소수점, 아니면 두 자리 이상의 지수(`to_json(100.0::float8)`은 `100`, `1e20::float8`은 `1e+20`, `1e-5::float8`은 `1e-05`; `xq_pg_float_json()`), 스케일을 아는 `numeric`은 그 자릿수(`to_json(1.50)`은 `1.50`, `numeric(5,2)` 열의 2는 `2.00`; `xq_pg_numeric_json()`). `row_to_json`·`json_agg`의 열도 | 스케일을 모르는 numeric(`avg()`, 나눗셈)과 타입을 모르는 값은 SQLite 철자(`2.5`, `1.0e+20`) |
+| JSON | `jsonb`는 이진 형식 | SQLite의 JSONB(정준 인코딩). `json`은 입력 텍스트. 이 방식 전에 만든 TEXT 열은 정규화한 TEXT | 확장 없는 sqlite3가 `json(j)`, `json_extract()`, `->>`로 읽음. sqlite3는 TEXT를 넣지 못하고(STRICT BLOB) `jsonb('...')`로 넣으며, 그 값은 정준이 아닐 수 있음(연산자·함수는 읽을 때 정규화; 확장을 올린 sqlite3는 `xq_pg_jsonb_bin(x)`로 정준 JSONB를 넣을 수 있음). CHECK `json_valid(j, 8)`(깊이 1000까지)는 SQLite의 규칙. 연산자(`->`, `@>`, `?` ...)의 식 인덱스·CHECK·뷰는 [확장](extension.md)을 올린 sqlite3가 같은 결과로 계산 |
+| jsonb 비교 | jsonb의 순서 | 같음(정렬 키 `xq_pg_jsonb_key()`). 열의 인덱스는 `=`에 쓰이지 않음. UNIQUE·`GROUP BY`·`DISTINCT`는 정준 JSONB의 바이트라 수의 철자만 다른 같은 값(`1.0`과 `1`)은 다른 값(PostgreSQL은 같은 값; 예전 TEXT 저장도 그랬음). 복합 질의의 `ORDER BY`는 위 [JSON](#json) | |
+| JSON 수 | numeric과 float8 | 같음: 타입을 아는 인자는 JSON을 만드는 함수가 PostgreSQL 철자로 씀. `double precision`/`real`은 `float8out()`처럼 되읽히는 가장 짧은 자릿수, 지수가 -4~14면 고정 소수점, 아니면 두 자리 이상의 지수(`to_json(100.0::float8)`은 `100`, `1e20::float8`은 `1e+20`, `1e-5::float8`은 `1e-05`; `xq_pg_float_json()`), `numeric`은 그 자릿수(`to_json(1.50)`은 `1.50`, `numeric(5,2)` 열의 2는 `2.00`, `avg()`는 `1.5000000000000000`; 키는 `xq_pg_dec_json()`, 리터럴은 `xq_pg_numeric_json()`), `NaN`·`Infinity`는 문자열. `row_to_json`·`json_agg`의 열도 | 타입을 모르는 값은 SQLite 철자(`2.5`, `1.0e+20`) |
 | 배열 | 원소 타입이 있는 이진 값 | PostgreSQL의 배열 텍스트(`{1,2}`)를 TEXT로. 원소 타입은 식의 타입([배열](#배열)). API로도 텍스트. 원소 타입을 모르는 곳(타입 모르는 매개변수, `ANY`의 문자열 상수 밖)에서는 원소를 적힌 대로 값으로 비교. `name[]`은 원소 타입이 없어 와이어에서 `text[]`(1009, PostgreSQL은 1003) | sqlite3가 그대로 읽고, 와이어·psql·카탈로그가 이미 이 텍스트를 씀. 배열 열의 CHECK(`xq_pg_array_valid()`)와 첨자·연산자의 식, collation `xq_pg_array`·`xq_pg_array_num`의 정렬은 [확장](extension.md)을 올린 sqlite3가 계산 |
 | 저장되는 식 | | IR이 SQLite 텍스트로 렌더링. PostgreSQL 함수는 `xq_postgres_greatest(...)`, LIKE는 `xq_like(...)`처럼 저장 | SQLite 방언이나 다른 방언의 연결에서 읽어도 같은 뜻. 평범한 sqlite3에서는 그런 식을 계산할 수 없고, [확장](extension.md)(`libxqlite_ext`)을 올린 sqlite3·Python·Datasette는 같은 결과로 계산(세션·카탈로그를 읽는 `current_setting()`, `pg_get_viewdef()` 같은 것만 빠짐). 그 함수들의 뜻은 파일 형식의 일부라 바뀌지 않음([ABI 규칙](extension.md#abi-규칙)) |
 
@@ -436,9 +492,9 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | DML | 데이터를 바꾸는 CTE, `ON CONFLICT ON CONSTRAINT`, `COPY` |
 | 타입 | `char(n)`의 공백 채움(`'x'::char(3)`, 저장한 `'ab'`는 `'ab  '`로 보여야 함)과 n을 넘는 뒤 공백 자르기(`'abcd    '`를 `char(4)`·`varchar(4)`에 넣으면 오류), `ENUM`·`CREATE TYPE`·도메인, 시퀀스의 데이터 타입(언제나 `bigint`) |
 | 배열 | 배열의 원소 typmod(`numeric(10,2)[]`의 반올림, `varchar(3)[]`의 길이 검사), 배열 슬라이스에 쓰기(`a[1:2] = ...`), `array_fill()`·`trim_array()`·`array_sample()`·`array_shuffle()`, 다차원 배열의 `array_to_json()`, 다른 배열 타입 사이의 캐스트의 원소 변환(`int[]::text[]`는 텍스트를 다시 읽음), `ARRAY[...]`의 원소에 쓰인 타입 모르는 매개변수, 레코드 일반(`_pg_expandarray()`의 `(x,n)`만), `name[]`의 OID 1003, 원소 타입이 다른 배열의 `\|\|`·비교에서의 오류(PostgreSQL은 `operator does not exist`) |
-| JSON | jsonpath `like_regex`의 POSIX 문자 클래스·역참조·플래그 `m`/`x`, `.**{n to m}`, `keyvalue()`, `datetime()`과 문자열 메서드; 복합 타입 인자의 `json_populate_record`(`NULL::table`만), `IS JSON`의 비텍스트 인자 오류, select 목록의 레코드 반환 함수(`json_each`), `WITH ORDINALITY`의 select 목록, `jsonb` 부분 쓰기 연산자(`j['a']`), GIN의 `@>`·`?` 인덱스 검색, sqlite3가 넣은 jsonb의 정규화, PostgreSQL 17의 `JSON_TABLE`/`JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS` |
-| 식과 함수 | `SIMILAR TO`, 정규식의 역참조·POSIX 문자 클래스·`regexp_*` 함수, `AT TIME ZONE`, `to_char`/`date_trunc`/`age`/`justify_*`, `extract`의 interval, `U&'...'` |
-| 날짜·시각 | `infinity`/`-infinity`, 세션 시간대(`timestamptz`는 UTC로만), `timetz`의 연산(표에 없어 SQLite의 연산), `sum()`/`avg()`의 interval(타입은 `interval`이지만 SQLite의 수 계산), `GROUP BY`/`DISTINCT`의 interval(텍스트로 같은 것끼리: 넣는 값은 정규화되므로 `'2 hours'`와 `'120 minutes'`는 같음, `'1 mon'`과 `'30 days'`는 다름), `timestamp`와 `date`의 비교, `interval '1' day`처럼 필드를 붙인 interval 리터럴(필드를 무시하고 `'1'`은 1초), 타임스탬프의 범위 294247년부터(PostgreSQL은 294276년까지), 타입을 아는 값(`now()`)을 `date` 열에 넣을 때의 변환(문자열만 읽음) |
+| JSON | jsonpath `like_regex`의 POSIX 문자 클래스·역참조·플래그 `m`/`x`, `.**{n to m}`, `keyvalue()`, `datetime()`과 문자열 메서드; 복합 타입 인자의 `json_populate_record`(`NULL::table`만), `IS JSON`의 비텍스트 인자 오류, select 목록의 레코드 반환 함수(`json_each`), `WITH ORDINALITY`의 select 목록, `jsonb` 첨자에 쓰기(`SET j['a'] = ...`), 맨 위 스칼라의 `->` 첨자 0·-1(TEXT 값, 곧 상수에서: PostgreSQL은 그 스칼라, 이 방언은 예전대로 NULL; JSONB 값은 같음), GIN의 `@>`·`?` 인덱스 검색, sqlite3가 넣은 jsonb의 정규화, PostgreSQL 17의 `JSON_TABLE`/`JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS` |
+| 식과 함수 | `SIMILAR TO`, 정규식의 역참조·POSIX 문자 클래스·`regexp_*` 함수, `AT TIME ZONE`, `to_char`/`date_trunc`/`age`/`make_interval`, `extract`·`date_part`의 interval, `U&'...'` |
+| 날짜·시각 | `date`·`timestamp`의 `infinity`/`-infinity`, `IntervalStyle`의 다른 형식(`sql_standard`, `iso_8601`, `postgres_verbose`)과 SQL의 연-월 리터럴(`'1-2'`), 세션 시간대(`timestamptz`는 UTC로만), `timetz`의 연산(표에 없어 SQLite의 연산), interval의 UNIQUE·`UNION`·`count(DISTINCT)`·`IN (SELECT ...)`(바이트로 같은 것끼리: `'1 mon'`과 `'30 days'`는 다름, [interval](#interval)), `timestamp`와 `date`의 비교, `interval '1' day`처럼 필드를 붙인 interval 리터럴(필드를 무시하고 `'1'`은 1초), 타임스탬프의 범위 294247년부터(PostgreSQL은 294276년까지), 타입을 아는 값(`now()`)을 `date` 열에 넣을 때의 변환(문자열만 읽음) |
 | 연산자 해석 | `numeric`·실수와 만난 문자열 상수를 그 타입의 입력으로 읽기(정수만 읽음), `OPERATOR(schema.op)` 문법, 사용자 정의 연산자 |
 | DDL | `ALTER TABLE`의 `ALTER COLUMN`·`ADD/DROP CONSTRAINT`·identity 열 추가, 한 문장으로 여러 개체 `DROP`(`DROP SCHEMA a, b`만 됨), 임시 테이블의 시퀀스(`main`에 남음), 붙인 데이터베이스 안의 `CREATE SEQUENCE`, `CREATE TABLE AS`·`SELECT ... INTO`의 명령 태그 `SELECT n`(와이어 서버는 `CREATE TABLE`, `SELECT 0`: SQLite의 CREATE TABLE AS는 넣은 행을 `changes()`에 세지 않음) |
 | 스키마 | 스키마 요소가 있는 `CREATE SCHEMA s CREATE TABLE ...`, `ALTER SCHEMA`, `ALTER TABLE ... SET SCHEMA`, `DROP SCHEMA public`, 이름에 `.`이 있는 스키마, 대소문자만 다른 두 스키마(SQLite의 이름 비교처럼 같은 이름), 다른 스키마의 뷰·외래 키가 기대는 것을 `CASCADE`가 따라 지우는 것, 여러 테이블을 지우는 `DROP SCHEMA ... CASCADE`의 auto_vacuum 데이터베이스(거부함), 상수가 아닌 `nextval(x)`의 `search_path`(이름 그대로 main에서 찾음), `public`에 이름이 `s.t`인 개체(스키마 `s`의 `t`와 겹침) |
@@ -453,9 +509,12 @@ PostgreSQL 문구를 쓰는 오류입니다.
 | --- | --- |
 | `src/dialect/postgres/test.zig` | 종단 테스트 |
 | `xqt dialect-diff pg tools/dialect/pg-array-cases.txt` | 배열과 `ANY`/`ALL`의 차등 비교. 기록(`tools/dialect/pg-expected/pg-array-cases.out`, PostgreSQL 18.6)과 비교하고 `zig build check`에 들어 있음. 29개 케이스 모두 같음 |
+| `xqt dialect-diff pg tools/dialect/pg-uuid-cases.txt` | `uuid`의 차등 비교(입력 형식과 오류, 열의 저장·순서·비교, 캐스트, JSON·배열, DEFAULT와 키, `uuidv4`/`uuidv7`의 버전·변형·순서, `uuid_extract_*`). 무작위·시각 값은 버전, 길이, 순서, 개수로 봄. 기록(`pg-uuid-cases.out`, PostgreSQL 18.6)과 비교하고 `zig build check`에 들어 있음. 12개 케이스 모두 같음 |
+| `xqt dialect-diff pg tools/dialect/pg-jsonb-cases.txt` | jsonb 열(JSONB로 저장)의 값, 연산자, 수정 함수, 비교·`ORDER BY`·`IN`·`BETWEEN`·`DISTINCT`·`GROUP BY`·조인, 만드는 함수와 집계, 집합 반환 함수와 jsonpath, 뷰·CHECK·생성 열·인덱스, `jsonb[]`, 큰 값, 첨자, json 열의 차등 비교. 기록(`tools/dialect/pg-expected/pg-jsonb-cases.out`, PostgreSQL 18.6)과 비교하고 `zig build check`에 들어 있음. 12개 케이스 모두 같음 |
+| `xqt dialect-diff pg tools/dialect/pg-numeric-cases.txt` | `numeric`의 차등 비교(입력, 산술과 스케일, 함수, 캐스트, 열과 인덱스·UNIQUE·외래 키, 집계, CHECK·생성 열·뷰, JSON·배열, 카탈로그). 기록과 비교하고 `zig build check`에 들어 있음. 13개 케이스 모두 같음. 회귀 테스트 `numeric`은 138문장 중 92(이전 52) |
 | `xqt dialect-diff pg` + `tools/dialect/pg-cases.txt` | PostgreSQL과 차등 비교. 기본은 저장소에 기록해 둔 PostgreSQL 18.6의 출력(`tools/dialect/pg-expected/pg-cases.out`)과 비교하므로 서버가 필요 없고 `zig build check`에 들어 있음. 82개 케이스 모두 PostgreSQL 18과 같은 행·열 이름·오류를 냄(불리언 `t`/`f`는 1/0으로 맞춰 비교; PostgreSQL 18로 옮길 때 81/82, NOT NULL 제약을 더해 82/82). 오류를 내는 문장은 따로 모은 케이스에 있음(psql의 stderr와 stdout이 podman을 거치며 섞이는 순서가 일정하지 않음) |
 | `xqt wire-diff pg` + `tools/dialect/pg-wire-cases.txt`, `pg-client-cases.txt` | 와이어 서버(`xqlite serve --pg`)를 psql 18로 PostgreSQL 18과 차등 비교(기본은 기록 `tools/dialect/pg-expected/pg-wire-cases.out`, `pg-client-cases.out`과: psql만 필요). psql 출력 전체(메타 명령 `\d` 계열, `\gdesc`, `\bind`, 명령 태그, 오류와 NOTICE)를 비교하고, 다른 케이스를 result(조용히 다른 답)·error(거부)·format(표기만 다름)으로 나눔. `pg-client-cases.txt`는 node-postgres·knex·Sequelize·SQLAlchemy·Django·pgjdbc·asyncpg·Prisma가 실제로 보낸 카탈로그 질의(서버 로그에서 모음). 처음 잰 값은 129개 중 22개가 같음(result 11, error 89, format 7): psql의 `\d` 계열과 ORM의 카탈로그 질의는 거의 모두 `pg_am`·`pg_type`·`pg_attribute`·`pg_index`가 없거나 `OPERATOR(pg_catalog.~)`·`!~`·`= ANY($1)`·`schema.table.column` 참조를 못 읽어 거부됨. PostgreSQL 16으로 52개, 18로 옮길 때 51개(psql 18이 `conperiod`·`datlocale`을 읽고, 버전이 16이었음), 지금 52개(result 11, error 55, format 11). 남은 error는 대부분 배열 문법(`= ANY`, `ARRAY(...)`, 첨자, `unnest`) |
-| `xqt wire-diff pg --regress` + `tools/dialect/pg-regress` | PostgreSQL 회귀 테스트 8개(`boolean`, `int2`, `int4`, `int8`, `text`, `varchar`, `case`, `strings`)를 와이어 서버에서 돌려 PostgreSQL이 함께 내놓는 기대 출력과 문장별 통과율을 잼(psql만 필요). 처음 잰 값은 REL_16_STABLE의 951개 중 431개(45.3%), 그 뒤 440개. REL_18_STABLE의 파일(문장 1005개: `to_bin`/`to_oct`, `crc32`, bytea와 정수 변환, `reverse(bytea)` ... 이 더해짐)로 448개(44.5%) |
+| `xqt wire-diff pg --regress` + `tools/dialect/pg-regress` | PostgreSQL 회귀 테스트 9개(`boolean`, `int2`, `int4`, `int8`, `text`, `varchar`, `case`, `strings`, `uuid`)를 와이어 서버에서 돌려 PostgreSQL이 함께 내놓는 기대 출력과 문장별 통과율을 잼(psql만 필요). 처음 잰 값은 REL_16_STABLE의 951개 중 431개(45.3%), 그 뒤 440개. REL_18_STABLE의 파일(문장 1005개: `to_bin`/`to_oct`, `crc32`, bytea와 정수 변환, `reverse(bytea)` ... 이 더해짐)로 448개(44.5%). `uuid`는 43개 중 24개(55.8%): 나머지는 오류의 `LINE`/`DETAIL`(저장 함수가 실행 중에 냄), `pg_input_is_valid()`, `EXPLAIN`의 계획, `infinity` interval, 10000년 이후 `timestamptz`의 순서(TEXT), 여러 테이블의 `DROP TABLE` |
 | `xqt interop ext` | [확장](extension.md)을 올린 sqlite3로: jsonb·배열·interval·numeric·boolean 열과 엔진 함수의 CHECK·생성 열·식 인덱스·뷰·collation이 있는 데이터베이스의 무결성, 같은 결과, CHECK 위반의 같은 오류, sqlite3가 쓴 행을 xqlite가 검사하고 읽음, 엔진 함수의 기록된 결과(`tools/ext/abi-pg*.sql`) |
 | `xqt interop pg` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(`CREATE SCHEMA`의 테이블·뷰 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함. sqlite3의 `.tables`에 `sales.orders`가 나오고, sqlite3가 넣은 행을 이 방언이 `sales.orders`로 읽음. `jsonb` 열은 sqlite3의 `json_extract()`로 읽히고, sqlite3가 넣은 JSON을 이 방언의 연산자가 읽으며, sqlite3도 잘못된 JSON을 거부함 |
 

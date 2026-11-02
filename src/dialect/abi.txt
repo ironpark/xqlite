@@ -64,6 +64,7 @@ xq_pg_regproc 1 engine xqlite-only:catalog
 xq_pg_regclass_out 1 engine xqlite-only:catalog
 xq_pg_regtype_out 1 engine xqlite-only:catalog
 xq_pg_regnamespace_out 1 engine xqlite-only:catalog
+xq_pg_column_default 2 engine xqlite-only:catalog
 xq_pg_regrole_out 1 engine xqlite-only:catalog
 xq_pg_array_position 2 engine deterministic
 xq_pg_dt_precision 2 engine deterministic
@@ -665,3 +666,88 @@ collation xq_pg_jsonb postgres
 collation xq_pg_interval postgres
 collation xq_pg_array postgres
 collation xq_pg_array_num postgres
+# PostgreSQL uuid as 16 bytes (src/dialect/postgres/uuid.zig)
+xq_pg_uuid 1 engine deterministic
+xq_pg_uuid_text 1 engine deterministic
+xq_postgres_uuidv4 0 qualified
+xq_postgres_uuidv7 0 qualified
+xq_postgres_uuidv7 1 qualified
+xq_postgres_uuid_extract_version 1 qualified deterministic
+xq_postgres_uuid_extract_timestamp 1 qualified deterministic
+# interval BLOB (src/dialect/interval.zig, postgres/datetime.zig)
+xq_pg_iv 1 engine deterministic
+xq_pg_iv_text 1 engine deterministic
+xq_pg_iv_key 1 engine deterministic
+xq_pg_iv_high 1 engine deterministic
+xq_pg_iv_valid 1 engine deterministic
+xq_pg_iv_sum 1 engine window deterministic
+xq_pg_iv_avg 1 engine window deterministic
+xq_pg_iv_date_pl_interval 2 engine deterministic
+xq_pg_iv_interval_pl_date 2 engine deterministic
+xq_pg_iv_date_mi_interval 2 engine deterministic
+xq_pg_iv_timestamp_pl_interval 2 engine deterministic
+xq_pg_iv_interval_pl_timestamp 2 engine deterministic
+xq_pg_iv_timestamp_mi_interval 2 engine deterministic
+xq_pg_iv_timestamp_mi 2 engine deterministic
+xq_pg_iv_timestamptz_pl_interval 2 engine deterministic
+xq_pg_iv_interval_pl_timestamptz 2 engine deterministic
+xq_pg_iv_timestamptz_mi_interval 2 engine deterministic
+xq_pg_iv_timestamptz_mi 2 engine deterministic
+xq_pg_iv_time_pl_interval 2 engine deterministic
+xq_pg_iv_interval_pl_time 2 engine deterministic
+xq_pg_iv_time_mi_interval 2 engine deterministic
+xq_pg_iv_time_mi_time 2 engine deterministic
+xq_pg_iv_interval_pl 2 engine deterministic
+xq_pg_iv_interval_mi 2 engine deterministic
+xq_pg_iv_interval_um 1 engine deterministic
+xq_pg_iv_interval_mul 2 engine deterministic
+xq_pg_iv_mul_d_interval 2 engine deterministic
+xq_pg_iv_interval_div 2 engine deterministic
+xq_postgres_justify_hours 1 qualified deterministic
+xq_postgres_justify_days 1 qualified deterministic
+xq_postgres_justify_interval 1 qualified deterministic
+xq_postgres_isfinite 1 qualified deterministic
+# PostgreSQL jsonb stored as SQLite's JSONB (postgres/jfuncs.zig).
+xq_pg_jsonb_bin 1 engine deterministic subtype result_subtype
+xq_pg_jsonb_text 1 engine deterministic subtype result_subtype
+xq_pg_jsonb_key 1 engine deterministic subtype result_subtype
+# numeric: decimal_sql.zig's keys (dialect/decimal.zig) and PostgreSQL's functions of them
+xq_dec 1 engine deterministic
+xq_dec 3 engine deterministic
+xq_dec_key 1 engine deterministic
+xq_dec_key 3 engine deterministic
+xq_dec_valid 1 engine deterministic
+xq_dec_valid 3 engine deterministic
+xq_dec_text 1 engine deterministic
+xq_dec_text 2 engine deterministic
+xq_dec_add 2 engine deterministic
+xq_dec_sub 2 engine deterministic
+xq_dec_mul 2 engine deterministic
+xq_dec_div 2 engine deterministic
+xq_dec_mod 2 engine deterministic
+xq_dec_div_trunc 2 engine deterministic
+xq_dec_neg 1 engine deterministic
+xq_dec_abs 1 engine deterministic
+xq_dec_ceil 1 engine deterministic
+xq_dec_floor 1 engine deterministic
+xq_dec_sign 1 engine deterministic
+xq_dec_trim_scale 1 engine deterministic
+xq_dec_round 1 engine deterministic
+xq_dec_round 2 engine deterministic
+xq_dec_trunc 1 engine deterministic
+xq_dec_trunc 2 engine deterministic
+xq_dec_scale 1 engine deterministic
+xq_dec_min_scale 1 engine deterministic
+xq_dec_int2 1 engine deterministic
+xq_dec_int4 1 engine deterministic
+xq_dec_int8 1 engine deterministic
+xq_dec_float4 1 engine deterministic
+xq_dec_float8 1 engine deterministic
+xq_dec_number 1 engine deterministic
+xq_dec_sum 1 engine window deterministic
+xq_dec_avg 1 engine window deterministic
+xq_pg_dec_json 2 engine deterministic subtype result_subtype
+xq_postgres_div 2 qualified deterministic
+xq_postgres_scale 1 qualified deterministic
+xq_postgres_min_scale 1 qualified deterministic
+xq_postgres_trim_scale 1 qualified deterministic

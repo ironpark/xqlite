@@ -9,6 +9,11 @@
 //! the values themselves, and what the C and Zig APIs return, stay
 //! SQLite's.
 //!
+//! A numeric stored as a key (dialect/decimal.zig: a BLOB in the order of
+//! the numbers) is written as its digits by every dialect but SQLite's,
+//! with the scale of its type, else the display scale the key carries,
+//! else its own digits; textAlloc() writes one longer than max_len.
+//!
 //! Columns gives the type: a table column's from the catalog, an
 //! expression's as the statement knows it (sql/typing.zig: a comparison
 //! is a boolean, a cast of its target type, a column of a subquery of the
@@ -24,8 +29,9 @@ const Stmt = @import("Stmt.zig");
 const Dialect = engine.Dialect;
 const Type = types.Type;
 
-/// The longest text() writes into its buffer.
-pub const max_len = 64;
+/// The longest text() writes into its buffer (an interval's text is up
+/// to 70 bytes).
+pub const max_len = 96;
 
 /// `cell`, a value of a column of type `t`, as `viewer` shows it, if not
 /// as SQLite does (in `buf` or static); null for SQLite's text.
@@ -46,6 +52,7 @@ pub fn text(viewer: Dialect, t: Type, cell: Value, buf: *[max_len]u8) ?[]const u
             };
         },
         .numeric => {
+            if (cell == .blob) return numericKey(viewer, t, cell.blob, buf);
             // A DECIMAL(p,s) shows its s digits; Oracle's NUMBER(p,s)
             // drops trailing zeros, as SQLite does.
             switch (viewer) {
@@ -63,9 +70,110 @@ pub fn text(viewer: Dialect, t: Type, cell: Value, buf: *[max_len]u8) ?[]const u
             };
             return utc(z, buf);
         },
+        // uuid: PostgreSQL's are 16 bytes (an older table's column, and
+        // SQL Server's uniqueidentifier, are text, shown as stored).
+        .uuid => {
+            if (viewer == .sqlite) return null;
+            const b = switch (cell) {
+                .blob => |b| b,
+                else => return null,
+            };
+            if (b.len != 16) return null;
+            return std.fmt.bufPrint(buf, "{x}-{x}-{x}-{x}-{x}", .{ b[0..4], b[4..6], b[6..8], b[8..10], b[10..16] }) catch null;
+        },
+        // interval BLOB: its text ('1 day 02:00:00'); the text of an older
+        // database's TEXT column as stored.
+        .interval => {
+            if (viewer != .postgres) return null;
+            const iv = intervalOf(cell) orelse return null;
+            return intervalText(iv, buf);
+        },
         else => return null,
     }
 }
+
+// ======================================================= numeric keys
+
+const decimal = @import("../dialect/decimal.zig");
+
+/// The scale a numeric key of type `t` shows with in `viewer`: its type's
+/// (Oracle's NUMBER(p,s) drops trailing zeros), else its own.
+fn keyScale(viewer: Dialect, t: Type) ?u32 {
+    return switch (viewer) {
+        .postgres, .mariadb, .mssql => if (t.scale) |s| s else null,
+        .sqlite, .oracle => null,
+    };
+}
+
+/// The text of numeric key `k` in `buf`, null if it is no key or longer
+/// than `buf` (textAlloc()).
+fn numericKey(viewer: Dialect, t: Type, k: []const u8, buf: *[max_len]u8) ?[]const u8 {
+    if (viewer == .sqlite) return null;
+    var mem: [512]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&mem);
+    const z = decimal.keyText(fba.allocator(), k, keyScale(viewer, t)) catch return null;
+    if (z.len > buf.len) return null;
+    @memcpy(buf[0..z.len], z);
+    return buf[0..z.len];
+}
+
+// ============================================================ interval
+// An interval as PostgreSQL's clients see it: for the shell and the wire
+// servers (their binary format, their parameters).
+
+pub const Interval = @import("../dialect/interval.zig").Interval;
+
+/// The interval `cell` is, a BLOB of src/dialect/interval.zig; null for
+/// another value.
+pub fn intervalOf(cell: Value) ?Interval {
+    return switch (cell) {
+        .blob => |b| @import("../dialect/interval.zig").decode(b),
+        else => null,
+    };
+}
+
+/// The interval of text `z` in PostgreSQL's input (an older database's
+/// TEXT column, a parameter), null if it is none or PostgreSQL is not in
+/// the build.
+pub fn parseInterval(z: []const u8) ?Interval {
+    if (comptime !Dialect.postgres.built()) return null;
+    return pg_datetime.parseIntervalOpts(z, .{ .pg = true }) catch null;
+}
+
+/// The text of `iv` in PostgreSQL's default output style; null if
+/// PostgreSQL is not in the build.
+pub fn intervalText(iv: Interval, buf: *[max_len]u8) ?[]const u8 {
+    if (comptime !Dialect.postgres.built()) return null;
+    return pg_datetime.formatIntervalPg(iv, buf);
+}
+
+const pg_datetime = @import("../dialect/postgres/datetime.zig");
+
+// jsonb as JSONB ------------------------------------------------------
+
+/// The text of `cell` that needs memory of its own (in `gpa`, which the
+/// caller frees it with), null for the others (text()), in every dialect
+/// but SQLite's, which shows the blob: a jsonb value stored as SQLite's
+/// JSONB (a blob, dialect/jsonb.zig) is its JSON text with PostgreSQL's
+/// spacing (`{"a": 1}`); a numeric key (dialect/decimal.zig) its digits
+/// (as text() writes them, of any length).
+pub fn textAlloc(gpa: std.mem.Allocator, viewer: Dialect, t: Type, cell: Value) error{OutOfMemory}!?[]u8 {
+    if (viewer == .sqlite) return null;
+    const b = switch (cell) {
+        .blob => |b| b,
+        else => return null,
+    };
+    return switch (t.logical) {
+        .jsonb => jsonb.text(gpa, b),
+        .numeric => decimal.keyText(gpa, b, keyScale(viewer, t)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+const jsonb = @import("../dialect/jsonb.zig");
 
 /// A number with `scale` digits after the point.
 fn fixed(cell: Value, scale: u8, buf: *[max_len]u8) ?[]const u8 {
@@ -171,9 +279,33 @@ test text {
     const whole: Type = .{ .logical = .numeric, .scale = 0 };
     try t.expectEqualStrings("1000", text(.postgres, whole, .{ .float = 1000.0 }, &buf).?);
     try t.expectEqual(@as(?[]const u8, null), text(.postgres, whole, .{ .integer = 3 }, &buf));
+    // A numeric key, with the scale of its type or its own.
+    const k15 = [_]u8{ 0x40, 0x81, 3, 100 };
+    try t.expectEqualStrings("1.50", text(.postgres, money, .{ .blob = &k15 }, &buf).?);
+    try t.expectEqualStrings("1.5", text(.postgres, .{ .logical = .numeric }, .{ .blob = &k15 }, &buf).?);
+    try t.expectEqualStrings("1.5", text(.oracle, money, .{ .blob = &k15 }, &buf).?);
+    const k150 = [_]u8{ 0x40, 0x81, 3, 100, 0, 3 };
+    try t.expectEqualStrings("1.500", text(.postgres, .{ .logical = .numeric }, .{ .blob = &k150 }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.sqlite, money, .{ .blob = &k15 }, &buf));
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, money, .{ .blob = "x" }, &buf));
     const tz: Type = .{ .logical = .timestamp_tz };
     try t.expectEqualStrings("2024-01-02 03:04:05+00", text(.postgres, tz, .{ .text = "2024-01-02 03:04:05" }, &buf).?);
     try t.expectEqualStrings("2024-01-02 03:04:05.123+00", text(.postgres, tz, .{ .text = "2024-01-02 03:04:05.123" }, &buf).?);
     try t.expectEqual(@as(?[]const u8, null), text(.postgres, tz, .{ .text = "2024-01-02 03:04:05+09:00" }, &buf));
     try t.expectEqual(@as(?[]const u8, null), text(.postgres, tz, .{ .text = "2024-01-02" }, &buf));
+    const uuid: Type = .{ .logical = .uuid };
+    try t.expectEqualStrings("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", text(.postgres, uuid, .{ .blob = "\xa0\xee\xbc\x99\x9c\x0b\x4e\xf8\xbb\x6d\x6b\xb9\xbd\x38\x0a\x11" }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, uuid, .{ .text = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" }, &buf));
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, uuid, .{ .blob = "\x01\x02" }, &buf));
+    // interval BLOB: its text; an older database's TEXT as stored.
+    if (comptime Dialect.postgres.built()) {
+        const iv: Type = .{ .logical = .interval };
+        const b = (Interval{ .months = 14, .days = -3, .time = 3_600_000_000 }).encode();
+        try t.expectEqualStrings("1 year 2 mons -3 days +01:00:00", text(.postgres, iv, .{ .blob = &b }, &buf).?);
+        const inf = Interval.neg_infinity.encode();
+        try t.expectEqualStrings("-infinity", text(.postgres, iv, .{ .blob = &inf }, &buf).?);
+        try t.expectEqual(@as(?[]const u8, null), text(.postgres, iv, .{ .text = "1 day" }, &buf));
+        try t.expectEqual(@as(?[]const u8, null), text(.sqlite, iv, .{ .blob = &b }, &buf));
+        try t.expectEqual(Interval{ .days = 1, .time = 7_200_000_000 }, parseInterval("1 day 2 hours").?);
+    }
 }

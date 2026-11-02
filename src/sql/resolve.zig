@@ -1123,6 +1123,11 @@ fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList,
         try resolveExprNames(nc, e);
         // xqlite: the collation the dialect sorts its type with (jsonb's
         // order, typing.zig): a COLLATE term is a result column no more.
+        // Or the key function it sorts by (jsonb's sort key, typing.zig).
+        if (typ[0] == 'O' and typing.active(p.db)) if (try typing.orderKey(nc, e)) |k| {
+            item.expr = k;
+            continue;
+        };
         if (typ[0] == 'O' and typing.active(p.db)) if (typing.orderCollation(p, e)) |coll| {
             item.expr = expr_mod.addCollateString(p, e, coll) catch {
                 build.oomFault(p);
@@ -1139,10 +1144,16 @@ fn resolveOrderGroupByTerms(nc: *NameContext, sel: *Select, order_by: *ExprList,
         }
     }
     try resolveOrderGroupBy(p, sel, order_by, typ);
+    // xqlite: the terms before the last sort by the keys of their types,
+    // so that equal values are ties (typing.zig: PostgreSQL's interval).
+    if (typ[0] == 'O' and typing.active(p.db)) {
+        typing.orderKeys(nc, sel);
+        if (p.n_err != 0 or p.db.malloc_failed) return error.ParseFailed;
+    }
     // xqlite: a result column number or alias sorts with the collation
     // of its type, as an expression does (above).
     if (typ[0] == 'O' and typing.active(p.db)) for (order_by.slice()) |*item| {
-        if (item.u.x.order_by_col != 0) if (item.expr) |x| typing.orderTerm(p, item, x.xq_type);
+        if (item.u.x.order_by_col != 0) if (item.expr) |x| typing.orderTerm(p, item, x.xq_type, false);
     };
 }
 
@@ -1287,6 +1298,12 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
                 }
             }
         }
+        // xqlite: GROUP BY and DISTINCT by the keys of the dialect's types
+        // (typing.zig: PostgreSQL's interval).
+        if (typing.active(db)) {
+            typing.groupBy(&nc, s);
+            if (p.n_err != 0 or db.malloc_failed) return WRC.Abort;
+        }
 
         // The terms of a compound have equal numbers of columns.
         if (s.next) |next| if (s.e_list.?.len() != next.e_list.?.len()) {
@@ -1314,7 +1331,7 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
         // (typing.zig).
         if (typing.active(p.db)) if (leftmost.order_by) |ob| for (ob.slice()) |*item| {
             const col = item.u.x.order_by_col;
-            if (col > 0) typing.orderTerm(p, item, try typing.columnOf(p, leftmost, col - 1));
+            if (col > 0) typing.orderTerm(p, item, try typing.columnOf(p, leftmost, col - 1), true);
         };
     }
     return WRC.Prune;

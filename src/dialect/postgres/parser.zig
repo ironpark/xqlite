@@ -48,6 +48,7 @@ const nsp = catalog.schemas;
 const pg_state = @import("state.zig");
 const json = @import("json.zig");
 const array = @import("array.zig");
+const uuid = @import("uuid.zig");
 const ctypes = @import("../../sql/types.zig");
 const Children = @import("jtype.zig").Children;
 
@@ -1618,22 +1619,83 @@ pub const Parser = struct {
         return p.expr(l.pos, .{ .unary = .{ .op = .not, .e = e } });
     }
 
+    /// The DEFAULT (`default`) or generated value of a numeric column, as
+    /// the column stores it (decimal.zig's key): a number or a string
+    /// constant its key as a blob constant (so that the schema keeps a
+    /// constant sqlite3 reads), another value through xq_dec_key(e, p, s).
+    fn numericStored(p: *Parser, ty: types.TypeName, e: *Expr, default: bool) Error!*Expr {
+        if (ty.array or !eql(ty.name, "numeric")) return e;
+        if (e.kind == .null) return e;
+        const mods = numericMods(ty);
+        if (default) if (constantText(e)) |lit| {
+            const decimal = @import("../decimal.zig");
+            var buf: [256]u8 = undefined;
+            const text = if (lit.neg) std.fmt.bufPrint(&buf, "-{s}", .{lit.text}) catch lit.text else lit.text;
+            if (decimal.parse(p.arena, text)) |d0| {
+                var d = d0;
+                const fits = if (mods) |m| blk: {
+                    d = decimal.applyTypmod(p.arena, d, @intCast(m[0]), @intCast(m[1])) catch break :blk false;
+                    break :blk true;
+                } else true;
+                // Out of the type's range: the error when a row takes it.
+                if (fits) {
+                    if (decimal.check(d)) |_| {
+                        const k = decimal.key(p.arena, d, false) catch return error.OutOfMemory;
+                        return p.expr(e.pos, .{ .blob = try std.fmt.allocPrint(p.arena, "{x}", .{k}) });
+                    } else |_| {}
+                }
+            } else |err| if (err == error.OutOfMemory) return error.OutOfMemory;
+        };
+        const mode: tree.CastMode = if (mods) |m|
+            .{ .func_args = .{ .func = "xq_dec_key", .args = try p.arena.dupe(i64, &m) } }
+        else
+            .{ .func = "xq_dec_key" };
+        return tree.expr(p.arena, e.pos, e.end, .{ .cast = .{ .e = e, .target_type = try types.format(p.arena, ty), .mode = mode } });
+    }
+
     /// The DEFAULT of a json/jsonb column: a constant checked (and for
-    /// jsonb normalized) here, so that the schema keeps plain text.
+    /// jsonb made its JSONB blob) here, so that the schema keeps a
+    /// literal sqlite3 reads; another jsonb expression made a blob
+    /// (jsonbStored()).
+    /// The DEFAULT of an interval column: a BLOB (xq_pg_iv(e)), as the
+    /// values stored into it.
     fn jsonDefault(p: *Parser, ty: types.TypeName, e: *Expr) Error!*Expr {
+        if (!ty.array and eql(ty.name, "interval") and e.kind != .null) {
+            if (e.kind == .cast and eql(e.kind.cast.target_type, "interval")) return e;
+            return p.expr(e.pos, .{ .cast = .{ .e = e, .target_type = "interval", .mode = .{ .func = "xq_pg_iv" } } });
+        }
         const jsonb = eql(ty.name, "jsonb");
         if (ty.array or !(jsonb or eql(ty.name, "json"))) return e;
         var lit = e;
         if (lit.kind == .cast and (eql(lit.kind.cast.target_type, "jsonb") or eql(lit.kind.cast.target_type, "json"))) lit = lit.kind.cast.e;
-        if (lit.kind != .string) return e;
+        if (lit.kind != .string) return if (jsonb) p.jsonbStored(ty, e) else e;
         const text = lit.kind.string;
         const v = (if (jsonb) json.parseJsonb(p.arena, text) else json.parse(p.arena, text, false)) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
             return p.failState(lit.pos, .of("22P02"), "invalid input syntax for type json", .{});
         };
         if (!jsonb) return lit;
-        const out = json.toText(p.arena, v, true) catch return error.OutOfMemory;
-        return p.expr(lit.pos, .{ .string = out });
+        const b = json.toBlob(p.arena, v) catch return error.OutOfMemory;
+        return p.expr(lit.pos, .{ .blob = try std.fmt.allocPrint(p.arena, "{x}", .{b}) });
+    }
+
+    /// A value a jsonb column stores that is not a constant (a DEFAULT,
+    /// a generated column's): xq_pg_jsonb_bin(e), its JSONB blob.
+    fn jsonbStored(p: *Parser, ty: types.TypeName, e: *Expr) Error!*Expr {
+        if (ty.array or !eql(ty.name, "jsonb") or e.kind == .null) return e;
+        return p.call(e.pos, "xq_pg_jsonb_bin", null, &.{e});
+    }
+
+    /// The DEFAULT of a uuid column: a string literal (or its cast to
+    /// uuid) is the blob of its 16 bytes, read now as PostgreSQL reads it
+    /// (uuid.zig); another expression as written.
+    fn uuidDefault(p: *Parser, ty: types.TypeName, e: *Expr) Error!*Expr {
+        if (ty.array or !eql(ty.name, "uuid")) return e;
+        var lit = e;
+        if (lit.kind == .cast and eql(lit.kind.cast.target_type, "uuid")) lit = lit.kind.cast.e;
+        if (lit.kind != .string) return e;
+        const b = uuid.parse(lit.kind.string) orelse return p.failState(lit.pos, .of("22P02"), "invalid input syntax for type uuid: \"{s}\"", .{lit.kind.string});
+        return p.expr(lit.pos, .{ .blob = try std.fmt.allocPrint(p.arena, "{x}", .{&b}) });
     }
 
     /// JSON_OBJECT(k VALUE v | k : v, ...), JSON_ARRAY(v, ... | query),
@@ -2127,8 +2189,11 @@ pub const Parser = struct {
                 .func => |f| .{ .func = f },
                 .truncate => |n| .{ .truncate = n },
                 .round => |s| .{ .round = s },
+                .numeric => |m| .{ .func_args = .{ .func = "xq_dec", .args = try p.arena.dupe(i64, &m) } },
             };
-            x = try p.expr(pos, .{ .cast = .{ .e = e, .target_type = ty.name, .mode = mode } });
+            // numeric(p, s) is of its precision and scale.
+            const target_type = if (plan == .numeric) try types.format(p.arena, ty) else ty.name;
+            x = try p.expr(pos, .{ .cast = .{ .e = e, .target_type = target_type, .mode = mode } });
         }
         try p.setFig(x, .{ .cast = .{ .strong = p.strongName(e), .type_name = ty.name } });
         return x;
@@ -2748,6 +2813,13 @@ pub const Parser = struct {
 
     // ============================================================= types
 
+    /// numeric(p [, s]): PostgreSQL's bounds.
+    fn numericTypmod(p: *Parser, pos: u32, mods: []const i64) Error!void {
+        if (mods.len > 2) return p.failState(pos, .of("22023"), "invalid NUMERIC type modifier", .{});
+        if (mods[0] < 1 or mods[0] > 1000) return p.failState(pos, .of("22023"), "NUMERIC precision {d} must be between 1 and 1000", .{mods[0]});
+        if (mods.len == 2 and (mods[1] < -1000 or mods[1] > 1000)) return p.failState(pos, .of("22023"), "NUMERIC scale {d} must be between -1000 and 1000", .{mods[1]});
+    }
+
     pub fn typeName(p: *Parser) Error!types.TypeName {
         const t = p.peek();
         if (t.kind != .ident and t.kind != .qident) return p.syntaxError();
@@ -2799,6 +2871,7 @@ pub const Parser = struct {
             }
             _ = try p.expect(.rparen);
             ty.mods = mods.items;
+            if (eql(ty.name, "numeric")) try p.numericTypmod(t.start, ty.mods);
         }
         if (eql(ty.name, "timestamp") or eql(ty.name, "time")) {
             var tz = false;
@@ -3309,11 +3382,11 @@ pub const Parser = struct {
                     .name = cname orelse try std.fmt.allocPrint(p.arena, "{s}_{s}_check", .{ table, name.text }),
                     .kind = .{ .check = e },
                 }),
-                .default => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .default = try p.jsonDefault(ty, e) } }),
+                .default => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .default = try p.numericStored(ty, try p.uuidDefault(ty, try p.jsonDefault(ty, e)), true) } }),
                 .primary_key => try cons.append(p.arena, .{ .name = cname, .kind = .{ .primary_key = .{} } }),
                 .unique => try cons.append(p.arena, .{ .name = cname, .kind = .unique }),
                 .references => |r| try cons.append(p.arena, .{ .name = cname, .kind = .{ .references = r } }),
-                .generated => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .generated = .{ .e = e, .stored = true } } }),
+                .generated => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .generated = .{ .e = try p.numericStored(ty, try p.jsonbStored(ty, e), false), .stored = true } } }),
             }
         }
         if (collate) |c| try cons.append(p.arena, .{ .kind = .{ .collate = collationName(c.text) } });
@@ -3347,10 +3420,12 @@ pub const Parser = struct {
                     .kind = .{ .check = try tree.expr(a, pos, pos, .{ .between = .{ .e = col, .not = false, .lo = try int_.lit(a, pos, lo), .hi = try int_.lit(a, pos, hi) } }) },
                 };
             },
+            // A key of decimal.zig (of numeric(p, s) as is).
             .numeric => {
-                const f = try p.call(pos, "typeof", null, &.{col});
-                const items = try p.list(&.{ try p.stringAt(pos, "integer"), try p.stringAt(pos, "real"), try p.stringAt(pos, "null") });
-                return .{ .name = "invalid input syntax for type numeric", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .in_list = .{ .e = f, .not = false, .items = items } }) } };
+                var args: std.ArrayList(*Expr) = .empty;
+                try args.append(a, col);
+                if (numericMods(ty)) |m| for (m) |v| try args.append(a, try int_.lit(a, pos, v));
+                return .{ .name = "invalid input syntax for type numeric", .kind = .{ .check = try p.call(pos, "xq_dec_valid", null, args.items) } };
             },
             .boolean => {
                 const items = try p.list(&.{ try int_.lit(a, pos, 0), try int_.lit(a, pos, 1) });
@@ -3366,7 +3441,16 @@ pub const Parser = struct {
                 };
             },
             .json => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{col}) } },
+            // A JSONB blob, as json_valid(x, 8) checks one (sqlite3 too).
+            .jsonb => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{ col, try int_.lit(a, pos, 8) }) } },
             .array => return .{ .name = "malformed array literal", .kind = .{ .check = try p.call(pos, "xq_pg_array_valid", null, &.{col}) } },
+            // 16 bytes (a value stored goes through xq_pg_uuid(), which
+            // fails on what is not one; this keeps out other blobs).
+            .uuid => {
+                const len = try p.call(pos, "length", null, &.{col});
+                return .{ .name = "invalid input syntax for type uuid", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .eq, .l = len, .r = try int_.lit(a, pos, 16) } }) } };
+            },
+            .interval => return .{ .name = "invalid input syntax for type interval", .kind = .{ .check = try p.call(pos, "xq_pg_iv_valid", null, &.{col}) } },
         }
     }
 
@@ -3810,7 +3894,7 @@ fn funcName(n: []const u8) []const u8 {
         .{ "substring", "substr" },   .{ "strpos", "instr" },            .{ "btrim", "trim" },
         .{ "char_length", "length" }, .{ "character_length", "length" }, .{ "bool_and", "min" },
         .{ "bool_or", "max" },        .{ "every", "min" },               .{ "ascii", "unicode" },
-        .{ "chr", "char" },
+        .{ "chr", "char" },           .{ "gen_random_uuid", "uuidv4" },
     };
     for (map) |m| if (eql(m[0], n)) return m[1];
     return n;
@@ -3871,6 +3955,33 @@ fn insertColumn(t: *int.Table, cols: []const Name, i: usize) ?*int.Column {
         k += 1;
     }
     return null;
+}
+
+/// The text of a constant number or string, and whether it is negated
+/// (`-1.5`, `'2.50'`, `'3'::numeric`); null for another expression.
+fn constantText(e: *const Expr) ?struct { text: []const u8, neg: bool = false } {
+    switch (e.kind) {
+        .integer => |z| return .{ .text = z },
+        .float => |z| return .{ .text = z },
+        .string => |z| return .{ .text = z },
+        .unary => |u| if (u.op == .neg) switch (u.e.kind) {
+            .integer, .float => |z| return .{ .text = z, .neg = true },
+            else => {},
+        },
+        .cast => |c| if (std.mem.startsWith(u8, c.target_type, "numeric") and c.e.kind == .string) return .{ .text = c.e.kind.string },
+        else => {},
+    }
+    return null;
+}
+
+/// The precision and scale of numeric(p [, s]), null for numeric.
+pub fn numericMods(ty: types.TypeName) ?[2]i64 {
+    if (ty.array or !eql(ty.name, "numeric")) return null;
+    return switch (ty.mods.len) {
+        1 => .{ ty.mods[0], 0 },
+        2 => .{ ty.mods[0], ty.mods[1] },
+        else => null,
+    };
 }
 
 /// The literal a string spells as a number ('1.5'), null if none.

@@ -1126,19 +1126,20 @@ test "zig api: a string stored into a PostgreSQL boolean or numeric column" {
     try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT b FROM t WHERE id = 2", .{}));
     try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT b FROM t WHERE id = 3", .{}));
     try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT b FROM t WHERE id = 4", .{}));
-    try testing.expectEqual(@as(?f64, 1.5), try db.one(f64, "SELECT n FROM t WHERE id = 1", .{}));
-    try testing.expectEqual(@as(?i64, 3), try db.one(i64, "SELECT n FROM t WHERE id = 2 AND typeof(n) = 'integer'", .{}));
-    try testing.expectEqual(@as(?f64, -20), try db.one(f64, "SELECT n FROM t WHERE id = 3", .{}));
+    // A numeric is a key (xqlite.decimal), its double by a cast.
+    try testing.expectEqual(@as(?f64, 1.5), try db.one(f64, "SELECT n::float8 FROM t WHERE id = 1", .{}));
+    try testing.expectEqual(@as(?i64, 3), try db.one(i64, "SELECT n::int FROM t WHERE id = 2 AND typeof(n) = 'blob'", .{}));
+    try testing.expectEqual(@as(?f64, -20), try db.one(f64, "SELECT n::float8 FROM t WHERE id = 3", .{}));
     // Parameters bound as text (what the wire protocol sends).
     try db.execArgs("INSERT INTO t VALUES ($1, $2, $3)", .{ "5", "true", "12.25" });
     try testing.expectEqual(@as(?i64, 1), try db.one(i64, "SELECT b FROM t WHERE id = 5", .{}));
-    try testing.expectEqual(@as(?f64, 12.25), try db.one(f64, "SELECT n FROM t WHERE id = 5", .{}));
+    try testing.expectEqual(@as(?f64, 12.25), try db.one(f64, "SELECT n::float8 FROM t WHERE id = 5", .{}));
     try db.execArgs("UPDATE t SET b = $1, n = $2 WHERE id = 5", .{ "f", "7" });
     try testing.expectEqual(@as(?i64, 0), try db.one(i64, "SELECT b FROM t WHERE id = 5", .{}));
-    try testing.expectEqual(@as(?i64, 7), try db.one(i64, "SELECT n FROM t WHERE id = 5 AND typeof(n) = 'integer'", .{}));
+    try testing.expectEqual(@as(?i64, 7), try db.one(i64, "SELECT n::int FROM t WHERE id = 5 AND typeof(n) = 'blob'", .{}));
     // INSERT ... SELECT, ON CONFLICT DO UPDATE.
     try db.exec("INSERT INTO t (id, b, n) SELECT 6, 'on', '0.25'");
-    try testing.expectEqual(@as(?f64, 0.25), try db.one(f64, "SELECT n FROM t WHERE id = 6 AND b = 1", .{}));
+    try testing.expectEqual(@as(?f64, 0.25), try db.one(f64, "SELECT n::float8 FROM t WHERE id = 6 AND b = 1", .{}));
     try db.exec("CREATE TABLE k (id int PRIMARY KEY, b boolean)");
     try db.exec("INSERT INTO k VALUES (1, 'no')");
     try db.exec("INSERT INTO k VALUES (1, 'no') ON CONFLICT (id) DO UPDATE SET b = 'yes'");
@@ -1352,27 +1353,25 @@ test "zig api: types of expressions through subqueries, CTEs, views and compound
     defer cols.deinit();
     try db.exec("CREATE TABLE t (a int, b int, ok boolean, n numeric(6,2))");
     try db.exec("INSERT INTO t VALUES (1, 2, true, 1.5)");
-    // (PostgreSQL's frontend keeps the scale of a cast to numeric, not
-    // its precision: numeric(38,2).)
     // A view stores SQLite text: a comparison is typed again when the
-    // view is compiled into a statement, a cast lowered to SQLite's
-    // (CAST(round(2.5, 2) AS NUMERIC)) has lost its target type.
+    // view is compiled into a statement, as a cast to numeric is
+    // (xq_dec(2.5, 6, 2)).
     try db.exec("CREATE VIEW v AS SELECT a = b AS x, 2.5::numeric(6,2) AS y, a < b AND ok AS z FROM t");
     const cases = [_]struct { []const u8, []const u8, ?[]const u8 }{
         // FROM subqueries, flattened or not.
-        .{ "SELECT y FROM (SELECT 2.5::numeric(6,2) AS y) s", "2.50", "numeric(38,2)" },
+        .{ "SELECT y FROM (SELECT 2.5::numeric(6,2) AS y) s", "2.50", "numeric(6,2)" },
         .{ "SELECT x FROM (SELECT DISTINCT a = b AS x FROM t LIMIT 1) s", "f", "boolean" },
         // CTEs.
         .{ "WITH c AS (SELECT a = b AS x FROM t) SELECT x FROM c", "f", "boolean" },
-        .{ "WITH c AS (SELECT 2.5::numeric(6,2) AS y) SELECT y FROM c", "2.50", "numeric(38,2)" },
+        .{ "WITH c AS (SELECT 2.5::numeric(6,2) AS y) SELECT y FROM c", "2.50", "numeric(6,2)" },
         .{ "WITH RECURSIVE r(x) AS (SELECT true UNION ALL SELECT NOT x FROM r LIMIT 3) SELECT x FROM r", "t", "boolean" },
         // Scalar subqueries: the type of their column.
         .{ "SELECT (SELECT a = b FROM t)", "f", "boolean" },
-        .{ "SELECT (SELECT 2.5::numeric(6,2))", "2.50", "numeric(38,2)" },
+        .{ "SELECT (SELECT 2.5::numeric(6,2))", "2.50", "numeric(6,2)" },
         // Views.
         .{ "SELECT x FROM v", "f", "boolean" },
         .{ "SELECT z FROM v", "t", "boolean" },
-        .{ "SELECT y FROM v", "2.5", null },
+        .{ "SELECT y FROM v", "2.50", "numeric" },
         // A compound is of the common type of its terms (integers of the
         // widest, an integer and a numeric a numeric); of none if they
         // have none (PostgreSQL fails: UNION types boolean and integer
@@ -1399,7 +1398,7 @@ test "zig api: types of expressions through subqueries, CTEs, views and compound
     // The type is kept with the statement as a Type.
     var s = try db.prepare("SELECT y FROM (SELECT 2.5::numeric(6,2) AS y) s");
     defer s.finalize();
-    try testing.expectEqual(xqlite.types.Type{ .logical = .numeric, .precision = 38, .scale = 2 }, (try cols.ofStmt(&s, 0)).?.type);
+    try testing.expectEqual(xqlite.types.Type{ .logical = .numeric, .precision = 6, .scale = 2 }, (try cols.ofStmt(&s, 0)).?.type);
     // SQLite's dialect types nothing, not even the same view.
     db.setDialect(.sqlite);
     try expectDecltype(&db, "SELECT x FROM v", 0, null);
@@ -1448,8 +1447,9 @@ test "zig api: types of literals, operators and functions in each dialect" {
         .{ "SELECT n * n FROM t", "2.2500", "numeric" },
         .{ "SELECT 1.50::numeric(6,2) + 1", "2.50", "numeric" },
         .{ "SELECT -n FROM t", "-1.50", "numeric(6,2)" },
-        // Division picks its scale per value in PostgreSQL: none known.
-        .{ "SELECT n / 3 FROM t", "0.5", "numeric" },
+        // Division picks its scale per value in PostgreSQL: none known to
+        // the type, the key carries it.
+        .{ "SELECT n / 3 FROM t", "0.50000000000000000000", "numeric" },
         .{ "SELECT f + a FROM t", "1.5", "double precision" },
         .{ "SELECT r * r FROM t", "0.0625", "real" },
         .{ "SELECT r + f FROM t", "0.75", "double precision" },
@@ -1458,7 +1458,7 @@ test "zig api: types of literals, operators and functions in each dialect" {
         .{ "SELECT sum(a) FROM t", "1", "bigint" },
         .{ "SELECT sum(b) FROM t", "2", "numeric" },
         .{ "SELECT sum(n) FROM t", "1.50", "numeric" },
-        .{ "SELECT avg(a) FROM t", "1", "numeric" },
+        .{ "SELECT avg(a) FROM t", "1.00000000000000000000", "numeric" },
         .{ "SELECT max(n) FROM t", "1.50", "numeric(6,2)" },
         .{ "SELECT length(x) FROM t", "1", "integer" },
         .{ "SELECT upper(x) FROM t", "X", "text" },
@@ -1656,8 +1656,9 @@ test "zig api: types of expressions of the schema outlive their statements" {
     var m = try Db.open(gpa, testing.io, ":memory:", .{ .vfs = .{ .custom = mem.interface() }, .dialect = .mariadb });
     defer m.close();
     try m.exec("ATTACH 'types.db' AS aux");
-    try testing.expectError(error.Constraint, m.exec("INSERT INTO aux.g (a, c, d) VALUES (6, FALSE, 6.5)"));
-    try m.exec("INSERT INTO aux.g (a, c, d) VALUES (6, TRUE, 6.5)");
+    // (MariaDB stores no numeric key of its own yet: the engine function.)
+    try testing.expectError(error.Constraint, m.exec("INSERT INTO aux.g (a, c, d) VALUES (6, FALSE, xq_dec_key(6.5))"));
+    try m.exec("INSERT INTO aux.g (a, c, d) VALUES (6, TRUE, xq_dec_key(6.5))");
     try testing.expectEqual(@as(?i64, 5), try m.one(i64, "SELECT count(*) FROM aux.g WHERE a < b", .{}));
     try m.exec("DETACH aux");
     try m.exec("ATTACH 'types.db' AS aux");

@@ -153,7 +153,12 @@ pub fn typeMod(t: Type) i32 {
 /// a numeric's scale, timestamptz's offset), a double's shortest digits
 /// (`100`, `1e+20`), a blob as `\x` and hex digits.
 pub fn writeText(o: *Out, t: Type, v: Value) !void {
-    var buf: [64]u8 = undefined;
+    // jsonb stored as JSONB: its JSON text; a numeric key its digits.
+    if (try xqlite.display.textAlloc(o.gpa, .postgres, t, v)) |z| {
+        defer o.gpa.free(z);
+        return o.field(z);
+    }
+    var buf: [xqlite.display.max_len]u8 = undefined;
     const z = textOf(t, v, &buf) orelse {
         // A blob: \x and two hex digits a byte.
         const b = v.blob;
@@ -167,12 +172,12 @@ pub fn writeText(o: *Out, t: Type, v: Value) !void {
 
 /// The text of a value that is not a blob or NULL, in `buf` or `v`; null
 /// for a blob.
-fn textOf(t: Type, v: Value, buf: *[64]u8) ?[]const u8 {
+fn textOf(t: Type, v: Value, buf: *[xqlite.display.max_len]u8) ?[]const u8 {
     if (xqlite.display.text(.postgres, t, v, buf[0..xqlite.display.max_len])) |z| return z;
     return switch (v) {
         .null => unreachable,
         .integer => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch unreachable,
-        .float => |f| floatText(buf, f, t.logical == .float4),
+        .float => |f| floatText(buf[0..64], f, t.logical == .float4),
         .text => |z| z,
         .blob => null,
     };
@@ -235,7 +240,7 @@ pub fn floatText(buf: *[64]u8, v: f64, real: bool) []const u8 {
 pub fn binaryOut(o: Oid) bool {
     if (elementOf(o)) |e| return binaryOut(e);
     return switch (o) {
-        oid.bool, oid.int2, oid.int4, oid.int8, oid.float4, oid.float8, oid.bytea, oid.uuid, oid.jsonb => true,
+        oid.bool, oid.int2, oid.int4, oid.int8, oid.float4, oid.float8, oid.bytea, oid.uuid, oid.jsonb, oid.interval, oid.numeric => true,
         else => textual(o),
     };
 }
@@ -294,16 +299,34 @@ pub fn writeBinary(o: *Out, o_id: Oid, t: Type, v: Value) !void {
             else => return error.Unencodable,
         },
         oid.uuid => {
-            const z = switch (v) {
-                .text => |z| z,
+            // Its 16 bytes, or the text of an older table's column.
+            const b: [16]u8 = switch (v) {
+                .blob => |x| if (x.len == 16) x[0..16].* else return error.Unencodable,
+                .text => |z| parseUuid(z) orelse return error.Unencodable,
                 else => return error.Unencodable,
             };
-            const b = parseUuid(z) orelse return error.Unencodable;
             try o.field(&b);
         },
+        oid.numeric => try writeNumeric(o, t, v),
+        // interval BLOB: PostgreSQL's interval_send(): the microseconds
+        // (int64), the days and the months (int32); an older database's
+        // TEXT read.
+        oid.interval => {
+            const iv = xqlite.display.intervalOf(v) orelse switch (v) {
+                .text => |z| xqlite.display.parseInterval(z) orelse return error.Unencodable,
+                else => return error.Unencodable,
+            };
+            try o.int(i32, 16);
+            try o.int(i64, iv.time);
+            try o.int(i32, iv.days);
+            try o.int(i32, iv.months);
+        },
         oid.jsonb => {
-            var buf: [64]u8 = undefined;
-            const z = textOf(t, v, &buf) orelse return error.Unencodable;
+            var buf: [xqlite.display.max_len]u8 = undefined;
+            // Version 1 and the text; of JSONB, its JSON text.
+            const owned = try xqlite.display.textAlloc(o.gpa, .postgres, t, v);
+            defer if (owned) |z| o.gpa.free(z);
+            const z = owned orelse textOf(t, v, &buf) orelse return error.Unencodable;
             try o.int(i32, @intCast(1 + z.len));
             try o.int(u8, 1);
             try o.bytes(z);
@@ -313,6 +336,37 @@ pub fn writeBinary(o: *Out, o_id: Oid, t: Type, v: Value) !void {
             try writeText(o, t, v);
         },
     }
+}
+
+// ================================================================ numeric
+
+const decimal = xqlite.decimal;
+
+/// PostgreSQL's binary numeric (NBASE 10000 digits) of `v`: a key
+/// (dialect/decimal.zig) with the scale of its type, else the one it
+/// carries; a number or a numeric's text.
+fn writeNumeric(o: *Out, t: Type, v: Value) error{ OutOfMemory, Unencodable }!void {
+    var arena: std.heap.ArenaAllocator = .init(o.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d: decimal.Dec = switch (v) {
+        .blob => |b| (decimal.decodeKey(a, b) catch return error.Unencodable).dec,
+        .integer => |i| decimal.fromInt(a, i) catch return error.OutOfMemory,
+        .float => |f| decimal.fromFloat(a, f) catch return error.Unencodable,
+        .text => |z| decimal.parse(a, z) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Unencodable,
+        .null => return error.Unencodable,
+    };
+    if (t.scale) |s| if (d.kind == .finite) {
+        d.dscale = @max(s, d.fracDigits());
+    };
+    const bin = decimal.toPgBinary(a, d) catch return error.Unencodable;
+    try o.field(bin);
+}
+
+/// The text of a binary numeric parameter (its display scale's digits).
+fn decodeNumeric(a: std.mem.Allocator, b: []const u8) DecodeError!Value {
+    const d = decimal.fromPgBinary(a, b) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidBinary;
+    return .{ .text = decimal.toText(a, d) catch return error.OutOfMemory };
 }
 
 fn writeInt(o: *Out, comptime T: type, v: Value) !void {
@@ -358,11 +412,24 @@ pub fn decodeBinary(a: std.mem.Allocator, o: Oid, b: []const u8) DecodeError!Val
         oid.float4 => return if (b.len == 4) .{ .float = @as(f32, @bitCast(std.mem.readInt(u32, b[0..4], .big))) } else error.InvalidBinary,
         oid.float8 => return if (b.len == 8) .{ .float = @bitCast(std.mem.readInt(u64, b[0..8], .big)) } else error.InvalidBinary,
         oid.bytea => return .{ .blob = b },
-        oid.uuid => {
-            if (b.len != 16) return error.InvalidBinary;
-            return .{ .text = try std.fmt.allocPrint(a, "{x}-{x}-{x}-{x}-{x}", .{ b[0..4], b[4..6], b[6..8], b[8..10], b[10..16] }) };
-        },
+        // The 16 bytes, as a uuid column keeps them (the statement reads
+        // them into an older table's text column: xq_pg_uuid_text()).
+        oid.uuid => return if (b.len == 16) .{ .blob = b } else error.InvalidBinary,
         oid.jsonb => return if (b.len >= 1 and b[0] == 1) .{ .text = b[1..] } else error.InvalidBinary,
+        // interval BLOB: interval_recv()'s fields, as text (the input of a
+        // BLOB or an older database's TEXT column alike).
+        oid.interval => {
+            if (b.len != 16) return error.InvalidBinary;
+            const iv: xqlite.display.Interval = .{
+                .time = std.mem.readInt(i64, b[0..8], .big),
+                .days = std.mem.readInt(i32, b[8..12], .big),
+                .months = std.mem.readInt(i32, b[12..16], .big),
+            };
+            var buf: [xqlite.display.max_len]u8 = undefined;
+            const z = xqlite.display.intervalText(iv, &buf) orelse return error.UnsupportedBinary;
+            return .{ .text = try a.dupe(u8, z) };
+        },
+        oid.numeric => return decodeNumeric(a, b),
         // An unspecified type: as text, as libpq's clients send strings.
         0 => return .{ .text = b },
         else => return if (textual(o)) .{ .text = b } else error.UnsupportedBinary,
@@ -551,7 +618,7 @@ fn decodeArray(a: std.mem.Allocator, elem: Oid, b: []const u8) DecodeError![]con
             .integer => |i| if (eo == oid.bool) (if (i != 0) "t" else "f") else try std.fmt.allocPrint(a, "{d}", .{i}),
             .float => |f| try a.dupe(u8, floatText(&buf, f, eo == oid.float4)),
             .text => |z| z,
-            .blob => |bl| try std.fmt.allocPrint(a, "\\x{x}", .{bl}),
+            .blob => |bl| if (eo == oid.uuid) try std.fmt.allocPrint(a, "{x}-{x}-{x}-{x}-{x}", .{ bl[0..4], bl[4..6], bl[6..8], bl[8..10], bl[10..16] }) else try std.fmt.allocPrint(a, "\\x{x}", .{bl}),
             .null => "NULL",
         };
         try writeElem(a, &out, text);
@@ -687,8 +754,10 @@ test "decode parameters" {
     try t.expectEqualStrings("1.50", (try decodeText(a, .{ .logical = .numeric }, "1.50")).text);
     try t.expectEqual(@as(i64, -2), (try decodeBinary(a, oid.int2, "\xff\xfe")).integer);
     try t.expectEqual(@as(f64, 1.5), (try decodeBinary(a, oid.float8, "\x3f\xf8\x00\x00\x00\x00\x00\x00")).float);
-    try t.expectEqualStrings("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", (try decodeBinary(a, oid.uuid, &parseUuid("A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11").?)).text);
-    try t.expectError(error.UnsupportedBinary, decodeBinary(a, oid.numeric, "\x00"));
+    try t.expectEqualSlices(u8, &parseUuid("A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11").?, (try decodeBinary(a, oid.uuid, &parseUuid("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11").?)).blob);
+    try t.expectError(error.InvalidBinary, decodeBinary(a, oid.numeric, "\x00"));
+    // -12.50: two digits, weight 0, negative, dscale 2: 0012 5000.
+    try t.expectEqualStrings("-12.50", (try decodeBinary(a, oid.numeric, "\x00\x02\x00\x00\x40\x00\x00\x02\x00\x0c\x13\x88")).text);
     try t.expectEqual(@as(?bool, null), parseBool("o"));
     try t.expectEqual(@as(?bool, true), parseBool("on"));
 }
@@ -727,5 +796,6 @@ test "arrays in the binary format" {
     try writeBinary(&o, 1007, .{ .logical = .array, .element = .int4 }, .{ .text = "{}" });
     try t.expectEqualStrings("{}", try decodeArray(a, oid.int4, o.buf.items[4..]));
     try t.expect(binaryOut(1007));
-    try t.expect(!binaryOut(1231));
+    try t.expect(binaryOut(1231));
+    try t.expect(binaryOut(oid.numeric));
 }

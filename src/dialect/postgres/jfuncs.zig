@@ -21,6 +21,9 @@
 //!   xq_pg_float_json(x, real)           a double precision (real) as JSON,
 //!                                       float8out()'s digits (1e+20)
 //!   xq_pg_numeric_json(x, scale)        a numeric as JSON, its digits (1.50)
+//!   xq_pg_dec_json(x, scale)            a numeric key (decimal.zig) as JSON:
+//!                                       its digits with `scale` (-1: its own);
+//!                                       NaN and the infinities strings
 //!   xq_pg_json[b]_get[_text](j, k)      -> / ->> (k text: key, integer: index)
 //!   xq_pg_json[b]_path[_text](j, p)     #> / #>> (p a text[] literal)
 //!   xq_pg_jsonb_contains(a, b)          @> (and <@ swapped)
@@ -57,6 +60,7 @@ const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const json = @import("json.zig");
+const bin = @import("../jsonb.zig");
 const jsonpath = @import("jsonpath.zig");
 
 const Context = dfunc.Context;
@@ -89,12 +93,18 @@ fn agg(name: [:0]const u8, n: i16, step: dfunc.StepFn, final: dfunc.FinalFn) Fun
     return dfunc.aggregate(name, n, det, step, final);
 }
 
+/// The store functions of jsonb (Rules.store): of a BLOB column, of a TEXT
+/// one (a table made before jsonb was JSONB).
+pub const store_jsonb_bin = s("xq_pg_jsonb_bin", 1, inArena(jsonbBin));
+pub const store_jsonb_text = s("xq_pg_jsonb_text", 1, inArena(jsonbText));
+
 pub const engine_functions = [_]FuncDef{
     s("xq_pg_json", 1, inArena(castJson)),
     s("xq_pg_jsonb", 1, inArena(castJsonb)),
     s("xq_pg_json_bool", 1, jsonBool),
     s("xq_pg_float_json", 2, floatJson),
     s("xq_pg_numeric_json", 2, numericJson),
+    s("xq_pg_dec_json", 2, decJson),
     s("xq_pg_json_get", 2, getJson),
     s("xq_pg_jsonb_get", 2, getJsonb),
     s("xq_pg_json_get_text", 2, getJsonText),
@@ -127,6 +137,10 @@ pub const engine_functions = [_]FuncDef{
     s("xq_pg_rows_path", 4, inArena(rowsPath)),
     s("xq_pg_rows_records", -1, inArena(rowsRecords)),
     s("xq_pg_rows_zip", -1, inArena(rowsZip)),
+    // jsonb stored as JSONB.
+    store_jsonb_bin,
+    store_jsonb_text,
+    s("xq_pg_jsonb_key", 1, inArena(jsonbKey)),
 };
 
 pub const functions = [_]FuncDef{
@@ -177,6 +191,9 @@ const anyNull = dfunc.anyNull;
 const Call = struct {
     arena: std.heap.ArenaAllocator,
     ctx: *Context,
+    /// An argument was a JSONB blob (a jsonb column's value): a jsonb
+    /// result is one too (result()).
+    blob: bool = false,
 
     pub fn init(ctx: *Context) Call {
         return .{ .arena = .init(dfunc.gpa(ctx)), .ctx = ctx };
@@ -195,8 +212,16 @@ const Call = struct {
     }
 
     /// Argument `m` parsed as json (or jsonb, normalized); null after
-    /// making the error the result.
+    /// making the error the result. A JSONB blob is read as its value
+    /// (json.fromBlob()), any other value as text.
     fn parse(c: *Call, m: *Mem, jsonb: bool) ?Value {
+        if (blobOf(m)) |b| {
+            c.blob = true;
+            return json.fromBlob(c.a(), b) catch |e| {
+                c.fail(e);
+                return null;
+            };
+        }
         const t = c.text(m) orelse return null;
         return c.parseText(t, jsonb);
     }
@@ -222,10 +247,18 @@ const Call = struct {
         api.resultErrorState(c.ctx, .of(st), msg);
     }
 
-    /// Make `v` the result: json's text or jsonb's, with the subtype.
+    /// Make `v` the result: json's text or jsonb's, with the subtype;
+    /// jsonb's JSONB blob if an argument was one (Call.blob).
     fn result(c: *Call, v: Value, jsonb: bool) void {
+        if (jsonb and c.blob) return c.resultBlob(v);
         const t = json.toText(c.a(), v, jsonb) catch return api.resultErrorNomem(c.ctx);
         c.resultJsonText(t);
+    }
+
+    /// Make `v` (normalized) the result as a canonical JSONB blob.
+    fn resultBlob(c: *Call, v: Value) void {
+        const b = json.toBlob(c.a(), v) catch |e| return c.fail(e);
+        resultBlobBytes(c.ctx, b);
     }
 
     fn resultJsonText(c: *Call, t: []const u8) void {
@@ -274,6 +307,12 @@ pub fn toValue(a: Allocator, m: *Mem, jsonb: bool) json.Error!Value {
         },
         vi.SQLITE_BLOB => {
             const b = api.valueBlob(m) orelse "";
+            // A jsonb value (a column's, wrapped in xq_pg_jsonb()); json's
+            // text of it is jsonb's.
+            if (api.valueSubtype(m) == J and bin.valid(b)) {
+                if (jsonb) return json.fromBlob(a, b);
+                return json.parse(a, try json.blobText(a, b), false);
+            }
             var out: std.ArrayList(u8) = .empty;
             try out.appendSlice(a, "\\x");
             for (b) |byte| try out.print(a, "{x:0>2}", .{byte});
@@ -289,19 +328,79 @@ pub fn toValue(a: Allocator, m: *Mem, jsonb: bool) json.Error!Value {
     }
 }
 
+/// The bytes of `m` if it is a JSONB blob (jsonb.valid(): the bytes of
+/// JSON text are not), else null.
+fn blobOf(m: *Mem) ?[]const u8 {
+    if (api.valueType(m) != vi.SQLITE_BLOB) return null;
+    const b = api.valueBlob(m) orelse return null;
+    return if (bin.valid(b)) b else null;
+}
+
+/// A JSONB blob as the result, with the JSON subtype.
+fn resultBlobBytes(ctx: *Context, b: []const u8) void {
+    api.resultBlob(ctx, b, .transient);
+    api.resultSubtype(ctx, J);
+}
+
 // ================================================================== casts
 
+/// ::json: the text checked; of a jsonb blob, jsonb's text.
 fn castJson(c: *Call, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(c.ctx);
+    if (blobOf(argv[0])) |b| return c.resultJsonText(json.blobText(c.a(), b) catch |e| return c.fail(e));
     const t = c.text(argv[0]) orelse return;
     _ = c.parseText(t, false) orelse return;
     c.resultJsonText(t);
 }
 
+/// ::jsonb: text normalized; a JSONB blob stays one (canonical).
 fn castJsonb(c: *Call, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(c.ctx);
+    if (blobOf(argv[0])) |b| return resultBlobBytes(c.ctx, json.canonicalBlob(c.a(), b) catch |e| return c.fail(e));
     const v = c.parse(argv[0], true) orelse return;
     c.result(v, true);
+}
+
+// ========================================================= jsonb storage
+
+// The value stored into a jsonb column, by the column's storage
+// (jtype.zig): a BLOB column (the tables made since jsonb is JSONB)
+// stores xq_pg_jsonb_bin(), a TEXT one (the tables made before)
+// xq_pg_jsonb_text(). The comparisons and ORDER BY of jsonb compare
+// xq_pg_jsonb_key() (overload.zig), whatever the storage.
+
+/// xq_pg_jsonb_bin(x): jsonb `x` (text of jsonb's input, or a JSONB
+/// blob) as its canonical JSONB blob (json.toBlob()).
+fn jsonbBin(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
+    if (blobOf(argv[0])) |b| return resultBlobBytes(c.ctx, json.canonicalBlob(c.a(), b) catch |e| return c.fail(e));
+    const v = c.parse(argv[0], true) orelse return;
+    c.resultBlob(v);
+}
+
+/// xq_pg_jsonb_text(x): jsonb `x` (text or a JSONB blob) as jsonb's
+/// text, without the JSON subtype (a text: jsonb::text).
+fn jsonbText(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
+    if (blobOf(argv[0])) |b| return api.resultText(c.ctx, json.blobText(c.a(), b) catch |e| return c.fail(e), .transient);
+    const v = c.parse(argv[0], true) orelse return;
+    const t = json.toText(c.a(), v, true) catch return api.resultErrorNomem(c.ctx);
+    api.resultText(c.ctx, t, .transient);
+}
+
+/// xq_pg_jsonb_key(x): the sort key of jsonb `x` (text or a JSONB
+/// blob), a blob whose byte order is jsonb's (json.appendKey()).
+fn jsonbKey(c: *Call, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(c.ctx);
+    var out: std.ArrayList(u8) = .empty;
+    // A canonical blob, read node by node.
+    if (blobOf(argv[0])) |b| if (json.canonical(b)) {
+        json.appendBlobKey(c.a(), &out, b) catch |e| return c.fail(e);
+        return api.resultBlob(c.ctx, out.items, .transient);
+    };
+    const v = c.parse(argv[0], true) orelse return;
+    json.appendKey(c.a(), &out, v) catch return api.resultErrorNomem(c.ctx);
+    api.resultBlob(c.ctx, out.items, .transient);
 }
 
 fn jsonBool(ctx: *Context, argv: []*Mem) void {
@@ -415,13 +514,132 @@ fn numericJson(ctx: *Context, argv: []*Mem) void {
     api.resultSubtype(ctx, J);
 }
 
+/// xq_pg_dec_json(x, scale): a numeric (a key of decimal.zig, a number,
+/// its text) as JSON, numeric_out()'s digits with at least `scale`
+/// digits after the point (-1: its own display scale); NaN, Infinity and
+/// -Infinity are strings, as PostgreSQL's to_json() writes them.
+fn decJson(ctx: *Context, argv: []*Mem) void {
+    if (dfunc.isNull(argv[0])) return api.resultNull(ctx);
+    const decimal = @import("../decimal.zig");
+    var arena: std.heap.ArenaAllocator = .init(dfunc.gpa(ctx));
+    defer arena.deinit();
+    const a = arena.allocator();
+    var d: decimal.Dec = switch (api.valueType(argv[0])) {
+        vi.SQLITE_INTEGER => decimal.fromInt(a, api.valueInt64(argv[0])) catch return api.resultErrorNomem(ctx),
+        vi.SQLITE_FLOAT => decimal.fromFloat(a, api.valueDouble(argv[0])) catch return api.resultValue(ctx, argv[0]),
+        vi.SQLITE_BLOB => (decimal.decodeKey(a, api.valueBlob(argv[0]) orelse "") catch return api.resultValue(ctx, argv[0])).dec,
+        else => decimal.parse(a, api.valueText(argv[0]) orelse "") catch return api.resultValue(ctx, argv[0]),
+    };
+    const s_arg = api.valueInt64(argv[1]);
+    if (s_arg >= 0 and d.kind == .finite) d.dscale = @max(@as(u32, @intCast(@min(s_arg, decimal.max_dscale))), d.fracDigits());
+    const z = decimal.toText(a, d) catch return api.resultErrorNomem(ctx);
+    api.resultText(ctx, z, .transient);
+    if (d.kind == .finite) api.resultSubtype(ctx, J);
+}
+
 // ============================================================== operators
+
+// The operators read a JSONB blob node by node, without decoding more
+// than what they return (Sub): a key's value is found by reading the
+// keys only, and returned as its bytes if they are canonical.
+
+/// A node of a JSONB blob.
+const Sub = struct {
+    at: usize,
+    n: bin.Node,
+
+    fn root(b: []const u8) Sub {
+        return .{ .at = 0, .n = bin.node(b, 0).? };
+    }
+
+    fn bytes(x: Sub, b: []const u8) []const u8 {
+        return b[x.at..][0..x.n.size()];
+    }
+
+    /// The value of key `k` of an object (the last one with that key,
+    /// as a non-canonical blob may have several); null if none.
+    fn key(x: Sub, c: *Call, b: []const u8, k: []const u8) json.Error!?Sub {
+        if (x.n.typ != bin.OBJECT) return null;
+        var it = bin.children(b, x.at, x.n);
+        var found: ?Sub = null;
+        while (it.next()) |kn| {
+            const v = it.next() orelse break;
+            const z = kn.body(b);
+            const eq = if (kn.n.typ == bin.TEXT or kn.n.typ == bin.TEXTRAW) std.mem.eql(u8, z, k) else std.mem.eql(u8, try bin.string(c.a(), kn.n.typ, z), k);
+            if (eq) found = .{ .at = v.at, .n = v.n };
+        }
+        return found;
+    }
+
+    /// Element `i` of an array, from the end if negative; null if none.
+    fn index(x: Sub, b: []const u8, i: i64) ?Sub {
+        if (x.n.typ != bin.ARRAY) return null;
+        return x.elem(b, i);
+    }
+
+    /// `->` of an index: index() of an array; of a scalar at the top, the
+    /// scalar itself for 0 and -1, as PostgreSQL's (whose scalars are
+    /// arrays of one element there).
+    fn indexTop(x: Sub, b: []const u8, i: i64) ?Sub {
+        if (x.n.typ == bin.OBJECT) return null;
+        if (x.n.typ != bin.ARRAY) return if (i == 0 or i == -1) x else null;
+        return x.elem(b, i);
+    }
+
+    fn elem(x: Sub, b: []const u8, i: i64) ?Sub {
+        var k = i;
+        if (k < 0) {
+            var n: i64 = 0;
+            var it = bin.children(b, x.at, x.n);
+            while (it.next()) |_| n += 1;
+            k += n;
+            if (k < 0) return null;
+        }
+        var it = bin.children(b, x.at, x.n);
+        while (it.next()) |e| : (k -= 1) if (k == 0) return .{ .at = e.at, .n = e.n };
+        return null;
+    }
+
+    /// The step of a path (#>): a key of an object, an index of an array.
+    fn step(x: Sub, c: *Call, b: []const u8, st: []const u8) json.Error!?Sub {
+        return switch (x.n.typ) {
+            bin.OBJECT => x.key(c, b, st),
+            bin.ARRAY => x.index(b, std.fmt.parseInt(i64, std.mem.trim(u8, st, " "), 10) catch return null),
+            else => null,
+        };
+    }
+
+    /// Make node `x` the result of `->` (jsonb, a blob) or `->>` (text).
+    fn result(x: Sub, c: *Call, b: []const u8, as_text: bool) void {
+        const z = bin.payload(b, x.at, x.n);
+        if (!as_text) {
+            const own = x.bytes(b);
+            return resultBlobBytes(c.ctx, json.canonicalBlob(c.a(), own) catch |e| return c.fail(e));
+        }
+        switch (x.n.typ) {
+            bin.NULL => api.resultNull(c.ctx),
+            bin.TRUE => api.resultText(c.ctx, "true", .static),
+            bin.FALSE => api.resultText(c.ctx, "false", .static),
+            bin.TEXT, bin.TEXTRAW => api.resultText(c.ctx, z, .transient),
+            bin.TEXTJ, bin.TEXT5 => api.resultText(c.ctx, bin.string(c.a(), x.n.typ, z) catch return api.resultErrorNomem(c.ctx), .transient),
+            else => api.resultText(c.ctx, json.blobText(c.a(), x.bytes(b)) catch |e| return c.fail(e), .transient),
+        }
+    }
+};
 
 /// `->`: `k` an integer is an index (negative from the end), else a key.
 fn get(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     var c: Call = .init(ctx);
     defer c.deinit();
+    if (jsonb) if (blobOf(argv[0])) |b| {
+        const root = Sub.root(b);
+        const r = switch (api.valueType(argv[1])) {
+            vi.SQLITE_INTEGER => root.indexTop(b, api.valueInt64(argv[1])),
+            else => root.key(&c, b, c.text(argv[1]) orelse return) catch |e| return c.fail(e),
+        } orelse return api.resultNull(ctx);
+        return r.result(&c, b, as_text);
+    };
     const v = c.parse(argv[0], jsonb) orelse return;
     const r = switch (api.valueType(argv[1])) {
         vi.SQLITE_INTEGER => v.at(api.valueInt64(argv[1])),
@@ -453,10 +671,25 @@ fn walk(v: Value, path: []const ?[]const u8) ?Value {
     return cur;
 }
 
+/// walk() of a JSONB blob.
+fn walkBlob(c: *Call, b: []const u8, path: []const ?[]const u8) json.Error!?Sub {
+    var cur = Sub.root(b);
+    for (path) |step_opt| {
+        const step = step_opt orelse return null;
+        cur = (try cur.step(c, b, step)) orelse return null;
+    }
+    return cur;
+}
+
 fn pathGet(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     var c: Call = .init(ctx);
     defer c.deinit();
+    if (jsonb) if (blobOf(argv[0])) |b| {
+        const path = c.textArray(argv[1]) orelse return;
+        const r = (walkBlob(&c, b, path) catch |e| return c.fail(e)) orelse return api.resultNull(ctx);
+        return r.result(&c, b, as_text);
+    };
     const v = c.parse(argv[0], jsonb) orelse return;
     const path = c.textArray(argv[1]) orelse return;
     const r = walk(v, path) orelse return api.resultNull(ctx);
@@ -474,9 +707,13 @@ fn extractPath(ctx: *Context, argv: []*Mem, jsonb: bool, as_text: bool) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     var c: Call = .init(ctx);
     defer c.deinit();
-    const v = c.parse(argv[0], jsonb) orelse return;
     const path = c.a().alloc(?[]const u8, argv.len - 1) catch return api.resultErrorNomem(ctx);
     for (argv[1..], path) |m, *p| p.* = c.text(m) orelse return;
+    if (jsonb) if (blobOf(argv[0])) |b| {
+        const r = (walkBlob(&c, b, path) catch |e| return c.fail(e)) orelse return api.resultNull(ctx);
+        return r.result(&c, b, as_text);
+    };
+    const v = c.parse(argv[0], jsonb) orelse return;
     const r = walk(v, path) orelse return api.resultNull(ctx);
     if (as_text) c.resultText(r, jsonb) else c.result(r, jsonb);
 }
@@ -493,8 +730,27 @@ fn containsFunc(c: *Call, argv: []*Mem) void {
     api.resultInt64(c.ctx, @intFromBool(json.contains(x, y)));
 }
 
+/// json.exists() of a JSONB blob.
+fn existsBlob(c: *Call, b: []const u8, k: []const u8) json.Error!bool {
+    const root = Sub.root(b);
+    switch (root.n.typ) {
+        bin.OBJECT => return (try root.key(c, b, k)) != null,
+        bin.ARRAY => {
+            var it = bin.children(b, 0, root.n);
+            while (it.next()) |e| if (e.n.isText() and std.mem.eql(u8, try bin.string(c.a(), e.n.typ, e.body(b)), k)) return true;
+            return false;
+        },
+        bin.TEXT, bin.TEXTJ, bin.TEXT5, bin.TEXTRAW => return std.mem.eql(u8, try bin.string(c.a(), root.n.typ, bin.payload(b, 0, root.n)), k),
+        else => return false,
+    }
+}
+
 fn existsFunc(c: *Call, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(c.ctx);
+    if (blobOf(argv[0])) |b| {
+        const k = c.text(argv[1]) orelse return;
+        return api.resultInt64(c.ctx, @intFromBool(existsBlob(c, b, k) catch |e| return c.fail(e)));
+    }
     const x = c.parse(argv[0], true) orelse return;
     api.resultInt64(c.ctx, @intFromBool(json.exists(x, c.text(argv[1]) orelse return)));
 }
@@ -503,12 +759,13 @@ fn existsSet(ctx: *Context, argv: []*Mem, all: bool) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     var c: Call = .init(ctx);
     defer c.deinit();
-    const x = c.parse(argv[0], true) orelse return;
+    const blob = blobOf(argv[0]);
+    const x = if (blob == null) (c.parse(argv[0], true) orelse return) else json.null_value;
     const keys = c.textArray(argv[1]) orelse return;
     var r = all;
     for (keys) |k_opt| {
         const k = k_opt orelse continue;
-        const e = json.exists(x, k);
+        const e = if (blob) |b| (existsBlob(&c, b, k) catch |err| return c.fail(err)) else json.exists(x, k);
         if (all and !e) r = false;
         if (!all and e) r = true;
     }
@@ -1246,6 +1503,18 @@ fn objectaggFinal(ctx: *Context) void {
 
 fn typeofAny(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
+    if (blobOf(argv[0])) |b| {
+        const t = bin.node(b, 0).?.typ;
+        const name = switch (t) {
+            bin.NULL => "null",
+            bin.TRUE, bin.FALSE => "boolean",
+            bin.ARRAY => "array",
+            bin.OBJECT => "object",
+            bin.TEXT, bin.TEXTJ, bin.TEXT5, bin.TEXTRAW => "string",
+            else => "number",
+        };
+        return api.resultText(ctx, name, .static);
+    }
     var c: Call = .init(ctx);
     defer c.deinit();
     const v = c.parse(argv[0], jsonb) orelse return;
@@ -1257,6 +1526,19 @@ const typeofJsonb = dfunc.bind(typeofAny, .{true});
 
 fn arrayLength(ctx: *Context, argv: []*Mem, jsonb: bool) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
+    if (blobOf(argv[0])) |b| {
+        const root = Sub.root(b);
+        switch (root.n.typ) {
+            bin.ARRAY => {
+                var n: i64 = 0;
+                var it = bin.children(b, 0, root.n);
+                while (it.next()) |_| n += 1;
+                return api.resultInt64(ctx, n);
+            },
+            bin.OBJECT => return api.resultErrorState(ctx, .of("22023"), "cannot get array length of a non-array"),
+            else => return api.resultErrorState(ctx, .of("22023"), "cannot get array length of a scalar"),
+        }
+    }
     var c: Call = .init(ctx);
     defer c.deinit();
     const v = c.parse(argv[0], jsonb) orelse return;
@@ -1313,8 +1595,11 @@ fn prettyFunc(c: *Call, argv: []*Mem) void {
 /// WITH UNIQUE KEYS.
 fn isJsonFunc(c: *Call, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(c.ctx);
-    const t = c.text(argv[0]) orelse return;
-    const v = json.parse(c.a(), t, false) catch return api.resultInt64(c.ctx, 0);
+    // A jsonb value (a JSONB blob) has no duplicate keys.
+    const v = if (blobOf(argv[0])) |b|
+        json.fromBlob(c.a(), b) catch return api.resultInt64(c.ctx, 0)
+    else
+        json.parse(c.a(), c.text(argv[0]) orelse return, false) catch return api.resultInt64(c.ctx, 0);
     const kind = api.valueInt64(argv[1]);
     const ok = switch (kind) {
         1 => v.v == .array,

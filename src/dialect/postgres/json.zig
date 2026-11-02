@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const json_text = @import("../json_text.zig");
+const bin = @import("../jsonb.zig");
 const Allocator = std.mem.Allocator;
 
 /// Invalid: not json; UnicodeEscape: `\u0000`, which jsonb cannot hold.
@@ -662,6 +663,401 @@ pub fn exists(x: Value, k: []const u8) bool {
     }
 }
 
+// ================================================================ JSONB
+
+// A jsonb column stores SQLite's JSONB (jsonb.zig), one canonical blob
+// per value, so that equal values are equal bytes (UNIQUE, GROUP BY,
+// DISTINCT) and sqlite3 reads them with json()/json_extract()/->>:
+//  - the value normalized (keys in jsonb's order without duplicates,
+//    numbers as numeric_out() writes them);
+//  - each node with the smallest header;
+//  - null/true/false; a number INT without a point, else FLOAT (no
+//    exponent: numeric_out()'s digits, 1.50 stays 1.50); a string TEXT
+//    if it has nothing to escape, else TEXTRAW (its characters as they
+//    are); arrays in order; objects key, value, ... in jsonb's order.
+// Any other valid JSONB (what sqlite3's own functions write: TEXTJ
+// strings, JSON5 numbers, keys in the order written, duplicates, larger
+// headers) is read the same (fromBlob() normalizes it), and canonical()
+// tells the two apart.
+
+/// The value of JSONB blob `b` (bin.valid()), normalized.
+pub fn fromBlob(a: Allocator, b: []const u8) Error!Value {
+    const n = bin.node(b, 0) orelse return error.Invalid;
+    // The value of a canonical blob is normalized already.
+    var canon = true;
+    var v = try decodeNode(a, b, 0, n, &canon);
+    if (!canon) try normalize(a, &v);
+    return v;
+}
+
+/// The value of node `n` at b[i]; `canon` cleared if the node is not
+/// as canonical() wants it (the keys of its objects compared to know).
+fn decodeNode(a: Allocator, b: []const u8, i: usize, n: bin.Node, canon: *bool) Error!Value {
+    const z = bin.payload(b, i, n);
+    switch (n.typ) {
+        bin.NULL => return null_value,
+        bin.TRUE => return .{ .v = .{ .bool = true } },
+        bin.FALSE => return .{ .v = .{ .bool = false } },
+        bin.INT, bin.INT5, bin.FLOAT, bin.FLOAT5 => {
+            if ((n.typ != bin.INT and n.typ != bin.FLOAT) or !normalNumber(z, n.typ == bin.FLOAT)) canon.* = false;
+            const t = (try bin.number(a, n.typ, z)) orelse return null_value;
+            return .{ .v = .{ .number = t } };
+        },
+        bin.TEXT, bin.TEXTJ, bin.TEXT5, bin.TEXTRAW => {
+            if (n.typ == bin.TEXTJ or n.typ == bin.TEXT5) canon.* = false;
+            return .{ .v = .{ .string = try bin.string(a, n.typ, z) } };
+        },
+        bin.ARRAY => {
+            var items: std.ArrayList(Value) = .empty;
+            var it = bin.children(b, i, n);
+            while (it.next()) |c| try items.append(a, try decodeNode(a, b, c.at, c.n, canon));
+            return .{ .v = .{ .array = items.items } };
+        },
+        bin.OBJECT => {
+            var pairs: std.ArrayList(Pair) = .empty;
+            var it = bin.children(b, i, n);
+            while (it.next()) |k| {
+                const v = it.next() orelse return error.Invalid;
+                if (k.n.typ == bin.TEXTJ or k.n.typ == bin.TEXT5) canon.* = false;
+                const key = try bin.string(a, k.n.typ, k.body(b));
+                if (pairs.items.len > 0 and keyOrder(pairs.items[pairs.items.len - 1].key, key) != .lt) canon.* = false;
+                try pairs.append(a, .{ .key = key, .value = try decodeNode(a, b, v.at, v.n, canon) });
+            }
+            return .{ .v = .{ .object = pairs.items } };
+        },
+        else => return error.Invalid,
+    }
+}
+
+/// The node type of string `s`: TEXT if nothing in it needs escaping,
+/// else TEXTRAW.
+fn stringType(s: []const u8) u8 {
+    for (s) |c| if (c < 0x20 or c == '"' or c == '\\') return bin.TEXTRAW;
+    return bin.TEXT;
+}
+
+/// The canonical JSONB of normalized value `v`.
+pub fn toBlob(a: Allocator, v_arg: Value) Error![]u8 {
+    var v = v_arg;
+    try normalNumbers(a, &v);
+    var sizes: std.ArrayList(usize) = .empty;
+    const total = try measure(a, v, &sizes);
+    var out: std.ArrayList(u8) = try .initCapacity(a, total);
+    var k: usize = 0;
+    try emit(a, &out, v, sizes.items, &k);
+    return out.items;
+}
+
+/// The numbers of `v` as numeric_out() writes them (a value a function
+/// computed, a jsonpath's arithmetic, may have another spelling).
+fn normalNumbers(a: Allocator, v: *Value) Error!void {
+    switch (v.v) {
+        .number => |t| if (!normalNumber(t, std.mem.indexOfScalar(u8, t, '.') != null)) {
+            v.v = .{ .number = try numericOut(a, t) };
+        },
+        .array => |items| for (items) |*x| try normalNumbers(a, x),
+        .object => |pairs| for (pairs) |*pp| try normalNumbers(a, &pp.value),
+        else => {},
+    }
+}
+
+/// The size of the node of `v`; the payload sizes of its containers are
+/// appended to `sizes`, in the order emit() writes them.
+fn measure(a: Allocator, v: Value, sizes: *std.ArrayList(usize)) Error!usize {
+    const len: usize = switch (v.v) {
+        .null, .bool => 0,
+        .number => |t| t.len,
+        .string => |t| t.len,
+        .array => |items| blk: {
+            const slot = sizes.items.len;
+            try sizes.append(a, 0);
+            var p: usize = 0;
+            for (items) |x| p += try measure(a, x, sizes);
+            sizes.items[slot] = p;
+            break :blk p;
+        },
+        .object => |pairs| blk: {
+            const slot = sizes.items.len;
+            try sizes.append(a, 0);
+            var p: usize = 0;
+            for (pairs) |pp| p += bin.headerSize(pp.key.len) + pp.key.len + try measure(a, pp.value, sizes);
+            sizes.items[slot] = p;
+            break :blk p;
+        },
+    };
+    return bin.headerSize(len) + len;
+}
+
+fn emit(a: Allocator, out: *std.ArrayList(u8), v: Value, sizes: []const usize, k: *usize) Error!void {
+    switch (v.v) {
+        .null => try bin.appendHeader(a, out, bin.NULL, 0),
+        .bool => |x| try bin.appendHeader(a, out, if (x) bin.TRUE else bin.FALSE, 0),
+        .number => |t| {
+            const point = std.mem.indexOfScalar(u8, t, '.') != null;
+            try bin.appendHeader(a, out, if (point) bin.FLOAT else bin.INT, t.len);
+            try out.appendSlice(a, t);
+        },
+        .string => |t| {
+            try bin.appendHeader(a, out, stringType(t), t.len);
+            try out.appendSlice(a, t);
+        },
+        .array => |items| {
+            try bin.appendHeader(a, out, bin.ARRAY, sizes[k.*]);
+            k.* += 1;
+            for (items) |x| try emit(a, out, x, sizes, k);
+        },
+        .object => |pairs| {
+            try bin.appendHeader(a, out, bin.OBJECT, sizes[k.*]);
+            k.* += 1;
+            for (pairs) |pp| {
+                try bin.appendHeader(a, out, stringType(pp.key), pp.key.len);
+                try out.appendSlice(a, pp.key);
+                try emit(a, out, pp.value, sizes, k);
+            }
+        },
+    }
+}
+
+/// Whether JSONB blob `b` (bin.valid()) is the canonical encoding of
+/// its value, as toBlob() writes it.
+pub fn canonical(b: []const u8) bool {
+    const n = bin.node(b, 0) orelse return false;
+    return n.size() == b.len and canonicalNode(b, 0, n);
+}
+
+fn canonicalNode(b: []const u8, i: usize, n: bin.Node) bool {
+    if (n.hdr != bin.headerSize(n.len)) return false;
+    const z = bin.payload(b, i, n);
+    switch (n.typ) {
+        bin.NULL, bin.TRUE, bin.FALSE => return n.len == 0,
+        bin.INT, bin.FLOAT => return normalNumber(z, n.typ == bin.FLOAT),
+        bin.TEXT, bin.TEXTRAW => return stringType(z) == n.typ,
+        bin.ARRAY => {
+            var it = bin.children(b, i, n);
+            while (it.next()) |c| if (!canonicalNode(b, c.at, c.n)) return false;
+            return true;
+        },
+        bin.OBJECT => {
+            var it = bin.children(b, i, n);
+            var prev: ?[]const u8 = null;
+            while (it.next()) |k| {
+                if (k.n.typ != bin.TEXT and k.n.typ != bin.TEXTRAW) return false;
+                if (!canonicalNode(b, k.at, k.n)) return false;
+                const key = k.body(b);
+                if (prev) |p| if (keyOrder(p, key) != .lt) return false;
+                prev = key;
+                const v = it.next() orelse return false;
+                if (!canonicalNode(b, v.at, v.n)) return false;
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// Whether `z` is a number as numeric_out() writes it (no exponent, no
+/// leading zero, no negative zero), with a point if `point`.
+fn normalNumber(z: []const u8, point: bool) bool {
+    var s = z;
+    var neg = false;
+    if (s.len > 0 and s[0] == '-') {
+        neg = true;
+        s = s[1..];
+    }
+    const dot = std.mem.indexOfScalar(u8, s, '.');
+    if ((dot != null) != point) return false;
+    const ip = if (dot) |d| s[0..d] else s;
+    const fp = if (dot) |d| s[d + 1 ..] else "";
+    if (ip.len == 0 or (ip.len > 1 and ip[0] == '0')) return false;
+    if (point and fp.len == 0) return false;
+    for (ip) |c| if (!std.ascii.isDigit(c)) return false;
+    for (fp) |c| if (!std.ascii.isDigit(c)) return false;
+    return !(neg and allZero(ip) and allZero(fp));
+}
+
+/// jsonb's text of JSONB blob `b` (bin.valid()): of a canonical one
+/// its nodes as they are, of another its value normalized.
+pub fn blobText(a: Allocator, b: []const u8) Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    if (canonical(b)) {
+        try bin.appendText(a, &out, b);
+    } else try writeJsonb(a, &out, try fromBlob(a, b));
+    return out.items;
+}
+
+/// The canonical JSONB of JSONB blob `b` (bin.valid()): `b` itself if
+/// it is.
+pub fn canonicalBlob(a: Allocator, b: []const u8) Error![]const u8 {
+    if (canonical(b)) return b;
+    return toBlob(a, try fromBlob(a, b));
+}
+
+// ============================================================ sort keys
+
+// xq_pg_jsonb_key(): bytes whose order (memcmp, SQLite's BINARY) is
+// jsonb's (compareTop()), equal for equal values ('1.0' and '1'). The
+// encoding is part of the file format (an index on the key, a view's
+// comparison): it never changes.
+//   value  := null 0x10 | string 0x20 str | number 0x30 num
+//           | false 0x40 0x00 | true 0x40 0x01
+//           | array 0x50 count value* | object 0x60 count (str value)*
+//   str    := its bytes, 0x00 as 0x00 0xff, then 0x00 0x00
+//   count  := 4 bytes, big-endian
+//   num    := 0x02 (zero) | 0x03 exp digits 0x00 (positive)
+//           | 0x01 ~exp ~digits 0xff (negative)
+//   exp    := the decimal exponent E of 0.d1d2... x 10^E, an i32
+//             big-endian with its sign bit flipped
+//   digits := the significant digits without trailing zeros, each as
+//             1 + its value
+// An empty array at the top is 0x08, less than any other value, as
+// PostgreSQL sorts it (where a scalar at the top is an array of one).
+
+/// Append the sort key of normalized value `v` (at the top).
+pub fn appendKey(a: Allocator, out: *std.ArrayList(u8), v: Value) Error!void {
+    if (v.v == .array and v.v.array.len == 0) return out.append(a, 0x08);
+    try keyNode(a, out, v);
+}
+
+fn keyNode(a: Allocator, out: *std.ArrayList(u8), v: Value) Error!void {
+    switch (v.v) {
+        .null => try out.append(a, 0x10),
+        .string => |t| {
+            try out.append(a, 0x20);
+            try keyString(a, out, t);
+        },
+        .number => |t| {
+            try out.append(a, 0x30);
+            try keyNumber(a, out, t);
+        },
+        .bool => |x| try out.appendSlice(a, &.{ 0x40, @intFromBool(x) }),
+        .array => |items| {
+            try out.append(a, 0x50);
+            try keyCount(a, out, items.len);
+            for (items) |x| try keyNode(a, out, x);
+        },
+        .object => |pairs| {
+            try out.append(a, 0x60);
+            try keyCount(a, out, pairs.len);
+            for (pairs) |pp| {
+                try keyString(a, out, pp.key);
+                try keyNode(a, out, pp.value);
+            }
+        },
+    }
+}
+
+fn keyCount(a: Allocator, out: *std.ArrayList(u8), n: usize) Error!void {
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, @intCast(@min(n, std.math.maxInt(u32))), .big);
+    try out.appendSlice(a, &buf);
+}
+
+fn keyString(a: Allocator, out: *std.ArrayList(u8), t: []const u8) Error!void {
+    for (t) |c| {
+        try out.append(a, c);
+        if (c == 0) try out.append(a, 0xff);
+    }
+    try out.appendSlice(a, &.{ 0, 0 });
+}
+
+/// A JSON number's text as the key's `num`.
+fn keyNumber(a: Allocator, out: *std.ArrayList(u8), text: []const u8) Error!void {
+    var s = text;
+    var neg = false;
+    if (s.len > 0 and (s[0] == '-' or s[0] == '+')) {
+        neg = s[0] == '-';
+        s = s[1..];
+    }
+    var mant_end: usize = 0;
+    while (mant_end < s.len and s[mant_end] != 'e' and s[mant_end] != 'E') mant_end += 1;
+    var exp: i64 = 0;
+    if (mant_end < s.len) exp = std.fmt.parseInt(i64, s[mant_end + 1 ..], 10) catch 0;
+    const mant = s[0..mant_end];
+    const dot = std.mem.indexOfScalar(u8, mant, '.');
+    const ip = if (dot) |d| mant[0..d] else mant;
+    const fp = if (dot) |d| mant[d + 1 ..] else "";
+    const D = struct {
+        ip: []const u8,
+        fp: []const u8,
+        fn at(d: @This(), k: usize) u8 {
+            return if (k < d.ip.len) d.ip[k] else d.fp[k - d.ip.len];
+        }
+    };
+    const d: D = .{ .ip = ip, .fp = fp };
+    const n = ip.len + fp.len;
+    var lead: usize = 0;
+    while (lead < n and d.at(lead) == '0') lead += 1;
+    var last = n;
+    while (last > lead and d.at(last - 1) == '0') last -= 1;
+    if (lead == last) return out.append(a, 0x02);
+    const point: i64 = @as(i64, @intCast(ip.len)) - @as(i64, @intCast(lead));
+    const e: i32 = @intCast(std.math.clamp(point + exp, std.math.minInt(i32), std.math.maxInt(i32)));
+    var eb: [4]u8 = undefined;
+    std.mem.writeInt(u32, &eb, @as(u32, @bitCast(e)) ^ 0x8000_0000, .big);
+    if (neg) {
+        try out.append(a, 0x01);
+        for (eb) |x| try out.append(a, ~x);
+        for (lead..last) |k| try out.append(a, ~(d.at(k) - '0' + 1));
+        try out.append(a, 0xff);
+    } else {
+        try out.append(a, 0x03);
+        try out.appendSlice(a, &eb);
+        for (lead..last) |k| try out.append(a, d.at(k) - '0' + 1);
+        try out.append(a, 0x00);
+    }
+}
+
+/// appendKey() of canonical JSONB blob `b` (canonical()), read node by
+/// node: the same bytes as of its value.
+pub fn appendBlobKey(a: Allocator, out: *std.ArrayList(u8), b: []const u8) Error!void {
+    const n = bin.node(b, 0) orelse return error.Invalid;
+    if (n.typ == bin.ARRAY and n.len == 0) return out.append(a, 0x08);
+    try blobKeyNode(a, out, b, 0, n);
+}
+
+fn blobKeyNode(a: Allocator, out: *std.ArrayList(u8), b: []const u8, i: usize, n: bin.Node) Error!void {
+    const z = bin.payload(b, i, n);
+    switch (n.typ) {
+        bin.NULL => try out.append(a, 0x10),
+        bin.TRUE => try out.appendSlice(a, &.{ 0x40, 1 }),
+        bin.FALSE => try out.appendSlice(a, &.{ 0x40, 0 }),
+        bin.INT, bin.FLOAT => {
+            try out.append(a, 0x30);
+            try keyNumber(a, out, z);
+        },
+        bin.TEXT, bin.TEXTRAW => {
+            try out.append(a, 0x20);
+            try keyString(a, out, z);
+        },
+        bin.ARRAY, bin.OBJECT => {
+            var count: usize = 0;
+            var it = bin.children(b, i, n);
+            while (it.next()) |_| count += 1;
+            try out.append(a, if (n.typ == bin.ARRAY) 0x50 else 0x60);
+            try keyCount(a, out, if (n.typ == bin.ARRAY) count else count / 2);
+            it = bin.children(b, i, n);
+            var k: usize = 0;
+            while (it.next()) |c| : (k += 1) {
+                // An object's keys: strings without their tag.
+                if (n.typ == bin.OBJECT and k % 2 == 0) {
+                    try keyString(a, out, c.body(b));
+                } else try blobKeyNode(a, out, b, c.at, c.n);
+            }
+        },
+        else => return error.Invalid,
+    }
+}
+
+/// jsonb's order of two values at the top of a document: compare(), but
+/// an empty array is less than any other value (PostgreSQL's scalars
+/// are arrays of one element at the top).
+pub fn compareTop(x: Value, y: Value) std.math.Order {
+    const ex = x.v == .array and x.v.array.len == 0;
+    const ey = y.v == .array and y.v.array.len == 0;
+    if (ex or ey) return if (ex and ey) .eq else if (ex) .lt else .gt;
+    return compare(x, y);
+}
+
 // =========================================================== text arrays
 
 /// A PostgreSQL text[] literal ('{a,"b c",NULL}'): its elements, null
@@ -816,4 +1212,49 @@ test "text arrays" {
     try std.testing.expectEqualStrings("d,e", r[4].?);
     try std.testing.expectEqual(@as(usize, 0), (try parseTextArray(a, "{}")).len);
     try std.testing.expectError(error.Invalid, parseTextArray(a, "a,b"));
+}
+
+test "jsonb blobs: canonical encoding, reading, sort keys" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = std.testing;
+    // Round trips, canonical.
+    for ([_][]const u8{ "{\"b\":1,\"a\":[1.50,\"x\\\"y\",null,true,false],\"a\":3,\"aa\":{}}", "[]", "\"\"", "-0.0015", "1e2", "\"\\u00e9\\n\"", "{\"k\":\"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\"}" }) |src| {
+        const v = try parseJsonb(a, src);
+        const b = try toBlob(a, v);
+        try t.expect(bin.valid(b));
+        try t.expect(canonical(b));
+        try t.expectEqualStrings(try toText(a, v, true), try blobText(a, b));
+        try t.expectEqualStrings(try toText(a, v, true), try toText(a, try fromBlob(a, b), true));
+    }
+    // {"a":1}: a TEXT key, an INT.
+    try t.expectEqualSlices(u8, "\x4c\x17a\x131", try toBlob(a, try parseJsonb(a, "{\"a\":1}")));
+    // What sqlite3's jsonb('{"b":1,"a":1.0e0,"a":"A"}') writes: keys
+    // as written, a duplicate, TEXTJ, an exponent. Not canonical, read
+    // normalized.
+    const s3 = "\xcc\x15\x17b\x131\x17a\x551.0e0\x17a\x68\\u0041";
+    try t.expect(bin.valid(s3));
+    try t.expect(!canonical(s3));
+    try t.expectEqualStrings("{\"a\": \"A\", \"b\": 1}", try blobText(a, s3));
+    try t.expectEqualSlices(u8, try toBlob(a, try parseJsonb(a, "{\"a\":\"A\",\"b\":1}")), try canonicalBlob(a, s3));
+    // The keys sort as compareTop() does.
+    const vals = [_][]const u8{ "[]", "null", "\"\"", "\"a\"", "\"a\\u0001\"", "\"ab\"", "\"b\"", "-10", "-2.5", "-2", "-0.001", "0", "0.000", "0.001", "1", "1.0", "1.5", "2", "10", "1e20", "false", "true", "[null]", "[1]", "[\"z\"]", "[[]]", "[1,2]", "{}", "{\"b\":1}", "{\"aa\":1}", "{\"a\":1,\"b\":1}" };
+    for (vals) |x| for (vals) |y| {
+        const vx = try parseJsonb(a, x);
+        const vy = try parseJsonb(a, y);
+        var kx: std.ArrayList(u8) = .empty;
+        var ky: std.ArrayList(u8) = .empty;
+        try appendKey(a, &kx, vx);
+        try appendKey(a, &ky, vy);
+        var bx: std.ArrayList(u8) = .empty;
+        try appendBlobKey(a, &bx, try toBlob(a, vx));
+        try t.expectEqualSlices(u8, kx.items, bx.items);
+        const want = compareTop(vx, vy);
+        const got = std.mem.order(u8, kx.items, ky.items);
+        if (want != got) {
+            std.debug.print("key order of {s} and {s}: {} vs {}\n", .{ x, y, got, want });
+            return error.TestUnexpectedResult;
+        }
+    };
 }

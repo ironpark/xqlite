@@ -22,6 +22,23 @@ hé|llo|007|c|cba
 |10|2|ARRAY|timestamptz
 '{3,NULL,1}'
 '["k", "j"]'|'{"j": "j", "k": "k"}'
+A0EEBC999C0B4EF8BB6D6BB9BD380A11|A0EEBC999C0B4EF8BB6D6BB9BD380A11|00112233445566778899AABBCCDDEEFF|NULL
+a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|NULL
+5|NULL|2022-02-22 19:22:22|2022-02-22 19:22:22|NULL
+4|7|16|1
+X'80000000000000000000025B7F3D400080000001800000008000000000000000'|X'80000000000000000000025B7F3D4000'|X'8000000000000000000000141DD76000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'|1|0|0
+1 year 2 mons 3 days 04:05:06.5|-infinity|1 day 25:00:00|1 mon 16 days 12:00:00|1 day 12:00:00
+1 mon 30 days 01:00:00|20 days 00:20:00
+2024-02-29 00:00:00|01:00:00
+2 days 04:00:00|1 mon 6 days|29 days 23:00:00|0|1
+7C17610217621331|{"a": "x", "b": 1}|{"a":"x","b":1}|NULL
+8C17611741177A1331|{"a": 100, "z": 1}|{"a": 0.50, "z": 1}|2B1331|{"a": [1]}
+60000000016100005000000004300380000001020020780000400110|1|1|1|NULL
+5C17622B1331|y|d|1|1
+8C1761133117621332|{"a": 1, "b": 2}|7C17614C17631332|number|{
+    "a": [
+    ]
+}
 -- errors
 line 5: invalid input syntax for type boolean: "maybe"
 line 7: smallint out of range
@@ -34,3 +51,12 @@ line 23: invalid input syntax for type date: "20240229"
 line 24: date/time field value out of range: "2023-02-29"
 line 29: invalid input syntax for type integer: "x"
 line 35: cannot take logarithm of zero
+line 41: invalid input syntax for type uuid: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a1"
+line 42: cannot cast type bytea to uuid
+line 43: cannot cast type integer to uuid
+line 45: invalid input syntax for type uuid: " a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+line 48: timestamp out of range for UUID version 7
+line 51: invalid input syntax for type interval: "soon"
+line 52: invalid interval value
+line 53: interval out of range
+line 56: cannot add infinite interval to time

@@ -615,6 +615,8 @@ pub const Vdbe = struct {
     /// statement gives it one (Parse.xq_param_types, sql/typing.zig):
     /// n_var entries, .unknown where not known; empty if none is known.
     xq_param_types: []@import("../sql/types.zig").Type = &.{},
+    /// Parse.xq_exact_numeric of the statement.
+    xq_exact_numeric: bool = false,
     result_row: ?[*]Mem = null,
     /// What api.columnMem() returns outside a row (C: a static const
     /// nullMem, which callers may not write; here they may).

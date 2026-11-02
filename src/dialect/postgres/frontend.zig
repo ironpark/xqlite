@@ -34,6 +34,7 @@ const jfuncs = @import("jfuncs.zig");
 const catalog_funcs = @import("catalog_funcs.zig");
 const datetime = @import("datetime.zig");
 const array = @import("array.zig");
+const uuid = @import("uuid.zig");
 const catalog = @import("../../catalog/catalog.zig");
 
 const RC = int.RC;
@@ -183,9 +184,9 @@ pub const hooks: dialect.Hooks = .{
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
-} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions;
+} ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions ++ uuid.functions ++ datetime.functions;
 
-const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions;
+const engine_functions = funcs.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions ++ uuid.engine_functions;
 
 comptime {
     dfunc.checkTable(&functions);
@@ -213,4 +214,5 @@ test {
     _ = @import("pgcatalog.zig");
     _ = @import("catalog_funcs.zig");
     _ = @import("array.zig");
+    _ = @import("uuid.zig");
 }

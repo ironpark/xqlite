@@ -1,0 +1,315 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-jsonb-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case fc83e0257dc63524 jsonb columns: values and the operators of a column
+id|j|n
+1|{"a": {"x": [1, "two", true]}, "b": 2}|{"a": null, "z": [1, 2.50]}
+2|[1, 2.50, "x", null, {"k": "v"}]|{"a": null, "z": [1, 2.50]}
+3|"str"|{"a": null, "z": [1, 2.50]}
+4|12.500|{"a": null, "z": [1, 2.50]}
+5|null|{"a": null, "z": [1, 2.50]}
+6||{"a": null, "z": [1, 2.50]}
+7|{"e": "", "s": "a\"b\\c\nd", "u": "é"}|{"a": null, "z": [1, 2.50]}
+8|1000|{"a": null, "z": [1, 2.50]}
+(8 rows)
+id|?column?|?column?|?column?|?column?|?column?|?column?|?column?|?column?|?column?
+1|{"x": [1, "two", true]}|2||||"two"|[1, "two", true]||
+2|||2.50|x|{"k": "v"}||||
+3|||||"str"||||
+4|||||12.500||||
+5|||||null||||
+6|||||||||
+7||||||||a"b\c
+d|"a\"b\\c\nd"
+8|||||1000||||
+(8 rows)
+id|?column?|?column?|?column?|?column?|?column?|?column?|?column?|?column?
+1|t|f|f|t|t|t|t|f
+2|f|t|f|f|f|f|f|t
+3|f|f|t|f|f|f|f|f
+4|f|f|f|f|f|f|f|f
+5|f|f|f|f|f|f|f|f
+6||||||||
+7|f|f|f|f|f|f|f|f
+8|f|f|f|f|f|f|f|f
+(8 rows)
+id|jsonb_typeof|?column?|?column?|?column?
+1|object|true|3|{"a": {"x": [1, "two", true]}, "b": 2}
+2|array|||[1, 2.50, "x", null, {"k": "v"}]
+3|string|||"str"
+4|number|||12.500
+5|null|||null
+6||||
+7|object|||{"e": "", "s": "a\"b\\c\nd", "u": "é"}
+8|number|||1000
+(8 rows)
+==== case 74506d39c0b152e1 jsonb columns: the operators of a column (errors)
+ERROR:  cannot delete from object using integer index
+ERROR:  cannot delete from scalar
+ERROR:  cannot delete path in scalar
+ERROR:  cannot get array length of a non-array
+ERROR:  cannot set path in scalar
+==== case aae7248b67ec00b6 jsonb columns: updates and the functions that change a value
+id|j
+1|{"a": 1, "b": {"c": ["first", 2]}, "z": true}
+2|[0, 1, 3]
+(2 rows)
+?column?|?column?|?column?|jsonb_strip_nulls|jsonb_set_lax
+{"a": 1, "b": {}, "z": true}|{"b": {"c": ["first", 2]}, "z": true}|{"b": {"c": ["first", 2]}}|{"a": 1, "b": {"c": ["first", 2]}, "z": true}|{"b": {"c": ["first", 2]}, "z": true}
+(1 row)
+jsonb_pretty|jsonb_typeof|jsonb_array_length|?column?|?column?
+[
+    0,
+    1,
+    3
+]|array|3|[0, 1, 3, 0, 1, 3]|[0, 1, 3, 9]
+(1 row)
+j
+[0, 1, 3, {"a": 1}]
+(1 row)
+id|j
+1|{"a": 1, "b": {"c": ["first", 2]}, "z": true, "id": 1}
+2|[0, 1, 3, {"a": 1}, {"id": 2}]
+(2 rows)
+==== case dc1bf1324c3ae32e jsonb columns: comparison, ORDER BY, DISTINCT, GROUP BY
+id|j
+3|[]
+4|null
+5|"a"
+17|"ab"
+15|-2.5
+16|0.000
+6|1
+7|1.0
+19|false
+8|true
+12|[null]
+18|[1]
+11|[[]]
+2|[1, 2]
+9|{}
+1|{"a": 1}
+13|{"aa": 1}
+14|{"b": 1}
+10|{"a": 1, "b": 2}
+(19 rows)
+id
+6
+7
+(2 rows)
+id
+1
+2
+9
+10
+11
+13
+14
+(7 rows)
+id
+3
+4
+(2 rows)
+id
+2
+8
+9
+(3 rows)
+id
+1
+2
+3
+4
+5
+(5 rows)
+id
+6
+7
+16
+(3 rows)
+id|row_number
+1|4
+2|6
+3|19
+4|18
+5|17
+6|12
+7|13
+8|10
+9|5
+10|1
+11|7
+12|9
+13|3
+14|2
+15|15
+16|14
+17|16
+18|8
+19|11
+(19 rows)
+jsonb_agg
+[{"a": 1}, [1, 2], "a", null, []]
+(1 row)
+j|count
+{}|1
+{"a": 1}|1
+{"b": 1}|1
+{"a": 1, "b": 2}|1
+(4 rows)
+j
+[]
+[null]
+[1]
+[[]]
+[1, 2]
+(5 rows)
+id|id
+6|7
+(1 row)
+id
+1
+(1 row)
+id|j
+10|{"a": 1, "b": 2}
+14|{"b": 1}
+13|{"aa": 1}
+1|{"a": 1}
+(4 rows)
+==== case 036be59f0d7c41b2 jsonb columns: building and aggregating from columns
+jsonb_agg|json_agg
+[{"k": "a", "v": [1]}, {"k": "b", "v": 2.50}, [true]]|[{"k": "a", "v": [1]}, {"k": "b", "v": 2.50}, [true]]
+(1 row)
+jsonb_build_object|json_build_array|to_json|to_jsonb|json_build_object
+{"x": {"k": "a", "v": [1]}, "id": 1}|[{"k": "a", "v": [1]}, 1]|{"k": "a", "v": [1]}|{"k": "a", "v": [1]}|{"j" : {"k": "a", "v": [1]}}
+{"x": {"k": "b", "v": 2.50}, "id": 2}|[{"k": "b", "v": 2.50}, 2]|{"k": "b", "v": 2.50}|{"k": "b", "v": 2.50}|{"j" : {"k": "b", "v": 2.50}}
+{"x": [true], "id": 3}|[[true], 3]|[true]|[true]|{"j" : [true]}
+(3 rows)
+jsonb_object_agg|json_object_agg
+{"a": [1], "b": 2.50}|{ "a" : [1], "b" : 2.50 }
+(1 row)
+row_to_json
+{"id":1,"j":{"k": "a", "v": [1]}}
+{"id":2,"j":{"k": "b", "v": 2.50}}
+{"id":3,"j":[true]}
+(3 rows)
+j|j|j|length|?column?|concat
+{"k": "a", "v": [1]}|{"k": "a", "v": [1]}|{"k": |20|{"k": "a", "v": [1]}!|{"k": "a", "v": [1]}?
+{"k": "b", "v": 2.50}|{"k": "b", "v": 2.50}|{"k": |21|{"k": "b", "v": 2.50}!|{"k": "b", "v": 2.50}?
+[true]|[true]|[true]|6|[true]!|[true]?
+(3 rows)
+==== case 7ea8a7464bf275cd jsonb columns: set-returning functions and jsonpath of a column
+id|key|value
+1|a|[1, 2, 3]
+1|b|{"c": "x"}
+2|a|[]
+2|b|null
+(4 rows)
+id|key|value
+1|a|[1, 2, 3]
+1|b|{"c": "x"}
+2|a|[]
+2|b|
+(4 rows)
+id|jsonb_array_elements
+1|1
+1|2
+1|3
+(3 rows)
+id|k
+1|a
+1|b
+2|a
+2|b
+(4 rows)
+id|jsonb_path_query_array|jsonb_path_query_first|jsonb_path_exists|?column?|?column?
+1|[2, 3]|"x"|t|t|t
+2|[]||f|f|f
+(2 rows)
+id|jsonb_path_query
+1|1
+1|2
+1|3
+(3 rows)
+id|c
+1|x
+(1 row)
+id|?column?|jsonb_extract_path|jsonb_extract_path_text
+1|1|"x"|2
+2|||
+(2 rows)
+==== case 230bb105becbd3ae jsonb columns: views, CHECK, generated columns, indexes
+id|sub|t|is_a
+1|{"y": [2], "z": 1}|{"sub": {"y": [2], "z": 1}, "kind": "a"}|t
+3||{"kind": "a"}|t
+(2 rows)
+id|kind|sub
+1|a|{"y": [2], "z": 1}
+2|b|
+3|a|
+(3 rows)
+id
+1
+3
+(2 rows)
+sub|count
+{"y": [2], "z": 1}|1
+|2
+(2 rows)
+==== case d29114a1417560d1 jsonb columns: views, CHECK, generated columns, indexes (errors)
+ERROR:  new row for relation "d" violates check constraint "d_j_check"
+DETAIL:  Failing row contains (1, {"x": 1}).
+ERROR:  invalid input syntax for type json
+LINE 1: INSERT INTO d VALUES (2, '{bad');
+                                 ^
+DETAIL:  Token "bad" is invalid.
+CONTEXT:  JSON data, line 1: {bad
+ERROR:  unsupported Unicode escape sequence
+LINE 1: INSERT INTO d VALUES (3, '"\u0000"');
+                                 ^
+DETAIL:  \u0000 cannot be converted to text.
+CONTEXT:  JSON data, line 1: "\u0000...
+ERROR:  null value in column "j" of relation "d" violates not-null constraint
+DETAIL:  Failing row contains (4, null).
+==== case 4dc46d91e6d4b197 jsonb columns: arrays of jsonb
+id|a|a|array|array_append
+1|{"{\"x\": 2, \"y\": 1}",[1]}|{"x": 2, "y": 1}|{"{\"a\": 2, \"b\": 1}"}|{"{\"x\": 2, \"y\": 1}",[1],"{\"a\": 2, \"b\": 1}"}
+2|{}||{[3]}|{[3]}
+(2 rows)
+array_agg
+{"{\"a\": 2, \"b\": 1}",[3]}
+(1 row)
+?column?|?column?
+2|[1, {"a": 2, "b": 1}]
+(1 row)
+==== case 80e21786dce5e5c5 jsonb columns: large values
+?column?|?column?|length|jsonb_typeof|?column?
+||980|array|f
+150|300|3684|object|t
+(2 rows)
+count
+300
+(1 row)
+length
+40
+(1 row)
+==== case 26c0b427a4d17418 jsonb columns: json columns stay text
+j|b|?column?|?column?|?column?|b|j|b
+{"b" : 1,  "a" : [1,  2]}|{"a": [1, 2], "b": 1}|[1,  2]|[1, 2]|t|{"a": [1, 2], "b": 1}|{"b" : 1,  "a" : [1,  2]}|{"a": [1, 2], "b": 1}
+(1 row)
+j|b
+{"a": [1, 2], "b": 1}|{"a": [1, 2], "b": 1, "c": 3}
+(1 row)
+==== case d74f6f41dcb9eef8 jsonb columns: subscripts
+id|j|j|j|j|j|j|j
+1|{"b": [10, 20]}|[10, 20]|20|"one"|"one"||
+2||||[2, 3]|[2, 3]|[2, 3]|2
+3|||||||
+(3 rows)
+id|ab
+1|[10, 20]
+2|
+3|
+(3 rows)
+jsonb|jsonb
+1|2
+(1 row)

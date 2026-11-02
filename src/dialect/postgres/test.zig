@@ -102,7 +102,8 @@ test "pg: SELECT" {
     try c.expectRows("SELECT count(*) FROM emp NATURAL JOIN dept", "3\n");
     try c.expectRows("SELECT e.name FROM emp e JOIN (dept d JOIN dept d2 ON d2.id = d.id) ON d.id = e.dept WHERE d2.title = 'ops'", "cid\n");
     // Grouping, HAVING, aggregates with FILTER and ORDER BY.
-    try c.expectRows("SELECT dept, count(*), sum(salary), avg(salary) FROM emp GROUP BY dept HAVING count(*) > 1", "1|2|180|90.0\n");
+    // avg() of integers is a numeric (a key: its text shown).
+    try c.expectRows("SELECT dept, count(*), sum(salary), avg(salary)::text FROM emp GROUP BY dept HAVING count(*) > 1", "1|2|180|90.0000000000000000\n");
     try c.expectRows("SELECT count(*) FILTER (WHERE salary > 60), count(salary), count(DISTINCT dept) FROM emp", "2|3|2\n");
     try c.expectRows("SELECT string_agg(name, ',' ORDER BY name DESC) FROM emp", "dan,cid,bob,ann\n");
     try c.expectRows("SELECT bool_and(salary > 40), bool_or(salary > 90) FROM emp", "1|1\n");
@@ -158,7 +159,7 @@ test "pg: expressions and functions" {
     defer c.close();
     // Precedence.
     try c.expectRows("SELECT 2 + 3 * 4, (2 + 3) * 4, -2 ^ 2, 2 ^ 3 ^ 2, 1 < 2 = true, 'a' || 'b' = 'ab'", "14|20|4.0|64.0|1|1\n");
-    try c.expectRows("SELECT NOT true OR true, NOT (true OR true), 7 / 2, -7 / 2, 7 % 3, 7.0 / 2", "1|0|3|-3|1|3.5\n");
+    try c.expectRows("SELECT NOT true OR true, NOT (true OR true), 7 / 2, -7 / 2, 7 % 3, (7.0 / 2)::text", "1|0|3|-3|1|3.5000000000000000\n");
     // Predicates.
     try c.expectRows("SELECT NULL IS NULL, 1 IS NOT NULL, NULL ISNULL, 1 NOTNULL, NULL IS DISTINCT FROM 1, NULL IS NOT DISTINCT FROM NULL", "1|1|1|1|1|1\n");
     try c.expectRows("SELECT true IS TRUE, NULL IS UNKNOWN, false IS NOT TRUE, 2 BETWEEN 1 AND 3, 2 NOT BETWEEN 1 AND 3, 2 IN (1, 2), 2 NOT IN (3)", "1|1|1|1|0|1|1\n");
@@ -169,7 +170,7 @@ test "pg: expressions and functions" {
     try c.expectRows("SELECT CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'many' END, CASE WHEN false THEN 1 END", "two|NULL\n");
     try c.expectRows("SELECT coalesce(NULL, NULL, 3), nullif(1, 1), nullif(1, 2), greatest(1, NULL, 3), least(NULL, 2, 1), greatest(NULL, NULL)", "3|NULL|1|3|1|NULL\n");
     // Casts.
-    try c.expectRows("SELECT '42'::int + 1, CAST('7' AS bigint), 42::text || 'x', 'abcdef'::varchar(3), 'abc'::char(1), 3.14159::numeric(4,2)", "43|7|42x|abc|a|3.14\n");
+    try c.expectRows("SELECT '42'::int + 1, CAST('7' AS bigint), 42::text || 'x', 'abcdef'::varchar(3), 'abc'::char(1), 3.14159::numeric(4,2)::text", "43|7|42x|abc|a|3.14\n");
     try c.expectRows("SELECT 't'::boolean, 'off'::bool, 1::boolean, '2024-03-05'::date, '2024-03-05 10:11:12.5'::timestamp, '10:11'::time", "1|0|1|2024-03-05|2024-03-05 10:11:12.5|10:11:00\n");
     try c.expectRows("SELECT date '2024-03-05', timestamp '2024-03-05 01:02:03', '\\x0aff'::bytea, '{\"a\":1}'::jsonb", "2024-03-05|2024-03-05 01:02:03|\n\xff|{\"a\": 1}\n");
     try c.expectError("SELECT 'maybe'::boolean", "invalid input syntax for type boolean: \"maybe\"");
@@ -182,7 +183,7 @@ test "pg: expressions and functions" {
     try c.expectRows("SELECT concat('a', NULL, 1, true), concat_ws('-', 'a', NULL, 'b'), upper('abc'), lower('ABC'), repeat('ab', 3), reverse('abc')", "a11|a-b|ABC|abc|ababab|cba\n");
     try c.expectRows("SELECT lpad('7', 3, '0'), rpad('ab', 4), split_part('a,b,c', ',', 2), starts_with('hello', 'he'), replace('aXbX', 'X', '-'), ascii('A'), chr(66)", "007|ab  |b|1|a-b-|65|B\n");
     // Numbers.
-    try c.expectRows("SELECT abs(-3), round(2.567, 2), floor(-2.5), ceil(2.1), ceiling(2.9), trunc(2.7), sqrt(16), power(2, 10), mod(-7, 3), sign(-4), ln(1), log(100), exp(0)", "3|2.57|-3.0|3.0|3.0|2.0|4.0|1024.0|-1|-1|0.0|2.0|1.0\n");
+    try c.expectRows("SELECT abs(-3), round(2.567, 2)::text, floor(-2.5)::text, ceil(2.1)::text, ceiling(2.9)::text, trunc(2.7)::text, sqrt(16), power(2, 10), mod(-7, 3), sign(-4), ln(1), log(100), exp(0)", "3|2.57|-3|3|3|2|4.0|1024.0|-1|-1|0.0|2.0|1.0\n");
     try c.expectError("SELECT sqrt(-1)", "cannot take square root of a negative number");
     try c.expectError("SELECT mod(1, 0)", "division by zero");
     try c.expectRows("SELECT random() >= 0 AND random() < 1, length(gen_random_uuid()::text), pi() > 3.14", "1|36|1\n");
@@ -194,6 +195,47 @@ test "pg: expressions and functions" {
     try c.expectRows("SELECT '{\"a\": {\"b\": 2}}'::json -> 'a' ->> 'b'", "2\n");
 }
 
+test "pg: intervals are BLOBs, an older database's TEXT" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE iv (id int, v interval DEFAULT '2 hours')");
+    try c.exec("INSERT INTO iv VALUES (1, '1 mon'), (2, '30 days'), (3, '1 day'), (4, '-1 day'), (5, 'infinity'), (6, NULL)");
+    try c.exec("INSERT INTO iv (id) VALUES (7)");
+    try c.expectRows("SELECT typeof(v), length(v), v::text FROM iv WHERE id IN (1, 7) ORDER BY id", "blob|32|1 mon\nblob|32|02:00:00\n");
+    try c.expectError("INSERT INTO iv VALUES (8, 'soon')", "invalid input syntax for type interval: \"soon\"");
+    // '1 mon' = '30 days' (PostgreSQL's), other values: they compute
+    // differently.
+    try c.expectRows("SELECT a.id, b.id FROM iv a JOIN iv b ON a.v = b.v AND a.id < b.id", "1|2\n");
+    try c.expectRows("SELECT (date '2024-02-01' + v)::text FROM iv WHERE id IN (1, 2) ORDER BY id", "2024-03-01 00:00:00\n2024-03-02 00:00:00\n");
+    try c.expectRows("SELECT min(id), count(*) FROM iv GROUP BY v ORDER BY 1", "1|2\n3|1\n4|1\n5|1\n6|1\n7|1\n");
+    try c.expectRows("SELECT count(*) FROM (SELECT DISTINCT v FROM iv) AS d", "6\n");
+    try c.expectRows("SELECT id FROM iv WHERE v > '29 days' ORDER BY v, id", "1\n2\n5\n");
+    try c.expectRows("SELECT id FROM iv WHERE v IN ('720 hours', '1 day') ORDER BY id", "1\n2\n3\n");
+    try c.expectRows("SELECT sum(v)::text, avg(v)::text FROM iv WHERE id < 5", "1 mon 30 days|15 days\n");
+    try c.expectRows("SELECT sum(v)::text FROM iv", "infinity\n");
+    try c.expectRows("SELECT justify_days(sum(v))::text, isfinite(max(v)) FROM iv WHERE id < 5", "2 mons|1\n");
+    // An index orders the BLOBs; SQLite's dialect reads the view (its
+    // comparison calls engine functions).
+    try c.exec("CREATE INDEX iv_v ON iv (v)");
+    try c.exec("CREATE VIEW iv_short AS SELECT id FROM iv WHERE v < '1 week' AND v <> '-1 day'");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT id FROM iv_short ORDER BY id", "3\n7\n");
+    try c.expectRows("PRAGMA integrity_check", "ok\n");
+    try c.expectRows("SELECT xq_pg_iv_text(v) FROM iv INDEXED BY iv_v WHERE v >= xq_pg_iv_key('1 day') AND v <= xq_pg_iv_high('30 days') ORDER BY v", "1 day\n30 days\n1 mon\n");
+    // An older database: its interval column is TEXT, and stays it.
+    try c.exec("INSERT INTO xq_catalog VALUES ('old', '', 'dialect', 'postgres'), ('old', 'id', 'type', 'integer'), ('old', 'v', 'type', 'interval')");
+    try c.exec("CREATE TABLE old (id INTEGER, v TEXT) STRICT");
+    main_mod.setDialect(c.db, .postgres);
+    try c.exec("INSERT INTO old VALUES (1, '1 mon'), (2, interval '30 days'), (3, '25 hours'), (4, (SELECT v FROM iv WHERE id = 3))");
+    try c.expectError("INSERT INTO old VALUES (5, 'infinity')", "interval out of range");
+    try c.expectRows("SELECT typeof(v), v FROM old ORDER BY v, id", "text|1 day\ntext|25:00:00\ntext|1 mon\ntext|30 days\n");
+    try c.expectRows("SELECT o.id, i.id FROM old o JOIN iv i ON o.v = i.v ORDER BY 1, 2", "1|1\n1|2\n2|1\n2|2\n4|3\n");
+    try c.expectRows("SELECT (v + interval '1 hour')::text FROM old WHERE id = 3", "26:00:00\n");
+    try c.exec("UPDATE old SET v = v * 2 WHERE id = 3");
+    try c.expectRows("SELECT v FROM old WHERE id = 3", "50:00:00\n");
+}
+
 test "pg: operators of dates, timestamps and intervals" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -203,14 +245,14 @@ test "pg: operators of dates, timestamps and intervals" {
     try c.expectRows("SELECT date '2024-01-31' + interval '1 month', date '2023-01-31' + interval '1 month', date '2024-01-01' - interval '1 hour', date '2024-01-01' + time '10:30'", "2024-02-29 00:00:00|2023-02-28 00:00:00|2023-12-31 23:00:00|2024-01-01 10:30:00\n");
     // Timestamps: months clamped to the end of the month, then days,
     // then time; the difference an interval of days and time.
-    try c.expectRows("SELECT timestamp '2024-01-31 10:00' + interval '1 month 1 day', timestamp '2024-01-01' + '1 day', timestamp '2024-01-02 02:00' - timestamp '2024-01-01', timestamp '2024-01-01' - timestamp '2024-01-02 02:00'", "2024-03-01 10:00:00|2024-01-02 00:00:00|1 day 02:00:00|-1 days -02:00:00\n");
-    try c.expectRows("SELECT timestamp '2024-01-01 10:00' - date '2024-01-01', '2024-01-01 10:00:00+02:00'::timestamptz + interval '1 day'", "10:00:00|2024-01-02 08:00:00\n");
+    try c.expectRows("SELECT timestamp '2024-01-31 10:00' + interval '1 month 1 day', timestamp '2024-01-01' + '1 day', (timestamp '2024-01-02 02:00' - timestamp '2024-01-01')::text, (timestamp '2024-01-01' - timestamp '2024-01-02 02:00')::text", "2024-03-01 10:00:00|2024-01-02 00:00:00|1 day 02:00:00|-1 days -02:00:00\n");
+    try c.expectRows("SELECT (timestamp '2024-01-01 10:00' - date '2024-01-01')::text, '2024-01-01 10:00:00+02:00'::timestamptz + interval '1 day'", "10:00:00|2024-01-02 08:00:00\n");
     try c.expectRows("SELECT now() - interval '1 day' < now(), now() + '1 hour' > now(), current_date + 1 > current_date", "1|1|1\n");
     // Times wrap around midnight.
-    try c.expectRows("SELECT time '23:00' + interval '2 hours', time '10:00' - time '08:30', time '01:00' - interval '2 hours'", "01:00:00|01:30:00|23:00:00\n");
+    try c.expectRows("SELECT time '23:00' + interval '2 hours', (time '10:00' - time '08:30')::text, time '01:00' - interval '2 hours'", "01:00:00|01:30:00|23:00:00\n");
     // Intervals in PostgreSQL's output style.
-    try c.expectRows("SELECT interval '1 day', interval '1 day 2 hours', interval '38 months', interval '90 minutes', -interval '1 month', interval '-1 day' + interval '1 hour'", "1 day|1 day 02:00:00|3 years 2 mons|01:30:00|-1 mons|-1 days +01:00:00\n");
-    try c.expectRows("SELECT interval '1 year 2 months' + interval '1 year', interval '1 day' - interval '2 hours', interval '1 day' * 2, 2 * interval '1 hour', interval '1 month' / 2, interval '1 day' / 3, interval '1 hour' * 1.5", "2 years 2 mons|1 day -02:00:00|2 days|02:00:00|15 days|08:00:00|01:30:00\n");
+    try c.expectRows("SELECT interval '1 day' || '', interval '1 day 2 hours'::text, (interval '38 months')::text, (interval '90 minutes')::text, (-interval '1 month')::text, (interval '-1 day' + interval '1 hour')::text", "1 day|1 day 02:00:00|3 years 2 mons|01:30:00|-1 mons|-1 days +01:00:00\n");
+    try c.expectRows("SELECT concat(interval '1 year 2 months' + interval '1 year', '|', interval '1 day' - interval '2 hours', '|', interval '1 day' * 2, '|', 2 * interval '1 hour', '|', interval '1 month' / 2, '|', interval '1 day' / 3, '|', interval '1 hour' * 1.5)", "2 years 2 mons|1 day -02:00:00|2 days|02:00:00|15 days|08:00:00|01:30:00\n");
     // Intervals compare and sort in their order, not their text's.
     try c.expectRows("SELECT interval '1 day' > interval '2 hours', interval '1 mon' = interval '30 days', interval '25 hours' > '1 day'", "1|1|1\n");
     try c.exec("CREATE TABLE ev (id int, d date, ts timestamp, iv interval)");
@@ -218,7 +260,7 @@ test "pg: operators of dates, timestamps and intervals" {
     try c.expectRows("SELECT id FROM ev ORDER BY iv", "2\n1\n3\n");
     // Stored as PostgreSQL reads and writes the type: '2 hours' is
     // '02:00:00', a timestamptz in UTC; what it does not read is an error.
-    try c.expectRows("SELECT iv FROM ev ORDER BY id", "1 day\n02:00:00\n1 mon\n");
+    try c.expectRows("SELECT iv::text FROM ev ORDER BY id", "1 day\n02:00:00\n1 mon\n");
     try c.exec("CREATE TABLE stamp (tz timestamptz, d date)");
     try c.exec("INSERT INTO stamp VALUES ('2024-01-01 10:00:00+02', '2024-1-5')");
     try c.expectRows("SELECT * FROM stamp", "2024-01-01 08:00:00|2024-01-05\n");
@@ -230,15 +272,16 @@ test "pg: operators of dates, timestamps and intervals" {
     // A view, a CHECK keep the functions the operators chose: what they
     // mean in every dialect.
     try c.exec("CREATE VIEW ev_next AS SELECT id, d + 1 AS next, ts - interval '1 hour' AS before, -iv AS neg FROM ev WHERE id < 3");
-    try c.expectRows("SELECT * FROM ev_next ORDER BY id", "1|2024-02-01|2024-01-31 09:00:00|-1 days\n2|2024-03-01|2024-02-28 23:00:00|-02:00:00\n");
-    // Its interval comparison is in the collation (the dialect's, as
-    // jsonb's: not seen by SQLite's dialect).
+    try c.expectRows("SELECT id, next, before, neg::text FROM ev_next ORDER BY id", "1|2024-02-01|2024-01-31 09:00:00|-1 days\n2|2024-03-01|2024-02-28 23:00:00|-02:00:00\n");
+    // Its interval comparison is of BLOBs and keys (engine functions,
+    // which SQLite's dialect reads too).
     try c.exec("CREATE VIEW ev_short AS SELECT id FROM ev WHERE iv < interval '1 week'");
     try c.expectRows("SELECT * FROM ev_short ORDER BY id", "1\n2\n");
     try c.exec("CREATE TABLE span (a date, b date CHECK (b - a <= 7))");
     try c.exec("INSERT INTO span VALUES ('2024-01-01', '2024-01-08')");
     try c.expectError("INSERT INTO span VALUES ('2024-01-01', '2024-01-09')", "new row for relation \"span\" violates check constraint \"span_b_check\"");
     main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT id FROM ev_short ORDER BY id", "1\n2\n");
     try c.expectRows("SELECT next FROM ev_next WHERE id = 1", "2024-02-01\n");
     try c.expectRows("SELECT d + 1 FROM ev WHERE id = 1", "2025\n");
     main_mod.setDialect(c.db, .postgres);
@@ -349,10 +392,10 @@ test "pg: json and jsonb" {
         \\INSERT INTO ev VALUES (1, '{"tags":["a","b"],"n":1}', '{"b" :  1}', true), (2, '{"tags":["c"],"n":2}', '[1]', false);
         \\INSERT INTO ev (id) VALUES (3);
     );
-    try c.expectRows("SELECT id, data, raw FROM ev ORDER BY id", "1|{\"n\": 1, \"tags\": [\"a\", \"b\"]}|{\"b\" :  1}\n2|{\"n\": 2, \"tags\": [\"c\"]}|[1]\n3|{\"a\": 2, \"z\": 1}|NULL\n");
+    try c.expectRows("SELECT id, data::text, raw FROM ev ORDER BY id", "1|{\"n\": 1, \"tags\": [\"a\", \"b\"]}|{\"b\" :  1}\n2|{\"n\": 2, \"tags\": [\"c\"]}|[1]\n3|{\"a\": 2, \"z\": 1}|NULL\n");
     try c.expectError("INSERT INTO ev (id, raw) VALUES (4, 'x')", "invalid input syntax for type json");
     try c.exec("UPDATE ev SET data = data || '{\"m\": 0}' WHERE id = 3");
-    try c.expectRows("SELECT data FROM ev WHERE id = 3", "{\"a\": 2, \"m\": 0, \"z\": 1}\n");
+    try c.expectRows("SELECT data::text FROM ev WHERE id = 3", "{\"a\": 2, \"m\": 0, \"z\": 1}\n");
     try c.expectRows("SELECT id FROM ev WHERE data = '{\"z\":1, \"m\":0, \"a\":2}'", "3\n");
     try c.expectRows("SELECT id, t.value FROM ev, jsonb_array_elements_text(ev.data -> 'tags') AS t ORDER BY 1, 2", "1|a\n1|b\n2|c\n");
     try c.expectRows("SELECT id, jsonb_array_elements_text(data -> 'tags') AS tag FROM ev ORDER BY id, tag", "1|a\n1|b\n2|c\n");
@@ -367,7 +410,7 @@ test "pg: json and jsonb" {
     try c.expectRows("SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'ev' AND sql IS NOT NULL", "ev_data_idx\n");
     // The schema keeps SQLite text: a view of JSON operators.
     try c.exec("CREATE VIEW evv AS SELECT id, data -> 'n' AS n, data ? 'tags' AS has FROM ev");
-    try c.expectRows("SELECT * FROM evv ORDER BY id", "1|1|1\n2|2|1\n3|NULL|0\n");
+    try c.expectRows("SELECT id, n::text, has FROM evv ORDER BY id", "1|1|1\n2|2|1\n3|NULL|0\n");
     try c.expectRows("SELECT sql LIKE '%xq_pg_jsonb_get(%' AND sql LIKE '%xq_pg_jsonb_exists(%' FROM sqlite_schema WHERE name = 'evv'", "1\n");
 }
 
@@ -379,38 +422,40 @@ test "pg: jsonb's operators by the type of a column of a subquery, a CTE, a view
         \\CREATE TABLE ej (id int PRIMARY KEY, d jsonb, r json);
         \\INSERT INTO ej VALUES (1, '{"a":1,"b":[1,2]}', '{"x" :  1}'), (2, '{"a":2}', '[1]'), (3, '[0]', NULL);
     );
-    try c.expectRows("SELECT s.d || '{\"c\":3}' FROM (SELECT d FROM ej WHERE id = 1) s", "{\"a\": 1, \"b\": [1, 2], \"c\": 3}\n");
-    try c.expectRows("WITH w AS (SELECT id, d FROM ej) SELECT w.d -> 'a', w.d - 'a', w.d #> '{b,1}' FROM w ORDER BY id", "1|{\"b\": [1, 2]}|2\n2|{}|NULL\nNULL|[0]|NULL\n");
+    try c.expectRows("SELECT (s.d || '{\"c\":3}')::text FROM (SELECT d FROM ej WHERE id = 1) s", "{\"a\": 1, \"b\": [1, 2], \"c\": 3}\n");
+    try c.expectRows("WITH w AS (SELECT id, d FROM ej) SELECT (w.d -> 'a')::text, (w.d - 'a')::text, (w.d #> '{b,1}')::text FROM w ORDER BY id", "1|{\"b\": [1, 2]}|2\n2|{}|NULL\nNULL|[0]|NULL\n");
     try c.expectRows("SELECT id FROM (SELECT id, d AS x FROM ej) s WHERE s.x = '{\"b\":[1,2],  \"a\":1}'", "1\n");
-    try c.expectRows("SELECT x FROM (SELECT d AS x FROM ej) s ORDER BY x", "[0]\n{\"a\": 2}\n{\"a\": 1, \"b\": [1, 2]}\n");
-    try c.expectRows("SELECT d FROM ej UNION ALL SELECT '{}' ORDER BY 1 DESC LIMIT 2", "{\"a\": 1, \"b\": [1, 2]}\n{\"a\": 2}\n");
-    try c.expectRows("SELECT coalesce(d, '{}') || '{\"m\":1}', CASE WHEN id = 1 THEN d ELSE '[]' END || '[9]' FROM ej WHERE id = 2", "{\"a\": 2, \"m\": 1}|[9]\n");
-    try c.expectRows("SELECT (SELECT d FROM ej WHERE id = 2) || '{\"y\":1}', to_json(s.d) FROM (SELECT d FROM ej WHERE id = 3) s", "{\"a\": 2, \"y\": 1}|[0]\n");
+    try c.expectRows("SELECT x::text FROM (SELECT d AS x FROM ej) s ORDER BY x", "[0]\n{\"a\": 2}\n{\"a\": 1, \"b\": [1, 2]}\n");
+    // (A compound sorts jsonb by the collation, which orders text, not
+    // JSONB: sorted outside it.)
+    try c.expectRows("SELECT d::text FROM (SELECT d FROM ej UNION ALL SELECT '{}') u ORDER BY d DESC LIMIT 2", "{\"a\": 1, \"b\": [1, 2]}\n{\"a\": 2}\n");
+    try c.expectRows("SELECT (coalesce(d, '{}') || '{\"m\":1}')::text, (CASE WHEN id = 1 THEN d ELSE '[]' END || '[9]')::text FROM ej WHERE id = 2", "{\"a\": 2, \"m\": 1}|[9]\n");
+    try c.expectRows("SELECT ((SELECT d FROM ej WHERE id = 2) || '{\"y\":1}')::text, to_json(s.d) FROM (SELECT d FROM ej WHERE id = 3) s", "{\"a\": 2, \"y\": 1}|[0]\n");
     try c.expectError("SELECT s.r || s.r FROM (SELECT r FROM ej) s", "operator does not exist: json || json");
     // excluded.* and RETURNING's columns are of the table's types.
-    try c.expectRows("INSERT INTO ej VALUES (2, '{\"b\":3}') ON CONFLICT (id) DO UPDATE SET d = ej.d || excluded.d RETURNING d || '{\"r\":1}'", "{\"a\": 2, \"b\": 3, \"r\": 1}\n");
+    try c.expectRows("INSERT INTO ej VALUES (2, '{\"b\":3}') ON CONFLICT (id) DO UPDATE SET d = ej.d || excluded.d RETURNING (d || '{\"r\":1}')::text", "{\"a\": 2, \"b\": 3, \"r\": 1}\n");
     try c.exec("UPDATE ej SET d = '{\"a\":2}' WHERE id = 2");
     // A view's column is of the type of its query's.
     try c.exec("CREATE VIEW ev AS SELECT id, d, d || '{\"z\":0}' AS dz FROM ej");
-    try c.expectRows("SELECT dz || '{\"q\":1}', d -> 'a' FROM ev WHERE id = 2", "{\"a\": 2, \"q\": 1, \"z\": 0}|2\n");
+    try c.expectRows("SELECT (dz || '{\"q\":1}')::text, (d -> 'a')::text FROM ev WHERE id = 2", "{\"a\": 2, \"q\": 1, \"z\": 0}|2\n");
     try c.expectRows("SELECT id FROM ev WHERE d = '{\"a\": 2}'", "2\n");
     // The text the schema keeps says what was chosen, inside a CTE too,
     // so that it means the same in every dialect.
     try c.exec("CREATE VIEW cv AS WITH w AS (SELECT id, d || '{\"c\":1}' AS e FROM ej) SELECT id, e -> 'c' AS c FROM w");
     try c.expectRows("SELECT instr(sql, 'xq_pg_jsonb_concat(\"d\"') > 0, instr(sql, 'xq_pg_jsonb_get(\"e\"') > 0 FROM sqlite_schema WHERE name = 'cv'", "1|1\n");
     try c.exec("CREATE VIEW ov AS SELECT x FROM (SELECT d AS x FROM ej) s ORDER BY 1");
-    try c.expectRows("SELECT instr(sql, '(1 COLLATE xq_pg_jsonb)') > 0 FROM sqlite_schema WHERE name = 'ov'", "1\n");
+    try c.expectRows("SELECT instr(sql, 'ORDER BY xq_pg_jsonb_key(\"x\")') > 0 FROM sqlite_schema WHERE name = 'ov'", "1\n");
     try c.exec("CREATE TABLE ck (j jsonb CHECK (j -> 'a' = '1'))");
     try c.exec("INSERT INTO ck VALUES ('{\"a\": 1}')");
     try c.expectError("INSERT INTO ck VALUES ('{\"a\": 2}')", "new row for relation \"ck\" violates check constraint \"ck_j_check\"");
     try c.exec("CREATE INDEX ck_a ON ck ((j -> 'a'))");
     try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE sql LIKE '%xq_pg_jsonb_get(\"j\", ''a'')%'", "2\n");
     main_mod.setDialect(c.db, .sqlite);
-    try c.expectRows("SELECT id, c FROM cv ORDER BY id", "1|1\n2|1\n3|NULL\n");
+    try c.expectRows("SELECT id, json(c) FROM cv ORDER BY id", "1|1\n2|1\n3|NULL\n");
     // A view of SQLite's dialect means SQLite's operators where it is read.
-    try c.exec("CREATE VIEW sv AS SELECT d || '{\"b\":2}' AS x FROM ej WHERE id = 2");
+    try c.exec("CREATE VIEW sv AS SELECT json(d) || '{\"b\":2}' AS x FROM ej WHERE id = 2");
     main_mod.setDialect(c.db, .postgres);
-    try c.expectRows("SELECT x FROM sv", "{\"a\": 2}{\"b\":2}\n");
+    try c.expectRows("SELECT x FROM sv", "{\"a\":2}{\"b\":2}\n");
 }
 
 test "pg: numbers in JSON as PostgreSQL spells them" {
@@ -515,6 +560,39 @@ test "pg: transactions and savepoints" {
     try c.expectError("COMMIT AND CHAIN", "AND CHAIN is not supported");
 }
 
+test "pg: uuid is 16 bytes, an older table's text column stays text" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (u uuid PRIMARY KEY, n int, d uuid DEFAULT 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11', g uuid DEFAULT gen_random_uuid())");
+    try c.exec("INSERT INTO t (u, n) VALUES ('{11111111-1111-1111-1111-111111111111}', 1), ('22222222222222222222222222222222', 2)");
+    try c.expectRows("SELECT typeof(u), length(u), hex(u), hex(d), length(g), n FROM t ORDER BY u",
+        \\blob|16|11111111111111111111111111111111|A0EEBC999C0B4EF8BB6D6BB9BD380A11|16|1
+        \\blob|16|22222222222222222222222222222222|A0EEBC999C0B4EF8BB6D6BB9BD380A11|16|2
+        \\
+    );
+    try c.expectRows("SELECT n FROM t WHERE u = '22222222-2222-2222-2222-222222222222'", "2\n");
+    try c.expectRows("SELECT u::text, u || '!' FROM t WHERE u IN ('11111111111111111111111111111111')", "11111111-1111-1111-1111-111111111111|11111111-1111-1111-1111-111111111111!\n");
+    try c.expectError("INSERT INTO t (u) VALUES ('11111111-1111-1111-1111-11111111111')", "invalid input syntax for type uuid: \"11111111-1111-1111-1111-11111111111\"");
+    try c.expectRows("SELECT uuid_extract_version(uuidv4()), uuid_extract_version(uuidv7()), uuid_extract_version(gen_random_uuid()), uuid_extract_timestamp('017F22E2-79B0-7CC3-98C4-DC0C0C07398F')", "4|7|4|2022-02-22 19:22:22\n");
+    // A literal compared with the column is read once, and the key's
+    // index is used.
+    try c.expectRows("EXPLAIN SELECT n FROM t WHERE u = '22222222-2222-2222-2222-222222222222'", "3|0|39|SEARCH t USING INDEX sqlite_autoindex_t_1 (u=?)\n");
+    // A table made before: its uuid column is TEXT, and stays so.
+    try c.exec("CREATE TABLE o (u text PRIMARY KEY, n int)");
+    main_mod.setDialect(c.db, .sqlite);
+    try c.exec("UPDATE xq_catalog SET value = 'uuid' WHERE tbl = 'o' AND col = 'u'");
+    main_mod.setDialect(c.db, .postgres);
+    try c.exec("INSERT INTO o VALUES ('{A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11}', 1), (gen_random_uuid(), 2)");
+    try c.exec("INSERT INTO o SELECT u, n + 10 FROM t");
+    try c.expectRows("SELECT typeof(u), length(u) FROM o GROUP BY 1, 2", "text|36\n");
+    try c.expectRows("SELECT n FROM o WHERE u = 'a0eebc999c0b4ef8bb6d6bb9bd380a11'", "1\n");
+    try c.expectRows("SELECT o.n FROM o JOIN t ON t.u = o.u ORDER BY 1", "11\n12\n");
+    try c.expectRows("SELECT uuid_extract_version(u) FROM o WHERE n = 2", "4\n");
+    try c.exec("INSERT INTO t (u, n) SELECT u, n + 100 FROM o WHERE n = 1");
+    try c.expectRows("SELECT typeof(u) FROM t WHERE n = 101", "blob\n");
+}
+
 test "pg: types are strict" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -526,7 +604,7 @@ test "pg: types are strict" {
         \\  dt date, ts timestamp, tz timestamptz, tm time, u uuid, j jsonb)
     );
     try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'ty'",
-        \\CREATE TABLE "ty"("i2" INTEGER CONSTRAINT "smallint out of range" CHECK(("i2" BETWEEN -32768 AND 32767)), "i4" INTEGER CONSTRAINT "integer out of range" CHECK(("i4" BETWEEN -2147483648 AND 2147483647)), "i8" INTEGER, "r" REAL, "d" REAL, "n" ANY CONSTRAINT "invalid input syntax for type numeric" CHECK((typeof("n") IN ('integer', 'real', 'null'))), "b" INTEGER CONSTRAINT "invalid input syntax for type boolean" CHECK(("b" IN (0, 1))), "t" TEXT, "vc" TEXT CONSTRAINT "value too long for type character varying(3)" CHECK((length("vc") <= 3)), "ch" TEXT CONSTRAINT "value too long for type character(2)" CHECK((length("ch") <= 2)), "by" BLOB, "dt" TEXT, "ts" TEXT, "tz" TEXT, "tm" TEXT, "u" TEXT, "j" TEXT CONSTRAINT "invalid input syntax for type json" CHECK(json_valid("j"))) STRICT
+        \\CREATE TABLE "ty"("i2" INTEGER CONSTRAINT "smallint out of range" CHECK(("i2" BETWEEN -32768 AND 32767)), "i4" INTEGER CONSTRAINT "integer out of range" CHECK(("i4" BETWEEN -2147483648 AND 2147483647)), "i8" INTEGER, "r" REAL, "d" REAL, "n" BLOB CONSTRAINT "invalid input syntax for type numeric" CHECK(xq_dec_valid("n", 6, 2)), "b" INTEGER CONSTRAINT "invalid input syntax for type boolean" CHECK(("b" IN (0, 1))), "t" TEXT, "vc" TEXT CONSTRAINT "value too long for type character varying(3)" CHECK((length("vc") <= 3)), "ch" TEXT CONSTRAINT "value too long for type character(2)" CHECK((length("ch") <= 2)), "by" BLOB, "dt" TEXT, "ts" TEXT, "tz" TEXT, "tm" TEXT, "u" BLOB CONSTRAINT "invalid input syntax for type uuid" CHECK((length("u") = 16)), "j" BLOB CONSTRAINT "invalid input syntax for type json" CHECK(json_valid("j", 8))) STRICT
         \\
     );
     try c.expectRows("SELECT col, value FROM xq_catalog WHERE tbl = 'ty' AND key = 'type' ORDER BY col",
@@ -551,10 +629,15 @@ test "pg: types are strict" {
     );
     try c.exec("INSERT INTO ty (i2, i4, i8, r, n, b, vc, j) VALUES (1, '2', 3, 4, 5.25, true, 'abc', '{}')");
     try c.exec("INSERT INTO ty (n) VALUES ('1.5'), ('7')");
-    try c.expectRows("SELECT i2, i4, r, n, b, vc FROM ty WHERE i2 = 1", "1|2|4.0|5.25|1|abc\n");
-    try c.expectRows("SELECT n, typeof(n) FROM ty WHERE i2 IS NULL ORDER BY n", "1.5|real\n7|integer\n");
+    try c.expectRows("SELECT i2, i4, r, n::text, b, vc FROM ty WHERE i2 = 1", "1|2|4.0|5.25|1|abc\n");
+    // A numeric is stored as decimal.zig's key.
+    try c.expectRows("SELECT n::text, typeof(n) FROM ty WHERE i2 IS NULL ORDER BY n", "1.50|blob\n7.00|blob\n");
     try c.expectError("INSERT INTO ty (i4) VALUES ('x')", "cannot store TEXT value in INTEGER column ty.i4");
-    try c.expectError("INSERT INTO ty (i4) VALUES (1.5)", "cannot store REAL value in INTEGER column ty.i4");
+    // A numeric stored into an integer is rounded (PostgreSQL's assignment
+    // cast).
+    try c.exec("INSERT INTO ty (i4, vc) VALUES (1.5, 'r')");
+    try c.expectRows("SELECT i4 FROM ty WHERE vc = 'r'", "2\n");
+    try c.exec("DELETE FROM ty WHERE vc = 'r'");
     try c.expectError("INSERT INTO ty (i2) VALUES (40000)", "smallint out of range");
     try c.expectError("INSERT INTO ty (i4) VALUES (3000000000)", "integer out of range");
     try c.expectError("INSERT INTO ty (vc) VALUES ('abcd')", "value too long for type character varying(3)");
@@ -564,7 +647,7 @@ test "pg: types are strict" {
     // A string is read as PostgreSQL reads the column type's input.
     try c.expectError("INSERT INTO ty (b) VALUES ('x')", "invalid input syntax for type boolean: \"x\"");
     try c.exec("INSERT INTO ty (i2, b, n) VALUES (9, 'on', ' 2.75 ')");
-    try c.expectRows("SELECT b, n FROM ty WHERE i2 = 9", "1|2.75\n");
+    try c.expectRows("SELECT b, n::text FROM ty WHERE i2 = 9", "1|2.75\n");
     try c.expectError("INSERT INTO ty (by) VALUES (1)", "cannot store INT value in BLOB column ty.by");
     try c.expectError("CREATE TABLE bad (x nosuchtype)", "type \"nosuchtype\" does not exist");
     try c.expectError("CREATE TABLE bad (x serial[])", "array of serial is not implemented");
@@ -741,7 +824,7 @@ test "pg: information_schema and pg_catalog" {
         \\SELECT column_name, ordinal_position, is_nullable, data_type, character_maximum_length, numeric_precision, numeric_scale, udt_name, column_default
         \\FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'person' ORDER BY ordinal_position
     ,
-        \\id|1|NO|integer|NULL|32|0|int4|nextval('person_id_seq')
+        \\id|1|NO|integer|NULL|32|0|int4|nextval('person_id_seq'::regclass)
         \\name|2|NO|character varying|40|NULL|NULL|varchar|NULL
         \\born|3|YES|date|NULL|NULL|NULL|date|NULL
         \\score|4|YES|numeric|NULL|5|1|numeric|NULL
@@ -1308,4 +1391,45 @@ test "pg: arrays in the text the schema keeps" {
     main_mod.setDialect(c.db, .sqlite);
     try c.expectRows("SELECT * FROM v", rows);
     try c.expectError("INSERT INTO t (a) VALUES ('x')", "CHECK constraint failed: malformed array literal");
+}
+
+// ================================================================ numeric
+
+test "pg: numeric columns store keys, in index order" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE n (id int, v numeric(12,4)); CREATE INDEX n_v ON n (v)");
+    try c.exec("INSERT INTO n VALUES (1, 10), (2, 9.5), (3, -1), (4, '1e7'), (5, 'NaN'), (6, -0.0001), (7, 0.1 + 0.2)");
+    try c.expectRows("SELECT typeof(v), count(*) FROM n GROUP BY 1", "blob|7\n");
+    try c.expectRows("SELECT id FROM n ORDER BY v", "3\n6\n7\n2\n1\n4\n5\n");
+    try c.expectRows("SELECT id FROM n WHERE v = 0.3", "7\n");
+    try c.expectRows("SELECT id FROM n WHERE v > 9.5 AND v < 'NaN' ORDER BY v", "1\n4\n");
+    // sqlite3 cannot write a number into the column.
+    main_mod.setDialect(c.db, .sqlite);
+    defer main_mod.setDialect(c.db, .postgres);
+    try c.expectError("INSERT INTO n VALUES (8, 1.5)", "cannot store REAL value in BLOB column n.v");
+    try c.expectError("INSERT INTO n VALUES (8, x'40')", "CHECK constraint failed: invalid input syntax for type numeric");
+    try c.exec("INSERT INTO n VALUES (8, xq_dec_key('2.5'))");
+    try c.expectRows("SELECT xq_dec_text(v) FROM n WHERE id = 8", "2.5\n");
+}
+
+test "pg: numeric columns of numbers (made before numerics were keys) keep numbers" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // What the PostgreSQL frontend made of `n numeric(6,2)` before.
+    main_mod.setDialect(c.db, .sqlite);
+    try c.exec(
+        \\CREATE TABLE xq_catalog(tbl TEXT NOT NULL,col TEXT NOT NULL,key TEXT NOT NULL,value,PRIMARY KEY(tbl,col,key))WITHOUT ROWID;
+        \\CREATE TABLE old (id INTEGER, n ANY CONSTRAINT "invalid input syntax for type numeric" CHECK (typeof(n) IN ('integer', 'real', 'null'))) STRICT;
+        \\INSERT INTO xq_catalog VALUES ('old', '', 'dialect', 'postgres'), ('old', 'n', 'type', 'numeric(6,2)'), ('old', 'id', 'type', 'integer');
+    );
+    main_mod.setDialect(c.db, .postgres);
+    try c.exec("INSERT INTO old VALUES (1, 1.5), (2, '2.25'), (3, 7)");
+    try c.exec("INSERT INTO old SELECT 4, n * 2 FROM old WHERE id = 1");
+    try c.exec("UPDATE old SET n = n + 0.1 WHERE id = 3");
+    try c.expectRows("SELECT id, n, typeof(n) FROM old ORDER BY id", "1|1.5|real\n2|2.25|real\n3|7.1|real\n4|3|integer\n");
+    try c.expectRows("SELECT id FROM old WHERE n = 3", "4\n");
+    try c.expectRows("SELECT (n * n)::text FROM old WHERE id = 2", "5.0625\n");
 }

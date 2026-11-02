@@ -67,6 +67,9 @@ pub const types = @import("sql/types.zig");
 /// Values as the dialect a client speaks shows them (display.text(), and
 /// display.Columns for the types of result columns).
 pub const display = @import("api/display.zig");
+/// Exact decimal numbers and the key a numeric column stores them as (a
+/// BLOB in the order of the numbers: decimal.decodeKey(), keyText()).
+pub const decimal = @import("dialect/decimal.zig");
 
 test {
     _ = errors;

@@ -124,6 +124,9 @@ const privileges = blk: {
 };
 
 pub const engine_functions = [_]int.FuncDef{
+    // information_schema.columns.column_default: pg_get_expr()'s text of
+    // a column's DEFAULT (its stored text, the column's declared type).
+    dfunc.scalar("xq_pg_column_default", 2, none, columnDefaultFunc),
     dfunc.scalar("xq_pg_regclass", 1, none, dfunc.bind(regIn, .{ Reg.class, false })),
     dfunc.scalar("xq_pg_regtype", 1, none, dfunc.bind(regIn, .{ Reg.type, false })),
     dfunc.scalar("xq_pg_regnamespace", 1, none, dfunc.bind(regIn, .{ Reg.namespace, false })),
@@ -613,6 +616,20 @@ fn viewQuery(a: Allocator, s: *const Snapshot, sql: []const u8) error{OutOfMemor
     const reg = registered(a, s) catch return error.OutOfMemory;
     const q = try pgc.pgText(a, std.mem.trim(u8, sql[start..], " ;"), reg);
     return std.fmt.allocPrint(a, " {s};", .{q});
+}
+
+fn columnDefaultFunc(ctx: *Context, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(ctx);
+    const z = dfunc.text(ctx, argv[0]) orelse return;
+    const decl: []const u8 = if (isNull(argv[1])) "" else dfunc.text(ctx, argv[1]) orelse return;
+    var c: Call = .init(ctx);
+    defer c.deinit();
+    const s = c.get() orelse return;
+    const a = c.a();
+    const reg = registered(a, s) catch return c.oom();
+    const t = pgc.columnTypeOf(decl);
+    const out = pgc.defaultText(a, z, t[0], false, reg, t[1]) catch return c.oom();
+    c.text(out);
 }
 
 fn registered(a: Allocator, s: *const Snapshot) error{OutOfMemory}![]const @import("../../catalog/schema.zig").Info {

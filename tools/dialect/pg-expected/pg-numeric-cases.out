@@ -1,0 +1,259 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-numeric-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 7735971eeb507fe1 literals and casts keep their digits and scale
+?column?|?column?|?column?|numeric
+1.50|0.3|2.000000000000000000001|123456789012345678901234567890.5
+(1 row)
+numeric|numeric|numeric|numeric|numeric|numeric
+1.50|12.3400|0.001|150|0.5|0
+(1 row)
+numeric|numeric|numeric|numeric
+1000.5|31|-5|15
+(1 row)
+numeric|numeric|numeric|?column?
+NaN|Infinity|-Infinity|t
+(1 row)
+numeric|numeric|numeric|numeric|numeric
+1.500|123.5|3|-3|1200
+(1 row)
+==== case 56065eabed206cb5 input errors and typmod overflow
+ERROR:  invalid input syntax for type numeric: "abc"
+LINE 1: SELECT 'abc'::numeric;
+               ^
+ERROR:  invalid input syntax for type numeric: "1__0"
+LINE 1: SELECT '1__0'::numeric;
+               ^
+ERROR:  value overflows numeric format
+LINE 1: SELECT '1e131072'::numeric;
+               ^
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 5, scale 2 cannot hold an infinite value.
+ERROR:  NUMERIC precision 0 must be between 1 and 1000
+LINE 1: SELECT 1::numeric(0);
+                  ^
+ERROR:  NUMERIC scale 1001 must be between -1000 and 1000
+LINE 1: SELECT 1::numeric(5,1001);
+                  ^
+ERROR:  invalid NUMERIC type modifier
+LINE 1: SELECT 1::numeric(1,2,3);
+                  ^
+==== case e447d47ff45b96fa arithmetic and its scales
+?column?|?column?|?column?|?column?|?column?|?column?
+2.50|2.2500|0.00|1.5|-1.5|-1.50
+(1 row)
+?column?|?column?|?column?|?column?|?column?
+2.5000000000000000|0.66666666666666666667|0.33333333333333333333|33.3333333333333333|1763668414462081127
+(1 row)
+ERROR:  division by zero
+ERROR:  division by zero
+?column?|?column?|?column?|?column?|?column?
+NaN|NaN|0|NaN|-Infinity
+(1 row)
+?column?|?column?
+100000000000000000000|9999999999999999999800000000000000000001
+(1 row)
+==== case 6c49ae18b1f599eb functions of numerics
+round|round|round|round|round|trunc|trunc
+3|-3|1.23|1200|1.500|-1|1.23
+(1 row)
+ceil|ceiling|floor|floor|abs|sign|sign|mod
+-1|2|-2|1|0.50|-1|0|2.0
+(1 row)
+div|div|scale|min_scale|trim_scale|scale
+3|-3|3|1|1.5|
+(1 row)
+==== case 9d6a65055ce8a0d3 casts to and from integers, floats and text
+int4|int4|int2|int8|text|float8
+3|-3|2|9007199254740994|1.50|1.5
+(1 row)
+ERROR:  smallint out of range
+ERROR:  cannot convert NaN to integer
+ERROR:  cannot convert infinity to bigint
+numeric|numeric|numeric|numeric
+0.333333333333333|0.3|0.00000000015|100
+(1 row)
+?column?|?column?|concat
+1.50x|v2.50|1.50|3
+(1 row)
+?column?|?column?
+3.75|t
+(1 row)
+==== case 83426755770ffd4e numeric columns store keys of their type
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 10, scale 2 cannot hold an infinite value.
+ERROR:  numeric field overflow
+DETAIL:  A field with precision 10, scale 2 must round to an absolute value less than 10^8.
+ERROR:  invalid input syntax for type numeric: "x"
+LINE 1: INSERT INTO t VALUES (5, 'x', 1, 1, 1);
+                                 ^
+id|a|b
+1|1.50|2.25
+2|-7.13|100
+3|12345678.90|NaN
+4|1.23|2
+(4 rows)
+id|?column?|?column?|?column?|?column?
+1|3.75|3.00|0.50000000000000000000|-1.50
+2|92.87|-14.26|-2.3766666666666667|7.13
+3|NaN|24691357.80|4115226.300000000000|-12345678.90
+4|3.23|2.46|0.41000000000000000000|-1.23
+(4 rows)
+id|b|c|i
+1|2.25|1.5|2
+2|200|-7.13|-7
+3|NaN|3.5|3
+4|2||
+(4 rows)
+==== case 3f977ec674899f6f comparisons, ORDER BY, GROUP BY and DISTINCT of keys
+id
+1
+4
+5
+8
+(4 rows)
+id
+1
+4
+(2 rows)
+id
+1
+2
+3
+4
+6
+(5 rows)
+id
+2
+3
+(2 rows)
+id|v
+3|-1.0000
+6|-0.0001
+2|9.5000
+1|10.0000
+4|10.0000
+8|10000000.0000
+5|NaN
+7|
+(8 rows)
+id|v
+5|NaN
+8|10000000.0000
+1|10.0000
+4|10.0000
+2|9.5000
+6|-0.0001
+3|-1.0000
+7|
+(8 rows)
+v|count
+-1.0000|1
+-0.0001|1
+9.5000|1
+10.0000|2
+10000000.0000|1
+NaN|1
+|1
+(7 rows)
+v
+9.5000
+10.0000
+10000000.0000
+NaN
+(4 rows)
+min|max|count
+-1.0000|NaN|6
+(1 row)
+id
+5
+(1 row)
+count|sum
+2|3.00
+2|4.000
+(2 rows)
+count
+1
+(1 row)
+==== case 1db93633fb0f8445 sum and avg
+g|sum|avg|sum|avg
+1|3.75|1.8750000000000000|18446744073709551614|1.5000000000000000
+2|3.00|3.0000000000000000|3|3.5000000000000000
+(2 rows)
+sum|avg|avg
+6.75|2.2500000000000000|4611686018427387904
+(1 row)
+g|sum
+1|1.50
+1|3.75
+2|2.25
+2|3.00
+(4 rows)
+sum|avg
+NaN|NaN
+(1 row)
+sum
+NaN
+(1 row)
+==== case 6e030ddbb709a997 indexes, UNIQUE and foreign keys on numeric keys
+ERROR:  duplicate key value violates unique constraint "k_pkey"
+DETAIL:  Key (n)=(1.50) already exists.
+ERROR:  insert or update on table "r" violates foreign key constraint "r_n_fkey"
+DETAIL:  Key (n)=(7) is not present in table "k".
+label
+a
+(1 row)
+label
+c
+a
+(2 rows)
+n|label
+1.50|a
+2.00|b
+(2 rows)
+==== case 380092eebb4acd03 CHECK, generated columns and views compute with keys
+ERROR:  new row for relation "c" violates check constraint "c_a_check"
+DETAIL:  Failing row contains (-1.00, -1.500).
+a|b|s|q|big
+2.25|3.375|5.625|0.7500|t
+(1 row)
+==== case a87c66e5cbaf4d44 CASE, coalesce, greatest and least of numerics
+id|coalesce|case|greatest|least|nullif
+1|1.50|1.50|2|1.50|
+2|0|5|2|2|
+(2 rows)
+case
+x
+y
+(2 rows)
+==== case 2b6c78461f859a90 numeric as JSON and in arrays
+to_json|to_jsonb|json_build_object|json_agg
+-2.00|0.25|{"a" : -2.00, "b" : 0.25}|[-2.00]
+1.50|100|{"a" : 1.50, "b" : 100}|[1.50]
+(2 rows)
+array|array
+{-2.00,0.25}|{1.50,2}
+{1.50,100}|{1.50,2}
+(2 rows)
+array_agg|numeric
+{-2.00,1.50}|{1.50,2}
+(1 row)
+to_json|to_json|to_jsonb
+"NaN"|1.50|1.50
+(1 row)
+?column?
+2.25
+(1 row)
+==== case 05724aee26011744 the catalog's types of numeric columns
+attname|format_type
+a|numeric
+b|numeric(10,2)
+c|numeric(5,0)
+d|numeric(3,-2)
+(4 rows)
+column_name|data_type|numeric_precision|numeric_scale
+a|numeric||
+b|numeric|10|2
+c|numeric|5|0
+(3 rows)

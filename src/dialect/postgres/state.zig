@@ -28,6 +28,9 @@ pub const State = struct {
     /// *pgcatalog.Snapshot), and what releases it.
     catalog: ?*anyopaque = null,
     catalog_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
+    /// uuidv7(): the time it last used, nanoseconds since 1970 (uuid.zig:
+    /// the next is later, so the session's uuids are in order).
+    uuidv7_ns: i64 = 0,
 
     /// Forget the parameters set (RESET ALL).
     pub fn resetParams(s: *State, gpa: std.mem.Allocator) void {

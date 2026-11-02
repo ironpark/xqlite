@@ -302,8 +302,22 @@ pub const Rules = struct {
     /// value of every column it names (storeFunctions()), so a
     /// parameter bound as text is read too. For the conversions that
     /// need no frontend: a frontend that wraps stored values itself
-    /// (store_wrappers) needs none.
-    store: ?*const fn (t: Type) ?*const int.FuncDef = null,
+    /// (store_wrappers) needs none. `storage` is the column's STRICT type
+    /// (the representation of the type may differ by it: PostgreSQL's
+    /// interval is TEXT in the tables of older databases, BLOB in newer
+    /// ones; PostgreSQL's uuid is 16 bytes, the text of an older table's
+    /// TEXT column; PostgreSQL's jsonb is JSONB in a BLOB column, text
+    /// in a TEXT one).
+    store: ?*const fn (t: Type, storage: int.COLTYPE) ?*const int.FuncDef = null,
+    /// The store function of a column of type `t` and SQLite storage
+    /// `storage` (its STRICT type), when it depends on more than the
+    /// type (`decl`: the declared type as written): constants after the
+    /// value, every value through it, or only values of a type
+    /// (PostgreSQL's numeric: xq_dec_key(v, p, s) into a BLOB column,
+    /// xq_dec_number(v) into a column of numbers, a numeric made the
+    /// number of an integer column). Asked before `store`; null to ask
+    /// `store`.
+    store_column: ?*const fn (t: Type, decl: []const u8, storage: int.COLTYPE) ?Store = null,
     /// A numeric value has a scale of its own (PostgreSQL's: 1 and 2.50
     /// together are 1 and 2.50), so that the common type of numerics of
     /// different scales has none; else the common type has the larger
@@ -330,8 +344,25 @@ pub const Rules = struct {
     overload: ?*const fn (c: *Ctx, e: *Expr) Error!bool = null,
     /// The collation an ORDER BY sorts values of type `id` with (jsonb's
     /// order), null for the default; as overload, not in the schema's
-    /// SQL.
-    order_collation: ?*const fn (c: *Ctx, id: TypeId) ?[:0]const u8 = null,
+    /// SQL. `e` is the term (a column of a compound's: its number), by
+    /// which the collation may differ (PostgreSQL's interval: a BLOB
+    /// sorts as it is, text in a collation).
+    order_collation: ?*const fn (c: *Ctx, id: TypeId, e: *const Expr) ?[:0]const u8 = null,
+    /// The function (of one argument) a GROUP BY or DISTINCT groups
+    /// values of type `id` by, null for the values themselves:
+    /// PostgreSQL's interval, whose equal values ('1 mon', '30 days') are
+    /// not the same bytes, groups by its key (groupBy()). `e` is the term,
+    /// by which the key may differ (PostgreSQL's numeric: a computed value
+    /// that may carry its display scale groups by its key without it, a
+    /// column of keys as it is). As overload, not in the schema's SQL.
+    group_key: ?*const fn (c: *Ctx, id: TypeId, e: *const Expr) ?[]const u8 = null,
+    /// The function an ORDER BY sorts values of type `id` by (a sort key
+    /// whose bytes are in the type's order: PostgreSQL's jsonb, a BLOB a
+    /// collation cannot order), null for none; before order_collation,
+    /// as it. A term so wrapped is a result column no more; the terms of
+    /// a compound, which can only be result columns, are left as they
+    /// are.
+    order_key: ?*const fn (c: *Ctx, id: TypeId) ?[:0]const u8 = null,
 };
 
 /// The functions whose type is the same in every dialect.
@@ -387,7 +418,16 @@ pub const Ctx = struct {
     pub fn call(c: *Ctx, name: []const u8, args: []const *Expr) Error!*Expr {
         const p = c.p;
         var list: ?*int.ExprList = null;
-        for (args) |a| list = try expr_mod.listAppend(p, list, a);
+        for (args) |a| {
+            // A window function copied out of the Expr it was (toCall()'s
+            // `e`, now this call) is its window's owner again, as after
+            // resolveAlias()'s swap.
+            if (a.flags.WinFunc) if (a.y.win) |win| {
+                win.owner = a;
+            };
+            list = try expr_mod.listAppend(p, list, a);
+        }
+        if (std.mem.startsWith(u8, name, "xq_dec")) p.xq_exact_numeric = true;
         const e = try expr_mod.exprAlloc(p.arena, TK.FUNCTION, int.Token.init(name), true);
         e.x = .{ .list = list };
         e.flags.HasFunc = true;
@@ -414,6 +454,7 @@ pub const Ctx = struct {
     /// window of a window function is told.
     pub fn rename(c: *Ctx, e: *Expr, name: []const u8) Oom!void {
         const p = c.p;
+        if (std.mem.startsWith(u8, name, "xq_dec")) p.xq_exact_numeric = true;
         e.u = .{ .token = try p.arena.dupeSentinel(u8, name, 0) };
         if (e.isWindowFunc()) {
             const n: i32 = if (e.x.list) |l| @intCast(l.len()) else 0;
@@ -492,16 +533,21 @@ fn walk(c: *Ctx, e: *Expr) Error!bool {
         // The ORDER BY of an aggregate (f(x ORDER BY y): a TK_ORDER on the
         // left of the call), the window of a window function.
         if (e.op == TK.ORDER and e.useXList()) if (e.x.list) |list| {
+            changed = try keyList(c, list, false) or changed;
             changed = try orderByList(c, list) or changed;
         };
         if (e.useYWin()) if (e.y.win) |w| {
-            if (w.partition) |list| for (list.slice()) |item| if (item.expr) |x| {
-                _ = try walk(c, x);
-            };
+            if (w.partition) |list| {
+                for (list.slice()) |item| if (item.expr) |x| {
+                    _ = try walk(c, x);
+                };
+                _ = try keyList(c, list, true);
+            }
             if (w.order_by) |list| {
                 for (list.slice()) |item| if (item.expr) |x| {
                     _ = try walk(c, x);
                 };
+                _ = try keyList(c, list, true);
                 _ = try orderByList(c, list);
             }
             if (w.filter) |x| _ = try walk(c, x);
@@ -517,16 +563,63 @@ fn walk(c: *Ctx, e: *Expr) Error!bool {
     return changed;
 }
 
+/// The terms of ORDER BY (PARTITION BY) list `list` (typed) made the
+/// keys of their types (Rules.group_key), so that values equal but not
+/// the same (PostgreSQL's '1 mon' and '30 days') sort as peers: `all`
+/// the terms (a window's: its peers, its partitions), else all but the
+/// last (whose ties do not matter, and whose values an index on them
+/// orders). Whether one changed.
+fn keyList(c: *Ctx, list: *int.ExprList, all: bool) Error!bool {
+    if (c.p.xq_schema_text > 0) return false;
+    const f = c.rules.group_key orelse return false;
+    const items = list.slice();
+    var changed = false;
+    for (items, 0..) |*item, i| {
+        if (!all and i + 1 == items.len) break;
+        const x = item.expr orelse continue;
+        const name = f(c, x.xq_type, x) orelse continue;
+        item.expr = try c.call(name, &.{x});
+        item.u = .{ .x = .{} };
+        changed = true;
+    }
+    return changed;
+}
+
+/// The ORDER BY of `s`, a query that is no compound (resolved in `nc`):
+/// keyList()'s keys (a term that stood for a result column is that
+/// column's copy, resolved: now an expression of its own). For a
+/// statement typed (active()).
+pub fn orderKeys(nc: *int.NameContext, s: *int.Select) void {
+    const p = nc.parse;
+    if (p.xq_schema_text > 0 or s.prior != null or s.next != null) return;
+    const list = s.order_by orelse return;
+    var c = ctxOf(p) orelse return;
+    c.nc = nc;
+    _ = keyList(&c, list, false) catch |err| switch (err) {
+        error.OutOfMemory => p.db.oomFault(),
+        error.Failed => {},
+    };
+}
+
 /// The collation Rules.order_collation gives the items of ORDER BY list
 /// `list` (typed) by their types; whether one changed.
 fn orderByList(c: *Ctx, list: *int.ExprList) Error!bool {
     if (c.p.xq_schema_text > 0) return false;
-    const f = c.rules.order_collation orelse return false;
     var changed = false;
+    // Rules.order_key: the term wrapped in the key function.
+    if (c.rules.order_key) |k| for (list.slice()) |*item| {
+        const x = item.expr orelse continue;
+        // (A key is of a type of no key: not wrapped twice.)
+        if (x.op == TK.COLLATE) continue;
+        const name = k(c, x.xq_type) orelse continue;
+        item.expr = try c.call(name, &.{x});
+        changed = true;
+    };
+    const f = c.rules.order_collation orelse return changed;
     for (list.slice()) |*item| {
         const x = item.expr orelse continue;
         if (x.op == TK.COLLATE) continue;
-        const coll = f(c, x.xq_type) orelse continue;
+        const coll = f(c, x.xq_type, x) orelse continue;
         item.expr = try c.collate(x, coll);
         changed = true;
     }
@@ -538,13 +631,20 @@ fn orderByList(c: *Ctx, list: *int.ExprList) Error!bool {
 /// number or alias, now that it stands for that column (`id`: the type of
 /// that column, for the terms of a compound, which are numbers). For a
 /// statement typed (active()).
-pub fn orderTerm(p: *int.Parse, item: *int.ExprListItem, id: TypeId) void {
+pub fn orderTerm(p: *int.Parse, item: *int.ExprListItem, id: TypeId, compound: bool) void {
     if (p.xq_schema_text > 0) return;
     var c = ctxOf(p) orelse return;
-    const f = c.rules.order_collation orelse return;
     const x = item.expr orelse return;
     if (x.op == TK.COLLATE) return;
-    const coll = f(&c, id) orelse return;
+    // Rules.order_key: the term an expression of its own (a compound's
+    // can only be a column: its type's collation, if any).
+    if (!compound) if (c.rules.order_key) |k| if (k(&c, id)) |name| {
+        item.expr = c.call(name, &.{x}) catch return p.db.oomFault();
+        item.u.x.order_by_col = 0;
+        return;
+    };
+    const f = c.rules.order_collation orelse return;
+    const coll = f(&c, id, x) orelse return;
     item.expr = c.collate(x, coll) catch return p.db.oomFault();
 }
 
@@ -556,13 +656,81 @@ pub fn orderCollation(p: *int.Parse, e: *const Expr) ?[:0]const u8 {
     var c = ctxOf(p) orelse return null;
     const f = c.rules.order_collation orelse return null;
     if (e.op == TK.COLLATE) return null;
-    return f(&c, e.xq_type);
+    return f(&c, e.xq_type, e);
+}
+
+/// The GROUP BY of `s` (its names resolved in `nc`, typed) by the keys
+/// of the dialect's types (Rules.group_key): a term of such a type is
+/// its key, which no longer stands for a result column; a DISTINCT that
+/// is no aggregate and has a result column of such a type is a GROUP BY
+/// of its result columns (as SQLite makes some DISTINCTs). For a
+/// statement typed (active()); not in the schema's SQL.
+pub fn groupBy(nc: *int.NameContext, s: *int.Select) void {
+    const p = nc.parse;
+    if (p.xq_schema_text > 0) return;
+    var c = ctxOf(p) orelse return;
+    c.nc = nc;
+    const f = c.rules.group_key orelse return;
+    groupByKeys(&c, f, s) catch |err| switch (err) {
+        error.OutOfMemory => p.db.oomFault(),
+        error.Failed => {},
+    };
+}
+
+fn groupByKeys(c: *Ctx, f: *const fn (c: *Ctx, id: TypeId, e: *const Expr) ?[]const u8, s: *int.Select) Error!void {
+    if (s.group_by) |gb| {
+        for (gb.slice()) |*item| {
+            const x = item.expr orelse continue;
+            const name = f(c, x.xq_type, x) orelse continue;
+            item.expr = try c.call(name, &.{x});
+            item.u = .{ .x = .{} };
+        }
+        return;
+    }
+    if (!s.sel_flags.Distinct or s.sel_flags.Aggregate or s.win != null) return;
+    const list = s.e_list orelse return;
+    for (list.slice()) |item| {
+        if (f(c, item.expr.?.xq_type, item.expr.?) != null) break;
+    } else return;
+    var gb: ?*int.ExprList = null;
+    for (list.slice()) |item| {
+        const x = (try expr_mod.exprDup(c.p.arena, item.expr.?)).?;
+        const term = if (f(c, x.xq_type, x)) |name| try c.call(name, &.{x}) else x;
+        gb = try expr_mod.listAppend(c.p, gb, term);
+    }
+    s.group_by = gb;
+    s.sel_flags.Distinct = false;
+    s.sel_flags.Aggregate = true;
+}
+
+/// ORDER BY term `e` (an expression, resolved in `nc` and typed) wrapped
+/// in the function its type sorts by (Rules.order_key), null if none.
+pub fn orderKey(nc: *int.NameContext, e: *Expr) int.ParseError!?*Expr {
+    const p = nc.parse;
+    if (p.xq_schema_text > 0 or e.op == TK.COLLATE) return null;
+    var c = ctxOf(p) orelse return null;
+    c.nc = nc;
+    const k = c.rules.order_key orelse return null;
+    const name = k(&c, e.xq_type) orelse return null;
+    return c.call(name, &.{e}) catch |err| switch (err) {
+        error.OutOfMemory => {
+            p.db.oomFault();
+            return error.ParseFailed;
+        },
+        error.Failed => return error.ParseFailed,
+    };
 }
 
 /// The type of `e`, whose operands are typed.
 fn exprType(c: *Ctx, e: *Expr) Oom!TypeId {
     switch (e.op) {
-        TK.INTEGER, TK.FLOAT, TK.STRING, TK.BLOB, TK.NULL => return c.rules.literal(c, e),
+        TK.INTEGER, TK.FLOAT, TK.STRING, TK.BLOB, TK.NULL => {
+            const id = try c.rules.literal(c, e);
+            // A number literal of PostgreSQL's numeric (1.5, 1e3, an
+            // integer past bigint) is exact (Parse.xq_exact_numeric).
+            if (e.op != TK.STRING and typeOf(c.p.db, id).logical == .numeric) c.p.xq_exact_numeric = true;
+            return id;
+        },
         TK.UPLUS, TK.COLLATE => return if (e.left) |l| l.xq_type else unknown,
         TK.PLUS, TK.MINUS, TK.STAR, TK.SLASH, TK.REM, TK.CONCAT, TK.BITAND, TK.BITOR, TK.LSHIFT, TK.RSHIFT => {
             const l = e.left orelse return unknown;
@@ -813,31 +981,62 @@ pub fn arithWidth(p: *const int.Parse, e: *const Expr) u16 {
     return dialect_mod.hooks(p.db).arith.width(typeOf(p.db, e.xq_type).logical);
 }
 
-/// The function each column of `t` (by index) is stored through
-/// (Rules.store, by the column's type in the catalog), null if no column
-/// has one; from the statement's memory.
-pub fn storeFunctions(p: *int.Parse, t: *int.Table) Oom!?[]const ?*const int.FuncDef {
+/// What a value stored into a column goes through (storeFunctions()):
+/// `def` of the value and `consts` after it.
+pub const Store = struct {
+    def: *const int.FuncDef,
+    consts: [2]i32 = .{ 0, 0 },
+    n_consts: u2 = 0,
+    /// Every value, not only those storeNeeded() picks.
+    always: bool = false,
+    /// Only the values of type numeric (PostgreSQL's numeric stored into
+    /// a column of another type: a key made a number or text).
+    only_numeric: bool = false,
+
+    /// Whether value `e` goes through it.
+    pub fn needed(s: Store, db: *const int.Sqlite3, e: *const Expr) bool {
+        if (s.only_numeric) return typeOf(db, e.xq_type).logical == .numeric;
+        return s.always or storeNeeded(db, e);
+    }
+
+    /// Whether the values of column `i` of query `sel` (INSERT ... SELECT)
+    /// go through it.
+    pub fn neededColumn(s: Store, p: *int.Parse, sel: *int.Select, i: usize) bool {
+        if (!s.only_numeric) return true;
+        const id = columnOf(p, sel, i) catch return true;
+        return typeOf(p.db, id).logical == .numeric;
+    }
+};
+
+/// What each column of `t` (by index) is stored through (Rules.store_column
+/// and Rules.store, by the column's type in the catalog), null if no
+/// column has it; from the statement's memory.
+pub fn storeFunctions(p: *int.Parse, t: *int.Table) Oom!?[]const ?Store {
     if (!active(p.db)) return null;
     const rules = dialect_mod.hooks(p.db).typing orelse return null;
-    const f = rules.store orelse return null;
+    if (rules.store == null and rules.store_column == null) return null;
     if (!t.isOrdinary()) return null;
     const m = (catalog.metaOf(p.db, t) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         else => null,
     }) orelse return null;
-    var out: ?[]?*const int.FuncDef = null;
+    var out: ?[]?Store = null;
     for (m.columns) |*col| {
-        const def = f(col.type) orelse continue;
         const i = for (t.cols, 0..) |*tc, k| {
             if (std.ascii.eqlIgnoreCase(tc.name(), col.name)) break k;
         } else continue;
+        const st: Store = blk: {
+            if (rules.store_column) |sc| if (sc(col.type, col.decl_type orelse "", t.cols[i].e_ctype)) |s| break :blk s;
+            const f = rules.store orelse continue;
+            break :blk .{ .def = f(col.type, t.cols[i].e_ctype) orelse continue };
+        };
         const list = out orelse blk: {
-            const x = try p.arena.alloc(?*const int.FuncDef, t.cols.len);
+            const x = try p.arena.alloc(?Store, t.cols.len);
             @memset(x, null);
             out = x;
             break :blk x;
         };
-        list[i] = def;
+        list[i] = st;
     }
     return out;
 }
@@ -845,11 +1044,16 @@ pub fn storeFunctions(p: *int.Parse, t: *int.Table) Oom!?[]const ?*const int.Fun
 /// Whether value `e`, stored into a column with a store function, may
 /// need it: a parameter, or a value of no known type or of a string
 /// type (a number, a boolean expression, a column of the same type are
-/// stored as they are).
+/// stored as they are). An interval may be text or a BLOB (PostgreSQL's
+/// interval columns of older databases are TEXT), stored as the column
+/// keeps it; jsonb JSONB or text, as the column keeps it.
 pub fn storeNeeded(db: *const int.Sqlite3, e: *const Expr) bool {
     if (e.op == TK.VARIABLE) return true;
     return switch (typeOf(db, e.xq_type).logical) {
-        .unknown, .text, .varchar, .char => true,
+        // A uuid may be a column's 16 bytes or an older column's text, an
+        // interval a BLOB or an older database's text, a numeric a key or
+        // a number (Rules.store).
+        .unknown, .text, .varchar, .char, .uuid, .interval, .jsonb, .numeric => true,
         else => false,
     };
 }

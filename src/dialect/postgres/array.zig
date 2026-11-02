@@ -50,6 +50,7 @@ const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const types = @import("../../sql/types.zig");
 const json = @import("json.zig");
+const jsonb_bin = @import("../jsonb.zig");
 const datetime = @import("datetime.zig");
 const like = @import("../like.zig");
 
@@ -706,6 +707,11 @@ pub fn valueElem(a: Allocator, c: Code, m: *Mem, fail: *Fail) ElemError!?[]const
         },
         vi.SQLITE_BLOB => {
             const b = api.valueBlob(m) orelse "";
+            // A jsonb value stored as JSONB: its text.
+            if (c.elem == .jsonb and jsonb_bin.valid(b)) return json.blobText(a, b) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return invalid(a, c.elem, "", fail),
+            };
             return try std.fmt.allocPrint(a, "\\x{x}", .{b});
         },
         else => {

@@ -1,4 +1,5 @@
--- The engine functions of no dialect (src/dialect/like.zig, abi.zig):
+-- The engine functions of no dialect (src/dialect/like.zig, abi.zig,
+-- decimal_sql.zig: numerics and their keys, whose bytes are a disk format):
 -- their results are part of the file format (docs/extension.md). The
 -- recorded output is abi-core.out; `xqt interop ext` checks xqlite and
 -- sqlite3 with the extension against it.
@@ -9,3 +10,13 @@ SELECT xq_ilike('A%', 'abc'), xq_ilike('É%', 'éa'), xq_ilike('%B%', 'abc', '\'
 SELECT xq_like(1, 1), xq_like('1%', 12), xq_like('%.5', 1.5), xq_like('%', x'00');
 SELECT xq_like('a\', 'a');
 SELECT xq_like('a', 'a', 'xy');
+SELECT hex(xq_dec_key('1.50')), hex(xq_dec('1.50')), hex(xq_dec_key(-1)), hex(xq_dec_key('1e300')), hex(xq_dec_key('-1e-300')), hex(xq_dec_key(0)), hex(xq_dec_key('NaN')), hex(xq_dec_key('inf')), hex(xq_dec_key('-inf'));
+SELECT xq_dec_text(xq_dec_add('0.1', '0.2')), xq_dec_text(xq_dec_div(1, 3)), xq_dec_text(xq_dec_mul('1.50', '1.50')), xq_dec_text(xq_dec_mod('-7.5', 2)), xq_dec_text(xq_dec_neg('1.50')), xq_dec_text(xq_dec_key('1.50'), 3);
+SELECT xq_dec_text(xq_dec_round('2.5')), xq_dec_text(xq_dec_round('1234.5', -2)), xq_dec_text(xq_dec_trunc('-1.99')), xq_dec_text(xq_dec_ceil('-1.5')), xq_dec_text(xq_dec_floor('-1.5')), xq_dec_text(xq_dec_sign('-3')), xq_dec_text(xq_dec_div_trunc('7.5', 2)), xq_dec_scale('1.500'), xq_dec_min_scale('1.500'), xq_dec_text(xq_dec_trim_scale('1.500'));
+SELECT xq_dec_text(xq_dec('12.345', 4, 2)), xq_dec_valid(xq_dec_key('1.5')), xq_dec_valid(xq_dec('1.50')), xq_dec_valid(xq_dec_key('1.234'), 10, 2), xq_dec_valid(1.5), quote(xq_dec_valid(NULL)), xq_dec_int4('2.5'), xq_dec_int8('-2.5'), xq_dec_float8('0.1'), xq_dec_number('3'), xq_dec_number(xq_dec_key('1.25'));
+SELECT xq_dec_key('1.5') < xq_dec_key('10'), xq_dec_key('-10') < xq_dec_key('-1.5'), xq_dec_key('inf') < xq_dec_key('NaN');
+SELECT xq_dec_text(xq_dec_sum(x)), xq_dec_text(xq_dec_avg(x)) FROM (SELECT '1.5' AS x UNION ALL SELECT '2.25' UNION ALL SELECT NULL);
+SELECT xq_dec('x');
+SELECT xq_dec('12345.678', 5, 2);
+SELECT xq_dec_div(1, 0);
+SELECT xq_dec_int2('32767.5');

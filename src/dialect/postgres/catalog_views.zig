@@ -58,7 +58,9 @@ const tables =
 const columns =
     \\SELECT current_database() AS table_catalog,
 ++ " " ++ schema_of ++ " AS table_schema, " ++ bare("m.name") ++ " AS table_name," ++
-    \\  c.name AS column_name, (c.cid + 1)::integer AS ordinal_position, c.dflt_value AS column_default,
+    \\  c.name AS column_name, (c.cid + 1)::integer AS ordinal_position,
+++ " xq_pg_column_default(c.dflt_value, k.value) AS column_default," ++
+    \\
     \\  CASE WHEN c."notnull" <> 0 OR c.pk <> 0 THEN 'NO' ELSE 'YES' END AS is_nullable,
     \\  xq_pg_data_type(k.value, c.type) AS data_type,
     \\  xq_pg_char_max(k.value, c.type)::integer AS character_maximum_length,

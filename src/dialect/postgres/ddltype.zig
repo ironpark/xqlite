@@ -11,7 +11,9 @@
 //! resolved, and so typed, in a Parse of its own that generates no code.
 //! What the core changed is then done to the tree: a call another
 //! function, an operator a call, an argument wrapped, a comparison's or
-//! an ORDER BY's collation. The query of a CTE is resolved as a copy
+//! an ORDER BY's collation, an Expr wrapped in place (a numeric's
+//! xq_dec_key(x) ..., overload.zig's wrapIn()) or a numeric literal read
+//! as text. The query of a CTE is resolved as a copy
 //! where it is read, so it is probed on its own, as a subquery under the
 //! CTEs it sees (a recursive one under itself).
 
@@ -24,6 +26,7 @@ const select_mod = @import("../../sql/select.zig");
 const parser = @import("parser.zig");
 const Children = @import("jtype.zig").Children;
 const operators = @import("operators.zig");
+const typing = @import("../../sql/typing.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -51,7 +54,10 @@ pub fn statement(ps: *Parser, stmt: tree.Stmt) Error!void {
             for (ct.columns, cols) |c, *rc| {
                 const pos = c.name.pos;
                 const null_ = try tree.expr(a, pos, pos, .null);
-                const v = if (c.decl_type) |d| try tree.expr(a, pos, pos, .{ .cast = .{ .e = null_, .target_type = d, .mode = .{ .affinity = "TEXT" } } }) else null_;
+                // (Of the column's storage if a BLOB: a uuid's 16 bytes,
+                // which overload.zig tells from an older column's text.)
+                const aff = if (c.type) |t| (if (std.mem.eql(u8, t, "BLOB")) "BLOB" else "TEXT") else "TEXT";
+                const v = if (c.decl_type) |d| try tree.expr(a, pos, pos, .{ .cast = .{ .e = null_, .target_type = d, .mode = .{ .affinity = aff } } }) else null_;
                 rc.* = .{ .expr = .{ .e = v, .alias = c.name } };
             }
             const inner = try selectOf(a, cols, &.{});
@@ -65,7 +71,7 @@ pub fn statement(ps: *Parser, stmt: tree.Stmt) Error!void {
             if (ci.where) |w| try exprs.append(a, w);
             const from = try a.alloc(tree.FromItem, 1);
             from[0] = .{ .source = .{ .table = .{ .schema = ci.name.schema, .name = ci.table } } };
-            try probe(p, ps.src, a, try selectOf(a, try resultCols(a, exprs.items), from), null);
+            try probeKeyed(p, ps.src, a, try selectOf(a, try resultCols(a, exprs.items), from), exprs.items[0..ci.items.len]);
         },
         else => {},
     }
@@ -85,6 +91,15 @@ fn selectOf(a: std.mem.Allocator, cols: []tree.ResultCol, from: []tree.FromItem)
 /// Lower and resolve `s` in a Parse of its own (no code, no error, no
 /// authorizer), then bring the choices of the core back to `s`'s tree.
 fn probe(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tree.Select, own_with: ?*tree.With) Error!void {
+    return probeWith(outer, src, a, s, own_with, &.{});
+}
+
+/// probe() of the expressions of an index (`keyed`, of `s`).
+fn probeKeyed(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tree.Select, keyed: []const *Expr) Error!void {
+    return probeWith(outer, src, a, s, null, keyed);
+}
+
+fn probeWith(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tree.Select, own_with: ?*tree.With, keyed: []const *Expr) Error!void {
     const db = outer.db;
     var q: int.Parse = .{ .db = db, .arena = outer.arena, .tail = outer.tail, .outer_parse = outer };
     defer build.releaseTableRefs(&q);
@@ -105,6 +120,17 @@ fn probe(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tree.Se
     if (db.malloc_failed) return error.OutOfMemory;
     var b: Back = .{ .o = &origins, .a = a, .p = &q, .own_with = own_with };
     try b.select(s);
+    // The numeric expressions of an index: their keys without a display
+    // scale (xq_dec_key()), as a comparison compares them, so that the
+    // query's `a + b = 1` is the index's expression.
+    for (keyed) |e| {
+        const ix = b.of(e) orelse continue;
+        if (ix.op == TK.COLUMN or typing.typeOf(db, ix.xq_type).logical != .numeric) continue;
+        if (isCall(ix) and std.ascii.eqlIgnoreCase(ix.token(), "xq_dec_key")) continue;
+        const inner = try a.create(Expr);
+        inner.* = e.*;
+        e.kind = .{ .func = try b.func(e.pos, "xq_dec_key", try a.dupe(*Expr, &.{inner})) };
+    }
     // The query of a CTE is resolved as a copy where it is read: probed
     // on its own, as `WITH (the CTEs it sees) SELECT * FROM (query)`.
     for (b.ctes.items) |c| {
@@ -147,9 +173,71 @@ const Back = struct {
             b.scope = try std.mem.concat(b.a, tree.Cte, &.{ outer, w.ctes });
         }
         try b.body(s.body);
-        try b.sortList(s.order_by);
+        try b.sortList(s.order_by, if (s.body.* == .core) s.body.core.cols else &.{});
         if (s.limit) |x| try b.expr(x);
         if (s.offset) |x| try b.expr(x);
+    }
+
+    // ------------------------------------------------- interval BLOB
+    // overload.zig's choices of intervals: keys, bounds and text.
+
+    /// Whether `e`'s Expr in the probe is an interval.
+    fn isInterval(b: *const Back, e: *const Expr) bool {
+        const x = b.of(e) orelse return false;
+        return typing.typeOf(b.p.db, x.xq_type).logical == .interval;
+    }
+
+    /// `name(e)`.
+    fn wrap(b: *Back, e: *Expr, name: []const u8) Error!*Expr {
+        return tree.expr(b.a, e.pos, e.end, .{ .func = try b.func(e.pos, name, try b.a.dupe(*Expr, &.{e})) });
+    }
+
+    /// Operand `t`, which the core wrapped in an interval's key, bound or
+    /// text (`w`: xq_pg_iv_key(its Expr)): wrapped the same; whether it
+    /// was.
+    fn wrapped(b: *Back, t: **Expr, w_: ?*IrExpr) Error!bool {
+        const w = w_ orelse return false;
+        if (!isCall(w)) return false;
+        const names = [_][]const u8{ "xq_pg_iv_key", "xq_pg_iv_high", "xq_pg_iv_text" };
+        const name = for (names) |n| {
+            if (std.ascii.eqlIgnoreCase(w.token(), n)) break n;
+        } else return false;
+        const list = w.x.list orelse return false;
+        if (list.len() != 1) return false;
+        // (+a of x IN (a).)
+        var arg = list.at(0).expr orelse return false;
+        if (arg.op == TK.UPLUS and arg.left != null and arg != b.of(t.*)) arg = arg.left.?;
+        if (arg != b.of(t.*)) return false;
+        t.* = try b.wrap(t.*, name);
+        return true;
+    }
+
+    /// The GROUP BY of `c` by the keys of intervals (typing.groupBy()): a
+    /// term that is an interval its key; a DISTINCT of an interval
+    /// column a GROUP BY of the columns (only for a list of plain
+    /// expressions: one with a call may be an aggregate).
+    fn groupKeys(b: *Back, c: *tree.Core) Error!void {
+        if (c.group_by.len > 0) {
+            for (c.group_by) |*g| if (b.isInterval(g.*)) {
+                g.* = try b.wrap(g.*, "xq_pg_iv_key");
+            };
+            return;
+        }
+        if (!c.distinct) return;
+        var any = false;
+        for (c.cols) |rc| {
+            if (rc != .expr) return;
+            switch (rc.expr.e.kind) {
+                .func, .subquery, .exists => return,
+                else => {},
+            }
+            if (b.isInterval(rc.expr.e)) any = true;
+        }
+        if (!any) return;
+        const gb = try b.a.alloc(*Expr, c.cols.len);
+        for (c.cols, gb) |rc, *g| g.* = if (b.isInterval(rc.expr.e)) try b.wrap(rc.expr.e, "xq_pg_iv_key") else rc.expr.e;
+        c.group_by = gb;
+        c.distinct = false;
     }
 
     fn body(b: *Back, x: *tree.Body) Error!void {
@@ -161,6 +249,7 @@ const Back = struct {
                 for (c.group_by) |g| try b.expr(g);
                 if (c.having) |h| try b.expr(h);
                 for (c.windows) |w| try b.window(w.spec);
+                try b.groupKeys(c);
             },
             .values => |rows| for (rows) |row| for (row) |e| try b.expr(e),
             .compound => |c| {
@@ -185,17 +274,36 @@ const Back = struct {
 
     fn window(b: *Back, w: *tree.WindowSpec) Error!void {
         for (w.partition) |e| try b.expr(e);
-        try b.sortList(w.order_by);
+        // An interval partitions by its key (typing.keyList()).
+        for (w.partition) |*e| if (b.isInterval(e.*)) {
+            e.* = try b.wrap(e.*, "xq_pg_iv_key");
+        };
+        try b.sortList(w.order_by, &.{});
     }
 
-    /// An ORDER BY whose term the core sorts with jsonb's collation.
-    fn sortList(b: *Back, items: []tree.SortItem) Error!void {
+    /// An ORDER BY whose term the core sorts with its type's collation
+    /// or by jsonb's key (`cols`: the result columns of a query, which a
+    /// term may name by number or alias).
+    fn sortList(b: *Back, items: []tree.SortItem, cols: []const tree.ResultCol) Error!void {
         for (items) |item| try b.expr(item.expr);
         if (items.len == 0) return;
         const list = b.o.sort_lists.get(items.ptr) orelse return;
         for (items, 0..) |*item, i| {
             if (i >= list.len()) break;
             const x = list.at(i).expr orelse continue;
+            // jsonb's: by its sort key.
+            if (calls(x, jsonb_key)) {
+                // A result column by number: the key of its expression (an
+                // alias reads as the column in the key's argument too).
+                if (item.expr.kind == .integer) {
+                    if (resultCol(cols, item.expr)) |e| item.expr = try b.wrap(e, jsonb_key);
+                } else if (b.wrappedIn(x, item.expr, jsonb_key) or resultCol(cols, item.expr) != null) {
+                    item.expr = try b.wrap(item.expr, jsonb_key);
+                }
+                continue;
+            }
+            // An interval's key (typing.keyList()).
+            if (try b.wrapped(&item.expr, x)) continue;
             if (!isCollate(x) or item.expr.kind == .collate) continue;
             item.expr = try tree.expr(b.a, item.expr.pos, item.expr.end, .{ .collate = .{ .e = item.expr, .collation = collationOf(x) } });
         }
@@ -206,7 +314,7 @@ const Back = struct {
             .func => |f| {
                 for (f.args) |x| try b.expr(x);
                 if (f.filter) |x| try b.expr(x);
-                try b.sortList(f.order_by);
+                try b.sortList(f.order_by, &.{});
                 if (f.over) |w| try b.window(w);
             },
             .in_select => |x| {
@@ -219,7 +327,27 @@ const Back = struct {
                 while (it.next()) |x| try b.expr(x);
             },
         }
-        const x = b.of(e) orelse return;
+        const x0 = b.of(e) orelse return;
+        // Calls the core wrapped `e` in, in place (outermost first): done
+        // to the tree once `e` itself is.
+        var wraps: [4]*IrExpr = undefined;
+        var n_wraps: usize = 0;
+        var x = x0;
+        while (n_wraps < wraps.len and b.wrappedInPlace(e, x)) {
+            wraps[n_wraps] = x;
+            n_wraps += 1;
+            x = x.x.list.?.at(0).expr.?;
+        }
+        defer {
+            var k = n_wraps;
+            while (k > 0) {
+                k -= 1;
+                b.wrapTree(e, wraps[k]) catch {};
+            }
+        }
+        // A numeric literal read as its text (xq_dec('1.50')).
+        if ((e.kind == .float or e.kind == .integer) and x.op == TK.STRING) e.kind = .{ .string = x.token() };
+        if (try b.uuid(e, x)) return;
         switch (e.kind) {
             .concat => |c| if (c.args.len == 2 and calls(x, "xq_pg_jsonb_concat")) {
                 e.kind = .{ .func = try b.func(e.pos, x.token(), c.args) };
@@ -228,6 +356,56 @@ const Back = struct {
                 const f = try b.func(e.pos, x.token(), c.args);
                 try b.call(f, x);
                 e.kind = .{ .func = f };
+            } else {
+                if (c.args.len == 2 and x.op == TK.CONCAT) {
+                    // jsonb || text: jsonb's text.
+                    if (x.left) |l| if (b.wrappedIn(l, c.args[0], "xq_pg_jsonb_text")) {
+                        c.args[0] = try b.wrap(c.args[0], "xq_pg_jsonb_text");
+                    };
+                    if (x.right) |r| if (b.wrappedIn(r, c.args[1], "xq_pg_jsonb_text")) {
+                        c.args[1] = try b.wrap(c.args[1], "xq_pg_jsonb_text");
+                    };
+                }
+                // An interval is its text.
+                for (c.args) |*arg| if (b.isInterval(arg.*)) {
+                    arg.* = try b.wrap(arg.*, "xq_pg_iv_text");
+                };
+            },
+            .between => |*bt| {
+                // jsonb's: the sort keys.
+                if (x.left) |l| if (b.wrappedIn(l, bt.e, jsonb_key)) {
+                    bt.e = try b.wrap(bt.e, jsonb_key);
+                    bt.lo = try b.wrap(bt.lo, jsonb_key);
+                    bt.hi = try b.wrap(bt.hi, jsonb_key);
+                    return;
+                };
+                const y = if (x.op == TK.NOT) x.left orelse return else x;
+                if (y.op != TK.BETWEEN or !y.useXList()) return;
+                const list = y.x.list orelse return;
+                if (list.len() != 2) return;
+                _ = try b.wrapped(&bt.e, y.left);
+                _ = try b.wrapped(&bt.lo, list.at(0).expr);
+                _ = try b.wrapped(&bt.hi, list.at(1).expr);
+            },
+            .in_list => |*il| {
+                // jsonb's: the sort keys.
+                if (x.left) |l| if (b.wrappedIn(l, il.e, jsonb_key)) {
+                    il.e = try b.wrap(il.e, jsonb_key);
+                    for (il.items) |*it| it.* = try b.wrap(it.*, jsonb_key);
+                    return;
+                };
+                const y = if (x.op == TK.NOT) x.left orelse return else x;
+                if (il.items.len == 1 and (y.op == TK.EQ or y.op == TK.NE)) {
+                    // x IN (a) is x = +a.
+                    _ = try b.wrapped(&il.e, y.left);
+                    _ = try b.wrapped(&il.items[0], y.right);
+                    return;
+                }
+                if (y.op != TK.IN or !y.useXList()) return;
+                const list = y.x.list orelse return;
+                if (list.len() != il.items.len) return;
+                _ = try b.wrapped(&il.e, y.left);
+                for (il.items, 0..) |*item, i| _ = try b.wrapped(item, list.at(i).expr);
             },
             // An operator the table made a call (operators.zig, jsonb's
             // `-` of an operand of no type).
@@ -251,7 +429,17 @@ const Back = struct {
                     TK.EQ, TK.NE, TK.LT, TK.LE, TK.GT, TK.GE, TK.IS, TK.ISNOT => {},
                     else => return,
                 }
+                // Intervals: keys, a BLOB column's bounds.
+                const wl = try b.wrapped(&c.l, x.left);
+                const wr = try b.wrapped(&c.r, x.right);
+                if (wl or wr) return;
                 const l = x.left orelse return;
+                // jsonb's: the sort keys compared.
+                if (b.wrappedIn(l, c.l, jsonb_key)) {
+                    c.l = try b.wrap(c.l, jsonb_key);
+                    c.r = try b.wrap(c.r, jsonb_key);
+                    return;
+                }
                 if (!isCollate(l)) return;
                 c.collation = collationOf(l);
                 if (isArrayCollation(c.collation.?)) {
@@ -268,9 +456,70 @@ const Back = struct {
                     c.r = try b.jsonb(c.r);
                 };
             },
-            .func => |f| try b.call(f, x),
+            .func => |f| if (std.ascii.eqlIgnoreCase(f.name.text, "xq_pg_subscript") and calls(x, "xq_pg_jsonb_path") and f.args.len > 1) {
+                // jsonb's subscripts: the path of them.
+                const path = try tree.expr(b.a, e.pos, e.end, .{ .func = try b.func(e.pos, "xq_pg_array", f.args[1..]) });
+                e.kind = .{ .func = try b.func(e.pos, "xq_pg_jsonb_path", try b.a.dupe(*Expr, &.{ f.args[0], path })) };
+            } else try b.call(f, x),
+            // jsonb::text: the text of jsonb (a JSONB blob's is not its
+            // bytes), CAST(xq_pg_jsonb_text(j) AS TEXT).
+            .cast => |*cs| {
+                // ::text of an interval.
+                if (calls(x, "xq_pg_iv_text") and cs.mode == .affinity) {
+                    cs.mode = .{ .func = "xq_pg_iv_text" };
+                    return;
+                }
+                var k = x;
+                if (cs.mode == .truncate and isCall(x)) if (x.x.list) |list| if (list.len() > 0) {
+                    k = list.at(0).expr orelse return;
+                };
+                if (k.op != TK.CAST) return;
+                const inner = k.left orelse return;
+                if (b.wrappedIn(inner, cs.e, "xq_pg_jsonb_text")) cs.e = try b.wrap(cs.e, "xq_pg_jsonb_text");
+            },
             else => {},
         }
+    }
+
+    /// Whether `x` (the Expr of `e`, or one around it) is a call the core
+    /// made of `e` in place (overload.zig's wrapIn(): xq_dec_key(e) ...):
+    /// a function that wraps, whose first argument is no Expr of the tree
+    /// under `e`. (wrappedIn() is a call made around another Expr, which
+    /// wrap() does to the tree.)
+    fn wrappedInPlace(b: *Back, e: *const Expr, x: *const IrExpr) bool {
+        if (!isCall(x) or !wrappers.has(x.token())) return false;
+        const list = x.x.list orelse return false;
+        if (list.len() == 0) return false;
+        const first = list.at(0).expr orelse return false;
+        var it = Children.of(e);
+        while (it.next()) |ch| if (b.of(ch) == first) return false;
+        return true;
+    }
+
+    /// Do to the tree what wrapper `w` did to `e` (wrappedIn()): `e`
+    /// becomes the call of its copy and the constants after it; a numeric
+    /// literal its text (`1.50` is xq_dec('1.50')).
+    fn wrapTree(b: *Back, e: *Expr, w: *const IrExpr) Error!void {
+        const list = w.x.list.?;
+        const inner = try b.a.create(Expr);
+        inner.* = e.*;
+        const first = list.at(0).expr.?;
+        // A literal read as its text ('1.50', '-2.5').
+        if (first.op == TK.STRING and e.kind != .string) inner.kind = .{ .string = first.token() };
+        var args: std.ArrayList(*Expr) = .empty;
+        try args.append(b.a, inner);
+        for (list.slice()[1..]) |c| try args.append(b.a, try b.constant(e, c.expr.?) orelse return);
+        e.kind = .{ .func = try b.func(e.pos, w.token(), args.items) };
+    }
+
+    /// Whether IR `w` is a call of `name` the core wrapped around the IR
+    /// of tree `t`.
+    fn wrappedIn(b: *const Back, w: *const IrExpr, t: *const Expr, name: []const u8) bool {
+        if (!calls(w, name)) return false;
+        const list = w.x.list orelse return false;
+        if (list.len() != 1) return false;
+        const mine = b.of(t) orelse return false;
+        return list.at(0).expr == mine;
     }
 
     /// A string literal operand `t` of an operator the core read as an
@@ -347,6 +596,62 @@ const Back = struct {
         return tree.new(b.a, tree.Func, .{ .name = .{ .text = try b.a.dupe(u8, name), .pos = pos }, .args = args });
     }
 
+    // ============================================================ uuid
+
+    /// The forms overload.zig gave uuid operands (its uuidUnify(),
+    /// uuidCast(), uuidConcat()): a comparison's, IN's and BETWEEN's
+    /// operands in xq_pg_uuid() or xq_pg_uuid_text(), a uuid cast to text
+    /// xq_pg_uuid_text(), the operands of `||`. Whether `e` was one.
+    fn uuid(b: *Back, e: *Expr, x: *IrExpr) Error!bool {
+        switch (e.kind) {
+            .compare => |*c| {
+                try b.uuidWrap(&c.l, x.left);
+                try b.uuidWrap(&c.r, x.right);
+                return false;
+            },
+            .concat => |c| {
+                if (c.args.len != 2 or x.op != TK.CONCAT) return false;
+                try b.uuidWrap(&c.args[0], x.left);
+                try b.uuidWrap(&c.args[1], x.right);
+                return false;
+            },
+            .cast => |c| {
+                if (!calls(x, "xq_pg_uuid_text") or c.mode != .affinity) return false;
+                e.kind = .{ .func = try b.func(e.pos, "xq_pg_uuid_text", try b.a.dupe(*Expr, &.{c.e})) };
+                return true;
+            },
+            .in_list => |*l| {
+                const in = if (x.op == TK.NOT) x.left orelse return false else x;
+                if (in.op != TK.IN or !in.useXList()) return false;
+                const list = in.x.list orelse return false;
+                if (list.len() != l.items.len) return false;
+                try b.uuidWrap(&l.e, in.left);
+                for (l.items, list.slice()) |*t, item| try b.uuidWrap(t, item.expr);
+                return true;
+            },
+            .between => |*bt| {
+                const in = if (x.op == TK.NOT) x.left orelse return false else x;
+                if (in.op != TK.BETWEEN or !in.useXList()) return false;
+                const list = in.x.list orelse return false;
+                if (list.len() != 2) return false;
+                try b.uuidWrap(&bt.e, in.left);
+                try b.uuidWrap(&bt.lo, list.at(0).expr);
+                try b.uuidWrap(&bt.hi, list.at(1).expr);
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    /// Operand `t` in the call `w` overload.zig wrapped it in, if it did.
+    fn uuidWrap(b: *Back, t: **Expr, w_: ?*IrExpr) Error!void {
+        const w = w_ orelse return;
+        if (!calls(w, "xq_pg_uuid") and !calls(w, "xq_pg_uuid_text")) return;
+        const list = w.x.list orelse return;
+        if (list.len() != 1 or list.at(0).expr != b.of(t.*)) return;
+        t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .func = try b.func(t.*.pos, w.token(), try b.a.dupe(*Expr, &.{t.*})) });
+    }
+
     /// `v::jsonb`.
     fn jsonb(b: *Back, v: *Expr) Error!*Expr {
         return tree.expr(b.a, v.pos, v.end, .{ .cast = .{ .e = v, .target_type = "jsonb", .mode = .{ .func = "xq_pg_jsonb" } } });
@@ -354,13 +659,26 @@ const Back = struct {
 };
 
 const jsonb_collation = "xq_pg_jsonb";
+const jsonb_key = @import("overload.zig").jsonb_key;
 
 /// The functions overload.zig calls in the place of another.
 const renames = std.StaticStringMap(void).initComptime(.{
     .{"xq_pg_jsonb_get"},       .{"xq_pg_jsonb_get_text"},   .{"xq_pg_jsonb_path"},
     .{"xq_pg_jsonb_path_text"}, .{"xq_pg_json_agg_rows"},    .{"xq_pg_array_to_json"},
     .{"xq_pg_array_nested"},    .{"xq_pg_array_agg_arrays"}, .{"xq_pg_subscript_k"},
-    .{"xq_pg_array_contains"},
+    .{"xq_pg_array_contains"},  .{"xq_pg_iv_sum"},           .{"xq_pg_iv_avg"},
+    // numeric's (overload.zig's numericCall()).
+    .{"xq_dec_round"},          .{"xq_dec_trunc"},           .{"xq_dec_ceil"},
+    .{"xq_dec_floor"},          .{"xq_dec_abs"},             .{"xq_dec_sign"},
+    .{"xq_dec_mod"},            .{"xq_dec_div_trunc"},       .{"xq_dec_scale"},
+    .{"xq_dec_min_scale"},      .{"xq_dec_trim_scale"},      .{"xq_dec_sum"},
+    .{"xq_dec_avg"},            .{"xq_dec_int2"},            .{"xq_dec_int4"},
+    .{"xq_dec_int8"},
+});
+
+/// The functions overload.zig wraps an Expr in, in place (wrapIn()).
+const wrappers = std.StaticStringMap(void).initComptime(.{
+    .{"xq_dec"}, .{"xq_dec_key"}, .{"xq_dec_text"}, .{"xq_dec_float8"}, .{"xq_dec_int8"}, .{"xq_dec_number"},
 });
 
 /// The functions overload.zig gives more arguments.
@@ -391,6 +709,24 @@ fn collationOf(x: *const IrExpr) []const u8 {
         if (std.ascii.eqlIgnoreCase(x.token(), n)) return n;
     }
     return jsonb_collation;
+}
+
+/// The expression of the result column ORDER BY term `t` names (a
+/// number, an alias), null if it names none.
+fn resultCol(cols: []const tree.ResultCol, t: *const Expr) ?*Expr {
+    switch (t.kind) {
+        .integer => |z| {
+            const n = std.fmt.parseInt(usize, z, 10) catch return null;
+            if (n < 1 or n > cols.len or cols[n - 1] != .expr) return null;
+            return cols[n - 1].expr.e;
+        },
+        .column => |names| {
+            if (names.len != 1) return null;
+            for (cols) |rc| if (rc == .expr) if (rc.expr.alias) |al| if (std.ascii.eqlIgnoreCase(al.text, names[0].text)) return rc.expr.e;
+            return null;
+        },
+        else => return null,
+    }
 }
 
 fn isCall(x: *const IrExpr) bool {

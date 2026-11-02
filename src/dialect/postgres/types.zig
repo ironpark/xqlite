@@ -7,14 +7,20 @@
 //! | smallint, integer (smallserial, serial) | INTEGER | range ("smallint/integer out of range") |
 //! | bigint, bigserial                   | INTEGER |                                        |
 //! | real, double precision, float(p)    | REAL    |                                        |
-//! | numeric(p,s), decimal               | ANY     | a number                               |
+//! | numeric(p,s), decimal               | BLOB    | a key of decimal.zig (xq_dec_valid())  |
 //! | boolean                             | INTEGER | 0 or 1                                 |
 //! | text, varchar(n), char(n)           | TEXT    | length <= n                            |
 //! | bytea                               | BLOB    |                                        |
-//! | date, time, timestamp[tz], interval | TEXT    |                                        |
-//! | uuid                                | TEXT    |                                        |
-//! | json, jsonb                         | TEXT    | json_valid(); jsonb stored normalized  |
+//! | date, time, timestamp[tz]           | TEXT    |                                        |
+//! | interval                            | BLOB    | xq_pg_iv_valid(): src/dialect/interval.zig's BLOB (TEXT in older databases) |
+//! | uuid                                | BLOB    | 16 bytes (uuid.zig); TEXT in older tables |
+//! | json                                | TEXT    | json_valid()                           |
+//! | jsonb                               | BLOB    | json_valid(x, 8): JSONB, canonical (TEXT in older tables) |
 //! | integer[], text[] ... (any T[])     | TEXT    | an array literal (array.zig); stored canonical |
+//!
+//! A numeric is stored as decimal.zig's key, a BLOB in the order of the
+//! numbers (decimal_sql.zig's xq_dec_*() compute with it); a numeric
+//! column of a table made before (storage ANY) keeps numbers.
 //!
 //! A check is a named CHECK constraint whose name is PostgreSQL's
 //! message (Hooks.check_errors), so that a violation in the dialect
@@ -41,8 +47,14 @@ pub const Check = enum {
     boolean,
     length,
     json,
+    /// A JSONB blob (json_valid(x, 8)).
+    jsonb,
     /// An array literal (xq_pg_array_valid()).
     array,
+    /// A uuid's 16 bytes (uuid.zig).
+    uuid,
+    /// An interval's BLOB (xq_pg_iv_valid()).
+    interval,
 };
 
 pub const Info = struct {
@@ -76,7 +88,7 @@ pub fn info(ty: TypeName) Error!Info {
         .{ "bigserial", .{ .storage = "INTEGER", .serial = true } },
         .{ "real", .{ .storage = "REAL" } },
         .{ "double precision", .{ .storage = "REAL" } },
-        .{ "numeric", .{ .storage = "ANY", .check = .numeric } },
+        .{ "numeric", .{ .storage = "BLOB", .check = .numeric } },
         .{ "boolean", .{ .storage = "INTEGER", .check = .boolean } },
         .{ "text", .{ .storage = "TEXT" } },
         .{ "character varying", .{ .storage = "TEXT", .check = .length } },
@@ -88,10 +100,14 @@ pub fn info(ty: TypeName) Error!Info {
         .{ "time with time zone", .{ .storage = "TEXT" } },
         .{ "timestamp without time zone", .{ .storage = "TEXT" } },
         .{ "timestamp with time zone", .{ .storage = "TEXT" } },
-        .{ "interval", .{ .storage = "TEXT" } },
-        .{ "uuid", .{ .storage = "TEXT" } },
+        // The columns of older databases are TEXT (and compare in the
+        // collation xq_pg_interval): they keep it.
+        .{ "interval", .{ .storage = "BLOB", .check = .interval } },
+        .{ "uuid", .{ .storage = "BLOB", .check = .uuid } },
         .{ "json", .{ .storage = "TEXT", .check = .json } },
-        .{ "jsonb", .{ .storage = "TEXT", .check = .json } },
+        // jsonb is SQLite's JSONB (postgres/json.zig), a table made before
+        // that keeps TEXT (jtype.zig reads the column's storage).
+        .{ "jsonb", .{ .storage = "BLOB", .check = .jsonb } },
         .{ "oid", .{ .storage = "INTEGER" } },
         // The catalog's vectors (`1 2`).
         .{ "int2vector", .{ .storage = "TEXT" } },
@@ -210,6 +226,8 @@ pub const CastPlan = union(enum) {
     truncate: i64,
     /// round(x, s) as NUMERIC
     round: i64,
+    /// xq_dec(x, p, s): numeric(p, s)
+    numeric: [2]i64,
 };
 
 pub fn castPlan(ty: TypeName) Error!CastPlan {
@@ -218,15 +236,16 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     const eql = std.mem.eql;
     if (regOutput(n)) |_| return .{ .func = regInput(n) };
     if (eql(u8, n, "regproc") or eql(u8, n, "regprocedure")) return .{ .func = "xq_pg_regproc" };
-    if (eql(u8, n, "jsonpath") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "uuid") or eql(u8, n, "int2vector") or eql(u8, n, "oidvector")) return .{ .sqlite = "TEXT" };
+    if (eql(u8, n, "jsonpath") or eql(u8, n, "text") or eql(u8, n, "name") or eql(u8, n, "int2vector") or eql(u8, n, "oidvector")) return .{ .sqlite = "TEXT" };
     if (eql(u8, n, "character varying") or eql(u8, n, "character")) {
         if (maxLength(ty)) |len| return .{ .truncate = len };
         return .{ .sqlite = "TEXT" };
     }
+    // A key of decimal.zig with its display scale.
     if (eql(u8, n, "numeric")) {
-        if (ty.mods.len == 2) return .{ .round = ty.mods[1] };
-        if (ty.mods.len == 1) return .{ .round = 0 };
-        return .{ .sqlite = "NUMERIC" };
+        if (ty.mods.len == 2) return .{ .numeric = .{ ty.mods[0], ty.mods[1] } };
+        if (ty.mods.len == 1) return .{ .numeric = .{ ty.mods[0], 0 } };
+        return .{ .func = "xq_dec" };
     }
     if (eql(u8, n, "boolean")) return .{ .func = "xq_pg_bool" };
     if (eql(u8, n, "smallint")) return .{ .func = "xq_pg_int2" };
@@ -236,7 +255,7 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     // error for what it does not read, the fraction of a second kept, a
     // timestamptz in UTC, '90 minutes' as '01:30:00').
     if (eql(u8, n, "date")) return .{ .func = "xq_pg_date" };
-    if (eql(u8, n, "interval")) return .{ .func = "xq_pg_interval" };
+    if (eql(u8, n, "interval")) return .{ .func = "xq_pg_iv" };
     if (eql(u8, n, "time without time zone")) return .{ .func = "xq_pg_time" };
     if (eql(u8, n, "time with time zone")) return .{ .func = "time" };
     if (eql(u8, n, "timestamp without time zone")) return .{ .func = "xq_pg_timestamp" };
@@ -244,6 +263,8 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     // json is checked and kept as written, jsonb normalized (json.zig).
     if (eql(u8, n, "json")) return .{ .func = "xq_pg_json" };
     if (eql(u8, n, "jsonb")) return .{ .func = "xq_pg_jsonb" };
+    // uuid_in(): the 16 bytes (uuid.zig).
+    if (eql(u8, n, "uuid")) return .{ .func = "xq_pg_uuid" };
     const i = try info(ty);
     if (i.serial) return error.UnknownType;
     return .{ .sqlite = i.storage };

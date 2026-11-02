@@ -162,6 +162,7 @@ const unportable_names = [_]struct { Dialect, []const u8, Unportable }{
     .{ .postgres, "xq_pg_regtype_out", .catalog },
     .{ .postgres, "xq_pg_regnamespace_out", .catalog },
     .{ .postgres, "xq_pg_regrole_out", .catalog },
+    .{ .postgres, "xq_pg_column_default", .catalog },
     // MariaDB: system and user variables, the current database.
     .{ .mariadb, "xq_sysvar", .session },
     .{ .mariadb, "xq_uservar", .session },
@@ -201,6 +202,7 @@ pub const catalogue: []const Entry = blk: {
     var all: []const Entry = &.{};
     for (&@import("like.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
     for (&engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
+    for (&@import("decimal_sql.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
     for (std.enums.values(Dialect)) |d| {
         const h = &dialect.spec(d).hooks;
         for (h.engine_functions) |*f| {

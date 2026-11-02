@@ -1,0 +1,126 @@
+-- Differential cases of PostgreSQL jsonb columns (xqt dialect-diff pg
+-- tools/dialect/pg-jsonb-cases.txt), in the format of pg-cases.txt: each
+-- case starts with a "-- case:" line and runs on an empty database, in
+-- PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. The expected output is PostgreSQL 18's.
+-- A jsonb column stores SQLite's JSONB (docs/postgres.md#json): these
+-- cases read and write the values of columns, where pg-cases.txt mostly
+-- has constants.
+
+-- case: jsonb columns: values and the operators of a column
+CREATE TABLE d (id int PRIMARY KEY, j jsonb, n jsonb DEFAULT '{"z": [1, 2.50], "a": null}');
+INSERT INTO d (id, j) VALUES (1, '{"b": 1, "a": {"x": [1, "two", true]}, "b": 2}'), (2, '[1, 2.50, "x", null, {"k": "v"}]'), (3, '"str"'), (4, '12.500'), (5, 'null'), (6, NULL), (7, '{"s": "a\"b\\c\nd", "u": "é", "e": ""}'), (8, '1e3');
+SELECT id, j, n FROM d ORDER BY id;
+SELECT id, j -> 'a', j ->> 'b', j -> 1, j ->> 2, j -> -1, j #> '{a,x,1}', j #>> '{a,x}', j ->> 's', j -> 's' FROM d ORDER BY id;
+SELECT id, j ? 'a', j ? 'x', j ? 'str', j ?| array['b','zz'], j ?& array['a','b'], j @> '{"a":{"x":[true]}}', j <@ '{"a":{"x":[1,"two",true]},"b":2,"c":3}', j @> '1' FROM d ORDER BY id;
+SELECT id, jsonb_typeof(j), j -> 'a' -> 'x' -> 2, (j ->> 'b')::int + 1, j #> '{}' FROM d ORDER BY id;
+
+-- case: jsonb columns: the operators of a column (errors)
+CREATE TABLE d (id int, j jsonb);
+INSERT INTO d VALUES (1, '{"a": 1}'), (2, '5');
+SELECT j - 1 FROM d WHERE id = 1;
+SELECT j - 'a' FROM d WHERE id = 2;
+SELECT j #- '{a}' FROM d WHERE id = 2;
+SELECT jsonb_array_length(j) FROM d WHERE id = 1;
+SELECT jsonb_set(j, '{a}', '1') FROM d WHERE id = 2;
+
+-- case: jsonb columns: updates and the functions that change a value
+CREATE TABLE d (id int PRIMARY KEY, j jsonb);
+INSERT INTO d VALUES (1, '{"a": 1, "b": {"c": [1, 2]}}'), (2, '[1, 2, 3]');
+UPDATE d SET j = j || '{"z": true}' WHERE id = 1;
+UPDATE d SET j = jsonb_set(j, '{b,c,0}', '"first"') WHERE id = 1;
+UPDATE d SET j = j - 1 WHERE id = 2;
+UPDATE d SET j = jsonb_insert(j, '{0}', '0') WHERE id = 2;
+SELECT id, j FROM d ORDER BY id;
+SELECT j #- '{b,c}', j - 'a', j - array['a','z'], jsonb_strip_nulls(j || '{"n": null}'), jsonb_set_lax(j, '{a}', NULL, true, 'delete_key') FROM d WHERE id = 1;
+SELECT jsonb_pretty(j), jsonb_typeof(j), jsonb_array_length(j), j || j, j || '9' FROM d WHERE id = 2;
+INSERT INTO d VALUES (2, '{"a": 1}') ON CONFLICT (id) DO UPDATE SET j = d.j || excluded.j RETURNING j;
+UPDATE d SET j = j || jsonb_build_object('id', id) RETURNING id, j;
+
+-- case: jsonb columns: comparison, ORDER BY, DISTINCT, GROUP BY
+CREATE TABLE o (id int, j jsonb);
+INSERT INTO o VALUES (1, '{"a":1}'), (2, '[1,2]'), (3, '[]'), (4, 'null'), (5, '"a"'), (6, '1'), (7, '1.0'), (8, 'true'), (9, '{}'), (10, '{"a":1,"b":2}'), (11, '[[]]'), (12, '[null]'), (13, '{"aa":1}'), (14, '{"b":1}'), (15, '-2.5'), (16, '0.000'), (17, '"ab"'), (18, '[1]'), (19, 'false');
+SELECT id, j FROM o ORDER BY j, id;
+SELECT id FROM o WHERE j = '1' ORDER BY id;
+SELECT id FROM o WHERE j > '[1]' ORDER BY id;
+SELECT id FROM o WHERE j <= 'null' ORDER BY id;
+SELECT id FROM o WHERE j IN ('true', '{}', '[1, 2]') ORDER BY id;
+SELECT id FROM o WHERE j NOT IN ('true', '{}') AND id < 6 ORDER BY id;
+SELECT id FROM o WHERE j BETWEEN '0' AND '2' ORDER BY id;
+SELECT id, row_number() OVER (ORDER BY j DESC, id) FROM o ORDER BY id;
+SELECT jsonb_agg(j ORDER BY j DESC) FROM o WHERE id < 6;
+SELECT j, count(*) FROM o WHERE id IN (1, 9, 10, 14) GROUP BY j ORDER BY j;
+SELECT DISTINCT j FROM o WHERE id IN (2, 3, 11, 12, 18) ORDER BY j;
+SELECT a.id, b.id FROM o a JOIN o b ON a.j = b.j AND a.id < b.id ORDER BY 1, 2;
+SELECT id FROM o WHERE j IS NOT DISTINCT FROM '{"a": 1}' ORDER BY id;
+SELECT id, j FROM o ORDER BY j DESC, id LIMIT 4;
+
+-- case: jsonb columns: building and aggregating from columns
+CREATE TABLE d (id int, j jsonb);
+INSERT INTO d VALUES (1, '{"k": "a", "v": [1]}'), (2, '{"k": "b", "v": 2.50}'), (3, '[true]');
+SELECT jsonb_agg(j ORDER BY id), json_agg(j ORDER BY id) FROM d;
+SELECT jsonb_build_object('x', j, 'id', id), json_build_array(j, id), to_json(j), to_jsonb(j), json_build_object('j', j) FROM d ORDER BY id;
+SELECT jsonb_object_agg(j ->> 'k', j -> 'v'), json_object_agg(j ->> 'k', j -> 'v') FROM d WHERE id < 3;
+SELECT row_to_json(d) FROM d ORDER BY id;
+SELECT j::text, j::json, j::varchar(6), length(j::text), j::text || '!', concat(j, '?') FROM d ORDER BY id;
+
+-- case: jsonb columns: set-returning functions and jsonpath of a column
+CREATE TABLE d (id int, j jsonb);
+INSERT INTO d VALUES (1, '{"a": [1, 2, 3], "b": {"c": "x"}}'), (2, '{"a": [], "b": null}');
+SELECT d.id, e.key, e.value FROM d, jsonb_each(d.j) e ORDER BY 1, 2;
+SELECT d.id, e.key, e.value FROM d, jsonb_each_text(d.j) e ORDER BY 1, 2;
+SELECT id, jsonb_array_elements(j -> 'a') FROM d ORDER BY 1, 2;
+SELECT id, k FROM d, jsonb_object_keys(d.j) AS k ORDER BY 1, 2;
+SELECT id, jsonb_path_query_array(j, '$.a[*] ? (@ > 1)'), jsonb_path_query_first(j, '$.b.c'), jsonb_path_exists(j, '$.a[2]'), j @? '$.b.c', j @@ '$.a[0] == 1' FROM d ORDER BY id;
+SELECT id, jsonb_path_query(j, '$.a[*]') FROM d ORDER BY 1, 2;
+SELECT id, x.c FROM d, jsonb_to_record(d.j -> 'b') AS x(c text) WHERE id = 1;
+SELECT id, j -> 'a' -> 0, jsonb_extract_path(j, 'b', 'c'), jsonb_extract_path_text(j, 'a', '1') FROM d ORDER BY id;
+
+-- case: jsonb columns: views, CHECK, generated columns, indexes
+CREATE TABLE d (id int PRIMARY KEY, j jsonb NOT NULL CHECK (j ? 'kind'), kind text GENERATED ALWAYS AS (j ->> 'kind') STORED, sub jsonb GENERATED ALWAYS AS (j -> 'sub') STORED);
+CREATE INDEX d_kind ON d ((j ->> 'kind'));
+CREATE INDEX d_gin ON d USING gin (j);
+INSERT INTO d VALUES (1, '{"kind": "a", "sub": {"z": 1, "y": [2]}}'), (2, '{"kind": "b", "n": 1.50}'), (3, '{"kind": "a"}');
+CREATE VIEW v AS SELECT id, j -> 'sub' AS sub, j::text AS t, j @> '{"kind": "a"}' AS is_a FROM d WHERE j <> '{"kind": "b", "n": 1.5}' ORDER BY j DESC;
+SELECT * FROM v;
+SELECT id, kind, sub FROM d ORDER BY id;
+SELECT id FROM d WHERE j ->> 'kind' = 'a' ORDER BY id;
+SELECT sub, count(*) FROM d GROUP BY sub ORDER BY 1;
+
+-- case: jsonb columns: views, CHECK, generated columns, indexes (errors)
+CREATE TABLE d (id int PRIMARY KEY, j jsonb NOT NULL CHECK (j ? 'kind'));
+INSERT INTO d VALUES (1, '{"x": 1}');
+INSERT INTO d VALUES (2, '{bad');
+INSERT INTO d VALUES (3, '"\u0000"');
+INSERT INTO d VALUES (4, NULL);
+
+-- case: jsonb columns: arrays of jsonb
+CREATE TABLE d (id int, j jsonb, a jsonb[]);
+INSERT INTO d VALUES (1, '{"b": 1, "a": 2}', ARRAY['{"y": 1, "x": 2}'::jsonb, '[1]']), (2, '[3]', '{}');
+SELECT id, a, a[1], ARRAY[j], array_append(a, j) FROM d ORDER BY id;
+SELECT array_agg(j ORDER BY id) FROM d;
+SELECT a[1] -> 'x', a[2] || j FROM d WHERE id = 1;
+
+-- case: jsonb columns: large values
+CREATE TABLE big (j jsonb);
+INSERT INTO big SELECT jsonb_object_agg('k' || n, n) FROM generate_series(1, 300) AS g(n);
+INSERT INTO big SELECT jsonb_agg(repeat('x', n)) FROM generate_series(1, 40) AS g(n);
+SELECT j -> 'k150', j ->> 'k300', length(j::text), jsonb_typeof(j), j -> 39 ->> 0 IS NULL FROM big ORDER BY 3;
+SELECT count(*) FROM big, jsonb_each(big.j) WHERE jsonb_typeof(big.j) = 'object';
+SELECT length(j ->> 39) FROM big WHERE jsonb_typeof(j) = 'array';
+
+-- case: jsonb columns: json columns stay text
+CREATE TABLE d (j json, b jsonb);
+INSERT INTO d VALUES ('{"b" : 1,  "a" : [1,  2]}', '{"b" : 1,  "a" : [1,  2]}');
+SELECT j, b, j -> 'a', b -> 'a', j::jsonb = b, b::json, j::text, b::text FROM d;
+UPDATE d SET j = b::json, b = j::jsonb || '{"c": 3}';
+SELECT j, b FROM d;
+
+-- case: jsonb columns: subscripts
+CREATE TABLE s (id int, j jsonb);
+INSERT INTO s VALUES (1, '{"a": {"b": [10, 20]}, "1": "one"}'), (2, '[1, [2, 3]]'), (3, '"x"');
+SELECT id, j['a'], j['a']['b'], j['a']['b'][1], j[1], j['1'], j[-1], j[1][0] FROM s ORDER BY id;
+CREATE VIEW sv AS SELECT id, j['a']['b'] AS ab FROM s;
+SELECT * FROM sv ORDER BY id;
+SELECT ('{"a": 1}'::jsonb)['a'], ('[1,2]'::jsonb)[1];

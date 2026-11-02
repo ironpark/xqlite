@@ -238,6 +238,13 @@ pub fn typmodOfLogical(t: ctypes.Type) i32 {
 }
 
 /// The type of a column declared `decl` in `d`: its OID and modifier.
+/// The type OID and the type of a PostgreSQL declared type `decl` (an
+/// empty one: text's, of no type).
+pub fn columnTypeOf(decl: []const u8) struct { u32, ?ctypes.Type } {
+    if (decl.len == 0) return .{ columnType(.sqlite, "")[0], null };
+    return .{ columnType(.postgres, decl)[0], ctypes.parse(.postgres, decl) };
+}
+
 pub fn columnType(d: dialect.Dialect, decl: []const u8) struct { u32, i32 } {
     var buf: [64]u8 = undefined;
     const lower = std.ascii.lowerString(buf[0..@min(buf.len, decl.len)], decl[0..@min(buf.len, decl.len)]);
@@ -251,6 +258,11 @@ pub fn columnType(d: dialect.Dialect, decl: []const u8) struct { u32, i32 } {
     };
     if (d == .postgres) for (named) |n| if (eql(n[0], trimmed)) return .{ n[1], -1 };
     const t = ctypes.parse(d, decl);
+    // numeric(p, s) of any p and s (Type's are bytes): PostgreSQL's
+    // modifier, the scale in 11 bits.
+    if (d == .postgres and t.logical == .numeric) if (@import("typing.zig").typmodOf(decl)) |m| {
+        return .{ oidOfLogical(t), ((m[0] << 16) | (m[1] & 0x7ff)) + 4 };
+    };
     return .{ oidOfLogical(t), typmodOfLogical(t) };
 }
 
@@ -825,7 +837,7 @@ const Builder = struct {
             if (cm) |c| if (c.identity != null and c.identity_kind == null) try b.ownedSequence(c.identity.?, r.oid, num, 'a');
             if (at.identity == 0) if (build.columnExpr(t, col)) |e| {
                 const text = std.mem.sliceTo(e.token(), 0);
-                const bin = try defaultText(a, text, ty[0], generated, b.registered);
+                const bin = try defaultText(a, text, ty[0], generated, b.registered, if (cm) |c| c.type else null);
                 at.hasdef = true;
                 try b.defs.append(a, .{ .oid = 0, .rel = r.oid, .num = num, .bin = bin });
                 try b.def_keys.append(a, try std.fmt.allocPrint(a, "{s}\x00{d}", .{ key, num }));
@@ -1214,9 +1226,16 @@ pub fn pgText(a: Allocator, z: []const u8, registered: []const nsp_mod.Info) Oom
 /// pg_get_expr() shows it: now() for SQLite's rendering of it, a string
 /// constant cast to the column's type ('x'::text), a negative integer
 /// quoted ('-1'::integer), nextval()'s argument a regclass.
-fn defaultText(a: Allocator, text: []const u8, type_oid: u32, generated: bool, registered: []const nsp_mod.Info) Oom![]const u8 {
+pub fn defaultText(a: Allocator, text: []const u8, type_oid: u32, generated: bool, registered: []const nsp_mod.Info, col_type: ?ctypes.Type) Oom![]const u8 {
     const z = std.mem.trim(u8, text, " ");
     if (generated) return pgText(a, z, registered);
+    if (col_type) |ty| if (try blobDefault(a, z, ty, type_oid)) |d| return d;
+    // An interval's DEFAULT, stored as its BLOB's input: the constant.
+    if (std.mem.startsWith(u8, z, "xq_pg_iv('") and std.mem.endsWith(u8, z, "')")) {
+        var s: Scanner = .{ .z = z["xq_pg_iv(".len .. z.len - 1] };
+        const t = s.next();
+        if (t.end == z.len - "xq_pg_iv(".len - 1) return std.fmt.allocPrint(a, "{s}::interval", .{z["xq_pg_iv(".len .. z.len - 1]});
+    }
     if (eql(z, "strftime('%Y-%m-%d %H:%M:%f', 'now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_TIMESTAMP")) return "now()";
     if (eql(z, "date('now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_DATE")) return "CURRENT_DATE";
     if (std.mem.startsWith(u8, z, "nextval('") and std.mem.endsWith(u8, z, "')")) {
@@ -1236,6 +1255,36 @@ fn defaultText(a: Allocator, text: []const u8, type_oid: u32, generated: bool, r
     }
     return pgText(a, z, registered);
 }
+
+/// A constant DEFAULT the dialect stored as its column's BLOB (X'..': a
+/// numeric's key, a uuid's 16 bytes, a jsonb's JSONB, an interval's
+/// BLOB) as PostgreSQL shows the constant: a numeric as its digits (as
+/// written, not in the column's scale: 0 for DEFAULT 0), another as its
+/// text cast to the type ('…'::uuid). Null if `z` is no such literal.
+fn blobDefault(a: Allocator, z: []const u8, t: ctypes.Type, type_oid: u32) Oom!?[]const u8 {
+    if (z.len < 3 or (z[0] != 'X' and z[0] != 'x') or z[1] != '\'' or z[z.len - 1] != '\'') return null;
+    const hex = z[2 .. z.len - 1];
+    if (hex.len % 2 != 0) return null;
+    const bytes = try a.alloc(u8, hex.len / 2);
+    _ = std.fmt.hexToBytes(bytes, hex) catch return null;
+    var shown = t;
+    if (t.logical == .numeric) shown.scale = null;
+    var buf: [display.max_len]u8 = undefined;
+    const owned = try display.textAlloc(a, .postgres, shown, .{ .blob = bytes });
+    const v = owned orelse display.text(.postgres, shown, .{ .blob = bytes }, &buf) orelse return null;
+    if (t.logical == .numeric) return try a.dupe(u8, v);
+    const tname: []const u8 = if (builtinType(type_oid)) |bt| bt.fmt else "text";
+    var q: std.ArrayList(u8) = .empty;
+    try q.append(a, '\'');
+    for (v) |c| {
+        if (c == '\'') try q.append(a, '\'');
+        try q.append(a, c);
+    }
+    try q.append(a, '\'');
+    return try std.fmt.allocPrint(a, "{s}::{s}", .{ q.items, tname });
+}
+
+const display = @import("../../api/display.zig");
 
 const Check = struct { name: []const u8, text: []const u8 };
 

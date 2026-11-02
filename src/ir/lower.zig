@@ -484,6 +484,12 @@ pub const Lowerer = struct {
             .truncate => |n| return l.call("substr", &.{ try ir.expr.cast(p, x, Token.init("TEXT")), try l.intConst(1), try l.intConst(n) }),
             .round => |s| return ir.expr.cast(p, try l.call("round", &.{ x, try l.intConst(s) }), Token.init("NUMERIC")),
             .typed => |t| return l.call(t.func, &.{ x, try l.strConst(t.type_arg) }),
+            .func_args => |f| {
+                var args: std.ArrayList(*IrExpr) = .empty;
+                try args.append(l.arena(), x);
+                for (f.args) |v| try args.append(l.arena(), try l.intConst(v));
+                return l.call(f.func, args.items);
+            },
         }
     }
 

@@ -9,15 +9,16 @@
 //!  - a reference to a column of a JSON set-returning function of FROM
 //!    (parser.zig's json_each() items) is replaced by its expression,
 //!    `*` spelled out where such an item is;
-//!  - a value stored into a jsonb column (INSERT, UPDATE) is normalized
-//!    (xq_pg_jsonb()), into a json column checked (xq_pg_json()): the
-//!    column's type is the catalog's.
+//!  - a value stored into a json column (INSERT, UPDATE) is checked
+//!    (xq_pg_json()): the column's type is the catalog's. (A jsonb
+//!    column's value goes through Rules.store, by the column's storage:
+//!    postgres/typing.zig.)
 //!
 //! What depends on the types of operands (jsonb's `||` and `-`, the
 //! json/jsonb functions of `->`, jsonb's comparison and ORDER BY, the
 //! arguments of the functions that build JSON) is chosen in the core,
 //! once names are resolved and operands typed: overload.zig, which also
-//! drops the normalization of a stored value that is jsonb already. For
+//! drops the check of a stored value that is json already. For
 //! the text the schema keeps (a view, a CHECK, an index expression),
 //! ddltype.zig brings the core's choices back to the tree.
 
@@ -74,7 +75,9 @@ pub fn statement(p: *Parser, stmt: tree.Stmt) Error!void {
 }
 
 /// What a column stores a value as (its declared type, in the catalog).
-const Store = enum { as_is, json, jsonb };
+/// (jsonb is stored through Rules.store, by the column's storage:
+/// postgres/typing.zig.)
+const Store = enum { as_is, json };
 
 const T = struct {
     p: *Parser,
@@ -111,7 +114,7 @@ const T = struct {
     }
 
     /// How the columns of table `q` store values (by the order of
-    /// tableCols()), null if no column is json or jsonb.
+    /// tableCols()), null if no column is json.
     fn storeTypes(t: *T, q: tree.QName) Error!?[]const Store {
         const ps = t.p.p orelse return null;
         t.p.readSchema() catch return null;
@@ -121,7 +124,7 @@ const T = struct {
         var any = false;
         for (tbl.cols, out) |*c, *st| {
             const d = m.declType(c.name()) orelse "";
-            st.* = if (std.mem.eql(u8, d, "jsonb")) .jsonb else if (std.mem.eql(u8, d, "json")) .json else .as_is;
+            st.* = if (std.mem.eql(u8, d, "json")) .json else .as_is;
             if (st.* != .as_is) any = true;
         }
         return if (any) out else null;
@@ -385,20 +388,19 @@ const T = struct {
         }
     }
 
-    /// `v` as stored into a column that stores `st`: normalized for
-    /// jsonb, checked for json, by a call no frontend types (which
-    /// overload.zig drops if `v` is a call of that type already).
+    /// `v` as stored into a column that stores `st`: json checked, by a
+    /// call no frontend types (xq_pg_json(), which overload.zig drops if
+    /// `v` is a call of json already).
     fn stored(t: *T, v: *Expr, st: Store) Error!*Expr {
         if (v.kind == .default or v.kind == .null) return v;
         const f: []const u8 = switch (st) {
-            .jsonb => "xq_pg_jsonb",
             .json => "xq_pg_json",
             .as_is => return v,
         };
         return tree.expr(t.arena(), v.pos, v.end, .{ .cast = .{ .e = v, .mode = .{ .func = f } } });
     }
 
-    /// The values of an INSERT into json/jsonb columns: VALUES items in
+    /// The values of an INSERT into json columns: VALUES items in
     /// place, a query's result columns, else the query wrapped as
     /// SELECT stored(c1) ... FROM (query) AS xq_src(c1, ...).
     fn coerceInsert(t: *T, ins: *tree.Insert, src: *tree.Select, cols: []const Col, stores: []const Store) Error!void {

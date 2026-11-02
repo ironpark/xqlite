@@ -480,12 +480,15 @@ pub const Gen = struct {
     fn cast(g: *Gen, c: Ctx) Oom!*Expr {
         const x = try g.expr(c);
         const Mode = std.meta.Tag(tree.CastMode);
-        const mode: tree.CastMode = switch (g.rand.enumValue(Mode)) {
+        // (The modes of before func_args, so that a seed makes the trees it
+        // made: func_args, PostgreSQL's numeric(p, s), is not picked.)
+        const mode: tree.CastMode = switch (g.pick(Mode, &.{ .affinity, .func, .truncate, .round, .typed })) {
             .affinity => .{ .affinity = g.pick([]const u8, &.{ "INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC", "INT", "FLOAT", "VARCHAR(10)", "DECIMAL(5,2)" }) },
             .func => .{ .func = g.pick([]const u8, &.{ "xq_pg_bool", "date", "datetime", "time", "julianday", "json", "lower", "upper", "abs", "typeof", "hex", "quote", "length", "unicode", "trim" }) },
             .truncate => .{ .truncate = g.pick(i64, &.{ 0, 1, 3, 10, -1 }) },
             .round => .{ .round = g.rand.intRangeAtMost(i64, -2, 4) },
             .typed => .{ .typed = .{ .func = "xq_cast", .type_arg = g.pick([]const u8, &.{ "date", "datetime", "time" }) } },
+            .func_args => .{ .func_args = .{ .func = g.pick([]const u8, &.{ "xq_dec", "xq_dec_key" }), .args = g.pick([]const i64, &.{ &.{ 10, 2 }, &.{ 30, 0 }, &.{ 5, -1 } }) } },
         };
         return g.e(.{ .cast = .{ .e = x, .target_type = "t", .mode = mode } });
     }

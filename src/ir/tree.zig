@@ -194,6 +194,9 @@ pub const CastMode = union(enum) {
     /// f(e, 'type'): an engine function taking the target type's
     /// spelling (MariaDB's xq_cast()).
     typed: struct { func: []const u8, type_arg: []const u8 },
+    /// f(e, n ...): an engine function taking the target type's integer
+    /// parameters (PostgreSQL's numeric(p, s): xq_dec(e, p, s)).
+    func_args: struct { func: []const u8, args: []const i64 },
 };
 
 pub const Case = struct {

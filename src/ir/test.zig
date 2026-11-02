@@ -124,7 +124,8 @@ fn functions(b: B) Oom!*tree.Select {
         try b.call("greatest", .postgres, &.{ try b.int_("1"), try b.e(.null), try b.int_("3") }),
         try b.call("concat", .mariadb, &.{ try b.str("a"), try b.e(.null) }),
         try b.call("power", .postgres, &.{ try b.int_("2"), try b.int_("10") }),
-        try b.call("round", null, &.{try b.e(.{ .float = "2.5" })}),
+        // (Of a double: PostgreSQL's round() of a numeric is a key.)
+        try b.call("round", null, &.{try b.e(.{ .cast = .{ .e = try b.e(.{ .float = "2.5" }), .mode = .{ .affinity = "REAL" } } })}),
         try b.call("concat", null, &.{ try b.str("a"), try b.e(.null) }),
     }, &.{});
 }

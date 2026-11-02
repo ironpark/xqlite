@@ -24,6 +24,7 @@ const typing = @import("../../sql/typing.zig");
 const types = @import("../../sql/types.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const funcs = @import("funcs.zig");
+const jfuncs = @import("jfuncs.zig");
 const datetime = @import("datetime.zig");
 
 const TK = int.TK;
@@ -43,32 +44,185 @@ pub const rules: typing.Rules = .{
     .function = function,
     .value_scale = true,
     .store = store,
+    .store_column = numericStore,
     .unknown_strings = true,
     .overload = overload.overload,
     .order_collation = overload.orderCollation,
+    .group_key = overload.groupKey,
+    .order_key = overload.orderKey,
 };
 
 /// A string stored into a boolean, numeric, date, time, timestamp or
 /// interval column is read as the type's input (funcs.zig's store
-/// functions, datetime.zig's casts).
-fn store(t: Type) ?*const int.FuncDef {
+/// functions, datetime.zig's casts). An interval column is a BLOB
+/// (xq_pg_iv()), in an older database's table TEXT (its text, no
+/// infinity: what the collation xq_pg_interval reads). A uuid column is
+/// 16 bytes, an older table's TEXT column its text; jsonb JSONB in a
+/// BLOB column, normalized text in a TEXT one.
+fn store(t: Type, storage: int.COLTYPE) ?*const int.FuncDef {
+    if (storage == .TEXT) switch (t.logical) {
+        .interval => return &datetime.store_interval_text,
+        // A uuid column of an older table keeps its text.
+        .uuid => return uuid.store_text,
+        else => {},
+    };
     return switch (t.logical) {
+        // jsonb as the column keeps it: JSONB in a BLOB column, normalized
+        // text in a TEXT one (a table made before), whatever the value
+        // (a column, a function's blob or text: typing.storeNeeded()).
+        .jsonb => if (storage == .BLOB) &jfuncs.store_jsonb_bin else &jfuncs.store_jsonb_text,
         .boolean => &funcs.store_boolean,
-        .numeric => &funcs.store_numeric,
+        // A numeric column of keys (BLOB) or of numbers (ANY, a table made
+        // before numerics were keys): numericStore() (store_column), which
+        // also gives numeric(p, s); this is the same without it.
+        .numeric => if (storage == .BLOB) decimal_sql.def("xq_dec_key", 1) else decimal_sql.def("xq_dec_number", 1),
         // Read and written as PostgreSQL does: '2 hours' is '02:00:00',
         // a timestamptz is kept in UTC, '2024-02-30' is an error.
         .date => datetime.cast_date,
         .time => datetime.cast_time,
         .timestamp => datetime.cast_timestamp,
         .timestamp_tz => datetime.cast_timestamptz,
-        .interval => datetime.cast_interval,
+        .interval => datetime.cast_iv,
         // Read as the elements' type reads them, written canonical.
         .array => array.inputFunction(t.element),
+        // uuid: its 16 bytes (uuid.zig).
+        .uuid => uuid.store,
         else => null,
     };
 }
 
+const uuid = @import("uuid.zig");
+
 const array = @import("array.zig");
+
+// ================================================================ numeric
+
+const decimal_sql = @import("../decimal_sql.zig");
+
+/// A value stored into a numeric column: into one stored as keys (BLOB)
+/// every value as the key of numeric(p, s) (xq_dec_key(v, p, s)), into one
+/// of a table made before numerics were keys (ANY) as a number
+/// (xq_dec_number(v)). A numeric stored into a column of a number or a
+/// string is made one (PostgreSQL's assignment cast).
+fn numericStore(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
+    const d = decimal_sql.def;
+    const cast: ?*const int.FuncDef = switch (t.logical) {
+        .numeric => {
+            if (storage != .BLOB) return .{ .def = d("xq_dec_number", 1), .always = true };
+            if (typmodOf(decl)) |m| return .{ .def = d("xq_dec_key", 3), .consts = m, .n_consts = 2, .always = true };
+            return .{ .def = d("xq_dec_key", 1), .always = true };
+        },
+        .float8 => d("xq_dec_float8", 1),
+        .float4 => d("xq_dec_float4", 1),
+        .int1, .int2 => d("xq_dec_int2", 1),
+        .int4 => d("xq_dec_int4", 1),
+        .int8 => d("xq_dec_int8", 1),
+        .text, .varchar, .char => d("xq_dec_text", 1),
+        else => null,
+    };
+    return .{ .def = cast orelse return null, .only_numeric = true };
+}
+
+/// The precision and scale of a declared `numeric(p [, s])`.
+pub fn typmodOf(decl: []const u8) ?[2]i32 {
+    const open = std.mem.indexOfScalar(u8, decl, '(') orelse return null;
+    const close = std.mem.indexOfScalarPos(u8, decl, open, ')') orelse return null;
+    var it = std.mem.splitScalar(u8, decl[open + 1 .. close], ',');
+    const p = std.fmt.parseInt(i32, std.mem.trim(u8, it.next() orelse return null, " "), 10) catch return null;
+    const s = if (it.next()) |z| std.fmt.parseInt(i32, std.mem.trim(u8, z, " "), 10) catch return null else 0;
+    return .{ p, s };
+}
+
+/// xq_dec(x [, p, s]) and xq_dec_key(): numeric(p, s), else of the scale
+/// of x (a string literal's digits: '1.50' has 2; an integer's none).
+fn decType(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len == 0) return unknown;
+    if (args.len == 3) if (typing.intArg(args[1])) |p| if (typing.intArg(args[2])) |s| {
+        const sc: ?u8 = if (s >= 0) typing.clampU8(@intCast(@min(s, 255))) else 0;
+        return c.make(.{ .logical = .numeric, .precision = if (p >= 1 and p <= 255) @intCast(p) else null, .scale = sc });
+    };
+    return numericOf(c, args[0]);
+}
+
+/// The numeric an operand is converted to.
+fn numericOf(c: *Ctx, o: Operand) Oom!TypeId {
+    if (typing.stringArg(o)) |z| {
+        const d = @import("../decimal.zig");
+        var buf: [512]u8 = undefined;
+        var fba: std.heap.FixedBufferAllocator = .init(&buf);
+        const v = d.parse(fba.allocator(), z) catch return c.make(.{ .logical = .numeric });
+        return c.make(.{ .logical = .numeric, .scale = typing.clampU8(@min(v.dscale, 255)) });
+    }
+    if (typing.intWidth(o.logical()) != null) return c.make(.{ .logical = .numeric, .scale = 0 });
+    if (o.logical() == .numeric) return c.make(.{ .logical = .numeric, .scale = o.type.scale });
+    return c.make(.{ .logical = .numeric });
+}
+
+fn decArg0(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len == 0) return unknown;
+    if (args[0].logical() == .numeric) return args[0].id;
+    return numericOf(c, args[0]);
+}
+
+fn decScale0(c: *Ctx, args: []const Operand) Oom!TypeId {
+    _ = args;
+    return c.make(.{ .logical = .numeric, .scale = 0 });
+}
+
+fn decNoScale(c: *Ctx, args: []const Operand) Oom!TypeId {
+    _ = args;
+    return c.make(.{ .logical = .numeric });
+}
+
+/// xq_dec_add() ... : the scale of the operator.
+fn decOperator(comptime op: u8) *const fn (c: *Ctx, args: []const Operand) Oom!TypeId {
+    return struct {
+        fn f(c: *Ctx, args: []const Operand) Oom!TypeId {
+            if (args.len != 2) return unknown;
+            const t = try operator(c, op, args[0], args[1]);
+            if (t == unknown) return c.make(.{ .logical = .numeric });
+            return t;
+        }
+    }.f;
+}
+
+/// The types of the engine functions of numerics (decimal_sql.zig) and
+/// of PostgreSQL's functions of numerics only.
+const numeric_functions = .{
+    .{ "xq_dec", Ret{ .rule = decType } },
+    .{ "xq_dec_key", Ret{ .rule = decType } },
+    .{ "xq_dec_valid", Ret{ .named = "boolean" } },
+    .{ "xq_dec_text", Ret{ .named = "text" } },
+    .{ "xq_dec_add", Ret{ .rule = decOperator(TK.PLUS) } },
+    .{ "xq_dec_sub", Ret{ .rule = decOperator(TK.MINUS) } },
+    .{ "xq_dec_mul", Ret{ .rule = decOperator(TK.STAR) } },
+    .{ "xq_dec_div", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_mod", Ret{ .rule = decOperator(TK.REM) } },
+    .{ "xq_dec_div_trunc", Ret{ .rule = decScale0 } },
+    .{ "xq_dec_neg", Ret{ .rule = decArg0 } },
+    .{ "xq_dec_abs", Ret{ .rule = decArg0 } },
+    .{ "xq_dec_ceil", Ret{ .rule = decScale0 } },
+    .{ "xq_dec_floor", Ret{ .rule = decScale0 } },
+    .{ "xq_dec_sign", Ret{ .rule = decScale0 } },
+    .{ "xq_dec_trim_scale", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_round", Ret{ .rule = round } },
+    .{ "xq_dec_trunc", Ret{ .rule = round } },
+    .{ "xq_dec_scale", Ret{ .named = "integer" } },
+    .{ "xq_dec_min_scale", Ret{ .named = "integer" } },
+    .{ "xq_dec_int2", Ret{ .named = "smallint" } },
+    .{ "xq_dec_int4", Ret{ .named = "integer" } },
+    .{ "xq_dec_int8", Ret{ .named = "bigint" } },
+    .{ "xq_dec_float4", Ret{ .named = "real" } },
+    .{ "xq_dec_float8", Ret{ .named = "double precision" } },
+    .{ "xq_dec_number", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_sum", Ret{ .rule = sum } },
+    .{ "xq_dec_avg", Ret{ .rule = decNoScale } },
+    .{ "xq_pg_dec_json", Ret{ .named = "json" } },
+    .{ "div", Ret{ .rule = decScale0 } },
+    .{ "scale", Ret{ .named = "integer" } },
+    .{ "min_scale", Ret{ .named = "integer" } },
+    .{ "trim_scale", Ret{ .rule = decNoScale } },
+};
 
 /// PostgreSQL's choices by the types of operands (jsonb's operators, the
 /// arguments of the functions that make JSON): overload.zig.
@@ -262,6 +416,13 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "set_config", Ret{ .named = "text" } },
     .{ "format_type", Ret{ .named = "text" } },
     .{ "gen_random_uuid", Ret{ .named = "uuid" } },
+    // uuid (uuid.zig).
+    .{ "uuidv4", Ret{ .named = "uuid" } },
+    .{ "uuidv7", Ret{ .named = "uuid" } },
+    .{ "uuid_extract_version", Ret{ .named = "smallint" } },
+    .{ "uuid_extract_timestamp", Ret{ .named = "timestamp with time zone" } },
+    .{ "xq_pg_uuid", Ret{ .named = "uuid" } },
+    .{ "xq_pg_uuid_text", Ret{ .named = "text" } },
     .{ "nextval", Ret{ .named = "bigint" } },
     .{ "currval", Ret{ .named = "bigint" } },
     .{ "setval", Ret{ .named = "bigint" } },
@@ -273,6 +434,18 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_pg_int8", Ret{ .named = "bigint" } },
     .{ "xq_pg_bool", Ret{ .named = "boolean" } },
     .{ "xq_pg_interval", Ret{ .named = "interval" } },
+    // interval BLOB (datetime.zig).
+    .{ "xq_pg_iv", Ret{ .named = "interval" } },
+    .{ "xq_pg_iv_text", Ret{ .named = "text" } },
+    .{ "xq_pg_iv_key", Ret{ .named = "bytea" } },
+    .{ "xq_pg_iv_high", Ret{ .named = "bytea" } },
+    .{ "xq_pg_iv_valid", Ret{ .named = "boolean" } },
+    .{ "xq_pg_iv_sum", Ret{ .named = "interval" } },
+    .{ "xq_pg_iv_avg", Ret{ .named = "interval" } },
+    .{ "justify_hours", Ret{ .named = "interval" } },
+    .{ "justify_days", Ret{ .named = "interval" } },
+    .{ "justify_interval", Ret{ .named = "interval" } },
+    .{ "isfinite", Ret{ .named = "boolean" } },
     .{ "xq_pg_date", Ret{ .named = "date" } },
     .{ "xq_pg_time", Ret{ .named = "time without time zone" } },
     .{ "xq_pg_timestamp", Ret{ .named = "timestamp without time zone" } },
@@ -298,6 +471,10 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_pg_jsonb_delete", Ret{ .named = "jsonb" } },
     .{ "xq_pg_jsonb_delete_keys", Ret{ .named = "jsonb" } },
     .{ "xq_pg_jsonb_delete_path", Ret{ .named = "jsonb" } },
+    // jsonb stored as JSONB (jfuncs.zig).
+    .{ "xq_pg_jsonb_bin", Ret{ .named = "jsonb" } },
+    .{ "xq_pg_jsonb_text", Ret{ .named = "text" } },
+    .{ "xq_pg_jsonb_key", Ret{ .named = "bytea" } },
     .{ "to_json", Ret{ .named = "json" } },
     .{ "json_build_object", Ret{ .named = "json" } },
     .{ "json_build_array", Ret{ .named = "json" } },
@@ -369,7 +546,7 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "array_to_string", Ret{ .named = "text" } },
     .{ "string_to_array", Ret{ .named = "text[]" } },
     .{ "current_schemas", Ret{ .named = "name[]" } },
-});
+} ++ numeric_functions);
 
 /// The spelling of the array of each element type (array.Elem).
 const array_names = blk: {

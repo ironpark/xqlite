@@ -261,7 +261,8 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 
 | 방언 | 엔진 함수 |
 | --- | --- |
-| PostgreSQL | `xq_like`, `xq_ilike`, `xq_pg_*` |
+| 모든 방언 | `xq_like`, `xq_ilike`(`like.zig`), `xq_dec_*`(정확한 십진수와 그 정렬 키, `decimal_sql.zig`) |
+| PostgreSQL | `xq_pg_*` |
 | MariaDB (의미 노드) | `xq_coerce`, `xq_div`, `xq_xor`, `xq_bitxor`, `xq_cast` |
 | MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_stddev_*`, `xq_var_*`, `xq_rand`, `xq_uuid` |
 | MariaDB (JSON) | `xq_maria_json_col`, `xq_maria_json_bool`, `xq_maria_json_cmp`([MariaDB 호환](mariadb.md#json)) |
@@ -302,11 +303,12 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 
 ## 값 표시
 
-엔진은 값을 SQLite처럼 저장하고 돌려줍니다. 불리언은 0/1, `numeric(10,2)`는 끝의 0이 없는 수, `timestamptz`는 오프셋 없는 UTC 텍스트입니다. 셸과 와이어 프로토콜은 그 방언의 클라이언트가 보는 텍스트로 보여 줍니다. C API와 Zig API가 돌려주는 값은 그대로입니다.
+엔진은 값을 SQLite처럼 저장하고 돌려줍니다. 불리언은 0/1, PostgreSQL의 `numeric`은 정렬 키 BLOB(`dialect/decimal.zig`, Zig API `xqlite.decimal`), `timestamptz`는 오프셋 없는 UTC 텍스트입니다. 셸과 와이어 프로토콜은 그 방언의 클라이언트가 보는 텍스트로 보여 줍니다. C API와 Zig API가 돌려주는 값은 그대로입니다.
 
 - `xqlite.types`(`src/sql/types.zig`, 엔진의 것): 방언의 선언 타입 → 방언과 무관한 `Type`(`boolean`, `int4`, `numeric(10,2)`, `timestamp_tz` ...). 배열은 `array`와 원소의 `Logical`(`Type.element`)이고, 원소의 매개변수는 그 `Type`의 것입니다(PostgreSQL의 `character varying(20)[]`은 `array`, `varchar`, 길이 20; `int2vector`는 `smallint`의 배열). 테이블을 만든 방언으로 읽으므로, PostgreSQL 연결이 MSSQL이 만든 `bit` 열을 읽어도 `boolean`입니다.
 - `xqlite.display.Columns`: 결과 열의 타입. 테이블 열이면 메모리의 카탈로그(`catalog.meta()`, [메모리의 카탈로그](#메모리의-카탈로그))에서 읽습니다. 식이면 엔진이 그 식에 매긴 타입입니다([코어의 타입](#코어의-타입)): 비교, `AND`/`OR`/`NOT`, `IS`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, 불리언 상수는 어느 방언에서나 불리언이고, 캐스트는 그 대상 타입입니다(`2.5::numeric(6,2)`, `CAST(x AS DECIMAL(6,2))`). 리터럴, 산술, `CASE`/`COALESCE`, 함수 호출은 방언의 규칙이 정한 타입입니다(PostgreSQL의 `1.50`, `n + 1`, `sum(n)`은 스케일 2의 `numeric`, MariaDB의 `7 / 2`는 `DECIMAL(14,4)`). 서브쿼리, CTE, 뷰의 열과 스칼라 서브쿼리는 그 열의 타입을 이어받습니다. 엔진은 타입을 문장에 `Type`으로 두고(`engine.resultType()`), 그 철자를 열의 선언 타입(`sqlite3_column_decltype()`)으로 남깁니다. SQLite 방언의 문장은 SQLite처럼 NULL입니다. 연결이 열의 출처를 기록해야 합니다(`setColumnMetadata`, Zig API의 `OpenOptions.column_metadata`; 셸은 늘 켬).
 - `xqlite.display.text(viewer, type, value)`: 그 방언이 그 값을 보이는 텍스트. SQLite와 같으면 null입니다. `viewer`는 문장을 컴파일한 방언입니다.
+- `xqlite.display.textAlloc(gpa, viewer, type, value)`: 메모리가 따로 드는 텍스트(호출한 쪽이 `gpa`로 해제), 아니면 null. 지금은 SQLite의 JSONB로 저장한 PostgreSQL `jsonb`(BLOB)의 JSON 텍스트(PostgreSQL의 공백, `dialect/jsonb.zig`)로, SQLite 방언이 아니면 어느 방언에서나 씁니다. 셸(`cli/qrf.zig`)과 와이어 서버(PostgreSQL의 텍스트·이진 형식, MySQL)가 BLOB에 먼저 부릅니다.
 
 | 방언 | 불리언 | `decimal(p,s)`/`numeric(p,s)` | 시간대 있는 타임스탬프 |
 | --- | --- | --- | --- |
@@ -315,16 +317,18 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | MSSQL | 1/0(`bit`) | s자리(`2.50`) | 저장할 때 이미 SQL Server 형식 |
 | Oracle | `TRUE`/`FALSE` | 끝의 0 없음(`NUMBER`, SQLite와 같음) | |
 
+- PostgreSQL의 `uuid`는 16바이트 BLOB으로 저장하고, SQLite 방언이 아닌 문장에서는 `a0eebc99-9c0b-...`로 보입니다(예전 테이블의 TEXT 열과 SQL Server의 `uniqueidentifier`는 저장된 텍스트 그대로).
 - 셸은 SQL이나 JSON 값을 쓰는 스타일(`quote`, `insert`, `json`, `jobject`)에서는 SQLite 그대로 씁니다.
 - 스케일 0의 수(`numeric(10,0)`, PostgreSQL의 `1e3`, `round(2.5)`)는 소수점 없이 보입니다(`1000`; SQLite는 실수 `1000.0`).
-- 타입을 모르는 식(SQLite 테이블의 열을 쓰는 식, 규칙이 없는 함수)은 SQLite처럼 보입니다. 값마다 스케일이 정해지는 PostgreSQL의 `numeric` 나눗셈과 `avg()`도 그렇습니다(`numeric`이지만 스케일을 모름). 뷰의 캐스트 열도 그렇습니다: 뷰는 SQLite 텍스트로 저장되었다가 다시 컴파일되고, 캐스트는 SQLite의 식(`CAST(round(x, 2) AS NUMERIC)`)으로 내려가 대상 타입이 남지 않습니다. 뷰의 비교는 다시 컴파일할 때 다시 불리언이 됩니다.
+- `numeric`의 키(BLOB)는 SQLite 방언이 아니면 그 십진 텍스트로 보입니다: 타입의 스케일(PostgreSQL·MariaDB·MSSQL), 없으면 키가 들고 다니는 표시 스케일(나눗셈, `avg()`: `2.5000000000000000`), 없으면 자기 자릿수. 64바이트를 넘는 것은 `display.textAlloc()`이 씁니다(jsonb의 텍스트와 함께).
+- 타입을 모르는 식(SQLite 테이블의 열을 쓰는 식, 규칙이 없는 함수)은 SQLite처럼 보입니다. 뷰의 비교는 다시 컴파일할 때 다시 불리언이 되고, 캐스트(`xq_dec(x, 6, 2)`)는 그 함수의 타입이 됩니다.
 
 ### 코어의 타입
 
 식의 타입은 코어의 개념입니다: `Expr.xq_type`(`src/sql/typing.zig`의 `TypeId`, u16, 0은 모름). 대부분 메타데이터이고, 코드 생성은 두 곳에서만 읽습니다([타입을 읽는 코드 생성](#타입을-읽는-코드-생성)). 방언이 타입으로 고르는 것(오버로드, 아래 `Rules.overload`)은 해석된 식을 바꿔 두는 것이라, 코드 생성은 그 식을 여느 식처럼 컴파일합니다. SQLite 방언의 문장, 스키마, 엔진이 스스로 컴파일하는 SQL에는 매기지 않으므로(`typing.active()`) 그 바이트코드는 SQLite의 것 그대로입니다.
 
 - 매기는 곳
-  - 내림(`Lowerer.expr()`): 프론트엔드가 아는 타입을 모든 식(결과 열만이 아님)의 뿌리에 찍습니다. 비교·논리·`IN`·`EXISTS`·`BETWEEN`·`LIKE`·`IS`는 불리언, 캐스트는 대상 타입을 프론트엔드의 철자로(PostgreSQL의 스케일만 있는 `numeric`은 `numeric(38,s)`), `COLLATE`는 피연산자의 타입. 캐스트는 내린 뒤에는 되살릴 수 없으므로(`CAST(round(x,s) AS NUMERIC)`, MariaDB의 `REAL` + `round`) 여기서 찍어야 합니다.
+  - 내림(`Lowerer.expr()`): 프론트엔드가 아는 타입을 모든 식(결과 열만이 아님)의 뿌리에 찍습니다. 비교·논리·`IN`·`EXISTS`·`BETWEEN`·`LIKE`·`IS`는 불리언, 캐스트는 대상 타입을 프론트엔드의 철자로(PostgreSQL의 `numeric(p,s)`는 그대로), `COLLATE`는 피연산자의 타입. 캐스트는 내린 뒤에는 되살릴 수 없으므로(`CAST(round(x,s) AS NUMERIC)`, MariaDB의 `REAL` + `round`) 여기서 찍어야 합니다.
   - 이름 해석(`resolve.zig`): 프론트엔드가 찍지 않은 식에 연산자가 정하는 타입(`typing.ofOp()`: 비교·논리는 불리언, SQLite 텍스트인 뷰에도). FROM 서브쿼리·CTE·뷰의 열을 가리키는 `TK_COLUMN`은 그 결과 열의 타입(`lookupName`), 스칼라 `TK_SELECT`는 첫 열의 타입, 방언 테이블의 열은 카탈로그의 타입(`catalog.metaCached()`: 메모리에 있을 때만, 이름 해석 중에는 질의하지 않음. 방언 프론트엔드가 문장을 내릴 때 대개 이미 읽음. PostgreSQL 프론트엔드는 문장마다 모든 데이터베이스의 카탈로그를 메모리에 둠(`catalog.readAll()`, 스키마가 바뀌지 않으면 질의 없음): 뷰가 읽는 테이블의 열도 타입을 알도록). SQLite 방언의 테이블은 카탈로그 항목이 없으므로 모름입니다.
   - 방언의 규칙(`Hooks.typing`, `typing.Rules`): 이름 해석이 끝난 식(`resolveExprNames`/`resolveExprListNames`의 끝)을 안쪽부터 훑어(`typing.typeTree()`, 해석 워커는 그대로) 타입이 없는 노드에 매깁니다. 프론트엔드가 찍은 타입과 열의 타입은 그대로 둡니다. 서브쿼리는 자기 해석 때 이미 매겼으므로 들어가지 않습니다.
     - 리터럴(`Rules.literal`), 산술·연결·비트 연산(`Rules.operator`: `TK_PLUS` ... `TK_CONCAT`, 단항 `-`·`~`), 함수(`Rules.function`: 내린 이름(소문자)으로 찾는 `Ret` 표. 고정 타입, 인자 i의 타입, 인자들의 공통 타입, 방언이 계산하는 규칙. 없으면 코어의 `coalesce`/`ifnull`/`nullif`/`iif`/`min`/`max`). FuncDef가 아니라 방언의 이름 표에 두는 이유: 같은 내장 함수(`length`, `sum`)가 방언마다 다른 타입을 돌려줍니다. 엔진 함수(`xq_*`)도 같은 표에 둡니다.
@@ -332,12 +336,13 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
     - 규칙이 만든 타입은 방언의 철자(`Rules.spell`)로 표에 넣습니다(`Interner.addType()`: (방언, 타입, 철자)). 철자가 타입보다 덜 말할 수 있습니다: PostgreSQL은 연산 결과의 `numeric`에 typmod를 두지 않으므로 `numeric`이라 쓰지만 스케일은 갖고 있어 그 자릿수로 보입니다.
     - 프론트엔드가 다른 함수로 바꾼 호출의 타입은 `tree.Func.result_type`으로 찍습니다(PostgreSQL `now()`은 `strftime()`이라 텍스트이지만 `timestamp with time zone`, MariaDB `NOW(3)`, SQL Server `GETDATE()`, Oracle `SYSDATE`).
     - PostgreSQL의 공통 타입에서 문자열 상수는 자기 타입이 없습니다(`Rules.unknown_strings`, PostgreSQL의 unknown): `coalesce(j, '{}')`, `CASE ... THEN j ELSE '[]' END`, `UNION`의 열은 다른 값들의 타입이고 모두 문자열이면 text입니다.
-  - 방언의 선택(`Rules.overload`, `Rules.order_collation`): `typeTree()`가 노드마다, 피연산자의 타입을 매긴 뒤 노드 자신의 타입을 매기기 전에 부릅니다(프론트엔드가 타입을 찍은 노드도). 피연산자 타입으로 연산자와 함수를 고르는 자리입니다(PostgreSQL의 `overload.zig`: 산술·비트 연산자를 연산자 표로, `jsonb`의 `||`를 `xq_pg_jsonb_concat()`으로, `->`를 jsonb의 함수로, jsonb와 interval 비교에 collation, JSON을 만드는 함수의 인자를 감쌈). 바꿀 수 있는 것:
+  - 방언의 선택(`Rules.overload`, `Rules.order_collation`): `typeTree()`가 노드마다, 피연산자의 타입을 매긴 뒤 노드 자신의 타입을 매기기 전에 부릅니다(프론트엔드가 타입을 찍은 노드도). 피연산자 타입으로 연산자와 함수를 고르는 자리입니다(PostgreSQL의 `overload.zig`: 산술·비트 연산자를 연산자 표로, `jsonb`의 `||`를 `xq_pg_jsonb_concat()`으로, `->`를 jsonb의 함수로, jsonb 비교에 collation, interval 비교를 키(`xq_pg_iv_key()`)나 BLOB 열의 경계로, JSON을 만드는 함수의 인자를 감쌈). 바꿀 수 있는 것:
     - PostgreSQL의 연산자 표(`operators.zig`)는 `pg_operator`처럼 행마다 연산자, 피연산자 타입, 결과 타입, 구현(엔진의 연산 코드이거나 같은 인자의 엔진 함수)을 둡니다. 해석은 PostgreSQL의 순서입니다: 정확히 맞는 행(문자열 상수는 다른 쪽의 타입으로 봄), 암시적 캐스트로 맞는 행들 중 정확히 맞는 자리와 선호 타입이 많은 행, 문자열 상수 자리의 타입 범주. 엔진 함수의 행이면 연산자를 호출로 바꾸고(`date + 1` → `xq_pg_date_pli(d, 1)`), 연산 코드의 행이면 그대로 두며 정수와 만난 문자열 상수만 그 정수의 입력 함수로 감쌉니다(`xq_pg_int4('a')`). 맞는 행이 없거나 여럿이면 문장을 실패시킵니다(`operator does not exist: date + text` 42883, `operator is not unique` 42725). 타입을 모르는 피연산자가 있으면 표를 보지 않으므로 SQLite 테이블의 열을 쓰는 식은 SQLite의 연산 그대로이고, 매개변수와 NULL은 어느 타입과도 맞되 실패시키지 않습니다. 연산 코드 행의 결과 타입(정수의 폭, `numeric`의 스케일)은 여전히 `Rules.operator`가 셈하고, 엔진 함수의 결과 타입은 `Rules.function`이 그 함수 이름으로 표에서 읽습니다(뷰의 텍스트에 남은 호출도 같은 타입).
     - 같은 종류(스칼라, 집계, 윈도우)의 다른 함수로 이름만 바꿈(`Ctx.rename()`): 해석 뒤의 코드 생성·집계 분석·상수 판단은 모두 이름과 인자 수로 FuncDef를 다시 찾으므로 이름만 바꾸면 됩니다. 집계/윈도우 여부, `NC_HasAgg`, 집계 깊이는 해석 때 정해졌으므로 종류가 같아야 하고, 윈도우 함수는 `Window.w_func`도 바꿉니다.
     - 연산자를 호출로(`Ctx.toCall()`), 피연산자를 호출이나 `COLLATE`로 감쌈(`Ctx.call()`, `Ctx.collate()`): 새 호출은 해석기가 호출에 하는 일 중 FuncDef로 정하는 부분(`resolve.applyFuncDef()`: 권한 검사, 서브타입 인자 `EP_SubtArg`, `EP_ConstFunc`, 쓸 수 있는 곳)을 거치고(`resolve.resolveNewCall()`), 감싼 인자의 `EP_SubtArg`를 이어받습니다. 바꾼 노드 위로는 높이를 다시 셉니다. 같은 식을 내리기 전에 바꿨을 때와 바이트코드가 같습니다(PostgreSQL 테스트의 모든 문장으로 확인).
     - 문장을 실패시킴(`Ctx.fail()`: `json || json`).
-    - `ORDER BY`(질의, 집계 안, 윈도우)는 항의 타입으로 collation을 고릅니다(`Rules.order_collation`, jsonb는 `xq_pg_jsonb`). 결과 열 번호·별칭인 항은 그 열로 바뀐 뒤에(`resolveOrderGroupByTerms`의 끝), 복합 질의의 항은 열 번호가 된 뒤 그 열의 공통 타입으로(`resolveCompoundOrderBy` 다음), 식인 항은 해석 직후(collation이 붙은 항은 결과 열과 같은 식이 아님).
+    - `ORDER BY`(질의, 집계 안, 윈도우)는 항의 타입으로 정렬 키 함수(`Rules.order_key`: 항을 그 함수로 감싸 결과 열 참조가 아닌 식으로 만듦, PostgreSQL의 jsonb는 `xq_pg_jsonb_key()`) 또는 collation(`Rules.order_collation`, interval·배열)을 고릅니다. 복합 질의의 항은 열이어야 하므로 키 함수 없이 collation만 씁니다(jsonb는 `xq_pg_jsonb`). 결과 열 번호·별칭인 항은 그 열로 바뀐 뒤에(`resolveOrderGroupByTerms`의 끝), 복합 질의의 항은 열 번호가 된 뒤 그 열의 공통 타입으로(`resolveCompoundOrderBy` 다음), 식인 항은 해석 직후(collation이 붙은 항은 결과 열과 같은 식이 아님).
+    - 같은 값이 다른 바이트일 수 있는 타입은 그룹 키 함수를 둡니다(`Rules.group_key`, PostgreSQL interval의 `xq_pg_iv_key`). `GROUP BY`의 항은 그 키로 감싸고 결과 열을 대신하지 않게 하며(`order_by_col` 0), 집계가 아닌 `DISTINCT`는 결과 열들의 `GROUP BY`로 바꿉니다(`typing.groupBy()`, GROUP BY 해석 뒤). 창의 `PARTITION BY`·`ORDER BY`의 모든 항과, 질의·집계 `ORDER BY`의 마지막이 아닌 항도 키로 정렬합니다(`keyList()`, 같은 길이가 동점·같은 파티션이 되도록. 마지막 항의 동점은 결과에 상관없고 인덱스가 그 순서를 줌).
     - 한 노드를 여러 번 볼 수 있으므로(`typeTree()`는 해석마다 부름) 선택은 한 번만 하게 짭니다(바꾼 뒤의 모양에서는 다시 고르지 않음).
     - 스키마가 남기는 SQL(뷰의 질의, 트리거의 프로그램: `Parse.xq_schema_text`)에서는 고르지 않습니다. 그 텍스트는 어느 방언에서나 적힌 뜻이어야 하므로, 방언이 고른 것은 텍스트에 함수로 적습니다(PostgreSQL의 `ddltype.zig`: 뷰·CHECK·생성 열·식 인덱스의 식을 따로 내려 해석만 해 보고(`lower.Origins`로 트리와 짝지음) 코어의 선택을 트리에 되돌린 뒤 렌더링).
   - 매개변수(`TK_VARIABLE`): 타입을 아는 피연산자와 비교·연산하면(`a = ?`, `? + 1`, `x BETWEEN ? AND ?`, `x IN (?, ?)`, `CASE x WHEN ? ...`) 그 타입을 받습니다(`typeTree()`의 `inferParams`). `INSERT VALUES`(복합 VALUES와 `INSERT ... SELECT`의 각 항 포함)와 `UPDATE SET`에서 열에 저장되는 매개변수는 그 열의 타입입니다(`typing.assign()`: 프론트엔드가 저장 값을 감싸는 함수 `xq_coerce`, `xq_tsql_store`, `xq_ora_coerce`(`Rules.store_wrappers`)를 지나서). 방언의 선택이 다른 타입의 행을 고르면(PostgreSQL의 `ts + $1`은 `timestamp + interval`) 그 타입으로 바꿉니다(`typing.retypeParam()`). 번호마다 처음 정해진 타입을 `Parse.xq_param_types`에 모아 `makeReady()`에서 `Vdbe.xq_param_types`에 값으로 둡니다(`engine.paramType()`, Zig API `Stmt.parameterType()`). 와이어 서버의 확장 질의(PostgreSQL `ParameterDescription`)가 쓸 자리입니다.
@@ -357,8 +362,11 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
   - MariaDB(`INT` 연산은 `BIGINT`)와 Oracle(`NUMBER`)에는 폭이 없습니다.
   - 매개변수의 타입은 추론한 것입니다(`$1 + a`에서 `a`의 `integer`). 클라이언트가 매개변수에 더 넓은 타입을 지정해도(PostgreSQL 확장 질의의 `int8`) 아직 반영하지 않습니다.
   - 뷰와 트리거 본문은 그것을 쓰는 문장 안에서 다시 해석되므로 그 문장 방언의 타입과 폭을 씁니다(PostgreSQL 문장이 읽는 뷰의 `a + 1`도 `integer out of range`). CHECK, 생성 열, 인덱스 식은 스키마를 읽을 때 해석되어(`init.busy`) 타입이 없으므로 64비트로 계산하고, 오류는 `Hooks.arith`의 0으로 나누기·64비트 넘침만입니다.
-- 저장 함수: `Rules.store(type)`가 그 타입(카탈로그의 열 타입, `catalog.metaOf()`) 열에 저장하는 값이 지날 함수(인자 하나의 `FuncDef`)를 줍니다. `INSERT`(VALUES, 복합 VALUES, `INSERT ... SELECT`, 기본값이 아닌 값)와 `UPDATE SET`(`ON CONFLICT DO UPDATE` 포함)이 값을 레지스터에 넣은 직후, 트리거·생성 열·제약 검사 전에 `OP_Function` + `OP_Move`로 바꿉니다(`insert.codeStore()`, `typing.storeFunctions()`). 타입을 아는 값(숫자, 불리언 식, 같은 타입의 열)은 지나지 않고(`typing.storeNeeded()`), 매개변수와 타입을 모르거나 문자열인 값만 지납니다. 그래서 텍스트로 바인딩한 매개변수(와이어 프로토콜이 보내는 값)도 읽힙니다.
-  - PostgreSQL: `date`, `time`, `timestamp`, `timestamptz`, `interval`은 그 타입의 캐스트 함수(`xq_pg_date` ...: PostgreSQL의 입력을 읽어 출력 텍스트로, `timestamptz`는 UTC, `'2 hours'`는 `02:00:00`; 아니면 `invalid input syntax for type date: "x"` 22007). `boolean`은 `xq_pg_store_boolean`(`'t'`, `'yes'`, `'on'`, `'1'` ...과 그 접두어, 대소문자·앞뒤 공백 무시; 아니면 `invalid input syntax for type boolean: "x"` 22P02), `numeric`은 `xq_pg_store_numeric`(`'1.50'` → 1.5, `'3'` → 3; 아니면 `invalid input syntax for type numeric: "x"` 22P02). 배열(`integer[]` ...)은 원소 타입의 배열 입력(`xq_pg_array_int4` ...: 원소마다 그 타입으로 읽어 PostgreSQL의 텍스트로; 아니면 `malformed array literal: "x"`, `invalid input syntax for type integer: "a"`). 문자열이 아닌 값은 그대로 두고 열의 CHECK가 봅니다.
+- 저장 함수: `Rules.store(type, storage)`가 그 타입(카탈로그의 열 타입, `catalog.metaOf()`)과 STRICT 저장 타입(같은 타입이 데이터베이스의 나이에 따라 다르게 저장됨: PostgreSQL interval은 예전 `TEXT`, 새 `BLOB`)의 열에 저장하는 값이 지날 함수(인자 하나의 `FuncDef`)를 줍니다. `INSERT`(VALUES, 복합 VALUES, `INSERT ... SELECT`, 기본값이 아닌 값)와 `UPDATE SET`(`ON CONFLICT DO UPDATE` 포함)이 값을 레지스터에 넣은 직후, 트리거·생성 열·제약 검사 전에 `OP_Function` + `OP_Move`로 바꿉니다(`insert.codeStore()`, `typing.storeFunctions()`). 타입을 아는 값(숫자, 불리언 식, 같은 타입의 열)은 지나지 않고(`typing.storeNeeded()`), 매개변수와 타입을 모르거나 문자열인 값, interval(텍스트이거나 BLOB)만 지납니다. 그래서 텍스트로 바인딩한 매개변수(와이어 프로토콜이 보내는 값)도 읽힙니다.
+  - PostgreSQL: `interval`의 BLOB 열은 `xq_pg_iv`(텍스트·BLOB을 읽어 BLOB으로), 예전 `TEXT` 열은 이름 없는 저장 함수(`datetime.store_interval_text`: 텍스트로, 무한은 오류). `date`, `time`, `timestamp`, `timestamptz`는 그 타입의 캐스트 함수(`xq_pg_date` ...: PostgreSQL의 입력을 읽어 출력 텍스트로, `timestamptz`는 UTC, `'2 hours'`는 `02:00:00`; 아니면 `invalid input syntax for type date: "x"` 22007). `boolean`은 `xq_pg_store_boolean`(`'t'`, `'yes'`, `'on'`, `'1'` ...과 그 접두어, 대소문자·앞뒤 공백 무시; 아니면 `invalid input syntax for type boolean: "x"` 22P02), `numeric`은 `xq_pg_store_numeric`(`'1.50'` → 1.5, `'3'` → 3; 아니면 `invalid input syntax for type numeric: "x"` 22P02). 배열(`integer[]` ...)은 원소 타입의 배열 입력(`xq_pg_array_int4` ...: 원소마다 그 타입으로 읽어 PostgreSQL의 텍스트로; 아니면 `malformed array literal: "x"`, `invalid input syntax for type integer: "a"`). 문자열이 아닌 값은 그대로 두고 열의 CHECK가 봅니다.
+  - PostgreSQL `uuid`: 새 `BLOB` 열은 `xq_pg_uuid`(16바이트), 예전 `TEXT` 열은 `xq_pg_uuid_text`(36자 텍스트). `uuid`와 `interval` 값은 열의 형태가 다를 수 있으므로 타입을 알아도 저장 함수를 지납니다(`storeNeeded()`).
+  - PostgreSQL: `jsonb`는 BLOB 열이면 `xq_pg_jsonb_bin`(정준 JSONB), TEXT 열(예전에 만든 테이블)이면 `xq_pg_jsonb_text`(정규화한 텍스트).
+  - PostgreSQL `numeric`: `BLOB` 열은 모든 값이 `xq_dec_key(v, p, s)`(정렬 키, s로 반올림; 상수가 필요하므로 `Rules.store_column` → `typing.Store`), 이전 테이블의 `ANY` 열은 `xq_dec_number(v)`(수; `'1.50'` → 1.5, `'3'` → 3). 다른 타입의 열에 넣는 numeric 값은 그 타입으로(`Store.only_numeric`: `xq_dec_float8`, `xq_dec_int4`, `xq_dec_text` ...). numeric 값은 키일 수도 수일 수도 있으므로 늘 저장 함수를 지납니다.
   - MariaDB(`xq_coerce`), SQL Server(`xq_tsql_store`), Oracle(`xq_ora_coerce`)은 프론트엔드가 저장 값을 이미 감쌉니다(`Rules.store_wrappers`). SQL Server `bit`의 `'true'`/`'false'`, Oracle `BOOLEAN`의 `'yes'`/`'no'`도 그 함수들이 읽습니다.
 
 ## 엄격한 타입

@@ -1,0 +1,125 @@
+-- Differential cases of PostgreSQL's exact numeric (xqt dialect-diff pg
+-- tools/dialect/pg-numeric-cases.txt), in the format of pg-cases.txt:
+-- each case starts with a "-- case:" line and runs on an empty database,
+-- in PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. The expected output is PostgreSQL 18's.
+-- A numeric is stored as decimal.zig's key; an unconstrained numeric
+-- column drops trailing zeros (1.50 is 1.5), which these cases avoid
+-- showing.
+
+-- case: literals and casts keep their digits and scale
+SELECT 1.50, 0.1 + 0.2, 1.000000000000000000001 + 1, 123456789012345678901234567890.5::numeric;
+SELECT '1.50'::numeric, ' 12.3400 '::numeric, '1e-3'::numeric, '1.5e+2'::numeric, '.5'::numeric, '-0'::numeric;
+SELECT '1_000.5'::numeric, '0x1F'::numeric, '-0b101'::numeric, '0o17'::numeric;
+SELECT 'NaN'::numeric, 'Infinity'::numeric, '-inf'::numeric, 'nan'::numeric = 'NaN'::numeric;
+SELECT 1.5::numeric(10,3), 123.456::numeric(5,1), 2.5::numeric(5,0), (-2.5)::numeric(5,0), 1234.5::numeric(4,-2);
+
+-- case: input errors and typmod overflow
+SELECT 'abc'::numeric;
+SELECT '1__0'::numeric;
+SELECT '1e131072'::numeric;
+SELECT 12345.678::numeric(5,2);
+SELECT 'inf'::numeric(5,2);
+SELECT 1::numeric(0);
+SELECT 1::numeric(5,1001);
+SELECT 1::numeric(1,2,3);
+
+-- case: arithmetic and its scales
+SELECT 1.50 + 1, 1.50 * 1.50, 2.5 - 2.50, 7.5 % 2, -7.5 % 2, -(1.50);
+SELECT 10.0 / 4, 2::numeric / 3, 1::numeric / 3, 100::numeric / 3, 12345678901234567890::numeric / 7;
+SELECT 1 / 0::numeric;
+SELECT 5 % 0::numeric;
+SELECT 'inf'::numeric + '-inf'::numeric, 'inf'::numeric * 0, 1 / 'inf'::numeric, 'nan'::numeric / 0, -'inf'::numeric;
+SELECT 99999999999999999999 + 1, 99999999999999999999 * 99999999999999999999;
+
+-- case: functions of numerics
+SELECT round(2.5), round(-2.5), round(1.2345, 2), round(1234.5, -2), round(1.5, 3), trunc(-1.99), trunc(1.2399, 2);
+SELECT ceil(-1.5), ceiling(1.001), floor(-1.5), floor(1.5), abs(-0.50), sign(-3.5), sign(0.0), mod(7, 2.5);
+SELECT div(7.5, 2), div(-7.5, 2), scale(1.500), min_scale(1.500), trim_scale(1.500), scale('nan'::numeric);
+
+-- case: casts to and from integers, floats and text
+SELECT 2.5::int, (-2.5)::int, 1.5::smallint, 9007199254740993.5::bigint, 1.50::text, 1.5::numeric::float8;
+SELECT 32767.5::int2;
+SELECT 'nan'::numeric::int;
+SELECT 'inf'::numeric::bigint;
+SELECT (1/3::float8)::numeric, (0.1::float8 + 0.2::float8)::numeric, 1.5e-10::float8::numeric, 100::float8::numeric;
+SELECT 1.50 || 'x', 'v' || 2.50::numeric, concat(1.50::numeric, '|', 3::numeric);
+SELECT 1.5::numeric * 2.5::float8, 1.5::numeric < 2.0::float8;
+
+-- case: numeric columns store keys of their type
+CREATE TABLE t (id int PRIMARY KEY, a numeric(10,2) DEFAULT 1.234, b numeric DEFAULT '2', c float8, i int);
+INSERT INTO t VALUES (1, 1.5, '2.25', 1.25, 1), (2, '-7.125', 100, 2.5, 2), (3, 12345678.9, 'NaN', 3.5, 3);
+INSERT INTO t (id) VALUES (4);
+INSERT INTO t VALUES (5, 'Infinity', 1, 1, 1);
+INSERT INTO t VALUES (5, 123456789, 1, 1, 1);
+INSERT INTO t VALUES (5, 'x', 1, 1, 1);
+SELECT id, a, b FROM t ORDER BY id;
+SELECT id, a + b, a * 2, a / 3, -a FROM t ORDER BY id;
+UPDATE t SET b = b * 2 WHERE id = 2;
+UPDATE t SET c = a, i = a WHERE id < 3;
+SELECT id, b, c, i FROM t ORDER BY id;
+
+-- case: comparisons, ORDER BY, GROUP BY and DISTINCT of keys
+CREATE TABLE p (id int, v numeric(12,4));
+INSERT INTO p VALUES (1, 10), (2, 9.5), (3, -1), (4, 10.0000), (5, 'NaN'), (6, -0.0001), (7, NULL), (8, 1e7);
+SELECT id FROM p WHERE v > 9.5 ORDER BY id;
+SELECT id FROM p WHERE v = 10 ORDER BY id;
+SELECT id FROM p WHERE v BETWEEN -1 AND 10 ORDER BY id;
+SELECT id FROM p WHERE v IN (9.5, -1, 100) ORDER BY id;
+SELECT id, v FROM p ORDER BY v, id;
+SELECT id, v FROM p ORDER BY v DESC NULLS LAST, id;
+SELECT v, count(*) FROM p GROUP BY v ORDER BY v;
+SELECT DISTINCT v FROM p WHERE v > 0 ORDER BY v;
+SELECT min(v), max(v), count(DISTINCT v) FROM p;
+SELECT id FROM p WHERE v = 'NaN' ORDER BY id;
+SELECT count(*), sum(x) FROM (VALUES (1.5::numeric), (1.50), (2), (2.000)) AS v(x) GROUP BY x ORDER BY 2;
+SELECT count(*) FROM (SELECT DISTINCT x * 1 FROM (VALUES (1.5::numeric), (1.50), (3.0 / 2)) AS v(x)) AS d;
+
+-- case: sum and avg
+CREATE TABLE s (g int, x numeric(8,2), n int, b bigint);
+INSERT INTO s VALUES (1, 1.5, 1, 9223372036854775807), (1, 2.25, 2, 9223372036854775807), (2, NULL, 3, 1), (2, 3, 4, 2);
+SELECT g, sum(x), avg(x), sum(b), avg(n) FROM s GROUP BY g ORDER BY g;
+SELECT sum(x), avg(x), avg(b) FROM s;
+SELECT g, sum(x) OVER (ORDER BY n ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM s ORDER BY n;
+SELECT sum(v), avg(v) FROM (VALUES (1.5::numeric), ('NaN'), (2)) AS t(v);
+SELECT sum(v) FROM (VALUES ('inf'::numeric), ('-inf')) AS t(v);
+
+-- case: indexes, UNIQUE and foreign keys on numeric keys
+CREATE TABLE k (n numeric(6,2) PRIMARY KEY, label text);
+CREATE TABLE r (n numeric REFERENCES k (n));
+INSERT INTO k VALUES (1.5, 'a'), (2, 'b'), (-3.25, 'c');
+INSERT INTO k VALUES (1.50, 'dup');
+INSERT INTO r VALUES (1.5), (2.00);
+INSERT INTO r VALUES (7);
+CREATE INDEX k_label ON k ((n * 2));
+SELECT label FROM k WHERE n * 2 = 3;
+SELECT label FROM k WHERE n >= -3.25 AND n < 2 ORDER BY n;
+SELECT k.n, label FROM r JOIN k USING (n) ORDER BY k.n;
+
+-- case: CHECK, generated columns and views compute with keys
+CREATE TABLE c (a numeric(6,2) CHECK (a > 0), b numeric(8,3) GENERATED ALWAYS AS (a * 1.5) STORED);
+INSERT INTO c (a) VALUES (2.25);
+INSERT INTO c (a) VALUES (-1);
+CREATE VIEW cv AS SELECT a, b, a + b AS s, round(a / 3, 4) AS q, a > 2 AS big FROM c;
+SELECT * FROM cv;
+
+-- case: CASE, coalesce, greatest and least of numerics
+CREATE TABLE q (id int, a numeric(6,2));
+INSERT INTO q VALUES (1, 1.5), (2, NULL);
+SELECT id, coalesce(a, 0), CASE WHEN id = 1 THEN a ELSE 5 END, greatest(a, 2), least(a, 2), nullif(a, 1.5) FROM q ORDER BY id;
+SELECT CASE a WHEN 1.5 THEN 'x' ELSE 'y' END FROM q ORDER BY id;
+
+-- case: numeric as JSON and in arrays
+CREATE TABLE j (a numeric(6,2), b numeric);
+INSERT INTO j VALUES (1.5, 100), (-2, 0.25);
+SELECT to_json(a), to_jsonb(b), json_build_object('a', a, 'b', b), json_agg(a ORDER BY a) FROM j GROUP BY a, b ORDER BY a;
+SELECT ARRAY[a, b], ARRAY[1.50, 2] FROM j ORDER BY a;
+SELECT array_agg(a ORDER BY a), '{1.50,2}'::numeric[] FROM j;
+SELECT to_json('NaN'::numeric), to_json(1.50), to_jsonb(1.50);
+SELECT (j::jsonb ->> 'a')::numeric + 1 FROM (VALUES ('{"a": 1.25}')) AS v(j);
+
+-- case: the catalog's types of numeric columns
+CREATE TABLE ct (a numeric, b numeric(10,2), c decimal(5), d numeric(3,-2));
+SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE c.relname = 'ct' AND a.attnum > 0 ORDER BY a.attnum;
+SELECT column_name, data_type, numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'ct' AND column_name <> 'd' ORDER BY ordinal_position;

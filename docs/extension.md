@@ -92,6 +92,7 @@ for row in con.execute("SELECT * FROM doc_v"):             # 엔진 함수를 �
 | --- | --- |
 | `contextDbHandle()`, `dfunc.gpa()` | 사설 연결(할당자, 한도, PRNG) |
 | `getAuxdata*()`, `setAuxdata*()` | 대리 문장(`OP_Function` 하나인 `Vdbe`)에 두고 호출이 끝나면 지움. SQLite의 JSON 캐시처럼 넣고 바로 읽는 것은 되고, 호출을 넘는 캐시는 없음(`xq_coerce()`는 호출마다 타입을 파싱) |
+| `uuidv7()`의 시계(`ConnState.postgres`) | 사설 연결의 것이라 sqlite3 연결마다 하나: 한 연결이 만든 uuidv7은 순서대로 |
 | `stmtCurrentTime()` | 호출마다 시계를 읽음(xqlite는 문장마다 한 번). `'now'`가 한 문장 안에서도 행마다 다를 수 있음 |
 | `aggregateContext()`, `dfunc.aggState()` | `sqlite3_aggregate_context()` 안의 누산기 `Mem` |
 | `resultErrorState()` | 메시지와 결과 코드만(sqlite3에는 SQLSTATE가 없음) |
@@ -112,18 +113,31 @@ for row in con.execute("SELECT * FROM doc_v"):             # 엔진 함수를 �
 | 시퀀스 함수 | identity의 DEFAULT가 부르는 평범한 이름 | `nextval('t_id_seq')`, `currval()`, `setval()`, `lastval()` |
 | collation | 방언의 것 | `COLLATE xq_pg_jsonb`, `xq_pg_interval`, `xq_pg_array`, `xq_pg_array_num` |
 
-방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 593개, 빠지는 것 64개):
+PostgreSQL의 `jsonb` 열은 SQLite의 JSONB(BLOB)라서 값 자체는 확장 없이 읽힙니다(`json(j)`, `json_extract(j, '$.a')`, `j ->> '$.a'`). 확장이 드는 것은 jsonb의 연산자·비교·정렬이 남긴 식입니다: `xq_pg_jsonb_get()` ...과 `xq_pg_jsonb_key()`(비교와 `ORDER BY`의 정렬 키), `xq_pg_jsonb_bin()`(정준 JSONB: 상수가 아닌 DEFAULT, 생성 열), `xq_pg_jsonb_text()`(`jsonb::text`). sqlite3가 jsonb 열에 넣을 때는 `jsonb('...')`(정준이 아닐 수 있음, 방언이 읽을 때 정규화) 또는 확장의 `xq_pg_jsonb_bin('...')`을 씁니다. TEXT는 STRICT BLOB 열이 받지 않습니다.
+
+방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 675개, 빠지는 것 64개):
 
 | 방언 | 엔진 함수 | 한정 이름 | 시퀀스 | 빠짐 | collation |
 | --- | --- | --- | --- | --- | --- |
-| 공통 | 5(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
-| PostgreSQL | 124 | 161 | 5 | 35 | 4 |
+| 공통 | 39(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 34) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
+| PostgreSQL | 159 | 174 | 5 | 35 | 4 |
 | MariaDB | 19 | 101 | 4 | 5 | |
 | SQL Server | 18 | 40 | 2 | 20 | |
 | Oracle | 20 | 49 | 5 | 4 | |
 | SQLite 내장(`xq_sqlite_*`) | | 35 | | | |
 
 모두 결정적이면 결정적으로 등록하므로 식 인덱스, CHECK, 생성 열에 쓸 수 있습니다. 집계(`xq_stddev_pop()`, `xq_postgres_array_agg()`, `xq_tsql_for_json()` ...)와 윈도우 함수(`xq_postgres_array_agg`의 윈도우 형태)도 등록합니다.
+
+## numeric 키
+
+PostgreSQL의 `numeric` 열(`dialect/decimal.zig`)은 값 자체가 정렬 키인 BLOB입니다. 키의 바이트는 디스크 형식이라 바뀌지 않습니다.
+
+- 첫 바이트는 부류: `0x10` -Infinity, `0x20` 음수, `0x30` 0, `0x40` 양수, `0x50` +Infinity, `0x60` NaN.
+- 양수 0.c1c2...cn × 100^E(c는 100진 자리, 처음과 끝이 0 아님): E는 -126..125면 한 바이트 E + 0x80, 더 크면 `0xFE`와 빅엔디언 2바이트 E - 126, 더 작으면 `0x01`과 2바이트 E + 65661. 자리는 한 바이트 2c + 1, 마지막만 2c.
+- 음수는 부류 뒤의 바이트를 모두 보수(255 - b)로.
+- 저장한 값은 키뿐이고(정규화: `1.50`과 `1.5`는 한 키), 계산한 값은 표시 스케일을 뒤에 빅엔디언 2바이트로 붙일 수 있습니다(다른 수의 순서는 바꾸지 않음). `xq_dec_key()`가 떼어냅니다.
+
+엔진 함수(모든 방언, `decimal_sql.zig`): `xq_dec(x [, p, s])`, `xq_dec_key(x [, p, s])`, `xq_dec_valid(k [, p, s])`, `xq_dec_text(x [, s])`, `xq_dec_add`/`sub`/`mul`/`div`/`mod`/`div_trunc`, `xq_dec_neg`/`abs`/`ceil`/`floor`/`sign`/`trim_scale`, `xq_dec_round`/`trunc(x [, s])`, `xq_dec_scale`/`min_scale`, `xq_dec_int2`/`int4`/`int8`/`float4`/`float8`/`number`, 집계·윈도우 `xq_dec_sum`/`xq_dec_avg`. 인자는 키, 정수, 실수(15자리), 텍스트(`numeric_in()`)이고, 결과와 오류는 PostgreSQL의 것입니다. sqlite3에서 numeric 열에 쓰려면 키를 넘깁니다(`INSERT INTO t VALUES (xq_dec_key('1.50'))`). 결과는 `tools/ext/abi-core.sql`에 기록되어 있습니다.
 
 시퀀스 함수는 `catalog/sequence.zig`과 같은 문장을 같은 표(`main.xq_sequence`)에 sqlite3 연결 자신에서 돌립니다. 그래서 한 엔진이 준 값은 다른 엔진이 다시 주지 않고, 오류 문구(`relation "x" does not exist`, `nextval: reached maximum value of sequence ...`)도 같습니다. `currval()`과 `lastval()`은 xqlite처럼 연결마다입니다. MariaDB의 `LASTVAL(seq)`(한정 이름 `xq_mariadb_lastval`)는 NULL을 돌려주고, SQL Server의 `NEXT VALUE FOR`(`xq_mssql_xq_tsql_next_value`)와 identity의 `nextval()`은 시퀀스만 움직입니다(`SCOPE_IDENTITY()`는 xqlite 세션의 것).
 
@@ -193,7 +207,7 @@ C API 테스트(`zig build test-capi`)는 확장을 libxqlite3에 올려(`test_b
 ## 한계
 
 - 엔진의 테이블 값 함수는 없습니다(위).
-- xqlite의 SQLite 방언은 방언의 collation과 평범한 이름의 시퀀스 함수를 그 방언에서만 찾습니다(`dialect.findCollation()`, `Hooks.functions`). 그래서 jsonb·interval·배열로 정렬하는 뷰나 `nextval()` DEFAULT는 xqlite의 SQLite 방언 연결에서는 읽히지 않는데, 확장을 올린 sqlite3에서는 읽힙니다. 엔진은 바꾸지 않았습니다(SQLite 방언의 동작이 그대로이도록).
+- xqlite의 SQLite 방언은 방언의 collation과 평범한 이름의 시퀀스 함수를 그 방언에서만 찾습니다(`dialect.findCollation()`, `Hooks.functions`). 그래서 jsonb·배열로 정렬하는 뷰(interval은 예전 `TEXT` 열을 정렬하는 것만: interval BLOB의 비교·정렬은 엔진 함수와 BLOB 순서)나 `nextval()` DEFAULT는 xqlite의 SQLite 방언 연결에서는 읽히지 않는데, 확장을 올린 sqlite3에서는 읽힙니다. 엔진은 바꾸지 않았습니다(SQLite 방언의 동작이 그대로이도록).
 - 세션에 기대는 함수의 기본값: `xq_coerce()`(MariaDB의 열 변환)는 새 세션의 `sql_mode`(엄격 모드)로 계산하고, 경고는 남지 않습니다. xqlite에서도 그 결과는 `sql_mode`에 따라 다르므로 STORED 열에는 맞지 않습니다.
 - 방언의 산술(0으로 나누기, 정수 범위)은 함수가 아니라 문장을 컴파일한 방언의 바이트코드라, sqlite3에서는 SQLite의 산술입니다(`1/0`은 NULL). 저장되는 식의 범위 검사는 CHECK라 sqlite3에서도 지켜집니다.
 - 오류의 SQLSTATE와 방언의 오류 번호는 sqlite3로 가지 않고 메시지만 갑니다. 메시지 안의 NUL은 sqlite3에서 거기서 끊깁니다.

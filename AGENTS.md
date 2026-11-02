@@ -42,6 +42,16 @@ zig-out/bin/xqt interop pg                             # 한 모듈만
 
 `-Ddialects=X`로 특정 구성만 직접 빌드하면 `zig-out/bin/xqlite`가 그 구성으로 바뀝니다. 그 뒤에는 `zig build && zig build tools`로 되돌립니다. `check-matrix`는 zig-out을 건드리지 않습니다.
 
+퍼저(`src/fuzz_tests.zig`)를 시드 여러 개로 돌릴 때는 ReleaseSafe로 한 번 빌드하고 병렬로 실행합니다. Debug로 하나씩 돌리면 몇 분이 걸리는 것이 시드 20개에 10초 안팎입니다.
+
+```sh
+zig build fuzz -Doptimize=ReleaseSafe -- ir_roundtrip 1 --events 1    # 빌드만
+F=$(ls -t .zig-cache/o/*/fuzz | head -1)
+for s in 1 2 3 4 5 6 7 8; do $F ir_roundtrip $s --events 3000 & done; wait
+```
+
+실패를 찾으면 같은 시드를 통합 전 커밋에서도 돌려 이번 변경 때문인지부터 가립니다.
+
 ### 2. 표준 단계 (작업을 마칠 때)
 
 ```sh

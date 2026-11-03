@@ -192,14 +192,14 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, ai
         // An INSERT of a single row fails at once: it runs without a
         // statement transaction.
         std.debug.assert(n_incr == 1);
-        if (dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx)) |z| {
-            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, 0, 0);
+        if (dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx, reg_data, ai_col)) |z| {
+            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, 0);
         } else {
             build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
         }
     } else {
         if (n_incr > 0 and !fk.is_deferred) main_mod.mayAbort(p);
-        const z = if (n_incr > 0) dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx) else null;
+        const z = if (n_incr > 0) dconstraint.foreignKey(p, .foreign_key, if (is_update) .update else .insert, fk, t, idx, reg_data, ai_col) else null;
         _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(fk.is_deferred), n_incr, 0, z);
     }
 
@@ -211,14 +211,13 @@ fn fkLookupParent(p: *Parse, i_db: usize, t: *Table, idx: ?*Index, fk: *FKey, ai
 /// held in the registers from `reg_base`, with its affinity and collation.
 fn exprTableRegister(p: *Parse, t: *Table, reg_base: i32, i_col: i16) Oom!*Expr {
     var e = try expr_mod.expr(p.arena, TK.REGISTER, null);
+    e.i_table = build.columnRegister(t, reg_base, i_col);
     if (i_col >= 0 and i_col != t.i_pkey) {
         const col = &t.cols[@intCast(i_col)];
-        e.i_table = reg_base + build.tableColumnToStorage(t, i_col) + 1;
         e.aff_expr = col.affinity;
         const coll = build.columnColl(col) orelse coll_mod.str_binary;
         e = try expr_mod.addCollateString(p, e, coll);
     } else {
-        e.i_table = reg_base;
         e.aff_expr = Aff.integer;
     }
     return e;
@@ -276,7 +275,7 @@ fn fkScanChildren(p: *Parse, src: *SrcList, t: *Table, idx: ?*Index, fk: *FKey, 
     resolve.resolveExprNames(&nc, where) catch {};
 
     if (p.n_err == 0) {
-        const z = if (n_incr > 0) dconstraint.foreignKey(p, .referenced, if (is_update) .update else .delete, fk, t, idx) else null;
+        const z = if (n_incr > 0) dconstraint.foreignKey(p, .referenced, if (is_update) .update else .delete, fk, t, idx, reg_data, ai_col) else null;
         const w = where_mod.whereBegin(p, src, where, null, null, null, .{}, 0);
         _ = aux.addOp4Str(v, OP.FkCounter, @intFromBool(fk.is_deferred), n_incr, 0, z);
         if (w) |wi| where_mod.whereEnd(wi);
@@ -322,7 +321,7 @@ fn fkDropTableImpl(p: *Parse, name: *SrcList, t: *Table) Oom!void {
     if (!db.flags.DeferFKs) {
         _ = aux.addOp2(v, OP.FkIfZero, 0, aux.currentAddr(v) + 2);
         if (dconstraint.foreignKeyUnknown(p)) |z| {
-            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, 0, 0);
+            build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, z, 0);
         } else {
             build.haltConstraint(p, RC.CONSTRAINT_FOREIGNKEY, OE.Abort, null, vi.P5_ConstraintFK);
         }

@@ -413,10 +413,18 @@ fn parseFormat(a: Allocator, fmt: []const u8) Allocator.Error![]Node {
 }
 
 fn fail(a: Allocator, diag: *Diag, state: *const [5]u8, comptime fmt: []const u8, args: anytype) Error {
+    return failFields(a, diag, state, null, null, fmt, args);
+}
+
+/// fail() with PostgreSQL's DETAIL and HINT.
+fn failFields(a: Allocator, diag: *Diag, state: *const [5]u8, detail: ?[]const u8, hint: ?[]const u8, comptime fmt: []const u8, args: anytype) Error {
     diag.state = state.*;
-    diag.msg = try std.fmt.allocPrint(a, fmt, args);
+    diag.fields = .{ .message = try std.fmt.allocPrint(a, fmt, args), .detail = detail, .hint = hint };
     return error.Failed;
 }
+
+/// The HINT of a field of a fixed width the input does not fill.
+const fm_hint = "If your source string is not fixed-width, try using the \"FM\" modifier.";
 
 // ============================================================ calendar
 
@@ -941,7 +949,7 @@ const Parser = struct {
         if (p.out.mode == .none) {
             p.out.mode = mode;
         } else if (p.out.mode != mode) {
-            return fail(p.a, p.diag, invalid_datetime_format, "invalid combination of date conventions", .{});
+            return failFields(p.a, p.diag, invalid_datetime_format, null, "Do not mix Gregorian and ISO week date conventions in a formatting template.", "invalid combination of date conventions", .{});
         }
     }
 
@@ -949,7 +957,7 @@ const Parser = struct {
     /// with the same value).
     fn setInt(p: *Parser, dest: *i32, value: i32, n: *const Node) Error!void {
         if (dest.* != 0 and dest.* != value)
-            return fail(p.a, p.diag, invalid_datetime_format, "conflicting values for \"{s}\" field in formatting string", .{n.key.name});
+            return failFields(p.a, p.diag, invalid_datetime_format, "This value contradicts a previous setting for the same field type.", null, "conflicting values for \"{s}\" field in formatting string", .{n.key.name});
         dest.* = value;
     }
 
@@ -977,17 +985,21 @@ const Parser = struct {
             value = strtol(p.in[init..]);
             p.s = init + value.used;
         } else {
-            if (copy.len < len)
-                return fail(p.a, p.diag, invalid_datetime_format, "source string too short for \"{s}\" formatting field", .{n.key.name});
+            if (copy.len < len) {
+                const detail = try std.fmt.allocPrint(p.a, "Field requires {d} characters, but only {d} remain.", .{ len, copy.len });
+                return failFields(p.a, p.diag, invalid_datetime_format, detail, fm_hint, "source string too short for \"{s}\" formatting field", .{n.key.name});
+            }
             value = strtol(copy);
-            if (value.used > 0 and value.used < len)
-                return fail(p.a, p.diag, invalid_datetime_format, "invalid value \"{s}\" for \"{s}\"", .{ copy, n.key.name });
+            if (value.used > 0 and value.used < len) {
+                const detail = try std.fmt.allocPrint(p.a, "Field requires {d} characters, but only {d} could be parsed.", .{ len, value.used });
+                return failFields(p.a, p.diag, invalid_datetime_format, detail, fm_hint, "invalid value \"{s}\" for \"{s}\"", .{ copy, n.key.name });
+            }
             p.s += value.used;
         }
         if (p.s == init)
-            return fail(p.a, p.diag, invalid_datetime_format, "invalid value \"{s}\" for \"{s}\"", .{ copy, n.key.name });
+            return failFields(p.a, p.diag, invalid_datetime_format, "Value must be an integer.", null, "invalid value \"{s}\" for \"{s}\"", .{ copy, n.key.name });
         if (value.overflow or value.v < std.math.minInt(i32) or value.v > std.math.maxInt(i32))
-            return fail(p.a, p.diag, datetime_out_of_range, "value for \"{s}\" in source string is out of range", .{n.key.name});
+            return failFields(p.a, p.diag, datetime_out_of_range, "Value must be in the range -2147483648 to 2147483647.", null, "value for \"{s}\" in source string is out of range", .{n.key.name});
         if (dest) |d| try p.setInt(d, @intCast(value.v), n);
         return p.s - init;
     }
@@ -1008,7 +1020,7 @@ const Parser = struct {
         }
         var end: usize = 0;
         while (end < rest.len and !isSpace(rest[end])) end += 1;
-        return fail(p.a, p.diag, invalid_datetime_format, "invalid value \"{s}\" for \"{s}\"", .{ rest[0..end], n.key.name });
+        return failFields(p.a, p.diag, invalid_datetime_format, "The given value did not match any of the allowed values for this field.", null, "invalid value \"{s}\" for \"{s}\"", .{ rest[0..end], n.key.name });
     }
 
     /// The sign of TZH and OF: a sign, or a space, or a minus taken
@@ -1347,7 +1359,7 @@ fn doToTimestamp(a: Allocator, input: []const u8, fmt: Template, diag: *Diag) Er
 
     if (f.clock12) {
         if (tm.hour < 1 or tm.hour > 12)
-            return fail(a, diag, invalid_datetime_format, "hour \"{d}\" is invalid for the 12-hour clock", .{tm.hour});
+            return failFields(a, diag, invalid_datetime_format, null, "Use the 24-hour clock, or give an hour between 1 and 12.", "hour \"{d}\" is invalid for the 12-hour clock", .{tm.hour});
         if (f.pm != 0 and tm.hour < 12) {
             tm.hour += 12;
         } else if (f.pm == 0 and tm.hour == 12) tm.hour = 0;
@@ -1557,8 +1569,8 @@ fn expectChar(us: i64, tz: bool, fmt: []const u8, want: []const u8) !void {
     const t = try parse(testing.allocator, fmt);
     defer t.deinit(testing.allocator);
     const got = timestampToChar(testing.allocator, us, tz, t, &diag) catch |e| {
-        std.debug.print("to_char({s}): {s}\n", .{ fmt, diag.msg });
-        testing.allocator.free(diag.msg);
+        std.debug.print("to_char({s}): {s}\n", .{ fmt, diag.fields.message });
+        testing.allocator.free(diag.fields.message);
         return e;
     };
     defer testing.allocator.free(got);
@@ -1570,8 +1582,8 @@ fn expectIv(iv: ivl.Interval, fmt: []const u8, want: []const u8) !void {
     const t = try parse(testing.allocator, fmt);
     defer t.deinit(testing.allocator);
     const got = intervalToChar(testing.allocator, iv, t, &diag) catch |e| {
-        std.debug.print("to_char({s}): {s}\n", .{ fmt, diag.msg });
-        testing.allocator.free(diag.msg);
+        std.debug.print("to_char({s}): {s}\n", .{ fmt, diag.fields.message });
+        testing.allocator.free(diag.fields.message);
         return e;
     };
     defer testing.allocator.free(got);
@@ -1583,8 +1595,8 @@ fn expectTs(input: []const u8, fmt: []const u8, want: i64) !void {
     const t = try parse(testing.allocator, fmt);
     defer t.deinit(testing.allocator);
     const got = toTimestamp(testing.allocator, input, t, &diag) catch |e| {
-        std.debug.print("to_timestamp({s}, {s}): {s}\n", .{ input, fmt, diag.msg });
-        testing.allocator.free(diag.msg);
+        std.debug.print("to_timestamp({s}, {s}): {s}\n", .{ input, fmt, diag.fields.message });
+        testing.allocator.free(diag.fields.message);
         return e;
     };
     try testing.expectEqual(want, got);
@@ -1595,8 +1607,8 @@ fn expectDate(input: []const u8, fmt: []const u8, y: i64, m: i64, d: i64) !void 
     const t = try parse(testing.allocator, fmt);
     defer t.deinit(testing.allocator);
     const got = toDate(testing.allocator, input, t, &diag) catch |e| {
-        std.debug.print("to_date({s}, {s}): {s}\n", .{ input, fmt, diag.msg });
-        testing.allocator.free(diag.msg);
+        std.debug.print("to_date({s}, {s}): {s}\n", .{ input, fmt, diag.fields.message });
+        testing.allocator.free(diag.fields.message);
         return e;
     };
     try testing.expectEqual(calendar.daysFromCivil(y, m, d), got);
@@ -1608,15 +1620,18 @@ fn expectFail(f: Fn, input: []const u8, fmt: []const u8, state: *const [5]u8, ms
     var diag: Diag = .{};
     const t = try parse(testing.allocator, fmt);
     defer t.deinit(testing.allocator);
+    // The message, its DETAIL and HINT, in the call's memory.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const r: Error!void = switch (f) {
-        .ts => if (toTimestamp(testing.allocator, input, t, &diag)) |_| {} else |e| e,
-        .date => if (toDate(testing.allocator, input, t, &diag)) |_| {} else |e| e,
-        .char => if (timestampToChar(testing.allocator, 0, false, t, &diag)) |s| testing.allocator.free(s) else |e| e,
-        .iv => if (intervalToChar(testing.allocator, .{ .months = 1 }, t, &diag)) |s| testing.allocator.free(s) else |e| e,
+        .ts => if (toTimestamp(a, input, t, &diag)) |_| {} else |e| e,
+        .date => if (toDate(a, input, t, &diag)) |_| {} else |e| e,
+        .char => if (timestampToChar(a, 0, false, t, &diag)) |_| {} else |e| e,
+        .iv => if (intervalToChar(a, .{ .months = 1 }, t, &diag)) |_| {} else |e| e,
     };
     try testing.expectError(error.Failed, r);
-    defer testing.allocator.free(diag.msg);
-    try testing.expectEqualStrings(msg, diag.msg);
+    try testing.expectEqualStrings(msg, diag.fields.message);
     try testing.expectEqualStrings(state, &diag.state);
 }
 

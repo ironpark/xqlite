@@ -47,6 +47,7 @@ pub const Conn = struct {
             .offset = if (off >= 0) @intCast(off) else null,
             .sqlstate = if (state) |st| st.sqlstate else null,
             .dialect_number = if (state) |st| if (st.number != 0) st.number else null else null,
+            .fields_at = if (state) |st| st.fields else .{},
         };
     }
 

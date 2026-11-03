@@ -260,6 +260,9 @@ pub const ErrorInfo = struct {
     /// more in lines of PostgreSQL's fields, "\nDETAIL:  ...",
     /// "\nHINT:  ...", "\nCONTEXT:  ..." (fields()).
     message: [:0]const u8,
+    /// Where those lines start in `message`, as the engine recorded them
+    /// where it wrote them (fields()); none if it has none.
+    fields_at: FieldsAt = .{},
     /// Byte offset in the SQL text of the token that caused the error
     /// (sqlite3_error_offset()), if known.
     offset: ?usize,
@@ -272,14 +275,22 @@ pub const ErrorInfo = struct {
     /// one: MySQL's 1146, SQL Server's 208, Oracle's 942 (ORA-00942).
     dialect_number: ?u32 = null,
 
-    /// The fields of an error message: the message itself, and its
-    /// DETAIL, HINT and CONTEXT if it has them (PostgreSQL's
-    /// ErrorResponse fields D, H and W).
+    /// The fields of an error message: the message without their lines,
+    /// and its DETAIL, HINT and CONTEXT if it has them (PostgreSQL's
+    /// ErrorResponse fields M, D, H and W). Slices of the message.
     pub const Fields = @import("../sql/util.zig").ErrorFields;
+    pub const FieldsAt = @import("../sql/sqlite_int.zig").ErrorState.FieldsAt;
 
-    /// The fields of `message` (an ErrorInfo's, or one copied from it).
-    pub fn fields(message: []const u8) Fields {
-        return @import("../sql/util.zig").errorFields(message);
+    /// The fields of the message, taken apart at `fields_at` (not by its
+    /// text: a value it quotes cannot pass for a field).
+    pub fn fields(e: *const ErrorInfo) Fields {
+        return splitFields(e.message, e.fields_at);
+    }
+
+    /// The fields of `message` (an ErrorInfo's, or a copy of it) at the
+    /// offsets `at` (its `fields_at`).
+    pub fn splitFields(message: []const u8, at: FieldsAt) Fields {
+        return @import("../sql/util.zig").splitFields(message, at);
     }
 };
 

@@ -131,30 +131,14 @@ pub fn opHalt(e: *Exec, op: *Op) Error!Flow {
 
 /// The error of a constraint in the words of the dialect the statement
 /// was compiled in (P5_ConstraintDialect): P4, with the values of the
-/// key at dialect.value_mark.
+/// key or the row at dialect.value_mark (constraint.render()).
 fn dialectConstraintError(e: *Exec, op: *const Op) Error!void {
     @branchHint(.cold);
     const v = e.v;
     const d = constraint.decode(std.mem.span(op.p4.z));
-    const n: usize = op.p5 >> 8;
-    const mark = std.mem.indexOfScalar(u8, d.msg, dialect.value_mark) orelse
-        return aux.vdbeErrorState(v, d.state, "{s}", .{d.msg});
-    var w: std.Io.Writer.Allocating = .init(e.db.gpa);
-    defer w.deinit();
-    const sep = dialect.spec(v.xq_lang.dialect).hooks.constraint.value_separator;
-    w.writer.writeAll(d.msg[0..mark]) catch return error.OutOfMemory;
-    for (0..n) |i| {
-        if (i > 0) w.writer.writeAll(sep) catch return error.OutOfMemory;
-        const r = e.reg(op.p3 + @as(i32, @intCast(i)));
-        if (r.flags.Null) {
-            w.writer.writeAll("NULL") catch return error.OutOfMemory;
-        } else {
-            const z = try mem.valueText(r, ENC.UTF8);
-            w.writer.writeAll(if (z) |s| std.mem.span(s) else "") catch return error.OutOfMemory;
-        }
-    }
-    w.writer.writeAll(d.msg[mark + 1 ..]) catch return error.OutOfMemory;
-    aux.vdbeErrorState(v, d.state, "{s}", .{w.written()});
+    const msg, const state = try constraint.render(e.db.gpa, v.xq_lang.dialect, d, e);
+    defer e.db.gpa.free(msg);
+    aux.vdbeErrorState(v, state, "{s}", .{msg});
 }
 
 pub fn opOnce(e: *Exec, op: *Op) Flow {
@@ -303,17 +287,42 @@ pub fn opParam(e: *Exec, op: *Op) Flow {
     return .next;
 }
 
-pub fn opFkCounter(e: *Exec, op: *Op) Flow {
-    // xqlite: P4 is the dialect's error of the violation counted.
-    if (op.p4type == .z) e.v.xq_fk_error = op.p4.z;
-    if (op.p1 != 0) {
-        e.db.n_deferred_cons += op.p2;
-    } else if (e.db.flags.DeferFKs) {
-        e.db.n_deferred_imm_cons += op.p2;
-    } else {
-        e.v.n_fk_constraint += op.p2;
-    }
+pub fn opFkCounter(e: *Exec, op: *Op) Error!Flow {
+    const counter: *i64 = if (op.p1 != 0)
+        &e.db.n_deferred_cons
+    else if (e.db.flags.DeferFKs)
+        &e.db.n_deferred_imm_cons
+    else
+        &e.v.n_fk_constraint;
+    // xqlite: P4 is the dialect's error of the violation counted, with
+    // the values of its key now (Vdbe.xq_fk_owned).
+    if (op.p4type == .z) try fkCounted(e, op, counter.*);
+    counter.* += op.p2;
     return .next;
+}
+
+/// Make P4 of OP_FkCounter `op` the error of the foreign key, written
+/// with the values of the registers it lists if it lists any
+/// (constraint.render()). Only for the violation that makes the count
+/// (`count` before it) not zero, or the first of the statement: while
+/// the count is not zero, that violation is the error, as PostgreSQL
+/// reports the first row that fails.
+fn fkCounted(e: *Exec, op: *const Op, count: i64) error{OutOfMemory}!void {
+    const v = e.v;
+    if (op.p2 <= 0 or (count != 0 and v.xq_fk_error != null)) return;
+    const z = std.mem.span(op.p4.z);
+    const d = constraint.decode(z);
+    if (d.values.len == 0) {
+        v.xq_fk_error = op.p4.z;
+        return;
+    }
+    const gpa = e.db.gpa;
+    const msg, const state = try constraint.render(gpa, v.xq_lang.dialect, d, e);
+    defer gpa.free(msg);
+    const owned = try constraint.encodeError(gpa, state, msg);
+    if (v.xq_fk_owned) |old| gpa.free(old);
+    v.xq_fk_owned = owned;
+    v.xq_fk_error = owned.ptr;
 }
 
 pub fn opFkIfZero(e: *Exec, op: *Op) Flow {

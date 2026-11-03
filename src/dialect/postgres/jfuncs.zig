@@ -233,16 +233,12 @@ const Call = struct {
                 return null;
             }
             // PostgreSQL's DETAIL and CONTEXT after the message.
-            const report = json.errorReport(c.a(), t, jsonb) catch {
-                c.fail(error.OutOfMemory);
-                return null;
-            };
             const msg = if (e == error.UnicodeEscape) "unsupported Unicode escape sequence" else "invalid input syntax for type json";
-            const full = std.mem.concat(c.a(), u8, &.{ msg, report }) catch {
+            const report = json.errorReport(c.a(), t, jsonb, msg) catch {
                 c.fail(error.OutOfMemory);
                 return null;
             };
-            api.resultErrorState(c.ctx, if (e == error.UnicodeEscape) .of("22P05") else .of("22P02"), full);
+            api.resultErrorFields(c.ctx, if (e == error.UnicodeEscape) .of("22P05") else .of("22P02"), report);
             return null;
         };
         return v;
@@ -292,7 +288,14 @@ const Call = struct {
         return json.parseTextArray(c.a(), t) catch |e| {
             if (e == error.OutOfMemory) {
                 api.resultErrorNomem(c.ctx);
-            } else c.errFmt("22P02", "malformed array literal: \"{s}\"", .{t});
+            } else {
+                // PostgreSQL's DETAIL: of the array's input, which
+                // reads more than parseTextArray().
+                const array = @import("array.zig");
+                var detail: ?[]const u8 = null;
+                _ = array.parseWith(c.a(), t, false, &detail) catch {};
+                array.malformedError(c.ctx, c.a(), t, detail);
+            }
             return null;
         };
     }
@@ -894,7 +897,7 @@ fn setPath(c: *Call, v: Value, path: []const ?[]const u8, level: usize, new: Val
                             continue;
                         },
                         .insert_before, .insert_after => {
-                            c.errFmt("22023", "cannot replace existing key", .{});
+                            api.resultErrorFields(c.ctx, .of("22023"), .{ .message = "cannot replace existing key", .hint = "Try using the function jsonb_set to replace key value." });
                             return error.Reported;
                         },
                     };
@@ -1001,7 +1004,11 @@ fn setLaxFunc(c: *Call, argv: []*Mem) void {
     const create = argv.len < 4 or api.valueInt64(argv[3]) != 0;
     if (isNull(argv[2])) {
         const how = if (argv.len == 5) (c.text(argv[4]) orelse return) else "use_json_null";
-        if (std.mem.eql(u8, how, "raise_exception")) return api.resultErrorState(c.ctx, .of("22004"), "JSON value must not be null");
+        if (std.mem.eql(u8, how, "raise_exception")) return api.resultErrorFields(c.ctx, .of("22004"), .{
+            .message = "JSON value must not be null",
+            .detail = "Exception was raised because null_value_treatment is \"raise_exception\".",
+            .hint = "To avoid, either change the null_value_treatment argument or ensure that an SQL NULL is not passed.",
+        });
         if (std.mem.eql(u8, how, "return_target")) return c.result(x, true);
         if (std.mem.eql(u8, how, "delete_key")) return runSet(c, x, path, json.null_value, .delete, false);
         if (!std.mem.eql(u8, how, "use_json_null")) return api.resultErrorState(c.ctx, .of("22023"), "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"");
@@ -1217,7 +1224,7 @@ const BuildOpts = struct { jsonb: bool, absent_on_null: bool = false, unique: bo
 /// json_build_object(k, v, ...): `{"a" : 1, "b" : 2}` (jsonb: normalized).
 fn buildObject(c: *Call, argv: []*Mem, o: BuildOpts) void {
     const a = c.a();
-    if (argv.len % 2 != 0) return api.resultErrorState(c.ctx, .of("22023"), "argument list must have even number of elements");
+    if (argv.len % 2 != 0) return api.resultErrorFields(c.ctx, .of("22023"), .{ .message = "argument list must have even number of elements", .hint = "The arguments of json_build_object() must consist of alternating keys and values." });
     var pairs: std.ArrayList(json.Pair) = .empty;
     var i: usize = 0;
     while (i < argv.len) : (i += 2) {

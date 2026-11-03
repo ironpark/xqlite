@@ -413,7 +413,7 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 
 ## 방언 차등 테스트
 
-`xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record] [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다.
+`xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record] [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. PostgreSQL은 오류 아래의 `DETAIL:`, `HINT:`, `CONTEXT:` 줄도 비교하고, 위치를 가리키는 줄(psql의 `LINE N:`과 `^`, 셸의 `^--- error here`)만 뺍니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다.
 
 서버 쪽 출력은 세 가지 중 하나에서 옵니다.
 

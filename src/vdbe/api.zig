@@ -717,6 +717,31 @@ pub fn resultErrorState(ctx: *Context, state: int.ErrorState, msg: []const u8) v
     ctx.err_state = state;
 }
 
+/// resultErrorState() of an error with PostgreSQL's fields (DETAIL,
+/// HINT, CONTEXT): the message is `f` with their lines (as
+/// sqlite3_result_error() of the extension carries them), the ErrorState
+/// says where they start (util.detail_mark).
+/// A message with a NUL has none: PostgreSQL's text has no NUL, and the
+/// C string of sqlite3_errmsg() ends there.
+/// The text is written into the result as it is formatted.
+pub fn resultErrorFields(ctx: *Context, state: int.ErrorState, f: @import("../sql/util.zig").ErrorFields) void {
+    const util = @import("../sql/util.zig");
+    if (std.mem.indexOfScalar(u8, f.message, 0) != null) return resultErrorState(ctx, state, f.message);
+    ctx.is_error = RC.ERROR;
+    ctx.err_state = state.withFields(util.fieldsAt(f));
+    const out = ctx.out;
+    const n = std.fmt.count("{f}", .{f});
+    const limit: i64 = if (out.db) |db| db.limit(.length) else mem.max_length;
+    if (n > limit) return mem.setNull(out);
+    mem.clearAndResize(out, @max(n + 1, 32)) catch return;
+    const z = out.z.?[0 .. n + 1];
+    _ = std.fmt.bufPrint(z[0..n], "{f}", .{f}) catch unreachable;
+    z[n] = 0;
+    out.n = @intCast(n);
+    out.flags = .{ .Str = true, .Term = true };
+    out.enc = ENC.UTF8;
+}
+
 /// resultError() of the error the connection `db` holds (one a statement
 /// the function ran left), with its ErrorState.
 pub fn resultErrorFrom(ctx: *Context, db: *const int.Sqlite3) void {

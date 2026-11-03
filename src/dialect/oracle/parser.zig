@@ -97,7 +97,7 @@ fn noAlias(word: []const u8) bool {
 
 /// The error of a statement that does not lex (Parser.init()).
 pub const LexError = struct {
-    msg: []const u8 = "",
+    fields: @import("../../sql/util.zig").ErrorFields = .{ .message = "" },
     pos: usize = 0,
 };
 
@@ -206,7 +206,7 @@ pub const Parser = struct {
             const t = l.next() catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.LexFailed => {
-                    if (lex_error) |e| e.* = .{ .msg = l.err_msg, .pos = l.err_pos };
+                    if (lex_error) |e| e.* = .{ .fields = .{ .message = l.err_msg }, .pos = l.err_pos };
                     return error.ParseFailed;
                 },
             };

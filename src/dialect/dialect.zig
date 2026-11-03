@@ -181,6 +181,14 @@ pub const Constraint = struct {
     foreign_key: ?Failure = null,
     /// Between the values of a key put at `value_mark`.
     value_separator: []const u8 = ", ",
+    /// Write value `m` of a key or a row put at `value_mark`, of type `t`
+    /// in the catalog (null: not known), as the dialect shows it, into
+    /// `out` (`gpa` for memory while it does); false, writing nothing, if
+    /// the dialect does not write it so: the field of the message that
+    /// would show it (a DETAIL) is left out (constraint.render()). `row`:
+    /// a value of the whole row (Violation.has_row). Null: SQLite's text
+    /// of each value.
+    value_text: ?*const fn (gpa: std.mem.Allocator, out: *std.Io.Writer, t: ?@import("../sql/types.zig").Type, m: *@import("../vdbe/vdbe_int.zig").Mem, row: bool) error{ OutOfMemory, WriteFailed }!bool = null,
 };
 
 /// Where the values of the duplicate key go in a message of
@@ -212,12 +220,14 @@ pub const Violation = struct {
     /// A foreign key: which of the table's, from 1 in the order of CREATE
     /// TABLE (MariaDB's t_ibfk_<n>).
     ordinal: u32 = 0,
-    /// The message may put the key's values at value_mark.
+    /// The message may put the key's values at value_mark (of the
+    /// columns of a key; a foreign key's: the child's columns, or the
+    /// parent's of `referenced`).
+    /// Set by constraint.zig, from the values the program holds.
     has_value: bool = false,
-    /// With has_value: the type of each column of the key, as the
-    /// catalog has it (null: not known), by which the dialect may tell
-    /// whether the values print as it shows them.
-    value_types: []const ?@import("../sql/types.zig").Type = &.{},
+    /// The message may put the values of the whole row (of NOT NULL and
+    /// CHECK) at value_mark; set as has_value.
+    has_row: bool = false,
 
     pub const Kind = enum {
         not_null,

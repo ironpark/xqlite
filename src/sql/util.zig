@@ -15,51 +15,105 @@ const RC = int.RC;
 /// xqlite: an error message says more after its first line in lines of
 /// PostgreSQL's fields, as psql prints them: "\nDETAIL:  ...",
 /// "\nHINT:  ...", "\nCONTEXT:  ..." (in that order, each at most once).
-/// The message (sqlite3_errmsg()) keeps them, so the shell shows them;
-/// errorFields() takes them apart (the wire protocol's ErrorResponse).
+/// The message (sqlite3_errmsg()) keeps them, so the shell and sqlite3
+/// with the extension show them. Where they start travels with the
+/// message in its ErrorState (ErrorState.fields), set by the one that
+/// writes them (joinFields(), errorFieldsAt(), api.resultErrorFields()):
+/// the fields are taken apart by those offsets (splitFields(): the wire
+/// protocol's ErrorResponse, ErrorInfo), never by reading the text, so a
+/// value quoted in a message cannot pass for a field.
 pub const detail_mark = "\nDETAIL:  ";
 pub const hint_mark = "\nHINT:  ";
 pub const context_mark = "\nCONTEXT:  ";
 
-/// The fields of an error message (see detail_mark).
+const marks = [3][]const u8{ detail_mark, hint_mark, context_mark };
+
+/// The fields of an error message (see detail_mark). format() writes
+/// the message with its fields' lines.
 pub const ErrorFields = struct {
     message: []const u8,
     detail: ?[]const u8 = null,
     hint: ?[]const u8 = null,
     context: ?[]const u8 = null,
+
+    fn values(f: ErrorFields) [3]?[]const u8 {
+        return .{ f.detail, f.hint, f.context };
+    }
+
+    pub fn format(f: ErrorFields, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll(f.message);
+        for (f.values(), marks) |v, mark| if (v) |t| {
+            try w.writeAll(mark);
+            try w.writeAll(t);
+        };
+    }
 };
 
-/// Take error message `msg` apart into its fields (detail_mark).
-pub fn errorFields(msg: []const u8) ErrorFields {
-    var f: ErrorFields = .{ .message = msg };
-    var rest = msg;
-    // From the last field back: each is the text after its mark.
-    if (std.mem.lastIndexOf(u8, rest, context_mark)) |i| {
-        f.context = rest[i + context_mark.len ..];
-        rest = rest[0..i];
-    }
-    if (std.mem.lastIndexOf(u8, rest, hint_mark)) |i| {
-        f.hint = rest[i + hint_mark.len ..];
-        rest = rest[0..i];
-    }
-    if (std.mem.lastIndexOf(u8, rest, detail_mark)) |i| {
-        f.detail = rest[i + detail_mark.len ..];
-        rest = rest[0..i];
-    }
-    f.message = rest;
-    return f;
+/// Where the fields of `f` start in its text (ErrorFields.format()).
+/// None for a message without fields, or an empty one (offset 0 is none).
+pub fn fieldsAt(f: ErrorFields) int.ErrorState.FieldsAt {
+    var at: [3]u32 = .{ 0, 0, 0 };
+    if (f.message.len == 0) return .{};
+    var n: usize = f.message.len;
+    for (f.values(), marks, &at) |v, mark, *o| if (v) |t| {
+        o.* = std.math.cast(u32, n) orelse return .{};
+        n += mark.len + t.len;
+    };
+    return .{ .detail = at[0], .hint = at[1], .context = at[2] };
 }
 
-test errorFields {
-    const f = errorFields("invalid input syntax for type json\nDETAIL:  Token \"bad\" is invalid.\nCONTEXT:  JSON data, line 1: {bad");
+/// The text of `f` (ErrorFields.format()) in `a`, and its ErrorState
+/// `state` with the fields' offsets.
+pub fn joinFields(a: std.mem.Allocator, state: int.ErrorState, f: ErrorFields) error{OutOfMemory}!struct { [:0]u8, int.ErrorState } {
+    return .{ try std.fmt.allocPrintSentinel(a, "{f}", .{f}, 0), state.withFields(fieldsAt(f)) };
+}
+
+/// Take error message `msg` apart into its fields at the offsets `at`
+/// (its ErrorState's). Offsets that do not fall on the lines of their
+/// fields, in order (a message changed after they were set), give none.
+pub fn splitFields(msg: []const u8, at: int.ErrorState.FieldsAt) ErrorFields {
+    if (!at.any()) return .{ .message = msg };
+    const offs = [3]u32{ at.detail, at.hint, at.context };
+    var vals: [3]?[]const u8 = .{ null, null, null };
+    var end = msg.len;
+    var i: usize = marks.len;
+    while (i > 0) {
+        i -= 1;
+        const o = offs[i];
+        if (o == 0) continue;
+        if (o >= end or !std.mem.startsWith(u8, msg[o..end], marks[i])) return .{ .message = msg };
+        vals[i] = msg[o + marks[i].len .. end];
+        end = o;
+    }
+    return .{ .message = msg[0..end], .detail = vals[0], .hint = vals[1], .context = vals[2] };
+}
+
+test splitFields {
+    const a = std.testing.allocator;
+    const text, const st = try joinFields(a, .of("22P02"), .{ .message = "invalid input syntax for type json", .detail = "Token \"bad\" is invalid.", .context = "JSON data, line 1: {bad" });
+    defer a.free(text);
+    try std.testing.expectEqualStrings("invalid input syntax for type json\nDETAIL:  Token \"bad\" is invalid.\nCONTEXT:  JSON data, line 1: {bad", text);
+    const f = splitFields(text, st.fields);
     try std.testing.expectEqualStrings("invalid input syntax for type json", f.message);
     try std.testing.expectEqualStrings("Token \"bad\" is invalid.", f.detail.?);
     try std.testing.expect(f.hint == null);
     try std.testing.expectEqualStrings("JSON data, line 1: {bad", f.context.?);
-    const g = errorFields("function f() does not exist\nHINT:  No function matches.");
-    try std.testing.expectEqualStrings("function f() does not exist", g.message);
-    try std.testing.expectEqualStrings("No function matches.", g.hint.?);
-    try std.testing.expectEqualStrings("no such table: t", errorFields("no such table: t").message);
+    // A message that quotes the text of a field has none.
+    const quoted = "invalid input syntax for type integer: \"1\nHINT:  x\"";
+    try std.testing.expectEqualStrings(quoted, splitFields(quoted, .{}).message);
+    try std.testing.expect(splitFields(quoted, .{}).hint == null);
+    // A field whose value quotes another's mark stays whole.
+    const t2, const st2 = try joinFields(a, .of("23505"), .{ .message = "m", .detail = "Key (a)=(x\nHINT:  y) already exists." });
+    defer a.free(t2);
+    const g = splitFields(t2, st2.fields);
+    try std.testing.expectEqualStrings("m", g.message);
+    try std.testing.expectEqualStrings("Key (a)=(x\nHINT:  y) already exists.", g.detail.?);
+    try std.testing.expect(g.hint == null);
+    // Offsets that do not fall on their lines give no fields.
+    try std.testing.expectEqualStrings("no such table: t", splitFields("no such table: t", .{ .hint = 3 }).message);
+    const h = splitFields("function f() does not exist\nHINT:  No function matches.", .{ .hint = 27 });
+    try std.testing.expectEqualStrings("function f() does not exist", h.message);
+    try std.testing.expectEqualStrings("No function matches.", h.hint.?);
 }
 
 /// Port of sqlite3ErrorMsg(): record a compile error in `p`. The format
@@ -78,6 +132,22 @@ pub fn errorMsgAt(p: *Parse, z: ?[*]const u8, comptime fmt: []const u8, args: an
 /// The error just recorded in `p` (by errorMsg()) is `state`.
 pub fn errorIs(p: *Parse, state: int.ErrorState) void {
     if (p.err_msg != null) p.err_state = state;
+}
+
+/// `errorMsgState` of an error with PostgreSQL's fields (detail_mark):
+/// the message `f` with their lines, their offsets in `state`.
+pub fn errorFieldsAt(p: *Parse, z: ?[*]const u8, state: int.ErrorState, f: ErrorFields) void {
+    errorMsgState(p, z, state.withFields(fieldsAt(f)), "{f}", .{f});
+}
+
+/// Make `f` the message of the error already recorded in `p` (a
+/// dialect's wording of it), which keeps its ErrorState but for the
+/// offsets of the fields, set with the text so that they cannot
+/// disagree.
+pub fn rewordError(p: *Parse, f: ErrorFields) error{OutOfMemory}!void {
+    const text, const st = try joinFields(p.arena, p.err_state orelse .of("XX000"), f);
+    p.err_msg = text;
+    if (p.err_state) |*s| s.fields = st.fields;
 }
 
 /// `errorMsgAt` of an error whose ErrorState is known (`state`): the

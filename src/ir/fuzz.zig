@@ -667,12 +667,7 @@ const Fuzz = struct {
             // untyped text computes (or reads no row). Only then: the
             // same error from a running statement is a difference.
             (!o.err.step and (std.mem.startsWith(u8, msg, "invalid input syntax for type ") or
-                std.mem.startsWith(u8, msg, "date/time field value out of range: "))) or
-            // A string literal met by a boolean (`'x' = b`, `'x' IN (b)`):
-            // PostgreSQL reads it while parsing, xqlite when it runs
-            // (xq_pg_bool(), only for a row that reaches it): a known gap
-            // (docs/postgres.md), not a difference of meaning.
-            std.mem.startsWith(u8, msg, "invalid input syntax for type boolean: ");
+                std.mem.startsWith(u8, msg, "date/time field value out of range: ")));
     }
 
     /// Whether text rendered in `d` is to mean in `e` what lowering means

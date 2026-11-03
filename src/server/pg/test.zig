@@ -249,13 +249,15 @@ const Client = struct {
         }
     }
 
-    /// " CODE message [@position]" of an ErrorResponse or NoticeResponse.
+    /// " CODE message [@position]" of an ErrorResponse or NoticeResponse,
+    /// then " D:detail", " H:hint", " W:context" if it has them.
     fn describeError(c: *Client, body: []const u8) !void {
         var rest = body;
         var code: []const u8 = "";
         var msg: []const u8 = "";
         var pos: []const u8 = "";
         var severity: []const u8 = "";
+        var fields: [3][]const u8 = .{ "", "", "" };
         while (rest.len > 0 and rest[0] != 0) {
             const k = rest[0];
             const v = std.mem.sliceTo(rest[1..], 0);
@@ -265,12 +267,16 @@ const Client = struct {
                 'M' => msg = v,
                 'P' => pos = v,
                 'V' => severity = v,
+                'D' => fields[0] = v,
+                'H' => fields[1] = v,
+                'W' => fields[2] = v,
                 else => {},
             }
         }
         if (!std.mem.eql(u8, severity, "ERROR")) try c.log.print(gpa, " {s}", .{severity});
         try c.log.print(gpa, " {s} {s}", .{ code, msg });
         if (pos.len > 0) try c.log.print(gpa, " @{s}", .{pos});
+        for (fields, "DHW") |f, k| if (f.len > 0) try c.log.print(gpa, " {c}:{s}", .{ k, f });
     }
 
     fn query(c: *Client, sql: []const u8) ![]const u8 {
@@ -402,7 +408,7 @@ test "pg: startup, simple queries, errors, transactions" {
     try testing.expectEqualStrings("T count:20\nD 3\nC SELECT 1\nZ I\n", try c.query("SELECT count(*) FROM fruit"));
     // The transaction states of ReadyForQuery.
     try testing.expectEqualStrings("C BEGIN\nC DELETE 1\nZ T\n", try c.query("BEGIN; DELETE FROM fruit WHERE id = 1"));
-    try testing.expectEqualStrings("E 23505 duplicate key value violates unique constraint \"fruit_pkey\"\nZ E\n", try c.query("INSERT INTO fruit (id) VALUES (2)"));
+    try testing.expectEqualStrings("E 23505 duplicate key value violates unique constraint \"fruit_pkey\" D:Key (id)=(2) already exists.\nZ E\n", try c.query("INSERT INTO fruit (id) VALUES (2)"));
     try testing.expectEqualStrings("E 25P02 current transaction is aborted, commands ignored until end of transaction block\nZ E\n", try c.query("SELECT 1"));
     try testing.expectEqualStrings("C ROLLBACK\nZ I\n", try c.query("COMMIT"));
     try testing.expectEqualStrings("N WARNING 25P01 there is no transaction in progress\nC COMMIT\nZ I\n", try c.query("COMMIT"));
@@ -410,6 +416,11 @@ test "pg: startup, simple queries, errors, transactions" {
     // SET has no result (the dialect runs set_config()); COPY is refused.
     try testing.expectEqualStrings("C SET\nT application_name:25\nD pgtest2\nC SHOW\nZ I\n", try c.query("SET application_name = 'pgtest2'; SHOW application_name"));
     try testing.expectEqualStrings("E 0A000 COPY is not supported by this server @1\nZ I\n", try c.query("COPY fruit TO STDOUT"));
+    // DETAIL, HINT and CONTEXT are fields of their own (D, H, W), cut
+    // where the engine wrote them: a quoted value is no field.
+    try testing.expectEqualStrings("E 22P02 invalid input syntax for type json @8 D:The input string ended unexpectedly. W:JSON data, line 1: {\nZ I\n", try c.query("SELECT '{'::jsonb"));
+    try testing.expectEqualStrings("E 42883 operator does not exist: boolean + integer @13 H:No operator matches the given name and argument types. You might need to add explicit type casts.\nZ I\n", try c.query("SELECT true + 1"));
+    try testing.expectEqualStrings("E 22P02 invalid input syntax for type integer: \"1\nHINT:  x\" @8\nZ I\n", try c.query("SELECT E'1\\nHINT:  x'::int"));
     try testing.expectEqualStrings("T t:25\nD character varying(10)\nC SELECT 1\nZ I\n", try c.query("SELECT pg_catalog.format_type(1043, 14) AS t"));
     try c.terminate();
 }

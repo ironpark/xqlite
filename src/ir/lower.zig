@@ -119,6 +119,13 @@ pub const Lowerer = struct {
         return error.Failed;
     }
 
+    /// failState() of an error with PostgreSQL's fields (DETAIL, HINT).
+    pub fn failFields(l: *Lowerer, pos: u32, state: int.ErrorState, f: @import("../sql/util.zig").ErrorFields) Error {
+        const z: ?[*]const u8 = if (pos < l.src.len) l.src.ptr + pos else null;
+        ir.stmt.errorFieldsAt(l.p, z, state, f);
+        return error.Failed;
+    }
+
     /// Fail if a builder left an error.
     fn check(l: *Lowerer) Error!void {
         if (l.p.n_err > 0) return error.Failed;
@@ -997,7 +1004,8 @@ pub const Lowerer = struct {
         return null;
     }
 
-    /// Fail on a value for a GENERATED ALWAYS identity column.
+    /// Fail on a value for a GENERATED ALWAYS identity column (a dialect
+    /// adds its fields: PostgreSQL's translateError()).
     fn checkAlways(l: *Lowerer, t: *int.Table, c: *const int.Column, pos: u32, is_update: bool) Error!void {
         const id = (try l.identityOf(t, c)) orelse return;
         if (!id.always) return;

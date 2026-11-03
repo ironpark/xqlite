@@ -193,8 +193,8 @@ pub const desc: repr.TypeRepr = .{
 /// what the collation xq_pg_interval reads).
 fn store(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     _ = t;
-    if (storage == .TEXT) return .{ .def = &datetime.store_interval_text };
-    return .{ .def = &ivinput.in_def, .consts = .{ ivinput.typmodOfDecl(decl), 0 }, .n_consts = 1 };
+    if (storage == .TEXT) return .of(.{ .def = &datetime.store_interval_text });
+    return .of(.{ .def = &ivinput.in_def, .consts = .{ ivinput.typmodOfDecl(decl), 0 }, .n_consts = 1 });
 }
 
 const datetime = @import("../datetime.zig");

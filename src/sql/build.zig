@@ -957,6 +957,14 @@ pub fn storageColumnToTable(t: *const Table, i_col_arg: i16) i16 {
     return i_col;
 }
 
+/// xqlite: the register of column `i_col` of `t` (-1: the rowid) in a
+/// row held in the registers from `reg_base` (its rowid, then its
+/// columns as stored): the INTEGER PRIMARY KEY's is the rowid's.
+pub fn columnRegister(t: *const Table, reg_base: i32, i_col: i16) i32 {
+    if (i_col < 0 or i_col == t.i_pkey) return reg_base;
+    return reg_base + 1 + tableColumnToStorage(t, i_col);
+}
+
 /// Port of sqlite3TableColumnToStorage(): VIRTUAL columns are stored
 /// after all the others.
 pub fn tableColumnToStorage(t: *const Table, i_col: i16) i16 {
@@ -2701,14 +2709,15 @@ pub fn haltConstraint(p: *Parse, err_code: i32, on_error: OE, msg: ?[]const u8, 
 }
 
 /// xqlite: haltConstraint() of the error of the dialect the statement is
-/// compiled in (`z`, from dialect/constraint.zig), with the `n_value`
-/// values of the key in the registers from `reg_value`.
-pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: [:0]const u8, reg_value: i32, n_value: usize) void {
+/// compiled in (`z`, from dialect/constraint.zig, which lists the
+/// registers of the values it shows): OP_Halt, or OP_HaltIfNull of
+/// register `reg_null` (0 for OP_Halt).
+pub fn haltDialectConstraint(p: *Parse, op: OP, err_code: i32, on_error: OE, z: [:0]const u8, reg_null: i32) void {
+    std.debug.assert(op == OP.HaltIfNull or reg_null == 0);
     const v = getVdbe(p) orelse return;
     if (on_error == OE.Abort) main_mod.mayAbort(p);
-    const n: u16 = if (n_value > 255 or op != OP.Halt) 0 else @intCast(n_value);
-    _ = aux.addOp4Str(v, op, err_code, on_error.int(), if (n > 0 or op != OP.Halt) reg_value else 0, z);
-    aux.changeP5(v, vi.P5_ConstraintDialect | n << 8);
+    _ = aux.addOp4Str(v, op, err_code, on_error.int(), reg_null, z);
+    aux.changeP5(v, vi.P5_ConstraintDialect);
 }
 
 /// Port of sqlite3UniqueConstraint(): halt for a UNIQUE or PRIMARY KEY
@@ -2720,8 +2729,8 @@ pub fn uniqueConstraint(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) void
 
 fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) Oom!void {
     const t = idx.table;
-    if (dconstraint.unique(p, idx, reg_key != 0)) |z| {
-        return haltDialectConstraint(p, OP.Halt, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, z, reg_key, idx.n_key_col);
+    if (dconstraint.unique(p, idx, reg_key)) |z| {
+        return haltDialectConstraint(p, OP.Halt, if (idx.isPrimaryKey()) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_UNIQUE, on_error, z, 0);
     }
     var msg: std.ArrayList(u8) = .empty;
     if (idx.col_expr != null) {
@@ -2740,8 +2749,8 @@ fn uniqueConstraintImpl(p: *Parse, on_error: OE, idx: *Index, reg_key: i32) Oom!
 /// Port of sqlite3RowidConstraint(): halt for a duplicate rowid, the one
 /// in register `reg_rowid` (0: not in a register).
 pub fn rowidConstraint(p: *Parse, on_error: OE, t: *Table, reg_rowid: i32) void {
-    if (dconstraint.rowid(p, t, reg_rowid != 0)) |z| {
-        return haltDialectConstraint(p, OP.Halt, if (t.i_pkey >= 0) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_ROWID, on_error, z, reg_rowid, 1);
+    if (dconstraint.rowid(p, t, reg_rowid)) |z| {
+        return haltDialectConstraint(p, OP.Halt, if (t.i_pkey >= 0) RC.CONSTRAINT_PRIMARYKEY else RC.CONSTRAINT_ROWID, on_error, z, 0);
     }
     const msg, const rc = if (t.i_pkey >= 0)
         .{ std.fmt.allocPrint(p.arena, "{s}.{s}", .{ t.name, t.cols[@intCast(t.i_pkey)].name() }) catch return oomFault(p), RC.CONSTRAINT_PRIMARYKEY }

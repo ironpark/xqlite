@@ -160,7 +160,7 @@ pub const desc: repr.TypeRepr = .{
 fn store(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     _ = t;
     _ = decl;
-    return .{ .def = if (storage == .TEXT) uuid_fns.store_text else uuid_fns.store };
+    return .of(.{ .def = if (storage == .TEXT) uuid_fns.store_text else uuid_fns.store });
 }
 
 const uuid_fns = @import("../uuid.zig");

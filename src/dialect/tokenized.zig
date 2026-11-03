@@ -20,7 +20,7 @@ pub fn run(comptime parser: type, comptime compile: anytype, comptime translateE
                 error.OutOfMemory => |e| return e,
                 error.ParseFailed => {
                     // A lexical error is a syntax error.
-                    ir.stmt.errorMsgState(p, sql.ptr + lex_error.pos, .of("42601"), "{s}", .{lex_error.msg});
+                    ir.stmt.errorFieldsAt(p, sql.ptr + lex_error.pos, .of("42601"), lex_error.fields);
                     p.tail = sql[sql.len..];
                     try translateError(p);
                     return error.ParseFailed;

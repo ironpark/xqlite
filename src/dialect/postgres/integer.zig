@@ -14,7 +14,7 @@
 //!    parse(), a real (a numeric's literal) rounded half away from zero
 //!    and a BLOB (a numeric's key) by decimal_sql.zig's xq_dec_int2() ...,
 //!    as numeric -> int does; a double precision or real by the cast
-//!    instead (Store.alt);
+//!    instead (Store.typed);
 //!  - `a # b` of integers: xq_pg_int_xor(a, b), an engine function, as
 //!    there is no opcode for it (the parser makes the call, overload.zig
 //!    checks its operands by operators.zig's table).
@@ -303,12 +303,12 @@ pub fn castOf(name: []const u8) ?Width {
 pub fn storeColumn(t: types.Type) ?typing.Store {
     const w = Width.of(t.logical) orelse return null;
     return .{
-        .def = switch (w) {
+        .typed = .{ .types = .initMany(&.{ .float4, .float8 }), .conv = .{ .def = castDef(w) } },
+        .needed = .{ .def = switch (w) {
             .int2 => &defs.store_int2,
             .int4 => &defs.store_int4,
             .int8 => &defs.store_int8,
-        },
-        .alt = .{ .types = .initMany(&.{ .float4, .float8 }), .def = castDef(w) },
+        } },
     };
 }
 

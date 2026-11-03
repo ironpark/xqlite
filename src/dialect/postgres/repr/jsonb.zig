@@ -94,7 +94,7 @@ pub const desc: repr.TypeRepr = .{
 fn store(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     _ = t;
     _ = decl;
-    return .{ .def = if (storage == .BLOB) &jfuncs.store_jsonb_bin else &jfuncs.store_jsonb_text };
+    return .of(.{ .def = if (storage == .BLOB) &jfuncs.store_jsonb_bin else &jfuncs.store_jsonb_text });
 }
 
 const jfuncs = @import("../jfuncs.zig");

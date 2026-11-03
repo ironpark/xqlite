@@ -67,10 +67,12 @@ fn storeColumn(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     // varchar(n), character(n): the spaces past n dropped (funcs.zig); a
     // numeric as its text.
     if ((t.logical == .varchar or t.logical == .char) and t.length != null) return .{
-        .def = if (t.logical == .char) &funcs.store_bpchar else &funcs.store_varchar,
-        .consts = .{ @intCast(@min(t.length.?, std.math.maxInt(i32))), 0 },
-        .n_consts = 1,
-        .alt = .{ .types = .initOne(.numeric), .def = @import("../decimal_sql.zig").def("xq_dec_text", 1) },
+        .typed = .{ .types = .initOne(.numeric), .conv = .{ .def = @import("../decimal_sql.zig").def("xq_dec_text", 1) } },
+        .needed = .{
+            .def = if (t.logical == .char) &funcs.store_bpchar else &funcs.store_varchar,
+            .consts = .{ @intCast(@min(t.length.?, std.math.maxInt(i32))), 0 },
+            .n_consts = 1,
+        },
     };
     return repr.storeColumn(t, decl, storage);
 }

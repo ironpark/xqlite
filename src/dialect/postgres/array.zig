@@ -240,6 +240,23 @@ const Parse = struct {
     out: std.ArrayList(?[]const u8) = .empty,
     x: Array = .{},
     seen: [max_dims]bool = @splat(false),
+    /// PostgreSQL's DETAIL of the error, if known (parseWith()).
+    detail: ?[]const u8 = null,
+    /// The text gave the dimensions ([1:2]=...).
+    dims_given: bool = false,
+
+    /// Malformed, with PostgreSQL's DETAIL.
+    fn bad(p: *Parse, detail: []const u8) error{Malformed} {
+        p.detail = detail;
+        return error.Malformed;
+    }
+
+    /// Malformed: the sub-arrays do not match (dimension_error).
+    fn dimensionError(p: *Parse) error{Malformed} {
+        return p.bad(if (p.dims_given) "Specified array dimensions do not match array contents." else "Multidimensional arrays must have sub-arrays with matching dimensions.");
+    }
+
+    const end_of_input = "Unexpected end of input.";
 
     fn ws(p: *Parse) void {
         while (p.i < p.z.len and isSpace(p.z[p.i])) p.i += 1;
@@ -269,27 +286,30 @@ const Parse = struct {
         }
         while (true) {
             p.ws();
-            const c = p.peek() orelse return error.Malformed;
+            const c = p.peek() orelse return p.bad(end_of_input);
+            const quoted = c == '"';
             if (c == '{') {
-                if (p.x.ndim != 0 and depth + 1 >= p.x.ndim) return error.Malformed;
+                if (p.x.ndim != 0 and depth + 1 >= p.x.ndim) return p.dimensionError();
                 try p.level(depth + 1);
                 if (p.x.ndim == 0) return error.Malformed;
             } else {
-                if (p.x.ndim == 0) p.x.ndim = @intCast(depth + 1) else if (p.x.ndim != depth + 1) return error.Malformed;
+                if (p.x.ndim == 0) p.x.ndim = @intCast(depth + 1) else if (p.x.ndim != depth + 1) return p.dimensionError();
                 try p.element();
             }
             n += 1;
             p.ws();
-            const d = p.peek() orelse return error.Malformed;
+            const d = p.peek() orelse return p.bad(end_of_input);
             p.i += 1;
             if (d == ',') continue;
             if (d == '}') break;
-            return error.Malformed;
+            // ReadArrayToken(): what may not follow an element.
+            if (d == '{') return p.bad("Unexpected \"{\" character.");
+            return p.bad(if (quoted) "Incorrectly quoted array element." else "Unexpected array element.");
         }
         if (!p.seen[depth]) {
             p.seen[depth] = true;
             p.x.dims[depth] = n;
-        } else if (p.x.dims[depth] != n) return error.Malformed;
+        } else if (p.x.dims[depth] != n) return p.dimensionError();
     }
 
     fn element(p: *Parse) ParseError!void {
@@ -297,11 +317,11 @@ const Parse = struct {
         if (p.peek() == '"') {
             p.i += 1;
             while (true) {
-                const c = p.peek() orelse return error.Malformed;
+                const c = p.peek() orelse return p.bad(end_of_input);
                 p.i += 1;
                 if (c == '"') break;
                 if (c == '\\') {
-                    const e = p.peek() orelse return error.Malformed;
+                    const e = p.peek() orelse return p.bad(end_of_input);
                     p.i += 1;
                     try buf.append(p.a, e);
                 } else try buf.append(p.a, c);
@@ -311,12 +331,13 @@ const Parse = struct {
         var keep: usize = 0; // the length without trailing blanks
         var escaped = false;
         while (true) {
-            const c = p.peek() orelse return error.Malformed;
+            const c = p.peek() orelse return p.bad(end_of_input);
             if (c == ',' or c == '}') break;
-            if (c == '{' or c == '"') return error.Malformed;
+            if (c == '{') return p.bad("Unexpected \"{\" character.");
+            if (c == '"') return p.bad("Incorrectly quoted array element.");
             p.i += 1;
             if (c == '\\') {
-                const e = p.peek() orelse return error.Malformed;
+                const e = p.peek() orelse return p.bad(end_of_input);
                 p.i += 1;
                 try buf.append(p.a, e);
                 keep = buf.items.len;
@@ -327,7 +348,8 @@ const Parse = struct {
             }
         }
         buf.items.len = keep;
-        if (buf.items.len == 0) return error.Malformed;
+        // A delimiter or a brace where an element is expected.
+        if (buf.items.len == 0) return p.bad(if (p.z[p.i] == ',') "Unexpected \",\" character." else "Unexpected \"}\" character.");
         if (!escaped and std.ascii.eqlIgnoreCase(buf.items, "null")) return p.out.append(p.a, null);
         try p.out.append(p.a, buf.items);
     }
@@ -340,7 +362,15 @@ fn isSpace(c: u8) bool {
 /// Array `z` (array_in()'s syntax). `vector`: also the space-separated
 /// integers of an int2vector or oidvector (`1 2`, from 0).
 pub fn parse(a: Allocator, z: []const u8, vector: bool) ParseError!Array {
+    var detail: ?[]const u8 = null;
+    return parseWith(a, z, vector, &detail);
+}
+
+/// parse(), leaving PostgreSQL's DETAIL of a malformed array in
+/// `detail` where it is known (static text; malformedError()).
+pub fn parseWith(a: Allocator, z: []const u8, vector: bool, detail: *?[]const u8) ParseError!Array {
     var p: Parse = .{ .a = a, .z = z };
+    defer detail.* = p.detail;
     p.ws();
     // [lo:hi][lo:hi]=
     var bounds: [max_dims][2]i64 = undefined;
@@ -349,17 +379,18 @@ pub fn parse(a: Allocator, z: []const u8, vector: bool) ParseError!Array {
         if (nb == max_dims) return error.Malformed;
         p.i += 1;
         p.ws();
-        const lo = p.int() orelse return error.Malformed;
+        p.dims_given = true;
+        const lo = p.int() orelse return p.bad("\"[\" must introduce explicitly-specified array dimensions.");
         p.ws();
         var hi = lo;
         var l = lo;
         if (p.peek() == ':') {
             p.i += 1;
             p.ws();
-            hi = p.int() orelse return error.Malformed;
+            hi = p.int() orelse return p.bad("Missing array dimension value.");
             p.ws();
         } else l = 1;
-        if (p.peek() != ']') return error.Malformed;
+        if (p.peek() != ']') return p.bad("Missing \"]\" after array dimensions.");
         p.i += 1;
         if (hi < l - 1) return error.Malformed;
         bounds[nb] = .{ l, hi };
@@ -367,26 +398,34 @@ pub fn parse(a: Allocator, z: []const u8, vector: bool) ParseError!Array {
         p.ws();
     }
     if (nb > 0) {
-        if (p.peek() != '=') return error.Malformed;
+        if (p.peek() != '=') return p.bad("Missing \"=\" after array dimensions.");
         p.i += 1;
         p.ws();
     }
     if (p.peek() != '{') {
-        if (nb == 0 and vector) return parseVector(a, z);
-        return error.Malformed;
+        const must = "Array value must start with \"{\" or dimension information.";
+        if (nb == 0 and vector) return parseVector(a, z) catch |err| if (err == error.Malformed) p.bad(must) else err;
+        return p.bad(must);
     }
     try p.level(0);
     p.ws();
-    if (p.i != p.z.len) return error.Malformed;
+    if (p.i != p.z.len) return p.bad("Junk after closing right brace.");
     p.x.elems = p.out.items;
     if (nb > 0) {
-        if (nb != p.x.ndim) return error.Malformed;
+        if (nb != p.x.ndim) return p.dimensionError();
         for (bounds[0..nb], 0..) |b, d| {
-            if (b[1] - b[0] + 1 != p.x.dims[d]) return error.Malformed;
+            if (b[1] - b[0] + 1 != p.x.dims[d]) return p.dimensionError();
             p.x.lower[d] = std.math.cast(i32, b[0]) orelse return error.Malformed;
         }
     }
     return p.x;
+}
+
+/// Make PostgreSQL's error of malformed array `z` the result of `ctx`,
+/// with its DETAIL `detail` where it is known (parseWith()'s).
+pub fn malformedError(ctx: *Context, a: Allocator, z: []const u8, detail: ?[]const u8) void {
+    const msg = std.fmt.allocPrint(a, "malformed array literal: \"{s}\"", .{z}) catch return api.resultErrorNomem(ctx);
+    api.resultErrorFields(ctx, .of("22P02"), .{ .message = msg, .detail = detail });
 }
 
 fn parseVector(a: Allocator, z: []const u8) ParseError!Array {
@@ -811,14 +850,15 @@ const Call = struct {
     /// result.
     fn array(c: *Call, m: *Mem) ?Array {
         const z = c.text(m) orelse return null;
-        return parse(c.a(), z, true) catch |err| {
-            if (err == error.OutOfMemory) c.oom() else c.malformed(z);
+        var detail: ?[]const u8 = null;
+        return parseWith(c.a(), z, true, &detail) catch |err| {
+            if (err == error.OutOfMemory) c.oom() else c.malformed(z, detail);
             return null;
         };
     }
 
-    fn malformed(c: *Call, z: []const u8) void {
-        c.errFmt("22P02", "malformed array literal: \"{s}\"", .{z});
+    fn malformed(c: *Call, z: []const u8, detail: ?[]const u8) void {
+        malformedError(c.ctx, c.a(), z, detail);
     }
 
     fn errFmt(c: *Call, comptime st: *const [5]u8, comptime fmt: []const u8, args: anytype) void {
@@ -860,8 +900,12 @@ fn arrayIn(c: *Call, argv: []*Mem, comptime e: Elem) void {
     const m = argv[0];
     if (isNull(m)) return api.resultNull(c.ctx);
     const z = c.text(m) orelse return;
-    if (api.valueType(m) != vi.SQLITE_TEXT) return c.malformed(z);
-    var x = parse(c.a(), z, false) catch |err| return if (err == error.OutOfMemory) c.oom() else c.malformed(z);
+    var detail: ?[]const u8 = null;
+    if (api.valueType(m) != vi.SQLITE_TEXT) {
+        _ = parseWith(c.a(), z, false, &detail) catch {};
+        return c.malformed(z, detail);
+    }
+    var x = parseWith(c.a(), z, false, &detail) catch |err| return if (err == error.OutOfMemory) c.oom() else c.malformed(z, detail);
     if (e != .unknown) {
         var fail: Fail = undefined;
         for (x.elems) |*el| if (el.*) |t| {

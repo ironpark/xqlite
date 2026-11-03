@@ -65,53 +65,103 @@ pub const Scope = struct {
     as_type: u32 = 0,
 };
 
-/// The PostgreSQL text of SQLite expression text `z` over `scope`, null if
-/// it is beyond this module.
-pub fn expr(a: Allocator, z: []const u8, scope: Scope, pretty: bool) Oom!?[]const u8 {
-    var p = Parser.init(a, z) catch |e| return orNull(e);
-    const n = p.expr() catch |e| return orNull(e);
+/// The PostgreSQL text of SQLite expression text `z` over `scope` in both
+/// modes (pg_get_expr()'s pretty or not), the text read and fixed once:
+/// each null where that mode's is beyond this module.
+pub const Texts = struct { plain: ?[]const u8 = null, pretty: ?[]const u8 = null };
+
+pub fn both(a: Allocator, z: []const u8, scope: Scope) Oom!Texts {
+    const t = try readFixed(a, z, scope, null) orelse return .{};
+    return printBoth(a, t, scope);
+}
+
+/// The tree of expression text `z`, fixed over `scope` (fixTree()), null
+/// where it is beyond this module. `keys`: the columns it reads of the
+/// one relation of `scope` (a CHECK's conkey), even where it is.
+fn readFixed(a: Allocator, z: []const u8, scope: Scope, keys: ?*[]const i16) Oom!?*Node {
+    return readFixedErr(a, z, scope, keys) catch |e| orNone(?*Node, e);
+}
+
+fn readFixedErr(a: Allocator, z: []const u8, scope: Scope, keys: ?*[]const i16) Error!?*Node {
+    var p = try Parser.init(a, z);
+    const n = try p.expr();
+    if (keys) |out| if (scope.items.len == 1) {
+        // Before fix(), which changes the tree.
+        var seen: std.AutoArrayHashMapUnmanaged(i16, void) = .empty;
+        try collect(a, n, scope.items[0].attrs, &seen);
+        const k = try a.dupe(i16, seen.keys());
+        std.mem.sort(i16, k, {}, std.sort.asc(i16));
+        out.* = k;
+    };
     if (!p.atEnd()) return null;
+    return try fixTree(a, n, scope);
+}
+
+/// Tree `n` (as read, which this changes) fixed over `scope`, with the
+/// assignment cast to scope.as_type.
+fn fixTree(a: Allocator, n: *Node, scope: Scope) Error!*Node {
     var f: Fixer = .{ .a = a, .scope = scope };
-    var t = f.fix(n) catch |e| return orNull(e);
+    var t = try f.fix(n);
     if (scope.as_type != 0) {
         const ty = typeName(scope.as_type);
         if (t.kind == .str and t.ty.len == 0) {
-            t = f.coerce(t, ty) catch |e| return orNull(e);
+            t = try f.coerce(t, ty);
         } else if (t.ty.len > 0 and !eql(t.ty, ty)) {
-            t = f.node(.{ .kind = .cast, .text = ty, .ty = ty, .args = f.list(&.{t}) catch return error.OutOfMemory, .hidden = true }) catch return error.OutOfMemory;
+            t = try f.node(.{ .kind = .cast, .text = ty, .ty = ty, .args = try f.list(&.{t}), .hidden = true });
         }
     }
-    var pr: Printer = .{ .a = a, .pretty = pretty, .scope = scope };
-    pr.expr(t) catch |e| return orNull(e);
-    return pr.out.items;
+    return t;
 }
 
-/// An index column's text (pg_get_indexdef()): in parentheses unless a
-/// function call.
-pub fn indexColumn(a: Allocator, z: []const u8, scope: Scope, pretty: bool) Oom!?[]const u8 {
-    var p = Parser.init(a, z) catch |e| return orNull(e);
-    const n = p.expr() catch |e| return orNull(e);
-    if (!p.atEnd()) return null;
-    var f: Fixer = .{ .a = a, .scope = scope };
-    const t = f.fix(n) catch |e| return orNull(e);
-    var pr: Printer = .{ .a = a, .pretty = pretty, .scope = scope };
-    pr.expr(t) catch |e| return orNull(e);
-    if (t.kind == .func) return pr.out.items;
-    return try std.fmt.allocPrint(a, "({s})", .{pr.out.items});
+/// Fixed tree `t` printed in both modes (the printer changes nothing in
+/// it, so one tree serves both).
+fn printBoth(a: Allocator, t: *const Node, scope: Scope) Oom!Texts {
+    var out: Texts = .{};
+    inline for (.{ false, true }) |pretty| {
+        var w: std.Io.Writer.Allocating = .init(a);
+        var pr: Printer = .{ .pretty = pretty, .scope = scope, .w = &w.writer };
+        if (pr.expr(t)) {
+            @field(out, if (pretty) "pretty" else "plain") = w.written();
+        } else |e| if (e == error.OutOfMemory) return error.OutOfMemory;
+    }
+    return out;
 }
 
-/// The columns (attribute numbers) expression text `z` reads of the one
-/// relation of `scope` (a CHECK's conkey), in their order there.
-pub fn columns(a: Allocator, z: []const u8, scope: Scope) Oom![]const i16 {
-    var out: std.ArrayList(i16) = .empty;
-    if (scope.items.len != 1) return out.items;
-    var p = Parser.init(a, z) catch return out.items;
-    const n = p.expr() catch return out.items;
-    var seen: std.AutoArrayHashMapUnmanaged(i16, void) = .empty;
-    try collect(a, n, scope.items[0].attrs, &seen);
-    try out.appendSlice(a, seen.keys());
-    std.mem.sort(i16, out.items, {}, std.sort.asc(i16));
-    return out.items;
+/// OutOfMemory, else `None`'s none (what is beyond this module).
+fn orNone(comptime None: type, e: Error) Oom!None {
+    if (e == error.OutOfMemory) return error.OutOfMemory;
+    return if (@typeInfo(None) == .optional) null else .{};
+}
+
+/// An index expression's texts, read and fixed once: as both() gives
+/// them (indexprs) and as pg_get_indexdef() prints a column (in
+/// parentheses unless a function call). An index column has no
+/// assignment cast: scope.as_type is not read.
+pub const IndexTexts = struct { expr: Texts = .{}, column: Texts = .{} };
+
+pub fn indexTexts(a: Allocator, z: []const u8, scope0: Scope) Oom!IndexTexts {
+    var scope = scope0;
+    scope.as_type = 0;
+    const t = try readFixed(a, z, scope, null) orelse return .{};
+    const e = try printBoth(a, t, scope);
+    var out: IndexTexts = .{ .expr = e, .column = e };
+    if (t.kind != .func) {
+        if (e.plain) |x| out.column.plain = try std.fmt.allocPrint(a, "({s})", .{x});
+        if (e.pretty) |x| out.column.pretty = try std.fmt.allocPrint(a, "({s})", .{x});
+    }
+    return out;
+}
+
+/// A CHECK's expression read once: the columns (attribute numbers) it
+/// reads of the one relation of `scope` (conkey), in their order there,
+/// and its texts (both()).
+pub const CheckTexts = struct { keys: []const i16 = &.{}, texts: Texts = .{} };
+
+pub fn check(a: Allocator, z: []const u8, scope: Scope) Oom!CheckTexts {
+    var out: CheckTexts = .{};
+    const t = try readFixed(a, z, scope, &out.keys) orelse return out;
+    out.texts = try printBoth(a, t, scope);
+    return out;
 }
 
 fn collect(a: Allocator, n: *const Node, attrs: []const pgc.Attr, seen: *std.AutoArrayHashMapUnmanaged(i16, void)) Oom!void {
@@ -119,10 +169,6 @@ fn collect(a: Allocator, n: *const Node, attrs: []const pgc.Attr, seen: *std.Aut
         for (attrs) |at| if (ieql(at.name, n.text)) try seen.put(a, at.num, {});
     }
     for (n.args) |x| try collect(a, x, attrs, seen);
-}
-
-fn orNull(e: Error) Oom!?[]const u8 {
-    return if (e == error.OutOfMemory) error.OutOfMemory else null;
 }
 
 // ================================================================= tree
@@ -1040,6 +1086,13 @@ const Fixer = struct {
         }
         if (!std.ascii.startsWithIgnoreCase(name, "xq_")) return f.plainCall(n);
         const lname = try std.ascii.allocLowerString(f.a, name);
+        // A call told the type of an argument (overload.zig's kind_calls:
+        // xq_pg_to_char(d, t, 7)): PostgreSQL's call.
+        if (@import("overload.zig").kindEngine(lname)) |k| if (args.len == 3 and args[2].kind == .int) {
+            n.text = k.name;
+            n.args = args[0..2];
+            return f.plainCall(n);
+        };
         // Wrappers the engine compares, orders or keeps a column's scale
         // by: the value.
         const keys = [_]struct { []const u8, []const u8 }{
@@ -1395,34 +1448,40 @@ fn normalize(a: Allocator, z: []const u8, ty: []const u8) Oom![]const u8 {
 // ============================================================= printing
 
 const Printer = struct {
-    a: Allocator,
     pretty: bool,
     scope: Scope,
-    out: std.ArrayList(u8) = .empty,
+    /// Where the text goes: a std.Io.Writer.Allocating's (whose buffer
+    /// holds all of it, which keyword() reads), or a discarding one to
+    /// only walk what is printed (its errors).
+    w: *std.Io.Writer,
     indent: i32 = 0,
 
     fn put(pr: *Printer, z: []const u8) Error!void {
-        try pr.out.appendSlice(pr.a, z);
+        pr.w.writeAll(z) catch return error.OutOfMemory;
     }
 
     fn print(pr: *Printer, comptime fmt: []const u8, args: anytype) Error!void {
-        try pr.out.print(pr.a, fmt, args);
+        pr.w.print(fmt, args) catch return error.OutOfMemory;
+    }
+
+    fn repeat(pr: *Printer, c: u8, n: usize) Error!void {
+        pr.w.splatByteAll(c, n) catch return error.OutOfMemory;
     }
 
     /// ruleutils.c's appendContextKeyword(): a new line at the indent
     /// (the spaces before it removed).
     fn keyword(pr: *Printer, z: []const u8, before: i32, after: i32, plus: i32) Error!void {
         pr.indent += before;
-        while (pr.out.items.len > 0 and pr.out.items[pr.out.items.len - 1] == ' ') pr.out.items.len -= 1;
-        try pr.out.append(pr.a, '\n');
-        try pr.out.appendNTimes(pr.a, ' ', @intCast(@max(pr.indent, 0) + plus));
+        while (pr.w.end > 0 and pr.w.buffer[pr.w.end - 1] == ' ') pr.w.end -= 1;
+        try pr.put("\n");
+        try pr.repeat(' ', @intCast(@max(pr.indent, 0) + plus));
         try pr.put(z);
         pr.indent += after;
         if (pr.indent < 0) pr.indent = 0;
     }
 
     fn quoted(pr: *Printer, z: []const u8) Error!void {
-        try pr.put(try pgc.quoteIdent(pr.a, z));
+        pgc.writeIdent(pr.w, z) catch return error.OutOfMemory;
     }
 
     /// `n` under `parent`, in parentheses if pretty mode needs them
@@ -1628,10 +1687,13 @@ const Printer = struct {
         const esc = std.mem.indexOfScalar(u8, z, '\\') != null;
         if (esc) try pr.put("E");
         try pr.put("'");
-        for (z) |c| {
-            if (c == '\'' or c == '\\') try pr.out.append(pr.a, c);
-            try pr.out.append(pr.a, c);
-        }
+        // Each quote and backslash doubled.
+        var start: usize = 0;
+        for (z, 0..) |c, i| if (c == '\'' or c == '\\') {
+            try pr.put(z[start .. i + 1]);
+            start = i;
+        };
+        try pr.put(z[start..]);
         try pr.put("'");
     }
 };
@@ -1707,7 +1769,7 @@ pub fn viewDef(
     comptime resolve: fn (@TypeOf(ctx), []const u8) Oom!?Resolved,
     pretty: bool,
 ) Oom!?[]const u8 {
-    return viewDefErr(a, sql, names, ctx, resolve, pretty, null) catch |e| orNull(e);
+    return viewDefErr(a, sql, names, ctx, resolve, pretty, null) catch |e| orNone(?[]const u8, e);
 }
 
 /// The column of a table each result column of a view is, where it is
@@ -1720,7 +1782,7 @@ pub fn viewSources(
     comptime resolve: fn (@TypeOf(ctx), []const u8) Oom!?Resolved,
 ) Oom!?[]const ?pgc.Attr {
     var out: std.ArrayList(?pgc.Attr) = .empty;
-    _ = viewDefErr(a, sql, &.{}, ctx, resolve, false, &out) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else null;
+    _ = viewDefErr(a, sql, &.{}, ctx, resolve, false, &out) catch |e| return orNone(?[]const ?pgc.Attr, e);
     return out.items;
 }
 
@@ -1884,7 +1946,11 @@ fn viewDefErr(
     if (!p.atEnd()) return error.Unsupported;
 
     var f: Fixer = .{ .a = a, .scope = scope };
-    var pr: Printer = .{ .a = a, .pretty = pretty, .scope = scope };
+    // For the sources alone, the query is walked as printing it would
+    // (to fail where that fails) but no text is made.
+    var text: std.Io.Writer.Allocating = .init(a);
+    var none: std.Io.Writer.Discarding = .init(&.{});
+    var pr: Printer = .{ .pretty = pretty, .scope = scope, .w = if (sources != null) &none.writer else &text.writer };
     pr.indent += 8;
     try pr.put(" SELECT");
     if (distinct) try pr.put(" DISTINCT");
@@ -1934,7 +2000,7 @@ fn viewDefErr(
             joins += 1;
         };
         // Joins nest to the left: ((a JOIN b ON ...) JOIN c ON ...).
-        if (!pr.pretty) try pr.out.appendNTimes(a, '(', joins);
+        if (!pr.pretty) try pr.repeat('(', joins);
         for (from.items) |fi| {
             if (eql(fi.join, ",")) {
                 try pr.put(", ");
@@ -1993,7 +2059,7 @@ fn viewDefErr(
         try pr.expr(try f.fix(l));
     }
     try pr.put(";");
-    return pr.out.items;
+    return text.written();
 }
 
 /// A GROUP BY or ORDER BY term: a result column's number is that column
@@ -2028,12 +2094,24 @@ test "deparse: numeric CHECK" {
     };
     const scope: Scope = .{ .items = &.{.{ .name = "t", .attrs = &attrs }} };
     const z = "(xq_dec_key(\"price\") >= xq_dec_key(0))";
-    try std.testing.expectEqualStrings("(price >= (0)::numeric)", (try expr(a, z, scope, false)).?);
-    try std.testing.expectEqualStrings("price >= 0::numeric", (try expr(a, z, scope, true)).?);
+    try std.testing.expectEqualStrings("(price >= (0)::numeric)", (try both(a, z, scope)).plain.?);
+    try std.testing.expectEqualStrings("price >= 0::numeric", (try both(a, z, scope)).pretty.?);
     const z2 = "(((\"v\" = 'x') OR (xq_like('a%', \"v\"))) AND (xq_pg_iv_key(\"iv\") > xq_pg_iv_key('1 hour')))";
-    try std.testing.expectEqualStrings("((((v)::text = 'x'::text) OR ((v)::text ~~ 'a%'::text)) AND (iv > '01:00:00'::interval))", (try expr(a, z2, scope, false)).?);
-    try std.testing.expectEqualStrings("(v::text = 'x'::text OR v::text ~~ 'a%'::text) AND iv > '01:00:00'::interval", (try expr(a, z2, scope, true)).?);
-    try std.testing.expectEqualSlices(i16, &.{1}, try columns(a, z, scope));
+    try std.testing.expectEqualStrings("((((v)::text = 'x'::text) OR ((v)::text ~~ 'a%'::text)) AND (iv > '01:00:00'::interval))", (try both(a, z2, scope)).plain.?);
+    try std.testing.expectEqualStrings("(v::text = 'x'::text OR v::text ~~ 'a%'::text) AND iv > '01:00:00'::interval", (try both(a, z2, scope)).pretty.?);
+    try std.testing.expectEqualSlices(i16, &.{1}, (try check(a, z, scope)).keys);
+    // Read once, as both() reads it.
+    const c = try check(a, z2, scope);
+    try std.testing.expectEqualSlices(i16, &.{ 2, 3 }, c.keys);
+    try std.testing.expectEqualStrings((try both(a, z2, scope)).plain.?, c.texts.plain.?);
+    try std.testing.expectEqualStrings((try both(a, z2, scope)).pretty.?, c.texts.pretty.?);
+    const ix = try indexTexts(a, "(\"price\" * 2)", scope);
+    try std.testing.expectEqualStrings("(price * (2)::numeric)", ix.expr.plain.?);
+    try std.testing.expectEqualStrings("((price * (2)::numeric))", ix.column.plain.?);
+    try std.testing.expectEqualStrings("(price * 2::numeric)", ix.column.pretty.?);
+    // What is beyond this module: no text, but its columns.
+    const u = try check(a, "\"v\" IN (SELECT 1)", scope);
+    try std.testing.expect(u.texts.plain == null and u.texts.pretty == null);
 }
 
 const ivinput = @import("ivinput.zig");

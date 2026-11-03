@@ -65,7 +65,11 @@ fn truncUnit(ctx: *Context, lower: []const u8, type_name: []const u8) ?Unit {
     switch (u) {
         .ago => unitError(ctx, lower, type_name, false),
         .tz, .tz_hour, .tz_minute, .dow, .doy, .isodow, .isoyear, .julian => unitError(ctx, lower, type_name, true),
-        .week => if (std.mem.eql(u8, type_name, "interval")) unitError(ctx, lower, type_name, true) else return u,
+        // PostgreSQL's DETAIL (interval_trunc()).
+        .week => if (std.mem.eql(u8, type_name, "interval")) api.resultErrorFields(ctx, .of("0A000"), .{
+            .message = "unit \"week\" not supported for type interval",
+            .detail = "Months usually have fractional weeks.",
+        }) else return u,
         else => return u,
     }
     return null;

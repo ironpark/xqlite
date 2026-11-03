@@ -20,6 +20,7 @@ const std = @import("std");
 const simd = @import("xqlite_base").simd;
 const json_text = @import("../json_text.zig");
 const bin = @import("../jsonb.zig");
+const util = @import("../../sql/util.zig");
 const Allocator = std.mem.Allocator;
 
 /// Invalid: not json; UnicodeEscape: `\u0000`, which jsonb cannot hold.
@@ -296,17 +297,17 @@ pub fn parse(a: Allocator, text: []const u8, jsonb: bool) Error!Value {
 
 // ============================================================ input errors
 
-/// What PostgreSQL says of json input `text` it cannot read, after the
-/// message: the DETAIL (json_errdetail(): `Token "bad" is invalid.`)
-/// and CONTEXT (report_json_context(): `JSON data, line 1: {bad`)
-/// lines (util.detail_mark), found by reading `text` again as its lexer
-/// and parser do; "" where they find no error (or nest too deep).
-pub fn errorReport(a: Allocator, text: []const u8, jsonb: bool) Allocator.Error![]const u8 {
+/// What PostgreSQL says of json input `text` it cannot read: the message
+/// `msg`, then the DETAIL (json_errdetail(): `Token "bad" is invalid.`)
+/// and CONTEXT (report_json_context(): `JSON data, line 1: {bad`), found
+/// by reading `text` again as its lexer and parser do; none where they
+/// find no error (or nest too deep).
+pub fn errorReport(a: Allocator, text: []const u8, jsonb: bool, msg: []const u8) Allocator.Error!util.ErrorFields {
     // PostgreSQL's text has no NUL (and a C string's message ends there).
-    if (std.mem.indexOfScalar(u8, text, 0) != null) return "";
+    if (std.mem.indexOfScalar(u8, text, 0) != null) return .{ .message = msg };
     var d: Diag = .{ .s = text, .jsonb = jsonb };
     d.parse() catch {};
-    const code = d.code orelse return "";
+    const code = d.code orelse return .{ .message = msg };
     var buf: [160]u8 = undefined;
     const tok = text[d.start..d.term];
     const detail = switch (code) {
@@ -331,13 +332,16 @@ pub fn errorReport(a: Allocator, text: []const u8, jsonb: bool) Allocator.Error!
     var start = d.line_start;
     while (end - start >= 50) start += charLen(text, start);
     const more = !d.at_end and end < text.len and text[end] != '\n' and text[end] != '\r';
-    const util = @import("../../sql/util.zig");
-    return std.fmt.allocPrint(a, "{s}{s}{s}JSON data, line {d}: {s}{s}{s}", .{
-        util.detail_mark,                        detail,
-        util.context_mark,                       d.line,
-        if (start > d.line_start) "..." else "", text[start..end],
-        if (more) "..." else "",
-    });
+    return .{
+        .message = msg,
+        .detail = try a.dupe(u8, detail),
+        .context = try std.fmt.allocPrint(a, "JSON data, line {d}: {s}{s}{s}", .{
+            d.line,
+            if (start > d.line_start) "..." else "",
+            text[start..end],
+            if (more) "..." else "",
+        }),
+    };
 }
 
 /// pg_mblen() of UTF-8: the bytes of the character at `i`, within `s`
@@ -598,10 +602,9 @@ test "json input errors as PostgreSQL reports them" {
         .{ "01", "Token \"01\" is invalid.", "JSON data, line 1: 01" },
     };
     for (cases) |c| {
-        const r = try errorReport(a, c[0], true);
-        const f = @import("../../sql/util.zig").errorFields(r);
-        try std.testing.expectEqualStrings(c[1], f.detail.?);
-        try std.testing.expectEqualStrings(c[2], f.context.?);
+        const r = try errorReport(a, c[0], true, "m");
+        try std.testing.expectEqualStrings(c[1], r.detail.?);
+        try std.testing.expectEqualStrings(c[2], r.context.?);
     }
 }
 

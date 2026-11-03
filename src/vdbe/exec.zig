@@ -343,7 +343,7 @@ pub const Exec = struct {
                 // Trigger programs and counters.
                 OP.Program => control.opProgram(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.Param => control.opParam(e, op),
-                OP.FkCounter => control.opFkCounter(e, op),
+                OP.FkCounter => control.opFkCounter(e, op) catch |err| return e.abortDueToError(err, n_vm_step),
                 OP.FkIfZero => control.opFkIfZero(e, op),
                 OP.MemMax => control.opMemMax(e, op),
                 OP.IfPos => control.opIfPos(e, op),

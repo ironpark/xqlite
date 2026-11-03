@@ -222,7 +222,7 @@ fn v7Func(ctx: *Context, argv: []*Mem) void {
     // timestamptz + interval, in microseconds (as PostgreSQL computes it).
     const us = datetime.addInterval(@divTrunc(ns, ns_per_us), shift) catch std.math.minInt(i64);
     if (us < 0 or us > max_us) {
-        return api.resultErrorState(ctx, .of("22008"), "timestamp out of range for UUID version 7");
+        return api.resultErrorFields(ctx, .of("22008"), .{ .message = "timestamp out of range for UUID version 7", .detail = "UUID version 7 supports timestamps from 1970-01-01 to approximately year 10889." });
     }
     const b = v7(ctx, @intCast(@divTrunc(us, 1000)), @intCast(@mod(us, 1000) * ns_per_us + @mod(ns, ns_per_us)));
     api.resultBlob(ctx, &b, .transient);

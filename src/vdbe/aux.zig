@@ -835,6 +835,13 @@ pub fn rewind(v: *Vdbe) void {
     v.i_statement = 0;
     v.n_fk_constraint = 0;
     v.xq_fk_error = null;
+    freeFkOwned(v);
+}
+
+/// Free Vdbe.xq_fk_owned.
+fn freeFkOwned(v: *Vdbe) void {
+    if (v.xq_fk_owned) |z| v.db.gpa.free(z);
+    v.xq_fk_owned = null;
 }
 
 /// Port of sqlite3VdbeMakeReady(): resolve labels and allocate registers,
@@ -1276,7 +1283,7 @@ fn fkError(v: *Vdbe) FkError {
     v.rc = RC.CONSTRAINT_FOREIGNKEY;
     v.error_action = OE.Abort;
     if (v.xq_fk_error) |z| {
-        // xqlite: the dialect's error of the last violation counted.
+        // xqlite: the dialect's error of the violation counted.
         const d = @import("../dialect/constraint.zig").decode(std.mem.span(z));
         vdbeErrorState(v, d.state, "{s}", .{d.msg});
     } else if (@import("../dialect/dialect.zig").spec(v.xq_lang.dialect).hooks.constraint.foreign_key) |f| {
@@ -1503,6 +1510,7 @@ pub fn delete(v: *Vdbe) void {
         if (s.mem) |*m| m.deinit();
     }
     setErrMsg(v, null);
+    freeFkOwned(v);
     v.arena.deinit();
     db.gpa.destroy(v);
 }

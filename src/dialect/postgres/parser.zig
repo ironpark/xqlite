@@ -97,7 +97,7 @@ const type_words = words.folded(.lower, &.{
 
 /// The error of a statement that does not lex (Parser.init()).
 pub const LexError = struct {
-    msg: []const u8 = "",
+    fields: @import("../../sql/util.zig").ErrorFields = .{ .message = "" },
     pos: usize = 0,
 };
 
@@ -182,7 +182,7 @@ pub const Parser = struct {
             const t = l.next() catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.LexFailed => {
-                    if (lex_error) |e| e.* = .{ .msg = l.err_msg, .pos = l.err_pos };
+                    if (lex_error) |e| e.* = .{ .fields = l.err, .pos = l.err_pos };
                     return error.ParseFailed;
                 },
             };
@@ -314,6 +314,13 @@ pub const Parser = struct {
         p.err_pos = pos;
         p.err_msg = try std.fmt.allocPrint(p.arena, fmt, args);
         p.err_state = state orelse comptime int.ErrorState.ofFormat(fmt);
+        return error.ParseFailed;
+    }
+
+    /// failState() of an error with PostgreSQL's fields (util.ErrorFields).
+    pub fn failFields(p: *Parser, pos: usize, state: int.ErrorState, f: @import("../../sql/util.zig").ErrorFields) Error {
+        p.err_pos = pos;
+        p.err_msg, p.err_state = try @import("../../sql/util.zig").joinFields(p.arena, state, f);
         return error.ParseFailed;
     }
 
@@ -2087,7 +2094,7 @@ pub const Parser = struct {
                     .regex => try p.regexOp(regexOperator(t.text).?, l, r),
                 };
             } else if (t.kind == .op and cmpOp(t) == null and !isArith(t.text) and !isLikeOp(t.text)) {
-                return p.failState(t.start, .of("42883"), "operator does not exist: {s}{s}", .{ t.text, @import("operators.zig").hint(.not_exist) });
+                return p.failFields(t.start, .of("42883"), .{ .message = try std.fmt.allocPrint(p.arena, "operator does not exist: {s}", .{t.text}), .hint = @import("operators.zig").hint(.not_exist) });
             } else break;
         }
         return l;
@@ -2446,7 +2453,7 @@ pub const Parser = struct {
             _ = p.advance();
             const e = try p.arrayCtor(t.start);
             if (e.kind.func.args.len == 0 and p.peek().kind != .cast and !p.isKw("as")) {
-                return p.failState(t.start, .of("42P18"), "cannot determine type of empty array", .{});
+                return p.failFields(t.start, .of("42P18"), .{ .message = "cannot determine type of empty array", .hint = "Explicitly cast to the desired type, for example ARRAY[]::integer[]." });
             }
             try p.setFig(e, .{ .call = "array" });
             return e;
@@ -2679,7 +2686,7 @@ pub const Parser = struct {
             if (i < names.len) if (names[i]) |n| try sig.print(p.arena, "{s} => ", .{n.text});
             try sig.appendSlice(p.arena, try p.argTypeName(a));
         }
-        return p.failState(name.pos, .of("42883"), "function {s}({s}) does not exist", .{ name.text, sig.items });
+        return p.failFields(name.pos, .of("42883"), .{ .message = try std.fmt.allocPrint(p.arena, "function {s}({s}) does not exist", .{ name.text, sig.items }), .hint = @import("frontend.zig").function_hint });
     }
 
     /// The type of argument `e` as far as the parser knows it: of a

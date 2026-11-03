@@ -857,11 +857,17 @@ fn failure(b: *Backend, f: Session.Failure) !void {
         // COPY, which the dialect does not parse.
         return b.errorResponse("ERROR", "0A000", "COPY is not supported by this server", pos);
     };
-    const message = if (f.code == .interrupt) "canceling statement due to user request" else f.message;
-    try b.errorResponse("ERROR", &f.sqlstate, message, pos);
+    // The message's DETAIL, HINT and CONTEXT are fields of their own.
+    const fields: xqlite.ErrorInfo.Fields = if (f.code == .interrupt) .{ .message = "canceling statement due to user request" } else xqlite.ErrorInfo.splitFields(f.message, f.fields_at);
+    try b.errorFields("ERROR", &f.sqlstate, fields, pos);
 }
 
 fn errorResponse(b: *Backend, severity: []const u8, code: *const [5]u8, message: []const u8, position: ?usize) !void {
+    return b.errorFields(severity, code, .{ .message = message }, position);
+}
+
+/// errorResponse() of a message with PostgreSQL's fields: D, H and W.
+fn errorFields(b: *Backend, severity: []const u8, code: *const [5]u8, f: xqlite.ErrorInfo.Fields, position: ?usize) !void {
     try b.out.begin(if (std.mem.eql(u8, severity, "ERROR") or std.mem.eql(u8, severity, "FATAL")) 'E' else 'N');
     for ([_]u8{ 'S', 'V' }) |k| {
         try b.out.int(u8, k);
@@ -869,8 +875,6 @@ fn errorResponse(b: *Backend, severity: []const u8, code: *const [5]u8, message:
     }
     try b.out.int(u8, 'C');
     try b.out.string(code);
-    // A message's DETAIL, HINT and CONTEXT lines are fields of their own.
-    const f = xqlite.ErrorInfo.fields(message);
     try b.out.int(u8, 'M');
     try b.out.string(f.message);
     if (f.detail) |d| {

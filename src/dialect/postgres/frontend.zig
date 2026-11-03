@@ -121,8 +121,8 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
 /// The error of the parser, left in `p`.
 const parseFailed = tokenized.parseFailed;
 
-/// The HINT of a function call no function matches (util.hint_mark).
-pub const function_hint = util.hint_mark ++ "No function matches the given name and argument types. You might need to add explicit type casts.";
+/// The HINT of a function call no function matches.
+pub const function_hint = "No function matches the given name and argument types. You might need to add explicit type casts.";
 
 /// SQLite's messages for common failures in PostgreSQL's words.
 fn translateError(p: *int.Parse) int.Oom!void {
@@ -140,16 +140,29 @@ fn translateError(p: *int.Parse) int.Oom!void {
     for (rules) |r| if (std.mem.startsWith(u8, m, r[0])) {
         var name = m[r[0].len..];
         if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
-        const hint = if (std.mem.eql(u8, r[0], "no such function: ")) function_hint else "";
-        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}{s}", .{ r[1], name, r[2], hint }, 0);
-        return;
+        const hint: ?[]const u8 = if (std.mem.eql(u8, r[0], "no such function: ")) function_hint else null;
+        return util.rewordError(p, .{ .message = try std.fmt.allocPrint(p.arena, "{s}{s}{s}", .{ r[1], name, r[2] }), .hint = hint });
     };
     // A function of another number of arguments: PostgreSQL finds none.
     const wrong = "wrong number of arguments to function ";
     if (std.mem.startsWith(u8, m, wrong) and std.mem.endsWith(u8, m, "()")) {
-        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "function {s} does not exist{s}", .{ m[wrong.len..], function_hint }, 0);
-        return;
+        return util.rewordError(p, .{ .message = try std.fmt.allocPrint(p.arena, "function {s} does not exist", .{m[wrong.len..]}), .hint = function_hint });
     }
+    // A value for a GENERATED ALWAYS identity column (lower.zig's
+    // checkAlways()): PostgreSQL's DETAIL and HINT (generated_always).
+    const always = [_]struct { []const u8, []const u8, ?[]const u8 }{
+        .{ "cannot insert a non-DEFAULT value into column \"", "\"", "Use OVERRIDING SYSTEM VALUE to override." },
+        .{ "column \"", "\" can only be updated to DEFAULT", null },
+    };
+    for (always) |r| if (std.mem.startsWith(u8, m, r[0]) and std.mem.endsWith(u8, m, r[1]) and m.len >= r[0].len + r[1].len) {
+        const col = m[r[0].len .. m.len - r[1].len];
+        p.err_state = .of("428C9");
+        return util.rewordError(p, .{
+            .message = m,
+            .detail = try std.fmt.allocPrint(p.arena, "Column \"{s}\" is an identity column defined as GENERATED ALWAYS.", .{col}),
+            .hint = r[2],
+        });
+    };
     // "table t already exists", "index i already exists"
     inline for (.{ "table ", "index ", "view " }) |kind| {
         if (std.mem.startsWith(u8, m, kind) and std.mem.endsWith(u8, m, " already exists")) {
@@ -160,8 +173,7 @@ fn translateError(p: *int.Parse) int.Oom!void {
             if (nsp.split(name)) |s| if (nsp.exists(p.db, s.schema) catch false) {
                 name = s.name;
             };
-            p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "relation \"{s}\" already exists", .{name}, 0);
-            return;
+            return util.rewordError(p, .{ .message = try std.fmt.allocPrint(p.arena, "relation \"{s}\" already exists", .{name}) });
         }
     }
 }

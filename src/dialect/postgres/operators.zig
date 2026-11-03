@@ -488,14 +488,12 @@ const functions = blk: {
     break :blk std.StaticStringMap(T).initComptime(kvs);
 };
 
-/// The HINT of a resolution that failed (util.hint_mark), to follow its
-/// message.
+/// The HINT of a resolution that failed (util.ErrorFields.hint).
 pub fn hint(r: Resolution) []const u8 {
-    const util = @import("../../sql/util.zig");
     return if (r == .not_unique)
-        util.hint_mark ++ "Could not choose a best candidate operator. You might need to add explicit type casts."
+        "Could not choose a best candidate operator. You might need to add explicit type casts."
     else
-        util.hint_mark ++ "No operator matches the given name and argument types. You might need to add explicit type casts.";
+        "No operator matches the given name and argument types. You might need to add explicit type casts.";
 }
 
 /// The message of a resolution that failed: "operator does not exist:

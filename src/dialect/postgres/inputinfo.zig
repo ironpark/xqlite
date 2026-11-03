@@ -248,8 +248,9 @@ fn callInput(ctx: *Context, a: Allocator, def: *const int.FuncDef, args: []const
     def.x_sfunc.?(&sub, ptrs[0..args.len]);
     if (sub.is_error == 0) return null;
     if (sub.is_error == int.RC.NOMEM) return error.OutOfMemory;
-    // The message may carry its DETAIL and HINT lines (util.detail_mark).
-    const f = util.errorFields(try a.dupe(u8, api.valueText(&out) orelse ""));
+    // The message may carry its DETAIL and HINT lines, where its
+    // ErrorState says (util.splitFields()).
+    const f = util.splitFields(try a.dupe(u8, api.valueText(&out) orelse ""), if (sub.err_state) |s| s.fields else .{});
     const state: [5]u8 = if (sub.err_state) |s| s.sqlstate else "XX000".*;
     return .{ .msg = f.message, .detail = f.detail, .hint = f.hint, .state = state };
 }

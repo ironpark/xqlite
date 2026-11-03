@@ -1171,12 +1171,12 @@ test "zig api: each dialect's constraint errors" {
             .{ .sql = "INSERT INTO p VALUES (1, 'b')", .msg = "duplicate key value violates unique constraint \"p_pkey\"\nDETAIL:  Key (id)=(1) already exists.", .state = "23505" },
             .{ .sql = "INSERT INTO p VALUES (2, 'a')", .msg = "duplicate key value violates unique constraint \"p_code_uq\"\nDETAIL:  Key (code)=(a) already exists.", .state = "23505" },
             .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 1)", .msg = "duplicate key value violates unique constraint \"c_q\"\nDETAIL:  Key (q)=(1) already exists.", .state = "23505" },
-            .{ .sql = "INSERT INTO c VALUES (2, 1, NULL, 2)", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint", .state = "23502" },
-            .{ .sql = "UPDATE c SET n = NULL", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint", .state = "23502" },
-            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 0)", .msg = "new row for relation \"c\" violates check constraint \"c_q_check\"", .state = "23514" },
-            .{ .sql = "INSERT INTO c VALUES (2, 9, 1, 2)", .msg = "insert or update on table \"c\" violates foreign key constraint \"c_pid_fkey\"", .state = "23503" },
-            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 2), (3, 9, 1, 3)", .msg = "insert or update on table \"c\" violates foreign key constraint \"c_pid_fkey\"", .state = "23503" },
-            .{ .sql = "DELETE FROM p", .msg = "update or delete on table \"p\" violates foreign key constraint \"c_pid_fkey\" on table \"c\"", .state = "23503" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, NULL, 2)", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint\nDETAIL:  Failing row contains (2, 1, null, 2).", .state = "23502" },
+            .{ .sql = "UPDATE c SET n = NULL", .msg = "null value in column \"n\" of relation \"c\" violates not-null constraint\nDETAIL:  Failing row contains (1, 1, null, 1).", .state = "23502" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 0)", .msg = "new row for relation \"c\" violates check constraint \"c_q_check\"\nDETAIL:  Failing row contains (2, 1, 1, 0).", .state = "23514" },
+            .{ .sql = "INSERT INTO c VALUES (2, 9, 1, 2)", .msg = "insert or update on table \"c\" violates foreign key constraint \"c_pid_fkey\"\nDETAIL:  Key (pid)=(9) is not present in table \"p\".", .state = "23503" },
+            .{ .sql = "INSERT INTO c VALUES (2, 1, 1, 2), (3, 9, 1, 3)", .msg = "insert or update on table \"c\" violates foreign key constraint \"c_pid_fkey\"\nDETAIL:  Key (pid)=(9) is not present in table \"p\".", .state = "23503" },
+            .{ .sql = "DELETE FROM p", .msg = "update or delete on table \"p\" violates foreign key constraint \"c_pid_fkey\" on table \"c\"\nDETAIL:  Key (id)=(1) is still referenced from table \"c\".", .state = "23503" },
         } },
         .{ .d = .mariadb, .ddl =
         \\CREATE TABLE p (id INT PRIMARY KEY, code VARCHAR(5), UNIQUE KEY uk (code));
@@ -1227,6 +1227,12 @@ test "zig api: each dialect's constraint errors" {
             errdefer std.debug.print("{s}: {s}\n", .{ @tagName(c.d), f.sql });
             try expectState(&db, f.sql, f.state, f.number);
             try testing.expectEqualStrings(f.msg, db.lastError().?.message);
+            // The DETAIL is a field of its own (ErrorInfo.fields()).
+            const fields = db.lastError().?.fields();
+            if (std.mem.indexOf(u8, f.msg, "\nDETAIL:  ")) |i| {
+                try testing.expectEqualStrings(f.msg[0..i], fields.message);
+                try testing.expectEqualStrings(f.msg[i + "\nDETAIL:  ".len ..], fields.detail.?);
+            } else try testing.expect(fields.detail == null);
             if (!f.coerced) try testing.expectEqual(xqlite.ResultCode.constraint, db.lastError().?.code.primary());
         }
         // A statement compiled in SQLite's dialect keeps SQLite's error.

@@ -120,6 +120,8 @@ pub const Failure = struct {
     code: xqlite.ResultCode,
     /// Valid until the sink returns.
     message: []const u8,
+    /// Where PostgreSQL's fields of the message start (ErrorInfo.fields_at).
+    fields_at: xqlite.ErrorInfo.FieldsAt = .{},
     /// The byte offset in the script of the token at fault, if known.
     offset: ?usize,
     /// The command of the statement that failed (what the text says).
@@ -369,6 +371,7 @@ fn fail(s: *Session, sink: anytype, at: ?usize, cmd: command.Command) !void {
         .number = info.dialect_number,
         .code = info.code,
         .message = info.message,
+        .fields_at = info.fields_at,
         .offset = if (at) |a| if (info.offset) |o| a + o else null else null,
         .command = cmd,
     });

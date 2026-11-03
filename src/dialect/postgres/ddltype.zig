@@ -28,6 +28,7 @@ const Children = @import("jtype.zig").Children;
 const operators = @import("operators.zig");
 const typing = @import("../../sql/typing.zig");
 const integer = @import("integer.zig");
+const overload = @import("overload.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -119,7 +120,7 @@ fn probeWith(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tre
     };
     select_mod.selectPrep(&q, x, null);
     if (db.malloc_failed) return error.OutOfMemory;
-    var b: Back = .{ .o = &origins, .a = a, .p = &q, .own_with = own_with };
+    var b: Back = .{ .o = &origins, .a = a, .p = &q, .outer = outer, .own_with = own_with };
     try b.select(s);
     // The numeric expressions of an index: their keys without a display
     // scale (xq_dec_key()), as a comparison compares them, so that the
@@ -150,6 +151,9 @@ const Back = struct {
     o: *const lower.Origins,
     a: std.mem.Allocator,
     p: *int.Parse,
+    /// The statement's Parse, which a literal no value of its type fails
+    /// (boolLiteral()).
+    outer: *int.Parse,
     /// The WITH of the query probed, whose CTEs are not (CteProbe).
     own_with: ?*tree.With,
     /// The CTEs in scope.
@@ -398,6 +402,8 @@ const Back = struct {
                 const y = if (x.op == TK.NOT) x.left orelse return else x;
                 if (il.items.len == 1 and (y.op == TK.EQ or y.op == TK.NE)) {
                     // x IN (a) is x = +a.
+                    const a = unplus(y.right);
+                    if (try b.boolLiteral(&il.items[0], a, y.left) or try b.boolLiteral(&il.e, y.left, a)) return;
                     _ = try b.wrapped(&il.e, y.left);
                     _ = try b.wrapped(&il.items[0], y.right);
                     return;
@@ -430,6 +436,9 @@ const Back = struct {
                     TK.EQ, TK.NE, TK.LT, TK.LE, TK.GT, TK.GE, TK.IS, TK.ISNOT => {},
                     else => return,
                 }
+                // A string literal met by a boolean, read as one
+                // (overload.zig's compare(): b = 't').
+                if (try b.boolLiteral(&c.l, x.left, x.right) or try b.boolLiteral(&c.r, x.right, x.left)) return;
                 // Intervals: keys, a BLOB column's bounds.
                 const wl = try b.wrapped(&c.l, x.left);
                 const wr = try b.wrapped(&c.r, x.right);
@@ -535,6 +544,30 @@ const Back = struct {
         t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = iw.name(), .mode = .{ .func = integer.castName(iw) } } });
     }
 
+    fn isBoolean(b: *const Back, x: *const IrExpr) bool {
+        return typing.typeOf(b.p.db, x.xq_type).logical == .boolean;
+    }
+
+    /// A string literal operand `t` the core read as a boolean (`w`:
+    /// xq_pg_bool('t')): that cast; whether it was. One that is no
+    /// boolean (`b = 'xyz'`, which the probe's core refused: `w` the
+    /// literal, `other` a boolean) fails the statement, as PostgreSQL's
+    /// CREATE VIEW and CHECK do.
+    fn boolLiteral(b: *Back, t: **Expr, w_: ?*IrExpr, other: ?*IrExpr) Error!bool {
+        const w = w_ orelse return false;
+        if (t.*.kind != .string) return false;
+        if (w.op == TK.STRING and w == b.of(t.*)) {
+            const o = other orelse return false;
+            if (b.isBoolean(o)) _ = try typing.readLiteralWith(b.outer, "xq_pg_bool", w);
+            return false;
+        }
+        if (!calls(w, "xq_pg_bool")) return false;
+        const list = w.x.list orelse return false;
+        if (list.len() != 1 or list.at(0).expr != b.of(t.*)) return false;
+        t.* = try tree.expr(b.a, t.*.pos, t.*.end, .{ .cast = .{ .e = t.*, .target_type = "boolean", .mode = .{ .func = "xq_pg_bool" } } });
+        return true;
+    }
+
     /// A string literal operand `t` the core read as an array (`w`:
     /// xq_pg_array_int4('{1}')): that cast.
     fn literalArray(b: *Back, t: **Expr, w_: ?*IrExpr) Error!void {
@@ -550,7 +583,8 @@ const Back = struct {
     fn call(b: *Back, f: *tree.Func, x: *IrExpr) Error!void {
         if (!isCall(x)) return;
         const want = lower.functionName(b.p, f.name.text, f.dialect, false) catch return error.OutOfMemory;
-        if (!std.ascii.eqlIgnoreCase(want, x.token()) and renames.has(x.token())) {
+        const kind = overload.kindEngine(x.token()) != null;
+        if (!std.ascii.eqlIgnoreCase(want, x.token()) and (renames.has(x.token()) or kind)) {
             f.name.text = x.token();
             f.dialect = null;
         }
@@ -576,7 +610,9 @@ const Back = struct {
         }
         // Arguments the core added (array_to_json()'s, the element type of
         // an array's: array.Code).
-        if (items.len > f.args.len and f.args.len > 0 and adds_args.has(x.token())) {
+        // The type of an argument the value does not tell (overload.zig's
+        // kind_calls: xq_pg_to_char(d, t, kind)).
+        if (items.len > f.args.len and f.args.len > 0 and (adds_args.has(x.token()) or kind)) {
             var args: std.ArrayList(*Expr) = .empty;
             try args.appendSlice(b.a, f.args);
             for (items[f.args.len..]) |c| try args.append(b.a, try b.constant(f.args[0], c.expr.?) orelse return);
@@ -726,6 +762,12 @@ fn resultCol(cols: []const tree.ResultCol, t: *const Expr) ?*Expr {
         },
         else => return null,
     }
+}
+
+/// `x` without the unary + of `a` in `x IN (a)` (`x = +a`).
+fn unplus(x: ?*IrExpr) ?*IrExpr {
+    const y = x orelse return null;
+    return if (y.op == TK.UPLUS) y.left else y;
 }
 
 fn isCall(x: *const IrExpr) bool {

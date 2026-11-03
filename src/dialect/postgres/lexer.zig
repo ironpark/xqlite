@@ -26,6 +26,7 @@ const std = @import("std");
 const lex = @import("../lex.zig");
 const ctype = @import("xqlite_base").ctype;
 const digitOf = @import("integer.zig").digitOf;
+const ErrorFields = @import("../../sql/util.zig").ErrorFields;
 
 pub const Kind = enum {
     eof,
@@ -87,8 +88,9 @@ pub const Lexer = struct {
     src: [:0]const u8,
     pos: usize,
     arena: std.mem.Allocator,
-    /// The message of the last error (error.LexFailed), and where.
-    err_msg: []const u8 = "",
+    /// The last error (error.LexFailed): its message and HINT, and
+    /// where.
+    err: ErrorFields = .{ .message = "" },
     err_pos: usize = 0,
 
     pub fn init(arena: std.mem.Allocator, src: [:0]const u8, pos: usize) Lexer {
@@ -97,9 +99,20 @@ pub const Lexer = struct {
 
     fn fail(l: *Lexer, at: usize, comptime fmt: []const u8, args: anytype) Error {
         l.err_pos = at;
-        l.err_msg = try std.fmt.allocPrint(l.arena, fmt, args);
+        l.err = .{ .message = try std.fmt.allocPrint(l.arena, fmt, args) };
         return error.LexFailed;
     }
+
+    /// fail() with PostgreSQL's HINT.
+    fn failHint(l: *Lexer, at: usize, hint: []const u8, comptime fmt: []const u8, args: anytype) Error {
+        const err = l.fail(at, fmt, args);
+        l.err.hint = hint;
+        return err;
+    }
+
+    /// The HINTs of a Unicode escape that is none: of E'...' and of U&'...'.
+    const e_escape_hint = "Unicode escapes must be \\uXXXX or \\UXXXXXXXX.";
+    const u_escape_hint = "Unicode escapes must be \\XXXX or \\+XXXXXX.";
 
     /// The text from `at` to the end of the line, for "at or near".
     fn near(l: *Lexer, at: usize) []const u8 {
@@ -375,7 +388,7 @@ pub const Lexer = struct {
                 return j;
             },
             'u', 'U' => {
-                var v = unicodeEscape(s, i) orelse return l.fail(i, "invalid Unicode escape", .{});
+                var v = unicodeEscape(s, i) orelse return l.failHint(i, e_escape_hint, "invalid Unicode escape", .{});
                 var end = i + 2 + @as(usize, if (c == 'u') 4 else 8);
                 if (isSurrogateSecond(v)) return l.fail(i, "invalid Unicode surrogate pair at or near \"{s}\"", .{s[i..end]});
                 if (isSurrogateFirst(v)) {
@@ -448,9 +461,9 @@ pub const Lexer = struct {
             }
             const n: usize = if (i + 1 < in.len and in[i + 1] == '+') 6 else 4;
             const digits_at = i + 1 + @as(usize, if (n == 6) 1 else 0);
-            if (digits_at + n > in.len) return l.fail(base + i, "invalid Unicode escape", .{});
+            if (digits_at + n > in.len) return l.failHint(base + i, u_escape_hint, "invalid Unicode escape", .{});
             var v: u32 = 0;
-            for (in[digits_at .. digits_at + n]) |ch| v = v * 16 + (std.fmt.charToDigit(ch, 16) catch return l.fail(base + i, "invalid Unicode escape", .{}));
+            for (in[digits_at .. digits_at + n]) |ch| v = v * 16 + (std.fmt.charToDigit(ch, 16) catch return l.failHint(base + i, u_escape_hint, "invalid Unicode escape", .{}));
             if (v == 0 or v > 0x10FFFF) return l.fail(base + i, "invalid Unicode escape value", .{});
             if (pair_first != 0) {
                 if (!isSurrogateSecond(v)) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
@@ -611,7 +624,7 @@ fn expectLexError(src: [:0]const u8, msg: []const u8) !void {
     while (true) {
         const t = l.next() catch |err| {
             try testing.expectEqual(error.LexFailed, err);
-            try testing.expectEqualStrings(msg, l.err_msg);
+            try testing.expectEqualStrings(msg, l.err.message);
             return;
         };
         if (t.kind == .eof) return error.TestExpectedError;

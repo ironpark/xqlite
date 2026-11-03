@@ -18,6 +18,7 @@
 const std = @import("std");
 const dec = @import("../decimal.zig");
 const json = @import("json.zig");
+const util = @import("../../sql/util.zig");
 
 const Allocator = std.mem.Allocator;
 const Dec = dec.Dec;
@@ -25,15 +26,16 @@ const Dec = dec.Dec;
 pub const Error = error{ OutOfMemory, Failed };
 
 /// The error of a call of a number or a date/time template (also
-/// dtformat.zig's): PostgreSQL's SQLSTATE, message and DETAIL.
+/// dtformat.zig's): PostgreSQL's SQLSTATE, and the message with its
+/// DETAIL and HINT.
 pub const Diag = struct {
     state: [5]u8 = "22023".*,
-    msg: []const u8 = "",
-    detail: ?[]const u8 = null,
+    fields: util.ErrorFields = .{ .message = "" },
 
+    /// The message `msg` (a DETAIL already given is kept).
     pub fn set(d: *Diag, comptime state: *const [5]u8, msg: []const u8) Error {
         d.state = state.*;
-        d.msg = msg;
+        d.fields.message = msg;
         return error.Failed;
     }
 };
@@ -240,7 +242,7 @@ fn prepare(num: *Desc, id: Id, diag: *Diag) Error!void {
             if (num.has(F_BLANK) or num.has(F_FILLMODE) or num.has(F_LSIGN) or num.has(F_BRACKET) or
                 num.has(F_MINUS) or num.has(F_PLUS) or num.has(F_ROMAN) or num.has(F_MULTI))
             {
-                diag.detail = "\"EEEE\" may only be used together with digit and decimal point patterns.";
+                diag.fields.detail = "\"EEEE\" may only be used together with digit and decimal point patterns.";
                 return syntax(diag, "\"EEEE\" is incompatible with other formats");
             }
             num.flag |= F_EEEE;
@@ -248,7 +250,7 @@ fn prepare(num: *Desc, id: Id, diag: *Diag) Error!void {
         else => {},
     }
     if (num.has(F_ROMAN) and num.flag & ~(F_ROMAN | F_FILLMODE) != 0) {
-        diag.detail = "\"RN\" may only be used together with \"FM\".";
+        diag.fields.detail = "\"RN\" may only be used together with \"FM\".";
         return syntax(diag, "\"RN\" is incompatible with other formats");
     }
 }
@@ -725,7 +727,7 @@ pub fn toNumber(a: Allocator, t: Template, in: []const u8, diag: *Diag) Error!De
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             var buf: [160]u8 = undefined;
-            diag.detail = try a.dupe(u8, dec.overflowDetail(&buf, d, precision, scale));
+            diag.fields.detail = try a.dupe(u8, dec.overflowDetail(&buf, d, precision, scale));
             return diag.set("22003", "numeric field overflow");
         },
     };

@@ -7,7 +7,8 @@
 //! `2024-01-02 03:04:05+00`. text() writes a value so, from the type of
 //! its column (types.zig), for the shell and the wire protocols alike;
 //! the values themselves, and what the C and Zig APIs return, stay
-//! SQLite's.
+//! SQLite's. The text is dialect/valuetext.zig's, which a dialect's
+//! messages (a constraint's DETAIL) write values with too.
 //!
 //! A value a dialect stores as a BLOB of its own form (a numeric's key, a
 //! uuid's bytes, an interval, jsonb as JSONB) is written by the form's
@@ -33,113 +34,46 @@ const Type = types.Type;
 
 /// The longest text() writes into its buffer (an interval's text is up
 /// to 70 bytes).
-pub const max_len = repr.max_len;
+pub const max_len = valuetext.max_len;
 
-/// `cell`, a value of a column of type `t`, as `viewer` shows it, if not
-/// as SQLite does (in `buf` or static); null for SQLite's text.
-pub fn text(viewer: Dialect, t: Type, cell: Value, buf: *[max_len]u8) ?[]const u8 {
-    // A BLOB of a dialect's form (a numeric key, a uuid's bytes, an
-    // interval): dialect/repr.zig.
-    if (cell == .blob) return repr.text(viewer, t, cell.blob, buf);
-    switch (t.logical) {
-        .boolean => {
-            const b = switch (cell) {
-                .integer => |v| v != 0,
-                else => return null,
-            };
-            return switch (viewer) {
-                .postgres => if (b) "t" else "f",
-                // Oracle 23ai's BOOLEAN.
-                .oracle => if (b) "TRUE" else "FALSE",
-                // MariaDB's BOOLEAN is TINYINT(1) and SQL Server's bit
-                // shows 0/1: as stored.
-                .sqlite, .mariadb, .mssql => null,
-            };
-        },
-        .numeric => {
-            // A DECIMAL(p,s) shows its s digits; Oracle's NUMBER(p,s)
-            // drops trailing zeros, as SQLite does.
-            switch (viewer) {
-                .postgres, .mariadb, .mssql => {},
-                .sqlite, .oracle => return null,
-            }
-            const scale = t.scale orelse return null;
-            return fixed(cell, scale, buf);
-        },
-        .timestamp_tz => {
-            if (viewer != .postgres) return null;
-            const z = switch (cell) {
-                .text => |z| z,
-                else => return null,
-            };
-            return utc(z, buf);
-        },
-        .char => {
-            // PostgreSQL's character(n) is padded with spaces to n
-            // characters; the value is kept without them.
-            if (viewer != .postgres) return null;
-            const n = t.length orelse return null;
-            const z = switch (cell) {
-                .text => |z| z,
-                else => return null,
-            };
-            const have = std.unicode.utf8CountCodepoints(z) catch return null;
-            if (have >= n or z.len + (n - have) > max_len) return null;
-            @memcpy(buf[0..z.len], z);
-            @memset(buf[z.len..][0 .. n - have], ' ');
-            return buf[0 .. z.len + n - have];
-        },
-        // uuid, interval: the text of an older table's TEXT column as
-        // stored.
-        else => return null,
-    }
-}
-
+/// The core of the display, which a dialect's messages write values with
+/// too (dialect/valuetext.zig).
+const valuetext = @import("../dialect/valuetext.zig");
 /// The values a dialect stores as a BLOB of its own form, and their text.
 const repr = @import("../dialect/repr.zig");
 
-/// The text of `cell` that needs memory of its own (in `gpa`, which the
+/// `v` as the core holds it.
+fn cell(v: Value) valuetext.Cell {
+    return switch (v) {
+        inline else => |x, tag| @unionInit(valuetext.Cell, @tagName(tag), x),
+    };
+}
+
+/// `v`, a value of a column of type `t`, as `viewer` shows it, if not
+/// as SQLite does (in `buf` or static); null for SQLite's text.
+pub fn text(viewer: Dialect, t: Type, v: Value, buf: *[max_len]u8) ?[]const u8 {
+    return valuetext.text(viewer, t, cell(v), buf);
+}
+
+/// The text of `v` that needs memory of its own (in `gpa`, which the
 /// caller frees it with), null for the others (text()), in every dialect
 /// but SQLite's, which shows the blob: a jsonb value stored as SQLite's
 /// JSONB (a blob, dialect/jsonb.zig) is its JSON text with PostgreSQL's
 /// spacing (`{"a": 1}`); a numeric key (dialect/decimal.zig) its digits
 /// (as text() writes them, of any length). dialect/repr.zig.
-pub fn textAlloc(gpa: std.mem.Allocator, viewer: Dialect, t: Type, cell: Value) error{OutOfMemory}!?[]u8 {
-    const b = switch (cell) {
-        .blob => |b| b,
-        else => return null,
-    };
-    return repr.textAlloc(gpa, viewer, t, b);
+pub fn textAlloc(gpa: std.mem.Allocator, viewer: Dialect, t: Type, v: Value) error{OutOfMemory}!?[]u8 {
+    return valuetext.textAlloc(gpa, viewer, t, cell(v));
 }
 
-/// A number with `scale` digits after the point.
-fn fixed(cell: Value, scale: u8, buf: *[max_len]u8) ?[]const u8 {
-    // Beyond the digits a double holds the text would show noise.
-    if (scale > 15) return null;
-    return switch (cell) {
-        // As stored, without a point.
-        .integer => |v| if (scale == 0) null else std.fmt.bufPrint(buf, "{d}.{s}", .{ v, "000000000000000"[0..scale] }) catch null,
-        .float => |v| if (std.math.isFinite(v) and @abs(v) < 1e15) std.fmt.bufPrint(buf, "{d:.[1]}", .{ v, scale }) catch null else null,
-        else => null,
-    };
+/// PostgreSQL's text of `v` (not NULL), a value of a column of type `t`
+/// (valuetext.pgText()): text()'s, a double's shortest digits, a text as
+/// stored; null for a blob no form writes.
+pub fn pgText(t: Type, v: Value, buf: *[max_len]u8) ?[]const u8 {
+    return valuetext.pgText(t, cell(v), buf);
 }
 
-/// PostgreSQL's timestamptz text of a UTC timestamp without an offset
-/// ("2024-01-02 03:04:05[.fff]"): the offset "+00" appended.
-fn utc(z: []const u8, buf: *[max_len]u8) ?[]const u8 {
-    // YYYY-MM-DD HH:MM:SS, then at most a fraction.
-    if (z.len < 19 or z.len + 3 > buf.len or z[10] != ' ' or z[13] != ':') return null;
-    const rest = z[19..];
-    if (rest.len > 0 and (rest[0] != '.' or !allDigits(rest[1..]))) return null;
-    @memcpy(buf[0..z.len], z);
-    @memcpy(buf[z.len..][0..3], "+00");
-    return buf[0 .. z.len + 3];
-}
-
-fn allDigits(z: []const u8) bool {
-    for (z) |c| if (!std.ascii.isDigit(c)) return false;
-    return true;
-}
+/// PostgreSQL's text of a double (valuetext.floatText()).
+pub const floatText = valuetext.floatText;
 
 /// The types of a connection's result columns: a table column's from the
 /// catalog the connection keeps in memory (catalog.meta(), read once per

@@ -15,6 +15,12 @@
 //! and no row was written (Sqlite3.n_total_change), so the catalog
 //! functions called once a row (pg_table_is_visible(), the reg* casts)
 //! read it once a statement. Each user is counted (acquire()/release()).
+//! As it is made again after each write, what costs is made when first
+//! read and kept in it: the PostgreSQL texts of the expressions (Expr:
+//! deparse.zig reads each once for both modes) and the rows of each
+//! relation (rowsOf(), freed when only the cache holds the snapshot:
+//! release()). What is looked up by name or OID is hashed, a relation's
+//! rows by their range (Snapshot.ranges).
 //!
 //! The relations are engine table-valued functions (eponymous virtual
 //! tables, Hooks.engine_modules) xq_pg_class ... whose columns are
@@ -294,13 +300,61 @@ pub const opfamilies = [_]struct { u32, u32, []const u8 }{
 /// .indclass): its type's, else text's for a string type (varchar's
 /// text_ops), array_ops for an array, 0 for none.
 pub fn defaultOpclass(oid: u32) u32 {
-    for (opclasses) |c| if (c[1] == 403 and c[5] and c[4] == oid) return c[0];
-    if (builtinType(oid)) |t| {
-        if (t.cat == 'S') return 3126;
-        if (t.cat == 'A') return 10000;
-    }
-    return 0;
+    return lookup(default_opclasses, oid) orelse 0;
 }
+
+/// A value by OID, in a table sorted by OID.
+const ByOid = struct {
+    oid: u32,
+    v: u32,
+
+    fn lt(_: void, x: ByOid, y: ByOid) bool {
+        return x.oid < y.oid;
+    }
+
+    fn cmp(key: u32, x: ByOid) std.math.Order {
+        return std.math.order(key, x.oid);
+    }
+};
+
+fn lookup(table: []const ByOid, oid: u32) ?u32 {
+    const i = std.sort.binarySearch(ByOid, table, oid, ByOid.cmp) orelse return null;
+    return table[i].v;
+}
+
+/// `items` sorted by OID, the first of each OID kept.
+fn firstByOid(comptime items: []const ByOid) []const ByOid {
+    comptime {
+        @setEvalBranchQuota(4_000);
+        var sorted = items[0..items.len].*;
+        // Stable: the first of an OID stays first.
+        std.mem.sort(ByOid, &sorted, {}, ByOid.lt);
+        var out: [items.len]ByOid = undefined;
+        var n = 0;
+        for (sorted) |x| {
+            if (n > 0 and out[n - 1].oid == x.oid) continue;
+            out[n] = x;
+            n += 1;
+        }
+        const final = out[0..n].*;
+        return &final;
+    }
+}
+
+/// defaultOpclass() of each type that has one (its first default btree
+/// class, else text_ops or array_ops by builtinType()'s category).
+const default_opclasses = blk: {
+    var out: []const ByOid = &.{};
+    for (opclasses) |c| if (c[1] == 403 and c[5]) {
+        out = out ++ .{ByOid{ .oid = c[4], .v = c[0] }};
+    };
+    for (type_index) |x| switch (builtin_types[x.v].cat) {
+        'S' => out = out ++ .{ByOid{ .oid = x.oid, .v = 3126 }},
+        'A' => out = out ++ .{ByOid{ .oid = x.oid, .v = 10000 }},
+        else => {},
+    };
+    break :blk firstByOid(out);
+};
 
 /// Every built-in type: the base types and an array type of each that
 /// has one (_int4, "integer[]").
@@ -338,9 +392,15 @@ pub const builtin_types: []const BuiltinType = blk: {
 };
 
 pub fn builtinType(oid: u32) ?*const BuiltinType {
-    for (builtin_types) |*t| if (t.oid == oid) return t;
-    return null;
+    return &builtin_types[lookup(type_index, oid) orelse return null];
 }
+
+/// The place in builtin_types of each OID (its first).
+const type_index = blk: {
+    var out: [builtin_types.len]ByOid = undefined;
+    for (builtin_types, &out, 0..) |t, *o, i| o.* = .{ .oid = t.oid, .v = i };
+    break :blk firstByOid(&out);
+};
 
 /// The type OID of `t` as the wire server describes it (keep with
 /// src/server/pg/values.zig's ofType(), which a test compares).
@@ -424,15 +484,24 @@ fn hashOid(cat: u8, key: []const u8) u32 {
 
 /// The OIDs of `keys` in catalog `cat` (see the top of the file).
 fn assign(a: Allocator, cat: u8, keys: []const []const u8) Oom![]u32 {
-    const order = try a.alloc(u32, keys.len);
-    for (order, 0..) |*o, i| o.* = @intCast(i);
-    std.mem.sort(u32, order, keys, struct {
-        fn lt(k: []const []const u8, x: u32, y: u32) bool {
-            return std.mem.order(u8, k[x], k[y]) == .lt;
-        }
-    }.lt);
     const out = try a.alloc(u32, keys.len);
     var used: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    try used.ensureTotalCapacity(a, @intCast(keys.len));
+    // Without a collision, each key has its number in any order (no
+    // number is taken before its key comes): the keys are not sorted.
+    for (keys, out) |k, *o| {
+        o.* = hashOid(cat, k);
+        if (used.getOrPutAssumeCapacity(o.*).found_existing) break;
+    } else return out;
+    used.clearRetainingCapacity();
+    const order = try a.alloc(u32, keys.len);
+    for (order, 0..) |*o, i| o.* = @intCast(i);
+    // Equal keys in their order (std.mem.sort is stable).
+    std.mem.sort(u32, order, keys, struct {
+        fn lt(k: []const []const u8, x: u32, y: u32) bool {
+            return std.mem.lessThan(u8, k[x], k[y]);
+        }
+    }.lt);
     for (order) |i| {
         var o = hashOid(cat, keys[i]);
         while (used.contains(o)) o = if (o == 0x7ffffffe) first_user_oid else o + 1;
@@ -512,10 +581,39 @@ pub const IndexRow = struct {
     /// (and pretty).
     coldefs: []const []const u8,
     coldefs_pretty: ?[]const []const u8 = null,
-    /// The expressions (indexprs) and the predicate (indpred), as text.
+    /// The expressions (indexprs), as text.
     exprs: ?[]const u8 = null,
-    pred: ?[]const u8 = null,
-    pred_pretty: ?[]const u8 = null,
+    /// The predicate (indpred): its Expr in Snapshot.exprs.
+    pred: ?u32 = null,
+};
+
+/// An expression of the schema (a DEFAULT, a generated column's, a
+/// CHECK, an index's predicate) whose PostgreSQL text is made when it is
+/// first read (Snapshot.expr()): most catalog queries read none of it,
+/// and the snapshot is made again after each write.
+pub const Expr = struct {
+    /// Its SQLite text.
+    src: []const u8,
+    kind: Kind,
+    /// The table it is over: its SQLite name and its columns in
+    /// Snapshot.attrs.
+    table: []const u8,
+    attrs: u32,
+    natts: u32,
+    /// A default's or generated column's: the column's type.
+    type_oid: u32 = 0,
+    col_type: ?ctypes.Type = null,
+
+    done: bool = false,
+    /// conbin, adbin or indpred (deparse.zig's, else the older text),
+    /// and pretty (null where deparse.zig has none).
+    bin: []const u8 = "",
+    pretty: ?[]const u8 = null,
+    /// A CHECK's conkey, and its text (null for none).
+    keys: []const i16 = &.{},
+    keys_text: ?[]const u8 = null,
+
+    pub const Kind = enum { default, generated, check, pred };
 };
 
 pub const Con = struct {
@@ -533,13 +631,13 @@ pub const Con = struct {
     del: u8 = ' ',
     deferrable: bool = false,
     deferred: bool = false,
-    /// A CHECK's expression (conbin, as text), and pretty
-    /// (deparse.zig; null where it kept the older text).
-    bin: ?[]const u8 = null,
-    pretty: ?[]const u8 = null,
+    /// A CHECK's expression (conbin, its conkey): its Expr in
+    /// Snapshot.exprs.
+    check: ?u32 = null,
 };
 
-pub const Def = struct { oid: u32, rel: u32, num: i16, bin: []const u8, pretty: ?[]const u8 = null };
+/// pg_attrdef's row; `expr`: its Expr in Snapshot.exprs (adbin).
+pub const Def = struct { oid: u32, rel: u32, num: i16, expr: u32 };
 
 /// The catalog key of a comment of COMMENT ON (session.zig), on the
 /// table's entry or the column's.
@@ -565,7 +663,89 @@ pub const Snapshot = struct {
     defs: []Def = &.{},
     deps: []Dep = &.{},
     descs: []Desc = &.{},
+    /// The expressions of defs, cons and indexes, made on first reading.
+    exprs: []Expr = &.{},
+    /// The CREATE SCHEMA schemas (pgText()).
+    registered: []const nsp_mod.Info = &.{},
     by_oid: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    /// The places of a relation's rows (attrs, defs, cons, its indexes),
+    /// which are next to each other (each table is described at once).
+    ranges: std.AutoHashMapUnmanaged(u32, Ranges) = .empty,
+    con_by_oid: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    index_by_oid: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    by_name: std.HashMapUnmanaged(NameKey, u32, NameKey.HashCtx, std.hash_map.default_max_load_percentage) = .empty,
+    /// The tables, views and sequences by database and SQLite name
+    /// (tableRel()).
+    by_sqlite: std.HashMapUnmanaged(SqliteKey, u32, SqliteKey.HashCtx, std.hash_map.default_max_load_percentage) = .empty,
+    /// What is made when first read, which a reader of a const snapshot
+    /// changes: the snapshot is the connection's (no other thread reads
+    /// it), and what is made is kept for every later reader.
+    lazy: *Lazy,
+
+    pub const Lazy = struct {
+        /// The texts of Snapshot.exprs: the snapshot's arena.
+        texts: Allocator,
+        /// The rows of each relation read (rowsOf()), by its fill
+        /// function, while a statement holds the snapshot: release()
+        /// frees them when only the connection's cache does.
+        rows: std.heap.ArenaAllocator,
+        filled: std.AutoHashMapUnmanaged(usize, []const Cell) = .empty,
+
+        fn idle(l: *Lazy) void {
+            l.filled = .empty;
+            _ = l.rows.reset(.free_all);
+        }
+    };
+
+    pub const Range = struct {
+        lo: u32 = 0,
+        hi: u32 = 0,
+
+        fn of(r: Range, comptime T: type, xs: []T) []T {
+            return xs[r.lo..r.hi];
+        }
+    };
+
+    pub const Ranges = struct { attrs: Range = .{}, defs: Range = .{}, cons: Range = .{}, indexes: Range = .{} };
+
+    /// The key of by_sqlite: a SQLite name is told apart without its
+    /// case (int.NoCaseContext).
+    pub const SqliteKey = struct {
+        /// 'T' a table or view, 'S' a sequence.
+        kind: u8,
+        db: []const u8,
+        name: []const u8,
+
+        pub const HashCtx = struct {
+            pub fn hash(_: HashCtx, k: SqliteKey) u64 {
+                var h = std.hash.Wyhash.init(int.NoCaseContext.hash(.{}, k.name));
+                h.update(&.{k.kind});
+                h.update(k.db);
+                return h.final();
+            }
+
+            pub fn eql(_: HashCtx, x: SqliteKey, y: SqliteKey) bool {
+                return x.kind == y.kind and std.mem.eql(u8, x.db, y.db) and int.NoCaseContext.eql(.{}, x.name, y.name);
+            }
+        };
+    };
+
+    pub const NameKey = struct {
+        nsp: u32,
+        name: []const u8,
+
+        pub const HashCtx = struct {
+            pub fn hash(_: HashCtx, k: NameKey) u64 {
+                var h = std.hash.Wyhash.init(k.nsp);
+                h.update(k.name);
+                return h.final();
+            }
+
+            pub fn eql(_: HashCtx, x: NameKey, y: NameKey) bool {
+                return x.nsp == y.nsp and std.mem.eql(u8, x.name, y.name);
+            }
+        };
+    };
 
     pub fn rel(s: *const Snapshot, oid: u32) ?*const Rel {
         const i = s.by_oid.get(oid) orelse return null;
@@ -582,30 +762,122 @@ pub const Snapshot = struct {
         return null;
     }
 
+    /// The table or view of SQLite name `name` of database `db_name`.
+    pub fn tableRel(s: *const Snapshot, db_name: []const u8, name: []const u8) ?*const Rel {
+        return &s.rels[s.by_sqlite.get(.{ .kind = 'T', .db = db_name, .name = name }) orelse return null];
+    }
+
     pub fn relByName(s: *const Snapshot, nsp_oid: u32, name: []const u8) ?*const Rel {
-        for (s.rels) |*r| if (r.nsp == nsp_oid and eql(r.name, name)) return r;
-        return null;
+        const i = s.by_name.get(.{ .nsp = nsp_oid, .name = name }) orelse return null;
+        return &s.rels[i];
     }
 
     pub fn con(s: *const Snapshot, oid: u32) ?*const Con {
-        for (s.cons) |*c| if (c.oid == oid) return c;
-        return null;
+        return &s.cons[s.con_by_oid.get(oid) orelse return null];
     }
 
     pub fn index(s: *const Snapshot, oid: u32) ?*const IndexRow {
-        for (s.indexes) |*x| if (x.rel == oid) return x;
-        return null;
+        return &s.indexes[s.index_by_oid.get(oid) orelse return null];
+    }
+
+    fn rangesOf(s: *const Snapshot, rel_oid: u32) Ranges {
+        return s.ranges.get(rel_oid) orelse .{};
+    }
+
+    /// The attributes of relation `rel_oid`, in their order.
+    pub fn attrsOf(s: *const Snapshot, rel_oid: u32) []const Attr {
+        return s.rangesOf(rel_oid).attrs.of(Attr, s.attrs);
+    }
+
+    /// The columns of relation `rel_oid` (its attributes of attnum > 0,
+    /// which come first).
+    pub fn columnsOf(s: *const Snapshot, rel_oid: u32) []const Attr {
+        const all = s.attrsOf(rel_oid);
+        var j: usize = 0;
+        while (j < all.len and all[j].num > 0) j += 1;
+        return all[0..j];
+    }
+
+    /// The defaults, constraints and indexes of table `rel_oid`.
+    pub fn defsOf(s: *const Snapshot, rel_oid: u32) []const Def {
+        return s.rangesOf(rel_oid).defs.of(Def, s.defs);
+    }
+
+    pub fn consOf(s: *const Snapshot, rel_oid: u32) []const Con {
+        return s.rangesOf(rel_oid).cons.of(Con, s.cons);
+    }
+
+    pub fn indexesOf(s: *const Snapshot, rel_oid: u32) []const IndexRow {
+        return s.rangesOf(rel_oid).indexes.of(IndexRow, s.indexes);
     }
 
     /// The attribute `num` of relation `rel`.
     pub fn attr(s: *const Snapshot, rel_oid: u32, num: i16) ?*const Attr {
-        for (s.attrs) |*x| if (x.rel == rel_oid and x.num == num) return x;
+        for (s.attrsOf(rel_oid)) |*x| if (x.num == num) return x;
         return null;
     }
 
     pub fn def(s: *const Snapshot, rel_oid: u32, num: i16) ?*const Def {
-        for (s.defs) |*x| if (x.rel == rel_oid and x.num == num) return x;
+        for (s.defsOf(rel_oid)) |*x| if (x.num == num) return x;
         return null;
+    }
+
+    /// Expression `i`, its texts made if they are not yet (kept in it).
+    pub fn expr(s: *const Snapshot, i: u32) Oom!*const Expr {
+        const e = &s.exprs[i];
+        if (!e.done) {
+            try s.deparseExpr(e);
+            e.done = true;
+        }
+        return e;
+    }
+
+    fn deparseExpr(s: *const Snapshot, e: *Expr) Oom!void {
+        const a = s.lazy.texts;
+        const own: deparse.Scope = .{ .items = &.{.{ .name = e.table, .attrs = s.attrs[e.attrs..][0..e.natts] }} };
+        var as = own;
+        as.as_type = e.type_oid;
+        switch (e.kind) {
+            .generated => {
+                const t = try deparse.both(a, e.src, as);
+                e.bin = t.plain orelse try pgText(a, e.src, s.registered);
+                e.pretty = t.pretty;
+            },
+            .default => {
+                const t = try defaultTexts(a, e.src, e.type_oid, s.registered, e.col_type, as);
+                e.bin = t.plain;
+                e.pretty = t.pretty;
+            },
+            .check => {
+                const c = try deparse.check(a, e.src, own);
+                e.keys = c.keys;
+                if (c.keys.len > 0) e.keys_text = try vector(a, c.keys, true);
+                e.bin = c.texts.plain orelse try pgText(a, e.src, s.registered);
+                e.pretty = if (c.texts.plain != null) c.texts.pretty else null;
+            },
+            .pred => {
+                const t = try deparse.both(a, e.src, own);
+                e.bin = t.plain orelse try pgText(a, stripParens(e.src), s.registered);
+                e.pretty = t.pretty;
+            },
+        }
+    }
+
+    /// The rows of relation `r`, made once (a nested loop scans the
+    /// relation again for each row of the outer one).
+    pub fn rowsOf(s: *const Snapshot, comptime r: Relation) Oom![]const Cell {
+        const l = s.lazy;
+        const key = @intFromPtr(r.fill);
+        if (l.filled.get(key)) |cells| return cells;
+        var rows: Rows = .{ .a = l.rows.allocator(), .ncol = r.cols.len };
+        try r.fill(s, &rows);
+        try l.filled.put(l.rows.allocator(), key, rows.cells.items);
+        return rows.cells.items;
+    }
+
+    /// The text of CHECK `c` (conbin), null for another constraint.
+    pub fn checkText(s: *const Snapshot, c: *const Con) Oom!?*const Expr {
+        return try s.expr(c.check orelse return null);
     }
 
     /// The temporary schema, if there is one.
@@ -617,58 +889,112 @@ pub const Snapshot = struct {
 
 pub const Error = Oom || error{Failed};
 
-/// The cache of the connection: State.catalog.
+/// Ends a use of `s` (acquire()). When only the connection's cache
+/// (State.catalog) is left holding it, the rows read for the statements
+/// are freed: the cache keeps the snapshot, not what was read of it.
 pub fn release(db: *Sqlite3, s: *Snapshot) void {
+    if (s.refs == 2 and db.xq.postgres.catalog == @as(?*anyopaque, s)) s.lazy.idle();
     releaseGpa(db.gpa, s);
 }
 
 fn releaseGpa(gpa: Allocator, s: *Snapshot) void {
     s.refs -= 1;
     if (s.refs == 0) {
+        s.lazy.rows.deinit();
         s.arena.deinit();
         gpa.destroy(s);
     }
 }
 
-fn keyOf(db: *Sqlite3, a: Allocator) Oom![]usize {
-    var k: std.ArrayList(usize) = .empty;
-    try k.append(a, @bitCast(@as(isize, @intCast(db.n_total_change))));
+/// What a snapshot is read from (Snapshot.key), each item given to
+/// `sink.put()`: n_total_change, then each database's schema, its cookie
+/// and generation, and whether it is loaded.
+fn writeKey(db: *Sqlite3, sink: anytype) void {
+    sink.put(@bitCast(@as(isize, @intCast(db.n_total_change))));
     for (db.dbs.items) |d| {
-        try k.append(a, @intFromPtr(d.schema));
-        try k.append(a, @as(u32, @bitCast(d.schema.schema_cookie)));
-        try k.append(a, @as(u32, @bitCast(d.schema.i_generation)));
-        try k.append(a, @intFromBool(d.schema.schema_flags.SchemaLoaded));
+        sink.put(@intFromPtr(d.schema));
+        sink.put(@as(u32, @bitCast(d.schema.schema_cookie)));
+        sink.put(@as(u32, @bitCast(d.schema.i_generation)));
+        sink.put(@intFromBool(d.schema.schema_flags.SchemaLoaded));
     }
-    return k.items;
 }
 
-/// The snapshot of the connection's catalogs: the one kept if nothing
-/// changed since, else a new one (kept in its place). release() it.
-pub fn acquire(db: *Sqlite3) Error!*Snapshot {
+fn keyLen(db: *Sqlite3) usize {
+    return 1 + 4 * db.dbs.items.len;
+}
+
+fn keyOf(db: *Sqlite3, a: Allocator) Oom![]usize {
+    var w: struct {
+        k: []usize,
+        i: usize = 0,
+        fn put(x: *@This(), v: usize) void {
+            x.k[x.i] = v;
+            x.i += 1;
+        }
+    } = .{ .k = try a.alloc(usize, keyLen(db)) };
+    writeKey(db, &w);
+    return w.k;
+}
+
+/// Whether keyOf() would give `key` (without making it).
+fn sameKey(db: *Sqlite3, key: []const usize) bool {
+    if (key.len != keyLen(db)) return false;
+    var c: struct {
+        k: []const usize,
+        i: usize = 0,
+        same: bool = true,
+        fn put(x: *@This(), v: usize) void {
+            x.same = x.same and x.k[x.i] == v;
+            x.i += 1;
+        }
+    } = .{ .k = key };
+    writeKey(db, &c);
+    return c.same;
+}
+
+/// The schema of each database read, if it is not (what a snapshot is
+/// made from).
+fn loadSchema(db: *Sqlite3) Error!void {
     var err: ?[:0]u8 = null;
     const rc = prepare.init(db, &err);
     if (err) |m| db.gpa.free(m);
     if (rc == int.RC.NOMEM) return error.OutOfMemory;
     if (rc != int.RC.OK) return error.Failed;
+}
+
+/// The snapshot the connection keeps, if nothing changed since it was
+/// made (after loadSchema()).
+fn currentSnapshot(db: *Sqlite3) ?*Snapshot {
+    const c: *Snapshot = @ptrCast(@alignCast(db.xq.postgres.catalog orelse return null));
+    return if (sameKey(db, c.key)) c else null;
+}
+
+/// The snapshot of the connection's catalogs: the one kept if nothing
+/// changed since, else a new one (kept in its place). release() it.
+pub fn acquire(db: *Sqlite3) Error!*Snapshot {
+    try loadSchema(db);
+    return acquireLoaded(db);
+}
+
+fn acquireLoaded(db: *Sqlite3) Error!*Snapshot {
+    if (currentSnapshot(db)) |c| {
+        c.refs += 1;
+        return c;
+    }
     const st = &db.xq.postgres;
-    var tmp: std.heap.ArenaAllocator = .init(db.gpa);
-    defer tmp.deinit();
-    const key = try keyOf(db, tmp.allocator());
     if (st.catalog) |p| {
-        const c: *Snapshot = @ptrCast(@alignCast(p));
-        if (std.mem.eql(usize, c.key, key)) {
-            c.refs += 1;
-            return c;
-        }
         st.catalog = null;
-        release(db, c);
+        release(db, @ptrCast(@alignCast(p)));
     }
     const s = try db.gpa.create(Snapshot);
-    s.* = .{ .arena = .init(db.gpa) };
+    s.* = .{ .arena = .init(db.gpa), .lazy = undefined };
     errdefer {
         s.arena.deinit();
         db.gpa.destroy(s);
     }
+    s.lazy = try s.arena.allocator().create(Snapshot.Lazy);
+    s.lazy.* = .{ .texts = s.arena.allocator(), .rows = .init(db.gpa) };
+    errdefer s.lazy.rows.deinit();
     var b: Builder = .{ .db = db, .a = s.arena.allocator(), .s = s };
     try b.run();
     // Reading may have read a schema again: the key is the one after.
@@ -683,22 +1009,32 @@ fn freeCache(gpa: Allocator, p: *anyopaque) void {
     releaseGpa(gpa, @ptrCast(@alignCast(p)));
 }
 
+/// The place of each run of `items` of one `field` (a relation's OID),
+/// by that value: the first, if a value had several (the builder adds
+/// a relation's rows at once).
+fn runs(a: Allocator, map: *std.AutoHashMapUnmanaged(u32, Snapshot.Range), comptime T: type, items: []const T, comptime field: []const u8) Oom!void {
+    var i: usize = 0;
+    while (i < items.len) {
+        const k = @field(items[i], field);
+        var j = i + 1;
+        while (j < items.len and @field(items[j], field) == k) j += 1;
+        const e = try map.getOrPut(a, k);
+        if (!e.found_existing) e.value_ptr.* = .{ .lo = @intCast(i), .hi = @intCast(j) };
+        i = j;
+    }
+}
+
 // ============================================================= building
 
 /// The relations a view's query reads, while building (deparse.zig's
 /// viewSources()).
 const ViewScope = struct {
-    b: *Builder,
+    s: *const Snapshot,
     db: []const u8,
 
     fn resolve(c: ViewScope, name: []const u8) Oom!?deparse.Resolved {
-        const r = c.b.tableRel(c.db, name) orelse return null;
-        const all = c.b.attrs.items;
-        var i: usize = 0;
-        while (i < all.len and all[i].rel != r.oid) i += 1;
-        var j = i;
-        while (j < all.len and all[j].rel == r.oid) j += 1;
-        return .{ .shown = "", .attrs = all[i..j] };
+        const r = c.s.tableRel(c.db, name) orelse return null;
+        return .{ .shown = "", .attrs = c.s.attrsOf(r.oid) };
     }
 };
 
@@ -717,17 +1053,19 @@ const Builder = struct {
     def_keys: std.ArrayList([]const u8) = .empty,
     deps: std.ArrayList(Dep) = .empty,
     descs: std.ArrayList(Desc) = .empty,
+    exprs: std.ArrayList(Expr) = .empty,
     /// The tables to describe once every relation has its OID.
     tables: std.ArrayList(TableWork) = .empty,
     registered: []const nsp_mod.Info = &.{},
 
+    /// A table or view, by its place in rels.
     const TableWork = struct {
         rel: usize,
         db: []const u8,
         /// The index of the INTEGER PRIMARY KEY, if any.
         ipk: ?usize = null,
         /// The indexes of the table, by SQLite name, to their Rel.
-        indexes: []const struct { name: []const u8, rel: usize } = &.{},
+        indexes: []struct { name: []const u8, rel: usize } = &.{},
     };
 
     fn run(b: *Builder) Error!void {
@@ -782,53 +1120,118 @@ const Builder = struct {
         }
         const toids = try assign(a, 't', type_keys.items);
         for (typed.items, toids) |i, o| b.rels.items[i].rowtype = o;
+        try b.sortRels();
 
-        for (b.tables.items) |w| try b.describe(w);
-        // A foreign key's conindid: the referenced table's unique index
-        // of its columns.
-        for (b.cons.items) |*f| if (f.type == 'f') {
-            for (b.cons.items) |k| if ((k.type == 'p' or k.type == 'u') and k.rel == f.frel and std.mem.eql(i16, k.keys, f.fkeys)) {
-                f.index = k.index;
-                break;
-            };
-        };
-        // A view's column that is a table's column has its type (the
-        // core's type of it is its storage's: bigint, text, bytea).
-        for (b.rels.items) |*v| if (v.kind == 'v') if (v.sql) |sql| {
-            const srcs = try deparse.viewSources(a, sql, ViewScope{ .b = b, .db = v.db }, ViewScope.resolve) orelse continue;
-            var k: usize = 0;
-            for (b.attrs.items) |*at| if (at.rel == v.oid) {
-                if (k < srcs.len) if (srcs[k]) |src| {
-                    at.type_oid = src.type_oid;
-                    at.typmod = src.typmod;
-                    at.collation = src.collation;
-                };
-                k += 1;
-            };
-        };
-        const coids = try assign(a, 'c', b.con_keys.items);
-        for (b.cons.items, coids) |*c, o| c.oid = o;
-        const doids = try assign(a, 'd', b.def_keys.items);
-        for (b.defs.items, doids) |*x, o| x.oid = o;
-
-        // Ordered by schema and name, as a client lists them anyway.
-        const Ctx = struct {
-            fn lt(_: void, x: Rel, y: Rel) bool {
-                if (x.nsp != y.nsp) return x.nsp < y.nsp;
-                return std.mem.order(u8, x.name, y.name) == .lt;
-            }
-        };
-        std.mem.sort(Rel, b.rels.items, {}, Ctx.lt);
         const s = b.s;
         s.nsps = b.nsps.items;
         s.rels = b.rels.items;
+        s.registered = b.registered;
+        const nrel: u32 = @intCast(s.rels.len);
+        try s.by_oid.ensureTotalCapacity(a, nrel);
+        try s.by_name.ensureTotalCapacity(a, nrel);
+        try s.by_sqlite.ensureTotalCapacity(a, nrel);
+        for (s.rels, 0..) |r, i| {
+            s.by_oid.putAssumeCapacity(r.oid, @intCast(i));
+            const e = s.by_name.getOrPutAssumeCapacity(.{ .nsp = r.nsp, .name = r.name });
+            if (!e.found_existing) e.value_ptr.* = @intCast(i);
+            const kind: u8 = switch (r.kind) {
+                'r', 'v' => 'T',
+                'S' => 'S',
+                else => continue,
+            };
+            const t = s.by_sqlite.getOrPutAssumeCapacity(.{ .kind = kind, .db = r.db, .name = r.sqlite_name });
+            if (!t.found_existing) t.value_ptr.* = @intCast(i);
+        }
+
+        for (b.tables.items) |w| try b.describe(w);
         s.attrs = b.attrs.items;
         s.indexes = b.indexes.items;
         s.cons = b.cons.items;
         s.defs = b.defs.items;
         s.deps = b.deps.items;
         s.descs = b.descs.items;
-        for (s.rels, 0..) |r, i| try s.by_oid.put(a, r.oid, @intCast(i));
+        s.exprs = b.exprs.items;
+        // Each table's rows, to look them up by it.
+        try s.ranges.ensureTotalCapacity(a, nrel);
+        var r: std.AutoHashMapUnmanaged(u32, Snapshot.Range) = .empty;
+        inline for (.{ .{ "attrs", Attr, "rel" }, .{ "defs", Def, "rel" }, .{ "cons", Con, "rel" }, .{ "indexes", IndexRow, "table" } }) |f| {
+            r.clearRetainingCapacity();
+            try runs(a, &r, f[1], @field(s, f[0]), f[2]);
+            var it = r.iterator();
+            while (it.next()) |e| {
+                const g = try s.ranges.getOrPut(a, e.key_ptr.*);
+                if (!g.found_existing) g.value_ptr.* = .{};
+                @field(g.value_ptr.*, f[0]) = e.value_ptr.*;
+            }
+        }
+
+        // A foreign key's conindid: the referenced table's unique index
+        // of its columns (the first).
+        var unique: std.StringHashMapUnmanaged(u32) = .empty;
+        for (b.cons.items) |k| if (k.type == 'p' or k.type == 'u') {
+            const e = try unique.getOrPut(a, try keysKey(a, k.rel, k.keys));
+            if (!e.found_existing) e.value_ptr.* = k.index;
+        };
+        for (b.cons.items) |*f| if (f.type == 'f') {
+            if (unique.get(try keysKey(a, f.frel, f.fkeys))) |x| f.index = x;
+        };
+        // A view's column that is a table's column has its type (the
+        // core's type of it is its storage's: bigint, text, bytea).
+        for (s.rels) |v| if (v.kind == 'v') if (v.sql) |sql| {
+            const srcs = try deparse.viewSources(a, sql, ViewScope{ .s = s, .db = v.db }, ViewScope.resolve) orelse continue;
+            for (s.rangesOf(v.oid).attrs.of(Attr, b.attrs.items), 0..) |*at, k| {
+                if (k < srcs.len) if (srcs[k]) |src| {
+                    at.type_oid = src.type_oid;
+                    at.typmod = src.typmod;
+                    at.collation = src.collation;
+                };
+            }
+        };
+        const coids = try assign(a, 'c', b.con_keys.items);
+        for (b.cons.items, coids) |*c, o| c.oid = o;
+        const doids = try assign(a, 'd', b.def_keys.items);
+        for (b.defs.items, doids) |*x, o| x.oid = o;
+        try s.con_by_oid.ensureTotalCapacity(a, @intCast(s.cons.len));
+        try s.index_by_oid.ensureTotalCapacity(a, @intCast(s.indexes.len));
+        for (s.cons, 0..) |c, i| s.con_by_oid.putAssumeCapacity(c.oid, @intCast(i));
+        for (s.indexes, 0..) |x, i| s.index_by_oid.putAssumeCapacity(x.rel, @intCast(i));
+    }
+
+    /// The relations ordered by schema and name, as a client lists them
+    /// anyway (equal ones in their order: std.mem.sort is stable), with
+    /// their keys and the tables' work, which refer to them by place.
+    fn sortRels(b: *Builder) Oom!void {
+        const a = b.a;
+        const n = b.rels.items.len;
+        const order = try a.alloc(u32, n);
+        for (order, 0..) |*o, i| o.* = @intCast(i);
+        std.mem.sort(u32, order, @as([]const Rel, b.rels.items), struct {
+            fn lt(rs: []const Rel, x: u32, y: u32) bool {
+                if (rs[x].nsp != rs[y].nsp) return rs[x].nsp < rs[y].nsp;
+                return std.mem.lessThan(u8, rs[x].name, rs[y].name);
+            }
+        }.lt);
+        const rels = try a.dupe(Rel, b.rels.items);
+        const keys = try a.dupe([]const u8, b.rel_keys.items);
+        const moved = try a.alloc(usize, n);
+        for (order, 0..) |old, new| {
+            b.rels.items[new] = rels[old];
+            b.rel_keys.items[new] = keys[old];
+            moved[old] = new;
+        }
+        for (b.tables.items) |*w| {
+            w.rel = moved[w.rel];
+            if (w.ipk) |*x| x.* = moved[x.*];
+            for (w.indexes) |*x| x.rel = moved[x.rel];
+        }
+    }
+
+    /// A key of a relation and attribute numbers.
+    fn keysKey(a: Allocator, rel_oid: u32, keys: []const i16) Oom![]const u8 {
+        const k = try a.alloc(u8, 4 + 2 * keys.len);
+        std.mem.writeInt(u32, k[0..4], rel_oid, .little);
+        for (keys, 0..) |x, i| std.mem.writeInt(i16, k[4 + 2 * i ..][0..2], x, .little);
+        return k;
     }
 
     fn mapErr(e: anyerror) Error {
@@ -972,14 +1375,14 @@ const Builder = struct {
         }
     }
 
+    /// The relation of a SQLite name, kind 'T' (a table or view) or 'S'
+    /// (a sequence), once all are listed.
     fn relOf(b: *Builder, db_name: []const u8, sqlite_name: []const u8, kind: u8) ?*Rel {
-        for (b.rels.items) |*r| if (r.kind == kind and eql(r.db, db_name) and std.ascii.eqlIgnoreCase(r.sqlite_name, sqlite_name)) return r;
-        return null;
+        return &b.rels.items[b.s.by_sqlite.get(.{ .kind = kind, .db = db_name, .name = sqlite_name }) orelse return null];
     }
 
     fn tableRel(b: *Builder, db_name: []const u8, sqlite_name: []const u8) ?*Rel {
-        for (b.rels.items) |*r| if ((r.kind == 'r' or r.kind == 'v') and eql(r.db, db_name) and std.ascii.eqlIgnoreCase(r.sqlite_name, sqlite_name)) return r;
-        return null;
+        return b.relOf(db_name, sqlite_name, 'T');
     }
 
     /// The attributes, indexes, constraints and defaults of a table (or
@@ -989,9 +1392,10 @@ const Builder = struct {
         const r = &b.rels.items[w.rel];
         const t = build.findTable(b.db, r.sqlite_name, if (eql(w.db, "temp")) "temp" else w.db) orelse return;
         if (t.isView()) {
+            const first = b.attrs.items.len;
             try b.viewColumns(w, r, t);
             const vm = catalog.meta(b.db, if (eql(w.db, "temp")) "temp" else w.db, t.name) catch |e| return mapErr(e);
-            return b.comments(vm, r.oid);
+            return b.comments(vm, r.oid, first);
         }
         const m = catalog.meta(b.db, if (eql(w.db, "temp")) "temp" else w.db, t.name) catch |e| return mapErr(e);
         const d: dialect.Dialect = if (m) |x| x.dialect else .sqlite;
@@ -1003,10 +1407,10 @@ const Builder = struct {
         for (checks) |c| if (dialect.checkState(c.name) == null) try kept.append(a, c);
         checks = kept.items;
         r.checks = @intCast(checks.len);
-        const pk = build.primaryKeyIndex(t);
         const first_attr = b.attrs.items.len;
-        const Pending = struct { def: usize, text: []const u8, type_oid: u32, generated: bool, col_type: ?ctypes.Type };
-        var pending: std.ArrayList(Pending) = .empty;
+        // The generated columns' expressions (no span of the text: the
+        // CREATE TABLE's), read once.
+        var generated_texts: ?[]const Generated = null;
         for (t.cols, 0..) |*col, ci| {
             const num: i16 = @intCast(ci + 1);
             const cm: ?*const catalog.ColumnMeta = if (m) |x| x.column(col.name()) else null;
@@ -1029,12 +1433,22 @@ const Builder = struct {
             };
             if (cm) |c| if (c.identity != null and c.identity_kind == null) try b.ownedSequence(c.identity.?, r.oid, num, 'a');
             if (at.identity == 0) if (build.columnExpr(t, col)) |e| {
-                // A generated column's expression is no span of the
-                // text: the CREATE TABLE's.
-                const text = if (generated) try generatedText(a, r.sql orelse "", col.name()) else null;
+                const text = if (generated) blk: {
+                    if (generated_texts == null) generated_texts = try generatedTexts(a, r.sql orelse "");
+                    break :blk generatedOf(generated_texts.?, col.name());
+                } else null;
                 at.hasdef = true;
-                try pending.append(a, .{ .def = b.defs.items.len, .text = text orelse std.mem.sliceTo(e.token(), 0), .type_oid = ty[0], .generated = generated, .col_type = if (cm) |c| c.type else null });
-                try b.defs.append(a, .{ .oid = 0, .rel = r.oid, .num = num, .bin = "" });
+                // Its text is made when read, over the table's columns.
+                try b.defs.append(a, .{ .oid = 0, .rel = r.oid, .num = num, .expr = @intCast(b.exprs.items.len) });
+                try b.exprs.append(a, .{
+                    .src = text orelse try a.dupe(u8, std.mem.sliceTo(e.token(), 0)),
+                    .kind = if (generated) .generated else .default,
+                    .table = r.sqlite_name,
+                    .attrs = @intCast(first_attr),
+                    .natts = @intCast(t.cols.len),
+                    .type_oid = ty[0],
+                    .col_type = if (cm) |c| c.type else null,
+                });
                 try b.def_keys.append(a, try std.fmt.allocPrint(a, "{s}\x00{d}", .{ key, num }));
             };
             try b.attrs.append(a, at);
@@ -1049,33 +1463,18 @@ const Builder = struct {
                 .keys = try a.dupe(i16, &.{num}),
             });
         }
-        // The defaults, over the table's columns.
-        const own: deparse.Scope = .{ .items = &.{.{ .name = t.name, .attrs = b.attrs.items[first_attr..][0..t.cols.len] }} };
-        for (pending.items) |pd| {
-            const def = &b.defs.items[pd.def];
-            var as = own;
-            as.as_type = pd.type_oid;
-            if (pd.generated) {
-                def.bin = try deparse.expr(a, pd.text, as, false) orelse try pgText(a, pd.text, b.registered);
-                def.pretty = try deparse.expr(a, pd.text, as, true);
-            } else {
-                def.bin = try defaultTextIn(a, pd.text, pd.type_oid, false, b.registered, pd.col_type, as, false);
-                def.pretty = try defaultTextIn(a, pd.text, pd.type_oid, false, b.registered, pd.col_type, as, true);
-            }
-        }
-        // The CHECK constraints (PostgreSQL makes them before the keys).
+        // The CHECK constraints (PostgreSQL makes them before the keys),
+        // their texts and columns made when read.
         for (checks) |c| {
-            const plain = try deparse.expr(a, c.text, own, false);
             try b.addCon(key, .{
                 .oid = 0,
                 .name = c.name,
                 .nsp = r.nsp,
                 .type = 'c',
                 .rel = r.oid,
-                .keys = try deparse.columns(a, c.text, own),
-                .bin = plain orelse try pgText(a, c.text, b.registered),
-                .pretty = if (plain != null) try deparse.expr(a, c.text, own, true) else null,
+                .check = @intCast(b.exprs.items.len),
             });
+            try b.exprs.append(a, .{ .src = c.text, .kind = .check, .table = r.sqlite_name, .attrs = @intCast(first_attr), .natts = @intCast(t.cols.len) });
         }
         // The INTEGER PRIMARY KEY's index and constraint.
         if (w.ipk) |ii| {
@@ -1083,7 +1482,7 @@ const Builder = struct {
             const num: i16 = t.i_pkey + 1;
             ir.natts = 1;
             const col = try quoteIdent(a, t.cols[@intCast(t.i_pkey)].name());
-            const ty = if (b.attrOf(r.oid, num)) |x| x.type_oid else 20;
+            const ty = b.attrs.items[first_attr + @as(usize, @intCast(t.i_pkey))].type_oid;
             try b.attrs.append(a, .{ .rel = ir.oid, .name = try a.dupe(u8, t.cols[@intCast(t.i_pkey)].name()), .num = 1, .type_oid = ty });
             try b.indexes.append(a, .{ .rel = ir.oid, .table = r.oid, .unique = true, .primary = true, .keys = try a.dupe(i16, &.{num}), .desc = try a.dupe(bool, &.{false}), .coldefs = try a.dupe([]const u8, &.{col}) });
             try b.addCon(key, .{ .oid = 0, .name = ir.name, .nsp = r.nsp, .type = 'p', .rel = r.oid, .index = ir.oid, .keys = try a.dupe(i16, &.{num}) });
@@ -1103,7 +1502,6 @@ const Builder = struct {
             var coldefs = try a.alloc([]const u8, n);
             var coldefs_pretty = try a.alloc([]const u8, n);
             var exprs: std.ArrayList(u8) = .empty;
-            const tscope: deparse.Scope = .{ .items = &.{.{ .name = t.name, .attrs = b.attrs.items[first_attr..][0..t.cols.len] }} };
             for (0..n) |k| {
                 const c = x.ai_column[k];
                 desc[k] = k < x.sort_order.len and x.sort_order[k] != 0;
@@ -1115,10 +1513,9 @@ const Builder = struct {
                     attname = t.cols[@intCast(c)].name();
                     coldefs[k] = try quoteIdent(a, attname);
                     coldefs_pretty[k] = coldefs[k];
-                    if (b.attrOf(r.oid, keys[k])) |at| {
-                        type_oid = at.type_oid;
-                        typmod = at.typmod;
-                    }
+                    const at = b.attrs.items[first_attr + @as(usize, @intCast(c))];
+                    type_oid = at.type_oid;
+                    typmod = at.typmod;
                 } else if (c == int.XN_ROWID) {
                     keys[k] = 0;
                     attname = "rowid";
@@ -1129,11 +1526,16 @@ const Builder = struct {
                     keys[k] = 0;
                     const item = if (k < items.len) items[k] else "?";
                     const src = stripParens(stripOrder(item));
-                    const old = try pgText(a, src, b.registered);
-                    const e = try deparse.expr(a, src, tscope, false) orelse old;
+                    // Its name is of its text: made now, once for its
+                    // texts of both modes.
+                    const tscope: deparse.Scope = .{ .items = &.{.{ .name = r.sqlite_name, .attrs = b.attrs.items[first_attr..][0..t.cols.len] }} };
+                    const tx = try deparse.indexTexts(a, src, tscope);
+                    // The older text where deparse.zig has none.
+                    const old = if (tx.expr.plain == null or tx.column.plain == null) try pgText(a, src, b.registered) else "";
+                    const e = tx.expr.plain orelse old;
                     attname = exprName(e);
-                    coldefs[k] = try deparse.indexColumn(a, src, tscope, false) orelse if (looksLikeCall(old)) old else try std.fmt.allocPrint(a, "({s})", .{old});
-                    coldefs_pretty[k] = try deparse.indexColumn(a, src, tscope, true) orelse coldefs[k];
+                    coldefs[k] = tx.column.plain orelse if (looksLikeCall(old)) old else try std.fmt.allocPrint(a, "({s})", .{old});
+                    coldefs_pretty[k] = tx.column.pretty orelse coldefs[k];
                     if (exprs.items.len > 0) try exprs.appendSlice(a, ", ");
                     try exprs.appendSlice(a, e);
                 }
@@ -1143,9 +1545,12 @@ const Builder = struct {
                 }
                 try b.attrs.append(a, .{ .rel = ir.oid, .name = try a.dupe(u8, attname), .num = @intCast(k + 1), .type_oid = type_oid, .typmod = typmod });
             }
-            const where_text: ?[]const u8 = if (ir.sql) |z| whereOf(z) else null;
-            const pred: ?[]const u8 = if (where_text) |wz| try deparse.expr(a, wz, tscope, false) orelse try pgText(a, stripParens(wz), b.registered) else null;
-            const pred_pretty: ?[]const u8 = if (where_text) |wz| try deparse.expr(a, wz, tscope, true) else null;
+            // The predicate's text is made when read.
+            var pred: ?u32 = null;
+            if (if (ir.sql) |z| whereOf(z) else null) |wz| {
+                pred = @intCast(b.exprs.items.len);
+                try b.exprs.append(a, .{ .src = wz, .kind = .pred, .table = r.sqlite_name, .attrs = @intCast(first_attr), .natts = @intCast(t.cols.len) });
+            }
             try b.indexes.append(a, .{
                 .rel = ir.oid,
                 .table = r.oid,
@@ -1157,13 +1562,11 @@ const Builder = struct {
                 .coldefs_pretty = coldefs_pretty,
                 .exprs = if (exprs.items.len > 0) exprs.items else null,
                 .pred = pred,
-                .pred_pretty = pred_pretty,
             });
             if (x.idx_type == .primarykey or x.idx_type == .unique) {
                 try b.addCon(key, .{ .oid = 0, .name = ir.name, .nsp = r.nsp, .type = if (x.idx_type == .primarykey) 'p' else 'u', .rel = r.oid, .index = ir.oid, .keys = try a.dupe(i16, keys) });
             }
         }
-        _ = pk;
         // Foreign keys.
         var fk = t.u.tab.fkey;
         while (fk) |f| : (fk = f.next_from) {
@@ -1215,29 +1618,25 @@ const Builder = struct {
                 .deferred = f.is_deferred,
             });
         }
-        try b.comments(m, r.oid);
+        try b.comments(m, r.oid, first_attr);
     }
 
-    /// The comments of COMMENT ON on relation `rel_oid` and its columns.
-    fn comments(b: *Builder, m: ?*const catalog.TableMeta, rel_oid: u32) Oom!void {
+    /// The comments of COMMENT ON on relation `rel_oid` and its columns
+    /// (its attributes from `first` of b.attrs on).
+    fn comments(b: *Builder, m: ?*const catalog.TableMeta, rel_oid: u32, first: usize) Oom!void {
         const x = m orelse return;
         for (x.entries) |e| {
             if (!eql(e.key, comment_key)) continue;
             var subid: i32 = 0;
             if (e.col.len > 0) {
                 subid = -1;
-                for (b.attrs.items) |at| if (at.rel == rel_oid and std.ascii.eqlIgnoreCase(at.name, e.col)) {
+                for (b.attrs.items[first..]) |at| if (at.rel == rel_oid and std.ascii.eqlIgnoreCase(at.name, e.col)) {
                     subid = at.num;
                 };
                 if (subid < 0) continue;
             }
             try b.descs.append(b.a, .{ .obj = rel_oid, .subid = subid, .text = try b.a.dupe(u8, e.value) });
         }
-    }
-
-    fn attrOf(b: *Builder, rel_oid: u32, num: i16) ?*const Attr {
-        for (b.attrs.items) |*x| if (x.rel == rel_oid and x.num == num) return x;
-        return null;
     }
 
     fn addCon(b: *Builder, rel_key: []const u8, c: Con) Oom!void {
@@ -1409,14 +1808,22 @@ fn identText(a: Allocator, t: Tok) Oom![]const u8 {
 /// is no keyword, else quoted.
 pub fn quoteIdent(a: Allocator, z: []const u8) Oom![]const u8 {
     if (safeIdent(z)) return a.dupe(u8, z);
-    var out: std.ArrayList(u8) = .empty;
-    try out.append(a, '"');
-    for (z) |c| {
-        if (c == '"') try out.append(a, '"');
-        try out.append(a, c);
-    }
-    try out.append(a, '"');
-    return out.items;
+    var out: std.Io.Writer.Allocating = try .initCapacity(a, z.len + 2);
+    writeIdent(&out.writer, z) catch return error.OutOfMemory;
+    return out.written();
+}
+
+/// quoteIdent() of `z`, written to `w`.
+pub fn writeIdent(w: *std.Io.Writer, z: []const u8) std.Io.Writer.Error!void {
+    if (safeIdent(z)) return w.writeAll(z);
+    try w.writeByte('"');
+    var start: usize = 0;
+    for (z, 0..) |c, i| if (c == '"') {
+        try w.writeAll(z[start .. i + 1]);
+        start = i;
+    };
+    try w.writeAll(z[start..]);
+    try w.writeByte('"');
 }
 
 fn safeIdent(z: []const u8) bool {
@@ -1460,51 +1867,76 @@ pub fn pgText(a: Allocator, z: []const u8, registered: []const nsp_mod.Info) Oom
     return out.items;
 }
 
-/// The text of a default (or generated column's) expression as
-/// pg_get_expr() shows it: now() for SQLite's rendering of it, a string
+/// The text of a default expression as pg_get_expr() shows it: now() for SQLite's rendering of it, a string
 /// constant cast to the column's type ('x'::text), a negative integer
 /// quoted ('-1'::integer), nextval()'s argument a regclass.
-pub fn defaultText(a: Allocator, text: []const u8, type_oid: u32, generated: bool, registered: []const nsp_mod.Info, col_type: ?ctypes.Type) Oom![]const u8 {
-    return defaultTextIn(a, text, type_oid, generated, registered, col_type, .{}, false);
+pub fn defaultText(a: Allocator, text: []const u8, type_oid: u32, registered: []const nsp_mod.Info, col_type: ?ctypes.Type) Oom![]const u8 {
+    return (try defaultTexts(a, text, type_oid, registered, col_type, .{})).plain;
 }
 
-/// defaultText() of a column of the relation of `scope`, pretty or not
-/// (an expression's text: deparse.zig's).
-pub fn defaultTextIn(a: Allocator, text: []const u8, type_oid: u32, generated: bool, registered: []const nsp_mod.Info, col_type: ?ctypes.Type, scope: deparse.Scope, pretty: bool) Oom![]const u8 {
+/// defaultText() of a column of the relation of `scope`, plain and
+/// pretty (an expression's texts: deparse.zig's, its text read once).
+pub const DefaultTexts = struct {
+    plain: []const u8,
+    pretty: []const u8,
+
+    fn one(x: []const u8) DefaultTexts {
+        return .{ .plain = x, .pretty = x };
+    }
+};
+
+pub fn defaultTexts(a: Allocator, text: []const u8, type_oid: u32, registered: []const nsp_mod.Info, col_type: ?ctypes.Type, scope: deparse.Scope) Oom!DefaultTexts {
     const z = std.mem.trim(u8, text, " ");
-    if (generated) return pgText(a, z, registered);
-    if (col_type) |ty| if (try blobDefault(a, z, ty, type_oid)) |d| return d;
+    const one = DefaultTexts.one;
+    if (col_type) |ty| if (try blobDefault(a, z, ty, type_oid)) |d| return one(d);
     // A DEFAULT stored as a function of the type's form (an interval's
     // xq_pg_iv('2 hours')): the constant.
-    inline for (repr.all) |r| if (r.default_text) |f| if (try f(a, z)) |d| return try deparse.expr(a, z, scope, pretty) orelse d;
-    if (eql(z, "strftime('%Y-%m-%d %H:%M:%f', 'now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_TIMESTAMP")) return "now()";
-    if (eql(z, "date('now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_DATE")) return "CURRENT_DATE";
+    inline for (repr.all) |r| if (r.default_text) |f| if (try f(a, z)) |d| {
+        const t = try deparse.both(a, z, scope);
+        return .{ .plain = t.plain orelse d, .pretty = t.pretty orelse d };
+    };
+    if (eql(z, "strftime('%Y-%m-%d %H:%M:%f', 'now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_TIMESTAMP")) return one("now()");
+    if (eql(z, "date('now')") or std.ascii.eqlIgnoreCase(z, "CURRENT_DATE")) return one("CURRENT_DATE");
     if (std.mem.startsWith(u8, z, "nextval('") and std.mem.endsWith(u8, z, "')")) {
-        return std.fmt.allocPrint(a, "{s}'::regclass)", .{z[0 .. z.len - 2]});
+        return one(try std.fmt.allocPrint(a, "{s}'::regclass)", .{z[0 .. z.len - 2]}));
     }
     const tname: []const u8 = if (builtinType(type_oid)) |t| t.fmt else "text";
     if (z.len >= 2 and z[0] == '\'' and z[z.len - 1] == '\'') {
         // One string constant.
         var s: Scanner = .{ .z = z };
         const t = s.next();
-        if (t.end == z.len) return std.fmt.allocPrint(a, "{s}::{s}", .{ z, tname });
+        if (t.end == z.len) return one(try std.fmt.allocPrint(a, "{s}::{s}", .{ z, tname }));
     }
     if (z.len > 1 and z[0] == '-' and std.ascii.isDigit(z[1])) {
         var digits = true;
         for (z[1..]) |c| digits = digits and (std.ascii.isDigit(c) or c == '.');
-        if (digits) return std.fmt.allocPrint(a, "'{s}'::{s}", .{ z, tname });
+        if (digits) return one(try std.fmt.allocPrint(a, "'{s}'::{s}", .{ z, tname }));
     }
-    if (try deparse.expr(a, z, scope, pretty)) |d| return d;
-    return pgText(a, z, registered);
+    const t = try deparse.both(a, z, scope);
+    if (t.plain != null and t.pretty != null) return .{ .plain = t.plain.?, .pretty = t.pretty.? };
+    const old = try pgText(a, z, registered);
+    return .{ .plain = t.plain orelse old, .pretty = t.pretty orelse old };
 }
 
-/// The expression of generated column `col` in CREATE TABLE text `sql`
-/// (its GENERATED ALWAYS AS (...)), null if there is none.
-fn generatedText(a: Allocator, sql: []const u8, col: []const u8) Oom!?[]const u8 {
+/// A generated column's name and its expression's text (null where the
+/// column has none that this reads).
+const Generated = struct { name: []const u8, text: ?[]const u8 };
+
+/// The expression of generated column `col` of generatedTexts().
+fn generatedOf(gs: []const Generated, col: []const u8) ?[]const u8 {
+    for (gs) |g| if (std.ascii.eqlIgnoreCase(g.name, col)) return g.text;
+    return null;
+}
+
+/// The expressions of the generated columns in CREATE TABLE text `sql`
+/// (GENERATED ALWAYS AS (...)), in one reading: of each column, the
+/// first AS of its definition's own level.
+fn generatedTexts(a: Allocator, sql: []const u8) Oom![]const Generated {
+    var out: std.ArrayList(Generated) = .empty;
     var s: Scanner = .{ .z = sql };
     while (true) {
         const t = s.next();
-        if (t.kind == .eof) return null;
+        if (t.kind == .eof) return out.items;
         if (t.kind == .punct and t.text[0] == '(') break;
     }
     var depth: usize = 1;
@@ -1512,7 +1944,7 @@ fn generatedText(a: Allocator, sql: []const u8, col: []const u8) Oom!?[]const u8
     var current: ?[]const u8 = null;
     while (depth > 0) {
         const t = s.next();
-        if (t.kind == .eof) return null;
+        if (t.kind == .eof) return out.items;
         if (t.kind == .punct) switch (t.text[0]) {
             '(' => {
                 depth += 1;
@@ -1536,22 +1968,36 @@ fn generatedText(a: Allocator, sql: []const u8, col: []const u8) Oom!?[]const u8
         }
         if (t.kind == .word and std.ascii.eqlIgnoreCase(t.text, "as")) {
             const name = current orelse continue;
-            if (!std.ascii.eqlIgnoreCase(name, col)) continue;
-            const open = s.next();
-            if (open.kind != .punct or open.text[0] != '(') return null;
-            var d: usize = 1;
-            while (true) {
-                const x = s.next();
-                if (x.kind == .eof) return null;
-                if (x.kind == .punct and x.text[0] == '(') d += 1;
-                if (x.kind == .punct and x.text[0] == ')') {
-                    d -= 1;
-                    if (d == 0) return std.mem.trim(u8, sql[open.end..x.start], " ");
+            // A later AS of the column (or of another of its name) is
+            // not its.
+            for (out.items) |g| {
+                if (std.ascii.eqlIgnoreCase(g.name, name)) break;
+            } else {
+                var ahead = s;
+                const open = ahead.next();
+                if (open.kind != .punct or open.text[0] != '(') {
+                    // None; what follows is read as the other columns'.
+                    try out.append(a, .{ .name = name, .text = null });
+                    continue;
                 }
+                // The parentheses, which leave the level as it was.
+                s = ahead;
+                var d: usize = 1;
+                const text: ?[]const u8 = while (true) {
+                    const x = s.next();
+                    if (x.kind == .eof) break null;
+                    if (x.kind == .punct and x.text[0] == '(') d += 1;
+                    if (x.kind == .punct and x.text[0] == ')') {
+                        d -= 1;
+                        if (d == 0) break std.mem.trim(u8, sql[open.end..x.start], " ");
+                    }
+                };
+                try out.append(a, .{ .name = name, .text = text });
+                if (text == null) return out.items;
             }
         }
     }
-    return null;
+    return out.items;
 }
 
 /// A constant DEFAULT the dialect stored as its column's BLOB (X'..': a
@@ -1820,6 +2266,14 @@ pub const Cell = union(enum) {
     int: i64,
     float: f64,
     text: []const u8,
+    /// Expression `expr` of the snapshot's texts, made when the column
+    /// is read (SQLite reads only the columns a query uses, and those of
+    /// the rows its conditions keep).
+    lazy: struct { expr: u32, what: enum { bin, keys } },
+
+    fn bin(i: u32) Cell {
+        return .{ .lazy = .{ .expr = i, .what = .bin } };
+    }
 };
 
 /// A column of a catalog relation: its name and PostgreSQL type, which
@@ -1935,6 +2389,9 @@ pub const Relation = struct {
     name: [:0]const u8,
     cols: []const Col,
     fill: *const fn (s: *const Snapshot, r: *Rows) Oom!void,
+    /// Whether the relation can have rows, known without a snapshot
+    /// (false: none, and none is made).
+    any: ?*const fn (db: *Sqlite3) bool = null,
 };
 
 fn fillNamespace(s: *const Snapshot, r: *Rows) Oom!void {
@@ -2020,8 +2477,8 @@ fn fillIndex(s: *const Snapshot, r: *Rows) Oom!void {
         const classes = try a.alloc(u32, n);
         for (classes, 0..) |*c, i| c.* = if (s.attr(x.rel, @intCast(i + 1))) |at| defaultOpclass(at.type_oid) else 0;
         try r.row(.{
-            x.rel,                        x.table,                     n,                             n,                          x.unique, false,  x.primary, false, true, false, true, false, true, true, false,
-            try vector(a, x.keys, false), try vector(a, colls, false), try vector(a, classes, false), try vector(a, opts, false), x.exprs,  x.pred,
+            x.rel,                        x.table,                     n,                             n,                          x.unique, false,                                  x.primary, false, true, false, true, false, true, true, false,
+            try vector(a, x.keys, false), try vector(a, colls, false), try vector(a, classes, false), try vector(a, opts, false), x.exprs,  if (x.pred) |p| Cell.bin(p) else .null,
         });
     }
 }
@@ -2029,16 +2486,38 @@ fn fillIndex(s: *const Snapshot, r: *Rows) Oom!void {
 fn fillConstraint(s: *const Snapshot, r: *Rows) Oom!void {
     const a = r.a;
     for (s.cons) |c| {
+        // A CHECK's conkey and conbin: its expression's.
+        const keys: Cell = if (c.check) |e| .{ .lazy = .{ .expr = e, .what = .keys } } else if (c.keys.len > 0) .{ .text = try vector(a, c.keys, true) } else .null;
+        const bin: Cell = if (c.check) |e| .bin(e) else .null;
         try r.row(.{
-            c.oid,       c.name,      c.nsp,                                 char(c.type), c.deferrable, c.deferred, true,                                                      c.rel,                                                       0,    c.index, 0,    c.frel,
-            char(c.upd), char(c.del), char(if (c.type == 'f') 's' else ' '), true,         0,            false,      if (c.keys.len > 0) try vector(a, c.keys, true) else null, if (c.fkeys.len > 0) try vector(a, c.fkeys, true) else null, null, null,    null, null,
-            null,        c.bin,       true,                                  false,
+            c.oid,       c.name,      c.nsp,                                 char(c.type), c.deferrable, c.deferred, true, c.rel,                                                       0,    c.index, 0,    c.frel,
+            char(c.upd), char(c.del), char(if (c.type == 'f') 's' else ' '), true,         0,            false,      keys, if (c.fkeys.len > 0) try vector(a, c.fkeys, true) else null, null, null,    null, null,
+            null,        bin,         true,                                  false,
         });
     }
 }
 
 fn fillAttrdef(s: *const Snapshot, r: *Rows) Oom!void {
-    for (s.defs) |d| try r.row(.{ d.oid, d.rel, d.num, d.bin });
+    for (s.defs) |d| try r.row(.{ d.oid, d.rel, d.num, Cell.bin(d.expr) });
+}
+
+/// The columns and their types of each view of main, a view by its name
+/// in SQLite ("<schema>.<view>" but for public's views): what
+/// information_schema.columns reads of views (catalog_views.zig, over
+/// main's sqlite_schema), which xq_catalog has not, without reading
+/// pg_class and pg_attribute.
+fn fillViewColumns(s: *const Snapshot, r: *Rows) Oom!void {
+    for (s.rels) |v| {
+        if (v.kind != 'v' or !eql(v.db, "main")) continue;
+        for (s.columnsOf(v.oid)) |at| try r.row(.{ v.sqlite_name, at.name, at.type_oid, at.typmod });
+    }
+}
+
+/// Whether main has a view (else fillViewColumns() has no row).
+fn anyView(db: *Sqlite3) bool {
+    var it = db.dbs.items[0].schema.tbl_hash.valueIterator();
+    while (it.next()) |t| if (t.*.isView()) return true;
+    return false;
 }
 
 fn fillSequence(s: *const Snapshot, r: *Rows) Oom!void {
@@ -2155,6 +2634,9 @@ pub const relations = [_]Relation{
     .{ .name = "xq_pg_description", .fill = fillDescription, .cols = &.{
         .{ "objoid", .oid }, .{ "classoid", .oid }, .{ "objsubid", .int4 }, .{ "description", .text },
     } },
+    .{ .name = "xq_pg_view_columns", .fill = fillViewColumns, .any = anyView, .cols = &.{
+        .{ "tbl", .text }, .{ "col", .text }, .{ "typid", .oid }, .{ "typmod", .int4 },
+    } },
     .{ .name = "xq_pg_proc", .fill = fillProc, .cols = &.{
         .{ "oid", .oid },                  .{ "proname", .name },           .{ "pronamespace", .oid },       .{ "proowner", .oid },
         .{ "prolang", .oid },              .{ "procost", .float4 },         .{ "prorows", .float4 },         .{ "provariadic", .oid },
@@ -2240,24 +2722,34 @@ fn moduleOf(comptime rel: Relation) vtab.Module {
 
         fn filter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, _: []*vi.Mem) i32 {
             const c = Cursor.of(cur);
-            if (c.snap) |s| release(c.db, s);
+            // The new snapshot taken before the old is let go: the rows
+            // read stay while the statement holds one (release()), for
+            // a nested loop's scans.
+            const old = c.snap;
+            defer if (old) |s| release(c.db, s);
             c.snap = null;
             _ = c.arena.reset(.retain_capacity);
             c.i = 0;
             c.cells = &.{};
             c.ncol = rel.cols.len;
-            const s = acquire(c.db) catch |err| return switch (err) {
+            c.snap = get(c.db, rel.any) catch |err| return switch (err) {
                 error.OutOfMemory => RC.NOMEM,
                 error.Failed => blk: {
                     vtab.setErrMsg(c.db, cur.vtab, "xqlite: cannot read the catalog", .{});
                     break :blk RC.ERROR;
                 },
             };
-            c.snap = s;
-            var rows: Rows = .{ .a = c.arena.allocator(), .ncol = rel.cols.len };
-            rel.fill(s, &rows) catch return RC.NOMEM;
-            c.cells = rows.cells.items;
+            const s = c.snap orelse return RC.OK;
+            c.cells = s.rowsOf(rel) catch return RC.NOMEM;
             return RC.OK;
+        }
+
+        /// The snapshot, null where `any` says there is no row (and no
+        /// current snapshot is kept, which would say it as well).
+        fn get(db: *Sqlite3, any: ?*const fn (db: *Sqlite3) bool) Error!?*Snapshot {
+            try loadSchema(db);
+            if (any) |f| if (currentSnapshot(db) == null and !f(db)) return null;
+            return try acquireLoaded(db);
         }
     };
     return .{
@@ -2298,6 +2790,13 @@ fn column(cur: *vtab.VtabCursor, ctx: *Context, i: i32) i32 {
         .int => |v| api.resultInt64(ctx, v),
         .float => |v| api.resultDouble(ctx, v),
         .text => |z| api.resultText(ctx, z, .static),
+        .lazy => |l| {
+            const e = c.snap.?.expr(l.expr) catch return RC.NOMEM;
+            switch (l.what) {
+                .bin => api.resultText(ctx, e.bin, .static),
+                .keys => if (e.keys_text) |z| api.resultText(ctx, z, .static) else api.resultNull(ctx),
+            }
+        },
     }
     return RC.OK;
 }
@@ -2344,4 +2843,25 @@ test "oids" {
     try std.testing.expectEqualStrings("(\"a\" > 5)", whereOf("CREATE INDEX \"i\" ON \"t\"((lower(\"b\")), \"a\" DESC) WHERE (\"a\" > 5)").?);
     try std.testing.expect(looksLikeCall("lower(b)"));
     try std.testing.expect(!looksLikeCall("(a + 1)"));
+    // Of each generated column, the first AS of its own definition.
+    const gs = try generatedTexts(a, "CREATE TABLE t(a INT, \"B\" INT GENERATED ALWAYS AS ((a * 2)) STORED, c TEXT AS (lower(x)) VIRTUAL, d INT AS e, f INT AS ( g ))");
+    try std.testing.expectEqualStrings("(a * 2)", generatedOf(gs, "b").?);
+    try std.testing.expectEqualStrings("lower(x)", generatedOf(gs, "C").?);
+    try std.testing.expect(generatedOf(gs, "d") == null);
+    try std.testing.expectEqualStrings("g", generatedOf(gs, "f").?);
+    try std.testing.expect(generatedOf(gs, "a") == null);
+}
+
+test "oids: without a collision as with the keys sorted" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var keys: std.ArrayList([]const u8) = .empty;
+    for (0..500) |i| try keys.append(a, try std.fmt.allocPrint(a, "main\x00t{d}", .{499 - i}));
+    const fast = try assign(a, 'r', keys.items);
+    // A repeated key collides: every number by the sorted keys.
+    try keys.append(a, keys.items[0]);
+    const slow = try assign(a, 'r', keys.items);
+    try std.testing.expectEqualSlices(u32, fast, slow[0..fast.len]);
+    try std.testing.expect(slow[fast.len] != slow[0]);
 }

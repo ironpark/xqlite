@@ -279,7 +279,7 @@ test "pg: operators of dates, timestamps and intervals" {
     try c.expectRows("SELECT * FROM ev_short ORDER BY id", "1\n2\n");
     try c.exec("CREATE TABLE span (a date, b date CHECK (b - a <= 7))");
     try c.exec("INSERT INTO span VALUES ('2024-01-01', '2024-01-08')");
-    try c.expectError("INSERT INTO span VALUES ('2024-01-01', '2024-01-09')", "new row for relation \"span\" violates check constraint \"span_b_check\"");
+    try c.expectError("INSERT INTO span VALUES ('2024-01-01', '2024-01-09')", "new row for relation \"span\" violates check constraint \"span_b_check\"\nDETAIL:  Failing row contains (2024-01-01, 2024-01-09).");
     main_mod.setDialect(c.db, .sqlite);
     try c.expectRows("SELECT id FROM ev_short ORDER BY id", "1\n2\n");
     try c.expectRows("SELECT next FROM ev_next WHERE id = 1", "2024-02-01\n");
@@ -292,13 +292,13 @@ test "pg: operators of dates, timestamps and intervals" {
     try c.expectRows("SELECT '2' + 1, 10 - '3'", "3|7\n");
     try c.expectError("SELECT 'a' + 1", "invalid input syntax for type integer: \"a\"");
     // No operator for the types: PostgreSQL's errors.
-    try c.expectError("SELECT date '2024-01-01' + 'abc'::text", "operator does not exist: date + text");
-    try c.expectError("SELECT timestamp '2024-01-01' + 1", "operator does not exist: timestamp without time zone + integer");
-    try c.expectError("SELECT d + ts FROM ev", "operator does not exist: date + timestamp without time zone");
-    try c.expectError("SELECT true + 1", "operator does not exist: boolean + integer");
-    try c.expectError("SELECT 1.5::float8 % 2", "operator does not exist: double precision % integer");
-    try c.expectError("SELECT -'a'::text", "operator does not exist: - text");
-    try c.expectError("SELECT date '2024-01-01' + '1 day'", "operator is not unique: date + unknown");
+    try c.expectError("SELECT date '2024-01-01' + 'abc'::text", "operator does not exist: date + text\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
+    try c.expectError("SELECT timestamp '2024-01-01' + 1", "operator does not exist: timestamp without time zone + integer\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
+    try c.expectError("SELECT d + ts FROM ev", "operator does not exist: date + timestamp without time zone\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
+    try c.expectError("SELECT true + 1", "operator does not exist: boolean + integer\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
+    try c.expectError("SELECT 1.5::float8 % 2", "operator does not exist: double precision % integer\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
+    try c.expectError("SELECT -'a'::text", "operator does not exist: - text\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
+    try c.expectError("SELECT date '2024-01-01' + '1 day'", "operator is not unique: date + unknown\nHINT:  Could not choose a best candidate operator. You might need to add explicit type casts.");
     // Bad values, results out of range.
     try c.expectError("SELECT d + interval 'abc' FROM ev", "invalid input syntax for type interval: \"abc\"");
     try c.expectError("SELECT 'x'::date + 1", "invalid input syntax for type date: \"x\"");
@@ -341,8 +341,8 @@ test "pg: json and jsonb" {
         "SELECT '{\"b\":1,  \"a\":2, \"b\":3}'::json, '{\"b\":1, \"aa\":[1,2], \"a\":2, \"b\":3}'::jsonb, '1e2'::jsonb, '1.50'::jsonb",
         "{\"b\":1,  \"a\":2, \"b\":3}|{\"a\": 2, \"b\": 3, \"aa\": [1, 2]}|100|1.50\n",
     );
-    try c.expectError("SELECT '{'::jsonb", "invalid input syntax for type json");
-    try c.expectError("SELECT '\"\\u0000\"'::jsonb", "unsupported Unicode escape sequence");
+    try c.expectError("SELECT '{'::jsonb", "invalid input syntax for type json\nDETAIL:  The input string ended unexpectedly.\nCONTEXT:  JSON data, line 1: {");
+    try c.expectError("SELECT '\"\\u0000\"'::jsonb", "unsupported Unicode escape sequence\nDETAIL:  \\u0000 cannot be converted to text.\nCONTEXT:  JSON data, line 1: \"\\u0000...");
     // Operators.
     try c.expectRows(
         "SELECT '{\"a\": {\"y\":1,  \"x\":2}}'::json -> 'a', '{\"a\": {\"y\":1, \"x\":2}}'::jsonb -> 'a', '[1,2,3]'::jsonb -> -1, '{\"a\":\"x\"}'::jsonb ->> 'a'",
@@ -358,7 +358,7 @@ test "pg: json and jsonb" {
         "{\"a\": 1, \"b\": 2}|[1, 2]|{\"b\": 2}|[1, 3]|{}|{\"a\": {}}\n",
     );
     try c.expectError("SELECT '{\"a\":1}'::jsonb - 1", "cannot delete from object using integer index");
-    try c.expectError("SELECT '[1]'::json || '[2]'::json", "operator does not exist: json || json");
+    try c.expectError("SELECT '[1]'::json || '[2]'::json", "operator does not exist: json || json\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
     // jsonb compares and sorts as jsonb.
     try c.expectRows("SELECT '{\"b\":1,\"a\":2}'::jsonb = '{\"a\": 2, \"b\": 1}', '1.0'::jsonb = '1'::jsonb, '{}'::jsonb > '[1,2]'::jsonb, '[1]'::jsonb < '[0,0]'::jsonb", "1|1|1|1\n");
     // Functions.
@@ -393,7 +393,7 @@ test "pg: json and jsonb" {
         \\INSERT INTO ev (id) VALUES (3);
     );
     try c.expectRows("SELECT id, data::text, raw FROM ev ORDER BY id", "1|{\"n\": 1, \"tags\": [\"a\", \"b\"]}|{\"b\" :  1}\n2|{\"n\": 2, \"tags\": [\"c\"]}|[1]\n3|{\"a\": 2, \"z\": 1}|NULL\n");
-    try c.expectError("INSERT INTO ev (id, raw) VALUES (4, 'x')", "invalid input syntax for type json");
+    try c.expectError("INSERT INTO ev (id, raw) VALUES (4, 'x')", "invalid input syntax for type json\nDETAIL:  Token \"x\" is invalid.\nCONTEXT:  JSON data, line 1: x");
     try c.exec("UPDATE ev SET data = data || '{\"m\": 0}' WHERE id = 3");
     try c.expectRows("SELECT data::text FROM ev WHERE id = 3", "{\"a\": 2, \"m\": 0, \"z\": 1}\n");
     try c.expectRows("SELECT id FROM ev WHERE data = '{\"z\":1, \"m\":0, \"a\":2}'", "3\n");
@@ -431,7 +431,7 @@ test "pg: jsonb's operators by the type of a column of a subquery, a CTE, a view
     try c.expectRows("SELECT d::text FROM (SELECT d FROM ej UNION ALL SELECT '{}') u ORDER BY d DESC LIMIT 2", "{\"a\": 1, \"b\": [1, 2]}\n{\"a\": 2}\n");
     try c.expectRows("SELECT (coalesce(d, '{}') || '{\"m\":1}')::text, (CASE WHEN id = 1 THEN d ELSE '[]' END || '[9]')::text FROM ej WHERE id = 2", "{\"a\": 2, \"m\": 1}|[9]\n");
     try c.expectRows("SELECT ((SELECT d FROM ej WHERE id = 2) || '{\"y\":1}')::text, to_json(s.d) FROM (SELECT d FROM ej WHERE id = 3) s", "{\"a\": 2, \"y\": 1}|[0]\n");
-    try c.expectError("SELECT s.r || s.r FROM (SELECT r FROM ej) s", "operator does not exist: json || json");
+    try c.expectError("SELECT s.r || s.r FROM (SELECT r FROM ej) s", "operator does not exist: json || json\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
     // excluded.* and RETURNING's columns are of the table's types.
     try c.expectRows("INSERT INTO ej VALUES (2, '{\"b\":3}') ON CONFLICT (id) DO UPDATE SET d = ej.d || excluded.d RETURNING (d || '{\"r\":1}')::text", "{\"a\": 2, \"b\": 3, \"r\": 1}\n");
     try c.exec("UPDATE ej SET d = '{\"a\":2}' WHERE id = 2");
@@ -447,7 +447,7 @@ test "pg: jsonb's operators by the type of a column of a subquery, a CTE, a view
     try c.expectRows("SELECT instr(sql, 'ORDER BY xq_pg_jsonb_key(\"x\")') > 0 FROM sqlite_schema WHERE name = 'ov'", "1\n");
     try c.exec("CREATE TABLE ck (j jsonb CHECK (j -> 'a' = '1'))");
     try c.exec("INSERT INTO ck VALUES ('{\"a\": 1}')");
-    try c.expectError("INSERT INTO ck VALUES ('{\"a\": 2}')", "new row for relation \"ck\" violates check constraint \"ck_j_check\"");
+    try c.expectError("INSERT INTO ck VALUES ('{\"a\": 2}')", "new row for relation \"ck\" violates check constraint \"ck_j_check\"\nDETAIL:  Failing row contains ({\"a\": 2}).");
     try c.exec("CREATE INDEX ck_a ON ck ((j -> 'a'))");
     try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE sql LIKE '%xq_pg_jsonb_get(\"j\", ''a'')%'", "2\n");
     main_mod.setDialect(c.db, .sqlite);
@@ -524,8 +524,8 @@ test "pg: INSERT, UPDATE, DELETE, RETURNING, ON CONFLICT" {
     try c.expectRows("INSERT INTO kv (k, v) VALUES ('a', 9), ('e', 9) ON CONFLICT DO NOTHING RETURNING k", "e\n");
     try c.expectRows("INSERT INTO kv (k, v) VALUES ('e', 1) ON CONFLICT (k) DO NOTHING RETURNING k", "");
     try c.expectError("INSERT INTO kv (k, v) VALUES ('e', 1) ON CONFLICT DO UPDATE SET v = 2", "ON CONFLICT DO UPDATE requires inference specification or constraint name");
-    try c.expectError("INSERT INTO kv (k, v) VALUES ('e', 1)", "duplicate key value violates unique constraint \"kv_pkey\"");
-    try c.expectError("INSERT INTO kv (k, v) VALUES ('f', NULL)", "null value in column \"v\" of relation \"kv\" violates not-null constraint");
+    try c.expectError("INSERT INTO kv (k, v) VALUES ('e', 1)", "duplicate key value violates unique constraint \"kv_pkey\"\nDETAIL:  Key (k)=(e) already exists.");
+    try c.expectError("INSERT INTO kv (k, v) VALUES ('f', NULL)", "null value in column \"v\" of relation \"kv\" violates not-null constraint\nDETAIL:  Failing row contains (f, null, null).");
     // UPDATE, with FROM and DEFAULT.
     try c.expectRows("UPDATE kv SET v = v + 1, note = 'u' WHERE k IN ('b', 'c') RETURNING k, v, note", "b|3|u\nc|1|u\n");
     try c.exec("CREATE TABLE bonus (k text, amount int); INSERT INTO bonus VALUES ('a', 1000)");
@@ -642,7 +642,7 @@ test "pg: types are strict" {
     try c.expectError("INSERT INTO ty (i4) VALUES (3000000000)", "integer out of range");
     try c.expectError("INSERT INTO ty (vc) VALUES ('abcd')", "value too long for type character varying(3)");
     try c.expectError("INSERT INTO ty (b) VALUES (2)", "invalid input syntax for type boolean");
-    try c.expectError("INSERT INTO ty (j) VALUES ('{')", "invalid input syntax for type json");
+    try c.expectError("INSERT INTO ty (j) VALUES ('{')", "invalid input syntax for type json\nDETAIL:  The input string ended unexpectedly.\nCONTEXT:  JSON data, line 1: {");
     try c.expectError("INSERT INTO ty (n) VALUES ('abc')", "invalid input syntax for type numeric: \"abc\"");
     // A string is read as PostgreSQL reads the column type's input.
     try c.expectError("INSERT INTO ty (b) VALUES ('x')", "invalid input syntax for type boolean: \"x\"");
@@ -673,7 +673,7 @@ test "pg: SERIAL and IDENTITY" {
     try c.expectRows("INSERT INTO s (v) SELECT 'e' RETURNING id", "4\n");
     try c.expectRows("INSERT INTO s DEFAULT VALUES RETURNING id, v", "5|NULL\n");
     try c.expectRows("SELECT currval('s_id_seq'), lastval()", "5|5\n");
-    try c.expectError("INSERT INTO s (id, v) VALUES (4, 'dup')", "duplicate key value violates unique constraint \"s_pkey\"");
+    try c.expectError("INSERT INTO s (id, v) VALUES (4, 'dup')", "duplicate key value violates unique constraint \"s_pkey\"\nDETAIL:  Key (id)=(4) already exists.");
 
     // bigserial that is not the key; GENERATED ... AS IDENTITY.
     try c.exec(
@@ -691,8 +691,8 @@ test "pg: SERIAL and IDENTITY" {
     );
     try c.expectRows("INSERT INTO g (v) VALUES ('a'), ('b') RETURNING id, n, k", "100|1|1\n110|2|2\n");
     try c.expectRows("INSERT INTO g (k, v) VALUES (50, 'c') RETURNING id, n, k", "120|3|50\n");
-    try c.expectError("INSERT INTO g (id, v) VALUES (1, 'x')", "cannot insert a non-DEFAULT value into column \"id\"");
-    try c.expectError("UPDATE g SET id = 1", "column \"id\" can only be updated to DEFAULT");
+    try c.expectError("INSERT INTO g (id, v) VALUES (1, 'x')", "cannot insert a non-DEFAULT value into column \"id\"\nDETAIL:  Column \"id\" is an identity column defined as GENERATED ALWAYS.\nHINT:  Use OVERRIDING SYSTEM VALUE to override.");
+    try c.expectError("UPDATE g SET id = 1", "column \"id\" can only be updated to DEFAULT\nDETAIL:  Column \"id\" is an identity column defined as GENERATED ALWAYS.");
     try c.expectRows("INSERT INTO g (id, v) OVERRIDING SYSTEM VALUE VALUES (1, 'x') RETURNING id", "1\n");
     try c.expectRows("INSERT INTO g (id, v) VALUES (DEFAULT, 'y') RETURNING id", "130\n");
     try c.expectRows("SELECT table_name, column_name, data_type, is_identity, identity_generation FROM information_schema.columns WHERE table_name = 'g' ORDER BY ordinal_position",
@@ -757,11 +757,11 @@ test "pg: DDL" {
     try c.expectError("CREATE TABLE child (x int)", "relation \"child\" already exists");
     try c.exec("INSERT INTO parent VALUES (1, 'p'); INSERT INTO child (id, parent_id, label) VALUES (1, 1, 'a')");
     try c.expectRows("SELECT qty, total FROM child", "1|2\n");
-    try c.expectError("INSERT INTO child (id, qty) VALUES (2, 0)", "new row for relation \"child\" violates check constraint \"child_qty_check\"");
-    try c.expectError("INSERT INTO child (id, parent_id, label) VALUES (1, 1, 'b')", "duplicate key value violates unique constraint \"child_pk\"");
-    try c.expectError("INSERT INTO child (id, parent_id, label) VALUES (2, 1, 'a')", "duplicate key value violates unique constraint \"child_parent_id_label_key\"");
-    try c.expectError("INSERT INTO child (id, parent_id) VALUES (2, 9)", "insert or update on table \"child\" violates foreign key constraint \"child_parent_id_fkey\"");
-    try c.expectError("INSERT INTO child (id) VALUES (-1)", "new row for relation \"child\" violates check constraint \"child_check\"");
+    try c.expectError("INSERT INTO child (id, qty) VALUES (2, 0)", "new row for relation \"child\" violates check constraint \"child_qty_check\"\nDETAIL:  Failing row contains (2, null, 0, null, 0).");
+    try c.expectError("INSERT INTO child (id, parent_id, label) VALUES (1, 1, 'b')", "duplicate key value violates unique constraint \"child_pk\"\nDETAIL:  Key (id)=(1) already exists.");
+    try c.expectError("INSERT INTO child (id, parent_id, label) VALUES (2, 1, 'a')", "duplicate key value violates unique constraint \"child_parent_id_label_key\"\nDETAIL:  Key (parent_id, label)=(1, a) already exists.");
+    try c.expectError("INSERT INTO child (id, parent_id) VALUES (2, 9)", "insert or update on table \"child\" violates foreign key constraint \"child_parent_id_fkey\"\nDETAIL:  Key (parent_id)=(9) is not present in table \"parent\".");
+    try c.expectError("INSERT INTO child (id) VALUES (-1)", "new row for relation \"child\" violates check constraint \"child_check\"\nDETAIL:  Failing row contains (-1, null, 1, null, 2).");
     // Indexes: PostgreSQL's names when none is given.
     try c.exec("CREATE INDEX ON child (qty); CREATE INDEX ON child (qty); CREATE UNIQUE INDEX IF NOT EXISTS lbl ON child (lower(label)) WHERE label IS NOT NULL");
     try c.exec("CREATE INDEX CONCURRENTLY child_lbl_desc ON child USING btree (label DESC NULLS LAST)");
@@ -891,9 +891,19 @@ test "pg: error positions and DETAIL, HINT, CONTEXT lines" {
     try c.exec("INSERT INTO t (s) VALUES ('x')");
     try c.expectError("INSERT INTO t (s) VALUES ('x')", "duplicate key value violates unique constraint \"t_s_key\"\nDETAIL:  Key (s)=(x) already exists.");
     // The fields of the message.
-    const f = @import("../../sql/util.zig").errorFields(main_mod.errmsg(c.db));
+    const f = @import("../../sql/util.zig").splitFields(main_mod.errmsg(c.db), c.db.err_state.?.fields);
     try testing.expectEqualStrings("duplicate key value violates unique constraint \"t_s_key\"", f.message);
     try testing.expectEqualStrings("Key (s)=(x) already exists.", f.detail.?);
+    // A value the message quotes is no field, whatever its text.
+    try c.expectError("SELECT E'1\\nHINT:  x'::int", "invalid input syntax for type integer: \"1\nHINT:  x\"");
+    const g = @import("../../sql/util.zig").splitFields(main_mod.errmsg(c.db), c.db.err_state.?.fields);
+    try testing.expectEqualStrings("invalid input syntax for type integer: \"1\nHINT:  x\"", g.message);
+    try testing.expect(g.hint == null);
+    // One the key holds is the DETAIL's.
+    try c.expectError("INSERT INTO t (s) VALUES (E'y\\nHINT:  z'), (E'y\\nHINT:  z')", "duplicate key value violates unique constraint \"t_s_key\"\nDETAIL:  Key (s)=(y\nHINT:  z) already exists.");
+    const h = @import("../../sql/util.zig").splitFields(main_mod.errmsg(c.db), c.db.err_state.?.fields);
+    try testing.expectEqualStrings("Key (s)=(y\nHINT:  z) already exists.", h.detail.?);
+    try testing.expect(h.hint == null);
 }
 
 test "pg: errors in PostgreSQL's words" {
@@ -904,15 +914,15 @@ test "pg: errors in PostgreSQL's words" {
     try c.expectError("SELECT * FROM nosuch", "relation \"nosuch\" does not exist");
     try c.expectError("SELECT nosuch FROM t", "column \"nosuch\" does not exist");
     try c.expectError("SELECT a FROM t, u", "column reference \"a\" is ambiguous");
-    try c.expectError("SELECT nosuchfunc(1)", "function nosuchfunc() does not exist");
+    try c.expectError("SELECT nosuchfunc(1)", "function nosuchfunc() does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.");
     try c.expectError("CREATE TABLE t (x int)", "relation \"t\" already exists");
     try c.expectError("SELECT 1 FROM t WHERE", "syntax error at end of input");
     try c.expectError("SELECT a b c FROM t", "syntax error at or near \"c\"");
-    try c.expectError("SELECT ARRAY[]", "cannot determine type of empty array");
+    try c.expectError("SELECT ARRAY[]", "cannot determine type of empty array\nHINT:  Explicitly cast to the desired type, for example ARRAY[]::integer[].");
     try c.expectError("SELECT 1 FROM t LATERAL", "syntax error at or near \"LATERAL\"");
     try c.expectError("CREATE TYPE mood AS ENUM ('a')", "CREATE TYPE is not supported");
     try c.expectError("LISTEN chan", "syntax error at or near \"LISTEN\"");
-    try c.expectError("SELECT 1 ## 2", "operator does not exist: ##");
+    try c.expectError("SELECT 1 ## 2", "operator does not exist: ##\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
 }
 
 test "pg: SQLite's administrative statements; the same code as SQLite" {
@@ -1022,14 +1032,14 @@ test "pg: schemas" {
     try c.expectRows("SELECT schemaname, indexname FROM pg_indexes ORDER BY 2", "sales|by_note\nsales|orders_amt_idx\nsales|orders_pkey\n");
     // Errors in PostgreSQL's words.
     try c.expectError("CREATE SCHEMA sales", "schema \"sales\" already exists");
-    try c.expectError("CREATE SCHEMA pg_x", "unacceptable schema name \"pg_x\"");
+    try c.expectError("CREATE SCHEMA pg_x", "unacceptable schema name \"pg_x\"\nDETAIL:  The prefix \"pg_\" is reserved for system schemas.");
     try c.expectError("CREATE SCHEMA \"a.b\"", "xqlite: a schema name cannot contain \".\"");
     try c.expectError("CREATE TABLE nosuch.t (a int)", "schema \"nosuch\" does not exist");
     try c.expectError("SELECT * FROM nosuch.t", "relation \"nosuch.t\" does not exist");
     try c.expectError("SELECT * FROM sales.nosuch", "relation \"sales.nosuch\" does not exist");
     try c.expectError("CREATE TABLE sales.orders (a int)", "relation \"orders\" already exists");
     try c.expectError("DROP TABLE sales.nosuch", "table \"nosuch\" does not exist");
-    try c.expectError("DROP SCHEMA sales", "cannot drop schema sales because other objects depend on it");
+    try c.expectError("DROP SCHEMA sales", "cannot drop schema sales because other objects depend on it\nDETAIL:  view sales.big depends on schema sales\ntable sales.orders depends on schema sales\nsequence sales.tickets depends on schema sales\nHINT:  Use DROP ... CASCADE to drop the dependent objects too.");
     // ALTER TABLE keeps the table in its schema.
     try c.exec("ALTER TABLE sales.orders RENAME TO ord");
     try c.expectRows("SELECT count(*) FROM sales.ord", "2\n");
@@ -1166,7 +1176,7 @@ test "pg: the catalog in memory follows DDL, rollbacks and other connections" {
     try expectDecl(&c, "u", "a2", "character varying(5)");
     // The identity still numbers the renamed table's column.
     try c.expectRows("INSERT INTO u (a2) VALUES ('x') RETURNING id", "1\n");
-    try c.expectError("INSERT INTO u (id) VALUES (5)", "cannot insert a non-DEFAULT value into column \"id\"");
+    try c.expectError("INSERT INTO u (id) VALUES (5)", "cannot insert a non-DEFAULT value into column \"id\"\nDETAIL:  Column \"id\" is an identity column defined as GENERATED ALWAYS.\nHINT:  Use OVERRIDING SYSTEM VALUE to override.");
     try c.exec("DROP TABLE u");
     try expectNoMeta(&c, "u");
     // Made again, of other types.
@@ -1381,15 +1391,15 @@ test "pg: arrays" {
     // written as the type does.
     try c.expectRows("SELECT '{ 1 , 01, NULL}'::int[], '{yes,off}'::bool[], '{1.50,1e2}'::numeric[], '{\"a b\",c}'::text[], '[0:1]={1,2}'::int[], '{{1,2},{3,4}}'::int[]", "{1,1,NULL}|{t,f}|{1.50,100}|{\"a b\",c}|[0:1]={1,2}|{{1,2},{3,4}}\n");
     try c.expectError("SELECT '{a}'::int[]", "invalid input syntax for type integer: \"a\"");
-    try c.expectError("SELECT '{1,2'::int[]", "malformed array literal: \"{1,2\"");
-    try c.expectError("SELECT '{{1},{2,3}}'::int[]", "malformed array literal: \"{{1},{2,3}}\"");
+    try c.expectError("SELECT '{1,2'::int[]", "malformed array literal: \"{1,2\"\nDETAIL:  Unexpected end of input.");
+    try c.expectError("SELECT '{{1},{2,3}}'::int[]", "malformed array literal: \"{{1},{2,3}}\"\nDETAIL:  Multidimensional arrays must have sub-arrays with matching dimensions.");
     try c.expectColumns("SELECT '{1}'::int[], ARRAY[1], '{a}'::text[]", "int4|array|text");
     // Columns: TEXT with a check, the declared type in the catalog, values
     // stored canonical.
     try c.exec("CREATE TABLE t (id int, a int[], b bool[], s varchar(10)[])");
     try c.exec("INSERT INTO t VALUES (1, '{3, 1, 2}', '{yes}', '{x,y}'), (2, NULL, ARRAY[false], '{}')");
     try c.expectError("INSERT INTO t VALUES (3, '{x}', NULL, NULL)", "invalid input syntax for type integer: \"x\"");
-    try c.expectError("INSERT INTO t VALUES (3, 'x', NULL, NULL)", "malformed array literal: \"x\"");
+    try c.expectError("INSERT INTO t VALUES (3, 'x', NULL, NULL)", "malformed array literal: \"x\"\nDETAIL:  Array value must start with \"{\" or dimension information.");
     try c.expectRows("SELECT id, a, b, s FROM t ORDER BY id", "1|{3,1,2}|{t}|{x,y}\n2|NULL|{f}|{}\n");
     try c.expectRows("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 1 ORDER BY attnum", "integer[]\nboolean[]\ncharacter varying(10)[]\n");
     try c.expectRows("SELECT instr(sql, '\"a\" TEXT') > 0 FROM sqlite_schema WHERE name = 't'", "1\n");
@@ -1397,7 +1407,7 @@ test "pg: arrays" {
     try c.expectRows("SELECT ARRAY[1,2], ARRAY[true,false], ARRAY['a','b c'], ARRAY[[1,2],[3,4]], ARRAY[1.50, 2], ARRAY[]::int[]", "{1,2}|{t,f}|{a,\"b c\"}|{{1,2},{3,4}}|{1.50,2}|{}\n");
     try c.expectRows("SELECT ARRAY(SELECT id FROM t ORDER BY id DESC), ARRAY(SELECT 1 WHERE false), (SELECT array_agg(id ORDER BY id DESC) FROM t)", "{2,1}|{}|{2,1}\n");
     try c.expectRows("SELECT array_agg(b ORDER BY id) FROM t", "{{t},{f}}\n");
-    try c.expectError("SELECT ARRAY[]", "cannot determine type of empty array");
+    try c.expectError("SELECT ARRAY[]", "cannot determine type of empty array\nHINT:  Explicitly cast to the desired type, for example ARRAY[]::integer[].");
     // ANY and ALL.
     try c.expectRows("SELECT 1 = ANY(ARRAY[1,2]), 3 = ANY(ARRAY[1,NULL]), 1 = ALL(ARRAY[1,NULL]), 2 = ALL(ARRAY[1,NULL]), 1 = ANY('{}'::int[]), 1 = ALL('{}'::int[]), 1 < ANY(ARRAY[0,2])", "1|NULL|NULL|0|0|1|1\n");
     try c.expectRows("SELECT id FROM t WHERE 2 = ANY(a)", "1\n");
@@ -1521,4 +1531,77 @@ test "pg: to_char, to_number, pg_input_is_valid and the calls told an argument's
     try c.expectError("SELECT gcd((-2147483648)::int4, 0::int4)", "integer out of range");
     try c.expectRows("SELECT date_trunc('hour', t), (t AT TIME ZONE 'UTC')::text, z AT TIME ZONE 'EST' FROM f", "2001-02-16 20:00:00|2001-02-16 20:38:40|2001-02-16 13:38:40\n");
     try c.expectRows("SELECT to_date('20100309', 'YYYYMMDD'), booleq(true, false), float8(b) = 4567890123456789 FROM f", "2010-03-09|0|1\n");
+}
+
+test "pg: a CHECK, an index and a view tell the type of an argument as a query does" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE k (z timestamptz, a int, b bigint, CHECK (to_char(z, 'TZ') <> ''), CONSTRAINT g CHECK (gcd(a, 0) > 0), CHECK (lcm(b, 2) >= 0), CHECK ((z AT TIME ZONE 'UTC') IS NOT NULL))");
+    // The schema keeps the engine's calls with the type, PostgreSQL's
+    // text shows the calls written.
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name = 'k' AND sql LIKE '%xq_pg_to_char(\"z\", ''TZ'', 7)%' AND sql LIKE '%xq_pg_gcd(\"a\", 0, 32)%' AND sql LIKE '%xq_pg_lcm(\"b\", 2, 64)%' AND sql LIKE '%xq_pg_timezone(''UTC'', \"z\", 7)%'", "1\n");
+    try c.expectRows("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'k'::regclass AND contype = 'c' ORDER BY conname, 1",
+        \\CHECK ((gcd(a, 0) > 0))
+        \\CHECK ((lcm(b, 2) >= 0))
+        \\CHECK ((timezone('UTC', z) IS NOT NULL))
+        \\CHECK ((to_char(z, 'TZ'::text) <> ''::text))
+        \\
+    );
+    // As the query reads the values: a timestamptz's zone, an integer's
+    // range.
+    try c.expectRows("SELECT to_char('2001-02-16 20:38:40+02'::timestamptz, 'TZ')", "UTC\n");
+    try c.exec("INSERT INTO k VALUES ('2001-02-16 20:38:40+02', 4, 6)");
+    try c.expectError("INSERT INTO k VALUES ('2001-02-16 20:38:40+02', -2147483648, 6)", "integer out of range");
+    try c.exec("CREATE INDEX k_y ON k (to_char(z, 'YYYY TZ'))");
+    try c.expectRows("SELECT pg_get_indexdef('k_y'::regclass)", "CREATE INDEX k_y ON public.k USING btree (to_char(z, 'YYYY TZ'::text))\n");
+    try c.expectRows("SELECT a FROM k WHERE to_char(z, 'YYYY TZ') = '2001 UTC'", "4\n");
+    try c.exec("CREATE VIEW kv AS SELECT to_char(z, 'HH24 TZ') AS h, gcd(a, 6) AS g FROM k");
+    try c.expectRows("SELECT h, g FROM kv", "18 UTC|2\n");
+    try c.expectRows("SELECT pg_get_viewdef('kv')", " SELECT to_char(z, 'HH24 TZ'::text) AS h,\n    gcd(a, 6) AS g\n   FROM k;\n");
+    // A table made before keeps the calls without the type, which read
+    // the values by their storage (a timestamp: no zone), as sqlite3 with
+    // the extension does.
+    main_mod.setDialect(c.db, .sqlite);
+    try c.exec("CREATE TABLE o (z TEXT, CHECK (xq_postgres_to_char(z, 'TZ') = ''))");
+    try c.exec("INSERT INTO xq_catalog VALUES ('o', '', 'dialect', 'postgres'), ('o', 'z', 'type', 'timestamp with time zone')");
+    main_mod.setDialect(c.db, .postgres);
+    try c.exec("INSERT INTO o VALUES ('2001-02-16 20:38:40+02')");
+    try c.expectRows("SELECT to_char(z, 'TZ') FROM o", "UTC\n");
+}
+
+test "pg: a string literal met by a boolean is read when the statement is compiled" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE b (x boolean, CHECK (x IN ('t') OR x = 'f'))");
+    // No row reaches the comparison: the literal fails the statement.
+    try c.expectError("SELECT * FROM b WHERE x = 'xyz'", "invalid input syntax for type boolean: \"xyz\"");
+    try c.expectError("SELECT * FROM b WHERE 'xyz' <> x", "invalid input syntax for type boolean: \"xyz\"");
+    try c.expectError("SELECT * FROM b WHERE x IN ('xyz')", "invalid input syntax for type boolean: \"xyz\"");
+    try c.expectError("SELECT 1 WHERE '2024-02-30' <= ('a' LIKE 'h%')", "invalid input syntax for type boolean: \"2024-02-30\"");
+    try c.expectRows("SELECT true IN ('yes'), false NOT IN ('t'), true = ' on '", "1|1|1\n");
+    // The schema's text says the boolean it read; one that is no boolean
+    // fails CREATE as in PostgreSQL.
+    try c.exec("CREATE VIEW bv AS SELECT x = 't' AS a, x NOT IN ('no') AS o FROM b");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE sql LIKE '%xq_pg_bool(''t'')%' AND sql LIKE '%NOT IN (xq_pg_bool(''no''))%'", "1\n");
+    try c.exec("INSERT INTO b VALUES (true)");
+    try c.expectRows("SELECT a, o FROM bv", "1|1\n");
+    try c.expectRows("SELECT pg_get_viewdef('bv')", " SELECT (x = true) AS a,\n    (x <> false) AS o\n   FROM b;\n");
+    try c.expectError("CREATE VIEW bw AS SELECT 1 FROM b WHERE x = 'xyz'", "invalid input syntax for type boolean: \"xyz\"");
+    try c.expectError("CREATE TABLE bc (x boolean CHECK (x <> 'xyz'))", "invalid input syntax for type boolean: \"xyz\"");
+    try c.expectError("CREATE TABLE bc (x boolean CHECK (x IN ('xyz')))", "invalid input syntax for type boolean: \"xyz\"");
+}
+
+test "pg: the catalogs' snapshot keeps no rows while the connection is idle" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (a int)");
+    // A nested loop reads pg_attribute's rows once a statement.
+    try c.expectRows("SELECT count(*) FROM pg_class c, pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0", "1\n");
+    const s: *const @import("pgcatalog.zig").Snapshot = @ptrCast(@alignCast(c.db.xq.postgres.catalog.?));
+    try testing.expectEqual(@as(u32, 1), s.refs);
+    try testing.expectEqual(@as(u32, 0), s.lazy.filled.count());
+    try c.expectRows("SELECT count(*) FROM pg_class", "1\n");
 }

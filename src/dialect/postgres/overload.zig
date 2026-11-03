@@ -66,6 +66,7 @@ const jsonb = @import("repr/jsonb.zig");
 const numeric = @import("repr/numeric.zig");
 const operand = @import("operand.zig");
 const integer = @import("integer.zig");
+const formatting = @import("formatting.zig");
 
 const TK = int.TK;
 const Expr = int.Expr;
@@ -120,7 +121,7 @@ fn concat(c: *Ctx, e: *Expr) Error!bool {
         if (logical(c, r) == .interval) e.right = try interval.ivText(c, r);
         return true;
     }
-    if (logical(c, l) == .json and logical(c, r) == .json) return c.fail(e, .of("42883"), "operator does not exist: json || json{s}", .{operators.hint(.not_exist)});
+    if (logical(c, l) == .json and logical(c, r) == .json) return c.failFields(e, .of("42883"), .{ .message = "operator does not exist: json || json", .hint = operators.hint(.not_exist) });
     return jsonb.concat(c, e, l, r);
 }
 
@@ -222,7 +223,7 @@ fn operatorRow(c: *Ctx, e: *Expr, op: operators.Op, operands: []const *Expr) Err
             if (loose) return null;
             var buf: [160]u8 = undefined;
             const msg = operators.message(r, op, given, &buf);
-            return c.fail(e, if (r == .not_unique) .of("42725") else .of("42883"), "{s}{s}", .{ msg, operators.hint(r) });
+            return c.failFields(e, if (r == .not_unique) .of("42725") else .of("42883"), .{ .message = msg, .hint = operators.hint(r) });
         },
     };
     for (operands, given, row.args) |x, a, t| if (a == .loose and x.op == TK.VARIABLE and logical(c, x) != t.logical()) {
@@ -270,24 +271,33 @@ fn compare(c: *Ctx, e: *Expr) Error!bool {
     const r = e.right orelse return false;
     if (isArray(c, l) or isArray(c, r)) return arrayCompare(c, e, l, r);
     // A boolean against a string literal: the literal read as a boolean
-    // (relispartition = 'f'), not compared as text.
-    if (logical(c, l) == .boolean and r.op == TK.STRING) {
-        e.right = try c.call("xq_pg_bool", &.{r});
-        return true;
-    }
-    if (logical(c, r) == .boolean and l.op == TK.STRING) {
-        e.left = try c.call("xq_pg_bool", &.{l});
-        return true;
-    }
+    // (relispartition = 'f'), not compared as text. As PostgreSQL's
+    // unknown, it is read when the statement is compiled: 'xyz' fails it
+    // even where no row reaches the comparison.
+    if (logical(c, l) == .boolean and try boolLiteral(c, &e.right.?)) return true;
+    if (logical(c, r) == .boolean and try boolLiteral(c, &e.left.?)) return true;
     if (try uuid.uuidCompare(c, e)) return true;
     if (e.op != TK.IS and e.op != TK.ISNOT and logical(c, l) == .json and logical(c, r) == .json) {
-        return c.fail(e, .of("42883"), "operator does not exist: json {s} json{s}", .{ opText(e.op), operators.hint(.not_exist) });
+        var buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "operator does not exist: json {s} json", .{opText(e.op)}) catch unreachable;
+        return c.failFields(e, .of("42883"), .{ .message = msg, .hint = operators.hint(.not_exist) });
     }
     if (try numeric.numericCompare(c, l, r)) return true;
     // Chosen already.
     if (l.op == TK.COLLATE and (std.ascii.eqlIgnoreCase(l.token(), jsonb.jsonb_collation) or std.ascii.eqlIgnoreCase(l.token(), interval.interval_collation))) return false;
     if (interval.intervalPair(c, l, r)) return interval.intervalCompare(c, e, l, r);
     return jsonb.compare(c, e, l, r);
+}
+
+/// Operand `x`, met by a boolean, read as one if a string literal (or
+/// the +literal of `b IN ('t')`, which is `b = +'t'`), when the statement
+/// is compiled (Ctx.readInput()); whether it was.
+fn boolLiteral(c: *Ctx, x: **Expr) Error!bool {
+    const slot = if (x.*.op == TK.UPLUS and x.*.left != null) &x.*.left.? else x;
+    if (slot.*.op != TK.STRING) return false;
+    try c.readInput("xq_pg_bool", slot.*);
+    slot.* = try c.call("xq_pg_bool", &.{slot.*});
+    return true;
 }
 
 fn opText(op: u8) []const u8 {
@@ -308,7 +318,7 @@ fn call(c: *Ctx, e: *Expr) Error!bool {
     const items = args(e);
     if (std.mem.eql(u8, n, integer.defs.int_xor.name) and items.len == 2) return xorCall(c, e, items);
     // to_char(), gcd(), timezone() ... told the type of an argument.
-    if (try @import("kindcalls.zig").call(c, e, n, items)) return true;
+    if (try kindCall(c, e, n, items)) return true;
     // The operators of jsonb operands.
     for (variants) |v| if (std.mem.eql(u8, n, v[0])) {
         if (items.len > 0 and logical(c, items[0].expr.?) == .jsonb) try c.rename(e, v[1]);
@@ -361,6 +371,76 @@ const variants = [_]struct { []const u8, []const u8 }{
     .{ "xq_pg_json_path", "xq_pg_jsonb_path" },
     .{ "xq_pg_json_path_text", "xq_pg_jsonb_path_text" },
 };
+
+/// A call whose meaning depends on the type of an argument the value
+/// does not tell (a timestamp, a timestamptz and a date are all TEXT; an
+/// integer is an integer, a bigint or a smallint): `name(a, b)` is
+/// `engine(a, b, told)`, `told` a constant after the call's arguments.
+/// Keyed on the function (nameOf(): to_char for xq_postgres_to_char).
+/// ddltype.zig brings the call back to the tree of what the schema keeps
+/// (kindEngine()), so that a CHECK, an index, a generated column and a
+/// view say the type their text reads; the constants are part of the
+/// file format (formatting.Kind's numbers). The schema's text is never
+/// chosen again (overload()'s FromDDL, Parse.xq_schema_text): an older
+/// schema's xq_postgres_to_char(x, t) keeps reading x by its storage,
+/// as its index entries and sqlite3 with the extension do.
+pub const KindCall = struct {
+    name: []const u8,
+    engine: []const u8,
+    told: Told,
+
+    pub const Told = union(enum) {
+        /// formatting.Kind of argument `i` (xq_pg_to_char(x, t, kind),
+        /// formatting.zig; xq_pg_timezone(zone, x, kind), dtfuncs.zig).
+        kind: u1,
+        /// The width of the integers: 32, 64 if one is a bigint, 0 if
+        /// one is a numeric (xq_pg_gcd(a, b, bits), builtins.zig).
+        bits,
+    };
+};
+
+pub const kind_calls = [_]KindCall{
+    .{ .name = "to_char", .engine = "xq_pg_to_char", .told = .{ .kind = 0 } },
+    .{ .name = "timezone", .engine = "xq_pg_timezone", .told = .{ .kind = 1 } },
+    .{ .name = "gcd", .engine = "xq_pg_gcd", .told = .bits },
+    .{ .name = "lcm", .engine = "xq_pg_lcm", .told = .bits },
+};
+
+/// The row of kind_calls whose engine function is `engine` (any case).
+pub fn kindEngine(engine: []const u8) ?*const KindCall {
+    for (&kind_calls) |*k| if (std.ascii.eqlIgnoreCase(engine, k.engine)) return k;
+    return null;
+}
+
+/// Call `e` of `n` (kind_calls) made its engine function's, told the
+/// type; whether it was. A call of arguments of no known type stays: the
+/// function reads its values by their storage.
+fn kindCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) Error!bool {
+    if (items.len != 2) return false;
+    const k = for (&kind_calls) |*k| {
+        if (std.mem.eql(u8, n, k.name)) break k;
+    } else return false;
+    const x = items[0].expr.?;
+    const y = items[1].expr.?;
+    const told: i32 = switch (k.told) {
+        .kind => |i| told: {
+            const kind = formatting.Kind.of(logical(c, items[i].expr.?));
+            if (kind == .auto) return false;
+            break :told @backingInt(kind);
+        },
+        .bits => bits: {
+            const lx = logical(c, x);
+            const ly = logical(c, y);
+            if (lx == .numeric or ly == .numeric) break :bits 0;
+            if (lx == .int8 or ly == .int8) break :bits 64;
+            if (typing.intWidth(lx) != null and (typing.intWidth(ly) != null or operand.untyped(y))) break :bits 32;
+            if (typing.intWidth(ly) != null and operand.untyped(x)) break :bits 32;
+            return false;
+        },
+    };
+    try c.toCall(e, k.engine, &.{ x, y, try int32(c, told) });
+    return true;
+}
 
 /// If `e` is an array (text[], int[] ..., ARRAY[...]), what its elements
 /// are as JSON: 0 strings, 1 numbers, 2 booleans (xq_pg_array_to_json()).

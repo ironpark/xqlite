@@ -60,6 +60,7 @@ line 42: cannot cast type bytea to uuid
 line 43: cannot cast type integer to uuid
 line 45: invalid input syntax for type uuid: " a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 line 48: timestamp out of range for UUID version 7
+DETAIL:  UUID version 7 supports timestamps from 1970-01-01 to approximately year 10889.
 line 51: invalid input syntax for type interval: "soon"
 line 52: invalid interval value
 line 53: interval out of range

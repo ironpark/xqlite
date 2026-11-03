@@ -213,10 +213,7 @@ fn typmod(c: *Call, d: Dec, argv: []*Mem) Fail!Dec {
         error.Overflow => {
             // PostgreSQL's DETAIL.
             var dbuf: [160]u8 = undefined;
-            var buf: [200]u8 = undefined;
-            const detail_mark = @import("../sql/util.zig").detail_mark;
-            const msg = std.fmt.bufPrint(&buf, "numeric field overflow" ++ detail_mark ++ "{s}", .{dec.overflowDetail(&dbuf, d, p, s)}) catch "numeric field overflow";
-            api.resultErrorState(c.ctx, .of("22003"), msg);
+            api.resultErrorFields(c.ctx, .of("22003"), .{ .message = "numeric field overflow", .detail = dec.overflowDetail(&dbuf, d, p, s) });
             return error.Reported;
         },
         else => |e| return e,

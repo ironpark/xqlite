@@ -171,69 +171,13 @@ pub fn writeText(o: *Out, t: Type, v: Value) !void {
 }
 
 /// The text of a value that is not a blob or NULL, in `buf` or `v`; null
-/// for a blob.
+/// for a blob (display.pgText()).
 fn textOf(t: Type, v: Value, buf: *[xqlite.display.max_len]u8) ?[]const u8 {
-    if (xqlite.display.text(.postgres, t, v, buf[0..xqlite.display.max_len])) |z| return z;
-    return switch (v) {
-        .null => unreachable,
-        .integer => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch unreachable,
-        .float => |f| floatText(buf[0..64], f, t.logical == .float4),
-        .text => |z| z,
-        .blob => null,
-    };
+    return xqlite.display.pgText(t, v, buf);
 }
 
-/// PostgreSQL's text of a double (of a real if `real`), with
-/// extra_float_digits 1, its default: the shortest digits that read back
-/// as the value, in fixed notation for a decimal exponent from -4 to 14
-/// (`100`, `0.0001`, `123.5`), else as `1.5e+20`, `1e-05`.
-pub fn floatText(buf: *[64]u8, v: f64, real: bool) []const u8 {
-    if (std.math.isNan(v)) return "NaN";
-    if (std.math.isInf(v)) return if (v > 0) "Infinity" else "-Infinity";
-    if (v == 0) return if (std.math.signbit(v)) "-0" else "0";
-    var sci: [40]u8 = undefined;
-    // The shortest digits and their exponent: "1.2345e17".
-    const z = (if (real) std.fmt.bufPrint(&sci, "{e}", .{@as(f32, @floatCast(v))}) else std.fmt.bufPrint(&sci, "{e}", .{v})) catch return "0";
-    const e_at = std.mem.indexOfScalar(u8, z, 'e') orelse return "0";
-    const neg = z[0] == '-';
-    var digits: [24]u8 = undefined;
-    var n: usize = 0;
-    for (z[@intFromBool(neg)..e_at]) |c| {
-        if (c == '.') continue;
-        digits[n] = c;
-        n += 1;
-    }
-    while (n > 1 and digits[n - 1] == '0') n -= 1;
-    const exp = std.fmt.parseInt(i32, z[e_at + 1 ..], 10) catch 0;
-    const d = digits[0..n];
-    var out: std.ArrayList(u8) = .initBuffer(buf);
-    if (neg) out.appendAssumeCapacity('-');
-    if (exp >= -4 and exp < 15) {
-        if (exp < 0) {
-            out.appendSliceAssumeCapacity("0.");
-            out.appendNTimesAssumeCapacity('0', @intCast(-exp - 1));
-            out.appendSliceAssumeCapacity(d);
-        } else {
-            const int_digits: usize = @intCast(exp + 1);
-            if (n <= int_digits) {
-                out.appendSliceAssumeCapacity(d);
-                out.appendNTimesAssumeCapacity('0', int_digits - n);
-            } else {
-                out.appendSliceAssumeCapacity(d[0..int_digits]);
-                out.appendAssumeCapacity('.');
-                out.appendSliceAssumeCapacity(d[int_digits..]);
-            }
-        }
-    } else {
-        out.appendAssumeCapacity(d[0]);
-        if (n > 1) {
-            out.appendAssumeCapacity('.');
-            out.appendSliceAssumeCapacity(d[1..]);
-        }
-        out.printAssumeCapacity("e{c}{d:0>2}", .{ @as(u8, if (exp < 0) '-' else '+'), @abs(exp) });
-    }
-    return out.items;
-}
+/// PostgreSQL's text of a double (display.floatText()).
+pub const floatText = xqlite.display.floatText;
 
 /// Whether a column of OID `o` can be sent in the binary format (an
 /// array if its elements can).

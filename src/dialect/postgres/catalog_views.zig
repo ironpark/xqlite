@@ -5,7 +5,9 @@
 //! exist only while compiling in this dialect, nothing is stored).
 //!
 //!  - information_schema: tables, columns (declared types from the
-//!    catalog), views, schemata, sequences;
+//!    catalog, a view's from pgcatalog.zig's xq_pg_view_columns, which
+//!    reads no snapshot while there is no view), views, schemata,
+//!    sequences;
 //!  - pg_catalog (also without the schema, as in PostgreSQL's
 //!    search_path): the relations of pgcatalog.zig (pg_class,
 //!    pg_attribute, pg_type, pg_index, pg_constraint ...) through their
@@ -85,10 +87,8 @@ const columns =
     \\  CASE WHEN m.type = 'view' THEN 'NO' ELSE 'YES' END AS is_updatable
     \\FROM sqlite_schema m, pragma_table_xinfo(m.name) c
     \\  LEFT JOIN (SELECT tbl, col, value FROM {cat} WHERE key = 'type'
-    \\    UNION ALL SELECT CASE WHEN vn.nspname = 'public' THEN vc.relname ELSE vn.nspname || '.' || vc.relname END,
-    \\      va.attname, format_type(va.atttypid, va.atttypmod)
-    \\    FROM pg_class vc JOIN pg_namespace vn ON vn.oid = vc.relnamespace JOIN pg_attribute va ON va.attrelid = vc.oid AND va.attnum > 0
-    \\    WHERE vc.relkind = 'v') k ON k.tbl = m.name AND k.col = c.name
+    \\    UNION ALL SELECT v.tbl, v.col, format_type(v.typid::oid, v.typmod::integer)
+    \\    FROM xq_pg_view_columns v) k ON k.tbl = m.name AND k.col = c.name
     \\  LEFT JOIN {cat} i ON i.tbl = m.name AND i.col = c.name AND i.key = 'identity_kind'
 ++ nsJoin("m.name") ++
     \\

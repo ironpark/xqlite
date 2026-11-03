@@ -510,7 +510,7 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                     if (stores) |f| if (f[i]) |st| {
                         const x = changes.at(@intCast(j)).expr.?;
                         if (n_change_from != 0) {
-                            insert.codeStore(p, st, k);
+                            if (st.untyped()) |s| insert.codeStore(p, s, k);
                         } else if (st.pick(db, x)) |s| {
                             if (typing.readStoredLiteral(p, s, x) catch return build.oomFault(p)) return;
                             insert.codeStore(p, s, k);

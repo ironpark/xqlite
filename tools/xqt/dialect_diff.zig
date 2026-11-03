@@ -532,20 +532,30 @@ fn normPg(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(gpa);
     var skip = false;
+    // In the lines of an error: its fields stay, its position goes.
+    var in_error = false;
     var it = lines(text);
     while (it.next()) |line| {
         if (pgError(line)) |msg| {
             try out.appendSlice(gpa, "ERROR: ");
             try out.appendSlice(gpa, msg);
             try out.append(gpa, '\n');
+            in_error = true;
             continue;
         }
-        if (startsWithLineN(line) or startsWithAny(line, &.{ "DETAIL:", "HINT:", "CONTEXT:", "NOTICE:", "psql:" })) {
+        if (in_error and fieldLine(line)) {
+            try out.appendSlice(gpa, line);
+            try out.append(gpa, '\n');
+            skip = false;
+            continue;
+        }
+        if (startsWithLineN(line) or startsWithAny(line, &.{ "NOTICE:", "psql:" })) {
             skip = true;
             continue;
         }
         if (skip and std.mem.startsWith(u8, line, " ")) continue;
         skip = false;
+        in_error = false;
         if (rowCount(line)) |n| {
             if (n > 0) try out.appendSlice(gpa, buf.items);
             buf.clearRetainingCapacity();
@@ -602,9 +612,21 @@ fn rowCount(line: []const u8) ?u64 {
     return std.fmt.parseUnsigned(u64, digits, 10) catch std.math.maxInt(u64);
 }
 
+/// The lines of PostgreSQL's fields of an error (DETAIL, HINT,
+/// CONTEXT), which psql and the shell print under its message.
+fn fieldLine(line: []const u8) bool {
+    return startsWithAny(line, &.{ "DETAIL:  ", "HINT:  ", "CONTEXT:  " });
+}
+
 /// xqlite's error lines become "ERROR: message", without the lines of
-/// context under them (the caret, DETAIL, HINT, CONTEXT).
+/// context under them (the caret, and the DETAIL, HINT and CONTEXT the
+/// other servers do not print).
 fn normXq(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
+    return normXqFields(gpa, text, false);
+}
+
+/// normXq(), keeping the DETAIL, HINT and CONTEXT lines if `fields`.
+fn normXqFields(gpa: Allocator, text: []const u8, fields: bool) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
     var skip = false;
     var it = lines(text);
@@ -616,7 +638,14 @@ fn normXq(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
             skip = true;
             continue;
         }
-        if (skip and (std.mem.startsWith(u8, line, "  ") or startsWithAny(line, &.{ "DETAIL:", "HINT:", "CONTEXT:" }))) continue;
+        if (skip and fieldLine(line)) {
+            if (fields) {
+                try out.appendSlice(gpa, line);
+                try out.append(gpa, '\n');
+            }
+            continue;
+        }
+        if (skip and std.mem.startsWith(u8, line, "  ")) continue;
         skip = false;
         try out.appendSlice(gpa, line);
         try out.append(gpa, '\n');
@@ -645,7 +674,7 @@ fn xqError(line: []const u8) ?[]const u8 {
 /// The shell shows a boolean column as psql does (t/f) and a boolean
 /// expression as 1/0: t/f become 1/0, as in normPg().
 fn normXqPg(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
-    const t = try normXq(gpa, text);
+    const t = try normXqFields(gpa, text, true);
     defer gpa.free(t);
     var out: std.ArrayList(u8) = .empty;
     var it = lines(t);
@@ -1210,6 +1239,40 @@ test normPg {
     );
     defer a.free(got);
     try std.testing.expectEqualStrings("a|b\n1|x\nERROR: relation \"x\" does not exist\n0\n", got);
+}
+
+test "normPg and normXqPg: the fields of an error stay, its position goes" {
+    const a = std.testing.allocator;
+    const pg_out = try normPg(a,
+        \\ERROR:  invalid input syntax for type json
+        \\LINE 1: SELECT '{'::jsonb;
+        \\               ^
+        \\DETAIL:  The input string ended unexpectedly.
+        \\CONTEXT:  JSON data, line 1: {
+        \\x
+        \\DETAIL:  a row
+        \\(2 rows)
+        \\
+    );
+    defer a.free(pg_out);
+    const want = "ERROR: invalid input syntax for type json\nDETAIL:  The input string ended unexpectedly.\nCONTEXT:  JSON data, line 1: {\nx\nDETAIL:  a row\n";
+    try std.testing.expectEqualStrings(want, pg_out);
+    const xq_out = try normXqPg(a,
+        \\Parse error near line 2: invalid input syntax for type json
+        \\DETAIL:  The input string ended unexpectedly.
+        \\CONTEXT:  JSON data, line 1: {
+        \\  SELECT '{'::jsonb;
+        \\         ^--- error here
+        \\x
+        \\DETAIL:  a row
+        \\
+    );
+    defer a.free(xq_out);
+    try std.testing.expectEqualStrings(want, xq_out);
+    // The other servers print no fields: xqlite's go.
+    const maria_out = try normXqMaria(a, "Error near line 1: m\nDETAIL:  d\n");
+    defer a.free(maria_out);
+    try std.testing.expectEqualStrings("ERROR: m\n", maria_out);
 }
 
 test normMaria {

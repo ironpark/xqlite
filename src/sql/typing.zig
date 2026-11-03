@@ -393,7 +393,15 @@ const core_functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "likelihood", Ret{ .arg = 0 } },
     .{ "min", Ret{ .rule = minMax } },
     .{ "max", Ret{ .rule = minMax } },
+    // SQLite's LIKE and GLOB (the text of a view, of the IR rendered): a
+    // boolean, as the IR's LIKE is (lower.zig's typeOf()).
+    .{ "like", Ret{ .rule = isBoolean } },
+    .{ "glob", Ret{ .rule = isBoolean } },
 });
+
+fn isBoolean(_: *Ctx, _: []const Operand) Oom!TypeId {
+    return boolean;
+}
 
 /// min(x) and max(x), aggregates, are of the type of x; min(a, b ...),
 /// scalars, of the common type.
@@ -490,6 +498,16 @@ pub const Ctx = struct {
     pub fn fail(c: *Ctx, e: *const Expr, state: int.ErrorState, comptime fmt: []const u8, args: anytype) error{Failed} {
         util.errorMsg(c.p, fmt, args);
         util.errorIs(c.p, state);
+        return c.failedAt(e);
+    }
+
+    /// fail() of an error with PostgreSQL's fields (util.ErrorFields).
+    pub fn failFields(c: *Ctx, e: *const Expr, state: int.ErrorState, f: util.ErrorFields) error{Failed} {
+        util.errorFieldsAt(c.p, null, state, f);
+        return c.failedAt(e);
+    }
+
+    fn failedAt(c: *Ctx, e: *const Expr) error{Failed} {
         // At the text of its leftmost operand that has one (an operator
         // a frontend made has none of its own).
         var x = e;
@@ -784,7 +802,7 @@ fn exprType(c: *Ctx, e: *Expr) Oom!TypeId {
             const params = c.p.xq_param_types.items;
             return if (i < params.len) params[i] else unknown;
         },
-        TK.SELECT => return if (e.useXSelect()) columnOfCtx(c, e.x.select.?, 0) else unknown,
+        TK.SELECT => return if (e.useXSelect()) columnOfCtx(c, e.x.select.?, 0, null) else unknown,
         else => return unknown,
     }
 }
@@ -972,24 +990,42 @@ pub fn clampU8(v: u32) u8 {
 /// the common type of the column of every term (Common), else unknown.
 /// Of the leftmost term without rules. For a statement typed (active()).
 pub fn columnOf(p: *int.Parse, s: *int.Select, i: usize) Oom!TypeId {
+    return columnOfNeeded(p, s, i, null);
+}
+
+/// columnOf(), and in the same walk of the terms, if `needed`, whether
+/// one of the column's values may need a store function (storeNeeded();
+/// a term without the column: may), or'ed into `needed`.
+fn columnOfNeeded(p: *int.Parse, s: *int.Select, i: usize, needed: ?*bool) Oom!TypeId {
     var c = ctxOf(p) orelse {
         var left = s;
-        while (left.prior) |pr| left = pr;
+        while (true) {
+            if (needed) |n| n.* = n.* or termNeeds(p.db, left, i);
+            left = left.prior orelse break;
+        }
         const list = left.e_list orelse return unknown;
         return if (i < list.len()) list.at(i).expr.?.xq_type else unknown;
     };
-    return columnOfCtx(&c, s, i);
+    return columnOfCtx(&c, s, i, needed);
 }
 
-fn columnOfCtx(c: *Ctx, s: *int.Select, i: usize) Oom!TypeId {
+fn columnOfCtx(c: *Ctx, s: *int.Select, i: usize, needed: ?*bool) Oom!TypeId {
     var m: Common = .{};
     var it: ?*int.Select = s;
     while (it) |term| : (it = term.prior) {
+        if (needed) |n| n.* = n.* or termNeeds(c.p.db, term, i);
         const list = term.e_list orelse return unknown;
         if (i >= list.len()) return unknown;
         try m.add(c, list.at(i).expr.?);
     }
     return m.result();
+}
+
+/// Whether the value of column `i` of term `term` may need a store
+/// function (storeNeeded()), true if the term has no such column.
+fn termNeeds(db: *const int.Sqlite3, term: *int.Select, i: usize) bool {
+    const list = term.e_list orelse return true;
+    return i >= list.len() or storeNeeded(db, list.at(i).expr.?);
 }
 
 // ======================================================= code generation
@@ -1006,57 +1042,85 @@ pub fn arithWidth(p: *const int.Parse, e: *const Expr) u16 {
     return dialect_mod.hooks(p.db).arith.width(typeOf(p.db, e.xq_type).logical);
 }
 
-/// What a value stored into a column goes through (storeFunctions()):
-/// `def` of the value and `consts` after it.
+/// What a value stored into a column goes through (storeFunctions()),
+/// chosen by the value's type (forType()): a value of a type of `typed`
+/// through its conversion whatever the value is, another through
+/// `needed` if it needs one (storeNeeded()); null for nothing.
+/// PostgreSQL's numeric column: every value as a key (all()); its
+/// integer column: a double precision or real by the cast (rounded to
+/// even, where `needed` rounds a real, which may be a numeric's literal,
+/// half away from zero); a column of another type: only a numeric (a
+/// key made a number or text).
 pub const Store = struct {
-    def: *const int.FuncDef,
-    consts: [2]i32 = .{ 0, 0 },
-    n_consts: u2 = 0,
-    /// Every value, not only those storeNeeded() picks.
-    always: bool = false,
-    /// Only the values of this type (PostgreSQL's numeric stored into a
-    /// column of another type: a key made a number or text).
-    only: ?Logical = null,
-    /// The values of these types go through another function, of no
-    /// constants (PostgreSQL's double precision into an integer column:
-    /// rounded to even, where `def` rounds a real, which may be a
-    /// numeric's literal, half away from zero).
-    alt: ?Alt = null,
+    typed: ?Case = null,
+    needed: ?Conv = null,
 
-    pub const Alt = struct { types: std.EnumSet(Logical), def: *const int.FuncDef };
+    pub const Case = struct { types: std.EnumSet(Logical), conv: Conv };
 
-    /// What value `e` goes through, null for nothing.
-    pub fn pick(s: Store, db: *const int.Sqlite3, e: *const Expr) ?Store {
-        return s.ofType(typeOf(db, e.xq_type).logical, s.always or storeNeeded(db, e));
+    /// Every value through `c`.
+    pub fn all(c: Conv) Store {
+        return .{ .typed = .{ .types = .full, .conv = c } };
+    }
+
+    /// The values that need it through `c`.
+    pub fn of(c: Conv) Store {
+        return .{ .needed = c };
+    }
+
+    /// What a value of type `l` goes through, `needed` whether a value
+    /// of no case needs a conversion.
+    pub fn forType(s: Store, l: Logical, needed: bool) ?Conv {
+        if (s.typed) |t| if (t.types.contains(l)) return t.conv;
+        return if (needed) s.needed else null;
+    }
+
+    /// What value `e` goes through.
+    pub fn pick(s: Store, db: *const int.Sqlite3, e: *const Expr) ?Conv {
+        return s.forType(typeOf(db, e.xq_type).logical, storeNeeded(db, e));
     }
 
     /// What the values of column `i` of query `sel` (INSERT ... SELECT)
-    /// go through.
-    pub fn pickColumn(s: Store, p: *int.Parse, sel: *int.Select, i: usize) ?Store {
-        if (s.only == null and s.alt == null) return s;
-        const id = columnOf(p, sel, i) catch return if (s.only == null) s else null;
-        const l = typeOf(p.db, id).logical;
-        // A store with an alternative is needed as for one value: by the
-        // column's type, or by a value of a term (a string literal, which
-        // the column's type leaves out; a parameter).
-        const needed = s.alt == null or s.always or storeNeededType(p.db, l) or termNeeds(p.db, sel, i);
-        return s.ofType(l, needed);
+    /// go through: by the column's type (columnOf()), needed as one value
+    /// is, by the type or by a value of a term (a string literal, which
+    /// the column's type leaves out; a parameter), found in the same walk
+    /// of the terms (the rows of a VALUES). A store of no case: every
+    /// value.
+    pub fn pickColumn(s: Store, p: *int.Parse, sel: *int.Select, i: usize) Oom!?Conv {
+        if (s.typed == null) return s.needed;
+        var needed = false;
+        const l = typeOf(p.db, try columnOfNeeded(p, sel, i, &needed)).logical;
+        return s.forType(l, needed or storeNeededType(p.db, l));
     }
 
-    fn termNeeds(db: *const int.Sqlite3, sel: *int.Select, i: usize) bool {
-        var it: ?*int.Select = sel;
-        while (it) |term| : (it = term.prior) {
-            const list = term.e_list orelse return true;
-            if (i >= list.len()) return true;
-            if (storeNeeded(db, list.at(i).expr.?)) return true;
-        }
-        return false;
+    /// What every value goes through when its type is not looked at
+    /// (UPDATE ... FROM, whose values come from a temporary table):
+    /// `needed` if there is one, else `typed`'s conversion, both for a
+    /// value of any type. So a store meant only for the values of some
+    /// types (`typed` without `needed`: PostgreSQL's numeric stored into
+    /// a column of a number or a string, repr.storeColumn()) runs on
+    /// every value, and a store whose `typed` differs from `needed` (an
+    /// integer column's double precision, rounded to even) runs `needed`
+    /// on the values of `typed` too; pick() would choose otherwise.
+    pub fn untyped(s: Store) ?Conv {
+        if (s.needed) |c| return c;
+        return if (s.typed) |t| t.conv else null;
     }
+};
 
-    fn ofType(s: Store, l: Logical, needed: bool) ?Store {
-        if (s.alt) |a| if (a.types.contains(l)) return .{ .def = a.def };
-        if (s.only) |o| return if (o == l) s else null;
-        return if (needed) s else null;
+/// A conversion of a stored value: `def` of the value and `consts` after
+/// it.
+pub const Conv = struct {
+    def: *const int.FuncDef,
+    consts: [2]i32 = .{ 0, 0 },
+    n_consts: u2 = 0,
+    /// With constants: the form of one argument, without the type's
+    /// parameters, that reads a literal when the statement is compiled
+    /// (readStoredLiteral()); null to read none.
+    bare: ?*const int.FuncDef = null,
+
+    /// The function readStoredLiteral() reads a literal with.
+    fn literalDef(c: Conv) ?*const int.FuncDef {
+        return if (c.n_consts == 0) c.def else c.bare;
     }
 };
 
@@ -1080,7 +1144,7 @@ pub fn storeFunctions(p: *int.Parse, t: *int.Table) Oom!?[]const ?Store {
         const st: Store = blk: {
             if (rules.store_column) |sc| if (sc(col.type, col.decl_type orelse "", t.cols[i].e_ctype)) |s| break :blk s;
             const f = rules.store orelse continue;
-            break :blk .{ .def = f(col.type, t.cols[i].e_ctype) orelse continue };
+            break :blk .of(.{ .def = f(col.type, t.cols[i].e_ctype) orelse continue });
         };
         const list = out orelse blk: {
             const x = try p.arena.alloc(?Store, t.cols.len);
@@ -1167,11 +1231,10 @@ fn literalReadable(p: *int.Parse, lit: *const Expr) bool {
     return lit.op == TK.STRING and !lit.flags.FromDDL and !lit.useWJoin() and lit.w.ofst > 0;
 }
 
-/// readLiteral() of value `e` stored through `st` (INSERT VALUES, UPDATE
-/// SET).
-pub fn readStoredLiteral(p: *int.Parse, st: Store, e: *const Expr) Oom!bool {
-    if (st.n_consts > 0) return readLiteralWith(p, st.def.name, e);
-    return readLiteral(p, st.def, e);
+/// readLiteral() of value `e` stored through `conv` (INSERT VALUES,
+/// UPDATE SET).
+pub fn readStoredLiteral(p: *int.Parse, conv: Conv, e: *const Expr) Oom!bool {
+    return readLiteral(p, conv.literalDef() orelse return false, e);
 }
 
 /// readLiteral() with the function called `name` (of one argument: the

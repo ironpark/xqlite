@@ -107,6 +107,8 @@ pub const stmt = struct {
     pub const errorMsgAt = util.errorMsgAt;
     /// errorMsgAt() of an error whose ErrorState is known.
     pub const errorMsgState = util.errorMsgState;
+    /// errorMsgState() of an error with PostgreSQL's fields.
+    pub const errorFieldsAt = util.errorFieldsAt;
     /// The error just recorded is this ErrorState.
     pub const errorIs = util.errorIs;
 
@@ -244,7 +246,14 @@ pub const expr = struct {
         var e = left;
         while (e.op == TK.UPLUS or e.op == TK.UMINUS) e = e.left.?;
         switch (e.op) {
-            TK.INTEGER, TK.STRING, TK.FLOAT, TK.BLOB => return expr_mod.exprInt32(p.arena, @intFromBool(op == TK.NOTNULL)),
+            TK.INTEGER, TK.STRING, TK.FLOAT, TK.BLOB => {
+                const x = try expr_mod.exprInt32(p.arena, @intFromBool(op == TK.NOTNULL));
+                // Still a boolean where statements are typed (as the
+                // IR's IS NULL is: lower.zig's typeOf()).
+                const typing = @import("../sql/typing.zig");
+                if (typing.active(p.db)) x.xq_type = typing.boolean;
+                return x;
+            },
             else => return expr_mod.pExpr(p, op, left, null),
         }
     }

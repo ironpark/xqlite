@@ -167,7 +167,7 @@ fn createSchema(ps: *Parser) Error!void {
         return ps.syntaxError();
     }
     const n = name.text;
-    if (std.mem.startsWith(u8, n, "pg_")) return ps.failState(name.pos, .of("42939"), "unacceptable schema name \"{s}\"", .{n});
+    if (std.mem.startsWith(u8, n, "pg_")) return ps.failFields(name.pos, .of("42939"), .{ .message = try std.fmt.allocPrint(ps.arena, "unacceptable schema name \"{s}\"", .{n}), .detail = "The prefix \"pg_\" is reserved for system schemas." });
     if (!nsp.validName(n)) return ps.fail(name.pos, "xqlite: a schema name cannot contain \".\"", .{});
     const p = ps.p.?;
     try ps.readSchema();
@@ -214,8 +214,15 @@ fn dropSchema(ps: *Parser) Error!void {
             else => return ps.failFrom(n.pos, p.db),
         };
         if (objs.len > 0 and !cascade) {
-            if (names.items.len > 1) return ps.failState(n.pos, .of("2BP01"), "cannot drop desired object(s) because other objects depend on them", .{});
-            return ps.failState(n.pos, .of("2BP01"), "cannot drop schema {s} because other objects depend on it", .{s.name});
+            // PostgreSQL's DETAIL: a line for each object that depends on
+            // the schema (reportDependentObjects()).
+            var detail: std.ArrayList(u8) = .empty;
+            for (objs, 0..) |o, i| {
+                if (i > 0) try detail.append(ps.arena, '\n');
+                try detail.print(ps.arena, "{s} {s}.{s} depends on schema {s}", .{ o.kind.word(), s.name, o.bare(), s.name });
+            }
+            const msg = if (names.items.len > 1) "cannot drop desired object(s) because other objects depend on them" else try std.fmt.allocPrint(ps.arena, "cannot drop schema {s} because other objects depend on it", .{s.name});
+            return ps.failFields(n.pos, .of("2BP01"), .{ .message = msg, .detail = detail.items, .hint = "Use DROP ... CASCADE to drop the dependent objects too." });
         }
         try drops.append(ps.arena, .{ .name = s.name, .objs = objs });
     }

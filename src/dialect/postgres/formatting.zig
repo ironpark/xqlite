@@ -114,11 +114,7 @@ fn report(c: *Call, err: anyerror) void {
         error.Reported => {},
         else => {
             const d = c.diag;
-            const msg = if (d.detail) |detail|
-                std.mem.concat(c.a(), u8, &.{ d.msg, util.detail_mark, detail }) catch return api.resultErrorNomem(c.ctx)
-            else
-                d.msg;
-            api.resultErrorState(c.ctx, .{ .sqlstate = d.state }, msg);
+            api.resultErrorFields(c.ctx, .{ .sqlstate = d.state }, d.fields);
         },
     }
 }
@@ -272,7 +268,7 @@ fn toNumber(c: *Call, argv: []*Mem) !void {
     const k = dec.key(a, d, true) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
         c.diag.state = "22003".*;
-        c.diag.msg = "value overflows numeric format";
+        c.diag.fields.message = "value overflows numeric format";
         return error.Failed;
     };
     api.resultBlob(c.ctx, k, .transient);

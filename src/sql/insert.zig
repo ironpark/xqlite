@@ -375,8 +375,8 @@ fn typeParams(p: *Parse, t: *Table, column: ?*IdList, list: *ExprList) Oom!void 
 }
 
 /// xqlite: the value in register `reg`, stored into a column, through
-/// `st` (typing.storeFunctions()).
-pub fn codeStore(p: *Parse, st: typing.Store, reg: i32) void {
+/// `st` (typing.Store.pick()).
+pub fn codeStore(p: *Parse, st: typing.Conv, reg: i32) void {
     const tmp = expr_mod.getTempReg(p);
     if (st.n_consts == 0) {
         _ = aux.addFunctionCall(p, 0, reg, tmp, 1, st.def, 0);
@@ -715,7 +715,9 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
                 };
                 continue;
             }
-            if (stores) |f| if (f[ii]) |st| if (if (sel) |q| st.pickColumn(p, q, @intCast(k)) else st) |s| codeStore(p, s, i_reg_store);
+            // A row of the SELECT (here only from one: a VALUES of one row
+            // took the branch above).
+            if (stores) |f| if (f[ii]) |st| if (try st.pickColumn(p, sel.?, @intCast(k))) |s| codeStore(p, s, i_reg_store);
         }
     }
 
@@ -1210,8 +1212,8 @@ fn generateConstraintChecksImpl(
                         aux.jumpHere(v, addr1);
                     },
                     OE.Abort, OE.Rollback, OE.Fail => {
-                        if (dconstraint.notNull(p, t, c, is_update)) |z| {
-                            build.haltDialectConstraint(p, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, z, i_reg, 0);
+                        if (dconstraint.notNull(p, t, c, is_update, reg_new_data)) |z| {
+                            build.haltDialectConstraint(p, OP.HaltIfNull, RC.CONSTRAINT_NOTNULL, on_error, z, i_reg);
                             continue;
                         }
                         if (on_error == OE.Abort) main_mod.mayAbort(p);
@@ -1249,8 +1251,8 @@ fn generateConstraintChecksImpl(
                 _ = aux.goto_(v, ignore_dest);
             } else {
                 if (on_error == OE.Replace) on_error = OE.Abort;
-                if (dconstraint.check(p, t, item.e_name, is_update)) |z| {
-                    build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_CHECK, on_error, z, 0, 0);
+                if (dconstraint.check(p, t, item.e_name, is_update, reg_new_data)) |z| {
+                    build.haltDialectConstraint(p, OP.Halt, RC.CONSTRAINT_CHECK, on_error, z, 0);
                 } else {
                     build.haltConstraint(p, RC.CONSTRAINT_CHECK, on_error, item.e_name, vi.P5_ConstraintCheck);
                 }

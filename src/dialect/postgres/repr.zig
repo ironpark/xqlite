@@ -111,7 +111,7 @@ pub const exact_types: std.EnumSet(Logical) = blk: {
 /// value (only for values of that type).
 pub fn storeColumn(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     if (of(t.logical)) |r| return r.store(t, decl, storage);
-    inline for (all) |r| if (r.store_into) |f| if (f(t)) |def| return .{ .def = def, .only = r.logical };
+    inline for (all) |r| if (r.store_into) |f| if (f(t)) |def| return .{ .typed = .{ .types = .initOne(r.logical), .conv = .{ .def = def } } };
     return null;
 }
 

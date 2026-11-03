@@ -637,9 +637,13 @@ pub const Vdbe = struct {
     /// xqlite: the language (dialect and frontend) the statement was
     /// compiled in, and is recompiled in.
     xq_lang: @import("../dialect/dialect.zig").Lang = .{},
-    /// xqlite: the dialect's error of the last foreign key violation
-    /// counted (the P4 of an OP_FkCounter, dialect/constraint.zig).
+    /// xqlite: the dialect's error of the foreign key violation that made
+    /// the count not zero (the P4 of an OP_FkCounter,
+    /// dialect/constraint.zig).
     xq_fk_error: ?[*:0]const u8 = null,
+    /// xqlite: xq_fk_error written with the values of its key
+    /// (OP_FkCounter), owned (the connection's gpa).
+    xq_fk_owned: ?[:0]u8 = null,
     e_vdbe_state: VdbeState = .init,
     expired: u2 = 0,
     explain: u2 = 0,

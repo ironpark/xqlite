@@ -1477,6 +1477,41 @@ pub const ErrorState = struct {
     sqlstate: [5]u8,
     /// 0 if the dialect has none (PostgreSQL's code is the SQLSTATE).
     number: u32 = 0,
+    /// xqlite: where the message's lines of PostgreSQL's fields start
+    /// (util.detail_mark), set by the one that wrote them
+    /// (util.FieldsText); none if the message has none.
+    fields: FieldsAt = .{},
+
+    /// The byte offsets in the message of its lines "\nDETAIL:  ...",
+    /// "\nHINT:  ..." and "\nCONTEXT:  ..." (util.detail_mark ...),
+    /// 0 for a field it does not have (a message starts with its first
+    /// line). util.splitFields() takes the message apart by them.
+    pub const FieldsAt = struct {
+        detail: u32 = 0,
+        hint: u32 = 0,
+        context: u32 = 0,
+
+        pub fn any(f: FieldsAt) bool {
+            return f.detail | f.hint | f.context != 0;
+        }
+
+        /// The offsets in a message whose text from `from` on moved by
+        /// `delta` bytes (a value written into it there).
+        pub fn moved(f: FieldsAt, from: usize, delta: isize) FieldsAt {
+            var r = f;
+            inline for (.{ &r.detail, &r.hint, &r.context }) |o| {
+                if (o.* != 0 and o.* >= from) o.* = @intCast(@as(i64, o.*) + delta);
+            }
+            return r;
+        }
+    };
+
+    /// This error with the fields at `at`.
+    pub fn withFields(st: ErrorState, at: FieldsAt) ErrorState {
+        var r = st;
+        r.fields = at;
+        return r;
+    }
 
     pub fn of(comptime sqlstate: *const [5]u8) ErrorState {
         return .{ .sqlstate = sqlstate.* };

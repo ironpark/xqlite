@@ -607,9 +607,9 @@ const decimal_sql = @import("../../decimal_sql.zig");
 fn numericStore(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     _ = t;
     const d = decimal_sql.def;
-    if (storage != .BLOB) return .{ .def = d("xq_dec_number", 1), .always = true };
-    if (typmodOf(decl)) |m| return .{ .def = d("xq_dec_key", 3), .consts = m, .n_consts = 2, .always = true };
-    return .{ .def = d("xq_dec_key", 1), .always = true };
+    if (storage != .BLOB) return .all(.{ .def = d("xq_dec_number", 1) });
+    if (typmodOf(decl)) |m| return .all(.{ .def = d("xq_dec_key", 3), .consts = m, .n_consts = 2, .bare = d("xq_dec_key", 1) });
+    return .all(.{ .def = d("xq_dec_key", 1) });
 }
 
 /// A numeric stored into a column of a number or a string of type `t` is

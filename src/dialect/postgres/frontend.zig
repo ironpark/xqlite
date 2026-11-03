@@ -12,7 +12,7 @@
 //! The engine side: the function table (version(), the sequence
 //! functions of src/catalog/sequence.zig and funcs.zig).
 //!
-//! What is supported and what is not: docs/postgres.md.
+//! What is supported and what is not: docs/postgres/README.md.
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");

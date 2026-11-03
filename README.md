@@ -116,11 +116,11 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 ### 방언별 문서
 
-- [SQLite 호환](docs/sqlite.md): 구현 범위, sqlite3와의 교차 검증
-- [PostgreSQL 호환](docs/postgres.md): 지원 문법, 타입과 의미, PostgreSQL과 다른 점
-- [MariaDB 호환](docs/mariadb.md): 저장 방식, `sql_mode`, 지원 문법, MariaDB와 다른 점
-- [MSSQL 호환](docs/mssql.md): T-SQL 문법, 타입과 값 변환, `+`·`MERGE`의 규칙, SQL Server와 다른 점
-- [Oracle 호환](docs/oracle.md): 빈 문자열과 NULL, 날짜, `ROWNUM`·`MERGE`, 암묵적 트랜잭션, Oracle과 다른 점
+- [SQLite 호환](docs/sqlite/README.md): 구현 범위, sqlite3와의 교차 검증
+- [PostgreSQL 호환](docs/postgres/README.md): 지원 문법, 타입과 의미, PostgreSQL과 다른 점
+- [MariaDB 호환](docs/mariadb/README.md): 저장 방식, `sql_mode`, 지원 문법, MariaDB와 다른 점
+- [MSSQL 호환](docs/mssql/README.md): T-SQL 문법, 타입과 값 변환, `+`·`MERGE`의 규칙, SQL Server와 다른 점
+- [Oracle 호환](docs/oracle/README.md): 빈 문자열과 NULL, 날짜, `ROWNUM`·`MERGE`, 암묵적 트랜잭션, Oracle과 다른 점
 - [sqlite3용 확장](docs/extension.md): 방언으로 만든 데이터베이스의 엔진 함수와 collation을 sqlite3·Python·Datasette에 올리는 `libxqlite_ext`, 함수 목록, ABI 규칙
 
 ## 빠른 시작
@@ -280,13 +280,13 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - [x] **WebAssembly**: WASI VFS, 호스트가 파일을 주는 브라우저용 모듈(`xq_*`)과 JavaScript 연결 코드 ([WebAssembly](docs/wasm.md))
 - [x] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기(auto-vacuum·incremental vacuum 포함), 레코드 포맷, 기존 SQLite 파일 읽기/수정
 - [x] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
-- [x] **Phase 3 · 완성도**: 세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`/`DETACH`와 super journal, `ANALYZE`/`PRAGMA optimize`, `VACUUM`/`VACUUM INTO`와 백업 API. sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 모두 통과 ([SQLite 호환](docs/sqlite.md))
+- [x] **Phase 3 · 완성도**: 세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`/`DETACH`와 super journal, `ANALYZE`/`PRAGMA optimize`, `VACUUM`/`VACUUM INTO`와 백업 API. sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 모두 통과 ([SQLite 호환](docs/sqlite/README.md))
 - [x] **Phase 4 · 공통 IR**: SQLite 파스 트리와 코드 생성기 진입점을 IR로 삼고 프론트엔드를 분리. 연결 단위 방언 선택, 방언 훅, STRICT 기반 엄격한 타입, `xq_catalog`·`xq_sequence`. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 같음 ([방언 아키텍처](docs/architecture.md))
-- [x] **Phase 5 · PostgreSQL 방언**: lexer·파서, SELECT·DML 전반, `RETURNING`·`ON CONFLICT`, DDL과 엄격한 타입, `SERIAL`/`IDENTITY`, `information_schema`·`pg_catalog`. PostgreSQL 16과 차등 비교 ([PostgreSQL 호환](docs/postgres.md))
-- [x] **Phase 6 · MariaDB 방언**: 토크나이저·파서, 연결 단위 `sql_mode`, `INSERT IGNORE`/`REPLACE`/`ON DUPLICATE KEY UPDATE`, `AUTO_INCREMENT`, MariaDB 타입과 collation, `SHOW`/`information_schema`. MariaDB 11.8과 차등 비교 ([MariaDB 호환](docs/mariadb.md))
+- [x] **Phase 5 · PostgreSQL 방언**: lexer·파서, SELECT·DML 전반, `RETURNING`·`ON CONFLICT`, DDL과 엄격한 타입, `SERIAL`/`IDENTITY`, `information_schema`·`pg_catalog`. PostgreSQL 16과 차등 비교 ([PostgreSQL 호환](docs/postgres/README.md))
+- [x] **Phase 6 · MariaDB 방언**: 토크나이저·파서, 연결 단위 `sql_mode`, `INSERT IGNORE`/`REPLACE`/`ON DUPLICATE KEY UPDATE`, `AUTO_INCREMENT`, MariaDB 타입과 collation, `SHOW`/`information_schema`. MariaDB 11.8과 차등 비교 ([MariaDB 호환](docs/mariadb/README.md))
 - [x] **구문 트리 IR**: 방언 중립 구문 트리와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT. PostgreSQL과 MariaDB 프론트엔드를 옮겨 실행과 저장의 의미가 같아짐 ([방언 아키텍처](docs/architecture.md#render와-lower의-계약))
-- [x] **Phase 7 · MSSQL 방언**: T-SQL 렉서·파서(`[x]`, `N'..'`, `@변수`, `GO`), `TOP`/`OFFSET…FETCH`, `+`의 타입별 해석, `OUTPUT`, `UPDATE/DELETE … FROM`, 한 문장의 `MERGE`, SQL Server 타입과 값 변환, `IDENTITY`/`IDENTITY_INSERT`, 변수, 중첩 트랜잭션, `INFORMATION_SCHEMA`·`sys.*`. SQL Server(Azure SQL Edge)와 차등 비교 ([MSSQL 호환](docs/mssql.md))
-- [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle.md))
+- [x] **Phase 7 · MSSQL 방언**: T-SQL 렉서·파서(`[x]`, `N'..'`, `@변수`, `GO`), `TOP`/`OFFSET…FETCH`, `+`의 타입별 해석, `OUTPUT`, `UPDATE/DELETE … FROM`, 한 문장의 `MERGE`, SQL Server 타입과 값 변환, `IDENTITY`/`IDENTITY_INSERT`, 변수, 중첩 트랜잭션, `INFORMATION_SCHEMA`·`sys.*`. SQL Server(Azure SQL Edge)와 차등 비교 ([MSSQL 호환](docs/mssql/README.md))
+- [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle/README.md))
 - [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS. 공통 기반(리스너, 세션, 열 타입·오류·명령 분류, 취소, 준비된 문장)과 PostgreSQL 프로토콜 v3(`xqlite serve --pg`: 단순·확장 질의, 이진 형식, 취소, SCRAM-SHA-256), MySQL 프로토콜(`xqlite serve --mysql`: 텍스트·이진 프로토콜, 준비된 문장, KILL)은 있음 ([서버](docs/server.md))
 - [x] **C ABI**: `sqlite3_*` 호환 C ABI(`libxqlite3`, SQLite 3.54.1 헤더), URI 파라미터 `?dialect=`, commit·rollback·update 훅과 진행 처리기. SQLite의 `shell.c`가 그대로 링크되어 돌아감 ([C API](docs/c-api.md))
 - [x] **sqlite3용 확장**: 방언의 엔진 함수·collation·시퀀스 함수를 실제 sqlite3에 등록하는 `libxqlite_ext`, 엔진과 같은 구현, 스키마 함수의 ABI(`xq_ext_version()`, `src/dialect/abi.txt`) ([sqlite3용 확장](docs/extension.md))

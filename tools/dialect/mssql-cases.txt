@@ -5,7 +5,7 @@
 -- messages (the "ERROR:" line) must be the same. GO ends a batch: a
 -- statement that fails to compile in SQL Server skips the rest of its
 -- batch, so such statements end with GO. What the two print differently
--- by design (docs/mssql.md: DECIMAL as REAL, the engine's own messages,
+-- by design (docs/mssql/differences.md: DECIMAL as REAL, the engine's own messages,
 -- GETDATE()) is avoided; numbers with a fraction are compared without
 -- trailing zeros.
 

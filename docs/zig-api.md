@@ -182,7 +182,7 @@ std.debug.print("{d} {t}\n", .{ id, db.dialect() });
 
 - `xqlite.Dialect`는 `.sqlite`, `.postgres`, `.mariadb`, `.mssql`, `.oracle`입니다.
 - `setDialect()`는 그 뒤에 준비하는 문장에만 적용됩니다. 이미 준비한 문장은 자기 방언을 유지합니다(`PRAGMA xq_dialect`와 같음).
-- 방언의 구조는 [방언 아키텍처](architecture.md), 방언별 문법은 [PostgreSQL 호환](postgres.md), [MariaDB 호환](mariadb.md), [MSSQL 호환](mssql.md), [Oracle 호환](oracle.md)에 있습니다.
+- 방언의 구조는 [방언 아키텍처](architecture.md), 방언별 문법은 [PostgreSQL 호환](postgres/README.md), [MariaDB 호환](mariadb/README.md), [MSSQL 호환](mssql/README.md), [Oracle 호환](oracle/README.md)에 있습니다.
 
 ## 값의 수명 규칙
 
@@ -260,7 +260,7 @@ std.debug.print("{d} {t}\n", .{ id, db.dialect() });
 - `db.lastError() ?ErrorInfo`: `sqlite3_extended_errcode()`, `sqlite3_errmsg()`, `sqlite3_error_offset()`에 해당합니다. 메시지는 빌린 값입니다.
   - `sqlstate`: 그 오류의 SQLSTATE(PostgreSQL의 코드 공간)입니다. `no such table`은 어느 방언에서나 `42P01`입니다. 엔진이나 방언이 오류를 낼 때 남긴 것이고, 확장 코드가 구분하는 오류(제약, BUSY ...)에는 없을 수 있습니다.
   - `dialect_number`: 연결의 방언이 그 오류에 매기는 번호입니다(MariaDB의 1146, SQL Server의 208, Oracle의 942).
-  - `info.fields()`: 메시지의 첫 줄 뒤에 붙은 PostgreSQL의 `DETAIL`, `HINT`, `CONTEXT` 줄을 떼어 냅니다([PostgreSQL 호환](postgres.md#위치와-detailhintcontext)). 메시지를 읽지 않고 엔진이 적은 자리(`info.fields_at`)에서 자릅니다. 메시지를 복사해 두었다면 `ErrorInfo.splitFields(message, fields_at)`.
+  - `info.fields()`: 메시지의 첫 줄 뒤에 붙은 PostgreSQL의 `DETAIL`, `HINT`, `CONTEXT` 줄을 떼어 냅니다([PostgreSQL 호환](postgres/differences.md#위치와-detailhintcontext)). 메시지를 읽지 않고 엔진이 적은 자리(`info.fields_at`)에서 자릅니다. 메시지를 복사해 두었다면 `ErrorInfo.splitFields(message, fields_at)`.
 - `OpenOptions.diagnostics = &diag`: std.json의 Diagnostics처럼 호출자가 가진 구조체에 실패를 복사해 둡니다.
   - 그 연결과 문장의 모든 실패, 그리고 연결 객체가 없는 `open()` 실패까지 기록합니다.
   - 할당 없이 메시지를 256바이트(`Diagnostics.max_message`)까지 저장합니다. 전체 메시지는 `lastError()`에 있습니다.
@@ -401,7 +401,7 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | (방언의 선언 타입, `xq_catalog`) | `Stmt.columnTypeAlloc(gpa, i)` (`character varying(20)`과 그 방언 ...) |
 | `sqlite3_table_column_metadata`의 NOT NULL·PRIMARY KEY·AUTOINCREMENT | `Db.columnConstraints(database, table, column)`, `Stmt.columnConstraints(i)` (`ColumnConstraints`: 그 밖에 UNIQUE 인덱스, 인덱스의 첫 열인지. 메모리의 스키마만 읽음) |
 | (`Vdbe.changeCntOn`) | `Stmt.countsChanges()` |
-| (PostgreSQL의 NOTICE) | `Stmt.notices()` (문장이 실행될 때마다 알리는 것: `Notice`의 수준, SQLSTATE, 메시지, `DETAIL`. SQLite 방언은 늘 비어 있음, [NOTICE](postgres.md#notice)), `Db.noticeLevel()` (클라이언트에 보낼 가장 낮은 수준: `client_min_messages`) |
+| (PostgreSQL의 NOTICE) | `Stmt.notices()` (문장이 실행될 때마다 알리는 것: `Notice`의 수준, SQLSTATE, 메시지, `DETAIL`. SQLite 방언은 늘 비어 있음, [NOTICE](postgres/differences.md#notice)), `Db.noticeLevel()` (클라이언트에 보낼 가장 낮은 수준: `client_min_messages`) |
 | `PRAGMA schema_version` (파일을 읽지 않음) | `Db.schemaVersion(name)` |
 | `sqlite3_reset` / `sqlite3_finalize` | `Stmt.reset()` / `Stmt.finalize()` |
 | `sqlite3_sql`, `sqlite3_stmt_readonly` | `Stmt.sql()`, `Stmt.isReadOnly()` |

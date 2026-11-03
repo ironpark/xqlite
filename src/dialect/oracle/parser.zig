@@ -1,5 +1,5 @@
 //! A recursive descent parser for the Oracle statements the dialect
-//! supports (see docs/oracle.md), producing the syntax tree IR
+//! supports (see docs/oracle/README.md), producing the syntax tree IR
 //! (src/ir/tree.zig) with Oracle's semantics resolved:
 //!
 //!  - names: unquoted identifiers folded to upper case (lexer.zig);

@@ -25,7 +25,7 @@
 //! The engine side: the function table (funcs.zig and the sequence
 //! functions) and the engine functions xq_ora_*.
 //!
-//! What is supported and what is not: docs/oracle.md.
+//! What is supported and what is not: docs/oracle/README.md.
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");

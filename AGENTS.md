@@ -7,7 +7,7 @@
 - xqlite는 SQLite 3.54.1을 순수 Zig(0.17)로 옮긴 것입니다. 파일 형식과 바이트코드가 SQLite와 호환됩니다.
 - 방언은 sqlite, postgres, mariadb, mssql, oracle입니다. 각 방언은 `src/dialect/<방언>/`에 있습니다.
 - 그 밖에 sqlite3 C ABI, WASI/wasm 대상, 와이어 서버(`src/server`: PostgreSQL v3, MySQL), sqlite3용 확장([docs/extension.md](docs/extension.md))이 있습니다.
-- 문서는 한국어입니다. 동작이 바뀌면 같은 작업에서 해당 문서(`docs/*.md`, `README.md`)를 기존 문체로 고칩니다.
+- 문서는 한국어입니다. 동작이 바뀌면 같은 작업에서 해당 문서(`docs/*.md`, 방언별 폴더 `docs/<방언>/`, `README.md`)를 기존 문체로 고칩니다.
 
 ## 지켜야 할 것
 

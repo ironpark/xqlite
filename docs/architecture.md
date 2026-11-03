@@ -266,7 +266,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | PostgreSQL | `xq_pg_*` |
 | MariaDB (의미 노드) | `xq_coerce`, `xq_div`, `xq_xor`, `xq_bitxor`, `xq_cast` |
 | MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_stddev_*`, `xq_var_*`, `xq_rand`, `xq_uuid` |
-| MariaDB (JSON) | `xq_maria_json_col`, `xq_maria_json_bool`, `xq_maria_json_cmp`([MariaDB 호환](mariadb/syntax.md#json)) |
+| MariaDB (JSON) | `xq_maria_json_col`, `xq_maria_json_bool`, `xq_maria_json_cmp`([MariaDB 호환](mariadb/features.md#4-내장-함수-및-연산자)) |
 | MSSQL | `xq_tsql_add`(`+`), `xq_tsql_like`, `xq_tsql_cast`, `xq_tsql_try_cast`, `xq_tsql_store`, `xq_tsql_newid`, `xq_tsql_avg`([MSSQL 호환](mssql/README.md)) |
 | Oracle | `xq_ora_coerce`(열에 저장하는 값의 변환, `func` 노드), `xq_ora_cast`(`CAST`, `cast{typed}`), `xq_ora_autocommit`(암묵적 트랜잭션), `xq_ora_data_*`(`USER_TAB_COLUMNS`) |
 
@@ -292,7 +292,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
   - 줄을 쓰는 쪽이 오프셋도 적습니다: `util.joinFields()`, 파서의 `failFields()`, `util.errorFieldsAt()`, 기록된 오류를 방언의 말로 고쳐 쓸 때는 `util.rewordError()`(텍스트와 오프셋을 함께 바꿈), 실행 중에는 `api.resultErrorFields(ctx, state, .{ .message, .detail, .hint, .context })`. 제약의 메시지는 P4에 오프셋을 함께 적고(`dialect/constraint.zig`), 실행할 때 값을 넣으며 오프셋을 옮깁니다.
   - 받는 쪽은 메시지를 읽지 않고 오프셋으로 자릅니다(`util.splitFields()`, Zig API `ErrorInfo.fields()`). 그래서 메시지가 인용한 값에 `\nHINT:  `가 들어 있어도 필드로 읽히지 않습니다. 오프셋이 그 필드의 줄을 가리키지 않으면(메시지가 그 뒤에 바뀜) 필드가 없는 것으로 봅니다.
   - 메시지 텍스트(`sqlite3_errmsg()`, 셸)는 그 줄을 그대로 가지므로, C ABI가 문자열만 나르는 sqlite3 + 확장도 같은 줄을 보여 줍니다. 와이어 서버는 ErrorResponse의 `D`, `H`, `W` 필드로 보냅니다.
-- 오류의 위치는 엔진의 오류 오프셋입니다. IR의 내림은 연산자(`w.ofst`)와 테이블 이름(`SrcItem.xq_ofst`)의 오프셋도 적습니다. `typing.Rules.literal_input`인 방언은 타입이 정해진 문자열 리터럴을 컴파일할 때 그 변환 함수로 읽어, 실패하면 리터럴의 위치로 문장을 실패시킵니다(`typing.readLiteral()`, [PostgreSQL 호환](postgres/differences.md#위치와-detailhintcontext)).
+- 오류의 위치는 엔진의 오류 오프셋입니다. IR의 내림은 연산자(`w.ofst`)와 테이블 이름(`SrcItem.xq_ofst`)의 오프셋도 적습니다. `typing.Rules.literal_input`인 방언은 타입이 정해진 문자열 리터럴을 컴파일할 때 그 변환 함수로 읽어, 실패하면 리터럴의 위치로 문장을 실패시킵니다(`typing.readLiteral()`, [PostgreSQL 호환](postgres/differences.md)).
 - 무엇인지 모르는 오류는 SQLSTATE가 없습니다. 확장 결과 코드가 구분하는 오류(제약, BUSY, INTERRUPT)는 그 코드로 알 수 있습니다.
 - 새 오류를 낼 때는 그 방언의 SQLSTATE와 번호를 함께 적습니다. 실제 서버의 번호를 확신할 수 없으면 SQLSTATE만 적습니다(번호 0).
 
@@ -313,7 +313,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 
 - `xqlite.types`(`src/sql/types.zig`, 엔진의 것): 방언의 선언 타입 → 방언과 무관한 `Type`(`boolean`, `int4`, `numeric(10,2)`, `timestamp_tz` ...). 배열은 `array`와 원소의 `Logical`(`Type.element`)이고, 원소의 매개변수는 그 `Type`의 것입니다(PostgreSQL의 `character varying(20)[]`은 `array`, `varchar`, 길이 20; `int2vector`는 `smallint`의 배열). 테이블을 만든 방언으로 읽으므로, PostgreSQL 연결이 MSSQL이 만든 `bit` 열을 읽어도 `boolean`입니다.
 - `xqlite.display.Columns`: 결과 열의 타입. 테이블 열이면 메모리의 카탈로그(`catalog.meta()`, [메모리의 카탈로그](#메모리의-카탈로그))에서 읽습니다. 식이면 엔진이 그 식에 매긴 타입입니다([코어의 타입](#코어의-타입)): 비교, `AND`/`OR`/`NOT`, `IS`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, 불리언 상수는 어느 방언에서나 불리언이고, 캐스트는 그 대상 타입입니다(`2.5::numeric(6,2)`, `CAST(x AS DECIMAL(6,2))`). 리터럴, 산술, `CASE`/`COALESCE`, 함수 호출은 방언의 규칙이 정한 타입입니다(PostgreSQL의 `1.50`, `n + 1`, `sum(n)`은 스케일 2의 `numeric`, MariaDB의 `7 / 2`는 `DECIMAL(14,4)`). 서브쿼리, CTE, 뷰의 열과 스칼라 서브쿼리는 그 열의 타입을 이어받습니다. 엔진은 타입을 문장에 `Type`으로 두고(`engine.resultType()`), 그 철자를 열의 선언 타입(`sqlite3_column_decltype()`)으로 남깁니다. SQLite 방언의 문장은 SQLite처럼 NULL입니다. 연결이 열의 출처를 기록해야 합니다(`setColumnMetadata`, Zig API의 `OpenOptions.column_metadata`; 셸은 늘 켬).
-- `xqlite.display.text(viewer, settings, type, value)`: 그 방언이 그 값을 보이는 텍스트. SQLite와 같으면 null입니다. `viewer`는 문장을 컴파일한 방언입니다. `settings`는 세션의 설정(`display.Settings`: 연결의 것은 `Db.displaySettings()`, 엔진 안에서는 `valuetext.Settings.of(db)`, 기본값은 `.{}`)으로, 지금은 PostgreSQL의 `IntervalStyle`(interval과 interval 배열의 원소, [PostgreSQL의 interval](postgres/interval.md))이고, 셸, 와이어 서버(`wire.Out.settings`), 제약 위반의 `DETAIL`이 세션의 것을 넘깁니다. 저장된 값은 설정과 무관합니다.
+- `xqlite.display.text(viewer, settings, type, value)`: 그 방언이 그 값을 보이는 텍스트. SQLite와 같으면 null입니다. `viewer`는 문장을 컴파일한 방언입니다. `settings`는 세션의 설정(`display.Settings`: 연결의 것은 `Db.displaySettings()`, 엔진 안에서는 `valuetext.Settings.of(db)`, 기본값은 `.{}`)으로, 지금은 PostgreSQL의 `IntervalStyle`(interval과 interval 배열의 원소, [PostgreSQL 호환](postgres/features.md#1-데이터-타입-및-리터럴))이고, 셸, 와이어 서버(`wire.Out.settings`), 제약 위반의 `DETAIL`이 세션의 것을 넘깁니다. 저장된 값은 설정과 무관합니다.
 - `xqlite.display.textAlloc(gpa, viewer, settings, type, value)`: 메모리가 따로 드는 텍스트(호출한 쪽이 `gpa`로 해제), 아니면 null. 지금은 SQLite의 JSONB로 저장한 PostgreSQL `jsonb`(BLOB)의 JSON 텍스트(PostgreSQL의 공백, `dialect/jsonb.zig`)로, SQLite 방언이 아니면 어느 방언에서나 씁니다. 셸(`cli/qrf.zig`)과 와이어 서버(PostgreSQL의 텍스트·이진 형식, MySQL)가 BLOB에 먼저 부릅니다.
 - `src/dialect/valuetext.zig`: `display.text()`/`textAlloc()`의 본체와 PostgreSQL의 값 텍스트 전체(`pgText()`: 실수의 최단 자릿수 `floatText()`, 텍스트는 저장된 그대로), 그것을 `std.Io.Writer`에 쓰는 `writePg()`(길이 제한이 있으면 복사하기 전에 자름). 타입과 `repr.zig`만 쓰므로 방언 계층도 부릅니다: `display.zig`, 와이어 서버(`server/pg/values.zig`), PostgreSQL 제약 위반의 `DETAIL`([제약 위반](#제약-위반))이 같은 텍스트를 씁니다.
 - `xqlite.repr`(`src/dialect/repr.zig`): 방언이 자기 형태의 BLOB으로 저장하는 타입(`numeric`의 키, `uuid`의 16바이트, `interval`, JSONB인 `jsonb`)마다 그 BLOB의 텍스트를 쓰는 표(`repr.forms`, 논리 타입당 한 항목). `display.text()`/`textAlloc()`은 BLOB 값을 이 표로 보내고, `api/`는 방언의 타입 모듈을 직접 가져오지 않습니다. 보는 방언이 저장한 방언과 다를 수 있으므로 방언 디렉터리 밖에 두어 어느 빌드(`-Ddialects=`)에나 있고, PostgreSQL의 코드가 필요한 것(interval의 텍스트, `repr.intervalText()`·`parseInterval()`)은 그 방언이 빠진 빌드에서 null입니다. 와이어 서버의 interval 이진 형식도 이것을 씁니다.
@@ -560,7 +560,7 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 
 ### uuid 패키지
 
-RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이름 `uuid`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 16바이트 값(`Uuid`, 네트워크 순서라 바이트 비교가 PostgreSQL의 `uuid_cmp()` 순서), PostgreSQL의 `uuid_in()`이 읽는 텍스트를 읽는 `parse()`와 소문자 하이픈 형식의 `format()`, `version()`·`timestamp()`(버전 1과 7), 무작위 16바이트로 만드는 `v4()`, Unix 밀리초와 밀리초 안의 나노초(12비트 분수, RFC 9562의 방법 3)와 무작위 8바이트로 만드는 `v7()`, 부를 때마다 앞으로 가는 시계 `Clock`(PostgreSQL의 `get_real_time_ns_ascending()`)이 있습니다. 시계와 엔트로피는 부르는 쪽이 넘깁니다. PostgreSQL 방언의 `src/dialect/postgres/uuid.zig`는 그 둘레의 SQL 함수(SQLite 값, 오류, 연결의 무작위 값과 시계)만 둡니다([PostgreSQL의 uuid](postgres/uuid.md)).
+RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이름 `uuid`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 16바이트 값(`Uuid`, 네트워크 순서라 바이트 비교가 PostgreSQL의 `uuid_cmp()` 순서), PostgreSQL의 `uuid_in()`이 읽는 텍스트를 읽는 `parse()`와 소문자 하이픈 형식의 `format()`, `version()`·`timestamp()`(버전 1과 7), 무작위 16바이트로 만드는 `v4()`, Unix 밀리초와 밀리초 안의 나노초(12비트 분수, RFC 9562의 방법 3)와 무작위 8바이트로 만드는 `v7()`, 부를 때마다 앞으로 가는 시계 `Clock`(PostgreSQL의 `get_real_time_ns_ascending()`)이 있습니다. 시계와 엔트로피는 부르는 쪽이 넘깁니다. PostgreSQL 방언의 `src/dialect/postgres/uuid.zig`는 그 둘레의 SQL 함수(SQLite 값, 오류, 연결의 무작위 값과 시계)만 둡니다([PostgreSQL 호환](postgres/internals.md#21-uuid-인코딩)).
 
 ### sqllex 패키지
 

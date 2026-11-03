@@ -160,7 +160,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 
 - `Query`의 텍스트는 스크립트입니다(`Session.run()`): 문장마다 `RowDescription`, `DataRow`, `CommandComplete`. 문장이 실패하면 `ErrorResponse`를 보내고 나머지는 돌리지 않으며, 암묵적 트랜잭션이면 앞의 문장도 롤백됩니다. 문장이 없으면 `EmptyQueryResponse`. 끝에 `ReadyForQuery`.
 - 명령 태그: `SELECT n`(VALUES도, `CREATE TABLE ... AS`·`SELECT ... INTO`는 넣은 행 수: PostgreSQL 방언의 CREATE TABLE AS는 `Hooks.count_create_as`로 행을 `changes()`에 셈), `INSERT 0 n`, `UPDATE n`, `DELETE n`, `MERGE n`, `TRUNCATE TABLE`, `CALL`, 나머지는 명령 분류의 단어(`CREATE TABLE`, `BEGIN`, `SET`, `RESET`, `COMMENT` ...). `SET`과 `RESET`은 행을 보내지 않습니다.
-- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)(엔진이 적은 자리에서 자름, [PostgreSQL 호환](postgres/differences.md#위치와-detailhintcontext)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`: `WARNING`)와 문장의 알림(`IF EXISTS`·`IF NOT EXISTS`가 건너뛴 것, `DROP SCHEMA ... CASCADE`가 함께 지운 것: `NOTICE`, [PostgreSQL 호환](postgres/differences.md#notice))이고, `S`/`V`, `C`, `M`, 있으면 `D`입니다. 문장의 알림은 그 문장의 `CommandComplete` 앞에 나가고(확장 질의는 `Execute`마다), `SET client_min_messages = warning`이면 `NOTICE`를, `error`면 `WARNING`도 보내지 않습니다.
+- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)(엔진이 적은 자리에서 자름, [PostgreSQL 호환](postgres/differences.md)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`: `WARNING`)와 문장의 알림(`IF EXISTS`·`IF NOT EXISTS`가 건너뛴 것, `DROP SCHEMA ... CASCADE`가 함께 지운 것: `NOTICE`, [PostgreSQL 호환](postgres/differences.md))이고, `S`/`V`, `C`, `M`, 있으면 `D`입니다. 문장의 알림은 그 문장의 `CommandComplete` 앞에 나가고(확장 질의는 `Execute`마다), `SET client_min_messages = warning`이면 `NOTICE`를, `error`면 `WARNING`도 보내지 않습니다.
 - 단순 질의는 이름 없는 문장과 포털을 지웁니다.
 
 ### 확장 질의
@@ -180,7 +180,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 - 배열의 값은 PostgreSQL의 텍스트(`{1,2}`, `{t,NULL}`, `[0:1]={1,2}`)이고 텍스트 형식은 그대로, 이진 형식은 그 텍스트를 읽어 원소마다 원소 타입의 이진 형식으로 씁니다. 이진으로 받은 배열 매개변수는 같은 텍스트가 되어 바인딩됩니다.
 - 이진 형식의 값은 열의 타입으로 바꿉니다(SQLite는 어느 열에나 어느 값이든 저장하므로). 바꿀 수 없으면(정수 열의 `'abc'`) 그 `Execute`가 `22P03`으로 실패합니다.
 - `pg_catalog.format_type(oid, typmod)`는 PostgreSQL 방언의 함수입니다(이 OID들의 이름). psql의 `\gdesc`가 씁니다.
-- 방언의 시스템 카탈로그(`pg_type`, `pg_attribute.atttypid` ...)도 같은 OID를 씁니다(`pgcatalog.zig`의 `oidOfLogical()`과 `values.zig`의 `ofType()`이 같은 표이고 테스트가 비교). 카탈로그의 `oid` 열은 `int4`(23)로 알립니다(PostgreSQL은 `oid` 26; 값은 2^31 아래라 텍스트·이진 형식이 같음). [PostgreSQL 호환의 카탈로그](postgres/catalog.md).
+- 방언의 시스템 카탈로그(`pg_type`, `pg_attribute.atttypid` ...)도 같은 OID를 씁니다(`pgcatalog.zig`의 `oidOfLogical()`과 `values.zig`의 `ofType()`이 같은 표이고 테스트가 비교). 카탈로그의 `oid` 열은 `int4`(23)로 알립니다(PostgreSQL은 `oid` 26; 값은 2^31 아래라 텍스트·이진 형식이 같음). [PostgreSQL 호환](postgres/features.md#42-시스템-카탈로그-및-뷰).
 - 세션은 `generate_series()`(셸과 같은 `ext/series.zig`)를 등록합니다. psql의 `\d`가 씁니다.
 
 ### PostgreSQL과 다른 점
@@ -217,7 +217,7 @@ xqlite serve app.db --pg 15432 --host 0.0.0.0
 podman run --rm postgres:16-alpine psql "host=host.containers.internal port=15432 user=u dbname=x sslmode=disable" -c "SELECT 1"
 ```
 
-- 메타 명령: `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`, `\dt+`의 출력이 PostgreSQL 16과 같은 모양입니다(스키마·이름·종류·소유자, `\dt+`의 Persistence·Access method·Description). `\d 테이블`(열·타입·기본값·`generated always as identity`, 인덱스, CHECK, 외래 키, Referenced by), `\d 뷰`, `\d 인덱스`, `\d 시퀀스`(Owned by)는 PostgreSQL 16의 출력과 같았습니다. psql이 함께 보내는 정책 질의의 `array(...)`·`= any(...)`, 발행 질의의 배열 첨자, `\d+ 테이블`의 `unnest()`도 방언이 읽습니다([PostgreSQL 호환의 배열](postgres/arrays.md)).
+- 메타 명령: `\d`, `\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\dT`, `\l`, `\du`, `\dt+`의 출력이 PostgreSQL 16과 같은 모양입니다(스키마·이름·종류·소유자, `\dt+`의 Persistence·Access method·Description). `\d 테이블`(열·타입·기본값·`generated always as identity`, 인덱스, CHECK, 외래 키, Referenced by), `\d 뷰`, `\d 인덱스`, `\d 시퀀스`(Owned by)는 PostgreSQL 16의 출력과 같았습니다. psql이 함께 보내는 정책 질의의 `array(...)`·`= any(...)`, 발행 질의의 배열 첨자, `\d+ 테이블`의 `unnest()`도 방언이 읽습니다([PostgreSQL 호환](postgres/features.md#32-배열-연산자)).
 - 여러 문장(`\;`), 오류와 위치(`LINE 1: ... ^`), `BEGIN`/실패/`25P02`/`ROLLBACK`, 트랜잭션 밖 `COMMIT`의 경고, `\gdesc`(Parse/Describe와 `format_type()`), `\bind ... \g`(확장 질의), `bytea`·`jsonb`·`numeric(10,2)`·`timestamptz`의 값, `SET`/`SHOW`, `COPY`의 오류, `timeout -s INT`로 보낸 psql의 취소 요청, SCRAM-SHA-256(`sslmode=prefer channel_binding=prefer` 포함)·MD5·틀린 비밀번호·없는 사용자.
 
 ## 테스트

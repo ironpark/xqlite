@@ -4,7 +4,7 @@
 -- PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
 -- `.dialect postgres`; the rows, column names and error messages (the
 -- "ERROR:" line) must be the same. The expected output is PostgreSQL 18's.
--- A jsonb column stores SQLite's JSONB (docs/postgres/json.md): these
+-- A jsonb column stores SQLite's JSONB (docs/postgres/internals.md): these
 -- cases read and write the values of columns, where pg-cases.txt mostly
 -- has constants.
 

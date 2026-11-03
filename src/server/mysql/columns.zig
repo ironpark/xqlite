@@ -180,7 +180,7 @@ pub const Source = struct {
 
 /// The source of a column that reads table column `o` (null for an
 /// expression). A table of a database of CREATE DATABASE is the main
-/// table "db.t" (docs/mariadb/databases.md).
+/// table "db.t" (docs/mariadb/internals.md).
 pub fn source(name: []const u8, origin: ?xqlite.Origin) Source {
     const o = origin orelse return .{ .name = name };
     var schema = o.database;

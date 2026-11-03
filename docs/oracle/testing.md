@@ -1,20 +1,56 @@
-# 검증
+# Oracle 호환: 검증 및 테스트
 
-[Oracle 호환](README.md)의 일부입니다.
+xqlite의 Oracle 방언 호환성을 보증하기 위한 테스트 체계, 차등 비교(differential testing) 도구 및 실행 가이드입니다.
 
-| 도구 | 하는 일 |
-| --- | --- |
-| `src/dialect/oracle/test.zig` | 종단 테스트(어휘, `''` 규칙, 질의, 날짜, DDL과 타입, identity·시퀀스, MERGE·INSERT ALL, 트랜잭션, 바인드 변수, 데이터 사전, JSON) |
-| `xqt dialect-diff oracle` + `tools/dialect/oracle-cases.txt` | 실제 Oracle과 차등 비교. 61개 케이스(JSON 15개, 사용자·스키마 6개)가 Oracle Database 23ai Free와 같은 행·열 이름·오류 코드를 냄 |
-| `xqt interop oracle` | sqlite3 교차 검증. 이 방언으로 쓴 데이터베이스(JSON 열 포함)가 sqlite3 무결성 검사를 통과하고, sqlite3와 xqlite(SQLite 방언)가 같은 행과 스키마를 읽어야 함 |
-| `xqt interop ext` | [확장](../extension.md)을 올린 sqlite3로: 함수 기반 인덱스(`SUBSTR`, `JSON_VALUE`, `ADD_MONTHS`)·가상 열·`IS JSON` CHECK·뷰가 있는 데이터베이스의 무결성, 같은 결과, CHECK 위반의 같은 오류, sqlite3가 쓴 행(identity 포함)을 xqlite가 검사하고 읽음, 엔진 함수의 기록된 결과(`tools/ext/abi-oracle.sql`) |
-| `zig build fuzz -- ir_roundtrip` | 퍼저의 방언 목록에 Oracle이 있음. 다른 방언의 트리로 만든 뷰를 Oracle 프론트엔드로 읽고, Oracle의 훅으로 렌더링한 텍스트를 모든 방언에서 컴파일 |
+---
 
-차등 비교는 Oracle 컨테이너를 띄운 뒤 실행합니다(`$ORA_SQLPLUS`, 기본값 `podman exec -i xq-ora sqlplus -s -L xq/xqpass@FREEPDB1`). 케이스는 한 번에 하나씩 돌고, 각 케이스는 SYSTEM으로 XQ에 DBA 역할을 주고 이전 케이스가 남긴 사용자(`XQ_...`)를 지운 뒤, 사용자 XQ의 테이블·뷰·시퀀스를 지우고 날짜 형식을 이 방언의 것(`YYYY-MM-DD HH24:MI:SS`)으로 맞춘 뒤 시작합니다. 비교할 때 오류는 ORA- 코드로 맞추고(SQLite 문구의 제약 위반은 Oracle이 같은 경우에 내는 코드로), Oracle의 `.5`와 `TRUE`는 `0.5`와 `1`로 맞춥니다. 서버에 닿지 않으면 바로 실패하며 `zig build check`에는 들어 있지 않습니다. 둘 다 먼저 `zig build tools`가 필요합니다.
+## 1. 테스트 체계 개요
 
+Oracle 방언은 단위 테스트, SQLite 상호운용성 검증, Oracle Database 23ai 컨테이너와의 실시간 차등 비교를 통해 검증됩니다.
+
+```mermaid
+flowchart LR
+    Unit["단위 테스트 (Zig)"] --> Interop["SQLite 상호운용 검증 (interop)"]
+    Interop --> Live["Oracle 23ai 차등 검증 (dialect-diff oracle --live)"]
+```
+
+1. **Zig 단위 테스트**: 대문자 폴딩, 빈 문자열=NULL 처리, 날짜 함수, MERGE 구문, 트랜잭션 꼬리 코드 생성을 검증합니다.
+2. **`xqt interop oracle`**: Oracle 방언으로 생성된 테이블과 데이터를 표준 `sqlite3` 바이너리로 교차 로드하여 무결성을 검증합니다.
+3. **`dialect-diff oracle`**: `tools/dialect/oracle-cases.txt`의 테스트 케이스를 xqlite와 실제 Oracle Database 23ai에서 동시 실행하고 결과를 문자 단위로 비교합니다.
+
+---
+
+## 2. 테스트 실행 방법
+
+### 2.1 단위 테스트
 ```sh
-podman run -d --name xq-ora -e ORACLE_PASSWORD=xqpass -e APP_USER=xq -e APP_USER_PASSWORD=xqpass \
-  gvenzl/oracle-free:23-slim-faststart
-zig-out/bin/xqt dialect-diff oracle --live
+# Oracle 방언 단위 테스트 실행
+zig build test -Dtest-filter='oracle:'
+```
+
+### 2.2 SQLite 상호운용성 검증
+```sh
+zig build tools
 zig-out/bin/xqt interop oracle
 ```
+
+---
+
+## 3. 실서버 교차 검증 (`dialect-diff`)
+
+실제 Oracle Database와의 비교 검증을 수행하려면 컨테이너가 필요합니다.
+
+```sh
+# 1. Oracle Database 23ai Free 컨테이너 시작
+podman run -d --name xq-oracle -p 1521:1521 \
+  -e ORACLE_PASSWORD=Xq_Passw0rd! \
+  container-registry.oracle.com/database/free:latest
+
+# 2. 실서버 차등 검증 실행
+zig-out/bin/xqt dialect-diff oracle --live
+
+# 3. 특정 케이스 파일만 지정 실행
+zig-out/bin/xqt dialect-diff oracle --live tools/dialect/oracle-cases.txt
+```
+
+- SQL*Plus의 특유의 헤더 포맷, 열 너비 잘림, 소수점 앞 `0` 표기 차이(예: `.5` vs `0.5`)는 테스트 러너에서 자동으로 정규화되어 논리적 동등성을 검증합니다.

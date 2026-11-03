@@ -1,19 +1,65 @@
-# 검증 도구
+# SQLite 호환: 검증 및 테스트
 
-[SQLite 호환](README.md)의 일부입니다.
+xqlite의 SQLite 3.54.1 호환성을 보증하기 위한 광범위한 테스트 스위트, 상호운용성 검증 도구 및 실행 가이드입니다.
 
-| 도구 | 확인하는 것 |
-| --- | --- |
-| `xqt interop btree`, `sql` | 서로 만든 DB 파일을 교차로 읽고 쓰고 `PRAGMA integrity_check` |
-| `xqt interop pragma`, `shell` | PRAGMA 결과, 셸 출력·dot-command·오류, `.dump` 왕복 |
-| `xqt interop savepoint`, `hot-journal` | 세이브포인트·문장 롤백, 핫 저널 복구 |
-| `xqt interop wal` | WAL 파일 상호 읽기, 체크포인트, 크래시 복구, 두 엔진 프로세스 동시 접근 |
-| `xqt interop attach` | 서로의 파일을 붙여 읽고 쓰기, 여러 파일 트랜잭션, 커밋 도중 크래시와 super journal 복구 |
-| `xqt interop analyze` | 같은 데이터의 `sqlite_stat1` 행, 서로 분석한 DB의 실행 계획과 `PRAGMA optimize` |
-| `xqt interop vacuum` | 같은 DB를 두 엔진이 `VACUUM`/`VACUUM INTO`한 파일의 바이트 비교, 셸의 `.backup`/`.restore`, VACUUM 도중 크래시 복구 |
-| `xqt planner` | 쿼리 결과·`EXPLAIN QUERY PLAN`·바이트코드를 sqlite3와 비교 |
-| `xqt slt` | sqllogictest. 스크립트 622개, 테스트 5,939,879개를 롤백 저널과 WAL 모드에서 모두 통과합니다([tools/slt/README.md](../../tools/slt/README.md)). |
-| `xqlite fuzzcheck` | SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`)에서 크래시·누수 |
-| `xqt interop ext` | 방언으로 만든 DB를 확장을 올린 sqlite3가 검사·읽기·쓰기, 엔진 함수의 결과를 xqlite와 비교(기록된 ABI 케이스, 생성한 호출) ([sqlite3용 확장](../extension.md#검증)) |
+---
 
-실행 방법은 [테스트 문서](../testing.md)를 보세요.
+## 1. 테스트 체계 개요
+
+xqlite는 SQLite 공식 테스트 도구 및 독자 검증 러너(`xqt`)를 결합하여 엄격한 품질을 보증합니다.
+
+```mermaid
+flowchart TD
+    Interop["xqt interop (파일 및 프로세스 상호운용 검증)"] --> Integrity["PRAGMA integrity_check 통과"]
+    SLT["xqt slt (sqllogictest 590만 개)"] --> SQLResult["쿼리 결과 100% 일치"]
+    Planner["xqt planner (플래너 및 바이트코드 비교)"] --> Opcode["VDBE Opcode 및 쿼리 플랜 일치"]
+    Fuzz["fuzzcheck & 퍼징"] --> CrashFree["크래시 및 OOM 안정성 검증"]
+```
+
+| 도구 | 대상 영역 | 보장 내용 |
+| --- | --- | --- |
+| **`xqt interop btree, sql`** | 파일 및 B-Tree | 두 엔진이 상호 수정한 DB 파일의 무결성(`PRAGMA integrity_check`) 검증. |
+| **`xqt interop wal, hot-journal`**| 저널링 & 복구 | 크래시 상황 시 핫 저널 상호 복구, 동시 프로세스 읽기/쓰기 검증. |
+| **`xqt interop vacuum, attach`** | 다중 DB & 백업 | `VACUUM INTO` 바이트 단위 일치, 슈퍼 저널 롤백 복구 검증. |
+| **`xqt planner`** | 쿼리 플래너 & VDBE | 복잡한 조인 질의의 `EXPLAIN QUERY PLAN` 및 바이트코드 일치 검증. |
+| **`xqt slt`** | sqllogictest | 스크립트 622개, 테스트 5,939,879개 전체 통과 (롤백 저널 및 WAL 모드). |
+| **`xqlite fuzzcheck`** | 퍼징 코퍼스 | 공식 SQLite 퍼즈 코퍼스(`test/fuzzdata*.db`) 상 무결함 검증. |
+
+---
+
+## 2. 테스트 실행 방법
+
+### 2.1 상호운용성 검증 (`interop`)
+```sh
+zig build tools
+
+# B-Tree 및 SQL 기본 상호운용성 검사
+zig-out/bin/xqt interop btree
+zig-out/bin/xqt interop sql
+
+# WAL 모드 및 핫 저널 복구 검사
+zig-out/bin/xqt interop wal
+zig-out/bin/xqt interop hot-journal
+
+# 전 항목 일괄 검사
+zig-out/bin/xqt interop
+```
+
+### 2.2 플래너 및 바이트코드 비교 (`planner`)
+```sh
+zig-out/bin/xqt planner
+```
+
+### 2.3 sqllogictest 실행 (`slt`)
+```sh
+# 기본 스크립트 실행
+zig-out/bin/xqt slt
+
+# WAL 모드에서 전체 실행
+zig-out/bin/xqt slt --journal wal
+```
+
+### 2.4 퍼징 테스트 (`fuzzcheck`)
+```sh
+zig build fuzz -Doptimize=ReleaseSafe -- ir_roundtrip 1 --events 1000
+```

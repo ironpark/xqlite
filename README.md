@@ -116,11 +116,13 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 ### 방언별 문서
 
-- [SQLite 호환](docs/sqlite/README.md): 구현 범위, sqlite3와의 교차 검증
-- [PostgreSQL 호환](docs/postgres/README.md): 지원 문법, 타입과 의미, PostgreSQL과 다른 점
-- [MariaDB 호환](docs/mariadb/README.md): 저장 방식, `sql_mode`, 지원 문법, MariaDB와 다른 점
-- [MSSQL 호환](docs/mssql/README.md): T-SQL 문법, 타입과 값 변환, `+`·`MERGE`의 규칙, SQL Server와 다른 점
-- [Oracle 호환](docs/oracle/README.md): 빈 문자열과 NULL, 날짜, `ROWNUM`·`MERGE`, 암묵적 트랜잭션, Oracle과 다른 점
+모든 방언 문서는 **사용 방법**, **지원 기능**, **차이점 및 미지원 사항**, **내부 기술 세부사항**, **검증 및 테스트**의 5개 표준 문서 체계로 일관되게 구성되어 있습니다.
+
+- [SQLite 호환](docs/sqlite/README.md): 호환 수준 및 사용법, 코어 기능, 미지원 제약, 순수 Zig 구현 원리, 교차 검증 도구
+- [PostgreSQL 호환](docs/postgres/README.md): 사용법, 지원 기능 및 카탈로그, PostgreSQL 18과의 차이점, 내부 아키텍처 및 직렬화, 차등 검증
+- [MariaDB 호환](docs/mariadb/README.md): 사용법, `sql_mode` 및 지원 문법, MariaDB 11과의 차이점, 다중 DB 매핑 원리, 실서버 검증
+- [MSSQL 호환](docs/mssql/README.md): 사용법, T-SQL 지원 기능 및 식 규칙, SQL Server와의 차이점, `MERGE`/`OUTPUT` IR 변환, 교차 검증
+- [Oracle 호환](docs/oracle/README.md): 사용법, 대문자·빈문자열·날짜 등 Oracle 시맨틱, Oracle 23ai와의 차이점, 암묵적 트랜잭션 구현, 실서버 검증
 - [sqlite3용 확장](docs/extension.md): 방언으로 만든 데이터베이스의 엔진 함수와 collation을 sqlite3·Python·Datasette에 올리는 `libxqlite_ext`, 함수 목록, ABI 규칙
 
 ## 빠른 시작

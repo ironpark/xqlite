@@ -974,7 +974,12 @@ fn sqliteShell(b: *std.Build, target: std.Build.ResolvedTarget, dep: *std.Build.
         .name = name,
         .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseFast, .link_libc = true }),
     });
-    const all = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{"-Wno-everything"} }) catch @panic("OOM");
+    // SQLITE_WITHOUT_ZONEMALLOC: on macOS sqlite3MallocSize() is
+    // otherwise the malloc zone's size of a block, whose rounding differs
+    // from one Mac to another; rehash() sizes the hash tables by it, and
+    // so the order ANALYZE visits the tables in (as the engine does, and
+    // SQLite on Linux: the size asked for).
+    const all = std.mem.concat(b.allocator, []const u8, &.{ flags, &.{ "-DSQLITE_WITHOUT_ZONEMALLOC", "-Wno-everything" } }) catch @panic("OOM");
     exe.root_module.addCSourceFiles(.{ .root = dep.path("."), .files = &.{ "sqlite3.c", "shell.c" }, .flags = all });
     exe.root_module.addIncludePath(dep.path("."));
     if (target.result.os.tag == .linux) {

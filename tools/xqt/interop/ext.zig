@@ -495,13 +495,16 @@ fn errors(c: *Check, stderr: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// Python's sqlite3 module (the system SQLite, whatever its version)
-/// loads the extension and reads what sqlite3 reads; skipped without a
-/// python3 whose sqlite3 can load extensions.
+/// Python's sqlite3 module (the system SQLite) loads the extension and
+/// reads what sqlite3 reads; skipped without a python3 whose sqlite3 can
+/// load extensions, or whose SQLite is older than 3.48: the schemas call
+/// if() (3.48), and before 3.47 a REAL's text had 15 digits, not 17.
 fn python(c: *Check, base: *BaseDb, sp: *const Spec) !void {
     try base.get(c, sp.db);
     const script =
         \\import sqlite3, sys
+        \\if sqlite3.sqlite_version_info < (3, 48, 0):
+        \\    print("SKIP system SQLite " + sqlite3.sqlite_version + " is older than 3.48"); sys.exit(0)
         \\con = sqlite3.connect(sys.argv[2])
         \\if not hasattr(con, "enable_load_extension"):
         \\    print("SKIP no enable_load_extension"); sys.exit(0)

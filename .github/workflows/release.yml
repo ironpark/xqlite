@@ -1,5 +1,7 @@
-# A tag v* builds an archive per platform and publishes them as a GitHub
-# release, with the notes of .github/release-notes/<tag>.md.
+# A tag v* builds an archive per platform and makes a draft GitHub
+# release of them, with the notes of .github/release-notes/<tag>.md; the
+# draft is published by hand (gh release edit TAG --draft=false) once the
+# archives that CI could not run (macOS, wasm) have been tried.
 #
 # Each archive (xqlite-<tag>-<platform>.tar.gz) holds, built ReleaseFast
 # and stripped:
@@ -17,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to build (an existing tag; the release is a draft)
+        description: Tag to build (an existing tag)
         required: true
 
 permissions:
@@ -32,8 +34,10 @@ jobs:
         include:
           - { name: linux-x86_64, os: ubuntu-latest, target: x86_64-linux-gnu.2.28, native: true }
           - { name: linux-aarch64, os: ubuntu-24.04-arm, target: aarch64-linux-gnu.2.28, native: true }
-          - { name: macos-aarch64, os: macos-latest, target: aarch64-macos, native: true }
-          - { name: macos-x86_64, os: macos-latest, target: x86_64-macos, native: false }
+          # Cross-compiled: Zig links and ad-hoc signs Mach-O itself, and
+          # hosted macOS runners are often not available.
+          - { name: macos-aarch64, os: ubuntu-latest, target: aarch64-macos, native: false }
+          - { name: macos-x86_64, os: ubuntu-latest, target: x86_64-macos, native: false }
           - { name: wasm, os: ubuntu-latest, target: wasm32-wasi, native: false }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -99,8 +103,6 @@ jobs:
           set -eu
           notes=".github/release-notes/$TAG.md"
           [ -f "$notes" ] || notes=/dev/null
-          draft=""
-          [ "${{ github.event_name }}" = workflow_dispatch ] && draft="--draft"
           prerelease=""
           case "$TAG" in v0.*) prerelease="--prerelease" ;; esac
-          gh release create "$TAG" dist/* --title "xqlite $TAG" --notes-file "$notes" --verify-tag $draft $prerelease
+          gh release create "$TAG" dist/* --title "xqlite $TAG" --notes-file "$notes" --verify-tag --draft $prerelease

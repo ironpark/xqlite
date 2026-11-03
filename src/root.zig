@@ -123,6 +123,8 @@ pub const sql = struct {
     pub const DbFlag = @import("sql/sqlite_int.zig").DbFlag;
     /// Process-wide state (sqlite3GlobalConfig, the PRNG, test controls).
     pub const global = @import("sql/global.zig");
+    /// The SQLite version the engine is a port of (sqlite_version()).
+    pub const sqlite_version = @import("sql/func/func.zig").sqlite_version;
     /// sqlite3_randomness(): an empty buffer resets the PRNG.
     pub const randomness = @import("sql/func/func.zig").randomness;
 };
@@ -134,7 +136,8 @@ pub const sql = struct {
 pub const loadext = @import("capi/bridge.zig");
 
 /// What the engine is built with (`zig build -Ddialects=... -Dext=...`):
-/// `dialect_<name>` and `ext_<name>` bools.
+/// `dialect_<name>` and `ext_<name>` bools, and xqlite's `version`
+/// (build.zig.zon).
 pub const config = @import("xqlite_config");
 
 /// Extensions from ext/misc that the sqlite3 shell builds in (unless

@@ -26,6 +26,8 @@ const usage =
     \\usage: xqlite <command> [args]
     \\
     \\commands:
+    \\  version                   print xqlite's version and the SQLite version
+    \\                            it is a port of (also --version)
     \\  dbinfo <file>             print the database file header
     \\  recover <file>            open the database, rolling back a hot journal
     \\  crash-write <file> <byte> overwrite every page, then exit after commit
@@ -76,7 +78,10 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_file_writer.interface;
     defer out.flush() catch {};
 
-    if (args.len == 3 and std.mem.eql(u8, args[1], "dbinfo")) {
+    if (args.len == 2 and (std.mem.eql(u8, args[1], "version") or std.mem.eql(u8, args[1], "--version"))) {
+        try out.print("xqlite {s} (SQLite {s})\n", .{ xqlite.config.version, xqlite.sql.sqlite_version });
+        try out.flush();
+    } else if (args.len == 3 and std.mem.eql(u8, args[1], "dbinfo")) {
         try dbinfo(arena, io, args[2], out);
     } else if (args.len == 3 and std.mem.eql(u8, args[1], "recover")) {
         try recover(arena, io, args[2], out);

@@ -112,6 +112,7 @@ pub fn build(b: *std.Build) void {
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
+    exe.root_module.strip = stripOption(b);
     b.installArtifact(exe);
 
     // This creates a top level step. Top level steps have a name and can be
@@ -829,6 +830,7 @@ fn extLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .link_libc = true,
         .pic = true,
         .imports = engineImportsWith(b, target, optimize, cfg.module),
+        .strip = stripOption(b),
     });
     m.addIncludePath(b.path("include"));
     m.addCSourceFile(.{ .file = b.path("src/loadable/entry.c"), .flags = &.{ "-std=c99", "-fvisibility=hidden" } });
@@ -863,6 +865,7 @@ fn capiLib(b: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMo
         .link_libc = true,
         .pic = true,
         .imports = engineImportsWith(b, t, o, cfg.module),
+        .strip = stripOption(b),
     });
     m.addIncludePath(b.path("include"));
     m.addCSourceFile(.{ .file = b.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
@@ -1043,12 +1046,16 @@ fn engineImportsWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     }) catch @panic("OOM");
 }
 
+/// xqlite's version (build.zig.zon), `xqlite.config.version`.
+const zon_version = @import("build.zig.zon").version;
+
 /// `xqlite_config` with no dialect but SQLite's and no extension, for
 /// tools/minimal_test.zig whatever -Ddialects and -Dext say.
 fn minimalConfigModule(b: *std.Build) *std.Build.Module {
     const options = b.addOptions();
     for (Config.dialects) |name| options.addOption(bool, b.fmt("dialect_{s}", .{name}), false);
     for (Config.exts) |name| options.addOption(bool, b.fmt("ext_{s}", .{name}), false);
+    options.addOption([]const u8, "version", zon_version);
     return options.createModule();
 }
 
@@ -1072,6 +1079,7 @@ const Config = struct {
         const options = b.addOptions();
         for (dialects, dialect) |name, on| options.addOption(bool, b.fmt("dialect_{s}", .{name}), on);
         for (exts, ext) |name, on| options.addOption(bool, b.fmt("ext_{s}", .{name}), on);
+        options.addOption([]const u8, "version", zon_version);
         return .{ .dialect = dialect, .ext = ext, .module = options.createModule() };
     }
 
@@ -1088,6 +1096,14 @@ const Config = struct {
 };
 
 var config: ?Config = null;
+
+/// -Dstrip: leave out debug information from the CLI, libxqlite3 and
+/// libxqlite_ext (the release archives). Null keeps Zig's default.
+fn stripOption(b: *std.Build) ?bool {
+    if (strip_option == null) strip_option = .{b.option(bool, "strip", "Strip debug information from the CLI and the C libraries (default: Zig's, by -Doptimize)")};
+    return strip_option.?[0];
+}
+var strip_option: ?struct { ?bool } = null;
 
 /// `xqlite_config`, what the engine is built with: a `dialect_<name>`
 /// bool for each dialect but SQLite's (-Ddialects, see

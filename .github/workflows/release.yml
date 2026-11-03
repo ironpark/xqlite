@@ -1,0 +1,106 @@
+# A tag v* builds an archive per platform and publishes them as a GitHub
+# release, with the notes of .github/release-notes/<tag>.md.
+#
+# Each archive (xqlite-<tag>-<platform>.tar.gz) holds, built ReleaseFast
+# and stripped:
+#   bin/xqlite                    the CLI (shell, serve ...)
+#   lib/libxqlite3.{a,so,dylib}   the sqlite3-compatible C library
+#   lib/libxqlite_ext.{so,dylib}  the extension for sqlite3 (docs/extension.md)
+#   lib/pkgconfig/xqlite3.pc, include/{sqlite3,sqlite3ext,xqlite}.h
+# The wasm archive has the WASI CLI and static library, and the module
+# for JavaScript hosts with its connection code (docs/wasm.md).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build (an existing tag; the release is a draft)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest, target: x86_64-linux-gnu.2.28, native: true }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm, target: aarch64-linux-gnu.2.28, native: true }
+          - { name: macos-aarch64, os: macos-latest, target: aarch64-macos, native: true }
+          - { name: macos-x86_64, os: macos-latest, target: x86_64-macos, native: false }
+          - { name: wasm, os: ubuntu-latest, target: wasm32-wasi, native: false }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Build
+        run: |
+          set -eu
+          dir="xqlite-$TAG-${{ matrix.name }}"
+          if [ "${{ matrix.target }}" = wasm32-wasi ]; then
+            # The WASI CLI and library, and the browser/Node module (zig-out/wasm).
+            zig build install wasm -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall -Dstrip=true --prefix "stage/$dir"
+            cp examples/wasm/xqlite.mjs "stage/$dir/wasm/"
+          else
+            zig build install ext -Dtarget=${{ matrix.target }} -Doptimize=ReleaseFast -Dstrip=true --prefix "stage/$dir"
+          fi
+          cp README.md LICENSE "stage/$dir/"
+          echo "DIR=$dir" >> "$GITHUB_ENV"
+      - name: Smoke test
+        if: matrix.native
+        run: |
+          set -eu
+          bin="stage/$DIR/bin/xqlite"
+          "$bin" --version
+          "$bin" --version | grep -q "^xqlite ${TAG#v} "
+          "$bin" sql :memory: ".dialect postgres" "SELECT 1 + 1 AS two, 'a' || 'b' AS ab" </dev/null
+      - name: Archive
+        run: tar -C stage -czf "$DIR.tar.gz" "$DIR"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.DIR }}
+          path: ${{ env.DIR }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          notes=".github/release-notes/$TAG.md"
+          [ -f "$notes" ] || notes=/dev/null
+          draft=""
+          [ "${{ github.event_name }}" = workflow_dispatch ] && draft="--draft"
+          prerelease=""
+          case "$TAG" in v0.*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" dist/* --title "xqlite $TAG" --notes-file "$notes" --verify-tag $draft $prerelease

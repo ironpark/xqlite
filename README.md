@@ -115,6 +115,15 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 ## 빠른 시작
 
+### 내려받기
+
+[Releases](https://github.com/ironpark/xqlite/releases)에 Linux(x86_64, aarch64), macOS(Apple Silicon, Intel), WebAssembly용 아카이브가 있습니다. 아카이브마다 CLI `bin/xqlite`, C 라이브러리 `lib/libxqlite3`(정적·공유)와 헤더, sqlite3용 확장 `lib/libxqlite_ext`가 들어 있습니다.
+
+```sh
+tar xzf xqlite-v0.0.1-linux-x86_64.tar.gz
+xqlite-v0.0.1-linux-x86_64/bin/xqlite --version    # xqlite 0.0.1 (SQLite 3.54.1)
+```
+
 ### 빌드
 
 Zig **0.17.0** 이상이 필요합니다.
@@ -127,6 +136,7 @@ zig build test-pkg     # 패키지 테스트만 (엔진을 빌드하지 않아 �
 zig build test-capi    # C API 테스트
 zig build ext          # sqlite3용 확장 (zig-out/lib/libxqlite_ext.*, docs/extension.md)
 zig build -Ddialects=postgres,mariadb -Dext=none   # 넣을 방언·확장만 (기본 all)
+zig build -Doptimize=ReleaseFast -Dstrip=true      # 릴리스 아카이브와 같은 빌드 (디버그 정보 없음)
 ```
 
 `-Ddialects`로 뺀 방언은 고르면 `dialect not built in` 오류가 나고, SQLite만 넣으면 브라우저 wasm이 2.3MB에서 0.95MB로 줄어듭니다([빌드에 넣을 방언과 확장](docs/architecture.md#빌드에-넣을-방언과-확장)).

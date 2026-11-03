@@ -1,0 +1,58 @@
+# The standard checks (AGENTS.md, tier 2) on Linux and macOS, and the
+# builds with one dialect or none (check-matrix) on Linux.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: Format
+        run: zig fmt --check src tools pkg build.zig examples
+      - name: Build
+        run: zig build && zig build tools
+      # SQLite's sources and fuzz corpora for fuzzcheck (ref/ is not in git).
+      - uses: actions/cache@v6
+        with:
+          path: ref/sqlite
+          key: ref-sqlite-3.54.1
+      - name: Fetch SQLite's sources
+        run: test -d ref/sqlite || zig-out/bin/xqt fetch sqlite
+      - name: zig build check
+        run: zig build check
+      - name: Packages, examples, wasm
+        run: zig build test-pkg examples wasm
+
+  matrix:
+    name: check-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      - name: zig build check-matrix
+        run: zig build check-matrix

@@ -67,7 +67,7 @@ fn dlErrorMsg(v: *vfs_c.sqlite3_vfs, n: usize, comptime fmt: []const u8, args: a
 }
 
 /// Port of sqlite3LoadExtension().
-fn loadExtension(db: *Handle, z_file: [*:0]const u8, z_proc: ?[*:0]const u8, pz_errmsg: ?*?[*:0]u8) c_int {
+pub fn loadExtension(db: *Handle, z_file: [*:0]const u8, z_proc: ?[*:0]const u8, pz_errmsg: ?*?[*:0]u8) c_int {
     const e = c.ext(db);
     const v = e.vfs.cvfs;
     const file = std.mem.span(z_file);

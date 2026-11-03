@@ -904,6 +904,7 @@ const help_text = [_][]const u8{
     ".indexes ?PATTERN?       Show names of indexes matching PATTERN",
     "   -a|--all                 Also show system-generated indexes",
     "   --sys                    Show only system-generated indexes",
+    ".load FILE ?ENTRY?       Load an extension library",
     ".mode ?MODE? ?OPTIONS?   Set output mode",
     ".nullvalue STRING        Use STRING in place of NULL values",
     ".print STRING...         Print literal STRING",
@@ -1060,6 +1061,8 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         }
     } else if (c == 'i' and (isCmd(cmd, "indices") or isCmd(cmd, "indexes"))) {
         rc = try dotStatus(dotIndexes(p));
+    } else if (c == 'l' and n >= 2 and isCmd(cmd, "load")) {
+        rc = try dotStatus(dotLoad(p));
     } else if (c == 'm' and isCmd(cmd, "mode")) {
         rc = try dotStatus(dotMode(p));
     } else if (c == 'n' and isCmd(cmd, "nullvalue")) {
@@ -1101,6 +1104,24 @@ fn doMetaCommand(p: *Shell, line: []const u8) Error!u8 {
         rc = 1;
     }
     return rc;
+}
+
+/// .load FILE ?ENTRY?: load an extension library into the connection
+/// (sqlite3_load_extension(), with the C ABI's loader: xqlite.loadext).
+fn dotLoad(p: *Shell) DotError!void {
+    const args = p.dot_args.items;
+    if (args.len < 2 or args[1].len == 0) {
+        try p.eprint("Usage: .load FILE ?ENTRYPOINT?\n", .{});
+        return error.CommandFailed;
+    }
+    const file = try p.gpa.dupeSentinel(u8, args[1], 0);
+    defer p.gpa.free(file);
+    const proc = if (args.len >= 3) try p.gpa.dupeSentinel(u8, args[2], 0) else null;
+    defer if (proc) |z| p.gpa.free(z);
+    if (xqlite.loadext.load(p.db, file, proc) != RC.OK) {
+        try p.eprint("Error: {s}\n", .{sql.main.errmsg(p.db)});
+        return error.CommandFailed;
+    }
 }
 
 /// Open `filename` for .backup and .restore, as sqlite3_open_v2() with
@@ -2098,7 +2119,8 @@ pub fn run(gpa: Allocator, io: Io, v: xqlite.vfs.Vfs, path: ?[]const u8, cmds: [
         try err_out.flush();
         return 1;
     };
-    defer _ = sql.main.close(db);
+    // (xqlite.loadext.close(): sql.main.close(), then what .load needed.)
+    defer _ = xqlite.loadext.close(db);
     if (orc != RC.OK) {
         try err_out.print("Error: unable to open database \"{s}\": {s}\n", .{ filename, sql.main.errmsg(db) });
         try err_out.flush();

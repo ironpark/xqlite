@@ -3,7 +3,7 @@
 > SQLite를 Zig로 포팅하고, 그 위에 **SQLite / PostgreSQL / MariaDB(MySQL) / MSSQL / Oracle** 호환 레이어를 얹은 임베디드 데이터베이스
 
 > [!WARNING]
-> 아주 초기 단계 프로젝트입니다. 아래 내용의 상당 부분은 **목표와 설계**이며, 아직 구현되지 않았습니다. API와 파일 포맷은 예고 없이 바뀔 수 있습니다. 지금 되는 것은 [로드맵](#로드맵)을 보세요.
+> 초기 단계 프로젝트입니다. API와 파일 포맷은 예고 없이 바뀔 수 있습니다. 지금 되는 것과 없는 것은 [현재 상태](#현재-상태)에 있습니다.
 
 ## 왜 xqlite인가
 
@@ -13,14 +13,14 @@
 - 서버 DB용으로 작성한 쿼리와 스키마를 로컬/엣지/데스크톱 앱에서 그대로 쓸 수 없습니다.
 - 개발 환경에서 DB 서버 컨테이너를 띄우는 비용이 큽니다.
 
-xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 방언을 그 DB의 의미 그대로** 실행하는 것을 목표로 합니다.
+xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 방언을 그 DB의 의미 그대로** 실행합니다.
 
-## 목표
+## 특징
 
-1. **SQLite의 Zig 포팅**: SQLite의 구조(Pager, B-Tree, VDBE)를 Zig로 다시 구현합니다. C 바인딩이 아니라 순수 Zig 구현입니다.
-2. **SQLite 파일 포맷 호환**: 기존 `.sqlite` / `.db` 파일을 그대로 읽고 씁니다.
+1. **SQLite의 Zig 포팅**: SQLite의 구조(Pager, B-Tree, VDBE)를 Zig로 다시 구현했습니다. C 바인딩이 아니라 순수 Zig 구현입니다.
+2. **SQLite 파일 포맷 호환**: 기존 `.sqlite` / `.db` 파일을 그대로 읽고 씁니다. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 같습니다.
 3. **멀티 방언 SQL**: 연결 단위로 방언을 골라 PostgreSQL, MariaDB, MSSQL, Oracle의 문법과 의미를 따릅니다.
-4. **임베디드 우선**: 별도 프로세스 없이 라이브러리로 링크해 씁니다. 필요하면 와이어 프로토콜 서버(`xqlite serve`)로 띄울 수도 있습니다.
+4. **임베디드 우선**: 별도 프로세스 없이 라이브러리(Zig API, sqlite3 호환 C ABI, WebAssembly)로 씁니다. 와이어 프로토콜 서버(`xqlite serve`)로 띄울 수도 있습니다.
 5. **Zig다운 설계**: 명시적 allocator, comptime을 활용한 방언 특화, 숨은 전역 상태 없음, 크로스 컴파일 지원.
 
 ## 비목표
@@ -79,44 +79,31 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 
 방언은 **연결 단위**로 고릅니다. 데이터는 하나의 SQLite 파일에 저장되고, 방언은 해석 방식만 바꿉니다.
 
-### 방언별 주요 차이
-
-| 항목 | SQLite | PostgreSQL | MariaDB | MSSQL | Oracle |
-| --- | --- | --- | --- | --- | --- |
-| 식별자 인용 | `"x"` `[x]` `` `x` `` | `"x"` | `` `x` `` (`ANSI_QUOTES` 시 `"x"`) | `[x]` `"x"` | `"x"` (인용 없으면 대문자) |
-| 타입 시스템 | 동적 타입 (affinity) | 엄격한 정적 타입 | 정적 타입 + `sql_mode` 의존 | 엄격한 정적 타입 | 정적 타입, `''`는 NULL |
-| 자동 증가 | `INTEGER PRIMARY KEY` | `SERIAL` / `IDENTITY` | `AUTO_INCREMENT` | `IDENTITY(1,1)` | `IDENTITY`, 시퀀스 `s.NEXTVAL` |
-| 페이징 | `LIMIT/OFFSET` | `LIMIT/OFFSET`, `FETCH` | `LIMIT` | `TOP`, `OFFSET…FETCH` | `ROWNUM`, `OFFSET…FETCH` |
-| UPSERT | `ON CONFLICT` | `ON CONFLICT` | `ON DUPLICATE KEY UPDATE` | `MERGE` | `MERGE` |
-| 반환 절 | `RETURNING` | `RETURNING` | `RETURNING` (MariaDB 10.5+) | `OUTPUT` | `RETURNING … INTO` (PL/SQL) |
-| 문자열 연결 | `\|\|` | `\|\|` | `CONCAT()` (`\|\|` = OR) | `+` | `\|\|` (NULL은 건너뜀) |
-| 대소문자 비교 | 기본 구분 (ASCII) | 구분 | collation 의존 (기본 비구분) | collation 의존 (기본 비구분) | 구분 |
-
 ### 타입
 
-서버 DB의 엄격한 타입은 SQLite `STRICT` 테이블 위에 구현합니다. 원래 선언 타입은 `xq_catalog`에 기록하고, 길이·범위 검사는 CHECK 제약으로 내립니다. 그래서 방언으로 만든 DB도 sqlite3가 그대로 열고 `PRAGMA integrity_check`를 통과합니다. 타입별 저장 방식은 방언 문서에 있습니다. SQLite 레코드로 표현할 수 없는 타입(정확한 `NUMERIC(38,10)`, 배열 등)을 위한 확장 레코드 인코딩은 계획만 있습니다.
+서버 DB의 엄격한 타입은 SQLite `STRICT` 테이블 위에 구현합니다. 원래 선언 타입은 `xq_catalog`에 기록하고, 길이·범위 검사는 CHECK 제약으로 내립니다. 그래서 방언으로 만든 DB도 sqlite3가 그대로 열고 `PRAGMA integrity_check`를 통과합니다. 타입별 저장 방식은 방언 문서에 있습니다.
 
 ### 지원 범위
 
 | 기능 | SQLite | PostgreSQL | MariaDB | MSSQL | Oracle |
 | --- | :-: | :-: | :-: | :-: | :-: |
-| DDL / DML 기본 | ✅ | ✅ | ✅ | ✅ `MERGE`, `OUTPUT`, `TOP` | ✅ |
-| 트랜잭션 / 세이브포인트 | ✅ | ✅ | ✅ | ✅ 중첩 `BEGIN TRAN`, `SAVE TRAN` | ✅ |
-| CTE / 재귀 CTE | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 윈도우 함수 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| JSON | ✅ `json1` | ✅ `json`/`jsonb`, 연산자·함수, jsonpath 일부 | ✅ `JSON_*`, `JSON_TABLE` | ✅ `JSON_VALUE`/`QUERY`/`MODIFY`, `OPENJSON`, `FOR JSON` | ✅ `JSON` 타입, SQL/JSON 함수, `JSON_TABLE` |
-| 시퀀스 | — | ✅ | ✅ | ✅ `IDENTITY`, `SEQUENCE` | ✅ |
-| 스키마(네임스페이스) | ✅ `ATTACH` | ✅ `CREATE SCHEMA`, `search_path`, 붙인 DB | ✅ `CREATE DATABASE`, `USE`, `db.t`, 붙인 DB | ✅ `CREATE/DROP/ALTER SCHEMA`, `dbo`, `#temp`, `db.s.t` | ✅ `CREATE USER` (사용자 = 스키마), `CURRENT_SCHEMA`, 붙인 DB |
-| 저장 프로시저 / 함수 | — | 🔬 PL/pgSQL 일부 | 🔬 | 🔬 T-SQL 일부 | 🔬 PL/SQL |
-| 트리거 | ✅ | 🎯 | 🎯 | 🎯 | 🎯 |
-| 메타데이터 카탈로그 | ✅ `sqlite_schema` | 🚧 `information_schema`, `pg_catalog` | 🚧 `information_schema`, `SHOW` | 🚧 `INFORMATION_SCHEMA`, `sys.*` 일부 | 🚧 `USER_*`/`ALL_*` 뷰 |
-| 와이어 프로토콜 | — | 🚧 pgwire v3 (`xqlite serve --pg`) | 🚧 MySQL protocol (`xqlite serve --mysql`) | 🔬 TDS 7.4 | — |
+| DDL / DML 기본 | [x] | [x] | [x] | [x] | [x] |
+| 트랜잭션 / 세이브포인트 | [x] | [x] | [x] | [x] | [x] |
+| CTE / 재귀 CTE | [x] | [x] | [x] | [x] | [x] |
+| 윈도우 함수 | [x] | [x] | [x] | [x] | [x] |
+| JSON | [x] | [x] | [x] | [x] | [x] |
+| 시퀀스 | [ ] | [x] | [x] | [x] | [x] |
+| 스키마(네임스페이스) | [x] | [x] | [x] | [x] | [x] |
+| 메타데이터 카탈로그 | [x] | 🚧 | 🚧 | 🚧 | 🚧 |
+| 트리거 | [x] | [ ] | [ ] | [ ] | [ ] |
+| 저장 프로시저 / 함수 | [ ] | [ ] | [ ] | [ ] | [ ] |
+| 와이어 프로토콜 | [ ] | 🚧 | 🚧 | [ ] | [ ] |
 
-✅ 구현 · 🚧 일부 구현 · 🎯 목표 · 🔬 실험적 / 후순위 · — 해당 없음
+[x] 구현 · 🚧 일부 구현 · [ ] 없음. 방언마다 무엇이 되고 무엇이 다른지는 방언별 문서에 있습니다.
 
 ### 방언별 문서
 
-모든 방언 문서는 **사용 방법**, **지원 기능**, **차이점 및 미지원 사항**, **내부 기술 세부사항**, **검증 및 테스트**의 5개 표준 문서 체계로 일관되게 구성되어 있습니다.
+방언마다 사용 방법, 지원 기능, 차이점, 내부 구현, 검증 문서가 있습니다.
 
 - [SQLite 호환](docs/sqlite/README.md): 호환 수준 및 사용법, 코어 기능, 미지원 제약, 순수 Zig 구현 원리, 교차 검증 도구
 - [PostgreSQL 호환](docs/postgres/README.md): 사용법, 지원 기능 및 카탈로그, PostgreSQL 18과의 차이점, 내부 아키텍처 및 직렬화, 차등 검증
@@ -124,6 +111,7 @@ xqlite는 **하나의 임베디드 스토리지 엔진** 위에서 **여러 SQL 
 - [MSSQL 호환](docs/mssql/README.md): 사용법, T-SQL 지원 기능 및 식 규칙, SQL Server와의 차이점, `MERGE`/`OUTPUT` IR 변환, 교차 검증
 - [Oracle 호환](docs/oracle/README.md): 사용법, 대문자·빈문자열·날짜 등 Oracle 시맨틱, Oracle 23ai와의 차이점, 암묵적 트랜잭션 구현, 실서버 검증
 - [sqlite3용 확장](docs/extension.md): 방언으로 만든 데이터베이스의 엔진 함수와 collation을 sqlite3·Python·Datasette에 올리는 `libxqlite_ext`, 함수 목록, ABI 규칙
+- [확장 로드와 사용](docs/load-extension.md): sqlite-regex 같은 SQLite용 로더블 확장을 셸(`.load`), Zig API, C API에서 올려 쓰는 방법과 예제
 
 ## 빠른 시작
 
@@ -170,7 +158,7 @@ sqlite3_open_v2("file:app.db?dialect=postgres", &db,
 cc app.c -Izig-out/include zig-out/lib/libxqlite3.a -lpthread -lm
 ```
 
-지원하는 함수와 SQLite와 다른 점(멀티스레드 모드, 권한 검사기·확장 로딩·serialize 미지원 등)은 [C API](docs/c-api.md)에 있습니다.
+지원하는 함수와 SQLite와 다른 점(멀티스레드 모드, 권한 검사기·serialize 미지원 등)은 [C API](docs/c-api.md)에 있습니다.
 
 ### sqlite3에서 읽기
 
@@ -203,6 +191,7 @@ zig-out/bin/xqlite sql test.db .dump > test.sql
 | 출력 설정 | `.mode`, `.headers`, `.separator`, `.nullvalue` |
 | 스키마 | `.tables`, `.schema`, `.indexes`, `.dump` |
 | 실행 | `.read`, `.bail`, `.echo`, `.changes`, `.timeout`, `.dbconfig` |
+| 확장 | `.load FILE ?ENTRY?` (SQLite용 로더블 확장, [확장 로드와 사용](docs/load-extension.md)) |
 | 그 밖 | `.dialect`, `.print`, `.show`, `.help`, `.quit`/`.exit` |
 
 ### 서버 실행
@@ -252,7 +241,7 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-전체 API, 값의 수명 규칙, 오류 모델, 확장(사용자 함수, 집계, collation, 가상 테이블)은 [docs/zig-api.md](docs/zig-api.md)에 있습니다. 실행할 수 있는 예제는 `examples/`에 있습니다(`zig build example-basic`, `zig build example-extensions`).
+전체 API, 값의 수명 규칙, 오류 모델, 확장(사용자 함수, 집계, collation, 가상 테이블)은 [docs/zig-api.md](docs/zig-api.md)에 있습니다. 실행할 수 있는 예제는 `examples/`에 있습니다(`zig build example-basic`, `zig build example-extensions`). SQLite용 로더블 확장([sqlite-regex](https://github.com/asg017/sqlite-regex) 등)은 `db.loadExtension("./regex0", null)`로 올리고, 예제는 `examples/extension/`에 Zig와 C로 있습니다([확장 로드와 사용](docs/load-extension.md)).
 
 ## 테스트
 
@@ -271,27 +260,18 @@ zig-out/bin/xqt help                           # 모든 명령과 옵션
 - **sqllogictest**: `xqt slt`
 - **C API**: `zig build test-capi`가 C 프로그램으로 `libxqlite3`를 검사하고, `zig build capi-shell`이 SQLite의 `shell.c`를 링크해 돌립니다.
 - **퍼징**: `xqlite fuzzcheck`(SQLite 퍼즈 코퍼스)와 시드 퍼저(`btree_model`, `btree_corrupt`, `btree_sqlite3`, `ir_roundtrip`)
-- **방언 차등 테스트**: `xqt dialect-diff pg|mariadb|mssql|oracle`이 실제 PostgreSQL 16, MariaDB 11, SQL Server(Azure SQL Edge), Oracle Database 23ai와 결과를 비교합니다.
+- **방언 차등 테스트**: `xqt dialect-diff pg|mariadb|mssql|oracle`이 실제 PostgreSQL 18, MariaDB 11, SQL Server(Azure SQL Edge), Oracle Database 23ai와 결과를 비교합니다.
 - **WebAssembly**: `zig build test-wasi`가 단위 테스트를 wasm32-wasi로 빌드해 wasmtime에서 돌리고, `xqt wasi`로 WASI 빌드를 sqlite3·네이티브 빌드와 비교합니다.
 
 도구별 실행 방법과 필요한 기준 sqlite3 빌드는 [테스트와 검증](docs/testing.md)에 있습니다.
 
-## 로드맵
+## 현재 상태
 
-- [x] **Phase 0 · 기반**: VFS(POSIX·메모리), 페이지 캐시, Pager(롤백 저널), 파일 헤더 파싱. Windows VFS는 아직 없음
-- [x] **WebAssembly**: WASI VFS, 호스트가 파일을 주는 브라우저용 모듈(`xq_*`)과 JavaScript 연결 코드 ([WebAssembly](docs/wasm.md))
-- [x] **Phase 1 · 스토리지**: B-Tree 읽기/쓰기(auto-vacuum·incremental vacuum 포함), 레코드 포맷, 기존 SQLite 파일 읽기/수정
-- [x] **Phase 2 · SQLite SQL**: Lexer/Parser, VDBE, 기본 Planner, `sqlite3` 호환 셸
-- [x] **Phase 3 · 완성도**: 세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`/`DETACH`와 super journal, `ANALYZE`/`PRAGMA optimize`, `VACUUM`/`VACUUM INTO`와 백업 API. sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 모두 통과 ([SQLite 호환](docs/sqlite/README.md))
-- [x] **Phase 4 · 공통 IR**: SQLite 파스 트리와 코드 생성기 진입점을 IR로 삼고 프론트엔드를 분리. 연결 단위 방언 선택, 방언 훅, STRICT 기반 엄격한 타입, `xq_catalog`·`xq_sequence`. SQLite 방언의 결과와 바이트코드는 sqlite3 3.54.1과 같음 ([방언 아키텍처](docs/architecture.md))
-- [x] **Phase 5 · PostgreSQL 방언**: lexer·파서, SELECT·DML 전반, `RETURNING`·`ON CONFLICT`, DDL과 엄격한 타입, `SERIAL`/`IDENTITY`, `information_schema`·`pg_catalog`. PostgreSQL 16과 차등 비교 ([PostgreSQL 호환](docs/postgres/README.md))
-- [x] **Phase 6 · MariaDB 방언**: 토크나이저·파서, 연결 단위 `sql_mode`, `INSERT IGNORE`/`REPLACE`/`ON DUPLICATE KEY UPDATE`, `AUTO_INCREMENT`, MariaDB 타입과 collation, `SHOW`/`information_schema`. MariaDB 11.8과 차등 비교 ([MariaDB 호환](docs/mariadb/README.md))
-- [x] **구문 트리 IR**: 방언 중립 구문 트리와 하나뿐인 lower·render, 모든 방언에서 보이는 엔진 함수와 방언 한정 함수 이름, 카탈로그 기반 identity·DEFAULT. PostgreSQL과 MariaDB 프론트엔드를 옮겨 실행과 저장의 의미가 같아짐 ([방언 아키텍처](docs/architecture.md#render와-lower의-계약))
-- [x] **Phase 7 · MSSQL 방언**: T-SQL 렉서·파서(`[x]`, `N'..'`, `@변수`, `GO`), `TOP`/`OFFSET…FETCH`, `+`의 타입별 해석, `OUTPUT`, `UPDATE/DELETE … FROM`, 한 문장의 `MERGE`, SQL Server 타입과 값 변환, `IDENTITY`/`IDENTITY_INSERT`, 변수, 중첩 트랜잭션, `INFORMATION_SCHEMA`·`sys.*`. SQL Server(Azure SQL Edge)와 차등 비교 ([MSSQL 호환](docs/mssql/README.md))
-- [x] **Phase 8 · Oracle 방언**: 대문자로 접는 식별자, `''` = NULL 규칙(리터럴·`||`·문자열 함수·저장 변환), `DUAL`·`ROWNUM`·`(+)` 외부 조인, `NVL`/`DECODE`/`TO_CHAR`/`TO_DATE`와 날짜 연산, `MERGE`·`INSERT ALL`, Oracle 타입과 identity·시퀀스, BEGIN 없는 암묵적 트랜잭션, `USER_*` 뷰. Oracle Database 23ai와 차등 비교 ([Oracle 호환](docs/oracle/README.md))
-- [ ] **Phase 9 · 서버 모드**: pgwire, MySQL protocol, TDS. 공통 기반(리스너, 세션, 열 타입·오류·명령 분류, 취소, 준비된 문장)과 PostgreSQL 프로토콜 v3(`xqlite serve --pg`: 단순·확장 질의, 이진 형식, 취소, SCRAM-SHA-256), MySQL 프로토콜(`xqlite serve --mysql`: 텍스트·이진 프로토콜, 준비된 문장, KILL)은 있음 ([서버](docs/server.md))
-- [x] **C ABI**: `sqlite3_*` 호환 C ABI(`libxqlite3`, SQLite 3.54.1 헤더), URI 파라미터 `?dialect=`, commit·rollback·update 훅과 진행 처리기. SQLite의 `shell.c`가 그대로 링크되어 돌아감 ([C API](docs/c-api.md))
-- [x] **sqlite3용 확장**: 방언의 엔진 함수·collation·시퀀스 함수를 실제 sqlite3에 등록하는 `libxqlite_ext`, 엔진과 같은 구현, 스키마 함수의 ABI(`xq_ext_version()`, `src/dialect/abi.txt`) ([sqlite3용 확장](docs/extension.md))
+- **엔진**: SQLite 3.54.1의 SQL(세이브포인트, WAL, 윈도우 함수, 가상 테이블, JSON, `ATTACH`, `VACUUM`, 백업 API ...). sqllogictest 전체(스크립트 622개, 테스트 5,939,879개)를 롤백 저널과 WAL 모드에서 통과합니다.
+- **방언**: PostgreSQL, MariaDB, MSSQL, Oracle. PostgreSQL은 PostgreSQL 18의 기록과, 나머지는 실제 서버와 차등 비교합니다.
+- **인터페이스**: Zig API, sqlite3 호환 C ABI(`libxqlite3`), WebAssembly(WASI, 브라우저·Node), sqlite3용 확장(`libxqlite_ext`), `sqlite3` 호환 셸.
+- **서버**: PostgreSQL 프로토콜 v3와 MySQL 프로토콜(`xqlite serve`). TLS와 PostgreSQL의 COPY는 없습니다.
+- **없는 것**: Windows VFS, TDS(SQL Server 프로토콜), 방언의 저장 프로시저·트리거(PL/pgSQL, T-SQL, PL/SQL).
 
 ## 프로젝트 구조
 
@@ -322,9 +302,11 @@ src/
 pkg/
 ├── vfs/                # VFS 패키지 xqlite_vfs: OS 추상화(POSIX·WASI·호스트·메모리·memdb), 크래시 테스트용 VFS
 ├── storage/            # 스토리지 패키지 xqlite_storage: pager/(페이지 캐시, 저널, WAL), btree/, 레코드 포맷
-└── base/               # 공용 패키지 xqlite_base: 콜백 클로저, sqlite3_status() 카운터, 퍼저 도구
+├── base/               # 공용 패키지 xqlite_base: 콜백 클로저, sqlite3_status() 카운터, 퍼저 도구
+├── uuid/               # RFC 9562 UUID 패키지 uuid (std만 씀)
+└── sqllex/             # 방언 렉서가 쓰는 SQL 스캐너 패키지 sqllex (std만 씀)
 docs/                   # 설계·호환성 문서
-examples/               # Zig API 예제, wasm/ (JavaScript 연결 코드, Node·브라우저 예제)
+examples/               # Zig API 예제, extension/ (남의 SQLite 확장을 올리는 C·Zig 예제), wasm/ (JavaScript 연결 코드, Node·브라우저 예제)
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일
 ```
 

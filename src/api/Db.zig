@@ -32,6 +32,9 @@ conn: Conn,
 gpa: Allocator,
 /// The VFS object of `.unix` and `.memory` connections.
 owned_vfs: ?*OwnedVfs,
+/// Frees the C ABI's state of the connection on close, once
+/// loadExtension() gave it some.
+release_ext: ?engine.ReleaseExt = null,
 
 const OwnedVfs = union(enum) {
     unix: OsVfs,
@@ -153,7 +156,9 @@ pub fn close(db: *Db) void {
 /// Close the connection, or fail with error.Busy (leaving it open) if
 /// statements are still unfinalized.
 pub fn tryClose(db: *Db) Error!void {
+    const ext = db.conn.h.capi;
     try db.conn.check(engine.close(db.conn.h));
+    if (ext) |e| if (db.release_ext) |release| release(e);
     if (db.owned_vfs) |o| destroyVfs(db.gpa, o);
     db.* = undefined;
 }
@@ -700,6 +705,28 @@ pub fn settingsVersion(db: *const Db) u32 {
 /// The engine's connection, for the low-level API (`xqlite.sql.*`).
 pub fn raw(db: *Db) *engine.Handle {
     return db.conn.h;
+}
+
+/// Load the SQLite extension library `path` (a `.so`/`.dylib` built
+/// against sqlite3ext.h: sqlite-regex, sqlite-vec ...) into this
+/// connection, as sqlite3_load_extension() does: the suffix may be left
+/// out, and with `entry` null the entry point is sqlite3_extension_init
+/// or the one named after the file (`regex0` → sqlite3_regex_init). What
+/// it registers (functions, collations, virtual tables) is then the
+/// connection's, in every dialect; the library stays loaded until close().
+///
+/// The extension calls back through the sqlite3 C API, so the first call
+/// compiles the C ABI (src/capi) into the program; a program that does
+/// not call this has none of it. Fails with error.Sql and the loader's
+/// message (lastError()) if the library or its entry point cannot be
+/// found or its initialization fails, and always on wasm (no dynamic
+/// loader). See docs/load-extension.md.
+pub fn loadExtension(db: *Db, path: []const u8, entry: ?[]const u8) Error!void {
+    const file = db.gpa.dupeSentinel(u8, path, 0) catch return db.conn.outOfMemory();
+    defer db.gpa.free(file);
+    const proc = if (entry) |e| db.gpa.dupeSentinel(u8, e, 0) catch return db.conn.outOfMemory() else null;
+    defer if (proc) |p| db.gpa.free(p);
+    return db.conn.check(engine.loadExtension(db.conn.h, file, proc, &db.release_ext));
 }
 
 // ============================================================ extensions

@@ -18,6 +18,7 @@
 - [BLOB 증분 I/O](#blob-증분-io)
 - [직렬화](#직렬화)
 - [확장 지점](#확장-지점)
+- [로더블 확장](#로더블-확장)
 - [C API 대응](#c-api-대응)
 - [아직 없는 것](#아직-없는-것)
 
@@ -86,6 +87,7 @@ fn renameAll(db: *xqlite.Db, prefix: []const u8) !void {
 zig build example-basic                # examples/basic.zig, 메모리 DB
 zig build example-basic -- notes.db    # 파일 DB
 zig build example-extensions           # examples/extensions.zig
+zig build example-sqlite-regex -- ./regex0   # examples/extension/sqlite_regex.zig, 받은 sqlite-regex를 올림
 zig build examples                     # 예제 빌드만
 ```
 
@@ -93,6 +95,7 @@ zig build examples                     # 예제 빌드만
 | --- | --- |
 | `examples/basic.zig` | open, DDL, 바인딩한 INSERT, 타입 있는 질의, 트랜잭션, `Diagnostics`와 오류 정보 |
 | `examples/extensions.zig` | 스칼라 함수, 집계(윈도우) 함수, collation, 테이블 값 함수 |
+| `examples/extension/sqlite_regex.zig` | 로더블 확장 [sqlite-regex](https://github.com/asg017/sqlite-regex) 올리기(`loadExtension()`)와 쓰기 |
 
 ## 계층 구조
 
@@ -381,6 +384,19 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 - 그 밖의 제약은 엔진이 행을 받은 뒤 걸러 냅니다.
 - 같은 모듈을 `CREATE VIRTUAL TABLE t USING name(args)`로도, eponymous 테이블로도 쓸 수 있습니다.
 
+## 로더블 확장
+
+SQLite용 로더블 확장(sqlite-regex, sqlite-vec ...)은 `Db.loadExtension(path, entry)`로 올립니다. 확장자는 생략해도 되고, `entry`가 null이면 진입점을 파일 이름에서 찾습니다(`regex0` → `sqlite3_regex_init`).
+
+```zig
+db.loadExtension("./regex0", null) catch |err| {
+    std.debug.print("{s}\n", .{db.lastError().?.message}); // 라이브러리·진입점이 없거나 초기화가 실패한 이유
+    return err; // error.Sql
+};
+```
+
+확장이 등록한 함수와 가상 테이블은 그 연결의 것이고, 라이브러리는 `close()`까지 올라가 있습니다. 확장은 sqlite3 C API로 xqlite를 부르므로 `loadExtension()`을 쓰는 프로그램에는 C ABI가 함께 빌드됩니다(쓰지 않으면 들어가지 않음). wasm에서는 늘 실패합니다. 자세한 것과 예제(`examples/extension/sqlite_regex.zig`)는 [확장 로드와 사용](load-extension.md)에 있습니다.
+
 ## C API 대응
 
 | C | Zig |
@@ -418,6 +434,7 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | `sqlite3_backup_remaining/pagecount` | `Backup.remaining`, `Backup.pageCount` |
 | `sqlite3_blob_open/read/write/bytes/reopen/close` | `Db.openBlob`, `BlobHandle.read`, `write`, `bytes`, `reopen`, `close` |
 | `sqlite3_serialize`, `sqlite3_deserialize` | `Db.serialize`, `Db.deserialize` |
+| `sqlite3_load_extension` | `Db.loadExtension(path, entry)` ([로더블 확장](#로더블-확장)) |
 | (그 밖의 모든 것) | `db.raw()` / `stmt.raw()`로 엔진 핸들을 꺼내 `xqlite.sql.*` 저수준 API 사용 |
 
 진짜 C 함수가 필요하면 [C API](c-api.md)(`libxqlite3`)를 링크하세요. 위 표는 Zig API가 무엇에 해당하는지를 보여 줍니다.

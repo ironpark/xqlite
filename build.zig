@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
         // engineImports().
         .imports = engineImports(b, target, optimize),
     });
+    linkCapiC(b, mod, target, optimize, buildConfig(b).hasExt("carray"));
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -178,11 +179,14 @@ pub fn build(b: *std.Build) void {
     // example-<name>` runs one (arguments after `--`), `zig build examples`
     // builds them all.
     const examples_step = b.step("examples", "Build the example programs");
-    inline for (.{ "basic", "extensions" }) |name| {
+    // examples/extension/sqlite_regex.zig loads a library that is not part
+    // of the build (docs/load-extension.md): `-- PATH` of it.
+    inline for (.{ .{ "basic", "basic" }, .{ "extensions", "extensions" }, .{ "sqlite-regex", "extension/sqlite_regex" } }) |e| {
+        const name = e[0];
         const example = b.addExecutable(.{
             .name = "example-" ++ name,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/" ++ name ++ ".zig"),
+                .root_source_file = b.path("examples/" ++ e[1] ++ ".zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "xqlite", .module = mod }},
@@ -191,7 +195,7 @@ pub fn build(b: *std.Build) void {
         examples_step.dependOn(&b.addInstallArtifact(example, .{}).step);
         const run_example = b.addRunArtifact(example);
         run_example.addPassthruArgs();
-        b.step("example-" ++ name, "Run examples/" ++ name ++ ".zig").dependOn(&run_example.step);
+        b.step("example-" ++ name, "Run examples/" ++ e[1] ++ ".zig").dependOn(&run_example.step);
     }
 
     // The reference sqlite3 shells and SQLite's sources (sqliteRef()).
@@ -200,7 +204,8 @@ pub fn build(b: *std.Build) void {
     // and its tests. See addCapi() and docs/c-api.md.
     // `zig build ext`: the loadable extension (addExt()).
     const ext = addExt(b, target, optimize);
-    const capi = addCapi(b, target, optimize, sqlite_ref, ext.lib);
+    const capi = addCapi(b, target, optimize, sqlite_ref, ext.lib, mod);
+    if (!target.result.cpu.arch.isWasm()) examples_step.dependOn(&b.addInstallArtifact(capi.c_example, .{}).step);
     // `zig build wasm`: the WebAssembly module for JavaScript hosts
     // (src/wasm/api.zig, wasm32-freestanding, no libc) in zig-out/wasm,
     // whatever -Dtarget is; ReleaseSmall unless -Dwasm-optimize says
@@ -371,25 +376,28 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = engineImports(b, wasi_target, optimize),
     });
+    linkCapiC(b, wasi_mod, wasi_target, optimize, buildConfig(b).hasExt("carray"));
     const wasi_exe_mod = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
         .target = wasi_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "xqlite", .module = wasi_mod }},
     });
+    const wasi_safe_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasi_target,
+        .optimize = .safe,
+        .link_libc = true,
+        .imports = engineImports(b, wasi_target, .safe),
+    });
+    linkCapiC(b, wasi_safe_mod, wasi_target, .safe, buildConfig(b).hasExt("carray"));
     const wasi_safe_exe = b.addExecutable(.{
         .name = "xqlite",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/cli/main.zig"),
             .target = wasi_target,
             .optimize = .safe,
-            .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
-                .root_source_file = b.path("src/root.zig"),
-                .target = wasi_target,
-                .optimize = .safe,
-                .link_libc = true,
-                .imports = engineImports(b, wasi_target, .safe),
-            }) }},
+            .imports = &.{.{ .name = "xqlite", .module = wasi_safe_mod }},
         }),
     });
     const test_wasi_step = b.step("test-wasi", "Run the unit tests and `xqt wasi` on wasm32-wasi under wasmtime");
@@ -430,17 +438,19 @@ pub fn build(b: *std.Build) void {
     if (check_fast) check_step.dependOn(capi.fast_step);
     check_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = xqt_exe.root_module })).step);
     // The engine with no dialect but SQLite's and no extension.
+    const minimal_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = engineImportsWith(b, target, optimize, minimalConfigModule(b)),
+    });
+    linkCapiC(b, minimal_mod, target, optimize, false);
     const minimal_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tools/minimal_test.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "xqlite", .module = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = engineImportsWith(b, target, optimize, minimalConfigModule(b)),
-        }) }},
+        .imports = &.{.{ .name = "xqlite", .module = minimal_mod }},
     }) });
     const minimal_run = b.addRunArtifact(minimal_tests);
     check_step.dependOn(&minimal_run.step);
@@ -497,6 +507,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = engineImportsWith(b, target, optimize, cfg.module),
             });
+            linkCapiC(b, m, target, optimize, cfg.hasExt("carray"));
             const sm = b.createModule(.{
                 .root_source_file = b.path("src/server/root.zig"),
                 .target = target,
@@ -608,7 +619,7 @@ pub fn build(b: *std.Build) void {
 /// script; `zig build capi-fast` runs the C test and tools/capi/bench.c
 /// on the ReleaseFast static library several times. Returns the
 /// test-capi and capi-fast steps.
-fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_ref: ?SqliteRef, xqlite_ext: ?*std.Build.Step.Compile) struct { test_step: *std.Build.Step, fast_step: *std.Build.Step, ext_test: *std.Build.Step.Compile } {
+fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sqlite_ref: ?SqliteRef, xqlite_ext: ?*std.Build.Step.Compile, zig_mod: *std.Build.Module) struct { test_step: *std.Build.Step, fast_step: *std.Build.Step, ext_test: *std.Build.Step.Compile, c_example: *std.Build.Step.Compile } {
     const enabled = b.option(bool, "capi", "Build and install the C libraries (libxqlite3) with `zig build` (default: true)") orelse true;
     const name = b.option([]const u8, "capi-name", "Base name of the C libraries: lib<name>.a, lib<name>.so/.dylib (default: xqlite3; sqlite3 for a drop-in libsqlite3)") orelse "xqlite3";
     // The amalgamation's files, from the `sqlite` dependency unless given.
@@ -670,6 +681,23 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     ext.root_module.addIncludePath(b.path("include"));
     for ([_]*std.Build.Step.Compile{ static, shared }, [_][]const u8{ "static", "shared" }) |lib, kind| {
         test_step.dependOn(&capiTestRun(b, target, optimize, b.fmt("capi-test-{s}", .{kind}), lib, ext, xqlite_ext).step);
+    }
+    // Db.loadExtension() (the Zig API, through src/capi/bridge.zig) with
+    // the same test extension: tools/capi/zig_load_test.zig.
+    if (!target.result.cpu.arch.isWasm()) {
+        const zig_load = b.addExecutable(.{
+            .name = "capi-zig-load-test",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/capi/zig_load_test.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "xqlite", .module = zig_mod }},
+            }),
+        });
+        const run_zig_load = b.addRunArtifact(zig_load);
+        run_zig_load.addArtifactArg(ext);
+        run_zig_load.expectExitCode(0);
+        test_step.dependOn(&run_zig_load.step);
     }
 
     // The C test and an insert benchmark (tools/capi/bench.c) on the
@@ -758,7 +786,23 @@ fn addCapi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         shell_step.dependOn(&run_shell.step);
     }
 
-    return .{ .test_step = test_step, .fast_step = fast_step, .ext_test = ext };
+    // A C example on libxqlite3 (examples/extension/sqlite_regex.c): a third-party
+    // extension, sqlite-regex, loaded with sqlite3_load_extension(). `zig
+    // build example-sqlite-regex-c -- ./regex0` runs it; the library is not
+    // part of the build (docs/load-extension.md).
+    const regex_example = b.addExecutable(.{
+        .name = "example-sqlite-regex-c",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    regex_example.root_module.addCSourceFile(.{ .file = b.path("examples/extension/sqlite_regex.c"), .flags = &.{"-std=c99"} });
+    regex_example.root_module.addIncludePath(b.path("include"));
+    regex_example.root_module.linkLibrary(static);
+    const run_regex_example = b.addRunArtifact(regex_example);
+    run_regex_example.addPassthruArgs();
+    run_regex_example.has_side_effects = true;
+    b.step("example-sqlite-regex-c", "Run examples/extension/sqlite_regex.c on libxqlite3 (-- PATH of sqlite-regex's regex0 library)").dependOn(&run_regex_example.step);
+
+    return .{ .test_step = test_step, .fast_step = fast_step, .ext_test = ext, .c_example = regex_example };
 }
 
 /// The loadable extension (src/loadable.zig, docs/extension.md):
@@ -792,6 +836,25 @@ fn extLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 }
 
 /// libxqlite3 (src/capi.zig) of configuration `cfg`.
+/// The C part of the C ABI (src/capi/varargs.c, loadext.c: the variadic
+/// functions, sqlite3_mutex and the sqlite3_api_routines table) as a
+/// static library of engine module `m`. Db.loadExtension() and the
+/// shell's .load compile the C ABI into a program (src/capi/bridge.zig)
+/// and need it; a program that loads nothing uses none of its objects.
+/// None on wasm32-freestanding, which has no C library and no loader.
+fn linkCapiC(b: *std.Build, m: *std.Build.Module, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, carray: bool) void {
+    if (t.result.os.tag == .freestanding) return;
+    // No UBSan: the engine module goes into programs of other optimize
+    // modes (a ReleaseSafe CLI on a Debug module), without its runtime.
+    const cm = b.createModule(.{ .target = t, .optimize = o, .link_libc = true, .pic = true, .sanitize_c = .off });
+    cm.addIncludePath(b.path("include"));
+    cm.addCSourceFile(.{ .file = b.path("src/capi/varargs.c"), .flags = &.{"-std=c99"} });
+    cm.addCSourceFile(.{ .file = b.path("src/capi/loadext.c"), .flags = if (carray) &.{"-std=c99"} else &.{ "-std=c99", "-DXQ_OMIT_CARRAY" } });
+    m.linkLibrary(b.addLibrary(.{ .name = "xqlite_capi_c", .linkage = .static, .root_module = cm }));
+    // dlopen(), in libdl before glibc 2.34.
+    if (t.result.os.tag == .linux) m.linkSystemLibrary("dl", .{});
+}
+
 fn capiLib(b: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.OptimizeMode, n: []const u8, linkage: std.builtin.LinkMode, cfg: Config) *std.Build.Step.Compile {
     const m = b.createModule(.{
         .root_source_file = b.path("src/capi.zig"),

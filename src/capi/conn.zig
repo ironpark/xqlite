@@ -145,7 +145,7 @@ pub export fn sqlite3_open16(z_filename: ?*const anyopaque, pp_db: ?*?*Handle) c
 
 // ================================================================= close
 
-fn freeExt(e: *Ext) void {
+pub fn freeExt(e: *Ext) void {
     for (e.colls.items) |w| func.CollWrap.destroy(w);
     e.colls.deinit(c.gpa);
     for (e.clientdata.items) |cd| {

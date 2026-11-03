@@ -545,7 +545,7 @@ wasm 경로는 `--wasm`, `XQ_WASM`, 기본값 `zig-out/bin/xqlite.wasm` 순으�
 
 ## C API
 
-`zig build test-capi`(`zig build check`에 포함)는 `tools/capi/capi_test.c`를 `include/sqlite3.h`와 함께 컴파일해 정적·공유 `libxqlite3`에 각각 링크하고 돌립니다. 인자로 테스트용 확장(`tools/capi/ext_test.c`)과 sqlite3용 확장(`libxqlite_ext`)을 받아, 둘 다 `sqlite3_load_extension()`으로 올려 봅니다(`test_b_ext()`, `test_b_xqlite_ext()`). 실패한 검사를 출력하고 0이 아닌 코드로 끝납니다. 이 프로그램은 SQLite 아말감에 링크해도 xqlite 확장과 문서에 적은 차이 말고는 모두 통과하므로, 기대값은 SQLite의 동작입니다.
+`zig build test-capi`(`zig build check`에 포함)는 `tools/capi/capi_test.c`를 `include/sqlite3.h`와 함께 컴파일해 정적·공유 `libxqlite3`에 각각 링크하고 돌립니다. 인자로 테스트용 확장(`tools/capi/ext_test.c`)과 sqlite3용 확장(`libxqlite_ext`)을 받아, 둘 다 `sqlite3_load_extension()`으로 올려 봅니다(`test_b_ext()`, `test_b_xqlite_ext()`). 같은 테스트용 확장을 Zig API의 `Db.loadExtension()`으로도 올립니다(`tools/capi/zig_load_test.zig`: 함수·집계 호출, PostgreSQL 방언, 없는 파일·진입점·초기화 실패의 오류, 꺼진 SQL 함수 `load_extension()`). 실패한 검사를 출력하고 0이 아닌 코드로 끝납니다. 이 프로그램은 SQLite 아말감에 링크해도 xqlite 확장과 문서에 적은 차이 말고는 모두 통과하므로, 기대값은 SQLite의 동작입니다.
 
 ```sh
 zig cc -std=gnu99 -Iinclude -DSQLITE_ENABLE_COLUMN_METADATA tools/capi/capi_test.c xqstub.c "$AMALGAMATION/sqlite3.c" -lpthread -lm

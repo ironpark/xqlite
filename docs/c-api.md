@@ -108,6 +108,7 @@ src/capi/printf.zig    mprintf 계열과 sqlite3_str (엔진의 printf 위)
 src/capi/varargs.c     가변 인자 함수(printf, config, db_config ...)와 sqlite3_mutex
 src/capi/loadext.zig   load_extension, enable_load_extension, 기본 VFS의 xDlOpen/xDlSym/xDlError/xDlClose
 src/capi/loadext.c     확장에 넘기는 sqlite3_api_routines 표 (loadext.c의 표 그대로)
+src/capi/bridge.zig    C ABI가 열지 않은 연결(Zig API, 셸)에 확장을 올리는 입구 (xqlite.loadext)
 src/capi/carray.zig    carray_bind(_v2)
 src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 ```
@@ -161,15 +162,9 @@ src/ext/carray.zig     carray() 테이블 값 함수 (엔진 가상 테이블)
 
 ## 확장
 
-**로드 가능한 확장.** `sqlite3_load_extension()`은 SQLite의 `loadext.c`를 옮긴 것입니다.
+**로드 가능한 확장.** `sqlite3_load_extension()`, SQL 함수 `load_extension()`, `sqlite3_auto_extension()`으로 `sqlite3ext.h`로 빌드한 확장을 고치지 않고 올립니다. 같은 로더를 Zig API(`Db.loadExtension()`)와 셸(`.load`)도 씁니다. 사용법과 예제는 [확장 로드와 사용](load-extension.md)에 있습니다.
 
-- 연결의 VFS의 `xDlOpen`/`xDlSym`/`xDlError`/`xDlClose`로 공유 라이브러리를 엽니다. 기본 VFS는 `dlopen(RTLD_NOW|RTLD_GLOBAL)`, C VFS는 그 VFS의 메서드입니다. 이름 그대로 열리지 않으면 `.dylib`(macOS)나 `.so`를 붙여 다시 해 봅니다.
-- 진입점을 주지 않으면 `sqlite3_extension_init`, 그다음 파일 이름에서 만든 `sqlite3_<이름>_init`을 찾습니다(`libExample5.so` → `sqlite3_example_init`, 그다음 `sqlite3_example5_init`).
-- 진입점은 SQLite와 같은 순서의 `sqlite3_api_routines` 표(`src/capi/loadext.c`)를 받으므로, `sqlite3ext.h`로 빌드한 확장이 고치지 않고 동작합니다. SQLite 기본 빌드가 NULL로 두는 칸(`SQLITE_ENABLE_COLUMN_METADATA`의 `column_database_name` 등, `unlock_notify`, `normalized_sql`)은 NULL입니다. `sqlite3_auto_extension()`의 진입점도 같은 표를 받습니다.
-- 오류 메시지는 SQLite와 같습니다: 꺼져 있으면 `not authorized`, 열지 못하거나 진입점이 없으면 동적 로더의 메시지(`dlerror()`; 없으면 `unable to open shared library [X]`, `no entry point [X] in shared library [Y]`), 진입점이 실패하면 `error during initialization: ...`. SQLite처럼 `sqlite3_errmsg()`에는 남기지 않습니다.
-- `sqlite3_enable_load_extension()`은 C 함수와 SQL 함수 `load_extension()`을 함께 켜고, `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION`은 C 함수만 켭니다.
-- 진입점이 `SQLITE_OK_LOAD_PERMANENTLY`를 돌려주면 라이브러리를 닫지 않습니다. 나머지는 연결을 닫을 때(그 함수·collation·모듈을 모두 정리한 뒤) `xDlClose`로 닫습니다.
-- WebAssembly에는 동적 로더가 없어 `xDlOpen`이 늘 실패합니다. Zig API(엔진만 쓸 때)의 SQL 함수 `load_extension()`은 넘길 표가 없으므로, 켜져 있어도 "extension loading is not supported"로 실패합니다.
+이 절의 나머지는 xqlite가 직접 가진 확장입니다.
 
 **sqlite3용 확장.** 방향이 반대인 것도 있습니다. `zig build ext`의 `libxqlite_ext`는 방언으로 만든 데이터베이스의 엔진 함수와 collation을 실제 sqlite3에 등록하는 로더블 확장입니다([sqlite3용 확장](extension.md)). `sqlite3ext.h`로 빌드되어 `libxqlite3`에도 그대로 올라갑니다(`capi_test.c`의 `test_b_xqlite_ext()`). 진입점은 `sqlite3_xqliteext_init`(파일 이름에서 만든 이름)과 `sqlite3_extension_init`입니다.
 

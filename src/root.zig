@@ -127,6 +127,12 @@ pub const sql = struct {
     pub const randomness = @import("sql/func/func.zig").randomness;
 };
 
+/// Loading SQLite extension libraries into a connection the engine
+/// opened (Db.loadExtension(), the shell's .load), with the C ABI's
+/// loader: `load()`, and `close()` in place of sql.main.close(). Using it
+/// compiles the C ABI into the program (src/capi/bridge.zig).
+pub const loadext = @import("capi/bridge.zig");
+
 /// What the engine is built with (`zig build -Ddialects=... -Dext=...`):
 /// `dialect_<name>` and `ext_<name>` bools.
 pub const config = @import("xqlite_config");

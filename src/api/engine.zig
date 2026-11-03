@@ -87,6 +87,28 @@ pub fn close(h: *Handle) Error!void {
     return int.check(main_mod.close(h));
 }
 
+/// Frees the C ABI's state of a connection after the engine closed it
+/// (src/capi/bridge.zig's release()).
+pub const ReleaseExt = *const fn (*anyopaque) void;
+
+/// sqlite3_load_extension() of `file` (entry point `proc`, null for the
+/// default) into `h`, with the C ABI's loader (src/capi/bridge.zig): only
+/// a program that calls this compiles the C ABI in. `release` receives
+/// what frees the state the load gives the connection, to call with
+/// Handle.capi once it is closed (set even if the load fails). On
+/// wasm32-freestanding, without a C library, there is no loader.
+pub fn loadExtension(h: *Handle, file: [:0]const u8, proc: ?[:0]const u8, release: *?ReleaseExt) Error!void {
+    if (comptime @import("builtin").os.tag == .freestanding) {
+        main_mod.errorWithMsg(h, int.RC.ERROR, "extension loading is not supported", .{});
+        return int.check(int.RC.ERROR);
+    } else {
+        const bridge = @import("../capi/bridge.zig");
+        const rc = bridge.load(h, file, proc);
+        if (h.capi != null) release.* = bridge.release;
+        return int.check(rc);
+    }
+}
+
 /// sqlite3_exec() without a callback.
 pub fn exec(h: *Handle, sql: []const u8) Error!void {
     return int.check(legacy.exec(h, sql, null, null, null));

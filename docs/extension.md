@@ -4,6 +4,8 @@ xqlite가 방언으로 만든 데이터베이스는 SQLite 파일입니다. 그�
 
 `libxqlite_ext`는 같은 Zig 소스로 만든 SQLite 로더블 확장입니다. 실제 sqlite3 연결에 스키마 텍스트가 부를 수 있는 엔진 함수와 collation을 모두 등록하고, 뜻은 xqlite와 같습니다(같은 구현을 부르므로). 확장을 올린 sqlite3는 그런 데이터베이스를 읽고 쓰고 `PRAGMA integrity_check`로 검사할 수 있습니다.
 
+반대 방향, 곧 남의 SQLite 확장을 xqlite에 올려 쓰는 것은 [확장 로드와 사용](load-extension.md)에 있습니다.
+
 ## 목차
 
 - [빌드](#빌드)

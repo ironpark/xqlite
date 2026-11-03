@@ -92,6 +92,11 @@ pub const Lexer = struct {
     /// where.
     err: ErrorFields = .{ .message = "" },
     err_pos: usize = 0,
+    /// The SQLSTATE of the last error if it is not a syntax error.
+    err_state: ?@import("../../sql/sqlite_int.zig").ErrorState = null,
+    /// standard_conforming_strings: off, '...' strings take backslash
+    /// escapes (as E'...'), and U&'...' is an error.
+    standard_strings: bool = true,
 
     pub fn init(arena: std.mem.Allocator, src: [:0]const u8, pos: usize) Lexer {
         return .{ .src = src, .pos = pos, .arena = arena };
@@ -181,7 +186,7 @@ pub const Lexer = struct {
                 if (isDigit(s[start + 1])) return l.number();
                 return l.single(.dot);
             },
-            '\'' => return l.string(start, start, false),
+            '\'' => return l.string(start, start, !l.standard_strings),
             '"' => return l.quotedIdent(),
             '$' => {
                 if (isDigit(s[start + 1])) {
@@ -197,12 +202,20 @@ pub const Lexer = struct {
             '0'...'9' => return l.number(),
             else => {},
         }
-        if ((c == 'u' or c == 'U') and s[start + 1] == '&' and (s[start + 2] == '\'' or s[start + 2] == '"')) return l.unicodeLiteral(start);
+        if ((c == 'u' or c == 'U') and s[start + 1] == '&' and (s[start + 2] == '\'' or s[start + 2] == '"')) {
+            if (s[start + 2] == '\'' and !l.standard_strings) {
+                const err = l.fail(start, "unsafe use of string constant with Unicode escapes", .{});
+                l.err.detail = "String constants with Unicode escapes cannot be used when \"standard_conforming_strings\" is off.";
+                l.err_state = .of("0A000");
+                return err;
+            }
+            return l.unicodeLiteral(start);
+        }
         if (isIdentStart(c)) {
             // E'...', N'...' (one letter right before a quote).
             if (s[start + 1] == '\'') {
                 if (c == 'e' or c == 'E') return l.string(start, start + 1, true);
-                if (c == 'n' or c == 'N') return l.string(start, start + 1, false);
+                if (c == 'n' or c == 'N') return l.string(start, start + 1, !l.standard_strings);
             }
             var e = start;
             var lower = true;

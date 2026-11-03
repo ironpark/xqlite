@@ -38,6 +38,7 @@ const operand = @import("../operand.zig");
 const TK = int.TK;
 const Expr = int.Expr;
 const Ctx = typing.Ctx;
+const Logical = @import("../../../sql/types.zig").Logical;
 const Error = typing.Error;
 const Type = @import("../../../sql/types.zig").Type;
 const expr_mod = @import("../../../sql/expr.zig");
@@ -82,7 +83,7 @@ fn reprOf(c: *const Ctx, e: *const Expr, depth: u8) Repr {
             var buf: [64]u8 = undefined;
             const n = nameOf(e, &buf);
             if (std.mem.eql(u8, n, "xq_dec_key")) return .pure;
-            if (key_functions.has(n)) return .key;
+            if (keyFunction(n)) return .key;
             // min() and max() of keys.
             if ((std.mem.eql(u8, n, "min") or std.mem.eql(u8, n, "max")) and args(e).len == 1) return reprOf(c, args(e)[0].expr.?, depth + 1);
         },
@@ -126,14 +127,12 @@ fn columnRepr(c: *const Ctx, e: *const Expr, depth: u8) Repr {
     return .unknown;
 }
 
-/// The functions whose result is a key (decimal_sql.zig's, and PostgreSQL's
-/// of numerics made them).
-const key_functions = std.StaticStringMap(void).initComptime(.{
-    .{"xq_dec"},           .{"xq_dec_add"},  .{"xq_dec_sub"},        .{"xq_dec_mul"},   .{"xq_dec_div"},
-    .{"xq_dec_mod"},       .{"xq_dec_neg"},  .{"xq_dec_abs"},        .{"xq_dec_ceil"},  .{"xq_dec_floor"},
-    .{"xq_dec_div_trunc"}, .{"xq_dec_sign"}, .{"xq_dec_trim_scale"}, .{"xq_dec_round"}, .{"xq_dec_trunc"},
-    .{"xq_dec_sum"},       .{"xq_dec_avg"},
-});
+/// Whether the result of the function `n` is a key (decimal_sql.zig's;
+/// PostgreSQL's of numerics are made them).
+fn keyFunction(n: []const u8) bool {
+    const i = decimal_sql.info(n) orelse return false;
+    return i.key;
+}
 
 /// Whether `e` is a numeric literal: a decimal (TK_FLOAT) or an integer
 /// beyond 64 bits, or one negated.
@@ -468,7 +467,7 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
         x.xq_type = typing.plain(.text);
         return true;
     }
-    if (std.mem.startsWith(u8, n, "xq_dec") or key_functions.has(n)) return false;
+    if (std.mem.startsWith(u8, n, "xq_dec")) return false;
     const renamed: ?[]const u8 = blk: {
         if (items.len == 0) break :blk null;
         const first = isNum(c, items[0]);
@@ -482,6 +481,9 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
         if (eql(n, "scale") and items.len == 1) break :blk "xq_dec_scale";
         if (eql(n, "min_scale") and items.len == 1) break :blk "xq_dec_min_scale";
         if (eql(n, "trim_scale") and items.len == 1) break :blk "xq_dec_trim_scale";
+        if (eql(n, "log") and items.len == 2) break :blk "xq_dec_log";
+        if (eql(n, "width_bucket") and items.len == 4 and numericArgs(c, items[0..3])) break :blk "xq_dec_width_bucket";
+        if (transcendentals.get(n)) |t| if (items.len == t[1] and numericArgs(c, items)) break :blk t[0];
         if (e.op == TK.AGG_FUNCTION or e.isWindowFunc()) {
             const l = logical(c, items[0].expr.?);
             if (eql(n, "sum") and items.len == 1 and (l == .numeric or l == .int8)) break :blk "xq_dec_sum";
@@ -501,8 +503,8 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
         break :blk null;
     };
     if (renamed) |r| {
-        // The value (the first argument; both of mod() and div()) exact.
-        const exact: usize = if (eql(r, "xq_dec_mod") or eql(r, "xq_dec_div_trunc")) 2 else 1;
+        // Its numeric arguments (decimal_sql.zig's Info.numerics) exact.
+        const exact: usize = decimal_sql.info(r).?.numerics;
         for (items[0..@min(exact, items.len)]) |item| _ = try exactOperand(c, item.expr.?);
         try c.rename(e, r);
         return true;
@@ -542,6 +544,42 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
         }
     }
     return changed;
+}
+
+/// sqrt() ... of numerics (decimal_math.zig), the engine function and the
+/// arguments.
+const transcendentals = std.StaticStringMap(struct { []const u8, usize }).initComptime(.{
+    .{ "sqrt", .{ "xq_dec_sqrt", 1 } }, .{ "exp", .{ "xq_dec_exp", 1 } },   .{ "ln", .{ "xq_dec_ln", 1 } },
+    .{ "log", .{ "xq_dec_log", 1 } },   .{ "log10", .{ "xq_dec_log", 1 } }, .{ "power", .{ "xq_dec_power", 2 } },
+    .{ "pow", .{ "xq_dec_power", 2 } },
+});
+
+/// Which of PostgreSQL's sqrt() ... and width_bucket() arguments of
+/// these types call (typing.zig's transcendental() too): the numeric one
+/// (decimal_math.zig) if one is a numeric and none a double precision or
+/// a real (the numeric candidate matches more of them exactly; a float
+/// makes it the float8 one), else the float8 one.
+pub const Candidate = struct {
+    numeric: bool = false,
+    float: bool = false,
+
+    pub fn arg(ch: *Candidate, l: Logical) void {
+        switch (l) {
+            .numeric => ch.numeric = true,
+            .float8, .float4 => ch.float = true,
+            else => {},
+        }
+    }
+
+    pub fn isNumeric(ch: Candidate) bool {
+        return ch.numeric and !ch.float;
+    }
+};
+
+fn numericArgs(c: *const Ctx, items: []const int.ExprListItem) bool {
+    var ch: Candidate = .{};
+    for (items) |item| ch.arg(logical(c, item.expr.?));
+    return ch.isNumeric();
 }
 
 /// The engine functions that take numerics as they are, or whose

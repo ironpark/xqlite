@@ -1,7 +1,7 @@
 //! PostgreSQL's system catalogs, made from the schema in memory: the rows
 //! of pg_namespace, pg_class, pg_attribute, pg_type, pg_index,
 //! pg_constraint, pg_attrdef, pg_proc, pg_sequence and pg_depend, as
-//! PostgreSQL 16 would have them for the objects of the connection's
+//! PostgreSQL 18 would have them for the objects of the connection's
 //! databases (main and its CREATE SCHEMA schemas, temp as pg_temp_1, an
 //! attached database as the schema of its name).
 //!
@@ -29,18 +29,22 @@
 //! a database stays SQLite's, and sqlite3 never sees these names.
 //!
 //! OIDs. The built-in objects have PostgreSQL's (int4 23, pg_catalog 11,
-//! public 2200, the pg_class relation 1259). An object of a database is
-//! numbered by a hash of what names it (its database and SQLite name, a
-//! constraint's table and name ...) into [16384, 2^31): no catalog row
-//! is written for it, whoever made it (sqlite3, another dialect), and it
-//! keeps its number across connections, VACUUM (which renumbers
+//! public 2200, the pg_class relation 1259), and the system relations
+//! are in the catalogs as PostgreSQL 18 has them (system, syscatalog.zig).
+//! An object of a database is numbered by a hash of what names it (its
+//! database and SQLite name, a constraint's table and name ...) into
+//! [16384, 100000), five digits as PostgreSQL's first OIDs: no catalog
+//! row is written for it, whoever made it (sqlite3, another dialect),
+//! and it keeps its number across connections, VACUUM (which renumbers
 //! sqlite_schema's rowids), the creation and dropping of other objects
-//! and restarts, unlike a numbering by position. Two keys of one catalog
-//! that hash to one number are told apart in the order of their keys
-//! (the later takes the next free number), so the numbering of a set of
-//! objects is a function of that set. A renamed object takes a new
-//! number (PostgreSQL keeps it), and a collision is resolved again when
-//! a colliding object comes or goes.
+//! and restarts, unlike a numbering by position. Of keys of one catalog
+//! that hash to one number the smallest keeps it, and the others take a
+//! number of a second hash into [100000, 2^31) in the order of their
+//! keys (assign()): the numbering of a set of objects is a function of
+//! that set, and an object no other collides with has the number of its
+//! key alone. A renamed object takes a new number (PostgreSQL keeps it),
+//! and a collision is resolved again when a colliding object comes or
+//! goes.
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
@@ -70,26 +74,11 @@ fn eql(a: []const u8, b: []const u8) bool {
 pub const oid_pg_catalog: u32 = 11;
 pub const oid_pg_toast: u32 = 99;
 pub const oid_public: u32 = 2200;
-pub const oid_information_schema: u32 = 13183;
+pub const oid_information_schema: u32 = 13327;
 pub const oid_superuser: u32 = 10;
 pub const oid_default_collation: u32 = 100;
 pub const oid_c_collation: u32 = 950;
 pub const first_user_oid: u32 = 16384;
-
-/// The built-in relations a reg* cast knows by name ('pg_class'::regclass
-/// is 1259), PostgreSQL's numbers.
-pub const builtin_relations = [_]struct { u32, []const u8 }{
-    .{ 1247, "pg_type" },                  .{ 1249, "pg_attribute" },    .{ 1255, "pg_proc" },
-    .{ 1259, "pg_class" },                 .{ 1260, "pg_authid" },       .{ 1262, "pg_database" },
-    .{ 1213, "pg_tablespace" },            .{ 2601, "pg_am" },           .{ 2604, "pg_attrdef" },
-    .{ 2606, "pg_constraint" },            .{ 2608, "pg_depend" },       .{ 2609, "pg_description" },
-    .{ 2610, "pg_index" },                 .{ 2611, "pg_inherits" },     .{ 2615, "pg_namespace" },
-    .{ 2618, "pg_rewrite" },               .{ 2620, "pg_trigger" },      .{ 2224, "pg_sequence" },
-    .{ 3256, "pg_policy" },                .{ 3456, "pg_collation" },    .{ 2396, "pg_shdescription" },
-    .{ 3381, "pg_statistic_ext" },         .{ 6104, "pg_publication" },  .{ 6106, "pg_publication_rel" },
-    .{ 6237, "pg_publication_namespace" }, .{ 2612, "pg_language" },     .{ 3079, "pg_extension" },
-    .{ 3501, "pg_enum" },                  .{ 1261, "pg_auth_members" },
-};
 
 /// A built-in type: pg_type's row, as PostgreSQL 16 has it.
 pub const BuiltinType = struct {
@@ -110,6 +99,10 @@ pub const BuiltinType = struct {
     typtype: u8 = 'b',
     preferred: bool = false,
     modin: []const u8 = "",
+    /// A domain's (typtype 'd'): its schema, base type and modifier.
+    nsp: u32 = oid_pg_catalog,
+    basetype: u32 = 0,
+    typmod: i32 = -1,
 };
 
 const base_types = [_]BuiltinType{
@@ -402,6 +395,130 @@ const type_index = blk: {
     break :blk firstByOid(&out);
 };
 
+/// The domains of information_schema its views' columns are of, as
+/// PostgreSQL 18 numbers them (format_type() writes them qualified).
+pub const domain_types = [_]BuiltinType{
+    .{ .oid = 13341, .name = "cardinal_number", .fmt = "information_schema.cardinal_number", .len = 4, .byval = true, .cat = 'N', .io = "int4", .typtype = 'd', .nsp = oid_information_schema, .basetype = 23 },
+    .{ .oid = 13344, .name = "character_data", .fmt = "information_schema.character_data", .len = -1, .byval = false, .cat = 'S', .storage = 'x', .io = "varchar", .typtype = 'd', .nsp = oid_information_schema, .basetype = 1043, .coll = oid_c_collation },
+    .{ .oid = 13346, .name = "sql_identifier", .fmt = "information_schema.sql_identifier", .len = 64, .byval = false, .cat = 'S', .@"align" = 'c', .io = "name", .typtype = 'd', .nsp = oid_information_schema, .basetype = 19, .coll = oid_c_collation },
+    .{ .oid = 13352, .name = "time_stamp", .fmt = "information_schema.time_stamp", .len = 8, .byval = true, .cat = 'D', .@"align" = 'd', .io = "timestamptz_", .typtype = 'd', .nsp = oid_information_schema, .basetype = 1184, .typmod = 2 },
+    .{ .oid = 13354, .name = "yes_or_no", .fmt = "information_schema.yes_or_no", .len = -1, .byval = false, .cat = 'S', .storage = 'x', .io = "varchar", .typtype = 'd', .nsp = oid_information_schema, .basetype = 1043, .typmod = 7, .coll = oid_c_collation },
+};
+
+/// A built-in type or a domain of domain_types.
+pub fn typeInfo(oid: u32) ?*const BuiltinType {
+    if (builtinType(oid)) |t| return t;
+    for (&domain_types) |*t| if (t.oid == oid) return t;
+    return null;
+}
+
+// ==================================================== system relations
+
+const syscat = @import("syscatalog.zig");
+
+/// PostgreSQL's system relations xqlite has (pg_class ...,
+/// information_schema's views) and their indexes, with their columns and
+/// constraints: PostgreSQL 18's rows (syscatalog.zig, generated). They
+/// are the same for every database and in no snapshot: Snapshot's
+/// lookups take them for an OID below first_user_oid (no object of a
+/// database has one) or a name of pg_catalog or information_schema, and
+/// their rows of pg_class and pg_attribute are made at compile time
+/// (Relation.static), so a snapshot costs no more for them.
+pub const system = struct {
+    pub const rels: []const Rel = &syscat.rels;
+    pub const attrs: []const Attr = &syscat.attrs;
+    pub const indexes: []const IndexRow = &syscat.indexes;
+    pub const cons: []const Con = &syscat.cons;
+    pub const defs: []const Def = &.{};
+
+    /// Places in rels, indexes and cons by OID (Snapshot.find()), and
+    /// in rels by row type.
+    const places = .{
+        .rels = byOid(Rel, "oid", rels),
+        .indexes = byOid(IndexRow, "rel", indexes),
+        .cons = byOid(Con, "oid", cons),
+    };
+    const rowtypes = byOid(Rel, "rowtype", rels);
+
+    fn byOid(comptime T: type, comptime field: []const u8, comptime xs: []const T) []const ByOid {
+        comptime {
+            @setEvalBranchQuota(100_000);
+            var out: [xs.len]ByOid = undefined;
+            for (xs, &out, 0..) |x, *o, i| o.* = .{ .oid = @field(x, field), .v = i };
+            return firstByOid(&out);
+        }
+    }
+
+    /// Each relation's rows (by its place in rels): attrs, cons and
+    /// indexes are in the order of their relation.
+    const ranges = blk: {
+        @setEvalBranchQuota(200_000);
+        var out: [rels.len]Snapshot.Ranges = @splat(.{});
+        for (.{ .{ "attrs", attrs, "rel" }, .{ "cons", cons, "rel" }, .{ "indexes", indexes, "table" } }) |f| {
+            var i = 0;
+            while (i < f[1].len) {
+                const oid = @field(f[1][i], f[2]);
+                var j = i;
+                while (j < f[1].len and @field(f[1][j], f[2]) == oid) j += 1;
+                @field(out[lookup(places.rels, oid).?], f[0]) = .{ .lo = i, .hi = j };
+                i = j;
+            }
+        }
+        const final = out;
+        break :blk final;
+    };
+
+    /// The row of OID `oid` of rels, indexes or cons (`field`).
+    fn find(comptime field: []const u8, oid: u32) ?*const Elem(field) {
+        return &@field(system, field)[lookup(@field(places, field), oid) orelse return null];
+    }
+
+    fn Elem(comptime field: []const u8) type {
+        return std.meta.Elem(@TypeOf(@field(system, field)));
+    }
+
+    pub fn rel(oid: u32) ?*const Rel {
+        return find("rels", oid);
+    }
+
+    /// The relation of row type `oid`.
+    fn relByRowtype(oid: u32) ?*const Rel {
+        if (oid == 0) return null;
+        return &rels[lookup(rowtypes, oid) orelse return null];
+    }
+
+    /// The attribute `num` of relation `rel_oid`.
+    fn attr(rel_oid: u32, num: i16) ?*const Attr {
+        for (rowsOfRel("attrs", rel_oid)) |*x| if (x.num == num) return x;
+        return null;
+    }
+
+    /// The rows of relation `rel_oid` of attrs, defs, cons or indexes
+    /// (`field`).
+    fn rowsOfRel(comptime field: []const u8, rel_oid: u32) []const Elem(field) {
+        const r = @field(ranges[lookup(places.rels, rel_oid) orelse return &.{}], field);
+        return @field(system, field)[r.lo..r.hi];
+    }
+
+    /// The relation `name` of schema `nsp` (rels are ordered by schema
+    /// and name).
+    pub fn relByName(nsp: u32, name: []const u8) ?*const Rel {
+        const Key = struct { u32, []const u8 };
+        const i = std.sort.binarySearch(Rel, rels, Key{ nsp, name }, struct {
+            fn cmp(k: Key, r: Rel) std.math.Order {
+                if (k[0] != r.nsp) return std.math.order(k[0], r.nsp);
+                return std.mem.order(u8, k[1], r.name);
+            }
+        }.cmp) orelse return null;
+        return &rels[i];
+    }
+
+    /// Whether a schema has only system relations.
+    pub fn isSchema(nsp: u32) bool {
+        return nsp == oid_pg_catalog or nsp == oid_information_schema;
+    }
+};
+
 /// The type OID of `t` as the wire server describes it (keep with
 /// src/server/pg/values.zig's ofType(), which a test compares).
 pub fn oidOfLogical(t: ctypes.Type) u32 {
@@ -474,38 +591,60 @@ pub fn columnType(d: dialect.Dialect, decl: []const u8) struct { u32, i32 } {
 
 // ================================================================= OIDs
 
-/// The number of `key` in catalog `cat` before collisions.
-fn hashOid(cat: u8, key: []const u8) u32 {
+/// An object's number: five digits past first_user_oid, as PostgreSQL
+/// gives the first objects of a database (a client lines up its columns
+/// alike); a key whose number a smaller key of its catalog has takes
+/// one of the numbers above them, up to 2^31.
+const small_first: u32 = first_user_oid;
+const small_span: u32 = 100_000 - first_user_oid;
+const large_first: u32 = 100_000;
+const large_span: u32 = 0x7fffffff - large_first;
+
+/// The number of `key` in catalog `cat` before collisions, in
+/// [first, first + span).
+fn hashOid(cat: u8, key: []const u8, first: u32, span: u32) u32 {
     var h = std.hash.Wyhash.init(cat);
     h.update(key);
-    const span: u64 = 0x7fffffff - first_user_oid;
-    return @intCast(first_user_oid + h.final() % span);
+    return @intCast(first + h.final() % span);
 }
 
-/// The OIDs of `keys` in catalog `cat` (see the top of the file).
+/// The OIDs of `keys` in catalog `cat` (see the top of the file). Each
+/// key has its five-digit number, but where keys share one: the
+/// smallest keeps it (the first of equal keys) and the others take
+/// theirs in the large span in the order of their keys (on a collision
+/// there as well, the next free number), so only they depend on other
+/// keys.
 fn assign(a: Allocator, cat: u8, keys: []const []const u8) Oom![]u32 {
     const out = try a.alloc(u32, keys.len);
-    var used: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    // A number taken: the key holding it.
+    var used: std.AutoHashMapUnmanaged(u32, u32) = .empty;
     try used.ensureTotalCapacity(a, @intCast(keys.len));
-    // Without a collision, each key has its number in any order (no
-    // number is taken before its key comes): the keys are not sorted.
-    for (keys, out) |k, *o| {
-        o.* = hashOid(cat, k);
-        if (used.getOrPutAssumeCapacity(o.*).found_existing) break;
-    } else return out;
-    used.clearRetainingCapacity();
-    const order = try a.alloc(u32, keys.len);
-    for (order, 0..) |*o, i| o.* = @intCast(i);
-    // Equal keys in their order (std.mem.sort is stable).
-    std.mem.sort(u32, order, keys, struct {
+    var moved: std.ArrayList(u32) = .empty;
+    for (keys, out, 0..) |k, *o, i| {
+        o.* = hashOid(cat, k, small_first, small_span);
+        const e = used.getOrPutAssumeCapacity(o.*);
+        if (!e.found_existing) {
+            e.value_ptr.* = @intCast(i);
+        } else if (std.mem.lessThan(u8, k, keys[e.value_ptr.*])) {
+            try moved.append(a, e.value_ptr.*);
+            e.value_ptr.* = @intCast(i);
+        } else try moved.append(a, @intCast(i));
+    }
+    if (moved.items.len == 0) return out;
+    std.mem.sort(u32, moved.items, keys, struct {
         fn lt(k: []const []const u8, x: u32, y: u32) bool {
-            return std.mem.lessThan(u8, k[x], k[y]);
+            return switch (std.mem.order(u8, k[x], k[y])) {
+                .lt => true,
+                .gt => false,
+                .eq => x < y,
+            };
         }
     }.lt);
-    for (order) |i| {
-        var o = hashOid(cat, keys[i]);
-        while (used.contains(o)) o = if (o == 0x7ffffffe) first_user_oid else o + 1;
-        try used.put(a, o, {});
+    try used.ensureUnusedCapacity(a, @intCast(moved.items.len));
+    for (moved.items) |i| {
+        var o = hashOid(cat, keys[i], large_first, large_span);
+        while (used.contains(o)) o = if (o == large_first + large_span - 1) large_first else o + 1;
+        used.putAssumeCapacity(o, i);
         out[i] = o;
     }
     return out;
@@ -551,6 +690,9 @@ pub const Rel = struct {
     checks: i16 = 0,
     has_index: bool = false,
     has_triggers: bool = false,
+    /// A system relation's (system): relisshared, relacl.
+    shared: bool = false,
+    acl: ?[]const u8 = null,
     /// A view's SQLite text (CREATE VIEW ... AS <query>).
     sql: ?[]const u8 = null,
     seq: ?Seq = null,
@@ -667,12 +809,13 @@ pub const Snapshot = struct {
     exprs: []Expr = &.{},
     /// The CREATE SCHEMA schemas (pgText()).
     registered: []const nsp_mod.Info = &.{},
-    by_oid: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    /// The places in rels, cons and indexes by OID (find()), and in rels
+    /// by row type.
+    places: struct { rels: OidMap = .empty, cons: OidMap = .empty, indexes: OidMap = .empty } = .{},
+    rowtypes: OidMap = .empty,
     /// The places of a relation's rows (attrs, defs, cons, its indexes),
     /// which are next to each other (each table is described at once).
     ranges: std.AutoHashMapUnmanaged(u32, Ranges) = .empty,
-    con_by_oid: std.AutoHashMapUnmanaged(u32, u32) = .empty,
-    index_by_oid: std.AutoHashMapUnmanaged(u32, u32) = .empty,
     by_name: std.HashMapUnmanaged(NameKey, u32, NameKey.HashCtx, std.hash_map.default_max_load_percentage) = .empty,
     /// The tables, views and sequences by database and SQLite name
     /// (tableRel()).
@@ -705,6 +848,8 @@ pub const Snapshot = struct {
             return xs[r.lo..r.hi];
         }
     };
+
+    const OidMap = std.AutoHashMapUnmanaged(u32, u32);
 
     pub const Ranges = struct { attrs: Range = .{}, defs: Range = .{}, cons: Range = .{}, indexes: Range = .{} };
 
@@ -747,9 +892,22 @@ pub const Snapshot = struct {
         };
     };
 
+    /// The row of OID `oid` of rels, cons or indexes (`field`): a
+    /// system relation's below first_user_oid (system), else the
+    /// snapshot's.
+    fn find(s: *const Snapshot, comptime field: []const u8, oid: u32) ?*const system.Elem(field) {
+        if (oid < first_user_oid) return system.find(field, oid);
+        return &@field(s, field)[@field(s.places, field).get(oid) orelse return null];
+    }
+
     pub fn rel(s: *const Snapshot, oid: u32) ?*const Rel {
-        const i = s.by_oid.get(oid) orelse return null;
-        return &s.rels[i];
+        return s.find("rels", oid);
+    }
+
+    /// The relation of row type `oid` (pg_type's row of a relation).
+    pub fn relByRowtype(s: *const Snapshot, oid: u32) ?*const Rel {
+        if (oid < first_user_oid) return system.relByRowtype(oid);
+        return &s.rels[s.rowtypes.get(oid) orelse return null];
     }
 
     pub fn nsp(s: *const Snapshot, oid: u32) ?*const Nsp {
@@ -768,25 +926,34 @@ pub const Snapshot = struct {
     }
 
     pub fn relByName(s: *const Snapshot, nsp_oid: u32, name: []const u8) ?*const Rel {
+        if (system.isSchema(nsp_oid)) return system.relByName(nsp_oid, name);
         const i = s.by_name.get(.{ .nsp = nsp_oid, .name = name }) orelse return null;
         return &s.rels[i];
     }
 
     pub fn con(s: *const Snapshot, oid: u32) ?*const Con {
-        return &s.cons[s.con_by_oid.get(oid) orelse return null];
+        return s.find("cons", oid);
     }
 
     pub fn index(s: *const Snapshot, oid: u32) ?*const IndexRow {
-        return &s.indexes[s.index_by_oid.get(oid) orelse return null];
+        return s.find("indexes", oid);
     }
 
     fn rangesOf(s: *const Snapshot, rel_oid: u32) Ranges {
         return s.ranges.get(rel_oid) orelse .{};
     }
 
+    /// The rows of relation `rel_oid` of attrs, defs, cons or indexes
+    /// (`field`): a system relation's (system), else the snapshot's.
+    fn rowsOfRel(s: *const Snapshot, comptime field: []const u8, rel_oid: u32) []const system.Elem(field) {
+        if (rel_oid < first_user_oid) return system.rowsOfRel(field, rel_oid);
+        const r = @field(s.rangesOf(rel_oid), field);
+        return @field(s, field)[r.lo..r.hi];
+    }
+
     /// The attributes of relation `rel_oid`, in their order.
     pub fn attrsOf(s: *const Snapshot, rel_oid: u32) []const Attr {
-        return s.rangesOf(rel_oid).attrs.of(Attr, s.attrs);
+        return s.rowsOfRel("attrs", rel_oid);
     }
 
     /// The columns of relation `rel_oid` (its attributes of attnum > 0,
@@ -800,15 +967,15 @@ pub const Snapshot = struct {
 
     /// The defaults, constraints and indexes of table `rel_oid`.
     pub fn defsOf(s: *const Snapshot, rel_oid: u32) []const Def {
-        return s.rangesOf(rel_oid).defs.of(Def, s.defs);
+        return s.rowsOfRel("defs", rel_oid);
     }
 
     pub fn consOf(s: *const Snapshot, rel_oid: u32) []const Con {
-        return s.rangesOf(rel_oid).cons.of(Con, s.cons);
+        return s.rowsOfRel("cons", rel_oid);
     }
 
     pub fn indexesOf(s: *const Snapshot, rel_oid: u32) []const IndexRow {
-        return s.rangesOf(rel_oid).indexes.of(IndexRow, s.indexes);
+        return s.rowsOfRel("indexes", rel_oid);
     }
 
     /// The attribute `num` of relation `rel`.
@@ -851,7 +1018,10 @@ pub const Snapshot = struct {
             .check => {
                 const c = try deparse.check(a, e.src, own);
                 e.keys = c.keys;
-                if (c.keys.len > 0) e.keys_text = try vector(a, c.keys, true);
+                if (c.keys.len > 0) {
+                    var r: Rows = .{ .a = a, .ncol = 0 };
+                    e.keys_text = try vector(&r, c.keys, true);
+                }
                 e.bin = c.texts.plain orelse try pgText(a, e.src, s.registered);
                 e.pretty = if (c.texts.plain != null) c.texts.pretty else null;
             },
@@ -1127,11 +1297,13 @@ const Builder = struct {
         s.rels = b.rels.items;
         s.registered = b.registered;
         const nrel: u32 = @intCast(s.rels.len);
-        try s.by_oid.ensureTotalCapacity(a, nrel);
+        try s.places.rels.ensureTotalCapacity(a, nrel);
+        try s.rowtypes.ensureTotalCapacity(a, nrel);
         try s.by_name.ensureTotalCapacity(a, nrel);
         try s.by_sqlite.ensureTotalCapacity(a, nrel);
         for (s.rels, 0..) |r, i| {
-            s.by_oid.putAssumeCapacity(r.oid, @intCast(i));
+            s.places.rels.putAssumeCapacity(r.oid, @intCast(i));
+            if (r.rowtype != 0) s.rowtypes.putAssumeCapacity(r.rowtype, @intCast(i));
             const e = s.by_name.getOrPutAssumeCapacity(.{ .nsp = r.nsp, .name = r.name });
             if (!e.found_existing) e.value_ptr.* = @intCast(i);
             const kind: u8 = switch (r.kind) {
@@ -1191,10 +1363,10 @@ const Builder = struct {
         for (b.cons.items, coids) |*c, o| c.oid = o;
         const doids = try assign(a, 'd', b.def_keys.items);
         for (b.defs.items, doids) |*x, o| x.oid = o;
-        try s.con_by_oid.ensureTotalCapacity(a, @intCast(s.cons.len));
-        try s.index_by_oid.ensureTotalCapacity(a, @intCast(s.indexes.len));
-        for (s.cons, 0..) |c, i| s.con_by_oid.putAssumeCapacity(c.oid, @intCast(i));
-        for (s.indexes, 0..) |x, i| s.index_by_oid.putAssumeCapacity(x.rel, @intCast(i));
+        try s.places.cons.ensureTotalCapacity(a, @intCast(s.cons.len));
+        try s.places.indexes.ensureTotalCapacity(a, @intCast(s.indexes.len));
+        for (s.cons, 0..) |c, i| s.places.cons.putAssumeCapacity(c.oid, @intCast(i));
+        for (s.indexes, 0..) |x, i| s.places.indexes.putAssumeCapacity(x.rel, @intCast(i));
     }
 
     /// The relations ordered by schema and name, as a client lists them
@@ -2340,6 +2512,23 @@ const Rows = struct {
         std.debug.assert(names.len == r.ncol);
         inline for (names) |n| try r.cells.append(r.a, cell(@field(cells, n)));
     }
+
+    /// A text of a row (StaticRows makes it at compile time).
+    fn print(r: *Rows, comptime fmt: []const u8, args: anytype) Oom![]const u8 {
+        return std.fmt.allocPrint(r.a, fmt, args);
+    }
+
+    /// The text of the numbers `at(ctx, i)` for i < n, as vector().
+    fn join(r: *Rows, n: usize, comptime braces: bool, ctx: anytype, comptime at: fn (@TypeOf(ctx), usize) i64) Oom![]const u8 {
+        var out: std.ArrayList(u8) = .empty;
+        if (braces) try out.append(r.a, '{');
+        for (0..n) |i| {
+            if (i > 0) try out.append(r.a, if (braces) ',' else ' ');
+            try out.print(r.a, "{d}", .{at(ctx, i)});
+        }
+        if (braces) try out.append(r.a, '}');
+        return out.items;
+    }
 };
 
 fn cell(v: anytype) Cell {
@@ -2374,15 +2563,14 @@ const chars = blk: {
     break :blk final;
 };
 
-fn vector(a: Allocator, xs: anytype, comptime braces: bool) Oom![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    if (braces) try out.append(a, '{');
-    for (xs, 0..) |x, i| {
-        if (i > 0) try out.append(a, if (braces) ',' else ' ');
-        try out.print(a, "{d}", .{x});
-    }
-    if (braces) try out.append(a, '}');
-    return out.items;
+/// The text of `xs` (`{1,2}`, or `1 2` without braces) into `r` (Rows
+/// or StaticRows).
+fn vector(r: anytype, xs: []const i16, comptime braces: bool) ![]const u8 {
+    return r.join(xs.len, braces, xs, struct {
+        fn at(ys: []const i16, i: usize) i64 {
+            return ys[i];
+        }
+    }.at);
 }
 
 pub const Relation = struct {
@@ -2392,6 +2580,10 @@ pub const Relation = struct {
     /// Whether the relation can have rows, known without a snapshot
     /// (false: none, and none is made).
     any: ?*const fn (db: *Sqlite3) bool = null,
+    /// The rows that are the same for every snapshot (the system
+    /// relations', the built-in types'), before the snapshot's: cells
+    /// made at compile time (staticRows()).
+    static: []const Cell = &.{},
 };
 
 fn fillNamespace(s: *const Snapshot, r: *Rows) Oom!void {
@@ -2407,31 +2599,58 @@ fn relam(kind: u8) u32 {
 }
 
 fn fillClass(s: *const Snapshot, r: *Rows) Oom!void {
-    for (s.rels) |x| try r.row(.{
-        x.oid,       x.name, x.nsp,               x.rowtype,    0,       oid_superuser, relam(x.kind), x.oid,          0,     @as(i32, if (x.kind == 'i') 1 else 0), @as(f64, if (x.kind == 'i') 0 else -1), 0,    0,
-        x.has_index, false,  char(x.persistence), char(x.kind), x.natts, x.checks,      false,         x.has_triggers, false, false,                                 false,                                  true, char(if (x.kind == 'r') 'd' else 'n'),
-        false,       0,      "0",                 "1",          null,    null,          null,          0,
+    try classRows(r, s.rels);
+}
+
+/// pg_class's rows of `rels` into `r` (Rows, or StaticRows at compile
+/// time: the system relations').
+fn classRows(r: anytype, rels: []const Rel) !void {
+    for (rels) |*x| try classRow(r, x);
+}
+
+fn classRow(r: anytype, x: *const Rel) !void {
+    const sys = x.oid < first_user_oid;
+    try r.row(.{
+        x.oid,       x.name,   x.nsp,               x.rowtype,    0,       oid_superuser, relam(x.kind), x.oid,          0,     @as(i32, if (x.kind == 'i') 1 else 0), @as(f64, if (x.kind == 'i') 0 else -1), 0,    0,                                              0,
+        x.has_index, x.shared, char(x.persistence), char(x.kind), x.natts, x.checks,      false,         x.has_triggers, false, false,                                 false,                                  true, char(if (x.kind == 'r' and !sys) 'd' else 'n'), false,
+        0,           "0",      "1",                 x.acl,        null,    null,
     });
 }
 
 fn fillAttribute(s: *const Snapshot, r: *Rows) Oom!void {
-    for (s.attrs, 0..) |x, i| {
-        const t = builtinType(x.type_oid);
-        try r.row(.{
-            x.rel,                         x.name,                               x.type_oid,                          -1,          if (t) |b| b.len else -1, x.num,    0,     -1,               x.typmod,
-            if (t) |b| b.byval else false, char(if (t) |b| b.@"align" else 'i'), char(if (t) |b| b.storage else 'x'), char(0),     x.notnull,                x.hasdef, false, char(x.identity), char(x.generated),
-            false,                         true,                                 0,                                   x.collation, null,                     null,     null,  null,
-        });
+    try attributeRows(r, s, s.attrs);
+}
+
+/// pg_attribute's rows of `attrs` (each relation's together) into `r`
+/// (Rows of a snapshot `cat`, or StaticRows of `system`).
+fn attributeRows(r: anytype, cat: anytype, attrs: []const Attr) !void {
+    for (attrs, 0..) |x, i| {
+        try attrRow(r, x);
         // A table's system columns, after its own (attnum < 0).
-        if (i + 1 < s.attrs.len and s.attrs[i + 1].rel == x.rel) continue;
-        const rel = s.rel(x.rel) orelse continue;
-        if (rel.kind != 'r') continue;
-        for (system_columns) |c| try r.row(.{
-            x.rel, c[0],       c[1],      -1,      c[3], c[2],  0,     -1,      -1,
-            c[4],  char(c[5]), char('p'), char(0), true, false, false, char(0), char(0),
-            false, true,       0,         0,       null, null,  null,  null,
-        });
+        if (i + 1 < attrs.len and attrs[i + 1].rel == x.rel) continue;
+        const rel = cat.rel(x.rel) orelse continue;
+        if (rel.kind == 'r') try systemColumnRows(r, x.rel);
     }
+}
+
+/// pg_attribute's row of `x` into `r` (Rows, or StaticRows).
+fn attrRow(r: anytype, x: Attr) !void {
+    const t = typeInfo(x.type_oid);
+    try r.row(.{
+        x.rel,                                x.name,                              x.type_oid, if (t) |b| b.len else -1, x.num,    x.typmod, 0,                if (t) |b| b.byval else false,
+        char(if (t) |b| b.@"align" else 'i'), char(if (t) |b| b.storage else 'x'), char(0),    x.notnull,                x.hasdef, false,    char(x.identity), char(x.generated),
+        false,                                true,                                0,          x.collation,              null,     null,     null,             null,
+        null,
+    });
+}
+
+fn systemColumnRows(r: anytype, rel: u32) !void {
+    for (system_columns) |c| try r.row(.{
+        rel,        c[0],      c[1],    c[3], c[2],  -1,    0,       c[4],
+        char(c[5]), char('p'), char(0), true, false, false, char(0), char(0),
+        false,      true,      0,       0,    null,  null,  null,    null,
+        null,
+    });
 }
 
 /// PostgreSQL's system columns of a table: name, type, attnum, attlen,
@@ -2441,22 +2660,42 @@ const system_columns = [_]struct { []const u8, u32, i16, i16, bool, u8 }{
     .{ "xmax", 28, -4, 4, true, 'i' },  .{ "cmax", 29, -5, 4, true, 'i' }, .{ "tableoid", 26, -6, 4, true, 'i' },
 };
 
-fn procOf(a: Allocator, stem: []const u8, suffix: []const u8) Oom![]const u8 {
+/// The name of a type's input function ... (`suffix` in, out, recv,
+/// send) into `r` (Rows or StaticRows).
+fn procOf(r: anytype, stem: []const u8, suffix: []const u8) ![]const u8 {
     if (stem.len == 0) return "-";
-    if (stem[stem.len - 1] == '_') return std.fmt.allocPrint(a, "{s}{s}", .{ stem[0 .. stem.len - 1], if (eql(suffix, "in")) "_in" else if (eql(suffix, "out")) "_out" else if (eql(suffix, "recv")) "_recv" else "_send" });
-    return std.fmt.allocPrint(a, "{s}{s}", .{ stem, suffix });
+    if (stem[stem.len - 1] == '_') return r.print("{s}{s}", .{ stem[0 .. stem.len - 1], if (eql(suffix, "in")) "_in" else if (eql(suffix, "out")) "_out" else if (eql(suffix, "recv")) "_recv" else "_send" });
+    return r.print("{s}{s}", .{ stem, suffix });
 }
 
 fn fillType(s: *const Snapshot, r: *Rows) Oom!void {
-    const a = r.a;
+    try rowtypeRows(r, s.rels);
+}
+
+/// pg_type's rows of the built-in types and information_schema's
+/// domains (StaticRows).
+fn builtinTypeRows(r: anytype) !void {
     for (builtin_types) |t| {
         try r.row(.{
-            t.oid,                                                                                  t.name, oid_pg_catalog, oid_superuser,             t.len,                      t.byval,                     char(t.typtype),             char(t.cat),                                                                  t.preferred,                                                                   true, ",",              0,
-            if (t.cat == 'A' and t.elem != 0 and t.io.len == 6) "array_subscript_handler" else "-", t.elem, t.array,        try procOf(a, t.io, "in"), try procOf(a, t.io, "out"), try procOf(a, t.io, "recv"), try procOf(a, t.io, "send"), if (t.modin.len > 0) try std.fmt.allocPrint(a, "{s}in", .{t.modin}) else "-", if (t.modin.len > 0) try std.fmt.allocPrint(a, "{s}out", .{t.modin}) else "-", "-",  char(t.@"align"), char(t.storage),
+            t.oid,                                                                                  t.name, oid_pg_catalog, oid_superuser,             t.len,                      t.byval,                     char(t.typtype),             char(t.cat),                                                    t.preferred,                                                     true, ",",              0,
+            if (t.cat == 'A' and t.elem != 0 and t.io.len == 6) "array_subscript_handler" else "-", t.elem, t.array,        try procOf(r, t.io, "in"), try procOf(r, t.io, "out"), try procOf(r, t.io, "recv"), try procOf(r, t.io, "send"), if (t.modin.len > 0) try r.print("{s}in", .{t.modin}) else "-", if (t.modin.len > 0) try r.print("{s}out", .{t.modin}) else "-", "-",  char(t.@"align"), char(t.storage),
             false,                                                                                  0,      -1,             0,                         t.coll,                     null,                        null,                        null,
         });
     }
-    for (s.rels) |x| {
+    for (&domain_types) |t| {
+        const base = builtinType(t.basetype).?;
+        try r.row(.{
+            t.oid, t.name,     t.nsp,    oid_superuser, t.len,                         t.byval,       char(t.typtype),                char(t.cat), false, true, ",",              0,
+            "-",   0,          0,        "domain_in",   try procOf(r, base.io, "out"), "domain_recv", try procOf(r, base.io, "send"), "-",         "-",   "-",  char(t.@"align"), char(t.storage),
+            false, t.basetype, t.typmod, 0,             t.coll,                        null,          null,                           null,
+        });
+    }
+    try rowtypeRows(r, system.rels);
+}
+
+/// pg_type's rows of the row types of `rels` (Rows, or StaticRows).
+fn rowtypeRows(r: anytype, rels: []const Rel) !void {
+    for (rels) |x| {
         if (x.rowtype == 0) continue;
         try r.row(.{
             x.rowtype,   x.name,       x.nsp,         oid_superuser, -1,  false, "c", "C", false, true,  ",", x.oid, "-", 0, 0,
@@ -2467,32 +2706,53 @@ fn fillType(s: *const Snapshot, r: *Rows) Oom!void {
 }
 
 fn fillIndex(s: *const Snapshot, r: *Rows) Oom!void {
-    const a = r.a;
-    for (s.indexes) |x| {
+    try indexRows(r, s, s.indexes);
+}
+
+/// pg_index's rows of `xs` into `r` (Rows of a snapshot `cat`, or
+/// StaticRows of `system`).
+fn indexRows(r: anytype, cat: anytype, xs: []const IndexRow) !void {
+    const Of = struct {
+        cat: @TypeOf(cat),
+        x: *const IndexRow,
+
+        fn opt(o: @This(), i: usize) i64 {
+            return if (o.x.desc[i]) 3 else 0;
+        }
+
+        fn coll(o: @This(), i: usize) i64 {
+            const k = o.x.keys[i];
+            return if (k > 0) (if (o.cat.attr(o.x.table, k)) |at| at.collation else 0) else 0;
+        }
+
+        fn class(o: @This(), i: usize) i64 {
+            return if (o.cat.attr(o.x.rel, @intCast(i + 1))) |at| defaultOpclass(at.type_oid) else 0;
+        }
+    };
+    for (xs) |*x| {
         const n = x.keys.len;
-        const opts = try a.alloc(i16, n);
-        for (opts, x.desc) |*o, d| o.* = if (d) 3 else 0;
-        const colls = try a.alloc(u32, n);
-        for (colls, x.keys) |*c, k| c.* = if (k > 0) (if (s.attr(x.table, k)) |at| at.collation else 0) else 0;
-        const classes = try a.alloc(u32, n);
-        for (classes, 0..) |*c, i| c.* = if (s.attr(x.rel, @intCast(i + 1))) |at| defaultOpclass(at.type_oid) else 0;
+        const o: Of = .{ .cat = cat, .x = x };
         try r.row(.{
-            x.rel,                        x.table,                     n,                             n,                          x.unique, false,                                  x.primary, false, true, false, true, false, true, true, false,
-            try vector(a, x.keys, false), try vector(a, colls, false), try vector(a, classes, false), try vector(a, opts, false), x.exprs,  if (x.pred) |p| Cell.bin(p) else .null,
+            x.rel,                        x.table,                          n,                                 n,                               x.unique, false,                                             x.primary, false, true, false, true, false, true, true, false,
+            try vector(r, x.keys, false), try r.join(n, false, o, Of.coll), try r.join(n, false, o, Of.class), try r.join(n, false, o, Of.opt), x.exprs,  if (x.pred) |p| Cell.bin(p) else @as(Cell, .null),
         });
     }
 }
 
 fn fillConstraint(s: *const Snapshot, r: *Rows) Oom!void {
-    const a = r.a;
-    for (s.cons) |c| {
+    try constraintRows(r, s.cons);
+}
+
+/// pg_constraint's rows of `cs` into `r` (Rows, or StaticRows).
+fn constraintRows(r: anytype, cs: []const Con) !void {
+    for (cs) |c| {
         // A CHECK's conkey and conbin: its expression's.
-        const keys: Cell = if (c.check) |e| .{ .lazy = .{ .expr = e, .what = .keys } } else if (c.keys.len > 0) .{ .text = try vector(a, c.keys, true) } else .null;
+        const keys: Cell = if (c.check) |e| .{ .lazy = .{ .expr = e, .what = .keys } } else if (c.keys.len > 0) .{ .text = try vector(r, c.keys, true) } else .null;
         const bin: Cell = if (c.check) |e| .bin(e) else .null;
         try r.row(.{
-            c.oid,       c.name,      c.nsp,                                 char(c.type), c.deferrable, c.deferred, true, c.rel,                                                       0,    c.index, 0,    c.frel,
-            char(c.upd), char(c.del), char(if (c.type == 'f') 's' else ' '), true,         0,            false,      keys, if (c.fkeys.len > 0) try vector(a, c.fkeys, true) else null, null, null,    null, null,
-            null,        bin,         true,                                  false,
+            c.oid,       c.name,      c.nsp,                                 char(c.type), c.deferrable, c.deferred, true,  true, c.rel,                                                       0,    c.index, 0,    c.frel,
+            char(c.upd), char(c.del), char(if (c.type == 'f') 's' else ' '), true,         0,            false,      false, keys, if (c.fkeys.len > 0) try vector(r, c.fkeys, true) else null, null, null,    null, null,
+            null,        bin,
         });
     }
 }
@@ -2540,7 +2800,7 @@ fn fillProc(s: *const Snapshot, r: *Rows) Oom!void {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     for (builtin_types) |t| {
         for ([_][]const u8{ "in", "out", "recv", "send" }) |suffix| {
-            const name = try procOf(a, t.io, suffix);
+            const name = try procOf(r, t.io, suffix);
             if (seen.contains(name)) continue;
             try seen.put(a, name, {});
             const ret: u32 = if (eql(suffix, "in") or eql(suffix, "recv")) t.oid else if (eql(suffix, "out")) 2275 else 17;
@@ -2555,71 +2815,163 @@ fn fillProc(s: *const Snapshot, r: *Rows) Oom!void {
 
 /// The OID of a built-in function of fillProc().
 pub fn procOid(name: []const u8) u32 {
-    return hashOid('p', name);
+    // No collision is resolved among them: up to 2^31.
+    return hashOid('p', name, first_user_oid, 0x7fffffff - first_user_oid);
 }
 
 /// The name of a built-in function by its OID, for regproc's output.
 pub fn procName(a: Allocator, oid: u32) Oom!?[]const u8 {
+    var r: Rows = .{ .a = a, .ncol = 0 };
     for (builtin_types) |t| {
         for ([_][]const u8{ "in", "out", "recv", "send" }) |suffix| {
-            const name = try procOf(a, t.io, suffix);
+            const name = try procOf(&r, t.io, suffix);
             if (procOid(name) == oid) return name;
         }
     }
     return null;
 }
 
+const class_cols = [_]Col{
+    .{ "oid", .oid },                  .{ "relname", .name },        .{ "relnamespace", .oid },    .{ "reltype", .oid },
+    .{ "reloftype", .oid },            .{ "relowner", .oid },        .{ "relam", .oid },           .{ "relfilenode", .oid },
+    .{ "reltablespace", .oid },        .{ "relpages", .int4 },       .{ "reltuples", .float4 },    .{ "relallvisible", .int4 },
+    .{ "relallfrozen", .int4 },        .{ "reltoastrelid", .oid },   .{ "relhasindex", .bool },    .{ "relisshared", .bool },
+    .{ "relpersistence", .char },      .{ "relkind", .char },        .{ "relnatts", .int2 },       .{ "relchecks", .int2 },
+    .{ "relhasrules", .bool },         .{ "relhastriggers", .bool }, .{ "relhassubclass", .bool }, .{ "relrowsecurity", .bool },
+    .{ "relforcerowsecurity", .bool }, .{ "relispopulated", .bool }, .{ "relreplident", .char },   .{ "relispartition", .bool },
+    .{ "relrewrite", .oid },           .{ "relfrozenxid", .text },   .{ "relminmxid", .text },     .{ "relacl", .acl_array },
+    .{ "reloptions", .text_array },    .{ "relpartbound", .text },
+};
+
+const attribute_cols = [_]Col{
+    .{ "attrelid", .oid },       .{ "attname", .name },       .{ "atttypid", .oid },          .{ "attlen", .int2 },
+    .{ "attnum", .int2 },        .{ "atttypmod", .int4 },     .{ "attndims", .int2 },         .{ "attbyval", .bool },
+    .{ "attalign", .char },      .{ "attstorage", .char },    .{ "attcompression", .char },   .{ "attnotnull", .bool },
+    .{ "atthasdef", .bool },     .{ "atthasmissing", .bool }, .{ "attidentity", .char },      .{ "attgenerated", .char },
+    .{ "attisdropped", .bool },  .{ "attislocal", .bool },    .{ "attinhcount", .int2 },      .{ "attcollation", .oid },
+    .{ "attstattarget", .int2 }, .{ "attacl", .acl_array },   .{ "attoptions", .text_array }, .{ "attfdwoptions", .text_array },
+    .{ "attmissingval", .text },
+};
+
+/// The rows of a relation that are the same for every snapshot, made at
+/// compile time: Rows' cells, by classRows() and the like (n null:
+/// only counted).
+fn StaticRows(comptime ncol: usize, comptime n: ?usize) type {
+    return struct {
+        cells: [ncol * (n orelse 0)]Cell = undefined,
+        /// The cells made (or counted).
+        len: usize = 0,
+
+        fn row(r: *@This(), cells: anytype) error{}!void {
+            const names = @typeInfo(@TypeOf(cells)).@"struct".field_names;
+            if (names.len != ncol) @compileError("not a row");
+            if (n == null) {
+                r.len += ncol;
+                return;
+            }
+            inline for (names) |f| {
+                r.cells[r.len] = cell(@field(cells, f));
+                r.len += 1;
+            }
+        }
+
+        fn print(_: *@This(), comptime fmt: []const u8, args: anytype) error{}![]const u8 {
+            if (n == null) return "";
+            return std.fmt.comptimePrint(fmt, args);
+        }
+
+        fn join(_: *@This(), len: usize, comptime braces: bool, ctx: anytype, comptime at: fn (@TypeOf(ctx), usize) i64) error{}![]const u8 {
+            if (n == null) return "";
+            var z: []const u8 = if (braces) "{" else "";
+            for (0..len) |i| {
+                if (i > 0) z = z ++ if (braces) "," else " ";
+                z = z ++ std.fmt.comptimePrint("{d}", .{at(ctx, i)});
+            }
+            return if (braces) z ++ "}" else z;
+        }
+    };
+}
+
+/// The cells `fill` makes into a StaticRows of `ncol` columns: a
+/// Relation's static.
+fn staticRows(comptime ncol: usize, comptime fill: anytype) []const Cell {
+    comptime {
+        @setEvalBranchQuota(20_000_000);
+        var count: StaticRows(ncol, null) = .{};
+        fill(&count) catch unreachable;
+        var r: StaticRows(ncol, count.len / ncol) = .{};
+        fill(&r) catch unreachable;
+        const final = r.cells;
+        return &final;
+    }
+}
+
+/// The system relations' rows, a table's system columns after its own
+/// (pg_attribute); pg_type's: the built-in types' and the system
+/// relations' row types.
+const static_rows = struct {
+    const class = staticRows(class_cols.len, struct {
+        fn f(r: anytype) !void {
+            try classRows(r, system.rels);
+        }
+    }.f);
+    const attribute = staticRows(attribute_cols.len, struct {
+        fn f(r: anytype) !void {
+            try attributeRows(r, system, system.attrs);
+        }
+    }.f);
+    const @"type" = staticRows(type_cols.len, builtinTypeRows);
+    const index = staticRows(index_cols.len, struct {
+        fn f(r: anytype) !void {
+            try indexRows(r, system, system.indexes);
+        }
+    }.f);
+    const constraint = staticRows(constraint_cols.len, struct {
+        fn f(r: anytype) !void {
+            try constraintRows(r, system.cons);
+        }
+    }.f);
+};
+
+const type_cols = [_]Col{
+    .{ "oid", .oid },             .{ "typname", .name },       .{ "typnamespace", .oid }, .{ "typowner", .oid },
+    .{ "typlen", .int2 },         .{ "typbyval", .bool },      .{ "typtype", .char },     .{ "typcategory", .char },
+    .{ "typispreferred", .bool }, .{ "typisdefined", .bool },  .{ "typdelim", .char },    .{ "typrelid", .oid },
+    .{ "typsubscript", .text },   .{ "typelem", .oid },        .{ "typarray", .oid },     .{ "typinput", .text },
+    .{ "typoutput", .text },      .{ "typreceive", .text },    .{ "typsend", .text },     .{ "typmodin", .text },
+    .{ "typmodout", .text },      .{ "typanalyze", .text },    .{ "typalign", .char },    .{ "typstorage", .char },
+    .{ "typnotnull", .bool },     .{ "typbasetype", .oid },    .{ "typtypmod", .int4 },   .{ "typndims", .int4 },
+    .{ "typcollation", .oid },    .{ "typdefaultbin", .text }, .{ "typdefault", .text },  .{ "typacl", .acl_array },
+};
+
+const index_cols = [_]Col{
+    .{ "indexrelid", .oid },         .{ "indrelid", .oid },             .{ "indnatts", .int2 },        .{ "indnkeyatts", .int2 },
+    .{ "indisunique", .bool },       .{ "indnullsnotdistinct", .bool }, .{ "indisprimary", .bool },    .{ "indisexclusion", .bool },
+    .{ "indimmediate", .bool },      .{ "indisclustered", .bool },      .{ "indisvalid", .bool },      .{ "indcheckxmin", .bool },
+    .{ "indisready", .bool },        .{ "indislive", .bool },           .{ "indisreplident", .bool },  .{ "indkey", .int2vector },
+    .{ "indcollation", .oidvector }, .{ "indclass", .oidvector },       .{ "indoption", .int2vector }, .{ "indexprs", .text },
+    .{ "indpred", .text },
+};
+
+const constraint_cols = [_]Col{
+    .{ "oid", .oid },             .{ "conname", .name },              .{ "connamespace", .oid },    .{ "contype", .char },
+    .{ "condeferrable", .bool },  .{ "condeferred", .bool },          .{ "conenforced", .bool },    .{ "convalidated", .bool },
+    .{ "conrelid", .oid },        .{ "contypid", .oid },              .{ "conindid", .oid },        .{ "conparentid", .oid },
+    .{ "confrelid", .oid },       .{ "confupdtype", .char },          .{ "confdeltype", .char },    .{ "confmatchtype", .char },
+    .{ "conislocal", .bool },     .{ "coninhcount", .int2 },          .{ "connoinherit", .bool },   .{ "conperiod", .bool },
+    .{ "conkey", .int2_array },   .{ "confkey", .int2_array },        .{ "conpfeqop", .oid_array }, .{ "conppeqop", .oid_array },
+    .{ "conffeqop", .oid_array }, .{ "confdelsetcols", .int2_array }, .{ "conexclop", .oid_array }, .{ "conbin", .text },
+};
+
 pub const relations = [_]Relation{
     .{ .name = "xq_pg_namespace", .fill = fillNamespace, .cols = &.{
         .{ "oid", .oid }, .{ "nspname", .name }, .{ "nspowner", .oid }, .{ "nspacl", .acl_array },
     } },
-    .{ .name = "xq_pg_class", .fill = fillClass, .cols = &.{
-        .{ "oid", .oid },             .{ "relname", .name },        .{ "relnamespace", .oid },    .{ "reltype", .oid },
-        .{ "reloftype", .oid },       .{ "relowner", .oid },        .{ "relam", .oid },           .{ "relfilenode", .oid },
-        .{ "reltablespace", .oid },   .{ "relpages", .int4 },       .{ "reltuples", .float4 },    .{ "relallvisible", .int4 },
-        .{ "reltoastrelid", .oid },   .{ "relhasindex", .bool },    .{ "relisshared", .bool },    .{ "relpersistence", .char },
-        .{ "relkind", .char },        .{ "relnatts", .int2 },       .{ "relchecks", .int2 },      .{ "relhasrules", .bool },
-        .{ "relhastriggers", .bool }, .{ "relhassubclass", .bool }, .{ "relrowsecurity", .bool }, .{ "relforcerowsecurity", .bool },
-        .{ "relispopulated", .bool }, .{ "relreplident", .char },   .{ "relispartition", .bool }, .{ "relrewrite", .oid },
-        .{ "relfrozenxid", .text },   .{ "relminmxid", .text },     .{ "relacl", .acl_array },    .{ "reloptions", .text_array },
-        .{ "relpartbound", .text },   .{ "relallfrozen", .int4 },
-    } },
-    .{ .name = "xq_pg_attribute", .fill = fillAttribute, .cols = &.{
-        .{ "attrelid", .oid },             .{ "attname", .name },       .{ "atttypid", .oid },      .{ "attstattarget", .int4 },
-        .{ "attlen", .int2 },              .{ "attnum", .int2 },        .{ "attndims", .int4 },     .{ "attcacheoff", .int4 },
-        .{ "atttypmod", .int4 },           .{ "attbyval", .bool },      .{ "attalign", .char },     .{ "attstorage", .char },
-        .{ "attcompression", .char },      .{ "attnotnull", .bool },    .{ "atthasdef", .bool },    .{ "atthasmissing", .bool },
-        .{ "attidentity", .char },         .{ "attgenerated", .char },  .{ "attisdropped", .bool }, .{ "attislocal", .bool },
-        .{ "attinhcount", .int2 },         .{ "attcollation", .oid },   .{ "attacl", .acl_array },  .{ "attoptions", .text_array },
-        .{ "attfdwoptions", .text_array }, .{ "attmissingval", .text },
-    } },
-    .{ .name = "xq_pg_type", .fill = fillType, .cols = &.{
-        .{ "oid", .oid },             .{ "typname", .name },       .{ "typnamespace", .oid }, .{ "typowner", .oid },
-        .{ "typlen", .int2 },         .{ "typbyval", .bool },      .{ "typtype", .char },     .{ "typcategory", .char },
-        .{ "typispreferred", .bool }, .{ "typisdefined", .bool },  .{ "typdelim", .char },    .{ "typrelid", .oid },
-        .{ "typsubscript", .text },   .{ "typelem", .oid },        .{ "typarray", .oid },     .{ "typinput", .text },
-        .{ "typoutput", .text },      .{ "typreceive", .text },    .{ "typsend", .text },     .{ "typmodin", .text },
-        .{ "typmodout", .text },      .{ "typanalyze", .text },    .{ "typalign", .char },    .{ "typstorage", .char },
-        .{ "typnotnull", .bool },     .{ "typbasetype", .oid },    .{ "typtypmod", .int4 },   .{ "typndims", .int4 },
-        .{ "typcollation", .oid },    .{ "typdefaultbin", .text }, .{ "typdefault", .text },  .{ "typacl", .acl_array },
-    } },
-    .{ .name = "xq_pg_index", .fill = fillIndex, .cols = &.{
-        .{ "indexrelid", .oid },         .{ "indrelid", .oid },             .{ "indnatts", .int2 },        .{ "indnkeyatts", .int2 },
-        .{ "indisunique", .bool },       .{ "indnullsnotdistinct", .bool }, .{ "indisprimary", .bool },    .{ "indisexclusion", .bool },
-        .{ "indimmediate", .bool },      .{ "indisclustered", .bool },      .{ "indisvalid", .bool },      .{ "indcheckxmin", .bool },
-        .{ "indisready", .bool },        .{ "indislive", .bool },           .{ "indisreplident", .bool },  .{ "indkey", .int2vector },
-        .{ "indcollation", .oidvector }, .{ "indclass", .oidvector },       .{ "indoption", .int2vector }, .{ "indexprs", .text },
-        .{ "indpred", .text },
-    } },
-    .{ .name = "xq_pg_constraint", .fill = fillConstraint, .cols = &.{
-        .{ "oid", .oid },             .{ "conname", .name },        .{ "connamespace", .oid },    .{ "contype", .char },
-        .{ "condeferrable", .bool },  .{ "condeferred", .bool },    .{ "convalidated", .bool },   .{ "conrelid", .oid },
-        .{ "contypid", .oid },        .{ "conindid", .oid },        .{ "conparentid", .oid },     .{ "confrelid", .oid },
-        .{ "confupdtype", .char },    .{ "confdeltype", .char },    .{ "confmatchtype", .char },  .{ "conislocal", .bool },
-        .{ "coninhcount", .int2 },    .{ "connoinherit", .bool },   .{ "conkey", .int2_array },   .{ "confkey", .int2_array },
-        .{ "conpfeqop", .oid_array }, .{ "conppeqop", .oid_array }, .{ "conffeqop", .oid_array }, .{ "confdelsetcols", .int2_array },
-        .{ "conexclop", .oid_array }, .{ "conbin", .text },         .{ "conenforced", .bool },    .{ "conperiod", .bool },
-    } },
+    .{ .name = "xq_pg_class", .fill = fillClass, .static = static_rows.class, .cols = &class_cols },
+    .{ .name = "xq_pg_attribute", .fill = fillAttribute, .static = static_rows.attribute, .cols = &attribute_cols },
+    .{ .name = "xq_pg_type", .fill = fillType, .static = static_rows.type, .cols = &type_cols },
+    .{ .name = "xq_pg_index", .fill = fillIndex, .static = static_rows.index, .cols = &index_cols },
+    .{ .name = "xq_pg_constraint", .fill = fillConstraint, .static = static_rows.constraint, .cols = &constraint_cols },
     .{ .name = "xq_pg_attrdef", .fill = fillAttrdef, .cols = &.{
         .{ "oid", .oid }, .{ "adrelid", .oid }, .{ "adnum", .int2 }, .{ "adbin", .text },
     } },
@@ -2688,6 +3040,8 @@ const Cursor = struct {
     db: *Sqlite3,
     snap: ?*Snapshot = null,
     arena: std.heap.ArenaAllocator,
+    /// The relation's static rows, then the snapshot's.
+    head: []const Cell = &.{},
     cells: []const Cell = &.{},
     ncol: usize = 1,
     i: usize = 0,
@@ -2731,6 +3085,7 @@ fn moduleOf(comptime rel: Relation) vtab.Module {
             _ = c.arena.reset(.retain_capacity);
             c.i = 0;
             c.cells = &.{};
+            c.head = rel.static;
             c.ncol = rel.cols.len;
             c.snap = get(c.db, rel.any) catch |err| return switch (err) {
                 error.OutOfMemory => RC.NOMEM,
@@ -2780,12 +3135,13 @@ fn next(cur: *vtab.VtabCursor) i32 {
 
 fn eof(cur: *vtab.VtabCursor) bool {
     const c = Cursor.of(cur);
-    return c.i * c.ncol >= c.cells.len;
+    return c.i * c.ncol >= c.head.len + c.cells.len;
 }
 
 fn column(cur: *vtab.VtabCursor, ctx: *Context, i: i32) i32 {
     const c = Cursor.of(cur);
-    switch (c.cells[c.i * c.ncol + @as(usize, @intCast(i))]) {
+    const k = c.i * c.ncol + @as(usize, @intCast(i));
+    switch (if (k < c.head.len) c.head[k] else c.cells[k - c.head.len]) {
         .null => api.resultNull(ctx),
         .int => |v| api.resultInt64(ctx, v),
         .float => |v| api.resultDouble(ctx, v),
@@ -2825,9 +3181,11 @@ test "oids" {
     defer arena.deinit();
     const a = arena.allocator();
     const o = try assign(a, 'r', &.{ "main\x00t", "main\x00u", "main\x00t" });
-    try std.testing.expect(o[0] >= first_user_oid and o[0] < 0x7fffffff);
+    // Five digits, as PostgreSQL's first OIDs.
+    try std.testing.expect(o[0] >= first_user_oid and o[0] < 100_000);
     try std.testing.expect(o[0] != o[2]);
-    try std.testing.expectEqual(o[0], hashOid('r', "main\x00t"));
+    try std.testing.expectEqual(o[0], hashOid('r', "main\x00t", small_first, small_span));
+    try std.testing.expect(o[2] >= large_first);
     const checks = try tableChecks(a, "CREATE TABLE \"t\"(\"a\" INTEGER CONSTRAINT \"integer out of range\" CHECK((\"a\" > 0)), \"b\" TEXT CHECK(b<>''), CHECK(a < 9), CONSTRAINT \"ck\" CHECK((\"a\" <> 3)))", "t");
     try std.testing.expectEqual(@as(usize, 4), checks.len);
     try std.testing.expectEqualStrings("integer out of range", checks[0].name);
@@ -2852,16 +3210,36 @@ test "oids" {
     try std.testing.expect(generatedOf(gs, "a") == null);
 }
 
-test "oids: without a collision as with the keys sorted" {
+test "oids: only colliding keys move, by their order" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var keys: std.ArrayList([]const u8) = .empty;
-    for (0..500) |i| try keys.append(a, try std.fmt.allocPrint(a, "main\x00t{d}", .{499 - i}));
-    const fast = try assign(a, 'r', keys.items);
-    // A repeated key collides: every number by the sorted keys.
+    for (0..5000) |i| try keys.append(a, try std.fmt.allocPrint(a, "main\x00t{d}", .{4999 - i}));
+    const o = try assign(a, 'r', keys.items);
+    // Each number once; a key keeps its own number unless a smaller key
+    // has it, and those that move are above the five digits.
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    var moved: usize = 0;
+    for (keys.items, o) |k, x| {
+        try std.testing.expect(!(try seen.getOrPut(a, x)).found_existing);
+        const own = hashOid('r', k, small_first, small_span);
+        if (x == own) continue;
+        moved += 1;
+        try std.testing.expect(x >= large_first);
+        const holder = for (keys.items, o) |k2, x2| {
+            if (x2 == own) break k2;
+        } else unreachable;
+        try std.testing.expect(std.mem.lessThan(u8, holder, k));
+    }
+    try std.testing.expect(moved > 0 and moved < 500);
+    // In any order of the keys, the same numbers.
+    std.mem.reverse([]const u8, keys.items);
+    const r = try assign(a, 'r', keys.items);
+    for (o, 0..) |x, i| try std.testing.expectEqual(x, r[keys.items.len - 1 - i]);
+    // A repeated key: the later moves, no other key does.
     try keys.append(a, keys.items[0]);
-    const slow = try assign(a, 'r', keys.items);
-    try std.testing.expectEqualSlices(u32, fast, slow[0..fast.len]);
-    try std.testing.expect(slow[fast.len] != slow[0]);
+    const d = try assign(a, 'r', keys.items);
+    try std.testing.expectEqualSlices(u32, r, d[0..r.len]);
+    try std.testing.expect(d[r.len] >= large_first);
 }

@@ -475,6 +475,25 @@ fn writeLevel(a: Allocator, out: *std.ArrayList(u8), x: *const Array, d: usize, 
     try out.append(a, '}');
 }
 
+/// The text of interval[] `z` (its elements in the default style, as
+/// stored) with its elements in IntervalStyle `style`, in `gpa`; null if
+/// `z` is no array of intervals.
+pub fn restyleIntervals(gpa: Allocator, z: []const u8, style: datetime.IntervalStyle) error{OutOfMemory}!?[]u8 {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var x = parse(a, z, false) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        else => return null,
+    };
+    for (x.elems) |*e| if (e.*) |t| {
+        const iv = datetime.parseInterval(t) catch return null;
+        var buf: datetime.Buf = undefined;
+        e.* = try a.dupe(u8, datetime.formatIntervalStyle(iv, style, &buf));
+    };
+    return try gpa.dupe(u8, try write(a, &x));
+}
+
 // ======================================================= element values
 
 /// An error of an element's input: its SQLSTATE and message.

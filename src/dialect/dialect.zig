@@ -306,6 +306,10 @@ pub const Hooks = struct {
     /// stays valid for sqlite3); the planner then does not use them for
     /// comparisons in this collation.
     default_collation: ?[:0]const u8 = null,
+    /// The lowest level of notice (int.Notice) the client is sent, by the
+    /// connection's settings (PostgreSQL's client_min_messages); null for
+    /// every notice.
+    notice_level: ?*const fn (db: *const Sqlite3) int.Notice.Level = null,
     /// Engine functions: functions a frontend lowers or renders a
     /// semantic node of the IR tree to (xq_like(), xq_pg_bool(),
     /// xq_coerce() ...). Unlike `functions` they are visible in every
@@ -528,6 +532,13 @@ pub fn swapLang(db: *Sqlite3, lang: Lang) Lang {
 /// The hooks of the dialect the connection compiles in.
 pub fn hooks(db: *const Sqlite3) *const Hooks {
     return &spec(db.xq.lang.dialect).hooks;
+}
+
+/// The lowest level of notice (int.Notice) the connection's client is
+/// sent (Hooks.notice_level); `.debug` for all.
+pub fn noticeLevel(db: *const Sqlite3) int.Notice.Level {
+    const f = hooks(db).notice_level orelse return .debug;
+    return f(db);
 }
 
 /// PRAGMA foreign_keys for the dialect the connection compiles in
@@ -755,6 +766,7 @@ test {
     _ = @import("like.zig");
     _ = @import("decimal.zig");
     _ = @import("decimal_sql.zig");
+    _ = @import("decimal_math.zig");
     _ = @import("abi.zig");
     _ = @import("test.zig");
     _ = @import("constraint.zig");

@@ -876,10 +876,23 @@ pub fn makeReady(v: *Vdbe, p: *Parse) void {
     v.n_var = @intCast(n_var);
     v.xq_param_types = @import("../sql/typing.zig").paramTypes(p, a, n_var) catch return oom(v);
     v.xq_exact_numeric = p.xq_exact_numeric;
+    v.xq_notices = copyNotices(a, p.xq_notices.items) catch return oom(v);
     initMemArray(v.vars, db, .{ .Null = true });
     initMemArray(v.mem, db, MEM.Undefined);
     @memset(v.csr, null);
     rewind(v);
+}
+
+/// Copy the notices into the program, which outlives the Parse.
+fn copyNotices(a: std.mem.Allocator, src: []const int.Notice) error{OutOfMemory}![]const int.Notice {
+    if (src.len == 0) return &.{};
+    const out = try a.alloc(int.Notice, src.len);
+    for (src, out) |n, *o| {
+        o.* = n;
+        o.message = try a.dupe(u8, n.message);
+        if (n.detail) |d| o.detail = try a.dupe(u8, d);
+    }
+    return out;
 }
 
 /// Copy the variable names into the program, which outlives the Parse.

@@ -9,6 +9,7 @@
 12.35|1|0|0|0|NULL|3|-3|0.1|3|1.25
 1|1|1
 3.75|1.8750000000000000
+1.414213562373095|2.7182818284590452|0.6931471805599453|2.0000000000000000|3.0000000000000000|1.4142135623730950|-512.00000000000000|2432902008176640000|3
 -- errors
 line 11: LIKE pattern must not end with escape character
 line 12: invalid escape string
@@ -17,3 +18,7 @@ line 20: numeric field overflow
 DETAIL:  A field with precision 5, scale 2 must round to an absolute value less than 10^3.
 line 21: division by zero
 line 22: smallint out of range
+line 24: cannot take square root of a negative number
+line 25: cannot take logarithm of zero
+line 26: zero raised to a negative power is undefined
+line 27: a negative number raised to a non-integer power yields a complex result

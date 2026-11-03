@@ -364,6 +364,141 @@ Indexes:
     "pg_namespace_oid_index" PRIMARY KEY, btree (oid)
     "pg_namespace_nspname_index" UNIQUE CONSTRAINT, btree (nspname)
 
+==== case 4e1abbd1671399ae meta-d-system
+\d pg_class
+                     Table "pg_catalog.pg_class"
+       Column        |     Type     | Collation | Nullable | Default 
+---------------------+--------------+-----------+----------+---------
+ oid                 | oid          |           | not null | 
+ relname             | name         |           | not null | 
+ relnamespace        | oid          |           | not null | 
+ reltype             | oid          |           | not null | 
+ reloftype           | oid          |           | not null | 
+ relowner            | oid          |           | not null | 
+ relam               | oid          |           | not null | 
+ relfilenode         | oid          |           | not null | 
+ reltablespace       | oid          |           | not null | 
+ relpages            | integer      |           | not null | 
+ reltuples           | real         |           | not null | 
+ relallvisible       | integer      |           | not null | 
+ relallfrozen        | integer      |           | not null | 
+ reltoastrelid       | oid          |           | not null | 
+ relhasindex         | boolean      |           | not null | 
+ relisshared         | boolean      |           | not null | 
+ relpersistence      | "char"       |           | not null | 
+ relkind             | "char"       |           | not null | 
+ relnatts            | smallint     |           | not null | 
+ relchecks           | smallint     |           | not null | 
+ relhasrules         | boolean      |           | not null | 
+ relhastriggers      | boolean      |           | not null | 
+ relhassubclass      | boolean      |           | not null | 
+ relrowsecurity      | boolean      |           | not null | 
+ relforcerowsecurity | boolean      |           | not null | 
+ relispopulated      | boolean      |           | not null | 
+ relreplident        | "char"       |           | not null | 
+ relispartition      | boolean      |           | not null | 
+ relrewrite          | oid          |           | not null | 
+ relfrozenxid        | xid          |           | not null | 
+ relminmxid          | xid          |           | not null | 
+ relacl              | aclitem[]    |           |          | 
+ reloptions          | text[]       | C         |          | 
+ relpartbound        | pg_node_tree | C         |          | 
+Indexes:
+    "pg_class_oid_index" PRIMARY KEY, btree (oid)
+    "pg_class_relname_nsp_index" UNIQUE CONSTRAINT, btree (relname, relnamespace)
+    "pg_class_tblspc_relfilenode_index" btree (reltablespace, relfilenode)
+
+\d information_schema.tables
+                                 View "information_schema.tables"
+            Column            |               Type                | Collation | Nullable | Default 
+------------------------------+-----------------------------------+-----------+----------+---------
+ table_catalog                | information_schema.sql_identifier |           |          | 
+ table_schema                 | information_schema.sql_identifier |           |          | 
+ table_name                   | information_schema.sql_identifier |           |          | 
+ table_type                   | information_schema.character_data |           |          | 
+ self_referencing_column_name | information_schema.sql_identifier |           |          | 
+ reference_generation         | information_schema.character_data |           |          | 
+ user_defined_type_catalog    | information_schema.sql_identifier |           |          | 
+ user_defined_type_schema     | information_schema.sql_identifier |           |          | 
+ user_defined_type_name       | information_schema.sql_identifier |           |          | 
+ is_insertable_into           | information_schema.yes_or_no      |           |          | 
+ is_typed                     | information_schema.yes_or_no      |           |          | 
+ commit_action                | information_schema.character_data |           |          | 
+
+\di pg_constraint*
+                                        List of indexes
+   Schema   |                     Name                      | Type  |  Owner   |     Table     
+------------+-----------------------------------------------+-------+----------+---------------
+ pg_catalog | pg_constraint_conname_nsp_index               | index | postgres | pg_constraint
+ pg_catalog | pg_constraint_conparentid_index               | index | postgres | pg_constraint
+ pg_catalog | pg_constraint_conrelid_contypid_conname_index | index | postgres | pg_constraint
+ pg_catalog | pg_constraint_contypid_index                  | index | postgres | pg_constraint
+ pg_catalog | pg_constraint_oid_index                       | index | postgres | pg_constraint
+(5 rows)
+
+\dt
+           List of tables
+ Schema |  Name  | Type  |  Owner   
+--------+--------+-------+----------
+ public | author | table | postgres
+ public | book   | table | postgres
+(2 rows)
+
+SELECT c.relname, c.relkind, n.nspname, c.reltype FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname IN ('pg_class', 'pg_attribute', 'pg_type', 'pg_proc', 'pg_namespace', 'pg_tables', 'tables', 'columns') ORDER BY 1, 3;
+   relname    | relkind |      nspname       | reltype 
+--------------+---------+--------------------+---------
+ columns      | v       | information_schema |   13417
+ pg_attribute | r       | pg_catalog         |      75
+ pg_class     | r       | pg_catalog         |      83
+ pg_namespace | r       | pg_catalog         |   10047
+ pg_proc      | r       | pg_catalog         |      81
+ pg_tables    | v       | pg_catalog         |   12035
+ pg_type      | r       | pg_catalog         |      71
+ tables       | v       | information_schema |   13546
+(8 rows)
+
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attlen, a.attnotnull FROM pg_attribute a WHERE a.attrelid = 'pg_attribute'::regclass ORDER BY a.attnum;
+    attname     | format_type | attlen | attnotnull 
+----------------+-------------+--------+------------
+ tableoid       | oid         |      4 | t
+ cmax           | cid         |      4 | t
+ xmax           | xid         |      4 | t
+ cmin           | cid         |      4 | t
+ xmin           | xid         |      4 | t
+ ctid           | tid         |      6 | t
+ attrelid       | oid         |      4 | t
+ attname        | name        |     64 | t
+ atttypid       | oid         |      4 | t
+ attlen         | smallint    |      2 | t
+ attnum         | smallint    |      2 | t
+ atttypmod      | integer     |      4 | t
+ attndims       | smallint    |      2 | t
+ attbyval       | boolean     |      1 | t
+ attalign       | "char"      |      1 | t
+ attstorage     | "char"      |      1 | t
+ attcompression | "char"      |      1 | t
+ attnotnull     | boolean     |      1 | t
+ atthasdef      | boolean     |      1 | t
+ atthasmissing  | boolean     |      1 | t
+ attidentity    | "char"      |      1 | t
+ attgenerated   | "char"      |      1 | t
+ attisdropped   | boolean     |      1 | t
+ attislocal     | boolean     |      1 | t
+ attinhcount    | smallint    |      2 | t
+ attcollation   | oid         |      4 | t
+ attstattarget  | smallint    |      2 | f
+ attacl         | aclitem[]   |     -1 | f
+ attoptions     | text[]      |     -1 | f
+ attfdwoptions  | text[]      |     -1 | f
+ attmissingval  | anyarray    |     -1 | f
+(31 rows)
+
+SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
+ count 
+-------
+     2
+(1 row)
+
 ==== case e3c408812dfeba64 gdesc
 SELECT id, title, price, tags, published FROM book \gdesc
   Column   |          Type          

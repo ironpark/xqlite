@@ -129,6 +129,20 @@ pub fn errorMsgAt(p: *Parse, z: ?[*]const u8, comptime fmt: []const u8, args: an
     errorMsgState(p, z, null, fmt, args);
 }
 
+/// xqlite: add a notice to the statement `p` compiles (int.Notice), which
+/// it reports each time it runs: PostgreSQL's NOTICE of a DDL statement
+/// that skips what IF EXISTS or IF NOT EXISTS lets it skip. Lost if
+/// memory runs out (it is not the statement's result).
+pub fn notice(p: *Parse, n: int.Notice) void {
+    p.xq_notices.append(p.arena, n) catch {};
+}
+
+/// notice() of a message formatted in the arena, with SQLSTATE `state`.
+pub fn noticeFmt(p: *Parse, state: *const [5]u8, comptime fmt: []const u8, args: anytype) void {
+    const msg = std.fmt.allocPrint(p.arena, fmt, args) catch return;
+    notice(p, .{ .sqlstate = state.*, .message = msg });
+}
+
 /// The error just recorded in `p` (by errorMsg()) is `state`.
 pub fn errorIs(p: *Parse, state: int.ErrorState) void {
     if (p.err_msg != null) p.err_state = state;

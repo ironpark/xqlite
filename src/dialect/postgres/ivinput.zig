@@ -23,6 +23,9 @@
 //! docs/extension.md):
 //!   xq_pg_iv_in(x, typmod)       x (text or an interval's BLOB) as an interval
 //!                                BLOB of type modifier typmod (-1: none)
+//!   xq_pg_iv_in(x, typmod, 1)    the same, a leading '-' read as IntervalStyle
+//!                                sql_standard reads it (a cast compiled in
+//!                                such a session)
 //!   xq_pg_iv_extract(field, x)   EXTRACT(field FROM x): a numeric key
 //!   xq_pg_iv_date_part(field, x) date_part(field, x): a double
 //! The dialect's make_interval(years, months, weeks, days, hours, mins,
@@ -504,8 +507,24 @@ fn decodeTime(z: []const u8, range: i32, t: *Itm) Error!void {
 
 const Decoded = union(enum) { fields: Itm, late, early };
 
-/// DecodeInterval().
-fn decodeFields(fields: []Field, range: i32) Error!Decoded {
+/// DecodeInterval(). `sql_standard` (IntervalStyle sql_standard): a
+/// leading '-' and no other sign makes every field negative ('-1
+/// 2:03:04' is -1 days -02:03:04).
+fn decodeFields(fields: []Field, range: i32, sql_standard: bool) Error!Decoded {
+    var force_negative = false;
+    if (sql_standard) {
+        // ParseDateTime() makes no field of '@'.
+        var first: ?usize = null;
+        for (fields, 0..) |f, k| if (!std.mem.eql(u8, f.z, "@")) {
+            first = k;
+            break;
+        };
+        if (first) |k0| if (fields[k0].z.len > 0 and fields[k0].z[0] == '-') {
+            force_negative = for (fields[k0 + 1 ..]) |f| {
+                if (f.z.len > 0 and (f.z[0] == '-' or f.z[0] == '+')) break false;
+            } else true;
+        };
+    }
     var t: Itm = .{};
     var fmask: u32 = 0;
     var typ: Type = .ignore;
@@ -521,6 +540,7 @@ fn decodeFields(fields: []Field, range: i32) Error!Decoded {
             switch (f.t) {
                 .time => {
                     try decodeTime(f.z, range, &t);
+                    if (force_negative and t.usec > 0) t.usec = -t.usec;
                     tmask = M.time;
                     typ = .day;
                     parsing_unit = false;
@@ -590,6 +610,10 @@ fn decodeFields(fields: []Field, range: i32) Error!Decoded {
                 fval = try parseFraction(rest);
                 if (f.z[0] == '-') fval = -fval;
             } else if (rest.len != 0) return error.Syntax;
+            if (force_negative) {
+                if (val > 0) val = -val;
+                if (fval > 0) fval = -fval;
+            }
             const ov = error.FieldOverflow;
             switch (typ) {
                 .microsecond => {
@@ -803,11 +827,17 @@ fn decodeIso(z: []const u8) Error!Itm {
 /// interval_in(): the interval text `z` is, read by the range of type
 /// modifier `tm` (-1 none), then adjusted to it.
 pub fn decode(z: []const u8, tm: i32) Error!Interval {
+    return decodeIn(z, tm, false);
+}
+
+/// decode() as IntervalStyle sql_standard reads it (`sql_standard`):
+/// a leading '-' and no other sign makes every field negative.
+pub fn decodeIn(z: []const u8, tm: i32, sql_standard: bool) Error!Interval {
     const range = rangeOf(tm);
     var buf: [256]u8 = undefined;
     var fields: [max_fields]Field = undefined;
     var iv: Interval = undefined;
-    const d: Error!Decoded = if (split(z, &buf, &fields)) |fs| decodeFields(fs, range) else |err| err;
+    const d: Error!Decoded = if (split(z, &buf, &fields)) |fs| decodeFields(fs, range, sql_standard) else |err| err;
     if (d) |r| {
         iv = switch (r) {
             .fields => |t| try t.interval(),
@@ -869,9 +899,41 @@ const det: dfunc.Options = .{ .deterministic = true };
 /// xq_pg_iv_in(x, typmod): an interval's input with its type modifier
 /// (repr/interval.zig's cast and store).
 pub const in_def = dfunc.scalar("xq_pg_iv_in", 2, det, inFunc);
+/// xq_pg_iv_in(x, typmod, 1): IntervalStyle sql_standard's input (its
+/// sign), what a cast compiled in such a session calls (a constant of
+/// its own: the session does not change it later).
+pub const in_sql_def = dfunc.scalar("xq_pg_iv_in", 3, det, inFunc);
+
+/// xq_pg_iv_in()'s constant arguments after x for type modifier `tm`,
+/// in `buf`: (tm), and where `db`'s session reads intervals in
+/// IntervalStyle sql_standard (tm, 1), its reading of a sign. A
+/// statement keeps them as compiled, as PostgreSQL reads a constant then
+/// (session.zig compiles the statements again when sql_standard comes or
+/// goes); null `db`: the default style's.
+pub fn inArgs(db: ?*const int.Sqlite3, tm: i64, buf: *[2]i64) []const i64 {
+    buf.* = .{ tm, 1 };
+    const sql = if (db) |d| sqlStandard(d) else false;
+    return buf[0 .. @as(usize, 1) + @intFromBool(sql)];
+}
+
+/// Whether `db`'s session reads intervals in IntervalStyle sql_standard.
+pub fn sqlStandard(db: *const int.Sqlite3) bool {
+    return db.xq.postgres.sqlStandard();
+}
+
+/// What a value stored into an interval column goes through
+/// (typing.Rules.store, with the typmod): xq_pg_iv_in(), in the
+/// session's IntervalStyle (a string with a leading '-' in sql_standard).
+/// Called by code generation, not by name: not an engine function.
+pub const store_def = dfunc.scalar("xq_pg_iv_store", 2, .{}, storeFunc);
+
+fn storeFunc(ctx: *Context, argv: []*Mem) void {
+    inRead(ctx, argv, sqlStandard(api.contextDbHandle(ctx)));
+}
 
 pub const engine_functions = [_]int.FuncDef{
     in_def,
+    in_sql_def,
     dfunc.scalar("xq_pg_iv_extract", 2, det, dfunc.bind(partFunc, .{true})),
     dfunc.scalar("xq_pg_iv_date_part", 2, det, dfunc.bind(partFunc, .{false})),
 };
@@ -917,8 +979,13 @@ pub fn fail(ctx: *Context, err: Error, raw: []const u8) void {
     }
 }
 
-/// xq_pg_iv_in(x, typmod).
+/// xq_pg_iv_in(x, typmod [, sql_standard]).
 fn inFunc(ctx: *Context, argv: []*Mem) void {
+    const sql = argv.len > 2 and !dfunc.isNull(argv[2]) and api.valueInt64(argv[2]) != 0;
+    inRead(ctx, argv[0..2], sql);
+}
+
+fn inRead(ctx: *Context, argv: []*Mem, sql_standard: bool) void {
     const m = argv[0];
     if (dfunc.isNull(m)) return api.resultNull(ctx);
     const tm: i32 = if (dfunc.isNull(argv[1])) -1 else std.math.cast(i32, api.valueInt64(argv[1])) orelse -1;
@@ -937,7 +1004,7 @@ fn inFunc(ctx: *Context, argv: []*Mem) void {
         return resultInterval(ctx, r);
     }
     const raw = dfunc.text(ctx, m) orelse return;
-    const iv = decode(raw, tm) catch |err| return fail(ctx, err, raw);
+    const iv = decodeIn(raw, tm, sql_standard) catch |err| return fail(ctx, err, raw);
     resultInterval(ctx, iv);
 }
 
@@ -1166,6 +1233,29 @@ test "pg interval input: DecodeInterval" {
     try testing.expectError(error.FieldOverflow, decode("2147483648 days", -1));
     try testing.expectError(error.IntervalRange, decode("2147483647 years", -1));
     try testing.expectError(error.FieldOverflow, decode("-2147483648 months ago", -1));
+}
+
+test "pg interval input: IntervalStyle sql_standard's leading sign" {
+    const h = usecs_per_hour;
+    const m = usecs_per_minute;
+    const cases = [_]struct { []const u8, Interval, Interval }{
+        // input, as postgres reads it, as sql_standard does
+        .{ "-1 2:03:04", .{ .days = -1, .time = 2 * h + 3 * m + 4 * usecs_per_sec }, .{ .days = -1, .time = -(2 * h + 3 * m + 4 * usecs_per_sec) } },
+        .{ "-1 day 2 hours", .{ .days = -1, .time = 2 * h }, .{ .days = -1, .time = -2 * h } },
+        .{ "-1-2 3", .{ .months = -14, .time = 3 * usecs_per_sec }, .{ .months = -14, .time = -3 * usecs_per_sec } },
+        .{ "-1.5 2:03", .{ .days = -1, .time = -12 * h + 2 * h + 3 * m }, .{ .days = -1, .time = -12 * h - 2 * h - 3 * m } },
+        .{ "-1 2:03:04 ago", .{ .days = 1, .time = -(2 * h + 3 * m + 4 * usecs_per_sec) }, .{ .days = 1, .time = 2 * h + 3 * m + 4 * usecs_per_sec } },
+        .{ "@ -1 day 2 hours", .{ .days = -1, .time = 2 * h }, .{ .days = -1, .time = -2 * h } },
+        // Another sign: as written.
+        .{ "-1 +2:03:04", .{ .days = -1, .time = 2 * h + 3 * m + 4 * usecs_per_sec }, .{ .days = -1, .time = 2 * h + 3 * m + 4 * usecs_per_sec } },
+        .{ "1 -2:00", .{ .days = 1, .time = -2 * h }, .{ .days = 1, .time = -2 * h } },
+        // ISO 8601: no such rule.
+        .{ "P-1DT2H", .{ .days = -1, .time = 2 * h }, .{ .days = -1, .time = 2 * h } },
+    };
+    for (cases) |cs| {
+        try testing.expectEqual(cs[1], try decodeIn(cs[0], -1, false));
+        try testing.expectEqual(cs[2], try decodeIn(cs[0], -1, true));
+    }
 }
 
 test "pg interval input: ISO 8601" {

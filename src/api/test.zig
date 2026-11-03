@@ -1252,7 +1252,7 @@ fn shown(db: *Db, cols: *xqlite.display.Columns, sql: []const u8, i: usize, buf:
     const cell = try s.column(xqlite.Value, i);
     var tbuf: [xqlite.display.max_len]u8 = undefined;
     const t = (try cols.ofStmt(&s, i)) orelse return std.fmt.bufPrint(buf, "{f}", .{fmtCell(cell)});
-    const z = xqlite.display.text(db.dialect(), t.type, cell, &tbuf) orelse return std.fmt.bufPrint(buf, "{f}", .{fmtCell(cell)});
+    const z = xqlite.display.text(db.dialect(), .{}, t.type, cell, &tbuf) orelse return std.fmt.bufPrint(buf, "{f}", .{fmtCell(cell)});
     return std.fmt.bufPrint(buf, "{s}", .{z});
 }
 

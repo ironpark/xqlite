@@ -105,6 +105,29 @@ SELECT date_bin('1 month', timestamp '2001-02-16 20:38:40', timestamp '2001-01-0
 SELECT date_bin('0 days', timestamp '2001-02-16 20:38:40', timestamp '2001-01-01');
 SELECT timezone('infinity'::interval, timestamp '1995-08-06 12:12:12');
 
+-- case: definitions of gcd, lcm and AT TIME ZONE
+CREATE TABLE g (a numeric, b int, i int, l bigint, z text, x timestamptz, y timestamp, iv interval, CHECK (gcd(a, 0) > 0), CHECK (gcd(a, b) > 0), CHECK (gcd(l, i) > 0), CHECK (lcm(l, 2) >= 0), CHECK (gcd(b, i) + 1 > 0), CHECK (timezone(z, x) IS NOT NULL), CHECK (timezone('UTC', y) IS NOT NULL), CHECK ((x AT TIME ZONE 'UTC') IS NOT NULL), CHECK ((y + iv) AT TIME ZONE z IS NOT NULL), CHECK (x AT TIME ZONE iv < y), CHECK (x AT TIME ZONE 'UTC' AT TIME ZONE 'EST' > y));
+SELECT pg_get_constraintdef(oid) AS def, pg_get_constraintdef(oid, true) AS pretty FROM pg_constraint WHERE conrelid = 'g'::regclass ORDER BY 1;
+CREATE VIEW gv AS SELECT gcd(a, 0) AS g1, gcd(b, 2) AS g2, timezone(z, x) AS t1, x AT TIME ZONE 'UTC' AS t2, y AT TIME ZONE z AS t3 FROM g;
+SELECT pg_get_viewdef('gv') AS def, pg_get_viewdef('gv', true) AS pretty;
+SELECT timestamptz '2001-02-16 20:38:40+02' AT TIME ZONE 'UTC' AT TIME ZONE 'EST' AS a, timestamptz '2001-02-16 20:38:40+02' AT TIME ZONE 'UTC';
+
+-- case: string literals of IN lists and CASE met by a boolean
+CREATE TABLE b (n int, x boolean, CHECK (x IN ('t', 'f')), CHECK (CASE WHEN n > 0 THEN x ELSE 'yes' END), CHECK ('on' IN (x, true, false)));
+INSERT INTO b VALUES (1, true), (-1, false);
+SELECT (true IN ('yes', 'no'))::int AS a, ('on' IN (true, false))::int AS b, (true NOT IN ('f', '0'))::int AS c, (CASE WHEN false THEN true ELSE 'no' END)::int AS d, CASE true WHEN 'yes' THEN 1 ELSE 2 END AS e, ('yes' IN ('yes', 'no'))::int AS f;
+SELECT n, (x IN ('t', 'f'))::int AS i, CASE x WHEN 'on' THEN 1 END AS w FROM b ORDER BY n;
+SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'b'::regclass ORDER BY 1;
+CREATE VIEW bv AS SELECT x IN ('t', 'f') AS i, CASE WHEN n > 0 THEN x ELSE 'yes' END AS c, CASE x WHEN 'on' THEN 1 END AS w FROM b;
+SELECT pg_get_viewdef('bv') AS def;
+
+-- case: string literals of IN lists and CASE met by a boolean: errors
+SELECT 'x' IN (true, false);
+SELECT true IN ('t', 'maybe');
+SELECT CASE WHEN true THEN true ELSE 'zz' END;
+SELECT CASE true WHEN 'q' THEN 1 END;
+CREATE TABLE bc (x boolean CHECK (x IN ('t', 'nope')));
+
 -- case: float8(), float4(), booleq, boolne, interval_hash
 SELECT float8(123::int8) = 123 AS a, float8(1.5::numeric) = 1.5 AS b, float4(0.1) = 0.1::float4 AS c, booleq(true, true) AS d, boolne(true, false) AS e, booleq(false, NULL) IS NULL AS f;
 SELECT interval_hash('30 days'::interval) = interval_hash('1 month'::interval) AS t;

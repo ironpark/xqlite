@@ -451,6 +451,8 @@ const Qrf = struct {
     /// empty), and that dialect.
     col_types: []?xqlite.types.Type = &.{},
     viewer: xqlite.Dialect = .sqlite,
+    /// The session's settings of the text of values (IntervalStyle).
+    settings: xqlite.display.Settings = .{},
 
     /// xqlite: the value of column `i_col` as the statement's dialect
     /// shows it, if not as SQLite does.
@@ -465,17 +467,21 @@ const Qrf = struct {
             SQLITE_BLOB => .{ .blob = api.columnBlob(p.stmt, i_col) orelse "" },
             else => return null,
         };
-        return xqlite.display.text(p.viewer, t, cell, buf);
+        return xqlite.display.text(p.viewer, p.settings, t, cell, buf);
     }
 
     /// xqlite: a blob of column `i_col` as the statement's dialect shows
     /// it (a jsonb value's JSON text, a numeric key's digits:
-    /// display.textAlloc()), in `gpa`.
-    fn displayBlob(p: *Qrf, gpa: Allocator, i_col: usize) Error!?[]u8 {
+    /// display.textAlloc()), in `gpa`; with `text`, its text (an
+    /// interval[]'s in the session's IntervalStyle).
+    fn displayBlob(p: *Qrf, gpa: Allocator, i_col: usize, text: bool) Error!?[]u8 {
         if (i_col >= p.col_types.len) return null;
         const t = p.col_types[i_col] orelse return null;
-        const cell: xqlite.Value = .{ .blob = api.columnBlob(p.stmt, i_col) orelse "" };
-        return xqlite.display.textAlloc(gpa, p.viewer, t, cell);
+        const cell: xqlite.Value = if (text)
+            .{ .text = if (api.columnText(p.stmt, i_col)) |z| cstr(z) else "" }
+        else
+            .{ .blob = api.columnBlob(p.stmt, i_col) orelse "" };
+        return xqlite.display.textAlloc(gpa, p.viewer, p.settings, t, cell);
     }
 
     /// xqlite: col_types, for a statement of a dialect other than
@@ -492,6 +498,7 @@ const Qrf = struct {
         for (t, 0..) |*x, i| x.* = if (try columns.get(p.stmt.db, p.stmt, i)) |e| e.type else null;
         p.col_types = t;
         p.viewer = viewer;
+        p.settings = .of(p.stmt.db);
     }
 
     /// Port of qrfError().
@@ -682,7 +689,7 @@ fn renderValue(p: *Qrf, s: *Str, i_col: usize) Error!void {
             }
         },
         SQLITE_BLOB => blob: {
-            if (try p.displayBlob(s.gpa, i_col)) |z| {
+            if (try p.displayBlob(s.gpa, i_col, false)) |z| {
                 defer s.gpa.free(z);
                 try s.append(z);
                 break :blob;
@@ -715,7 +722,10 @@ fn renderValue(p: *Qrf, s: *Str, i_col: usize) Error!void {
                 },
             }
         },
-        SQLITE_TEXT => try encodeText(p, s, if (api.columnText(p.stmt, i_col)) |z| cstr(z) else ""),
+        SQLITE_TEXT => if (try p.displayBlob(s.gpa, i_col, true)) |z| {
+            defer s.gpa.free(z);
+            try encodeText(p, s, z);
+        } else try encodeText(p, s, if (api.columnText(p.stmt, i_col)) |z| cstr(z) else ""),
         else => try s.append(p.nullText()),
     }
     // Truncate values longer than spec.char_limit display characters.

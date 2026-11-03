@@ -1,0 +1,121 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-error-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case d8bdcdc290e217b2 a call no function matches: the types of its arguments
+ERROR:  function foo(integer, unknown) does not exist
+LINE 1: SELECT foo(1, 'a');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function foo(unknown, numeric, bigint, boolean, numeric, text, timestamp with time zone, date, smallint, double precision) does not exist
+LINE 1: SELECT foo(NULL, 1.5, 3000000000, true, 1e3, 'x'::text, now(...
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function foo(character varying, integer[], jsonb, interval, bytea, real, character, bigint) does not exist
+LINE 1: SELECT foo('a'::varchar(3), '{1}'::int[], '{}'::jsonb, inter...
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function foo() does not exist
+LINE 1: SELECT foo();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function foo(integer, text, integer, numeric) does not exist
+LINE 1: SELECT foo(1 + 1, upper('a'), -1, - 1.5);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  column "x" does not exist
+LINE 1: SELECT nosuch(x);
+                      ^
+==== case dd4ddc33ae500e42 a call no function matches: columns and expressions
+ERROR:  function foo(integer, text, numeric, timestamp without time zone) does not exist
+LINE 1: SELECT foo(a, b, c, d) FROM t;
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function foo(character varying, boolean, double precision, date) does not exist
+LINE 1: SELECT foo(e, f, g, h) FROM t;
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function foo(integer, text, numeric, boolean) does not exist
+LINE 1: SELECT foo(a + 1, b || 'x', c * 2, a > 1) FROM t;
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  column "x" does not exist
+LINE 1: SELECT foo(x) FROM t;
+                   ^
+ERROR:  function foo(integer) does not exist
+LINE 1: SELECT count(*) FROM t WHERE foo(a) > 0;
+                                     ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+==== case 38cccadebc3fec65 a function of another number of arguments
+ERROR:  function round(integer, integer, integer) does not exist
+LINE 1: SELECT round(1, 2, 3);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function upper() does not exist
+LINE 1: SELECT upper();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function lower(integer, integer) does not exist
+LINE 1: SELECT lower(1, 2);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function abs(unknown, unknown) does not exist
+LINE 1: SELECT abs('a', 'b');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function count(integer, integer) does not exist
+LINE 1: SELECT count(1, 2);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function sum() does not exist
+LINE 1: SELECT sum();
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+==== case e39e81e9e016a2a8 operators no row matches
+ERROR:  operator does not exist: integer + text
+LINE 1: SELECT 1 + 'a'::text;
+                 ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: timestamp with time zone + integer
+LINE 1: SELECT now() + 1;
+                     ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: boolean + integer
+LINE 1: SELECT true + 1;
+                    ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  operator does not exist: date + double precision
+LINE 1: SELECT current_date + 1.5::float8;
+                            ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+==== case 9e2a77ce2061deb9 notices of DROP ... IF EXISTS
+NOTICE:  table "nt" does not exist, skipping
+NOTICE:  table "nt1" does not exist, skipping
+NOTICE:  table "nt2" does not exist, skipping
+NOTICE:  view "nv" does not exist, skipping
+NOTICE:  index "ni" does not exist, skipping
+NOTICE:  sequence "ns" does not exist, skipping
+NOTICE:  table "nt" does not exist, skipping
+NOTICE:  table "t" does not exist, skipping
+==== case d728ba39533acc6d notices of CREATE ... IF NOT EXISTS
+NOTICE:  relation "t" already exists, skipping
+NOTICE:  relation "t" already exists, skipping
+NOTICE:  relation "ti" already exists, skipping
+NOTICE:  relation "s" already exists, skipping
+NOTICE:  relation "t" already exists, skipping
+NOTICE:  relation "s" already exists, skipping
+NOTICE:  relation "ti" already exists, skipping
+NOTICE:  relation "u" already exists, skipping
+==== case 3c6a09d23b9e5701 notices of ALTER TABLE ... IF EXISTS
+NOTICE:  relation "nt" does not exist, skipping
+NOTICE:  column "a" of relation "t" already exists, skipping
+NOTICE:  column "zz" of relation "t" does not exist, skipping
+==== case 801ccf15e7b82909 notices of schemas
+NOTICE:  schema "nsch" does not exist, skipping
+NOTICE:  schema "nsch1" does not exist, skipping
+NOTICE:  schema "nsch2" does not exist, skipping
+NOTICE:  schema "sc" already exists, skipping
+NOTICE:  relation "x" already exists, skipping
+NOTICE:  drop cascades to table sc.x
+NOTICE:  schema "nsch" does not exist, skipping
+==== case 0f3d55d9a3333fd0 client_min_messages leaves notices out
+NOTICE:  table "a" does not exist, skipping
+NOTICE:  table "d" does not exist, skipping

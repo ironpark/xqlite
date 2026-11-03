@@ -238,13 +238,13 @@ pub fn writeText(gpa: Allocator, b: *std.ArrayList(u8), viewer: xqlite.Dialect, 
         .null => return packet.int1(gpa, b, c.null_value),
         .blob => |x| {
             // A jsonb value stored as JSONB: its JSON text.
-            if (try xqlite.display.textAlloc(gpa, viewer, f.t, v)) |t| {
+            if (try xqlite.display.textAlloc(gpa, viewer, .{}, f.t, v)) |t| {
                 defer gpa.free(t);
                 return packet.lenencStr(gpa, b, t);
             }
             // A uuid's 16 bytes (a PostgreSQL table's) as its text.
             var ub: [xqlite.display.max_len]u8 = undefined;
-            if (f.t.logical == .uuid) if (xqlite.display.text(viewer, f.t, v, &ub)) |t| return packet.lenencStr(gpa, b, t);
+            if (f.t.logical == .uuid) if (xqlite.display.text(viewer, .{}, f.t, v, &ub)) |t| return packet.lenencStr(gpa, b, t);
             return packet.lenencStr(gpa, b, x);
         },
         else => {},
@@ -254,7 +254,7 @@ pub fn writeText(gpa: Allocator, b: *std.ArrayList(u8), viewer: xqlite.Dialect, 
         return packet.lenencStr(gpa, b, bitBytes(f, v, &bytes));
     }
     var buf: [xqlite.display.max_len]u8 = undefined;
-    if (xqlite.display.text(viewer, f.t, v, &buf)) |t| return packet.lenencStr(gpa, b, t);
+    if (xqlite.display.text(viewer, .{}, f.t, v, &buf)) |t| return packet.lenencStr(gpa, b, t);
     switch (v) {
         .integer => |x| {
             const t = std.fmt.bufPrint(&buf, "{d}", .{x}) catch unreachable;

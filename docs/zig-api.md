@@ -401,6 +401,7 @@ try db.createModule("fib", Fib, {});                      // SELECT * FROM fib(1
 | (방언의 선언 타입, `xq_catalog`) | `Stmt.columnTypeAlloc(gpa, i)` (`character varying(20)`과 그 방언 ...) |
 | `sqlite3_table_column_metadata`의 NOT NULL·PRIMARY KEY·AUTOINCREMENT | `Db.columnConstraints(database, table, column)`, `Stmt.columnConstraints(i)` (`ColumnConstraints`: 그 밖에 UNIQUE 인덱스, 인덱스의 첫 열인지. 메모리의 스키마만 읽음) |
 | (`Vdbe.changeCntOn`) | `Stmt.countsChanges()` |
+| (PostgreSQL의 NOTICE) | `Stmt.notices()` (문장이 실행될 때마다 알리는 것: `Notice`의 수준, SQLSTATE, 메시지, `DETAIL`. SQLite 방언은 늘 비어 있음, [NOTICE](postgres.md#notice)), `Db.noticeLevel()` (클라이언트에 보낼 가장 낮은 수준: `client_min_messages`) |
 | `PRAGMA schema_version` (파일을 읽지 않음) | `Db.schemaVersion(name)` |
 | `sqlite3_reset` / `sqlite3_finalize` | `Stmt.reset()` / `Stmt.finalize()` |
 | `sqlite3_sql`, `sqlite3_stmt_readonly` | `Stmt.sql()`, `Stmt.isReadOnly()` |

@@ -96,10 +96,8 @@ fn noAlias(word: []const u8) bool {
 }
 
 /// The error of a statement that does not lex (Parser.init()).
-pub const LexError = struct {
-    fields: @import("../../sql/util.zig").ErrorFields = .{ .message = "" },
-    pos: usize = 0,
-};
+pub const LexError = tokenized.LexError;
+const tokenized = @import("../tokenized.zig");
 
 /// `[schema.]name` as written.
 pub const QName = struct {
@@ -198,7 +196,8 @@ pub const Parser = struct {
 
     /// Lex the statement that starts at `pos` (blank text and leading
     /// semicolons are skipped). An empty statement has no tokens but eof.
-    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError) Error!Parser {
+    /// The session's options change nothing in Oracle.
+    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError, _: tokenized.Options) Error!Parser {
         var l = lexer.Lexer.init(arena, src, pos);
         var toks: std.ArrayList(Token) = .empty;
         var end: usize = src.len;
@@ -521,7 +520,7 @@ pub const Parser = struct {
         if (build.findTable(ps.db, q.name.text, null) != null) return null;
         if (q.schema == null) if (try p.unqualified(q.name, .relation)) |t| if (build.findTable(ps.db, t.name, "main") != null) return null;
         const text = (try views.definition(ps, q.name.text)) orelse return null;
-        var sub = Parser.init(p.arena, text, 0, null) catch |err| switch (err) {
+        var sub = Parser.init(p.arena, text, 0, null, .{}) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.ParseFailed => return p.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text}),
         };

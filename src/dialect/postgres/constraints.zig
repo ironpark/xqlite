@@ -85,7 +85,9 @@ fn valueText(gpa: Allocator, out: *std.Io.Writer, t: ?types.Type, m: *vi.Mem, ro
         .numeric => if (c == .float and ty.scale == null) return false,
         else => {},
     }
-    return valuetext.writePg(gpa, out, ty, c, if (row) 64 else null);
+    // In the session's IntervalStyle, as PostgreSQL's output function.
+    const settings: valuetext.Settings = if (m.db) |db| .of(db) else .{};
+    return valuetext.writePg(gpa, out, settings, ty, c, if (row) 64 else null);
 }
 
 /// The constraint's name: the user's, else PostgreSQL's.

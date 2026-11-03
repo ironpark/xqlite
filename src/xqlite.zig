@@ -47,6 +47,7 @@ pub const SqlError = errors.SqlError;
 pub const UsageError = errors.UsageError;
 pub const ResultCode = errors.ResultCode;
 pub const ErrorInfo = errors.ErrorInfo;
+pub const Notice = Stmt.Notice;
 pub const Diagnostics = errors.Diagnostics;
 
 pub const Value = value.Value;

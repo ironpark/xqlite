@@ -61,8 +61,11 @@ pub const Ddl = struct {
     fn createTable(d: *Ddl, ct: *const tree.CreateTable) Error!void {
         const p = d.l.p;
         const schema: []const u8 = if (ct.temp) "temp" else "main";
+        const found: Existing = if (ct.if_not_exists) skipExisting(p, ct.name.name.text, schema, .table) else .none;
+        // An index or a sequence of the name: nothing to make.
+        if (found == .other) return;
         // A sequence of an identity column that exists already.
-        if (!(ct.if_not_exists and build.findTable(p.db, ct.name.name.text, schema) != null)) {
+        if (found == .none) {
             for (ct.columns) |c| for (c.constraints) |cc| if (cc.kind == .identity) {
                 const seq = cc.kind.identity.sequence;
                 if (sequenceExists(p.db, seq)) return d.failState(ct.name.name.pos, .of("42P07"), "relation \"{s}\" already exists", .{shown(p.db, seq)});
@@ -76,6 +79,9 @@ pub const Ddl = struct {
         if (x.name.name.text.len == 0) {
             const schema: []const u8 = if (x.name.schema) |s| s.text else "main";
             x.name.name = .{ .text = try d.indexName(ci.table.text, ci.items, schema), .pos = ci.table.pos };
+        } else if (ci.if_not_exists) {
+            const schema: []const u8 = if (x.name.schema) |s| s.text else "main";
+            if (skipExisting(d.l.p, x.name.name.text, schema, .index) == .other) return;
         }
         try d.l.createIndex(&x);
     }
@@ -104,8 +110,9 @@ pub const Ddl = struct {
 
     fn createSequence(d: *Ddl, s: *const tree.CreateSequence) Error!void {
         const name = s.name.name.text;
-        if (relationExists(d.l.p.db, name, catalog.main_schema) or sequenceExists(d.l.p.db, name)) {
-            if (s.if_not_exists) return;
+        if (s.if_not_exists) {
+            if (skipExisting(d.l.p, name, catalog.main_schema, .sequence) != .none) return;
+        } else if (existing(d.l.p.db, name, catalog.main_schema, .sequence) != .none) {
             return d.failState(s.name.name.pos, .of("42P07"), "relation \"{s}\" already exists", .{shown(d.l.p.db, name)});
         }
         d.l.createSequence(s);
@@ -115,16 +122,16 @@ pub const Ddl = struct {
         const p = d.l.p;
         const table = a.name.name.text;
         const tab = build.findTable(p.db, table, if (a.name.schema) |s| s.text else null) orelse {
-            if (a.if_exists) return;
+            if (a.if_exists) return notice(p, "00000", "relation \"{s}\" does not exist, skipping", .{bare(p.db, table)});
             return d.failState(a.name.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{table});
         };
         switch (a.action) {
             .add_column => |ac| if (build.columnIndex(tab, ac.def.name.text) >= 0) {
-                if (ac.if_not_exists) return;
+                if (ac.if_not_exists) return notice(p, "42701", "column \"{s}\" of relation \"{s}\" already exists, skipping", .{ ac.def.name.text, shown(p.db, table) });
                 return d.failState(ac.def.name.pos, .of("42710"), "column \"{s}\" of relation \"{s}\" already exists", .{ ac.def.name.text, shown(p.db, table) });
             },
             .drop_column => |dc| if (build.columnIndex(tab, dc.name.text) < 0) {
-                if (dc.if_exists) return;
+                if (dc.if_exists) return notice(p, "00000", "column \"{s}\" of relation \"{s}\" does not exist, skipping", .{ dc.name.text, shown(p.db, table) });
                 return d.failState(dc.name.pos, .of("42703"), "column \"{s}\" of relation \"{s}\" does not exist", .{ dc.name.text, shown(p.db, table) });
             },
             else => {},
@@ -142,8 +149,10 @@ pub const Ddl = struct {
             switch (x.kind) {
                 .table, .view => {
                     const db: ?[]const u8 = if (q.schema) |s| s.text else null;
-                    if (build.findTable(p.db, name, db) == null and !x.if_exists) {
-                        return d.failState(q.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ if (x.kind == .table) "table" else "view", shown(p.db, name) });
+                    if (build.findTable(p.db, name, db) == null) {
+                        const kind = if (x.kind == .table) "table" else "view";
+                        if (!x.if_exists) return d.failState(q.name.pos, .of("42P01"), "{s} \"{s}\" does not exist", .{ kind, shown(p.db, name) });
+                        notice(p, "00000", "{s} \"{s}\" does not exist, skipping", .{ kind, bare(p.db, name) });
                     }
                     // Several tables of an auto-vacuum database: dropping one
                     // may move the root pages of the next (SQLite drops one
@@ -153,10 +162,15 @@ pub const Ddl = struct {
                     };
                 },
                 .sequence => if (!sequenceExists(p.db, name)) {
-                    if (x.if_exists) continue;
+                    if (x.if_exists) {
+                        notice(p, "00000", "sequence \"{s}\" does not exist, skipping", .{bare(p.db, name)});
+                        continue;
+                    }
                     return d.failState(q.name.pos, .of("42704"), "sequence \"{s}\" does not exist", .{shown(p.db, name)});
                 },
-                .index => {},
+                .index => if (x.if_exists and build.findIndex(p.db, name, if (q.schema) |s| s.text else null) == null) {
+                    notice(p, "00000", "index \"{s}\" does not exist, skipping", .{bare(p.db, name)});
+                },
             }
             try names.append(p.arena, q);
         }
@@ -167,6 +181,51 @@ pub const Ddl = struct {
         try d.l.drop(&all);
     }
 };
+
+/// PostgreSQL's NOTICE of statement `p` (util.notice()), which has a
+/// program even when it does nothing else, so that it reports the notice
+/// when it runs.
+pub fn notice(p: *Parse, state: *const [5]u8, comptime fmt: []const u8, args: anytype) void {
+    @import("../../sql/util.zig").noticeFmt(p, state, fmt, args);
+    _ = build.getVdbe(p);
+}
+
+/// shown(), and the bare name of a name not on search_path (the parser's
+/// pg_temp.<name> that names nothing).
+fn bare(db: *int.Sqlite3, name: []const u8) []const u8 {
+    if (catalog.schemas.split(name)) |s| if (std.mem.eql(u8, s.schema, "pg_temp")) return s.name;
+    return shown(db, name);
+}
+
+/// What is of the name of a relation that CREATE makes: none, one of the
+/// kind it makes (`.made`: a table for CREATE TABLE), or another relation
+/// or a sequence (`.other`), as PostgreSQL's relations share one namespace.
+const Existing = enum { none, made, other };
+
+/// The kind of relation a CREATE makes.
+const Made = enum { table, index, sequence };
+
+fn existing(db: *int.Sqlite3, name: []const u8, schema: []const u8, kind: Made) Existing {
+    const table = build.findTable(db, name, schema) != null;
+    const index = !table and build.findIndex(db, name, schema) != null;
+    const made = switch (kind) {
+        .table => table,
+        .index => index,
+        .sequence => false,
+    };
+    if (made) return .made;
+    return if (table or index or sequenceExists(db, name)) .other else .none;
+}
+
+/// existing() for CREATE ... IF NOT EXISTS, with PostgreSQL's NOTICE when
+/// the name is taken. A relation of the kind made is left to the lowered
+/// statement, which skips it (SQLite's IF NOT EXISTS); on `.other` there
+/// is nothing to make.
+fn skipExisting(p: *Parse, name: []const u8, schema: []const u8, kind: Made) Existing {
+    const found = existing(p.db, name, schema, kind);
+    if (found != .none) notice(p, "42P07", "relation \"{s}\" already exists, skipping", .{shown(p.db, name)});
+    return found;
+}
 
 fn relationExists(db: *int.Sqlite3, name: []const u8, schema: []const u8) bool {
     if (build.findTable(db, name, schema) != null) return true;

@@ -381,10 +381,7 @@ fn tableVisibleFunc(ctx: *Context, argv: []*Mem) void {
     var c: Call = .init(ctx);
     defer c.deinit();
     const s = c.get() orelse return;
-    const r = s.rel(oid) orelse {
-        for (pgc.builtin_relations) |b| if (b[0] == oid) return api.resultInt64(ctx, 1);
-        return api.resultNull(ctx);
-    };
+    const r = s.rel(oid) orelse return api.resultNull(ctx);
     const p = c.path(s) orelse return;
     api.resultInt64(ctx, @intFromBool(pgc.visible(s, p, r)));
 }
@@ -392,12 +389,14 @@ fn tableVisibleFunc(ctx: *Context, argv: []*Mem) void {
 fn typeVisibleFunc(ctx: *Context, argv: []*Mem) void {
     const oid = oidArg(argv[0]) orelse return api.resultNull(ctx);
     if (pgc.builtinType(oid) != null) return api.resultInt64(ctx, 1);
+    // information_schema's domains: not on the path.
+    if (pgc.typeInfo(oid) != null) return api.resultInt64(ctx, 0);
     var c: Call = .init(ctx);
     defer c.deinit();
     const s = c.get() orelse return;
     const p = c.path(s) orelse return;
-    for (s.rels) |*r| if (r.rowtype == oid) return api.resultInt64(ctx, @intFromBool(pgc.visible(s, p, r)));
-    api.resultNull(ctx);
+    const r = s.relByRowtype(oid) orelse return api.resultNull(ctx);
+    api.resultInt64(ctx, @intFromBool(pgc.visible(s, p, r)));
 }
 
 /// pg_get_expr(text, relation [, pretty]): conbin's and adbin's text is
@@ -810,18 +809,10 @@ pub fn resolveClass(a: Allocator, s: *const Snapshot, p: []const u32, z: []const
     const name = parts[0];
     if (parts.len > 1) {
         const ns = parts[1];
-        if (eql(ns, "pg_catalog")) {
-            for (pgc.builtin_relations) |b| if (eql(b[1], name)) return b[0];
-            return null;
-        }
         const n = s.nspByName(ns) orelse return null;
         return if (s.relByName(n.oid, name)) |r| r.oid else null;
     }
     for (p) |n| {
-        if (n == pgc.oid_pg_catalog) {
-            for (pgc.builtin_relations) |b| if (eql(b[1], name)) return b[0];
-            continue;
-        }
         if (s.relByName(n, name)) |r| return r.oid;
     }
     return null;
@@ -934,8 +925,10 @@ fn regOut(ctx: *Context, argv: []*Mem, comptime reg: Reg) void {
     if (oid == 0) return api.resultText(ctx, "-", .static);
     switch (reg) {
         .role => return api.resultText(ctx, if (oid == pgc.oid_superuser) state.user else number, .transient),
-        .type => if (pgc.builtinType(oid)) |t| return api.resultText(ctx, t.fmt, .static),
-        .class => for (pgc.builtin_relations) |b| if (b[0] == oid) return api.resultText(ctx, b[1], .static),
+        .type => if (pgc.typeInfo(oid)) |t| return api.resultText(ctx, t.fmt, .static),
+        // pg_catalog's, found by the name alone (unless a temporary
+        // relation of the name comes first).
+        .class => if (pgc.system.rel(oid)) |r| if (r.nsp == pgc.oid_pg_catalog) return api.resultText(ctx, r.name, .static),
         .namespace => {},
     }
     var c: Call = .init(ctx);
@@ -947,7 +940,7 @@ fn regOut(ctx: *Context, argv: []*Mem, comptime reg: Reg) void {
             const p = c.path(s) orelse return;
             return c.text(relText(c.a(), s, p, r) catch return c.oom());
         },
-        .type => for (s.rels) |*r| if (r.rowtype == oid) {
+        .type => if (s.relByRowtype(oid)) |r| {
             const p = c.path(s) orelse return;
             return c.text(relText(c.a(), s, p, r) catch return c.oom());
         },

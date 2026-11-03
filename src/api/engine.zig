@@ -403,6 +403,20 @@ pub fn setColumnMetadata(h: *Handle, on: bool) void {
     h.col_metadata = on;
 }
 
+/// xqlite: a notice of a statement (PostgreSQL's NOTICE).
+pub const Notice = int.Notice;
+
+/// The notices the statement reports each time it runs (int.Notice).
+pub fn notices(v: *const Vm) []const Notice {
+    return v.xq_notices;
+}
+
+/// The lowest level of notice the connection's client is sent, by its
+/// dialect's settings (PostgreSQL's client_min_messages).
+pub fn noticeLevel(h: *const Handle) Notice.Level {
+    return @import("../dialect/dialect.zig").noticeLevel(h);
+}
+
 /// The dialect the statement was compiled in.
 pub fn statementDialect(v: *const Vm) Dialect {
     return v.xq_lang.dialect;

@@ -30,6 +30,7 @@ pub const SqlError = api.SqlError;
 pub const UsageError = api.UsageError;
 pub const ResultCode = api.ResultCode;
 pub const ErrorInfo = api.ErrorInfo;
+pub const Notice = api.Notice;
 pub const Diagnostics = api.Diagnostics;
 pub const Value = api.Value;
 pub const Kind = api.Kind;

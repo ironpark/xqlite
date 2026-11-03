@@ -7,7 +7,7 @@
 //!  - left, right, repeat, reverse, lpad, rpad, split_part,
 //!    starts_with;
 //!  - random() in [0, 1), gen_random_uuid();
-//!  - floor, ceil/ceiling, sqrt, power/pow, exp, ln, log, mod, trunc,
+//!  - floor, ceil/ceiling, sqrt, power/pow, exp, ln, log, log10, mod, trunc,
 //!    sign, pi;
 //!  - current_user(), current_database() (current_schema() is session.zig's);
 //!  - format_type(oid, typmod): the name of a type by its OID and type
@@ -24,7 +24,8 @@
 //!    xq_pg_num_precision(), xq_pg_num_scale() of (catalog type, SQLite
 //!    type): the columns of information_schema.columns;
 //!  - xq_pg_regex(s, pattern, flags): the regular expression operators
-//!    `~` and `~*` (regex.zig); `!~`, `!~*` are its NOT.
+//!    `~` and `~*` as the schema of older databases calls them (regex.zig,
+//!    kept as it was); the frontend now writes regexp.zig's xq_pg_re().
 
 const std = @import("std");
 const dfunc = @import("../func.zig");
@@ -62,6 +63,8 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("ln", 1, det, lnFunc),
     dfunc.scalar("log", 1, det, logFunc),
     dfunc.scalar("log", 2, det, logFunc),
+    dfunc.scalar("log10", 1, det, logFunc),
+    dfunc.scalar("width_bucket", 4, det, widthBucketFunc),
     dfunc.scalar("mod", 2, det, modFunc),
     dfunc.scalar("trunc", 1, det, truncFunc),
     dfunc.scalar("trunc", 2, det, truncFunc),
@@ -76,9 +79,11 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("scale", 1, det, decimal_sql.def("xq_dec_scale", 1).x_sfunc.?),
     dfunc.scalar("min_scale", 1, det, decimal_sql.def("xq_dec_min_scale", 1).x_sfunc.?),
     dfunc.scalar("trim_scale", 1, det, decimal_sql.def("xq_dec_trim_scale", 1).x_sfunc.?),
+    dfunc.scalar("factorial", 1, det, decimal_sql.def("xq_dec_factorial", 1).x_sfunc.?),
 };
 
 const decimal_sql = @import("../decimal_sql.zig");
+const decimal_math = @import("../decimal_math.zig");
 
 pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_bool", 1, det, boolFunc),
@@ -308,6 +313,48 @@ fn logFunc(ctx: *Context, argv: []*Mem) void {
     api.resultDouble(ctx, @log(x) / @log(b));
 }
 
+/// width_bucket(x, b1, b2, n) of doubles (width_bucket_float8());
+/// numerics' is decimal_sql.zig's xq_dec_width_bucket().
+fn widthBucketFunc(ctx: *Context, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(ctx);
+    const x = api.valueDouble(argv[0]);
+    const b1 = api.valueDouble(argv[1]);
+    const b2 = api.valueDouble(argv[2]);
+    const count = api.valueInt64(argv[3]);
+    if (count <= 0 or count > std.math.maxInt(i32)) return bucketError(ctx, error.BucketCount);
+    if (std.math.isNan(x) or std.math.isNan(b1) or std.math.isNan(b2)) return bucketError(ctx, error.BucketNaN);
+    if (std.math.isInf(b1) or std.math.isInf(b2)) return bucketError(ctx, error.BucketInfinite);
+    if (b1 == b2) return bucketError(ctx, error.BucketEqual);
+    const n: f64 = @floatFromInt(count);
+    const up = b1 < b2;
+    const before = if (up) x < b1 else x > b1;
+    const after = if (up) x >= b2 else x <= b2;
+    if (before) return api.resultInt64(ctx, 0);
+    if (after) {
+        if (count == std.math.maxInt(i32)) return bucketError(ctx, error.IntegerRange);
+        return api.resultInt64(ctx, count + 1);
+    }
+    const lo = if (up) b1 else x;
+    const hi = if (up) x else b1;
+    const width = if (up) b2 - b1 else b1 - b2;
+    const q = if (!std.math.isInf(width))
+        n * ((hi - lo) / width)
+    else if (up)
+        n * ((x / 2 - b1 / 2) / (b2 / 2 - b1 / 2))
+    else
+        n * ((b1 / 2 - x / 2) / (b1 / 2 - b2 / 2));
+    // C's conversion to int32: truncated.
+    var r: i64 = @intFromFloat(@trunc(q));
+    if (r >= count) r = count - 1;
+    api.resultInt64(ctx, r + 1);
+}
+
+/// width_bucket()'s errors, numerics' (decimal_math.zig).
+fn bucketError(ctx: *Context, err: decimal_math.Error) void {
+    const state, const msg = decimal_math.errorInfo(err).?;
+    api.resultErrorState(ctx, .{ .sqlstate = state }, msg);
+}
+
 fn modFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     if (isInt(argv[0]) and isInt(argv[1])) {
@@ -346,8 +393,9 @@ fn currentDatabaseFunc(ctx: *Context, _: []*Mem) void {
 
 /// format_type(oid, typmod): the name of the type of OID `oid` (those
 /// the server describes columns with, src/server/pg/values.zig), with the
-/// type modifier's arguments (`character varying(10)`, `numeric(10,2)`);
-/// "???" for another OID, as PostgreSQL writes one it does not know.
+/// type modifier's arguments (`character varying(10)`, `numeric(10,2)`),
+/// or of another built-in type (pgcatalog.zig's typeInfo()); "???" for
+/// another OID, as PostgreSQL writes one it does not know.
 fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
     var oid = api.valueInt64(argv[0]);
@@ -388,7 +436,12 @@ fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
     };
     const n = for (names) |n| {
         if (n[0] == oid) break n;
-    } else return api.resultText(ctx, "???", .static);
+    } else if (@import("pgcatalog.zig").typeInfo(std.math.cast(u32, oid) orelse 0)) |t|
+        // The other built-in types (regproc, xid, aclitem ...) and
+        // information_schema's domains: no modifier.
+        Name{ oid, t.fmt, .none }
+    else
+        return api.resultText(ctx, "???", .static);
     var buf: [64]u8 = undefined;
     const name = n[1];
     const z = switch (n[2]) {
@@ -709,7 +762,8 @@ fn numScaleFunc(ctx: *Context, argv: []*Mem) void {
 /// xq_pg_regex(s, pattern, flags): `s ~ pattern` (flags ''), `s ~*
 /// pattern` (flags 'i'): whether `s` has a match of POSIX regular
 /// expression `pattern` anywhere (regex.zig's syntax). `!~` and `!~*`
-/// are its NOT.
+/// are its NOT. The older databases' schema calls it; its meaning stays
+/// (the frontend writes regexp.zig's xq_pg_re()).
 fn regexFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const s = text(ctx, argv[0]) orelse return;

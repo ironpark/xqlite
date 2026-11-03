@@ -70,7 +70,7 @@
 - 실패한 문장은 `run()`의 오류가 아니라 `failed` 이벤트입니다. `run()`의 오류는 sink의 오류(클라이언트가 떠남)와 메모리 부족뿐입니다.
 - `Options.abort_failed_transactions`: PostgreSQL의 규칙입니다. 트랜잭션 안에서 문장이 실패하면 트랜잭션이 끝날 때까지 `ROLLBACK` 말고는 모두 `25P02`로 실패하고, `COMMIT`은 롤백합니다(`ROLLBACK` 태그). PostgreSQL처럼 이 판정(`Session.admit()`)은 문장을 컴파일하기 전에 하고, 확장 질의의 Execute도 같은 함수를 씁니다. 끄면 SQLite·MySQL·SQL Server처럼 실패한 문장만 되돌립니다.
 - `Options.implicit_transactions`: PostgreSQL의 암묵적 트랜잭션 블록입니다. 트랜잭션 밖에서 스크립트의 문장들(문장이 둘 이상일 때)이나 `sync()`까지 실행한 준비된 문장들은 세션이 연 트랜잭션 하나에서 돌고, 스크립트 끝이나 `sync()`에서 커밋됩니다. 문장이 실패하면 그 앞의 문장까지 롤백됩니다. 그 안의 `BEGIN`은 트랜잭션을 클라이언트의 것으로 바꾸고(실행하지 않고 `BEGIN` 완료), 트랜잭션 밖의 `COMMIT`/`ROLLBACK`은 오류가 아니라 경고(`notice`, `25P01` "there is no transaction in progress")입니다. `SAVEPOINT`, `RELEASE`, `VACUUM`, `ATTACH`, `DETACH`, `PRAGMA`, `SET`, `SHOW`, `USE`는 암묵적 트랜잭션을 열지 않습니다.
-- `notice(Notice)`는 선택 이벤트입니다. sink에 `pub fn notice`가 없으면 부르지 않습니다.
+- `notice(Notice)`는 선택 이벤트입니다. sink에 `pub fn notice`가 없으면 부르지 않습니다. 세션의 경고와 문장의 알림(`Stmt.notices()`: PostgreSQL 방언의 `table "t" does not exist, skipping` ...)이 나가고, 문장의 알림은 문장이 실행될 때마다 첫 `step()` 뒤, 그 문장의 `columns`·`complete` 앞에 나갑니다. 연결의 설정이 빼는 수준(`Db.noticeLevel()`: PostgreSQL의 `client_min_messages`)의 것은 보내지 않습니다. `Notice`에는 수준(`NOTICE`, `WARNING`), SQLSTATE, 메시지, `DETAIL`이 있습니다.
 - `SET`은 결과가 없습니다. 방언이 `SET`을 질의로 돌려도(PostgreSQL의 `set_config()`) `columns`·`row` 없이 `complete`만 나갑니다.
 - `status()`: `idle`, `in_transaction`, `aborted`. PostgreSQL ReadyForQuery의 `I`/`T`/`E`, MySQL의 `SERVER_STATUS_IN_TRANS`입니다. 세션이 연 암묵적 트랜잭션은 `idle`입니다.
 - `markFailed()`: 프로토콜이 스스로 낸 문장의 실패(보낼 수 없는 값, 읽을 수 없는 매개변수) 뒤에, 문장의 실패처럼 암묵적 트랜잭션을 롤백하거나 열린 트랜잭션을 실패로 표시합니다.
@@ -154,13 +154,13 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 - `StartupMessage` 3.0: `user`(없으면 `28000`), `database`(없으면 사용자 이름), `application_name`, `options`(`-c name=value`, `--name=value`, 모르는 이름이면 FATAL). `application_name`과 `options`의 값은 방언의 `xq_pg_startup_setting()`으로 정하므로 그 값이 세션의 값이자 `RESET`이 돌아가는 값입니다(PostgreSQL과 같음). 데이터베이스 이름은 `current_database()`, `pg_database.datname`, `information_schema`의 `table_catalog`가 됩니다(숨은 설정 `xqlite.database`). 그 밖의 설정(`client_encoding`, `DateStyle`, `extra_float_digits` ...)은 무시합니다. 3.x의 더 높은 마이너 버전이나 `_pq_.` 옵션에는 `NegotiateProtocolVersion`(3.0)을 보냅니다.
 - 데이터베이스 이름: 서버는 파일 하나를 내놓으므로 어떤 이름이든 그 파일입니다. `Config.database`(`--database`)를 주면 그 이름만 받습니다(아니면 `3D000`).
 - 인증(`auth.Config`): `trust`(기본), `password`(cleartext), `md5`, `scram-sha-256`. 비밀번호는 하나(모든 사용자)이고, `user`를 주면 그 사용자만 받습니다(아니면 `28000` "role does not exist"). 틀리면 `28P01`. SCRAM은 RFC 5802/7677을 따르고 채널 바인딩은 없습니다(`SCRAM-SHA-256-PLUS`를 알리지 않고, `p=`를 요구하는 클라이언트는 거절). 키(StoredKey, ServerKey)는 시작할 때 무작위 소금과 4096회 PBKDF2로 한 번 만듭니다. 비밀번호는 정규화(SASLprep)하지 않으므로 ASCII 비밀번호가 PostgreSQL과 같게 동작합니다. 인증 전의 메시지는 10000바이트까지입니다.
-- 그 뒤: `AuthenticationOk`, `ParameterStatus`(`server_version` "18.6 (xqlite)" — 방언의 `SHOW server_version`, `server_version_num` 180006, `version()`의 "PostgreSQL 18.6"과 같은 릴리스. psql 18이 주 버전이 다르다는 경고를 내지 않음, `server_encoding`/`client_encoding` UTF8, `DateStyle` "ISO, MDY", `integer_datetimes` on, `standard_conforming_strings` on, `TimeZone` UTC, `IntervalStyle` postgres, `is_superuser` on, `session_authorization`, `application_name`, `default_transaction_read_only`, `in_hot_standby`, `scram_iterations` 4096, PostgreSQL 18처럼 `search_path`(세션의 값, 시작 옵션이 바꾼 것도). `SET`으로 바뀐 값을 다시 알리지는 않음), `BackendKeyData`(세션의 `Ticket`), `ReadyForQuery`(`Session.status()`의 `I`/`T`/`E`).
+- 그 뒤: `AuthenticationOk`, `ParameterStatus`(`server_version` "18.6 (xqlite)" — 방언의 `SHOW server_version`, `server_version_num` 180006, `version()`의 "PostgreSQL 18.6"과 같은 릴리스. psql 18이 주 버전이 다르다는 경고를 내지 않음, `server_encoding`/`client_encoding` UTF8, `DateStyle` "ISO, MDY", `integer_datetimes` on, `TimeZone` UTC, `is_superuser` on, `session_authorization`, `default_transaction_read_only`, `in_hot_standby`, `scram_iterations` 4096, 그리고 세션의 값인 `application_name`, `IntervalStyle`, `standard_conforming_strings`, PostgreSQL 18처럼 `search_path`(`Db.reported_settings`, 시작 옵션이 바꾼 것도). 이 네 설정은 `SET`·`RESET`·`set_config()`로 값이 바뀌면 다음 `ReadyForQuery` 앞에 다시 알림(PostgreSQL의 GUC_REPORT. 마지막으로 보낸 값과 같아지면 보내지 않음)), `BackendKeyData`(세션의 `Ticket`), `ReadyForQuery`(`Session.status()`의 `I`/`T`/`E`).
 
 ### 단순 질의
 
 - `Query`의 텍스트는 스크립트입니다(`Session.run()`): 문장마다 `RowDescription`, `DataRow`, `CommandComplete`. 문장이 실패하면 `ErrorResponse`를 보내고 나머지는 돌리지 않으며, 암묵적 트랜잭션이면 앞의 문장도 롤백됩니다. 문장이 없으면 `EmptyQueryResponse`. 끝에 `ReadyForQuery`.
 - 명령 태그: `SELECT n`(VALUES도, `CREATE TABLE ... AS`·`SELECT ... INTO`는 넣은 행 수: PostgreSQL 방언의 CREATE TABLE AS는 `Hooks.count_create_as`로 행을 `changes()`에 셈), `INSERT 0 n`, `UPDATE n`, `DELETE n`, `MERGE n`, `TRUNCATE TABLE`, `CALL`, 나머지는 명령 분류의 단어(`CREATE TABLE`, `BEGIN`, `SET`, `RESET`, `COMMENT` ...). `SET`과 `RESET`은 행을 보내지 않습니다.
-- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)(엔진이 적은 자리에서 자름, [PostgreSQL 호환](postgres.md#위치와-detailhintcontext)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`)입니다.
+- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)(엔진이 적은 자리에서 자름, [PostgreSQL 호환](postgres.md#위치와-detailhintcontext)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`: `WARNING`)와 문장의 알림(`IF EXISTS`·`IF NOT EXISTS`가 건너뛴 것, `DROP SCHEMA ... CASCADE`가 함께 지운 것: `NOTICE`, [PostgreSQL 호환](postgres.md#notice))이고, `S`/`V`, `C`, `M`, 있으면 `D`입니다. 문장의 알림은 그 문장의 `CommandComplete` 앞에 나가고(확장 질의는 `Execute`마다), `SET client_min_messages = warning`이면 `NOTICE`를, `error`면 `WARNING`도 보내지 않습니다.
 - 단순 질의는 이름 없는 문장과 포털을 지웁니다.
 
 ### 확장 질의
@@ -187,7 +187,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 
 - TLS, GSSAPI, 채널 바인딩이 없습니다. 비밀번호는 서버에 하나입니다(사용자별 비밀번호, `pg_hba.conf` 같은 규칙 없음).
 - `COPY`는 지원하지 않습니다: 방언이 파싱하지 못하고, 서버는 그 오류를 `0A000` "COPY is not supported by this server"로 바꿔 보냅니다. CopyData/CopyDone/CopyFail은 PostgreSQL처럼 무시합니다. 함수 호출 프로토콜(`FunctionCall`)은 `0A000`입니다.
-- 클라이언트가 바꾼 설정(`SET client_encoding`, `DateStyle` ...)을 `ParameterStatus`로 다시 알리지 않습니다. 시작할 때의 값은 늘 UTF8, ISO, UTC입니다.
+- 동작에 쓰지 않는 설정(`SET client_encoding`, `DateStyle`, `TimeZone` ...)은 바뀌어도 `ParameterStatus`로 다시 알리지 않습니다. 시작할 때의 값은 늘 UTF8, ISO, UTC입니다.
 - 실행 전의 열 타입(`Describe`)은 문장이 매긴 타입입니다. 문장이 모르는 식(SQLite 테이블의 열을 쓰는 식, 규칙이 없는 함수)은 `text`로 알리고, 단순 질의에서는 첫 행의 값으로 정합니다.
 - 단순 질의의 문장이 하나뿐이면 암묵적 트랜잭션을 열지 않습니다(SQLite의 자동 커밋과 같음).
 - SQL 수준의 `PREPARE`/`EXECUTE`/`DECLARE CURSOR`는 방언의 일입니다(지금은 없음).
@@ -224,7 +224,7 @@ podman run --rm postgres:16-alpine psql "host=host.containers.internal port=1543
 
 - 각 파일의 단위 테스트: 방언별 선언 타입, 방언별 오류 문구, 명령 분류, 세션 이벤트와 PostgreSQL의 실패한 트랜잭션, 레지스트리.
 - 세션: 암묵적 트랜잭션(실패가 앞의 문장을 롤백, `BEGIN`이 트랜잭션을 넘겨받음, 트랜잭션 밖 `COMMIT`의 경고), 준비된 문장(실행 전의 매개변수·열 타입, 몇 행씩 실행, 둘 이상의 문장·컴파일 실패·빈 문장, 실패한 트랜잭션에서의 준비와 실행, 스키마 변경 뒤 다시 설명, 첫 행으로 정하는 모르는 식의 타입).
-- `src/server/pg/test.zig`: 테스트 안의 최소 PostgreSQL 클라이언트(startup, 인증 교환, 메시지마다 한 줄의 기록)로 루프백 서버를 확인합니다. startup과 `ParameterStatus`, 여러 문장의 단순 질의와 값의 텍스트(`numeric(10,2)`, 불리언, `bytea`, `float8`), 빈 질의, 오류 위치(문자 단위), 암묵적 트랜잭션의 롤백, ReadyForQuery의 `I`/`T`/`E`, 확장 질의(문장 설명, 행 수 제한과 `PortalSuspended`, 이진 매개변수와 결과, 클라이언트의 OID, `Sync`까지 건너뛰기, 이름 없는 빈 문장, `Close`, 트랜잭션 안에서 `Sync`를 넘는 포털), `CancelRequest`, cleartext·MD5·SCRAM-SHA-256과 틀린 비밀번호·없는 사용자, 배열(텍스트와 이진 형식의 값, `ParameterDescription`·`RowDescription`의 배열 OID, `= ANY($1)`의 매개변수), 카탈로그와 설정(`ParameterStatus`·`SHOW server_version`·`version()`의 릴리스, 클라이언트가 준 데이터베이스 이름, `RESET`의 태그와 시작 값, `regclass`와 `pg_class.oid`, `pg_attribute.atttypid`가 RowDescription의 OID와 같은지, `INTEGER PRIMARY KEY`와 비교한 매개변수의 `int4`). `pg/auth.zig`는 RFC 7677의 예(클라이언트 증명과 서버 서명)로 SCRAM을 확인합니다.
+- `src/server/pg/test.zig`: 테스트 안의 최소 PostgreSQL 클라이언트(startup, 인증 교환, 메시지마다 한 줄의 기록)로 루프백 서버를 확인합니다. startup과 `ParameterStatus`, 여러 문장의 단순 질의와 값의 텍스트(`numeric(10,2)`, 불리언, `bytea`, `float8`), 빈 질의, 오류 위치(문자 단위), 암묵적 트랜잭션의 롤백, ReadyForQuery의 `I`/`T`/`E`, 확장 질의(문장 설명, 행 수 제한과 `PortalSuspended`, 이진 매개변수와 결과, 클라이언트의 OID, `Sync`까지 건너뛰기, 이름 없는 빈 문장, `Close`, 트랜잭션 안에서 `Sync`를 넘는 포털), `CancelRequest`, cleartext·MD5·SCRAM-SHA-256과 틀린 비밀번호·없는 사용자, 배열(텍스트와 이진 형식의 값, `ParameterDescription`·`RowDescription`의 배열 OID, `= ANY($1)`의 매개변수), 카탈로그와 설정(`ParameterStatus`·`SHOW server_version`·`version()`의 릴리스, `SET`이 바꾼 `IntervalStyle`·`standard_conforming_strings`의 `ParameterStatus`, 클라이언트가 준 데이터베이스 이름, `RESET`의 태그와 시작 값, `regclass`와 `pg_class.oid`, `pg_attribute.atttypid`가 RowDescription의 OID와 같은지, `INTEGER PRIMARY KEY`와 비교한 매개변수의 `int4`). `pg/auth.zig`는 RFC 7677의 예(클라이언트 증명과 서버 서명)로 SCRAM을 확인합니다.
 - `src/server/test.zig`: 루프백 TCP로 실제 서버를 띄우고 테스트용 줄 프로토콜(한 줄에 스크립트 하나, 이벤트마다 한 줄)로 확인합니다. 두 클라이언트가 같은 DB를 보는지, 세 번째 클라이언트의 취소가 끝없는 재귀 CTE를 멈추는지(`57014`), 그 뒤에도 세션이 계속 쓰이는지 봅니다.
 - `src/server/mysql/test.zig`: MySQL 프로토콜([MySQL 프로토콜의 테스트](#mysql-프로토콜의-테스트)).
 
@@ -370,7 +370,7 @@ podman run --rm mariadb:11 mariadb-admin -h host.containers.internal -P 33061 -u
 
 ## 다음 단계
 
-1. **pgwire 다듬기**: 드라이버(pgjdbc, psycopg, pgx, node-postgres)로 검증, `numeric`·날짜·시각의 이진 형식, 클라이언트가 준 매개변수 타입을 엔진의 매개변수 타입으로, 바뀐 설정의 `ParameterStatus`, TLS, `COPY`(방언의 파싱부터).
+1. **pgwire 다듬기**: 드라이버(pgjdbc, psycopg, pgx, node-postgres)로 검증, `numeric`·날짜·시각의 이진 형식, 클라이언트가 준 매개변수 타입을 엔진의 매개변수 타입으로, TLS, `COPY`(방언의 파싱부터).
 2. **문장의 종류를 엔진이 기록**: `Parse`에 동사와 객체 종류를 두고 빌더 진입점이 기본값을, 방언 프론트엔드가 다르게 낮추는 문장(`SET`, `SHOW`, `TRUNCATE`, `MERGE` ...)을 덮어써 `Stmt.command()`로 내보냅니다. 명령 태그가 첫 소비자입니다.
 3. **방언의 타입 서술자**: 선언 타입 텍스트를 프로토콜 중립 타입으로 바꾸는 방언 훅. 각 방언의 타입 enum 위의 망라적 switch라서 `types.zig`의 이름 표가 필요 없어지고, `UNSIGNED`, `enum`, `year`, `xml`, 배열 같은 것도 다룹니다.
 4. TDS.

@@ -617,6 +617,9 @@ pub const Vdbe = struct {
     xq_param_types: []@import("../sql/types.zig").Type = &.{},
     /// Parse.xq_exact_numeric of the statement.
     xq_exact_numeric: bool = false,
+    /// xqlite: the notices the statement reports each time it runs
+    /// (Parse.xq_notices, int.Notice), in the program's memory.
+    xq_notices: []const int.Notice = &.{},
     result_row: ?[*]Mem = null,
     /// What api.columnMem() returns outside a row (C: a static const
     /// nullMem, which callers may not write; here they may).

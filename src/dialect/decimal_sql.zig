@@ -28,6 +28,11 @@
 //!   xq_dec_round(x [, s]), xq_dec_trunc(x [, s]), xq_dec_ceil(x),
 //!   xq_dec_floor(x), xq_dec_sign(x)
 //!   xq_dec_scale(x), xq_dec_min_scale(x) (integers), xq_dec_trim_scale(x)
+//!   xq_dec_sqrt(x), xq_dec_exp(x), xq_dec_ln(x), xq_dec_log(x) (base
+//!   10), xq_dec_log(b, x), xq_dec_power(x, y)   decimal_math.zig: the
+//!                             digits and scale of PostgreSQL's
+//!   xq_dec_factorial(n)       n! of an integer n
+//!   xq_dec_width_bucket(x, b1, b2, n)   width_bucket() (an integer)
 //!   xq_dec_int2/int4/int8(x)  the integer, rounded half away from zero
 //!   xq_dec_float4/float8(x)   the nearest float (a double is itself)
 //!   xq_dec_number(x)          a SQLite number: what an older numeric
@@ -40,6 +45,7 @@ const vi = @import("../vdbe/vdbe_int.zig");
 const int = @import("../sql/sqlite_int.zig");
 const dfunc = @import("func.zig");
 const dec = @import("decimal.zig");
+const math = @import("decimal_math.zig");
 
 const Context = dfunc.Context;
 const Mem = dfunc.Mem;
@@ -76,6 +82,14 @@ pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_dec_trunc", 2, det, wrap(roundFunc(false))),
     dfunc.scalar("xq_dec_scale", 1, det, wrap(scaleFunc(false))),
     dfunc.scalar("xq_dec_min_scale", 1, det, wrap(scaleFunc(true))),
+    dfunc.scalar("xq_dec_sqrt", 1, det, wrap(mathFunc(.sqrt))),
+    dfunc.scalar("xq_dec_exp", 1, det, wrap(mathFunc(.exp))),
+    dfunc.scalar("xq_dec_ln", 1, det, wrap(mathFunc(.ln))),
+    dfunc.scalar("xq_dec_log", 1, det, wrap(mathFunc(.log10))),
+    dfunc.scalar("xq_dec_log", 2, det, wrap(mathFunc(.log))),
+    dfunc.scalar("xq_dec_power", 2, det, wrap(mathFunc(.power))),
+    dfunc.scalar("xq_dec_factorial", 1, det, wrap(factorialFunc)),
+    dfunc.scalar("xq_dec_width_bucket", 4, det, wrap(widthBucketFunc)),
     dfunc.scalar("xq_dec_int2", 1, det, wrap(intFunc(.smallint))),
     dfunc.scalar("xq_dec_int4", 1, det, wrap(intFunc(.integer))),
     dfunc.scalar("xq_dec_int8", 1, det, wrap(intFunc(.bigint))),
@@ -92,6 +106,79 @@ pub fn def(comptime name: []const u8, comptime n_arg: i16) *const int.FuncDef {
         if (comptime std.mem.eql(u8, f.name, name) and f.n_arg == n_arg) return f;
     }
     @compileError("decimal_sql.zig: no function " ++ name);
+}
+
+/// What a dialect knows of a function of the table (PostgreSQL's: its
+/// overload.zig calls these in the place of its functions, ddltype.zig
+/// keeps such calls, deparse.zig gives them back).
+pub const Info = struct {
+    name: []const u8,
+    /// The PostgreSQL function it is (`div` of xq_dec_div_trunc), null
+    /// for an operator, a cast or none of PostgreSQL's.
+    pg: ?[]const u8 = null,
+    /// Its result is a key (else an integer, a double or text).
+    key: bool = true,
+    /// How many of the first arguments are numerics (keys).
+    numerics: u8 = 1,
+    /// Whether PostgreSQL's dialect calls it in the place of `pg` (or of
+    /// a cast to an integer).
+    renamed: bool = false,
+};
+
+const infos = [_]Info{
+    .{ .name = "xq_dec" },
+    .{ .name = "xq_dec_key" },
+    .{ .name = "xq_dec_valid", .key = false },
+    .{ .name = "xq_dec_text", .key = false },
+    .{ .name = "xq_dec_add", .numerics = 2 },
+    .{ .name = "xq_dec_sub", .numerics = 2 },
+    .{ .name = "xq_dec_mul", .numerics = 2 },
+    .{ .name = "xq_dec_div", .numerics = 2 },
+    .{ .name = "xq_dec_neg" },
+    .{ .name = "xq_dec_mod", .pg = "mod", .numerics = 2, .renamed = true },
+    .{ .name = "xq_dec_div_trunc", .pg = "div", .numerics = 2, .renamed = true },
+    .{ .name = "xq_dec_abs", .pg = "abs", .renamed = true },
+    .{ .name = "xq_dec_ceil", .pg = "ceil", .renamed = true },
+    .{ .name = "xq_dec_floor", .pg = "floor", .renamed = true },
+    .{ .name = "xq_dec_sign", .pg = "sign", .renamed = true },
+    .{ .name = "xq_dec_trim_scale", .pg = "trim_scale", .renamed = true },
+    .{ .name = "xq_dec_round", .pg = "round", .renamed = true },
+    .{ .name = "xq_dec_trunc", .pg = "trunc", .renamed = true },
+    .{ .name = "xq_dec_scale", .pg = "scale", .key = false, .renamed = true },
+    .{ .name = "xq_dec_min_scale", .pg = "min_scale", .key = false, .renamed = true },
+    .{ .name = "xq_dec_sqrt", .pg = "sqrt", .renamed = true },
+    .{ .name = "xq_dec_exp", .pg = "exp", .renamed = true },
+    .{ .name = "xq_dec_ln", .pg = "ln", .renamed = true },
+    .{ .name = "xq_dec_log", .pg = "log", .numerics = 2, .renamed = true },
+    .{ .name = "xq_dec_power", .pg = "power", .numerics = 2, .renamed = true },
+    // factorial(bigint): PostgreSQL's dialect calls it by that name.
+    .{ .name = "xq_dec_factorial", .pg = "factorial", .numerics = 0 },
+    .{ .name = "xq_dec_width_bucket", .pg = "width_bucket", .key = false, .numerics = 3, .renamed = true },
+    .{ .name = "xq_dec_int2", .key = false, .renamed = true },
+    .{ .name = "xq_dec_int4", .key = false, .renamed = true },
+    .{ .name = "xq_dec_int8", .key = false, .renamed = true },
+    .{ .name = "xq_dec_float4", .key = false },
+    .{ .name = "xq_dec_float8", .key = false },
+    .{ .name = "xq_dec_number", .key = false },
+    .{ .name = "xq_dec_sum", .pg = "sum", .renamed = true },
+    .{ .name = "xq_dec_avg", .pg = "avg", .renamed = true },
+};
+
+const info_map = blk: {
+    @setEvalBranchQuota(100_000);
+    var kvs: [infos.len]struct { []const u8, Info } = undefined;
+    for (infos, &kvs) |i, *kv| {
+        for (engine_functions) |f| {
+            if (std.mem.eql(u8, f.name, i.name)) break;
+        } else @compileError("decimal_sql.zig: no function " ++ i.name);
+        kv.* = .{ i.name, i };
+    }
+    break :blk std.StaticStringMap(Info).initComptime(kvs);
+};
+
+/// What is known of the function `name` of the table, null if it is not one.
+pub fn info(name: []const u8) ?Info {
+    return info_map.get(name);
 }
 
 fn window(name: [:0]const u8, step: dfunc.StepFn, final: dfunc.FinalFn, value_fn: dfunc.FinalFn, inverse: dfunc.StepFn) int.FuncDef {
@@ -332,6 +419,62 @@ fn scaleFunc(comptime min: bool) fn (*Call, []*Mem) Fail!void {
             api.resultInt64(c.ctx, if (min) x.fracDigits() else x.dscale);
         }
     }.f;
+}
+
+const Math = enum { sqrt, exp, ln, log10, log, power };
+
+fn mathFunc(comptime op: Math) fn (*Call, []*Mem) Fail!void {
+    return struct {
+        fn f(c: *Call, argv: []*Mem) Fail!void {
+            const x = try value(c, argv[0]) orelse return api.resultNull(c.ctx);
+            const y: Dec = if (argv.len == 2) try value(c, argv[1]) orelse return api.resultNull(c.ctx) else .zero;
+            const a = c.a();
+            const r = switch (op) {
+                .sqrt => math.sqrt(a, x),
+                .exp => math.exp(a, x),
+                .ln => math.ln(a, x),
+                .log10 => math.log10(a, x),
+                .log => math.log(a, x, y),
+                .power => math.power(a, x, y),
+            } catch |err| return mathError(c, err);
+            try result(c, r, true);
+        }
+    }.f;
+}
+
+fn factorialFunc(c: *Call, argv: []*Mem) Fail!void {
+    const n: i64 = switch (api.valueType(argv[0])) {
+        vi.SQLITE_NULL => return api.resultNull(c.ctx),
+        vi.SQLITE_INTEGER => api.valueInt64(argv[0]),
+        else => blk: {
+            const x = try value(c, argv[0]) orelse return api.resultNull(c.ctx);
+            break :blk dec.toInt(c.a(), x) catch |err| switch (err) {
+                error.Overflow, error.Invalid => {
+                    api.resultErrorState(c.ctx, .of("22003"), "bigint out of range");
+                    return error.Reported;
+                },
+                else => |e| return e,
+            };
+        },
+    };
+    const r = math.factorial(c.a(), n) catch |err| return mathError(c, err);
+    try result(c, r, true);
+}
+
+fn widthBucketFunc(c: *Call, argv: []*Mem) Fail!void {
+    const x = try value(c, argv[0]) orelse return api.resultNull(c.ctx);
+    const b1 = try value(c, argv[1]) orelse return api.resultNull(c.ctx);
+    const b2 = try value(c, argv[2]) orelse return api.resultNull(c.ctx);
+    const n = intArg(argv[3]) orelse return api.resultNull(c.ctx);
+    const r = math.widthBucket(c.a(), x, b1, b2, n) catch |err| return mathError(c, err);
+    api.resultInt64(c.ctx, r);
+}
+
+/// The errors of decimal_math.zig, PostgreSQL's.
+fn mathError(c: *Call, err: math.Error) Fail {
+    const state, const msg = math.errorInfo(err) orelse return error.OutOfMemory;
+    api.resultErrorState(c.ctx, .{ .sqlstate = state }, msg);
+    return error.Reported;
 }
 
 const IntType = enum {

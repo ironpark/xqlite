@@ -1,0 +1,100 @@
+-- Differential cases of PostgreSQL's numeric sqrt(), exp(), ln(), log(),
+-- power() and factorial() (xqt dialect-diff pg
+-- tools/dialect/pg-numeric-math-cases.txt), in the format of
+-- pg-cases.txt: each case starts with a "-- case:" line and runs on an
+-- empty database, in PostgreSQL (psql, unaligned, with headers) and in
+-- `xqlite sql` with `.dialect postgres`. The expected output is
+-- PostgreSQL 18's: the digits and the scale numeric.c chooses
+-- (src/dialect/decimal_math.zig).
+
+-- case: sqrt of numerics
+SELECT sqrt(2::numeric), sqrt(2.0), sqrt(16::numeric), sqrt(0.0001), sqrt(1e20::numeric), sqrt(123456789.123456789);
+SELECT sqrt(0.0), sqrt(1.00000000000000000000), sqrt(0.000000000000000000000001), sqrt(99999999999999999999999999999999999999), sqrt(2.25), sqrt(1e-100::numeric);
+SELECT sqrt('NaN'::numeric), sqrt('Infinity'::numeric);
+SELECT sqrt(-1::numeric);
+SELECT sqrt('-Infinity'::numeric);
+
+-- case: exp of numerics
+SELECT exp(1.0), exp(1::numeric), exp(0.0), exp(-1.5), exp(100.0), exp(-100.0);
+SELECT exp(1.000000000000000000000), exp(0.001), exp(-0.00001), exp(12.5), exp(5000.0), exp(-5000.0)::text = '0' AS tiny;
+SELECT exp(-6000.0), exp('-Infinity'::numeric), exp('Infinity'::numeric), exp('NaN'::numeric);
+SELECT exp(10000.0);
+
+-- case: ln, log and log10 of numerics
+SELECT ln(2.0), ln(10::numeric), ln(1.0), ln(0.5), ln(1e100::numeric), ln(1.0000001);
+SELECT ln(0.0000001), ln(123456789.987654321), ln(0.99999999), ln(1e-100::numeric), ln(2.000000000000000000000000000000);
+SELECT log(100::numeric), log(2::numeric), log(2, 8), log(2.0, 8.0), log10(1000::numeric), log(10, 2.5);
+SELECT log(0.5, 0.125), log(3, 1e30::numeric), log(1.0001, 2), log(10, 1), log10(0.001), log(2.5::numeric);
+SELECT ln('Infinity'::numeric), ln('NaN'::numeric), log('Infinity'::numeric, 2), log(2, 'Infinity'::numeric), log('NaN'::numeric, 2);
+SELECT ln(0::numeric);
+SELECT ln(-1.0);
+SELECT log(0.0, 2.0);
+SELECT log(2, -3.0);
+SELECT log(1, 2);
+SELECT ln('-Infinity'::numeric);
+
+-- case: power and ^ of numerics
+SELECT power(2::numeric, 0.5), 2::numeric ^ 100, 2.0 ^ 10, (-2)::numeric ^ 3, power(-8.0, 3), 1.5 ^ 2.5;
+SELECT 0.5 ^ -3, 10::numeric ^ -2, 0::numeric ^ 0, power(0.0, 2.5), power(2::numeric, 0.0), 1.0001 ^ 10000;
+SELECT 3.0 ^ -20, 1.1 ^ 1000, 0.9 ^ 1000, 7::numeric ^ 0.333, 2::numeric ^ -1, 12.34 ^ 2;
+SELECT (-1.5) ^ 3, (-1.5) ^ 4.0, 2 ^ 0.5, power(10::numeric, 50), 9 ^ 0.5, 0.0001 ^ 0.25;
+SELECT 1::numeric ^ 1e10::numeric, (-1)::numeric ^ 1e10::numeric;
+SELECT 'NaN'::numeric ^ 0, 1::numeric ^ 'NaN'::numeric, 'NaN'::numeric ^ 2, 2 ^ 'Infinity'::numeric, 0.5 ^ 'Infinity'::numeric, 2 ^ '-Infinity'::numeric;
+SELECT 'Infinity'::numeric ^ 2, 'Infinity'::numeric ^ -2, '-Infinity'::numeric ^ 3, '-Infinity'::numeric ^ 2, '-Infinity'::numeric ^ -3, (-1)::numeric ^ 'Infinity'::numeric;
+SELECT (-2)::numeric ^ 'Infinity'::numeric;
+SELECT 0::numeric ^ -1;
+SELECT (-2.0) ^ 0.5;
+SELECT 10::numeric ^ 200000;
+SELECT 0::numeric ^ '-Infinity'::numeric;
+
+-- case: numeric's or double precision's, by the arguments
+-- (to_json() writes a double as float8out() does)
+SELECT to_json(sqrt(2)), to_json(power(2, 0.5::float8)), to_json(ln(2::float8)), to_json(log(100::float8)), to_json(2 ^ 0.5::float8);
+SELECT to_json(log10(2::float8)), to_json(2 ^ 10), to_json(sqrt(16)), to_json(power(2.0, 2::float8)), to_json(ln(10)), to_json(log(1000)), to_json(log10(100));
+SELECT to_json(power(2, 0.5)), to_json(log(2, 8)), to_json(2.0 ^ 3), to_json(sqrt(2::int8)), to_json(exp(0.5::float4));
+SELECT sqrt(-1);
+SELECT ln(0);
+
+-- case: columns and their scales
+CREATE TABLE m (id int, a numeric(10,2), b numeric, f float8);
+INSERT INTO m VALUES (1, 2, 2, 2), (2, 10.5, 10.5, 10.5), (3, 0.01, 0.01, 0.01), (4, NULL, NULL, NULL);
+SELECT id, sqrt(a), exp(a), ln(a), log(a), power(a, 2), a ^ 0.5 FROM m ORDER BY id;
+SELECT id, sqrt(b), ln(b), b ^ 3, to_json(sqrt(f)), to_json(ln(f)) FROM m ORDER BY id;
+SELECT id, log(a, 100), power(2, a), round(sqrt(a), 4) FROM m ORDER BY id;
+CREATE TABLE g (x numeric(12,2) CHECK (ln(x) < 10), y numeric(20,10) GENERATED ALWAYS AS (sqrt(x)) STORED);
+INSERT INTO g (x) VALUES (2), (9.00);
+INSERT INTO g (x) VALUES (1e10);
+SELECT x, y FROM g ORDER BY x;
+CREATE VIEW v AS SELECT x, sqrt(x) AS s, exp(x) AS e, ln(x) AS l, log(x) AS lg, log(2, x) AS l2, power(x, 2) AS p, power(2.5, x) AS q FROM g;
+SELECT * FROM v ORDER BY x;
+SELECT pg_get_viewdef('v'::regclass);
+
+-- case: factorial
+SELECT factorial(20), factorial(0), factorial(1), factorial(25), factorial(3::smallint);
+SELECT factorial(-1);
+SELECT factorial(40000);
+
+-- case: width_bucket of numerics and doubles
+SELECT width_bucket(5.35, 0.024, 10.06, 5), width_bucket(5.35::float8, 0.024, 10.06, 5), width_bucket(-1, 0, 10, 5), width_bucket(10.0, 0, 10, 5), width_bucket(3, 10.0, 0, 4);
+SELECT width_bucket(0.5, 1.0, 0.0, 3), width_bucket('Infinity'::numeric, 0, 10, 3), width_bucket(5, 0, 10, 2147483647), width_bucket(5, 0, 10, 3), width_bucket(-0.1::float8, 0, 1, 10);
+SELECT width_bucket(1e300::float8, -1e308, 1e308, 10), width_bucket(0.333333333333333333333, 0, 1, 3), width_bucket(x, 0.0, 1.0, 4) FROM (VALUES (0.25::numeric(4,2))) v(x);
+SELECT width_bucket(10, 0, 10, 2147483647);
+SELECT width_bucket(10::numeric, 0, 10, 2147483647);
+SELECT width_bucket(1.0, 0, 10, 0);
+SELECT width_bucket('NaN'::numeric, 0, 10, 3);
+SELECT width_bucket(1.0, 'Infinity'::numeric, 10, 3);
+SELECT width_bucket(1.0, 2, 2.0, 3);
+SELECT width_bucket(1::float8, 2, 2, 3);
+
+-- case: round, trunc, div, mod and the scales
+SELECT round(2.5), round(-2.5), round(1.2345, 2), round(1234.5, -2), round(1.5, 3), trunc(-1.99), trunc(1.2399, 2), round(123.456, -5), trunc(123.456, -1);
+SELECT div(7.5, 2), div(-7.5, 2), div(10, 3.0), mod(7, 2.5), mod(-7.5, 2), mod(7.50, 0.07), scale(1.500), min_scale(1.500), trim_scale(1.500), scale(0.0), min_scale(0), trim_scale(10.00);
+SELECT round('Infinity'::numeric), trunc('NaN'::numeric, 2), round(9.99999, 3), round(-0.0005, 3), trunc(5e-20::numeric, 19), div(9, 4), div(-9.9, 4), mod(-9, 4);
+SELECT div(1, 0.0);
+SELECT mod(1.0, 0);
+
+-- case: definition text of numeric function arguments
+CREATE TABLE dt(n numeric);
+CREATE VIEW dtv AS SELECT div(n, 3) AS a, width_bucket(n, 0, 10, 5) AS b, power(n, 2) AS c FROM dt;
+SELECT pg_get_viewdef('dtv'::regclass, true);
+SELECT pg_get_viewdef('dtv'::regclass);

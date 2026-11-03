@@ -31,6 +31,7 @@ X'80000000000000000000025B7F3D400080000001800000008000000000000000'|X'8000000000
 1 mon 30 days 01:00:00|20 days 00:20:00
 2024-02-29 00:00:00|01:00:00
 2 days 04:00:00|1 mon 6 days|29 days 23:00:00|0|1
+1 day 02:00:00|-infinity|NULL|-1 days -02:03:04|-1 days +02:03:04|-1 days +02:03:04
 7C17610217621331|{"a": "x", "b": 1}|{"a":"x","b":1}|NULL
 8C17611741177A1331|{"a": 100, "z": 1}|{"a": 0.50, "z": 1}|2B1331|{"a": [1]}
 60000000016100005000000004300380000001020020780000400110|1|1|1|NULL
@@ -41,6 +42,11 @@ X'80000000000000000000025B7F3D400080000001800000008000000000000000'|X'8000000000
 }
 32767|42|-1000|2|4|-2|NULL
 435|-6|NULL
+1|1|1|1|NULL
+^(?:a.*b.c){1,1}?(d){1,1}(?:)$|^(?:(?:a|b)\.)$|NULL|1
+["{a,1}","{b,22}"]|[]|["a","b","c"]|[]
+{abc,0,""}|fooXarYXazY|2|3|FGH
+1|{a,b,"",c}|o|oob|^(?:a.b)$
 -- errors
 line 5: invalid input syntax for type boolean: "maybe"
 line 7: smallint out of range
@@ -65,6 +71,11 @@ line 51: invalid input syntax for type interval: "soon"
 line 52: invalid interval value
 line 53: interval out of range
 line 56: cannot add infinite interval to time
-line 66: value "32768" is out of range for type smallint
-line 67: invalid input syntax for type integer: "1__0"
-line 68: bigint out of range
+line 67: value "32768" is out of range for type smallint
+line 68: invalid input syntax for type integer: "1__0"
+line 69: bigint out of range
+line 73: invalid regular expression: parentheses () not balanced
+line 75: invalid escape string
+HINT:  Escape string must be empty or one character.
+line 79: regexp_match() does not support the "global" option
+HINT:  Use the regexp_matches function instead.

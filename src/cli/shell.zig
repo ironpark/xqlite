@@ -585,6 +585,7 @@ fn shellExec(p: *Shell, mode: *const Mode, text: []const u8, err_msg: ?*?[]u8) E
         if (err_msg) |e| {
             e.* = qerr;
         } else if (qerr) |m| p.gpa.free(m);
+        try printNotices(p, stmt);
         const rc2 = api.finalize(stmt);
         if (rc2 != RC.OK and rc != RC.NOMEM) rc = rc2;
         if (rc == RC.OK) {
@@ -594,6 +595,19 @@ fn shellExec(p: *Shell, mode: *const Mode, text: []const u8, err_msg: ?*?[]u8) E
         }
     }
     return rc;
+}
+
+/// xqlite: the notices of a statement that ran (PostgreSQL's NOTICE), on
+/// stderr as psql prints them: `NOTICE:  ...` and its `DETAIL:  ...`;
+/// those below the connection's client_min_messages left out.
+fn printNotices(p: *Shell, stmt: *const Stmt) Error!void {
+    if (stmt.xq_notices.len == 0) return;
+    const min = xqlite.dialect.noticeLevel(p.db);
+    for (stmt.xq_notices) |n| {
+        if (!n.level.reaches(min)) continue;
+        try p.eprint("{s}:  {s}\n", .{ n.level.name(), n.message });
+        if (n.detail) |d| try p.eprint("DETAIL:  {s}\n", .{d});
+    }
 }
 
 /// Port of runOneSqlLine(): run `text` read from `file` at line

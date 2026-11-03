@@ -121,6 +121,15 @@ COMMENT ON TABLE book IS 'books';
 -- case: meta-dS-small
 \dS pg_namespace
 
+-- case: meta-d-system
+\d pg_class
+\d information_schema.tables
+\di pg_constraint*
+\dt
+SELECT c.relname, c.relkind, n.nspname, c.reltype FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname IN ('pg_class', 'pg_attribute', 'pg_type', 'pg_proc', 'pg_namespace', 'pg_tables', 'tables', 'columns') ORDER BY 1, 3;
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attlen, a.attnotnull FROM pg_attribute a WHERE a.attrelid = 'pg_attribute'::regclass ORDER BY a.attnum;
+SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema');
+
 -- case: gdesc
 SELECT id, title, price, tags, published FROM book \gdesc
 SELECT 1 AS one, 'x'::text AS t, 1.5::float8 AS f, now() AS ts \gdesc

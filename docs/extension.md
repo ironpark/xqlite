@@ -115,18 +115,18 @@ for row in con.execute("SELECT * FROM doc_v"):             # 엔진 함수를 �
 
 PostgreSQL의 `jsonb` 열은 SQLite의 JSONB(BLOB)라서 값 자체는 확장 없이 읽힙니다(`json(j)`, `json_extract(j, '$.a')`, `j ->> '$.a'`). 확장이 드는 것은 jsonb의 연산자·비교·정렬이 남긴 식입니다: `xq_pg_jsonb_get()` ...과 `xq_pg_jsonb_key()`(비교와 `ORDER BY`의 정렬 키), `xq_pg_jsonb_bin()`(정준 JSONB: 상수가 아닌 DEFAULT, 생성 열), `xq_pg_jsonb_text()`(`jsonb::text`). sqlite3가 jsonb 열에 넣을 때는 `jsonb('...')`(정준이 아닐 수 있음, 방언이 읽을 때 정규화) 또는 확장의 `xq_pg_jsonb_bin('...')`을 씁니다. TEXT는 STRICT BLOB 열이 받지 않습니다.
 
-방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 705개, 빠지는 것 65개). 이 표의 수는 `src/dialect/abi.zig`의 테스트가 카탈로그와 맞춰 봅니다:
+방언별로 확장이 등록하는 수(모든 방언을 넣은 빌드, 인자 수가 다른 것은 따로 셈; 모두 753개, 빠지는 것 65개). 이 표의 수는 `src/dialect/abi.zig`의 테스트가 카탈로그와 맞춰 봅니다:
 
 | 방언 | 엔진 함수 | 한정 이름 | 시퀀스 | 빠짐 | collation |
 | --- | --- | --- | --- | --- | --- |
-| 공통 | 39(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 34) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
-| PostgreSQL | 170 | 193 | 5 | 36 | 4 |
+| 공통 | 47(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 42) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
+| PostgreSQL | 179 | 224 | 5 | 36 | 4 |
 | MariaDB | 19 | 101 | 4 | 5 | |
 | SQL Server | 18 | 40 | 2 | 20 | |
 | Oracle | 20 | 49 | 5 | 4 | |
 | SQLite 내장(`xq_sqlite_*`) | | 35 | | | |
 
-모두 결정적이면 결정적으로 등록하므로 식 인덱스, CHECK, 생성 열에 쓸 수 있습니다. 집계(`xq_stddev_pop()`, `xq_postgres_array_agg()`, `xq_tsql_for_json()` ...)와 윈도우 함수(`xq_postgres_array_agg`의 윈도우 형태)도 등록합니다.
+모두 결정적이면 결정적으로 등록하므로 식 인덱스, CHECK, 생성 열에 쓸 수 있습니다. `xq_pg_iv_out()`(interval의 텍스트, xqlite에서는 세션의 `IntervalStyle`)은 결정적이지 않아 CHECK와 뷰에만 쓰이고, 확장에서는 세션이 없으므로 기본 형식(postgres)으로 씁니다. 집계(`xq_stddev_pop()`, `xq_postgres_array_agg()`, `xq_tsql_for_json()` ...)와 윈도우 함수(`xq_postgres_array_agg`의 윈도우 형태)도 등록합니다.
 
 ## numeric 키
 
@@ -137,7 +137,7 @@ PostgreSQL의 `numeric` 열(`dialect/decimal.zig`)은 값 자체가 정렬 키�
 - 음수는 부류 뒤의 바이트를 모두 보수(255 - b)로.
 - 저장한 값은 키뿐이고(정규화: `1.50`과 `1.5`는 한 키), 계산한 값은 표시 스케일을 뒤에 빅엔디언 2바이트로 붙일 수 있습니다(다른 수의 순서는 바꾸지 않음). `xq_dec_key()`가 떼어냅니다.
 
-엔진 함수(모든 방언, `decimal_sql.zig`): `xq_dec(x [, p, s])`, `xq_dec_key(x [, p, s])`, `xq_dec_valid(k [, p, s])`, `xq_dec_text(x [, s])`, `xq_dec_add`/`sub`/`mul`/`div`/`mod`/`div_trunc`, `xq_dec_neg`/`abs`/`ceil`/`floor`/`sign`/`trim_scale`, `xq_dec_round`/`trunc(x [, s])`, `xq_dec_scale`/`min_scale`, `xq_dec_int2`/`int4`/`int8`/`float4`/`float8`/`number`, 집계·윈도우 `xq_dec_sum`/`xq_dec_avg`. 인자는 키, 정수, 실수(15자리), 텍스트(`numeric_in()`)이고, 결과와 오류는 PostgreSQL의 것입니다. sqlite3에서 numeric 열에 쓰려면 키를 넘깁니다(`INSERT INTO t VALUES (xq_dec_key('1.50'))`). 결과는 `tools/ext/abi-core.sql`에 기록되어 있습니다.
+엔진 함수(모든 방언, `decimal_sql.zig`): `xq_dec(x [, p, s])`, `xq_dec_key(x [, p, s])`, `xq_dec_valid(k [, p, s])`, `xq_dec_text(x [, s])`, `xq_dec_add`/`sub`/`mul`/`div`/`mod`/`div_trunc`, `xq_dec_neg`/`abs`/`ceil`/`floor`/`sign`/`trim_scale`, `xq_dec_round`/`trunc(x [, s])`, `xq_dec_scale`/`min_scale`, `xq_dec_int2`/`int4`/`int8`/`float4`/`float8`/`number`, `xq_dec_sqrt`/`exp`/`ln`/`log(x)`(밑 10)/`log(b, x)`/`power(x, y)`(PostgreSQL의 자릿수와 스케일, `decimal_math.zig`), `xq_dec_factorial(n)`, `xq_dec_width_bucket(x, b1, b2, n)`(정수), 집계·윈도우 `xq_dec_sum`/`xq_dec_avg`. 인자는 키, 정수, 실수(15자리), 텍스트(`numeric_in()`)이고, 결과와 오류는 PostgreSQL의 것입니다. sqlite3에서 numeric 열에 쓰려면 키를 넘깁니다(`INSERT INTO t VALUES (xq_dec_key('1.50'))`). 결과는 `tools/ext/abi-core.sql`에 기록되어 있습니다.
 
 시퀀스 함수는 `catalog/sequence.zig`과 같은 문장을 같은 표(`main.xq_sequence`)에 sqlite3 연결 자신에서 돌립니다. 그래서 한 엔진이 준 값은 다른 엔진이 다시 주지 않고, 오류 문구(`relation "x" does not exist`, `nextval: reached maximum value of sequence ...`)도 같습니다. `currval()`과 `lastval()`은 xqlite처럼 연결마다입니다. MariaDB의 `LASTVAL(seq)`(한정 이름 `xq_mariadb_lastval`)는 NULL을 돌려주고, SQL Server의 `NEXT VALUE FOR`(`xq_mssql_xq_tsql_next_value`)와 identity의 `nextval()`은 시퀀스만 움직입니다(`SCOPE_IDENTITY()`는 xqlite 세션의 것).
 
@@ -159,7 +159,7 @@ PostgreSQL의 `numeric` 열(`dialect/decimal.zig`)은 값 자체가 정렬 키�
 식 인덱스나 STORED 생성 열은 한 엔진이 계산해 파일에 넣은 값을 다른 엔진이 읽고, 다시 계산해 비교합니다(`PRAGMA integrity_check`, UPDATE·DELETE의 인덱스 항목 찾기). 두 엔진의 결과가 다르면 인덱스가 깨진 것입니다. 그래서 스키마가 부를 수 있는 함수와 collation의 뜻은 파일 형식의 일부입니다.
 
 - **규칙: 스키마가 부를 수 있는 함수·collation은 뜻(결과, 오류, NULL 처리, 비교 순서)을 바꾸지 않습니다. 바꾸려면 새 이름을 만들고, 옛 이름은 옛 뜻을 그대로 둡니다.** 새 frontend는 새 이름을 쓰고, 옛 데이터베이스는 옛 이름으로 계속 읽힙니다.
-- 프론트엔드가 상수로 더하는 인자의 값도 뜻의 일부입니다: `xq_pg_to_char(x, t, 종류)`·`xq_pg_timezone(z, x, 종류)`의 종류(`formatting.Kind`의 번호), `xq_pg_gcd(a, b, 비트)`의 비트(32, 64, numeric은 0). 이미 있는 스키마의 텍스트도 적힌 뜻 그대로 읽힙니다: 다시 컴파일할 때 그런 인자를 더하지 않습니다(PostgreSQL의 `xq_postgres_to_char(x, t)`는 저장 형식으로 읽음).
+- 프론트엔드가 상수로 더하는 인자의 값도 뜻의 일부입니다: `xq_pg_to_char(x, t, 종류)`·`xq_pg_timezone(z, x, 종류)`·`xq_pg_at_time_zone(z, x, 종류)`(`AT TIME ZONE`으로 쓴 것, 같은 계산)의 종류(`formatting.Kind`의 번호), `xq_pg_gcd(a, b, 비트)`의 비트(32, 64, numeric은 0). 이미 있는 스키마의 텍스트도 적힌 뜻 그대로 읽힙니다: 다시 컴파일할 때 그런 인자를 더하지 않습니다(PostgreSQL의 `xq_postgres_to_char(x, t)`는 저장 형식으로 읽음).
 - `xq_ext_version()`은 엔진과 확장에서 같은 상수(`abi.zig`의 `version`, 지금 1)를 돌려줍니다. 새 이름으로 피할 수 없는 뜻의 변경이 있었다면 그때만 올립니다(지금까지 없음). 응용은 두 값을 비교해 확장이 데이터베이스를 쓴 xqlite와 맞는지 볼 수 있습니다.
 - 확장과 엔진은 같은 소스로 만들어지므로, 같은 릴리스의 둘은 결과가 같습니다. 다른 릴리스 사이의 규칙이 위의 것입니다.
 

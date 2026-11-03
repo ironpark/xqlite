@@ -99,7 +99,8 @@ const views_ =
     \\SELECT current_database() AS table_catalog,
 ++ " " ++ schema_of ++ " AS table_schema, " ++ bare("m.name") ++ " AS table_name," ++
     " pg_get_viewdef(quote_ident(" ++ schema_of ++ ") || '.' || quote_ident(" ++ bare("m.name") ++ ")) AS view_definition," ++
-    \\  'NONE' AS check_option, 'NO' AS is_updatable, 'NO' AS is_insertable_into
+    \\  'NONE' AS check_option, 'NO' AS is_updatable, 'NO' AS is_insertable_into,
+    \\  'NO' AS is_trigger_updatable, 'NO' AS is_trigger_deletable, 'NO' AS is_trigger_insertable_into
     \\FROM sqlite_schema m
 ++ nsJoin("m.name") ++ " WHERE m.type = 'view' AND" ++ user_tables;
 
@@ -471,4 +472,14 @@ const Key = enum { cat, ns, seq };
 
 comptime {
     for (defs) |d| template.check(Key, d.text);
+}
+
+test "catalog views: each is a system relation of pgcatalog.zig" {
+    // tools/dialect/pg-syscatalog.sql lists them: generate syscatalog.zig
+    // again after adding one.
+    for (defs) |d| {
+        const nsp = if (std.mem.eql(u8, d.schema, "pg_catalog")) pgc.oid_pg_catalog else pgc.oid_information_schema;
+        const r = pgc.system.relByName(nsp, d.name) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(r.natts > 0);
+    }
 }

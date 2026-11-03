@@ -7,8 +7,10 @@
 //! (xq_pg_iv_key(): '1 mon' = '30 days'), of a BLOB column with a bound
 //! of the other's length (xq_pg_iv_key() below it, xq_pg_iv_high() above
 //! it), which an index on the column serves; GROUP BY and DISTINCT
-//! group by the key (groupKey()); a value made text is its text
-//! (xq_pg_iv_text(): ::text, ||, concat(), JSON, an array's element).
+//! group by the key (groupKey()); a value made text is its text in the
+//! session's IntervalStyle (xq_pg_iv_out(): ::text, ||, concat(), JSON,
+//! an array's element; xq_pg_iv_text(), always PostgreSQL's default
+//! style, is what older schemas call).
 
 const std = @import("std");
 const typing = @import("../../../sql/typing.zig");
@@ -100,8 +102,15 @@ pub fn intervalSet(c: *Ctx, e: *Expr) Error!bool {
 }
 
 /// `e` (an interval) as text, where PostgreSQL makes one text: its
-/// output (xq_pg_iv_text()).
+/// output in the session's IntervalStyle (xq_pg_iv_out()).
 pub fn ivText(c: *Ctx, e: *Expr) Error!*Expr {
+    return c.call(datetime.out_name, &.{e});
+}
+
+/// `e` (an interval) as an array's element: its text in the default
+/// style (xq_pg_iv_text()), what an interval[] stores whatever the
+/// session's IntervalStyle (the display writes it in that one).
+pub fn ivElemText(c: *Ctx, e: *Expr) Error!*Expr {
     return c.call("xq_pg_iv_text", &.{e});
 }
 
@@ -112,7 +121,7 @@ pub fn intervalCast(c: *Ctx, e: *Expr) Error!bool {
     const z = e.u.token orelse return false;
     if (!std.ascii.eqlIgnoreCase(z, "TEXT")) return false;
     const t = e.xq_type;
-    try c.toCall(e, "xq_pg_iv_text", &.{l});
+    try c.toCall(e, datetime.out_name, &.{l});
     if (t != typing.unknown) e.xq_type = t;
     return true;
 }
@@ -188,13 +197,13 @@ pub const desc: repr.TypeRepr = .{
 };
 
 /// A value stored into an interval column: a BLOB of the column's type
-/// modifier (xq_pg_iv_in(x, typmod): `interval day to hour` keeps whole
-/// hours), in an older database's table TEXT (its text, no infinity:
+/// modifier (xq_pg_iv_in(x, typmod) in the session's IntervalStyle:
+/// `interval day to hour` keeps whole hours), in an older database's table TEXT (its text, no infinity:
 /// what the collation xq_pg_interval reads).
 fn store(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     _ = t;
     if (storage == .TEXT) return .of(.{ .def = &datetime.store_interval_text });
-    return .of(.{ .def = &ivinput.in_def, .consts = .{ ivinput.typmodOfDecl(decl), 0 }, .n_consts = 1 });
+    return .of(.{ .def = &ivinput.store_def, .consts = .{ ivinput.typmodOfDecl(decl), 0 }, .n_consts = 1 });
 }
 
 const datetime = @import("../datetime.zig");
@@ -225,14 +234,15 @@ fn jsonArg(c: *Ctx, item: *int.ExprListItem) Error!bool {
 /// hours'): parser.zig), as pg_get_expr() shows it: the constant
 /// ('2 hours'::interval); null for another.
 fn defaultText(a: std.mem.Allocator, z: []const u8) error{OutOfMemory}!?[]const u8 {
-    // xq_pg_iv('...') of older tables, xq_pg_iv_in('...', typmod).
+    // xq_pg_iv('...') of older tables, xq_pg_iv_in('...', typmod [, 1]).
     const open = if (std.mem.startsWith(u8, z, "xq_pg_iv('")) "xq_pg_iv(".len else if (std.mem.startsWith(u8, z, "xq_pg_iv_in('")) "xq_pg_iv_in(".len else return null;
     if (!std.mem.endsWith(u8, z, ")")) return null;
     var s: pgcatalog.Scanner = .{ .z = z[open .. z.len - 1] };
     const t = s.next();
     var end = open + t.end;
     if (open != "xq_pg_iv(".len) {
-        const rest = z[end .. z.len - 1];
+        var rest = z[end .. z.len - 1];
+        if (std.mem.endsWith(u8, rest, ", 1")) rest = rest[0 .. rest.len - 3];
         if (!std.mem.startsWith(u8, rest, ", ")) return null;
         _ = std.fmt.parseInt(i32, rest[2..], 10) catch return null;
         end = z.len - 1;

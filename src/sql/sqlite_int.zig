@@ -1529,6 +1529,49 @@ pub const ErrorState = struct {
     }
 };
 
+/// xqlite: a message of a statement that is not an error (PostgreSQL's
+/// NOTICE: `table "t" does not exist, skipping` of DROP TABLE IF EXISTS),
+/// written when the statement is compiled (util.notice(): Parse.xq_notices,
+/// then Vdbe.xq_notices) and reported each time it runs: the wire server
+/// sends it (NoticeResponse) and the shell prints it as psql does. It does
+/// not change what the statement does, nor the C API.
+pub const Notice = struct {
+    level: Level = .notice,
+    /// PostgreSQL's code: 00000 for a notice, 42P07 for a relation
+    /// CREATE ... IF NOT EXISTS skips.
+    sqlstate: [5]u8 = "00000".*,
+    message: []const u8,
+    /// PostgreSQL's DETAIL, if any (lines apart by '\n').
+    detail: ?[]const u8 = null,
+
+    /// PostgreSQL's levels that a client may be sent, lowest first
+    /// (client_min_messages: a level below the setting is not sent).
+    pub const Level = enum(u8) {
+        debug,
+        log,
+        notice,
+        warning,
+        @"error",
+
+        /// The severity as PostgreSQL spells it ("NOTICE").
+        pub fn name(l: Level) []const u8 {
+            return switch (l) {
+                .debug => "DEBUG",
+                .log => "LOG",
+                .notice => "NOTICE",
+                .warning => "WARNING",
+                .@"error" => "ERROR",
+            };
+        }
+
+        /// Whether a notice of level `l` is sent to a client whose
+        /// lowest level is `min` (client_min_messages).
+        pub fn reaches(l: Level, min: Level) bool {
+            return @backingInt(l) >= @backingInt(min);
+        }
+    };
+};
+
 /// The DestructorFn of `f`, a typed destructor (`fn (*T) void`): it calls
 /// `f` with the pointer cast to the type of its parameter (thunk.thunk()).
 /// It is one function per `f`, so it can be compared as C compares xDel
@@ -1870,6 +1913,9 @@ pub const Parse = struct {
     /// statement computes numbers as the dialect types them, not as
     /// SQLite does. Vdbe.xq_exact_numeric at makeReady(); for tests.
     xq_exact_numeric: bool = false,
+    /// xqlite: the notices of the statement (util.notice()), in the
+    /// arena; Vdbe.xq_notices at makeReady().
+    xq_notices: std.ArrayList(Notice) = .empty,
     /// xqlite: nonzero while names of SQL the schema keeps are resolved (a
     /// view's query, a trigger's program): text that means what it says
     /// in every dialect, which the typing rules type but make no choices

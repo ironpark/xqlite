@@ -622,14 +622,13 @@ fn putDate(o: *Out, days: i64) bool {
     return bc;
 }
 
-/// Seconds and their fraction without trailing zeros (AppendSeconds()).
-fn putSeconds(o: *Out, us: u64) void {
-    const sec = us / 1_000_000;
-    const frac = us % 1_000_000;
-    o.print("{d:0>2}", .{sec});
-    if (frac == 0) return;
+/// AppendSeconds(): seconds `sec` (two digits with `fill`), their
+/// fraction `fsec` (microseconds) without its trailing zeros.
+fn putSeconds(o: *Out, sec: u64, fsec: u64, fill: bool) void {
+    if (fill) o.print("{d:0>2}", .{sec}) else o.print("{d}", .{sec});
+    if (fsec == 0) return;
     var digits: [6]u8 = undefined;
-    _ = std.fmt.bufPrint(&digits, "{d:0>6}", .{frac}) catch unreachable;
+    _ = std.fmt.bufPrint(&digits, "{d:0>6}", .{fsec}) catch unreachable;
     var n: usize = 6;
     while (n > 0 and digits[n - 1] == '0') n -= 1;
     o.print(".{s}", .{digits[0..n]});
@@ -639,7 +638,7 @@ fn putTime(o: *Out, us: u64) void {
     const h = us / @as(u64, usecs_per_hour);
     const m = us / 60_000_000 % 60;
     o.print("{d:0>2}:{d:0>2}:", .{ h, m });
-    putSeconds(o, us % 60_000_000);
+    putSeconds(o, us / 1_000_000 % 60, us % 1_000_000, true);
 }
 
 pub fn formatDate(days: i64, buf: *Buf) []const u8 {
@@ -696,9 +695,113 @@ pub fn formatInterval(iv: Interval, buf: *Buf) []const u8 {
 /// An interval's text as PostgreSQL 18 writes it: formatInterval()'s,
 /// 'infinity' and '-infinity' for the infinities.
 pub fn formatIntervalPg(iv: Interval, buf: *Buf) []const u8 {
+    return formatIntervalStyle(iv, .postgres, buf);
+}
+
+pub const IntervalStyle = ivl.Style;
+
+/// An interval's text in IntervalStyle `style` (interval_out():
+/// EncodeInterval()), 'infinity' and '-infinity' for the infinities.
+pub fn formatIntervalStyle(iv: Interval, style: IntervalStyle, buf: *Buf) []const u8 {
     if (iv.isPosInf()) return "infinity";
     if (iv.isNegInf()) return "-infinity";
-    return formatInterval(iv, buf);
+    // interval2itm(): the fields, each of the sign of its value.
+    const year: i64 = @divTrunc(iv.months, 12);
+    const mon: i64 = @rem(iv.months, 12);
+    const mday: i64 = iv.days;
+    var t = iv.time;
+    const hour: i64 = @divTrunc(t, usecs_per_hour);
+    t -= hour * usecs_per_hour;
+    const min: i64 = @divTrunc(t, ivl.usecs_per_minute);
+    t -= min * ivl.usecs_per_minute;
+    const sec: i64 = @divTrunc(t, ivl.usecs_per_sec);
+    const fsec: i64 = t - sec * ivl.usecs_per_sec;
+    var o: Out = .{ .buf = buf };
+    switch (style) {
+        .postgres => return formatInterval(iv, buf),
+        .sql_standard => {
+            const neg = year < 0 or mon < 0 or mday < 0 or hour < 0 or min < 0 or sec < 0 or fsec < 0;
+            const pos = year > 0 or mon > 0 or mday > 0 or hour > 0 or min > 0 or sec > 0 or fsec > 0;
+            const has_ym = year != 0 or mon != 0;
+            const has_dt = mday != 0 or hour != 0 or min != 0 or sec != 0 or fsec != 0;
+            // One sign before the whole value, if its fields allow it.
+            const standard = !(neg and pos) and !(has_ym and has_dt);
+            if (!neg and !pos) {
+                o.print("0", .{});
+            } else if (!standard) {
+                // Every sign written: the fields' are mixed.
+                const ys: u8 = if (year < 0 or mon < 0) '-' else '+';
+                const ds: u8 = if (mday < 0) '-' else '+';
+                const tsg: u8 = if (hour < 0 or min < 0 or sec < 0 or fsec < 0) '-' else '+';
+                o.print("{c}{d}-{d} {c}{d} {c}{d}:{d:0>2}:", .{ ys, @abs(year), @abs(mon), ds, @abs(mday), tsg, @abs(hour), @abs(min) });
+                putSeconds(&o, @abs(sec), @abs(fsec), true);
+            } else {
+                if (neg) o.print("-", .{});
+                if (has_ym) {
+                    o.print("{d}-{d}", .{ @abs(year), @abs(mon) });
+                } else {
+                    if (mday != 0) o.print("{d} ", .{@abs(mday)});
+                    o.print("{d}:{d:0>2}:", .{ @abs(hour), @abs(min) });
+                    putSeconds(&o, @abs(sec), @abs(fsec), true);
+                }
+            }
+        },
+        .iso_8601 => {
+            if (year == 0 and mon == 0 and mday == 0 and iv.time == 0) return "PT0S";
+            o.print("P", .{});
+            isoPart(&o, year, 'Y');
+            isoPart(&o, mon, 'M');
+            isoPart(&o, mday, 'D');
+            if (iv.time != 0) o.print("T", .{});
+            isoPart(&o, hour, 'H');
+            isoPart(&o, min, 'M');
+            if (sec != 0 or fsec != 0) {
+                if (sec < 0 or fsec < 0) o.print("-", .{});
+                putSeconds(&o, @abs(sec), @abs(fsec), false);
+                o.print("S", .{});
+            }
+        },
+        .postgres_verbose => {
+            o.print("@", .{});
+            var zero = true;
+            var before = false;
+            const parts = [_]struct { i64, []const u8 }{ .{ year, "year" }, .{ mon, "mon" }, .{ mday, "day" }, .{ hour, "hour" }, .{ min, "min" } };
+            // AddVerboseIntPart(): the first value's sign is "ago", the
+            // later ones' relative to it.
+            for (parts) |pt| {
+                var v = pt[0];
+                if (v == 0) continue;
+                if (zero) {
+                    before = v < 0;
+                    if (v < 0) v = -v;
+                } else if (before) v = -v;
+                o.print(" {d} {s}{s}", .{ v, pt[1], if (v == 1) "" else "s" });
+                zero = false;
+            }
+            if (sec != 0 or fsec != 0) {
+                o.print(" ", .{});
+                if (sec < 0 or (sec == 0 and fsec < 0)) {
+                    if (zero) before = true else if (!before) o.print("-", .{});
+                } else if (before) o.print("-", .{});
+                putSeconds(&o, @abs(sec), @abs(fsec), false);
+                o.print(" sec{s}", .{if (@abs(sec) != 1 or fsec != 0) "s" else ""});
+                zero = false;
+            }
+            if (zero) o.print(" 0", .{});
+            if (before) o.print(" ago", .{});
+        },
+    }
+    return o.slice();
+}
+
+/// AddISO8601IntPart().
+fn isoPart(o: *Out, v: i64, unit: u8) void {
+    if (v != 0) o.print("{d}{c}", .{ v, unit });
+}
+
+/// An interval's text in the session's IntervalStyle (`db`'s).
+pub fn formatIntervalSession(db: *const int.Sqlite3, iv: Interval, buf: *Buf) []const u8 {
+    return formatIntervalStyle(iv, @import("../valuetext.zig").Settings.of(db).interval, buf);
 }
 
 /// The collation xq_pg_interval: intervals in PostgreSQL's order, a
@@ -782,6 +885,8 @@ const casts = struct {
     const iv = dfunc.scalar("xq_pg_iv", 1, det, dfunc.bind(castFunc, .{ Kind.interval, true }));
 };
 pub const cast_date = &casts.date;
+/// xq_pg_iv_out(x): what an interval made text is (::text, ||, JSON ...).
+pub const out_name = "xq_pg_iv_out";
 pub const cast_time = &casts.time;
 pub const cast_timestamp = &casts.timestamp;
 pub const cast_timestamptz = &casts.timestamptz;
@@ -791,6 +896,9 @@ pub const cast_timestamptz = &casts.timestamptz;
 ///   xq_pg_iv(x)          x (an interval's text or BLOB) as a BLOB: the cast,
 ///                        a value stored into a BLOB column
 ///   xq_pg_iv_text(x)     its text, in PostgreSQL's default output style
+///   xq_pg_iv_out(x)      its text in the session's IntervalStyle (postgres
+///                        outside an xqlite session: the extension's);
+///                        not deterministic (no index or generated column)
 ///   xq_pg_iv_key(x)      its key (16 bytes): what = < ... GROUP BY compare
 ///   xq_pg_iv_high(x)     its key and 0xFF: above every interval of its length
 ///   xq_pg_iv_valid(x)    whether x is an interval's BLOB (a column's CHECK)
@@ -806,6 +914,9 @@ pub const engine_functions = blk: {
         casts.timestamptz,
         casts.iv,
         dfunc.scalar("xq_pg_iv_text", 1, det, dfunc.bind(ivFunc, .{IvFn.text})),
+        // Of the session (IntervalStyle): not deterministic, as
+        // PostgreSQL's interval_out() is stable.
+        dfunc.scalar(out_name, 1, .{}, dfunc.bind(ivFunc, .{IvFn.out})),
         dfunc.scalar("xq_pg_iv_key", 1, det, dfunc.bind(ivFunc, .{IvFn.key})),
         dfunc.scalar("xq_pg_iv_high", 1, det, dfunc.bind(ivFunc, .{IvFn.high})),
         dfunc.scalar("xq_pg_iv_valid", 1, det, validFunc),
@@ -1110,7 +1221,7 @@ fn castFunc(ctx: *Context, argv: []*Mem, comptime k: Kind, comptime pg: bool) vo
     api.resultText(ctx, z, .transient);
 }
 
-const IvFn = enum { text, key, high, justify_hours, justify_days, justify_interval };
+const IvFn = enum { text, out, key, high, justify_hours, justify_days, justify_interval };
 
 /// A function of one interval (its text or BLOB): its text, its key ...
 fn ivFunc(ctx: *Context, argv: []*Mem, comptime f: IvFn) void {
@@ -1121,6 +1232,10 @@ fn ivFunc(ctx: *Context, argv: []*Mem, comptime f: IvFn) void {
         .text => {
             var buf: Buf = undefined;
             api.resultText(ctx, formatIntervalPg(iv, &buf), .transient);
+        },
+        .out => {
+            var buf: Buf = undefined;
+            api.resultText(ctx, formatIntervalSession(api.contextDbHandle(ctx), iv, &buf), .transient);
         },
         .key => {
             const k = iv.key();
@@ -1295,6 +1410,37 @@ test "intervals read and written as PostgreSQL does" {
     try testing.expectError(error.Syntax, parseInterval("abc"));
     try testing.expectError(error.Syntax, parseInterval(""));
     try testing.expectError(error.Syntax, parseInterval("1 fortnight"));
+}
+
+test "intervals in each IntervalStyle (EncodeInterval())" {
+    const cases = [_]struct { []const u8, []const u8, []const u8, []const u8 }{
+        // input, postgres_verbose, sql_standard, iso_8601
+        .{ "0", "@ 0", "0", "PT0S" },
+        .{ "1 day 2 hours", "@ 1 day 2 hours", "1 2:00:00", "P1DT2H" },
+        .{ "-1 day", "@ 1 day ago", "-1 0:00:00", "P-1D" },
+        .{ "1 year 2 mons", "@ 1 year 2 mons", "1-2", "P1Y2M" },
+        .{ "-1 years -2 mons", "@ 1 year 2 mons ago", "-1-2", "P-1Y-2M" },
+        .{ "1 year 2 mons -3 days 4:05:06", "@ 1 year 2 mons -3 days 4 hours 5 mins 6 secs", "+1-2 -3 +4:05:06", "P1Y2M-3DT4H5M6S" },
+        .{ "-1 years -2 mons +3 days -04:05:06", "@ 1 year 2 mons -3 days 4 hours 5 mins 6 secs ago", "-1-2 +3 -4:05:06", "P-1Y-2M3DT-4H-5M-6S" },
+        .{ "-2:03:04.5", "@ 2 hours 3 mins 4.5 secs ago", "-2:03:04.5", "PT-2H-3M-4.5S" },
+        .{ "1 day -1 sec", "@ 1 day -1 sec", "+0-0 +1 -0:00:01", "P1DT-1S" },
+        .{ "-1 day 1 sec", "@ 1 day -1 sec ago", "+0-0 -1 +0:00:01", "P-1DT1S" },
+        .{ "-0.5 sec", "@ 0.5 secs ago", "-0:00:00.5", "PT-0.5S" },
+        .{ "1 sec", "@ 1 sec", "0:00:01", "PT1S" },
+        .{ "1.5 sec", "@ 1.5 secs", "0:00:01.5", "PT1.5S" },
+    };
+    var buf: Buf = undefined;
+    for (cases) |cs| {
+        const iv = try parseInterval(cs[0]);
+        try testing.expectEqualStrings(cs[1], formatIntervalStyle(iv, .postgres_verbose, &buf));
+        try testing.expectEqualStrings(cs[2], formatIntervalStyle(iv, .sql_standard, &buf));
+        try testing.expectEqualStrings(cs[3], formatIntervalStyle(iv, .iso_8601, &buf));
+        try testing.expectEqualStrings(formatInterval(iv, &buf), formatIntervalStyle(iv, .postgres, &buf));
+    }
+    // The longest text fits the buffer.
+    const most: Interval = .{ .months = std.math.maxInt(i32) - 1, .days = std.math.minInt(i32), .time = std.math.minInt(i64) + 1 };
+    for (std.enums.values(IntervalStyle)) |st| _ = formatIntervalStyle(most, st, &buf);
+    try testing.expectEqualStrings("infinity", formatIntervalStyle(Interval.infinity, .iso_8601, &buf));
 }
 
 test "interval arithmetic" {

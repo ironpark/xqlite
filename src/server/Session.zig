@@ -12,7 +12,8 @@
 //!                               stops there
 //!     notice(Notice)            optional (a sink without a pub notice()
 //!                               gets none):
-//!                               a warning of a statement that ran
+//!                               a notice or warning of a statement
+//!                               that ran
 //!
 //! Or it prepares a statement (prepare(): an extended query's Parse,
 //! MySQL's COM_STMT_PREPARE), describes it before it runs (its parameter
@@ -128,13 +129,13 @@ pub const Failure = struct {
     command: command.Command,
 };
 
-/// A warning of a statement that ran (implicit_transactions: COMMIT
-/// outside a transaction).
-pub const Notice = struct {
-    sqlstate: [5]u8,
-    /// Static.
-    message: []const u8,
-};
+/// A notice of a statement that ran: the statement's own (Stmt.notices():
+/// PostgreSQL's `table "t" does not exist, skipping`), or the session's
+/// warning (implicit_transactions: COMMIT outside a transaction). Only
+/// those of a level the connection's settings let through
+/// (Db.noticeLevel(): PostgreSQL's client_min_messages). Its text is
+/// valid until the sink returns.
+pub const Notice = xqlite.Notice;
 
 /// Opened with OpenOptions.column_metadata, as every result is described.
 pub fn open(gpa: Allocator, io: std.Io, path: []const u8, options: Options) xqlite.Error!Session {
@@ -275,7 +276,8 @@ fn enter(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, more: bool, sink
             return .done;
         },
         .commit, .rollback => if (!in_tx and !savepointName(stmt.sql())) {
-            if (std.meta.hasMethod(@TypeOf(sink), "notice")) try sink.notice(.{
+            try s.notice(sink, .{
+                .level = .warning,
                 .sqlstate = "25P01".*,
                 .message = "there is no transaction in progress",
             });
@@ -326,10 +328,25 @@ fn onlyTrivia(rest: []const u8) bool {
     return true;
 }
 
+/// Report notice `n` to `sink` (if it takes notices), unless the
+/// connection's settings leave its level out.
+fn notice(s: *Session, sink: anytype, n: Notice) !void {
+    if (comptime !std.meta.hasMethod(@TypeOf(sink), "notice")) return;
+    if (!n.level.reaches(s.db.noticeLevel())) return;
+    try sink.notice(n);
+}
+
+/// The notices of a statement that started (Stmt.notices()), before its
+/// rows and its completion, as PostgreSQL sends them while it runs.
+fn statementNotices(s: *Session, stmt: *const xqlite.Stmt, sink: anytype) !void {
+    for (stmt.notices()) |n| try s.notice(sink, n);
+}
+
 /// Run one statement: false if it failed (its error in the connection).
 fn runOne(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, sink: anytype) !bool {
     var rows: u64 = 0;
     const has_row = stmt.step() catch return false;
+    try s.statementNotices(stmt, sink);
     if (hasResult(stmt, cmd)) {
         defer _ = s.scratch.reset(.retain_capacity);
         try sink.columns(try s.describe(s.scratch.allocator(), stmt, has_row));
@@ -483,6 +500,7 @@ pub const Prepared = struct {
             }
             p.running = true;
             has_row = st.step() catch return p.failed(sink);
+            try s.statementNotices(st, sink);
             if (hasResult(st, p.command)) {
                 // The schema changed since prepare() (Stmt.step()
                 // recompiled it).

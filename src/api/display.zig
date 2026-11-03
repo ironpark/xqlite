@@ -49,10 +49,16 @@ fn cell(v: Value) valuetext.Cell {
     };
 }
 
-/// `v`, a value of a column of type `t`, as `viewer` shows it, if not
-/// as SQLite does (in `buf` or static); null for SQLite's text.
-pub fn text(viewer: Dialect, t: Type, v: Value, buf: *[max_len]u8) ?[]const u8 {
-    return valuetext.text(viewer, t, cell(v), buf);
+/// What a connection's session changes in the text of values
+/// (PostgreSQL's IntervalStyle: `SET IntervalStyle`); Db.displaySettings()
+/// gives a connection's, `.{}` the defaults.
+pub const Settings = valuetext.Settings;
+
+/// `v`, a value of a column of type `t`, as `viewer` shows it in a
+/// session of `settings` (an interval in its IntervalStyle), if not as
+/// SQLite does (in `buf` or static); null for SQLite's text.
+pub fn text(viewer: Dialect, settings: Settings, t: Type, v: Value, buf: *[max_len]u8) ?[]const u8 {
+    return valuetext.text(viewer, settings, t, cell(v), buf);
 }
 
 /// The text of `v` that needs memory of its own (in `gpa`, which the
@@ -60,16 +66,17 @@ pub fn text(viewer: Dialect, t: Type, v: Value, buf: *[max_len]u8) ?[]const u8 {
 /// but SQLite's, which shows the blob: a jsonb value stored as SQLite's
 /// JSONB (a blob, dialect/jsonb.zig) is its JSON text with PostgreSQL's
 /// spacing (`{"a": 1}`); a numeric key (dialect/decimal.zig) its digits
-/// (as text() writes them, of any length). dialect/repr.zig.
-pub fn textAlloc(gpa: std.mem.Allocator, viewer: Dialect, t: Type, v: Value) error{OutOfMemory}!?[]u8 {
-    return valuetext.textAlloc(gpa, viewer, t, cell(v));
+/// (as text() writes them, of any length); an interval[]'s elements in
+/// the IntervalStyle of `settings`. dialect/repr.zig.
+pub fn textAlloc(gpa: std.mem.Allocator, viewer: Dialect, settings: Settings, t: Type, v: Value) error{OutOfMemory}!?[]u8 {
+    return valuetext.textAlloc(gpa, viewer, settings, t, cell(v));
 }
 
-/// PostgreSQL's text of `v` (not NULL), a value of a column of type `t`
-/// (valuetext.pgText()): text()'s, a double's shortest digits, a text as
-/// stored; null for a blob no form writes.
-pub fn pgText(t: Type, v: Value, buf: *[max_len]u8) ?[]const u8 {
-    return valuetext.pgText(t, cell(v), buf);
+/// PostgreSQL's text of `v` (not NULL), a value of a column of type `t`,
+/// in a session of `settings` (valuetext.pgText()): text()'s, a double's
+/// shortest digits, a text as stored; null for a blob no form writes.
+pub fn pgText(settings: Settings, t: Type, v: Value, buf: *[max_len]u8) ?[]const u8 {
+    return valuetext.pgText(settings, t, cell(v), buf);
 }
 
 /// PostgreSQL's text of a double (valuetext.floatText()).
@@ -135,49 +142,49 @@ test text {
     var buf: [max_len]u8 = undefined;
     const t = std.testing;
     const boolean: Type = .{ .logical = .boolean };
-    try t.expectEqualStrings("t", text(.postgres, boolean, .{ .integer = 1 }, &buf).?);
-    try t.expectEqualStrings("f", text(.postgres, boolean, .{ .integer = 0 }, &buf).?);
-    try t.expectEqualStrings("FALSE", text(.oracle, boolean, .{ .integer = 0 }, &buf).?);
-    try t.expectEqual(@as(?[]const u8, null), text(.mariadb, boolean, .{ .integer = 1 }, &buf));
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, boolean, .null, &buf));
+    try t.expectEqualStrings("t", text(.postgres, .{}, boolean, .{ .integer = 1 }, &buf).?);
+    try t.expectEqualStrings("f", text(.postgres, .{}, boolean, .{ .integer = 0 }, &buf).?);
+    try t.expectEqualStrings("FALSE", text(.oracle, .{}, boolean, .{ .integer = 0 }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.mariadb, .{}, boolean, .{ .integer = 1 }, &buf));
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, boolean, .null, &buf));
     const money: Type = .{ .logical = .numeric, .precision = 10, .scale = 2 };
-    try t.expectEqualStrings("1.50", text(.postgres, money, .{ .float = 1.5 }, &buf).?);
-    try t.expectEqualStrings("220.00", text(.mariadb, money, .{ .integer = 220 }, &buf).?);
-    try t.expectEqualStrings("-0.25", text(.mssql, money, .{ .float = -0.25 }, &buf).?);
-    try t.expectEqual(@as(?[]const u8, null), text(.oracle, money, .{ .float = 1.5 }, &buf));
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{ .logical = .numeric }, .{ .float = 1.5 }, &buf));
+    try t.expectEqualStrings("1.50", text(.postgres, .{}, money, .{ .float = 1.5 }, &buf).?);
+    try t.expectEqualStrings("220.00", text(.mariadb, .{}, money, .{ .integer = 220 }, &buf).?);
+    try t.expectEqualStrings("-0.25", text(.mssql, .{}, money, .{ .float = -0.25 }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.oracle, .{}, money, .{ .float = 1.5 }, &buf));
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, .{ .logical = .numeric }, .{ .float = 1.5 }, &buf));
     // A scale of 0: no point (1e3 is 1000 in PostgreSQL, SQLite's 1000.0).
     const whole: Type = .{ .logical = .numeric, .scale = 0 };
-    try t.expectEqualStrings("1000", text(.postgres, whole, .{ .float = 1000.0 }, &buf).?);
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, whole, .{ .integer = 3 }, &buf));
+    try t.expectEqualStrings("1000", text(.postgres, .{}, whole, .{ .float = 1000.0 }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, whole, .{ .integer = 3 }, &buf));
     // A numeric key, with the scale of its type or its own.
     const k15 = [_]u8{ 0x40, 0x81, 3, 100 };
-    try t.expectEqualStrings("1.50", text(.postgres, money, .{ .blob = &k15 }, &buf).?);
-    try t.expectEqualStrings("1.5", text(.postgres, .{ .logical = .numeric }, .{ .blob = &k15 }, &buf).?);
-    try t.expectEqualStrings("1.5", text(.oracle, money, .{ .blob = &k15 }, &buf).?);
+    try t.expectEqualStrings("1.50", text(.postgres, .{}, money, .{ .blob = &k15 }, &buf).?);
+    try t.expectEqualStrings("1.5", text(.postgres, .{}, .{ .logical = .numeric }, .{ .blob = &k15 }, &buf).?);
+    try t.expectEqualStrings("1.5", text(.oracle, .{}, money, .{ .blob = &k15 }, &buf).?);
     const k150 = [_]u8{ 0x40, 0x81, 3, 100, 0, 3 };
-    try t.expectEqualStrings("1.500", text(.postgres, .{ .logical = .numeric }, .{ .blob = &k150 }, &buf).?);
-    try t.expectEqual(@as(?[]const u8, null), text(.sqlite, money, .{ .blob = &k15 }, &buf));
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, money, .{ .blob = "x" }, &buf));
+    try t.expectEqualStrings("1.500", text(.postgres, .{}, .{ .logical = .numeric }, .{ .blob = &k150 }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.sqlite, .{}, money, .{ .blob = &k15 }, &buf));
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, money, .{ .blob = "x" }, &buf));
     const tz: Type = .{ .logical = .timestamp_tz };
-    try t.expectEqualStrings("2024-01-02 03:04:05+00", text(.postgres, tz, .{ .text = "2024-01-02 03:04:05" }, &buf).?);
-    try t.expectEqualStrings("2024-01-02 03:04:05.123+00", text(.postgres, tz, .{ .text = "2024-01-02 03:04:05.123" }, &buf).?);
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, tz, .{ .text = "2024-01-02 03:04:05+09:00" }, &buf));
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, tz, .{ .text = "2024-01-02" }, &buf));
+    try t.expectEqualStrings("2024-01-02 03:04:05+00", text(.postgres, .{}, tz, .{ .text = "2024-01-02 03:04:05" }, &buf).?);
+    try t.expectEqualStrings("2024-01-02 03:04:05.123+00", text(.postgres, .{}, tz, .{ .text = "2024-01-02 03:04:05.123" }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, tz, .{ .text = "2024-01-02 03:04:05+09:00" }, &buf));
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, tz, .{ .text = "2024-01-02" }, &buf));
     const uuid: Type = .{ .logical = .uuid };
-    try t.expectEqualStrings("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", text(.postgres, uuid, .{ .blob = "\xa0\xee\xbc\x99\x9c\x0b\x4e\xf8\xbb\x6d\x6b\xb9\xbd\x38\x0a\x11" }, &buf).?);
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, uuid, .{ .text = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" }, &buf));
-    try t.expectEqual(@as(?[]const u8, null), text(.postgres, uuid, .{ .blob = "\x01\x02" }, &buf));
+    try t.expectEqualStrings("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", text(.postgres, .{}, uuid, .{ .blob = "\xa0\xee\xbc\x99\x9c\x0b\x4e\xf8\xbb\x6d\x6b\xb9\xbd\x38\x0a\x11" }, &buf).?);
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, uuid, .{ .text = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" }, &buf));
+    try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, uuid, .{ .blob = "\x01\x02" }, &buf));
     // interval BLOB: its text; an older database's TEXT as stored.
     if (comptime Dialect.postgres.built()) {
         const Interval = repr.Interval;
         const iv: Type = .{ .logical = .interval };
         const b = (Interval{ .months = 14, .days = -3, .time = 3_600_000_000 }).encode();
-        try t.expectEqualStrings("1 year 2 mons -3 days +01:00:00", text(.postgres, iv, .{ .blob = &b }, &buf).?);
+        try t.expectEqualStrings("1 year 2 mons -3 days +01:00:00", text(.postgres, .{}, iv, .{ .blob = &b }, &buf).?);
         const inf = Interval.neg_infinity.encode();
-        try t.expectEqualStrings("-infinity", text(.postgres, iv, .{ .blob = &inf }, &buf).?);
-        try t.expectEqual(@as(?[]const u8, null), text(.postgres, iv, .{ .text = "1 day" }, &buf));
-        try t.expectEqual(@as(?[]const u8, null), text(.sqlite, iv, .{ .blob = &b }, &buf));
+        try t.expectEqualStrings("-infinity", text(.postgres, .{}, iv, .{ .blob = &inf }, &buf).?);
+        try t.expectEqual(@as(?[]const u8, null), text(.postgres, .{}, iv, .{ .text = "1 day" }, &buf));
+        try t.expectEqual(@as(?[]const u8, null), text(.sqlite, .{}, iv, .{ .blob = &b }, &buf));
         try t.expectEqual(Interval{ .days = 1, .time = 7_200_000_000 }, repr.parseInterval("1 day 2 hours").?);
     }
 }

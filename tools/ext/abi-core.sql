@@ -20,3 +20,8 @@ SELECT xq_dec('x');
 SELECT xq_dec('12345.678', 5, 2);
 SELECT xq_dec_div(1, 0);
 SELECT xq_dec_int2('32767.5');
+SELECT xq_dec_text(xq_dec_sqrt(2)), xq_dec_text(xq_dec_exp('1.0')), xq_dec_text(xq_dec_ln('2.0')), xq_dec_text(xq_dec_log(100)), xq_dec_text(xq_dec_log(2, 8)), xq_dec_text(xq_dec_power(2, '0.5')), xq_dec_text(xq_dec_power('-8.0', 3)), xq_dec_text(xq_dec_factorial(20)), xq_dec_width_bucket('5.35', '0.024', '10.06', 5);
+SELECT xq_dec_sqrt(-1);
+SELECT xq_dec_ln(0);
+SELECT xq_dec_power(0, -1);
+SELECT xq_dec_power('-2.0', '0.5');

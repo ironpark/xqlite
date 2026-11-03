@@ -68,6 +68,9 @@ pub const Out = struct {
     gpa: Allocator,
     w: *std.Io.Writer,
     buf: std.ArrayList(u8) = .empty,
+    /// The session's settings of the text of values (IntervalStyle),
+    /// as the rows are sent (Backend.dataRow()).
+    settings: @import("xqlite").display.Settings = .{},
 
     pub fn deinit(o: *Out) void {
         o.buf.deinit(o.gpa);

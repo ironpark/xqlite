@@ -230,6 +230,10 @@ const Client = struct {
                     }
                 },
                 'C' => try c.log.print(gpa, "C {s}", .{std.mem.sliceTo(body, 0)}),
+                'S' => {
+                    const name = std.mem.sliceTo(body, 0);
+                    try c.log.print(gpa, "S {s} {s}", .{ name, std.mem.sliceTo(body[name.len + 1 ..], 0) });
+                },
                 'E', 'N' => {
                     try c.log.append(gpa, t);
                     try c.describeError(body);
@@ -412,9 +416,56 @@ test "pg: startup, simple queries, errors, transactions" {
     try testing.expectEqualStrings("E 25P02 current transaction is aborted, commands ignored until end of transaction block\nZ E\n", try c.query("SELECT 1"));
     try testing.expectEqualStrings("C ROLLBACK\nZ I\n", try c.query("COMMIT"));
     try testing.expectEqualStrings("N WARNING 25P01 there is no transaction in progress\nC COMMIT\nZ I\n", try c.query("COMMIT"));
+    // A statement's notices come before its CommandComplete, each time it
+    // runs (an extended query's Execute), and client_min_messages leaves
+    // them out.
+    try testing.expectEqualStrings(
+        \\N NOTICE 00000 table "nope" does not exist, skipping
+        \\C DROP TABLE
+        \\N NOTICE 42P07 relation "fruit" already exists, skipping
+        \\C CREATE TABLE
+        \\Z I
+        \\
+    , try c.query("DROP TABLE IF EXISTS nope; CREATE TABLE IF NOT EXISTS fruit (id int)"));
+    try c.parse("dn", "DROP VIEW IF EXISTS nope", &.{});
+    for (0..2) |_| {
+        try c.bind("", "dn", &.{}, &.{});
+        try c.execute("", 0);
+    }
+    try testing.expectEqualStrings(
+        \\1
+        \\2
+        \\N NOTICE 00000 view "nope" does not exist, skipping
+        \\C DROP VIEW
+        \\2
+        \\N NOTICE 00000 view "nope" does not exist, skipping
+        \\C DROP VIEW
+        \\Z I
+        \\
+    , try c.sync());
+    try testing.expectEqualStrings(
+        \\C SET
+        \\C DROP TABLE
+        \\Z I
+        \\
+    , try c.query("SET client_min_messages = warning; DROP TABLE IF EXISTS nope"));
+    try testing.expectEqualStrings("N WARNING 25P01 there is no transaction in progress\nC COMMIT\nZ I\n", try c.query("COMMIT"));
+    try testing.expectEqualStrings("C SET\nZ I\n", try c.query("SET client_min_messages TO error"));
+    try testing.expectEqualStrings("C COMMIT\nZ I\n", try c.query("COMMIT"));
+    try testing.expectEqualStrings("C RESET\nZ I\n", try c.query("RESET client_min_messages"));
+    try testing.expectEqualStrings(
+        \\C CREATE SCHEMA
+        \\C CREATE TABLE
+        \\C CREATE TABLE
+        \\N NOTICE 00000 drop cascades to 2 other objects D:drop cascades to table s.a
+        \\drop cascades to table s.b
+        \\C DROP SCHEMA
+        \\Z I
+        \\
+    , try c.query("CREATE SCHEMA s; CREATE TABLE s.a (x int); CREATE TABLE s.b (x int); DROP SCHEMA s CASCADE"));
     try testing.expectEqualStrings("T count:20\nD 3\nC SELECT 1\nZ I\n", try c.query("SELECT count(*) FROM fruit"));
     // SET has no result (the dialect runs set_config()); COPY is refused.
-    try testing.expectEqualStrings("C SET\nT application_name:25\nD pgtest2\nC SHOW\nZ I\n", try c.query("SET application_name = 'pgtest2'; SHOW application_name"));
+    try testing.expectEqualStrings("C SET\nT application_name:25\nD pgtest2\nC SHOW\nS application_name pgtest2\nZ I\n", try c.query("SET application_name = 'pgtest2'; SHOW application_name"));
     try testing.expectEqualStrings("E 0A000 COPY is not supported by this server @1\nZ I\n", try c.query("COPY fruit TO STDOUT"));
     // DETAIL, HINT and CONTEXT are fields of their own (D, H, W), cut
     // where the engine wrote them: a quoted value is no field.
@@ -734,6 +785,11 @@ test "pg: catalogs and settings" {
     try testing.expectEqualStrings("T current_database:25\nD x\nC SELECT 1\nZ I\n", try c.query("SELECT current_database()"));
     // RESET: its tag, and the startup packet's value.
     try testing.expectEqualStrings("C SET\nC RESET\nT application_name:25\nD pgtest\nC SHOW\nZ I\n", try c.query("SET application_name = 'x'; RESET application_name; SHOW application_name"));
+    // A setting the client is told of: ParameterStatus before
+    // ReadyForQuery when its value changed (not when it came back).
+    try testing.expectEqualStrings("C SET\nC SET\nS IntervalStyle sql_standard\nS standard_conforming_strings off\nZ I\n", try c.query("SET standard_conforming_strings = of; SET IntervalStyle = SQL_STANDARD"));
+    try testing.expectEqualStrings("E 22023 parameter \"standard_conforming_strings\" requires a Boolean value\nZ I\n", try c.query("SET standard_conforming_strings = maybe"));
+    try testing.expectEqualStrings("C RESET\nC RESET\nS IntervalStyle postgres\nS standard_conforming_strings on\nZ I\n", try c.query("RESET standard_conforming_strings; RESET IntervalStyle"));
     // The catalogs: OIDs agree, booleans are t/f, the type OIDs are the
     // ones RowDescription uses.
     _ = try c.query("CREATE TABLE book (id integer PRIMARY KEY, title varchar(20))");

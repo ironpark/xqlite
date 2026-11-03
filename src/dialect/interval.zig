@@ -315,6 +315,26 @@ pub const Interval = struct {
     }
 };
 
+/// PostgreSQL's IntervalStyle: how an interval is written (its output,
+/// postgres/datetime.zig's formatIntervalStyle()) and, sql_standard, how
+/// a leading sign is read. A setting of the session
+/// (dialect.ConnState.postgres), not of the value: what is stored never
+/// depends on it.
+pub const Style = enum(u8) {
+    postgres,
+    postgres_verbose,
+    sql_standard,
+    iso_8601,
+
+    /// The style named `z` (any case), null if none.
+    pub fn parse(z: []const u8) ?Style {
+        inline for (comptime std.enums.values(Style)) |s| {
+            if (std.ascii.eqlIgnoreCase(z, @tagName(s))) return s;
+        }
+        return null;
+    }
+};
+
 /// The bytes of an interval's BLOB.
 pub const len = 32;
 /// The bytes of its key.

@@ -96,10 +96,10 @@ const type_words = words.folded(.lower, &.{
 });
 
 /// The error of a statement that does not lex (Parser.init()).
-pub const LexError = struct {
-    fields: @import("../../sql/util.zig").ErrorFields = .{ .message = "" },
-    pos: usize = 0,
-};
+pub const LexError = tokenized.LexError;
+/// What the session changes in the lexing (standard_conforming_strings).
+pub const Options = tokenized.Options;
+const tokenized = @import("../tokenized.zig");
 
 /// `[schema.]name` as written (the schema is PostgreSQL's).
 pub const QName = struct {
@@ -172,17 +172,21 @@ pub const Parser = struct {
     srf_count: u32 = 0,
 
     /// Lex the statement that starts at `pos` (blank text and leading
-    /// semicolons are skipped). An empty statement has no tokens but eof.
-    /// A lexical error fails with its message and offset in `lex_error`.
-    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError) Error!Parser {
+    /// semicolons are skipped), its strings as `options` read them (a
+    /// statement of the session: Options.of() its connection; text the
+    /// dialect writes itself: the defaults). An empty statement has no
+    /// tokens but eof. A lexical error fails with its message and offset
+    /// in `lex_error`.
+    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError, options: Options) Error!Parser {
         var l = lexer.Lexer.init(arena, src, pos);
+        l.standard_strings = options.standard_strings;
         var toks: std.ArrayList(Token) = .empty;
         var end: usize = src.len;
         while (true) {
             const t = l.next() catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.LexFailed => {
-                    if (lex_error) |e| e.* = .{ .fields = l.err, .pos = l.err_pos };
+                    if (lex_error) |e| e.* = .{ .fields = l.err, .pos = l.err_pos, .state = l.err_state };
                     return error.ParseFailed;
                 },
             };
@@ -572,7 +576,7 @@ pub const Parser = struct {
             };
             return null;
         };
-        var sub = Parser.init(p.arena, text, 0, null) catch |err| switch (err) {
+        var sub = Parser.init(p.arena, text, 0, null, .{}) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.ParseFailed => return p.failState(q.name.pos, .of("XX000"), "internal error in the definition of {s}", .{q.name.text}),
         };
@@ -1393,7 +1397,7 @@ pub const Parser = struct {
                 rows_fn = "xq_pg_rows_records";
                 try p.recordColumns(base.?, &cols);
             },
-            .unnest, .subscripts, .expand => unreachable,
+            .unnest, .subscripts, .expand, .re_matches, .re_split => unreachable,
         }
         if (kind == .path) {
             try rows_args.append(p.arena, args[1]);
@@ -1430,6 +1434,7 @@ pub const Parser = struct {
         const ok = switch (kind) {
             .unnest => args.len >= 1,
             .subscripts => args.len == 2 or args.len == 3,
+            .re_matches, .re_split => args.len == 2 or args.len == 3,
             else => args.len == 1,
         };
         if (!ok) return p.failState(pos, .of("42883"), "function {s} with {d} arguments does not exist", .{ fname, args.len });
@@ -1467,6 +1472,10 @@ pub const Parser = struct {
                 rows = try p.call(pos, "xq_pg_rows_subscripts", null, &.{ args[0], args[1], if (args.len > 2) args[2] else try p.expr(pos, .{ .integer = "0" }) });
                 try cols.append(p.arena, .{ .name = if (has_alias and !ordinality) label.text else fname });
             },
+            .re_matches, .re_split => {
+                rows = try p.regexpRows(pos, kind, args);
+                try cols.append(p.arena, .{ .name = if (has_alias and !ordinality) label.text else fname, .cast = if (kind == .re_matches) text_array else null });
+            },
             else => {
                 rows = try p.call(pos, "xq_pg_rows_expand", null, &.{ args[0], try p.expr(pos, .{ .integer = "0" }) });
                 try cols.append(p.arena, .{ .name = "x", .index = 0 });
@@ -1479,6 +1488,14 @@ pub const Parser = struct {
         const f = try p.new(tree.Func, .{ .name = .{ .text = "json_each", .pos = pos }, .args = try p.list(&.{rows}) });
         try p.srfs.put(p.arena, f, .{ .cols = cols.items });
         return .{ .source = .{ .func = f }, .alias = .{ .name = label } };
+    }
+
+    /// The rows of regexp_matches(s, p [, flags]) or
+    /// regexp_split_to_table(s, p [, flags]) (regexp.zig).
+    fn regexpRows(p: *Parser, pos: u32, kind: SrfKind, args: []const *Expr) Error!*Expr {
+        const flags = if (args.len > 2) args[2] else try p.stringAt(pos, "");
+        const name = if (kind == .re_matches) "xq_pg_rows_regexp_matches" else "xq_pg_rows_regexp_split";
+        return p.call(pos, name, null, &.{ args[0], args[1], flags });
     }
 
     /// pg_input_error_info(text, type) in FROM: the json_each() of the one
@@ -1518,7 +1535,7 @@ pub const Parser = struct {
             var ty: ?types.TypeName = null;
             if (decl) |d| {
                 const z = try p.arena.dupeSentinel(u8, d, 0);
-                var sub = Parser.init(p.arena, z, 0, null) catch return p.failState(q.name.pos, .of("42704"), "type \"{s}\" does not exist", .{d});
+                var sub = Parser.init(p.arena, z, 0, null, .{}) catch return p.failState(q.name.pos, .of("42704"), "type \"{s}\" does not exist", .{d});
                 ty = sub.typeName() catch null;
             }
             try cols.append(p.arena, .{ .name = c.name(), .index = @intCast(cols.items.len), .cast = ty orelse .{ .name = "text", .pos = q.name.pos } });
@@ -1559,6 +1576,17 @@ pub const Parser = struct {
             const kind = srfKind(f.name.text).?;
             switch (kind) {
                 .each, .records, .populate => return p.unsupported(e.pos, "a record-returning function in a select list"),
+                .re_matches, .re_split => {
+                    const n = f.args.len;
+                    if (n != 2 and n != 3) return p.failState(f.name.pos, .of("42883"), "function {s} with {d} arguments does not exist", .{ f.name.text, n });
+                    try rows.append(p.arena, try p.regexpRows(e.pos, kind, f.args));
+                    try cols.append(p.arena, .{
+                        .name = f.name.text,
+                        .index = if (found.items.len > 1) @intCast(i) else null,
+                        .cast = if (kind == .re_matches) text_array else null,
+                    });
+                    continue;
+                },
                 .unnest, .subscripts, .expand => {
                     const n = f.args.len;
                     if (!(if (kind == .subscripts) n == 2 or n == 3 else n == 1)) {
@@ -1692,6 +1720,13 @@ pub const Parser = struct {
         return tree.expr(p.arena, e.pos, e.end, .{ .cast = .{ .e = e, .target_type = try types.format(p.arena, ty), .mode = mode } });
     }
 
+    /// The arguments of xq_pg_iv_in() after the value, for type modifier
+    /// `tm`, in the session (ivinput.inArgs()).
+    fn ivInArgs(p: *Parser, tm: i64) Error![]const i64 {
+        var buf: [2]i64 = undefined;
+        return p.arena.dupe(i64, ivinput.inArgs(if (p.p) |ps| ps.db else null, tm, &buf));
+    }
+
     /// The DEFAULT of a json/jsonb column: a constant checked (and for
     /// jsonb made its JSONB blob) here, so that the schema keeps a
     /// literal sqlite3 reads; another jsonb expression made a blob
@@ -1702,7 +1737,7 @@ pub const Parser = struct {
         if (!ty.array and eql(ty.name, "interval") and e.kind != .null) {
             const tm = types.intervalTypmod(ty);
             if (tm < 0 and e.kind == .cast and eql(e.kind.cast.target_type, "interval")) return e;
-            return p.expr(e.pos, .{ .cast = .{ .e = e, .target_type = "interval", .mode = .{ .func_args = .{ .func = "xq_pg_iv_in", .args = try p.arena.dupe(i64, &.{tm}) } } } });
+            return p.expr(e.pos, .{ .cast = .{ .e = e, .target_type = "interval", .mode = .{ .func_args = .{ .func = "xq_pg_iv_in", .args = try p.ivInArgs(tm) } } } });
         }
         const jsonb = eql(ty.name, "jsonb");
         if (ty.array or !(jsonb or eql(ty.name, "json"))) return e;
@@ -2023,8 +2058,10 @@ pub const Parser = struct {
             } else if (p.isKw("like") or p.isKw("ilike")) {
                 const ilike = p.advance().isKw("ilike");
                 l = try p.likeRest(l, not, ilike);
-            } else if (p.isKw("similar")) {
-                return p.unsupported(t.start, "SIMILAR TO");
+            } else if (p.isKw("similar") and p.isKwAt(1, "to")) {
+                _ = p.advance();
+                _ = p.advance();
+                l = try p.similarRest(l, not);
             } else if (!not and (t.isOp("~~") or t.isOp("!~~") or t.isOp("~~*") or t.isOp("!~~*"))) {
                 _ = p.advance();
                 l = try p.likeRest(l, t.text[0] == '!', t.text[t.text.len - 1] == '*');
@@ -2050,6 +2087,18 @@ pub const Parser = struct {
         return p.expr(l.pos, .{ .like = .{ .e = l, .pat = pat, .not = not, .case_sensitive = !ilike, .escape = esc } });
     }
 
+    /// `l [NOT] SIMILAR TO pat [ESCAPE e]`: as PostgreSQL rewrites it,
+    /// `l ~ similar_to_escape(pat [, e])` (xq_pg_re(l,
+    /// xq_pg_similar_escape(pat [, e]), ''), regexp.zig).
+    fn similarRest(p: *Parser, l: *Expr, not: bool) Error!*Expr {
+        const pat = try p.otherExpr();
+        var args: std.ArrayList(*Expr) = .empty;
+        try args.append(p.arena, pat);
+        if (p.eatKw("escape")) try args.append(p.arena, try p.otherExpr());
+        const re = try p.call(pat.pos, "xq_pg_similar_escape", null, args.items);
+        return p.regexOp(.{ .fold = false, .negate = not }, l, re);
+    }
+
     const OtherOp = enum { concat, bit_and, bit_or, bit_xor, shl, shr, json, regex };
 
     /// Operators of the "any other operator" level.
@@ -2065,10 +2114,10 @@ pub const Parser = struct {
     }
 
     /// `l op r` of regular expression operator `op` (regexOperator()):
-    /// xq_pg_regex(l, r, flags), under NOT for `!~` and `!~*`.
+    /// xq_pg_re(l, r, flags) (regexp.zig), under NOT for `!~` and `!~*`.
     pub fn regexOp(p: *Parser, op: RegexOp, l: *Expr, r: *Expr) Error!*Expr {
         const flags = try p.expr(r.pos, .{ .string = if (op.fold) "i" else "" });
-        const fun = try p.new(tree.Func, .{ .name = .{ .text = "xq_pg_regex", .pos = l.pos }, .args = try p.list(&.{ l, r, flags }) });
+        const fun = try p.new(tree.Func, .{ .name = .{ .text = "xq_pg_re", .pos = l.pos }, .args = try p.list(&.{ l, r, flags }) });
         const x = try p.span(l, r, .{ .func = fun });
         if (!op.negate) return x;
         return p.span(l, r, .{ .unary = .{ .op = .not, .e = x } });
@@ -2157,14 +2206,21 @@ pub const Parser = struct {
     }
 
     fn unary(p: *Parser) Error!*Expr {
+        return p.unaryAt(true);
+    }
+
+    /// A unary expression; `at`: with its AT TIME ZONE (not of a zone:
+    /// `x AT TIME ZONE 'UTC' AT TIME ZONE 'EST'` is `(x AT TIME ZONE
+    /// 'UTC') AT TIME ZONE 'EST'`, AT being left-associative).
+    fn unaryAt(p: *Parser, at: bool) Error!*Expr {
         const t = p.peek();
-        const op: tree.UnOp = if (t.isOp("-")) .neg else if (t.isOp("+")) .plus else if (t.isOp("~")) .bit_not else return p.postfix();
+        const op: tree.UnOp = if (t.isOp("-")) .neg else if (t.isOp("+")) .plus else if (t.isOp("~")) .bit_not else return p.postfix(at);
         _ = p.advance();
-        const e = try p.unary();
+        const e = try p.unaryAt(at);
         return p.expr(t.start, .{ .unary = .{ .op = op, .e = e } });
     }
 
-    fn postfix(p: *Parser) Error!*Expr {
+    fn postfix(p: *Parser, at: bool) Error!*Expr {
         var e = try p.primary();
         while (true) {
             if (p.eat(.cast)) {
@@ -2189,14 +2245,16 @@ pub const Parser = struct {
                 x.end = p.lastEnd();
                 try p.setFig(x, .{ .call = field.text });
                 e = x;
-            } else if (p.isKw("at") and p.isKwAt(1, "time") and p.isKwAt(2, "zone")) {
-                // x AT TIME ZONE z: timezone(z, x) (dtfuncs.zig).
+            } else if (at and p.isKw("at") and p.isKwAt(1, "time") and p.isKwAt(2, "zone")) {
+                // x AT TIME ZONE z: timezone(z, x) by its syntax's name
+                // (dtfuncs.zig), a column named "timezone".
                 _ = p.advance();
                 _ = p.advance();
                 _ = p.advance();
-                const z = try p.unary();
-                e = try p.call(e.pos, "timezone", .postgres, &.{ z, e });
-            } else if (p.isKw("at") and p.isKwAt(1, "local")) {
+                const z = try p.unaryAt(false);
+                e = try p.call(e.pos, "xq_pg_at_time_zone", null, &.{ z, e });
+                try p.setFig(e, .{ .call = "timezone" });
+            } else if (at and p.isKw("at") and p.isKwAt(1, "local")) {
                 // The session's zone, UTC.
                 _ = p.advance();
                 _ = p.advance();
@@ -2243,7 +2301,7 @@ pub const Parser = struct {
                 .truncate => |n| .{ .truncate = n },
                 .round => |s| .{ .round = s },
                 .numeric => |m| .{ .func_args = .{ .func = "xq_dec", .args = try p.arena.dupe(i64, &m) } },
-                .interval => |m| .{ .func_args = .{ .func = "xq_pg_iv_in", .args = try p.arena.dupe(i64, &.{m}) } },
+                .interval => |m| .{ .func_args = .{ .func = "xq_pg_iv_in", .args = try p.ivInArgs(m) } },
             };
             // numeric(p, s) is of its precision and scale, character(n) of
             // its length (shown padded to it).
@@ -2680,13 +2738,13 @@ pub const Parser = struct {
     /// "function f(a => integer, ...) does not exist", the arguments'
     /// types as their literals tell (argTypeName()).
     fn noFunction(p: *Parser, name: Name, args: []const *Expr, names: []const ?Name) Error {
-        var sig: std.ArrayList(u8) = .empty;
-        for (args, 0..) |a, i| {
-            if (i > 0) try sig.appendSlice(p.arena, ", ");
-            if (i < names.len) if (names[i]) |n| try sig.print(p.arena, "{s} => ", .{n.text});
-            try sig.appendSlice(p.arena, try p.argTypeName(a));
+        const shown = try p.arena.alloc([]const u8, args.len);
+        for (args, shown, 0..) |a, *s, i| {
+            const t = try p.argTypeName(a);
+            const n: ?Name = if (i < names.len) names[i] else null;
+            s.* = if (n) |nm| try std.fmt.allocPrint(p.arena, "{s} => {s}", .{ nm.text, t }) else t;
         }
-        return p.failFields(name.pos, .of("42883"), .{ .message = try std.fmt.allocPrint(p.arena, "function {s}({s}) does not exist", .{ name.text, sig.items }), .hint = @import("frontend.zig").function_hint });
+        return p.failFields(name.pos, .of("42883"), try @import("frontend.zig").functionNotExist(p.arena, name.text, shown));
     }
 
     /// The type of argument `e` as far as the parser knows it: of a
@@ -2850,17 +2908,21 @@ pub const Parser = struct {
                 return false;
             }
             try args.append(p.arena, x);
+            var similar = false;
             if (p.eatKw("from")) {
                 try args.append(p.arena, try p.expr0());
                 if (p.eatKw("for")) try args.append(p.arena, try p.expr0());
             } else if (p.eatKw("for")) {
                 try args.append(p.arena, try p.expr(x.pos, .{ .integer = "1" }));
                 try args.append(p.arena, try p.expr0());
-            } else if (p.isKw("similar")) {
-                return p.unsupported(p.peek().start, "SUBSTRING ... SIMILAR");
+            } else if (p.eatKw("similar")) {
+                try args.append(p.arena, try p.expr0());
+                try p.expectKw("escape");
+                try args.append(p.arena, try p.expr0());
+                similar = true;
             } else return p.syntaxError();
             _ = try p.expect(.rparen);
-            f.name.text = "substr";
+            f.name.text = substringName(args.items, similar);
             f.args = args.items;
             return true;
         }
@@ -2868,6 +2930,20 @@ pub const Parser = struct {
             return p.unsupported(f.name.pos, "OVERLAY");
         }
         return false;
+    }
+
+    /// The function substring(args) is (`similar`: SUBSTRING(x SIMILAR
+    /// pattern ESCAPE e)), as PostgreSQL's substring(text, text) and
+    /// substring(text, text, text) are chosen for string constants: of a
+    /// pattern or a SIMILAR pattern and its escape textregexsubstr()
+    /// (regexp.zig); otherwise SQLite's substr().
+    fn substringName(args: []const *Expr, similar: bool) []const u8 {
+        const pattern = switch (args.len) {
+            2 => args[1].kind == .string,
+            3 => args[1].kind == .string and args[2].kind == .string,
+            else => false,
+        };
+        return if (similar or pattern) "textregexsubstr" else "substr";
     }
 
     /// The expression a call means: PostgreSQL's name mapped to SQLite's
@@ -2895,7 +2971,7 @@ pub const Parser = struct {
                 .date_part => try p.datePart(pos, c),
             };
         } else {
-            const mapped = funcName(n);
+            const mapped = if (eql(n, "substring") and plain and (c.args.len == 2 or c.args.len == 3)) substringName(c.args, false) else funcName(n);
             const name: Name = if (mapped.ptr == n.ptr) c.name else .{ .text = mapped, .pos = c.name.pos };
             if ((eql(mapped, "nextval") or eql(mapped, "currval") or eql(mapped, "setval")) and c.args.len > 0 and c.args[0].kind == .string) {
                 c.args[0] = try p.sequenceArg(c.args[0]);
@@ -3989,6 +4065,9 @@ fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
 
+/// The type of regexp_matches()'s column.
+const text_array: types.TypeName = .{ .name = "text", .array = true, .pos = 0 };
+
 /// A column of a JSON set-returning function (Parser.srfColumn()): of
 /// the SQLite json_each() row of the item, `value` itself or element
 /// `index` of it, cast to `cast`; `ordinality` is WITH ORDINALITY's.
@@ -4001,7 +4080,7 @@ pub const SrfCol = struct {
 
 pub const Srf = struct { cols: []SrfCol };
 
-const SrfKind = enum { each, elements, keys, path, records, populate, unnest, subscripts, expand };
+const SrfKind = enum { each, elements, keys, path, records, populate, unnest, subscripts, expand, re_matches, re_split };
 
 /// The set-returning functions of arrays.
 fn arraySrfKind(q: QName) ?SrfKind {
@@ -4012,6 +4091,8 @@ fn arraySrfKind(q: QName) ?SrfKind {
     }
     if (eql(n, "unnest")) return .unnest;
     if (eql(n, "generate_subscripts")) return .subscripts;
+    if (eql(n, "regexp_matches")) return .re_matches;
+    if (eql(n, "regexp_split_to_table")) return .re_split;
     return null;
 }
 
@@ -4028,6 +4109,7 @@ fn srfKind(name: []const u8) ?SrfKind {
         .{ "json_populate_recordset", .populate },  .{ "jsonb_populate_record", .populate },
         .{ "jsonb_populate_recordset", .populate }, .{ "unnest", .unnest },
         .{ "generate_subscripts", .subscripts },    .{ "_pg_expandarray", .expand },
+        .{ "regexp_matches", .re_matches },         .{ "regexp_split_to_table", .re_split },
     });
     return map.get(name);
 }

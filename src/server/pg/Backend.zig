@@ -37,6 +37,13 @@ query: []const u8 = "",
 scratch: std.heap.ArenaAllocator,
 /// The column types of the statement of a simple query being sent.
 col_types: std.ArrayList(xqlite.types.Type) = .empty,
+/// The values of the session's settings a client is told of
+/// (Db.reported_settings) as last sent (ParameterStatus), and the
+/// Db.settingsVersion() they were read at: one that changed is reported
+/// before the next ReadyForQuery, as PostgreSQL does
+/// (ReportChangedGUCOptions()).
+reported: [xqlite.Db.reported_settings.len]?[]u8 = @splat(null),
+reported_version: ?u32 = null,
 
 /// A prepared statement (Parse).
 const Statement = struct {
@@ -93,6 +100,7 @@ fn deinit(b: *Backend) void {
     }
     b.statements.deinit(b.gpa);
     b.col_types.deinit(b.gpa);
+    for (b.reported) |v| if (v) |z| b.gpa.free(z);
     b.scratch.deinit();
     b.in_buf.deinit(b.gpa);
     b.out.deinit();
@@ -213,23 +221,18 @@ fn startup(b: *Backend) !bool {
         .{ "client_encoding", "UTF8" },
         .{ "DateStyle", "ISO, MDY" },
         .{ "integer_datetimes", "on" },
-        .{ "standard_conforming_strings", "on" },
         .{ "TimeZone", "UTC" },
-        .{ "IntervalStyle", "postgres" },
         .{ "is_superuser", "on" },
         .{ "session_authorization", user },
-        .{ "application_name", app_name },
         .{ "default_transaction_read_only", "off" },
         .{ "in_hot_standby", "off" },
         .{ "scram_iterations", "4096" },
     };
     for (reported) |r| try b.parameterStatus(r[0], r[1]);
-    // PostgreSQL 18 reports search_path too: the session's, which the
-    // startup options may have set.
-    var path: SettingSink = .{ .gpa = b.gpa };
-    defer if (path.value) |v| b.gpa.free(v);
-    try b.session.run("SELECT current_setting('search_path')", &path);
-    try b.parameterStatus("search_path", path.value orelse "\"$user\", public");
+    // The session's (IntervalStyle, standard_conforming_strings,
+    // application_name, search_path as PostgreSQL 18), which the startup
+    // packet may have set.
+    try b.reportSettings();
     const t = b.c.ticket();
     try b.out.begin('K');
     try b.out.int(u32, t.id);
@@ -275,22 +278,6 @@ const StartupSink = struct {
     pub fn failed(s: *StartupSink, _: Session.Failure) !void {
         s.bad = true;
     }
-};
-
-/// The text of a one-row, one-column result.
-const SettingSink = struct {
-    gpa: std.mem.Allocator,
-    value: ?[]u8 = null,
-    pub fn columns(_: *SettingSink, _: []const Column) !void {}
-    pub fn row(s: *SettingSink, r: *Session.Row) !void {
-        if (s.value != null or r.len() == 0) return;
-        switch (try r.value(0)) {
-            .text => |t| s.value = try s.gpa.dupe(u8, t),
-            else => {},
-        }
-    }
-    pub fn complete(_: *SettingSink, _: Session.Complete) !void {}
-    pub fn failed(_: *SettingSink, _: Session.Failure) !void {}
 };
 
 /// The `options` of the startup packet: `-c name=value` and
@@ -461,7 +448,25 @@ fn loop(b: *Backend) !void {
     }
 }
 
+/// ParameterStatus of each setting of Db.reported_settings whose value
+/// is not the one last sent.
+fn reportSettings(b: *Backend) !void {
+    const db = b.session.db;
+    const version = db.settingsVersion();
+    if (b.reported_version == version) return;
+    b.reported_version = version;
+    for (&b.reported, xqlite.Db.reported_settings, 0..) |*last, name, i| {
+        const now = db.reportedSetting(i);
+        if (last.*) |z| if (std.mem.eql(u8, z, now)) continue;
+        const copy = try b.gpa.dupe(u8, now);
+        if (last.*) |z| b.gpa.free(z);
+        last.* = copy;
+        try b.parameterStatus(name, now);
+    }
+}
+
 fn readyForQuery(b: *Backend) !void {
+    try b.reportSettings();
     try b.out.begin('Z');
     try b.out.int(u8, switch (b.session.status()) {
         .idle => 'I',
@@ -513,7 +518,7 @@ const SimpleSink = struct {
     }
 
     pub fn notice(s: *SimpleSink, n: Session.Notice) !void {
-        try s.b.errorResponse("WARNING", &n.sqlstate, n.message, null);
+        try s.b.noticeResponse(n);
     }
 };
 
@@ -548,7 +553,7 @@ const ExtendedSink = struct {
     }
 
     pub fn notice(s: *ExtendedSink, n: Session.Notice) !void {
-        try s.b.errorResponse("WARNING", &n.sqlstate, n.message, null);
+        try s.b.noticeResponse(n);
     }
 };
 
@@ -818,6 +823,7 @@ fn rowDescription(b: *Backend, cols: []const Column, binary: ?[]const bool) !voi
 /// in binary where `binary` says (with the columns' `oids`).
 fn dataRow(b: *Backend, r: *Session.Row, types: []const xqlite.types.Type, oids: ?[]const Oid, binary: ?[]const bool) !void {
     try b.out.begin('D');
+    b.out.settings = b.session.db.displaySettings();
     const n = r.len();
     try b.out.int(i16, @intCast(n));
     for (0..n) |i| {
@@ -860,6 +866,11 @@ fn failure(b: *Backend, f: Session.Failure) !void {
     // The message's DETAIL, HINT and CONTEXT are fields of their own.
     const fields: xqlite.ErrorInfo.Fields = if (f.code == .interrupt) .{ .message = "canceling statement due to user request" } else xqlite.ErrorInfo.splitFields(f.message, f.fields_at);
     try b.errorFields("ERROR", &f.sqlstate, fields, pos);
+}
+
+/// A NoticeResponse: the severity of the notice's level, its DETAIL.
+fn noticeResponse(b: *Backend, n: Session.Notice) !void {
+    return b.errorFields(n.level.name(), &n.sqlstate, .{ .message = n.message, .detail = n.detail }, null);
 }
 
 fn errorResponse(b: *Backend, severity: []const u8, code: *const [5]u8, message: []const u8, position: ?usize) !void {

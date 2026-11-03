@@ -123,7 +123,8 @@ const pg: Dialect = .{
     .prelude = "SET client_min_messages = warning; DROP SCHEMA public CASCADE; CREATE SCHEMA public;" ++
         " DO $$DECLARE r record; BEGIN FOR r IN SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname NOT IN ('public', 'information_schema')" ++
         " LOOP EXECUTE 'DROP SCHEMA ' || quote_ident(r.nspname) || ' CASCADE'; END LOOP; END$$;\n",
-    .xq_prelude = ".dialect postgres\n.headers on\n",
+    // As the server's prelude: a case that compares notices sets it back.
+    .xq_prelude = ".dialect postgres\n.headers on\nSET client_min_messages = warning;\n",
     .norm_server = normPg,
     .norm_xq = normXqPg,
     .databases = true,
@@ -525,7 +526,9 @@ fn lines(text: []const u8) std.mem.SplitIterator(u8, .scalar) {
 // ---------------------------------------------------------------- normalizing
 
 /// psql prints a header and "(N rows)" for every result: keep the header
-/// only above rows, as the shell does. Errors become "ERROR: message".
+/// only above rows, as the shell does. Errors become "ERROR: message",
+/// notices "NOTICE: message" (a case sees them after SET
+/// client_min_messages = notice: the prelude leaves them out).
 /// Booleans print as t/f, which the dialect returns as integers 1/0.
 fn normPg(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -543,13 +546,20 @@ fn normPg(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
             in_error = true;
             continue;
         }
+        if (pgNotice(line)) |msg| {
+            try out.appendSlice(gpa, "NOTICE: ");
+            try out.appendSlice(gpa, msg);
+            try out.append(gpa, '\n');
+            in_error = true;
+            continue;
+        }
         if (in_error and fieldLine(line)) {
             try out.appendSlice(gpa, line);
             try out.append(gpa, '\n');
             skip = false;
             continue;
         }
-        if (startsWithLineN(line) or startsWithAny(line, &.{ "NOTICE:", "psql:" })) {
+        if (startsWithLineN(line) or startsWithAny(line, &.{"psql:"})) {
             skip = true;
             continue;
         }
@@ -584,6 +594,17 @@ fn pgError(line: []const u8) ?[]const u8 {
     }
     if (!std.mem.startsWith(u8, rest, "ERROR: ")) return null;
     return std.mem.trimStart(u8, rest["ERROR:".len..], " ");
+}
+
+/// /^(psql:[^ ]* )?NOTICE: +/: the message after it.
+fn pgNotice(line: []const u8) ?[]const u8 {
+    var rest = line;
+    if (std.mem.startsWith(u8, rest, "psql:")) {
+        const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
+        rest = rest[sp + 1 ..];
+    }
+    if (!std.mem.startsWith(u8, rest, "NOTICE: ")) return null;
+    return std.mem.trimStart(u8, rest["NOTICE:".len..], " ");
 }
 
 /// /^LINE [0-9]+:/
@@ -634,6 +655,14 @@ fn normXqFields(gpa: Allocator, text: []const u8, fields: bool) Allocator.Error!
         if (xqError(line)) |msg| {
             try out.appendSlice(gpa, "ERROR: ");
             try out.appendSlice(gpa, msg);
+            try out.append(gpa, '\n');
+            skip = true;
+            continue;
+        }
+        // The shell's notices (PostgreSQL's dialect): as normPg()'s.
+        if (std.mem.startsWith(u8, line, "NOTICE:  ")) {
+            try out.appendSlice(gpa, "NOTICE: ");
+            try out.appendSlice(gpa, line["NOTICE:  ".len..]);
             try out.append(gpa, '\n');
             skip = true;
             continue;
@@ -1239,6 +1268,29 @@ test normPg {
     );
     defer a.free(got);
     try std.testing.expectEqualStrings("a|b\n1|x\nERROR: relation \"x\" does not exist\n0\n", got);
+}
+
+test "normPg and normXqPg: notices and their DETAIL" {
+    const a = std.testing.allocator;
+    const pg_out = try normPg(a,
+        \\psql:<stdin>:2: NOTICE:  table "t" does not exist, skipping
+        \\psql:<stdin>:3: NOTICE:  drop cascades to table s.t
+        \\NOTICE:  drop cascades to 2 other objects
+        \\DETAIL:  drop cascades to table s.a
+        \\
+    );
+    defer a.free(pg_out);
+    const want = "NOTICE: table \"t\" does not exist, skipping\nNOTICE: drop cascades to table s.t\nNOTICE: drop cascades to 2 other objects\nDETAIL:  drop cascades to table s.a\n";
+    try std.testing.expectEqualStrings(want, pg_out);
+    const xq_out = try normXqPg(a,
+        \\NOTICE:  table "t" does not exist, skipping
+        \\NOTICE:  drop cascades to table s.t
+        \\NOTICE:  drop cascades to 2 other objects
+        \\DETAIL:  drop cascades to table s.a
+        \\
+    );
+    defer a.free(xq_out);
+    try std.testing.expectEqualStrings(want, xq_out);
 }
 
 test "normPg and normXqPg: the fields of an error stay, its position goes" {

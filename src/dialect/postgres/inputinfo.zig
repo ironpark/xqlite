@@ -219,7 +219,7 @@ fn run(ctx: *Context, a: Allocator, value: []const u8, type_text: []const u8) Fa
 fn typeName(a: Allocator, z: []const u8) ?types.TypeName {
     const Parser = @import("parser.zig").Parser;
     const src = a.dupeSentinel(u8, z, 0) catch return null;
-    var p = Parser.init(a, src, 0, null) catch return null;
+    var p = Parser.init(a, src, 0, null, .{}) catch return null;
     const ty = p.typeName() catch return null;
     if (p.peek().kind != .eof) return null;
     _ = types.info(ty) catch return null;

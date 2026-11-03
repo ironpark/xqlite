@@ -198,6 +198,9 @@ const Kind = enum {
     cast,
     /// CASE: args [base] (when then)* [else].
     case_,
+    /// `x AT TIME ZONE z`: args x, z (ruleutils.c's get_func_sql_syntax()
+    /// of timezone()).
+    at_zone,
     array,
     /// x op ANY (array), flag: ALL.
     any,
@@ -858,6 +861,15 @@ const Fixer = struct {
                 }
                 if (n.has_else) n.args[n.args.len - 1] = results.items[k];
                 n.ty = ty;
+                // No ELSE: the parser's NULL of the CASE's type, which
+                // ruleutils.c prints (ELSE NULL::integer).
+                if (!n.has_else) {
+                    const args = try f.a.alloc(*Node, n.args.len + 1);
+                    @memcpy(args[0..n.args.len], n.args);
+                    args[n.args.len] = try f.node(.{ .kind = .null_, .text = "NULL", .ty = ty });
+                    n.args = args;
+                    n.has_else = true;
+                }
                 return n;
             },
             .collate => {
@@ -872,16 +884,33 @@ const Fixer = struct {
             },
             .in_ => {
                 // x IN (a, b): x = ANY (ARRAY[a, b]); a list of one: x = a.
+                // As transformAExprIn(), the items that read a column are
+                // compared each on its own, after the array of the others
+                // (of two or more): x IN (1, 2, c) is (x = ANY (ARRAY[1,
+                // 2])) OR (x = c); NOT IN the same with <> and AND.
                 for (n.args) |*x| x.* = try f.fix(x.*);
                 const x = n.args[0];
-                if (n.args.len == 2) {
-                    const e = try f.binop(try f.node(.{ .kind = .op, .text = if (n.flag) "<>" else "=", .args = try f.list(&.{ x, n.args[1] }) }));
-                    return e;
+                const op = if (n.flag) "<>" else "=";
+                var consts: std.ArrayList(*Node) = .empty;
+                var cols: std.ArrayList(*Node) = .empty;
+                try consts.append(f.a, x);
+                for (n.args[1..]) |item| try (if (readsColumn(item)) &cols else &consts).append(f.a, item);
+                var terms: std.ArrayList(*Node) = .empty;
+                // Fewer than two constants: every item on its own, in order.
+                var each: []const *Node = n.args[1..];
+                if (consts.items.len > 2) {
+                    _ = try f.common(consts.items, true);
+                    const elems = try f.list(consts.items[1..]);
+                    const arr = try f.node(.{ .kind = .array, .args = elems, .ty = try std.fmt.allocPrint(f.a, "{s}[]", .{consts.items[0].ty}) });
+                    try terms.append(f.a, try f.node(.{ .kind = .any, .text = op, .flag = n.flag, .args = try f.list(&.{ consts.items[0], arr }), .ty = T.boolean }));
+                    each = cols.items;
                 }
-                _ = try f.common(n.args, true);
-                const elems = try f.list(n.args[1..]);
-                const arr = try f.node(.{ .kind = .array, .args = elems, .ty = try std.fmt.allocPrint(f.a, "{s}[]", .{n.args[0].ty}) });
-                return f.node(.{ .kind = .any, .text = if (n.flag) "<>" else "=", .flag = n.flag, .args = try f.list(&.{ n.args[0], arr }), .ty = T.boolean });
+                for (each) |item| {
+                    const l = if (terms.items.len == 0) x else try f.node(x.*);
+                    try terms.append(f.a, try f.binop(try f.node(.{ .kind = .op, .text = op, .args = try f.list(&.{ l, item }) })));
+                }
+                if (terms.items.len == 1) return terms.items[0];
+                return f.node(.{ .kind = if (n.flag) .and_ else .or_, .args = terms.items, .ty = T.boolean });
             },
             .between => {
                 // PostgreSQL 18 makes x BETWEEN a AND b (x >= a AND x <= b).
@@ -898,7 +927,7 @@ const Fixer = struct {
                 const r = try f.fix(n.args[1]);
                 return f.binop(try f.node(.{ .kind = .op, .text = if (n.flag) "!~~" else "~~", .args = try f.list(&.{ l, r }) }));
             },
-            .array, .any, .subscript => return n,
+            .array, .any, .subscript, .at_zone => return n,
         }
     }
 
@@ -1082,6 +1111,14 @@ const Fixer = struct {
         const args = n.args;
         if (std.ascii.startsWithIgnoreCase(name, "xq_postgres_")) {
             n.text = name["xq_postgres_".len..];
+            // substring(x FROM pattern), substring(x SIMILAR p ESCAPE e):
+            // as PostgreSQL prints its function (a keyword, quoted).
+            if (std.ascii.eqlIgnoreCase(n.text, "textregexsubstr")) {
+                n.text = "substring";
+                const x = try f.plainCall(n);
+                x.text = "\"substring\"";
+                return x;
+            }
             return f.plainCall(n);
         }
         if (!std.ascii.startsWithIgnoreCase(name, "xq_")) return f.plainCall(n);
@@ -1089,17 +1126,18 @@ const Fixer = struct {
         // A call told the type of an argument (overload.zig's kind_calls:
         // xq_pg_to_char(d, t, 7)): PostgreSQL's call.
         if (@import("overload.zig").kindEngine(lname)) |k| if (args.len == 3 and args[2].kind == .int) {
-            n.text = k.name;
             n.args = args[0..2];
-            return f.plainCall(n);
+            return f.kindCall(n, k.name, args[2].text);
         };
+        // x AT TIME ZONE z of an x of no type told.
+        if (eql(lname, "xq_pg_at_time_zone") and args.len == 2) return f.kindCall(n, lname, "0");
         // Wrappers the engine compares, orders or keeps a column's scale
         // by: the value.
         const keys = [_]struct { []const u8, []const u8 }{
-            .{ "xq_dec_key", T.numeric },    .{ "xq_dec", T.numeric },         .{ "xq_dec_text", T.numeric },
-            .{ "xq_pg_iv_key", T.interval }, .{ "xq_pg_iv_high", T.interval }, .{ "xq_pg_iv_text", T.interval },
-            .{ "xq_pg_jsonb_key", T.jsonb }, .{ "xq_pg_jsonb_bin", T.jsonb },  .{ "xq_pg_jsonb_text", T.jsonb },
-            .{ "xq_pg_uuid_text", T.uuid },
+            .{ "xq_dec_key", T.numeric },     .{ "xq_dec", T.numeric },         .{ "xq_dec_text", T.numeric },
+            .{ "xq_pg_iv_key", T.interval },  .{ "xq_pg_iv_high", T.interval }, .{ "xq_pg_iv_text", T.interval },
+            .{ "xq_pg_iv_out", T.interval },  .{ "xq_pg_jsonb_key", T.jsonb },  .{ "xq_pg_jsonb_bin", T.jsonb },
+            .{ "xq_pg_jsonb_text", T.jsonb }, .{ "xq_pg_uuid_text", T.uuid },
         };
         for (keys) |k| if (eql(lname, k[0]) and args.len >= 1) return f.asType(args[0], k[1]);
         // Casts.
@@ -1118,11 +1156,13 @@ const Fixer = struct {
         // An interval's input with its type modifier (ivinput.zig, a
         // cast or DEFAULT of interval(p) / interval year to month ...):
         // its constant as the modifier keeps it, else a cast.
-        if (eql(lname, "xq_pg_iv_in") and args.len == 2 and args[1].kind == .int) {
+        if (eql(lname, "xq_pg_iv_in") and (args.len == 2 or (args.len == 3 and args[2].kind == .int)) and args[1].kind == .int) {
             const x = args[0];
             const tm = std.fmt.parseInt(i32, args[1].text, 10) catch return error.Unsupported;
+            // (x, tm, 1): read as IntervalStyle sql_standard reads it.
+            const sql = args.len == 3 and !eql(args[2].text, "0");
             if (x.kind == .str and x.ty.len == 0) {
-                const iv = ivinput.decode(x.text, tm) catch return f.castTo(x, T.interval, true);
+                const iv = ivinput.decodeIn(x.text, tm, sql) catch return f.castTo(x, T.interval, true);
                 var buf: datetime.Buf = undefined;
                 x.text = try f.a.dupe(u8, datetime.formatIntervalPg(iv, &buf));
                 x.ty = T.interval;
@@ -1147,15 +1187,12 @@ const Fixer = struct {
             return f.node(.{ .kind = .prefix, .text = "-", .args = try f.list(&.{try f.asType(args[0], T.numeric)}), .ty = T.numeric });
         }
         if (std.mem.startsWith(u8, lname, "xq_dec_")) {
-            const fname = lname["xq_dec_".len..];
-            const known = [_][]const u8{ "round", "trunc", "abs", "floor", "ceil", "sign", "scale", "min_scale", "trim_scale", "sum", "avg", "sqrt", "exp", "ln", "power", "mod", "div_trunc" };
-            for (known) |k| if (eql(fname, k)) {
-                if (args.len >= 1) args[0] = try f.asType(args[0], T.numeric);
-                n.text = if (eql(k, "div_trunc")) "div" else k;
-                n.ty = if (eql(k, "scale") or eql(k, "min_scale")) T.int4 else T.numeric;
-                return n;
-            };
-            return error.Unsupported;
+            const i = @import("../decimal_sql.zig").info(lname) orelse return error.Unsupported;
+            const pg = i.pg orelse return error.Unsupported;
+            for (args[0..@min(i.numerics, args.len)]) |*x| x.* = try f.asType(x.*, T.numeric);
+            n.text = pg;
+            n.ty = if (i.key) T.numeric else T.int4;
+            return n;
         }
         // interval's.
         if (std.mem.startsWith(u8, lname, "xq_pg_iv_") or std.mem.startsWith(u8, lname, "xq_pg_date_") or eql(lname, "xq_pg_integer_pl_date")) {
@@ -1228,10 +1265,14 @@ const Fixer = struct {
             if (x.kind == .str and x.ty.len == 0 and ety.len > 0) x = try f.coerce(x, labelFor(ety));
             return f.node(.{ .kind = .any, .text = ops[code], .flag = !eql(args[3].text, "0"), .args = try f.list(&.{ x, arr }), .ty = T.boolean });
         }
-        if (eql(lname, "xq_pg_regex") and args.len == 3 and args[2].kind == .str) {
+        if ((eql(lname, "xq_pg_regex") or eql(lname, "xq_pg_re")) and args.len == 3 and args[2].kind == .str) {
             const flags = args[2].text;
             const op: []const u8 = if (flags.len == 0) "~" else if (eql(flags, "i")) "~*" else return error.Unsupported;
             return f.binop(try f.node(.{ .kind = .op, .text = op, .args = try f.list(&.{ args[0], args[1] }) }));
+        }
+        if (eql(lname, "xq_pg_similar_escape")) {
+            n.text = "similar_to_escape";
+            return f.plainCall(n);
         }
         if ((eql(lname, "xq_like") or eql(lname, "xq_ilike")) and args.len == 2) {
             const op: []const u8 = if (eql(lname, "xq_like")) "~~" else "~~*";
@@ -1337,12 +1378,50 @@ const Fixer = struct {
         return x;
     }
 
+    /// A call of overload.zig's kind_calls, `told` the constant that
+    /// says the type of an argument: PostgreSQL's call of `name`, its
+    /// arguments cast as the function PostgreSQL chose takes them
+    /// (gcd(a, (0)::numeric), gcd(l, (i)::bigint), timezone('UTC'::text,
+    /// x)); the parser's xq_pg_at_time_zone(z, x) `x AT TIME ZONE z`.
+    fn kindCall(f: *Fixer, n: *Node, name: []const u8, told: []const u8) Error!*Node {
+        const args = n.args;
+        if (eql(name, "gcd") or eql(name, "lcm")) {
+            const ty = if (eql(told, "0")) T.numeric else if (eql(told, "64")) T.int8 else T.int4;
+            for (args) |*x| x.* = try f.coerce(x.*, ty);
+            n.text = name;
+            n.ty = ty;
+            return n;
+        }
+        if (eql(name, "timezone") or eql(name, "xq_pg_at_time_zone")) {
+            // The zone: text (or an interval), the value as the kind says.
+            if (args[0].kind == .str and args[0].ty.len == 0) args[0] = try f.coerce(args[0], T.text);
+            const kind = std.fmt.parseInt(u8, told, 10) catch 0;
+            const fk = @import("formatting.zig").Kind;
+            if (kind == @backingInt(fk.date)) args[1] = try f.coerce(args[1], T.tstz);
+            n.ty = switch (kind) {
+                @backingInt(fk.timestamp) => T.tstz,
+                @backingInt(fk.timestamptz), @backingInt(fk.date) => T.ts,
+                else => if (eql(args[1].ty, T.ts)) T.tstz else if (eql(args[1].ty, T.tstz)) T.ts else "",
+            };
+            if (eql(name, "timezone")) {
+                n.text = name;
+                return n;
+            }
+            n.kind = .at_zone;
+            n.text = "";
+            n.args = try f.list(&.{ args[1], args[0] });
+            return n;
+        }
+        n.text = name;
+        return f.plainCall(n);
+    }
+
     /// A call of no engine function: its name as PostgreSQL prints it,
     /// its type, text functions' arguments text.
     fn plainCall(f: *Fixer, n: *Node) Error!*Node {
         const lname = try std.ascii.allocLowerString(f.a, n.text);
         n.text = lname;
-        const text_funcs = [_][]const u8{ "upper", "lower", "btrim", "ltrim", "rtrim", "substr", "substring", "replace", "left", "right", "md5", "repeat", "reverse", "initcap", "lpad", "rpad", "translate", "split_part", "quote_ident", "quote_literal", "to_tsvector" };
+        const text_funcs = [_][]const u8{ "upper", "lower", "btrim", "ltrim", "rtrim", "substr", "substring", "replace", "left", "right", "md5", "repeat", "reverse", "initcap", "lpad", "rpad", "translate", "split_part", "quote_ident", "quote_literal", "to_tsvector", "regexp_replace", "regexp_substr", "similar_to_escape" };
         const int_text_funcs = [_][]const u8{ "length", "char_length", "character_length", "octet_length", "bit_length", "strpos", "ascii" };
         const int_funcs = [_][]const u8{ "cardinality", "array_length", "array_ndims", "array_position", "array_upper", "array_lower" };
         const keyword_funcs = [_][]const u8{ "coalesce", "nullif", "greatest", "least" };
@@ -1366,6 +1445,20 @@ const Fixer = struct {
         };
         for (int_funcs) |k| if (eql(lname, k)) {
             n.ty = T.int4;
+            return n;
+        };
+        // The regular expression functions (regexp.zig): their text
+        // arguments text.
+        const re_funcs = [_]struct { []const u8, []const u8 }{
+            .{ "regexp_match", "text[]" }, .{ "regexp_split_to_array", "text[]" },
+            .{ "regexp_like", T.boolean }, .{ "regexp_count", T.int4 },
+            .{ "regexp_instr", T.int4 },
+        };
+        for (re_funcs) |k| if (eql(lname, k[0])) {
+            for (n.args, 0..) |*x, i| if (i == 0 or x.*.kind == .str) {
+                x.* = try f.textArg(x.*);
+            };
+            n.ty = k[1];
             return n;
         };
         if (eql(lname, "count")) {
@@ -1628,6 +1721,14 @@ const Printer = struct {
                 }
                 try pr.keyword("END", -4, 0, 0);
             },
+            .at_zone => {
+                // In parentheses in either mode.
+                try pr.put("(");
+                try pr.sub(n.args[0], n);
+                try pr.put(" AT TIME ZONE ");
+                try pr.sub(n.args[1], n);
+                try pr.put(")");
+            },
             .array => {
                 try pr.put("ARRAY[");
                 for (n.args, 0..) |x, i| {
@@ -1683,13 +1784,13 @@ const Printer = struct {
         try pr.put(")");
     }
 
+    /// A string constant as PostgreSQL's simple_quote_literal() writes
+    /// it with standard_conforming_strings on (its default): each quote
+    /// doubled, a backslash as it is, never E''.
     fn literal(pr: *Printer, z: []const u8) Error!void {
-        const esc = std.mem.indexOfScalar(u8, z, '\\') != null;
-        if (esc) try pr.put("E");
         try pr.put("'");
-        // Each quote and backslash doubled.
         var start: usize = 0;
-        for (z, 0..) |c, i| if (c == '\'' or c == '\\') {
+        for (z, 0..) |c, i| if (c == '\'') {
             try pr.put(z[start .. i + 1]);
             start = i;
         };
@@ -1697,6 +1798,13 @@ const Printer = struct {
         try pr.put("'");
     }
 };
+
+/// Whether `n` reads a column (contain_vars_of_level()).
+fn readsColumn(n: *const Node) bool {
+    if (n.kind == .col) return true;
+    for (n.args) |x| if (readsColumn(x)) return true;
+    return false;
+}
 
 fn arithOp(op: []const u8) ?enum { lo, hi } {
     if (op.len != 1) return null;
@@ -1712,7 +1820,7 @@ fn arithOp(op: []const u8) ?enum { lo, hi } {
 fn simple(n: *const Node, parent: *const Node) bool {
     switch (n.kind) {
         .col, .int, .num, .str, .null_, .bool_, .raw, .star => return true,
-        .func, .array, .subscript, .case_, .row => return true,
+        .func, .array, .subscript, .case_, .row, .at_zone => return true,
         .cast => return if (n.func_cast or n.hidden) true else simple(n.args[0], n),
         .op, .prefix => {
             if (parent.kind == .op) {
@@ -1980,13 +2088,24 @@ fn viewDefErr(
     };
     for (exp.items, 0..) |t0, i| {
         const t = try f.fix(t0);
+        // Where the separator's line break is.
+        var sep: usize = pr.w.end;
         if (i == 0) try pr.put(" ") else {
             try pr.put(",");
+            sep = pr.w.end;
             try pr.keyword("", -8, 8, 4);
         }
         // An unknown constant is text in a view's result.
         if (t.kind == .str and t.ty.len == 0) t.ty = T.text;
         try pr.expr(t);
+        // A column that starts on a line of its own (CASE, whose keyword
+        // took back the separator's indent) takes no other line break
+        // (get_target_list()).
+        if (i > 0 and pr.w.end > sep + 1 and pr.w.buffer[sep] == '\n' and pr.w.buffer[sep + 1] == '\n') {
+            const n = pr.w.end - sep - 1;
+            std.mem.copyForwards(u8, pr.w.buffer[sep..][0..n], pr.w.buffer[sep + 1 .. pr.w.end]);
+            pr.w.end = sep + n;
+        }
         const name: []const u8 = if (i < names.len) names[i] else "?column?";
         if (!(t.kind == .col and eql(t.text, name))) {
             try pr.put(" AS ");

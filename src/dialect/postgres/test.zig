@@ -185,6 +185,9 @@ test "pg: expressions and functions" {
     // Numbers.
     try c.expectRows("SELECT abs(-3), round(2.567, 2)::text, floor(-2.5)::text, ceil(2.1)::text, ceiling(2.9)::text, trunc(2.7)::text, sqrt(16), power(2, 10), mod(-7, 3), sign(-4), ln(1), log(100), exp(0)", "3|2.57|-3|3|3|2|4.0|1024.0|-1|-1|0.0|2.0|1.0\n");
     try c.expectError("SELECT sqrt(-1)", "cannot take square root of a negative number");
+    // numeric's (decimal_math.zig): PostgreSQL's digits and scale.
+    try c.expectRows("SELECT sqrt(2.0)::text, exp(1.0)::text, ln(2.0)::text, log(2, 8)::text, (2::numeric ^ 0.5)::text, factorial(5)::text, width_bucket(5.35, 0.024, 10.06, 5)", "1.414213562373095|2.7182818284590452|0.6931471805599453|3.0000000000000000|1.4142135623730950|120|3\n");
+    try c.expectError("SELECT ln(0.0)", "cannot take logarithm of zero");
     try c.expectError("SELECT mod(1, 0)", "division by zero");
     try c.expectRows("SELECT random() >= 0 AND random() < 1, length(gen_random_uuid()::text), pi() > 3.14", "1|36|1\n");
     // Dates.
@@ -234,6 +237,30 @@ test "pg: intervals are BLOBs, an older database's TEXT" {
     try c.expectRows("SELECT (v + interval '1 hour')::text FROM old WHERE id = 3", "26:00:00\n");
     try c.exec("UPDATE old SET v = v * 2 WHERE id = 3");
     try c.expectRows("SELECT v FROM old WHERE id = 3", "50:00:00\n");
+}
+
+test "pg: IntervalStyle changes the text of intervals, not what is stored" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE iv (id int, v interval, a interval[])");
+    try c.exec("INSERT INTO iv VALUES (1, '1 day 2 hours', ARRAY[interval '1 day'])");
+    try c.exec("CREATE VIEW iv_text AS SELECT v::text AS t FROM iv");
+    try c.exec("SET IntervalStyle = iso_8601");
+    try c.expectRows("SHOW IntervalStyle", "iso_8601\n");
+    try c.expectRows("SELECT v::text, v || '', a, t, to_json(v) FROM iv, iv_text", "P1DT2H|P1DT2H|{\"1 day\"}|P1DT2H|\"P1DT2H\"\n");
+    try c.exec("INSERT INTO iv VALUES (2, 'P1DT2H', ARRAY[interval 'PT1H'])");
+    try c.exec("SET IntervalStyle = 'SQL_Standard'");
+    try c.expectRows("SELECT v::text FROM iv ORDER BY id", "1 2:00:00\n1 2:00:00\n");
+    // The leading sign of sql_standard's input, in a cast and stored.
+    try c.exec("INSERT INTO iv VALUES (3, '-1 2:00', NULL)");
+    try c.expectRows("SELECT interval '-1 2:00' = v, '-1 2:00'::text::interval = v FROM iv WHERE id = 3", "1|1\n");
+    try c.exec("RESET IntervalStyle");
+    try c.expectRows("SELECT v::text, a::text FROM iv ORDER BY id", "1 day 02:00:00|{\"1 day\"}\n1 day 02:00:00|{01:00:00}\n-1 days -02:00:00|NULL\n");
+    try c.expectError("SET IntervalStyle = iso8601", "invalid value for parameter \"IntervalStyle\": \"iso8601\"\nHINT:  Available values: postgres, postgres_verbose, sql_standard, iso_8601.");
+    // The text of the session is not deterministic: no index of it, as
+    // PostgreSQL's interval_out() is stable.
+    try c.expectError("CREATE INDEX iv_t ON iv ((v::text))", "non-deterministic functions prohibited in index expressions");
 }
 
 test "pg: operators of dates, timestamps and intervals" {
@@ -329,7 +356,49 @@ test "pg: regular expression operators" {
     main_mod.setDialect(c.db, .sqlite);
     try c.expectRows("SELECT n FROM names_a", "abc\n");
     main_mod.setDialect(c.db, .postgres);
-    try c.expectError("SELECT 'a' ~ '('", "invalid regular expression: (");
+    try c.expectError("SELECT 'a' ~ '('", "invalid regular expression: parentheses () not balanced");
+    // The older engine function of the schema of older databases keeps
+    // its meaning (a backslash-letter is the letter).
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectRows("SELECT xq_pg_regex('ay', 'a\\y', ''), xq_pg_re('ay', 'a\\y', ''), xq_pg_re('a y', 'a\\y', '')", "1|0|1\n");
+    main_mod.setDialect(c.db, .postgres);
+}
+
+test "pg: regular expression functions, SIMILAR TO, substring" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.expectRows("SELECT regexp_match('abc01234xyz', '(.*?)(\\d+)(.*)'), regexp_match('abcd', '(a|ab)(c|bcd)(d*)'), regexp_match('aaa', '(a*)+'), regexp_match('abab', '(ab)\\1')", "{abc,0,\"\"}|{ab,c,d}|{\"\"}|{ab}\n");
+    try c.expectRows("SELECT regexp_replace('foobarbaz', 'b(..)', 'X\\1Y', 'g'), regexp_count('ABCABC', 'b', 1, 'i'), regexp_instr('aébc', 'b'), regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2), regexp_like('Hello', 'hello', 'i')", "fooXarYXazY|2|3|FGH|1\n");
+    try c.expectRows("SELECT regexp_split_to_array('a,b,,c', ','), regexp_split_to_array('abc', '')", "{a,b,\"\",c}|{a,b,c}\n");
+    try c.expectRows("SELECT m[1], m[2] FROM regexp_matches('a1b22', '([a-z])(\\d+)', 'g') AS m", "a|1\nb|22\n");
+    try c.expectRows("SELECT regexp_split_to_table('a b  c', '\\s+')", "a\nb\nc\n");
+    try c.expectRows("SELECT 'abc' SIMILAR TO 'a%', 'abc' SIMILAR TO '(a|b)_c', 'abc' NOT SIMILAR TO 'b%', 'a_b' SIMILAR TO 'a#_b' ESCAPE '#'", "1|1|1|1\n");
+    try c.expectRows("SELECT substring('foobar' FROM 'o(.)b'), substring('foobar' SIMILAR '%#\"o_b#\"%' ESCAPE '#'), substring('hello' FROM 2 FOR 3)", "o|oob|ell\n");
+    try c.expectError("SELECT regexp_match('a', 'a', 'g')", "regexp_match() does not support the \"global\" option\nHINT:  Use the regexp_matches function instead.");
+    try c.expectError("SELECT 'a' SIMILAR TO 'a' ESCAPE 'xy'", "invalid escape string\nHINT:  Escape string must be empty or one character.");
+}
+
+test "pg: standard_conforming_strings" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.expectRows("SELECT length('a\\tb')", "4\n");
+    try c.exec("SET standard_conforming_strings = off");
+    try c.expectRows("SELECT length('a\\tb'), 'it\\'s', E'x\\ty' = 'x\\ty'", "3|it's|1\n");
+    try c.expectError("SELECT U&'d\\0061t'", "unsafe use of string constant with Unicode escapes\nDETAIL:  String constants with Unicode escapes cannot be used when \"standard_conforming_strings\" is off.");
+    try c.exec("RESET standard_conforming_strings");
+    try c.expectRows("SELECT length('a\\tb'), U&'d\\0061t'", "4|dat\n");
+    // Checked as PostgreSQL checks them; SHOW prints a Boolean on or off,
+    // an enum as listed.
+    try c.exec("SET standard_conforming_strings = 0");
+    try c.expectRows("SHOW standard_conforming_strings", "off\n");
+    try c.expectError("SET standard_conforming_strings = maybe", "parameter \"standard_conforming_strings\" requires a Boolean value");
+    try c.expectRows("SHOW standard_conforming_strings", "off\n");
+    try c.exec("RESET standard_conforming_strings");
+    try c.expectError("SET client_min_messages = loud", "invalid value for parameter \"client_min_messages\": \"loud\"\nHINT:  Available values: debug5, debug4, debug3, debug2, debug1, log, notice, warning, error.");
+    try c.expectRows("SELECT set_config('client_min_messages', 'DEBUG', false)", "debug2\n");
+    try c.exec("RESET client_min_messages");
 }
 
 test "pg: json and jsonb" {
@@ -835,11 +904,11 @@ test "pg: information_schema and pg_catalog" {
         \\
     );
     try c.expectRows("SELECT c.table_name, count(*) FROM information_schema.tables t JOIN information_schema.columns c ON c.table_name = t.table_name GROUP BY 1 ORDER BY 1", "adults|1\nlite|3\nperson|4\n");
-    try c.expectRows("SELECT schemaname, tablename, hasindexes FROM pg_catalog.pg_tables ORDER BY 2", "public|lite|0\npublic|person|1\n");
-    try c.expectRows("SELECT tablename FROM pg_tables WHERE tablename LIKE 'p%'", "person\n");
-    try c.expectRows("SELECT viewname FROM pg_views", "adults\n");
+    try c.expectRows("SELECT schemaname, tablename, hasindexes FROM pg_catalog.pg_tables WHERE schemaname <> 'pg_catalog' ORDER BY 2", "public|lite|0\npublic|person|1\n");
+    try c.expectRows("SELECT tablename FROM pg_tables WHERE tablename LIKE 'pe%'", "person\n");
+    try c.expectRows("SELECT viewname FROM pg_views WHERE schemaname = 'public'", "adults\n");
     // The INTEGER PRIMARY KEY has its index, as in PostgreSQL.
-    try c.expectRows("SELECT indexname, indexdef FROM pg_indexes ORDER BY 1",
+    try c.expectRows("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY 1",
         \\person_name_idx|CREATE INDEX person_name_idx ON public.person USING btree (name)
         \\person_pkey|CREATE UNIQUE INDEX person_pkey ON public.person USING btree (id)
         \\
@@ -876,7 +945,7 @@ test "pg: error positions and DETAIL, HINT, CONTEXT lines" {
         .{ "UPDATE t SET n = 'abc'", "invalid input syntax for type numeric: \"abc\"", 17 },
         .{ "SELECT '{bad'::jsonb", "invalid input syntax for type json\nDETAIL:  Token \"bad\" is invalid.\nCONTEXT:  JSON data, line 1: {bad", 7 },
         .{ "SELECT true + 1", "operator does not exist: boolean + integer\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.", 12 },
-        .{ "SELECT nosuchfunc(1)", "function nosuchfunc() does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.", 7 },
+        .{ "SELECT nosuchfunc(1)", "function nosuchfunc(integer) does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.", 7 },
     }) |case| {
         var stmt: ?*vi.Vdbe = null;
         try testing.expectEqual(RC.ERROR, prepare.prepareV2(c.db, case[0], &stmt, null));
@@ -906,6 +975,113 @@ test "pg: error positions and DETAIL, HINT, CONTEXT lines" {
     try testing.expect(h.hint == null);
 }
 
+test "pg: a call no function matches names the argument types" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE t (a int, b text, c numeric(5,2), d timestamp, e varchar(3))");
+    const hint = "\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.";
+    const cases = [_][2][]const u8{
+        .{ "SELECT foo(1, 'a')", "function foo(integer, unknown) does not exist" },
+        .{ "SELECT foo(NULL, 1.5, 3000000000, true, '{1}'::int[], now())", "function foo(unknown, numeric, bigint, boolean, integer[], timestamp with time zone) does not exist" },
+        .{ "SELECT foo()", "function foo() does not exist" },
+        .{ "SELECT foo(a, b, c, d, e) FROM t", "function foo(integer, text, numeric, timestamp without time zone, character varying) does not exist" },
+        .{ "SELECT foo(a + 1, upper(b)) FROM t", "function foo(integer, text) does not exist" },
+        // A function of another number of arguments.
+        .{ "SELECT round(1, 2, 3)", "function round(integer, integer, integer) does not exist" },
+        .{ "SELECT count(1, 2)", "function count(integer, integer) does not exist" },
+        .{ "SELECT upper()", "function upper() does not exist" },
+    };
+    for (cases) |k| {
+        const want = try std.mem.concat(testing.allocator, u8, &.{ k[1], hint });
+        defer testing.allocator.free(want);
+        try c.expectError(k[0], want);
+        try testing.expectEqual(@as(i32, 7), main_mod.errorOffset(c.db));
+    }
+    // An error of an argument comes first, as PostgreSQL resolves the
+    // arguments before the call.
+    try c.expectError("SELECT foo(x) FROM t", "column \"x\" does not exist");
+    // SQLite's dialect keeps SQLite's message.
+    main_mod.setDialect(c.db, .sqlite);
+    try c.expectError("SELECT foo(1)", "no such function: foo");
+    try c.expectError("SELECT upper()", "wrong number of arguments to function upper()");
+}
+
+/// The notices (int.Notice) of `sql` compiled in the connection's dialect,
+/// one "SQLSTATE message" line each (and its DETAIL).
+fn expectNotices(c: *Conn, sql: []const u8, want: []const u8) !void {
+    var v: ?*vi.Vdbe = null;
+    try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, sql, &v, null));
+    defer _ = api.finalize(v.?);
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    for (v.?.xq_notices) |n| {
+        try out.print(testing.allocator, "{s} {s}\n", .{ &n.sqlstate, n.message });
+        if (n.detail) |d| try out.print(testing.allocator, "DETAIL: {s}\n", .{d});
+    }
+    try testing.expectEqualStrings(want, out.items);
+    while (api.step(v.?) == RC.ROW) {}
+}
+
+test "pg: notices of what IF EXISTS and IF NOT EXISTS skip" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try expectNotices(&c, "DROP TABLE IF EXISTS a, b", "00000 table \"a\" does not exist, skipping\n00000 table \"b\" does not exist, skipping\n");
+    try expectNotices(&c, "DROP VIEW IF EXISTS v", "00000 view \"v\" does not exist, skipping\n");
+    try expectNotices(&c, "DROP INDEX IF EXISTS i", "00000 index \"i\" does not exist, skipping\n");
+    try expectNotices(&c, "DROP SEQUENCE IF EXISTS s", "00000 sequence \"s\" does not exist, skipping\n");
+    try expectNotices(&c, "DROP SCHEMA IF EXISTS s", "00000 schema \"s\" does not exist, skipping\n");
+    try expectNotices(&c, "ALTER TABLE IF EXISTS t ADD COLUMN b int", "00000 relation \"t\" does not exist, skipping\n");
+    try expectNotices(&c, "CREATE TABLE t (a int)", "");
+    try expectNotices(&c, "CREATE TABLE IF NOT EXISTS t (a int)", "42P07 relation \"t\" already exists, skipping\n");
+    try expectNotices(&c, "CREATE INDEX i ON t (a)", "");
+    try expectNotices(&c, "CREATE INDEX IF NOT EXISTS i ON t (a)", "42P07 relation \"i\" already exists, skipping\n");
+    try expectNotices(&c, "CREATE SEQUENCE s", "");
+    try expectNotices(&c, "CREATE SEQUENCE IF NOT EXISTS s", "42P07 relation \"s\" already exists, skipping\n");
+    // A relation of the name that is not a table: skipped too.
+    try expectNotices(&c, "CREATE TABLE IF NOT EXISTS s (a int)", "42P07 relation \"s\" already exists, skipping\n");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name = 's'", "0\n");
+    try expectNotices(&c, "ALTER TABLE t ADD COLUMN IF NOT EXISTS a int", "42701 column \"a\" of relation \"t\" already exists, skipping\n");
+    try expectNotices(&c, "ALTER TABLE t DROP COLUMN IF EXISTS z", "00000 column \"z\" of relation \"t\" does not exist, skipping\n");
+    try expectNotices(&c, "CREATE SCHEMA sc", "");
+    try expectNotices(&c, "CREATE SCHEMA IF NOT EXISTS sc", "42P06 schema \"sc\" already exists, skipping\n");
+    try expectNotices(&c, "CREATE TABLE sc.x (a int)", "");
+    try expectNotices(&c, "CREATE TABLE IF NOT EXISTS sc.x (a int)", "42P07 relation \"x\" already exists, skipping\n");
+    try expectNotices(&c, "DROP SCHEMA sc CASCADE", "00000 drop cascades to table sc.x\n");
+    try c.exec("CREATE SCHEMA sc; CREATE TABLE sc.x (a int); CREATE TABLE sc.y (a int)");
+    // A line for each object (in the order of the schema's hash, not
+    // PostgreSQL's order of creation).
+    {
+        var v: ?*vi.Vdbe = null;
+        try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "DROP SCHEMA sc CASCADE", &v, null));
+        defer _ = api.finalize(v.?);
+        const n = v.?.xq_notices;
+        try testing.expectEqual(@as(usize, 1), n.len);
+        try testing.expectEqualStrings("drop cascades to 2 other objects", n[0].message);
+        const d = n[0].detail.?;
+        try testing.expect(std.mem.eql(u8, d, "drop cascades to table sc.x\ndrop cascades to table sc.y") or
+            std.mem.eql(u8, d, "drop cascades to table sc.y\ndrop cascades to table sc.x"));
+        while (api.step(v.?) == RC.ROW) {}
+    }
+    try expectNotices(&c, "DROP TABLE IF EXISTS t", "");
+    // client_min_messages: what a client is sent (Db.noticeLevel()).
+    const dialect = @import("../dialect.zig");
+    try testing.expectEqual(int.Notice.Level.notice, dialect.noticeLevel(c.db));
+    try c.exec("SET client_min_messages = warning");
+    try testing.expectEqual(int.Notice.Level.warning, dialect.noticeLevel(c.db));
+    try c.exec("SET client_min_messages TO DEBUG1");
+    try testing.expectEqual(int.Notice.Level.debug, dialect.noticeLevel(c.db));
+    try c.exec("RESET client_min_messages");
+    try testing.expectEqual(int.Notice.Level.notice, dialect.noticeLevel(c.db));
+    // SQLite's dialect has none.
+    main_mod.setDialect(c.db, .sqlite);
+    try expectNotices(&c, "DROP TABLE IF EXISTS nope", "");
+    try expectNotices(&c, "CREATE TABLE IF NOT EXISTS lt (a)", "");
+    try expectNotices(&c, "CREATE TABLE IF NOT EXISTS lt (a)", "");
+    try testing.expectEqual(int.Notice.Level.debug, dialect.noticeLevel(c.db));
+}
+
 test "pg: errors in PostgreSQL's words" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -914,7 +1090,7 @@ test "pg: errors in PostgreSQL's words" {
     try c.expectError("SELECT * FROM nosuch", "relation \"nosuch\" does not exist");
     try c.expectError("SELECT nosuch FROM t", "column \"nosuch\" does not exist");
     try c.expectError("SELECT a FROM t, u", "column reference \"a\" is ambiguous");
-    try c.expectError("SELECT nosuchfunc(1)", "function nosuchfunc() does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.");
+    try c.expectError("SELECT nosuchfunc(1)", "function nosuchfunc(integer) does not exist\nHINT:  No function matches the given name and argument types. You might need to add explicit type casts.");
     try c.expectError("CREATE TABLE t (x int)", "relation \"t\" already exists");
     try c.expectError("SELECT 1 FROM t WHERE", "syntax error at end of input");
     try c.expectError("SELECT a b c FROM t", "syntax error at or near \"c\"");
@@ -1029,7 +1205,7 @@ test "pg: schemas" {
     try c.expectRows("SELECT nextval('sales.tickets'), nextval('SALES.TICKETS')", "10|11\n");
     try c.expectRows("SELECT count(*) FROM orders", "0\n");
     try c.expectRows("SELECT table_schema, table_name FROM information_schema.tables ORDER BY 1, 2", "public|orders\nsales|big\nsales|orders\n");
-    try c.expectRows("SELECT schemaname, indexname FROM pg_indexes ORDER BY 2", "sales|by_note\nsales|orders_amt_idx\nsales|orders_pkey\n");
+    try c.expectRows("SELECT schemaname, indexname FROM pg_indexes WHERE schemaname <> 'pg_catalog' ORDER BY 2", "sales|by_note\nsales|orders_amt_idx\nsales|orders_pkey\n");
     // Errors in PostgreSQL's words.
     try c.expectError("CREATE SCHEMA sales", "schema \"sales\" already exists");
     try c.expectError("CREATE SCHEMA pg_x", "unacceptable schema name \"pg_x\"\nDETAIL:  The prefix \"pg_\" is reserved for system schemas.");
@@ -1255,7 +1431,7 @@ test "pg: system catalogs" {
     try c.exec("CREATE VIEW v AS SELECT a, b FROM t WHERE a > 1");
     try c.exec("CREATE SCHEMA sales");
     try c.exec("CREATE TABLE sales.orders (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, at timestamptz DEFAULT now(), flag boolean NOT NULL DEFAULT false)");
-    try c.expectRows("SELECT n.nspname, c.relname, c.relkind, c.relnatts, c.relchecks, c.relhasindex, c.relhastriggers FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace ORDER BY 1, 2",
+    try c.expectRows("SELECT n.nspname, c.relname, c.relkind, c.relnatts, c.relchecks, c.relhasindex, c.relhastriggers FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1, 2",
         \\public|p|r|2|0|1|1
         \\public|p_id_seq|S|3|0|0|0
         \\public|p_name_key|i|1|0|0|0
@@ -1537,14 +1713,18 @@ test "pg: a CHECK, an index and a view tell the type of an argument as a query d
     var c: Conn = undefined;
     try openPg(&c);
     defer c.close();
-    try c.exec("CREATE TABLE k (z timestamptz, a int, b bigint, CHECK (to_char(z, 'TZ') <> ''), CONSTRAINT g CHECK (gcd(a, 0) > 0), CHECK (lcm(b, 2) >= 0), CHECK ((z AT TIME ZONE 'UTC') IS NOT NULL))");
+    try c.exec("CREATE TABLE k (z timestamptz, a int, b bigint, n numeric, y text, CHECK (to_char(z, 'TZ') <> ''), CONSTRAINT g CHECK (gcd(a, 0) > 0), CHECK (lcm(b, 2) >= 0), CHECK ((z AT TIME ZONE 'UTC') IS NOT NULL), CHECK (y IS NULL OR timezone(y, z) IS NOT NULL), CHECK (gcd(n, a) > 0), CHECK (lcm(b, a) >= 0), CHECK (z AT TIME ZONE 'UTC' AT TIME ZONE 'EST' > z))");
     // The schema keeps the engine's calls with the type, PostgreSQL's
     // text shows the calls written.
-    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name = 'k' AND sql LIKE '%xq_pg_to_char(\"z\", ''TZ'', 7)%' AND sql LIKE '%xq_pg_gcd(\"a\", 0, 32)%' AND sql LIKE '%xq_pg_lcm(\"b\", 2, 64)%' AND sql LIKE '%xq_pg_timezone(''UTC'', \"z\", 7)%'", "1\n");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name = 'k' AND sql LIKE '%xq_pg_to_char(\"z\", ''TZ'', 7)%' AND sql LIKE '%xq_pg_gcd(\"a\", 0, 32)%' AND sql LIKE '%xq_pg_lcm(\"b\", 2, 64)%' AND sql LIKE '%xq_pg_at_time_zone(''UTC'', \"z\", 7)%' AND sql LIKE '%xq_pg_timezone(\"y\", \"z\", 7)%'", "1\n");
     try c.expectRows("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'k'::regclass AND contype = 'c' ORDER BY conname, 1",
         \\CHECK ((gcd(a, 0) > 0))
-        \\CHECK ((lcm(b, 2) >= 0))
-        \\CHECK ((timezone('UTC', z) IS NOT NULL))
+        \\CHECK ((((z AT TIME ZONE 'UTC'::text) AT TIME ZONE 'EST'::text) > z))
+        \\CHECK (((y IS NULL) OR (timezone(y, z) IS NOT NULL)))
+        \\CHECK (((z AT TIME ZONE 'UTC'::text) IS NOT NULL))
+        \\CHECK ((gcd(n, (a)::numeric) > (0)::numeric))
+        \\CHECK ((lcm(b, (2)::bigint) >= 0))
+        \\CHECK ((lcm(b, (a)::bigint) >= 0))
         \\CHECK ((to_char(z, 'TZ'::text) <> ''::text))
         \\
     );
@@ -1593,15 +1773,72 @@ test "pg: a string literal met by a boolean is read when the statement is compil
     try c.expectError("CREATE TABLE bc (x boolean CHECK (x IN ('xyz')))", "invalid input syntax for type boolean: \"xyz\"");
 }
 
+test "pg: a list of IN and the values of CASE read their string literals as a boolean among them" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // As PostgreSQL's common type of the list, of the results.
+    try c.expectRows("SELECT true IN ('yes', 'no'), 'on' IN (true, false), true NOT IN ('f', '0'), CASE WHEN false THEN true ELSE 'no' END, CASE true WHEN 'yes' THEN 1 ELSE 2 END", "1|1|1|0|1\n");
+    try c.expectError("SELECT 'x' IN (true, false)", "invalid input syntax for type boolean: \"x\"");
+    try c.expectError("SELECT true IN ('t', 'maybe')", "invalid input syntax for type boolean: \"maybe\"");
+    try c.expectError("SELECT CASE WHEN true THEN true ELSE 'zz' END", "invalid input syntax for type boolean: \"zz\"");
+    try c.expectError("SELECT CASE true WHEN 'q' THEN 1 END", "invalid input syntax for type boolean: \"q\"");
+    // A list of no boolean compares text.
+    try c.expectRows("SELECT 'yes' IN ('yes', 'no')", "1\n");
+    // The schema's text reads them so: a CHECK of true holds.
+    try c.exec("CREATE TABLE b (n int, x boolean, CHECK (x IN ('t', 'f')), CHECK (CASE WHEN n > 0 THEN x ELSE 'yes' END), CHECK ('on' IN (x, true, false)))");
+    try c.exec("INSERT INTO b VALUES (1, true), (-1, false)");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE name = 'b' AND sql LIKE '%IN (xq_pg_bool(''t''), xq_pg_bool(''f''))%' AND sql LIKE '%ELSE xq_pg_bool(''yes'')%'", "1\n");
+    try c.expectRows("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'b'::regclass AND contype = 'c' ORDER BY 1",
+        \\CHECK (
+        \\CASE
+        \\    WHEN (n > 0) THEN x
+        \\    ELSE true
+        \\END)
+        \\CHECK (((true = ANY (ARRAY[true, false])) OR (true = x)))
+        \\CHECK ((x = ANY (ARRAY[true, false])))
+        \\
+    );
+    try c.exec("CREATE VIEW bv AS SELECT x IN ('t', 'f') AS i, CASE x WHEN 'on' THEN 1 END AS w FROM b");
+    try c.expectRows("SELECT i, w FROM bv ORDER BY w", "1|1\n1|NULL\n");
+    try c.expectError("CREATE TABLE bc (x boolean CHECK (x IN ('t', 'xyz')))", "invalid input syntax for type boolean: \"xyz\"");
+    try c.expectError("CREATE VIEW bw AS SELECT CASE WHEN x THEN x ELSE 'xyz' END FROM b", "invalid input syntax for type boolean: \"xyz\"");
+}
+
 test "pg: the catalogs' snapshot keeps no rows while the connection is idle" {
     var c: Conn = undefined;
     try openPg(&c);
     defer c.close();
     try c.exec("CREATE TABLE t (a int)");
     // A nested loop reads pg_attribute's rows once a statement.
-    try c.expectRows("SELECT count(*) FROM pg_class c, pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0", "1\n");
+    try c.expectRows("SELECT count(*) FROM pg_class c, pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND c.oid >= 16384", "1\n");
     const s: *const @import("pgcatalog.zig").Snapshot = @ptrCast(@alignCast(c.db.xq.postgres.catalog.?));
     try testing.expectEqual(@as(u32, 1), s.refs);
     try testing.expectEqual(@as(u32, 0), s.lazy.filled.count());
-    try c.expectRows("SELECT count(*) FROM pg_class", "1\n");
+    try c.expectRows("SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace", "1\n");
+}
+
+test "pg: the system relations are in their own catalogs" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.expectRows("SELECT relname, relkind, relnamespace, reltype, relnatts, relhasindex, relisshared FROM pg_class WHERE oid = 'pg_class'::regclass", "pg_class|r|11|83|34|1|0\n");
+    try c.expectRows("SELECT c.relname, n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname IN ('tables', 'pg_tables', 'pg_database') ORDER BY 1", "pg_database|pg_catalog\npg_tables|pg_catalog\ntables|information_schema\n");
+    try c.expectRows("SELECT attname, format_type(atttypid, atttypmod), attnotnull FROM pg_attribute WHERE attrelid = 'pg_namespace'::regclass AND attnum > 0 ORDER BY attnum", "oid|oid|1\nnspname|name|1\nnspowner|oid|1\nnspacl|aclitem[]|0\n");
+    try c.expectRows("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'information_schema.tables'::regclass AND attnum = 1", "information_schema.sql_identifier\n");
+    try c.expectRows("SELECT pg_get_indexdef(i.indexrelid), pg_get_constraintdef(k.oid) FROM pg_index i JOIN pg_constraint k ON k.conindid = i.indexrelid WHERE i.indrelid = 'pg_namespace'::regclass ORDER BY 1", "CREATE UNIQUE INDEX pg_namespace_nspname_index ON pg_catalog.pg_namespace USING btree (nspname)|UNIQUE (nspname)\n" ++
+        "CREATE UNIQUE INDEX pg_namespace_oid_index ON pg_catalog.pg_namespace USING btree (oid)|PRIMARY KEY (oid)\n");
+    try c.expectRows("SELECT 'pg_class'::regclass, 'information_schema.columns'::regclass, pg_table_is_visible('pg_type'::regclass), pg_table_is_visible('information_schema.tables'::regclass)", "pg_class|information_schema.columns|1|0\n");
+    try c.expectRows("SELECT typname, typtype, typrelid FROM pg_type WHERE oid IN (83, 13341) ORDER BY 1", "cardinal_number|d|0\npg_class|c|1259\n");
+    // Each column of the relation is in pg_attribute, in its order.
+    inline for (.{ "pg_class", "pg_attribute", "pg_constraint", "pg_type", "pg_index", "pg_proc", "pg_namespace", "information_schema.views" }) |r| {
+        var stmt: ?*vi.Vdbe = null;
+        try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "SELECT string_agg(attname, '|' ORDER BY attnum) FROM pg_attribute WHERE attrelid = '" ++ r ++ "'::regclass AND attnum > 0", &stmt, null));
+        defer _ = api.finalize(stmt.?);
+        try testing.expectEqual(RC.ROW, api.step(stmt.?));
+        try c.expectColumns("SELECT * FROM " ++ r, api.columnText(stmt.?, 0).?);
+    }
+    // Hidden where PostgreSQL hides them (psql's \dt).
+    try c.exec("CREATE TABLE t (a int)");
+    try c.expectRows("SELECT c.relname FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', '') AND n.nspname <> 'pg_catalog' AND n.nspname !~ '^pg_toast' AND n.nspname <> 'information_schema' AND pg_table_is_visible(c.oid)", "t\n");
 }

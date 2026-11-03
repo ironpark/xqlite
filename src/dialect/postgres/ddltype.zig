@@ -203,7 +203,7 @@ const Back = struct {
     fn wrapped(b: *Back, t: **Expr, w_: ?*IrExpr) Error!bool {
         const w = w_ orelse return false;
         if (!isCall(w)) return false;
-        const names = [_][]const u8{ "xq_pg_iv_key", "xq_pg_iv_high", "xq_pg_iv_text" };
+        const names = [_][]const u8{ "xq_pg_iv_key", "xq_pg_iv_high", "xq_pg_iv_text", "xq_pg_iv_out" };
         const name = for (names) |n| {
             if (std.ascii.eqlIgnoreCase(w.token(), n)) break n;
         } else return false;
@@ -373,7 +373,7 @@ const Back = struct {
                 }
                 // An interval is its text.
                 for (c.args) |*arg| if (b.isInterval(arg.*)) {
-                    arg.* = try b.wrap(arg.*, "xq_pg_iv_text");
+                    arg.* = try b.wrap(arg.*, "xq_pg_iv_out");
                 };
             },
             .between => |*bt| {
@@ -411,8 +411,36 @@ const Back = struct {
                 if (y.op != TK.IN or !y.useXList()) return;
                 const list = y.x.list orelse return;
                 if (list.len() != il.items.len) return;
+                // A list with a boolean: its string literals read as
+                // booleans (overload.zig's boolList()).
+                if (b.booleanAmong(y.left, list.slice())) |o| {
+                    _ = try b.boolLiteral(&il.e, y.left, o);
+                    for (il.items, list.slice()) |*item, w| _ = try b.boolLiteral(item, w.expr, o);
+                    return;
+                }
                 _ = try b.wrapped(&il.e, y.left);
                 for (il.items, 0..) |*item, i| _ = try b.wrapped(item, list.at(i).expr);
+            },
+            // A boolean CASE: its string literals read as booleans
+            // (overload.zig's boolCase()).
+            .case => |*cs| {
+                if (x.op != TK.CASE or !x.useXList()) return;
+                const list = x.x.list orelse return;
+                const items = list.slice();
+                if (items.len != cs.whens.len + @intFromBool(cs.@"else" != null)) return;
+                const n = items.len;
+                if (cs.operand != null) if (x.left) |base| if (b.isBoolean(base)) {
+                    for (cs.whens, 0..) |*w, i| if (!overload.caseResult(n, i)) {
+                        _ = try b.boolLiteral(w, items[i].expr, base);
+                    };
+                };
+                const o = for (items, 0..) |item, i| {
+                    if (overload.caseResult(n, i) and b.isBoolean(item.expr.?)) break item.expr;
+                } else return;
+                for (cs.whens, 0..) |*w, i| if (overload.caseResult(n, i)) {
+                    _ = try b.boolLiteral(w, items[i].expr, o);
+                };
+                if (cs.@"else") |*el| _ = try b.boolLiteral(el, items[n - 1].expr, o);
             },
             // An operator the table made a call (operators.zig, jsonb's
             // `-` of an operand of no type).
@@ -475,8 +503,8 @@ const Back = struct {
             // bytes), CAST(xq_pg_jsonb_text(j) AS TEXT).
             .cast => |*cs| {
                 // ::text of an interval.
-                if (calls(x, "xq_pg_iv_text") and cs.mode == .affinity) {
-                    cs.mode = .{ .func = "xq_pg_iv_text" };
+                if (calls(x, "xq_pg_iv_out") and cs.mode == .affinity) {
+                    cs.mode = .{ .func = "xq_pg_iv_out" };
                     return;
                 }
                 var k = x;
@@ -548,6 +576,13 @@ const Back = struct {
         return typing.typeOf(b.p.db, x.xq_type).logical == .boolean;
     }
 
+    /// A boolean among `x` and `items` (of an IN list), if one is.
+    fn booleanAmong(b: *const Back, x: ?*IrExpr, items: []const int.ExprListItem) ?*IrExpr {
+        if (x) |e| if (b.isBoolean(e)) return e;
+        for (items) |item| if (item.expr) |e| if (b.isBoolean(e)) return e;
+        return null;
+    }
+
     /// A string literal operand `t` the core read as a boolean (`w`:
     /// xq_pg_bool('t')): that cast; whether it was. One that is no
     /// boolean (`b = 'xyz'`, which the probe's core refused: `w` the
@@ -584,7 +619,7 @@ const Back = struct {
         if (!isCall(x)) return;
         const want = lower.functionName(b.p, f.name.text, f.dialect, false) catch return error.OutOfMemory;
         const kind = overload.kindEngine(x.token()) != null;
-        if (!std.ascii.eqlIgnoreCase(want, x.token()) and (renames.has(x.token()) or kind)) {
+        if (!std.ascii.eqlIgnoreCase(want, x.token()) and (renamed(x.token()) or kind)) {
             f.name.text = x.token();
             f.dialect = null;
         }
@@ -636,7 +671,8 @@ const Back = struct {
     /// The forms overload.zig gave uuid operands (its uuidUnify(),
     /// uuidCast(), uuidConcat()): a comparison's, IN's and BETWEEN's
     /// operands in xq_pg_uuid() or xq_pg_uuid_text(), a uuid cast to text
-    /// xq_pg_uuid_text(), the operands of `||`. Whether `e` was one.
+    /// xq_pg_uuid_text(), the operands of `||`. Whether it replaced `e`
+    /// (the cast): the others go on to expr()'s forms.
     fn uuid(b: *Back, e: *Expr, x: *IrExpr) Error!bool {
         switch (e.kind) {
             .compare => |*c| {
@@ -662,7 +698,8 @@ const Back = struct {
                 if (list.len() != l.items.len) return false;
                 try b.uuidWrap(&l.e, in.left);
                 for (l.items, list.slice()) |*t, item| try b.uuidWrap(t, item.expr);
-                return true;
+                // On to expr()'s: a boolean list's literals, intervals.
+                return false;
             },
             .between => |*bt| {
                 const in = if (x.op == TK.NOT) x.left orelse return false else x;
@@ -672,7 +709,7 @@ const Back = struct {
                 try b.uuidWrap(&bt.e, in.left);
                 try b.uuidWrap(&bt.lo, list.at(0).expr);
                 try b.uuidWrap(&bt.hi, list.at(1).expr);
-                return true;
+                return false;
             },
             else => return false,
         }
@@ -702,14 +739,17 @@ const renames = std.StaticStringMap(void).initComptime(.{
     .{"xq_pg_jsonb_path_text"}, .{"xq_pg_json_agg_rows"},    .{"xq_pg_array_to_json"},
     .{"xq_pg_array_nested"},    .{"xq_pg_array_agg_arrays"}, .{"xq_pg_subscript_k"},
     .{"xq_pg_array_contains"},  .{"xq_pg_iv_sum"},           .{"xq_pg_iv_avg"},
-    // numeric's (overload.zig's numericCall()).
-    .{"xq_dec_round"},          .{"xq_dec_trunc"},           .{"xq_dec_ceil"},
-    .{"xq_dec_floor"},          .{"xq_dec_abs"},             .{"xq_dec_sign"},
-    .{"xq_dec_mod"},            .{"xq_dec_div_trunc"},       .{"xq_dec_scale"},
-    .{"xq_dec_min_scale"},      .{"xq_dec_trim_scale"},      .{"xq_dec_sum"},
-    .{"xq_dec_avg"},            .{"xq_dec_int2"},            .{"xq_dec_int4"},
-    .{"xq_dec_int8"},
 });
+
+/// Whether overload.zig calls `name` in the place of another: renames'
+/// or numeric's (numericCall(), decimal_sql.zig's Info.renamed).
+fn renamed(name: []const u8) bool {
+    if (renames.has(name)) return true;
+    const i = decimal_sql.info(name) orelse return false;
+    return i.renamed;
+}
+
+const decimal_sql = @import("../decimal_sql.zig");
 
 /// The functions overload.zig wraps an Expr in, in place (wrapIn()).
 const wrappers = std.StaticStringMap(void).initComptime(.{

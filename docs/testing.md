@@ -409,11 +409,12 @@ zig build fuzz -- smoke      # 모든 퍼저를 고정 시드로 짧게
 - 방언 d에서 렌더링한 텍스트를 제3의 방언 e가 읽을 때, e가 가린 SQLite 내장 함수 이름이 텍스트에 그대로 있는 경우. 계약은 SQLite 방언과 d만 다루고, e에서는 그 이름이 e의 함수를 뜻합니다(예: PostgreSQL 뷰의 `concat()`은 MariaDB 연결에서 MariaDB의 `CONCAT()`).
 - 상수가 파라미터와 다르게 해석되는 ORDER BY/GROUP BY가 있는 트리의 파라미터 비교. 정수 상수는 열 번호이기 때문입니다.
 - 뷰가 서브쿼리와 달리 실행 중 오류가 나는 식을 계산하지 않는 경우(sqlite3도 같음)
+- 방언의 타입이 값의 뜻을 정한 문장: PostgreSQL의 정확한 십진수를 계산하거나(`Parse.xq_exact_numeric`) 불리언과 만난 문자열 상수를 불리언으로 읽은 문장(`Parse.xq_typed_literal`: `true IN ('yes', 'no')`). 같은 트리의 SQLite 텍스트(다른 방언이 만든 뷰·CHECK)는 실수와 텍스트로, 텍스트로 바인딩한 파라미터는 텍스트로 계산합니다.
 
 
 ## 방언 차등 테스트
 
-`xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record] [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. PostgreSQL은 오류 아래의 `DETAIL:`, `HINT:`, `CONTEXT:` 줄도 비교하고, 위치를 가리키는 줄(psql의 `LINE N:`과 `^`, 셸의 `^--- error here`)만 뺍니다. 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다.
+`xqt dialect-diff pg|mariadb|mssql|oracle [--live|--record] [CASES]`는 같은 케이스를 실제 서버와 `xqlite sql`(해당 방언)에서 실행해 행, 열 이름(행이 있는 결과), `ERROR:` 줄을 비교합니다. PostgreSQL은 오류 아래의 `DETAIL:`, `HINT:`, `CONTEXT:` 줄과 `NOTICE:` 줄(그 아래의 `DETAIL:`도)도 비교하고, 위치를 가리키는 줄(psql의 `LINE N:`과 `^`, 셸의 `^--- error here`)만 뺍니다. 두 쪽의 프렐류드가 `client_min_messages`를 `warning`으로 두므로 알림을 비교하는 케이스는 `SET client_min_messages = notice`로 시작합니다(`tools/dialect/pg-error-cases.txt`). 케이스는 `-- case: NAME` 줄로 시작하고 빈 데이터베이스에서 돕니다.
 
 서버 쪽 출력은 세 가지 중 하나에서 옵니다.
 

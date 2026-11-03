@@ -407,6 +407,12 @@ fn jsonCacheInsert(ctx: *Context, parse: *JsonParse) i32 {
     std.debug.assert(parse.z_json != null);
     std.debug.assert(parse.b_json_is_rcstr);
     std.debug.assert(parse.delta == 0);
+    // Called with no statement (typing.readLiteral() reads a literal when
+    // the statement is compiled), there is no aux data to keep a cache
+    // in: the parse stays its caller's alone, as with JSON_NOCACHE. In C
+    // sqlite3_set_auxdata() then frees it and this reports SQLITE_NOMEM,
+    // but no C caller calls a JSON function without a statement.
+    if (ctx.vdbe == null) return RC.OK;
     var p = api.getAuxdataTyped(ctx, json_cache_id, jsonCacheDelete);
     if (p == null) {
         const db = api.contextDbHandle(ctx);

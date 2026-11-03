@@ -240,6 +240,18 @@ pub fn countsChanges(s: *const Stmt) bool {
     return engine.countsChanges(s.vm);
 }
 
+/// A message of the statement that is not an error (PostgreSQL's NOTICE:
+/// `table "t" does not exist, skipping` of DROP TABLE IF EXISTS).
+pub const Notice = engine.Notice;
+
+/// The notices the statement reports each time it runs, for its client
+/// (the wire server's NoticeResponse, the shell's `NOTICE:` lines); valid
+/// until finalize(). Those of a level below Db.noticeLevel() are for the
+/// client to leave out. Empty in SQLite's dialect.
+pub fn notices(s: *const Stmt) []const Notice {
+    return engine.notices(s.vm);
+}
+
 /// How many times a schema change has recompiled the statement
 /// (sqlite3_stmt_status(SQLITE_STMTSTATUS_REPREPARE)): its result columns
 /// may have changed when this has.

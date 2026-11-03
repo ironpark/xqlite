@@ -1,0 +1,177 @@
+-- Differential cases of PostgreSQL's regular expressions, SIMILAR TO and
+-- string constants (xqt dialect-diff pg tools/dialect/pg-string-cases.txt),
+-- in the format of pg-cases.txt: the `~` operators, regexp_match(),
+-- regexp_matches(), regexp_replace(), regexp_split_to_*(), regexp_count(),
+-- regexp_instr(), regexp_substr(), regexp_like(), substring() of a
+-- pattern, SIMILAR TO and similar_to_escape(), standard_conforming_strings.
+-- Each case runs on an empty database in PostgreSQL and in `xqlite sql`
+-- with `.dialect postgres`; the rows, column names and error messages must
+-- be the same. The expected output is PostgreSQL 18's.
+
+-- case: regex operators
+SELECT 'abc' ~ 'b' AS a, 'abc' ~ '^b' AS b, 'ABC' ~* 'b' AS c, 'abc' !~ 'x' AS d, 'abc' !~* 'B' AS e, NULL ~ 'a' AS f;
+SELECT 'abc' ~ 'a{' AS a, 'a{1}' ~ 'a\{1\}' AS b, 'abc' ~ 'a{255}' AS c, 'abc' ~ '(?#comment)abc' AS d, 'abc' ~ 'a(?:b)c' AS e, 'abc' ~ '(?<=b)' AS f;
+SELECT 'abc' ~ '()' AS a, 'abc' ~ 'a|' AS b, 'abc' ~ '(|a)' AS c, 'a-b' ~ '[a\-b]' AS d, '\' ~ '[\\]' AS e, ']' ~ '[]]' AS f, 'b' ~ '[^]a]' AS g, '-' ~ '[a-]' AS h;
+SELECT 'ab' ~ '[[.a.]]b' AS a, 'ab' ~ '[[=a=]]b' AS b, ' ' ~ '[[.space.]]' AS c, 'x' ~ '[[:word:]]' AS d, 'x' ~ '[[:ascii:]]' AS e, 'a1' ~ '[\d]' AS f, 'a1' ~ '[\D]' AS g;
+SELECT 'a' ~ '[[:upper:]]' AS a, 'a' ~* '[[:upper:]]' AS b, 'A' ~* '[a-c]' AS c, 'ÉCOLE' ~* 'école' AS d, 'é' ~ '[[:alpha:]]' AS e, '1' ~ '[[:alpha:]]' AS f, 'ß' ~ '\w' AS g;
+SELECT 'é' ~ 'é' AS a, 'A' ~ '\x41' AS b, 'A' ~ '\101' AS c, 'aa' ~ '(a)\01' AS d, E'\t' ~ '\t' AS e, 'a' ~ '\a' AS f, 'abc' ~ '\%' AS g, 'a%' ~ '\%' AS h;
+SELECT 'abc' ~ '(?i)A' AS a, 'abc' ~ '***=a.c' AS b, 'a.c' ~ '***=a.c' AS c, 'abc' ~ '***:(?i)B' AS d, 'ab' ~ '(?x) a b' AS e, 'ab' ~ '(?x)a\ b' AS f, 'a b' ~ '(?x)a\ b' AS g, 'a b' ~ '(?x)a[ ]b' AS h;
+SELECT 'foo bar' ~ '\mbar\M' AS a, 'foobar' ~ '\ybar' AS b, 'a b' ~ 'a\yb' AS c, 'ab' ~ 'a\Yb' AS d, 'abc' ~ '\Aabc\Z' AS e, 'aa' ~ '^(a)\1$' AS f, 'ab' ~ '(?=a)' AS g, 'ab' ~ '(?<=(a))b' AS h;
+
+-- case: regex errors
+SELECT 'abc' ~ '(';
+SELECT 'abc' ~ 'a)';
+SELECT 'abc' ~ '[[:foo:]]';
+SELECT 'abc' ~ 'a{3,2}';
+SELECT 'abc' ~ 'a{256}';
+SELECT 'abc' ~ 'a{1';
+SELECT 'abc' ~ 'a{1,2';
+SELECT 'abc' ~ 'a{1x}';
+SELECT 'abc' ~ '\1';
+SELECT 'aa' ~ '(a\1)';
+SELECT 'aa' ~ '\1(a)';
+SELECT 'ab' ~ '(a)(b)\3';
+SELECT 'abc' ~ '*';
+SELECT 'abc' ~ 'a**';
+SELECT 'abc' ~ '^*';
+SELECT 'abc' ~ '{1}';
+SELECT 'abc' ~ 'a|*b';
+SELECT 'a' ~ '\y*';
+SELECT 'x' ~ '(?=a)*';
+SELECT 'abc' ~ '[';
+SELECT 'abc' ~ '\';
+SELECT 'abc' ~ '\q';
+SELECT 'abc' ~ '\uZZZZ';
+SELECT 'x' ~ '[\y]';
+SELECT 'abc' ~ '[z-a]';
+SELECT 'a' ~ '[[:alpha:]-z]';
+SELECT 'a' ~ '[z-[:alpha:]]';
+SELECT 'abc' ~ '(?z)a';
+SELECT 'abc' ~ 'a(?i)b';
+SELECT 'a' ~ '(?';
+
+-- case: regexp_match and the greediness of the whole and of its parts
+SELECT regexp_match('b', '(a*)*') AS a, regexp_match('aaa', '(a*)*') AS b, regexp_match('abab', '(ab|a)*') AS c, regexp_match('xyz', '(a)|(x)') AS d;
+SELECT regexp_match('abc01234xyz', '(.*?)(\d+)(.*)') AS a, regexp_match('abc01234xyz', '(.*)(\d+)(.*)') AS b, regexp_match('abcd', '(a|ab)(c|bcd)(d*)') AS c;
+SELECT regexp_match('XY1234Z', 'Y*([0-9]{1,3})') AS a, regexp_match('XY1234Z', 'Y*?([0-9]{1,3})') AS b, regexp_match('aaa', 'a{2}?') AS c, regexp_match('aaa', '(a+?)') AS d;
+SELECT regexp_match('aaab', 'a+?b') AS a, regexp_match('xaaay', 'a*?y') AS b, regexp_match('abcabc', '(?:a|ab)(c|bcd)?') AS c, regexp_match('abc', '(x)?b') AS d;
+SELECT regexp_match('abab', '(ab)\1') AS a, regexp_match('ABab', '(ab)\1', 'i') AS b, regexp_match('abc', '(?<=a)b') AS c, regexp_match('abc', '(?<!a)c') AS d, regexp_match('abc', 'b(?=c)') AS e, regexp_match('abc', 'b(?!c)') AS f;
+SELECT regexp_match('foo bar', '\mbar\M') AS a, regexp_match('foobar', '\ybar') AS b, regexp_match('aXbXc', 'x', 'i') AS c, regexp_match('abc', 'B', 'ic') AS d, regexp_match('abc', 'B', 'ci') AS e;
+SELECT regexp_match('a.c', 'a.c', 'q') AS a, regexp_match('abc', 'a.c', 'q') AS b, regexp_match('a b', 'a b c?', 'x') AS c, regexp_match('ab', 'a b # comment', 'x') AS d, regexp_match('héllo', '(é)(l+)') AS e;
+SELECT regexp_match(E'a\nb', '^b', 'n') AS a, regexp_match(E'a\nb', 'a.b') AS b, regexp_match(E'a\nb', 'a.b', 'n') AS c, regexp_match(E'a\nb', 'a$', 'w') AS d, regexp_match(E'a\nb', 'a[^x]b', 'p') AS e, regexp_match(E'a\nb', '^b', 's') AS f;
+SELECT regexp_match(NULL, 'a') AS a, regexp_match('a', NULL) AS b, regexp_match('abc', 'z') AS c, regexp_match('abc', '') AS d, (regexp_match('k=v', '(\w)=(\w)'))[2] AS e;
+
+-- case: regexp_match: the groups of repetitions
+SELECT regexp_match('b', '(b|x?)+') AS a, regexp_match('aaa', '(a*)+') AS b, regexp_match('aaa', '(a*)*') AS c, regexp_match('bab', '([ab]+?)+') AS d, regexp_match('bab', '([ab]+)+?') AS e, regexp_match('ab', '(b|a|x?)+') AS g;
+SELECT regexp_match('ba', '([ab]+?([ab])*|x?)+') AS a, regexp_match('ba', '(.|x?)+') AS b, regexp_match('ba', '(.)+') AS c, regexp_match('bbab', '(([ab]+)+?)') AS d, regexp_match('bbab', 'x?([ab]+)+?') AS e;
+SELECT regexp_match('b', '(b|x?)*') AS a, regexp_match('aaa', '(a*){0,2}') AS b, regexp_match('aaa', '(a*){0,1}') AS c, regexp_match('ba', '(.|x?)*') AS d, regexp_match('aab', 'x?(a*)*?b') AS e, regexp_match('abab', 'x?(ab|a)*?b') AS g;
+SELECT regexp_match('aaa', '(a*){2,3}') AS a, regexp_match('aaa', '(a*){2}') AS b, regexp_match('abab', '(ab|a){1,2}') AS c, regexp_match('ab', '(a|ab)(b?)+') AS d, regexp_match('abca', '([^a]*?|(a)){1,2}') AS e;
+SELECT regexp_match('abc', '((a)|(b)|(c))*') AS a, regexp_match('acba', '(c|((x?|.)+?[ab]*?))+') AS b, regexp_match('1a1c', '([ab]|(.*?)*)') AS c, regexp_match('acac1', '((x?))*?') AS d, regexp_match('bb abc', '(.*?){0,2}?') AS e;
+SELECT regexp_match('bbac ', '(a+[^b]{1,2}(\y|[^b]*))*?\1*') AS a, regexp_match('abab', '(ab)+\1') AS b, regexp_match('xyxyz', '((x)(y))+z') AS c, regexp_match('192.168.0.1', '^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$') AS d;
+
+-- case: regexp_match and the greediness of the whole and of its parts: errors
+SELECT regexp_match('abc', 'b', 'g');
+SELECT regexp_match('abc', 'b', 'z');
+SELECT regexp_match('ABC', 'b', 'gi');
+
+-- case: regexp_matches, regexp_split_to_table: rows
+SELECT regexp_matches('foobarbequebaz', '(b[^b]+)(b[^b]+)', 'g');
+SELECT regexp_matches('abcabc', 'b', 'g'), 1 AS one;
+SELECT regexp_matches('abc', '(x)?b');
+SELECT regexp_matches('abcabc', '');
+SELECT regexp_matches('abc', '', 'g');
+SELECT regexp_matches('abc', 'b*', 'g');
+SELECT regexp_matches('abc', NULL);
+SELECT m[1] AS letter, m[2] AS digit FROM regexp_matches('a1b2c3', '([a-z])(\d)', 'g') AS m;
+SELECT regexp_split_to_table('the quick  brown', '\s+');
+SELECT t FROM regexp_split_to_table('a,b,,c', ',') AS t;
+SELECT x, n FROM regexp_split_to_table('x y z', ' ') WITH ORDINALITY AS r(x, n);
+SELECT regexp_split_to_table('abc', 'b', 'g');
+
+-- case: regexp_replace
+SELECT regexp_replace('foobarbaz', 'b..', 'X') AS a, regexp_replace('foobarbaz', 'b..', 'X', 'g') AS b, regexp_replace('foobarbaz', 'b(..)', 'X\1Y\\Z\&', 'g') AS c, regexp_replace('Thomas', '.[mN]a.', 'M') AS d;
+SELECT regexp_replace('aaa', 'a', 'b', 'gi') AS a, regexp_replace('abcabc', 'b', 'x', 2) AS b, regexp_replace('abcabcabc', 'b', 'x', 1, 2) AS c, regexp_replace('abcabcabc', 'B', 'x', 1, 0, 'i') AS d, regexp_replace('abcabc', 'b', 'x', 1, 2, 'g') AS e;
+SELECT regexp_replace('abc', '', 'X', 'g') AS a, regexp_replace('abc', 'x*', '-', 'g') AS b, regexp_replace('abc', 'b*', '-', 'g') AS c, regexp_replace('abc', 'b', '\5\0\') AS d, regexp_replace('héllo', 'l', 'L', 'g') AS e;
+SELECT regexp_replace('abc', 'b', 'x', 10) AS a, regexp_replace('a', NULL, 'b') AS b, regexp_replace('aaa', '^a', 'b', 'g') AS c, regexp_replace('2024-01-15', '(\d+)-(\d+)-(\d+)', '\3/\2/\1') AS d;
+
+-- case: regexp_replace: errors
+SELECT regexp_replace('abc', 'b', 'x', 'z');
+SELECT regexp_replace('abc', 'b', 'x', 0);
+SELECT regexp_replace('abc', 'b', 'x', 1, -1);
+SELECT regexp_replace('abc', '(', 'x');
+
+-- case: regexp_split_to_array, regexp_count, regexp_instr, regexp_substr, regexp_like
+SELECT regexp_split_to_array('hello world', '\s*') AS a, regexp_split_to_array('abc', '') AS b, regexp_split_to_array('', 'x') AS c, regexp_split_to_array('abc', 'x*') AS d, regexp_split_to_array('a,b,,c', ',') AS e;
+SELECT regexp_split_to_array('abc', 'b*') AS a, regexp_split_to_array('abbc', 'b') AS b, regexp_split_to_array('abc', '(?=b)') AS c, regexp_split_to_array('aXbxc', 'x', 'i') AS d;
+SELECT regexp_count('ABCABCAXYaxy', 'A.') AS a, regexp_count('ABCABCAXYaxy', 'A.', 1, 'i') AS b, regexp_count('abc', '') AS c, regexp_count('aaa', 'a*') AS d, regexp_count('abc', '^b', 2) AS e, regexp_count('abc', '^a', 1) AS f, regexp_count('éaéa', 'a', 2) AS g;
+SELECT regexp_instr('ABCDEFGHI', '(c..)(...)', 1, 1, 0, 'i', 2) AS a, regexp_instr('abcabc', 'b', 1, 2) AS b, regexp_instr('abcabc', 'b', 1, 1, 1) AS c, regexp_instr('abc', 'z') AS d, regexp_instr('abc', '', 1, 2) AS e, regexp_instr('aébc', 'b') AS f, regexp_instr('aébc', 'b', 1, 1, 1) AS g;
+SELECT regexp_instr('abcabc', '(?<=c)a', 2) AS a, regexp_instr('abc', '(b)', 1, 1, 0, '', 3) AS b, regexp_count('abc', 'b', 10) AS c, regexp_instr('abc', 'b', 10) AS d, regexp_substr('abc', 'b', 10) AS e;
+SELECT regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2) AS a, regexp_substr('abc', 'z') AS b, regexp_substr('abc', '(b)(x)?', 1, 1, '', 2) AS c, regexp_substr('abc', '(b)', 1, 1, '', 3) AS d, regexp_substr('one two three', '\w+', 1, 3) AS e;
+SELECT regexp_like('Hello', 'hello', 'i') AS a, regexp_like('Hello', 'hello') AS b, regexp_like('Hello', NULL) AS c, regexp_count('a', 'a', NULL) AS d;
+
+-- case: regexp_split_to_array, regexp_count, regexp_instr, regexp_substr, regexp_like: errors
+SELECT regexp_split_to_array('abc', 'b', 'g');
+SELECT regexp_count('abc', 'b', 0);
+SELECT regexp_count('abc', 'b', 1, 'g');
+SELECT regexp_instr('abc', 'b', 1, 0);
+SELECT regexp_instr('abc', 'b', 1, 1, 2);
+SELECT regexp_instr('abc', 'b', 1, 1, 0, '', -1);
+SELECT regexp_instr('abc', 'b', 1, 1, 0, 'g');
+SELECT regexp_substr('abc', 'b', 1, 1, '', -1);
+SELECT regexp_substr('abc', 'b', 1, 1, 'g');
+SELECT regexp_like('abc', 'b', 'g');
+
+-- case: substring of a pattern
+SELECT substring('foobar' from 'o.b') AS a, substring('foobar' from 'o(.)b') AS b, substring('abc' from 'z') AS c, substring('abc' from '(z)?b') AS d, substring('foobar', 'o+') AS e;
+SELECT substring('foobar' similar '%#"o_b#"%' escape '#') AS a, substring('foobar' from '%#"o_b#"%' for '#') AS b, substring('abc' from 'b' for '#') AS c, substring('ab#"c' similar '%#"c' escape '#') AS d;
+SELECT substring('abc' similar 'b' escape NULL) AS a, substring('abc' from NULL) AS b, substring('hello' FROM 2 FOR 3) AS c, substring('hello' FROM 3) AS d, substring('hello', 2, 2) AS e;
+SELECT substring('Thomas' similar '%#"o_a#"_' escape '#') AS a, substring('Thomas' similar '#"%#"' escape '#') AS b, substring('Thomas' similar 'T#"ho#"%' escape '#') AS c;
+
+-- case: substring of a pattern: errors
+SELECT substring('abc' from '(');
+SELECT substring('abc' similar 'a' escape 'xx');
+
+-- case: SIMILAR TO
+SELECT 'abc' SIMILAR TO 'a%' AS a, 'abc' SIMILAR TO '(a|b)%c' AS b, 'abc' NOT SIMILAR TO 'b%' AS c, 'ab' SIMILAR TO 'a_' AS d, 'a.b' SIMILAR TO 'a.b' AS e, 'axb' SIMILAR TO 'a.b' AS f;
+SELECT 'ab' SIMILAR TO '[ab]{2}' AS a, 'abc' SIMILAR TO 'a%' ESCAPE '' AS b, 'a%' SIMILAR TO 'a\%' AS c, 'a' SIMILAR TO 'a' ESCAPE NULL AS d, 'AB' SIMILAR TO 'ab' AS e, 'abc' SIMILAR TO 'a(b|c)+' AS f;
+SELECT 'abc' SIMILAR TO 'abc' ESCAPE NULL AS a, 'a' SIMILAR TO NULL AS b, 'a_b' SIMILAR TO 'a#_b' ESCAPE '#' AS c, 'axb' SIMILAR TO 'a#_b' ESCAPE '#' AS d, 'a$' SIMILAR TO 'a$' AS e, 'a' SIMILAR TO 'a|b' AS f, 'ab' SIMILAR TO 'a|b' AS g;
+SELECT x, x SIMILAR TO '%(b|d)%' AS m FROM (VALUES ('abc'), ('xyz'), ('d')) AS v(x) ORDER BY x;
+SELECT similar_to_escape('a%b_c[x]#"y#"', '#') AS a, similar_to_escape('(a|b)\.$^') AS b, similar_to_escape('[]a]#"%', '#') AS c, similar_to_escape('[^]x]%') AS d;
+SELECT similar_to_escape('a\b') AS a, similar_to_escape('a', '') AS b, similar_to_escape('a\', '') AS c, similar_to_escape('é_ü', 'ü') AS d, similar_to_escape(NULL) AS e, similar_to_escape('a', NULL) AS f;
+
+-- case: SIMILAR TO: errors
+SELECT 'abc' SIMILAR TO 'a' ESCAPE 'xx';
+SELECT 'abc' SIMILAR TO '#"a#"b#"c' ESCAPE '#';
+SELECT 'abc' SIMILAR TO '(a';
+
+-- case: regular expressions in a table, a CHECK and a view
+CREATE TABLE codes (code text CHECK (code ~ '^[A-Z]{2}-\d+$'), note text);
+INSERT INTO codes VALUES ('AB-12', 'x1y22'), ('CD-3', NULL), ('EF-456', 'z');
+CREATE VIEW code_parts AS SELECT code, regexp_replace(code, '-.*', '') AS prefix, substring(code from '\d+') AS num, code SIMILAR TO '%-_' AS short FROM codes;
+SELECT * FROM code_parts ORDER BY code;
+SELECT pg_get_viewdef('code_parts') AS def;
+CREATE VIEW code_tests AS SELECT code ~* '^ab' AS a, code !~ 'x' AS b, code NOT SIMILAR TO 'A#_%' ESCAPE '#' AS c, regexp_match(code, '(\d)') AS d, regexp_count(code, '\d', 1) AS e, regexp_like(code, 'b', 'i') AS g FROM codes;
+SELECT pg_get_viewdef('code_tests') AS def;
+SELECT code, regexp_matches(note, '\d+', 'g') AS digits FROM codes ORDER BY code, digits;
+SELECT code FROM codes WHERE code ~* '^cd' OR note ~ 'z';
+SELECT string_agg(part, '|' ORDER BY part) AS parts FROM codes, regexp_split_to_table(code, '-') AS part;
+
+-- case: regular expressions in a table, a CHECK and a view: errors
+CREATE TABLE codes (code text CHECK (code ~ '^[A-Z]{2}-\d+$'));
+INSERT INTO codes VALUES ('ab-12');
+
+-- case: standard_conforming_strings
+SET escape_string_warning = off;
+SELECT 'a\nb' AS a, 'a\\b' AS b, E'a\tb' AS c, length('a\tb') AS d;
+SET standard_conforming_strings = off;
+SHOW standard_conforming_strings;
+SELECT 'a\tb' AS a, length('a\nb') AS b, 'a\\b' AS c, 'it\'s' AS d, 'x\x41\101B' AS e, E'a\tb' AS f, 'q''q' AS g;
+SELECT 'a\'b' ~ '\'' AS a, regexp_replace('a.b', '\\.', '-') AS b;
+SET standard_conforming_strings = on;
+SELECT 'a\tb' AS a, length('a\nb') AS b;
+
+-- case: standard_conforming_strings: errors
+SET escape_string_warning = off;
+SET standard_conforming_strings = off;
+SELECT U&'d\0061t';
+SELECT 'ok' AS a;

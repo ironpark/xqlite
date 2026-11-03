@@ -158,6 +158,7 @@ pub const Lowerer = struct {
         return Token.init(t);
     }
 
+    /// The text at `pos`, or no token (offset 0: not in the text).
     fn tokAt(l: *Lowerer, pos: u32, len: u32) Token {
         if (pos + len <= l.src.len) return .{ .z = l.src.ptr + pos, .n = len };
         return .{};

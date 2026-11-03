@@ -28,6 +28,7 @@ const jfuncs = @import("jfuncs.zig");
 const datetime = @import("datetime.zig");
 
 const TK = int.TK;
+const Expr = int.Expr;
 const Ctx = typing.Ctx;
 const Operand = typing.Operand;
 const Ret = typing.Ret;
@@ -53,7 +54,35 @@ pub const rules: typing.Rules = .{
     .order_collation = overload.orderCollation,
     .group_key = repr.groupKey,
     .order_key = repr.orderKey,
+    .no_function = noFunction,
 };
+
+/// PostgreSQL's error of a call no function matches (ParseFuncOrColumn()):
+/// `function f(integer, unknown) does not exist`, the types of the
+/// arguments as format_type() spells them; a string literal, NULL or a
+/// parameter of no type is unknown (and so is an argument whose type the
+/// core does not know: a column of a SQLite table).
+fn noFunction(c: *Ctx, e: *const Expr) typing.Error {
+    const a = c.p.arena;
+    // The name as written, without the prefix of the dialect's own.
+    const z = e.token();
+    var buf: [64]u8 = undefined;
+    const own = if (z.len <= buf.len) ownName(std.ascii.lowerString(&buf, z)).len else z.len;
+    const args: []const int.ExprListItem = if (e.useXList()) if (e.x.list) |l| l.slice() else &.{} else &.{};
+    const shown = try a.alloc([]const u8, args.len);
+    for (args, shown) |item, *t| t.* = argTypeName(c, item.expr.?);
+    return c.failFields(e, .of("42883"), try @import("frontend.zig").functionNotExist(a, z[z.len - own ..], shown));
+}
+
+/// The name of the type of argument `x` in PostgreSQL's errors.
+fn argTypeName(c: *const Ctx, x: *const Expr) []const u8 {
+    if (x.op == TK.STRING or x.op == TK.NULL) return "unknown";
+    const t = typing.typeOf(c.p.db, x.xq_type);
+    if (t.logical == .unknown) return "unknown";
+    const pgc = @import("pgcatalog.zig");
+    const bt = pgc.builtinType(pgc.oidOfLogical(t)) orelse return "unknown";
+    return bt.fmt;
+}
 
 /// The types stored in a BLOB form of their own (numeric, interval, uuid,
 /// jsonb): their store functions, grouping and ordering.
@@ -180,6 +209,13 @@ const numeric_functions = .{
     .{ "xq_dec_trunc", Ret{ .rule = round } },
     .{ "xq_dec_scale", Ret{ .named = "integer" } },
     .{ "xq_dec_min_scale", Ret{ .named = "integer" } },
+    .{ "xq_dec_sqrt", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_exp", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_ln", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_log", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_power", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_factorial", Ret{ .rule = decScale0 } },
+    .{ "xq_dec_width_bucket", Ret{ .named = "integer" } },
     .{ "xq_dec_int2", Ret{ .named = "smallint" } },
     .{ "xq_dec_int4", Ret{ .named = "integer" } },
     .{ "xq_dec_int8", Ret{ .named = "bigint" } },
@@ -368,7 +404,10 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "sqrt", Ret{ .rule = transcendental } },
     .{ "exp", Ret{ .rule = transcendental } },
     .{ "ln", Ret{ .rule = transcendental } },
-    .{ "log", Ret{ .rule = transcendental } },
+    .{ "log", Ret{ .rule = logType } },
+    .{ "log10", Ret{ .rule = transcendental } },
+    .{ "factorial", Ret{ .rule = decScale0 } },
+    .{ "width_bucket", Ret{ .named = "integer" } },
     .{ "power", Ret{ .rule = transcendental } },
     .{ "pow", Ret{ .rule = transcendental } },
     .{ "random", Ret{ .named = "double precision" } },
@@ -413,6 +452,7 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     // interval BLOB (datetime.zig).
     .{ "xq_pg_iv", Ret{ .named = "interval" } },
     .{ "xq_pg_iv_text", Ret{ .named = "text" } },
+    .{ "xq_pg_iv_out", Ret{ .named = "text" } },
     .{ "xq_pg_iv_key", Ret{ .named = "bytea" } },
     .{ "xq_pg_iv_high", Ret{ .named = "bytea" } },
     .{ "xq_pg_iv_valid", Ret{ .named = "boolean" } },
@@ -491,6 +531,18 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "xq_like", Ret{ .named = "boolean" } },
     .{ "xq_ilike", Ret{ .named = "boolean" } },
     .{ "xq_pg_regex", Ret{ .named = "boolean" } },
+    // Regular expressions (regexp.zig).
+    .{ "xq_pg_re", Ret{ .named = "boolean" } },
+    .{ "xq_pg_similar_escape", Ret{ .named = "text" } },
+    .{ "similar_to_escape", Ret{ .named = "text" } },
+    .{ "textregexsubstr", Ret{ .named = "text" } },
+    .{ "regexp_match", Ret{ .named = "text[]" } },
+    .{ "regexp_split_to_array", Ret{ .named = "text[]" } },
+    .{ "regexp_replace", Ret{ .named = "text" } },
+    .{ "regexp_substr", Ret{ .named = "text" } },
+    .{ "regexp_count", Ret{ .named = "integer" } },
+    .{ "regexp_instr", Ret{ .named = "integer" } },
+    .{ "regexp_like", Ret{ .named = "boolean" } },
     // Arrays (array.zig).
     .{ "xq_pg_text_array", Ret{ .named = "text[]" } },
     .{ "xq_pg_array", Ret{ .rule = arrayOfArgs } },
@@ -548,6 +600,7 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "date_bin", Ret{ .named = "timestamp without time zone" } },
     .{ "timezone", Ret{ .rule = zoneType } },
     .{ "xq_pg_timezone", Ret{ .rule = zoneType } },
+    .{ "xq_pg_at_time_zone", Ret{ .rule = zoneType } },
 } ++ numeric_functions);
 
 /// xq_pg_gcd(a, b, bits): of `bits` 0 a numeric, else the common type.
@@ -723,13 +776,24 @@ fn ceil(c: *Ctx, args: []const Operand) Oom!TypeId {
     return unknown;
 }
 
-/// sqrt(), exp(), ln(), log(), power(): a numeric (of no known scale) if
-/// an argument is one, else a double precision.
+/// sqrt(), exp(), ln(), log(), log10(), power(): a numeric (of no known
+/// scale) if an argument is one and none is a double precision or a real
+/// (PostgreSQL's choice of the numeric function), else a double
+/// precision.
 fn transcendental(c: *Ctx, args: []const Operand) Oom!TypeId {
     if (args.len == 0) return unknown;
+    var ch: repr.numeric.Candidate = .{};
     for (args) |a| {
-        if (a.logical() == .numeric) return c.make(.{ .logical = .numeric });
-        if (!typing.isNumber(a.logical())) return unknown;
+        const l = a.logical();
+        // Not a number before a float: no such function.
+        if (!ch.float and !typing.isNumber(l) and l != .unknown) return unknown;
+        ch.arg(l);
     }
-    return typing.plain(.float8);
+    return if (ch.isNumeric()) c.make(.{ .logical = .numeric }) else typing.plain(.float8);
+}
+
+/// log(x) as transcendental(); log(b, x) is numeric's only.
+fn logType(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len == 2) return c.make(.{ .logical = .numeric });
+    return transcendental(c, args);
 }

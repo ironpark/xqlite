@@ -138,8 +138,25 @@ pub fn parseInterval(z: []const u8) ?Interval {
 /// The text of `iv` in PostgreSQL's default output style; null if
 /// PostgreSQL is not in the build.
 pub fn intervalText(iv: Interval, buf: *[max_len]u8) ?[]const u8 {
+    return intervalTextStyle(iv, .postgres, buf);
+}
+
+/// PostgreSQL's IntervalStyle (a session's: valuetext.Settings).
+pub const IntervalStyle = @import("interval.zig").Style;
+
+/// The text of `iv` in IntervalStyle `style`; null if PostgreSQL is not
+/// in the build.
+pub fn intervalTextStyle(iv: Interval, style: IntervalStyle, buf: *[max_len]u8) ?[]const u8 {
     if (comptime !Dialect.postgres.built()) return null;
-    return pg_datetime.formatIntervalPg(iv, buf);
+    return pg_datetime.formatIntervalStyle(iv, style, buf);
+}
+
+/// The text of interval[] `z` (as stored: its elements in the default
+/// style) with its elements in `style` (in `gpa`); null if it is no
+/// array's text or PostgreSQL is not in the build.
+pub fn intervalArrayText(gpa: Allocator, z: []const u8, style: IntervalStyle) Allocator.Error!?[]u8 {
+    if (comptime !Dialect.postgres.built()) return null;
+    return @import("postgres/array.zig").restyleIntervals(gpa, z, style);
 }
 
 const pg_datetime = @import("postgres/datetime.zig");

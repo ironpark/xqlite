@@ -380,6 +380,12 @@ pub const Rules = struct {
     /// PostgreSQL's unknown literal, which fails the statement at the
     /// literal ("LINE 1: ..." and its caret) even where no row reads it.
     literal_input: bool = false,
+    /// The error of a call no function matches by its name and number
+    /// of arguments (`e`, its arguments resolved and typed): the
+    /// dialect's words (PostgreSQL's `function f(integer, unknown) does
+    /// not exist`, which names the types of the arguments). It fails the
+    /// statement (Ctx.fail()); null for SQLite's `no such function`.
+    no_function: ?*const fn (c: *Ctx, e: *const Expr) Error = null,
 };
 
 /// The functions whose type is the same in every dialect.
@@ -561,6 +567,35 @@ pub fn typeTree(nc: *int.NameContext, e: *Expr) int.ParseError!void {
         error.OutOfMemory => p.db.oomFault(),
         error.Failed => return error.ParseFailed,
     };
+}
+
+/// Whether the statement's dialect reports a call no function matches
+/// itself (Rules.no_function), after its arguments are typed: then name
+/// resolution resolves the arguments first and calls noFunction().
+pub fn reportsNoFunction(p: *const int.Parse) bool {
+    if (!active(p.db)) return false;
+    const rules = @import("../dialect/dialect.zig").hooks(p.db).typing orelse return false;
+    return rules.no_function != null;
+}
+
+/// Fail the statement with the dialect's error of call `e` (resolved in
+/// `nc`, with its arguments), which no function matches
+/// (reportsNoFunction()): its arguments typed first.
+pub fn noFunction(nc: *int.NameContext, e: *Expr) void {
+    const p = nc.parse;
+    var c = ctxOf(p) orelse return;
+    const f = c.rules.no_function orelse return;
+    c.nc = nc;
+    if (e.useXList()) if (e.x.list) |list| for (list.slice()) |item| if (item.expr) |x| {
+        _ = walk(&c, x) catch |err| switch (err) {
+            error.OutOfMemory => return p.db.oomFault(),
+            error.Failed => return,
+        };
+    };
+    switch (f(&c, e)) {
+        error.OutOfMemory => p.db.oomFault(),
+        error.Failed => {},
+    }
 }
 
 /// Type `e` and what is under it; whether a rule changed the operands

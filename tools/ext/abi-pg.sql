@@ -55,6 +55,7 @@ SELECT xq_pg_iv_text(xq_pg_iv_sum(column1)), xq_pg_iv_text(xq_pg_iv_avg(column1)
 SELECT xq_pg_iv_date_pl_interval('2024-01-31', xq_pg_iv('1 mon')), xq_pg_iv_time_pl_interval('23:00:00', '2 hours');
 SELECT xq_pg_iv_time_pl_interval('23:00:00', 'infinity');
 SELECT xq_pg_iv_text(xq_postgres_justify_hours('52 hours')), xq_pg_iv_text(xq_postgres_justify_days(xq_pg_iv('36 days'))), xq_pg_iv_text(xq_postgres_justify_interval('1 mon -1 hour')), xq_postgres_isfinite(xq_pg_iv('infinity')), xq_postgres_isfinite('1 day');
+SELECT xq_pg_iv_out(xq_pg_iv('1 day 2 hours')), xq_pg_iv_out('-infinity'), quote(xq_pg_iv_out(NULL)), xq_pg_iv_text(xq_pg_iv_in('-1 2:03:04', -1, 1)), xq_pg_iv_text(xq_pg_iv_in('-1 2:03:04', -1, 0)), xq_pg_iv_text(xq_pg_iv_in('-1 2:03:04', -1));
 -- jsonb as SQLite's JSONB: the canonical blob, its text, the sort key; the
 -- operators of a blob (sqlite3's jsonb() too) give blobs.
 SELECT hex(xq_pg_jsonb_bin('{"b":1,"a":[1.50,"x\"y",null,true],"a":false}')), xq_pg_jsonb_text(xq_pg_jsonb_bin('{"b":1,"a":"x"}')), json(xq_pg_jsonb_bin('{"b":1,"a":"x"}')), quote(xq_pg_jsonb_text(NULL));
@@ -67,3 +68,12 @@ SELECT xq_pg_cast_int2('32768');
 SELECT xq_pg_cast_int4('1__0');
 SELECT xq_pg_cast_int8(9.3e18);
 SELECT xq_pg_int_xor(123, 456), xq_pg_int_xor(-1, 5), quote(xq_pg_int_xor(NULL, 1));
+-- Regular expressions (regexp.zig, are.zig).
+SELECT xq_pg_re('abab', '^(ab)\1$', ''), xq_pg_re('ABC', '[[:lower:]]', 'i'), xq_pg_re('foo bar', '\mbar\M', ''), xq_pg_re('aXb', 'a.b', 'n'), quote(xq_pg_re(NULL, 'a', ''));
+SELECT xq_pg_re('a', '(', '');
+SELECT xq_pg_similar_escape('a%b_c#"d#"', '#'), xq_pg_similar_escape('(a|b)\.'), quote(xq_pg_similar_escape('a', NULL)), xq_pg_re('abc', xq_pg_similar_escape('a(b|x)%'), '');
+SELECT xq_pg_similar_escape('a', 'xy');
+SELECT xq_pg_rows_regexp_matches('a1b22', '([a-z])(\d+)', 'g'), xq_pg_rows_regexp_matches('abc', 'z', ''), xq_pg_rows_regexp_split('a, b,c', ',\s*', ''), xq_pg_rows_regexp_split(NULL, ',', '');
+SELECT xq_postgres_regexp_match('abc01234xyz', '(.*?)(\d+)(.*)'), xq_postgres_regexp_replace('foobarbaz', 'b(..)', 'X\1Y', 'g'), xq_postgres_regexp_count('ABCABC', 'b', 1, 'i'), xq_postgres_regexp_instr('aébc', 'b'), xq_postgres_regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2);
+SELECT xq_postgres_regexp_like('Hello', 'hello', 'i'), xq_postgres_regexp_split_to_array('a,b,,c', ','), xq_postgres_textregexsubstr('foobar', 'o(.)b'), xq_postgres_textregexsubstr('foobar', '%#"o_b#"%', '#'), xq_postgres_similar_to_escape('a_b');
+SELECT xq_postgres_regexp_match('abc', 'b', 'g');

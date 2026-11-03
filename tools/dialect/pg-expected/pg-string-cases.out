@@ -1,0 +1,317 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-string-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 6d29eb200020df41 regex operators
+a|b|c|d|e|f
+t|f|t|t|f|
+(1 row)
+a|b|c|d|e|f
+f|t|f|t|t|t
+(1 row)
+a|b|c|d|e|f|g|h
+t|t|t|t|t|t|t|t
+(1 row)
+a|b|c|d|e|f|g
+t|t|t|t|t|t|t
+(1 row)
+a|b|c|d|e|f|g
+f|t|t|t|t|f|t
+(1 row)
+a|b|c|d|e|f|g|h
+t|t|t|f|t|f|f|t
+(1 row)
+a|b|c|d|e|f|g|h
+t|f|t|t|t|f|t|t
+(1 row)
+a|b|c|d|e|f|g|h
+t|f|f|t|t|t|t|t
+(1 row)
+==== case 3427d8f8809710c5 regex errors
+ERROR:  invalid regular expression: parentheses () not balanced
+ERROR:  invalid regular expression: parentheses () not balanced
+ERROR:  invalid regular expression: invalid character class
+ERROR:  invalid regular expression: invalid repetition count(s)
+ERROR:  invalid regular expression: invalid repetition count(s)
+ERROR:  invalid regular expression: braces {} not balanced
+ERROR:  invalid regular expression: braces {} not balanced
+ERROR:  invalid regular expression: invalid repetition count(s)
+ERROR:  invalid regular expression: invalid backreference number
+ERROR:  invalid regular expression: invalid backreference number
+ERROR:  invalid regular expression: invalid backreference number
+ERROR:  invalid regular expression: invalid backreference number
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: brackets [] not balanced
+ERROR:  invalid regular expression: invalid escape \ sequence
+ERROR:  invalid regular expression: invalid escape \ sequence
+ERROR:  invalid regular expression: invalid escape \ sequence
+ERROR:  invalid regular expression: invalid escape \ sequence
+ERROR:  invalid regular expression: invalid character range
+ERROR:  invalid regular expression: invalid character range
+ERROR:  invalid regular expression: invalid character range
+ERROR:  invalid regular expression: invalid embedded option
+ERROR:  invalid regular expression: quantifier operand invalid
+ERROR:  invalid regular expression: quantifier operand invalid
+==== case a643e87517557494 regexp_match and the greediness of the whole and of its parts
+a|b|c|d
+{""}|{aaa}|{ab}|{NULL,x}
+(1 row)
+a|b|c
+{abc,0,""}|{abc0123,4,xyz}|{ab,c,d}
+(1 row)
+a|b|c|d
+{123}|{1}|{aa}|{a}
+(1 row)
+a|b|c|d
+{aaab}|{aaay}|{c}|{NULL}
+(1 row)
+a|b|c|d|e|f
+{ab}|{AB}|{b}|{c}|{b}|
+(1 row)
+a|b|c|d|e
+{bar}||{X}||{b}
+(1 row)
+a|b|c|d|e
+{a.c}|||{ab}|{é,ll}
+(1 row)
+a|b|c|d|e|f
+{b}|{"a
+b"}||{a}||
+(1 row)
+a|b|c|d|e
+|||{""}|v
+(1 row)
+==== case 9d8cd98f4f95a2e7 regexp_match: the groups of repetitions
+a|b|c|d|e|g
+{""}|{""}|{aaa}|{b}|{b}|{""}
+(1 row)
+a|b|c|d|e
+{"",NULL}|{""}|{a}|{b,b}|{bbab}
+(1 row)
+a|b|c|d|e|g
+{b}|{aaa}|{aaa}|{a}|{aa}|{a}
+(1 row)
+a|b|c|d|e
+{""}|{""}|{ab}|{ab,""}|{bc,NULL}
+(1 row)
+a|b|c|d|e
+{c,NULL,NULL,c}|{"","",""}|{1a1c,c}|{"",""}|{NULL}
+(1 row)
+a|b|c|d
+{ac,""}|{ab}|{xy,x,y}|{192,168,0,1}
+(1 row)
+==== case 5ac80ec9c9168962 regexp_match and the greediness of the whole and of its parts: errors
+ERROR:  regexp_match() does not support the "global" option
+HINT:  Use the regexp_matches function instead.
+ERROR:  invalid regular expression option: "z"
+ERROR:  regexp_match() does not support the "global" option
+HINT:  Use the regexp_matches function instead.
+==== case 5a48fdb63d4825f2 regexp_matches, regexp_split_to_table: rows
+regexp_matches
+{bar,beque}
+(1 row)
+regexp_matches|one
+{b}|1
+{b}|1
+(2 rows)
+regexp_matches
+{NULL}
+(1 row)
+regexp_matches
+{""}
+(1 row)
+regexp_matches
+{""}
+{""}
+{""}
+{""}
+(4 rows)
+regexp_matches
+{""}
+{b}
+{""}
+{""}
+(4 rows)
+regexp_matches
+(0 rows)
+letter|digit
+a|1
+b|2
+c|3
+(3 rows)
+regexp_split_to_table
+the
+quick
+brown
+(3 rows)
+t
+a
+b
+
+c
+(4 rows)
+x|n
+x|1
+y|2
+z|3
+(3 rows)
+ERROR:  regexp_split_to_table() does not support the "global" option
+==== case 2bd1198a507d7e08 regexp_replace
+a|b|c|d
+fooXbaz|fooXX|fooXarY\ZbarXazY\Zbaz|ThM
+(1 row)
+a|b|c|d|e
+bbb|axcabc|abcaxcabc|axcaxcaxc|abcaxc
+(1 row)
+a|b|c|d|e
+XaXbXcX|-a-b-c-|-a--c-|a\0\c|héLLo
+(1 row)
+a|b|c|d
+abc||baa|15/01/2024
+(1 row)
+==== case 84ce82c14301c87d regexp_replace: errors
+ERROR:  invalid regular expression option: "z"
+ERROR:  invalid value for parameter "start": 0
+ERROR:  invalid value for parameter "n": -1
+ERROR:  invalid regular expression: parentheses () not balanced
+==== case aab8ff704bf852c6 regexp_split_to_array, regexp_count, regexp_instr, regexp_substr, regexp_like
+a|b|c|d|e
+{h,e,l,l,o,w,o,r,l,d}|{a,b,c}|{""}|{a,b,c}|{a,b,"",c}
+(1 row)
+a|b|c|d
+{a,c}|{a,"",c}|{a,bc}|{a,b,c}
+(1 row)
+a|b|c|d|e|f|g
+3|4|4|2|0|1|2
+(1 row)
+a|b|c|d|e|f|g
+6|5|3|0|2|3|4
+(1 row)
+a|b|c|d|e
+4|0|0|0|
+(1 row)
+a|b|c|d|e
+FGH||||three
+(1 row)
+a|b|c|d
+t|f||
+(1 row)
+==== case 26bd8f29e6c640b0 regexp_split_to_array, regexp_count, regexp_instr, regexp_substr, regexp_like: errors
+ERROR:  regexp_split_to_array() does not support the "global" option
+ERROR:  invalid value for parameter "start": 0
+ERROR:  regexp_count() does not support the "global" option
+ERROR:  invalid value for parameter "n": 0
+ERROR:  invalid value for parameter "endoption": 2
+ERROR:  invalid value for parameter "subexpr": -1
+ERROR:  regexp_instr() does not support the "global" option
+ERROR:  invalid value for parameter "subexpr": -1
+ERROR:  regexp_substr() does not support the "global" option
+ERROR:  regexp_like() does not support the "global" option
+==== case ad3683ce12c923d1 substring of a pattern
+a|b|c|d|e
+oob|o|||oo
+(1 row)
+a|b|c|d
+oob|oob||c
+(1 row)
+a|b|c|d|e
+||ell|llo|el
+(1 row)
+a|b|c
+oma|Thomas|ho
+(1 row)
+==== case dc5a2cf47ae0749a substring of a pattern: errors
+ERROR:  invalid regular expression: parentheses () not balanced
+ERROR:  invalid escape string
+HINT:  Escape string must be empty or one character.
+CONTEXT:  SQL function "substring" statement 1
+==== case 4df6c4ca2a613a64 SIMILAR TO
+a|b|c|d|e|f
+t|t|t|t|t|f
+(1 row)
+a|b|c|d|e|f
+t|t|t||f|t
+(1 row)
+a|b|c|d|e|f|g
+||t|f|t|t|f
+(1 row)
+x|m
+abc|t
+d|t
+xyz|f
+(3 rows)
+a|b|c|d
+^(?:a.*b.c[x]){1,1}?(y){1,1}(?:)$|^(?:(?:a|b)\.\$\^)$|^(?:[]a]){1,1}?(.*)$|^(?:[^]x].*)$
+(1 row)
+a|b|c|d|e|f
+^(?:a\b)$|^(?:a)$|^(?:a\\)$|^(?:é.)$||
+(1 row)
+==== case 1bb20851a01347f8 SIMILAR TO: errors
+ERROR:  invalid escape string
+HINT:  Escape string must be empty or one character.
+ERROR:  SQL regular expression may not contain more than two escape-double-quote separators
+ERROR:  invalid regular expression: parentheses () not balanced
+==== case 2ab52ab7e90a4453 regular expressions in a table, a CHECK and a view
+code|prefix|num|short
+AB-12|AB|12|f
+CD-3|CD|3|t
+EF-456|EF|456|f
+(3 rows)
+def
+ SELECT code,
+    regexp_replace(code, '-.*'::text, ''::text) AS prefix,
+    "substring"(code, '\d+'::text) AS num,
+    (code ~ similar_to_escape('%-_'::text)) AS short
+   FROM codes;
+(1 row)
+def
+ SELECT (code ~* '^ab'::text) AS a,
+    (code !~ 'x'::text) AS b,
+    (code !~ similar_to_escape('A#_%'::text, '#'::text)) AS c,
+    regexp_match(code, '(\d)'::text) AS d,
+    regexp_count(code, '\d'::text, 1) AS e,
+    regexp_like(code, 'b'::text, 'i'::text) AS g
+   FROM codes;
+(1 row)
+code|digits
+AB-12|{1}
+AB-12|{22}
+(2 rows)
+code
+CD-3
+EF-456
+(2 rows)
+parts
+12|3|456|AB|CD|EF
+(1 row)
+==== case e985d0fee4c8910a regular expressions in a table, a CHECK and a view: errors
+ERROR:  new row for relation "codes" violates check constraint "codes_code_check"
+DETAIL:  Failing row contains (ab-12).
+==== case 1856ae641fe3ca3a standard_conforming_strings
+a|b|c|d
+a\nb|a\\b|a	b|4
+(1 row)
+standard_conforming_strings
+off
+(1 row)
+a|b|c|d|e|f|g
+a	b|3|a\b|it's|xAAB|a	b|q'q
+(1 row)
+a|b
+t|a-b
+(1 row)
+a|b
+a\tb|4
+(1 row)
+==== case 16fc973233badc06 standard_conforming_strings: errors
+ERROR:  unsafe use of string constant with Unicode escapes
+LINE 1: SELECT U&'d\0061t';
+               ^
+DETAIL:  String constants with Unicode escapes cannot be used when "standard_conforming_strings" is off.
+a
+ok
+(1 row)

@@ -154,12 +154,12 @@ pub fn typeMod(t: Type) i32 {
 /// (`100`, `1e+20`), a blob as `\x` and hex digits.
 pub fn writeText(o: *Out, t: Type, v: Value) !void {
     // jsonb stored as JSONB: its JSON text; a numeric key its digits.
-    if (try xqlite.display.textAlloc(o.gpa, .postgres, t, v)) |z| {
+    if (try xqlite.display.textAlloc(o.gpa, .postgres, o.settings, t, v)) |z| {
         defer o.gpa.free(z);
         return o.field(z);
     }
     var buf: [xqlite.display.max_len]u8 = undefined;
-    const z = textOf(t, v, &buf) orelse {
+    const z = xqlite.display.pgText(o.settings, t, v, &buf) orelse {
         // A blob: \x and two hex digits a byte.
         const b = v.blob;
         try o.int(i32, @intCast(2 + 2 * b.len));
@@ -173,7 +173,7 @@ pub fn writeText(o: *Out, t: Type, v: Value) !void {
 /// The text of a value that is not a blob or NULL, in `buf` or `v`; null
 /// for a blob (display.pgText()).
 fn textOf(t: Type, v: Value, buf: *[xqlite.display.max_len]u8) ?[]const u8 {
-    return xqlite.display.pgText(t, v, buf);
+    return xqlite.display.pgText(.{}, t, v, buf);
 }
 
 /// PostgreSQL's text of a double (display.floatText()).
@@ -333,7 +333,7 @@ const jsonb_form = struct {
     /// Version 1 and the text; of JSONB, its JSON text.
     fn send(o: *Out, t: Type, v: Value) error{ OutOfMemory, Unencodable }!void {
         var buf: [xqlite.display.max_len]u8 = undefined;
-        const owned = try xqlite.display.textAlloc(o.gpa, .postgres, t, v);
+        const owned = try xqlite.display.textAlloc(o.gpa, .postgres, .{}, t, v);
         defer if (owned) |z| o.gpa.free(z);
         const z = owned orelse textOf(t, v, &buf) orelse return error.Unencodable;
         try o.int(i32, @intCast(1 + z.len));

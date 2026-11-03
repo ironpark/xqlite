@@ -93,9 +93,13 @@ pub fn overload(c: *Ctx, e: *Expr) Error!bool {
         TK.PLUS, TK.STAR, TK.SLASH, TK.REM, TK.UMINUS, TK.BITAND, TK.BITOR, TK.LSHIFT, TK.RSHIFT => arith(c, e),
         TK.EQ, TK.NE, TK.LT, TK.LE, TK.GT, TK.GE, TK.IS, TK.ISNOT => compare(c, e),
         TK.FUNCTION, TK.AGG_FUNCTION => call(c, e),
-        TK.IN, TK.BETWEEN => repr.list(c, e),
+        TK.IN => try boolList(c, e) or try repr.list(c, e),
+        TK.BETWEEN => repr.list(c, e),
         TK.CAST => repr.cast(c, e),
-        TK.CASE => numeric.numericCase(c, e),
+        TK.CASE => {
+            const b = try boolCase(c, e);
+            return try numeric.numericCase(c, e) or b;
+        },
         TK.COLUMN => numeric.numericColumn(c, e),
         else => false,
     };
@@ -189,7 +193,14 @@ fn arith(c: *Ctx, e: *Expr) Error!bool {
     // (xq_pg_iv_in(x, -1)), as a cast reads it. The operators' functions
     // read text as the schemas that call them were written for.
     for (operands[0..n], row.args) |*x, t| if (t == .interval and x.*.op == TK.STRING) {
-        x.* = try c.call(@import("ivinput.zig").in_def.name, &.{ x.*, try int32(c, -1) });
+        const ivinput = @import("ivinput.zig");
+        // In IntervalStyle sql_standard, its reading of a sign.
+        var buf: [2]i64 = undefined;
+        const consts = ivinput.inArgs(c.p.db, -1, &buf);
+        var in_args: [3]*Expr = undefined;
+        in_args[0] = x.*;
+        for (consts, in_args[1..][0..consts.len]) |v, *arg| arg.* = try int32(c, @intCast(v));
+        x.* = try c.call(ivinput.in_def.name, in_args[0 .. 1 + consts.len]);
     };
     try c.toCall(e, f, operands[0..n]);
     return true;
@@ -300,6 +311,63 @@ fn boolLiteral(c: *Ctx, x: **Expr) Error!bool {
     return true;
 }
 
+/// `x IN (a, b ...)` (of two items or more: one is `x = +a`, compare())
+/// with a boolean among `x` and the items: each string literal among
+/// them read as a boolean, as PostgreSQL resolves the list's common type
+/// (select_common_type(): an unknown literal takes the type of the
+/// others) and reads `b IN ('t', 'f')` and `'x' IN (b, true)` so,
+/// failing when it compiles the statement if one is no boolean. Whether
+/// one was.
+fn boolList(c: *Ctx, e: *Expr) Error!bool {
+    if (!e.useXList()) return false;
+    const l = e.left orelse return false;
+    const list = e.x.list orelse return false;
+    const items = list.slice();
+    var any = logical(c, l) == .boolean;
+    for (items) |item| {
+        if (logical(c, item.expr.?) == .boolean) any = true;
+    }
+    if (!any) return false;
+    var changed = try boolLiteral(c, &e.left.?);
+    for (items) |*item| {
+        if (try boolLiteral(c, &item.expr.?)) changed = true;
+    }
+    return changed;
+}
+
+/// Whether item `i` of a CASE's list of `n` (pairs of a WHEN value and
+/// its result, then the ELSE if `n` is odd) is a result: a THEN or the
+/// ELSE. The others are WHEN values. Of boolCase() and ddltype.zig's
+/// CASE, which find the literals it read.
+pub fn caseResult(n: usize, i: usize) bool {
+    return i % 2 == 1 or (n % 2 == 1 and i == n - 1);
+}
+
+/// CASE with a boolean result (THEN or ELSE): its string literal results
+/// read as booleans (`CASE WHEN c THEN b ELSE 'yes' END`), as
+/// select_common_type() makes them; of a boolean base expression (`CASE
+/// b WHEN 't' ...`), its string literal WHEN values, each `b = 't'`,
+/// read first (as transformCaseExpr() reads them). Whether one was.
+fn boolCase(c: *Ctx, e: *Expr) Error!bool {
+    if (!e.useXList()) return false;
+    const list = e.x.list orelse return false;
+    const items = list.slice();
+    var changed = false;
+    if (e.left) |base| if (logical(c, base) == .boolean) {
+        for (items, 0..) |*item, i| if (!caseResult(items.len, i)) {
+            if (try boolLiteral(c, &item.expr.?)) changed = true;
+        };
+    };
+    const any = for (items, 0..) |item, i| {
+        if (caseResult(items.len, i) and logical(c, item.expr.?) == .boolean) break true;
+    } else false;
+    if (!any) return changed;
+    for (items, 0..) |*item, i| if (caseResult(items.len, i)) {
+        if (try boolLiteral(c, &item.expr.?)) changed = true;
+    };
+    return changed;
+}
+
 fn opText(op: u8) []const u8 {
     return switch (op) {
         TK.NE => "<>",
@@ -402,6 +470,8 @@ pub const KindCall = struct {
 pub const kind_calls = [_]KindCall{
     .{ .name = "to_char", .engine = "xq_pg_to_char", .told = .{ .kind = 0 } },
     .{ .name = "timezone", .engine = "xq_pg_timezone", .told = .{ .kind = 1 } },
+    // `x AT TIME ZONE z` (the parser's xq_pg_at_time_zone(z, x)).
+    .{ .name = "xq_pg_at_time_zone", .engine = "xq_pg_at_time_zone", .told = .{ .kind = 1 } },
     .{ .name = "gcd", .engine = "xq_pg_gcd", .told = .bits },
     .{ .name = "lcm", .engine = "xq_pg_lcm", .told = .bits },
 };
@@ -500,7 +570,7 @@ fn wrapElem(c: *Ctx, item: *int.ExprListItem, code_arg: array.Code) Error!bool {
     if (code.elem == .numeric and code.scale == null and t.logical == .numeric) code.scale = t.scale;
     if (code.elem == .interval and t.logical == .interval) {
         // interval BLOB: an element is its text.
-        item.expr = try interval.ivText(c, x);
+        item.expr = try interval.ivElemText(c, x);
         return true;
     }
     if (!needsElem(code, x, t)) return false;
@@ -511,7 +581,7 @@ fn wrapElem(c: *Ctx, item: *int.ExprListItem, code_arg: array.Code) Error!bool {
 /// Value `v` made an element of an array of `code`: wrapElem()'s.
 fn elemValue(c: *Ctx, code: array.Code, v: *Expr) Error!*Expr {
     const t = typeOfExpr(c, v);
-    if (code.elem == .interval and t.logical == .interval) return interval.ivText(c, v);
+    if (code.elem == .interval and t.logical == .interval) return interval.ivElemText(c, v);
     if (code.elem == .uuid) return uuid.uuidElem(c, v);
     if (needsElem(code, v, t)) return c.call("xq_pg_elem", &.{ v, try codeExpr(c, code) });
     return v;
@@ -623,7 +693,7 @@ fn arrayCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) Error!
         // A uuid as the text of the elements.
         if (code.elem == .uuid) _ = try uuid.uuidText(c, &items[0]);
         // interval BLOB: compared with the elements as its text.
-        if (code.elem == .interval and logical(c, x) == .interval) items[0].expr = try interval.ivText(c, x);
+        if (code.elem == .interval and logical(c, x) == .interval) items[0].expr = try interval.ivElemText(c, x);
         var list = e.x.list;
         list = try expr_mod.listAppend(c.p, list, try codeExpr(c, code));
         e.x = .{ .list = list };

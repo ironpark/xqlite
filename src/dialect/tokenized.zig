@@ -9,18 +9,40 @@ const lower = @import("../ir/lower.zig");
 
 const RC = int.RC;
 
-/// Frontend.run for the parser module `parser` (`Parser.init`, `LexError`),
-/// which compiles a statement with `compile(p, sql, &ps)` and rewords its
-/// errors with `translateError(p)`.
+/// What the session changes in how a statement is lexed (Parser.init()'s
+/// options; each default is the dialect's, what a statement the dialect
+/// writes itself is lexed with). PostgreSQL's standard_conforming_strings:
+/// off, '...' strings take backslash escapes, as E'...'. Oracle reads
+/// none.
+pub const Options = struct {
+    standard_strings: bool = true,
+
+    /// The options of `db`'s session.
+    pub fn of(db: *const int.Sqlite3) Options {
+        return .{ .standard_strings = db.xq.postgres.standard_strings };
+    }
+};
+
+/// The error of a statement that does not lex (Parser.init()).
+pub const LexError = struct {
+    fields: @import("../sql/util.zig").ErrorFields = .{ .message = "" },
+    pos: usize = 0,
+    /// The SQLSTATE if not a syntax error's.
+    state: ?int.ErrorState = null,
+};
+
+/// Frontend.run for the parser module `parser` (`Parser.init(arena, sql,
+/// pos, &lex_error, options)`), which compiles a statement with
+/// `compile(p, sql, &ps)` and rewords its errors with `translateError(p)`.
 pub fn run(comptime parser: type, comptime compile: anytype, comptime translateError: fn (*int.Parse) int.Oom!void) fn (*int.Parse, [:0]const u8) (int.Oom || int.ParseError)!void {
     return struct {
         fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-            var lex_error: parser.LexError = .{};
-            var ps = parser.Parser.init(p.arena, sql, 0, &lex_error) catch |err| switch (err) {
+            var lex_error: LexError = .{};
+            var ps = parser.Parser.init(p.arena, sql, 0, &lex_error, .of(p.db)) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.ParseFailed => {
-                    // A lexical error is a syntax error.
-                    ir.stmt.errorFieldsAt(p, sql.ptr + lex_error.pos, .of("42601"), lex_error.fields);
+                    // A lexical error is a syntax error (unless it says).
+                    ir.stmt.errorFieldsAt(p, sql.ptr + lex_error.pos, lex_error.state orelse .of("42601"), lex_error.fields);
                     p.tail = sql[sql.len..];
                     try translateError(p);
                     return error.ParseFailed;

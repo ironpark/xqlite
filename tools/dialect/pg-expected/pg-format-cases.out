@@ -169,6 +169,81 @@ ERROR:  unit "ago" not recognized for type timestamp without time zone
 ERROR:  timestamps cannot be binned into intervals containing months or years
 ERROR:  stride must be greater than zero
 ERROR:  interval time zone "infinity" must be finite
+==== case 768c0d69585ee67c definitions of gcd, lcm and AT TIME ZONE
+def|pretty
+CHECK ((((x AT TIME ZONE 'UTC'::text) AT TIME ZONE 'EST'::text) > y))|CHECK (((x AT TIME ZONE 'UTC'::text) AT TIME ZONE 'EST'::text) > y)
+CHECK ((((y + iv) AT TIME ZONE z) IS NOT NULL))|CHECK (((y + iv) AT TIME ZONE z) IS NOT NULL)
+CHECK (((gcd(b, i) + 1) > 0))|CHECK ((gcd(b, i) + 1) > 0)
+CHECK (((x AT TIME ZONE 'UTC'::text) IS NOT NULL))|CHECK ((x AT TIME ZONE 'UTC'::text) IS NOT NULL)
+CHECK (((x AT TIME ZONE iv) < y))|CHECK ((x AT TIME ZONE iv) < y)
+CHECK ((gcd(a, (0)::numeric) > (0)::numeric))|CHECK (gcd(a, 0::numeric) > 0::numeric)
+CHECK ((gcd(a, (b)::numeric) > (0)::numeric))|CHECK (gcd(a, b::numeric) > 0::numeric)
+CHECK ((gcd(l, (i)::bigint) > 0))|CHECK (gcd(l, i::bigint) > 0)
+CHECK ((lcm(l, (2)::bigint) >= 0))|CHECK (lcm(l, 2::bigint) >= 0)
+CHECK ((timezone('UTC'::text, y) IS NOT NULL))|CHECK (timezone('UTC'::text, y) IS NOT NULL)
+CHECK ((timezone(z, x) IS NOT NULL))|CHECK (timezone(z, x) IS NOT NULL)
+(11 rows)
+def|pretty
+ SELECT gcd(a, (0)::numeric) AS g1,
+    gcd(b, 2) AS g2,
+    timezone(z, x) AS t1,
+    (x AT TIME ZONE 'UTC'::text) AS t2,
+    (y AT TIME ZONE z) AS t3
+   FROM g;| SELECT gcd(a, 0::numeric) AS g1,
+    gcd(b, 2) AS g2,
+    timezone(z, x) AS t1,
+    (x AT TIME ZONE 'UTC'::text) AS t2,
+    (y AT TIME ZONE z) AS t3
+   FROM g;
+(1 row)
+a|timezone
+2001-02-16 23:38:40+00|2001-02-16 18:38:40
+(1 row)
+==== case 9698b06b0575ba86 string literals of IN lists and CASE met by a boolean
+a|b|c|d|e|f
+1|1|1|0|1|1
+(1 row)
+n|i|w
+-1|1|
+1|1|1
+(2 rows)
+def
+CHECK (
+CASE
+    WHEN (n > 0) THEN x
+    ELSE true
+END)
+CHECK (((true = ANY (ARRAY[true, false])) OR (true = x)))
+CHECK ((x = ANY (ARRAY[true, false])))
+(3 rows)
+def
+ SELECT (x = ANY (ARRAY[true, false])) AS i,
+        CASE
+            WHEN (n > 0) THEN x
+            ELSE true
+        END AS c,
+        CASE x
+            WHEN true THEN 1
+            ELSE NULL::integer
+        END AS w
+   FROM b;
+(1 row)
+==== case bb78af970490ede5 string literals of IN lists and CASE met by a boolean: errors
+ERROR:  invalid input syntax for type boolean: "x"
+LINE 1: SELECT 'x' IN (true, false);
+               ^
+ERROR:  invalid input syntax for type boolean: "maybe"
+LINE 1: SELECT true IN ('t', 'maybe');
+                             ^
+ERROR:  invalid input syntax for type boolean: "zz"
+LINE 1: SELECT CASE WHEN true THEN true ELSE 'zz' END;
+                                             ^
+ERROR:  invalid input syntax for type boolean: "q"
+LINE 1: SELECT CASE true WHEN 'q' THEN 1 END;
+                              ^
+ERROR:  invalid input syntax for type boolean: "nope"
+LINE 1: CREATE TABLE bc (x boolean CHECK (x IN ('t', 'nope')));
+                                                     ^
 ==== case 593ffebe477816b2 float8(), float4(), booleq, boolne, interval_hash
 a|b|c|d|e|f
 t|t|t|t|t|t

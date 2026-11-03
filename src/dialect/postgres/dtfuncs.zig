@@ -17,7 +17,9 @@
 //!    five hours west); a name of the tz database is not known
 //!    ("time zone "x" not recognized"). overload.zig calls
 //!    xq_pg_timezone(zone, x, kind), `kind` saying which type `x` is
-//!    (formatting.Kind).
+//!    (formatting.Kind); `x AT TIME ZONE zone` is the same function as
+//!    xq_pg_at_time_zone(zone, x[, kind]), so that a definition shows
+//!    the syntax it was written in.
 
 const std = @import("std");
 const dfunc = @import("../func.zig");
@@ -46,6 +48,11 @@ pub const functions = [_]int.FuncDef{
 
 pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_timezone", 3, det, timezoneFunc),
+    // `x AT TIME ZONE z`: timezone(z, x) by the name of its syntax, which
+    // the definitions show as written (deparse.zig); of an `x` of no type
+    // told, two arguments.
+    dfunc.scalar("xq_pg_at_time_zone", 2, det, timezoneFunc),
+    dfunc.scalar("xq_pg_at_time_zone", 3, det, timezoneFunc),
 };
 
 // ============================================================ date_trunc

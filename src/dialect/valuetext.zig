@@ -34,9 +34,32 @@ pub const Cell = union(types.Kind) {
 /// to 70 bytes).
 pub const max_len = repr.max_len;
 
-/// `cell`, a value of a column of type `t`, as `viewer` shows it, if not
-/// as SQLite does (in `buf` or static); null for SQLite's text.
-pub fn text(viewer: Dialect, t: Type, cell: Cell, buf: *[max_len]u8) ?[]const u8 {
+/// What the session of the viewer changes in the text of values (each
+/// default is the dialect's): PostgreSQL's IntervalStyle. Never what is
+/// stored.
+pub const Settings = struct {
+    interval: repr.IntervalStyle = .postgres,
+
+    /// The settings of `db`'s session (`SET IntervalStyle`).
+    pub fn of(db: *const @import("../sql/sqlite_int.zig").Sqlite3) Settings {
+        return .{ .interval = db.xq.postgres.interval_style };
+    }
+};
+
+/// `cell`, a value of a column of type `t`, as `viewer` shows it in a
+/// session of `settings` (`.{}`: the defaults), if not as SQLite does (in
+/// `buf` or static); null for SQLite's text. An interval is in the
+/// session's IntervalStyle (`P1D`, `@ 1 day`), an older table's TEXT
+/// interval too.
+pub fn text(viewer: Dialect, settings: Settings, t: Type, cell: Cell, buf: *[max_len]u8) ?[]const u8 {
+    if (t.logical == .interval and viewer == .postgres and settings.interval != .postgres) {
+        const iv = switch (cell) {
+            .blob => |b| repr.intervalOf(b),
+            .text => |z| repr.parseInterval(z),
+            else => null,
+        } orelse return null;
+        return repr.intervalTextStyle(iv, settings.interval, buf);
+    }
     // A BLOB of a dialect's form (a numeric key, a uuid's bytes, an
     // interval): repr.zig.
     if (cell == .blob) return repr.text(viewer, t, cell.blob, buf);
@@ -98,8 +121,13 @@ pub fn text(viewer: Dialect, t: Type, cell: Cell, buf: *[max_len]u8) ?[]const u8
 /// caller frees it with), null for the others (text()), in every dialect
 /// but SQLite's, which shows the blob: a jsonb value stored as SQLite's
 /// JSONB is its JSON text with PostgreSQL's spacing (`{"a": 1}`); a
-/// numeric key its digits (as text() writes them, of any length).
-pub fn textAlloc(gpa: Allocator, viewer: Dialect, t: Type, cell: Cell) error{OutOfMemory}!?[]u8 {
+/// numeric key its digits (as text() writes them, of any length); an
+/// interval[]'s elements in the IntervalStyle of `settings` (stored in
+/// the default one).
+pub fn textAlloc(gpa: Allocator, viewer: Dialect, settings: Settings, t: Type, cell: Cell) error{OutOfMemory}!?[]u8 {
+    if (t.logical == .array and t.element == .interval and viewer == .postgres and settings.interval != .postgres) {
+        if (cell == .text) return repr.intervalArrayText(gpa, cell.text, settings.interval);
+    }
     const b = switch (cell) {
         .blob => |b| b,
         else => return null,
@@ -111,9 +139,10 @@ pub fn textAlloc(gpa: Allocator, viewer: Dialect, t: Type, cell: Cell) error{Out
 /// `t`, in `buf`, static or `cell`'s: text()'s, else a number's
 /// (a double's shortest digits, floatText()), a text as stored. Null for
 /// NULL, and for a blob no form writes (PostgreSQL's bytea text is
-/// `\x` and hex digits; textAlloc() is asked first).
-pub fn pgText(t: Type, cell: Cell, buf: *[max_len]u8) ?[]const u8 {
-    if (text(.postgres, t, cell, buf)) |z| return z;
+/// `\x` and hex digits; textAlloc() is asked first). In a session of
+/// `settings` (text()).
+pub fn pgText(settings: Settings, t: Type, cell: Cell, buf: *[max_len]u8) ?[]const u8 {
+    if (text(.postgres, settings, t, cell, buf)) |z| return z;
     return switch (cell) {
         .null, .blob => null,
         .integer => |i| std.fmt.bufPrint(buf, "{d}", .{i}) catch unreachable,
@@ -126,15 +155,15 @@ pub fn pgText(t: Type, cell: Cell, buf: *[max_len]u8) ?[]const u8 {
 /// while it is written); false, writing nothing, for a value without
 /// one. `max`: at most that many bytes of the text, in whole
 /// characters, then "..." (ExecBuildSlotValueDescription()); a stored
-/// text is cut before it is copied.
-pub fn writePg(gpa: Allocator, w: *std.Io.Writer, t: Type, cell: Cell, max: ?usize) error{ OutOfMemory, WriteFailed }!bool {
-    if (try textAlloc(gpa, .postgres, t, cell)) |z| {
+/// text is cut before it is copied. In a session of `settings` (text()).
+pub fn writePg(gpa: Allocator, w: *std.Io.Writer, settings: Settings, t: Type, cell: Cell, max: ?usize) error{ OutOfMemory, WriteFailed }!bool {
+    if (try textAlloc(gpa, .postgres, settings, t, cell)) |z| {
         defer gpa.free(z);
         try writeClipped(w, z, max);
         return true;
     }
     var buf: [max_len]u8 = undefined;
-    try writeClipped(w, pgText(t, cell, &buf) orelse return false, max);
+    try writeClipped(w, pgText(settings, t, cell, &buf) orelse return false, max);
     return true;
 }
 
@@ -234,17 +263,17 @@ test writePg {
     var w: std.Io.Writer.Allocating = .init(t.allocator);
     defer w.deinit();
     const long: [70]u8 = @splat('x');
-    try t.expect(try writePg(t.allocator, &w.writer, .{ .logical = .text }, .{ .text = &long }, 64));
+    try t.expect(try writePg(t.allocator, &w.writer, .{}, .{ .logical = .text }, .{ .text = &long }, 64));
     try t.expectEqualStrings(long[0..64] ++ "...", w.written());
     w.clearRetainingCapacity();
     // Whole characters: a 2-byte one across the limit is left out.
-    try t.expect(try writePg(t.allocator, &w.writer, .{ .logical = .text }, .{ .text = long[0..63] ++ "é" }, 64));
+    try t.expect(try writePg(t.allocator, &w.writer, .{}, .{ .logical = .text }, .{ .text = long[0..63] ++ "é" }, 64));
     try t.expectEqualStrings(long[0..63] ++ "...", w.written());
     w.clearRetainingCapacity();
-    try t.expect(try writePg(t.allocator, &w.writer, .{ .logical = .float8 }, .{ .float = 1e20 }, null));
+    try t.expect(try writePg(t.allocator, &w.writer, .{}, .{ .logical = .float8 }, .{ .float = 1e20 }, null));
     try t.expectEqualStrings("1e+20", w.written());
     w.clearRetainingCapacity();
-    try t.expect(try writePg(t.allocator, &w.writer, .{ .logical = .boolean }, .{ .integer = 1 }, null));
+    try t.expect(try writePg(t.allocator, &w.writer, .{}, .{ .logical = .boolean }, .{ .integer = 1 }, null));
     try t.expectEqualStrings("t", w.written());
-    try t.expect(!try writePg(t.allocator, &w.writer, .{ .logical = .bytes }, .{ .blob = "\x01" }, null));
+    try t.expect(!try writePg(t.allocator, &w.writer, .{}, .{ .logical = .bytes }, .{ .blob = "\x01" }, null));
 }

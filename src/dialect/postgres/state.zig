@@ -17,6 +17,9 @@ pub const release = "18.6";
 pub const server_version = release ++ " (xqlite)";
 pub const server_version_num = "180006";
 
+pub const IntervalStyle = @import("../interval.zig").Style;
+pub const NoticeLevel = @import("../../sql/sqlite_int.zig").Notice.Level;
+
 pub const State = struct {
     /// Parameters set in this session, by name (lower case), as SHOW
     /// prints them; a parameter not here has its default.
@@ -28,13 +31,45 @@ pub const State = struct {
     /// *pgcatalog.Snapshot), and what releases it.
     catalog: ?*anyopaque = null,
     catalog_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
+    /// The regular expressions compiled last (a *regexp.Cache: the
+    /// patterns that are no constant), and what releases them.
+    regex_cache: ?*anyopaque = null,
+    regex_cache_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
     /// uuidv7(): the time it last used, nanoseconds since 1970 (uuid.zig:
     /// the next is later, so the session's uuids are in order).
     uuidv7_ns: i64 = 0,
+    /// The parameters the dialect reads, as values kept with their text
+    /// (refresh(), from the text session.zig checked and stored as SHOW
+    /// prints it). IntervalStyle: what the value display and
+    /// xq_pg_iv_out() write intervals in.
+    interval_style: IntervalStyle = .postgres,
+    /// standard_conforming_strings: off, '...' strings take backslash
+    /// escapes (the lexer's: tokenized.Options).
+    standard_strings: bool = true,
+    /// client_min_messages: the lowest level of notice the client is sent.
+    notice_level: NoticeLevel = .notice,
+    /// Changes with each change of a parameter: what the wire server
+    /// compares to tell the client of the ones that changed.
+    version: u32 = 0,
 
     /// Forget the parameters set (RESET ALL).
     pub fn resetParams(s: *State, gpa: std.mem.Allocator) void {
         freeMap(gpa, &s.params);
+        s.refresh();
+    }
+
+    /// The values of the parameters the dialect reads, from their text.
+    fn refresh(s: *State) void {
+        s.version +%= 1;
+        s.interval_style = IntervalStyle.parse(s.get("intervalstyle") orelse "") orelse .postgres;
+        s.standard_strings = !std.mem.eql(u8, s.get("standard_conforming_strings") orelse "on", "off");
+        s.notice_level = noticeLevel(s.get("client_min_messages") orelse "notice");
+    }
+
+    /// Whether intervals are read in IntervalStyle sql_standard (its
+    /// leading sign): what a statement compiles in.
+    pub fn sqlStandard(s: *const State) bool {
+        return s.interval_style == .sql_standard;
     }
 
     fn freeMap(gpa: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]u8)) void {
@@ -58,6 +93,7 @@ pub const State = struct {
         s.resetParams(gpa);
         freeMap(gpa, &s.reset_values);
         if (s.catalog) |p| if (s.catalog_free) |f| f(gpa, p);
+        if (s.regex_cache) |p| if (s.regex_cache_free) |f| f(gpa, p);
         s.* = .{};
     }
 
@@ -74,9 +110,11 @@ pub const State = struct {
                 gpa.free(kv.key);
                 gpa.free(kv.value);
             }
+            s.refresh();
             return;
         };
         try put(gpa, &s.params, name, v);
+        s.refresh();
     }
 
     fn put(gpa: std.mem.Allocator, m: *std.StringHashMapUnmanaged([]u8), name: []const u8, v: []const u8) error{OutOfMemory}!void {
@@ -99,6 +137,17 @@ pub const State = struct {
         return s.get("search_path") orelse default_search_path;
     }
 };
+
+/// The level of client_min_messages `z` (debug5 ... debug1, log, info,
+/// notice, warning, error): PostgreSQL's INFO is sent at any setting, and
+/// the levels below it are not sent with info.
+fn noticeLevel(z: []const u8) NoticeLevel {
+    if (std.mem.startsWith(u8, z, "debug")) return .debug;
+    inline for (.{ .log, .warning, .@"error" }) |l| {
+        if (std.mem.eql(u8, z, @tagName(l))) return l;
+    }
+    return .notice;
+}
 
 /// The schema names of search_path text (PostgreSQL's
 /// SplitIdentifierString: comma-separated, a "quoted" name kept, others

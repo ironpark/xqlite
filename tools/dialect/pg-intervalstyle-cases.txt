@@ -1,0 +1,103 @@
+-- Differential cases of PostgreSQL's IntervalStyle (xqt dialect-diff pg
+-- tools/dialect/pg-intervalstyle-cases.txt), in the format of pg-cases.txt:
+-- each case starts with a "-- case:" line and runs on an empty database, in
+-- PostgreSQL (psql) and in `xqlite sql` with `.dialect postgres`; a SET in a
+-- case holds for the rest of it. The expected output is PostgreSQL 18's.
+-- The style changes how an interval is written (the value display, ::text,
+-- ||, JSON, an array's elements) and, sql_standard, how a leading '-' is
+-- read; never what a table stores.
+
+-- case: the setting
+SHOW IntervalStyle;
+SET IntervalStyle = 'SQL_STANDARD';
+SHOW IntervalStyle;
+SET IntervalStyle TO iso_8601;
+SHOW IntervalStyle;
+SET IntervalStyle = postgres_verbose;
+SELECT current_setting('IntervalStyle');
+SET IntervalStyle = DEFAULT;
+SHOW IntervalStyle;
+SET IntervalStyle = 'iso8601';
+SHOW IntervalStyle;
+
+-- case: postgres_verbose output
+SET IntervalStyle = postgres_verbose;
+SELECT interval '1 day', interval '1 day 2 hours', interval '-1 day', interval '0', interval '1 sec', interval '1.5 sec', interval '-1 sec', interval '-0.5 sec';
+SELECT interval '1 day -1 sec', interval '-1 day 1 sec', interval '1 year 2 mons -3 days 4:05:06', interval '-1 years -2 mons +3 days -04:05:06', interval '38 months', interval '90 minutes';
+SELECT interval '1 hour 1 min 1 sec', interval '2 hours 2 mins 2.25 secs', interval '-1 mons', interval '0.000001 sec', interval '1 day 00:00:01', interval '-1 days -00:00:00.5';
+SELECT interval 'infinity', interval '-infinity', interval '178000000 years', interval '-178000000 years';
+
+-- case: sql_standard output
+SET IntervalStyle = sql_standard;
+SELECT interval '1 day', interval '1 day 2 hours', interval '-1 day', interval '0', interval '2:03:04', interval '-2:03:04.5', interval '1 sec';
+SELECT interval '1 year 2 mons', interval '-1 year -2 mons', interval '3 years', interval '1 mon', interval '1 year 2 mons -3 days 4:05:06', interval '-1 years -2 mons +3 days -04:05:06';
+SELECT interval '1 day -1 hour', interval '-1 day 1 hour', interval '1 mon 1 day', interval '-1 mon -1 sec', interval '100 days 00:00:00.000001', interval '-0.5 sec';
+SELECT interval 'infinity', interval '-infinity', interval '2147483647 days', interval '-2147483648 days';
+
+-- case: iso_8601 output
+SET IntervalStyle = iso_8601;
+SELECT interval '1 day', interval '1 day 2 hours', interval '-1 day', interval '0', interval '2:03:04', interval '-2:03:04.5', interval '1.5 sec', interval '-0.5 sec';
+SELECT interval '1 year 2 mons', interval '-1 year -2 mons', interval '1 year 2 mons -3 days 4:05:06', interval '-1 years -2 mons +3 days -04:05:06', interval '10 mins', interval '1 mon -1 sec';
+SELECT interval 'infinity', interval '-infinity', interval '0.000001 sec', interval '1 hour 1 sec';
+
+-- case: the style where an interval is made text
+SET IntervalStyle = iso_8601;
+SELECT interval '1 day 2 hours'::text, CAST(interval '3 hours' AS text), interval '1 day' || ' later', 'after ' || interval '-1 sec';
+SELECT concat(interval '1 day', '/', interval '2 hours'), format('%s', interval '1 hour'), to_json(interval '1 day'), json_build_object('a', interval '2 mons');
+SELECT array[interval '1 day', interval '-1 sec'], ARRAY[interval '1 year', NULL];
+SET IntervalStyle = postgres_verbose;
+SELECT interval '1 day 2 hours'::text, to_jsonb(interval '1 day ago'), array[interval '1 day', interval '2 hours'];
+SET IntervalStyle = sql_standard;
+SELECT interval '1 day 2 hours'::text, array[interval '1 day 2 hours', interval '-1 year'], to_json(interval '1 mon');
+
+-- case: a table's values do not change with the style
+CREATE TABLE t (id int, i interval, a interval[]);
+INSERT INTO t VALUES (1, '1 day 2 hours', '{"1 mon", "-1 sec"}'), (2, '-1 years -2 mons +3 days -04:05:06', NULL), (3, '0', '{}');
+SET IntervalStyle = iso_8601;
+INSERT INTO t VALUES (4, 'P1DT2H', ARRAY[interval 'PT3H']);
+SELECT id, i, a FROM t ORDER BY id;
+SELECT id FROM t WHERE i = interval '1 day 2 hours' ORDER BY id;
+SET IntervalStyle = postgres;
+SELECT id, i, a, i::text FROM t ORDER BY id;
+SET IntervalStyle = sql_standard;
+SELECT id, i, a FROM t ORDER BY id;
+SELECT id, i + interval '1 day' AS next, sum(i) OVER (ORDER BY id) FROM t ORDER BY id;
+RESET IntervalStyle;
+SELECT id, i FROM t ORDER BY id;
+
+-- case: a view's text of an interval follows the session
+CREATE TABLE t (i interval);
+INSERT INTO t VALUES ('1 day 3 hours'), ('-2 mins');
+CREATE VIEW v AS SELECT i, i::text AS s, i || '' AS c FROM t;
+SELECT * FROM v ORDER BY i;
+SET IntervalStyle = iso_8601;
+SELECT * FROM v ORDER BY i;
+SET IntervalStyle = postgres_verbose;
+SELECT * FROM v ORDER BY i;
+
+-- case: sql_standard input of a leading sign
+SET IntervalStyle = sql_standard;
+SELECT interval '-1 2:03:04', interval '-1-2 3 4:05:06', interval '-2:03:04', interval '-1 day 2 hours', interval '-1 2:03:04 ago', interval '- 1 day';
+SELECT interval '-1.5 2:03', interval '-1 day 2 hours 3 minutes', interval '-1 +2:03:04', interval '-1-2 3', interval '-1 years 2 mons', interval '-1 2:03:04.5';
+SELECT interval '-1 2:03:04'::interval day to second, interval '-1 1' day to hour, interval 'P-1D', interval '@ -1 day 2 hours', '-1 2:00'::interval, CAST('-3 4:00' AS interval);
+SELECT interval '1 day' + '-1 2:00', '-1 1:00'::text::interval, interval '-1 2:00' = interval '-1 days -2 hours';
+CREATE TABLE t (i interval, j interval DEFAULT '-1 2:00');
+INSERT INTO t (i) VALUES ('-1 2:03:04');
+SET IntervalStyle = postgres;
+SELECT i, j FROM t;
+SELECT interval '-1 2:03:04', interval '-1-2 3 4:05:06', interval '-1 day 2 hours';
+
+-- case: ISO 8601 and postgres_verbose input in every style
+SET IntervalStyle = sql_standard;
+SELECT interval 'P1Y2M3DT4H5M6S', interval 'P0001-02-03T04:05:06', interval '@ 1 day ago', interval '@ 1 year 2 mons -3 days 4 hours ago', interval 'PT1.5S', interval 'P1.5Y';
+SET IntervalStyle = iso_8601;
+SELECT interval 'P1Y2M3DT4H5M6S', interval 'P0001-02-03T04:05:06', interval '@ 1 day ago', interval 'PT-1S', interval 'P-1Y-2M', interval '1 2:03:04';
+SET IntervalStyle = postgres_verbose;
+SELECT interval '@ 1 day 2 hours 3 mins 4.5 secs ago', interval 'P2W', interval '-1 2:03:04';
+
+-- case: a value in an error and in a constraint's DETAIL
+CREATE TABLE t (i interval CHECK (i < interval '1 day'));
+SET IntervalStyle = iso_8601;
+INSERT INTO t VALUES ('2 days 3 hours');
+SET IntervalStyle = postgres_verbose;
+INSERT INTO t VALUES ('2 days 3 hours');

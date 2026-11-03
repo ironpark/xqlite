@@ -587,6 +587,14 @@ pub fn dialect(db: *const Db) Dialect {
     return engine.getDialect(db.conn.h);
 }
 
+/// The lowest level of notice (Stmt.notices()) the connection's client is
+/// sent, as the dialect's settings say (PostgreSQL's client_min_messages:
+/// `SET client_min_messages = warning` leaves NOTICE out); `.debug` for
+/// all.
+pub fn noticeLevel(db: *const Db) Stmt.Notice.Level {
+    return engine.noticeLevel(db.conn.h);
+}
+
 /// Stop the statements running on this connection at their next check
 /// (sqlite3_interrupt()): their step() fails with error.Interrupt, and a
 /// statement started afterwards runs normally. Safe to call from any
@@ -654,6 +662,39 @@ pub fn setJournalMode(db: *Db, mode: JournalMode) Error!void {
     if (!std.ascii.eqlIgnoreCase(got, @tagName(mode))) {
         return db.conn.usage(error.UnsupportedJournalMode, "journal_mode={s} refused: the database uses {s}", .{ @tagName(mode), got });
     }
+}
+
+/// What the connection's session changes in the text of values
+/// (display.text()): PostgreSQL's IntervalStyle as `SET` left it.
+pub fn displaySettings(db: *const Db) @import("display.zig").Settings {
+    return .of(db.conn.h);
+}
+
+/// PostgreSQL's settings of the session a client is told the value of,
+/// and told again when it changes (GUC_REPORT: IntervalStyle,
+/// standard_conforming_strings, search_path, application_name; the wire
+/// server's ParameterStatus), as PostgreSQL spells their names. Empty
+/// without PostgreSQL in the build.
+pub const reported_settings: []const []const u8 = if (Dialect.postgres.built()) blk: {
+    const reported = @import("../dialect/postgres/session.zig").reported;
+    var names: [reported.len][]const u8 = undefined;
+    for (reported, &names) |prm, *n| n.* = prm.shown();
+    const final = names;
+    break :blk &final;
+} else &.{};
+
+/// The value of `reported_settings[i]` in the connection's session, as
+/// SHOW prints it (the connection's until the settings next change).
+pub fn reportedSetting(db: *const Db, i: usize) []const u8 {
+    if (comptime !Dialect.postgres.built()) unreachable;
+    const session = @import("../dialect/postgres/session.zig");
+    return session.settingOf(db.conn.h, session.reported[i]);
+}
+
+/// A number that changes whenever a setting of the session does (SET,
+/// RESET, set_config()): reportedSetting() is the same while it stays.
+pub fn settingsVersion(db: *const Db) u32 {
+    return db.conn.h.xq.postgres.version;
 }
 
 /// The engine's connection, for the low-level API (`xqlite.sql.*`).

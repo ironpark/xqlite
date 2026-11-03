@@ -1,0 +1,157 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-intervalstyle-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 39eac6fe7a2fcb58 the setting
+IntervalStyle
+postgres
+(1 row)
+IntervalStyle
+sql_standard
+(1 row)
+IntervalStyle
+iso_8601
+(1 row)
+current_setting
+postgres_verbose
+(1 row)
+IntervalStyle
+postgres
+(1 row)
+ERROR:  invalid value for parameter "IntervalStyle": "iso8601"
+HINT:  Available values: postgres, postgres_verbose, sql_standard, iso_8601.
+IntervalStyle
+postgres
+(1 row)
+==== case c8d312bdb2d20c06 postgres_verbose output
+interval|interval|interval|interval|interval|interval|interval|interval
+@ 1 day|@ 1 day 2 hours|@ 1 day ago|@ 0|@ 1 sec|@ 1.5 secs|@ 1 sec ago|@ 0.5 secs ago
+(1 row)
+interval|interval|interval|interval|interval|interval
+@ 1 day -1 sec|@ 1 day -1 sec ago|@ 1 year 2 mons -3 days 4 hours 5 mins 6 secs|@ 1 year 2 mons -3 days 4 hours 5 mins 6 secs ago|@ 3 years 2 mons|@ 1 hour 30 mins
+(1 row)
+interval|interval|interval|interval|interval|interval
+@ 1 hour 1 min 1 sec|@ 2 hours 2 mins 2.25 secs|@ 1 mon ago|@ 0.000001 secs|@ 1 day 1 sec|@ 1 day 0.5 secs ago
+(1 row)
+interval|interval|interval|interval
+infinity|-infinity|@ 178000000 years|@ 178000000 years ago
+(1 row)
+==== case b8cfd6c22c5f1f5e sql_standard output
+interval|interval|interval|interval|interval|interval|interval
+1 0:00:00|1 2:00:00|-1 0:00:00|0|2:03:04|-2:03:04.5|0:00:01
+(1 row)
+interval|interval|interval|interval|interval|interval
+1-2|-1-2|3-0|0-1|+1-2 -3 +4:05:06|-1-2 +3 -4:05:06
+(1 row)
+interval|interval|interval|interval|interval|interval
++0-0 +1 -1:00:00|-1 1:00:00|+0-1 +1 +0:00:00|-0-1 +0 -0:00:01|100 0:00:00.000001|-0:00:00.5
+(1 row)
+interval|interval|interval|interval
+infinity|-infinity|2147483647 0:00:00|-2147483648 0:00:00
+(1 row)
+==== case a8eab25b886164e5 iso_8601 output
+interval|interval|interval|interval|interval|interval|interval|interval
+P1D|P1DT2H|P-1D|PT0S|PT2H3M4S|PT-2H-3M-4.5S|PT1.5S|PT-0.5S
+(1 row)
+interval|interval|interval|interval|interval|interval
+P1Y2M|P-1Y-2M|P1Y2M-3DT4H5M6S|P-1Y-2M3DT-4H-5M-6S|PT10M|P1MT-1S
+(1 row)
+interval|interval|interval|interval
+infinity|-infinity|PT0.000001S|PT1H1S
+(1 row)
+==== case 0020bc5725768c75 the style where an interval is made text
+text|text|?column?|?column?
+P1DT2H|PT3H|P1D later|after PT-1S
+(1 row)
+concat|format|to_json|json_build_object
+P1D/PT2H|PT1H|"P1D"|{"a" : "P2M"}
+(1 row)
+array|array
+{P1D,PT-1S}|{P1Y,NULL}
+(1 row)
+text|to_jsonb|array
+@ 1 day 2 hours|"@ 1 day ago"|{"@ 1 day","@ 2 hours"}
+(1 row)
+text|array|to_json
+1 2:00:00|{"1 2:00:00",-1-0}|"0-1"
+(1 row)
+==== case 407abe3f106d04f0 a table's values do not change with the style
+id|i|a
+1|P1DT2H|{P1M,PT-1S}
+2|P-1Y-2M3DT-4H-5M-6S|
+3|PT0S|{}
+4|P1DT2H|{PT3H}
+(4 rows)
+id
+1
+4
+(2 rows)
+id|i|a|i
+1|1 day 02:00:00|{"1 mon",-00:00:01}|1 day 02:00:00
+2|-1 years -2 mons +3 days -04:05:06||-1 years -2 mons +3 days -04:05:06
+3|00:00:00|{}|00:00:00
+4|1 day 02:00:00|{03:00:00}|1 day 02:00:00
+(4 rows)
+id|i|a
+1|1 2:00:00|{0-1,-0:00:01}
+2|-1-2 +3 -4:05:06|
+3|0|{}
+4|1 2:00:00|{3:00:00}
+(4 rows)
+id|next|sum
+1|2 2:00:00|1 2:00:00
+2|-1-2 +4 -4:05:06|-1-2 +4 -2:05:06
+3|1 0:00:00|-1-2 +4 -2:05:06
+4|2 2:00:00|-1-2 +5 -0:05:06
+(4 rows)
+id|i
+1|1 day 02:00:00
+2|-1 years -2 mons +3 days -04:05:06
+3|00:00:00
+4|1 day 02:00:00
+(4 rows)
+==== case 1b225f15e8a264c2 a view's text of an interval follows the session
+i|s|c
+-00:02:00|-00:02:00|-00:02:00
+1 day 03:00:00|1 day 03:00:00|1 day 03:00:00
+(2 rows)
+i|s|c
+PT-2M|PT-2M|PT-2M
+P1DT3H|P1DT3H|P1DT3H
+(2 rows)
+i|s|c
+@ 2 mins ago|@ 2 mins ago|@ 2 mins ago
+@ 1 day 3 hours|@ 1 day 3 hours|@ 1 day 3 hours
+(2 rows)
+==== case d7a0d4bae0de1030 sql_standard input of a leading sign
+interval|interval|interval|interval|interval|interval
+-1 2:03:04|-1-2 -3 -4:05:06|-2:03:04|-1 2:00:00|1 2:03:04|-1 0:00:00
+(1 row)
+interval|interval|interval|interval|interval|interval
+-1 14:03:00|-1 2:03:00|+0-0 -1 +2:03:04|-1-2 +0 -0:00:03|-1-2|-1 2:03:04.5
+(1 row)
+interval|interval|interval|interval|interval|interval
+-1 2:03:04|-1 1:00:00|-1 0:00:00|-1 2:00:00|-1 2:00:00|-3 4:00:00
+(1 row)
+?column?|interval|?column?
+-2:00:00|-1 1:00:00|t
+(1 row)
+i|j
+-1 days -02:03:04|-1 days -02:00:00
+(1 row)
+interval|interval|interval
+-1 days +02:03:04|-1 years -2 mons +3 days 04:05:06|-1 days +02:00:00
+(1 row)
+==== case 41ffe98acd83fb35 ISO 8601 and postgres_verbose input in every style
+interval|interval|interval|interval|interval|interval
++1-2 +3 +4:05:06|+1-2 +3 +4:05:06|-1 0:00:00|-1-2 +3 -4:00:00|0:00:01.5|1-6
+(1 row)
+interval|interval|interval|interval|interval|interval
+P1Y2M3DT4H5M6S|P1Y2M3DT4H5M6S|P-1D|PT-1S|P-1Y-2M|P1DT2H3M4S
+(1 row)
+interval|interval|interval
+@ 1 day 2 hours 3 mins 4.5 secs ago|@ 14 days|@ 1 day -2 hours -3 mins -4 secs ago
+(1 row)
+==== case d0658a0d37ee31a9 a value in an error and in a constraint's DETAIL
+ERROR:  new row for relation "t" violates check constraint "t_i_check"
+DETAIL:  Failing row contains (P2DT3H).
+ERROR:  new row for relation "t" violates check constraint "t_i_check"
+DETAIL:  Failing row contains (@ 2 days 3 hours).

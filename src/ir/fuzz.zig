@@ -274,7 +274,8 @@ const Db = struct {
     mem: MemVfs,
     db: *int.Sqlite3,
     /// Whether the statement run() last prepared computes PostgreSQL's
-    /// exact numerics (calls a FUNC.XQ_EXACT function): exactNumeric().
+    /// exact numerics (calls a FUNC.XQ_EXACT function) or reads a string
+    /// literal as the boolean it met: exactNumeric().
     exact: bool = false,
 
     fn open(gpa: Allocator, io: std.Io) !*Db {
@@ -365,7 +366,10 @@ const Db = struct {
     /// (round(x, -2) rounds to hundreds), where the untyped SQLite text
     /// of the same tree computes doubles by SQLite's: a choice of the
     /// dialect, as typeRefused()'s errors are, not a difference of
-    /// meaning.
+    /// meaning. So is a string literal the dialect read as a boolean it
+    /// met (a call of xq_pg_bool(): PostgreSQL's `true IN ('yes', 'no')`
+    /// is true), which the untyped SQLite text of a view or a CHECK, and
+    /// a parameter bound as text, compare as text.
     fn exactNumeric(v: *vi.Vdbe) bool {
         if (v.xq_exact_numeric) return true;
         for (v.ops.items) |*op| {
@@ -374,7 +378,7 @@ const Db = struct {
                 .funcctx => op.p4.funcctx.func,
                 else => continue,
             };
-            if (f.func_flags.XQ_EXACT) return true;
+            if (f.func_flags.XQ_EXACT or std.mem.eql(u8, f.name, "xq_pg_bool")) return true;
         }
         return false;
     }
@@ -501,7 +505,8 @@ const Stats = struct {
     /// the other way around.
     view_step_errors: u32 = 0,
     /// Comparisons left out as one side computed PostgreSQL's exact
-    /// numerics and the other SQLite's doubles (Db.exactNumeric()).
+    /// numerics and the other SQLite's doubles, or read a string literal
+    /// as a boolean (Db.exactNumeric()).
     exact_skipped: u32 = 0,
     /// Rows whose expected values failed while the table took them.
     row_step_errors: u32 = 0,
@@ -1025,7 +1030,7 @@ pub fn roundtrip(gpa: Allocator, io: std.Io, seed: u64, events_max: u32) !void {
     }
     const s = f.stats;
     if (!@import("builtin").is_test) std.debug.print(
-        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors, {d} row errors, {d} exact numerics\n",
+        "ir_roundtrip: {d} queries ({d} failing, {d} with parameters bound), {d} tables ({d} not created), {d} rows checked ({d} refused by a CHECK); skipped: {d} third-dialect reads, {d} view errors, {d} row errors, {d} exact numerics or typed literals\n",
         .{ s.queries, s.query_errors, s.params_checked, s.tables, s.table_errors, s.rows_checked, s.check_failures, s.cross_skipped, s.view_step_errors, s.row_step_errors, s.exact_skipped },
     );
 }

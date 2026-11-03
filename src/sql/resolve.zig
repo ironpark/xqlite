@@ -812,6 +812,14 @@ fn resolveExprStepImpl(w: *Walker, e: *Expr) Oom!WRC {
                     errorAtExpr(p, e, "misuse of {s} function {s}()", .{ typ, id });
                     nc.n_nc_err += 1;
                     is_agg = false;
+                } else if ((no_such_func != 0 or wrong_num_args) and !p.db.init.busy and typing.reportsNoFunction(p)) {
+                    // xqlite: the dialect's error, which names the types
+                    // of the arguments; an error of an argument first (as
+                    // PostgreSQL resolves the arguments before the call).
+                    const n_err = p.n_err;
+                    _ = walker.walkExprList(w, list);
+                    if (p.n_err == n_err) typing.noFunction(nc, e);
+                    return WRC.Prune;
                 } else if (no_such_func != 0 and (!p.db.init.busy or (no_such_func == 2 and false))) {
                     // Unknown functions are tolerated while reading the
                     // schema.

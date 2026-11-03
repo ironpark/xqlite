@@ -244,12 +244,28 @@ pub fn exprFunction(p: *Parse, list: ?*ExprList, name: Token, e_distinct: SF) Oo
     return e;
 }
 
-/// Offset of a token from the start of the statement (Expr.w.iOfst).
+/// Offset of a token from the start of the statement (Expr.w.iOfst),
+/// C's (int)(pToken->z - pParse->zTail). A token of another text (a
+/// view's definition a frontend's lowering inlines, a text it made up)
+/// has offset 0, as one of no text: the difference of unrelated
+/// addresses would make what reads an offset > 0 (an error's position,
+/// typing.readLiteral()) depend on where the texts were allocated.
 pub fn tokenOffset(p: *const Parse, t: Token) i32 {
     const z = t.z orelse return 0;
-    // C: (int)(pToken->z - pParse->zTail), truncating the offset of a
-    // token from another text (one an xqlite frontend made up).
-    return @truncate(@as(isize, @bitCast(@intFromPtr(z) -% @intFromPtr(p.tail.ptr))));
+    const at = @intFromPtr(z);
+    const start = @intFromPtr(p.tail.ptr);
+    if (at < start or at - start > p.tail.len) return 0;
+    return std.math.cast(i32, at - start) orelse 0;
+}
+
+test "tokenOffset: a token of another text has offset 0" {
+    const sql = "SELECT 'a'";
+    const p: Parse = .{ .db = undefined, .arena = undefined, .tail = sql };
+    var other = "SELECT 'b'".*;
+    try std.testing.expectEqual(7, tokenOffset(&p, .{ .z = sql.ptr + 7, .n = 3 }));
+    try std.testing.expectEqual(@as(i32, sql.len), tokenOffset(&p, .{ .z = sql.ptr + sql.len, .n = 0 }));
+    try std.testing.expectEqual(0, tokenOffset(&p, .{ .z = &other, .n = 3 }));
+    try std.testing.expectEqual(0, tokenOffset(&p, .{}));
 }
 
 /// Port of sqlite3ExprOrderByAggregateError().

@@ -1,0 +1,98 @@
+-- Differential cases of PostgreSQL's errors and notices that name what a
+-- statement resolved (xqt dialect-diff pg tools/dialect/pg-error-cases.txt),
+-- in the format of pg-cases.txt: each case starts with a "-- case:" line
+-- and runs on an empty database, in PostgreSQL (psql, unaligned, with
+-- headers) and in `xqlite sql` with `.dialect postgres`; the error lines
+-- ("ERROR:" and its HINT) and the notices ("NOTICE:" and its DETAIL)
+-- must be the same. The preludes set client_min_messages to warning: a
+-- case that compares notices sets it back. The cases print nothing on
+-- stdout (psql's stderr and stdout do not keep their order through
+-- podman). The expected output is PostgreSQL 18's.
+
+-- case: a call no function matches: the types of its arguments
+SELECT foo(1, 'a');
+SELECT foo(NULL, 1.5, 3000000000, true, 1e3, 'x'::text, now(), current_date, '1'::int2, 2.0::float8);
+SELECT foo('a'::varchar(3), '{1}'::int[], '{}'::jsonb, interval '1 day', 'x'::bytea, '1'::real, 'a'::char(2), '1'::bigint);
+SELECT foo();
+SELECT foo(1 + 1, upper('a'), -1, - 1.5);
+SELECT nosuch(x);
+
+-- case: a call no function matches: columns and expressions
+CREATE TABLE t (a int, b text, c numeric(5,2), d timestamp, e varchar(10), f boolean, g double precision, h date);
+SELECT foo(a, b, c, d) FROM t;
+SELECT foo(e, f, g, h) FROM t;
+SELECT foo(a + 1, b || 'x', c * 2, a > 1) FROM t;
+SELECT foo(x) FROM t;
+SELECT count(*) FROM t WHERE foo(a) > 0;
+
+-- case: a function of another number of arguments
+SELECT round(1, 2, 3);
+SELECT upper();
+SELECT lower(1, 2);
+SELECT abs('a', 'b');
+SELECT count(1, 2);
+SELECT sum();
+
+-- case: operators no row matches
+SELECT 1 + 'a'::text;
+SELECT now() + 1;
+SELECT true + 1;
+SELECT current_date + 1.5::float8;
+
+-- case: notices of DROP ... IF EXISTS
+SET client_min_messages = notice;
+DROP TABLE IF EXISTS nt;
+DROP TABLE IF EXISTS nt1, nt2;
+DROP VIEW IF EXISTS nv;
+DROP INDEX IF EXISTS ni;
+DROP SEQUENCE IF EXISTS ns;
+CREATE TABLE t (a int);
+DROP TABLE IF EXISTS t, nt;
+DROP TABLE IF EXISTS t;
+
+-- case: notices of CREATE ... IF NOT EXISTS
+SET client_min_messages = notice;
+CREATE TABLE t (a int);
+CREATE TABLE IF NOT EXISTS t (a int);
+CREATE TABLE IF NOT EXISTS t (b text, c int);
+CREATE INDEX ti ON t (a);
+CREATE INDEX IF NOT EXISTS ti ON t (a);
+CREATE SEQUENCE s;
+CREATE SEQUENCE IF NOT EXISTS s;
+CREATE SEQUENCE IF NOT EXISTS t;
+CREATE TABLE IF NOT EXISTS s (a int);
+CREATE TABLE IF NOT EXISTS ti (a int);
+CREATE TABLE u (id serial);
+CREATE TABLE IF NOT EXISTS u (id serial);
+
+-- case: notices of ALTER TABLE ... IF EXISTS
+SET client_min_messages = notice;
+ALTER TABLE IF EXISTS nt ADD COLUMN b int;
+CREATE TABLE t (a int);
+ALTER TABLE t ADD COLUMN IF NOT EXISTS a int;
+ALTER TABLE t ADD COLUMN IF NOT EXISTS b int;
+ALTER TABLE t DROP COLUMN IF EXISTS zz;
+ALTER TABLE t DROP COLUMN IF EXISTS b;
+
+-- case: notices of schemas
+SET client_min_messages = notice;
+DROP SCHEMA IF EXISTS nsch;
+DROP SCHEMA IF EXISTS nsch1, nsch2;
+CREATE SCHEMA sc;
+CREATE SCHEMA IF NOT EXISTS sc;
+CREATE TABLE sc.x (a int);
+CREATE TABLE IF NOT EXISTS sc.x (a int);
+DROP SCHEMA sc CASCADE;
+CREATE SCHEMA sc;
+DROP SCHEMA IF EXISTS sc, nsch CASCADE;
+
+-- case: client_min_messages leaves notices out
+SET client_min_messages = notice;
+DROP TABLE IF EXISTS a;
+SET client_min_messages = warning;
+DROP TABLE IF EXISTS b;
+SET client_min_messages TO error;
+DROP TABLE IF EXISTS c;
+RESET client_min_messages;
+SET client_min_messages = notice;
+DROP TABLE IF EXISTS d;

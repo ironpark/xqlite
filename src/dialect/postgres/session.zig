@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
+const ddl = @import("ddl.zig");
 const ir = @import("../../ir/ir.zig");
 const lower = @import("../../ir/lower.zig");
 const catalog = @import("../../catalog/catalog.zig");
@@ -174,7 +175,7 @@ fn createSchema(ps: *Parser) Error!void {
     const taken = isSystemSchema(n) or nsp.find(try ps.registered(), n) != null or
         @import("../../sql/build.zig").findDbName(p.db, n) != null;
     if (taken) {
-        if (if_not_exists) return emptyStatement(p);
+        if (if_not_exists) return ddl.notice(p, "42P06", "schema \"{s}\" already exists, skipping", .{n});
         return ps.failState(name.pos, .of("42P06"), "schema \"{s}\" already exists", .{n});
     }
     nsp.codeCreate(p, n, owner);
@@ -206,7 +207,10 @@ fn dropSchema(ps: *Parser) Error!void {
             if (@import("../../sql/build.zig").findDbName(p.db, n.text) != null) {
                 return ps.fail(n.pos, "xqlite: schema \"{s}\" is an attached database (use DETACH)", .{n.text});
             }
-            if (if_exists) continue;
+            if (if_exists) {
+                ddl.notice(p, "00000", "schema \"{s}\" does not exist, skipping", .{n.text});
+                continue;
+            }
             return ps.failState(n.pos, .of("3F000"), "schema \"{s}\" does not exist", .{n.text});
         };
         const objs = nsp.objects(p.db, ps.arena, s.name) catch |err| switch (err) {
@@ -227,10 +231,33 @@ fn dropSchema(ps: *Parser) Error!void {
         try drops.append(ps.arena, .{ .name = s.name, .objs = objs });
     }
     if (drops.items.len == 0) return emptyStatement(p);
+    try cascadeNotice(p, ps.arena, drops.items);
     for (drops.items) |d| nsp.codeDrop(p, d.name, d.objs) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.Failed, error.AutoVacuum => return error.Failed,
     };
+}
+
+/// The lowest level of notice the client is sent: client_min_messages
+/// (debug5 ... debug1, log, notice, warning, error; notice by default).
+pub fn noticeLevel(db: *const int.Sqlite3) int.Notice.Level {
+    return db.xq.postgres.notice_level;
+}
+
+/// PostgreSQL's NOTICE of DROP SCHEMA ... CASCADE (reportDependentObjects()):
+/// `drop cascades to table s.t`, or for several objects `drop cascades to
+/// 2 other objects` with a DETAIL line for each.
+fn cascadeNotice(p: *int.Parse, a: std.mem.Allocator, drops: anytype) Error!void {
+    var n: usize = 0;
+    var detail: std.ArrayList(u8) = .empty;
+    for (drops) |d| for (d.objs) |o| {
+        if (n > 0) try detail.append(a, '\n');
+        try detail.print(a, "drop cascades to {s} {s}.{s}", .{ o.kind.word(), d.name, o.bare() });
+        n += 1;
+    };
+    if (n == 0) return;
+    if (n == 1) return @import("../../sql/util.zig").notice(p, .{ .message = detail.items });
+    @import("../../sql/util.zig").notice(p, .{ .message = try std.fmt.allocPrint(a, "drop cascades to {d} other objects", .{n}), .detail = detail.items });
 }
 
 /// A statement that does nothing.
@@ -257,6 +284,12 @@ pub const Param = struct {
     display: ?[]const u8 = null,
     /// Not in pg_settings (xqlite's own).
     hidden: bool = false,
+    /// The values SET, set_config() and the startup packet may give it,
+    /// and the text SHOW prints of them.
+    check: Check = .text,
+    /// The client is told its value, and told again when it changes
+    /// (PostgreSQL's GUC_REPORT: the wire server's ParameterStatus).
+    report: bool = false,
 
     pub fn shown(p: *const Param) []const u8 {
         return p.display orelse p.name;
@@ -267,6 +300,38 @@ pub const Param = struct {
     }
 };
 
+pub const Check = union(enum) {
+    /// Any text, as given.
+    text,
+    /// An enum: one of `names` (any case), SHOW printing it as listed.
+    choices: Choices,
+    /// A Boolean (parse_bool(): on, off, true, no, 1 ...): SHOW prints
+    /// on or off.
+    boolean,
+};
+
+pub const Choices = struct {
+    names: []const []const u8,
+    /// Names taken too but not listed in the HINT of an invalid value
+    /// (PostgreSQL's hidden ones), and the value each is.
+    aliases: []const struct { []const u8, []const u8 } = &.{},
+};
+
+/// IntervalStyle's values: interval.Style's.
+const interval_styles: Choices = .{ .names = blk: {
+    const tags = std.meta.tags(state.IntervalStyle);
+    var names: [tags.len][]const u8 = undefined;
+    for (tags, &names) |t, *n| n.* = @tagName(t);
+    const final = names;
+    break :blk &final;
+} };
+
+/// client_min_messages' values (state.zig reads them).
+const message_levels: Choices = .{
+    .names = &.{ "debug5", "debug4", "debug3", "debug2", "debug1", "log", "notice", "warning", "error" },
+    .aliases = &.{ .{ "debug", "debug2" }, .{ "info", "info" } },
+};
+
 const preset = "Preset Options";
 const stmt_defaults = "Client Connection Defaults / Statement Behavior";
 const compat = "Version and Platform Compatibility / Previous PostgreSQL Versions";
@@ -275,12 +340,12 @@ const compat = "Version and Platform Compatibility / Previous PostgreSQL Version
 /// they connect, and the read-only ones the server reports); SET of the
 /// others is accepted and changes nothing but what SHOW prints.
 pub const params = [_]Param{
-    .{ .name = "search_path", .default = state.default_search_path, .list = true, .category = stmt_defaults, .desc = "Sets the schema search order for names that are not schema-qualified." },
-    .{ .name = "application_name", .default = "", .category = "Reporting and Logging / What to Log", .desc = "Sets the application name to be reported in statistics and logs." },
+    .{ .name = "search_path", .default = state.default_search_path, .list = true, .report = true, .category = stmt_defaults, .desc = "Sets the schema search order for names that are not schema-qualified." },
+    .{ .name = "application_name", .default = "", .report = true, .category = "Reporting and Logging / What to Log", .desc = "Sets the application name to be reported in statistics and logs." },
     .{ .name = "client_encoding", .default = "UTF8", .desc = "Sets the client's character set encoding." },
-    .{ .name = "client_min_messages", .default = "notice", .vartype = "enum", .category = stmt_defaults, .desc = "Sets the message levels that are sent to the client." },
+    .{ .name = "client_min_messages", .default = "notice", .vartype = "enum", .category = stmt_defaults, .desc = "Sets the message levels that are sent to the client.", .check = .{ .choices = message_levels } },
     .{ .name = "datestyle", .default = "ISO, MDY", .display = "DateStyle", .desc = "Sets the display format for date and time values." },
-    .{ .name = "intervalstyle", .default = "postgres", .display = "IntervalStyle", .vartype = "enum", .desc = "Sets the display format for interval values." },
+    .{ .name = "intervalstyle", .default = "postgres", .display = "IntervalStyle", .vartype = "enum", .desc = "Sets the display format for interval values.", .check = .{ .choices = interval_styles }, .report = true },
     .{ .name = "timezone", .default = "UTC", .display = "TimeZone", .desc = "Sets the time zone for displaying and interpreting time stamps." },
     .{ .name = "timezone_abbreviations", .default = "Default", .desc = "Selects a file of time zone abbreviations." },
     .{ .name = "extra_float_digits", .default = "1", .vartype = "integer", .desc = "Sets the number of digits displayed for floating-point values." },
@@ -305,7 +370,7 @@ pub const params = [_]Param{
     .{ .name = "default_tablespace", .default = "", .category = stmt_defaults, .desc = "Sets the default tablespace to create tables and indexes in." },
     .{ .name = "temp_tablespaces", .default = "", .category = stmt_defaults, .desc = "Sets the tablespace(s) to use for temporary tables and sort files." },
     .{ .name = "session_replication_role", .default = "origin", .vartype = "enum", .category = stmt_defaults, .desc = "Sets the session's behavior for triggers and rewrite rules." },
-    .{ .name = "standard_conforming_strings", .default = "on", .vartype = "bool", .category = compat, .desc = "Causes '...' strings to treat backslashes literally." },
+    .{ .name = "standard_conforming_strings", .default = "on", .vartype = "bool", .category = compat, .desc = "Causes '...' strings to treat backslashes literally.", .check = .boolean, .report = true },
     .{ .name = "escape_string_warning", .default = "on", .vartype = "bool", .category = compat, .desc = "Warn about backslash escapes in ordinary string literals." },
     .{ .name = "array_nulls", .default = "on", .vartype = "bool", .category = compat, .desc = "Enable input of NULL elements in arrays." },
     .{ .name = "backslash_quote", .default = "safe_encoding", .vartype = "enum", .category = compat, .desc = "Sets whether \"\\'\" is allowed in string literals." },
@@ -470,7 +535,7 @@ fn show(ps: *Parser) Error!void {
 
 /// Compile PostgreSQL text `text` (a SELECT) as this statement.
 fn lowerPg(ps: *Parser, text: [:0]const u8) Error!void {
-    var sub = Parser.init(ps.arena, text, 0, null) catch |err| switch (err) {
+    var sub = Parser.init(ps.arena, text, 0, null, .{}) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.ParseFailed => unreachable,
     };
@@ -502,19 +567,79 @@ pub const functions = [_]int.FuncDef{
 fn startupSettingFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
     const name = api.valueText(argv[0]) orelse return api.resultNull(ctx);
-    const value = api.valueText(argv[1]) orelse "";
-    const prm = findParam(name) orelse {
-        var buf: [200]u8 = undefined;
-        return api.resultErrorState(ctx, .of("42704"), std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
-    };
-    db.xq.postgres.setReset(db.gpa, prm.name, value) catch return api.resultErrorNomem(ctx);
-    if (prm.list) expire(db);
+    const prm = findParam(name) orelse return unrecognized(ctx, name);
+    const value = checked(ctx, prm, api.valueText(argv[1]) orelse "") orelse return;
+    apply(db, prm, value, true) catch return api.resultErrorNomem(ctx);
     api.resultText(ctx, value, .transient);
+}
+
+fn unrecognized(ctx: *Context, name: []const u8) void {
+    var buf: [200]u8 = undefined;
+    api.resultErrorState(ctx, .of("42704"), std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
+}
+
+/// Value `v` of `prm` as its parameter keeps it (Param.check: an enum's
+/// name as listed, a Boolean's on or off), else null with PostgreSQL's
+/// error the result.
+fn checked(ctx: *Context, prm: *const Param, v: []const u8) ?[]const u8 {
+    var buf: [300]u8 = undefined;
+    switch (prm.check) {
+        .text => return v,
+        .boolean => {
+            if (@import("funcs.zig").parseBool(v)) |b| return if (b) "on" else "off";
+            const msg = std.fmt.bufPrint(&buf, "parameter \"{s}\" requires a Boolean value", .{prm.shown()}) catch "parameter requires a Boolean value";
+            api.resultErrorState(ctx, .of("22023"), msg);
+            return null;
+        },
+        .choices => |choices| {
+            for (choices.names) |c| if (std.ascii.eqlIgnoreCase(c, v)) return c;
+            for (choices.aliases) |c| if (std.ascii.eqlIgnoreCase(c[0], v)) return c[1];
+            var hint: [200]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "invalid value for parameter \"{s}\": \"{s}\"", .{ prm.shown(), v[0..@min(v.len, 100)] }) catch "invalid value for parameter";
+            var w: std.Io.Writer = .fixed(&hint);
+            w.writeAll("Available values: ") catch {};
+            for (choices.names, 0..) |c, i| w.print("{s}{s}", .{ if (i > 0) ", " else "", c }) catch {};
+            w.writeAll(".") catch {};
+            api.resultErrorFields(ctx, .of("22023"), .{ .message = msg, .hint = w.buffered() });
+            return null;
+        },
+    }
+}
+
+/// Set `prm` to `value` (checked(); null: its value at startup or its
+/// default), with `startup` the value RESET goes back to too; expire the
+/// prepared statements if what they compiled read changed: search_path's
+/// names, IntervalStyle sql_standard's reading of a sign (the others'
+/// styles write the same code).
+fn apply(db: *int.Sqlite3, prm: *const Param, value: ?[]const u8, startup: bool) error{OutOfMemory}!void {
+    const st = &db.xq.postgres;
+    const sql_standard = st.sqlStandard();
+    if (startup) try st.setReset(db.gpa, prm.name, value.?) else try st.set(db.gpa, prm.name, value);
+    if (prm.list or st.sqlStandard() != sql_standard) expire(db);
 }
 
 fn expire(db: *int.Sqlite3) void {
     @import("../../vdbe/aux.zig").expirePreparedStatements(db, 0);
 }
+
+/// The value of `prm` in `db`'s session, as SHOW prints it.
+pub fn settingOf(db: *const int.Sqlite3, prm: *const Param) []const u8 {
+    return db.xq.postgres.get(prm.name) orelse prm.default;
+}
+
+/// The parameters the client is told of (Param.report).
+pub const reported = blk: {
+    var n: usize = 0;
+    for (params) |x| n += @intFromBool(x.report);
+    var out: [n]*const Param = undefined;
+    var i: usize = 0;
+    for (&params) |*x| if (x.report) {
+        out[i] = x;
+        i += 1;
+    };
+    const final = out;
+    break :blk final;
+};
 
 /// set_config(name, value, is_local): set a parameter (NULL: its
 /// default; name 'all' with NULL: every one) and return its value.
@@ -524,25 +649,20 @@ fn setConfigFunc(ctx: *Context, argv: []*Mem) void {
     if (api.valueType(argv[2]) != vi.SQLITE_NULL and api.valueInt64(argv[2]) != 0) {
         return api.resultErrorState(ctx, .of("0A000"), "xqlite: SET LOCAL is not supported");
     }
-    const value: ?[]const u8 = if (api.valueType(argv[1]) == vi.SQLITE_NULL) null else api.valueText(argv[1]) orelse "";
-    const st = &db.xq.postgres;
-    if (std.ascii.eqlIgnoreCase(name, "all") and value == null) {
-        st.resetParams(db.gpa);
+    const given: ?[]const u8 = if (api.valueType(argv[1]) == vi.SQLITE_NULL) null else api.valueText(argv[1]) orelse "";
+    if (std.ascii.eqlIgnoreCase(name, "all") and given == null) {
+        db.xq.postgres.resetParams(db.gpa);
         expire(db);
         return api.resultNull(ctx);
     }
-    const prm = findParam(name) orelse {
-        var buf: [200]u8 = undefined;
-        return api.resultErrorState(ctx, .of("42704"), std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
-    };
+    const prm = findParam(name) orelse return unrecognized(ctx, name);
     if (prm.read_only) {
         var buf: [200]u8 = undefined;
         return api.resultErrorState(ctx, .of("55P02"), std.fmt.bufPrint(&buf, "parameter \"{s}\" cannot be changed", .{prm.name}) catch "parameter cannot be changed");
     }
-    st.set(db.gpa, prm.name, value) catch return api.resultErrorNomem(ctx);
-    if (prm.list) expire(db);
-    const shown = st.get(prm.name) orelse prm.default;
-    api.resultText(ctx, shown, .transient);
+    const v = if (given) |g| checked(ctx, prm, g) orelse return else null;
+    apply(db, prm, v, false) catch return api.resultErrorNomem(ctx);
+    api.resultText(ctx, settingOf(db, prm), .transient);
 }
 
 /// current_setting(name [, missing_ok]).
@@ -551,10 +671,9 @@ fn currentSettingFunc(ctx: *Context, argv: []*Mem) void {
     const name = api.valueText(argv[0]) orelse return api.resultNull(ctx);
     const prm = findParam(name) orelse {
         if (argv.len > 1 and api.valueInt64(argv[1]) != 0) return api.resultNull(ctx);
-        var buf: [200]u8 = undefined;
-        return api.resultErrorState(ctx, .of("42704"), std.fmt.bufPrint(&buf, "unrecognized configuration parameter \"{s}\"", .{name[0..@min(name.len, 100)]}) catch "unrecognized configuration parameter");
+        return unrecognized(ctx, name);
     };
-    api.resultText(ctx, db.xq.postgres.get(prm.name) orelse prm.default, .transient);
+    api.resultText(ctx, settingOf(db, prm), .transient);
 }
 
 /// The schemas of search_path that exist, in order (in `a`).

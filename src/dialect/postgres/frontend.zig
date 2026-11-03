@@ -124,6 +124,15 @@ const parseFailed = tokenized.parseFailed;
 /// The HINT of a function call no function matches.
 pub const function_hint = "No function matches the given name and argument types. You might need to add explicit type casts.";
 
+/// PostgreSQL's error of a call of `name` no function matches
+/// (ParseFuncOrColumn()): `function f(integer, unknown) does not exist`
+/// and its HINT, of the arguments as `args` show them (the type,
+/// "a => type" for a named one).
+pub fn functionNotExist(a: std.mem.Allocator, name: []const u8, args: []const []const u8) error{OutOfMemory}!util.ErrorFields {
+    const sig = try std.mem.join(a, ", ", args);
+    return .{ .message = try std.fmt.allocPrint(a, "function {s}({s}) does not exist", .{ name, sig }), .hint = function_hint };
+}
+
 /// SQLite's messages for common failures in PostgreSQL's words.
 fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
@@ -181,6 +190,7 @@ fn translateError(p: *int.Parse) int.Oom!void {
 pub const hooks: dialect.Hooks = .{
     .foreign_keys = true,
     .count_create_as = true,
+    .notice_level = session.noticeLevel,
     .constraint = @import("constraints.zig").constraint,
     .arith = .{
         .div_zero = .{ .msg = "division by zero", .state = .of("22012") },
@@ -211,16 +221,17 @@ pub const hooks: dialect.Hooks = .{
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
 } ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions ++ uuid.functions ++ datetime.functions ++ ivinput.functions ++
-    formatting.functions ++ builtins.functions ++ inputinfo.functions ++ dtfuncs.functions;
+    formatting.functions ++ builtins.functions ++ inputinfo.functions ++ dtfuncs.functions ++ regexp.functions;
 
 const engine_functions = funcs.engine_functions ++ integer.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions ++ uuid.engine_functions ++ ivinput.engine_functions ++
-    formatting.engine_functions ++ builtins.engine_functions ++ inputinfo.engine_functions ++ dtfuncs.engine_functions;
+    formatting.engine_functions ++ builtins.engine_functions ++ inputinfo.engine_functions ++ dtfuncs.engine_functions ++ regexp.engine_functions;
 
 // to_char(), gcd(), pg_input_is_valid(), date_trunc() ...
 const formatting = @import("formatting.zig");
 const builtins = @import("builtins.zig");
 const inputinfo = @import("inputinfo.zig");
 const dtfuncs = @import("dtfuncs.zig");
+const regexp = @import("regexp.zig");
 
 comptime {
     dfunc.checkTable(&functions);
@@ -240,6 +251,8 @@ test {
     _ = @import("json.zig");
     _ = @import("jsonpath.zig");
     _ = @import("regex.zig");
+    _ = @import("are.zig");
+    _ = @import("regexp.zig");
     _ = @import("datetime.zig");
     _ = @import("operators.zig");
     _ = @import("state.zig");

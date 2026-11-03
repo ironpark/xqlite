@@ -55,29 +55,30 @@ __attribute__((used)) static struct { const void *a, *b; } interposers[]
   { (const void*)my_unlink, (const void*)unlink },
 };
 #else
-#define NEXT(name, type) static type real; if( !real ) real = (type)dlsym(RTLD_NEXT, name)
+/* real: the next definition of `name` (libc's), of type RET (*)ARGS. */
+#define NEXT(name, RET, ARGS) static RET (*real)ARGS; if( !real ) real = (RET (*)ARGS)dlsym(RTLD_NEXT, name)
 ssize_t pwrite(int fd, const void *b, size_t n, off_t o){
-  NEXT("pwrite", ssize_t(*)(int, const void*, size_t, off_t));
+  NEXT("pwrite", ssize_t, (int, const void*, size_t, off_t));
   tick(fd_matches(fd)); return real(fd, b, n, o);
 }
 ssize_t pwrite64(int fd, const void *b, size_t n, off_t o){
-  NEXT("pwrite64", ssize_t(*)(int, const void*, size_t, off_t));
+  NEXT("pwrite64", ssize_t, (int, const void*, size_t, off_t));
   tick(fd_matches(fd)); return real(fd, b, n, o);
 }
 ssize_t write(int fd, const void *b, size_t n){
-  NEXT("write", ssize_t(*)(int, const void*, size_t));
+  NEXT("write", ssize_t, (int, const void*, size_t));
   tick(fd_matches(fd)); return real(fd, b, n);
 }
 int ftruncate(int fd, off_t n){
-  NEXT("ftruncate", int(*)(int, off_t));
+  NEXT("ftruncate", int, (int, off_t));
   tick(fd_matches(fd)); return real(fd, n);
 }
 int ftruncate64(int fd, off_t n){
-  NEXT("ftruncate64", int(*)(int, off_t));
+  NEXT("ftruncate64", int, (int, off_t));
   tick(fd_matches(fd)); return real(fd, n);
 }
 int unlink(const char *path){
-  NEXT("unlink", int(*)(const char*));
+  NEXT("unlink", int, (const char*));
   tick(matches(path)); return real(path);
 }
 #endif

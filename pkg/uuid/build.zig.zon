@@ -1,0 +1,14 @@
+.{
+    // RFC 9562 UUIDs: the module `uuid`. The root package
+    // (../../build.zig.zon) depends on it by path.
+    .name = .uuid,
+    .version = "0.0.0",
+    .fingerprint = 0xd17f50a6520781e2, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

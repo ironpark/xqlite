@@ -35,9 +35,9 @@ pub const State = struct {
     /// patterns that are no constant), and what releases them.
     regex_cache: ?*anyopaque = null,
     regex_cache_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
-    /// uuidv7(): the time it last used, nanoseconds since 1970 (uuid.zig:
-    /// the next is later, so the session's uuids are in order).
-    uuidv7_ns: i64 = 0,
+    /// uuidv7()'s clock (pkg/uuid's Clock: each time is later than the
+    /// last, so the session's uuids are in order).
+    uuidv7_clock: @import("uuid").Clock = .{},
     /// The parameters the dialect reads, as values kept with their text
     /// (refresh(), from the text session.zig checked and stored as SHOW
     /// prints it). IntervalStyle: what the value display and

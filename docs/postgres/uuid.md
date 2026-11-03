@@ -2,7 +2,7 @@
 
 [PostgreSQL 호환](README.md)의 일부입니다.
 
-`uuid`는 16바이트 BLOB으로 저장합니다(`src/dialect/postgres/uuid.zig`). PostgreSQL의 uuid 순서(`uuid_cmp()`)는 바이트 순서이므로 SQLite의 BLOB 비교(memcmp)가 곧 PostgreSQL의 순서입니다. 그래서 인덱스, 범위 검색, `ORDER BY`, `PRIMARY KEY`/`UNIQUE`/외래 키가 값 그대로 동작하고, `uuidv7()` 키는 시간 순서라 인덱스에 거의 끝에만 붙습니다.
+`uuid`는 16바이트 BLOB으로 저장합니다(`src/dialect/postgres/uuid.zig`; 값의 읽기·쓰기, 필드, 버전 4·7은 일반 패키지 `pkg/uuid`, [uuid 패키지](../architecture.md#uuid-패키지)). PostgreSQL의 uuid 순서(`uuid_cmp()`)는 바이트 순서이므로 SQLite의 BLOB 비교(memcmp)가 곧 PostgreSQL의 순서입니다. 그래서 인덱스, 범위 검색, `ORDER BY`, `PRIMARY KEY`/`UNIQUE`/외래 키가 값 그대로 동작하고, `uuidv7()` 키는 시간 순서라 인덱스에 거의 끝에만 붙습니다.
 
 - 입력은 PostgreSQL의 `uuid_in()`과 같습니다: 16진수 32자리(대소문자 무관), 네 자리마다(마지막 뒤 말고) 하이픈 하나를 둘 수 있음, 전체를 `{}`로 감쌀 수 있음, 공백은 없음. 아니면 `invalid input syntax for type uuid: "x"`(22P02). 출력은 소문자의 `8-4-4-4-12`입니다.
 - 열에 넣는 값(상수, 텍스트·이진으로 바인딩한 매개변수, `INSERT ... SELECT`의 값)은 저장 함수 `xq_pg_uuid()`가 16바이트로 바꿉니다. 열의 CHECK `length(u) = 16`(이름 `invalid input syntax for type uuid`)은 다른 BLOB을 막습니다. `DEFAULT '...'`은 CREATE TABLE에서 읽어 `X'..'`로 남고, `DEFAULT gen_random_uuid()`는 `xq_postgres_uuidv4()`입니다.

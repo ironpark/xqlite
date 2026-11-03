@@ -558,7 +558,11 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 | `flags` | 비트 플래그 집합(bool의 packed struct)에 공통인 연산 |
 | `cast` | Zig 0.17의 좁히는 캐스트 오컴파일(ziglang/zig#37127)을 피하는 캐스트 |
 
-`zig build test-pkg`는 세 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`)의 테스트만 엔진 없이 빌드해 돌립니다.
+### uuid 패키지
+
+RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이름 `uuid`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 16바이트 값(`Uuid`, 네트워크 순서라 바이트 비교가 PostgreSQL의 `uuid_cmp()` 순서), PostgreSQL의 `uuid_in()`이 읽는 텍스트를 읽는 `parse()`와 소문자 하이픈 형식의 `format()`, `version()`·`timestamp()`(버전 1과 7), 무작위 16바이트로 만드는 `v4()`, Unix 밀리초와 밀리초 안의 나노초(12비트 분수, RFC 9562의 방법 3)와 무작위 8바이트로 만드는 `v7()`, 부를 때마다 앞으로 가는 시계 `Clock`(PostgreSQL의 `get_real_time_ns_ascending()`)이 있습니다. 시계와 엔트로피는 부르는 쪽이 넘깁니다. PostgreSQL 방언의 `src/dialect/postgres/uuid.zig`는 그 둘레의 SQL 함수(SQLite 값, 오류, 연결의 무작위 값과 시계)만 둡니다([PostgreSQL의 uuid](postgres/uuid.md)).
+
+`zig build test-pkg`는 네 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`)의 테스트만 엔진 없이 빌드해 돌립니다.
 
 ## 소스 파일
 
@@ -601,6 +605,7 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 | `pkg/storage/bench/btree.zig` | B-tree 커서 벤치마크(`zig build bench-btree`) |
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
 | `pkg/base/src/{ctype,numeric,hash,flags,cast}.zig` | 공용 패키지: 문자 분류, 수 변환, Hash 순서, 플래그 연산, 캐스트 |
+| `pkg/uuid/src/root.zig` | uuid 패키지(`uuid`): RFC 9562 UUID의 텍스트, 필드, 버전 4·7, v7의 시계([uuid 패키지](#uuid-패키지)) |
 | `src/dialect/disabled.zig` | 빌드에서 뺀 방언의 프론트엔드([빌드에 넣을 방언과 확장](#빌드에-넣을-방언과-확장)) |
 | `tools/minimal_test.zig` | 방언·확장을 모두 뺀 엔진의 테스트(`zig build test-minimal`) |
 

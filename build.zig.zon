@@ -39,6 +39,8 @@
         .xqlite_storage = .{ .path = "pkg/storage" },
         // The helpers every layer shares (closures, status counters).
         .xqlite_base = .{ .path = "pkg/base" },
+        // RFC 9562 UUIDs (PostgreSQL's uuid), with no dependency but std.
+        .uuid = .{ .path = "pkg/uuid" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -92,6 +94,7 @@
         "pkg/vfs",
         "pkg/storage",
         "pkg/base",
+        "pkg/uuid",
         "LICENSE",
         "README.md",
     },

@@ -17,7 +17,18 @@
 //!    count): a statement end, as `;`.
 
 const std = @import("std");
-const lex = @import("../lex.zig");
+const sqllex = @import("sqllex");
+
+/// SQL Server's rules for the scanners: identifiers of letters, `_`, `#`
+/// and any non-ASCII byte, then digits, `$` and `@` too; nested block
+/// comments.
+pub const spec: sqllex.Spec = .{
+    .ident_start = .of(.{ .letters = true, .high = true, .chars = "_#" }),
+    .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_#$@" }),
+    .comments = .{ .block = .nested },
+    .numbers = .{ .radix = "xX" },
+};
+const scan = sqllex.Scanner(spec);
 
 pub const Kind = enum {
     eof,
@@ -82,32 +93,7 @@ pub const Lexer = struct {
     /// Skip spaces and comments (an unterminated /* comment runs to the
     /// end).
     fn skipSpace(lx: *Lexer) void {
-        const s = lx.sql;
-        while (true) {
-            switch (s[lx.pos]) {
-                ' ', '\t', '\n', '\r', 0x0b, 0x0c => lx.pos += 1,
-                '-' => {
-                    if (s[lx.pos + 1] != '-') return;
-                    while (s[lx.pos] != 0 and s[lx.pos] != '\n') lx.pos += 1;
-                },
-                '/' => {
-                    if (s[lx.pos + 1] != '*') return;
-                    var depth: usize = 1;
-                    var i = lx.pos + 2;
-                    while (s[i] != 0 and depth > 0) {
-                        if (s[i] == '/' and s[i + 1] == '*') {
-                            depth += 1;
-                            i += 2;
-                        } else if (s[i] == '*' and s[i + 1] == '/') {
-                            depth -= 1;
-                            i += 2;
-                        } else i += 1;
-                    }
-                    lx.pos = i;
-                },
-                else => return,
-            }
-        }
+        lx.pos = scan.skip(lx.sql, lx.pos).end;
     }
 
     pub fn next(lx: *Lexer) Token {
@@ -121,8 +107,8 @@ pub const Lexer = struct {
             '"' => lx.quoted(start, '"', .quoted_ident),
             '\'' => lx.quoted(start, '\'', .string),
             '0'...'9' => lx.number(start),
-            '.' => if (std.ascii.isDigit(s[start + 1])) lx.number(start) else lx.op1(),
-            '?' => lx.op1Kind(.param),
+            '.' => if (scan.isDigit(s[start + 1])) lx.number(start) else lx.one(.op),
+            '?' => lx.one(.param),
             '@' => lx.variable(start),
             'n', 'N' => blk: {
                 if (s[start + 1] == '\'') {
@@ -130,7 +116,7 @@ pub const Lexer = struct {
                 }
                 break :blk lx.word(start);
             },
-            else => if (isIdentStart(c)) lx.word(start) else lx.operator(),
+            else => if (scan.isIdentStart(c)) lx.word(start) else lx.operator(),
         };
         return .{ .kind = kind, .text = s[start..lx.pos] };
     }
@@ -138,47 +124,31 @@ pub const Lexer = struct {
     /// A quoted token from `start` (its opening quote): `q` ends it, a
     /// doubled `q` stands for one.
     fn quoted(lx: *Lexer, start: usize, q: u8, kind: Kind) Kind {
-        const r = lex.quotedEnd(lx.sql, start, q, false);
+        const r = sqllex.quotedEnd(lx.sql, start, q, false);
         lx.pos = r.end;
         return if (r.closed) kind else .illegal;
     }
 
     fn number(lx: *Lexer, start: usize) Kind {
         const s = lx.sql;
-        var i = start;
-        if (s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
-            i += 2;
-            while (std.ascii.isHex(s[i])) i += 1;
-            lx.pos = i;
+        if (scan.radixPrefix(s, start)) |base| {
+            lx.pos = sqllex.radixDigits(s, start + 2, base, false).end;
             return .hex;
         }
-        var kind: Kind = .integer;
-        while (std.ascii.isDigit(s[i])) i += 1;
-        if (s[i] == '.') {
-            kind = .float;
-            i += 1;
-            while (std.ascii.isDigit(s[i])) i += 1;
-        }
-        if ((s[i] == 'e' or s[i] == 'E') and (std.ascii.isDigit(s[i + 1]) or
-            ((s[i + 1] == '+' or s[i + 1] == '-') and std.ascii.isDigit(s[i + 2]))))
-        {
-            kind = .float;
-            i += 2;
-            while (std.ascii.isDigit(s[i])) i += 1;
-        }
-        lx.pos = i;
-        return kind;
+        const n = scan.number(s, start);
+        lx.pos = n.end;
+        return if (n.float) .float else .integer;
     }
 
     /// A word, or GO alone on its line.
     fn word(lx: *Lexer, start: usize) Kind {
         const s = lx.sql;
-        while (isIdentChar(s[lx.pos])) lx.pos += 1;
-        if (lx.pos - start == 2 and std.ascii.eqlIgnoreCase(s[start..lx.pos], "GO") and atLineStart(s, start)) {
+        lx.pos = scan.word(s, lx.pos);
+        if (lx.pos - start == 2 and std.ascii.eqlIgnoreCase(s[start..lx.pos], "GO") and sqllex.blankBefore(s, start)) {
             // GO [count] then the end of the line (or a comment).
             var i = lx.pos;
             while (s[i] == ' ' or s[i] == '\t') i += 1;
-            while (std.ascii.isDigit(s[i])) i += 1;
+            while (scan.isDigit(s[i])) i += 1;
             while (s[i] == ' ' or s[i] == '\t' or s[i] == '\r') i += 1;
             if (s[i] == 0 or s[i] == '\n' or (s[i] == '-' and s[i + 1] == '-')) {
                 lx.pos = i;
@@ -193,59 +163,29 @@ pub const Lexer = struct {
         const sys = s[start + 1] == '@';
         lx.pos = start + 1 + @intFromBool(sys);
         const first = lx.pos;
-        while (isIdentChar(s[lx.pos])) lx.pos += 1;
+        lx.pos = scan.word(s, lx.pos);
         if (lx.pos == first) return .illegal;
         return if (sys) .sys_var else .variable;
     }
 
-    fn op1(lx: *Lexer) Kind {
-        lx.pos += 1;
-        return .op;
-    }
-
-    fn op1Kind(lx: *Lexer, k: Kind) Kind {
+    /// A token of one character.
+    fn one(lx: *Lexer, k: Kind) Kind {
         lx.pos += 1;
         return k;
     }
 
     fn operator(lx: *Lexer) Kind {
-        const rest = lx.sql[lx.pos..];
-        const ops2 = [_][]const u8{ "<=", ">=", "<>", "!=", "!<", "!>", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "::" };
-        for (ops2) |o| if (std.mem.startsWith(u8, rest, o)) {
-            lx.pos += 2;
+        const n = sqllex.longestOp(&.{ "<=", ">=", "<>", "!=", "!<", "!>", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "::" }, lx.sql, lx.pos);
+        if (n > 0) {
+            lx.pos += n;
             return .op;
-        };
-        switch (rest[0]) {
-            '(', ')', ',', '.', ';', '+', '-', '*', '/', '%', '=', '<', '>', '~', '^', '&', '|', '{', '}', ':' => return lx.op1(),
-            else => {
-                lx.pos += 1;
-                return .illegal;
-            },
+        }
+        switch (lx.sql[lx.pos]) {
+            '(', ')', ',', '.', ';', '+', '-', '*', '/', '%', '=', '<', '>', '~', '^', '&', '|', '{', '}', ':' => return lx.one(.op),
+            else => return lx.one(.illegal),
         }
     }
 };
-
-/// Whether only spaces are between the start of the line and `i`.
-fn atLineStart(s: []const u8, i: usize) bool {
-    var j = i;
-    while (j > 0) {
-        j -= 1;
-        switch (s[j]) {
-            ' ', '\t', '\r' => {},
-            '\n' => return true,
-            else => return false,
-        }
-    }
-    return true;
-}
-
-pub fn isIdentStart(c: u8) bool {
-    return std.ascii.isAlphabetic(c) or c == '_' or c == '#' or c >= 0x80;
-}
-
-pub fn isIdentChar(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c == '#' or c == '$' or c == '@' or c >= 0x80;
-}
 
 /// The name an identifier token stands for: the word itself, or the
 /// text between the delimiters with doubled closing delimiters undone
@@ -253,36 +193,20 @@ pub fn isIdentChar(c: u8) bool {
 pub fn identValue(a: std.mem.Allocator, t: Token) error{OutOfMemory}![]const u8 {
     if (t.kind != .quoted_ident) return t.text;
     const q: u8 = if (t.text[0] == '[') ']' else '"';
-    return undouble(a, t.text[1 .. t.text.len - 1], q);
+    return sqllex.undouble(a, t.text[1 .. t.text.len - 1], q);
 }
 
 /// The value of a string token ('...' or N'...').
 pub fn stringValue(a: std.mem.Allocator, t: Token) error{OutOfMemory}![]const u8 {
     var z = t.text;
     if (z[0] == 'n' or z[0] == 'N') z = z[1..];
-    return undouble(a, z[1 .. z.len - 1], '\'');
-}
-
-fn undouble(a: std.mem.Allocator, inner: []const u8, q: u8) error{OutOfMemory}![]const u8 {
-    if (std.mem.indexOfScalar(u8, inner, q) == null) return inner;
-    var out: std.ArrayList(u8) = try .initCapacity(a, inner.len);
-    var i: usize = 0;
-    while (i < inner.len) : (i += 1) {
-        out.appendAssumeCapacity(inner[i]);
-        if (inner[i] == q) i += 1;
-    }
-    return out.items;
+    return sqllex.undouble(a, z[1 .. z.len - 1], '\'');
 }
 
 /// The hex digits of a binary constant (0x0A), padded to an even count
 /// with a leading 0 (0xA is 0x0A, as in SQL Server).
 pub fn hexDigits(a: std.mem.Allocator, t: Token) error{OutOfMemory}![]const u8 {
-    const digits = t.text[2..];
-    if (digits.len % 2 == 0) return digits;
-    const out = try a.alloc(u8, digits.len + 1);
-    out[0] = '0';
-    @memcpy(out[1..], digits);
-    return out;
+    return sqllex.evenDigits(a, t.text[2..]);
 }
 
 fn testTokens(sql: [:0]const u8, expected: []const struct { Kind, []const u8 }) !void {

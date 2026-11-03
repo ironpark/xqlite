@@ -41,6 +41,9 @@
         .xqlite_base = .{ .path = "pkg/base" },
         // RFC 9562 UUIDs (PostgreSQL's uuid), with no dependency but std.
         .uuid = .{ .path = "pkg/uuid" },
+        // The building blocks of the dialects' SQL lexers, with no
+        // dependency but std.
+        .sqllex = .{ .path = "pkg/sqllex" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -95,6 +98,7 @@
         "pkg/storage",
         "pkg/base",
         "pkg/uuid",
+        "pkg/sqllex",
         "LICENSE",
         "README.md",
     },

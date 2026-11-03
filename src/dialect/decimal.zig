@@ -282,22 +282,26 @@ fn parseBased(a: Allocator, z: []const u8, base: u8, neg: bool) Error!Dec {
         }
         const v = std.fmt.charToDigit(c, base) catch return error.Invalid;
         any = true;
-        // acc = acc * base + v.
-        var carry: u32 = v;
-        for (acc.items) |*d| {
-            const t = @as(u32, d.*) * base + carry;
-            d.* = @intCast(t % 10);
-            carry = t / 10;
-        }
-        while (carry > 0) {
-            try acc.append(a, @intCast(carry % 10));
-            carry /= 10;
-        }
+        try mulAddDigit(a, &acc, base, v);
         if (acc.items.len > max_point) return error.Overflow;
     }
     if (!any) return error.Invalid;
     std.mem.reverse(u8, acc.items);
     return normalize(acc.items, @intCast(acc.items.len), neg, 0);
+}
+
+/// `acc = acc * base + v`, `acc` an integer as its decimal digits (0-9,
+/// not characters), least significant first: one more digit of a number
+/// of base `base` written in decimal (parseBased(), and the PostgreSQL
+/// lexer's 0x1F).
+pub fn mulAddDigit(a: Allocator, acc: *std.ArrayList(u8), base: u8, v: u8) error{OutOfMemory}!void {
+    var carry: u32 = v;
+    for (acc.items) |*d| {
+        const t = @as(u32, d.*) * base + carry;
+        d.* = @intCast(t % 10);
+        carry = t / 10;
+    }
+    while (carry > 0) : (carry /= 10) try acc.append(a, @intCast(carry % 10));
 }
 
 /// The number of an integer.

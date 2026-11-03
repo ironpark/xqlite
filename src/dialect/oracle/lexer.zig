@@ -20,8 +20,17 @@
 //! source).
 
 const std = @import("std");
-const lex = @import("../lex.zig");
-const ctype = @import("xqlite_base").ctype;
+const sqllex = @import("sqllex");
+
+/// Oracle's rules for the scanners: identifiers of letters, `_` and any
+/// non-ASCII byte, then digits, `$` and `#` too; block comments that do
+/// not nest; 1..2 as 1 and `..`.
+pub const spec: sqllex.Spec = .{
+    .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
+    .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$#" }),
+    .numbers = .{ .range_dots = true },
+};
+const scan = sqllex.Scanner(spec);
 
 pub const Kind = enum {
     eof,
@@ -99,28 +108,9 @@ pub const Lexer = struct {
     /// Skip spaces and comments. Returns an error for an unterminated
     /// block comment.
     pub fn skipSpace(l: *Lexer) Error!void {
-        const s = l.src;
-        while (true) {
-            const c = s[l.pos];
-            if (isSpace(c)) {
-                l.pos += 1;
-            } else if (c == '-' and s[l.pos + 1] == '-') {
-                while (s[l.pos] != 0 and s[l.pos] != '\n') l.pos += 1;
-            } else if (c == '/' and s[l.pos + 1] == '*') {
-                const start = l.pos;
-                l.pos += 2;
-                while (true) {
-                    if (s[l.pos] == 0) return l.fail(start, "ORA-01742: comment not properly terminated", .{});
-                    if (s[l.pos] == '*' and s[l.pos + 1] == '/') {
-                        l.pos += 2;
-                        break;
-                    }
-                    l.pos += 1;
-                }
-            } else {
-                return;
-            }
-        }
+        const t = scan.skip(l.src, l.pos);
+        if (t.open_comment) |at| return l.fail(at, "ORA-01742: comment not properly terminated", .{});
+        l.pos = t.end;
     }
 
     pub fn next(l: *Lexer) Error!Token {
@@ -137,9 +127,8 @@ pub const Lexer = struct {
             '/' => if (l.slashLine(start)) return l.single(.semi),
             ':' => {
                 const n = s[start + 1];
-                if (isDigit(n) or isIdentStart(n)) {
-                    var e = start + 1;
-                    while (isIdentChar(s[e])) e += 1;
+                if (scan.isDigit(n) or scan.isIdentStart(n)) {
+                    const e = scan.word(s, start + 1);
                     l.pos = e;
                     return l.tok(.param, start, e, s[start..e]);
                 }
@@ -151,7 +140,7 @@ pub const Lexer = struct {
                 }
             },
             '.' => {
-                if (isDigit(s[start + 1])) return l.number();
+                if (scan.isDigit(s[start + 1])) return l.number();
                 return l.single(.dot);
             },
             '\'' => return l.string(start, start),
@@ -159,43 +148,24 @@ pub const Lexer = struct {
             '0'...'9' => return l.number(),
             else => {},
         }
-        if (isIdentStart(c)) {
+        if (scan.isIdentStart(c)) {
             // N'...', q'[...]', nq'[...]'.
             const c1 = s[start + 1];
             if ((c == 'n' or c == 'N') and c1 == '\'') return l.string(start, start + 1);
             if ((c == 'q' or c == 'Q') and c1 == '\'') return l.qString(start, start + 1);
             if ((c == 'n' or c == 'N') and (c1 == 'q' or c1 == 'Q') and s[start + 2] == '\'') return l.qString(start, start + 2);
-            var e = start;
-            var upper = true;
-            while (isIdentChar(s[e])) : (e += 1) {
-                if (s[e] >= 'a' and s[e] <= 'z') upper = false;
-            }
-            l.pos = e;
-            const raw = s[start..e];
-            if (upper) return l.tok(.ident, start, e, raw);
-            const folded = try l.arena.alloc(u8, raw.len);
-            for (raw, folded) |ch, *o| o.* = std.ascii.toUpper(ch);
-            return l.tok(.ident, start, e, folded);
+            const w = try scan.foldedWord(l.arena, s, start, .upper);
+            l.pos = w.end;
+            return l.tok(.ident, start, w.end, w.text);
         }
-        if (isOpChar(c)) return l.operator();
-        return l.fail(start, "ORA-00911: {s}: invalid character", .{s[start .. start + utf8Len(c, s[start..])]});
+        if (op_chars.has(c)) return l.operator();
+        return l.fail(start, "ORA-00911: {s}: invalid character", .{s[start .. start + sqllex.charLen(s, start)]});
     }
 
     /// Whether the `/` at `at` is alone on its line (spaces aside): a
     /// statement terminator of SQL*Plus scripts.
     fn slashLine(l: *Lexer, at: usize) bool {
-        const s = l.src;
-        var i = at;
-        while (i > 0) {
-            i -= 1;
-            if (s[i] == '\n') break;
-            if (s[i] != ' ' and s[i] != '\t' and s[i] != '\r') return false;
-        }
-        var j = at + 1;
-        while (s[j] != 0 and s[j] != '\n') : (j += 1) {
-            if (s[j] != ' ' and s[j] != '\t' and s[j] != '\r') return false;
-        }
-        return true;
+        return sqllex.blankBefore(l.src, at) and sqllex.blankAfter(l.src, at + 1);
     }
 
     fn tok(l: *Lexer, kind: Kind, start: usize, end: usize, text: []const u8) Token {
@@ -212,39 +182,30 @@ pub const Lexer = struct {
     fn number(l: *Lexer) Error!Token {
         const s = l.src;
         const start = l.pos;
-        var e = start;
-        var is_float = false;
-        while (isDigit(s[e])) e += 1;
-        if (s[e] == '.' and s[e + 1] != '.') {
-            is_float = true;
-            e += 1;
-            while (isDigit(s[e])) e += 1;
-        }
-        if ((s[e] == 'e' or s[e] == 'E') and (isDigit(s[e + 1]) or ((s[e + 1] == '+' or s[e + 1] == '-') and isDigit(s[e + 2])))) {
-            is_float = true;
-            e += 2;
-            while (isDigit(s[e])) e += 1;
-        }
+        const n = scan.number(s, start);
+        const e = n.end;
+        var is_float = n.float;
         var text: []const u8 = s[start..e];
         // 1.5f, 2d: BINARY_FLOAT/BINARY_DOUBLE literals.
         var end = e;
-        if ((s[e] == 'f' or s[e] == 'F' or s[e] == 'd' or s[e] == 'D') and !isIdentChar(s[e + 1])) {
+        if ((s[e] == 'f' or s[e] == 'F' or s[e] == 'd' or s[e] == 'D') and !scan.isIdent(s[e + 1])) {
             end = e + 1;
             is_float = true;
         }
         l.pos = end;
         if (text[0] == '.') text = try std.mem.concat(l.arena, u8, &.{ "0", text });
         if (text[text.len - 1] == '.') text = try std.mem.concat(l.arena, u8, &.{ text, "0" });
-        // An integer too large for 64 bits is a real.
-        if (!is_float and std.fmt.parseInt(i64, text, 10) == error.Overflow) is_float = true;
+        // An integer too large for 64 bits is a real (one of 19 digits or
+        // more: 9223372036854775807 has 19).
+        if (!is_float and text.len >= 19 and std.fmt.parseInt(i64, text, 10) == error.Overflow) is_float = true;
         return l.tok(if (is_float) .float else .integer, start, end, text);
     }
 
     /// A string constant whose opening quote is at `quote` (the token
     /// starts at `start`, before an N prefix).
     fn string(l: *Lexer, start: usize, quote: usize) Error!Token {
-        const q = try lex.undoubled(l.arena, l.src, quote, '\'') orelse
-            return l.fail(start, "ORA-01756: quoted string not properly terminated", .{});
+        const q = try sqllex.undoubled(l.arena, l.src, quote, '\'');
+        if (!q.closed) return l.fail(start, "ORA-01756: quoted string not properly terminated", .{});
         l.pos = q.end;
         return l.tok(.string, start, q.end, q.text);
     }
@@ -253,7 +214,7 @@ pub const Lexer = struct {
     fn qString(l: *Lexer, start: usize, quote: usize) Error!Token {
         const s = l.src;
         const open = s[quote + 1];
-        if (open == 0 or isSpace(open)) return l.fail(start, "ORA-01756: quoted string not properly terminated", .{});
+        if (open == 0 or scan.isSpace(open)) return l.fail(start, "ORA-01756: quoted string not properly terminated", .{});
         const close: u8 = switch (open) {
             '[' => ']',
             '{' => '}',
@@ -273,8 +234,8 @@ pub const Lexer = struct {
 
     fn quotedIdent(l: *Lexer) Error!Token {
         const start = l.pos;
-        const q = try lex.undoubled(l.arena, l.src, start, '"') orelse
-            return l.fail(start, "ORA-01740: missing double quote in identifier", .{});
+        const q = try sqllex.undoubled(l.arena, l.src, start, '"');
+        if (!q.closed) return l.fail(start, "ORA-01740: missing double quote in identifier", .{});
         l.pos = q.end;
         if (q.text.len == 0) return l.fail(start, "ORA-01741: illegal zero-length identifier", .{});
         return l.tok(.qident, start, q.end, q.text);
@@ -283,37 +244,13 @@ pub const Lexer = struct {
     fn operator(l: *Lexer) Token {
         const s = l.src;
         const start = l.pos;
-        const two = [_][]const u8{ "||", "<>", "!=", "^=", "~=", "<=", ">=", "=>" };
-        for (two) |op| {
-            if (s[start] == op[0] and s[start + 1] == op[1]) {
-                l.pos = start + 2;
-                return l.tok(.op, start, l.pos, s[start..l.pos]);
-            }
-        }
-        l.pos = start + 1;
+        const n = sqllex.longestOp(&.{ "||", "<>", "!=", "^=", "~=", "<=", ">=", "=>" }, s, start);
+        l.pos = start + @max(n, 1);
         return l.tok(.op, start, l.pos, s[start..l.pos]);
     }
 };
 
-const isSpace = ctype.isSpace;
-const isDigit = ctype.isDigit;
-
-fn isIdentStart(c: u8) bool {
-    return std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80;
-}
-
-fn isIdentChar(c: u8) bool {
-    return isIdentStart(c) or isDigit(c) or c == '$' or c == '#';
-}
-
-fn isOpChar(c: u8) bool {
-    return c != 0 and std.mem.indexOfScalar(u8, "+-*/<>=!^~|@%&?:[]", c) != null;
-}
-
-fn utf8Len(c: u8, rest: []const u8) usize {
-    const n: usize = std.unicode.utf8ByteSequenceLength(c) catch 1;
-    return @min(n, rest.len);
-}
+const op_chars: sqllex.Set = .of(.{ .chars = "+-*/<>=!^~|@%&?:[]" });
 
 // ================================================================= tests
 

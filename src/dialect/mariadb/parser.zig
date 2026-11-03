@@ -35,6 +35,7 @@
 const std = @import("std");
 const words = @import("../words.zig");
 const ctype = @import("xqlite_base").ctype;
+const sqllex = @import("sqllex");
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
 const tree = @import("../../ir/tree.zig");
@@ -213,10 +214,7 @@ pub const Parser = struct {
         if (s.p.n_err > 0) return error.ParseFailed;
         const rest = std.mem.sliceTo(t.text.ptr, 0);
         const near = rest[0..@min(rest.len, 80)];
-        var line: usize = 1;
-        for (s.lx.sql[0..s.posOf(t)]) |c| {
-            if (c == '\n') line += 1;
-        }
+        const line = sqllex.lineOf(s.lx.sql, s.posOf(t));
         ir.stmt.errorMsgState(s.p, t.text.ptr, .numbered("42601", 1064), "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '{s}' at line {d}", .{ near, line });
         return error.ParseFailed;
     }

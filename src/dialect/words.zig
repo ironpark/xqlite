@@ -3,8 +3,9 @@
 
 const std = @import("std");
 const ctype = @import("xqlite_base").ctype;
+const sqllex = @import("sqllex");
 
-pub const Case = enum { lower, upper };
+pub const Case = sqllex.Case;
 
 /// A set for tokens that the lexer folds to `case` (PostgreSQL to lower
 /// case, Oracle to upper case), matched exactly. A word not in that case
@@ -13,8 +14,7 @@ pub fn folded(comptime case: Case, comptime words: []const []const u8) std.Stati
     @setEvalBranchQuota(20 * words.len + 1000);
     var kvs: [words.len]struct { []const u8 } = undefined;
     for (words, &kvs) |w, *kv| {
-        for (w) |c| if (if (case == .lower) std.ascii.isUpper(c) else std.ascii.isLower(c))
-            @compileError("word not in " ++ @tagName(case) ++ " case: " ++ w);
+        sqllex.assertFolded(case, w);
         kv.* = .{w};
     }
     return .initComptime(kvs);

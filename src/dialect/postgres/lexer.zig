@@ -23,10 +23,20 @@
 //! source).
 
 const std = @import("std");
-const lex = @import("../lex.zig");
-const ctype = @import("xqlite_base").ctype;
-const digitOf = @import("integer.zig").digitOf;
+const sqllex = @import("sqllex");
 const ErrorFields = @import("../../sql/util.zig").ErrorFields;
+const decimal = @import("../decimal.zig");
+
+/// PostgreSQL's rules for the scanners (scan.l): identifiers of letters,
+/// `_` and any non-ASCII byte, then digits and `$` too; nested block
+/// comments; 1_000, and 1..2 as 1 and `..`.
+pub const spec: sqllex.Spec = .{
+    .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
+    .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
+    .comments = .{ .block = .nested },
+    .numbers = .{ .underscores = true, .range_dots = true, .radix = "xXoObB" },
+};
+const scan = sqllex.Scanner(spec);
 
 pub const Kind = enum {
     eof,
@@ -68,7 +78,7 @@ pub const Token = struct {
     /// case as identifiers fold to it: one with upper case could never
     /// match, so it does not compile.
     pub fn isKw(t: Token, comptime kw: []const u8) bool {
-        comptime for (kw) |c| if (std.ascii.isUpper(c)) @compileError("keyword not in lower case: " ++ kw);
+        comptime sqllex.assertFolded(.lower, kw);
         return t.kind == .ident and std.mem.eql(u8, t.text, kw);
     }
 
@@ -121,41 +131,15 @@ pub const Lexer = struct {
 
     /// The text from `at` to the end of the line, for "at or near".
     fn near(l: *Lexer, at: usize) []const u8 {
-        var e = at;
-        while (e < l.src.len and l.src[e] != '\n') e += 1;
-        return l.src[at..e];
+        return sqllex.restOfLine(l.src, at);
     }
 
     /// Skip spaces and comments. Returns an error for an unterminated
     /// block comment.
     pub fn skipSpace(l: *Lexer) Error!void {
-        const s = l.src;
-        while (true) {
-            const c = s[l.pos];
-            if (isSpace(c)) {
-                l.pos += 1;
-            } else if (c == '-' and s[l.pos + 1] == '-') {
-                while (s[l.pos] != 0 and s[l.pos] != '\n') l.pos += 1;
-            } else if (c == '/' and s[l.pos + 1] == '*') {
-                const start = l.pos;
-                var depth: usize = 0;
-                while (true) {
-                    if (s[l.pos] == 0) return l.fail(start, "unterminated /* comment at or near \"{s}\"", .{l.near(start)});
-                    if (s[l.pos] == '/' and s[l.pos + 1] == '*') {
-                        depth += 1;
-                        l.pos += 2;
-                    } else if (s[l.pos] == '*' and s[l.pos + 1] == '/') {
-                        depth -= 1;
-                        l.pos += 2;
-                        if (depth == 0) break;
-                    } else {
-                        l.pos += 1;
-                    }
-                }
-            } else {
-                return;
-            }
-        }
+        const t = scan.skip(l.src, l.pos);
+        if (t.open_comment) |at| return l.fail(at, "unterminated /* comment at or near \"{s}\"", .{l.near(at)});
+        l.pos = t.end;
     }
 
     pub fn next(l: *Lexer) Error!Token {
@@ -183,20 +167,19 @@ pub const Lexer = struct {
                 return l.single(.colon);
             },
             '.' => {
-                if (isDigit(s[start + 1])) return l.number();
+                if (scan.isDigit(s[start + 1])) return l.number();
                 return l.single(.dot);
             },
             '\'' => return l.string(start, start, !l.standard_strings),
             '"' => return l.quotedIdent(),
             '$' => {
-                if (isDigit(s[start + 1])) {
-                    var e = start + 1;
-                    while (isDigit(s[e])) e += 1;
-                    if (isIdentChar(s[e])) return l.fail(start, "trailing junk after parameter at or near \"{s}\"", .{s[start .. e + 1]});
+                if (scan.isDigit(s[start + 1])) {
+                    const e = sqllex.digits.span(s, start + 1);
+                    if (scan.isIdent(s[e])) return l.fail(start, "trailing junk after parameter at or near \"{s}\"", .{s[start .. e + 1]});
                     l.pos = e;
                     return l.tok(.param, start, e, s[start + 1 .. e]);
                 }
-                if (l.dollarTag(start)) |tag_end| return l.dollarString(start, tag_end);
+                if (scan.dollarTag(s, start)) |tag_end| return l.dollarString(start, tag_end);
                 return l.fail(start, "syntax error at or near \"$\"", .{});
             },
             '0'...'9' => return l.number(),
@@ -211,26 +194,18 @@ pub const Lexer = struct {
             }
             return l.unicodeLiteral(start);
         }
-        if (isIdentStart(c)) {
+        if (scan.isIdentStart(c)) {
             // E'...', N'...' (one letter right before a quote).
             if (s[start + 1] == '\'') {
                 if (c == 'e' or c == 'E') return l.string(start, start + 1, true);
                 if (c == 'n' or c == 'N') return l.string(start, start + 1, !l.standard_strings);
             }
-            var e = start;
-            var lower = true;
-            while (isIdentChar(s[e])) : (e += 1) {
-                if (s[e] >= 'A' and s[e] <= 'Z') lower = false;
-            }
-            l.pos = e;
-            const raw = s[start..e];
-            if (lower) return l.tok(.ident, start, e, raw);
-            const folded = try l.arena.alloc(u8, raw.len);
-            for (raw, folded) |ch, *o| o.* = std.ascii.toLower(ch);
-            return l.tok(.ident, start, e, folded);
+            const w = try scan.foldedWord(l.arena, s, start, .lower);
+            l.pos = w.end;
+            return l.tok(.ident, start, w.end, w.text);
         }
-        if (isOpChar(c)) return l.operator();
-        return l.fail(start, "syntax error at or near \"{s}\"", .{s[start .. start + utf8Len(c, s[start..])]});
+        if (op_chars.has(c)) return l.operator();
+        return l.fail(start, "syntax error at or near \"{s}\"", .{s[start .. start + sqllex.charLen(s, start)]});
     }
 
     fn tok(l: *Lexer, kind: Kind, start: usize, end: usize, text: []const u8) Token {
@@ -247,32 +222,17 @@ pub const Lexer = struct {
     fn number(l: *Lexer) Error!Token {
         const s = l.src;
         const start = l.pos;
-        var e = start;
-        var is_float = false;
-        var underscores = false;
-        if (s[e] == '0' and (s[e + 1] == 'x' or s[e + 1] == 'X' or s[e + 1] == 'o' or s[e + 1] == 'O' or s[e + 1] == 'b' or s[e + 1] == 'B')) {
-            const base: u8 = switch (s[e + 1]) {
-                'x', 'X' => 16,
-                'o', 'O' => 8,
-                else => 2,
-            };
+        if (scan.radixPrefix(s, start)) |base| {
             // PostgreSQL's scanner: 0x(_?hexdigit)+, longest match first;
             // "0x" or "0x_" alone is hexfail, a digit or letter after the
             // number (0x1g, 0b102: "0" and an identifier) is junk.
-            e += 2;
-            var digits: std.ArrayList(u8) = .empty;
-            while (true) {
-                const u: usize = @intFromBool(s[e] == '_');
-                if (digitOf(s[e + u]) >= base) break;
-                try digits.append(l.arena, s[e + u]);
-                e += u + 1;
-            }
-            var j = start + 1;
-            while (isIdentChar(s[j])) j += 1;
-            if (j > e and !(digits.items.len == 0 and j == e + 1 and s[e] == '_')) {
+            const r = sqllex.radixDigits(s, start + 2, base, true);
+            var e = r.end;
+            const j = scan.word(s, start + 1);
+            if (j > e and !(r.count == 0 and j == e + 1 and s[e] == '_')) {
                 return l.fail(start, "trailing junk after numeric literal at or near \"{s}\"", .{s[start..j]});
             }
-            if (digits.items.len == 0) {
+            if (r.count == 0) {
                 if (s[e] == '_') e += 1;
                 l.pos = e;
                 return l.fail(start, "invalid {s} integer at or near \"{s}\"", .{ switch (base) {
@@ -284,39 +244,22 @@ pub const Lexer = struct {
             l.pos = e;
             // Its decimal digits: a number beyond a bigint is a numeric,
             // as a decimal one is.
-            return l.tok(.integer, start, e, try toDecimal(l.arena, digits.items, base));
+            return l.tok(.integer, start, e, try toDecimal(l.arena, s[start + 2 .. e], base));
         }
-        while (isDigit(s[e]) or (s[e] == '_' and isDigit(s[e + 1]))) : (e += 1) {
-            if (s[e] == '_') underscores = true;
-        }
-        if (s[e] == '.' and s[e + 1] != '.') {
-            is_float = true;
-            e += 1;
-            while (isDigit(s[e]) or (s[e] == '_' and isDigit(s[e + 1]))) : (e += 1) {
-                if (s[e] == '_') underscores = true;
-            }
-        }
-        if ((s[e] == 'e' or s[e] == 'E') and (isDigit(s[e + 1]) or ((s[e + 1] == '+' or s[e + 1] == '-') and isDigit(s[e + 2])))) {
-            is_float = true;
-            e += 2;
-            while (isDigit(s[e]) or (s[e] == '_' and isDigit(s[e + 1]))) : (e += 1) {
-                if (s[e] == '_') underscores = true;
-            }
-        }
-        if (isIdentStart(s[e])) {
-            var j = e;
-            while (isIdentChar(s[j])) j += 1;
-            return l.fail(start, "trailing junk after numeric literal at or near \"{s}\"", .{s[start..j]});
+        const n = scan.number(s, start);
+        const e = n.end;
+        if (scan.isIdentStart(s[e])) {
+            return l.fail(start, "trailing junk after numeric literal at or near \"{s}\"", .{s[start..scan.word(s, e)]});
         }
         l.pos = e;
         var text: []const u8 = s[start..e];
-        if (underscores) {
+        if (n.underscores) {
             var out: std.ArrayList(u8) = .empty;
             for (text) |ch| if (ch != '_') try out.append(l.arena, ch);
             text = out.items;
         }
         if (text[0] == '.') text = try std.mem.concat(l.arena, u8, &.{ "0", text });
-        return l.tok(if (is_float) .float else .integer, start, e, text);
+        return l.tok(if (n.float) .float else .integer, start, e, text);
     }
 
     /// A string constant whose opening quote is at `quote` (the token
@@ -325,45 +268,46 @@ pub const Lexer = struct {
         const s = l.src;
         var out: std.ArrayList(u8) = .empty;
         var i = quote + 1;
+        // Whether the value is in `out` (else a slice of the text): only
+        // once a doubled quote, an escape or a continuation is seen.
         var copied = false;
         var seg_start = i;
         while (true) {
+            i = if (escapes) sqllex.indexOfAnyOrNul(2, s, i, .{ '\'', '\\' }) else sqllex.indexOfAnyOrNul(1, s, i, .{'\''});
             const ch = s[i];
             if (ch == 0) return l.fail(start, "unterminated quoted string at or near \"{s}\"", .{l.near(start)});
             if (ch == '\'') {
                 if (s[i + 1] == '\'') {
-                    try out.appendSlice(l.arena, s[seg_start..i]);
-                    try out.append(l.arena, '\'');
+                    try out.appendSlice(l.arena, s[seg_start .. i + 1]);
                     copied = true;
                     i += 2;
                     seg_start = i;
                     continue;
                 }
-                try out.appendSlice(l.arena, s[seg_start..i]);
+                const close = i;
                 i += 1;
                 // 'a'
                 // 'b' is 'ab': the next string after whitespace with a newline.
                 var j = i;
                 var newline = false;
-                while (isSpace(s[j])) : (j += 1) {
+                while (scan.isSpace(s[j])) : (j += 1) {
                     if (s[j] == '\n' or s[j] == '\r') newline = true;
                 }
                 if (newline and s[j] == '\'') {
+                    try out.appendSlice(l.arena, s[seg_start..close]);
                     copied = true;
                     i = j + 1;
                     seg_start = i;
                     continue;
                 }
+                if (copied) try out.appendSlice(l.arena, s[seg_start..close]);
                 break;
             }
-            if (escapes and ch == '\\') {
-                try out.appendSlice(l.arena, s[seg_start..i]);
-                copied = true;
-                i = try l.escape(start, i, &out);
-                seg_start = i;
-                continue;
-            }
-            i += 1;
+            // A backslash escape.
+            try out.appendSlice(l.arena, s[seg_start..i]);
+            copied = true;
+            i = try l.escape(start, i, &out);
+            seg_start = i;
         }
         l.pos = i;
         const value = if (copied) out.items else s[quote + 1 .. i - 1];
@@ -403,13 +347,13 @@ pub const Lexer = struct {
             'u', 'U' => {
                 var v = unicodeEscape(s, i) orelse return l.failHint(i, e_escape_hint, "invalid Unicode escape", .{});
                 var end = i + 2 + @as(usize, if (c == 'u') 4 else 8);
-                if (isSurrogateSecond(v)) return l.fail(i, "invalid Unicode surrogate pair at or near \"{s}\"", .{s[i..end]});
-                if (isSurrogateFirst(v)) {
+                if (isLowSurrogate(v)) return l.fail(i, "invalid Unicode surrogate pair at or near \"{s}\"", .{s[i..end]});
+                if (isHighSurrogate(v)) {
                     // The second half must follow: \uDC00 ... as an escape.
                     const w = if (s[end] == '\\') unicodeEscape(s, end) else null;
                     const w_end = if (w != null) end + 2 + @as(usize, if (s[end + 1] == 'u') 4 else 8) else end;
-                    if (w == null or !isSurrogateSecond(w.?)) {
-                        const tok_near = if (w != null) s[end..w_end] else s[end .. end + utf8Len(s[end], s[end..])];
+                    if (w == null or !isLowSurrogate(w.?)) {
+                        const tok_near = if (w != null) s[end..w_end] else s[end .. end + sqllex.charLen(s, end)];
                         return l.fail(end, "invalid Unicode surrogate pair at or near \"{s}\"", .{tok_near});
                     }
                     v = 0x10000 + ((v & 0x3FF) << 10) + (w.? & 0x3FF);
@@ -444,7 +388,7 @@ pub const Lexer = struct {
         const after = l.pos;
         try l.skipSpace();
         const w = l.pos;
-        if (w + 7 <= s.len and std.ascii.eqlIgnoreCase(s[w .. w + 7], "uescape") and !isIdentChar(s[w + 7])) {
+        if (w + 7 <= s.len and std.ascii.eqlIgnoreCase(s[w .. w + 7], "uescape") and !scan.isIdent(s[w + 7])) {
             l.pos = w + 7;
             const e = try l.next();
             const raw = s[e.start..e.end];
@@ -479,12 +423,12 @@ pub const Lexer = struct {
             for (in[digits_at .. digits_at + n]) |ch| v = v * 16 + (std.fmt.charToDigit(ch, 16) catch return l.failHint(base + i, u_escape_hint, "invalid Unicode escape", .{}));
             if (v == 0 or v > 0x10FFFF) return l.fail(base + i, "invalid Unicode escape value", .{});
             if (pair_first != 0) {
-                if (!isSurrogateSecond(v)) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
+                if (!isLowSurrogate(v)) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
                 v = 0x10000 + ((pair_first & 0x3FF) << 10) + (v & 0x3FF);
                 pair_first = 0;
-            } else if (isSurrogateSecond(v)) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
+            } else if (isLowSurrogate(v)) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
             i = digits_at + n;
-            if (isSurrogateFirst(v)) {
+            if (isHighSurrogate(v)) {
                 pair_first = v;
                 continue;
             }
@@ -501,42 +445,29 @@ pub const Lexer = struct {
 
     fn quotedIdent(l: *Lexer) Error!Token {
         const start = l.pos;
-        const q = try lex.undoubled(l.arena, l.src, start, '"') orelse
-            return l.fail(start, "unterminated quoted identifier at or near \"{s}\"", .{l.near(start)});
+        const q = try sqllex.undoubled(l.arena, l.src, start, '"');
+        if (!q.closed) return l.fail(start, "unterminated quoted identifier at or near \"{s}\"", .{l.near(start)});
         l.pos = q.end;
         if (q.text.len == 0) return l.fail(start, "zero-length delimited identifier at or near \"\"\"\"", .{});
         return l.tok(.qident, start, q.end, q.text);
     }
 
-    /// If a dollar-quote delimiter ($$ or $tag$) starts at `start`, the
-    /// index after it.
-    fn dollarTag(l: *Lexer, start: usize) ?usize {
-        const s = l.src;
-        var i = start + 1;
-        if (s[i] == '$') return i + 1;
-        if (!isIdentStart(s[i])) return null;
-        while (isIdentChar(s[i]) and s[i] != '$') i += 1;
-        if (s[i] != '$') return null;
-        return i + 1;
-    }
-
+    /// $tag$...$tag$, the opening delimiter s[start..tag_end].
     fn dollarString(l: *Lexer, start: usize, tag_end: usize) Error!Token {
         const s = l.src;
-        const tag = s[start..tag_end];
-        const body = s[tag_end..];
-        const n = std.mem.indexOf(u8, body, tag) orelse
-            return l.fail(start, "unterminated dollar-quoted string at or near \"{s}\"", .{l.near(start)});
-        l.pos = tag_end + n + tag.len;
-        return l.tok(.string, start, l.pos, body[0..n]);
+        const d = sqllex.dollarEnd(s, start, tag_end);
+        if (!d.closed) return l.fail(start, "unterminated dollar-quoted string at or near \"{s}\"", .{l.near(start)});
+        l.pos = d.end;
+        return l.tok(.string, start, d.end, d.body);
     }
 
     fn operator(l: *Lexer) Token {
         const s = l.src;
         const start = l.pos;
         var e = start;
-        while (isOpChar(s[e])) : (e += 1) {
+        while (op_chars.has(s[e])) : (e += 1) {
             // A comment starts inside the run: the operator ends there.
-            if (e > start and ((s[e] == '-' and s[e + 1] == '-') or (s[e] == '/' and s[e + 1] == '*'))) break;
+            if (e > start and scan.commentAt(s, e)) break;
         }
         var n = e - start;
         if (n > 1 and (s[start + n - 1] == '+' or s[start + n - 1] == '-')) {
@@ -566,35 +497,21 @@ fn unicodeEscape(s: [:0]const u8, i: usize) ?u32 {
     return v;
 }
 
-fn isSurrogateFirst(c: u32) bool {
-    return c >= 0xD800 and c <= 0xDBFF;
+fn isHighSurrogate(c: u32) bool {
+    return c <= 0xFFFF and std.unicode.utf16IsHighSurrogate(@intCast(c));
 }
 
-fn isSurrogateSecond(c: u32) bool {
-    return c >= 0xDC00 and c <= 0xDFFF;
+fn isLowSurrogate(c: u32) bool {
+    return c <= 0xFFFF and std.unicode.utf16IsLowSurrogate(@intCast(c));
 }
 
-const isSpace = ctype.isSpace;
-const isDigit = ctype.isDigit;
-/// isIdentStart(), digits and `$`.
-const isIdentChar = ctype.isIdChar;
-
-fn isIdentStart(c: u8) bool {
-    return std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80;
-}
-
-/// Digits of base `base` written in decimal, of any length.
+/// Digits of base `base` (and `_` separators) written in decimal, of any
+/// length.
 fn toDecimal(a: std.mem.Allocator, digits: []const u8, base: u8) error{OutOfMemory}![]const u8 {
     // Little-endian decimal digits.
     var dec: std.ArrayList(u8) = .empty;
     for (digits) |ch| {
-        var carry: u32 = @intCast(digitOf(ch));
-        for (dec.items) |*d| {
-            const x = @as(u32, d.*) * base + carry;
-            d.* = @intCast(x % 10);
-            carry = x / 10;
-        }
-        while (carry > 0) : (carry /= 10) try dec.append(a, @intCast(carry % 10));
+        if (ch != '_') try decimal.mulAddDigit(a, &dec, base, sqllex.digitValue(ch));
     }
     if (dec.items.len == 0) try dec.append(a, 0);
     std.mem.reverse(u8, dec.items);
@@ -602,14 +519,7 @@ fn toDecimal(a: std.mem.Allocator, digits: []const u8, base: u8) error{OutOfMemo
     return dec.items;
 }
 
-fn isOpChar(c: u8) bool {
-    return c != 0 and std.mem.indexOfScalar(u8, "+-*/<>=~!@#%^&|`?", c) != null;
-}
-
-fn utf8Len(c: u8, rest: []const u8) usize {
-    const n: usize = std.unicode.utf8ByteSequenceLength(c) catch 1;
-    return @min(n, rest.len);
-}
+const op_chars: sqllex.Set = .of(.{ .chars = "+-*/<>=~!@#%^&|`?" });
 
 // ================================================================= tests
 

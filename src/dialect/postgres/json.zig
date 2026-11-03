@@ -17,6 +17,7 @@
 //! `@>`), PostgreSQL's text[] literals (parseTextArray(), '{a,b}').
 
 const std = @import("std");
+const sqllex = @import("sqllex");
 const simd = @import("xqlite_base").simd;
 const json_text = @import("../json_text.zig");
 const bin = @import("../jsonb.zig");
@@ -347,9 +348,7 @@ pub fn errorReport(a: Allocator, text: []const u8, jsonb: bool, msg: []const u8)
 /// pg_mblen() of UTF-8: the bytes of the character at `i`, within `s`
 /// (1 at its end, or for a byte that starts none).
 pub fn charLen(s: []const u8, i: usize) usize {
-    if (i >= s.len) return 1;
-    const n = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
-    return @min(n, s.len - i);
+    return if (i >= s.len) 1 else sqllex.charLen(s, i);
 }
 
 /// PostgreSQL's json lexer and recursive parser (common/jsonapi.c),

@@ -562,7 +562,18 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 
 RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이름 `uuid`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 16바이트 값(`Uuid`, 네트워크 순서라 바이트 비교가 PostgreSQL의 `uuid_cmp()` 순서), PostgreSQL의 `uuid_in()`이 읽는 텍스트를 읽는 `parse()`와 소문자 하이픈 형식의 `format()`, `version()`·`timestamp()`(버전 1과 7), 무작위 16바이트로 만드는 `v4()`, Unix 밀리초와 밀리초 안의 나노초(12비트 분수, RFC 9562의 방법 3)와 무작위 8바이트로 만드는 `v7()`, 부를 때마다 앞으로 가는 시계 `Clock`(PostgreSQL의 `get_real_time_ns_ascending()`)이 있습니다. 시계와 엔트로피는 부르는 쪽이 넘깁니다. PostgreSQL 방언의 `src/dialect/postgres/uuid.zig`는 그 둘레의 SQL 함수(SQLite 값, 오류, 연결의 무작위 값과 시계)만 둡니다([PostgreSQL의 uuid](postgres/uuid.md)).
 
-`zig build test-pkg`는 네 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`)의 테스트만 엔진 없이 빌드해 돌립니다.
+### sqllex 패키지
+
+방언들의 렉서가 함께 쓰는 SQL 스캐너는 엔진과 상관없는 일반 패키지 `pkg/sqllex/`(모듈 이름 `sqllex`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 방언마다 다른 것은 토큰 종류, 토큰을 시도하는 순서, 오류 문구이고, 같은 것은 식별자 문자·공백·주석의 연속, 따옴표를 겹쳐 쓰는 따옴표 토큰, 십진수와 진법 숫자를 읽는 방법(규칙 몇 개만 다름)입니다. 그래서 패키지는 스캐너만 주고, 방언의 렉서는 첫 문자로 갈라 스캐너를 부르는 디스패치로 남습니다.
+
+- `Spec`은 방언의 규칙입니다. 단어를 시작하는 문자와 잇는 문자(`Set`, 컴파일 시점의 256칸 표), 주석(`--`, MySQL의 `-- `, `#`, 중첩하거나 하지 않는 `/* */`, 방언이 직접 건너뛰는 블록 주석: MariaDB의 실행 주석), 숫자(`1_000`의 구분자, `1..2`를 `1`과 `..`으로 읽는지, `0x`·`0o`·`0b` 접두사로 쓸 수 있는 글자)가 들어 있습니다. 공백은 모든 방언이 C의 isspace() 여섯 문자입니다. `Scanner(spec)`이 그 규칙에 맞춰 컴파일 시점에 특수화한 `skip()`(공백과 주석, 닫히지 않은 블록 주석의 시작 위치), `commentAt()`(그 자리에서 주석이 시작하는지: PostgreSQL 연산자가 `--`·`/*` 앞에서 끊김), `word()`, `foldedWord()`(단어와 접은 이름을 한 번에), `number()`(숫자 뒤의 접미사, 쓰레기, 숫자로 시작하는 이름은 방언이 판단), `radixPrefix()`(진법 접두사와 그 진법. 숫자가 없거나 뒤에 쓰레기가 붙은 경우는 방언이 판단), `dollarTag()`, `isDigit()`를 줍니다.
+- 규칙이 필요 없는 스캐너: `quotedEnd()`(겹친 따옴표, 런타임 플래그로 MySQL의 백슬래시 이스케이프), `undoubled()`(`quotedEnd()`와 `undouble()`), `blockCommentEnd()`, `lineEnd()`, `radixDigits()`(접두사 뒤의 숫자, 구분자), `longestOp()`(첫 바이트로 갈라 그 바이트로 시작하는 연산자만 비교. 긴 연산자가 그것으로 시작하는 짧은 것보다 앞에 없으면 컴파일되지 않음), `dollarEnd()`. 따옴표 안, 줄 주석, 블록 주석은 `indexOfAnyOrNul()`로 16바이트씩(`@Vector`) 닫는 문자나 NUL을 찾습니다.
+- 해석은 스캔과 따로 있어 문장을 먼저 모두 토큰화하는 렉서(PostgreSQL, Oracle)와 원문 조각을 들고 있다가 필요할 때 해석하는 렉서(MariaDB, SQL Server)가 같은 코드를 씁니다: `undouble()`, `fold()`, `assertFolded()`(접힌 이름과 견줄 키워드가 그 대소문자가 아니면 컴파일되지 않음. PostgreSQL의 `Token.isKw()`와 `src/dialect/words.zig`의 `folded()`), `evenDigits()`.
+- 위치: `lineOf()`(MariaDB의 `at line N`), `restOfLine()`(PostgreSQL의 `at or near`), `charLen()`(PostgreSQL 방언의 `json.charLen()`도 이것을 씀), `blankBefore()`·`blankAfter()`(SQL Server의 `GO`, Oracle의 `/` 줄).
+
+모든 스캐너는 `[:0]const u8`과 그 안의 인덱스를 받아 인덱스를 돌려주고, 끝의 NUL이 루프를 멈추므로 경계 검사 없이 한 바이트 앞을 봅니다. 닫히지 않은 토큰을 오류로 볼지 방언의 토큰으로 볼지, 그 문구와 SQLSTATE는 방언이 정합니다(패키지는 끝과 닫혔는지만 돌려줌: `Extent`, 또는 그 두 필드와 본문을 담은 `Quoted`·`Dollar`). 방언의 `lexer.zig`는 `pub const spec`과 자기 것(PostgreSQL의 `E'..'`·`U&'..'`·`UESCAPE`·연산자 규칙·`$1`, Oracle의 `q'[..]'`·`:이름`·`f`/`d` 접미사, MariaDB의 실행 주석·`@변수`·sql_mode, SQL Server의 `[..]`·`@@`·`GO`)만 둡니다. SQLite 방언의 토크나이저(`src/parse/tokenize.zig`)는 tokenize.c를 그대로 옮긴 것(문자 분류 표, 문법의 `TK_*`, 키워드 해시, `sqlite3_complete()`)이고 바이트코드가 SQLite와 같아야 하므로 이 패키지를 쓰지 않습니다.
+
+`zig build test-pkg`는 다섯 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`, `pkg/sqllex`)의 테스트만 엔진 없이 빌드해 돌립니다.
 
 ## 소스 파일
 
@@ -570,7 +581,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | --- | --- |
 | `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`, `mssql`, `oracle`), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
 | `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena` |
-| `src/dialect/{calendar,json_text,words,lex,template,tokenized,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 예약어 집합(접힌 대소문자를 컴파일 시점에 검사), 따옴표 토큰 스캔, 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 문장을 먼저 토큰화하는 프론트엔드의 `run`, MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
+| `src/dialect/{calendar,json_text,words,template,tokenized,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 예약어 집합(접힌 대소문자를 컴파일 시점에 검사), 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 문장을 먼저 토큰화하는 프론트엔드의 `run`, MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
 | `src/dialect/{sqlite,postgres,mariadb,mssql,oracle}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/constraint.zig`, `src/dialect/*/constraints.zig` | 제약 위반의 방언 문구와 `ErrorState`(`Hooks.constraint`, [제약 위반](#제약-위반)) |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres/README.md)) |
@@ -606,6 +617,8 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
 | `pkg/base/src/{ctype,numeric,hash,flags,cast}.zig` | 공용 패키지: 문자 분류, 수 변환, Hash 순서, 플래그 연산, 캐스트 |
 | `pkg/uuid/src/root.zig` | uuid 패키지(`uuid`): RFC 9562 UUID의 텍스트, 필드, 버전 4·7, v7의 시계([uuid 패키지](#uuid-패키지)) |
+| `pkg/sqllex/build.zig`, `build.zig.zon` | sqllex 패키지(`sqllex`): 모듈과 `zig build test`. 루트 빌드가 경로 의존성으로 받음 |
+| `pkg/sqllex/src/root.zig` | sqllex 패키지: 방언 규칙 `Spec`과 `Scanner(spec)`, 따옴표·주석·숫자 스캐너, 해석, 위치([sqllex 패키지](#sqllex-패키지)) |
 | `src/dialect/disabled.zig` | 빌드에서 뺀 방언의 프론트엔드([빌드에 넣을 방언과 확장](#빌드에-넣을-방언과-확장)) |
 | `tools/minimal_test.zig` | 방언·확장을 모두 뺀 엔진의 테스트(`zig build test-minimal`) |
 

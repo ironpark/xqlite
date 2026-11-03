@@ -357,7 +357,28 @@ pub const CheckError = struct {
 pub const EngineModule = struct {
     name: [:0]const u8,
     module: *const @import("../sql/vtab.zig").Module,
+    /// The type of each column in the dialect's spelling ("" for none):
+    /// a reference to a column is of that type (resolve.zig's
+    /// tableColumnType()), as a cast would make it, while staying a
+    /// column, whose constraints reach xBestIndex (PostgreSQL's
+    /// pg_attribute.attrelid). Without types, the declared type of the
+    /// column as SQLite's.
+    column_types: []const [:0]const u8 = &.{},
 };
+
+/// The type of column `i` of engine module `name` (EngineModule
+/// .column_types) and the dialect it is spelled in; null if it has none.
+pub fn engineColumnType(name: []const u8, i: usize) ?struct { Dialect, [:0]const u8 } {
+    if (!hasEnginePrefix(name)) return null;
+    inline for (comptime std.enums.values(Dialect)) |d| {
+        for (module(d).hooks.engine_modules) |m| {
+            if (!ctype.eqlNoCase(m.name, name)) continue;
+            if (i >= m.column_types.len or m.column_types[i].len == 0) return null;
+            return .{ d, m.column_types[i] };
+        }
+    }
+    return null;
+}
 
 /// Register the engine module `name` (Hooks.engine_modules) on `db`, for
 /// build.locateTable(); null if there is none of that name.
@@ -452,6 +473,11 @@ fn module(comptime d: Dialect) type {
         .oracle => @import("oracle/frontend.zig"),
     };
 }
+
+/// MariaDB's lexer, for the MySQL server, which splits statements as
+/// the parser does (src/server/mysql/Handler.zig); void when MariaDB is
+/// not built.
+pub const mariadb_lexer = if (Dialect.mariadb.built()) @import("mariadb/lexer.zig") else void;
 
 /// The definition of dialect `d`.
 pub fn spec(d: Dialect) *const Spec {

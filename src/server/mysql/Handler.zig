@@ -306,7 +306,7 @@ fn query(h: *Handler, sql: []const u8) !bool {
             return true;
         },
     };
-    if (!h.multi_statements) if (secondStatement(sql)) |at| {
+    if (!h.multi_statements) if (try h.secondStatement(sql)) |at| {
         try h.syntaxErrorNear(sql[at..]);
         return true;
     };
@@ -400,7 +400,7 @@ fn fieldList(h: *Handler, table: []const u8) !void {
 /// of its parameters and result columns as the statement gives them).
 fn prepare(h: *Handler, sql: []const u8) !void {
     // One statement, even with CLIENT_MULTI_STATEMENTS.
-    if (secondStatement(sql)) |at| return h.syntaxErrorNear(sql[at..]);
+    if (try h.secondStatement(sql)) |at| return h.syntaxErrorNear(sql[at..]);
     var results: Results = .{ .h = h, .binary = true };
     const sp = try h.session.prepare(sql, &results) orelse return;
     if (sp.stmt == null) {
@@ -668,50 +668,42 @@ pub fn parseKill(sql: []const u8) ?Kill {
     return .{ .id = .{ .id = id, .query_only = query_only } };
 }
 
-/// Where a second statement starts in `sql`, if it has one: text after
-/// a `;` outside quotes and comments. For a client without
-/// CLIENT_MULTI_STATEMENTS, which MariaDB answers with a syntax error.
-pub fn secondStatement(sql: []const u8) ?usize {
-    var i: usize = 0;
-    var after_semicolon = false;
-    while (i < sql.len) {
-        const ch = sql[i];
-        if (ch == '#' or (ch == '-' and i + 2 <= sql.len and std.mem.startsWith(u8, sql[i..], "--") and (i + 2 == sql.len or std.ascii.isWhitespace(sql[i + 2])))) {
-            i = std.mem.indexOfScalarPos(u8, sql, i, '\n') orelse sql.len;
-            continue;
+/// Where a second statement starts in `sql`, if it has one. For a client
+/// without CLIENT_MULTI_STATEMENTS, which MariaDB answers with a syntax
+/// error near it. The split is the engine's, so that what is refused is
+/// what would run as two statements: in the MariaDB dialect, its lexer's
+/// (the first token after a `;`, with the session's sql_mode, whose
+/// NO_BACKSLASH_ESCAPES and ANSI_QUOTES change where a string ends); in
+/// another (SQLite's, when MariaDB is not built), the statement that the
+/// engine compiles after the first.
+fn secondStatement(h: *Handler, sql: []const u8) error{OutOfMemory}!?usize {
+    if (comptime xqlite.Dialect.mariadb.built()) if (h.session.dialect() == .mariadb) {
+        // The lexer reads NUL-terminated text.
+        const z = try h.gpa.dupeSentinel(u8, sql, 0);
+        defer h.gpa.free(z);
+        return xqlite.dialect.mariadb_lexer.secondStatement(z, h.session.db.raw().xq.mariadb.sql_mode);
+    };
+    var it = h.session.db.script(sql) catch return error.OutOfMemory;
+    defer it.deinit();
+    // A first statement that does not compile fails as it runs.
+    var first = (it.next() catch return null) orelse return null;
+    first.finalize();
+    // The second statement's first token, after spaces and comments.
+    const rest = it.rest;
+    var at: usize = 0;
+    while (at < rest.len) {
+        const t = xqlite.tokenize.getToken(rest[at..].ptr);
+        switch (t.tk) {
+            xqlite.tokenize.TK.SPACE, xqlite.tokenize.TK.COMMENT, xqlite.tokenize.TK.SEMI => at += t.len,
+            else => break,
         }
-        if (ch == '/' and i + 1 < sql.len and sql[i + 1] == '*') {
-            const end = std.mem.indexOfPos(u8, sql, i + 2, "*/") orelse sql.len;
-            // An executable comment (/*! ... */) is code.
-            if (after_semicolon and i + 2 < sql.len and sql[i + 2] == '!') return i;
-            i = @min(end + 2, sql.len);
-            continue;
-        }
-        if (std.ascii.isWhitespace(ch) or ch == ';') {
-            if (ch == ';') after_semicolon = true;
-            i += 1;
-            continue;
-        }
-        if (after_semicolon) return i;
-        if (ch == '\'' or ch == '"' or ch == '`') {
-            i += 1;
-            while (i < sql.len) : (i += 1) {
-                if (sql[i] == '\\' and ch != '`') {
-                    i += 1;
-                    continue;
-                }
-                if (sql[i] == ch) {
-                    if (i + 1 < sql.len and sql[i + 1] == ch) {
-                        i += 1;
-                        continue;
-                    }
-                    break;
-                }
-            }
-        }
-        i += 1;
     }
-    return null;
+    // Text that does not compile is a second statement too.
+    if (it.next()) |second| {
+        var stmt = second orelse return null;
+        stmt.finalize();
+    } else |_| {}
+    return sql.len - rest.len + at;
 }
 
 test parseKill {
@@ -723,13 +715,4 @@ test parseKill {
     try T.expectEqual(@as(?Kill, null), parseKill("KILL USER bob"));
     try T.expectEqual(@as(?Kill, null), parseKill("SELECT 1"));
     try T.expectEqual(@as(?Kill, null), parseKill("KILL 1; SELECT 2"));
-}
-
-test secondStatement {
-    const T = std.testing;
-    try T.expectEqual(@as(?usize, null), secondStatement("SELECT 1;"));
-    try T.expectEqual(@as(?usize, null), secondStatement("SELECT ';x' ; -- y\n # z\n /* w */ ;"));
-    try T.expectEqual(@as(?usize, 10), secondStatement("SELECT 1; SELECT 2"));
-    try T.expectEqual(@as(?usize, null), secondStatement("SELECT 'a\\';b', `x;``y`"));
-    try T.expectEqual(@as(?usize, null), secondStatement("SELECT 1 --x"));
 }

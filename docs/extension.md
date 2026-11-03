@@ -126,7 +126,7 @@ PostgreSQL의 `jsonb` 열은 SQLite의 JSONB(BLOB)라서 값 자체는 확장 �
 | Oracle | 20 | 49 | 5 | 4 | |
 | SQLite 내장(`xq_sqlite_*`) | | 35 | | | |
 
-모두 결정적이면 결정적으로 등록하므로 식 인덱스, CHECK, 생성 열에 쓸 수 있습니다. `xq_pg_iv_out()`(interval의 텍스트, xqlite에서는 세션의 `IntervalStyle`)은 결정적이지 않아 CHECK와 뷰에만 쓰이고, 확장에서는 세션이 없으므로 기본 형식(postgres)으로 씁니다. 집계(`xq_stddev_pop()`, `xq_postgres_array_agg()`, `xq_tsql_for_json()` ...)와 윈도우 함수(`xq_postgres_array_agg`의 윈도우 형태)도 등록합니다.
+모두 결정적이면 결정적으로 등록하므로 식 인덱스, CHECK, 생성 열에 쓸 수 있습니다. `xq_pg_iv_out()`(interval의 텍스트, xqlite에서는 세션의 `IntervalStyle`)은 결정적이지 않아 CHECK와 뷰에만 쓰이고(xqlite에서는 stable: 상수 인자의 텍스트는 문장마다 한 번 만듦), 확장에서는 세션이 없으므로 기본 형식(postgres)으로 씁니다. 집계(`xq_stddev_pop()`, `xq_postgres_array_agg()`, `xq_tsql_for_json()` ...)와 윈도우 함수(`xq_postgres_array_agg`의 윈도우 형태)도 등록합니다.
 
 ## numeric 키
 

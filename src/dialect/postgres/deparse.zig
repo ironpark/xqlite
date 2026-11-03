@@ -1140,6 +1140,9 @@ const Fixer = struct {
             .{ "xq_pg_jsonb_text", T.jsonb }, .{ "xq_pg_uuid_text", T.uuid },
         };
         for (keys) |k| if (eql(lname, k[0]) and args.len >= 1) return f.asType(args[0], k[1]);
+        // An element of ARRAY[...] made its type's text (overload.zig's
+        // wrapElem()): the value.
+        if (eql(lname, "xq_pg_elem") and args.len == 2) return args[0];
         // Casts.
         const casts = [_]struct { []const u8, []const u8 }{
             .{ "xq_pg_int2", T.int2 },                   .{ "xq_pg_int4", T.int4 },            .{ "xq_pg_int8", T.int8 },
@@ -1548,22 +1551,49 @@ const Printer = struct {
     /// only walk what is printed (its errors).
     w: *std.Io.Writer,
     indent: i32 = 0,
+    /// A line break not written yet, of this many spaces of indent
+    /// (lineBreak()): written before the next text, unless that starts
+    /// with a line break of its own (keyword()).
+    pending: ?usize = null,
+
+    /// Write the line break lineBreak() left pending.
+    fn flush(pr: *Printer) Error!void {
+        const n = pr.pending orelse return;
+        pr.pending = null;
+        pr.w.writeByte('\n') catch return error.OutOfMemory;
+        pr.w.splatByteAll(' ', n) catch return error.OutOfMemory;
+    }
 
     fn put(pr: *Printer, z: []const u8) Error!void {
+        try pr.flush();
         pr.w.writeAll(z) catch return error.OutOfMemory;
     }
 
     fn print(pr: *Printer, comptime fmt: []const u8, args: anytype) Error!void {
+        try pr.flush();
         pr.w.print(fmt, args) catch return error.OutOfMemory;
     }
 
     fn repeat(pr: *Printer, c: u8, n: usize) Error!void {
+        try pr.flush();
         pr.w.splatByteAll(c, n) catch return error.OutOfMemory;
+    }
+
+    /// keyword("", before, after, plus) whose line break waits for what
+    /// follows: none if that starts on a line of its own (a CASE column
+    /// of get_target_list(), which then takes no other line break).
+    fn lineBreak(pr: *Printer, before: i32, after: i32, plus: i32) void {
+        pr.indent += before;
+        pr.pending = @intCast(@max(pr.indent, 0) + plus);
+        pr.indent += after;
+        if (pr.indent < 0) pr.indent = 0;
     }
 
     /// ruleutils.c's appendContextKeyword(): a new line at the indent
     /// (the spaces before it removed).
     fn keyword(pr: *Printer, z: []const u8, before: i32, after: i32, plus: i32) Error!void {
+        // Its line break instead of the one waiting.
+        pr.pending = null;
         pr.indent += before;
         while (pr.w.end > 0 and pr.w.buffer[pr.w.end - 1] == ' ') pr.w.end -= 1;
         try pr.put("\n");
@@ -1574,6 +1604,7 @@ const Printer = struct {
     }
 
     fn quoted(pr: *Printer, z: []const u8) Error!void {
+        try pr.flush();
         pgc.writeIdent(pr.w, z) catch return error.OutOfMemory;
     }
 
@@ -2088,24 +2119,15 @@ fn viewDefErr(
     };
     for (exp.items, 0..) |t0, i| {
         const t = try f.fix(t0);
-        // Where the separator's line break is.
-        var sep: usize = pr.w.end;
+        // The separator's line break waits: a column that starts on a
+        // line of its own (CASE) takes no other (get_target_list()).
         if (i == 0) try pr.put(" ") else {
             try pr.put(",");
-            sep = pr.w.end;
-            try pr.keyword("", -8, 8, 4);
+            pr.lineBreak(-8, 8, 4);
         }
         // An unknown constant is text in a view's result.
         if (t.kind == .str and t.ty.len == 0) t.ty = T.text;
         try pr.expr(t);
-        // A column that starts on a line of its own (CASE, whose keyword
-        // took back the separator's indent) takes no other line break
-        // (get_target_list()).
-        if (i > 0 and pr.w.end > sep + 1 and pr.w.buffer[sep] == '\n' and pr.w.buffer[sep + 1] == '\n') {
-            const n = pr.w.end - sep - 1;
-            std.mem.copyForwards(u8, pr.w.buffer[sep..][0..n], pr.w.buffer[sep + 1 .. pr.w.end]);
-            pr.w.end = sep + n;
-        }
         const name: []const u8 = if (i < names.len) names[i] else "?column?";
         if (!(t.kind == .col and eql(t.text, name))) {
             try pr.put(" AS ");

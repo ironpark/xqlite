@@ -368,8 +368,10 @@ const Db = struct {
     /// dialect, as typeRefused()'s errors are, not a difference of
     /// meaning. So is a string literal the dialect read as a boolean it
     /// met (a call of xq_pg_bool(): PostgreSQL's `true IN ('yes', 'no')`
-    /// is true), which the untyped SQLite text of a view or a CHECK, and
-    /// a parameter bound as text, compare as text.
+    /// is true, as are `coalesce(NULL, 'on')`, `greatest(false, 'yes')`,
+    /// `true BETWEEN 'f' AND 't'` and the column of `VALUES (true),
+    /// ('no')` booleans), which the untyped SQLite text of a view or a
+    /// CHECK, and a parameter bound as text, compare as text.
     fn exactNumeric(v: *vi.Vdbe) bool {
         if (v.xq_exact_numeric) return true;
         for (v.ops.items) |*op| {

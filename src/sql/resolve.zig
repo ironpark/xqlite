@@ -514,11 +514,21 @@ fn typeColumn(p: *Parse, m: *const SrcItem, e: *Expr) Oom!void {
 /// the catalog declares for a table of a dialect whose catalog is in
 /// memory, else unknown (see typeColumn()).
 pub fn tableColumnType(p: *Parse, t: *Table, i: usize) Oom!typing.TypeId {
+    if (engineColumnType(t, i)) |ty| return typing.intern(p.db, ty[0], ty[1]);
     if (!t.isOrdinary() or t.tnum == 0 or i >= t.cols.len) return typing.unknown;
     const meta = catalog.metaCached(t) orelse return typing.unknown;
     const c = meta.column(t.cols[i].name()) orelse return typing.unknown;
     const z = c.decl_type orelse return typing.unknown;
     return typing.intern(p.db, meta.dialect, z);
+}
+
+/// xqlite: the type an engine module gives column `i` of virtual table
+/// `t` (dialect.zig's EngineModule.column_types) and the dialect it is
+/// spelled in; null for another table or a column of no type.
+pub fn engineColumnType(t: *const Table, i: usize) ?struct { @import("../dialect/dialect.zig").Dialect, [:0]const u8 } {
+    if (!t.isVirtual() or t.u.vtab.args.len == 0) return null;
+    const ty = @import("../dialect/dialect.zig").engineColumnType(t.u.vtab.args[0], i) orelse return null;
+    return .{ ty[0], ty[1] };
 }
 
 /// The lookupname_end part of lookupName(): count the reference in every
@@ -1331,6 +1341,9 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
     }
 
     if (is_compound) {
+        // xqlite: the dialect's choices by the types of each column of
+        // its terms (typing.zig).
+        if (typing.active(p.db)) typing.compoundColumns(p, leftmost) catch return WRC.Abort;
         resolveCompoundOrderBy(p, leftmost) catch |err| switch (err) {
             error.ParseFailed => return WRC.Abort,
             error.OutOfMemory => |e| return e,

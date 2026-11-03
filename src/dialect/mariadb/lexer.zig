@@ -254,6 +254,22 @@ pub const Lexer = struct {
     }
 };
 
+/// Where the second statement of `sql` starts, if it has one: the first
+/// token after a `;`, as the parser sees it (atStmtEnd(), with the
+/// sql_mode `mode`). For the MySQL server, whose client without
+/// CLIENT_MULTI_STATEMENTS MariaDB answers with a syntax error near that
+/// token (src/server/mysql/Handler.zig).
+pub fn secondStatement(sql: [:0]const u8, mode: state.SqlMode) ?usize {
+    var lx: Lexer = .init(sql, mode);
+    var after_semicolon = false;
+    while (true) {
+        const t = lx.next();
+        if (t.kind == .eof) return null;
+        if (after_semicolon and !t.is(";")) return t.text.ptr - sql.ptr;
+        if (t.is(";")) after_semicolon = true;
+    }
+}
+
 /// The characters of a variable's name: those of a word, and `.`
 /// (@@session.sql_mode).
 const var_chars = spec.ident.with(".");
@@ -375,4 +391,27 @@ test "lexer: string values" {
     try std.testing.expectEqualStrings("'b'", lx2.next().text);
     const id: Token = .{ .kind = .quoted_ident, .text = "`a``b`" };
     try std.testing.expectEqualStrings("a`b", try identValue(aa, id));
+}
+
+test "lexer: second statement" {
+    const d = state.SqlMode.default;
+    try std.testing.expectEqual(@as(?usize, null), secondStatement("SELECT 1;", d));
+    try std.testing.expectEqual(@as(?usize, null), secondStatement("SELECT ';x' ; -- y\n # z\n /* w */ ;", d));
+    try std.testing.expectEqual(@as(?usize, 10), secondStatement("SELECT 1; SELECT 2", d));
+    try std.testing.expectEqual(@as(?usize, null), secondStatement("SELECT 'a\\';b', `x;``y`", d));
+    try std.testing.expectEqual(@as(?usize, null), secondStatement("SELECT 1 --x", d));
+    // --x is not a comment: `;` ends the first statement.
+    try std.testing.expectEqual(@as(?usize, 4), secondStatement("1--;x", d));
+    // A backslash escapes nothing under NO_BACKSLASH_ESCAPES, and never
+    // in an identifier ("..." under ANSI_QUOTES).
+    try std.testing.expectEqual(@as(?usize, 13), secondStatement("SELECT 'a\\'; SELECT 2", d.with(.NO_BACKSLASH_ESCAPES)));
+    try std.testing.expectEqual(@as(?usize, 13), secondStatement("SELECT \"a\\\"; SELECT 2", d.with(.ANSI_QUOTES)));
+    try std.testing.expectEqual(@as(?usize, null), secondStatement("SELECT \"a\\\"; SELECT 2\"", d));
+    // Executable comments are code, at any place: their `;` too, and
+    // the text after one. One for a later version is a comment.
+    try std.testing.expectEqual(@as(?usize, 15), secondStatement("SELECT 1 /*! ; SELECT 2 */", d));
+    try std.testing.expectEqual(@as(?usize, 24), secondStatement("SELECT 1; /*M!100100 */ SELECT 2", d));
+    try std.testing.expectEqual(@as(?usize, 21), secondStatement("SELECT 1; /*M!100100 SELECT 2 */", d));
+    try std.testing.expectEqual(@as(?usize, null), secondStatement("SELECT 1; /*!999999 SELECT 2 */", d));
+    try std.testing.expectEqual(@as(?usize, null), secondStatement("SELECT 1; /*!*/", d));
 }

@@ -868,9 +868,10 @@ fn failure(b: *Backend, f: Session.Failure) !void {
     try b.errorFields("ERROR", &f.sqlstate, fields, pos);
 }
 
-/// A NoticeResponse: the severity of the notice's level, its DETAIL.
+/// A NoticeResponse: the severity of the notice's level, its DETAIL,
+/// HINT and CONTEXT.
 fn noticeResponse(b: *Backend, n: Session.Notice) !void {
-    return b.errorFields(n.level.name(), &n.sqlstate, .{ .message = n.message, .detail = n.detail }, null);
+    return b.errorFields(n.level.name(), &n.sqlstate, n.fields, null);
 }
 
 fn errorResponse(b: *Backend, severity: []const u8, code: *const [5]u8, message: []const u8, position: ?usize) !void {

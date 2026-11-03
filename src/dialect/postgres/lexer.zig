@@ -74,12 +74,10 @@ pub const Token = struct {
         return t.kind == kind;
     }
 
-    /// Whether this is the unquoted keyword `kw`, which must be in lower
-    /// case as identifiers fold to it: one with upper case could never
-    /// match, so it does not compile.
+    /// Whether this is the unquoted keyword `kw` (any case). Identifiers
+    /// fold to lower case, so `kw` is folded once, at compile time.
     pub fn isKw(t: Token, comptime kw: []const u8) bool {
-        comptime sqllex.assertFolded(.lower, kw);
-        return t.kind == .ident and std.mem.eql(u8, t.text, kw);
+        return t.kind == .ident and std.mem.eql(u8, t.text, comptime sqllex.foldComptime(.lower, kw));
     }
 
     pub fn isAnyKw(t: Token, comptime kws: []const []const u8) bool {

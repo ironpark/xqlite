@@ -261,6 +261,17 @@ test "pg: IntervalStyle changes the text of intervals, not what is stored" {
     // The text of the session is not deterministic: no index of it, as
     // PostgreSQL's interval_out() is stable.
     try c.expectError("CREATE INDEX iv_t ON iv ((v::text))", "non-deterministic functions prohibited in index expressions");
+    try c.expectError("CREATE TABLE ivg (v interval, t text GENERATED ALWAYS AS (v::text) STORED)", "non-deterministic functions prohibited in generated columns");
+    // A CHECK may call it.
+    try c.exec("CREATE TABLE ivc (v interval CHECK (v::text <> '00:00:00'))");
+    try c.exec("INSERT INTO ivc VALUES ('1 day')");
+    try c.expectError("INSERT INTO ivc VALUES ('0')", "new row for relation \"ivc\" violates check constraint \"ivc_v_check\"\nDETAIL:  Failing row contains (00:00:00).");
+    // Stable: a constant's text is made once, when the statement first
+    // needs it (after a set_config() before it in the row, as PostgreSQL;
+    // a later row's set_config() is not seen, as stable allows).
+    try c.expectRows("SELECT set_config('IntervalStyle', 'iso_8601', false), '1 day'::interval::text", "iso_8601|P1D\n");
+    try c.expectRows("SELECT set_config('IntervalStyle', CASE WHEN g = 2 THEN 'postgres' ELSE 'iso_8601' END, false), '1 day'::interval::text FROM (VALUES (1), (2)) v(g)", "iso_8601|P1D\npostgres|P1D\n");
+    try c.expectRows("SELECT '1 day'::interval::text", "1 day\n");
 }
 
 test "pg: operators of dates, timestamps and intervals" {
@@ -927,6 +938,50 @@ test "pg: information_schema and pg_catalog" {
     try c.expectError("SELECT * FROM nosuchschema.person", "relation \"nosuchschema.person\" does not exist");
 }
 
+test "pg: the catalog relations' columns are of the types their casts were" {
+    const pgc = @import("pgcatalog.zig");
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE SEQUENCE s");
+    try c.exec("CREATE TABLE t (id serial PRIMARY KEY, a int NOT NULL DEFAULT 1 CHECK (a > 0), b text UNIQUE, r int REFERENCES t (id), f boolean)");
+    try c.exec("CREATE INDEX t_ab ON t (a, lower(b)) WHERE a > 2");
+    try c.exec("CREATE VIEW v AS SELECT a, b FROM t");
+    try c.exec("COMMENT ON TABLE t IS 'tee'");
+    inline for (pgc.relations) |r| {
+        const typed = comptime pgc.viewText(r);
+        const cast = comptime pgc.castViewText(r);
+        // The same declared types and types of the result columns.
+        var a: ?*vi.Vdbe = null;
+        var b: ?*vi.Vdbe = null;
+        try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, typed, &a, null));
+        defer _ = api.finalize(a.?);
+        try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, cast, &b, null));
+        defer _ = api.finalize(b.?);
+        for (0..api.columnCount(b.?)) |i| {
+            const x = api.columnDecltype(a.?, i) orelse "";
+            const y = api.columnDecltype(b.?, i) orelse "";
+            testing.expectEqualStrings(y, x) catch |err| {
+                std.debug.print("{s} column {d}\n", .{ r.name, i });
+                return err;
+            };
+            try testing.expect(std.meta.eql(b.?.xq_col_types[i], a.?.xq_col_types[i]));
+        }
+        // And the same rows.
+        try c.expectRows("SELECT count(*) FROM (" ++ typed ++ " EXCEPT " ++ cast ++ ") x", "0\n");
+        try c.expectRows("SELECT count(*) FROM (" ++ cast ++ " EXCEPT " ++ typed ++ ") x", "0\n");
+    }
+    // A condition on a key column is the virtual table's (bestIndex()),
+    // of an OID, of another type, or NULL.
+    try c.expectRows("SELECT attname FROM pg_attribute WHERE attrelid = 't'::regclass AND attnum > 0 ORDER BY attnum", "id\na\nb\nr\nf\n");
+    try c.expectRows("SELECT count(*) FROM pg_attribute WHERE attrelid = (SELECT oid::text FROM pg_class WHERE relname = 't')", "11\n");
+    try c.expectRows("SELECT count(*) FROM pg_attribute WHERE attrelid = NULL", "0\n");
+    try c.expectRows("SELECT count(*) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relname = 't'", "11\n");
+    try c.expectRows("SELECT relname FROM pg_class WHERE oid = 1259", "pg_class\n");
+    try c.expectRows("SELECT count(*) FROM pg_constraint WHERE conrelid = 't'::regclass", "6\n");
+    try c.expectRows("SELECT count(*) FROM pg_index WHERE indrelid = 't'::regclass", "3\n");
+}
+
 test "pg: error positions and DETAIL, HINT, CONTEXT lines" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -1016,8 +1071,8 @@ fn expectNotices(c: *Conn, sql: []const u8, want: []const u8) !void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     for (v.?.xq_notices) |n| {
-        try out.print(testing.allocator, "{s} {s}\n", .{ &n.sqlstate, n.message });
-        if (n.detail) |d| try out.print(testing.allocator, "DETAIL: {s}\n", .{d});
+        try out.print(testing.allocator, "{s} {s}\n", .{ &n.sqlstate, n.fields.message });
+        if (n.fields.detail) |d| try out.print(testing.allocator, "DETAIL: {s}\n", .{d});
     }
     try testing.expectEqualStrings(want, out.items);
     while (api.step(v.?) == RC.ROW) {}
@@ -1058,8 +1113,8 @@ test "pg: notices of what IF EXISTS and IF NOT EXISTS skip" {
         defer _ = api.finalize(v.?);
         const n = v.?.xq_notices;
         try testing.expectEqual(@as(usize, 1), n.len);
-        try testing.expectEqualStrings("drop cascades to 2 other objects", n[0].message);
-        const d = n[0].detail.?;
+        try testing.expectEqualStrings("drop cascades to 2 other objects", n[0].fields.message);
+        const d = n[0].fields.detail.?;
         try testing.expect(std.mem.eql(u8, d, "drop cascades to table sc.x\ndrop cascades to table sc.y") or
             std.mem.eql(u8, d, "drop cascades to table sc.y\ndrop cascades to table sc.x"));
         while (api.step(v.?) == RC.ROW) {}

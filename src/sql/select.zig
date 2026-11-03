@@ -995,6 +995,10 @@ fn columnType(nc_arg: *NameContext, e: *Expr, origin: ?*Origin) ?[:0]const u8 {
                 }
                 return null;
             }
+            // xqlite: a column an engine module types (pg_attribute's
+            // attrelid of PostgreSQL), as the cast it stands for: of no
+            // declared type or origin, but the spelling of its type.
+            if (i_col >= 0 and typing.active(nc_arg.parse.db) and resolve.engineColumnType(tab, @intCast(i_col)) != null) return null;
             if (origin != null) {
                 if (i_col < 0) i_col = tab.i_pkey;
                 var z: ?[:0]const u8 = null;

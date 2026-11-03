@@ -889,8 +889,10 @@ fn copyNotices(a: std.mem.Allocator, src: []const int.Notice) error{OutOfMemory}
     const out = try a.alloc(int.Notice, src.len);
     for (src, out) |n, *o| {
         o.* = n;
-        o.message = try a.dupe(u8, n.message);
-        if (n.detail) |d| o.detail = try a.dupe(u8, d);
+        o.fields.message = try a.dupe(u8, n.fields.message);
+        inline for (.{ "detail", "hint", "context" }) |f| {
+            if (@field(n.fields, f)) |z| @field(o.fields, f) = try a.dupe(u8, z);
+        }
     }
     return out;
 }

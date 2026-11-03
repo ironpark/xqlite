@@ -1,0 +1,75 @@
+-- Differential cases of string literals met by a boolean among operands
+-- of one common type (xqt dialect-diff pg tools/dialect/pg-boolean-cases.txt),
+-- in the format of pg-cases.txt: each case starts with a "-- case:" line
+-- and runs on an empty database, in PostgreSQL (psql, unaligned, with
+-- headers) and in `xqlite sql` with `.dialect postgres`; the rows, column
+-- names and error messages (the "ERROR:" line) must be the same. The
+-- expected output is PostgreSQL 18's. IN lists and CASE are in
+-- pg-format-cases.txt.
+
+-- case: BETWEEN, coalesce, nullif, greatest and least of a boolean
+CREATE TABLE bt (id int, b boolean);
+INSERT INTO bt VALUES (1, true), (2, false), (3, NULL);
+SELECT id, b BETWEEN 'f' AND 'yes' AS bw, b NOT BETWEEN 'off' AND 'f' AS nb, coalesce(b, 'yes') AS c, nullif(b, 't') AS n, greatest(b, 'no') AS g, least(b, 'on') AS l FROM bt ORDER BY id;
+SELECT 'yes' BETWEEN false AND true AS a, coalesce('off', true) AS b, coalesce(NULL, 'on', false) AS c, nullif('yes', true) AS d, nullif('no', true) AS e, greatest('yes', false, 'off') AS f, least('1', true) AS g;
+SELECT coalesce('t', 'f') AS t, greatest('a', 'b') AS g, nullif('x', 'y') AS n;
+
+-- case: BETWEEN, coalesce, nullif, greatest and least of a boolean: errors
+SELECT true BETWEEN 'x' AND 'y';
+SELECT 'a' BETWEEN 'b' AND true;
+SELECT coalesce(true, 'maybe');
+SELECT nullif(true, 'x');
+SELECT greatest(true, 'zz');
+SELECT least('q', false);
+
+-- case: ARRAY[...] of a boolean
+CREATE TABLE bt (id int, b boolean);
+INSERT INTO bt VALUES (1, true), (2, false), (3, NULL);
+SELECT id, ARRAY[b, 'yes'] AS a FROM bt ORDER BY id;
+SELECT ARRAY['t', true, 'off'] AS a, ARRAY[NULL, 'on', false] AS b;
+SELECT ARRAY[true, 'nope'];
+
+-- case: VALUES and UNION of a boolean
+SELECT * FROM (VALUES (true), ('no'), ('on')) v(x);
+SELECT * FROM (VALUES (1, 'yes'), (2, false)) v(a, b) WHERE b IS NOT NULL ORDER BY a;
+SELECT * FROM (VALUES (1, true), (2, 'off')) v(a, b) WHERE b;
+VALUES (1, 'yes'), (2, false);
+SELECT true AS x UNION SELECT 'no' ORDER BY 1;
+SELECT 'yes' AS x UNION ALL SELECT false;
+SELECT true AS x UNION SELECT 'no' UNION SELECT 'off' ORDER BY 1;
+SELECT x FROM (SELECT 'on' AS x UNION ALL SELECT false) s WHERE x;
+SELECT 'a' AS x UNION SELECT 'b' ORDER BY 1;
+VALUES (true), ('bad');
+SELECT true UNION SELECT 'xx';
+
+-- case: INSERT of VALUES stores each row as it is
+CREATE TABLE tt (id int, t text, b boolean);
+INSERT INTO tt VALUES (1, 'yes', 'on'), (2, 'no', false);
+INSERT INTO tt SELECT 3, 'x', 'yes' UNION ALL SELECT 4, 'y', false;
+SELECT * FROM tt ORDER BY id;
+
+-- case: definitions of BETWEEN, coalesce, nullif, greatest, least, ARRAY and VALUES of a boolean
+CREATE TABLE bt (id int, b boolean CHECK (coalesce(b, 'yes')) CHECK (b BETWEEN 'f' AND 'on') CHECK (greatest(b, 'f') IS NOT NULL));
+INSERT INTO bt VALUES (1, true);
+INSERT INTO bt VALUES (2, false);
+INSERT INTO bt VALUES (3, NULL);
+SELECT * FROM bt ORDER BY id;
+SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'bt'::regclass AND contype = 'c' ORDER BY 1;
+CREATE VIEW bv AS SELECT id, coalesce(b, 'yes') AS c, nullif(b, 't') AS n, greatest(b, 'no') AS g, least(b, 'on') AS l, ARRAY[b, 'f'] AS a, b BETWEEN 'f' AND 't' AS bw FROM bt;
+SELECT * FROM bv ORDER BY id;
+SELECT pg_get_viewdef('bv') AS def;
+CREATE VIEW vv AS SELECT * FROM (VALUES (true), ('no')) v(x);
+SELECT * FROM vv;
+CREATE VIEW uv AS SELECT 'yes' AS x UNION ALL SELECT false;
+SELECT * FROM uv;
+
+-- case: definitions of BETWEEN, coalesce, nullif, greatest, least, ARRAY and VALUES of a boolean: errors
+CREATE TABLE bt (id int, b boolean);
+CREATE VIEW e1 AS SELECT coalesce(b, 'maybe') FROM bt;
+CREATE VIEW e2 AS SELECT * FROM (VALUES (true), ('bad')) v(x);
+CREATE VIEW e3 AS SELECT greatest(b, 'zz') FROM bt;
+CREATE TABLE e4 (b boolean CHECK (b BETWEEN 'x' AND true));
+CREATE VIEW e5 AS SELECT ARRAY[b, 'nope'] FROM bt;
+CREATE VIEW e6 AS SELECT true AS x UNION SELECT 'xx';
+CREATE TABLE e7 (b boolean CHECK (nullif(b, 'q')));
+SELECT count(*) FROM pg_class WHERE relname LIKE 'e_';

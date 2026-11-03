@@ -51,6 +51,7 @@ pub const rules: typing.Rules = .{
     .unknown_strings = true,
     .literal_input = true,
     .overload = overload.overload,
+    .unify = overload.unify,
     .order_collation = overload.orderCollation,
     .group_key = repr.groupKey,
     .order_key = repr.orderKey,

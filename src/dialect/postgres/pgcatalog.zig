@@ -1900,6 +1900,13 @@ fn collationOf(type_oid: u32, declared: ?[]const u8) u32 {
 // ========================================================= SQLite text
 
 /// A token of SQLite text (just enough to take a statement apart).
+///
+/// The text is SQLite's (sqlite_schema, or an expression the IR rendered),
+/// so the rules are those of SQLite's tokenizer (src/parse/tokenize.zig),
+/// for what they decide here: comments, quotes and the extent of a
+/// number. That tokenizer reads NUL-terminated text, and this one runs on
+/// slices of it (an expression, a column's definition): hence its own
+/// loop, on a bounded slice.
 const Tok = struct {
     kind: enum { word, quoted, string, number, punct, eof },
     text: []const u8,
@@ -1950,17 +1957,54 @@ pub const Scanner = struct {
             else => {},
         }
         if (std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80) {
-            while (s.i < z.len and (std.ascii.isAlphanumeric(z[s.i]) or z[s.i] == '_' or z[s.i] == '$' or z[s.i] >= 0x80)) s.i += 1;
+            while (s.i < z.len and isIdChar(z[s.i])) s.i += 1;
             return .{ .kind = .word, .text = z[start..s.i], .start = start, .end = s.i };
         }
-        if (std.ascii.isDigit(c)) {
-            while (s.i < z.len and (std.ascii.isAlphanumeric(z[s.i]) or z[s.i] == '.')) s.i += 1;
+        if (std.ascii.isDigit(c) or (c == '.' and std.ascii.isDigit(byteAt(z, s.i + 1)))) {
+            s.i = numberEnd(z, s.i);
             return .{ .kind = .number, .text = z[start..s.i], .start = start, .end = s.i };
         }
         s.i += 1;
         return .{ .kind = .punct, .text = z[start..s.i], .start = start, .end = s.i };
     }
 };
+
+/// The byte at `i`, NUL past the end (as SQLite's tokenizer sees it).
+fn byteAt(z: []const u8, i: usize) u8 {
+    return if (i < z.len) z[i] else 0;
+}
+
+/// The end of the number at `i` (a digit, or a `.` before one) as
+/// sqlite3GetToken() scans it: `0x` and hex digits, else digits, a
+/// fraction and an exponent (`e`, a sign, digits); `_` between digits
+/// separates them. Word characters after it belong to the token (an
+/// illegal one to SQLite).
+fn numberEnd(z: []const u8, start: usize) usize {
+    var i = start;
+    if (byteAt(z, i) == '0' and (byteAt(z, i + 1) == 'x' or byteAt(z, i + 1) == 'X') and std.ascii.isHex(byteAt(z, i + 2))) {
+        i += 2;
+        while (std.ascii.isHex(byteAt(z, i)) or (byteAt(z, i) == '_' and std.ascii.isHex(byteAt(z, i + 1)))) i += 1;
+    } else {
+        i = digitsEnd(z, i);
+        if (byteAt(z, i) == '.') i = digitsEnd(z, i + 1);
+        const e = byteAt(z, i);
+        const sign = byteAt(z, i + 1) == '+' or byteAt(z, i + 1) == '-';
+        if ((e == 'e' or e == 'E') and std.ascii.isDigit(byteAt(z, i + 1 + @intFromBool(sign)))) i = digitsEnd(z, i + 1 + @intFromBool(sign));
+    }
+    while (isIdChar(byteAt(z, i))) i += 1;
+    return i;
+}
+
+fn digitsEnd(z: []const u8, start: usize) usize {
+    var i = start;
+    while (std.ascii.isDigit(byteAt(z, i)) or (byteAt(z, i) == '_' and std.ascii.isDigit(byteAt(z, i + 1)))) i += 1;
+    return i;
+}
+
+/// A character of an unquoted word (SQLite's IdChar()).
+fn isIdChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '$' or c >= 0x80;
+}
 
 /// The name a quoted or bare identifier token stands for.
 fn identText(a: Allocator, t: Tok) Oom![]const u8 {
@@ -2449,7 +2493,7 @@ pub const Cell = union(enum) {
 };
 
 /// A column of a catalog relation: its name and PostgreSQL type, which
-/// catalog_views.zig's text casts it to.
+/// a reference to the column has (EngineModule.column_types).
 pub const Col = struct { []const u8, Type };
 
 pub const Type = enum {
@@ -2480,7 +2524,17 @@ pub const Type = enum {
         };
     }
 
-    /// The cast of catalog_views.zig's text ("" for none).
+    /// The spelling of the type of the column (EngineModule
+    /// .column_types), as the parser spells cast()'s type; "" for none
+    /// (text and "char" are of no type, as an unknown literal).
+    pub fn spelling(comptime t: Type) [:0]const u8 {
+        if (t == .char_array) return "char[]";
+        const z = t.cast();
+        return if (z.len == 0) "" else z[2..] ++ "";
+    }
+
+    /// The cast to the type ("" for none): catalog_views.zig's NULL of an
+    /// empty relation's column.
     pub fn cast(t: Type) []const u8 {
         return switch (t) {
             .oid => "::oid",
@@ -2584,6 +2638,18 @@ pub const Relation = struct {
     /// relations', the built-in types'), before the snapshot's: cells
     /// made at compile time (staticRows()).
     static: []const Cell = &.{},
+    /// The columns of OIDs an equality picks the rows by (bestIndex():
+    /// `attrelid = 16384`, a join's `a.attrelid = c.oid`), the better
+    /// first.
+    keys: []const Key = &.{},
+
+    pub const Key = struct {
+        col: u8,
+        /// One row at most of a value (an OID column).
+        unique: bool = false,
+        /// The rows of a value, about (the estimate of bestIndex()).
+        rows: u8 = 1,
+    };
 };
 
 fn fillNamespace(s: *const Snapshot, r: *Rows) Oom!void {
@@ -2963,33 +3029,36 @@ const constraint_cols = [_]Col{
     .{ "conffeqop", .oid_array }, .{ "confdelsetcols", .int2_array }, .{ "conexclop", .oid_array }, .{ "conbin", .text },
 };
 
+/// The first column, an OID of one row each.
+const oid_key: Relation.Key = .{ .col = 0, .unique = true };
+
 pub const relations = [_]Relation{
-    .{ .name = "xq_pg_namespace", .fill = fillNamespace, .cols = &.{
+    .{ .name = "xq_pg_namespace", .fill = fillNamespace, .keys = &.{oid_key}, .cols = &.{
         .{ "oid", .oid }, .{ "nspname", .name }, .{ "nspowner", .oid }, .{ "nspacl", .acl_array },
     } },
-    .{ .name = "xq_pg_class", .fill = fillClass, .static = static_rows.class, .cols = &class_cols },
-    .{ .name = "xq_pg_attribute", .fill = fillAttribute, .static = static_rows.attribute, .cols = &attribute_cols },
-    .{ .name = "xq_pg_type", .fill = fillType, .static = static_rows.type, .cols = &type_cols },
-    .{ .name = "xq_pg_index", .fill = fillIndex, .static = static_rows.index, .cols = &index_cols },
-    .{ .name = "xq_pg_constraint", .fill = fillConstraint, .static = static_rows.constraint, .cols = &constraint_cols },
-    .{ .name = "xq_pg_attrdef", .fill = fillAttrdef, .cols = &.{
+    .{ .name = "xq_pg_class", .fill = fillClass, .static = static_rows.class, .keys = &.{oid_key}, .cols = &class_cols },
+    .{ .name = "xq_pg_attribute", .fill = fillAttribute, .static = static_rows.attribute, .keys = &.{.{ .col = 0, .rows = 10 }}, .cols = &attribute_cols },
+    .{ .name = "xq_pg_type", .fill = fillType, .static = static_rows.type, .keys = &.{oid_key}, .cols = &type_cols },
+    .{ .name = "xq_pg_index", .fill = fillIndex, .static = static_rows.index, .keys = &.{ oid_key, .{ .col = 1, .rows = 2 } }, .cols = &index_cols },
+    .{ .name = "xq_pg_constraint", .fill = fillConstraint, .static = static_rows.constraint, .keys = &.{ oid_key, .{ .col = 8, .rows = 3 }, .{ .col = 12, .rows = 2 } }, .cols = &constraint_cols },
+    .{ .name = "xq_pg_attrdef", .fill = fillAttrdef, .keys = &.{ oid_key, .{ .col = 1, .rows = 2 } }, .cols = &.{
         .{ "oid", .oid }, .{ "adrelid", .oid }, .{ "adnum", .int2 }, .{ "adbin", .text },
     } },
-    .{ .name = "xq_pg_sequence", .fill = fillSequence, .cols = &.{
+    .{ .name = "xq_pg_sequence", .fill = fillSequence, .keys = &.{oid_key}, .cols = &.{
         .{ "seqrelid", .oid }, .{ "seqtypid", .oid }, .{ "seqstart", .int8 }, .{ "seqincrement", .int8 },
         .{ "seqmax", .int8 },  .{ "seqmin", .int8 },  .{ "seqcache", .int8 }, .{ "seqcycle", .bool },
     } },
-    .{ .name = "xq_pg_depend", .fill = fillDepend, .cols = &.{
+    .{ .name = "xq_pg_depend", .fill = fillDepend, .keys = &.{ .{ .col = 1, .rows = 2 }, .{ .col = 4, .rows = 2 } }, .cols = &.{
         .{ "classid", .oid },  .{ "objid", .oid },        .{ "objsubid", .int4 }, .{ "refclassid", .oid },
         .{ "refobjid", .oid }, .{ "refobjsubid", .int4 }, .{ "deptype", .char },
     } },
-    .{ .name = "xq_pg_description", .fill = fillDescription, .cols = &.{
+    .{ .name = "xq_pg_description", .fill = fillDescription, .keys = &.{.{ .col = 0, .rows = 2 }}, .cols = &.{
         .{ "objoid", .oid }, .{ "classoid", .oid }, .{ "objsubid", .int4 }, .{ "description", .text },
     } },
     .{ .name = "xq_pg_view_columns", .fill = fillViewColumns, .any = anyView, .cols = &.{
         .{ "tbl", .text }, .{ "col", .text }, .{ "typid", .oid }, .{ "typmod", .int4 },
     } },
-    .{ .name = "xq_pg_proc", .fill = fillProc, .cols = &.{
+    .{ .name = "xq_pg_proc", .fill = fillProc, .keys = &.{oid_key}, .cols = &.{
         .{ "oid", .oid },                  .{ "proname", .name },           .{ "pronamespace", .oid },       .{ "proowner", .oid },
         .{ "prolang", .oid },              .{ "procost", .float4 },         .{ "prorows", .float4 },         .{ "provariadic", .oid },
         .{ "prosupport", .text },          .{ "prokind", .char },           .{ "prosecdef", .bool },         .{ "proleakproof", .bool },
@@ -3001,9 +3070,25 @@ pub const relations = [_]Relation{
     } },
 };
 
-/// The view text of relation `pg_name` (pg_class ...): its columns cast
-/// to their types, from the virtual table.
+/// The view text of relation `pg_name` (pg_class ...): the columns of
+/// the virtual table, which are of their types (EngineModule
+/// .column_types) without a cast, so that a condition on one (`attrelid
+/// = 16384`, a join's `a.attrelid = c.oid`) is a constraint of
+/// bestIndex().
 pub fn viewText(comptime rel: Relation) []const u8 {
+    comptime {
+        var z: []const u8 = "SELECT ";
+        for (rel.cols, 0..) |c, i| {
+            if (i > 0) z = z ++ ", ";
+            z = z ++ c[0];
+        }
+        return z ++ " FROM " ++ rel.name;
+    }
+}
+
+/// The view text of relation `rel` as it was before its columns were
+/// typed: each cast to its type (the test of column_types).
+pub fn castViewText(comptime rel: Relation) []const u8 {
     comptime {
         var z: []const u8 = "SELECT ";
         for (rel.cols, 0..) |c, i| {
@@ -3011,6 +3096,15 @@ pub fn viewText(comptime rel: Relation) []const u8 {
             z = z ++ c[0] ++ c[1].cast() ++ " AS " ++ c[0];
         }
         return z ++ " FROM " ++ rel.name;
+    }
+}
+
+fn columnTypes(comptime rel: Relation) []const [:0]const u8 {
+    comptime {
+        var out: [rel.cols.len][:0]const u8 = undefined;
+        for (rel.cols, &out) |c, *o| o.* = c[1].spelling();
+        const final = out;
+        return &final;
     }
 }
 
@@ -3045,9 +3139,29 @@ const Cursor = struct {
     cells: []const Cell = &.{},
     ncol: usize = 1,
     i: usize = 0,
+    /// The rows read: those whose column `col` is `value` (filter()'s
+    /// equality), or all.
+    key: ?struct { col: usize, value: i64 } = null,
 
     fn of(cur: *vtab.VtabCursor) *Cursor {
         return @alignCast(@fieldParentPtr("base", cur));
+    }
+
+    fn eof(c: *const Cursor) bool {
+        return c.i * c.ncol >= c.head.len + c.cells.len;
+    }
+
+    fn cellAt(c: *const Cursor, k: usize) Cell {
+        return if (k < c.head.len) c.head[k] else c.cells[k - c.head.len];
+    }
+
+    /// From row `i` on, to the first row read (or the end).
+    fn seek(c: *Cursor) void {
+        const key = c.key orelse return;
+        while (!c.eof()) : (c.i += 1) switch (c.cellAt(c.i * c.ncol + key.col)) {
+            .int => |v| if (v == key.value) return,
+            else => {},
+        };
     }
 
     pub fn init(t: *VTable) Cursor {
@@ -3074,8 +3188,27 @@ fn moduleOf(comptime rel: Relation) vtab.Module {
             return RC.OK;
         }
 
-        fn filter(cur: *vtab.VtabCursor, _: i32, _: ?[:0]const u8, _: []*vi.Mem) i32 {
+        fn filter(cur: *vtab.VtabCursor, idx_num: i32, _: ?[:0]const u8, argv: []*vi.Mem) i32 {
             const c = Cursor.of(cur);
+            // An equality on a key column (bestIndex()): of an integer,
+            // the rows of that OID; of a value of another type, every
+            // row (SQLite tests the condition on each, with the column's
+            // affinity); NULL none.
+            c.key = null;
+            var none = false;
+            if (idx_num > 0 and argv.len == 1) {
+                const col: usize = @intCast(idx_num - 1);
+                const m = argv[0];
+                switch (api.valueType(m)) {
+                    vi.SQLITE_INTEGER => c.key = .{ .col = col, .value = api.valueInt64(m) },
+                    vi.SQLITE_FLOAT => {
+                        const f = api.valueDouble(m);
+                        if (@floor(f) == f and @abs(f) < 1e18) c.key = .{ .col = col, .value = @intFromFloat(f) } else if (!std.math.isNan(f)) none = true;
+                    },
+                    vi.SQLITE_NULL => none = true,
+                    else => {},
+                }
+            }
             // The new snapshot taken before the old is let go: the rows
             // read stay while the statement holds one (release()), for
             // a nested loop's scans.
@@ -3087,6 +3220,10 @@ fn moduleOf(comptime rel: Relation) vtab.Module {
             c.cells = &.{};
             c.head = rel.static;
             c.ncol = rel.cols.len;
+            if (none) {
+                c.head = &.{};
+                return RC.OK;
+            }
             c.snap = get(c.db, rel.any) catch |err| return switch (err) {
                 error.OutOfMemory => RC.NOMEM,
                 error.Failed => blk: {
@@ -3094,8 +3231,36 @@ fn moduleOf(comptime rel: Relation) vtab.Module {
                     break :blk RC.ERROR;
                 },
             };
-            const s = c.snap orelse return RC.OK;
-            c.cells = s.rowsOf(rel) catch return RC.NOMEM;
+            if (c.snap) |s| c.cells = s.rowsOf(rel) catch return RC.NOMEM;
+            c.seek();
+            return RC.OK;
+        }
+
+        /// An equality on a key column (Relation.keys) picks the rows:
+        /// its value is filter()'s argument (the condition still tested
+        /// by SQLite). The estimates: the system rows and some.
+        fn bestIndex(_: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
+            const all: f64 = @floatFromInt(rel.static.len / rel.cols.len + 100);
+            info.estimated_cost = all;
+            info.estimated_rows = @intFromFloat(all);
+            if (rel.keys.len == 0) return RC.OK;
+            var best: ?usize = null;
+            var best_key: usize = rel.keys.len;
+            for (info.constraints, 0..) |cons, i| {
+                if (!cons.usable or cons.op != vtab.INDEX_CONSTRAINT.EQ or cons.i_column < 0) continue;
+                for (rel.keys, 0..) |k, j| if (k.col == cons.i_column and j < best_key) {
+                    best = i;
+                    best_key = j;
+                };
+            }
+            const i = best orelse return RC.OK;
+            const k = rel.keys[best_key];
+            info.usage[i].argv_index = 1;
+            info.idx_num = @as(i32, k.col) + 1;
+            info.estimated_rows = k.rows;
+            // Each row tested by the cursor, not by SQLite's loop.
+            info.estimated_cost = @as(f64, @floatFromInt(k.rows)) + all / 50;
+            if (k.unique) info.idx_flags |= vtab.INDEX_SCAN_UNIQUE;
             return RC.OK;
         }
 
@@ -3110,7 +3275,7 @@ fn moduleOf(comptime rel: Relation) vtab.Module {
     return .{
         .i_version = 0,
         .x_connect = M.connect,
-        .x_best_index = bestIndex,
+        .x_best_index = M.bestIndex,
         .x_disconnect = lifecycle.disconnect,
         .x_open = lifecycle.open,
         .x_close = lifecycle.close,
@@ -3122,26 +3287,21 @@ fn moduleOf(comptime rel: Relation) vtab.Module {
     };
 }
 
-fn bestIndex(_: *vtab.Vtab, info: *vtab.IndexInfo) i32 {
-    info.estimated_cost = 1000;
-    info.estimated_rows = 100;
-    return RC.OK;
-}
-
 fn next(cur: *vtab.VtabCursor) i32 {
-    Cursor.of(cur).i += 1;
+    const c = Cursor.of(cur);
+    c.i += 1;
+    c.seek();
     return RC.OK;
 }
 
 fn eof(cur: *vtab.VtabCursor) bool {
-    const c = Cursor.of(cur);
-    return c.i * c.ncol >= c.head.len + c.cells.len;
+    return Cursor.of(cur).eof();
 }
 
 fn column(cur: *vtab.VtabCursor, ctx: *Context, i: i32) i32 {
     const c = Cursor.of(cur);
     const k = c.i * c.ncol + @as(usize, @intCast(i));
-    switch (if (k < c.head.len) c.head[k] else c.cells[k - c.head.len]) {
+    switch (c.cellAt(k)) {
         .null => api.resultNull(ctx),
         .int => |v| api.resultInt64(ctx, v),
         .float => |v| api.resultDouble(ctx, v),
@@ -3171,7 +3331,7 @@ const module_list = blk: {
 
 pub const modules = blk: {
     var out: [relations.len]dialect.EngineModule = undefined;
-    for (relations, 0..) |r, i| out[i] = .{ .name = r.name, .module = &module_list[i] };
+    for (relations, 0..) |r, i| out[i] = .{ .name = r.name, .module = &module_list[i], .column_types = columnTypes(r) };
     const final = out;
     break :blk final;
 };
@@ -3242,4 +3402,23 @@ test "oids: only colliding keys move, by their order" {
     const d = try assign(a, 'r', keys.items);
     try std.testing.expectEqualSlices(u32, r, d[0..r.len]);
     try std.testing.expect(d[r.len] >= large_first);
+}
+
+test "SQLite text: numbers end as SQLite's tokenizer ends them" {
+    const texts = [_][]const u8{ "1.5e-3", "2.5E+3", ".5", "1_000", "0x1F", "12", "3.", "1e", "1abc" };
+    const ends = [_]usize{ 6, 6, 2, 5, 4, 2, 2, 2, 4 };
+    for (texts, ends) |z, e| {
+        var s: Scanner = .{ .z = z };
+        const t = s.next();
+        try std.testing.expectEqual(.number, t.kind);
+        try std.testing.expectEqual(e, t.end);
+    }
+    // Not an exponent: 1e is a (bad) number, then - and 3.
+    var s: Scanner = .{ .z = "1e-x" };
+    try std.testing.expectEqualStrings("1e", s.next().text);
+    try std.testing.expectEqualStrings("-", s.next().text);
+    // A bounded slice: the scan stops at its end.
+    s = .{ .z = "12e+5"[0..3] };
+    try std.testing.expectEqualStrings("12e", s.next().text);
+    try std.testing.expectEqual(.eof, s.next().kind);
 }

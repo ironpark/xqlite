@@ -70,7 +70,7 @@
 - 실패한 문장은 `run()`의 오류가 아니라 `failed` 이벤트입니다. `run()`의 오류는 sink의 오류(클라이언트가 떠남)와 메모리 부족뿐입니다.
 - `Options.abort_failed_transactions`: PostgreSQL의 규칙입니다. 트랜잭션 안에서 문장이 실패하면 트랜잭션이 끝날 때까지 `ROLLBACK` 말고는 모두 `25P02`로 실패하고, `COMMIT`은 롤백합니다(`ROLLBACK` 태그). PostgreSQL처럼 이 판정(`Session.admit()`)은 문장을 컴파일하기 전에 하고, 확장 질의의 Execute도 같은 함수를 씁니다. 끄면 SQLite·MySQL·SQL Server처럼 실패한 문장만 되돌립니다.
 - `Options.implicit_transactions`: PostgreSQL의 암묵적 트랜잭션 블록입니다. 트랜잭션 밖에서 스크립트의 문장들(문장이 둘 이상일 때)이나 `sync()`까지 실행한 준비된 문장들은 세션이 연 트랜잭션 하나에서 돌고, 스크립트 끝이나 `sync()`에서 커밋됩니다. 문장이 실패하면 그 앞의 문장까지 롤백됩니다. 그 안의 `BEGIN`은 트랜잭션을 클라이언트의 것으로 바꾸고(실행하지 않고 `BEGIN` 완료), 트랜잭션 밖의 `COMMIT`/`ROLLBACK`은 오류가 아니라 경고(`notice`, `25P01` "there is no transaction in progress")입니다. `SAVEPOINT`, `RELEASE`, `VACUUM`, `ATTACH`, `DETACH`, `PRAGMA`, `SET`, `SHOW`, `USE`는 암묵적 트랜잭션을 열지 않습니다.
-- `notice(Notice)`는 선택 이벤트입니다. sink에 `pub fn notice`가 없으면 부르지 않습니다. 세션의 경고와 문장의 알림(`Stmt.notices()`: PostgreSQL 방언의 `table "t" does not exist, skipping` ...)이 나가고, 문장의 알림은 문장이 실행될 때마다 첫 `step()` 뒤, 그 문장의 `columns`·`complete` 앞에 나갑니다. 연결의 설정이 빼는 수준(`Db.noticeLevel()`: PostgreSQL의 `client_min_messages`)의 것은 보내지 않습니다. `Notice`에는 수준(`NOTICE`, `WARNING`), SQLSTATE, 메시지, `DETAIL`이 있습니다.
+- `notice(Notice)`는 선택 이벤트입니다. sink에 `pub fn notice`가 없으면 부르지 않습니다. 세션의 경고와 문장의 알림(`Stmt.notices()`: PostgreSQL 방언의 `table "t" does not exist, skipping` ...)이 나가고, 문장의 알림은 문장이 실행될 때마다 첫 `step()` 뒤, 그 문장의 `columns`·`complete` 앞에 나갑니다. 연결의 설정이 빼는 수준(`Db.noticeLevel()`: PostgreSQL의 `client_min_messages`)의 것은 보내지 않습니다. `Notice`에는 수준(`NOTICE`, `WARNING`), SQLSTATE, `fields`(`ErrorFields`: 메시지, 있으면 `DETAIL`, `HINT`, `CONTEXT`)가 있습니다.
 - `SET`은 결과가 없습니다. 방언이 `SET`을 질의로 돌려도(PostgreSQL의 `set_config()`) `columns`·`row` 없이 `complete`만 나갑니다.
 - `status()`: `idle`, `in_transaction`, `aborted`. PostgreSQL ReadyForQuery의 `I`/`T`/`E`, MySQL의 `SERVER_STATUS_IN_TRANS`입니다. 세션이 연 암묵적 트랜잭션은 `idle`입니다.
 - `markFailed()`: 프로토콜이 스스로 낸 문장의 실패(보낼 수 없는 값, 읽을 수 없는 매개변수) 뒤에, 문장의 실패처럼 암묵적 트랜잭션을 롤백하거나 열린 트랜잭션을 실패로 표시합니다.
@@ -119,7 +119,7 @@ try session.sync(&sink);                                 // 암묵적 트랜잭�
 
 `command.classify(sql)`은 문장 텍스트의 앞 키워드로 명령을 정합니다. 프론트엔드가 이미 문장을 파싱했으므로 근본적으로는 엔진이 문장의 종류를 기록해야 합니다([다음 단계](#다음-단계)). 텍스트 판정은 그때까지의 것이고, 컴파일 전에 판정해야 하는 곳(실패한 트랜잭션의 `ROLLBACK`/`COMMIT`, 컴파일에 실패한 문장)에만 남습니다. PostgreSQL의 명령 태그(`INSERT 0 3`, `CREATE INDEX`), MySQL OK 패킷의 바뀐 행 수, TDS DONE의 행 수에 씁니다.
 
-- 주석과 `WITH` 절을 건너뜁니다. `WITH x AS (...) DELETE ...`는 `DELETE`입니다. 모든 방언의 따옴표(`'...'`, `"..."`, `` `...` ``, `[...]`)를 알아서, 문자열과 이름 안의 키워드는 보지 않습니다.
+- 주석과 `WITH` 절을 건너뜁니다. `WITH x AS (...) DELETE ...`는 `DELETE`입니다. 모든 방언의 따옴표(`'...'`, `"..."`, `` `...` ``, `[...]`, 겹친 따옴표는 따옴표 하나)를 알아서, 문자열과 이름 안의 키워드는 보지 않습니다. 어느 한 방언의 규칙이 아니므로 MySQL의 백슬래시 이스케이프는 모릅니다. 주석, 따옴표, 단어는 렉서들의 스캐너(`pkg/sqllex`)로 읽습니다.
 - `CREATE`/`DROP`/`ALTER`는 수식어를 뺀 객체 종류를 씁니다: `CREATE UNIQUE INDEX` → `INDEX`, `CREATE OR REPLACE VIEW` → `VIEW`, `CREATE MATERIALIZED VIEW` → `MATERIALIZED VIEW`.
 - 별칭: `START TRANSACTION` → `BEGIN`, `END` → `COMMIT`, `REPLACE INTO` → `INSERT`, `EXEC`/`CALL` → `EXECUTE`.
 
@@ -160,7 +160,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 
 - `Query`의 텍스트는 스크립트입니다(`Session.run()`): 문장마다 `RowDescription`, `DataRow`, `CommandComplete`. 문장이 실패하면 `ErrorResponse`를 보내고 나머지는 돌리지 않으며, 암묵적 트랜잭션이면 앞의 문장도 롤백됩니다. 문장이 없으면 `EmptyQueryResponse`. 끝에 `ReadyForQuery`.
 - 명령 태그: `SELECT n`(VALUES도, `CREATE TABLE ... AS`·`SELECT ... INTO`는 넣은 행 수: PostgreSQL 방언의 CREATE TABLE AS는 `Hooks.count_create_as`로 행을 `changes()`에 셈), `INSERT 0 n`, `UPDATE n`, `DELETE n`, `MERGE n`, `TRUNCATE TABLE`, `CALL`, 나머지는 명령 분류의 단어(`CREATE TABLE`, `BEGIN`, `SET`, `RESET`, `COMMENT` ...). `SET`과 `RESET`은 행을 보내지 않습니다.
-- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)(엔진이 적은 자리에서 자름, [PostgreSQL 호환](postgres/differences.md)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`: `WARNING`)와 문장의 알림(`IF EXISTS`·`IF NOT EXISTS`가 건너뛴 것, `DROP SCHEMA ... CASCADE`가 함께 지운 것: `NOTICE`, [PostgreSQL 호환](postgres/differences.md))이고, `S`/`V`, `C`, `M`, 있으면 `D`입니다. 문장의 알림은 그 문장의 `CommandComplete` 앞에 나가고(확장 질의는 `Execute`마다), `SET client_min_messages = warning`이면 `NOTICE`를, `error`면 `WARNING`도 보내지 않습니다.
+- `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)(엔진이 적은 자리에서 자름, [PostgreSQL 호환](postgres/differences.md)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`: `WARNING`)와 문장의 알림(`IF EXISTS`·`IF NOT EXISTS`가 건너뛴 것, `DROP SCHEMA ... CASCADE`가 함께 지운 것: `NOTICE`, [PostgreSQL 호환](postgres/differences.md))이고, `S`/`V`, `C`, `M`, 있으면 `D`, `H`, `W`입니다. 문장의 알림은 그 문장의 `CommandComplete` 앞에 나가고(확장 질의는 `Execute`마다), `SET client_min_messages = warning`이면 `NOTICE`를, `error`면 `WARNING`도 보내지 않습니다.
 - 단순 질의는 이름 없는 문장과 포털을 지웁니다.
 
 ### 확장 질의
@@ -285,7 +285,7 @@ try srv.run(); // 취소될 때까지
 | `COM_STMT_FETCH` | 커서가 없으므로 ERR 1235. |
 | `COM_CHANGE_USER`, `COM_SHUTDOWN`, 그 밖 | ERR(1235, 1227, 1047). |
 
-- 여러 문장: 각 결과의 마지막 패킷(OK, 또는 결과 집합 끝의 EOF/OK)은 다음 이벤트가 올 때까지 보내지 않고 기다렸다가, 뒤에 결과가 더 있으면 `SERVER_MORE_RESULTS_EXISTS`를 붙여 보냅니다. 문장이 실패하면 앞 결과에 이 플래그가 붙고 ERR이 마지막입니다(MariaDB와 같음). 클라이언트가 `MULTI_STATEMENTS`를 켜지 않았으면 두 번째 문장이 있는 질의는 아무것도 실행하지 않고 ERR 1064입니다. 이 판단은 따옴표와 주석(`#`, `-- `, `/* */`)을 아는 텍스트 검사입니다.
+- 여러 문장: 각 결과의 마지막 패킷(OK, 또는 결과 집합 끝의 EOF/OK)은 다음 이벤트가 올 때까지 보내지 않고 기다렸다가, 뒤에 결과가 더 있으면 `SERVER_MORE_RESULTS_EXISTS`를 붙여 보냅니다. 문장이 실패하면 앞 결과에 이 플래그가 붙고 ERR이 마지막입니다(MariaDB와 같음). 클라이언트가 `MULTI_STATEMENTS`를 켜지 않았으면 두 번째 문장이 있는 질의는 아무것도 실행하지 않고 ERR 1064입니다. 두 번째 문장은 엔진이 나누는 대로 찾습니다. MariaDB 방언에서는 방언의 렉서(`mariadb/lexer.zig`의 `secondStatement()`)로 `;` 뒤의 첫 토큰을 찾으므로 세션의 `sql_mode`(`NO_BACKSLASH_ESCAPES`, `ANSI_QUOTES`)와 실행 주석(`/*! ... */`, `/*M!NNNNN ... */`. 버전이 우리보다 높으면 주석)이 파서와 같습니다. 다른 방언(MariaDB가 빌드되지 않았을 때의 SQLite 방언)에서는 첫 문장을 컴파일해 보고 그 뒤에 문장이 있는지 봅니다(트리거 본문의 `;`는 나누지 않음).
 - `DEPRECATE_EOF`가 없으면 열 정의 뒤와 결과 집합 끝에 EOF 패킷을, 있으면 결과 집합 끝에 헤더가 `0xFE`인 OK 패킷을 보냅니다.
 - OK 패킷: 바뀐 행 수는 `Complete.changes`, 마지막 삽입 id는 `INSERT`가 행을 넣었을 때의 `Complete.last_insert_id`(여러 행이면 마지막 행의 id, `LAST_INSERT_ID()`와 같음), 경고 수는 MariaDB 세션의 경고 수입니다(`SET sql_mode=''` 뒤의 잘린 값 → `warnings=1`, `SHOW WARNINGS`). 상태 플래그는 `AUTOCOMMIT`(언제나), 트랜잭션 안이면 `IN_TRANS`, `NO_BACKSLASH_ESCAPES` 모드면 `NO_BACKSLASH_ESCAPES`(클라이언트의 문자열 이스케이프가 이것을 봅니다)입니다. 상태와 경고 수는 그 문장이 끝났을 때의 것입니다.
 - `UPDATE`의 바뀐 행 수는 SQLite처럼 조건에 맞은 행 수입니다(`FOUND_ROWS`의 뜻). 값이 같아 바뀌지 않은 행도 셉니다.
@@ -327,7 +327,7 @@ MariaDB 방언에는 `KILL`이 없으므로 프로토콜이 `COM_QUERY`의 텍�
 
 준비된 문장은 `Session`의 프로토콜 중립 API([준비된 문장](#준비된-문장)) 위에 있습니다. `prepared.zig`에는 MySQL의 것(문장 id, 클라이언트가 묶은 매개변수 타입, `SEND_LONG_DATA`의 바이트, 이진 매개변수 읽기)만 있고, 실행·설명·트랜잭션 상태는 `Session.Prepared`가 합니다.
 
-- `COM_STMT_PREPARE`: `Session.prepare()`. 문장은 하나만 받습니다: `MULTI_STATEMENTS`를 켠 클라이언트라도 두 번째 문장이 있으면 ERR 1064(MariaDB와 같음, `COM_QUERY`와 같은 텍스트 검사), 빈 텍스트는 ERR 1065 `Query was empty`, 컴파일 오류는 그 ERR입니다. 답은 문장 id, 열 수, 매개변수 수, 매개변수 정의(타입은 `Prepared.parameterType()`, 모르면 `VAR_STRING`), 실행 전의 열 정의(`Prepared.columns`: 테이블 열은 선언 타입, 식은 문장이 매긴 타입, 모르면 `VAR_STRING`)입니다.
+- `COM_STMT_PREPARE`: `Session.prepare()`. 문장은 하나만 받습니다: `MULTI_STATEMENTS`를 켠 클라이언트라도 두 번째 문장이 있으면 ERR 1064(MariaDB와 같음, `COM_QUERY`와 같은 판단), 빈 텍스트는 ERR 1065 `Query was empty`, 컴파일 오류는 그 ERR입니다. 답은 문장 id, 열 수, 매개변수 수, 매개변수 정의(타입은 `Prepared.parameterType()`, 모르면 `VAR_STRING`), 실행 전의 열 정의(`Prepared.columns`: 테이블 열은 선언 타입, 식은 문장이 매긴 타입, 모르면 `VAR_STRING`)입니다.
 - `COM_STMT_EXECUTE`: NULL 비트맵, 새로 묶은 타입(없으면 앞 실행의 타입), 이진 값을 읽어 `Prepared.bind()`로 묶고 `Prepared.execute(0, sink)`로 모든 행을 보냅니다(커서 없음). 결과는 열 정의(실행 전의 것에서 모르는 식만 첫 행으로 정한 것)와 이진 행입니다. 묶을 수 없는 값(너무 큰 값)은 ERR 1210입니다. 문장 id `0xFFFFFFFF`는 MariaDB처럼 마지막으로 준비한 문장입니다. 커서 플래그는 무시하고(`SERVER_STATUS_CURSOR_EXISTS`를 보내지 않으므로 클라이언트는 행을 바로 읽음) 반복 횟수는 1입니다. 실행이 끝나면(실패해도) 문장을 `reset()`해 잠금을 놓습니다.
 - 매개변수: `TINY`·`SHORT`·`YEAR`·`LONG`·`INT24`·`LONGLONG`(부호 없음 플래그, `i64`를 넘는 부호 없는 값은 십진 텍스트), `FLOAT`·`DOUBLE`, `DATE`·`DATETIME`·`TIMESTAMP`(`YYYY-MM-DD[ HH:MM:SS[.ffffff]]` 텍스트), `TIME`(`[-]HH:MM:SS[.ffffff]`, 일은 시간으로), BLOB 계열·`BIT`·`GEOMETRY`는 BLOB, 그 밖의 문자열·`DECIMAL`은 텍스트로 묶습니다. 저장할 때 방언의 값 변환이 열 타입으로 바꿉니다.
 - `COM_STMT_SEND_LONG_DATA`: 매개변수의 바이트를 모아 다음 실행에 씁니다(BLOB 타입이면 BLOB, 아니면 텍스트). 답이 없습니다.

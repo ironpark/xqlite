@@ -256,8 +256,8 @@ fn cascadeNotice(p: *int.Parse, a: std.mem.Allocator, drops: anytype) Error!void
         n += 1;
     };
     if (n == 0) return;
-    if (n == 1) return @import("../../sql/util.zig").notice(p, .{ .message = detail.items });
-    @import("../../sql/util.zig").notice(p, .{ .message = try std.fmt.allocPrint(a, "drop cascades to {d} other objects", .{n}), .detail = detail.items });
+    if (n == 1) return @import("../../sql/util.zig").notice(p, .{ .fields = .{ .message = detail.items } });
+    @import("../../sql/util.zig").notice(p, .{ .fields = .{ .message = try std.fmt.allocPrint(a, "drop cascades to {d} other objects", .{n}), .detail = detail.items } });
 }
 
 /// A statement that does nothing.

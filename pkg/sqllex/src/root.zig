@@ -19,7 +19,8 @@
 //!   `indexOfAnyOrNul()`.
 //! - Decoding is separate from scanning, so that a lexer that keeps raw
 //!   slices of the text and decodes on demand and one that decodes as it
-//!   tokenizes use the same code: `undouble()`, `fold()`, `evenDigits()`.
+//!   tokenizes use the same code: `undouble()`, `fold()`,
+//!   `foldComptime()`, `evenDigits()`.
 //! - Positions: `lineOf()`, `restOfLine()`, `charLen()`, `blankBefore()`,
 //!   `blankAfter()`.
 //!
@@ -538,6 +539,18 @@ pub fn assertFolded(comptime case: Case, comptime word: []const u8) void {
     comptime for (word) |c| if (notIn(case, c)) @compileError("word not in " ++ @tagName(case) ++ " case: " ++ word);
 }
 
+/// `word` folded to `case` at compile time: a keyword written in any
+/// case, to match against a lexer's folded names (`Token.isKw()` of
+/// PostgreSQL and Oracle).
+pub fn foldComptime(comptime case: Case, comptime word: []const u8) *const [word.len]u8 {
+    comptime {
+        var out: [word.len]u8 = undefined;
+        for (word, &out) |c, *o| o.* = if (case == .lower) std.ascii.toLower(c) else std.ascii.toUpper(c);
+        const final = out;
+        return &final;
+    }
+}
+
 /// `word` folded to `case` (ASCII letters only): `word` itself if it is
 /// in that case already, else a copy in `a`.
 pub fn fold(a: std.mem.Allocator, word: []const u8, comptime case: Case) error{OutOfMemory}![]const u8 {
@@ -576,9 +589,10 @@ pub fn lineOf(s: []const u8, pos: usize) usize {
 }
 
 /// The text from `at` to the end of its line (for an error's "near"):
-/// to the newline, or to the end of `s` (past a NUL, unlike lineEnd()).
+/// to the newline or the NUL, as lineEnd(). A NUL inside the text ends
+/// it for the lexers, and for a C caller reading the message.
 pub fn restOfLine(s: [:0]const u8, at: usize) []const u8 {
-    return s[at .. std.mem.indexOfScalarPos(u8, s, at, '\n') orelse s.len];
+    return s[at..lineEnd(s, at)];
 }
 
 /// The length of the UTF-8 character at `i` (1 for a byte that starts
@@ -819,6 +833,8 @@ test "decoding" {
     try testing.expect((try fold(a, lower, .lower)).ptr == lower.ptr);
     comptime assertFolded(.lower, "select_1");
     comptime assertFolded(.upper, "SELECT_1");
+    try testing.expectEqualStrings("SELECT_é", comptime foldComptime(.upper, "SeLeCt_é"));
+    try testing.expectEqualStrings("from", comptime foldComptime(.lower, "FROM"));
     const w = try pg_like.foldedWord(a, "Ab_1$ x", 0, .lower);
     try testing.expectEqualStrings("ab_1$", w.text);
     try testing.expectEqual(@as(usize, 5), w.end);
@@ -836,6 +852,8 @@ test "positions" {
     try testing.expectEqual(@as(usize, 2), lineOf(s, 9));
     try testing.expectEqualStrings("FROM t\r", restOfLine(s, 11));
     try testing.expectEqualStrings("GO 2", restOfLine(s, 23));
+    // A NUL ends the line as the end does.
+    try testing.expectEqualStrings("ab", restOfLine("ab\x00cd\nx", 0));
     try testing.expect(blankBefore(s, 11) and !blankBefore(s, 13) and blankBefore(s, 0));
     try testing.expect(blankBefore(s, 21) and blankAfter(s, 22) and !blankAfter(s, 11));
     try testing.expect(blankAfter(s, 27));

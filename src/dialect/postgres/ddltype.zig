@@ -27,6 +27,7 @@ const parser = @import("parser.zig");
 const Children = @import("jtype.zig").Children;
 const operators = @import("operators.zig");
 const typing = @import("../../sql/typing.zig");
+const util = @import("../../sql/util.zig");
 const integer = @import("integer.zig");
 const overload = @import("overload.zig");
 
@@ -122,6 +123,15 @@ fn probeWith(outer: *int.Parse, src: [:0]const u8, a: std.mem.Allocator, s: *tre
     if (db.malloc_failed) return error.OutOfMemory;
     var b: Back = .{ .o = &origins, .a = a, .p = &q, .outer = outer, .own_with = own_with };
     try b.select(s);
+    // A string literal the probe's core could not read as the boolean it
+    // met (`coalesce(b, 'maybe')`, `VALUES (true), ('bad')`): the
+    // statement's error, at the literal, as PostgreSQL's CREATE VIEW and
+    // CHECK fail.
+    if (q.n_err > 0 and outer.n_err == 0) if (q.err_msg) |m| if (std.mem.startsWith(u8, m, "invalid input syntax for type boolean")) {
+        const at = db.err_byte_offset;
+        util.errorMsgState(outer, null, q.err_state, "{s}", .{m});
+        db.err_byte_offset = at;
+    };
     // The numeric expressions of an index: their keys without a display
     // scale (xq_dec_key()), as a comparison compares them, so that the
     // query's `a + b = 1` is the index's expression.
@@ -269,7 +279,13 @@ const Back = struct {
         for (items) |fi| {
             switch (fi.source) {
                 .table => {},
-                .subquery => |sub| try b.select(sub),
+                .subquery => |sub| {
+                    try b.select(sub);
+                    // `(s) AS x(a, b)` is a CTE (lower.zig's
+                    // renameColumns()), resolved as a copy where it is
+                    // read: probed on its own, as a CTE's query.
+                    if (fi.alias) |al| if (al.cols.len > 0) try b.ctes.append(b.a, .{ .select = sub, .scope = b.scope, .recursive = false });
+                },
                 .func => |f| for (f.args) |x| try b.expr(x),
                 .nested => |inner| try b.from(inner),
             }
@@ -753,7 +769,10 @@ const decimal_sql = @import("../decimal_sql.zig");
 
 /// The functions overload.zig wraps an Expr in, in place (wrapIn()).
 const wrappers = std.StaticStringMap(void).initComptime(.{
-    .{"xq_dec"}, .{"xq_dec_key"}, .{"xq_dec_text"}, .{"xq_dec_float8"}, .{"xq_dec_int8"}, .{"xq_dec_number"},
+    .{"xq_dec"},     .{"xq_dec_key"}, .{"xq_dec_text"}, .{"xq_dec_float8"}, .{"xq_dec_int8"}, .{"xq_dec_number"},
+    // A string literal read as the boolean it met (overload.zig's
+    // boolLiteral()).
+    .{"xq_pg_bool"},
 });
 
 /// The functions overload.zig gives more arguments.

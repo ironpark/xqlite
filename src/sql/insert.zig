@@ -519,7 +519,10 @@ fn insertImpl(p: *Parse, tab_list: *SrcList, sel_arg: ?*Select, column: ?*IdList
         dest = select_mod.selectDestInit(SRT.Coroutine, reg_yield);
         dest.i_sdst = if (b_id_list_in_order) reg_data else 0;
         dest.n_sdst = @intCast(t.cols.len);
+        const saved_values = p.xq_insert_values;
+        if (s.sel_flags.Values) p.xq_insert_values = s;
         const rc = select_mod.select(p, s, &dest);
+        p.xq_insert_values = saved_values;
         reg_from_select = dest.i_sdst;
         rc catch return;
         if (p.n_err != 0) return;

@@ -898,7 +898,9 @@ pub const cast_timestamptz = &casts.timestamptz;
 ///   xq_pg_iv_text(x)     its text, in PostgreSQL's default output style
 ///   xq_pg_iv_out(x)      its text in the session's IntervalStyle (postgres
 ///                        outside an xqlite session: the extension's);
-///                        not deterministic (no index or generated column)
+///                        stable: not deterministic (no index or generated
+///                        column), the text of a constant made once a
+///                        statement
 ///   xq_pg_iv_key(x)      its key (16 bytes): what = < ... GROUP BY compare
 ///   xq_pg_iv_high(x)     its key and 0xFF: above every interval of its length
 ///   xq_pg_iv_valid(x)    whether x is an interval's BLOB (a column's CHECK)
@@ -914,9 +916,9 @@ pub const engine_functions = blk: {
         casts.timestamptz,
         casts.iv,
         dfunc.scalar("xq_pg_iv_text", 1, det, dfunc.bind(ivFunc, .{IvFn.text})),
-        // Of the session (IntervalStyle): not deterministic, as
-        // PostgreSQL's interval_out() is stable.
-        dfunc.scalar(out_name, 1, .{}, dfunc.bind(ivFunc, .{IvFn.out})),
+        // Of the session (IntervalStyle): stable, as PostgreSQL's
+        // interval_out() (a constant's text made once a statement).
+        dfunc.scalar(out_name, 1, .{ .stable = true }, dfunc.bind(ivFunc, .{IvFn.out})),
         dfunc.scalar("xq_pg_iv_key", 1, det, dfunc.bind(ivFunc, .{IvFn.key})),
         dfunc.scalar("xq_pg_iv_high", 1, det, dfunc.bind(ivFunc, .{IvFn.high})),
         dfunc.scalar("xq_pg_iv_valid", 1, det, validFunc),

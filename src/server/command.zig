@@ -4,12 +4,16 @@
 //!
 //! The leading keywords decide, after comments and a WITH clause: the
 //! statement `WITH x AS (...) DELETE FROM t ...` is a DELETE. The scan
-//! knows the quotes of every dialect ('...', "...", `...`, [...]) so that
-//! a keyword inside a string or name is not taken for the statement's.
+//! is no one dialect's but knows the quotes of every one ('...', "...",
+//! `...`, [...], a doubled quote standing for one) so that a keyword
+//! inside a string or name is not taken for the statement's. (A MySQL
+//! backslash escape, `'it\'s'`, is not one: what it can mistake is a
+//! report, not what runs.)
 //! (Which rows a statement changes is the engine's to say:
 //! Stmt.countsChanges().)
 
 const std = @import("std");
+const sqllex = @import("xqlite").sqllex;
 
 pub const Verb = enum {
     select,
@@ -116,8 +120,8 @@ const objects = std.StaticStringMap(struct { []const u8, []const u8 }).initCompt
 
 /// The command of the statement `sql` (one statement: the text from its
 /// first token; empty statements before it are skipped).
-pub fn classify(sql: []const u8) Command {
-    var s: Scanner = .{ .text = std.mem.trimStart(u8, sql, " \t\r\n;") };
+pub fn classify(sql: [:0]const u8) Command {
+    var s: Scanner = .{ .text = sql[std.mem.indexOfNone(u8, sql, " \t\r\n;") orelse sql.len ..] };
     var buf: [16]u8 = undefined;
     const first = lower(&buf, s.word() orelse return .{ .verb = .other });
     if (std.mem.eql(u8, first, "with")) return .{ .verb = afterWith(&s) };
@@ -181,10 +185,17 @@ fn lower(buf: *[16]u8, w: []const u8) []const u8 {
     return std.ascii.lowerString(buf, w);
 }
 
+/// The rules of the scan: words of letters, digits, `_` and `$` (from a
+/// letter or `_`), `--` and flat `/* */` comments.
+const scan = sqllex.Scanner(.{
+    .ident_start = .of(.{ .letters = true, .chars = "_" }),
+    .ident = .of(.{ .letters = true, .digits = true, .chars = "_$" }),
+});
+
 /// The tokens that matter: words at the top level, and the parentheses
 /// that nest the rest (strings, quoted names and comments are skipped).
 const Scanner = struct {
-    text: []const u8,
+    text: [:0]const u8,
     pos: usize = 0,
     depth: u32 = 0,
 
@@ -217,48 +228,38 @@ const Scanner = struct {
 
     fn raw(s: *Scanner) ?Token {
         const z = s.text;
-        while (s.pos < z.len) {
-            const c = z[s.pos];
-            if (std.ascii.isWhitespace(c)) {
-                s.pos += 1;
-            } else if (std.mem.startsWith(u8, z[s.pos..], "--")) {
-                s.pos = std.mem.indexOfScalarPos(u8, z, s.pos, '\n') orelse z.len;
-            } else if (std.mem.startsWith(u8, z[s.pos..], "/*")) {
-                s.pos = if (std.mem.indexOfPos(u8, z, s.pos + 2, "*/")) |e| e + 2 else z.len;
-            } else if (c == '\'' or c == '"' or c == '`' or c == '[') {
-                const close: u8 = if (c == '[') ']' else c;
-                var i = s.pos + 1;
-                while (i < z.len) : (i += 1) {
-                    if (z[i] != close) continue;
-                    // A doubled quote stands for itself.
-                    if (close != ']' and i + 1 < z.len and z[i + 1] == close) {
-                        i += 1;
-                        continue;
-                    }
-                    break;
-                }
-                s.pos = @min(i + 1, z.len);
+        s.pos = scan.skip(z, s.pos).end;
+        const c = z[s.pos];
+        switch (c) {
+            0 => return null,
+            '\'', '"', '`', '[' => {
+                s.pos = sqllex.quotedEnd(z, s.pos, if (c == '[') ']' else c, false).end;
                 return .other;
-            } else if (std.ascii.isAlphabetic(c) or c == '_') {
-                const start = s.pos;
-                while (s.pos < z.len and (std.ascii.isAlphanumeric(z[s.pos]) or z[s.pos] == '_' or z[s.pos] == '$')) s.pos += 1;
-                return .{ .word = z[start..s.pos] };
-            } else {
+            },
+            '(' => {
                 s.pos += 1;
-                return switch (c) {
-                    '(' => .open,
-                    ')' => .close,
-                    else => .other,
-                };
-            }
+                return .open;
+            },
+            ')' => {
+                s.pos += 1;
+                return .close;
+            },
+            else => {
+                const start = s.pos;
+                if (scan.isIdentStart(c)) {
+                    s.pos = scan.word(z, start);
+                    return .{ .word = z[start..s.pos] };
+                }
+                s.pos += 1;
+                return .other;
+            },
         }
-        return null;
     }
 };
 
 test "classify" {
     const T = struct {
-        fn expect(sql: []const u8, verb: Verb, obj: []const u8) !void {
+        fn expect(sql: [:0]const u8, verb: Verb, obj: []const u8) !void {
             const c = classify(sql);
             try std.testing.expectEqual(verb, c.verb);
             try std.testing.expectEqualStrings(obj, c.object);
@@ -286,6 +287,10 @@ test "classify" {
     try T.expect("VALUES (1), (2)", .values, "");
     try T.expect("MERGE INTO t USING s ON (1=1) WHEN MATCHED THEN DELETE", .merge, "");
     try T.expect("", .other, "");
+    // Quoted names with doubled quotes, comments, a comment left open.
+    try T.expect("WITH [a]]b] AS (SELECT 1), `c``d` AS (SELECT 2) /* ( */ UPDATE t SET a = 1", .update, "");
+    try T.expect("-- x\nDROP /* y */ TABLE t", .drop, "TABLE");
+    try T.expect("CREATE /* TABLE", .create, "");
     try T.expect("frobnicate", .other, "");
 
     var buf: [32]u8 = undefined;

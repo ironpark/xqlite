@@ -527,11 +527,35 @@ test "mysql: without multi-statements or DEPRECATE_EOF" {
     try testing.expectEqual(@as(?[]const u8, null), try a.connect(f.srv.address(), .{ .without = c.Cap.multi_statements | c.Cap.deprecate_eof | c.Cap.connect_attrs }));
     try expectLines("err 1064 42000 You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'SELECT 2' at line 1\n", try a.query("SELECT 1; SELECT 2"));
     try expectLines("cols 1:LONG\nrow 1\nend\n", try a.query("SELECT 1;"));
+    // The statements are split as the dialect lexes them: an executable
+    // comment is code, and the sql_mode decides where a string ends.
+    try expectLines("err 1064 42000 You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'SELECT 2 */' at line 1\n", try a.query("SELECT 1 /*! ; SELECT 2 */"));
+    try expectLines("cols 1:LONG\nrow 1\nend\n", try a.query("SELECT 1; /*!999999 SELECT 2 */"));
+    try expectLines("cols a';b:VAR_STRING\nrow a';b\nend\n", try a.query("SELECT 'a\\';b'"));
+    try expectLines("ok affected=0 id=0\n", try a.query("SET sql_mode = 'NO_BACKSLASH_ESCAPES'"));
+    try expectLines("err 1064 42000 You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'SELECT 2' at line 1\n", try a.query("SELECT 'a\\'; SELECT 2"));
+    try expectLines("ok affected=0 id=0\n", try a.query("SET sql_mode = DEFAULT"));
     // COM_SET_OPTION MYSQL_OPTION_MULTI_STATEMENTS_ON: an EOF.
     try a.command(.set_option, &.{ 0, 0 });
     const p = try a.wire.read();
     try testing.expectEqual(@as(usize, 5), p.len);
     try expectLines("cols 1:LONG\nrow 1\nend more\ncols 2:LONG\nrow 2\nend\n", try a.query("SELECT 1; SELECT 2"));
+}
+
+test "mysql: without multi-statements, in SQLite's dialect" {
+    // The engine splits the statements: a trigger's body is one.
+    var f: Fixture = .{ .tmp = testing.tmpDir(.{}), .proto = .{ .dialect = .sqlite } };
+    try f.start();
+    defer f.stop();
+    var a: Client = .{};
+    defer a.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), try a.connect(f.srv.address(), .{ .without = c.Cap.multi_statements }));
+    try expectLines("err 1064 42000 You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'SELECT 2' at line 1\n", try a.query("SELECT 1; -- c\n SELECT 2"));
+    try expectLines("err 1064 42000 You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'nope' at line 1\n", try a.query("SELECT 1; nope"));
+    try expectLines("cols 1:LONGLONG\nrow 1\nend\n", try a.query("SELECT 1; -- c"));
+    try expectLines("ok affected=0 id=0\n", try a.query("CREATE TABLE t(a)"));
+    try expectLines("ok affected=0 id=0\n", try a.query("CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; SELECT 2; END;"));
+    try expectLines("cols name:BLOB@main.sqlite_master\nrow tr\nend\n", try a.query("SELECT name FROM sqlite_schema WHERE type = 'trigger'"));
 }
 
 test "mysql: databases, ping, statistics, field list, reset" {

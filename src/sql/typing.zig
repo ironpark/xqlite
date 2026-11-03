@@ -349,6 +349,14 @@ pub const Rules = struct {
     /// a frontend writes its choices into that text itself (PostgreSQL's
     /// ddltype.zig).
     overload: ?*const fn (c: *Ctx, e: *Expr) Error!bool = null,
+    /// The choices the dialect makes by the types of a compound's
+    /// column (compoundColumns()): `xs` the column's value in each term,
+    /// leftmost first, `values` whether the terms are the rows of one
+    /// VALUES list. As overload, it may change the Exprs in place
+    /// (PostgreSQL reads a string literal met by a boolean as one:
+    /// `VALUES (true), ('no')`) or fail the statement; not called for the
+    /// SQL the schema keeps.
+    unify: ?*const fn (c: *Ctx, xs: []const *Expr, values: bool) Error!bool = null,
     /// The collation an ORDER BY sorts values of type `id` with (jsonb's
     /// order), null for the default; as overload, not in the schema's
     /// SQL. `e` is the term (a column of a compound's: its number), by
@@ -567,6 +575,38 @@ pub fn typeTree(nc: *int.NameContext, e: *Expr) int.ParseError!void {
         error.OutOfMemory => p.db.oomFault(),
         error.Failed => return error.ParseFailed,
     };
+}
+
+/// The columns of compound `s` (its last term, whose `prior`s are the
+/// others), after its terms are resolved and typed: Rules.unify of each.
+/// For a statement typed (active()); not for the SQL the schema keeps,
+/// nor for the rows of INSERT ... VALUES (Parse.xq_insert_values), each
+/// of which is stored into the columns as it is.
+pub fn compoundColumns(p: *int.Parse, s: *int.Select) int.ParseError!void {
+    if (p.xq_schema_text > 0 or p.xq_insert_values == s or s.prior == null) return;
+    var c = ctxOf(p) orelse return;
+    const f = c.rules.unify orelse return;
+    var nc: int.NameContext = .{ .parse = p, .src_list = s.src };
+    c.nc = &nc;
+    const n = (s.e_list orelse return).len();
+    var terms: std.ArrayList(*int.Select) = .empty;
+    var values = true;
+    var it: ?*int.Select = s;
+    while (it) |t| : (it = t.prior) {
+        const list = t.e_list orelse return;
+        if (list.len() != n) return;
+        if (!t.sel_flags.Values) values = false;
+        terms.append(p.arena, t) catch return p.db.oomFault();
+    }
+    std.mem.reverse(*int.Select, terms.items);
+    const xs = p.arena.alloc(*Expr, terms.items.len) catch return p.db.oomFault();
+    for (0..n) |i| {
+        for (terms.items, xs) |t, *x| x.* = t.e_list.?.at(i).expr.?;
+        _ = f(&c, xs, values) catch |err| switch (err) {
+            error.OutOfMemory => return p.db.oomFault(),
+            error.Failed => return error.ParseFailed,
+        };
+    }
 }
 
 /// Whether the statement's dialect reports a call no function matches

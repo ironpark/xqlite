@@ -598,15 +598,17 @@ fn shellExec(p: *Shell, mode: *const Mode, text: []const u8, err_msg: ?*?[]u8) E
 }
 
 /// xqlite: the notices of a statement that ran (PostgreSQL's NOTICE), on
-/// stderr as psql prints them: `NOTICE:  ...` and its `DETAIL:  ...`;
+/// stderr as psql prints them: `NOTICE:  ...` and its `DETAIL:  ...` and
+/// `HINT:  ...` (a CONTEXT only for an error, as psql's SHOW_CONTEXT);
 /// those below the connection's client_min_messages left out.
 fn printNotices(p: *Shell, stmt: *const Stmt) Error!void {
     if (stmt.xq_notices.len == 0) return;
     const min = xqlite.dialect.noticeLevel(p.db);
     for (stmt.xq_notices) |n| {
         if (!n.level.reaches(min)) continue;
-        try p.eprint("{s}:  {s}\n", .{ n.level.name(), n.message });
-        if (n.detail) |d| try p.eprint("DETAIL:  {s}\n", .{d});
+        try p.eprint("{s}:  {s}\n", .{ n.level.name(), n.fields.message });
+        if (n.fields.detail) |d| try p.eprint("DETAIL:  {s}\n", .{d});
+        if (n.fields.hint) |h| try p.eprint("HINT:  {s}\n", .{h});
     }
 }
 

@@ -279,7 +279,7 @@ fn enter(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, more: bool, sink
             try s.notice(sink, .{
                 .level = .warning,
                 .sqlstate = "25P01".*,
-                .message = "there is no transaction in progress",
+                .fields = .{ .message = "there is no transaction in progress" },
             });
             try s.completeBare(sink, cmd);
             return .done;
@@ -580,7 +580,12 @@ pub const Prepared = struct {
 /// would. The errors are the sink's and OutOfMemory. Close the result
 /// with Prepared.close() before the session.
 pub fn prepare(s: *Session, sql: []const u8, sink: anytype) !?*Prepared {
-    const cmd = command.classify(sql);
+    const cmd = cmd: {
+        // classify() reads NUL-terminated text.
+        const z = try s.gpa.dupeSentinel(u8, sql, 0);
+        defer s.gpa.free(z);
+        break :cmd command.classify(z);
+    };
     if (s.admit(cmd) == .refuse) {
         try s.refuse(sink, cmd);
         return null;
@@ -654,7 +659,7 @@ const Log = struct {
     }
 
     pub fn notice(l: *Log, n: Notice) !void {
-        try l.out.print(testing.allocator, "notice {s} {s}\n", .{ &n.sqlstate, n.message });
+        try l.out.print(testing.allocator, "notice {s} {s}\n", .{ &n.sqlstate, n.fields.message });
     }
 };
 

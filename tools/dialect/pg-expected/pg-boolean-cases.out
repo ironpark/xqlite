@@ -1,0 +1,153 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-boolean-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case dba1381ce62771a6 BETWEEN, coalesce, nullif, greatest and least of a boolean
+id|bw|nb|c|n|g|l
+1|t|t|t||t|t
+2|t|f|f|f|f|f
+3|||t||f|t
+(3 rows)
+a|b|c|d|e|f|g
+t|f|t||f|t|t
+(1 row)
+t|g|n
+t|b|x
+(1 row)
+==== case dd46e8273a2c709b BETWEEN, coalesce, nullif, greatest and least of a boolean: errors
+ERROR:  invalid input syntax for type boolean: "x"
+LINE 1: SELECT true BETWEEN 'x' AND 'y';
+                            ^
+ERROR:  invalid input syntax for type boolean: "a"
+LINE 1: SELECT 'a' BETWEEN 'b' AND true;
+               ^
+ERROR:  invalid input syntax for type boolean: "maybe"
+LINE 1: SELECT coalesce(true, 'maybe');
+                              ^
+ERROR:  invalid input syntax for type boolean: "x"
+LINE 1: SELECT nullif(true, 'x');
+                            ^
+ERROR:  invalid input syntax for type boolean: "zz"
+LINE 1: SELECT greatest(true, 'zz');
+                              ^
+ERROR:  invalid input syntax for type boolean: "q"
+LINE 1: SELECT least('q', false);
+                     ^
+==== case e749eccc1d4b44c7 ARRAY[...] of a boolean
+id|a
+1|{t,t}
+2|{f,t}
+3|{NULL,t}
+(3 rows)
+a|b
+{t,t,f}|{NULL,t,f}
+(1 row)
+ERROR:  invalid input syntax for type boolean: "nope"
+LINE 1: SELECT ARRAY[true, 'nope'];
+                           ^
+==== case 198edd22053fccca VALUES and UNION of a boolean
+x
+t
+f
+t
+(3 rows)
+a|b
+1|t
+2|f
+(2 rows)
+a|b
+1|t
+(1 row)
+column1|column2
+1|t
+2|f
+(2 rows)
+x
+f
+t
+(2 rows)
+x
+t
+f
+(2 rows)
+x
+f
+t
+(2 rows)
+x
+t
+(1 row)
+x
+a
+b
+(2 rows)
+ERROR:  invalid input syntax for type boolean: "bad"
+LINE 1: VALUES (true), ('bad');
+                        ^
+ERROR:  invalid input syntax for type boolean: "xx"
+LINE 1: SELECT true UNION SELECT 'xx';
+                                 ^
+==== case 04b93a9507d0058f INSERT of VALUES stores each row as it is
+id|t|b
+1|yes|t
+2|no|f
+3|x|t
+4|y|f
+(4 rows)
+==== case e33c73126e1da5f4 definitions of BETWEEN, coalesce, nullif, greatest, least, ARRAY and VALUES of a boolean
+ERROR:  new row for relation "bt" violates check constraint "bt_b_check"
+DETAIL:  Failing row contains (2, f).
+id|b
+1|t
+3|
+(2 rows)
+def
+CHECK (((b >= false) AND (b <= true)))
+CHECK ((GREATEST(b, false) IS NOT NULL))
+CHECK (COALESCE(b, true))
+(3 rows)
+id|c|n|g|l|a|bw
+1|t||t|t|{t,f}|t
+3|t||f|t|{NULL,f}|
+(2 rows)
+def
+ SELECT id,
+    COALESCE(b, true) AS c,
+    NULLIF(b, true) AS n,
+    GREATEST(b, false) AS g,
+    LEAST(b, true) AS l,
+    ARRAY[b, false] AS a,
+    ((b >= false) AND (b <= true)) AS bw
+   FROM bt;
+(1 row)
+x
+t
+f
+(2 rows)
+x
+t
+f
+(2 rows)
+==== case 2c1a1563bc2eb441 definitions of BETWEEN, coalesce, nullif, greatest, least, ARRAY and VALUES of a boolean: errors
+ERROR:  invalid input syntax for type boolean: "maybe"
+LINE 1: CREATE VIEW e1 AS SELECT coalesce(b, 'maybe') FROM bt;
+                                             ^
+ERROR:  invalid input syntax for type boolean: "bad"
+LINE 1: CREATE VIEW e2 AS SELECT * FROM (VALUES (true), ('bad')) v(x...
+                                                         ^
+ERROR:  invalid input syntax for type boolean: "zz"
+LINE 1: CREATE VIEW e3 AS SELECT greatest(b, 'zz') FROM bt;
+                                             ^
+ERROR:  invalid input syntax for type boolean: "x"
+LINE 1: CREATE TABLE e4 (b boolean CHECK (b BETWEEN 'x' AND true));
+                                                    ^
+ERROR:  invalid input syntax for type boolean: "nope"
+LINE 1: CREATE VIEW e5 AS SELECT ARRAY[b, 'nope'] FROM bt;
+                                          ^
+ERROR:  invalid input syntax for type boolean: "xx"
+LINE 1: CREATE VIEW e6 AS SELECT true AS x UNION SELECT 'xx';
+                                                        ^
+ERROR:  invalid input syntax for type boolean: "q"
+LINE 1: CREATE TABLE e7 (b boolean CHECK (nullif(b, 'q')));
+                                                    ^
+count
+0
+(1 row)

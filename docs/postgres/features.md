@@ -83,6 +83,7 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
   - 정규식: `~` (일치), `~*` (대소문자 무시 일치), `!~`, `!~*`
   - `SIMILAR TO`
 - 타입 캐스트: `expr::type` 및 `CAST(expr AS type)`
+- 불리언과 만난 문자열 상수는 PostgreSQL처럼 불리언으로 읽습니다: 비교(`b = 'yes'`), `IN`, `CASE`, `BETWEEN`, `coalesce`, `nullif`, `greatest`, `least`, `ARRAY[...]`, `VALUES`의 열, `UNION`/`INTERSECT`/`EXCEPT`의 열(왼쪽부터 두 항씩). 불리언이 아니면 문장을 컴파일할 때 실패합니다(`invalid input syntax for type boolean: "x"`, 뷰와 CHECK도). `INSERT ... VALUES`의 행은 각자 그 열의 타입으로 저장됩니다.
 - CASE 식: `CASE WHEN ... THEN ... ELSE ... END`
 
 ### 3.2 배열 연산자
@@ -121,4 +122,5 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 PostgreSQL의 표준 카탈로그 구조를 가상 테이블로 노출합니다.
 - `pg_catalog.pg_class`, `pg_attribute`, `pg_type`, `pg_namespace`, `pg_index`, `pg_constraint`, `pg_database`, `pg_tablespace`, `pg_am`, `pg_sequence`
 - `information_schema.tables`, `columns`, `schemata`, `views`, `table_constraints`, `key_column_usage`, `referential_constraints`
+- 키 열의 등호 조건(`pg_class.oid`, `pg_attribute.attrelid`, `pg_index.indexrelid`·`indrelid`, `pg_constraint.oid`·`conrelid`·`confrelid`, `pg_attrdef.oid`·`adrelid`, `pg_type.oid`, `pg_namespace.oid`, `pg_proc.oid`, `pg_sequence.seqrelid`, `pg_depend.objid`·`refobjid`, `pg_description.objoid`)은 가상 테이블이 그 OID의 행만 읽습니다. `attrelid = '16384'`, 조인의 `a.attrelid = c.oid`처럼 psql과 ORM이 쓰는 질의가 시스템 행(`pg_attribute`만 1100개 남짓)을 다 훑지 않습니다.
 - `psql` 클라이언트의 메타 명령(`\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\d <table_name>`)이 네이티브 PostgreSQL 16/18과 완벽히 동일하게 동작합니다.

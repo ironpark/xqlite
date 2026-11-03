@@ -94,7 +94,10 @@ pub fn overload(c: *Ctx, e: *Expr) Error!bool {
         TK.EQ, TK.NE, TK.LT, TK.LE, TK.GT, TK.GE, TK.IS, TK.ISNOT => compare(c, e),
         TK.FUNCTION, TK.AGG_FUNCTION => call(c, e),
         TK.IN => try boolList(c, e) or try repr.list(c, e),
-        TK.BETWEEN => repr.list(c, e),
+        TK.BETWEEN => {
+            const b = try boolBetween(c, e);
+            return try repr.list(c, e) or b;
+        },
         TK.CAST => repr.cast(c, e),
         TK.CASE => {
             const b = try boolCase(c, e);
@@ -285,8 +288,8 @@ fn compare(c: *Ctx, e: *Expr) Error!bool {
     // (relispartition = 'f'), not compared as text. As PostgreSQL's
     // unknown, it is read when the statement is compiled: 'xyz' fails it
     // even where no row reaches the comparison.
-    if (logical(c, l) == .boolean and try boolLiteral(c, &e.right.?)) return true;
-    if (logical(c, r) == .boolean and try boolLiteral(c, &e.left.?)) return true;
+    if (logical(c, l) == .boolean and try boolLiteral(c, r)) return true;
+    if (logical(c, r) == .boolean and try boolLiteral(c, l)) return true;
     if (try uuid.uuidCompare(c, e)) return true;
     if (e.op != TK.IS and e.op != TK.ISNOT and logical(c, l) == .json and logical(c, r) == .json) {
         var buf: [64]u8 = undefined;
@@ -302,35 +305,99 @@ fn compare(c: *Ctx, e: *Expr) Error!bool {
 
 /// Operand `x`, met by a boolean, read as one if a string literal (or
 /// the +literal of `b IN ('t')`, which is `b = +'t'`), when the statement
-/// is compiled (Ctx.readInput()); whether it was.
-fn boolLiteral(c: *Ctx, x: **Expr) Error!bool {
-    const slot = if (x.*.op == TK.UPLUS and x.*.left != null) &x.*.left.? else x;
-    if (slot.*.op != TK.STRING) return false;
-    try c.readInput("xq_pg_bool", slot.*);
-    slot.* = try c.call("xq_pg_bool", &.{slot.*});
+/// is compiled (Ctx.readInput()), failing it if it is none: the literal
+/// made xq_pg_bool('t') in place (so that ddltype.zig finds the call
+/// where the literal was). Whether it was.
+fn boolLiteral(c: *Ctx, x: *Expr) Error!bool {
+    const lit = if (x.op == TK.UPLUS and x.left != null) x.left.? else x;
+    if (lit.op != TK.STRING) return false;
+    try c.readInput("xq_pg_bool", lit);
+    const inner = try c.p.arena.create(Expr);
+    inner.* = lit.*;
+    lit.xq_type = typing.unknown;
+    try c.toCall(lit, "xq_pg_bool", &.{inner});
+    // Where it was (an error's offset, an ON clause).
+    lit.w = inner.w;
+    lit.flags.set(inner.flags.only(.{ .InnerON = true, .OuterON = true }));
     return true;
 }
 
-/// `x IN (a, b ...)` (of two items or more: one is `x = +a`, compare())
-/// with a boolean among `x` and the items: each string literal among
-/// them read as a boolean, as PostgreSQL resolves the list's common type
-/// (select_common_type(): an unknown literal takes the type of the
-/// others) and reads `b IN ('t', 'f')` and `'x' IN (b, true)` so,
-/// failing when it compiles the statement if one is no boolean. Whether
-/// one was.
-fn boolList(c: *Ctx, e: *Expr) Error!bool {
-    if (!e.useXList()) return false;
-    const l = e.left orelse return false;
-    const list = e.x.list orelse return false;
-    const items = list.slice();
-    var any = logical(c, l) == .boolean;
+/// Operands of one common type (select_common_type(): an unknown
+/// literal takes the type of the others) with a boolean among them: each
+/// string literal read as a boolean (boolLiteral()), as PostgreSQL reads
+/// `coalesce(b, 'yes')`, `'x' IN (b, true)`, `VALUES (true), ('no')`.
+/// Whether one was.
+fn boolCommon(c: *Ctx, xs: []const *Expr) Error!bool {
+    for (xs) |x| {
+        if (logical(c, x) == .boolean) break;
+    } else return false;
+    var changed = false;
+    for (xs) |x| {
+        if (try boolLiteral(c, x)) changed = true;
+    }
+    return changed;
+}
+
+/// boolCommon() of the items of `list` and `first`.
+fn boolItems(c: *Ctx, first: ?*Expr, items: []int.ExprListItem) Error!bool {
+    var any = if (first) |f| logical(c, f) == .boolean else false;
     for (items) |item| {
         if (logical(c, item.expr.?) == .boolean) any = true;
     }
     if (!any) return false;
-    var changed = try boolLiteral(c, &e.left.?);
-    for (items) |*item| {
-        if (try boolLiteral(c, &item.expr.?)) changed = true;
+    var changed = if (first) |f| try boolLiteral(c, f) else false;
+    for (items) |item| {
+        if (try boolLiteral(c, item.expr.?)) changed = true;
+    }
+    return changed;
+}
+
+/// `x IN (a, b ...)` (of two items or more: one is `x = +a`, compare()):
+/// boolCommon() of `x` and the items, as PostgreSQL resolves the list's
+/// common type and reads `b IN ('t', 'f')` and `'x' IN (b, true)` so.
+fn boolList(c: *Ctx, e: *Expr) Error!bool {
+    if (!e.useXList()) return false;
+    const l = e.left orelse return false;
+    const list = e.x.list orelse return false;
+    return boolItems(c, l, list.slice());
+}
+
+/// `x BETWEEN a AND b`, which PostgreSQL makes `x >= a AND x <= b`: of a
+/// boolean `x`, string literals `a` and `b` read as booleans; of a
+/// boolean bound, a string literal `x` (compare()'s choice, of each
+/// comparison).
+fn boolBetween(c: *Ctx, e: *Expr) Error!bool {
+    if (!e.useXList()) return false;
+    const x = e.left orelse return false;
+    const list = e.x.list orelse return false;
+    if (list.len() != 2) return false;
+    const lo = list.at(0).expr.?;
+    const hi = list.at(1).expr.?;
+    if (logical(c, x) == .boolean) {
+        const a = try boolLiteral(c, lo);
+        return try boolLiteral(c, hi) or a;
+    }
+    if (logical(c, lo) == .boolean or logical(c, hi) == .boolean) return boolLiteral(c, x);
+    return false;
+}
+
+/// A compound's column (typing.Rules.unify): the rows of a VALUES list
+/// are of one common type (boolCommon()); the terms of UNION, INTERSECT
+/// and EXCEPT of the common type of each pair, from the left
+/// (transformSetOperationTree()): `'yes' UNION SELECT false` is two
+/// booleans, `'a' UNION SELECT 'b' UNION SELECT true` text before it
+/// meets the boolean.
+pub fn unify(c: *Ctx, xs: []const *Expr, values: bool) Error!bool {
+    if (values) return boolCommon(c, xs);
+    if (xs.len < 2) return false;
+    // The leftmost pair a boolean, or a literal of no type of its own
+    // (a string, NULL) and a boolean: then the column is boolean.
+    const first = xs[0];
+    const unknown = first.op == TK.STRING or first.op == TK.NULL;
+    if (logical(c, first) != .boolean and !(unknown and logical(c, xs[1]) == .boolean)) return false;
+    var changed = false;
+    for (xs) |x| {
+        if (try boolLiteral(c, x)) changed = true;
     }
     return changed;
 }
@@ -354,16 +421,16 @@ fn boolCase(c: *Ctx, e: *Expr) Error!bool {
     const items = list.slice();
     var changed = false;
     if (e.left) |base| if (logical(c, base) == .boolean) {
-        for (items, 0..) |*item, i| if (!caseResult(items.len, i)) {
-            if (try boolLiteral(c, &item.expr.?)) changed = true;
+        for (items, 0..) |item, i| if (!caseResult(items.len, i)) {
+            if (try boolLiteral(c, item.expr.?)) changed = true;
         };
     };
     const any = for (items, 0..) |item, i| {
         if (caseResult(items.len, i) and logical(c, item.expr.?) == .boolean) break true;
     } else false;
     if (!any) return changed;
-    for (items, 0..) |*item, i| if (caseResult(items.len, i)) {
-        if (try boolLiteral(c, &item.expr.?)) changed = true;
+    for (items, 0..) |item, i| if (caseResult(items.len, i)) {
+        if (try boolLiteral(c, item.expr.?)) changed = true;
     };
     return changed;
 }
@@ -381,6 +448,15 @@ fn opText(op: u8) []const u8 {
 
 fn call(c: *Ctx, e: *Expr) Error!bool {
     if (!isCall(e)) return false;
+    var buf: [64]u8 = undefined;
+    // The arguments of one common type: coalesce(b, 'yes'), greatest(),
+    // least(), ARRAY[b, 'f'] (then made of booleans); nullif(a, b),
+    // which is `a = b`.
+    const b = common_args.has(nameOf(e, &buf)) and try boolItems(c, null, args(e));
+    return try callOf(c, e) or b;
+}
+
+fn callOf(c: *Ctx, e: *Expr) Error!bool {
     var buf: [64]u8 = undefined;
     const n = nameOf(e, &buf);
     const items = args(e);
@@ -431,6 +507,11 @@ fn call(c: *Ctx, e: *Expr) Error!bool {
     }
     return changed;
 }
+
+/// The functions whose arguments are of one common type (boolItems()).
+const common_args = std.StaticStringMap(void).initComptime(.{
+    .{"coalesce"}, .{"nullif"}, .{"greatest"}, .{"least"}, .{"xq_pg_array"},
+});
 
 /// json's functions of `->`, `->>`, `#>`, `#>>` and jsonb's.
 const variants = [_]struct { []const u8, []const u8 }{

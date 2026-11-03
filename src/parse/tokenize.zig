@@ -6,7 +6,8 @@ const std = @import("std");
 const grammar = @import("grammar.zig");
 const ctype = @import("xqlite_base").ctype;
 
-const TK = grammar.TK;
+/// The token codes getToken() returns (the grammar's).
+pub const TK = grammar.TK;
 
 /// Character classes (CC_*), the first switch of getToken().
 const CC = enum(u8) {

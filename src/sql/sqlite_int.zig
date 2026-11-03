@@ -1529,6 +1529,34 @@ pub const ErrorState = struct {
     }
 };
 
+/// xqlite: the fields of an error message (util.zig's detail_mark), and
+/// of a notice: PostgreSQL's message, DETAIL, HINT and CONTEXT. format()
+/// writes the message with its fields' lines.
+pub const ErrorFields = struct {
+    message: []const u8,
+    detail: ?[]const u8 = null,
+    hint: ?[]const u8 = null,
+    context: ?[]const u8 = null,
+
+    pub const detail_mark = "\nDETAIL:  ";
+    pub const hint_mark = "\nHINT:  ";
+    pub const context_mark = "\nCONTEXT:  ";
+    pub const marks = [3][]const u8{ detail_mark, hint_mark, context_mark };
+
+    /// DETAIL, HINT and CONTEXT, in the order of marks.
+    pub fn values(f: ErrorFields) [3]?[]const u8 {
+        return .{ f.detail, f.hint, f.context };
+    }
+
+    pub fn format(f: ErrorFields, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll(f.message);
+        for (f.values(), marks) |v, mark| if (v) |t| {
+            try w.writeAll(mark);
+            try w.writeAll(t);
+        };
+    }
+};
+
 /// xqlite: a message of a statement that is not an error (PostgreSQL's
 /// NOTICE: `table "t" does not exist, skipping` of DROP TABLE IF EXISTS),
 /// written when the statement is compiled (util.notice(): Parse.xq_notices,
@@ -1540,9 +1568,9 @@ pub const Notice = struct {
     /// PostgreSQL's code: 00000 for a notice, 42P07 for a relation
     /// CREATE ... IF NOT EXISTS skips.
     sqlstate: [5]u8 = "00000".*,
-    message: []const u8,
-    /// PostgreSQL's DETAIL, if any (lines apart by '\n').
-    detail: ?[]const u8 = null,
+    /// The message and PostgreSQL's DETAIL, HINT and CONTEXT, if any
+    /// (lines apart by '\n').
+    fields: ErrorFields,
 
     /// PostgreSQL's levels that a client may be sent, lowest first
     /// (client_min_messages: a level below the setting is not sent).
@@ -1921,6 +1949,10 @@ pub const Parse = struct {
     /// in every dialect, which the typing rules type but make no choices
     /// in (typing.Rules.overload).
     xq_schema_text: u32 = 0,
+    /// xqlite: the VALUES list of the INSERT being compiled, whose rows
+    /// are stored into the columns each as it is: not one query of a
+    /// common type of its columns (typing.compoundColumns()).
+    xq_insert_values: ?*Select = null,
     n_err: i32 = 0,
     /// Counter for Select.sel_id.
     n_select: i32 = 0,

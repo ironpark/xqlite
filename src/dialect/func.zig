@@ -28,6 +28,13 @@ pub const Options = struct {
     /// Same result for the same arguments within a statement
     /// (SQLITE_DETERMINISTIC): may be factored out of loops.
     deterministic: bool = false,
+    /// Not deterministic, but the same result for the same arguments
+    /// within one statement (SQLITE_FUNC_SLOCHNG, as SQLite's date('now')
+    /// and PostgreSQL's stable functions): a call of constant arguments
+    /// is made once when the statement starts. Still not usable in an
+    /// index or a generated column, as any function not deterministic
+    /// (a CHECK may call it).
+    stable: bool = false,
     /// Not usable from the schema (CHECK, DEFAULT, generated columns,
     /// views, triggers) while trusted_schema is off (SQLITE_FUNC_UNSAFE,
     /// as for an application function that is not SQLITE_INNOCUOUS).
@@ -51,6 +58,7 @@ fn flags(o: Options) @import("../sql/callback.zig").FUNC {
         .enc = vi.ENC.UTF8,
         .BUILTIN = true,
         .CONSTANT = o.deterministic,
+        .SLOCHNG = o.stable,
         .DIRECT = o.direct_only,
         .UNSAFE = o.unsafe,
         .SUBTYPE = o.subtype,

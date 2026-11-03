@@ -22,32 +22,14 @@ const RC = int.RC;
 /// the fields are taken apart by those offsets (splitFields(): the wire
 /// protocol's ErrorResponse, ErrorInfo), never by reading the text, so a
 /// value quoted in a message cannot pass for a field.
-pub const detail_mark = "\nDETAIL:  ";
-pub const hint_mark = "\nHINT:  ";
-pub const context_mark = "\nCONTEXT:  ";
+pub const detail_mark = int.ErrorFields.detail_mark;
+pub const hint_mark = int.ErrorFields.hint_mark;
+pub const context_mark = int.ErrorFields.context_mark;
 
-const marks = [3][]const u8{ detail_mark, hint_mark, context_mark };
+const marks = int.ErrorFields.marks;
 
-/// The fields of an error message (see detail_mark). format() writes
-/// the message with its fields' lines.
-pub const ErrorFields = struct {
-    message: []const u8,
-    detail: ?[]const u8 = null,
-    hint: ?[]const u8 = null,
-    context: ?[]const u8 = null,
-
-    fn values(f: ErrorFields) [3]?[]const u8 {
-        return .{ f.detail, f.hint, f.context };
-    }
-
-    pub fn format(f: ErrorFields, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.writeAll(f.message);
-        for (f.values(), marks) |v, mark| if (v) |t| {
-            try w.writeAll(mark);
-            try w.writeAll(t);
-        };
-    }
-};
+/// The fields of an error message (see detail_mark), and of a notice.
+pub const ErrorFields = int.ErrorFields;
 
 /// Where the fields of `f` start in its text (ErrorFields.format()).
 /// None for a message without fields, or an empty one (offset 0 is none).
@@ -140,7 +122,7 @@ pub fn notice(p: *Parse, n: int.Notice) void {
 /// notice() of a message formatted in the arena, with SQLSTATE `state`.
 pub fn noticeFmt(p: *Parse, state: *const [5]u8, comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.allocPrint(p.arena, fmt, args) catch return;
-    notice(p, .{ .sqlstate = state.*, .message = msg });
+    notice(p, .{ .sqlstate = state.*, .fields = .{ .message = msg } });
 }
 
 /// The error just recorded in `p` (by errorMsg()) is `state`.

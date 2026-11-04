@@ -50,22 +50,22 @@ pub const JsonTable = struct {
 
 /// JSON_TABLE(doc, path COLUMNS (...)) alias, after `JSON_TABLE`.
 pub fn fromItem(s: *Parser, pos: u32) Error!tree.FromItem {
-    try s.expectOp("(");
+    try s.c.expectOp("(");
     const doc = try s.expr();
-    try s.expectOp(",");
+    try s.c.expectOp(",");
     const path = try s.stringLiteral();
     var b: SpecBuilder = .{ .s = s };
     try b.out.appendSlice(s.a, "{\"p\":");
     try json.appendQuoted(s.a, &b.out, path);
     try b.out.appendSlice(s.a, ",\"c\":");
     try b.columns();
-    try s.expectOp(")");
-    const al = (try s.alias(false)) orelse return s.failState(.of("42601"), "Every table function must have an alias.", .{});
+    try s.c.expectOp(")");
+    const al = (try s.alias(false)) orelse return s.c.failState(null, .of("42601"), "Every table function must have an alias.", .{});
     try b.out.appendSlice(s.a, ",\"t\":");
     try json.appendQuoted(s.a, &b.out, al.text);
     try b.out.append(s.a, '}');
     for (b.names.items, 0..) |n, i| for (b.names.items[0..i]) |o| {
-        if (std.ascii.eqlIgnoreCase(n, o)) return s.failState(.numbered("42701", 1060), "Duplicate column name '{s}'", .{n});
+        if (std.ascii.eqlIgnoreCase(n, o)) return s.c.failState(null, .numbered("42701", 1060), "Duplicate column name '{s}'", .{n});
     };
     try s.json_tables.append(s.a, .{ .alias = al.text, .cols = b.names.items });
     const f = try s.new(tree.Func, .{ .name = .{ .text = "xq_maria_json_table", .pos = pos }, .args = try s.a.dupe(*Expr, &.{ doc, try s.str(pos, b.out.items) }) });
@@ -92,25 +92,25 @@ const SpecBuilder = struct {
 
     fn columns(b: *SpecBuilder) Error!void {
         const s = b.s;
-        try s.expectKw("COLUMNS");
-        try s.expectOp("(");
+        try s.c.expectKw("COLUMNS");
+        try s.c.expectOp("(");
         try b.raw("[");
         var first = true;
         while (true) {
             if (!first) try b.raw(",");
             first = false;
             try b.column();
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         try b.raw("]");
     }
 
     fn column(b: *SpecBuilder) Error!void {
         const s = b.s;
-        if (s.isKw("NESTED")) {
-            s.advance();
-            _ = s.eatKw("PATH");
+        if (s.c.isKw("NESTED")) {
+            s.c.skip();
+            _ = s.c.eatKw("PATH");
             try b.raw("{\"N\":");
             try b.str(try s.stringLiteral());
             try b.raw(",\"c\":");
@@ -122,8 +122,8 @@ const SpecBuilder = struct {
         try b.names.append(s.a, name.text);
         try b.raw("{\"n\":");
         try b.str(name.text);
-        if (s.eatKw("FOR")) {
-            try s.expectKw("ORDINALITY");
+        if (s.c.eatKw("FOR")) {
+            try s.c.expectKw("ORDINALITY");
             try b.raw(",\"o\":1}");
             return;
         }
@@ -133,8 +133,8 @@ const SpecBuilder = struct {
         ty.format(&w.writer) catch return error.OutOfMemory;
         try b.str(w.written());
         if (is_json) try b.raw(",\"j\":1");
-        if (s.eatKw("EXISTS")) try b.raw(",\"x\":1");
-        try s.expectKw("PATH");
+        if (s.c.eatKw("EXISTS")) try b.raw(",\"x\":1");
+        try s.c.expectKw("PATH");
         try b.raw(",\"p\":");
         try b.str(try s.stringLiteral());
         // [NULL | ERROR | DEFAULT value] ON EMPTY / ON ERROR, either order.
@@ -142,41 +142,41 @@ const SpecBuilder = struct {
         var seen_error = false;
         while (true) {
             var what: []const u8 = undefined;
-            if (s.isKw("NULL") or s.isKw("ERROR")) {
-                what = if (s.isKw("NULL")) "" else "\"E\"";
-                s.advance();
-            } else if (s.isKw("DEFAULT")) {
-                s.advance();
+            if (s.c.isKw("NULL") or s.c.isKw("ERROR")) {
+                what = if (s.c.isKw("NULL")) "" else "\"E\"";
+                s.c.skip();
+            } else if (s.c.isKw("DEFAULT")) {
+                s.c.skip();
                 var v: std.ArrayList(u8) = .empty;
                 try v.appendSlice(s.a, "{\"d\":");
-                const t = s.tok;
+                const t = s.c.peek();
                 switch (t.kind) {
                     .string => try json.appendQuoted(s.a, &v, try s.stringLiteral()),
                     .integer, .float => {
-                        s.advance();
+                        s.c.skip();
                         try json.appendQuoted(s.a, &v, t.text);
                     },
-                    else => return s.syntaxError(),
+                    else => return s.c.syntaxError(),
                 }
                 try v.append(s.a, '}');
                 what = v.items;
             } else break;
-            try s.expectKw("ON");
-            if (s.eatKw("EMPTY")) {
-                if (seen_empty) return s.syntaxError();
+            try s.c.expectKw("ON");
+            if (s.c.eatKw("EMPTY")) {
+                if (seen_empty) return s.c.syntaxError();
                 seen_empty = true;
                 if (what.len > 0) {
                     try b.raw(",\"e\":");
                     try b.raw(what);
                 }
-            } else if (s.eatKw("ERROR")) {
-                if (seen_error) return s.syntaxError();
+            } else if (s.c.eatKw("ERROR")) {
+                if (seen_error) return s.c.syntaxError();
                 seen_error = true;
                 if (what.len > 0) {
                     try b.raw(",\"r\":");
                     try b.raw(what);
                 }
-            } else return s.syntaxError();
+            } else return s.c.syntaxError();
         }
         try b.raw("}");
     }
@@ -290,7 +290,7 @@ const Rewriter = struct {
                 try r.s.a.dupe(Name, &.{a.name})
             else switch (item.source) {
                 .table => |q| if (q.schema) |sc| try r.s.a.dupe(Name, &.{ sc, q.name }) else try r.s.a.dupe(Name, &.{q.name}),
-                else => return r.s.failState(.numbered("42601", 1248), "Every derived table must have its own alias", .{}),
+                else => return r.s.c.failState(null, .numbered("42601", 1248), "Every derived table must have its own alias", .{}),
             };
             if (label.len == 1) if (r.table(label[0].text)) |jt| {
                 try r.listColumns(out, jt, pos);

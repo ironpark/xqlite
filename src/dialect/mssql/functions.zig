@@ -25,32 +25,32 @@ fn eq(a: []const u8, b: []const u8) bool {
 
 /// `name ( ... )` at the current token.
 pub fn call(s: *Parser) Error!*Expr {
-    const name_tok = s.tok;
-    const pos = s.posOf(name_tok);
-    s.advance();
-    try s.expectOp("(");
+    const name_tok = s.c.peek();
+    const pos = name_tok.start;
+    s.c.skip();
+    try s.c.expectOp("(");
     const n = name_tok.text;
     if (try @import("json_sql.zig").call(s, n, pos)) |e| return e;
 
     if (eq(n, "CAST") or eq(n, "TRY_CAST") or eq(n, "PARSE") or eq(n, "TRY_PARSE")) {
         const e = try s.expr();
-        try s.expectKw("AS");
+        try s.c.expectKw("AS");
         const ty = try typeName(s);
-        if (s.eatKw("USING")) _ = try s.expr();
-        try s.expectOp(")");
+        if (s.c.eatKw("USING")) _ = try s.expr();
+        try s.c.expectOp(")");
         return castTo(s, pos, e, ty, eq(n, "TRY_CAST") or eq(n, "TRY_PARSE"));
     }
     if (eq(n, "CONVERT") or eq(n, "TRY_CONVERT")) {
         const ty = try typeName(s);
-        try s.expectOp(",");
+        try s.c.expectOp(",");
         const e = try s.expr();
         var style: ?i64 = null;
-        if (s.eatOp(",")) {
-            if (s.tok.kind != .integer) return s.fail("xqlite: CONVERT needs a constant style", .{});
-            style = std.fmt.parseInt(i64, s.tok.text, 10) catch return s.syntaxError();
-            s.advance();
+        if (s.c.eatOp(",")) {
+            if (s.c.peek().kind != .integer) return s.c.fail(null, "xqlite: CONVERT needs a constant style", .{});
+            style = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+            s.c.skip();
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         if (style) |st| if (ty.t.isChar()) {
             if (dateStyle(st)) |fmt| {
                 const f = try s.func(pos, "strftime", &.{ try s.str(pos, fmt), e });
@@ -64,8 +64,8 @@ pub fn call(s: *Parser) Error!*Expr {
         const part = try datePart(s);
         var args: std.ArrayList(*Expr) = .empty;
         try args.append(s.a, try s.str(pos, part));
-        while (s.eatOp(",")) try args.append(s.a, try dateArg(s));
-        try s.expectOp(")");
+        while (s.c.eatOp(",")) try args.append(s.a, try dateArg(s));
+        try s.c.expectOp(")");
         const want: usize = if (eq(n, "DATEPART") or eq(n, "DATENAME")) 2 else 3;
         if (args.items.len != want) return argCount(s, n);
         const fname: []const u8 = if (eq(n, "DATEADD")) "dateadd" else if (eq(n, "DATEPART")) "datepart" else if (eq(n, "DATENAME")) "datename" else "datediff";
@@ -74,27 +74,27 @@ pub fn call(s: *Parser) Error!*Expr {
     if (eq(n, "TRIM")) {
         // TRIM([chars FROM] s)
         const first = try s.expr();
-        if (s.eatKw("FROM")) {
+        if (s.c.eatKw("FROM")) {
             const str = try s.expr();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             return s.func(pos, "trim", &.{ str, first });
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return s.func(pos, "trim", &.{ first, try s.str(pos, " ") });
     }
     if (eq(n, "STRING_AGG")) {
         const e = try s.expr();
-        try s.expectOp(",");
+        try s.c.expectOp(",");
         const sep = try s.expr();
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         var order: []tree.SortItem = &.{};
-        if (s.eatKw("WITHIN")) {
-            try s.expectKw("GROUP");
-            try s.expectOp("(");
-            try s.expectKw("ORDER");
-            try s.expectKw("BY");
+        if (s.c.eatKw("WITHIN")) {
+            try s.c.expectKw("GROUP");
+            try s.c.expectOp("(");
+            try s.c.expectKw("ORDER");
+            try s.c.expectKw("BY");
             order = try s.sortList();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
         }
         const over = try s.overClause();
         return s.funcNode(pos, .{ .name = .{ .text = "group_concat", .pos = pos }, .args = try s.a.dupe(*Expr, &.{ e, sep }), .order_by = order, .over = over });
@@ -104,15 +104,15 @@ pub fn call(s: *Parser) Error!*Expr {
     var distinct = false;
     var args: []*Expr = &.{};
     var star = false;
-    if (s.eatOp("*")) {
+    if (s.c.eatOp("*")) {
         star = true;
     } else {
-        if (s.eatKw("DISTINCT")) {
+        if (s.c.eatKw("DISTINCT")) {
             distinct = true;
-        } else _ = s.eatKw("ALL");
-        if (!s.isOp(")")) args = try s.exprList();
+        } else _ = s.c.eatKw("ALL");
+        if (!s.c.isOp(")")) args = try s.exprList();
     }
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     const over = try s.overClause();
     if (star or distinct or over != null) {
         // An aggregate or a window function.
@@ -135,17 +135,17 @@ const aggregates = std.StaticStringMapWithEql([]const u8, ctype.eqlNoCase).initC
 });
 
 fn argCount(s: *Parser, n: []const u8) Error {
-    return s.failState(.numbered("42883", 174), "The {s} function requires a different number of arguments.", .{n});
+    return s.c.failState(null, .numbered("42883", 174), "The {s} function requires a different number of arguments.", .{n});
 }
 
 /// A datepart word of DATEADD/DATEDIFF/DATEPART/DATENAME, its canonical
 /// name.
 fn datePart(s: *Parser) Error![]const u8 {
-    const t = s.tok;
-    if (t.kind != .ident and t.kind != .quoted_ident and t.kind != .string) return s.syntaxError();
+    const t = s.c.peek();
+    if (t.kind != .ident and t.kind != .quoted_ident and t.kind != .string) return s.c.syntaxError();
     const w = if (t.kind == .string) try lexer.stringValue(s.a, t) else try s.nameText(t);
-    s.advance();
-    return canonicalPart(w) orelse s.failState(.numbered("22023", 155), "'{s}' is not a recognized datepart option.", .{w});
+    s.c.skip();
+    return canonicalPart(w) orelse s.c.failState(null, .numbered("22023", 155), "'{s}' is not a recognized datepart option.", .{w});
 }
 
 /// The canonical name of a datepart or its abbreviation.
@@ -216,13 +216,13 @@ pub const TypeName = struct { t: types.Type, text: []const u8, written: []const 
 /// defaults of a column definition (char is char(1)), else of CAST
 /// (char is char(30)).
 pub fn typeNameOf(s: *Parser, column: bool) Error!TypeName {
-    const t = s.tok;
-    if (t.kind != .ident and t.kind != .quoted_ident) return s.syntaxError();
+    const t = s.c.peek();
+    if (t.kind != .ident and t.kind != .quoted_ident) return s.c.syntaxError();
     var tname = try s.nameText(t);
-    s.advance();
+    s.c.skip();
     // dbo.type / sys.type
-    if (s.isOp(".") and (std.ascii.eqlIgnoreCase(tname, "dbo") or std.ascii.eqlIgnoreCase(tname, "sys"))) {
-        s.advance();
+    if (s.c.isOp(".") and (std.ascii.eqlIgnoreCase(tname, "dbo") or std.ascii.eqlIgnoreCase(tname, "sys"))) {
+        s.c.skip();
         tname = try s.nameText(try s.anyName());
     }
     // char varying, national character varying, double precision.
@@ -230,21 +230,21 @@ pub fn typeNameOf(s: *Parser, column: bool) Error!TypeName {
         tname = try s.nameText(try s.anyName());
         tname = if (eq(tname, "TEXT")) "ntext" else "nchar";
     }
-    if (s.eatKw("VARYING")) tname = if (eq(tname, "nchar")) "nvarchar" else "varchar";
+    if (s.c.eatKw("VARYING")) tname = if (eq(tname, "nchar")) "nvarchar" else "varchar";
     if (eq(tname, "DOUBLE")) {
-        try s.expectKw("PRECISION");
+        try s.c.expectKw("PRECISION");
         tname = "float";
     }
-    const base = types.baseByName(tname) orelse return s.failState(.numbered("42704", 2715), "Column, parameter, or variable #1: Cannot find data type {s}.", .{tname});
+    const base = types.baseByName(tname) orelse return s.c.failState(null, .numbered("42704", 2715), "Column, parameter, or variable #1: Cannot find data type {s}.", .{tname});
     var ty: types.Type = .{ .base = base };
-    if (s.eatOp("(")) {
-        if (s.eatKw("MAX")) {
+    if (s.c.eatOp("(")) {
+        if (s.c.eatKw("MAX")) {
             ty.len = types.max_len;
         } else {
             ty.len = try intArg(s);
-            if (s.eatOp(",")) ty.scale = try intArg(s);
+            if (s.c.eatOp(",")) ty.scale = try intArg(s);
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
     }
     ty = types.columnDefaults(tname, ty);
     if (!column and ty.len == null and (ty.isChar() or ty.isBinary())) {
@@ -255,7 +255,7 @@ pub fn typeNameOf(s: *Parser, column: bool) Error!TypeName {
     }
     if (ty.base == .decimal or ty.base == .numeric) {
         const p = ty.len orelse 18;
-        if (p < 1 or p > 38 or (ty.scale orelse 0) > p or (ty.scale orelse 0) < 0) return s.failState(.numbered("22023", 192), "The scale must be less than or equal to the precision.", .{});
+        if (p < 1 or p > 38 or (ty.scale orelse 0) > p or (ty.scale orelse 0) < 0) return s.c.failState(null, .numbered("22023", 192), "The scale must be less than or equal to the precision.", .{});
     }
     return .{ .t = ty, .text = try types.format(s.a, ty), .written = tname };
 }
@@ -265,9 +265,9 @@ fn typeName(s: *Parser) Error!TypeName {
 }
 
 fn intArg(s: *Parser) Error!i64 {
-    if (s.tok.kind != .integer) return s.syntaxError();
-    const v = std.fmt.parseInt(i64, s.tok.text, 10) catch return s.syntaxError();
-    s.advance();
+    if (s.c.peek().kind != .integer) return s.c.syntaxError();
+    const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+    s.c.skip();
     return v;
 }
 
@@ -311,7 +311,7 @@ pub fn systemFunction(s: *Parser, t: Token, pos: u32) Error!*Expr {
         .{ "SERVERNAME", "xqlite" }, .{ "SERVICENAME", "MSSQLSERVER" }, .{ "LANGUAGE", "us_english" },
     };
     for (strs) |x| if (eq(n, x[0])) return s.str(pos, x[1]);
-    return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
+    return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
 }
 
 /// Functions with SQLite's semantics under another name.
@@ -369,7 +369,7 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
         return s.mk(pos, .{ .case = .{ .operand = args[0], .whens = whens.items, .@"else" = null } });
     }
     if (eq(n, "concat")) {
-        if (k < 2) return s.failState(.numbered("42883", 189), "The concat function requires 2 to 254 arguments.", .{});
+        if (k < 2) return s.c.failState(null, .numbered("42883", 189), "The concat function requires 2 to 254 arguments.", .{});
         return s.mk(pos, .{ .concat = .{ .args = args, .null_policy = .skip } });
     }
     if (eq(n, "square") and k == 1) return s.bin(.mul, args[0], args[0]);
@@ -401,7 +401,7 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
         var open: []const u8 = "[";
         var close: []const u8 = "]";
         if (k == 2) {
-            if (args[1].kind != .string) return s.fail("xqlite: QUOTENAME needs a constant quote character", .{});
+            if (args[1].kind != .string) return s.c.fail(null, "xqlite: QUOTENAME needs a constant quote character", .{});
             const q = args[1].kind.string;
             if (std.mem.eql(u8, q, "\"")) {
                 open = "\"";
@@ -416,8 +416,8 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
         return s.mk(pos, .{ .concat = .{ .args = try s.a.dupe(*Expr, &.{ try s.str(pos, open), rep, try s.str(pos, close) }), .null_policy = .propagate } });
     }
     if (eq(n, "format") or eq(n, "string_split") or eq(n, "openjson")) {
-        if (eq(n, "openjson")) return s.fail("xqlite: OPENJSON is a table source (FROM, CROSS APPLY)", .{});
-        return s.fail("xqlite: {s}() is not supported", .{n});
+        if (eq(n, "openjson")) return s.c.fail(null, "xqlite: OPENJSON is a table source (FROM, CROSS APPLY)", .{});
+        return s.c.fail(null, "xqlite: {s}() is not supported", .{n});
     }
     // As written: a function of the dialect's table, a SQLite built-in
     // or an application function.
@@ -428,7 +428,7 @@ pub fn byName(s: *Parser, n: []const u8, args_in: []const *Expr, pos: u32) Error
 /// in sqlite_schema (sys.tables shows the same), NULL if there is none.
 fn objectId(s: *Parser, pos: u32, args: []const *Expr) Error!*Expr {
     if (args.len < 1 or args.len > 2) return argCount(s, "object_id");
-    if (args[0].kind != .string) return s.fail("xqlite: OBJECT_ID needs a constant name", .{});
+    if (args[0].kind != .string) return s.c.fail(null, "xqlite: OBJECT_ID needs a constant name", .{});
     // tempdb..#t, dbo.t, [s].[t], db.s.t
     var parts: std.ArrayList(tree.Name) = .empty;
     var it = std.mem.splitScalar(u8, args[0].kind.string, '.');
@@ -442,8 +442,8 @@ fn objectId(s: *Parser, pos: u32, args: []const *Expr) Error!*Expr {
     const text = try std.fmt.allocPrintSentinel(s.a, "(SELECT rowid FROM {s}.sqlite_schema WHERE type IN ('table', 'view') AND name = {f} COLLATE NOCASE)", .{ schema, @import("../dialect.zig").Quoted('\''){ .z = z } }, 0);
     var sub: Parser = .init(s.p, text);
     sub.depth = 1;
-    const e = try sub.expr();
-    if (sub.tok.kind != .eof) return sub.syntaxError();
+    const e = sub.expr() catch |err| return s.c.failedIn(&sub.c, err);
+    if (!sub.c.atEof()) return s.c.failedIn(&sub.c, sub.c.syntaxError());
     const sel = e.kind.subquery;
     sel.src = text;
     return s.mk(pos, .{ .subquery = sel });

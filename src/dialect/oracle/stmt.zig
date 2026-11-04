@@ -43,18 +43,18 @@ fn eq(a: []const u8, b: []const u8) bool {
 /// One statement, to its end.
 pub fn statement(p: *Parser) Error!Statement {
     const s = try stmt(p);
-    if (p.peek().kind != .eof) return p.syntaxError();
+    if (p.c.peek().kind != .eof) return p.c.syntaxError();
     return s;
 }
 
 fn skipRest(p: *Parser) void {
-    while (p.peek().kind != .eof) _ = p.advance();
+    while (p.c.peek().kind != .eof) p.c.skip();
 }
 
 fn stmt(p: *Parser) Error!Statement {
-    const t = p.peek();
+    const t = p.c.peek();
     if (t.kind == .lparen) return .{ .tree = .{ .select = try p.select() } };
-    if (t.kind != .ident) return p.fail(t.start, "ORA-00900: invalid SQL statement", .{});
+    if (t.kind != .ident) return p.c.fail(t.start, "ORA-00900: invalid SQL statement", .{});
     const w = t.text;
     if (eq(w, "SELECT") or eq(w, "WITH")) return .{ .tree = .{ .select = try p.select() } };
     if (eq(w, "INSERT")) return insert(p);
@@ -62,31 +62,31 @@ fn stmt(p: *Parser) Error!Statement {
     if (eq(w, "DELETE")) return .{ .tree = .{ .delete = try delete(p) } };
     if (eq(w, "MERGE")) return merge(p);
     if (eq(w, "COMMIT")) {
-        _ = p.advance();
-        _ = p.eatKw("work");
-        if (p.eatKw("comment")) _ = try p.expect(.string);
-        if (p.eatKw("write")) skipRest(p);
+        p.c.skip();
+        _ = p.c.eatKw("work");
+        if (p.c.eatKw("comment")) _ = try p.c.expect(.string);
+        if (p.c.eatKw("write")) skipRest(p);
         return .{ .tree = .commit };
     }
     if (eq(w, "ROLLBACK")) {
-        _ = p.advance();
-        _ = p.eatKw("work");
-        if (p.eatKw("to")) {
-            _ = p.eatKw("savepoint");
+        p.c.skip();
+        _ = p.c.eatKw("work");
+        if (p.c.eatKw("to")) {
+            _ = p.c.eatKw("savepoint");
             return .{ .tree = .{ .rollback_to = try p.colId() } };
         }
         return .{ .tree = .rollback };
     }
     if (eq(w, "SAVEPOINT")) {
-        _ = p.advance();
+        p.c.skip();
         return .{ .tree = .{ .savepoint = try p.colId() } };
     }
     if (eq(w, "SET")) {
-        if (p.isKwAt(1, "transaction")) {
+        if (p.c.isKwAt(1, "transaction")) {
             skipRest(p);
             return .noop;
         }
-        return p.fail(t.start, "ORA-00922: missing or invalid option", .{});
+        return p.c.fail(t.start, "ORA-00922: missing or invalid option", .{});
     }
     if (eq(w, "LOCK")) {
         // LOCK TABLE: writers are serialized already.
@@ -94,18 +94,18 @@ fn stmt(p: *Parser) Error!Statement {
         return .noop;
     }
     if (eq(w, "ALTER")) {
-        if (p.isKwAt(1, "session") or p.isKwAt(1, "system")) {
+        if (p.c.isKwAt(1, "session") or p.c.isKwAt(1, "system")) {
             skipRest(p);
             return .noop;
         }
-        if (p.isKwAt(1, "table")) return alterTable(p);
-        return p.unsupported(p.peekAt(1).start, try std.fmt.allocPrint(p.arena, "ALTER {s}", .{p.peekAt(1).text}));
+        if (p.c.isKwAt(1, "table")) return alterTable(p);
+        return p.unsupported(p.c.peekAt(1).start, try std.fmt.allocPrint(p.arena, "ALTER {s}", .{p.c.peekAt(1).text}));
     }
     if (eq(w, "CREATE")) return create(p);
     if (eq(w, "DROP")) return .{ .tree = .{ .drop = try drop(p) } };
     if (eq(w, "TRUNCATE")) {
-        _ = p.advance();
-        try p.expectKw("table");
+        p.c.skip();
+        try p.c.expectKw("table");
         const q = try p.qname();
         var tr: tree.Truncate = .{ .table = (try p.relation(q)).q };
         tr.restart_identity = false;
@@ -113,9 +113,9 @@ fn stmt(p: *Parser) Error!Statement {
         return .{ .tree = .{ .truncate = try p.new(tree.Truncate, tr) } };
     }
     if (eq(w, "RENAME")) {
-        _ = p.advance();
+        p.c.skip();
         const old = try p.colId();
-        try p.expectKw("to");
+        try p.c.expectKw("to");
         var new = try p.colId();
         // In the current schema, where the object stays.
         const r = try p.relation(.{ .name = old });
@@ -125,15 +125,15 @@ fn stmt(p: *Parser) Error!Statement {
     }
     if (eq(w, "COMMENT")) return comment(p);
     if (eq(w, "EXPLAIN")) {
-        _ = p.advance();
-        try p.expectKw("plan");
-        if (p.eatKw("set")) {
-            try p.expectKw("statement_id");
-            if (!p.eatOp("=")) return p.syntaxError();
-            _ = try p.expect(.string);
+        p.c.skip();
+        try p.c.expectKw("plan");
+        if (p.c.eatKw("set")) {
+            try p.c.expectKw("statement_id");
+            if (!p.c.eatOp("=")) return p.c.syntaxError();
+            _ = try p.c.expect(.string);
         }
-        if (p.eatKw("into")) _ = try p.qname();
-        try p.expectKw("for");
+        if (p.c.eatKw("into")) _ = try p.qname();
+        try p.c.expectKw("for");
         const inner = try stmt(p);
         return switch (inner) {
             .tree => |x| switch (x) {
@@ -152,7 +152,7 @@ fn stmt(p: *Parser) Error!Statement {
     if (eq(w, "AUDIT") or eq(w, "NOAUDIT") or eq(w, "ANALYZE") or eq(w, "PURGE") or eq(w, "FLASHBACK") or eq(w, "CALL")) {
         return p.unsupported(t.start, try std.ascii.allocUpperString(p.arena, w));
     }
-    return p.fail(t.start, "ORA-00900: invalid SQL statement", .{});
+    return p.c.fail(t.start, "ORA-00900: invalid SQL statement", .{});
 }
 
 // =============================================================== DML
@@ -163,27 +163,27 @@ fn targetTable(p: *Parser) Error!struct { table: tree.QName, alias: ?Name } {
     const r = try p.relation(q);
     const table = r.q;
     var alias: ?Name = r.alias;
-    const a = p.peek();
+    const a = p.c.peek();
     if (a.kind == .qident or (a.kind == .ident and !parser.isReserved(a.text) and !a.isAnyKw(&.{ "using", "values", "returning", "log" }))) {
-        _ = p.advance();
+        p.c.skip();
         alias = .{ .text = a.text, .pos = a.start };
     }
     return .{ .table = table, .alias = alias };
 }
 
 fn returning(p: *Parser) Error!void {
-    if (p.isKw("returning") or p.isKw("return")) return p.unsupported(p.peek().start, "RETURNING (RETURNING ... INTO is PL/SQL)");
-    if (p.isKw("log") and p.isKwAt(1, "errors")) return p.unsupported(p.peek().start, "LOG ERRORS");
+    if (p.c.isKw("returning") or p.c.isKw("return")) return p.unsupported(p.c.peek().start, "RETURNING (RETURNING ... INTO is PL/SQL)");
+    if (p.c.isKw("log") and p.c.isKwAt(1, "errors")) return p.unsupported(p.c.peek().start, "LOG ERRORS");
 }
 
 fn insert(p: *Parser) Error!Statement {
-    const pos = p.advance().start; // INSERT
-    if (p.isKw("all") or p.isKw("first")) return insertMulti(p, pos);
-    try p.expectKw("into");
+    const pos = p.c.advance().start; // INSERT
+    if (p.c.isKw("all") or p.c.isKw("first")) return insertMulti(p, pos);
+    try p.c.expectKw("into");
     const tgt = try targetTable(p);
     var ins: tree.Insert = .{ .table = tgt.table, .alias = tgt.alias, .source = null, .pos = pos };
-    if (p.peek().kind == .lparen and !startsQuery(p)) ins.cols = try p.parenNameList();
-    if (!p.isKw("values") and !p.isKw("select") and !p.isKw("with") and p.peek().kind != .lparen) return p.missing("ORA-00926: missing VALUES keyword");
+    if (p.c.peek().kind == .lparen and !startsQuery(p)) ins.cols = try p.parenNameList();
+    if (!p.c.isKw("values") and !p.c.isKw("select") and !p.c.isKw("with") and p.c.peek().kind != .lparen) return p.missing("ORA-00926: missing VALUES keyword");
     ins.source = try p.select();
     try returning(p);
     const x = try p.new(tree.Insert, ins);
@@ -193,15 +193,15 @@ fn insert(p: *Parser) Error!Statement {
 
 fn startsQuery(p: *Parser) bool {
     var k: usize = 0;
-    while (p.peekAt(k).kind == .lparen) k += 1;
-    return k > 0 and (p.peekAt(k).isKw("select") or p.peekAt(k).isKw("with"));
+    while (p.c.peekAt(k).kind == .lparen) k += 1;
+    return k > 0 and (p.c.peekAt(k).isKw("select") or p.c.peekAt(k).isKw("with"));
 }
 
 /// INSERT ALL / INSERT FIRST: one INSERT ... SELECT per INTO, each
 /// reading the subquery, filtered by its WHEN (for FIRST, the first WHEN
 /// that holds).
 fn insertMulti(p: *Parser, pos: u32) Error!Statement {
-    const first = p.advance().isKw("first");
+    const first = p.c.advance().isKw("first");
     const Into = struct { table: tree.QName, alias: ?Name, cols: []Name, values: ?[]*Expr, branch: usize };
     var intos: std.ArrayList(Into) = .empty;
     var conds: std.ArrayList(*Expr) = .empty;
@@ -209,27 +209,27 @@ fn insertMulti(p: *Parser, pos: u32) Error!Statement {
     var has_else = false;
     while (true) {
         var branch: usize = 0;
-        if (p.eatKw("when")) {
+        if (p.c.eatKw("when")) {
             conditional = true;
             try conds.append(p.arena, try p.expr0());
-            try p.expectKw("then");
+            try p.c.expectKw("then");
             branch = conds.items.len;
-        } else if (conditional and p.eatKw("else")) {
+        } else if (conditional and p.c.eatKw("else")) {
             has_else = true;
             branch = 0;
-        } else if (conditional or !p.isKw("into")) break;
+        } else if (conditional or !p.c.isKw("into")) break;
         var any = false;
-        while (p.eatKw("into")) {
+        while (p.c.eatKw("into")) {
             any = true;
             const tgt = try targetTable(p);
             var cols: []Name = &.{};
-            if (p.peek().kind == .lparen) cols = try p.parenNameList();
+            if (p.c.peek().kind == .lparen) cols = try p.parenNameList();
             var values: ?[]*Expr = null;
-            if (p.eatKw("values")) {
+            if (p.c.eatKw("values")) {
                 p.nextval_seen.clearRetainingCapacity();
-                _ = try p.expect(.lparen);
+                _ = try p.c.expect(.lparen);
                 values = try p.exprList();
-                _ = try p.expect(.rparen);
+                _ = try p.c.expect(.rparen);
             }
             try intos.append(p.arena, .{ .table = tgt.table, .alias = tgt.alias, .cols = cols, .values = values, .branch = branch });
         }
@@ -284,38 +284,38 @@ fn setList(p: *Parser) Error![]tree.SetItem {
     p.nextval_seen.clearRetainingCapacity();
     var out: std.ArrayList(tree.SetItem) = .empty;
     while (true) {
-        if (p.peek().kind == .lparen) {
+        if (p.c.peek().kind == .lparen) {
             const cols = try p.parenNameList();
-            if (!p.peek().isOp("=")) return p.missing("ORA-00927: missing equal sign");
-            _ = p.advance();
+            if (!p.c.peek().isOp("=")) return p.missing("ORA-00927: missing equal sign");
+            p.c.skip();
             const v = try p.expr0();
             try out.append(p.arena, .{ .cols = cols, .multi = true, .value = v });
         } else {
             var cols = try p.arena.alloc(Name, 1);
             cols[0] = try p.colId();
             // t.col = ...: the target's column.
-            if (p.peek().kind == .dot) {
-                _ = p.advance();
+            if (p.c.peek().kind == .dot) {
+                p.c.skip();
                 cols[0] = try p.anyName();
             }
-            if (!p.peek().isOp("=")) return p.missing("ORA-00927: missing equal sign");
-            _ = p.advance();
+            if (!p.c.peek().isOp("=")) return p.missing("ORA-00927: missing equal sign");
+            p.c.skip();
             const v = try p.expr0();
             try out.append(p.arena, .{ .cols = cols, .multi = false, .value = v });
         }
-        if (!p.eat(.comma)) break;
+        if (!p.c.eat(.comma)) break;
     }
     return out.items;
 }
 
 fn update(p: *Parser) Error!*tree.Update {
-    const pos = p.advance().start; // UPDATE
+    const pos = p.c.advance().start; // UPDATE
     const tgt = try targetTable(p);
     var u: tree.Update = .{ .table = tgt.table, .alias = tgt.alias, .sets = &.{}, .pos = pos };
-    try p.expectKw("set");
+    try p.c.expectKw("set");
     u.sets = try setList(p);
-    if (p.eatKw("where")) {
-        if (p.isKw("current") and p.isKwAt(1, "of")) return p.unsupported(p.peek().start, "WHERE CURRENT OF");
+    if (p.c.eatKw("where")) {
+        if (p.c.isKw("current") and p.c.isKwAt(1, "of")) return p.unsupported(p.c.peek().start, "WHERE CURRENT OF");
         u.where = try p.expr0();
         u.limit = try p.takeRownum(&u.where);
     }
@@ -326,12 +326,12 @@ fn update(p: *Parser) Error!*tree.Update {
 }
 
 fn delete(p: *Parser) Error!*tree.Delete {
-    const pos = p.advance().start; // DELETE
-    _ = p.eatKw("from");
+    const pos = p.c.advance().start; // DELETE
+    _ = p.c.eatKw("from");
     const tgt = try targetTable(p);
     var d: tree.Delete = .{ .table = tgt.table, .alias = tgt.alias, .pos = pos };
-    if (p.eatKw("where")) {
-        if (p.isKw("current") and p.isKwAt(1, "of")) return p.unsupported(p.peek().start, "WHERE CURRENT OF");
+    if (p.c.eatKw("where")) {
+        if (p.c.isKw("current") and p.c.isKwAt(1, "of")) return p.unsupported(p.c.peek().start, "WHERE CURRENT OF");
         d.where = try p.expr0();
         d.limit = try p.takeRownum(&d.where);
     }
@@ -340,78 +340,78 @@ fn delete(p: *Parser) Error!*tree.Delete {
 }
 
 fn merge(p: *Parser) Error!Statement {
-    const pos = p.advance().start; // MERGE
-    try p.expectKw("into");
+    const pos = p.c.advance().start; // MERGE
+    try p.c.expectKw("into");
     const tgt = try targetTable(p);
-    try p.expectKw("using");
+    try p.c.expectKw("using");
     // The source: a table or a subquery, and its alias.
     var src: tree.FromItem = undefined;
-    if (p.peek().kind == .lparen) {
-        _ = p.advance();
+    if (p.c.peek().kind == .lparen) {
+        p.c.skip();
         const s = try p.select();
-        _ = try p.expect(.rparen);
+        _ = try p.c.expect(.rparen);
         src = .{ .source = .{ .subquery = s } };
     } else {
         const r = try p.relation(try p.qname());
         src = .{ .source = .{ .table = r.q }, .alias = if (r.alias) |a| .{ .name = a } else null };
     }
     {
-        const a = p.peek();
+        const a = p.c.peek();
         if (a.kind == .qident or (a.kind == .ident and !parser.isReserved(a.text))) {
-            _ = p.advance();
+            p.c.skip();
             src.alias = .{ .name = .{ .text = a.text, .pos = a.start } };
         }
     }
-    try p.expectKw("on");
-    _ = try p.expect(.lparen);
+    try p.c.expectKw("on");
+    _ = try p.c.expect(.lparen);
     const on = try p.expr0();
-    _ = try p.expect(.rparen);
+    _ = try p.c.expect(.rparen);
 
     var upd: ?struct { sets: []tree.SetItem, where: ?*Expr, delete: ?*Expr } = null;
     var ins: ?struct { cols: []Name, values: []*Expr, where: ?*Expr } = null;
-    while (p.eatKw("when")) {
-        const not = p.eatKw("not");
-        try p.expectKw("matched");
-        try p.expectKw("then");
+    while (p.c.eatKw("when")) {
+        const not = p.c.eatKw("not");
+        try p.c.expectKw("matched");
+        try p.c.expectKw("then");
         if (!not) {
-            if (upd != null) return p.syntaxError();
-            try p.expectKw("update");
-            try p.expectKw("set");
+            if (upd != null) return p.c.syntaxError();
+            try p.c.expectKw("update");
+            try p.c.expectKw("set");
             const sets = try setList(p);
             var w: ?*Expr = null;
             var d: ?*Expr = null;
-            if (p.eatKw("where")) w = try p.expr0();
-            if (p.eatKw("delete")) {
-                try p.expectKw("where");
+            if (p.c.eatKw("where")) w = try p.expr0();
+            if (p.c.eatKw("delete")) {
+                try p.c.expectKw("where");
                 d = try p.expr0();
             }
             upd = .{ .sets = sets, .where = w, .delete = d };
         } else {
-            if (ins != null) return p.syntaxError();
-            try p.expectKw("insert");
+            if (ins != null) return p.c.syntaxError();
+            try p.c.expectKw("insert");
             var cols: []Name = &.{};
-            if (p.peek().kind == .lparen) {
-                _ = p.advance();
+            if (p.c.peek().kind == .lparen) {
+                p.c.skip();
                 var names: std.ArrayList(Name) = .empty;
                 while (true) {
                     var n = try p.colId();
-                    if (p.peek().kind == .dot) {
-                        _ = p.advance();
+                    if (p.c.peek().kind == .dot) {
+                        p.c.skip();
                         n = try p.anyName();
                     }
                     try names.append(p.arena, n);
-                    if (!p.eat(.comma)) break;
+                    if (!p.c.eat(.comma)) break;
                 }
-                _ = try p.expect(.rparen);
+                _ = try p.c.expect(.rparen);
                 cols = names.items;
             }
-            try p.expectKw("values");
+            try p.c.expectKw("values");
             p.nextval_seen.clearRetainingCapacity();
-            _ = try p.expect(.lparen);
+            _ = try p.c.expect(.lparen);
             const values = try p.exprList();
-            _ = try p.expect(.rparen);
+            _ = try p.c.expect(.rparen);
             var w: ?*Expr = null;
-            if (p.eatKw("where")) w = try p.expr0();
+            if (p.c.eatKw("where")) w = try p.expr0();
             ins = .{ .cols = cols, .values = values, .where = w };
         }
     }
@@ -428,7 +428,7 @@ fn merge(p: *Parser) Error!Statement {
     if (upd) |u| {
         // The ON condition may not update the columns it reads (ORA-38104).
         for (u.sets) |set| for (set.cols) |col| if (mentions(on, col.text)) {
-            return p.fail(col.pos, "ORA-38104: Columns referenced in the ON Clause cannot be updated: \"{s}\"", .{col.text});
+            return p.c.fail(col.pos, "ORA-38104: Columns referenced in the ON Clause cannot be updated: \"{s}\"", .{col.text});
         };
         var from = try p.arena.alloc(tree.FromItem, 1);
         from[0] = src;
@@ -611,29 +611,29 @@ pub fn coerceSets(p: *Parser, q: tree.QName, sets: []tree.SetItem) Error!void {
 // =============================================================== DDL
 
 fn create(p: *Parser) Error!Statement {
-    const at = p.advance().start; // CREATE
+    const at = p.c.advance().start; // CREATE
     var or_replace = false;
-    if (p.eatKw("or")) {
-        try p.expectKw("replace");
+    if (p.c.eatKw("or")) {
+        try p.c.expectKw("replace");
         or_replace = true;
     }
     var temp = false;
-    if (p.eatKw("global") or p.eatKw("private")) {
-        if (!p.eatKw("temporary")) return p.missing("ORA-00905: missing keyword");
+    if (p.c.eatKw("global") or p.c.eatKw("private")) {
+        if (!p.c.eatKw("temporary")) return p.missing("ORA-00905: missing keyword");
         temp = true;
     }
-    _ = p.eatKw("noforce") or p.eatKw("force");
-    if (p.isKw("no") and p.isKwAt(1, "force")) {
-        _ = p.advance();
-        _ = p.advance();
+    _ = p.c.eatKw("noforce") or p.c.eatKw("force");
+    if (p.c.isKw("no") and p.c.isKwAt(1, "force")) {
+        p.c.skip();
+        p.c.skip();
     }
-    _ = p.eatKw("editionable") or p.eatKw("noneditionable");
-    if (p.isKw("table")) {
-        if (or_replace) return p.syntaxError();
+    _ = p.c.eatKw("editionable") or p.c.eatKw("noneditionable");
+    if (p.c.isKw("table")) {
+        if (or_replace) return p.c.syntaxError();
         return .{ .tree = .{ .create_table = try createTable(p, temp) } };
     }
-    if (p.eatKw("view")) return .{ .tree = .{ .create_view = try createView(p, or_replace) } };
-    if (p.eatKw("sequence")) {
+    if (p.c.eatKw("view")) return .{ .tree = .{ .create_view = try createView(p, or_replace) } };
+    if (p.c.eatKw("sequence")) {
         var s: tree.CreateSequence = .{ .name = undefined };
         s.if_not_exists = try p.ifNotExists();
         const q = try p.qname();
@@ -644,19 +644,19 @@ fn create(p: *Parser) Error!Statement {
         s.opts = try seqOptions(p);
         return .{ .tree = .{ .create_sequence = try p.new(tree.CreateSequence, s) } };
     }
-    if (p.isKw("unique") or p.isKw("bitmap") or p.isKw("index")) {
-        if (or_replace or temp) return p.syntaxError();
+    if (p.c.isKw("unique") or p.c.isKw("bitmap") or p.c.isKw("index")) {
+        if (or_replace or temp) return p.c.syntaxError();
         return .{ .tree = .{ .create_index = try createIndex(p) } };
     }
-    if (p.isKw("schema")) {
-        if (or_replace or temp) return p.syntaxError();
+    if (p.c.isKw("schema")) {
+        if (or_replace or temp) return p.c.syntaxError();
         return createSchema(p);
     }
-    if (p.isAnyKw(&.{ "procedure", "function", "package", "trigger", "type", "library" })) return p.unsupported(at, "PL/SQL");
-    if (p.isKw("public") or p.isKw("synonym")) return p.unsupported(at, "CREATE SYNONYM");
-    if (p.isKw("materialized")) return p.unsupported(at, "CREATE MATERIALIZED VIEW");
-    if (p.peek().kind == .ident) return p.unsupported(at, try std.fmt.allocPrint(p.arena, "CREATE {s}", .{p.peek().text}));
-    return p.fail(at, "ORA-00901: invalid CREATE command", .{});
+    if (p.c.isAnyKw(&.{ "procedure", "function", "package", "trigger", "type", "library" })) return p.unsupported(at, "PL/SQL");
+    if (p.c.isKw("public") or p.c.isKw("synonym")) return p.unsupported(at, "CREATE SYNONYM");
+    if (p.c.isKw("materialized")) return p.unsupported(at, "CREATE MATERIALIZED VIEW");
+    if (p.c.peek().kind == .ident) return p.unsupported(at, try std.fmt.allocPrint(p.arena, "CREATE {s}", .{p.c.peek().text}));
+    return p.c.fail(at, "ORA-00901: invalid CREATE command", .{});
 }
 
 /// CREATE VIEW, after VIEW.
@@ -665,16 +665,16 @@ fn createView(p: *Parser, or_replace: bool) Error!*tree.CreateView {
     const c = try p.createTarget(q, false, .user_or_role);
     var v: tree.CreateView = .{ .or_replace = or_replace, .name = .{ .schema = .{ .text = c.t.db }, .name = .{ .text = c.t.name, .pos = q.name.pos } }, .select = undefined };
     v.if_not_exists = false;
-    if (p.peek().kind == .lparen) v.cols = try p.parenNameList();
-    try p.expectKw("as");
+    if (p.c.peek().kind == .lparen) v.cols = try p.parenNameList();
+    try p.c.expectKw("as");
     v.select = try p.select();
-    if (p.eatKw("with")) {
-        if (p.eatKw("read")) {
-            try p.expectKw("only");
+    if (p.c.eatKw("with")) {
+        if (p.c.eatKw("read")) {
+            try p.c.expectKw("only");
         } else {
-            try p.expectKw("check");
-            try p.expectKw("option");
-            if (p.eatKw("constraint")) _ = try p.colId();
+            try p.c.expectKw("check");
+            try p.c.expectKw("option");
+            if (p.c.eatKw("constraint")) _ = try p.colId();
         }
     }
     return p.new(tree.CreateView, v);
@@ -685,27 +685,27 @@ fn createView(p: *Parser, or_replace: bool) Error!*tree.CreateView {
 /// the connected user (whose name the statement must give). GRANTs are
 /// ignored.
 fn createSchema(p: *Parser) Error!Statement {
-    _ = p.advance(); // SCHEMA
-    try p.expectKw("authorization");
+    p.c.skip(); // SCHEMA
+    try p.c.expectKw("authorization");
     const u = try p.colId();
-    if (!eq(u.text, ora_state.user)) return p.fail(u.pos, "ORA-02421: missing or invalid schema authorization identifier", .{});
+    if (!eq(u.text, ora_state.user)) return p.c.fail(u.pos, "ORA-02421: missing or invalid schema authorization identifier", .{});
     var out: std.ArrayList(tree.Stmt) = .empty;
     p.schema_element = true;
     defer p.schema_element = false;
-    while (p.peek().kind != .eof) {
-        const at = p.peek().start;
-        if (p.eatKw("grant")) {
-            while (p.peek().kind != .eof and !p.isKw("create") and !p.isKw("grant")) _ = p.advance();
+    while (p.c.peek().kind != .eof) {
+        const at = p.c.peek().start;
+        if (p.c.eatKw("grant")) {
+            while (p.c.peek().kind != .eof and !p.c.isKw("create") and !p.c.isKw("grant")) p.c.skip();
             continue;
         }
-        if (!p.eatKw("create")) return p.fail(at, "ORA-02422: missing or invalid schema element", .{});
-        if (p.isKw("table")) {
+        if (!p.c.eatKw("create")) return p.c.fail(at, "ORA-02422: missing or invalid schema element", .{});
+        if (p.c.isKw("table")) {
             try out.append(p.arena, .{ .create_table = try createTable(p, false) });
-        } else if (p.eatKw("view")) {
+        } else if (p.c.eatKw("view")) {
             try out.append(p.arena, .{ .create_view = try createView(p, false) });
-        } else return p.fail(at, "ORA-02422: missing or invalid schema element", .{});
+        } else return p.c.fail(at, "ORA-02422: missing or invalid schema element", .{});
     }
-    if (out.items.len == 0) return p.fail(p.peek().start, "ORA-02422: missing or invalid schema element", .{});
+    if (out.items.len == 0) return p.c.fail(p.c.peek().start, "ORA-02422: missing or invalid schema element", .{});
     return .{ .ddl = out.items };
 }
 
@@ -714,24 +714,24 @@ fn createSchema(p: *Parser) Error!Statement {
 fn seqOptions(p: *Parser) Error!tree.SeqOpts {
     var o: tree.SeqOpts = .{};
     while (true) {
-        if (p.eatKw("increment")) {
-            try p.expectKw("by");
+        if (p.c.eatKw("increment")) {
+            try p.c.expectKw("by");
             o.increment = try p.signedInt();
-        } else if (p.eatKw("start")) {
-            try p.expectKw("with");
+        } else if (p.c.eatKw("start")) {
+            try p.c.expectKw("with");
             o.start = try p.signedInt();
-        } else if (p.eatKw("minvalue")) {
+        } else if (p.c.eatKw("minvalue")) {
             o.min = try p.signedInt();
-        } else if (p.eatKw("maxvalue")) {
+        } else if (p.c.eatKw("maxvalue")) {
             o.max = bigInt(p) catch |err| return err;
-        } else if (p.eatKw("cycle")) {
+        } else if (p.c.eatKw("cycle")) {
             o.cycle = true;
-        } else if (p.eatKw("nocycle")) {
+        } else if (p.c.eatKw("nocycle")) {
             o.cycle = false;
-        } else if (p.eatKw("cache")) {
+        } else if (p.c.eatKw("cache")) {
             _ = try p.signedInt();
-        } else if (p.isAnyKw(&.{ "nocache", "order", "noorder", "nominvalue", "nomaxvalue", "keep", "nokeep", "scale", "noscale", "extend", "noextend", "session", "global", "shard", "noshard" })) {
-            _ = p.advance();
+        } else if (p.c.isAnyKw(&.{ "nocache", "order", "noorder", "nominvalue", "nomaxvalue", "keep", "nokeep", "scale", "noscale", "extend", "noextend", "session", "global", "shard", "noshard" })) {
+            p.c.skip();
         } else break;
     }
     return o;
@@ -740,15 +740,15 @@ fn seqOptions(p: *Parser) Error!tree.SeqOpts {
 /// An integer that may be larger than 64 bits (MAXVALUE
 /// 9999999999999999999999999999): the largest i64 then.
 fn bigInt(p: *Parser) Error!i64 {
-    if (p.peek().kind == .float) {
-        _ = p.advance();
+    if (p.c.peek().kind == .float) {
+        p.c.skip();
         return std.math.maxInt(i64);
     }
     return p.signedInt();
 }
 
 fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
-    _ = p.advance(); // TABLE
+    p.c.skip(); // TABLE
     const if_not_exists = try p.ifNotExists();
     const q = try p.qname();
     const dest = try p.createTarget(q, temp, .user);
@@ -760,13 +760,13 @@ fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
         .strict = true,
     };
     const table = q.name.text;
-    if (p.peek().kind == .lparen) {
-        _ = p.advance();
+    if (p.c.peek().kind == .lparen) {
+        p.c.skip();
         var cols: std.ArrayList(tree.ColumnDef) = .empty;
         var cons: std.ArrayList(tree.TableConstraint) = .empty;
         var pk_cols: []Name = &.{};
         while (true) {
-            const t = p.peek();
+            const t = p.c.peek();
             if (t.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign" })) {
                 const tc = try tableConstraint(p);
                 if (tc.kind == .primary_key) pk_cols = tc.kind.primary_key;
@@ -774,13 +774,13 @@ fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
             } else {
                 const c = try columnDef(p, table);
                 for (cols.items) |prev| if (eq(prev.name.text, c.name.text)) {
-                    return p.fail(c.name.pos, "ORA-00957: duplicate column name", .{});
+                    return p.c.fail(c.name.pos, "ORA-00957: duplicate column name", .{});
                 };
                 try cols.append(p.arena, c);
             }
-            if (!p.eat(.comma)) break;
+            if (!p.c.eat(.comma)) break;
         }
-        _ = try p.expect(.rparen);
+        _ = try p.c.expect(.rparen);
         // Key columns are NOT NULL in Oracle.
         for (pk_cols) |k| for (cols.items) |*c| if (eq(c.name.text, k.text)) try addNotNull(p, c);
         ct.columns = cols.items;
@@ -789,19 +789,19 @@ fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
         try prefixIdentity(p, Parser.prefixOf(dest.t), ct.columns);
     }
     // Physical properties are ignored; ON COMMIT of a temporary table.
-    while (p.peek().kind != .eof and !p.isKw("as") and !(p.schema_element and (p.isKw("create") or p.isKw("grant")))) {
-        if (p.isKw("on") and p.isKwAt(1, "commit")) {
-            _ = p.advance();
-            _ = p.advance();
-            if (!p.eatKw("preserve")) try p.expectKw("delete");
-            if (!p.eatKw("rows")) try p.expectKw("definition");
+    while (p.c.peek().kind != .eof and !p.c.isKw("as") and !(p.schema_element and (p.c.isKw("create") or p.c.isKw("grant")))) {
+        if (p.c.isKw("on") and p.c.isKwAt(1, "commit")) {
+            p.c.skip();
+            p.c.skip();
+            if (!p.c.eatKw("preserve")) try p.c.expectKw("delete");
+            if (!p.c.eatKw("rows")) try p.c.expectKw("definition");
             continue;
         }
-        if (p.isKw("organization") and p.isKwAt(1, "index")) return p.unsupported(p.peek().start, "ORGANIZATION INDEX");
-        if (p.isKw("partition")) return p.unsupported(p.peek().start, "partitioned tables");
+        if (p.c.isKw("organization") and p.c.isKwAt(1, "index")) return p.unsupported(p.c.peek().start, "ORGANIZATION INDEX");
+        if (p.c.isKw("partition")) return p.unsupported(p.c.peek().start, "partitioned tables");
         try skipClause(p);
     }
-    if (p.eatKw("as")) {
+    if (p.c.eatKw("as")) {
         if (ct.columns.len > 0) return p.unsupported(q.name.pos, "a column list with AS");
         ct.as_select = try p.select();
         ct.strict = false;
@@ -812,10 +812,10 @@ fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
 /// One token of a clause that is ignored, with what is in parentheses
 /// after it.
 fn skipClause(p: *Parser) Error!void {
-    if (p.peek().kind == .lparen) {
+    if (p.c.peek().kind == .lparen) {
         var depth: usize = 0;
         while (true) {
-            const x = p.advance();
+            const x = p.c.advance();
             if (x.kind == .lparen) depth += 1;
             if (x.kind == .rparen) {
                 depth -= 1;
@@ -824,7 +824,7 @@ fn skipClause(p: *Parser) Error!void {
             if (x.kind == .eof) return p.missing("ORA-00907: missing right parenthesis");
         }
     }
-    _ = p.advance();
+    p.c.skip();
 }
 
 /// The identity sequences of `cols` named in schema `prefix` ("S.").
@@ -844,16 +844,16 @@ fn addNotNull(p: *Parser, c: *tree.ColumnDef) Error!void {
 /// Constraint states (ENABLE, NOVALIDATE, USING INDEX ...): ignored.
 fn constraintState(p: *Parser) Error!void {
     while (true) {
-        if (p.isAnyKw(&.{ "enable", "disable", "validate", "novalidate", "rely", "norely", "deferrable" })) {
-            _ = p.advance();
-        } else if (p.isKw("not") and p.isKwAt(1, "deferrable")) {
-            _ = p.advance();
-            _ = p.advance();
-        } else if (p.eatKw("initially")) {
-            if (!p.eatKw("immediate")) try p.expectKw("deferred");
-        } else if (p.eatKw("using")) {
-            try p.expectKw("index");
-            while (p.peek().kind != .eof and p.peek().kind != .comma and p.peek().kind != .rparen and !p.isAnyKw(&.{ "enable", "disable", "constraint", "not", "null", "check", "unique", "primary", "references", "default" })) try skipClause(p);
+        if (p.c.isAnyKw(&.{ "enable", "disable", "validate", "novalidate", "rely", "norely", "deferrable" })) {
+            p.c.skip();
+        } else if (p.c.isKw("not") and p.c.isKwAt(1, "deferrable")) {
+            p.c.skip();
+            p.c.skip();
+        } else if (p.c.eatKw("initially")) {
+            if (!p.c.eatKw("immediate")) try p.c.expectKw("deferred");
+        } else if (p.c.eatKw("using")) {
+            try p.c.expectKw("index");
+            while (p.c.peek().kind != .eof and p.c.peek().kind != .comma and p.c.peek().kind != .rparen and !p.c.isAnyKw(&.{ "enable", "disable", "constraint", "not", "null", "check", "unique", "primary", "references", "default" })) try skipClause(p);
         } else break;
     }
 }
@@ -879,65 +879,65 @@ const RawConstraint = struct {
 pub fn columnDef(p: *Parser, table: []const u8) Error!tree.ColumnDef {
     const name = try p.colId();
     var ty: ?types.TypeName = null;
-    if (!p.isKw("as") and !p.isKw("generated")) ty = try p.typeName();
+    if (!p.c.isKw("as") and !p.c.isKw("generated")) ty = try p.typeName();
     var raw: std.ArrayList(RawConstraint) = .empty;
     while (true) {
         var cname: ?Name = null;
-        if (p.eatKw("constraint")) cname = try p.colId();
+        if (p.c.eatKw("constraint")) cname = try p.colId();
         var cc: RawConstraint = .{ .name = cname, .kind = .null };
-        if (p.eatKw("not")) {
-            try p.expectKw("null");
+        if (p.c.eatKw("not")) {
+            try p.c.expectKw("null");
             cc.kind = .not_null;
-        } else if (p.eatKw("null")) {
+        } else if (p.c.eatKw("null")) {
             cc.kind = .null;
-        } else if (p.eatKw("check")) {
-            _ = try p.expect(.lparen);
+        } else if (p.c.eatKw("check")) {
+            _ = try p.c.expect(.lparen);
             cc.kind = .{ .check = try p.expr0() };
-            _ = try p.expect(.rparen);
-        } else if (p.eatKw("default")) {
-            if (p.isKw("on") and p.isKwAt(1, "null")) {
-                _ = p.advance();
-                _ = p.advance();
+            _ = try p.c.expect(.rparen);
+        } else if (p.c.eatKw("default")) {
+            if (p.c.isKw("on") and p.c.isKwAt(1, "null")) {
+                p.c.skip();
+                p.c.skip();
             }
             cc.kind = .{ .default = try p.addExpr() };
-        } else if (p.eatKw("unique")) {
+        } else if (p.c.eatKw("unique")) {
             cc.kind = .unique;
-        } else if (p.eatKw("primary")) {
-            try p.expectKw("key");
+        } else if (p.c.eatKw("primary")) {
+            try p.c.expectKw("key");
             cc.kind = .primary_key;
-        } else if (p.isKw("references")) {
+        } else if (p.c.isKw("references")) {
             cc.kind = .{ .references = try references(p) };
-        } else if (p.isKw("generated") or p.isKw("as")) {
+        } else if (p.c.isKw("generated") or p.c.isKw("as")) {
             var always = true;
-            if (p.eatKw("generated")) {
-                if (p.eatKw("by")) {
-                    try p.expectKw("default");
+            if (p.c.eatKw("generated")) {
+                if (p.c.eatKw("by")) {
+                    try p.c.expectKw("default");
                     always = false;
-                    if (p.isKw("on") and p.isKwAt(1, "null")) {
-                        _ = p.advance();
-                        _ = p.advance();
+                    if (p.c.isKw("on") and p.c.isKwAt(1, "null")) {
+                        p.c.skip();
+                        p.c.skip();
                     }
-                } else try p.expectKw("always");
+                } else try p.c.expectKw("always");
             }
-            try p.expectKw("as");
-            if (p.eatKw("identity")) {
+            try p.c.expectKw("as");
+            if (p.c.eatKw("identity")) {
                 var opts: tree.SeqOpts = .{};
-                if (p.peek().kind == .lparen) {
-                    _ = p.advance();
+                if (p.c.peek().kind == .lparen) {
+                    p.c.skip();
                     opts = try seqOptions(p);
-                    _ = try p.expect(.rparen);
+                    _ = try p.c.expect(.rparen);
                 }
                 cc.kind = .{ .identity = .{ .always = always, .opts = opts } };
             } else {
-                if (!always) return p.syntaxError();
-                _ = try p.expect(.lparen);
+                if (!always) return p.c.syntaxError();
+                _ = try p.c.expect(.lparen);
                 const e = try p.expr0();
-                _ = try p.expect(.rparen);
-                _ = p.eatKw("virtual");
+                _ = try p.c.expect(.rparen);
+                _ = p.c.eatKw("virtual");
                 cc.kind = .{ .generated = e };
             }
         } else {
-            if (cname != null) return p.syntaxError();
+            if (cname != null) return p.c.syntaxError();
             break;
         }
         try constraintState(p);
@@ -956,12 +956,12 @@ fn resolveColumn(p: *Parser, table: []const u8, name: Name, ty_opt: ?types.TypeN
     var decl: ?[]const u8 = null;
     var info: ?types.Info = null;
     if (ty_opt) |ty| {
-        info = types.info(ty) catch return p.fail(ty.pos, "ORA-00902: invalid datatype", .{});
+        info = types.info(ty) catch return p.c.fail(ty.pos, "ORA-00902: invalid datatype", .{});
         storage = info.?.storage;
         decl = try types.format(p.arena, ty);
     }
     if (identity) {
-        if (info) |i| if (i.family != .number) return p.fail(name.pos, "ORA-30675: identity column must be a numeric type", .{});
+        if (info) |i| if (i.family != .number) return p.c.fail(name.pos, "ORA-30675: identity column must be a numeric type", .{});
         // Identity values are integers: the rowid when it is the key.
         storage = "INTEGER";
         if (decl == null) decl = "NUMBER";
@@ -1031,7 +1031,7 @@ fn typeChecks(p: *Parser, name: Name, ty: types.TypeName, info: types.Info, cons
 }
 
 fn references(p: *Parser) Error!tree.Ref {
-    try p.expectKw("references");
+    try p.c.expectKw("references");
     const q = try p.qname();
     var r: tree.Ref = .{ .table = q.name };
     // SQLite's REFERENCES names a table of the same database.
@@ -1040,15 +1040,15 @@ fn references(p: *Parser) Error!tree.Ref {
     } else if (p.creating != null and std.mem.eql(u8, p.creating.?.bare, q.name.text)) {
         r.table.text = p.creating.?.name;
     } else if (try p.unqualified(q.name, .relation)) |t| r.table.text = t.name;
-    if (p.peek().kind == .lparen) r.cols = try p.parenNameList();
-    if (p.isKw("on") and p.isKwAt(1, "delete")) {
-        _ = p.advance();
-        _ = p.advance();
-        if (p.eatKw("cascade")) {
+    if (p.c.peek().kind == .lparen) r.cols = try p.parenNameList();
+    if (p.c.isKw("on") and p.c.isKwAt(1, "delete")) {
+        p.c.skip();
+        p.c.skip();
+        if (p.c.eatKw("cascade")) {
             r.on_delete = .cascade;
         } else {
-            try p.expectKw("set");
-            try p.expectKw("null");
+            try p.c.expectKw("set");
+            try p.c.expectKw("null");
             r.on_delete = .set_null;
         }
     }
@@ -1057,19 +1057,19 @@ fn references(p: *Parser) Error!tree.Ref {
 
 fn tableConstraint(p: *Parser) Error!tree.TableConstraint {
     var name: ?Name = null;
-    if (p.eatKw("constraint")) name = try p.colId();
+    if (p.c.eatKw("constraint")) name = try p.colId();
     var tc: tree.TableConstraint = .{ .name = if (name) |n| n.text else null, .kind = undefined };
-    if (p.eatKw("check")) {
-        _ = try p.expect(.lparen);
+    if (p.c.eatKw("check")) {
+        _ = try p.c.expect(.lparen);
         tc.kind = .{ .check = try p.expr0() };
-        _ = try p.expect(.rparen);
-    } else if (p.eatKw("unique")) {
+        _ = try p.c.expect(.rparen);
+    } else if (p.c.eatKw("unique")) {
         tc.kind = .{ .unique = try p.parenNameList() };
-    } else if (p.eatKw("primary")) {
-        try p.expectKw("key");
+    } else if (p.c.eatKw("primary")) {
+        try p.c.expectKw("key");
         tc.kind = .{ .primary_key = try p.parenNameList() };
-    } else if (p.eatKw("foreign")) {
-        try p.expectKw("key");
+    } else if (p.c.eatKw("foreign")) {
+        try p.c.expectKw("key");
         const cols = try p.parenNameList();
         tc.kind = .{ .foreign_key = .{ .cols = cols, .ref = try references(p) } };
     } else return p.missing("ORA-00902: invalid datatype");
@@ -1079,11 +1079,11 @@ fn tableConstraint(p: *Parser) Error!tree.TableConstraint {
 
 fn createIndex(p: *Parser) Error!*tree.CreateIndex {
     var ci: tree.CreateIndex = .{ .name = undefined, .table = undefined, .items = &.{} };
-    if (p.eatKw("unique")) ci.unique = true else _ = p.eatKw("bitmap");
-    try p.expectKw("index");
+    if (p.c.eatKw("unique")) ci.unique = true else _ = p.c.eatKw("bitmap");
+    try p.c.expectKw("index");
     ci.if_not_exists = try p.ifNotExists();
     const iq = try p.qname();
-    try p.expectKw("on");
+    try p.c.expectKw("on");
     const q = try p.qname();
     const rel = try p.relation(q);
     ci.table = rel.q.name;
@@ -1093,36 +1093,36 @@ fn createIndex(p: *Parser) Error!*tree.CreateIndex {
     ci.name = .{ .schema = rel.q.schema, .name = .{ .text = idx.t.name, .pos = iq.name.pos } };
     if (idx.t.mangled or rel.alias != null) ci.name.schema = .{ .text = "main", .pos = iq.name.pos };
     if (iq.schema != null and !idx.t.mangled) ci.name.schema = idx.schema;
-    _ = try p.expect(.lparen);
+    _ = try p.c.expect(.lparen);
     var items: std.ArrayList(tree.IndexItem) = .empty;
     while (true) {
         var item: tree.IndexItem = .{ .expr = try p.addExpr() };
-        if (p.eatKw("desc")) item.desc = true else _ = p.eatKw("asc");
+        if (p.c.eatKw("desc")) item.desc = true else _ = p.c.eatKw("asc");
         try items.append(p.arena, item);
-        if (!p.eat(.comma)) break;
+        if (!p.c.eat(.comma)) break;
     }
-    _ = try p.expect(.rparen);
+    _ = try p.c.expect(.rparen);
     ci.items = items.items;
     // TABLESPACE, ONLINE, COMPUTE STATISTICS, REVERSE ...: ignored.
-    while (p.peek().kind != .eof) try skipClause(p);
+    while (p.c.peek().kind != .eof) try skipClause(p);
     return p.new(tree.CreateIndex, ci);
 }
 
 fn drop(p: *Parser) Error!*tree.Drop {
-    _ = p.advance(); // DROP
-    const t = p.peek();
+    p.c.skip(); // DROP
+    const t = p.c.peek();
     var d: tree.Drop = .{ .kind = undefined, .name = undefined };
-    if (p.eatKw("table")) {
+    if (p.c.eatKw("table")) {
         d.kind = .table;
-    } else if (p.eatKw("view")) {
+    } else if (p.c.eatKw("view")) {
         d.kind = .view;
-    } else if (p.eatKw("index")) {
+    } else if (p.c.eatKw("index")) {
         d.kind = .index;
-    } else if (p.eatKw("sequence")) {
+    } else if (p.c.eatKw("sequence")) {
         d.kind = .sequence;
     } else if (t.kind == .ident) {
         return p.unsupported(t.start, try std.fmt.allocPrint(p.arena, "DROP {s}", .{t.text}));
-    } else return p.syntaxError();
+    } else return p.c.syntaxError();
     d.if_exists = try p.ifExists();
     const q = try p.qname();
     const kind: Parser.Lookup = switch (d.kind) {
@@ -1139,85 +1139,85 @@ fn drop(p: *Parser) Error!*tree.Drop {
         // Sequences are all in main.
         if (d.kind == .sequence) d.name.schema = null;
     }
-    if (p.eatKw("cascade")) try p.expectKw("constraints");
-    _ = p.eatKw("purge");
-    _ = p.eatKw("online");
-    _ = p.eatKw("force");
+    if (p.c.eatKw("cascade")) try p.c.expectKw("constraints");
+    _ = p.c.eatKw("purge");
+    _ = p.c.eatKw("online");
+    _ = p.c.eatKw("force");
     return p.new(tree.Drop, d);
 }
 
 fn alterTable(p: *Parser) Error!Statement {
-    _ = p.advance(); // ALTER
-    _ = p.advance(); // TABLE
+    p.c.skip(); // ALTER
+    p.c.skip(); // TABLE
     const q = try p.qname();
     const r = try p.relation(q);
     const name = r.q;
     const prefix = Parser.relPrefix(r);
-    const at = p.peek().start;
+    const at = p.c.peek().start;
     var a: tree.AlterTable = .{ .name = name, .action = undefined };
-    if (p.eatKw("rename")) {
-        if (p.eatKw("to")) {
+    if (p.c.eatKw("rename")) {
+        if (p.c.eatKw("to")) {
             // The table stays in its schema.
             var to = try p.colId();
             if (prefix.len > 0) to.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, to.text });
             a.action = .{ .rename_to = to };
         } else {
-            if (p.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... RENAME CONSTRAINT");
-            try p.expectKw("column");
+            if (p.c.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... RENAME CONSTRAINT");
+            try p.c.expectKw("column");
             const old = try p.colId();
-            try p.expectKw("to");
+            try p.c.expectKw("to");
             a.action = .{ .rename_column = .{ .old = old, .new = try p.colId() } };
         }
-    } else if (p.eatKw("add")) {
-        if (p.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign" })) return p.unsupported(at, "ALTER TABLE ... ADD CONSTRAINT");
-        const paren = p.eat(.lparen);
+    } else if (p.c.eatKw("add")) {
+        if (p.c.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign" })) return p.unsupported(at, "ALTER TABLE ... ADD CONSTRAINT");
+        const paren = p.c.eat(.lparen);
         var def = try columnDef(p, q.name.text);
         try prefixIdentity(p, prefix, (&def)[0..1]);
         a.action = .{ .add_column = .{ .def = def } };
         if (paren) {
-            if (p.peek().kind == .comma) return p.unsupported(p.peek().start, "adding several columns in one ALTER TABLE (add them one at a time)");
-            _ = try p.expect(.rparen);
+            if (p.c.peek().kind == .comma) return p.unsupported(p.c.peek().start, "adding several columns in one ALTER TABLE (add them one at a time)");
+            _ = try p.c.expect(.rparen);
         }
-    } else if (p.eatKw("drop")) {
-        if (p.isKw("constraint") or p.isKw("primary") or p.isKw("unique")) return p.unsupported(at, "ALTER TABLE ... DROP CONSTRAINT");
+    } else if (p.c.eatKw("drop")) {
+        if (p.c.isKw("constraint") or p.c.isKw("primary") or p.c.isKw("unique")) return p.unsupported(at, "ALTER TABLE ... DROP CONSTRAINT");
         var col: Name = undefined;
-        if (p.eatKw("column")) {
+        if (p.c.eatKw("column")) {
             col = try p.colId();
         } else {
-            _ = try p.expect(.lparen);
+            _ = try p.c.expect(.lparen);
             col = try p.colId();
-            if (p.peek().kind == .comma) return p.unsupported(p.peek().start, "dropping several columns in one ALTER TABLE (drop them one at a time)");
-            _ = try p.expect(.rparen);
+            if (p.c.peek().kind == .comma) return p.unsupported(p.c.peek().start, "dropping several columns in one ALTER TABLE (drop them one at a time)");
+            _ = try p.c.expect(.rparen);
         }
-        if (p.eatKw("cascade")) try p.expectKw("constraints");
+        if (p.c.eatKw("cascade")) try p.c.expectKw("constraints");
         a.action = .{ .drop_column = .{ .name = col } };
-    } else if (p.isKw("modify")) {
+    } else if (p.c.isKw("modify")) {
         return p.unsupported(at, "ALTER TABLE ... MODIFY");
-    } else return p.fail(at, "ORA-01735: invalid ALTER TABLE option", .{});
+    } else return p.c.fail(at, "ORA-01735: invalid ALTER TABLE option", .{});
     return .{ .tree = .{ .alter_table = try p.new(tree.AlterTable, a) } };
 }
 
 fn comment(p: *Parser) Error!Statement {
-    _ = p.advance(); // COMMENT
-    try p.expectKw("on");
+    p.c.skip(); // COMMENT
+    try p.c.expectKw("on");
     var q: parser.QName = undefined;
     var column: ?Name = null;
-    if (p.eatKw("table")) {
+    if (p.c.eatKw("table")) {
         q = try p.qname();
-    } else if (p.eatKw("column")) {
+    } else if (p.c.eatKw("column")) {
         const first = try p.colId();
-        _ = try p.expect(.dot);
+        _ = try p.c.expect(.dot);
         const second = try p.anyName();
-        if (p.eat(.dot)) {
+        if (p.c.eat(.dot)) {
             q = .{ .schema = first, .name = second };
             column = try p.anyName();
         } else {
             q = .{ .name = first };
             column = second;
         }
-    } else return p.unsupported(p.peek().start, "this COMMENT ON");
+    } else return p.unsupported(p.c.peek().start, "this COMMENT ON");
     const table = (try p.relation(q)).q;
-    try p.expectKw("is");
-    const t = try p.expect(.string);
+    try p.c.expectKw("is");
+    const t = try p.c.expect(.string);
     return .{ .comment = .{ .table = table, .column = column, .text = if (t.text.len == 0) null else t.text } };
 }

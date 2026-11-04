@@ -19,88 +19,88 @@ const Expr = tree.Expr;
 
 /// `name ( ... )` at the current token.
 pub fn call(s: *Parser) Error!*Expr {
-    const name_tok = s.tok;
-    const pos = s.posOf(name_tok);
-    s.advance();
-    try s.expectOp("(");
+    const name_tok = s.c.peek();
+    const pos = name_tok.start;
+    s.c.skip();
+    try s.c.expectOp("(");
     var lname_buf: [64]u8 = undefined;
     const lname = if (name_tok.text.len <= lname_buf.len) std.ascii.lowerString(&lname_buf, name_tok.text) else name_tok.text;
 
     if (eq(lname, "cast")) {
         const e = try s.expr();
-        try s.expectKw("AS");
+        try s.c.expectKw("AS");
         const r = try castTo(s, pos, e);
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return r;
     }
     if (eq(lname, "convert")) {
         const e = try s.expr();
-        if (s.eatKw("USING")) {
+        if (s.c.eatKw("USING")) {
             _ = try s.anyName();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             return e;
         }
-        try s.expectOp(",");
+        try s.c.expectOp(",");
         const r = try castTo(s, pos, e);
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return r;
     }
     if (eq(lname, "trim")) return trim(s, pos);
     if (eq(lname, "substring") or eq(lname, "substr") or eq(lname, "mid")) {
         var args: std.ArrayList(*Expr) = .empty;
         try args.append(s.a, try s.expr());
-        if (s.eatKw("FROM")) {
+        if (s.c.eatKw("FROM")) {
             try args.append(s.a, try s.expr());
-            if (s.eatKw("FOR")) try args.append(s.a, try s.expr());
+            if (s.c.eatKw("FOR")) try args.append(s.a, try s.expr());
         } else {
-            while (s.eatOp(",")) try args.append(s.a, try s.expr());
+            while (s.c.eatOp(",")) try args.append(s.a, try s.expr());
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return s.func(pos, "substr", args.items);
     }
     if (eq(lname, "position")) {
         // POSITION(substr IN str): the IN is not an operator here.
         const sub = try s.bitOr();
-        try s.expectKw("IN");
+        try s.c.expectKw("IN");
         const str = try s.expr();
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return s.func(pos, "instr", &.{ str, sub });
     }
     if (eq(lname, "extract")) {
-        if (s.tok.kind != .ident) return s.syntaxError();
-        const unit = try std.ascii.allocUpperString(s.a, s.tok.text);
-        s.advance();
-        try s.expectKw("FROM");
+        if (s.c.peek().kind != .ident) return s.c.syntaxError();
+        const unit = try std.ascii.allocUpperString(s.a, s.c.peek().text);
+        s.c.skip();
+        try s.c.expectKw("FROM");
         const e = try s.expr();
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return s.func(pos, "xq_extract", &.{ try s.str(pos, unit), e });
     }
     if (eq(lname, "date_add") or eq(lname, "date_sub") or eq(lname, "adddate") or eq(lname, "subdate")) {
         const d = try s.expr();
-        try s.expectOp(",");
+        try s.c.expectOp(",");
         const minus = eq(lname, "date_sub") or eq(lname, "subdate");
         var r: *Expr = undefined;
-        if (s.eatKw("INTERVAL")) {
+        if (s.c.eatKw("INTERVAL")) {
             const n = try s.expr();
-            if (s.tok.kind != .ident) return s.syntaxError();
-            const unit = s.tok.text;
-            s.advance();
+            if (s.c.peek().kind != .ident) return s.c.syntaxError();
+            const unit = s.c.peek().text;
+            s.c.skip();
             r = try s.dateAdd(pos, d, n, unit, minus);
         } else {
             r = try s.dateAdd(pos, d, try s.expr(), "DAY", minus);
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return r;
     }
     if (eq(lname, "timestampadd") or eq(lname, "timestampdiff")) {
-        if (s.tok.kind != .ident) return s.syntaxError();
-        const unit = s.tok.text;
-        s.advance();
-        try s.expectOp(",");
+        if (s.c.peek().kind != .ident) return s.c.syntaxError();
+        const unit = s.c.peek().text;
+        s.c.skip();
+        try s.c.expectOp(",");
         const a = try s.expr();
-        try s.expectOp(",");
+        try s.c.expectOp(",");
         const b = try s.expr();
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         if (eq(lname, "timestampadd")) return s.dateAdd(pos, b, a, unit, false);
         return s.func(pos, "xq_timestampdiff", &.{ try s.str(pos, try std.ascii.allocUpperString(s.a, unit)), a, b });
     }
@@ -109,28 +109,28 @@ pub fn call(s: *Parser) Error!*Expr {
         // VALUES(col) in ON DUPLICATE KEY UPDATE: the value the INSERT
         // would have stored.
         const col = try s.nameOf(try s.anyName());
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return s.mk(pos, .{ .column = try s.a.dupe(tree.Name, &.{ .{ .text = "excluded", .pos = pos }, col }) });
     }
     if (eq(lname, "nextval") or eq(lname, "lastval") or eq(lname, "setval")) {
         // MariaDB passes the sequence as a name, not a string.
         var args: std.ArrayList(*Expr) = .empty;
-        if (s.tok.kind == .ident or s.tok.kind == .quoted_ident) {
+        if (s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident) {
             const n = try s.qualifiedName();
             try args.append(s.a, try s.str(n.name.pos, try s.sequenceName(n)));
         } else try args.append(s.a, try s.expr());
-        while (s.eatOp(",")) try args.append(s.a, try s.expr());
-        try s.expectOp(")");
+        while (s.c.eatOp(",")) try args.append(s.a, try s.expr());
+        try s.c.expectOp(")");
         return s.func(pos, lname_lit(lname), args.items);
     }
     if (eq(lname, "char")) {
         const args = try s.exprList();
-        if (s.eatKw("USING")) _ = try s.anyName();
-        try s.expectOp(")");
+        if (s.c.eatKw("USING")) _ = try s.anyName();
+        try s.c.expectOp(")");
         return s.func(pos, "char", args);
     }
     if (eq(lname, "match")) {
-        return s.fail("xqlite: {s}() is not supported", .{name_tok.text});
+        return s.c.fail(null, "xqlite: {s}() is not supported", .{name_tok.text});
     }
     // JSON_TABLE is a FROM item only (json_table.zig).
     if (eq(lname, "json_table")) return s.syntaxErrorAt(name_tok);
@@ -140,17 +140,17 @@ pub fn call(s: *Parser) Error!*Expr {
     var distinct = false;
     var args: []*Expr = &.{};
     var star = false;
-    if (s.eatOp("*")) {
+    if (s.c.eatOp("*")) {
         star = true;
     } else {
-        if (s.eatKw("DISTINCT")) {
+        if (s.c.eatKw("DISTINCT")) {
             distinct = true;
-        } else _ = s.eatKw("ALL");
-        if (!s.isOp(")")) args = try s.exprList();
+        } else _ = s.c.eatKw("ALL");
+        if (!s.c.isOp(")")) args = try s.exprList();
     }
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     if (distinct and args.len > 1) {
-        return s.fail("xqlite: {s}(DISTINCT ...) with several arguments is not supported", .{name_tok.text});
+        return s.c.fail(null, "xqlite: {s}(DISTINCT ...) with several arguments is not supported", .{name_tok.text});
     }
     const over = try s.overClause();
     if (star or distinct or over != null) {
@@ -271,28 +271,28 @@ fn byNameAs(s: *Parser, lname: []const u8, args_in: []const *Expr, pos: u32, wri
 
 /// CAST/CONVERT's target type at the current token, applied to `e`.
 fn castTo(s: *Parser, pos: u32, e: *Expr) Error!*Expr {
-    if (s.tok.kind != .ident) return s.syntaxError();
-    const t = s.tok;
-    s.advance();
+    if (s.c.peek().kind != .ident) return s.c.syntaxError();
+    const t = s.c.peek();
+    s.c.skip();
     var len: ?i64 = null;
     var scale: ?i64 = null;
-    if (t.isKw("DOUBLE")) _ = s.eatKw("PRECISION");
-    if (t.isKw("SIGNED") or t.isKw("UNSIGNED")) _ = s.eatKw("INTEGER") or s.eatKw("INT");
-    if (t.isKw("CHARACTER") or t.isKw("NATIONAL")) _ = s.eatKw("CHAR") or s.eatKw("VARYING");
-    if (s.eatOp("(")) {
+    if (t.isKw("DOUBLE")) _ = s.c.eatKw("PRECISION");
+    if (t.isKw("SIGNED") or t.isKw("UNSIGNED")) _ = s.c.eatKw("INTEGER") or s.c.eatKw("INT");
+    if (t.isKw("CHARACTER") or t.isKw("NATIONAL")) _ = s.c.eatKw("CHAR") or s.c.eatKw("VARYING");
+    if (s.c.eatOp("(")) {
         len = try intArg(s);
-        if (s.eatOp(",")) scale = try intArg(s);
-        try s.expectOp(")");
+        if (s.c.eatOp(",")) scale = try intArg(s);
+        try s.c.expectOp(")");
     }
     // CHAR(n) CHARACTER SET x / COLLATE / BINARY.
     while (true) {
-        if (s.isKw("CHARACTER") or s.isKw("CHARSET")) {
-            s.advance();
-            _ = s.eatKw("SET");
+        if (s.c.isKw("CHARACTER") or s.c.isKw("CHARSET")) {
+            s.c.skip();
+            _ = s.c.eatKw("SET");
             _ = try s.anyName();
-        } else if (s.eatKw("COLLATE")) {
+        } else if (s.c.eatKw("COLLATE")) {
             _ = try s.collationName();
-        } else if (s.eatKw("BINARY") or s.eatKw("ASCII") or s.eatKw("UNICODE")) {} else break;
+        } else if (s.c.eatKw("BINARY") or s.c.eatKw("ASCII") or s.c.eatKw("UNICODE")) {} else break;
     }
     const kinds = [_]struct { []const u8, []const u8 }{
         .{ "SIGNED", "INTEGER" }, .{ "UNSIGNED", "INTEGER" }, .{ "INTEGER", "INTEGER" }, .{ "INT", "INTEGER" },
@@ -328,13 +328,13 @@ fn castTo(s: *Parser, pos: u32, e: *Expr) Error!*Expr {
         const to: []const u8 = if (t.isKw("DATE")) "date" else if (t.isKw("TIME")) "time" else "datetime";
         return s.mk(pos, .{ .cast = .{ .e = e, .target_type = t.text, .mode = .{ .typed = .{ .func = "xq_cast", .type_arg = to } } } });
     }
-    return s.fail("xqlite: CAST to {s} is not supported", .{t.text});
+    return s.c.fail(null, "xqlite: CAST to {s} is not supported", .{t.text});
 }
 
 fn intArg(s: *Parser) Error!i64 {
-    if (s.tok.kind != .integer) return s.syntaxError();
-    const v = std.fmt.parseInt(i64, s.tok.text, 10) catch return s.syntaxError();
-    s.advance();
+    if (s.c.peek().kind != .integer) return s.c.syntaxError();
+    const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+    s.c.skip();
     return v;
 }
 
@@ -342,27 +342,27 @@ fn intArg(s: *Parser) Error!i64 {
 fn trim(s: *Parser, pos: u32) Error!*Expr {
     var func: []const u8 = "trim";
     var explicit = false;
-    if (s.eatKw("BOTH")) {
+    if (s.c.eatKw("BOTH")) {
         explicit = true;
-    } else if (s.eatKw("LEADING")) {
+    } else if (s.c.eatKw("LEADING")) {
         func = "ltrim";
         explicit = true;
-    } else if (s.eatKw("TRAILING")) {
+    } else if (s.c.eatKw("TRAILING")) {
         func = "rtrim";
         explicit = true;
     }
     var rem: ?*Expr = null;
     var str: *Expr = undefined;
-    if (explicit and s.eatKw("FROM")) {
+    if (explicit and s.c.eatKw("FROM")) {
         str = try s.expr();
     } else {
         const first = try s.expr();
-        if (s.eatKw("FROM")) {
+        if (s.c.eatKw("FROM")) {
             rem = first;
             str = try s.expr();
         } else str = first;
     }
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     // MariaDB trims spaces only by default (SQLite: spaces).
     return s.func(pos, func, &.{ str, rem orelse try s.str(pos, " ") });
 }
@@ -372,24 +372,24 @@ fn trim(s: *Parser, pos: u32) Error!*Expr {
 /// concatenation of the expressions (NULL, so left out, if one is).
 fn groupConcat(s: *Parser, pos: u32) Error!*Expr {
     var distinct = false;
-    if (s.eatKw("DISTINCT")) distinct = true else _ = s.eatKw("ALL");
+    if (s.c.eatKw("DISTINCT")) distinct = true else _ = s.c.eatKw("ALL");
     const items = try s.exprList();
     var order: []tree.SortItem = &.{};
-    if (s.isKw("ORDER")) {
-        s.advance();
-        try s.expectKw("BY");
+    if (s.c.isKw("ORDER")) {
+        s.c.skip();
+        try s.c.expectKw("BY");
         order = try s.sortList();
     }
     var sep: ?[]const u8 = null;
-    if (s.eatKw("SEPARATOR")) sep = try s.stringLiteral();
-    if (s.isKw("LIMIT")) return s.fail("xqlite: GROUP_CONCAT(... LIMIT) is not supported", .{});
-    try s.expectOp(")");
+    if (s.c.eatKw("SEPARATOR")) sep = try s.stringLiteral();
+    if (s.c.isKw("LIMIT")) return s.c.fail(null, "xqlite: GROUP_CONCAT(... LIMIT) is not supported", .{});
+    try s.c.expectOp(")");
     const value = if (items.len == 1) items[0] else try s.mk(pos, .{ .concat = .{ .args = items, .null_policy = .propagate } });
     var args: std.ArrayList(*Expr) = .empty;
     try args.append(s.a, value);
     if (sep) |z| {
         if (distinct and !std.mem.eql(u8, z, ",")) {
-            return s.fail("xqlite: GROUP_CONCAT(DISTINCT ... SEPARATOR) is only supported with ','", .{});
+            return s.c.fail(null, "xqlite: GROUP_CONCAT(DISTINCT ... SEPARATOR) is only supported with ','", .{});
         }
         if (!distinct) try args.append(s.a, try s.str(pos, z));
     }
@@ -448,7 +448,7 @@ fn jsonArgs(s: *Parser, lname: []const u8, args: []*Expr, written: []const u8) E
         .odd => n % 2 == 1,
         .even => n % 2 == 0,
     };
-    if (!ok) return s.failState(.numbered("42883", 1582), "Incorrect parameter count in the call to native function '{s}'", .{written});
+    if (!ok) return s.c.failState(null, .numbered("42883", 1582), "Incorrect parameter count in the call to native function '{s}'", .{written});
     if (eq(lname, "json_array")) {
         for (args) |*a| try jsonValue(s, a);
     } else if (eq(lname, "json_object")) {
@@ -536,20 +536,20 @@ pub fn jsonCompared(s: *Parser, e: *Expr) Error!*Expr {
 /// JSON_OBJECTAGG(key, value).
 fn jsonAgg(s: *Parser, pos: u32, written: []const u8, object: bool) Error!*Expr {
     var distinct = false;
-    if (s.eatKw("DISTINCT")) distinct = true else _ = s.eatKw("ALL");
+    if (s.c.eatKw("DISTINCT")) distinct = true else _ = s.c.eatKw("ALL");
     const args = try s.exprList();
-    if (args.len != @as(usize, if (object) 2 else 1)) return s.failState(.numbered("42883", 1582), "Incorrect parameter count in the call to native function '{s}'", .{written});
+    if (args.len != @as(usize, if (object) 2 else 1)) return s.c.failState(null, .numbered("42883", 1582), "Incorrect parameter count in the call to native function '{s}'", .{written});
     var order: []tree.SortItem = &.{};
-    if (!object and s.isKw("ORDER")) {
-        s.advance();
-        try s.expectKw("BY");
+    if (!object and s.c.isKw("ORDER")) {
+        s.c.skip();
+        try s.c.expectKw("BY");
         order = try s.sortList();
     }
     var limit: ?*Expr = null;
-    if (!object and s.eatKw("LIMIT")) limit = try s.expr();
-    try s.expectOp(")");
-    if (s.isKw("OVER")) {
-        return s.failState(.numbered("0A000", 1235), "This version of MariaDB doesn't yet support '{s}() aggregate as window function'", .{if (object) "JSON_OBJECTAGG" else "JSON_ARRAYAGG"});
+    if (!object and s.c.eatKw("LIMIT")) limit = try s.expr();
+    try s.c.expectOp(")");
+    if (s.c.isKw("OVER")) {
+        return s.c.failState(null, .numbered("0A000", 1235), "This version of MariaDB doesn't yet support '{s}() aggregate as window function'", .{if (object) "JSON_OBJECTAGG" else "JSON_ARRAYAGG"});
     }
     try jsonValue(s, &args[args.len - 1]);
     const name: []const u8 = if (object) "json_objectagg" else "json_arrayagg";

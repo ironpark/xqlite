@@ -88,9 +88,9 @@ fn nullLit(p: *Parser, pos: u32) Error!*Expr {
 /// The path literal of a JSON function, checked as Oracle checks it when
 /// the statement is compiled.
 fn pathLiteral(p: *Parser) Error![]const u8 {
-    const t = p.peek();
+    const t = p.c.peek();
     if (t.kind != .string) return p.missing("ORA-40597: JSON path expression syntax error");
-    _ = p.advance();
+    p.c.skip();
     try checkPath(p, t.start, t.text);
     return t.text;
 }
@@ -99,22 +99,22 @@ fn checkPath(p: *Parser, pos: u32, text: []const u8) Error!void {
     const s = std.mem.trimStart(u8, text, " \t\n\r");
     if (s.len == 0 or s[0] != '$') {
         if (std.ascii.startsWithIgnoreCase(s, "lax") or std.ascii.startsWithIgnoreCase(s, "strict")) {
-            return p.fail(pos, "ORA-40442: JSON path expression syntax error ('{s}')", .{text});
+            return p.c.fail(pos, "ORA-40442: JSON path expression syntax error ('{s}')", .{text});
         }
-        return p.fail(pos, "ORA-40597: JSON path expression syntax error ('{s}')", .{text});
+        return p.c.fail(pos, "ORA-40597: JSON path expression syntax error ('{s}')", .{text});
     }
     _ = J.parsePath(p.arena, text) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        error.BadPath => return p.fail(pos, "ORA-40597: JSON path expression syntax error ('{s}')", .{text}),
+        error.BadPath => return p.c.fail(pos, "ORA-40597: JSON path expression syntax error ('{s}')", .{text}),
     };
 }
 
 /// `RETURNING type` (VARCHAR2 alone is VARCHAR2(4000)): the catalog
 /// spelling.
 fn returning(p: *Parser) Error![]const u8 {
-    const t = p.peek();
-    if ((t.isKw("varchar2") or t.isKw("varchar")) and p.peekAt(1).kind != .lparen) {
-        _ = p.advance();
+    const t = p.c.peek();
+    if ((t.isKw("varchar2") or t.isKw("varchar")) and p.c.peekAt(1).kind != .lparen) {
+        p.c.skip();
         return "VARCHAR2(4000)";
     }
     const ty = try p.typeName();
@@ -123,9 +123,9 @@ fn returning(p: *Parser) Error![]const u8 {
 
 /// `FORMAT JSON` after a value.
 fn formatJson(p: *Parser) Error!bool {
-    if (p.isKw("format") and p.isKwAt(1, "json")) {
-        _ = p.advance();
-        _ = p.advance();
+    if (p.c.isKw("format") and p.c.isKwAt(1, "json")) {
+        p.c.skip();
+        p.c.skip();
         return true;
     }
     return false;
@@ -143,46 +143,46 @@ const Clause = struct {
 /// `ERROR|NULL|DEFAULT e|EMPTY [ARRAY|OBJECT]|TRUE|FALSE|IGNORE ON
 /// ERROR|EMPTY|MISMATCH|NULL`, or null (nothing consumed).
 fn handlerClause(p: *Parser) Error!?Clause {
-    const t = p.peek();
-    const save = p.i;
+    const t = p.c.peek();
+    const save = p.c.mark();
     var c: Clause = .{ .kind = .on_error, .code = 'N' };
     if (t.isKw("error")) {
         c.code = 'E';
-        _ = p.advance();
+        p.c.skip();
     } else if (t.isKw("null")) {
         c.code = 'N';
-        _ = p.advance();
+        p.c.skip();
     } else if (t.isKw("true")) {
         c.code = 'T';
-        _ = p.advance();
+        p.c.skip();
     } else if (t.isKw("false")) {
         c.code = 'F';
-        _ = p.advance();
+        p.c.skip();
     } else if (t.isKw("ignore")) {
         c.code = 'I';
-        _ = p.advance();
+        p.c.skip();
     } else if (t.isKw("empty")) {
-        _ = p.advance();
+        p.c.skip();
         c.code = 'A';
-        if (p.eatKw("object")) {
+        if (p.c.eatKw("object")) {
             c.code = 'O';
-        } else _ = p.eatKw("array");
+        } else _ = p.c.eatKw("array");
     } else if (t.isKw("default")) {
-        _ = p.advance();
+        p.c.skip();
         c.code = 'D';
         c.default = try p.addExpr();
     } else return null;
-    if (!p.eatKw("on")) {
-        p.i = save;
+    if (!p.c.eatKw("on")) {
+        p.c.reset(save);
         return null;
     }
-    if (p.eatKw("error")) {
+    if (p.c.eatKw("error")) {
         c.kind = .on_error;
-    } else if (p.eatKw("empty")) {
+    } else if (p.c.eatKw("empty")) {
         c.kind = .on_empty;
-    } else if (p.eatKw("mismatch")) {
+    } else if (p.c.eatKw("mismatch")) {
         c.kind = .on_mismatch;
-    } else if (p.eatKw("null")) {
+    } else if (p.c.eatKw("null")) {
         c.kind = .on_null;
     } else return p.missing("ORA-00905: missing keyword");
     return c;
@@ -190,14 +190,14 @@ fn handlerClause(p: *Parser) Error!?Clause {
 
 /// `PASSING e AS name, ...`: name, value argument pairs.
 fn passingClause(p: *Parser, args: *std.ArrayList(*Expr)) Error!void {
-    if (!p.eatKw("passing")) return;
+    if (!p.c.eatKw("passing")) return;
     while (true) {
         const v = try p.addExpr();
-        try p.expectKw("as");
+        try p.c.expectKw("as");
         const n = try p.anyName();
         try args.append(p.arena, try str(p, n.pos, n.text));
         try args.append(p.arena, v);
-        if (!p.eat(.comma)) break;
+        if (!p.c.eat(.comma)) break;
     }
 }
 
@@ -220,15 +220,15 @@ fn optionsExpr(p: *Parser, pos: u32, fields: []const []const u8) Error!*Expr {
 }
 
 fn finish(p: *Parser, pos: u32, name: []const u8, args: []const *Expr) Error!*Expr {
-    _ = try p.expect(.rparen);
+    _ = try p.c.expect(.rparen);
     const e = try p.call(pos, name, null, args);
-    e.end = p.lastEnd();
+    e.end = p.c.lastEnd();
     return e;
 }
 
 /// A call of an SQL/JSON function; `name` was read, `(` is next.
 pub fn call(p: *Parser, pos: u32, name: Token) Error!*Expr {
-    _ = try p.expect(.lparen);
+    _ = try p.c.expect(.lparen);
     const n = name.text;
     if (eq(n, "JSON_VALUE")) return jsonValue(p, pos);
     if (eq(n, "JSON_QUERY")) return jsonQuery(p, pos);
@@ -249,8 +249,8 @@ pub fn call(p: *Parser, pos: u32, name: Token) Error!*Expr {
 fn docAndPath(p: *Parser) Error!struct { doc: *Expr, path: []const u8, path_pos: u32 } {
     const doc = try p.expr0();
     _ = try formatJson(p);
-    _ = try p.expect(.comma);
-    const pp = p.peek().start;
+    _ = try p.c.expect(.comma);
+    const pp = p.c.peek().start;
     const path = try pathLiteral(p);
     return .{ .doc = doc, .path = path, .path_pos = pp };
 }
@@ -266,18 +266,18 @@ fn jsonValue(p: *Parser, pos: u32) Error!*Expr {
     var def_empty = try nullLit(p, pos);
     var def_error = try nullLit(p, pos);
     while (true) {
-        if (p.eatKw("returning")) {
+        if (p.c.eatKw("returning")) {
             ty = try returning(p);
-            if (p.eatKw("truncate")) truncate = true;
+            if (p.c.eatKw("truncate")) truncate = true;
             continue;
         }
-        if (p.eatKw("truncate")) {
+        if (p.c.eatKw("truncate")) {
             truncate = true;
             continue;
         }
-        if (p.isKw("allow") or p.isKw("disallow")) {
-            _ = p.advance();
-            try p.expectKw("scalars");
+        if (p.c.isKw("allow") or p.c.isKw("disallow")) {
+            p.c.skip();
+            try p.c.expectKw("scalars");
             continue;
         }
         const c = (try handlerClause(p)) orelse break;
@@ -305,20 +305,20 @@ fn jsonValue(p: *Parser, pos: u32) Error!*Expr {
 /// WITH [CONDITIONAL|UNCONDITIONAL] [ARRAY] WRAPPER, WITHOUT [ARRAY]
 /// WRAPPER: U, C or N; null if not one.
 fn wrapperClause(p: *Parser) Error!?[]const u8 {
-    if (p.isKw("with") and (p.isKwAt(1, "wrapper") or p.isKwAt(1, "array") or p.isKwAt(1, "conditional") or p.isKwAt(1, "unconditional"))) {
-        _ = p.advance();
+    if (p.c.isKw("with") and (p.c.isKwAt(1, "wrapper") or p.c.isKwAt(1, "array") or p.c.isKwAt(1, "conditional") or p.c.isKwAt(1, "unconditional"))) {
+        p.c.skip();
         var w: []const u8 = "U";
-        if (p.eatKw("conditional")) {
+        if (p.c.eatKw("conditional")) {
             w = "C";
-        } else _ = p.eatKw("unconditional");
-        _ = p.eatKw("array");
-        try p.expectKw("wrapper");
+        } else _ = p.c.eatKw("unconditional");
+        _ = p.c.eatKw("array");
+        try p.c.expectKw("wrapper");
         return w;
     }
-    if (p.isKw("without")) {
-        _ = p.advance();
-        _ = p.eatKw("array");
-        try p.expectKw("wrapper");
+    if (p.c.isKw("without")) {
+        p.c.skip();
+        _ = p.c.eatKw("array");
+        try p.c.expectKw("wrapper");
         return "N";
     }
     return null;
@@ -335,21 +335,21 @@ fn jsonQuery(p: *Parser, pos: u32) Error!*Expr {
     var pretty = false;
     var ascii = false;
     while (true) {
-        if (p.eatKw("returning")) {
+        if (p.c.eatKw("returning")) {
             ty = try returning(p);
             continue;
         }
-        if (p.eatKw("pretty")) {
+        if (p.c.eatKw("pretty")) {
             pretty = true;
             continue;
         }
-        if (p.eatKw("ascii")) {
+        if (p.c.eatKw("ascii")) {
             ascii = true;
             continue;
         }
-        if (p.isKw("allow") or p.isKw("disallow")) {
-            _ = p.advance();
-            try p.expectKw("scalars");
+        if (p.c.isKw("allow") or p.c.isKw("disallow")) {
+            p.c.skip();
+            try p.c.expectKw("scalars");
             continue;
         }
         if (try wrapperClause(p)) |w| {
@@ -357,7 +357,7 @@ fn jsonQuery(p: *Parser, pos: u32) Error!*Expr {
             continue;
         }
         const c = (try handlerClause(p)) orelse break;
-        if (c.code == 'D') return p.fail(pos, "ORA-40450: invalid ON ERROR clause", .{});
+        if (c.code == 'D') return p.c.fail(pos, "ORA-40450: invalid ON ERROR clause", .{});
         const code = try p.arena.dupe(u8, &.{c.code});
         switch (c.kind) {
             .on_error => on_error = code,
@@ -393,21 +393,21 @@ fn ctorClauses(p: *Parser, null_on_null: bool) Error!CtorOpts {
     var o: CtorOpts = .{ .flags = 0 };
     var non = null_on_null;
     while (true) {
-        if (p.isKw("null") and p.isKwAt(1, "on") and p.isKwAt(2, "null")) {
-            p.i += 3;
+        if (p.c.isKw("null") and p.c.isKwAt(1, "on") and p.c.isKwAt(2, "null")) {
+            p.c.skipN(3);
             non = true;
-        } else if (p.isKw("absent") and p.isKwAt(1, "on") and p.isKwAt(2, "null")) {
-            p.i += 3;
+        } else if (p.c.isKw("absent") and p.c.isKwAt(1, "on") and p.c.isKwAt(2, "null")) {
+            p.c.skipN(3);
             non = false;
-        } else if (p.eatKw("returning")) {
+        } else if (p.c.eatKw("returning")) {
             o.ty = try returning(p);
-        } else if (p.eatKw("strict")) {} else if (p.isKw("with") and p.isKwAt(1, "unique")) {
-            p.i += 2;
-            try p.expectKw("keys");
+        } else if (p.c.eatKw("strict")) {} else if (p.c.isKw("with") and p.c.isKwAt(1, "unique")) {
+            p.c.skipN(2);
+            try p.c.expectKw("keys");
             o.flags |= 4;
-        } else if (p.isKw("without") and p.isKwAt(1, "unique")) {
-            p.i += 2;
-            try p.expectKw("keys");
+        } else if (p.c.isKw("without") and p.c.isKwAt(1, "unique")) {
+            p.c.skipN(2);
+            try p.c.expectKw("keys");
         } else break;
     }
     o.flags |= if (non) 2 else 1;
@@ -419,10 +419,10 @@ fn ctorOptions(p: *Parser, pos: u32, o: CtorOpts) Error!*Expr {
 }
 
 fn atCtorEnd(p: *Parser) bool {
-    const t = p.peek();
+    const t = p.c.peek();
     if (t.kind == .rparen) return true;
-    if ((t.isKw("null") or t.isKw("absent")) and p.isKwAt(1, "on") and p.isKwAt(2, "null")) return true;
-    return t.isKw("returning") or t.isKw("strict") or (t.isKw("with") and p.isKwAt(1, "unique")) or (t.isKw("without") and p.isKwAt(1, "unique"));
+    if ((t.isKw("null") or t.isKw("absent")) and p.c.isKwAt(1, "on") and p.c.isKwAt(2, "null")) return true;
+    return t.isKw("returning") or t.isKw("strict") or (t.isKw("with") and p.c.isKwAt(1, "unique")) or (t.isKw("without") and p.c.isKwAt(1, "unique"));
 }
 
 fn jsonObject(p: *Parser, pos: u32) Error!*Expr {
@@ -430,14 +430,14 @@ fn jsonObject(p: *Parser, pos: u32) Error!*Expr {
     try args.append(p.arena, undefined);
     var star = false;
     while (!atCtorEnd(p)) {
-        if (p.peek().isOp("*")) {
-            _ = p.advance();
+        if (p.c.peek().isOp("*")) {
+            p.c.skip();
             star = true;
         } else {
-            const kw_key = p.eatKw("key");
-            const kt = p.peek();
+            const kw_key = p.c.eatKw("key");
+            const kt = p.c.peek();
             const key = try p.addExpr();
-            if (p.eatKw("value") or p.eatKw("is") or p.eatOp(":")) {
+            if (p.c.eatKw("value") or p.c.eatKw("is") or p.c.eatOp(":")) {
                 try args.append(p.arena, key);
                 try args.append(p.arena, try ctorValue(p));
             } else {
@@ -451,7 +451,7 @@ fn jsonObject(p: *Parser, pos: u32) Error!*Expr {
                 try args.append(p.arena, key);
             }
         }
-        if (!p.eat(.comma)) break;
+        if (!p.c.eat(.comma)) break;
     }
     const o = try ctorClauses(p, true);
     args.items[0] = try ctorOptions(p, pos, o);
@@ -463,9 +463,9 @@ fn jsonObject(p: *Parser, pos: u32) Error!*Expr {
 /// The name `n` as written in the statement (unquoted names keep their
 /// case: JSON_OBJECT(k) is {"k": ...}).
 fn rawName(p: *Parser, n: Name, _: Token) []const u8 {
-    if (n.pos < p.src.len and p.src[n.pos] == '"') return n.text;
-    const end = @min(n.pos + n.text.len, p.src.len);
-    return p.src[n.pos..end];
+    if (n.pos < p.c.sql.len and p.c.sql[n.pos] == '"') return n.text;
+    const end = @min(n.pos + n.text.len, p.c.sql.len);
+    return p.c.sql[n.pos..end];
 }
 
 fn jsonArray(p: *Parser, pos: u32) Error!*Expr {
@@ -473,7 +473,7 @@ fn jsonArray(p: *Parser, pos: u32) Error!*Expr {
     try args.append(p.arena, undefined);
     while (!atCtorEnd(p)) {
         try args.append(p.arena, try ctorValue(p));
-        if (!p.eat(.comma)) break;
+        if (!p.c.eat(.comma)) break;
     }
     const o = try ctorClauses(p, false);
     args.items[0] = try ctorOptions(p, pos, o);
@@ -483,21 +483,21 @@ fn jsonArray(p: *Parser, pos: u32) Error!*Expr {
 fn arrayAgg(p: *Parser, pos: u32) Error!*Expr {
     const v = try ctorValue(p);
     var order: []tree.SortItem = &.{};
-    if (p.isKw("order")) {
-        _ = p.advance();
-        try p.expectKw("by");
+    if (p.c.isKw("order")) {
+        p.c.skip();
+        try p.c.expectKw("by");
         order = try p.sortList();
     }
     const o = try ctorClauses(p, false);
-    _ = try p.expect(.rparen);
+    _ = try p.c.expect(.rparen);
     const f = try p.new(tree.Func, .{ .name = .{ .text = "xq_ora_json_arrayagg", .pos = pos }, .args = try p.list(&.{ try ctorOptions(p, pos, o), v }), .order_by = order });
     return p.expr(pos, .{ .func = f });
 }
 
 fn objectAgg(p: *Parser, pos: u32) Error!*Expr {
-    _ = p.eatKw("key");
+    _ = p.c.eatKw("key");
     const k = try p.addExpr();
-    if (!(p.eatKw("value") or p.eatKw("is") or p.eatOp(":"))) return p.missing("ORA-00905: missing keyword");
+    if (!(p.c.eatKw("value") or p.c.eatKw("is") or p.c.eatOp(":"))) return p.missing("ORA-00905: missing keyword");
     const v = try ctorValue(p);
     const o = try ctorClauses(p, true);
     return finish(p, pos, "xq_ora_json_objectagg", &.{ try ctorOptions(p, pos, o), k, v });
@@ -508,15 +508,15 @@ fn objectAgg(p: *Parser, pos: u32) Error!*Expr {
 fn outputClauses(p: *Parser, pos: u32, default_error: []const u8) Error!*Expr {
     var f = [6][]const u8{ "", "", "", "", default_error, "" };
     while (true) {
-        if (p.eatKw("returning")) {
+        if (p.c.eatKw("returning")) {
             f[0] = try returning(p);
-        } else if (p.eatKw("pretty")) {
+        } else if (p.c.eatKw("pretty")) {
             f[1] = "P";
-        } else if (p.eatKw("ascii")) {
+        } else if (p.c.eatKw("ascii")) {
             f[2] = "A";
-        } else if (p.eatKw("truncate")) {
+        } else if (p.c.eatKw("truncate")) {
             f[3] = "T";
-        } else if (p.eatKw("ordered")) {
+        } else if (p.c.eatKw("ordered")) {
             f[5] = "O";
         } else if (try handlerClause(p)) |c| {
             if (c.kind == .on_error) f[4] = if (c.code == 'E') "E" else "N";
@@ -527,7 +527,7 @@ fn outputClauses(p: *Parser, pos: u32, default_error: []const u8) Error!*Expr {
 
 fn mergePatch(p: *Parser, pos: u32) Error!*Expr {
     const t = try p.expr0();
-    _ = try p.expect(.comma);
+    _ = try p.c.expect(.comma);
     const patch = try p.expr0();
     const o = try outputClauses(p, pos, "N");
     return finish(p, pos, "xq_ora_json_mergepatch", &.{ t, patch, o });
@@ -545,34 +545,34 @@ fn transform(p: *Parser, pos: u32) Error!*Expr {
     var args: std.ArrayList(*Expr) = .empty;
     try args.append(p.arena, doc);
     try args.append(p.arena, undefined);
-    while (p.eat(.comma)) {
-        const t = p.peek();
+    while (p.c.eat(.comma)) {
+        const t = p.c.peek();
         const ops = [_][]const u8{ "SET", "INSERT", "REPLACE", "APPEND", "REMOVE", "RENAME", "KEEP" };
         const op = inline for (ops) |o| {
             if (t.isKw(o)) break o;
         } else return p.unsupported(t.start, "this JSON_TRANSFORM operation");
-        _ = p.advance();
+        p.c.skip();
         while (true) {
-            const pp = p.peek().start;
+            const pp = p.c.peek().start;
             const path = try pathLiteral(p);
             try args.append(p.arena, try str(p, t.start, op));
             try args.append(p.arena, try str(p, pp, path));
             if (eq(op, "REMOVE") or eq(op, "KEEP")) {
                 try args.append(p.arena, try nullLit(p, pp));
             } else if (eq(op, "RENAME")) {
-                if (!p.eatOp("=")) try p.expectKw("with");
-                const nt = p.peek();
+                if (!p.c.eatOp("=")) try p.c.expectKw("with");
+                const nt = p.c.peek();
                 if (nt.kind != .string) return p.missing("ORA-00936: missing expression");
-                _ = p.advance();
+                p.c.skip();
                 try args.append(p.arena, try str(p, nt.start, nt.text));
             } else {
-                if (!p.eatOp("=")) return p.missing("ORA-00905: missing keyword");
+                if (!p.c.eatOp("=")) return p.missing("ORA-00905: missing keyword");
                 try args.append(p.arena, try ctorValue(p));
             }
             if (try handlerClause(p)) |_| return p.unsupported(t.start, "JSON_TRANSFORM handlers (ON EXISTING/MISSING/NULL)");
             // KEEP '$.a', '$.b'
-            if (eq(op, "KEEP") and p.peek().kind == .comma and p.peekAt(1).kind == .string) {
-                _ = p.advance();
+            if (eq(op, "KEEP") and p.c.peek().kind == .comma and p.c.peekAt(1).kind == .string) {
+                p.c.skip();
                 continue;
             }
             break;
@@ -586,34 +586,34 @@ fn transform(p: *Parser, pos: u32) Error!*Expr {
 
 /// `l IS [NOT] JSON ...`, after IS [NOT] (JSON is next).
 pub fn isJson(p: *Parser, l: *Expr, not: bool) Error!*Expr {
-    const start = p.advance().start; // JSON
-    if (p.peek().kind == .lparen) return p.fail(start, "ORA-61763: JSON modifier check on IS JSON is only supported on JSON type.", .{});
+    const start = p.c.advance().start; // JSON
+    if (p.c.peek().kind == .lparen) return p.c.fail(start, "ORA-61763: JSON modifier check on IS JSON is only supported on JSON type.", .{});
     var fl: i64 = 0;
     while (true) {
-        if (p.eatKw("strict")) {
+        if (p.c.eatKw("strict")) {
             fl |= 1;
-        } else if (p.eatKw("lax")) {
+        } else if (p.c.eatKw("lax")) {
             fl &= ~@as(i64, 1);
-        } else if (p.isKw("format") and p.isKwAt(1, "json")) {
-            p.i += 2;
-        } else if (p.eatKw("allow")) {
-            try p.expectKw("scalars");
-        } else if (p.eatKw("disallow")) {
-            try p.expectKw("scalars");
+        } else if (p.c.isKw("format") and p.c.isKwAt(1, "json")) {
+            p.c.skipN(2);
+        } else if (p.c.eatKw("allow")) {
+            try p.c.expectKw("scalars");
+        } else if (p.c.eatKw("disallow")) {
+            try p.c.expectKw("scalars");
             fl |= 4;
-        } else if (p.isKw("with") and p.isKwAt(1, "unique")) {
-            p.i += 2;
-            try p.expectKw("keys");
+        } else if (p.c.isKw("with") and p.c.isKwAt(1, "unique")) {
+            p.c.skipN(2);
+            try p.c.expectKw("keys");
             fl |= 2;
-        } else if (p.isKw("without") and p.isKwAt(1, "unique")) {
-            p.i += 2;
-            try p.expectKw("keys");
+        } else if (p.c.isKw("without") and p.c.isKwAt(1, "unique")) {
+            p.c.skipN(2);
+            try p.c.expectKw("keys");
         } else break;
     }
     const f = try p.new(tree.Func, .{ .name = .{ .text = "xq_ora_is_json", .pos = start }, .args = try p.list(&.{ l, try int(p, start, fl) }) });
-    const e = try tree.expr(p.arena, l.pos, p.lastEnd(), .{ .func = f });
+    const e = try tree.expr(p.arena, l.pos, p.c.lastEnd(), .{ .func = f });
     if (!not) return e;
-    return tree.expr(p.arena, l.pos, p.lastEnd(), .{ .unary = .{ .op = .not, .e = e } });
+    return tree.expr(p.arena, l.pos, p.c.lastEnd(), .{ .unary = .{ .op = .not, .e = e } });
 }
 
 // ========================================================= dot notation
@@ -627,9 +627,9 @@ fn isMethod(raw: []const u8) bool {
 
 /// Whether `.method()` (an item method of dot notation) is next.
 pub fn methodAhead(p: *const Parser) bool {
-    if (p.peek().kind != .dot) return false;
-    const t = p.peekAt(1);
-    return t.kind == .ident and p.peekAt(2).kind == .lparen and p.peekAt(3).kind == .rparen and isMethod(t.text);
+    if (p.c.peek().kind != .dot) return false;
+    const t = p.c.peekAt(1);
+    return t.kind == .ident and p.c.peekAt(2).kind == .lparen and p.c.peekAt(3).kind == .rparen and isMethod(t.text);
 }
 
 /// t.col.a.b[0].c.size(): the names read so far (`names`, at least 2:
@@ -647,27 +647,27 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
     }
     var method = false;
     while (true) {
-        if (p.peek().isOp("[")) {
+        if (p.c.peek().isOp("[")) {
             complex = true;
-            const open = p.advance();
+            const open = p.c.advance();
             var depth: usize = 1;
             while (depth > 0) {
-                const t = p.advance();
+                const t = p.c.advance();
                 if (t.kind == .eof) return p.missing("ORA-00907: missing right parenthesis");
                 if (t.isOp("[")) depth += 1;
                 if (t.isOp("]")) depth -= 1;
             }
-            try path.appendSlice(p.arena, p.src[open.start..p.lastEnd()]);
+            try path.appendSlice(p.arena, p.c.sql[open.start..p.c.lastEnd()]);
             continue;
         }
-        if (p.peek().kind == .dot and !method) {
-            const nt = p.peekAt(1);
+        if (p.c.peek().kind == .dot and !method) {
+            const nt = p.c.peekAt(1);
             if (nt.kind != .ident and nt.kind != .qident) break;
-            _ = p.advance();
-            _ = p.advance();
+            p.c.skip();
+            p.c.skip();
             const raw = rawText(p, nt);
-            if (nt.kind == .ident and p.peek().kind == .lparen and p.peekAt(1).kind == .rparen and isMethod(raw)) {
-                p.i += 2;
+            if (nt.kind == .ident and p.c.peek().kind == .lparen and p.c.peekAt(1).kind == .rparen and isMethod(raw)) {
+                p.c.skipN(2);
                 try path.append(p.arena, '.');
                 try path.appendSlice(p.arena, raw);
                 try path.appendSlice(p.arena, "()");
@@ -684,10 +684,10 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
     }
     // t.col.a may still be db.t.col: resolveDot() decides.
     const col_names = try p.arena.dupe(Name, names[0..2]);
-    const col = try tree.expr(p.arena, start, p.lastEnd(), .{ .column = col_names });
+    const col = try tree.expr(p.arena, start, p.c.lastEnd(), .{ .column = col_names });
     const flags: i64 = if (method) 2 else 0;
     const e = try p.call(start, "xq_ora_json_dot", null, &.{ col, try str(p, start, path.items), try int(p, start, flags) });
-    e.end = p.lastEnd();
+    e.end = p.c.lastEnd();
     try p.dot_nodes.put(p.arena, e, .{ .names = try p.arena.dupe(Name, names), .complex = complex or names.len > 3 });
     if (label) |l| try p.pseudo_names.put(p.arena, e, try std.ascii.allocUpperString(p.arena, l));
     return e;
@@ -695,13 +695,13 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
 
 fn rawText(p: *const Parser, t: Token) []const u8 {
     if (t.kind == .qident) return t.text;
-    return p.src[t.start..t.end];
+    return p.c.sql[t.start..t.end];
 }
 
 /// `.name` of a path: the name as written (quoted when it must be).
 fn appendMember(p: *Parser, path: *std.ArrayList(u8), n: Name) Error!void {
-    const quoted = n.pos < p.src.len and p.src[n.pos] == '"';
-    const raw = if (quoted) n.text else p.src[n.pos..@min(n.pos + n.text.len, p.src.len)];
+    const quoted = n.pos < p.c.sql.len and p.c.sql[n.pos] == '"';
+    const raw = if (quoted) n.text else p.c.sql[n.pos..@min(n.pos + n.text.len, p.c.sql.len)];
     try path.append(p.arena, '.');
     var plain = !quoted and raw.len > 0;
     for (raw) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_')) {
@@ -716,25 +716,25 @@ fn appendMember(p: *Parser, path: *std.ArrayList(u8), n: Name) Error!void {
 /// JSON_TABLE(doc [FORMAT JSON], 'path' [ERROR|NULL ON ERROR] COLUMNS
 /// (...)) [alias]: xq_ora_json_table(doc, spec).
 pub fn jsonTable(p: *Parser) Error!tree.FromItem {
-    const start = p.advance().start; // JSON_TABLE
-    _ = try p.expect(.lparen);
+    const start = p.c.advance().start; // JSON_TABLE
+    _ = try p.c.expect(.lparen);
     const doc = try p.expr0();
     _ = try formatJson(p);
     var path: []const u8 = "$";
-    var pp = p.peek().start;
-    if (p.eat(.comma)) {
-        pp = p.peek().start;
+    var pp = p.c.peek().start;
+    if (p.c.eat(.comma)) {
+        pp = p.c.peek().start;
         path = try pathLiteral(p);
     }
     var on_error: []const u8 = "N";
     while (try handlerClause(p)) |c| {
         if (c.kind == .on_error and c.code == 'E') on_error = "E";
     }
-    if (p.isKw("type")) return p.unsupported(p.peek().start, "JSON_TABLE TYPE (STRICT|LAX)");
-    try p.expectKw("columns");
+    if (p.c.isKw("type")) return p.unsupported(p.c.peek().start, "JSON_TABLE TYPE (STRICT|LAX)");
+    try p.c.expectKw("columns");
     var cols: std.ArrayList(Column) = .empty;
     const spec_cols = try columns(p, &cols);
-    _ = try p.expect(.rparen);
+    _ = try p.c.expect(.rparen);
     if (cols.items.len > jf.max_columns) return p.unsupported(start, "JSON_TABLE with more than 100 columns");
     var members: std.ArrayList(J.Member) = .empty;
     try members.append(p.arena, .{ .key = "p", .value = .{ .string = path } });
@@ -758,35 +758,35 @@ fn jstr(s: []const u8) J.Value {
 /// COLUMNS (...): the spec of the columns (json.zig's value), the
 /// columns appended to `out` (numbered in order, nested ones included).
 fn columns(p: *Parser, out: *std.ArrayList(Column)) Error!J.Value {
-    _ = try p.expect(.lparen);
+    _ = try p.c.expect(.lparen);
     var items: std.ArrayList(J.Value) = .empty;
     while (true) {
         var ms: std.ArrayList(J.Member) = .empty;
-        if (p.isKw("nested")) {
-            _ = p.advance();
-            _ = p.eatKw("path");
-            const pp = p.peek().start;
+        if (p.c.isKw("nested")) {
+            p.c.skip();
+            _ = p.c.eatKw("path");
+            const pp = p.c.peek().start;
             _ = pp;
             const path = try pathLiteral(p);
-            try p.expectKw("columns");
+            try p.c.expectKw("columns");
             try ms.append(p.arena, .{ .key = "k", .value = jstr("n") });
             try ms.append(p.arena, .{ .key = "p", .value = jstr(path) });
             try ms.append(p.arena, .{ .key = "c", .value = try columns(p, out) });
             try items.append(p.arena, .{ .object = ms.items });
-            if (!p.eat(.comma)) break;
+            if (!p.c.eat(.comma)) break;
             continue;
         }
-        const nt = p.peek();
+        const nt = p.c.peek();
         const name = try p.colId();
         const raw = rawText(p, nt);
         var col: Column = .{ .name = name.text, .index = out.items.len };
-        if (p.isKw("for") and p.isKwAt(1, "ordinality")) {
-            p.i += 2;
+        if (p.c.isKw("for") and p.c.isKwAt(1, "ordinality")) {
+            p.c.skipN(2);
             try ms.append(p.arena, .{ .key = "k", .value = jstr("o") });
             col.family = .number;
             try out.append(p.arena, col);
             try items.append(p.arena, .{ .object = ms.items });
-            if (!p.eat(.comma)) break;
+            if (!p.c.eat(.comma)) break;
             continue;
         }
         var kind: []const u8 = "v";
@@ -799,24 +799,24 @@ fn columns(p: *Parser, out: *std.ArrayList(Column)) Error!J.Value {
         var truncate = false;
         var wrapper: []const u8 = "N";
         // The type, unless a clause comes first.
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.kind == .ident and !t.isAnyKw(&.{ "format", "exists", "path", "error", "null", "default", "empty", "truncate", "with", "without", "allow", "disallow" })) {
             ty = try returning(p);
         }
         while (true) {
-            if (p.eatKw("truncate")) {
+            if (p.c.eatKw("truncate")) {
                 truncate = true;
             } else if (try formatJson(p)) {
                 kind = "q";
-            } else if (p.eatKw("exists")) {
+            } else if (p.c.eatKw("exists")) {
                 kind = "x";
-            } else if (p.eatKw("path")) {
+            } else if (p.c.eatKw("path")) {
                 path = try pathLiteral(p);
             } else if (try wrapperClause(p)) |w| {
                 wrapper = w;
-            } else if (p.isKw("allow") or p.isKw("disallow")) {
-                _ = p.advance();
-                try p.expectKw("scalars");
+            } else if (p.c.isKw("allow") or p.c.isKw("disallow")) {
+                p.c.skip();
+                try p.c.expectKw("scalars");
             } else if (try handlerClause(p)) |c| {
                 const code = try p.arena.dupe(u8, &.{c.code});
                 var dv: ?J.Value = null;
@@ -853,9 +853,9 @@ fn columns(p: *Parser, out: *std.ArrayList(Column)) Error!J.Value {
         col.family = if (std.mem.eql(u8, kind, "v") and ty.len > 0) (if (types.parse(ty)) |tn| types.family(tn.name) else null) else null;
         try out.append(p.arena, col);
         try items.append(p.arena, .{ .object = ms.items });
-        if (!p.eat(.comma)) break;
+        if (!p.c.eat(.comma)) break;
     }
-    _ = try p.expect(.rparen);
+    _ = try p.c.expect(.rparen);
     return .{ .array = items.items };
 }
 
@@ -866,13 +866,13 @@ fn literalValue(p: *Parser, e: *const Expr) Error!J.Value {
         .integer => |s| .{ .number = s },
         .float => |s| .{ .number = try jf.canonNumber(p.arena, s) },
         .unary => |u| blk: {
-            if (u.op != .neg) break :blk p.fail(e.pos, "ORA-40451: invalid default value", .{});
+            if (u.op != .neg) break :blk p.c.fail(e.pos, "ORA-40451: invalid default value", .{});
             const inner = try literalValue(p, u.e);
-            if (inner != .number) break :blk p.fail(e.pos, "ORA-40451: invalid default value", .{});
+            if (inner != .number) break :blk p.c.fail(e.pos, "ORA-40451: invalid default value", .{});
             break :blk .{ .number = try std.fmt.allocPrint(p.arena, "-{s}", .{inner.number}) };
         },
         .null => .null,
-        else => p.fail(e.pos, "ORA-40451: invalid default value", .{}),
+        else => p.c.fail(e.pos, "ORA-40451: invalid default value", .{}),
     };
 }
 
@@ -1024,11 +1024,11 @@ fn resolveDot(p: *Parser, e: *Expr, d: Dot, scope: []const []const tree.FromItem
     }
     // schema.table.column, the table in scope.
     if (d.complex or d.names.len != 3 or try findLabel(p, scope, d.names[1].text) == null) {
-        return p.fail(d.names[0].pos, "ORA-00904: \"{s}\": invalid identifier", .{d.names[0].text});
+        return p.c.fail(d.names[0].pos, "ORA-00904: \"{s}\": invalid identifier", .{d.names[0].text});
     }
     const names = try p.arena.dupe(Name, d.names);
     const t = (try p.schemaTarget(names[0], names[1])) orelse
-        return p.fail(d.names[0].pos, "ORA-00904: \"{s}\": invalid identifier", .{d.names[0].text});
+        return p.c.fail(d.names[0].pos, "ORA-00904: \"{s}\": invalid identifier", .{d.names[0].text});
     // A table of another user's schema has its bare name as alias.
     e.kind = .{ .column = if (t.mangled) names[1..] else names };
     names[0] = .{ .text = t.db, .pos = names[0].pos };
@@ -1038,7 +1038,7 @@ fn resolveDot(p: *Parser, e: *Expr, d: Dot, scope: []const []const tree.FromItem
 /// JSON_OBJECT(*): the columns of the FROM items in scope, as KEY 'NAME'
 /// VALUE t.name pairs.
 fn objectStar(p: *Parser, f: *tree.Func, scope: []const []const tree.FromItem) Error!void {
-    if (scope.len == 0) return p.fail(f.name.pos, "ORA-00936: missing expression", .{});
+    if (scope.len == 0) return p.c.fail(f.name.pos, "ORA-00936: missing expression", .{});
     var flat: std.ArrayList(tree.FromItem) = .empty;
     try flatItems(p, scope[scope.len - 1], &flat);
     var args: std.ArrayList(*Expr) = .empty;
@@ -1050,7 +1050,7 @@ fn objectStar(p: *Parser, f: *tree.Func, scope: []const []const tree.FromItem) E
         var refs: std.ArrayList([]const u8) = .empty;
         switch (it.source) {
             .table => |q| {
-                const t = (try p.findTable(q)) orelse return p.fail(pos, "ORA-00942: table or view does not exist", .{});
+                const t = (try p.findTable(q)) orelse return p.c.fail(pos, "ORA-00942: table or view does not exist", .{});
                 for (t.cols) |col| {
                     if (col.col_flags.HIDDEN) continue;
                     try cols.append(p.arena, col.name());

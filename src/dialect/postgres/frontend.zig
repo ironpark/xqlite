@@ -24,7 +24,7 @@ const api = @import("../../vdbe/api.zig");
 const ir = @import("../../ir/ir.zig");
 const lower = @import("../../ir/lower.zig");
 const parser = @import("parser.zig");
-const tokenized = @import("../tokenized.zig");
+const driver = @import("../driver.zig");
 const ddl = @import("ddl.zig");
 const funcs = @import("funcs.zig");
 const session = @import("session.zig");
@@ -44,38 +44,39 @@ const RC = int.RC;
 
 pub const frontend: dialect.Frontend = .{ .run = run };
 
-pub const run = tokenized.run(parser, compile, translateError);
+pub const run = driver.run(parser, compile, translateError);
 
 fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
     // ANALYZE [VERBOSE] [[schema.]name], as written (SQLite's takes the
     // same arguments). VERBOSE does nothing; schema public is main and
     // pg_temp temp.
-    const first = ps.toks[0];
+    const toks = ps.c.src.toks;
+    const first = toks[0];
     if (first.isKw("analyze")) {
         var i: usize = 1;
-        if (ps.toks[i].isKw("verbose")) i += 1;
+        if (toks[i].isKw("verbose")) i += 1;
         var schema: ?[]const u8 = null;
-        if (ps.toks[i].kind == .ident and i + 1 < ps.toks.len and ps.toks[i + 1].kind == .dot) {
-            if (ps.toks[i].isKw("public")) schema = "main";
-            if (ps.toks[i].isKw("pg_temp")) schema = "temp";
+        if (toks[i].kind == .ident and i + 1 < toks.len and toks[i + 1].kind == .dot) {
+            if (toks[i].isKw("public")) schema = "main";
+            if (toks[i].isKw("pg_temp")) schema = "temp";
             if (schema != null) i += 2;
             // A table of a schema of CREATE SCHEMA: main."s.t".
-            if (schema == null and i + 3 == ps.toks.len and (ps.toks[i + 2].kind == .ident or ps.toks[i + 2].kind == .qident)) {
+            if (schema == null and i + 3 == toks.len and (toks[i + 2].kind == .ident or toks[i + 2].kind == .qident)) {
                 ps.p = p;
-                const n = ps.toks[i + 2];
-                const t = ps.qualified(.{ .text = ps.toks[i].text, .pos = ps.toks[i].start }, .{ .text = n.text, .pos = n.start }) catch |err| return parseFailed(p, sql, ps, err);
+                const n = toks[i + 2];
+                const t = ps.qualified(.{ .text = toks[i].text, .pos = toks[i].start }, .{ .text = n.text, .pos = n.start }) catch |err| return parseFailed(p, sql, ps, err);
                 if (t.mangled) {
                     const text = try std.fmt.allocPrintSentinel(p.arena, "ANALYZE main.{f}", .{dialect.Quoted('"'){ .z = t.name }}, 0);
                     return ir.stmt.lowerSqliteText(p, text);
                 }
             }
         }
-        var end = ps.toks[i].start;
-        for (ps.toks[i..]) |t| {
+        var end = toks[i].start;
+        for (toks[i..]) |t| {
             if (t.kind == .eof) break;
             end = t.end;
         }
-        const rest = sql[ps.toks[i].start..@max(end, ps.toks[i].start)];
+        const rest = sql[toks[i].start..@max(end, toks[i].start)];
         const text = if (schema) |s|
             try std.fmt.allocPrintSentinel(p.arena, "ANALYZE {s}.{s}", .{ s, rest }, 0)
         else
@@ -119,7 +120,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
 }
 
 /// The error of the parser, left in `p`.
-const parseFailed = tokenized.parseFailed;
+const parseFailed = driver.parseFailed;
 
 /// The HINT of a function call no function matches.
 pub const function_hint = "No function matches the given name and argument types. You might need to add explicit type casts.";

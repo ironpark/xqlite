@@ -74,37 +74,37 @@ fn databaseOptions(s: *Parser) Error!?[]const u8 {
     var cs: ?[]const u8 = null;
     var coll: ?[]const u8 = null;
     while (!s.atStmtEnd()) {
-        _ = s.eatKw("DEFAULT");
-        if (s.eatKw("CHARACTER")) {
-            try s.expectKw("SET");
-            _ = s.eatOp("=");
+        _ = s.c.eatKw("DEFAULT");
+        if (s.c.eatKw("CHARACTER")) {
+            try s.c.expectKw("SET");
+            _ = s.c.eatOp("=");
             cs = try optionValue(s);
-        } else if (s.eatKw("CHARSET")) {
-            _ = s.eatOp("=");
+        } else if (s.c.eatKw("CHARSET")) {
+            _ = s.c.eatOp("=");
             cs = try optionValue(s);
-        } else if (s.eatKw("COLLATE")) {
-            _ = s.eatOp("=");
+        } else if (s.c.eatKw("COLLATE")) {
+            _ = s.c.eatOp("=");
             coll = try optionValue(s);
-        } else if (s.eatKw("COMMENT")) {
-            _ = s.eatOp("=");
+        } else if (s.c.eatKw("COMMENT")) {
+            _ = s.c.eatOp("=");
             _ = try s.stringLiteral();
-        } else return s.syntaxError();
+        } else return s.c.syntaxError();
     }
     if (coll) |c| {
         const lc = try std.ascii.allocLowerString(s.a, c);
         if (cs) |x| if (!std.ascii.startsWithIgnoreCase(lc, x) or (lc.len > x.len and lc[x.len] != '_')) {
             if (!(std.ascii.eqlIgnoreCase(x, "binary") and std.mem.eql(u8, lc, "binary"))) {
-                return s.failState(.numbered("42P21", 1253), "COLLATION '{s}' is not valid for CHARACTER SET '{s}'", .{ c, x });
+                return s.c.failState(null, .numbered("42P21", 1253), "COLLATION '{s}' is not valid for CHARACTER SET '{s}'", .{ c, x });
             }
         };
         return lc;
     }
-    if (cs) |x| return defaultCollation(x) orelse s.failState(.numbered("42704", 1115), "Unknown character set: '{s}'", .{x});
+    if (cs) |x| return defaultCollation(x) orelse s.c.failState(null, .numbered("42704", 1115), "Unknown character set: '{s}'", .{x});
     return null;
 }
 
 fn optionValue(s: *Parser) Error![]const u8 {
-    if (s.tok.kind == .string) return s.stringLiteral();
+    if (s.c.peek().kind == .string) return s.stringLiteral();
     return s.nameText(try s.anyName());
 }
 
@@ -116,23 +116,23 @@ fn charsetOf(c: []const u8) []const u8 {
 
 /// CREATE [OR REPLACE] {DATABASE | SCHEMA} [IF NOT EXISTS] db [options].
 pub fn create(s: *Parser, or_replace: bool) Error!void {
-    s.advance(); // DATABASE / SCHEMA
-    const if_not_exists = try s.ifNotExists();
+    s.c.skip(); // DATABASE / SCHEMA
+    const if_not_exists = try s.c.ifNotExists();
     const n = try s.nameOf(try s.anyName());
     const coll = (try databaseOptions(s)) orelse server_collation;
     const name = n.text;
     if (!nsp.validName(name) or name.len > 64 or std.mem.indexOfAny(u8, name, "/\\") != null) {
-        return s.failState(.numbered("42602", 1102), "Incorrect database name '{s}'", .{name});
+        return s.c.failState(null, .numbered("42602", 1102), "Incorrect database name '{s}'", .{name});
     }
-    if (isSystem(name)) return s.failState(.numbered("42501", 1044), "Access denied for user 'root'@'localhost' to database '{s}'", .{name});
+    if (isSystem(name)) return s.c.failState(null, .numbered("42501", 1044), "Access denied for user 'root'@'localhost' to database '{s}'", .{name});
     const p = s.p;
     if (try s.database(name)) |d| {
         if (!or_replace) {
-            if (!if_not_exists) return s.failState(.numbered("42P04", 1007), "Can't create database '{s}'; database exists", .{name});
+            if (!if_not_exists) return s.c.failState(null, .numbered("42P04", 1007), "Can't create database '{s}'; database exists", .{name});
             p.db.xq.mariadb.warn(.note, 1007, "Can't create database '{s}'; database exists", .{name});
             return session.emptyStatement(s);
         }
-        const named = d.named orelse return s.fail("xqlite: database '{s}' is a SQLite database (main, temp or ATTACH) and cannot be replaced", .{d.shown});
+        const named = d.named orelse return s.c.fail(null, "xqlite: database '{s}' is a SQLite database (main, temp or ATTACH) and cannot be replaced", .{d.shown});
         try codeDrop(s, named);
     }
     nsp.codeCreate(p, name, "root");
@@ -155,36 +155,36 @@ fn codeDrop(s: *Parser, name: []const u8) Error!void {
         else => return error.ParseFailed,
     };
     if (p.db.xq.mariadb.currentDatabase()) |cur| if (std.ascii.eqlIgnoreCase(cur, name)) {
-        try session.codeEval(s, &.{try s.func(s.here(), "xq_maria_use", &.{try s.mk(s.here(), .null)})});
+        try session.codeEval(s, &.{try s.func(s.c.here(), "xq_maria_use", &.{try s.mk(s.c.here(), .null)})});
     };
 }
 
 /// DROP {DATABASE | SCHEMA} [IF EXISTS] db: the database and everything
 /// in it (MariaDB has no RESTRICT).
 pub fn drop(s: *Parser) Error!void {
-    s.advance(); // DATABASE / SCHEMA
-    const if_exists = try s.ifExists();
+    s.c.skip(); // DATABASE / SCHEMA
+    const if_exists = try s.c.ifExists();
     const name = try s.nameText(try s.anyName());
     const d = (try s.database(name)) orelse {
-        if (isSystem(name)) return s.failState(.numbered("42501", 1044), "Access denied for user 'root'@'localhost' to database '{s}'", .{name});
-        if (!if_exists) return s.failState(.numbered("3D000", 1008), "Can't drop database '{s}'; database doesn't exist", .{name});
+        if (isSystem(name)) return s.c.failState(null, .numbered("42501", 1044), "Access denied for user 'root'@'localhost' to database '{s}'", .{name});
+        if (!if_exists) return s.c.failState(null, .numbered("3D000", 1008), "Can't drop database '{s}'; database doesn't exist", .{name});
         s.p.db.xq.mariadb.warn(.note, 1008, "Can't drop database '{s}'; database doesn't exist", .{name});
         return session.emptyStatement(s);
     };
     const named = d.named orelse {
-        if (std.ascii.eqlIgnoreCase(d.sqlite, catalog.main_schema)) return s.fail("xqlite: database 'main' cannot be dropped", .{});
-        return s.fail("xqlite: database '{s}' is a SQLite database (use DETACH)", .{d.shown});
+        if (std.ascii.eqlIgnoreCase(d.sqlite, catalog.main_schema)) return s.c.fail(null, "xqlite: database 'main' cannot be dropped", .{});
+        return s.c.fail(null, "xqlite: database '{s}' is a SQLite database (use DETACH)", .{d.shown});
     };
     try codeDrop(s, named);
 }
 
 /// USE db: the current database, when the statement runs.
 pub fn use(s: *Parser) Error!void {
-    try s.expectKw("USE");
+    try s.c.expectKw("USE");
     const name = try s.nameText(try s.anyName());
-    const d = (try s.database(name)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
-    if (std.mem.eql(u8, d.sqlite, "temp")) return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
-    const pos = s.here();
+    const d = (try s.database(name)) orelse return s.c.failState(null, .numbered("3D000", 1049), "Unknown database '{s}'", .{name});
+    if (std.mem.eql(u8, d.sqlite, "temp")) return s.c.failState(null, .numbered("3D000", 1049), "Unknown database '{s}'", .{name});
+    const pos = s.c.here();
     try session.codeEval(s, &.{try s.func(pos, "xq_maria_use", &.{try s.str(pos, d.shown)})});
 }
 
@@ -217,22 +217,22 @@ pub fn showDatabases(s: *Parser) Error!void {
     var like: []const u8 = "";
     // MariaDB names the column after the pattern too.
     var col: []const u8 = "Database";
-    if (s.eatKw("LIKE")) {
+    if (s.c.eatKw("LIKE")) {
         const pattern = try s.stringLiteral();
         like = try std.fmt.allocPrint(s.a, " WHERE name LIKE {f}", .{Q{ .z = pattern }});
         col = try std.fmt.allocPrint(s.a, "Database ({s})", .{pattern});
     }
-    if (s.isKw("WHERE")) return s.fail("xqlite: SHOW DATABASES WHERE is not supported", .{});
+    if (s.c.isKw("WHERE")) return s.c.fail(null, "xqlite: SHOW DATABASES WHERE is not supported", .{});
     const text = try std.fmt.allocPrintSentinel(s.a, "SELECT name AS {f} FROM (SELECT 'information_schema' AS name UNION ALL SELECT name FROM ({s})){s} ORDER BY name COLLATE BINARY", .{ Id{ .z = col }, databaseList(s), like }, 0);
     try session.lowerText(s, text);
 }
 
 /// SHOW CREATE {DATABASE | SCHEMA} [IF NOT EXISTS] db.
 pub fn showCreateDatabase(s: *Parser) Error!void {
-    const if_not_exists = try s.ifNotExists();
+    const if_not_exists = try s.c.ifNotExists();
     const name = try s.nameText(try s.anyName());
-    const d = (try s.database(name)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
-    if (std.mem.eql(u8, d.sqlite, "temp")) return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
+    const d = (try s.database(name)) orelse return s.c.failState(null, .numbered("3D000", 1049), "Unknown database '{s}'", .{name});
+    if (std.mem.eql(u8, d.sqlite, "temp")) return s.c.failState(null, .numbered("3D000", 1049), "Unknown database '{s}'", .{name});
     const coll: []const u8 = if (d.named) |n| try collationOf(s, n) else main_collation;
     const B = @import("../dialect.zig").Quoted('`');
     const text = try std.fmt.allocPrint(s.a, "CREATE DATABASE {s}{f} /*!40100 DEFAULT CHARACTER SET {s} COLLATE {s} */", .{
@@ -253,13 +253,13 @@ fn collationOf(s: *Parser, name: []const u8) Error![]const u8 {
 /// SHOW [FULL] TABLES [{FROM | IN} db] [LIKE 'pattern'].
 pub fn showTables(s: *Parser, full: bool) Error!void {
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    const d = if (s.eatKw("FROM") or s.eatKw("IN")) blk: {
+    const d = if (s.c.eatKw("FROM") or s.c.eatKw("IN")) blk: {
         const name = try s.nameText(try s.anyName());
-        break :blk (try s.database(name)) orelse return s.failState(.numbered("3D000", 1049), "Unknown database '{s}'", .{name});
+        break :blk (try s.database(name)) orelse return s.c.failState(null, .numbered("3D000", 1049), "Unknown database '{s}'", .{name});
     } else try s.currentDb();
     var like: ?[]const u8 = null;
-    if (s.eatKw("LIKE")) like = try s.stringLiteral();
-    if (s.isKw("WHERE")) return s.fail("xqlite: SHOW TABLES WHERE is not supported", .{});
+    if (s.c.eatKw("LIKE")) like = try s.stringLiteral();
+    if (s.c.isKw("WHERE")) return s.c.fail(null, "xqlite: SHOW TABLES WHERE is not supported", .{});
     const col = if (like) |l|
         try std.fmt.allocPrint(s.a, "Tables_in_{s} ({s})", .{ d.shown, l })
     else

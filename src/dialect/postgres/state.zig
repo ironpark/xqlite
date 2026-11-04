@@ -44,7 +44,7 @@ pub const State = struct {
     /// xq_pg_iv_out() write intervals in.
     interval_style: IntervalStyle = .postgres,
     /// standard_conforming_strings: off, '...' strings take backslash
-    /// escapes (the lexer's: tokenized.Options).
+    /// escapes (the lexer's: driver.Options).
     standard_strings: bool = true,
     /// client_min_messages: the lowest level of notice the client is sent.
     notice_level: NoticeLevel = .notice,

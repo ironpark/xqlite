@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         // wasm32-freestanding has none (src/util/platform.zig).
         .link_libc = target.result.os.tag != .freestanding,
         // The VFS and storage layers and the shared helpers, packages of
-        // their own (pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sqllex). See
+        // their own (pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sqllex, pkg/sqlparse). See
         // engineImports().
         .imports = engineImports(b, target, optimize),
     });
@@ -174,6 +174,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(uuidTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(sqllexTests(b, target, optimize, test_filters)).step);
+    test_step.dependOn(&b.addRunArtifact(sqlparseTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_mod, .filters = test_filters })).step);
 
     // Example programs of the Zig API (examples/*.zig): `zig build
@@ -300,12 +301,13 @@ pub fn build(b: *std.Build) void {
 
     // The packages alone, without the engine: quick to build when working
     // on the VFS, the pager or the b-tree. `zig build test` runs these too.
-    const pkg_step = b.step("test-pkg", "Run the tests of pkg/vfs, pkg/storage, pkg/base, pkg/uuid and pkg/sqllex alone (no engine build)");
+    const pkg_step = b.step("test-pkg", "Run the tests of pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sqllex and pkg/sqlparse alone (no engine build)");
     pkg_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(uuidTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(sqllexTests(b, target, optimize, test_filters)).step);
+    pkg_step.dependOn(&b.addRunArtifact(sqlparseTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(journal_tests).step);
 
     // The b-tree benchmark of pkg/storage (bench/btree.zig), ReleaseFast.
@@ -410,6 +412,7 @@ pub fn build(b: *std.Build) void {
         baseTests(b, wasi_target, optimize, test_filters),
         uuidTests(b, wasi_target, optimize, test_filters),
         sqllexTests(b, wasi_target, optimize, test_filters),
+        sqlparseTests(b, wasi_target, optimize, test_filters),
     }) |t| {
         const run = b.addSystemCommand(&.{ "wasmtime", "run", "--dir", "." });
         run.addArtifactArg(t);
@@ -1047,6 +1050,7 @@ fn engineImportsWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
         baseImport(b, target, optimize),
         uuidImport(b, target, optimize),
         sqllexImport(b, target, optimize),
+        sqlparseImport(b, target, optimize),
         .{ .name = "xqlite_config", .module = config_module },
     }) catch @panic("OOM");
 }
@@ -1196,6 +1200,29 @@ fn uuidTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 fn sqllexImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
     const dep = b.dependency("sqllex", .{ .target = target, .optimize = optimize });
     return .{ .name = "sqllex", .module = dep.module("sqllex") };
+}
+
+/// The sqlparse package (pkg/sqlparse, a path dependency) for `target`,
+/// as the import `sqlparse` of a module (the dialects' parsers).
+fn sqlparseImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
+    const dep = b.dependency("sqlparse", .{ .target = target, .optimize = optimize });
+    return .{ .name = "sqlparse", .module = dep.module("sqlparse") };
+}
+
+/// The sqlparse package's tests for `target`: those `zig build test` runs
+/// in pkg/sqlparse.
+fn sqlparseTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
+    const dep = b.dependency("sqlparse", .{ .target = target, .optimize = optimize });
+    return b.addTest(.{
+        .name = "sqlparse-test",
+        .root_module = b.createModule(.{
+            .root_source_file = dep.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{sqllexImport(b, target, optimize)},
+        }),
+        .filters = filters,
+    });
 }
 
 /// The sqllex package's tests for `target`: those `zig build test` runs

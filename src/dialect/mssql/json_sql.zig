@@ -224,14 +224,14 @@ pub fn call(s: *Parser, n: []const u8, pos: u32) Error!?*Expr {
     if (eq(n, "ISJSON")) {
         const x = try s.expr();
         try badArg(s, x, 1, "isjson");
-        if (s.eatOp(",")) {
-            const t = s.tok;
-            if (t.kind != .ident or !t.isAnyKw(&.{ "VALUE", "ARRAY", "OBJECT", "SCALAR" })) return s.syntaxError();
-            s.advance();
-            try s.expectOp(")");
+        if (s.c.eatOp(",")) {
+            const t = s.c.peek();
+            if (t.kind != .ident or !t.isAnyKw(&.{ "VALUE", "ARRAY", "OBJECT", "SCALAR" })) return s.c.syntaxError();
+            s.c.skip();
+            try s.c.expectOp(")");
             return try s.func(pos, "xq_tsql_isjson", &.{ x, try s.str(pos, try std.ascii.allocLowerString(s.a, t.text)) });
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         // json_valid() and an object or array: SQLite's own functions,
         // so that a CHECK (ISJSON(c) = 1) works in sqlite3 too.
         const valid = try s.func(pos, "json_valid", &.{x});
@@ -245,13 +245,13 @@ pub fn call(s: *Parser, n: []const u8, pos: u32) Error!?*Expr {
         if (eq(n, x)) break;
     } else return null;
     var args: []*Expr = &.{};
-    if (!s.isOp(")")) args = try s.exprList();
-    try s.expectOp(")");
+    if (!s.c.isOp(")")) args = try s.exprList();
+    try s.c.expectOp(")");
     const k = args.len;
     if (eq(n, "JSON_VALUE") or eq(n, "JSON_PATH_EXISTS")) {
         if (k != 2) return argCount(s, n);
         try badArg(s, args[0], 1, if (eq(n, "JSON_VALUE")) "json_value" else "json_path_exists");
-        if (args[1].kind == .null and eq(n, "JSON_VALUE")) return s.failState(.numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of json_value function.", .{});
+        if (args[1].kind == .null and eq(n, "JSON_VALUE")) return s.c.failState(null, .numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of json_value function.", .{});
         return try s.func(pos, if (eq(n, "JSON_VALUE")) "xq_tsql_json_value" else "xq_tsql_json_path_exists", args);
     }
     if (eq(n, "JSON_QUERY")) {
@@ -270,12 +270,12 @@ pub fn call(s: *Parser, n: []const u8, pos: u32) Error!?*Expr {
     }
     // STRING_ESCAPE(x, 'json')
     if (k != 2) return argCount(s, n);
-    if (args[1].kind != .string or !eq(args[1].kind.string, "json")) return s.failState(.of("22023"), "An invalid value was specified for argument 2.", .{});
+    if (args[1].kind != .string or !eq(args[1].kind.string, "json")) return s.c.failState(null, .of("22023"), "An invalid value was specified for argument 2.", .{});
     return try s.func(pos, "xq_tsql_json_escape", args[0..1]);
 }
 
 fn argCount(s: *Parser, n: []const u8) Error {
-    return s.failState(.numbered("42883", 174), "The {s} function requires a different number of arguments.", .{n});
+    return s.c.failState(null, .numbered("42883", 174), "The {s} function requires a different number of arguments.", .{n});
 }
 
 /// A number constant where text is required: SQL Server's compile error.
@@ -285,7 +285,7 @@ fn badArg(s: *Parser, e: *const Expr, i: u32, func: []const u8) Error!void {
         .float => |f| if (std.mem.indexOfAny(u8, f, "eE") != null) "float" else "numeric",
         else => null,
     };
-    if (t) |tn| return s.failState(.numbered("42804", 8116), "Argument data type {s} is invalid for argument {d} of {s} function.", .{ tn, i, func });
+    if (t) |tn| return s.c.failState(null, .numbered("42804", 8116), "Argument data type {s} is invalid for argument {d} of {s} function.", .{ tn, i, func });
 }
 
 /// A value of a type JSON has no form for (dates, money, binary,
@@ -297,7 +297,7 @@ fn badValue(s: *Parser, e: *const Expr, i: u32, func: []const u8) Error!void {
         .cast => |c| c.mode == .affinity and std.mem.eql(u8, c.mode.affinity, "BLOB"),
         else => false,
     };
-    if (blob) return s.failState(.numbered("42804", 8116), "Argument data type varbinary is invalid for argument {d} of {s} function.", .{ i, func });
+    if (blob) return s.c.failState(null, .numbered("42804", 8116), "Argument data type varbinary is invalid for argument {d} of {s} function.", .{ i, func });
     if (e.kind != .cast) return;
     const c = e.kind.cast;
     const ty = (switch (c.mode) {
@@ -306,7 +306,7 @@ fn badValue(s: *Parser, e: *const Expr, i: u32, func: []const u8) Error!void {
     }) orelse return;
     switch (ty.base) {
         .money, .smallmoney, .date, .time, .datetime, .datetime2, .smalldatetime, .datetimeoffset, .binary, .varbinary, .image, .uniqueidentifier => {
-            return s.failState(.numbered("42804", 8116), "Argument data type {s} is invalid for argument {d} of {s} function.", .{ @tagName(ty.base), i, func });
+            return s.c.failState(null, .numbered("42804", 8116), "Argument data type {s} is invalid for argument {d} of {s} function.", .{ @tagName(ty.base), i, func });
         },
         else => {},
     }
@@ -314,11 +314,11 @@ fn badValue(s: *Parser, e: *const Expr, i: u32, func: []const u8) Error!void {
 
 /// `[NULL | ABSENT] ON NULL` at the end of JSON_OBJECT/JSON_ARRAY.
 fn onNull(s: *Parser) Error!?bool {
-    if ((s.isKw("NULL") or s.isKw("ABSENT")) and s.peek().isKw("ON") and s.peek2().isKw("NULL")) {
-        const absent = s.isKw("ABSENT");
-        s.advance();
-        s.advance();
-        s.advance();
+    if ((s.c.isKw("NULL") or s.c.isKw("ABSENT")) and s.c.peekAt(1).isKw("ON") and s.c.peekAt(2).isKw("NULL")) {
+        const absent = s.c.isKw("ABSENT");
+        s.c.skip();
+        s.c.skip();
+        s.c.skip();
         return absent;
     }
     return null;
@@ -332,15 +332,15 @@ fn jsonObject(s: *Parser, pos: u32) Error!*Expr {
     var absent = false;
     if (try onNull(s)) |x| {
         absent = x;
-    } else if (!s.isOp(")")) while (true) {
+    } else if (!s.c.isOp(")")) while (true) {
         try keys.append(s.a, try s.expr());
-        try s.expectOp(":");
+        try s.c.expectOp(":");
         try vals.append(s.a, try s.expr());
-        if (s.eatOp(",")) continue;
+        if (s.c.eatOp(",")) continue;
         if (try onNull(s)) |x| absent = x;
         break;
     };
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     var args: std.ArrayList(*Expr) = .empty;
     try args.append(s.a, try s.str(pos, if (absent) "absent" else "null"));
     try args.append(s.a, try kindArg(s, pos, vals.items));
@@ -358,13 +358,13 @@ fn jsonArray(s: *Parser, pos: u32) Error!*Expr {
     var absent = true;
     if (try onNull(s)) |x| {
         absent = x;
-    } else if (!s.isOp(")")) while (true) {
+    } else if (!s.c.isOp(")")) while (true) {
         try vals.append(s.a, try s.expr());
-        if (s.eatOp(",")) continue;
+        if (s.c.eatOp(",")) continue;
         if (try onNull(s)) |x| absent = x;
         break;
     };
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     var args: std.ArrayList(*Expr) = .empty;
     try args.append(s.a, try s.str(pos, if (absent) "absent" else "null"));
     try args.append(s.a, try kindArg(s, pos, vals.items));
@@ -378,21 +378,21 @@ fn jsonArray(s: *Parser, pos: u32) Error!*Expr {
 /// at the current token (OPENJSON): the call of the engine table-valued
 /// function (openjson.zig).
 pub fn openJson(s: *Parser) Error!*tree.Func {
-    const pos = s.here();
-    s.advance();
-    try s.expectOp("(");
+    const pos = s.c.here();
+    s.c.skip();
+    try s.c.expectOp("(");
     const args = try s.exprList();
-    try s.expectOp(")");
-    if (args.len < 1 or args.len > 2) return s.failState(.numbered("42883", 174), "The openjson function requires 1 to 2 arguments.", .{});
+    try s.c.expectOp(")");
+    if (args.len < 1 or args.len > 2) return s.c.failState(null, .numbered("42883", 174), "The openjson function requires 1 to 2 arguments.", .{});
     try badArg(s, args[0], 1, "openjson");
-    if (args.len == 2 and args[1].kind == .null) return s.failState(.numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of openjson function.", .{});
-    if (!(s.isKw("WITH") and s.peek().is("("))) {
+    if (args.len == 2 and args[1].kind == .null) return s.c.failState(null, .numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of openjson function.", .{});
+    if (!(s.c.isKw("WITH") and s.c.peekAt(1).is("("))) {
         const f = try s.new(tree.Func, .{ .name = .{ .text = openjson.default_name, .pos = pos }, .args = args });
         try s.openjson_cols.put(s.a, f, try s.a.dupe(Col, &.{ .{ .name = "key", .kind = 's' }, .{ .name = "value", .kind = 's' }, .{ .name = "type", .kind = 'a' } }));
         return f;
     }
-    s.advance();
-    try s.expectOp("(");
+    s.c.skip();
+    try s.c.expectOp("(");
     var spec: std.ArrayList(u8) = .empty;
     var cols: std.ArrayList(Col) = .empty;
     try spec.append(s.a, '[');
@@ -400,13 +400,13 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
         const n = try s.nameText(try s.anyName());
         const ty = try functions.typeNameOf(s, true);
         var path: ?[]const u8 = null;
-        if (s.tok.kind == .string) path = try s.stringLiteral();
+        if (s.c.peek().kind == .string) path = try s.stringLiteral();
         var as_json = false;
-        if (s.isKw("AS") and s.peek().isKw("JSON")) {
-            s.advance();
-            s.advance();
+        if (s.c.isKw("AS") and s.c.peekAt(1).isKw("JSON")) {
+            s.c.skip();
+            s.c.skip();
             if (!(ty.t.base == .nvarchar and ty.t.len == types.max_len)) {
-                return s.failState(.of("42601"), "AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.", .{});
+                return s.c.failState(null, .of("42601"), "AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.", .{});
             }
             as_json = true;
         }
@@ -416,7 +416,7 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
                 error.OutOfMemory => |e| return e,
                 error.BadPath => {
                     var buf: [200]u8 = undefined;
-                    return s.failState(json.path_error, "{s}", .{json.pathMessage(&buf, p, perr.pos)});
+                    return s.c.failState(null, json.path_error, "{s}", .{json.pathMessage(&buf, p, perr.pos)});
                 },
             };
         }
@@ -429,9 +429,9 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
         if (path) |p| try json.writeString(s.a, &spec, p) else try spec.appendSlice(s.a, "null");
         try spec.appendSlice(s.a, if (as_json) ",1]" else ",0]");
         try cols.append(s.a, .{ .name = n, .kind = if (as_json) 'j' else typeKind(ty.t) });
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     try spec.append(s.a, ']');
     const name = try openjson.withName(s.a, spec.items);
     const f = try s.new(tree.Func, .{ .name = .{ .text = name, .pos = pos }, .args = args });
@@ -457,31 +457,31 @@ const OutCol = struct { name: []const u8, kind: u8, src: ?usize, e: *Expr };
 /// [, WITHOUT_ARRAY_WRAPPER]` after query `sel` (the current token is
 /// FOR): the query of the JSON text.
 pub fn forJson(s: *Parser, sel: *tree.Select) Error!*tree.Select {
-    const pos = s.here();
-    s.advance();
-    s.advance(); // JSON
+    const pos = s.c.here();
+    s.c.skip();
+    s.c.skip(); // JSON
     var auto = false;
-    if (s.eatKw("AUTO")) {
+    if (s.c.eatKw("AUTO")) {
         auto = true;
-    } else if (!s.eatKw("PATH")) return s.syntaxError();
+    } else if (!s.c.eatKw("PATH")) return s.c.syntaxError();
     var root: ?[]const u8 = null;
     var nulls = false;
     var nowrap = false;
-    while (s.eatOp(",")) {
-        if (s.eatKw("ROOT")) {
+    while (s.c.eatOp(",")) {
+        if (s.c.eatKw("ROOT")) {
             root = "root";
-            if (s.eatOp("(")) {
+            if (s.c.eatOp("(")) {
                 root = try s.stringLiteral();
-                try s.expectOp(")");
+                try s.c.expectOp(")");
             }
-        } else if (s.eatKw("INCLUDE_NULL_VALUES")) {
+        } else if (s.c.eatKw("INCLUDE_NULL_VALUES")) {
             nulls = true;
-        } else if (s.eatKw("WITHOUT_ARRAY_WRAPPER")) {
+        } else if (s.c.eatKw("WITHOUT_ARRAY_WRAPPER")) {
             nowrap = true;
-        } else return s.syntaxError();
+        } else return s.c.syntaxError();
     }
-    if (root != null and nowrap) return s.failState(.of("42601"), "ROOT option and WITHOUT_ARRAY_WRAPPER option cannot be used together in FOR JSON. Remove one of these options.", .{});
-    const core = leftCore(sel.body) orelse return s.fail("xqlite: FOR JSON of VALUES is not supported", .{});
+    if (root != null and nowrap) return s.c.failState(null, .of("42601"), "ROOT option and WITHOUT_ARRAY_WRAPPER option cannot be used together in FOR JSON. Remove one of these options.", .{});
+    const core = leftCore(sel.body) orelse return s.c.fail(null, "xqlite: FOR JSON of VALUES is not supported", .{});
     const scope = try scopeOf(s, core.from);
 
     // The columns, * expanded.
@@ -496,8 +496,8 @@ pub fn forJson(s: *Parser, sel: *tree.Select) Error!*tree.Select {
         },
         .expr => |x| {
             const n: ?[]const u8 = if (x.alias) |a| a.text else if (x.e.kind == .column) x.e.kind.column[x.e.kind.column.len - 1].text else null;
-            const nm = n orelse return s.failState(.numbered("42601", 1038), "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
-            if (nm.len == 0) return s.failState(.numbered("42601", 1038), "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
+            const nm = n orelse return s.c.failState(null, .numbered("42601", 1038), "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
+            if (nm.len == 0) return s.c.failState(null, .numbered("42601", 1038), "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.", .{});
             const src: ?usize = if (x.e.kind == .column) (if (findColumn(scope, x.e.kind.column)) |f| f.src else null) else null;
             try cols.append(s.a, .{ .name = nm, .kind = valueKind(s, x.e, scope), .src = src, .e = x.e });
         },
@@ -507,7 +507,7 @@ pub fn forJson(s: *Parser, sel: *tree.Select) Error!*tree.Select {
     var levels: std.ArrayList([]const u8) = .empty;
     var level_of = try s.a.alloc(u32, cols.items.len);
     if (auto) {
-        if (scope.len == 0) return s.failState(.of("42601"), "FOR JSON AUTO requires at least one table for generating JSON objects. Use FOR JSON PATH or add a FROM clause with a table name.", .{});
+        if (scope.len == 0) return s.c.failState(null, .of("42601"), "FOR JSON AUTO requires at least one table for generating JSON objects. Use FOR JSON PATH or add a FROM clause with a table name.", .{});
         var srcs: std.ArrayList(usize) = .empty;
         var last: u32 = 0;
         for (cols.items, 0..) |c, i| {
@@ -579,7 +579,7 @@ pub fn forJson(s: *Parser, sel: *tree.Select) Error!*tree.Select {
 
 /// The columns of FROM item `src` for `*`.
 fn expand(s: *Parser, cols: *std.ArrayList(OutCol), src: Source, pos: u32) Error!void {
-    const list = src.cols orelse return s.fail("xqlite: FOR JSON of * over {s} is not supported", .{if (src.label.len > 0) src.label else "a subquery without an alias"});
+    const list = src.cols orelse return s.c.fail(null, "xqlite: FOR JSON of * over {s} is not supported", .{if (src.label.len > 0) src.label else "a subquery without an alias"});
     for (list) |c| {
         const names = try s.a.dupe(Name, &.{ .{ .text = src.label, .pos = pos }, .{ .text = c.name, .pos = pos } });
         try cols.append(s.a, .{ .name = c.name, .kind = c.kind, .src = src.index, .e = try tree.expr(s.a, pos, pos, .{ .column = names }) });
@@ -611,7 +611,7 @@ fn checkNames(s: *Parser, cols: []const OutCol, level_of: []const u32, auto: boo
             if (!is_open) {
                 for (props.items) |p| {
                     if (p.level == lv and std.mem.eql(u8, p.path, prefix)) {
-                        return s.failState(.of("42701"), "Property '{s}' cannot be generated in JSON output due to a conflict with another column name or alias. Use different names and aliases for each column in SELECT list.", .{name});
+                        return s.c.failState(null, .of("42701"), "Property '{s}' cannot be generated in JSON output due to a conflict with another column name or alias. Use different names and aliases for each column in SELECT list.", .{name});
                     }
                 }
                 try props.append(s.a, .{ .level = lv, .path = prefix, .object = object });

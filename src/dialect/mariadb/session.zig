@@ -228,71 +228,71 @@ pub fn setUservarFunc(ctx: *dfunc.Context, argv: []*dfunc.Mem) void {
 
 /// SET assignments, SET NAMES, SET CHARACTER SET, SET TRANSACTION.
 pub fn set(s: *Parser) Error!void {
-    try s.expectKw("SET");
+    try s.c.expectKw("SET");
     var scope_global = false;
-    if (s.eatKw("GLOBAL")) {
+    if (s.c.eatKw("GLOBAL")) {
         scope_global = true;
-    } else _ = s.eatKw("SESSION") or s.eatKw("LOCAL");
-    if (s.eatKw("TRANSACTION")) {
+    } else _ = s.c.eatKw("SESSION") or s.c.eatKw("LOCAL");
+    if (s.c.eatKw("TRANSACTION")) {
         // ISOLATION LEVEL ... / READ ONLY|WRITE: accepted, ignored
         // (transactions are serializable).
-        while (!s.atStmtEnd()) s.advance();
+        while (!s.atStmtEnd()) s.c.skip();
         return emptyStatement(s);
     }
-    if (scope_global) return s.fail("xqlite: SET GLOBAL is not supported", .{});
+    if (scope_global) return s.c.fail(null, "xqlite: SET GLOBAL is not supported", .{});
     var calls: std.ArrayList(*tree.Expr) = .empty;
     while (true) {
-        const pos = s.here();
-        if (s.isKw("NAMES") or ((s.isKw("CHARACTER") or s.isKw("CHARSET")))) {
+        const pos = s.c.here();
+        if (s.c.isKw("NAMES") or ((s.c.isKw("CHARACTER") or s.c.isKw("CHARSET")))) {
             // SET NAMES cs [COLLATE c], SET CHARACTER SET cs: accepted.
-            if (s.eatKw("CHARACTER")) try s.expectKw("SET") else s.advance();
-            if (s.eatKw("DEFAULT")) {} else if (s.tok.kind == .string) {
+            if (s.c.eatKw("CHARACTER")) try s.c.expectKw("SET") else s.c.skip();
+            if (s.c.eatKw("DEFAULT")) {} else if (s.c.peek().kind == .string) {
                 _ = try s.stringLiteral();
             } else _ = try s.anyName();
-            if (s.eatKw("COLLATE")) {
-                if (s.tok.kind == .string) _ = try s.stringLiteral() else _ = try s.anyName();
+            if (s.c.eatKw("COLLATE")) {
+                if (s.c.peek().kind == .string) _ = try s.stringLiteral() else _ = try s.anyName();
             }
-        } else if (s.tok.kind == .user_var) {
-            const t = s.tok;
-            s.advance();
-            if (!(s.eatOp("=") or s.eatOp(":="))) return s.syntaxError();
+        } else if (s.c.peek().kind == .user_var) {
+            const t = s.c.peek();
+            s.c.skip();
+            if (!(s.c.eatOp("=") or s.c.eatOp(":="))) return s.c.syntaxError();
             const name = try std.ascii.allocLowerString(s.a, try userVarText(s, t));
             const v = try s.expr();
             try calls.append(s.a, try s.func(pos, "xq_set_uservar", &.{ try s.str(pos, name), v }));
         } else {
             var name_text: []const u8 = undefined;
-            if (s.tok.kind == .sys_var) {
-                name_text = s.tok.text[2..];
+            if (s.c.peek().kind == .sys_var) {
+                name_text = s.c.peek().text[2..];
                 for ([_][]const u8{ "global.", "session.", "local." }) |scope| {
                     if (std.ascii.startsWithIgnoreCase(name_text, scope)) {
-                        if (scope[0] == 'g') return s.fail("xqlite: SET GLOBAL is not supported", .{});
+                        if (scope[0] == 'g') return s.c.fail(null, "xqlite: SET GLOBAL is not supported", .{});
                         name_text = name_text[scope.len..];
                     }
                 }
-                s.advance();
+                s.c.skip();
             } else {
                 const n = try s.anyName();
                 name_text = try s.nameText(n);
             }
-            const v = findVar(name_text) orelse return s.failState(.numbered("42704", 1193), "Unknown system variable '{s}'", .{name_text});
-            if (!v.settable) return s.failState(.numbered("55P02", 1238), "Variable '{s}' is a read only variable", .{v.name});
-            if (!(s.eatOp("=") or s.eatOp(":="))) return s.syntaxError();
-            const vpos = s.here();
+            const v = findVar(name_text) orelse return s.c.failState(null, .numbered("42704", 1193), "Unknown system variable '{s}'", .{name_text});
+            if (!v.settable) return s.c.failState(null, .numbered("55P02", 1238), "Variable '{s}' is a read only variable", .{v.name});
+            if (!(s.c.eatOp("=") or s.c.eatOp(":="))) return s.c.syntaxError();
+            const vpos = s.c.here();
             var value: *tree.Expr = undefined;
-            if (s.isKw("DEFAULT")) {
-                s.advance();
+            if (s.c.isKw("DEFAULT")) {
+                s.c.skip();
                 value = try s.mk(vpos, .null);
-            } else if (s.isKw("ON") or s.isKw("OFF")) {
-                value = try s.int_(vpos, @intFromBool(s.isKw("ON")));
-                s.advance();
-            } else if (s.tok.kind == .ident and !s.peek().is("(") and !s.peek().is(".") and !parser.isReserved(s.tok)) {
+            } else if (s.c.isKw("ON") or s.c.isKw("OFF")) {
+                value = try s.int_(vpos, @intFromBool(s.c.isKw("ON")));
+                s.c.skip();
+            } else if (s.c.peek().kind == .ident and !s.c.peekAt(1).is("(") and !s.c.peekAt(1).is(".") and !parser.isReserved(s.c.peek())) {
                 // SET sql_mode = ANSI: a word is a string.
-                value = try s.str(vpos, s.tok.text);
-                s.advance();
+                value = try s.str(vpos, s.c.peek().text);
+                s.c.skip();
             } else value = try s.expr();
             try calls.append(s.a, try s.func(pos, "xq_set_sysvar", &.{ try s.str(pos, v.name), value }));
         }
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
     try s.check();
     try codeEval(s, calls.items);
@@ -329,53 +329,53 @@ pub fn emptyStatement(s: *Parser) Error!void {
 /// START TRANSACTION, BEGIN [WORK], COMMIT, ROLLBACK [TO SAVEPOINT],
 /// SAVEPOINT, RELEASE SAVEPOINT.
 pub fn transaction(s: *Parser) Error!void {
-    if (s.eatKw("START")) {
-        try s.expectKw("TRANSACTION");
-        while (!s.atStmtEnd()) s.advance(); // READ ONLY|WRITE, WITH CONSISTENT SNAPSHOT
+    if (s.c.eatKw("START")) {
+        try s.c.expectKw("TRANSACTION");
+        while (!s.atStmtEnd()) s.c.skip(); // READ ONLY|WRITE, WITH CONSISTENT SNAPSHOT
         return s.lowerStmt(.begin);
     }
-    if (s.eatKw("BEGIN")) {
-        _ = s.eatKw("WORK");
+    if (s.c.eatKw("BEGIN")) {
+        _ = s.c.eatKw("WORK");
         return s.lowerStmt(.begin);
     }
-    if (s.eatKw("COMMIT")) {
-        _ = s.eatKw("WORK");
+    if (s.c.eatKw("COMMIT")) {
+        _ = s.c.eatKw("WORK");
         try chainRelease(s);
         return s.lowerStmt(.commit);
     }
-    if (s.eatKw("ROLLBACK")) {
-        _ = s.eatKw("WORK");
-        if (s.eatKw("TO")) {
-            _ = s.eatKw("SAVEPOINT");
+    if (s.c.eatKw("ROLLBACK")) {
+        _ = s.c.eatKw("WORK");
+        if (s.c.eatKw("TO")) {
+            _ = s.c.eatKw("SAVEPOINT");
             const n = try s.nameOf(try s.name());
             return s.lowerStmt(.{ .rollback_to = n });
         }
         try chainRelease(s);
         return s.lowerStmt(.rollback);
     }
-    if (s.eatKw("SAVEPOINT")) {
+    if (s.c.eatKw("SAVEPOINT")) {
         const n = try s.nameOf(try s.name());
         // Outside a transaction a savepoint ends with its statement in
         // MariaDB; SQLite's would open a transaction.
         if (s.p.db.auto_commit) return emptyStatement(s);
         return s.lowerStmt(.{ .savepoint = n });
     }
-    if (s.eatKw("RELEASE")) {
-        try s.expectKw("SAVEPOINT");
+    if (s.c.eatKw("RELEASE")) {
+        try s.c.expectKw("SAVEPOINT");
         const n = try s.nameOf(try s.name());
         return s.lowerStmt(.{ .release = n });
     }
-    return s.syntaxError();
+    return s.c.syntaxError();
 }
 
 fn chainRelease(s: *Parser) Error!void {
-    if (s.eatKw("AND")) {
-        _ = s.eatKw("NO");
-        try s.expectKw("CHAIN");
+    if (s.c.eatKw("AND")) {
+        _ = s.c.eatKw("NO");
+        try s.c.expectKw("CHAIN");
     }
-    if (s.isKw("NO") or s.isKw("RELEASE")) {
-        _ = s.eatKw("NO");
-        try s.expectKw("RELEASE");
+    if (s.c.isKw("NO") or s.c.isKw("RELEASE")) {
+        _ = s.c.eatKw("NO");
+        try s.c.expectKw("RELEASE");
     }
 }
 
@@ -384,7 +384,7 @@ fn chainRelease(s: *Parser) Error!void {
 /// LOCK TABLES ... / UNLOCK TABLES: accepted, nothing to do (the
 /// database file is locked by transactions).
 pub fn lockTables(s: *Parser) Error!void {
-    while (!s.atStmtEnd()) s.advance();
+    while (!s.atStmtEnd()) s.c.skip();
     return emptyStatement(s);
 }
 
@@ -393,9 +393,9 @@ pub fn lockTables(s: *Parser) Error!void {
 /// result rows (Table, Op, Msg_type, Msg_text). A view or a missing table
 /// gets an error row, as in MariaDB; the others are analyzed.
 pub fn analyzeTable(s: *Parser) Error!void {
-    try s.expectKw("ANALYZE");
-    _ = s.eatKw("NO_WRITE_TO_BINLOG") or s.eatKw("LOCAL");
-    if (!s.eatKw("TABLE") and !s.eatKw("TABLES")) return s.syntaxError();
+    try s.c.expectKw("ANALYZE");
+    _ = s.c.eatKw("NO_WRITE_TO_BINLOG") or s.c.eatKw("LOCAL");
+    if (!s.c.eatKw("TABLE") and !s.c.eatKw("TABLES")) return s.c.syntaxError();
     const Item = struct { shown: []const u8, err: ?[]const u8, tab: ?*int.Table };
     var items: std.ArrayList(Item) = .empty;
     while (true) {
@@ -412,13 +412,13 @@ pub fn analyzeTable(s: *Parser) Error!void {
         else
             null;
         try items.append(s.a, .{ .shown = shown, .err = err, .tab = tab });
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
     var persistent = false;
-    if (s.eatKw("PERSISTENT")) {
-        try s.expectKw("FOR");
+    if (s.c.eatKw("PERSISTENT")) {
+        try s.c.expectKw("FOR");
         persistent = true;
-        while (!s.atStmtEnd()) s.advance(); // ALL | COLUMNS (...) INDEXES (...)
+        while (!s.atStmtEnd()) s.c.skip(); // ALL | COLUMNS (...) INDEXES (...)
     }
     // One analysis for all of them (analyze.analyzeTables()): one
     // ANALYZE per table would expire this program after the first.
@@ -467,48 +467,48 @@ pub const Id = dialect.Quoted('"');
 
 /// SHOW ..., DESCRIBE t, DESC t, EXPLAIN t.
 pub fn show(s: *Parser) Error!void {
-    try s.expectKw("SHOW");
-    const full = s.eatKw("FULL");
-    if (s.eatKw("TABLES")) return databases.showTables(s, full);
-    if (s.eatKw("COLUMNS") or s.eatKw("FIELDS")) {
-        if (!(s.eatKw("FROM") or s.eatKw("IN"))) return s.syntaxError();
+    try s.c.expectKw("SHOW");
+    const full = s.c.eatKw("FULL");
+    if (s.c.eatKw("TABLES")) return databases.showTables(s, full);
+    if (s.c.eatKw("COLUMNS") or s.c.eatKw("FIELDS")) {
+        if (!(s.c.eatKw("FROM") or s.c.eatKw("IN"))) return s.c.syntaxError();
         const q = try s.qualifiedName();
         var schema: ?[]const u8 = if (q.schema) |x| x.text else null;
-        if (s.eatKw("FROM") or s.eatKw("IN")) schema = try s.nameText(try s.anyName());
+        if (s.c.eatKw("FROM") or s.c.eatKw("IN")) schema = try s.nameText(try s.anyName());
         var like: ?[]const u8 = null;
-        if (s.eatKw("LIKE")) like = try s.stringLiteral();
+        if (s.c.eatKw("LIKE")) like = try s.stringLiteral();
         return showColumns(s, q.name.text, schema, like);
     }
-    if (s.eatKw("INDEX") or s.eatKw("INDEXES") or s.eatKw("KEYS")) {
-        if (!(s.eatKw("FROM") or s.eatKw("IN"))) return s.syntaxError();
+    if (s.c.eatKw("INDEX") or s.c.eatKw("INDEXES") or s.c.eatKw("KEYS")) {
+        if (!(s.c.eatKw("FROM") or s.c.eatKw("IN"))) return s.c.syntaxError();
         const q = try s.qualifiedName();
         var schema: ?[]const u8 = if (q.schema) |x| x.text else null;
-        if (s.eatKw("FROM") or s.eatKw("IN")) schema = try s.nameText(try s.anyName());
+        if (s.c.eatKw("FROM") or s.c.eatKw("IN")) schema = try s.nameText(try s.anyName());
         return showIndex(s, q.name.text, schema);
     }
-    if (s.eatKw("CREATE")) {
-        if (s.eatKw("DATABASE") or s.eatKw("SCHEMA")) return databases.showCreateDatabase(s);
-        if (s.eatKw("TABLE") or s.eatKw("VIEW")) {
+    if (s.c.eatKw("CREATE")) {
+        if (s.c.eatKw("DATABASE") or s.c.eatKw("SCHEMA")) return databases.showCreateDatabase(s);
+        if (s.c.eatKw("TABLE") or s.c.eatKw("VIEW")) {
             const q = try s.qualifiedName();
             return showCreate(s, q.name.text, if (q.schema) |x| x.text else null);
         }
-        return s.syntaxError();
+        return s.c.syntaxError();
     }
-    if (s.eatKw("WARNINGS")) return showWarnings(s, false);
-    if (s.eatKw("ERRORS")) return showWarnings(s, true);
-    if (s.eatKw("DATABASES") or s.eatKw("SCHEMAS")) return databases.showDatabases(s);
-    _ = s.eatKw("SESSION");
-    if (s.eatKw("VARIABLES")) {
+    if (s.c.eatKw("WARNINGS")) return showWarnings(s, false);
+    if (s.c.eatKw("ERRORS")) return showWarnings(s, true);
+    if (s.c.eatKw("DATABASES") or s.c.eatKw("SCHEMAS")) return databases.showDatabases(s);
+    _ = s.c.eatKw("SESSION");
+    if (s.c.eatKw("VARIABLES")) {
         var like: ?[]const u8 = null;
-        if (s.eatKw("LIKE")) like = try s.stringLiteral();
+        if (s.c.eatKw("LIKE")) like = try s.stringLiteral();
         return showVariables(s, like);
     }
-    if (s.eatKw("COUNT")) {
-        try s.expectOp("(");
-        try s.expectOp("*");
-        try s.expectOp(")");
-        const errors = s.eatKw("ERRORS");
-        if (!errors) try s.expectKw("WARNINGS");
+    if (s.c.eatKw("COUNT")) {
+        try s.c.expectOp("(");
+        try s.c.expectOp("*");
+        try s.c.expectOp(")");
+        const errors = s.c.eatKw("ERRORS");
+        if (!errors) try s.c.expectKw("WARNINGS");
         const st = &s.p.db.xq.mariadb;
         var n: u32 = 0;
         if (errors) {
@@ -516,20 +516,20 @@ pub fn show(s: *Parser) Error!void {
         } else n = st.n_warnings;
         return lowerFmt(s, "SELECT {d} AS \"@@session.{s}_count\"", .{ n, if (errors) "error" else "warning" });
     }
-    return s.fail("xqlite: this SHOW statement is not supported", .{});
+    return s.c.fail(null, "xqlite: this SHOW statement is not supported", .{});
 }
 
 /// DESCRIBE t [col] / DESC t / EXPLAIN t: SHOW COLUMNS; DESCRIBE/EXPLAIN
 /// of a statement: EXPLAIN QUERY PLAN.
 pub fn describe(s: *Parser) Error!bool {
-    const n = s.peek();
+    const n = s.c.peekAt(1);
     const is_stmt = n.isAnyKw(&.{ "SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "WITH", "EXTENDED", "PARTITIONS", "FORMAT", "ANALYZE" }) or
         n.is("(");
     if (is_stmt) return false;
-    s.advance();
+    s.c.skip();
     const q = try s.qualifiedName();
     var like: ?[]const u8 = null;
-    if (s.tok.kind == .string) like = try s.stringLiteral() else if (s.isName()) like = try s.nameText(try s.name());
+    if (s.c.peek().kind == .string) like = try s.stringLiteral() else if (s.isName()) like = try s.nameText(try s.name());
     try showColumns(s, q.name.text, if (q.schema) |x| x.text else null, like);
     return true;
 }
@@ -545,7 +545,7 @@ fn likeClause(s: *Parser, prefix: []const u8, like: ?[]const u8) Error![]const u
 fn resolveTable(s: *Parser, name: []const u8, schema: ?[]const u8) Error!struct { *int.Table, []const u8, []const u8 } {
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const r = try s.relation(.{ .schema = if (schema) |x| .{ .text = x } else null, .name = .{ .text = name } });
-    const tab = r.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const tab = r.find(s.p.db) orelse return s.c.failState(null, .numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
     const stored = try s.a.dupe(u8, tab.name);
     const bare = if (r.db.named) |n| stored[@min(n.len + 1, stored.len)..] else stored;
     return .{ tab, try s.a.dupe(u8, catalog.schemaName(s.p.db, tab)), bare };
@@ -606,8 +606,8 @@ fn showCreate(s: *Parser, name: []const u8, schema_in: ?[]const u8) Error!void {
 }
 
 fn showWarnings(s: *Parser, errors_only: bool) Error!void {
-    if (s.isKw("LIMIT")) {
-        while (!s.atStmtEnd()) s.advance();
+    if (s.c.isKw("LIMIT")) {
+        while (!s.atStmtEnd()) s.c.skip();
     }
     const st = &s.p.db.xq.mariadb;
     var w: std.Io.Writer.Allocating = .init(s.a);

@@ -62,10 +62,16 @@ pub const Token = struct {
     kind: Kind,
     /// The text of the token in the statement.
     text: []const u8,
+    /// Its byte offsets in the statement (0 for a token made of other
+    /// text, to decode it).
+    start: u32 = 0,
+    end: u32 = 0,
 
     pub fn is(t: Token, op: []const u8) bool {
         return t.kind == .op and std.mem.eql(u8, t.text, op);
     }
+
+    pub const isOp = is;
 
     /// An unquoted word equal to `kw` (case-insensitive).
     pub fn isKw(t: Token, kw: []const u8) bool {
@@ -75,10 +81,6 @@ pub const Token = struct {
     pub fn isAnyKw(t: Token, comptime kws: []const []const u8) bool {
         inline for (kws) |kw| if (t.isKw(kw)) return true;
         return false;
-    }
-
-    pub fn end(t: Token) [*]const u8 {
-        return t.text.ptr + t.text.len;
     }
 };
 
@@ -101,7 +103,7 @@ pub const Lexer = struct {
         const s = lx.sql;
         const start = lx.pos;
         const c = s[start];
-        if (c == 0) return .{ .kind = .eof, .text = s[start..start] };
+        if (c == 0) return .{ .kind = .eof, .text = s[start..start], .start = @intCast(start), .end = @intCast(start) };
         const kind: Kind = switch (c) {
             '[' => lx.quoted(start, ']', .quoted_ident),
             '"' => lx.quoted(start, '"', .quoted_ident),
@@ -118,7 +120,7 @@ pub const Lexer = struct {
             },
             else => if (scan.isIdentStart(c)) lx.word(start) else lx.operator(),
         };
-        return .{ .kind = kind, .text = s[start..lx.pos] };
+        return .{ .kind = kind, .text = s[start..lx.pos], .start = @intCast(start), .end = @intCast(lx.pos) };
     }
 
     /// A quoted token from `start` (its opening quote): `q` ends it, a

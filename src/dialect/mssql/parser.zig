@@ -30,7 +30,9 @@
 //! parsed with `stored` set: variables and parameters are refused there.
 
 const std = @import("std");
-const words = @import("../words.zig");
+const sqlparse = @import("sqlparse");
+const syntax = @import("../syntax.zig");
+const words = sqlparse.words;
 const ctype = @import("xqlite_base").ctype;
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
@@ -105,12 +107,37 @@ pub const Top = struct { n: *Expr, percent: bool = false };
 /// `@name = expr` of SELECT @a = x, @b = y FROM ...
 pub const Assign = struct { name: []const u8, value: *Expr };
 
+/// The tokens of a statement, read as the parser goes (a statement may
+/// end before a word that starts another one), and its error
+/// (pkg/sqlparse).
+pub const Cursor = sqlparse.Cursor(sqlparse.Streaming(lexer.Lexer), int.ErrorState, struct {
+    pub fn syntaxError(c: anytype) Error {
+        return tsqlSyntaxError(c, c.peek());
+    }
+});
+
+/// SQL Server's syntax error at token `t`.
+fn tsqlSyntaxError(c: *Cursor, t: Token) Error {
+    if (t.kind == .illegal and t.text.len > 0 and (t.text[0] == '\'' or t.text[0] == 'N' or t.text[0] == 'n')) {
+        return c.failState(t.start, .numbered("42601", 105), "Unclosed quotation mark after the character string '{s}'.", .{t.text[@min(t.text.len, @as(usize, if (t.text[0] == '\'') 1 else 2))..]});
+    }
+    // At the end: the token before it.
+    const near: []const u8 = if (t.kind == .eof) blk: {
+        var i: usize = c.lastEnd();
+        var j = i;
+        while (j > 0 and !std.ascii.isWhitespace(c.sql[j - 1])) j -= 1;
+        if (j == i) i = j;
+        break :blk c.sql[j..i];
+    } else t.text;
+    return c.failState(t.start, .numbered("42601", 102), "Incorrect syntax near '{s}'.", .{near[0..@min(near.len, 80)]});
+}
+
 pub const Parser = struct {
     p: *Parse,
     a: std.mem.Allocator,
-    lx: lexer.Lexer,
-    tok: Token,
-    prev_end: [*]const u8,
+    /// The tokens, the text they are in and the error the parser found
+    /// (frontend.zig records it in `p`, unless lowering recorded one).
+    c: Cursor,
     /// Parsing the VALUES rows or SET list of INSERT/UPDATE: DEFAULT
     /// stands for the column's default (tree.Kind.default).
     allow_default: bool = false,
@@ -145,149 +172,38 @@ pub const Parser = struct {
     element_schema: ?[]const u8 = null,
 
     pub fn init(p: *Parse, sql: [:0]const u8) Parser {
-        var s: Parser = .{
-            .p = p,
-            .a = p.arena,
-            .lx = .init(sql),
-            .tok = undefined,
-            .prev_end = sql.ptr,
-        };
-        s.tok = s.lx.next();
-        return s;
+        return .{ .p = p, .a = p.arena, .c = .{ .arena = p.arena, .sql = sql, .src = .init(.init(sql)) } };
     }
 
-    pub fn advance(s: *Parser) void {
-        s.prev_end = s.tok.end();
-        s.tok = s.lx.next();
-    }
-
-    pub fn peek(s: *Parser) Token {
-        var copy = s.lx;
-        return copy.next();
-    }
-
-    pub fn peek2(s: *Parser) Token {
-        var copy = s.lx;
-        _ = copy.next();
-        return copy.next();
-    }
-
-    pub fn isKw(s: *Parser, kw: []const u8) bool {
-        return s.tok.isKw(kw);
-    }
-
-    pub fn eatKw(s: *Parser, kw: []const u8) bool {
-        if (!s.tok.isKw(kw)) return false;
-        s.advance();
-        return true;
-    }
-
-    pub fn expectKw(s: *Parser, kw: []const u8) Error!void {
-        if (!s.eatKw(kw)) return s.syntaxError();
-    }
-
-    pub fn isAnyKw(s: *Parser, comptime kws: []const []const u8) bool {
-        return s.tok.isAnyKw(kws);
-    }
-
-    pub fn isOp(s: *Parser, op: []const u8) bool {
-        return s.tok.is(op);
-    }
-
-    pub fn eatOp(s: *Parser, op: []const u8) bool {
-        if (!s.tok.is(op)) return false;
-        s.advance();
-        return true;
-    }
-
-    pub fn expectOp(s: *Parser, op: []const u8) Error!void {
-        if (!s.eatOp(op)) return s.syntaxError();
-    }
-
-    /// IF EXISTS
-    pub fn ifExists(s: *Parser) Error!bool {
-        if (!s.isKw("IF")) return false;
-        if (!s.peek().isKw("EXISTS")) return false;
-        s.advance();
-        s.advance();
-        return true;
+    /// IF EXISTS (IF alone starts a statement).
+    pub fn ifExists(s: *Parser) bool {
+        return s.c.eatKws(&.{ "IF", "EXISTS" });
     }
 
     /// The end of the statement: `;`, GO, the end of the text, or a word
     /// that starts another statement.
     pub fn atStmtEnd(s: *Parser) bool {
-        return s.tok.kind == .eof or s.tok.is(";") or startsStatement(s.tok);
+        return s.c.peek().kind == .eof or s.c.peek().is(";") or startsStatement(s.c.peek());
     }
 
-    /// SQL Server's syntax error at the current token.
-    pub fn syntaxError(s: *Parser) Error {
-        return s.syntaxErrorAt(s.tok);
-    }
-
+    /// SQL Server's syntax error at token `t`.
     pub fn syntaxErrorAt(s: *Parser, t: Token) Error {
-        if (s.p.n_err > 0) return error.ParseFailed;
-        if (t.kind == .illegal and t.text.len > 0 and (t.text[0] == '\'' or t.text[0] == 'N' or t.text[0] == 'n')) {
-            ir.stmt.errorMsgState(s.p, t.text.ptr, .numbered("42601", 105), "Unclosed quotation mark after the character string '{s}'.", .{t.text[@min(t.text.len, @as(usize, if (t.text[0] == '\'') 1 else 2))..]});
-            return error.ParseFailed;
-        }
-        // At the end: the token before it.
-        const near: []const u8 = if (t.kind == .eof) blk: {
-            const start = @intFromPtr(s.lx.sql.ptr);
-            var i = @intFromPtr(s.prev_end) - start;
-            var j = i;
-            while (j > 0 and !std.ascii.isWhitespace(s.lx.sql[j - 1])) j -= 1;
-            if (j == i) i = j;
-            break :blk s.lx.sql[j..i];
-        } else t.text;
-        ir.stmt.errorMsgState(s.p, t.text.ptr, .numbered("42601", 102), "Incorrect syntax near '{s}'.", .{near[0..@min(near.len, 80)]});
-        return error.ParseFailed;
-    }
-
-    /// An error with a message.
-    pub fn fail(s: *Parser, comptime fmt: []const u8, args: anytype) Error {
-        if (s.p.n_err == 0) ir.stmt.errorMsg(s.p, fmt, args);
-        return error.ParseFailed;
+        return tsqlSyntaxError(&s.c, t);
     }
 
     /// Fail with the error a statement run while compiling this one left
     /// in the connection `db`, as it is (its ErrorState too).
     pub fn failFrom(s: *Parser, db: *int.Sqlite3) Error {
-        if (s.p.n_err == 0) ir.stmt.errorMsgState(s.p, null, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
-        return error.ParseFailed;
-    }
-
-    /// fail() of an error whose ErrorState (SQL Server's error number) is
-    /// known.
-    pub fn failState(s: *Parser, st: int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
-        if (s.p.n_err == 0) ir.stmt.errorMsgState(s.p, null, st, fmt, args);
-        return error.ParseFailed;
+        return s.c.failState(null, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
     }
 
     pub fn check(s: *Parser) Error!void {
         if (s.p.n_err > 0) return error.ParseFailed;
     }
 
-    // --------------------------------------------------------- positions
-
-    pub fn offset(s: *const Parser, ptr: [*]const u8) u32 {
-        return @intCast(@intFromPtr(ptr) - @intFromPtr(s.lx.sql.ptr));
-    }
-
-    pub fn posOf(s: *const Parser, t: Token) u32 {
-        return s.offset(t.text.ptr);
-    }
-
-    pub fn here(s: *const Parser) u32 {
-        return s.posOf(s.tok);
-    }
-
-    pub fn endPos(s: *const Parser) u32 {
-        return s.offset(s.prev_end);
-    }
-
     /// An expression node from `pos` to the last token consumed.
     pub fn mk(s: *Parser, pos: u32, kind: tree.Kind) Error!*Expr {
-        return tree.expr(s.a, pos, @max(pos, s.endPos()), kind);
+        return tree.expr(s.a, pos, @max(pos, s.c.lastEnd()), kind);
     }
 
     pub fn new(s: *Parser, comptime T: type, v: T) Error!*T {
@@ -297,7 +213,7 @@ pub const Parser = struct {
     // ============================================================ lowering
 
     pub fn lowerer(s: *Parser) lower.Lowerer {
-        return .init(s.p, s.lx.sql);
+        return .init(s.p, s.c.sql);
     }
 
     /// Lower statement `st` with the IR.
@@ -311,26 +227,26 @@ pub const Parser = struct {
     /// A name: a word that is not reserved, or a delimited identifier.
     pub fn name(s: *Parser) Error!Token {
         if (s.isName()) {
-            const t = s.tok;
-            s.advance();
+            const t = s.c.peek();
+            s.c.skip();
             return t;
         }
-        return s.syntaxError();
+        return s.c.syntaxError();
     }
 
     /// A name, also a reserved word (after a dot, or where only a name
     /// can come).
     pub fn anyName(s: *Parser) Error!Token {
-        const t = s.tok;
+        const t = s.c.peek();
         if (t.kind == .quoted_ident or t.kind == .ident) {
-            s.advance();
+            s.c.skip();
             return t;
         }
-        return s.syntaxError();
+        return s.c.syntaxError();
     }
 
     pub fn isName(s: *Parser) bool {
-        return s.tok.kind == .quoted_ident or (s.tok.kind == .ident and !isReserved(s.tok));
+        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .ident and !isReserved(s.c.peek()));
     }
 
     pub fn nameText(s: *Parser, t: Token) Error![]const u8 {
@@ -338,14 +254,14 @@ pub const Parser = struct {
     }
 
     pub fn nameOf(s: *Parser, t: Token) Error!Name {
-        return .{ .text = try lexer.identValue(s.a, t), .pos = s.posOf(t) };
+        return .{ .text = try lexer.identValue(s.a, t), .pos = t.start };
     }
 
     /// A string literal's value.
     pub fn stringLiteral(s: *Parser) Error![]const u8 {
-        if (s.tok.kind != .string) return s.syntaxError();
-        const v = try lexer.stringValue(s.a, s.tok);
-        s.advance();
+        if (s.c.peek().kind != .string) return s.c.syntaxError();
+        const v = try lexer.stringValue(s.a, s.c.peek());
+        s.c.skip();
         return v;
     }
 
@@ -420,11 +336,11 @@ pub const Parser = struct {
     pub fn qualifiedNameFor(s: *Parser, use: NameUse) Error!QName {
         var parts: std.ArrayList(Name) = .empty;
         try parts.append(s.a, try s.nameOf(try s.anyName()));
-        while (s.isOp(".") and parts.items.len < 3) {
-            s.advance();
-            if (s.isOp(".")) {
+        while (s.c.isOp(".") and parts.items.len < 3) {
+            s.c.skip();
+            if (s.c.isOp(".")) {
                 // db..name: the default schema.
-                try parts.append(s.a, .{ .text = "", .pos = s.here() });
+                try parts.append(s.a, .{ .text = "", .pos = s.c.here() });
                 continue;
             }
             try parts.append(s.a, try s.nameOf(try s.anyName()));
@@ -458,7 +374,7 @@ pub const Parser = struct {
 
     /// SQL Server's error 2760.
     pub fn noSchema(s: *Parser, sch: []const u8) Error {
-        return s.failState(.numbered("3F000", 2760), "The specified schema name \"{s}\" either does not exist or you do not have permission to use it.", .{sch});
+        return s.c.failState(null, .numbered("3F000", 2760), "The specified schema name \"{s}\" either does not exist or you do not have permission to use it.", .{sch});
     }
 
     /// An unqualified name: the session's default schema's object of that
@@ -501,19 +417,19 @@ pub const Parser = struct {
 
     fn orExpr(s: *Parser) Error!*Expr {
         var l = try s.andExpr();
-        while (s.eatKw("OR")) l = try s.bin(.@"or", l, try s.andExpr());
+        while (s.c.eatKw("OR")) l = try s.bin(.@"or", l, try s.andExpr());
         return l;
     }
 
     fn andExpr(s: *Parser) Error!*Expr {
         var l = try s.notExpr();
-        while (s.eatKw("AND")) l = try s.bin(.@"and", l, try s.notExpr());
+        while (s.c.eatKw("AND")) l = try s.bin(.@"and", l, try s.notExpr());
         return l;
     }
 
     fn notExpr(s: *Parser) Error!*Expr {
-        const pos = s.here();
-        if (s.eatKw("NOT")) {
+        const pos = s.c.here();
+        if (s.c.eatKw("NOT")) {
             const e = try s.notExpr();
             return s.mk(pos, .{ .unary = .{ .op = .not, .e = e } });
         }
@@ -533,56 +449,56 @@ pub const Parser = struct {
     fn predicate(s: *Parser) Error!*Expr {
         var l = try s.additive();
         while (true) {
-            if (compareOp(s.tok)) |op| {
-                s.advance();
-                if (s.isAnyKw(&.{ "ANY", "SOME", "ALL" })) {
-                    return s.fail("xqlite: comparisons with ANY/SOME/ALL subqueries are not supported", .{});
+            if (compareOp(s.c.peek())) |op| {
+                s.c.skip();
+                if (s.c.isAnyKw(&.{ "ANY", "SOME", "ALL" })) {
+                    return s.c.fail(null, "xqlite: comparisons with ANY/SOME/ALL subqueries are not supported", .{});
                 }
                 const r = try s.additive();
                 l = try s.mk(l.pos, .{ .compare = .{ .op = op, .l = l, .r = r } });
                 continue;
             }
-            if (s.isKw("IS")) {
-                s.advance();
-                const not = s.eatKw("NOT");
-                try s.expectKw("NULL");
+            if (s.c.isKw("IS")) {
+                s.c.skip();
+                const not = s.c.eatKw("NOT");
+                try s.c.expectKw("NULL");
                 l = try s.mk(l.pos, .{ .is_null = .{ .e = l, .not = not } });
                 continue;
             }
             var not = false;
-            if (s.isKw("NOT")) {
-                const n = s.peek();
+            if (s.c.isKw("NOT")) {
+                const n = s.c.peekAt(1);
                 if (!n.isAnyKw(&.{ "LIKE", "IN", "BETWEEN" })) break;
-                s.advance();
+                s.c.skip();
                 not = true;
             }
-            if (s.eatKw("LIKE")) {
+            if (s.c.eatKw("LIKE")) {
                 const r = try s.additive();
-                const esc: ?*Expr = if (s.eatKw("ESCAPE")) try s.additive() else null;
+                const esc: ?*Expr = if (s.c.eatKw("ESCAPE")) try s.additive() else null;
                 l = try s.like(l, r, esc, not);
                 continue;
             }
-            if (s.eatKw("IN")) {
-                try s.expectOp("(");
+            if (s.c.eatKw("IN")) {
+                try s.c.expectOp("(");
                 if (s.isSelectStart()) {
                     const sub = try s.subSelect();
-                    try s.expectOp(")");
+                    try s.c.expectOp(")");
                     l = try s.mk(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = sub } });
                 } else {
                     const items = try s.exprList();
-                    try s.expectOp(")");
+                    try s.c.expectOp(")");
                     l = try s.mk(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
                 }
                 continue;
             }
-            if (s.eatKw("BETWEEN")) {
+            if (s.c.eatKw("BETWEEN")) {
                 const lo = try s.additive();
-                try s.expectKw("AND");
+                try s.c.expectKw("AND");
                 const hi = try s.additive();
                 l = try s.mk(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
                 continue;
             }
-            if (not) return s.syntaxError();
+            if (not) return s.c.syntaxError();
             break;
         }
         return l;
@@ -608,15 +524,15 @@ pub const Parser = struct {
     fn additive(s: *Parser) Error!*Expr {
         var l = try s.multiplicative();
         while (true) {
-            if (s.eatOp("+")) {
+            if (s.c.eatOp("+")) {
                 l = try s.plus(l, try s.multiplicative());
-            } else if (s.eatOp("-")) {
+            } else if (s.c.eatOp("-")) {
                 l = try s.bin(.sub, l, try s.multiplicative());
-            } else if (s.eatOp("&")) {
+            } else if (s.c.eatOp("&")) {
                 l = try s.bin(.bit_and, l, try s.multiplicative());
-            } else if (s.eatOp("|")) {
+            } else if (s.c.eatOp("|")) {
                 l = try s.bin(.bit_or, l, try s.multiplicative());
-            } else if (s.eatOp("^")) {
+            } else if (s.c.eatOp("^")) {
                 l = try s.xor(l, try s.multiplicative());
             } else break;
         }
@@ -740,12 +656,12 @@ pub const Parser = struct {
     fn multiplicative(s: *Parser) Error!*Expr {
         var l = try s.unary();
         while (true) {
-            if (s.eatOp("*")) {
+            if (s.c.eatOp("*")) {
                 l = try s.bin(.mul, l, try s.unary());
-            } else if (s.eatOp("/")) {
+            } else if (s.c.eatOp("/")) {
                 const r = try s.unary();
                 l = try s.mk(l.pos, .{ .div = .{ .kind = .sqlite, .l = l, .r = r } });
-            } else if (s.eatOp("%")) {
+            } else if (s.c.eatOp("%")) {
                 l = try s.bin(.rem, l, try s.unary());
             } else break;
         }
@@ -753,21 +669,21 @@ pub const Parser = struct {
     }
 
     fn unary(s: *Parser) Error!*Expr {
-        const pos = s.here();
-        if (s.isOp("-") or s.isOp("+")) {
-            const minus = s.isOp("-");
-            s.advance();
+        const pos = s.c.here();
+        if (s.c.isOp("-") or s.c.isOp("+")) {
+            const minus = s.c.isOp("-");
+            s.c.skip();
             const e = try s.unary();
             if (!minus) return e;
             return s.mk(pos, .{ .unary = .{ .op = .neg, .e = e } });
         }
-        if (s.eatOp("~")) return s.mk(pos, .{ .unary = .{ .op = .bit_not, .e = try s.unary() } });
+        if (s.c.eatOp("~")) return s.mk(pos, .{ .unary = .{ .op = .bit_not, .e = try s.unary() } });
         return s.primaryWithCollate();
     }
 
     fn primaryWithCollate(s: *Parser) Error!*Expr {
         var e = try s.primary();
-        while (s.eatKw("COLLATE")) {
+        while (s.c.eatKw("COLLATE")) {
             const coll = try s.collationName();
             e = try s.mk(e.pos, .{ .collate = .{ .e = e, .collation = coll } });
         }
@@ -778,11 +694,11 @@ pub const Parser = struct {
     /// token: case-sensitive (_CS_) and binary (_BIN, _BIN2) ones are
     /// BINARY, the others (_CI_) NOCASE.
     pub fn collationName(s: *Parser) Error![:0]const u8 {
-        const t = s.tok;
-        if (t.kind != .ident and t.kind != .quoted_ident) return s.syntaxError();
+        const t = s.c.peek();
+        if (t.kind != .ident and t.kind != .quoted_ident) return s.c.syntaxError();
         const n = try s.nameText(t);
-        s.advance();
-        return mapCollation(n) orelse s.failState(.numbered("42704", 448), "Invalid collation '{s}'.", .{n});
+        s.c.skip();
+        return mapCollation(n) orelse s.c.failState(null, .numbered("42704", 448), "Invalid collation '{s}'.", .{n});
     }
 
     pub fn str(s: *Parser, pos: u32, z: []const u8) Error!*Expr {
@@ -810,7 +726,7 @@ pub const Parser = struct {
     }
 
     pub fn isSelectStart(s: *Parser) bool {
-        return s.isKw("SELECT") or s.isKw("WITH") or (s.isOp("(") and isSelectish(s.peek()));
+        return s.c.isKw("SELECT") or s.c.isKw("WITH") or (s.c.isOp("(") and isSelectish(s.c.peekAt(1)));
     }
 
     fn isSelectish(t: Token) bool {
@@ -819,84 +735,84 @@ pub const Parser = struct {
 
     fn refuseStored(s: *Parser, what: []const u8) Error!void {
         if (!s.stored) return;
-        return s.failState(.of("42601"), "Variables are not allowed in this context: '{s}'.", .{what});
+        return s.c.failState(null, .of("42601"), "Variables are not allowed in this context: '{s}'.", .{what});
     }
 
     fn primary(s: *Parser) Error!*Expr {
-        const t = s.tok;
-        const pos = s.posOf(t);
+        const t = s.c.peek();
+        const pos = t.start;
         switch (t.kind) {
             .string => return s.mk(pos, .{ .string = try s.stringLiteral() }),
             .integer => {
-                s.advance();
+                s.c.skip();
                 return s.mk(pos, .{ .integer = t.text });
             },
             .float => {
-                s.advance();
+                s.c.skip();
                 return s.mk(pos, .{ .float = t.text });
             },
             .hex => {
-                s.advance();
+                s.c.skip();
                 return s.mk(pos, .{ .blob = try lexer.hexDigits(s.a, t) });
             },
             .param => {
                 try s.refuseStored(t.text);
-                s.advance();
+                s.c.skip();
                 return s.mk(pos, .{ .param = null });
             },
             .variable => {
                 try s.refuseStored(t.text);
-                s.advance();
+                s.c.skip();
                 return s.variableRef(t, pos);
             },
             .sys_var => {
                 try s.refuseStored(t.text);
-                s.advance();
+                s.c.skip();
                 return @import("functions.zig").systemFunction(s, t, pos);
             },
             .op => {
                 if (t.is("(")) return s.parenthesized();
-                return s.syntaxError();
+                return s.c.syntaxError();
             },
             .quoted_ident => return s.columnRef(),
             .ident => return s.wordExpr(),
-            else => return s.syntaxError(),
+            else => return s.c.syntaxError(),
         }
     }
 
     /// @name: the variable's value (it must be declared).
     pub fn variableRef(s: *Parser, t: Token, pos: u32) Error!*Expr {
         const vname = try varName(s.a, t.text);
-        const v = s.p.db.xq.mssql.get(vname) orelse return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
+        const v = s.p.db.xq.mssql.get(vname) orelse return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
         const x = try s.func(pos, "xq_tsql_getvar", &.{try s.str(pos, vname)});
         try s.classes.put(s.a, x, typeClass(types.parseText(v.type)));
         return x;
     }
 
     fn parenthesized(s: *Parser) Error!*Expr {
-        const pos = s.here();
-        try s.expectOp("(");
-        if (s.isAnyKw(&.{ "SELECT", "WITH" })) {
+        const pos = s.c.here();
+        try s.c.expectOp("(");
+        if (s.c.isAnyKw(&.{ "SELECT", "WITH" })) {
             const sub = try s.subSelect();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             return s.mk(pos, .{ .subquery = sub });
         }
         const first = try s.expr();
-        if (s.eatOp(")")) return first;
+        if (s.c.eatOp(")")) return first;
         var items: std.ArrayList(*Expr) = .empty;
         try items.append(s.a, first);
-        while (s.eatOp(",")) try items.append(s.a, try s.expr());
-        try s.expectOp(")");
+        while (s.c.eatOp(",")) try items.append(s.a, try s.expr());
+        try s.c.expectOp(")");
         return s.mk(pos, .{ .row = items.items });
     }
 
     /// [[db.]schema.]table.column, table.column or column.
     pub fn columnRef(s: *Parser) Error!*Expr {
-        const pos = s.here();
+        const pos = s.c.here();
         var names: std.ArrayList(Name) = .empty;
         try names.append(s.a, try s.nameOf(try s.anyName()));
-        while (names.items.len < 4 and s.isOp(".") and !s.peek().is("*")) {
-            s.advance();
+        while (names.items.len < 4 and s.c.isOp(".") and !s.c.peekAt(1).is("*")) {
+            s.c.skip();
             try names.append(s.a, try s.nameOf(try s.anyName()));
         }
         var ns = names.items;
@@ -905,9 +821,9 @@ pub const Parser = struct {
             const del = std.ascii.eqlIgnoreCase(ns[0].text, "deleted");
             if (ins or del) {
                 if ((ins and o == .delete) or (del and o == .insert)) {
-                    return s.failState(.numbered("42P01", 4104), "The multi-part identifier \"{s}.{s}\" could not be bound.", .{ ns[0].text, ns[1].text });
+                    return s.c.failState(null, .numbered("42P01", 4104), "The multi-part identifier \"{s}.{s}\" could not be bound.", .{ ns[0].text, ns[1].text });
                 }
-                if (del and o == .update) return s.fail("xqlite: OUTPUT DELETED in UPDATE is not supported (RETURNING sees the new row)", .{});
+                if (del and o == .update) return s.c.fail(null, "xqlite: OUTPUT DELETED in UPDATE is not supported (RETURNING sees the new row)", .{});
                 return s.mk(pos, .{ .column = ns[1..] });
             }
         };
@@ -933,47 +849,43 @@ pub const Parser = struct {
     /// An expression starting with a word: a keyword form, a function
     /// call or a column reference.
     fn wordExpr(s: *Parser) Error!*Expr {
-        const t = s.tok;
-        const pos = s.posOf(t);
-        const next = s.peek();
+        const t = s.c.peek();
+        const pos = t.start;
+        const next = s.c.peekAt(1);
         if (t.isKw("NULL")) {
-            s.advance();
+            s.c.skip();
             return s.mk(pos, .null);
         }
         if (t.isKw("CASE")) return s.caseExpr();
         if (t.isKw("EXISTS")) {
-            s.advance();
-            try s.expectOp("(");
+            s.c.skip();
+            try s.c.expectOp("(");
             const sub = try s.subSelect();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             return s.mk(pos, .{ .exists = sub });
         }
         if (t.isKw("DEFAULT") and s.allow_default) {
-            s.advance();
+            s.c.skip();
             return s.mk(pos, .default);
         }
         if (t.isKw("NEXT") and next.isKw("VALUE")) {
-            s.advance();
-            s.advance();
-            try s.expectKw("FOR");
+            s.c.skip();
+            s.c.skip();
+            try s.c.expectKw("FOR");
             const q = try s.qualifiedName();
             return s.func(pos, "xq_tsql_next_value", &.{try s.str(q.name.pos, q.name.text)});
         }
         if (next.is("(") and t.kind == .ident) return @import("functions.zig").call(s);
         const niladic = [_][]const u8{ "CURRENT_TIMESTAMP", "CURRENT_USER", "SESSION_USER", "SYSTEM_USER", "USER", "CURRENT_DATE" };
         for (niladic) |n| if (t.isKw(n)) {
-            s.advance();
+            s.c.skip();
             return @import("functions.zig").byName(s, n, &.{}, pos);
         };
-        if (isReserved(t)) return s.syntaxError();
+        if (isReserved(t)) return s.c.syntaxError();
         // schema.function(...)
-        if (next.is(".") and s.peek2().kind == .ident) {
-            var copy = s.lx;
-            _ = copy.next();
-            _ = copy.next();
-            if (copy.next().is("(")) {
-                s.advance();
-                s.advance();
+        if (next.is(".") and s.c.peekAt(2).kind == .ident) {
+            if (s.c.peekAt(3).is("(")) {
+                s.c.skipN(2);
                 return @import("functions.zig").call(s);
             }
         }
@@ -981,26 +893,11 @@ pub const Parser = struct {
     }
 
     fn caseExpr(s: *Parser) Error!*Expr {
-        const pos = s.here();
-        try s.expectKw("CASE");
-        const operand: ?*Expr = if (s.isKw("WHEN")) null else try s.expr();
-        var whens: std.ArrayList(*Expr) = .empty;
-        while (s.eatKw("WHEN")) {
-            try whens.append(s.a, try s.expr());
-            try s.expectKw("THEN");
-            try whens.append(s.a, try s.expr());
-        }
-        if (whens.items.len == 0) return s.syntaxError();
-        const else_: ?*Expr = if (s.eatKw("ELSE")) try s.expr() else null;
-        try s.expectKw("END");
-        return s.mk(pos, .{ .case = .{ .operand = operand, .whens = whens.items, .@"else" = else_ } });
+        return syntax.caseExpr(s, expr);
     }
 
     pub fn exprList(s: *Parser) Error![]*Expr {
-        var l: std.ArrayList(*Expr) = .empty;
-        try l.append(s.a, try s.expr());
-        while (s.eatOp(",")) try l.append(s.a, try s.expr());
-        return l.items;
+        return s.c.list(*Expr, s, expr);
     }
 
     // ============================================================= SELECT
@@ -1019,8 +916,8 @@ pub const Parser = struct {
         s.assigns = null;
         s.into = null;
         const sel = try s.selectInner();
-        if (s.assigns != null) return s.fail("xqlite: a SELECT that assigns variables cannot be a subquery", .{});
-        if (s.into != null) return s.syntaxError();
+        if (s.assigns != null) return s.c.fail(null, "xqlite: a SELECT that assigns variables cannot be a subquery", .{});
+        if (s.into != null) return s.c.syntaxError();
         return sel;
     }
 
@@ -1033,51 +930,51 @@ pub const Parser = struct {
     }
 
     fn selectInner(s: *Parser) Error!*tree.Select {
-        const pos = s.here();
+        const pos = s.c.here();
         var w: ?*tree.With = null;
-        if (s.isKw("WITH")) w = try s.withClause();
+        if (s.c.isKw("WITH")) w = try s.withClause();
         const body = try s.selectBody();
         const sel = try s.new(tree.Select, .{ .with = w, .body = body, .pos = pos });
         // TOP of a lone SELECT: after its ORDER BY.
         var top: ?Top = null;
         if (body.* == .core) top = s.tops.get(body.core);
-        if (s.isKw("ORDER") and s.peek().isKw("BY")) {
-            s.advance();
-            s.advance();
+        if (s.c.isKw("ORDER") and s.c.peekAt(1).isKw("BY")) {
+            s.c.skip();
+            s.c.skip();
             sel.order_by = try s.sortList();
         }
-        if (s.eatKw("OFFSET")) {
-            if (top != null) return s.failState(.numbered("42601", 10741), "A TOP can not be used in the same query or sub-query as a OFFSET.", .{});
-            if (sel.order_by.len == 0) return s.syntaxError();
+        if (s.c.eatKw("OFFSET")) {
+            if (top != null) return s.c.failState(null, .numbered("42601", 10741), "A TOP can not be used in the same query or sub-query as a OFFSET.", .{});
+            if (sel.order_by.len == 0) return s.c.syntaxError();
             sel.offset = try s.expr();
-            if (!(s.eatKw("ROWS") or s.eatKw("ROW"))) return s.syntaxError();
-            if (s.eatKw("FETCH")) {
-                if (!(s.eatKw("FIRST") or s.eatKw("NEXT"))) return s.syntaxError();
+            if (!(s.c.eatKw("ROWS") or s.c.eatKw("ROW"))) return s.c.syntaxError();
+            if (s.c.eatKw("FETCH")) {
+                if (!(s.c.eatKw("FIRST") or s.c.eatKw("NEXT"))) return s.c.syntaxError();
                 sel.limit = try s.expr();
-                if (!(s.eatKw("ROWS") or s.eatKw("ROW"))) return s.syntaxError();
-                try s.expectKw("ONLY");
+                if (!(s.c.eatKw("ROWS") or s.c.eatKw("ROW"))) return s.c.syntaxError();
+                try s.c.expectKw("ONLY");
             }
         }
         if (top) |tp| try s.applyTop(sel, tp);
-        if (s.isKw("OPTION") and s.peek().is("(")) {
+        if (s.c.isKw("OPTION") and s.c.peekAt(1).is("(")) {
             // Query hints: ignored.
-            s.advance();
+            s.c.skip();
             try s.skipParens();
         }
-        if (s.isKw("FOR") and s.peek().isKw("JSON")) return json_sql.forJson(s, sel);
-        if (s.isKw("FOR") and s.peek().isAnyKw(&.{ "XML", "BROWSE" })) return s.fail("xqlite: FOR {s} is not supported", .{s.peek().text});
+        if (s.c.isKw("FOR") and s.c.peekAt(1).isKw("JSON")) return json_sql.forJson(s, sel);
+        if (s.c.isKw("FOR") and s.c.peekAt(1).isAnyKw(&.{ "XML", "BROWSE" })) return s.c.fail(null, "xqlite: FOR {s} is not supported", .{s.c.peekAt(1).text});
         return sel;
     }
 
     /// Skip a parenthesized group at the current token.
     pub fn skipParens(s: *Parser) Error!void {
-        try s.expectOp("(");
+        try s.c.expectOp("(");
         var depth: usize = 1;
         while (depth > 0) {
-            if (s.tok.kind == .eof) return s.syntaxError();
-            if (s.isOp("(")) depth += 1;
-            if (s.isOp(")")) depth -= 1;
-            s.advance();
+            if (s.c.peek().kind == .eof) return s.c.syntaxError();
+            if (s.c.isOp("(")) depth += 1;
+            if (s.c.isOp(")")) depth -= 1;
+            s.c.skip();
         }
     }
 
@@ -1104,47 +1001,37 @@ pub const Parser = struct {
     }
 
     pub fn sortList(s: *Parser) Error![]tree.SortItem {
-        var l: std.ArrayList(tree.SortItem) = .empty;
-        while (true) {
-            const e = try s.expr();
-            var item: tree.SortItem = .{ .expr = e };
-            if (s.eatKw("ASC")) {
-                item.dir = .asc;
-            } else if (s.eatKw("DESC")) item.dir = .desc;
-            try l.append(s.a, item);
-            if (!s.eatOp(",")) break;
-        }
-        return l.items;
+        return syntax.sortList(s, expr, .{});
     }
 
     /// A parenthesized list of names.
     pub fn nameList(s: *Parser) Error![]Name {
-        try s.expectOp("(");
+        try s.c.expectOp("(");
         var out: std.ArrayList(Name) = .empty;
         while (true) {
             try out.append(s.a, try s.nameOf(try s.anyName()));
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return out.items;
     }
 
     /// WITH name [(cols)] AS (query), ...: SQL Server's CTEs are recursive
     /// when they name themselves, without a RECURSIVE keyword.
     pub fn withClause(s: *Parser) Error!*tree.With {
-        try s.expectKw("WITH");
+        try s.c.expectKw("WITH");
         var ctes: std.ArrayList(tree.Cte) = .empty;
         while (true) {
             const n = try s.nameOf(try s.name());
             try s.cte_names.append(s.a, n.text);
             var cols: []Name = &.{};
-            if (s.isOp("(")) cols = try s.nameList();
-            try s.expectKw("AS");
-            try s.expectOp("(");
+            if (s.c.isOp("(")) cols = try s.nameList();
+            try s.c.expectKw("AS");
+            try s.c.expectOp("(");
             const q = try s.subSelect();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             try ctes.append(s.a, .{ .name = n, .cols = cols, .select = q });
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         }
         return s.new(tree.With, .{ .recursive = true, .ctes = ctes.items });
     }
@@ -1155,10 +1042,10 @@ pub const Parser = struct {
         while (true) {
             var op: tree.SetOp = undefined;
             var all = false;
-            if (s.eatKw("UNION")) {
+            if (s.c.eatKw("UNION")) {
                 op = .@"union";
-                all = s.eatKw("ALL");
-            } else if (s.eatKw("EXCEPT")) {
+                all = s.c.eatKw("ALL");
+            } else if (s.c.eatKw("EXCEPT")) {
                 op = .except;
             } else break;
             const rhs = try s.intersectTerm();
@@ -1169,7 +1056,7 @@ pub const Parser = struct {
 
     fn intersectTerm(s: *Parser) Error!*tree.Body {
         var lhs = try s.selectTerm();
-        while (s.eatKw("INTERSECT")) {
+        while (s.c.eatKw("INTERSECT")) {
             const rhs = try s.selectTerm();
             lhs = try s.compound(.intersect, false, lhs, rhs);
         }
@@ -1190,9 +1077,9 @@ pub const Parser = struct {
     }
 
     fn selectTerm(s: *Parser) Error!*tree.Body {
-        if (s.eatOp("(")) {
+        if (s.c.eatOp("(")) {
             const inner = try s.subSelect();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             return s.new(tree.Body, .{ .nested = inner });
         }
         return s.new(tree.Body, .{ .core = try s.selectCore() });
@@ -1200,56 +1087,56 @@ pub const Parser = struct {
 
     /// `VALUES (row), (row) ...`.
     pub fn valuesRows(s: *Parser) Error![][]*Expr {
-        try s.expectKw("VALUES");
+        try s.c.expectKw("VALUES");
         var rows: std.ArrayList([]*Expr) = .empty;
         while (true) {
-            try s.expectOp("(");
+            try s.c.expectOp("(");
             const row = try s.exprList();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             try rows.append(s.a, row);
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         }
         return rows.items;
     }
 
     fn selectCore(s: *Parser) Error!*tree.Core {
-        const pos = s.here();
+        const pos = s.c.here();
         const json_mark = s.json_fixes.items.len;
-        try s.expectKw("SELECT");
+        try s.c.expectKw("SELECT");
         var distinct = false;
-        if (s.eatKw("DISTINCT")) {
+        if (s.c.eatKw("DISTINCT")) {
             distinct = true;
-        } else _ = s.eatKw("ALL");
+        } else _ = s.c.eatKw("ALL");
         var top: ?Top = null;
-        if (s.eatKw("TOP")) {
-            const n = if (s.eatOp("(")) blk: {
+        if (s.c.eatKw("TOP")) {
+            const n = if (s.c.eatOp("(")) blk: {
                 const x = try s.expr();
-                try s.expectOp(")");
+                try s.c.expectOp(")");
                 break :blk x;
             } else try s.primary();
-            top = .{ .n = n, .percent = s.eatKw("PERCENT") };
-            if (s.isKw("WITH") and s.peek().isKw("TIES")) return s.fail("xqlite: TOP ... WITH TIES is not supported", .{});
+            top = .{ .n = n, .percent = s.c.eatKw("PERCENT") };
+            if (s.c.isKw("WITH") and s.c.peekAt(1).isKw("TIES")) return s.c.fail(null, "xqlite: TOP ... WITH TIES is not supported", .{});
         }
         const cols = try s.resultColumns();
-        if (s.eatKw("INTO")) {
-            if (s.depth != 1 or s.into != null) return s.syntaxError();
+        if (s.c.eatKw("INTO")) {
+            if (s.depth != 1 or s.into != null) return s.c.syntaxError();
             s.into = try s.qualifiedNameFor(.create);
         }
         var from: []tree.FromItem = &.{};
-        if (s.eatKw("FROM")) from = try s.tableRefs();
-        const where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
+        if (s.c.eatKw("FROM")) from = try s.tableRefs();
+        const where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
         var group: std.ArrayList(*Expr) = .empty;
-        if (s.isKw("GROUP")) {
-            s.advance();
-            try s.expectKw("BY");
-            if (s.isAnyKw(&.{ "ROLLUP", "CUBE", "GROUPING" })) return s.fail("xqlite: GROUP BY {s} is not supported", .{s.tok.text});
+        if (s.c.isKw("GROUP")) {
+            s.c.skip();
+            try s.c.expectKw("BY");
+            if (s.c.isAnyKw(&.{ "ROLLUP", "CUBE", "GROUPING" })) return s.c.fail(null, "xqlite: GROUP BY {s} is not supported", .{s.c.peek().text});
             while (true) {
                 try group.append(s.a, try s.expr());
-                if (!s.eatOp(",")) break;
+                if (!s.c.eatOp(",")) break;
             }
-            if (s.isKw("WITH") and s.peek().isAnyKw(&.{ "ROLLUP", "CUBE" })) return s.fail("xqlite: GROUP BY ... WITH {s} is not supported", .{s.peek().text});
+            if (s.c.isKw("WITH") and s.c.peekAt(1).isAnyKw(&.{ "ROLLUP", "CUBE" })) return s.c.fail(null, "xqlite: GROUP BY ... WITH {s} is not supported", .{s.c.peekAt(1).text});
         }
-        const having: ?*Expr = if (s.eatKw("HAVING")) try s.expr() else null;
+        const having: ?*Expr = if (s.c.eatKw("HAVING")) try s.expr() else null;
         const core = try s.new(tree.Core, .{
             .distinct = distinct,
             .cols = cols,
@@ -1393,7 +1280,7 @@ pub const Parser = struct {
 
     /// Whether the tokens are `name . name . *`.
     fn qualifiedStar(s: *Parser) bool {
-        var copy = s.lx;
+        var copy = s.c.src.lx;
         _ = copy.next(); // .
         const t = copy.next();
         if (t.kind != .ident and t.kind != .quoted_ident) return false;
@@ -1405,42 +1292,42 @@ pub const Parser = struct {
         var l: std.ArrayList(tree.ResultCol) = .empty;
         var assigns: std.ArrayList(Assign) = .empty;
         while (true) {
-            if (s.isOp("*")) {
-                try l.append(s.a, .{ .star = s.here() });
-                s.advance();
-            } else if ((s.tok.kind == .ident or s.tok.kind == .quoted_ident) and s.peek().is(".") and s.peek2().kind != .op and s.qualifiedStar()) {
+            if (s.c.isOp("*")) {
+                try l.append(s.a, .{ .star = s.c.here() });
+                s.c.skip();
+            } else if ((s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident) and s.c.peekAt(1).is(".") and s.c.peekAt(2).kind != .op and s.qualifiedStar()) {
                 // schema.table.*: the table (aliased to its name).
-                s.advance();
-                s.advance();
-                const tbl = try s.nameOf(s.tok);
-                s.advance();
-                s.advance();
-                const star = s.here();
-                s.advance();
+                s.c.skip();
+                s.c.skip();
+                const tbl = try s.nameOf(s.c.peek());
+                s.c.skip();
+                s.c.skip();
+                const star = s.c.here();
+                s.c.skip();
                 try l.append(s.a, .{ .table_star = .{ .names = try s.a.dupe(Name, &.{tbl}), .star_pos = star } });
-            } else if ((s.tok.kind == .ident or s.tok.kind == .quoted_ident) and s.peek().is(".") and s.peek2().is("*")) {
-                const tbl = try s.nameOf(s.tok);
-                s.advance();
-                s.advance();
-                const star = s.here();
-                s.advance();
+            } else if ((s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident) and s.c.peekAt(1).is(".") and s.c.peekAt(2).is("*")) {
+                const tbl = try s.nameOf(s.c.peek());
+                s.c.skip();
+                s.c.skip();
+                const star = s.c.here();
+                s.c.skip();
                 try l.append(s.a, .{ .table_star = .{ .names = try s.a.dupe(Name, &.{tbl}), .star_pos = star } });
-            } else if (s.tok.kind == .variable and isAssignOp(s.peek())) {
+            } else if (s.c.peek().kind == .variable and isAssignOp(s.c.peekAt(1))) {
                 // @x = expr, @x += expr
-                const vt = s.tok;
-                const vpos = s.here();
-                s.advance();
-                const op = s.tok.text;
-                s.advance();
+                const vt = s.c.peek();
+                const vpos = s.c.here();
+                s.c.skip();
+                const op = s.c.peek().text;
+                s.c.skip();
                 var e = try s.expr();
                 if (op.len == 2) e = try s.compoundAssign(op[0], try s.variableRef(vt, vpos), e);
                 try assigns.append(s.a, .{ .name = try varName(s.a, vt.text), .value = e });
                 try l.append(s.a, .{ .expr = .{ .e = e } });
-            } else if ((s.tok.kind == .ident or s.tok.kind == .quoted_ident or s.tok.kind == .string) and !isReserved(s.tok) and s.peek().is("=")) {
+            } else if ((s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident or s.c.peek().kind == .string) and !isReserved(s.c.peek()) and s.c.peekAt(1).is("=")) {
                 // alias = expr
-                const al: Name = if (s.tok.kind == .string) .{ .text = try lexer.stringValue(s.a, s.tok), .pos = s.here() } else try s.nameOf(s.tok);
-                s.advance();
-                s.advance();
+                const al: Name = if (s.c.peek().kind == .string) .{ .text = try lexer.stringValue(s.a, s.c.peek()), .pos = s.c.here() } else try s.nameOf(s.c.peek());
+                s.c.skip();
+                s.c.skip();
                 const e = try s.expr();
                 try l.append(s.a, .{ .expr = .{ .e = e, .alias = al } });
             } else {
@@ -1451,11 +1338,11 @@ pub const Parser = struct {
                 const nm: ?[]const u8 = if (al != null or e.kind == .column or s.depth != 1) null else "";
                 try l.append(s.a, .{ .expr = .{ .e = e, .alias = al, .name = nm } });
             }
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         }
         if (assigns.items.len > 0) {
             if (assigns.items.len != l.items.len or s.depth != 1) {
-                return s.failState(.numbered("42601", 141), "A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", .{});
+                return s.c.failState(null, .numbered("42601", 141), "A SELECT statement that assigns a value to a variable must not be combined with data-retrieval operations.", .{});
             }
             s.assigns = assigns.items;
         }
@@ -1473,27 +1360,27 @@ pub const Parser = struct {
             '&' => s.bin(.bit_and, x, e),
             '|' => s.bin(.bit_or, x, e),
             '^' => s.xor(x, e),
-            else => s.syntaxError(),
+            else => s.c.syntaxError(),
         };
     }
 
     /// `[AS] name` (or a string, for a column alias).
     fn alias(s: *Parser, string_ok: bool) Error!?Name {
-        if (s.eatKw("AS")) {
-            if (string_ok and s.tok.kind == .string) return try s.stringAlias();
+        if (s.c.eatKw("AS")) {
+            if (string_ok and s.c.peek().kind == .string) return try s.stringAlias();
             return try s.nameOf(try s.anyName());
         }
         if (s.isName()) {
-            const t = s.tok;
-            s.advance();
+            const t = s.c.peek();
+            s.c.skip();
             return try s.nameOf(t);
         }
-        if (string_ok and s.tok.kind == .string) return try s.stringAlias();
+        if (string_ok and s.c.peek().kind == .string) return try s.stringAlias();
         return null;
     }
 
     fn stringAlias(s: *Parser) Error!Name {
-        const pos = s.here();
+        const pos = s.c.here();
         return .{ .text = try s.stringLiteral(), .pos = pos };
     }
 
@@ -1502,58 +1389,16 @@ pub const Parser = struct {
     /// The inside of OVER ( ... ).
     fn windowSpec(s: *Parser) Error!*tree.WindowSpec {
         var w: tree.WindowSpec = .{};
-        if (s.eatKw("PARTITION")) {
-            try s.expectKw("BY");
-            w.partition = try s.exprList();
-        }
-        if (s.isKw("ORDER")) {
-            s.advance();
-            try s.expectKw("BY");
-            w.order_by = try s.sortList();
-        }
-        w.frame = try s.frame();
+        try syntax.windowClauses(s, &w, additive, .{ .exclude = false });
         return s.new(tree.WindowSpec, w);
-    }
-
-    fn frame(s: *Parser) Error!?tree.Frame {
-        var f: tree.Frame = undefined;
-        if (s.eatKw("ROWS")) {
-            f.unit = .rows;
-        } else if (s.eatKw("RANGE")) {
-            f.unit = .range;
-        } else return null;
-        f.end = null;
-        if (s.eatKw("BETWEEN")) {
-            f.start = try s.frameBound();
-            try s.expectKw("AND");
-            f.end = try s.frameBound();
-        } else f.start = try s.frameBound();
-        f.exclude = .none;
-        return f;
-    }
-
-    fn frameBound(s: *Parser) Error!tree.Bound {
-        if (s.eatKw("UNBOUNDED")) {
-            if (s.eatKw("PRECEDING")) return .{ .kind = .unbounded_preceding };
-            if (s.eatKw("FOLLOWING")) return .{ .kind = .unbounded_following };
-            return s.syntaxError();
-        }
-        if (s.eatKw("CURRENT")) {
-            try s.expectKw("ROW");
-            return .{ .kind = .current_row };
-        }
-        const e = try s.additive();
-        if (s.eatKw("PRECEDING")) return .{ .kind = .preceding, .expr = e };
-        if (s.eatKw("FOLLOWING")) return .{ .kind = .following, .expr = e };
-        return s.syntaxError();
     }
 
     /// `OVER (spec)` after a function call.
     pub fn overClause(s: *Parser) Error!?*tree.WindowSpec {
-        if (!s.eatKw("OVER")) return null;
-        try s.expectOp("(");
+        if (!s.c.eatKw("OVER")) return null;
+        try s.c.expectOp("(");
         const w = try s.windowSpec();
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         return w;
     }
 
@@ -1564,14 +1409,14 @@ pub const Parser = struct {
         var list: std.ArrayList(tree.FromItem) = .empty;
         try list.append(s.a, try s.tableSource());
         while (true) {
-            if ((s.isKw("CROSS") or s.isKw("OUTER")) and s.peek().isKw("APPLY")) {
+            if ((s.c.isKw("CROSS") or s.c.isKw("OUTER")) and s.c.peekAt(1).isKw("APPLY")) {
                 // CROSS/OUTER APPLY of a table-valued function (OPENJSON):
                 // a join, whose arguments may name the tables before it.
-                const outer = s.isKw("OUTER");
-                s.advance();
-                s.advance();
+                const outer = s.c.isKw("OUTER");
+                s.c.skip();
+                s.c.skip();
                 var item = try s.tableSource();
-                if (item.source != .func) return s.fail("xqlite: {s} APPLY is supported only with OPENJSON and table-valued functions", .{if (outer) "OUTER" else "CROSS"});
+                if (item.source != .func) return s.c.fail(null, "xqlite: {s} APPLY is supported only with OPENJSON and table-valued functions", .{if (outer) "OUTER" else "CROSS"});
                 item.join = if (outer) .left else .inner;
                 try list.append(s.a, item);
                 continue;
@@ -1580,7 +1425,7 @@ pub const Parser = struct {
             var item = try s.tableSource();
             item.join = j;
             if (j != .comma and j != .cross) {
-                try s.expectKw("ON");
+                try s.c.expectKw("ON");
                 item.on = try s.expr();
             }
             try list.append(s.a, item);
@@ -1589,25 +1434,25 @@ pub const Parser = struct {
     }
 
     fn joinOp(s: *Parser) Error!?tree.JoinKind {
-        if (s.eatOp(",")) return .comma;
-        if (s.eatKw("CROSS")) {
-            try s.expectKw("JOIN");
+        if (s.c.eatOp(",")) return .comma;
+        if (s.c.eatKw("CROSS")) {
+            try s.c.expectKw("JOIN");
             return .cross;
         }
         var j: tree.JoinKind = .inner;
-        if (s.eatKw("INNER")) {} else if (s.eatKw("LEFT")) {
+        if (s.c.eatKw("INNER")) {} else if (s.c.eatKw("LEFT")) {
             j = .left;
-            _ = s.eatKw("OUTER");
-        } else if (s.eatKw("RIGHT")) {
+            _ = s.c.eatKw("OUTER");
+        } else if (s.c.eatKw("RIGHT")) {
             j = .right;
-            _ = s.eatKw("OUTER");
-        } else if (s.eatKw("FULL")) {
+            _ = s.c.eatKw("OUTER");
+        } else if (s.c.eatKw("FULL")) {
             j = .full;
-            _ = s.eatKw("OUTER");
-        } else if (!s.isKw("JOIN")) return null;
+            _ = s.c.eatKw("OUTER");
+        } else if (!s.c.isKw("JOIN")) return null;
         // Join hints.
-        _ = s.eatKw("LOOP") or s.eatKw("HASH") or s.eatKw("MERGE") or s.eatKw("REMOTE");
-        try s.expectKw("JOIN");
+        _ = s.c.eatKw("LOOP") or s.c.eatKw("HASH") or s.c.eatKw("MERGE") or s.c.eatKw("REMOTE");
+        try s.c.expectKw("JOIN");
         return j;
     }
 
@@ -1616,7 +1461,7 @@ pub const Parser = struct {
     fn aliasOf(s: *Parser, cols: bool) Error!?tree.Alias {
         const n = (try s.alias(false)) orelse return null;
         var al: tree.Alias = .{ .name = n };
-        if (cols and s.isOp("(")) al.cols = try s.nameList();
+        if (cols and s.c.isOp("(")) al.cols = try s.nameList();
         return al;
     }
 
@@ -1626,38 +1471,38 @@ pub const Parser = struct {
 
     /// WITH (NOLOCK, ...) and the old (NOLOCK): ignored.
     pub fn tableHints(s: *Parser) Error!void {
-        if ((s.isKw("WITH") and s.peek().is("(")) or (s.isOp("(") and isHint(s.peek()))) {
-            if (s.isKw("WITH")) s.advance();
+        if ((s.c.isKw("WITH") and s.c.peekAt(1).is("(")) or (s.c.isOp("(") and isHint(s.c.peekAt(1)))) {
+            if (s.c.isKw("WITH")) s.c.skip();
             try s.skipParens();
         }
     }
 
     pub fn tableSource(s: *Parser) Error!tree.FromItem {
         var item: tree.FromItem = .{ .source = undefined };
-        if (s.isOp("(")) {
-            const n = s.peek();
+        if (s.c.isOp("(")) {
+            const n = s.c.peekAt(1);
             if (n.isAnyKw(&.{ "SELECT", "WITH", "VALUES" }) or n.is("(")) {
-                s.advance();
-                if (s.isKw("VALUES")) {
-                    const pos = s.here();
+                s.c.skip();
+                if (s.c.isKw("VALUES")) {
+                    const pos = s.c.here();
                     const rows = try s.valuesRows();
                     item.source = .{ .subquery = try s.new(tree.Select, .{ .body = try s.new(tree.Body, .{ .values = rows }), .pos = pos }) };
                 } else {
                     item.source = .{ .subquery = try s.subSelect() };
                 }
-                try s.expectOp(")");
+                try s.c.expectOp(")");
                 item.alias = try s.aliasOf(true);
                 return item;
             }
-            s.advance();
+            s.c.skip();
             const inner = try s.tableRefs();
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             item.source = .{ .nested = inner };
             item.alias = try s.aliasOf(false);
             return item;
         }
-        if (s.tok.kind == .variable) return s.fail("xqlite: table variables are not supported", .{});
-        if (s.tok.kind == .ident and s.tok.isKw("OPENJSON") and s.peek().is("(")) {
+        if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
+        if (s.c.peek().kind == .ident and s.c.peek().isKw("OPENJSON") and s.c.peekAt(1).is("(")) {
             item.source = .{ .func = try json_sql.openJson(s) };
             item.alias = try s.aliasOf(false);
             return item;
@@ -1665,16 +1510,16 @@ pub const Parser = struct {
         const q = try s.qualifiedNameRaw();
         if (q.special) |sp| {
             const sub = (try @import("catalog_views.zig").select(s, sp, q.q.name.text)) orelse
-                return s.failState(.numbered("42P01", 208), "Invalid object name '{s}.{s}'.", .{ sp, q.q.name.text });
+                return s.c.failState(null, .numbered("42P01", 208), "Invalid object name '{s}.{s}'.", .{ sp, q.q.name.text });
             item.source = .{ .subquery = sub };
             item.alias = (try s.aliasOf(false)) orelse .{ .name = q.q.name };
             return item;
         }
-        if (s.isOp("(") and !isHint(s.peek())) {
-            s.advance();
+        if (s.c.isOp("(") and !isHint(s.c.peekAt(1))) {
+            s.c.skip();
             // A table-valued function (SQLite's json_each(), pragma_*()).
-            const args: []*Expr = if (s.isOp(")")) &.{} else try s.exprList();
-            try s.expectOp(")");
+            const args: []*Expr = if (s.c.isOp(")")) &.{} else try s.exprList();
+            try s.c.expectOp(")");
             item.source = .{ .func = try s.new(tree.Func, .{ .name = q.q.name, .args = args }) };
         } else item.source = .{ .table = q.q };
         try s.tableHints();
@@ -1691,13 +1536,13 @@ pub const Parser = struct {
     /// qualifiedName(), and whether the schema is INFORMATION_SCHEMA or
     /// sys (catalog views).
     pub fn qualifiedNameRaw(s: *Parser) Error!RawName {
-        const t = s.tok;
-        if ((t.kind == .ident or t.kind == .quoted_ident) and s.peek().is(".")) {
+        const t = s.c.peek();
+        if ((t.kind == .ident or t.kind == .quoted_ident) and s.c.peekAt(1).is(".")) {
             const first = try s.nameText(t);
             const specials = [_][]const u8{ "INFORMATION_SCHEMA", "sys" };
             for (specials) |sp| if (std.ascii.eqlIgnoreCase(first, sp)) {
-                s.advance();
-                s.advance();
+                s.c.skip();
+                s.c.skip();
                 const n = try s.nameOf(try s.anyName());
                 return .{ .q = .{ .name = n }, .special = sp };
             };

@@ -43,12 +43,12 @@ pub const Error = parser.Error || lower.Error;
 
 /// Compile the statement if it is one of this file's; false if not.
 pub fn statement(ps: *Parser) Error!bool {
-    const t = ps.peek();
-    if (t.isKw("create") and ps.isKwAt(1, "schema")) {
+    const t = ps.c.peek();
+    if (t.isKw("create") and ps.c.isKwAt(1, "schema")) {
         try createSchema(ps);
         return true;
     }
-    if (t.isKw("drop") and ps.isKwAt(1, "schema")) {
+    if (t.isKw("drop") and ps.c.isKwAt(1, "schema")) {
         try dropSchema(ps);
         return true;
     }
@@ -60,7 +60,7 @@ pub fn statement(ps: *Parser) Error!bool {
         try show(ps);
         return true;
     }
-    if (t.isKw("comment") and ps.isKwAt(1, "on")) {
+    if (t.isKw("comment") and ps.c.isKwAt(1, "on")) {
         try comment(ps);
         return true;
     }
@@ -74,46 +74,46 @@ pub fn statement(ps: *Parser) Error!bool {
 /// (pgcatalog.comment_key) that pg_description, obj_description() and
 /// col_description() read.
 fn comment(ps: *Parser) Error!void {
-    _ = ps.advance(); // COMMENT
-    _ = ps.advance(); // ON
-    const kind = ps.peek();
+    ps.c.skip(); // COMMENT
+    ps.c.skip(); // ON
+    const kind = ps.c.peek();
     const is_column = kind.isKw("column");
     if (!(is_column or kind.isKw("table") or kind.isKw("view"))) {
-        return ps.fail(kind.start, "xqlite: COMMENT ON {s} is not supported", .{kind.text});
+        return ps.c.fail(kind.start, "xqlite: COMMENT ON {s} is not supported", .{kind.text});
     }
-    _ = ps.advance();
+    ps.c.skip();
     var names: std.ArrayList(Name) = .empty;
     try names.append(ps.arena, try ps.colId());
-    while (ps.eat(.dot)) try names.append(ps.arena, try ps.anyName());
+    while (ps.c.eat(.dot)) try names.append(ps.arena, try ps.anyName());
     const n = names.items;
     var col: []const u8 = "";
     var q: parser.QName = undefined;
     if (is_column) {
-        if (n.len < 2 or n.len > 3) return ps.syntaxError();
+        if (n.len < 2 or n.len > 3) return ps.c.syntaxError();
         col = n[n.len - 1].text;
         q = if (n.len == 3) .{ .schema = n[0], .name = n[1] } else .{ .name = n[0] };
     } else {
-        if (n.len > 2) return ps.syntaxError();
+        if (n.len > 2) return ps.c.syntaxError();
         q = if (n.len == 2) .{ .schema = n[0], .name = n[1] } else .{ .name = n[0] };
     }
-    try ps.expectKw("is");
+    try ps.c.expectKw("is");
     var value: ?[]const u8 = null;
-    const v = ps.peek();
+    const v = ps.c.peek();
     if (v.kind == .string) {
         value = v.text;
-        _ = ps.advance();
-    } else if (!ps.eatKw("null")) return ps.syntaxError();
-    if (ps.peek().kind != .eof) return ps.syntaxError();
+        ps.c.skip();
+    } else if (!ps.c.eatKw("null")) return ps.c.syntaxError();
+    if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
     const p = ps.p.?;
     try ps.readSchema();
     const r = try ps.lookup(q, .relation);
     const db_name: ?[]const u8 = if (r.q.schema) |sc| sc.text else null;
     const tab = @import("../../sql/build.zig").findTable(p.db, r.q.name.text, db_name) orelse
-        return ps.failState(q.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{q.name.text});
+        return ps.c.failState(q.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{q.name.text});
     if (is_column) {
         const found = for (tab.cols) |*c| {
             if (std.ascii.eqlIgnoreCase(c.name(), col)) break c.name();
-        } else return ps.failState(n[n.len - 1].pos, .of("42703"), "column \"{s}\" of relation \"{s}\" does not exist", .{ col, q.name.text });
+        } else return ps.c.failState(n[n.len - 1].pos, .of("42703"), "column \"{s}\" of relation \"{s}\" does not exist", .{ col, q.name.text });
         col = found;
     }
     if (value) |z| if (z.len == 0) {
@@ -132,86 +132,82 @@ fn isSystemSchema(name: []const u8) bool {
 
 /// A role: the only one is current_user's.
 fn role(ps: *Parser) parser.Error![]const u8 {
-    const t = ps.peek();
+    const t = ps.c.peek();
     if (t.isAnyKw(&.{ "current_user", "current_role", "session_user" })) {
-        _ = ps.advance();
+        ps.c.skip();
         return state.user;
     }
     const n = try ps.anyName();
-    if (!eql(n.text, state.user)) return ps.failState(n.pos, .of("42704"), "role \"{s}\" does not exist", .{n.text});
+    if (!eql(n.text, state.user)) return ps.c.failState(n.pos, .of("42704"), "role \"{s}\" does not exist", .{n.text});
     return n.text;
 }
 
 fn createSchema(ps: *Parser) Error!void {
-    _ = ps.advance(); // CREATE
-    _ = ps.advance(); // SCHEMA
-    const if_not_exists = try ps.ifNotExists();
+    ps.c.skip(); // CREATE
+    ps.c.skip(); // SCHEMA
+    const if_not_exists = try ps.c.ifNotExists();
     var name: Name = undefined;
     var owner: []const u8 = state.user;
-    if (ps.isKw("authorization")) {
-        _ = ps.advance();
-        const at = ps.peek().start;
+    if (ps.c.isKw("authorization")) {
+        ps.c.skip();
+        const at = ps.c.peek().start;
         owner = try role(ps);
         name = .{ .text = owner, .pos = at };
     } else {
         name = try ps.colId();
-        if (ps.isKw("authorization")) {
-            _ = ps.advance();
+        if (ps.c.isKw("authorization")) {
+            ps.c.skip();
             owner = try role(ps);
         }
     }
-    if (ps.peek().kind != .eof) {
-        if (ps.isKw("create") or ps.isKw("grant")) {
-            if (if_not_exists) return ps.failState(ps.peek().start, .of("0A000"), "CREATE SCHEMA IF NOT EXISTS cannot include schema elements", .{});
-            return ps.fail(ps.peek().start, "xqlite: CREATE SCHEMA with schema elements is not supported", .{});
+    if (ps.c.peek().kind != .eof) {
+        if (ps.c.isKw("create") or ps.c.isKw("grant")) {
+            if (if_not_exists) return ps.c.failState(ps.c.peek().start, .of("0A000"), "CREATE SCHEMA IF NOT EXISTS cannot include schema elements", .{});
+            return ps.c.fail(ps.c.peek().start, "xqlite: CREATE SCHEMA with schema elements is not supported", .{});
         }
-        return ps.syntaxError();
+        return ps.c.syntaxError();
     }
     const n = name.text;
     if (std.mem.startsWith(u8, n, "pg_")) return ps.failFields(name.pos, .of("42939"), .{ .message = try std.fmt.allocPrint(ps.arena, "unacceptable schema name \"{s}\"", .{n}), .detail = "The prefix \"pg_\" is reserved for system schemas." });
-    if (!nsp.validName(n)) return ps.fail(name.pos, "xqlite: a schema name cannot contain \".\"", .{});
+    if (!nsp.validName(n)) return ps.c.fail(name.pos, "xqlite: a schema name cannot contain \".\"", .{});
     const p = ps.p.?;
     try ps.readSchema();
     const taken = isSystemSchema(n) or nsp.find(try ps.registered(), n) != null or
         @import("../../sql/build.zig").findDbName(p.db, n) != null;
     if (taken) {
         if (if_not_exists) return ddl.notice(p, "42P06", "schema \"{s}\" already exists, skipping", .{n});
-        return ps.failState(name.pos, .of("42P06"), "schema \"{s}\" already exists", .{n});
+        return ps.c.failState(name.pos, .of("42P06"), "schema \"{s}\" already exists", .{n});
     }
     nsp.codeCreate(p, n, owner);
     if (p.n_err > 0) return error.Failed;
 }
 
 fn dropSchema(ps: *Parser) Error!void {
-    _ = ps.advance(); // DROP
-    _ = ps.advance(); // SCHEMA
-    const if_exists = try ps.ifExists();
-    var names: std.ArrayList(Name) = .empty;
-    while (true) {
-        try names.append(ps.arena, try ps.colId());
-        if (!ps.eat(.comma)) break;
-    }
+    ps.c.skip(); // DROP
+    ps.c.skip(); // SCHEMA
+    const if_exists = try ps.c.ifExists();
+    const names = try ps.nameList();
     var cascade = false;
-    if (ps.eatKw("cascade")) cascade = true else _ = ps.eatKw("restrict");
-    if (ps.peek().kind != .eof) return ps.syntaxError();
+    if (ps.c.eatKw("cascade")) cascade = true else _ = ps.c.eatKw("restrict");
+    if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
     const p = ps.p.?;
     try ps.readSchema();
     const schemas = try ps.registered();
     var drops: std.ArrayList(struct { name: []const u8, objs: []const nsp.Object }) = .empty;
-    for (names.items) |n| {
+    for (names) |n| {
         const s = nsp.find(schemas, n.text) orelse {
             if (eql(n.text, "pg_catalog") or eql(n.text, "information_schema") or eql(n.text, "pg_toast")) {
-                return ps.failState(n.pos, .of("2BP01"), "cannot drop schema {s} because it is required by the database system", .{n.text});
+                return ps.c.failState(n.pos, .of("2BP01"), "cannot drop schema {s} because it is required by the database system", .{n.text});
             }
-            if (eql(n.text, "public")) return ps.fail(n.pos, "xqlite: schema public cannot be dropped", .{});
+            if (eql(n.text, "public")) return ps.c.fail(n.pos, "xqlite: schema public cannot be dropped", .{});
             if (@import("../../sql/build.zig").findDbName(p.db, n.text) != null) {
-                return ps.fail(n.pos, "xqlite: schema \"{s}\" is an attached database (use DETACH)", .{n.text});
+                return ps.c.fail(n.pos, "xqlite: schema \"{s}\" is an attached database (use DETACH)", .{n.text});
             }
             if (if_exists) {
                 ddl.notice(p, "00000", "schema \"{s}\" does not exist, skipping", .{n.text});
                 continue;
             }
-            return ps.failState(n.pos, .of("3F000"), "schema \"{s}\" does not exist", .{n.text});
+            return ps.c.failState(n.pos, .of("3F000"), "schema \"{s}\" does not exist", .{n.text});
         };
         const objs = nsp.objects(p.db, ps.arena, s.name) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
@@ -225,7 +221,7 @@ fn dropSchema(ps: *Parser) Error!void {
                 if (i > 0) try detail.append(ps.arena, '\n');
                 try detail.print(ps.arena, "{s} {s}.{s} depends on schema {s}", .{ o.kind.word(), s.name, o.bare(), s.name });
             }
-            const msg = if (names.items.len > 1) "cannot drop desired object(s) because other objects depend on them" else try std.fmt.allocPrint(ps.arena, "cannot drop schema {s} because other objects depend on it", .{s.name});
+            const msg = if (names.len > 1) "cannot drop desired object(s) because other objects depend on them" else try std.fmt.allocPrint(ps.arena, "cannot drop schema {s} because other objects depend on it", .{s.name});
             return ps.failFields(n.pos, .of("2BP01"), .{ .message = msg, .detail = detail.items, .hint = "Use DROP ... CASCADE to drop the dependent objects too." });
         }
         try drops.append(ps.arena, .{ .name = s.name, .objs = objs });
@@ -435,71 +431,71 @@ fn literal(out: *std.ArrayList(u8), a: std.mem.Allocator, z: []const u8) !void {
 /// row.
 fn set(ps: *Parser) Error!void {
     const a = ps.arena;
-    const reset = ps.advance().isKw("reset");
+    const reset = ps.c.advance().isKw("reset");
     var name: []const u8 = undefined;
     var value: ?[]const u8 = null;
     if (reset) {
-        if (ps.eatKw("all")) {
-            if (ps.peek().kind != .eof) return ps.syntaxError();
+        if (ps.c.eatKw("all")) {
+            if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
             return lowerPg(ps, "SELECT 1 WHERE set_config('all', NULL, false) IS NOT NULL");
         }
         name = (try ps.anyName()).text;
-        if (eql(name, "time") and ps.eatKw("zone")) name = "timezone";
+        if (eql(name, "time") and ps.c.eatKw("zone")) name = "timezone";
     } else {
-        if (ps.isKw("local")) return ps.fail(ps.peek().start, "xqlite: SET LOCAL is not supported", .{});
-        _ = ps.eatKw("session");
-        if (ps.isKw("transaction") or (ps.isKw("session") and ps.isKwAt(1, "characteristics"))) {
+        if (ps.c.isKw("local")) return ps.c.fail(ps.c.peek().start, "xqlite: SET LOCAL is not supported", .{});
+        _ = ps.c.eatKw("session");
+        if (ps.c.isKw("transaction") or (ps.c.isKw("session") and ps.c.isKwAt(1, "characteristics"))) {
             // Isolation levels: parsed, nothing to do (SQLite is serializable).
-            while (ps.peek().kind != .eof) _ = ps.advance();
+            while (ps.c.peek().kind != .eof) ps.c.skip();
             return emptyStatement(ps.p.?);
         }
-        if (ps.eatKw("schema")) {
-            const t = ps.peek();
-            if (t.kind != .string) return ps.syntaxError();
-            _ = ps.advance();
+        if (ps.c.eatKw("schema")) {
+            const t = ps.c.peek();
+            if (t.kind != .string) return ps.c.syntaxError();
+            ps.c.skip();
             name = "search_path";
             var out: std.ArrayList(u8) = .empty;
             try quoteIdent(&out, a, t.text);
             value = out.items;
         } else {
             name = (try ps.anyName()).text;
-            if (eql(name, "time") and ps.eatKw("zone")) {
+            if (eql(name, "time") and ps.c.eatKw("zone")) {
                 name = "timezone";
-            } else if (!ps.eatKw("to") and !ps.eatOp("=")) return ps.syntaxError();
-            if (eql(name, "timezone") and ps.isKw("interval") and ps.peekAt(1).kind == .string) {
+            } else if (!ps.c.eatKw("to") and !ps.c.eatOp("=")) return ps.c.syntaxError();
+            if (eql(name, "timezone") and ps.c.isKw("interval") and ps.c.peekAt(1).kind == .string) {
                 // SET TIME ZONE INTERVAL '+00:00' HOUR TO MINUTE: the offset.
-                _ = ps.advance();
-                value = ps.advance().text;
-                while (ps.peek().kind == .ident) _ = ps.advance();
-            } else if (eql(name, "timezone") and ps.eatKw("local")) {} else if (ps.eatKw("default")) {} else {
+                ps.c.skip();
+                value = ps.c.advance().text;
+                while (ps.c.peek().kind == .ident) ps.c.skip();
+            } else if (eql(name, "timezone") and ps.c.eatKw("local")) {} else if (ps.c.eatKw("default")) {} else {
                 const p_ = findParam(name);
                 var out: std.ArrayList(u8) = .empty;
                 var n: usize = 0;
                 while (true) : (n += 1) {
-                    const t = ps.peek();
+                    const t = ps.c.peek();
                     if (n > 0) try out.appendSlice(a, ", ");
                     switch (t.kind) {
                         .ident, .qident => if (p_ != null and p_.?.list) try quoteIdent(&out, a, t.text) else try out.appendSlice(a, t.text),
                         .string => if (p_ != null and p_.?.list) try quoteIdent(&out, a, t.text) else try out.appendSlice(a, t.text),
                         .integer, .float => try out.appendSlice(a, t.text),
-                        .op => if (eql(t.text, "-") and (ps.peekAt(1).kind == .integer or ps.peekAt(1).kind == .float)) {
-                            _ = ps.advance();
+                        .op => if (eql(t.text, "-") and (ps.c.peekAt(1).kind == .integer or ps.c.peekAt(1).kind == .float)) {
+                            ps.c.skip();
                             try out.append(a, '-');
-                            try out.appendSlice(a, ps.peek().text);
-                        } else return ps.syntaxError(),
-                        else => return ps.syntaxError(),
+                            try out.appendSlice(a, ps.c.peek().text);
+                        } else return ps.c.syntaxError(),
+                        else => return ps.c.syntaxError(),
                     }
-                    _ = ps.advance();
-                    if (!ps.eat(.comma)) break;
+                    ps.c.skip();
+                    if (!ps.c.eat(.comma)) break;
                 }
-                if (n > 0 and !(p_ != null and p_.?.list)) return ps.failState(ps.peek().start, .of("22023"), "SET {s} takes only one argument", .{name});
+                if (n > 0 and !(p_ != null and p_.?.list)) return ps.c.failState(ps.c.peek().start, .of("22023"), "SET {s} takes only one argument", .{name});
                 value = out.items;
             }
         }
     }
-    if (ps.peek().kind != .eof) return ps.syntaxError();
-    const prm = findParam(name) orelse return ps.failState(0, .of("42704"), "unrecognized configuration parameter \"{s}\"", .{name});
-    if (prm.read_only) return ps.failState(0, .of("55P02"), "parameter \"{s}\" cannot be changed", .{prm.name});
+    if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
+    const prm = findParam(name) orelse return ps.c.failState(0, .of("42704"), "unrecognized configuration parameter \"{s}\"", .{name});
+    if (prm.read_only) return ps.c.failState(0, .of("55P02"), "parameter \"{s}\" cannot be changed", .{prm.name});
     var q: std.ArrayList(u8) = .empty;
     try q.appendSlice(a, "SELECT 1 WHERE set_config(");
     try literal(&q, a, prm.name);
@@ -514,17 +510,17 @@ fn set(ps: *Parser) Error!void {
 /// the parameter; SHOW ALL: pg_settings' names, values and descriptions.
 fn show(ps: *Parser) Error!void {
     const a = ps.arena;
-    _ = ps.advance(); // SHOW
+    ps.c.skip(); // SHOW
     var name = (try ps.anyName()).text;
-    if (eql(name, "time") and ps.eatKw("zone")) name = "timezone";
-    if (eql(name, "transaction") and ps.eatKw("isolation")) {
-        try ps.expectKw("level");
+    if (eql(name, "time") and ps.c.eatKw("zone")) name = "timezone";
+    if (eql(name, "transaction") and ps.c.eatKw("isolation")) {
+        try ps.c.expectKw("level");
         name = "transaction_isolation";
     }
-    if (eql(name, "session") and ps.eatKw("authorization")) name = "session_authorization";
-    if (ps.peek().kind != .eof) return ps.syntaxError();
+    if (eql(name, "session") and ps.c.eatKw("authorization")) name = "session_authorization";
+    if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
     if (eql(name, "all")) return lowerPg(ps, "SELECT name, setting, short_desc AS description FROM pg_catalog.pg_settings ORDER BY 1");
-    const prm = findParam(name) orelse return ps.failState(0, .of("42704"), "unrecognized configuration parameter \"{s}\"", .{name});
+    const prm = findParam(name) orelse return ps.c.failState(0, .of("42704"), "unrecognized configuration parameter \"{s}\"", .{name});
     var q: std.ArrayList(u8) = .empty;
     try q.appendSlice(a, "SELECT current_setting(");
     try literal(&q, a, prm.name);
@@ -542,7 +538,7 @@ fn lowerPg(ps: *Parser, text: [:0]const u8) Error!void {
     sub.p = ps.p;
     const stmt = sub.statement() catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
-        error.ParseFailed => return ps.failState(0, sub.err_state, "{s}", .{sub.err_msg}),
+        error.ParseFailed => return ps.c.failState(0, sub.c.diag.state, "{s}", .{sub.c.diag.msg}),
     };
     var l: lower.Lowerer = .init(ps.p.?, text);
     try l.statement(stmt);

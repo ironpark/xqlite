@@ -44,6 +44,7 @@
         // The building blocks of the dialects' SQL lexers, with no
         // dependency but std.
         .sqllex = .{ .path = "pkg/sqllex" },
+        .sqlparse = .{ .path = "pkg/sqlparse" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -99,6 +100,7 @@
         "pkg/base",
         "pkg/uuid",
         "pkg/sqllex",
+        "pkg/sqlparse",
         "LICENSE",
         "README.md",
     },

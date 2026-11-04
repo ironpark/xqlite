@@ -33,44 +33,44 @@ const ColMeta = Parser.ColMeta;
 
 /// `TOP (n) [PERCENT]` of INSERT/UPDATE/DELETE/MERGE.
 fn dmlTop(s: *Parser) Error!?*Expr {
-    if (!s.eatKw("TOP")) return null;
-    try s.expectOp("(");
+    if (!s.c.eatKw("TOP")) return null;
+    try s.c.expectOp("(");
     const n = try s.expr();
-    try s.expectOp(")");
-    if (s.eatKw("PERCENT")) return s.fail("xqlite: TOP ... PERCENT in INSERT, UPDATE or DELETE is not supported", .{});
+    try s.c.expectOp(")");
+    if (s.c.eatKw("PERCENT")) return s.c.fail(null, "xqlite: TOP ... PERCENT in INSERT, UPDATE or DELETE is not supported", .{});
     return n;
 }
 
 /// The OUTPUT clause: INSERTED.* and DELETED.* are the target's columns.
 fn output(s: *Parser, kind: parser.Output) Error![]tree.ResultCol {
-    if (!s.eatKw("OUTPUT")) return &.{};
+    if (!s.c.eatKw("OUTPUT")) return &.{};
     const saved = s.output;
     s.output = kind;
     defer s.output = saved;
     var l: std.ArrayList(tree.ResultCol) = .empty;
     while (true) {
-        if ((s.isKw("INSERTED") or s.isKw("DELETED")) and s.peek().is(".") and s.peek2().is("*")) {
-            const ins = s.isKw("INSERTED");
-            if ((ins and kind == .delete) or (!ins and kind == .insert)) return s.failState(.numbered("42P01", 4104), "The multi-part identifier \"{s}.*\" could not be bound.", .{s.tok.text});
-            if (!ins and kind == .update) return s.fail("xqlite: OUTPUT DELETED in UPDATE is not supported (RETURNING sees the new row)", .{});
-            s.advance();
-            s.advance();
-            try l.append(s.a, .{ .star = s.here() });
-            s.advance();
-        } else if (s.isKw("$ACTION")) {
-            return s.fail("xqlite: OUTPUT $action is not supported", .{});
+        if ((s.c.isKw("INSERTED") or s.c.isKw("DELETED")) and s.c.peekAt(1).is(".") and s.c.peekAt(2).is("*")) {
+            const ins = s.c.isKw("INSERTED");
+            if ((ins and kind == .delete) or (!ins and kind == .insert)) return s.c.failState(null, .numbered("42P01", 4104), "The multi-part identifier \"{s}.*\" could not be bound.", .{s.c.peek().text});
+            if (!ins and kind == .update) return s.c.fail(null, "xqlite: OUTPUT DELETED in UPDATE is not supported (RETURNING sees the new row)", .{});
+            s.c.skip();
+            s.c.skip();
+            try l.append(s.a, .{ .star = s.c.here() });
+            s.c.skip();
+        } else if (s.c.isKw("$ACTION")) {
+            return s.c.fail(null, "xqlite: OUTPUT $action is not supported", .{});
         } else {
             const e = try s.expr();
             var al: ?Name = null;
-            if (s.eatKw("AS")) {
+            if (s.c.eatKw("AS")) {
                 al = try s.nameOf(try s.anyName());
-            } else if (s.isName() and !s.isKw("INTO")) al = try s.nameOf(try s.name());
+            } else if (s.isName() and !s.c.isKw("INTO")) al = try s.nameOf(try s.name());
             const nm: ?[]const u8 = if (al != null or e.kind == .column) null else "";
             try l.append(s.a, .{ .expr = .{ .e = e, .alias = al, .name = nm } });
         }
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
-    if (s.isKw("INTO")) return s.fail("xqlite: OUTPUT ... INTO is not supported", .{});
+    if (s.c.isKw("INTO")) return s.c.fail(null, "xqlite: OUTPUT ... INTO is not supported", .{});
     return l.items;
 }
 
@@ -139,12 +139,12 @@ fn planColumns(s: *Parser, t: *const Target, written: ?[]Name) Error!ColumnPlan 
             try names.append(s.a, n);
             try cols.append(s.a, c);
         }
-        if (has_id and !on) return s.failState(.numbered("428C9", 544), "Cannot insert explicit value for identity column in table '{s}' when IDENTITY_INSERT is set to OFF.", .{t.bare});
-        if (id != null and on and !has_id) return s.failState(.numbered("428C9", 545), "Explicit value must be specified for identity column in table '{s}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", .{t.bare});
+        if (has_id and !on) return s.c.failState(null, .numbered("428C9", 544), "Cannot insert explicit value for identity column in table '{s}' when IDENTITY_INSERT is set to OFF.", .{t.bare});
+        if (id != null and on and !has_id) return s.c.failState(null, .numbered("428C9", 545), "Explicit value must be specified for identity column in table '{s}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", .{t.bare});
         return .{ .names = names.items, .cols = cols.items, .overriding = has_id };
     }
     if (t.tab == null) return .{ .names = &.{}, .cols = &.{}, .overriding = false };
-    if (id != null and on) return s.failState(.numbered("428C9", 8101), "An explicit value for the identity column in table '{s}' can only be specified when a column list is used and IDENTITY_INSERT is ON.", .{t.bare});
+    if (id != null and on) return s.c.failState(null, .numbered("428C9", 8101), "An explicit value for the identity column in table '{s}' can only be specified when a column list is used and IDENTITY_INSERT is ON.", .{t.bare});
     for (try insertColumns(s, t)) |c| {
         try names.append(s.a, .{ .text = c.name });
         try cols.append(s.a, c);
@@ -157,29 +157,29 @@ fn planColumns(s: *Parser, t: *const Target, written: ?[]Name) Error!ColumnPlan 
 /// [WITH ...] INSERT [TOP (n)] [INTO] t [(cols)] [OUTPUT ...]
 /// {VALUES ... | query | DEFAULT VALUES}.
 pub fn insert(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
-    const pos = s.here();
-    try s.expectKw("INSERT");
+    const pos = s.c.here();
+    try s.c.expectKw("INSERT");
     const top = try dmlTop(s);
-    _ = s.eatKw("INTO");
-    if (s.tok.kind == .variable) return s.fail("xqlite: table variables are not supported", .{});
+    _ = s.c.eatKw("INTO");
+    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
     const q = try s.qualifiedName();
     try s.tableHints();
     const t = try s.target(q);
     var written: ?[]Name = null;
-    if (s.isOp("(") and !s.peek().isAnyKw(&.{ "SELECT", "WITH" })) written = try s.nameList();
+    if (s.c.isOp("(") and !s.c.peekAt(1).isAnyKw(&.{ "SELECT", "WITH" })) written = try s.nameList();
     const plan = try planColumns(s, &t, written);
     const ret = try output(s, .insert);
 
     var source: ?*tree.Select = null;
-    if (s.isKw("VALUES")) {
+    if (s.c.isKw("VALUES")) {
         const saved = s.allow_default;
         s.allow_default = true;
-        const vpos = s.here();
+        const vpos = s.c.here();
         const rows = try s.valuesRows();
         s.allow_default = saved;
         for (rows) |*row| {
             if (plan.cols.len > 0 and row.len != plan.cols.len) {
-                return s.failState(.of("42601"), "There are {s} columns in the INSERT statement than values specified in the VALUES clause. The number of values in the VALUES clause must match the number of columns specified in the INSERT statement.", .{if (row.len < plan.cols.len) "more" else "fewer"});
+                return s.c.failState(null, .of("42601"), "There are {s} columns in the INSERT statement than values specified in the VALUES clause. The number of values in the VALUES clause must match the number of columns specified in the INSERT statement.", .{if (row.len < plan.cols.len) "more" else "fewer"});
             }
             var out: std.ArrayList(*Expr) = .empty;
             for (row.*, 0..) |e, i| {
@@ -189,10 +189,10 @@ pub fn insert(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
             row.* = out.items;
         }
         source = try s.new(tree.Select, .{ .body = try s.new(tree.Body, .{ .values = rows }), .pos = vpos });
-        if (top != null) return s.fail("xqlite: INSERT TOP with VALUES is not supported", .{});
-    } else if (s.eatKw("DEFAULT")) {
-        try s.expectKw("VALUES");
-        if (written != null) return s.syntaxError();
+        if (top != null) return s.c.fail(null, "xqlite: INSERT TOP with VALUES is not supported", .{});
+    } else if (s.c.eatKw("DEFAULT")) {
+        try s.c.expectKw("VALUES");
+        if (written != null) return s.c.syntaxError();
         return .{ .insert = try s.new(tree.Insert, .{ .with = with, .table = q, .source = null, .returning = ret, .pos = pos }) };
     } else if (s.isSelectStart()) {
         var sel = try s.subSelect();
@@ -203,9 +203,9 @@ pub fn insert(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
             sel = try s.new(tree.Select, .{ .body = try s.new(tree.Body, .{ .core = core }), .limit = n, .pos = inner.pos });
         }
         source = try wrapSelect(s, plan.cols, sel);
-    } else if (s.isKw("EXEC") or s.isKw("EXECUTE")) {
-        return s.fail("xqlite: INSERT ... EXEC is not supported", .{});
-    } else return s.syntaxError();
+    } else if (s.c.isKw("EXEC") or s.c.isKw("EXECUTE")) {
+        return s.c.fail(null, "xqlite: INSERT ... EXEC is not supported", .{});
+    } else return s.c.syntaxError();
 
     return .{ .insert = try s.new(tree.Insert, .{
         .with = with,
@@ -258,7 +258,7 @@ fn takeTarget(s: *Parser, written: tree.QName, items: []tree.FromItem) Error!Joi
         for (items, 0..) |it, i| {
             const label: ?[]const u8 = if (it.alias) |a| a.name.text else if (it.source == .table) it.source.table.name.text else null;
             if (label) |l| if (std.ascii.eqlIgnoreCase(l, written.name.text)) {
-                if (found != null) return s.failState(.numbered("42702", 8154), "The table '{s}' is ambiguous.", .{written.name.text});
+                if (found != null) return s.c.failState(null, .numbered("42702", 8154), "The table '{s}' is ambiguous.", .{written.name.text});
                 found = i;
             };
         }
@@ -271,7 +271,7 @@ fn takeTarget(s: *Parser, written: tree.QName, items: []tree.FromItem) Error!Joi
     }
     const i = found orelse return .{ .target = .{ .q = written, .alias = auto }, .from = items, .cond = null };
     const item = items[i];
-    if (item.source != .table) return s.fail("xqlite: an UPDATE or DELETE of a derived table is not supported", .{});
+    if (item.source != .table) return s.c.fail(null, "xqlite: an UPDATE or DELETE of a derived table is not supported", .{});
     var rest: std.ArrayList(tree.FromItem) = .empty;
     var cond: ?*Expr = null;
     for (items, 0..) |it, j| {
@@ -279,7 +279,7 @@ fn takeTarget(s: *Parser, written: tree.QName, items: []tree.FromItem) Error!Joi
         var x = it;
         // The item after the target joined the target.
         if (j == i + 1 and i == 0) {
-            if (x.join == .left or x.join == .right or x.join == .full) return s.fail("xqlite: UPDATE or DELETE ... FROM with an outer join of the target is not supported", .{});
+            if (x.join == .left or x.join == .right or x.join == .full) return s.c.fail(null, "xqlite: UPDATE or DELETE ... FROM with an outer join of the target is not supported", .{});
             if (x.on) |on| cond = on;
             x.on = null;
             x.join = .comma;
@@ -288,7 +288,7 @@ fn takeTarget(s: *Parser, written: tree.QName, items: []tree.FromItem) Error!Joi
         try rest.append(s.a, x);
     }
     if (i > 0) {
-        if (item.join == .left or item.join == .right or item.join == .full) return s.fail("xqlite: UPDATE or DELETE ... FROM with an outer join of the target is not supported", .{});
+        if (item.join == .left or item.join == .right or item.join == .full) return s.c.fail(null, "xqlite: UPDATE or DELETE ... FROM with an outer join of the target is not supported", .{});
         cond = item.on;
     }
     return .{
@@ -312,22 +312,22 @@ fn assignments(s: *Parser, t: *const Target, label: []const u8) Error![]tree.Set
     s.allow_default = true;
     defer s.allow_default = saved;
     while (true) {
-        if (s.tok.kind == .variable) return s.fail("xqlite: assigning variables in UPDATE is not supported", .{});
+        if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: assigning variables in UPDATE is not supported", .{});
         var c = try s.nameOf(try s.anyName());
-        if (s.eatOp(".")) {
-            if (!std.ascii.eqlIgnoreCase(c.text, label)) return s.failState(.numbered("42P01", 4104), "The multi-part identifier \"{s}\" could not be bound.", .{c.text});
+        if (s.c.eatOp(".")) {
+            if (!std.ascii.eqlIgnoreCase(c.text, label)) return s.c.failState(null, .numbered("42P01", 4104), "The multi-part identifier \"{s}\" could not be bound.", .{c.text});
             c = try s.nameOf(try s.anyName());
         }
-        const op = s.tok;
-        if (op.kind != .op or !(op.is("=") or (op.text.len == 2 and op.text[1] == '='))) return s.syntaxError();
-        s.advance();
+        const op = s.c.peek();
+        if (op.kind != .op or !(op.is("=") or (op.text.len == 2 and op.text[1] == '='))) return s.c.syntaxError();
+        s.c.skip();
         var e = try s.expr();
         if (op.text.len == 2) {
             const ref = try tree.expr(s.a, c.pos, c.pos, .{ .column = try s.a.dupe(Name, &.{c}) });
             e = try s.compoundAssign(op.text[0], ref, e);
         }
         if (t.findCol(c.text)) |m| {
-            if (m.identity != null) return s.failState(.numbered("428C9", 8102), "Cannot update identity column '{s}'.", .{m.name});
+            if (m.identity != null) return s.c.failState(null, .numbered("428C9", 8102), "Cannot update identity column '{s}'.", .{m.name});
             if (m.decl_type) |dt| {
                 const ty = types.parseText(dt);
                 if (ty == null or !storesAsIs(e, ty.?)) {
@@ -336,45 +336,37 @@ fn assignments(s: *Parser, t: *const Target, label: []const u8) Error![]tree.Set
             }
         }
         try list.append(s.a, .{ .cols = try s.a.dupe(Name, &.{c}), .value = e });
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
     return list.items;
 }
 
 /// [WITH ...] UPDATE [TOP (n)] t SET ... [OUTPUT ...] [FROM ...] [WHERE ...].
 pub fn update(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
-    const pos = s.here();
-    try s.expectKw("UPDATE");
+    const pos = s.c.here();
+    try s.c.expectKw("UPDATE");
     const top = try dmlTop(s);
-    if (s.tok.kind == .variable) return s.fail("xqlite: table variables are not supported", .{});
+    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
     const written = try s.qualifiedName();
     try s.tableHints();
-    try s.expectKw("SET");
+    try s.c.expectKw("SET");
     // The SET list names columns of the target, which FROM may define:
     // read ahead to the FROM clause.
-    const set_lx = s.lx;
-    const set_tok = s.tok;
-    const set_prev = s.prev_end;
+    const set_mark = s.c.mark();
     try skipSet(s);
     _ = try output(s, .update);
     var from: []tree.FromItem = &.{};
-    if (s.eatKw("FROM")) from = try s.tableRefs();
+    if (s.c.eatKw("FROM")) from = try s.tableRefs();
     const j = try takeTarget(s, written, from);
     const t = try s.target(j.target.q);
-    const after_lx = s.lx;
-    const after_tok = s.tok;
-    const after_prev = s.prev_end;
+    const after_mark = s.c.mark();
     // Back to SET.
-    s.lx = set_lx;
-    s.tok = set_tok;
-    s.prev_end = set_prev;
+    s.c.reset(set_mark);
     const label = if (j.target.alias) |a| a.text else j.target.q.name.text;
     const sets = try assignments(s, &t, label);
     const ret = try output(s, .update);
-    s.lx = after_lx;
-    s.tok = after_tok;
-    s.prev_end = after_prev;
-    var where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
+    s.c.reset(after_mark);
+    var where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
     where = try andOf(s, j.cond, where);
     try optionClause(s);
     {
@@ -407,40 +399,40 @@ pub fn update(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
 /// Skip the SET list (up to OUTPUT, FROM, WHERE, OPTION or the end).
 fn skipSet(s: *Parser) Error!void {
     var depth: usize = 0;
-    while (s.tok.kind != .eof) {
-        if (depth == 0 and (s.isKw("OUTPUT") or s.isKw("FROM") or s.isKw("WHERE") or s.isKw("OPTION") or s.isOp(";") or s.tok.kind == .go)) return;
-        if (depth == 0 and parser.startsStatement(s.tok) and !s.isKw("SELECT")) return;
-        if (s.isOp("(")) depth += 1;
-        if (s.isOp(")")) {
-            if (depth == 0) return s.syntaxError();
+    while (s.c.peek().kind != .eof) {
+        if (depth == 0 and (s.c.isKw("OUTPUT") or s.c.isKw("FROM") or s.c.isKw("WHERE") or s.c.isKw("OPTION") or s.c.isOp(";") or s.c.peek().kind == .go)) return;
+        if (depth == 0 and parser.startsStatement(s.c.peek()) and !s.c.isKw("SELECT")) return;
+        if (s.c.isOp("(")) depth += 1;
+        if (s.c.isOp(")")) {
+            if (depth == 0) return s.c.syntaxError();
             depth -= 1;
         }
-        s.advance();
+        s.c.skip();
     }
 }
 
 fn optionClause(s: *Parser) Error!void {
-    if (s.isKw("OPTION") and s.peek().is("(")) {
-        s.advance();
+    if (s.c.isKw("OPTION") and s.c.peekAt(1).is("(")) {
+        s.c.skip();
         try s.skipParens();
     }
 }
 
 /// [WITH ...] DELETE [TOP (n)] [FROM] t [OUTPUT ...] [FROM ...] [WHERE ...].
 pub fn delete(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
-    const pos = s.here();
-    try s.expectKw("DELETE");
+    const pos = s.c.here();
+    try s.c.expectKw("DELETE");
     const top = try dmlTop(s);
-    _ = s.eatKw("FROM");
-    if (s.tok.kind == .variable) return s.fail("xqlite: table variables are not supported", .{});
+    _ = s.c.eatKw("FROM");
+    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
     const written = try s.qualifiedName();
     try s.tableHints();
     const ret = try output(s, .delete);
     var from: []tree.FromItem = &.{};
-    if (s.eatKw("FROM")) from = try s.tableRefs();
+    if (s.c.eatKw("FROM")) from = try s.tableRefs();
     const j = try takeTarget(s, written, from);
     _ = try s.target(j.target.q);
-    var where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
+    var where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
     where = try andOf(s, j.cond, where);
     try optionClause(s);
     return .{ .delete = try s.new(tree.Delete, .{
@@ -457,10 +449,10 @@ pub fn delete(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
 
 /// TRUNCATE TABLE t: DELETE FROM t, and the identity starts over.
 pub fn truncate(s: *Parser) Error!tree.Stmt {
-    try s.expectKw("TRUNCATE");
-    try s.expectKw("TABLE");
+    try s.c.expectKw("TRUNCATE");
+    try s.c.expectKw("TABLE");
     const q = try s.qualifiedName();
-    if (s.isKw("WITH")) return s.fail("xqlite: TRUNCATE TABLE ... WITH (PARTITIONS) is not supported", .{});
+    if (s.c.isKw("WITH")) return s.c.fail(null, "xqlite: TRUNCATE TABLE ... WITH (PARTITIONS) is not supported", .{});
     return .{ .truncate = try s.new(tree.Truncate, .{ .table = q, .restart_identity = true }) };
 }
 
@@ -498,88 +490,88 @@ const Clause = struct { cond: ?*Expr, action: Action };
 /// Server, a target row that two source rows match is changed once,
 /// with one of them, instead of failing the statement.
 pub fn merge(s: *Parser) Error!void {
-    try s.expectKw("MERGE");
-    if (s.isKw("TOP")) return s.fail("xqlite: MERGE TOP is not supported", .{});
-    _ = s.eatKw("INTO");
+    try s.c.expectKw("MERGE");
+    if (s.c.isKw("TOP")) return s.c.fail(null, "xqlite: MERGE TOP is not supported", .{});
+    _ = s.c.eatKw("INTO");
     const tq = try s.qualifiedName();
     try s.tableHints();
     var talias: ?Name = null;
-    if (s.eatKw("AS")) {
+    if (s.c.eatKw("AS")) {
         talias = try s.nameOf(try s.anyName());
     } else if (s.isName()) talias = try s.nameOf(try s.name());
     if (talias == null) talias = try s.autoAlias(tq);
     const t = try s.target(tq);
-    if (t.tab == null) return s.failState(.numbered("42P01", 208), "Invalid object name '{s}'.", .{tq.name.text});
+    if (t.tab == null) return s.c.failState(null, .numbered("42P01", 208), "Invalid object name '{s}'.", .{tq.name.text});
     const tlabel = if (talias) |a| a.text else tq.name.text;
-    try s.expectKw("USING");
+    try s.c.expectKw("USING");
 
     // The source, numbered.
-    const src_pos = s.here();
+    const src_pos = s.c.here();
     var src_item = try sourceItem(s);
-    const slabel: Name = if (src_item.alias) |a| a.name else if (src_item.source == .table) src_item.source.table.name else return s.syntaxError();
-    try s.expectKw("ON");
+    const slabel: Name = if (src_item.alias) |a| a.name else if (src_item.source == .table) src_item.source.table.name else return s.c.syntaxError();
+    try s.c.expectKw("ON");
     const on = try s.expr();
 
     var matched: std.ArrayList(Clause) = .empty;
     var by_source: std.ArrayList(Clause) = .empty;
     var not_matched: ?Clause = null;
-    while (s.eatKw("WHEN")) {
-        const kind: enum { matched, not_matched, by_source } = if (s.eatKw("MATCHED")) .matched else blk: {
-            try s.expectKw("NOT");
-            try s.expectKw("MATCHED");
-            if (s.eatKw("BY")) {
-                if (s.eatKw("SOURCE")) break :blk .by_source;
-                try s.expectKw("TARGET");
+    while (s.c.eatKw("WHEN")) {
+        const kind: enum { matched, not_matched, by_source } = if (s.c.eatKw("MATCHED")) .matched else blk: {
+            try s.c.expectKw("NOT");
+            try s.c.expectKw("MATCHED");
+            if (s.c.eatKw("BY")) {
+                if (s.c.eatKw("SOURCE")) break :blk .by_source;
+                try s.c.expectKw("TARGET");
             }
             break :blk .not_matched;
         };
-        const cond: ?*Expr = if (s.eatKw("AND")) try s.expr() else null;
-        try s.expectKw("THEN");
+        const cond: ?*Expr = if (s.c.eatKw("AND")) try s.expr() else null;
+        try s.c.expectKw("THEN");
         var action: Action = undefined;
-        if (s.eatKw("UPDATE")) {
-            if (kind == .not_matched) return s.syntaxError();
-            try s.expectKw("SET");
+        if (s.c.eatKw("UPDATE")) {
+            if (kind == .not_matched) return s.c.syntaxError();
+            try s.c.expectKw("SET");
             action = .{ .update = try assignments(s, &t, tlabel) };
-        } else if (s.eatKw("DELETE")) {
-            if (kind == .not_matched) return s.syntaxError();
+        } else if (s.c.eatKw("DELETE")) {
+            if (kind == .not_matched) return s.c.syntaxError();
             action = .delete;
-        } else if (s.eatKw("INSERT")) {
-            if (kind != .not_matched) return s.syntaxError();
+        } else if (s.c.eatKw("INSERT")) {
+            if (kind != .not_matched) return s.c.syntaxError();
             var cols: ?[]Name = null;
-            if (s.isOp("(")) cols = try s.nameList();
-            if (s.eatKw("DEFAULT")) return s.fail("xqlite: MERGE ... INSERT DEFAULT VALUES is not supported", .{});
-            try s.expectKw("VALUES");
-            try s.expectOp("(");
+            if (s.c.isOp("(")) cols = try s.nameList();
+            if (s.c.eatKw("DEFAULT")) return s.c.fail(null, "xqlite: MERGE ... INSERT DEFAULT VALUES is not supported", .{});
+            try s.c.expectKw("VALUES");
+            try s.c.expectOp("(");
             const saved = s.allow_default;
             s.allow_default = true;
             const values = try s.exprList();
             s.allow_default = saved;
-            try s.expectOp(")");
+            try s.c.expectOp(")");
             action = .{ .insert = .{ .cols = cols, .values = values } };
-        } else return s.syntaxError();
+        } else return s.c.syntaxError();
         const c: Clause = .{ .cond = cond, .action = action };
         switch (kind) {
             .matched => {
-                if (matched.items.len == 2) return s.failState(.of("42601"), "An action of type 'WHEN MATCHED' cannot appear more than once in a 'UPDATE' clause of a MERGE statement.", .{});
+                if (matched.items.len == 2) return s.c.failState(null, .of("42601"), "An action of type 'WHEN MATCHED' cannot appear more than once in a 'UPDATE' clause of a MERGE statement.", .{});
                 if (matched.items.len == 1 and (std.meta.activeTag(matched.items[0].action) == std.meta.activeTag(action) or matched.items[0].cond == null)) {
-                    return s.failState(.of("42601"), "An action of type '{s}' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{if (action == .delete) "DELETE" else "UPDATE"});
+                    return s.c.failState(null, .of("42601"), "An action of type '{s}' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{if (action == .delete) "DELETE" else "UPDATE"});
                 }
                 try matched.append(s.a, c);
             },
             .by_source => {
-                if (by_source.items.len == 2) return s.failState(.of("42601"), "An action of type 'WHEN NOT MATCHED BY SOURCE' cannot appear more than once in a MERGE statement.", .{});
+                if (by_source.items.len == 2) return s.c.failState(null, .of("42601"), "An action of type 'WHEN NOT MATCHED BY SOURCE' cannot appear more than once in a MERGE statement.", .{});
                 try by_source.append(s.a, c);
             },
             .not_matched => {
-                if (not_matched != null) return s.failState(.of("42601"), "An action of type 'INSERT' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{});
+                if (not_matched != null) return s.c.failState(null, .of("42601"), "An action of type 'INSERT' is not allowed in the 'WHEN MATCHED' clause of a MERGE statement.", .{});
                 not_matched = c;
             },
         }
     }
-    if (matched.items.len == 0 and by_source.items.len == 0 and not_matched == null) return s.syntaxError();
-    if (s.isKw("OUTPUT")) return s.fail("xqlite: MERGE ... OUTPUT is not supported", .{});
+    if (matched.items.len == 0 and by_source.items.len == 0 and not_matched == null) return s.c.syntaxError();
+    if (s.c.isKw("OUTPUT")) return s.c.fail(null, "xqlite: MERGE ... OUTPUT is not supported", .{});
     try optionClause(s);
-    if (!s.isOp(";")) return s.failState(.numbered("42601", 10713), "A MERGE statement must be terminated by a semi-colon (;).", .{});
+    if (!s.c.isOp(";")) return s.c.failState(null, .numbered("42601", 10713), "A MERGE statement must be terminated by a semi-colon (;).", .{});
 
     // The source numbered: (SELECT row_number() OVER () AS xq_n, *
     // FROM source) AS label.
@@ -603,11 +595,11 @@ pub fn merge(s: *Parser) Error!void {
     if (not_matched) |c| {
         const ins = c.action.insert;
         const plan = try planColumns(s, &t, ins.cols);
-        if (plan.cols.len > 0 and ins.values.len != plan.cols.len) return s.failState(.of("42601"), "The MERGE statement has more or fewer values than columns.", .{});
+        if (plan.cols.len > 0 and ins.values.len != plan.cols.len) return s.c.failState(null, .of("42601"), "The MERGE statement has more or fewer values than columns.", .{});
         var out: std.ArrayList(tree.ResultCol) = .empty;
         for (ins.values, 0..) |e, i| {
             const cm: ?*ColMeta = if (i < plan.cols.len) plan.cols[i] else null;
-            if (e.kind == .default) return s.fail("xqlite: DEFAULT in MERGE ... INSERT is not supported", .{});
+            if (e.kind == .default) return s.c.fail(null, "xqlite: DEFAULT in MERGE ... INSERT is not supported", .{});
             try out.append(s.a, .{ .expr = .{ .e = if (cm) |m| try wrapValue(s, m, e) else e } });
         }
         // NOT EXISTS (SELECT 1 FROM target WHERE on) [AND c]

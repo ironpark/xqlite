@@ -37,7 +37,9 @@
 //! first, so lookahead never fails; `end` is the offset after it.
 
 const std = @import("std");
-const words = @import("../words.zig");
+const sqlparse = @import("sqlparse");
+const syntax = @import("../syntax.zig");
+const words = sqlparse.words;
 const tree = @import("../../ir/tree.zig");
 const ir = @import("../../ir/ir.zig");
 const int = @import("../../sql/sqlite_int.zig");
@@ -96,8 +98,8 @@ fn noAlias(word: []const u8) bool {
 }
 
 /// The error of a statement that does not lex (Parser.init()).
-pub const LexError = tokenized.LexError;
-const tokenized = @import("../tokenized.zig");
+pub const LexError = driver.LexError;
+const driver = @import("../driver.zig");
 
 /// `[schema.]name` as written.
 pub const QName = struct {
@@ -133,15 +135,46 @@ pub const Statement = union(enum) {
 
 pub const Kind = enum { none, date, timestamp };
 
+/// The tokens of a statement and its error (pkg/sqlparse), with Oracle's
+/// errors for a missing token.
+pub const Cursor = sqlparse.Cursor(sqlparse.Buffered(Token), int.ErrorState, Hooks);
+
+const Hooks = struct {
+    /// The error of an unexpected token: ORA-00933 when a statement could
+    /// have ended there, else ORA-00936 (an expression is missing).
+    pub fn syntaxError(c: anytype) Error {
+        if (c.atEof()) return missing(c, "ORA-00936: missing expression");
+        return missing(c, "ORA-00933: SQL command not properly ended");
+    }
+
+    pub fn missingKeyword(c: anytype) Error {
+        return missing(c, "ORA-00905: missing keyword");
+    }
+
+    pub fn missingToken(c: anytype, kind: lexer.Kind) Error {
+        return switch (kind) {
+            .rparen => missing(c, "ORA-00907: missing right parenthesis"),
+            .lparen => missing(c, "ORA-00906: missing left parenthesis"),
+            .comma => missing(c, "ORA-00917: missing comma"),
+            else => syntaxError(c),
+        };
+    }
+
+    pub fn stateOfFormat(comptime fmt: []const u8) ?int.ErrorState {
+        return ora_errors.formatState(fmt);
+    }
+
+    /// An Oracle error at the next token.
+    fn missing(c: anytype, msg: []const u8) Error {
+        return c.fail(c.here(), "{s}", .{msg});
+    }
+};
+
 pub const Parser = struct {
     arena: Allocator,
-    src: [:0]const u8,
-    toks: []Token,
-    i: usize = 0,
-    err_msg: []const u8 = "",
-    /// What err_msg is (int.ErrorState), if known.
-    err_state: ?int.ErrorState = null,
-    err_pos: usize = 0,
+    /// The tokens, the text they are in and the error (diag: its message,
+    /// offset and int.ErrorState).
+    c: Cursor,
     /// Offset after the statement (and its terminator).
     end: usize,
     /// The statement being compiled, for what depends on the schema.
@@ -197,7 +230,7 @@ pub const Parser = struct {
     /// Lex the statement that starts at `pos` (blank text and leading
     /// semicolons are skipped). An empty statement has no tokens but eof.
     /// The session's options change nothing in Oracle.
-    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError, _: tokenized.Options) Error!Parser {
+    pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError, _: driver.Options) Error!Parser {
         var l = lexer.Lexer.init(arena, src, pos);
         var toks: std.ArrayList(Token) = .empty;
         var end: usize = src.len;
@@ -218,133 +251,34 @@ pub const Parser = struct {
             try toks.append(arena, t);
             if (t.kind == .eof) break;
         }
-        return .{ .arena = arena, .src = src, .toks = toks.items, .end = end };
+        return .{ .arena = arena, .c = .{ .arena = arena, .sql = src, .src = .init(toks.items) }, .end = end };
     }
 
-    pub fn isEmpty(p: *const Parser) bool {
-        return p.toks.len == 0 or p.toks[0].kind == .eof;
-    }
-
-    // ------------------------------------------------------------ tokens
-
-    pub fn peek(p: *const Parser) Token {
-        return p.toks[p.i];
-    }
-
-    pub fn peekAt(p: *const Parser, k: usize) Token {
-        const j = @min(p.i + k, p.toks.len - 1);
-        return p.toks[j];
-    }
-
-    pub fn advance(p: *Parser) Token {
-        const t = p.toks[p.i];
-        if (t.kind != .eof) p.i += 1;
-        return t;
-    }
-
-    pub fn lastEnd(p: *const Parser) u32 {
-        return if (p.i == 0) p.toks[0].start else p.toks[p.i - 1].end;
-    }
-
-    pub fn isKw(p: *const Parser, comptime kw: []const u8) bool {
-        return p.peek().isKw(kw);
-    }
-
-    pub fn isKwAt(p: *const Parser, k: usize, comptime kw: []const u8) bool {
-        return p.peekAt(k).isKw(kw);
-    }
-
-    pub fn eatKw(p: *Parser, comptime kw: []const u8) bool {
-        if (!p.isKw(kw)) return false;
-        _ = p.advance();
-        return true;
-    }
-
-    pub fn expectKw(p: *Parser, comptime kw: []const u8) Error!void {
-        if (!p.eatKw(kw)) return p.missing("ORA-00905: missing keyword");
-    }
-
-    pub fn isAnyKw(p: *const Parser, comptime kws: []const []const u8) bool {
-        return p.peek().isAnyKw(kws);
-    }
-
+    /// An optional IF EXISTS (IF alone is a name).
     pub fn ifExists(p: *Parser) Error!bool {
-        if (!(p.isKw("if") and p.isKwAt(1, "exists"))) return false;
-        _ = p.advance();
-        _ = p.advance();
-        return true;
+        return p.c.eatKws(&.{ "if", "exists" });
     }
 
+    /// An optional IF NOT EXISTS.
     pub fn ifNotExists(p: *Parser) Error!bool {
-        if (!(p.isKw("if") and p.isKwAt(1, "not"))) return false;
-        _ = p.advance();
-        _ = p.advance();
-        try p.expectKw("exists");
+        if (!p.c.eatKws(&.{ "if", "not" })) return false;
+        try p.c.expectKw("exists");
         return true;
-    }
-
-    pub fn eat(p: *Parser, kind: lexer.Kind) bool {
-        if (p.peek().kind != kind) return false;
-        _ = p.advance();
-        return true;
-    }
-
-    pub fn expect(p: *Parser, kind: lexer.Kind) Error!Token {
-        if (p.peek().kind != kind) {
-            return switch (kind) {
-                .rparen => p.missing("ORA-00907: missing right parenthesis"),
-                .lparen => p.missing("ORA-00906: missing left parenthesis"),
-                .comma => p.missing("ORA-00917: missing comma"),
-                else => p.syntaxError(),
-            };
-        }
-        return p.advance();
-    }
-
-    pub fn isOp(p: *const Parser, op: []const u8) bool {
-        return p.peek().isOp(op);
-    }
-
-    pub fn eatOp(p: *Parser, op: []const u8) bool {
-        if (!p.isOp(op)) return false;
-        _ = p.advance();
-        return true;
-    }
-
-    pub fn fail(p: *Parser, pos: usize, comptime fmt: []const u8, args: anytype) Error {
-        return p.failState(pos, null, fmt, args);
-    }
-
-    /// fail() of an error whose ErrorState is known (else that of xqlite's
-    /// conventions, int.ErrorState.ofFormat()).
-    pub fn failState(p: *Parser, pos: usize, state: ?int.ErrorState, comptime fmt: []const u8, args: anytype) Error {
-        p.err_pos = pos;
-        p.err_msg = try std.fmt.allocPrint(p.arena, fmt, args);
-        p.err_state = state orelse comptime ora_errors.formatState(fmt);
-        return error.ParseFailed;
     }
 
     /// Fail with the error a statement run while compiling this one left
     /// in the connection `db`, as it is (its ErrorState too).
     pub fn failFrom(p: *Parser, pos: usize, db: *int.Sqlite3) Error {
-        return p.failState(pos, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
+        return p.c.failState(pos, db.err_state, "{s}", .{@import("../../sql/main.zig").errmsg(db)});
     }
 
     /// An Oracle error at the next token.
     pub fn missing(p: *Parser, msg: []const u8) Error {
-        return p.fail(p.peek().start, "{s}", .{msg});
-    }
-
-    /// The error of an unexpected token: ORA-00933 when a statement could
-    /// have ended there, else ORA-00936 (an expression is missing).
-    pub fn syntaxError(p: *Parser) Error {
-        const t = p.peek();
-        if (t.kind == .eof) return p.missing("ORA-00936: missing expression");
-        return p.missing("ORA-00933: SQL command not properly ended");
+        return Hooks.missing(&p.c, msg);
     }
 
     pub fn unsupported(p: *Parser, pos: usize, what: []const u8) Error {
-        return p.fail(pos, "xqlite: {s} is not supported", .{what});
+        return p.c.fail(pos, "xqlite: {s} is not supported", .{what});
     }
 
     pub fn new(p: *Parser, comptime T: type, v: T) Error!*T {
@@ -352,7 +286,7 @@ pub const Parser = struct {
     }
 
     pub fn expr(p: *Parser, pos: u32, kind: tree.Kind) Error!*Expr {
-        return tree.expr(p.arena, pos, @max(pos, p.lastEnd()), kind);
+        return tree.expr(p.arena, pos, @max(pos, p.c.lastEnd()), kind);
     }
 
     fn span(p: *Parser, l: *const Expr, r: *const Expr, kind: tree.Kind) Error!*Expr {
@@ -405,11 +339,11 @@ pub const Parser = struct {
 
     fn noSchema(p: *Parser, s: Name, n: Name, m: Missing) Error {
         return switch (m) {
-            .table => p.fail(s.pos, "ORA-00942: table or view \"{s}\".\"{s}\" does not exist", .{ s.text, n.text }),
-            .user => p.fail(s.pos, "ORA-01918: user '{s}' does not exist", .{s.text}),
-            .user_or_role => p.fail(s.pos, "ORA-01917: user or role '{s}' does not exist", .{s.text}),
-            .sequence => p.fail(s.pos, "ORA-02289: sequence does not exist", .{}),
-            .index => p.fail(s.pos, "ORA-01418: specified index does not exist", .{}),
+            .table => p.c.fail(s.pos, "ORA-00942: table or view \"{s}\".\"{s}\" does not exist", .{ s.text, n.text }),
+            .user => p.c.fail(s.pos, "ORA-01918: user '{s}' does not exist", .{s.text}),
+            .user_or_role => p.c.fail(s.pos, "ORA-01917: user or role '{s}' does not exist", .{s.text}),
+            .sequence => p.c.fail(s.pos, "ORA-02289: sequence does not exist", .{}),
+            .index => p.c.fail(s.pos, "ORA-01418: specified index does not exist", .{}),
         };
     }
 
@@ -489,7 +423,7 @@ pub const Parser = struct {
         const plain: nsp.Target = .{ .db = if (temp) "temp" else "main", .name = q.name.text, .bare = q.name.text };
         if (temp) return .{ .t = plain, .schema = null };
         const cur = p.currentSchema() orelse return .{ .t = plain, .schema = null };
-        const s = nsp.find(try p.registered(), cur) orelse return p.fail(q.name.pos, "ORA-01435: user does not exist", .{});
+        const s = nsp.find(try p.registered(), cur) orelse return p.c.fail(q.name.pos, "ORA-01435: user does not exist", .{});
         const t: nsp.Target = .{ .db = "main", .name = try nsp.mangle(p.arena, s.name, q.name.text), .mangled = true, .bare = q.name.text };
         return .{ .t = t, .schema = .{ .text = "main", .pos = q.name.pos } };
     }
@@ -522,7 +456,7 @@ pub const Parser = struct {
         const text = (try views.definition(ps, q.name.text)) orelse return null;
         var sub = Parser.init(p.arena, text, 0, null, .{}) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
-            error.ParseFailed => return p.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text}),
+            error.ParseFailed => return p.c.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text}),
         };
         sub.p = ps;
         sub.schema_read = true;
@@ -534,10 +468,10 @@ pub const Parser = struct {
                     p.err_in_parse = true;
                     return error.ParseFailed;
                 }
-                return p.fail(q.name.pos, "internal error in the definition of {s}: {s}", .{ q.name.text, sub.err_msg });
+                return p.c.fail(q.name.pos, "internal error in the definition of {s}: {s}", .{ q.name.text, sub.c.diag.msg });
             },
         };
-        if (sub.peek().kind != .eof) return p.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
+        if (sub.c.peek().kind != .eof) return p.c.fail(q.name.pos, "internal error in the definition of {s}", .{q.name.text});
         sel.src = text;
         return sel;
     }
@@ -547,29 +481,29 @@ pub const Parser = struct {
     /// A column or table name: a quoted identifier or an unquoted word
     /// that is not reserved.
     pub fn colId(p: *Parser) Error!Name {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.kind == .qident or (t.kind == .ident and !isReserved(t.text))) {
-            _ = p.advance();
+            p.c.skip();
             return .{ .text = t.text, .pos = t.start };
         }
         if (t.kind == .ident) return p.missing("ORA-00904: : invalid identifier");
-        return p.syntaxError();
+        return p.c.syntaxError();
     }
 
     /// Any identifier, reserved or not (after AS, after a dot).
     pub fn anyName(p: *Parser) Error!Name {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.kind == .qident or t.kind == .ident) {
-            _ = p.advance();
+            p.c.skip();
             return .{ .text = t.text, .pos = t.start };
         }
-        return p.syntaxError();
+        return p.c.syntaxError();
     }
 
     pub fn qname(p: *Parser) Error!QName {
         const first = try p.colId();
-        if (p.peek().kind == .dot) {
-            _ = p.advance();
+        if (p.c.peek().kind == .dot) {
+            p.c.skip();
             const second = try p.anyName();
             return .{ .schema = first, .name = second };
         }
@@ -577,94 +511,89 @@ pub const Parser = struct {
     }
 
     pub fn nameList(p: *Parser) Error![]Name {
-        var out: std.ArrayList(Name) = .empty;
-        while (true) {
-            try out.append(p.arena, try p.colId());
-            if (!p.eat(.comma)) break;
-        }
-        return out.items;
+        return p.c.list(Name, p, colId);
     }
 
     pub fn parenNameList(p: *Parser) Error![]Name {
-        _ = try p.expect(.lparen);
+        _ = try p.c.expect(.lparen);
         const l = try p.nameList();
-        _ = try p.expect(.rparen);
+        _ = try p.c.expect(.rparen);
         return l;
     }
 
     pub fn signedInt(p: *Parser) Error!i64 {
         var neg = false;
-        if (p.eatOp("-")) neg = true else _ = p.eatOp("+");
-        const t = p.peek();
+        if (p.c.eatOp("-")) neg = true else _ = p.c.eatOp("+");
+        const t = p.c.peek();
         if (t.kind != .integer) return p.missing("ORA-01722: invalid number");
-        _ = p.advance();
-        const v = std.fmt.parseInt(i64, t.text, 10) catch return p.fail(t.start, "ORA-01426: numeric overflow", .{});
+        p.c.skip();
+        const v = std.fmt.parseInt(i64, t.text, 10) catch return p.c.fail(t.start, "ORA-01426: numeric overflow", .{});
         return if (neg) -v else v;
     }
 
     // ============================================================ SELECT
 
     fn startsSelect(p: *const Parser, k: usize) bool {
-        const t = p.peekAt(k);
+        const t = p.c.peekAt(k);
         return t.isAnyKw(&.{ "select", "with" });
     }
 
     fn parenStartsSelect(p: *const Parser) bool {
         var k: usize = 0;
-        while (p.peekAt(k).kind == .lparen) k += 1;
+        while (p.c.peekAt(k).kind == .lparen) k += 1;
         return k > 0 and p.startsSelect(k);
     }
 
     pub fn select(p: *Parser) Error!*tree.Select {
-        const pos = p.peek().start;
+        const pos = p.c.peek().start;
         var with: ?*tree.With = null;
-        if (p.isKw("with")) with = try p.withClause();
+        if (p.c.isKw("with")) with = try p.withClause();
         return p.selectAfterWith(with, pos);
     }
 
     pub fn selectAfterWith(p: *Parser, with: ?*tree.With, pos: u32) Error!*tree.Select {
         const body = try p.setExpr();
         var s: tree.Select = .{ .with = with, .body = body, .pos = pos };
-        if (p.isKw("order")) {
-            _ = p.advance();
-            _ = p.eatKw("siblings");
-            try p.expectKw("by");
+        if (p.c.isKw("order")) {
+            p.c.skip();
+            _ = p.c.eatKw("siblings");
+            try p.c.expectKw("by");
             s.order_by = try p.sortList();
         }
         // OFFSET n ROWS, FETCH FIRST n ROWS ONLY, FOR UPDATE.
         while (true) {
-            if (p.isKw("offset")) {
-                const at = p.advance().start;
-                if (s.offset != null) return p.fail(at, "ORA-00933: SQL command not properly ended", .{});
+            if (p.c.isKw("offset")) {
+                const at = p.c.advance().start;
+                if (s.offset != null) return p.c.fail(at, "ORA-00933: SQL command not properly ended", .{});
                 s.offset = try p.addExpr();
-                if (!p.eatKw("row")) try p.expectKw("rows");
-            } else if (p.isKw("fetch")) {
-                const at = p.advance().start;
-                if (s.limit != null) return p.fail(at, "ORA-00933: SQL command not properly ended", .{});
-                if (!p.eatKw("first")) try p.expectKw("next");
-                if (p.isKw("row") or p.isKw("rows")) {
+                if (!p.c.eatKw("row")) try p.c.expectKw("rows");
+            } else if (p.c.isKw("fetch")) {
+                const at = p.c.advance().start;
+                if (s.limit != null) return p.c.fail(at, "ORA-00933: SQL command not properly ended", .{});
+                if (!p.c.eatKw("first")) try p.c.expectKw("next");
+                if (p.c.isKw("row") or p.c.isKw("rows")) {
                     s.limit = try p.expr(at, .{ .integer = "1" });
                 } else {
                     s.limit = try p.addExpr();
-                    if (p.isKw("percent")) return p.unsupported(at, "FETCH ... PERCENT");
+                    if (p.c.isKw("percent")) return p.unsupported(at, "FETCH ... PERCENT");
                 }
-                if (!p.eatKw("row")) try p.expectKw("rows");
-                if (p.isKw("with")) return p.unsupported(at, "FETCH ... WITH TIES");
-                try p.expectKw("only");
-            } else if (p.isKw("for") and p.isKwAt(1, "update")) {
+                if (!p.c.eatKw("row")) try p.c.expectKw("rows");
+                if (p.c.isKw("with")) return p.unsupported(at, "FETCH ... WITH TIES");
+                try p.c.expectKw("only");
+            } else if (p.c.isKw("for") and p.c.isKwAt(1, "update")) {
                 // FOR UPDATE: a no-op, writers are serialized.
-                _ = p.advance();
-                _ = p.advance();
-                if (p.eatKw("of")) {
+                p.c.skip();
+                p.c.skip();
+                if (p.c.eatKw("of")) {
                     while (true) {
                         _ = try p.anyName();
-                        while (p.eat(.dot)) _ = try p.anyName();
-                        if (!p.eat(.comma)) break;
+                        while (p.c.eat(.dot)) _ = try p.anyName();
+                        if (!p.c.eat(.comma)) break;
                     }
                 }
-                if (p.eatKw("nowait")) {} else if (p.eatKw("wait")) {
+                if (p.c.eatKw("nowait")) {} else if (p.c.eatKw("wait")) {
                     _ = try p.signedInt();
-                } else if (p.eatKw("skip")) try p.expectKw("locked");
+                } else if (p.c.eatKw("skip")) try p.c.expectKw("locked");
             } else break;
         }
         // A parenthesized query alone is that query.
@@ -675,27 +604,27 @@ pub const Parser = struct {
     }
 
     fn withClause(p: *Parser) Error!*tree.With {
-        try p.expectKw("with");
-        if (p.isKw("function") or p.isKw("procedure")) return p.unsupported(p.peek().start, "PL/SQL in WITH");
+        try p.c.expectKw("with");
+        if (p.c.isKw("function") or p.c.isKw("procedure")) return p.unsupported(p.c.peek().start, "PL/SQL in WITH");
         var ctes: std.ArrayList(tree.Cte) = .empty;
         while (true) {
             var cte: tree.Cte = .{ .name = try p.colId(), .select = undefined };
             try p.cte_names.append(p.arena, cte.name.text);
-            if (p.peek().kind == .lparen) cte.cols = try p.parenNameList();
-            try p.expectKw("as");
-            if (p.eatKw("materialized")) {
+            if (p.c.peek().kind == .lparen) cte.cols = try p.parenNameList();
+            try p.c.expectKw("as");
+            if (p.c.eatKw("materialized")) {
                 cte.materialized = true;
-            } else if (p.isKw("not") and p.isKwAt(1, "materialized")) {
-                _ = p.advance();
-                _ = p.advance();
+            } else if (p.c.isKw("not") and p.c.isKwAt(1, "materialized")) {
+                p.c.skip();
+                p.c.skip();
                 cte.materialized = false;
             }
-            _ = try p.expect(.lparen);
+            _ = try p.c.expect(.lparen);
             cte.select = try p.select();
-            _ = try p.expect(.rparen);
-            if (p.isKw("search") or p.isKw("cycle")) return p.unsupported(p.peek().start, "SEARCH and CYCLE clauses");
+            _ = try p.c.expect(.rparen);
+            if (p.c.isKw("search") or p.c.isKw("cycle")) return p.unsupported(p.c.peek().start, "SEARCH and CYCLE clauses");
             try ctes.append(p.arena, cte);
-            if (!p.eat(.comma)) break;
+            if (!p.c.eat(.comma)) break;
         }
         // Oracle's recursive subquery factoring has no RECURSIVE; SQLite's
         // WITH lets a query name itself either way.
@@ -707,16 +636,16 @@ pub const Parser = struct {
     fn setExpr(p: *Parser) Error!*tree.Body {
         var left = try p.simpleSelect();
         while (true) {
-            const op: tree.SetOp = if (p.eatKw("union"))
+            const op: tree.SetOp = if (p.c.eatKw("union"))
                 .@"union"
-            else if (p.eatKw("intersect"))
+            else if (p.c.eatKw("intersect"))
                 .intersect
-            else if (p.eatKw("minus") or p.eatKw("except"))
+            else if (p.c.eatKw("minus") or p.c.eatKw("except"))
                 .except
             else
                 break;
-            const all = p.eatKw("all");
-            if (!all) _ = p.eatKw("distinct");
+            const all = p.c.eatKw("all");
+            if (!all) _ = p.c.eatKw("distinct");
             const right = try p.simpleSelect();
             left = try p.new(tree.Body, .{ .compound = .{ .op = op, .all = all, .left = left, .right = right } });
         }
@@ -724,23 +653,23 @@ pub const Parser = struct {
     }
 
     fn simpleSelect(p: *Parser) Error!*tree.Body {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.kind == .lparen) {
-            _ = p.advance();
+            p.c.skip();
             const s = try p.select();
-            _ = try p.expect(.rparen);
+            _ = try p.c.expect(.rparen);
             return p.new(tree.Body, .{ .nested = s });
         }
         if (t.isKw("select")) return p.new(tree.Body, .{ .core = try p.core() });
         if (t.isKw("values")) {
-            _ = p.advance();
+            p.c.skip();
             var rows: std.ArrayList([]*Expr) = .empty;
             while (true) {
                 p.nextval_seen.clearRetainingCapacity();
-                _ = try p.expect(.lparen);
+                _ = try p.c.expect(.lparen);
                 try rows.append(p.arena, try p.exprList());
-                _ = try p.expect(.rparen);
-                if (!p.eat(.comma)) break;
+                _ = try p.c.expect(.rparen);
+                if (!p.c.eat(.comma)) break;
             }
             return p.new(tree.Body, .{ .values = rows.items });
         }
@@ -749,15 +678,15 @@ pub const Parser = struct {
     }
 
     fn core(p: *Parser) Error!*tree.Core {
-        const pos = p.advance().start; // SELECT
+        const pos = p.c.advance().start; // SELECT
         var c: tree.Core = .{ .cols = &.{}, .pos = pos };
-        if (p.eatKw("distinct") or p.eatKw("unique")) {
+        if (p.c.eatKw("distinct") or p.c.eatKw("unique")) {
             c.distinct = true;
-        } else _ = p.eatKw("all");
+        } else _ = p.c.eatKw("all");
         if (p.atClauseEnd()) return p.missing("ORA-00936: missing expression");
         c.cols = try p.targetList();
-        if (p.isKw("into")) return p.unsupported(p.peek().start, "SELECT INTO (PL/SQL)");
-        if (p.eatKw("from")) {
+        if (p.c.isKw("into")) return p.unsupported(p.c.peek().start, "SELECT INTO (PL/SQL)");
+        if (p.c.eatKw("from")) {
             const saved = p.dual_star;
             defer p.dual_star = saved;
             p.dual_star = false;
@@ -771,22 +700,22 @@ pub const Parser = struct {
         } else if (!p.atClauseEnd()) {
             return p.missing("ORA-00923: FROM keyword not found where expected");
         }
-        if (p.eatKw("where")) c.where = try p.expr0();
-        if (p.isKw("start") or p.isKw("connect")) return p.unsupported(p.peek().start, "CONNECT BY hierarchical queries");
-        if (p.isKw("group")) {
-            _ = p.advance();
-            try p.expectKw("by");
-            if (p.isAnyKw(&.{ "rollup", "cube", "grouping" })) return p.unsupported(p.peek().start, "GROUP BY ROLLUP/CUBE/GROUPING SETS");
+        if (p.c.eatKw("where")) c.where = try p.expr0();
+        if (p.c.isKw("start") or p.c.isKw("connect")) return p.unsupported(p.c.peek().start, "CONNECT BY hierarchical queries");
+        if (p.c.isKw("group")) {
+            p.c.skip();
+            try p.c.expectKw("by");
+            if (p.c.isAnyKw(&.{ "rollup", "cube", "grouping" })) return p.unsupported(p.c.peek().start, "GROUP BY ROLLUP/CUBE/GROUPING SETS");
             c.group_by = try p.exprList();
         }
-        if (p.eatKw("having")) c.having = try p.expr0();
-        if (p.eatKw("window")) {
+        if (p.c.eatKw("having")) c.having = try p.expr0();
+        if (p.c.eatKw("window")) {
             var wins: std.ArrayList(tree.NamedWindow) = .empty;
             while (true) {
                 const name = try p.colId();
-                try p.expectKw("as");
+                try p.c.expectKw("as");
                 try wins.append(p.arena, .{ .name = name, .spec = try p.windowSpec() });
-                if (!p.eat(.comma)) break;
+                if (!p.c.eat(.comma)) break;
             }
             c.windows = wins.items;
         }
@@ -797,7 +726,7 @@ pub const Parser = struct {
     }
 
     fn atClauseEnd(p: *const Parser) bool {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.kind == .eof or t.kind == .rparen) return true;
         return t.isAnyKw(&.{ "from", "where", "group", "having", "window", "order", "offset", "fetch", "union", "intersect", "minus", "except", "into", "for", "connect", "start" });
     }
@@ -807,49 +736,49 @@ pub const Parser = struct {
         var out: std.ArrayList(tree.ResultCol) = .empty;
         while (true) {
             try out.append(p.arena, try p.target());
-            if (!p.eat(.comma)) break;
+            if (!p.c.eat(.comma)) break;
         }
         return out.items;
     }
 
     fn target(p: *Parser) Error!tree.ResultCol {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.isOp("*")) {
-            _ = p.advance();
+            p.c.skip();
             return .{ .star = t.start };
         }
         // t.* and s.t.*
         if (t.kind == .ident or t.kind == .qident) {
             var k: usize = 1;
             var names: std.ArrayList(Name) = .empty;
-            while (p.peekAt(k).kind == .dot) : (k += 2) {
-                if (p.peekAt(k + 1).isOp("*")) {
+            while (p.c.peekAt(k).kind == .dot) : (k += 2) {
+                if (p.c.peekAt(k + 1).isOp("*")) {
                     var j: usize = 0;
                     while (j < k) : (j += 2) {
-                        const nt = p.peekAt(j);
+                        const nt = p.c.peekAt(j);
                         if (nt.kind != .ident and nt.kind != .qident) break;
                         try names.append(p.arena, .{ .text = nt.text, .pos = nt.start });
                     } else {
-                        const star = p.peekAt(k + 1);
-                        p.i += k + 2;
+                        const star = p.c.peekAt(k + 1);
+                        p.c.skipN(k + 2);
                         // schema.t.*: the schema is the current user's.
                         if (names.items.len > 1) names.items = names.items[names.items.len - 1 ..];
                         return .{ .table_star = .{ .names = names.items, .star_pos = star.start } };
                     }
                     break;
                 }
-                const nt = p.peekAt(k + 1);
+                const nt = p.c.peekAt(k + 1);
                 if (nt.kind != .ident and nt.kind != .qident) break;
             }
         }
         const e = try p.expr0();
         var label: ?Name = null;
-        if (p.eatKw("as")) {
+        if (p.c.eatKw("as")) {
             label = try p.anyName();
         } else {
-            const a = p.peek();
+            const a = p.c.peek();
             if (a.kind == .qident or (a.kind == .ident and !noAlias(a.text))) {
-                _ = p.advance();
+                p.c.skip();
                 label = .{ .text = a.text, .pos = a.start };
             }
         }
@@ -863,7 +792,7 @@ pub const Parser = struct {
     fn columnName(p: *Parser, e: *const Expr) Error!?[]const u8 {
         if (p.pseudo_names.get(e)) |n| return n;
         if (e.kind == .column) return null;
-        const text = p.src[@min(e.pos, p.src.len)..@min(e.end, p.src.len)];
+        const text = p.c.sql[@min(e.pos, p.c.sql.len)..@min(e.end, p.c.sql.len)];
         var out: std.ArrayList(u8) = .empty;
         // Blanks go, and the quotes of quoted names (not those in
         // string literals).
@@ -877,29 +806,7 @@ pub const Parser = struct {
     }
 
     pub fn sortList(p: *Parser) Error![]tree.SortItem {
-        var out: std.ArrayList(tree.SortItem) = .empty;
-        while (true) {
-            var item: tree.SortItem = .{ .expr = try p.expr0() };
-            if (p.eatKw("asc")) {
-                item.dir = .asc;
-            } else if (p.eatKw("desc")) {
-                item.dir = .desc;
-            }
-            if (p.eatKw("nulls")) {
-                if (p.eatKw("first")) {
-                    item.nulls = .first;
-                } else {
-                    try p.expectKw("last");
-                    item.nulls = .last;
-                }
-            } else {
-                // Oracle: NULLs sort as if larger than any value.
-                item.nulls = if (item.dir == .desc) .first else .last;
-            }
-            try out.append(p.arena, item);
-            if (!p.eat(.comma)) break;
-        }
-        return out.items;
+        return syntax.sortList(p, expr0, .{ .nulls = true });
     }
 
     // -------------------------------------------------------------- FROM
@@ -907,7 +814,7 @@ pub const Parser = struct {
     pub fn fromList(p: *Parser) Error![]tree.FromItem {
         var items: std.ArrayList(tree.FromItem) = .empty;
         try p.tableRef(&items, .none);
-        while (p.eat(.comma)) try p.tableRef(&items, .comma);
+        while (p.c.eat(.comma)) try p.tableRef(&items, .comma);
         // DUAL is no table; for a `*`, a row with its column DUMMY.
         var out: std.ArrayList(tree.FromItem) = .empty;
         for (items.items) |it| {
@@ -946,37 +853,37 @@ pub const Parser = struct {
         try items.append(p.arena, first);
         while (true) {
             var natural = false;
-            if (p.eatKw("natural")) natural = true;
+            if (p.c.eatKw("natural")) natural = true;
             var kind: tree.JoinKind = .inner;
-            if (p.eatKw("join")) {} else if (p.eatKw("inner")) {
-                try p.expectKw("join");
-            } else if (p.eatKw("left")) {
-                _ = p.eatKw("outer");
-                try p.expectKw("join");
+            if (p.c.eatKw("join")) {} else if (p.c.eatKw("inner")) {
+                try p.c.expectKw("join");
+            } else if (p.c.eatKw("left")) {
+                _ = p.c.eatKw("outer");
+                try p.c.expectKw("join");
                 kind = .left;
-            } else if (p.eatKw("right")) {
-                _ = p.eatKw("outer");
-                try p.expectKw("join");
+            } else if (p.c.eatKw("right")) {
+                _ = p.c.eatKw("outer");
+                try p.c.expectKw("join");
                 kind = .right;
-            } else if (p.eatKw("full")) {
-                _ = p.eatKw("outer");
-                try p.expectKw("join");
+            } else if (p.c.eatKw("full")) {
+                _ = p.c.eatKw("outer");
+                try p.c.expectKw("join");
                 kind = .full;
-            } else if (p.eatKw("cross")) {
-                if (p.isKw("apply")) return p.unsupported(p.peek().start, "CROSS APPLY");
-                try p.expectKw("join");
+            } else if (p.c.eatKw("cross")) {
+                if (p.c.isKw("apply")) return p.unsupported(p.c.peek().start, "CROSS APPLY");
+                try p.c.expectKw("join");
                 kind = .cross;
             } else {
-                if (natural) return p.syntaxError();
+                if (natural) return p.c.syntaxError();
                 break;
             }
             var item = try p.fromPrimary();
             item.join = kind;
             item.natural = natural;
             if (kind != .cross and !natural) {
-                if (p.eatKw("on")) {
+                if (p.c.eatKw("on")) {
                     item.on = try p.expr0();
-                } else if (p.eatKw("using")) {
+                } else if (p.c.eatKw("using")) {
                     item.using = try p.parenNameList();
                 } else return p.missing("ORA-00905: missing keyword");
             }
@@ -993,33 +900,33 @@ pub const Parser = struct {
     }
 
     fn fromPrimary(p: *Parser) Error!tree.FromItem {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.isKw("lateral")) return p.unsupported(t.start, "LATERAL");
         if (t.kind == .lparen) {
             if (p.parenStartsSelect()) {
-                const save = p.i;
-                _ = p.advance();
+                const save = p.c.mark();
+                p.c.skip();
                 if (p.select()) |s| {
-                    if (p.eat(.rparen)) {
+                    if (p.c.eat(.rparen)) {
                         var item: tree.FromItem = .{ .source = .{ .subquery = s } };
                         item.alias = try p.alias();
                         return item;
                     }
                 } else |err| if (err == error.OutOfMemory or p.err_in_parse) return err;
-                p.i = save;
+                p.c.reset(save);
             }
-            _ = p.advance();
+            p.c.skip();
             const inner = try p.fromList();
-            _ = try p.expect(.rparen);
+            _ = try p.c.expect(.rparen);
             var item: tree.FromItem = .{ .source = .{ .nested = inner } };
             item.alias = try p.alias();
             return item;
         }
-        if (t.isKw("table") and p.peekAt(1).kind == .lparen) return p.unsupported(t.start, "TABLE() collection expressions");
-        if (t.isKw("json_table") and p.peekAt(1).kind == .lparen) return jsonsql.jsonTable(p);
-        _ = p.eatKw("only");
+        if (t.isKw("table") and p.c.peekAt(1).kind == .lparen) return p.unsupported(t.start, "TABLE() collection expressions");
+        if (t.isKw("json_table") and p.c.peekAt(1).kind == .lparen) return jsonsql.jsonTable(p);
+        _ = p.c.eatKw("only");
         const name = try p.qname();
-        if (p.peek().kind == .lparen) {
+        if (p.c.peek().kind == .lparen) {
             // A table-valued function (SQLite's: pragma_table_info() ...).
             const c = try p.funcCall(name.name);
             const al = try p.alias();
@@ -1027,8 +934,8 @@ pub const Parser = struct {
             return .{ .source = .{ .func = f }, .alias = al };
         }
         var item = try p.tableItem(name);
-        if (p.isKw("sample")) return p.unsupported(p.peek().start, "SAMPLE");
-        if (p.isKw("as") and p.isKwAt(1, "of")) return p.unsupported(p.peek().start, "flashback queries (AS OF)");
+        if (p.c.isKw("sample")) return p.unsupported(p.c.peek().start, "SAMPLE");
+        if (p.c.isKw("as") and p.c.isKwAt(1, "of")) return p.unsupported(p.c.peek().start, "flashback queries (AS OF)");
         if (try p.alias()) |al| item.alias = al;
         return item;
     }
@@ -1036,10 +943,10 @@ pub const Parser = struct {
     /// `[AS] alias` (Oracle has no AS before a table alias, xqlite takes
     /// one).
     pub fn alias(p: *Parser) Error!?tree.Alias {
-        if (p.eatKw("as")) return .{ .name = try p.colId() };
-        const a = p.peek();
+        if (p.c.eatKw("as")) return .{ .name = try p.colId() };
+        const a = p.c.peek();
         if (a.kind == .qident or (a.kind == .ident and !noAlias(a.text))) {
-            _ = p.advance();
+            p.c.skip();
             return .{ .name = .{ .text = a.text, .pos = a.start } };
         }
         return null;
@@ -1063,7 +970,7 @@ pub const Parser = struct {
             var marked: ?usize = null;
             var bad = false;
             try p.markedItem(x, c.from, &marked, &bad);
-            if (bad) return p.fail(x.pos, "ORA-01468: a predicate may reference only one outer-joined table", .{});
+            if (bad) return p.c.fail(x.pos, "ORA-01468: a predicate may reference only one outer-joined table", .{});
             const k = marked orelse {
                 try rest.append(p.arena, x);
                 continue;
@@ -1075,7 +982,7 @@ pub const Parser = struct {
         var from = try p.arena.dupe(tree.FromItem, c.from);
         for (ons, 0..) |on_opt, k| {
             const on = on_opt orelse continue;
-            if (from[k].join != .comma and from[k].join != .none) return p.fail(on.pos, "ORA-25156: old style outer join (+) cannot be used with ANSI joins", .{});
+            if (from[k].join != .comma and from[k].join != .none) return p.c.fail(on.pos, "ORA-25156: old style outer join (+) cannot be used with ANSI joins", .{});
             if (k > 0) {
                 from[k].join = .left;
                 from[k].on = on;
@@ -1099,7 +1006,7 @@ pub const Parser = struct {
     fn markedItem(p: *Parser, e: *const Expr, from: []const tree.FromItem, out: *?usize, bad: *bool) Error!void {
         if (p.outer_marks.contains(e)) {
             const names = e.kind.column;
-            const k = try p.itemOf(names, from) orelse return p.fail(e.pos, "ORA-00904: \"{s}\": invalid identifier", .{names[names.len - 1].text});
+            const k = try p.itemOf(names, from) orelse return p.c.fail(e.pos, "ORA-00904: \"{s}\": invalid identifier", .{names[names.len - 1].text});
             if (out.*) |prev| {
                 if (prev != k) bad.* = true;
             } else out.* = k;
@@ -1271,12 +1178,7 @@ pub const Parser = struct {
     // ======================================================= expressions
 
     pub fn exprList(p: *Parser) Error![]*Expr {
-        var out: std.ArrayList(*Expr) = .empty;
-        while (true) {
-            try out.append(p.arena, try p.expr0());
-            if (!p.eat(.comma)) break;
-        }
-        return out.items;
+        return p.c.list(*Expr, p, expr0);
     }
 
     pub fn expr0(p: *Parser) Error!*Expr {
@@ -1285,7 +1187,7 @@ pub const Parser = struct {
 
     fn orExpr(p: *Parser) Error!*Expr {
         var l = try p.andExpr();
-        while (p.eatKw("or")) {
+        while (p.c.eatKw("or")) {
             const r = try p.andExpr();
             l = try p.binary(.@"or", l, r);
         }
@@ -1294,7 +1196,7 @@ pub const Parser = struct {
 
     fn andExpr(p: *Parser) Error!*Expr {
         var l = try p.notExpr();
-        while (p.eatKw("and")) {
+        while (p.c.eatKw("and")) {
             const r = try p.notExpr();
             l = try p.binary(.@"and", l, r);
         }
@@ -1302,9 +1204,9 @@ pub const Parser = struct {
     }
 
     fn notExpr(p: *Parser) Error!*Expr {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.isKw("not")) {
-            _ = p.advance();
+            p.c.skip();
             const e = try p.notExpr();
             return p.expr(t.start, .{ .unary = .{ .op = .not, .e = e } });
         }
@@ -1326,19 +1228,19 @@ pub const Parser = struct {
     fn cmpExpr(p: *Parser) Error!*Expr {
         var l = try p.addExpr();
         while (true) {
-            if (cmpOp(p.peek())) |op| {
-                const at = p.advance().start;
-                if (p.isAnyKw(&.{ "any", "some", "all" })) {
-                    const all = p.advance().isKw("all");
+            if (cmpOp(p.c.peek())) |op| {
+                const at = p.c.advance().start;
+                if (p.c.isAnyKw(&.{ "any", "some", "all" })) {
+                    const all = p.c.advance().isKw("all");
                     if (!((op == .eq and !all) or (op == .ne and all))) return p.unsupported(at, "this ANY/ALL comparison");
-                    _ = try p.expect(.lparen);
+                    _ = try p.c.expect(.lparen);
                     if (p.startsSelect(0) or p.parenStartsSelect()) {
                         const s = try p.select();
-                        _ = try p.expect(.rparen);
+                        _ = try p.c.expect(.rparen);
                         l = try p.expr(l.pos, .{ .in_select = .{ .e = l, .not = all, .sel = s } });
                     } else {
                         const items = try p.exprList();
-                        _ = try p.expect(.rparen);
+                        _ = try p.c.expect(.rparen);
                         l = try p.expr(l.pos, .{ .in_list = .{ .e = l, .not = all, .items = items } });
                     }
                     continue;
@@ -1347,50 +1249,50 @@ pub const Parser = struct {
                 l = try p.span(l, r, .{ .compare = .{ .op = op, .l = l, .r = r } });
                 continue;
             }
-            if (p.isKw("is")) {
-                _ = p.advance();
-                const not = p.eatKw("not");
-                if (p.eatKw("null")) {
+            if (p.c.isKw("is")) {
+                p.c.skip();
+                const not = p.c.eatKw("not");
+                if (p.c.eatKw("null")) {
                     l = try p.expr(l.pos, .{ .is_null = .{ .e = l, .not = not } });
-                } else if (p.eatKw("true")) {
+                } else if (p.c.eatKw("true")) {
                     l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = true, .not = not } });
-                } else if (p.eatKw("false")) {
+                } else if (p.c.eatKw("false")) {
                     l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = false, .not = not } });
-                } else if (p.isKw("json")) {
+                } else if (p.c.isKw("json")) {
                     l = try jsonsql.isJson(p, l, not);
                 } else return p.missing("ORA-00908: missing NULL keyword");
                 continue;
             }
             var not = false;
-            const save = p.i;
-            if (p.isKw("not") and (p.isKwAt(1, "between") or p.isKwAt(1, "in") or p.isKwAt(1, "like"))) {
-                _ = p.advance();
+            const save = p.c.mark();
+            if (p.c.isKw("not") and (p.c.isKwAt(1, "between") or p.c.isKwAt(1, "in") or p.c.isKwAt(1, "like"))) {
+                p.c.skip();
                 not = true;
             }
-            if (p.eatKw("between")) {
+            if (p.c.eatKw("between")) {
                 const lo = try p.addExpr();
-                try p.expectKw("and");
+                try p.c.expectKw("and");
                 const hi = try p.addExpr();
                 l = try p.expr(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
-            } else if (p.eatKw("in")) {
-                _ = try p.expect(.lparen);
+            } else if (p.c.eatKw("in")) {
+                _ = try p.c.expect(.lparen);
                 if (p.startsSelect(0) or p.parenStartsSelect()) {
                     const s = try p.select();
-                    _ = try p.expect(.rparen);
+                    _ = try p.c.expect(.rparen);
                     l = try p.expr(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = s } });
                 } else {
                     const items = try p.exprList();
-                    _ = try p.expect(.rparen);
+                    _ = try p.c.expect(.rparen);
                     l = try p.expr(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
                 }
-            } else if (p.eatKw("like")) {
+            } else if (p.c.eatKw("like")) {
                 // Case-sensitive, no escape character without ESCAPE.
                 const pat = try p.addExpr();
                 var esc: tree.Escape = .none;
-                if (p.eatKw("escape")) esc = .{ .expr = try p.addExpr() };
+                if (p.c.eatKw("escape")) esc = .{ .expr = try p.addExpr() };
                 l = try p.expr(l.pos, .{ .like = .{ .e = l, .pat = pat, .not = not, .case_sensitive = true, .escape = esc } });
             } else {
-                p.i = save;
+                p.c.reset(save);
                 break;
             }
         }
@@ -1401,11 +1303,11 @@ pub const Parser = struct {
     pub fn addExpr(p: *Parser) Error!*Expr {
         var l = try p.mulExpr();
         while (true) {
-            if (p.isOp("+") or p.isOp("-")) {
-                const op: tree.BinOp = if (p.advance().isOp("+")) .add else .sub;
+            if (p.c.isOp("+") or p.c.isOp("-")) {
+                const op: tree.BinOp = if (p.c.advance().isOp("+")) .add else .sub;
                 const r = try p.mulExpr();
                 l = try p.binary(op, l, r);
-            } else if (p.eatOp("||")) {
+            } else if (p.c.eatOp("||")) {
                 const r = try p.mulExpr();
                 l = try p.concat(l, r);
             } else break;
@@ -1436,9 +1338,9 @@ pub const Parser = struct {
     fn mulExpr(p: *Parser) Error!*Expr {
         var l = try p.unary();
         while (true) {
-            if (p.eatOp("*")) {
+            if (p.c.eatOp("*")) {
                 l = try p.binary(.mul, l, try p.unary());
-            } else if (p.eatOp("/")) {
+            } else if (p.c.eatOp("/")) {
                 // Oracle's NUMBER division is exact: as reals.
                 const r = try p.unary();
                 l = try p.span(l, r, .{ .div = .{ .kind = .real, .l = l, .r = r } });
@@ -1448,10 +1350,10 @@ pub const Parser = struct {
     }
 
     fn unary(p: *Parser) Error!*Expr {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.isKw("prior")) return p.unsupported(t.start, "CONNECT BY (PRIOR)");
         const op: tree.UnOp = if (t.isOp("-")) .neg else if (t.isOp("+")) .plus else return p.postfix();
-        _ = p.advance();
+        p.c.skip();
         const e = try p.unary();
         return p.expr(t.start, .{ .unary = .{ .op = op, .e = e } });
     }
@@ -1459,15 +1361,15 @@ pub const Parser = struct {
     fn postfix(p: *Parser) Error!*Expr {
         const e = try p.primary();
         // (+): an outer join mark on a column.
-        if (p.peek().kind == .lparen and p.peekAt(1).isOp("+") and p.peekAt(2).kind == .rparen) {
-            if (e.kind != .column) return p.fail(e.pos, "ORA-00936: missing expression", .{});
-            _ = p.advance();
-            _ = p.advance();
-            _ = p.advance();
+        if (p.c.peek().kind == .lparen and p.c.peekAt(1).isOp("+") and p.c.peekAt(2).kind == .rparen) {
+            if (e.kind != .column) return p.c.fail(e.pos, "ORA-00936: missing expression", .{});
+            p.c.skip();
+            p.c.skip();
+            p.c.skip();
             try p.outer_marks.put(p.arena, e, {});
         }
-        if (p.isKw("collate")) return p.unsupported(p.peek().start, "COLLATE");
-        if (p.isKw("at") and (p.isKwAt(1, "time") or p.isKwAt(1, "local"))) return p.unsupported(p.peek().start, "AT TIME ZONE");
+        if (p.c.isKw("collate")) return p.unsupported(p.c.peek().start, "COLLATE");
+        if (p.c.isKw("at") and (p.c.isKwAt(1, "time") or p.c.isKwAt(1, "local"))) return p.unsupported(p.c.peek().start, "AT TIME ZONE");
         return e;
     }
 
@@ -1476,28 +1378,28 @@ pub const Parser = struct {
     }
 
     fn primary(p: *Parser) Error!*Expr {
-        const t = p.peek();
+        const t = p.c.peek();
         switch (t.kind) {
             .integer => {
-                _ = p.advance();
+                p.c.skip();
                 return p.expr(t.start, .{ .integer = t.text });
             },
             .float => {
-                _ = p.advance();
+                p.c.skip();
                 return p.expr(t.start, .{ .float = t.text });
             },
             .string => {
-                _ = p.advance();
+                p.c.skip();
                 // The empty string is NULL.
                 if (t.text.len == 0) return p.expr(t.start, .null);
                 return p.expr(t.start, .{ .string = t.text });
             },
             .param => {
-                _ = p.advance();
+                p.c.skip();
                 const name = t.text[1..];
                 if (name.len > 0 and std.ascii.isDigit(name[0])) {
-                    const n = std.fmt.parseInt(u32, name, 10) catch return p.fail(t.start, "ORA-01036: illegal variable name/number", .{});
-                    if (n == 0) return p.fail(t.start, "ORA-01036: illegal variable name/number", .{});
+                    const n = std.fmt.parseInt(u32, name, 10) catch return p.c.fail(t.start, "ORA-01036: illegal variable name/number", .{});
+                    if (n == 0) return p.c.fail(t.start, "ORA-01036: illegal variable name/number", .{});
                     return p.expr(t.start, .{ .param = n });
                 }
                 return p.expr(t.start, .{ .named_param = t.text });
@@ -1514,42 +1416,42 @@ pub const Parser = struct {
         if (eq(w, "DEFAULT")) return p.keywordExpr(.default);
         if (eq(w, "CASE")) return p.caseExpr();
         if (eq(w, "CAST")) {
-            _ = p.advance();
-            _ = try p.expect(.lparen);
-            if (p.isKw("multiset")) return p.unsupported(p.peek().start, "CAST(MULTISET ...)");
+            p.c.skip();
+            _ = try p.c.expect(.lparen);
+            if (p.c.isKw("multiset")) return p.unsupported(p.c.peek().start, "CAST(MULTISET ...)");
             const e = try p.expr0();
-            try p.expectKw("as");
+            try p.c.expectKw("as");
             const ty = try p.typeName();
-            _ = try p.expect(.rparen);
+            _ = try p.c.expect(.rparen);
             return p.castExpr(t.start, e, ty);
         }
         if (eq(w, "EXISTS")) {
-            _ = p.advance();
-            _ = try p.expect(.lparen);
+            p.c.skip();
+            _ = try p.c.expect(.lparen);
             const s = try p.select();
-            _ = try p.expect(.rparen);
+            _ = try p.c.expect(.rparen);
             return p.expr(t.start, .{ .exists = s });
         }
         if (eq(w, "SYSDATE") or eq(w, "CURRENT_DATE")) {
-            _ = p.advance();
+            p.c.skip();
             return p.sysdate(t.start);
         }
         if (eq(w, "SYSTIMESTAMP") or eq(w, "CURRENT_TIMESTAMP") or eq(w, "LOCALTIMESTAMP")) {
-            _ = p.advance();
+            p.c.skip();
             // CURRENT_TIMESTAMP(3): the precision is ignored.
-            if (p.peek().kind == .lparen and p.peekAt(1).kind == .integer and p.peekAt(2).kind == .rparen) p.i += 3;
+            if (p.c.peek().kind == .lparen and p.c.peekAt(1).kind == .integer and p.c.peekAt(2).kind == .rparen) p.c.skipN(3);
             return p.systimestamp(t.start);
         }
         if (eq(w, "USER")) {
-            _ = p.advance();
+            p.c.skip();
             return p.expr(t.start, .{ .string = "MAIN" });
         }
         if (eq(w, "UID")) {
-            _ = p.advance();
+            p.c.skip();
             return p.expr(t.start, .{ .integer = "0" });
         }
         if (eq(w, "ROWNUM")) {
-            _ = p.advance();
+            p.c.skip();
             // row_number() OVER (): the number of the row as the query
             // produces it (in WHERE, a LIMIT: rownumWhere()).
             const spec = try p.new(tree.WindowSpec, .{});
@@ -1559,7 +1461,7 @@ pub const Parser = struct {
             return x;
         }
         if (eq(w, "ROWID")) {
-            _ = p.advance();
+            p.c.skip();
             const n = try p.arena.alloc(Name, 1);
             n[0] = .{ .text = "rowid", .pos = t.start };
             const x = try p.expr(t.start, .{ .column = n });
@@ -1567,20 +1469,20 @@ pub const Parser = struct {
             return x;
         }
         if (eq(w, "LEVEL") or eq(w, "PRIOR") or eq(w, "CONNECT_BY_ROOT")) return p.unsupported(t.start, "CONNECT BY hierarchical queries");
-        if ((eq(w, "DATE") or eq(w, "TIMESTAMP")) and p.peekAt(1).kind == .string) {
-            _ = p.advance();
-            const s = p.advance();
+        if ((eq(w, "DATE") or eq(w, "TIMESTAMP")) and p.c.peekAt(1).kind == .string) {
+            p.c.skip();
+            const s = p.c.advance();
             return p.dateLiteral(t.start, s, eq(w, "TIMESTAMP"));
         }
-        if (eq(w, "INTERVAL") and p.peekAt(1).kind == .string) return p.unsupported(t.start, "INTERVAL literals");
-        if (isReserved(w) and !(p.peekAt(1).kind == .lparen and isFuncNameKeyword(w))) {
+        if (eq(w, "INTERVAL") and p.c.peekAt(1).kind == .string) return p.unsupported(t.start, "INTERVAL literals");
+        if (isReserved(w) and !(p.c.peekAt(1).kind == .lparen and isFuncNameKeyword(w))) {
             return p.missing("ORA-00936: missing expression");
         }
         return p.nameExpr();
     }
 
     fn keywordExpr(p: *Parser, kind: tree.Kind) Error!*Expr {
-        const t = p.advance();
+        const t = p.c.advance();
         return p.expr(t.start, kind);
     }
 
@@ -1603,8 +1505,8 @@ pub const Parser = struct {
     /// DATE 'YYYY-MM-DD', TIMESTAMP 'YYYY-MM-DD HH:MM:SS[.f]': their
     /// text as the dialect stores them.
     fn dateLiteral(p: *Parser, pos: u32, s: Token, timestamp: bool) Error!*Expr {
-        const d = datetime.parseIso(s.text) orelse return p.fail(s.start, "ORA-01861: literal does not match format string", .{});
-        if (!timestamp and s.text.len != 10) return p.fail(s.start, "ORA-01861: literal does not match format string", .{});
+        const d = datetime.parseIso(s.text) orelse return p.c.fail(s.start, "ORA-01861: literal does not match format string", .{});
+        if (!timestamp and s.text.len != 10) return p.c.fail(s.start, "ORA-01861: literal does not match format string", .{});
         var buf: [48]u8 = undefined;
         const text = if (timestamp) datetime.writeTimestamp(&buf, d, 6) else datetime.writeDate(&buf, d);
         const e = try p.expr(pos, .{ .string = try p.arena.dupe(u8, text) });
@@ -1614,26 +1516,26 @@ pub const Parser = struct {
 
     /// A column reference, s.NEXTVAL/CURRVAL, or a function call.
     fn nameExpr(p: *Parser) Error!*Expr {
-        const start = p.peek().start;
+        const start = p.c.peek().start;
         var names: std.ArrayList(Name) = .empty;
-        const first = p.advance();
-        if (first.kind == .ident and p.peek().kind == .lparen and jsonsql.isFunction(first.text)) return jsonsql.call(p, start, first);
+        const first = p.c.advance();
+        if (first.kind == .ident and p.c.peek().kind == .lparen and jsonsql.isFunction(first.text)) return jsonsql.call(p, start, first);
         try names.append(p.arena, .{ .text = first.text, .pos = first.start });
-        while (p.peek().kind == .dot) {
+        while (p.c.peek().kind == .dot) {
             // t.col.a.size(): dot notation with an item method.
             if (names.items.len >= 2 and jsonsql.methodAhead(p)) break;
-            _ = p.advance();
-            const nt = p.peek();
+            p.c.skip();
+            const nt = p.c.peek();
             try names.append(p.arena, try p.anyName());
             // seq.NEXTVAL, schema.seq.CURRVAL
             if (nt.kind == .ident and (eq(nt.text, "NEXTVAL") or eq(nt.text, "CURRVAL"))) {
                 const seq = names.items[names.items.len - 2];
-                if (names.items.len > 3) return p.syntaxError();
+                if (names.items.len > 3) return p.c.syntaxError();
                 const q: QName = .{ .schema = if (names.items.len == 3) names.items[0] else null, .name = seq };
                 const r = try p.lookup(q, .sequence);
                 // Sequences are all in main.
                 const sname = if (r.alias != null) r.q.name.text else seq.text;
-                if (p.p) |ps| if (!sequenceExists(ps.db, sname)) return p.fail(seq.pos, "ORA-02289: sequence does not exist", .{});
+                if (p.p) |ps| if (!sequenceExists(ps.db, sname)) return p.c.fail(seq.pos, "ORA-02289: sequence does not exist", .{});
                 var fname: []const u8 = if (eq(nt.text, "NEXTVAL")) "nextval" else "currval";
                 if (eq(nt.text, "NEXTVAL")) {
                     if (p.nextval_seen.contains(sname)) fname = "currval" else try p.nextval_seen.put(p.arena, sname, {});
@@ -1643,100 +1545,87 @@ pub const Parser = struct {
                 return x;
             }
         }
-        if (p.peek().kind == .lparen and !(p.peekAt(1).isOp("+") and p.peekAt(2).kind == .rparen)) {
+        if (p.c.peek().kind == .lparen and !(p.c.peekAt(1).isOp("+") and p.c.peekAt(2).kind == .rparen)) {
             const n = names.items;
-            if (n.len > 2) return p.syntaxError();
+            if (n.len > 2) return p.c.syntaxError();
             // pkg.f(): packages are not supported, schema.f() is f().
             const c = try p.funcCall(n[n.len - 1]);
             return p.callExpr(start, c);
         }
-        if (names.items.len >= 3 or (names.items.len == 2 and (p.peek().isOp("[") or jsonsql.methodAhead(p)))) {
+        if (names.items.len >= 3 or (names.items.len == 2 and (p.c.peek().isOp("[") or jsonsql.methodAhead(p)))) {
             return jsonsql.dotExpr(p, start, names.items);
         }
         return p.expr(start, .{ .column = names.items });
     }
 
     fn parenExpr(p: *Parser) Error!*Expr {
-        const start = p.peek().start;
+        const start = p.c.peek().start;
         if (p.parenStartsSelect()) {
-            const save = p.i;
-            _ = p.advance();
+            const save = p.c.mark();
+            p.c.skip();
             if (p.select()) |s| {
-                if (p.eat(.rparen)) return p.expr(start, .{ .subquery = s });
+                if (p.c.eat(.rparen)) return p.expr(start, .{ .subquery = s });
             } else |err| if (err == error.OutOfMemory or p.err_in_parse) return err;
-            p.i = save;
+            p.c.reset(save);
         }
-        _ = p.advance();
+        p.c.skip();
         const e = try p.expr0();
-        if (p.peek().kind == .comma) {
+        if (p.c.peek().kind == .comma) {
             var items: std.ArrayList(*Expr) = .empty;
             try items.append(p.arena, e);
-            while (p.eat(.comma)) try items.append(p.arena, try p.expr0());
-            _ = try p.expect(.rparen);
+            while (p.c.eat(.comma)) try items.append(p.arena, try p.expr0());
+            _ = try p.c.expect(.rparen);
             return p.expr(start, .{ .row = items.items });
         }
-        _ = try p.expect(.rparen);
+        _ = try p.c.expect(.rparen);
         e.pos = start;
-        e.end = p.lastEnd();
+        e.end = p.c.lastEnd();
         return e;
     }
 
     fn caseExpr(p: *Parser) Error!*Expr {
-        const start = p.advance().start;
-        var operand: ?*Expr = null;
-        if (!p.isKw("when")) operand = try p.expr0();
-        var whens: std.ArrayList(*Expr) = .empty;
-        while (p.eatKw("when")) {
-            try whens.append(p.arena, try p.expr0());
-            try p.expectKw("then");
-            try whens.append(p.arena, try p.expr0());
-        }
-        if (whens.items.len == 0) return p.missing("ORA-00905: missing keyword");
-        var else_: ?*Expr = null;
-        if (p.eatKw("else")) else_ = try p.expr0();
-        try p.expectKw("end");
-        return p.expr(start, .{ .case = .{ .operand = operand, .whens = whens.items, .@"else" = else_ } });
+        return syntax.caseExpr(p, expr0);
     }
 
     // ========================================================= functions
 
     fn funcCall(p: *Parser, name: Name) Error!Call {
-        _ = try p.expect(.lparen);
+        _ = try p.c.expect(.lparen);
         var f: Call = .{ .name = name };
         const n = name.text;
         if (eq(n, "TRIM") or eq(n, "EXTRACT")) {
             if (try p.specialCall(&f)) return p.finishCall(f);
         }
-        if (p.peek().isOp("*")) {
-            _ = p.advance();
+        if (p.c.peek().isOp("*")) {
+            p.c.skip();
             f.star = true;
-        } else if (p.peek().kind != .rparen) {
-            if (p.eatKw("distinct") or p.eatKw("unique")) f.distinct = true else _ = p.eatKw("all");
+        } else if (p.c.peek().kind != .rparen) {
+            if (p.c.eatKw("distinct") or p.c.eatKw("unique")) f.distinct = true else _ = p.c.eatKw("all");
             f.args = try p.exprList();
-            if (p.peek().isOp("=>")) return p.unsupported(p.peek().start, "named arguments");
-            if (p.isKw("on") and p.isKwAt(1, "overflow")) return p.unsupported(p.peek().start, "LISTAGG ... ON OVERFLOW");
+            if (p.c.peek().isOp("=>")) return p.unsupported(p.c.peek().start, "named arguments");
+            if (p.c.isKw("on") and p.c.isKwAt(1, "overflow")) return p.unsupported(p.c.peek().start, "LISTAGG ... ON OVERFLOW");
         }
-        _ = try p.expect(.rparen);
+        _ = try p.c.expect(.rparen);
         return p.finishCall(f);
     }
 
     fn finishCall(p: *Parser, f_arg: Call) Error!Call {
         var f = f_arg;
-        if (p.isKw("within") and p.isKwAt(1, "group")) {
-            _ = p.advance();
-            _ = p.advance();
-            _ = try p.expect(.lparen);
-            try p.expectKw("order");
-            try p.expectKw("by");
+        if (p.c.isKw("within") and p.c.isKwAt(1, "group")) {
+            p.c.skip();
+            p.c.skip();
+            _ = try p.c.expect(.lparen);
+            try p.c.expectKw("order");
+            try p.c.expectKw("by");
             f.order_by = try p.sortList();
-            _ = try p.expect(.rparen);
+            _ = try p.c.expect(.rparen);
         }
-        if (p.isKw("keep")) return p.unsupported(p.peek().start, "KEEP (DENSE_RANK ...)");
-        if (p.isKw("respect") or p.isKw("ignore")) {
-            if (p.isKwAt(1, "nulls")) return p.unsupported(p.peek().start, "IGNORE/RESPECT NULLS");
+        if (p.c.isKw("keep")) return p.unsupported(p.c.peek().start, "KEEP (DENSE_RANK ...)");
+        if (p.c.isKw("respect") or p.c.isKw("ignore")) {
+            if (p.c.isKwAt(1, "nulls")) return p.unsupported(p.c.peek().start, "IGNORE/RESPECT NULLS");
         }
-        if (p.eatKw("over")) {
-            if (p.peek().kind == .lparen) {
+        if (p.c.eatKw("over")) {
+            if (p.c.peek().kind == .lparen) {
                 f.over = try p.windowSpec();
             } else {
                 f.over = try p.new(tree.WindowSpec, .{ .base = try p.colId(), .name_only = true });
@@ -1751,17 +1640,17 @@ pub const Parser = struct {
         const n = f.name.text;
         var args: std.ArrayList(*Expr) = .empty;
         if (eq(n, "EXTRACT")) {
-            const t = p.peek();
+            const t = p.c.peek();
             if (t.kind != .ident) return p.missing("ORA-00905: missing keyword");
-            _ = p.advance();
+            p.c.skip();
             const fields = [_][]const u8{ "YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND" };
             for (fields) |fw| {
                 if (eq(t.text, fw)) break;
             } else return p.unsupported(t.start, "this EXTRACT field");
-            try p.expectKw("from");
+            try p.c.expectKw("from");
             try args.append(p.arena, try p.expr(t.start, .{ .string = t.text }));
             try args.append(p.arena, try p.expr0());
-            _ = try p.expect(.rparen);
+            _ = try p.c.expect(.rparen);
             f.name.text = "extract";
             f.args = args.items;
             return true;
@@ -1769,22 +1658,22 @@ pub const Parser = struct {
         // TRIM
         var kind: []const u8 = "trim";
         var keyword = false;
-        if (p.eatKw("both")) {
+        if (p.c.eatKw("both")) {
             keyword = true;
-        } else if (p.eatKw("leading")) {
+        } else if (p.c.eatKw("leading")) {
             kind = "ltrim";
             keyword = true;
-        } else if (p.eatKw("trailing")) {
+        } else if (p.c.eatKw("trailing")) {
             kind = "rtrim";
             keyword = true;
         }
         var chars: ?*Expr = null;
         var subject: *Expr = undefined;
-        if (p.eatKw("from")) {
+        if (p.c.eatKw("from")) {
             subject = try p.expr0();
         } else {
             const first = try p.expr0();
-            if (p.eatKw("from")) {
+            if (p.c.eatKw("from")) {
                 chars = first;
                 subject = try p.expr0();
             } else {
@@ -1792,7 +1681,7 @@ pub const Parser = struct {
                 subject = first;
             }
         }
-        _ = try p.expect(.rparen);
+        _ = try p.c.expect(.rparen);
         try args.append(p.arena, subject);
         if (chars) |c| {
             try args.append(p.arena, c);
@@ -1839,7 +1728,7 @@ pub const Parser = struct {
                 const x = try p.concat(c.args[0], c.args[1]);
                 // The call's span (for its column name), not the arguments'.
                 x.pos = pos;
-                x.end = p.lastEnd();
+                x.end = p.c.lastEnd();
                 return x;
             }
             if (eq(n, "LENGTH") or eq(n, "LENGTHC")) return p.call(pos, "lengthc", .oracle, c.args);
@@ -1847,7 +1736,7 @@ pub const Parser = struct {
                 // SQLite's (sqlite3 can run them in an index), '' as NULL.
                 if (argc != 1) return p.argCount(c);
                 const x = try p.nullIfEmpty(try p.call(pos, if (eq(n, "UPPER")) "upper" else "lower", null, c.args));
-                x.end = p.lastEnd();
+                x.end = p.c.lastEnd();
                 return x;
             }
             if (eq(n, "SUBSTRB") or eq(n, "SUBSTRC")) return p.call(pos, "substr", .oracle, c.args);
@@ -1934,7 +1823,7 @@ pub const Parser = struct {
     }
 
     fn argCount(p: *Parser, c: Call) Error {
-        return p.fail(c.name.pos, "ORA-00909: invalid number of arguments", .{});
+        return p.c.fail(c.name.pos, "ORA-00909: invalid number of arguments", .{});
     }
 
     pub fn call(p: *Parser, pos: u32, name: []const u8, owner: ?Dialect, args: []const *Expr) Error!*Expr {
@@ -1947,65 +1836,15 @@ pub const Parser = struct {
     }
 
     fn windowSpec(p: *Parser) Error!*tree.WindowSpec {
-        _ = try p.expect(.lparen);
+        _ = try p.c.expect(.lparen);
         var w: tree.WindowSpec = .{};
-        const t = p.peek();
+        const t = p.c.peek();
         if ((t.kind == .ident and !isReserved(t.text) and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .qident) {
             w.base = try p.colId();
         }
-        if (p.eatKw("partition")) {
-            try p.expectKw("by");
-            w.partition = try p.exprList();
-        }
-        if (p.isKw("order")) {
-            _ = p.advance();
-            try p.expectKw("by");
-            w.order_by = try p.sortList();
-        }
-        if (p.isAnyKw(&.{ "rows", "range", "groups" })) {
-            const u = p.advance();
-            var fr: tree.Frame = .{ .unit = if (u.isKw("rows")) .rows else if (u.isKw("range")) .range else .groups, .start = undefined, .end = null };
-            if (p.eatKw("between")) {
-                fr.start = try p.frameBound();
-                try p.expectKw("and");
-                fr.end = try p.frameBound();
-            } else {
-                fr.start = try p.frameBound();
-            }
-            if (p.eatKw("exclude")) {
-                if (p.eatKw("current")) {
-                    try p.expectKw("row");
-                    fr.exclude = .current_row;
-                } else if (p.eatKw("group")) {
-                    fr.exclude = .group;
-                } else if (p.eatKw("ties")) {
-                    fr.exclude = .ties;
-                } else {
-                    try p.expectKw("no");
-                    try p.expectKw("others");
-                    fr.exclude = .no_others;
-                }
-            }
-            w.frame = fr;
-        }
-        _ = try p.expect(.rparen);
+        try syntax.windowClauses(p, &w, addExpr, .{ .groups = true });
+        _ = try p.c.expect(.rparen);
         return p.new(tree.WindowSpec, w);
-    }
-
-    fn frameBound(p: *Parser) Error!tree.Bound {
-        if (p.eatKw("unbounded")) {
-            if (p.eatKw("preceding")) return .{ .kind = .unbounded_preceding };
-            try p.expectKw("following");
-            return .{ .kind = .unbounded_following };
-        }
-        if (p.eatKw("current")) {
-            try p.expectKw("row");
-            return .{ .kind = .current_row };
-        }
-        const e = try p.addExpr();
-        if (p.eatKw("preceding")) return .{ .kind = .preceding, .expr = e };
-        try p.expectKw("following");
-        return .{ .kind = .following, .expr = e };
     }
 
     // ============================================================= types
@@ -2014,9 +1853,9 @@ pub const Parser = struct {
     /// [WITH [LOCAL] TIME ZONE], the ANSI names (INTEGER, DECIMAL, DOUBLE
     /// PRECISION ...) mapped to Oracle's.
     pub fn typeName(p: *Parser) Error!types.TypeName {
-        const t = p.peek();
+        const t = p.c.peek();
         if (t.kind != .ident) return p.missing("ORA-00902: invalid datatype");
-        _ = p.advance();
+        p.c.skip();
         const w = t.text;
         var ty: types.TypeName = .{ .name = w, .pos = t.start };
         if (eq(w, "INTEGER") or eq(w, "INT") or eq(w, "SMALLINT")) {
@@ -2026,67 +1865,67 @@ pub const Parser = struct {
         if (eq(w, "DECIMAL") or eq(w, "DEC") or eq(w, "NUMERIC")) ty.name = "NUMBER";
         if (eq(w, "REAL")) return .{ .name = "FLOAT", .precision = 63, .pos = t.start };
         if (eq(w, "DOUBLE")) {
-            try p.expectKw("precision");
+            try p.c.expectKw("precision");
             return .{ .name = "FLOAT", .precision = 126, .pos = t.start };
         }
         if (eq(w, "VARCHAR") or eq(w, "STRING")) ty.name = "VARCHAR2";
-        if (eq(w, "CHARACTER")) ty.name = if (p.eatKw("varying")) "VARCHAR2" else "CHAR";
-        if (eq(w, "CHAR") and p.eatKw("varying")) ty.name = "VARCHAR2";
+        if (eq(w, "CHARACTER")) ty.name = if (p.c.eatKw("varying")) "VARCHAR2" else "CHAR";
+        if (eq(w, "CHAR") and p.c.eatKw("varying")) ty.name = "VARCHAR2";
         if (eq(w, "NATIONAL")) {
-            if (!p.eatKw("character")) try p.expectKw("char");
-            ty.name = if (p.eatKw("varying")) "NVARCHAR2" else "NCHAR";
+            if (!p.c.eatKw("character")) try p.c.expectKw("char");
+            ty.name = if (p.c.eatKw("varying")) "NVARCHAR2" else "NCHAR";
         }
-        if (eq(w, "LONG") and p.eatKw("raw")) ty.name = "LONG RAW";
+        if (eq(w, "LONG") and p.c.eatKw("raw")) ty.name = "LONG RAW";
         if (eq(w, "INTERVAL")) {
-            if (p.eatKw("year")) {
-                if (p.peek().kind == .lparen) _ = try p.parenInt();
-                try p.expectKw("to");
-                try p.expectKw("month");
+            if (p.c.eatKw("year")) {
+                if (p.c.peek().kind == .lparen) _ = try p.parenInt();
+                try p.c.expectKw("to");
+                try p.c.expectKw("month");
                 return .{ .name = "INTERVAL YEAR TO MONTH", .pos = t.start };
             }
-            try p.expectKw("day");
-            if (p.peek().kind == .lparen) _ = try p.parenInt();
-            try p.expectKw("to");
-            try p.expectKw("second");
-            if (p.peek().kind == .lparen) _ = try p.parenInt();
+            try p.c.expectKw("day");
+            if (p.c.peek().kind == .lparen) _ = try p.parenInt();
+            try p.c.expectKw("to");
+            try p.c.expectKw("second");
+            if (p.c.peek().kind == .lparen) _ = try p.parenInt();
             return .{ .name = "INTERVAL DAY TO SECOND", .pos = t.start };
         }
         // Spelled as in the table of types.zig, upper case.
         ty.name = canonical(ty.name);
-        if (types.family(ty.name) == null) return p.fail(t.start, "ORA-00902: invalid datatype", .{});
-        if (p.peek().kind == .lparen) {
-            _ = p.advance();
-            if (p.isOp("*")) {
-                _ = p.advance();
+        if (types.family(ty.name) == null) return p.c.fail(t.start, "ORA-00902: invalid datatype", .{});
+        if (p.c.peek().kind == .lparen) {
+            p.c.skip();
+            if (p.c.isOp("*")) {
+                p.c.skip();
             } else {
                 ty.precision = try p.signedInt();
             }
-            if (p.eatKw("byte")) {} else if (p.eatKw("char")) ty.char_semantics = true;
-            if (p.eat(.comma)) ty.scale = try p.signedInt();
-            _ = try p.expect(.rparen);
+            if (p.c.eatKw("byte")) {} else if (p.c.eatKw("char")) ty.char_semantics = true;
+            if (p.c.eat(.comma)) ty.scale = try p.signedInt();
+            _ = try p.c.expect(.rparen);
             if (ty.precision == null and ty.scale == null) ty.scale = 0;
         }
         if (eq(ty.name, "TIMESTAMP")) {
-            if (p.isKw("with") and (p.isKwAt(1, "time") or p.isKwAt(1, "local"))) {
-                _ = p.advance();
-                const local = p.eatKw("local");
-                try p.expectKw("time");
-                try p.expectKw("zone");
+            if (p.c.isKw("with") and (p.c.isKwAt(1, "time") or p.c.isKwAt(1, "local"))) {
+                p.c.skip();
+                const local = p.c.eatKw("local");
+                try p.c.expectKw("time");
+                try p.c.expectKw("zone");
                 ty.name = if (local) "TIMESTAMP WITH LOCAL TIME ZONE" else "TIMESTAMP WITH TIME ZONE";
             }
         }
         if ((eq(ty.name, "CHAR") or eq(ty.name, "NCHAR")) and ty.precision == null) ty.precision = 1;
         if (eq(ty.name, "NVARCHAR2") or eq(ty.name, "NCHAR")) ty.char_semantics = true;
         if ((eq(ty.name, "VARCHAR2") or eq(ty.name, "NVARCHAR2") or eq(ty.name, "RAW")) and ty.precision == null) {
-            return p.fail(t.start, "ORA-00906: missing left parenthesis", .{});
+            return p.c.fail(t.start, "ORA-00906: missing left parenthesis", .{});
         }
         return ty;
     }
 
     fn parenInt(p: *Parser) Error!i64 {
-        _ = try p.expect(.lparen);
+        _ = try p.c.expect(.lparen);
         const v = try p.signedInt();
-        _ = try p.expect(.rparen);
+        _ = try p.c.expect(.rparen);
         return v;
     }
 

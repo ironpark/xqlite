@@ -54,21 +54,21 @@ pub fn asType(s: *Parser, e: *Expr, ty: []const u8) Error!*Expr {
 
 /// DECLARE @x type [= value] [, ...].
 pub fn declare(s: *Parser) Error!void {
-    try s.expectKw("DECLARE");
+    try s.c.expectKw("DECLARE");
     var calls: std.ArrayList(*Expr) = .empty;
     while (true) {
-        if (s.tok.kind != .variable) return s.syntaxError();
-        const vt = s.tok;
-        const pos = s.here();
-        s.advance();
-        _ = s.eatKw("AS");
-        if (s.isKw("TABLE")) return s.fail("xqlite: table variables are not supported", .{});
-        if (s.isKw("CURSOR")) return s.fail("xqlite: cursors are not supported", .{});
+        if (s.c.peek().kind != .variable) return s.c.syntaxError();
+        const vt = s.c.peek();
+        const pos = s.c.here();
+        s.c.skip();
+        _ = s.c.eatKw("AS");
+        if (s.c.isKw("TABLE")) return s.c.fail(null, "xqlite: table variables are not supported", .{});
+        if (s.c.isKw("CURSOR")) return s.c.fail(null, "xqlite: cursors are not supported", .{});
         const ty = try functions.typeNameOf(s, true);
         var value: *Expr = try s.mk(pos, .null);
-        if (s.eatOp("=")) value = try asType(s, try s.expr(), ty.text);
+        if (s.c.eatOp("=")) value = try asType(s, try s.expr(), ty.text);
         try calls.append(s.a, try s.func(pos, "xq_tsql_declare", &.{ try s.str(pos, try parser.varName(s.a, vt.text)), try s.str(pos, ty.text), value }));
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
     try codeEval(s, calls.items);
 }
@@ -77,43 +77,43 @@ pub fn declare(s: *Parser) Error!void {
 
 /// SET @x = value, SET IDENTITY_INSERT t ON|OFF, SET <option> ...
 pub fn set(s: *Parser) Error!void {
-    try s.expectKw("SET");
-    if (s.tok.kind == .variable) {
-        const vt = s.tok;
-        const pos = s.here();
-        s.advance();
-        const op = s.tok;
-        if (op.kind != .op or !(op.is("=") or (op.text.len == 2 and op.text[1] == '='))) return s.syntaxError();
-        s.advance();
+    try s.c.expectKw("SET");
+    if (s.c.peek().kind == .variable) {
+        const vt = s.c.peek();
+        const pos = s.c.here();
+        s.c.skip();
+        const op = s.c.peek();
+        if (op.kind != .op or !(op.is("=") or (op.text.len == 2 and op.text[1] == '='))) return s.c.syntaxError();
+        s.c.skip();
         const name = try parser.varName(s.a, vt.text);
-        const v = s.p.db.xq.mssql.get(name) orelse return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{vt.text});
+        const v = s.p.db.xq.mssql.get(name) orelse return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{vt.text});
         const ty = try s.a.dupe(u8, v.type);
         var e = try s.expr();
         if (op.text.len == 2) e = try s.compoundAssign(op.text[0], try s.variableRef(vt, pos), e);
         return codeEval(s, &.{try s.func(pos, "xq_tsql_setvar", &.{ try s.str(pos, name), try asType(s, e, ty) })});
     }
-    if (s.eatKw("IDENTITY_INSERT")) {
-        const pos = s.here();
+    if (s.c.eatKw("IDENTITY_INSERT")) {
+        const pos = s.c.here();
         const q = try s.qualifiedName();
-        const on = if (s.eatKw("ON")) true else if (s.eatKw("OFF")) false else return s.syntaxError();
+        const on = if (s.c.eatKw("ON")) true else if (s.c.eatKw("OFF")) false else return s.c.syntaxError();
         const t = try s.target(q);
-        if (t.tab == null) return s.failState(.numbered("42P01", 4902), "Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{q.name.text});
-        if (t.identity() == null) return s.failState(.numbered("42809", 8106), "Table '{s}' does not have the identity property. Cannot perform SET operation.", .{t.bare});
+        if (t.tab == null) return s.c.failState(null, .numbered("42P01", 4902), "Cannot find the object \"{s}\" because it does not exist or you do not have permissions.", .{q.name.text});
+        if (t.identity() == null) return s.c.failState(null, .numbered("42809", 8106), "Table '{s}' does not have the identity property. Cannot perform SET operation.", .{t.bare});
         const key = try std.ascii.allocLowerString(s.a, try std.fmt.allocPrint(s.a, "{s}.{s}", .{ t.schema, t.name }));
         return codeEval(s, &.{try s.func(pos, "xq_tsql_identity_insert", &.{ try s.str(pos, key), try s.int_(pos, @intFromBool(on)) })});
     }
-    if (s.eatKw("ROWCOUNT")) {
+    if (s.c.eatKw("ROWCOUNT")) {
         const e = try s.expr();
-        if (!(e.kind == .integer and std.mem.eql(u8, e.kind.integer, "0"))) return s.fail("xqlite: SET ROWCOUNT is not supported", .{});
+        if (!(e.kind == .integer and std.mem.eql(u8, e.kind.integer, "0"))) return s.c.fail(null, "xqlite: SET ROWCOUNT is not supported", .{});
         return emptyStatement(s);
     }
-    if (s.isKw("IMPLICIT_TRANSACTIONS") and s.peek().isKw("ON")) return s.fail("xqlite: SET IMPLICIT_TRANSACTIONS ON is not supported", .{});
-    if (s.tok.kind != .ident) return s.syntaxError();
+    if (s.c.isKw("IMPLICIT_TRANSACTIONS") and s.c.peekAt(1).isKw("ON")) return s.c.fail(null, "xqlite: SET IMPLICIT_TRANSACTIONS ON is not supported", .{});
+    if (s.c.peek().kind != .ident) return s.c.syntaxError();
     // An option: accepted and ignored (NOCOUNT, ANSI_NULLS, XACT_ABORT,
     // TRANSACTION ISOLATION LEVEL, DATEFORMAT ...).
-    while (!s.atStmtEnd() or s.isKw("SET")) {
-        if (s.tok.kind == .eof) break;
-        s.advance();
+    while (!s.atStmtEnd() or s.c.isKw("SET")) {
+        if (s.c.peek().kind == .eof) break;
+        s.c.skip();
     }
     return emptyStatement(s);
 }
@@ -121,18 +121,18 @@ pub fn set(s: *Parser) Error!void {
 // ======================================================= transactions
 
 fn tranWord(s: *Parser) void {
-    _ = s.eatKw("TRAN") or s.eatKw("TRANSACTION") or s.eatKw("WORK");
+    _ = s.c.eatKw("TRAN") or s.c.eatKw("TRANSACTION") or s.c.eatKw("WORK");
 }
 
 /// A transaction or savepoint name (or @variable, not supported).
 fn tranName(s: *Parser) Error!?tree.Name {
-    if (s.tok.kind == .variable) return s.fail("xqlite: transaction names in variables are not supported", .{});
+    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: transaction names in variables are not supported", .{});
     if (s.isName()) return try s.nameOf(try s.name());
     return null;
 }
 
 fn tranCall(s: *Parser, op: i64, name: ?tree.Name) Error!void {
-    const pos = s.here();
+    const pos = s.c.here();
     const n: *Expr = if (name) |x| try s.str(pos, x.text) else try s.mk(pos, .null);
     try codeEval(s, &.{try s.func(pos, "xq_tsql_tran", &.{ try s.int_(pos, op), n })});
 }
@@ -140,16 +140,16 @@ fn tranCall(s: *Parser, op: i64, name: ?tree.Name) Error!void {
 /// BEGIN TRAN[SACTION] [name]: a transaction, or one level deeper in the
 /// one open (@@TRANCOUNT), as in SQL Server.
 pub fn begin(s: *Parser) Error!void {
-    try s.expectKw("BEGIN");
-    if (s.isKw("DISTRIBUTED")) return s.fail("xqlite: distributed transactions are not supported", .{});
-    if (!(s.isKw("TRAN") or s.isKw("TRANSACTION"))) {
-        return s.fail("xqlite: BEGIN ... END blocks (and TRY/CATCH) are not supported", .{});
+    try s.c.expectKw("BEGIN");
+    if (s.c.isKw("DISTRIBUTED")) return s.c.fail(null, "xqlite: distributed transactions are not supported", .{});
+    if (!(s.c.isKw("TRAN") or s.c.isKw("TRANSACTION"))) {
+        return s.c.fail(null, "xqlite: BEGIN ... END blocks (and TRY/CATCH) are not supported", .{});
     }
-    s.advance();
+    s.c.skip();
     const name = try tranName(s);
-    if (s.eatKw("WITH")) {
-        try s.expectKw("MARK");
-        if (s.tok.kind == .string) s.advance();
+    if (s.c.eatKw("WITH")) {
+        try s.c.expectKw("MARK");
+        if (s.c.peek().kind == .string) s.c.skip();
     }
     if (s.p.db.auto_commit) {
         try s.lowerStmt(.begin);
@@ -161,11 +161,11 @@ pub fn begin(s: *Parser) Error!void {
 /// COMMIT [TRAN[SACTION] | WORK] [name]: the innermost level; the
 /// outermost commits.
 pub fn commit(s: *Parser) Error!void {
-    try s.expectKw("COMMIT");
+    try s.c.expectKw("COMMIT");
     tranWord(s);
     _ = try tranName(s);
     const st = &s.p.db.xq.mssql;
-    if (s.p.db.auto_commit) return s.failState(.numbered("25P01", 3902), "The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
+    if (s.p.db.auto_commit) return s.c.failState(null, .numbered("25P01", 3902), "The COMMIT TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
     if (st.tran_nest > 0) return tranCall(s, 2, null);
     try s.lowerStmt(.commit);
     return tranCall(s, 3, null);
@@ -174,11 +174,11 @@ pub fn commit(s: *Parser) Error!void {
 /// ROLLBACK [TRAN[SACTION] | WORK] [name]: the whole transaction, or
 /// back to savepoint `name`.
 pub fn rollback(s: *Parser) Error!void {
-    try s.expectKw("ROLLBACK");
+    try s.c.expectKw("ROLLBACK");
     tranWord(s);
     const name = try tranName(s);
     const st = &s.p.db.xq.mssql;
-    if (s.p.db.auto_commit) return s.failState(.numbered("25P01", 3903), "The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
+    if (s.p.db.auto_commit) return s.c.failState(null, .numbered("25P01", 3903), "The ROLLBACK TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
     if (name) |n| {
         const outer = if (st.tran_name) |tn| std.ascii.eqlIgnoreCase(tn, n.text) else false;
         if (!outer) return s.lowerStmt(.{ .rollback_to = n });
@@ -189,10 +189,10 @@ pub fn rollback(s: *Parser) Error!void {
 
 /// SAVE TRAN[SACTION] name: a savepoint.
 pub fn save(s: *Parser) Error!void {
-    try s.expectKw("SAVE");
-    if (!(s.eatKw("TRAN") or s.eatKw("TRANSACTION"))) return s.syntaxError();
-    const name = (try tranName(s)) orelse return s.syntaxError();
-    if (s.p.db.auto_commit) return s.failState(.numbered("25P01", 628), "The SAVE TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
+    try s.c.expectKw("SAVE");
+    if (!(s.c.eatKw("TRAN") or s.c.eatKw("TRANSACTION"))) return s.c.syntaxError();
+    const name = (try tranName(s)) orelse return s.c.syntaxError();
+    if (s.p.db.auto_commit) return s.c.failState(null, .numbered("25P01", 628), "The SAVE TRANSACTION request has no corresponding BEGIN TRANSACTION.", .{});
     return s.lowerStmt(.{ .savepoint = name });
 }
 
@@ -200,7 +200,7 @@ pub fn save(s: *Parser) Error!void {
 
 /// PRINT expr: evaluated, nothing is shown.
 pub fn print(s: *Parser) Error!void {
-    try s.expectKw("PRINT");
+    try s.c.expectKw("PRINT");
     const e = try s.expr();
     return codeEval(s, &.{e});
 }
@@ -208,10 +208,10 @@ pub fn print(s: *Parser) Error!void {
 /// USE db: the database must exist (main, temp, an attached one); the
 /// default schema stays dbo (main).
 pub fn use(s: *Parser) Error!void {
-    try s.expectKw("USE");
+    try s.c.expectKw("USE");
     const n = try s.nameText(try s.anyName());
     if (!std.ascii.eqlIgnoreCase(n, "master") and build.findDbName(s.p.db, n) == null) {
-        return s.failState(.numbered("3D000", 911), "Database '{s}' does not exist. Make sure that the name is entered correctly.", .{n});
+        return s.c.failState(null, .numbered("3D000", 911), "Database '{s}' does not exist. Make sure that the name is entered correctly.", .{n});
     }
     return emptyStatement(s);
 }
@@ -219,35 +219,35 @@ pub fn use(s: *Parser) Error!void {
 /// EXEC sp_rename 'old', 'new' [, 'OBJECT' | 'COLUMN']: ALTER TABLE ...
 /// RENAME. Any other procedure is not supported.
 pub fn exec(s: *Parser) Error!void {
-    s.advance(); // EXEC/EXECUTE
+    s.c.skip(); // EXEC/EXECUTE
     const pname = try s.nameText(try s.anyName());
     var proc = pname;
-    while (s.eatOp(".")) proc = try s.nameText(try s.anyName());
-    if (!std.ascii.eqlIgnoreCase(proc, "sp_rename")) return s.fail("xqlite: EXEC {s} is not supported (stored procedures are not)", .{proc});
+    while (s.c.eatOp(".")) proc = try s.nameText(try s.anyName());
+    if (!std.ascii.eqlIgnoreCase(proc, "sp_rename")) return s.c.fail(null, "xqlite: EXEC {s} is not supported (stored procedures are not)", .{proc});
     var args: std.ArrayList([]const u8) = .empty;
     while (true) {
-        if (s.tok.kind == .ident and s.peek().is("=")) {
-            s.advance();
-            s.advance();
+        if (s.c.peek().kind == .ident and s.c.peekAt(1).is("=")) {
+            s.c.skip();
+            s.c.skip();
         }
         try args.append(s.a, try s.stringLiteral());
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
-    if (args.items.len < 2 or args.items.len > 3) return s.failState(.numbered("42883", 201), "Procedure or function 'sp_rename' expects parameter '@newname', which was not supplied.", .{});
+    if (args.items.len < 2 or args.items.len > 3) return s.c.failState(null, .numbered("42883", 201), "Procedure or function 'sp_rename' expects parameter '@newname', which was not supplied.", .{});
     const kind = if (args.items.len == 3) args.items[2] else "OBJECT";
     var parts: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, args.items[0], '.');
     while (it.next()) |p| try parts.append(s.a, std.mem.trim(u8, p, "[]"));
     const ps = parts.items;
-    const pos = s.here();
+    const pos = s.c.here();
     if (std.ascii.eqlIgnoreCase(kind, "COLUMN")) {
-        if (ps.len < 2) return s.failState(.numbered("42704", 15248), "Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
+        if (ps.len < 2) return s.c.failState(null, .numbered("42704", 15248), "Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
         const table = try s.resolveParts(try names(s, ps[0 .. ps.len - 1], pos), .lookup);
         const at = try s.new(tree.AlterTable, .{ .name = table, .action = .{ .rename_column = .{ .old = .{ .text = ps[ps.len - 1], .pos = pos }, .new = .{ .text = args.items[1], .pos = pos } } } });
         return s.lowerStmt(.{ .alter_table = at });
     }
-    if (!std.ascii.eqlIgnoreCase(kind, "OBJECT")) return s.fail("xqlite: sp_rename of an {s} is not supported", .{kind});
-    if (ps.len > 3) return s.fail("xqlite: sp_rename of '{s}' is not supported", .{args.items[0]});
+    if (!std.ascii.eqlIgnoreCase(kind, "OBJECT")) return s.c.fail(null, "xqlite: sp_rename of an {s} is not supported", .{kind});
+    if (ps.len > 3) return s.c.fail(null, "xqlite: sp_rename of '{s}' is not supported", .{args.items[0]});
     const table = try s.resolveParts(try names(s, ps, pos), .lookup);
     // The object stays in its schema.
     const old = table.name.text;
@@ -258,7 +258,7 @@ pub fn exec(s: *Parser) Error!void {
 
 /// Parts of a name (1 to 3) as Names at `pos`.
 fn names(s: *Parser, ps: []const []const u8, pos: u32) Error![]tree.Name {
-    if (ps.len == 0 or ps.len > 3) return s.failState(.numbered("42704", 15248), "Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
+    if (ps.len == 0 or ps.len > 3) return s.c.failState(null, .numbered("42704", 15248), "Either the parameter @objname is ambiguous or the claimed @objtype (COLUMN) is wrong.", .{});
     const out = try s.a.alloc(tree.Name, ps.len);
     for (ps, out) |p, *n| n.* = .{ .text = p, .pos = pos };
     return out;

@@ -41,9 +41,9 @@ pub fn statement(ps: *Parser, stmt: tree.Stmt) Error!void {
     const p = ps.p orelse return;
     const a = ps.arena;
     switch (stmt) {
-        .create_view => |v| try probe(p, ps.src, a, v.select, null),
+        .create_view => |v| try probe(p, ps.c.sql, a, v.select, null),
         .create_table => |ct| {
-            if (ct.as_select) |s| try probe(p, ps.src, a, s, null);
+            if (ct.as_select) |s| try probe(p, ps.c.sql, a, s, null);
             var exprs: std.ArrayList(*Expr) = .empty;
             for (ct.columns) |c| for (c.constraints) |cc| switch (cc.kind) {
                 .check => |e| try exprs.append(a, e),
@@ -66,7 +66,7 @@ pub fn statement(ps: *Parser, stmt: tree.Stmt) Error!void {
             const inner = try selectOf(a, cols, &.{});
             const from = try a.alloc(tree.FromItem, 1);
             from[0] = .{ .source = .{ .subquery = inner }, .alias = .{ .name = ct.name.name } };
-            try probe(p, ps.src, a, try selectOf(a, try resultCols(a, exprs.items), from), null);
+            try probe(p, ps.c.sql, a, try selectOf(a, try resultCols(a, exprs.items), from), null);
         },
         .create_index => |ci| {
             var exprs: std.ArrayList(*Expr) = .empty;
@@ -74,7 +74,7 @@ pub fn statement(ps: *Parser, stmt: tree.Stmt) Error!void {
             if (ci.where) |w| try exprs.append(a, w);
             const from = try a.alloc(tree.FromItem, 1);
             from[0] = .{ .source = .{ .table = .{ .schema = ci.name.schema, .name = ci.table } } };
-            try probeKeyed(p, ps.src, a, try selectOf(a, try resultCols(a, exprs.items), from), exprs.items[0..ci.items.len]);
+            try probeKeyed(p, ps.c.sql, a, try selectOf(a, try resultCols(a, exprs.items), from), exprs.items[0..ci.items.len]);
         },
         else => {},
     }

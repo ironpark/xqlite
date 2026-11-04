@@ -29,6 +29,7 @@
 //! Server: the dialect turns PRAGMA foreign_keys on.
 
 const std = @import("std");
+const driver = @import("../driver.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const dialect = @import("../dialect.zig");
 const dfunc = @import("../func.zig");
@@ -47,67 +48,52 @@ const shared = @import("../shared_funcs.zig");
 
 pub const frontend: dialect.Frontend = .{ .run = run };
 
-const Parser = parser.Parser;
+pub const Parser = parser.Parser;
 const Error = parser.Error;
 
 /// The version string of @@VERSION.
 pub const version = "Microsoft SQL Server 2022 (xqlite " ++ @import("../../sql/func/func.zig").sqlite_version ++ ")";
 
-/// Compile the first statement of `sql` (dialect.Frontend's contract).
-pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-    var s: Parser = .init(p, sql);
-    while (s.isOp(";") or s.tok.kind == .go) s.advance();
-    if (s.tok.kind == .eof) {
-        p.tail = sql[sql.len..];
-        return;
-    }
-    // An element of the CREATE SCHEMA compiled before: in its schema.
-    const st = &p.db.xq.mssql;
-    const element: ?[]const u8 = if (st.schema_element) |e| try p.arena.dupe(u8, e) else null;
-    if (st.schema_element) |e| {
-        p.db.gpa.free(e);
-        st.schema_element = null;
-    }
-    if (element != null and schemas.isElement(&s)) s.element_schema = element;
-    const ok = blk: {
-        statement(&s) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            error.ParseFailed => break :blk false,
-        };
-        if (!s.atStmtEnd()) {
-            _ = s.syntaxError() catch {};
-            break :blk false;
-        }
-        break :blk p.n_err == 0;
-    };
-    if (!ok) {
-        p.tail = sql[sql.len..];
-        try translateError(p);
-        return error.ParseFailed;
-    }
-    // More elements of the same CREATE SCHEMA follow.
-    if (s.element_schema) |e| if (schemas.isElement(&s)) {
-        @TypeOf(st.*).setText(p.db.gpa, &st.schema_element, e) catch return error.OutOfMemory;
-    };
-    if (s.isOp(";") or s.tok.kind == .go) {
-        s.advance();
-        p.tail = sql[@intFromPtr(s.prev_end) - @intFromPtr(sql.ptr) ..];
-    } else if (s.tok.kind == .eof) {
-        p.tail = sql[sql.len..];
-    } else p.tail = sql[@intFromPtr(s.tok.text.ptr) - @intFromPtr(sql.ptr) ..];
-    ir.stmt.finishCoding(p);
+/// Compile the first statement of `sql` (dialect.Frontend's contract):
+/// the driver with this file's init(), separator(), statement() ...
+pub const run = driver.streaming(@This());
+
+pub fn init(p: *int.Parse, sql: [:0]const u8) Parser {
+    return .init(p, sql);
 }
 
-fn statement(s: *Parser) Error!void {
-    const t = s.tok;
+pub fn separator(s: *Parser) bool {
+    return s.c.isOp(";") or s.c.is(.go);
+}
+
+/// An element of the CREATE SCHEMA compiled before: in its schema.
+pub fn begin(s: *Parser) int.Oom!void {
+    const st = &s.p.db.xq.mssql;
+    const e = st.schema_element orelse return;
+    const element = try s.p.arena.dupe(u8, e);
+    s.p.db.gpa.free(e);
+    st.schema_element = null;
+    if (schemas.isElement(s)) s.element_schema = element;
+}
+
+/// More elements of the same CREATE SCHEMA follow.
+pub fn end(s: *Parser) int.Oom!void {
+    const st = &s.p.db.xq.mssql;
+    if (s.element_schema) |e| if (schemas.isElement(s)) {
+        try @TypeOf(st.*).setText(s.p.db.gpa, &st.schema_element, e);
+    };
+}
+
+pub fn statement(s: *Parser) Error!void {
+    const t = s.c.peek();
     if (t.isKw("WITH")) {
         const w = try s.withClause();
-        if (s.isKw("SELECT") or s.isOp("(")) return selectStatement(s, w);
-        if (s.isKw("INSERT")) return s.lowerStmt(try dml.insert(s, w));
-        if (s.isKw("UPDATE")) return s.lowerStmt(try dml.update(s, w));
-        if (s.isKw("DELETE")) return s.lowerStmt(try dml.delete(s, w));
-        if (s.isKw("MERGE")) return s.fail("xqlite: WITH ... MERGE is not supported", .{});
-        return s.syntaxError();
+        if (s.c.isKw("SELECT") or s.c.isOp("(")) return selectStatement(s, w);
+        if (s.c.isKw("INSERT")) return s.lowerStmt(try dml.insert(s, w));
+        if (s.c.isKw("UPDATE")) return s.lowerStmt(try dml.update(s, w));
+        if (s.c.isKw("DELETE")) return s.lowerStmt(try dml.delete(s, w));
+        if (s.c.isKw("MERGE")) return s.c.fail(null, "xqlite: WITH ... MERGE is not supported", .{});
+        return s.c.syntaxError();
     }
     if (t.isKw("SELECT") or t.is("(")) return selectStatement(s, null);
     if (t.isKw("INSERT")) return s.lowerStmt(try dml.insert(s, null));
@@ -129,12 +115,12 @@ fn statement(s: *Parser) Error!void {
     if (t.isKw("EXEC") or t.isKw("EXECUTE")) return session.exec(s);
     if (t.isAnyKw(&.{ "GRANT", "REVOKE", "DENY" })) {
         if (s.element_schema != null) return schemas.skipPermission(s);
-        return s.fail("xqlite: {s} is not supported (xqlite has no permissions)", .{t.text});
+        return s.c.fail(null, "xqlite: {s} is not supported (xqlite has no permissions)", .{t.text});
     }
     if (t.isAnyKw(&.{ "IF", "WHILE", "RETURN", "GOTO", "BREAK", "CONTINUE", "TRY", "THROW", "RAISERROR", "WAITFOR" })) {
-        return s.fail("xqlite: {s} is not supported (T-SQL control flow is not)", .{t.text});
+        return s.c.fail(null, "xqlite: {s} is not supported (T-SQL control flow is not)", .{t.text});
     }
-    return s.syntaxError();
+    return s.c.syntaxError();
 }
 
 /// SELECT: rows, or the assignment of variables (SELECT @x = ...), or a
@@ -144,7 +130,7 @@ fn selectStatement(s: *Parser, with: ?*tree.With) Error!void {
     s.into = null;
     const sel = try s.selectStmt();
     if (with) |w| {
-        if (sel.with != null) return s.syntaxError();
+        if (sel.with != null) return s.c.syntaxError();
         sel.with = w;
     }
     if (s.assigns) |as| return assignStatement(s, sel, as);
@@ -172,7 +158,7 @@ fn assignStatement(s: *Parser, sel: *tree.Select, as: []const parser.Assign) Err
     var cols: std.ArrayList(tree.ResultCol) = .empty;
     var args: std.ArrayList(*tree.Expr) = .empty;
     for (as, 0..) |a, i| {
-        const v = s.p.db.xq.mssql.get(a.name) orelse return s.failState(.numbered("42P02", 137), "Must declare the scalar variable \"@{s}\".", .{a.name});
+        const v = s.p.db.xq.mssql.get(a.name) orelse return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"@{s}\".", .{a.name});
         const ty = try s.a.dupe(u8, v.type);
         const al: tree.Name = .{ .text = try std.fmt.allocPrint(s.a, "xq_a{d}", .{i}), .pos = pos };
         const value = try session.asType(s, a.value, ty);
@@ -198,7 +184,7 @@ fn assignStatement(s: *Parser, sel: *tree.Select, as: []const parser.Assign) Err
 }
 
 /// SQLite's messages for common failures in SQL Server's words.
-fn translateError(p: *int.Parse) int.Oom!void {
+pub fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
     // SQL Server's numbers of the engine's errors.
     dialect.numberError(p, &.{

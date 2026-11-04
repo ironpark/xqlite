@@ -221,7 +221,7 @@ fn typeName(a: Allocator, z: []const u8) ?types.TypeName {
     const src = a.dupeSentinel(u8, z, 0) catch return null;
     var p = Parser.init(a, src, 0, null, .{}) catch return null;
     const ty = p.typeName() catch return null;
-    if (p.peek().kind != .eof) return null;
+    if (p.c.peek().kind != .eof) return null;
     _ = types.info(ty) catch return null;
     return ty;
 }

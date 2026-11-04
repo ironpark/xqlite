@@ -784,7 +784,6 @@ test {
     _ = @import("func.zig");
     _ = @import("template.zig");
     _ = @import("calendar.zig");
-    _ = @import("words.zig");
     _ = @import("json_text.zig");
     _ = @import("jsonb.zig");
     _ = @import("shared_funcs.zig");

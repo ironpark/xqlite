@@ -46,8 +46,8 @@ pub fn select(s: *Parser, schema: []const u8, name: []const u8) Error!?*tree.Sel
     };
     var sub: Parser = .init(s.p, text);
     sub.depth = 1;
-    const sel = try sub.subSelect();
-    if (sub.tok.kind != .eof) return sub.syntaxError();
+    const sel = sub.subSelect() catch |err| return s.c.failedIn(&sub.c, err);
+    if (!sub.c.atEof()) return s.c.failedIn(&sub.c, sub.c.syntaxError());
     sel.src = text;
     return sel;
 }

@@ -35,8 +35,8 @@ pub fn select(s: *Parser, name: []const u8) Error!?*tree.Select {
         return null;
     var sub: Parser = .init(s.p, text, (state.SqlMode{}).with(.PIPES_AS_CONCAT));
     sub.raw_names = true;
-    const sel = try sub.selectStmt();
-    if (sub.tok.kind != .eof) return sub.syntaxError();
+    const sel = sub.selectStmt() catch |err| return s.c.failedIn(&sub.c, err);
+    if (!sub.c.atEof()) return s.c.failedIn(&sub.c, sub.c.syntaxError());
     sel.src = text;
     return sel;
 }

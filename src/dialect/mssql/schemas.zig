@@ -52,8 +52,8 @@ pub fn builtinId(name: []const u8) ?i64 {
 /// Whether the statement at `s` is an element of CREATE SCHEMA: CREATE
 /// TABLE, CREATE VIEW, GRANT, REVOKE or DENY.
 pub fn isElement(s: *Parser) bool {
-    if (s.isKw("CREATE")) return s.peek().isAnyKw(&.{ "TABLE", "VIEW" });
-    return s.isAnyKw(&.{ "GRANT", "REVOKE", "DENY" });
+    if (s.c.isKw("CREATE")) return s.c.peekAt(1).isAnyKw(&.{ "TABLE", "VIEW" });
+    return s.c.isAnyKw(&.{ "GRANT", "REVOKE", "DENY" });
 }
 
 // ======================================================= CREATE SCHEMA
@@ -62,15 +62,15 @@ pub fn isElement(s: *Parser) bool {
 /// TABLE, CREATE VIEW, GRANT ...) that follow up to the end of the
 /// statement are compiled after it, in s (state.schema_element).
 pub fn create(s: *Parser) Error!void {
-    try s.expectKw("SCHEMA");
+    try s.c.expectKw("SCHEMA");
     const n = try s.nameOf(try s.anyName());
     var owner: []const u8 = "dbo";
-    if (s.eatKw("AUTHORIZATION")) owner = try s.nameText(try s.anyName());
+    if (s.c.eatKw("AUTHORIZATION")) owner = try s.nameText(try s.anyName());
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     if (builtinId(n.text) != null) return s.noSchema(n.text);
-    if (try s.findSchema(n.text) != null) return s.failState(.numbered("42P07", 2714), "There is already an object named '{s}' in the database.", .{n.text});
-    if (!nsp.validName(n.text)) return s.fail("xqlite: a schema name cannot contain '.'", .{});
-    if (try s.sqliteDb(n.text, n.pos) != null) return s.fail("xqlite: '{s}' names a database; it cannot name a schema", .{n.text});
+    if (try s.findSchema(n.text) != null) return s.c.failState(null, .numbered("42P07", 2714), "There is already an object named '{s}' in the database.", .{n.text});
+    if (!nsp.validName(n.text)) return s.c.fail(null, "xqlite: a schema name cannot contain '.'", .{});
+    if (try s.sqliteDb(n.text, n.pos) != null) return s.c.fail(null, "xqlite: '{s}' names a database; it cannot name a schema", .{n.text});
     nsp.codeCreate(s.p, n.text, owner);
     // The lowest schema_id from 5 on that no schema has.
     catalog.codeExecFmt(s.p, catalog.main_schema, "INSERT INTO main.xq_catalog SELECT '',%Q,'" ++ id_key ++ "',min(x.id+1) FROM " ++
@@ -86,23 +86,23 @@ pub fn create(s: *Parser) Error!void {
 /// ignored (xqlite has no permissions). Up to the principals after TO
 /// (FROM) and WITH GRANT OPTION, CASCADE or AS principal.
 pub fn skipPermission(s: *Parser) Error!void {
-    s.advance(); // GRANT, REVOKE, DENY
-    while (!(s.isKw("TO") or s.isKw("FROM"))) {
-        if (s.tok.kind == .eof or s.isOp(";") or s.tok.kind == .go) return s.syntaxError();
-        s.advance();
+    s.c.skip(); // GRANT, REVOKE, DENY
+    while (!(s.c.isKw("TO") or s.c.isKw("FROM"))) {
+        if (s.c.peek().kind == .eof or s.c.isOp(";") or s.c.peek().kind == .go) return s.c.syntaxError();
+        s.c.skip();
     }
-    s.advance();
+    s.c.skip();
     while (true) {
         _ = try s.anyName();
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
-    if (s.isKw("WITH") and s.peek().isKw("GRANT")) {
-        s.advance();
-        s.advance();
-        try s.expectKw("OPTION");
+    if (s.c.isKw("WITH") and s.c.peekAt(1).isKw("GRANT")) {
+        s.c.skip();
+        s.c.skip();
+        try s.c.expectKw("OPTION");
     }
-    _ = s.eatKw("CASCADE");
-    if (s.eatKw("AS")) _ = try s.anyName();
+    _ = s.c.eatKw("CASCADE");
+    if (s.c.eatKw("AS")) _ = try s.anyName();
     return session.emptyStatement(s);
 }
 
@@ -111,14 +111,14 @@ pub fn skipPermission(s: *Parser) Error!void {
 /// DROP SCHEMA [IF EXISTS] s: s must be empty (SQL Server has no
 /// CASCADE).
 pub fn drop(s: *Parser) Error!void {
-    try s.expectKw("SCHEMA");
-    const if_exists = try s.ifExists();
+    try s.c.expectKw("SCHEMA");
+    const if_exists = s.ifExists();
     const n = try s.nameOf(try s.anyName());
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    if (builtinId(n.text) != null) return s.failState(.of("42501"), "Cannot drop the schema '{s}'.", .{n.text});
+    if (builtinId(n.text) != null) return s.c.failState(null, .of("42501"), "Cannot drop the schema '{s}'.", .{n.text});
     const info = (try s.findSchema(n.text)) orelse {
         if (if_exists) return session.emptyStatement(s);
-        return s.failState(.numbered("3F000", 3701), "Cannot drop the schema '{s}', because it does not exist or you do not have permission.", .{n.text});
+        return s.c.failState(null, .numbered("3F000", 3701), "Cannot drop the schema '{s}', because it does not exist or you do not have permission.", .{n.text});
     };
     const objs = nsp.objects(s.p.db, s.a, info.name) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -130,7 +130,7 @@ pub fn drop(s: *Parser) Error!void {
         for (objs[1..]) |o| if (std.ascii.lessThanIgnoreCase(o.bare(), first)) {
             first = o.bare();
         };
-        return s.failState(.numbered("2BP01", 3729), "Cannot drop schema '{s}' because it is being referenced by object '{s}'.", .{ n.text, first });
+        return s.c.failState(null, .numbered("2BP01", 3729), "Cannot drop schema '{s}' because it is being referenced by object '{s}'.", .{ n.text, first });
     }
     nsp.codeDrop(s.p, info.name, &.{}) catch return error.ParseFailed;
 }
@@ -142,31 +142,31 @@ pub fn drop(s: *Parser) Error!void {
 /// table with an IDENTITY column (whose sequence is named after its
 /// schema), is not supported.
 pub fn transfer(s: *Parser) Error!void {
-    try s.expectKw("SCHEMA");
+    try s.c.expectKw("SCHEMA");
     const to = try s.nameOf(try s.anyName());
-    try s.expectKw("TRANSFER");
-    if (s.isKw("OBJECT") and s.peek().is("::")) {
-        s.advance();
-        s.advance();
-    } else if (s.peek().is("::")) return s.fail("xqlite: ALTER SCHEMA ... TRANSFER {s}:: is not supported", .{s.tok.text});
+    try s.c.expectKw("TRANSFER");
+    if (s.c.isKw("OBJECT") and s.c.peekAt(1).is("::")) {
+        s.c.skip();
+        s.c.skip();
+    } else if (s.c.peekAt(1).is("::")) return s.c.fail(null, "xqlite: ALTER SCHEMA ... TRANSFER {s}:: is not supported", .{s.c.peek().text});
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     var prefix: []const u8 = "";
     if (!std.ascii.eqlIgnoreCase(to.text, "dbo")) {
         const info = (try s.findSchema(to.text)) orelse
-            return s.failState(.numbered("3F000", 15151), "Cannot alter the schema '{s}', because it does not exist or you do not have permission.", .{to.text});
+            return s.c.failState(null, .numbered("3F000", 15151), "Cannot alter the schema '{s}', because it does not exist or you do not have permission.", .{to.text});
         prefix = try nsp.mangle(s.a, info.name, "");
     }
     const bare = try s.bareName(q.name.text);
     const tab = build.findTable(s.p.db, q.name.text, if (q.schema) |x| x.text else null) orelse
-        return s.failState(.numbered("42P01", 4902), "Cannot find the object '{s}', because it does not exist or you do not have permission.", .{bare});
-    if (!std.mem.eql(u8, catalog.schemaName(s.p.db, tab), catalog.main_schema)) return s.fail("xqlite: ALTER SCHEMA ... TRANSFER of an object of another database is not supported", .{});
-    if (tab.isView()) return s.fail("xqlite: ALTER SCHEMA ... TRANSFER of a view is not supported", .{});
+        return s.c.failState(null, .numbered("42P01", 4902), "Cannot find the object '{s}', because it does not exist or you do not have permission.", .{bare});
+    if (!std.mem.eql(u8, catalog.schemaName(s.p.db, tab), catalog.main_schema)) return s.c.fail(null, "xqlite: ALTER SCHEMA ... TRANSFER of an object of another database is not supported", .{});
+    if (tab.isView()) return s.c.fail(null, "xqlite: ALTER SCHEMA ... TRANSFER of a view is not supported", .{});
     const t = try s.target(q);
-    if (t.identity() != null) return s.fail("xqlite: ALTER SCHEMA ... TRANSFER of a table with an IDENTITY column is not supported", .{});
+    if (t.identity() != null) return s.c.fail(null, "xqlite: ALTER SCHEMA ... TRANSFER of a table with an IDENTITY column is not supported", .{});
     const new = try std.fmt.allocPrint(s.a, "{s}{s}", .{ prefix, bare });
     if (std.ascii.eqlIgnoreCase(new, tab.name)) return session.emptyStatement(s);
-    if (build.findTable(s.p.db, new, catalog.main_schema) != null) return s.failState(.of("42P07"), "The object with name \"{s}\" already exists.", .{bare});
+    if (build.findTable(s.p.db, new, catalog.main_schema) != null) return s.c.failState(null, .of("42P07"), "The object with name \"{s}\" already exists.", .{bare});
     const at = try s.new(tree.AlterTable, .{
         .name = .{ .schema = .{ .text = catalog.main_schema }, .name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos } },
         .action = .{ .rename_to = .{ .text = new, .pos = q.name.pos } },
@@ -180,21 +180,21 @@ pub fn transfer(s: *Parser) Error!void {
 /// in s (then dbo) and are created there, for the session (xqlite has no
 /// users: whatever u is).
 pub fn alterUser(s: *Parser) Error!void {
-    try s.expectKw("USER");
+    try s.c.expectKw("USER");
     _ = try s.anyName();
-    try s.expectKw("WITH");
-    const pos = s.here();
+    try s.c.expectKw("WITH");
+    const pos = s.c.here();
     var value: ?*tree.Expr = null;
     while (true) {
-        if (!s.eatKw("DEFAULT_SCHEMA")) return s.fail("xqlite: ALTER USER ... WITH {s} is not supported", .{s.tok.text});
-        try s.expectOp("=");
-        if (s.eatKw("NULL")) {
+        if (!s.c.eatKw("DEFAULT_SCHEMA")) return s.c.fail(null, "xqlite: ALTER USER ... WITH {s} is not supported", .{s.c.peek().text});
+        try s.c.expectOp("=");
+        if (s.c.eatKw("NULL")) {
             value = try s.mk(pos, .null);
         } else {
             const n = try s.nameText(try s.anyName());
             value = if (std.ascii.eqlIgnoreCase(n, "dbo")) try s.mk(pos, .null) else try s.str(pos, n);
         }
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
     return session.codeEval(s, &.{try s.func(pos, "xq_tsql_default_schema", &.{value.?})});
 }

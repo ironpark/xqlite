@@ -30,34 +30,34 @@ const Name = tree.Name;
 
 /// INSERT ... or REPLACE ...
 pub fn insert(s: *Parser) Error!tree.Stmt {
-    const pos = s.here();
-    const is_replace = s.isKw("REPLACE");
-    s.advance();
+    const pos = s.c.here();
+    const is_replace = s.c.isKw("REPLACE");
+    s.c.skip();
     var ignore = false;
     while (true) {
-        if (s.eatKw("LOW_PRIORITY") or s.eatKw("DELAYED") or s.eatKw("HIGH_PRIORITY")) {} else if (!is_replace and s.eatKw("IGNORE")) {
+        if (s.c.eatKw("LOW_PRIORITY") or s.c.eatKw("DELAYED") or s.c.eatKw("HIGH_PRIORITY")) {} else if (!is_replace and s.c.eatKw("IGNORE")) {
             ignore = true;
         } else break;
     }
-    _ = s.eatKw("INTO");
+    _ = s.c.eatKw("INTO");
     const q = try s.qualifiedName();
-    if (s.isKw("PARTITION")) return s.fail("xqlite: PARTITION is not supported", .{});
+    if (s.c.isKw("PARTITION")) return s.c.fail(null, "xqlite: PARTITION is not supported", .{});
     var t = try s.target(q);
 
     // The column list.
     var names: std.ArrayList(Name) = .empty;
     var cols: std.ArrayList(*Parser.ColMeta) = .empty;
     var unknown_col = false;
-    if (s.isOp("(") and !isSelectAfterParen(s)) {
-        s.advance();
-        if (!s.isOp(")")) while (true) {
+    if (s.c.isOp("(") and !isSelectAfterParen(s)) {
+        s.c.skip();
+        if (!s.c.isOp(")")) while (true) {
             const c = try s.nameOf(try s.name());
             try names.append(s.a, c);
             if (Parser.findCol(&t, c.text)) |m| try cols.append(s.a, m) else unknown_col = true;
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         };
-        try s.expectOp(")");
-    } else if (t.tab != null and !s.isKw("SET")) {
+        try s.c.expectOp(")");
+    } else if (t.tab != null and !s.c.isKw("SET")) {
         try cols.appendSlice(s.a, try s.insertColumns(&t));
     }
     // An unknown column: let lowering report it, unconverted.
@@ -71,10 +71,10 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
 
     var source: ?*tree.Select = null;
     var missing: []*Parser.ColMeta = &.{};
-    if (s.isKw("VALUES") or s.isKw("VALUE")) {
+    if (s.c.isKw("VALUES") or s.c.isKw("VALUE")) {
         const saved = s.allow_default;
         s.allow_default = true;
-        const vpos = s.here();
+        const vpos = s.c.here();
         const rows = try s.valuesRows();
         s.allow_default = saved;
         const empty = for (rows) |row| {
@@ -82,14 +82,14 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
         } else true;
         if (empty) {
             // VALUES (): the defaults.
-            if (rows.len > 1) return s.fail("xqlite: VALUES () with several rows is not supported", .{});
+            if (rows.len > 1) return s.c.fail(null, "xqlite: VALUES () with several rows is not supported", .{});
             names.clearRetainingCapacity();
             cols.clearRetainingCapacity();
         }
         if (!unknown_col) missing = try s.missingColumns(&t, cols.items);
         for (rows, 0..) |*row, ri| {
             if (cols.items.len > 0 and row.len != cols.items.len) {
-                return s.failState(.numbered("42601", 1136), "Column count doesn't match value count at row {d}", .{ri + 1});
+                return s.c.failState(null, .numbered("42601", 1136), "Column count doesn't match value count at row {d}", .{ri + 1});
             }
             var w = base;
             w.row = @intCast(@min(ri + 1, std.math.maxInt(u32)));
@@ -106,23 +106,23 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
         } else {
             source = try s.new(tree.Select, .{ .body = try s.new(tree.Body, .{ .values = rows }), .pos = vpos });
         }
-    } else if (s.eatKw("SET")) {
+    } else if (s.c.eatKw("SET")) {
         // INSERT ... SET a = 1, b = 2: one row.
-        if (names.items.len > 0) return s.syntaxError();
+        if (names.items.len > 0) return s.c.syntaxError();
         cols.clearRetainingCapacity();
         const saved = s.allow_default;
         s.allow_default = true;
-        const vpos = s.here();
+        const vpos = s.c.here();
         var row: std.ArrayList(*Expr) = .empty;
         while (true) {
             const c = try columnName(s);
-            try s.expectOp("=");
+            try s.c.expectOp("=");
             const e = try s.expr();
             try names.append(s.a, c);
             const m = Parser.findCol(&t, c.text);
             try row.append(s.a, if (m) |cm| try s.wrapValue(&t, cm, e, base) else e);
             if (m) |cm| try cols.append(s.a, cm);
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         }
         s.allow_default = saved;
         missing = try s.missingColumns(&t, cols.items);
@@ -133,7 +133,7 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
         source = try s.selectStmt();
         if (!unknown_col) missing = try s.missingColumns(&t, cols.items);
         if (needed or missing.len > 0) source = try wrapSelect(s, &t, cols.items, missing, base, source.?);
-    } else return s.syntaxError();
+    } else return s.c.syntaxError();
     if (missing.len > 0) {
         // Name the columns, with the ones added.
         if (names.items.len == 0) for (cols.items) |c| try names.append(s.a, .{ .text = c.name });
@@ -141,16 +141,16 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
     }
 
     var on_conflict: ?*tree.OnConflict = null;
-    if (s.isKw("ON")) {
-        s.advance();
-        try s.expectKw("DUPLICATE");
-        try s.expectKw("KEY");
-        try s.expectKw("UPDATE");
-        if (is_replace) return s.syntaxError();
+    if (s.c.isKw("ON")) {
+        s.c.skip();
+        try s.c.expectKw("DUPLICATE");
+        try s.c.expectKw("KEY");
+        try s.c.expectKw("UPDATE");
+        if (is_replace) return s.c.syntaxError();
         on_conflict = try s.new(tree.OnConflict, .{ .update = try assignments(s, &t, ignore, true) });
     }
     var ret: []tree.ResultCol = &.{};
-    if (s.eatKw("RETURNING")) ret = try returning(s);
+    if (s.c.eatKw("RETURNING")) ret = try returning(s);
     return .{ .insert = try s.new(tree.Insert, .{
         .table = t.q,
         .alias = t.alias,
@@ -168,20 +168,20 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
 fn missingValue(s: *Parser, t: *const Parser.Target, c: *const Parser.ColMeta, w: Parser.Wrap) Error!*Expr {
     var x = w;
     x.missing = true;
-    return s.wrapValue(t, c, try s.mk(s.here(), .null), x);
+    return s.wrapValue(t, c, try s.mk(s.c.here(), .null), x);
 }
 
 /// Whether `(` at the current token opens a SELECT rather than a column
 /// list (INSERT INTO t (SELECT ...)).
 fn isSelectAfterParen(s: *Parser) bool {
-    const n = s.peek();
+    const n = s.c.peekAt(1);
     return n.isKw("SELECT") or n.isKw("WITH");
 }
 
 /// A column name, maybe qualified (t.c): the column's name.
 fn columnName(s: *Parser) Error!Name {
     var c = try s.name();
-    while (s.eatOp(".")) c = try s.anyName();
+    while (s.c.eatOp(".")) c = try s.anyName();
     return s.nameOf(c);
 }
 
@@ -219,12 +219,12 @@ fn assignments(s: *Parser, t: *const Parser.Target, ignore: bool, odku: bool) Er
     }
     while (true) {
         const c = try columnName(s);
-        try s.expectOp("=");
+        try s.c.expectOp("=");
         var e = try s.expr();
         // AUTO_INCREMENT's 0 is for INSERT only.
         if (Parser.findCol(t, c.text)) |m| e = try s.wrapValue(t, m, e, .{ .ignore = ignore, .insert = false });
         try list.append(s.a, .{ .cols = try s.a.dupe(Name, &.{c}), .value = e });
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
     // ON UPDATE CURRENT_TIMESTAMP columns not assigned.
     if (!odku) for (t.cols) |*c| {
@@ -233,7 +233,7 @@ fn assignments(s: *Parser, t: *const Parser.Target, ignore: bool, odku: bool) Er
             if (std.ascii.eqlIgnoreCase(it.cols[0].text, c.name)) break true;
         } else false;
         if (assigned) continue;
-        const now = try s.func(s.here(), "datetime", &.{try s.str(s.here(), "now")});
+        const now = try s.func(s.c.here(), "datetime", &.{try s.str(s.c.here(), "now")});
         try list.append(s.a, .{ .cols = try s.a.dupe(Name, &.{.{ .text = c.name }}), .value = now });
     };
     return list.items;
@@ -242,26 +242,26 @@ fn assignments(s: *Parser, t: *const Parser.Target, ignore: bool, odku: bool) Er
 fn returning(s: *Parser) Error![]tree.ResultCol {
     var l: std.ArrayList(tree.ResultCol) = .empty;
     while (true) {
-        if (s.isOp("*")) {
-            try l.append(s.a, .{ .star = s.here() });
-            s.advance();
+        if (s.c.isOp("*")) {
+            try l.append(s.a, .{ .star = s.c.here() });
+            s.c.skip();
         } else {
-            const start = s.here();
+            const start = s.c.here();
             const e = try s.expr();
-            const end = s.endPos();
+            const end = s.c.lastEnd();
             var al: ?Name = null;
-            if (s.eatKw("AS")) al = try s.nameOf(try s.anyName()) else if (s.isName()) al = try s.nameOf(try s.name());
-            const text: ?[]const u8 = if (al != null or e.kind == .column) null else s.lx.sql[start..end];
+            if (s.c.eatKw("AS")) al = try s.nameOf(try s.anyName()) else if (s.isName()) al = try s.nameOf(try s.name());
+            const text: ?[]const u8 = if (al != null or e.kind == .column) null else s.c.sql[start..end];
             try l.append(s.a, .{ .expr = .{ .e = e, .alias = al, .name = text } });
         }
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
     return l.items;
 }
 
 /// `[[AS] alias]` of UPDATE/DELETE.
 fn targetAlias(s: *Parser) Error!?Name {
-    if (s.eatKw("AS")) return try s.nameOf(try s.name());
+    if (s.c.eatKw("AS")) return try s.nameOf(try s.name());
     if (s.isName()) return try s.nameOf(try s.name());
     return null;
 }
@@ -269,25 +269,25 @@ fn targetAlias(s: *Parser) Error!?Name {
 /// UPDATE [LOW_PRIORITY] [IGNORE] t [[AS] a] SET ... [WHERE] [ORDER BY]
 /// [LIMIT n].
 pub fn update(s: *Parser) Error!tree.Stmt {
-    const pos = s.here();
-    try s.expectKw("UPDATE");
+    const pos = s.c.here();
+    try s.c.expectKw("UPDATE");
     var ignore = false;
     while (true) {
-        if (s.eatKw("LOW_PRIORITY")) {} else if (s.eatKw("IGNORE")) {
+        if (s.c.eatKw("LOW_PRIORITY")) {} else if (s.c.eatKw("IGNORE")) {
             ignore = true;
         } else break;
     }
     const q = try s.qualifiedName();
     const al = try targetAlias(s);
-    if (s.isOp(",") or s.isAnyKw(&.{ "JOIN", "INNER", "LEFT", "RIGHT", "CROSS", "STRAIGHT_JOIN" })) {
-        return s.fail("xqlite: multi-table UPDATE is not supported", .{});
+    if (s.c.isOp(",") or s.c.isAnyKw(&.{ "JOIN", "INNER", "LEFT", "RIGHT", "CROSS", "STRAIGHT_JOIN" })) {
+        return s.c.fail(null, "xqlite: multi-table UPDATE is not supported", .{});
     }
     const t = try s.target(q);
-    try s.expectKw("SET");
+    try s.c.expectKw("SET");
     const sets = try assignments(s, &t, ignore, false);
-    const where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
+    const where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
     const order, const limit = try orderLimit(s);
-    if (s.isKw("RETURNING")) return s.fail("xqlite: UPDATE ... RETURNING is not supported by MariaDB", .{});
+    if (s.c.isKw("RETURNING")) return s.c.fail(null, "xqlite: UPDATE ... RETURNING is not supported by MariaDB", .{});
     return .{ .update = try s.new(tree.Update, .{
         .table = t.q,
         .alias = al orelse t.alias,
@@ -302,15 +302,15 @@ pub fn update(s: *Parser) Error!tree.Stmt {
 
 fn orderLimit(s: *Parser) Error!struct { []tree.SortItem, ?*Expr } {
     var order: []tree.SortItem = &.{};
-    if (s.isKw("ORDER")) {
-        s.advance();
-        try s.expectKw("BY");
+    if (s.c.isKw("ORDER")) {
+        s.c.skip();
+        try s.c.expectKw("BY");
         order = try s.sortList();
     }
     var limit: ?*Expr = null;
-    if (s.isKw("LIMIT")) {
+    if (s.c.isKw("LIMIT")) {
         const l = try s.limitClause();
-        if (l.offset != null) return s.syntaxError();
+        if (l.offset != null) return s.c.syntaxError();
         limit = l.limit;
     }
     return .{ order, limit };
@@ -319,18 +319,18 @@ fn orderLimit(s: *Parser) Error!struct { []tree.SortItem, ?*Expr } {
 /// DELETE [LOW_PRIORITY] [QUICK] [IGNORE] FROM t [[AS] a] [WHERE]
 /// [ORDER BY] [LIMIT n] [RETURNING ...].
 pub fn delete(s: *Parser) Error!tree.Stmt {
-    const pos = s.here();
-    try s.expectKw("DELETE");
-    while (s.eatKw("LOW_PRIORITY") or s.eatKw("QUICK") or s.eatKw("IGNORE")) {}
-    if (!s.isKw("FROM")) return s.fail("xqlite: multi-table DELETE is not supported", .{});
-    s.advance();
+    const pos = s.c.here();
+    try s.c.expectKw("DELETE");
+    while (s.c.eatKw("LOW_PRIORITY") or s.c.eatKw("QUICK") or s.c.eatKw("IGNORE")) {}
+    if (!s.c.isKw("FROM")) return s.c.fail(null, "xqlite: multi-table DELETE is not supported", .{});
+    s.c.skip();
     const r = try s.relation(try s.qualifiedName());
     const al = try targetAlias(s);
-    if (s.isOp(",") or s.isKw("USING") or s.isKw("JOIN")) return s.fail("xqlite: multi-table DELETE is not supported", .{});
-    const where: ?*Expr = if (s.eatKw("WHERE")) try s.expr() else null;
+    if (s.c.isOp(",") or s.c.isKw("USING") or s.c.isKw("JOIN")) return s.c.fail(null, "xqlite: multi-table DELETE is not supported", .{});
+    const where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
     const order, const limit = try orderLimit(s);
     var ret: []tree.ResultCol = &.{};
-    if (s.eatKw("RETURNING")) ret = try returning(s);
+    if (s.c.eatKw("RETURNING")) ret = try returning(s);
     return .{ .delete = try s.new(tree.Delete, .{
         .table = r.q,
         .alias = al orelse r.alias,
@@ -345,8 +345,8 @@ pub fn delete(s: *Parser) Error!tree.Stmt {
 /// TRUNCATE [TABLE] t: DELETE FROM t, and the AUTO_INCREMENT counter
 /// starts again.
 pub fn truncate(s: *Parser) Error!void {
-    try s.expectKw("TRUNCATE");
-    _ = s.eatKw("TABLE");
+    try s.c.expectKw("TRUNCATE");
+    _ = s.c.eatKw("TABLE");
     const q = try s.qualifiedName();
     const t = try s.target(q);
     try s.lowerStmt(.{ .truncate = try s.new(tree.Truncate, .{ .table = t.q }) });

@@ -110,41 +110,41 @@ fn lowered(err: render.Error) Error {
 // ====================================================== CREATE TABLE
 
 pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
-    try s.expectKw("TABLE");
-    const if_not_exists = try s.ifNotExists();
+    try s.c.expectKw("TABLE");
+    const if_not_exists = try s.c.ifNotExists();
     const q = try s.qualifiedName();
     const dest = try s.createTarget(q, temp);
     // The SQLite name: "db.t" in a database of CREATE DATABASE.
     const name = dest.q.name.text;
     const schema = dest.q.schema.?.text;
-    if (or_replace) return s.fail("xqlite: CREATE OR REPLACE TABLE is not supported (use DROP TABLE IF EXISTS)", .{});
+    if (or_replace) return s.c.fail(null, "xqlite: CREATE OR REPLACE TABLE is not supported (use DROP TABLE IF EXISTS)", .{});
     const tname: tree.QName = if (temp) .{ .name = q.name } else dest.q;
     s.creating = dest;
 
-    if (s.isKw("LIKE") or (s.isOp("(") and s.peek().isKw("LIKE"))) {
-        return s.fail("xqlite: CREATE TABLE ... LIKE is not supported", .{});
+    if (s.c.isKw("LIKE") or (s.c.isOp("(") and s.c.peekAt(1).isKw("LIKE"))) {
+        return s.c.fail(null, "xqlite: CREATE TABLE ... LIKE is not supported", .{});
     }
-    if (!s.isOp("(")) {
+    if (!s.c.isOp("(")) {
         // CREATE TABLE t [AS] SELECT ...: SQLite's CREATE TABLE AS.
         try tableOptions(s, null);
-        _ = s.eatKw("AS");
-        if (!s.isSelectStart()) return s.syntaxError();
+        _ = s.c.eatKw("AS");
+        if (!s.isSelectStart()) return s.c.syntaxError();
         const sel = try s.selectStmt();
         return s.lowerStmt(.{ .create_table = try s.new(tree.CreateTable, .{ .temp = temp, .if_not_exists = if_not_exists, .name = tname, .as_select = sel }) });
     }
-    try s.expectOp("(");
+    try s.c.expectOp("(");
     var t: Table = .{};
     while (true) {
         try createDefinition(s, &t);
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     try tableOptions(s, &t);
-    if (s.isKw("PARTITION")) return s.fail("xqlite: PARTITION BY is not supported", .{});
-    if (s.isSelectStart() or s.isKw("AS")) return s.fail("xqlite: CREATE TABLE with columns and a SELECT is not supported", .{});
+    if (s.c.isKw("PARTITION")) return s.c.fail(null, "xqlite: PARTITION BY is not supported", .{});
+    if (s.isSelectStart() or s.c.isKw("AS")) return s.c.fail(null, "xqlite: CREATE TABLE with columns and a SELECT is not supported", .{});
 
     if (build.findTable(s.p.db, name, schema) != null) {
-        if (!if_not_exists) return s.failState(.numbered("42P07", 1050), "Table '{s}' already exists", .{dest.bare});
+        if (!if_not_exists) return s.c.failState(null, .numbered("42P07", 1050), "Table '{s}' already exists", .{dest.bare});
         // Nothing to do (MariaDB adds a note).
         s.p.db.xq.mariadb.warn(.note, 1050, "Table '{s}' already exists", .{dest.bare});
         return session.emptyStatement(s);
@@ -156,32 +156,32 @@ pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
 }
 
 fn isTableConstraintStart(s: *Parser) bool {
-    if (s.tok.kind != .ident) return false;
-    const kws = [_][]const u8{ "PRIMARY", "UNIQUE", "KEY", "INDEX", "FULLTEXT", "SPATIAL", "CONSTRAINT", "FOREIGN", "CHECK", "PERIOD" };
-    for (kws) |k| if (s.isKw(k)) {
-        // `key INT` is a column called key.
-        if ((s.isKw("KEY") or s.isKw("INDEX")) and !(s.peek().is("(") or s.peek().kind == .ident or s.peek().kind == .quoted_ident)) return false;
-        return true;
-    };
-    return false;
+    if (s.c.peek().kind != .ident) return false;
+    if (!s.c.isAnyKw(&.{ "PRIMARY", "UNIQUE", "KEY", "INDEX", "FULLTEXT", "SPATIAL", "CONSTRAINT", "FOREIGN", "CHECK", "PERIOD" })) return false;
+    // `key INT` is a column called key.
+    if (s.c.isKw("KEY") or s.c.isKw("INDEX")) {
+        const n = s.c.peekAt(1);
+        return n.is("(") or n.kind == .ident or n.kind == .quoted_ident;
+    }
+    return true;
 }
 
 fn createDefinition(s: *Parser, t: *Table) Error!void {
     if (!isTableConstraintStart(s)) return columnDefinition(s, t);
     var constraint: ?[]const u8 = null;
-    if (s.eatKw("CONSTRAINT")) {
+    if (s.c.eatKw("CONSTRAINT")) {
         if (s.isName()) constraint = try s.nameText(try s.name());
     }
-    if (s.eatKw("PRIMARY")) {
-        try s.expectKw("KEY");
+    if (s.c.eatKw("PRIMARY")) {
+        try s.c.expectKw("KEY");
         try indexType(s);
-        if (t.primary != null) return s.failState(.numbered("42P16", 1068), "Multiple primary key defined", .{});
+        if (t.primary != null) return s.c.failState(null, .numbered("42P16", 1068), "Multiple primary key defined", .{});
         t.primary = try indexColumns(s);
         try indexOptions(s);
         return;
     }
-    if (s.eatKw("UNIQUE")) {
-        _ = s.eatKw("KEY") or s.eatKw("INDEX");
+    if (s.c.eatKw("UNIQUE")) {
+        _ = s.c.eatKw("KEY") or s.c.eatKw("INDEX");
         var name: ?[]const u8 = constraint;
         if (s.isName()) name = try s.nameText(try s.name());
         try indexType(s);
@@ -189,92 +189,92 @@ fn createDefinition(s: *Parser, t: *Table) Error!void {
         try indexOptions(s);
         return;
     }
-    if (s.eatKw("FULLTEXT") or s.eatKw("SPATIAL")) {
-        _ = s.eatKw("KEY") or s.eatKw("INDEX");
+    if (s.c.eatKw("FULLTEXT") or s.c.eatKw("SPATIAL")) {
+        _ = s.c.eatKw("KEY") or s.c.eatKw("INDEX");
         // An ordinary index (MATCH ... AGAINST is not supported).
-    } else if (s.eatKw("KEY") or s.eatKw("INDEX")) {} else if (s.eatKw("FOREIGN")) {
-        try s.expectKw("KEY");
+    } else if (s.c.eatKw("KEY") or s.c.eatKw("INDEX")) {} else if (s.c.eatKw("FOREIGN")) {
+        try s.c.expectKw("KEY");
         if (s.isName()) _ = try s.name();
         const cols = try s.nameList();
         const ref = try references(s);
         try t.fkeys.append(s.a, .{ .name = constraint, .kind = .{ .foreign_key = .{ .cols = cols, .ref = ref } } });
         return;
-    } else if (s.eatKw("CHECK")) {
+    } else if (s.c.eatKw("CHECK")) {
         const n = constraint orelse blk: {
             t.n_unnamed_checks += 1;
             break :blk try std.fmt.allocPrint(s.a, "CONSTRAINT_{d}", .{t.n_unnamed_checks});
         };
         try t.checks.append(s.a, .{ .name = n, .e = try checkExpr(s, n) });
         return;
-    } else if (s.isKw("PERIOD")) {
-        return s.fail("xqlite: PERIOD FOR is not supported", .{});
-    } else return s.syntaxError();
+    } else if (s.c.isKw("PERIOD")) {
+        return s.c.fail(null, "xqlite: PERIOD FOR is not supported", .{});
+    } else return s.c.syntaxError();
     var name: ?[]const u8 = null;
-    if (s.isName() and !s.isKw("USING")) name = try s.nameText(try s.name());
+    if (s.isName() and !s.c.isKw("USING")) name = try s.nameText(try s.name());
     try indexType(s);
     try t.indexes.append(s.a, .{ .name = name, .unique = false, .cols = try indexColumns(s) });
     try indexOptions(s);
 }
 
 fn indexType(s: *Parser) Error!void {
-    if (s.eatKw("USING")) _ = try s.anyName();
+    if (s.c.eatKw("USING")) _ = try s.anyName();
 }
 
 fn indexOptions(s: *Parser) Error!void {
     while (true) {
-        if (s.eatKw("USING")) {
+        if (s.c.eatKw("USING")) {
             _ = try s.anyName();
-        } else if (s.eatKw("COMMENT")) {
+        } else if (s.c.eatKw("COMMENT")) {
             _ = try s.stringLiteral();
-        } else if (s.eatKw("KEY_BLOCK_SIZE")) {
-            _ = s.eatOp("=");
-            s.advance();
-        } else if (s.eatKw("VISIBLE") or s.eatKw("INVISIBLE") or s.eatKw("CLUSTERING")) {} else if (s.isKw("IGNORED") or s.isKw("NOT")) {
-            if (s.eatKw("NOT")) {}
-            try s.expectKw("IGNORED");
+        } else if (s.c.eatKw("KEY_BLOCK_SIZE")) {
+            _ = s.c.eatOp("=");
+            s.c.skip();
+        } else if (s.c.eatKw("VISIBLE") or s.c.eatKw("INVISIBLE") or s.c.eatKw("CLUSTERING")) {} else if (s.c.isKw("IGNORED") or s.c.isKw("NOT")) {
+            if (s.c.eatKw("NOT")) {}
+            try s.c.expectKw("IGNORED");
         } else break;
     }
 }
 
 /// `(col [(len)] [ASC|DESC], ...)`.
 fn indexColumns(s: *Parser) Error![]const IndexCol {
-    try s.expectOp("(");
+    try s.c.expectOp("(");
     var cols: std.ArrayList(IndexCol) = .empty;
     while (true) {
         const n = try s.nameOf(try s.anyName());
-        if (s.eatOp("(")) {
+        if (s.c.eatOp("(")) {
             // A prefix length: the whole value is indexed.
-            if (s.tok.kind != .integer) return s.syntaxError();
-            s.advance();
-            try s.expectOp(")");
+            if (s.c.peek().kind != .integer) return s.c.syntaxError();
+            s.c.skip();
+            try s.c.expectOp(")");
         }
         var desc = false;
-        if (s.eatKw("DESC")) {
+        if (s.c.eatKw("DESC")) {
             desc = true;
-        } else _ = s.eatKw("ASC");
+        } else _ = s.c.eatKw("ASC");
         try cols.append(s.a, .{ .name = n, .desc = desc });
-        if (!s.eatOp(",")) break;
+        if (!s.c.eatOp(",")) break;
     }
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     return cols.items;
 }
 
 /// REFERENCES t [(cols)] [MATCH ...] [ON DELETE a] [ON UPDATE a].
 fn references(s: *Parser) Error!tree.Ref {
-    try s.expectKw("REFERENCES");
+    try s.c.expectKw("REFERENCES");
     const q = try s.qualifiedName();
     // SQLite's REFERENCES names a table of the same SQLite database (a
     // database of CREATE DATABASE is in main); a temporary table's
     // unqualified parent stays as written.
     var ref: tree.Ref = .{ .table = q.name };
     const c = s.creating orelse {
-        if (q.schema != null) return s.fail("xqlite: a foreign key to a table of another database is not supported", .{});
+        if (q.schema != null) return s.c.fail(null, "xqlite: a foreign key to a table of another database is not supported", .{});
         return referencesRest(s, ref);
     };
     if (q.schema != null or !std.mem.eql(u8, c.db.sqlite, "temp")) {
         const r = if (q.schema == null and std.ascii.eqlIgnoreCase(q.name.text, c.bare)) c else try s.createTarget(q, false);
         if (!std.ascii.eqlIgnoreCase(r.q.schema.?.text, c.q.schema.?.text)) {
-            return s.fail("xqlite: a foreign key to a table of another database is not supported", .{});
+            return s.c.fail(null, "xqlite: a foreign key to a table of another database is not supported", .{});
         }
         ref.table = r.q.name;
     }
@@ -284,24 +284,24 @@ fn references(s: *Parser) Error!tree.Ref {
 /// [(cols)] [MATCH ...] [ON DELETE a] [ON UPDATE a] of REFERENCES.
 fn referencesRest(s: *Parser, ref_in: tree.Ref) Error!tree.Ref {
     var ref = ref_in;
-    if (s.isOp("(")) ref.cols = try s.nameList();
+    if (s.c.isOp("(")) ref.cols = try s.nameList();
     while (true) {
-        if (s.eatKw("MATCH")) {
+        if (s.c.eatKw("MATCH")) {
             _ = try s.anyName();
-        } else if (s.eatKw("ON")) {
-            const on_delete = if (s.eatKw("DELETE")) true else if (s.eatKw("UPDATE")) false else return s.syntaxError();
-            const action: tree.RefAction = if (s.eatKw("CASCADE"))
+        } else if (s.c.eatKw("ON")) {
+            const on_delete = if (s.c.eatKw("DELETE")) true else if (s.c.eatKw("UPDATE")) false else return s.c.syntaxError();
+            const action: tree.RefAction = if (s.c.eatKw("CASCADE"))
                 .cascade
-            else if (s.eatKw("RESTRICT"))
+            else if (s.c.eatKw("RESTRICT"))
                 .restrict
-            else if (s.eatKw("SET")) blk: {
-                if (s.eatKw("NULL")) break :blk .set_null;
-                try s.expectKw("DEFAULT");
+            else if (s.c.eatKw("SET")) blk: {
+                if (s.c.eatKw("NULL")) break :blk .set_null;
+                try s.c.expectKw("DEFAULT");
                 break :blk .set_default;
-            } else if (s.eatKw("NO")) blk: {
-                try s.expectKw("ACTION");
+            } else if (s.c.eatKw("NO")) blk: {
+                try s.c.expectKw("ACTION");
                 break :blk .none;
-            } else return s.syntaxError();
+            } else return s.c.syntaxError();
             if (on_delete) ref.on_delete = action else ref.on_update = action;
         } else break;
     }
@@ -318,9 +318,9 @@ fn storedExpr(s: *Parser, clause: []const u8, name: []const u8) Error!*Expr {
 
 /// `( expr )` of CHECK.
 fn checkExpr(s: *Parser, name: []const u8) Error!*Expr {
-    try s.expectOp("(");
+    try s.c.expectOp("(");
     const e = try storedExpr(s, "CHECK", name);
-    try s.expectOp(")");
+    try s.c.expectOp(")");
     return e;
 }
 
@@ -334,67 +334,67 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
     }
     // Attributes, in any order.
     while (true) {
-        if (s.eatKw("NOT")) {
-            try s.expectKw("NULL");
+        if (s.c.eatKw("NOT")) {
+            try s.c.expectKw("NULL");
             c.not_null = true;
-        } else if (s.eatKw("NULL")) {
+        } else if (s.c.eatKw("NULL")) {
             c.explicit_null = true;
-        } else if (s.eatKw("DEFAULT")) {
+        } else if (s.c.eatKw("DEFAULT")) {
             try defaultValue(s, &c);
-        } else if (s.eatKw("AUTO_INCREMENT")) {
+        } else if (s.c.eatKw("AUTO_INCREMENT")) {
             c.autoinc = true;
-        } else if (s.eatKw("PRIMARY")) {
-            try s.expectKw("KEY");
+        } else if (s.c.eatKw("PRIMARY")) {
+            try s.c.expectKw("KEY");
             c.primary = true;
-        } else if (s.eatKw("UNIQUE")) {
-            _ = s.eatKw("KEY");
+        } else if (s.c.eatKw("UNIQUE")) {
+            _ = s.c.eatKw("KEY");
             c.unique = true;
-        } else if (s.eatKw("KEY")) {
+        } else if (s.c.eatKw("KEY")) {
             c.primary = true;
-        } else if (s.eatKw("COMMENT")) {
+        } else if (s.c.eatKw("COMMENT")) {
             _ = try s.stringLiteral();
-        } else if (s.eatKw("COLLATE")) {
-            const t0 = s.tok;
+        } else if (s.c.eatKw("COLLATE")) {
+            const t0 = s.c.peek();
             c.collation = try s.collationName();
             c.collation_name = try collName(s, t0);
-        } else if (s.isKw("CHARACTER") or s.isKw("CHARSET")) {
+        } else if (s.c.isKw("CHARACTER") or s.c.isKw("CHARSET")) {
             try charsetClause(s, &c);
-        } else if (s.eatKw("CONSTRAINT")) {
+        } else if (s.c.eatKw("CONSTRAINT")) {
             var cname: []const u8 = name.text;
             if (s.isName()) cname = try s.nameText(try s.name());
-            try s.expectKw("CHECK");
+            try s.c.expectKw("CHECK");
             try c.checks.append(s.a, .{ .name = cname, .e = try checkExpr(s, cname) });
-        } else if (s.eatKw("CHECK")) {
+        } else if (s.c.eatKw("CHECK")) {
             try c.checks.append(s.a, .{ .name = name.text, .e = try checkExpr(s, name.text) });
-        } else if (s.isKw("GENERATED") or s.isKw("AS")) {
-            if (s.eatKw("GENERATED")) {
-                try s.expectKw("ALWAYS");
+        } else if (s.c.isKw("GENERATED") or s.c.isKw("AS")) {
+            if (s.c.eatKw("GENERATED")) {
+                try s.c.expectKw("ALWAYS");
             }
-            try s.expectKw("AS");
-            try s.expectOp("(");
+            try s.c.expectKw("AS");
+            try s.c.expectOp("(");
             c.generated = try storedExpr(s, "GENERATED ALWAYS AS", name.text);
-            try s.expectOp(")");
-            if (s.eatKw("STORED") or s.eatKw("PERSISTENT")) {
+            try s.c.expectOp(")");
+            if (s.c.eatKw("STORED") or s.c.eatKw("PERSISTENT")) {
                 c.stored = true;
-            } else _ = s.eatKw("VIRTUAL");
-        } else if (s.eatKw("ON")) {
-            try s.expectKw("UPDATE");
-            if (!(s.eatKw("CURRENT_TIMESTAMP") or s.eatKw("NOW") or s.eatKw("LOCALTIMESTAMP") or s.eatKw("LOCALTIME"))) return s.syntaxError();
-            if (s.eatOp("(")) {
-                if (s.tok.kind == .integer) s.advance();
-                try s.expectOp(")");
+            } else _ = s.c.eatKw("VIRTUAL");
+        } else if (s.c.eatKw("ON")) {
+            try s.c.expectKw("UPDATE");
+            if (!(s.c.eatKw("CURRENT_TIMESTAMP") or s.c.eatKw("NOW") or s.c.eatKw("LOCALTIMESTAMP") or s.c.eatKw("LOCALTIME"))) return s.c.syntaxError();
+            if (s.c.eatOp("(")) {
+                if (s.c.peek().kind == .integer) s.c.skip();
+                try s.c.expectOp(")");
             }
             c.on_update = true;
-        } else if (s.isKw("REFERENCES")) {
+        } else if (s.c.isKw("REFERENCES")) {
             // MariaDB ignores a column's REFERENCES.
             _ = try references(s);
-        } else if (s.eatKw("INVISIBLE")) {
-            return s.fail("xqlite: INVISIBLE columns are not supported", .{});
-        } else if (s.eatKw("COLUMN_FORMAT") or s.eatKw("STORAGE")) {
+        } else if (s.c.eatKw("INVISIBLE")) {
+            return s.c.fail(null, "xqlite: INVISIBLE columns are not supported", .{});
+        } else if (s.c.eatKw("COLUMN_FORMAT") or s.c.eatKw("STORAGE")) {
             _ = try s.anyName();
-        } else if (s.eatKw("SERIAL")) {
-            try s.expectKw("DEFAULT");
-            try s.expectKw("VALUE");
+        } else if (s.c.eatKw("SERIAL")) {
+            try s.c.expectKw("DEFAULT");
+            try s.c.expectKw("VALUE");
             c.not_null = true;
             c.autoinc = true;
             c.unique = true;
@@ -411,21 +411,21 @@ fn collName(s: *Parser, t: Token) Error![]const u8 {
 
 /// CHARACTER SET x / CHARSET x: the charset's default collation.
 fn charsetClause(s: *Parser, c: *Column) Error!void {
-    if (s.eatKw("CHARACTER")) try s.expectKw("SET") else s.advance();
-    const t0 = s.tok;
-    if (t0.kind != .ident and t0.kind != .quoted_ident and t0.kind != .string) return s.syntaxError();
-    s.advance();
+    if (s.c.eatKw("CHARACTER")) try s.c.expectKw("SET") else s.c.skip();
+    const t0 = s.c.peek();
+    if (t0.kind != .ident and t0.kind != .quoted_ident and t0.kind != .string) return s.c.syntaxError();
+    s.c.skip();
     const cs = try collName(s, t0);
     if (c.collation == null) {
-        c.collation = parser.charsetCollation(cs) orelse return s.failState(.numbered("42704", 1115), "Unknown character set: '{s}'", .{cs});
+        c.collation = parser.charsetCollation(cs) orelse return s.c.failState(null, .numbered("42704", 1115), "Unknown character set: '{s}'", .{cs});
     }
 }
 
 /// The type of a column definition (and its type attributes).
 fn columnType(s: *Parser, c: *Column) Error!types.Type {
-    const t0 = s.tok;
-    if (t0.kind != .ident) return s.syntaxError();
-    s.advance();
+    const t0 = s.c.peek();
+    if (t0.kind != .ident) return s.c.syntaxError();
+    s.c.skip();
     var ty: types.Type = undefined;
     const W = struct {
         fn is(t: Token, w: []const u8) bool {
@@ -457,33 +457,33 @@ fn columnType(s: *Parser, c: *Column) Error!types.Type {
         base = al[1];
     };
     if (base == null) base = types.baseByName(t0.text);
-    var b = base orelse return s.fail("xqlite: unknown data type '{s}'", .{t0.text});
+    var b = base orelse return s.c.fail(null, "xqlite: unknown data type '{s}'", .{t0.text});
     // Two-word types.
-    if (W.is(t0, "DOUBLE")) _ = s.eatKw("PRECISION");
+    if (W.is(t0, "DOUBLE")) _ = s.c.eatKw("PRECISION");
     if (W.is(t0, "NATIONAL")) {
-        if (s.eatKw("VARCHAR")) {
+        if (s.c.eatKw("VARCHAR")) {
             b = .varchar;
-        } else if (!(s.eatKw("CHAR") or s.eatKw("CHARACTER"))) return s.syntaxError();
+        } else if (!(s.c.eatKw("CHAR") or s.c.eatKw("CHARACTER"))) return s.c.syntaxError();
     }
-    if (b == .char and (s.eatKw("VARYING"))) b = .varchar;
+    if (b == .char and (s.c.eatKw("VARYING"))) b = .varchar;
     if (W.is(t0, "LONG")) {
-        if (s.eatKw("VARBINARY")) b = .mediumblob else _ = s.eatKw("VARCHAR");
+        if (s.c.eatKw("VARBINARY")) b = .mediumblob else _ = s.c.eatKw("VARCHAR");
     }
-    if (b == .char and s.eatKw("BYTE")) b = .binary;
+    if (b == .char and s.c.eatKw("BYTE")) b = .binary;
     ty = .{ .base = b };
     if (b == .@"enum" or b == .set) {
-        try s.expectOp("(");
+        try s.c.expectOp("(");
         var members: std.ArrayList([]const u8) = .empty;
         while (true) {
             try members.append(s.a, try s.stringLiteral());
-            if (!s.eatOp(",")) break;
+            if (!s.c.eatOp(",")) break;
         }
-        try s.expectOp(")");
+        try s.c.expectOp(")");
         ty.members = members.items;
-    } else if (s.eatOp("(")) {
+    } else if (s.c.eatOp("(")) {
         ty.len = try intArg(s);
-        if (s.eatOp(",")) ty.scale = try intArg(s);
-        try s.expectOp(")");
+        if (s.c.eatOp(",")) ty.scale = try intArg(s);
+        try s.c.expectOp(")");
     }
     // TEXT(n) and BLOB(n) pick the smallest type that holds n bytes.
     if ((b == .text or b == .blob) and ty.len != null) {
@@ -500,27 +500,27 @@ fn columnType(s: *Parser, c: *Column) Error!types.Type {
         ty.len = null;
     }
     if (b == .varchar or b == .varbinary) {
-        if (ty.len == null) return s.syntaxError();
+        if (ty.len == null) return s.c.syntaxError();
     }
     if (b == .decimal) {
-        if (ty.len) |p| if (p > 65) return s.failState(.numbered("42611", 1426), "Too big precision specified for '{s}'. Maximum is 65", .{c.name.text});
+        if (ty.len) |p| if (p > 65) return s.c.failState(null, .numbered("42611", 1426), "Too big precision specified for '{s}'. Maximum is 65", .{c.name.text});
         if (ty.scale) |sc| {
-            if (sc > 38) return s.failState(.numbered("42611", 1425), "Too big scale specified for '{s}'. Maximum is 38", .{c.name.text});
-            if (sc > (ty.len orelse 10)) return s.failState(.numbered("22023", 1427), "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '{s}')", .{c.name.text});
+            if (sc > 38) return s.c.failState(null, .numbered("42611", 1425), "Too big scale specified for '{s}'. Maximum is 38", .{c.name.text});
+            if (sc > (ty.len orelse 10)) return s.c.failState(null, .numbered("22023", 1427), "For float(M,D), double(M,D) or decimal(M,D), M must be >= D (column '{s}')", .{c.name.text});
         }
     }
     while (true) {
-        if (s.eatKw("UNSIGNED")) {
+        if (s.c.eatKw("UNSIGNED")) {
             ty.unsigned = true;
-        } else if (s.eatKw("SIGNED")) {} else if (s.eatKw("ZEROFILL")) {
+        } else if (s.c.eatKw("SIGNED")) {} else if (s.c.eatKw("ZEROFILL")) {
             ty.zerofill = true;
             ty.unsigned = true;
-        } else if (s.isKw("BINARY") and ty.base.isString()) {
-            s.advance();
+        } else if (s.c.isKw("BINARY") and ty.base.isString()) {
+            s.c.skip();
             c.collation = "BINARY";
-        } else if (s.isKw("CHARACTER") or s.isKw("CHARSET")) {
+        } else if (s.c.isKw("CHARACTER") or s.c.isKw("CHARSET")) {
             try charsetClause(s, c);
-        } else if (s.eatKw("ASCII") or s.eatKw("UNICODE")) {} else break;
+        } else if (s.c.eatKw("ASCII") or s.c.eatKw("UNICODE")) {} else break;
     }
     if (ty.base == .tinyint and b == .tinyint and W.is(t0, "BOOL")) ty.len = 1;
     return ty;
@@ -531,140 +531,140 @@ fn columnType(s: *Parser, c: *Column) Error!types.Type {
 pub fn dataType(s: *Parser, name: Name) Error!struct { types.Type, bool } {
     var c: Column = .{ .name = name, .type = undefined };
     const ty = try columnType(s, &c);
-    if (s.eatKw("COLLATE")) _ = try s.collationName();
+    if (s.c.eatKw("COLLATE")) _ = try s.collationName();
     return .{ ty, c.json };
 }
 
 fn intArg(s: *Parser) Error!u32 {
-    if (s.tok.kind != .integer) return s.syntaxError();
-    const v = std.fmt.parseInt(u32, s.tok.text, 10) catch return s.syntaxError();
-    s.advance();
+    if (s.c.peek().kind != .integer) return s.c.syntaxError();
+    const v = std.fmt.parseInt(u32, s.c.peek().text, 10) catch return s.c.syntaxError();
+    s.c.skip();
     return v;
 }
 
 /// DEFAULT literal | (expr) | CURRENT_TIMESTAMP[(n)] | NOW() ...
 fn defaultValue(s: *Parser, c: *Column) Error!void {
-    const t = s.tok;
-    const pos = s.here();
+    const t = s.c.peek();
+    const pos = s.c.here();
     if (t.isAnyKw(&.{ "CURRENT_TIMESTAMP", "NOW", "LOCALTIMESTAMP", "LOCALTIME" })) {
-        s.advance();
-        if (s.eatOp("(")) {
-            if (s.tok.kind == .integer) s.advance();
-            try s.expectOp(")");
+        s.c.skip();
+        if (s.c.eatOp("(")) {
+            if (s.c.peek().kind == .integer) s.c.skip();
+            try s.c.expectOp(")");
         }
         c.default = try s.func(pos, "datetime", &.{try s.str(pos, "now")});
         c.default_shown = "current_timestamp()";
         return;
     }
     if (t.isKw("CURRENT_DATE") or t.isKw("CURDATE")) {
-        s.advance();
-        if (s.eatOp("(")) try s.expectOp(")");
+        s.c.skip();
+        if (s.c.eatOp("(")) try s.c.expectOp(")");
         c.default = try s.func(pos, "date", &.{try s.str(pos, "now")});
         c.default_shown = "curdate()";
         return;
     }
     if (t.isKw("NULL")) {
-        s.advance();
+        s.c.skip();
         return;
     }
     if (t.isKw("TRUE") or t.isKw("FALSE")) {
-        s.advance();
+        s.c.skip();
         const v: []const u8 = if (t.isKw("TRUE")) "1" else "0";
         c.default = try s.mk(pos, .{ .integer = v });
         c.default_shown = v;
         return;
     }
-    if (t.kind == .string or (t.kind == .ident and t.text[0] == '_' and s.peek().kind == .string)) {
+    if (t.kind == .string or (t.kind == .ident and t.text[0] == '_' and s.c.peekAt(1).kind == .string)) {
         const v = try s.stringLiteral();
         c.default = try s.mk(pos, .{ .string = v });
         c.default_shown = v;
         return;
     }
-    if (s.isOp("(")) {
-        s.advance();
-        const start = s.here();
+    if (s.c.isOp("(")) {
+        s.c.skip();
+        const start = s.c.here();
         const e = try storedExpr(s, "DEFAULT", c.name.text);
-        const end = s.endPos();
-        try s.expectOp(")");
+        const end = s.c.lastEnd();
+        try s.c.expectOp(")");
         c.default = e;
-        c.default_shown = s.lx.sql[start..end];
+        c.default_shown = s.c.sql[start..end];
         return;
     }
     // A number, maybe signed; hex and bit literals.
     var neg = false;
-    if (s.eatOp("-")) {
+    if (s.c.eatOp("-")) {
         neg = true;
-    } else _ = s.eatOp("+");
-    const n = s.tok;
+    } else _ = s.c.eatOp("+");
+    const n = s.c.peek();
     switch (n.kind) {
         .integer, .float => {
-            s.advance();
-            const lit = try s.mk(s.posOf(n), if (n.kind == .integer) .{ .integer = n.text } else .{ .float = n.text });
+            s.c.skip();
+            const lit = try s.mk(n.start, if (n.kind == .integer) .{ .integer = n.text } else .{ .float = n.text });
             c.default = if (neg) try s.mk(pos, .{ .unary = .{ .op = .neg, .e = lit } }) else lit;
             c.default_shown = try std.fmt.allocPrint(s.a, "{s}{s}", .{ if (neg) "-" else "", n.text });
         },
         .hex => {
-            s.advance();
+            s.c.skip();
             const d = (try lexer.hexDigits(s.a, n)) orelse return s.syntaxErrorAt(n);
             c.default = try s.mk(pos, .{ .blob = d });
             c.default_shown = n.text;
         },
         .bit => {
-            s.advance();
+            s.c.skip();
             const v = lexer.bitValue(n) orelse 0;
             c.default = try s.int_(pos, v);
             c.default_shown = try std.fmt.allocPrint(s.a, "{d}", .{v});
         },
-        else => return s.syntaxError(),
+        else => return s.c.syntaxError(),
     }
 }
 
 fn tableOptions(s: *Parser, t: ?*Table) Error!void {
-    while (!s.atStmtEnd() and !s.isKw("PARTITION") and !s.isKw("AS") and !s.isSelectStart()) {
-        _ = s.eatKw("DEFAULT");
-        if (s.isKw("CHARACTER") or s.isKw("CHARSET")) {
-            if (s.eatKw("CHARACTER")) try s.expectKw("SET") else s.advance();
-            _ = s.eatOp("=");
-            const t0 = s.tok;
-            s.advance();
+    while (!s.atStmtEnd() and !s.c.isKw("PARTITION") and !s.c.isKw("AS") and !s.isSelectStart()) {
+        _ = s.c.eatKw("DEFAULT");
+        if (s.c.isKw("CHARACTER") or s.c.isKw("CHARSET")) {
+            if (s.c.eatKw("CHARACTER")) try s.c.expectKw("SET") else s.c.skip();
+            _ = s.c.eatOp("=");
+            const t0 = s.c.peek();
+            s.c.skip();
             const cs = try collName(s, t0);
-            const coll = parser.charsetCollation(cs) orelse return s.failState(.numbered("42704", 1115), "Unknown character set: '{s}'", .{cs});
+            const coll = parser.charsetCollation(cs) orelse return s.c.failState(null, .numbered("42704", 1115), "Unknown character set: '{s}'", .{cs});
             if (t) |tt| if (tt.default_collation_name == null) {
                 tt.default_collation = coll;
             };
-        } else if (s.eatKw("COLLATE")) {
-            _ = s.eatOp("=");
-            const t0 = s.tok;
+        } else if (s.c.eatKw("COLLATE")) {
+            _ = s.c.eatOp("=");
+            const t0 = s.c.peek();
             const coll = try s.collationName();
             if (t) |tt| {
                 tt.default_collation = coll;
                 tt.default_collation_name = try collName(s, t0);
             }
-        } else if (s.eatKw("AUTO_INCREMENT")) {
-            _ = s.eatOp("=");
-            if (s.tok.kind != .integer) return s.syntaxError();
-            const v = std.fmt.parseInt(i64, s.tok.text, 10) catch return s.syntaxError();
-            s.advance();
+        } else if (s.c.eatKw("AUTO_INCREMENT")) {
+            _ = s.c.eatOp("=");
+            if (s.c.peek().kind != .integer) return s.c.syntaxError();
+            const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+            s.c.skip();
             if (t) |tt| tt.auto_increment_start = v;
-        } else if (s.tok.kind == .ident) {
+        } else if (s.c.peek().kind == .ident) {
             // ENGINE=x, COMMENT='x', ROW_FORMAT=x, ...: accepted.
-            s.advance();
-            _ = s.eatOp("=");
-            switch (s.tok.kind) {
-                .ident, .quoted_ident, .string, .integer, .float => s.advance(),
-                else => return s.syntaxError(),
+            s.c.skip();
+            _ = s.c.eatOp("=");
+            switch (s.c.peek().kind) {
+                .ident, .quoted_ident, .string, .integer, .float => s.c.skip(),
+                else => return s.c.syntaxError(),
             }
-        } else return s.syntaxError();
-        _ = s.eatOp(",");
+        } else return s.c.syntaxError();
+        _ = s.c.eatOp(",");
     }
 }
 
 /// Check the definition and apply the table-level defaults.
 fn finishTable(s: *Parser, t: *Table) Error!void {
-    if (t.columns.items.len == 0) return s.syntaxError();
+    if (t.columns.items.len == 0) return s.c.syntaxError();
     // The column-level PRIMARY KEY.
     for (t.columns.items) |*c| if (c.primary) {
-        if (t.primary != null) return s.failState(.numbered("42P16", 1068), "Multiple primary key defined", .{});
+        if (t.primary != null) return s.c.failState(null, .numbered("42P16", 1068), "Multiple primary key defined", .{});
         t.primary = try s.a.dupe(IndexCol, &.{.{ .name = c.name, .desc = false }});
     };
     for (t.columns.items) |*c| {
@@ -678,33 +678,33 @@ fn finishTable(s: *Parser, t: *Table) Error!void {
         if (t.primary) |pk| for (pk) |k| {
             if (std.ascii.eqlIgnoreCase(k.name.text, c.name.text)) c.not_null = true;
         };
-        if (findColumn(t, c.name.text) != c) return s.failState(.numbered("42701", 1060), "Duplicate column name '{s}'", .{c.name.text});
+        if (findColumn(t, c.name.text) != c) return s.c.failState(null, .numbered("42701", 1060), "Duplicate column name '{s}'", .{c.name.text});
     }
     // Keys refer to existing columns.
     for (t.indexes.items) |ix| for (ix.cols) |k| {
-        if (findColumn(t, k.name.text) == null) return s.failState(.numbered("42703", 1072), "Key column '{s}' doesn't exist in table", .{k.name.text});
+        if (findColumn(t, k.name.text) == null) return s.c.failState(null, .numbered("42703", 1072), "Key column '{s}' doesn't exist in table", .{k.name.text});
     };
     if (t.primary) |pk| for (pk) |k| {
-        if (findColumn(t, k.name.text) == null) return s.failState(.numbered("42703", 1072), "Key column '{s}' doesn't exist in table", .{k.name.text});
+        if (findColumn(t, k.name.text) == null) return s.c.failState(null, .numbered("42703", 1072), "Key column '{s}' doesn't exist in table", .{k.name.text});
     };
     // AUTO_INCREMENT: the rowid.
     var n_auto: usize = 0;
     for (t.columns.items) |*c| {
         if (!c.autoinc) continue;
         n_auto += 1;
-        if (!c.type.base.isInteger()) return s.failState(.numbered("42P16", 1063), "Incorrect column specifier for column '{s}'", .{c.name.text});
+        if (!c.type.base.isInteger()) return s.c.failState(null, .numbered("42P16", 1063), "Incorrect column specifier for column '{s}'", .{c.name.text});
         const is_pk = if (t.primary) |pk| pk.len == 1 and std.ascii.eqlIgnoreCase(pk[0].name.text, c.name.text) else false;
         if (!is_pk) {
             var unique = c.unique;
             for (t.indexes.items) |ix| unique = unique or (ix.unique and ix.cols.len == 1 and std.ascii.eqlIgnoreCase(ix.cols[0].name.text, c.name.text));
             if (t.primary != null or !unique) {
-                return s.fail("xqlite: an AUTO_INCREMENT column must be the PRIMARY KEY (or the only UNIQUE key of a table without one)", .{});
+                return s.c.fail(null, "xqlite: an AUTO_INCREMENT column must be the PRIMARY KEY (or the only UNIQUE key of a table without one)", .{});
             }
             t.primary = try s.a.dupe(IndexCol, &.{.{ .name = c.name, .desc = false }});
             c.unique = false;
         }
     }
-    if (n_auto > 1) return s.failState(.numbered("42P16", 1075), "Incorrect table definition; there can be only one auto column and it must be defined as a key", .{});
+    if (n_auto > 1) return s.c.failState(null, .numbered("42P16", 1075), "Incorrect table definition; there can be only one auto column and it must be defined as a key", .{});
     // Unique columns become named unique indexes.
     for (t.columns.items) |*c| if (c.unique) {
         try t.indexes.append(s.a, .{ .name = c.name.text, .unique = true, .cols = try s.a.dupe(IndexCol, &.{.{ .name = c.name, .desc = false }}) });
@@ -720,7 +720,7 @@ fn finishTable(s: *Parser, t: *Table) Error!void {
     }
     for (t.indexes.items, 0..) |ix, i| {
         if (indexNameUsed(t.indexes.items[0..i], ix.name.?) or std.ascii.eqlIgnoreCase(ix.name.?, "PRIMARY")) {
-            return s.failState(.numbered("42P07", 1061), "Duplicate key name '{s}'", .{ix.name.?});
+            return s.c.failState(null, .numbered("42P07", 1061), "Duplicate key name '{s}'", .{ix.name.?});
         }
     }
 }
@@ -775,7 +775,7 @@ fn columnTree(s: *Parser, c: *const Column, rowid: bool) Error!tree.ColumnDef {
 fn declType(s: *Parser, c: *const Column) Error![]const u8 {
     var tbuf: [512]u8 = undefined;
     var tw: Writer = .fixed(&tbuf);
-    c.type.format(&tw) catch return s.fail("xqlite: column type too long", .{});
+    c.type.format(&tw) catch return s.c.fail(null, "xqlite: column type too long", .{});
     return s.a.dupe(u8, tw.buffered());
 }
 
@@ -803,7 +803,7 @@ fn indexTree(s: *Parser, schema: []const u8, table: Name, ix: IndexDef, if_not_e
 /// The indexes, the catalog entries and AUTO_INCREMENT=n of a new table,
 /// when the statement runs.
 fn codeTableExtras(s: *Parser, t: *Table, schema: []const u8, name: []const u8) Error!void {
-    var r: render.Renderer = .{ .p = s.p, .src = s.lx.sql };
+    var r: render.Renderer = .{ .p = s.p, .src = s.c.sql };
     const table: Name = .{ .text = name };
     for (t.indexes.items) |ix| {
         _ = r.createIndex(try indexTree(s, schema, table, ix, false)) catch |err| return lowered(err);
@@ -834,21 +834,21 @@ fn codeColumnEntries(s: *Parser, schema: []const u8, table: []const u8, c: *cons
 // ====================================================== CREATE INDEX
 
 pub fn createIndex(s: *Parser, unique: bool) Error!void {
-    try s.expectKw("INDEX");
-    const if_not_exists = try s.ifNotExists();
+    try s.c.expectKw("INDEX");
+    const if_not_exists = try s.c.ifNotExists();
     const iname = try s.nameText(try s.name());
     try indexType(s);
-    try s.expectKw("ON");
+    try s.c.expectKw("ON");
     const q = try s.qualifiedName();
     const cols = try indexColumns(s);
     try indexOptions(s);
-    while (s.eatKw("ALGORITHM") or s.eatKw("LOCK")) {
-        _ = s.eatOp("=");
+    while (s.c.eatKw("ALGORITHM") or s.c.eatKw("LOCK")) {
+        _ = s.c.eatOp("=");
         _ = try s.anyName();
     }
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const r = try s.relation(q);
-    const tab = r.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const tab = r.find(s.p.db) orelse return s.c.failState(null, .numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const table: Name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos };
     try s.lowerStmt(.{ .create_index = try indexTree(s, schema, table, .{ .name = iname, .unique = unique, .cols = cols }, if_not_exists) });
@@ -865,18 +865,18 @@ fn findIndexName(s: *Parser, tab: *int.Table, iname: []const u8, schema: ?[]cons
 
 /// DROP INDEX [IF EXISTS] i ON t.
 pub fn dropIndex(s: *Parser) Error!void {
-    try s.expectKw("INDEX");
-    const if_exists = try s.ifExists();
+    try s.c.expectKw("INDEX");
+    const if_exists = try s.c.ifExists();
     const iname = try s.nameText(try s.anyName());
-    if (!s.eatKw("ON")) return s.fail("xqlite: DROP INDEX needs ON table", .{});
+    if (!s.c.eatKw("ON")) return s.c.fail(null, "xqlite: DROP INDEX needs ON table", .{});
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
-    if (std.ascii.eqlIgnoreCase(iname, "PRIMARY")) return s.fail("xqlite: dropping the PRIMARY KEY is not supported", .{});
+    if (std.ascii.eqlIgnoreCase(iname, "PRIMARY")) return s.c.fail(null, "xqlite: dropping the PRIMARY KEY is not supported", .{});
     const r = try s.relation(q);
-    const tab = r.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
+    const tab = r.find(s.p.db) orelse return s.c.failState(null, .numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try r.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const real = (try findIndexName(s, tab, iname, schema)) orelse {
-        if (!if_exists) return s.failState(.numbered("42704", 1091), "Can't DROP INDEX `{s}`; check that it exists", .{iname});
+        if (!if_exists) return s.c.failState(null, .numbered("42704", 1091), "Can't DROP INDEX `{s}`; check that it exists", .{iname});
         return session.emptyStatement(s);
     };
     try dropIndexNamed(s, .{ .text = schema }, real);
@@ -890,20 +890,20 @@ fn dropIndexNamed(s: *Parser, schema: ?Name, real: []const u8) Error!void {
 
 /// DROP [TEMPORARY] TABLE [IF EXISTS] t [, t2 ...] [RESTRICT|CASCADE].
 pub fn dropTable(s: *Parser, view: bool) Error!void {
-    s.advance(); // TABLE / VIEW
-    const if_exists = try s.ifExists();
+    s.c.skip(); // TABLE / VIEW
+    const if_exists = try s.c.ifExists();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const q = try s.qualifiedName();
-    if (s.isOp(",")) return s.fail("xqlite: DROP {s} of several tables is not supported", .{if (view) "VIEW" else "TABLE"});
-    _ = s.eatKw("RESTRICT") or s.eatKw("CASCADE");
+    if (s.c.isOp(",")) return s.c.fail(null, "xqlite: DROP {s} of several tables is not supported", .{if (view) "VIEW" else "TABLE"});
+    _ = s.c.eatKw("RESTRICT") or s.c.eatKw("CASCADE");
     // A database that does not exist has no such table.
     if (q.schema) |x| if ((try s.database(x.text)) == null) {
         if (if_exists) return session.emptyStatement(s);
-        return s.failState(.numbered("42P01", 1051), "Unknown table '{s}.{s}'", .{ x.text, q.name.text });
+        return s.c.failState(null, .numbered("42P01", 1051), "Unknown table '{s}.{s}'", .{ x.text, q.name.text });
     };
     const r = try s.relation(q);
     if (r.find(s.p.db) == null) {
-        if (!if_exists) return s.failState(.numbered("42P01", 1051), "Unknown table '{s}'", .{try r.shown(s.a)});
+        if (!if_exists) return s.c.failState(null, .numbered("42P01", 1051), "Unknown table '{s}'", .{try r.shown(s.a)});
         return session.emptyStatement(s);
     }
     var name = r.q;
@@ -916,21 +916,21 @@ pub fn dropTable(s: *Parser, view: bool) Error!void {
 /// CREATE [OR REPLACE] [ALGORITHM=..] [DEFINER=..] [SQL SECURITY ..] VIEW
 /// [IF NOT EXISTS] v [(cols)] AS select [WITH CHECK OPTION].
 pub fn createView(s: *Parser, or_replace: bool, temp: bool) Error!void {
-    try s.expectKw("VIEW");
-    const if_not_exists = try s.ifNotExists();
+    try s.c.expectKw("VIEW");
+    const if_not_exists = try s.c.ifNotExists();
     const q = try s.qualifiedName();
     const dest = try s.createTarget(q, temp);
     var cols: []Name = &.{};
-    if (s.isOp("(")) cols = try s.nameList();
-    try s.expectKw("AS");
+    if (s.c.isOp("(")) cols = try s.nameList();
+    try s.c.expectKw("AS");
     const saved = s.stored;
     s.stored = .{};
     const sel = try s.selectStmt();
     s.stored = saved;
-    if (s.eatKw("WITH")) {
-        _ = s.eatKw("CASCADED") or s.eatKw("LOCAL");
-        try s.expectKw("CHECK");
-        try s.expectKw("OPTION");
+    if (s.c.eatKw("WITH")) {
+        _ = s.c.eatKw("CASCADED") or s.c.eatKw("LOCAL");
+        try s.c.expectKw("CHECK");
+        try s.c.expectKw("OPTION");
     }
     const name: tree.QName = if (temp) .{ .name = q.name } else dest.q;
     try s.lowerStmt(.{ .create_view = try s.new(tree.CreateView, .{
@@ -947,34 +947,34 @@ pub fn createView(s: *Parser, or_replace: bool, temp: bool) Error!void {
 
 /// CREATE [OR REPLACE] SEQUENCE [IF NOT EXISTS] s [options] (MariaDB 10.3).
 pub fn createSequence(s: *Parser) Error!void {
-    try s.expectKw("SEQUENCE");
-    const if_not_exists = try s.ifNotExists();
+    try s.c.expectKw("SEQUENCE");
+    const if_not_exists = try s.c.ifNotExists();
     const q = try s.qualifiedName();
     var o: tree.SeqOpts = .{};
     while (!s.atStmtEnd()) {
-        if (s.eatKw("INCREMENT")) {
-            _ = s.eatKw("BY") or s.eatOp("=");
+        if (s.c.eatKw("INCREMENT")) {
+            _ = s.c.eatKw("BY") or s.c.eatOp("=");
             o.increment = try signedInt(s);
-        } else if (s.eatKw("MINVALUE")) {
-            _ = s.eatOp("=");
+        } else if (s.c.eatKw("MINVALUE")) {
+            _ = s.c.eatOp("=");
             o.min = try signedInt(s);
-        } else if (s.eatKw("MAXVALUE")) {
-            _ = s.eatOp("=");
+        } else if (s.c.eatKw("MAXVALUE")) {
+            _ = s.c.eatOp("=");
             o.max = try signedInt(s);
-        } else if (s.eatKw("NOMINVALUE") or s.eatKw("NOMAXVALUE") or s.eatKw("NOCACHE") or s.eatKw("NOCYCLE")) {} else if (s.eatKw("NO")) {
-            if (!(s.eatKw("MINVALUE") or s.eatKw("MAXVALUE") or s.eatKw("CACHE") or s.eatKw("CYCLE"))) return s.syntaxError();
-        } else if (s.eatKw("START")) {
-            _ = s.eatKw("WITH") or s.eatOp("=");
+        } else if (s.c.eatKw("NOMINVALUE") or s.c.eatKw("NOMAXVALUE") or s.c.eatKw("NOCACHE") or s.c.eatKw("NOCYCLE")) {} else if (s.c.eatKw("NO")) {
+            if (!(s.c.eatKw("MINVALUE") or s.c.eatKw("MAXVALUE") or s.c.eatKw("CACHE") or s.c.eatKw("CYCLE"))) return s.c.syntaxError();
+        } else if (s.c.eatKw("START")) {
+            _ = s.c.eatKw("WITH") or s.c.eatOp("=");
             o.start = try signedInt(s);
-        } else if (s.eatKw("CACHE")) {
-            _ = s.eatOp("=");
+        } else if (s.c.eatKw("CACHE")) {
+            _ = s.c.eatOp("=");
             _ = try signedInt(s);
-        } else if (s.eatKw("CYCLE")) {
+        } else if (s.c.eatKw("CYCLE")) {
             o.cycle = true;
-        } else if (s.eatKw("ENGINE")) {
-            _ = s.eatOp("=");
+        } else if (s.c.eatKw("ENGINE")) {
+            _ = s.c.eatOp("=");
             _ = try s.anyName();
-        } else return s.syntaxError();
+        } else return s.c.syntaxError();
     }
     // MariaDB: a descending sequence's MAXVALUE defaults to -1 and its
     // MINVALUE to -9223372036854775807; PostgreSQL's (sequence.zig) are
@@ -984,18 +984,18 @@ pub fn createSequence(s: *Parser) Error!void {
 }
 
 fn signedInt(s: *Parser) Error!i64 {
-    const neg = s.eatOp("-");
-    if (!neg) _ = s.eatOp("+");
-    if (s.tok.kind != .integer) return s.syntaxError();
-    const v = std.fmt.parseInt(i64, s.tok.text, 10) catch return s.syntaxError();
-    s.advance();
+    const neg = s.c.eatOp("-");
+    if (!neg) _ = s.c.eatOp("+");
+    if (s.c.peek().kind != .integer) return s.c.syntaxError();
+    const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+    s.c.skip();
     return if (neg) -v else v;
 }
 
 /// DROP SEQUENCE [IF EXISTS] s.
 pub fn dropSequence(s: *Parser) Error!void {
-    try s.expectKw("SEQUENCE");
-    const if_exists = try s.ifExists();
+    try s.c.expectKw("SEQUENCE");
+    const if_exists = try s.c.ifExists();
     const q = try s.qualifiedName();
     // Dropping a sequence that does not exist does nothing (MariaDB
     // fails without IF EXISTS).
@@ -1009,17 +1009,17 @@ pub fn dropSequence(s: *Parser) Error!void {
 /// [COLUMN] c | DROP {INDEX|KEY} i | RENAME [TO|AS] n | RENAME COLUMN a
 /// TO b: one change per statement.
 pub fn alterTable(s: *Parser) Error!void {
-    _ = s.eatKw("IGNORE");
-    try s.expectKw("TABLE");
+    _ = s.c.eatKw("IGNORE");
+    try s.c.expectKw("TABLE");
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const rel = try s.relation(q);
-    const tab = rel.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try rel.shown(s.a)});
+    const tab = rel.find(s.p.db) orelse return s.c.failState(null, .numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try rel.shown(s.a)});
     const real = try s.a.dupe(u8, tab.name);
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const tq: tree.QName = .{ .schema = .{ .text = schema }, .name = .{ .text = real, .pos = q.name.pos } };
-    if (s.eatKw("ADD")) {
-        if (s.isAnyKw(&.{ "INDEX", "KEY", "UNIQUE", "FULLTEXT", "SPATIAL" })) {
+    if (s.c.eatKw("ADD")) {
+        if (s.c.isAnyKw(&.{ "INDEX", "KEY", "UNIQUE", "FULLTEXT", "SPATIAL" })) {
             var t: Table = .{};
             try createDefinition(s, &t);
             var ix = t.indexes.items[0];
@@ -1027,16 +1027,16 @@ pub fn alterTable(s: *Parser) Error!void {
             try s.lowerStmt(.{ .create_index = try indexTree(s, schema, .{ .text = real, .pos = q.name.pos }, ix, false) });
             return endAlter(s);
         }
-        if (s.isAnyKw(&.{ "PRIMARY", "CONSTRAINT", "FOREIGN", "CHECK" })) {
-            return s.fail("xqlite: ALTER TABLE ADD {s} is not supported", .{s.tok.text});
+        if (s.c.isAnyKw(&.{ "PRIMARY", "CONSTRAINT", "FOREIGN", "CHECK" })) {
+            return s.c.fail(null, "xqlite: ALTER TABLE ADD {s} is not supported", .{s.c.peek().text});
         }
-        _ = s.eatKw("COLUMN");
-        const if_not_exists = try s.ifNotExists();
+        _ = s.c.eatKw("COLUMN");
+        const if_not_exists = try s.c.ifNotExists();
         var t: Table = .{};
         try columnDefinition(s, &t);
-        if (s.eatKw("FIRST")) {} else if (s.eatKw("AFTER")) _ = try s.anyName();
+        if (s.c.eatKw("FIRST")) {} else if (s.c.eatKw("AFTER")) _ = try s.anyName();
         const c = &t.columns.items[0];
-        if (c.primary or c.autoinc or c.unique) return s.fail("xqlite: ALTER TABLE ADD of a key column is not supported", .{});
+        if (c.primary or c.autoinc or c.unique) return s.c.fail(null, "xqlite: ALTER TABLE ADD of a key column is not supported", .{});
         try finishTable(s, &t);
         if (if_not_exists and build.columnIndex(tab, c.name.text) >= 0) return session.emptyStatement(s);
         try s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = tq, .action = .{ .add_column = .{ .def = try columnTree(s, c, false) } } }) });
@@ -1045,53 +1045,53 @@ pub fn alterTable(s: *Parser) Error!void {
         try s.check();
         return endAlter(s);
     }
-    if (s.eatKw("DROP")) {
-        if (s.eatKw("INDEX") or s.eatKw("KEY")) {
+    if (s.c.eatKw("DROP")) {
+        if (s.c.eatKw("INDEX") or s.c.eatKw("KEY")) {
             const iname = try s.nameText(try s.anyName());
-            const idx = (try findIndexName(s, tab, iname, schema)) orelse return s.failState(.numbered("42704", 1091), "Can't DROP INDEX `{s}`; check that it exists", .{iname});
+            const idx = (try findIndexName(s, tab, iname, schema)) orelse return s.c.failState(null, .numbered("42704", 1091), "Can't DROP INDEX `{s}`; check that it exists", .{iname});
             try dropIndexNamed(s, tq.schema, idx);
             return endAlter(s);
         }
-        if (s.isAnyKw(&.{ "PRIMARY", "FOREIGN", "CONSTRAINT", "CHECK" })) {
-            return s.fail("xqlite: ALTER TABLE DROP {s} is not supported", .{s.tok.text});
+        if (s.c.isAnyKw(&.{ "PRIMARY", "FOREIGN", "CONSTRAINT", "CHECK" })) {
+            return s.c.fail(null, "xqlite: ALTER TABLE DROP {s} is not supported", .{s.c.peek().text});
         }
-        _ = s.eatKw("COLUMN");
-        const if_exists = try s.ifExists();
+        _ = s.c.eatKw("COLUMN");
+        const if_exists = try s.c.ifExists();
         const c = try s.nameOf(try s.anyName());
         try s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = tq, .action = .{ .drop_column = .{ .if_exists = if_exists, .name = c } } }) });
         return endAlter(s);
     }
-    if (s.eatKw("RENAME")) {
-        if (s.eatKw("COLUMN")) {
+    if (s.c.eatKw("RENAME")) {
+        if (s.c.eatKw("COLUMN")) {
             const a = try s.nameOf(try s.anyName());
-            try s.expectKw("TO");
+            try s.c.expectKw("TO");
             const b = try s.nameOf(try s.anyName());
             try s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = tq, .action = .{ .rename_column = .{ .old = a, .new = b } } }) });
             return endAlter(s);
         }
-        if (s.isKw("INDEX") or s.isKw("KEY")) return s.fail("xqlite: ALTER TABLE RENAME INDEX is not supported", .{});
-        _ = s.eatKw("TO") or s.eatKw("AS");
+        if (s.c.isKw("INDEX") or s.c.isKw("KEY")) return s.c.fail(null, "xqlite: ALTER TABLE RENAME INDEX is not supported", .{});
+        _ = s.c.eatKw("TO") or s.c.eatKw("AS");
         const new = try s.qualifiedName();
         try renameTable(s, tab, tq, try renameTarget(s, tab, rel.db, new));
         return endAlter(s);
     }
-    if (s.isKw("DISABLE") or s.isKw("ENABLE")) {
+    if (s.c.isKw("DISABLE") or s.c.isKw("ENABLE")) {
         // DISABLE/ENABLE KEYS (mysqldump): nothing to do.
-        s.advance();
-        try s.expectKw("KEYS");
+        s.c.skip();
+        try s.c.expectKw("KEYS");
         return session.emptyStatement(s);
     }
-    if (s.isAnyKw(&.{ "ENGINE", "DEFAULT", "CHARSET", "CHARACTER", "COMMENT", "AUTO_INCREMENT", "CONVERT" })) {
-        if (s.isKw("CONVERT")) {
-            while (!s.atStmtEnd()) s.advance();
+    if (s.c.isAnyKw(&.{ "ENGINE", "DEFAULT", "CHARSET", "CHARACTER", "COMMENT", "AUTO_INCREMENT", "CONVERT" })) {
+        if (s.c.isKw("CONVERT")) {
+            while (!s.atStmtEnd()) s.c.skip();
         } else try tableOptions(s, null);
         return session.emptyStatement(s);
     }
-    return s.fail("xqlite: this ALTER TABLE is not supported (ADD/DROP COLUMN, ADD/DROP INDEX, RENAME)", .{});
+    return s.c.fail(null, "xqlite: this ALTER TABLE is not supported (ADD/DROP COLUMN, ADD/DROP INDEX, RENAME)", .{});
 }
 
 fn endAlter(s: *Parser) Error!void {
-    if (s.isOp(",")) return s.fail("xqlite: ALTER TABLE with several changes is not supported", .{});
+    if (s.c.isOp(",")) return s.c.fail(null, "xqlite: ALTER TABLE with several changes is not supported", .{});
 }
 
 /// ALTER TABLE ... RENAME TO `new` (the IR renames the catalog entries),
@@ -1120,7 +1120,7 @@ fn renameTable(s: *Parser, tab: *int.Table, old: tree.QName, new: Name) Error!vo
         var ci = try indexTree(s, schema, new, def, false);
         // The schema keeps the name unqualified.
         ci.name.schema = null;
-        const sql = render.statement(s.p, s.lx.sql, .{ .create_index = ci }) catch |err| return lowered(err);
+        const sql = render.statement(s.p, s.c.sql, .{ .create_index = ci }) catch |err| return lowered(err);
         try renamed.append(s.a, .{ .old = try s.a.dupe(u8, ix.name), .new = ci.name.name.text, .sql = sql });
     }
     try s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = old, .action = .{ .rename_to = new } }) });
@@ -1139,14 +1139,14 @@ fn renameTable(s: *Parser, tab: *int.Table, old: tree.QName, new: Name) Error!vo
 
 /// RENAME TABLE a TO b.
 pub fn renameTableStmt(s: *Parser) Error!void {
-    try s.expectKw("TABLE");
+    try s.c.expectKw("TABLE");
     const q = try s.qualifiedName();
-    try s.expectKw("TO");
+    try s.c.expectKw("TO");
     const m = try s.qualifiedName();
-    if (s.isOp(",")) return s.fail("xqlite: RENAME TABLE of several tables is not supported", .{});
+    if (s.c.isOp(",")) return s.c.fail(null, "xqlite: RENAME TABLE of several tables is not supported", .{});
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     const rel = try s.relation(q);
-    const tab = rel.find(s.p.db) orelse return s.failState(.numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try rel.shown(s.a)});
+    const tab = rel.find(s.p.db) orelse return s.c.failState(null, .numbered("42P01", 1146), "Table '{s}' doesn't exist", .{try rel.shown(s.a)});
     const schema = try s.a.dupe(u8, catalog.schemaName(s.p.db, tab));
     const tq: tree.QName = .{ .schema = .{ .text = schema }, .name = .{ .text = try s.a.dupe(u8, tab.name), .pos = q.name.pos } };
     try renameTable(s, tab, tq, try renameTarget(s, tab, rel.db, m));
@@ -1165,9 +1165,9 @@ fn renameTarget(s: *Parser, tab: *int.Table, db: Parser.Db, new: tree.QName) Err
     }
     const dest = try s.createTarget(new, false);
     if (!std.ascii.eqlIgnoreCase(dest.q.schema.?.text, from)) {
-        return s.fail("xqlite: moving a table to another SQLite database (ATTACH) is not supported", .{});
+        return s.c.fail(null, "xqlite: moving a table to another SQLite database (ATTACH) is not supported", .{});
     }
-    if (build.findTable(s.p.db, dest.q.name.text, from) != null) return s.failState(.numbered("42P07", 1050), "Table '{s}' already exists", .{dest.bare});
+    if (build.findTable(s.p.db, dest.q.name.text, from) != null) return s.c.failState(null, .numbered("42P07", 1050), "Table '{s}' already exists", .{dest.bare});
     return dest.q.name;
 }
 

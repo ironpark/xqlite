@@ -40,7 +40,7 @@ const lower = @import("../../ir/lower.zig");
 const build = @import("../../sql/build.zig");
 const aux = @import("../../vdbe/aux.zig");
 const parser = @import("parser.zig");
-const tokenized = @import("../tokenized.zig");
+const driver = @import("../driver.zig");
 const stmt_mod = @import("stmt.zig");
 const dates = @import("dates.zig");
 const funcs = @import("funcs.zig");
@@ -74,7 +74,7 @@ comptime {
     dfunc.checkTable(&engine_functions);
 }
 
-pub const run = tokenized.run(parser, compile, translateError);
+pub const run = driver.run(parser, compile, translateError);
 
 fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
     ps.p = p;
@@ -120,7 +120,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     }
 }
 
-const parseError = tokenized.parseFailed;
+const parseError = driver.parseFailed;
 
 fn fail(p: *int.Parse, sql: [:0]const u8, msg: []const u8) lower.Error {
     ir.stmt.errorMsgAt(p, sql.ptr, "{s}", .{msg});

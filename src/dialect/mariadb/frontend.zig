@@ -30,6 +30,7 @@
 //! DDL names the collation of every text column so that indexes agree.
 
 const std = @import("std");
+const driver = @import("../driver.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const dialect = @import("../dialect.zig");
 const dfunc = @import("../func.zig");
@@ -49,46 +50,29 @@ const json = @import("json.zig");
 
 pub const frontend: dialect.Frontend = .{ .run = run };
 
-const Parser = parser.Parser;
+pub const Parser = parser.Parser;
 const Error = parser.Error;
 
-/// Compile the first statement of `sql` (dialect.Frontend's contract).
-pub fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
-    const db = p.db;
-    var s: Parser = .init(p, sql, db.xq.mariadb.sql_mode);
-    while (s.isOp(";")) s.advance();
-    if (s.tok.kind == .eof) {
-        p.tail = sql[sql.len..];
-        return;
-    }
-    if (!keepsWarnings(&s)) db.xq.mariadb.clearWarnings();
-    const ok = blk: {
-        statement(&s) catch |err| switch (err) {
-            error.OutOfMemory => |e| return e,
-            error.ParseFailed => break :blk false,
-        };
-        if (!s.atStmtEnd()) {
-            _ = s.syntaxError() catch {};
-            break :blk false;
-        }
-        break :blk p.n_err == 0;
-    };
-    if (!ok) {
-        p.tail = sql[sql.len..];
-        try translateError(p);
-        return error.ParseFailed;
-    }
-    if (s.isOp(";")) {
-        s.advance();
-        p.tail = sql[@intFromPtr(s.prev_end) - @intFromPtr(sql.ptr) ..];
-    } else p.tail = sql[sql.len..];
-    ir.stmt.finishCoding(p);
+/// Compile the first statement of `sql` (dialect.Frontend's contract):
+/// the driver with this file's init(), separator(), statement() ...
+pub const run = driver.streaming(@This());
+
+pub fn init(p: *int.Parse, sql: [:0]const u8) Parser {
+    return .init(p, sql, p.db.xq.mariadb.sql_mode);
+}
+
+pub fn separator(s: *Parser) bool {
+    return s.c.isOp(";");
+}
+
+pub fn begin(s: *Parser) int.Oom!void {
+    if (!keepsWarnings(s)) s.p.db.xq.mariadb.clearWarnings();
 }
 
 /// SQLite's "no such table: x" (from lowering) in MariaDB's words:
 /// "Table 'db.x' doesn't exist". A name without a database is in the
 /// current one; a mangled name "db.x" (Parser.relation()) reads the same.
-fn translateError(p: *int.Parse) int.Oom!void {
+pub fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
     // MariaDB's numbers of the engine's errors.
     dialect.numberError(p, &.{
@@ -106,16 +90,16 @@ fn translateError(p: *int.Parse) int.Oom!void {
 /// SHOW WARNINGS and friends look at the warnings of the statement
 /// before.
 fn keepsWarnings(s: *Parser) bool {
-    const n = s.peek();
-    if (s.isKw("SHOW")) return n.isAnyKw(&.{ "WARNINGS", "ERRORS", "COUNT" });
-    if (s.isKw("SELECT") and n.kind == .sys_var) {
+    const n = s.c.peekAt(1);
+    if (s.c.isKw("SHOW")) return n.isAnyKw(&.{ "WARNINGS", "ERRORS", "COUNT" });
+    if (s.c.isKw("SELECT") and n.kind == .sys_var) {
         return std.ascii.endsWithIgnoreCase(n.text, "warning_count") or std.ascii.endsWithIgnoreCase(n.text, "error_count");
     }
     return false;
 }
 
-fn statement(s: *Parser) Error!void {
-    const t = s.tok;
+pub fn statement(s: *Parser) Error!void {
+    const t = s.c.peek();
     if (t.isKw("SELECT") or t.isKw("WITH") or t.is("(") or t.isKw("VALUES")) {
         return s.lowerStmt(.{ .select = try s.selectStmt() });
     }
@@ -126,13 +110,13 @@ fn statement(s: *Parser) Error!void {
     if (t.isKw("CREATE")) return create(s);
     if (t.isKw("DROP")) return drop(s);
     if (t.isKw("ALTER")) {
-        s.advance();
-        if (s.isKw("ONLINE")) s.advance();
-        if (s.isKw("SEQUENCE")) return s.fail("xqlite: ALTER SEQUENCE is not supported", .{});
+        s.c.skip();
+        if (s.c.isKw("ONLINE")) s.c.skip();
+        if (s.c.isKw("SEQUENCE")) return s.c.fail(null, "xqlite: ALTER SEQUENCE is not supported", .{});
         return ddl.alterTable(s);
     }
     if (t.isKw("RENAME")) {
-        s.advance();
+        s.c.skip();
         return ddl.renameTableStmt(s);
     }
     if (t.isAnyKw(&.{ "START", "BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE" })) {
@@ -143,10 +127,10 @@ fn statement(s: *Parser) Error!void {
     if (t.isKw("USE")) return databases.use(s);
     if (t.isAnyKw(&.{ "DESCRIBE", "DESC", "EXPLAIN" })) {
         if (try session.describe(s)) return;
-        s.advance();
-        while (s.eatKw("EXTENDED") or s.eatKw("PARTITIONS") or s.eatKw("ANALYZE")) {}
-        if (s.eatKw("FORMAT")) {
-            try s.expectOp("=");
+        s.c.skip();
+        while (s.c.eatKw("EXTENDED") or s.c.eatKw("PARTITIONS") or s.c.eatKw("ANALYZE")) {}
+        if (s.c.eatKw("FORMAT")) {
+            try s.c.expectOp("=");
             _ = try s.anyName();
         }
         ir.stmt.setExplain(s.p, 2);
@@ -155,61 +139,61 @@ fn statement(s: *Parser) Error!void {
     if (t.isKw("LOCK") or t.isKw("UNLOCK")) return session.lockTables(s);
     if (t.isKw("ANALYZE")) return session.analyzeTable(s);
     if (t.isKw("DO")) {
-        s.advance();
+        s.c.skip();
         _ = try s.exprList();
-        return s.fail("xqlite: DO is not supported", .{});
+        return s.c.fail(null, "xqlite: DO is not supported", .{});
     }
-    return s.syntaxError();
+    return s.c.syntaxError();
 }
 
 fn create(s: *Parser) Error!void {
-    try s.expectKw("CREATE");
+    try s.c.expectKw("CREATE");
     var or_replace = false;
-    if (s.eatKw("OR")) {
-        try s.expectKw("REPLACE");
+    if (s.c.eatKw("OR")) {
+        try s.c.expectKw("REPLACE");
         or_replace = true;
     }
-    const temp = s.eatKw("TEMPORARY") or s.eatKw("TEMP");
-    if (s.isKw("TABLE")) return ddl.createTable(s, temp, or_replace);
-    if (!temp and (s.isKw("DATABASE") or s.isKw("SCHEMA"))) return databases.create(s, or_replace);
-    if (s.isKw("SEQUENCE")) {
-        if (or_replace) return s.fail("xqlite: CREATE OR REPLACE SEQUENCE is not supported", .{});
+    const temp = s.c.eatKw("TEMPORARY") or s.c.eatKw("TEMP");
+    if (s.c.isKw("TABLE")) return ddl.createTable(s, temp, or_replace);
+    if (!temp and (s.c.isKw("DATABASE") or s.c.isKw("SCHEMA"))) return databases.create(s, or_replace);
+    if (s.c.isKw("SEQUENCE")) {
+        if (or_replace) return s.c.fail(null, "xqlite: CREATE OR REPLACE SEQUENCE is not supported", .{});
         return ddl.createSequence(s);
     }
     if (!temp) {
-        const unique = s.eatKw("UNIQUE");
-        if (!unique) _ = s.eatKw("FULLTEXT") or s.eatKw("SPATIAL");
-        if (s.isKw("INDEX")) return ddl.createIndex(s, unique);
-        if (unique) return s.syntaxError();
+        const unique = s.c.eatKw("UNIQUE");
+        if (!unique) _ = s.c.eatKw("FULLTEXT") or s.c.eatKw("SPATIAL");
+        if (s.c.isKw("INDEX")) return ddl.createIndex(s, unique);
+        if (unique) return s.c.syntaxError();
     }
     // View options.
-    while (s.isAnyKw(&.{ "ALGORITHM", "DEFINER", "SQL" })) {
-        if (s.eatKw("SQL")) {
-            try s.expectKw("SECURITY");
+    while (s.c.isAnyKw(&.{ "ALGORITHM", "DEFINER", "SQL" })) {
+        if (s.c.eatKw("SQL")) {
+            try s.c.expectKw("SECURITY");
             _ = try s.anyName();
             continue;
         }
-        s.advance();
-        try s.expectOp("=");
+        s.c.skip();
+        try s.c.expectOp("=");
         // DEFINER = user@host / CURRENT_USER.
-        while (!s.atStmtEnd() and !s.isKw("VIEW") and !s.isKw("SQL") and !s.isKw("ALGORITHM")) s.advance();
+        while (!s.atStmtEnd() and !s.c.isKw("VIEW") and !s.c.isKw("SQL") and !s.c.isKw("ALGORITHM")) s.c.skip();
     }
-    if (s.isKw("VIEW")) return ddl.createView(s, or_replace, temp);
-    if (s.isAnyKw(&.{ "TRIGGER", "PROCEDURE", "FUNCTION", "EVENT" })) {
-        return s.fail("xqlite: CREATE {s} is not supported in the MariaDB dialect", .{s.tok.text});
+    if (s.c.isKw("VIEW")) return ddl.createView(s, or_replace, temp);
+    if (s.c.isAnyKw(&.{ "TRIGGER", "PROCEDURE", "FUNCTION", "EVENT" })) {
+        return s.c.fail(null, "xqlite: CREATE {s} is not supported in the MariaDB dialect", .{s.c.peek().text});
     }
-    return s.syntaxError();
+    return s.c.syntaxError();
 }
 
 fn drop(s: *Parser) Error!void {
-    try s.expectKw("DROP");
-    _ = s.eatKw("TEMPORARY");
-    if (s.isKw("TABLE") or s.isKw("TABLES")) return ddl.dropTable(s, false);
-    if (s.isKw("VIEW")) return ddl.dropTable(s, true);
-    if (s.isKw("INDEX")) return ddl.dropIndex(s);
-    if (s.isKw("SEQUENCE")) return ddl.dropSequence(s);
-    if (s.isKw("DATABASE") or s.isKw("SCHEMA")) return databases.drop(s);
-    return s.syntaxError();
+    try s.c.expectKw("DROP");
+    _ = s.c.eatKw("TEMPORARY");
+    if (s.c.isKw("TABLE") or s.c.isKw("TABLES")) return ddl.dropTable(s, false);
+    if (s.c.isKw("VIEW")) return ddl.dropTable(s, true);
+    if (s.c.isKw("INDEX")) return ddl.dropIndex(s);
+    if (s.c.isKw("SEQUENCE")) return ddl.dropSequence(s);
+    if (s.c.isKw("DATABASE") or s.c.isKw("SCHEMA")) return databases.drop(s);
+    return s.c.syntaxError();
 }
 
 // ================================================================ hooks

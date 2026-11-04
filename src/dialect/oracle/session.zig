@@ -43,20 +43,20 @@ fn eq(a: []const u8, b: []const u8) bool {
 
 /// Compile the statement if it is one of this file's; false if not.
 pub fn statement(ps: *Parser) Error!bool {
-    const t = ps.peek();
-    if (t.isKw("create") and ps.isKwAt(1, "user")) {
+    const t = ps.c.peek();
+    if (t.isKw("create") and ps.c.isKwAt(1, "user")) {
         try createUser(ps);
         return true;
     }
-    if (t.isKw("drop") and ps.isKwAt(1, "user")) {
+    if (t.isKw("drop") and ps.c.isKwAt(1, "user")) {
         try dropUser(ps);
         return true;
     }
-    if (t.isKw("alter") and ps.isKwAt(1, "user")) {
+    if (t.isKw("alter") and ps.c.isKwAt(1, "user")) {
         try alterUser(ps);
         return true;
     }
-    if (t.isKw("alter") and ps.isKwAt(1, "session") and ps.isKwAt(2, "set")) {
+    if (t.isKw("alter") and ps.c.isKwAt(1, "session") and ps.c.isKwAt(2, "set")) {
         return alterSession(ps);
     }
     return false;
@@ -75,42 +75,42 @@ fn emptyStatement(p: *int.Parse) Error!void {
 }
 
 fn userNotFound(ps: *Parser, n: Name) parser.Error {
-    return ps.fail(n.pos, "ORA-01918: user '{s}' does not exist", .{n.text});
+    return ps.c.fail(n.pos, "ORA-01918: user '{s}' does not exist", .{n.text});
 }
 
 fn createUser(ps: *Parser) Error!void {
-    _ = ps.advance(); // CREATE
-    _ = ps.advance(); // USER
+    ps.c.skip(); // CREATE
+    ps.c.skip(); // USER
     const if_not_exists = try ps.ifNotExists();
     const name = try ps.colId();
     // IDENTIFIED BY password | EXTERNALLY | GLOBALLY ..., NO
     // AUTHENTICATION, DEFAULT TABLESPACE, QUOTA ...: ignored.
-    while (ps.peek().kind != .eof) _ = ps.advance();
+    while (ps.c.peek().kind != .eof) ps.c.skip();
     const n = name.text;
-    if (!nsp.validName(n)) return ps.fail(name.pos, "xqlite: a user name cannot contain \".\"", .{});
+    if (!nsp.validName(n)) return ps.c.fail(name.pos, "xqlite: a user name cannot contain \".\"", .{});
     const p = ps.p.?;
     try ps.readSchema();
     const taken = isSystemUser(n) or nsp.find(try ps.registered(), n) != null or build.findDbName(p.db, n) != null;
     if (taken) {
         if (if_not_exists) return emptyStatement(p);
-        return ps.fail(name.pos, "ORA-01920: user name '{s}' conflicts with another user or role name", .{n});
+        return ps.c.fail(name.pos, "ORA-01920: user name '{s}' conflicts with another user or role name", .{n});
     }
     nsp.codeCreate(p, n, state.user);
     if (p.n_err > 0) return error.Failed;
 }
 
 fn dropUser(ps: *Parser) Error!void {
-    _ = ps.advance(); // DROP
-    _ = ps.advance(); // USER
+    ps.c.skip(); // DROP
+    ps.c.skip(); // USER
     const if_exists = try ps.ifExists();
     const name = try ps.colId();
-    const cascade = ps.eatKw("cascade");
-    if (ps.peek().kind != .eof) return ps.syntaxError();
+    const cascade = ps.c.eatKw("cascade");
+    if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
     const p = ps.p.?;
     try ps.readSchema();
     const s = nsp.find(try ps.registered(), name.text) orelse {
-        if (eq(name.text, state.user)) return ps.fail(name.pos, "ORA-01940: cannot drop a user that is currently connected", .{});
-        if (isSystemUser(name.text)) return ps.fail(name.pos, "ORA-01031: insufficient privileges", .{});
+        if (eq(name.text, state.user)) return ps.c.fail(name.pos, "ORA-01940: cannot drop a user that is currently connected", .{});
+        if (isSystemUser(name.text)) return ps.c.fail(name.pos, "ORA-01031: insufficient privileges", .{});
         if (if_exists) return emptyStatement(p);
         return userNotFound(ps, name);
     };
@@ -130,7 +130,7 @@ fn dropUser(ps: *Parser) Error!void {
         try indexes.append(ps.arena, ix.name);
     }
     if ((objs.len > 0 or indexes.items.len > 0) and !cascade) {
-        return ps.fail(name.pos, "ORA-01922: CASCADE must be specified to drop '{s}'", .{s.name});
+        return ps.c.fail(name.pos, "ORA-01922: CASCADE must be specified to drop '{s}'", .{s.name});
     }
     var l: lower.Lowerer = .init(p, "");
     for (indexes.items) |x| {
@@ -144,10 +144,10 @@ fn dropUser(ps: *Parser) Error!void {
 }
 
 fn alterUser(ps: *Parser) Error!void {
-    _ = ps.advance(); // ALTER
-    _ = ps.advance(); // USER
+    ps.c.skip(); // ALTER
+    ps.c.skip(); // USER
     const name = try ps.colId();
-    while (ps.peek().kind != .eof) _ = ps.advance();
+    while (ps.c.peek().kind != .eof) ps.c.skip();
     const p = ps.p.?;
     try ps.readSchema();
     if (!eq(name.text, state.user) and !isSystemUser(name.text) and nsp.find(try ps.registered(), name.text) == null) {
@@ -162,19 +162,19 @@ fn alterUser(ps: *Parser) Error!void {
 fn alterSession(ps: *Parser) Error!bool {
     var k: usize = 3;
     var schema: ?Name = null;
-    while (ps.peekAt(k).kind != .eof) : (k += 1) {
-        const t = ps.peekAt(k);
-        if (t.kind == .ident and eq(t.text, "CURRENT_SCHEMA") and ps.peekAt(k + 1).isOp("=")) {
-            const v = ps.peekAt(k + 2);
+    while (ps.c.peekAt(k).kind != .eof) : (k += 1) {
+        const t = ps.c.peekAt(k);
+        if (t.kind == .ident and eq(t.text, "CURRENT_SCHEMA") and ps.c.peekAt(k + 1).isOp("=")) {
+            const v = ps.c.peekAt(k + 2);
             if (v.kind != .ident and v.kind != .qident) {
-                ps.i += k + 2;
+                ps.c.skipN(k + 2);
                 return ps.missing("ORA-02248: invalid option for ALTER SESSION");
             }
             schema = .{ .text = v.text, .pos = v.start };
         }
     }
     const s = schema orelse return false;
-    while (ps.peek().kind != .eof) _ = ps.advance();
+    while (ps.c.peek().kind != .eof) ps.c.skip();
     const pos = s.pos;
     // SELECT 1 WHERE set_current_schema('U') IS NULL (it never is).
     const call = try ps.call(pos, "set_current_schema", .oracle, &.{try ps.stringAt(pos, s.text)});
@@ -183,7 +183,7 @@ fn alterSession(ps: *Parser) Error!bool {
     cols[0] = .{ .expr = .{ .e = try ps.expr(pos, .{ .integer = "1" }) } };
     const core = try ps.new(tree.Core, .{ .cols = cols, .where = where, .pos = pos });
     const sel = try ps.new(tree.Select, .{ .body = try ps.new(tree.Body, .{ .core = core }), .pos = pos });
-    var l: lower.Lowerer = .init(ps.p.?, ps.src);
+    var l: lower.Lowerer = .init(ps.p.?, ps.c.sql);
     try l.statement(.{ .select = sel });
     return true;
 }

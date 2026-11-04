@@ -151,9 +151,20 @@ pub const Comments = struct {
     };
 };
 
+/// Where `_` may separate digits (1_000).
+pub const Separators = enum {
+    /// Nowhere: `_` ends the digits.
+    none,
+    /// Between two digits (PostgreSQL 16).
+    between,
+    /// Anywhere in the digits, also first or doubled: the token takes
+    /// them and the dialect checks them later (SQLite's QNUMBER).
+    any,
+};
+
 pub const Numbers = struct {
-    /// `_` between two digits is a separator (1_000, PostgreSQL 16).
-    underscores: bool = false,
+    /// `_` separating digits.
+    underscores: Separators = .none,
     /// `..` after the digits is not a fraction: 1..2 is 1, then `..`
     /// (PostgreSQL, Oracle). Else 1..2 is `1.` and `.2`.
     range_dots: bool = false,
@@ -161,6 +172,23 @@ pub const Numbers = struct {
     /// `x` 16, `o` 8, `b` 2, in the cases given (`"xX"` for 0x1F and
     /// 0X1F).
     radix: []const u8 = "",
+};
+
+/// SQLite's rules (tokenize.c), for code that reads SQLite text: the
+/// dialects' catalogs read what sqlite_schema keeps. SQLite's own
+/// tokenizer (src/parse/tokenize.zig) is a port of tokenize.c with its
+/// generated keyword hash and does not use these; a test in the engine
+/// (pgcatalog.zig) checks that the two agree on where tokens end.
+///  - words: a letter, `_` or a byte from 0x80, then those, digits and
+///    `$` (IdChar());
+///  - comments: `--` to the end of the line, `/* */` not nested;
+///  - numbers: `_` anywhere in the digits (SQLite checks them later),
+///    `0x` hexadecimal; `1..2` is `1.` and `.2`.
+pub const sqlite: Spec = .{
+    .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
+    .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
+    .comments = .{ .dash_dash = .line, .block = .flat },
+    .numbers = .{ .underscores = .any, .radix = "xX" },
 };
 
 /// An unquoted word scanned by `Scanner.foldedWord()`.
@@ -290,12 +318,14 @@ pub fn Scanner(comptime spec: Spec) type {
 
         inline fn digitRun(s: [:0]const u8, i: usize, underscores: *bool) usize {
             var e = i;
-            if (spec.numbers.underscores) {
-                while (digits.has(s[e]) or (s[e] == '_' and digits.has(s[e + 1]))) : (e += 1) {
+            switch (spec.numbers.underscores) {
+                .none => while (digits.has(s[e])) : (e += 1) {},
+                .between => while (digits.has(s[e]) or (s[e] == '_' and digits.has(s[e + 1]))) : (e += 1) {
                     if (s[e] == '_') underscores.* = true;
-                }
-            } else {
-                while (digits.has(s[e])) e += 1;
+                },
+                .any => while (digits.has(s[e]) or s[e] == '_') : (e += 1) {
+                    if (s[e] == '_') underscores.* = true;
+                },
             }
             return e;
         }
@@ -462,25 +492,32 @@ pub inline fn digitValue(c: u8) u8 {
     return digit_values[c];
 }
 
-/// The digits of base `base` at `i` (after a prefix such as 0x); with
-/// `underscores`, a `_` before a digit is a separator.
-pub fn radixDigits(s: [:0]const u8, i: usize, base: u8, comptime underscores: bool) struct {
+/// The digits of base `base` at `i` (after a prefix such as 0x), with
+/// `_` separators where `sep` allows them (`.between`: before a digit).
+pub fn radixDigits(s: [:0]const u8, i: usize, base: u8, comptime sep: Separators) struct {
     /// The index after them.
     end: usize,
     /// How many digits (not counting the separators).
     count: usize,
 } {
     var e = i;
-    if (!underscores) {
-        while (digitValue(s[e]) < base) e += 1;
-        return .{ .end = e, .count = e - i };
-    }
     var count: usize = 0;
-    while (true) {
-        const u: usize = @intFromBool(s[e] == '_');
-        if (digitValue(s[e + u]) >= base) break;
-        e += u + 1;
-        count += 1;
+    switch (sep) {
+        .none => {
+            while (digitValue(s[e]) < base) e += 1;
+            count = e - i;
+        },
+        .between => while (true) {
+            const u: usize = @intFromBool(s[e] == '_');
+            if (digitValue(s[e + u]) >= base) break;
+            e += u + 1;
+            count += 1;
+        },
+        .any => while (true) : (e += 1) {
+            if (digitValue(s[e]) < base) {
+                count += 1;
+            } else if (s[e] != '_') break;
+        },
     }
     return .{ .end = e, .count = count };
 }
@@ -641,7 +678,7 @@ const pg_like = Scanner(.{
     .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
     .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
     .comments = .{ .block = .nested },
-    .numbers = .{ .underscores = true, .range_dots = true, .radix = "xXoObB" },
+    .numbers = .{ .underscores = .between, .range_dots = true, .radix = "xXoObB" },
 });
 const oracle_like = Scanner(.{
     .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
@@ -754,15 +791,15 @@ test "radix digits" {
     try testing.expectEqual(@as(?u8, null), mysql_like.radixPrefix("0B1", 0));
     try testing.expectEqual(@as(?u8, null), tsql_like.radixPrefix("0x1", 0));
     try testing.expectEqual(@as(?u8, null), pg_like.radixPrefix("1x1", 0));
-    try testing.expectEqual(@as(usize, 4), radixDigits("0x1F", 2, 16, false).end);
-    try testing.expectEqual(@as(usize, 2), radixDigits("0x1Fg", 2, 16, false).count);
+    try testing.expectEqual(@as(usize, 4), radixDigits("0x1F", 2, 16, .none).end);
+    try testing.expectEqual(@as(usize, 2), radixDigits("0x1Fg", 2, 16, .none).count);
     // 0x alone, 0x_ alone.
-    try testing.expectEqual(@as(usize, 0), radixDigits("0x", 2, 16, true).count);
-    const lone = radixDigits("0x_", 2, 16, true);
+    try testing.expectEqual(@as(usize, 0), radixDigits("0x", 2, 16, .between).count);
+    const lone = radixDigits("0x_", 2, 16, .between);
     try testing.expect(lone.count == 0 and lone.end == 2);
-    const sep = radixDigits("0b1_01_", 2, 2, true);
+    const sep = radixDigits("0b1_01_", 2, 2, .between);
     try testing.expect(sep.count == 3 and sep.end == 6);
-    try testing.expectEqual(@as(usize, 3), radixDigits("0o78", 2, 8, false).end);
+    try testing.expectEqual(@as(usize, 3), radixDigits("0o78", 2, 8, .none).end);
     try testing.expectEqual(@as(u8, 35), digitValue('Z'));
     try testing.expectEqual(@as(u8, 0xff), digitValue(0));
     for (0..256) |c| try testing.expectEqual(std.fmt.charToDigit(@intCast(c), 36) catch 0xff, digitValue(@intCast(c)));
@@ -862,4 +899,16 @@ test "positions" {
     try testing.expectEqual(@as(usize, 1), charLen("\xff", 0));
     try testing.expectEqual(@as(usize, 0), charLen("ab", 2));
     try testing.expectEqual(@as(usize, 0), charLen("ab", 5));
+}
+
+test "SQLite's rules" {
+    const S = Scanner(sqlite);
+    try std.testing.expect(S.isIdentStart('_') and !S.isIdentStart('$') and S.isIdent('$') and S.isIdent(0xc3));
+    try std.testing.expectEqual(@as(usize, 6), S.number("1.5e-3", 0).end);
+    try std.testing.expectEqual(@as(usize, 5), S.number("1_000", 0).end);
+    try std.testing.expectEqual(@as(usize, 4), S.number("9__.", 0).end);
+    try std.testing.expectEqual(@as(usize, 6), radixDigits("0x1__F", 2, 16, .any).end);
+    try std.testing.expectEqual(@as(usize, 2), S.number("1..2", 0).end);
+    try std.testing.expectEqual(@as(?u8, 16), S.radixPrefix("0X1F", 0));
+    try std.testing.expectEqual(@as(usize, 9), S.skip("-- x\n/**/a", 0).end);
 }

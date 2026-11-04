@@ -195,7 +195,7 @@ pub const Lexer = struct {
         // 0x1F, 0b01 (else 0x is a name): a name if a word character
         // follows the digits.
         if (scan.radixPrefix(s, start)) |base| if (sqllex.digitValue(s[start + 2]) < base) {
-            const i = sqllex.radixDigits(s, start + 2, base, false).end;
+            const i = sqllex.radixDigits(s, start + 2, base, .none).end;
             if (scan.isIdent(s[i])) {
                 lx.pos = start;
                 return lx.word();

@@ -134,7 +134,7 @@ pub const Lexer = struct {
     fn number(lx: *Lexer, start: usize) Kind {
         const s = lx.sql;
         if (scan.radixPrefix(s, start)) |base| {
-            lx.pos = sqllex.radixDigits(s, start + 2, base, false).end;
+            lx.pos = sqllex.radixDigits(s, start + 2, base, .none).end;
             return .hex;
         }
         const n = scan.number(s, start);

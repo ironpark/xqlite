@@ -34,7 +34,7 @@ pub const spec: sqllex.Spec = .{
     .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
     .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
     .comments = .{ .block = .nested },
-    .numbers = .{ .underscores = true, .range_dots = true, .radix = "xXoObB" },
+    .numbers = .{ .underscores = .between, .range_dots = true, .radix = "xXoObB" },
 };
 const scan = sqllex.Scanner(spec);
 
@@ -224,7 +224,7 @@ pub const Lexer = struct {
             // PostgreSQL's scanner: 0x(_?hexdigit)+, longest match first;
             // "0x" or "0x_" alone is hexfail, a digit or letter after the
             // number (0x1g, 0b102: "0" and an identifier) is junk.
-            const r = sqllex.radixDigits(s, start + 2, base, true);
+            const r = sqllex.radixDigits(s, start + 2, base, .between);
             var e = r.end;
             const j = scan.word(s, start + 1);
             if (j > e and !(r.count == 0 and j == e + 1 and s[e] == '_')) {

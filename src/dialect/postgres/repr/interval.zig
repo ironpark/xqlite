@@ -237,7 +237,7 @@ fn defaultText(a: std.mem.Allocator, z: []const u8) error{OutOfMemory}!?[]const 
     // xq_pg_iv('...') of older tables, xq_pg_iv_in('...', typmod [, 1]).
     const open = if (std.mem.startsWith(u8, z, "xq_pg_iv('")) "xq_pg_iv(".len else if (std.mem.startsWith(u8, z, "xq_pg_iv_in('")) "xq_pg_iv_in(".len else return null;
     if (!std.mem.endsWith(u8, z, ")")) return null;
-    var s: pgcatalog.Scanner = .{ .z = z[open .. z.len - 1] };
+    var s = try pgcatalog.Scanner.init(a, z[open .. z.len - 1]);
     const t = s.next();
     var end = open + t.end;
     if (open != "xq_pg_iv(".len) {

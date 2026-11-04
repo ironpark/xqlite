@@ -1705,8 +1705,8 @@ const Builder = struct {
                     // The older text where deparse.zig has none.
                     const old = if (tx.expr.plain == null or tx.column.plain == null) try pgText(a, src, b.registered) else "";
                     const e = tx.expr.plain orelse old;
-                    attname = exprName(e);
-                    coldefs[k] = tx.column.plain orelse if (looksLikeCall(old)) old else try std.fmt.allocPrint(a, "({s})", .{old});
+                    attname = try exprName(a, e);
+                    coldefs[k] = tx.column.plain orelse if (try looksLikeCall(a, old)) old else try std.fmt.allocPrint(a, "({s})", .{old});
                     coldefs_pretty[k] = tx.column.pretty orelse coldefs[k];
                     if (exprs.items.len > 0) try exprs.appendSlice(a, ", ");
                     try exprs.appendSlice(a, e);
@@ -1719,7 +1719,7 @@ const Builder = struct {
             }
             // The predicate's text is made when read.
             var pred: ?u32 = null;
-            if (if (ir.sql) |z| whereOf(z) else null) |wz| {
+            if (if (ir.sql) |z| try whereOf(a, z) else null) |wz| {
                 pred = @intCast(b.exprs.items.len);
                 try b.exprs.append(a, .{ .src = wz, .kind = .pred, .table = r.sqlite_name, .attrs = @intCast(first_attr), .natts = @intCast(t.cols.len) });
             }
@@ -1902,11 +1902,12 @@ fn collationOf(type_oid: u32, declared: ?[]const u8) u32 {
 /// A token of SQLite text (just enough to take a statement apart).
 ///
 /// The text is SQLite's (sqlite_schema, or an expression the IR rendered),
-/// so the rules are those of SQLite's tokenizer (src/parse/tokenize.zig),
-/// for what they decide here: comments, quotes and the extent of a
-/// number. That tokenizer reads NUL-terminated text, and this one runs on
-/// slices of it (an expression, a column's definition): hence its own
-/// loop, on a bounded slice.
+/// so it is read with SQLite's rules of the sql/lexer package
+/// (sqllex.sqlite: comments, quotes, words and the extent of a number),
+/// which a test below checks against SQLite's tokenizer
+/// (src/parse/tokenize.zig). That tokenizer is not used: it reads
+/// statements for the grammar (keywords, operators, TK_ codes), this
+/// takes slices apart (an expression, a column's definition).
 const Tok = struct {
     kind: enum { word, quoted, string, number, punct, eof },
     text: []const u8,
@@ -1914,96 +1915,59 @@ const Tok = struct {
     end: usize,
 };
 
+const sqllex = @import("sql/lexer");
+const Sql = sqllex.Scanner(sqllex.sqlite);
+
 pub const Scanner = struct {
-    z: []const u8,
+    /// The text, with a NUL after it, where the scanners of sqllex stop:
+    /// the slice it was made of, copied (Scanner.init()).
+    z: [:0]const u8,
     i: usize = 0,
+
+    /// A scanner of `z`, a slice of SQLite text.
+    pub fn init(a: Allocator, z: []const u8) Oom!Scanner {
+        return .{ .z = try a.dupeSentinel(u8, z, 0) };
+    }
 
     pub fn next(s: *Scanner) Tok {
         const z = s.z;
-        while (s.i < z.len) {
-            if (std.ascii.isWhitespace(z[s.i])) {
-                s.i += 1;
-            } else if (z[s.i] == '-' and s.i + 1 < z.len and z[s.i + 1] == '-') {
-                while (s.i < z.len and z[s.i] != '\n') s.i += 1;
-            } else if (z[s.i] == '/' and s.i + 1 < z.len and z[s.i + 1] == '*') {
-                s.i += 2;
-                while (s.i + 1 < z.len and !(z[s.i] == '*' and z[s.i + 1] == '/')) s.i += 1;
-                s.i = @min(z.len, s.i + 2);
-            } else break;
-        }
-        const start = s.i;
-        if (s.i >= z.len) return .{ .kind = .eof, .text = "", .start = start, .end = start };
-        const c = z[s.i];
-        switch (c) {
-            '\'', '"', '`' => {
-                s.i += 1;
-                while (s.i < z.len) : (s.i += 1) {
-                    if (z[s.i] == c) {
-                        if (s.i + 1 < z.len and z[s.i + 1] == c) {
-                            s.i += 1;
-                            continue;
-                        }
-                        s.i += 1;
-                        break;
-                    }
-                }
-                return .{ .kind = if (c == '\'') .string else .quoted, .text = z[start..s.i], .start = start, .end = s.i };
+        const start = Sql.skip(z, s.i).end;
+        const c = z[start];
+        if (c == 0) return .{ .kind = .eof, .text = "", .start = start, .end = start };
+        var kind: @FieldType(Tok, "kind") = .punct;
+        s.i = switch (c) {
+            '\'', '"', '`' => blk: {
+                kind = if (c == '\'') .string else .quoted;
+                break :blk sqllex.quotedEnd(z, start, c, false).end;
             },
-            '[' => {
-                while (s.i < z.len and z[s.i] != ']') s.i += 1;
-                s.i = @min(z.len, s.i + 1);
-                return .{ .kind = .quoted, .text = z[start..s.i], .start = start, .end = s.i };
+            // [name]: up to the first ] (no doubling).
+            '[' => blk: {
+                kind = .quoted;
+                const e = sqllex.indexOfAnyOrNul(1, z, start + 1, .{']'});
+                break :blk if (z[e] == 0) e else e + 1;
             },
-            else => {},
-        }
-        if (std.ascii.isAlphabetic(c) or c == '_' or c >= 0x80) {
-            while (s.i < z.len and isIdChar(z[s.i])) s.i += 1;
-            return .{ .kind = .word, .text = z[start..s.i], .start = start, .end = s.i };
-        }
-        if (std.ascii.isDigit(c) or (c == '.' and std.ascii.isDigit(byteAt(z, s.i + 1)))) {
-            s.i = numberEnd(z, s.i);
-            return .{ .kind = .number, .text = z[start..s.i], .start = start, .end = s.i };
-        }
-        s.i += 1;
-        return .{ .kind = .punct, .text = z[start..s.i], .start = start, .end = s.i };
+            else => if (Sql.isIdentStart(c)) blk: {
+                kind = .word;
+                break :blk Sql.word(z, start);
+            } else if (Sql.isDigit(c) or (c == '.' and Sql.isDigit(z[start + 1]))) blk: {
+                kind = .number;
+                break :blk numberEnd(z, start);
+            } else start + 1,
+        };
+        return .{ .kind = kind, .text = z[start..s.i], .start = start, .end = s.i };
     }
 };
 
-/// The byte at `i`, NUL past the end (as SQLite's tokenizer sees it).
-fn byteAt(z: []const u8, i: usize) u8 {
-    return if (i < z.len) z[i] else 0;
-}
-
 /// The end of the number at `i` (a digit, or a `.` before one) as
 /// sqlite3GetToken() scans it: `0x` and hex digits, else digits, a
-/// fraction and an exponent (`e`, a sign, digits); `_` between digits
-/// separates them. Word characters after it belong to the token (an
-/// illegal one to SQLite).
-fn numberEnd(z: []const u8, start: usize) usize {
-    var i = start;
-    if (byteAt(z, i) == '0' and (byteAt(z, i + 1) == 'x' or byteAt(z, i + 1) == 'X') and std.ascii.isHex(byteAt(z, i + 2))) {
-        i += 2;
-        while (std.ascii.isHex(byteAt(z, i)) or (byteAt(z, i) == '_' and std.ascii.isHex(byteAt(z, i + 1)))) i += 1;
-    } else {
-        i = digitsEnd(z, i);
-        if (byteAt(z, i) == '.') i = digitsEnd(z, i + 1);
-        const e = byteAt(z, i);
-        const sign = byteAt(z, i + 1) == '+' or byteAt(z, i + 1) == '-';
-        if ((e == 'e' or e == 'E') and std.ascii.isDigit(byteAt(z, i + 1 + @intFromBool(sign)))) i = digitsEnd(z, i + 1 + @intFromBool(sign));
-    }
-    while (isIdChar(byteAt(z, i))) i += 1;
-    return i;
-}
-
-fn digitsEnd(z: []const u8, start: usize) usize {
-    var i = start;
-    while (std.ascii.isDigit(byteAt(z, i)) or (byteAt(z, i) == '_' and std.ascii.isDigit(byteAt(z, i + 1)))) i += 1;
-    return i;
-}
-
-/// A character of an unquoted word (SQLite's IdChar()).
-fn isIdChar(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c == '$' or c >= 0x80;
+/// fraction and an exponent; word characters after it belong to the
+/// token (an illegal one to SQLite).
+fn numberEnd(z: [:0]const u8, i: usize) usize {
+    const end = if (Sql.radixPrefix(z, i) != null and std.ascii.isHex(z[i + 2]))
+        sqllex.radixDigits(z, i + 2, 16, .any).end
+    else
+        Sql.number(z, i).end;
+    return Sql.word(z, end);
 }
 
 /// The name a quoted or bare identifier token stands for.
@@ -2055,7 +2019,7 @@ fn safeIdent(z: []const u8) bool {
 /// TRUE and FALSE in lower case.
 pub fn pgText(a: Allocator, z: []const u8, registered: []const nsp_mod.Info) Oom![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    var s: Scanner = .{ .z = z };
+    var s = try Scanner.init(a, z);
     var prev_end: usize = 0;
     while (true) {
         const t = s.next();
@@ -2119,7 +2083,7 @@ pub fn defaultTexts(a: Allocator, text: []const u8, type_oid: u32, registered: [
     const tname: []const u8 = if (builtinType(type_oid)) |t| t.fmt else "text";
     if (z.len >= 2 and z[0] == '\'' and z[z.len - 1] == '\'') {
         // One string constant.
-        var s: Scanner = .{ .z = z };
+        var s = try Scanner.init(a, z);
         const t = s.next();
         if (t.end == z.len) return one(try std.fmt.allocPrint(a, "{s}::{s}", .{ z, tname }));
     }
@@ -2149,7 +2113,7 @@ fn generatedOf(gs: []const Generated, col: []const u8) ?[]const u8 {
 /// first AS of its definition's own level.
 fn generatedTexts(a: Allocator, sql: []const u8) Oom![]const Generated {
     var out: std.ArrayList(Generated) = .empty;
-    var s: Scanner = .{ .z = sql };
+    var s = try Scanner.init(a, sql);
     while (true) {
         const t = s.next();
         if (t.kind == .eof) return out.items;
@@ -2258,7 +2222,7 @@ const Check = struct { name: []const u8, text: []const u8 };
 /// text.
 fn tableChecks(a: Allocator, sql: []const u8, table: []const u8) Oom![]Check {
     var out: std.ArrayList(Check) = .empty;
-    var s: Scanner = .{ .z = sql };
+    var s = try Scanner.init(a, sql);
     // To the column list.
     while (true) {
         const t = s.next();
@@ -2344,7 +2308,7 @@ fn tableChecks(a: Allocator, sql: []const u8, table: []const u8) Oom![]Check {
 /// The items of the column list of CREATE INDEX text `sql`, as written.
 fn indexItems(a: Allocator, sql: []const u8) Oom![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    var s: Scanner = .{ .z = sql };
+    var s = try Scanner.init(a, sql);
     var seen_on = false;
     while (true) {
         const t = s.next();
@@ -2376,8 +2340,8 @@ fn indexItems(a: Allocator, sql: []const u8) Oom![]const []const u8 {
 }
 
 /// The predicate of CREATE INDEX text `sql` (after WHERE), if any.
-fn whereOf(sql: []const u8) ?[]const u8 {
-    var s: Scanner = .{ .z = sql };
+fn whereOf(a: Allocator, sql: []const u8) Oom!?[]const u8 {
+    var s = try Scanner.init(a, sql);
     var depth: usize = 0;
     while (true) {
         const t = s.next();
@@ -2413,8 +2377,8 @@ fn stripParens(z: []const u8) []const u8 {
 
 /// Whether expression text `e` is a function call (PostgreSQL prints an
 /// index expression that is one without parentheses).
-fn looksLikeCall(e: []const u8) bool {
-    var s: Scanner = .{ .z = e };
+fn looksLikeCall(a: Allocator, e: []const u8) Oom!bool {
+    var s = try Scanner.init(a, e);
     const t = s.next();
     if (t.kind != .word and t.kind != .quoted) return false;
     const p = s.next();
@@ -2432,9 +2396,9 @@ fn looksLikeCall(e: []const u8) bool {
 
 /// The name of an index column that is an expression: the function's,
 /// else "expr".
-fn exprName(e: []const u8) []const u8 {
-    if (!looksLikeCall(e)) return "expr";
-    var s: Scanner = .{ .z = e };
+fn exprName(a: Allocator, e: []const u8) Oom![]const u8 {
+    if (!try looksLikeCall(a, e)) return "expr";
+    var s = try Scanner.init(a, e);
     return s.next().text;
 }
 
@@ -3358,9 +3322,9 @@ test "oids" {
     const items = try indexItems(a, "CREATE INDEX \"i\" ON \"t\"((lower(\"b\")), \"a\" DESC) WHERE (\"a\" > 5)");
     try std.testing.expectEqual(@as(usize, 2), items.len);
     try std.testing.expectEqualStrings("lower(\"b\")", stripParens(items[0]));
-    try std.testing.expectEqualStrings("(\"a\" > 5)", whereOf("CREATE INDEX \"i\" ON \"t\"((lower(\"b\")), \"a\" DESC) WHERE (\"a\" > 5)").?);
-    try std.testing.expect(looksLikeCall("lower(b)"));
-    try std.testing.expect(!looksLikeCall("(a + 1)"));
+    try std.testing.expectEqualStrings("(\"a\" > 5)", (try whereOf(a, "CREATE INDEX \"i\" ON \"t\"((lower(\"b\")), \"a\" DESC) WHERE (\"a\" > 5)")).?);
+    try std.testing.expect(try looksLikeCall(a, "lower(b)"));
+    try std.testing.expect(!try looksLikeCall(a, "(a + 1)"));
     // Of each generated column, the first AS of its own definition.
     const gs = try generatedTexts(a, "CREATE TABLE t(a INT, \"B\" INT GENERATED ALWAYS AS ((a * 2)) STORED, c TEXT AS (lower(x)) VIRTUAL, d INT AS e, f INT AS ( g ))");
     try std.testing.expectEqualStrings("(a * 2)", generatedOf(gs, "b").?);
@@ -3405,20 +3369,54 @@ test "oids: only colliding keys move, by their order" {
 }
 
 test "SQLite text: numbers end as SQLite's tokenizer ends them" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const texts = [_][]const u8{ "1.5e-3", "2.5E+3", ".5", "1_000", "0x1F", "12", "3.", "1e", "1abc" };
     const ends = [_]usize{ 6, 6, 2, 5, 4, 2, 2, 2, 4 };
     for (texts, ends) |z, e| {
-        var s: Scanner = .{ .z = z };
+        var s = try Scanner.init(a, z);
         const t = s.next();
         try std.testing.expectEqual(.number, t.kind);
         try std.testing.expectEqual(e, t.end);
     }
     // Not an exponent: 1e is a (bad) number, then - and 3.
-    var s: Scanner = .{ .z = "1e-x" };
+    var s = try Scanner.init(a, "1e-x");
     try std.testing.expectEqualStrings("1e", s.next().text);
     try std.testing.expectEqualStrings("-", s.next().text);
     // A bounded slice: the scan stops at its end.
-    s = .{ .z = "12e+5"[0..3] };
+    s = try Scanner.init(a, "12e+5"[0..3]);
     try std.testing.expectEqualStrings("12e", s.next().text);
     try std.testing.expectEqual(.eof, s.next().kind);
+}
+
+test "SQLite text: tokens end where SQLite's tokenizer ends them" {
+    // Random text of the characters the rules are about; at each word,
+    // quoted name, string and number the scanner reads, SQLite's
+    // tokenizer (sqlite3GetToken()) started there ends at the same place.
+    const getToken = @import("../../parse/tokenize.zig").getToken;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const alphabet = [_][]const u8{ "a", "Z", "_", "$", "x", "e", "E", "0", "1", "9", ".", "_", "+", "-", " ", "\n", "'", "\"", "`", "[", "]", "(", "*", "/", "\xc3\xa9", "0x", "--", "/*", "*/", "''" };
+    var prng: std.Random.DefaultPrng = .init(0x5eed);
+    const r = prng.random();
+    var buf: std.ArrayList(u8) = .empty;
+    for (0..20000) |_| {
+        buf.clearRetainingCapacity();
+        for (0..r.intRangeAtMost(usize, 1, 12)) |_| try buf.appendSlice(a, alphabet[r.uintLessThan(usize, alphabet.len)]);
+        var s = try Scanner.init(a, buf.items);
+        while (true) {
+            const t = s.next();
+            if (t.kind == .eof) break;
+            if (t.kind == .punct) continue;
+            // x'..' is a blob literal to SQLite, a word and a string here.
+            if (t.kind == .word and t.text.len == 1 and (t.text[0] == 'x' or t.text[0] == 'X') and s.z[t.end] == '\'') continue;
+            const n = getToken(s.z.ptr + t.start).len;
+            if (n != t.end - t.start) {
+                std.debug.print("{f}: {s} at {d}: SQLite {d}, here {d}\n", .{ std.zig.fmtString(buf.items), @tagName(t.kind), t.start, n, t.end - t.start });
+                return error.TestExpectedEqual;
+            }
+        }
+    }
 }

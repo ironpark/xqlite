@@ -241,7 +241,7 @@ const Tok = struct { kind: TokKind, text: []const u8, start: usize, end: usize }
 
 fn tokenize(a: Allocator, z: []const u8) Error![]Tok {
     var out: std.ArrayList(Tok) = .empty;
-    var s: pgc.Scanner = .{ .z = z };
+    var s = try pgc.Scanner.init(a, z);
     const ops = [_][]const u8{ "->>", "->", "||", "<=", ">=", "<>", "!=", "==", "<<", ">>", "::" };
     while (true) {
         const t = s.next();

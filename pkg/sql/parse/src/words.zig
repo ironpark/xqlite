@@ -2,7 +2,7 @@
 //! tokens up in, built at compile time.
 
 const std = @import("std");
-const sqllex = @import("sqllex");
+const sqllex = @import("sql/lexer");
 
 pub const Case = sqllex.Case;
 

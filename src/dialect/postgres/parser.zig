@@ -35,7 +35,7 @@
 //! offset after the semicolon, where the next statement starts.
 
 const std = @import("std");
-const sqlparse = @import("sqlparse");
+const sqlparse = @import("sql/parse");
 const syntax = @import("../syntax.zig");
 const words = sqlparse.words;
 const tree = @import("../../ir/tree.zig");
@@ -132,11 +132,10 @@ const Call = struct {
     label: ?[]const u8 = null,
 };
 
-/// The tokens of a statement and its error (pkg/sqlparse).
+/// The tokens of a statement and its error (pkg/sql/parse).
 pub const Cursor = sqlparse.Cursor(sqlparse.Buffered(Token), int.ErrorState, struct {
-    /// PostgreSQL's `syntax error at or near "X"` for the next token.
-    pub fn syntaxError(c: anytype) Error {
-        const t = c.peek();
+    /// PostgreSQL's `syntax error at or near "X"` at token `t`.
+    pub fn syntaxErrorAt(c: anytype, t: Token) Error {
         // The end of a statement: PostgreSQL names its semicolon.
         if (t.kind == .eof and t.start < c.sql.len and c.sql[t.start] == ';') return c.failState(t.start, .of("42601"), "syntax error at or near \";\"", .{});
         if (t.kind == .eof) return c.failState(t.start, .of("42601"), "syntax error at end of input", .{});
@@ -673,19 +672,13 @@ pub const Parser = struct {
 
     fn transactionModes(p: *Parser) Error!void {
         while (true) {
-            if (p.c.eatKw("isolation")) {
-                try p.c.expectKw("level");
-                if (p.c.eatKw("serializable")) {} else if (p.c.eatKw("repeatable")) {
-                    try p.c.expectKw("read");
-                } else if (p.c.eatKw("read")) {
+            if (try p.c.optKws(&.{ "isolation", "level" })) {
+                if (p.c.eatKw("serializable")) {} else if (try p.c.optKws(&.{ "repeatable", "read" })) {} else if (p.c.eatKw("read")) {
                     if (!p.c.eatKw("committed")) try p.c.expectKw("uncommitted");
                 } else return p.c.syntaxError();
             } else if (p.c.eatKw("read")) {
                 if (!p.c.eatKw("write")) try p.c.expectKw("only");
-            } else if (p.c.isKw("not") and p.c.isKwAt(1, "deferrable")) {
-                p.c.skip();
-                p.c.skip();
-            } else if (p.c.eatKw("deferrable")) {} else break;
+            } else if (p.c.eatKws(&.{ "not", "deferrable" })) {} else if (p.c.eatKw("deferrable")) {} else break;
             _ = p.c.eat(.comma);
         }
     }
@@ -693,9 +686,7 @@ pub const Parser = struct {
     fn andChain(p: *Parser) Error!void {
         if (p.c.eatKw("and")) {
             const pos = p.c.peek().start;
-            if (p.c.eatKw("no")) {
-                try p.c.expectKw("chain");
-            } else {
+            if (try p.c.optKws(&.{ "no", "chain" })) {} else {
                 try p.c.expectKw("chain");
                 return p.unsupported(pos, "AND CHAIN");
             }
@@ -727,9 +718,7 @@ pub const Parser = struct {
     fn selectAfterWith(p: *Parser, with: ?*tree.With, pos: u32) Error!*tree.Select {
         const body = try p.setExpr();
         var s: tree.Select = .{ .with = with, .body = body, .pos = pos };
-        if (p.c.isKw("order")) {
-            p.c.skip();
-            try p.c.expectKw("by");
+        if (try p.c.optKws(&.{ "order", "by" })) {
             s.order_by = try p.sortList();
         }
         // LIMIT/OFFSET/FETCH in any order, and locking clauses.
@@ -758,12 +747,7 @@ pub const Parser = struct {
             } else if (p.c.isKw("for")) {
                 // FOR UPDATE/SHARE: a no-op, writers are serialized.
                 p.c.skip();
-                if (p.c.eatKw("update")) {} else if (p.c.eatKw("share")) {} else if (p.c.eatKw("no")) {
-                    try p.c.expectKw("key");
-                    try p.c.expectKw("update");
-                } else if (p.c.eatKw("key")) {
-                    try p.c.expectKw("share");
-                } else return p.c.syntaxError();
+                if (p.c.eatKw("update")) {} else if (p.c.eatKw("share")) {} else if (try p.c.optKws(&.{ "no", "key", "update" })) {} else if (try p.c.optKws(&.{ "key", "share" })) {} else return p.c.syntaxError();
                 if (p.c.eatKw("of")) _ = try p.nameList();
                 if (p.c.eatKw("nowait")) {} else if (p.c.eatKw("skip")) try p.c.expectKw("locked");
             } else break;
@@ -786,9 +770,7 @@ pub const Parser = struct {
             try p.c.expectKw("as");
             if (p.c.eatKw("materialized")) {
                 cte.materialized = true;
-            } else if (p.c.isKw("not") and p.c.isKwAt(1, "materialized")) {
-                p.c.skip();
-                p.c.skip();
+            } else if (p.c.eatKws(&.{ "not", "materialized" })) {
                 cte.materialized = false;
             }
             _ = try p.c.expect(.lparen);
@@ -879,9 +861,7 @@ pub const Parser = struct {
         if (c.cols.len == 0) return p.unsupported(p.c.peek().start, "SELECT without result columns");
         if (p.c.eatKw("from")) c.from = try p.fromList();
         if (p.c.eatKw("where")) c.where = try p.expr0();
-        if (p.c.isKw("group")) {
-            p.c.skip();
-            try p.c.expectKw("by");
+        if (try p.c.optKws(&.{ "group", "by" })) {
             _ = p.c.eatKw("all");
             if (p.c.isAnyKw(&.{ "rollup", "cube", "grouping" })) return p.unsupported(p.c.peek().start, "GROUP BY ROLLUP/CUBE/GROUPING SETS");
             c.group_by = try p.exprList();
@@ -1040,9 +1020,7 @@ pub const Parser = struct {
             var natural = false;
             if (p.c.eatKw("natural")) natural = true;
             var kind: tree.JoinKind = .inner;
-            if (p.c.eatKw("join")) {} else if (p.c.eatKw("inner")) {
-                try p.c.expectKw("join");
-            } else if (p.c.eatKw("left")) {
+            if (p.c.eatKw("join")) {} else if (try p.c.optKws(&.{ "inner", "join" })) {} else if (p.c.eatKw("left")) {
                 _ = p.c.eatKw("outer");
                 try p.c.expectKw("join");
                 kind = .left;
@@ -1054,8 +1032,7 @@ pub const Parser = struct {
                 _ = p.c.eatKw("outer");
                 try p.c.expectKw("join");
                 kind = .full;
-            } else if (p.c.eatKw("cross")) {
-                try p.c.expectKw("join");
+            } else if (try p.c.optKws(&.{ "cross", "join" })) {
                 kind = .cross;
             } else {
                 if (natural) return p.c.syntaxError();
@@ -1210,9 +1187,7 @@ pub const Parser = struct {
             return p.c.failState(name.pos, .of("42883"), "function {s} with {d} arguments does not exist", .{ fname, args.len });
         }
         var ordinality = false;
-        if (p.c.isKw("with") and p.c.isKwAt(1, "ordinality")) {
-            p.c.skip();
-            p.c.skip();
+        if (p.c.eatKws(&.{ "with", "ordinality" })) {
             ordinality = true;
         }
         // The alias, with column definitions for json_to_record().
@@ -1312,9 +1287,7 @@ pub const Parser = struct {
         };
         if (!ok) return p.c.failState(pos, .of("42883"), "function {s} with {d} arguments does not exist", .{ fname, args.len });
         var ordinality = false;
-        if (p.c.isKw("with") and p.c.isKwAt(1, "ordinality")) {
-            p.c.skip();
-            p.c.skip();
+        if (p.c.eatKws(&.{ "with", "ordinality" })) {
             ordinality = true;
         }
         var label: Name = name;
@@ -1843,8 +1816,7 @@ pub const Parser = struct {
                     l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = null, .not = not } });
                 } else if (p.c.eatKw("json")) {
                     l = try p.isJson(l, not);
-                } else if (p.c.eatKw("distinct")) {
-                    try p.c.expectKw("from");
+                } else if (try p.c.optKws(&.{ "distinct", "from" })) {
                     const r = try p.cmpExpr();
                     // IS DISTINCT FROM is IS NOT, IS NOT DISTINCT FROM IS.
                     l = try p.span(l, r, .{ .compare = .{ .op = if (not) .is else .is_not, .l = l, .r = r } });
@@ -1926,9 +1898,7 @@ pub const Parser = struct {
             } else if (p.c.isKw("like") or p.c.isKw("ilike")) {
                 const ilike = p.c.advance().isKw("ilike");
                 l = try p.likeRest(l, not, ilike);
-            } else if (p.c.isKw("similar") and p.c.isKwAt(1, "to")) {
-                p.c.skip();
-                p.c.skip();
+            } else if (p.c.eatKws(&.{ "similar", "to" })) {
                 l = try p.similarRest(l, not);
             } else if (!not and (t.isOp("~~") or t.isOp("!~~") or t.isOp("~~*") or t.isOp("!~~*"))) {
                 p.c.skip();
@@ -2514,9 +2484,7 @@ pub const Parser = struct {
         } else if (p.c.peek().kind != .rparen) {
             if (p.c.eatKw("distinct")) f.distinct = true else _ = p.c.eatKw("all");
             try p.callArgs(&f);
-            if (p.c.isKw("order")) {
-                p.c.skip();
-                try p.c.expectKw("by");
+            if (try p.c.optKws(&.{ "order", "by" })) {
                 f.order_by = try p.sortList();
             }
         } else try p.placeArgs(&f, &.{}, false);
@@ -3009,14 +2977,10 @@ pub const Parser = struct {
         }
         if (eql(ty.name, "timestamp") or eql(ty.name, "time")) {
             var tz = false;
-            if (p.c.isKw("with") and p.c.isKwAt(1, "time")) {
-                p.c.skip();
-                p.c.skip();
+            if (p.c.eatKws(&.{ "with", "time" })) {
                 try p.c.expectKw("zone");
                 tz = true;
-            } else if (p.c.isKw("without") and p.c.isKwAt(1, "time")) {
-                p.c.skip();
-                p.c.skip();
+            } else if (p.c.eatKws(&.{ "without", "time" })) {
                 try p.c.expectKw("zone");
             }
             ty.name = if (eql(ty.name, "timestamp"))
@@ -3055,15 +3019,10 @@ pub const Parser = struct {
             try p.c.expectKw("value");
             ins.overriding = true;
         }
-        if (p.c.isKw("default") and p.c.isKwAt(1, "values")) {
-            p.c.skip();
-            p.c.skip();
-        } else {
+        if (p.c.eatKws(&.{ "default", "values" })) {} else {
             ins.source = try p.select();
         }
-        if (p.c.isKw("on") and p.c.isKwAt(1, "conflict")) {
-            p.c.skip();
-            p.c.skip();
+        if (p.c.eatKws(&.{ "on", "conflict" })) {
             var oc: tree.OnConflict = .{};
             if (p.c.peek().kind == .lparen) {
                 p.c.skip();
@@ -3219,8 +3178,7 @@ pub const Parser = struct {
     fn create(p: *Parser) Error!tree.Stmt {
         const at = p.c.advance().start; // CREATE
         var or_replace = false;
-        if (p.c.eatKw("or")) {
-            try p.c.expectKw("replace");
+        if (try p.c.optKws(&.{ "or", "replace" })) {
             or_replace = true;
         }
         var temp = false;
@@ -3293,8 +3251,7 @@ pub const Parser = struct {
                 if (p.c.eatKw("minvalue")) {} else if (p.c.eatKw("maxvalue")) {} else if (p.c.eatKw("cycle")) {
                     o.cycle = false;
                 } else return p.c.syntaxError();
-            } else if (p.c.eatKw("owned")) {
-                try p.c.expectKw("by");
+            } else if (try p.c.optKws(&.{ "owned", "by" })) {
                 if (!p.c.eatKw("none")) _ = try p.qname();
             } else break;
         }
@@ -3358,14 +3315,8 @@ pub const Parser = struct {
                 _ = try p.c.expect(.lparen);
                 while (p.c.peek().kind != .rparen and p.c.peek().kind != .eof) p.c.skip();
                 _ = try p.c.expect(.rparen);
-            } else if (p.c.eatKw("without")) {
-                try p.c.expectKw("oids");
-            } else if (p.c.isKw("on") and p.c.isKwAt(1, "commit")) {
-                p.c.skip();
-                p.c.skip();
-                if (p.c.eatKw("preserve")) {
-                    try p.c.expectKw("rows");
-                } else if (p.c.eatKw("delete")) {
+            } else if (try p.c.optKws(&.{ "without", "oids" })) {} else if (p.c.eatKws(&.{ "on", "commit" })) {
+                if (try p.c.optKws(&.{ "preserve", "rows" })) {} else if (p.c.eatKw("delete")) {
                     return p.unsupported(p.c.prev().start, "ON COMMIT DELETE ROWS");
                 } else try p.c.expectKw("drop");
             } else if (p.c.eatKw("tablespace")) {
@@ -3420,21 +3371,19 @@ pub const Parser = struct {
                 _ = try p.c.expect(.lparen);
                 cc.kind = .{ .check = try p.expr0() };
                 _ = try p.c.expect(.rparen);
-                if (p.c.eatKw("no")) try p.c.expectKw("inherit");
+                _ = try p.c.optKws(&.{ "no", "inherit" });
             } else if (p.c.eatKw("default")) {
                 cc.kind = .{ .default = try p.otherExpr() };
             } else if (p.c.eatKw("unique")) {
                 try p.nullsDistinct();
                 cc.kind = .unique;
-            } else if (p.c.eatKw("primary")) {
-                try p.c.expectKw("key");
+            } else if (try p.c.optKws(&.{ "primary", "key" })) {
                 cc.kind = .primary_key;
             } else if (p.c.isKw("references")) {
                 cc.kind = .{ .references = try p.references() };
             } else if (p.c.eatKw("generated")) {
                 var always = true;
-                if (p.c.eatKw("by")) {
-                    try p.c.expectKw("default");
+                if (try p.c.optKws(&.{ "by", "default" })) {
                     always = false;
                 } else try p.c.expectKw("always");
                 try p.c.expectKw("as");
@@ -3584,8 +3533,7 @@ pub const Parser = struct {
     fn nullsDistinct(p: *Parser) Error!void {
         if (p.c.isKw("nulls")) {
             const at = p.c.advance().start;
-            if (p.c.eatKw("not")) {
-                try p.c.expectKw("distinct");
+            if (try p.c.optKws(&.{ "not", "distinct" })) {
                 return p.unsupported(at, "NULLS NOT DISTINCT");
             }
             try p.c.expectKw("distinct");
@@ -3614,10 +3562,7 @@ pub const Parser = struct {
                 const del = p.c.advance().isKw("delete");
                 const act = try p.refAction();
                 if (del) r.on_delete = act else r.on_update = act;
-            } else if (p.c.isKw("not") and p.c.isKwAt(1, "deferrable")) {
-                p.c.skip();
-                p.c.skip();
-            } else if (p.c.eatKw("deferrable")) {} else if (p.c.eatKw("initially")) {
+            } else if (p.c.eatKws(&.{ "not", "deferrable" })) {} else if (p.c.eatKw("deferrable")) {} else if (p.c.eatKw("initially")) {
                 if (p.c.eatKw("deferred")) r.deferred = true else try p.c.expectKw("immediate");
             } else break;
         }
@@ -3627,8 +3572,7 @@ pub const Parser = struct {
     fn refAction(p: *Parser) Error!tree.RefAction {
         if (p.c.eatKw("cascade")) return .cascade;
         if (p.c.eatKw("restrict")) return .restrict;
-        if (p.c.eatKw("no")) {
-            try p.c.expectKw("action");
+        if (try p.c.optKws(&.{ "no", "action" })) {
             return .none;
         }
         try p.c.expectKw("set");
@@ -3646,28 +3590,23 @@ pub const Parser = struct {
             _ = try p.c.expect(.lparen);
             tc.kind = .{ .check = try p.expr0() };
             _ = try p.c.expect(.rparen);
-            if (p.c.eatKw("no")) try p.c.expectKw("inherit");
+            _ = try p.c.optKws(&.{ "no", "inherit" });
             if (name == null) tc.name = try std.fmt.allocPrint(p.arena, "{s}_check", .{table});
         } else if (p.c.eatKw("unique")) {
             try p.nullsDistinct();
             tc.kind = .{ .unique = try p.parenNameList() };
             try p.indexTail();
-        } else if (p.c.eatKw("primary")) {
-            try p.c.expectKw("key");
+        } else if (try p.c.optKws(&.{ "primary", "key" })) {
             tc.kind = .{ .primary_key = try p.parenNameList() };
             try p.indexTail();
-        } else if (p.c.eatKw("foreign")) {
-            try p.c.expectKw("key");
+        } else if (try p.c.optKws(&.{ "foreign", "key" })) {
             const cols = try p.parenNameList();
             tc.kind = .{ .foreign_key = .{ .cols = cols, .ref = try p.references() } };
         } else if (p.c.isKw("exclude")) {
             return p.unsupported(t.start, "EXCLUDE constraints");
         } else return p.c.syntaxError();
         while (true) {
-            if (p.c.isKw("not") and p.c.isKwAt(1, "deferrable")) {
-                p.c.skip();
-                p.c.skip();
-            } else if (p.c.eatKw("deferrable")) {} else if (p.c.eatKw("initially")) {
+            if (p.c.eatKws(&.{ "not", "deferrable" })) {} else if (p.c.eatKw("deferrable")) {} else if (p.c.eatKw("initially")) {
                 if (!p.c.eatKw("deferred")) try p.c.expectKw("immediate");
             } else break;
         }
@@ -3857,8 +3796,7 @@ pub const Parser = struct {
         _ = p.c.eatOp("*");
         if (p.c.eat(.comma)) return p.c.failState(p.c.peek().start, .of("0A000"), "TRUNCATE of several tables is not supported", .{});
         var t: tree.Truncate = .{ .table = (try p.relation(q)).q };
-        if (p.c.eatKw("restart")) {
-            try p.c.expectKw("identity");
+        if (try p.c.optKws(&.{ "restart", "identity" })) {
             t.restart_identity = true;
         } else if (p.c.eatKw("continue")) try p.c.expectKw("identity");
         _ = p.c.eatKw("cascade") or p.c.eatKw("restrict");

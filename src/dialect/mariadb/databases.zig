@@ -75,8 +75,7 @@ fn databaseOptions(s: *Parser) Error!?[]const u8 {
     var coll: ?[]const u8 = null;
     while (!s.atStmtEnd()) {
         _ = s.c.eatKw("DEFAULT");
-        if (s.c.eatKw("CHARACTER")) {
-            try s.c.expectKw("SET");
+        if (try s.c.optKws(&.{ "CHARACTER", "SET" })) {
             _ = s.c.eatOp("=");
             cs = try optionValue(s);
         } else if (s.c.eatKw("CHARSET")) {

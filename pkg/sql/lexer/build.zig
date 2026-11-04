@@ -1,9 +1,9 @@
 //! sqllex, the building blocks of SQL lexers (character classes,
 //! comments, quotes, numbers, positions) as a package of its own: the
-//! module `sqllex` (src/root.zig) and its tests. It depends on nothing
+//! module `sql/lexer` (src/root.zig) and its tests. It depends on nothing
 //! but std.
 //!
-//! The root build (../../build.zig) takes it as a path dependency, once
+//! The root build (../../../build.zig) takes it as a path dependency, once
 //! per target, with `target` and `optimize` as arguments. `optimize`
 //! only picks the optimization mode of the tests here. `zig build test`
 //! in this directory runs the tests alone.
@@ -15,7 +15,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = b.option([]const []const u8, "test-filter", "Run only the tests whose names contain this text") orelse &.{};
 
-    _ = b.addModule("sqllex", .{
+    _ = b.addModule("sql/lexer", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });

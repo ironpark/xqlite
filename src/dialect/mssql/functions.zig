@@ -88,8 +88,7 @@ pub fn call(s: *Parser) Error!*Expr {
         const sep = try s.expr();
         try s.c.expectOp(")");
         var order: []tree.SortItem = &.{};
-        if (s.c.eatKw("WITHIN")) {
-            try s.c.expectKw("GROUP");
+        if (try s.c.optKws(&.{ "WITHIN", "GROUP" })) {
             try s.c.expectOp("(");
             try s.c.expectKw("ORDER");
             try s.c.expectKw("BY");

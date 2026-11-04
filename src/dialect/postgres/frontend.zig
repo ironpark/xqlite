@@ -46,7 +46,7 @@ pub const frontend: dialect.Frontend = .{ .run = run };
 
 pub const run = driver.run(parser, compile, translateError);
 
-fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
+fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.CompileError!void {
     // ANALYZE [VERBOSE] [[schema.]name], as written (SQLite's takes the
     // same arguments). VERBOSE does nothing; schema public is main and
     // pg_temp temp.
@@ -64,7 +64,7 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
             if (schema == null and i + 3 == toks.len and (toks[i + 2].kind == .ident or toks[i + 2].kind == .qident)) {
                 ps.p = p;
                 const n = toks[i + 2];
-                const t = ps.qualified(.{ .text = toks[i].text, .pos = toks[i].start }, .{ .text = n.text, .pos = n.start }) catch |err| return parseFailed(p, sql, ps, err);
+                const t = try ps.qualified(.{ .text = toks[i].text, .pos = toks[i].start }, .{ .text = n.text, .pos = n.start });
                 if (t.mangled) {
                     const text = try std.fmt.allocPrintSentinel(p.arena, "ANALYZE main.{f}", .{dialect.Quoted('"'){ .z = t.name }}, 0);
                     return ir.stmt.lowerSqliteText(p, text);
@@ -86,21 +86,18 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     }
     ps.p = p;
     // CREATE/DROP SCHEMA, SET, RESET, SHOW.
-    const done = session.statement(ps) catch |err| switch (err) {
-        error.OutOfMemory, error.ParseFailed => |e| return parseFailed(p, sql, ps, e),
-        error.Failed => return error.Failed,
-    };
+    const done = try session.statement(ps);
     if (done) return;
-    const stmt = ps.statement() catch |err| return parseFailed(p, sql, ps, err);
-    ps.regOutputs(stmt) catch |err| return parseFailed(p, sql, ps, err);
+    const stmt = try ps.statement();
+    try ps.regOutputs(stmt);
     // The types of the columns of the tables, for the typing of names
     // resolved (sql/typing.zig, overload.zig).
     catalog.readAll(p.db) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         else => {},
     };
-    jtype.statement(ps, stmt) catch |err| return parseFailed(p, sql, ps, err);
-    ddltype.statement(ps, stmt) catch |err| return parseFailed(p, sql, ps, err);
+    try jtype.statement(ps, stmt);
+    try ddltype.statement(ps, stmt);
     switch (stmt) {
         .create_table, .create_index, .create_view, .create_sequence, .alter_table, .drop => {
             var d: ddl.Ddl = .init(p, sql);
@@ -118,9 +115,6 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
     var l: lower.Lowerer = .init(p, sql);
     try l.statement(stmt);
 }
-
-/// The error of the parser, left in `p`.
-const parseFailed = driver.parseFailed;
 
 /// The HINT of a function call no function matches.
 pub const function_hint = "No function matches the given name and argument types. You might need to add explicit type casts.";

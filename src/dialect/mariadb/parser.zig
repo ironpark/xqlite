@@ -33,11 +33,11 @@
 //! as MariaDB does.
 
 const std = @import("std");
-const sqlparse = @import("sqlparse");
+const sqlparse = @import("sql/parse");
 const syntax = @import("../syntax.zig");
 const words = sqlparse.words;
 const ctype = @import("xqlite_base").ctype;
-const sqllex = @import("sqllex");
+const sqllex = @import("sql/lexer");
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
 const tree = @import("../../ir/tree.zig");
@@ -95,15 +95,13 @@ pub const Stored = struct {
 };
 
 /// The tokens of a statement, read as the parser goes (where a statement
-/// ends is the parser's business), and its error (pkg/sqlparse).
+/// ends is the parser's business), and its error (pkg/sql/parse).
 pub const Cursor = sqlparse.Cursor(sqlparse.Streaming(lexer.Lexer), int.ErrorState, struct {
-    pub fn syntaxError(c: anytype) Error {
-        return mariadbSyntaxError(c, c.peek());
-    }
+    pub const syntaxErrorAt = mariadbSyntaxError;
 });
 
 /// MariaDB's syntax error at token `t`.
-fn mariadbSyntaxError(c: *Cursor, t: Token) Error {
+fn mariadbSyntaxError(c: anytype, t: Token) Error {
     const near = std.mem.sliceTo(c.sql[t.start..@min(c.sql.len, t.start + 80)], 0);
     const line = sqllex.lineOf(c.sql, t.start);
     return c.failState(t.start, .numbered("42601", 1064), "You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '{s}' at line {d}", .{ near, line });
@@ -150,11 +148,6 @@ pub const Parser = struct {
     /// The end of the statement: `;` or the end of the text.
     pub fn atStmtEnd(s: *Parser) bool {
         return s.c.atEof() or s.c.isOp(";");
-    }
-
-    /// MariaDB's syntax error at token `t`.
-    pub fn syntaxErrorAt(s: *Parser, t: Token) Error {
-        return mariadbSyntaxError(&s.c, t);
     }
 
     /// Fail with the error a statement run while compiling this one left
@@ -750,7 +743,7 @@ pub const Parser = struct {
             },
             .hex => {
                 s.c.skip();
-                const digits = (try lexer.hexDigits(s.a, t)) orelse return s.syntaxErrorAt(t);
+                const digits = (try lexer.hexDigits(s.a, t)) orelse return s.c.syntaxErrorAt(t);
                 return s.mk(pos, .{ .blob = digits });
             },
             .bit => {
@@ -919,9 +912,7 @@ pub const Parser = struct {
 
     /// The ORDER BY and LIMIT of a whole SELECT.
     fn orderLimit(s: *Parser, sel: *tree.Select) Error!void {
-        if (s.c.isKw("ORDER") and s.c.peekAt(1).isKw("BY")) {
-            s.c.skip();
-            s.c.skip();
+        if (s.c.eatKws(&.{ "ORDER", "BY" })) {
             sel.order_by = try s.sortList();
         }
         if (s.c.isKw("LIMIT")) {
@@ -966,15 +957,11 @@ pub const Parser = struct {
     }
 
     fn lockingClause(s: *Parser) Error!void {
-        if (s.c.isKw("FOR") and s.c.peekAt(1).isKw("UPDATE")) {
-            s.c.skip();
-            s.c.skip();
+        if (s.c.eatKws(&.{ "FOR", "UPDATE" })) {
             if (s.c.eatKw("WAIT")) {
                 _ = try s.expr();
             } else _ = s.c.eatKw("NOWAIT") or (s.c.eatKw("SKIP") and s.c.eatKw("LOCKED"));
-        } else if (s.c.isKw("LOCK") and s.c.peekAt(1).isKw("IN")) {
-            s.c.skip();
-            s.c.skip();
+        } else if (s.c.eatKws(&.{ "LOCK", "IN" })) {
             try s.c.expectKw("SHARE");
             try s.c.expectKw("MODE");
         }
@@ -1095,9 +1082,7 @@ pub const Parser = struct {
         }
         const where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
         var group: std.ArrayList(*Expr) = .empty;
-        if (s.c.isKw("GROUP")) {
-            s.c.skip();
-            try s.c.expectKw("BY");
+        if (try s.c.optKws(&.{ "GROUP", "BY" })) {
             while (true) {
                 try group.append(s.a, try s.expr());
                 _ = s.c.eatKw("ASC") or s.c.eatKw("DESC");
@@ -1240,12 +1225,10 @@ pub const Parser = struct {
         if (s.c.eatOp(",")) return .{ .join = .comma };
         if (s.c.eatKw("JOIN")) return .{ .join = .inner };
         if (s.c.eatKw("STRAIGHT_JOIN")) return .{ .join = .straight };
-        if (s.c.eatKw("INNER")) {
-            try s.c.expectKw("JOIN");
+        if (try s.c.optKws(&.{ "INNER", "JOIN" })) {
             return .{ .join = .inner };
         }
-        if (s.c.eatKw("CROSS")) {
-            try s.c.expectKw("JOIN");
+        if (try s.c.optKws(&.{ "CROSS", "JOIN" })) {
             return .{ .join = .cross };
         }
         const natural = s.c.eatKw("NATURAL");

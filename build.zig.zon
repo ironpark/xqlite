@@ -43,8 +43,8 @@
         .uuid = .{ .path = "pkg/uuid" },
         // The building blocks of the dialects' SQL lexers, with no
         // dependency but std.
-        .sqllex = .{ .path = "pkg/sqllex" },
-        .sqlparse = .{ .path = "pkg/sqlparse" },
+        .sqllex = .{ .path = "pkg/sql/lexer" },
+        .sqlparse = .{ .path = "pkg/sql/parse" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -99,8 +99,8 @@
         "pkg/storage",
         "pkg/base",
         "pkg/uuid",
-        "pkg/sqllex",
-        "pkg/sqlparse",
+        "pkg/sql/lexer",
+        "pkg/sql/parse",
         "LICENSE",
         "README.md",
     },

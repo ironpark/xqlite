@@ -23,7 +23,7 @@
 //! source).
 
 const std = @import("std");
-const sqllex = @import("sqllex");
+const sqllex = @import("sql/lexer");
 const ErrorFields = @import("../../sql/util.zig").ErrorFields;
 const decimal = @import("../decimal.zig");
 

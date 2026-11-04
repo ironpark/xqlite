@@ -76,16 +76,13 @@ comptime {
 
 pub const run = driver.run(parser, compile, translateError);
 
-fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!void {
+fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.CompileError!void {
     ps.p = p;
     // CREATE/DROP/ALTER USER, ALTER SESSION SET CURRENT_SCHEMA.
-    const done = session.statement(ps) catch |err| switch (err) {
-        error.OutOfMemory, error.ParseFailed => |e| return parseError(p, sql, ps, e),
-        error.Failed => return error.Failed,
-    };
+    const done = try session.statement(ps);
     if (done) return;
-    const s = stmt_mod.statement(ps) catch |err| return parseError(p, sql, ps, err);
-    dates.statement(ps, s) catch |err| return parseError(p, sql, ps, err);
+    const s = try stmt_mod.statement(ps);
+    try dates.statement(ps, s);
     var l: lower.Lowerer = .init(p, sql);
     switch (s) {
         .tree => |t| switch (t) {
@@ -119,8 +116,6 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) lower.Error!voi
         .noop => _ = build.getVdbe(p) orelse return error.Failed,
     }
 }
-
-const parseError = driver.parseFailed;
 
 fn fail(p: *int.Parse, sql: [:0]const u8, msg: []const u8) lower.Error {
     ir.stmt.errorMsgAt(p, sql.ptr, "{s}", .{msg});

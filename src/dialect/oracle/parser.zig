@@ -37,7 +37,7 @@
 //! first, so lookahead never fails; `end` is the offset after it.
 
 const std = @import("std");
-const sqlparse = @import("sqlparse");
+const sqlparse = @import("sql/parse");
 const syntax = @import("../syntax.zig");
 const words = sqlparse.words;
 const tree = @import("../../ir/tree.zig");
@@ -135,16 +135,15 @@ pub const Statement = union(enum) {
 
 pub const Kind = enum { none, date, timestamp };
 
-/// The tokens of a statement and its error (pkg/sqlparse), with Oracle's
+/// The tokens of a statement and its error (pkg/sql/parse), with Oracle's
 /// errors for a missing token.
 pub const Cursor = sqlparse.Cursor(sqlparse.Buffered(Token), int.ErrorState, Hooks);
 
 const Hooks = struct {
     /// The error of an unexpected token: ORA-00933 when a statement could
     /// have ended there, else ORA-00936 (an expression is missing).
-    pub fn syntaxError(c: anytype) Error {
-        if (c.atEof()) return missing(c, "ORA-00936: missing expression");
-        return missing(c, "ORA-00933: SQL command not properly ended");
+    pub fn syntaxErrorAt(c: anytype, t: Token) Error {
+        return c.fail(t.start, "{s}", .{if (t.kind == .eof) "ORA-00936: missing expression" else "ORA-00933: SQL command not properly ended"});
     }
 
     pub fn missingKeyword(c: anytype) Error {
@@ -156,7 +155,7 @@ const Hooks = struct {
             .rparen => missing(c, "ORA-00907: missing right parenthesis"),
             .lparen => missing(c, "ORA-00906: missing left parenthesis"),
             .comma => missing(c, "ORA-00917: missing comma"),
-            else => syntaxError(c),
+            else => c.syntaxError(),
         };
     }
 
@@ -614,9 +613,7 @@ pub const Parser = struct {
             try p.c.expectKw("as");
             if (p.c.eatKw("materialized")) {
                 cte.materialized = true;
-            } else if (p.c.isKw("not") and p.c.isKwAt(1, "materialized")) {
-                p.c.skip();
-                p.c.skip();
+            } else if (p.c.eatKws(&.{ "not", "materialized" })) {
                 cte.materialized = false;
             }
             _ = try p.c.expect(.lparen);
@@ -702,9 +699,7 @@ pub const Parser = struct {
         }
         if (p.c.eatKw("where")) c.where = try p.expr0();
         if (p.c.isKw("start") or p.c.isKw("connect")) return p.unsupported(p.c.peek().start, "CONNECT BY hierarchical queries");
-        if (p.c.isKw("group")) {
-            p.c.skip();
-            try p.c.expectKw("by");
+        if (try p.c.optKws(&.{ "group", "by" })) {
             if (p.c.isAnyKw(&.{ "rollup", "cube", "grouping" })) return p.unsupported(p.c.peek().start, "GROUP BY ROLLUP/CUBE/GROUPING SETS");
             c.group_by = try p.exprList();
         }
@@ -855,9 +850,7 @@ pub const Parser = struct {
             var natural = false;
             if (p.c.eatKw("natural")) natural = true;
             var kind: tree.JoinKind = .inner;
-            if (p.c.eatKw("join")) {} else if (p.c.eatKw("inner")) {
-                try p.c.expectKw("join");
-            } else if (p.c.eatKw("left")) {
+            if (p.c.eatKw("join")) {} else if (try p.c.optKws(&.{ "inner", "join" })) {} else if (p.c.eatKw("left")) {
                 _ = p.c.eatKw("outer");
                 try p.c.expectKw("join");
                 kind = .left;
@@ -1611,9 +1604,7 @@ pub const Parser = struct {
 
     fn finishCall(p: *Parser, f_arg: Call) Error!Call {
         var f = f_arg;
-        if (p.c.isKw("within") and p.c.isKwAt(1, "group")) {
-            p.c.skip();
-            p.c.skip();
+        if (p.c.eatKws(&.{ "within", "group" })) {
             _ = try p.c.expect(.lparen);
             try p.c.expectKw("order");
             try p.c.expectKw("by");

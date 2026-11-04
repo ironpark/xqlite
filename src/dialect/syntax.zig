@@ -3,7 +3,7 @@
 //! IR, up to a few options (src/ir/tree.zig).
 //!
 //! Each function takes the dialect's parser `p` (anytype) and uses:
-//!  - `p.c`, its cursor (pkg/sqlparse), for the tokens, the arena and
+//!  - `p.c`, its cursor (pkg/sql/parse), for the tokens, the arena and
 //!    the errors; keywords are written in upper case, the cursor
 //!    compares them as the dialect does (folded or not);
 //!  - the dialect's functions given as comptime arguments (`operand`:
@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const tree = @import("../ir/tree.zig");
-const sqlparse = @import("sqlparse");
+const sqlparse = @import("sql/parse");
 
 const Error = sqlparse.Error;
 const Expr = tree.Expr;

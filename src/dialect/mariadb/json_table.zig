@@ -122,8 +122,7 @@ const SpecBuilder = struct {
         try b.names.append(s.a, name.text);
         try b.raw("{\"n\":");
         try b.str(name.text);
-        if (s.c.eatKw("FOR")) {
-            try s.c.expectKw("ORDINALITY");
+        if (try s.c.optKws(&.{ "FOR", "ORDINALITY" })) {
             try b.raw(",\"o\":1}");
             return;
         }

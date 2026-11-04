@@ -141,11 +141,7 @@ pub fn insert(s: *Parser) Error!tree.Stmt {
     }
 
     var on_conflict: ?*tree.OnConflict = null;
-    if (s.c.isKw("ON")) {
-        s.c.skip();
-        try s.c.expectKw("DUPLICATE");
-        try s.c.expectKw("KEY");
-        try s.c.expectKw("UPDATE");
+    if (try s.c.optKws(&.{ "ON", "DUPLICATE", "KEY", "UPDATE" })) {
         if (is_replace) return s.c.syntaxError();
         on_conflict = try s.new(tree.OnConflict, .{ .update = try assignments(s, &t, ignore, true) });
     }
@@ -302,9 +298,7 @@ pub fn update(s: *Parser) Error!tree.Stmt {
 
 fn orderLimit(s: *Parser) Error!struct { []tree.SortItem, ?*Expr } {
     var order: []tree.SortItem = &.{};
-    if (s.c.isKw("ORDER")) {
-        s.c.skip();
-        try s.c.expectKw("BY");
+    if (try s.c.optKws(&.{ "ORDER", "BY" })) {
         order = try s.sortList();
     }
     var limit: ?*Expr = null;

@@ -14,6 +14,7 @@ const std = @import("std");
 const int = @import("../sql/sqlite_int.zig");
 const ir = @import("../ir/ir.zig");
 const lower = @import("../ir/lower.zig");
+const sqlparse = @import("sql/parse");
 
 const RC = int.RC;
 
@@ -39,9 +40,16 @@ pub const LexError = struct {
     state: ?int.ErrorState = null,
 };
 
+/// What compile() of run() fails with: lowering's errors (in the Parse
+/// already), and the parser's (ParseFailed: in its Diag, which run()
+/// records, unless the parser could not read the schema: then it is in
+/// the Parse too).
+pub const CompileError = lower.Error || sqlparse.Error;
+
 /// Frontend.run for the parser module `parser` (`Parser.init(arena, sql,
 /// pos, &lex_error, options)`), which compiles a statement with
-/// `compile(p, sql, &ps)` and rewords its errors with `translateError(p)`.
+/// `compile(p, sql, &ps)` (a CompileError) and rewords its errors with
+/// `translateError(p)`.
 pub fn run(comptime parser: type, comptime compile: anytype, comptime translateError: fn (*int.Parse) int.Oom!void) fn (*int.Parse, [:0]const u8) (int.Oom || int.ParseError)!void {
     return struct {
         fn run(p: *int.Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void {
@@ -64,6 +72,7 @@ pub fn run(comptime parser: type, comptime compile: anytype, comptime translateE
             compile(p, sql, &ps) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.Failed => {},
+                error.ParseFailed => if (!ps.err_in_parse) report(p, sql, ps.c.diag),
             };
             if (p.n_err == 0 and p.rc == RC.OK) ir.stmt.finishCoding(p);
             p.tail = rest;
@@ -135,17 +144,4 @@ fn report(p: *int.Parse, sql: [:0]const u8, diag: anytype) void {
     const pos = diag.pos orelse sql.len;
     const z: ?[*]const u8 = if (pos < sql.len) sql.ptr + pos else null;
     ir.stmt.errorMsgState(p, z, diag.state, "{s}", .{diag.msg});
-}
-
-/// The lower.Error of a parser's error `err`: its message at its place in
-/// `sql`, unless the parser could not read the schema (then the error is
-/// in `p` already).
-pub fn parseFailed(p: *int.Parse, sql: [:0]const u8, ps: anytype, err: anytype) lower.Error {
-    switch (err) {
-        error.OutOfMemory => |e| return e,
-        error.ParseFailed => {
-            if (!ps.err_in_parse) report(p, sql, ps.c.diag);
-            return error.Failed;
-        },
-    }
 }

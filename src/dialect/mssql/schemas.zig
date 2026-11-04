@@ -96,9 +96,7 @@ pub fn skipPermission(s: *Parser) Error!void {
         _ = try s.anyName();
         if (!s.c.eatOp(",")) break;
     }
-    if (s.c.isKw("WITH") and s.c.peekAt(1).isKw("GRANT")) {
-        s.c.skip();
-        s.c.skip();
+    if (s.c.eatKws(&.{ "WITH", "GRANT" })) {
         try s.c.expectKw("OPTION");
     }
     _ = s.c.eatKw("CASCADE");

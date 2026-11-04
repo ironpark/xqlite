@@ -17,7 +17,7 @@
 //! it is a comment), and its closing `*/` is skipped.
 
 const std = @import("std");
-const sqllex = @import("sqllex");
+const sqllex = @import("sql/lexer");
 const state = @import("state.zig");
 
 /// MariaDB's rules for the scanners: identifiers of letters, `_`, `$`

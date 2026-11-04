@@ -61,9 +61,9 @@ pub const varint = @import("xqlite_storage").varint;
 /// Byte loops sixteen bytes at a time (hex digits, searches) that the
 /// wire servers and the shell share with the engine.
 pub const simd = @import("xqlite_base").simd;
-/// The scanners of the dialects' lexers (pkg/sqllex), which the wire
+/// The scanners of the dialects' lexers (pkg/sql/lexer), which the wire
 /// servers' scan of statement text uses too (src/server/command.zig).
-pub const sqllex = @import("sqllex");
+pub const sqllex = @import("sql/lexer");
 
 pub const vfs = @import("xqlite_vfs").vfs;
 pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;

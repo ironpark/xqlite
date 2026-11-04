@@ -30,7 +30,7 @@
 //! parsed with `stored` set: variables and parameters are refused there.
 
 const std = @import("std");
-const sqlparse = @import("sqlparse");
+const sqlparse = @import("sql/parse");
 const syntax = @import("../syntax.zig");
 const words = sqlparse.words;
 const ctype = @import("xqlite_base").ctype;
@@ -109,15 +109,13 @@ pub const Assign = struct { name: []const u8, value: *Expr };
 
 /// The tokens of a statement, read as the parser goes (a statement may
 /// end before a word that starts another one), and its error
-/// (pkg/sqlparse).
+/// (pkg/sql/parse).
 pub const Cursor = sqlparse.Cursor(sqlparse.Streaming(lexer.Lexer), int.ErrorState, struct {
-    pub fn syntaxError(c: anytype) Error {
-        return tsqlSyntaxError(c, c.peek());
-    }
+    pub const syntaxErrorAt = tsqlSyntaxError;
 });
 
 /// SQL Server's syntax error at token `t`.
-fn tsqlSyntaxError(c: *Cursor, t: Token) Error {
+fn tsqlSyntaxError(c: anytype, t: Token) Error {
     if (t.kind == .illegal and t.text.len > 0 and (t.text[0] == '\'' or t.text[0] == 'N' or t.text[0] == 'n')) {
         return c.failState(t.start, .numbered("42601", 105), "Unclosed quotation mark after the character string '{s}'.", .{t.text[@min(t.text.len, @as(usize, if (t.text[0] == '\'') 1 else 2))..]});
     }
@@ -184,11 +182,6 @@ pub const Parser = struct {
     /// that starts another statement.
     pub fn atStmtEnd(s: *Parser) bool {
         return s.c.peek().kind == .eof or s.c.peek().is(";") or startsStatement(s.c.peek());
-    }
-
-    /// SQL Server's syntax error at token `t`.
-    pub fn syntaxErrorAt(s: *Parser, t: Token) Error {
-        return tsqlSyntaxError(&s.c, t);
     }
 
     /// Fail with the error a statement run while compiling this one left
@@ -938,9 +931,7 @@ pub const Parser = struct {
         // TOP of a lone SELECT: after its ORDER BY.
         var top: ?Top = null;
         if (body.* == .core) top = s.tops.get(body.core);
-        if (s.c.isKw("ORDER") and s.c.peekAt(1).isKw("BY")) {
-            s.c.skip();
-            s.c.skip();
+        if (s.c.eatKws(&.{ "ORDER", "BY" })) {
             sel.order_by = try s.sortList();
         }
         if (s.c.eatKw("OFFSET")) {
@@ -1126,9 +1117,7 @@ pub const Parser = struct {
         if (s.c.eatKw("FROM")) from = try s.tableRefs();
         const where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
         var group: std.ArrayList(*Expr) = .empty;
-        if (s.c.isKw("GROUP")) {
-            s.c.skip();
-            try s.c.expectKw("BY");
+        if (try s.c.optKws(&.{ "GROUP", "BY" })) {
             if (s.c.isAnyKw(&.{ "ROLLUP", "CUBE", "GROUPING" })) return s.c.fail(null, "xqlite: GROUP BY {s} is not supported", .{s.c.peek().text});
             while (true) {
                 try group.append(s.a, try s.expr());
@@ -1435,8 +1424,7 @@ pub const Parser = struct {
 
     fn joinOp(s: *Parser) Error!?tree.JoinKind {
         if (s.c.eatOp(",")) return .comma;
-        if (s.c.eatKw("CROSS")) {
-            try s.c.expectKw("JOIN");
+        if (try s.c.optKws(&.{ "CROSS", "JOIN" })) {
             return .cross;
         }
         var j: tree.JoinKind = .inner;

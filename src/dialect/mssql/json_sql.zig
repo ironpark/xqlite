@@ -402,9 +402,7 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
         var path: ?[]const u8 = null;
         if (s.c.peek().kind == .string) path = try s.stringLiteral();
         var as_json = false;
-        if (s.c.isKw("AS") and s.c.peekAt(1).isKw("JSON")) {
-            s.c.skip();
-            s.c.skip();
+        if (s.c.eatKws(&.{ "AS", "JSON" })) {
             if (!(ty.t.base == .nvarchar and ty.t.len == types.max_len)) {
                 return s.c.failState(null, .of("42601"), "AS JSON option can be specified only for column of nvarchar(max) type in WITH clause.", .{});
             }

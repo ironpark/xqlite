@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         // wasm32-freestanding has none (src/util/platform.zig).
         .link_libc = target.result.os.tag != .freestanding,
         // The VFS and storage layers and the shared helpers, packages of
-        // their own (pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sqllex, pkg/sqlparse). See
+        // their own (pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sql/lexer, pkg/sql/parse). See
         // engineImports().
         .imports = engineImports(b, target, optimize),
     });
@@ -301,7 +301,7 @@ pub fn build(b: *std.Build) void {
 
     // The packages alone, without the engine: quick to build when working
     // on the VFS, the pager or the b-tree. `zig build test` runs these too.
-    const pkg_step = b.step("test-pkg", "Run the tests of pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sqllex and pkg/sqlparse alone (no engine build)");
+    const pkg_step = b.step("test-pkg", "Run the tests of pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sql/lexer and pkg/sql/parse alone (no engine build)");
     pkg_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
@@ -1195,22 +1195,22 @@ fn uuidTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     });
 }
 
-/// The sqllex package (pkg/sqllex, a path dependency) for `target`, as
+/// The sqllex package (pkg/sql/lexer, a path dependency) for `target`, as
 /// the import `sqllex` of a module (the dialects' lexers).
 fn sqllexImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
     const dep = b.dependency("sqllex", .{ .target = target, .optimize = optimize });
-    return .{ .name = "sqllex", .module = dep.module("sqllex") };
+    return .{ .name = "sql/lexer", .module = dep.module("sql/lexer") };
 }
 
-/// The sqlparse package (pkg/sqlparse, a path dependency) for `target`,
+/// The sqlparse package (pkg/sql/parse, a path dependency) for `target`,
 /// as the import `sqlparse` of a module (the dialects' parsers).
 fn sqlparseImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
     const dep = b.dependency("sqlparse", .{ .target = target, .optimize = optimize });
-    return .{ .name = "sqlparse", .module = dep.module("sqlparse") };
+    return .{ .name = "sql/parse", .module = dep.module("sql/parse") };
 }
 
 /// The sqlparse package's tests for `target`: those `zig build test` runs
-/// in pkg/sqlparse.
+/// in pkg/sql/parse.
 fn sqlparseTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
     const dep = b.dependency("sqlparse", .{ .target = target, .optimize = optimize });
     return b.addTest(.{
@@ -1226,7 +1226,7 @@ fn sqlparseTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// The sqllex package's tests for `target`: those `zig build test` runs
-/// in pkg/sqllex.
+/// in pkg/sql/lexer.
 fn sqllexTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
     const dep = b.dependency("sqllex", .{ .target = target, .optimize = optimize });
     return b.addTest(.{

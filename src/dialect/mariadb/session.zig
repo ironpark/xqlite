@@ -329,8 +329,7 @@ pub fn emptyStatement(s: *Parser) Error!void {
 /// START TRANSACTION, BEGIN [WORK], COMMIT, ROLLBACK [TO SAVEPOINT],
 /// SAVEPOINT, RELEASE SAVEPOINT.
 pub fn transaction(s: *Parser) Error!void {
-    if (s.c.eatKw("START")) {
-        try s.c.expectKw("TRANSACTION");
+    if (try s.c.optKws(&.{ "START", "TRANSACTION" })) {
         while (!s.atStmtEnd()) s.c.skip(); // READ ONLY|WRITE, WITH CONSISTENT SNAPSHOT
         return s.lowerStmt(.begin);
     }
@@ -360,8 +359,7 @@ pub fn transaction(s: *Parser) Error!void {
         if (s.p.db.auto_commit) return emptyStatement(s);
         return s.lowerStmt(.{ .savepoint = n });
     }
-    if (s.c.eatKw("RELEASE")) {
-        try s.c.expectKw("SAVEPOINT");
+    if (try s.c.optKws(&.{ "RELEASE", "SAVEPOINT" })) {
         const n = try s.nameOf(try s.name());
         return s.lowerStmt(.{ .release = n });
     }
@@ -415,8 +413,7 @@ pub fn analyzeTable(s: *Parser) Error!void {
         if (!s.c.eatOp(",")) break;
     }
     var persistent = false;
-    if (s.c.eatKw("PERSISTENT")) {
-        try s.c.expectKw("FOR");
+    if (try s.c.optKws(&.{ "PERSISTENT", "FOR" })) {
         persistent = true;
         while (!s.atStmtEnd()) s.c.skip(); // ALL | COLUMNS (...) INDEXES (...)
     }

@@ -565,7 +565,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 
 ### sqllex 패키지
 
-방언들의 렉서가 함께 쓰는 SQL 스캐너는 엔진과 상관없는 일반 패키지 `pkg/sqllex/`(모듈 이름 `sqllex`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 방언마다 다른 것은 토큰 종류, 토큰을 시도하는 순서, 오류 문구이고, 같은 것은 식별자 문자·공백·주석의 연속, 따옴표를 겹쳐 쓰는 따옴표 토큰, 십진수와 진법 숫자를 읽는 방법(규칙 몇 개만 다름)입니다. 그래서 패키지는 스캐너만 주고, 방언의 렉서는 첫 문자로 갈라 스캐너를 부르는 디스패치로 남습니다.
+방언들의 렉서가 함께 쓰는 SQL 스캐너는 엔진과 상관없는 일반 패키지 `pkg/sql/lexer/`(모듈 이름 `sql/lexer`, `@import("sql/lexer")`. 패키지 이름은 `sqllex`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 방언마다 다른 것은 토큰 종류, 토큰을 시도하는 순서, 오류 문구이고, 같은 것은 식별자 문자·공백·주석의 연속, 따옴표를 겹쳐 쓰는 따옴표 토큰, 십진수와 진법 숫자를 읽는 방법(규칙 몇 개만 다름)입니다. 그래서 패키지는 스캐너만 주고, 방언의 렉서는 첫 문자로 갈라 스캐너를 부르는 디스패치로 남습니다.
 
 - `Spec`은 방언의 규칙입니다. 단어를 시작하는 문자와 잇는 문자(`Set`, 컴파일 시점의 256칸 표), 주석(`--`, MySQL의 `-- `, `#`, 중첩하거나 하지 않는 `/* */`, 방언이 직접 건너뛰는 블록 주석: MariaDB의 실행 주석), 숫자(`1_000`의 구분자, `1..2`를 `1`과 `..`으로 읽는지, `0x`·`0o`·`0b` 접두사로 쓸 수 있는 글자)가 들어 있습니다. 공백은 모든 방언이 C의 isspace() 여섯 문자입니다. `Scanner(spec)`이 그 규칙에 맞춰 컴파일 시점에 특수화한 `skip()`(공백과 주석, 닫히지 않은 블록 주석의 시작 위치), `commentAt()`(그 자리에서 주석이 시작하는지: PostgreSQL 연산자가 `--`·`/*` 앞에서 끊김), `word()`, `foldedWord()`(단어와 접은 이름을 한 번에), `number()`(숫자 뒤의 접미사, 쓰레기, 숫자로 시작하는 이름은 방언이 판단), `radixPrefix()`(진법 접두사와 그 진법. 숫자가 없거나 뒤에 쓰레기가 붙은 경우는 방언이 판단), `dollarTag()`, `isDigit()`를 줍니다.
 - 규칙이 필요 없는 스캐너: `quotedEnd()`(겹친 따옴표, 런타임 플래그로 MySQL의 백슬래시 이스케이프), `undoubled()`(`quotedEnd()`와 `undouble()`), `blockCommentEnd()`, `lineEnd()`, `radixDigits()`(접두사 뒤의 숫자, 구분자), `longestOp()`(첫 바이트로 갈라 그 바이트로 시작하는 연산자만 비교. 긴 연산자가 그것으로 시작하는 짧은 것보다 앞에 없으면 컴파일되지 않음), `dollarEnd()`. 따옴표 안, 줄 주석, 블록 주석은 `indexOfAnyOrNul()`로 16바이트씩(`@Vector`) 닫는 문자나 NUL을 찾습니다.
@@ -578,9 +578,9 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 
 ### sqlparse 패키지
 
-방언들의 파서가 함께 쓰는 토큰 커서와 오류 기록은 엔진과 상관없는 일반 패키지 `pkg/sqlparse/`(모듈 이름 `sqlparse`)입니다. `std`와 sqllex만 import하고, 루트와 이 패키지가 같은 인자로 sqllex를 불러 같은 모듈을 씁니다. 토큰 공급원(`Buffered`, `Streaming`), 커서(`Cursor`), 오류 기록(`Diag`), 단어 집합(`words`)이 있고, IR 트리를 만드는 공통 문법 조각은 엔진 쪽 `src/dialect/syntax.zig`에 있습니다. 자세한 것은 [SQL 파서 공통 층](sqlparse.md)에 있습니다.
+방언들의 파서가 함께 쓰는 토큰 커서와 오류 기록은 엔진과 상관없는 일반 패키지 `pkg/sql/parse/`(모듈 이름 `sql/parse`, `@import("sql/parse")`. 패키지 이름은 `sqlparse`)입니다. `std`와 `sql/lexer`만 import하고, 루트와 이 패키지가 같은 인자로 sqllex 패키지를 불러 같은 모듈을 씁니다. 토큰 공급원(`Buffered`, `Streaming`), 커서(`Cursor`), 오류 기록(`Diag`), 단어 집합(`words`)이 있고, IR 트리를 만드는 공통 문법 조각은 엔진 쪽 `src/dialect/syntax.zig`에 있습니다. 자세한 것은 [SQL 파서 공통 층](sqlparse.md)에 있습니다.
 
-`zig build test-pkg`는 여섯 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`, `pkg/sqllex`, `pkg/sqlparse`)의 테스트만 엔진 없이 빌드해 돌립니다.
+`zig build test-pkg`는 여섯 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`, `pkg/sql/lexer`, `pkg/sql/parse`)의 테스트만 엔진 없이 빌드해 돌립니다.
 
 ## 소스 파일
 
@@ -624,10 +624,10 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
 | `pkg/base/src/{ctype,numeric,hash,flags,cast}.zig` | 공용 패키지: 문자 분류, 수 변환, Hash 순서, 플래그 연산, 캐스트 |
 | `pkg/uuid/src/root.zig` | uuid 패키지(`uuid`): RFC 9562 UUID의 텍스트, 필드, 버전 4·7, v7의 시계([uuid 패키지](#uuid-패키지)) |
-| `pkg/sqllex/build.zig`, `build.zig.zon` | sqllex 패키지(`sqllex`): 모듈과 `zig build test`. 루트 빌드가 경로 의존성으로 받음 |
-| `pkg/sqllex/src/root.zig` | sqllex 패키지: 방언 규칙 `Spec`과 `Scanner(spec)`, 따옴표·주석·숫자 스캐너, 해석, 위치([sqllex 패키지](#sqllex-패키지)) |
-| `pkg/sqlparse/build.zig`, `build.zig.zon` | sqlparse 패키지(`sqlparse`): 모듈과 `zig build test`. sqllex에 경로 의존성 |
-| `pkg/sqlparse/src/{root,words}.zig` | sqlparse 패키지: 토큰 공급원 `Buffered`·`Streaming`, `Cursor`, `Diag`, 단어 집합([SQL 파서 공통 층](sqlparse.md)) |
+| `pkg/sql/lexer/build.zig`, `build.zig.zon` | sqllex 패키지(모듈 `sql/lexer`): 모듈과 `zig build test`. 루트 빌드가 경로 의존성으로 받음 |
+| `pkg/sql/lexer/src/root.zig` | sqllex 패키지: 방언 규칙 `Spec`과 `Scanner(spec)`, 따옴표·주석·숫자 스캐너, 해석, 위치([sqllex 패키지](#sqllex-패키지)) |
+| `pkg/sql/parse/build.zig`, `build.zig.zon` | sqlparse 패키지(모듈 `sql/parse`): 모듈과 `zig build test`. sqllex에 경로 의존성 |
+| `pkg/sql/parse/src/{root,words}.zig` | sqlparse 패키지: 토큰 공급원 `Buffered`·`Streaming`, `Cursor`, `Diag`, 단어 집합([SQL 파서 공통 층](sqlparse.md)) |
 | `src/dialect/disabled.zig` | 빌드에서 뺀 방언의 프론트엔드([빌드에 넣을 방언과 확장](#빌드에-넣을-방언과-확장)) |
 | `tools/minimal_test.zig` | 방언·확장을 모두 뺀 엔진의 테스트(`zig build test-minimal`) |
 

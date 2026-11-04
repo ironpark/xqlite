@@ -1,6 +1,6 @@
 //! sqlparse: what the hand-written SQL parsers of the dialects share,
 //! below the syntax tree they build (docs/sqlparse.md). It depends on
-//! std and sqllex.
+//! std and sql/lexer.
 //!
 //! A dialect's parser keeps its token kinds, its grammar, its
 //! precedence and its error wording; what is the same in every one is
@@ -44,9 +44,9 @@ pub fn checkToken(comptime T: type) void {
 /// Fails to compile if `Hooks` has a public declaration that is no hook
 /// (a misspelt optional hook would be ignored).
 fn checkHooks(comptime Hooks: type) void {
-    if (!@hasDecl(Hooks, "syntaxError")) @compileError(@typeName(Hooks) ++ " needs syntaxError()");
+    if (!@hasDecl(Hooks, "syntaxErrorAt")) @compileError(@typeName(Hooks) ++ " needs syntaxErrorAt()");
     for (@typeInfo(Hooks).@"struct".decl_names) |d| {
-        for ([_][]const u8{ "syntaxError", "missingKeyword", "missingToken", "stateOfFormat" }) |name| {
+        for ([_][]const u8{ "syntaxErrorAt", "missingKeyword", "missingToken", "stateOfFormat" }) |name| {
             if (std.mem.eql(u8, d, name)) break;
         } else @compileError(@typeName(Hooks) ++ "." ++ d ++ " is not a hook");
     }
@@ -188,8 +188,9 @@ pub fn Diag(comptime State: type) type {
 /// Streaming) and the error of the statement.
 ///
 /// `Hooks` is what is the dialect's:
-///  - `pub fn syntaxError(c: anytype) Error`: its syntax error at the
-///    next token (what expect*() fail with), recorded with fail();
+///  - `pub fn syntaxErrorAt(c: anytype, t: Token) Error`: its syntax error
+///    at token `t` (syntaxError() is at the next token: what expect*()
+///    fail with), recorded with fail();
 /// and optionally:
 ///  - `pub fn missingKeyword(c: anytype) Error`: expectKw()'s error
 ///    (else syntaxError());
@@ -409,7 +410,12 @@ pub fn Cursor(comptime Source: type, comptime State: type, comptime Hooks: type)
 
         /// The dialect's syntax error at the next token.
         pub fn syntaxError(c: *C) Error {
-            return Hooks.syntaxError(c);
+            return Hooks.syntaxErrorAt(c, c.peek());
+        }
+
+        /// The dialect's syntax error at token `t`.
+        pub fn syntaxErrorAt(c: *C, t: Token) Error {
+            return Hooks.syntaxErrorAt(c, t);
         }
     };
 }
@@ -469,8 +475,7 @@ const Toy = struct {
     };
 
     const Hooks = struct {
-        pub fn syntaxError(c: anytype) Error {
-            const t = c.peek();
+        pub fn syntaxErrorAt(c: anytype, t: Token) Error {
             if (t.kind == .eof) return c.fail(t.start, "syntax error at end", .{});
             return c.fail(t.start, "syntax error near {s}", .{t.text});
         }
@@ -550,8 +555,8 @@ test "lists" {
 
 test "hooks for missing tokens" {
     const H = struct {
-        pub fn syntaxError(c: anytype) Error {
-            return c.fail(c.here(), "syntax", .{});
+        pub fn syntaxErrorAt(c: anytype, t: Toy.Token) Error {
+            return c.fail(t.start, "syntax", .{});
         }
         pub fn missingKeyword(c: anytype) Error {
             return c.fail(c.here(), "missing keyword", .{});

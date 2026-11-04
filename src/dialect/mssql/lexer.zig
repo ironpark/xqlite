@@ -17,7 +17,7 @@
 //!    count): a statement end, as `;`.
 
 const std = @import("std");
-const sqllex = @import("sqllex");
+const sqllex = @import("sql/lexer");
 
 /// SQL Server's rules for the scanners: identifiers of letters, `_`, `#`
 /// and any non-ASCII byte, then digits, `$` and `@` too; nested block

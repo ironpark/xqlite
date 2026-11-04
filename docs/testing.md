@@ -229,9 +229,9 @@ zig build test
 다음을 함께 실행합니다.
 
 - 모듈의 단위 테스트
-- VFS(`pkg/vfs`), 스토리지(`pkg/storage`), 공용(`pkg/base`), uuid(`pkg/uuid`), sqllex(`pkg/sqllex`), sqlparse(`pkg/sqlparse`) 패키지의 단위 테스트. 엔진 모듈과 다른 모듈이라 모듈의 테스트에 들어가지 않으므로 따로 빌드해 돌립니다(`vfsTests()`, `storageTests()`, `baseTests()`, `uuidTests()`, `sqllexTests()`, `sqlparseTests()`). sqllex의 테스트는 방언들의 규칙을 흉내 낸 `Spec`으로 스캐너의 경계(닫히지 않은 따옴표와 주석, 중첩 주석, `$$` 따옴표, `1e`·`.5`·`0x`·`1_000`·`123abc`)를 봅니다. sqlparse의 테스트는 장난감 방언으로 두 토큰 공급원의 커서(앞보기, 되감기, eof, 키워드 순서열, 목록)와 오류 훅을 봅니다. B-tree, 페이저, WAL, 저널, 페이지 캐시의 테스트는 스토리지 패키지에 있습니다. `zig build test-pkg`는 이것들(과 ReleaseSafe 저널 테스트)만 엔진 없이 돌립니다.
+- VFS(`pkg/vfs`), 스토리지(`pkg/storage`), 공용(`pkg/base`), uuid(`pkg/uuid`), sqllex(`pkg/sql/lexer`), sqlparse(`pkg/sql/parse`) 패키지의 단위 테스트. 엔진 모듈과 다른 모듈이라 모듈의 테스트에 들어가지 않으므로 따로 빌드해 돌립니다(`vfsTests()`, `storageTests()`, `baseTests()`, `uuidTests()`, `sqllexTests()`, `sqlparseTests()`). sqllex의 테스트는 방언들의 규칙을 흉내 낸 `Spec`으로 스캐너의 경계(닫히지 않은 따옴표와 주석, 중첩 주석, `$$` 따옴표, `1e`·`.5`·`0x`·`1_000`·`123abc`)를 봅니다. sqlparse의 테스트는 장난감 방언으로 두 토큰 공급원의 커서(앞보기, 되감기, eof, 키워드 순서열, 목록)와 오류 훅을 봅니다. B-tree, 페이저, WAL, 저널, 페이지 캐시의 테스트는 스토리지 패키지에 있습니다. `zig build test-pkg`는 이것들(과 ReleaseSafe 저널 테스트)만 엔진 없이 돌립니다.
 - `docs/names_test.zig`: [docs/zig-api.md](zig-api.md)가 쓰는 이름(`xqlite.Value`, `Db.lastError` ...)과 `examples/`가 쓰는 이름이 모듈에 있는지 검사합니다.
-- `tools/globals_test.zig`: `src/`(그리고 `pkg/vfs/src`, `pkg/storage/src`, `pkg/base/src`, `pkg/uuid/src`, `pkg/sqllex/src`, `pkg/sqlparse/src`, `tools/xqt`)에 허용 목록 밖의 가변 전역이 없는지 검사합니다.
+- `tools/globals_test.zig`: `src/`(그리고 `pkg/vfs/src`, `pkg/storage/src`, `pkg/base/src`, `pkg/uuid/src`, `pkg/sql/lexer/src`, `pkg/sql/parse/src`, `tools/xqt`)에 허용 목록 밖의 가변 전역이 없는지 검사합니다.
 - 모든 [시드 퍼저](#시드-퍼저)의 스모크 실행(고정 시드, 적은 이벤트)
 
 모듈의 단위 테스트는 Debug로 빌드합니다. 다만 `pkg/storage/src/pager/journal.zig`의 테스트(저널 체크섬)는 ReleaseSafe로 한 번 더 돌립니다. Zig 0.17이 super journal 이름의 체크섬 루프를 최적화 빌드에서만 잘못 컴파일했기 때문입니다. 모듈 전체를 최적화해 돌리려면 세 패키지를 모듈로 붙여 `zig test -O ReleaseSafe -lc --dep xqlite_vfs --dep xqlite_storage --dep xqlite_base -Mroot=src/root.zig --dep xqlite_vfs --dep xqlite_base -Mxqlite_storage=pkg/storage/src/root.zig -lc -Mxqlite_vfs=pkg/vfs/src/root.zig -Mxqlite_base=pkg/base/src/root.zig`를 씁니다.
@@ -528,7 +528,7 @@ zig build wasm-example                   # wasm32-freestanding 모듈을 Node.js
 
 `zig build test-wasi`는 wasmtime(`PATH`)이 필요하고 `zig build check`에는 들어 있지 않습니다. 하는 일은 다음과 같습니다.
 
-- 모듈(`src/root.zig`), CLI(`src/cli/main.zig`), VFS·스토리지·공용·uuid·sqllex·sqlparse 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`, `pkg/sqllex`, `pkg/sqlparse`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
+- 모듈(`src/root.zig`), CLI(`src/cli/main.zig`), VFS·스토리지·공용·uuid·sqllex·sqlparse 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`, `pkg/sql/lexer`, `pkg/sql/parse`)의 단위 테스트를 wasm32-wasi로 빌드해 `wasmtime run --dir .`로 저장소 루트에서 돌립니다. 테스트의 임시 디렉터리는 `.zig-cache/tmp`입니다. POSIX VFS의 `-shm` 파일과 파일 권한에 기대는 테스트 셋은 WASI에서 건너뜁니다.
 - `xqt wasi`: ReleaseSafe로 빌드한 WASI `xqlite`를 `wasmtime run --dir . xqlite.wasm ...`으로 검사 디렉터리에서 돌립니다. WASI 빌드가 쓴 파일은 모두 sqlite3의 `PRAGMA integrity_check`를 통과해야 합니다.
 
 | 검사 | 확인하는 것 |

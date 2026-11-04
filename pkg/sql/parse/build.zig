@@ -1,11 +1,11 @@
 //! sqlparse, what the dialects' SQL parsers share below the syntax tree
 //! (token sources, the cursor, the error record, sets of words) as a
-//! package of its own: the module `sqlparse` (src/root.zig) and its
-//! tests. It depends on std and sqllex (../sqllex).
+//! package of its own: the module `sql/parse` (src/root.zig) and its
+//! tests. It depends on std and sqllex (../lexer).
 //!
-//! The root build (../../build.zig) takes it as a path dependency, once
+//! The root build (../../../build.zig) takes it as a path dependency, once
 //! per target, with `target` and `optimize` as arguments, as it takes
-//! sqllex, so that both use the same sqllex module. `zig build test` in
+//! sqllex, so that both use the same `sql/lexer` module. `zig build test` in
 //! this directory runs the tests alone.
 
 const std = @import("std");
@@ -14,12 +14,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const test_filters = b.option([]const []const u8, "test-filter", "Run only the tests whose names contain this text") orelse &.{};
-    const sqllex = b.dependency("sqllex", .{ .target = target, .optimize = optimize }).module("sqllex");
+    const sqllex = b.dependency("sqllex", .{ .target = target, .optimize = optimize }).module("sql/lexer");
 
-    _ = b.addModule("sqlparse", .{
+    _ = b.addModule("sql/parse", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .imports = &.{.{ .name = "sqllex", .module = sqllex }},
+        .imports = &.{.{ .name = "sql/lexer", .module = sqllex }},
     });
 
     const tests = b.addTest(.{
@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "sqllex", .module = sqllex }},
+            .imports = &.{.{ .name = "sql/lexer", .module = sqllex }},
         }),
         .filters = test_filters,
     });

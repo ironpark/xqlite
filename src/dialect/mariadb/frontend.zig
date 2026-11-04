@@ -149,8 +149,7 @@ pub fn statement(s: *Parser) Error!void {
 fn create(s: *Parser) Error!void {
     try s.c.expectKw("CREATE");
     var or_replace = false;
-    if (s.c.eatKw("OR")) {
-        try s.c.expectKw("REPLACE");
+    if (try s.c.optKws(&.{ "OR", "REPLACE" })) {
         or_replace = true;
     }
     const temp = s.c.eatKw("TEMPORARY") or s.c.eatKw("TEMP");
@@ -168,8 +167,7 @@ fn create(s: *Parser) Error!void {
     }
     // View options.
     while (s.c.isAnyKw(&.{ "ALGORITHM", "DEFINER", "SQL" })) {
-        if (s.c.eatKw("SQL")) {
-            try s.c.expectKw("SECURITY");
+        if (try s.c.optKws(&.{ "SQL", "SECURITY" })) {
             _ = try s.anyName();
             continue;
         }

@@ -119,7 +119,7 @@ try session.sync(&sink);                                 // 암묵적 트랜잭�
 
 `command.classify(sql)`은 문장 텍스트의 앞 키워드로 명령을 정합니다. 프론트엔드가 이미 문장을 파싱했으므로 근본적으로는 엔진이 문장의 종류를 기록해야 합니다([다음 단계](#다음-단계)). 텍스트 판정은 그때까지의 것이고, 컴파일 전에 판정해야 하는 곳(실패한 트랜잭션의 `ROLLBACK`/`COMMIT`, 컴파일에 실패한 문장)에만 남습니다. PostgreSQL의 명령 태그(`INSERT 0 3`, `CREATE INDEX`), MySQL OK 패킷의 바뀐 행 수, TDS DONE의 행 수에 씁니다.
 
-- 주석과 `WITH` 절을 건너뜁니다. `WITH x AS (...) DELETE ...`는 `DELETE`입니다. 모든 방언의 따옴표(`'...'`, `"..."`, `` `...` ``, `[...]`, 겹친 따옴표는 따옴표 하나)를 알아서, 문자열과 이름 안의 키워드는 보지 않습니다. 어느 한 방언의 규칙이 아니므로 MySQL의 백슬래시 이스케이프는 모릅니다. 주석, 따옴표, 단어는 렉서들의 스캐너(`pkg/sqllex`)로 읽습니다.
+- 주석과 `WITH` 절을 건너뜁니다. `WITH x AS (...) DELETE ...`는 `DELETE`입니다. 모든 방언의 따옴표(`'...'`, `"..."`, `` `...` ``, `[...]`, 겹친 따옴표는 따옴표 하나)를 알아서, 문자열과 이름 안의 키워드는 보지 않습니다. 어느 한 방언의 규칙이 아니므로 MySQL의 백슬래시 이스케이프는 모릅니다. 주석, 따옴표, 단어는 렉서들의 스캐너(`pkg/sql/lexer`)로 읽습니다.
 - `CREATE`/`DROP`/`ALTER`는 수식어를 뺀 객체 종류를 씁니다: `CREATE UNIQUE INDEX` → `INDEX`, `CREATE OR REPLACE VIEW` → `VIEW`, `CREATE MATERIALIZED VIEW` → `MATERIALIZED VIEW`.
 - 별칭: `START TRANSACTION` → `BEGIN`, `END` → `COMMIT`, `REPLACE INTO` → `INSERT`, `EXEC`/`CALL` → `EXECUTE`.
 

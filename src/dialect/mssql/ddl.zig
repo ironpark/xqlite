@@ -49,8 +49,7 @@ const sequence = catalog.sequence;
 pub fn create(s: *Parser) Error!void {
     try s.c.expectKw("CREATE");
     var or_alter = false;
-    if (s.c.eatKw("OR")) {
-        try s.c.expectKw("ALTER");
+    if (try s.c.optKws(&.{ "OR", "ALTER" })) {
         or_alter = true;
     }
     if (s.c.isKw("TABLE")) return createTable(s);
@@ -171,8 +170,7 @@ fn tableElement(s: *Parser, t: *Table) Error!void {
     if (!isConstraintStart(s)) return t.columns.append(s.a, try columnDef(s, t.name));
     var cname: ?[]const u8 = null;
     if (s.c.eatKw("CONSTRAINT")) cname = try s.nameText(try s.anyName());
-    if (s.c.eatKw("PRIMARY")) {
-        try s.c.expectKw("KEY");
+    if (try s.c.optKws(&.{ "PRIMARY", "KEY" })) {
         _ = s.c.eatKw("CLUSTERED") or s.c.eatKw("NONCLUSTERED");
         const cols = try keyColumns(s);
         try indexOptions(s);
@@ -183,13 +181,9 @@ fn tableElement(s: *Parser, t: *Table) Error!void {
         try indexOptions(s);
         try t.constraints.append(s.a, .{ .name = cname, .kind = .{ .unique = cols } });
     } else if (s.c.eatKw("CHECK")) {
-        if (s.c.eatKw("NOT")) {
-            try s.c.expectKw("FOR");
-            try s.c.expectKw("REPLICATION");
-        }
+        _ = try s.c.optKws(&.{ "NOT", "FOR", "REPLICATION" });
         try t.constraints.append(s.a, .{ .name = cname, .kind = .{ .check = try parenExpr(s) } });
-    } else if (s.c.eatKw("FOREIGN")) {
-        try s.c.expectKw("KEY");
+    } else if (try s.c.optKws(&.{ "FOREIGN", "KEY" })) {
         const cols = try s.nameList();
         const ref = try references(s);
         try t.constraints.append(s.a, .{ .name = cname, .kind = .{ .foreign_key = .{ .cols = cols, .ref = ref } } });
@@ -260,9 +254,7 @@ fn references(s: *Parser) Error!tree.Ref {
                 break :blk .none;
             } else return s.c.syntaxError();
             if (on_delete) ref.on_delete = action else ref.on_update = action;
-        } else if (s.c.isKw("NOT") and s.c.peekAt(1).isKw("FOR")) {
-            s.c.skip();
-            s.c.skip();
+        } else if (s.c.eatKws(&.{ "NOT", "FOR" })) {
             try s.c.expectKw("REPLICATION");
         } else break;
     }
@@ -306,9 +298,7 @@ fn columnDef(s: *Parser, table: []const u8) Error!tree.ColumnDef {
         var stored = false;
         if (s.c.eatKw("PERSISTED")) {
             stored = true;
-            if (s.c.isKw("NOT") and s.c.peekAt(1).isKw("NULL")) {
-                s.c.skip();
-                s.c.skip();
+            if (s.c.eatKws(&.{ "NOT", "NULL" })) {
                 try cons.append(s.a, .{ .kind = .not_null });
             }
         }
@@ -336,13 +326,9 @@ fn columnConstraints(s: *Parser, table: []const u8, name: Name, ty: ?types.Type,
         if (s.c.eatKw("CONSTRAINT")) cname = try s.nameText(try s.anyName());
         if (s.c.eatKw("COLLATE")) {
             try cons.append(s.a, .{ .kind = .{ .collate = try s.collationName() } });
-        } else if (s.c.isKw("NOT") and s.c.peekAt(1).isKw("NULL")) {
-            s.c.skip();
-            s.c.skip();
+        } else if (s.c.eatKws(&.{ "NOT", "NULL" })) {
             try cons.append(s.a, .{ .name = cname, .kind = .not_null });
-        } else if (s.c.isKw("NOT") and s.c.peekAt(1).isKw("FOR")) {
-            s.c.skip();
-            s.c.skip();
+        } else if (s.c.eatKws(&.{ "NOT", "FOR" })) {
             try s.c.expectKw("REPLICATION");
         } else if (s.c.eatKw("NULL")) {
             try cons.append(s.a, .{ .kind = .null });
@@ -376,8 +362,7 @@ fn columnConstraints(s: *Parser, table: []const u8, name: Name, ty: ?types.Type,
             }
             const seq = try std.fmt.allocPrint(s.a, "{s}_{s}_seq", .{ table, name.text });
             try cons.append(s.a, .{ .kind = .{ .identity = .{ .sequence = seq, .opts = opts } } });
-        } else if (s.c.eatKw("PRIMARY")) {
-            try s.c.expectKw("KEY");
+        } else if (try s.c.optKws(&.{ "PRIMARY", "KEY" })) {
             _ = s.c.eatKw("CLUSTERED") or s.c.eatKw("NONCLUSTERED");
             try indexOptions(s);
             try cons.append(s.a, .{ .name = cname, .kind = .{ .primary_key = .{} } });
@@ -386,14 +371,10 @@ fn columnConstraints(s: *Parser, table: []const u8, name: Name, ty: ?types.Type,
             try indexOptions(s);
             try cons.append(s.a, .{ .name = cname, .kind = .unique });
         } else if (s.c.eatKw("CHECK")) {
-            if (s.c.isKw("NOT")) {
-                s.c.skip();
-                try s.c.expectKw("FOR");
-                try s.c.expectKw("REPLICATION");
-            }
+            _ = try s.c.optKws(&.{ "NOT", "FOR", "REPLICATION" });
             try cons.append(s.a, .{ .name = cname, .kind = .{ .check = try parenExpr(s) } });
         } else if (s.c.isKw("REFERENCES") or s.c.isKw("FOREIGN")) {
-            if (s.c.eatKw("FOREIGN")) try s.c.expectKw("KEY");
+            _ = try s.c.optKws(&.{ "FOREIGN", "KEY" });
             try cons.append(s.a, .{ .name = cname, .kind = .{ .references = try references(s) } });
         } else if (s.c.eatKw("ROWGUIDCOL") or s.c.eatKw("SPARSE") or s.c.eatKw("FILESTREAM")) {} else {
             if (cname != null) return s.c.syntaxError();
@@ -523,11 +504,9 @@ fn createSequence(s: *Parser) Error!void {
     while (!s.atStmtEnd()) {
         if (s.c.eatKw("AS")) {
             ty = (try functions.typeNameOf(s, true)).t;
-        } else if (s.c.eatKw("START")) {
-            try s.c.expectKw("WITH");
+        } else if (try s.c.optKws(&.{ "START", "WITH" })) {
             opts.start = try signedInt(s);
-        } else if (s.c.eatKw("INCREMENT")) {
-            try s.c.expectKw("BY");
+        } else if (try s.c.optKws(&.{ "INCREMENT", "BY" })) {
             opts.increment = try signedInt(s);
         } else if (s.c.eatKw("MINVALUE")) {
             opts.min = try signedInt(s);
@@ -672,9 +651,7 @@ fn alterTable(s: *Parser) Error!void {
         if (s.c.isOp(",")) return s.c.fail(null, "xqlite: ALTER TABLE ... ADD of several columns is not supported (add them one at a time)", .{});
         if (build.columnIndex(tab, def.name.text) >= 0) return s.c.failState(null, .numbered("42701", 2705), "Column names in each table must be unique. Column name '{s}' in table '{s}' is specified more than once.", .{ def.name.text, bare });
         var with_values = false;
-        if (s.c.isKw("WITH") and s.c.peekAt(1).isKw("VALUES")) {
-            s.c.skip();
-            s.c.skip();
+        if (s.c.eatKws(&.{ "WITH", "VALUES" })) {
             with_values = true;
         }
         try s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = q, .action = .{ .add_column = .{ .def = def } } }) });

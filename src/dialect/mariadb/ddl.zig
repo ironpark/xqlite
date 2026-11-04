@@ -172,8 +172,7 @@ fn createDefinition(s: *Parser, t: *Table) Error!void {
     if (s.c.eatKw("CONSTRAINT")) {
         if (s.isName()) constraint = try s.nameText(try s.name());
     }
-    if (s.c.eatKw("PRIMARY")) {
-        try s.c.expectKw("KEY");
+    if (try s.c.optKws(&.{ "PRIMARY", "KEY" })) {
         try indexType(s);
         if (t.primary != null) return s.c.failState(null, .numbered("42P16", 1068), "Multiple primary key defined", .{});
         t.primary = try indexColumns(s);
@@ -192,8 +191,7 @@ fn createDefinition(s: *Parser, t: *Table) Error!void {
     if (s.c.eatKw("FULLTEXT") or s.c.eatKw("SPATIAL")) {
         _ = s.c.eatKw("KEY") or s.c.eatKw("INDEX");
         // An ordinary index (MATCH ... AGAINST is not supported).
-    } else if (s.c.eatKw("KEY") or s.c.eatKw("INDEX")) {} else if (s.c.eatKw("FOREIGN")) {
-        try s.c.expectKw("KEY");
+    } else if (s.c.eatKw("KEY") or s.c.eatKw("INDEX")) {} else if (try s.c.optKws(&.{ "FOREIGN", "KEY" })) {
         if (s.isName()) _ = try s.name();
         const cols = try s.nameList();
         const ref = try references(s);
@@ -334,8 +332,7 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
     }
     // Attributes, in any order.
     while (true) {
-        if (s.c.eatKw("NOT")) {
-            try s.c.expectKw("NULL");
+        if (try s.c.optKws(&.{ "NOT", "NULL" })) {
             c.not_null = true;
         } else if (s.c.eatKw("NULL")) {
             c.explicit_null = true;
@@ -343,8 +340,7 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
             try defaultValue(s, &c);
         } else if (s.c.eatKw("AUTO_INCREMENT")) {
             c.autoinc = true;
-        } else if (s.c.eatKw("PRIMARY")) {
-            try s.c.expectKw("KEY");
+        } else if (try s.c.optKws(&.{ "PRIMARY", "KEY" })) {
             c.primary = true;
         } else if (s.c.eatKw("UNIQUE")) {
             _ = s.c.eatKw("KEY");
@@ -367,9 +363,7 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
         } else if (s.c.eatKw("CHECK")) {
             try c.checks.append(s.a, .{ .name = name.text, .e = try checkExpr(s, name.text) });
         } else if (s.c.isKw("GENERATED") or s.c.isKw("AS")) {
-            if (s.c.eatKw("GENERATED")) {
-                try s.c.expectKw("ALWAYS");
-            }
+            _ = try s.c.optKws(&.{ "GENERATED", "ALWAYS" });
             try s.c.expectKw("AS");
             try s.c.expectOp("(");
             c.generated = try storedExpr(s, "GENERATED ALWAYS AS", name.text);
@@ -377,8 +371,7 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
             if (s.c.eatKw("STORED") or s.c.eatKw("PERSISTENT")) {
                 c.stored = true;
             } else _ = s.c.eatKw("VIRTUAL");
-        } else if (s.c.eatKw("ON")) {
-            try s.c.expectKw("UPDATE");
+        } else if (try s.c.optKws(&.{ "ON", "UPDATE" })) {
             if (!(s.c.eatKw("CURRENT_TIMESTAMP") or s.c.eatKw("NOW") or s.c.eatKw("LOCALTIMESTAMP") or s.c.eatKw("LOCALTIME"))) return s.c.syntaxError();
             if (s.c.eatOp("(")) {
                 if (s.c.peek().kind == .integer) s.c.skip();
@@ -392,9 +385,7 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
             return s.c.fail(null, "xqlite: INVISIBLE columns are not supported", .{});
         } else if (s.c.eatKw("COLUMN_FORMAT") or s.c.eatKw("STORAGE")) {
             _ = try s.anyName();
-        } else if (s.c.eatKw("SERIAL")) {
-            try s.c.expectKw("DEFAULT");
-            try s.c.expectKw("VALUE");
+        } else if (try s.c.optKws(&.{ "SERIAL", "DEFAULT", "VALUE" })) {
             c.not_null = true;
             c.autoinc = true;
             c.unique = true;
@@ -605,7 +596,7 @@ fn defaultValue(s: *Parser, c: *Column) Error!void {
         },
         .hex => {
             s.c.skip();
-            const d = (try lexer.hexDigits(s.a, n)) orelse return s.syntaxErrorAt(n);
+            const d = (try lexer.hexDigits(s.a, n)) orelse return s.c.syntaxErrorAt(n);
             c.default = try s.mk(pos, .{ .blob = d });
             c.default_shown = n.text;
         },

@@ -133,7 +133,7 @@ pub fn call(s: *Parser) Error!*Expr {
         return s.c.fail(null, "xqlite: {s}() is not supported", .{name_tok.text});
     }
     // JSON_TABLE is a FROM item only (json_table.zig).
-    if (eq(lname, "json_table")) return s.syntaxErrorAt(name_tok);
+    if (eq(lname, "json_table")) return s.c.syntaxErrorAt(name_tok);
     if (eq(lname, "json_arrayagg") or eq(lname, "json_objectagg")) return jsonAgg(s, pos, name_tok.text, eq(lname, "json_objectagg"));
 
     // An ordinary call: [DISTINCT|ALL] args, or *.
@@ -375,9 +375,7 @@ fn groupConcat(s: *Parser, pos: u32) Error!*Expr {
     if (s.c.eatKw("DISTINCT")) distinct = true else _ = s.c.eatKw("ALL");
     const items = try s.exprList();
     var order: []tree.SortItem = &.{};
-    if (s.c.isKw("ORDER")) {
-        s.c.skip();
-        try s.c.expectKw("BY");
+    if (try s.c.optKws(&.{ "ORDER", "BY" })) {
         order = try s.sortList();
     }
     var sep: ?[]const u8 = null;

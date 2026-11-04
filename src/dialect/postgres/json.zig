@@ -17,7 +17,7 @@
 //! `@>`), PostgreSQL's text[] literals (parseTextArray(), '{a,b}').
 
 const std = @import("std");
-const sqllex = @import("sqllex");
+const sqllex = @import("sql/lexer");
 const simd = @import("xqlite_base").simd;
 const json_text = @import("../json_text.zig");
 const bin = @import("../jsonb.zig");

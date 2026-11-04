@@ -190,8 +190,7 @@ pub fn insert(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
         }
         source = try s.new(tree.Select, .{ .body = try s.new(tree.Body, .{ .values = rows }), .pos = vpos });
         if (top != null) return s.c.fail(null, "xqlite: INSERT TOP with VALUES is not supported", .{});
-    } else if (s.c.eatKw("DEFAULT")) {
-        try s.c.expectKw("VALUES");
+    } else if (try s.c.optKws(&.{ "DEFAULT", "VALUES" })) {
         if (written != null) return s.c.syntaxError();
         return .{ .insert = try s.new(tree.Insert, .{ .with = with, .table = q, .source = null, .returning = ret, .pos = pos }) };
     } else if (s.isSelectStart()) {

@@ -127,8 +127,7 @@ fn stmt(p: *Parser) Error!Statement {
     if (eq(w, "EXPLAIN")) {
         p.c.skip();
         try p.c.expectKw("plan");
-        if (p.c.eatKw("set")) {
-            try p.c.expectKw("statement_id");
+        if (try p.c.optKws(&.{ "set", "statement_id" })) {
             if (!p.c.eatOp("=")) return p.c.syntaxError();
             _ = try p.c.expect(.string);
         }
@@ -381,8 +380,7 @@ fn merge(p: *Parser) Error!Statement {
             var w: ?*Expr = null;
             var d: ?*Expr = null;
             if (p.c.eatKw("where")) w = try p.expr0();
-            if (p.c.eatKw("delete")) {
-                try p.c.expectKw("where");
+            if (try p.c.optKws(&.{ "delete", "where" })) {
                 d = try p.expr0();
             }
             upd = .{ .sets = sets, .where = w, .delete = d };
@@ -613,8 +611,7 @@ pub fn coerceSets(p: *Parser, q: tree.QName, sets: []tree.SetItem) Error!void {
 fn create(p: *Parser) Error!Statement {
     const at = p.c.advance().start; // CREATE
     var or_replace = false;
-    if (p.c.eatKw("or")) {
-        try p.c.expectKw("replace");
+    if (try p.c.optKws(&.{ "or", "replace" })) {
         or_replace = true;
     }
     var temp = false;
@@ -623,10 +620,7 @@ fn create(p: *Parser) Error!Statement {
         temp = true;
     }
     _ = p.c.eatKw("noforce") or p.c.eatKw("force");
-    if (p.c.isKw("no") and p.c.isKwAt(1, "force")) {
-        p.c.skip();
-        p.c.skip();
-    }
+    _ = p.c.eatKws(&.{ "no", "force" });
     _ = p.c.eatKw("editionable") or p.c.eatKw("noneditionable");
     if (p.c.isKw("table")) {
         if (or_replace) return p.c.syntaxError();
@@ -669,9 +663,7 @@ fn createView(p: *Parser, or_replace: bool) Error!*tree.CreateView {
     try p.c.expectKw("as");
     v.select = try p.select();
     if (p.c.eatKw("with")) {
-        if (p.c.eatKw("read")) {
-            try p.c.expectKw("only");
-        } else {
+        if (try p.c.optKws(&.{ "read", "only" })) {} else {
             try p.c.expectKw("check");
             try p.c.expectKw("option");
             if (p.c.eatKw("constraint")) _ = try p.colId();
@@ -714,11 +706,9 @@ fn createSchema(p: *Parser) Error!Statement {
 fn seqOptions(p: *Parser) Error!tree.SeqOpts {
     var o: tree.SeqOpts = .{};
     while (true) {
-        if (p.c.eatKw("increment")) {
-            try p.c.expectKw("by");
+        if (try p.c.optKws(&.{ "increment", "by" })) {
             o.increment = try p.signedInt();
-        } else if (p.c.eatKw("start")) {
-            try p.c.expectKw("with");
+        } else if (try p.c.optKws(&.{ "start", "with" })) {
             o.start = try p.signedInt();
         } else if (p.c.eatKw("minvalue")) {
             o.min = try p.signedInt();
@@ -790,9 +780,7 @@ fn createTable(p: *Parser, temp: bool) Error!*tree.CreateTable {
     }
     // Physical properties are ignored; ON COMMIT of a temporary table.
     while (p.c.peek().kind != .eof and !p.c.isKw("as") and !(p.schema_element and (p.c.isKw("create") or p.c.isKw("grant")))) {
-        if (p.c.isKw("on") and p.c.isKwAt(1, "commit")) {
-            p.c.skip();
-            p.c.skip();
+        if (p.c.eatKws(&.{ "on", "commit" })) {
             if (!p.c.eatKw("preserve")) try p.c.expectKw("delete");
             if (!p.c.eatKw("rows")) try p.c.expectKw("definition");
             continue;
@@ -846,13 +834,9 @@ fn constraintState(p: *Parser) Error!void {
     while (true) {
         if (p.c.isAnyKw(&.{ "enable", "disable", "validate", "novalidate", "rely", "norely", "deferrable" })) {
             p.c.skip();
-        } else if (p.c.isKw("not") and p.c.isKwAt(1, "deferrable")) {
-            p.c.skip();
-            p.c.skip();
-        } else if (p.c.eatKw("initially")) {
+        } else if (p.c.eatKws(&.{ "not", "deferrable" })) {} else if (p.c.eatKw("initially")) {
             if (!p.c.eatKw("immediate")) try p.c.expectKw("deferred");
-        } else if (p.c.eatKw("using")) {
-            try p.c.expectKw("index");
+        } else if (try p.c.optKws(&.{ "using", "index" })) {
             while (p.c.peek().kind != .eof and p.c.peek().kind != .comma and p.c.peek().kind != .rparen and !p.c.isAnyKw(&.{ "enable", "disable", "constraint", "not", "null", "check", "unique", "primary", "references", "default" })) try skipClause(p);
         } else break;
     }
@@ -885,8 +869,7 @@ pub fn columnDef(p: *Parser, table: []const u8) Error!tree.ColumnDef {
         var cname: ?Name = null;
         if (p.c.eatKw("constraint")) cname = try p.colId();
         var cc: RawConstraint = .{ .name = cname, .kind = .null };
-        if (p.c.eatKw("not")) {
-            try p.c.expectKw("null");
+        if (try p.c.optKws(&.{ "not", "null" })) {
             cc.kind = .not_null;
         } else if (p.c.eatKw("null")) {
             cc.kind = .null;
@@ -895,28 +878,20 @@ pub fn columnDef(p: *Parser, table: []const u8) Error!tree.ColumnDef {
             cc.kind = .{ .check = try p.expr0() };
             _ = try p.c.expect(.rparen);
         } else if (p.c.eatKw("default")) {
-            if (p.c.isKw("on") and p.c.isKwAt(1, "null")) {
-                p.c.skip();
-                p.c.skip();
-            }
+            _ = p.c.eatKws(&.{ "on", "null" });
             cc.kind = .{ .default = try p.addExpr() };
         } else if (p.c.eatKw("unique")) {
             cc.kind = .unique;
-        } else if (p.c.eatKw("primary")) {
-            try p.c.expectKw("key");
+        } else if (try p.c.optKws(&.{ "primary", "key" })) {
             cc.kind = .primary_key;
         } else if (p.c.isKw("references")) {
             cc.kind = .{ .references = try references(p) };
         } else if (p.c.isKw("generated") or p.c.isKw("as")) {
             var always = true;
             if (p.c.eatKw("generated")) {
-                if (p.c.eatKw("by")) {
-                    try p.c.expectKw("default");
+                if (try p.c.optKws(&.{ "by", "default" })) {
                     always = false;
-                    if (p.c.isKw("on") and p.c.isKwAt(1, "null")) {
-                        p.c.skip();
-                        p.c.skip();
-                    }
+                    _ = p.c.eatKws(&.{ "on", "null" });
                 } else try p.c.expectKw("always");
             }
             try p.c.expectKw("as");
@@ -1041,9 +1016,7 @@ fn references(p: *Parser) Error!tree.Ref {
         r.table.text = p.creating.?.name;
     } else if (try p.unqualified(q.name, .relation)) |t| r.table.text = t.name;
     if (p.c.peek().kind == .lparen) r.cols = try p.parenNameList();
-    if (p.c.isKw("on") and p.c.isKwAt(1, "delete")) {
-        p.c.skip();
-        p.c.skip();
+    if (p.c.eatKws(&.{ "on", "delete" })) {
         if (p.c.eatKw("cascade")) {
             r.on_delete = .cascade;
         } else {
@@ -1065,11 +1038,9 @@ fn tableConstraint(p: *Parser) Error!tree.TableConstraint {
         _ = try p.c.expect(.rparen);
     } else if (p.c.eatKw("unique")) {
         tc.kind = .{ .unique = try p.parenNameList() };
-    } else if (p.c.eatKw("primary")) {
-        try p.c.expectKw("key");
+    } else if (try p.c.optKws(&.{ "primary", "key" })) {
         tc.kind = .{ .primary_key = try p.parenNameList() };
-    } else if (p.c.eatKw("foreign")) {
-        try p.c.expectKw("key");
+    } else if (try p.c.optKws(&.{ "foreign", "key" })) {
         const cols = try p.parenNameList();
         tc.kind = .{ .foreign_key = .{ .cols = cols, .ref = try references(p) } };
     } else return p.missing("ORA-00902: invalid datatype");
@@ -1139,7 +1110,7 @@ fn drop(p: *Parser) Error!*tree.Drop {
         // Sequences are all in main.
         if (d.kind == .sequence) d.name.schema = null;
     }
-    if (p.c.eatKw("cascade")) try p.c.expectKw("constraints");
+    _ = try p.c.optKws(&.{ "cascade", "constraints" });
     _ = p.c.eatKw("purge");
     _ = p.c.eatKw("online");
     _ = p.c.eatKw("force");
@@ -1189,7 +1160,7 @@ fn alterTable(p: *Parser) Error!Statement {
             if (p.c.peek().kind == .comma) return p.unsupported(p.c.peek().start, "dropping several columns in one ALTER TABLE (drop them one at a time)");
             _ = try p.c.expect(.rparen);
         }
-        if (p.c.eatKw("cascade")) try p.c.expectKw("constraints");
+        _ = try p.c.optKws(&.{ "cascade", "constraints" });
         a.action = .{ .drop_column = .{ .name = col } };
     } else if (p.c.isKw("modify")) {
         return p.unsupported(at, "ALTER TABLE ... MODIFY");

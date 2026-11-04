@@ -7,8 +7,8 @@
 ## 1. 층
 
 ```
-pkg/sqllex              스캐너 (std만)
-pkg/sqlparse            토큰 공급원, 커서, 오류 기록, 단어 집합 (std + sqllex)
+pkg/sql/lexer           스캐너 (std만, @import("sql/lexer"))
+pkg/sql/parse           토큰 공급원, 커서, 오류 기록, 단어 집합 (std + sql/lexer, @import("sql/parse"))
 src/dialect/syntax.zig  IR 트리를 만드는 공통 문법 조각
 src/dialect/driver.zig  프런트엔드 드라이버 (Frontend.run)
 src/dialect/<방언>/     렉서 디스패치, 우선순위, 방언의 의미
@@ -22,7 +22,7 @@ src/dialect/<방언>/     렉서 디스패치, 우선순위, 방언의 의미
 - **의미 해석**: 이름 해석, 캐스트 계획, 함수 매핑은 방언의 것입니다.
 - **IR 트리**: `tree.zig`가 import하는 엔진 것은 `Dialect` enum뿐이라 패키지로 옮길 수는 있습니다. 하지만 트리의 약속(`lower.zig`·`render.zig`와의 계약, `xq_*` 엔진 함수)이 엔진의 것이라 엔진에 둡니다.
 
-## 2. `pkg/sqlparse`
+## 2. `pkg/sql/parse` (`@import("sql/parse")`)
 
 ### 토큰
 
@@ -61,16 +61,16 @@ src/dialect/<방언>/     렉서 디스패치, 우선순위, 방언의 의미
 | `atEof()`, `is(kind)`, `eat(kind)`, `expect(kind)` | 종류로 |
 | `isKw`, `isKwAt`, `isAnyKw`, `eatKw`, `expectKw` | 키워드로 |
 | `eatKws(.{"if", "exists"})` | 단어가 모두 이어지면 먹고 true, 아니면 아무것도 먹지 않음 |
-| `optKws(...)`, `ifExists()`, `ifNotExists()` | 첫 단어가 있으면 나머지가 와야 함(없으면 오류) |
+| `optKws(...)`, `ifExists()`, `ifNotExists()` | 첫 단어가 있으면 나머지가 와야 함(없으면 오류). 방언 파서는 "키워드 다음 반드시 키워드"(`ORDER BY`, `PRIMARY KEY` ...)를 이것으로, 두 단어를 함께 봐야 하는 것을 `eatKws`로 씁니다 |
 | `isOp`, `eatOp`, `expectOp` | 연산자로 |
 | `eatComma()`, `list(T, ctx, item)` | 쉼표(방언에 `comma` 토큰 종류가 있으면 그것, 없으면 연산자 `,`), 쉼표로 이은 목록 |
 | `fail(pos, fmt, args)`, `failState(pos, state, fmt, args)` | 오류를 기록하고 `error.ParseFailed` |
 | `failedIn(&sub.c, err)` | 하위 파서(방언이 쓴 텍스트를 읽은 것)의 오류를 이 커서의 오류로(위치 없이) |
-| `syntaxError()`, `missingKeyword()` | 방언의 구문 오류, 키워드가 없을 때의 오류 |
+| `syntaxError()`, `syntaxErrorAt(t)`, `missingKeyword()` | 방언의 구문 오류(다음 토큰, 토큰 `t`), 키워드가 없을 때의 오류 |
 
 `Hooks`는 방언의 것입니다. 훅이 아닌 공개 선언이 있으면 컴파일되지 않습니다(철자가 틀린 선택 훅이 조용히 무시되지 않게).
 
-- `syntaxError(c)`(필수): 다음 토큰에서의 구문 오류. 예: PostgreSQL `syntax error at or near "x"`, MariaDB `You have an error in your SQL syntax; ... near '...' at line N`, SQL Server `Incorrect syntax near '...'.`, Oracle `ORA-00933`/`ORA-00936`.
+- `syntaxErrorAt(c, t)`(필수): 토큰 `t`에서의 구문 오류. 커서의 `syntaxError()`는 다음 토큰에서 이것을 부릅니다. 예: PostgreSQL `syntax error at or near "x"`, MariaDB `You have an error in your SQL syntax; ... near '...' at line N`, SQL Server `Incorrect syntax near '...'.`, Oracle `ORA-00933`/`ORA-00936`.
 - `missingKeyword(c)`(선택): `expectKw()`가 실패할 때. Oracle의 `ORA-00905: missing keyword`. 없으면 구문 오류입니다.
 - `missingToken(c, kind)`(선택): `expect(kind)`가 실패할 때. Oracle의 괄호와 쉼표(`ORA-00906`, `ORA-00907`, `ORA-00917`).
 - `stateOfFormat(fmt)`(선택): 부르는 쪽이 오류 상태를 주지 않은 `fail()`의 상태. Oracle의 `ORA-` 번호에서 SQLSTATE를 찾습니다. 없으면 `State.ofFormat(fmt)`(엔진의 `int.ErrorState`)입니다.
@@ -81,7 +81,7 @@ src/dialect/<방언>/     렉서 디스패치, 우선순위, 방언의 의미
 
 `msg`(커서의 아레나), `pos`(문장 텍스트 안의 오프셋, null이면 위치 없음), `state`, `failed`입니다. 마지막으로 기록한 오류가 남고, 파서는 오류를 기록하면 곧바로 `error.ParseFailed`로 돌아갑니다.
 
-- 엔진에 옮기는 것은 드라이버(`driver.recordDiag`, PostgreSQL과 Oracle은 `driver.parseFailed`)입니다. `p.tail`을 바꾸기 전에 `ir.stmt.errorMsgState()`로 옮기므로 오류 위치(`sqlite3_error_offset()`)가 그대로입니다.
+- 엔진에 옮기는 것은 드라이버입니다. PostgreSQL과 Oracle의 `compile()`은 파서의 실패(`ParseFailed`)를 그대로 돌려주고 `driver.run()`이 한 곳에서 옮기며, MariaDB와 SQL Server는 `driver.streaming()`의 `recordDiag()`가 옮깁니다. `p.tail`을 바꾸기 전에 `ir.stmt.errorMsgState()`로 옮기므로 오류 위치(`sqlite3_error_offset()`)가 그대로입니다.
 - `Parse`에 이미 오류가 있으면(파서가 부른 빌더나 낮추기가 남긴 것) 그것을 남깁니다. MariaDB와 SQL Server는 파싱하면서 낮추므로 이 순서가 필요합니다.
 - 방언이 직접 쓴 텍스트를 하위 파서로 읽다 난 오류(MariaDB의 information_schema, SQL Server의 sys 뷰와 `OBJECT_ID()`)는 커서의 `failedIn(&sub.c, err)`가 바깥 파서의 오류로 옮깁니다. 그 위치는 바깥 텍스트에 없으므로 null입니다.
 
@@ -106,7 +106,7 @@ src/dialect/<방언>/     렉서 디스패치, 우선순위, 방언의 의미
 
 `dialect.Frontend.run`의 둘레입니다. 하는 일은 앞의 빈 문장(`;`, SQL Server의 `GO`)과 빈 텍스트, 방언의 `statement()` 호출, 문장 끝 확인, 오류 옮기기, `finishCoding()`, 다음 문장의 시작(`p.tail`), 방언의 문구로 바꾸기(`translateError()`)입니다.
 
-- `run(parser, compile, translateError)`: 미리 토큰화하는 파서(PostgreSQL, Oracle). 렉서의 오류도 처리합니다.
+- `run(parser, compile, translateError)`: 미리 토큰화하는 파서(PostgreSQL, Oracle). 렉서의 오류도 처리합니다. `compile()`은 `driver.CompileError`(낮추기의 오류와 파서의 `ParseFailed`)를 돌려주므로 파서를 부르는 곳은 `try`만 씁니다.
 - `streaming(F)`: 읽으며 가는 파서(MariaDB, SQL Server). `F`는 방언의 `frontend.zig` 자체(`driver.streaming(@This())`)로, `Parser`, `init`, `separator`(문장을 끝내는 토큰), `statement`, `translateError`를 주고, 선택적으로 `begin`(MariaDB: 경고 지우기, SQL Server: 앞서 컴파일한 CREATE SCHEMA의 요소)과 `end`(SQL Server: 같은 CREATE SCHEMA의 요소가 더 있는지)를 줍니다.
 
 ## 5. 검증

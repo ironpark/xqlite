@@ -123,9 +123,7 @@ fn returning(p: *Parser) Error![]const u8 {
 
 /// `FORMAT JSON` after a value.
 fn formatJson(p: *Parser) Error!bool {
-    if (p.c.isKw("format") and p.c.isKwAt(1, "json")) {
-        p.c.skip();
-        p.c.skip();
+    if (p.c.eatKws(&.{ "format", "json" })) {
         return true;
     }
     return false;
@@ -401,12 +399,10 @@ fn ctorClauses(p: *Parser, null_on_null: bool) Error!CtorOpts {
             non = false;
         } else if (p.c.eatKw("returning")) {
             o.ty = try returning(p);
-        } else if (p.c.eatKw("strict")) {} else if (p.c.isKw("with") and p.c.isKwAt(1, "unique")) {
-            p.c.skipN(2);
+        } else if (p.c.eatKw("strict")) {} else if (p.c.eatKws(&.{ "with", "unique" })) {
             try p.c.expectKw("keys");
             o.flags |= 4;
-        } else if (p.c.isKw("without") and p.c.isKwAt(1, "unique")) {
-            p.c.skipN(2);
+        } else if (p.c.eatKws(&.{ "without", "unique" })) {
             try p.c.expectKw("keys");
         } else break;
     }
@@ -483,9 +479,7 @@ fn jsonArray(p: *Parser, pos: u32) Error!*Expr {
 fn arrayAgg(p: *Parser, pos: u32) Error!*Expr {
     const v = try ctorValue(p);
     var order: []tree.SortItem = &.{};
-    if (p.c.isKw("order")) {
-        p.c.skip();
-        try p.c.expectKw("by");
+    if (try p.c.optKws(&.{ "order", "by" })) {
         order = try p.sortList();
     }
     const o = try ctorClauses(p, false);
@@ -594,19 +588,12 @@ pub fn isJson(p: *Parser, l: *Expr, not: bool) Error!*Expr {
             fl |= 1;
         } else if (p.c.eatKw("lax")) {
             fl &= ~@as(i64, 1);
-        } else if (p.c.isKw("format") and p.c.isKwAt(1, "json")) {
-            p.c.skipN(2);
-        } else if (p.c.eatKw("allow")) {
-            try p.c.expectKw("scalars");
-        } else if (p.c.eatKw("disallow")) {
-            try p.c.expectKw("scalars");
+        } else if (p.c.eatKws(&.{ "format", "json" })) {} else if (try p.c.optKws(&.{ "allow", "scalars" })) {} else if (try p.c.optKws(&.{ "disallow", "scalars" })) {
             fl |= 4;
-        } else if (p.c.isKw("with") and p.c.isKwAt(1, "unique")) {
-            p.c.skipN(2);
+        } else if (p.c.eatKws(&.{ "with", "unique" })) {
             try p.c.expectKw("keys");
             fl |= 2;
-        } else if (p.c.isKw("without") and p.c.isKwAt(1, "unique")) {
-            p.c.skipN(2);
+        } else if (p.c.eatKws(&.{ "without", "unique" })) {
             try p.c.expectKw("keys");
         } else break;
     }
@@ -780,8 +767,7 @@ fn columns(p: *Parser, out: *std.ArrayList(Column)) Error!J.Value {
         const name = try p.colId();
         const raw = rawText(p, nt);
         var col: Column = .{ .name = name.text, .index = out.items.len };
-        if (p.c.isKw("for") and p.c.isKwAt(1, "ordinality")) {
-            p.c.skipN(2);
+        if (p.c.eatKws(&.{ "for", "ordinality" })) {
             try ms.append(p.arena, .{ .key = "k", .value = jstr("o") });
             col.family = .number;
             try out.append(p.arena, col);

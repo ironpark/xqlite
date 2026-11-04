@@ -147,8 +147,7 @@ pub fn begin(s: *Parser) Error!void {
     }
     s.c.skip();
     const name = try tranName(s);
-    if (s.c.eatKw("WITH")) {
-        try s.c.expectKw("MARK");
+    if (try s.c.optKws(&.{ "WITH", "MARK" })) {
         if (s.c.peek().kind == .string) s.c.skip();
     }
     if (s.p.db.auto_commit) {

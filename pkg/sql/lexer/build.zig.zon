@@ -1,6 +1,6 @@
 .{
-    // The building blocks of SQL lexers: the module `sqllex`. The root
-    // package (../../build.zig.zon) depends on it by path.
+    // The building blocks of SQL lexers: the module `sql/lexer`. The root
+    // package (../../../build.zig.zon) depends on it by path.
     .name = .sqllex,
     .version = "0.0.0",
     .fingerprint = 0x8eaf0ba013da8138, // Changing this has security and trust implications.

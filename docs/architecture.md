@@ -309,12 +309,12 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 
 ## 값 표시
 
-엔진은 값을 SQLite처럼 저장하고 돌려줍니다. 불리언은 0/1, PostgreSQL의 `numeric`은 정렬 키 BLOB(`dialect/decimal.zig`, Zig API `xqlite.decimal`), `timestamptz`는 오프셋 없는 UTC 텍스트입니다. 셸과 와이어 프로토콜은 그 방언의 클라이언트가 보는 텍스트로 보여 줍니다. C API와 Zig API가 돌려주는 값은 그대로입니다.
+엔진은 값을 SQLite처럼 저장하고 돌려줍니다. 불리언은 0/1, PostgreSQL의 `numeric`은 정렬 키 BLOB(`pkg/decimal`, Zig API `xqlite.decimal`), `timestamptz`는 오프셋 없는 UTC 텍스트입니다. 셸과 와이어 프로토콜은 그 방언의 클라이언트가 보는 텍스트로 보여 줍니다. C API와 Zig API가 돌려주는 값은 그대로입니다.
 
 - `xqlite.types`(`src/sql/types.zig`, 엔진의 것): 방언의 선언 타입 → 방언과 무관한 `Type`(`boolean`, `int4`, `numeric(10,2)`, `timestamp_tz` ...). 배열은 `array`와 원소의 `Logical`(`Type.element`)이고, 원소의 매개변수는 그 `Type`의 것입니다(PostgreSQL의 `character varying(20)[]`은 `array`, `varchar`, 길이 20; `int2vector`는 `smallint`의 배열). 테이블을 만든 방언으로 읽으므로, PostgreSQL 연결이 MSSQL이 만든 `bit` 열을 읽어도 `boolean`입니다.
 - `xqlite.display.Columns`: 결과 열의 타입. 테이블 열이면 메모리의 카탈로그(`catalog.meta()`, [메모리의 카탈로그](#메모리의-카탈로그))에서 읽습니다. 식이면 엔진이 그 식에 매긴 타입입니다([코어의 타입](#코어의-타입)): 비교, `AND`/`OR`/`NOT`, `IS`, `IN`, `BETWEEN`, `LIKE`, `EXISTS`, 불리언 상수는 어느 방언에서나 불리언이고, 캐스트는 그 대상 타입입니다(`2.5::numeric(6,2)`, `CAST(x AS DECIMAL(6,2))`). 리터럴, 산술, `CASE`/`COALESCE`, 함수 호출은 방언의 규칙이 정한 타입입니다(PostgreSQL의 `1.50`, `n + 1`, `sum(n)`은 스케일 2의 `numeric`, MariaDB의 `7 / 2`는 `DECIMAL(14,4)`). 서브쿼리, CTE, 뷰의 열과 스칼라 서브쿼리는 그 열의 타입을 이어받습니다. 엔진은 타입을 문장에 `Type`으로 두고(`engine.resultType()`), 그 철자를 열의 선언 타입(`sqlite3_column_decltype()`)으로 남깁니다. SQLite 방언의 문장은 SQLite처럼 NULL입니다. 연결이 열의 출처를 기록해야 합니다(`setColumnMetadata`, Zig API의 `OpenOptions.column_metadata`; 셸은 늘 켬).
 - `xqlite.display.text(viewer, settings, type, value)`: 그 방언이 그 값을 보이는 텍스트. SQLite와 같으면 null입니다. `viewer`는 문장을 컴파일한 방언입니다. `settings`는 세션의 설정(`display.Settings`: 연결의 것은 `Db.displaySettings()`, 엔진 안에서는 `valuetext.Settings.of(db)`, 기본값은 `.{}`)으로, 지금은 PostgreSQL의 `IntervalStyle`(interval과 interval 배열의 원소, [PostgreSQL 호환](postgres/features.md#1-데이터-타입-및-리터럴))이고, 셸, 와이어 서버(`wire.Out.settings`), 제약 위반의 `DETAIL`이 세션의 것을 넘깁니다. 저장된 값은 설정과 무관합니다.
-- `xqlite.display.textAlloc(gpa, viewer, settings, type, value)`: 메모리가 따로 드는 텍스트(호출한 쪽이 `gpa`로 해제), 아니면 null. 지금은 SQLite의 JSONB로 저장한 PostgreSQL `jsonb`(BLOB)의 JSON 텍스트(PostgreSQL의 공백, `dialect/jsonb.zig`)로, SQLite 방언이 아니면 어느 방언에서나 씁니다. 셸(`cli/qrf.zig`)과 와이어 서버(PostgreSQL의 텍스트·이진 형식, MySQL)가 BLOB에 먼저 부릅니다.
+- `xqlite.display.textAlloc(gpa, viewer, settings, type, value)`: 메모리가 따로 드는 텍스트(호출한 쪽이 `gpa`로 해제), 아니면 null. 지금은 SQLite의 JSONB로 저장한 PostgreSQL `jsonb`(BLOB)의 JSON 텍스트(PostgreSQL의 공백, `pkg/json`의 `jsonb.zig`)로, SQLite 방언이 아니면 어느 방언에서나 씁니다. 셸(`cli/qrf.zig`)과 와이어 서버(PostgreSQL의 텍스트·이진 형식, MySQL)가 BLOB에 먼저 부릅니다.
 - `src/dialect/valuetext.zig`: `display.text()`/`textAlloc()`의 본체와 PostgreSQL의 값 텍스트 전체(`pgText()`: 실수의 최단 자릿수 `floatText()`, 텍스트는 저장된 그대로), 그것을 `std.Io.Writer`에 쓰는 `writePg()`(길이 제한이 있으면 복사하기 전에 자름). 타입과 `repr.zig`만 쓰므로 방언 계층도 부릅니다: `display.zig`, 와이어 서버(`server/pg/values.zig`), PostgreSQL 제약 위반의 `DETAIL`([제약 위반](#제약-위반))이 같은 텍스트를 씁니다.
 - `xqlite.repr`(`src/dialect/repr.zig`): 방언이 자기 형태의 BLOB으로 저장하는 타입(`numeric`의 키, `uuid`의 16바이트, `interval`, JSONB인 `jsonb`)마다 그 BLOB의 텍스트를 쓰는 표(`repr.forms`, 논리 타입당 한 항목). `display.text()`/`textAlloc()`은 BLOB 값을 이 표로 보내고, `api/`는 방언의 타입 모듈을 직접 가져오지 않습니다. 보는 방언이 저장한 방언과 다를 수 있으므로 방언 디렉터리 밖에 두어 어느 빌드(`-Ddialects=`)에나 있고, PostgreSQL의 코드가 필요한 것(interval의 텍스트, `repr.intervalText()`·`parseInterval()`)은 그 방언이 빠진 빌드에서 null입니다. 와이어 서버의 interval 이진 형식도 이것을 씁니다.
 
@@ -563,6 +563,20 @@ B-tree 층(`pkg/storage/src/btree/`)은 btree.c를 파일 몇 개로 나눕니�
 
 RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이름 `uuid`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 16바이트 값(`Uuid`, 네트워크 순서라 바이트 비교가 PostgreSQL의 `uuid_cmp()` 순서), PostgreSQL의 `uuid_in()`이 읽는 텍스트를 읽는 `parse()`와 소문자 하이픈 형식의 `format()`, `version()`·`timestamp()`(버전 1과 7), 무작위 16바이트로 만드는 `v4()`, Unix 밀리초와 밀리초 안의 나노초(12비트 분수, RFC 9562의 방법 3)와 무작위 8바이트로 만드는 `v7()`, 부를 때마다 앞으로 가는 시계 `Clock`(PostgreSQL의 `get_real_time_ns_ascending()`)이 있습니다. 시계와 엔트로피는 부르는 쪽이 넘깁니다. PostgreSQL 방언의 `src/dialect/postgres/uuid.zig`는 그 둘레의 SQL 함수(SQLite 값, 오류, 연결의 무작위 값과 시계)만 둡니다([PostgreSQL 호환](postgres/internals.md#21-uuid-인코딩)).
 
+### decimal, datetime, json, regex, pgtext 패키지
+
+방언들과 와이어 서버가 쓰는 라이브러리 가운데 엔진과 상관없는 것은 `std`만 import하는 일반 패키지이고, 루트가 경로 의존성으로 받습니다. 방언 디렉터리 밖에 있으므로 `-Ddialects=`로 방언을 빼도 그대로이고, 값 표시(`src/api/display.zig`)와 와이어 서버도 씁니다. SQL 함수(SQLite 값, 오류 문구, 연결 상태)는 엔진 쪽(`src/dialect/decimal_sql.zig`, 방언 디렉터리)에 둡니다.
+
+| 패키지 | 모듈 | 내용 |
+| --- | --- | --- |
+| `pkg/decimal/` | `decimal` | PostgreSQL `numeric`의 계산(`Dec`, 반올림, `select_div_scale()`)과 바이트 순서가 수의 순서인 키(디스크 형식). `decimal.math`는 `sqrt()`·`exp()`·`ln()`·`log()`·`power()`·`factorial()`(PostgreSQL 18의 numeric.c와 같은 자릿수) |
+| `pkg/datetime/` | `datetime` | `calendar`(그레고리력: 1970-01-01부터의 일수, 달의 길이), `interval`(PostgreSQL의 interval: 월·일·마이크로초, 산술, 정렬되는 BLOB) |
+| `pkg/json/` | `json` | `text`(JSON 문자열 이스케이프, 방언별 차이는 comptime 옵션), `jsonb`(SQLite의 JSONB: 노드 읽기, 엄격한 유효성, PostgreSQL 공백의 텍스트, 노드 헤더 쓰기) |
+| `pkg/regex/` | `regex` | `are`(PostgreSQL의 고급 정규식, Henry Spencer 엔진: `~`, SIMILAR TO, `regexp_*()`), `pike`(작은 Pike VM: 예전 스키마의 `xq_pg_regex()`, jsonpath의 `like_regex`) |
+| `pkg/pgtext/` | `pgtext` | `array`(PostgreSQL 배열의 텍스트: `array_in()`의 문법과 DETAIL, `array_out()`의 원소 인용, int2vector·oidvector의 `1 2`). PostgreSQL 방언의 배열 함수와 text[] 인자, 카탈로그의 `xq_pg_array_position()`, 와이어 서버의 이진 배열(루트가 `xqlite.pgtext`로 내보냄)이 같은 파서를 씁니다 |
+
+키(`decimal`), interval BLOB, JSONB는 디스크에 남는 형식이라 바뀌지 않습니다.
+
 ### sqllex 패키지
 
 다섯 방언의 렉서는 엔진과 상관없는 일반 패키지 `pkg/sql/lexer/`(모듈 이름 `sql/lexer`, `@import("sql/lexer")`. 패키지 이름은 `sqllex`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 설계는 [SQL 렉서·파서 공통 층](sqlparse.md#2-렉서-pkgsqllexer)에 있습니다.
@@ -581,7 +595,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 
 방언들의 파서가 함께 쓰는 토큰 커서와 오류 기록은 엔진과 상관없는 일반 패키지 `pkg/sql/parse/`(모듈 이름 `sql/parse`, `@import("sql/parse")`. 패키지 이름은 `sqlparse`)입니다. `std`와 `sql/lexer`만 import하고, 루트와 이 패키지가 같은 인자로 sqllex 패키지를 불러 같은 모듈을 씁니다. 토큰 공급원(`Buffered`, `Streaming`), 커서(`Cursor`), 오류 기록(`Diag`), 단어 집합(`words`)이 있고, IR 트리를 만드는 공통 문법 조각은 엔진 쪽 `src/dialect/syntax.zig`에 있습니다. 자세한 것은 [SQL 파서 공통 층](sqlparse.md)에 있습니다.
 
-`zig build test-pkg`는 여섯 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`, `pkg/sql/lexer`, `pkg/sql/parse`)의 테스트만 엔진 없이 빌드해 돌립니다.
+`zig build test-pkg`는 `pkg/` 아래 열한 패키지(`pkg/vfs`, `pkg/storage`, `pkg/base`, `pkg/uuid`, `pkg/sql/lexer`, `pkg/sql/parse`, `pkg/decimal`, `pkg/datetime`, `pkg/json`, `pkg/regex`, `pkg/pgtext`)의 테스트만 엔진 없이 빌드해 돌립니다. `std`만 쓰는 패키지(`pkg/base`도)는 `build.zig`의 `leaf_pkgs` 표 한 줄로 엔진의 import, `test`, `test-pkg`, `test-wasi`에 들어갑니다.
 
 ## 소스 파일
 
@@ -589,10 +603,11 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | --- | --- |
 | `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`, `mssql`, `oracle`), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
 | `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena` |
-| `src/dialect/{calendar,json_text,template,driver,syntax,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 프론트엔드의 드라이버(`run`, `streaming`, 파서의 오류를 Parse로 옮기는 `recordDiag`), 공통 문법 조각(CASE, ORDER BY, 윈도 프레임: [SQL 파서 공통 층](sqlparse.md)), MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
+| `src/dialect/{template,driver,syntax,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 프론트엔드의 드라이버(`run`, `streaming`, 파서의 오류를 Parse로 옮기는 `recordDiag`), 공통 문법 조각(CASE, ORDER BY, 윈도 프레임: [SQL 파서 공통 층](sqlparse.md)), MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
 | `src/dialect/{sqlite,postgres,mariadb,mssql,oracle}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/sqlite/parser.zig` | SQLite 파서: `runParser()`(`sqlite3RunParser()`)와 parse.y 문법의 재귀 하강 파서. reduce 동작과 같은 순서로 `ir.*` 빌더를 부릅니다([SQL 렉서·파서 공통 층](sqlparse.md#53-파서)) |
 | `src/dialect/sqlite/lexer.zig`, `normalize.zig` | SQLite 렉서와 키워드 표(mkkeywordhash의 순서, `%fallback ID`), `sqlite3_normalized_sql()` |
+| `src/sql/pg_types.zig` | PostgreSQL의 타입 OID와 typmod(`types.Logical`마다, 배열 타입): 와이어 서버의 열·파라미터 설명과 PostgreSQL 카탈로그(`atttypid`, `atttypmod`)가 함께 씀. `xqlite.pg_types` |
 | `src/sql/tk.zig` | 토큰 코드 `TK_*`(parse.y의 번호). `Expr.op`와 VDBE의 비교·산술 연산 코드가 같은 번호를 씀 |
 | `src/dialect/constraint.zig`, `src/dialect/*/constraints.zig` | 제약 위반의 방언 문구와 `ErrorState`(`Hooks.constraint`, [제약 위반](#제약-위반)) |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres/README.md)) |
@@ -628,6 +643,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `pkg/base/src/{thunk,status,fuzz}.zig` | 공용 패키지(`xqlite_base`): 클로저, 상태 카운터, 퍼저 도우미([공용 패키지](#공용-패키지)) |
 | `pkg/base/src/{ctype,numeric,hash,flags,cast}.zig` | 공용 패키지: 문자 분류, 수 변환, Hash 순서, 플래그 연산, 캐스트 |
 | `pkg/uuid/src/root.zig` | uuid 패키지(`uuid`): RFC 9562 UUID의 텍스트, 필드, 버전 4·7, v7의 시계([uuid 패키지](#uuid-패키지)) |
+| `pkg/{decimal,datetime,json,regex,pgtext}/src/*.zig` | 방언들의 라이브러리(`decimal`, `datetime`, `json`, `regex`, `pgtext`, std만): 십진 수와 키, 그레고리력과 interval, JSON 이스케이프와 JSONB, PostgreSQL 정규식, PostgreSQL 배열 텍스트([decimal, datetime, json, regex, pgtext 패키지](#decimal-datetime-json-regex-pgtext-패키지)) |
 | `pkg/sql/lexer/build.zig`, `build.zig.zon` | sqllex 패키지(모듈 `sql/lexer`): 모듈과 `zig build test`. 루트 빌드가 경로 의존성으로 받음 |
 | `pkg/sql/lexer/src/root.zig` | sqllex 패키지: 방언 규칙 `Spec`과 `Scanner(spec)`, 따옴표·주석·숫자 스캐너, 해석, 위치([sqllex 패키지](#sqllex-패키지)) |
 | `pkg/sql/parse/build.zig`, `build.zig.zon` | sqlparse 패키지(모듈 `sql/parse`): 모듈과 `zig build test`. sqllex에 경로 의존성 |

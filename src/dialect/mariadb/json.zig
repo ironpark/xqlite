@@ -33,7 +33,7 @@
 //! warning is not recorded).
 
 const std = @import("std");
-const json_text = @import("../json_text.zig");
+const json_text = @import("json").text;
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");

@@ -1,0 +1,15 @@
+.{
+    // PostgreSQL's regular expressions (the ARE engine) and a small Pike
+    // VM: the module `regex`. The root package (../../build.zig.zon)
+    // depends on it by path.
+    .name = .regex,
+    .version = "0.0.0",
+    .fingerprint = 0x4204f8ca9a7397b6, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

@@ -245,8 +245,6 @@ test {
     _ = @import("funcs.zig");
     _ = @import("json.zig");
     _ = @import("jsonpath.zig");
-    _ = @import("regex.zig");
-    _ = @import("are.zig");
     _ = @import("regexp.zig");
     _ = @import("datetime.zig");
     _ = @import("operators.zig");

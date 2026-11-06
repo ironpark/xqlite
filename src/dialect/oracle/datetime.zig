@@ -9,7 +9,7 @@
 //! and punctuation, in English (NLS_DATE_LANGUAGE AMERICAN).
 
 const std = @import("std");
-const calendar = @import("../calendar.zig");
+const calendar = @import("datetime").calendar;
 
 pub const DateTime = struct {
     year: i32 = 1,

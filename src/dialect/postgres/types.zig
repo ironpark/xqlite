@@ -7,18 +7,18 @@
 //! | smallint, integer (smallserial, serial) | INTEGER | range ("smallint/integer out of range") |
 //! | bigint, bigserial                   | INTEGER |                                        |
 //! | real, double precision, float(p)    | REAL    |                                        |
-//! | numeric(p,s), decimal               | BLOB    | a key of decimal.zig (xq_dec_valid())  |
+//! | numeric(p,s), decimal               | BLOB    | a key of pkg/decimal (xq_dec_valid())  |
 //! | boolean                             | INTEGER | 0 or 1                                 |
 //! | text, varchar(n), char(n)           | TEXT    | length <= n                            |
 //! | bytea                               | BLOB    |                                        |
 //! | date, time, timestamp[tz]           | TEXT    |                                        |
-//! | interval                            | BLOB    | xq_pg_iv_valid(): src/dialect/interval.zig's BLOB (TEXT in older databases) |
+//! | interval                            | BLOB    | xq_pg_iv_valid(): pkg/datetime/src/interval.zig's BLOB (TEXT in older databases) |
 //! | uuid                                | BLOB    | 16 bytes (uuid.zig); TEXT in older tables |
 //! | json                                | TEXT    | json_valid()                           |
 //! | jsonb                               | BLOB    | json_valid(x, 8): JSONB, canonical (TEXT in older tables) |
 //! | integer[], text[] ... (any T[])     | TEXT    | an array literal (array.zig); stored canonical |
 //!
-//! A numeric is stored as decimal.zig's key, a BLOB in the order of the
+//! A numeric is stored as pkg/decimal's key, a BLOB in the order of the
 //! numbers (decimal_sql.zig's xq_dec_*() compute with it); a numeric
 //! column of a table made before (storage ANY) keeps numbers.
 //!
@@ -257,7 +257,7 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
         if (maxLength(ty)) |len| return .{ .truncate = len };
         return .{ .sqlite = "TEXT" };
     }
-    // A key of decimal.zig with its display scale.
+    // A key of pkg/decimal with its display scale.
     if (eql(u8, n, "numeric")) {
         if (ty.mods.len == 2) return .{ .numeric = .{ ty.mods[0], ty.mods[1] } };
         if (ty.mods.len == 1) return .{ .numeric = .{ ty.mods[0], 0 } };

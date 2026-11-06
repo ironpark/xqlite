@@ -25,6 +25,8 @@ test "mariadb: expressions and operators" {
     try c.expectRows("SELECT 2 BETWEEN 1 AND 3, 5 NOT BETWEEN 1 AND 3, 2 IN (1,2), 2 NOT IN (1,3), NULL IS NULL, 1 IS TRUE, 0 IS NOT FALSE", "1|1|1|1|1|1|0\n");
     try c.expectRows("SELECT CASE WHEN 1 THEN 'y' ELSE 'n' END, CASE 2 WHEN 1 THEN 'a' WHEN 2 THEN 'b' END", "y|b\n");
     try c.expectRows("SELECT TRUE, FALSE, X'41', 0x41 = X'41', b'101', 0b11", "1|0|A|1|5|3\n");
+    // 64 bits with only the top one set: the minimum i64, not an overflow.
+    try c.expectRows("SELECT b'1000000000000000000000000000000000000000000000000000000000000000'", "-9223372036854775808\n");
 }
 
 test "mariadb: tokenizer quirks" {

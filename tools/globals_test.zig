@@ -105,6 +105,11 @@ test "no hidden global state" {
     try std.testing.expect(try scan(gpa, "pkg/uuid/src", &found) >= 1);
     try std.testing.expect(try scan(gpa, "pkg/sql/lexer/src", &found) >= 1);
     try std.testing.expect(try scan(gpa, "pkg/sql/parse/src", &found) >= 1);
+    try std.testing.expect(try scan(gpa, "pkg/decimal/src", &found) >= 1);
+    try std.testing.expect(try scan(gpa, "pkg/datetime/src", &found) >= 1);
+    try std.testing.expect(try scan(gpa, "pkg/json/src", &found) >= 1);
+    try std.testing.expect(try scan(gpa, "pkg/regex/src", &found) >= 1);
+    try std.testing.expect(try scan(gpa, "pkg/pgtext/src", &found) >= 1);
     // The test tool, which runs its checks on threads.
     try std.testing.expect(try scan(gpa, "tools/xqt", &found) > 5);
     if (found.items.len > 0) {

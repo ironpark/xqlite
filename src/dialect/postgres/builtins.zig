@@ -20,8 +20,8 @@ const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
-const dec = @import("../decimal.zig");
-const ivl = @import("../interval.zig");
+const dec = @import("decimal");
+const ivl = @import("datetime").interval;
 const decimal_sql = @import("../decimal_sql.zig");
 
 const Context = dfunc.Context;

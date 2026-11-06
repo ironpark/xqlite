@@ -5,9 +5,10 @@
 //! DISTINCT, min()/max(), PRIMARY KEY, UNIQUE and foreign keys work on
 //! such a column as SQLite does on any value.
 //!
-//! The library of every dialect's exact numbers (decimal_sql.zig makes
-//! the engine functions xq_dec_*() of it), outside the dialect
-//! directories so that a build with any set of dialects has it. What
+//! The library of every dialect's exact numbers (src/dialect/
+//! decimal_sql.zig makes the engine functions xq_dec_*() of it), a
+//! package of its own (pkg/decimal, std only) so that a build with any
+//! set of dialects has it. What
 //! differs between dialects (messages, rounding, the scale of a
 //! quotient) is the caller's; what is here is PostgreSQL's: half away
 //! from zero, select_div_scale(), NaN equal to itself and above every
@@ -53,6 +54,10 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+
+/// sqrt(), exp(), ln(), log(), power() and factorial() of these numbers,
+/// as PostgreSQL 18 computes them.
+pub const math = @import("math.zig");
 
 pub const Kind = enum { finite, nan, pinf, ninf };
 
@@ -1192,6 +1197,10 @@ pub fn fromPgBinary(a: Allocator, b: []const u8) Error!Dec {
 // ================================================================ tests
 
 const testing = std.testing;
+
+test {
+    _ = math;
+}
 
 fn pz(a: Allocator, z: []const u8) !Dec {
     return parse(a, z);

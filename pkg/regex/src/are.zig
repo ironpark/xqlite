@@ -1,7 +1,7 @@
 //! PostgreSQL's regular expressions: the advanced regular expressions
 //! (AREs) of Henry Spencer's engine in src/backend/regex, for the `~`
 //! operators, SIMILAR TO and the regexp_*() functions (regexp.zig).
-//! (regex.zig is the older, smaller engine; the schema text of older
+//! (pike.zig is the older, smaller engine; the schema text of older
 //! databases calls it through xq_pg_regex(), and jsonpath's like_regex
 //! uses it.)
 //!

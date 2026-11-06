@@ -1,0 +1,15 @@
+.{
+    // PostgreSQL's text forms (arrays) that the dialect and the wire
+    // server share: the module `pgtext`. The root package
+    // (../../build.zig.zon) depends on it by path.
+    .name = .pgtext,
+    .version = "0.0.0",
+    .fingerprint = 0x8b3d7fe43f5c00cf, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

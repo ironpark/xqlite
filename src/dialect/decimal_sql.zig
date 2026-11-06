@@ -1,10 +1,10 @@
-//! The engine functions of exact numbers (decimal.zig): what a dialect's
+//! The engine functions of exact numbers (pkg/decimal): what a dialect's
 //! `numeric` lowers to and what the schema may call, in every dialect
 //! (outside the dialect directories, as like.zig's) and in sqlite3 with
 //! the extension. Their meaning, and the key, are part of the file format
 //! (abi.zig): they never change; a change is a new name.
 //!
-//! A value of these functions is a key (decimal.zig: a BLOB in the order
+//! A value of these functions is a key (pkg/decimal: a BLOB in the order
 //! of the numbers), with its display scale after it if that is known. An argument
 //! may be a key, an integer, a double (its 15 significant digits, as
 //! PostgreSQL's float8_numeric()), or text (numeric_in()); NULL gives
@@ -29,7 +29,7 @@
 //!   xq_dec_floor(x), xq_dec_sign(x)
 //!   xq_dec_scale(x), xq_dec_min_scale(x) (integers), xq_dec_trim_scale(x)
 //!   xq_dec_sqrt(x), xq_dec_exp(x), xq_dec_ln(x), xq_dec_log(x) (base
-//!   10), xq_dec_log(b, x), xq_dec_power(x, y)   decimal_math.zig: the
+//!   10), xq_dec_log(b, x), xq_dec_power(x, y)   pkg/decimal/src/math.zig: the
 //!                             digits and scale of PostgreSQL's
 //!   xq_dec_factorial(n)       n! of an integer n
 //!   xq_dec_width_bucket(x, b1, b2, n)   width_bucket() (an integer)
@@ -44,8 +44,8 @@ const api = @import("../vdbe/api.zig");
 const vi = @import("../vdbe/vdbe_int.zig");
 const int = @import("../sql/sqlite_int.zig");
 const dfunc = @import("func.zig");
-const dec = @import("decimal.zig");
-const math = @import("decimal_math.zig");
+const dec = @import("decimal");
+const math = @import("decimal").math;
 
 const Context = dfunc.Context;
 const Mem = dfunc.Mem;
@@ -470,7 +470,7 @@ fn widthBucketFunc(c: *Call, argv: []*Mem) Fail!void {
     api.resultInt64(c.ctx, r);
 }
 
-/// The errors of decimal_math.zig, PostgreSQL's.
+/// The errors of pkg/decimal/src/math.zig, PostgreSQL's.
 fn mathError(c: *Call, err: math.Error) Fail {
     const state, const msg = math.errorInfo(err) orelse return error.OutOfMemory;
     api.resultErrorState(c.ctx, .{ .sqlstate = state }, msg);

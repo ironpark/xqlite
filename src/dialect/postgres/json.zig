@@ -14,13 +14,14 @@
 //!
 //! Also: jsonb comparison (compare(): Object > Array > Boolean > Number
 //! > String > Null, containers by size first), containment (contains(),
-//! `@>`), PostgreSQL's text[] literals (parseTextArray(), '{a,b}').
+//! `@>`).
 
 const std = @import("std");
+const decimal = @import("decimal");
 const sqllex = @import("sql/lexer");
 const simd = @import("xqlite_base").simd;
-const json_text = @import("../json_text.zig");
-const bin = @import("../jsonb.zig");
+const json_text = @import("json").text;
+const bin = @import("json").jsonb;
 const util = @import("../../sql/util.zig");
 const Allocator = std.mem.Allocator;
 
@@ -658,64 +659,16 @@ pub fn normalize(a: Allocator, v: *Value) Error!void {
 
 /// A JSON number as numeric_out() writes it: no exponent, the scale of
 /// the input (1.50 is 1.50, 1e2 is 100, 1.5e-3 is 0.0015), no negative
-/// zero.
+/// zero (numeric_in() then numeric_out(), pkg/decimal).
 pub fn numericOut(a: Allocator, text: []const u8) Error![]const u8 {
-    var s = text;
-    var neg = false;
-    if (s.len > 0 and (s[0] == '-' or s[0] == '+')) {
-        neg = s[0] == '-';
-        s = s[1..];
-    }
-    var mant_end: usize = 0;
-    while (mant_end < s.len and s[mant_end] != 'e' and s[mant_end] != 'E') mant_end += 1;
-    var exp: i64 = 0;
-    if (mant_end < s.len) exp = std.fmt.parseInt(i64, s[mant_end + 1 ..], 10) catch return error.Invalid;
-    const mant = s[0..mant_end];
-    const dot = std.mem.indexOfScalar(u8, mant, '.');
-    const ip = if (dot) |d| mant[0..d] else mant;
-    const fp = if (dot) |d| mant[d + 1 ..] else "";
-    if (exp > 100000 or exp < -100000) return error.Invalid;
-    // Fast path: already normalized.
-    if (exp == 0 and mant_end == s.len and (ip.len <= 1 or ip[0] != '0') and !(neg and allZero(ip) and allZero(fp))) return text;
-    const fp_len: i64 = @intCast(fp.len);
-    const scale: usize = @intCast(@max(0, fp_len - exp));
-    // The digits, the point after `point` of them.
-    var digits: std.ArrayList(u8) = .empty;
-    try digits.appendSlice(a, ip);
-    try digits.appendSlice(a, fp);
-    var point: i64 = @as(i64, @intCast(ip.len)) + exp;
-    var out: std.ArrayList(u8) = .empty;
-    if (point < 0) {
-        const pad: usize = @intCast(-point);
-        try digits.insertSlice(a, 0, try zeros(a, pad));
-        point = 0;
-    }
-    const pt: usize = @intCast(point);
-    if (pt > digits.items.len) try digits.appendSlice(a, try zeros(a, pt - digits.items.len));
-    var int_part: []const u8 = digits.items[0..pt];
-    while (int_part.len > 1 and int_part[0] == '0') int_part = int_part[1..];
-    if (int_part.len == 0) int_part = "0";
-    var frac: []const u8 = digits.items[pt..];
-    if (frac.len > scale) frac = frac[0..scale];
-    if (neg and !(allZero(int_part) and allZero(frac))) try out.append(a, '-');
-    try out.appendSlice(a, int_part);
-    if (scale > 0) {
-        try out.append(a, '.');
-        try out.appendSlice(a, frac);
-        if (frac.len < scale) try out.appendSlice(a, try zeros(a, scale - frac.len));
-    }
-    return out.items;
+    if (isNormal(text)) return text;
+    const d = decimal.parse(a, text) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.Invalid;
+    return decimal.toText(a, d) catch error.OutOfMemory;
 }
 
 fn allZero(s: []const u8) bool {
     for (s) |c| if (c != '0') return false;
     return true;
-}
-
-fn zeros(a: Allocator, n: usize) Error![]u8 {
-    const z = try a.alloc(u8, n);
-    @memset(z, '0');
-    return z;
 }
 
 // ================================================================ writing
@@ -837,41 +790,42 @@ pub fn toSqlText(a: Allocator, v: Value, jsonb: bool) Error!?[]const u8 {
 
 /// Compare two JSON numbers by value.
 pub fn numCompare(x: []const u8, y: []const u8) std.math.Order {
-    var buf: [2]std.heap.FixedBufferAllocator = undefined;
-    var mem: [2][256]u8 = undefined;
-    buf[0] = .init(&mem[0]);
-    buf[1] = .init(&mem[1]);
-    const nx = numericOut(buf[0].allocator(), x) catch x;
-    const ny = numericOut(buf[1].allocator(), y) catch y;
-    if (nx.len > 200 or ny.len > 200) {
-        const fx = std.fmt.parseFloat(f64, x) catch 0;
-        const fy = std.fmt.parseFloat(f64, y) catch 0;
-        return std.math.order(fx, fy);
-    }
-    const negx = nx[0] == '-';
-    const negy = ny[0] == '-';
-    if (negx != negy) return if (negx) .lt else .gt;
-    const ax = if (negx) nx[1..] else nx;
-    const ay = if (negy) ny[1..] else ny;
-    const o = absCompare(ax, ay);
-    return if (negx) o.invert() else o;
+    // Both as numeric_out() writes them (a stored jsonb's): by their text.
+    if (isNormal(x) and isNormal(y)) return normalCompare(x, y);
+    var mem: [2][512]u8 = undefined;
+    var fa: [2]std.heap.FixedBufferAllocator = .{ .init(&mem[0]), .init(&mem[1]) };
+    const dx = decimal.parse(fa[0].allocator(), x) catch null;
+    const dy = decimal.parse(fa[1].allocator(), y) catch null;
+    if (dx != null and dy != null) return decimal.order(dx.?, dy.?);
+    // Not a number, or longer than the buffers: as doubles.
+    const fx = std.fmt.parseFloat(f64, x) catch 0;
+    const fy = std.fmt.parseFloat(f64, y) catch 0;
+    return std.math.order(fx, fy);
 }
 
-fn absCompare(x: []const u8, y: []const u8) std.math.Order {
-    const ix = std.mem.indexOfScalar(u8, x, '.') orelse x.len;
-    const iy = std.mem.indexOfScalar(u8, y, '.') orelse y.len;
-    if (ix != iy) return std.math.order(ix, iy);
-    const o = simd.order(x[0..ix], y[0..iy]);
-    if (o != .eq) return o;
-    const fx = if (ix < x.len) x[ix + 1 ..] else "";
-    const fy = if (iy < y.len) y[iy + 1 ..] else "";
-    const n = @max(fx.len, fy.len);
-    for (0..n) |k| {
-        const cx: u8 = if (k < fx.len) fx[k] else '0';
-        const cy: u8 = if (k < fy.len) fy[k] else '0';
-        if (cx != cy) return std.math.order(cx, cy);
-    }
-    return .eq;
+/// The order of two numbers as numeric_out() writes them: the sign, the
+/// length of the integer part, then the digits (the shorter fraction
+/// padded with zeros).
+fn normalCompare(x: []const u8, y: []const u8) std.math.Order {
+    const negx = x[0] == '-';
+    if (negx != (y[0] == '-')) return if (negx) .lt else .gt;
+    const ax = x[@intFromBool(negx)..];
+    const ay = y[@intFromBool(negx)..];
+    const ix = std.mem.indexOfScalar(u8, ax, '.') orelse ax.len;
+    const iy = std.mem.indexOfScalar(u8, ay, '.') orelse ay.len;
+    const o = if (ix != iy) std.math.order(ix, iy) else blk: {
+        const io = simd.order(ax[0..ix], ay[0..iy]);
+        if (io != .eq) break :blk io;
+        const fx = ax[@min(ix + 1, ax.len)..];
+        const fy = ay[@min(iy + 1, ay.len)..];
+        for (0..@max(fx.len, fy.len)) |k| {
+            const cx: u8 = if (k < fx.len) fx[k] else '0';
+            const cy: u8 = if (k < fy.len) fy[k] else '0';
+            if (cx != cy) break :blk std.math.order(cx, cy);
+        }
+        break :blk .eq;
+    };
+    return if (negx) o.invert() else o;
 }
 
 fn rank(v: Value) u8 {
@@ -979,7 +933,7 @@ pub fn exists(x: Value, k: []const u8) bool {
 
 // ================================================================ JSONB
 
-// A jsonb column stores SQLite's JSONB (jsonb.zig), one canonical blob
+// A jsonb column stores SQLite's JSONB (pkg/json/src/jsonb.zig), one canonical blob
 // per value, so that equal values are equal bytes (UNIQUE, GROUP BY,
 // DISTINCT) and sqlite3 reads them with json()/json_extract()/->>:
 //  - the value normalized (keys in jsonb's order without duplicates,
@@ -1066,7 +1020,7 @@ pub fn toBlob(a: Allocator, v_arg: Value) Error![]u8 {
 /// computed, a jsonpath's arithmetic, may have another spelling).
 fn normalNumbers(a: Allocator, v: *Value) Error!void {
     switch (v.v) {
-        .number => |t| if (!normalNumber(t, std.mem.indexOfScalar(u8, t, '.') != null)) {
+        .number => |t| if (!isNormal(t)) {
             v.v = .{ .number = try numericOut(a, t) };
         },
         .array => |items| for (items) |*x| try normalNumbers(a, x),
@@ -1167,6 +1121,12 @@ fn canonicalNode(b: []const u8, i: usize, n: bin.Node) bool {
         },
         else => return false,
     }
+}
+
+/// Whether `z` is a number as numeric_out() writes it, with or without a
+/// point.
+fn isNormal(z: []const u8) bool {
+    return normalNumber(z, std.mem.indexOfScalar(u8, z, '.') != null);
 }
 
 /// Whether `z` is a number as numeric_out() writes it (no exponent, no
@@ -1372,90 +1332,6 @@ pub fn compareTop(x: Value, y: Value) std.math.Order {
     return compare(x, y);
 }
 
-// =========================================================== text arrays
-
-/// A PostgreSQL text[] literal ('{a,"b c",NULL}'): its elements, null
-/// for NULL. error.Invalid if malformed.
-pub fn parseTextArray(a: Allocator, text: []const u8) Error![]?[]const u8 {
-    var out: std.ArrayList(?[]const u8) = .empty;
-    var i: usize = 0;
-    const s = text;
-    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
-    // [1:2]={...} dimensions are not read.
-    if (i >= s.len or s[i] != '{') return error.Invalid;
-    i += 1;
-    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
-    if (i < s.len and s[i] == '}') {
-        i += 1;
-    } else while (true) {
-        while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
-        if (i >= s.len) return error.Invalid;
-        if (s[i] == '{') return error.Invalid; // multidimensional
-        var elem: std.ArrayList(u8) = .empty;
-        var quoted = false;
-        if (s[i] == '"') {
-            quoted = true;
-            i += 1;
-            while (true) {
-                if (i >= s.len) return error.Invalid;
-                if (s[i] == '"') break;
-                if (s[i] == '\\') {
-                    i += 1;
-                    if (i >= s.len) return error.Invalid;
-                }
-                try elem.append(a, s[i]);
-                i += 1;
-            }
-            i += 1;
-            while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
-        } else {
-            while (i < s.len and s[i] != ',' and s[i] != '}') {
-                if (s[i] == '"' or s[i] == '{') return error.Invalid;
-                if (s[i] == '\\') {
-                    i += 1;
-                    if (i >= s.len) return error.Invalid;
-                }
-                try elem.append(a, s[i]);
-                i += 1;
-            }
-            const t = std.mem.trimEnd(u8, elem.items, " \t\r\n");
-            elem.items.len = t.len;
-            if (elem.items.len == 0) return error.Invalid;
-        }
-        if (!quoted and std.ascii.eqlIgnoreCase(elem.items, "null")) {
-            try out.append(a, null);
-        } else try out.append(a, elem.items);
-        if (i >= s.len) return error.Invalid;
-        if (s[i] == ',') {
-            i += 1;
-            continue;
-        }
-        if (s[i] != '}') return error.Invalid;
-        i += 1;
-        break;
-    }
-    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
-    if (i != s.len) return error.Invalid;
-    return out.items;
-}
-
-/// An element of a text[] literal as array_out() writes it: quoted if
-/// empty, NULL, or with blanks or `{},"\`.
-pub fn writeArrayElem(a: Allocator, out: *std.ArrayList(u8), e: ?[]const u8) Error!void {
-    const s = e orelse return out.appendSlice(a, "NULL");
-    var quote = s.len == 0 or std.ascii.eqlIgnoreCase(s, "null");
-    for (s) |c| if (std.mem.indexOfScalar(u8, "{},\"\\ \t\n\r\x0b\x0c", c) != null) {
-        quote = true;
-    };
-    if (!quote) return out.appendSlice(a, s);
-    try out.append(a, '"');
-    for (s) |c| {
-        if (c == '"' or c == '\\') try out.append(a, '\\');
-        try out.append(a, c);
-    }
-    try out.append(a, '"');
-}
-
 // ================================================================= tests
 
 fn expectJsonb(input: []const u8, want: []const u8) !void {
@@ -1512,20 +1388,6 @@ test "jsonb comparison and containment" {
     try std.testing.expectEqual(std.math.Order.gt, compare(try P.v(a, "{}"), try P.v(a, "[1,2]")));
     try std.testing.expectEqual(std.math.Order.lt, compare(try P.v(a, "-2.5"), try P.v(a, "-2")));
     try std.testing.expectEqual(std.math.Order.gt, compare(try P.v(a, "10"), try P.v(a, "9.99")));
-}
-
-test "text arrays" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const r = try parseTextArray(a, "{a, \"b c\" ,NULL,\"NULL\",d\\,e}");
-    try std.testing.expectEqual(@as(usize, 5), r.len);
-    try std.testing.expectEqualStrings("b c", r[1].?);
-    try std.testing.expect(r[2] == null);
-    try std.testing.expectEqualStrings("NULL", r[3].?);
-    try std.testing.expectEqualStrings("d,e", r[4].?);
-    try std.testing.expectEqual(@as(usize, 0), (try parseTextArray(a, "{}")).len);
-    try std.testing.expectError(error.Invalid, parseTextArray(a, "a,b"));
 }
 
 test "jsonb blobs: canonical encoding, reading, sort keys" {

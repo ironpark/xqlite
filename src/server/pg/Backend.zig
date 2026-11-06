@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const xqlite = @import("xqlite");
+const pg_types = xqlite.pg_types;
 const server = @import("../root.zig");
 const wire = @import("wire.zig");
 const values = @import("values.zig");
@@ -14,7 +15,7 @@ const Session = server.Session;
 const Connection = server.Connection;
 const Prepared = Session.Prepared;
 const Column = Session.Column;
-const Oid = values.Oid;
+const Oid = pg_types.Oid;
 const Body = wire.Body;
 const command = server.command;
 
@@ -590,7 +591,7 @@ fn parse(b: *Backend, body: *Body) !void {
     errdefer b.gpa.free(st.client_oids);
     for (st.oids, st.client_oids, 0..) |*o, *co, i| {
         co.* = if (i < n) client_oids[i] else 0;
-        o.* = if (co.* != 0) co.* else if (prepared.parameterType(i + 1)) |t| values.ofType(t) else values.oid.text;
+        o.* = if (co.* != 0) co.* else if (prepared.parameterType(i + 1)) |t| pg_types.ofType(t) else pg_types.oid.text;
     }
     const key = try b.gpa.dupe(u8, name);
     errdefer b.gpa.free(key);
@@ -633,7 +634,7 @@ fn bind(b: *Backend, body: *Body) !void {
         const v: xqlite.Value = if (raw) |z| (if (format == 1)
             values.decodeBinary(a, st.oids[i], z)
         else
-            values.decodeText(a, if (st.client_oids[i] != 0) values.typeOf(st.client_oids[i]) else prepared.parameterType(i + 1), z)) catch |err| switch (err) {
+            values.decodeText(a, if (st.client_oids[i] != 0) pg_types.typeOf(st.client_oids[i]) else prepared.parameterType(i + 1), z)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidText => return b.extendedError("22P02", "invalid input syntax for type {s}: \"{s}\"", .{ typeName(st.oids[i]), z }),
             error.InvalidBinary => return b.extendedError("22P03", "incorrect binary data format in bind parameter {d}", .{i + 1}),
@@ -661,7 +662,7 @@ fn bind(b: *Backend, body: *Body) !void {
     }
     for (cols, portal.types, portal.oids, portal.binary, 0..) |col, *t, *o, *bin, i| {
         t.* = col.type;
-        o.* = values.ofType(col.type);
+        o.* = pg_types.ofType(col.type);
         const f = if (n_results == 0) 0 else if (n_results == 1) result_formats[0] else result_formats[i];
         bin.* = f == 1;
         if (bin.* and !values.binaryOut(o.*)) {
@@ -806,14 +807,14 @@ fn rowDescription(b: *Backend, cols: []const Column, binary: ?[]const bool) !voi
     try b.out.begin('T');
     try b.out.int(i16, @intCast(cols.len));
     for (cols, 0..) |c, i| {
-        const o = values.ofType(c.type);
+        const o = pg_types.ofType(c.type);
         try b.out.string(c.name);
         // The table's OID and the column's number: not known.
         try b.out.int(u32, 0);
         try b.out.int(i16, 0);
         try b.out.int(u32, o);
-        try b.out.int(i16, values.typeLen(o));
-        try b.out.int(i32, values.typeMod(c.type));
+        try b.out.int(i16, pg_types.typeLen(o));
+        try b.out.int(i32, pg_types.typeMod(c.type));
         try b.out.int(i16, if (binary) |bin| @intFromBool(bin[i]) else 0);
     }
     try b.out.end();
@@ -920,36 +921,36 @@ fn fatal(b: *Backend, code: *const [5]u8, comptime fmt: []const u8, args: anytyp
 
 /// The name of a type OID, for messages.
 fn typeName(o: Oid) []const u8 {
-    if (values.elementOf(o)) |e| return switch (e) {
-        values.oid.bool => "boolean[]",
-        values.oid.int2 => "smallint[]",
-        values.oid.int4 => "integer[]",
-        values.oid.int8 => "bigint[]",
-        values.oid.float8 => "double precision[]",
-        values.oid.numeric => "numeric[]",
-        values.oid.varchar => "character varying[]",
-        values.oid.name => "name[]",
+    if (pg_types.elementOf(o)) |e| return switch (e) {
+        pg_types.oid.bool => "boolean[]",
+        pg_types.oid.int2 => "smallint[]",
+        pg_types.oid.int4 => "integer[]",
+        pg_types.oid.int8 => "bigint[]",
+        pg_types.oid.float8 => "double precision[]",
+        pg_types.oid.numeric => "numeric[]",
+        pg_types.oid.varchar => "character varying[]",
+        pg_types.oid.name => "name[]",
         else => "text[]",
     };
     return switch (o) {
-        values.oid.bool => "boolean",
-        values.oid.int2 => "smallint",
-        values.oid.int4 => "integer",
-        values.oid.int8 => "bigint",
-        values.oid.float4 => "real",
-        values.oid.float8 => "double precision",
-        values.oid.numeric => "numeric",
-        values.oid.bytea => "bytea",
-        values.oid.date => "date",
-        values.oid.time => "time without time zone",
-        values.oid.timestamp => "timestamp without time zone",
-        values.oid.timestamptz => "timestamp with time zone",
-        values.oid.interval => "interval",
-        values.oid.uuid => "uuid",
-        values.oid.json => "json",
-        values.oid.jsonb => "jsonb",
-        values.oid.varchar => "character varying",
-        values.oid.bpchar => "character",
+        pg_types.oid.bool => "boolean",
+        pg_types.oid.int2 => "smallint",
+        pg_types.oid.int4 => "integer",
+        pg_types.oid.int8 => "bigint",
+        pg_types.oid.float4 => "real",
+        pg_types.oid.float8 => "double precision",
+        pg_types.oid.numeric => "numeric",
+        pg_types.oid.bytea => "bytea",
+        pg_types.oid.date => "date",
+        pg_types.oid.time => "time without time zone",
+        pg_types.oid.timestamp => "timestamp without time zone",
+        pg_types.oid.timestamptz => "timestamp with time zone",
+        pg_types.oid.interval => "interval",
+        pg_types.oid.uuid => "uuid",
+        pg_types.oid.json => "json",
+        pg_types.oid.jsonb => "jsonb",
+        pg_types.oid.varchar => "character varying",
+        pg_types.oid.bpchar => "character",
         else => "text",
     };
 }

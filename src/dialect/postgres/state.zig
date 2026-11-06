@@ -17,7 +17,7 @@ pub const release = "18.6";
 pub const server_version = release ++ " (xqlite)";
 pub const server_version_num = "180006";
 
-pub const IntervalStyle = @import("../interval.zig").Style;
+pub const IntervalStyle = @import("datetime").interval.Style;
 pub const NoticeLevel = @import("../../sql/sqlite_int.zig").Notice.Level;
 
 pub const State = struct {

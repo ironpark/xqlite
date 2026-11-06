@@ -2,8 +2,8 @@
 //! PostgreSQL 18 computes them (numeric.c): the same result scale, the
 //! same digits, the same errors.
 //!
-//! Outside the dialect directories, as decimal.zig, whose numbers (Dec)
-//! these take and give; decimal_sql.zig makes the engine functions
+//! In the decimal package with root.zig, whose numbers (Dec) these
+//! take and give; src/dialect/decimal_sql.zig makes the engine functions
 //! xq_dec_sqrt() ... of them.
 //!
 //! PostgreSQL computes these in base 10000 (NBASE) with scales chosen
@@ -25,7 +25,7 @@
 //!    power_var_int(), estimate_ln_dweight()) is PostgreSQL's code.
 
 const std = @import("std");
-const dec = @import("decimal.zig");
+const dec = @import("root.zig");
 
 const Dec = dec.Dec;
 const Allocator = std.mem.Allocator;

@@ -132,14 +132,14 @@ PostgreSQL의 `jsonb` 열은 SQLite의 JSONB(BLOB)라서 값 자체는 확장 �
 
 ## numeric 키
 
-PostgreSQL의 `numeric` 열(`dialect/decimal.zig`)은 값 자체가 정렬 키인 BLOB입니다. 키의 바이트는 디스크 형식이라 바뀌지 않습니다.
+PostgreSQL의 `numeric` 열(`pkg/decimal`)은 값 자체가 정렬 키인 BLOB입니다. 키의 바이트는 디스크 형식이라 바뀌지 않습니다.
 
 - 첫 바이트는 부류: `0x10` -Infinity, `0x20` 음수, `0x30` 0, `0x40` 양수, `0x50` +Infinity, `0x60` NaN.
 - 양수 0.c1c2...cn × 100^E(c는 100진 자리, 처음과 끝이 0 아님): E는 -126..125면 한 바이트 E + 0x80, 더 크면 `0xFE`와 빅엔디언 2바이트 E - 126, 더 작으면 `0x01`과 2바이트 E + 65661. 자리는 한 바이트 2c + 1, 마지막만 2c.
 - 음수는 부류 뒤의 바이트를 모두 보수(255 - b)로.
 - 저장한 값은 키뿐이고(정규화: `1.50`과 `1.5`는 한 키), 계산한 값은 표시 스케일을 뒤에 빅엔디언 2바이트로 붙일 수 있습니다(다른 수의 순서는 바꾸지 않음). `xq_dec_key()`가 떼어냅니다.
 
-엔진 함수(모든 방언, `decimal_sql.zig`): `xq_dec(x [, p, s])`, `xq_dec_key(x [, p, s])`, `xq_dec_valid(k [, p, s])`, `xq_dec_text(x [, s])`, `xq_dec_add`/`sub`/`mul`/`div`/`mod`/`div_trunc`, `xq_dec_neg`/`abs`/`ceil`/`floor`/`sign`/`trim_scale`, `xq_dec_round`/`trunc(x [, s])`, `xq_dec_scale`/`min_scale`, `xq_dec_int2`/`int4`/`int8`/`float4`/`float8`/`number`, `xq_dec_sqrt`/`exp`/`ln`/`log(x)`(밑 10)/`log(b, x)`/`power(x, y)`(PostgreSQL의 자릿수와 스케일, `decimal_math.zig`), `xq_dec_factorial(n)`, `xq_dec_width_bucket(x, b1, b2, n)`(정수), 집계·윈도우 `xq_dec_sum`/`xq_dec_avg`. 인자는 키, 정수, 실수(15자리), 텍스트(`numeric_in()`)이고, 결과와 오류는 PostgreSQL의 것입니다. sqlite3에서 numeric 열에 쓰려면 키를 넘깁니다(`INSERT INTO t VALUES (xq_dec_key('1.50'))`). 결과는 `tools/ext/abi-core.sql`에 기록되어 있습니다.
+엔진 함수(모든 방언, `decimal_sql.zig`): `xq_dec(x [, p, s])`, `xq_dec_key(x [, p, s])`, `xq_dec_valid(k [, p, s])`, `xq_dec_text(x [, s])`, `xq_dec_add`/`sub`/`mul`/`div`/`mod`/`div_trunc`, `xq_dec_neg`/`abs`/`ceil`/`floor`/`sign`/`trim_scale`, `xq_dec_round`/`trunc(x [, s])`, `xq_dec_scale`/`min_scale`, `xq_dec_int2`/`int4`/`int8`/`float4`/`float8`/`number`, `xq_dec_sqrt`/`exp`/`ln`/`log(x)`(밑 10)/`log(b, x)`/`power(x, y)`(PostgreSQL의 자릿수와 스케일, `pkg/decimal`의 `math.zig`), `xq_dec_factorial(n)`, `xq_dec_width_bucket(x, b1, b2, n)`(정수), 집계·윈도우 `xq_dec_sum`/`xq_dec_avg`. 인자는 키, 정수, 실수(15자리), 텍스트(`numeric_in()`)이고, 결과와 오류는 PostgreSQL의 것입니다. sqlite3에서 numeric 열에 쓰려면 키를 넘깁니다(`INSERT INTO t VALUES (xq_dec_key('1.50'))`). 결과는 `tools/ext/abi-core.sql`에 기록되어 있습니다.
 
 시퀀스 함수는 `catalog/sequence.zig`과 같은 문장을 같은 표(`main.xq_sequence`)에 sqlite3 연결 자신에서 돌립니다. 그래서 한 엔진이 준 값은 다른 엔진이 다시 주지 않고, 오류 문구(`relation "x" does not exist`, `nextval: reached maximum value of sequence ...`)도 같습니다. `currval()`과 `lastval()`은 xqlite처럼 연결마다입니다. MariaDB의 `LASTVAL(seq)`(한정 이름 `xq_mariadb_lastval`)는 NULL을 돌려주고, SQL Server의 `NEXT VALUE FOR`(`xq_mssql_xq_tsql_next_value`)와 identity의 `nextval()`은 시퀀스만 움직입니다(`SCOPE_IDENTITY()`는 xqlite 세션의 것).
 

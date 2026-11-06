@@ -24,8 +24,8 @@
 //! infinite value (to_char() is NULL for those).
 
 const std = @import("std");
-const calendar = @import("../calendar.zig");
-const ivl = @import("../interval.zig");
+const calendar = @import("datetime").calendar;
+const ivl = @import("datetime").interval;
 const numformat = @import("numformat.zig");
 
 /// The error of a failed call: PostgreSQL's SQLSTATE and message.

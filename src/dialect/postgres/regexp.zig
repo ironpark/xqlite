@@ -1,12 +1,12 @@
 //! PostgreSQL's regular expression functions and SIMILAR TO, on the
-//! engine of are.zig.
+//! engine of pkg/regex/src/are.zig.
 //!
 //! Engine functions (the schema holds them: operators, rows of
 //! set-returning calls):
 //!
 //!   xq_pg_re(s, pattern, flags)     s ~ pattern (flags ''), ~* ('i');
 //!                                   `!~`, `!~*` are its NOT. (The
-//!                                   older xq_pg_regex() is regex.zig's)
+//!                                   older xq_pg_regex() is pkg/regex/src/pike.zig's)
 //!   xq_pg_similar_escape(p [, e])   similar_to_escape(): SIMILAR TO's
 //!                                   pattern as a regular expression;
 //!                                   `s SIMILAR TO p ESCAPE e` is
@@ -27,7 +27,7 @@ const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
-const are = @import("are.zig");
+const are = @import("regex").are;
 const array = @import("array.zig");
 const json = @import("json.zig");
 

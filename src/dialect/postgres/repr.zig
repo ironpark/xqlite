@@ -1,7 +1,7 @@
 //! The types PostgreSQL stores as a BLOB of a form of its own, each also
 //! in the TEXT (or ANY) column of a table made before it had that form:
-//! numeric (decimal.zig's key; a number in an older table), interval
-//! (interval.zig's key and fields; its text), uuid (16 bytes; its text),
+//! numeric (pkg/decimal's key; a number in an older table), interval
+//! (pkg/datetime/src/interval.zig's key and fields; its text), uuid (16 bytes; its text),
 //! jsonb (SQLite's JSONB; normalized text). One descriptor per type
 //! (TypeRepr), in a module of its own (repr/*.zig) with the choices
 //! overload.zig makes for it; the typing rules (typing.zig) and

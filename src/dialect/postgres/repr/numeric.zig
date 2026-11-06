@@ -1,7 +1,7 @@
 //! PostgreSQL's numeric (postgres/repr.zig's descriptor and the choices
 //! overload.zig makes for it).
 //!
-//! A numeric is decimal.zig's key (a BLOB in the order of the numbers,
+//! A numeric is pkg/decimal's key (a BLOB in the order of the numbers,
 //! maybe with its display scale after it) where it comes from a column of
 //! keys or a function of decimal_sql.zig (xq_dec_add() ...), and a SQLite
 //! number where it comes from a literal (1.50 is the double 1.5, typed of
@@ -546,7 +546,7 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
     return changed;
 }
 
-/// sqrt() ... of numerics (decimal_math.zig), the engine function and the
+/// sqrt() ... of numerics (pkg/decimal/src/math.zig), the engine function and the
 /// arguments.
 const transcendentals = std.StaticStringMap(struct { []const u8, usize }).initComptime(.{
     .{ "sqrt", .{ "xq_dec_sqrt", 1 } }, .{ "exp", .{ "xq_dec_exp", 1 } },   .{ "ln", .{ "xq_dec_ln", 1 } },
@@ -556,7 +556,7 @@ const transcendentals = std.StaticStringMap(struct { []const u8, usize }).initCo
 
 /// Which of PostgreSQL's sqrt() ... and width_bucket() arguments of
 /// these types call (typing.zig's transcendental() too): the numeric one
-/// (decimal_math.zig) if one is a numeric and none a double precision or
+/// (pkg/decimal/src/math.zig) if one is a numeric and none a double precision or
 /// a real (the numeric candidate matches more of them exactly; a float
 /// makes it the float8 one), else the float8 one.
 pub const Candidate = struct {

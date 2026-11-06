@@ -180,7 +180,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 - 배열의 값은 PostgreSQL의 텍스트(`{1,2}`, `{t,NULL}`, `[0:1]={1,2}`)이고 텍스트 형식은 그대로, 이진 형식은 그 텍스트를 읽어 원소마다 원소 타입의 이진 형식으로 씁니다. 이진으로 받은 배열 매개변수는 같은 텍스트가 되어 바인딩됩니다.
 - 이진 형식의 값은 열의 타입으로 바꿉니다(SQLite는 어느 열에나 어느 값이든 저장하므로). 바꿀 수 없으면(정수 열의 `'abc'`) 그 `Execute`가 `22P03`으로 실패합니다.
 - `pg_catalog.format_type(oid, typmod)`는 PostgreSQL 방언의 함수입니다(이 OID들의 이름). psql의 `\gdesc`가 씁니다.
-- 방언의 시스템 카탈로그(`pg_type`, `pg_attribute.atttypid` ...)도 같은 OID를 씁니다(`pgcatalog.zig`의 `oidOfLogical()`과 `values.zig`의 `ofType()`이 같은 표이고 테스트가 비교). 카탈로그의 `oid` 열은 `int4`(23)로 알립니다(PostgreSQL은 `oid` 26; 값은 2^31 아래라 텍스트·이진 형식이 같음). [PostgreSQL 호환](postgres/features.md#42-시스템-카탈로그-및-뷰).
+- 방언의 시스템 카탈로그(`pg_type`, `pg_attribute.atttypid` ...)도 같은 OID를 씁니다(둘 다 `src/sql/pg_types.zig`의 `ofType()`·`typeMod()`이고, 배열 타입이 카탈로그의 `pg_type.typarray`와 같은지 테스트가 봄). 카탈로그의 `oid` 열은 `int4`(23)로 알립니다(PostgreSQL은 `oid` 26; 값은 2^31 아래라 텍스트·이진 형식이 같음). [PostgreSQL 호환](postgres/features.md#42-시스템-카탈로그-및-뷰).
 - 세션은 `generate_series()`(셸과 같은 `ext/series.zig`)를 등록합니다. psql의 `\d`가 씁니다.
 
 ### PostgreSQL과 다른 점

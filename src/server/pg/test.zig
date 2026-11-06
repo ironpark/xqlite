@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const xqlite = @import("xqlite");
+const pg_types = xqlite.pg_types;
 const server = @import("../root.zig");
 const pg = @import("root.zig");
 
@@ -795,7 +796,7 @@ test "pg: catalogs and settings" {
     _ = try c.query("CREATE TABLE book (id integer PRIMARY KEY, title varchar(20))");
     try testing.expectEqualStrings("T ?column?:16 relname:25 relhasindex:16\nD t book t\nC SELECT 1\nZ I\n", try c.query("SELECT c.oid = 'book'::regclass::oid, c.relname, c.relhasindex FROM pg_catalog.pg_class c WHERE c.relname = 'book'"));
     var buf: [256]u8 = undefined;
-    const types_ = try std.fmt.bufPrint(&buf, "T attname:25 atttypid:23 atttypmod:23\nD id {d} -1\nD title {d} 24\nC SELECT 2\nZ I\n", .{ pg.values.oid.int4, pg.values.oid.varchar });
+    const types_ = try std.fmt.bufPrint(&buf, "T attname:25 atttypid:23 atttypmod:23\nD id {d} -1\nD title {d} 24\nC SELECT 2\nZ I\n", .{ pg_types.oid.int4, pg_types.oid.varchar });
     try testing.expectEqualStrings(types_, try c.query("SELECT attname, atttypid, atttypmod FROM pg_attribute WHERE attrelid = 'book'::regclass AND attnum > 0 ORDER BY attnum"));
     // A parameter compared with an INTEGER PRIMARY KEY is an integer.
     try c.parse("q", "SELECT title FROM book WHERE id = $1", &.{});

@@ -81,7 +81,7 @@ fn argTypeName(c: *const Ctx, x: *const Expr) []const u8 {
     const t = typing.typeOf(c.p.db, x.xq_type);
     if (t.logical == .unknown) return "unknown";
     const pgc = @import("pgcatalog.zig");
-    const bt = pgc.builtinType(pgc.oidOfLogical(t)) orelse return "unknown";
+    const bt = pgc.builtinType(@import("../../sql/pg_types.zig").ofType(t)) orelse return "unknown";
     return bt.fmt;
 }
 
@@ -148,7 +148,7 @@ fn decType(c: *Ctx, args: []const Operand) Oom!TypeId {
 /// The numeric an operand is converted to.
 fn numericOf(c: *Ctx, o: Operand) Oom!TypeId {
     if (typing.stringArg(o)) |z| {
-        const d = @import("../decimal.zig");
+        const d = @import("decimal");
         var buf: [512]u8 = undefined;
         var fba: std.heap.FixedBufferAllocator = .init(&buf);
         const v = d.parse(fba.allocator(), z) catch return c.make(.{ .logical = .numeric });

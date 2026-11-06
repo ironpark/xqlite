@@ -47,6 +47,7 @@
 //! goes.
 
 const std = @import("std");
+const pg_types = @import("../../sql/pg_types.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const build = @import("../../sql/build.zig");
 const prepare = @import("../../sql/prepare.zig");
@@ -519,45 +520,6 @@ pub const system = struct {
     }
 };
 
-/// The type OID of `t` as the wire server describes it (keep with
-/// src/server/pg/values.zig's ofType(), which a test compares).
-pub fn oidOfLogical(t: ctypes.Type) u32 {
-    return switch (t.logical) {
-        .unknown, .text => 25,
-        .boolean => 16,
-        .int1, .int2 => 21,
-        .int4 => 23,
-        .int8 => 20,
-        .float4 => 700,
-        .float8 => 701,
-        .numeric => 1700,
-        .varchar => 1043,
-        .char => 1042,
-        .bytes => 17,
-        .date => 1082,
-        .time => 1083,
-        .time_tz => 1266,
-        .timestamp => 1114,
-        .timestamp_tz => 1184,
-        .interval => 1186,
-        .uuid => 2950,
-        .json => 114,
-        .jsonb => 3802,
-        .array => if (builtinType(oidOfLogical(t.elementType()))) |e| e.array else 1009,
-    };
-}
-
-/// The type modifier (atttypmod) of `t`, as the wire server's typeMod().
-pub fn typmodOfLogical(t: ctypes.Type) i32 {
-    if (t.logical == .array) return typmodOfLogical(t.elementType());
-    return switch (t.logical) {
-        .varchar, .char => if (t.length) |n| if (n < std.math.maxInt(i32) - 4) @as(i32, @intCast(n)) + 4 else -1 else -1,
-        .numeric => if (t.precision) |p| ((@as(i32, p) << 16) | (t.scale orelse 0)) + 4 else -1,
-        .time, .time_tz, .timestamp, .timestamp_tz => if (t.scale) |s| s else -1,
-        else => -1,
-    };
-}
-
 /// The type of a column declared `decl` in `d`: its OID and modifier.
 /// The type OID and the type of a PostgreSQL declared type `decl` (an
 /// empty one: text's, of no type).
@@ -582,11 +544,11 @@ pub fn columnType(d: dialect.Dialect, decl: []const u8) struct { u32, i32 } {
     // numeric(p, s) of any p and s (Type's are bytes): PostgreSQL's
     // modifier, the scale in 11 bits.
     if (d == .postgres and t.logical == .numeric) if (@import("repr.zig").numeric.typmodOf(decl)) |m| {
-        return .{ oidOfLogical(t), ((m[0] << 16) | (m[1] & 0x7ff)) + 4 };
+        return .{ pg_types.ofType(t), ((m[0] << 16) | (m[1] & 0x7ff)) + 4 };
     };
     // interval year to month, interval(2): INTERVAL_TYPMOD().
-    if (d == .postgres and t.logical == .interval) return .{ oidOfLogical(t), @import("ivinput.zig").typmodOfDecl(decl) };
-    return .{ oidOfLogical(t), typmodOfLogical(t) };
+    if (d == .postgres and t.logical == .interval) return .{ pg_types.ofType(t), @import("ivinput.zig").typmodOfDecl(decl) };
+    return .{ pg_types.ofType(t), pg_types.typeMod(t) };
 }
 
 // ================================================================= OIDs
@@ -1843,7 +1805,7 @@ const Builder = struct {
             // The type the core gave the column, else its declared one.
             const decl: []const u8 = api.columnDecltype(v, i) orelse "";
             const known: ?ctypes.Type = if (i < v.xq_col_types.len and v.xq_col_types[i].logical != .unknown) v.xq_col_types[i] else null;
-            const ty = if (known) |k| .{ oidOfLogical(k), typmodOfLogical(k) } else if (decl.len == 0) .{ @as(u32, 25), @as(i32, -1) } else columnType(.postgres, decl);
+            const ty = if (known) |k| .{ pg_types.ofType(k), pg_types.typeMod(k) } else if (decl.len == 0) .{ pg_types.oid.text, @as(i32, -1) } else columnType(.postgres, decl);
             try b.attrs.append(a, .{ .rel = r.oid, .name = try a.dupe(u8, name), .num = @intCast(i + 1), .type_oid = ty[0], .typmod = ty[1], .collation = collationOf(ty[0], null) });
         }
     }
@@ -3299,6 +3261,16 @@ pub const modules = blk: {
     const final = out;
     break :blk final;
 };
+
+test "pg_types: each type and its array are the catalog's" {
+    for (std.enums.values(ctypes.Logical)) |l| {
+        if (l == .array) continue;
+        const o = pg_types.ofType(.{ .logical = l });
+        const bt = builtinType(o) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(bt.array, pg_types.arrayOf(o) orelse return error.TestUnexpectedResult);
+        try std.testing.expectEqual(bt.array, pg_types.ofType(.{ .logical = .array, .element = l }));
+    }
+}
 
 test "oids" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

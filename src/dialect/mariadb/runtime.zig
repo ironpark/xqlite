@@ -7,7 +7,7 @@
 //! "now" is UTC (@@time_zone is +00:00).
 
 const std = @import("std");
-const calendar = @import("../calendar.zig");
+const calendar = @import("datetime").calendar;
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");

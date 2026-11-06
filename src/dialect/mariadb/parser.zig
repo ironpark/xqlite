@@ -719,11 +719,7 @@ pub const Parser = struct {
 
     /// An integer constant at `pos`.
     pub fn int_(s: *Parser, pos: u32, v: i64) Error!*Expr {
-        if (v < 0) {
-            const x = try tree.expr(s.a, pos, pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{-v}) });
-            return tree.expr(s.a, pos, pos, .{ .unary = .{ .op = .neg, .e = x } });
-        }
-        return tree.expr(s.a, pos, pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{v}) });
+        return tree.intConst(s.a, pos, v);
     }
 
     /// A call of `fname` (a function the frontend chose): of the

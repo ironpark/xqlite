@@ -51,7 +51,7 @@ const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const types = @import("../../sql/types.zig");
 const json = @import("json.zig");
-const jsonb_bin = @import("../jsonb.zig");
+const jsonb_bin = @import("json").jsonb;
 const datetime = @import("datetime.zig");
 const like = @import("../like.zig");
 
@@ -199,280 +199,19 @@ pub const Code = struct {
 
 // ======================================================== parse, write
 
-pub const max_dims = 6;
-
-/// An array: its dimensions (none if empty) and its elements, the last
-/// dimension's fastest; an element is its text (null for NULL).
-pub const Array = struct {
-    ndim: u8 = 0,
-    dims: [max_dims]u32 = @splat(0),
-    lower: [max_dims]i32 = @splat(1),
-    elems: []?[]const u8 = &.{},
-
-    pub fn count(x: *const Array) usize {
-        if (x.ndim == 0) return 0;
-        var n: usize = 1;
-        for (x.dims[0..x.ndim]) |d| n *= d;
-        return n;
-    }
-
-    /// A one-dimensional array of `elems` (from 1).
-    pub fn list(elems: []?[]const u8) Array {
-        var x: Array = .{ .elems = elems };
-        if (elems.len > 0) {
-            x.ndim = 1;
-            x.dims[0] = @intCast(elems.len);
-        }
-        return x;
-    }
-
-    fn upper(x: *const Array, d: usize) i64 {
-        return @as(i64, x.lower[d]) + x.dims[d] - 1;
-    }
-};
-
-pub const ParseError = error{ Malformed, OutOfMemory };
-
-const Parse = struct {
-    a: Allocator,
-    z: []const u8,
-    i: usize = 0,
-    out: std.ArrayList(?[]const u8) = .empty,
-    x: Array = .{},
-    seen: [max_dims]bool = @splat(false),
-    /// PostgreSQL's DETAIL of the error, if known (parseWith()).
-    detail: ?[]const u8 = null,
-    /// The text gave the dimensions ([1:2]=...).
-    dims_given: bool = false,
-
-    /// Malformed, with PostgreSQL's DETAIL.
-    fn bad(p: *Parse, detail: []const u8) error{Malformed} {
-        p.detail = detail;
-        return error.Malformed;
-    }
-
-    /// Malformed: the sub-arrays do not match (dimension_error).
-    fn dimensionError(p: *Parse) error{Malformed} {
-        return p.bad(if (p.dims_given) "Specified array dimensions do not match array contents." else "Multidimensional arrays must have sub-arrays with matching dimensions.");
-    }
-
-    const end_of_input = "Unexpected end of input.";
-
-    fn ws(p: *Parse) void {
-        while (p.i < p.z.len and isSpace(p.z[p.i])) p.i += 1;
-    }
-
-    fn peek(p: *const Parse) ?u8 {
-        return if (p.i < p.z.len) p.z[p.i] else null;
-    }
-
-    fn int(p: *Parse) ?i64 {
-        const start = p.i;
-        if (p.i < p.z.len and (p.z[p.i] == '-' or p.z[p.i] == '+')) p.i += 1;
-        while (p.i < p.z.len and std.ascii.isDigit(p.z[p.i])) p.i += 1;
-        return std.fmt.parseInt(i64, p.z[start..p.i], 10) catch null;
-    }
-
-    fn level(p: *Parse, depth: usize) ParseError!void {
-        if (depth >= max_dims) return error.Malformed;
-        p.i += 1; // {
-        p.ws();
-        var n: u32 = 0;
-        if (p.peek() == '}') {
-            p.i += 1;
-            // {} only as the whole array.
-            if (depth != 0) return error.Malformed;
-            return;
-        }
-        while (true) {
-            p.ws();
-            const c = p.peek() orelse return p.bad(end_of_input);
-            const quoted = c == '"';
-            if (c == '{') {
-                if (p.x.ndim != 0 and depth + 1 >= p.x.ndim) return p.dimensionError();
-                try p.level(depth + 1);
-                if (p.x.ndim == 0) return error.Malformed;
-            } else {
-                if (p.x.ndim == 0) p.x.ndim = @intCast(depth + 1) else if (p.x.ndim != depth + 1) return p.dimensionError();
-                try p.element();
-            }
-            n += 1;
-            p.ws();
-            const d = p.peek() orelse return p.bad(end_of_input);
-            p.i += 1;
-            if (d == ',') continue;
-            if (d == '}') break;
-            // ReadArrayToken(): what may not follow an element.
-            if (d == '{') return p.bad("Unexpected \"{\" character.");
-            return p.bad(if (quoted) "Incorrectly quoted array element." else "Unexpected array element.");
-        }
-        if (!p.seen[depth]) {
-            p.seen[depth] = true;
-            p.x.dims[depth] = n;
-        } else if (p.x.dims[depth] != n) return p.dimensionError();
-    }
-
-    fn element(p: *Parse) ParseError!void {
-        var buf: std.ArrayList(u8) = .empty;
-        if (p.peek() == '"') {
-            p.i += 1;
-            while (true) {
-                const c = p.peek() orelse return p.bad(end_of_input);
-                p.i += 1;
-                if (c == '"') break;
-                if (c == '\\') {
-                    const e = p.peek() orelse return p.bad(end_of_input);
-                    p.i += 1;
-                    try buf.append(p.a, e);
-                } else try buf.append(p.a, c);
-            }
-            return p.out.append(p.a, buf.items);
-        }
-        var keep: usize = 0; // the length without trailing blanks
-        var escaped = false;
-        while (true) {
-            const c = p.peek() orelse return p.bad(end_of_input);
-            if (c == ',' or c == '}') break;
-            if (c == '{') return p.bad("Unexpected \"{\" character.");
-            if (c == '"') return p.bad("Incorrectly quoted array element.");
-            p.i += 1;
-            if (c == '\\') {
-                const e = p.peek() orelse return p.bad(end_of_input);
-                p.i += 1;
-                try buf.append(p.a, e);
-                keep = buf.items.len;
-                escaped = true;
-            } else {
-                try buf.append(p.a, c);
-                if (!isSpace(c)) keep = buf.items.len;
-            }
-        }
-        buf.items.len = keep;
-        // A delimiter or a brace where an element is expected.
-        if (buf.items.len == 0) return p.bad(if (p.z[p.i] == ',') "Unexpected \",\" character." else "Unexpected \"}\" character.");
-        if (!escaped and std.ascii.eqlIgnoreCase(buf.items, "null")) return p.out.append(p.a, null);
-        try p.out.append(p.a, buf.items);
-    }
-};
-
-fn isSpace(c: u8) bool {
-    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0b or c == 0x0c;
-}
-
-/// Array `z` (array_in()'s syntax). `vector`: also the space-separated
-/// integers of an int2vector or oidvector (`1 2`, from 0).
-pub fn parse(a: Allocator, z: []const u8, vector: bool) ParseError!Array {
-    var detail: ?[]const u8 = null;
-    return parseWith(a, z, vector, &detail);
-}
-
-/// parse(), leaving PostgreSQL's DETAIL of a malformed array in
-/// `detail` where it is known (static text; malformedError()).
-pub fn parseWith(a: Allocator, z: []const u8, vector: bool, detail: *?[]const u8) ParseError!Array {
-    var p: Parse = .{ .a = a, .z = z };
-    defer detail.* = p.detail;
-    p.ws();
-    // [lo:hi][lo:hi]=
-    var bounds: [max_dims][2]i64 = undefined;
-    var nb: usize = 0;
-    while (p.peek() == '[') {
-        if (nb == max_dims) return error.Malformed;
-        p.i += 1;
-        p.ws();
-        p.dims_given = true;
-        const lo = p.int() orelse return p.bad("\"[\" must introduce explicitly-specified array dimensions.");
-        p.ws();
-        var hi = lo;
-        var l = lo;
-        if (p.peek() == ':') {
-            p.i += 1;
-            p.ws();
-            hi = p.int() orelse return p.bad("Missing array dimension value.");
-            p.ws();
-        } else l = 1;
-        if (p.peek() != ']') return p.bad("Missing \"]\" after array dimensions.");
-        p.i += 1;
-        if (hi < l - 1) return error.Malformed;
-        bounds[nb] = .{ l, hi };
-        nb += 1;
-        p.ws();
-    }
-    if (nb > 0) {
-        if (p.peek() != '=') return p.bad("Missing \"=\" after array dimensions.");
-        p.i += 1;
-        p.ws();
-    }
-    if (p.peek() != '{') {
-        const must = "Array value must start with \"{\" or dimension information.";
-        if (nb == 0 and vector) return parseVector(a, z) catch |err| if (err == error.Malformed) p.bad(must) else err;
-        return p.bad(must);
-    }
-    try p.level(0);
-    p.ws();
-    if (p.i != p.z.len) return p.bad("Junk after closing right brace.");
-    p.x.elems = p.out.items;
-    if (nb > 0) {
-        if (nb != p.x.ndim) return p.dimensionError();
-        for (bounds[0..nb], 0..) |b, d| {
-            if (b[1] - b[0] + 1 != p.x.dims[d]) return p.dimensionError();
-            p.x.lower[d] = std.math.cast(i32, b[0]) orelse return error.Malformed;
-        }
-    }
-    return p.x;
-}
+const pgarray = @import("pgtext").array;
+const max_dims = pgarray.max_dims;
+pub const Array = pgarray.Array;
+pub const parse = pgarray.parse;
+pub const parseWith = pgarray.parseWith;
+pub const write = pgarray.write;
+const isSpace = pgarray.isSpace;
 
 /// Make PostgreSQL's error of malformed array `z` the result of `ctx`,
 /// with its DETAIL `detail` where it is known (parseWith()'s).
 pub fn malformedError(ctx: *Context, a: Allocator, z: []const u8, detail: ?[]const u8) void {
     const msg = std.fmt.allocPrint(a, "malformed array literal: \"{s}\"", .{z}) catch return api.resultErrorNomem(ctx);
     api.resultErrorFields(ctx, .of("22P02"), .{ .message = msg, .detail = detail });
-}
-
-fn parseVector(a: Allocator, z: []const u8) ParseError!Array {
-    var out: std.ArrayList(?[]const u8) = .empty;
-    var it = std.mem.tokenizeAny(u8, z, " \t\r\n");
-    while (it.next()) |w| {
-        _ = std.fmt.parseInt(i64, w, 10) catch return error.Malformed;
-        try out.append(a, w);
-    }
-    var x = Array.list(out.items);
-    x.lower[0] = 0;
-    return x;
-}
-
-/// The text of `x`, as array_out() writes it.
-pub fn write(a: Allocator, x: *const Array) error{OutOfMemory}![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    try writeTo(a, &out, x);
-    return out.items;
-}
-
-pub fn writeTo(a: Allocator, out: *std.ArrayList(u8), x: *const Array) error{OutOfMemory}!void {
-    if (x.ndim == 0 or x.count() == 0) return out.appendSlice(a, "{}");
-    var decorate = false;
-    for (x.lower[0..x.ndim]) |l| {
-        if (l != 1) decorate = true;
-    }
-    if (decorate) {
-        for (0..x.ndim) |d| try out.print(a, "[{d}:{d}]", .{ x.lower[d], x.upper(d) });
-        try out.append(a, '=');
-    }
-    var i: usize = 0;
-    try writeLevel(a, out, x, 0, &i);
-}
-
-fn writeLevel(a: Allocator, out: *std.ArrayList(u8), x: *const Array, d: usize, i: *usize) error{OutOfMemory}!void {
-    try out.append(a, '{');
-    for (0..x.dims[d]) |k| {
-        if (k > 0) try out.append(a, ',');
-        if (d + 1 < x.ndim) {
-            try writeLevel(a, out, x, d + 1, i);
-        } else {
-            json.writeArrayElem(a, out, x.elems[i.*]) catch return error.OutOfMemory;
-            i.* += 1;
-        }
-    }
-    try out.append(a, '}');
 }
 
 /// The text of interval[] `z` (its elements in the default style, as
@@ -607,74 +346,13 @@ pub fn parseFloat(z: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, z) catch null;
 }
 
-/// PostgreSQL's text of a double (of a real if `real`): float8out()'s.
-pub fn floatText(buf: *[64]u8, v: f64, real: bool) []const u8 {
-    if (std.math.isNan(v)) return "NaN";
-    if (std.math.isInf(v)) return if (v > 0) "Infinity" else "-Infinity";
-    if (v == 0) return if (std.math.signbit(v)) "-0" else "0";
-    return @import("jfuncs.zig").floatText(buf[0..48], v, real);
-}
+const floatText = @import("../valuetext.zig").floatText;
 
 /// numeric_in()'s value of `t` as numeric_out() writes it: the scale as
 /// written once the exponent moved the point (`1.50`, `1e2` is `100`,
 /// `.5` is `0.5`), without leading zeros; null if it is no number.
 pub fn numericIn(a: Allocator, t: []const u8) ?[]const u8 {
-    if (std.ascii.eqlIgnoreCase(t, "nan")) return "NaN";
-    var i: usize = 0;
-    var neg = false;
-    if (i < t.len and (t[i] == '+' or t[i] == '-')) {
-        neg = t[i] == '-';
-        i += 1;
-    }
-    var digits: std.ArrayList(u8) = .empty;
-    var point: ?usize = null;
-    var n: usize = 0;
-    while (i < t.len and (std.ascii.isDigit(t[i]) or (t[i] == '.' and point == null))) : (i += 1) {
-        if (t[i] == '.') {
-            point = digits.items.len;
-            continue;
-        }
-        digits.append(a, t[i]) catch return null;
-        n += 1;
-    }
-    if (n == 0) return null;
-    var exp: i64 = 0;
-    if (i < t.len and (t[i] == 'e' or t[i] == 'E')) {
-        i += 1;
-        const start = i;
-        if (i < t.len and (t[i] == '+' or t[i] == '-')) i += 1;
-        while (i < t.len and std.ascii.isDigit(t[i])) i += 1;
-        exp = std.fmt.parseInt(i64, t[start..i], 10) catch return null;
-        if (@abs(exp) > 1000) return null;
-    }
-    if (i != t.len) return null;
-    // The digits and where the point goes.
-    const d = digits.items;
-    const int_len: i64 = @as(i64, @intCast(point orelse d.len)) + exp;
-    var frac: i64 = @as(i64, @intCast(d.len)) - int_len;
-    if (frac < 0) frac = 0;
-    var out: std.ArrayList(u8) = .empty;
-    if (neg) out.append(a, '-') catch return null;
-    if (int_len <= 0) {
-        out.append(a, '0') catch return null;
-    } else {
-        var k: usize = 0;
-        // Leading zeros.
-        while (k + 1 < @as(usize, @intCast(int_len)) and k < d.len and d[k] == '0') k += 1;
-        while (k < @as(usize, @intCast(int_len))) : (k += 1) out.append(a, if (k < d.len) d[k] else '0') catch return null;
-    }
-    if (frac > 0) {
-        out.append(a, '.') catch return null;
-        var k: i64 = int_len;
-        while (k < @as(i64, @intCast(d.len))) : (k += 1) out.append(a, if (k < 0) '0' else d[@intCast(k)]) catch return null;
-    }
-    // -0 is 0.
-    var zero = true;
-    for (out.items) |c| if (c != '-' and c != '0' and c != '.') {
-        zero = false;
-    };
-    if (zero and neg) return out.items[1..];
-    return out.items;
+    return json.numericOut(a, t) catch null;
 }
 
 /// A value of SQLite of an element.
@@ -1889,32 +1567,6 @@ pub const functions = [_]FuncDef{
     [_]FuncDef{agg("array_agg", aggStep, aggFinal, aggValue, aggInverse)};
 
 // ================================================================= tests
-
-fn expectRound(in: []const u8, want: []const u8) !void {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const x = try parse(arena.allocator(), in, false);
-    try std.testing.expectEqualStrings(want, try write(arena.allocator(), &x));
-}
-
-test "array literals" {
-    try expectRound("{1,2,NULL}", "{1,2,NULL}");
-    try expectRound(" { 1 , 2 } ", "{1,2}");
-    try expectRound("{\"a b\",c,\"\",\"NULL\",d\\,e}", "{\"a b\",c,\"\",\"NULL\",\"d,e\"}");
-    try expectRound("{{1,2},{3,4}}", "{{1,2},{3,4}}");
-    try expectRound("[0:1]={1,2}", "[0:1]={1,2}");
-    try expectRound("[1:2]={1,2}", "{1,2}");
-    try expectRound("{}", "{}");
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    for ([_][]const u8{ "", "x", "{1,2", "{{1},{2,3}}", "{1,{2}}", "{{1},2}", "{,}", "[1:3]={1,2}", "{a\"b}", "{{}}" }) |bad| {
-        try std.testing.expectError(error.Malformed, parse(a, bad, false));
-    }
-    const v = try parse(a, "1 2 3", true);
-    try std.testing.expectEqual(@as(i32, 0), v.lower[0]);
-    try std.testing.expectEqual(@as(usize, 3), v.count());
-}
 
 test "element input" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

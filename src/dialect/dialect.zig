@@ -793,14 +793,9 @@ test {
     _ = @import("func.zig");
     _ = @import("sqlite/lexer.zig");
     _ = @import("template.zig");
-    _ = @import("calendar.zig");
-    _ = @import("json_text.zig");
-    _ = @import("jsonb.zig");
     _ = @import("shared_funcs.zig");
     _ = @import("like.zig");
-    _ = @import("decimal.zig");
     _ = @import("decimal_sql.zig");
-    _ = @import("decimal_math.zig");
     _ = @import("abi.zig");
     _ = @import("test.zig");
     _ = @import("constraint.zig");

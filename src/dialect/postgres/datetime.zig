@@ -24,7 +24,7 @@
 //!    days into time, as interval_mul() and interval_div() do.
 
 const std = @import("std");
-const calendar = @import("../calendar.zig");
+const calendar = @import("datetime").calendar;
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
@@ -69,8 +69,8 @@ pub fn checkTimestamp(t: i64) Error!i64 {
 }
 
 /// An interval's months, days and microseconds, its arithmetic and its
-/// BLOB (src/dialect/interval.zig).
-pub const ivl = @import("../interval.zig");
+/// BLOB (pkg/datetime/src/interval.zig).
+pub const ivl = @import("datetime").interval;
 const ivinput = @import("ivinput.zig");
 pub const Interval = ivl.Interval;
 

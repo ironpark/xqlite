@@ -185,7 +185,7 @@ test "pg: expressions and functions" {
     // Numbers.
     try c.expectRows("SELECT abs(-3), round(2.567, 2)::text, floor(-2.5)::text, ceil(2.1)::text, ceiling(2.9)::text, trunc(2.7)::text, sqrt(16), power(2, 10), mod(-7, 3), sign(-4), ln(1), log(100), exp(0)", "3|2.57|-3|3|3|2|4.0|1024.0|-1|-1|0.0|2.0|1.0\n");
     try c.expectError("SELECT sqrt(-1)", "cannot take square root of a negative number");
-    // numeric's (decimal_math.zig): PostgreSQL's digits and scale.
+    // numeric's (pkg/decimal/src/math.zig): PostgreSQL's digits and scale.
     try c.expectRows("SELECT sqrt(2.0)::text, exp(1.0)::text, ln(2.0)::text, log(2, 8)::text, (2::numeric ^ 0.5)::text, factorial(5)::text, width_bucket(5.35, 0.024, 10.06, 5)", "1.414213562373095|2.7182818284590452|0.6931471805599453|3.0000000000000000|1.4142135623730950|120|3\n");
     try c.expectError("SELECT ln(0.0)", "cannot take logarithm of zero");
     try c.expectError("SELECT mod(1, 0)", "division by zero");
@@ -558,20 +558,6 @@ test "pg: numbers in JSON as PostgreSQL spells them" {
     try c.expectRows("SELECT to_json(s.f) FROM (SELECT f FROM fj WHERE id = 2) s", "2.5e-07\n");
 }
 
-test "pg: floatText" {
-    const floatText = @import("jfuncs.zig").floatText;
-    var buf: [48]u8 = undefined;
-    const cases = [_]struct { f64, []const u8 }{
-        .{ 100.0, "100" },     .{ 1e20, "1e+20" },                                     .{ 1e-5, "1e-05" },
-        .{ 0.0001, "0.0001" }, .{ 1e14, "100000000000000" },                           .{ 1e15, "1e+15" },
-        .{ -2.5, "-2.5" },     .{ 123456789012345678.0, "1.2345678901234568e+17" },    .{ 0.0, "0" },
-        .{ 5e-324, "5e-324" }, .{ 1.7976931348623157e308, "1.7976931348623157e+308" }, .{ 0.1, "0.1" },
-    };
-    for (cases) |x| try testing.expectEqualStrings(x[1], floatText(&buf, x[0], false));
-    try testing.expectEqualStrings("1.1", floatText(&buf, 1.1, true));
-    try testing.expectEqualStrings("3.4028235e+38", floatText(&buf, std.math.floatMax(f32), true));
-}
-
 test "pg: parameters" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -710,7 +696,7 @@ test "pg: types are strict" {
     try c.exec("INSERT INTO ty (i2, i4, i8, r, n, b, vc, j) VALUES (1, '2', 3, 4, 5.25, true, 'abc', '{}')");
     try c.exec("INSERT INTO ty (n) VALUES ('1.5'), ('7')");
     try c.expectRows("SELECT i2, i4, r, n::text, b, vc FROM ty WHERE i2 = 1", "1|2|4.0|5.25|1|abc\n");
-    // A numeric is stored as decimal.zig's key.
+    // A numeric is stored as pkg/decimal's key.
     try c.expectRows("SELECT n::text, typeof(n) FROM ty WHERE i2 IS NULL ORDER BY n", "1.50|blob\n7.00|blob\n");
     try c.expectError("INSERT INTO ty (i4) VALUES ('x')", "invalid input syntax for type integer: \"x\"");
     // A numeric stored into an integer is rounded (PostgreSQL's assignment

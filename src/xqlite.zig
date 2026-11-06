@@ -65,12 +65,14 @@ pub const FilterArgs = @import("api/module.zig").FilterArgs;
 /// The type of a result column, independent of the dialect that declared
 /// it (types.Type, types.parse()): the engine's own (src/sql/types.zig).
 pub const types = @import("sql/types.zig");
+/// PostgreSQL's type OIDs and modifiers of each `types.Logical`.
+pub const pg_types = @import("sql/pg_types.zig");
 /// Values as the dialect a client speaks shows them (display.text(), and
 /// display.Columns for the types of result columns).
 pub const display = @import("api/display.zig");
 /// Exact decimal numbers and the key a numeric column stores them as (a
 /// BLOB in the order of the numbers: decimal.decodeKey(), keyText()).
-pub const decimal = @import("dialect/decimal.zig");
+pub const decimal = @import("decimal");
 /// The values a dialect stores as a BLOB of its own form (a numeric's
 /// key, a uuid's bytes, an interval, jsonb as JSONB) and their text
 /// (repr.text(), repr.intervalOf() ...): what display.text() writes them

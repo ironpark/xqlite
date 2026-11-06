@@ -277,3 +277,25 @@ test writePg {
     try t.expectEqualStrings("t", w.written());
     try t.expect(!try writePg(t.allocator, &w.writer, .{}, .{ .logical = .bytes }, .{ .blob = "\x01" }, null));
 }
+
+test floatText {
+    const t = std.testing;
+    var buf: [64]u8 = undefined;
+    const cases = [_]struct { f64, []const u8 }{
+        .{ 100.0, "100" },     .{ 1e20, "1e+20" },                                     .{ 1e-5, "1e-05" },
+        .{ 0.0001, "0.0001" }, .{ 1e14, "100000000000000" },                           .{ 1e15, "1e+15" },
+        .{ -2.5, "-2.5" },     .{ 123456789012345678.0, "1.2345678901234568e+17" },    .{ 0.0, "0" },
+        .{ 5e-324, "5e-324" }, .{ 1.7976931348623157e308, "1.7976931348623157e+308" }, .{ 0.1, "0.1" },
+        .{ 1.5, "1.5" },       .{ -1.25e15, "-1.25e+15" },                             .{ -0.0, "-0" },
+    };
+    for (cases) |x| try t.expectEqualStrings(x[1], floatText(&buf, x[0], false));
+    var tenth: f64 = 0.1;
+    _ = &tenth;
+    try t.expectEqualStrings("0.30000000000000004", floatText(&buf, tenth + 0.2, false));
+    try t.expectEqualStrings("NaN", floatText(&buf, std.math.nan(f64), false));
+    try t.expectEqualStrings("-Infinity", floatText(&buf, -std.math.inf(f64), false));
+    // A real: its own shortest digits.
+    try t.expectEqualStrings("1.1", floatText(&buf, 1.1, true));
+    try t.expectEqualStrings("0.1", floatText(&buf, @as(f32, 0.1), true));
+    try t.expectEqualStrings("3.4028235e+38", floatText(&buf, std.math.floatMax(f32), true));
+}

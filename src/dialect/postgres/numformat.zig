@@ -16,7 +16,7 @@
 //! limited to DBL_DIG (FLT_DIG for a real), as float8_to_char() does.
 
 const std = @import("std");
-const dec = @import("../decimal.zig");
+const dec = @import("decimal");
 const json = @import("json.zig");
 const util = @import("../../sql/util.zig");
 

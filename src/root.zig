@@ -41,6 +41,7 @@ pub const free = api.free;
 pub const FunctionOptions = api.FunctionOptions;
 pub const Args = api.Args;
 pub const types = api.types;
+pub const pg_types = api.pg_types;
 pub const display = api.display;
 pub const decimal = api.decimal;
 pub const repr = api.repr;
@@ -64,6 +65,9 @@ pub const simd = @import("xqlite_base").simd;
 /// The scanners of the dialects' lexers (pkg/sql/lexer), which the wire
 /// servers' scan of statement text uses too (src/server/command.zig).
 pub const sqllex = @import("sql/lexer");
+/// PostgreSQL's array text (pkg/pgtext), which the wire server reads and
+/// writes.
+pub const pgtext = @import("pgtext");
 
 pub const vfs = @import("xqlite_vfs").vfs;
 pub const MemVfs = @import("xqlite_vfs").mem.MemVfs;

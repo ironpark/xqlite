@@ -35,7 +35,7 @@
 //!    arrays is xq_pg_json_agg_rows() (a line break between them),
 //!    array_to_json() of an array xq_pg_array_to_json();
 //!  - numerics (repr/numeric.zig): their operators and functions
-//!    compute with decimal.zig's keys (xq_dec_add() ...), a comparison
+//!    compute with pkg/decimal's keys (xq_dec_add() ...), a comparison
 //!    compares keys, a numeric made text, a double or JSON is converted;
 //!  - an xq_pg_jsonb() (xq_pg_json()) no frontend typed around a call
 //!    whose result is jsonb (json or jsonb) is that call: jtype.zig

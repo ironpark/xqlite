@@ -21,7 +21,7 @@
 
 const std = @import("std");
 const int = @import("../../sql/sqlite_int.zig");
-const json_text = @import("../json_text.zig");
+const json_text = @import("json").text;
 
 /// The types of values, numbered as OPENJSON's type column.
 pub const Kind = enum(u8) { null = 0, string = 1, number = 2, boolean = 3, array = 4, object = 5 };

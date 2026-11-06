@@ -1,0 +1,15 @@
+.{
+    // Exact decimal numbers as PostgreSQL's numeric computes them, and
+    // their order-preserving keys: the module `decimal`. The root package
+    // (../../build.zig.zon) depends on it by path.
+    .name = .decimal,
+    .version = "0.0.0",
+    .fingerprint = 0x5afdb393ea3e69fb, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

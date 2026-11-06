@@ -1,8 +1,8 @@
 //! An interval of months, days and microseconds (PostgreSQL's interval,
 //! the fields Oracle's INTERVAL types can share), its arithmetic, and the
-//! BLOB a column stores one as. Outside the dialect directories, so that
-//! the display layer (api/display.zig) and the wire servers have it with
-//! any set of dialects (-Ddialects).
+//! BLOB a column stores one as. A package of its own (pkg/datetime), so
+//! that the display layer (src/api/display.zig) and the wire servers have
+//! it with any set of dialects (-Ddialects).
 //!
 //! The BLOB (`len` bytes) is an order-preserving key followed by the
 //! fields:

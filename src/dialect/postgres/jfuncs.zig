@@ -21,7 +21,7 @@
 //!   xq_pg_float_json(x, real)           a double precision (real) as JSON,
 //!                                       float8out()'s digits (1e+20)
 //!   xq_pg_numeric_json(x, scale)        a numeric as JSON, its digits (1.50)
-//!   xq_pg_dec_json(x, scale)            a numeric key (decimal.zig) as JSON:
+//!   xq_pg_dec_json(x, scale)            a numeric key (pkg/decimal) as JSON:
 //!                                       its digits with `scale` (-1: its own);
 //!                                       NaN and the infinities strings
 //!   xq_pg_json[b]_get[_text](j, k)      -> / ->> (k text: key, integer: index)
@@ -55,12 +55,13 @@
 //! jsonb_path_exists/match/query_array/query_first.
 
 const std = @import("std");
+const valuetext = @import("../valuetext.zig");
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const json = @import("json.zig");
-const bin = @import("../jsonb.zig");
+const bin = @import("json").jsonb;
 const jsonpath = @import("jsonpath.zig");
 
 const Context = dfunc.Context;
@@ -282,22 +283,21 @@ const Call = struct {
         api.resultText(c.ctx, t, .transient);
     }
 
-    /// A text[] argument; null after making the error the result.
+    /// A text[] argument, one-dimensional: its elements (null for NULL);
+    /// null after making the error the result.
     fn textArray(c: *Call, m: *Mem) ?[]?[]const u8 {
+        const array = @import("array.zig");
         const t = c.text(m) orelse return null;
-        return json.parseTextArray(c.a(), t) catch |e| {
-            if (e == error.OutOfMemory) {
-                api.resultErrorNomem(c.ctx);
-            } else {
-                // PostgreSQL's DETAIL: of the array's input, which
-                // reads more than parseTextArray().
-                const array = @import("array.zig");
-                var detail: ?[]const u8 = null;
-                _ = array.parseWith(c.a(), t, false, &detail) catch {};
-                array.malformedError(c.ctx, c.a(), t, detail);
-            }
+        var detail: ?[]const u8 = null;
+        const x = array.parseWith(c.a(), t, false, &detail) catch |e| {
+            if (e == error.OutOfMemory) api.resultErrorNomem(c.ctx) else array.malformedError(c.ctx, c.a(), t, detail);
             return null;
         };
+        if (x.ndim > 1) {
+            array.malformedError(c.ctx, c.a(), t, null);
+            return null;
+        }
+        return x.elems;
     }
 
     /// The JSON value an SQL value means: a number, a string, null, or
@@ -428,7 +428,7 @@ fn jsonBool(ctx: *Context, argv: []*Mem) void {
 
 /// xq_pg_float_json(x, real): a double precision (a real if `real` is 1)
 /// as JSON, spelled as PostgreSQL's float8out() (float4out()) spells it
-/// (floatText()): `100`, `1e+20`, `0.30000000000000004`; NaN and the
+/// (valuetext.floatText()): `100`, `1e+20`, `0.30000000000000004`; NaN and the
 /// infinities are strings. Another value is itself.
 fn floatJson(ctx: *Context, argv: []*Mem) void {
     switch (api.valueType(argv[0])) {
@@ -436,69 +436,15 @@ fn floatJson(ctx: *Context, argv: []*Mem) void {
         else => return api.resultValue(ctx, argv[0]),
     }
     const v = api.valueDouble(argv[0]);
-    var buf: [48]u8 = undefined;
+    var buf: [64]u8 = undefined;
     const t = if (std.math.isNan(v))
         "\"NaN\""
     else if (std.math.isInf(v))
         (if (v > 0) "\"Infinity\"" else "\"-Infinity\"")
     else
-        floatText(&buf, v, api.valueInt64(argv[1]) == 1);
+        valuetext.floatText(&buf, v, api.valueInt64(argv[1]) == 1);
     api.resultText(ctx, t, .transient);
     api.resultSubtype(ctx, J);
-}
-
-/// PostgreSQL's spelling of a finite double (of a real if `real`), with
-/// extra_float_digits 1 (the default): the shortest digits that read back
-/// as the same value, in fixed notation if the decimal exponent is from
-/// -4 to 14 (`100`, `0.0001`, `123.5`), else as `1.5e+20`, `1e-05` (at
-/// least two digits of exponent), as C's %g.
-pub fn floatText(buf: *[48]u8, v: f64, real: bool) []const u8 {
-    // The shortest digits and their exponent: "1.2345e17".
-    var sci: [40]u8 = undefined;
-    const z = (if (real) std.fmt.bufPrint(&sci, "{e}", .{@as(f32, @floatCast(v))}) else std.fmt.bufPrint(&sci, "{e}", .{v})) catch return "0";
-    var i: usize = 0;
-    var n: usize = 0;
-    const neg = z[0] == '-';
-    if (neg) i = 1;
-    var digits: [24]u8 = undefined;
-    while (i < z.len and z[i] != 'e') : (i += 1) {
-        if (z[i] == '.') continue;
-        digits[n] = z[i];
-        n += 1;
-    }
-    const exp = std.fmt.parseInt(i32, z[i + 1 ..], 10) catch 0;
-    // Trailing zeros of the digits say nothing ("1e2").
-    while (n > 1 and digits[n - 1] == '0') n -= 1;
-    var out: std.ArrayList(u8) = .initBuffer(buf);
-    if (neg) out.appendAssumeCapacity('-');
-    const d = digits[0..n];
-    if (exp >= -4 and exp < 15) {
-        if (exp < 0) {
-            out.appendSliceAssumeCapacity("0.");
-            out.appendNTimesAssumeCapacity('0', @intCast(-exp - 1));
-            out.appendSliceAssumeCapacity(d);
-        } else {
-            const int_digits: usize = @intCast(exp + 1);
-            if (n <= int_digits) {
-                out.appendSliceAssumeCapacity(d);
-                out.appendNTimesAssumeCapacity('0', int_digits - n);
-            } else {
-                out.appendSliceAssumeCapacity(d[0..int_digits]);
-                out.appendSliceAssumeCapacity(".");
-                out.appendSliceAssumeCapacity(d[int_digits..]);
-            }
-        }
-    } else {
-        out.appendSliceAssumeCapacity(d[0..1]);
-        if (n > 1) {
-            out.appendSliceAssumeCapacity(".");
-            out.appendSliceAssumeCapacity(d[1..]);
-        }
-        var e: [8]u8 = undefined;
-        const ez = std.fmt.bufPrint(&e, "e{c}{d:0>2}", .{ @as(u8, if (exp < 0) '-' else '+'), @abs(exp) }) catch unreachable;
-        out.appendSliceAssumeCapacity(ez);
-    }
-    return out.items;
 }
 
 /// xq_pg_numeric_json(x, scale): a numeric of `scale` digits after the
@@ -531,13 +477,13 @@ fn numericJson(ctx: *Context, argv: []*Mem) void {
     api.resultSubtype(ctx, J);
 }
 
-/// xq_pg_dec_json(x, scale): a numeric (a key of decimal.zig, a number,
+/// xq_pg_dec_json(x, scale): a numeric (a key of pkg/decimal, a number,
 /// its text) as JSON, numeric_out()'s digits with at least `scale`
 /// digits after the point (-1: its own display scale); NaN, Infinity and
 /// -Infinity are strings, as PostgreSQL's to_json() writes them.
 fn decJson(ctx: *Context, argv: []*Mem) void {
     if (dfunc.isNull(argv[0])) return api.resultNull(ctx);
-    const decimal = @import("../decimal.zig");
+    const decimal = @import("decimal");
     var arena: std.heap.ArenaAllocator = .init(dfunc.gpa(ctx));
     defer arena.deinit();
     const a = arena.allocator();

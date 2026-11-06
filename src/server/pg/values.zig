@@ -1,5 +1,5 @@
-//! Types and values on the wire: the type OID of each `types.Logical`,
-//! the text and binary forms of values as PostgreSQL writes them, and the
+//! Types and values on the wire: the type OID of each `types.Logical`
+//! (xqlite.pg_types), the text and binary forms of values as PostgreSQL writes them, and the
 //! parameters a client binds (text, or binary for the common types).
 
 const std = @import("std");
@@ -11,140 +11,12 @@ const Type = types.Type;
 const Value = xqlite.Value;
 const Out = wire.Out;
 
-pub const Oid = u32;
-
-/// PostgreSQL's type OIDs (pg_type.dat).
-pub const oid = struct {
-    pub const @"bool": Oid = 16;
-    pub const bytea: Oid = 17;
-    pub const name: Oid = 19;
-    pub const int8: Oid = 20;
-    pub const int2: Oid = 21;
-    pub const int4: Oid = 23;
-    pub const text: Oid = 25;
-    pub const oid: Oid = 26;
-    pub const json: Oid = 114;
-    pub const float4: Oid = 700;
-    pub const float8: Oid = 701;
-    pub const unknown: Oid = 705;
-    pub const bpchar: Oid = 1042;
-    pub const varchar: Oid = 1043;
-    pub const date: Oid = 1082;
-    pub const time: Oid = 1083;
-    pub const timestamp: Oid = 1114;
-    pub const timestamptz: Oid = 1184;
-    pub const interval: Oid = 1186;
-    pub const timetz: Oid = 1266;
-    pub const numeric: Oid = 1700;
-    pub const uuid: Oid = 2950;
-    pub const jsonb: Oid = 3802;
-};
-
-/// The array type of each element type (pg_type.typarray), and back.
-const arrays = [_]struct { Oid, Oid }{
-    .{ oid.bool, 1000 },        .{ oid.bytea, 1001 },    .{ oid.name, 1003 },    .{ oid.int2, 1005 },
-    .{ oid.int4, 1007 },        .{ oid.text, 1009 },     .{ oid.varchar, 1015 }, .{ oid.bpchar, 1014 },
-    .{ oid.int8, 1016 },        .{ oid.float4, 1021 },   .{ oid.float8, 1022 },  .{ oid.oid, 1028 },
-    .{ oid.json, 199 },         .{ oid.date, 1182 },     .{ oid.time, 1183 },    .{ oid.timestamp, 1115 },
-    .{ oid.timestamptz, 1185 }, .{ oid.interval, 1187 }, .{ oid.timetz, 1270 },  .{ oid.numeric, 1231 },
-    .{ oid.uuid, 2951 },        .{ oid.jsonb, 3807 },
-};
-
-/// The array type of element type `o`, null if it has none here.
-pub fn arrayOf(o: Oid) ?Oid {
-    for (arrays) |x| if (x[0] == o) return x[1];
-    return null;
-}
-
-/// The element type of array type `o`, null if `o` is no array type.
-pub fn elementOf(o: Oid) ?Oid {
-    for (arrays) |x| if (x[1] == o) return x[0];
-    return null;
-}
-
-/// The OID a column or parameter of type `t` is described with. A type
-/// not known is text, as PostgreSQL resolves an unknown literal.
-pub fn ofType(t: Type) Oid {
-    return switch (t.logical) {
-        .unknown, .text => oid.text,
-        .boolean => oid.bool,
-        .int1, .int2 => oid.int2,
-        .int4 => oid.int4,
-        .int8 => oid.int8,
-        .float4 => oid.float4,
-        .float8 => oid.float8,
-        .numeric => oid.numeric,
-        .varchar => oid.varchar,
-        .char => oid.bpchar,
-        .bytes => oid.bytea,
-        .date => oid.date,
-        .time => oid.time,
-        .time_tz => oid.timetz,
-        .timestamp => oid.timestamp,
-        .timestamp_tz => oid.timestamptz,
-        .interval => oid.interval,
-        .uuid => oid.uuid,
-        .json => oid.json,
-        .jsonb => oid.jsonb,
-        .array => arrayOf(ofType(t.elementType())) orelse 1009,
-    };
-}
-
-/// The type of a parameter the client gave OID `o`, for reading its value
-/// (null: not one of ours, read as text).
-pub fn typeOf(o: Oid) ?Type {
-    if (elementOf(o)) |e| return if (typeOf(e)) |t| t.arrayOf() else .{ .logical = .array };
-    return .{ .logical = switch (o) {
-        oid.bool => .boolean,
-        oid.int2 => .int2,
-        oid.int4, oid.oid => .int4,
-        oid.int8 => .int8,
-        oid.float4 => .float4,
-        oid.float8 => .float8,
-        oid.numeric => .numeric,
-        oid.text, oid.name, oid.unknown => .text,
-        oid.varchar => .varchar,
-        oid.bpchar => .char,
-        oid.bytea => .bytes,
-        oid.date => .date,
-        oid.time => .time,
-        oid.timetz => .time_tz,
-        oid.timestamp => .timestamp,
-        oid.timestamptz => .timestamp_tz,
-        oid.interval => .interval,
-        oid.uuid => .uuid,
-        oid.json => .json,
-        oid.jsonb => .jsonb,
-        else => return null,
-    } };
-}
-
-/// pg_type.typlen: the size of a fixed-size type, -1 for the others.
-pub fn typeLen(o: Oid) i16 {
-    return switch (o) {
-        oid.bool => 1,
-        oid.int2 => 2,
-        oid.int4, oid.float4, oid.date, oid.oid => 4,
-        oid.int8, oid.float8, oid.time, oid.timestamp, oid.timestamptz => 8,
-        oid.timetz => 12,
-        oid.interval, oid.uuid => 16,
-        oid.name => 64,
-        else => -1,
-    };
-}
-
-/// The type modifier (atttypmod): a varchar(n)'s n + 4, a numeric(p,s)'s
-/// (p << 16 | s) + 4, a time's or timestamp's fractional digits; -1 for
-/// none.
-pub fn typeMod(t: Type) i32 {
-    if (t.logical == .array) return typeMod(t.elementType());
-    return switch (t.logical) {
-        .varchar, .char => if (t.length) |n| if (n < std.math.maxInt(i32) - 4) @as(i32, @intCast(n)) + 4 else -1 else -1,
-        .numeric => if (t.precision) |p| ((@as(i32, p) << 16) | (t.scale orelse 0)) + 4 else -1,
-        .time, .time_tz, .timestamp, .timestamp_tz => if (t.scale) |s| s else -1,
-        else => -1,
-    };
-}
+const pg_types = xqlite.pg_types;
+const Oid = pg_types.Oid;
+const oid = pg_types.oid;
+const elementOf = pg_types.elementOf;
+const ofType = pg_types.ofType;
+const typeMod = pg_types.typeMod;
 
 // ================================================================== output
 
@@ -176,8 +48,7 @@ fn textOf(t: Type, v: Value, buf: *[xqlite.display.max_len]u8) ?[]const u8 {
     return xqlite.display.pgText(.{}, t, v, buf);
 }
 
-/// PostgreSQL's text of a double (display.floatText()).
-pub const floatText = xqlite.display.floatText;
+const floatText = xqlite.display.floatText;
 
 /// Whether a column of OID `o` can be sent in the binary format (an
 /// array if its elements can).
@@ -354,7 +225,7 @@ const repr = xqlite.repr;
 const decimal = xqlite.decimal;
 
 /// PostgreSQL's binary numeric (NBASE 10000 digits) of `v`: a key
-/// (dialect/decimal.zig) with the scale of its type, else the one it
+/// (pkg/decimal) with the scale of its type, else the one it
 /// carries; a number or a numeric's text.
 fn writeNumeric(o: *Out, t: Type, v: Value) error{ OutOfMemory, Unencodable }!void {
     var arena: std.heap.ArenaAllocator = .init(o.gpa);
@@ -434,113 +305,29 @@ pub fn decodeBinary(a: std.mem.Allocator, o: Oid, b: []const u8) DecodeError!Val
 
 // =================================================================== arrays
 
-/// An array's text (array_out()'s: `{1,2}`, `{{1},{2}}`, `[0:1]={1,2}`)
-/// read: its dimensions, lower bounds and elements (null for NULL).
-pub const ArrayText = struct {
-    ndim: usize = 0,
-    dims: [6]i32 = @splat(0),
-    lower: [6]i32 = @splat(1),
-    elems: std.ArrayList(?[]const u8) = .empty,
-};
-
-/// Read `z`, an array's text, into `out` (its elements unquoted in `a`);
-/// also an int2vector's or oidvector's `1 2` (from 0).
-pub fn readArray(a: std.mem.Allocator, z: []const u8, out: *ArrayText) error{ InvalidText, OutOfMemory }!void {
-    var i: usize = 0;
-    var nb: usize = 0;
-    var lbs: [6]i32 = @splat(1);
-    while (i < z.len and z[i] == '[') {
-        const close = std.mem.indexOfScalarPos(u8, z, i, ']') orelse return error.InvalidText;
-        const inner = z[i + 1 .. close];
-        const colon = std.mem.indexOfScalar(u8, inner, ':');
-        if (nb == 6) return error.InvalidText;
-        lbs[nb] = if (colon) |c| std.fmt.parseInt(i32, std.mem.trim(u8, inner[0..c], " "), 10) catch return error.InvalidText else 1;
-        nb += 1;
-        i = close + 1;
-    }
-    if (nb > 0) {
-        if (i >= z.len or z[i] != '=') return error.InvalidText;
-        i += 1;
-    }
-    if (i >= z.len or z[i] != '{') {
-        // A vector.
-        var it = std.mem.tokenizeScalar(u8, z, ' ');
-        while (it.next()) |w| try out.elems.append(a, w);
-        out.ndim = if (out.elems.items.len > 0) 1 else 0;
-        out.dims[0] = @intCast(out.elems.items.len);
-        out.lower[0] = 0;
-        return;
-    }
-    var depth: usize = 0;
-    var counts: [6]i32 = @splat(0);
-    var buf: std.ArrayList(u8) = .empty;
-    while (i < z.len) {
-        const c = z[i];
-        switch (c) {
-            '{' => {
-                if (depth == 6) return error.InvalidText;
-                if (depth > 0) counts[depth - 1] += 1;
-                counts[depth] = 0;
-                depth += 1;
-                if (depth > out.ndim) out.ndim = depth;
-                i += 1;
-            },
-            '}' => {
-                if (depth == 0) return error.InvalidText;
-                depth -= 1;
-                if (depth + 1 == out.ndim or counts[depth] > 0) out.dims[depth] = counts[depth];
-                i += 1;
-                if (depth == 0) break;
-            },
-            ',', ' ' => i += 1,
-            else => {
-                buf = .empty;
-                var quoted = false;
-                if (c == '"') {
-                    quoted = true;
-                    i += 1;
-                    while (i < z.len and z[i] != '"') : (i += 1) {
-                        if (z[i] == '\\' and i + 1 < z.len) i += 1;
-                        try buf.append(a, z[i]);
-                    }
-                    i += 1;
-                } else {
-                    while (i < z.len and z[i] != ',' and z[i] != '}') : (i += 1) {
-                        if (z[i] == '\\' and i + 1 < z.len) i += 1;
-                        try buf.append(a, z[i]);
-                    }
-                }
-                if (depth == 0) return error.InvalidText;
-                counts[depth - 1] += 1;
-                try out.elems.append(a, if (!quoted and std.ascii.eqlIgnoreCase(buf.items, "null")) null else buf.items);
-            },
-        }
-    }
-    if (out.elems.items.len == 0) out.ndim = 0;
-    for (0..nb) |d| out.lower[d] = lbs[d];
-}
+const pgarray = xqlite.pgtext.array;
 
 /// The binary form of array `z` (its text), of elements of OID `elem`
 /// and type `t`: the dimensions, then each element's binary form.
 fn writeArray(o: *Out, elem: Oid, t: Type, z: []const u8) error{ OutOfMemory, Unencodable }!void {
     var arena: std.heap.ArenaAllocator = .init(o.gpa);
     defer arena.deinit();
-    var x: ArrayText = .{};
-    readArray(arena.allocator(), z, &x) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Unencodable;
+    // Also an int2vector's or oidvector's `1 2` (from 0).
+    const x = pgarray.parse(arena.allocator(), z, true) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Unencodable;
     const at = o.buf.items.len;
     try o.int(i32, 0);
-    try o.int(i32, @intCast(x.ndim));
+    try o.int(i32, x.ndim);
     var nulls = false;
-    for (x.elems.items) |e| {
+    for (x.elems) |e| {
         if (e == null) nulls = true;
     }
     try o.int(i32, @intFromBool(nulls));
     try o.int(u32, elem);
     for (0..x.ndim) |d| {
-        try o.int(i32, x.dims[d]);
+        try o.int(i32, @intCast(x.dims[d]));
         try o.int(i32, x.lower[d]);
     }
-    for (x.elems.items) |e| {
+    for (x.elems) |e| {
         if (e) |s| try writeBinary(o, elem, t, .{ .text = s }) else try o.int(i32, -1);
     }
     const len: i32 = @intCast(o.buf.items.len - at - 4);
@@ -570,39 +357,20 @@ fn decodeArray(a: std.mem.Allocator, elem: Oid, b: []const u8) DecodeError![]con
         dims[d] = try Rd.int(b, &r);
         lower[d] = try Rd.int(b, &r);
         if (dims[d] < 0) return error.InvalidBinary;
-        count *= @intCast(dims[d]);
+        count = std.math.mul(usize, count, @intCast(dims[d])) catch return error.InvalidBinary;
     }
+    // Each element has its length (4 bytes) at least.
+    if (count > (b.len - r) / 4) return error.InvalidBinary;
     const eo = if (elem_oid != 0) elem_oid else elem;
-    var out: std.ArrayList(u8) = .empty;
-    if (count == 0) return "{}";
-    for (0..n) |d| if (lower[d] != 1) {
-        for (0..n) |k| try out.print(a, "[{d}:{d}]", .{ lower[k], lower[k] + dims[k] - 1 });
-        try out.append(a, '=');
-        break;
-    };
-    // Each element, with the braces of its dimensions around.
-    var idx: [6]i32 = @splat(0);
-    for (0..n) |_| try out.append(a, '{');
-    for (0..count) |k| {
-        if (k > 0) {
-            // Close and open the dimensions that wrapped.
-            var d: usize = n - 1;
-            var closes: usize = 0;
-            while (true) {
-                idx[d] += 1;
-                if (idx[d] < dims[d]) break;
-                idx[d] = 0;
-                closes += 1;
-                if (d == 0) break;
-                d -= 1;
-            }
-            for (0..closes) |_| try out.append(a, '}');
-            try out.append(a, ',');
-            for (0..closes) |_| try out.append(a, '{');
-        }
+    var x: pgarray.Array = .{ .ndim = @intCast(n), .elems = try a.alloc(?[]const u8, count) };
+    for (0..n) |d| {
+        x.dims[d] = @intCast(dims[d]);
+        x.lower[d] = lower[d];
+    }
+    for (x.elems) |*e| {
         const len = try Rd.int(b, &r);
         if (len < 0) {
-            try out.appendSlice(a, "NULL");
+            e.* = null;
             continue;
         }
         const ul: usize = @intCast(len);
@@ -610,33 +378,15 @@ fn decodeArray(a: std.mem.Allocator, elem: Oid, b: []const u8) DecodeError![]con
         const v = try decodeBinary(a, eo, b[r .. r + ul]);
         r += ul;
         var buf: [64]u8 = undefined;
-        const text: []const u8 = switch (v) {
+        e.* = switch (v) {
             .integer => |i| if (eo == oid.bool) (if (i != 0) "t" else "f") else try std.fmt.allocPrint(a, "{d}", .{i}),
             .float => |f| try a.dupe(u8, floatText(&buf, f, eo == oid.float4)),
             .text => |z| z,
             .blob => |bl| if (eo == oid.uuid) try std.fmt.allocPrint(a, "{x}-{x}-{x}-{x}-{x}", .{ bl[0..4], bl[4..6], bl[6..8], bl[8..10], bl[10..16] }) else try std.fmt.allocPrint(a, "\\x{x}", .{bl}),
-            .null => "NULL",
+            .null => null,
         };
-        try writeElem(a, &out, text);
     }
-    for (0..n) |_| try out.append(a, '}');
-    return out.items;
-}
-
-/// An element as array_out() writes it: quoted if empty, NULL, or with
-/// blanks or `{},"\`.
-fn writeElem(a: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
-    var quote = s.len == 0 or std.ascii.eqlIgnoreCase(s, "null");
-    for (s) |c| if (std.mem.indexOfScalar(u8, "{},\"\\ \t\n\r\x0b\x0c", c) != null) {
-        quote = true;
-    };
-    if (!quote) return out.appendSlice(a, s);
-    try out.append(a, '"');
-    for (s) |c| {
-        if (c == '"' or c == '\\') try out.append(a, '\\');
-        try out.append(a, c);
-    }
-    try out.append(a, '"');
+    return pgarray.write(a, &x);
 }
 
 /// PostgreSQL's boolean input: t, true, yes, on, 1 and f, false, no, off,
@@ -724,24 +474,6 @@ fn parseUuid(z: []const u8) ?[16]u8 {
     return if (n == 16 and half == null) b else null;
 }
 
-test floatText {
-    var buf: [64]u8 = undefined;
-    const t = std.testing;
-    try t.expectEqualStrings("100", floatText(&buf, 100, false));
-    try t.expectEqualStrings("1.5", floatText(&buf, 1.5, false));
-    try t.expectEqualStrings("0.0001", floatText(&buf, 0.0001, false));
-    try t.expectEqualStrings("1e-05", floatText(&buf, 0.00001, false));
-    try t.expectEqualStrings("1e+20", floatText(&buf, 1e20, false));
-    try t.expectEqualStrings("-1.25e+15", floatText(&buf, -1.25e15, false));
-    try t.expectEqualStrings("0.1", floatText(&buf, 0.1, false));
-    try t.expectEqualStrings("0.1", floatText(&buf, @as(f32, 0.1), true));
-    var tenth: f64 = 0.1;
-    _ = &tenth;
-    try t.expectEqualStrings("0.30000000000000004", floatText(&buf, tenth + 0.2, false));
-    try t.expectEqualStrings("NaN", floatText(&buf, std.math.nan(f64), false));
-    try t.expectEqualStrings("-Infinity", floatText(&buf, -std.math.inf(f64), false));
-}
-
 test "decode parameters" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -777,7 +509,7 @@ test "type modifiers" {
     try t.expectEqual(@as(Oid, 1007), ofType(.{ .logical = .array, .element = .int4 }));
     try t.expectEqual(@as(Oid, 1009), ofType(.{ .logical = .array }));
     try t.expectEqual(@as(i32, 24), typeMod(.{ .logical = .array, .element = .varchar, .length = 20 }));
-    try t.expectEqual(Type{ .logical = .array, .element = .int8 }, typeOf(1016).?);
+    try t.expectEqual(Type{ .logical = .array, .element = .int8 }, pg_types.typeOf(1016).?);
 }
 
 test "arrays in the binary format" {

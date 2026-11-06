@@ -1,7 +1,7 @@
 //! PostgreSQL's interval (postgres/repr.zig's descriptor and the choices
 //! overload.zig makes for it).
 //!
-//! An interval is a BLOB (src/dialect/interval.zig: a key of its length,
+//! An interval is a BLOB (pkg/datetime/src/interval.zig: a key of its length,
 //! then its fields), in an older database's TEXT column its text; the
 //! functions of intervals take both. A comparison compares the keys
 //! (xq_pg_iv_key(): '1 mon' = '30 days'), of a BLOB column with a bound

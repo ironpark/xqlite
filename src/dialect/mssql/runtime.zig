@@ -14,7 +14,7 @@
 //! (minutes), datetimeoffset(n) with '+hh:mm'.
 
 const std = @import("std");
-const calendar = @import("../calendar.zig");
+const calendar = @import("datetime").calendar;
 const api = @import("../../vdbe/api.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");

@@ -45,6 +45,14 @@
         // dependency but std.
         .sqllex = .{ .path = "pkg/sql/lexer" },
         .sqlparse = .{ .path = "pkg/sql/parse" },
+        // Libraries of the dialects with no dependency but std: exact
+        // numbers, calendar and interval, JSON and JSONB, PostgreSQL's
+        // regular expressions, PostgreSQL's array text.
+        .decimal = .{ .path = "pkg/decimal" },
+        .datetime = .{ .path = "pkg/datetime" },
+        .json = .{ .path = "pkg/json" },
+        .regex = .{ .path = "pkg/regex" },
+        .pgtext = .{ .path = "pkg/pgtext" },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
         //    // When updating this field to a new URL, be sure to delete the corresponding
@@ -101,6 +109,11 @@
         "pkg/uuid",
         "pkg/sql/lexer",
         "pkg/sql/parse",
+        "pkg/decimal",
+        "pkg/datetime",
+        "pkg/json",
+        "pkg/regex",
+        "pkg/pgtext",
         "LICENSE",
         "README.md",
     },

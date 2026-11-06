@@ -9,7 +9,7 @@
 //! nothing is freed piecemeal.
 
 const std = @import("std");
-const json_text = @import("../json_text.zig");
+const json_text = @import("json").text;
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ Syntax, OutOfMemory };

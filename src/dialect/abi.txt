@@ -678,7 +678,7 @@ xq_postgres_uuidv7 0 qualified
 xq_postgres_uuidv7 1 qualified
 xq_postgres_uuid_extract_version 1 qualified deterministic
 xq_postgres_uuid_extract_timestamp 1 qualified deterministic
-# interval BLOB (src/dialect/interval.zig, postgres/datetime.zig)
+# interval BLOB (pkg/datetime/src/interval.zig, postgres/datetime.zig)
 xq_pg_iv 1 engine deterministic
 xq_pg_iv_text 1 engine deterministic
 xq_pg_iv_out 1 engine
@@ -716,7 +716,7 @@ xq_postgres_isfinite 1 qualified deterministic
 xq_pg_jsonb_bin 1 engine deterministic subtype result_subtype
 xq_pg_jsonb_text 1 engine deterministic subtype result_subtype
 xq_pg_jsonb_key 1 engine deterministic subtype result_subtype
-# numeric: decimal_sql.zig's keys (dialect/decimal.zig) and PostgreSQL's functions of them
+# numeric: decimal_sql.zig's keys (pkg/decimal) and PostgreSQL's functions of them
 xq_dec 1 engine deterministic
 xq_dec 3 engine deterministic
 xq_dec_key 1 engine deterministic

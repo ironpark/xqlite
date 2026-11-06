@@ -24,7 +24,7 @@
 //!    xq_pg_num_precision(), xq_pg_num_scale() of (catalog type, SQLite
 //!    type): the columns of information_schema.columns;
 //!  - xq_pg_regex(s, pattern, flags): the regular expression operators
-//!    `~` and `~*` as the schema of older databases calls them (regex.zig,
+//!    `~` and `~*` as the schema of older databases calls them (pkg/regex/src/pike.zig,
 //!    kept as it was); the frontend now writes regexp.zig's xq_pg_re().
 
 const std = @import("std");
@@ -83,7 +83,7 @@ pub const functions = [_]int.FuncDef{
 };
 
 const decimal_sql = @import("../decimal_sql.zig");
-const decimal_math = @import("../decimal_math.zig");
+const decimal_math = @import("decimal").math;
 
 pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_bool", 1, det, boolFunc),
@@ -349,7 +349,7 @@ fn widthBucketFunc(ctx: *Context, argv: []*Mem) void {
     api.resultInt64(ctx, r + 1);
 }
 
-/// width_bucket()'s errors, numerics' (decimal_math.zig).
+/// width_bucket()'s errors, numerics' (pkg/decimal/src/math.zig).
 fn bucketError(ctx: *Context, err: decimal_math.Error) void {
     const state, const msg = decimal_math.errorInfo(err).?;
     api.resultErrorState(ctx, .{ .sqlstate = state }, msg);
@@ -761,7 +761,7 @@ fn numScaleFunc(ctx: *Context, argv: []*Mem) void {
 
 /// xq_pg_regex(s, pattern, flags): `s ~ pattern` (flags ''), `s ~*
 /// pattern` (flags 'i'): whether `s` has a match of POSIX regular
-/// expression `pattern` anywhere (regex.zig's syntax). `!~` and `!~*`
+/// expression `pattern` anywhere (pkg/regex/src/pike.zig's syntax). `!~` and `!~*`
 /// are its NOT. The older databases' schema calls it; its meaning stays
 /// (the frontend writes regexp.zig's xq_pg_re()).
 fn regexFunc(ctx: *Context, argv: []*Mem) void {
@@ -784,7 +784,7 @@ fn regexFunc(ctx: *Context, argv: []*Mem) void {
     api.resultInt64(ctx, @intFromBool(r));
 }
 
-const regex = @import("regex.zig");
+const regex = @import("regex").pike;
 
 // ================================================================ tests
 

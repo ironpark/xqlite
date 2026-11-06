@@ -7,7 +7,7 @@
 //!    `[last - 1]`, `.**`;
 //!  - filters `? (predicate)`: `==`, `!=`/`<>`, `<`, `<=`, `>`, `>=`,
 //!    `&&`, `||`, `!`, `exists (path)`, `starts with`, `like_regex`
-//!    (regex.zig, flags i and q), `is unknown`;
+//!    (pkg/regex/src/pike.zig, flags i and q), `is unknown`;
 //!  - arithmetic `+ - * / %` of single numbers, unary `-`/`+`;
 //!  - methods type(), size(), double(), abs(), floor(), ceiling().
 //!
@@ -19,7 +19,7 @@
 const std = @import("std");
 const json = @import("json.zig");
 const int = @import("../../sql/sqlite_int.zig");
-const regex = @import("regex.zig");
+const regex = @import("regex").pike;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 

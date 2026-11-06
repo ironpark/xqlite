@@ -171,9 +171,7 @@ pub fn build(b: *std.Build) void {
     // binary runs the tests of its root module only).
     test_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
-    test_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
-    test_step.dependOn(&b.addRunArtifact(uuidTests(b, target, optimize, test_filters)).step);
-    test_step.dependOn(&b.addRunArtifact(sqllexTests(b, target, optimize, test_filters)).step);
+    for (leafTestsAll(b, target, optimize, test_filters)) |t| test_step.dependOn(&b.addRunArtifact(t).step);
     test_step.dependOn(&b.addRunArtifact(sqlparseTests(b, target, optimize, test_filters)).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_mod, .filters = test_filters })).step);
 
@@ -301,12 +299,10 @@ pub fn build(b: *std.Build) void {
 
     // The packages alone, without the engine: quick to build when working
     // on the VFS, the pager or the b-tree. `zig build test` runs these too.
-    const pkg_step = b.step("test-pkg", "Run the tests of pkg/vfs, pkg/storage, pkg/base, pkg/uuid, pkg/sql/lexer and pkg/sql/parse alone (no engine build)");
+    const pkg_step = b.step("test-pkg", "Run the tests of the packages under pkg/ alone (no engine build)");
     pkg_step.dependOn(&b.addRunArtifact(vfsTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(storageTests(b, target, optimize, test_filters)).step);
-    pkg_step.dependOn(&b.addRunArtifact(baseTests(b, target, optimize, test_filters)).step);
-    pkg_step.dependOn(&b.addRunArtifact(uuidTests(b, target, optimize, test_filters)).step);
-    pkg_step.dependOn(&b.addRunArtifact(sqllexTests(b, target, optimize, test_filters)).step);
+    for (leafTestsAll(b, target, optimize, test_filters)) |t| pkg_step.dependOn(&b.addRunArtifact(t).step);
     pkg_step.dependOn(&b.addRunArtifact(sqlparseTests(b, target, optimize, test_filters)).step);
     pkg_step.dependOn(&b.addRunArtifact(journal_tests).step);
 
@@ -409,11 +405,8 @@ pub fn build(b: *std.Build) void {
         b.addTest(.{ .root_module = wasi_exe_mod, .filters = test_filters }),
         vfsTests(b, wasi_target, optimize, test_filters),
         storageTests(b, wasi_target, optimize, test_filters),
-        baseTests(b, wasi_target, optimize, test_filters),
-        uuidTests(b, wasi_target, optimize, test_filters),
-        sqllexTests(b, wasi_target, optimize, test_filters),
         sqlparseTests(b, wasi_target, optimize, test_filters),
-    }) |t| {
+    } ++ leafTestsAll(b, wasi_target, optimize, test_filters)) |t| {
         const run = b.addSystemCommand(&.{ "wasmtime", "run", "--dir", "." });
         run.addArtifactArg(t);
         // The tests make their temporary directories under .zig-cache/tmp.
@@ -1044,15 +1037,12 @@ fn engineImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 fn engineImportsWith(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, config_module: *std.Build.Module) []const std.Build.Module.Import {
-    return b.allocator.dupe(std.Build.Module.Import, &.{
+    return b.allocator.dupe(std.Build.Module.Import, &([_]std.Build.Module.Import{
         vfsImport(b, target, optimize),
         storageImport(b, target, optimize),
-        baseImport(b, target, optimize),
-        uuidImport(b, target, optimize),
-        sqllexImport(b, target, optimize),
         sqlparseImport(b, target, optimize),
         .{ .name = "xqlite_config", .module = config_module },
-    }) catch @panic("OOM");
+    } ++ leafImports(b, target, optimize))) catch @panic("OOM");
 }
 
 /// xqlite's version (build.zig.zon), `xqlite.config.version`.
@@ -1150,20 +1140,45 @@ fn buildConfig(b: *std.Build) Config {
     return config.?;
 }
 
-/// The shared helpers (pkg/base, a path dependency) for `target`, as the
-/// import `xqlite_base` of a module; the storage package gets the same
+/// The packages with no dependency but std: the name of the path
+/// dependency (build.zig.zon) and of the module it exports. The engine
+/// imports each module under that name; `zig build test`, test-pkg and
+/// test-wasi run the tests of each.
+const LeafPkg = struct { dep: []const u8, module: []const u8 };
+/// The helpers every layer shares; the storage package imports the same
 /// module (see storageImport()).
-fn baseImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
-    const dep = b.dependency("xqlite_base", .{ .target = target, .optimize = optimize });
-    return .{ .name = "xqlite_base", .module = dep.module("xqlite_base") };
+const base_pkg: LeafPkg = .{ .dep = "xqlite_base", .module = "xqlite_base" };
+/// The dialects' lexers; sqlparse imports it too.
+const sqllex_pkg: LeafPkg = .{ .dep = "sqllex", .module = "sql/lexer" };
+const leaf_pkgs = [_]LeafPkg{
+    base_pkg,
+    sqllex_pkg,
+    .{ .dep = "uuid", .module = "uuid" }, // RFC 9562 UUIDs (PostgreSQL's uuid)
+    .{ .dep = "decimal", .module = "decimal" }, // exact numbers (numeric)
+    .{ .dep = "datetime", .module = "datetime" }, // calendar, interval
+    .{ .dep = "json", .module = "json" }, // JSON escaping, SQLite's JSONB
+    .{ .dep = "regex", .module = "regex" }, // PostgreSQL's regular expressions
+    .{ .dep = "pgtext", .module = "pgtext" }, // PostgreSQL's array text
+};
+
+/// The module of `p` for `target`, as an import of the same name.
+fn leafImport(b: *std.Build, p: LeafPkg, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
+    const dep = b.dependency(p.dep, .{ .target = target, .optimize = optimize });
+    return .{ .name = p.module, .module = dep.module(p.module) };
 }
 
-/// The base package's tests for `target`: those `zig build test` runs in
-/// pkg/base.
-fn baseTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
-    const dep = b.dependency("xqlite_base", .{ .target = target, .optimize = optimize });
+fn leafImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) [leaf_pkgs.len]std.Build.Module.Import {
+    var out: [leaf_pkgs.len]std.Build.Module.Import = undefined;
+    for (leaf_pkgs, &out) |p, *o| o.* = leafImport(b, p, target, optimize);
+    return out;
+}
+
+/// The tests of `p` for `target`: those `zig build test` runs in its
+/// directory.
+fn leafTests(b: *std.Build, p: LeafPkg, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
+    const dep = b.dependency(p.dep, .{ .target = target, .optimize = optimize });
     return b.addTest(.{
-        .name = "base-test",
+        .name = b.fmt("{s}-test", .{p.dep}),
         .root_module = b.createModule(.{
             .root_source_file = dep.path("src/root.zig"),
             .target = target,
@@ -1173,33 +1188,10 @@ fn baseTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     });
 }
 
-/// The uuid package (pkg/uuid, a path dependency) for `target`, as the
-/// import `uuid` of a module (the PostgreSQL dialect's uuid type).
-fn uuidImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
-    const dep = b.dependency("uuid", .{ .target = target, .optimize = optimize });
-    return .{ .name = "uuid", .module = dep.module("uuid") };
-}
-
-/// The uuid package's tests for `target`: those `zig build test` runs in
-/// pkg/uuid.
-fn uuidTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
-    const dep = b.dependency("uuid", .{ .target = target, .optimize = optimize });
-    return b.addTest(.{
-        .name = "uuid-test",
-        .root_module = b.createModule(.{
-            .root_source_file = dep.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        .filters = filters,
-    });
-}
-
-/// The sqllex package (pkg/sql/lexer, a path dependency) for `target`, as
-/// the import `sqllex` of a module (the dialects' lexers).
-fn sqllexImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
-    const dep = b.dependency("sqllex", .{ .target = target, .optimize = optimize });
-    return .{ .name = "sql/lexer", .module = dep.module("sql/lexer") };
+fn leafTestsAll(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) [leaf_pkgs.len]*std.Build.Step.Compile {
+    var out: [leaf_pkgs.len]*std.Build.Step.Compile = undefined;
+    for (leaf_pkgs, &out) |p, *o| o.* = leafTests(b, p, target, optimize, filters);
+    return out;
 }
 
 /// The sqlparse package (pkg/sql/parse, a path dependency) for `target`,
@@ -1219,22 +1211,7 @@ fn sqlparseTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .root_source_file = dep.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{sqllexImport(b, target, optimize)},
-        }),
-        .filters = filters,
-    });
-}
-
-/// The sqllex package's tests for `target`: those `zig build test` runs
-/// in pkg/sql/lexer.
-fn sqllexTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, filters: []const []const u8) *std.Build.Step.Compile {
-    const dep = b.dependency("sqllex", .{ .target = target, .optimize = optimize });
-    return b.addTest(.{
-        .name = "sqllex-test",
-        .root_module = b.createModule(.{
-            .root_source_file = dep.path("src/root.zig"),
-            .target = target,
-            .optimize = optimize,
+            .imports = &.{leafImport(b, sqllex_pkg, target, optimize)},
         }),
         .filters = filters,
     });
@@ -1242,7 +1219,7 @@ fn sqllexTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 /// The storage layer (pkg/storage, a path dependency) for `target`, as
 /// the import `xqlite_storage` of a module. It imports the modules of
-/// vfsImport() and baseImport() with the same arguments: the build system
+/// vfsImport() and leafImport(base_pkg) with the same arguments: the build system
 /// makes one dependency of pkg/vfs and of pkg/base for the root and the
 /// storage package alike.
 fn storageImport(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) std.Build.Module.Import {
@@ -1260,7 +1237,7 @@ fn storageTests(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             .root_source_file = dep.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{ vfsImport(b, target, optimize), baseImport(b, target, optimize) },
+            .imports = &.{ vfsImport(b, target, optimize), leafImport(b, base_pkg, target, optimize) },
         }),
         .filters = filters,
     });

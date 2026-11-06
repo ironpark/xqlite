@@ -29,6 +29,7 @@ const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const pgc = @import("pgcatalog.zig");
 const state = @import("state.zig");
+const pg_array = @import("array.zig");
 
 const Context = dfunc.Context;
 const Mem = dfunc.Mem;
@@ -314,51 +315,20 @@ fn quoteLiteralFunc(ctx: *Context, argv: []*Mem, nullable: bool) void {
     c.text(out.items);
 }
 
-/// The elements of a one-dimensional array literal: each its text, null
-/// for NULL.
-const Elements = struct {
-    z: []const u8,
-    i: usize = 0,
-
-    fn next(it: *Elements, gpa: Allocator, buf: *std.ArrayList(u8)) !??[]const u8 {
-        const z = it.z;
-        if (it.i == 0) {
-            while (it.i < z.len and z[it.i] != '{') it.i += 1;
-            if (it.i >= z.len) return null;
-            it.i += 1;
-        }
-        while (it.i < z.len and (z[it.i] == ' ' or z[it.i] == ',')) it.i += 1;
-        if (it.i >= z.len or z[it.i] == '}') return null;
-        buf.clearRetainingCapacity();
-        if (z[it.i] == '"') {
-            it.i += 1;
-            while (it.i < z.len and z[it.i] != '"') : (it.i += 1) {
-                if (z[it.i] == '\\' and it.i + 1 < z.len) it.i += 1;
-                try buf.append(gpa, z[it.i]);
-            }
-            it.i += 1;
-            return @as(?[]const u8, buf.items);
-        }
-        const start = it.i;
-        while (it.i < z.len and z[it.i] != ',' and z[it.i] != '}') it.i += 1;
-        const e = std.mem.trim(u8, z[start..it.i], " ");
-        if (std.ascii.eqlIgnoreCase(e, "NULL")) return @as(?[]const u8, null);
-        return @as(?[]const u8, e);
-    }
-};
-
 /// xq_pg_array_position(array, v): the 1-based place of `v` in the array
 /// literal (numbers compared as numbers), NULL if it is not there.
 fn arrayPositionFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0]) or isNull(argv[1])) return api.resultNull(ctx);
     const z = dfunc.text(ctx, argv[0]) orelse return;
     const v = dfunc.text(ctx, argv[1]) orelse return;
-    var it = Elements{ .z = z };
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(dfunc.gpa(ctx));
-    var n: i64 = 1;
-    while (it.next(dfunc.gpa(ctx), &buf) catch return api.resultErrorNomem(ctx)) |e| : (n += 1) {
-        if (e) |x| if (eql(x, v)) return api.resultInt64(ctx, n);
+    var mem: [1024]u8 = undefined;
+    var bf: std.heap.BufferFirstAllocator = .init(&mem, dfunc.gpa(ctx));
+    var arena: std.heap.ArenaAllocator = .init(bf.allocator());
+    defer arena.deinit();
+    // Not an array (nor an int2vector's `1 2`): not there.
+    const x = pg_array.parse(arena.allocator(), z, true) catch |e| return if (e == error.OutOfMemory) api.resultErrorNomem(ctx) else api.resultNull(ctx);
+    for (x.elems, 1..) |e, n| {
+        if (e) |y| if (eql(y, v)) return api.resultInt64(ctx, @intCast(n));
     }
     api.resultNull(ctx);
 }

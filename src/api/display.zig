@@ -64,8 +64,8 @@ pub fn text(viewer: Dialect, settings: Settings, t: Type, v: Value, buf: *[max_l
 /// The text of `v` that needs memory of its own (in `gpa`, which the
 /// caller frees it with), null for the others (text()), in every dialect
 /// but SQLite's, which shows the blob: a jsonb value stored as SQLite's
-/// JSONB (a blob, dialect/jsonb.zig) is its JSON text with PostgreSQL's
-/// spacing (`{"a": 1}`); a numeric key (dialect/decimal.zig) its digits
+/// JSONB (a blob, pkg/json/src/jsonb.zig) is its JSON text with PostgreSQL's
+/// spacing (`{"a": 1}`); a numeric key (pkg/decimal) its digits
 /// (as text() writes them, of any length); an interval[]'s elements in
 /// the IntervalStyle of `settings`. dialect/repr.zig.
 pub fn textAlloc(gpa: std.mem.Allocator, viewer: Dialect, settings: Settings, t: Type, v: Value) error{OutOfMemory}!?[]u8 {

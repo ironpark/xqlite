@@ -62,6 +62,14 @@ pub fn expr(arena: std.mem.Allocator, pos: u32, end: u32, kind: Kind) error{OutO
     return new(arena, Expr, .{ .pos = pos, .end = end, .kind = kind });
 }
 
+/// Integer constant `v` at `pos`: its digits, under a unary minus if it is
+/// negative (the minimum i64 too).
+pub fn intConst(arena: std.mem.Allocator, pos: u32, v: i64) error{OutOfMemory}!*Expr {
+    const x = try expr(arena, pos, pos, .{ .integer = try std.fmt.allocPrint(arena, "{d}", .{@abs(v)}) });
+    if (v >= 0) return x;
+    return expr(arena, pos, pos, .{ .unary = .{ .op = .neg, .e = x } });
+}
+
 // =========================================================== expressions
 
 pub const Expr = struct {

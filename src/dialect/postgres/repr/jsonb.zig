@@ -1,6 +1,6 @@
 //! PostgreSQL's jsonb (postgres/repr.zig's descriptor and the choices
 //! overload.zig makes for it): SQLite's JSONB in a BLOB column
-//! (src/dialect/jsonb.zig's canonical form), normalized text in the TEXT
+//! (pkg/json/src/jsonb.zig's canonical form), normalized text in the TEXT
 //! column of an older table. Comparisons, IN, BETWEEN and ORDER BY
 //! compare the sort keys (xq_pg_jsonb_key()), which read either.
 

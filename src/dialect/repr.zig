@@ -1,6 +1,6 @@
 //! The values a dialect stores as a BLOB of a form of its own, and their
-//! text: a numeric's key (decimal.zig), a uuid's 16 bytes, an interval's
-//! key and fields (interval.zig), jsonb as SQLite's JSONB (jsonb.zig).
+//! text: a numeric's key (pkg/decimal), a uuid's 16 bytes, an interval's
+//! key and fields (pkg/datetime/src/interval.zig), jsonb as SQLite's JSONB (pkg/json/src/jsonb.zig).
 //! One entry per logical type (forms), which the display layer
 //! (api/display.zig) and the wire servers read: a value is shown by the
 //! dialect a client speaks (the viewer), whichever dialect stored it, so
@@ -63,11 +63,11 @@ pub fn textAlloc(gpa: Allocator, viewer: Dialect, t: Type, b: []const u8) Alloca
 }
 
 // ============================================================ numeric
-// A numeric key (decimal.zig: a BLOB in the order of the numbers) is its
+// A numeric key (pkg/decimal: a BLOB in the order of the numbers) is its
 // digits in every dialect but SQLite's: with the scale of its type, else
 // the display scale the key carries, else its own digits.
 
-const decimal = @import("decimal.zig");
+const decimal = @import("decimal");
 
 /// The scale a numeric key of type `t` shows with in `viewer`: its type's
 /// (Oracle's NUMBER(p,s) drops trailing zeros), else its own.
@@ -109,14 +109,14 @@ fn uuidText(viewer: Dialect, t: Type, b: []const u8, buf: *[max_len]u8) ?[]const
 }
 
 // =========================================================== interval
-// An interval BLOB (interval.zig) as PostgreSQL's clients see it: for the
+// An interval BLOB (pkg/datetime/src/interval.zig) as PostgreSQL's clients see it: for the
 // shell and the wire servers (their binary format, their parameters).
 
-pub const Interval = @import("interval.zig").Interval;
+pub const Interval = @import("datetime").interval.Interval;
 
 /// The interval BLOB `b` is, null if it is none.
 pub fn intervalOf(b: []const u8) ?Interval {
-    return @import("interval.zig").decode(b);
+    return @import("datetime").interval.decode(b);
 }
 
 /// The text of interval BLOB `b` in PostgreSQL; the text of an older
@@ -142,7 +142,7 @@ pub fn intervalText(iv: Interval, buf: *[max_len]u8) ?[]const u8 {
 }
 
 /// PostgreSQL's IntervalStyle (a session's: valuetext.Settings).
-pub const IntervalStyle = @import("interval.zig").Style;
+pub const IntervalStyle = @import("datetime").interval.Style;
 
 /// The text of `iv` in IntervalStyle `style`; null if PostgreSQL is not
 /// in the build.
@@ -162,11 +162,11 @@ pub fn intervalArrayText(gpa: Allocator, z: []const u8, style: IntervalStyle) Al
 const pg_datetime = @import("postgres/datetime.zig");
 
 // ============================================================== jsonb
-// jsonb as SQLite's JSONB (jsonb.zig): its JSON text with PostgreSQL's
+// jsonb as SQLite's JSONB (pkg/json/src/jsonb.zig): its JSON text with PostgreSQL's
 // spacing (`{"a": 1}`).
 
 fn jsonbTextAlloc(gpa: Allocator, viewer: Dialect, t: Type, b: []const u8) Allocator.Error!?[]u8 {
     _ = viewer;
     _ = t;
-    return @import("jsonb.zig").text(gpa, b);
+    return @import("json").jsonb.text(gpa, b);
 }

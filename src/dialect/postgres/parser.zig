@@ -1526,7 +1526,7 @@ pub const Parser = struct {
     }
 
     /// The DEFAULT (`default`) or generated value of a numeric column, as
-    /// the column stores it (decimal.zig's key): a number or a string
+    /// the column stores it (pkg/decimal's key): a number or a string
     /// constant its key as a blob constant (so that the schema keeps a
     /// constant sqlite3 reads), another value through xq_dec_key(e, p, s).
     fn numericStored(p: *Parser, ty: types.TypeName, e: *Expr, default: bool) Error!*Expr {
@@ -1534,7 +1534,7 @@ pub const Parser = struct {
         if (e.kind == .null) return e;
         const mods = numericMods(ty);
         if (default) if (constantText(e)) |lit| {
-            const decimal = @import("../decimal.zig");
+            const decimal = @import("decimal");
             var buf: [256]u8 = undefined;
             const text = if (lit.neg) std.fmt.bufPrint(&buf, "-{s}", .{lit.text}) catch lit.text else lit.text;
             if (decimal.parse(p.arena, text)) |d0| {
@@ -3561,14 +3561,6 @@ pub const Parser = struct {
         const names = try a.alloc(Name, 1);
         names[0] = .{ .text = name.text, .pos = pos };
         const col = try tree.expr(a, pos, pos, .{ .column = names });
-        const int_ = struct {
-            fn lit(arena: Allocator, at: u32, v: i64) Error!*Expr {
-                const digits = try std.fmt.allocPrint(arena, "{d}", .{@abs(v)});
-                const x = try tree.expr(arena, at, at, .{ .integer = digits });
-                if (v >= 0) return x;
-                return tree.expr(arena, at, at, .{ .unary = .{ .op = .neg, .e = x } });
-            }
-        };
         switch (info.check) {
             .none => return null,
             .smallint_range, .integer_range => {
@@ -3577,18 +3569,18 @@ pub const Parser = struct {
                 const hi: i64 = if (small) 32767 else 2147483647;
                 return .{
                     .name = if (small) "smallint out of range" else "integer out of range",
-                    .kind = .{ .check = try tree.expr(a, pos, pos, .{ .between = .{ .e = col, .not = false, .lo = try int_.lit(a, pos, lo), .hi = try int_.lit(a, pos, hi) } }) },
+                    .kind = .{ .check = try tree.expr(a, pos, pos, .{ .between = .{ .e = col, .not = false, .lo = try tree.intConst(a, pos, lo), .hi = try tree.intConst(a, pos, hi) } }) },
                 };
             },
-            // A key of decimal.zig (of numeric(p, s) as is).
+            // A key of pkg/decimal (of numeric(p, s) as is).
             .numeric => {
                 var args: std.ArrayList(*Expr) = .empty;
                 try args.append(a, col);
-                if (numericMods(ty)) |m| for (m) |v| try args.append(a, try int_.lit(a, pos, v));
+                if (numericMods(ty)) |m| for (m) |v| try args.append(a, try tree.intConst(a, pos, v));
                 return .{ .name = "invalid input syntax for type numeric", .kind = .{ .check = try p.call(pos, "xq_dec_valid", null, args.items) } };
             },
             .boolean => {
-                const items = try p.list(&.{ try int_.lit(a, pos, 0), try int_.lit(a, pos, 1) });
+                const items = try p.list(&.{ try tree.intConst(a, pos, 0), try tree.intConst(a, pos, 1) });
                 return .{ .name = "invalid input syntax for type boolean", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .in_list = .{ .e = col, .not = false, .items = items } }) } };
             },
             .length => {
@@ -3597,18 +3589,18 @@ pub const Parser = struct {
                 const len = try p.call(pos, "length", null, &.{col});
                 return .{
                     .name = try std.fmt.allocPrint(a, "value too long for type {s}({d})", .{ tname, n }),
-                    .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .le, .l = len, .r = try int_.lit(a, pos, n) } }) },
+                    .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .le, .l = len, .r = try tree.intConst(a, pos, n) } }) },
                 };
             },
             .json => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{col}) } },
             // A JSONB blob, as json_valid(x, 8) checks one (sqlite3 too).
-            .jsonb => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{ col, try int_.lit(a, pos, 8) }) } },
+            .jsonb => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{ col, try tree.intConst(a, pos, 8) }) } },
             .array => return .{ .name = "malformed array literal", .kind = .{ .check = try p.call(pos, "xq_pg_array_valid", null, &.{col}) } },
             // 16 bytes (a value stored goes through xq_pg_uuid(), which
             // fails on what is not one; this keeps out other blobs).
             .uuid => {
                 const len = try p.call(pos, "length", null, &.{col});
-                return .{ .name = "invalid input syntax for type uuid", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .eq, .l = len, .r = try int_.lit(a, pos, 16) } }) } };
+                return .{ .name = "invalid input syntax for type uuid", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .eq, .l = len, .r = try tree.intConst(a, pos, 16) } }) } };
             },
             .interval => return .{ .name = "invalid input syntax for type interval", .kind = .{ .check = try p.call(pos, "xq_pg_iv_valid", null, &.{col}) } },
         }

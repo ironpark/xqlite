@@ -2,8 +2,8 @@
 //! JSON the dialects store: reading a blob node by node, its strict
 //! validity, its strings and numbers decoded, its text written with
 //! PostgreSQL's spacing, and the headers of the nodes a writer emits.
-//! Outside the dialect directories, as the value display (api/display.zig)
-//! and the wire server read it too.
+//! A package of its own (pkg/json), as the value display
+//! (src/api/display.zig) and the wire server read it too.
 //!
 //! A node is a header and a payload. The header's first byte has the
 //! element type in its low four bits and the payload size in its high
@@ -18,7 +18,7 @@
 //! order, duplicate keys): every reader here takes it.
 
 const std = @import("std");
-const json_text = @import("json_text.zig");
+const json_text = @import("text.zig");
 const Allocator = std.mem.Allocator;
 
 pub const NULL: u8 = 0;

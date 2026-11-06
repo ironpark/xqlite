@@ -25,7 +25,7 @@ flowchart TD
 | 소스 파일 | 핵심 역할 |
 | --- | --- |
 | `frontend.zig` | T-SQL 방언 진입점 및 세션 상태 바인딩. |
-| `lexer.zig` | 대괄호 식별자(`[...]`), 유니코드 리터럴(`N'...'`), 로컬 변수(`@var`), `GO` 구분자 토큰화. |
+| `lexer.zig` | 공통 렉서(`sqllex.Lexer`)의 T-SQL 규칙: 대괄호 식별자(`[...]`), 유니코드 리터럴(`N'...'`), 로컬 변수(`@var`), `GO` 구분자, 키워드 표(예약어는 `reserved` 등급). |
 | `parser.zig` | SELECT (`TOP`, `OFFSET...FETCH`), DML, 스키마 문장 파싱. |
 | `merge.zig` | `MERGE` 문을 SQLite 원자적 복합 DML 시퀀스로 변환. |
 | `output.zig` | `OUTPUT INSERTED.* / DELETED.*` 절 처리를 위한 가상 임시 버퍼 연결. |

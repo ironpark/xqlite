@@ -692,9 +692,9 @@ fn secondStatement(h: *Handler, sql: []const u8) error{OutOfMemory}!?usize {
     const rest = it.rest;
     var at: usize = 0;
     while (at < rest.len) {
-        const t = xqlite.tokenize.getToken(rest[at..].ptr);
+        const t = xqlite.sqlite_lexer.getToken(rest, at);
         switch (t.tk) {
-            xqlite.tokenize.TK.SPACE, xqlite.tokenize.TK.COMMENT, xqlite.tokenize.TK.SEMI => at += t.len,
+            xqlite.TK.SPACE, xqlite.TK.COMMENT, xqlite.TK.SEMI => at += t.len,
             else => break,
         }
     }

@@ -10,7 +10,7 @@ Oracle 방언 구현체는 `src/dialect/oracle/`에 위치하며, Oracle 고유�
 
 ```mermaid
 flowchart TD
-    SQL["Oracle SQL 입력"] --> Lexer["lexer.zig (대문자 폴딩 / 빈 문자열 감지)"]
+    SQL["Oracle SQL 입력"] --> Lexer["lexer.zig (sqllex 규칙 / 대문자 폴딩)"]
     Lexer --> Parser["parser.zig (재귀 하강 파서)"]
     Parser --> SpecialOps{"특수 시맨틱 처리"}
     SpecialOps --> TxTail["transactions.zig (DML autocommit 오프 꼬리 코드)"]
@@ -25,7 +25,7 @@ flowchart TD
 | 소스 파일 | 핵심 역할 |
 | --- | --- |
 | `frontend.zig` | Oracle 방언 진입점 및 세션 훅 바인딩. |
-| `lexer.zig` | 따옴표 없는 식별자의 대문자 변환(Upper-case folding), `''` 빈 문자열의 NULL 치환 토큰화. |
+| `lexer.zig` | 공통 렉서(`sqllex.Lexer`)의 Oracle 규칙: `q'[..]'` 인용, `:바인드`, `f`/`d` 접미사, `/` 줄, 키워드 표(예약어는 `reserved` 등급). 토큰의 값(`value()`)은 따옴표 없는 식별자를 대문자로 접습니다. |
 | `parser.zig` | DDL, DML, `(+)` 조인, `CONNECT BY` 계층 구문 파서. |
 | `dates.zig` | `SYSDATE` 및 날짜 사칙연산(`+ n`, `- n`, `d1 - d2`)의 VDBE 식 변환기. |
 | `merge.zig` | `MERGE INTO` 및 `INSERT ALL`의 복합 DML 변환. |

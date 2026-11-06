@@ -156,12 +156,12 @@ pub fn createTable(s: *Parser, temp: bool, or_replace: bool) Error!void {
 }
 
 fn isTableConstraintStart(s: *Parser) bool {
-    if (s.c.peek().kind != .ident) return false;
+    if (s.c.peek().kind != .word) return false;
     if (!s.c.isAnyKw(&.{ "PRIMARY", "UNIQUE", "KEY", "INDEX", "FULLTEXT", "SPATIAL", "CONSTRAINT", "FOREIGN", "CHECK", "PERIOD" })) return false;
     // `key INT` is a column called key.
     if (s.c.isKw("KEY") or s.c.isKw("INDEX")) {
         const n = s.c.peekAt(1);
-        return n.is("(") or n.kind == .ident or n.kind == .quoted_ident;
+        return n.kind == .lparen or n.kind == .word or n.kind == .quoted_ident;
     }
     return true;
 }
@@ -242,7 +242,7 @@ fn indexColumns(s: *Parser) Error![]const IndexCol {
         const n = try s.nameOf(try s.anyName());
         if (s.c.eatOp("(")) {
             // A prefix length: the whole value is indexed.
-            if (s.c.peek().kind != .integer) return s.c.syntaxError();
+            if (!lexer.isInteger(s.c.peek())) return s.c.syntaxError();
             s.c.skip();
             try s.c.expectOp(")");
         }
@@ -374,7 +374,7 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
         } else if (try s.c.optKws(&.{ "ON", "UPDATE" })) {
             if (!(s.c.eatKw("CURRENT_TIMESTAMP") or s.c.eatKw("NOW") or s.c.eatKw("LOCALTIMESTAMP") or s.c.eatKw("LOCALTIME"))) return s.c.syntaxError();
             if (s.c.eatOp("(")) {
-                if (s.c.peek().kind == .integer) s.c.skip();
+                if (lexer.isInteger(s.c.peek())) s.c.skip();
                 try s.c.expectOp(")");
             }
             c.on_update = true;
@@ -396,7 +396,7 @@ fn columnDefinition(s: *Parser, t: *Table) Error!void {
 }
 
 fn collName(s: *Parser, t: Token) Error![]const u8 {
-    if (t.kind == .string) return lexer.stringValue(s.a, t, false);
+    if (lexer.isString(t)) return lexer.stringValue(s.a, s.c.sql, t, false);
     return s.nameText(t);
 }
 
@@ -404,7 +404,7 @@ fn collName(s: *Parser, t: Token) Error![]const u8 {
 fn charsetClause(s: *Parser, c: *Column) Error!void {
     if (s.c.eatKw("CHARACTER")) try s.c.expectKw("SET") else s.c.skip();
     const t0 = s.c.peek();
-    if (t0.kind != .ident and t0.kind != .quoted_ident and t0.kind != .string) return s.c.syntaxError();
+    if (t0.kind != .word and t0.kind != .quoted_ident and !lexer.isString(t0)) return s.c.syntaxError();
     s.c.skip();
     const cs = try collName(s, t0);
     if (c.collation == null) {
@@ -415,22 +415,17 @@ fn charsetClause(s: *Parser, c: *Column) Error!void {
 /// The type of a column definition (and its type attributes).
 fn columnType(s: *Parser, c: *Column) Error!types.Type {
     const t0 = s.c.peek();
-    if (t0.kind != .ident) return s.c.syntaxError();
+    if (t0.kind != .word) return s.c.syntaxError();
     s.c.skip();
     var ty: types.Type = undefined;
-    const W = struct {
-        fn is(t: Token, w: []const u8) bool {
-            return t.isKw(w);
-        }
-    };
-    if (W.is(t0, "SERIAL")) {
+    if (t0.isKw("SERIAL")) {
         c.autoinc = true;
         c.not_null = true;
         c.unique = true;
         return .{ .base = .bigint, .unsigned = true };
     }
-    if (W.is(t0, "BOOL") or W.is(t0, "BOOLEAN")) return .{ .base = .tinyint, .len = 1 };
-    if (W.is(t0, "JSON")) {
+    if (t0.isKw("BOOL") or t0.isKw("BOOLEAN")) return .{ .base = .tinyint, .len = 1 };
+    if (t0.isKw("JSON")) {
         c.json = true;
         c.collation = "BINARY";
         return .{ .base = .longtext };
@@ -444,20 +439,20 @@ fn columnType(s: *Parser, c: *Column) Error!types.Type {
         .{ "VARCHARACTER", .varchar }, .{ "CLOB", .longtext },    .{ "RAW", .varbinary },
     };
     var base: ?types.Base = null;
-    for (aliases) |al| if (W.is(t0, al[0])) {
+    inline for (aliases) |al| if (t0.isKw(al[0])) {
         base = al[1];
     };
-    if (base == null) base = types.baseByName(t0.text);
-    var b = base orelse return s.c.fail(null, "xqlite: unknown data type '{s}'", .{t0.text});
+    if (base == null) base = types.baseByName(s.c.text(t0));
+    var b = base orelse return s.c.fail(null, "xqlite: unknown data type '{s}'", .{s.c.text(t0)});
     // Two-word types.
-    if (W.is(t0, "DOUBLE")) _ = s.c.eatKw("PRECISION");
-    if (W.is(t0, "NATIONAL")) {
+    if (t0.isKw("DOUBLE")) _ = s.c.eatKw("PRECISION");
+    if (t0.isKw("NATIONAL")) {
         if (s.c.eatKw("VARCHAR")) {
             b = .varchar;
         } else if (!(s.c.eatKw("CHAR") or s.c.eatKw("CHARACTER"))) return s.c.syntaxError();
     }
     if (b == .char and (s.c.eatKw("VARYING"))) b = .varchar;
-    if (W.is(t0, "LONG")) {
+    if (t0.isKw("LONG")) {
         if (s.c.eatKw("VARBINARY")) b = .mediumblob else _ = s.c.eatKw("VARCHAR");
     }
     if (b == .char and s.c.eatKw("BYTE")) b = .binary;
@@ -513,7 +508,7 @@ fn columnType(s: *Parser, c: *Column) Error!types.Type {
             try charsetClause(s, c);
         } else if (s.c.eatKw("ASCII") or s.c.eatKw("UNICODE")) {} else break;
     }
-    if (ty.base == .tinyint and b == .tinyint and W.is(t0, "BOOL")) ty.len = 1;
+    if (ty.base == .tinyint and b == .tinyint and t0.isKw("BOOL")) ty.len = 1;
     return ty;
 }
 
@@ -527,8 +522,8 @@ pub fn dataType(s: *Parser, name: Name) Error!struct { types.Type, bool } {
 }
 
 fn intArg(s: *Parser) Error!u32 {
-    if (s.c.peek().kind != .integer) return s.c.syntaxError();
-    const v = std.fmt.parseInt(u32, s.c.peek().text, 10) catch return s.c.syntaxError();
+    if (!lexer.isInteger(s.c.peek())) return s.c.syntaxError();
+    const v = std.fmt.parseInt(u32, s.c.text(s.c.peek()), 10) catch return s.c.syntaxError();
     s.c.skip();
     return v;
 }
@@ -540,7 +535,7 @@ fn defaultValue(s: *Parser, c: *Column) Error!void {
     if (t.isAnyKw(&.{ "CURRENT_TIMESTAMP", "NOW", "LOCALTIMESTAMP", "LOCALTIME" })) {
         s.c.skip();
         if (s.c.eatOp("(")) {
-            if (s.c.peek().kind == .integer) s.c.skip();
+            if (lexer.isInteger(s.c.peek())) s.c.skip();
             try s.c.expectOp(")");
         }
         c.default = try s.func(pos, "datetime", &.{try s.str(pos, "now")});
@@ -565,7 +560,7 @@ fn defaultValue(s: *Parser, c: *Column) Error!void {
         c.default_shown = v;
         return;
     }
-    if (t.kind == .string or (t.kind == .ident and t.text[0] == '_' and s.c.peekAt(1).kind == .string)) {
+    if (lexer.isString(t) or (t.kind == .word and s.c.text(t)[0] == '_' and lexer.isString(s.c.peekAt(1)))) {
         const v = try s.stringLiteral();
         c.default = try s.mk(pos, .{ .string = v });
         c.default_shown = v;
@@ -587,27 +582,22 @@ fn defaultValue(s: *Parser, c: *Column) Error!void {
         neg = true;
     } else _ = s.c.eatOp("+");
     const n = s.c.peek();
-    switch (n.kind) {
-        .integer, .float => {
-            s.c.skip();
-            const lit = try s.mk(n.start, if (n.kind == .integer) .{ .integer = n.text } else .{ .float = n.text });
-            c.default = if (neg) try s.mk(pos, .{ .unary = .{ .op = .neg, .e = lit } }) else lit;
-            c.default_shown = try std.fmt.allocPrint(s.a, "{s}{s}", .{ if (neg) "-" else "", n.text });
-        },
-        .hex => {
-            s.c.skip();
-            const d = (try lexer.hexDigits(s.a, n)) orelse return s.c.syntaxErrorAt(n);
-            c.default = try s.mk(pos, .{ .blob = d });
-            c.default_shown = n.text;
-        },
-        .bit => {
-            s.c.skip();
-            const v = lexer.bitValue(n) orelse 0;
-            c.default = try s.int_(pos, v);
-            c.default_shown = try std.fmt.allocPrint(s.a, "{d}", .{v});
-        },
-        else => return s.c.syntaxError(),
-    }
+    if (lexer.isHex(n)) {
+        s.c.skip();
+        const d = (try lexer.hexDigits(s.a, s.c.sql, n)) orelse return s.c.syntaxErrorAt(n);
+        c.default = try s.mk(pos, .{ .blob = d });
+        c.default_shown = s.c.text(n);
+    } else if (lexer.isBits(n)) {
+        s.c.skip();
+        const v = lexer.bitValue(s.c.sql, n) orelse 0;
+        c.default = try s.int_(pos, v);
+        c.default_shown = try std.fmt.allocPrint(s.a, "{d}", .{v});
+    } else if (n.kind == .integer or n.kind == .float) {
+        s.c.skip();
+        const lit = try s.mk(n.start, if (n.kind == .integer) .{ .integer = s.c.text(n) } else .{ .float = s.c.text(n) });
+        c.default = if (neg) try s.mk(pos, .{ .unary = .{ .op = .neg, .e = lit } }) else lit;
+        c.default_shown = try std.fmt.allocPrint(s.a, "{s}{s}", .{ if (neg) "-" else "", s.c.text(n) });
+    } else return s.c.syntaxError();
 }
 
 fn tableOptions(s: *Parser, t: ?*Table) Error!void {
@@ -633,18 +623,17 @@ fn tableOptions(s: *Parser, t: ?*Table) Error!void {
             }
         } else if (s.c.eatKw("AUTO_INCREMENT")) {
             _ = s.c.eatOp("=");
-            if (s.c.peek().kind != .integer) return s.c.syntaxError();
-            const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+            if (!lexer.isInteger(s.c.peek())) return s.c.syntaxError();
+            const v = std.fmt.parseInt(i64, s.c.text(s.c.peek()), 10) catch return s.c.syntaxError();
             s.c.skip();
             if (t) |tt| tt.auto_increment_start = v;
-        } else if (s.c.peek().kind == .ident) {
+        } else if (s.c.peek().kind == .word) {
             // ENGINE=x, COMMENT='x', ROW_FORMAT=x, ...: accepted.
             s.c.skip();
             _ = s.c.eatOp("=");
-            switch (s.c.peek().kind) {
-                .ident, .quoted_ident, .string, .integer, .float => s.c.skip(),
-                else => return s.c.syntaxError(),
-            }
+            const v = s.c.peek();
+            if (!(lexer.isIdent(v) or lexer.isString(v) or lexer.isInteger(v) or v.kind == .float)) return s.c.syntaxError();
+            s.c.skip();
         } else return s.c.syntaxError();
         _ = s.c.eatOp(",");
     }
@@ -977,8 +966,8 @@ pub fn createSequence(s: *Parser) Error!void {
 fn signedInt(s: *Parser) Error!i64 {
     const neg = s.c.eatOp("-");
     if (!neg) _ = s.c.eatOp("+");
-    if (s.c.peek().kind != .integer) return s.c.syntaxError();
-    const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+    if (!lexer.isInteger(s.c.peek())) return s.c.syntaxError();
+    const v = std.fmt.parseInt(i64, s.c.text(s.c.peek()), 10) catch return s.c.syntaxError();
     s.c.skip();
     return if (neg) -v else v;
 }
@@ -1019,7 +1008,7 @@ pub fn alterTable(s: *Parser) Error!void {
             return endAlter(s);
         }
         if (s.c.isAnyKw(&.{ "PRIMARY", "CONSTRAINT", "FOREIGN", "CHECK" })) {
-            return s.c.fail(null, "xqlite: ALTER TABLE ADD {s} is not supported", .{s.c.peek().text});
+            return s.c.fail(null, "xqlite: ALTER TABLE ADD {s} is not supported", .{s.c.text(s.c.peek())});
         }
         _ = s.c.eatKw("COLUMN");
         const if_not_exists = try s.c.ifNotExists();
@@ -1044,7 +1033,7 @@ pub fn alterTable(s: *Parser) Error!void {
             return endAlter(s);
         }
         if (s.c.isAnyKw(&.{ "PRIMARY", "FOREIGN", "CONSTRAINT", "CHECK" })) {
-            return s.c.fail(null, "xqlite: ALTER TABLE DROP {s} is not supported", .{s.c.peek().text});
+            return s.c.fail(null, "xqlite: ALTER TABLE DROP {s} is not supported", .{s.c.text(s.c.peek())});
         }
         _ = s.c.eatKw("COLUMN");
         const if_exists = try s.c.ifExists();

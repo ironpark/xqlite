@@ -79,7 +79,7 @@ fn comment(ps: *Parser) Error!void {
     const kind = ps.c.peek();
     const is_column = kind.isKw("column");
     if (!(is_column or kind.isKw("table") or kind.isKw("view"))) {
-        return ps.c.fail(kind.start, "xqlite: COMMENT ON {s} is not supported", .{kind.text});
+        return ps.c.fail(kind.start, "xqlite: COMMENT ON {s} is not supported", .{ps.val(kind)});
     }
     ps.c.skip();
     var names: std.ArrayList(Name) = .empty;
@@ -100,7 +100,7 @@ fn comment(ps: *Parser) Error!void {
     var value: ?[]const u8 = null;
     const v = ps.c.peek();
     if (v.kind == .string) {
-        value = v.text;
+        value = ps.val(v);
         ps.c.skip();
     } else if (!ps.c.eatKw("null")) return ps.c.syntaxError();
     if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
@@ -455,7 +455,7 @@ fn set(ps: *Parser) Error!void {
             ps.c.skip();
             name = "search_path";
             var out: std.ArrayList(u8) = .empty;
-            try quoteIdent(&out, a, t.text);
+            try quoteIdent(&out, a, ps.val(t));
             value = out.items;
         } else {
             name = (try ps.anyName()).text;
@@ -465,8 +465,8 @@ fn set(ps: *Parser) Error!void {
             if (eql(name, "timezone") and ps.c.isKw("interval") and ps.c.peekAt(1).kind == .string) {
                 // SET TIME ZONE INTERVAL '+00:00' HOUR TO MINUTE: the offset.
                 ps.c.skip();
-                value = ps.c.advance().text;
-                while (ps.c.peek().kind == .ident) ps.c.skip();
+                value = ps.val(ps.c.advance());
+                while (ps.c.peek().kind == .word) ps.c.skip();
             } else if (eql(name, "timezone") and ps.c.eatKw("local")) {} else if (ps.c.eatKw("default")) {} else {
                 const p_ = findParam(name);
                 var out: std.ArrayList(u8) = .empty;
@@ -475,13 +475,13 @@ fn set(ps: *Parser) Error!void {
                     const t = ps.c.peek();
                     if (n > 0) try out.appendSlice(a, ", ");
                     switch (t.kind) {
-                        .ident, .qident => if (p_ != null and p_.?.list) try quoteIdent(&out, a, t.text) else try out.appendSlice(a, t.text),
-                        .string => if (p_ != null and p_.?.list) try quoteIdent(&out, a, t.text) else try out.appendSlice(a, t.text),
-                        .integer, .float => try out.appendSlice(a, t.text),
-                        .op => if (eql(t.text, "-") and (ps.c.peekAt(1).kind == .integer or ps.c.peekAt(1).kind == .float)) {
+                        .word, .quoted_ident => if (p_ != null and p_.?.list) try quoteIdent(&out, a, ps.val(t)) else try out.appendSlice(a, ps.val(t)),
+                        .string => if (p_ != null and p_.?.list) try quoteIdent(&out, a, ps.val(t)) else try out.appendSlice(a, ps.val(t)),
+                        .integer, .float => try out.appendSlice(a, ps.val(t)),
+                        .op => if (eql(ps.val(t), "-") and (ps.c.peekAt(1).kind == .integer or ps.c.peekAt(1).kind == .float)) {
                             ps.c.skip();
                             try out.append(a, '-');
-                            try out.appendSlice(a, ps.c.peek().text);
+                            try out.appendSlice(a, ps.val(ps.c.peek()));
                         } else return ps.c.syntaxError(),
                         else => return ps.c.syntaxError(),
                     }

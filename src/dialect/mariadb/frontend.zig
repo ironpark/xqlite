@@ -92,15 +92,15 @@ pub fn translateError(p: *int.Parse) int.Oom!void {
 fn keepsWarnings(s: *Parser) bool {
     const n = s.c.peekAt(1);
     if (s.c.isKw("SHOW")) return n.isAnyKw(&.{ "WARNINGS", "ERRORS", "COUNT" });
-    if (s.c.isKw("SELECT") and n.kind == .sys_var) {
-        return std.ascii.endsWithIgnoreCase(n.text, "warning_count") or std.ascii.endsWithIgnoreCase(n.text, "error_count");
+    if (s.c.isKw("SELECT") and (n.kind == .variable and n.sub == .system)) {
+        return std.ascii.endsWithIgnoreCase(s.c.text(n), "warning_count") or std.ascii.endsWithIgnoreCase(s.c.text(n), "error_count");
     }
     return false;
 }
 
 pub fn statement(s: *Parser) Error!void {
     const t = s.c.peek();
-    if (t.isKw("SELECT") or t.isKw("WITH") or t.is("(") or t.isKw("VALUES")) {
+    if (t.isKw("SELECT") or t.isKw("WITH") or t.kind == .lparen or t.isKw("VALUES")) {
         return s.lowerStmt(.{ .select = try s.selectStmt() });
     }
     if (t.isKw("INSERT") or t.isKw("REPLACE")) return s.lowerStmt(try dml.insert(s));
@@ -178,7 +178,7 @@ fn create(s: *Parser) Error!void {
     }
     if (s.c.isKw("VIEW")) return ddl.createView(s, or_replace, temp);
     if (s.c.isAnyKw(&.{ "TRIGGER", "PROCEDURE", "FUNCTION", "EVENT" })) {
-        return s.c.fail(null, "xqlite: CREATE {s} is not supported in the MariaDB dialect", .{s.c.peek().text});
+        return s.c.fail(null, "xqlite: CREATE {s} is not supported in the MariaDB dialect", .{s.c.text(s.c.peek())});
     }
     return s.c.syntaxError();
 }

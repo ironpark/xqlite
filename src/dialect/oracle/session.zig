@@ -164,13 +164,13 @@ fn alterSession(ps: *Parser) Error!bool {
     var schema: ?Name = null;
     while (ps.c.peekAt(k).kind != .eof) : (k += 1) {
         const t = ps.c.peekAt(k);
-        if (t.kind == .ident and eq(t.text, "CURRENT_SCHEMA") and ps.c.peekAt(k + 1).isOp("=")) {
+        if (t.isKw("CURRENT_SCHEMA") and ps.c.peekAt(k + 1).isOp(ps.c.sql, "=")) {
             const v = ps.c.peekAt(k + 2);
-            if (v.kind != .ident and v.kind != .qident) {
+            if (v.kind != .word and v.kind != .quoted_ident) {
                 ps.c.skipN(k + 2);
                 return ps.missing("ORA-02248: invalid option for ALTER SESSION");
             }
-            schema = .{ .text = v.text, .pos = v.start };
+            schema = try ps.nameOf(v);
         }
     }
     const s = schema orelse return false;

@@ -56,37 +56,24 @@ const ctypes = @import("../../sql/types.zig");
 const Children = @import("jtype.zig").Children;
 
 const Token = lexer.Token;
+const keywords = lexer.keywords;
 const Name = tree.Name;
 const Expr = tree.Expr;
 const Allocator = std.mem.Allocator;
 
 pub const Error = error{ ParseFailed, OutOfMemory };
 
-/// PostgreSQL's reserved keywords and the "type_func_name" ones: neither
-/// can be a column name or a bare alias.
-const reserved = words.folded(.lower, &.{
-    "all",           "analyse",      "analyze",      "and",               "any",          "array",
-    "as",            "asc",          "asymmetric",   "both",              "case",         "cast",
-    "check",         "collate",      "column",       "constraint",        "create",       "current_catalog",
-    "current_date",  "current_role", "current_time", "current_timestamp", "current_user", "default",
-    "deferrable",    "desc",         "distinct",     "do",                "else",         "end",
-    "except",        "false",        "fetch",        "for",               "foreign",      "from",
-    "grant",         "group",        "having",       "in",                "initially",    "intersect",
-    "into",          "lateral",      "leading",      "limit",             "localtime",    "localtimestamp",
-    "not",           "null",         "offset",       "on",                "only",         "or",
-    "order",         "placing",      "primary",      "references",        "returning",    "select",
-    "session_user",  "some",         "symmetric",    "system_user",       "table",        "then",
-    "to",            "trailing",     "true",         "union",             "unique",       "user",
-    "using",         "variadic",     "when",         "where",             "window",       "with",
-    // type_func_name_keyword
-    "authorization", "binary",       "collation",    "concurrently",      "cross",        "current_schema",
-    "freeze",        "full",         "ilike",        "inner",             "is",           "isnull",
-    "join",          "left",         "like",         "natural",           "notnull",      "outer",
-    "overlaps",      "right",        "similar",      "tablesample",       "verbose",
-});
-
+/// Whether `word` (in lower case) is one of PostgreSQL's reserved
+/// keywords or its "type_func_name" ones: neither can be a column name or
+/// a bare alias (lexer.lex.keywords).
 pub fn isReserved(word: []const u8) bool {
-    return reserved.has(word);
+    const k = keywords.lookup(word);
+    return k != 0 and keywords.class(k) == .reserved and eql(word, keywords.name(k));
+}
+
+/// Whether the token `t` is a reserved word (isReserved()).
+fn reservedKw(t: Token) bool {
+    return t.kind == .word and keywords.class(t.kw) == .reserved;
 }
 
 /// The words that start a type in a typed literal (`DATE '2024-01-01'`).
@@ -150,6 +137,8 @@ pub const Parser = struct {
     c: Cursor,
     /// Offset after the statement (and its semicolon).
     end: usize,
+    /// The decoded values of the tokens (val()).
+    values: lexer.Values,
     /// The statement being compiled, for what depends on the schema; null
     /// to parse without it (schema names other than public and pg_temp
     /// are then unknown, catalog views are tables).
@@ -179,6 +168,8 @@ pub const Parser = struct {
     /// be resolved again).
     srf_refs: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
     srf_count: u32 = 0,
+    /// The operators' parser's state (exprAbove()).
+    pratt: sqlparse.pratt.State = .{},
 
     /// Lex the statement that starts at `pos` (blank text and leading
     /// semicolons are skipped), its strings as `options` read them (a
@@ -187,39 +178,46 @@ pub const Parser = struct {
     /// tokens but eof. A lexical error fails with its message and offset
     /// in `lex_error`.
     pub fn init(arena: Allocator, src: [:0]const u8, pos: usize, lex_error: ?*LexError, options: Options) Error!Parser {
-        var l = lexer.Lexer.init(arena, src, pos);
-        l.standard_strings = options.standard_strings;
-        var toks: std.ArrayList(Token) = .empty;
-        var end: usize = src.len;
-        while (true) {
-            const t = l.next() catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
-                error.LexFailed => {
-                    if (lex_error) |e| e.* = .{ .fields = l.err, .pos = l.err_pos, .state = l.err_state };
-                    return error.ParseFailed;
-                },
-            };
-            if (t.kind == .semi) {
-                if (toks.items.len == 0) continue;
-                end = t.end;
-                try toks.append(arena, .{ .kind = .eof, .start = t.start, .end = t.start, .text = "" });
-                break;
-            }
-            try toks.append(arena, t);
-            if (t.kind == .eof) break;
-        }
-        return .{ .arena = arena, .c = .{ .arena = arena, .sql = src, .src = .init(operatorSyntax(toks.items)) }, .end = end };
+        var f: lexer.LexFailure = .{ .pos = 0 };
+        const st = lexer.statement(arena, src, pos, options.standard_strings, &f) catch |err| switch (err) {
+            error.OutOfMemory => |e| return e,
+            error.LexFailed => {
+                if (lex_error) |e| e.* = .{ .fields = f.fields, .pos = f.pos, .state = f.state };
+                return error.ParseFailed;
+            },
+        };
+        return .{
+            .arena = arena,
+            .c = .{ .arena = arena, .sql = src, .src = .init(operatorSyntax(src, st.toks)) },
+            .end = st.end,
+            .values = st.values,
+        };
+    }
+
+    /// The value of token `t`: a word folded to lower case, a quoted
+    /// identifier's name, a string's value (escapes decoded), a number's
+    /// decimal digits, a parameter's number, an operator itself.
+    pub fn val(p: *const Parser, t: Token) []const u8 {
+        return lexer.value(p.c.sql, &p.values, t);
+    }
+
+    /// Whether `t` is an operator of PostgreSQL's (`[`, `]`, `:` and
+    /// `::` are tokens of their own).
+    fn isOperator(sql: []const u8, t: Token) bool {
+        if (t.kind != .op) return false;
+        const op = t.text(sql);
+        return !(eql(op, "[") or eql(op, "]") or eql(op, ":") or eql(op, "::"));
     }
 
     /// `OPERATOR(pg_catalog.~)` (psql writes it) is the operator itself.
-    fn operatorSyntax(toks: []Token) []Token {
+    fn operatorSyntax(sql: []const u8, toks: []Token) []Token {
         var out: usize = 0;
         var i: usize = 0;
         while (i < toks.len) {
             if (toks[i].isKw("operator") and i + 1 < toks.len and toks[i + 1].kind == .lparen) {
                 var j = i + 2;
-                while (j + 1 < toks.len and toks[j].kind == .ident and toks[j + 1].kind == .dot) j += 2;
-                if (j + 1 < toks.len and toks[j].kind == .op and toks[j + 1].kind == .rparen) {
+                while (j + 1 < toks.len and toks[j].kind == .word and toks[j + 1].kind == .dot) j += 2;
+                if (j + 1 < toks.len and isOperator(sql, toks[j]) and toks[j + 1].kind == .rparen) {
                     toks[out] = toks[j];
                     out += 1;
                     i = j + 2;
@@ -506,9 +504,9 @@ pub const Parser = struct {
     /// that is not reserved.
     pub fn colId(p: *Parser) Error!Name {
         const t = p.c.peek();
-        if (t.kind == .qident or (t.kind == .ident and !isReserved(t.text))) {
+        if (t.kind == .quoted_ident or (t.kind == .word and !reservedKw(t))) {
             p.c.skip();
-            return .{ .text = t.text, .pos = t.start };
+            return .{ .text = p.val(t), .pos = t.start };
         }
         return p.c.syntaxError();
     }
@@ -516,9 +514,9 @@ pub const Parser = struct {
     /// Any identifier, reserved or not (after AS, after a dot).
     pub fn anyName(p: *Parser) Error!Name {
         const t = p.c.peek();
-        if (t.kind == .qident or t.kind == .ident) {
+        if (t.kind == .quoted_ident or t.kind == .word) {
             p.c.skip();
-            return .{ .text = t.text, .pos = t.start };
+            return .{ .text = p.val(t), .pos = t.start };
         }
         return p.c.syntaxError();
     }
@@ -556,7 +554,7 @@ pub const Parser = struct {
         const t = p.c.peek();
         if (t.kind != .integer) return p.c.syntaxError();
         p.c.skip();
-        const v = std.fmt.parseInt(i64, t.text, 10) catch return p.c.failState(t.start, .of("22003"), "value \"{s}\" is out of range for type bigint", .{t.text});
+        const v = std.fmt.parseInt(i64, p.val(t), 10) catch return p.c.failState(t.start, .of("22003"), "value \"{s}\" is out of range for type bigint", .{p.val(t)});
         return if (neg) -v else v;
     }
 
@@ -591,8 +589,8 @@ pub const Parser = struct {
     fn stmtInto(p: *Parser) Error!tree.Stmt {
         const t = p.c.peek();
         if (t.kind == .lparen) return .{ .select = try p.select() };
-        if (t.kind != .ident) return p.c.syntaxError();
-        const w = t.text;
+        if (t.kind != .word) return p.c.syntaxError();
+        const w = p.val(t);
         if (eql(w, "select") or eql(w, "values") or eql(w, "table")) return .{ .select = try p.select() };
         if (eql(w, "with")) {
             const with = try p.withClause();
@@ -899,21 +897,21 @@ pub const Parser = struct {
 
     fn target(p: *Parser) Error!tree.ResultCol {
         const t = p.c.peek();
-        if (t.isOp("*")) {
+        if (p.c.isOpTok(t, "*")) {
             p.c.skip();
             return .{ .star = t.start };
         }
         // t.* and s.t.*
-        if (t.kind == .ident or t.kind == .qident) {
+        if (t.kind == .word or t.kind == .quoted_ident) {
             var k: usize = 1;
             var names: std.ArrayList(Name) = .empty;
             while (p.c.peekAt(k).kind == .dot) : (k += 2) {
-                if (p.c.peekAt(k + 1).isOp("*")) {
+                if (p.c.isOpTok(p.c.peekAt(k + 1), "*")) {
                     var j: usize = 0;
                     while (j < k) : (j += 2) {
                         const nt = p.c.peekAt(j);
-                        if (nt.kind != .ident and nt.kind != .qident) break;
-                        try names.append(p.arena, .{ .text = nt.text, .pos = nt.start });
+                        if (nt.kind != .word and nt.kind != .quoted_ident) break;
+                        try names.append(p.arena, .{ .text = p.val(nt), .pos = nt.start });
                     } else {
                         const star = p.c.peekAt(k + 1);
                         p.c.skipN(k + 2);
@@ -922,7 +920,7 @@ pub const Parser = struct {
                     break;
                 }
                 const nt = p.c.peekAt(k + 1);
-                if (nt.kind != .ident and nt.kind != .qident) break;
+                if (nt.kind != .word and nt.kind != .quoted_ident) break;
             }
         }
         const e = try p.expr0();
@@ -931,9 +929,9 @@ pub const Parser = struct {
             label = try p.anyName();
         } else {
             const a = p.c.peek();
-            if (a.kind == .qident or (a.kind == .ident and !isReserved(a.text))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a))) {
                 p.c.skip();
-                label = .{ .text = a.text, .pos = a.start };
+                label = .{ .text = p.val(a), .pos = a.start };
             }
         }
         return .{ .expr = .{ .e = e, .alias = label, .name = if (label == null) p.columnName(e) else null } };
@@ -1067,7 +1065,7 @@ pub const Parser = struct {
             // LATERAL function(...): a function's arguments may name the
             // items before it anyway.
             const n1 = p.c.peekAt(1);
-            if (!((n1.kind == .ident or n1.kind == .qident) and p.c.peekAt(2).kind == .lparen)) return p.unsupported(t.start, "LATERAL");
+            if (!((n1.kind == .word or n1.kind == .quoted_ident) and p.c.peekAt(2).kind == .lparen)) return p.unsupported(t.start, "LATERAL");
             p.c.skip();
         }
         if (t.kind == .lparen) {
@@ -1170,7 +1168,7 @@ pub const Parser = struct {
             // (NULL::table, json): the record type is a table's.
             _ = try p.c.expect(.lparen);
             try p.c.expectKw("null");
-            if (!p.c.eat(.cast)) return p.unsupported(p.c.peek().start, "a record argument other than NULL::table");
+            if (!p.c.eatOp("::")) return p.unsupported(p.c.peek().start, "a record argument other than NULL::table");
             base = try p.qname();
             _ = try p.c.expect(.comma);
             args = try p.exprList();
@@ -1194,7 +1192,7 @@ pub const Parser = struct {
         var label: Name = name;
         var alias_cols: std.ArrayList(Name) = .empty;
         var defs: std.ArrayList(SrfCol) = .empty;
-        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .qident or (p.c.peek().kind == .ident and !isReserved(p.c.peek().text) and !p.c.isKw("on") and !p.c.isKw("using")));
+        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("on") and !p.c.isKw("using")));
         if (has_alias) {
             _ = p.c.eatKw("as");
             label = try p.colId();
@@ -1292,7 +1290,7 @@ pub const Parser = struct {
         }
         var label: Name = name;
         var alias_cols: []const Name = &.{};
-        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .qident or (p.c.peek().kind == .ident and !isReserved(p.c.peek().text) and !p.c.isKw("on") and !p.c.isKw("using")));
+        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("on") and !p.c.isKw("using")));
         if (has_alias) {
             _ = p.c.eatKw("as");
             label = try p.colId();
@@ -1351,7 +1349,7 @@ pub const Parser = struct {
         if (c.args.len != 2) return p.c.failState(name.pos, .of("42883"), "function pg_input_error_info with {d} arguments does not exist", .{c.args.len});
         var label: Name = name;
         var alias_cols: []const Name = &.{};
-        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .qident or (p.c.peek().kind == .ident and !isReserved(p.c.peek().text) and !p.c.isKw("on") and !p.c.isKw("using")));
+        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("on") and !p.c.isKw("using")));
         if (has_alias) {
             _ = p.c.eatKw("as");
             label = try p.colId();
@@ -1640,7 +1638,7 @@ pub const Parser = struct {
             while (true) {
                 const k = try p.expr0();
                 if (which == .object or which == .objectagg) {
-                    if (!p.c.eatKw("value") and !p.c.eat(.colon)) {
+                    if (!p.c.eatKw("value") and !p.c.eatOp(":")) {
                         if (which == .object and args.items.len == 0) {
                             // json_object(text[] [, text[]]): the function.
                             p.c.reset(save);
@@ -1745,9 +1743,9 @@ pub const Parser = struct {
             name = try p.colId();
         } else {
             const a = p.c.peek();
-            if (a.kind == .qident or (a.kind == .ident and !isReserved(a.text) and !a.isKw("set"))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a) and !a.isKw("set"))) {
                 p.c.skip();
-                name = .{ .text = a.text, .pos = a.start };
+                name = .{ .text = p.val(a), .pos = a.start };
             } else return null;
         }
         var al: tree.Alias = .{ .name = name };
@@ -1766,149 +1764,358 @@ pub const Parser = struct {
 
     /// A full expression (a_expr).
     pub fn expr0(p: *Parser) Error!*Expr {
-        return p.orExpr();
+        return p.exprAbove(0);
     }
 
-    fn orExpr(p: *Parser) Error!*Expr {
-        var l = try p.andExpr();
-        while (p.c.eatKw("or")) {
-            const r = try p.andExpr();
-            l = try p.binary(.@"or", l, r);
-        }
-        return l;
+    /// An expression of the operators above BETWEEN/IN/LIKE (|| and the
+    /// other operators, arithmetic, unary, postfix).
+    fn otherExpr(p: *Parser) Error!*Expr {
+        return p.exprAbove(lv.other);
     }
 
-    fn andExpr(p: *Parser) Error!*Expr {
-        var l = try p.notExpr();
-        while (p.c.eatKw("and")) {
-            const r = try p.notExpr();
-            l = try p.binary(.@"and", l, r);
-        }
-        return l;
+    /// A unary expression with its postfix operators and AT TIME ZONE.
+    fn unary(p: *Parser) Error!*Expr {
+        return p.exprAbove(lv.at);
     }
 
-    fn notExpr(p: *Parser) Error!*Expr {
-        const t = p.c.peek();
-        if (t.isKw("not")) {
-            p.c.skip();
-            const e = try p.notExpr();
-            return p.expr(t.start, .{ .unary = .{ .op = .not, .e = e } });
-        }
-        return p.isExpr();
-    }
+    // The precedence of the operators (sqlparse.pratt). The levels are
+    // those of the chain of functions this parser had (orExpr → andExpr
+    // → notExpr → ... → postfix), lowest first: OR, AND, NOT, IS (and
+    // ISNULL, NOTNULL), comparison, BETWEEN/IN/LIKE/SIMILAR, the other
+    // operators (||, ->, & ...), + -, * / %, ^ (left-associative),
+    // unary + - ~, AT TIME ZONE/AT LOCAL, and ::/COLLATE/[...]/.field.
+    //
+    // What the chain did besides precedence, kept:
+    //
+    //  - after a form whose right side is not an expression of the next
+    //    level (IS NULL, ISNULL, IN (...), = ANY (...), LIKE ANY (...)),
+    //    only operators of its level or looser follow (caps): `a IN (1)
+    //    + 1` ends at `+`;
+    //  - NOT is an operator where a_expr starts (and after AND, OR, NOT);
+    //    elsewhere (`x = NOT y`) its word is an operand (prefixAt);
+    //  - an operand of AT TIME ZONE has no AT TIME ZONE of its own:
+    //    `x AT TIME ZONE - z AT TIME ZONE w` is `(x AT TIME ZONE -z) AT
+    //    TIME ZONE w` (unary minus reads above its loop's `min` there);
+    //  - an operator that is not one of PostgreSQL's fails where the
+    //    level of the other operators would read it (unmatched()).
 
-    fn isExpr(p: *Parser) Error!*Expr {
-        var l = try p.cmpExpr();
-        while (true) {
-            if (p.c.eatKw("isnull")) {
-                l = try p.expr(l.pos, .{ .is_null = .{ .e = l, .not = false } });
-            } else if (p.c.eatKw("notnull")) {
-                l = try p.expr(l.pos, .{ .is_null = .{ .e = l, .not = true } });
-            } else if (p.c.eatKw("is")) {
-                const not = p.c.eatKw("not");
-                if (p.c.eatKw("null")) {
-                    l = try p.expr(l.pos, .{ .is_null = .{ .e = l, .not = not } });
-                } else if (p.c.eatKw("true")) {
-                    l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = true, .not = not } });
-                } else if (p.c.eatKw("false")) {
-                    l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = false, .not = not } });
-                } else if (p.c.eatKw("unknown")) {
-                    l = try p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = null, .not = not } });
-                } else if (p.c.eatKw("json")) {
-                    l = try p.isJson(l, not);
-                } else if (try p.c.optKws(&.{ "distinct", "from" })) {
-                    const r = try p.cmpExpr();
-                    // IS DISTINCT FROM is IS NOT, IS NOT DISTINCT FROM IS.
-                    l = try p.span(l, r, .{ .compare = .{ .op = if (not) .is else .is_not, .l = l, .r = r } });
-                } else return p.c.syntaxError();
-            } else break;
-        }
-        return l;
-    }
+    /// The levels (binding powers) of the operators.
+    const lv = struct {
+        const @"or": u8 = 10;
+        const @"and": u8 = 20;
+        const not: u8 = 30;
+        const is: u8 = 40;
+        const cmp: u8 = 50;
+        const pred: u8 = 60;
+        const other: u8 = 70;
+        const add: u8 = 80;
+        const mul: u8 = 90;
+        const pow: u8 = 100;
+        const at: u8 = 120;
+        const postfix: u8 = 130;
+    };
 
-    fn cmpOp(t: Token) ?tree.CmpOp {
-        if (t.kind != .op) return null;
-        const map = [_]struct { []const u8, tree.CmpOp }{
-            .{ "=", .eq }, .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt }, .{ "<=", .le }, .{ ">", .gt }, .{ ">=", .ge },
+    pub const OpTag = enum {
+        @"or",
+        @"and",
+        not,
+        is,
+        isnull,
+        notnull,
+        cmp,
+        between,
+        not_between,
+        in,
+        not_in,
+        like,
+        not_like,
+        ilike,
+        not_ilike,
+        similar,
+        not_similar,
+        like_op,
+        concat,
+        bit_and,
+        bit_or,
+        bit_xor,
+        shl,
+        shr,
+        json,
+        regex,
+        add,
+        sub,
+        mul,
+        div,
+        rem,
+        pow,
+        neg,
+        plus,
+        bit_not,
+        at_time_zone,
+        at_local,
+        cast,
+        collate,
+        subscript,
+        field,
+    };
+
+    const op_table = blk: {
+        const P = sqlparse.pratt;
+        const T = OpTag;
+        var t: []const P.Op(T) = &.{
+            P.left(T, .@"or", lv.@"or", .{ .kw = "or" }),
+            P.left(T, .@"and", lv.@"and", .{ .kw = "and" }),
+            P.prefixAt(T, .not, lv.not, lv.not, .{ .kw = "not" }),
+            P.left(T, .is, lv.is, .{ .kw = "is" }),
+            P.postfix(T, .isnull, lv.is, .{ .kw = "isnull", .cap = lv.is }),
+            P.postfix(T, .notnull, lv.is, .{ .kw = "notnull", .cap = lv.is }),
         };
-        for (map) |m| if (std.mem.eql(u8, t.text, m[0])) return m[1];
-        return null;
+        for (cmp_ops) |o| t = t ++ &[_]P.Op(T){P.left(T, .cmp, lv.cmp, .{ .op = o[0] })};
+        t = t ++ &[_]P.Op(T){
+            P.left(T, .not_between, lv.pred, .{ .kw = "not", .then = "between" }),
+            P.left(T, .not_in, lv.pred, .{ .kw = "not", .then = "in", .cap = lv.pred }),
+            P.left(T, .not_like, lv.pred, .{ .kw = "not", .then = "like" }),
+            P.left(T, .not_ilike, lv.pred, .{ .kw = "not", .then = "ilike" }),
+            P.left(T, .not_similar, lv.pred, .{ .kw = "not", .seq = &.{ .{ .kw = "similar" }, .{ .kw = "to" } } }),
+            P.left(T, .between, lv.pred, .{ .kw = "between" }),
+            P.left(T, .in, lv.pred, .{ .kw = "in", .cap = lv.pred }),
+            P.left(T, .like, lv.pred, .{ .kw = "like" }),
+            P.left(T, .ilike, lv.pred, .{ .kw = "ilike" }),
+            P.left(T, .similar, lv.pred, .{ .kw = "similar", .then = "to" }),
+            P.left(T, .like_op, lv.pred, .{ .op = "~~" }),
+            P.left(T, .like_op, lv.pred, .{ .op = "!~~" }),
+            P.left(T, .like_op, lv.pred, .{ .op = "~~*" }),
+            P.left(T, .like_op, lv.pred, .{ .op = "!~~*" }),
+            P.left(T, .concat, lv.other, .{ .op = "||" }),
+            P.left(T, .bit_and, lv.other, .{ .op = "&" }),
+            P.left(T, .bit_or, lv.other, .{ .op = "|" }),
+            P.left(T, .bit_xor, lv.other, .{ .op = "#" }),
+            P.left(T, .shl, lv.other, .{ .op = "<<" }),
+            P.left(T, .shr, lv.other, .{ .op = ">>" }),
+        };
+        for (json_operators) |o| t = t ++ &[_]P.Op(T){P.left(T, .json, lv.other, .{ .op = o[0] })};
+        for (regex_operators) |o| t = t ++ &[_]P.Op(T){P.left(T, .regex, lv.other, .{ .op = o[0] })};
+        t = t ++ &[_]P.Op(T){
+            P.left(T, .add, lv.add, .{ .op = "+" }),
+            P.left(T, .sub, lv.add, .{ .op = "-" }),
+            P.left(T, .mul, lv.mul, .{ .op = "*" }),
+            P.left(T, .div, lv.mul, .{ .op = "/" }),
+            P.left(T, .rem, lv.mul, .{ .op = "%" }),
+            P.left(T, .pow, lv.pow, .{ .op = "^" }),
+            // The operand of a unary operator has its AT TIME ZONE.
+            P.prefix(T, .neg, lv.at, .{ .op = "-" }),
+            P.prefix(T, .plus, lv.at, .{ .op = "+" }),
+            P.prefix(T, .bit_not, lv.at, .{ .op = "~" }),
+            // Looser than ::, of whose loop they were: the zone has its
+            // casts but no AT of its own.
+            P.left(T, .at_time_zone, lv.at, .{ .kw = "at", .seq = &.{ .{ .kw = "time" }, .{ .kw = "zone" } } }),
+            P.postfix(T, .at_local, lv.at, .{ .kw = "at", .then = "local" }),
+            P.postfix(T, .cast, lv.postfix, .{ .op = "::" }),
+            P.postfix(T, .collate, lv.postfix, .{ .kw = "collate" }),
+            P.postfix(T, .subscript, lv.postfix, .{ .op = "[" }),
+            P.postfix(T, .field, lv.postfix, .{ .kind = "dot", .seq = &.{.{ .kind = "word" }} }),
+            P.postfix(T, .field, lv.postfix, .{ .kind = "dot", .seq = &.{.{ .kind = "quoted_ident" }} }),
+        };
+        break :blk t[0..t.len].*;
+    };
+
+    const Ops = sqlparse.pratt.Pratt(Parser, *Expr, OpTag, &op_table);
+
+    /// An expression of the operators binding at least `min`.
+    fn exprAbove(p: *Parser, min: u8) Error!*Expr {
+        return Ops.expr(p, min);
     }
 
-    fn cmpExpr(p: *Parser) Error!*Expr {
-        var l = try p.predicate();
-        while (cmpOp(p.c.peek())) |op| {
-            const at = p.c.advance().start;
-            // x = ANY (subquery), x <> ALL (subquery)
-            if (p.c.isAnyKw(&.{ "any", "some", "all" }) and p.c.peekAt(1).kind == .lparen) {
-                const all = p.c.advance().isKw("all");
-                if (!((op == .eq and !all) or (op == .ne and all)) or !p.parenStartsSelect()) {
-                    const aop: array.AnyOp = switch (op) {
-                        .eq => .eq,
-                        .ne => .ne,
-                        .lt => .lt,
-                        .le => .le,
-                        .gt => .gt,
-                        .ge => .ge,
-                        else => return p.unsupported(at, "this ANY/ALL comparison"),
-                    };
-                    l = try p.anyAll(l, aop, all);
-                    continue;
-                }
-                _ = try p.c.expect(.lparen);
-                const s = try p.select();
-                _ = try p.c.expect(.rparen);
-                l = try p.expr(l.pos, .{ .in_select = .{ .e = l, .not = all, .sel = s } });
-                continue;
-            }
-            const r = try p.predicate();
-            l = try p.span(l, r, .{ .compare = .{ .op = op, .l = l, .r = r } });
+    pub fn operand(p: *Parser) Error!*Expr {
+        return p.primary();
+    }
+
+    /// The loop ended at a token that is no operator of the table: an
+    /// operator that is not PostgreSQL's fails where the level of the
+    /// other operators would have read it.
+    pub fn unmatched(p: *Parser, l: *Expr, min: u8, last: ?u8) Error!void {
+        _ = l;
+        if (min > lv.other or (last orelse 255) < lv.other) return;
+        const t = p.c.peek();
+        if (isOperator(p.c.sql, t) and p.otherOp(t) == null and p.cmpOp(t) == null and !isArith(p.val(t)) and !isLikeOp(p.val(t))) {
+            return p.failFields(t.start, .of("42883"), .{ .message = try std.fmt.allocPrint(p.arena, "operator does not exist: {s}", .{p.val(t)}), .hint = @import("operators.zig").hint(.not_exist) });
         }
-        return l;
     }
 
-    fn predicate(p: *Parser) Error!*Expr {
-        var l = try p.otherExpr();
-        while (true) {
-            var not = false;
-            const save = p.c.mark();
-            if (p.c.isKw("not") and (p.c.isKwAt(1, "between") or p.c.isKwAt(1, "in") or p.c.isKwAt(1, "like") or p.c.isKwAt(1, "ilike") or p.c.isKwAt(1, "similar"))) {
-                p.c.skip();
-                not = true;
-            }
-            const t = p.c.peek();
-            if (p.c.eatKw("between")) {
-                if (p.c.eatKw("symmetric")) return p.unsupported(t.start, "BETWEEN SYMMETRIC");
+    pub fn prefix(p: *Parser, tag: OpTag, m: Ops.Matched, rbp: u8) Error!*Expr {
+        const op: tree.UnOp = switch (tag) {
+            .not => .not,
+            .neg => .neg,
+            .plus => .plus,
+            .bit_not => .bit_not,
+            else => unreachable,
+        };
+        // In the zone of AT TIME ZONE (min above AT) the operand has none.
+        const e = try p.exprAbove(if (tag == .not) rbp else @max(rbp, m.min));
+        return p.expr(m.first.start, .{ .unary = .{ .op = op, .e = e } });
+    }
+
+    pub fn infix(p: *Parser, tag: OpTag, l: *Expr, m: Ops.Matched, rbp: u8) Error!*Expr {
+        return switch (tag) {
+            .@"or" => p.binary(.@"or", l, try p.exprAbove(rbp)),
+            .@"and" => p.binary(.@"and", l, try p.exprAbove(rbp)),
+            .is => p.isRest(l, rbp),
+            .cmp => p.compare(l, m.first, rbp),
+            .between, .not_between => {
+                if (p.c.eatKw("symmetric")) return p.unsupported(m.last.start, "BETWEEN SYMMETRIC");
                 _ = p.c.eatKw("asymmetric");
                 const lo = try p.otherExpr();
                 try p.c.expectKw("and");
                 const hi = try p.otherExpr();
-                l = try p.expr(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
-            } else if (p.c.eatKw("in")) {
+                return p.expr(l.pos, .{ .between = .{ .e = l, .not = tag == .not_between, .lo = lo, .hi = hi } });
+            },
+            .in, .not_in => {
+                const not = tag == .not_in;
                 _ = try p.c.expect(.lparen);
                 if (p.startsSelect(0) or p.parenStartsSelect()) {
                     const s = try p.select();
                     _ = try p.c.expect(.rparen);
-                    l = try p.expr(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = s } });
-                } else {
-                    const items = try p.exprList();
-                    _ = try p.c.expect(.rparen);
-                    l = try p.expr(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
+                    return p.expr(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = s } });
                 }
-            } else if (p.c.isKw("like") or p.c.isKw("ilike")) {
-                const ilike = p.c.advance().isKw("ilike");
-                l = try p.likeRest(l, not, ilike);
-            } else if (p.c.eatKws(&.{ "similar", "to" })) {
-                l = try p.similarRest(l, not);
-            } else if (!not and (t.isOp("~~") or t.isOp("!~~") or t.isOp("~~*") or t.isOp("!~~*"))) {
-                p.c.skip();
-                l = try p.likeRest(l, t.text[0] == '!', t.text[t.text.len - 1] == '*');
-            } else {
-                p.c.reset(save);
-                break;
-            }
+                const items = try p.exprList();
+                _ = try p.c.expect(.rparen);
+                return p.expr(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
+            },
+            .like => p.likeRest(l, false, false),
+            .not_like => p.likeRest(l, true, false),
+            .ilike => p.likeRest(l, false, true),
+            .not_ilike => p.likeRest(l, true, true),
+            .similar => p.similarRest(l, false),
+            .not_similar => p.similarRest(l, true),
+            .like_op => p.likeRest(l, p.val(m.first)[0] == '!', p.val(m.first)[p.val(m.first).len - 1] == '*'),
+            .concat, .bit_and, .bit_or, .bit_xor, .shl, .shr, .json, .regex => {
+                const r = try p.exprAbove(rbp);
+                return switch (tag) {
+                    .concat => p.span(l, r, .{ .concat = .{ .args = try p.list(&.{ l, r }), .null_policy = .propagate } }),
+                    .bit_and => p.binary(.bit_and, l, r),
+                    .bit_or => p.binary(.bit_or, l, r),
+                    // No opcode: integer.zig's function, of the types
+                    // overload.zig checks.
+                    .bit_xor => p.span(l, r, .{ .func = try p.new(tree.Func, .{ .name = .{ .text = "xq_pg_int_xor", .pos = l.pos }, .args = try p.list(&.{ l, r }) }) }),
+                    .shl => p.binary(.shl, l, r),
+                    .shr => p.binary(.shr, l, r),
+                    .json => p.jsonOp(p.val(m.first), l, r),
+                    else => p.regexOp(regexOperator(p.val(m.first)).?, l, r),
+                };
+            },
+            .add => p.binary(.add, l, try p.exprAbove(rbp)),
+            .sub => p.binary(.sub, l, try p.exprAbove(rbp)),
+            .mul => p.binary(.mul, l, try p.exprAbove(rbp)),
+            .div => {
+                const r = try p.exprAbove(rbp);
+                return p.span(l, r, .{ .div = .{ .kind = .sqlite, .l = l, .r = r } });
+            },
+            .rem => p.binary(.rem, l, try p.exprAbove(rbp)),
+            // a ^ b is power(a, b), PostgreSQL's (a real).
+            .pow => {
+                const r = try p.exprAbove(rbp);
+                const f = try p.new(tree.Func, .{ .name = .{ .text = "power", .pos = l.pos }, .dialect = .postgres, .args = try p.list(&.{ l, r }) });
+                return p.span(l, r, .{ .func = f });
+            },
+            // x AT TIME ZONE z: timezone(z, x) by its syntax's name
+            // (dtfuncs.zig), a column named "timezone".
+            .at_time_zone => {
+                const z = try p.exprAbove(rbp);
+                const x = try p.call(l.pos, "xq_pg_at_time_zone", null, &.{ z, l });
+                try p.setFig(x, .{ .call = "timezone" });
+                return x;
+            },
+            else => unreachable,
+        };
+    }
+
+    pub fn postfix(p: *Parser, tag: OpTag, l: *Expr, m: Ops.Matched) Error!*Expr {
+        return switch (tag) {
+            .isnull => p.expr(l.pos, .{ .is_null = .{ .e = l, .not = false } }),
+            .notnull => p.expr(l.pos, .{ .is_null = .{ .e = l, .not = true } }),
+            .cast => p.castExpr(l.pos, l, try p.typeName()),
+            .collate => {
+                var name = try p.anyName();
+                // pg_catalog."C", pg_catalog.default
+                if (p.c.peek().kind == .dot and eql(name.text, "pg_catalog")) {
+                    p.c.skip();
+                    name = try p.anyName();
+                }
+                return p.expr(l.pos, .{ .collate = .{ .e = l, .collation = collationName(name.text) } });
+            },
+            .subscript => p.subscripts(l, m.first.start),
+            .field => {
+                // (r).field of a record (_pg_expandarray()'s x and n).
+                const t = m.last;
+                if (reservedKw(t)) return p.c.syntaxErrorAt(t);
+                const x = try p.call(l.pos, "xq_pg_record_field", null, &.{ l, try p.stringAt(t.start, p.val(t)) });
+                x.end = p.c.lastEnd();
+                try p.setFig(x, .{ .call = p.val(t) });
+                return x;
+            },
+            // The session's zone, UTC.
+            .at_local => p.call(l.pos, "timezone", .postgres, &.{ try p.stringAt(l.pos, "UTC"), l }),
+            else => unreachable,
+        };
+    }
+
+    /// `l IS [NOT] ...` after IS.
+    fn isRest(p: *Parser, l: *Expr, rbp: u8) Error!*Expr {
+        const not = p.c.eatKw("not");
+        if (p.c.isAnyKw(&.{ "null", "true", "false", "unknown", "json" })) Ops.cap(p, lv.is);
+        if (p.c.eatKw("null")) return p.expr(l.pos, .{ .is_null = .{ .e = l, .not = not } });
+        if (p.c.eatKw("true")) return p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = true, .not = not } });
+        if (p.c.eatKw("false")) return p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = false, .not = not } });
+        if (p.c.eatKw("unknown")) return p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = null, .not = not } });
+        if (p.c.eatKw("json")) return p.isJson(l, not);
+        if (try p.c.optKws(&.{ "distinct", "from" })) {
+            const r = try p.exprAbove(rbp);
+            // IS DISTINCT FROM is IS NOT, IS NOT DISTINCT FROM IS.
+            return p.span(l, r, .{ .compare = .{ .op = if (not) .is else .is_not, .l = l, .r = r } });
         }
-        return l;
+        return p.c.syntaxError();
+    }
+
+    const cmp_ops = [_]struct { []const u8, tree.CmpOp }{
+        .{ "=", .eq }, .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt }, .{ "<=", .le }, .{ ">", .gt }, .{ ">=", .ge },
+    };
+
+    fn cmpOp(p: *const Parser, t: Token) ?tree.CmpOp {
+        if (!isOperator(p.c.sql, t)) return null;
+        for (cmp_ops) |m| if (std.mem.eql(u8, p.val(t), m[0])) return m[1];
+        return null;
+    }
+
+    /// `l op r` after the comparison operator `tok`, or `l op ANY (...)`,
+    /// `l = ANY (subquery)`.
+    fn compare(p: *Parser, l: *Expr, tok: Token, rbp: u8) Error!*Expr {
+        const op = p.cmpOp(tok).?;
+        const at = tok.start;
+        // x = ANY (subquery), x <> ALL (subquery)
+        if (p.c.isAnyKw(&.{ "any", "some", "all" }) and p.c.peekAt(1).kind == .lparen) {
+            const all = p.c.advance().isKw("all");
+            if (!((op == .eq and !all) or (op == .ne and all)) or !p.parenStartsSelect()) {
+                const aop: array.AnyOp = switch (op) {
+                    .eq => .eq,
+                    .ne => .ne,
+                    .lt => .lt,
+                    .le => .le,
+                    .gt => .gt,
+                    .ge => .ge,
+                    else => return p.unsupported(at, "this ANY/ALL comparison"),
+                };
+                const e = try p.anyAll(l, aop, all);
+                Ops.cap(p, lv.cmp);
+                return e;
+            }
+            _ = try p.c.expect(.lparen);
+            const s = try p.select();
+            _ = try p.c.expect(.rparen);
+            Ops.cap(p, lv.cmp);
+            return p.expr(l.pos, .{ .in_select = .{ .e = l, .not = all, .sel = s } });
+        }
+        const r = try p.exprAbove(rbp);
+        return p.span(l, r, .{ .compare = .{ .op = op, .l = l, .r = r } });
     }
 
     /// LIKE is case-sensitive, ILIKE folds ASCII letters; both escape
@@ -1917,7 +2124,9 @@ pub const Parser = struct {
         if (p.c.isAnyKw(&.{ "any", "some", "all" }) and p.c.peekAt(1).kind == .lparen) {
             const all = p.c.advance().isKw("all");
             const op: array.AnyOp = if (ilike) (if (not) .not_ilike else .ilike) else if (not) .not_like else .like;
-            return p.anyAll(l, op, all);
+            const e = try p.anyAll(l, op, all);
+            Ops.cap(p, lv.pred);
+            return e;
         }
         const pat = try p.otherExpr();
         var esc: tree.Escape = .backslash;
@@ -1940,14 +2149,14 @@ pub const Parser = struct {
     const OtherOp = enum { concat, bit_and, bit_or, bit_xor, shl, shr, json, regex };
 
     /// Operators of the "any other operator" level.
-    fn otherOp(t: Token) ?OtherOp {
-        if (t.kind != .op) return null;
+    fn otherOp(p: *const Parser, t: Token) ?OtherOp {
+        if (!isOperator(p.c.sql, t)) return null;
         const map = [_]struct { []const u8, OtherOp }{
             .{ "||", .concat }, .{ "&", .bit_and }, .{ "|", .bit_or }, .{ "#", .bit_xor }, .{ "<<", .shl }, .{ ">>", .shr },
         };
-        for (map) |m| if (std.mem.eql(u8, t.text, m[0])) return m[1];
-        if (jsonOperator(t.text) != null) return .json;
-        if (regexOperator(t.text) != null) return .regex;
+        for (map) |m| if (std.mem.eql(u8, p.val(t), m[0])) return m[1];
+        if (jsonOperator(p.val(t)) != null) return .json;
+        if (regexOperator(p.val(t)) != null) return .regex;
         return null;
     }
 
@@ -1959,32 +2168,6 @@ pub const Parser = struct {
         const x = try p.span(l, r, .{ .func = fun });
         if (!op.negate) return x;
         return p.span(l, r, .{ .unary = .{ .op = .not, .e = x } });
-    }
-
-    fn otherExpr(p: *Parser) Error!*Expr {
-        var l = try p.addExpr();
-        while (true) {
-            const t = p.c.peek();
-            if (otherOp(t)) |op| {
-                p.c.skip();
-                const r = try p.addExpr();
-                l = switch (op) {
-                    .concat => try p.span(l, r, .{ .concat = .{ .args = try p.list(&.{ l, r }), .null_policy = .propagate } }),
-                    .bit_and => try p.binary(.bit_and, l, r),
-                    .bit_or => try p.binary(.bit_or, l, r),
-                    // No opcode: integer.zig's function, of the types
-                    // overload.zig checks.
-                    .bit_xor => try p.span(l, r, .{ .func = try p.new(tree.Func, .{ .name = .{ .text = "xq_pg_int_xor", .pos = l.pos }, .args = try p.list(&.{ l, r }) }) }),
-                    .shl => try p.binary(.shl, l, r),
-                    .shr => try p.binary(.shr, l, r),
-                    .json => try p.jsonOp(t.text, l, r),
-                    .regex => try p.regexOp(regexOperator(t.text).?, l, r),
-                };
-            } else if (t.kind == .op and cmpOp(t) == null and !isArith(t.text) and !isLikeOp(t.text)) {
-                return p.failFields(t.start, .of("42883"), .{ .message = try std.fmt.allocPrint(p.arena, "operator does not exist: {s}", .{t.text}), .hint = @import("operators.zig").hint(.not_exist) });
-            } else break;
-        }
-        return l;
     }
 
     /// A json/jsonb operator: the engine function of its json variant
@@ -2004,102 +2187,6 @@ pub const Parser = struct {
 
     fn isLikeOp(op: []const u8) bool {
         return std.mem.eql(u8, op, "~~") or std.mem.eql(u8, op, "!~~") or std.mem.eql(u8, op, "~~*") or std.mem.eql(u8, op, "!~~*");
-    }
-
-    fn addExpr(p: *Parser) Error!*Expr {
-        var l = try p.mulExpr();
-        while (true) {
-            const op: tree.BinOp = if (p.c.isOp("+")) .add else if (p.c.isOp("-")) .sub else break;
-            p.c.skip();
-            const r = try p.mulExpr();
-            l = try p.binary(op, l, r);
-        }
-        return l;
-    }
-
-    fn mulExpr(p: *Parser) Error!*Expr {
-        var l = try p.powExpr();
-        while (true) {
-            if (p.c.eatOp("*")) {
-                l = try p.binary(.mul, l, try p.powExpr());
-            } else if (p.c.eatOp("/")) {
-                const r = try p.powExpr();
-                l = try p.span(l, r, .{ .div = .{ .kind = .sqlite, .l = l, .r = r } });
-            } else if (p.c.eatOp("%")) {
-                l = try p.binary(.rem, l, try p.powExpr());
-            } else break;
-        }
-        return l;
-    }
-
-    /// a ^ b is power(a, b), PostgreSQL's (a real).
-    fn powExpr(p: *Parser) Error!*Expr {
-        var l = try p.unary();
-        while (p.c.eatOp("^")) {
-            const r = try p.unary();
-            const f = try p.new(tree.Func, .{ .name = .{ .text = "power", .pos = l.pos }, .dialect = .postgres, .args = try p.list(&.{ l, r }) });
-            l = try p.span(l, r, .{ .func = f });
-        }
-        return l;
-    }
-
-    fn unary(p: *Parser) Error!*Expr {
-        return p.unaryAt(true);
-    }
-
-    /// A unary expression; `at`: with its AT TIME ZONE (not of a zone:
-    /// `x AT TIME ZONE 'UTC' AT TIME ZONE 'EST'` is `(x AT TIME ZONE
-    /// 'UTC') AT TIME ZONE 'EST'`, AT being left-associative).
-    fn unaryAt(p: *Parser, at: bool) Error!*Expr {
-        const t = p.c.peek();
-        const op: tree.UnOp = if (t.isOp("-")) .neg else if (t.isOp("+")) .plus else if (t.isOp("~")) .bit_not else return p.postfix(at);
-        p.c.skip();
-        const e = try p.unaryAt(at);
-        return p.expr(t.start, .{ .unary = .{ .op = op, .e = e } });
-    }
-
-    fn postfix(p: *Parser, at: bool) Error!*Expr {
-        var e = try p.primary();
-        while (true) {
-            if (p.c.eat(.cast)) {
-                const ty = try p.typeName();
-                e = try p.castExpr(e.pos, e, ty);
-            } else if (p.c.isKw("collate")) {
-                p.c.skip();
-                var name = try p.anyName();
-                // pg_catalog."C", pg_catalog.default
-                if (p.c.peek().kind == .dot and eql(name.text, "pg_catalog")) {
-                    p.c.skip();
-                    name = try p.anyName();
-                }
-                e = try p.expr(e.pos, .{ .collate = .{ .e = e, .collation = collationName(name.text) } });
-            } else if (p.c.peek().kind == .lbracket) {
-                e = try p.subscripts(e);
-            } else if (p.c.peek().kind == .dot and (p.c.peekAt(1).kind == .ident or p.c.peekAt(1).kind == .qident)) {
-                // (r).field of a record (_pg_expandarray()'s x and n).
-                p.c.skip();
-                const field = try p.colId();
-                const x = try p.call(e.pos, "xq_pg_record_field", null, &.{ e, try p.stringAt(field.pos, field.text) });
-                x.end = p.c.lastEnd();
-                try p.setFig(x, .{ .call = field.text });
-                e = x;
-            } else if (at and p.c.isKw("at") and p.c.isKwAt(1, "time") and p.c.isKwAt(2, "zone")) {
-                // x AT TIME ZONE z: timezone(z, x) by its syntax's name
-                // (dtfuncs.zig), a column named "timezone".
-                p.c.skip();
-                p.c.skip();
-                p.c.skip();
-                const z = try p.unaryAt(false);
-                e = try p.call(e.pos, "xq_pg_at_time_zone", null, &.{ z, e });
-                try p.setFig(e, .{ .call = "timezone" });
-            } else if (at and p.c.isKw("at") and p.c.isKwAt(1, "local")) {
-                // The session's zone, UTC.
-                p.c.skip();
-                p.c.skip();
-                e = try p.call(e.pos, "timezone", .postgres, &.{ try p.stringAt(e.pos, "UTC"), e });
-            } else break;
-        }
-        return e;
     }
 
     fn binary(p: *Parser, op: tree.BinOp, l: *Expr, r: *Expr) Error!*Expr {
@@ -2154,17 +2241,17 @@ pub const Parser = struct {
     /// xq_pg_array()s (overload.zig makes an array of arrays
     /// xq_pg_array_nested(), and gives the values of a type their text).
     fn arrayCtor(p: *Parser, pos: u32) Error!*Expr {
-        _ = try p.c.expect(.lbracket);
+        try p.c.expectOp("[");
         var items: std.ArrayList(*Expr) = .empty;
-        if (p.c.peek().kind != .rbracket) {
-            if (p.c.peek().kind == .lbracket) {
+        if (!p.c.isOp("]")) {
+            if (p.c.isOp("[")) {
                 while (true) {
                     try items.append(p.arena, try p.arrayCtor(p.c.peek().start));
                     if (!p.c.eat(.comma)) break;
                 }
             } else try items.appendSlice(p.arena, try p.exprList());
         }
-        _ = try p.c.expect(.rbracket);
+        try p.c.expectOp("]");
         return p.call(pos, "xq_pg_array", null, items.items);
     }
 
@@ -2206,25 +2293,27 @@ pub const Parser = struct {
     /// `e[i][j]` (xq_pg_subscript(e, i, j)) or with a slice `e[lo:hi]`
     /// (xq_pg_slice(e, lo, hi, ...), an omitted bound NULL, a plain
     /// subscript i as 1:i): named as `e`.
-    fn subscripts(p: *Parser, base: *Expr) Error!*Expr {
+    fn subscripts(p: *Parser, base: *Expr, first: u32) Error!*Expr {
         var bounds: std.ArrayList([2]?*Expr) = .empty;
         var slice = false;
-        while (p.c.peek().kind == .lbracket) {
-            const at = p.c.advance().start;
+        var at = first;
+        while (true) {
             var lo: ?*Expr = null;
             var hi: ?*Expr = null;
-            if (p.c.peek().kind != .colon) lo = try p.expr0();
-            if (p.c.eat(.colon)) {
+            if (!p.c.isOp(":")) lo = try p.expr0();
+            if (p.c.eatOp(":")) {
                 slice = true;
-                if (p.c.peek().kind != .rbracket) hi = try p.expr0();
+                if (!p.c.isOp("]")) hi = try p.expr0();
                 if (lo == null) lo = try p.expr(at, .null);
                 if (hi == null) hi = try p.expr(at, .null);
             } else {
                 hi = lo;
                 lo = null;
             }
-            _ = try p.c.expect(.rbracket);
+            try p.c.expectOp("]");
             try bounds.append(p.arena, .{ lo, hi });
+            if (!p.c.isOp("[")) break;
+            at = p.c.advance().start;
         }
         var args: std.ArrayList(*Expr) = .empty;
         try args.append(p.arena, base);
@@ -2289,28 +2378,28 @@ pub const Parser = struct {
         switch (t.kind) {
             .integer => {
                 p.c.skip();
-                return p.expr(t.start, .{ .integer = t.text });
+                return p.expr(t.start, .{ .integer = p.val(t) });
             },
             .float => {
                 p.c.skip();
-                return p.expr(t.start, .{ .float = t.text });
+                return p.expr(t.start, .{ .float = p.val(t) });
             },
             .string => {
                 p.c.skip();
-                return p.expr(t.start, .{ .string = t.text });
+                return p.expr(t.start, .{ .string = p.val(t) });
             },
             .param => {
                 p.c.skip();
-                const n = std.fmt.parseInt(u32, t.text, 10) catch return p.c.failState(t.start, .of("42P02"), "there is no parameter ${s}", .{t.text});
+                const n = std.fmt.parseInt(u32, p.val(t), 10) catch return p.c.failState(t.start, .of("42P02"), "there is no parameter ${s}", .{p.val(t)});
                 if (n == 0) return p.c.failState(t.start, .of("42P02"), "there is no parameter $0", .{});
                 return p.expr(t.start, .{ .param = n });
             },
             .lparen => return p.parenExpr(),
-            .qident => return p.nameExpr(),
-            .ident => {},
+            .quoted_ident => return p.nameExpr(),
+            .word => {},
             else => return p.c.syntaxError(),
         }
-        const w = t.text;
+        const w = p.val(t);
         if (eql(w, "null")) return p.keywordExpr(.null);
         if (eql(w, "true")) return p.keywordExpr(.{ .boolean = true });
         if (eql(w, "false")) return p.keywordExpr(.{ .boolean = false });
@@ -2345,10 +2434,10 @@ pub const Parser = struct {
                 try p.setFig(e, .{ .call = "array" });
                 return e;
             }
-            if (p.c.peekAt(1).kind != .lbracket) return p.unsupported(t.start, "ARRAY");
+            if (!p.c.isOpTok(p.c.peekAt(1), "[")) return p.unsupported(t.start, "ARRAY");
             p.c.skip();
             const e = try p.arrayCtor(t.start);
-            if (e.kind.func.args.len == 0 and p.c.peek().kind != .cast and !p.c.isKw("as")) {
+            if (e.kind.func.args.len == 0 and !p.c.isOp("::") and !p.c.isKw("as")) {
                 return p.failFields(t.start, .of("42P18"), .{ .message = "cannot determine type of empty array", .hint = "Explicitly cast to the desired type, for example ARRAY[]::integer[]." });
             }
             try p.setFig(e, .{ .call = "array" });
@@ -2387,7 +2476,7 @@ pub const Parser = struct {
                     p.c.skip();
                     // INTERVAL '1' YEAR TO MONTH: the fields after the string.
                     if (eql(ty.name, "interval") and ty.mods.len == 0 and ty.fields.len == 0 and !ty.array) try p.intervalFields(&ty);
-                    const lit = try p.expr(s.start, .{ .string = s.text });
+                    const lit = try p.expr(s.start, .{ .string = p.val(s) });
                     return p.castExpr(t.start, lit, ty);
                 }
             } else |err| if (err == error.OutOfMemory) return err;
@@ -2407,7 +2496,7 @@ pub const Parser = struct {
         const start = p.c.peek().start;
         var names: std.ArrayList(Name) = .empty;
         const first = p.c.advance();
-        try names.append(p.arena, .{ .text = first.text, .pos = first.start });
+        try names.append(p.arena, .{ .text = p.val(first), .pos = first.start });
         while (p.c.peek().kind == .dot) {
             p.c.skip();
             try names.append(p.arena, try p.anyName());
@@ -2478,7 +2567,7 @@ pub const Parser = struct {
         if (eql(n, "substring") or eql(n, "position") or eql(n, "trim") or eql(n, "extract") or eql(n, "overlay")) {
             if (try p.specialCall(&f)) return p.finishCall(f);
         }
-        if (p.c.peek().isOp("*")) {
+        if (p.c.isOp("*")) {
             p.c.skip();
             f.star = true;
         } else if (p.c.peek().kind != .rparen) {
@@ -2508,12 +2597,12 @@ pub const Parser = struct {
                 p.c.skip();
                 variadic = p.c.peek().start;
             }
-            if ((t.kind == .ident or t.kind == .qident) and (p.c.peekAt(1).isOp(":=") or p.c.peekAt(1).isOp("=>"))) {
+            if ((t.kind == .word or t.kind == .quoted_ident) and (p.c.isOpTok(p.c.peekAt(1), ":=") or p.c.isOpTok(p.c.peekAt(1), "=>"))) {
                 p.c.skip();
                 p.c.skip();
-                for (names.items) |n| if (n) |x| if (eql(x.text, t.text))
-                    return p.c.failState(t.start, .of("42601"), "argument name \"{s}\" used more than once", .{t.text});
-                try names.append(p.arena, .{ .text = t.text, .pos = t.start });
+                for (names.items) |n| if (n) |x| if (eql(x.text, p.val(t)))
+                    return p.c.failState(t.start, .of("42601"), "argument name \"{s}\" used more than once", .{p.val(t)});
+                try names.append(p.arena, .{ .text = p.val(t), .pos = t.start });
                 named = true;
             } else {
                 if (named) return p.c.failState(t.start, .of("42601"), "positional argument cannot follow named argument", .{});
@@ -2668,7 +2757,7 @@ pub const Parser = struct {
         if (eql(n, "extract")) {
             const t = p.c.peek();
             const field: []const u8 = switch (t.kind) {
-                .ident, .qident, .string => t.text,
+                .word, .quoted_ident, .string => p.val(t),
                 else => return p.c.syntaxError(),
             };
             p.c.skip();
@@ -2862,7 +2951,7 @@ pub const Parser = struct {
         _ = try p.c.expect(.lparen);
         var w: tree.WindowSpec = .{};
         const t = p.c.peek();
-        if ((t.kind == .ident and !isReserved(t.text) and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .qident) {
+        if ((t.kind == .word and !reservedKw(t) and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .quoted_ident) {
             w.base = try p.colId();
         }
         try syntax.windowClauses(p, &w, expr0, .{ .groups = true });
@@ -2888,21 +2977,21 @@ pub const Parser = struct {
         const iv_words = [_][]const u8{ "year", "month", "day", "hour", "minute", "second" };
         const first = p.c.peek();
         const a = for (iv_words) |w| {
-            if (first.kind == .ident and eql(first.text, w)) break w;
+            if (first.kind == .word and eql(p.val(first), w)) break w;
         } else return;
         p.c.skip();
         var b: []const u8 = "";
         if (p.c.isKw("to")) {
             const to = p.c.peekAt(1);
             const ok = for (iv_words) |w| {
-                if (to.kind == .ident and eql(to.text, w)) break true;
+                if (to.kind == .word and eql(p.val(to), w)) break true;
             } else false;
-            if (!ok or ivinput.rangeOfFields(a, to.text) == null) {
+            if (!ok or ivinput.rangeOfFields(a, p.val(to)) == null) {
                 p.c.skip();
                 return p.c.syntaxError();
             }
             p.c.skip();
-            b = p.c.advance().text;
+            b = p.val(p.c.advance());
         }
         const last = if (b.len > 0) b else a;
         if (eql(last, "second") and p.c.peek().kind == .lparen) {
@@ -2924,9 +3013,9 @@ pub const Parser = struct {
 
     pub fn typeName(p: *Parser) Error!types.TypeName {
         const t = p.c.peek();
-        if (t.kind != .ident and t.kind != .qident) return p.c.syntaxError();
+        if (t.kind != .word and t.kind != .quoted_ident) return p.c.syntaxError();
         p.c.skip();
-        var w = t.text;
+        var w = p.val(t);
         // pg_catalog.int4
         if (p.c.peek().kind == .dot) {
             if (!eql(w, "pg_catalog") and !eql(w, "public")) return p.c.failState(t.start, .of("42704"), "type \"{s}\" does not exist", .{p.c.sql[t.start..p.c.peekAt(1).end]});
@@ -2935,7 +3024,7 @@ pub const Parser = struct {
             w = n.text;
         }
         var ty: types.TypeName = .{ .name = w, .pos = t.start };
-        if (t.kind == .ident) {
+        if (t.kind == .word) {
             if (eql(w, "double")) {
                 try p.c.expectKw("precision");
                 ty.name = "double precision";
@@ -2992,10 +3081,10 @@ pub const Parser = struct {
                 try p.intervalPrecision(t.start, ty.mods);
             } else try p.intervalFields(&ty);
         }
-        while (p.c.peek().kind == .lbracket) {
+        while (p.c.isOp("[")) {
             p.c.skip();
             if (p.c.peek().kind == .integer) p.c.skip();
-            _ = try p.c.expect(.rbracket);
+            try p.c.expectOp("]");
             ty.array = true;
         }
         if (p.c.isKw("array")) {
@@ -3098,11 +3187,11 @@ pub const Parser = struct {
                 if (p.c.peek().kind == .dot) return p.unsupported(p.c.peek().start, "assigning to a field of a column");
                 // col[i][j] = v: col = xq_pg_array_set(col, v, i, j).
                 var subs: std.ArrayList(*Expr) = .empty;
-                while (p.c.peek().kind == .lbracket) {
+                while (p.c.isOp("[")) {
                     p.c.skip();
                     try subs.append(p.arena, try p.expr0());
-                    if (p.c.peek().kind == .colon) return p.unsupported(p.c.peek().start, "assigning to an array slice");
-                    _ = try p.c.expect(.rbracket);
+                    if (p.c.isOp(":")) return p.unsupported(p.c.peek().start, "assigning to an array slice");
+                    try p.c.expectOp("]");
                 }
                 if (!p.c.eatOp("=")) return p.c.syntaxError();
                 var v = try p.expr0();
@@ -3132,9 +3221,9 @@ pub const Parser = struct {
             u.alias = try p.colId();
         } else if (!p.c.isKw("set")) {
             const a = p.c.peek();
-            if (a.kind == .qident or (a.kind == .ident and !isReserved(a.text))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a))) {
                 p.c.skip();
-                u.alias = .{ .text = a.text, .pos = a.start };
+                u.alias = .{ .text = p.val(a), .pos = a.start };
             }
         }
         try p.c.expectKw("set");
@@ -3159,9 +3248,9 @@ pub const Parser = struct {
             d.alias = try p.colId();
         } else {
             const a = p.c.peek();
-            if (a.kind == .qident or (a.kind == .ident and !isReserved(a.text))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a))) {
                 p.c.skip();
-                d.alias = .{ .text = a.text, .pos = a.start };
+                d.alias = .{ .text = p.val(a), .pos = a.start };
             }
         }
         if (p.c.eatKw("using")) d.using = try p.fromList();
@@ -3223,7 +3312,7 @@ pub const Parser = struct {
             return .{ .create_index = try p.createIndex() };
         }
         if (p.c.isAnyKw(&.{ "schema", "database", "extension", "type", "function", "trigger", "domain", "procedure", "role", "user" })) {
-            return p.c.failState(at, .of("0A000"), "CREATE {s} is not supported", .{std.ascii.allocUpperString(p.arena, p.c.peek().text) catch return error.OutOfMemory});
+            return p.c.failState(at, .of("0A000"), "CREATE {s} is not supported", .{std.ascii.allocUpperString(p.arena, p.val(p.c.peek())) catch return error.OutOfMemory});
         }
         return p.c.syntaxError();
     }
@@ -3636,8 +3725,8 @@ pub const Parser = struct {
         if (rel.q.schema) |s| ci.name.schema = .{ .text = s.text };
         ci.table = rel.q.name;
         if (rel.alias) |bare| if (ci.name.name.text.len > 0) {
-            const prefix = rel.q.name.text[0 .. rel.q.name.text.len - bare.text.len];
-            ci.name.name.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, ci.name.name.text });
+            const head = rel.q.name.text[0 .. rel.q.name.text.len - bare.text.len];
+            ci.name.name.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ head, ci.name.name.text });
         };
         if (p.c.eatKw("using")) {
             const m = try p.anyName();
@@ -3655,7 +3744,7 @@ pub const Parser = struct {
                 item.collate = e.kind.collate.collation;
             } else item.expr = e;
             // An operator class.
-            if (p.c.peek().kind == .ident and !isReserved(p.c.peek().text) and !p.c.isKw("nulls")) p.c.skip();
+            if (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("nulls")) p.c.skip();
             if (p.c.eatKw("desc")) item.desc = true else _ = p.c.eatKw("asc");
             if (p.c.eatKw("nulls")) {
                 if (!p.c.eatKw("first")) try p.c.expectKw("last");
@@ -3690,8 +3779,8 @@ pub const Parser = struct {
             _ = p.c.eatKw("concurrently");
         } else if (p.c.eatKw("sequence")) {
             d.kind = .sequence;
-        } else if (t.kind == .ident and t.isAnyKw(&.{ "schema", "database", "extension", "type", "function", "trigger" })) {
-            return p.c.failState(t.start, .of("0A000"), "DROP {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
+        } else if (t.kind == .word and t.isAnyKw(&.{ "schema", "database", "extension", "type", "function", "trigger" })) {
+            return p.c.failState(t.start, .of("0A000"), "DROP {s} is not supported", .{std.ascii.allocUpperString(p.arena, p.val(t)) catch return error.OutOfMemory});
         } else return p.c.syntaxError();
         d.if_exists = try p.c.ifExists();
         const kind: Lookup = switch (d.kind) {
@@ -3730,7 +3819,7 @@ pub const Parser = struct {
         p.c.skip(); // ALTER
         if (!p.c.isKw("table")) {
             const t = p.c.peek();
-            if (t.kind == .ident) return p.c.failState(t.start, .of("0A000"), "ALTER {s} is not supported", .{std.ascii.allocUpperString(p.arena, t.text) catch return error.OutOfMemory});
+            if (t.kind == .word) return p.c.failState(t.start, .of("0A000"), "ALTER {s} is not supported", .{std.ascii.allocUpperString(p.arena, p.val(t)) catch return error.OutOfMemory});
             return p.c.syntaxError();
         }
         p.c.skip();
@@ -3738,15 +3827,15 @@ pub const Parser = struct {
         a.if_exists = try p.c.ifExists();
         _ = p.c.eatKw("only");
         const q = try p.qname();
-        var prefix: []const u8 = "";
+        var head: []const u8 = "";
         if (q.schema) |s| {
             const t = try p.qualified(s, q.name);
-            prefix = prefixOf(t);
+            head = prefixOf(t);
             a.name = .{ .schema = .{ .text = t.db, .pos = s.pos }, .name = .{ .text = t.name, .pos = q.name.pos } };
         } else switch (try p.unqualified(q.name, .relation)) {
             .keep => a.name = .{ .name = q.name },
             .target => |t| {
-                prefix = prefixOf(t);
+                head = prefixOf(t);
                 a.name = .{ .schema = .{ .text = t.db, .pos = q.name.pos }, .name = .{ .text = t.name, .pos = q.name.pos } };
             },
             .missing => {
@@ -3759,7 +3848,7 @@ pub const Parser = struct {
             if (p.c.eatKw("to")) {
                 // The table stays in its schema.
                 var to = try p.colId();
-                if (prefix.len > 0) to.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ prefix, to.text });
+                if (head.len > 0) to.text = try std.fmt.allocPrint(p.arena, "{s}{s}", .{ head, to.text });
                 a.action = .{ .rename_to = to };
             } else {
                 if (p.c.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... RENAME CONSTRAINT");
@@ -3861,23 +3950,25 @@ fn srfKind(name: []const u8) ?SrfKind {
 /// operands the other way round.
 const JsonOperator = struct { func: []const u8, swap: bool = false };
 
+const json_operators = [_]struct { []const u8, JsonOperator }{
+    .{ "->", JsonOperator{ .func = "xq_pg_json_get" } },
+    .{ "->>", JsonOperator{ .func = "xq_pg_json_get_text" } },
+    .{ "#>", JsonOperator{ .func = "xq_pg_json_path" } },
+    .{ "#>>", JsonOperator{ .func = "xq_pg_json_path_text" } },
+    .{ "@>", JsonOperator{ .func = "xq_pg_jsonb_contains" } },
+    .{ "<@", JsonOperator{ .func = "xq_pg_jsonb_contains", .swap = true } },
+    .{ "?", JsonOperator{ .func = "xq_pg_jsonb_exists" } },
+    .{ "?|", JsonOperator{ .func = "xq_pg_jsonb_exists_any" } },
+    .{ "?&", JsonOperator{ .func = "xq_pg_jsonb_exists_all" } },
+    .{ "#-", JsonOperator{ .func = "xq_pg_jsonb_delete_path" } },
+    .{ "@?", JsonOperator{ .func = "xq_pg_jsonb_path_exists_op" } },
+    .{ "@@", JsonOperator{ .func = "xq_pg_jsonb_path_match_op" } },
+    // Of arrays (overload.zig makes @> and <@ of arrays theirs).
+    .{ "&&", JsonOperator{ .func = "xq_pg_array_overlap" } },
+};
+
 fn jsonOperator(op: []const u8) ?JsonOperator {
-    const map = std.StaticStringMap(JsonOperator).initComptime(.{
-        .{ "->", JsonOperator{ .func = "xq_pg_json_get" } },
-        .{ "->>", JsonOperator{ .func = "xq_pg_json_get_text" } },
-        .{ "#>", JsonOperator{ .func = "xq_pg_json_path" } },
-        .{ "#>>", JsonOperator{ .func = "xq_pg_json_path_text" } },
-        .{ "@>", JsonOperator{ .func = "xq_pg_jsonb_contains" } },
-        .{ "<@", JsonOperator{ .func = "xq_pg_jsonb_contains", .swap = true } },
-        .{ "?", JsonOperator{ .func = "xq_pg_jsonb_exists" } },
-        .{ "?|", JsonOperator{ .func = "xq_pg_jsonb_exists_any" } },
-        .{ "?&", JsonOperator{ .func = "xq_pg_jsonb_exists_all" } },
-        .{ "#-", JsonOperator{ .func = "xq_pg_jsonb_delete_path" } },
-        .{ "@?", JsonOperator{ .func = "xq_pg_jsonb_path_exists_op" } },
-        .{ "@@", JsonOperator{ .func = "xq_pg_jsonb_path_match_op" } },
-        // Of arrays (overload.zig makes @> and <@ of arrays theirs).
-        .{ "&&", JsonOperator{ .func = "xq_pg_array_overlap" } },
-    });
+    const map = std.StaticStringMap(JsonOperator).initComptime(json_operators);
     return map.get(op);
 }
 
@@ -3939,12 +4030,13 @@ pub const RegexOp = struct { fold: bool, negate: bool };
 
 /// The regular expression operator named `op` (`~`, `~*`, `!~`, `!~*`),
 /// also for OPERATOR(pg_catalog.~); null for another.
+const regex_operators = [_]struct { []const u8, RegexOp }{
+    .{ "~", .{ .fold = false, .negate = false } }, .{ "~*", .{ .fold = true, .negate = false } },
+    .{ "!~", .{ .fold = false, .negate = true } }, .{ "!~*", .{ .fold = true, .negate = true } },
+};
+
 pub fn regexOperator(op: []const u8) ?RegexOp {
-    const map = [_]struct { []const u8, RegexOp }{
-        .{ "~", .{ .fold = false, .negate = false } }, .{ "~*", .{ .fold = true, .negate = false } },
-        .{ "!~", .{ .fold = false, .negate = true } }, .{ "!~*", .{ .fold = true, .negate = true } },
-    };
-    for (map) |m| if (std.mem.eql(u8, op, m[0])) return m[1];
+    for (regex_operators) |m| if (std.mem.eql(u8, op, m[0])) return m[1];
     return null;
 }
 

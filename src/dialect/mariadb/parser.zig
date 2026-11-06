@@ -34,8 +34,8 @@
 
 const std = @import("std");
 const sqlparse = @import("sql/parse");
+const pratt = sqlparse.pratt;
 const syntax = @import("../syntax.zig");
-const words = sqlparse.words;
 const ctype = @import("xqlite_base").ctype;
 const sqllex = @import("sql/lexer");
 const int = @import("../../sql/sqlite_int.zig");
@@ -59,24 +59,11 @@ const QName = tree.QName;
 pub const Token = lexer.Token;
 pub const Error = int.Oom || int.ParseError;
 
-/// Words that are not names where a name is optional (aliases) or
-/// where they would make no sense as one (a column reference).
-const reserved = words.noCase(&.{
-    "ALL",      "AND",           "AS",         "ASC",     "BETWEEN",   "BINARY",  "BY",     "CASE",
-    "CHECK",    "COLLATE",       "CONSTRAINT", "CREATE",  "CROSS",     "DEFAULT", "DELETE", "DESC",
-    "DISTINCT", "DISTINCTROW",   "DIV",        "DROP",    "DUAL",      "ELSE",    "ESCAPE", "EXCEPT",
-    "EXISTS",   "FALSE",         "FETCH",      "FOR",     "FORCE",     "FOREIGN", "FROM",   "GROUP",
-    "HAVING",   "HIGH_PRIORITY", "IGNORE",     "IN",      "INDEX",     "INNER",   "INSERT", "INTERSECT",
-    "INTERVAL", "INTO",          "IS",         "JOIN",    "KEY",       "LEFT",    "LIKE",   "LIMIT",
-    "LOCK",     "LOW_PRIORITY",  "MOD",        "NATURAL", "NOT",       "NULL",    "OFFSET", "ON",
-    "OR",       "ORDER",         "OUTER",      "OVER",    "PARTITION", "PRIMARY", "RANGE",  "REFERENCES",
-    "REGEXP",   "REPLACE",       "RETURNING",  "RIGHT",   "RLIKE",     "ROWS",    "SELECT", "SEPARATOR",
-    "SET",      "STRAIGHT_JOIN", "THEN",       "TRUE",    "UNION",     "UNIQUE",  "UPDATE", "USE",
-    "USING",    "VALUES",        "WHEN",       "WHERE",   "WINDOW",    "WITH",    "XOR",
-});
-
+/// A word that is no name where a name is optional (aliases) or where
+/// it would make no sense as one (a column reference): a reserved word
+/// of lexer.zig's keywords.
 pub fn isReserved(t: Token) bool {
-    return t.kind == .ident and reserved.has(t.text);
+    return t.kind == .word and lexer.Keywords.class(t.kw) == .reserved;
 }
 
 /// Whether `name` is a function of the dialect's table (runtime.zig):
@@ -135,12 +122,14 @@ pub const Parser = struct {
     raw_names: bool = false,
     /// The table CREATE TABLE creates (its REFERENCES may name it).
     creating: ?Rel = null,
+    /// The precedence parser's state (expr()).
+    pratt: pratt.State = .{},
 
     pub fn init(p: *Parse, sql: [:0]const u8, mode: state.SqlMode) Parser {
         return .{
             .p = p,
             .a = p.arena,
-            .c = .{ .arena = p.arena, .sql = sql, .src = .init(.init(sql, mode)) },
+            .c = .{ .arena = p.arena, .sql = sql, .src = .init(lexer.init(sql, 0, mode)) },
             .mode = mode,
         };
     }
@@ -188,7 +177,7 @@ pub const Parser = struct {
     /// A name: a word that is not reserved, or a quoted identifier.
     pub fn name(s: *Parser) Error!Token {
         const t = s.c.peek();
-        if (t.kind == .quoted_ident or (t.kind == .ident and !isReserved(t))) {
+        if (t.kind == .quoted_ident or (t.kind == .word and !isReserved(t))) {
             s.c.skip();
             return t;
         }
@@ -199,7 +188,7 @@ pub const Parser = struct {
     /// can come).
     pub fn anyName(s: *Parser) Error!Token {
         const t = s.c.peek();
-        if (t.kind == .quoted_ident or t.kind == .ident) {
+        if (t.kind == .quoted_ident or t.kind == .word) {
             s.c.skip();
             return t;
         }
@@ -207,28 +196,28 @@ pub const Parser = struct {
     }
 
     pub fn isName(s: *Parser) bool {
-        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .ident and !isReserved(s.c.peek()));
+        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .word and !isReserved(s.c.peek()));
     }
 
     /// The name a name token stands for.
     pub fn nameText(s: *Parser, t: Token) Error![]const u8 {
-        return lexer.identValue(s.a, t);
+        return lexer.identValue(s.a, s.c.sql, t);
     }
 
     /// The tree name of a name token.
     pub fn nameOf(s: *Parser, t: Token) Error!Name {
-        return .{ .text = try lexer.identValue(s.a, t), .pos = t.start };
+        return .{ .text = try lexer.identValue(s.a, s.c.sql, t), .pos = t.start };
     }
 
     /// A string literal's value (after `_charset` introducers and with
     /// adjacent literals concatenated, as MariaDB does).
     pub fn stringLiteral(s: *Parser) Error![]const u8 {
-        if (s.c.peek().kind == .ident and s.c.peek().text[0] == '_' and s.c.peekAt(1).kind == .string) s.c.skip();
-        if (s.c.peek().kind != .string) return s.c.syntaxError();
-        var v = try lexer.stringValue(s.a, s.c.peek(), !s.mode.has(.NO_BACKSLASH_ESCAPES));
+        if (s.c.peek().kind == .word and s.c.text(s.c.peek())[0] == '_' and lexer.isString(s.c.peekAt(1))) s.c.skip();
+        if (!lexer.isString(s.c.peek())) return s.c.syntaxError();
+        var v = try lexer.stringValue(s.a, s.c.sql, s.c.peek(), !s.mode.has(.NO_BACKSLASH_ESCAPES));
         s.c.skip();
-        while (s.c.peek().kind == .string) {
-            const more = try lexer.stringValue(s.a, s.c.peek(), !s.mode.has(.NO_BACKSLASH_ESCAPES));
+        while (lexer.isString(s.c.peek())) {
+            const more = try lexer.stringValue(s.a, s.c.sql, s.c.peek(), !s.mode.has(.NO_BACKSLASH_ESCAPES));
             v = try std.mem.concat(s.a, u8, &.{ v, more });
             s.c.skip();
         }
@@ -407,177 +396,299 @@ pub const Parser = struct {
 
     // ======================================================== expressions
 
+    /// An expression: one table of sqlparse.pratt (ops()) says where the
+    /// operators stand, prefix(), infix() and postfix() what they mean.
     pub fn expr(s: *Parser) Error!*Expr {
-        return s.orExpr();
+        return s.exprAt(0);
     }
 
     fn bin(s: *Parser, op: tree.BinOp, l: *Expr, r: *Expr) Error!*Expr {
         return tree.expr(s.a, l.pos, r.end, .{ .binary = .{ .op = op, .l = l, .r = r } });
     }
 
-    fn orExpr(s: *Parser) Error!*Expr {
-        var l = try s.xorExpr();
-        while (s.c.isKw("OR") or (s.c.isOp("||") and !s.mode.has(.PIPES_AS_CONCAT))) {
-            s.c.skip();
-            l = try s.bin(.@"or", l, try s.xorExpr());
-        }
-        return l;
-    }
+    const ExprOp = enum {
+        @"or",
+        xor,
+        @"and",
+        not,
+        compare,
+        is,
+        like,
+        not_like,
+        regexp,
+        not_regexp,
+        in,
+        not_in,
+        between,
+        not_between,
+        sounds,
+        bit_or,
+        bit_and,
+        shl,
+        shr,
+        add,
+        sub,
+        interval,
+        mul,
+        div,
+        rem,
+        int_div,
+        bit_xor,
+        concat,
+        neg,
+        plus,
+        bit_not,
+        bang,
+        binary,
+        json,
+        json_text,
+        collate,
+    };
 
-    fn xorExpr(s: *Parser) Error!*Expr {
-        var l = try s.andExpr();
-        while (s.c.eatKw("XOR")) {
-            const r = try s.andExpr();
-            l = try s.func(l.pos, "xq_xor", &.{ l, r });
-        }
-        return l;
-    }
+    /// Binding powers: conditions, the predicates, bit expressions
+    /// (| & << >> + -), terms (* / ^ ||), unary operators, COLLATE, ->.
+    const pred_bp = 40;
+    const bit_bp = 50;
+    const add_bp = 80;
+    const mul_bp = 90;
+    const unary_bp = 120;
+    const collate_bp = 130;
+    const json_bp = 140;
 
-    fn andExpr(s: *Parser) Error!*Expr {
-        var l = try s.notExpr();
-        while (s.c.isKw("AND") or s.c.isOp("&&")) {
-            s.c.skip();
-            l = try s.bin(.@"and", l, try s.notExpr());
-        }
-        return l;
-    }
-
-    fn notExpr(s: *Parser) Error!*Expr {
-        const pos = s.c.here();
-        if (s.c.eatKw("NOT")) {
-            const e = try s.notExpr();
-            return s.mk(pos, .{ .unary = .{ .op = .not, .e = e } });
-        }
-        return s.predicate();
-    }
-
-    fn compareOp(t: Token) ?tree.CmpOp {
-        if (t.kind != .op) return null;
-        const ops = [_]struct { []const u8, tree.CmpOp }{
-            .{ "=", .eq },  .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt },
-            .{ "<=", .le }, .{ ">", .gt },  .{ ">=", .ge }, .{ "<=>", .is },
+    /// MariaDB's operators. What no tighter operator follows is capped:
+    /// `x IS NULL + 1`, `x IN (1) * 2`, `x - INTERVAL 1 DAY * 2` and
+    /// `x COLLATE c -> '$'` are syntax errors. NOT starts a condition only
+    /// (`1 + NOT x` is a syntax error at NOT), - + ~ ! BINARY a term only
+    /// (after ESCAPE a primary follows), and `INTERVAL n unit + x` starts
+    /// a bit expression; elsewhere `INTERVAL ...` is an operand of its own
+    /// (wordExpr()). `||` is OR, or a term's Concat under PIPES_AS_CONCAT.
+    fn ops(comptime pipes: bool) []const pratt.Op(ExprOp) {
+        const T = ExprOp;
+        const no_paren: pratt.Tok = .{ .kind = "lparen" };
+        var o: []const pratt.Op(T) = &.{pratt.left(T, .@"or", 10, .{ .kw = "OR" })};
+        if (!pipes) o = o ++ .{pratt.left(T, .@"or", 10, .{ .op = "||" })};
+        o = o ++ .{
+            pratt.left(T, .xor, 20, .{ .kw = "XOR" }),
+            pratt.left(T, .@"and", 30, .{ .kw = "AND" }),
+            pratt.left(T, .@"and", 30, .{ .op = "&&" }),
+            pratt.prefixAt(T, .not, pred_bp, pred_bp, .{ .kw = "NOT" }),
+            pratt.postfix(T, .is, pred_bp, .{ .kw = "IS", .cap = pred_bp }),
+            pratt.left(T, .not_like, pred_bp, .{ .kw = "NOT", .then = "LIKE" }),
+            pratt.left(T, .not_in, pred_bp, .{ .kw = "NOT", .then = "IN", .cap = pred_bp }),
+            pratt.left(T, .not_between, pred_bp, .{ .kw = "NOT", .then = "BETWEEN" }),
+            pratt.left(T, .not_regexp, pred_bp, .{ .kw = "NOT", .then = "REGEXP" }),
+            pratt.left(T, .not_regexp, pred_bp, .{ .kw = "NOT", .then = "RLIKE" }),
+            pratt.left(T, .like, pred_bp, .{ .kw = "LIKE" }),
+            pratt.left(T, .regexp, pred_bp, .{ .kw = "REGEXP" }),
+            pratt.left(T, .regexp, pred_bp, .{ .kw = "RLIKE" }),
+            pratt.left(T, .in, pred_bp, .{ .kw = "IN", .cap = pred_bp }),
+            pratt.left(T, .between, pred_bp, .{ .kw = "BETWEEN" }),
+            pratt.left(T, .sounds, pred_bp, .{ .kw = "SOUNDS" }),
         };
-        for (ops) |o| if (std.mem.eql(u8, t.text, o[0])) return o[1];
-        return null;
+        for (compare_ops) |c| o = o ++ .{pratt.left(T, .compare, pred_bp, .{ .op = c[0] })};
+        o = o ++ .{
+            pratt.left(T, .bit_or, bit_bp, .{ .op = "|" }),
+            pratt.left(T, .bit_and, 60, .{ .op = "&" }),
+            pratt.left(T, .shl, 70, .{ .op = "<<" }),
+            pratt.left(T, .shr, 70, .{ .op = ">>" }),
+            pratt.left(T, .add, add_bp, .{ .op = "+" }),
+            pratt.left(T, .sub, add_bp, .{ .op = "-" }),
+            pratt.prefixAt(T, .interval, add_bp, mul_bp, .{ .kw = "INTERVAL", .unless = no_paren }),
+            pratt.left(T, .mul, mul_bp, .{ .op = "*" }),
+            pratt.left(T, .div, mul_bp, .{ .op = "/" }),
+            pratt.left(T, .rem, mul_bp, .{ .op = "%" }),
+            pratt.left(T, .rem, mul_bp, .{ .kw = "MOD" }),
+            pratt.left(T, .int_div, mul_bp, .{ .kw = "DIV" }),
+            pratt.left(T, .bit_xor, 100, .{ .op = "^" }),
+        };
+        if (pipes) o = o ++ .{pratt.left(T, .concat, 110, .{ .op = "||" })};
+        return o ++ .{
+            pratt.prefixAt(T, .neg, unary_bp, unary_bp, .{ .op = "-" }),
+            pratt.prefixAt(T, .plus, unary_bp, unary_bp, .{ .op = "+" }),
+            pratt.prefixAt(T, .bit_not, unary_bp, unary_bp, .{ .op = "~" }),
+            pratt.prefixAt(T, .bang, unary_bp, unary_bp, .{ .op = "!" }),
+            pratt.prefixAt(T, .binary, unary_bp, unary_bp, .{ .kw = "BINARY", .unless = no_paren }),
+            pratt.postfix(T, .collate, collate_bp, .{ .kw = "COLLATE", .cap = collate_bp }),
+            pratt.postfix(T, .json, json_bp, .{ .op = "->" }),
+            pratt.postfix(T, .json_text, json_bp, .{ .op = "->>" }),
+        };
     }
 
-    fn predicate(s: *Parser) Error!*Expr {
-        var l = try s.bitOr();
-        while (true) {
-            if (compareOp(s.c.peek())) |op| {
-                s.c.skip();
+    fn Ops(comptime pipes: bool) type {
+        return pratt.Pratt(Parser, *Expr, ExprOp, comptime ops(pipes));
+    }
+
+    /// An expression whose operators bind at least `min`.
+    fn exprAt(s: *Parser, min: u8) Error!*Expr {
+        if (s.mode.has(.PIPES_AS_CONCAT)) return Ops(true).expr(s, min);
+        return Ops(false).expr(s, min);
+    }
+
+    /// From a callback: only operators binding at most `c` follow.
+    fn cap(s: *Parser, c: u8) void {
+        if (s.mode.has(.PIPES_AS_CONCAT)) Ops(true).cap(s, c) else Ops(false).cap(s, c);
+    }
+
+    /// The comparison operators; <=> is IS.
+    const compare_ops = [_]struct { []const u8, tree.CmpOp }{
+        .{ "=", .eq },  .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt },
+        .{ "<=", .le }, .{ ">", .gt },  .{ ">=", .ge }, .{ "<=>", .is },
+    };
+
+    fn compareOp(s: *const Parser, t: Token) tree.CmpOp {
+        for (compare_ops) |o| if (std.mem.eql(u8, s.c.text(t), o[0])) return o[1];
+        unreachable;
+    }
+
+    /// A bit expression: an operand of the predicates.
+    pub fn bitOr(s: *Parser) Error!*Expr {
+        return s.exprAt(bit_bp);
+    }
+
+    /// `a + b - ...` (and INTERVAL forms): a LIMIT value, and an operand
+    /// starting with INTERVAL.
+    fn additive(s: *Parser) Error!*Expr {
+        return s.exprAt(add_bp);
+    }
+
+    pub fn operand(s: *Parser) Error!*Expr {
+        return s.primary();
+    }
+
+    /// NOT, `INTERVAL n unit + x` (xq_date_add()), - + ~ !, BINARY.
+    pub fn prefix(s: *Parser, tag: ExprOp, m: anytype, rbp: u8) Error!*Expr {
+        const pos = m.first.start;
+        if (tag == .interval) {
+            const iv = try s.intervalRest();
+            try s.c.expectOp("+");
+            const d = try s.exprAt(rbp);
+            return s.dateAdd(pos, d, iv.n, iv.unit, false);
+        }
+        const e = try s.exprAt(rbp);
+        return switch (tag) {
+            .not, .bang => s.mk(pos, .{ .unary = .{ .op = .not, .e = e } }),
+            .neg => s.mk(pos, .{ .unary = .{ .op = .neg, .e = e } }),
+            .plus => e,
+            .bit_not => s.mk(pos, .{ .unary = .{ .op = .bit_not, .e = e } }),
+            .binary => s.mk(pos, .{ .collate = .{ .e = e, .collation = "BINARY" } }),
+            else => unreachable,
+        };
+    }
+
+    /// The binary operators, the predicates (whose operands are bit
+    /// expressions), `x ± INTERVAL n unit`, and `||` as a Concat of all
+    /// the operands in a row.
+    pub fn infix(s: *Parser, tag: ExprOp, l: *Expr, m: anytype, rbp: u8) Error!*Expr {
+        const not = switch (tag) {
+            .not_like, .not_regexp, .not_in, .not_between => true,
+            else => false,
+        };
+        switch (tag) {
+            .compare => {
                 if (s.c.isAnyKw(&.{ "ANY", "SOME", "ALL" })) {
                     return s.c.fail(null, "xqlite: comparisons with ANY/SOME/ALL subqueries are not supported", .{});
                 }
                 const r = try s.bitOr();
-                l = try s.mk(l.pos, .{ .compare = .{ .op = op, .l = try functions.jsonCompared(s, l), .r = try functions.jsonCompared(s, r) } });
-                continue;
-            }
-            if (s.c.isKw("IS")) {
-                s.c.skip();
-                const not = s.c.eatKw("NOT");
-                if (s.c.eatKw("NULL") or s.c.eatKw("UNKNOWN")) {
-                    l = try s.mk(l.pos, .{ .is_null = .{ .e = l, .not = not } });
-                } else if (s.c.isKw("TRUE") or s.c.isKw("FALSE")) {
-                    const v = s.c.isKw("TRUE");
-                    s.c.skip();
-                    l = try s.mk(l.pos, .{ .is_bool = .{ .e = l, .value = v, .not = not } });
-                } else return s.c.syntaxError();
-                continue;
-            }
-            var not = false;
-            if (s.c.isKw("NOT")) {
-                const n = s.c.peekAt(1);
-                if (!n.isAnyKw(&.{ "LIKE", "IN", "BETWEEN", "REGEXP", "RLIKE" })) break;
-                s.c.skip();
-                not = true;
-            }
-            if (s.c.isKw("LIKE")) {
-                const op_pos = s.c.here();
-                s.c.skip();
+                return s.mk(l.pos, .{ .compare = .{ .op = s.compareOp(m.first), .l = try functions.jsonCompared(s, l), .r = try functions.jsonCompared(s, r) } });
+            },
+            .like, .not_like => {
                 const r = try s.bitOr();
-                // The escape character is \ unless ESCAPE says.
-                const esc = if (s.c.eatKw("ESCAPE")) try s.primaryWithCollate() else try s.mk(op_pos, .{ .string = "\\" });
-                l = try s.mk(l.pos, .{ .like = .{ .e = l, .pat = r, .not = not, .case_sensitive = false, .escape = .{ .expr = esc } } });
-                continue;
-            }
-            if (s.c.isKw("REGEXP") or s.c.isKw("RLIKE")) {
-                const op_pos = s.c.here();
-                s.c.skip();
+                // The escape character is \ unless ESCAPE says (then a
+                // primary, after which no tighter operator follows).
+                const esc = if (s.c.eatKw("ESCAPE")) blk: {
+                    const e = try s.exprAt(collate_bp);
+                    s.cap(pred_bp);
+                    break :blk e;
+                } else try s.mk(m.last.start, .{ .string = "\\" });
+                return s.mk(l.pos, .{ .like = .{ .e = l, .pat = r, .not = not, .case_sensitive = false, .escape = .{ .expr = esc } } });
+            },
+            .regexp, .not_regexp => {
                 const r = try s.bitOr();
-                const f = try s.new(tree.Func, .{ .name = .{ .text = "regexp", .pos = op_pos }, .args = try s.a.dupe(*Expr, &.{ r, l }) });
-                l = try s.mk(l.pos, .{ .func = f });
-                if (not) l = try s.mk(l.pos, .{ .unary = .{ .op = .not, .e = l } });
-                continue;
-            }
-            if (s.c.eatKw("IN")) {
+                const f = try s.new(tree.Func, .{ .name = .{ .text = "regexp", .pos = m.last.start }, .args = try s.a.dupe(*Expr, &.{ r, l }) });
+                const e = try s.mk(l.pos, .{ .func = f });
+                if (!not) return e;
+                return s.mk(e.pos, .{ .unary = .{ .op = .not, .e = e } });
+            },
+            .in, .not_in => {
                 try s.c.expectOp("(");
                 if (s.isSelectStart()) {
                     const sub = try s.selectStmt();
                     try s.c.expectOp(")");
-                    l = try s.mk(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = sub } });
-                } else {
-                    const items = try s.exprList();
-                    try s.c.expectOp(")");
-                    l = try s.mk(l.pos, .{ .in_list = .{ .e = try functions.jsonCompared(s, l), .not = not, .items = items } });
+                    return s.mk(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = sub } });
                 }
-                continue;
-            }
-            if (s.c.eatKw("BETWEEN")) {
+                const items = try s.exprList();
+                try s.c.expectOp(")");
+                return s.mk(l.pos, .{ .in_list = .{ .e = try functions.jsonCompared(s, l), .not = not, .items = items } });
+            },
+            .between, .not_between => {
                 const lo = try s.bitOr();
                 try s.c.expectKw("AND");
                 const hi = try s.bitOr();
-                l = try s.mk(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
-                continue;
-            }
-            if (s.c.isKw("SOUNDS")) return s.c.fail(null, "xqlite: SOUNDS LIKE is not supported", .{});
-            break;
-        }
-        return l;
-    }
-
-    pub fn bitOr(s: *Parser) Error!*Expr {
-        var l = try s.bitAnd();
-        while (s.c.eatOp("|")) l = try s.bin(.bit_or, l, try s.bitAnd());
-        return l;
-    }
-
-    fn bitAnd(s: *Parser) Error!*Expr {
-        var l = try s.shift();
-        while (s.c.eatOp("&")) l = try s.bin(.bit_and, l, try s.shift());
-        return l;
-    }
-
-    fn shift(s: *Parser) Error!*Expr {
-        var l = try s.additive();
-        while (s.c.isOp("<<") or s.c.isOp(">>")) {
-            const op: tree.BinOp = if (s.c.isOp("<<")) .shl else .shr;
-            s.c.skip();
-            l = try s.bin(op, l, try s.additive());
-        }
-        return l;
-    }
-
-    fn additive(s: *Parser) Error!*Expr {
-        var l = if (s.c.isKw("INTERVAL") and !s.c.peekAt(1).is("(")) blk: {
-            // INTERVAL n unit + date
-            const pos = s.c.here();
-            const iv = try s.interval();
-            try s.c.expectOp("+");
-            const d = try s.multiplicative();
-            break :blk try s.dateAdd(pos, d, iv.n, iv.unit, false);
-        } else try s.multiplicative();
-        while (s.c.isOp("+") or s.c.isOp("-")) {
-            const minus = s.c.isOp("-");
-            s.c.skip();
-            if (s.c.isKw("INTERVAL")) {
+                return s.mk(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
+            },
+            .sounds => return s.c.fail(null, "xqlite: SOUNDS LIKE is not supported", .{}),
+            .add, .sub => if (s.c.isKw("INTERVAL")) {
                 const iv = try s.interval();
-                l = try s.dateAdd(l.pos, l, iv.n, iv.unit, minus);
-                continue;
-            }
-            l = try s.bin(if (minus) .sub else .add, l, try s.multiplicative());
+                s.cap(add_bp);
+                return s.dateAdd(l.pos, l, iv.n, iv.unit, tag == .sub);
+            },
+            .concat => {
+                var args: std.ArrayList(*Expr) = .empty;
+                try args.append(s.a, l);
+                try args.append(s.a, try s.exprAt(rbp));
+                while (s.c.eatOp("||")) try args.append(s.a, try s.exprAt(rbp));
+                return s.mk(l.pos, .{ .concat = .{ .args = args.items, .null_policy = .propagate } });
+            },
+            else => {},
         }
-        return l;
+        const r = try s.exprAt(rbp);
+        return switch (tag) {
+            .@"or" => s.bin(.@"or", l, r),
+            .@"and" => s.bin(.@"and", l, r),
+            .xor => s.func(l.pos, "xq_xor", &.{ l, r }),
+            .bit_or => s.bin(.bit_or, l, r),
+            .bit_and => s.bin(.bit_and, l, r),
+            .shl => s.bin(.shl, l, r),
+            .shr => s.bin(.shr, l, r),
+            .add => s.bin(.add, l, r),
+            .sub => s.bin(.sub, l, r),
+            .mul => s.bin(.mul, l, r),
+            .div => s.mk(l.pos, .{ .div = .{ .kind = .real, .l = l, .r = r } }),
+            .rem => s.bin(.rem, l, r),
+            .int_div => s.mk(l.pos, .{ .div = .{ .kind = .int, .l = l, .r = r } }),
+            .bit_xor => s.func(l.pos, "xq_bitxor", &.{ l, r }),
+            else => unreachable,
+        };
+    }
+
+    /// IS [NOT] {NULL | UNKNOWN | TRUE | FALSE}; COLLATE name;
+    /// col->'path', col->>'path' (MySQL's; MariaDB has neither).
+    pub fn postfix(s: *Parser, tag: ExprOp, l: *Expr, m: anytype) Error!*Expr {
+        switch (tag) {
+            .is => {
+                const not = s.c.eatKw("NOT");
+                if (s.c.eatKw("NULL") or s.c.eatKw("UNKNOWN")) {
+                    return s.mk(l.pos, .{ .is_null = .{ .e = l, .not = not } });
+                } else if (s.c.isKw("TRUE") or s.c.isKw("FALSE")) {
+                    const v = s.c.isKw("TRUE");
+                    s.c.skip();
+                    return s.mk(l.pos, .{ .is_bool = .{ .e = l, .value = v, .not = not } });
+                }
+                return s.c.syntaxError();
+            },
+            .collate => {
+                const coll = try s.collationName();
+                return s.mk(l.pos, .{ .collate = .{ .e = l, .collation = coll } });
+            },
+            .json, .json_text => {
+                const pos = m.first.start;
+                const path = try s.mk(s.c.here(), .{ .string = try s.stringLiteral() });
+                const e = try s.func(pos, "json_extract", &.{ l, path });
+                if (tag == .json) return e;
+                return s.func(pos, "json_unquote", &.{e});
+            },
+            else => unreachable,
+        }
     }
 
     const Interval = struct { n: *Expr, unit: []const u8 };
@@ -585,9 +696,14 @@ pub const Parser = struct {
     /// `INTERVAL expr unit`.
     fn interval(s: *Parser) Error!Interval {
         try s.c.expectKw("INTERVAL");
+        return s.intervalRest();
+    }
+
+    /// `expr unit`, after INTERVAL.
+    fn intervalRest(s: *Parser) Error!Interval {
         const n = try s.expr();
-        if (s.c.peek().kind != .ident) return s.c.syntaxError();
-        const unit = s.c.peek().text;
+        if (s.c.peek().kind != .word) return s.c.syntaxError();
+        const unit = s.c.text(s.c.peek());
         s.c.skip();
         return .{ .n = n, .unit = unit };
     }
@@ -599,83 +715,11 @@ pub const Parser = struct {
         return s.func(pos, "xq_date_add", &.{ d, amount, try s.str(pos, u) });
     }
 
-    fn multiplicative(s: *Parser) Error!*Expr {
-        var l = try s.bitXor();
-        while (true) {
-            if (s.c.eatOp("*")) {
-                l = try s.bin(.mul, l, try s.bitXor());
-            } else if (s.c.eatOp("/")) {
-                const r = try s.bitXor();
-                l = try s.mk(l.pos, .{ .div = .{ .kind = .real, .l = l, .r = r } });
-            } else if (s.c.eatOp("%") or s.c.eatKw("MOD")) {
-                l = try s.bin(.rem, l, try s.bitXor());
-            } else if (s.c.eatKw("DIV")) {
-                const r = try s.bitXor();
-                l = try s.mk(l.pos, .{ .div = .{ .kind = .int, .l = l, .r = r } });
-            } else break;
-        }
-        return l;
-    }
-
-    fn bitXor(s: *Parser) Error!*Expr {
-        var l = try s.concat();
-        while (s.c.eatOp("^")) {
-            const r = try s.concat();
-            l = try s.func(l.pos, "xq_bitxor", &.{ l, r });
-        }
-        return l;
-    }
-
-    fn concat(s: *Parser) Error!*Expr {
-        const l = try s.unary();
-        if (!(s.mode.has(.PIPES_AS_CONCAT) and s.c.isOp("||"))) return l;
-        var args: std.ArrayList(*Expr) = .empty;
-        try args.append(s.a, l);
-        while (s.mode.has(.PIPES_AS_CONCAT) and s.c.eatOp("||")) try args.append(s.a, try s.unary());
-        return s.mk(l.pos, .{ .concat = .{ .args = args.items, .null_policy = .propagate } });
-    }
-
-    fn unary(s: *Parser) Error!*Expr {
-        const pos = s.c.here();
-        if (s.c.isOp("-") or s.c.isOp("+")) {
-            const minus = s.c.isOp("-");
-            s.c.skip();
-            const e = try s.unary();
-            if (!minus) return e;
-            return s.mk(pos, .{ .unary = .{ .op = .neg, .e = e } });
-        }
-        if (s.c.eatOp("~")) return s.mk(pos, .{ .unary = .{ .op = .bit_not, .e = try s.unary() } });
-        if (s.c.eatOp("!")) return s.mk(pos, .{ .unary = .{ .op = .not, .e = try s.unary() } });
-        if (s.c.isKw("BINARY") and !s.c.peekAt(1).is("(")) {
-            s.c.skip();
-            return s.mk(pos, .{ .collate = .{ .e = try s.unary(), .collation = "BINARY" } });
-        }
-        return s.primaryWithCollate();
-    }
-
-    fn primaryWithCollate(s: *Parser) Error!*Expr {
-        var e = try s.primary();
-        // col->'path', col->>'path' (MySQL's; MariaDB has neither).
-        while (s.c.isOp("->") or s.c.isOp("->>")) {
-            const text = s.c.isOp("->>");
-            const pos = s.c.here();
-            s.c.skip();
-            const path = try s.mk(s.c.here(), .{ .string = try s.stringLiteral() });
-            e = try s.func(pos, "json_extract", &.{ e, path });
-            if (text) e = try s.func(pos, "json_unquote", &.{e});
-        }
-        while (s.c.eatKw("COLLATE")) {
-            const coll = try s.collationName();
-            e = try s.mk(e.pos, .{ .collate = .{ .e = e, .collation = coll } });
-        }
-        return e;
-    }
-
     /// The SQLite collation for a MariaDB collation name (after COLLATE).
     pub fn collationName(s: *Parser) Error![:0]const u8 {
         const t = s.c.peek();
-        if (t.kind != .ident and t.kind != .quoted_ident and t.kind != .string) return s.c.syntaxError();
-        const n = if (t.kind == .string) try lexer.stringValue(s.a, t, false) else try s.nameText(t);
+        if (t.kind != .word and t.kind != .quoted_ident and !lexer.isString(t)) return s.c.syntaxError();
+        const n = if (lexer.isString(t)) try lexer.stringValue(s.a, s.c.sql, t, false) else try s.nameText(t);
         s.c.skip();
         return mapCollation(n) orelse s.c.failState(null, .numbered("42704", 1273), "Unknown collation: '{s}'", .{n});
     }
@@ -713,7 +757,7 @@ pub const Parser = struct {
     }
 
     fn isSelectish(t: Token) bool {
-        return t.isKw("SELECT") or t.isKw("WITH") or t.is("(");
+        return t.isKw("SELECT") or t.isKw("WITH") or t.kind == .lparen;
     }
 
     /// Refuse what the schema may not keep (variables, parameters):
@@ -727,6 +771,17 @@ pub const Parser = struct {
     fn primary(s: *Parser) Error!*Expr {
         const t = s.c.peek();
         const pos = t.start;
+        if (lexer.isHex(t)) {
+            s.c.skip();
+            const digits = (try lexer.hexDigits(s.a, s.c.sql, t)) orelse return s.c.syntaxErrorAt(t);
+            return s.mk(pos, .{ .blob = digits });
+        }
+        if (lexer.isBits(t)) {
+            s.c.skip();
+            const v = lexer.bitValue(s.c.sql, t) orelse return s.c.failState(null, .of("22003"), "bit literal out of range", .{});
+            if (v < 0) return s.int_(pos, v);
+            return s.mk(pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{v}) });
+        }
         switch (t.kind) {
             .string => {
                 const v = try s.stringLiteral();
@@ -735,37 +790,24 @@ pub const Parser = struct {
             },
             .integer => {
                 s.c.skip();
-                return s.mk(pos, .{ .integer = t.text });
+                return s.mk(pos, .{ .integer = s.c.text(t) });
             },
             .float => {
                 s.c.skip();
-                return s.mk(pos, .{ .float = t.text });
-            },
-            .hex => {
-                s.c.skip();
-                const digits = (try lexer.hexDigits(s.a, t)) orelse return s.c.syntaxErrorAt(t);
-                return s.mk(pos, .{ .blob = digits });
-            },
-            .bit => {
-                s.c.skip();
-                const v = lexer.bitValue(t) orelse return s.c.failState(null, .of("22003"), "bit literal out of range", .{});
-                if (v < 0) return s.int_(pos, v);
-                return s.mk(pos, .{ .integer = try std.fmt.allocPrint(s.a, "{d}", .{v}) });
+                return s.mk(pos, .{ .float = s.c.text(t) });
             },
             .param => {
-                try s.refuseStored(t.text);
+                try s.refuseStored(s.c.text(t));
                 s.c.skip();
                 return s.mk(pos, .{ .param = null });
             },
-            .sys_var => {
-                try s.refuseStored(t.text);
+            .variable => {
+                try s.refuseStored(s.c.text(t));
                 s.c.skip();
-                const name_ = try sysVarName(s, t);
-                return s.func(pos, "xq_sysvar", &.{try s.str(pos, name_)});
-            },
-            .user_var => {
-                try s.refuseStored(t.text);
-                s.c.skip();
+                if (t.sub == .system) {
+                    const name_ = try sysVarName(s, t);
+                    return s.func(pos, "xq_sysvar", &.{try s.str(pos, name_)});
+                }
                 const name_ = try userVarName(s, t);
                 if (s.c.eatOp(":=")) {
                     const v = try s.expr();
@@ -773,9 +815,9 @@ pub const Parser = struct {
                 }
                 return s.func(pos, "xq_uservar", &.{try s.str(pos, name_)});
             },
+            .lparen => return s.parenthesized(),
             .op => {
-                if (t.is("(")) return s.parenthesized();
-                if (t.is("{")) {
+                if (s.c.isOpTok(t, "{")) {
                     // ODBC escapes: {d '...'}, {ts '...'}, {fn f()}.
                     s.c.skip();
                     _ = try s.anyName();
@@ -786,7 +828,7 @@ pub const Parser = struct {
                 return s.c.syntaxError();
             },
             .quoted_ident => return s.columnRef(),
-            .ident => return s.wordExpr(),
+            .word => return s.wordExpr(),
             else => return s.c.syntaxError(),
         }
     }
@@ -843,17 +885,17 @@ pub const Parser = struct {
             try s.c.expectOp(")");
             return s.mk(pos, .{ .exists = sub });
         }
-        if (t.isKw("DEFAULT") and s.allow_default and !next.is("(")) {
+        if (t.isKw("DEFAULT") and s.allow_default and next.kind != .lparen) {
             s.c.skip();
             return s.mk(pos, .default);
         }
-        if (t.isAnyKw(&.{ "DATE", "TIME", "TIMESTAMP" }) and next.kind == .string) {
+        if (t.isAnyKw(&.{ "DATE", "TIME", "TIMESTAMP" }) and lexer.isString(next)) {
             // DATE '2024-01-01' and the like: the string.
             s.c.skip();
             return s.primary();
         }
-        if (t.text[0] == '_' and next.kind == .string) return s.primary();
-        if (t.isKw("INTERVAL") and !next.is("(")) {
+        if (s.c.text(t)[0] == '_' and lexer.isString(next)) return s.primary();
+        if (t.isKw("INTERVAL") and next.kind != .lparen) {
             // INTERVAL n unit + date
             return s.additive();
         }
@@ -871,14 +913,14 @@ pub const Parser = struct {
             const seq = try s.qualifiedName();
             return s.func(pos, "lastval", &.{try s.str(seq.name.pos, try s.sequenceName(seq))});
         }
-        if (next.is("(")) return @import("functions.zig").call(s);
+        if (next.kind == .lparen) return @import("functions.zig").call(s);
         // Niladic functions.
         const niladic = [_]struct { []const u8, []const u8 }{
             .{ "CURRENT_TIMESTAMP", "now" }, .{ "LOCALTIME", "now" },        .{ "LOCALTIMESTAMP", "now" },
             .{ "CURRENT_DATE", "curdate" },  .{ "CURRENT_TIME", "curtime" }, .{ "UTC_TIMESTAMP", "now" },
             .{ "UTC_DATE", "curdate" },      .{ "UTC_TIME", "curtime" },     .{ "CURRENT_USER", "current_user" },
         };
-        for (niladic) |n| if (t.isKw(n[0])) {
+        inline for (niladic) |n| if (t.isKw(n[0])) {
             s.c.skip();
             return @import("functions.zig").byName(s, n[1], &.{}, pos);
         };
@@ -1113,7 +1155,7 @@ pub const Parser = struct {
             if (s.c.isOp("*")) {
                 try l.append(s.a, .{ .star = s.c.here() });
                 s.c.skip();
-            } else if ((s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident) and s.c.peekAt(1).is(".") and s.c.peekAt(2).is("*")) {
+            } else if ((s.c.peek().kind == .word or s.c.peek().kind == .quoted_ident) and s.c.peekAt(1).kind == .dot and s.c.peekAt(2).isOp(s.c.sql, "*")) {
                 const tbl = try s.nameOf(s.c.peek());
                 s.c.skip();
                 s.c.skip();
@@ -1143,7 +1185,7 @@ pub const Parser = struct {
     /// `[AS] name` (or a string, for a column alias).
     pub fn alias(s: *Parser, string_ok: bool) Error!?Name {
         if (s.c.eatKw("AS")) {
-            if (string_ok and s.c.peek().kind == .string) return try s.stringAlias();
+            if (string_ok and lexer.isString(s.c.peek())) return try s.stringAlias();
             return try s.nameOf(try s.anyName());
         }
         if (s.isName()) {
@@ -1151,7 +1193,7 @@ pub const Parser = struct {
             s.c.skip();
             return try s.nameOf(t);
         }
-        if (string_ok and s.c.peek().kind == .string) return try s.stringAlias();
+        if (string_ok and lexer.isString(s.c.peek())) return try s.stringAlias();
         return null;
     }
 
@@ -1504,8 +1546,8 @@ pub fn charsetCollation(n: []const u8) ?[:0]const u8 {
 /// The name of @@[scope.]name, lower case, checked against the system
 /// variables xqlite knows (session.zig).
 fn sysVarName(s: *Parser, t: Token) Error![]const u8 {
-    var z = t.text[2..];
-    if (z.len > 0 and z[0] == '`') z = try lexer.identValue(s.a, .{ .kind = .quoted_ident, .text = z });
+    var z = s.c.text(t)[2..];
+    if (z.len > 0 and z[0] == '`') z = try lexer.quotedName(s.a, z);
     for ([_][]const u8{ "global.", "session.", "local." }) |scope| {
         if (z.len > scope.len and std.ascii.startsWithIgnoreCase(z, scope)) z = z[scope.len..];
     }
@@ -1516,9 +1558,9 @@ fn sysVarName(s: *Parser, t: Token) Error![]const u8 {
 
 /// The name of @name (case-insensitive: lower case).
 fn userVarName(s: *Parser, t: Token) Error![]const u8 {
-    var z = t.text[1..];
+    var z = s.c.text(t)[1..];
     if (z.len > 0 and (z[0] == '`' or z[0] == '\'' or z[0] == '"')) {
-        z = if (z[0] == '`') try lexer.identValue(s.a, .{ .kind = .quoted_ident, .text = z }) else try lexer.stringValue(s.a, .{ .kind = .string, .text = z }, false);
+        z = if (z[0] == '`') try lexer.quotedName(s.a, z) else try lexer.stringText(s.a, z, false);
     }
     return std.ascii.allocLowerString(s.a, z);
 }

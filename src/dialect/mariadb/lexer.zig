@@ -1,9 +1,9 @@
-//! The MariaDB tokenizer.
+//! The MariaDB tokenizer: MariaDB's lexical rules for sqllex.Lexer().
 //!
-//! Tokens are slices of the statement text (so that the IR's Token
+//! Tokens are offsets in the statement text (so that the IR's Token
 //! offsets and error positions point into it); the value of a string
 //! literal (escapes, doubled quotes) is computed on demand by
-//! stringValue(). What depends on sql_mode:
+//! stringValue(). What depends on sql_mode (lexOptions()):
 //!  - ANSI_QUOTES: "x" is an identifier (else a string, as 'x');
 //!  - NO_BACKSLASH_ESCAPES: a backslash in a string is an ordinary
 //!    character (else it starts an escape: \0 \' \" \b \n \r \t \Z \\,
@@ -15,246 +15,174 @@
 //! `/*! ... */`, `/*!NNNNN ... */` or `/*M!NNNNN ... */` is code: its
 //! contents are tokenized (unless the version NNNNN is above ours, then
 //! it is a comment), and its closing `*/` is skipped.
+//!
+//! Besides the shared kinds: X'0A1B' is a string of sub `blob` and 0x0A1B
+//! an integer of sub `hex` (both binary strings, isHex()); B'0101' a
+//! string of sub `bits` and 0b0101 an integer of sub `binary` (isBits());
+//! @x a variable of sub `user`, @@x of sub `system`.
 
 const std = @import("std");
 const sqllex = @import("sql/lexer");
 const state = @import("state.zig");
 
-/// MariaDB's rules for the scanners: identifiers of letters, `_`, `$`
-/// and any non-ASCII byte, then digits too; `#` and `-- ` comments. Block
-/// comments are skipped by Lexer.skipSpace() itself, which knows the
-/// executable ones.
-pub const spec: sqllex.Spec = .{
-    .ident_start = .of(.{ .letters = true, .high = true, .chars = "_$" }),
-    .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
-    .comments = .{ .dash_dash = .before_space, .hash = true, .block = .none },
-    .numbers = .{ .radix = "xXb" },
-};
-const scan = sqllex.Scanner(spec);
-
-pub const Kind = enum {
-    eof,
-    /// An unquoted word: a keyword or a name.
-    ident,
-    /// `name` (or "name" under ANSI_QUOTES).
-    quoted_ident,
-    /// '...' (or "..." unless ANSI_QUOTES); N'...' too.
-    string,
-    integer,
-    /// A number with a fraction or an exponent.
-    float,
-    /// X'0A1B' or 0x0A1B: a binary string.
-    hex,
-    /// B'0101' or 0b0101.
-    bit,
-    /// `?`
-    param,
-    /// @name, @'name', @`name`: a user variable.
-    user_var,
-    /// @@name, @@session.name ...: a system variable.
-    sys_var,
-    /// Punctuation and operators: ( ) , . ; + - * / % = < > <= >= <> !=
-    /// <=> ! ~ ^ & | && || << >> := { }
-    op,
-    /// A character that starts no token, or an unterminated literal.
-    illegal,
-};
-
-pub const Token = struct {
-    kind: Kind,
-    /// The text of the token in the statement.
-    text: []const u8,
-    /// Its byte offsets in the statement (0 for a token made of other
-    /// text, to decode it).
-    start: u32 = 0,
-    end: u32 = 0,
-
-    pub fn is(t: Token, op: []const u8) bool {
-        return t.kind == .op and std.mem.eql(u8, t.text, op);
-    }
-
-    pub const isOp = is;
-
-    /// An unquoted word equal to `kw` (case-insensitive).
-    pub fn isKw(t: Token, kw: []const u8) bool {
-        return t.kind == .ident and std.ascii.eqlIgnoreCase(t.text, kw);
-    }
-
-    pub fn isAnyKw(t: Token, comptime kws: []const []const u8) bool {
-        inline for (kws) |kw| if (t.isKw(kw)) return true;
-        return false;
-    }
-};
-
 /// Our version as executable comments compare it (MAJOR*10000 +
 /// MINOR*100 + PATCH).
 pub const version_id: u32 = 110800;
 
-pub const Lexer = struct {
-    sql: [:0]const u8,
-    pos: usize = 0,
-    /// Executable comments open at `pos` (their `*/` is skipped).
-    exec_depth: u8 = 0,
-    ansi_quotes: bool,
-    backslash_escapes: bool,
+/// MariaDB's lexical rules for sqllex.Lexer(), as sql_mode sets its
+/// options (lexOptions()).
+pub const lex = struct {
+    pub const spec: sqllex.Spec = .{
+        .ident_start = .of(.{ .letters = true, .high = true, .chars = "_$" }),
+        .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
+        .comments = .{ .dash_dash = .before_space, .hash = true, .block = .none },
+        .numbers = .{ .radix = "xXb", .tail = .word, .radix_empty = .decimal },
+        .quotes = &.{
+            .{ .open = '`', .close = '`', .kind = .quoted_ident },
+            .{ .open = '\'', .close = '\'', .kind = .string, .escapes = true },
+            .{ .open = '"', .close = '"', .kind = .string, .escapes = true, .when = .not_ansi_quotes },
+            .{ .open = '"', .close = '"', .kind = .quoted_ident, .when = .ansi_quotes },
+        },
+        .prefixes = &.{
+            .{ .letters = "x", .sub = .blob, .escapes = .never },
+            .{ .letters = "b", .sub = .bits, .escapes = .never },
+            .{ .letters = "n", .sub = .national },
+        },
+        .params = .{ .question = .positional },
+        .ops = .{
+            .list = &.{ "<=>", "->>", "<=", ">=", "<>", "!=", "&&", "||", "<<", ">>", ":=", "->" },
+            .singles = .of(.{ .chars = "+-*/%=<>!~^&|{}:" }),
+        },
+    };
 
-    pub fn init(sql: [:0]const u8, mode: state.SqlMode) Lexer {
-        return .{
-            .sql = sql,
-            .ansi_quotes = mode.has(.ANSI_QUOTES),
-            .backslash_escapes = !mode.has(.NO_BACKSLASH_ESCAPES),
-        };
-    }
+    /// Every word the parser (and syntax.zig, sqlparse's Cursor) compares
+    /// as a keyword: a word not here is never one. The reserved ones are
+    /// no names where a name is optional (aliases) or where they would
+    /// make no sense as one (a column reference): parser.isReserved().
+    pub const keywords = sqllex.Keywords(sqllex.allKeywords(.reserved, &reserved_words) ++ sqllex.allKeywords(.unreserved, &.{
+        "ACTION",         "ADD",                 "AFTER",        "ALGORITHM",        "ALTER",      "ALWAYS",         "ANALYZE",      "ANY",            "ASCII",
+        "AUTO_INCREMENT", "BEGIN",               "BOOL",         "BOOLEAN",          "BOTH",       "BYTE",           "CACHE",        "CASCADE",        "CASCADED",
+        "CHAIN",          "CHAR",                "CHARACTER",    "CHARSET",          "CLOB",       "CLUSTERING",     "COLUMN",       "COLUMNS",        "COLUMN_FORMAT",
+        "COMMENT",        "COMMIT",              "CONVERT",      "COUNT",            "CURDATE",    "CURRENT",        "CURRENT_DATE", "CURRENT_TIME",   "CURRENT_TIMESTAMP",
+        "CURRENT_USER",   "CYCLE",               "DATABASE",     "DATABASES",        "DATE",       "DATETIME",       "DEC",          "DECIMAL",        "DEFINER",
+        "DELAYED",        "DESCRIBE",            "DISABLE",      "DO",               "DOUBLE",     "DUPLICATE",      "EMPTY",        "ENABLE",         "END",
+        "ENGINE",         "ERROR",               "ERRORS",       "EVENT",            "EXCLUDE",    "EXPLAIN",        "EXTENDED",     "FIELDS",         "FIRST",
+        "FIXED",          "FLOAT",               "FLOAT4",       "FLOAT8",           "FOLLOWING",  "FORMAT",         "FULL",         "FULLTEXT",       "FUNCTION",
+        "GENERATED",      "GLOBAL",              "GROUPS",       "IF",               "IGNORED",    "INCREMENT",      "INDEXES",      "INT",            "INT1",
+        "INT2",           "INT3",                "INT4",         "INT8",             "INTEGER",    "INVISIBLE",      "JSON",         "KEYS",           "KEY_BLOCK_SIZE",
+        "LAST",           "LASTVAL",             "LEADING",      "LOCAL",            "LOCALTIME",  "LOCALTIMESTAMP", "LOCKED",       "LONG",           "MATCH",
+        "MAXVALUE",       "MIDDLEINT",           "MINUS",        "MINVALUE",         "MODE",       "NAMES",          "NATIONAL",     "NCHAR",          "NESTED",
+        "NEXT",           "NO",                  "NOCACHE",      "NOCYCLE",          "NOMAXVALUE", "NOMINVALUE",     "NOW",          "NOWAIT",         "NO_WRITE_TO_BINLOG",
+        "NULLS",          "NUMBER",              "NUMERIC",      "NVARCHAR",         "OFF",        "ONLINE",         "ONLY",         "OPTION",         "ORDINALITY",
+        "OTHERS",         "PARTITIONS",          "PATH",         "PERIOD",           "PERSISTENT", "PRECEDING",      "PRECISION",    "PREVIOUS",       "PROCEDURE",
+        "QUICK",          "RAW",                 "REAL",         "RECURSIVE",        "RELEASE",    "RENAME",         "RESTRICT",     "ROLLBACK",       "ROLLUP",
+        "ROW",            "SAVEPOINT",           "SCHEMA",       "SCHEMAS",          "SECURITY",   "SEQUENCE",       "SERIAL",       "SESSION",        "SHARE",
+        "SHOW",           "SIGNED",              "SKIP",         "SOME",             "SOUNDS",     "SPATIAL",        "SQL",          "SQL_BIG_RESULT", "SQL_BUFFER_RESULT",
+        "SQL_CACHE",      "SQL_CALC_FOUND_ROWS", "SQL_NO_CACHE", "SQL_SMALL_RESULT", "START",      "STORAGE",        "STORED",       "TABLE",          "TABLES",
+        "TEMP",           "TEMPORARY",           "TEXT",         "TIES",             "TIME",       "TIMESTAMP",      "TO",           "TRAILING",       "TRANSACTION",
+        "TRIGGER",        "TRUNCATE",            "UNBOUNDED",    "UNICODE",          "UNKNOWN",    "UNLOCK",         "UNSIGNED",     "UTC_DATE",       "UTC_TIME",
+        "UTC_TIMESTAMP",  "VALUE",               "VARBINARY",    "VARCHAR",          "VARCHAR2",   "VARCHARACTER",   "VARIABLES",    "VARYING",        "VIEW",
+        "VIRTUAL",        "VISIBLE",             "WAIT",         "WARNINGS",         "WORK",       "ZEROFILL",
+    }));
 
-    /// Skip spaces and comments (an unterminated /* comment runs to the
-    /// end).
-    fn skipSpace(lx: *Lexer) void {
-        const s = lx.sql;
+    pub const State = struct {
+        /// How many executable comments are open.
+        exec_depth: u8 = 0,
+    };
+
+    /// White space and comments; an executable comment's opening is
+    /// skipped (its contents are code), and so is its closing `*/`.
+    pub fn skip(l: anytype) ?Token {
+        const s = l.sql;
         while (true) {
-            lx.pos = scan.skip(s, lx.pos).end;
-            switch (s[lx.pos]) {
+            l.pos = Lexer.scan.skip(s, l.pos).end;
+            switch (s[l.pos]) {
                 '*' => {
-                    if (lx.exec_depth > 0 and s[lx.pos + 1] == '/') {
-                        lx.exec_depth -= 1;
-                        lx.pos += 2;
-                    } else return;
+                    if (l.state.exec_depth > 0 and s[l.pos + 1] == '/') {
+                        l.state.exec_depth -= 1;
+                        l.pos += 2;
+                    } else return null;
                 },
                 '/' => {
-                    if (s[lx.pos + 1] != '*') return;
-                    var i = lx.pos + 2;
+                    if (s[l.pos + 1] != '*') return null;
+                    var i = l.pos + 2;
                     const mariadb_only = s[i] == 'M' and s[i + 1] == '!';
                     if (mariadb_only) i += 1;
                     if (s[i] == '!') {
                         i += 1;
                         var ver: u32 = 0;
                         var digits: usize = 0;
-                        while (scan.isDigit(s[i]) and digits < 6) : (digits += 1) {
+                        while (Lexer.scan.isDigit(s[i]) and digits < 6) : (digits += 1) {
                             ver = ver * 10 + (s[i] - '0');
                             i += 1;
                         }
                         if (digits == 0 or ver <= version_id) {
-                            lx.exec_depth += 1;
-                            lx.pos = i;
+                            l.state.exec_depth += 1;
+                            l.pos = i;
                             continue;
                         }
                     }
-                    // An ordinary comment (or one for a later version).
-                    lx.pos = sqllex.blockCommentEnd(false, s, lx.pos).end;
+                    l.pos = sqllex.blockCommentEnd(false, s, l.pos).end;
                 },
-                else => return,
+                else => return null,
             }
         }
     }
 
-    pub fn next(lx: *Lexer) Token {
-        lx.skipSpace();
-        const s = lx.sql;
-        const start = lx.pos;
-        const c = s[start];
-        if (c == 0) return .{ .kind = .eof, .text = s[start..start], .start = @intCast(start), .end = @intCast(start) };
-        const kind: Kind = switch (c) {
-            '`' => lx.quoted(start, '`', .quoted_ident, false),
-            '\'' => lx.quoted(start, '\'', .string, lx.backslash_escapes),
-            '"' => if (lx.ansi_quotes)
-                lx.quoted(start, '"', .quoted_ident, false)
-            else
-                lx.quoted(start, '"', .string, lx.backslash_escapes),
-            '0'...'9' => lx.number(start),
-            '.' => if (scan.isDigit(s[start + 1])) lx.number(start) else lx.one(.op),
-            '?' => lx.one(.param),
-            '@' => lx.variable(start),
-            'x', 'X', 'b', 'B', 'n', 'N' => blk: {
-                if (s[start + 1] == '\'') {
-                    lx.pos += 1;
-                    const k = lx.quoted(lx.pos, '\'', .string, (c == 'n' or c == 'N') and lx.backslash_escapes);
-                    if (k == .illegal) break :blk .illegal;
-                    break :blk switch (c) {
-                        'x', 'X' => .hex,
-                        'b', 'B' => .bit,
-                        else => .string,
-                    };
-                }
-                break :blk lx.word();
-            },
-            else => if (scan.isIdentStart(c)) lx.word() else lx.operator(),
-        };
-        return .{ .kind = kind, .text = s[start..lx.pos], .start = @intCast(start), .end = @intCast(lx.pos) };
-    }
-
-    /// A quoted token from `start` (its opening quote): the closing
-    /// quote ends it, a doubled one stands for one, and a backslash
-    /// escapes the next character if `escapes`.
-    fn quoted(lx: *Lexer, start: usize, q: u8, kind: Kind, escapes: bool) Kind {
-        const r = sqllex.quotedEnd(lx.sql, start, q, escapes);
-        lx.pos = r.end;
-        return if (r.closed) kind else .illegal;
-    }
-
-    fn number(lx: *Lexer, start: usize) Kind {
-        const s = lx.sql;
-        // 0x1F, 0b01 (else 0x is a name): a name if a word character
-        // follows the digits.
-        if (scan.radixPrefix(s, start)) |base| if (sqllex.digitValue(s[start + 2]) < base) {
-            const i = sqllex.radixDigits(s, start + 2, base, .none).end;
-            if (scan.isIdent(s[i])) {
-                lx.pos = start;
-                return lx.word();
-            }
-            lx.pos = i;
-            return if (base == 16) .hex else .bit;
-        };
-        const n = scan.number(s, start);
-        // 1abc is a name in MariaDB.
-        if (!n.float and scan.isIdent(s[n.end])) {
-            lx.pos = start;
-            return lx.word();
-        }
-        lx.pos = n.end;
-        return if (n.float) .float else .integer;
-    }
-
-    fn word(lx: *Lexer) Kind {
-        lx.pos = scan.word(lx.sql, lx.pos);
-        return .ident;
-    }
-
-    fn variable(lx: *Lexer, start: usize) Kind {
-        const s = lx.sql;
+    /// @name, @'name', @`name`: a user variable; @@name, @@`name`: a
+    /// system variable.
+    pub fn scan(l: anytype, start: usize) ?Token {
+        const s = l.sql;
+        if (s[start] != '@') return null;
         if (s[start + 1] == '@') {
-            lx.pos = start + 2;
-            if (s[lx.pos] == '`') return if (lx.quoted(lx.pos, '`', .sys_var, false) == .illegal) .illegal else .sys_var;
-            lx.pos = var_chars.span(s, lx.pos);
-            return if (lx.pos == start + 2) .illegal else .sys_var;
+            const first = start + 2;
+            if (s[first] == '`') return quotedVar(l, start, first, .system);
+            const e = var_chars.span(s, first);
+            return l.take(if (e == first) .illegal else .variable, if (e == first) .bad_char else .system, start, e);
         }
-        lx.pos = start + 1;
-        switch (s[lx.pos]) {
-            '`', '\'', '"' => return if (lx.quoted(lx.pos, s[lx.pos], .user_var, false) == .illegal) .illegal else .user_var,
+        const first = start + 1;
+        switch (s[first]) {
+            '`', '\'', '"' => return quotedVar(l, start, first, .user),
             else => {},
         }
-        lx.pos = var_chars.span(s, lx.pos);
-        return if (lx.pos == start + 1) .illegal else .user_var;
+        const e = var_chars.span(s, first);
+        return l.take(if (e == first) .illegal else .variable, if (e == first) .bad_char else .user, start, e);
     }
 
-    /// A token of one character.
-    fn one(lx: *Lexer, k: Kind) Kind {
-        lx.pos += 1;
-        return k;
-    }
-
-    fn operator(lx: *Lexer) Kind {
-        const s = lx.sql;
-        // -> and ->> are MySQL's JSON operators (parser.zig).
-        const n = sqllex.longestOp(&.{ "<=>", "->>", "<=", ">=", "<>", "!=", "&&", "||", "<<", ">>", ":=", "->" }, s, lx.pos);
-        if (n > 0) {
-            lx.pos += n;
-            return .op;
-        }
-        switch (s[lx.pos]) {
-            '(', ')', ',', '.', ';', '+', '-', '*', '/', '%', '=', '<', '>', '!', '~', '^', '&', '|', '{', '}', ':' => return lx.one(.op),
-            else => return lx.one(.illegal),
-        }
+    fn quotedVar(l: anytype, start: usize, open: usize, sub: sqllex.Sub) Token {
+        const r = sqllex.quotedEnd(l.sql, open, l.sql[open], false);
+        if (!r.closed) return l.take(.illegal, .unterminated, start, r.end);
+        return l.take(.variable, sub, start, r.end);
     }
 };
+
+pub const Lexer = sqllex.Lexer(lex);
+pub const Token = Lexer.Token;
+pub const Keywords = lex.keywords;
+
+const reserved_words = [_][]const u8{
+    "ALL",      "AND",           "AS",         "ASC",     "BETWEEN",   "BINARY",  "BY",     "CASE",
+    "CHECK",    "COLLATE",       "CONSTRAINT", "CREATE",  "CROSS",     "DEFAULT", "DELETE", "DESC",
+    "DISTINCT", "DISTINCTROW",   "DIV",        "DROP",    "DUAL",      "ELSE",    "ESCAPE", "EXCEPT",
+    "EXISTS",   "FALSE",         "FETCH",      "FOR",     "FORCE",     "FOREIGN", "FROM",   "GROUP",
+    "HAVING",   "HIGH_PRIORITY", "IGNORE",     "IN",      "INDEX",     "INNER",   "INSERT", "INTERSECT",
+    "INTERVAL", "INTO",          "IS",         "JOIN",    "KEY",       "LEFT",    "LIKE",   "LIMIT",
+    "LOCK",     "LOW_PRIORITY",  "MOD",        "NATURAL", "NOT",       "NULL",    "OFFSET", "ON",
+    "OR",       "ORDER",         "OUTER",      "OVER",    "PARTITION", "PRIMARY", "RANGE",  "REFERENCES",
+    "REGEXP",   "REPLACE",       "RETURNING",  "RIGHT",   "RLIKE",     "ROWS",    "SELECT", "SEPARATOR",
+    "SET",      "STRAIGHT_JOIN", "THEN",       "TRUE",    "UNION",     "UNIQUE",  "UPDATE", "USE",
+    "USING",    "VALUES",        "WHEN",       "WHERE",   "WINDOW",    "WITH",    "XOR",
+};
+
+/// The lexer of `sql` from `pos`, under sql_mode `mode`.
+pub fn init(sql: [:0]const u8, pos: usize, mode: state.SqlMode) Lexer {
+    return .init(sql, pos, lexOptions(mode));
+}
+
+/// The lexer's options under sql_mode `mode`.
+pub fn lexOptions(mode: state.SqlMode) sqllex.Options {
+    return .{ .ansi_quotes = mode.has(.ANSI_QUOTES), .backslash_escapes = !mode.has(.NO_BACKSLASH_ESCAPES) };
+}
 
 /// Where the second statement of `sql` starts, if it has one: the first
 /// token after a `;`, as the parser sees it (atStmtEnd(), with the
@@ -262,32 +190,68 @@ pub const Lexer = struct {
 /// CLIENT_MULTI_STATEMENTS MariaDB answers with a syntax error near that
 /// token (src/server/mysql/Handler.zig).
 pub fn secondStatement(sql: [:0]const u8, mode: state.SqlMode) ?usize {
-    var lx: Lexer = .init(sql, mode);
+    var lx = init(sql, 0, mode);
     var after_semicolon = false;
     while (true) {
         const t = lx.next();
         if (t.kind == .eof) return null;
-        if (after_semicolon and !t.is(";")) return t.text.ptr - sql.ptr;
-        if (t.is(";")) after_semicolon = true;
+        if (after_semicolon and t.kind != .semi) return t.start;
+        if (t.kind == .semi) after_semicolon = true;
     }
 }
 
 /// The characters of a variable's name: those of a word, and `.`
 /// (@@session.sql_mode).
-const var_chars = spec.ident.with(".");
+const var_chars = lex.spec.ident.with(".");
+
+/// A string constant: '...', "..." (unless ANSI_QUOTES), N'...'; not
+/// X'..' or B'..'.
+pub fn isString(t: Token) bool {
+    return t.kind == .string and (t.sub == .none or t.sub == .national);
+}
+
+/// A decimal integer (not 0x.. or 0b..).
+pub fn isInteger(t: Token) bool {
+    return t.kind == .integer and t.sub == .none;
+}
+
+/// X'0A1B' or 0x0A1B: a binary string.
+pub fn isHex(t: Token) bool {
+    return (t.kind == .string and t.sub == .blob) or (t.kind == .integer and t.sub == .hex);
+}
+
+/// B'0101' or 0b0101.
+pub fn isBits(t: Token) bool {
+    return (t.kind == .string and t.sub == .bits) or (t.kind == .integer and t.sub == .binary);
+}
+
+/// An unquoted word or a quoted identifier.
+pub fn isIdent(t: Token) bool {
+    return t.kind == .word or t.kind == .quoted_ident;
+}
 
 /// The name an identifier token stands for: the word itself, or the
 /// text between the quotes with doubled quotes undone (in `a` if any).
-pub fn identValue(a: std.mem.Allocator, t: Token) error{OutOfMemory}![]const u8 {
-    if (t.kind != .quoted_ident) return t.text;
-    return sqllex.undouble(a, t.text[1 .. t.text.len - 1], t.text[0]);
+pub fn identValue(a: std.mem.Allocator, sql: []const u8, t: Token) error{OutOfMemory}![]const u8 {
+    if (t.kind != .quoted_ident) return t.text(sql);
+    return quotedName(a, t.text(sql));
+}
+
+/// The name a quoted identifier written `z` (`a``b` or "a""b") stands for.
+pub fn quotedName(a: std.mem.Allocator, z: []const u8) error{OutOfMemory}![]const u8 {
+    return sqllex.undouble(a, z[1 .. z.len - 1], z[0]);
 }
 
 /// The value of a string token ('...', "...", N'...'): doubled quotes and
 /// (if `escapes`) backslash escapes undone. X'..' and B'..' are not
-/// strings (see hexValue()/bitValue()).
-pub fn stringValue(a: std.mem.Allocator, t: Token, escapes: bool) error{OutOfMemory}![]const u8 {
-    var z = t.text;
+/// strings (see hexDigits()/bitValue()).
+pub fn stringValue(a: std.mem.Allocator, sql: []const u8, t: Token, escapes: bool) error{OutOfMemory}![]const u8 {
+    return stringText(a, t.text(sql), escapes);
+}
+
+/// stringValue() of a string written `text`.
+pub fn stringText(a: std.mem.Allocator, text: []const u8, escapes: bool) error{OutOfMemory}![]const u8 {
+    var z = text;
     if (z[0] == 'n' or z[0] == 'N') z = z[1..];
     const q = z[0];
     const inner = z[1 .. z.len - 1];
@@ -327,15 +291,17 @@ pub fn stringValue(a: std.mem.Allocator, t: Token, escapes: bool) error{OutOfMem
 /// The hex digits of a hex token (X'0A' or 0x0A), padded to an even
 /// count with a leading 0 (MariaDB's 0xA is 0x0A); null if X'..' has an
 /// odd count (an error in MariaDB).
-pub fn hexDigits(a: std.mem.Allocator, t: Token) error{OutOfMemory}!?[]const u8 {
-    const digits = if (t.text[0] == '0') t.text[2..] else t.text[2 .. t.text.len - 1];
-    if (digits.len % 2 != 0 and t.text[0] != '0') return null;
+pub fn hexDigits(a: std.mem.Allocator, sql: []const u8, t: Token) error{OutOfMemory}!?[]const u8 {
+    const z = t.text(sql);
+    const digits = if (z[0] == '0') z[2..] else z[2 .. z.len - 1];
+    if (digits.len % 2 != 0 and z[0] != '0') return null;
     return try sqllex.evenDigits(a, digits);
 }
 
 /// The value of a bit token (B'0101' or 0b0101), null if out of range.
-pub fn bitValue(t: Token) ?i64 {
-    const digits = if (t.text[0] == '0') t.text[2..] else t.text[2 .. t.text.len - 1];
+pub fn bitValue(sql: []const u8, t: Token) ?i64 {
+    const z = t.text(sql);
+    const digits = if (z[0] == '0') z[2..] else z[2 .. z.len - 1];
     var v: u64 = 0;
     for (digits) |d| {
         if (v >> 63 != 0) return null;
@@ -344,12 +310,16 @@ pub fn bitValue(t: Token) ?i64 {
     return @bitCast(v);
 }
 
-fn testTokens(sql: [:0]const u8, mode: state.SqlMode, expected: []const struct { Kind, []const u8 }) !void {
-    var lx: Lexer = .init(sql, mode);
+const Kind = sqllex.Kind;
+const Sub = sqllex.Sub;
+
+fn testTokens(sql: [:0]const u8, mode: state.SqlMode, expected: []const struct { Kind, Sub, []const u8 }) !void {
+    var lx = init(sql, 0, mode);
     for (expected) |e| {
         const t = lx.next();
         try std.testing.expectEqual(e[0], t.kind);
-        try std.testing.expectEqualStrings(e[1], t.text);
+        try std.testing.expectEqual(e[1], t.sub);
+        try std.testing.expectEqualStrings(e[2], t.text(sql));
     }
     try std.testing.expectEqual(Kind.eof, lx.next().kind);
 }
@@ -357,25 +327,37 @@ fn testTokens(sql: [:0]const u8, mode: state.SqlMode, expected: []const struct {
 test "lexer: quoting, comments and executable comments" {
     const d = state.SqlMode.default;
     try testTokens("SELECT `a``b`, \"s\", 'x' -- c\n# c\n/* c */ 1", d, &.{
-        .{ .ident, "SELECT" }, .{ .quoted_ident, "`a``b`" }, .{ .op, "," },
-        .{ .string, "\"s\"" }, .{ .op, "," },                .{ .string, "'x'" },
-        .{ .integer, "1" },
+        .{ .word, .none, "SELECT" },  .{ .quoted_ident, .none, "`a``b`" }, .{ .comma, .none, "," },
+        .{ .string, .none, "\"s\"" }, .{ .comma, .none, "," },             .{ .string, .none, "'x'" },
+        .{ .integer, .none, "1" },
     });
     // --x is minus minus x.
-    try testTokens("1--2", d, &.{ .{ .integer, "1" }, .{ .op, "-" }, .{ .op, "-" }, .{ .integer, "2" } });
+    try testTokens("1--2", d, &.{ .{ .integer, .none, "1" }, .{ .op, .none, "-" }, .{ .op, .none, "-" }, .{ .integer, .none, "2" } });
     try testTokens("/*! STRAIGHT_JOIN */ /*!50100 a */ /*!999999 b */ /*M!100100 c*/", d, &.{
-        .{ .ident, "STRAIGHT_JOIN" }, .{ .ident, "a" }, .{ .ident, "c" },
+        .{ .word, .none, "STRAIGHT_JOIN" }, .{ .word, .none, "a" }, .{ .word, .none, "c" },
     });
-    try testTokens("\"x\"", state.SqlMode.default.with(.ANSI_QUOTES), &.{.{ .quoted_ident, "\"x\"" }});
+    try testTokens("\"x\"", state.SqlMode.default.with(.ANSI_QUOTES), &.{.{ .quoted_ident, .none, "\"x\"" }});
     try testTokens("a<=>b||c&&!d:=@v,@@session.sql_mode,?", d, &.{
-        .{ .ident, "a" }, .{ .op, "<=>" },                     .{ .ident, "b" }, .{ .op, "||" },   .{ .ident, "c" },
-        .{ .op, "&&" },   .{ .op, "!" },                       .{ .ident, "d" }, .{ .op, ":=" },   .{ .user_var, "@v" },
-        .{ .op, "," },    .{ .sys_var, "@@session.sql_mode" }, .{ .op, "," },    .{ .param, "?" },
+        .{ .word, .none, "a" },  .{ .op, .none, "<=>" },        .{ .word, .none, "b" },  .{ .op, .none, "||" },
+        .{ .word, .none, "c" },  .{ .op, .none, "&&" },         .{ .op, .none, "!" },    .{ .word, .none, "d" },
+        .{ .op, .none, ":=" },   .{ .variable, .user, "@v" },   .{ .comma, .none, "," }, .{ .variable, .system, "@@session.sql_mode" },
+        .{ .comma, .none, "," }, .{ .param, .positional, "?" },
     });
-    try testTokens("X'0a' 0x1F b'101' 0b11 1.5e3 .5 N'n' 1abc", d, &.{
-        .{ .hex, "X'0a'" },   .{ .hex, "0x1F" }, .{ .bit, "b'101'" },  .{ .bit, "0b11" },
-        .{ .float, "1.5e3" }, .{ .float, ".5" }, .{ .string, "N'n'" }, .{ .ident, "1abc" },
+    try testTokens("X'0a' 0x1F b'101' 0b11 1.5e3 .5 N'n' 1abc 0x1g", d, &.{
+        .{ .string, .blob, "X'0a'" }, .{ .integer, .hex, "0x1F" }, .{ .string, .bits, "b'101'" },   .{ .integer, .binary, "0b11" },
+        .{ .float, .none, "1.5e3" },  .{ .float, .none, ".5" },    .{ .string, .national, "N'n'" }, .{ .word, .none, "1abc" },
+        .{ .word, .none, "0x1g" },
     });
+    try testTokens("'open", d, &.{.{ .illegal, .unterminated, "'open" }});
+    try testTokens("@ x", d, &.{ .{ .illegal, .bad_char, "@" }, .{ .word, .none, "x" } });
+}
+
+test "lexer: keywords" {
+    var lx = init("select `select` Alias", 0, .default);
+    const t = lx.next();
+    try std.testing.expect(t.isKw("SELECT") and Keywords.class(t.kw) == .reserved);
+    try std.testing.expectEqual(@as(u16, 0), lx.next().kw);
+    try std.testing.expectEqual(@as(u16, 0), lx.next().kw);
 }
 
 test "lexer: string values" {
@@ -383,16 +365,17 @@ test "lexer: string values" {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     const aa = arena.allocator();
-    var lx: Lexer = .init("'a\\nb\\'c''d\\\\e\\%\\x'", state.SqlMode.default);
+    const sql = "'a\\nb\\'c''d\\\\e\\%\\x'";
+    var lx = init(sql, 0, .default);
     const t = lx.next();
     try std.testing.expectEqual(Kind.string, t.kind);
-    try std.testing.expectEqualStrings("a\nb'c'd\\e\\%x", try stringValue(aa, t, true));
-    var lx2: Lexer = .init("'a\\' 'b'", state.SqlMode.default.with(.NO_BACKSLASH_ESCAPES));
+    try std.testing.expectEqualStrings("a\nb'c'd\\e\\%x", try stringValue(aa, sql, t, true));
+    const sql2 = "'a\\' 'b'";
+    var lx2 = init(sql2, 0, state.SqlMode.default.with(.NO_BACKSLASH_ESCAPES));
     const t2 = lx2.next();
-    try std.testing.expectEqualStrings("a\\", try stringValue(aa, t2, false));
-    try std.testing.expectEqualStrings("'b'", lx2.next().text);
-    const id: Token = .{ .kind = .quoted_ident, .text = "`a``b`" };
-    try std.testing.expectEqualStrings("a`b", try identValue(aa, id));
+    try std.testing.expectEqualStrings("a\\", try stringValue(aa, sql2, t2, false));
+    try std.testing.expectEqualStrings("'b'", lx2.next().text(sql2));
+    try std.testing.expectEqualStrings("a`b", try quotedName(aa, "`a``b`"));
 }
 
 test "lexer: second statement" {

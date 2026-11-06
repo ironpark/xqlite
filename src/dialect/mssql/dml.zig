@@ -21,6 +21,7 @@
 const std = @import("std");
 const tree = @import("../../ir/tree.zig");
 const parser = @import("parser.zig");
+const lexer = @import("lexer.zig");
 const types = @import("types.zig");
 const session = @import("session.zig");
 
@@ -49,16 +50,14 @@ fn output(s: *Parser, kind: parser.Output) Error![]tree.ResultCol {
     defer s.output = saved;
     var l: std.ArrayList(tree.ResultCol) = .empty;
     while (true) {
-        if ((s.c.isKw("INSERTED") or s.c.isKw("DELETED")) and s.c.peekAt(1).is(".") and s.c.peekAt(2).is("*")) {
+        if ((s.c.isKw("INSERTED") or s.c.isKw("DELETED")) and s.c.isOpTok(s.c.peekAt(1), ".") and s.c.isOpTok(s.c.peekAt(2), "*")) {
             const ins = s.c.isKw("INSERTED");
-            if ((ins and kind == .delete) or (!ins and kind == .insert)) return s.c.failState(null, .numbered("42P01", 4104), "The multi-part identifier \"{s}.*\" could not be bound.", .{s.c.peek().text});
+            if ((ins and kind == .delete) or (!ins and kind == .insert)) return s.c.failState(null, .numbered("42P01", 4104), "The multi-part identifier \"{s}.*\" could not be bound.", .{s.c.text(s.c.peek())});
             if (!ins and kind == .update) return s.c.fail(null, "xqlite: OUTPUT DELETED in UPDATE is not supported (RETURNING sees the new row)", .{});
             s.c.skip();
             s.c.skip();
             try l.append(s.a, .{ .star = s.c.here() });
             s.c.skip();
-        } else if (s.c.isKw("$ACTION")) {
-            return s.c.fail(null, "xqlite: OUTPUT $action is not supported", .{});
         } else {
             const e = try s.expr();
             var al: ?Name = null;
@@ -161,7 +160,7 @@ pub fn insert(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
     try s.c.expectKw("INSERT");
     const top = try dmlTop(s);
     _ = s.c.eatKw("INTO");
-    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
+    if (lexer.isUserVar(s.c.peek())) return s.c.fail(null, "xqlite: table variables are not supported", .{});
     const q = try s.qualifiedName();
     try s.tableHints();
     const t = try s.target(q);
@@ -311,19 +310,20 @@ fn assignments(s: *Parser, t: *const Target, label: []const u8) Error![]tree.Set
     s.allow_default = true;
     defer s.allow_default = saved;
     while (true) {
-        if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: assigning variables in UPDATE is not supported", .{});
+        if (lexer.isUserVar(s.c.peek())) return s.c.fail(null, "xqlite: assigning variables in UPDATE is not supported", .{});
         var c = try s.nameOf(try s.anyName());
         if (s.c.eatOp(".")) {
             if (!std.ascii.eqlIgnoreCase(c.text, label)) return s.c.failState(null, .numbered("42P01", 4104), "The multi-part identifier \"{s}\" could not be bound.", .{c.text});
             c = try s.nameOf(try s.anyName());
         }
-        const op = s.c.peek();
-        if (op.kind != .op or !(op.is("=") or (op.text.len == 2 and op.text[1] == '='))) return s.c.syntaxError();
+        const op_tok = s.c.peek();
+        const op = s.c.text(op_tok);
+        if (op_tok.kind != .op or !(std.mem.eql(u8, op, "=") or (op.len == 2 and op[1] == '='))) return s.c.syntaxError();
         s.c.skip();
         var e = try s.expr();
-        if (op.text.len == 2) {
+        if (op.len == 2) {
             const ref = try tree.expr(s.a, c.pos, c.pos, .{ .column = try s.a.dupe(Name, &.{c}) });
-            e = try s.compoundAssign(op.text[0], ref, e);
+            e = try s.compoundAssign(op[0], ref, e);
         }
         if (t.findCol(c.text)) |m| {
             if (m.identity != null) return s.c.failState(null, .numbered("428C9", 8102), "Cannot update identity column '{s}'.", .{m.name});
@@ -345,7 +345,7 @@ pub fn update(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
     const pos = s.c.here();
     try s.c.expectKw("UPDATE");
     const top = try dmlTop(s);
-    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
+    if (lexer.isUserVar(s.c.peek())) return s.c.fail(null, "xqlite: table variables are not supported", .{});
     const written = try s.qualifiedName();
     try s.tableHints();
     try s.c.expectKw("SET");
@@ -399,7 +399,7 @@ pub fn update(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
 fn skipSet(s: *Parser) Error!void {
     var depth: usize = 0;
     while (s.c.peek().kind != .eof) {
-        if (depth == 0 and (s.c.isKw("OUTPUT") or s.c.isKw("FROM") or s.c.isKw("WHERE") or s.c.isKw("OPTION") or s.c.isOp(";") or s.c.peek().kind == .go)) return;
+        if (depth == 0 and (s.c.isKw("OUTPUT") or s.c.isKw("FROM") or s.c.isKw("WHERE") or s.c.isKw("OPTION") or s.c.isOp(";") or s.c.peek().kind == .terminator)) return;
         if (depth == 0 and parser.startsStatement(s.c.peek()) and !s.c.isKw("SELECT")) return;
         if (s.c.isOp("(")) depth += 1;
         if (s.c.isOp(")")) {
@@ -411,7 +411,7 @@ fn skipSet(s: *Parser) Error!void {
 }
 
 fn optionClause(s: *Parser) Error!void {
-    if (s.c.isKw("OPTION") and s.c.peekAt(1).is("(")) {
+    if (s.c.isKw("OPTION") and s.c.isOpTok(s.c.peekAt(1), "(")) {
         s.c.skip();
         try s.skipParens();
     }
@@ -423,7 +423,7 @@ pub fn delete(s: *Parser, with: ?*tree.With) Error!tree.Stmt {
     try s.c.expectKw("DELETE");
     const top = try dmlTop(s);
     _ = s.c.eatKw("FROM");
-    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
+    if (lexer.isUserVar(s.c.peek())) return s.c.fail(null, "xqlite: table variables are not supported", .{});
     const written = try s.qualifiedName();
     try s.tableHints();
     const ret = try output(s, .delete);

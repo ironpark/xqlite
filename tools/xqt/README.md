@@ -12,7 +12,7 @@ xqlite의 테스트 도구입니다. xqlite와 sqlite3(또는 PostgreSQL·MariaD
 | C 실행기 `sqllogictest` (`--ref`, 선택) | `slt` |
 | 서버 클라이언트(`$PG_PSQL`, `$MARIA_CLIENT`, `$ORA_SQLPLUS`, 기본 `podman exec -i ...`) | `dialect-diff --live`/`--record` (기본은 기록과 비교하므로 서버가 필요 없음) |
 | psql을 돌리는 명령(`$PG_WIRE_EXEC`; 기본은 호스트의 psql 18, 없으면 `podman run --rm -i postgres:18-alpine`, `--live`/`--record`는 `podman exec -i xq-pg`)과 `xqlite serve` | `wire-diff` |
-| `zig cc`, `zig run` (`$ZIG`) | `gen parser`, `gen opcodes` (크래시 shim은 `zig build tools`가 `zig cc`로 빌드) |
+| `zig cc`, `zig run` (`$ZIG`) | `gen opcodes` (크래시 shim은 `zig build tools`가 `zig cc`로 빌드) |
 | `tclsh` | `gen opcodes` |
 | `git` | `fetch slt` (`fetch sqlite`는 내려받기와 압축 풀기를 프로세스 안에서 함) |
 
@@ -48,7 +48,7 @@ zig-out/bin/xqt dialect-diff pg --record  # 서버의 출력을 다시 기록
 zig-out/bin/xqt wire-diff pg              # 기록과 비교, psql만 필요
 zig-out/bin/xqt wire-diff pg --record     # 서버의 출력을 다시 기록 (podman 컨테이너)
 zig-out/bin/xqt bench insert scan
-zig-out/bin/xqt gen parser opcodes
+zig-out/bin/xqt gen opcodes
 zig-out/bin/xqt gen superjournal
 zig-out/bin/xqt fetch sqlite
 zig-out/bin/xqt help planner    # 명령별 옵션
@@ -64,7 +64,7 @@ zig-out/bin/xqt help planner    # 명령별 옵션
 | `wire-diff pg [--live\|--record] [CASES...]`, `wire-diff pg --regress [TEST...]` | 와이어 서버(`xqlite serve --pg`)를 psql로 PostgreSQL의 출력과 차등 비교(기본은 기록과), PostgreSQL 회귀 테스트 일부의 문장별 통과율(PostgreSQL이 함께 내놓는 기대 출력과). psql이 필요하고 호스트에 psql 18이 없으면 podman으로 돌리므로 `zig build check`에는 없음 | `wire_diff.zig` |
 | `bench [WORKLOAD...]` | 같은 작업의 실행 시간(`--runs`/`RUNS`, `--rows`/`ROWS`) | `bench.zig` |
 | `wasi [--wasm PATH] [--runtime PROG]` | wasm32-wasi 빌드를 wasmtime에서: sqlite3·네이티브 xqlite와 비교(`zig build test-wasi`) | `wasi.zig` |
-| `gen fixtures\|parser\|opcodes` | `src/testdata`의 DB, `grammar.zig`, `opcodes.zig` 재생성 | `gen.zig` |
+| `gen fixtures\|opcodes` | `src/testdata`의 DB, `opcodes.zig` 재생성 | `gen.zig` |
 | `gen superjournal [DIR]` | `src/testdata/superjournal` 재생성 | `gen/superjournal.zig` |
 | `fetch sqlite\|slt [--dest DIR]` | `ref/sqlite`, `ref/sqllogictest` 내려받기 | `fetch.zig` |
 | `list` | interop 모듈, 플래너 케이스 파일, 고른 바이너리 | `main.zig` |
@@ -148,7 +148,7 @@ tools/xqt/
   wire_diff.zig         xqt wire-diff pg [--live|--record] [--regress]
   bench.zig             xqt bench
   wasi.zig              xqt wasi
-  gen.zig               xqt gen fixtures|parser|opcodes
+  gen.zig               xqt gen fixtures|opcodes
   gen/superjournal.zig  xqt gen superjournal
   fetch.zig             xqt fetch sqlite|slt
   lib/                  라이브러리, 모듈에서는 @import("xqt")

@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const tree = @import("../../ir/tree.zig");
+const lexer = @import("lexer.zig");
 const int = @import("../../sql/sqlite_int.zig");
 const build = @import("../../sql/build.zig");
 const api = @import("../../vdbe/api.zig");
@@ -149,14 +150,12 @@ const SpecBuilder = struct {
                 var v: std.ArrayList(u8) = .empty;
                 try v.appendSlice(s.a, "{\"d\":");
                 const t = s.c.peek();
-                switch (t.kind) {
-                    .string => try json.appendQuoted(s.a, &v, try s.stringLiteral()),
-                    .integer, .float => {
-                        s.c.skip();
-                        try json.appendQuoted(s.a, &v, t.text);
-                    },
-                    else => return s.c.syntaxError(),
-                }
+                if (lexer.isString(t)) {
+                    try json.appendQuoted(s.a, &v, try s.stringLiteral());
+                } else if (lexer.isInteger(t) or t.kind == .float) {
+                    s.c.skip();
+                    try json.appendQuoted(s.a, &v, s.c.text(t));
+                } else return s.c.syntaxError();
                 try v.append(s.a, '}');
                 what = v.items;
             } else break;

@@ -88,7 +88,7 @@ pub fn create(s: *Parser) Error!void {
 pub fn skipPermission(s: *Parser) Error!void {
     s.c.skip(); // GRANT, REVOKE, DENY
     while (!(s.c.isKw("TO") or s.c.isKw("FROM"))) {
-        if (s.c.peek().kind == .eof or s.c.isOp(";") or s.c.peek().kind == .go) return s.c.syntaxError();
+        if (s.c.peek().kind == .eof or s.c.isOp(";") or s.c.peek().kind == .terminator) return s.c.syntaxError();
         s.c.skip();
     }
     s.c.skip();
@@ -143,10 +143,10 @@ pub fn transfer(s: *Parser) Error!void {
     try s.c.expectKw("SCHEMA");
     const to = try s.nameOf(try s.anyName());
     try s.c.expectKw("TRANSFER");
-    if (s.c.isKw("OBJECT") and s.c.peekAt(1).is("::")) {
+    if (s.c.isKw("OBJECT") and s.c.isOpTok(s.c.peekAt(1), "::")) {
         s.c.skip();
         s.c.skip();
-    } else if (s.c.peekAt(1).is("::")) return s.c.fail(null, "xqlite: ALTER SCHEMA ... TRANSFER {s}:: is not supported", .{s.c.peek().text});
+    } else if (s.c.isOpTok(s.c.peekAt(1), "::")) return s.c.fail(null, "xqlite: ALTER SCHEMA ... TRANSFER {s}:: is not supported", .{s.c.text(s.c.peek())});
     const q = try s.qualifiedName();
     ir.stmt.readSchema(s.p) catch return error.ParseFailed;
     var prefix: []const u8 = "";
@@ -184,7 +184,7 @@ pub fn alterUser(s: *Parser) Error!void {
     const pos = s.c.here();
     var value: ?*tree.Expr = null;
     while (true) {
-        if (!s.c.eatKw("DEFAULT_SCHEMA")) return s.c.fail(null, "xqlite: ALTER USER ... WITH {s} is not supported", .{s.c.peek().text});
+        if (!s.c.eatKw("DEFAULT_SCHEMA")) return s.c.fail(null, "xqlite: ALTER USER ... WITH {s} is not supported", .{s.c.text(s.c.peek())});
         try s.c.expectOp("=");
         if (s.c.eatKw("NULL")) {
             value = try s.mk(pos, .null);

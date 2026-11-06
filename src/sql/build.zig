@@ -431,7 +431,7 @@ pub fn nestedParse(p: *Parse, fmt: []const u8, args: []const @import("printf.zig
     // The part of Parse reset for each recursion (PARSE_TAIL).
     const saved = ParseTail.save(p);
     db.m_db_flags.PreferBuiltin = true;
-    @import("../parse/tokenize.zig").runParser(p, sql) catch |err| switch (err) {
+    @import("../dialect/sqlite/parser.zig").runParser(p, sql) catch |err| switch (err) {
         error.OutOfMemory => oomFault(p),
         error.ParseFailed => {},
     };
@@ -1468,7 +1468,7 @@ fn identPut(out: *std.ArrayList(u8), a: Allocator, ident: []const u8) Oom!void {
         if (!ctype.isAlnum(ident[j]) and ident[j] != '_') break;
     }
     const need_quote = (ident.len > 0 and ctype.isDigit(ident[0])) or
-        @import("../parse/tokenize.zig").keywordCode(ident[0..j]) != TK.ID or
+        @import("../dialect/sqlite/lexer.zig").keywordCode(ident[0..j]) != TK.ID or
         j != ident.len or j == 0;
     if (need_quote) try out.append(a, '"');
     for (ident) |c| {

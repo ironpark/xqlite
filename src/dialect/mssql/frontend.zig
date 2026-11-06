@@ -63,7 +63,7 @@ pub fn init(p: *int.Parse, sql: [:0]const u8) Parser {
 }
 
 pub fn separator(s: *Parser) bool {
-    return s.c.isOp(";") or s.c.is(.go);
+    return s.c.isOp(";") or s.c.is(.terminator);
 }
 
 /// An element of the CREATE SCHEMA compiled before: in its schema.
@@ -95,7 +95,7 @@ pub fn statement(s: *Parser) Error!void {
         if (s.c.isKw("MERGE")) return s.c.fail(null, "xqlite: WITH ... MERGE is not supported", .{});
         return s.c.syntaxError();
     }
-    if (t.isKw("SELECT") or t.is("(")) return selectStatement(s, null);
+    if (t.isKw("SELECT") or t.kind == .lparen) return selectStatement(s, null);
     if (t.isKw("INSERT")) return s.lowerStmt(try dml.insert(s, null));
     if (t.isKw("UPDATE")) return s.lowerStmt(try dml.update(s, null));
     if (t.isKw("DELETE")) return s.lowerStmt(try dml.delete(s, null));
@@ -115,10 +115,10 @@ pub fn statement(s: *Parser) Error!void {
     if (t.isKw("EXEC") or t.isKw("EXECUTE")) return session.exec(s);
     if (t.isAnyKw(&.{ "GRANT", "REVOKE", "DENY" })) {
         if (s.element_schema != null) return schemas.skipPermission(s);
-        return s.c.fail(null, "xqlite: {s} is not supported (xqlite has no permissions)", .{t.text});
+        return s.c.fail(null, "xqlite: {s} is not supported (xqlite has no permissions)", .{s.c.text(t)});
     }
     if (t.isAnyKw(&.{ "IF", "WHILE", "RETURN", "GOTO", "BREAK", "CONTINUE", "TRY", "THROW", "RAISERROR", "WAITFOR" })) {
-        return s.c.fail(null, "xqlite: {s} is not supported (T-SQL control flow is not)", .{t.text});
+        return s.c.fail(null, "xqlite: {s} is not supported (T-SQL control flow is not)", .{s.c.text(t)});
     }
     return s.c.syntaxError();
 }

@@ -5,7 +5,7 @@
 //! tools/vdbe/opcodes2zig.zig.
 
 const std = @import("std");
-const TK = @import("../parse/grammar.zig").TK;
+const TK = @import("../sql/tk.zig").TK;
 
 /// The opcodes (OP_*), numbered as in C.
 pub const OP = enum(u8) {

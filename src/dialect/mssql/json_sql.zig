@@ -226,10 +226,10 @@ pub fn call(s: *Parser, n: []const u8, pos: u32) Error!?*Expr {
         try badArg(s, x, 1, "isjson");
         if (s.c.eatOp(",")) {
             const t = s.c.peek();
-            if (t.kind != .ident or !t.isAnyKw(&.{ "VALUE", "ARRAY", "OBJECT", "SCALAR" })) return s.c.syntaxError();
+            if (t.kind != .word or !t.isAnyKw(&.{ "VALUE", "ARRAY", "OBJECT", "SCALAR" })) return s.c.syntaxError();
             s.c.skip();
             try s.c.expectOp(")");
-            return try s.func(pos, "xq_tsql_isjson", &.{ x, try s.str(pos, try std.ascii.allocLowerString(s.a, t.text)) });
+            return try s.func(pos, "xq_tsql_isjson", &.{ x, try s.str(pos, try std.ascii.allocLowerString(s.a, s.c.text(t))) });
         }
         try s.c.expectOp(")");
         // json_valid() and an object or array: SQLite's own functions,
@@ -386,7 +386,7 @@ pub fn openJson(s: *Parser) Error!*tree.Func {
     if (args.len < 1 or args.len > 2) return s.c.failState(null, .numbered("42883", 174), "The openjson function requires 1 to 2 arguments.", .{});
     try badArg(s, args[0], 1, "openjson");
     if (args.len == 2 and args[1].kind == .null) return s.c.failState(null, .numbered("42804", 8116), "Argument data type NULL is invalid for argument 2 of openjson function.", .{});
-    if (!(s.c.isKw("WITH") and s.c.peekAt(1).is("("))) {
+    if (!(s.c.isKw("WITH") and s.c.isOpTok(s.c.peekAt(1), "("))) {
         const f = try s.new(tree.Func, .{ .name = .{ .text = openjson.default_name, .pos = pos }, .args = args });
         try s.openjson_cols.put(s.a, f, try s.a.dupe(Col, &.{ .{ .name = "key", .kind = 's' }, .{ .name = "value", .kind = 's' }, .{ .name = "type", .kind = 'a' } }));
         return f;

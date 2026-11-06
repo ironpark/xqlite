@@ -17,6 +17,7 @@ const int = @import("../../sql/sqlite_int.zig");
 const build = @import("../../sql/build.zig");
 const tree = @import("../../ir/tree.zig");
 const parser = @import("parser.zig");
+const lexer = @import("lexer.zig");
 const functions = @import("functions.zig");
 const types = @import("types.zig");
 
@@ -57,7 +58,7 @@ pub fn declare(s: *Parser) Error!void {
     try s.c.expectKw("DECLARE");
     var calls: std.ArrayList(*Expr) = .empty;
     while (true) {
-        if (s.c.peek().kind != .variable) return s.c.syntaxError();
+        if (!lexer.isUserVar(s.c.peek())) return s.c.syntaxError();
         const vt = s.c.peek();
         const pos = s.c.here();
         s.c.skip();
@@ -67,7 +68,7 @@ pub fn declare(s: *Parser) Error!void {
         const ty = try functions.typeNameOf(s, true);
         var value: *Expr = try s.mk(pos, .null);
         if (s.c.eatOp("=")) value = try asType(s, try s.expr(), ty.text);
-        try calls.append(s.a, try s.func(pos, "xq_tsql_declare", &.{ try s.str(pos, try parser.varName(s.a, vt.text)), try s.str(pos, ty.text), value }));
+        try calls.append(s.a, try s.func(pos, "xq_tsql_declare", &.{ try s.str(pos, try parser.varName(s.a, s.c.text(vt))), try s.str(pos, ty.text), value }));
         if (!s.c.eatOp(",")) break;
     }
     try codeEval(s, calls.items);
@@ -78,18 +79,19 @@ pub fn declare(s: *Parser) Error!void {
 /// SET @x = value, SET IDENTITY_INSERT t ON|OFF, SET <option> ...
 pub fn set(s: *Parser) Error!void {
     try s.c.expectKw("SET");
-    if (s.c.peek().kind == .variable) {
+    if (lexer.isUserVar(s.c.peek())) {
         const vt = s.c.peek();
         const pos = s.c.here();
         s.c.skip();
-        const op = s.c.peek();
-        if (op.kind != .op or !(op.is("=") or (op.text.len == 2 and op.text[1] == '='))) return s.c.syntaxError();
+        const op_tok = s.c.peek();
+        const op = s.c.text(op_tok);
+        if (op_tok.kind != .op or !(std.mem.eql(u8, op, "=") or (op.len == 2 and op[1] == '='))) return s.c.syntaxError();
         s.c.skip();
-        const name = try parser.varName(s.a, vt.text);
-        const v = s.p.db.xq.mssql.get(name) orelse return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{vt.text});
+        const name = try parser.varName(s.a, s.c.text(vt));
+        const v = s.p.db.xq.mssql.get(name) orelse return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{s.c.text(vt)});
         const ty = try s.a.dupe(u8, v.type);
         var e = try s.expr();
-        if (op.text.len == 2) e = try s.compoundAssign(op.text[0], try s.variableRef(vt, pos), e);
+        if (op.len == 2) e = try s.compoundAssign(op[0], try s.variableRef(vt, pos), e);
         return codeEval(s, &.{try s.func(pos, "xq_tsql_setvar", &.{ try s.str(pos, name), try asType(s, e, ty) })});
     }
     if (s.c.eatKw("IDENTITY_INSERT")) {
@@ -108,7 +110,7 @@ pub fn set(s: *Parser) Error!void {
         return emptyStatement(s);
     }
     if (s.c.isKw("IMPLICIT_TRANSACTIONS") and s.c.peekAt(1).isKw("ON")) return s.c.fail(null, "xqlite: SET IMPLICIT_TRANSACTIONS ON is not supported", .{});
-    if (s.c.peek().kind != .ident) return s.c.syntaxError();
+    if (s.c.peek().kind != .word) return s.c.syntaxError();
     // An option: accepted and ignored (NOCOUNT, ANSI_NULLS, XACT_ABORT,
     // TRANSACTION ISOLATION LEVEL, DATEFORMAT ...).
     while (!s.atStmtEnd() or s.c.isKw("SET")) {
@@ -126,7 +128,7 @@ fn tranWord(s: *Parser) void {
 
 /// A transaction or savepoint name (or @variable, not supported).
 fn tranName(s: *Parser) Error!?tree.Name {
-    if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: transaction names in variables are not supported", .{});
+    if (lexer.isUserVar(s.c.peek())) return s.c.fail(null, "xqlite: transaction names in variables are not supported", .{});
     if (s.isName()) return try s.nameOf(try s.name());
     return null;
 }
@@ -225,7 +227,7 @@ pub fn exec(s: *Parser) Error!void {
     if (!std.ascii.eqlIgnoreCase(proc, "sp_rename")) return s.c.fail(null, "xqlite: EXEC {s} is not supported (stored procedures are not)", .{proc});
     var args: std.ArrayList([]const u8) = .empty;
     while (true) {
-        if (s.c.peek().kind == .ident and s.c.peekAt(1).is("=")) {
+        if (s.c.peek().kind == .word and s.c.isOpTok(s.c.peekAt(1), "=")) {
             s.c.skip();
             s.c.skip();
         }

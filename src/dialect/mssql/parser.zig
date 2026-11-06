@@ -33,6 +33,7 @@ const std = @import("std");
 const sqlparse = @import("sql/parse");
 const syntax = @import("../syntax.zig");
 const words = sqlparse.words;
+const pratt = sqlparse.pratt;
 const ctype = @import("xqlite_base").ctype;
 const int = @import("../../sql/sqlite_int.zig");
 const ir = @import("../../ir/ir.zig");
@@ -55,33 +56,13 @@ pub const Token = lexer.Token;
 pub const Error = int.Oom || int.ParseError;
 
 /// SQL Server's reserved words and the words that cannot be an alias
-/// where one is optional.
-const reserved = words.noCase(&.{
-    "ADD",          "ALL",          "ALTER",             "AND",          "ANY",      "APPLY",   "AS",     "ASC",
-    "BEGIN",        "BETWEEN",      "BREAK",             "BY",           "CASCADE",  "CASE",    "CHECK",  "CLUSTERED",
-    "COLLATE",      "COLUMN",       "COMMIT",            "CONSTRAINT",   "CONTINUE", "CREATE",  "CROSS",  "CURRENT",
-    "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DECLARE",  "DEFAULT", "DELETE", "DENY",
-    "DESC",         "DISTINCT",     "DROP",              "ELSE",         "END",      "ESCAPE",  "EXCEPT", "EXEC",
-    "EXECUTE",      "EXISTS",       "FETCH",             "FOR",          "FOREIGN",  "FROM",    "FULL",   "FUNCTION",
-    "GOTO",         "GRANT",        "GROUP",             "HAVING",       "IDENTITY", "IF",      "IN",     "INDEX",
-    "INNER",        "INSERT",       "INTERSECT",         "INTO",         "IS",       "JOIN",    "KEY",    "LEFT",
-    "LIKE",         "MERGE",        "NONCLUSTERED",      "NOT",          "NULL",     "OFFSET",  "ON",     "OPTION",
-    "OR",           "ORDER",        "OUTER",             "OUTPUT",       "OVER",     "PERCENT", "PIVOT",  "PRIMARY",
-    "PRINT",        "PROC",         "PROCEDURE",         "REFERENCES",   "RETURN",   "REVOKE",  "RIGHT",  "ROLLBACK",
-    "SAVE",         "SELECT",       "SET",               "SOME",         "TABLE",    "THEN",    "TO",     "TOP",
-    "TRAN",         "TRANSACTION",  "TRUNCATE",          "UNION",        "UNIQUE",   "UNPIVOT", "UPDATE", "USE",
-    "USING",        "VALUES",       "VIEW",              "WHEN",         "WHERE",    "WHILE",   "WINDOW", "WITH",
-    "WITHIN",
-});
-
-pub fn isReserved(t: Token) bool {
-    return t.kind == .ident and reserved.has(t.text);
-}
+/// where one is optional (the class `reserved` of lexer.zig's keywords).
+pub const isReserved = lexer.isReserved;
 
 /// The words that start a statement: one ends the statement before it
 /// (T-SQL needs no semicolons).
 pub fn startsStatement(t: Token) bool {
-    return t.kind == .go or t.isAnyKw(&.{
+    return t.kind == .terminator or t.isAnyKw(&.{
         "SELECT",  "INSERT", "UPDATE",   "DELETE", "MERGE", "CREATE",  "DROP",  "ALTER", "TRUNCATE",
         "BEGIN",   "COMMIT", "ROLLBACK", "SAVE",   "SET",   "DECLARE", "PRINT", "USE",   "EXEC",
         "EXECUTE", "IF",     "WHILE",    "RETURN", "GRANT", "REVOKE",  "DENY",
@@ -116,8 +97,9 @@ pub const Cursor = sqlparse.Cursor(sqlparse.Streaming(lexer.Lexer), int.ErrorSta
 
 /// SQL Server's syntax error at token `t`.
 fn tsqlSyntaxError(c: anytype, t: Token) Error {
-    if (t.kind == .illegal and t.text.len > 0 and (t.text[0] == '\'' or t.text[0] == 'N' or t.text[0] == 'n')) {
-        return c.failState(t.start, .numbered("42601", 105), "Unclosed quotation mark after the character string '{s}'.", .{t.text[@min(t.text.len, @as(usize, if (t.text[0] == '\'') 1 else 2))..]});
+    const text = c.text(t);
+    if (t.kind == .illegal and text.len > 0 and (text[0] == '\'' or text[0] == 'N' or text[0] == 'n')) {
+        return c.failState(t.start, .numbered("42601", 105), "Unclosed quotation mark after the character string '{s}'.", .{text[@min(text.len, @as(usize, if (text[0] == '\'') 1 else 2))..]});
     }
     // At the end: the token before it.
     const near: []const u8 = if (t.kind == .eof) blk: {
@@ -126,7 +108,7 @@ fn tsqlSyntaxError(c: anytype, t: Token) Error {
         while (j > 0 and !std.ascii.isWhitespace(c.sql[j - 1])) j -= 1;
         if (j == i) i = j;
         break :blk c.sql[j..i];
-    } else t.text;
+    } else text;
     return c.failState(t.start, .numbered("42601", 102), "Incorrect syntax near '{s}'.", .{near[0..@min(near.len, 80)]});
 }
 
@@ -136,6 +118,8 @@ pub const Parser = struct {
     /// The tokens, the text they are in and the error the parser found
     /// (frontend.zig records it in `p`, unless lowering recorded one).
     c: Cursor,
+    /// The expression engine's state (sqlparse.pratt).
+    pratt: pratt.State = .{},
     /// Parsing the VALUES rows or SET list of INSERT/UPDATE: DEFAULT
     /// stands for the column's default (tree.Kind.default).
     allow_default: bool = false,
@@ -170,7 +154,7 @@ pub const Parser = struct {
     element_schema: ?[]const u8 = null,
 
     pub fn init(p: *Parse, sql: [:0]const u8) Parser {
-        return .{ .p = p, .a = p.arena, .c = .{ .arena = p.arena, .sql = sql, .src = .init(.init(sql)) } };
+        return .{ .p = p, .a = p.arena, .c = .{ .arena = p.arena, .sql = sql, .src = .init(.init(sql, 0, .{})) } };
     }
 
     /// IF EXISTS (IF alone starts a statement).
@@ -181,7 +165,7 @@ pub const Parser = struct {
     /// The end of the statement: `;`, GO, the end of the text, or a word
     /// that starts another statement.
     pub fn atStmtEnd(s: *Parser) bool {
-        return s.c.peek().kind == .eof or s.c.peek().is(";") or startsStatement(s.c.peek());
+        return s.c.peek().kind == .eof or s.c.isOp(";") or startsStatement(s.c.peek());
     }
 
     /// Fail with the error a statement run while compiling this one left
@@ -231,7 +215,7 @@ pub const Parser = struct {
     /// can come).
     pub fn anyName(s: *Parser) Error!Token {
         const t = s.c.peek();
-        if (t.kind == .quoted_ident or t.kind == .ident) {
+        if (t.kind == .quoted_ident or t.kind == .word) {
             s.c.skip();
             return t;
         }
@@ -239,21 +223,21 @@ pub const Parser = struct {
     }
 
     pub fn isName(s: *Parser) bool {
-        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .ident and !isReserved(s.c.peek()));
+        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .word and !isReserved(s.c.peek()));
     }
 
     pub fn nameText(s: *Parser, t: Token) Error![]const u8 {
-        return lexer.identValue(s.a, t);
+        return lexer.identValue(s.a, s.c.sql, t);
     }
 
     pub fn nameOf(s: *Parser, t: Token) Error!Name {
-        return .{ .text = try lexer.identValue(s.a, t), .pos = t.start };
+        return .{ .text = try lexer.identValue(s.a, s.c.sql, t), .pos = t.start };
     }
 
     /// A string literal's value.
     pub fn stringLiteral(s: *Parser) Error![]const u8 {
         if (s.c.peek().kind != .string) return s.c.syntaxError();
-        const v = try lexer.stringValue(s.a, s.c.peek());
+        const v = try lexer.stringValue(s.a, s.c.sql, s.c.peek());
         s.c.skip();
         return v;
     }
@@ -400,101 +384,190 @@ pub const Parser = struct {
 
     // ======================================================== expressions
 
+    /// An expression, read with the operator table `ops` (sqlparse.pratt).
+    /// Conditions (OR, AND, NOT, the predicates) take terms (arithmetic
+    /// and bit operators, unary - + ~, COLLATE) and give none: NOT starts
+    /// only a condition (`1 + NOT x` is a syntax error at NOT), and after
+    /// a predicate no term operator follows (cap 30: `x IS NULL + 1` and
+    /// `x IN (1) COLLATE c` end the expression before `+`, `COLLATE`).
     pub fn expr(s: *Parser) Error!*Expr {
-        return s.orExpr();
+        return E.expr(s, 0);
+    }
+
+    /// A term: an operand of the predicates.
+    pub fn term(s: *Parser) Error!*Expr {
+        return E.expr(s, term_bp);
     }
 
     pub fn bin(s: *Parser, op: tree.BinOp, l: *Expr, r: *Expr) Error!*Expr {
         return tree.expr(s.a, l.pos, r.end, .{ .binary = .{ .op = op, .l = l, .r = r } });
     }
 
-    fn orExpr(s: *Parser) Error!*Expr {
-        var l = try s.andExpr();
-        while (s.c.eatKw("OR")) l = try s.bin(.@"or", l, try s.andExpr());
-        return l;
-    }
+    /// The operators of expressions: where they stand (ops), what they
+    /// mean (prefix(), infix(), postfix()).
+    const Op = enum {
+        @"or",
+        @"and",
+        not,
+        compare,
+        is,
+        like,
+        not_like,
+        in,
+        not_in,
+        between,
+        not_between,
+        add,
+        sub,
+        bit_and,
+        bit_or,
+        bit_xor,
+        mul,
+        div,
+        rem,
+        neg,
+        plus,
+        bit_not,
+        collate,
+    };
 
-    fn andExpr(s: *Parser) Error!*Expr {
-        var l = try s.notExpr();
-        while (s.c.eatKw("AND")) l = try s.bin(.@"and", l, try s.notExpr());
-        return l;
-    }
+    /// The power of the predicates; their operands bind tighter.
+    const pred_bp = 30;
+    const term_bp = pred_bp + 1;
 
-    fn notExpr(s: *Parser) Error!*Expr {
-        const pos = s.c.here();
-        if (s.c.eatKw("NOT")) {
-            const e = try s.notExpr();
-            return s.mk(pos, .{ .unary = .{ .op = .not, .e = e } });
-        }
-        return s.predicate();
-    }
-
-    fn compareOp(t: Token) ?tree.CmpOp {
-        if (t.kind != .op) return null;
-        const ops = [_]struct { []const u8, tree.CmpOp }{
-            .{ "=", .eq }, .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt },  .{ "<=", .le },
-            .{ ">", .gt }, .{ ">=", .ge }, .{ "!<", .ge }, .{ "!>", .le },
+    const ops = blk: {
+        const T = Op;
+        const pred: pratt.Match = .{ .cap = pred_bp };
+        var o: []const pratt.Op(T) = &.{
+            pratt.left(T, .@"or", 10, .{ .kw = "OR" }),
+            pratt.left(T, .@"and", 20, .{ .kw = "AND" }),
+            pratt.prefixAt(T, .not, pred_bp, pred_bp, .{ .kw = "NOT" }),
+            pratt.postfix(T, .is, pred_bp, .{ .kw = "IS", .cap = pred.cap }),
+            pratt.left(T, .not_like, pred_bp, .{ .kw = "NOT", .then = "LIKE", .cap = pred.cap }),
+            pratt.left(T, .not_in, pred_bp, .{ .kw = "NOT", .then = "IN", .cap = pred.cap }),
+            pratt.left(T, .not_between, pred_bp, .{ .kw = "NOT", .then = "BETWEEN", .cap = pred.cap }),
+            pratt.left(T, .like, pred_bp, .{ .kw = "LIKE", .cap = pred.cap }),
+            pratt.left(T, .in, pred_bp, .{ .kw = "IN", .cap = pred.cap }),
+            pratt.left(T, .between, pred_bp, .{ .kw = "BETWEEN", .cap = pred.cap }),
         };
-        for (ops) |o| if (std.mem.eql(u8, t.text, o[0])) return o[1];
-        return null;
+        for (compare_ops) |c| o = o ++ .{pratt.left(T, .compare, pred_bp, .{ .op = c[0], .cap = pred.cap })};
+        break :blk o ++ .{
+            pratt.left(T, .add, 40, .{ .op = "+" }),
+            pratt.left(T, .sub, 40, .{ .op = "-" }),
+            pratt.left(T, .bit_and, 40, .{ .op = "&" }),
+            pratt.left(T, .bit_or, 40, .{ .op = "|" }),
+            pratt.left(T, .bit_xor, 40, .{ .op = "^" }),
+            pratt.left(T, .mul, 50, .{ .op = "*" }),
+            pratt.left(T, .div, 50, .{ .op = "/" }),
+            pratt.left(T, .rem, 50, .{ .op = "%" }),
+            pratt.prefix(T, .neg, 60, .{ .op = "-" }),
+            pratt.prefix(T, .plus, 60, .{ .op = "+" }),
+            pratt.prefix(T, .bit_not, 60, .{ .op = "~" }),
+            pratt.postfix(T, .collate, 70, .{ .kw = "COLLATE" }),
+        };
+    };
+    const E = pratt.Pratt(Parser, *Expr, Op, ops);
+
+    /// The comparison operators: = <> != < <= > >= and !< (not less),
+    /// !> (not greater).
+    const compare_ops = [_]struct { []const u8, tree.CmpOp }{
+        .{ "=", .eq }, .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt },  .{ "<=", .le },
+        .{ ">", .gt }, .{ ">=", .ge }, .{ "!<", .ge }, .{ "!>", .le },
+    };
+
+    fn compareOp(s: *Parser, t: Token) tree.CmpOp {
+        for (compare_ops) |o| if (std.mem.eql(u8, s.c.text(t), o[0])) return o[1];
+        unreachable;
     }
 
-    fn predicate(s: *Parser) Error!*Expr {
-        var l = try s.additive();
-        while (true) {
-            if (compareOp(s.c.peek())) |op| {
-                s.c.skip();
+    pub fn operand(s: *Parser) Error!*Expr {
+        return s.primary();
+    }
+
+    /// NOT cond; - + ~ term.
+    pub fn prefix(s: *Parser, tag: Op, m: E.Matched, rbp: u8) Error!*Expr {
+        const e = try E.expr(s, rbp);
+        const op: tree.UnOp = switch (tag) {
+            .not => .not,
+            .neg => .neg,
+            .bit_not => .bit_not,
+            .plus => return e,
+            else => unreachable,
+        };
+        return s.mk(m.first.start, .{ .unary = .{ .op = op, .e = e } });
+    }
+
+    /// AND, OR; the predicates, whose operands are terms; `+` as the
+    /// operands' types say (plus()), `/` of SQLite's division, `^` as
+    /// & | ~ (xor()).
+    pub fn infix(s: *Parser, tag: Op, l: *Expr, m: E.Matched, rbp: u8) Error!*Expr {
+        const not = switch (tag) {
+            .not_like, .not_in, .not_between => true,
+            else => false,
+        };
+        switch (tag) {
+            .compare => {
                 if (s.c.isAnyKw(&.{ "ANY", "SOME", "ALL" })) {
                     return s.c.fail(null, "xqlite: comparisons with ANY/SOME/ALL subqueries are not supported", .{});
                 }
-                const r = try s.additive();
-                l = try s.mk(l.pos, .{ .compare = .{ .op = op, .l = l, .r = r } });
-                continue;
-            }
-            if (s.c.isKw("IS")) {
-                s.c.skip();
-                const not = s.c.eatKw("NOT");
-                try s.c.expectKw("NULL");
-                l = try s.mk(l.pos, .{ .is_null = .{ .e = l, .not = not } });
-                continue;
-            }
-            var not = false;
-            if (s.c.isKw("NOT")) {
-                const n = s.c.peekAt(1);
-                if (!n.isAnyKw(&.{ "LIKE", "IN", "BETWEEN" })) break;
-                s.c.skip();
-                not = true;
-            }
-            if (s.c.eatKw("LIKE")) {
-                const r = try s.additive();
-                const esc: ?*Expr = if (s.c.eatKw("ESCAPE")) try s.additive() else null;
-                l = try s.like(l, r, esc, not);
-                continue;
-            }
-            if (s.c.eatKw("IN")) {
+                const r = try s.term();
+                return s.mk(l.pos, .{ .compare = .{ .op = s.compareOp(m.first), .l = l, .r = r } });
+            },
+            .like, .not_like => {
+                const r = try s.term();
+                const esc: ?*Expr = if (s.c.eatKw("ESCAPE")) try s.term() else null;
+                return s.like(l, r, esc, not);
+            },
+            .in, .not_in => {
                 try s.c.expectOp("(");
                 if (s.isSelectStart()) {
                     const sub = try s.subSelect();
                     try s.c.expectOp(")");
-                    l = try s.mk(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = sub } });
-                } else {
-                    const items = try s.exprList();
-                    try s.c.expectOp(")");
-                    l = try s.mk(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
+                    return s.mk(l.pos, .{ .in_select = .{ .e = l, .not = not, .sel = sub } });
                 }
-                continue;
-            }
-            if (s.c.eatKw("BETWEEN")) {
-                const lo = try s.additive();
+                const items = try s.exprList();
+                try s.c.expectOp(")");
+                return s.mk(l.pos, .{ .in_list = .{ .e = l, .not = not, .items = items } });
+            },
+            .between, .not_between => {
+                const lo = try s.term();
                 try s.c.expectKw("AND");
-                const hi = try s.additive();
-                l = try s.mk(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
-                continue;
-            }
-            if (not) return s.c.syntaxError();
-            break;
+                const hi = try s.term();
+                return s.mk(l.pos, .{ .between = .{ .e = l, .not = not, .lo = lo, .hi = hi } });
+            },
+            else => {},
         }
-        return l;
+        const r = try E.expr(s, rbp);
+        return switch (tag) {
+            .@"or" => s.bin(.@"or", l, r),
+            .@"and" => s.bin(.@"and", l, r),
+            .add => s.plus(l, r),
+            .sub => s.bin(.sub, l, r),
+            .bit_and => s.bin(.bit_and, l, r),
+            .bit_or => s.bin(.bit_or, l, r),
+            .bit_xor => s.xor(l, r),
+            .mul => s.bin(.mul, l, r),
+            .div => s.mk(l.pos, .{ .div = .{ .kind = .sqlite, .l = l, .r = r } }),
+            .rem => s.bin(.rem, l, r),
+            else => unreachable,
+        };
+    }
+
+    /// IS [NOT] NULL; COLLATE name.
+    pub fn postfix(s: *Parser, tag: Op, l: *Expr, m: E.Matched) Error!*Expr {
+        _ = m;
+        switch (tag) {
+            .is => {
+                const not = s.c.eatKw("NOT");
+                try s.c.expectKw("NULL");
+                return s.mk(l.pos, .{ .is_null = .{ .e = l, .not = not } });
+            },
+            .collate => {
+                const coll = try s.collationName();
+                return s.mk(l.pos, .{ .collate = .{ .e = l, .collation = coll } });
+            },
+            else => unreachable,
+        }
     }
 
     /// `e [NOT] LIKE pat [ESCAPE esc]`: SQLite's LIKE (case-insensitive,
@@ -512,24 +585,6 @@ pub const Parser = struct {
         const call = try s.func(e.pos, "xq_tsql_like", args.items);
         if (!not) return call;
         return s.mk(e.pos, .{ .unary = .{ .op = .not, .e = call } });
-    }
-
-    fn additive(s: *Parser) Error!*Expr {
-        var l = try s.multiplicative();
-        while (true) {
-            if (s.c.eatOp("+")) {
-                l = try s.plus(l, try s.multiplicative());
-            } else if (s.c.eatOp("-")) {
-                l = try s.bin(.sub, l, try s.multiplicative());
-            } else if (s.c.eatOp("&")) {
-                l = try s.bin(.bit_and, l, try s.multiplicative());
-            } else if (s.c.eatOp("|")) {
-                l = try s.bin(.bit_or, l, try s.multiplicative());
-            } else if (s.c.eatOp("^")) {
-                l = try s.xor(l, try s.multiplicative());
-            } else break;
-        }
-        return l;
     }
 
     /// a ^ b: (a | b) & ~(a & b).
@@ -646,49 +701,12 @@ pub const Parser = struct {
         return .unknown;
     }
 
-    fn multiplicative(s: *Parser) Error!*Expr {
-        var l = try s.unary();
-        while (true) {
-            if (s.c.eatOp("*")) {
-                l = try s.bin(.mul, l, try s.unary());
-            } else if (s.c.eatOp("/")) {
-                const r = try s.unary();
-                l = try s.mk(l.pos, .{ .div = .{ .kind = .sqlite, .l = l, .r = r } });
-            } else if (s.c.eatOp("%")) {
-                l = try s.bin(.rem, l, try s.unary());
-            } else break;
-        }
-        return l;
-    }
-
-    fn unary(s: *Parser) Error!*Expr {
-        const pos = s.c.here();
-        if (s.c.isOp("-") or s.c.isOp("+")) {
-            const minus = s.c.isOp("-");
-            s.c.skip();
-            const e = try s.unary();
-            if (!minus) return e;
-            return s.mk(pos, .{ .unary = .{ .op = .neg, .e = e } });
-        }
-        if (s.c.eatOp("~")) return s.mk(pos, .{ .unary = .{ .op = .bit_not, .e = try s.unary() } });
-        return s.primaryWithCollate();
-    }
-
-    fn primaryWithCollate(s: *Parser) Error!*Expr {
-        var e = try s.primary();
-        while (s.c.eatKw("COLLATE")) {
-            const coll = try s.collationName();
-            e = try s.mk(e.pos, .{ .collate = .{ .e = e, .collation = coll } });
-        }
-        return e;
-    }
-
     /// The SQLite collation of the SQL Server collation at the current
     /// token: case-sensitive (_CS_) and binary (_BIN, _BIN2) ones are
     /// BINARY, the others (_CI_) NOCASE.
     pub fn collationName(s: *Parser) Error![:0]const u8 {
         const t = s.c.peek();
-        if (t.kind != .ident and t.kind != .quoted_ident) return s.c.syntaxError();
+        if (t.kind != .word and t.kind != .quoted_ident) return s.c.syntaxError();
         const n = try s.nameText(t);
         s.c.skip();
         return mapCollation(n) orelse s.c.failState(null, .numbered("42704", 448), "Invalid collation '{s}'.", .{n});
@@ -723,7 +741,7 @@ pub const Parser = struct {
     }
 
     fn isSelectish(t: Token) bool {
-        return t.isKw("SELECT") or t.isKw("WITH") or t.is("(");
+        return t.isKw("SELECT") or t.isKw("WITH") or t.kind == .lparen;
     }
 
     fn refuseStored(s: *Parser, what: []const u8) Error!void {
@@ -738,45 +756,35 @@ pub const Parser = struct {
             .string => return s.mk(pos, .{ .string = try s.stringLiteral() }),
             .integer => {
                 s.c.skip();
-                return s.mk(pos, .{ .integer = t.text });
+                if (t.sub == .hex) return s.mk(pos, .{ .blob = try lexer.hexDigits(s.a, s.c.sql, t) });
+                return s.mk(pos, .{ .integer = s.c.text(t) });
             },
             .float => {
                 s.c.skip();
-                return s.mk(pos, .{ .float = t.text });
-            },
-            .hex => {
-                s.c.skip();
-                return s.mk(pos, .{ .blob = try lexer.hexDigits(s.a, t) });
+                return s.mk(pos, .{ .float = s.c.text(t) });
             },
             .param => {
-                try s.refuseStored(t.text);
+                try s.refuseStored(s.c.text(t));
                 s.c.skip();
                 return s.mk(pos, .{ .param = null });
             },
             .variable => {
-                try s.refuseStored(t.text);
+                try s.refuseStored(s.c.text(t));
                 s.c.skip();
+                if (t.sub == .system) return @import("functions.zig").systemFunction(s, t, pos);
                 return s.variableRef(t, pos);
             },
-            .sys_var => {
-                try s.refuseStored(t.text);
-                s.c.skip();
-                return @import("functions.zig").systemFunction(s, t, pos);
-            },
-            .op => {
-                if (t.is("(")) return s.parenthesized();
-                return s.c.syntaxError();
-            },
+            .lparen => return s.parenthesized(),
             .quoted_ident => return s.columnRef(),
-            .ident => return s.wordExpr(),
+            .word => return s.wordExpr(),
             else => return s.c.syntaxError(),
         }
     }
 
     /// @name: the variable's value (it must be declared).
     pub fn variableRef(s: *Parser, t: Token, pos: u32) Error!*Expr {
-        const vname = try varName(s.a, t.text);
-        const v = s.p.db.xq.mssql.get(vname) orelse return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
+        const vname = try varName(s.a, s.c.text(t));
+        const v = s.p.db.xq.mssql.get(vname) orelse return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{s.c.text(t)});
         const x = try s.func(pos, "xq_tsql_getvar", &.{try s.str(pos, vname)});
         try s.classes.put(s.a, x, typeClass(types.parseText(v.type)));
         return x;
@@ -804,7 +812,7 @@ pub const Parser = struct {
         const pos = s.c.here();
         var names: std.ArrayList(Name) = .empty;
         try names.append(s.a, try s.nameOf(try s.anyName()));
-        while (names.items.len < 4 and s.c.isOp(".") and !s.c.peekAt(1).is("*")) {
+        while (names.items.len < 4 and s.c.isOp(".") and !s.c.isOpTok(s.c.peekAt(1), "*")) {
             s.c.skip();
             try names.append(s.a, try s.nameOf(try s.anyName()));
         }
@@ -868,16 +876,16 @@ pub const Parser = struct {
             const q = try s.qualifiedName();
             return s.func(pos, "xq_tsql_next_value", &.{try s.str(q.name.pos, q.name.text)});
         }
-        if (next.is("(") and t.kind == .ident) return @import("functions.zig").call(s);
+        if (next.kind == .lparen and t.kind == .word) return @import("functions.zig").call(s);
         const niladic = [_][]const u8{ "CURRENT_TIMESTAMP", "CURRENT_USER", "SESSION_USER", "SYSTEM_USER", "USER", "CURRENT_DATE" };
-        for (niladic) |n| if (t.isKw(n)) {
+        for (niladic) |n| if (t.isKwText(n)) {
             s.c.skip();
             return @import("functions.zig").byName(s, n, &.{}, pos);
         };
         if (isReserved(t)) return s.c.syntaxError();
         // schema.function(...)
-        if (next.is(".") and s.c.peekAt(2).kind == .ident) {
-            if (s.c.peekAt(3).is("(")) {
+        if (next.kind == .dot and s.c.peekAt(2).kind == .word) {
+            if (s.c.isOpTok(s.c.peekAt(3), "(")) {
                 s.c.skipN(2);
                 return @import("functions.zig").call(s);
             }
@@ -947,13 +955,13 @@ pub const Parser = struct {
             }
         }
         if (top) |tp| try s.applyTop(sel, tp);
-        if (s.c.isKw("OPTION") and s.c.peekAt(1).is("(")) {
+        if (s.c.isKw("OPTION") and s.c.isOpTok(s.c.peekAt(1), "(")) {
             // Query hints: ignored.
             s.c.skip();
             try s.skipParens();
         }
         if (s.c.isKw("FOR") and s.c.peekAt(1).isKw("JSON")) return json_sql.forJson(s, sel);
-        if (s.c.isKw("FOR") and s.c.peekAt(1).isAnyKw(&.{ "XML", "BROWSE" })) return s.c.fail(null, "xqlite: FOR {s} is not supported", .{s.c.peekAt(1).text});
+        if (s.c.isKw("FOR") and s.c.peekAt(1).isAnyKw(&.{ "XML", "BROWSE" })) return s.c.fail(null, "xqlite: FOR {s} is not supported", .{s.c.text(s.c.peekAt(1))});
         return sel;
     }
 
@@ -1118,12 +1126,12 @@ pub const Parser = struct {
         const where: ?*Expr = if (s.c.eatKw("WHERE")) try s.expr() else null;
         var group: std.ArrayList(*Expr) = .empty;
         if (try s.c.optKws(&.{ "GROUP", "BY" })) {
-            if (s.c.isAnyKw(&.{ "ROLLUP", "CUBE", "GROUPING" })) return s.c.fail(null, "xqlite: GROUP BY {s} is not supported", .{s.c.peek().text});
+            if (s.c.isAnyKw(&.{ "ROLLUP", "CUBE", "GROUPING" })) return s.c.fail(null, "xqlite: GROUP BY {s} is not supported", .{s.c.text(s.c.peek())});
             while (true) {
                 try group.append(s.a, try s.expr());
                 if (!s.c.eatOp(",")) break;
             }
-            if (s.c.isKw("WITH") and s.c.peekAt(1).isAnyKw(&.{ "ROLLUP", "CUBE" })) return s.c.fail(null, "xqlite: GROUP BY ... WITH {s} is not supported", .{s.c.peekAt(1).text});
+            if (s.c.isKw("WITH") and s.c.peekAt(1).isAnyKw(&.{ "ROLLUP", "CUBE" })) return s.c.fail(null, "xqlite: GROUP BY ... WITH {s} is not supported", .{s.c.text(s.c.peekAt(1))});
         }
         const having: ?*Expr = if (s.c.eatKw("HAVING")) try s.expr() else null;
         const core = try s.new(tree.Core, .{
@@ -1272,9 +1280,9 @@ pub const Parser = struct {
         var copy = s.c.src.lx;
         _ = copy.next(); // .
         const t = copy.next();
-        if (t.kind != .ident and t.kind != .quoted_ident) return false;
-        if (!copy.next().is(".")) return false;
-        return copy.next().is("*");
+        if (t.kind != .word and t.kind != .quoted_ident) return false;
+        if (copy.next().kind != .dot) return false;
+        return copy.next().isOp(s.c.sql, "*");
     }
 
     fn resultColumns(s: *Parser) Error![]tree.ResultCol {
@@ -1284,7 +1292,7 @@ pub const Parser = struct {
             if (s.c.isOp("*")) {
                 try l.append(s.a, .{ .star = s.c.here() });
                 s.c.skip();
-            } else if ((s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident) and s.c.peekAt(1).is(".") and s.c.peekAt(2).kind != .op and s.qualifiedStar()) {
+            } else if ((s.c.peek().kind == .word or s.c.peek().kind == .quoted_ident) and s.c.isOpTok(s.c.peekAt(1), ".") and !lexer.isOpKind(s.c.peekAt(2)) and s.qualifiedStar()) {
                 // schema.table.*: the table (aliased to its name).
                 s.c.skip();
                 s.c.skip();
@@ -1294,27 +1302,27 @@ pub const Parser = struct {
                 const star = s.c.here();
                 s.c.skip();
                 try l.append(s.a, .{ .table_star = .{ .names = try s.a.dupe(Name, &.{tbl}), .star_pos = star } });
-            } else if ((s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident) and s.c.peekAt(1).is(".") and s.c.peekAt(2).is("*")) {
+            } else if ((s.c.peek().kind == .word or s.c.peek().kind == .quoted_ident) and s.c.isOpTok(s.c.peekAt(1), ".") and s.c.isOpTok(s.c.peekAt(2), "*")) {
                 const tbl = try s.nameOf(s.c.peek());
                 s.c.skip();
                 s.c.skip();
                 const star = s.c.here();
                 s.c.skip();
                 try l.append(s.a, .{ .table_star = .{ .names = try s.a.dupe(Name, &.{tbl}), .star_pos = star } });
-            } else if (s.c.peek().kind == .variable and isAssignOp(s.c.peekAt(1))) {
+            } else if (lexer.isUserVar(s.c.peek()) and isAssignOp(s.c.sql, s.c.peekAt(1))) {
                 // @x = expr, @x += expr
                 const vt = s.c.peek();
                 const vpos = s.c.here();
                 s.c.skip();
-                const op = s.c.peek().text;
+                const op = s.c.text(s.c.peek());
                 s.c.skip();
                 var e = try s.expr();
                 if (op.len == 2) e = try s.compoundAssign(op[0], try s.variableRef(vt, vpos), e);
-                try assigns.append(s.a, .{ .name = try varName(s.a, vt.text), .value = e });
+                try assigns.append(s.a, .{ .name = try varName(s.a, s.c.text(vt)), .value = e });
                 try l.append(s.a, .{ .expr = .{ .e = e } });
-            } else if ((s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident or s.c.peek().kind == .string) and !isReserved(s.c.peek()) and s.c.peekAt(1).is("=")) {
+            } else if ((s.c.peek().kind == .word or s.c.peek().kind == .quoted_ident or s.c.peek().kind == .string) and !isReserved(s.c.peek()) and s.c.isOpTok(s.c.peekAt(1), "=")) {
                 // alias = expr
-                const al: Name = if (s.c.peek().kind == .string) .{ .text = try lexer.stringValue(s.a, s.c.peek()), .pos = s.c.here() } else try s.nameOf(s.c.peek());
+                const al: Name = if (s.c.peek().kind == .string) .{ .text = try lexer.stringValue(s.a, s.c.sql, s.c.peek()), .pos = s.c.here() } else try s.nameOf(s.c.peek());
                 s.c.skip();
                 s.c.skip();
                 const e = try s.expr();
@@ -1378,7 +1386,7 @@ pub const Parser = struct {
     /// The inside of OVER ( ... ).
     fn windowSpec(s: *Parser) Error!*tree.WindowSpec {
         var w: tree.WindowSpec = .{};
-        try syntax.windowClauses(s, &w, additive, .{ .exclude = false });
+        try syntax.windowClauses(s, &w, term, .{ .exclude = false });
         return s.new(tree.WindowSpec, w);
     }
 
@@ -1459,7 +1467,7 @@ pub const Parser = struct {
 
     /// WITH (NOLOCK, ...) and the old (NOLOCK): ignored.
     pub fn tableHints(s: *Parser) Error!void {
-        if ((s.c.isKw("WITH") and s.c.peekAt(1).is("(")) or (s.c.isOp("(") and isHint(s.c.peekAt(1)))) {
+        if ((s.c.isKw("WITH") and s.c.isOpTok(s.c.peekAt(1), "(")) or (s.c.isOp("(") and isHint(s.c.peekAt(1)))) {
             if (s.c.isKw("WITH")) s.c.skip();
             try s.skipParens();
         }
@@ -1469,7 +1477,7 @@ pub const Parser = struct {
         var item: tree.FromItem = .{ .source = undefined };
         if (s.c.isOp("(")) {
             const n = s.c.peekAt(1);
-            if (n.isAnyKw(&.{ "SELECT", "WITH", "VALUES" }) or n.is("(")) {
+            if (n.isAnyKw(&.{ "SELECT", "WITH", "VALUES" }) or n.kind == .lparen) {
                 s.c.skip();
                 if (s.c.isKw("VALUES")) {
                     const pos = s.c.here();
@@ -1489,8 +1497,8 @@ pub const Parser = struct {
             item.alias = try s.aliasOf(false);
             return item;
         }
-        if (s.c.peek().kind == .variable) return s.c.fail(null, "xqlite: table variables are not supported", .{});
-        if (s.c.peek().kind == .ident and s.c.peek().isKw("OPENJSON") and s.c.peekAt(1).is("(")) {
+        if (lexer.isUserVar(s.c.peek())) return s.c.fail(null, "xqlite: table variables are not supported", .{});
+        if (s.c.peek().kind == .word and s.c.peek().isKw("OPENJSON") and s.c.isOpTok(s.c.peekAt(1), "(")) {
             item.source = .{ .func = try json_sql.openJson(s) };
             item.alias = try s.aliasOf(false);
             return item;
@@ -1525,7 +1533,7 @@ pub const Parser = struct {
     /// sys (catalog views).
     pub fn qualifiedNameRaw(s: *Parser) Error!RawName {
         const t = s.c.peek();
-        if ((t.kind == .ident or t.kind == .quoted_ident) and s.c.peekAt(1).is(".")) {
+        if ((t.kind == .word or t.kind == .quoted_ident) and s.c.isOpTok(s.c.peekAt(1), ".")) {
             const first = try s.nameText(t);
             const specials = [_][]const u8{ "INFORMATION_SCHEMA", "sys" };
             for (specials) |sp| if (std.ascii.eqlIgnoreCase(first, sp)) {
@@ -1624,10 +1632,10 @@ pub const Parser = struct {
     }
 };
 
-fn isAssignOp(t: Token) bool {
+fn isAssignOp(sql: []const u8, t: Token) bool {
     if (t.kind != .op) return false;
     const ops = [_][]const u8{ "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=" };
-    for (ops) |o| if (std.mem.eql(u8, t.text, o)) return true;
+    for (ops) |o| if (std.mem.eql(u8, t.text(sql), o)) return true;
     return false;
 }
 

@@ -405,8 +405,7 @@ pub fn needQuote(name: ?[]const u8) bool {
 
 /// sqlite3_keyword_check().
 pub fn isKeyword(z: []const u8) bool {
-    const tk = xqlite.tokenize;
-    return tk.keywordCode(z) != tk.keywordCode("xq__");
+    return xqlite.sqlite_lexer.keywords.lookup(z) != 0;
 }
 
 // ============================================================ formatter

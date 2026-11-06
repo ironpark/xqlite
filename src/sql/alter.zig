@@ -28,7 +28,8 @@ const callback = @import("callback.zig");
 const func = @import("func/func.zig");
 const printf = @import("printf.zig");
 const ctype = @import("xqlite_base").ctype;
-const tokenize = @import("../parse/tokenize.zig");
+const sqlite_parser = @import("../dialect/sqlite/parser.zig");
+const lexer = @import("../dialect/sqlite/lexer.zig");
 const btree = @import("xqlite_storage").btree;
 const vi = @import("../vdbe/vdbe_int.zig");
 const aux = @import("../vdbe/aux.zig");
@@ -788,7 +789,7 @@ fn renameParseSql(p: *Parse, zdb: ?[]const u8, db: *Sqlite3, sql_arg: ?[:0]const
     db.flags.Comments = true;
     // C: rc is the error count of sqlite3RunParser(), 1 (SQLITE_ERROR)
     // on error.
-    var rc: i32 = if (tokenize.runParser(p, sql)) |_| RC.OK else |err| switch (err) {
+    var rc: i32 = if (sqlite_parser.runParser(p, sql)) |_| RC.OK else |err| switch (err) {
         error.OutOfMemory => blk: {
             db.oomFault();
             break :blk RC.ERROR;
@@ -1342,11 +1343,11 @@ fn renameTableTest(ctx: *Context, argv: []*Mem) void {
 /// Port of getConstraintToken(): the bytes up to the end of the next
 /// token that is not white space or a comment, with its type in `tk`. A
 /// "(" token extends to its matching ")" (or the first illegal token).
-fn getConstraintToken(z: [*:0]const u8, tk: *u8) usize {
+fn getConstraintToken(sql: [:0]const u8, at: usize, tk: *u8) usize {
     var off: usize = 0;
     var t: u8 = 0;
     while (true) {
-        const s = tokenize.getToken(z + off);
+        const s = lexer.getToken(sql, at + off);
         off += s.len;
         t = s.tk;
         if (t != TK.SPACE and t != TK.COMMENT) break;
@@ -1354,7 +1355,7 @@ fn getConstraintToken(z: [*:0]const u8, tk: *u8) usize {
     if (t == TK.LP) {
         var nest: i32 = 1;
         while (nest > 0) {
-            const s = tokenize.getToken(z + off);
+            const s = lexer.getToken(sql, at + off);
             off += s.len;
             t = s.tk;
             if (t == TK.LP) {
@@ -1422,7 +1423,7 @@ fn dropColumnEdit(ctx: *Context, p: *Parse, sql: [:0]const u8, i_col_arg: i32) i
         var tk: u8 = 0;
         var off = offsetIn(sql, col.t.z.?);
         while (true) {
-            off += getConstraintToken(sql[off..].ptr, &tk);
+            off += getConstraintToken(sql, off, &tk);
             if (tk == TK.COMMA) break;
         }
         start = off - 1;
@@ -1566,10 +1567,10 @@ fn dropColumnImpl(p: *Parse, src: *SrcList, name: Token) Oom!void {
 
 /// Port of getWhitespace(): the bytes of white space and comments at the
 /// start of `z`.
-fn getWhitespace(z: [*:0]const u8) usize {
+fn getWhitespace(sql: [:0]const u8, at: usize) usize {
     var n: usize = 0;
     while (true) {
-        const s = tokenize.getToken(z + n);
+        const s = lexer.getToken(sql, at + n);
         if (s.tk != TK.SPACE and s.tk != TK.COMMENT) break;
         n += s.len;
     }
@@ -1580,24 +1581,24 @@ fn getWhitespace(z: [*:0]const u8) usize {
 /// second token starts `z` (for an unnamed NOT NULL, the token after
 /// NOT). `tk`, the type of its first token, enables parsing a foreign key
 /// for TK_REFERENCES and TK_FOREIGN.
-fn getConstraint(z: [*:0]const u8, tk_arg: u8) usize {
+fn getConstraint(sql: [:0]const u8, at: usize, tk_arg: u8) usize {
     var off: usize = 0;
     var t: u8 = 0;
     var tk = tk_arg;
     if (tk == TK.FOREIGN) {
         // Up to REFERENCES, then REFERENCES itself.
-        off = getConstraint(z, 0);
-        off += getConstraintToken(z + off, &tk);
+        off = getConstraint(sql, at, 0);
+        off += getConstraintToken(sql, at + off, &tk);
     }
     if (tk == TK.REFERENCES) {
         // The table name, which may be a fallback token like GENERATED.
-        off += getConstraintToken(z + off, &t);
+        off += getConstraintToken(sql, at + off, &t);
     }
     // The constraint ends at the next CONSTRAINT, PRIMARY, NOT, UNIQUE,
     // CHECK, DEFAULT, COLLATE, REFERENCES, FOREIGN, GENERATED, AS, ")" or
     // ",", or at an illegal token.
     while (true) {
-        const n = getConstraintToken(z + off, &t);
+        const n = getConstraintToken(sql, at + off, &t);
         switch (t) {
             TK.CONSTRAINT, TK.PRIMARY, TK.NOT, TK.UNIQUE, TK.CHECK, TK.DEFAULT, TK.COLLATE, TK.REFERENCES, TK.FOREIGN, TK.RP, TK.COMMA, TK.ILLEGAL, TK.AS, TK.GENERATED => break,
             else => {},
@@ -1631,7 +1632,7 @@ fn skipCreateTable(ctx: *Context, sql_arg: ?[:0]const u8) ?usize {
     const sql = sql_arg orelse return null;
     var off: usize = 0;
     while (true) {
-        const s = tokenize.getToken(sql.ptr + off);
+        const s = lexer.getToken(sql, off);
         off += s.len;
         if (s.tk == TK.LP) break;
         if (s.tk == TK.ILLEGAL) {
@@ -1673,12 +1674,12 @@ fn dropConstraintFunc(ctx: *Context, argv: []*Mem) void {
     while (end == 0) : (ii += 1) {
         while (true) {
             start = off;
-            off += getConstraintToken(z + off, &t);
+            off += getConstraintToken(sql, off, &t);
             if (t == TK.CONSTRAINT and (cons != null or i_not_null == ii)) {
                 var cmp = true;
                 // The name, which may be quoted.
-                off += getWhitespace(z + off);
-                var n_tok = getConstraintToken(z + off, &t);
+                off += getWhitespace(sql, off);
+                var n_tok = getConstraintToken(sql, off, &t);
                 if (cons) |c| {
                     if (quotedCompare(ctx, t, z[off .. off + n_tok], c, &cmp) != RC.OK) return;
                 }
@@ -1692,14 +1693,14 @@ fn dropConstraintFunc(ctx: *Context, argv: []*Mem) void {
                 //
                 // Then "CONSTRAINT one" alone may be dropped, or the search
                 // goes on from the next CONSTRAINT.
-                n_tok = getConstraintToken(z + off, &t);
+                n_tok = getConstraintToken(sql, off, &t);
                 if (t == TK.CONSTRAINT or t == TK.DEFAULT or t == TK.COLLATE or
                     t == TK.COMMA or t == TK.RP or t == TK.GENERATED or t == TK.AS)
                 {
                     t = TK.CHECK;
                 } else {
                     off += n_tok;
-                    off += getConstraint(z + off, t);
+                    off += getConstraint(sql, off, t);
                 }
 
                 if (!cmp or (i_not_null >= 0 and t == TK.NOT)) {
@@ -1711,7 +1712,7 @@ fn dropConstraintFunc(ctx: *Context, argv: []*Mem) void {
                     break;
                 }
             } else if (t == TK.NOT and i_not_null == ii) {
-                end = @intCast(off + getConstraint(z + off, 0));
+                end = @intCast(off + getConstraint(sql, off, 0));
                 break;
             } else if (t == TK.RP or t == TK.ILLEGAL) {
                 end = -1;
@@ -1737,8 +1738,8 @@ fn dropConstraintFunc(ctx: *Context, argv: []*Mem) void {
     // which then also takes the place of a "," before the constraint.
     var e: usize = @intCast(end);
     var space: []const u8 = " ";
-    e += getWhitespace(z + e);
-    t = tokenize.getToken(z + e).tk;
+    e += getWhitespace(sql, e);
+    t = lexer.getToken(sql, e).tk;
     if (t == TK.RP or t == TK.COMMA) {
         space = "";
         if (z[start - 1] == ',') start -= 1;
@@ -1762,13 +1763,13 @@ fn addConstraintFunc(ctx: *Context, argv: []*Mem) void {
     const i_col = api.valueInt(argv[2]);
     var t: u8 = 0;
     var off = skipCreateTable(ctx, sql) orelse return;
-    const z = sql.?.ptr;
+    const text = sql.?;
 
     var ii: i32 = 0;
     while (ii <= i_col or (i_col < 0 and t != TK.RP)) : (ii += 1) {
-        off += getConstraintToken(z + off, &t);
+        off += getConstraintToken(text, off, &t);
         while (true) {
-            const n_tok = getConstraintToken(z + off, &t);
+            const n_tok = getConstraintToken(text, off, &t);
             if (t == TK.COMMA or t == TK.RP) break;
             if (t == TK.ILLEGAL) {
                 api.resultErrorCode(ctx, RC.CORRUPT);
@@ -1777,7 +1778,7 @@ fn addConstraintFunc(ctx: *Context, argv: []*Mem) void {
             off += n_tok;
         }
     }
-    off += getWhitespace(z + off);
+    off += getWhitespace(text, off);
 
     const db = api.contextDbHandle(ctx);
     const new = std.mem.concat(db.gpa, u8, &.{
@@ -1876,7 +1877,7 @@ fn alterRtrimConstraint(gpa: Allocator, cons: []const u8) Oom!usize {
     var off: usize = 0;
     var end: usize = 0;
     while (true) {
-        const s = tokenize.getToken(tmp.ptr + off);
+        const s = lexer.getToken(tmp, off);
         if (s.tk == TK.ILLEGAL) break;
         if (s.tk != TK.SPACE and (s.tk != TK.COMMENT or tmp[off] != '-')) end = off + s.len;
         off += s.len;
@@ -1942,16 +1943,16 @@ fn findConstraintFunc(ctx: *Context, argv: []*Mem) void {
     var off: usize = 0;
     var t: u8 = 0;
     while (t != TK.LP and t != TK.ILLEGAL) {
-        const s = tokenize.getToken(z + off);
+        const s = lexer.getToken(sql, off);
         off += s.len;
         t = s.tk;
     }
     while (true) {
-        off += getConstraintToken(z + off, &t);
+        off += getConstraintToken(sql, off, &t);
         if (t == TK.CONSTRAINT) {
             var cmp = false;
-            off += getWhitespace(z + off);
-            const n_tok = getConstraintToken(z + off, &t);
+            off += getWhitespace(sql, off);
+            const n_tok = getConstraintToken(sql, off, &t);
             if (quotedCompare(ctx, t, z[off .. off + n_tok], cons, &cmp) != RC.OK) return;
             if (!cmp) {
                 api.resultInt(ctx, 1);

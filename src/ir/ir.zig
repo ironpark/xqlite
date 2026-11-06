@@ -31,7 +31,7 @@
 //!  - statement builders (select.run, dml.insert, ddl.endTable ...)
 //!    generate code; the statement ends with stmt.finishCoding().
 //!
-//! SQLite's grammar (src/parse/parser.zig) is the reference for which
+//! SQLite's parser (src/dialect/sqlite/parser.zig, after parse.y) is the reference for which
 //! builder each construct calls with which arguments; see
 //! docs/architecture.md for the frontend contract.
 
@@ -150,7 +150,7 @@ pub const stmt = struct {
             p.xq_hold_finish = hold;
             p.tail = tail;
         }
-        @import("../parse/tokenize.zig").runParser(p, text) catch |err| switch (err) {
+        @import("../dialect/sqlite/parser.zig").runParser(p, text) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
             error.ParseFailed => {},
         };

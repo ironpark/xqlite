@@ -12,8 +12,7 @@ const Mem = c.Mem;
 const RC = c.RC;
 const aux = @import("../vdbe/aux.zig");
 const prepare_mod = @import("../sql/prepare.zig");
-const tokenize = @import("../parse/tokenize.zig");
-const TK = @import("../parse/grammar.zig").TK;
+const TK = @import("../sql/tk.zig").TK;
 
 // =============================================================== prepare
 
@@ -454,7 +453,7 @@ pub export fn sqlite3_sql(v: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
 pub export fn sqlite3_normalized_sql(v: ?*Vdbe) callconv(.c) ?[*:0]const u8 {
     const lk = c.lockStmt(v);
     defer lk.unlock();
-    return c.cStr(@import("../parse/normalize.zig").normalizedSql(v orelse return null));
+    return c.cStr(@import("../dialect/sqlite/normalize.zig").normalizedSql(v orelse return null));
 }
 
 /// Port of sqlite3VdbeExpandSql(): the SQL of the statement with its
@@ -502,7 +501,7 @@ fn expand(v: *Vdbe, raw: [:0]const u8, out: *std.ArrayList(u8)) !void {
         var start = i;
         var tok_len: usize = 0;
         while (start < raw.len) {
-            const t = tokenize.getToken(raw[start..].ptr);
+            const t = @import("../dialect/sqlite/lexer.zig").getToken(raw, start);
             if (t.tk == TK.VARIABLE) {
                 tok_len = t.len;
                 break;

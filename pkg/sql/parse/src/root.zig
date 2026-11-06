@@ -25,6 +25,7 @@
 const std = @import("std");
 
 pub const words = @import("words.zig");
+pub const pratt = @import("pratt.zig");
 
 pub const Error = error{ ParseFailed, OutOfMemory };
 
@@ -206,6 +207,8 @@ pub fn Cursor(comptime Source: type, comptime State: type, comptime Hooks: type)
         pub const Token = Source.Token;
         pub const Kind = @FieldType(Token, "kind");
         pub const Mark = Source.Mark;
+        /// The token is sql/lexer's (TokenOf()), with no text of its own.
+        const keyworded = @hasField(Token, "kw");
 
         arena: std.mem.Allocator,
         /// The text the offsets of tokens are in.
@@ -343,7 +346,18 @@ pub fn Cursor(comptime Source: type, comptime State: type, comptime Hooks: type)
         // ----------------------------------------------------- operators
 
         pub inline fn isOp(c: *const C, op: []const u8) bool {
-            return c.peek().isOp(op);
+            return c.isOpTok(c.peek(), op);
+        }
+
+        /// Whether token `t` is the operator `op`.
+        pub inline fn isOpTok(c: *const C, t: Token, op: []const u8) bool {
+            if (comptime keyworded) return t.isOp(c.sql, op);
+            return t.isOp(op);
+        }
+
+        /// The text of token `t`, as written.
+        pub inline fn text(c: *const C, t: Token) []const u8 {
+            return c.sql[t.start..t.end];
         }
 
         pub fn eatOp(c: *C, op: []const u8) bool {
@@ -612,4 +626,5 @@ test "streaming cursor" {
 
 test {
     _ = words;
+    _ = pratt;
 }

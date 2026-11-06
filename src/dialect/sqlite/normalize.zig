@@ -6,11 +6,11 @@
 //! first time it is asked for, so other statements pay nothing.
 
 const std = @import("std");
-const tokenize = @import("tokenize.zig");
-const TK = @import("grammar.zig").TK;
+const lexer = @import("lexer.zig");
+const TK = lexer.TK;
 const ctype = @import("xqlite_base").ctype;
-const util = @import("../sql/util.zig");
-const vi = @import("../vdbe/vdbe_int.zig");
+const util = @import("../../sql/util.zig");
+const vi = @import("../../vdbe/vdbe_int.zig");
 
 const Vdbe = vi.Vdbe;
 const Allocator = std.mem.Allocator;
@@ -55,7 +55,7 @@ pub fn normalize(a: Allocator, v: *const Vdbe, sql: [:0]const u8) error{OutOfMem
     var i: usize = 0;
     while (sql[i] != 0) {
         if (token_type != TK.SPACE) prev_type = token_type;
-        const t = tokenize.getToken(sql[i..].ptr);
+        const t = lexer.getToken(sql, i);
         const n = t.len;
         token_type = t.tk;
         if (n == 0) break;
@@ -98,7 +98,7 @@ pub fn normalize(a: Allocator, v: *const Vdbe, sql: [:0]const u8) error{OutOfMem
                         try out.append(a, '?');
                         continue;
                     }
-                    const it = tokenize.getToken(id.ptr);
+                    const it = lexer.getToken(id, 0);
                     if (it.len == id.len and it.tk == TK.ID) {
                         try addSpaceSeparator(a, &out);
                         try out.appendSlice(a, id);

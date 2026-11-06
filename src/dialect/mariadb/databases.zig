@@ -30,6 +30,7 @@ const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const dfunc = @import("../func.zig");
 const parser = @import("parser.zig");
+const lexer = @import("lexer.zig");
 const session = @import("session.zig");
 const state = @import("state.zig");
 
@@ -103,7 +104,7 @@ fn databaseOptions(s: *Parser) Error!?[]const u8 {
 }
 
 fn optionValue(s: *Parser) Error![]const u8 {
-    if (s.c.peek().kind == .string) return s.stringLiteral();
+    if (lexer.isString(s.c.peek())) return s.stringLiteral();
     return s.nameText(try s.anyName());
 }
 

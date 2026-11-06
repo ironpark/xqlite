@@ -21,7 +21,7 @@ flowchart TD
 | 소스 파일 | 핵심 역할 |
 | --- | --- |
 | `frontend.zig` | 방언 진입점. 질의 문자열을 받아 어휘/구문 분석을 구동하고 IR 생성을 조율합니다. |
-| `tokenizer.zig` | PostgreSQL 어휘 규칙을 따르는 렉서. `$1` 매개변수, `$$` 달러 인용 문자열, 식별자 소문자 폴딩을 처리합니다. |
+| `lexer.zig` | 공통 렉서(`sqllex.Lexer`)의 PostgreSQL 규칙(`$1` 매개변수, `$$` 달러 인용, `U&'..'`와 UESCAPE, 연산자 규칙)과 키워드 표, `E'..'`·`U&` 이스케이프를 푸는 `Decoder`. 문장을 미리 토큰화하며 렉서 오류를 냅니다(`statement()`). |
 | `parser.zig` | SELECT, DML, DDL 전체를 아우르는 고성능 파서. 식과 연산자 우선순위를 PostgreSQL 규칙에 맞게 처리합니다. |
 | `types.zig` | PostgreSQL 논리 타입 정의, 코어 스토리지 타입 매핑 및 OID 테이블 관리. |
 | `overload.zig` | 연산자 및 함수 오버로딩 해결기. 인자 타입에 따른 최적 엔진 함수 매핑. |

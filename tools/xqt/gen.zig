@@ -4,10 +4,6 @@
 //! - fixtures: the databases of src/testdata and pkg/storage/src/testdata,
 //!   made by the sqlite3 shell
 //!   (was tools/gen-fixtures.sh).
-//! - parser: src/parse/grammar.zig from SQLite's grammar: lemon and
-//!   mkkeywordhash from ref/sqlite, run on parse.y, and the parser tables,
-//!   rule names and keyword list converted by tools/parser/lemon2zig.zig
-//!   (was tools/gen-parser.sh).
 //! - opcodes: src/vdbe/opcodes.zig: mkopcodeh.tcl and mkopcodec.tcl over
 //!   parse.h and vdbe.c, converted by tools/vdbe/opcodes2zig.zig (was
 //!   tools/gen-opcodes.sh). Needs tclsh.
@@ -15,7 +11,7 @@
 //!   dies in a multi-database commit (gen/superjournal.zig; it takes its
 //!   own arguments, so it runs alone).
 //!
-//! The C helpers (lemon, mkkeywordhash, tools/parser/keywords.c) are built
+//! The C helper (lemon, for parse.h's token codes) is built
 //! with `zig cc`, the converters run with `zig run`, and the output is
 //! formatted as `zig fmt` does, in-process. $ZIG names the zig binary
 //! (default: zig on PATH).
@@ -32,7 +28,6 @@ pub const usage =
     \\  fixtures   pkg/storage/src/testdata/{btree,autovacuum}.db, src/testdata/sql.db with the sqlite3 on
     \\             PATH, or --fixtures-sqlite3 PATH (the committed ones are
     \\             from 3.44.4, whose version they carry in their header)
-    \\  parser     src/parse/grammar.zig from ref/sqlite (lemon, mkkeywordhash)
     \\  opcodes    src/vdbe/opcodes.zig from ref/sqlite (lemon, tclsh)
     \\
     \\The C helpers are built with $ZIG cc (default zig on PATH).
@@ -40,7 +35,7 @@ pub const usage =
     \\
 ++ superjournal.usage;
 
-const Name = enum { fixtures, parser, opcodes };
+const Name = enum { fixtures, opcodes };
 
 const Job = struct {
     name: Name,
@@ -112,7 +107,6 @@ fn runJob(jobs: []Job, i: usize) void {
     var g: Gen = .{ .ctx = j.ctx, .arena = arena_state.allocator(), .tmp = "" };
     const result = switch (j.name) {
         .fixtures => g.fixtures(),
-        .parser => g.parser(),
         .opcodes => g.opcodes(),
     };
     // The message outlives the job's arena.
@@ -195,23 +189,6 @@ const Gen = struct {
         const exe = try std.fs.path.join(g.arena, &.{ tmp, "lemon" });
         try g.cc(&.{ "-O2", "-o", exe, try std.fs.path.join(g.arena, &.{ ref, "tool", "lemon.c" }) });
         _ = try g.step(&.{ exe, "-S", "parse.y" }, .{ .cwd = tmp });
-    }
-
-    fn parser(g: *Gen) ![]const u8 {
-        const ref = try g.root("ref/sqlite");
-        const tmp = try g.makeTmp("parser");
-        const p = struct {
-            fn f(gen: *Gen, dir: []const u8, name: []const u8) ![]const u8 {
-                return std.fs.path.join(gen.arena, &.{ dir, name });
-            }
-        }.f;
-        try g.lemon(ref, tmp);
-        try g.cc(&.{ "-O2", "-o", try p(g, tmp, "mkkeywordhash"), try p(g, ref, "tool/mkkeywordhash.c") });
-        try g.write(try p(g, tmp, "keywordhash.h"), try g.step(&.{try p(g, tmp, "mkkeywordhash")}, .{}));
-        try g.cc(&.{ try std.fmt.allocPrint(g.arena, "-I{s}", .{tmp}), "-o", try p(g, tmp, "keywords"), try g.root("tools/parser/keywords.c") });
-        try g.write(try p(g, tmp, "keywords.txt"), try g.step(&.{try p(g, tmp, "keywords")}, .{}));
-        try g.convert("tools/parser/lemon2zig.zig", &.{ try p(g, tmp, "parse.c"), try p(g, tmp, "parse.h"), try p(g, tmp, "keywords.txt"), try g.version(ref) }, try g.root("src/parse/grammar.zig"));
-        return "wrote src/parse/grammar.zig";
     }
 
     fn opcodes(g: *Gen) ![]const u8 {

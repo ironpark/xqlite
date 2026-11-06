@@ -29,7 +29,7 @@ pub fn call(s: *Parser) Error!*Expr {
     const pos = name_tok.start;
     s.c.skip();
     try s.c.expectOp("(");
-    const n = name_tok.text;
+    const n = s.c.text(name_tok);
     if (try @import("json_sql.zig").call(s, n, pos)) |e| return e;
 
     if (eq(n, "CAST") or eq(n, "TRY_CAST") or eq(n, "PARSE") or eq(n, "TRY_PARSE")) {
@@ -46,8 +46,8 @@ pub fn call(s: *Parser) Error!*Expr {
         const e = try s.expr();
         var style: ?i64 = null;
         if (s.c.eatOp(",")) {
-            if (s.c.peek().kind != .integer) return s.c.fail(null, "xqlite: CONVERT needs a constant style", .{});
-            style = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+            if (!lexer.isDecimal(s.c.peek())) return s.c.fail(null, "xqlite: CONVERT needs a constant style", .{});
+            style = std.fmt.parseInt(i64, s.c.text(s.c.peek()), 10) catch return s.c.syntaxError();
             s.c.skip();
         }
         try s.c.expectOp(")");
@@ -115,7 +115,7 @@ pub fn call(s: *Parser) Error!*Expr {
     const over = try s.overClause();
     if (star or distinct or over != null) {
         // An aggregate or a window function.
-        var fname: []const u8 = name_tok.text;
+        var fname: []const u8 = s.c.text(name_tok);
         if (aggregates.get(fname)) |to| fname = to;
         if (over == null and eq(fname, "avg")) fname = "xq_tsql_avg";
         return s.funcNode(pos, .{ .name = .{ .text = fname, .pos = pos }, .args = args, .star = star, .distinct = distinct, .over = over });
@@ -141,8 +141,8 @@ fn argCount(s: *Parser, n: []const u8) Error {
 /// name.
 fn datePart(s: *Parser) Error![]const u8 {
     const t = s.c.peek();
-    if (t.kind != .ident and t.kind != .quoted_ident and t.kind != .string) return s.c.syntaxError();
-    const w = if (t.kind == .string) try lexer.stringValue(s.a, t) else try s.nameText(t);
+    if (t.kind != .word and t.kind != .quoted_ident and t.kind != .string) return s.c.syntaxError();
+    const w = if (t.kind == .string) try lexer.stringValue(s.a, s.c.sql, t) else try s.nameText(t);
     s.c.skip();
     return canonicalPart(w) orelse s.c.failState(null, .numbered("22023", 155), "'{s}' is not a recognized datepart option.", .{w});
 }
@@ -216,7 +216,7 @@ pub const TypeName = struct { t: types.Type, text: []const u8, written: []const 
 /// (char is char(30)).
 pub fn typeNameOf(s: *Parser, column: bool) Error!TypeName {
     const t = s.c.peek();
-    if (t.kind != .ident and t.kind != .quoted_ident) return s.c.syntaxError();
+    if (t.kind != .word and t.kind != .quoted_ident) return s.c.syntaxError();
     var tname = try s.nameText(t);
     s.c.skip();
     // dbo.type / sys.type
@@ -264,8 +264,8 @@ fn typeName(s: *Parser) Error!TypeName {
 }
 
 fn intArg(s: *Parser) Error!i64 {
-    if (s.c.peek().kind != .integer) return s.c.syntaxError();
-    const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+    if (!lexer.isDecimal(s.c.peek())) return s.c.syntaxError();
+    const v = std.fmt.parseInt(i64, s.c.text(s.c.peek()), 10) catch return s.c.syntaxError();
     s.c.skip();
     return v;
 }
@@ -295,7 +295,7 @@ pub fn castTo(s: *Parser, pos: u32, e: *Expr, ty: TypeName, try_: bool) Error!*E
 
 /// @@name: a session value or a constant.
 pub fn systemFunction(s: *Parser, t: Token, pos: u32) Error!*Expr {
-    const n = t.text[2..];
+    const n = s.c.text(t)[2..];
     if (eq(n, "ROWCOUNT")) return s.func(pos, "changes", &.{});
     if (eq(n, "IDENTITY")) return s.func(pos, "scope_identity", &.{});
     if (eq(n, "TRANCOUNT")) return s.func(pos, "xq_tsql_trancount", &.{});
@@ -310,7 +310,7 @@ pub fn systemFunction(s: *Parser, t: Token, pos: u32) Error!*Expr {
         .{ "SERVERNAME", "xqlite" }, .{ "SERVICENAME", "MSSQLSERVER" }, .{ "LANGUAGE", "us_english" },
     };
     for (strs) |x| if (eq(n, x[0])) return s.str(pos, x[1]);
-    return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{t.text});
+    return s.c.failState(null, .numbered("42P02", 137), "Must declare the scalar variable \"{s}\".", .{s.c.text(t)});
 }
 
 /// Functions with SQLite's semantics under another name.

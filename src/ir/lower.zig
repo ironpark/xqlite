@@ -1,6 +1,6 @@
 //! Lowering the syntax tree IR (tree.zig) into SQLite's parse tree with
 //! the builders of ir.zig: queries, DML, transaction control and DDL. The
-//! builders are called as SQLite's grammar (src/parse/parser.zig) calls
+//! builders are called as SQLite's parser (src/dialect/sqlite/parser.zig) calls
 //! them, so a tree without dialect-specific nodes gets SQLite's own plan
 //! and bytecode. DDL is rendered as SQLite text (render.zig) and lowered
 //! with ir.stmt.lowerSqliteText(), the dialect metadata recorded in the

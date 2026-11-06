@@ -33,6 +33,23 @@
 //! is closed (`Extent`, or a struct with those two fields and the text).
 
 const std = @import("std");
+const lexer = @import("lexer.zig");
+const token = @import("token.zig");
+const keywords = @import("keywords.zig");
+
+pub const Token = token.Token;
+pub const TokenOf = token.TokenOf;
+pub const Kind = token.Kind;
+pub const Sub = token.Sub;
+pub const Lexer = lexer.Lexer;
+pub const Options = lexer.Options;
+pub const Quote = lexer.Quote;
+pub const Prefix = lexer.Prefix;
+pub const Keywords = keywords.Keywords;
+pub const KeywordClass = keywords.Class;
+pub const KeywordEntry = keywords.Entry;
+pub const allKeywords = keywords.all;
+pub const value = @import("value.zig");
 
 // ============================================================ characters
 
@@ -121,6 +138,26 @@ pub const Spec = struct {
     ident: Set,
     comments: Comments = .{},
     numbers: Numbers = .{},
+
+    // What Lexer() reads besides (lexer.zig).
+
+    /// The quote characters, in the order they are tried.
+    quotes: []const lexer.Quote = &.{},
+    /// Letters before a quote that make a string of another form.
+    prefixes: []const lexer.Prefix = &.{},
+    /// Strings that follow a string after white space with a newline in
+    /// it are part of it (PostgreSQL).
+    string_continuation: bool = false,
+    /// A delimited identifier with no characters is `illegal` (empty).
+    empty_ident_illegal: bool = false,
+    /// $tag$...$tag$ (PostgreSQL).
+    dollar_quotes: bool = false,
+    params: lexer.Params = .{},
+    /// @x and @@x (SQL Server).
+    variables: bool = false,
+    ops: lexer.Ops = .{},
+    /// A `/` alone on its line ends a statement (Oracle's SQL*Plus).
+    slash_line: bool = false,
 };
 
 pub const Comments = struct {
@@ -130,6 +167,8 @@ pub const Comments = struct {
     hash: bool = false,
     /// `/* ... */`.
     block: Block = .flat,
+    /// What a block comment that is not closed is to Lexer().
+    unclosed: enum { comment, illegal } = .comment,
 
     pub const DashDash = enum {
         /// `--` starts a comment.
@@ -172,12 +211,19 @@ pub const Numbers = struct {
     /// `x` 16, `o` 8, `b` 2, in the cases given (`"xX"` for 0x1F and
     /// 0X1F).
     radix: []const u8 = "",
+    /// What follows a number (Lexer()).
+    tail: lexer.Tail = .none,
+    /// A radix prefix with no digits (Lexer()).
+    radix_empty: lexer.RadixEmpty = .token,
+    /// Letters after a decimal number (not before a word character) that
+    /// make it a float and are part of it (Oracle's 1.5f, 2d).
+    float_suffix: []const u8 = "",
 };
 
 /// SQLite's rules (tokenize.c), for code that reads SQLite text: the
 /// dialects' catalogs read what sqlite_schema keeps. SQLite's own
-/// tokenizer (src/parse/tokenize.zig) is a port of tokenize.c with its
-/// generated keyword hash and does not use these; a test in the engine
+/// lexer (src/dialect/sqlite/lexer.zig) is Lexer(spec) with its own
+/// hooks and keyword table and does not use these; a test in the engine
 /// (pgcatalog.zig) checks that the two agree on where tokens end.
 ///  - words: a letter, `_` or a byte from 0x80, then those, digits and
 ///    `$` (IdChar());
@@ -671,6 +717,12 @@ pub fn blankAfter(s: [:0]const u8, i: usize) bool {
 // ================================================================= tests
 
 const testing = std.testing;
+
+test {
+    _ = keywords;
+    _ = lexer;
+    _ = value;
+}
 
 /// Specs like the dialects' (src/dialect/*/lexer.zig), to test the rules
 /// they pick.

@@ -31,8 +31,7 @@ const sql_func = @import("../sql/func/func.zig");
 const util = @import("../sql/util.zig");
 const printf = @import("../sql/printf.zig");
 const types = @import("../sql/types.zig");
-const tokenize = @import("../parse/tokenize.zig");
-const TK = @import("../parse/grammar.zig").TK;
+const TK = @import("../sql/tk.zig").TK;
 const thunk_mod = @import("xqlite_base").thunk;
 
 pub const Vfs = @import("xqlite_vfs").vfs.Vfs;
@@ -144,7 +143,7 @@ pub fn onlyTrivia(gpa: std.mem.Allocator, sql: []const u8) error{OutOfMemory}!bo
     defer if (z.ptr != &buf) gpa.free(z);
     var i: usize = 0;
     while (i < z.len) {
-        const t = tokenize.getToken(z[i..].ptr);
+        const t = @import("../dialect/sqlite/lexer.zig").getToken(z, i);
         switch (t.tk) {
             TK.SPACE, TK.COMMENT, TK.SEMI => i += t.len,
             else => return false,

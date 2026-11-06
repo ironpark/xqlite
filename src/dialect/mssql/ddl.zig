@@ -33,6 +33,8 @@ const render = @import("../../ir/render.zig");
 const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const parser = @import("parser.zig");
+const lexer = @import("lexer.zig");
+const isDecimal = lexer.isDecimal;
 const functions = @import("functions.zig");
 const types = @import("types.zig");
 const session = @import("session.zig");
@@ -60,7 +62,7 @@ pub fn create(s: *Parser) Error!void {
     _ = s.c.eatKw("CLUSTERED") or s.c.eatKw("NONCLUSTERED");
     if (s.c.isKw("INDEX")) return createIndex(s, unique);
     if (s.c.isAnyKw(&.{ "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "TYPE", "DATABASE", "SYNONYM", "LOGIN", "USER", "ROLE" })) {
-        return s.c.fail(null, "xqlite: CREATE {s} is not supported in the T-SQL dialect", .{s.c.peek().text});
+        return s.c.fail(null, "xqlite: CREATE {s} is not supported in the T-SQL dialect", .{s.c.text(s.c.peek())});
     }
     return s.c.syntaxError();
 }
@@ -72,7 +74,7 @@ pub fn alter(s: *Parser) Error!void {
     if (s.c.isKw("TABLE")) return alterTable(s);
     if (s.c.isKw("SCHEMA")) return schemas.transfer(s);
     if (s.c.isKw("USER")) return schemas.alterUser(s);
-    return s.c.fail(null, "xqlite: ALTER {s} is not supported in the T-SQL dialect", .{s.c.peek().text});
+    return s.c.fail(null, "xqlite: ALTER {s} is not supported in the T-SQL dialect", .{s.c.text(s.c.peek())});
 }
 
 // ======================================================== CREATE TABLE
@@ -153,7 +155,7 @@ fn tableOptions(s: *Parser) Error!void {
         if (s.c.eatKw("ON") or s.c.eatKw("TEXTIMAGE_ON") or s.c.eatKw("FILESTREAM_ON")) {
             _ = try s.anyName();
             if (s.c.isOp("(")) try s.skipParens();
-        } else if (s.c.isKw("WITH") and s.c.peekAt(1).is("(")) {
+        } else if (s.c.isKw("WITH") and s.c.isOpTok(s.c.peekAt(1), "(")) {
             s.c.skip();
             try s.skipParens();
         } else break;
@@ -162,11 +164,11 @@ fn tableOptions(s: *Parser) Error!void {
 
 fn isConstraintStart(s: *Parser) bool {
     return s.c.isAnyKw(&.{ "CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN" }) or
-        (s.c.isKw("INDEX") and (s.c.peekAt(1).kind == .ident or s.c.peekAt(1).kind == .quoted_ident) and !s.c.peekAt(1).isKw("INT"));
+        (s.c.isKw("INDEX") and (s.c.peekAt(1).kind == .word or s.c.peekAt(1).kind == .quoted_ident) and !s.c.peekAt(1).isKw("INT"));
 }
 
 fn tableElement(s: *Parser, t: *Table) Error!void {
-    if (s.c.isKw("INDEX") and s.c.peekAt(1).kind != .op) return inlineIndex(s, t);
+    if (s.c.isKw("INDEX") and !lexer.isOpKind(s.c.peekAt(1))) return inlineIndex(s, t);
     if (!isConstraintStart(s)) return t.columns.append(s.a, try columnDef(s, t.name));
     var cname: ?[]const u8 = null;
     if (s.c.eatKw("CONSTRAINT")) cname = try s.nameText(try s.anyName());
@@ -206,7 +208,7 @@ fn keyColumns(s: *Parser) Error![]Name {
 /// WITH (...) / ON filegroup after a key: ignored.
 fn indexOptions(s: *Parser) Error!void {
     while (true) {
-        if (s.c.isKw("WITH") and s.c.peekAt(1).is("(")) {
+        if (s.c.isKw("WITH") and s.c.isOpTok(s.c.peekAt(1), "(")) {
             s.c.skip();
             try s.skipParens();
         } else if (s.c.isKw("ON") and !s.c.peekAt(1).isAnyKw(&.{ "DELETE", "UPDATE" })) {
@@ -386,8 +388,8 @@ fn columnConstraints(s: *Parser, table: []const u8, name: Name, ty: ?types.Type,
 fn signedInt(s: *Parser) Error!i64 {
     const neg = s.c.eatOp("-");
     if (!neg) _ = s.c.eatOp("+");
-    if (s.c.peek().kind != .integer) return s.c.syntaxError();
-    const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+    if (!isDecimal(s.c.peek())) return s.c.syntaxError();
+    const v = std.fmt.parseInt(i64, s.c.text(s.c.peek()), 10) catch return s.c.syntaxError();
     s.c.skip();
     return if (neg) -v else v;
 }
@@ -515,7 +517,7 @@ fn createSequence(s: *Parser) Error!void {
         } else if (s.c.eatKw("CYCLE")) {
             opts.cycle = true;
         } else if (s.c.eatKw("CACHE")) {
-            if (s.c.peek().kind == .integer) s.c.skip();
+            if (isDecimal(s.c.peek())) s.c.skip();
         } else if (s.c.eatKw("NO")) {
             if (!(s.c.eatKw("MINVALUE") or s.c.eatKw("MAXVALUE") or s.c.eatKw("CYCLE") or s.c.eatKw("CACHE"))) return s.c.syntaxError();
         } else return s.c.syntaxError();
@@ -535,7 +537,7 @@ pub fn drop(s: *Parser) Error!void {
     try s.c.expectKw("DROP");
     if (s.c.isKw("SCHEMA")) return schemas.drop(s);
     const kind: tree.ObjectKind = if (s.c.eatKw("TABLE")) .table else if (s.c.eatKw("VIEW")) .view else if (s.c.eatKw("INDEX")) .index else if (s.c.eatKw("SEQUENCE")) .sequence else {
-        if (s.c.isAnyKw(&.{ "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "TYPE", "DATABASE" })) return s.c.fail(null, "xqlite: DROP {s} is not supported in the T-SQL dialect", .{s.c.peek().text});
+        if (s.c.isAnyKw(&.{ "PROCEDURE", "PROC", "FUNCTION", "TRIGGER", "TYPE", "DATABASE" })) return s.c.fail(null, "xqlite: DROP {s} is not supported in the T-SQL dialect", .{s.c.text(s.c.peek())});
         return s.c.syntaxError();
     };
     const if_exists = s.ifExists();
@@ -604,14 +606,15 @@ pub fn drop(s: *Parser) Error!void {
 /// A name as written ([db].[s].t ...) as SQL Server's messages show it:
 /// its parts without their quotes, joined by dots.
 fn writtenName(s: *Parser, text: []const u8) Error![]const u8 {
-    var lx: @import("lexer.zig").Lexer = .init(try s.a.dupeSentinel(u8, text, 0));
+    const z = try s.a.dupeSentinel(u8, text, 0);
+    var lx: lexer.Lexer = .init(z, 0, .{});
     var out: std.ArrayList(u8) = .empty;
     while (true) {
         const t = lx.next();
         switch (t.kind) {
             .eof => break,
-            .ident, .quoted_ident => try out.appendSlice(s.a, try s.nameText(t)),
-            else => try out.appendSlice(s.a, t.text),
+            .word, .quoted_ident => try out.appendSlice(s.a, try lexer.identValue(s.a, z, t)),
+            else => try out.appendSlice(s.a, t.text(z)),
         }
     }
     return out.items;
@@ -671,7 +674,7 @@ fn alterTable(s: *Parser) Error!void {
         return;
     }
     if (s.c.eatKw("DROP")) {
-        if (!s.c.eatKw("COLUMN")) return s.c.fail(null, "xqlite: ALTER TABLE ... DROP {s} is not supported", .{s.c.peek().text});
+        if (!s.c.eatKw("COLUMN")) return s.c.fail(null, "xqlite: ALTER TABLE ... DROP {s} is not supported", .{s.c.text(s.c.peek())});
         const if_exists = s.ifExists();
         const n = try s.nameOf(try s.anyName());
         if (s.c.isOp(",")) return s.c.fail(null, "xqlite: ALTER TABLE ... DROP COLUMN of several columns is not supported (drop them one at a time)", .{});
@@ -681,5 +684,5 @@ fn alterTable(s: *Parser) Error!void {
         }
         return s.lowerStmt(.{ .alter_table = try s.new(tree.AlterTable, .{ .name = q, .action = .{ .drop_column = .{ .name = n } } }) });
     }
-    return s.c.fail(null, "xqlite: ALTER TABLE ... {s} is not supported", .{s.c.peek().text});
+    return s.c.fail(null, "xqlite: ALTER TABLE ... {s} is not supported", .{s.c.text(s.c.peek())});
 }

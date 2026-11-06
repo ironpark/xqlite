@@ -15,109 +15,316 @@
 //!  - operators: any run of + - * / < > = ~ ! @ # % ^ & | ` ?, cut
 //!    before -- and /*, and without a trailing + or - unless the run has
 //!    one of ~ ! @ # % ^ & | ` ? (so that a<-1 is a < -1); `::` is the
-//!    cast operator.
+//!    cast operator, and `:`, `[`, `]` operators of their own.
 //!
-//! Tokens carry their byte range in the statement text and their value:
-//! the folded name of an identifier, the decoded text of a string or
-//! quoted identifier (allocated in the arena when it differs from the
-//! source).
+//! The tokens are sql/lexer's (`Lexer`, made from the rules of `lex`):
+//! kinds and byte ranges, no values. statement() lexes a statement and
+//! decodes, once, the values that are not the text as written (a name
+//! folded, a string with escapes or doubled quotes, a number of another
+//! radix): `Values`, which value() reads. The escapes of strings, and
+//! their errors, are the Decoder's.
 
 const std = @import("std");
 const sqllex = @import("sql/lexer");
 const ErrorFields = @import("../../sql/util.zig").ErrorFields;
-const decimal = @import("../decimal.zig");
+const ErrorState = @import("../../sql/sqlite_int.zig").ErrorState;
 
-/// PostgreSQL's rules for the scanners (scan.l): identifiers of letters,
-/// `_` and any non-ASCII byte, then digits and `$` too; nested block
-/// comments; 1_000, and 1..2 as 1 and `..`.
-pub const spec: sqllex.Spec = .{
-    .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
-    .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
-    .comments = .{ .block = .nested },
-    .numbers = .{ .underscores = .between, .range_dots = true, .radix = "xXoObB" },
-};
-const scan = sqllex.Scanner(spec);
+const value_ = sqllex.value;
 
-pub const Kind = enum {
-    eof,
-    /// An unquoted identifier or keyword; `text` is folded to lower case.
-    ident,
-    /// A "quoted identifier"; `text` is the name.
-    qident,
-    /// A string constant; `text` is its value.
-    string,
-    integer,
-    float,
-    /// $n; `text` is the digits.
-    param,
-    /// An operator; `text` is its spelling.
-    op,
-    lparen,
-    rparen,
-    lbracket,
-    rbracket,
-    comma,
-    semi,
-    dot,
-    colon,
-    /// `::`
-    cast,
-};
+const op_chars: sqllex.Set = .of(.{ .chars = "+-*/<>=~!@#%^&|`?" });
 
-pub const Token = struct {
-    kind: Kind,
-    start: u32,
-    end: u32,
-    text: []const u8,
+/// PostgreSQL's lexical rules for sqllex.Lexer() (scan.l): the lexer
+/// finds the tokens; their values and the errors of their escapes are
+/// decoded afterwards (statement(), Decoder).
+pub const lex = struct {
+    pub const spec: sqllex.Spec = .{
+        .ident_start = .of(.{ .letters = true, .high = true, .chars = "_" }),
+        .ident = .of(.{ .letters = true, .digits = true, .high = true, .chars = "_$" }),
+        .comments = .{ .block = .nested, .unclosed = .illegal },
+        .numbers = .{ .underscores = .between, .range_dots = true, .radix = "xXoObB", .tail = .junk, .radix_empty = .illegal },
+        .quotes = &.{
+            .{ .open = '\'', .close = '\'', .kind = .string, .escapes = true },
+            .{ .open = '"', .close = '"', .kind = .quoted_ident },
+        },
+        .prefixes = &.{
+            .{ .letters = "e", .sub = .escape, .escapes = .always },
+            .{ .letters = "n", .sub = .national },
+        },
+        .string_continuation = true,
+        .empty_ident_illegal = true,
+        .dollar_quotes = true,
+        .params = .{ .dollar_number = true },
+        .ops = .{ .list = &.{ "::", ":=" }, .run = op_chars, .singles = .of(.{ .chars = ":[]" }) },
+    };
 
-    pub fn is(t: Token, kind: Kind) bool {
-        return t.kind == kind;
-    }
+    /// The words the parser reads as keywords. `reserved`: PostgreSQL's
+    /// reserved keywords and its "type_func_name" ones, which can be
+    /// neither a column name nor a bare alias (Parser.colId()); the
+    /// others are any name.
+    pub const keywords = sqllex.Keywords(sqllex.allKeywords(.reserved, &reserved_words) ++ sqllex.allKeywords(.unreserved, &other_words));
 
-    /// Whether this is the unquoted keyword `kw` (any case). Identifiers
-    /// fold to lower case, so `kw` is folded once, at compile time.
-    pub fn isKw(t: Token, comptime kw: []const u8) bool {
-        return t.kind == .ident and std.mem.eql(u8, t.text, comptime sqllex.foldComptime(.lower, kw));
-    }
-
-    pub fn isAnyKw(t: Token, comptime kws: []const []const u8) bool {
-        inline for (kws) |kw| if (t.isKw(kw)) return true;
-        return false;
-    }
-
-    pub fn isOp(t: Token, op: []const u8) bool {
-        return t.kind == .op and std.mem.eql(u8, t.text, op);
+    /// U&'...' and U&"..." and their UESCAPE 'c' clause.
+    pub fn scan(l: anytype, start: usize) ?@TypeOf(l.*).Token {
+        const s = l.sql;
+        const c = s[start];
+        if (!((c == 'u' or c == 'U') and s[start + 1] == '&' and (s[start + 2] == '\'' or s[start + 2] == '"'))) return null;
+        const str = s[start + 2] == '\'';
+        if (str and l.opts.backslash_escapes) return l.take(.illegal, .unicode_off, start, start + 3);
+        var t = if (str)
+            l.quotedFrom(start, start + 2, lex.spec.quotes[0], false, .unicode)
+        else
+            l.quotedFrom(start, start + 2, lex.spec.quotes[1], false, .unicode);
+        if (t.kind == .illegal) return t;
+        const after = l.pos;
+        if (l.skip()) |bad| return bad;
+        const w = l.pos;
+        if (w + 7 <= s.len and std.ascii.eqlIgnoreCase(s[w .. w + 7], "uescape") and !@TypeOf(l.*).scan.isIdent(s[w + 7])) {
+            l.pos = w + 7;
+            const e = l.next();
+            if (e.kind == .illegal) return e;
+            if (e.kind != .string or s[e.start] != '\'') return l.token(.illegal, .uescape_follow, e.start, e.end);
+            t.end = e.end;
+        } else l.pos = after;
+        return t;
     }
 };
+
+const reserved_words = [_][]const u8{
+    "all",           "analyse",      "analyze",      "and",               "any",          "array",
+    "as",            "asc",          "asymmetric",   "both",              "case",         "cast",
+    "check",         "collate",      "column",       "constraint",        "create",       "current_catalog",
+    "current_date",  "current_role", "current_time", "current_timestamp", "current_user", "default",
+    "deferrable",    "desc",         "distinct",     "do",                "else",         "end",
+    "except",        "false",        "fetch",        "for",               "foreign",      "from",
+    "grant",         "group",        "having",       "in",                "initially",    "intersect",
+    "into",          "lateral",      "leading",      "limit",             "localtime",    "localtimestamp",
+    "not",           "null",         "offset",       "on",                "only",         "or",
+    "order",         "placing",      "primary",      "references",        "returning",    "select",
+    "session_user",  "some",         "symmetric",    "system_user",       "table",        "then",
+    "to",            "trailing",     "true",         "union",             "unique",       "user",
+    "using",         "variadic",     "when",         "where",             "window",       "with",
+    // type_func_name_keyword
+    "authorization", "binary",       "collation",    "concurrently",      "cross",        "current_schema",
+    "freeze",        "full",         "ilike",        "inner",             "is",           "isnull",
+    "join",          "left",         "like",         "natural",           "notnull",      "outer",
+    "overlaps",      "right",        "similar",      "tablesample",       "verbose",
+};
+
+/// The other words the parser compares as keywords.
+const other_words = [_][]const u8{
+    "absent",    "action",       "add",       "alter",           "always",       "at",        "between",   "by",         "cache",     "cascade",
+    "chain",     "char",         "character", "characteristics", "comment",      "commit",    "committed", "conflict",   "continue",  "cube",
+    "current",   "cycle",        "data",      "database",        "deferred",     "delete",    "domain",    "drop",       "encoding",  "escape",
+    "exclude",   "exists",       "extension", "filter",          "first",        "following", "format",    "function",   "generated", "global",
+    "grouping",  "groups",       "identity",  "if",              "immediate",    "include",   "increment", "index",      "inherit",   "inherits",
+    "insert",    "interval",     "isolation", "json",            "key",          "keys",      "last",      "level",      "local",     "locked",
+    "match",     "materialized", "maxvalue",  "minvalue",        "next",         "no",        "none",      "nothing",    "nowait",    "nulls",
+    "object",    "of",           "oids",      "operator",        "ordinality",   "others",    "over",      "overriding", "owned",     "partial",
+    "partition", "pg_temp",      "preceding", "precision",       "preserve",     "procedure", "public",    "range",      "read",      "recursive",
+    "rename",    "repeatable",   "replace",   "reset",           "restart",      "restrict",  "role",      "rollup",     "row",       "rows",
+    "savepoint", "scalar",       "schema",    "sequence",        "serializable", "session",   "set",       "share",      "show",      "simple",
+    "skip",      "start",        "stored",    "system",          "tablespace",   "temp",      "temporary", "ties",       "time",      "transaction",
+    "trigger",   "type",         "unbounded", "uncommitted",     "unknown",      "unlogged",  "update",    "value",      "values",    "varying",
+    "view",      "within",       "without",   "work",            "write",        "zone",
+};
+
+pub const Lexer = sqllex.Lexer(lex);
+pub const Token = Lexer.Token;
+pub const keywords = lex.keywords;
+
+/// Options for Lexer of a session's `standard_strings`.
+pub fn lexOptions(standard_strings: bool) sqllex.Options {
+    return .{ .backslash_escapes = !standard_strings };
+}
 
 pub const Error = error{ LexFailed, OutOfMemory };
 
-pub const Lexer = struct {
-    src: [:0]const u8,
+/// A lexical error: its message (and DETAIL, HINT), where, and its
+/// SQLSTATE if it is not a syntax error.
+pub const LexFailure = struct {
+    fields: ErrorFields = .{ .message = "" },
     pos: usize,
+    state: ?ErrorState = null,
+};
+
+// ============================================================ statements
+
+/// The values of a statement's tokens that are not their text as written
+/// (defaultValue()), by the token's start.
+pub const Values = std.AutoHashMapUnmanaged(u32, []const u8);
+
+/// The tokens of a statement, up to its semicolon.
+pub const Statement = struct {
+    /// Its tokens, the last eof (at the semicolon, if one ends it).
+    toks: []Token,
+    /// The offset after the statement (and its semicolon).
+    end: usize,
+    values: Values,
+};
+
+/// Lex the statement that starts at `pos` (leading semicolons are
+/// skipped), its strings as `standard_strings` reads them, and decode
+/// the values of its tokens. The first lexical error (in the order of
+/// the text) fails with error.LexFailed, into `failure`.
+pub fn statement(a: std.mem.Allocator, src: [:0]const u8, pos: usize, standard_strings: bool, failure: *LexFailure) Error!Statement {
+    const opts = lexOptions(standard_strings);
+    var l = Lexer.init(src, pos, opts);
+    var toks: std.ArrayList(Token) = .empty;
+    var values: Values = .empty;
+    var end: usize = src.len;
+    while (true) {
+        const t = l.next();
+        if (hasEscapes(src, t, opts)) {
+            var d: Decoder = .{ .src = src, .arena = a, .standard_strings = standard_strings };
+            const v = d.decode(t.start) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                error.LexFailed => {
+                    failure.* = .{ .fields = d.err, .pos = d.err_pos, .state = d.err_state };
+                    return error.LexFailed;
+                },
+            };
+            if (t.kind != .illegal) try values.put(a, t.start, v);
+        } else if (try plainValue(a, src, t)) |v| try values.put(a, t.start, v);
+        if (t.kind == .illegal) {
+            failure.* = try illegalError(a, src, t);
+            return error.LexFailed;
+        }
+        if (t.kind == .semi) {
+            if (toks.items.len == 0) continue;
+            end = t.end;
+            try toks.append(a, .{ .kind = .eof, .start = t.start, .end = t.start });
+            break;
+        }
+        try toks.append(a, t);
+        if (t.kind == .eof) break;
+    }
+    return .{ .toks = toks.items, .end = end, .values = values };
+}
+
+/// The value of token `t` of `sql`: decoded (`values`), else its text.
+pub fn value(sql: []const u8, values: *const Values, t: Token) []const u8 {
+    return values.get(t.start) orelse defaultValue(sql, t);
+}
+
+/// The value of `t` as a slice of its text: a word, number or operator
+/// itself, a quoted one between its quotes, a parameter's digits.
+fn defaultValue(sql: []const u8, t: Token) []const u8 {
+    const raw = t.text(sql);
+    return switch (t.kind) {
+        .quoted_ident => raw[1 .. raw.len - 1],
+        .string => if (t.sub == .dollar) value_.dollarBody(sql, t) else sql[value_.openQuote(sql, t) + 1 .. t.end - 1],
+        .param => raw[1..],
+        else => raw,
+    };
+}
+
+/// The value of `t` (one without escapes) if it is not defaultValue().
+fn plainValue(a: std.mem.Allocator, sql: [:0]const u8, t: Token) error{OutOfMemory}!?[]const u8 {
+    const v = switch (t.kind) {
+        .word, .quoted_ident => try value_.name(a, sql, t, .lower),
+        .string => if (t.sub == .dollar) return null else try value_.plainString(a, sql, t),
+        .integer, .float => try value_.decimal(a, sql, t),
+        else => return null,
+    };
+    const d = defaultValue(sql, t);
+    return if (v.ptr == d.ptr and v.len == d.len) null else v;
+}
+
+/// A lexical error: the error of an `illegal` token `t` of `sql`.
+pub fn illegalError(a: std.mem.Allocator, sql: [:0]const u8, t: Token) error{OutOfMemory}!LexFailure {
+    const s = sql;
+    const start: usize = t.start;
+    const raw = t.text(sql);
+    const near = sqllex.restOfLine(s, start);
+    var f: LexFailure = .{ .pos = start };
+    // U&"...: the identifier's errors are at its quote.
+    const u_ident = raw.len >= 3 and (raw[0] == 'u' or raw[0] == 'U') and raw[1] == '&' and raw[2] == '"';
+    f.fields.message = switch (t.sub) {
+        .unterminated => switch (raw[0]) {
+            '/' => try std.fmt.allocPrint(a, "unterminated /* comment at or near \"{s}\"", .{near}),
+            '"' => try std.fmt.allocPrint(a, "unterminated quoted identifier at or near \"{s}\"", .{near}),
+            '$' => try std.fmt.allocPrint(a, "unterminated dollar-quoted string at or near \"{s}\"", .{near}),
+            else => if (u_ident) blk: {
+                f.pos = start + 2;
+                break :blk try std.fmt.allocPrint(a, "unterminated quoted identifier at or near \"{s}\"", .{sqllex.restOfLine(s, start + 2)});
+            } else try std.fmt.allocPrint(a, "unterminated quoted string at or near \"{s}\"", .{near}),
+        },
+        .empty => blk: {
+            if (u_ident) f.pos = start + 2;
+            break :blk "zero-length delimited identifier at or near \"\"\"\"";
+        },
+        .trailing_junk => if (raw[0] == '$')
+            try std.fmt.allocPrint(a, "trailing junk after parameter at or near \"{s}\"", .{raw})
+        else
+            try std.fmt.allocPrint(a, "trailing junk after numeric literal at or near \"{s}\"", .{raw}),
+        .bad_radix => try std.fmt.allocPrint(a, "invalid {s} integer at or near \"{s}\"", .{ switch (raw[1]) {
+            'x', 'X' => "hexadecimal",
+            'o', 'O' => "octal",
+            else => "binary",
+        }, raw }),
+        .unicode_off => blk: {
+            f.fields.detail = "String constants with Unicode escapes cannot be used when \"standard_conforming_strings\" is off.";
+            f.state = .of("0A000");
+            break :blk "unsafe use of string constant with Unicode escapes";
+        },
+        .uescape_follow => try std.fmt.allocPrint(a, "UESCAPE must be followed by a simple string literal at or near \"{s}\"", .{raw}),
+        else => try std.fmt.allocPrint(a, "syntax error at or near \"{s}\"", .{s[start .. start + sqllex.charLen(s, start)]}),
+    };
+    return f;
+}
+
+/// Whether the value of `t` is decoded with errors of its own: escapes.
+/// An unterminated string with escapes too: an escape's error comes
+/// before the end is seen.
+pub fn hasEscapes(sql: []const u8, t: Token, opts: sqllex.Options) bool {
+    return switch (t.kind) {
+        .illegal => t.sub == .unterminated and switch (sql[t.start]) {
+            '\'' => opts.backslash_escapes,
+            'e', 'E' => sql[t.start + 1] == '\'',
+            'n', 'N' => sql[t.start + 1] == '\'' and opts.backslash_escapes,
+            else => false,
+        },
+        .string => switch (t.sub) {
+            .escape, .unicode => true,
+            .none, .national => opts.backslash_escapes,
+            else => false,
+        },
+        .quoted_ident => t.sub == .unicode,
+        else => false,
+    };
+}
+
+// =============================================================== decoder
+
+/// The decoder of the strings and identifiers with escapes (hasEscapes()):
+/// E'...', U&'...' and U&"..." [UESCAPE 'c'], and '...' and N'...' with
+/// standard_conforming_strings off. It reads the token again from its
+/// start, as PostgreSQL's scanner does, and fails with the error of its
+/// first bad escape.
+pub const Decoder = struct {
+    src: [:0]const u8,
     arena: std.mem.Allocator,
+    /// standard_conforming_strings: off, '...' strings take backslash
+    /// escapes (as E'...').
+    standard_strings: bool = true,
     /// The last error (error.LexFailed): its message and HINT, and
     /// where.
     err: ErrorFields = .{ .message = "" },
     err_pos: usize = 0,
     /// The SQLSTATE of the last error if it is not a syntax error.
-    err_state: ?@import("../../sql/sqlite_int.zig").ErrorState = null,
-    /// standard_conforming_strings: off, '...' strings take backslash
-    /// escapes (as E'...'), and U&'...' is an error.
-    standard_strings: bool = true,
+    err_state: ?ErrorState = null,
 
-    pub fn init(arena: std.mem.Allocator, src: [:0]const u8, pos: usize) Lexer {
-        return .{ .src = src, .pos = pos, .arena = arena };
-    }
+    /// A decoded string: its value and the index after it.
+    const Decoded = struct { value: []const u8, end: usize };
 
-    fn fail(l: *Lexer, at: usize, comptime fmt: []const u8, args: anytype) Error {
+    fn fail(l: *Decoder, at: usize, comptime fmt: []const u8, args: anytype) Error {
         l.err_pos = at;
         l.err = .{ .message = try std.fmt.allocPrint(l.arena, fmt, args) };
         return error.LexFailed;
     }
 
     /// fail() with PostgreSQL's HINT.
-    fn failHint(l: *Lexer, at: usize, hint: []const u8, comptime fmt: []const u8, args: anytype) Error {
+    fn failHint(l: *Decoder, at: usize, hint: []const u8, comptime fmt: []const u8, args: anytype) Error {
         const err = l.fail(at, fmt, args);
         l.err.hint = hint;
         return err;
@@ -128,141 +335,24 @@ pub const Lexer = struct {
     const u_escape_hint = "Unicode escapes must be \\XXXX or \\+XXXXXX.";
 
     /// The text from `at` to the end of the line, for "at or near".
-    fn near(l: *Lexer, at: usize) []const u8 {
+    fn near(l: *Decoder, at: usize) []const u8 {
         return sqllex.restOfLine(l.src, at);
     }
 
-    /// Skip spaces and comments. Returns an error for an unterminated
-    /// block comment.
-    pub fn skipSpace(l: *Lexer) Error!void {
-        const t = scan.skip(l.src, l.pos);
-        if (t.open_comment) |at| return l.fail(at, "unterminated /* comment at or near \"{s}\"", .{l.near(at)});
-        l.pos = t.end;
-    }
-
-    pub fn next(l: *Lexer) Error!Token {
-        try l.skipSpace();
+    /// The value of the token with escapes that starts at `start`.
+    pub fn decode(l: *Decoder, start: usize) Error![]const u8 {
         const s = l.src;
-        const start = l.pos;
         const c = s[start];
-        if (c == 0) return l.tok(.eof, start, start, "");
-        switch (c) {
-            '(' => return l.single(.lparen),
-            ')' => return l.single(.rparen),
-            '[' => return l.single(.lbracket),
-            ']' => return l.single(.rbracket),
-            ',' => return l.single(.comma),
-            ';' => return l.single(.semi),
-            ':' => {
-                if (s[start + 1] == ':') {
-                    l.pos += 2;
-                    return l.tok(.cast, start, l.pos, "::");
-                }
-                if (s[start + 1] == '=') {
-                    l.pos += 2;
-                    return l.tok(.op, start, l.pos, ":=");
-                }
-                return l.single(.colon);
-            },
-            '.' => {
-                if (scan.isDigit(s[start + 1])) return l.number();
-                return l.single(.dot);
-            },
-            '\'' => return l.string(start, start, !l.standard_strings),
-            '"' => return l.quotedIdent(),
-            '$' => {
-                if (scan.isDigit(s[start + 1])) {
-                    const e = sqllex.digits.span(s, start + 1);
-                    if (scan.isIdent(s[e])) return l.fail(start, "trailing junk after parameter at or near \"{s}\"", .{s[start .. e + 1]});
-                    l.pos = e;
-                    return l.tok(.param, start, e, s[start + 1 .. e]);
-                }
-                if (scan.dollarTag(s, start)) |tag_end| return l.dollarString(start, tag_end);
-                return l.fail(start, "syntax error at or near \"$\"", .{});
-            },
-            '0'...'9' => return l.number(),
-            else => {},
-        }
-        if ((c == 'u' or c == 'U') and s[start + 1] == '&' and (s[start + 2] == '\'' or s[start + 2] == '"')) {
-            if (s[start + 2] == '\'' and !l.standard_strings) {
-                const err = l.fail(start, "unsafe use of string constant with Unicode escapes", .{});
-                l.err.detail = "String constants with Unicode escapes cannot be used when \"standard_conforming_strings\" is off.";
-                l.err_state = .of("0A000");
-                return err;
-            }
-            return l.unicodeLiteral(start);
-        }
-        if (scan.isIdentStart(c)) {
-            // E'...', N'...' (one letter right before a quote).
-            if (s[start + 1] == '\'') {
-                if (c == 'e' or c == 'E') return l.string(start, start + 1, true);
-                if (c == 'n' or c == 'N') return l.string(start, start + 1, !l.standard_strings);
-            }
-            const w = try scan.foldedWord(l.arena, s, start, .lower);
-            l.pos = w.end;
-            return l.tok(.ident, start, w.end, w.text);
-        }
-        if (op_chars.has(c)) return l.operator();
-        return l.fail(start, "syntax error at or near \"{s}\"", .{s[start .. start + sqllex.charLen(s, start)]});
-    }
-
-    fn tok(l: *Lexer, kind: Kind, start: usize, end: usize, text: []const u8) Token {
-        _ = l;
-        return .{ .kind = kind, .start = @intCast(start), .end = @intCast(end), .text = text };
-    }
-
-    fn single(l: *Lexer, kind: Kind) Token {
-        const start = l.pos;
-        l.pos += 1;
-        return l.tok(kind, start, l.pos, l.src[start..l.pos]);
-    }
-
-    fn number(l: *Lexer) Error!Token {
-        const s = l.src;
-        const start = l.pos;
-        if (scan.radixPrefix(s, start)) |base| {
-            // PostgreSQL's scanner: 0x(_?hexdigit)+, longest match first;
-            // "0x" or "0x_" alone is hexfail, a digit or letter after the
-            // number (0x1g, 0b102: "0" and an identifier) is junk.
-            const r = sqllex.radixDigits(s, start + 2, base, .between);
-            var e = r.end;
-            const j = scan.word(s, start + 1);
-            if (j > e and !(r.count == 0 and j == e + 1 and s[e] == '_')) {
-                return l.fail(start, "trailing junk after numeric literal at or near \"{s}\"", .{s[start..j]});
-            }
-            if (r.count == 0) {
-                if (s[e] == '_') e += 1;
-                l.pos = e;
-                return l.fail(start, "invalid {s} integer at or near \"{s}\"", .{ switch (base) {
-                    16 => "hexadecimal",
-                    8 => "octal",
-                    else => "binary",
-                }, s[start..e] });
-            }
-            l.pos = e;
-            // Its decimal digits: a number beyond a bigint is a numeric,
-            // as a decimal one is.
-            return l.tok(.integer, start, e, try toDecimal(l.arena, s[start + 2 .. e], base));
-        }
-        const n = scan.number(s, start);
-        const e = n.end;
-        if (scan.isIdentStart(s[e])) {
-            return l.fail(start, "trailing junk after numeric literal at or near \"{s}\"", .{s[start..scan.word(s, e)]});
-        }
-        l.pos = e;
-        var text: []const u8 = s[start..e];
-        if (n.underscores) {
-            var out: std.ArrayList(u8) = .empty;
-            for (text) |ch| if (ch != '_') try out.append(l.arena, ch);
-            text = out.items;
-        }
-        if (text[0] == '.') text = try std.mem.concat(l.arena, u8, &.{ "0", text });
-        return l.tok(if (n.float) .float else .integer, start, e, text);
+        if (c == '\'') return (try l.string(start, start, !l.standard_strings)).value;
+        if ((c == 'u' or c == 'U') and s[start + 1] == '&') return l.unicodeLiteral(start);
+        if (c == 'e' or c == 'E') return (try l.string(start, start + 1, true)).value;
+        std.debug.assert((c == 'n' or c == 'N') and s[start + 1] == '\'');
+        return (try l.string(start, start + 1, !l.standard_strings)).value;
     }
 
     /// A string constant whose opening quote is at `quote` (the token
     /// starts at `start`, before an E or N prefix).
-    fn string(l: *Lexer, start: usize, quote: usize, escapes: bool) Error!Token {
+    fn string(l: *Decoder, start: usize, quote: usize, escapes: bool) Error!Decoded {
         const s = l.src;
         var out: std.ArrayList(u8) = .empty;
         var i = quote + 1;
@@ -288,7 +378,7 @@ pub const Lexer = struct {
                 // 'b' is 'ab': the next string after whitespace with a newline.
                 var j = i;
                 var newline = false;
-                while (scan.isSpace(s[j])) : (j += 1) {
+                while (Lexer.scan.isSpace(s[j])) : (j += 1) {
                     if (s[j] == '\n' or s[j] == '\r') newline = true;
                 }
                 if (newline and s[j] == '\'') {
@@ -307,14 +397,12 @@ pub const Lexer = struct {
             i = try l.escape(start, i, &out);
             seg_start = i;
         }
-        l.pos = i;
-        const value = if (copied) out.items else s[quote + 1 .. i - 1];
-        return l.tok(.string, start, i, value);
+        return .{ .value = if (copied) out.items else s[quote + 1 .. i - 1], .end = i };
     }
 
     /// One backslash escape of an E'' string at `i`; returns the index
     /// after it.
-    fn escape(l: *Lexer, start: usize, i: usize, out: *std.ArrayList(u8)) Error!usize {
+    fn escape(l: *Decoder, start: usize, i: usize, out: *std.ArrayList(u8)) Error!usize {
         const s = l.src;
         const c = s[i + 1];
         switch (c) {
@@ -371,31 +459,26 @@ pub const Lexer = struct {
     /// U&'...' and U&"..." with Unicode escapes (\XXXX, \+XXXXXX, \\),
     /// the escape character another after UESCAPE 'c' (PostgreSQL's
     /// str_udeescape()). Errors point at the escape.
-    fn unicodeLiteral(l: *Lexer, start: usize) Error!Token {
+    fn unicodeLiteral(l: *Decoder, start: usize) Error![]const u8 {
         const s = l.src;
-        var t: Token = undefined;
-        if (s[start + 2] == '\'') {
-            t = try l.string(start, start + 2, false);
-        } else {
-            l.pos = start + 2;
-            t = try l.quotedIdent();
-            t.start = @intCast(start);
-        }
-        // UESCAPE 'c'.
+        const ident = s[start + 2] == '"';
+        const lit = if (ident) try l.quotedIdent(start + 2) else try l.string(start, start + 2, false);
+        // UESCAPE 'c' (the lexer read the clause: it is a string).
         var esc: u8 = '\\';
-        const after = l.pos;
-        try l.skipSpace();
-        const w = l.pos;
-        if (w + 7 <= s.len and std.ascii.eqlIgnoreCase(s[w .. w + 7], "uescape") and !scan.isIdent(s[w + 7])) {
-            l.pos = w + 7;
-            const e = try l.next();
+        var nl = Lexer.init(s, lit.end, lexOptions(l.standard_strings));
+        _ = nl.skip();
+        const w = nl.pos;
+        if (w + 7 <= s.len and std.ascii.eqlIgnoreCase(s[w .. w + 7], "uescape") and !Lexer.scan.isIdent(s[w + 7])) {
+            nl.pos = w + 7;
+            const e = nl.next();
             const raw = s[e.start..e.end];
             if (e.kind != .string or raw[0] != '\'') return l.fail(e.start, "UESCAPE must be followed by a simple string literal at or near \"{s}\"", .{raw});
-            if (e.text.len != 1 or std.ascii.isHex(e.text[0]) or std.mem.indexOfScalar(u8, "+'\" \t\n\r\x0b\x0c", e.text[0]) != null)
+            const text = (try l.string(e.start, e.start, !l.standard_strings)).value;
+            if (text.len != 1 or std.ascii.isHex(text[0]) or std.mem.indexOfScalar(u8, "+'\" \t\n\r\x0b\x0c", text[0]) != null)
                 return l.fail(e.start, "invalid Unicode escape character at or near \"{s}\"", .{raw});
-            esc = e.text[0];
-        } else l.pos = after;
-        const in = t.text;
+            esc = text[0];
+        }
+        const in = lit.value;
         var out: std.ArrayList(u8) = .empty;
         var pair_first: u32 = 0;
         var i: usize = 0;
@@ -435,50 +518,16 @@ pub const Lexer = struct {
             try out.appendSlice(l.arena, buf[0..len]);
         }
         if (pair_first != 0) return l.fail(base + i, "invalid Unicode surrogate pair", .{});
-        if (t.kind == .qident and out.items.len == 0) return l.fail(start, "zero-length delimited identifier at or near \"\"\"\"", .{});
-        t.text = out.items;
-        t.end = @intCast(@max(t.end, l.pos));
-        return t;
+        if (ident and out.items.len == 0) return l.fail(start, "zero-length delimited identifier at or near \"\"\"\"", .{});
+        return out.items;
     }
 
-    fn quotedIdent(l: *Lexer) Error!Token {
-        const start = l.pos;
+    /// The "quoted identifier" at `start`.
+    fn quotedIdent(l: *Decoder, start: usize) Error!Decoded {
         const q = try sqllex.undoubled(l.arena, l.src, start, '"');
         if (!q.closed) return l.fail(start, "unterminated quoted identifier at or near \"{s}\"", .{l.near(start)});
-        l.pos = q.end;
         if (q.text.len == 0) return l.fail(start, "zero-length delimited identifier at or near \"\"\"\"", .{});
-        return l.tok(.qident, start, q.end, q.text);
-    }
-
-    /// $tag$...$tag$, the opening delimiter s[start..tag_end].
-    fn dollarString(l: *Lexer, start: usize, tag_end: usize) Error!Token {
-        const s = l.src;
-        const d = sqllex.dollarEnd(s, start, tag_end);
-        if (!d.closed) return l.fail(start, "unterminated dollar-quoted string at or near \"{s}\"", .{l.near(start)});
-        l.pos = d.end;
-        return l.tok(.string, start, d.end, d.body);
-    }
-
-    fn operator(l: *Lexer) Token {
-        const s = l.src;
-        const start = l.pos;
-        var e = start;
-        while (op_chars.has(s[e])) : (e += 1) {
-            // A comment starts inside the run: the operator ends there.
-            if (e > start and scan.commentAt(s, e)) break;
-        }
-        var n = e - start;
-        if (n > 1 and (s[start + n - 1] == '+' or s[start + n - 1] == '-')) {
-            var special = false;
-            for (s[start .. start + n]) |ch| {
-                if (std.mem.indexOfScalar(u8, "~!@#%^&|`?", ch) != null) special = true;
-            }
-            if (!special) {
-                while (n > 1 and (s[start + n - 1] == '+' or s[start + n - 1] == '-')) n -= 1;
-            }
-        }
-        l.pos = start + n;
-        return l.tok(.op, start, l.pos, s[start..l.pos]);
+        return .{ .value = q.text, .end = q.end };
     }
 };
 
@@ -503,64 +552,58 @@ fn isLowSurrogate(c: u32) bool {
     return c <= 0xFFFF and std.unicode.utf16IsLowSurrogate(@intCast(c));
 }
 
-/// Digits of base `base` (and `_` separators) written in decimal, of any
-/// length.
-fn toDecimal(a: std.mem.Allocator, digits: []const u8, base: u8) error{OutOfMemory}![]const u8 {
-    // Little-endian decimal digits.
-    var dec: std.ArrayList(u8) = .empty;
-    for (digits) |ch| {
-        if (ch != '_') try decimal.mulAddDigit(a, &dec, base, sqllex.digitValue(ch));
-    }
-    if (dec.items.len == 0) try dec.append(a, 0);
-    std.mem.reverse(u8, dec.items);
-    for (dec.items) |*d| d.* += '0';
-    return dec.items;
-}
-
-const op_chars: sqllex.Set = .of(.{ .chars = "+-*/<>=~!@#%^&|`?" });
-
 // ================================================================= tests
 
 const testing = std.testing;
 
-fn expectTokens(src: [:0]const u8, expected: []const struct { Kind, []const u8 }) !void {
+const Expected = struct { sqllex.Kind, []const u8 };
+
+/// The kinds and values of the tokens of `src` (the eof left out).
+fn expectTokens(src: [:0]const u8, expected: []const Expected) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var l = Lexer.init(arena.allocator(), src, 0);
-    for (expected) |e| {
-        const t = try l.next();
+    var f: LexFailure = .{ .pos = 0 };
+    const st = try statement(arena.allocator(), src, 0, true, &f);
+    try testing.expectEqual(expected.len + 1, st.toks.len);
+    for (expected, st.toks[0..expected.len]) |e, t| {
         testing.expectEqual(e[0], t.kind) catch |err| {
-            std.debug.print("at {d}: {s}\n", .{ t.start, t.text });
+            std.debug.print("at {d}: {s}\n", .{ t.start, t.text(src) });
             return err;
         };
-        try testing.expectEqualStrings(e[1], t.text);
+        try testing.expectEqualStrings(e[1], value(src, &st.values, t));
     }
-    try testing.expectEqual(Kind.eof, (try l.next()).kind);
+    try testing.expectEqual(sqllex.Kind.eof, st.toks[expected.len].kind);
 }
 
 fn expectLexError(src: [:0]const u8, msg: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var l = Lexer.init(arena.allocator(), src, 0);
-    while (true) {
-        const t = l.next() catch |err| {
-            try testing.expectEqual(error.LexFailed, err);
-            try testing.expectEqualStrings(msg, l.err.message);
-            return;
-        };
-        if (t.kind == .eof) return error.TestExpectedError;
-    }
+    var f: LexFailure = .{ .pos = 0 };
+    try testing.expectError(error.LexFailed, statement(arena.allocator(), src, 0, true, &f));
+    try testing.expectEqualStrings(msg, f.fields.message);
 }
 
 test "pg lexer: identifiers fold, quoted ones keep their case" {
     try expectTokens("SELECT Foo, \"Bar\", \"a\"\"b\", _x1$ FROM t", &.{
-        .{ .ident, "select" }, .{ .ident, "foo" }, .{ .comma, "," },    .{ .qident, "Bar" }, .{ .comma, "," },
-        .{ .qident, "a\"b" },  .{ .comma, "," },   .{ .ident, "_x1$" }, .{ .ident, "from" }, .{ .ident, "t" },
+        .{ .word, "select" },       .{ .word, "foo" }, .{ .comma, "," },   .{ .quoted_ident, "Bar" }, .{ .comma, "," },
+        .{ .quoted_ident, "a\"b" }, .{ .comma, "," },  .{ .word, "_x1$" }, .{ .word, "from" },        .{ .word, "t" },
     });
     // Backticks and brackets are not identifiers.
     try expectTokens("`a` [b]", &.{
-        .{ .op, "`" }, .{ .ident, "a" }, .{ .op, "`" }, .{ .lbracket, "[" }, .{ .ident, "b" }, .{ .rbracket, "]" },
+        .{ .op, "`" }, .{ .word, "a" }, .{ .op, "`" }, .{ .op, "[" }, .{ .word, "b" }, .{ .op, "]" },
     });
+}
+
+test "pg lexer: keywords" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const src = "SeLeCt \"select\" foo";
+    var f: LexFailure = .{ .pos = 0 };
+    const st = try statement(arena.allocator(), src, 0, true, &f);
+    try testing.expect(st.toks[0].isKw("select"));
+    try testing.expectEqual(sqllex.KeywordClass.reserved, keywords.class(st.toks[0].kw));
+    try testing.expect(!st.toks[1].isKw("select"));
+    try testing.expectEqual(@as(u16, 0), st.toks[2].kw);
 }
 
 test "pg lexer: strings" {
@@ -585,20 +628,20 @@ test "pg lexer: numbers, parameters, operators, comments" {
         .{ .integer, "31" }, .{ .integer, "1000" }, .{ .param, "1" },   .{ .param, "12" },
     });
     try expectTokens("a::int||b<>c!=d<=-1 a<-1 x~~y", &.{
-        .{ .ident, "a" }, .{ .cast, "::" }, .{ .ident, "int" }, .{ .op, "||" },     .{ .ident, "b" }, .{ .op, "<>" },
-        .{ .ident, "c" }, .{ .op, "!=" },   .{ .ident, "d" },   .{ .op, "<=" },     .{ .op, "-" },    .{ .integer, "1" },
-        .{ .ident, "a" }, .{ .op, "<" },    .{ .op, "-" },      .{ .integer, "1" }, .{ .ident, "x" }, .{ .op, "~~" },
-        .{ .ident, "y" },
+        .{ .word, "a" }, .{ .op, "::" }, .{ .word, "int" }, .{ .op, "||" },     .{ .word, "b" }, .{ .op, "<>" },
+        .{ .word, "c" }, .{ .op, "!=" }, .{ .word, "d" },   .{ .op, "<=" },     .{ .op, "-" },   .{ .integer, "1" },
+        .{ .word, "a" }, .{ .op, "<" },  .{ .op, "-" },     .{ .integer, "1" }, .{ .word, "x" }, .{ .op, "~~" },
+        .{ .word, "y" },
     });
-    try expectTokens("a /* x /* nested */ y */ + -- comment\n b", &.{ .{ .ident, "a" }, .{ .op, "+" }, .{ .ident, "b" } });
-    try expectTokens("a+/*c*/b", &.{ .{ .ident, "a" }, .{ .op, "+" }, .{ .ident, "b" } });
+    try expectTokens("a /* x /* nested */ y */ + -- comment\n b", &.{ .{ .word, "a" }, .{ .op, "+" }, .{ .word, "b" } });
+    try expectTokens("a+/*c*/b", &.{ .{ .word, "a" }, .{ .op, "+" }, .{ .word, "b" } });
     try expectLexError("/* a /* b */", "unterminated /* comment at or near \"/* a /* b */\"");
     try expectLexError("SELECT 123abc", "trailing junk after numeric literal at or near \"123abc\"");
 }
 
 test "pg lexer: Unicode escapes" {
     try expectTokens("U&'d\\0061t\\+000061' U&\"d!0061\" UESCAPE '!' E'\\uD83D\\uDE00' u&'a\\\\b'", &.{
-        .{ .string, "data" }, .{ .qident, "da" }, .{ .string, "\u{1F600}" }, .{ .string, "a\\b" },
+        .{ .string, "data" }, .{ .quoted_ident, "da" }, .{ .string, "\u{1F600}" }, .{ .string, "a\\b" },
     });
     try expectLexError("SELECT U&'wrong: \\061'", "invalid Unicode escape");
     try expectLexError("SELECT U&'wrong: \\db99xy'", "invalid Unicode surrogate pair");
@@ -608,4 +651,15 @@ test "pg lexer: Unicode escapes" {
     try expectLexError("SELECT E'wrong: \\u061'", "invalid Unicode escape");
     try expectLexError("SELECT E'\\udb99\\u0061'", "invalid Unicode surrogate pair at or near \"\\u0061\"");
     try expectLexError("SELECT E'\\udb99'", "invalid Unicode surrogate pair at or near \"'\"");
+}
+
+test "pg lexer: a statement ends at its semicolon" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const src = ";; a; 'unterminated";
+    var f: LexFailure = .{ .pos = 0 };
+    const st = try statement(arena.allocator(), src, 0, true, &f);
+    try testing.expectEqual(@as(usize, 2), st.toks.len);
+    try testing.expectEqual(@as(usize, 5), st.end);
+    try testing.expectEqual(@as(u32, 4), st.toks[1].start);
 }

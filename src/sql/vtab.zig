@@ -31,7 +31,8 @@ const prepare = @import("prepare.zig");
 const util = @import("util.zig");
 const main_mod = @import("main.zig");
 const expr_mod = @import("expr.zig");
-const tokenize = @import("../parse/tokenize.zig");
+const sqlite_parser = @import("../dialect/sqlite/parser.zig");
+const lexer = @import("../dialect/sqlite/lexer.zig");
 const ctype = @import("xqlite_base").ctype;
 const wi = @import("where/where_int.zig");
 const malloc = @import("malloc.zig");
@@ -813,12 +814,12 @@ pub fn callCreate(db: *Sqlite3, i_db: usize, tab_name: []const u8, err: *?[:0]u8
 /// the columns of the virtual table from a CREATE TABLE statement.
 pub fn declareVtab(db: *Sqlite3, create_table: [:0]const u8) i32 {
     // The statement must start with CREATE TABLE.
-    var z: [*:0]const u8 = create_table.ptr;
+    var pos: usize = 0;
     for ([_]u8{ TK.CREATE, TK.TABLE }) |kw| {
         var tk: u8 = undefined;
         while (true) {
-            const t = tokenize.getToken(z);
-            z += t.len;
+            const t = lexer.getToken(create_table, pos);
+            pos += t.len;
             tk = t.tk;
             if (tk != TK.SPACE and tk != TK.COMMENT) break;
         }
@@ -854,7 +855,7 @@ pub fn declareVtab(db: *Sqlite3, create_table: [:0]const u8) i32 {
     p.n_query_loop = 1;
 
     var rc: i32 = RC.OK;
-    const parsed = if (tokenize.runParser(&p, create_table)) |_| true else |err| switch (err) {
+    const parsed = if (sqlite_parser.runParser(&p, create_table)) |_| true else |err| switch (err) {
         error.OutOfMemory => blk: {
             db.oomFault();
             break :blk false;

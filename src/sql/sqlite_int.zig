@@ -9,11 +9,10 @@
 //! connection's allocator; parse trees they keep are copied into it.
 
 const std = @import("std");
-const grammar = @import("../parse/grammar.zig");
 const flags = @import("xqlite_base").flags;
 const thunk = @import("xqlite_base").thunk;
 
-pub const TK = grammar.TK;
+pub const TK = @import("tk.zig").TK;
 pub const Allocator = std.mem.Allocator;
 pub const Pgno = u32;
 

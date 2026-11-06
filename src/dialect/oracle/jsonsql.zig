@@ -91,8 +91,9 @@ fn pathLiteral(p: *Parser) Error![]const u8 {
     const t = p.c.peek();
     if (t.kind != .string) return p.missing("ORA-40597: JSON path expression syntax error");
     p.c.skip();
-    try checkPath(p, t.start, t.text);
-    return t.text;
+    const v = try p.text(t);
+    try checkPath(p, t.start, v);
+    return v;
 }
 
 fn checkPath(p: *Parser, pos: u32, text: []const u8) Error!void {
@@ -227,7 +228,7 @@ fn finish(p: *Parser, pos: u32, name: []const u8, args: []const *Expr) Error!*Ex
 /// A call of an SQL/JSON function; `name` was read, `(` is next.
 pub fn call(p: *Parser, pos: u32, name: Token) Error!*Expr {
     _ = try p.c.expect(.lparen);
-    const n = name.text;
+    const n = try p.text(name);
     if (eq(n, "JSON_VALUE")) return jsonValue(p, pos);
     if (eq(n, "JSON_QUERY")) return jsonQuery(p, pos);
     if (eq(n, "JSON_EXISTS")) return jsonExists(p, pos);
@@ -426,7 +427,7 @@ fn jsonObject(p: *Parser, pos: u32) Error!*Expr {
     try args.append(p.arena, undefined);
     var star = false;
     while (!atCtorEnd(p)) {
-        if (p.c.peek().isOp("*")) {
+        if (p.c.isOp("*")) {
             p.c.skip();
             star = true;
         } else {
@@ -558,7 +559,7 @@ fn transform(p: *Parser, pos: u32) Error!*Expr {
                 const nt = p.c.peek();
                 if (nt.kind != .string) return p.missing("ORA-00936: missing expression");
                 p.c.skip();
-                try args.append(p.arena, try str(p, nt.start, nt.text));
+                try args.append(p.arena, try str(p, nt.start, try p.text(nt)));
             } else {
                 if (!p.c.eatOp("=")) return p.missing("ORA-00905: missing keyword");
                 try args.append(p.arena, try ctorValue(p));
@@ -616,7 +617,7 @@ fn isMethod(raw: []const u8) bool {
 pub fn methodAhead(p: *const Parser) bool {
     if (p.c.peek().kind != .dot) return false;
     const t = p.c.peekAt(1);
-    return t.kind == .ident and p.c.peekAt(2).kind == .lparen and p.c.peekAt(3).kind == .rparen and isMethod(t.text);
+    return t.kind == .word and p.c.peekAt(2).kind == .lparen and p.c.peekAt(3).kind == .rparen and isMethod(p.c.text(t));
 }
 
 /// t.col.a.b[0].c.size(): the names read so far (`names`, at least 2:
@@ -634,26 +635,26 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
     }
     var method = false;
     while (true) {
-        if (p.c.peek().isOp("[")) {
+        if (p.c.isOp("[")) {
             complex = true;
             const open = p.c.advance();
             var depth: usize = 1;
             while (depth > 0) {
                 const t = p.c.advance();
                 if (t.kind == .eof) return p.missing("ORA-00907: missing right parenthesis");
-                if (t.isOp("[")) depth += 1;
-                if (t.isOp("]")) depth -= 1;
+                if (t.isOp(p.c.sql, "[")) depth += 1;
+                if (t.isOp(p.c.sql, "]")) depth -= 1;
             }
             try path.appendSlice(p.arena, p.c.sql[open.start..p.c.lastEnd()]);
             continue;
         }
         if (p.c.peek().kind == .dot and !method) {
             const nt = p.c.peekAt(1);
-            if (nt.kind != .ident and nt.kind != .qident) break;
+            if (nt.kind != .word and nt.kind != .quoted_ident) break;
             p.c.skip();
             p.c.skip();
-            const raw = rawText(p, nt);
-            if (nt.kind == .ident and p.c.peek().kind == .lparen and p.c.peekAt(1).kind == .rparen and isMethod(raw)) {
+            const raw = try rawText(p, nt);
+            if (nt.kind == .word and p.c.peek().kind == .lparen and p.c.peekAt(1).kind == .rparen and isMethod(raw)) {
                 p.c.skipN(2);
                 try path.append(p.arena, '.');
                 try path.appendSlice(p.arena, raw);
@@ -662,7 +663,7 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
                 complex = true;
                 continue;
             }
-            const n: Name = .{ .text = nt.text, .pos = nt.start };
+            const n: Name = try p.nameOf(nt);
             try appendMember(p, &path, n);
             if (!complex) label = n.text;
             continue;
@@ -680,8 +681,8 @@ pub fn dotExpr(p: *Parser, start: u32, names: []const Name) Error!*Expr {
     return e;
 }
 
-fn rawText(p: *const Parser, t: Token) []const u8 {
-    if (t.kind == .qident) return t.text;
+fn rawText(p: *const Parser, t: Token) Error![]const u8 {
+    if (t.kind == .quoted_ident) return p.text(t);
     return p.c.sql[t.start..t.end];
 }
 
@@ -765,7 +766,7 @@ fn columns(p: *Parser, out: *std.ArrayList(Column)) Error!J.Value {
         }
         const nt = p.c.peek();
         const name = try p.colId();
-        const raw = rawText(p, nt);
+        const raw = try rawText(p, nt);
         var col: Column = .{ .name = name.text, .index = out.items.len };
         if (p.c.eatKws(&.{ "for", "ordinality" })) {
             try ms.append(p.arena, .{ .key = "k", .value = jstr("o") });
@@ -786,7 +787,7 @@ fn columns(p: *Parser, out: *std.ArrayList(Column)) Error!J.Value {
         var wrapper: []const u8 = "N";
         // The type, unless a clause comes first.
         const t = p.c.peek();
-        if (t.kind == .ident and !t.isAnyKw(&.{ "format", "exists", "path", "error", "null", "default", "empty", "truncate", "with", "without", "allow", "disallow" })) {
+        if (t.kind == .word and !t.isAnyKw(&.{ "format", "exists", "path", "error", "null", "default", "empty", "truncate", "with", "without", "allow", "disallow" })) {
             ty = try returning(p);
         }
         while (true) {
@@ -824,7 +825,7 @@ fn columns(p: *Parser, out: *std.ArrayList(Column)) Error!J.Value {
         const p_text = path orelse blk: {
             var b: std.ArrayList(u8) = .empty;
             try b.append(p.arena, '$');
-            try appendMember(p, &b, .{ .text = if (nt.kind == .qident) name.text else raw, .pos = nt.start });
+            try appendMember(p, &b, .{ .text = if (nt.kind == .quoted_ident) name.text else raw, .pos = nt.start });
             break :blk b.items;
         };
         try ms.append(p.arena, .{ .key = "k", .value = jstr(kind) });

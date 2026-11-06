@@ -12,6 +12,7 @@ const std = @import("std");
 const ctype = @import("xqlite_base").ctype;
 const tree = @import("../../ir/tree.zig");
 const parser = @import("parser.zig");
+const lexer = @import("lexer.zig");
 
 const Parser = parser.Parser;
 const Error = parser.Error;
@@ -24,7 +25,7 @@ pub fn call(s: *Parser) Error!*Expr {
     s.c.skip();
     try s.c.expectOp("(");
     var lname_buf: [64]u8 = undefined;
-    const lname = if (name_tok.text.len <= lname_buf.len) std.ascii.lowerString(&lname_buf, name_tok.text) else name_tok.text;
+    const lname = if (s.c.text(name_tok).len <= lname_buf.len) std.ascii.lowerString(&lname_buf, s.c.text(name_tok)) else s.c.text(name_tok);
 
     if (eq(lname, "cast")) {
         const e = try s.expr();
@@ -67,8 +68,8 @@ pub fn call(s: *Parser) Error!*Expr {
         return s.func(pos, "instr", &.{ str, sub });
     }
     if (eq(lname, "extract")) {
-        if (s.c.peek().kind != .ident) return s.c.syntaxError();
-        const unit = try std.ascii.allocUpperString(s.a, s.c.peek().text);
+        if (s.c.peek().kind != .word) return s.c.syntaxError();
+        const unit = try std.ascii.allocUpperString(s.a, s.c.text(s.c.peek()));
         s.c.skip();
         try s.c.expectKw("FROM");
         const e = try s.expr();
@@ -82,8 +83,8 @@ pub fn call(s: *Parser) Error!*Expr {
         var r: *Expr = undefined;
         if (s.c.eatKw("INTERVAL")) {
             const n = try s.expr();
-            if (s.c.peek().kind != .ident) return s.c.syntaxError();
-            const unit = s.c.peek().text;
+            if (s.c.peek().kind != .word) return s.c.syntaxError();
+            const unit = s.c.text(s.c.peek());
             s.c.skip();
             r = try s.dateAdd(pos, d, n, unit, minus);
         } else {
@@ -93,8 +94,8 @@ pub fn call(s: *Parser) Error!*Expr {
         return r;
     }
     if (eq(lname, "timestampadd") or eq(lname, "timestampdiff")) {
-        if (s.c.peek().kind != .ident) return s.c.syntaxError();
-        const unit = s.c.peek().text;
+        if (s.c.peek().kind != .word) return s.c.syntaxError();
+        const unit = s.c.text(s.c.peek());
         s.c.skip();
         try s.c.expectOp(",");
         const a = try s.expr();
@@ -115,7 +116,7 @@ pub fn call(s: *Parser) Error!*Expr {
     if (eq(lname, "nextval") or eq(lname, "lastval") or eq(lname, "setval")) {
         // MariaDB passes the sequence as a name, not a string.
         var args: std.ArrayList(*Expr) = .empty;
-        if (s.c.peek().kind == .ident or s.c.peek().kind == .quoted_ident) {
+        if (s.c.peek().kind == .word or s.c.peek().kind == .quoted_ident) {
             const n = try s.qualifiedName();
             try args.append(s.a, try s.str(n.name.pos, try s.sequenceName(n)));
         } else try args.append(s.a, try s.expr());
@@ -130,11 +131,11 @@ pub fn call(s: *Parser) Error!*Expr {
         return s.func(pos, "char", args);
     }
     if (eq(lname, "match")) {
-        return s.c.fail(null, "xqlite: {s}() is not supported", .{name_tok.text});
+        return s.c.fail(null, "xqlite: {s}() is not supported", .{s.c.text(name_tok)});
     }
     // JSON_TABLE is a FROM item only (json_table.zig).
     if (eq(lname, "json_table")) return s.c.syntaxErrorAt(name_tok);
-    if (eq(lname, "json_arrayagg") or eq(lname, "json_objectagg")) return jsonAgg(s, pos, name_tok.text, eq(lname, "json_objectagg"));
+    if (eq(lname, "json_arrayagg") or eq(lname, "json_objectagg")) return jsonAgg(s, pos, s.c.text(name_tok), eq(lname, "json_objectagg"));
 
     // An ordinary call: [DISTINCT|ALL] args, or *.
     var distinct = false;
@@ -150,16 +151,16 @@ pub fn call(s: *Parser) Error!*Expr {
     }
     try s.c.expectOp(")");
     if (distinct and args.len > 1) {
-        return s.c.fail(null, "xqlite: {s}(DISTINCT ...) with several arguments is not supported", .{name_tok.text});
+        return s.c.fail(null, "xqlite: {s}(DISTINCT ...) with several arguments is not supported", .{s.c.text(name_tok)});
     }
     const over = try s.overClause();
     if (star or distinct or over != null) {
         // An aggregate or window function: as written (or renamed).
-        const n: []const u8 = renames.get(lname) orelse name_tok.text;
+        const n: []const u8 = renames.get(lname) orelse s.c.text(name_tok);
         const name_pos: u32 = pos;
         return s.funcNode(pos, .{ .name = .{ .text = n, .pos = name_pos }, .args = args, .star = star, .distinct = distinct, .over = over });
     }
-    return byNameAs(s, lname, args, pos, name_tok.text);
+    return byNameAs(s, lname, args, pos, s.c.text(name_tok));
 }
 
 /// The static spelling of a lower-case name of call() (lname lives in a
@@ -271,7 +272,7 @@ fn byNameAs(s: *Parser, lname: []const u8, args_in: []const *Expr, pos: u32, wri
 
 /// CAST/CONVERT's target type at the current token, applied to `e`.
 fn castTo(s: *Parser, pos: u32, e: *Expr) Error!*Expr {
-    if (s.c.peek().kind != .ident) return s.c.syntaxError();
+    if (s.c.peek().kind != .word) return s.c.syntaxError();
     const t = s.c.peek();
     s.c.skip();
     var len: ?i64 = null;
@@ -300,17 +301,17 @@ fn castTo(s: *Parser, pos: u32, e: *Expr) Error!*Expr {
         .{ "NATIONAL", "TEXT" },  .{ "TEXT", "TEXT" },        .{ "BINARY", "BLOB" },     .{ "VARBINARY", "BLOB" },
         .{ "DOUBLE", "REAL" },    .{ "FLOAT", "REAL" },       .{ "REAL", "REAL" },       .{ "JSON", "" },
     };
-    for (kinds) |k| if (t.isKw(k[0])) {
+    inline for (kinds) |k| if (t.isKw(k[0])) {
         if (k[1].len == 0) return e;
         const ty = k[1];
         if (len) |n| {
-            if (std.mem.eql(u8, ty, "TEXT")) return s.mk(pos, .{ .cast = .{ .e = e, .target_type = t.text, .mode = .{ .truncate = n } } });
+            if (std.mem.eql(u8, ty, "TEXT")) return s.mk(pos, .{ .cast = .{ .e = e, .target_type = s.c.text(t), .mode = .{ .truncate = n } } });
             if (std.mem.eql(u8, ty, "BLOB")) {
-                const blob = try s.mk(pos, .{ .cast = .{ .e = e, .target_type = t.text, .mode = .{ .affinity = "BLOB" } } });
+                const blob = try s.mk(pos, .{ .cast = .{ .e = e, .target_type = s.c.text(t), .mode = .{ .affinity = "BLOB" } } });
                 return s.func(pos, "substr", &.{ blob, try s.int_(pos, 1), try s.int_(pos, n) });
             }
         }
-        return s.mk(pos, .{ .cast = .{ .e = e, .target_type = t.text, .mode = .{ .affinity = ty } } });
+        return s.mk(pos, .{ .cast = .{ .e = e, .target_type = s.c.text(t), .mode = .{ .affinity = ty } } });
     };
     if (t.isAnyKw(&.{ "DECIMAL", "DEC", "NUMERIC", "FIXED" })) {
         // round(e, scale), an integer without a scale.
@@ -322,18 +323,18 @@ fn castTo(s: *Parser, pos: u32, e: *Expr) Error!*Expr {
             return s.mk(pos, .{ .cast = .{ .e = try s.func(pos, "round", &.{ real, try s.int_(pos, sc) }), .target_type = spelling, .mode = .{ .affinity = "REAL" } } });
         };
         const r = try s.func(pos, "round", &.{real});
-        return s.mk(pos, .{ .cast = .{ .e = r, .target_type = t.text, .mode = .{ .affinity = "INTEGER" } } });
+        return s.mk(pos, .{ .cast = .{ .e = r, .target_type = s.c.text(t), .mode = .{ .affinity = "INTEGER" } } });
     }
     if (t.isAnyKw(&.{ "DATE", "DATETIME", "TIME", "TIMESTAMP" })) {
         const to: []const u8 = if (t.isKw("DATE")) "date" else if (t.isKw("TIME")) "time" else "datetime";
-        return s.mk(pos, .{ .cast = .{ .e = e, .target_type = t.text, .mode = .{ .typed = .{ .func = "xq_cast", .type_arg = to } } } });
+        return s.mk(pos, .{ .cast = .{ .e = e, .target_type = s.c.text(t), .mode = .{ .typed = .{ .func = "xq_cast", .type_arg = to } } } });
     }
-    return s.c.fail(null, "xqlite: CAST to {s} is not supported", .{t.text});
+    return s.c.fail(null, "xqlite: CAST to {s} is not supported", .{s.c.text(t)});
 }
 
 fn intArg(s: *Parser) Error!i64 {
-    if (s.c.peek().kind != .integer) return s.c.syntaxError();
-    const v = std.fmt.parseInt(i64, s.c.peek().text, 10) catch return s.c.syntaxError();
+    if (!lexer.isInteger(s.c.peek())) return s.c.syntaxError();
+    const v = std.fmt.parseInt(i64, s.c.text(s.c.peek()), 10) catch return s.c.syntaxError();
     s.c.skip();
     return v;
 }

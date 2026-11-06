@@ -246,13 +246,13 @@ pub fn set(s: *Parser) Error!void {
         if (s.c.isKw("NAMES") or ((s.c.isKw("CHARACTER") or s.c.isKw("CHARSET")))) {
             // SET NAMES cs [COLLATE c], SET CHARACTER SET cs: accepted.
             if (s.c.eatKw("CHARACTER")) try s.c.expectKw("SET") else s.c.skip();
-            if (s.c.eatKw("DEFAULT")) {} else if (s.c.peek().kind == .string) {
+            if (s.c.eatKw("DEFAULT")) {} else if (lexer.isString(s.c.peek())) {
                 _ = try s.stringLiteral();
             } else _ = try s.anyName();
             if (s.c.eatKw("COLLATE")) {
-                if (s.c.peek().kind == .string) _ = try s.stringLiteral() else _ = try s.anyName();
+                if (lexer.isString(s.c.peek())) _ = try s.stringLiteral() else _ = try s.anyName();
             }
-        } else if (s.c.peek().kind == .user_var) {
+        } else if ((s.c.peek().kind == .variable and s.c.peek().sub == .user)) {
             const t = s.c.peek();
             s.c.skip();
             if (!(s.c.eatOp("=") or s.c.eatOp(":="))) return s.c.syntaxError();
@@ -261,8 +261,8 @@ pub fn set(s: *Parser) Error!void {
             try calls.append(s.a, try s.func(pos, "xq_set_uservar", &.{ try s.str(pos, name), v }));
         } else {
             var name_text: []const u8 = undefined;
-            if (s.c.peek().kind == .sys_var) {
-                name_text = s.c.peek().text[2..];
+            if ((s.c.peek().kind == .variable and s.c.peek().sub == .system)) {
+                name_text = s.c.text(s.c.peek())[2..];
                 for ([_][]const u8{ "global.", "session.", "local." }) |scope| {
                     if (std.ascii.startsWithIgnoreCase(name_text, scope)) {
                         if (scope[0] == 'g') return s.c.fail(null, "xqlite: SET GLOBAL is not supported", .{});
@@ -285,9 +285,9 @@ pub fn set(s: *Parser) Error!void {
             } else if (s.c.isKw("ON") or s.c.isKw("OFF")) {
                 value = try s.int_(vpos, @intFromBool(s.c.isKw("ON")));
                 s.c.skip();
-            } else if (s.c.peek().kind == .ident and !s.c.peekAt(1).is("(") and !s.c.peekAt(1).is(".") and !parser.isReserved(s.c.peek())) {
+            } else if (s.c.peek().kind == .word and s.c.peekAt(1).kind != .lparen and s.c.peekAt(1).kind != .dot and !parser.isReserved(s.c.peek())) {
                 // SET sql_mode = ANSI: a word is a string.
-                value = try s.str(vpos, s.c.peek().text);
+                value = try s.str(vpos, s.c.text(s.c.peek()));
                 s.c.skip();
             } else value = try s.expr();
             try calls.append(s.a, try s.func(pos, "xq_set_sysvar", &.{ try s.str(pos, v.name), value }));
@@ -299,9 +299,9 @@ pub fn set(s: *Parser) Error!void {
 }
 
 fn userVarText(s: *Parser, t: lexer.Token) Error![]const u8 {
-    const z = t.text[1..];
-    if (z.len > 0 and z[0] == '`') return lexer.identValue(s.a, .{ .kind = .quoted_ident, .text = z });
-    if (z.len > 0 and (z[0] == '\'' or z[0] == '"')) return lexer.stringValue(s.a, .{ .kind = .string, .text = z }, false);
+    const z = s.c.text(t)[1..];
+    if (z.len > 0 and z[0] == '`') return lexer.quotedName(s.a, z);
+    if (z.len > 0 and (z[0] == '\'' or z[0] == '"')) return lexer.stringText(s.a, z, false);
     return z;
 }
 
@@ -521,12 +521,12 @@ pub fn show(s: *Parser) Error!void {
 pub fn describe(s: *Parser) Error!bool {
     const n = s.c.peekAt(1);
     const is_stmt = n.isAnyKw(&.{ "SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE", "WITH", "EXTENDED", "PARTITIONS", "FORMAT", "ANALYZE" }) or
-        n.is("(");
+        n.kind == .lparen;
     if (is_stmt) return false;
     s.c.skip();
     const q = try s.qualifiedName();
     var like: ?[]const u8 = null;
-    if (s.c.peek().kind == .string) like = try s.stringLiteral() else if (s.isName()) like = try s.nameText(try s.name());
+    if (lexer.isString(s.c.peek())) like = try s.stringLiteral() else if (s.isName()) like = try s.nameText(try s.name());
     try showColumns(s, q.name.text, if (q.schema) |x| x.text else null, like);
     return true;
 }

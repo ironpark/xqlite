@@ -641,13 +641,13 @@ pub fn runParser(p: *Parse, sql: [:0]const u8) (int.Oom || int.ParseError)!void 
 /// switches back, ATTACH, DETACH, VACUUM and REINDEX. Spaces, comments
 /// and semicolons before it are SQLite's.
 fn isSqliteCommand(sql: [:0]const u8) bool {
-    const getToken = @import("../parse/tokenize.zig").getToken;
+    const getToken = @import("sqlite/lexer.zig").getToken;
     const TK = int.TK;
-    var z: [*:0]const u8 = sql.ptr;
-    while (z[0] != 0) {
-        const t = getToken(z);
+    var pos: usize = 0;
+    while (sql[pos] != 0) {
+        const t = getToken(sql, pos);
         switch (t.tk) {
-            TK.SPACE, TK.COMMENT, TK.SEMI => z += t.len,
+            TK.SPACE, TK.COMMENT, TK.SEMI => pos += t.len,
             TK.PRAGMA, TK.ATTACH, TK.DETACH, TK.VACUUM, TK.REINDEX => return true,
             else => return false,
         }
@@ -782,6 +782,7 @@ pub fn defaultCollationName(db: *const Sqlite3) ?[:0]const u8 {
 
 test {
     _ = @import("func.zig");
+    _ = @import("sqlite/lexer.zig");
     _ = @import("template.zig");
     _ = @import("calendar.zig");
     _ = @import("json_text.zig");

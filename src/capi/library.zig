@@ -7,8 +7,7 @@ const c = @import("common.zig");
 const RC = c.RC;
 const func_mod = @import("../sql/func/func.zig");
 const complete_mod = @import("../sql/complete.zig");
-const tokenize = @import("../parse/tokenize.zig");
-const grammar = @import("../parse/grammar.zig");
+const sqlite_lexer = @import("../dialect/sqlite/lexer.zig");
 
 pub const version = "3.54.1";
 pub const version_number = 3054001;
@@ -398,12 +397,12 @@ pub export fn sqlite3_incomplete(sql: ?[*:0]const u8) callconv(.c) i64 {
 }
 
 pub export fn sqlite3_keyword_count() callconv(.c) c_int {
-    return grammar.keywords.len;
+    return sqlite_lexer.keyword_list.len;
 }
 
 pub export fn sqlite3_keyword_name(i: c_int, pz: ?*?[*]const u8, pn: ?*c_int) callconv(.c) c_int {
-    if (i < 0 or i >= grammar.keywords.len) return RC.ERROR;
-    const k = grammar.keywords[@intCast(i)].name;
+    if (i < 0 or i >= sqlite_lexer.keyword_list.len) return RC.ERROR;
+    const k = sqlite_lexer.keyword_list[@intCast(i)].name;
     if (pz) |p| p.* = k.ptr;
     if (pn) |p| p.* = @intCast(k.len);
     return RC.OK;
@@ -411,7 +410,7 @@ pub export fn sqlite3_keyword_name(i: c_int, pz: ?*?[*]const u8, pn: ?*c_int) ca
 
 pub export fn sqlite3_keyword_check(z: ?[*]const u8, n: c_int) callconv(.c) c_int {
     if (n <= 0) return 0;
-    return @intFromBool(tokenize.keywordCode((z orelse return 0)[0..@intCast(n)]) != grammar.TK.ID);
+    return @intFromBool(sqlite_lexer.keywordCode((z orelse return 0)[0..@intCast(n)]) != sqlite_lexer.TK.ID);
 }
 
 pub export fn sqlite3_stricmp(a: ?[*:0]const u8, b: ?[*:0]const u8) callconv(.c) c_int {

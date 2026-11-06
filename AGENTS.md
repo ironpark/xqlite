@@ -5,13 +5,14 @@
 ## 프로젝트
 
 - xqlite는 SQLite 3.54.1을 순수 Zig(0.17)로 옮긴 것입니다. 파일 형식과 바이트코드가 SQLite와 호환됩니다.
+- 3.54.1 뒤의 SQLite 업스트림은 따라가지 않습니다. 코드는 업스트림에서 다시 생성하지 않고(lemon 문법 대신 손으로 쓴 파서, `src/dialect/sqlite/parser.zig`) 고쳐 나갑니다. 아래의 SQLite 방언 호환 규칙은 그대로입니다.
 - 방언은 sqlite, postgres, mariadb, mssql, oracle입니다. 각 방언은 `src/dialect/<방언>/`에 있습니다.
 - 그 밖에 sqlite3 C ABI, WASI/wasm 대상, 와이어 서버(`src/server`: PostgreSQL v3, MySQL), sqlite3용 확장([docs/extension.md](docs/extension.md))이 있습니다.
 - 문서는 한국어입니다. 동작이 바뀌면 같은 작업에서 해당 문서(`docs/*.md`, 방언별 폴더 `docs/<방언>/`, `README.md`)를 기존 문체로 고칩니다.
 
 ## 지켜야 할 것
 
-- **SQLite 방언은 그대로**: SQLite 방언의 바이트코드와 파일 형식은 SQLite와 같아야 합니다. 코어의 타입 계층은 SQLite 방언에서 꺼져 있습니다(`typing.active(db)`가 false).
+- **SQLite 방언은 그대로**: SQLite 방언의 바이트코드와 파일 형식은 SQLite(3.54.1)와 같아야 합니다. 오류 문구와 위치, `sqlite_schema`에 저장되는 텍스트도 같습니다. 코어의 타입 계층은 SQLite 방언에서 꺼져 있습니다(`typing.active(db)`가 false).
 - **스키마에 저장되는 엔진 함수의 의미는 바꾸지 않음**: CHECK, DEFAULT, 생성 열, 식 인덱스, 뷰가 부르는 `xq_*` 함수, collation, 정렬 키 인코딩이 여기에 해당합니다.
   - 식 인덱스와 STORED 생성 열은 결과를 디스크에 남깁니다. 의미가 바뀌면 xqlite끼리도, xqlite와 sqlite3 + 확장 사이에서도 인덱스가 깨집니다.
   - 동작을 바꿔야 하면 새 이름을 쓰고 확장의 ABI 버전을 올립니다([docs/extension.md](docs/extension.md)).

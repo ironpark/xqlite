@@ -1905,7 +1905,7 @@ fn collationOf(type_oid: u32, declared: ?[]const u8) u32 {
 /// so it is read with SQLite's rules of the sql/lexer package
 /// (sqllex.sqlite: comments, quotes, words and the extent of a number),
 /// which a test below checks against SQLite's tokenizer
-/// (src/parse/tokenize.zig). That tokenizer is not used: it reads
+/// (src/dialect/sqlite/lexer.zig). That tokenizer is not used: it reads
 /// statements for the grammar (keywords, operators, TK_ codes), this
 /// takes slices apart (an expression, a column's definition).
 const Tok = struct {
@@ -3394,7 +3394,7 @@ test "SQLite text: tokens end where SQLite's tokenizer ends them" {
     // Random text of the characters the rules are about; at each word,
     // quoted name, string and number the scanner reads, SQLite's
     // tokenizer (sqlite3GetToken()) started there ends at the same place.
-    const getToken = @import("../../parse/tokenize.zig").getToken;
+    const getToken = @import("../sqlite/lexer.zig").getToken;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -3412,7 +3412,7 @@ test "SQLite text: tokens end where SQLite's tokenizer ends them" {
             if (t.kind == .punct) continue;
             // x'..' is a blob literal to SQLite, a word and a string here.
             if (t.kind == .word and t.text.len == 1 and (t.text[0] == 'x' or t.text[0] == 'X') and s.z[t.end] == '\'') continue;
-            const n = getToken(s.z.ptr + t.start).len;
+            const n = getToken(s.z, t.start).len;
             if (n != t.end - t.start) {
                 std.debug.print("{f}: {s} at {d}: SQLite {d}, here {d}\n", .{ std.zig.fmtString(buf.items), @tagName(t.kind), t.start, n, t.end - t.start });
                 return error.TestExpectedEqual;

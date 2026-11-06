@@ -54,8 +54,8 @@ fn skipRest(p: *Parser) void {
 fn stmt(p: *Parser) Error!Statement {
     const t = p.c.peek();
     if (t.kind == .lparen) return .{ .tree = .{ .select = try p.select() } };
-    if (t.kind != .ident) return p.c.fail(t.start, "ORA-00900: invalid SQL statement", .{});
-    const w = t.text;
+    if (t.kind != .word) return p.c.fail(t.start, "ORA-00900: invalid SQL statement", .{});
+    const w = try p.text(t);
     if (eq(w, "SELECT") or eq(w, "WITH")) return .{ .tree = .{ .select = try p.select() } };
     if (eq(w, "INSERT")) return insert(p);
     if (eq(w, "UPDATE")) return .{ .tree = .{ .update = try update(p) } };
@@ -99,7 +99,7 @@ fn stmt(p: *Parser) Error!Statement {
             return .noop;
         }
         if (p.c.isKwAt(1, "table")) return alterTable(p);
-        return p.unsupported(p.c.peekAt(1).start, try std.fmt.allocPrint(p.arena, "ALTER {s}", .{p.c.peekAt(1).text}));
+        return p.unsupported(p.c.peekAt(1).start, try std.fmt.allocPrint(p.arena, "ALTER {s}", .{try p.text(p.c.peekAt(1))}));
     }
     if (eq(w, "CREATE")) return create(p);
     if (eq(w, "DROP")) return .{ .tree = .{ .drop = try drop(p) } };
@@ -163,9 +163,9 @@ fn targetTable(p: *Parser) Error!struct { table: tree.QName, alias: ?Name } {
     const table = r.q;
     var alias: ?Name = r.alias;
     const a = p.c.peek();
-    if (a.kind == .qident or (a.kind == .ident and !parser.isReserved(a.text) and !a.isAnyKw(&.{ "using", "values", "returning", "log" }))) {
+    if (a.kind == .quoted_ident or (a.kind == .word and !parser.isReserved(a) and !a.isAnyKw(&.{ "using", "values", "returning", "log" }))) {
         p.c.skip();
-        alias = .{ .text = a.text, .pos = a.start };
+        alias = try p.nameOf(a);
     }
     return .{ .table = table, .alias = alias };
 }
@@ -285,7 +285,7 @@ fn setList(p: *Parser) Error![]tree.SetItem {
     while (true) {
         if (p.c.peek().kind == .lparen) {
             const cols = try p.parenNameList();
-            if (!p.c.peek().isOp("=")) return p.missing("ORA-00927: missing equal sign");
+            if (!p.c.isOp("=")) return p.missing("ORA-00927: missing equal sign");
             p.c.skip();
             const v = try p.expr0();
             try out.append(p.arena, .{ .cols = cols, .multi = true, .value = v });
@@ -297,7 +297,7 @@ fn setList(p: *Parser) Error![]tree.SetItem {
                 p.c.skip();
                 cols[0] = try p.anyName();
             }
-            if (!p.c.peek().isOp("=")) return p.missing("ORA-00927: missing equal sign");
+            if (!p.c.isOp("=")) return p.missing("ORA-00927: missing equal sign");
             p.c.skip();
             const v = try p.expr0();
             try out.append(p.arena, .{ .cols = cols, .multi = false, .value = v });
@@ -356,9 +356,9 @@ fn merge(p: *Parser) Error!Statement {
     }
     {
         const a = p.c.peek();
-        if (a.kind == .qident or (a.kind == .ident and !parser.isReserved(a.text))) {
+        if (a.kind == .quoted_ident or (a.kind == .word and !parser.isReserved(a))) {
             p.c.skip();
-            src.alias = .{ .name = .{ .text = a.text, .pos = a.start } };
+            src.alias = .{ .name = try p.nameOf(a) };
         }
     }
     try p.c.expectKw("on");
@@ -649,7 +649,7 @@ fn create(p: *Parser) Error!Statement {
     if (p.c.isAnyKw(&.{ "procedure", "function", "package", "trigger", "type", "library" })) return p.unsupported(at, "PL/SQL");
     if (p.c.isKw("public") or p.c.isKw("synonym")) return p.unsupported(at, "CREATE SYNONYM");
     if (p.c.isKw("materialized")) return p.unsupported(at, "CREATE MATERIALIZED VIEW");
-    if (p.c.peek().kind == .ident) return p.unsupported(at, try std.fmt.allocPrint(p.arena, "CREATE {s}", .{p.c.peek().text}));
+    if (p.c.peek().kind == .word) return p.unsupported(at, try std.fmt.allocPrint(p.arena, "CREATE {s}", .{try p.text(p.c.peek())}));
     return p.c.fail(at, "ORA-00901: invalid CREATE command", .{});
 }
 
@@ -1091,8 +1091,8 @@ fn drop(p: *Parser) Error!*tree.Drop {
         d.kind = .index;
     } else if (p.c.eatKw("sequence")) {
         d.kind = .sequence;
-    } else if (t.kind == .ident) {
-        return p.unsupported(t.start, try std.fmt.allocPrint(p.arena, "DROP {s}", .{t.text}));
+    } else if (t.kind == .word) {
+        return p.unsupported(t.start, try std.fmt.allocPrint(p.arena, "DROP {s}", .{try p.text(t)}));
     } else return p.c.syntaxError();
     d.if_exists = try p.ifExists();
     const q = try p.qname();
@@ -1190,5 +1190,6 @@ fn comment(p: *Parser) Error!Statement {
     const table = (try p.relation(q)).q;
     try p.c.expectKw("is");
     const t = try p.c.expect(.string);
-    return .{ .comment = .{ .table = table, .column = column, .text = if (t.text.len == 0) null else t.text } };
+    const v = try p.text(t);
+    return .{ .comment = .{ .table = table, .column = column, .text = if (v.len == 0) null else v } };
 }

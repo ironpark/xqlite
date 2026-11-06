@@ -141,7 +141,7 @@ zig build -Doptimize=ReleaseFast -Dstrip=true      # 릴리스 아카이브와 �
 
 `-Ddialects`로 뺀 방언은 고르면 `dialect not built in` 오류가 나고, SQLite만 넣으면 브라우저 wasm이 2.3MB에서 0.95MB로 줄어듭니다([빌드에 넣을 방언과 확장](docs/architecture.md#빌드에-넣을-방언과-확장)).
 
-VFS와 스토리지 층(페이저, B-tree), 둘이 엔진과 함께 쓰는 도우미, PostgreSQL 방언이 쓰는 UUID, 방언들의 렉서가 쓰는 SQL 스캐너, 방언들의 파서가 쓰는 토큰 커서는 따로 빌드되는 Zig 패키지(`pkg/vfs`의 `xqlite_vfs`, `pkg/storage`의 `xqlite_storage`, `pkg/base`의 `xqlite_base`, `std`만 쓰는 `pkg/uuid`의 `uuid`와 `pkg/sql/lexer`의 `sql/lexer`, 그 위의 `pkg/sql/parse`의 `sql/parse`)이고 루트 빌드가 경로 의존성으로 가져옵니다. 각 디렉터리에서 `zig build test`를 하면 그 패키지의 테스트만 돕니다([VFS 패키지](docs/architecture.md#vfs-패키지), [스토리지 패키지](docs/architecture.md#스토리지-패키지), [uuid 패키지](docs/architecture.md#uuid-패키지), [sqllex 패키지](docs/architecture.md#sqllex-패키지), [sqlparse 패키지](docs/sqlparse.md)).
+VFS와 스토리지 층(페이저, B-tree), 둘이 엔진과 함께 쓰는 도우미, PostgreSQL 방언이 쓰는 UUID, 방언들의 렉서(SQL 토큰, 선언형 렉서, 키워드 표), 방언들의 파서가 쓰는 토큰 커서와 우선순위 파서는 따로 빌드되는 Zig 패키지(`pkg/vfs`의 `xqlite_vfs`, `pkg/storage`의 `xqlite_storage`, `pkg/base`의 `xqlite_base`, `std`만 쓰는 `pkg/uuid`의 `uuid`와 `pkg/sql/lexer`의 `sql/lexer`, 그 위의 `pkg/sql/parse`의 `sql/parse`)이고 루트 빌드가 경로 의존성으로 가져옵니다. 각 디렉터리에서 `zig build test`를 하면 그 패키지의 테스트만 돕니다([VFS 패키지](docs/architecture.md#vfs-패키지), [스토리지 패키지](docs/architecture.md#스토리지-패키지), [uuid 패키지](docs/architecture.md#uuid-패키지), [sqllex 패키지](docs/architecture.md#sqllex-패키지), [sqlparse 패키지](docs/sqlparse.md)).
 
 Linux 타깃과 WebAssembly로 크로스 컴파일할 수 있습니다.
 
@@ -291,14 +291,13 @@ src/
 ├── xqlite.zig          # 공개 Zig API 이름 목록
 ├── cli/                # CLI xqlite (main.zig: sql, slt, fuzzcheck, serve, 테스트 보조 명령; shell.zig: sqlite3 호환 셸)
 ├── vdbe/               # 바이트코드 VM
-├── parse/              # SQLite tokenizer, LALR(1) 파서
 ├── sql/                # 코드 생성기 (SQLite C 포팅)
 │   ├── where/          # 플래너 (where.c, wherecode.c, whereexpr.c ...)
 │   └── func/           # 내장 함수 (func.c, date.c, json.c)
 ├── ir/                 # 공통 IR: 빌더 파사드, 구문 트리, lower, render
 ├── catalog/            # 방언 메타데이터(xq_catalog)와 메모리의 카탈로그(meta.zig), 시퀀스(xq_sequence)
 ├── dialect/
-│   ├── sqlite/
+│   ├── sqlite/         # 렉서(sqllex), 재귀 하강 파서(sqlite3RunParser), sqlite3_normalized_sql()
 │   ├── postgres/       # lexer, parser(→ 구문 트리 IR), DDL 검사, 카탈로그 뷰
 │   ├── mariadb/        # 토크나이저, 파서(→ 구문 트리 IR), sql_mode, 타입 변환, 함수
 │   ├── mssql/          # T-SQL 렉서, 파서(→ 구문 트리 IR), MERGE, 타입 변환, 함수, 카탈로그 뷰
@@ -315,8 +314,8 @@ pkg/
 ├── base/               # 공용 패키지 xqlite_base: 콜백 클로저, sqlite3_status() 카운터, 퍼저 도구
 ├── uuid/               # RFC 9562 UUID 패키지 uuid (std만 씀)
 └── sql/
-    ├── lexer/          # 방언 렉서가 쓰는 SQL 스캐너 패키지 sqllex (std만 씀)
-    └── parse/          # 방언 파서가 쓰는 토큰 커서·오류 기록 패키지 sqlparse (std, sqllex)
+    ├── lexer/          # 방언 렉서 패키지 sqllex: 토큰, 선언형 렉서, 키워드 표, 스캐너 (std만 씀)
+    └── parse/          # 방언 파서가 쓰는 토큰 커서·오류 기록·우선순위 파서 패키지 sqlparse (std, sqllex)
 docs/                   # 설계·호환성 문서
 examples/               # Zig API 예제, extension/ (남의 SQLite 확장을 올리는 C·Zig 예제), wasm/ (JavaScript 연결 코드, Node·브라우저 예제)
 tools/                  # 테스트 도구 xqt(교차 검증·차등 테스트·코드 생성), 케이스 파일

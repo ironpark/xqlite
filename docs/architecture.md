@@ -37,7 +37,7 @@ xqlite가 하나의 SQLite 엔진 위에서 여러 SQL 방언을 실행하는 �
 
 ```
 SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.xq.lang)으로 디스패치
-                 ├─ dialect/sqlite    tokenize.zig + parser.zig (기준 구현) ─────────────┐
+                 ├─ dialect/sqlite    lexer.zig + parser.zig (기준 구현) ────────────────┐
                  ├─ dialect/postgres  lexer → parser ─┐                                   │
                  ├─ dialect/mariadb   lexer → parser ─┤                                   │
                  ├─ dialect/mssql     lexer → parser ─┤                                   │
@@ -565,14 +565,15 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 
 ### sqllex 패키지
 
-방언들의 렉서가 함께 쓰는 SQL 스캐너는 엔진과 상관없는 일반 패키지 `pkg/sql/lexer/`(모듈 이름 `sql/lexer`, `@import("sql/lexer")`. 패키지 이름은 `sqllex`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 방언마다 다른 것은 토큰 종류, 토큰을 시도하는 순서, 오류 문구이고, 같은 것은 식별자 문자·공백·주석의 연속, 따옴표를 겹쳐 쓰는 따옴표 토큰, 십진수와 진법 숫자를 읽는 방법(규칙 몇 개만 다름)입니다. 그래서 패키지는 스캐너만 주고, 방언의 렉서는 첫 문자로 갈라 스캐너를 부르는 디스패치로 남습니다.
+다섯 방언의 렉서는 엔진과 상관없는 일반 패키지 `pkg/sql/lexer/`(모듈 이름 `sql/lexer`, `@import("sql/lexer")`. 패키지 이름은 `sqllex`)입니다. `std`만 import하고 루트가 경로 의존성으로 받습니다. 설계는 [SQL 렉서·파서 공통 층](sqlparse.md#2-렉서-pkgsqllexer)에 있습니다.
 
-- `Spec`은 방언의 규칙입니다. 단어를 시작하는 문자와 잇는 문자(`Set`, 컴파일 시점의 256칸 표), 주석(`--`, MySQL의 `-- `, `#`, 중첩하거나 하지 않는 `/* */`, 방언이 직접 건너뛰는 블록 주석: MariaDB의 실행 주석), 숫자(`1_000`의 구분자 `Separators`: 없음, 숫자 사이(PostgreSQL), 어디든(SQLite: 토큰이 받고 나중에 검사), `1..2`를 `1`과 `..`으로 읽는지, `0x`·`0o`·`0b` 접두사로 쓸 수 있는 글자)가 들어 있습니다. 공백은 모든 방언이 C의 isspace() 여섯 문자입니다. `Scanner(spec)`이 그 규칙에 맞춰 컴파일 시점에 특수화한 `skip()`(공백과 주석, 닫히지 않은 블록 주석의 시작 위치), `commentAt()`(그 자리에서 주석이 시작하는지: PostgreSQL 연산자가 `--`·`/*` 앞에서 끊김), `word()`, `foldedWord()`(단어와 접은 이름을 한 번에), `number()`(숫자 뒤의 접미사, 쓰레기, 숫자로 시작하는 이름은 방언이 판단), `radixPrefix()`(진법 접두사와 그 진법. 숫자가 없거나 뒤에 쓰레기가 붙은 경우는 방언이 판단), `dollarTag()`, `isDigit()`를 줍니다.
-- 규칙이 필요 없는 스캐너: `quotedEnd()`(겹친 따옴표, 런타임 플래그로 MySQL의 백슬래시 이스케이프), `undoubled()`(`quotedEnd()`와 `undouble()`), `blockCommentEnd()`, `lineEnd()`, `radixDigits()`(접두사 뒤의 숫자, `Separators`에 따른 구분자), `longestOp()`(첫 바이트로 갈라 그 바이트로 시작하는 연산자만 비교. 긴 연산자가 그것으로 시작하는 짧은 것보다 앞에 없으면 컴파일되지 않음), `dollarEnd()`. 따옴표 안, 줄 주석, 블록 주석은 `indexOfAnyOrNul()`로 16바이트씩(`@Vector`) 닫는 문자나 NUL을 찾습니다.
-- 해석은 스캔과 따로 있어 문장을 먼저 모두 토큰화하는 렉서(PostgreSQL, Oracle)와 원문 조각을 들고 있다가 필요할 때 해석하는 렉서(MariaDB, SQL Server)가 같은 코드를 씁니다: `undouble()`, `fold()`, `foldComptime()`(키워드를 컴파일 시점에 접음. PostgreSQL과 Oracle의 `Token.isKw()`는 키워드를 어느 대소문자로 받든 렉서가 접는 쪽으로 접어 견줌), `assertFolded()`(접힌 이름과 견줄 단어가 그 대소문자가 아니면 컴파일되지 않음. sqlparse 패키지 `words`의 `folded()`), `evenDigits()`.
-- 위치: `lineOf()`(MariaDB의 `at line N`), `restOfLine()`(PostgreSQL의 `at or near`. `lineEnd()`처럼 줄바꿈이나 NUL까지), `charLen()`(PostgreSQL 방언의 `json.charLen()`도 이것을 씀), `blankBefore()`·`blankAfter()`(SQL Server의 `GO`, Oracle의 `/` 줄).
+- **토큰**(`token.zig`): `TokenOf(키워드 표)`. 종류(`kind`: word, quoted_ident, string, integer, float, param, variable, op, 문장 부호 다섯, terminator, illegal, eof), 세부(`sub`: 문자열 접두사, 진법, 파라미터 모양, illegal의 까닭), 키워드 번호(`kw`), 범위(`start`, `end`)만 담은 12바이트이고 텍스트는 없습니다. `t.isKw("from")`은 컴파일 시점에 키워드 번호로 바뀌고, 표에 없는 단어는 컴파일되지 않습니다.
+- **렉서**(`lexer.zig`): `Lexer(D)`는 방언 정의 `D`의 `spec`(따옴표, 문자열 접두사, 숫자 꼬리, 파라미터, 변수, 연산자, 문장 끝 줄)과 훅(`skip`, `scan`, `word`, `number`)으로 만든 렉서입니다. 실패하지 않고, 토큰이 되지 못한 것은 `illegal` 토큰이며 그 오류 문구는 방언이 정합니다. 세션 옵션(`Options`: 백슬래시 이스케이프, ANSI_QUOTES)은 런타임에 받습니다.
+- **키워드 표**(`keywords.zig`): `Keywords(&.{ .{ "select", .reserved }, ... })`. 렉서가 단어마다 번호를 찾고(대소문자 무시), 등급(`reserved`, `unreserved`, `col_name`, `type_func_name`)이 예약어 집합을 대신합니다.
+- **값**(`value.zig`): 이름(접기, 겹친 따옴표), 이스케이프 없는 문자열(이어진 문자열 포함), 달러 인용과 q 인용의 본문, 숫자(`_` 빼기, 진법을 10진으로). 백슬래시 이스케이프의 뜻은 방언이 풉니다.
+- **스캐너**(`root.zig`): `Scanner(spec)`(공백과 주석, 단어, 숫자, 진법 접두사, 달러 태그)와 규칙이 필요 없는 스캐너(`quotedEnd()`, `blockCommentEnd()`, `lineEnd()`, `radixDigits()`, `longestOp()`, `dollarEnd()`. 따옴표 안과 주석은 `indexOfAnyOrNul()`로 16바이트씩), 해석(`undouble()`, `fold()`, `evenDigits()`), 위치(`lineOf()`, `restOfLine()`, `charLen()`, `blankBefore()`, `blankAfter()`). 렉서가 이것으로 만들어지고, 토큰 단위가 아닌 일을 하는 코드도 씁니다.
 
-모든 스캐너는 `[:0]const u8`과 그 안의 인덱스를 받아 인덱스를 돌려주고, 끝의 NUL이 루프를 멈추므로 경계 검사 없이 한 바이트 앞을 봅니다. 닫히지 않은 토큰을 오류로 볼지 방언의 토큰으로 볼지, 그 문구와 SQLSTATE는 방언이 정합니다(패키지는 끝과 닫혔는지만 돌려줌: `Extent`, 또는 그 두 필드와 본문을 담은 `Quoted`·`Dollar`). 방언의 `lexer.zig`는 `pub const spec`과 자기 것(PostgreSQL의 `E'..'`·`U&'..'`·`UESCAPE`·연산자 규칙·`$1`, Oracle의 `q'[..]'`·`:이름`·`f`/`d` 접미사, MariaDB의 실행 주석·`@변수`·sql_mode, SQL Server의 `[..]`·`@@`·`GO`)만 둡니다. SQLite 방언의 토크나이저(`src/parse/tokenize.zig`)는 tokenize.c를 그대로 옮긴 것(문자 분류 표, 문법의 `TK_*`, 키워드 해시, `sqlite3_complete()`)이고 바이트코드가 SQLite와 같아야 하므로 이 패키지를 쓰지 않습니다. 대신 SQLite의 규칙은 `sqllex.sqlite`(단어, 주석, 따옴표, 숫자)로 패키지에 있어, SQLite 텍스트를 읽는 다른 코드가 씁니다. `pgcatalog.zig`의 테스트가 무작위 텍스트로 이 규칙과 SQLite 토크나이저가 토큰의 끝을 같게 보는지 확인합니다.
+모든 스캐너와 렉서는 `[:0]const u8`과 그 안의 인덱스를 받고, 끝의 NUL이 루프를 멈추므로 경계 검사 없이 한 바이트 앞을 봅니다. 방언의 `lexer.zig`는 `lex`(spec, 키워드 표, 훅)와 방언만의 해석(PostgreSQL의 `E''`·`U&''` 이스케이프를 푸는 `Decoder`, Oracle의 숫자와 바인드 텍스트, MariaDB의 백슬래시 이스케이프)을 둡니다. SQLite 방언의 렉서는 `src/dialect/sqlite/lexer.zig`이고, tokenize.c의 `sqlite3GetToken()`(`getToken()`: 공백과 주석 토큰까지)과 키워드 표(mkkeywordhash의 순서, `sqlite3_keyword_name()`)를 그 위에 둡니다. SQLite 파서(`src/dialect/sqlite/parser.zig`), ALTER의 이름 바꾸기와 제약 지우기, `sqlite3_declare_vtab()`, `sqlite3_normalized_sql()`, `sqlite3_expanded_sql()`이 이것을 씁니다. `sqllex.sqlite`(SQLite의 단어·주석·숫자 규칙)는 SQLite 텍스트를 읽는 다른 코드(`pgcatalog.Scanner`)가 씁니다.
 
 렉서 밖에서는 와이어 서버의 명령 분류(`src/server/command.zig`, 루트가 `xqlite.sqllex`로 내보냄)가 이 패키지로 주석과 따옴표를 건너뜁니다. MySQL 서버가 `MULTI_STATEMENTS` 없는 클라이언트의 두 번째 문장을 찾을 때는 따로 규칙을 두지 않고 MariaDB 렉서(`dialect.mariadb_lexer`)를 그대로 씁니다. PostgreSQL 카탈로그가 SQLite 텍스트(`sqlite_schema`의 SQL, IR이 그린 식)를 읽는 `pgcatalog.Scanner`는 `sqllex.sqlite`의 스캐너를 씁니다. 읽는 것이 NUL로 끝나지 않는 조각(식 하나, 열 정의 하나)이라 조각을 NUL을 붙여 아레나에 한 번 복사합니다(`Scanner.init()`).
 
@@ -590,6 +591,9 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena` |
 | `src/dialect/{calendar,json_text,template,driver,syntax,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 그레고리력 날짜 계산, JSON 문자열 이스케이프(방언별 차이는 comptime 옵션), 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 프론트엔드의 드라이버(`run`, `streaming`, 파서의 오류를 Parse로 옮기는 `recordDiag`), 공통 문법 조각(CASE, ORDER BY, 윈도 프레임: [SQL 파서 공통 층](sqlparse.md)), MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
 | `src/dialect/{sqlite,postgres,mariadb,mssql,oracle}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
+| `src/dialect/sqlite/parser.zig` | SQLite 파서: `runParser()`(`sqlite3RunParser()`)와 parse.y 문법의 재귀 하강 파서. reduce 동작과 같은 순서로 `ir.*` 빌더를 부릅니다([SQL 렉서·파서 공통 층](sqlparse.md#53-파서)) |
+| `src/dialect/sqlite/lexer.zig`, `normalize.zig` | SQLite 렉서와 키워드 표(mkkeywordhash의 순서, `%fallback ID`), `sqlite3_normalized_sql()` |
+| `src/sql/tk.zig` | 토큰 코드 `TK_*`(parse.y의 번호). `Expr.op`와 VDBE의 비교·산술 연산 코드가 같은 번호를 씀 |
 | `src/dialect/constraint.zig`, `src/dialect/*/constraints.zig` | 제약 위반의 방언 문구와 `ErrorState`(`Hooks.constraint`, [제약 위반](#제약-위반)) |
 | `src/dialect/postgres/*.zig` | PostgreSQL 프론트엔드([PostgreSQL 호환](postgres/README.md)) |
 | `src/dialect/mariadb/*.zig` | MariaDB 프론트엔드([MariaDB 호환](mariadb/README.md)) |

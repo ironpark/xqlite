@@ -10,7 +10,7 @@ xqlite의 코어 엔진은 SQLite의 전통적인 계층형 아키텍처를 순�
 
 ```mermaid
 flowchart TD
-    SQL["SQL 쿼리 입력"] --> Parser["LALR(1) 파서 (parse.y 기반 코드 생성)"]
+    SQL["SQL 쿼리 입력"] --> Parser["재귀 하강 파서 (parse.y의 문법, src/dialect/sqlite/parser.zig)"]
     Parser --> Planner["쿼리 플래너 & 코드 생성기 (where.zig, select.zig)"]
     Planner --> VDBE["가상 데이터베이스 엔진 VDBE (vdbe.zig)"]
     VDBE --> BTree["B-Tree 엔진 (btree.zig)"]
@@ -20,7 +20,8 @@ flowchart TD
 
 | 모듈 경로 | 핵심 역할 |
 | --- | --- |
-| `src/sql/` | LALR(1) 토크나이저 및 파서, `parse.y`로부터 생성된 문법 엔진. |
+| `src/dialect/sqlite/` | SQLite의 렉서와 재귀 하강 파서. `parse.y`의 문법을 손으로 옮긴 것으로, 같은 빌더를 같은 순서로 불러 SQLite와 같은 바이트코드를 만듭니다. |
+| `src/sql/` | 코드 생성기(SQLite C 포팅). |
 | `src/vdbe/` | 바이트코드 인터프리터(VDBE), Opcode 디스패치 루프, 레지스터 및 커서 관리. |
 | `src/btree/` | B-Tree 페이지 분할/병합, 셀 인코딩, 테이블/인덱스 B-Tree 순회. |
 | `src/pager/` | 페이지 캐시(PCache), 롤백 저널, WAL 로깅, 체크포인트 관리. |

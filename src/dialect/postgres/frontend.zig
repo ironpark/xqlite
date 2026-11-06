@@ -56,15 +56,15 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.CompileE
         var i: usize = 1;
         if (toks[i].isKw("verbose")) i += 1;
         var schema: ?[]const u8 = null;
-        if (toks[i].kind == .ident and i + 1 < toks.len and toks[i + 1].kind == .dot) {
+        if (toks[i].kind == .word and i + 1 < toks.len and toks[i + 1].kind == .dot) {
             if (toks[i].isKw("public")) schema = "main";
             if (toks[i].isKw("pg_temp")) schema = "temp";
             if (schema != null) i += 2;
             // A table of a schema of CREATE SCHEMA: main."s.t".
-            if (schema == null and i + 3 == toks.len and (toks[i + 2].kind == .ident or toks[i + 2].kind == .qident)) {
+            if (schema == null and i + 3 == toks.len and (toks[i + 2].kind == .word or toks[i + 2].kind == .quoted_ident)) {
                 ps.p = p;
                 const n = toks[i + 2];
-                const t = try ps.qualified(.{ .text = toks[i].text, .pos = toks[i].start }, .{ .text = n.text, .pos = n.start });
+                const t = try ps.qualified(.{ .text = ps.val(toks[i]), .pos = toks[i].start }, .{ .text = ps.val(n), .pos = n.start });
                 if (t.mangled) {
                     const text = try std.fmt.allocPrintSentinel(p.arena, "ANALYZE main.{f}", .{dialect.Quoted('"'){ .z = t.name }}, 0);
                     return ir.stmt.lowerSqliteText(p, text);

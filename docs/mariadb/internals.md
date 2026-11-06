@@ -25,7 +25,7 @@ flowchart TD
 | 소스 파일 | 핵심 역할 |
 | --- | --- |
 | `frontend.zig` | 방언 진입점 및 세션 훅 연결 (`ConnState.mariadb`). |
-| `lexer.zig` | 백틱 식별자, 백슬래시 이스케이프, 실행 주석(`/*! ... */`), `@사용자변수` 토큰화. |
+| `lexer.zig` | 공통 렉서(`sqllex.Lexer`)의 MariaDB 규칙: 백틱 식별자, sql_mode에 따른 따옴표와 백슬래시 이스케이프, 실행 주석(`/*! ... */`), `@사용자변수`, 키워드 표(예약어는 `reserved` 등급). |
 | `parser.zig` | SELECT 및 표현식 파싱의 핵심 루프. |
 | `dml.zig` | `INSERT IGNORE`, `REPLACE INTO`, `ON DUPLICATE KEY UPDATE`의 IR 내림. |
 | `ddl.zig` | MariaDB 전용 테이블 옵션, AUTO_INCREMENT, 제약조건 파싱. |

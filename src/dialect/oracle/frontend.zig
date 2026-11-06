@@ -269,29 +269,21 @@ fn translateError(p: *int.Parse) int.Oom!void {
 fn translateMessage(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
     if (std.mem.startsWith(u8, m, "ORA-") or std.mem.startsWith(u8, m, "xqlite:")) return;
-    const Rule = struct { []const u8, []const u8, []const u8 };
-    const rules = [_]Rule{
-        // prefix, before the name, after it
-        .{ "no such table: ", "ORA-00942: table or view \"", "\" does not exist" },
-        .{ "no such view: ", "ORA-00942: table or view \"", "\" does not exist" },
-        .{ "no such column: ", "ORA-00904: \"", "\": invalid identifier" },
-        .{ "no such function: ", "ORA-00904: \"", "\": invalid identifier" },
-        .{ "no such index: ", "ORA-01418: specified index does not exist", "" },
-        .{ "ambiguous column name: ", "ORA-00918: column ambiguously defined", "" },
-        .{ "wrong number of arguments to function ", "ORA-00909: invalid number of arguments", "" },
-        .{ "misuse of aggregate", "ORA-00934: group function is not allowed here", "" },
-        .{ "misuse of window function", "ORA-30483: window functions are not allowed here", "" },
+    const rules = [_]driver.Reword{
+        .{ .prefix = "no such table: ", .before = "ORA-00942: table or view \"", .after = "\" does not exist" },
+        .{ .prefix = "no such view: ", .before = "ORA-00942: table or view \"", .after = "\" does not exist" },
+        .{ .prefix = "no such column: ", .before = "ORA-00904: \"", .after = "\": invalid identifier" },
+        .{ .prefix = "no such function: ", .before = "ORA-00904: \"", .after = "\": invalid identifier" },
+        .{ .prefix = "no such index: ", .before = "ORA-01418: specified index does not exist", .named = false },
+        .{ .prefix = "ambiguous column name: ", .before = "ORA-00918: column ambiguously defined", .named = false },
+        .{ .prefix = "wrong number of arguments to function ", .before = "ORA-00909: invalid number of arguments", .named = false },
+        .{ .prefix = "misuse of aggregate", .before = "ORA-00934: group function is not allowed here", .named = false },
+        .{ .prefix = "misuse of window function", .before = "ORA-30483: window functions are not allowed here", .named = false },
     };
-    for (rules) |r| if (std.mem.startsWith(u8, m, r[0])) {
-        if (r[2].len == 0) {
-            p.err_msg = try p.arena.dupeSentinel(u8, r[1], 0);
-            return;
-        }
-        var name = m[r[0].len..];
-        if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
-        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}", .{ r[1], name, r[2] }, 0);
+    if (try driver.reword(p.arena, m, &rules)) |hit| {
+        p.err_msg = hit.text;
         return;
-    };
+    }
     if (std.mem.startsWith(u8, m, "cannot insert a non-DEFAULT value into column")) {
         p.err_msg = try p.arena.dupeSentinel(u8, "ORA-32795: cannot insert into a generated always identity column", 0);
         return;

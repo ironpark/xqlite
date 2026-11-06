@@ -126,6 +126,45 @@ fn wrongArgs(ctx: *Context) void {
     api.resultError(ctx, msg);
 }
 
+/// text(), for ArenaCall.text() (which hides it).
+const argText = text;
+
+/// A call that works in an arena of its own: the context, the arena, and
+/// what most such functions do with them. A function with more state
+/// (a snapshot, a message) has a Call of its own with these too.
+pub const ArenaCall = struct {
+    ctx: *Context,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(ctx: *Context) ArenaCall {
+        return .{ .ctx = ctx, .arena = .init(gpa(ctx)) };
+    }
+
+    pub fn deinit(c: *ArenaCall) void {
+        c.arena.deinit();
+    }
+
+    pub fn a(c: *ArenaCall) std.mem.Allocator {
+        return c.arena.allocator();
+    }
+
+    /// Argument `m` as text (null after making the error the result).
+    pub fn text(c: *ArenaCall, m: *Mem) ?[]const u8 {
+        return argText(c.ctx, m);
+    }
+
+    pub fn oom(c: *ArenaCall) void {
+        api.resultErrorNomem(c.ctx);
+    }
+
+    /// Make an error of SQLSTATE `state` the result, its message
+    /// formatted in the arena.
+    pub fn errFmt(c: *ArenaCall, comptime state: *const [5]u8, comptime fmt: []const u8, args: anytype) void {
+        const msg = std.fmt.allocPrint(c.a(), fmt, args) catch return c.oom();
+        api.resultErrorState(c.ctx, .of(state), msg);
+    }
+};
+
 /// The StepFn calling `f(&c, argv)` with `c` a `Call` (`Call.init(ctx)`,
 /// deinit() after `f` returns): for the implementations that work in a
 /// per-call arena, which `f` reaches the context through (c.ctx). The

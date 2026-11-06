@@ -64,13 +64,6 @@ pub fn startsStatement(t: Token) bool {
     });
 }
 
-/// Whether `name` is a function of the dialect's table (frontend.zig):
-/// a call of it is a Func of .mssql, which the schema keeps as
-/// xq_mssql_<name>.
-pub fn isDialectFunction(name: []const u8) bool {
-    return dialect.spec(.mssql).function_map.get(name) != null;
-}
-
 /// The static type class of an expression (Parser.classOf()).
 pub const Class = enum { string, number, unknown };
 
@@ -723,7 +716,7 @@ pub const Parser = struct {
 
     pub fn funcNode(s: *Parser, pos: u32, f: tree.Func) Error!*Expr {
         var x = f;
-        x.dialect = if (isDialectFunction(f.name.text)) .mssql else null;
+        x.dialect = if (dialect.Dialect.mssql.hasFunction(f.name.text)) .mssql else null;
         return s.mk(pos, .{ .func = try s.new(tree.Func, x) });
     }
 

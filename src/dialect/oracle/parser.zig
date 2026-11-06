@@ -1830,7 +1830,7 @@ pub const Parser = struct {
         const mapped: []const u8 = mappedName(n) orelse blk: {
             // Oracle's own: the dialect's table.
             const lower_name = try std.ascii.allocLowerString(p.arena, n);
-            if (isDialectFunction(lower_name)) {
+            if (Dialect.oracle.hasFunction(lower_name)) {
                 const f = try p.new(tree.Func, .{ .name = .{ .text = lower_name, .pos = c.name.pos }, .dialect = .oracle, .args = c.args, .star = c.star, .distinct = c.distinct, .order_by = c.order_by, .filter = c.filter, .over = c.over });
                 const e = try p.expr(pos, .{ .func = f });
                 if ((eq(n, "TRUNC") or eq(n, "ROUND")) and argc >= 1 and try p.dateKindOf(c.args[0], &.{}) != .none) {
@@ -2106,10 +2106,6 @@ fn mappedName(n: []const u8) ?[]const u8 {
 fn isSqliteAggregate(name: []const u8) bool {
     _ = name;
     return false;
-}
-
-fn isDialectFunction(name: []const u8) bool {
-    return @import("../dialect.zig").spec(.oracle).function_map.get(name) != null;
 }
 
 /// Whether `e` refers to DUAL's column DUMMY.

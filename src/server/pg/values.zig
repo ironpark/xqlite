@@ -195,7 +195,7 @@ const interval_form = struct {
             .months = std.mem.readInt(i32, b[12..16], .big),
         };
         var buf: [repr.max_len]u8 = undefined;
-        const z = repr.intervalText(iv, &buf) orelse return error.UnsupportedBinary;
+        const z = repr.intervalText(iv, &buf);
         return .{ .text = try a.dupe(u8, z) };
     }
 };

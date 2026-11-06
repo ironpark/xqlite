@@ -145,3 +145,33 @@ fn report(p: *int.Parse, sql: [:0]const u8, diag: anytype) void {
     const z: ?[*]const u8 = if (pos < sql.len) sql.ptr + pos else null;
     ir.stmt.errorMsgState(p, z, diag.state, "{s}", .{diag.msg});
 }
+
+/// A rewording of an engine message: the prefix of SQLite's message, then
+/// the dialect's text before and after the name that follows the prefix.
+pub const Reword = struct {
+    prefix: []const u8,
+    before: []const u8,
+    after: []const u8 = "",
+    /// Whether the message names the object (if not, it is `before`).
+    named: bool = true,
+    /// What a name in schema main is written with (SQL Server's `dbo.`).
+    main_as: []const u8 = "",
+};
+
+/// `name` without schema `main.`, which the dialects' messages leave out.
+pub fn withoutMain(name: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, name, "main.")) name[5..] else name;
+}
+
+/// Message `m` reworded by the rule of `rules` whose prefix it has (in
+/// `a`), with that rule; null if it has none.
+pub fn reword(a: std.mem.Allocator, m: []const u8, rules: []const Reword) std.mem.Allocator.Error!?struct { rule: *const Reword, text: [:0]u8 } {
+    for (rules) |*r| if (std.mem.startsWith(u8, m, r.prefix)) {
+        if (!r.named) return .{ .rule = r, .text = try a.dupeSentinel(u8, r.before, 0) };
+        const name = m[r.prefix.len..];
+        const bare = withoutMain(name);
+        const schema = if (bare.len < name.len) r.main_as else "";
+        return .{ .rule = r, .text = try std.fmt.allocPrintSentinel(a, "{s}{s}{s}{s}", .{ r.before, schema, bare, r.after }, 0) };
+    };
+    return null;
+}

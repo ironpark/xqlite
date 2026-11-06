@@ -65,6 +65,12 @@ pub const Dialect = enum(u8) {
         };
     }
 
+    /// Whether `fname` is a function of the dialect's own table (the
+    /// parser marks a call of it as the dialect's).
+    pub fn hasFunction(d: Dialect, fname: []const u8) bool {
+        return spec(d).function_map.get(fname) != null;
+    }
+
     /// For tests: error.SkipZigTest unless every dialect of `ds` is
     /// built().
     pub fn requireBuilt(ds: []const Dialect) error{SkipZigTest}!void {

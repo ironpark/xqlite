@@ -531,12 +531,6 @@ pub fn describe(s: *Parser) Error!bool {
     return true;
 }
 
-/// `<prefix> LIKE 'pattern'`, or nothing.
-fn likeClause(s: *Parser, prefix: []const u8, like: ?[]const u8) Error![]const u8 {
-    const l = like orelse return "";
-    return std.fmt.allocPrint(s.a, "{s} LIKE {f}", .{ prefix, Q{ .z = l } });
-}
-
 /// Table `name` of database `schema` (else of the current one): the
 /// table, its SQLite database and its name in its MariaDB database.
 fn resolveTable(s: *Parser, name: []const u8, schema: ?[]const u8) Error!struct { *int.Table, []const u8, []const u8 } {

@@ -14,6 +14,8 @@
 const std = @import("std");
 const types = @import("../sql/types.zig");
 const Dialect = @import("dialect.zig").Dialect;
+const ivl = @import("datetime").interval;
+const pgdt = @import("datetime").pg;
 
 const Type = types.Type;
 const Logical = types.Logical;
@@ -112,11 +114,11 @@ fn uuidText(viewer: Dialect, t: Type, b: []const u8, buf: *[max_len]u8) ?[]const
 // An interval BLOB (pkg/datetime/src/interval.zig) as PostgreSQL's clients see it: for the
 // shell and the wire servers (their binary format, their parameters).
 
-pub const Interval = @import("datetime").interval.Interval;
+pub const Interval = ivl.Interval;
 
 /// The interval BLOB `b` is, null if it is none.
 pub fn intervalOf(b: []const u8) ?Interval {
-    return @import("datetime").interval.decode(b);
+    return ivl.decode(b);
 }
 
 /// The text of interval BLOB `b` in PostgreSQL; the text of an older
@@ -135,20 +137,17 @@ pub fn parseInterval(z: []const u8) ?Interval {
     return @import("postgres/ivinput.zig").decode(z, -1) catch null;
 }
 
-/// The text of `iv` in PostgreSQL's default output style; null if
-/// PostgreSQL is not in the build.
-pub fn intervalText(iv: Interval, buf: *[max_len]u8) ?[]const u8 {
+/// The text of `iv` in PostgreSQL's default output style.
+pub fn intervalText(iv: Interval, buf: *[max_len]u8) []const u8 {
     return intervalTextStyle(iv, .postgres, buf);
 }
 
 /// PostgreSQL's IntervalStyle (a session's: valuetext.Settings).
-pub const IntervalStyle = @import("datetime").interval.Style;
+pub const IntervalStyle = pgdt.IntervalStyle;
 
-/// The text of `iv` in IntervalStyle `style`; null if PostgreSQL is not
-/// in the build.
-pub fn intervalTextStyle(iv: Interval, style: IntervalStyle, buf: *[max_len]u8) ?[]const u8 {
-    if (comptime !Dialect.postgres.built()) return null;
-    return pg_datetime.formatIntervalStyle(iv, style, buf);
+/// The text of `iv` in IntervalStyle `style` (pkg/datetime's pg).
+pub fn intervalTextStyle(iv: Interval, style: IntervalStyle, buf: *[max_len]u8) []const u8 {
+    return pgdt.formatIntervalStyle(iv, style, buf);
 }
 
 /// The text of interval[] `z` (as stored: its elements in the default
@@ -158,8 +157,6 @@ pub fn intervalArrayText(gpa: Allocator, z: []const u8, style: IntervalStyle) Al
     if (comptime !Dialect.postgres.built()) return null;
     return @import("postgres/array.zig").restyleIntervals(gpa, z, style);
 }
-
-const pg_datetime = @import("postgres/datetime.zig");
 
 // ============================================================== jsonb
 // jsonb as SQLite's JSONB (pkg/json/src/jsonb.zig): its JSON text with PostgreSQL's

@@ -244,7 +244,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 - 반복을 줄이는 comptime 도우미가 같은 파일에 있습니다.
   - `dfunc.overloads("instr", &.{ 2, 3, 4 }, det, f)`: 인자 개수만 다른 등록을 한 번에(붙어 있음이 보장됨).
   - `dfunc.bind(f, .{ true, false })`: 고정 인자만 다른 구현을 손으로 쓴 래퍼 없이.
-  - `dfunc.withArena(Call, f)`: 호출마다 아레나를 쓰는 구현의 `init`/`deinit`.
+  - `dfunc.withArena(Call, f)`: 호출마다 아레나를 쓰는 구현의 `init`/`deinit`. 상태가 따로 없는 구현은 `dfunc.ArenaCall`(컨텍스트, 아레나, `text`, `oom`, `errFmt`)을 그대로 씁니다.
   - `dfunc.typed(name, o, Conv, f)`: 인자 개수를 `f`의 매개변수에서 정하고, 인자를 차례로 변환(NULL이면 그 자리에서 끝). 변환 규칙(`Conv`)은 방언 것입니다(Oracle은 `''`도 NULL).
 
 ### 엔진 함수 (`engine_functions`)
@@ -570,7 +570,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | 패키지 | 모듈 | 내용 |
 | --- | --- | --- |
 | `pkg/decimal/` | `decimal` | PostgreSQL `numeric`의 계산(`Dec`, 반올림, `select_div_scale()`)과 바이트 순서가 수의 순서인 키(디스크 형식). `decimal.math`는 `sqrt()`·`exp()`·`ln()`·`log()`·`power()`·`factorial()`(PostgreSQL 18의 numeric.c와 같은 자릿수) |
-| `pkg/datetime/` | `datetime` | `calendar`(그레고리력: 1970-01-01부터의 일수, 달의 길이), `interval`(PostgreSQL의 interval: 월·일·마이크로초, 산술, 정렬되는 BLOB) |
+| `pkg/datetime/` | `datetime` | `calendar`(그레고리력: 1970-01-01부터의 일수, 달의 길이), `interval`(PostgreSQL의 interval: 월·일·마이크로초, 산술, 정렬되는 BLOB), `pg`(PostgreSQL의 date·time·timestamp·interval 텍스트 입력과 출력 스타일, 값의 산술. PostgreSQL 방언의 SQL 함수는 `src/dialect/postgres/datetime.zig`이고, 값 표시(`repr.zig`)는 방언 없이 이것으로 interval을 씀) |
 | `pkg/json/` | `json` | `text`(JSON 문자열 이스케이프, 방언별 차이는 comptime 옵션), `jsonb`(SQLite의 JSONB: 노드 읽기, 엄격한 유효성, PostgreSQL 공백의 텍스트, 노드 헤더 쓰기) |
 | `pkg/regex/` | `regex` | `are`(PostgreSQL의 고급 정규식, Henry Spencer 엔진: `~`, SIMILAR TO, `regexp_*()`), `pike`(작은 Pike VM: 예전 스키마의 `xq_pg_regex()`, jsonpath의 `like_regex`) |
 | `pkg/pgtext/` | `pgtext` | `array`(PostgreSQL 배열의 텍스트: `array_in()`의 문법과 DETAIL, `array_out()`의 원소 인용, int2vector·oidvector의 `1 2`). PostgreSQL 방언의 배열 함수와 text[] 인자, 카탈로그의 `xq_pg_array_position()`, 와이어 서버의 이진 배열(루트가 `xqlite.pgtext`로 내보냄)이 같은 파서를 씁니다 |
@@ -602,7 +602,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | 파일 | 내용 |
 | --- | --- |
 | `src/dialect/dialect.zig` | `Dialect`(`sqlite`, `postgres`, `mariadb`, `mssql`, `oracle`), `Frontend`, `Hooks`, `Lang`, 연결별 상태(`ConnState`), 디스패치 |
-| `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena` |
+| `src/dialect/func.zig` | 방언 함수 테이블을 만드는 생성자(`scalar`, `aggregate`, `overloads`, `typed`)와 `bind`, `withArena`, `ArenaCall` |
 | `src/dialect/{template,driver,syntax,shared_funcs}.zig` | 방언들이 함께 쓰는 것: 카탈로그 뷰 템플릿(`{key}`를 컴파일 시점에 검사), 프론트엔드의 드라이버(`run`, `streaming`, 파서의 오류를 Parse로 옮기는 `recordDiag`), 공통 문법 조각(CASE, ORDER BY, 윈도 프레임: [SQL 파서 공통 층](sqlparse.md)), MariaDB와 MSSQL이 같은 뜻으로 쓰는 수학·문자열 함수(`LEFT`, `REPLICATE`, `ROUND` ...). 어느 방언 디렉터리에도 속하지 않으므로 `-Ddialects=`로 방언을 빼도 그대로입니다 |
 | `src/dialect/{sqlite,postgres,mariadb,mssql,oracle}/frontend.zig` | 방언마다 `frontend`와 `hooks` |
 | `src/dialect/sqlite/parser.zig` | SQLite 파서: `runParser()`(`sqlite3RunParser()`)와 parse.y 문법의 재귀 하강 파서. reduce 동작과 같은 순서로 `ir.*` 빌더를 부릅니다([SQL 렉서·파서 공통 층](sqlparse.md#53-파서)) |

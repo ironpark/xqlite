@@ -193,20 +193,13 @@ fn window(name: [:0]const u8, step: dfunc.StepFn, final: dfunc.FinalFn, value_fn
 const Fail = error{ Reported, OutOfMemory, Invalid, Overflow, DivisionByZero };
 
 /// A call: an arena of the connection's allocator.
-const Call = struct {
-    ctx: *Context,
-    arena: std.heap.ArenaAllocator,
-
-    fn a(c: *Call) Allocator {
-        return c.arena.allocator();
-    }
-};
+const Call = dfunc.ArenaCall;
 
 fn wrap(comptime f: fn (*Call, []*Mem) Fail!void) dfunc.StepFn {
     return struct {
         fn call(ctx: *Context, argv: []*Mem) void {
-            var c: Call = .{ .ctx = ctx, .arena = .init(dfunc.gpa(ctx)) };
-            defer c.arena.deinit();
+            var c: Call = .init(ctx);
+            defer c.deinit();
             f(&c, argv) catch |err| report(ctx, err);
         }
     }.call;
@@ -631,8 +624,8 @@ fn sumInverse(ctx: *Context, argv: []*Mem) void {
 }
 
 fn accumulate(ctx: *Context, argv: []*Mem, remove: bool) void {
-    var c: Call = .{ .ctx = ctx, .arena = .init(dfunc.gpa(ctx)) };
-    defer c.arena.deinit();
+    var c: Call = .init(ctx);
+    defer c.deinit();
     accumulateImpl(&c, argv[0], remove) catch |err| report(ctx, err);
 }
 
@@ -701,8 +694,8 @@ fn sumFinal(comptime which: Agg, comptime final: bool) dfunc.FinalFn {
                 if (st.scales) |s| gpa.free(s[0..st.scales_len]);
                 st.* = .{};
             };
-            var c: Call = .{ .ctx = ctx, .arena = .init(dfunc.gpa(ctx)) };
-            defer c.arena.deinit();
+            var c: Call = .init(ctx);
+            defer c.deinit();
             finish(&c, st, which) catch |err| report(ctx, err);
         }
     }.f;

@@ -131,22 +131,19 @@ pub fn functionNotExist(a: std.mem.Allocator, name: []const u8, args: []const []
 /// SQLite's messages for common failures in PostgreSQL's words.
 fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
-    const rules = [_]struct { []const u8, []const u8, []const u8 }{
-        // prefix, before the name, after it
-        .{ "no such table: ", "relation \"", "\" does not exist" },
-        .{ "no such column: ", "column \"", "\" does not exist" },
-        .{ "no such function: ", "function ", "() does not exist" },
-        .{ "no such index: ", "index \"", "\" does not exist" },
-        .{ "no such view: ", "view \"", "\" does not exist" },
-        .{ "ambiguous column name: ", "column reference \"", "\" is ambiguous" },
-        .{ "no such collation sequence: ", "collation \"", "\" for encoding \"UTF8\" does not exist" },
+    const rules = [_]driver.Reword{
+        .{ .prefix = "no such table: ", .before = "relation \"", .after = "\" does not exist" },
+        .{ .prefix = "no such column: ", .before = "column \"", .after = "\" does not exist" },
+        .{ .prefix = "no such function: ", .before = "function ", .after = "() does not exist" },
+        .{ .prefix = "no such index: ", .before = "index \"", .after = "\" does not exist" },
+        .{ .prefix = "no such view: ", .before = "view \"", .after = "\" does not exist" },
+        .{ .prefix = "ambiguous column name: ", .before = "column reference \"", .after = "\" is ambiguous" },
+        .{ .prefix = "no such collation sequence: ", .before = "collation \"", .after = "\" for encoding \"UTF8\" does not exist" },
     };
-    for (rules) |r| if (std.mem.startsWith(u8, m, r[0])) {
-        var name = m[r[0].len..];
-        if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
-        const hint: ?[]const u8 = if (std.mem.eql(u8, r[0], "no such function: ")) function_hint else null;
-        return util.rewordError(p, .{ .message = try std.fmt.allocPrint(p.arena, "{s}{s}{s}", .{ r[1], name, r[2] }), .hint = hint });
-    };
+    if (try driver.reword(p.arena, m, &rules)) |hit| {
+        const hint: ?[]const u8 = if (std.mem.eql(u8, hit.rule.prefix, "no such function: ")) function_hint else null;
+        return util.rewordError(p, .{ .message = hit.text, .hint = hint });
+    }
     // A function of another number of arguments: PostgreSQL finds none.
     const wrong = "wrong number of arguments to function ";
     if (std.mem.startsWith(u8, m, wrong) and std.mem.endsWith(u8, m, "()")) {
@@ -170,8 +167,7 @@ fn translateError(p: *int.Parse) int.Oom!void {
     // "table t already exists", "index i already exists"
     inline for (.{ "table ", "index ", "view " }) |kind| {
         if (std.mem.startsWith(u8, m, kind) and std.mem.endsWith(u8, m, " already exists")) {
-            var name = m[kind.len .. m.len - " already exists".len];
-            if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
+            var name = driver.withoutMain(m[kind.len .. m.len - " already exists".len]);
             if (name.len > 1 and name[0] == '"') name = name[1 .. name.len - 1];
             // PostgreSQL names the relation without its schema.
             if (nsp.split(name)) |s| if (nsp.exists(p.db, s.schema) catch false) {

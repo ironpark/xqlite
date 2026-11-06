@@ -59,13 +59,6 @@ const QName = tree.QName;
 pub const Token = lexer.Token;
 pub const Error = int.Oom || int.ParseError;
 
-/// Whether `name` is a function of the dialect's table (runtime.zig):
-/// a call of it is a Func of .mariadb, which the schema keeps as
-/// xq_mariadb_<name>.
-pub fn isDialectFunction(name: []const u8) bool {
-    return dialect.spec(.mariadb).function_map.get(name) != null;
-}
-
 /// What the parser is reading for the schema (Parser.stored).
 pub const Stored = struct {
     /// The clause (CHECK, DEFAULT, GENERATED ALWAYS AS), "" for a view.
@@ -723,7 +716,7 @@ pub const Parser = struct {
     }
 
     /// A call of `fname` (a function the frontend chose): of the
-    /// dialect's table if it has one of that name (isDialectFunction()),
+    /// dialect's table if it has one of that name (Dialect.hasFunction()),
     /// else a SQLite built-in or an engine function.
     pub fn func(s: *Parser, pos: u32, fname: []const u8, args: []const *Expr) Error!*Expr {
         return s.funcNode(pos, .{ .name = .{ .text = fname, .pos = pos }, .args = try s.a.dupe(*Expr, args) });
@@ -732,7 +725,7 @@ pub const Parser = struct {
     /// A Func node (its `dialect` set as func() says).
     pub fn funcNode(s: *Parser, pos: u32, f: tree.Func) Error!*Expr {
         var x = f;
-        x.dialect = if (isDialectFunction(f.name.text)) .mariadb else null;
+        x.dialect = if (dialect.Dialect.mariadb.hasFunction(f.name.text)) .mariadb else null;
         return s.mk(pos, .{ .func = try s.new(tree.Func, x) });
     }
 

@@ -264,9 +264,3 @@ fn names(s: *Parser, ps: []const []const u8, pos: u32) Error![]tree.Name {
     for (ps, out) |p, *n| n.* = .{ .text = p, .pos = pos };
     return out;
 }
-
-/// The declared type of a variable, for types.parseText().
-pub fn varType(s: *Parser, name: []const u8) ?types.Type {
-    const v = s.p.db.xq.mssql.get(name) orelse return null;
-    return types.parseText(v.type);
-}

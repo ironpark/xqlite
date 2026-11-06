@@ -192,23 +192,19 @@ pub fn translateError(p: *int.Parse) int.Oom!void {
         .{ "42883".*, 195 },  .{ "42P07".*, 2714 }, .{ "42601".*, 102 },
         .{ "42704".*, 3701 },
     }, if (std.mem.startsWith(u8, m, "no such column: ") and std.mem.indexOfScalar(u8, m["no such column: ".len..], '.') != null) 4104 else null);
-    const rules = [_]struct { []const u8, []const u8, []const u8 }{
-        // prefix, before the name, after it
-        .{ "no such table: ", "Invalid object name '", "'." },
-        .{ "no such view: ", "Invalid object name '", "'." },
-        .{ "no such function: ", "'", "' is not a recognized built-in function name." },
-        .{ "ambiguous column name: ", "Ambiguous column name '", "'." },
-        .{ "no such index: ", "Cannot drop the index '", "', because it does not exist or you do not have permission." },
-    };
-    for (rules) |r| if (std.mem.startsWith(u8, m, r[0])) {
-        var name = m[r[0].len..];
+    const rules = [_]driver.Reword{
         // main.t: the user wrote dbo.t (the parser keeps an unqualified
         // name unqualified).
-        const dbo = std.mem.startsWith(u8, name, "main.") and std.mem.startsWith(u8, r[1], "Invalid");
-        if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
-        p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "{s}{s}{s}{s}", .{ r[1], if (dbo) "dbo." else "", name, r[2] }, 0);
-        return;
+        .{ .prefix = "no such table: ", .before = "Invalid object name '", .after = "'.", .main_as = "dbo." },
+        .{ .prefix = "no such view: ", .before = "Invalid object name '", .after = "'.", .main_as = "dbo." },
+        .{ .prefix = "no such function: ", .before = "'", .after = "' is not a recognized built-in function name." },
+        .{ .prefix = "ambiguous column name: ", .before = "Ambiguous column name '", .after = "'." },
+        .{ .prefix = "no such index: ", .before = "Cannot drop the index '", .after = "', because it does not exist or you do not have permission." },
     };
+    if (try driver.reword(p.arena, m, &rules)) |hit| {
+        p.err_msg = hit.text;
+        return;
+    }
     if (std.mem.startsWith(u8, m, "no such column: ")) {
         const name = m["no such column: ".len..];
         if (std.mem.lastIndexOfScalar(u8, name, '.')) |_| {
@@ -220,8 +216,7 @@ pub fn translateError(p: *int.Parse) int.Oom!void {
     }
     inline for (.{ "table ", "view " }) |kind| {
         if (std.mem.startsWith(u8, m, kind) and std.mem.endsWith(u8, m, " already exists")) {
-            var name = m[kind.len .. m.len - " already exists".len];
-            if (std.mem.startsWith(u8, name, "main.")) name = name[5..];
+            var name = driver.withoutMain(m[kind.len .. m.len - " already exists".len]);
             if (name.len > 1 and name[0] == '"') name = name[1 .. name.len - 1];
             p.err_msg = try std.fmt.allocPrintSentinel(p.arena, "There is already an object named '{s}' in the database.", .{name}, 0);
             return;

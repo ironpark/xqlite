@@ -41,6 +41,7 @@ const words = sqlparse.words;
 const tree = @import("../../ir/tree.zig");
 const ir = @import("../../ir/ir.zig");
 const int = @import("../../sql/sqlite_int.zig");
+const Dialect = @import("../dialect.zig").Dialect;
 const build = @import("../../sql/build.zig");
 const lexer = @import("lexer.zig");
 const types = @import("types.zig");
@@ -2885,7 +2886,7 @@ pub const Parser = struct {
             }
             const f = try p.new(tree.Func, .{
                 .name = name,
-                .dialect = if (isDialectFunction(mapped)) .postgres else null,
+                .dialect = if (Dialect.postgres.hasFunction(mapped)) .postgres else null,
                 .args = c.args,
                 .star = c.star,
                 .distinct = c.distinct,
@@ -2901,7 +2902,7 @@ pub const Parser = struct {
 
     /// A call the parser makes: `owner` a dialect for a function of its
     /// table.
-    fn call(p: *Parser, pos: u32, name: []const u8, owner: ?@import("../dialect.zig").Dialect, args: []const *Expr) Error!*Expr {
+    fn call(p: *Parser, pos: u32, name: []const u8, owner: ?Dialect, args: []const *Expr) Error!*Expr {
         const f = try p.new(tree.Func, .{ .name = .{ .text = name, .pos = pos }, .dialect = owner, .args = try p.list(args) });
         return p.expr(pos, .{ .func = f });
     }
@@ -4003,12 +4004,6 @@ fn takesMods(name: []const u8) bool {
 pub fn collationName(name: []const u8) []const u8 {
     if (eql(name, "C") or eql(name, "POSIX") or std.ascii.eqlIgnoreCase(name, "default") or std.ascii.eqlIgnoreCase(name, "ucs_basic")) return "BINARY";
     return name;
-}
-
-/// Whether `name` is a function of the dialect's table
-/// (dialect.Hooks.functions).
-fn isDialectFunction(name: []const u8) bool {
-    return @import("../dialect.zig").spec(.postgres).function_map.get(name) != null;
 }
 
 /// A regular expression operator: `~` (`fold`: `~*`, case-insensitive;

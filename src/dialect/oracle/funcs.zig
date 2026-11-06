@@ -973,21 +973,6 @@ fn toDateCommon(ctx: *Context, argv: []*Mem, digits: ?u32) void {
 const toDateFunc = dfunc.bind(toDateCommon, .{null});
 const toTimestampFunc = dfunc.bind(toDateCommon, .{6});
 
-/// The fractional digits a date's text has (a TIMESTAMP keeps them).
-fn fracDigitsOf(m: *Mem) u32 {
-    if (api.valueType(m) != vi.SQLITE_TEXT) return 0;
-    const z = api.valueText(m) orelse return 0;
-    if (z.len > 20 and z[19] == '.') {
-        var n: u32 = 0;
-        for (z[20..]) |c| {
-            if (!std.ascii.isDigit(c)) break;
-            n += 1;
-        }
-        return n;
-    }
-    return 0;
-}
-
 fn addMonthsFunc(ctx: *Context, d: DateTime, n: i64) void {
     resultDate(ctx, dt.addMonths(d, n));
 }

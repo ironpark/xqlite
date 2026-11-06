@@ -62,44 +62,7 @@ pub const functions = dfunc.overloads("regexp_match", &.{ 2, 3 }, det, inArena(m
 
 // ================================================================ calls
 
-const Call = struct {
-    arena: std.heap.ArenaAllocator,
-    ctx: *Context,
-
-    pub fn init(ctx: *Context) Call {
-        return .{ .arena = .init(dfunc.gpa(ctx)), .ctx = ctx };
-    }
-
-    pub fn deinit(c: *Call) void {
-        c.arena.deinit();
-    }
-
-    fn a(c: *Call) Allocator {
-        return c.arena.allocator();
-    }
-
-    fn text(c: *Call, m: *Mem) ?[]const u8 {
-        return dfunc.text(c.ctx, m);
-    }
-
-    fn oom(c: *Call) void {
-        api.resultErrorNomem(c.ctx);
-    }
-
-    fn fail(c: *Call, comptime state: *const [5]u8, comptime fmt: []const u8, args: anytype) void {
-        const msg = std.fmt.allocPrint(c.a(), fmt, args) catch return c.oom();
-        api.resultErrorState(c.ctx, .of(state), msg);
-    }
-
-    fn failFields(c: *Call, comptime state: *const [5]u8, f: @import("../../sql/util.zig").ErrorFields) void {
-        api.resultErrorFields(c.ctx, .of(state), f);
-    }
-
-    /// Integer argument `m` (not NULL).
-    fn intArg(_: *Call, m: *Mem) i64 {
-        return api.valueInt64(m);
-    }
-};
+const Call = dfunc.ArenaCall;
 
 /// A pattern with its flags, compiled: held by the connection's cache
 /// and by the statements that keep it as auxiliary data (`refs` of
@@ -182,7 +145,7 @@ fn parseFlags(c: *Call, f: []const u8, fname: ?[]const u8) ?Flags {
         if (ch == 'g') {
             r.global = true;
         } else if (ch >= 128 or !r.opt.apply(ch)) {
-            c.fail("22023", "invalid regular expression option: \"{s}\"", .{f[i .. i + json.charLen(f, i)]});
+            c.errFmt("22023", "invalid regular expression option: \"{s}\"", .{f[i .. i + json.charLen(f, i)]});
             return null;
         }
     }
@@ -192,7 +155,7 @@ fn parseFlags(c: *Call, f: []const u8, fname: ?[]const u8) ?Flags {
             return null;
         };
         const hint: ?[]const u8 = if (std.mem.eql(u8, n, "regexp_match")) "Use the regexp_matches function instead." else null;
-        c.failFields("22023", .{ .message = msg, .hint = hint });
+        api.resultErrorFields(c.ctx, .of("22023"), .{ .message = msg, .hint = hint });
         return null;
     };
     return r;
@@ -242,7 +205,7 @@ fn compileNew(c: *Call, pattern: []const u8, opt: are.Options) ?*Compiled {
         x.release();
         switch (err) {
             error.OutOfMemory => c.oom(),
-            error.BadPattern => c.fail("2201B", "invalid regular expression: {s}", .{why.message()}),
+            error.BadPattern => c.errFmt("2201B", "invalid regular expression: {s}", .{why.message()}),
         }
         return null;
     };
@@ -267,9 +230,9 @@ fn flagsArg(c: *Call, argv: []*Mem, i: usize) ?[]const u8 {
 /// Integer parameter `name` at least `min` (PostgreSQL's message when
 /// not).
 fn atLeast(c: *Call, m: *Mem, name: []const u8, min: i64) ?i64 {
-    const v = c.intArg(m);
+    const v = api.valueInt64(m);
     if (v < min) {
-        c.fail("22023", "invalid value for parameter \"{s}\": {d}", .{ name, v });
+        c.errFmt("22023", "invalid value for parameter \"{s}\": {d}", .{ name, v });
         return null;
     }
     return v;
@@ -325,7 +288,7 @@ fn matches(c: *Call, re: *const are.Regex, s: []const u8, from: usize, global: b
 fn engineError(c: *Call, err: are.Error) void {
     switch (err) {
         error.OutOfMemory => c.oom(),
-        error.BadPattern => c.fail("2201B", "invalid regular expression: {s}", .{are.Fail.toobig.message()}),
+        error.BadPattern => c.errFmt("2201B", "invalid regular expression: {s}", .{are.Fail.toobig.message()}),
     }
 }
 
@@ -458,7 +421,7 @@ fn replaceFunc(c: *Call, argv: []*Mem) void {
             flags = c.text(argv[3]) orelse return;
             if (flags.len > 0 and std.ascii.isDigit(flags[0])) {
                 const msg = std.fmt.allocPrint(c.a(), "invalid regular expression option: \"{s}\"", .{flags[0..1]}) catch return c.oom();
-                return c.failFields("22023", .{ .message = msg, .hint = "If you meant to use regexp_replace() with a start parameter, cast the fourth argument to integer explicitly." });
+                return api.resultErrorFields(c.ctx, .of("22023"), .{ .message = msg, .hint = "If you meant to use regexp_replace() with a start parameter, cast the fourth argument to integer explicitly." });
             }
         }
     } else if (argv.len > 4) {
@@ -541,9 +504,9 @@ fn nth(c: *Call, argv: []*Mem, s: []const u8, fname: []const u8, n_arg: usize, f
     const start: i64 = if (argv.len > 2) atLeast(c, argv[2], "start", 1) orelse return .err else 1;
     const n: i64 = if (argv.len > n_arg) atLeast(c, argv[n_arg], "n", 1) orelse return .err else 1;
     if (std.mem.eql(u8, fname, "regexp_instr") and argv.len > 4) {
-        const e = c.intArg(argv[4]);
+        const e = api.valueInt64(argv[4]);
         if (e != 0 and e != 1) {
-            c.fail("22023", "invalid value for parameter \"endoption\": {d}", .{e});
+            c.errFmt("22023", "invalid value for parameter \"endoption\": {d}", .{e});
             return .err;
         }
     }
@@ -571,7 +534,7 @@ fn instrFunc(c: *Call, argv: []*Mem) void {
         .err => {},
         .none => api.resultInt64(c.ctx, 0),
         .span => |sp| {
-            const end = argv.len > 4 and c.intArg(argv[4]) == 1;
+            const end = argv.len > 4 and api.valueInt64(argv[4]) == 1;
             api.resultInt64(c.ctx, charPos(s, if (end) sp.eo else sp.so));
         },
     }
@@ -626,7 +589,7 @@ fn similarOf(c: *Call, pm: *Mem, em: ?*Mem, context: ?[]const u8) ?[]const u8 {
         if (e.len == 0) {
             esc = null;
         } else if (dfunc.charCount(e) > 1) {
-            c.failFields("22025", .{ .message = "invalid escape string", .hint = "Escape string must be empty or one character.", .context = context });
+            api.resultErrorFields(c.ctx, .of("22025"), .{ .message = "invalid escape string", .hint = "Escape string must be empty or one character.", .context = context });
             return null;
         } else esc = e;
     }
@@ -634,7 +597,7 @@ fn similarOf(c: *Call, pm: *Mem, em: ?*Mem, context: ?[]const u8) ?[]const u8 {
     similarEscape(c.a(), p, esc, &out) catch |err| {
         switch (err) {
             error.OutOfMemory => c.oom(),
-            error.TooManyQuotes => c.failFields("2200B", .{ .message = "SQL regular expression may not contain more than two escape-double-quote separators", .context = context }),
+            error.TooManyQuotes => api.resultErrorFields(c.ctx, .of("2200B"), .{ .message = "SQL regular expression may not contain more than two escape-double-quote separators", .context = context }),
         }
         return null;
     };

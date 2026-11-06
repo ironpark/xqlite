@@ -513,6 +513,8 @@ zig-out/bin/xqt wire-diff pg --record                        # tools/dialect/pg-
   - `result`: xqlite가 답했지만 PostgreSQL과 다른 답(또는 PostgreSQL이 오류를 낸 문장에 답함)
   - `error`: PostgreSQL이 답한 문장에 xqlite가 오류를 냄
   - `format`: 대소문자, 공백, 표의 선(`-`, `+`, `|`), 오류 문구와 그 주변 줄(`LINE`과 `^`, `DETAIL`, `HINT`, `CONTEXT`, `NOTICE`, `WARNING`), 서버의 `version()` 문자열만 다름
+- 두 서버가 다르게 답해도 둘 다 맞는 것은 같은 답으로 봅니다(`sameAnswers()`). 정렬된 표는 셀(앞뒤 공백을 뺀 값)로 비교하므로 열 너비는 상관없지만, psql이 숫자 타입 열을 오른쪽에 붙이는 정렬은 열마다 비교합니다(정수를 `text`로 알린 열은 다름). 그 밖에 `version()` 문자열인 셀과, 표 앞의 문장(앞 표 뒤로 psql이 되풀이한 입력)에 `ORDER BY`가 없는 표의 행 순서는 보지 않습니다.
+- 남은 차이(기록과 비교해 130개 중 3개)는 xqlite가 사실대로 답하는 것입니다. `\dt+`의 크기(PostgreSQL 힙 페이지의 `16 kB`, xqlite는 `0 bytes`), `\l`의 `Collate`·`Ctype`(기록한 컨테이너의 `en_US.utf8`, xqlite의 정렬은 바이트 순이라 `C`), `ORDER BY` 없는 `array_agg()`의 원소 순서(PostgreSQL 해시 조인의 순서)입니다.
 - `--out DIR`은 케이스마다 두 출력을 `DIR/NAME.pg`, `DIR/NAME.xq`에 씁니다.
 - psql을 돌리는 명령은 `PG_WIRE_EXEC`(주면 모든 모드에서 그것을, 그 뒤에 `sh -c "psql ... 2>&1"`; `--live`·`--record`의 기본은 `podman exec -i xq-pg`), psql이 xqlite를 찾는 호스트는 `PG_WIRE_HOST`(기본 `host.containers.internal`, 호스트의 psql이면 `127.0.0.1`), xqlite가 받는 주소는 `PG_WIRE_LISTEN`(기본 `0.0.0.0`, 호스트의 psql이면 `127.0.0.1`)으로 바꿉니다.
 - `--regress`는 `tools/dialect/pg-regress`(`PG_REGRESS_DIR`)의 PostgreSQL 회귀 테스트(REL_18_STABLE의 `boolean`, `int2`, `int4`, `int8`, `numeric`, `text`, `varchar`, `case`, `strings`, `uuid`, PostgreSQL 라이선스는 그 디렉터리의 `COPYRIGHT`)를 pg_regress처럼(`psql -X -a -q`, `PGTZ=PST8PDT`, `PGDATESTYLE='Postgres, MDY'`) xqlite에서만 돌리고 `expected/TEST.out`과 문장별로 비교합니다. `setup.sql`(`test_setup.sql`의 `INT4_TBL` 등)이 테스트마다 먼저 돕니다. 출력이 있는 문장 중 기대 출력과 같은 것의 비율과, 다른 것의 세 가지 분류를 찍습니다. psql은 기본 모드처럼 고르고(`--live`이면 `xq-pg` 안의 것), 서버는 쓰지 않습니다.

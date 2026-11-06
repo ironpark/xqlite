@@ -257,6 +257,29 @@ const pg_extension =
     \\  false AS extrelocatable, '1.0' AS extversion, NULL::oid[] AS extconfig, NULL::text[] AS extcondition
 ;
 
+/// pg_available_extensions: plpgsql, the one there is (pg_extension).
+/// The function pg_available_extensions() is its name, default_version
+/// and comment (parser.zig).
+const pg_available_extensions =
+    \\SELECT 'plpgsql'::name AS name, '1.0'::text AS default_version, '1.0'::text AS installed_version,
+    \\  'PL/pgSQL procedural language'::text AS comment
+;
+
+/// pg_range: PostgreSQL's range types (systypes.zig), which pg_type
+/// lists though xqlite has no range values.
+const pg_range = blk: {
+    var z: []const u8 =
+        \\SELECT t::oid AS rngtypid, s::oid AS rngsubtype, m::oid AS rngmultitypid, c::oid AS rngcollation, o::oid AS rngsubopc,
+        \\  k AS rngcanonical, d AS rngsubdiff
+        \\FROM (VALUES
+    ;
+    for (@import("systypes.zig").ranges, 0..) |r, i| {
+        if (i > 0) z = z ++ ", ";
+        z = z ++ std.fmt.comptimePrint("({d}, {d}, {d}, {d}, {d}, '{s}', '{s}')", .{ r.typ, r.subtype, r.multi, r.coll, r.opc, r.canonical, r.subdiff });
+    }
+    break :blk z ++ ") AS x(t, s, m, c, o, k, d)";
+};
+
 /// pg_opfamily: PostgreSQL's operator families (pgcatalog.opfamilies).
 const pg_opfamily = blk: {
     @setEvalBranchQuota(200_000);
@@ -432,6 +455,7 @@ const defs = [_]Def{
     .{ .schema = "pg_catalog", .name = "pg_publication_namespace", .text = empty(&.{ .{ "oid", .oid }, .{ "pnpubid", .oid }, .{ "pnnspid", .oid } }) },
     .{ .schema = "pg_catalog", .name = "pg_enum", .text = empty(&.{ .{ "oid", .oid }, .{ "enumtypid", .oid }, .{ "enumsortorder", .float4 }, .{ "enumlabel", .name } }) },
     .{ .schema = "pg_catalog", .name = "pg_extension", .text = pg_extension },
+    .{ .schema = "pg_catalog", .name = "pg_available_extensions", .text = pg_available_extensions },
     .{ .schema = "pg_catalog", .name = "pg_auth_members", .text = empty(&.{ .{ "oid", .oid }, .{ "roleid", .oid }, .{ "member", .oid }, .{ "grantor", .oid }, .{ "admin_option", .bool }, .{ "inherit_option", .bool }, .{ "set_option", .bool } }) },
     .{ .schema = "pg_catalog", .name = "pg_partitioned_table", .text = empty(&.{
         .{ "partrelid", .oid },  .{ "partstrat", .char },     .{ "partnatts", .int2 }, .{ "partdefid", .oid }, .{ "partattrs", .text },
@@ -442,7 +466,7 @@ const defs = [_]Def{
         .{ "schemaname", .name }, .{ "matviewname", .name }, .{ "matviewowner", .name }, .{ "tablespace", .name },
         .{ "hasindexes", .bool }, .{ "ispopulated", .bool }, .{ "definition", .text },
     }) },
-    .{ .schema = "pg_catalog", .name = "pg_range", .text = empty(&.{ .{ "rngtypid", .oid }, .{ "rngsubtype", .oid }, .{ "rngmultitypid", .oid }, .{ "rngcollation", .oid }, .{ "rngsubopc", .oid }, .{ "rngcanonical", .text }, .{ "rngsubdiff", .text } }) },
+    .{ .schema = "pg_catalog", .name = "pg_range", .text = pg_range },
     .{ .schema = "pg_catalog", .name = "pg_event_trigger", .text = empty(&.{ .{ "oid", .oid }, .{ "evtname", .name }, .{ "evtevent", .name }, .{ "evtowner", .oid }, .{ "evtfoid", .oid }, .{ "evtenabled", .char }, .{ "evttags", .text } }) },
 };
 

@@ -87,6 +87,7 @@ pub fn overload(c: *Ctx, e: *Expr) Error!bool {
     // window's rewrite or a flattening) means what that text says: the
     // choices of this dialect are written there as functions.
     if (e.flags.FromDDL) return false;
+    try @import("srftype.zig").typeExpr(c, e);
     return switch (e.op) {
         TK.CONCAT => concat(c, e),
         TK.MINUS => minus(c, e),

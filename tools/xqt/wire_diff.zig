@@ -51,6 +51,11 @@
 //!   caret, DETAIL, HINT, CONTEXT, NOTICE, WARNING) and the server's
 //!   version() string are ignored.
 //!
+//! Two outputs agree when they are the same but for what the servers may
+//! answer differently and both be right (sameAnswers()): the layout of an
+//! aligned table (its widths), a cell of the server's version() string,
+//! and the order of the rows of a query without ORDER BY.
+//!
 //! psql runs through $PG_WIRE_EXEC when it is set (with --live and
 //! --record, by default "podman exec -i xq-pg"), which must run `sh -c`
 //! next to a psql: the standard output and error are merged there so that
@@ -342,6 +347,7 @@ pub fn run(gpa: Allocator, io: Io, cfg: *const xqt.Config, out: *Io.Writer, args
         if (std.mem.eql(u8, cs.server, cs.xq)) continue;
         var scratch: std.heap.ArenaAllocator = .init(gpa);
         defer scratch.deinit();
+        if (try sameAnswers(scratch.allocator(), cs.server, cs.xq)) continue;
         const class = try classify(scratch.allocator(), cs.sql, cs.server, cs.xq);
         counts[@backingInt(class)] += 1;
         try out.print("DIFF [{t}] {s} ({s})\n", .{ class, cs.name, cs.file });
@@ -794,6 +800,103 @@ fn loose(arena: Allocator, text: []const u8) ![]u8 {
     return out.items;
 }
 
+/// Whether outputs `a` and `b` say the same (the top of the file): each
+/// aligned table becomes its cells, a version() cell "version()", and the
+/// rows of a table sorted when the text since the table before it (the
+/// statement psql echoed) has no ORDER BY.
+pub fn sameAnswers(arena: Allocator, a: []const u8, b: []const u8) !bool {
+    return std.mem.eql(u8, try answers(arena, a), try answers(arena, b));
+}
+
+fn answers(arena: Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| try lines.append(arena, line);
+    const ls = lines.items;
+    // Where the text since the last table starts.
+    var since: usize = 0;
+    var i: usize = 0;
+    while (i < ls.len) {
+        // A header, then its rule, rows, and "(N rows)".
+        if (i + 1 < ls.len and isRule(ls[i + 1])) if (tableEnd(ls, i + 2)) |end| {
+            const ordered = for (ls[since..i]) |l| {
+                if (hasOrderBy(l)) break true;
+            } else false;
+            // psql right-aligns the columns of number types.
+            var right: [64]bool = @splat(false);
+            var rows: std.ArrayList([]u8) = .empty;
+            for (ls[i + 2 .. end]) |row| {
+                var cells: std.ArrayList(u8) = .empty;
+                try appendCells(arena, &cells, row, &right);
+                try rows.append(arena, cells.items);
+            }
+            try appendCells(arena, &out, ls[i], null);
+            for (right[0..@min(right.len, std.mem.count(u8, ls[i], "|") + 1)]) |r| try out.append(arena, if (r) 'r' else 'l');
+            try out.append(arena, '\n');
+            if (!ordered) std.mem.sort([]u8, rows.items, {}, struct {
+                fn lt(_: void, x: []u8, y: []u8) bool {
+                    return std.mem.lessThan(u8, x, y);
+                }
+            }.lt);
+            for (rows.items) |r| try out.appendSlice(arena, r);
+            try out.appendSlice(arena, ls[end]);
+            try out.append(arena, '\n');
+            i = end + 1;
+            since = i;
+            continue;
+        };
+        try out.appendSlice(arena, ls[i]);
+        try out.append(arena, '\n');
+        i += 1;
+    }
+    return out.items;
+}
+
+fn hasOrderBy(line: []const u8) bool {
+    var k: usize = 0;
+    while (k + 8 <= line.len) : (k += 1) if (std.ascii.startsWithIgnoreCase(line[k..], "order by")) return true;
+    return false;
+}
+
+/// The line of a table's "(N rows)" at or after `from`, if every line
+/// before it is a row (no blank line between).
+fn tableEnd(ls: []const []const u8, from: usize) ?usize {
+    var j = from;
+    while (j < ls.len) : (j += 1) {
+        const l = ls[j];
+        if (std.mem.startsWith(u8, l, "(") and std.mem.endsWith(u8, l, ")") and (std.mem.endsWith(u8, l, " rows)") or std.mem.endsWith(u8, l, " row)"))) return j;
+        if (l.len == 0) return null;
+    }
+    return null;
+}
+
+/// /^-+(\+-+)*$/: the rule under a table's header.
+fn isRule(line: []const u8) bool {
+    if (line.len == 0 or line[0] != '-') return false;
+    for (line) |ch| if (ch != '-' and ch != '+') return false;
+    return true;
+}
+
+/// The cells of a table's line, trimmed, each ending in '|'; a cell of
+/// the server's version() string is "version()". A cell padded on the
+/// left (more than the one blank before a cell) marks its column in
+/// `right`.
+fn appendCells(arena: Allocator, out: *std.ArrayList(u8), line: []const u8, right: ?*[64]bool) !void {
+    var cells = std.mem.splitScalar(u8, line, '|');
+    var n: usize = 0;
+    while (cells.next()) |cell| : (n += 1) {
+        const t = std.mem.trim(u8, cell, " ");
+        if (right) |r| if (n < r.len and t.len > 0 and std.mem.startsWith(u8, cell, "  ")) {
+            r[n] = true;
+        };
+        const version = std.mem.startsWith(u8, t, "PostgreSQL ") and t.len > 11 and std.ascii.isDigit(t[11]);
+        try out.appendSlice(arena, if (version) "version()" else t);
+        try out.append(arena, '|');
+    }
+    try out.append(arena, '\n');
+}
+
 /// /^LINE [0-9]+:/
 fn startsWithLineN(line: []const u8) bool {
     if (!std.mem.startsWith(u8, line, "LINE ")) return false;
@@ -818,6 +921,18 @@ test normalize {
     const got = try normalize(a, "psql:<stdin>:12: ERROR:  x\n 16385 | int4 | 23\nt16385", true);
     defer a.free(got);
     try std.testing.expectEqualStrings("ERROR:  x\n <oid> | int4 | 23\nt16385", got);
+}
+
+test sameAnswers {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Widths, a version() cell, rows without ORDER BY.
+    try std.testing.expect(try sameAnswers(a, "SELECT x, version();\n x |   version   \n---+-------------\n 1 | PostgreSQL 18.6 on x\n 2 | PostgreSQL 18.6 on x\n(2 rows)\n", "SELECT x, version();\n x | version \n---+---------\n 2 | PostgreSQL 18.6 (xqlite)\n 1 | PostgreSQL 18.6 (xqlite)\n(2 rows)\n"));
+    try std.testing.expect(!try sameAnswers(a, "SELECT x ORDER BY x;\n x \n---\n 1\n 2\n(2 rows)\n", "SELECT x ORDER BY x;\n x \n---\n 2\n 1\n(2 rows)\n"));
+    try std.testing.expect(!try sameAnswers(a, " x \n---\n 1\n(1 row)\n", " x \n---\n 2\n(1 row)\n"));
+    // An integer psql aligns as text: a column of another type.
+    try std.testing.expect(!try sameAnswers(a, " k | key_seq \n---+---------\n a |       1\n(1 row)\n", " k | key_seq \n---+---------\n a | 1      \n(1 row)\n"));
 }
 
 test classify {

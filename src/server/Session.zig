@@ -372,9 +372,10 @@ fn runOne(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, sink: anytype) 
 }
 
 /// Whether a statement's rows are its result: a SET has none, though a
-/// dialect may run it as a query (PostgreSQL's set_config()).
+/// dialect may run it as a query (PostgreSQL's set_config()); a query of
+/// no columns (`SELECT;`) has its rows.
 fn hasResult(stmt: *const xqlite.Stmt, cmd: command.Command) bool {
-    return stmt.columnCount() > 0 and cmd.verb != .set and cmd.verb != .reset;
+    return (stmt.columnCount() > 0 or stmt.queryOfNoColumns()) and cmd.verb != .set and cmd.verb != .reset;
 }
 
 /// Report the connection's last error for the statement at `at` (null:

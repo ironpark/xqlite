@@ -408,6 +408,13 @@ pub fn finishCoding(p: *Parse) void {
     }
 
     if (p.n_err == 0 and !db.malloc_failed) {
+        if (p.xq_no_columns and p.explain == 0) {
+            const v = p.vdbe.?;
+            aux.setNumCols(v, 0);
+            for (v.ops.items) |*op| if (op.opcode == OP.ResultRow) {
+                op.p2 = 0;
+            };
+        }
         aux.makeReady(p.vdbe.?, p);
         p.rc = RC.DONE;
     } else {

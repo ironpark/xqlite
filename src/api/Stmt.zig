@@ -240,6 +240,13 @@ pub fn countsChanges(s: *const Stmt) bool {
     return engine.countsChanges(s.vm);
 }
 
+/// Whether the statement is a query of no result columns
+/// (engine.queryOfNoColumns()): columnCount() is 0, yet its rows are its
+/// result.
+pub fn queryOfNoColumns(s: *const Stmt) bool {
+    return engine.queryOfNoColumns(s.vm);
+}
+
 /// A message of the statement that is not an error (PostgreSQL's NOTICE:
 /// `table "t" does not exist, skipping` of DROP TABLE IF EXISTS).
 pub const Notice = engine.Notice;

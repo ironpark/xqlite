@@ -612,6 +612,14 @@ test "pg: extended queries" {
     try c.execute("wp", 0);
     try testing.expectEqualStrings("E 0A000 cached plan must not change result type\nZ E\n", try c.sync());
     _ = try c.query("ROLLBACK");
+
+    // The columns of set-returning functions, described before they run:
+    // of their arguments' types, as PostgreSQL has them.
+    try c.parse("g", "SELECT pos.n, x, (information_schema._pg_expandarray('{5}'::int2[])).n AS k FROM generate_series(1::int8, 2) pos(n), unnest('{1}'::int2[]) x", &.{});
+    try c.describe('S', "g");
+    try testing.expectEqualStrings("1\nt\nT n:20 x:21 k:23\nZ I\n", try c.sync());
+    // A query of no columns: its rows, of no value.
+    try testing.expectEqualStrings("T\nD\nC SELECT 1\nT\nD\nD\nC SELECT 2\nZ I\n", try c.query("SELECT; SELECT FROM (VALUES (1), (2)) v"));
     try c.terminate();
 }
 

@@ -472,6 +472,12 @@ pub fn countsChanges(v: *const Vm) bool {
     return v.change_cnt_on;
 }
 
+/// Whether the statement is a query of no result columns (PostgreSQL's
+/// `SELECT;`, `SELECT FROM t`): its rows, of no value, are its result.
+pub fn queryOfNoColumns(v: *const Vm) bool {
+    return v.xq_no_columns;
+}
+
 /// A column's type as the catalog records it.
 pub const CatalogType = struct {
     /// The declared type, as written in `dialect`.

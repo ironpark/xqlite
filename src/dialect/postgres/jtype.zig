@@ -51,6 +51,9 @@ const Item = struct {
     vtab: bool = false,
     /// Null when not known (a table-valued function of SQLite's).
     cols: ?[]const Col,
+    /// The relation the item reads (a table, a catalog view): its system
+    /// column tableoid.
+    rel: ?tree.QName = null,
 };
 
 const Cte = struct { name: []const u8, cols: []const Col };
@@ -142,14 +145,17 @@ const T = struct {
         for (from) |*fi| {
             var cols: ?[]const Col = null;
             var name: []const u8 = "";
+            var rel: ?tree.QName = null;
             switch (fi.source) {
                 .table => |q| {
                     name = q.name.text;
                     const cte = if (q.schema == null and parent != null) parent.?.cte(q.name.text) else null;
                     cols = cte orelse try t.tableCols(q);
+                    if (cte == null) rel = q;
                 },
                 .subquery => |sub| {
                     cols = try t.select(sub, parent);
+                    if (t.p.views_of.get(sub)) |v| rel = .{ .schema = v.schema, .name = v.name };
                 },
                 .func => |f| {
                     name = f.name.text;
@@ -176,7 +182,7 @@ const T = struct {
                     cols = renamed;
                 };
             }
-            try items.append(t.arena(), .{ .name = name, .cols = cols, .vtab = fi.source == .func });
+            try items.append(t.arena(), .{ .name = name, .cols = cols, .vtab = fi.source == .func, .rel = rel });
             if (fi.on) |on| {
                 const sc = try tree.new(t.arena(), Scope, .{ .parent = parent, .items = try t.arena().dupe(Item, items.items) });
                 _ = try t.expr(on, sc);
@@ -506,8 +512,32 @@ const T = struct {
                 return false;
             }
         }
+        if (std.ascii.eqlIgnoreCase(col_name, "tableoid")) if (try t.tableoid(e, item_name, sc)) return false;
         // A FROM item as a value: its row.
         return names.len == 1 and findItem(sc, col_name) != null;
+    }
+
+    /// The system column tableoid of the FROM item `item_name` names
+    /// (null: the one item of the nearest FROM): the OID of the relation
+    /// it reads, 'schema.name'::regclass::oid. Whether `e` became it.
+    fn tableoid(t: *T, e: *Expr, item_name: ?[]const u8, sc: *const Scope) Error!bool {
+        const it: Item = if (item_name) |n| findItem(sc, n) orelse return false else blk: {
+            var s: ?*const Scope = sc;
+            while (s) |x| : (s = x.parent) {
+                if (x.items.len == 1) break :blk x.items[0];
+                if (x.items.len > 1) return false;
+            }
+            return false;
+        };
+        const q = it.rel orelse return false;
+        const z = if (q.schema) |s|
+            try std.fmt.allocPrint(t.arena(), "\"{s}\".\"{s}\"", .{ s.text, q.name.text })
+        else
+            try std.fmt.allocPrint(t.arena(), "\"{s}\"", .{q.name.text});
+        const rc = try t.p.castExpr(e.pos, try t.p.stringAt(e.pos, z), .{ .name = "regclass", .pos = e.pos });
+        const v = try t.p.castExpr(e.pos, rc, .{ .name = "oid", .pos = e.pos });
+        e.kind = v.kind;
+        return true;
     }
 
     fn func(t: *T, e: *Expr, f: *tree.Func, sc: ?*const Scope) Error!void {

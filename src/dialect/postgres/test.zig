@@ -1553,7 +1553,8 @@ test "pg: system catalogs" {
     // COMMENT ON, for obj_description() and col_description().
     try c.exec("COMMENT ON TABLE t IS 'the t'");
     try c.exec("COMMENT ON COLUMN sales.orders.at IS 'when'");
-    try c.expectRows("SELECT obj_description('t'::regclass, 'pg_class'), col_description('sales.orders'::regclass, 2), (SELECT count(*) FROM pg_description)", "the t|when|2\n");
+    // (pg_description has plpgsql's too.)
+    try c.expectRows("SELECT obj_description('t'::regclass, 'pg_class'), col_description('sales.orders'::regclass, 2), (SELECT count(*) FROM pg_description)", "the t|when|3\n");
     try c.exec("COMMENT ON TABLE t IS NULL");
     try c.expectRows("SELECT obj_description('t'::regclass)", "NULL\n");
     try c.expectError("COMMENT ON COLUMN t.nosuch IS 'x'", "column \"nosuch\" of relation \"t\" does not exist");
@@ -1649,6 +1650,15 @@ test "pg: arrays" {
     try c.expectRows("SELECT t.id, u FROM t, unnest(t.s) u ORDER BY 1, 2", "1|x\n1|y\n");
     try c.expectRows("SELECT unnest(ARRAY[1,2]), generate_subscripts(ARRAY['a','b'], 1)", "1|1\n2|2\n");
     try c.expectRows("SELECT (information_schema._pg_expandarray(ARRAY[5,6])).n, (information_schema._pg_expandarray(ARRAY[5,6])).x", "1|5\n2|6\n");
+    // A query of no columns; tableoid; psql's \\dx; pg_type's other
+    // types and the arrays of row types; pg_range.
+    try c.expectRows("SELECT EXISTS (SELECT FROM t WHERE id = 1), (SELECT count(*) FROM (SELECT FROM t) s)", "1|2\n");
+    try c.expectRows("SELECT t.tableoid = 't'::regclass, tableoid::regclass FROM t LIMIT 1", "1|t\n");
+    try c.expectRows("SELECT k.tableoid::regclass, count(*) > 0 FROM pg_constraint k GROUP BY 1", "pg_constraint|1\n");
+    try c.expectRows("SELECT ae.n, e.extversion, d.description FROM pg_extension e JOIN pg_available_extensions() ae(n, v, c) ON ae.n = e.extname LEFT JOIN pg_description d ON d.objoid = e.oid AND d.classoid = 'pg_extension'::regclass", "plpgsql|1.0|PL/pgSQL procedural language\n");
+    try c.expectRows("SELECT a.typname, a.typelem = r.oid, r.typarray = a.oid FROM pg_type r JOIN pg_type a ON a.oid = r.typarray WHERE r.typrelid = 't'::regclass", "_t|1|1\n");
+    try c.expectRows("SELECT typname, typarray FROM pg_type WHERE typname IN ('point', 'tsvector', '_pg_stat_io', '_record') ORDER BY 1", "_pg_stat_io|0\n_record|0\npoint|1017\ntsvector|3643\n");
+    try c.expectRows("SELECT t.typname, s.typname FROM pg_range r JOIN pg_type t ON t.oid = r.rngtypid JOIN pg_type s ON s.oid = r.rngsubtype ORDER BY 1", "daterange|date\nint4range|int4\nint8range|int8\nnumrange|numeric\ntsrange|timestamp\ntstzrange|timestamptz\n");
     // The catalog's arrays.
     try c.exec("CREATE TABLE p (id int PRIMARY KEY, k int, UNIQUE (k, id))");
     try c.expectRows("SELECT conkey, conkey[1] FROM pg_constraint WHERE conrelid = 'p'::regclass AND contype = 'u'", "{2,1}|2\n");

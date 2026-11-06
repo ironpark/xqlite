@@ -372,7 +372,9 @@ pub const builtin_types: []const BuiltinType = blk: {
             .fmt = t.fmt ++ "[]",
             .len = -1,
             .byval = false,
-            .cat = 'A',
+            // record[] is a pseudo-type, as record is (cstring[] is not).
+            .cat = if (t.oid == 2249) 'P' else 'A',
+            .typtype = if (t.oid == 2249) 'p' else 'b',
             .@"align" = if (t.@"align" == 'd') 'd' else 'i',
             .storage = 'x',
             .io = "array_",
@@ -648,6 +650,8 @@ pub const Rel = struct {
     sqlite_name: []const u8,
     persistence: u8 = 'p',
     rowtype: u32 = 0,
+    /// The array type of the row type (0: none of its own).
+    rowarray: u32 = 0,
     natts: i16 = 0,
     checks: i16 = 0,
     has_index: bool = false,
@@ -1243,15 +1247,23 @@ const Builder = struct {
 
         const roids = try assign(a, 'r', b.rel_keys.items);
         for (b.rels.items, roids) |*r, o| r.oid = o;
+        // The row type of each relation, then its array (`[]` after
+        // its key), numbered together. An index has none, nor has a
+        // sequence (PostgreSQL's reltype 0).
         var type_keys: std.ArrayList([]const u8) = .empty;
         var typed: std.ArrayList(usize) = .empty;
         for (b.rels.items, 0..) |r, i| {
-            if (r.kind == 'i') continue;
+            if (r.kind == 'i' or r.kind == 'S') continue;
             try type_keys.append(a, b.rel_keys.items[i]);
             try typed.append(a, i);
         }
+        const n_typed = typed.items.len;
+        for (typed.items) |i| try type_keys.append(a, try std.mem.concat(a, u8, &.{ b.rel_keys.items[i], "[]" }));
         const toids = try assign(a, 't', type_keys.items);
-        for (typed.items, toids) |i, o| b.rels.items[i].rowtype = o;
+        for (typed.items, toids[0..n_typed], toids[n_typed..]) |i, o, ao| {
+            b.rels.items[i].rowtype = o;
+            b.rels.items[i].rowarray = ao;
+        }
         try b.sortRels();
 
         const s = b.s;
@@ -2664,8 +2676,58 @@ fn fillType(s: *const Snapshot, r: *Rows) Oom!void {
     try rowtypeRows(r, s.rels);
 }
 
+/// A row of PostgreSQL's pg_type (systypes.zig).
+pub const SysType = struct {
+    oid: u32,
+    name: []const u8,
+    nsp: u32,
+    len: i16,
+    byval: bool,
+    typtype: u8,
+    cat: u8,
+    preferred: bool,
+    relid: u32,
+    subscript: []const u8,
+    elem: u32,
+    array: u32,
+    input: []const u8,
+    output: []const u8,
+    recv: []const u8,
+    send: []const u8,
+    modin: []const u8,
+    modout: []const u8,
+    analyze: []const u8,
+    @"align": u8,
+    storage: u8,
+    basetype: u32,
+    typmod: i32,
+    ndims: i32,
+    coll: u32,
+};
+
+/// A row of PostgreSQL's pg_range (systypes.zig).
+pub const SysRange = struct { typ: u32, subtype: u32, multi: u32, coll: u32, opc: u32, canonical: []const u8, subdiff: []const u8 };
+
+const systypes = @import("systypes.zig");
+
+/// The array type PostgreSQL has of type `oid` (systypes.zig), 0 if none.
+fn sysArray(oid: u32) u32 {
+    for (systypes.types) |t| if (t.oid == oid) return t.array;
+    return 0;
+}
+
+/// Whether builtinTypeRows() makes type `oid` of its own data: a
+/// built-in type, a domain, a system relation's row type.
+fn madeType(oid: u32) bool {
+    if (typeInfo(oid) != null) return true;
+    for (system.rels) |x| if (x.rowtype == oid) return true;
+    return false;
+}
+
 /// pg_type's rows of the built-in types and information_schema's
-/// domains (StaticRows).
+/// domains, then PostgreSQL's others (systypes.zig: the types xqlite
+/// has not, the row types of the relations it has not, the arrays of
+/// those of domains and relations) (StaticRows).
 fn builtinTypeRows(r: anytype) !void {
     for (builtin_types) |t| {
         try r.row(.{
@@ -2677,22 +2739,39 @@ fn builtinTypeRows(r: anytype) !void {
     for (&domain_types) |t| {
         const base = builtinType(t.basetype).?;
         try r.row(.{
-            t.oid, t.name,     t.nsp,    oid_superuser, t.len,                         t.byval,       char(t.typtype),                char(t.cat), false, true, ",",              0,
-            "-",   0,          0,        "domain_in",   try procOf(r, base.io, "out"), "domain_recv", try procOf(r, base.io, "send"), "-",         "-",   "-",  char(t.@"align"), char(t.storage),
-            false, t.basetype, t.typmod, 0,             t.coll,                        null,          null,                           null,
+            t.oid, t.name,     t.nsp,           oid_superuser, t.len,                         t.byval,       char(t.typtype),                char(t.cat), false, true, ",",              0,
+            "-",   0,          sysArray(t.oid), "domain_in",   try procOf(r, base.io, "out"), "domain_recv", try procOf(r, base.io, "send"), "-",         "-",   "-",  char(t.@"align"), char(t.storage),
+            false, t.basetype, t.typmod,        0,             t.coll,                        null,          null,                           null,
         });
     }
     try rowtypeRows(r, system.rels);
+    for (systypes.types) |t| {
+        if (madeType(t.oid)) continue;
+        try r.row(.{
+            t.oid,       t.name,     t.nsp,    oid_superuser, t.len,    t.byval, char(t.typtype), char(t.cat), t.preferred, true,      ",",              t.relid,
+            t.subscript, t.elem,     t.array,  t.input,       t.output, t.recv,  t.send,          t.modin,     t.modout,    t.analyze, char(t.@"align"), char(t.storage),
+            false,       t.basetype, t.typmod, t.ndims,       t.coll,   null,    null,            null,
+        });
+    }
 }
 
-/// pg_type's rows of the row types of `rels` (Rows, or StaticRows).
+/// pg_type's rows of the row types of `rels` (Rows, or StaticRows), and
+/// of their arrays where the Rel has one of its own (a relation of a
+/// database: a system relation's is PostgreSQL's, in systypes.zig).
 fn rowtypeRows(r: anytype, rels: []const Rel) !void {
     for (rels) |x| {
         if (x.rowtype == 0) continue;
+        const array = if (x.rowarray != 0) x.rowarray else sysArray(x.rowtype);
         try r.row(.{
-            x.rowtype,   x.name,       x.nsp,         oid_superuser, -1,  false, "c", "C", false, true,  ",", x.oid, "-", 0, 0,
+            x.rowtype,   x.name,       x.nsp,         oid_superuser, -1,  false, "c", "C", false, true,  ",", x.oid, "-", 0, array,
             "record_in", "record_out", "record_recv", "record_send", "-", "-",   "-", "d", "x",   false, 0,   -1,    0,   0, null,
             null,        null,
+        });
+        if (x.rowarray == 0) continue;
+        try r.row(.{
+            x.rowarray, try r.print("_{s}", .{x.name}), x.nsp,        oid_superuser, -1,  false, "b",                "A", false, true,  ",", 0,  "array_subscript_handler", x.rowtype, 0,
+            "array_in", "array_out",                    "array_recv", "array_send",  "-", "-",   "array_typanalyze", "d", "x",   false, 0,   -1, 0,                         0,         null,
+            null,       null,
         });
     }
 }
@@ -2783,6 +2862,8 @@ fn fillDepend(s: *const Snapshot, r: *Rows) Oom!void {
 }
 
 fn fillDescription(s: *const Snapshot, r: *Rows) Oom!void {
+    // pg_extension's plpgsql (catalog_views.zig), as PostgreSQL has it.
+    try r.row(.{ 13603, 3079, 0, "PL/pgSQL procedural language" });
     for (s.descs) |d| try r.row(.{ d.obj, 1259, d.subid, d.text });
 }
 

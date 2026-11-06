@@ -1242,9 +1242,18 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
             o.n_nested_select -= 1;
         };
 
-        nc.nc_flags = .{ .AllowAgg = true, .AllowWin = true };
         nc.src_list = s.src;
         nc.next = outer_nc;
+
+        // xqlite: a typed dialect resolves the arguments of table-valued
+        // functions before the result set, as PostgreSQL resolves FROM
+        // before the select list: the types of the functions' columns
+        // come from them (postgres/srftype.zig). No aggregate there.
+        const args_first = typing.active(p.db);
+        if (args_first) for (s.src.?.slice()) |*item| {
+            if (item.fg.is_tab_func) resolveExprListNames(&nc, item.u1.func_arg) catch return WRC.Abort;
+        };
+        nc.nc_flags = .{ .AllowAgg = true, .AllowWin = true };
 
         // The result set.
         resolveExprListNames(&nc, s.e_list) catch return WRC.Abort;
@@ -1276,9 +1285,9 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
         nc.nc_flags.Where = false;
 
         // Arguments of table-valued functions.
-        for (s.src.?.slice()) |*item| {
+        if (!args_first) for (s.src.?.slice()) |*item| {
             if (item.fg.is_tab_func) resolveExprListNames(&nc, item.u1.func_arg) catch return WRC.Abort;
-        }
+        };
 
         if (p.inRenameObject()) {
             var win = s.win_defn;

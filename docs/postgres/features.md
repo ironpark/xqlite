@@ -122,5 +122,8 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 PostgreSQL의 표준 카탈로그 구조를 가상 테이블로 노출합니다.
 - `pg_catalog.pg_class`, `pg_attribute`, `pg_type`, `pg_namespace`, `pg_index`, `pg_constraint`, `pg_database`, `pg_tablespace`, `pg_am`, `pg_sequence`
 - `information_schema.tables`, `columns`, `schemata`, `views`, `table_constraints`, `key_column_usage`, `referential_constraints`
+- `pg_type`은 PostgreSQL 18의 행을 모두 가집니다. xqlite가 만드는 타입(내장 타입, `information_schema`의 도메인, 있는 시스템 관계의 행 타입) 밖의 것(기하·텍스트 검색·범위 타입, xqlite에 없는 시스템 관계와 `information_schema` 뷰의 행 타입, 그 배열)은 `tools/dialect/pg-systypes.sql`이 PostgreSQL 18에서 만든 `src/dialect/postgres/systypes.zig`에서 옵니다. `pg_range`도 같은 곳에서 범위 타입 6개를 가집니다. 테이블과 뷰마다 행 타입과 그 배열(`_book`)이 있고, 시퀀스에는 없습니다(`reltype` 0).
+- 시스템 열 `tableoid`: 테이블과 카탈로그 뷰의 `t.tableoid`(또는 FROM 항목이 하나일 때 `tableoid`)는 그 관계의 OID(`'schema.name'::regclass::oid`)입니다. psql의 `\dd`가 씁니다.
+- `pg_available_extensions` 뷰와 FROM의 `pg_available_extensions()`(열 별칭 포함)는 `plpgsql` 하나를 보입니다. `pg_description`에 그 설명이 있어 `\dx`가 PostgreSQL과 같습니다.
 - 키 열의 등호 조건(`pg_class.oid`, `pg_attribute.attrelid`, `pg_index.indexrelid`·`indrelid`, `pg_constraint.oid`·`conrelid`·`confrelid`, `pg_attrdef.oid`·`adrelid`, `pg_type.oid`, `pg_namespace.oid`, `pg_proc.oid`, `pg_sequence.seqrelid`, `pg_depend.objid`·`refobjid`, `pg_description.objoid`)은 가상 테이블이 그 OID의 행만 읽습니다. `attrelid = '16384'`, 조인의 `a.attrelid = c.oid`처럼 psql과 ORM이 쓰는 질의가 시스템 행(`pg_attribute`만 1100개 남짓)을 다 훑지 않습니다.
 - `psql` 클라이언트의 메타 명령(`\dt`, `\di`, `\dv`, `\ds`, `\dn`, `\df`, `\d <table_name>`)이 네이티브 PostgreSQL 16/18과 완벽히 동일하게 동작합니다.

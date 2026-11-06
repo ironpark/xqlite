@@ -445,6 +445,18 @@ pub const Ctx = struct {
         return c.p.db.xq.types.addType(c.p.db.gpa, c.dialect, t, c.rules.spell(t, &buf));
     }
 
+    /// The FROM item column `e` (TK_COLUMN) reads, in the context the
+    /// Exprs were resolved in or one around it; null if none is known.
+    pub fn columnSource(c: *const Ctx, e: *const Expr) ?*int.SrcItem {
+        if (e.op != TK.COLUMN) return null;
+        var nc = c.nc;
+        while (nc) |n| : (nc = n.next) {
+            const list = n.src_list orelse continue;
+            for (list.slice()) |*item| if (item.i_cursor == e.i_table) return item;
+        }
+        return null;
+    }
+
     pub fn operand(c: *const Ctx, e: *const Expr) Operand {
         return .{ .id = e.xq_type, .type = typeOf(c.p.db, e.xq_type), .e = e };
     }

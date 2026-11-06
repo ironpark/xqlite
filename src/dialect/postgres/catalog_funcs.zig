@@ -51,6 +51,7 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("pg_function_is_visible", 1, det, trueFunc),
     dfunc.scalar("pg_collation_is_visible", 1, det, trueFunc),
     dfunc.scalar("pg_opclass_is_visible", 1, det, trueFunc),
+    dfunc.scalar("pg_opfamily_is_visible", 1, det, trueFunc),
     dfunc.scalar("pg_operator_is_visible", 1, det, trueFunc),
     dfunc.scalar("pg_conversion_is_visible", 1, det, trueFunc),
     dfunc.scalar("pg_statistics_obj_is_visible", 1, det, trueFunc),

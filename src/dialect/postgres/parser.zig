@@ -163,6 +163,9 @@ pub const Parser = struct {
     /// The references to json_each() columns srfColumn() made (not to
     /// be resolved again).
     srf_refs: std.AutoHashMapUnmanaged(*const Expr, void) = .empty,
+    /// The catalog views of FROM (catalogView()), each the relation its
+    /// subquery stands for: jtype.zig's tableoid.
+    views_of: std.AutoHashMapUnmanaged(*const tree.Select, QName) = .empty,
     srf_count: u32 = 0,
     /// The operators' parser's state (exprAbove()).
     pratt: sqlparse.pratt.State = .{},
@@ -852,7 +855,6 @@ pub const Parser = struct {
             _ = p.c.eatKw("table");
             p.select_into = .{ .q = try p.qname(), .temp = temp, .pos = into_pos };
         }
-        if (c.cols.len == 0) return p.unsupported(p.c.peek().start, "SELECT without result columns");
         if (p.c.eatKw("from")) c.from = try p.fromList();
         if (p.c.eatKw("where")) c.where = try p.expr0();
         if (try p.c.optKws(&.{ "group", "by" })) {
@@ -1049,6 +1051,7 @@ pub const Parser = struct {
     /// A FROM item naming a table, or a catalog view.
     fn tableItem(p: *Parser, q: QName) Error!tree.FromItem {
         if (try p.catalogView(q)) |sel| {
+            try p.views_of.put(p.arena, sel, q);
             return .{ .source = .{ .subquery = sel }, .alias = .{ .name = q.name } };
         }
         const r = try p.relation(q);
@@ -1101,6 +1104,7 @@ pub const Parser = struct {
             }
             const al = try p.alias(true);
             if (eql(c.name.text, "generate_series")) return p.generateSeries(c, al);
+            if (eql(c.name.text, "pg_available_extensions") and c.args.len == 0) return p.availableExtensions(c, al);
             const f = try p.new(tree.Func, .{ .name = c.name, .args = c.args });
             return .{ .source = .{ .func = f }, .alias = al };
         }
@@ -1126,6 +1130,28 @@ pub const Parser = struct {
         const body = try p.new(tree.Body, .{ .core = try p.new(tree.Core, .{ .cols = cols, .pos = pos }) });
         const sub = try p.new(tree.Select, .{ .body = body, .pos = pos });
         const label: Name = if (al) |a| a.name else .{ .text = "pg_partition_ancestors", .pos = pos };
+        return .{ .source = .{ .subquery = sub }, .alias = .{ .name = label } };
+    }
+
+    /// pg_available_extensions() in FROM (psql's \\dx): the view's name,
+    /// default_version and comment, under the alias's column names.
+    fn availableExtensions(p: *Parser, c: Call, al: ?tree.Alias) Error!tree.FromItem {
+        const pos = c.name.pos;
+        const names = [_][]const u8{ "name", "default_version", "comment" };
+        const alias_cols: []const Name = if (al) |a| a.cols else &.{};
+        if (alias_cols.len > names.len) return p.c.failState(alias_cols[names.len].pos, .of("42601"), "too many column aliases specified for function pg_available_extensions", .{});
+        const view = (try p.catalogView(.{ .schema = .{ .text = "pg_catalog", .pos = pos }, .name = .{ .text = "pg_available_extensions", .pos = pos } })).?;
+        var from = try p.arena.alloc(tree.FromItem, 1);
+        from[0] = .{ .source = .{ .subquery = view }, .alias = .{ .name = .{ .text = "e", .pos = pos } } };
+        var cols = try p.arena.alloc(tree.ResultCol, names.len);
+        for (names, 0..) |n, i| {
+            const ref = try p.arena.alloc(Name, 1);
+            ref[0] = .{ .text = n, .pos = pos };
+            cols[i] = .{ .expr = .{ .e = try p.expr(pos, .{ .column = ref }), .alias = .{ .text = if (i < alias_cols.len) alias_cols[i].text else n } } };
+        }
+        const body = try p.new(tree.Body, .{ .core = try p.new(tree.Core, .{ .cols = cols, .from = from, .pos = pos }) });
+        const sub = try p.new(tree.Select, .{ .body = body, .pos = pos });
+        const label: Name = if (al) |a| a.name else .{ .text = "pg_available_extensions", .pos = pos };
         return .{ .source = .{ .subquery = sub }, .alias = .{ .name = label } };
     }
 
@@ -2191,7 +2217,7 @@ pub const Parser = struct {
 
     /// `e::ty` (and CAST, typed literals) as types.castPlan() says;
     /// '\x0102'::bytea is a blob constant.
-    fn castExpr(p: *Parser, pos: u32, e_arg: *Expr, ty: types.TypeName) Error!*Expr {
+    pub fn castExpr(p: *Parser, pos: u32, e_arg: *Expr, ty: types.TypeName) Error!*Expr {
         var x: *Expr = undefined;
         var e = e_arg;
         // A reg* value (an OID) cast to text is its name.
@@ -2907,7 +2933,7 @@ pub const Parser = struct {
         return p.expr(pos, .{ .func = f });
     }
 
-    fn stringAt(p: *Parser, pos: u32, s: []const u8) Error!*Expr {
+    pub fn stringAt(p: *Parser, pos: u32, s: []const u8) Error!*Expr {
         return p.expr(pos, .{ .string = s });
     }
 

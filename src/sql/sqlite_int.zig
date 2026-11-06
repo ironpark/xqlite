@@ -1940,6 +1940,10 @@ pub const Parse = struct {
     /// statement computes numbers as the dialect types them, not as
     /// SQLite does. Vdbe.xq_exact_numeric at makeReady(); for tests.
     xq_exact_numeric: bool = false,
+    /// xqlite: the statement is a query of no result columns (PostgreSQL's
+    /// `SELECT;`), lowered with one: finishCoding() hides it (its rows
+    /// have none).
+    xq_no_columns: bool = false,
     /// xqlite: the notices of the statement (util.notice()), in the
     /// arena; Vdbe.xq_notices at makeReady().
     xq_notices: std.ArrayList(Notice) = .empty,

@@ -214,7 +214,10 @@ pub const Lowerer = struct {
             else => {},
         }
         switch (s) {
-            .select => |sel| ir.stmt.select(p, try l.select(sel)),
+            .select => |sel| {
+                if (sel.body.* == .core and sel.body.core.cols.len == 0) p.xq_no_columns = true;
+                ir.stmt.select(p, try l.select(sel));
+            },
             .insert => |x| try l.insert(x),
             .update => |x| try l.update(x),
             .delete => |x| try l.delete(x),
@@ -810,7 +813,9 @@ pub const Lowerer = struct {
 
     fn core(l: *Lowerer, c: *const tree.Core) Error!*IrSelect {
         const p = l.p;
-        const cols = try l.targets(c.cols);
+        // No columns (PostgreSQL's `SELECT;`, `EXISTS (SELECT FROM t)`):
+        // a NULL, hidden at the top (Parse.xq_no_columns).
+        const cols = if (c.cols.len == 0) try ir.list.append(p, null, try l.nullConst()) else try l.targets(c.cols);
         const src = try l.fromClause(c.from);
         const where = if (c.where) |w| try l.expr(w) else null;
         const group = try l.exprList(c.group_by);

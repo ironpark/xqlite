@@ -103,6 +103,8 @@ fn indexWhereClauseMightChange(idx: *Index, ax_ref: []const i32, chng_rowid: boo
 pub fn update(p: *Parse, tab_list: ?*int.SrcList, changes: ?*int.ExprList, where: ?*int.Expr, on_error: OE, order_by: ?*int.ExprList, limit: ?*int.Expr, upsert: ?*int.Upsert) void {
     if (p.syntax_only) return;
     _ = .{ order_by, limit };
+    // A list is null only after an error (sqlite3ExprListAppendVector()).
+    if (p.n_err != 0) return;
     updateImpl(p, tab_list.?, changes.?, where, on_error, upsert) catch build.oomFault(p);
 }
 

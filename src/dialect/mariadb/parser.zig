@@ -894,7 +894,12 @@ pub const Parser = struct {
             s.c.skip();
             return s.primary();
         }
-        if (s.c.text(t)[0] == '_' and lexer.isString(next)) return s.primary();
+        if (s.c.text(t)[0] == '_' and (lexer.isString(next) or lexer.isHex(next) or lexer.isBits(next))) {
+            // A character set introducer: _latin1 'x' is the string (and
+            // _binary X'41', _binary 0b1 the constant).
+            s.c.skip();
+            return s.primary();
+        }
         if (t.isKw("INTERVAL") and next.kind != .lparen) {
             // INTERVAL n unit + date
             return s.additive();

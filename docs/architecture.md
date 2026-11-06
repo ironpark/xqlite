@@ -262,10 +262,10 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 
 | 방언 | 엔진 함수 |
 | --- | --- |
-| 모든 방언 | `xq_like`, `xq_ilike`(`like.zig`), `xq_dec_*`(정확한 십진수와 그 정렬 키, `decimal_sql.zig`) |
+| 모든 방언 | `xq_like`, `xq_ilike`(`like.zig`), `xq_dec_*`(정확한 십진수와 그 정렬 키, `decimal_sql.zig`), `xq_stddev_*`·`xq_var_*`(MariaDB·MSSQL·Oracle의 분산 집계, `variance.zig`) |
 | PostgreSQL | `xq_pg_*` |
 | MariaDB (의미 노드) | `xq_coerce`, `xq_div`, `xq_xor`, `xq_bitxor`, `xq_cast` |
-| MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_stddev_*`, `xq_var_*`, `xq_rand`, `xq_uuid` |
+| MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_rand`, `xq_uuid` |
 | MariaDB (JSON) | `xq_maria_json_col`, `xq_maria_json_bool`, `xq_maria_json_cmp`([MariaDB 호환](mariadb/features.md#4-내장-함수-및-연산자)) |
 | MSSQL | `xq_tsql_add`(`+`), `xq_tsql_like`, `xq_tsql_cast`, `xq_tsql_try_cast`, `xq_tsql_store`, `xq_tsql_newid`, `xq_tsql_avg`([MSSQL 호환](mssql/README.md)) |
 | Oracle | `xq_ora_coerce`(열에 저장하는 값의 변환, `func` 노드), `xq_ora_cast`(`CAST`, `cast{typed}`), `xq_ora_autocommit`(암묵적 트랜잭션), `xq_ora_data_*`(`USER_TAB_COLUMNS`) |

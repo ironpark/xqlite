@@ -707,7 +707,7 @@ const engine_function_map = blk: {
     @setEvalBranchQuota(100_000);
     var all: []const FuncDef = &.{};
     const tables = blk2: {
-        var t: []const []const FuncDef = &.{ &@import("like.zig").engine_functions, &@import("abi.zig").engine_functions, &@import("decimal_sql.zig").engine_functions };
+        var t: []const []const FuncDef = &.{ &@import("like.zig").engine_functions, &@import("abi.zig").engine_functions, &@import("decimal_sql.zig").engine_functions, &@import("variance.zig").engine_functions };
         for (std.enums.values(Dialect)) |d| t = t ++ &[_][]const FuncDef{module(d).hooks.engine_functions};
         break :blk2 t;
     };

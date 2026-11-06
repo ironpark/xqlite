@@ -20,6 +20,7 @@ test "mssql: expressions and operators" {
     try c.expectColumns("SELECT 1 + 1, 2 AS x, y = 3", "|x|y");
     try c.expectRows("SELECT CASE WHEN 'abc' = 'ABC' THEN 1 ELSE 0 END, CASE WHEN 1 !< 2 THEN 1 ELSE 0 END", "1|0\n");
     try c.expectRows("SELECT IIF(2 > 1, 'y', 'n'), ISNULL(NULL, 3), CHOOSE(2, 'a', 'b')", "y|3|b\n");
+    try c.expectRows("SELECT STDEV(x), VARP(x) FROM (VALUES (1), (2), (4)) AS v(x)", "1.5275252316519465|1.5555555555555554\n");
 }
 
 test "mssql: tokens and GO" {

@@ -203,6 +203,7 @@ pub const catalogue: []const Entry = blk: {
     for (&@import("like.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
     for (&engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
     for (&@import("decimal_sql.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
+    for (&@import("variance.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
     for (std.enums.values(Dialect)) |d| {
         const h = &dialect.spec(d).hooks;
         for (h.engine_functions) |*f| {

@@ -679,38 +679,6 @@ pub fn dateFormatFunc(ctx: *Context, argv: []*Mem) void {
     api.resultText(ctx, w.buffered(), .transient);
 }
 
-// ========================================================== aggregates
-
-const Moments = struct { n: f64 = 0, mean: f64 = 0, m2: f64 = 0 };
-
-/// Welford's running variance.
-pub fn varStep(ctx: *Context, argv: []*Mem) void {
-    const m = dfunc.aggState(Moments, ctx, true) orelse return;
-    if (isNull(argv[0])) return;
-    const x = api.valueDouble(argv[0]);
-    m.n += 1;
-    const d = x - m.mean;
-    m.mean += d / m.n;
-    m.m2 += d * (x - m.mean);
-}
-
-fn varFinal(comptime sample: bool, comptime root: bool) dfunc.FinalFn {
-    return struct {
-        fn call(ctx: *Context) void {
-            const m = dfunc.aggState(Moments, ctx, false) orelse return api.resultNull(ctx);
-            const div = if (sample) m.n - 1 else m.n;
-            if (div <= 0) return api.resultNull(ctx);
-            const v = m.m2 / div;
-            api.resultDouble(ctx, if (root) @sqrt(v) else v);
-        }
-    }.call;
-}
-
-pub const stddevPopFinal = varFinal(false, true);
-pub const stddevSampFinal = varFinal(true, true);
-pub const varPopFinal = varFinal(false, false);
-pub const varSampFinal = varFinal(true, false);
-
 test "runtime: civil dates" {
     try std.testing.expectEqual(@as(i64, 0), daysFromCivil(1970, 1, 1));
     try std.testing.expectEqual(@as(i64, 19723), daysFromCivil(2024, 1, 1));

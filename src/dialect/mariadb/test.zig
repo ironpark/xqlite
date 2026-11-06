@@ -44,6 +44,8 @@ test "mariadb: tokenizer quirks" {
     // \% and \_ stay for LIKE, whose escape character is \.
     try c.expectRows("SELECT 'a%' LIKE 'a\\%', 'ab' LIKE 'a\\%', 'a_b' LIKE 'a\\_b', 'axb' LIKE 'a\\_b'", "1|0|1|0\n");
     try c.expectRows("SELECT ? IS NULL", "1\n");
+    // Character set introducers: the constant after them.
+    try c.expectRows("SELECT _latin1 'x', _utf8mb4'y' 'z', _binary X'41', _binary 0x42", "x|yz|A|B\n");
 }
 
 test "mariadb: sql_mode switches" {

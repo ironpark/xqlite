@@ -277,6 +277,7 @@ const alter = @import("alter.zig");
 const vtab_mod = @import("vtab.zig");
 const dconstraint = @import("../dialect/constraint.zig");
 const btree = @import("xqlite_storage").btree;
+const corrupt = @import("xqlite_storage").corrupt;
 
 const Sqlite3 = int.Sqlite3;
 const Table = int.Table;
@@ -1062,7 +1063,8 @@ pub fn startTable(p: *Parse, name1: Token, name2: Token, is_temp_arg: bool, is_v
             if (!no_err) {
                 util.errorMsgState(p, name_tok.z, .of("42P07"), "{s} {s} already exists", .{ if (t.isView()) "view" else "table", name_tok.slice() });
             } else {
-                std.debug.assert(!db.init.busy);
+                // A schema of two tables of a name is corrupt (CORRUPT_DB).
+                std.debug.assert(!db.init.busy or !corrupt.checking());
                 codeVerifySchema(p, i_db);
                 forceNotReadOnly(p);
             }

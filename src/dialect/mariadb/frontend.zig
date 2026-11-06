@@ -349,10 +349,6 @@ const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_rand", 1, .{}, rt.randFunc),
     dfunc.scalar("xq_uuid", 0, .{}, rt.uuidFunc),
     dfunc.scalar("xq_bit_length", 1, det, rt.bitLengthFunc),
-    dfunc.aggregate("xq_stddev_pop", 1, det, rt.varStep, rt.stddevPopFinal),
-    dfunc.aggregate("xq_stddev_samp", 1, det, rt.varStep, rt.stddevSampFinal),
-    dfunc.aggregate("xq_var_pop", 1, det, rt.varStep, rt.varPopFinal),
-    dfunc.aggregate("xq_var_samp", 1, det, rt.varStep, rt.varSampFinal),
     // What the parser adds around JSON (json.zig, json_table.zig).
     dfunc.scalar("xq_maria_json_bool", 1, jdet, json.boolFunc),
     dfunc.scalar("xq_maria_json_col", 1, jdet, json.colFunc),

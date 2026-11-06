@@ -102,6 +102,9 @@ test "oracle: queries" {
         \\COMMIT;
     );
     try c.expectRows("SELECT 1 + 1 FROM dual", "2\n");
+    // The variance aggregates are the engine's (variance.zig): in an
+    // Oracle-only build too.
+    try c.expectRows("SELECT STDDEV(sal), VARIANCE(sal), STDDEV_POP(sal) FROM emp WHERE sal IS NOT NULL", "25.166114784235834|633.33333333333349|20.548046676563256\n");
     // NULLs sort last ascending and first descending.
     try c.expectRows("SELECT name FROM emp ORDER BY sal", "dan\nbob\nann\ncid\n");
     try c.expectRows("SELECT name FROM emp ORDER BY sal DESC", "cid\nann\nbob\ndan\n");

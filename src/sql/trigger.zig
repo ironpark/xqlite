@@ -227,6 +227,7 @@ fn beginTriggerImpl(p: *Parse, name1: Token, name2: Token, tr_tm_arg: i32, op: i
                 util.errorMsg(p, "", .{});
             } else {
                 build.codeVerifySchema(p, i_db);
+                p.if_not_exists = true; // for addReturning()'s assertions
             }
             return;
         }

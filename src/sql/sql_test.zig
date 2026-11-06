@@ -239,6 +239,8 @@ test "sql: CREATE TABLE, INSERT, UPDATE and DELETE" {
     try c.expectRows("SELECT a, b FROM t WHERE a > 3", "20|ten\n");
     try c.expectError("UPDATE t SET a = 1 WHERE a = 2", "UNIQUE constraint failed: t.a");
     try c.expectError("UPDATE t SET b = NULL", "NOT NULL constraint failed: t.b");
+    try c.expectError("UPDATE t SET (a, b) = 5", "2 columns assigned 1 values");
+    try c.expectError("UPDATE t SET (a, b) = (1, 2, 3)", "2 columns assigned 3 values");
 
     try c.exec("DELETE FROM t WHERE b LIKE 't%'");
     try c.expectRows("SELECT a, b FROM t", "1|uno\n");
@@ -522,6 +524,12 @@ test "sql: RETURNING" {
     try c.expectRows("SELECT a, b, c FROM t", "2|y|3.5\n");
     try c.expectError("INSERT INTO t(b) VALUES('q') RETURNING t.*", "RETURNING may not use \"TABLE.*\" wildcards");
     try c.expectError("CREATE TRIGGER tr AFTER INSERT ON t BEGIN DELETE FROM t RETURNING *; END", "near \"RETURNING\": syntax error");
+    try c.expectError("CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO t(b) VALUES('q') RETURNING b; END", "cannot use RETURNING in a trigger");
+    // IF NOT EXISTS of a trigger there is: the body is parsed, not kept,
+    // and RETURNING in it is no error (returning1.test).
+    try c.exec("CREATE TRIGGER tr AFTER DELETE ON t BEGIN SELECT 1; END");
+    try c.exec("CREATE TRIGGER IF NOT EXISTS tr AFTER DELETE ON t BEGIN INSERT INTO t(b) VALUES('p') RETURNING 1; INSERT INTO t(b) VALUES('q') RETURNING 2; END");
+    try c.expectRows("SELECT sql FROM sqlite_schema WHERE name = 'tr'", "CREATE TRIGGER tr AFTER DELETE ON t BEGIN SELECT 1; END\n");
 }
 
 test "sql: UPSERT" {
@@ -745,6 +753,26 @@ test "sql: ALTER TABLE with PRAGMA writable_schema and legacy_alter_table" {
         \\CREATE VIEW v AS SELECT aa, b FROM t2
         \\
     );
+}
+
+test "sql: a schema with a table twice, made with PRAGMA writable_schema" {
+    var c: Conn = undefined;
+    try c.open();
+    defer c.close();
+    // misc1.test: both rows of sqlite_schema now create t, the second
+    // when the schema is read again (corruptSchema() is quiet about it).
+    // A corrupt schema: off with the checks of a valid one.
+    const corrupt = @import("xqlite_storage").corrupt;
+    const never = corrupt.never_corrupt;
+    corrupt.never_corrupt = false;
+    defer corrupt.never_corrupt = never;
+    try c.exec(
+        \\CREATE TABLE t1(x UNIQUE);
+        \\PRAGMA writable_schema=ON;
+        \\UPDATE sqlite_schema SET sql='CREATE TABLE IF not EXISTS t(c)';
+    );
+    try c.exec("BEGIN; CREATE TABLE t2(x); ROLLBACK");
+    try c.expectError("DROP TABLE f", "no such table: f");
 }
 
 test "sql: a failed ALTER TABLE in a transaction" {

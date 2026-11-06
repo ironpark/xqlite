@@ -26,7 +26,7 @@ zig build ext -Ddialects=postgres     # PostgreSQL 방언의 것만
 ```
 
 - `zig build tools`도 확장을 만들고, `zig build check`는 그것을 `xqt interop`에 넘깁니다(`--ext`).
-- `-Ddialects`를 따릅니다. 빌드에서 뺀 방언의 함수와 collation은 확장에도 없습니다. `-Ddialects=none`이면 어느 방언에도 속하지 않는 것(`xq_like()`, `xq_ilike()`, `xq_ext_version()`)만 남습니다.
+- `-Ddialects`를 따릅니다. 빌드에서 뺀 방언의 함수와 collation은 확장에도 없습니다. `-Ddialects=none`이면 어느 방언에도 속하지 않는 것(`xq_like()`, `xq_ilike()`, `xq_ext_version()`, numeric의 `xq_dec*`, 분산 집계)만 남습니다.
 - 라이브러리는 SQLite에 링크하지 않습니다. 모든 호출이 로더가 넘겨 주는 `sqlite3_api_routines` 표를 거치므로 그 확장을 올리는 SQLite(시스템 sqlite3, Python, xqlite의 C ABI)의 것을 씁니다. SQLite 3.31.0 이상이 필요합니다(`SQLITE_INNOCUOUS`).
 - 내보내는 심볼은 진입점 두 개뿐입니다. 엔진은 라이브러리 안에 감춰져 있어서 올린 SQLite의 `sqlite3_*`와 부딪치지 않습니다.
 - WebAssembly는 해당하지 않습니다(동적 로더가 없음). wasm 대상에서 `zig build ext`는 아무것도 만들지 않습니다.
@@ -121,9 +121,9 @@ PostgreSQL의 `jsonb` 열은 SQLite의 JSONB(BLOB)라서 값 자체는 확장 �
 
 | 방언 | 엔진 함수 | 한정 이름 | 시퀀스 | 빠짐 | collation |
 | --- | --- | --- | --- | --- | --- |
-| 공통 | 47(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 42) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
+| 공통 | 51(`xq_like` 2, `xq_ilike` 2, `xq_ext_version`, numeric의 `xq_dec*` 42, 분산 집계 `xq_var_*`·`xq_stddev_*` 4) | | 5(`nextval`, `currval`, `setval` 2, `lastval`) | | |
 | PostgreSQL | 179 | 224 | 5 | 36 | 4 |
-| MariaDB | 19 | 101 | 4 | 5 | |
+| MariaDB | 15 | 101 | 4 | 5 | |
 | SQL Server | 18 | 40 | 2 | 20 | |
 | Oracle | 20 | 49 | 5 | 4 | |
 | SQLite 내장(`xq_sqlite_*`) | | 35 | | | |

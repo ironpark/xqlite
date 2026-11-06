@@ -71,11 +71,6 @@ pub fn isReserved(word: []const u8) bool {
     return k != 0 and keywords.class(k) == .reserved and eql(word, keywords.name(k));
 }
 
-/// Whether the token `t` is a reserved word (isReserved()).
-fn reservedKw(t: Token) bool {
-    return t.kind == .word and keywords.class(t.kw) == .reserved;
-}
-
 /// The words that start a type in a typed literal (`DATE '2024-01-01'`).
 const type_words = words.folded(.lower, &.{
     "date",  "time",      "timestamp", "timestamptz", "timetz",  "interval", "boolean", "bool",
@@ -504,7 +499,7 @@ pub const Parser = struct {
     /// that is not reserved.
     pub fn colId(p: *Parser) Error!Name {
         const t = p.c.peek();
-        if (t.kind == .quoted_ident or (t.kind == .word and !reservedKw(t))) {
+        if (t.kind == .quoted_ident or (t.kind == .word and !t.isReserved())) {
             p.c.skip();
             return .{ .text = p.val(t), .pos = t.start };
         }
@@ -929,7 +924,7 @@ pub const Parser = struct {
             label = try p.anyName();
         } else {
             const a = p.c.peek();
-            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !a.isReserved())) {
                 p.c.skip();
                 label = .{ .text = p.val(a), .pos = a.start };
             }
@@ -1192,7 +1187,7 @@ pub const Parser = struct {
         var label: Name = name;
         var alias_cols: std.ArrayList(Name) = .empty;
         var defs: std.ArrayList(SrfCol) = .empty;
-        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("on") and !p.c.isKw("using")));
+        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !p.c.peek().isReserved() and !p.c.isKw("on") and !p.c.isKw("using")));
         if (has_alias) {
             _ = p.c.eatKw("as");
             label = try p.colId();
@@ -1290,7 +1285,7 @@ pub const Parser = struct {
         }
         var label: Name = name;
         var alias_cols: []const Name = &.{};
-        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("on") and !p.c.isKw("using")));
+        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !p.c.peek().isReserved() and !p.c.isKw("on") and !p.c.isKw("using")));
         if (has_alias) {
             _ = p.c.eatKw("as");
             label = try p.colId();
@@ -1349,7 +1344,7 @@ pub const Parser = struct {
         if (c.args.len != 2) return p.c.failState(name.pos, .of("42883"), "function pg_input_error_info with {d} arguments does not exist", .{c.args.len});
         var label: Name = name;
         var alias_cols: []const Name = &.{};
-        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("on") and !p.c.isKw("using")));
+        const has_alias = p.c.isKw("as") or (p.c.peek().kind == .quoted_ident or (p.c.peek().kind == .word and !p.c.peek().isReserved() and !p.c.isKw("on") and !p.c.isKw("using")));
         if (has_alias) {
             _ = p.c.eatKw("as");
             label = try p.colId();
@@ -1743,7 +1738,7 @@ pub const Parser = struct {
             name = try p.colId();
         } else {
             const a = p.c.peek();
-            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a) and !a.isKw("set"))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !a.isReserved() and !a.isKw("set"))) {
                 p.c.skip();
                 name = .{ .text = p.val(a), .pos = a.start };
             } else return null;
@@ -2047,7 +2042,7 @@ pub const Parser = struct {
             .field => {
                 // (r).field of a record (_pg_expandarray()'s x and n).
                 const t = m.last;
-                if (reservedKw(t)) return p.c.syntaxErrorAt(t);
+                if (t.isReserved()) return p.c.syntaxErrorAt(t);
                 const x = try p.call(l.pos, "xq_pg_record_field", null, &.{ l, try p.stringAt(t.start, p.val(t)) });
                 x.end = p.c.lastEnd();
                 try p.setFig(x, .{ .call = p.val(t) });
@@ -2062,7 +2057,7 @@ pub const Parser = struct {
     /// `l IS [NOT] ...` after IS.
     fn isRest(p: *Parser, l: *Expr, rbp: u8) Error!*Expr {
         const not = p.c.eatKw("not");
-        if (p.c.isAnyKw(&.{ "null", "true", "false", "unknown", "json" })) Ops.cap(p, lv.is);
+        if (p.c.isAnyKw(&.{ "null", "true", "false", "unknown", "json" })) p.pratt.cap(lv.is);
         if (p.c.eatKw("null")) return p.expr(l.pos, .{ .is_null = .{ .e = l, .not = not } });
         if (p.c.eatKw("true")) return p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = true, .not = not } });
         if (p.c.eatKw("false")) return p.expr(l.pos, .{ .is_bool = .{ .e = l, .value = false, .not = not } });
@@ -2105,13 +2100,13 @@ pub const Parser = struct {
                     else => return p.unsupported(at, "this ANY/ALL comparison"),
                 };
                 const e = try p.anyAll(l, aop, all);
-                Ops.cap(p, lv.cmp);
+                p.pratt.cap(lv.cmp);
                 return e;
             }
             _ = try p.c.expect(.lparen);
             const s = try p.select();
             _ = try p.c.expect(.rparen);
-            Ops.cap(p, lv.cmp);
+            p.pratt.cap(lv.cmp);
             return p.expr(l.pos, .{ .in_select = .{ .e = l, .not = all, .sel = s } });
         }
         const r = try p.exprAbove(rbp);
@@ -2125,7 +2120,7 @@ pub const Parser = struct {
             const all = p.c.advance().isKw("all");
             const op: array.AnyOp = if (ilike) (if (not) .not_ilike else .ilike) else if (not) .not_like else .like;
             const e = try p.anyAll(l, op, all);
-            Ops.cap(p, lv.pred);
+            p.pratt.cap(lv.pred);
             return e;
         }
         const pat = try p.otherExpr();
@@ -2951,7 +2946,7 @@ pub const Parser = struct {
         _ = try p.c.expect(.lparen);
         var w: tree.WindowSpec = .{};
         const t = p.c.peek();
-        if ((t.kind == .word and !reservedKw(t) and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .quoted_ident) {
+        if ((t.kind == .word and !t.isReserved() and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .quoted_ident) {
             w.base = try p.colId();
         }
         try syntax.windowClauses(p, &w, expr0, .{ .groups = true });
@@ -3221,7 +3216,7 @@ pub const Parser = struct {
             u.alias = try p.colId();
         } else if (!p.c.isKw("set")) {
             const a = p.c.peek();
-            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !a.isReserved())) {
                 p.c.skip();
                 u.alias = .{ .text = p.val(a), .pos = a.start };
             }
@@ -3248,7 +3243,7 @@ pub const Parser = struct {
             d.alias = try p.colId();
         } else {
             const a = p.c.peek();
-            if (a.kind == .quoted_ident or (a.kind == .word and !reservedKw(a))) {
+            if (a.kind == .quoted_ident or (a.kind == .word and !a.isReserved())) {
                 p.c.skip();
                 d.alias = .{ .text = p.val(a), .pos = a.start };
             }
@@ -3744,7 +3739,7 @@ pub const Parser = struct {
                 item.collate = e.kind.collate.collation;
             } else item.expr = e;
             // An operator class.
-            if (p.c.peek().kind == .word and !reservedKw(p.c.peek()) and !p.c.isKw("nulls")) p.c.skip();
+            if (p.c.peek().kind == .word and !p.c.peek().isReserved() and !p.c.isKw("nulls")) p.c.skip();
             if (p.c.eatKw("desc")) item.desc = true else _ = p.c.eatKw("asc");
             if (p.c.eatKw("nulls")) {
                 if (!p.c.eatKw("first")) try p.c.expectKw("last");

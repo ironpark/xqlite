@@ -58,7 +58,7 @@ pub const lex = struct {
     /// Every word the parser (and syntax.zig, sqlparse's Cursor) compares
     /// as a keyword: a word not here is never one. The reserved ones are
     /// no names where a name is optional (aliases) or where they would
-    /// make no sense as one (a column reference): parser.isReserved().
+    /// make no sense as one (a column reference): Token.isReserved().
     pub const keywords = sqllex.Keywords(sqllex.allKeywords(.reserved, &reserved_words) ++ sqllex.allKeywords(.unreserved, &.{
         "ACTION",         "ADD",                 "AFTER",        "ALGORITHM",        "ALTER",      "ALWAYS",         "ANALYZE",      "ANY",            "ASCII",
         "AUTO_INCREMENT", "BEGIN",               "BOOL",         "BOOLEAN",          "BOTH",       "BYTE",           "CACHE",        "CASCADE",        "CASCADED",

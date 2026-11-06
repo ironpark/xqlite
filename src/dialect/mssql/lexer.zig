@@ -46,7 +46,7 @@ pub const lex = struct {
 
     /// The keywords. The reserved ones are SQL Server's reserved words
     /// and the words that cannot be an alias where one is optional
-    /// (isReserved()).
+    /// (Token.isReserved()).
     pub const keywords = sqllex.Keywords(&.{
         .{ "ABSENT", .unreserved },
         .{ "ACTION", .unreserved },
@@ -288,11 +288,6 @@ pub const Lexer = sqllex.Lexer(lex);
 pub const Token = Lexer.Token;
 pub const Keywords = lex.keywords;
 
-/// Whether `t` is one of SQL Server's reserved words (no name).
-pub fn isReserved(t: Token) bool {
-    return t.kind == .word and Keywords.class(t.kw) == .reserved;
-}
-
 /// Whether `t` is a decimal integer (not 0x...).
 pub fn isDecimal(t: Token) bool {
     return t.kind == .integer and t.sub == .none;
@@ -321,9 +316,7 @@ pub fn identValue(a: std.mem.Allocator, sql: [:0]const u8, t: Token) error{OutOf
 
 /// The value of a string token ('...' or N'...').
 pub fn stringValue(a: std.mem.Allocator, sql: []const u8, t: Token) error{OutOfMemory}![]const u8 {
-    var z = t.text(sql);
-    if (z[0] == 'n' or z[0] == 'N') z = z[1..];
-    return sqllex.undouble(a, z[1 .. z.len - 1], '\'');
+    return sqllex.value.plainString(a, sql, t);
 }
 
 /// The hex digits of a binary constant (0x0A), padded to an even count
@@ -362,11 +355,11 @@ test "lexer: keywords" {
     const sql = "select [select] Rows #t";
     var lx: Lexer = .init(sql, 0, .{});
     const sel = lx.next();
-    try std.testing.expect(sel.isKw("SELECT") and isReserved(sel));
+    try std.testing.expect(sel.isKw("SELECT") and sel.isReserved());
     const q = lx.next();
-    try std.testing.expect(!q.isKw("SELECT") and !isReserved(q));
+    try std.testing.expect(!q.isKw("SELECT") and !q.isReserved());
     const rows = lx.next();
-    try std.testing.expect(rows.isKw("rows") and rows.isKwText("ROWS") and !isReserved(rows));
+    try std.testing.expect(rows.isKw("rows") and rows.isKwText("ROWS") and !rows.isReserved());
     try std.testing.expect(lx.next().kw == 0);
 }
 

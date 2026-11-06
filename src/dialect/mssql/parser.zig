@@ -32,7 +32,6 @@
 const std = @import("std");
 const sqlparse = @import("sql/parse");
 const syntax = @import("../syntax.zig");
-const words = sqlparse.words;
 const pratt = sqlparse.pratt;
 const ctype = @import("xqlite_base").ctype;
 const int = @import("../../sql/sqlite_int.zig");
@@ -54,10 +53,6 @@ const QName = tree.QName;
 
 pub const Token = lexer.Token;
 pub const Error = int.Oom || int.ParseError;
-
-/// SQL Server's reserved words and the words that cannot be an alias
-/// where one is optional (the class `reserved` of lexer.zig's keywords).
-pub const isReserved = lexer.isReserved;
 
 /// The words that start a statement: one ends the statement before it
 /// (T-SQL needs no semicolons).
@@ -223,7 +218,7 @@ pub const Parser = struct {
     }
 
     pub fn isName(s: *Parser) bool {
-        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .word and !isReserved(s.c.peek()));
+        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .word and !s.c.peek().isReserved());
     }
 
     pub fn nameText(s: *Parser, t: Token) Error![]const u8 {
@@ -882,7 +877,7 @@ pub const Parser = struct {
             s.c.skip();
             return @import("functions.zig").byName(s, n, &.{}, pos);
         };
-        if (isReserved(t)) return s.c.syntaxError();
+        if (t.isReserved()) return s.c.syntaxError();
         // schema.function(...)
         if (next.kind == .dot and s.c.peekAt(2).kind == .word) {
             if (s.c.isOpTok(s.c.peekAt(3), "(")) {
@@ -1320,7 +1315,7 @@ pub const Parser = struct {
                 if (op.len == 2) e = try s.compoundAssign(op[0], try s.variableRef(vt, vpos), e);
                 try assigns.append(s.a, .{ .name = try varName(s.a, s.c.text(vt)), .value = e });
                 try l.append(s.a, .{ .expr = .{ .e = e } });
-            } else if ((s.c.peek().kind == .word or s.c.peek().kind == .quoted_ident or s.c.peek().kind == .string) and !isReserved(s.c.peek()) and s.c.isOpTok(s.c.peekAt(1), "=")) {
+            } else if ((s.c.peek().kind == .word or s.c.peek().kind == .quoted_ident or s.c.peek().kind == .string) and !s.c.peek().isReserved() and s.c.isOpTok(s.c.peekAt(1), "=")) {
                 // alias = expr
                 const al: Name = if (s.c.peek().kind == .string) .{ .text = try lexer.stringValue(s.a, s.c.sql, s.c.peek()), .pos = s.c.here() } else try s.nameOf(s.c.peek());
                 s.c.skip();

@@ -569,7 +569,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 
 - **토큰**(`token.zig`): `TokenOf(키워드 표)`. 종류(`kind`: word, quoted_ident, string, integer, float, param, variable, op, 문장 부호 다섯, terminator, illegal, eof), 세부(`sub`: 문자열 접두사, 진법, 파라미터 모양, illegal의 까닭), 키워드 번호(`kw`), 범위(`start`, `end`)만 담은 12바이트이고 텍스트는 없습니다. `t.isKw("from")`은 컴파일 시점에 키워드 번호로 바뀌고, 표에 없는 단어는 컴파일되지 않습니다.
 - **렉서**(`lexer.zig`): `Lexer(D)`는 방언 정의 `D`의 `spec`(따옴표, 문자열 접두사, 숫자 꼬리, 파라미터, 변수, 연산자, 문장 끝 줄)과 훅(`skip`, `scan`, `word`, `number`)으로 만든 렉서입니다. 실패하지 않고, 토큰이 되지 못한 것은 `illegal` 토큰이며 그 오류 문구는 방언이 정합니다. 세션 옵션(`Options`: 백슬래시 이스케이프, ANSI_QUOTES)은 런타임에 받습니다.
-- **키워드 표**(`keywords.zig`): `Keywords(&.{ .{ "select", .reserved }, ... })`. 렉서가 단어마다 번호를 찾고(대소문자 무시), 등급(`reserved`, `unreserved`, `col_name`, `type_func_name`)이 예약어 집합을 대신합니다.
+- **키워드 표**(`keywords.zig`): `Keywords(&.{ .{ "select", .reserved }, ... })`. 렉서가 단어마다 번호를 찾고(대소문자 무시), 등급(`reserved`, `unreserved`; `t.isReserved()`)이 예약어 집합을 대신합니다.
 - **값**(`value.zig`): 이름(접기, 겹친 따옴표), 이스케이프 없는 문자열(이어진 문자열 포함), 달러 인용과 q 인용의 본문, 숫자(`_` 빼기, 진법을 10진으로). 백슬래시 이스케이프의 뜻은 방언이 풉니다.
 - **스캐너**(`root.zig`): `Scanner(spec)`(공백과 주석, 단어, 숫자, 진법 접두사, 달러 태그)와 규칙이 필요 없는 스캐너(`quotedEnd()`, `blockCommentEnd()`, `lineEnd()`, `radixDigits()`, `longestOp()`, `dollarEnd()`. 따옴표 안과 주석은 `indexOfAnyOrNul()`로 16바이트씩), 해석(`undouble()`, `fold()`, `evenDigits()`), 위치(`lineOf()`, `restOfLine()`, `charLen()`, `blankBefore()`, `blankAfter()`). 렉서가 이것으로 만들어지고, 토큰 단위가 아닌 일을 하는 코드도 씁니다.
 

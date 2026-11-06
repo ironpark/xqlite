@@ -11,7 +11,7 @@
 //! - `Spec` holds a dialect's rules (which characters start and continue
 //!   an unquoted word, the comments, the numbers), and `Scanner(spec)`
 //!   the scanners specialized to them at compile time: `skip()` (white
-//!   space and comments), `commentAt()`, `word()`, `foldedWord()`,
+//!   space and comments), `commentAt()`, `word()`,
 //!   `number()`, `radixPrefix()`, `dollarTag()`.
 //! - The rest takes no spec: `quotedEnd()` and `undoubled()` (a quoted
 //!   token whose doubled quote stands for one), `blockCommentEnd()`,
@@ -20,7 +20,7 @@
 //! - Decoding is separate from scanning, so that a lexer that keeps raw
 //!   slices of the text and decodes on demand and one that decodes as it
 //!   tokenizes use the same code: `undouble()`, `fold()`,
-//!   `foldComptime()`, `evenDigits()`.
+//!   `evenDigits()`.
 //! - Positions: `lineOf()`, `restOfLine()`, `charLen()`, `blankBefore()`,
 //!   `blankAfter()`.
 //!
@@ -237,14 +237,6 @@ pub const sqlite: Spec = .{
     .numbers = .{ .underscores = .any, .radix = "xX" },
 };
 
-/// An unquoted word scanned by `Scanner.foldedWord()`.
-pub const Word = struct {
-    /// The index after it.
-    end: usize,
-    /// Its name: the word folded.
-    text: []const u8,
-};
-
 /// A decimal number scanned by `Scanner.number()`.
 pub const Number = struct {
     /// The index after it.
@@ -296,18 +288,6 @@ pub fn Scanner(comptime spec: Spec) type {
         /// `Spec.ident`; `i` is where the dialect saw it start).
         pub inline fn word(s: [:0]const u8, i: usize) usize {
             return spec.ident.span(s, i);
-        }
-
-        /// The unquoted word at `i` (word()) and its name: the word
-        /// folded to `case` (fold()), in one pass.
-        pub fn foldedWord(a: std.mem.Allocator, s: [:0]const u8, i: usize, comptime case: Case) error{OutOfMemory}!Word {
-            var e = i;
-            var folded = true;
-            while (spec.ident.has(s[e])) : (e += 1) {
-                if (notIn(case, s[e])) folded = false;
-            }
-            const raw = s[i..e];
-            return .{ .end = e, .text = if (folded) raw else try foldCopy(a, raw, case) };
         }
 
         /// Whether a comment of the spec (one that skip() skips) starts
@@ -622,18 +602,6 @@ pub fn assertFolded(comptime case: Case, comptime word: []const u8) void {
     comptime for (word) |c| if (notIn(case, c)) @compileError("word not in " ++ @tagName(case) ++ " case: " ++ word);
 }
 
-/// `word` folded to `case` at compile time: a keyword written in any
-/// case, to match against a lexer's folded names (`Token.isKw()` of
-/// PostgreSQL and Oracle).
-pub fn foldComptime(comptime case: Case, comptime word: []const u8) *const [word.len]u8 {
-    comptime {
-        var out: [word.len]u8 = undefined;
-        for (word, &out) |c, *o| o.* = if (case == .lower) std.ascii.toLower(c) else std.ascii.toUpper(c);
-        const final = out;
-        return &final;
-    }
-}
-
 /// `word` folded to `case` (ASCII letters only): `word` itself if it is
 /// in that case already, else a copy in `a`.
 pub fn fold(a: std.mem.Allocator, word: []const u8, comptime case: Case) error{OutOfMemory}![]const u8 {
@@ -922,15 +890,6 @@ test "decoding" {
     try testing.expect((try fold(a, lower, .lower)).ptr == lower.ptr);
     comptime assertFolded(.lower, "select_1");
     comptime assertFolded(.upper, "SELECT_1");
-    try testing.expectEqualStrings("SELECT_é", comptime foldComptime(.upper, "SeLeCt_é"));
-    try testing.expectEqualStrings("from", comptime foldComptime(.lower, "FROM"));
-    const w = try pg_like.foldedWord(a, "Ab_1$ x", 0, .lower);
-    try testing.expectEqualStrings("ab_1$", w.text);
-    try testing.expectEqual(@as(usize, 5), w.end);
-    // Already folded: a slice of the text.
-    const src: [:0]const u8 = "AB#C+";
-    const up = try oracle_like.foldedWord(a, src, 0, .upper);
-    try testing.expect(up.end == 4 and up.text.ptr == src.ptr and up.text.len == 4);
     try testing.expectEqualStrings("0a", try evenDigits(a, "a"));
     try testing.expectEqualStrings("0a1b", try evenDigits(a, "0a1b"));
 }

@@ -703,11 +703,20 @@ fn hasEnginePrefix(name: []const u8) bool {
     return name.len > 3 and ctype.eqlNoCase(name[0..3], "xq_");
 }
 
+/// The engine functions of no dialect, outside the dialect directories
+/// so that a build with any set of dialects has them.
+pub const common_engine_functions = [_][]const FuncDef{
+    &@import("like.zig").engine_functions,
+    &@import("abi.zig").engine_functions,
+    &@import("decimal_sql.zig").engine_functions,
+    &@import("variance.zig").engine_functions,
+};
+
 const engine_function_map = blk: {
     @setEvalBranchQuota(100_000);
     var all: []const FuncDef = &.{};
     const tables = blk2: {
-        var t: []const []const FuncDef = &.{ &@import("like.zig").engine_functions, &@import("abi.zig").engine_functions, &@import("decimal_sql.zig").engine_functions, &@import("variance.zig").engine_functions };
+        var t: []const []const FuncDef = &common_engine_functions;
         for (std.enums.values(Dialect)) |d| t = t ++ &[_][]const FuncDef{module(d).hooks.engine_functions};
         break :blk2 t;
     };

@@ -63,11 +63,6 @@ const Allocator = std.mem.Allocator;
 
 pub const Error = error{ ParseFailed, OutOfMemory };
 
-/// Oracle's reserved words (V$RESERVED_WORDS), which cannot name a
-/// column or table unquoted: the keywords of the class `reserved`
-/// (lexer.zig).
-pub const isReserved = lexer.isReserved;
-
 /// Words that may not be a bare alias (reserved words and the keywords
 /// that may follow a FROM item or a result column).
 const not_alias = [_][]const u8{
@@ -77,7 +72,7 @@ const not_alias = [_][]const u8{
 };
 
 fn noAlias(t: Token) bool {
-    return isReserved(t) or t.isAnyKw(&not_alias);
+    return t.isReserved() or t.isAnyKw(&not_alias);
 }
 
 /// The operators of expressions (`ops`).
@@ -576,7 +571,7 @@ pub const Parser = struct {
     /// that is not reserved.
     pub fn colId(p: *Parser) Error!Name {
         const t = p.c.peek();
-        if (t.kind == .quoted_ident or (t.kind == .word and !isReserved(t))) {
+        if (t.kind == .quoted_ident or (t.kind == .word and !t.isReserved())) {
             p.c.skip();
             return p.nameOf(t);
         }
@@ -1517,7 +1512,7 @@ pub const Parser = struct {
             return p.dateLiteral(t.start, s, t.isKw("TIMESTAMP"));
         }
         if (t.isKw("INTERVAL") and p.c.peekAt(1).kind == .string) return p.unsupported(t.start, "INTERVAL literals");
-        if (isReserved(t) and !(p.c.peekAt(1).kind == .lparen and isFuncNameKeyword(t))) {
+        if (t.isReserved() and !(p.c.peekAt(1).kind == .lparen and isFuncNameKeyword(t))) {
             return p.missing("ORA-00936: missing expression");
         }
         return p.nameExpr();
@@ -1877,7 +1872,7 @@ pub const Parser = struct {
         _ = try p.c.expect(.lparen);
         var w: tree.WindowSpec = .{};
         const t = p.c.peek();
-        if ((t.kind == .word and !isReserved(t) and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .quoted_ident) {
+        if ((t.kind == .word and !t.isReserved() and !t.isKw("partition") and !t.isKw("rows") and !t.isKw("range") and !t.isKw("groups")) or t.kind == .quoted_ident) {
             w.base = try p.colId();
         }
         try syntax.windowClauses(p, &w, addExpr, .{ .groups = true });

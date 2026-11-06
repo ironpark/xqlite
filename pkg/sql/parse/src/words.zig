@@ -19,18 +19,7 @@ pub fn folded(comptime case: Case, comptime list: []const []const u8) std.Static
     return .initComptime(kvs);
 }
 
-/// A set for tokens as written, matched without regard to ASCII case
-/// (MariaDB, SQL Server).
-pub fn noCase(comptime list: []const []const u8) std.StaticStringMapWithEql(void, std.ascii.eqlIgnoreCase) {
-    @setEvalBranchQuota(20 * list.len + 1000);
-    var kvs: [list.len]struct { []const u8 } = undefined;
-    for (list, &kvs) |w, *kv| kv.* = .{w};
-    return .initComptime(kvs);
-}
-
-test "folded and case-insensitive sets" {
+test "folded sets" {
     const lower = comptime folded(.lower, &.{ "select", "from" });
     try std.testing.expect(lower.has("from") and !lower.has("FROM"));
-    const any = comptime noCase(&.{"SELECT"});
-    try std.testing.expect(any.has("select") and any.has("Select"));
 }

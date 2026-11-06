@@ -51,7 +51,7 @@ pub fn TokenOf(comptime Keywords: type) type {   // 방언의 키워드 표(없�
         /// 문장 텍스트 안의 바이트 범위. 토큰의 원문은 sql[start..end].
         start: u32,
         end: u32,
-        // isKw(comptime "from"), isAnyKw, isKwText(런타임 단어), isOp(sql, op), text(sql)
+        // isKw(comptime "from"), isAnyKw, isKwText(런타임 단어), isReserved(), isOp(sql, op), text(sql)
     };
 }
 ```
@@ -121,14 +121,14 @@ PostgreSQL의 `OPERATOR(pg_catalog.~)`는 렉서가 아니라 미리 토큰화�
 
 ```zig
 pub const keywords = sqllex.Keywords(&.{
-    .{ "select", .reserved }, .{ "abort", .unreserved }, .{ "between", .col_name }, ...
+    .{ "select", .reserved }, .{ "abort", .unreserved }, ...
 });
 ```
 
-- 렉서가 `word` 토큰마다 표를 찾아 `kw`를 채웁니다(ASCII 대소문자 무시). 따옴표 친 이름은 키워드가 아닙니다.
+- 렉서가 `word` 토큰마다 표를 찾아 `kw`를 채웁니다(ASCII 대소문자 무시). 표는 컴파일 시점에 만든 해시 표라서, 키워드가 아닌 단어는 대개 비교 없이 빈 칸에서 끝납니다. 따옴표 친 이름은 키워드가 아닙니다.
 - 파서는 키워드를 지금처럼 문자열로 씁니다(`c.eatKw("from")`). 토큰 타입이 표를 알므로 문자열은 컴파일 시점에 번호로 바뀌고, 비교는 정수 비교입니다. 표에 없는 단어는 컴파일되지 않으므로 철자가 틀린 키워드가 조용히 거짓이 되던 일이 없어집니다. 런타임 단어는 `isKwText()`입니다.
 - 키워드 인자를 enum 리터럴(`.select`)로 바꾸는 것도 생각했지만, 같은 검사를 얻으면서 네 방언의 키워드 호출 수천 곳을 그대로 둘 수 있어 문자열로 두었습니다.
-- 등급(`reserved`, `unreserved`, `col_name`, `type_func_name`)은 표에 함께 둡니다. 예전에 방언 파서마다 따로 있던 `reserved` 집합(`words.folded`, `words.noCase`)이 이것으로 바뀝니다.
+- 등급(`reserved`: 따옴표 없이는 이름이 아님, `unreserved`)은 표에 함께 두고, 토큰의 `t.isReserved()`가 읽습니다. 예전에 방언 파서마다 따로 있던 예약어 집합이 이것으로 바뀌었습니다. PostgreSQL의 `type_func_name` 키워드는 `reserved`로 둡니다(이름 자리에서 받지 않는 것이 같음).
 - SQLite의 표는 mkkeywordhash가 만든 것을 대신하고, `sqlite3_keyword_name()`이 돌려주는 순서를 지키도록 목록 순서를 그대로 둡니다.
 
 ### 2.4 값 해석
@@ -158,9 +158,9 @@ pub const keywords = sqllex.Keywords(&.{
 | | 쓰는 방언 | 앞보기 | 되감기(`Mark`) |
 | --- | --- | --- | --- |
 | `Buffered` | PostgreSQL, Oracle | 미리 토큰화한 배열의 인덱스 | 인덱스 |
-| `Streaming(Lexer)` | MariaDB, SQL Server, SQLite | 렉서 사본을 k번 읽음 | 공급원 전체의 사본 |
+| `Streaming(Lexer)` | MariaDB, SQL Server | 렉서 사본을 k번 읽음 | 공급원 전체의 사본 |
 
-SQLite는 `Streaming`입니다. 지금 `runParser()`가 문장마다 코드를 만들며 읽고, 한 텍스트에 문장이 많을 수 있기 때문입니다. 또 SQLite의 오류는 렉서 오류도 구문 오류처럼 토큰을 만나는 순서대로 나옵니다.
+SQLite는 커서를 쓰지 않고 파서 안의 작은 공급원으로 읽습니다([5.3](#53-파서)).
 
 `Cursor(Source, State, Hooks)`의 연산은 지금과 같습니다. 키워드는 문자열 그대로이고 토큰 타입이 컴파일 시점에 번호로 바꿉니다. 원문이 필요하면 `c.text(t)`, 토큰 하나가 연산자인지는 `c.isOpTok(t, op)`입니다.
 
@@ -175,13 +175,9 @@ SQLite는 `Streaming`입니다. 지금 `runParser()`가 문장마다 코드를 �
 | `eatKws(&.{...})`, `optKws(&.{...})`, `ifExists()`, `ifNotExists()` | 키워드 연속 |
 | `isOp`, `eatOp`, `expectOp`, `isOpTok(t, op)` | 연산자로. `(` `)` `,` `;` `.`도 연산자처럼 비교됩니다 |
 | `eatComma()`, `list(T, ctx, item)` | 쉼표, 쉼표로 이은 목록 |
-| `isName(class)`, `name(class)` | 이름 자리에 올 수 있는 토큰. 따옴표 친 이름과, 키워드 표의 등급이 `class`가 허락하는 키워드입니다(PostgreSQL의 `ColId`, `type_function_name`, SQLite의 fallback) |
 | `fail`, `failState`, `failedIn`, `syntaxError`, `syntaxErrorAt`, `missingKeyword` | 오류 |
-| `enter()`, `leave()` | 재귀 깊이. 넘으면 방언의 `tooDeep` 훅으로 실패합니다 |
 
-`Hooks`는 지금 것(`syntaxErrorAt`, `missingKeyword`, `missingToken`, `stateOfFormat`)에 하나를 더합니다.
-
-- `tooDeep(c)`: 재귀가 너무 깊을 때의 오류
+이름 자리에 올 수 있는 토큰(따옴표 친 이름과 `reserved`가 아닌 키워드)을 읽는 함수는 방언에 있습니다. 방언마다 이름 자리의 예외(Oracle의 `IF`, PostgreSQL의 `SET` 등)가 달라서입니다. `Hooks`는 지금 것(`syntaxErrorAt`, `missingKeyword`, `missingToken`, `stateOfFormat`) 그대로입니다.
 
 ### 3.2 우선순위 파서 `pratt`
 
@@ -206,7 +202,7 @@ const ops = [_]pratt.Op(Tag){
 SQL 문법에는 우선순위만으로 담기지 않는 것이 있어 엔진이 셋을 더 압니다. 네 방언을 옮기며 나온 것입니다.
 
 - **전위 연산자의 자리(`prefixAt`의 `level`)**: NOT은 조건이 시작하는 자리에서만 연산자입니다. `1 + NOT x`는 식이 아닙니다. `min <= level`인 곳에서만 전위 연산자이고, 다른 곳에서는 그 토큰이 피연산자(`operand()`)로 갑니다.
-- **뒤에 더 강한 연산자가 올 수 없는 모양(`cap`)**: `x IS NULL`, `x IN (...)`, `x LIKE y ESCAPE z` 뒤에는 `+`가 올 수 없습니다(`x IS NULL + 1`은 `(x IS NULL) + 1`이 아니라 오류). cap이 `c`인 연산자(정적인 `cap`이나, 콜백이 부른 `cap(c)`) 뒤에는 왼쪽 결합력이 `c` 이하인 연산자만 식을 잇습니다. 이 제한은 그 고리에서도, 그 식이 오른쪽인 바깥 고리에서도 지켜지지만, 그 뒤에 읽은 토큰(닫는 괄호)을 넘지는 않습니다.
+- **뒤에 더 강한 연산자가 올 수 없는 모양(`cap`)**: `x IS NULL`, `x IN (...)`, `x LIKE y ESCAPE z` 뒤에는 `+`가 올 수 없습니다(`x IS NULL + 1`은 `(x IS NULL) + 1`이 아니라 오류). cap이 `c`인 연산자(정적인 `cap`이나, 콜백이 부른 `p.pratt.cap(c)`) 뒤에는 왼쪽 결합력이 `c` 이하인 연산자만 식을 잇습니다. 이 제한은 그 고리에서도, 그 식이 오른쪽인 바깥 고리에서도 지켜지지만, 그 뒤에 읽은 토큰(닫는 괄호)을 넘지는 않습니다.
 - **여러 토큰과 음의 앞보기(`seq`, `then`, `unless`)**: `NOT LIKE`, `AT TIME ZONE`, Oracle의 `(+)`처럼 여러 토큰인 연산자와, MySQL의 `BINARY x`(그러나 `BINARY(x)`는 함수)처럼 뒤에 어떤 토큰이 오면 연산자가 아닌 것.
 
 표에 없는 토큰에서 고리가 끝날 때는 선택 콜백 `unmatched(lhs, min, last)`를 부릅니다. PostgreSQL은 연산자 집합이 열려 있어 표에 없는 연산자의 "operator does not exist"(42883)를 여기서 냅니다.
@@ -225,20 +221,15 @@ SQLite는 이 엔진을 쓰지 않습니다([5.3](#53-파서)).
 
 ### 3.3 오류 기록과 단어 집합
 
-`Diag(State)`는 지금과 같습니다. `words.folded`와 `words.noCase`는 키워드 표의 등급으로 바뀌어 없어지고, 키워드가 아닌 단어 집합(PostgreSQL의 타입 이름 등)은 `Keywords`와 같은 해시를 쓰는 `sqllex.WordSet`이 대신합니다.
+`Diag(State)`는 지금과 같습니다. 예약어 집합은 키워드 표의 등급으로 바뀌어 없어졌고, 키워드가 아닌 단어 집합(PostgreSQL의 타입 이름)만 `words.folded`로 남았습니다.
 
 ## 4. 공통 문법 조각과 드라이버
 
-`src/dialect/syntax.zig`의 조각(`caseExpr`, `sortList`, `windowClauses`, `frame`, `frameBound`)은 그대로입니다. 그 키워드도 방언의 표에 있어야 컴파일됩니다. 다섯 방언이 같은 토큰을 쓰게 되므로 다음 조각을 더합니다. 이름을 읽는 방법은 커서의 `name(class)`에 방언의 이름 등급을 넘깁니다.
+`src/dialect/syntax.zig`의 조각(`caseExpr`, `sortList`, `windowClauses`, `frame`, `frameBound`)은 그대로입니다. 그 키워드도 방언의 표에 있어야 컴파일됩니다.
 
-| 조각 | 내용 |
-| --- | --- |
-| `qualifiedName(p, class, max)` | `a.b.c`. 부분 개수 상한과 각 부분의 위치 |
-| `parenNames(p, class)` | `(a, b, c)` |
-| `withClause(p, cte)` | `WITH [RECURSIVE] name [(cols)] AS [[NOT] MATERIALIZED] (...)`의 틀. 본문은 방언의 `cte` |
-| `joinConstraint(p, operand, class)` | `ON expr` / `USING (names)` |
+`WITH`, 한정 이름(`a.b.c`), `(a, b, c)`, `ON`/`USING`을 공통 조각으로 두는 것도 생각했지만 두지 않았습니다. 방언마다 이름 자리의 예외, 부분 개수의 오류, `MATERIALIZED` 같은 선택지가 달라 조각이 방언의 옵션 모음이 되기 때문입니다. 지금은 방언 파서에 있습니다.
 
-`src/dialect/driver.zig`는 `run()`(미리 토큰화)과 `streaming()`(읽으며 감) 그대로입니다. SQLite도 `streaming()`을 씁니다. 다만 SQLite는 한 번의 호출로 텍스트의 문장을 모두 읽고, 문장마다 `finishCoding()`이 끝나면 멈추므로(`rc == DONE`) 드라이버에 그 동작을 옵션으로 둡니다.
+`src/dialect/driver.zig`는 `run()`(미리 토큰화)과 `streaming()`(읽으며 감) 그대로입니다. SQLite는 드라이버를 쓰지 않고 `runParser()`가 텍스트의 문장을 모두 읽습니다.
 
 ## 5. SQLite 방언
 
@@ -317,8 +308,8 @@ SQLite는 이 엔진을 쓰지 않습니다([5.3](#53-파서)).
 진행: 1~6단계가 끝났습니다. 다섯 방언이 공통 렉서와 키워드 표를 쓰고, 네 방언의 식은 `pratt` 표 하나로 읽습니다(MariaDB는 `PIPES_AS_CONCAT`에 따라 두 벌). SQLite 방언은 손으로 쓴 파서이고 lemon은 없어졌습니다.
 
 1. **토큰과 렉서**: `sqllex`에 `Token`, `Kind`, `Lexer(spec, Hooks)`, `Keywords`, 값 해석을 더합니다. 네 방언 렉서를 spec과 훅으로 옮기고, 새 토큰열과 옛 토큰열을 비교하는 시험을 둡니다.
-2. **커서와 방언 파서**: 커서가 새 토큰을 받게 하고, 네 방언에 키워드 표를 두어 파서를 새 렉서로 옮깁니다. 방언 렉서의 `Token`, `Kind`, 옛 토큰화 코드, `words` 집합은 지웁니다. 이스케이프를 푸는 코드는 방언에 남습니다.
-3. **Pratt**: `pratt`를 더하고 네 방언의 식 사슬을 연산자 표와 `prefix`/`infix`/`postfix`로 옮깁니다. 공통 조각(`qualifiedName`, `parenNames`, `withClause`, `joinConstraint`)도 이 단계에서 더합니다.
+2. **커서와 방언 파서**: 커서가 새 토큰을 받게 하고, 네 방언에 키워드 표를 두어 파서를 새 렉서로 옮깁니다. 방언 렉서의 `Token`, `Kind`, 옛 토큰화 코드, 예약어 집합은 지웁니다. 이스케이프를 푸는 코드는 방언에 남습니다.
+3. **Pratt**: `pratt`를 더하고 네 방언의 식 사슬을 연산자 표와 `prefix`/`infix`/`postfix`로 옮깁니다. (공통 문법 조각은 두지 않았습니다: [4](#4-공통-문법-조각과-드라이버).)
 4. **SQLite 렉서**: `Lexer(sqlite)`와 SQLite 키워드 표를 만들고, `getToken()`을 그 위에 다시 써서 사용처를 옮깁니다.
 5. **SQLite 파서**: `src/dialect/sqlite/parser.zig`를 lemon과 나란히 만들고 [6](#6-검증)의 비교로 맞춥니다.
 6. **정리**: `runParser()`가 새 파서만 씁니다. `src/parse/`(lemon 엔진과 `grammar.zig`, `tokenize.zig`), `tools/parser/`, `xqt gen parser`, 비교 도구를 지우고, `TK`를 `src/sql/tk.zig`로, 키워드 표를 `lexer.zig`로, `normalize.zig`를 `src/dialect/sqlite/`로 옮겼습니다.

@@ -150,8 +150,23 @@ pub const LexFailure = struct {
 // ============================================================ statements
 
 /// The values of a statement's tokens that are not their text as written
-/// (defaultValue()), by the token's start.
-pub const Values = std.AutoHashMapUnmanaged(u32, []const u8);
+/// (defaultValue()): one for each token, null for the text.
+pub const Values = struct {
+    /// The tokens' starts, in order (the parser may change the tokens).
+    starts: []const u32 = &.{},
+    vals: []const ?[]const u8 = &.{},
+
+    /// The value of the token at `start`, if it is not its text.
+    fn get(v: *const Values, start: u32) ?[]const u8 {
+        const Ctx = struct {
+            fn order(key: u32, x: u32) std.math.Order {
+                return std.math.order(key, x);
+            }
+        };
+        const i = std.sort.binarySearch(u32, v.starts, start, Ctx.order) orelse return null;
+        return v.vals[i];
+    }
+};
 
 /// The tokens of a statement, up to its semicolon.
 pub const Statement = struct {
@@ -170,21 +185,22 @@ pub fn statement(a: std.mem.Allocator, src: [:0]const u8, pos: usize, standard_s
     const opts = lexOptions(standard_strings);
     var l = Lexer.init(src, pos, opts);
     var toks: std.ArrayList(Token) = .empty;
-    var values: Values = .empty;
+    var starts: std.ArrayList(u32) = .empty;
+    var vals: std.ArrayList(?[]const u8) = .empty;
     var end: usize = src.len;
     while (true) {
         const t = l.next();
+        var v: ?[]const u8 = null;
         if (hasEscapes(src, t, opts)) {
             var d: Decoder = .{ .src = src, .arena = a, .standard_strings = standard_strings };
-            const v = d.decode(t.start) catch |err| switch (err) {
+            v = d.decode(t.start) catch |err| switch (err) {
                 error.OutOfMemory => |e| return e,
                 error.LexFailed => {
                     failure.* = .{ .fields = d.err, .pos = d.err_pos, .state = d.err_state };
                     return error.LexFailed;
                 },
             };
-            if (t.kind != .illegal) try values.put(a, t.start, v);
-        } else if (try plainValue(a, src, t)) |v| try values.put(a, t.start, v);
+        } else v = try plainValue(a, src, t);
         if (t.kind == .illegal) {
             failure.* = try illegalError(a, src, t);
             return error.LexFailed;
@@ -196,9 +212,13 @@ pub fn statement(a: std.mem.Allocator, src: [:0]const u8, pos: usize, standard_s
             break;
         }
         try toks.append(a, t);
+        if (v != null) {
+            try starts.append(a, t.start);
+            try vals.append(a, v);
+        }
         if (t.kind == .eof) break;
     }
-    return .{ .toks = toks.items, .end = end, .values = values };
+    return .{ .toks = toks.items, .end = end, .values = .{ .starts = starts.items, .vals = vals.items } };
 }
 
 /// The value of token `t` of `sql`: decoded (`values`), else its text.
@@ -221,7 +241,9 @@ fn defaultValue(sql: []const u8, t: Token) []const u8 {
 /// The value of `t` (one without escapes) if it is not defaultValue().
 fn plainValue(a: std.mem.Allocator, sql: [:0]const u8, t: Token) error{OutOfMemory}!?[]const u8 {
     const v = switch (t.kind) {
-        .word, .quoted_ident => try value_.name(a, sql, t, .lower),
+        // A keyword: its name, in lower case already.
+        .word => if (t.kw != 0) return keywords.name(t.kw) else try value_.name(a, sql, t, .lower),
+        .quoted_ident => try value_.name(a, sql, t, .lower),
         .string => if (t.sub == .dollar) return null else try value_.plainString(a, sql, t),
         .integer, .float => try value_.decimal(a, sql, t),
         else => return null,

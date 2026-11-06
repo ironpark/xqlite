@@ -117,11 +117,6 @@ const other_words = [_][]const u8{
     "ZONE",
 };
 
-/// Whether `t` is a reserved word (unquoted).
-pub fn isReserved(t: Token) bool {
-    return Keywords.class(t.kw) == .reserved;
-}
-
 /// The value of token `t` of `sql`: an identifier folded to upper case,
 /// a quoted identifier or a string without its quotes (q'[...]': its
 /// body), a number as text (`.5` as `0.5`, `3.` as `3.0`, without an f/d
@@ -226,7 +221,7 @@ test "oracle lexer: keywords" {
     const c = l.next();
     const d = l.next();
     try testing.expect(a.isKw("SELECT") and b.isKw("select") and !c.isKw("select"));
-    try testing.expect(isReserved(a) and isReserved(d) and !isReserved(c));
+    try testing.expect(a.isReserved() and d.isReserved() and !c.isReserved());
     try testing.expect(b.isKwText("Select") and !b.isKwText("FROM") and !c.isKwText("SELECT"));
 }
 

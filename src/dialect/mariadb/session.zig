@@ -285,7 +285,7 @@ pub fn set(s: *Parser) Error!void {
             } else if (s.c.isKw("ON") or s.c.isKw("OFF")) {
                 value = try s.int_(vpos, @intFromBool(s.c.isKw("ON")));
                 s.c.skip();
-            } else if (s.c.peek().kind == .word and s.c.peekAt(1).kind != .lparen and s.c.peekAt(1).kind != .dot and !parser.isReserved(s.c.peek())) {
+            } else if (s.c.peek().kind == .word and s.c.peekAt(1).kind != .lparen and s.c.peekAt(1).kind != .dot and !s.c.peek().isReserved()) {
                 // SET sql_mode = ANSI: a word is a string.
                 value = try s.str(vpos, s.c.text(s.c.peek()));
                 s.c.skip();

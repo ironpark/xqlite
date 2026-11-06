@@ -163,7 +163,7 @@ fn targetTable(p: *Parser) Error!struct { table: tree.QName, alias: ?Name } {
     const table = r.q;
     var alias: ?Name = r.alias;
     const a = p.c.peek();
-    if (a.kind == .quoted_ident or (a.kind == .word and !parser.isReserved(a) and !a.isAnyKw(&.{ "using", "values", "returning", "log" }))) {
+    if (a.kind == .quoted_ident or (a.kind == .word and !a.isReserved() and !a.isAnyKw(&.{ "using", "values", "returning", "log" }))) {
         p.c.skip();
         alias = try p.nameOf(a);
     }
@@ -356,7 +356,7 @@ fn merge(p: *Parser) Error!Statement {
     }
     {
         const a = p.c.peek();
-        if (a.kind == .quoted_ident or (a.kind == .word and !parser.isReserved(a))) {
+        if (a.kind == .quoted_ident or (a.kind == .word and !a.isReserved())) {
             p.c.skip();
             src.alias = .{ .name = try p.nameOf(a) };
         }

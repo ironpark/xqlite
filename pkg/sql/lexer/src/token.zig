@@ -93,9 +93,6 @@ pub const Sub = enum(u8) {
     /// UESCAPE not followed by a simple string: the token is the one
     /// that follows.
     uescape_follow,
-    /// UESCAPE with a character that cannot be one: the token is the
-    /// string.
-    uescape_char,
 };
 
 /// A token of a dialect whose keywords are `K` (a Keywords() table, or
@@ -127,6 +124,12 @@ pub fn TokenOf(comptime K: type) type {
         /// this does not compile).
         pub inline fn isKw(t: T, comptime kw: []const u8) bool {
             return t.kw == comptime kwId(kw);
+        }
+
+        /// Whether it is a keyword of the class `reserved` (no name
+        /// unquoted).
+        pub inline fn isReserved(t: T) bool {
+            return K.class(t.kw) == .reserved;
         }
 
         /// isKw() of the keyword `kw` known at run time (any word).

@@ -229,23 +229,10 @@ pub const lex = struct {
     };
     pub const keywords = @import("lexer.zig").keywords;
 
-    /// White space (and a BOM) and comments.
-    pub fn skip(l: anytype) ?Lexer.Token {
-        const s = l.sql;
-        var i = l.pos;
-        while (true) {
-            const c = s[i];
-            if (sqllex.space.has(c)) {
-                i += 1;
-            } else if (c == 0xef and s[i + 1] == 0xbb and s[i + 2] == 0xbf) {
-                i += 3;
-            } else if (c == '-' and s[i + 1] == '-') {
-                i = sqllex.lineEnd(s, i);
-            } else if (c == '/' and s[i + 1] == '*' and s[i + 2] != 0) {
-                i = sqllex.blockCommentEnd(false, s, i).end;
-            } else break;
-        }
-        l.pos = i;
+    /// None: getToken() reads white space and comments itself (as tokens
+    /// of their own), and the lexer starts at a token. The hook keeps the
+    /// default skip from reading `/*` at the very end as a comment.
+    pub fn skip(_: anytype) ?Lexer.Token {
         return null;
     }
 
@@ -348,15 +335,26 @@ pub fn keywordCode(word: []const u8) u8 {
 }
 
 fn opCode(op: []const u8) u8 {
-    const map = std.StaticStringMap(u8).initComptime(.{
-        .{ "-", TK.MINUS },   .{ "->", TK.PTR },  .{ "->>", TK.PTR },   .{ "+", TK.PLUS },
-        .{ "*", TK.STAR },    .{ "/", TK.SLASH }, .{ "%", TK.REM },     .{ "=", TK.EQ },
-        .{ "==", TK.EQ },     .{ "<", TK.LT },    .{ "<=", TK.LE },     .{ "<>", TK.NE },
-        .{ "<<", TK.LSHIFT }, .{ ">", TK.GT },    .{ ">=", TK.GE },     .{ ">>", TK.RSHIFT },
-        .{ "!=", TK.NE },     .{ "|", TK.BITOR }, .{ "||", TK.CONCAT }, .{ "&", TK.BITAND },
-        .{ "~", TK.BITNOT },
-    });
-    return map.get(op).?;
+    const two = op.len > 1;
+    return switch (op[0]) {
+        '-' => if (two) TK.PTR else TK.MINUS,
+        '+' => TK.PLUS,
+        '*' => TK.STAR,
+        '/' => TK.SLASH,
+        '%' => TK.REM,
+        '=' => TK.EQ,
+        '<' => if (!two) TK.LT else switch (op[1]) {
+            '=' => TK.LE,
+            '>' => TK.NE,
+            else => TK.LSHIFT,
+        },
+        '>' => if (!two) TK.GT else if (op[1] == '=') TK.GE else TK.RSHIFT,
+        '!' => TK.NE,
+        '|' => if (two) TK.CONCAT else TK.BITOR,
+        '&' => TK.BITAND,
+        '~' => TK.BITNOT,
+        else => unreachable,
+    };
 }
 
 // ================================================================= tests

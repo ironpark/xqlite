@@ -28,9 +28,8 @@
 //!
 //! Binding powers: an infix operator of left power `l` binds when
 //! `l >= min`; its right side is read with `min = r`. Left-associative:
-//! r = l + 1; right-associative: r = l; non-associative: r = l + 1 and
-//! the same level right after fails with `p.c.syntaxError()`
-//! (PostgreSQL's a < b < c).
+//! r = l + 1; right-associative: r = l. A non-associative one (a < b < c)
+//! is left-associative with a `cap` below its own power.
 //!
 //! What the grammars of SQL have besides precedence:
 //!
@@ -40,7 +39,7 @@
 //!  - Forms after which no tighter operator applies (`cap`): after
 //!    `x IS NULL`, `x IN (...)`, `x LIKE y ESCAPE z`, a `+` cannot follow
 //!    (`x IS NULL + 1` is an error, not `(x IS NULL) + 1`). After an
-//!    operator of cap `c` (or one whose callback called `cap(c)`), only
+//!    operator of cap `c` (or one whose callback called `p.pratt.cap(c)`), only
 //!    operators of left power `<= c` continue the expression, in this
 //!    loop and in the loops of the operators it is the right side of
 //!    (but not past a token read after it: a cap inside parentheses ends
@@ -89,7 +88,6 @@ pub fn Op(comptime Tag: type) type {
         lbp: u8 = 0,
         /// Right binding power (prefix, infix).
         rbp: u8 = 0,
-        nonassoc: bool = false,
         /// A prefix operator: the highest `min` it is one at.
         level: u8 = 255,
         /// After it, only operators of left power <= cap continue.
@@ -105,11 +103,6 @@ pub fn left(comptime Tag: type, comptime tag: Tag, comptime bp: u8, comptime m: 
 /// A right-associative infix operator of power `bp`.
 pub fn right(comptime Tag: type, comptime tag: Tag, comptime bp: u8, comptime m: Match) Op(Tag) {
     return with(Tag, .{ .tag = tag, .fix = .infix, .first = undefined, .lbp = bp, .rbp = bp }, m);
-}
-
-/// A non-associative infix operator of power `bp`.
-pub fn nonassoc(comptime Tag: type, comptime tag: Tag, comptime bp: u8, comptime m: Match) Op(Tag) {
-    return with(Tag, .{ .tag = tag, .fix = .infix, .first = undefined, .lbp = bp, .rbp = bp + 1, .nonassoc = true }, m);
 }
 
 /// A prefix operator whose operand binds at least `bp`, an operator
@@ -151,6 +144,12 @@ pub const State = struct {
     /// Where the last expr() ended, and the cap it ended under.
     exit_end: u32 = 0,
     exit_cap: u8 = 255,
+
+    /// From a callback: after the operator it reads only operators of
+    /// left power <= `c` continue the expression (LIKE with ESCAPE).
+    pub fn cap(st: *State, c: u8) void {
+        st.callback_cap = @min(st.callback_cap orelse 255, c);
+    }
 };
 
 /// The precedence parser of the dialect parser `P` (with a cursor `c`, a
@@ -177,12 +176,6 @@ pub fn Pratt(comptime P: type, comptime Expr: type, comptime Tag: type, comptime
             min: u8,
         };
 
-        /// From a callback: after this operator only operators of left
-        /// power <= `c` continue the expression (LIKE with ESCAPE).
-        pub fn cap(p: *P, c: u8) void {
-            p.pratt.callback_cap = @min(p.pratt.callback_cap orelse 255, c);
-        }
-
         /// An expression whose operators bind at least `min` (0: any).
         pub fn expr(p: *P, min: u8) Error!Expr {
             var ceiling: u8 = 255;
@@ -198,14 +191,12 @@ pub fn Pratt(comptime P: type, comptime Expr: type, comptime Tag: type, comptime
                 }
                 break :blk try p.operand();
             };
-            var last_nonassoc: ?u8 = null;
             while (true) {
                 const o = matchOp(p, .infix_or_postfix, min) orelse {
                     if (@hasDecl(P, "unmatched")) try p.unmatched(lhs, min, last);
                     break;
                 };
                 if (o.lbp < min or o.lbp > ceiling) break;
-                if (last_nonassoc) |l| if (l == o.lbp) return p.c.syntaxError();
                 const m = take(p, o, min);
                 p.pratt.callback_cap = null;
                 switch (o.fix) {
@@ -215,7 +206,6 @@ pub fn Pratt(comptime P: type, comptime Expr: type, comptime Tag: type, comptime
                 }
                 ceiling = after(p, o);
                 last = o.lbp;
-                last_nonassoc = if (o.nonassoc) o.lbp else null;
             }
             p.pratt.exit_end = p.c.lastEnd();
             p.pratt.exit_cap = ceiling;
@@ -240,8 +230,34 @@ pub fn Pratt(comptime P: type, comptime Expr: type, comptime Tag: type, comptime
 
         const Want = enum { prefix, infix_or_postfix };
 
+        /// The kinds of token an operator of `want` may start with.
+        fn startKinds(comptime want: Want) std.EnumSet(Cursor.Kind) {
+            comptime {
+                var set: std.EnumSet(Cursor.Kind) = .empty;
+                for (table) |o| {
+                    if ((o.fix == .prefix) != (want == .prefix)) continue;
+                    const t = o.first;
+                    if (t.kw != null) {
+                        set.insert(.word);
+                    } else if (t.kind) |k| {
+                        set.insert(@field(Cursor.Kind, k));
+                    } else {
+                        // A punctuation operator may be a kind of its own.
+                        set.insert(.op);
+                        for (.{ .{ "(", .lparen }, .{ ")", .rparen }, .{ ",", .comma }, .{ ";", .semi }, .{ ".", .dot } }) |pk| {
+                            if (std.mem.eql(u8, t.op.?, pk[0]) and @hasField(Cursor.Kind, @tagName(pk[1]))) set.insert(@field(Cursor.Kind, @tagName(pk[1])));
+                        }
+                    }
+                }
+                return set;
+            }
+        }
+
         /// The operator of the table at the next tokens, if any.
         inline fn matchOp(p: *P, comptime want: Want, min: u8) ?Op(Tag) {
+            // Most often a token that starts none (`,`, `)`, a name).
+            const starts = comptime startKinds(want);
+            if (!starts.contains(p.c.peekAt(0).kind)) return null;
             inline for (table) |o| {
                 const fits = comptime switch (want) {
                     .prefix => o.fix == .prefix,
@@ -282,7 +298,7 @@ const Toy = struct {
     const ops = [_]Op(Tag){
         left(Tag, .@"and", 10, .{ .kw = "and" }),
         prefixAt(Tag, .not, 20, 20, .{ .kw = "not" }),
-        nonassoc(Tag, .lt, 30, .{ .op = "<" }),
+        left(Tag, .lt, 30, .{ .op = "<", .cap = 29 }),
         left(Tag, .not_between, 30, .{ .kw = "not", .then = "between" }),
         left(Tag, .between, 30, .{ .kw = "between" }),
         postfix(Tag, .is_null, 30, .{ .kw = "is", .then = "null", .cap = 30 }),

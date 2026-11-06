@@ -200,10 +200,9 @@ comptime {
 pub const catalogue: []const Entry = blk: {
     @setEvalBranchQuota(1_000_000);
     var all: []const Entry = &.{};
-    for (&@import("like.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
-    for (&engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
-    for (&@import("decimal_sql.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
-    for (&@import("variance.zig").engine_functions) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
+    for (dialect.common_engine_functions) |defs| {
+        for (defs) |*f| all = all ++ &[_]Entry{.{ .name = f.name, .def = f, .origin = .engine }};
+    }
     for (std.enums.values(Dialect)) |d| {
         const h = &dialect.spec(d).hooks;
         for (h.engine_functions) |*f| {

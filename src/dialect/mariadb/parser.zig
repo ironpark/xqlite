@@ -59,13 +59,6 @@ const QName = tree.QName;
 pub const Token = lexer.Token;
 pub const Error = int.Oom || int.ParseError;
 
-/// A word that is no name where a name is optional (aliases) or where
-/// it would make no sense as one (a column reference): a reserved word
-/// of lexer.zig's keywords.
-pub fn isReserved(t: Token) bool {
-    return t.kind == .word and lexer.Keywords.class(t.kw) == .reserved;
-}
-
 /// Whether `name` is a function of the dialect's table (runtime.zig):
 /// a call of it is a Func of .mariadb, which the schema keeps as
 /// xq_mariadb_<name>.
@@ -177,7 +170,7 @@ pub const Parser = struct {
     /// A name: a word that is not reserved, or a quoted identifier.
     pub fn name(s: *Parser) Error!Token {
         const t = s.c.peek();
-        if (t.kind == .quoted_ident or (t.kind == .word and !isReserved(t))) {
+        if (t.kind == .quoted_ident or (t.kind == .word and !t.isReserved())) {
             s.c.skip();
             return t;
         }
@@ -196,7 +189,7 @@ pub const Parser = struct {
     }
 
     pub fn isName(s: *Parser) bool {
-        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .word and !isReserved(s.c.peek()));
+        return s.c.peek().kind == .quoted_ident or (s.c.peek().kind == .word and !s.c.peek().isReserved());
     }
 
     /// The name a name token stands for.
@@ -524,11 +517,6 @@ pub const Parser = struct {
         return Ops(false).expr(s, min);
     }
 
-    /// From a callback: only operators binding at most `c` follow.
-    fn cap(s: *Parser, c: u8) void {
-        if (s.mode.has(.PIPES_AS_CONCAT)) Ops(true).cap(s, c) else Ops(false).cap(s, c);
-    }
-
     /// The comparison operators; <=> is IS.
     const compare_ops = [_]struct { []const u8, tree.CmpOp }{
         .{ "=", .eq },  .{ "<>", .ne }, .{ "!=", .ne }, .{ "<", .lt },
@@ -597,7 +585,7 @@ pub const Parser = struct {
                 // primary, after which no tighter operator follows).
                 const esc = if (s.c.eatKw("ESCAPE")) blk: {
                     const e = try s.exprAt(collate_bp);
-                    s.cap(pred_bp);
+                    s.pratt.cap(pred_bp);
                     break :blk e;
                 } else try s.mk(m.last.start, .{ .string = "\\" });
                 return s.mk(l.pos, .{ .like = .{ .e = l, .pat = r, .not = not, .case_sensitive = false, .escape = .{ .expr = esc } } });
@@ -629,7 +617,7 @@ pub const Parser = struct {
             .sounds => return s.c.fail(null, "xqlite: SOUNDS LIKE is not supported", .{}),
             .add, .sub => if (s.c.isKw("INTERVAL")) {
                 const iv = try s.interval();
-                s.cap(add_bp);
+                s.pratt.cap(add_bp);
                 return s.dateAdd(l.pos, l, iv.n, iv.unit, tag == .sub);
             },
             .concat => {
@@ -929,7 +917,7 @@ pub const Parser = struct {
             s.c.skip();
             return @import("functions.zig").byName(s, n[1], &.{}, pos);
         };
-        if (isReserved(t)) return s.c.syntaxError();
+        if (t.isReserved()) return s.c.syntaxError();
         return s.columnRef();
     }
 

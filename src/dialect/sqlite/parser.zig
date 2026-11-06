@@ -150,6 +150,11 @@ fn run(p: *Parse, sql: [:0]const u8) Oom!usize {
 /// text.
 const Tok = struct {
     tk: u8,
+    /// getToken()'s code, before WINDOW, OVER, FILTER and the end are
+    /// decided.
+    raw: u8,
+    /// Whether a comment is in the text between it and the token before.
+    comment: bool,
     start: u32,
     len: u32,
 
@@ -311,9 +316,11 @@ const Parser = struct {
     /// decided, SEMI then 0 at the end (as runParser() feeds them).
     fn lexOne(s: *Parser) Tok {
         var i = s.lex_pos;
+        var comment = false;
         while (true) {
             const r = lexer.getToken(s.sql, i);
             if (r.tk == TK.SPACE or r.tk == TK.COMMENT) {
+                comment = comment or r.tk == TK.COMMENT;
                 i += r.len;
                 continue;
             }
@@ -329,7 +336,7 @@ const Parser = struct {
             }
             s.lex_pos = i + r.len;
             s.lex_last = code;
-            return .{ .tk = code, .start = @intCast(i), .len = @intCast(r.len) };
+            return .{ .tk = code, .raw = r.tk, .comment = comment, .start = @intCast(i), .len = @intCast(r.len) };
         }
     }
 
@@ -343,7 +350,27 @@ const Parser = struct {
     /// SQLITE_LIMIT_SQL_LENGTH; at the special tokens it checks for an
     /// interrupt; a comment is an error unless reading the schema or
     /// SQLITE_DBCONFIG_ENABLE_COMMENTS; an illegal token is an error.
-    noinline fn feed(s: *Parser) Error!void {
+    fn feed(s: *Parser) Error!void {
+        // Most tokens: an ordinary one after space (and comments where
+        // allowed), in the limit. The loop below would charge the same
+        // and stop nowhere.
+        const t = s.la[0];
+        const db = s.p.db;
+        const n: i64 = @intCast(t.end() - s.pos);
+        if (t.raw < TK.WINDOW and n <= s.mx and
+            (!t.comment or db.init.busy or db.flags.Comments) and
+            (t.start == s.pos or !db.is_interrupted.load(.monotonic)))
+        {
+            s.mx -= n;
+            s.pos = t.start;
+            s.p.last_token = s.token(t);
+            return;
+        }
+        return s.feedSlow();
+    }
+
+    /// feed() token by token, as runParser() does.
+    noinline fn feedSlow(s: *Parser) Error!void {
         const p = s.p;
         const db = p.db;
         while (true) {

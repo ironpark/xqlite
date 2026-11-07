@@ -371,7 +371,11 @@ const Db = struct {
     /// is true, as are `coalesce(NULL, 'on')`, `greatest(false, 'yes')`,
     /// `true BETWEEN 'f' AND 't'` and the column of `VALUES (true),
     /// ('no')` booleans), which the untyped SQLite text of a view or a
-    /// CHECK, and a parameter bound as text, compare as text.
+    /// CHECK, and a parameter bound as text, compare as text. And so is
+    /// a value the dialect writes by its type: a boolean made text
+    /// (`'x' || true` is 'xtrue', concat(false) 'f': xq_pg_bool_text(),
+    /// xq_pg_bool_out()), pg_typeof() of a type known (xq_pg_typeof_as()),
+    /// where untyped text writes 1, 0 and the value's storage class.
     fn exactNumeric(v: *vi.Vdbe) bool {
         if (v.xq_exact_numeric) return true;
         for (v.ops.items) |*op| {
@@ -380,10 +384,15 @@ const Db = struct {
                 .funcctx => op.p4.funcctx.func,
                 else => continue,
             };
-            if (f.func_flags.XQ_EXACT or std.mem.eql(u8, f.name, "xq_pg_bool")) return true;
+            if (f.func_flags.XQ_EXACT or typed_choices.has(f.name)) return true;
         }
         return false;
     }
+
+    /// The functions of exactNumeric()'s choices by type.
+    const typed_choices = std.StaticStringMap(void).initComptime(.{
+        .{"xq_pg_bool"}, .{"xq_pg_bool_text"}, .{"xq_pg_bool_out"}, .{"xq_pg_typeof_as"},
+    });
 
     fn failure(d: *Db, a: Allocator, rc: i32, step: bool) Oom!Outcome {
         return .{ .err = .{ .rc = rc & 0xff, .msg = try a.dupe(u8, main_mod.errmsg(d.db)), .step = step } };

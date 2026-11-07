@@ -37,6 +37,11 @@
 //!  - numerics (repr/numeric.zig): their operators and functions
 //!    compute with pkg/decimal's keys (xq_dec_add() ...), a comparison
 //!    compares keys, a numeric made text, a double or JSON is converted;
+//!  - a boolean made text: cast (`b::text`) and `||` by its cast,
+//!    xq_pg_bool_text() ('true'), an argument of concat(), concat_ws(),
+//!    format() by its output function, xq_pg_bool_out() ('t');
+//!  - pg_typeof(x) of an x of a type known: xq_pg_typeof_as(x, 'bigint')
+//!    (format_type()'s name), else the value's (catalog_funcs.zig);
 //!  - an xq_pg_jsonb() (xq_pg_json()) no frontend typed around a call
 //!    whose result is jsonb (json or jsonb) is that call: jtype.zig
 //!    wraps every value stored into a jsonb (json) column, before the
@@ -99,7 +104,7 @@ pub fn overload(c: *Ctx, e: *Expr) Error!bool {
             const b = try boolBetween(c, e);
             return try repr.list(c, e) or b;
         },
-        TK.CAST => repr.cast(c, e),
+        TK.CAST => try boolCast(c, e) or try repr.cast(c, e),
         TK.CASE => {
             const b = try boolCase(c, e);
             return try numeric.numericCase(c, e) or b;
@@ -123,6 +128,8 @@ fn concat(c: *Ctx, e: *Expr) Error!bool {
     if (isArray(c, l) or isArray(c, r)) return arrayConcat(c, e, l, r);
     if (try uuid.uuidConcat(c, e)) return true;
     if (try numeric.numericText(c, l) or try numeric.numericText(c, r)) return true;
+    const lb = try boolText(c, l, "xq_pg_bool_text");
+    if (try boolText(c, r, "xq_pg_bool_text") or lb) return true;
     // text || interval: the interval's text.
     if (logical(c, l) == .interval or logical(c, r) == .interval) {
         if (logical(c, l) == .interval) e.left = try interval.ivText(c, l);
@@ -462,6 +469,7 @@ fn callOf(c: *Ctx, e: *Expr) Error!bool {
     const n = nameOf(e, &buf);
     const items = args(e);
     if (std.mem.eql(u8, n, integer.defs.int_xor.name) and items.len == 2) return xorCall(c, e, items);
+    if (std.mem.eql(u8, n, "pg_typeof") and items.len == 1) return typeofCall(c, e, items[0].expr.?);
     // to_char(), gcd(), timezone() ... told the type of an argument.
     if (try kindCall(c, e, n, items)) return true;
     // The operators of jsonb operands.
@@ -476,6 +484,10 @@ fn callOf(c: *Ctx, e: *Expr) Error!bool {
         if (try uuid.uuidText(c, item)) changed = true;
     };
     if (try numeric.numericCall(c, e, n, items)) return true;
+    // A boolean argument of a function of "any" made text: its output.
+    if (any_text_functions.has(n)) for (items) |item| {
+        if (try boolText(c, item.expr.?, "xq_pg_bool_out")) changed = true;
+    };
     const b = builderArgs(n);
     for (items, 0..) |*item, i| if (b.takes(i)) {
         if (try wrapArg(c, item)) changed = true;
@@ -507,6 +519,48 @@ fn callOf(c: *Ctx, e: *Expr) Error!bool {
         }
     }
     return changed;
+}
+
+/// A boolean `x` made text by `f` (SQLite's text of 1 is '1'): cast,
+/// xq_pg_bool_text(x), 'true'; written by its output function,
+/// xq_pg_bool_out(x), 't'. Whether it was a boolean.
+fn boolText(c: *Ctx, x: *Expr, f: []const u8) Error!bool {
+    if (logical(c, x) != .boolean) return false;
+    try numeric.wrapIn(c, x, f, &.{});
+    x.xq_type = typing.plain(.text);
+    return true;
+}
+
+/// CAST(b AS TEXT) of a boolean (`b::text`, `b::varchar(5)`: substr() of
+/// that cast): of its text.
+fn boolCast(c: *Ctx, e: *Expr) Error!bool {
+    const x = e.left orelse return false;
+    if (!e.useUToken() or !std.ascii.eqlIgnoreCase(e.token(), "TEXT")) return false;
+    return boolText(c, x, "xq_pg_bool_text");
+}
+
+/// The functions of arguments of any type that write each with its
+/// type's output function.
+const any_text_functions = std.StaticStringMap(void).initComptime(.{
+    .{"concat"}, .{"concat_ws"}, .{"format"},
+});
+
+/// pg_typeof(x) of an `x` of a type known when the statement is compiled:
+/// xq_pg_typeof_as(x, name), the type's name (format_type()'s: bigint,
+/// character varying, an enum's name); of no type known the type of the
+/// value (catalog_funcs.zig).
+fn typeofCall(c: *Ctx, e: *Expr, x: *Expr) Error!bool {
+    const spelled = typing.spelling(c.p.db, x.xq_type) orelse return false;
+    if (spelled.len == 0) return false;
+    var buf: [96]u8 = undefined;
+    const name = if (typing.typeOf(c.p.db, x.xq_type).logical == .unknown)
+        spelled
+    else
+        @import("funcs.zig").typeName(&buf, @import("pgcatalog.zig").columnType(.postgres, spelled)[0], -1) orelse spelled;
+    const s = try expr_mod.expr(c.p.arena, TK.STRING, try c.p.arena.dupe(u8, name));
+    s.xq_type = typing.plain(.text);
+    try c.toCall(e, "xq_pg_typeof_as", &.{ x, s });
+    return true;
 }
 
 /// The functions whose arguments are of one common type (boolItems()).

@@ -6,8 +6,9 @@
 //!    pg_get_constraintdef(), pg_get_viewdef(), pg_get_serial_sequence(),
 //!    obj_description(), col_description(), shobj_description(), the
 //!    privilege functions (has_table_privilege() ...: the one role is a
-//!    superuser), to_regclass() and its kin, pg_typeof() (by the value's
-//!    storage class), pg_encoding_to_char(), the size functions,
+//!    superuser), to_regclass() and its kin, pg_typeof() (of an
+//!    expression of no type known: by the value's storage class; else
+//!    overload.zig's xq_pg_typeof_as()), pg_encoding_to_char(), the size functions,
 //!    array_to_string() of an array literal, and the ones psql calls on
 //!    relations xqlite has none of (pg_get_triggerdef(),
 //!    pg_partition_ancestors() ...);
@@ -128,6 +129,9 @@ const privileges = blk: {
 };
 
 pub const engine_functions = [_]int.FuncDef{
+    // pg_typeof(x) of an x of a type known when the statement is compiled
+    // (overload.zig): that type's name.
+    dfunc.scalar("xq_pg_typeof_as", 2, det, typeofAsFunc),
     // information_schema.columns.column_default: pg_get_expr()'s text of
     // a column's DEFAULT (its stored text, the column's declared type).
     dfunc.scalar("xq_pg_column_default", 2, none, columnDefaultFunc),
@@ -274,8 +278,13 @@ fn sizePrettyFunc(ctx: *Context, argv: []*Mem) void {
     api.resultText(ctx, std.fmt.bufPrint(&buf, "{d} {s}", .{ v, units[k] }) catch "?", .transient);
 }
 
-/// pg_typeof(x): the type of the value as stored (the expression's
-/// type is not known to a function).
+/// xq_pg_typeof_as(x, name): `name`, after `x` (an aggregate, say).
+fn typeofAsFunc(ctx: *Context, argv: []*Mem) void {
+    api.resultValue(ctx, argv[1]);
+}
+
+/// pg_typeof(x): the type of the value as stored, for an x whose type
+/// is not known when the statement is compiled (overload.zig).
 fn typeofFunc(ctx: *Context, argv: []*Mem) void {
     const z: []const u8 = switch (api.valueType(argv[0])) {
         vi.SQLITE_INTEGER => blk: {

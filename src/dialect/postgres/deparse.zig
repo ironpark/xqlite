@@ -1137,9 +1137,16 @@ const Fixer = struct {
             .{ "xq_dec_key", T.numeric },     .{ "xq_dec", T.numeric },         .{ "xq_dec_text", T.numeric },
             .{ "xq_pg_iv_key", T.interval },  .{ "xq_pg_iv_high", T.interval }, .{ "xq_pg_iv_text", T.interval },
             .{ "xq_pg_iv_out", T.interval },  .{ "xq_pg_jsonb_key", T.jsonb },  .{ "xq_pg_jsonb_bin", T.jsonb },
-            .{ "xq_pg_jsonb_text", T.jsonb }, .{ "xq_pg_uuid_text", T.uuid },
+            .{ "xq_pg_jsonb_text", T.jsonb }, .{ "xq_pg_uuid_text", T.uuid },   .{ "xq_pg_bool_text", T.boolean },
+            .{ "xq_pg_bool_out", T.boolean },
         };
         for (keys) |k| if (eql(lname, k[0]) and args.len >= 1) return f.asType(args[0], k[1]);
+        // pg_typeof(x) of a type known (overload.zig's typeofCall()).
+        if (eql(lname, "xq_pg_typeof_as") and args.len == 2) {
+            n.text = "pg_typeof";
+            n.args = args[0..1];
+            return f.plainCall(n);
+        }
         // An element of ARRAY[...] made its type's text (overload.zig's
         // wrapElem()): the value.
         if (eql(lname, "xq_pg_elem") and args.len == 2) return args[0];

@@ -98,6 +98,8 @@ const decimal_math = @import("decimal").math;
 
 pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_bool", 1, det, boolFunc),
+    bool_text,
+    dfunc.scalar("xq_pg_bool_out", 1, det, dfunc.bind(boolTextFunc, .{ "t", "f" })),
     dfunc.scalar("xq_pg_int2", 1, det, dfunc.bind(intFunc, .{IntType.smallint})),
     dfunc.scalar("xq_pg_int4", 1, det, dfunc.bind(intFunc, .{IntType.integer})),
     dfunc.scalar("xq_pg_int8", 1, det, dfunc.bind(intFunc, .{IntType.bigint})),
@@ -527,15 +529,22 @@ fn currentDatabaseFunc(ctx: *Context, _: []*Mem) void {
 /// another OID, as PostgreSQL writes one it does not know.
 fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
     if (isNull(argv[0])) return api.resultNull(ctx);
-    var oid = api.valueInt64(argv[0]);
     const mod: i64 = if (isNull(argv[1])) -1 else api.valueInt64(argv[1]);
+    var buf: [96]u8 = undefined;
+    api.resultText(ctx, typeName(&buf, api.valueInt64(argv[0]), mod) orelse "???", .transient);
+}
+
+/// The name of the type of OID `oid` with modifier `mod` (format_type()),
+/// in `buf`; null for an OID of no type known.
+pub fn typeName(buf: *[96]u8, oid_arg: i64, mod: i64) ?[]const u8 {
+    var oid = oid_arg;
     // An array type: its element's, then [] (character varying(10)[]).
     var is_array = false;
     if (@import("pgcatalog.zig").builtinType(std.math.cast(u32, oid) orelse 0)) |t| if (t.cat == 'A' and t.elem != 0 and t.oid != 22 and t.oid != 30) {
         oid = t.elem;
         is_array = true;
     };
-    if (oid == 22 or oid == 30) return api.resultText(ctx, if (oid == 22) "int2vector" else "oidvector", .static);
+    if (oid == 22 or oid == 30) return if (oid == 22) "int2vector" else "oidvector";
     const Name = struct { i64, []const u8, enum { none, length, numeric, precision, interval } };
     const names = [_]Name{
         .{ 16, "boolean", .none },
@@ -570,31 +579,27 @@ fn formatTypeFunc(ctx: *Context, argv: []*Mem) void {
         // information_schema's domains: no modifier.
         Name{ oid, t.fmt, .none }
     else
-        return api.resultText(ctx, "???", .static);
-    var buf: [64]u8 = undefined;
+        return null;
+    var nb: [64]u8 = undefined;
     const name = n[1];
     const z = switch (n[2]) {
         .none => name,
-        .length => if (mod >= 4) std.fmt.bufPrint(&buf, "{s}({d})", .{ name, mod - 4 }) catch name else name,
+        .length => if (mod >= 4) std.fmt.bufPrint(&nb, "{s}({d})", .{ name, mod - 4 }) catch name else name,
         // The scale is 11 bits, signed (numeric(3,-6)).
-        .numeric => if (mod >= 4) std.fmt.bufPrint(&buf, "{s}({d},{d})", .{ name, (mod - 4) >> 16, @as(i64, @as(i11, @bitCast(@as(u11, @truncate(@as(u64, @bitCast(mod - 4))))))) }) catch name else name,
+        .numeric => if (mod >= 4) std.fmt.bufPrint(&nb, "{s}({d},{d})", .{ name, (mod - 4) >> 16, @as(i64, @as(i11, @bitCast(@as(u11, @truncate(@as(u64, @bitCast(mod - 4))))))) }) catch name else name,
         // "timestamp(3) without time zone": the digits after the first word.
         .precision => if (mod >= 0) blk: {
             const sp = std.mem.indexOfScalar(u8, name, ' ').?;
-            break :blk std.fmt.bufPrint(&buf, "{s}({d}){s}", .{ name[0..sp], mod, name[sp..] }) catch name;
+            break :blk std.fmt.bufPrint(&nb, "{s}({d}){s}", .{ name[0..sp], mod, name[sp..] }) catch name;
         } else name,
         // "interval day to second(3)" (ivinput.zig).
         .interval => blk: {
             var tb: [48]u8 = undefined;
             const tail = @import("ivinput.zig").typmodText(&tb, std.math.cast(i32, mod) orelse -1);
-            break :blk std.fmt.bufPrint(&buf, "{s}{s}", .{ name, tail }) catch name;
+            break :blk std.fmt.bufPrint(&nb, "{s}{s}", .{ name, tail }) catch name;
         },
     };
-    if (is_array) {
-        var abuf: [80]u8 = undefined;
-        return api.resultText(ctx, std.fmt.bufPrint(&abuf, "{s}[]", .{z}) catch z, .transient);
-    }
-    api.resultText(ctx, z, .transient);
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ z, if (is_array) "[]" else "" }) catch z;
 }
 
 // ============================================================== casts
@@ -615,6 +620,14 @@ fn boolFunc(ctx: *Context, argv: []*Mem) void {
     var buf: [128]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "invalid input syntax for type boolean: \"{s}\"", .{raw[0..@min(raw.len, 64)]}) catch "invalid input syntax for type boolean";
     api.resultErrorState(ctx, .of("22P02"), msg);
+}
+
+/// xq_pg_bool_text(b): a boolean cast to text, 'true' or 'false'
+/// (booltext()); xq_pg_bool_out(b): its output, 't' or 'f' (boolout(),
+/// what concat() and format() write). SQLite's text would be 1 or 0.
+fn boolTextFunc(ctx: *Context, argv: []*Mem, yes: [:0]const u8, no: [:0]const u8) void {
+    if (isNull(argv[0])) return api.resultNull(ctx);
+    api.resultText(ctx, if (api.valueInt64(argv[0]) != 0) yes else no, .static);
 }
 
 pub const IntType = enum(u8) {
@@ -670,6 +683,9 @@ fn intFunc(ctx: *Context, argv: []*Mem, comptime t: IntType) void {
 /// PostgreSQL reads a boolean's input ('t', 'yes', 'on', '1' ..., case
 /// and the spaces around ignored); other values are stored as they are
 /// (the column's check takes 0 and 1).
+/// A boolean stored into a column of text (PostgreSQL's assignment cast).
+pub const bool_text = dfunc.scalar("xq_pg_bool_text", 1, det, dfunc.bind(boolTextFunc, .{ "true", "false" }));
+
 pub const store_boolean = dfunc.scalar("xq_pg_store_boolean", 1, det, storeBooleanFunc);
 
 /// What a value stored into a numeric column goes through: a string is

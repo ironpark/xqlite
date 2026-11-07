@@ -671,9 +671,10 @@ const Back = struct {
         }
     }
 
-    /// The tree of an integer constant the core added, null for another
-    /// Expr.
+    /// The tree of an integer or string constant the core added, null for
+    /// another Expr.
     fn constant(b: *Back, at: *const Expr, c: *const IrExpr) Error!?*Expr {
+        if (c.op == TK.STRING) return try tree.expr(b.a, at.pos, at.pos, .{ .string = try b.a.dupe(u8, c.token()) });
         if (c.op != TK.INTEGER or !c.flags.IntValue) return null;
         return try tree.expr(b.a, at.pos, at.pos, .{ .integer = try std.fmt.allocPrint(b.a, "{d}", .{c.u.value}) });
     }
@@ -755,6 +756,7 @@ const renames = std.StaticStringMap(void).initComptime(.{
     .{"xq_pg_jsonb_path_text"}, .{"xq_pg_json_agg_rows"},    .{"xq_pg_array_to_json"},
     .{"xq_pg_array_nested"},    .{"xq_pg_array_agg_arrays"}, .{"xq_pg_subscript_k"},
     .{"xq_pg_array_contains"},  .{"xq_pg_iv_sum"},           .{"xq_pg_iv_avg"},
+    .{"xq_pg_typeof_as"},
 });
 
 /// Whether overload.zig calls `name` in the place of another: renames'
@@ -769,15 +771,18 @@ const decimal_sql = @import("../decimal_sql.zig");
 
 /// The functions overload.zig wraps an Expr in, in place (wrapIn()).
 const wrappers = std.StaticStringMap(void).initComptime(.{
-    .{"xq_dec"},     .{"xq_dec_key"}, .{"xq_dec_text"}, .{"xq_dec_float8"}, .{"xq_dec_int8"}, .{"xq_dec_number"},
+    .{"xq_dec"},     .{"xq_dec_key"},      .{"xq_dec_text"},    .{"xq_dec_float8"}, .{"xq_dec_int8"}, .{"xq_dec_number"},
     // A string literal read as the boolean it met (overload.zig's
     // boolLiteral()).
     .{"xq_pg_bool"},
+    // A boolean made text (overload.zig's boolText()).
+    .{"xq_pg_bool_text"}, .{"xq_pg_bool_out"},
 });
 
 /// The functions overload.zig gives more arguments.
 const adds_args = std.StaticStringMap(void).initComptime(.{
     .{"xq_pg_array_to_json"}, .{"xq_pg_any"}, .{"xq_pg_subscript_k"}, .{"xq_pg_rows_unnest"},
+    .{"xq_pg_typeof_as"},
 });
 
 const array = @import("array.zig");

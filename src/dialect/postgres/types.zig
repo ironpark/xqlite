@@ -145,9 +145,6 @@ fn arrayOnly(name: []const u8) bool {
     return false;
 }
 
-/// Whether `name` is the name of a type's CHECK constraint (the message
-/// the parser's typeCheck() gives it), which ALTER COLUMN ... TYPE
-/// replaces.
 /// Whether `ty` is a type of PostgreSQL's (not one of the user's).
 pub fn builtin(ty: TypeName) bool {
     if (info(ty)) |_| return true else |_| {}
@@ -155,14 +152,33 @@ pub fn builtin(ty: TypeName) bool {
     return false;
 }
 
-pub fn isCheckName(name: []const u8) bool {
-    const names = [_][]const u8{
-        "smallint out of range",                 "integer out of range",                   "invalid input syntax for type numeric",
-        "invalid input syntax for type boolean", "invalid input syntax for type json",     "malformed array literal",
-        "invalid input syntax for type uuid",    "invalid input syntax for type interval",
+/// The name of the CHECK constraint of type check `c` (the parser's
+/// typeCheck()): PostgreSQL's message for a value the type refuses. Null
+/// for none, and for the checks named by their type (length_check_prefix,
+/// enum_check_prefix).
+pub fn checkName(c: Check) ?[]const u8 {
+    return switch (c) {
+        .none, .length, .enum_label => null,
+        .smallint_range => "smallint out of range",
+        .integer_range => "integer out of range",
+        .numeric => "invalid input syntax for type numeric",
+        .boolean => "invalid input syntax for type boolean",
+        .json, .jsonb => "invalid input syntax for type json",
+        .array => "malformed array literal",
+        .uuid => "invalid input syntax for type uuid",
+        .interval => "invalid input syntax for type interval",
     };
-    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
-    return std.mem.startsWith(u8, name, "value too long for type character") or std.mem.startsWith(u8, name, enum_check_prefix);
+}
+
+/// The start of the name of a varchar(n) or character(n) column's CHECK
+/// ("value too long for type character varying(10)").
+pub const length_check_prefix = "value too long for type ";
+
+/// Whether `name` is the name of a type's CHECK constraint (checkName()),
+/// which ALTER COLUMN ... TYPE replaces.
+pub fn isCheckName(name: []const u8) bool {
+    inline for (comptime std.enums.values(Check)) |c| if (checkName(c)) |n| if (std.mem.eql(u8, n, name)) return true;
+    return std.mem.startsWith(u8, name, length_check_prefix) or std.mem.startsWith(u8, name, enum_check_prefix);
 }
 
 /// The start of the name of an enum column's CHECK ("invalid input value

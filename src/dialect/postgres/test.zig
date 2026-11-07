@@ -180,7 +180,7 @@ test "pg: expressions and functions" {
     try c.expectRows("SELECT substring('hello' FROM 2 FOR 3), substring('hello' FROM 3), substring('hello', 2, 2), position('l' IN 'hello'), strpos('hello', 'lo')", "ell|llo|el|3|4\n");
     try c.expectRows("SELECT trim('  x  '), trim(BOTH 'x' FROM 'xxaxx'), trim(LEADING 'x' FROM 'xxa'), trim(TRAILING FROM 'a  '), btrim('xax', 'x'), ltrim('  a'), rtrim('a  ')", "x|a|a|a|a|a|a\n");
     try c.expectRows("SELECT left('hello', 2), left('hello', -2), right('hello', 2), right('hello', -2), length('héllo'), char_length('ab'), octet_length('é')", "he|hel|lo|llo|5|2|2\n");
-    try c.expectRows("SELECT concat('a', NULL, 1, true), concat_ws('-', 'a', NULL, 'b'), upper('abc'), lower('ABC'), repeat('ab', 3), reverse('abc')", "a11|a-b|ABC|abc|ababab|cba\n");
+    try c.expectRows("SELECT concat('a', NULL, 1, true), concat_ws('-', 'a', NULL, 'b'), upper('abc'), lower('ABC'), repeat('ab', 3), reverse('abc')", "a1t|a-b|ABC|abc|ababab|cba\n");
     try c.expectRows("SELECT lpad('7', 3, '0'), rpad('ab', 4), split_part('a,b,c', ',', 2), starts_with('hello', 'he'), replace('aXbX', 'X', '-'), ascii('A'), chr(66)", "007|ab  |b|1|a-b-|65|B\n");
     // Numbers.
     try c.expectRows("SELECT abs(-3), round(2.567, 2)::text, floor(-2.5)::text, ceil(2.1)::text, ceiling(2.9)::text, trunc(2.7)::text, sqrt(16), power(2, 10), mod(-7, 3), sign(-4), ln(1), log(100), exp(0)", "3|2.57|-3|3|3|2|4.0|1024.0|-1|-1|0.0|2.0|1.0\n");
@@ -984,6 +984,33 @@ test "pg: enum types" {
     try c.expectError("DROP TYPE mood", "type \"mood\" does not exist");
     try c.expectError("SELECT 'x'::mood", "type \"mood\" does not exist");
     try c.exec("PRAGMA integrity_check");
+}
+
+test "pg: a boolean made text, pg_typeof() of the expression's type" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec("CREATE TABLE bt (a bigint, d smallint, v varchar(5), b boolean)");
+    try c.exec("INSERT INTO bt VALUES (1, 2, 'x', true), (5, 6, 'y', false)");
+    try c.expectRows("SELECT true::text, b::text, b::varchar(3), 'x' || b, concat(b, 'y'), format('%s', b) FROM bt ORDER BY a", "true|true|tru|xtrue|ty|t\ntrue|false|fal|xfalse|fy|f\n");
+    try c.expectRows("SELECT min(b::text), max(b::text), string_agg(b::text, ',' ORDER BY a) FROM bt", "false|true|true,false\n");
+    try c.expectRows("SELECT pg_typeof(a), pg_typeof(d), pg_typeof(a + 1), pg_typeof(v), pg_typeof(b), pg_typeof(1::bigint) FROM bt LIMIT 1", "bigint|smallint|bigint|character varying|boolean|bigint\n");
+    try c.expectRows("SELECT pg_typeof(count(*)), pg_typeof(sum(d)), count(*) FROM bt", "bigint|bigint|2\n");
+    // In the schema's text: what the session computes, and PostgreSQL's
+    // text back.
+    try c.exec("CREATE VIEW btv AS SELECT pg_typeof(a) AS k, b::text AS t FROM bt");
+    try c.expectRows("SELECT k, t FROM btv ORDER BY t", "bigint|false\nbigint|true\n");
+    try c.expectRows("SELECT pg_get_viewdef('btv')", " SELECT pg_typeof(a) AS k,\n    (b)::text AS t\n   FROM bt;\n");
+    // Into a column of text: its cast's text.
+    try c.exec("CREATE TABLE bs (t text, v varchar(10), n int)");
+    try c.exec("INSERT INTO bs VALUES (true, false, 1); INSERT INTO bs SELECT b, b, 2 FROM bt WHERE a = 5; UPDATE bs SET v = (n > 1)");
+    try c.expectRows("SELECT t, v FROM bs ORDER BY n", "true|false\nfalse|true\n");
+    // A numeric into a column of text: the digits of its scale.
+    try c.exec("CREATE TABLE nt (t text, v varchar(9), n numeric(5,2), k int)");
+    try c.exec("INSERT INTO nt VALUES (1.50, 1.50, 1.50, 1); INSERT INTO nt SELECT n, n, n, 2 FROM nt; UPDATE nt SET t = n * 2 WHERE k = 2");
+    try c.expectRows("SELECT t, v FROM nt ORDER BY k", "1.50|1.50\n3.00|1.50\n");
+    try c.exec("CREATE TABLE bc (b boolean CHECK (b::text <> 'false'))");
+    try c.expectError("INSERT INTO bc VALUES (false)", "new row for relation \"bc\" violates check constraint \"bc_b_check\"\nDETAIL:  Failing row contains (f).");
 }
 
 test "pg: inet, digests and encode" {

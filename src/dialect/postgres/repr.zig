@@ -42,7 +42,7 @@ pub const TypeRepr = struct {
     /// The function a value of the type stored into a column of another
     /// type `t` goes through (PostgreSQL's assignment cast: a numeric
     /// into a double column), null for none.
-    store_into: ?*const fn (t: Type) ?*const int.FuncDef = null,
+    store_into: ?*const fn (t: Type) ?typing.Conv = null,
     /// `x IN (a, b ...)`, `x BETWEEN a AND b` with operands of the type;
     /// whether it changed `e` (list()).
     list: ?*const fn (c: *Ctx, e: *Expr) Error!bool = null,
@@ -111,7 +111,7 @@ pub const exact_types: std.EnumSet(Logical) = blk: {
 /// value (only for values of that type).
 pub fn storeColumn(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     if (of(t.logical)) |r| return r.store(t, decl, storage);
-    inline for (all) |r| if (r.store_into) |f| if (f(t)) |def| return .{ .typed = .{ .types = .initOne(r.logical), .conv = .{ .def = def } } };
+    inline for (all) |r| if (r.store_into) |f| if (f(t)) |conv| return .{ .typed = .{ .types = .initOne(r.logical), .conv = conv } };
     return null;
 }
 

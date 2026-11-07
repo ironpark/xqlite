@@ -3653,7 +3653,7 @@ pub const Parser = struct {
                 const lo: i64 = if (small) -32768 else -2147483648;
                 const hi: i64 = if (small) 32767 else 2147483647;
                 return .{
-                    .name = if (small) "smallint out of range" else "integer out of range",
+                    .name = types.checkName(info.check).?,
                     .kind = .{ .check = try tree.expr(a, pos, pos, .{ .between = .{ .e = col, .not = false, .lo = try tree.intConst(a, pos, lo), .hi = try tree.intConst(a, pos, hi) } }) },
                 };
             },
@@ -3662,32 +3662,32 @@ pub const Parser = struct {
                 var args: std.ArrayList(*Expr) = .empty;
                 try args.append(a, col);
                 if (numericMods(ty)) |m| for (m) |v| try args.append(a, try tree.intConst(a, pos, v));
-                return .{ .name = "invalid input syntax for type numeric", .kind = .{ .check = try p.call(pos, "xq_dec_valid", null, args.items) } };
+                return .{ .name = types.checkName(.numeric).?, .kind = .{ .check = try p.call(pos, "xq_dec_valid", null, args.items) } };
             },
             .boolean => {
                 const items = try p.list(&.{ try tree.intConst(a, pos, 0), try tree.intConst(a, pos, 1) });
-                return .{ .name = "invalid input syntax for type boolean", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .in_list = .{ .e = col, .not = false, .items = items } }) } };
+                return .{ .name = types.checkName(.boolean).?, .kind = .{ .check = try tree.expr(a, pos, pos, .{ .in_list = .{ .e = col, .not = false, .items = items } }) } };
             },
             .length => {
                 const n = types.maxLength(ty).?;
                 const tname = if (eql(ty.name, "character")) "character" else "character varying";
                 const len = try p.call(pos, "length", null, &.{col});
                 return .{
-                    .name = try std.fmt.allocPrint(a, "value too long for type {s}({d})", .{ tname, n }),
+                    .name = try std.fmt.allocPrint(a, types.length_check_prefix ++ "{s}({d})", .{ tname, n }),
                     .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .le, .l = len, .r = try tree.intConst(a, pos, n) } }) },
                 };
             },
-            .json => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{col}) } },
+            .json => return .{ .name = types.checkName(.json).?, .kind = .{ .check = try p.call(pos, "json_valid", null, &.{col}) } },
             // A JSONB blob, as json_valid(x, 8) checks one (sqlite3 too).
-            .jsonb => return .{ .name = "invalid input syntax for type json", .kind = .{ .check = try p.call(pos, "json_valid", null, &.{ col, try tree.intConst(a, pos, 8) }) } },
-            .array => return .{ .name = "malformed array literal", .kind = .{ .check = try p.call(pos, "xq_pg_array_valid", null, &.{col}) } },
+            .jsonb => return .{ .name = types.checkName(.jsonb).?, .kind = .{ .check = try p.call(pos, "json_valid", null, &.{ col, try tree.intConst(a, pos, 8) }) } },
+            .array => return .{ .name = types.checkName(.array).?, .kind = .{ .check = try p.call(pos, "xq_pg_array_valid", null, &.{col}) } },
             // 16 bytes (a value stored goes through xq_pg_uuid(), which
             // fails on what is not one; this keeps out other blobs).
             .uuid => {
                 const len = try p.call(pos, "length", null, &.{col});
-                return .{ .name = "invalid input syntax for type uuid", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .eq, .l = len, .r = try tree.intConst(a, pos, 16) } }) } };
+                return .{ .name = types.checkName(.uuid).?, .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .eq, .l = len, .r = try tree.intConst(a, pos, 16) } }) } };
             },
-            .interval => return .{ .name = "invalid input syntax for type interval", .kind = .{ .check = try p.call(pos, "xq_pg_iv_valid", null, &.{col}) } },
+            .interval => return .{ .name = types.checkName(.interval).?, .kind = .{ .check = try p.call(pos, "xq_pg_iv_valid", null, &.{col}) } },
             .enum_label => return try enums.check(a, col, ty),
         }
     }

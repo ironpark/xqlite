@@ -899,12 +899,12 @@ fn functionType(c: *Ctx, e: *Expr) Oom!TypeId {
     const z = e.u.token orelse return unknown;
     var buf: [64]u8 = undefined;
     if (z.len > buf.len) return unknown;
-    var name = std.ascii.lowerString(&buf, z);
-    // SQLite's built-in under the name the dialect shadows.
-    const sqlite_prefix = "xq_sqlite_";
+    var name: []const u8 = std.ascii.lowerString(&buf, z);
     const ret = c.rules.function(name) orelse core_functions.get(name) orelse blk: {
-        if (!std.mem.startsWith(u8, name, sqlite_prefix)) return unknown;
-        name = name[sqlite_prefix.len..];
+        // SQLite's built-in under the name the dialect shadows
+        // (xq_sqlite_round), a function of the dialect by the name the
+        // schema calls it (xq_postgres_round).
+        name = unqualified(c.p.db, name) orelse return unknown;
         break :blk c.rules.function(name) orelse core_functions.get(name) orelse return unknown;
     };
     var ops: [32]Operand = undefined;
@@ -921,6 +921,17 @@ fn functionType(c: *Ctx, e: *Expr) Oom!TypeId {
         .common => |i| if (i < args.len) commonOf(c, args[i..]) else unknown,
         .rule => |f| f(c, args),
     };
+}
+
+/// `name` without the prefix xq_sqlite_ or xq_<dialect of db>_, null if it
+/// has neither.
+fn unqualified(db: *const int.Sqlite3, name: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, name, "xq_")) return null;
+    const rest = name["xq_".len..];
+    for ([_][]const u8{ "sqlite", db.xq.lang.dialect.name() }) |d| {
+        if (rest.len > d.len and std.mem.startsWith(u8, rest, d) and rest[d.len] == '_') return rest[d.len + 1 ..];
+    }
+    return null;
 }
 
 /// The common type of the values of a CASE, a compound's column ...:
@@ -1140,6 +1151,9 @@ pub fn arithWidth(p: *const int.Parse, e: *const Expr) u16 {
 /// key made a number or text).
 pub const Store = struct {
     typed: ?Case = null,
+    /// A second case, of other types than `typed`'s (a boolean stored
+    /// into a text column of PostgreSQL's, whose numerics are `typed`).
+    also: ?Case = null,
     needed: ?Conv = null,
 
     pub const Case = struct { types: std.EnumSet(Logical), conv: Conv };
@@ -1156,14 +1170,16 @@ pub const Store = struct {
 
     /// What a value of type `l` goes through, `needed` whether a value
     /// of no case needs a conversion.
-    pub fn forType(s: Store, l: Logical, needed: bool) ?Conv {
-        if (s.typed) |t| if (t.types.contains(l)) return t.conv;
+    pub fn forType(s: Store, ty: Type, needed: bool) ?Conv {
+        const l = ty.logical;
+        if (s.typed) |t| if (t.types.contains(l)) return t.conv.of(ty);
+        if (s.also) |t| if (t.types.contains(l)) return t.conv.of(ty);
         return if (needed) s.needed else null;
     }
 
     /// What value `e` goes through.
     pub fn pick(s: Store, db: *const int.Sqlite3, e: *const Expr) ?Conv {
-        return s.forType(typeOf(db, e.xq_type).logical, storeNeeded(db, e));
+        return s.forType(typeOf(db, e.xq_type), storeNeeded(db, e));
     }
 
     /// What the values of column `i` of query `sel` (INSERT ... SELECT)
@@ -1173,10 +1189,10 @@ pub const Store = struct {
     /// of the terms (the rows of a VALUES). A store of no case: every
     /// value.
     pub fn pickColumn(s: Store, p: *int.Parse, sel: *int.Select, i: usize) Oom!?Conv {
-        if (s.typed == null) return s.needed;
+        if (s.typed == null and s.also == null) return s.needed;
         var needed = false;
-        const l = typeOf(p.db, try columnOfNeeded(p, sel, i, &needed)).logical;
-        return s.forType(l, needed or storeNeededType(p.db, l));
+        const t = typeOf(p.db, try columnOfNeeded(p, sel, i, &needed));
+        return s.forType(t, needed or storeNeededType(p.db, t.logical));
     }
 
     /// What every value goes through when its type is not looked at
@@ -1204,6 +1220,19 @@ pub const Conv = struct {
     /// parameters, that reads a literal when the statement is compiled
     /// (readStoredLiteral()); null to read none.
     bare: ?*const int.FuncDef = null,
+    /// The one constant is the scale of the value's type, -1 if it has
+    /// none (a numeric made text with the digits it shows: xq_dec_text(x,
+    /// scale)); set by of().
+    value_scale: bool = false,
+
+    /// The conversion of a value of type `t`.
+    fn of(c: Conv, t: Type) Conv {
+        if (!c.value_scale) return c;
+        var x = c;
+        x.consts[0] = if (t.logical == .numeric) (if (t.scale) |sc| sc else -1) else -1;
+        x.n_consts = 1;
+        return x;
+    }
 
     /// The function readStoredLiteral() reads a literal with.
     fn literalDef(c: Conv) ?*const int.FuncDef {

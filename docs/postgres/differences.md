@@ -16,7 +16,7 @@ xqlite는 SQLite 스토리지 및 VDBE 실행 엔진을 기반으로 구현되�
 | **바이너리 저장** | TOAST 메커니즘을 통한 대용량 튜플 외부 저장 | SQLite의 오버플로 페이지 체인 사용 | 사용자가 별도의 TOAST 설정을 신경 쓸 필요 없이 자동으로 페이지 단위로 분할 저장됩니다. |
 | **UUID 저장 형식** | 16바이트 내부 바이너리 | 16바이트 `BLOB` (네트워크 바이트 순서) | `uuid_cmp()` 정렬 순서가 SQLite의 `memcmp`와 완전히 일치하여 인덱스 스캔 효율이 극대화됩니다. 질의 출력 시에는 표준 36자 문자열로 자동 변환됩니다. |
 | **stable 함수** | 행마다 다시 계산 | interval의 텍스트(`::text`, `||`, `IntervalStyle`을 따르는 `xq_pg_iv_out()`)는 stable(SQLite의 `SQLITE_FUNC_SLOCHNG`)이라 상수의 텍스트는 문장에서 처음 쓸 때 한 번 만듭니다 | 같은 행에서 앞서 부른 `set_config('IntervalStyle', ...)`는 보이지만, 뒤 행의 `set_config()`가 바꾼 형식은 그 상수에 보이지 않습니다(PostgreSQL의 stable 정의는 둘 다 허용). 인덱스와 생성 열에는 여전히 쓸 수 없고 CHECK에는 쓸 수 있습니다. |
-| **집합 연산의 타입** | `'a' UNION SELECT 'b' UNION SELECT true`는 `UNION types text and boolean cannot be matched` | 불리언과 만난 문자열 상수는 PostgreSQL처럼 읽지만, 타입이 맞지 않는 항의 오류는 내지 않고 값을 그대로 둡니다 | 불리언을 `text` 열에 저장할 때의 `'true'`/`'false'` 변환도 아직 없습니다(`1`/`0`). |
+| **집합 연산의 타입** | `'a' UNION SELECT 'b' UNION SELECT true`는 `UNION types text and boolean cannot be matched` | 불리언과 만난 문자열 상수는 PostgreSQL처럼 읽지만, 타입이 맞지 않는 항의 오류는 내지 않고 값을 그대로 둡니다 | |
 | **숫자 정밀도** | 임의 정밀도 BCD 십진수 연산 | IEEE 754 부동소수점 및 64비트 정수 하이브리드 연산 | 64비트 정수 범위를 넘어서는 거대 십진 연산의 경우 미세한 정밀도 차이가 발생할 수 있습니다. |
 
 ---

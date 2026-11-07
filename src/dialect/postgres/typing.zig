@@ -93,11 +93,21 @@ const repr = @import("repr.zig");
 /// ('12' is 12, '1.5' an error), a real rounded, a numeric as a numeric
 /// (integer.zig); the other types' by their descriptors.
 fn storeColumn(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
+    var s = storeOf(t, decl, storage);
+    // A boolean into a column of text: 'true', 'false' (its cast).
+    if (t.logical == .text or t.logical == .varchar or t.logical == .char) {
+        if (s == null) s = .{};
+        s.?.also = .{ .types = .initOne(.boolean), .conv = .{ .def = &funcs.bool_text } };
+    }
+    return s;
+}
+
+fn storeOf(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
     if (integer.storeColumn(t)) |s| return s;
     // varchar(n), character(n): the spaces past n dropped (funcs.zig); a
     // numeric as its text.
     if ((t.logical == .varchar or t.logical == .char) and t.length != null) return .{
-        .typed = .{ .types = .initOne(.numeric), .conv = .{ .def = @import("../decimal_sql.zig").def("xq_dec_text", 1) } },
+        .typed = .{ .types = .initOne(.numeric), .conv = repr.numeric.text_store },
         .needed = .{
             .def = if (t.logical == .char) &funcs.store_bpchar else &funcs.store_varchar,
             .consts = .{ @intCast(@min(t.length.?, std.math.maxInt(i32))), 0 },

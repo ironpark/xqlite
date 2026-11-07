@@ -844,3 +844,6 @@ xq_postgres_decode 2 qualified deterministic
 xq_postgres_host 1 qualified deterministic
 xq_postgres_masklen 1 qualified deterministic
 xq_postgres_family 1 qualified deterministic
+xq_pg_bool_text 1 engine deterministic
+xq_pg_typeof_as 2 engine deterministic
+xq_pg_bool_out 1 engine deterministic

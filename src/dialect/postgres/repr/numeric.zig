@@ -144,7 +144,7 @@ pub fn numericLiteral(e: *const Expr) bool {
 
 /// Make `x` a call of `name` with `x` (as it was) and `extra`, in place:
 /// the Exprs that point at `x` see the call.
-fn wrapIn(c: *Ctx, x: *Expr, name: []const u8, extra: []const *Expr) Error!void {
+pub fn wrapIn(c: *Ctx, x: *Expr, name: []const u8, extra: []const *Expr) Error!void {
     const inner = try c.p.arena.create(Expr);
     inner.* = x.*;
     var list: [3]*Expr = undefined;
@@ -653,15 +653,19 @@ fn numericStore(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
 /// A numeric stored into a column of a number or a string of type `t` is
 /// made one (PostgreSQL's assignment cast; into an integer column:
 /// integer.zig's storeColumn()).
-fn storeInto(t: Type) ?*const int.FuncDef {
+fn storeInto(t: Type) ?typing.Conv {
     const d = decimal_sql.def;
     return switch (t.logical) {
-        .float8 => d("xq_dec_float8", 1),
-        .float4 => d("xq_dec_float4", 1),
-        .text, .varchar, .char => d("xq_dec_text", 1),
+        .float8 => .{ .def = d("xq_dec_float8", 1) },
+        .float4 => .{ .def = d("xq_dec_float4", 1) },
+        .text, .varchar, .char => text_store,
         else => null,
     };
 }
+
+/// A numeric stored into a column of text: its text with the digits of
+/// its type's scale (xq_dec_text(x, scale)), a literal's as written.
+pub const text_store: typing.Conv = .{ .def = decimal_sql.def("xq_dec_text", 2), .value_scale = true, .bare = decimal_sql.def("xq_dec_text", 1) };
 
 /// The precision and scale of a declared `numeric(p [, s])`.
 pub fn typmodOf(decl: []const u8) ?[2]i32 {

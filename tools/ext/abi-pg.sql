@@ -87,3 +87,5 @@ SELECT xq_pg_enum_in('meh', '["sad","ok"]', 'mood');
 SELECT xq_postgres_md5('a'), hex(xq_postgres_sha224('')), hex(xq_postgres_sha256('abc')), length(xq_postgres_sha384('x')), length(xq_postgres_sha512('x'));
 SELECT xq_postgres_encode(x'00ff5c41', 'hex'), xq_postgres_encode(x'00ff5c41', 'escape'), xq_postgres_encode('hello world', 'base64'), hex(xq_postgres_decode('aGVsbG8=', 'base64')), hex(xq_postgres_decode('6869', 'hex'));
 SELECT xq_postgres_encode('x', 'nope');
+-- A boolean made text, pg_typeof() of a type known (overload.zig).
+SELECT xq_pg_bool_text(1), xq_pg_bool_text(0), quote(xq_pg_bool_text(NULL)), xq_pg_bool_out(1), xq_pg_bool_out(0), xq_pg_typeof_as(1, 'bigint'), xq_pg_typeof_as(NULL, 'text');

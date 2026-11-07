@@ -312,17 +312,24 @@ fn alterType(ps: *Parser) Error!void {
     // values renamed).
     const ty: types.TypeName = .{ .name = name.text, .pos = name.pos, .labels = new_json };
     const cname = try checkName(ps.arena, name.text);
-    // By table (columnsOf() is in their order): one edit of each.
+    // By table (columnsOf() is in their order): one edit of each, the
+    // schema read again once, then (the new CHECKs holding) the rows
+    // renamed, one UPDATE of each table.
     const cols = try columnsOf(ps, name.text, false);
+    var d: ddl.Ddl = .init(p, ps.c.sql);
+    var updates: std.ArrayList([:0]const u8) = .empty;
+    var wrote = false;
     var k: usize = 0;
     while (k < cols.len) {
         var e = k + 1;
         while (e < cols.len and std.mem.eql(u8, cols[e][0], cols[k][0])) e += 1;
         defer k = e;
         const tab = build.findTable(p.db, cols[k][0], catalog.main_schema) orelse continue;
-        var d: ddl.Ddl = .init(p, ps.c.sql);
         const t = try alter.target(&d, tab);
         var edits: std.ArrayList(coldef.Edit) = .empty;
+        // SET a = CASE WHEN a = 'old' THEN 'new' ELSE a END, ... WHERE a = 'old' OR ...
+        var set: std.ArrayList(u8) = .empty;
+        var where: std.ArrayList(u8) = .empty;
         for (cols[k..e]) |tc| {
             const icol = build.columnIndex(tab, tc[1]);
             if (icol < 0 or @as(usize, @intCast(icol)) >= t.def.columns.len) continue;
@@ -334,15 +341,24 @@ fn alterType(ps: *Parser) Error!void {
             var r = d.l.renderer();
             try r.colConstraint(try check(ps.arena, col, ty));
             try edits.append(ps.arena, .{ .start = cdef.end, .end = cdef.end, .text = try r.text() });
+            if (renamed) |rn| {
+                const q: Quoted = .{ .z = tc[1] };
+                const old: Literal = .{ .z = rn[0] };
+                if (set.items.len > 0) try set.appendSlice(ps.arena, ", ");
+                if (where.items.len > 0) try where.appendSlice(ps.arena, " OR ");
+                try set.print(ps.arena, "{f} = CASE WHEN {f} = {f} THEN {f} ELSE {f} END", .{ q, q, old, Literal{ .z = rn[1] }, q });
+                try where.print(ps.arena, "{f} = {f}", .{ q, old });
+            }
         }
-        try alter.write(&d, t, edits.items);
-        if (renamed) |rn| for (cols[k..e]) |tc| {
-            catalog.codeExec(p, t.i_db, build.mprintf(p, "UPDATE \"%w\".\"%w\" SET \"%w\" = %Q WHERE \"%w\" = %Q", &.{
-                .{ .str = t.schema }, .{ .str = tab.name }, .{ .str = tc[1] }, .{ .str = rn[1] }, .{ .str = tc[1] }, .{ .str = rn[0] },
-            }) catch return error.OutOfMemory);
-        };
+        if (try alter.writeText(&d, t, edits.items)) wrote = true;
+        if (set.items.len > 0) try updates.append(ps.arena, try std.fmt.allocPrintSentinel(ps.arena, "UPDATE {f}.{f} SET {s} WHERE {s}", .{ Quoted{ .z = t.schema }, Quoted{ .z = tab.name }, set.items, where.items }, 0));
     }
+    if (wrote) try alter.reload(&d, catalog.schemaIndex(p, catalog.main_schema) orelse return error.Failed);
+    for (updates.items) |u| catalog.codeExec(p, 0, u);
 }
+
+const Quoted = @import("../dialect.zig").Quoted('"');
+const Literal = @import("../dialect.zig").Quoted('\'');
 
 fn indexOf(list: []const []const u8, v: []const u8) ?usize {
     for (list, 0..) |x, i| if (std.mem.eql(u8, x, v)) return i;

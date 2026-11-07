@@ -72,25 +72,38 @@ pub fn target(d: *Ddl, tab: *int.Table) Error!Target {
 
 /// Write `edits` of the table's text to the schema and read it again.
 pub fn write(d: *Ddl, t: Target, edits: []coldef.Edit) Error!void {
-    if (edits.len == 0) return;
+    if (try writeText(d, t, edits)) try reload(d, t.i_db);
+}
+
+/// write() without reading the schema again (reload(), once after the
+/// texts of several tables); whether there was an edit.
+pub fn writeText(d: *Ddl, t: Target, edits: []coldef.Edit) Error!bool {
+    if (edits.len == 0) return false;
     const new = coldef.apply(d.l.p.arena, t.sql, edits) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.Malformed => unreachable,
     };
-    try setSql(d, t.schema, t.i_db, t.tab.name, "%Q", new);
+    try setSql(d, t.schema, t.tab.name, "%Q", new);
+    return true;
+}
+
+/// The schema of `i_db` read again when the statement runs (SQLite's
+/// renameReloadSchema()).
+pub fn reload(d: *Ddl, i_db: usize) Error!void {
+    const p = d.l.p;
+    _ = build.getVdbe(p) orelse return error.OutOfMemory;
+    sqlalter.renameReloadSchema(p, i_db, prepare.INITFLAG_AlterDropCons);
 }
 
 /// sqlite_schema's text of `table` set to `value` (a format of one %Q:
-/// `arg`), and the schema read again (SQLite's renameReloadSchema()).
-fn setSql(d: *Ddl, schema: []const u8, i_db: usize, table: []const u8, value: []const u8, arg: []const u8) Error!void {
+/// `arg`).
+fn setSql(d: *Ddl, schema: []const u8, table: []const u8, value: []const u8, arg: []const u8) Error!void {
     const p = d.l.p;
     const fmt = try std.fmt.allocPrint(p.arena, "UPDATE \"%w\"." ++ int.LEGACY_SCHEMA_TABLE ++ " SET sql = {s} WHERE type='table' AND name=%Q", .{value});
     build.nestedParse(p, fmt, &.{
         .{ .str = schema }, .{ .str = arg }, .{ .str = table },
     });
     try d.l.check();
-    _ = build.getVdbe(p) orelse return error.OutOfMemory;
-    sqlalter.renameReloadSchema(p, i_db, prepare.INITFLAG_AlterDropCons);
 }
 
 /// The column's values set to `e` when the statement runs.
@@ -172,7 +185,8 @@ pub fn addColumn(d: *Ddl, a: *const tree.AlterTable, tab: *int.Table) Error!void
     try setColumn(d, schema, i_db, tab.name, ac.def.name.text, value.?);
     // The column is the table's last (tab.cols.len before the ADD).
     const add = try std.fmt.allocPrint(arena, "sqlite_add_constraint(sql, %Q, {d})", .{tab.cols.len});
-    try setSql(d, schema, i_db, tab.name, add, std.mem.trimStart(u8, added, " "));
+    try setSql(d, schema, tab.name, add, std.mem.trimStart(u8, added, " "));
+    try reload(d, i_db);
 }
 
 /// An ALTER TABLE of several actions: its statements, run in order.

@@ -70,6 +70,7 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 - `sql.main.setFrontend()`는 다른 방언의 훅으로 SQLite 문법을 돌릴 때 씁니다(테스트·개발용).
 - 문장은 컴파일된 언어(`Vdbe.xq_lang`)를 기억합니다. 그래서 스키마 변경 뒤의 재컴파일도 같은 방언으로 합니다.
 - 엔진이 스스로 파싱하는 텍스트는 언제나 SQLite 텍스트이고 SQLite 프론트엔드로 갑니다. 스키마, nested parse, `OP_SqlExec`, ALTER TABLE 재작성, pragma 가상 테이블, `sqlite_stat1`, 카탈로그 SQL이 여기에 해당합니다.
+- 예외는 `catalog.codeExecDialect()`의 `OP_SqlExec`(p1의 `0x0004`)입니다. 연결의 방언으로 쓴 문장들을 문장이 돌 때 차례로 컴파일·실행합니다(PostgreSQL의 여러 동작의 `ALTER TABLE`, 동작마다 한 문장). 앞 문장이 바꾼 스키마로 다음 문장이 컴파일되고, 세이브포인트 안에서 돌아 하나가 실패하면 모두 되돌립니다. 이 `OP_SqlExec`의 문장은 트랜잭션을 열지 않습니다(안의 `DROP INDEX`가 다른 문장이 읽는 동안 막히는 `OP_Destroy`를 쓸 수 있게). 오류는 SQLSTATE를 지닙니다.
 
 ## 빌드에 넣을 방언과 확장
 
@@ -618,7 +619,8 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `src/ir/ir.zig` | IR 빌더 파사드: `stmt`, `expr`, `list`, `from`, `select`, `with`, `window`, `dml`, `ddl`, `txn`, `admin`. 각 항목은 대응하는 C 함수(`sqlite3PExpr`, `sqlite3StartTable` ...)의 별칭이거나 parse.y에서 옮긴 도우미 |
 | `src/ir/tree.zig` | 구문 트리 IR과 의미 노드 (아래) |
 | `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록; `Origins`(내린 식과 트리의 짝) |
-| `src/ir/render.zig` | `render.select(p, src, s)`, `render.expr()`, `render.statement()`(CREATE TABLE/INDEX/VIEW, ALTER TABLE)와 `Renderer` |
+| `src/ir/render.zig` | `render.select(p, src, s)`, `render.expr()`, `render.statement()`(CREATE TABLE/INDEX/VIEW, ALTER TABLE)와 `Renderer`(`column()`, `colConstraint()`, `tableConstraint()`) |
+| `src/ir/coldef.zig` | `sqlite_schema`의 CREATE TABLE 텍스트를 SQLite 토크나이저로 읽은 열 정의(이름, 타입, 제약 절)와 테이블 제약, 그 텍스트의 편집(`apply()`). 열을 제자리에서 바꾸는 ALTER TABLE(PostgreSQL의 `ALTER COLUMN`, `ADD`/`DROP CONSTRAINT`)이 씀 |
 | `src/ir/test.zig`, `fuzz.zig`, `gen.zig` | render ≡ lower 테스트와 퍼저 |
 | `src/catalog/catalog.zig`, `meta.zig`, `sequence.zig`, `schema.zig` | 방언 메타데이터와 메모리의 카탈로그([메모리의 카탈로그](#메모리의-카탈로그)), 시퀀스, 이름 붙은 스키마([스키마](#스키마네임스페이스)) |
 | `src/sql/types.zig` | 방언과 무관한 타입(`Type`, `Logical`, `parse()`, `ofKind()`). 엔진의 것이고 `xqlite.types`로 내보냄 |

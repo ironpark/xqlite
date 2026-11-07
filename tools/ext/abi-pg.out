@@ -47,6 +47,11 @@ X'80000000000000000000025B7F3D400080000001800000008000000000000000'|X'8000000000
 ["{a,1}","{b,22}"]|[]|["a","b","c"]|[]
 {abc,0,""}|fooXarYXazY|2|3|FGH
 1|{a,b,"",c}|o|oob|^(?:a.b)$
+127.0.0.1|10.1.2.3/8|2001:db8::1|::ffff:1.2.3.4|10.0.0.0/8|NULL
+10.1.2.3|8|6
+ok|NULL
+0cc175b9c0f1b6a831c399e269772661|D14A028C2A3A2BC9476102BB288234C415A2B01F828EA62AC5B3E42F|BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD|48|64
+00ff5c41|\000\377\\A|aGVsbG8gd29ybGQ=|68656C6C6F|6869
 -- errors
 line 5: invalid input syntax for type boolean: "maybe"
 line 7: smallint out of range
@@ -79,3 +84,7 @@ line 75: invalid escape string
 HINT:  Escape string must be empty or one character.
 line 79: regexp_match() does not support the "global" option
 HINT:  Use the regexp_matches function instead.
+line 82: invalid input syntax for type inet: "1.2.3"
+line 83: invalid cidr value: "10.0.0.1/8"
+line 86: invalid input value for enum mood: "meh"
+line 89: unrecognized encoding: "nope"

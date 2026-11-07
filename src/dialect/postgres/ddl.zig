@@ -21,6 +21,7 @@ const lower = @import("../../ir/lower.zig");
 const build = @import("../../sql/build.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const sequence = catalog.sequence;
+const alter = @import("alter.zig");
 
 const Parse = int.Parse;
 pub const Error = lower.Error;
@@ -125,6 +126,7 @@ pub const Ddl = struct {
             if (a.if_exists) return notice(p, "00000", "relation \"{s}\" does not exist, skipping", .{bare(p.db, table)});
             return d.failState(a.name.name.pos, .of("42P01"), "relation \"{s}\" does not exist", .{table});
         };
+        if (a.steps.len > 0) return alter.steps(d, a.steps);
         switch (a.action) {
             .add_column => |ac| if (build.columnIndex(tab, ac.def.name.text) >= 0) {
                 if (ac.if_not_exists) return notice(p, "42701", "column \"{s}\" of relation \"{s}\" already exists, skipping", .{ ac.def.name.text, shown(p.db, table) });
@@ -134,6 +136,13 @@ pub const Ddl = struct {
                 if (dc.if_exists) return notice(p, "00000", "column \"{s}\" of relation \"{s}\" does not exist, skipping", .{ dc.name.text, shown(p.db, table) });
                 return d.failState(dc.name.pos, .of("42703"), "column \"{s}\" of relation \"{s}\" does not exist", .{ dc.name.text, shown(p.db, table) });
             },
+            else => {},
+        }
+        switch (a.action) {
+            .add_column => |ac| if (alter.variableDefault(ac.def)) return alter.addColumn(d, a, tab),
+            .alter_column => |ac| return alter.alterColumn(d, tab, ac),
+            .add_constraint => |tc| return alter.addConstraint(d, a, tab, tc),
+            .drop_constraint => |dc| return alter.dropConstraint(d, tab, dc.name, dc.if_exists),
             else => {},
         }
         try d.l.alterTable(a);
@@ -227,7 +236,7 @@ fn skipExisting(p: *Parse, name: []const u8, schema: []const u8, kind: Made) Exi
     return found;
 }
 
-fn relationExists(db: *int.Sqlite3, name: []const u8, schema: []const u8) bool {
+pub fn relationExists(db: *int.Sqlite3, name: []const u8, schema: []const u8) bool {
     if (build.findTable(db, name, schema) != null) return true;
     const i = build.findDbName(db, schema) orelse return false;
     return db.dbs.items[i].schema.idx_hash.get(name) != null;
@@ -244,7 +253,7 @@ pub fn sequenceExists(db: *int.Sqlite3, name: []const u8) bool {
 
 /// The name PostgreSQL shows for SQLite name `name`: without its schema
 /// if it is an object of a schema of CREATE SCHEMA ("s.t" is t).
-fn shown(db: *int.Sqlite3, name: []const u8) []const u8 {
+pub fn shown(db: *int.Sqlite3, name: []const u8) []const u8 {
     const s = catalog.schemas.split(name) orelse return name;
     return if (catalog.schemas.exists(db, s.schema) catch false) s.name else name;
 }

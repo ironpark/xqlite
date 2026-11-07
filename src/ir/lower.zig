@@ -96,6 +96,10 @@ pub const Lowerer = struct {
     /// Where each Expr and ORDER BY list lowered comes from, if kept
     /// (Origins).
     origins: ?*Origins = null,
+    /// Lowering an ON CONFLICT target: a function of a dialect's table
+    /// by the name an index of the schema calls it (functionName()), so
+    /// that SQLite finds the index of `ON CONFLICT (f(x))`.
+    schema_names: bool = false,
 
     const ValueTarget = struct { tab: ?*int.Table, col: ?*int.Column };
 
@@ -127,7 +131,7 @@ pub const Lowerer = struct {
     }
 
     /// Fail if a builder left an error.
-    fn check(l: *Lowerer) Error!void {
+    pub fn check(l: *Lowerer) Error!void {
         if (l.p.n_err > 0) return error.Failed;
     }
 
@@ -579,7 +583,7 @@ pub const Lowerer = struct {
 
     fn func(l: *Lowerer, f: *const tree.Func) Error!*IrExpr {
         const p = l.p;
-        const name = try functionName(p, f.name.text, f.dialect, false);
+        const name = try functionName(p, f.name.text, f.dialect, l.schema_names);
         const name_tok = if (name.ptr == f.name.text.ptr) try l.nameTok(f.name) else Token.init(name);
         const sf: int.SF = if (f.distinct) .{ .Distinct = true } else .{};
         const args = if (f.star) null else try l.exprList(f.args);
@@ -1159,11 +1163,13 @@ pub const Lowerer = struct {
         var upsert: ?*int.Upsert = null;
         if (ins.on_conflict) |oc| {
             var tgt: ?*ExprList = null;
+            l.schema_names = true;
             for (oc.target) |e| {
                 tgt = try ir.list.append(p, tgt, try l.expr(e));
                 ir.list.setSortOrder(tgt, SO.undef, SO.undef);
             }
             const tw = if (oc.target_where) |w| try l.expr(w) else null;
+            l.schema_names = false;
             var set: ?*ExprList = null;
             var where: ?*IrExpr = null;
             if (oc.update) |items| {
@@ -1280,12 +1286,19 @@ pub const Lowerer = struct {
 
     // ============================================================== DDL
 
-    fn lowerText(l: *Lowerer, text: [:0]const u8) Error!void {
+    /// The SQLite text the renderer wrote, compiled: without
+    /// double-quoted strings (it quotes strings '...'), so that a name of
+    /// no column is an error, not a string.
+    pub fn lowerText(l: *Lowerer, text: [:0]const u8) Error!void {
+        const db = l.p.db;
+        const flags = db.flags;
+        db.flags.clear(.{ .DqsDML = true, .DqsDDL = true });
+        defer db.flags = flags;
         try ir.stmt.lowerSqliteText(l.p, text);
         try l.check();
     }
 
-    fn renderer(l: *Lowerer) render.Renderer {
+    pub fn renderer(l: *Lowerer) render.Renderer {
         return .{ .p = l.p, .src = l.src };
     }
 
@@ -1423,6 +1436,7 @@ pub const Lowerer = struct {
                 };
             },
             .drop_column => |dc| if (dc.if_exists and columnIndex(tab, dc.name.text) == null) return,
+            .alter_column, .add_constraint, .drop_constraint => return l.fail(a.name.name.pos, "this ALTER TABLE is not supported", .{}),
             else => {},
         }
         var at = a.*;
@@ -1442,6 +1456,7 @@ pub const Lowerer = struct {
                 }
                 catalog.codeDeleteColumn(p, db_name, table, n.text);
             },
+            .alter_column, .add_constraint, .drop_constraint => unreachable,
         }
     }
 

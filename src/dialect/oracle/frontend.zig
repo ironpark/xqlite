@@ -212,6 +212,7 @@ fn ddl(l: *lower.Lowerer, s: tree.Stmt) lower.Error!void {
                 .rename_to => |n| if (relationExists(p.db, n.text, catalog.schemaName(p.db, tab))) {
                     return l.fail(n.pos, "ORA-00955: name is already used by an existing object", .{});
                 },
+                .alter_column, .add_constraint, .drop_constraint => {},
             }
             try l.alterTable(a);
         },

@@ -168,7 +168,11 @@ pub fn withoutMain(name: []const u8) []const u8 {
 pub fn reword(a: std.mem.Allocator, m: []const u8, rules: []const Reword) std.mem.Allocator.Error!?struct { rule: *const Reword, text: [:0]u8 } {
     for (rules) |*r| if (std.mem.startsWith(u8, m, r.prefix)) {
         if (!r.named) return .{ .rule = r, .text = try a.dupeSentinel(u8, r.before, 0) };
-        const name = m[r.prefix.len..];
+        var name = m[r.prefix.len..];
+        // SQLite's hint for a "name" of no column (resolve.zig), which
+        // the dialects' messages do not have.
+        const dqs_hint = "\" - should this be a string literal in single-quotes?";
+        if (name.len > dqs_hint.len and name[0] == '"' and std.mem.endsWith(u8, name, dqs_hint)) name = name[1 .. name.len - dqs_hint.len];
         const bare = withoutMain(name);
         const schema = if (bare.len < name.len) r.main_as else "";
         return .{ .rule = r, .text = try std.fmt.allocPrintSentinel(a, "{s}{s}{s}{s}", .{ r.before, schema, bare, r.after }, 0) };

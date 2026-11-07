@@ -104,8 +104,13 @@ fn storeColumn(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
             .n_consts = 1,
         },
     };
+    // inet, cidr: their input, written canonical (inet.zig).
+    if (std.mem.eql(u8, decl, "inet")) return .of(.{ .def = &inet.cast_inet });
+    if (std.mem.eql(u8, decl, "cidr")) return .of(.{ .def = &inet.cast_cidr });
     return repr.storeColumn(t, decl, storage);
 }
+
+const inet = @import("inet.zig");
 
 const integer = @import("integer.zig");
 
@@ -391,6 +396,17 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "split_part", Ret{ .named = "text" } },
     .{ "translate", Ret{ .named = "text" } },
     .{ "md5", Ret{ .named = "text" } },
+    .{ "sha224", Ret{ .named = "bytea" } },
+    .{ "sha256", Ret{ .named = "bytea" } },
+    .{ "sha384", Ret{ .named = "bytea" } },
+    .{ "sha512", Ret{ .named = "bytea" } },
+    .{ "encode", Ret{ .named = "text" } },
+    .{ "host", Ret{ .named = "text" } },
+    .{ "masklen", Ret{ .named = "integer" } },
+    .{ "family", Ret{ .named = "integer" } },
+    .{ "xq_pg_inet", Ret{ .named = "inet" } },
+    .{ "xq_pg_cidr", Ret{ .named = "cidr" } },
+    .{ "decode", Ret{ .named = "bytea" } },
     .{ "format", Ret{ .named = "text" } },
     .{ "starts_with", Ret{ .named = "boolean" } },
     // Numbers.

@@ -14,6 +14,8 @@
 //! | date, time, timestamp[tz]           | TEXT    |                                        |
 //! | interval                            | BLOB    | xq_pg_iv_valid(): pkg/datetime/src/interval.zig's BLOB (TEXT in older databases) |
 //! | uuid                                | BLOB    | 16 bytes (uuid.zig); TEXT in older tables |
+//! | inet, cidr                          | TEXT    | (its text, as inet.zig writes it)      |
+//! | an enum (enums.zig)                 | TEXT    | one of its labels                      |
 //! | json                                | TEXT    | json_valid()                           |
 //! | jsonb                               | BLOB    | json_valid(x, 8): JSONB, canonical (TEXT in older tables) |
 //! | integer[], text[] ... (any T[])     | TEXT    | an array literal (array.zig); stored canonical |
@@ -41,6 +43,9 @@ pub const TypeName = struct {
     fields: []const u8 = "",
     array: bool = false,
     pos: u32,
+    /// An enum type (CREATE TYPE ... AS ENUM, enums.zig): its labels in
+    /// order, as a JSON array of strings; `name` is the type's.
+    labels: ?[]const u8 = null,
 };
 
 pub const Check = enum {
@@ -59,6 +64,8 @@ pub const Check = enum {
     uuid,
     /// An interval's BLOB (xq_pg_iv_valid()).
     interval,
+    /// One of an enum's labels (TypeName.labels).
+    enum_label,
 };
 
 pub const Info = struct {
@@ -82,6 +89,7 @@ pub fn info(ty: TypeName) Error!Info {
         if (e.serial) return error.Array;
         return .{ .storage = "TEXT", .check = .array };
     }
+    if (ty.labels != null) return .{ .storage = "TEXT", .check = .enum_label };
     const n = ty.name;
     const table = [_]struct { []const u8, Info }{
         .{ "smallint", .{ .storage = "INTEGER", .check = .smallint_range } },
@@ -113,6 +121,9 @@ pub fn info(ty: TypeName) Error!Info {
         // that keeps TEXT (jtype.zig reads the column's storage).
         .{ "jsonb", .{ .storage = "BLOB", .check = .jsonb } },
         .{ "oid", .{ .storage = "INTEGER" } },
+        // Their text (inet.zig).
+        .{ "inet", .{ .storage = "TEXT" } },
+        .{ "cidr", .{ .storage = "TEXT" } },
         // The catalog's vectors (`1 2`).
         .{ "int2vector", .{ .storage = "TEXT" } },
         .{ "oidvector", .{ .storage = "TEXT" } },
@@ -133,6 +144,30 @@ fn arrayOnly(name: []const u8) bool {
     for (names) |x| if (std.mem.eql(u8, x, name)) return true;
     return false;
 }
+
+/// Whether `name` is the name of a type's CHECK constraint (the message
+/// the parser's typeCheck() gives it), which ALTER COLUMN ... TYPE
+/// replaces.
+/// Whether `ty` is a type of PostgreSQL's (not one of the user's).
+pub fn builtin(ty: TypeName) bool {
+    if (info(ty)) |_| return true else |_| {}
+    if (castPlan(ty)) |_| return true else |_| {}
+    return false;
+}
+
+pub fn isCheckName(name: []const u8) bool {
+    const names = [_][]const u8{
+        "smallint out of range",                 "integer out of range",                   "invalid input syntax for type numeric",
+        "invalid input syntax for type boolean", "invalid input syntax for type json",     "malformed array literal",
+        "invalid input syntax for type uuid",    "invalid input syntax for type interval",
+    };
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return std.mem.startsWith(u8, name, "value too long for type character") or std.mem.startsWith(u8, name, enum_check_prefix);
+}
+
+/// The start of the name of an enum column's CHECK ("invalid input value
+/// for enum mood"), PostgreSQL's message without the value.
+pub const enum_check_prefix = "invalid input value for enum ";
 
 /// The length limit of varchar(n)/char(n) (char is char(1)).
 pub fn maxLength(ty: TypeName) ?i64 {
@@ -280,6 +315,8 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (eql(u8, n, "jsonb")) return .{ .func = "xq_pg_jsonb" };
     // uuid_in(): the 16 bytes (uuid.zig).
     if (eql(u8, n, "uuid")) return .{ .func = "xq_pg_uuid" };
+    if (eql(u8, n, "inet")) return .{ .func = "xq_pg_inet" };
+    if (eql(u8, n, "cidr")) return .{ .func = "xq_pg_cidr" };
     const i = try info(ty);
     if (i.serial) return error.UnknownType;
     return .{ .sqlite = i.storage };

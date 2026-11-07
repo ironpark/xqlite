@@ -326,12 +326,21 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     if (op.p1 & 0x0002 != 0) e.db.n_analysis_limit = op.p2;
     // xqlite: the SQL is the engine's, SQLite text in any dialect. It is
     // how a statement writes the dialect catalog (catalog.codeExec()), so
-    // the catalog read into memory goes (catalog.zig).
+    // the catalog read into memory goes (catalog.zig). With 0x0004 it is
+    // statements of the connection's dialect (catalog.codeExecDialect()),
+    // whose errors keep their state, run in a savepoint (all or none: the
+    // statement itself has no transaction, so that they may drop a
+    // b-tree, which OP_Destroy refuses while another statement reads).
     const dialect = @import("../../dialect/dialect.zig");
     const meta = @import("../../catalog/meta.zig");
+    const sql = std.mem.span(op.p4.z);
     meta.written(e.db);
     const saved_lang = dialect.swapLang(e.db, .sqlite);
-    const rc = @import("../../sql/legacy.zig").execNoCallback(e.db, std.mem.span(op.p4.z), &err_msg);
+    var state: ?int.ErrorState = null;
+    const rc = if (op.p1 & 0x0004 != 0)
+        execDialect(e.db, sql, saved_lang, &err_msg, &state)
+    else
+        legacy.execNoCallback(e.db, sql, &err_msg);
     _ = dialect.swapLang(e.db, saved_lang);
     meta.dropAll(e.db);
     e.db.n_sql_exec -= 1;
@@ -340,10 +349,30 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     e.db.n_analysis_limit = saved_analysis_limit;
     if (err_msg != null or rc != RC.OK) {
         aux.vdbeError(e.v, "{s}", .{err_msg orelse ""});
+        if (state) |st| e.v.err_state = st;
         if (err_msg) |m| e.db.gpa.free(m);
         return e.abort(if (rc != RC.OK) rc else RC.ERROR);
     }
     return .next;
+}
+
+const legacy = @import("../../sql/legacy.zig");
+
+/// xqlite: OP_SqlExec's 0x0004: `sql` in dialect `lang`, all or none (a
+/// savepoint), and the state of its error in `state`.
+fn execDialect(db: *int.Sqlite3, sql: [:0]const u8, lang: @import("../../dialect/dialect.zig").Lang, err_msg: *?[:0]u8, state: *?int.ErrorState) i32 {
+    const dialect = @import("../../dialect/dialect.zig");
+    var rc = legacy.execNoCallback(db, "SAVEPOINT xq_steps", err_msg);
+    if (rc != RC.OK) return rc;
+    _ = dialect.swapLang(db, lang);
+    rc = legacy.execNoCallback(db, sql, err_msg);
+    _ = dialect.swapLang(db, .sqlite);
+    if (rc != RC.OK) state.* = db.err_state;
+    var ignored: ?[:0]u8 = null;
+    if (rc != RC.OK) _ = legacy.execNoCallback(db, "ROLLBACK TO xq_steps", &ignored);
+    _ = legacy.execNoCallback(db, "RELEASE xq_steps", &ignored);
+    if (ignored) |m| db.gpa.free(m);
+    return rc;
 }
 
 pub fn opParseSchema(e: *Exec, op: *Op) Error!Flow {

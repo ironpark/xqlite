@@ -877,6 +877,140 @@ test "pg: DDL" {
     try c.exec("PRAGMA integrity_check");
 }
 
+/// expectError(), and the extended result code it fails with (whose
+/// SQLSTATE the server sends: 23502 for CONSTRAINT_NOTNULL ...).
+fn expectErrorCode(c: *Conn, sql: []const u8, msg: []const u8, code: i32) !void {
+    try c.expectError(sql, msg);
+    try testing.expectEqual(code, c.db.err_code);
+}
+
+/// expectError(), and the SQLSTATE it fails with.
+fn expectErrorState(c: *Conn, sql: []const u8, msg: []const u8, state: *const [5]u8) !void {
+    try c.expectError(sql, msg);
+    try testing.expectEqualStrings(state, &(c.db.err_state orelse return error.TestExpectedState).sqlstate);
+}
+
+test "pg: ALTER TABLE of several actions, ALTER COLUMN, ADD and DROP CONSTRAINT" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE users (id serial PRIMARY KEY, name text);
+        \\CREATE TABLE s (user_id int, v int, ip text, flag bool);
+        \\INSERT INTO users (name) VALUES ('a'), (NULL);
+        \\INSERT INTO s VALUES (1, 5, '10.0.0.1', true), (NULL, 6, '::1', false);
+    );
+    // Several actions, in order, each seeing what the one before made;
+    // all or none.
+    try c.exec("ALTER TABLE users ADD COLUMN x int DEFAULT 1, ADD COLUMN y text DEFAULT 'q', ALTER COLUMN y SET DEFAULT 'r'");
+    try c.expectRows("SELECT id, x, y FROM users ORDER BY id", "1|1|q\n2|1|q\n");
+    try expectErrorState(&c, "ALTER TABLE users ADD COLUMN z int, ALTER COLUMN nosuch SET NOT NULL", "column \"nosuch\" of relation \"users\" does not exist", "42703");
+    try c.expectRows("SELECT count(*) FROM pragma_table_info('users') WHERE name = 'z'", "0\n");
+    // SET/DROP DEFAULT: the rows keep their values (the old default of
+    // a column a row's record does not have).
+    try c.exec("ALTER TABLE users ALTER COLUMN x SET DEFAULT 5");
+    try c.exec("INSERT INTO users (name) VALUES ('b')");
+    try c.expectRows("SELECT id, x FROM users ORDER BY id", "1|1\n2|1\n3|5\n");
+    try c.exec("ALTER TABLE users ALTER COLUMN x DROP DEFAULT");
+    try c.exec("INSERT INTO users (name) VALUES ('c')");
+    try c.expectRows("SELECT x IS NULL FROM users WHERE name = 'c'", "1\n");
+    // SET/DROP NOT NULL.
+    try expectErrorCode(&c, "ALTER TABLE users ALTER COLUMN name SET NOT NULL", "column \"name\" of relation \"users\" contains null values", RC.CONSTRAINT_NOTNULL);
+    try c.exec("UPDATE users SET name = 'z' WHERE name IS NULL; ALTER TABLE users ALTER COLUMN name SET NOT NULL");
+    try c.expectError("INSERT INTO users (name) VALUES (NULL)", "null value in column \"name\" of relation \"users\" violates not-null constraint\nDETAIL:  Failing row contains (5, null, null, r).");
+    try c.exec("ALTER TABLE users ALTER name DROP NOT NULL; INSERT INTO users (name) VALUES (NULL)");
+    try expectErrorState(&c, "ALTER TABLE users ALTER COLUMN id DROP NOT NULL", "column \"id\" is in a primary key", "42P16");
+    // SET DATA TYPE [USING]: the type's CHECK replaced, the values cast.
+    try c.exec("ALTER TABLE s ALTER COLUMN v TYPE bigint, ALTER COLUMN ip SET DATA TYPE inet USING ip::inet");
+    try c.exec("ALTER TABLE s ALTER COLUMN flag SET DATA TYPE text USING CASE WHEN flag = true THEN 'tap' WHEN flag = false THEN 'none' END, ALTER COLUMN flag SET DEFAULT 'tap'");
+    try c.expectRows("SELECT v, ip, flag FROM s ORDER BY v", "5|10.0.0.1|tap\n6|::1|none\n");
+    try c.expectRows("SELECT col, value FROM xq_catalog WHERE tbl = 's' AND key = 'type' ORDER BY col", "flag|text\nip|inet\nuser_id|integer\nv|bigint\n");
+    try c.exec("INSERT INTO s (v) VALUES (3000000000)");
+    try c.expectError("ALTER TABLE s ALTER COLUMN v TYPE int", "integer out of range");
+    try c.exec("DELETE FROM s WHERE v > 10");
+    // ADD CONSTRAINT: the rows checked, PostgreSQL's names.
+    try c.exec("ALTER TABLE s ADD CONSTRAINT s_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE");
+    try c.expectError("INSERT INTO s (user_id) VALUES (99)", "insert or update on table \"s\" violates foreign key constraint \"s_user_id_fkey\"\nDETAIL:  Key (user_id)=(99) is not present in table \"users\".");
+    try expectErrorCode(&c, "ALTER TABLE s ADD CHECK (v > 5)", "check constraint \"s_v_check\" of relation \"s\" is violated by some row", RC.CONSTRAINT_CHECK);
+    try c.exec("ALTER TABLE s ADD CHECK (v > 0), ADD CHECK (v < 100), ADD UNIQUE (v)");
+    try c.expectError("INSERT INTO s (v) VALUES (5)", "duplicate key value violates unique constraint \"s_v_key\"\nDETAIL:  Key (v)=(5) already exists.");
+    try c.expectError("INSERT INTO s (v) VALUES (100)", "new row for relation \"s\" violates check constraint \"s_v_check1\"\nDETAIL:  Failing row contains (null, 100, null, tap).");
+    try expectErrorState(&c, "ALTER TABLE s ADD CONSTRAINT s_v_check CHECK (v > 1)", "constraint \"s_v_check\" for relation \"s\" already exists", "42710");
+    try c.exec("DELETE FROM users WHERE id = 1");
+    try c.expectRows("SELECT v FROM s ORDER BY v", "6\n");
+    // DROP CONSTRAINT: a CHECK, a foreign key, a UNIQUE's index.
+    try c.exec("ALTER TABLE s DROP CONSTRAINT s_v_key, DROP CONSTRAINT s_v_check1, DROP CONSTRAINT s_user_id_fkey");
+    try c.exec("INSERT INTO s (user_id, v) VALUES (99, 6), (98, 200)");
+    try expectErrorState(&c, "ALTER TABLE s DROP CONSTRAINT nosuch", "constraint \"nosuch\" of relation \"s\" does not exist", "42704");
+    try c.exec("ALTER TABLE s DROP CONSTRAINT IF EXISTS nosuch");
+    try c.expectRows("SELECT count(*) FROM xq_catalog WHERE tbl = 's' AND key LIKE 'constraint:%'", "0\n");
+    // ADD COLUMN of a DEFAULT that is no constant: the rows given its
+    // value.
+    try c.exec("ALTER TABLE s ADD COLUMN at timestamptz NOT NULL DEFAULT now(), ADD COLUMN ok bool DEFAULT 'f'");
+    try c.expectRows("SELECT count(*), count(at), count(*) FILTER (WHERE NOT ok) FROM s", "3|3|3\n");
+    try c.expectError("CREATE TABLE b (x bool DEFAULT 'maybe')", "invalid input syntax for type boolean: \"maybe\"");
+    try c.expectError("CREATE INDEX ON s (nosuch)", "column \"nosuch\" does not exist");
+    try c.exec("PRAGMA integrity_check");
+}
+
+test "pg: enum types" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+        \\CREATE TABLE p (name text, m mood DEFAULT 'ok', n mood);
+        \\INSERT INTO p (name) VALUES ('a');
+        \\INSERT INTO p VALUES ('b', 'happy', 'sad');
+    );
+    try c.expectRows("SELECT name, m, n FROM p ORDER BY name", "a|ok|NULL\nb|happy|sad\n");
+    try c.expectRows("SELECT 'sad'::mood, CAST('ok' AS mood)", "sad|ok\n");
+    try expectErrorState(&c, "SELECT 'meh'::mood", "invalid input value for enum mood: \"meh\"", "22P02");
+    try expectErrorState(&c, "INSERT INTO p (m) VALUES ('meh')", "invalid input value for enum mood", "22P02");
+    try expectErrorState(&c, "CREATE TYPE mood AS ENUM ('x')", "type \"mood\" already exists", "42710");
+    try c.expectError("CREATE TYPE m2 AS ENUM ('x', 'x')", "enum label \"x\" used more than once");
+    // ADD VALUE, RENAME VALUE: the CHECK of every column of the type.
+    try c.exec("ALTER TABLE p ADD COLUMN o mood DEFAULT 'sad'");
+    try c.exec("ALTER TYPE mood ADD VALUE 'meh' BEFORE 'ok'; ALTER TYPE mood ADD VALUE IF NOT EXISTS 'meh'");
+    try c.exec("INSERT INTO p VALUES ('c', 'meh', 'meh', 'meh')");
+    try c.exec("ALTER TYPE mood RENAME VALUE 'happy' TO 'glad'");
+    try c.expectRows("SELECT name, m FROM p ORDER BY name", "a|ok\nb|glad\nc|meh\n");
+    try c.expectRows("SELECT value FROM xq_catalog WHERE tbl = '' AND col = 'mood' AND key = 'enum'", "[\"sad\",\"meh\",\"ok\",\"glad\"]\n");
+    try c.expectError("INSERT INTO p (o) VALUES ('happy')", "invalid input value for enum mood");
+    try c.expectError("ALTER TYPE mood ADD VALUE 'x' AFTER 'nosuch'", "\"nosuch\" is not an existing enum label");
+    // DROP TYPE: not while a column is of it.
+    try expectErrorState(&c, "DROP TYPE mood", "cannot drop type mood because other objects depend on it\nDETAIL:  column m of table p depends on type mood\nHINT:  Use DROP ... CASCADE to drop the dependent objects too.", "2BP01");
+    try c.exec("DROP TABLE p; DROP TYPE mood; DROP TYPE IF EXISTS mood");
+    try c.expectError("DROP TYPE mood", "type \"mood\" does not exist");
+    try c.expectError("SELECT 'x'::mood", "type \"mood\" does not exist");
+    try c.exec("PRAGMA integrity_check");
+}
+
+test "pg: inet, digests and encode" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.expectRows("SELECT '127.0.0.1'::inet, '10.1.2.3/8'::inet, '2001:0DB8:0:0::1'::inet, '::ffff:1.2.3.4'::inet, '10.0.0.0/8'::cidr", "127.0.0.1|10.1.2.3/8|2001:db8::1|::ffff:1.2.3.4|10.0.0.0/8\n");
+    try c.expectRows("SELECT host('10.1.2.3/8'::inet), masklen('10.1.2.3/8'::inet), family('::1'::inet)", "10.1.2.3|8|6\n");
+    try expectErrorState(&c, "SELECT 'x'::inet", "invalid input syntax for type inet: \"x\"", "22P02");
+    try c.expectError("SELECT '10.0.0.1/8'::cidr", "invalid cidr value: \"10.0.0.1/8\"");
+    try c.exec("CREATE TABLE ses (ip inet NOT NULL DEFAULT '127.0.0.1'::inet, n int)");
+    try c.exec("INSERT INTO ses (n) VALUES (1); INSERT INTO ses VALUES ('2001:db8:0::2', 2)");
+    try c.expectRows("SELECT ip FROM ses ORDER BY n", "127.0.0.1\n2001:db8::2\n");
+    try c.expectError("INSERT INTO ses VALUES ('bogus', 3)", "invalid input syntax for type inet: \"bogus\"");
+    try c.expectRows("SELECT md5('a'), encode(sha256('abc'), 'hex'), encode(sha224(''::bytea), 'hex')", "0cc175b9c0f1b6a831c399e269772661|ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad|d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f\n");
+    try c.expectRows("SELECT length(sha384('x')), length(sha512('x')), encode('hello world'::bytea, 'base64'), encode('\\x00ff5c'::bytea, 'escape')", "48|64|aGVsbG8gd29ybGQ=|\\000\\377\\\\\n");
+    try c.expectRows("SELECT encode(decode('68656c6c6f', 'hex'), 'escape'), encode(decode('aGVsbG8=', 'base64'), 'hex')", "hello|68656c6c6f\n");
+    try c.expectError("SELECT encode('x'::bytea, 'nope')", "unrecognized encoding: \"nope\"");
+    // An index of a digest, and ON CONFLICT on it.
+    try c.exec("CREATE TABLE enc (user_id int, url text); CREATE UNIQUE INDEX enc_url ON enc (user_id, sha256(url::bytea))");
+    try c.exec("INSERT INTO enc VALUES (1, 'a') ON CONFLICT (user_id, sha256(url::bytea)) DO NOTHING");
+    try c.exec("INSERT INTO enc VALUES (1, 'a'), (1, 'b') ON CONFLICT (user_id, sha256(url::bytea)) DO NOTHING");
+    try c.expectRows("SELECT url FROM enc ORDER BY url", "a\nb\n");
+    try c.exec("DROP EXTENSION IF EXISTS hstore");
+    try c.expectError("DROP EXTENSION hstore", "extension \"hstore\" does not exist");
+}
+
 test "pg: information_schema and pg_catalog" {
     var c: Conn = undefined;
     try openPg(&c);
@@ -1137,7 +1271,7 @@ test "pg: errors in PostgreSQL's words" {
     try c.expectError("SELECT a b c FROM t", "syntax error at or near \"c\"");
     try c.expectError("SELECT ARRAY[]", "cannot determine type of empty array\nHINT:  Explicitly cast to the desired type, for example ARRAY[]::integer[].");
     try c.expectError("SELECT 1 FROM t LATERAL", "syntax error at or near \"LATERAL\"");
-    try c.expectError("CREATE TYPE mood AS ENUM ('a')", "CREATE TYPE is not supported");
+    try c.expectError("CREATE TYPE pair AS (a int, b int)", "xqlite: only enum types can be created (CREATE TYPE ... AS ENUM)");
     try c.expectError("LISTEN chan", "syntax error at or near \"LISTEN\"");
     try c.expectError("SELECT 1 ## 2", "operator does not exist: ##\nHINT:  No operator matches the given name and argument types. You might need to add explicit type casts.");
 }

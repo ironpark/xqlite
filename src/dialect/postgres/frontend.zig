@@ -206,16 +206,17 @@ pub const hooks: dialect.Hooks = .{
         .{ .prefix = "invalid input syntax for type ", .state = .of("22P02") },
         .{ .prefix = "value too long for type ", .state = .of("22001") },
         .{ .prefix = "malformed array literal", .state = .of("22P02") },
+        .{ .prefix = "invalid input value for enum ", .state = .of("22P02") },
     },
 };
 
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
 } ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions ++ uuid.functions ++ datetime.functions ++ ivinput.functions ++
-    formatting.functions ++ builtins.functions ++ inputinfo.functions ++ dtfuncs.functions ++ regexp.functions;
+    formatting.functions ++ builtins.functions ++ inputinfo.functions ++ dtfuncs.functions ++ regexp.functions ++ inet.functions;
 
 const engine_functions = funcs.engine_functions ++ integer.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions ++ uuid.engine_functions ++ ivinput.engine_functions ++
-    formatting.engine_functions ++ builtins.engine_functions ++ inputinfo.engine_functions ++ dtfuncs.engine_functions ++ regexp.engine_functions;
+    formatting.engine_functions ++ builtins.engine_functions ++ inputinfo.engine_functions ++ dtfuncs.engine_functions ++ regexp.engine_functions ++ inet.engine_functions ++ @import("enums.zig").engine_functions;
 
 // to_char(), gcd(), pg_input_is_valid(), date_trunc() ...
 const formatting = @import("formatting.zig");
@@ -223,6 +224,7 @@ const builtins = @import("builtins.zig");
 const inputinfo = @import("inputinfo.zig");
 const dtfuncs = @import("dtfuncs.zig");
 const regexp = @import("regexp.zig");
+const inet = @import("inet.zig");
 
 comptime {
     dfunc.checkTable(&functions);
@@ -257,4 +259,7 @@ test {
     _ = @import("dtformat.zig");
     _ = @import("builtins.zig");
     _ = @import("dtfuncs.zig");
+    _ = @import("inet.zig");
+    _ = @import("alter.zig");
+    _ = @import("enums.zig");
 }

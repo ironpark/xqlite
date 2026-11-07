@@ -21,6 +21,8 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 | **고유 식별자** | `uuid` | 16바이트 `BLOB` | 표준 36자 하이픈 형식 텍스트와 16바이트 BLOB 간 자동 변환됩니다. `gen_random_uuid()` (v4) 및 `uuidv7()`을 지원합니다. |
 | **JSON** | `json`<br>`jsonb` | 정규화 텍스트 / `jsonb` 바이너리 | `json`은 텍스트 보존형, `jsonb`는 공백 제거 및 키 정렬이 적용된 바이너리/정규화 표현입니다. |
 | **배열** | `T[]` (예: `int[]`, `text[]`, `numeric[]` 등) | `TEXT` | 다차원 배열, 슬라이스, 리터럴(`'{1, 2, 3}'` 또는 `ARRAY[1, 2, 3]`)을 지원합니다. |
+| **네트워크 주소** | `inet`<br>`cidr` | `TEXT` | PostgreSQL이 쓰는 텍스트로 저장합니다(`'192.168.1.5'`, `'10.1.2.3/8'`, IPv6는 RFC 5952의 줄인 꼴 `'2001:db8::1'`). 입력은 캐스트와 저장할 때 읽고, 잘못된 값은 `22P02: invalid input syntax for type inet`입니다. `cidr`은 길이 오른쪽에 비트가 있으면 오류입니다. 비교와 정렬은 텍스트 순서입니다. |
+| **열거형** | `CREATE TYPE name AS ENUM (...)` | `TEXT` | 레이블의 텍스트로 저장하고, 열마다 레이블 중 하나인지 보는 CHECK(`invalid input value for enum name`, `22P02`)를 둡니다. 비교와 정렬은 레이블의 순서가 아니라 텍스트 순서입니다. |
 | **기타 / 카탈로그** | `bytea`<br>`oid`, `name`, `regtype`, `regclass` | `BLOB` / `INTEGER` / `TEXT` | 시스템 카탈로그 및 드라이버 연동에 필요한 특수 타입을 지원합니다. |
 
 ---
@@ -38,8 +40,16 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 - **`ALTER TABLE`**
   - `ADD COLUMN [IF NOT EXISTS]`, `DROP COLUMN [IF EXISTS]`
   - `RENAME COLUMN old TO new`, `RENAME TO new_table`
-  - `ALTER COLUMN SET DEFAULT / DROP DEFAULT`
-  - `ALTER COLUMN SET NOT NULL / DROP NOT NULL`
+  - `ALTER [COLUMN] c SET DEFAULT expr / DROP DEFAULT`: 행은 값을 그대로 가집니다(ADD COLUMN 전의 행도).
+  - `ALTER [COLUMN] c SET NOT NULL / DROP NOT NULL`: NULL인 행이 있으면 `column "c" of relation "t" contains null values`(23502). 기본 키 열은 `DROP NOT NULL`할 수 없습니다(42P16).
+  - `ALTER [COLUMN] c [SET DATA] TYPE type [COLLATE c] [USING expr]`: 저장 타입과 타입의 CHECK를 바꾸고 값을 `USING`(없으면 열 자신)의 캐스트로 다시 씁니다. 정수 기본 키(rowid) 열을 INTEGER 아닌 타입으로 바꾸는 것은 지원하지 않습니다.
+  - `ADD [CONSTRAINT name] CHECK (expr) | FOREIGN KEY (...) REFERENCES ... | UNIQUE (...)`: 있는 행을 먼저 검사합니다(`check constraint ... is violated by some row`, 외래 키 위반). 이름이 없으면 PostgreSQL의 이름(`t_a_check`, `t_a_fkey`, `t_a_key`, 겹치면 `t_a_check1` ...). `UNIQUE`는 그 이름의 고유 인덱스입니다. `ADD PRIMARY KEY`는 지원하지 않습니다.
+  - `DROP CONSTRAINT [IF EXISTS] name`: CHECK, 외래 키, UNIQUE(그 인덱스)
+  - 한 문장에 여러 동작(`ADD COLUMN a int, ADD COLUMN b text, ALTER COLUMN c SET NOT NULL`): 동작마다 앞의 것이 바꾼 테이블에서 차례로 돌고, 하나가 실패하면 모두 되돌립니다.
+  - 상수가 아닌 DEFAULT의 `ADD COLUMN`(`DEFAULT now()`): 있는 행은 그 값을 받습니다(SQLite의 ADD COLUMN은 받지 않음).
+- 문자열 상수의 `DEFAULT`는 테이블을 만들 때 열의 타입으로 읽습니다(`bool DEFAULT 'f'`는 false, `int DEFAULT '0'`, 날짜, `inet`, 열거형). 읽을 수 없으면 그 타입의 입력 오류입니다.
+- **`CREATE TYPE name AS ENUM ('a', ...)`**, **`ALTER TYPE name ADD VALUE [IF NOT EXISTS] 'v' [BEFORE | AFTER 'w']`**, **`ALTER TYPE name RENAME VALUE 'a' TO 'b'`**(행의 값도 바뀜), **`DROP TYPE [IF EXISTS] name`**(그 타입의 열이 있으면 `2BP01`). 타입은 `public`에만 둡니다. 복합 타입·범위 타입은 지원하지 않습니다.
+- **`DROP EXTENSION [IF EXISTS] name`**: 설치된 확장이 없으므로 `IF EXISTS`면 NOTICE만 냅니다.
 - **`CREATE INDEX`**
   - 일반 인덱스 및 고유 인덱스 (`UNIQUE`)
   - 식 인덱스 (`CREATE INDEX ON tbl (lower(email))`)
@@ -110,6 +120,8 @@ xqlite PostgreSQL 방언이 지원하는 데이터 타입, SQL 문장, 연산자
 
 ### 4.1 주요 내장 함수
 - **문자열 함수**: `length`, `octet_length`, `lower`, `upper`, `substr` / `substring`, `trim`, `btrim`, `ltrim`, `rtrim`, `concat`, `concat_ws`, `format`, `split_part`, `replace`, `repeat`, `reverse`, `left`, `right`, `lpad`, `rpad`, `md5`
+- **바이너리 함수**: `sha224`, `sha256`, `sha384`, `sha512`(bytea), `encode(bytea, 'hex' | 'base64' | 'escape')`, `decode(text, format)`. 식 인덱스(`ON t (sha256(url::bytea))`)와 그 식의 `ON CONFLICT` 대상을 지원합니다.
+- **네트워크 주소 함수**: `host(inet)`, `masklen(inet)`, `family(inet)`
 - **수학 함수**: `abs`, `ceil`, `floor`, `round`, `trunc`, `power`, `sqrt`, `mod`, `sign`, `random`, `greatest`, `least`
 - **날짜 및 시간 함수**: `now()`, `current_date`, `current_time`, `current_timestamp`, `clock_timestamp()`, `date_part('field', dt)`, `date_trunc('field', dt)`, `extract(field FROM dt)`, `age(dt1, dt2)`
 - **형식화 함수**: `to_char(val, fmt)`, `to_date(str, fmt)`, `to_timestamp(str, fmt)`, `to_number(str, fmt)`

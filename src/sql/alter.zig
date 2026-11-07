@@ -129,7 +129,7 @@ fn renameFixQuotes(p: *Parse, zdb: []const u8, b_temp: bool) void {
 
 /// Port of renameReloadSchema(): code the rereading of the schema of
 /// `i_db`, and of TEMP if that is another database.
-fn renameReloadSchema(p: *Parse, i_db: usize, p5: u16) void {
+pub fn renameReloadSchema(p: *Parse, i_db: usize, p5: u16) void {
     const v = p.vdbe orelse return;
     build.changeCookie(p, i_db);
     aux.addParseSchemaOp(v, @intCast(i_db), null, p5);

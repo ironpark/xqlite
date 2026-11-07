@@ -7,6 +7,9 @@
 //!  - left, right, repeat, reverse, lpad, rpad, split_part,
 //!    starts_with;
 //!  - random() in [0, 1), gen_random_uuid();
+//!  - md5(x) (hex text), sha224/sha256/sha384/sha512(x) (bytea) of the
+//!    bytes of x; encode(bytea, 'hex' | 'base64' | 'escape') and
+//!    decode(text, format), as PostgreSQL writes and reads them;
 //!  - floor, ceil/ceiling, sqrt, power/pow, exp, ln, log, log10, mod, trunc,
 //!    sign, pi;
 //!  - current_user(), current_database() (current_schema() is session.zig's);
@@ -28,6 +31,7 @@
 //!    kept as it was); the frontend now writes regexp.zig's xq_pg_re().
 
 const std = @import("std");
+const simd = @import("xqlite_base").simd;
 const dfunc = @import("../func.zig");
 const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
@@ -73,6 +77,13 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("current_user", 0, det, currentUserFunc),
     dfunc.scalar("current_database", 0, det, currentDatabaseFunc),
     dfunc.scalar("format_type", 2, det, formatTypeFunc),
+    dfunc.scalar("md5", 1, det, md5Func),
+    dfunc.scalar("sha224", 1, det, dfunc.bind(shaFunc, .{std.crypto.hash.sha2.Sha224})),
+    dfunc.scalar("sha256", 1, det, dfunc.bind(shaFunc, .{std.crypto.hash.sha2.Sha256})),
+    dfunc.scalar("sha384", 1, det, dfunc.bind(shaFunc, .{std.crypto.hash.sha2.Sha384})),
+    dfunc.scalar("sha512", 1, det, dfunc.bind(shaFunc, .{std.crypto.hash.sha2.Sha512})),
+    dfunc.scalar("encode", 2, det, encodeFunc),
+    dfunc.scalar("decode", 2, det, decodeFunc),
     // numeric's (decimal_sql.zig's; overload.zig calls them by their
     // engine names).
     dfunc.scalar("div", 2, det, decimal_sql.def("xq_dec_div_trunc", 2).x_sfunc.?),
@@ -233,6 +244,124 @@ fn randomFunc(ctx: *Context, _: []*Mem) void {
 fn uuidFunc(ctx: *Context, _: []*Mem) void {
     const out = dfunc.uuidV4(ctx);
     api.resultText(ctx, &out, .transient);
+}
+
+// ===================================================== digests, encode
+
+fn md5Func(ctx: *Context, argv: []*Mem) void {
+    if (isNull(argv[0])) return api.resultNull(ctx);
+    var h: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(api.valueBlob(argv[0]) orelse "", &h, .{});
+    const hex = std.fmt.bytesToHex(h, .lower);
+    api.resultText(ctx, &hex, .transient);
+}
+
+fn shaFunc(ctx: *Context, argv: []*Mem, comptime H: type) void {
+    if (isNull(argv[0])) return api.resultNull(ctx);
+    var h: [H.digest_length]u8 = undefined;
+    H.hash(api.valueBlob(argv[0]) orelse "", &h, .{});
+    api.resultBlob(ctx, &h, .transient);
+}
+
+const Encoding = enum { hex, base64, escape };
+
+/// The format of encode() and decode() (no case), or an error.
+fn encoding(ctx: *Context, m: *Mem) ?Encoding {
+    const z = text(ctx, m) orelse "";
+    inline for (.{ "hex", "base64", "escape" }) |n| if (std.ascii.eqlIgnoreCase(z, n)) return @field(Encoding, n);
+    var buf: [128]u8 = undefined;
+    api.resultErrorState(ctx, .of("22023"), std.fmt.bufPrint(&buf, "unrecognized encoding: \"{s}\"", .{z[0..@min(z.len, 64)]}) catch "unrecognized encoding");
+    return null;
+}
+
+fn encodeFunc(ctx: *Context, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(ctx);
+    const enc = encoding(ctx, argv[1]) orelse return;
+    const b = api.valueBlob(argv[0]) orelse "";
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa(ctx));
+    encodeTo(gpa(ctx), &out, b, enc) catch return api.resultErrorNomem(ctx);
+    api.resultText(ctx, out.items, .transient);
+}
+
+fn encodeTo(a: std.mem.Allocator, out: *std.ArrayList(u8), b: []const u8, enc: Encoding) !void {
+    switch (enc) {
+        .hex => simd.hexEncode(try out.addManyAsSlice(a, 2 * b.len), b, false),
+        // Lines of 76 characters, as PostgreSQL's pg_base64_encode().
+        .base64 => {
+            const E = std.base64.standard.Encoder;
+            var i: usize = 0;
+            while (i < b.len) : (i += 57) {
+                if (i > 0) try out.append(a, '\n');
+                const chunk = b[i..@min(b.len, i + 57)];
+                const at = out.items.len;
+                try out.resize(a, at + E.calcSize(chunk.len));
+                _ = E.encode(out.items[at..], chunk);
+            }
+        },
+        .escape => for (b) |c| {
+            if (c == '\\') {
+                try out.appendSlice(a, "\\\\");
+            } else if (c == 0 or c >= 0x80) {
+                try out.print(a, "\\{o:0>3}", .{c});
+            } else try out.append(a, c);
+        },
+    }
+}
+
+fn decodeFunc(ctx: *Context, argv: []*Mem) void {
+    if (anyNull(argv)) return api.resultNull(ctx);
+    const enc = encoding(ctx, argv[1]) orelse return;
+    const z = text(ctx, argv[0]) orelse "";
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa(ctx));
+    const a = gpa(ctx);
+    switch (enc) {
+        .hex => {
+            var i: usize = 0;
+            while (i < z.len) {
+                if (std.ascii.isWhitespace(z[i])) {
+                    i += 1;
+                    continue;
+                }
+                const hi = std.fmt.charToDigit(z[i], 16) catch return badDigit(ctx, z[i]);
+                if (i + 1 >= z.len) return api.resultErrorState(ctx, .of("22023"), "invalid hexadecimal data: odd number of digits");
+                const lo = std.fmt.charToDigit(z[i + 1], 16) catch return badDigit(ctx, z[i + 1]);
+                out.append(a, hi * 16 + lo) catch return api.resultErrorNomem(ctx);
+                i += 2;
+            }
+        },
+        .base64 => {
+            var clean: std.ArrayList(u8) = .empty;
+            defer clean.deinit(a);
+            for (z) |c| if (!std.ascii.isWhitespace(c)) clean.append(a, c) catch return api.resultErrorNomem(ctx);
+            const D = std.base64.standard.Decoder;
+            const n = D.calcSizeForSlice(clean.items) catch return api.resultErrorState(ctx, .of("22023"), "invalid base64 end sequence");
+            out.resize(a, n) catch return api.resultErrorNomem(ctx);
+            D.decode(out.items, clean.items) catch return api.resultErrorState(ctx, .of("22023"), "invalid symbol found while decoding base64 sequence");
+        },
+        .escape => {
+            var i: usize = 0;
+            while (i < z.len) : (i += 1) {
+                var c = z[i];
+                if (c == '\\') {
+                    if (i + 1 < z.len and z[i + 1] == '\\') {
+                        i += 1;
+                    } else if (i + 3 < z.len and std.mem.indexOfNone(u8, z[i + 1 .. i + 4], "01234567") == null) {
+                        c = std.fmt.parseInt(u8, z[i + 1 .. i + 4], 8) catch return api.resultErrorState(ctx, .of("22P02"), "invalid input syntax for type bytea");
+                        i += 3;
+                    } else return api.resultErrorState(ctx, .of("22P02"), "invalid input syntax for type bytea");
+                }
+                out.append(a, c) catch return api.resultErrorNomem(ctx);
+            }
+        },
+    }
+    api.resultBlob(ctx, out.items, .transient);
+}
+
+fn badDigit(ctx: *Context, c: u8) void {
+    var buf: [64]u8 = undefined;
+    api.resultErrorState(ctx, .of("22023"), std.fmt.bufPrint(&buf, "invalid hexadecimal digit: \"{c}\"", .{c}) catch "invalid hexadecimal digit");
 }
 
 // =============================================================== math

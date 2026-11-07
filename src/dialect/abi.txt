@@ -831,3 +831,16 @@ xq_dec_width_bucket 4 engine deterministic
 xq_postgres_log10 1 qualified deterministic
 xq_postgres_width_bucket 4 qualified deterministic
 xq_postgres_factorial 1 qualified deterministic
+xq_pg_inet 1 engine deterministic
+xq_pg_cidr 1 engine deterministic
+xq_pg_enum_in 3 engine deterministic
+xq_postgres_md5 1 qualified deterministic
+xq_postgres_sha224 1 qualified deterministic
+xq_postgres_sha256 1 qualified deterministic
+xq_postgres_sha384 1 qualified deterministic
+xq_postgres_sha512 1 qualified deterministic
+xq_postgres_encode 2 qualified deterministic
+xq_postgres_decode 2 qualified deterministic
+xq_postgres_host 1 qualified deterministic
+xq_postgres_masklen 1 qualified deterministic
+xq_postgres_family 1 qualified deterministic

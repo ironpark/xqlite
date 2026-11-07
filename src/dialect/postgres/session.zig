@@ -44,6 +44,7 @@ pub const Error = parser.Error || lower.Error;
 /// Compile the statement if it is one of this file's; false if not.
 pub fn statement(ps: *Parser) Error!bool {
     const t = ps.c.peek();
+    if (try @import("enums.zig").statement(ps)) return true;
     if (t.isKw("create") and ps.c.isKwAt(1, "schema")) {
         try createSchema(ps);
         return true;
@@ -54,6 +55,10 @@ pub fn statement(ps: *Parser) Error!bool {
     }
     if (t.isKw("set") or t.isKw("reset")) {
         try set(ps);
+        return true;
+    }
+    if (t.isKw("drop") and ps.c.isKwAt(1, "extension")) {
+        try dropExtension(ps);
         return true;
     }
     if (t.isKw("show")) {
@@ -180,6 +185,23 @@ fn createSchema(ps: *Parser) Error!void {
     }
     nsp.codeCreate(p, n, owner);
     if (p.n_err > 0) return error.Failed;
+}
+
+/// DROP EXTENSION [IF EXISTS] name, ...: none is installed but plpgsql
+/// (pg_extension), which cannot be dropped here.
+fn dropExtension(ps: *Parser) Error!void {
+    ps.c.skip(); // DROP
+    ps.c.skip(); // EXTENSION
+    const if_exists = try ps.c.ifExists();
+    const names = try ps.nameList();
+    if (ps.c.eatKw("cascade")) {} else _ = ps.c.eatKw("restrict");
+    if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
+    const p = ps.p.?;
+    for (names) |n| {
+        if (std.mem.eql(u8, n.text, "plpgsql")) return ps.c.failState(n.pos, .of("0A000"), "xqlite: extension \"plpgsql\" cannot be dropped", .{});
+        if (!if_exists) return ps.c.failState(n.pos, .of("42704"), "extension \"{s}\" does not exist", .{n.text});
+        ddl.notice(p, "00000", "extension \"{s}\" does not exist, skipping", .{n.text});
+    }
 }
 
 fn dropSchema(ps: *Parser) Error!void {

@@ -29,6 +29,9 @@ flowchart TD
 | `uuid.zig` | RFC 9562 UUID v4/v7 생성 및 16바이트 BLOB 직렬화 함수군. |
 | `json.zig` | JSONB 바이너리 포맷 파싱 및 질의 최적화 루틴. |
 | `arrays.zig` | 다차원 배열 텍스트 직렬화 및 슬라이스/원소 접근자 처리. |
+| `ddl.zig`, `alter.zig` | DDL의 PostgreSQL 검사와 오류. `alter.zig`는 SQLite에 없는 ALTER TABLE: 여러 동작(동작마다 한 문장으로 차례로 실행, `catalog.codeExecDialect()`), `ALTER COLUMN`, `ADD`/`DROP CONSTRAINT`(`sqlite_schema`의 CREATE TABLE 텍스트를 `ir/coldef.zig`로 고치고 스키마를 다시 읽음, 행 검사는 그 앞, 새 타입의 값 쓰기는 그 뒤), 상수가 아닌 DEFAULT의 `ADD COLUMN`. |
+| `enums.zig` | 열거형: `xq_catalog`의 행(`tbl ''`, `col` 타입 이름, `key 'enum'`, 값은 레이블의 JSON 배열), 열마다의 CHECK, 캐스트 `xq_pg_enum_in()`, `CREATE`/`ALTER`/`DROP TYPE`. |
+| `inet.zig` | `inet`·`cidr`의 입력과 PostgreSQL의 출력 텍스트, `xq_pg_inet()`·`xq_pg_cidr()`, `host()`·`masklen()`·`family()`. |
 
 ---
 
@@ -69,6 +72,12 @@ flowchart LR
    - 부동소수점 값은 IEEE 754 형식으로 변환되며, 비정상적 값(NaN, Infinity)은 PostgreSQL 에러 코드로 차단됩니다.
 3. **불리언 열**:
    - `'t'`, `'true'`, `'1'`, `1`은 정수 `1`로, `'f'`, `'false'`, `'0'`, `0`은 정수 `0`으로 치환 저장됩니다.
+4. **`inet`·`cidr` 열**:
+   - 문자열과 매개변수는 `xq_pg_inet()`·`xq_pg_cidr()`를 거쳐 PostgreSQL의 출력 텍스트로 저장됩니다(`'2001:0db8::1'`은 `2001:db8::1`). 잘못된 값은 오류입니다.
+5. **열거형 열**:
+   - 레이블의 텍스트로 저장되고, 열의 CHECK(`invalid input value for enum T`)가 레이블 밖의 값을 막습니다. `ALTER TYPE ... ADD VALUE`/`RENAME VALUE`는 그 타입의 열이 있는 테이블마다 CHECK를 다시 씁니다.
+
+문자열 상수의 `DEFAULT`는 테이블을 만들 때 열 타입의 캐스트로 계산해 상수로 둡니다(`parser.zig`의 `foldDefault()`: `bool DEFAULT 'f'`는 `DEFAULT (0)`). SQLite의 ADD COLUMN은 상수 DEFAULT만 받기 때문이기도 합니다.
 
 ---
 

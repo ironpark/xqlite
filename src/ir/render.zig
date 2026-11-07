@@ -777,31 +777,7 @@ pub const Renderer = struct {
         }
         for (ct.constraints) |tc| {
             try r.put(", ");
-            if (tc.name) |n| {
-                try r.put("CONSTRAINT ");
-                try r.ident(n);
-                try r.put(" ");
-            }
-            switch (tc.kind) {
-                .check => |e| {
-                    try r.put("CHECK(");
-                    try r.expr(e);
-                    try r.put(")");
-                },
-                .unique => |cols| {
-                    try r.put("UNIQUE");
-                    try r.nameList(cols);
-                },
-                .primary_key => |cols| {
-                    try r.put("PRIMARY KEY");
-                    try r.nameList(cols);
-                },
-                .foreign_key => |fk| {
-                    try r.put("FOREIGN KEY");
-                    try r.nameList(fk.cols);
-                    try r.references(fk.ref);
-                },
-            }
+            try r.tableConstraint(tc);
         }
         try r.put(")");
         if (ct.strict) try r.put(" STRICT");
@@ -813,49 +789,82 @@ pub const Renderer = struct {
     pub fn column(r: *Renderer, c: tree.ColumnDef) Error!void {
         try r.ident(c.name.text);
         if (c.type) |t| try r.print(" {s}", .{t});
-        for (c.constraints) |cc| {
-            if (cc.name) |n| {
-                try r.put(" CONSTRAINT ");
-                try r.ident(n);
-            }
-            switch (cc.kind) {
-                .not_null => try r.put(" NOT NULL"),
-                .null => {},
-                .check => |e| {
-                    try r.put(" CHECK(");
-                    try r.expr(e);
-                    try r.put(")");
-                },
-                .default => |e| {
-                    try r.put(" DEFAULT (");
-                    const saved = r.in_default;
-                    r.in_default = true;
-                    defer r.in_default = saved;
-                    try r.expr(e);
-                    try r.put(")");
-                },
-                .primary_key => |pk| {
-                    try r.put(" PRIMARY KEY");
-                    if (pk.desc) try r.put(" DESC");
-                    if (pk.autoincrement) try r.put(" AUTOINCREMENT");
-                },
-                .unique => try r.put(" UNIQUE"),
-                .references => |ref| try r.references(ref),
-                .generated => |g| {
-                    try r.put(" GENERATED ALWAYS AS (");
-                    try r.expr(g.e);
-                    try r.put(if (g.stored) ") STORED" else ") VIRTUAL");
-                },
-                .collate => |coll| {
-                    try r.put(" COLLATE ");
-                    try r.collation(coll);
-                },
-                .identity => |id| {
-                    try r.put(" NOT NULL DEFAULT (nextval(");
-                    try r.string(id.sequence);
-                    try r.put("))");
-                },
-            }
+        for (c.constraints) |cc| try r.colConstraint(cc);
+    }
+
+    /// A column constraint, after a space.
+    pub fn colConstraint(r: *Renderer, cc: tree.ColConstraint) Error!void {
+        if (cc.name) |n| {
+            try r.put(" CONSTRAINT ");
+            try r.ident(n);
+        }
+        switch (cc.kind) {
+            .not_null => try r.put(" NOT NULL"),
+            .null => {},
+            .check => |e| {
+                try r.put(" CHECK(");
+                try r.expr(e);
+                try r.put(")");
+            },
+            .default => |e| {
+                try r.put(" DEFAULT (");
+                const saved = r.in_default;
+                r.in_default = true;
+                defer r.in_default = saved;
+                try r.expr(e);
+                try r.put(")");
+            },
+            .primary_key => |pk| {
+                try r.put(" PRIMARY KEY");
+                if (pk.desc) try r.put(" DESC");
+                if (pk.autoincrement) try r.put(" AUTOINCREMENT");
+            },
+            .unique => try r.put(" UNIQUE"),
+            .references => |ref| try r.references(ref),
+            .generated => |g| {
+                try r.put(" GENERATED ALWAYS AS (");
+                try r.expr(g.e);
+                try r.put(if (g.stored) ") STORED" else ") VIRTUAL");
+            },
+            .collate => |coll| {
+                try r.put(" COLLATE ");
+                try r.collation(coll);
+            },
+            .identity => |id| {
+                try r.put(" NOT NULL DEFAULT (nextval(");
+                try r.string(id.sequence);
+                try r.put("))");
+            },
+        }
+    }
+
+    /// A table constraint (CREATE TABLE, PostgreSQL's ALTER TABLE ADD
+    /// CONSTRAINT).
+    pub fn tableConstraint(r: *Renderer, tc: tree.TableConstraint) Error!void {
+        if (tc.name) |n| {
+            try r.put("CONSTRAINT ");
+            try r.ident(n);
+            try r.put(" ");
+        }
+        switch (tc.kind) {
+            .check => |e| {
+                try r.put("CHECK(");
+                try r.expr(e);
+                try r.put(")");
+            },
+            .unique => |cols| {
+                try r.put("UNIQUE");
+                try r.nameList(cols);
+            },
+            .primary_key => |cols| {
+                try r.put("PRIMARY KEY");
+                try r.nameList(cols);
+            },
+            .foreign_key => |fk| {
+                try r.put("FOREIGN KEY");
+                try r.nameList(fk.cols);
+                try r.references(fk.ref);
+            },
         }
     }
 
@@ -947,6 +956,7 @@ pub const Renderer = struct {
                 try r.put(" DROP COLUMN ");
                 try r.ident(dc.name.text);
             },
+            .alter_column, .add_constraint, .drop_constraint => return r.fail(at.name.name.pos, "this ALTER TABLE has no SQLite text", .{}),
         }
         return r.text();
     }

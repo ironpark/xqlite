@@ -34,7 +34,8 @@ xqlite는 SQLite 스토리지 및 VDBE 실행 엔진을 기반으로 구현되�
 - **파티셔닝 (Table Partitioning)**: `PARTITION BY RANGE / LIST / HASH` 구문은 지원되지 않습니다.
 - **테이블스페이스 (Tablespaces)**: `CREATE TABLESPACE` 및 물리적 디스크 경로 지정은 지원되지 않습니다 (SQLite 단일 파일 DB 특성).
 - **역할 및 권한 (Roles & Privileges)**: `CREATE ROLE`, `GRANT`, `REVOKE` 문장은 구문 파싱 단계에서 무시되거나 허용되지 않으며, 파일 시스템 기반 권한을 따릅니다.
-- **도메인 및 사용자 정의 타입 (UDT)**: `CREATE DOMAIN`, `CREATE TYPE AS ENUM` 등의 사용자 정의 복합/열거형 타입 생성은 지원되지 않습니다.
+- **도메인 및 사용자 정의 타입 (UDT)**: `CREATE DOMAIN`과 복합·범위 타입(`CREATE TYPE ... AS (...)`, `AS RANGE`)은 지원되지 않습니다. 열거형(`CREATE TYPE ... AS ENUM`)은 지원하지만, 값은 레이블의 순서가 아니라 텍스트 순서로 비교·정렬되고 타입은 `public`에만 둡니다. `pg_type`·`pg_enum`에는 나오지 않습니다.
+- **`inet`·`cidr`의 순서**: 텍스트 순서로 비교·정렬합니다(PostgreSQL은 주소족, 주소 순서). `<<`, `>>` 같은 포함 연산자는 없습니다.
 - **구체화된 뷰 (Materialized Views)**: `CREATE MATERIALIZED VIEW` 및 `REFRESH MATERIALIZED VIEW`는 지원되지 않습니다.
 
 ### 2.3 질의 및 색인 제약

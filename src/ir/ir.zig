@@ -819,8 +819,12 @@ pub const catalog = @import("../catalog/catalog.zig");
 pub const tree = @import("tree.zig");
 pub const lower = @import("lower.zig");
 pub const render = @import("render.zig");
+/// The column definitions of a CREATE TABLE text, for an ALTER TABLE
+/// that edits them (coldef.zig).
+pub const coldef = @import("coldef.zig");
 
 test {
+    _ = coldef;
     _ = @import("test.zig");
     _ = @import("roundtrip_test.zig");
 }

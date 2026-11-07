@@ -55,6 +55,7 @@ const uuid = @import("uuid.zig");
 const ivinput = @import("ivinput.zig");
 const ctypes = @import("../../sql/types.zig");
 const Children = @import("jtype.zig").Children;
+const enums = @import("enums.zig");
 
 const Token = lexer.Token;
 const keywords = lexer.keywords;
@@ -1620,6 +1621,48 @@ pub const Parser = struct {
         return p.expr(lit.pos, .{ .blob = try std.fmt.allocPrint(p.arena, "{x}", .{b}) });
     }
 
+    /// A DEFAULT that is a string literal, of a column of a type that
+    /// reads it (boolean 'f', integer '0', a date, an inet, an array ...):
+    /// the value the type's input makes of it, computed now, as
+    /// PostgreSQL coerces a default to the column's type when the table
+    /// is made (an error for bad input); so that the default is a
+    /// constant the column stores (SQLite's ADD COLUMN takes no other).
+    /// The types of a literal of their own (text, json, uuid, numeric,
+    /// interval: jsonDefault() ...) keep it.
+    fn foldDefault(p: *Parser, ty: types.TypeName, e: *Expr) Error!*Expr {
+        if (e.kind != .string) return e;
+        const ps = p.p orelse return e;
+        if (!ty.array) {
+            const own = [_][]const u8{ "text", "character varying", "character", "name", "json", "jsonb", "uuid", "numeric", "interval", "bytea" };
+            for (own) |n| if (eql(ty.name, n)) return e;
+        }
+        const cast = try p.castExpr(e.pos, e, ty);
+        const text = @import("../../ir/render.zig").expr(ps, p.c.sql, cast) catch return e;
+        const db = ps.db;
+        var q = catalog.Query.initFmt(db, "SELECT %s", &.{.{ .str = text }}) catch return e;
+        defer q.deinit();
+        const api = @import("../../vdbe/api.zig");
+        const vi = @import("../../vdbe/vdbe_int.zig");
+        const row = q.step() catch {
+            const msg = try p.arena.dupe(u8, @import("../../sql/main.zig").errmsg(db));
+            return p.c.failState(e.pos, db.err_state orelse .of("22P02"), "{s}", .{msg});
+        };
+        if (!row) return e;
+        const pos = e.pos;
+        return switch (api.columnType(q.v, 0)) {
+            vi.SQLITE_INTEGER => blk: {
+                const v = api.columnInt64(q.v, 0);
+                const lit = try tree.expr(p.arena, pos, e.end, .{ .integer = try std.fmt.allocPrint(p.arena, "{d}", .{@abs(v)}) });
+                if (v >= 0) break :blk lit;
+                break :blk tree.expr(p.arena, pos, e.end, .{ .unary = .{ .op = .neg, .e = lit } });
+            },
+            vi.SQLITE_FLOAT => tree.expr(p.arena, pos, e.end, .{ .float = try std.fmt.allocPrint(p.arena, "{e}", .{api.columnDouble(q.v, 0)}) }),
+            vi.SQLITE_BLOB => tree.expr(p.arena, pos, e.end, .{ .blob = try std.fmt.allocPrint(p.arena, "{x}", .{api.columnBlob(q.v, 0) orelse ""}) }),
+            vi.SQLITE_NULL => tree.expr(p.arena, pos, e.end, .null),
+            else => tree.expr(p.arena, pos, e.end, .{ .string = try p.arena.dupe(u8, api.columnText(q.v, 0) orelse "") }),
+        };
+    }
+
     /// A value a jsonb column stores that is not a constant (a DEFAULT,
     /// a generated column's): xq_pg_jsonb_bin(e), its JSONB blob.
     fn jsonbStored(p: *Parser, ty: types.TypeName, e: *Expr) Error!*Expr {
@@ -2240,6 +2283,10 @@ pub const Parser = struct {
             const name = try types.format(p.arena, ty);
             const t = ctypes.parse(.postgres, name);
             x = try p.expr(pos, .{ .cast = .{ .e = e, .target_type = name, .mode = .{ .func = array.inputName(t.element) } } });
+        } else if (ty.labels) |labels| {
+            // One of the labels (enums.zig).
+            const in = try p.call(pos, "xq_pg_enum_in", null, &.{ e, try p.expr(pos, .{ .string = labels }), try p.expr(pos, .{ .string = ty.name }) });
+            x = try p.expr(pos, .{ .cast = .{ .e = in, .target_type = ty.name, .mode = .{ .affinity = "TEXT" } } });
         } else {
             const plan = types.castPlan(ty) catch |err| return p.typeError(ty, err);
             const mode: tree.CastMode = switch (plan) {
@@ -3033,6 +3080,16 @@ pub const Parser = struct {
         if (mods[0] < 0) return p.c.failState(pos, .of("22023"), "INTERVAL({d}) precision must not be negative", .{mods[0]});
     }
 
+    /// An enum type's labels in `ty` (a name no built-in type has).
+    pub fn userType(p: *Parser, ty: *types.TypeName) Error!void {
+        if (ty.labels != null) return;
+        var base = ty.*;
+        base.array = false;
+        if (types.builtin(base)) return;
+        const ps = p.p orelse return;
+        ty.labels = try enums.labels(ps.db, p.arena, ty.name);
+    }
+
     pub fn typeName(p: *Parser) Error!types.TypeName {
         const t = p.c.peek();
         if (t.kind != .word and t.kind != .quoted_ident) return p.c.syntaxError();
@@ -3109,6 +3166,7 @@ pub const Parser = struct {
             try p.c.expectOp("]");
             ty.array = true;
         }
+        try p.userType(&ty);
         if (p.c.isKw("array")) {
             p.c.skip();
             ty.array = true;
@@ -3569,7 +3627,7 @@ pub const Parser = struct {
                     .name = cname orelse try std.fmt.allocPrint(p.arena, "{s}_{s}_check", .{ table, name.text }),
                     .kind = .{ .check = e },
                 }),
-                .default => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .default = try p.numericStored(ty, try p.uuidDefault(ty, try p.jsonDefault(ty, e)), true) } }),
+                .default => |e| try cons.append(p.arena, .{ .name = cname, .kind = .{ .default = try p.numericStored(ty, try p.uuidDefault(ty, try p.jsonDefault(ty, try p.foldDefault(ty, e))), true) } }),
                 .primary_key => try cons.append(p.arena, .{ .name = cname, .kind = .{ .primary_key = .{} } }),
                 .unique => try cons.append(p.arena, .{ .name = cname, .kind = .unique }),
                 .references => |r| try cons.append(p.arena, .{ .name = cname, .kind = .{ .references = r } }),
@@ -3630,6 +3688,7 @@ pub const Parser = struct {
                 return .{ .name = "invalid input syntax for type uuid", .kind = .{ .check = try tree.expr(a, pos, pos, .{ .compare = .{ .op = .eq, .l = len, .r = try tree.intConst(a, pos, 16) } }) } };
             },
             .interval => return .{ .name = "invalid input syntax for type interval", .kind = .{ .check = try p.call(pos, "xq_pg_iv_valid", null, &.{col}) } },
+            .enum_label => return try enums.check(a, col, ty),
         }
     }
 
@@ -3840,7 +3899,9 @@ pub const Parser = struct {
         var a: tree.AlterTable = .{ .name = undefined, .action = undefined };
         a.if_exists = try p.c.ifExists();
         _ = p.c.eatKw("only");
+        const name_start = p.c.peek().start;
         const q = try p.qname();
+        const name_end = p.c.prev().end;
         var head: []const u8 = "";
         if (q.schema) |s| {
             const t = try p.qualified(s, q.name);
@@ -3857,8 +3918,8 @@ pub const Parser = struct {
                 a.name = .{ .schema = .{ .text = "main" }, .name = .{ .text = try nsp.mangle(p.arena, "pg_temp", q.name.text), .pos = q.name.pos } };
             },
         }
-        const at = p.c.peek().start;
         if (p.c.eatKw("rename")) {
+            const at = p.c.prev().start;
             if (p.c.eatKw("to")) {
                 // The table stays in its schema.
                 var to = try p.colId();
@@ -3871,24 +3932,129 @@ pub const Parser = struct {
                 try p.c.expectKw("to");
                 a.action = .{ .rename_column = .{ .old = old, .new = try p.colId() } };
             }
-        } else if (p.c.eatKw("add")) {
-            if (p.c.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign" })) {
-                return p.unsupported(at, "ALTER TABLE ... ADD CONSTRAINT");
+            return p.new(tree.AlterTable, a);
+        }
+        // Actions separated by commas: each also a statement of its own
+        // (tree.AlterTable.steps).
+        var steps: std.ArrayList([:0]const u8) = .empty;
+        while (true) {
+            const start = p.c.peek().start;
+            const action = try p.alterAction(a.name, q.name.text, steps.items.len == 0);
+            if (steps.items.len == 0) a.action = action;
+            try steps.append(p.arena, try std.fmt.allocPrintSentinel(p.arena, "ALTER TABLE {s} {s}", .{ p.c.sql[name_start..name_end], p.c.sql[start..p.c.prev().end] }, 0));
+            if (!p.c.eat(.comma)) break;
+        }
+        if (steps.items.len > 1) a.steps = steps.items;
+        return p.new(tree.AlterTable, a);
+    }
+
+    /// One action of ALTER TABLE `table` (`bare` as written). Only the
+    /// first action is read with the table as it is (`current`): of
+    /// several, each runs as a statement of its own (AlterTable.steps),
+    /// after those before it.
+    fn alterAction(p: *Parser, table: tree.QName, bare: []const u8, current: bool) Error!@FieldType(tree.AlterTable, "action") {
+        const at = p.c.peek().start;
+        if (p.c.eatKw("add")) {
+            if (p.c.isAnyKw(&.{ "constraint", "check", "unique", "primary", "foreign", "exclude" })) {
+                const named = p.c.isKw("constraint");
+                var tc = try p.tableConstraint(bare);
+                // PostgreSQL's name, one not taken (alter.zig).
+                if (!named) tc.name = null;
+                if (tc.kind == .primary_key) return p.unsupported(at, "ALTER TABLE ... ADD PRIMARY KEY");
+                _ = try p.c.optKws(&.{ "not", "valid" });
+                return .{ .add_constraint = tc };
             }
             _ = p.c.eatKw("column");
             const ine = try p.c.ifNotExists();
-            a.action = .{ .add_column = .{ .if_not_exists = ine, .def = try p.columnDef(q.name.text) } };
-        } else if (p.c.eatKw("drop")) {
-            if (p.c.isKw("constraint")) return p.unsupported(at, "ALTER TABLE ... DROP CONSTRAINT");
+            return .{ .add_column = .{ .if_not_exists = ine, .def = try p.columnDef(bare) } };
+        }
+        if (p.c.eatKw("drop")) {
+            if (p.c.eatKw("constraint")) {
+                const ie = try p.c.ifExists();
+                const n = try p.colId();
+                _ = p.c.eatKw("cascade") or p.c.eatKw("restrict");
+                return .{ .drop_constraint = .{ .if_exists = ie, .name = n } };
+            }
             _ = p.c.eatKw("column");
             const ie = try p.c.ifExists();
-            a.action = .{ .drop_column = .{ .if_exists = ie, .name = try p.colId() } };
+            const n = try p.colId();
             _ = p.c.eatKw("cascade") or p.c.eatKw("restrict");
-        } else if (p.c.isKw("alter")) {
-            return p.unsupported(at, "ALTER TABLE ... ALTER COLUMN");
-        } else return p.c.syntaxError();
-        if (p.c.peek().kind == .comma) return p.unsupported(p.c.peek().start, "several ALTER TABLE actions");
-        return p.new(tree.AlterTable, a);
+            return .{ .drop_column = .{ .if_exists = ie, .name = n } };
+        }
+        if (p.c.eatKw("alter")) {
+            _ = p.c.eatKw("column");
+            const name = try p.colId();
+            return .{ .alter_column = .{ .name = name, .op = try p.alterColumnOp(if (current) table else null, bare, name) } };
+        }
+        return p.c.syntaxError();
+    }
+
+    /// What ALTER COLUMN `name` of `table` (null: not read) does.
+    fn alterColumnOp(p: *Parser, table: ?tree.QName, bare: []const u8, name: Name) Error!@FieldType(tree.AlterColumn, "op") {
+        const at = p.c.peek().start;
+        if (p.c.eatKw("set")) {
+            if (p.c.eatKw("default")) {
+                const e = try p.otherExpr();
+                // As a DEFAULT of the column's type (columnDef()).
+                const tq = table orelse return .{ .set_default = .{ .kind = .{ .default = e } } };
+                const ty = try p.columnType(tq, name.text) orelse return .{ .set_default = .{ .kind = .{ .default = e } } };
+                const raw = [_]RawConstraint{.{ .kind = .{ .default = e } }};
+                const def = try p.resolveColumn(bare, name, ty, null, &raw);
+                for (def.constraints) |cc| if (cc.kind == .default) return .{ .set_default = cc };
+                unreachable;
+            }
+            if (try p.c.optKws(&.{ "not", "null" })) return .set_not_null;
+            if (p.c.eatKw("data")) {
+                try p.c.expectKw("type");
+                return p.alterType(bare, name);
+            }
+            if (p.c.isAnyKw(&.{ "statistics", "storage", "compression" })) return p.unsupported(at, "ALTER TABLE ... ALTER COLUMN ... SET STATISTICS/STORAGE/COMPRESSION");
+            if (p.c.isKw("generated") or p.c.isKw("expression")) return p.unsupported(at, "ALTER TABLE ... ALTER COLUMN ... SET GENERATED/EXPRESSION");
+            return p.c.syntaxError();
+        }
+        if (p.c.eatKw("drop")) {
+            if (p.c.eatKw("default")) return .drop_default;
+            if (try p.c.optKws(&.{ "not", "null" })) return .drop_not_null;
+            if (p.c.isKw("identity") or p.c.isKw("expression")) return p.unsupported(at, "ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY/EXPRESSION");
+            return p.c.syntaxError();
+        }
+        if (p.c.eatKw("type")) return p.alterType(bare, name);
+        if (p.c.isKw("add")) return p.unsupported(at, "ALTER TABLE ... ALTER COLUMN ... ADD GENERATED");
+        return p.c.syntaxError();
+    }
+
+    /// [SET DATA] TYPE type [COLLATE c] [USING e] of column `name`: the
+    /// column of the new type, and its values as a cast of `e` (of the
+    /// column itself without USING) to it.
+    fn alterType(p: *Parser, bare: []const u8, name: Name) Error!@FieldType(tree.AlterColumn, "op") {
+        const ty = try p.typeName();
+        var collate: ?Name = null;
+        if (p.c.eatKw("collate")) collate = try p.anyName();
+        const def = try p.resolveColumn(bare, name, ty, collate, &.{});
+        for (def.constraints) |cc| if (cc.kind == .identity) return p.c.failState(ty.pos, .of("42804"), "cannot alter column \"{s}\" to a serial type", .{name.text});
+        const pos = p.c.peek().start;
+        const using = if (p.c.eatKw("using")) try p.expr0() else blk: {
+            const names = try p.arena.alloc(Name, 1);
+            names[0] = name;
+            break :blk try tree.expr(p.arena, pos, pos, .{ .column = names });
+        };
+        return .{ .set_type = .{ .def = def, .using = try p.castExpr(using.pos, using, ty) } };
+    }
+
+    /// The declared type of column `col` of `table` (the catalog's), null
+    /// if it has none or there is no such column (yet: an ALTER TABLE of
+    /// several actions is parsed before any runs).
+    fn columnType(p: *Parser, table: tree.QName, col: []const u8) Error!?types.TypeName {
+        const ps = p.p orelse return null;
+        try p.readSchema();
+        const t = build.findTable(ps.db, table.name.text, if (table.schema) |s| s.text else null) orelse return null;
+        const m = (catalog.metaOf(ps.db, t) catch null) orelse return null;
+        const d = m.declType(col) orelse return null;
+        const z = try p.arena.dupeSentinel(u8, d, 0);
+        var sub = Parser.init(p.arena, z, 0, null, .{}) catch return null;
+        var ty = sub.typeName() catch return null;
+        try p.userType(&ty);
+        return ty;
     }
 
     fn truncate(p: *Parser) Error!*tree.Truncate {

@@ -112,20 +112,21 @@ const reserved_words = [_][]const u8{
 
 /// The other words the parser compares as keywords.
 const other_words = [_][]const u8{
-    "absent",    "action",       "add",       "alter",           "always",       "at",        "between",   "by",         "cache",     "cascade",
-    "chain",     "char",         "character", "characteristics", "comment",      "commit",    "committed", "conflict",   "continue",  "cube",
-    "current",   "cycle",        "data",      "database",        "deferred",     "delete",    "domain",    "drop",       "encoding",  "escape",
-    "exclude",   "exists",       "extension", "filter",          "first",        "following", "format",    "function",   "generated", "global",
-    "grouping",  "groups",       "identity",  "if",              "immediate",    "include",   "increment", "index",      "inherit",   "inherits",
-    "insert",    "interval",     "isolation", "json",            "key",          "keys",      "last",      "level",      "local",     "locked",
-    "match",     "materialized", "maxvalue",  "minvalue",        "next",         "no",        "none",      "nothing",    "nowait",    "nulls",
-    "object",    "of",           "oids",      "operator",        "ordinality",   "others",    "over",      "overriding", "owned",     "partial",
-    "partition", "pg_temp",      "preceding", "precision",       "preserve",     "procedure", "public",    "range",      "read",      "recursive",
-    "rename",    "repeatable",   "replace",   "reset",           "restart",      "restrict",  "role",      "rollup",     "row",       "rows",
-    "savepoint", "scalar",       "schema",    "sequence",        "serializable", "session",   "set",       "share",      "show",      "simple",
-    "skip",      "start",        "stored",    "system",          "tablespace",   "temp",      "temporary", "ties",       "time",      "transaction",
-    "trigger",   "type",         "unbounded", "uncommitted",     "unknown",      "unlogged",  "update",    "value",      "values",    "varying",
-    "view",      "within",       "without",   "work",            "write",        "zone",
+    "absent",     "action",       "add",       "alter",           "always",       "at",        "between",   "by",         "cache",       "cascade",
+    "chain",      "char",         "character", "characteristics", "comment",      "commit",    "committed", "conflict",   "continue",    "cube",
+    "current",    "cycle",        "data",      "database",        "deferred",     "delete",    "domain",    "drop",       "encoding",    "escape",
+    "exclude",    "exists",       "extension", "filter",          "first",        "following", "format",    "function",   "generated",   "global",
+    "grouping",   "groups",       "identity",  "if",              "immediate",    "include",   "increment", "index",      "inherit",     "inherits",
+    "insert",     "interval",     "isolation", "json",            "key",          "keys",      "last",      "level",      "local",       "locked",
+    "match",      "materialized", "maxvalue",  "minvalue",        "next",         "no",        "none",      "nothing",    "nowait",      "nulls",
+    "object",     "of",           "oids",      "operator",        "ordinality",   "others",    "over",      "overriding", "owned",       "partial",
+    "partition",  "pg_temp",      "preceding", "precision",       "preserve",     "procedure", "public",    "range",      "read",        "recursive",
+    "rename",     "repeatable",   "replace",   "reset",           "restart",      "restrict",  "role",      "rollup",     "row",         "rows",
+    "savepoint",  "scalar",       "schema",    "sequence",        "serializable", "session",   "set",       "share",      "show",        "simple",
+    "skip",       "start",        "stored",    "system",          "tablespace",   "temp",      "temporary", "ties",       "time",        "transaction",
+    "trigger",    "type",         "unbounded", "uncommitted",     "unknown",      "unlogged",  "update",    "value",      "values",      "varying",
+    "view",       "within",       "without",   "work",            "write",        "zone",      "after",     "before",     "compression", "enum",
+    "expression", "statistics",   "storage",   "valid",           "owner",
 };
 
 pub const Lexer = sqllex.Lexer(lex);

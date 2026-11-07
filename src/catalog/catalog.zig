@@ -158,6 +158,15 @@ pub fn codeExec(p: *Parse, i_db: usize, sql: [:0]const u8) void {
     _ = aux.addOp4Str(v, OP.SqlExec, 0x0001, 0, 0, sql);
 }
 
+/// Statements of the connection's dialect, run when the statement runs,
+/// each compiled when the one before has run (PostgreSQL's ALTER TABLE
+/// of several actions), in a savepoint of their own: the statement opens
+/// no transaction (opSqlExec()). An error keeps its state.
+pub fn codeExecDialect(p: *Parse, sql: [:0]const u8) void {
+    const v = build.getVdbe(p) orelse return;
+    _ = aux.addOp4Str(v, OP.SqlExec, 0x0005, 0, 0, sql);
+}
+
 /// codeExec() of SQL formatted by SQLite's printf (%Q, %w ...).
 pub fn codeExecFmt(p: *Parse, schema: []const u8, fmt: []const u8, args: []const printf.Arg) void {
     const i_db = schemaIndex(p, schema) orelse return;

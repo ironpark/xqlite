@@ -77,3 +77,13 @@ SELECT xq_pg_rows_regexp_matches('a1b22', '([a-z])(\d+)', 'g'), xq_pg_rows_regex
 SELECT xq_postgres_regexp_match('abc01234xyz', '(.*?)(\d+)(.*)'), xq_postgres_regexp_replace('foobarbaz', 'b(..)', 'X\1Y', 'g'), xq_postgres_regexp_count('ABCABC', 'b', 1, 'i'), xq_postgres_regexp_instr('aébc', 'b'), xq_postgres_regexp_substr('ABCDEFGHI', '(c..)(...)', 1, 1, 'i', 2);
 SELECT xq_postgres_regexp_like('Hello', 'hello', 'i'), xq_postgres_regexp_split_to_array('a,b,,c', ','), xq_postgres_textregexsubstr('foobar', 'o(.)b'), xq_postgres_textregexsubstr('foobar', '%#"o_b#"%', '#'), xq_postgres_similar_to_escape('a_b');
 SELECT xq_postgres_regexp_match('abc', 'b', 'g');
+-- inet, cidr (inet.zig), enums (enums.zig), digests and encode (funcs.zig).
+SELECT xq_pg_inet('127.0.0.1'), xq_pg_inet('10.1.2.3/8'), xq_pg_inet('2001:0DB8:0:0::1'), xq_pg_inet('::ffff:1.2.3.4/128'), xq_pg_cidr('10.0.0.0/8'), quote(xq_pg_inet(NULL));
+SELECT xq_pg_inet('1.2.3');
+SELECT xq_pg_cidr('10.0.0.1/8');
+SELECT xq_postgres_host('10.1.2.3/8'), xq_postgres_masklen('10.1.2.3/8'), xq_postgres_family('::1');
+SELECT xq_pg_enum_in('ok', '["sad","ok"]', 'mood'), quote(xq_pg_enum_in(NULL, '["sad"]', 'mood'));
+SELECT xq_pg_enum_in('meh', '["sad","ok"]', 'mood');
+SELECT xq_postgres_md5('a'), hex(xq_postgres_sha224('')), hex(xq_postgres_sha256('abc')), length(xq_postgres_sha384('x')), length(xq_postgres_sha512('x'));
+SELECT xq_postgres_encode(x'00ff5c41', 'hex'), xq_postgres_encode(x'00ff5c41', 'escape'), xq_postgres_encode('hello world', 'base64'), hex(xq_postgres_decode('aGVsbG8=', 'base64')), hex(xq_postgres_decode('6869', 'hex'));
+SELECT xq_postgres_encode('x', 'nope');

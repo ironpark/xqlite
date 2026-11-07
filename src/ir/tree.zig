@@ -660,6 +660,32 @@ pub const AlterTable = struct {
         rename_column: struct { old: Name, new: Name },
         add_column: struct { if_not_exists: bool = false, def: ColumnDef },
         drop_column: struct { if_exists: bool = false, name: Name },
+        /// The actions below are PostgreSQL's: its frontend codes them
+        /// (postgres/alter.zig); lower.zig and render.zig have none.
+        alter_column: AlterColumn,
+        add_constraint: TableConstraint,
+        drop_constraint: struct { if_exists: bool = false, name: Name },
+    },
+    /// Several actions (PostgreSQL's ALTER TABLE t a, b): one statement
+    /// of the dialect's text per action, run in order when the statement
+    /// runs, each compiled after the one before has run; `action` is the
+    /// first.
+    steps: []const [:0]const u8 = &.{},
+};
+
+/// ALTER TABLE ... ALTER COLUMN `name`.
+pub const AlterColumn = struct {
+    name: Name,
+    op: union(enum) {
+        /// The column's new DEFAULT (a constraint `default`).
+        set_default: ColConstraint,
+        drop_default,
+        set_not_null,
+        drop_not_null,
+        /// SET DATA TYPE: `def` is the column of its new type (its type,
+        /// declared type, and the constraints of the type: a CHECK, a
+        /// COLLATE), `using` what the values become (null: a cast).
+        set_type: struct { def: ColumnDef, using: *Expr },
     },
 };
 

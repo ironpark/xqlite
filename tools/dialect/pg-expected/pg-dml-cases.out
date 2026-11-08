@@ -1,0 +1,306 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-dml-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 1d361dc3903eab37 MERGE: every kind of WHEN clause, RETURNING merge_action()
+merge_action|id|a|b|sa
+UPDATE|1|110|t|100
+UPDATE|2|20|t|
+DELETE|3|30||
+INSERT|4|400||400
+(4 rows)
+id|a|b
+1|110|t
+2|20|t
+4|400|
+(3 rows)
+==== case 961945f6e9639a59 MERGE without RETURNING, a table as the source, aliases
+k|v|n
+1|one|1
+2|TWO|20
+3|three|7
+(3 rows)
+k|v|n
+1|one|1
+2|TWO|20
+4|shifted|7
+5|shifted|7
+(4 rows)
+==== case e3e859c9cd409ed9 MERGE: the first WHEN clause whose condition holds
+id|a
+1|10
+2|-20
+4|-40
+5|50
+7|70
+8|
+(6 rows)
+==== case 34ef2d0e6db8ea72 MERGE: a row twice, DO NOTHING twice, a source row twice not matched
+id|a
+1|5
+(1 row)
+==== case b2abb07497c5029c MERGE: errors
+ERROR:  MERGE command cannot affect row a second time
+HINT:  Ensure that not more than one source row matches any one target row.
+ERROR:  MERGE command cannot affect row a second time
+HINT:  Ensure that not more than one source row matches any one target row.
+ERROR:  duplicate key value violates unique constraint "t_pkey"
+DETAIL:  Key (id)=(2) already exists.
+ERROR:  new row for relation "t" violates check constraint "t_a_check"
+DETAIL:  Failing row contains (1, 500, x).
+ERROR:  null value in column "b" of relation "t" violates not-null constraint
+DETAIL:  Failing row contains (3, 1, null).
+ERROR:  column "zz" of relation "t" does not exist
+LINE 1: ...AS id) s ON t.id = s.id WHEN MATCHED THEN UPDATE SET zz = 2;
+                                                                ^
+ERROR:  invalid reference to FROM-clause entry for table "s"
+LINE 1: ... = s.id WHEN NOT MATCHED BY SOURCE THEN UPDATE SET a = s.id;
+                                                                  ^
+DETAIL:  There is an entry for table "s", but it cannot be referenced from this part of the query.
+ERROR:  invalid reference to FROM-clause entry for table "t"
+LINE 1: ...s ON t.id = s.id WHEN NOT MATCHED THEN INSERT VALUES (t.id);
+                                                                 ^
+DETAIL:  There is an entry for table "t", but it cannot be referenced from this part of the query.
+ERROR:  invalid reference to FROM-clause entry for table "t"
+LINE 1: ...CT 1 AS id) s ON t.id = s.id WHEN NOT MATCHED AND t.a = 1 TH...
+                                                             ^
+DETAIL:  There is an entry for table "t", but it cannot be referenced from this part of the query.
+ERROR:  syntax error at or near "INSERT"
+LINE 1: ...ELECT 1 AS id) s ON t.id = s.id WHEN MATCHED THEN INSERT VAL...
+                                                             ^
+ERROR:  syntax error at or near "DELETE"
+LINE 1: ...LECT 1 AS id) s ON t.id = s.id WHEN NOT MATCHED THEN DELETE;
+                                                                ^
+ERROR:  column reference "id" is ambiguous
+LINE 1: MERGE INTO t USING (SELECT 1 AS id) s ON id = s.id WHEN MATC...
+                                                 ^
+ERROR:  INSERT has more expressions than target columns
+LINE 1: ...d = s.id WHEN NOT MATCHED THEN INSERT VALUES (1, 2, 'c', 4);
+                                                                    ^
+ERROR:  relation "nope" does not exist
+LINE 1: MERGE INTO nope USING (SELECT 1 AS id) s ON nope.id = s.id W...
+                   ^
+ERROR:  relation "nope" does not exist
+LINE 1: MERGE INTO t USING nope ON t.id = nope.id WHEN MATCHED THEN ...
+                           ^
+ERROR:  syntax error at or near ";"
+LINE 1: MERGE INTO t USING (SELECT 1 AS id) s ON t.id = s.id;
+                                                            ^
+ERROR:  MERGE_ACTION() can only be used in the RETURNING list of a MERGE command
+LINE 1: SELECT merge_action();
+               ^
+ERROR:  MERGE_ACTION() can only be used in the RETURNING list of a MERGE command
+LINE 1: ...SELECT 1 AS id) s ON t.id = s.id WHEN MATCHED AND merge_acti...
+                                                             ^
+==== case 0abe5571135b6242 MERGE: an error undoes the whole statement
+ERROR:  new row for relation "t" violates check constraint "t_a_check"
+DETAIL:  Failing row contains (2, 500).
+id|a
+1|1
+2|2
+(2 rows)
+==== case 588a253a8facf5c9 MERGE in a transaction: an error undoes the statement only
+ERROR:  new row for relation "t" violates check constraint "t_a_check"
+DETAIL:  Failing row contains (2, 500).
+id|a
+1|5
+2|50
+(2 rows)
+==== case 04257a088fe28018 MERGE: typed columns, defaults, identity and generated columns
+ERROR:  column reference "k" is ambiguous
+LINE 4: RETURNING merge_action(), id, k, flag, amount, note, at, dou...
+                                      ^
+id|k|flag|amount|note|at|doubled
+1|a|t|1.50|||2
+(1 row)
+==== case 799859f5aa083477 MERGE: INSERT DEFAULT VALUES and OVERRIDING
+id|v
+1|dflt
+2|dflt
+3|x
+10|dflt
+(4 rows)
+==== case 60840b38129c5207 MERGE: RETURNING * is the source's columns, then the target's
+id|b|id|a|merge_action|pg_typeof
+1|2|1|2|UPDATE|text
+2|3|2|3|INSERT|text
+(2 rows)
+==== case fdf0286d23ef6927 MERGE: RETURNING old and new
+merge_action|old_a|new_a|id|a|id
+UPDATE|10|5|1|10|1
+DELETE|20||2|20|2
+INSERT||30|||3
+(3 rows)
+id|a|id|a|next
+1|5||5|6
+(1 row)
+==== case 1a87ec51da4d47e4 WITH ... MERGE, MERGE in WITH
+id|a
+1|99
+5|55
+(2 rows)
+act|id|a
+INSERT|7|70
+(1 row)
+count|sum
+2|3
+(1 row)
+id|a
+5|55
+7|70
+(2 rows)
+==== case d8b9637a55eb3d76 MERGE of a schema's table, a parameterless prepared statement
+sku|qty
+a|6
+b|2
+(2 rows)
+==== case eb5218cace008891 WITH: DELETE ... RETURNING into another table
+id|a|what
+3|30|deleted
+(1 row)
+id|a|b
+1|10|x
+2|20|y
+(2 rows)
+==== case 4eb2d9b256e3c966 WITH: UPDATE, INSERT and the statement's query
+id|a|what
+1|11|updated
+2|21|updated
+(2 rows)
+twice|b
+10|w
+(1 row)
+id|a|b
+1|11|w
+(1 row)
+count
+1
+(1 row)
+id|a|what
+1|11|updated
+2|21|updated
+9|9|a
+10|10|b
+(4 rows)
+sum
+22
+(1 row)
+k
+2
+(1 row)
+id|a|b
+1|11|w
+(1 row)
+==== case 8504efde3e609e68 WITH: a recursive query before, the RETURNING's old and new
+id
+1
+2
+3
+(3 rows)
+id|ob|nb
+1|x|x!
+3|z|z!
+(2 rows)
+id|b|gone
+3|z!|
+(1 row)
+==== case e26167247c449302 WITH: errors
+ERROR:  WITH query "d" does not have a RETURNING clause
+LINE 1: WITH d AS (DELETE FROM t) SELECT * FROM d;
+                                                ^
+ERROR:  WITH clause containing a data-modifying statement must be at the top level
+LINE 1: SELECT * FROM (WITH d AS (DELETE FROM t RETURNING *) SELECT ...
+                            ^
+ERROR:  division by zero
+ERROR:  column "zz" does not exist
+LINE 1: WITH d AS (DELETE FROM t RETURNING zz) SELECT * FROM d;
+                                           ^
+ERROR:  duplicate key value violates unique constraint "t_pkey"
+DETAIL:  Key (id)=(1) already exists.
+==== case 6417277de3086abd WITH: an error undoes every statement
+ERROR:  duplicate key value violates unique constraint "log_pkey"
+DETAIL:  Key (id)=(1) already exists.
+t|log
+2|0
+(1 row)
+==== case 027ec39753a13b82 ON CONFLICT ON CONSTRAINT
+id|a|b
+1|5|1
+(1 row)
+id|a|b
+2|5|5
+(1 row)
+id|a|b
+3|5|5
+(1 row)
+k|v
+a|3
+(1 row)
+==== case cc2f711becc8406f ON CONFLICT ON CONSTRAINT: errors
+ERROR:  constraint "nope" for table "t" does not exist
+ERROR:  constraint "ua" for table "t" does not exist
+==== case ac7385931566373d RETURNING old and new
+a|a|id|a|b|id|a|b
+|30||||3|30|z
+(1 row)
+o|n
+30|31
+(1 row)
+id|a|a|a|a|diff
+1|10|20|20|20|10
+2|20|40|40|40|20
+(2 rows)
+b|b|same
+x|q|t
+(1 row)
+id|a|b|b
+2|40|y|
+(1 row)
+==== case cfb5b0b96a6bcb2d RETURNING old and new: errors
+ERROR:  column old.zz does not exist
+LINE 1: UPDATE t SET a = 0 RETURNING old.zz;
+                                     ^
+ERROR:  column new.zz does not exist
+LINE 1: UPDATE t SET a = 0 RETURNING new.zz;
+                                     ^
+==== case 5b3218e430492f6c OVERRIDING USER VALUE, UPDATE of a column the table has not
+id|v
+1|a
+2|b
+3|c
+4|d
+5|e
+(5 rows)
+==== case 09f52bdd6cc7c05f UPDATE of a column the table has not
+ERROR:  column "zz" of relation "t" does not exist
+LINE 1: UPDATE t SET zz = 1;
+                     ^
+ERROR:  column "zz" of relation "t" does not exist
+LINE 1: UPDATE t AS x SET (a, zz) = (1, 2);
+                              ^
+==== case 5d3c96ea8493f329 UPDATE ... SET (a, b) = (SELECT ...), DELETE ... USING
+id|a|b
+1|10|ten
+(1 row)
+id|a|b
+2|2|b
+(1 row)
+id|a|b
+1|10|ten
+(1 row)
+==== case f983e1bcd765f580 MERGE: jsonb, uuid, interval and array columns, the source the target itself
+id|j|u|iv|tags|b|pg_typeof
+2|{"a": 1, "b": 2}|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|2 days|{x,y}|2|interval
+(1 row)
+id|j|tags
+2|{"a": 1}|{x,y,x}
+(1 row)
+id|j|u|iv|tags
+1|{"a": 1}|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|1 day|{x}
+2|{"a": 1}|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|2 days|{x,y,x}
+(2 rows)
+==== case 1298e5529810e081 UPDATE ... FROM a table of text columns
+k|v|n|c|b
+2|TWO|5|TWO|t
+(1 row)
+k|v|n|c|b
+2|true|5|x2|t
+(1 row)

@@ -99,6 +99,16 @@ fn storeColumn(t: Type, decl: []const u8, storage: int.COLTYPE) ?typing.Store {
         if (s == null) s = .{};
         s.?.also = .{ .types = .initOne(.boolean), .conv = .{ .def = &funcs.bool_text } };
     }
+    // A float column: a string or a parameter read as float8in() or
+    // float4in() reads it; into a real, any other number rounded to
+    // single precision (an error out of its range); a numeric by its key
+    // (an error out of the range of the type).
+    if (t.logical == .float8 or t.logical == .float4) {
+        const conv: typing.Conv = .{ .def = store(t, storage).? };
+        var numbers: std.EnumSet(Logical) = .initMany(&.{.numeric});
+        if (t.logical == .float4) numbers.setUnion(.initMany(&.{ .int1, .int2, .int4, .int8, .float8 }));
+        return .{ .typed = .{ .types = numbers, .conv = conv }, .needed = conv };
+    }
     return s;
 }
 
@@ -141,11 +151,16 @@ fn store(t: Type, storage: int.COLTYPE) ?*const int.FuncDef {
         .timestamp_tz => datetime.cast_timestamptz,
         // Read as the elements' type reads them, written canonical.
         .array => array.inputFunction(t.element),
+        // float8in(), float4in(): 'Infinity', an error for 'abc'
+        // (builtins.zig).
+        .float8 => &builtins.cast_float8,
+        .float4 => &builtins.cast_float4,
         else => null,
     };
 }
 
 const array = @import("array.zig");
+const builtins = @import("builtins.zig");
 
 // ================================================================ numeric
 
@@ -236,6 +251,9 @@ const numeric_functions = .{
     .{ "xq_dec_int4", Ret{ .named = "integer" } },
     .{ "xq_dec_int8", Ret{ .named = "bigint" } },
     .{ "xq_dec_float4", Ret{ .named = "real" } },
+    .{ "xq_pg_cast_float4", Ret{ .named = "real" } },
+    .{ "xq_pg_cast_float8", Ret{ .named = "double precision" } },
+    .{ "xq_pg_float_text", Ret{ .named = "text" } },
     .{ "xq_dec_float8", Ret{ .named = "double precision" } },
     .{ "xq_dec_number", Ret{ .rule = decNoScale } },
     .{ "xq_dec_sum", Ret{ .rule = sum } },
@@ -369,6 +387,38 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "sum", Ret{ .rule = sum } },
     .{ "avg", Ret{ .rule = avg } },
     .{ "string_agg", Ret{ .named = "text" } },
+    // The statistical, ordered-set and hypothetical-set aggregates
+    // (decimal_sql.zig's numeric ones, stats.zig's).
+    .{ "xq_dec_var_pop", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_var_samp", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_stddev_pop", Ret{ .rule = decNoScale } },
+    .{ "xq_dec_stddev_samp", Ret{ .rule = decNoScale } },
+    .{ "xq_float_var_pop", Ret{ .named = "double precision" } },
+    .{ "xq_float_var_samp", Ret{ .named = "double precision" } },
+    .{ "xq_float_stddev_pop", Ret{ .named = "double precision" } },
+    .{ "xq_float_stddev_samp", Ret{ .named = "double precision" } },
+    .{ "xq_corr", Ret{ .named = "double precision" } },
+    .{ "xq_covar_pop", Ret{ .named = "double precision" } },
+    .{ "xq_covar_samp", Ret{ .named = "double precision" } },
+    .{ "xq_regr_avgx", Ret{ .named = "double precision" } },
+    .{ "xq_regr_avgy", Ret{ .named = "double precision" } },
+    .{ "xq_regr_count", Ret{ .named = "bigint" } },
+    .{ "xq_regr_intercept", Ret{ .named = "double precision" } },
+    .{ "xq_regr_r2", Ret{ .named = "double precision" } },
+    .{ "xq_regr_slope", Ret{ .named = "double precision" } },
+    .{ "xq_regr_sxx", Ret{ .named = "double precision" } },
+    .{ "xq_regr_sxy", Ret{ .named = "double precision" } },
+    .{ "xq_regr_syy", Ret{ .named = "double precision" } },
+    .{ "xq_any_value", Ret{ .arg = 0 } },
+    .{ "xq_percentile_cont", Ret{ .named = "double precision" } },
+    .{ "xq_percentile_disc", Ret{ .arg = 1 } },
+    .{ "xq_pg_percentile_cont_arr", Ret{ .named = "double precision[]" } },
+    .{ "xq_pg_percentile_disc_arr", Ret{ .rule = arrayOf(1) } },
+    .{ "xq_mode", Ret{ .arg = 0 } },
+    .{ "xq_hypo_rank", Ret{ .named = "bigint" } },
+    .{ "xq_hypo_dense_rank", Ret{ .named = "bigint" } },
+    .{ "xq_hypo_percent_rank", Ret{ .named = "double precision" } },
+    .{ "xq_hypo_cume_dist", Ret{ .named = "double precision" } },
     .{ "group_concat", Ret{ .named = "text" } },
     .{ "row_number", Ret{ .named = "bigint" } },
     .{ "rank", Ret{ .named = "bigint" } },
@@ -437,7 +487,38 @@ const functions = std.StaticStringMap(Ret).initComptime(.{
     .{ "width_bucket", Ret{ .named = "integer" } },
     .{ "power", Ret{ .rule = transcendental } },
     .{ "pow", Ret{ .rule = transcendental } },
-    .{ "random", Ret{ .named = "double precision" } },
+    .{ "random", Ret{ .rule = randomType } },
+    // mathfuncs.zig.
+    .{ "sin", Ret{ .named = "double precision" } },
+    .{ "cos", Ret{ .named = "double precision" } },
+    .{ "tan", Ret{ .named = "double precision" } },
+    .{ "cot", Ret{ .named = "double precision" } },
+    .{ "asin", Ret{ .named = "double precision" } },
+    .{ "acos", Ret{ .named = "double precision" } },
+    .{ "atan", Ret{ .named = "double precision" } },
+    .{ "atan2", Ret{ .named = "double precision" } },
+    .{ "sind", Ret{ .named = "double precision" } },
+    .{ "cosd", Ret{ .named = "double precision" } },
+    .{ "tand", Ret{ .named = "double precision" } },
+    .{ "cotd", Ret{ .named = "double precision" } },
+    .{ "asind", Ret{ .named = "double precision" } },
+    .{ "acosd", Ret{ .named = "double precision" } },
+    .{ "atand", Ret{ .named = "double precision" } },
+    .{ "atan2d", Ret{ .named = "double precision" } },
+    .{ "sinh", Ret{ .named = "double precision" } },
+    .{ "cosh", Ret{ .named = "double precision" } },
+    .{ "tanh", Ret{ .named = "double precision" } },
+    .{ "asinh", Ret{ .named = "double precision" } },
+    .{ "acosh", Ret{ .named = "double precision" } },
+    .{ "atanh", Ret{ .named = "double precision" } },
+    .{ "cbrt", Ret{ .named = "double precision" } },
+    .{ "degrees", Ret{ .named = "double precision" } },
+    .{ "radians", Ret{ .named = "double precision" } },
+    .{ "erf", Ret{ .named = "double precision" } },
+    .{ "erfc", Ret{ .named = "double precision" } },
+    .{ "gamma", Ret{ .named = "double precision" } },
+    .{ "lgamma", Ret{ .named = "double precision" } },
+    .{ "random_normal", Ret{ .named = "double precision" } },
     .{ "pi", Ret{ .named = "double precision" } },
     .{ "greatest", Ret{ .common = 0 } },
     .{ "least", Ret{ .common = 0 } },
@@ -817,6 +898,16 @@ fn transcendental(c: *Ctx, args: []const Operand) Oom!TypeId {
         ch.arg(l);
     }
     return if (ch.isNumeric()) c.make(.{ .logical = .numeric }) else typing.plain(.float8);
+}
+
+/// random(): a double precision; random(min, max) of integers an integer
+/// (a bigint if one is), else a numeric.
+fn randomType(c: *Ctx, args: []const Operand) Oom!TypeId {
+    if (args.len != 2) return typing.plain(.float8);
+    const wa = typing.intWidth(args[0].logical());
+    const wb = typing.intWidth(args[1].logical());
+    if (wa != null and wb != null) return typing.plain(if (@max(wa.?, wb.?) > 4) .int8 else .int4);
+    return c.make(.{ .logical = .numeric });
 }
 
 /// log(x) as transcendental(); log(b, x) is numeric's only.

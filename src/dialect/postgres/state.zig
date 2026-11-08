@@ -20,6 +20,26 @@ pub const server_version_num = "180006";
 pub const IntervalStyle = @import("datetime").interval.Style;
 pub const NoticeLevel = @import("../../sql/sqlite_int.zig").Notice.Level;
 
+/// A parameter changed in a transaction (PostgreSQL's GUC stack, one
+/// level): its value before the transaction, which a rollback gives back,
+/// and the value a commit leaves: that of the last SET, not a SET LOCAL
+/// (null: the default or the startup value).
+pub const Saved = struct {
+    orig: ?[]u8,
+    commit: ?[]u8,
+
+    pub fn setCommit(e: *Saved, gpa: std.mem.Allocator, value: ?[]const u8) error{OutOfMemory}!void {
+        const copy: ?[]u8 = if (value) |v| try gpa.dupe(u8, v) else null;
+        if (e.commit) |old| gpa.free(old);
+        e.commit = copy;
+    }
+
+    fn deinit(e: *Saved, gpa: std.mem.Allocator) void {
+        if (e.orig) |v| gpa.free(v);
+        if (e.commit) |v| gpa.free(v);
+    }
+};
+
 pub const State = struct {
     /// Parameters set in this session, by name (lower case), as SHOW
     /// prints them; a parameter not here has its default.
@@ -35,9 +55,23 @@ pub const State = struct {
     /// patterns that are no constant), and what releases them.
     regex_cache: ?*anyopaque = null,
     regex_cache_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
+    /// The statements of PREPARE (a *commands.Statements), and what
+    /// releases them.
+    prepared: ?*anyopaque = null,
+    prepared_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
+    /// The cursors of DECLARE (a *cursor.Cursors), and what releases them.
+    cursors: ?*anyopaque = null,
+    cursors_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
+    /// The rows MERGE and the data-modifying statements of WITH keep
+    /// while they run (a *rows.Store), and what releases them.
+    dml_rows: ?*anyopaque = null,
+    dml_rows_free: ?*const fn (gpa: std.mem.Allocator, p: *anyopaque) void = null,
     /// uuidv7()'s clock (pkg/uuid's Clock: each time is later than the
     /// last, so the session's uuids are in order).
     uuidv7_clock: @import("uuid").Clock = .{},
+    /// random()'s PRNG (mathfuncs.zig: pg_prng.c's xoroshiro128** state),
+    /// null until the first random() or setseed().
+    prng: ?[2]u64 = null,
     /// The parameters the dialect reads, as values kept with their text
     /// (refresh(), from the text session.zig checked and stored as SHOW
     /// prints it). IntervalStyle: what the value display and
@@ -48,6 +82,9 @@ pub const State = struct {
     standard_strings: bool = true,
     /// client_min_messages: the lowest level of notice the client is sent.
     notice_level: NoticeLevel = .notice,
+    /// The parameters SET or SET LOCAL changed in the open transaction,
+    /// by name, and the values they go back to when it ends (Saved).
+    tx_saved: std.StringHashMapUnmanaged(Saved) = .empty,
     /// Changes with each change of a parameter: what the wire server
     /// compares to tell the client of the ones that changed.
     version: u32 = 0,
@@ -90,10 +127,14 @@ pub const State = struct {
     }
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
+        s.clearSaved(gpa);
         s.resetParams(gpa);
         freeMap(gpa, &s.reset_values);
         if (s.catalog) |p| if (s.catalog_free) |f| f(gpa, p);
         if (s.regex_cache) |p| if (s.regex_cache_free) |f| f(gpa, p);
+        if (s.cursors) |p| if (s.cursors_free) |f| f(gpa, p);
+        if (s.prepared) |p| if (s.prepared_free) |f| f(gpa, p);
+        if (s.dml_rows) |p| if (s.dml_rows_free) |f| f(gpa, p);
         s.* = .{};
     }
 
@@ -130,6 +171,43 @@ pub const State = struct {
             };
         }
         gop.value_ptr.* = copy;
+    }
+
+    /// Before a parameter first changes in a transaction: keep what it
+    /// goes back to (Saved).
+    pub fn touch(s: *State, gpa: std.mem.Allocator, name: []const u8) error{OutOfMemory}!*Saved {
+        const gop = try s.tx_saved.getOrPut(gpa, name);
+        if (gop.found_existing) return gop.value_ptr;
+        errdefer s.tx_saved.removeByPtr(gop.key_ptr);
+        const orig: ?[]u8 = if (s.params.get(name)) |v| try gpa.dupe(u8, v) else null;
+        errdefer if (orig) |v| gpa.free(v);
+        const commit: ?[]u8 = if (orig) |v| try gpa.dupe(u8, v) else null;
+        errdefer if (commit) |v| gpa.free(v);
+        gop.key_ptr.* = try gpa.dupe(u8, name);
+        gop.value_ptr.* = .{ .orig = orig, .commit = commit };
+        return gop.value_ptr;
+    }
+
+    /// The parameters the transaction changed (taken: the caller frees
+    /// them with freeSaved()).
+    pub fn takeSaved(s: *State) std.StringHashMapUnmanaged(Saved) {
+        const m = s.tx_saved;
+        s.tx_saved = .empty;
+        return m;
+    }
+
+    pub fn freeSaved(gpa: std.mem.Allocator, m: *std.StringHashMapUnmanaged(Saved)) void {
+        var it = m.iterator();
+        while (it.next()) |e| {
+            gpa.free(e.key_ptr.*);
+            e.value_ptr.deinit(gpa);
+        }
+        m.deinit(gpa);
+    }
+
+    fn clearSaved(s: *State, gpa: std.mem.Allocator) void {
+        var m = s.takeSaved();
+        freeSaved(gpa, &m);
     }
 
     /// search_path as SHOW prints it.

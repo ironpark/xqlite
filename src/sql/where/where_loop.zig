@@ -1291,6 +1291,7 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) AddError!Flo
         !src.fg.is_indexed_by and
         !src.fg.not_indexed and
         !src.fg.is_correlated and
+        !src.fg.xq_lateral_ref and
         !src.fg.is_recursive and
         !src.fg.jointype.RIGHT)
     {
@@ -1397,6 +1398,13 @@ fn whereLoopAddBtree(builder: *WhereLoopBuilder, m_prereq: Bitmask) AddError!Flo
                 } else if (m == 0 and (tab.hasRowid() or w.select != null)) {
                     new.ws_flags = .{ .IDX_ONLY = true, .INDEXED = true };
                 }
+            }
+            // xqlite: a LATERAL subquery reads the table's row (in its
+            // co-routine, which whereEnd() does not translate to reads of
+            // the index).
+            if (src.fg.xq_lateral_ref and new.ws_flags.intersects(.{ .IDX_ONLY = true, .EXPRIDX = true })) {
+                new.ws_flags = .{ .INDEXED = true };
+                m = TOPBIT;
             }
 
             // Full scan via index. (sqlite3GlobalConfig.bUseCis is
@@ -2053,7 +2061,9 @@ pub fn whereLoopAddAll(builder: *WhereLoopBuilder) AddError!void {
         new.i_tab = @intCast(i_tab);
         builder.i_plan_limit += wi.QUERY_PLANNER_LIMIT_INCR;
         new.mask_self = wi.getMask(&w.s_mask_set, item.i_cursor);
-        if (b_first_past_rj or item.fg.jointype.intersects(.{ .OUTER = true, .CROSS = true, .LTORJ = true })) {
+        if (b_first_past_rj or item.fg.jointype.intersects(.{ .OUTER = true, .CROSS = true, .LTORJ = true }) or
+            (item.fg.xq_lateral and item.fg.is_correlated))
+        {
             // Prevent reordering across CROSS and outer joins; the right
             // operand of a RIGHT JOIN stays put relative to later terms.
             if (item.fg.jointype.intersects(.{ .LTORJ = true, .CROSS = true })) {

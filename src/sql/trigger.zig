@@ -747,7 +747,7 @@ pub fn codeRowTrigger(p: *Parse, trigger: ?*Trigger, op: u8, changes: ?*ExprList
             if (!trig.returning) {
                 codeRowTriggerDirect(p, trig, t, reg, orconf, ignore_jump);
             } else if (p.toplevel == null) {
-                codeReturningTrigger(p, trig, t, reg) catch build.oomFault(p);
+                codeReturningTrigger(p, trig, t, reg, op) catch build.oomFault(p);
             }
         }
     }
@@ -790,6 +790,52 @@ fn expandReturning(p: *Parse, list: *ExprList, t: *Table) Oom!?*ExprList {
     return new;
 }
 
+/// xqlite: the qualifier of `e` if it is `\x00old.a` or `\x00new.a`
+/// (resolve.zig's returningOldNew()).
+fn oldNewQualifier(e: *const Expr) ?[]const u8 {
+    if (e.op != TK.DOT) return null;
+    const l = e.left orelse return null;
+    const r = e.right orelse return null;
+    if (l.op != TK.ID or r.op != TK.ID) return null;
+    const z = l.token();
+    if (!std.mem.eql(u8, z, resolve.returning_old) and !std.mem.eql(u8, z, resolve.returning_new)) return null;
+    return z;
+}
+
+fn findOld(w: *Walker, e: *Expr) WRC {
+    if (oldNewQualifier(e)) |z| if (std.mem.eql(u8, z, resolve.returning_old)) {
+        w.e_code = 1;
+        return WRC.Abort;
+    };
+    return WRC.Continue;
+}
+
+/// xqlite: whether the statement's RETURNING list reads a dialect's OLD.
+fn returningReadsOld(p: *Parse) bool {
+    const top = build.toplevel(p);
+    if (!top.returning) return false;
+    const ret = top.u1.d.returning orelse return false;
+    const list = ret.return_el orelse return false;
+    var w: Walker = .{ .expr_callback = findOld, .select_callback = walker.selectWalkNoop };
+    _ = walker.walkExprList(&w, list);
+    return w.e_code != 0;
+}
+
+/// xqlite: `\x00old.a` and `\x00new.a` (resolve.zig's returningOldNew())
+/// made `a`, for the names of the result columns (a column of `t`; any
+/// other is the error it is).
+fn unqualifyOldNew(w: *Walker, e: *Expr) WRC {
+    _ = oldNewQualifier(e) orelse return WRC.Continue;
+    const r = e.right.?;
+    const col = r.token();
+    if (build.columnIndex(w.u.tab.?, col) < 0 and !std.ascii.eqlIgnoreCase(col, "rowid")) return WRC.Continue;
+    e.op = TK.ID;
+    e.u = r.u;
+    e.left = null;
+    e.right = null;
+    return WRC.Continue;
+}
+
 /// Port of sqlite3ReturningSubqueryVarSelect().
 fn returningSubqueryVarSelect(_: *Walker, e: *Expr) WRC {
     if (e.useXSelect() and e.x.select.?.sel_flags.Correlated) e.flags.VarSelect = true;
@@ -829,7 +875,7 @@ fn processReturningSubqueries(list: *ExprList, t: *Table) void {
 /// Port of codeReturningTrigger(): code, in line, the computation of a
 /// row of RETURNING results from the registers at `reg_in` (as for a
 /// trigger's OLD.* and NEW.*) and its insertion into the results table.
-fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32) Oom!void {
+fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32, site_op: u8) Oom!void {
     const v = p.vdbe.?;
     const db = p.db;
     const a = p.arena;
@@ -842,6 +888,10 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32) Oom!v
     var from: SrcList = .{};
     try from.items.append(a, .{ .s_tab = t, .name = t.name, .i_cursor = -1 });
     var sel: Select = .{ .e_list = try expr_mod.listDup(a, ret.return_el), .src = &from };
+    // xqlite: a dialect's OLD and NEW (resolve.zig's returningOldNew())
+    // name the table's columns.
+    var unq: Walker = .{ .expr_callback = unqualifyOldNew, .select_callback = walker.selectWalkNoop, .u = .{ .tab = t } };
+    _ = walker.walkExprList(&unq, sel.e_list.?);
     select_mod.selectPrep(p, &sel, null);
     if (p.n_err == 0) select_mod.generateColumnNames(p, &sel);
 
@@ -855,7 +905,9 @@ fn codeReturningTrigger(p: *Parse, trig: *Trigger, t: *Table, reg_in: i32) Oom!v
         }
         p.e_trigger_op = trig.op;
         p.trigger_tab = t;
+        p.xq_returning_op = site_op;
         const resolved = if (resolve.resolveExprListNames(&nc, new)) |_| true else |_| false;
+        p.xq_returning_op = 0;
         if (resolved and !db.malloc_failed) {
             const n_col: i32 = @intCast(new.len());
             const reg = p.n_mem + 1;
@@ -892,6 +944,10 @@ pub fn triggerColmask(p: *Parse, trigger: ?*Trigger, changes: ?*ExprList, is_new
             } else if (getRowTrigger(p, trig, t, orconf)) |prg| {
                 mask |= prg.colmask[@intFromBool(is_new)];
             }
+        } else if (trig.returning and trig.op == TK.INSERT and op == TK.UPDATE and tr_tm & trig.tr_tm != 0 and returningReadsOld(p)) {
+            // xqlite: the RETURNING of an upsert's DO UPDATE that reads a
+            // dialect's OLD (resolve.zig's returningOldNew()).
+            mask = 0xffffffff;
         }
     }
     return mask;

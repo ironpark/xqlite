@@ -391,7 +391,8 @@ const Db = struct {
 
     /// The functions of exactNumeric()'s choices by type.
     const typed_choices = std.StaticStringMap(void).initComptime(.{
-        .{"xq_pg_bool"}, .{"xq_pg_bool_text"}, .{"xq_pg_bool_out"}, .{"xq_pg_typeof_as"},
+        .{"xq_pg_bool"},       .{"xq_pg_bool_text"}, .{"xq_pg_bool_out"}, .{"xq_pg_typeof_as"},
+        .{"xq_pg_float_text"},
     });
 
     fn failure(d: *Db, a: Allocator, rc: i32, step: bool) Oom!Outcome {

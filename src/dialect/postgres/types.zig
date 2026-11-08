@@ -317,6 +317,10 @@ pub fn castPlan(ty: TypeName) Error!CastPlan {
     if (eql(u8, n, "boolean")) return .{ .func = "xq_pg_bool" };
     // int2in() ... (integer.zig): 0x1F, 1_000; a real rounds to even.
     if (integer.Width.named(n)) |w| return .{ .func = integer.castName(w) };
+    // float8in(), float4in() (builtins.zig): 'Infinity', an error for
+    // 'abc', a real rounded to single precision.
+    if (eql(u8, n, "double precision")) return .{ .func = "xq_pg_cast_float8" };
+    if (eql(u8, n, "real")) return .{ .func = "xq_pg_cast_float4" };
     // PostgreSQL's input and output of the value (datetime.zig: an
     // error for what it does not read, the fraction of a second kept, a
     // timestamptz in UTC, '90 minutes' as '01:30:00').

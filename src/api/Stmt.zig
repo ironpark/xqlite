@@ -474,6 +474,12 @@ pub fn sql(s: *const Stmt) []const u8 {
     return engine.sqlText(s.vm) orelse "";
 }
 
+/// The text the statement's command is named after (a protocol's
+/// command tag): the statement PostgreSQL's EXECUTE runs, else sql().
+pub fn commandSql(s: *const Stmt) []const u8 {
+    return engine.commandSql(s.vm) orelse "";
+}
+
 /// Whether the statement makes no direct change to the database
 /// (sqlite3_stmt_readonly()).
 pub fn isReadOnly(s: *const Stmt) bool {

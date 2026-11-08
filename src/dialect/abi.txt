@@ -766,6 +766,9 @@ xq_postgres_xq_pg_part 4 qualified deterministic
 xq_pg_to_char 3 engine deterministic
 xq_pg_gcd 3 engine deterministic
 xq_pg_lcm 3 engine deterministic
+xq_pg_cast_float8 1 engine deterministic
+xq_pg_cast_float4 1 engine deterministic
+xq_pg_float_text 2 engine deterministic
 xq_pg_rows_input_error 2 engine deterministic
 xq_pg_timezone 3 engine deterministic
 xq_postgres_to_char 2 qualified deterministic
@@ -847,3 +850,81 @@ xq_postgres_family 1 qualified deterministic
 xq_pg_bool_text 1 engine deterministic
 xq_pg_typeof_as 2 engine deterministic
 xq_pg_bool_out 1 engine deterministic
+xq_dec_var_pop 1 engine aggregate deterministic
+xq_dec_var_samp 1 engine aggregate deterministic
+xq_dec_stddev_pop 1 engine aggregate deterministic
+xq_dec_stddev_samp 1 engine aggregate deterministic
+xq_float_var_pop 1 engine aggregate deterministic
+xq_float_var_samp 1 engine aggregate deterministic
+xq_float_stddev_pop 1 engine aggregate deterministic
+xq_float_stddev_samp 1 engine aggregate deterministic
+xq_corr 2 engine aggregate deterministic
+xq_covar_pop 2 engine aggregate deterministic
+xq_covar_samp 2 engine aggregate deterministic
+xq_regr_avgx 2 engine aggregate deterministic
+xq_regr_avgy 2 engine aggregate deterministic
+xq_regr_count 2 engine aggregate deterministic
+xq_regr_intercept 2 engine aggregate deterministic
+xq_regr_r2 2 engine aggregate deterministic
+xq_regr_slope 2 engine aggregate deterministic
+xq_regr_sxx 2 engine aggregate deterministic
+xq_regr_sxy 2 engine aggregate deterministic
+xq_regr_syy 2 engine aggregate deterministic
+xq_any_value 1 engine aggregate deterministic
+xq_percentile_cont 2 engine aggregate deterministic
+xq_percentile_disc 2 engine aggregate deterministic
+xq_mode 1 engine aggregate deterministic
+xq_hypo_rank -1 engine aggregate deterministic
+xq_hypo_dense_rank -1 engine aggregate deterministic
+xq_hypo_percent_rank -1 engine aggregate deterministic
+xq_hypo_cume_dist -1 engine aggregate deterministic
+xq_pg_percentile_cont_arr 2 engine aggregate deterministic
+xq_pg_percentile_disc_arr 2 engine aggregate deterministic
+xq_postgres_random 2 qualified
+xq_postgres_sin 1 qualified deterministic
+xq_postgres_cos 1 qualified deterministic
+xq_postgres_tan 1 qualified deterministic
+xq_postgres_cot 1 qualified deterministic
+xq_postgres_asin 1 qualified deterministic
+xq_postgres_acos 1 qualified deterministic
+xq_postgres_atan 1 qualified deterministic
+xq_postgres_atan2 2 qualified deterministic
+xq_postgres_sind 1 qualified deterministic
+xq_postgres_cosd 1 qualified deterministic
+xq_postgres_tand 1 qualified deterministic
+xq_postgres_cotd 1 qualified deterministic
+xq_postgres_asind 1 qualified deterministic
+xq_postgres_acosd 1 qualified deterministic
+xq_postgres_atand 1 qualified deterministic
+xq_postgres_atan2d 2 qualified deterministic
+xq_postgres_sinh 1 qualified deterministic
+xq_postgres_cosh 1 qualified deterministic
+xq_postgres_tanh 1 qualified deterministic
+xq_postgres_asinh 1 qualified deterministic
+xq_postgres_acosh 1 qualified deterministic
+xq_postgres_atanh 1 qualified deterministic
+xq_postgres_cbrt 1 qualified deterministic
+xq_postgres_degrees 1 qualified deterministic
+xq_postgres_radians 1 qualified deterministic
+xq_postgres_erf 1 qualified deterministic
+xq_postgres_erfc 1 qualified deterministic
+xq_postgres_gamma 1 qualified deterministic
+xq_postgres_lgamma 1 qualified deterministic
+xq_postgres_random_normal 0 qualified
+xq_postgres_random_normal 1 qualified
+xq_postgres_random_normal 2 qualified
+xq_postgres_setseed 1 qualified
+xq_postgres_round 1 qualified deterministic
+xq_postgres_round 2 qualified deterministic
+# PostgreSQL cursors (postgres/cursor.zig): DECLARE, FETCH, MOVE, CLOSE, WHERE CURRENT OF, pg_cursors
+xq_postgres_xq_pg_cursor_declare -1 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_cursor_fetch 4 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_cursor_move 3 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_cursor_value 3 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_cursor_close 1 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_cursor_rowid 3 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_cursors 0 qualified unsafe direct xqlite-only:direct_only
+# PostgreSQL PREPARE/EXECUTE/DEALLOCATE and DISCARD (postgres/commands.zig)
+xq_postgres_xq_pg_prepare 5 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_deallocate 1 qualified unsafe direct xqlite-only:direct_only
+xq_postgres_xq_pg_discard 1 qualified unsafe direct xqlite-only:direct_only

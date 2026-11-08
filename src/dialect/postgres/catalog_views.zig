@@ -334,6 +334,13 @@ const pg_language =
     \\FROM (VALUES (12, 'internal', false), (13, 'c', false), (14, 'sql', true)) AS x(o, n, t)
 ;
 
+/// The session's cursors (cursor.zig).
+const pg_cursors =
+    \\SELECT x.name, x.statement, x.is_holdable, x.is_binary, x.is_scrollable, x.creation_time
+    \\FROM json_to_recordset(xq_pg_cursors()::json) AS x(name text, statement text, is_holdable boolean,
+    \\  is_binary boolean, is_scrollable boolean, creation_time timestamp with time zone)
+;
+
 const pg_settings = blk: {
     var z: []const u8 =
         \\SELECT n AS name, current_setting(n) AS setting, u AS unit, cat AS category, d AS short_desc,
@@ -426,6 +433,7 @@ const defs = [_]Def{
     .{ .schema = "pg_catalog", .name = "pg_collation", .text = pg_collation },
     .{ .schema = "pg_catalog", .name = "pg_language", .text = pg_language },
     .{ .schema = "pg_catalog", .name = "pg_settings", .text = pg_settings },
+    .{ .schema = "pg_catalog", .name = "pg_cursors", .text = pg_cursors },
     .{ .schema = "pg_catalog", .name = "pg_description", .text = rel("pg_description") },
     .{ .schema = "pg_catalog", .name = "pg_shdescription", .text = empty(&.{ .{ "objoid", .oid }, .{ "classoid", .oid }, .{ "description", .text } }) },
     .{ .schema = "pg_catalog", .name = "pg_inherits", .text = empty(&.{ .{ "inhrelid", .oid }, .{ "inhparent", .oid }, .{ "inhseqno", .int4 }, .{ "inhdetachpending", .bool } }) },

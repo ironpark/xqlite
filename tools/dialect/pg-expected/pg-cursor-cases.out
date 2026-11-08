@@ -1,0 +1,519 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-cursor-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case f222e2f918b981ab cursors: DECLARE needs a transaction block; unknown cursors
+count
+0
+(1 row)
+ERROR:  DECLARE CURSOR can only be used in transaction blocks
+ERROR:  DECLARE CURSOR can only be used in transaction blocks
+ERROR:  cursor "c" does not exist
+ERROR:  cursor "c" does not exist
+ERROR:  cursor "c" does not exist
+ERROR:  cursor "c" does not exist
+==== case 694762310a58c2f2 cursors: FETCH in each direction of a SCROLL cursor
+a|b
+1|one
+(1 row)
+a|b
+2|two
+(1 row)
+a|b
+3|three
+(1 row)
+a|b
+2|two
+(1 row)
+a|b
+3|three
+4|four
+(2 rows)
+a|b
+5|five
+(1 row)
+a|b
+(0 rows)
+a|b
+(0 rows)
+a|b
+5|five
+(1 row)
+a|b
+4|four
+3|three
+(2 rows)
+a|b
+1|one
+(1 row)
+a|b
+5|five
+(1 row)
+a|b
+2|two
+(1 row)
+a|b
+4|four
+(1 row)
+a|b
+(0 rows)
+a|b
+(0 rows)
+a|b
+(0 rows)
+a|b
+2|two
+(1 row)
+a|b
+1|one
+(1 row)
+a|b
+1|one
+(1 row)
+a|b
+1|one
+(1 row)
+a|b
+1|one
+(1 row)
+a|b
+(0 rows)
+a|b
+(0 rows)
+a|b
+1|one
+2|two
+(2 rows)
+a|b
+3|three
+4|four
+5|five
+(3 rows)
+a|b
+(0 rows)
+a|b
+5|five
+4|four
+3|three
+2|two
+1|one
+(5 rows)
+a|b
+(0 rows)
+a|b
+1|one
+2|two
+3|three
+4|four
+5|five
+(5 rows)
+a|b
+(0 rows)
+a|b
+(0 rows)
+==== case ee0d4916aa1a625d cursors: MOVE, then FETCH where it left the cursor
+a
+2
+(1 row)
+a
+5
+(1 row)
+a
+6
+(1 row)
+a
+1
+(1 row)
+a
+5
+(1 row)
+a
+3
+(1 row)
+a
+3
+(1 row)
+a
+(0 rows)
+a
+(0 rows)
+==== case 2092cba5b5291290 cursors: the columns and types of the query
+id|ok|amount|at|j|tags|note
+1|t|1.50|2024-01-02 03:04:05|{"a": [true, null], "b": 1}|{x,y}|
+2|f|20.00|2024-12-31 23:59:59.5|[]|{}|n
+(2 rows)
+twice|both|?column?|upper|n|nothing|?column?
+2|t|2.50||1.5||lit
+4|f|21.00|N|1.5||lit
+(2 rows)
+column1|column2
+1|a
+(1 row)
+id|ok|amount|at|j|tags|note
+1|t|1.50|2024-01-02 03:04:05|{"a": [true, null], "b": 1}|{x,y}|
+(1 row)
+x
+11
+12
+(2 rows)
+one
+2
+1
+(2 rows)
+a
+1
+2
+3
+(3 rows)
+id
+(0 rows)
+==== case 549aadf7efc6bc70 cursors: NO SCROLL and the default
+a
+1
+2
+(2 rows)
+a
+1
+(1 row)
+a
+3
+(1 row)
+a
+1
+(1 row)
+a
+1
+2
+(2 rows)
+a
+3
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+a
+1
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+a
+1
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+a
+1
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+==== case fb0e5c0b8502dece cursors: without SCROLL, a plan that cannot go backward
+count
+3
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+a
+1
+(1 row)
+a
+(0 rows)
+a
+1
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+a|row_number
+1|1
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+a
+1
+(1 row)
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+a
+1
+(1 row)
+a
+(0 rows)
+count
+3
+(1 row)
+count
+(0 rows)
+count
+3
+(1 row)
+==== case bf72c95f1696b1df cursors: COMMIT and ROLLBACK close cursors without HOLD
+a
+1
+(1 row)
+ERROR:  cursor "c" does not exist
+a
+1
+(1 row)
+ERROR:  cursor "c" does not exist
+ERROR:  cursor "c" does not exist
+==== case 40a2d942129d4c3f cursors: WITH HOLD stays open after COMMIT, where it was
+a
+1
+(1 row)
+a
+2
+(1 row)
+name|is_holdable
+h|t
+(1 row)
+a
+3
+(1 row)
+a
+3
+2
+(2 rows)
+a
+3
+(1 row)
+a
+(0 rows)
+ERROR:  cursor "h" does not exist
+==== case 1a1a2552eec06c78 cursors: WITH HOLD outside a transaction block; a rolled back one
+a
+2
+(1 row)
+name|is_holdable|is_scrollable
+h|t|t
+(1 row)
+ERROR:  cursor "g" does not exist
+==== case de7ffafe7a84f579 cursors: CLOSE and CLOSE ALL
+name
+B
+a
+b
+(3 rows)
+?column?
+2
+(1 row)
+name
+B
+a
+(2 rows)
+count
+0
+(1 row)
+?column?
+1
+(1 row)
+ERROR:  cursor "b" does not exist
+==== case 891d594d1e8e96ba cursors: pg_cursors
+name|statement|is_holdable|is_binary|is_scrollable|created
+c|DECLARE c SCROLL CURSOR FOR SELECT a FROM t;|f|f|t|t
+d|DECLARE d CURSOR FOR SELECT a FROM t;|f|f|t|t
+g|DECLARE g CURSOR FOR SELECT count(*) FROM t;|f|f|f|t
+h|DECLARE h CURSOR WITH HOLD FOR SELECT 'x';|t|f|f|t
+n|DECLARE n NO SCROLL CURSOR FOR SELECT a FROM t;|f|f|f|t
+(5 rows)
+name
+c
+d
+(2 rows)
+==== case 752e72092c3f3114 cursors: a SAVEPOINT rolled back to drops the cursors declared after it
+a
+1
+(1 row)
+a
+2
+3
+(2 rows)
+a
+4
+(1 row)
+name
+a
+(1 row)
+name
+a
+y
+(2 rows)
+name
+y
+(1 row)
+==== case 9f2e96fb4b90193a cursors: DECLARE errors
+ERROR:  cursor "c" already exists
+ERROR:  cannot specify both SCROLL and NO SCROLL
+ERROR:  cannot specify both ASENSITIVE and INSENSITIVE
+ERROR:  relation "nosuch" does not exist
+LINE 1: DECLARE c CURSOR FOR SELECT * FROM nosuch;
+                                           ^
+ERROR:  syntax error at or near "INSERT"
+LINE 1: DECLARE c CURSOR FOR INSERT INTO t VALUES (1);
+                             ^
+ERROR:  DECLARE CURSOR WITH HOLD ... FOR UPDATE is not supported
+DETAIL:  Holdable cursors must be READ ONLY.
+ERROR:  DECLARE SCROLL CURSOR ... FOR SHARE is not supported
+DETAIL:  Scrollable cursors must be READ ONLY.
+ERROR:  DECLARE INSENSITIVE CURSOR ... FOR NO KEY UPDATE is not valid
+DETAIL:  Insensitive cursors must be READ ONLY.
+ERROR:  cursor "nosuch" does not exist
+==== case 9f06b7edd9801baa cursors: ASENSITIVE and INSENSITIVE
+a
+1
+2
+(2 rows)
+a
+1
+2
+(2 rows)
+==== case ded1b6383e9f374c cursors: UPDATE and DELETE WHERE CURRENT OF
+a|b
+2|y
+(1 row)
+a|b
+3|z
+(1 row)
+a|b
+3|z
+(1 row)
+a|b
+4|w
+(1 row)
+a|b
+4|last
+(1 row)
+a|b
+1|x
+2|y!
+4|last
+(3 rows)
+==== case 5054954f0bd4a08c cursors: WHERE CURRENT OF errors
+ERROR:  cursor "c" is not positioned on a row
+a
+1
+2
+(2 rows)
+ERROR:  cursor "c" is not positioned on a row
+a
+1
+(1 row)
+ERROR:  cursor "c" is not a simply updatable scan of table "t"
+a
+1
+(1 row)
+ERROR:  cursor "c" is not a simply updatable scan of table "t"
+ERROR:  cursor "nosuch" does not exist
+==== case 20464151dc071ad2 session: SET LOCAL lasts until the transaction ends
+application_name
+local
+(1 row)
+current_setting
+local
+(1 row)
+application_name
+base
+(1 row)
+application_name
+session
+(1 row)
+application_name
+after
+(1 row)
+application_name
+after
+(1 row)
+set_config
+cfg
+(1 row)
+application_name
+cfg
+(1 row)
+application_name
+after
+(1 row)
+WARNING:  SET LOCAL can only be used in transaction blocks
+application_name
+after
+(1 row)
+search_path
+nosuch, public
+(1 row)
+search_path
+"$user", public
+(1 row)
+application_name
+after
+(1 row)
+search_path
+public
+(1 row)
+==== case 721ef0df23cad6b0 session: COMMIT AND CHAIN, ROLLBACK AND CHAIN
+a
+1
+3
+(2 rows)
+ERROR:  cursor "c" does not exist
+ERROR:  COMMIT AND CHAIN can only be used in transaction blocks
+ERROR:  ROLLBACK AND CHAIN can only be used in transaction blocks
+==== case 6ef2d1603094dddb session: PREPARE, EXECUTE, DEALLOCATE
+a|b
+2|TWO
+3|three
+(2 rows)
+x|y
+42|z
+(1 row)
+a|b
+1|one!
+(1 row)
+a|b
+1|one!
+2|TWO
+3|three
+(3 rows)
+ERROR:  prepared statement "q" does not exist
+ERROR:  prepared statement "n" does not exist
+ERROR:  prepared statement "nosuch" does not exist
+ERROR:  relation "nosuch" does not exist
+LINE 1: PREPARE e AS SELECT * FROM nosuch;
+                                   ^
+ERROR:  prepared statement "p1" already exists
+?column?
+1
+(1 row)
+==== case 63dfad3a304919c8 session: DISCARD
+lastval
+1
+(1 row)
+one
+1
+(1 row)
+ERROR:  lastval is not yet defined in this session
+ERROR:  relation "tt" does not exist
+LINE 1: SELECT * FROM tt;
+                      ^
+id|a
+1|1
+(1 row)
+search_path
+"$user", public
+(1 row)
+ERROR:  prepared statement "p" does not exist
+ERROR:  relation "tt" does not exist
+LINE 1: SELECT * FROM tt;
+                      ^
+ERROR:  DISCARD ALL cannot run inside a transaction block
+==== case fe762e31ccd27f79 session: SET CONSTRAINTS
+pid
+1
+(1 row)
+pid
+1
+2
+(2 rows)
+ERROR:  constraint "nosuch" does not exist
+WARNING:  SET CONSTRAINTS can only be used in transaction blocks
+==== case 5713aebac416d426 session: LOCK TABLE
+a
+1
+(1 row)
+ERROR:  relation "nosuch" does not exist
+ERROR:  LOCK TABLE can only be used in transaction blocks

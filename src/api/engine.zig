@@ -391,6 +391,14 @@ pub fn sqlText(v: *const Vm) ?[]const u8 {
     return v.sql;
 }
 
+/// The text a protocol names the statement's command after: the
+/// statement PostgreSQL's EXECUTE runs (Vdbe.xq_command_sql), else the
+/// statement's own; null for none.
+pub fn commandSql(v: *const Vm) ?[]const u8 {
+    if (v.xq_command_sql.len > 0) return v.xq_command_sql;
+    return v.sql;
+}
+
 /// sqlite3_stmt_readonly().
 pub fn stmtReadonly(v: *const Vm) bool {
     return v.read_only;

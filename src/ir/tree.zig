@@ -235,6 +235,11 @@ pub const Func = struct {
     /// strftime(), a text): lowering gives the call that type
     /// (Expr.xq_type, sql/typing.zig). Metadata only.
     result_type: []const u8 = "",
+    /// The type of the result as a type id of the connection
+    /// (sql/typing.zig's TypeId, interned), which wins over result_type:
+    /// a type a frontend kept from a statement it ran (PostgreSQL's
+    /// cursors). 0 for none. Metadata only.
+    result_type_id: u16 = 0,
 };
 
 pub const InList = struct { e: *Expr, not: bool, items: []*Expr };
@@ -335,6 +340,84 @@ pub const SortItem = struct {
     nulls: enum { default, first, last } = .default,
 };
 
+/// The direct subexpressions of an expression (not of subqueries).
+pub const Children = struct {
+    buf: [4]*Expr = undefined,
+    extra: []const *Expr = &.{},
+    n: usize = 0,
+    i: usize = 0,
+    j: usize = 0,
+
+    pub fn of(e: *const Expr) Children {
+        var c: Children = .{};
+        switch (e.kind) {
+            .unary => |u| c.add(u.e),
+            .binary => |b| {
+                c.add(b.l);
+                c.add(b.r);
+            },
+            .div => |d| {
+                c.add(d.l);
+                c.add(d.r);
+            },
+            .compare => |x| {
+                c.add(x.l);
+                c.add(x.r);
+            },
+            .concat => |x| c.extra = x.args,
+            .cast => |x| c.add(x.e),
+            .func => |f| {
+                c.extra = f.args;
+                if (f.filter) |x| c.add(x);
+            },
+            .case => |x| {
+                if (x.operand) |o| c.add(o);
+                if (x.@"else") |o| c.add(o);
+                c.extra = x.whens;
+            },
+            .in_list => |x| {
+                c.add(x.e);
+                c.extra = x.items;
+            },
+            .in_select => |x| c.add(x.e),
+            .between => |x| {
+                c.add(x.e);
+                c.add(x.lo);
+                c.add(x.hi);
+            },
+            .like => |x| {
+                c.add(x.e);
+                c.add(x.pat);
+                if (x.escape == .expr) c.add(x.escape.expr);
+            },
+            .is_null => |x| c.add(x.e),
+            .is_bool => |x| c.add(x.e),
+            .row => |items| c.extra = items,
+            .collate => |x| c.add(x.e),
+            .coerce => |x| c.add(x.e),
+            else => {},
+        }
+        return c;
+    }
+
+    fn add(c: *Children, e: *Expr) void {
+        c.buf[c.n] = e;
+        c.n += 1;
+    }
+
+    pub fn next(c: *Children) ?*Expr {
+        if (c.i < c.n) {
+            c.i += 1;
+            return c.buf[c.i - 1];
+        }
+        if (c.j < c.extra.len) {
+            c.j += 1;
+            return c.extra[c.j - 1];
+        }
+        return null;
+    }
+};
+
 // ================================================================ SELECT
 
 pub const Select = struct {
@@ -343,6 +426,9 @@ pub const Select = struct {
     order_by: []SortItem = &.{},
     limit: ?*Expr = null,
     offset: ?*Expr = null,
+    /// FETCH FIRST n ROWS WITH TIES: the rows after the first `limit`
+    /// that sort equal to the last of them too (desugar.zig).
+    with_ties: bool = false,
     pos: u32 = 0,
     /// The text the positions of this query (and what it contains) are
     /// offsets of, when it is not the statement's (a query a frontend
@@ -360,6 +446,14 @@ pub const Cte = struct {
     cols: []Name = &.{},
     materialized: ?bool = null,
     select: *Select,
+    /// A data-modifying statement (PostgreSQL's `d AS (DELETE ...
+    /// RETURNING ...)`), which the frontend runs on its own and replaces
+    /// with `select` before the statement is lowered.
+    dml: ?*Stmt = null,
+    /// The text of the CTE (from its name to its closing parenthesis)
+    /// and of its query or statement, where the frontend keeps them.
+    text: []const u8 = "",
+    body: []const u8 = "",
 };
 
 pub const Body = union(enum) {
@@ -381,12 +475,26 @@ pub const Compound = struct {
 
 pub const Core = struct {
     distinct: bool = false,
+    /// DISTINCT ON (exprs): the first row of each group of rows equal in
+    /// them, in the order of the query's ORDER BY (desugar.zig).
+    distinct_on: []*Expr = &.{},
     cols: []ResultCol,
     from: []FromItem = &.{},
     where: ?*Expr = null,
     group_by: []*Expr = &.{},
+    /// GROUPING SETS (ROLLUP, CUBE ... expanded): each set the indexes of
+    /// the `group_by` expressions it groups by, the rows of all sets
+    /// together (desugar.zig); `group_by` is then every expression a set
+    /// names, once. Also a plain GROUP BY whose query calls GROUPING():
+    /// one set of all.
+    grouping_sets: ?[]const []const u32 = null,
     having: ?*Expr = null,
     windows: []NamedWindow = &.{},
+    /// The last `hidden` result columns are not columns of the query to
+    /// a `*` of a query reading it in FROM (but can be named): what
+    /// desugar.zig keeps there for the outer query's ORDER BY and WHERE.
+    /// lower.zig only (render.zig cannot say it).
+    hidden: u16 = 0,
     pos: u32 = 0,
 };
 
@@ -412,6 +520,9 @@ pub const JoinKind = enum { none, comma, inner, left, right, full, cross, straig
 pub const FromItem = struct {
     join: JoinKind = .none,
     natural: bool = false,
+    /// LATERAL: a subquery that may name the items before it (run again
+    /// for each of their rows).
+    lateral: bool = false,
     source: Source,
     alias: ?Alias = null,
     on: ?*Expr = null,
@@ -475,6 +586,8 @@ pub const Insert = struct {
     overriding: bool = false,
     on_conflict: ?*OnConflict = null,
     returning: []ResultCol = &.{},
+    /// Where RETURNING is in the text (a frontend's; 0 if not kept).
+    returning_pos: u32 = 0,
     pos: u32 = 0,
 };
 
@@ -507,6 +620,8 @@ pub const Update = struct {
     order_by: []SortItem = &.{},
     limit: ?*Expr = null,
     returning: []ResultCol = &.{},
+    /// Where RETURNING is in the text (a frontend's; 0 if not kept).
+    returning_pos: u32 = 0,
     pos: u32 = 0,
 };
 
@@ -521,6 +636,8 @@ pub const Delete = struct {
     order_by: []SortItem = &.{},
     limit: ?*Expr = null,
     returning: []ResultCol = &.{},
+    /// Where RETURNING is in the text (a frontend's; 0 if not kept).
+    returning_pos: u32 = 0,
     pos: u32 = 0,
 };
 

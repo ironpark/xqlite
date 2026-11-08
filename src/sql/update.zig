@@ -82,6 +82,14 @@ fn updateFromSelect(p: *Parse, i_eph: i32, pk: ?*Index, changes: *ExprList, tab_
     var dest = select_mod.selectDestInit(e_dest, i_eph);
     dest.i_sd_parm2 = if (pk) |k| k.n_key_col else -1;
     select_mod.select(p, sel, &dest) catch {};
+    // xqlite: the types the query gave the new values, for the stores of
+    // the dialect's types (the values written are the query's).
+    if (sel.e_list) |l| if (l.len() >= changes.len()) {
+        const off = l.len() - changes.len();
+        for (changes.slice(), 0..) |*item, i| if (item.expr) |x| if (l.at(off + i).expr) |y| {
+            x.xq_type = y.xq_type;
+        };
+    };
 }
 
 /// Port of indexColumnIsBeingUpdated().
@@ -512,7 +520,10 @@ fn updateImpl(p: *Parse, tab_list: *SrcList, changes: *ExprList, where: ?*Expr, 
                     if (stores) |f| if (f[i]) |st| {
                         const x = changes.at(@intCast(j)).expr.?;
                         if (n_change_from != 0) {
-                            if (st.untyped()) |s| insert.codeStore(p, s, k);
+                            // The value of a type known: as pick() goes
+                            // (a string is not a numeric's text_store).
+                            const known = typing.typeOf(db, x.xq_type).logical != .unknown;
+                            if (if (known) st.pick(db, x) else st.untyped()) |s| insert.codeStore(p, s, k);
                         } else if (st.pick(db, x)) |s| {
                             if (typing.readStoredLiteral(p, s, x) catch return build.oomFault(p)) return;
                             insert.codeStore(p, s, k);

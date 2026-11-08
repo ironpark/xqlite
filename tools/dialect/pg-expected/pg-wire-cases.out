@@ -951,7 +951,7 @@ SELECT pg_get_serial_sequence('author', 'id');
  public.author_id_seq
 (1 row)
 
-==== case f8a8d0dda17b1bcb format-type
+==== case b9c28b0d22773b8b format-type
 SELECT format_type(23, -1), format_type(1043, 204), format_type(1700, 655366), format_type(25, NULL);
  format_type |      format_type       |  format_type  | format_type 
 -------------+------------------------+---------------+-------------
@@ -969,3 +969,58 @@ SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE
  published | boolean
 (6 rows)
 
+==== case 7c65491eef0205fa cursors
+BEGIN;
+BEGIN
+DECLARE c SCROLL CURSOR FOR SELECT id, title, price FROM book ORDER BY id;
+DECLARE CURSOR
+FETCH 2 FROM c;
+ id | title | price 
+----+-------+-------
+  1 | Alpha |  9.50
+  2 | Beta  | 12.00
+(2 rows)
+
+MOVE ALL c;
+MOVE 1
+FETCH BACKWARD 1 c;
+ id | title | price 
+----+-------+-------
+  3 | Gamma |      
+(1 row)
+
+MOVE BACKWARD ALL IN c;
+MOVE 2
+FETCH 0 c;
+ id | title | price 
+----+-------+-------
+(0 rows)
+
+CLOSE c;
+CLOSE CURSOR
+DECLARE n NO SCROLL CURSOR WITH HOLD FOR SELECT name FROM author ORDER BY id;
+DECLARE CURSOR
+END;
+COMMIT
+FETCH ALL n;
+ name 
+------
+ Ann
+ Bob
+(2 rows)
+
+FETCH PRIOR n;
+ERROR:  cursor can only scan forward
+HINT:  Declare it with SCROLL option to enable backward scan.
+CLOSE ALL;
+CLOSE CURSOR ALL
+\set FETCH_COUNT 1
+SELECT id FROM book ORDER BY id;
+ id 
+----
+  1
+  2
+  3
+(3 rows)
+
+\unset FETCH_COUNT

@@ -327,6 +327,10 @@ pub const Subquery = struct {
     addr_fill_sub: i32 = 0,
     reg_return: i32 = 0,
     reg_result: i32 = 0,
+    /// xqlite: the end of the code of a co-routine (for a LATERAL
+    /// subquery's: where whereEnd() copies the columns it reads of the
+    /// co-routines before it).
+    xq_end: i32 = 0,
 };
 
 /// Join types (JT_*).
@@ -393,6 +397,15 @@ pub const SrcItem = struct {
         fixed_schema: bool = false,
         had_schema: bool = false,
         from_exists: bool = false,
+        /// xqlite: a LATERAL subquery, which may name the terms before it
+        /// (set by the IR's lowering only); with is_correlated it is a
+        /// co-routine run for each row of those terms, after them.
+        xq_lateral: bool = false,
+        /// xqlite: a term a LATERAL subquery names: its columns are read
+        /// in the code of that co-routine, outside the loop of the term,
+        /// so it has no covering-index or automatic-index loop and, if a
+        /// co-routine itself, its columns are copied there too.
+        xq_lateral_ref: bool = false,
     } = .{},
     i_cursor: i32 = -1,
     col_used: Bitmask = 0,
@@ -542,6 +555,10 @@ pub const Select = struct {
     with: ?*With = null,
     win: ?*Window = null,
     win_defn: ?*Window = null,
+    /// xqlite: the last `xq_hidden` result columns are hidden columns of
+    /// the table of this query as a FROM-clause subquery (not in its
+    /// `*`); set by the IR's lowering only (tree.Core.hidden).
+    xq_hidden: u16 = 0,
 };
 
 /// ON CONFLICT clause of an INSERT (Upsert).
@@ -1380,6 +1397,10 @@ pub const NameContext = struct {
     n_nested_select: u32 = 0,
     /// The SELECT of any window functions.
     win_select: ?*Select = null,
+    /// xqlite: only the first `xq_n_src` terms of `src_list` are visible
+    /// (the terms before a LATERAL subquery, in the context its names
+    /// are resolved in); a term matched is marked fg.xq_lateral_ref.
+    xq_n_src: ?usize = null,
 };
 
 /// A column used by an aggregate query (AggInfo_col).
@@ -1968,6 +1989,10 @@ pub const Parse = struct {
     is_multi_write: bool = false,
     within_rj_subrtn: u8 = 0,
     e_trigger_op: u8 = 0,
+    /// xqlite: the operation whose row a RETURNING list being resolved
+    /// reads (TK_INSERT, TK_UPDATE, also of an upsert's DO UPDATE, or
+    /// TK_DELETE), for a dialect's OLD and NEW (resolve.returning_old).
+    xq_returning_op: u8 = 0,
     e_orconf: OE = .None,
     bhas_exists: bool = false,
     col_names_set: bool = false,

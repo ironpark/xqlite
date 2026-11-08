@@ -819,12 +819,16 @@ pub const catalog = @import("../catalog/catalog.zig");
 pub const tree = @import("tree.zig");
 pub const lower = @import("lower.zig");
 pub const render = @import("render.zig");
+/// Query forms SQLite has no syntax for, as trees of forms it has
+/// (desugar.zig), before lowering and rendering.
+pub const desugar = @import("desugar.zig");
 /// The column definitions of a CREATE TABLE text, for an ALTER TABLE
 /// that edits them (coldef.zig).
 pub const coldef = @import("coldef.zig");
 
 test {
     _ = coldef;
+    _ = desugar;
     _ = @import("test.zig");
     _ = @import("roundtrip_test.zig");
 }

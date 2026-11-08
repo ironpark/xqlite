@@ -1375,6 +1375,7 @@ pub fn halt(v: *Vdbe) error{Busy}!void {
                     db.flags.DeferFKs = false;
                     main_mod.commitInternalChanges(db);
                     @import("../catalog/meta.zig").ended(db, true);
+                    @import("../dialect/dialect.zig").transactionEnded(db, true);
                 }
             } else if (v.rc == RC.SCHEMA and db.n_vdbe_active > 1) {
                 v.n_change = 0;

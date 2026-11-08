@@ -176,6 +176,23 @@ fn translateColumnToCopy(p: *Parse, i_start: i32, i_tab_cur: i32, i_register: i3
     }
 }
 
+/// xqlite: translateColumnToCopy() of the code from `i_start` to `i_end`
+/// (a LATERAL subquery's co-routine), without an automatic index.
+fn translateColumnRange(p: *Parse, i_start: i32, i_end: i32, i_tab_cur: i32, i_register: i32) void {
+    const v = p.vdbe.?;
+    if (p.db.malloc_failed) return;
+    var addr = i_start;
+    while (addr < i_end) : (addr += 1) {
+        const op = aux.getOp(v, addr);
+        if (op.p1 != i_tab_cur or op.opcode != OP.Column) continue;
+        op.opcode = OP.Copy;
+        op.p1 = op.p2 + i_register;
+        op.p2 = op.p3;
+        op.p3 = 0;
+        op.p5 = 2;
+    }
+}
+
 /// Port of explainAutomaticIndex(): for sqlite3_stmt_scanstatus() (but
 /// not in EXPLAIN QUERY PLAN, whose output stays as it was), an
 /// OP_Explain "CREATE AUTOMATIC INDEX ON t(cols)"; its address, or 0.
@@ -1188,7 +1205,7 @@ fn whereShortCut(builder: *WhereLoopBuilder) bool {
             }
             if (j != idx.n_key_col) continue;
             loop.ws_flags = .{ .COLUMN_EQ = true, .ONEROW = true, .INDEXED = true };
-            if (idx.is_covering or item.col_used & idx.col_not_idxed == 0) {
+            if ((idx.is_covering or item.col_used & idx.col_not_idxed == 0) and !item.fg.xq_lateral_ref) {
                 loop.ws_flags.IDX_ONLY = true;
             }
             loop.n_lterm = @intCast(j);
@@ -1970,6 +1987,13 @@ pub fn whereEnd(w: *WhereInfo) void {
             std.debug.assert(tab_item.fg.is_subquery);
             std.debug.assert(tab_item.u4.subq.?.reg_result >= 0);
             translateColumnToCopy(p, level.addr_body, level.i_tab_cur, tab_item.u4.subq.?.reg_result, 0);
+            // xqlite: and in the co-routines of the LATERAL subqueries
+            // after it that read it.
+            if (tab_item.fg.xq_lateral_ref) for (tab_list.slice()[level.i_from + 1 ..]) |*later| {
+                if (!later.fg.xq_lateral or !later.fg.via_coroutine) continue;
+                const sq = later.u4.subq.?;
+                translateColumnRange(p, sq.addr_fill_sub, sq.xq_end, level.i_tab_cur, tab_item.u4.subq.?.reg_result);
+            };
             continue;
         }
 

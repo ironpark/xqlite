@@ -32,6 +32,7 @@ const api = @import("../../vdbe/api.zig");
 const vi = @import("../../vdbe/vdbe_int.zig");
 const parser = @import("parser.zig");
 const state = @import("state.zig");
+const main_mod = @import("../../sql/main.zig");
 
 const Parser = parser.Parser;
 const Name = @import("../../ir/tree.zig").Name;
@@ -440,7 +441,7 @@ fn quoteIdent(out: *std.ArrayList(u8), a: std.mem.Allocator, z: []const u8) !voi
 }
 
 /// A PostgreSQL string literal of `z`.
-fn literal(out: *std.ArrayList(u8), a: std.mem.Allocator, z: []const u8) !void {
+pub fn literal(out: *std.ArrayList(u8), a: std.mem.Allocator, z: []const u8) !void {
     try out.append(a, '\'');
     for (z) |c| {
         if (c == '\'') try out.append(a, '\'');
@@ -454,6 +455,7 @@ fn literal(out: *std.ArrayList(u8), a: std.mem.Allocator, z: []const u8) !void {
 fn set(ps: *Parser) Error!void {
     const a = ps.arena;
     const reset = ps.c.advance().isKw("reset");
+    var local = false;
     var name: []const u8 = undefined;
     var value: ?[]const u8 = null;
     if (reset) {
@@ -464,8 +466,8 @@ fn set(ps: *Parser) Error!void {
         name = (try ps.anyName()).text;
         if (eql(name, "time") and ps.c.eatKw("zone")) name = "timezone";
     } else {
-        if (ps.c.isKw("local")) return ps.c.fail(ps.c.peek().start, "xqlite: SET LOCAL is not supported", .{});
-        _ = ps.c.eatKw("session");
+        local = ps.c.eatKw("local");
+        if (!local) _ = ps.c.eatKw("session");
         if (ps.c.isKw("transaction") or (ps.c.isKw("session") and ps.c.isKwAt(1, "characteristics"))) {
             // Isolation levels: parsed, nothing to do (SQLite is serializable).
             while (ps.c.peek().kind != .eof) ps.c.skip();
@@ -518,13 +520,17 @@ fn set(ps: *Parser) Error!void {
     if (ps.c.peek().kind != .eof) return ps.c.syntaxError();
     const prm = findParam(name) orelse return ps.c.failState(0, .of("42704"), "unrecognized configuration parameter \"{s}\"", .{name});
     if (prm.read_only) return ps.c.failState(0, .of("55P02"), "parameter \"{s}\" cannot be changed", .{prm.name});
+    // SET LOCAL outside a transaction block does nothing, with a warning.
+    if (local and main_mod.getAutocommit(ps.p.?.db)) {
+        @import("../../sql/util.zig").notice(ps.p.?, .{ .level = .warning, .sqlstate = "25P01".*, .fields = .{ .message = "SET LOCAL can only be used in transaction blocks" } });
+    }
     var q: std.ArrayList(u8) = .empty;
     try q.appendSlice(a, "SELECT 1 WHERE set_config(");
     try literal(&q, a, prm.name);
     try q.appendSlice(a, ", ");
     if (value) |v| try literal(&q, a, v) else try q.appendSlice(a, "NULL");
     // set_config() returns the value, never NULL: no row.
-    try q.appendSlice(a, ", false) IS NULL");
+    try q.print(a, ", {s}) IS NULL", .{if (local) "true" else "false"});
     try lowerPg(ps, try a.dupeSentinel(u8, q.items, 0));
 }
 
@@ -552,7 +558,7 @@ fn show(ps: *Parser) Error!void {
 }
 
 /// Compile PostgreSQL text `text` (a SELECT) as this statement.
-fn lowerPg(ps: *Parser, text: [:0]const u8) Error!void {
+pub fn lowerPg(ps: *Parser, text: [:0]const u8) Error!void {
     var sub = Parser.init(ps.arena, text, 0, null, .{}) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         error.ParseFailed => unreachable,
@@ -664,11 +670,18 @@ pub const reported = blk: {
 fn setConfigFunc(ctx: *Context, argv: []*Mem) void {
     const db = api.contextDbHandle(ctx);
     const name = api.valueText(argv[0]) orelse return api.resultErrorState(ctx, .of("22004"), "NULL value not allowed for parameter name");
-    if (api.valueType(argv[2]) != vi.SQLITE_NULL and api.valueInt64(argv[2]) != 0) {
-        return api.resultErrorState(ctx, .of("0A000"), "xqlite: SET LOCAL is not supported");
-    }
+    const local = api.valueType(argv[2]) != vi.SQLITE_NULL and api.valueInt64(argv[2]) != 0;
     const given: ?[]const u8 = if (api.valueType(argv[1]) == vi.SQLITE_NULL) null else api.valueText(argv[1]) orelse "";
+    const in_tx = !main_mod.getAutocommit(db);
     if (std.ascii.eqlIgnoreCase(name, "all") and given == null) {
+        if (in_tx) {
+            // Each value goes back if the transaction rolls back.
+            const st = &db.xq.postgres;
+            var names = st.params.keyIterator();
+            while (names.next()) |k| _ = st.touch(db.gpa, k.*) catch return api.resultErrorNomem(ctx);
+            var it = st.tx_saved.valueIterator();
+            while (it.next()) |e| e.setCommit(db.gpa, null) catch return api.resultErrorNomem(ctx);
+        }
         db.xq.postgres.resetParams(db.gpa);
         expire(db);
         return api.resultNull(ctx);
@@ -679,8 +692,38 @@ fn setConfigFunc(ctx: *Context, argv: []*Mem) void {
         return api.resultErrorState(ctx, .of("55P02"), std.fmt.bufPrint(&buf, "parameter \"{s}\" cannot be changed", .{prm.name}) catch "parameter cannot be changed");
     }
     const v = if (given) |g| checked(ctx, prm, g) orelse return else null;
+    const st = &db.xq.postgres;
+    if (in_tx) {
+        // The value it goes back to when the transaction ends: a SET's
+        // stays after COMMIT, a SET LOCAL's does not.
+        const e = st.touch(db.gpa, prm.name) catch return api.resultErrorNomem(ctx);
+        if (!local) e.setCommit(db.gpa, v) catch return api.resultErrorNomem(ctx);
+    } else if (local) {
+        // Outside a transaction: for the transaction of this statement
+        // alone, so nothing (PostgreSQL's set_config(..., true) too).
+        return api.resultText(ctx, v orelse prm.default, .transient);
+    }
     apply(db, prm, v, false) catch return api.resultErrorNomem(ctx);
     api.resultText(ctx, settingOf(db, prm), .transient);
+}
+
+/// The transaction ended (dialect.transactionEnded()): the parameters it
+/// changed take the value of its last SET (COMMIT; SET LOCAL lasts until
+/// here) or the one before it (ROLLBACK), as PostgreSQL's.
+pub fn transactionEnded(db: *int.Sqlite3, committed: bool) void {
+    const st = &db.xq.postgres;
+    if (st.tx_saved.count() == 0) return;
+    var m = st.takeSaved();
+    defer state.State.freeSaved(db.gpa, &m);
+    var it = m.iterator();
+    while (it.next()) |e| {
+        const prm = findParam(e.key_ptr.*) orelse continue;
+        const v = if (committed) e.value_ptr.commit else e.value_ptr.orig;
+        const now = st.params.get(prm.name);
+        if (v == null and now == null) continue;
+        if (v != null and now != null and eql(v.?, now.?)) continue;
+        apply(db, prm, v, false) catch {};
+    }
 }
 
 /// current_setting(name [, missing_ok]).

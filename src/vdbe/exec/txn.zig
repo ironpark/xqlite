@@ -31,6 +31,9 @@ pub fn opAutoCommit(e: *Exec, op: *Op) Error!Flow {
     const db = e.db;
     const desired = op.p1 != 0;
     const rollback = op.p2 != 0;
+    // xqlite: P3, a COMMIT or ROLLBACK AND CHAIN of PostgreSQL's dialect
+    // (never SQLite's): the next transaction begins at once.
+    const chain = op.p3 != 0;
     if (desired != db.auto_commit) {
         if (rollback) {
             main_mod.rollbackAll(db, error.Abort);
@@ -50,8 +53,13 @@ pub fn opAutoCommit(e: *Exec, op: *Op) Error!Flow {
             return .ret;
         };
         main_mod.closeSavepoints(db);
+        if (chain and v.rc == RC.OK) db.auto_commit = false;
         e.rc = if (v.rc == RC.OK) RC.DONE else RC.ERROR;
         return .ret;
+    }
+    if (chain) {
+        aux.vdbeErrorState(v, .of("25P01"), "{s} AND CHAIN can only be used in transaction blocks", .{if (rollback) "ROLLBACK" else "COMMIT"});
+        return error.Error;
     }
     // active_sql_transaction, no_active_sql_transaction.
     aux.vdbeErrorState(v, if (!desired) .of("25001") else .of("25P01"), "{s}", .{if (!desired)
@@ -182,6 +190,8 @@ pub fn opSavepoint(e: *Exec, op: *Op) Error!Flow {
             db.n_deferred_cons = sp.n_deferred_cons;
             db.n_deferred_imm_cons = sp.n_deferred_imm_cons;
         }
+        // xqlite: the dialects' session state of savepoints.
+        @import("../../dialect/dialect.zig").savepointEnded(db, p1 == .ROLLBACK);
         if (!is_transaction or p1 == .ROLLBACK) {
             try e.check(vtab_mod.savepoint(db, p1, i_sp_vtab));
         }
@@ -337,7 +347,15 @@ pub fn opSqlExec(e: *Exec, op: *Op) Error!Flow {
     meta.written(e.db);
     const saved_lang = dialect.swapLang(e.db, .sqlite);
     var state: ?int.ErrorState = null;
-    const rc = if (op.p1 & 0x0004 != 0)
+    // With 0x0008 (no frontend of SQLite's codes it) it is the steps of
+    // a statement of the dialect (dialect.runSteps(): PostgreSQL's MERGE
+    // and data-modifying WITH), run in it, in the statement's own
+    // statement transaction.
+    const rc = if (op.p1 & 0x0008 != 0) blk: {
+        _ = dialect.swapLang(e.db, saved_lang);
+        defer _ = dialect.swapLang(e.db, .sqlite);
+        break :blk dialect.runSteps(saved_lang.dialect, e.db, e.v, sql, &err_msg, &state);
+    } else if (op.p1 & 0x0004 != 0)
         execDialect(e.db, sql, saved_lang, &err_msg, &state)
     else
         legacy.execNoCallback(e.db, sql, &err_msg);

@@ -268,6 +268,7 @@ const T = struct {
             .table_star => |ts| if (findItem(sc, ts.names[ts.names.len - 1].text)) |it| if (it.cols) |cs| try cols.appendSlice(t.arena(), cs),
         };
         if (c.where) |w| _ = try t.expr(w, sc);
+        for (c.distinct_on) |g| _ = try t.expr(g, sc);
         for (c.group_by) |g| _ = try t.expr(g, sc);
         if (c.having) |h| _ = try t.expr(h, sc);
         for (c.windows) |w| try t.window(w.spec, sc);
@@ -599,79 +600,4 @@ fn findItem(sc: *const Scope, name: []const u8) ?Item {
 // =========================================================== tree walking
 
 /// The direct subexpressions of an expression (not of subqueries).
-pub const Children = struct {
-    buf: [4]*Expr = undefined,
-    extra: []const *Expr = &.{},
-    n: usize = 0,
-    i: usize = 0,
-    j: usize = 0,
-
-    pub fn of(e: *const Expr) Children {
-        var c: Children = .{};
-        switch (e.kind) {
-            .unary => |u| c.add(u.e),
-            .binary => |b| {
-                c.add(b.l);
-                c.add(b.r);
-            },
-            .div => |d| {
-                c.add(d.l);
-                c.add(d.r);
-            },
-            .compare => |x| {
-                c.add(x.l);
-                c.add(x.r);
-            },
-            .concat => |x| c.extra = x.args,
-            .cast => |x| c.add(x.e),
-            .func => |f| {
-                c.extra = f.args;
-                if (f.filter) |x| c.add(x);
-            },
-            .case => |x| {
-                if (x.operand) |o| c.add(o);
-                if (x.@"else") |o| c.add(o);
-                c.extra = x.whens;
-            },
-            .in_list => |x| {
-                c.add(x.e);
-                c.extra = x.items;
-            },
-            .in_select => |x| c.add(x.e),
-            .between => |x| {
-                c.add(x.e);
-                c.add(x.lo);
-                c.add(x.hi);
-            },
-            .like => |x| {
-                c.add(x.e);
-                c.add(x.pat);
-                if (x.escape == .expr) c.add(x.escape.expr);
-            },
-            .is_null => |x| c.add(x.e),
-            .is_bool => |x| c.add(x.e),
-            .row => |items| c.extra = items,
-            .collate => |x| c.add(x.e),
-            .coerce => |x| c.add(x.e),
-            else => {},
-        }
-        return c;
-    }
-
-    fn add(c: *Children, e: *Expr) void {
-        c.buf[c.n] = e;
-        c.n += 1;
-    }
-
-    pub fn next(c: *Children) ?*Expr {
-        if (c.i < c.n) {
-            c.i += 1;
-            return c.buf[c.i - 1];
-        }
-        if (c.j < c.extra.len) {
-            c.j += 1;
-            return c.extra[c.j - 1];
-        }
-        return null;
-    }
-};
+pub const Children = tree.Children;

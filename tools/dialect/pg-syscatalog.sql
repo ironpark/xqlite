@@ -20,7 +20,7 @@ WITH names(n) AS (VALUES
   ('pg_shdescription'), ('pg_inherits'), ('pg_trigger'), ('pg_policy'), ('pg_rewrite'),
   ('pg_statistic_ext'), ('pg_publication'), ('pg_publication_rel'), ('pg_publication_namespace'),
   ('pg_enum'), ('pg_extension'), ('pg_auth_members'), ('pg_partitioned_table'), ('pg_foreign_table'),
-  ('pg_matviews'), ('pg_range'), ('pg_event_trigger'), ('pg_available_extensions')
+  ('pg_matviews'), ('pg_range'), ('pg_event_trigger'), ('pg_available_extensions'), ('pg_cursors')
 ), tabs AS (
   SELECT ('pg_catalog.' || n)::regclass::oid AS oid FROM names WHERE n NOT LIKE '%.%'
   UNION ALL SELECT n::regclass::oid FROM names WHERE n LIKE '%.%'

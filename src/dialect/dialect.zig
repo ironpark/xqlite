@@ -340,6 +340,15 @@ pub const Hooks = struct {
     /// it registers the module called `name` on `db` and returns it, null
     /// if `name` is not one of its.
     table_function: ?*const fn (db: *Sqlite3, name: []const u8) ?*int.Module = null,
+    /// The type of column `i` of a module of table_function called
+    /// `name` (registered on `db`) and its spelling in the dialect; null
+    /// for none (resolve.zig's tableColumnType()).
+    table_function_type: ?*const fn (db: *Sqlite3, name: []const u8, i: usize) ?struct { @import("../sql/types.zig").Type, []const u8 } = null,
+    /// Run the steps `sql` of statement `v` (OP_SqlExec's 0x0008, which a
+    /// frontend codes: PostgreSQL's MERGE and data-modifying WITH), in
+    /// the dialect; an error's message (from db.gpa) in `err_msg`, its
+    /// state in `state`.
+    run_steps: ?*const fn (db: *Sqlite3, v: *@import("../vdbe/vdbe_int.zig").Vdbe, sql: [:0]const u8, err_msg: *?[:0]u8, state: *?int.ErrorState) i32 = null,
     /// The errors of the CHECK constraints the frontend names after its
     /// type checks (`value too long for type character varying(3)`): a
     /// failed CHECK whose name starts with `prefix` is that error
@@ -408,6 +417,29 @@ pub fn tableFunction(db: *Sqlite3, name: []const u8) ?*int.Module {
         }
     }
     return null;
+}
+
+/// The type of column `i` of the module `name` of a table_function of
+/// any dialect (Hooks.table_function_type), and the dialect it is
+/// spelled in; null if none.
+pub fn tableFunctionType(db: *Sqlite3, name: []const u8, i: usize) ?struct { Dialect, @import("../sql/types.zig").Type, []const u8 } {
+    if (!hasEnginePrefix(name)) return null;
+    inline for (comptime std.enums.values(Dialect)) |d| {
+        if (comptime module(d).hooks.table_function_type) |f| {
+            if (f(db, name, i)) |t| return .{ d, t[0], t[1] };
+        }
+    }
+    return null;
+}
+
+/// Run the steps `sql` of statement `v` in dialect `d` (Hooks.run_steps).
+pub fn runSteps(d: Dialect, db: *Sqlite3, v: *@import("../vdbe/vdbe_int.zig").Vdbe, sql: [:0]const u8, err_msg: *?[:0]u8, state: *?int.ErrorState) i32 {
+    inline for (comptime std.enums.values(Dialect)) |x| {
+        if (comptime module(x).hooks.run_steps) |f| {
+            if (x == d) return f(db, v, sql, err_msg, state);
+        }
+    }
+    return int.RC.ERROR;
 }
 
 /// The number a dialect gives the error of an SQLSTATE.
@@ -559,6 +591,23 @@ pub fn swapLang(db: *Sqlite3, lang: Lang) Lang {
     const saved = db.xq.lang;
     db.xq.lang = lang;
     return saved;
+}
+
+/// The connection's transaction ended, committed or rolled back (the
+/// core's end of a transaction in vdbeHalt(), main.rollbackAll()): the
+/// session state that lasts as long as a transaction, PostgreSQL's
+/// cursors without HOLD. Nothing for a connection that has none.
+pub fn transactionEnded(db: *Sqlite3, committed: bool) void {
+    if (comptime Dialect.postgres.built()) {
+        @import("postgres/cursor.zig").ended(db, committed);
+        @import("postgres/session.zig").transactionEnded(db, committed);
+    }
+}
+
+/// A RELEASE or ROLLBACK TO of a savepoint ran (OP_Savepoint): what
+/// PostgreSQL's cursors declared after the savepoint do.
+pub fn savepointEnded(db: *Sqlite3, rolled_back: bool) void {
+    if (comptime Dialect.postgres.built()) @import("postgres/cursor.zig").savepointEnded(db, rolled_back);
 }
 
 /// The hooks of the dialect the connection compiles in.
@@ -716,6 +765,7 @@ pub const common_engine_functions = [_][]const FuncDef{
     &@import("abi.zig").engine_functions,
     &@import("decimal_sql.zig").engine_functions,
     &@import("variance.zig").engine_functions,
+    &@import("stats.zig").engine_functions,
 };
 
 const engine_function_map = blk: {
@@ -802,6 +852,8 @@ test {
     _ = @import("shared_funcs.zig");
     _ = @import("like.zig");
     _ = @import("decimal_sql.zig");
+    _ = @import("stats.zig");
+    _ = @import("libm.zig");
     _ = @import("abi.zig");
     _ = @import("test.zig");
     _ = @import("constraint.zig");

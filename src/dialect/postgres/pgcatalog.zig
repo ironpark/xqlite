@@ -1834,6 +1834,43 @@ fn doubled(a: Allocator, z: []const u8) Oom![]const u8 {
 
 /// The name of a constraint CREATE TABLE recorded (dialect/constraint.zig
 /// key()).
+/// The columns of the PRIMARY KEY or UNIQUE constraint called `name` of
+/// table `t` (`bare`: its name without a schema), as pg_constraint names
+/// them: INSERT ... ON CONFLICT ON CONSTRAINT. Null if `t` has none of
+/// that name (an index that is no constraint's is not one); an
+/// expression's column is not given (null too).
+pub fn constraintColumns(a: Allocator, db: *int.Sqlite3, t: *int.Table, bare: []const u8, name: []const u8) Oom!?[]const []const u8 {
+    const m = catalog.metaOf(db, t) catch null;
+    if (t.i_pkey >= 0 and t.hasRowid()) {
+        const col = t.cols[@intCast(t.i_pkey)].name();
+        const cols = try a.dupe([]const u8, &.{col});
+        const pname = recorded(m, "primary_key", cols) orelse try std.fmt.allocPrint(a, "{s}_pkey", .{bare});
+        if (std.mem.eql(u8, pname, name)) return cols;
+    }
+    var ix = t.index;
+    while (ix) |x| : (ix = x.next) {
+        if (x.idx_type != .primarykey and x.idx_type != .unique) continue;
+        var cols: std.ArrayList([]const u8) = .empty;
+        var expr = false;
+        for (x.ai_column[0..x.n_key_col]) |c| {
+            if (c >= 0) try cols.append(a, t.cols[@intCast(c)].name()) else expr = true;
+        }
+        const kind = if (x.idx_type == .primarykey) "primary_key" else "unique";
+        const pname = recorded(m, kind, cols.items) orelse if (x.idx_type == .primarykey) try std.fmt.allocPrint(a, "{s}_pkey", .{bare}) else blk: {
+            var out: std.ArrayList(u8) = .empty;
+            try out.appendSlice(a, bare);
+            for (cols.items) |c| {
+                try out.append(a, '_');
+                try out.appendSlice(a, c);
+            }
+            try out.appendSlice(a, "_key");
+            break :blk out.items;
+        };
+        if (std.mem.eql(u8, pname, name)) return if (expr) null else cols.items;
+    }
+    return null;
+}
+
 fn recorded(m: ?*const catalog.TableMeta, kind: []const u8, cols: []const []const u8) ?[]const u8 {
     const x = m orelse return null;
     var buf: [512]u8 = undefined;

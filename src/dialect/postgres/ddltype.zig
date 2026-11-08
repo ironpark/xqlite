@@ -261,6 +261,7 @@ const Back = struct {
                 try b.from(c.from);
                 for (c.cols) |rc| if (rc == .expr) try b.expr(rc.expr.e);
                 if (c.where) |w| try b.expr(w);
+                for (c.distinct_on) |g| try b.expr(g);
                 for (c.group_by) |g| try b.expr(g);
                 if (c.having) |h| try b.expr(h);
                 for (c.windows) |w| try b.window(w.spec);
@@ -756,13 +757,20 @@ const renames = std.StaticStringMap(void).initComptime(.{
     .{"xq_pg_jsonb_path_text"}, .{"xq_pg_json_agg_rows"},    .{"xq_pg_array_to_json"},
     .{"xq_pg_array_nested"},    .{"xq_pg_array_agg_arrays"}, .{"xq_pg_subscript_k"},
     .{"xq_pg_array_contains"},  .{"xq_pg_iv_sum"},           .{"xq_pg_iv_avg"},
-    .{"xq_pg_typeof_as"},
+    .{"xq_pg_typeof_as"},       .{"xq_pg_cast_float8"},      .{"xq_pg_cast_float4"},
+});
+
+/// stats.zig's aggregates of doubles and ordered.zig's of arrays, which
+/// overload.zig calls in the place of the numeric ones.
+const stat_renames = std.StaticStringMap(void).initComptime(.{
+    .{"xq_float_var_pop"},     .{"xq_float_var_samp"},         .{"xq_float_stddev_pop"},
+    .{"xq_float_stddev_samp"}, .{"xq_pg_percentile_cont_arr"}, .{"xq_pg_percentile_disc_arr"},
 });
 
 /// Whether overload.zig calls `name` in the place of another: renames'
 /// or numeric's (numericCall(), decimal_sql.zig's Info.renamed).
 fn renamed(name: []const u8) bool {
-    if (renames.has(name)) return true;
+    if (renames.has(name) or stat_renames.has(name)) return true;
     const i = decimal_sql.info(name) orelse return false;
     return i.renamed;
 }
@@ -771,12 +779,14 @@ const decimal_sql = @import("../decimal_sql.zig");
 
 /// The functions overload.zig wraps an Expr in, in place (wrapIn()).
 const wrappers = std.StaticStringMap(void).initComptime(.{
-    .{"xq_dec"},     .{"xq_dec_key"},      .{"xq_dec_text"},    .{"xq_dec_float8"}, .{"xq_dec_int8"}, .{"xq_dec_number"},
+    .{"xq_dec"},     .{"xq_dec_key"},      .{"xq_dec_text"},    .{"xq_dec_float8"},    .{"xq_dec_int8"}, .{"xq_dec_number"},
     // A string literal read as the boolean it met (overload.zig's
     // boolLiteral()).
     .{"xq_pg_bool"},
     // A boolean made text (overload.zig's boolText()).
     .{"xq_pg_bool_text"}, .{"xq_pg_bool_out"},
+    // A double precision or real made text (overload.zig's floatText()).
+    .{"xq_pg_float_text"},
 });
 
 /// The functions overload.zig gives more arguments.

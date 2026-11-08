@@ -6,7 +6,8 @@
 //!    of several arguments are NULL if one is);
 //!  - left, right, repeat, reverse, lpad, rpad, split_part,
 //!    starts_with;
-//!  - random() in [0, 1), gen_random_uuid();
+//!  - random() in [0, 1) and random(min, max) (mathfuncs.zig's PRNG),
+//!    gen_random_uuid();
 //!  - md5(x) (hex text), sha224/sha256/sha384/sha512(x) (bytea) of the
 //!    bytes of x; encode(bytea, 'hex' | 'base64' | 'escape') and
 //!    decode(text, format), as PostgreSQL writes and reads them;
@@ -55,7 +56,8 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("rpad", 3, det, rpadFunc),
     dfunc.scalar("split_part", 3, det, splitPartFunc),
     dfunc.scalar("starts_with", 2, det, startsWithFunc),
-    dfunc.scalar("random", 0, .{}, randomFunc),
+    dfunc.scalar("random", 0, .{}, @import("mathfuncs.zig").randomFunc),
+    dfunc.scalar("random", 2, .{}, @import("mathfuncs.zig").randomFunc),
     dfunc.scalar("gen_random_uuid", 0, .{}, uuidFunc),
     dfunc.scalar("floor", 1, det, floorFunc),
     dfunc.scalar("ceil", 1, det, ceilFunc),
@@ -63,7 +65,7 @@ pub const functions = [_]int.FuncDef{
     dfunc.scalar("sqrt", 1, det, sqrtFunc),
     dfunc.scalar("power", 2, det, powerFunc),
     dfunc.scalar("pow", 2, det, powerFunc),
-    dfunc.scalar("exp", 1, det, expFunc),
+    @import("mathfuncs.zig").unary("exp", @import("mathfuncs.zig").expF),
     dfunc.scalar("ln", 1, det, lnFunc),
     dfunc.scalar("log", 1, det, logFunc),
     dfunc.scalar("log", 2, det, logFunc),
@@ -239,10 +241,6 @@ fn startsWithFunc(ctx: *Context, argv: []*Mem) void {
 
 // ============================================================= random
 
-fn randomFunc(ctx: *Context, _: []*Mem) void {
-    api.resultDouble(ctx, dfunc.randomUnit(ctx));
-}
-
 fn uuidFunc(ctx: *Context, _: []*Mem) void {
     const out = dfunc.uuidV4(ctx);
     api.resultText(ctx, &out, .transient);
@@ -405,13 +403,10 @@ fn powerFunc(ctx: *Context, argv: []*Mem) void {
     const y = api.valueDouble(argv[1]);
     if (x == 0 and y < 0) return api.resultErrorState(ctx, .of("2201F"), "zero raised to a negative power is undefined");
     if (x < 0 and @floor(y) != y) return api.resultErrorState(ctx, .of("2201F"), "a negative number raised to a non-integer power yields a complex result");
-    api.resultDouble(ctx, std.math.pow(f64, x, y));
+    api.resultDouble(ctx, libm.pow(x, y));
 }
 
-fn expFunc(ctx: *Context, argv: []*Mem) void {
-    if (anyNull(argv)) return api.resultNull(ctx);
-    api.resultDouble(ctx, @exp(api.valueDouble(argv[0])));
-}
+const libm = @import("../libm.zig");
 
 fn checkLog(ctx: *Context, x: f64) bool {
     if (x == 0) {
@@ -429,7 +424,7 @@ fn lnFunc(ctx: *Context, argv: []*Mem) void {
     if (anyNull(argv)) return api.resultNull(ctx);
     const x = api.valueDouble(argv[0]);
     if (!checkLog(ctx, x)) return;
-    api.resultDouble(ctx, @log(x));
+    api.resultDouble(ctx, libm.log(x));
 }
 
 /// log(x) is base 10; log(b, x) base b.

@@ -812,3 +812,63 @@ test "pg: catalogs and settings" {
     try testing.expectEqualStrings("1\nt 23\nT title:1043(24)\nZ I\n", try c.sync());
     try c.terminate();
 }
+
+test "pg: cursors and prepared statements of SQL" {
+    if (!xqlite.Dialect.postgres.built()) return;
+    var f: Fixture = undefined;
+    try f.start(.{});
+    defer f.stop();
+    var c: Client = .{};
+    defer c.deinit();
+    try testing.expectEqual(@as(?[]const u8, null), try c.connect(f.srv.address(), "erin", ""));
+    defer c.close();
+    _ = try c.query("CREATE TABLE t (id int, ok boolean); INSERT INTO t VALUES (1, true), (2, false), (3, NULL)");
+    try testing.expectEqualStrings(
+        \\E 25P01 DECLARE CURSOR can only be used in transaction blocks
+        \\Z I
+        \\
+    , try c.query("DECLARE c CURSOR FOR SELECT id FROM t"));
+    // The tags; a FETCH of no row still describes its columns; MOVE sends
+    // no row.
+    try testing.expectEqualStrings(
+        \\C BEGIN
+        \\C DECLARE CURSOR
+        \\T id:23 ok:16
+        \\D 1 t
+        \\D 2 f
+        \\C FETCH 2
+        \\C MOVE 1
+        \\T id:23 ok:16
+        \\C FETCH 0
+        \\C MOVE 3
+        \\C CLOSE CURSOR
+        \\C CLOSE CURSOR ALL
+        \\Z T
+        \\
+    , try c.query("BEGIN; DECLARE c SCROLL CURSOR FOR SELECT id, ok FROM t ORDER BY id; FETCH 2 c; MOVE ALL c; FETCH c; MOVE BACKWARD ALL c; CLOSE c; CLOSE ALL"));
+    // A cursor is a portal to Describe (psycopg's server-side cursor).
+    _ = try c.query("DECLARE d CURSOR FOR SELECT ok, id FROM t ORDER BY id");
+    try c.describe('P', "d");
+    try c.describe('P', "nosuch");
+    try testing.expectEqualStrings(
+        \\T ok:16 id:23
+        \\E 34000 portal "nosuch" does not exist
+        \\Z E
+        \\
+    , try c.sync());
+    _ = try c.query("ROLLBACK");
+    // EXECUTE has the tag of the statement it runs.
+    try testing.expectEqualStrings(
+        \\C PREPARE
+        \\C INSERT 0 1
+        \\C PREPARE
+        \\T id:23
+        \\D 4
+        \\C SELECT 1
+        \\C DEALLOCATE ALL
+        \\Z I
+        \\
+    , try c.query("PREPARE i (int) AS INSERT INTO t VALUES ($1); EXECUTE i(4); PREPARE q AS SELECT id FROM t WHERE id > $1; EXECUTE q(3); DEALLOCATE ALL"));
+    try testing.expectEqualStrings("C DISCARD ALL\nZ I\n", try c.query("DISCARD ALL"));
+    try c.terminate();
+}

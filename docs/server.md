@@ -159,7 +159,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 ### 단순 질의
 
 - `Query`의 텍스트는 스크립트입니다(`Session.run()`): 문장마다 `RowDescription`, `DataRow`, `CommandComplete`. 문장이 실패하면 `ErrorResponse`를 보내고 나머지는 돌리지 않으며, 암묵적 트랜잭션이면 앞의 문장도 롤백됩니다. 문장이 없으면 `EmptyQueryResponse`. 끝에 `ReadyForQuery`.
-- 명령 태그: `SELECT n`(VALUES도, `CREATE TABLE ... AS`·`SELECT ... INTO`는 넣은 행 수: PostgreSQL 방언의 CREATE TABLE AS는 `Hooks.count_create_as`로 행을 `changes()`에 셈), `INSERT 0 n`, `UPDATE n`, `DELETE n`, `MERGE n`, `TRUNCATE TABLE`, `CALL`, 나머지는 명령 분류의 단어(`CREATE TABLE`, `BEGIN`, `SET`, `RESET`, `COMMENT` ...). `SET`과 `RESET`은 행을 보내지 않습니다.
+- 명령 태그: `SELECT n`(VALUES도, `CREATE TABLE ... AS`·`SELECT ... INTO`는 넣은 행 수: PostgreSQL 방언의 CREATE TABLE AS는 `Hooks.count_create_as`로 행을 `changes()`에 셈), `INSERT 0 n`, `UPDATE n`, `DELETE n`, `MERGE n`, `TRUNCATE TABLE`, `CALL`, 커서의 `DECLARE CURSOR`, `FETCH n`(보낸 행 수), `MOVE n`(지나간 행 수: 방언이 문장의 `changes()`로 셈), `CLOSE CURSOR`, `CLOSE CURSOR ALL`, `LOCK TABLE`, `EXECUTE`는 그것이 실행한 문장의 태그, 나머지는 명령 분류의 단어(`CREATE TABLE`, `BEGIN`, `SET`, `RESET`, `COMMENT` ...). `SET`, `RESET`, `DECLARE`, `MOVE`, `CLOSE`, `PREPARE`, `DEALLOCATE`, `DISCARD`, `LOCK`은 행을 보내지 않습니다.
 - `ErrorResponse`: `S`/`V`(ERROR, FATAL), `C`(SQLSTATE), `M`, 메시지가 그 줄을 가지면 `D`(DETAIL), `H`(HINT), `W`(CONTEXT)(엔진이 적은 자리에서 자름, [PostgreSQL 호환](postgres/differences.md)), 오프셋을 알면 `P`(질의 텍스트에서 1부터 센 문자 위치). 취소된 문장은 PostgreSQL처럼 "canceling statement due to user request"(`57014`). `NoticeResponse`는 세션의 경고(트랜잭션 밖의 `COMMIT`: `WARNING`)와 문장의 알림(`IF EXISTS`·`IF NOT EXISTS`가 건너뛴 것, `DROP SCHEMA ... CASCADE`가 함께 지운 것: `NOTICE`, [PostgreSQL 호환](postgres/differences.md))이고, `S`/`V`, `C`, `M`, 있으면 `D`, `H`, `W`입니다. 문장의 알림은 그 문장의 `CommandComplete` 앞에 나가고(확장 질의는 `Execute`마다), `SET client_min_messages = warning`이면 `NOTICE`를, `error`면 `WARNING`도 보내지 않습니다.
 - 단순 질의는 이름 없는 문장과 포털을 지웁니다.
 
@@ -167,7 +167,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 
 - `Parse`: 이름 있는 문장과 이름 없는 문장(새 `Parse`가 바꿈), 클라이언트가 준 매개변수 타입 OID(0이면 문장이 매긴 타입, 그것도 없으면 `text`). 이미 있는 이름은 `42P05`. 매개변수 OID는 값을 읽는 데만 씁니다(엔진의 매개변수 타입에는 아직 반영하지 않음, [타입을 읽는 코드 생성](architecture.md#타입을-읽는-코드-생성)).
 - `Bind`: 포털(이름 없는 것은 새 `Bind`가 바꿈). 매개변수는 텍스트 형식, 또는 이진 형식의 `bool`, `int2`, `int4`, `int8`, `float4`, `float8`, `numeric`(NBASE 10000), `bytea`, `text`/`varchar`/`bpchar`/`name`/`json`, `jsonb`, `uuid`와 그 배열(`int4[]` ...: 차원, 하한, 원소마다 그 타입의 이진 형식; 그 밖은 `0A000`). 텍스트 값은 매개변수의 타입으로 읽습니다: 정수, 실수, 불리언(`t`, `yes`, `on`, `1` ...), `bytea`(`\x` 16진수나 escape 형식)는 그 값으로, 나머지(`numeric`, 날짜·시각 ...)는 텍스트 그대로 바인딩하고 문장이 읽습니다(저장 함수, [타입을 읽는 코드 생성](architecture.md#타입을-읽는-코드-생성)). 읽을 수 없으면 `22P02`. 결과 형식 코드는 텍스트와, 이진 매개변수와 같은 타입의 이진 형식입니다. 이진으로 보낼 수 없는 열(날짜·시각 ...)을 이진으로 달라고 하면 `Bind`가 `0A000`으로 실패합니다.
-- `Describe`: 문장(`S`)은 `ParameterDescription`과 `RowDescription`(또는 `NoData`), 포털(`P`)은 그 형식 코드의 `RowDescription`. 실행 전의 타입입니다([준비된 문장](#준비된-문장)): 식의 타입을 문장이 모르면 `text`입니다. FROM의 `generate_series()`, `unnest()`, `generate_subscripts()`, `_pg_expandarray()`의 열과 select 목록의 `unnest()`는 PostgreSQL처럼 인자의 타입을 따릅니다(`postgres/srftype.zig`).
+- `Describe`: 문장(`S`)은 `ParameterDescription`과 `RowDescription`(또는 `NoData`), 포털(`P`)은 그 형식 코드의 `RowDescription`. 프로토콜의 포털이 아닌 이름이면 그 이름의 커서(`DECLARE`)를 설명합니다: PostgreSQL에서 커서는 포털이고, psycopg 3는 서버 쪽 커서를 `DECLARE` 뒤에 이렇게 설명합니다(`FETCH FORWARD 0 FROM name`을 준비해 그 열을 보냄). 실행 전의 타입입니다([준비된 문장](#준비된-문장)): 식의 타입을 문장이 모르면 `text`입니다. FROM의 `generate_series()`, `unnest()`, `generate_subscripts()`, `_pg_expandarray()`의 열과 select 목록의 `unnest()`는 PostgreSQL처럼 인자의 타입을 따릅니다(`postgres/srftype.zig`).
 - 열이 없는 질의(`SELECT;`, `SELECT FROM t`)는 PostgreSQL처럼 필드가 없는 `RowDescription`, 값이 없는 `DataRow`를 행마다 보냅니다(`Stmt.queryOfNoColumns()`).
 - `Execute`: 행 수 제한이 있으면 그만큼 보내고 `PortalSuspended`, 다음 `Execute`가 이어 갑니다. 끝난 포털을 다시 실행하면 행 없이 `CommandComplete`. 실패한 트랜잭션의 규칙(`Session.admit()`)은 실행할 때 봅니다(`Bind`는 받음).
 - `Close`, `Flush`, `Sync`. 확장 질의 메시지가 실패하면 `ErrorResponse`를 보내고 `Sync`까지 메시지(단순 질의 포함, PostgreSQL과 같음)를 버립니다.
@@ -191,7 +191,7 @@ var srv = try server.Server(server.pg.Protocol).init(io, gpa, &protocol, .{ .add
 - 동작에 쓰지 않는 설정(`SET client_encoding`, `DateStyle`, `TimeZone` ...)은 바뀌어도 `ParameterStatus`로 다시 알리지 않습니다. 시작할 때의 값은 늘 UTF8, ISO, UTC입니다.
 - 실행 전의 열 타입(`Describe`)은 문장이 매긴 타입입니다. 문장이 모르는 식(SQLite 테이블의 열을 쓰는 식, 규칙이 없는 함수)은 `text`로 알리고, 단순 질의에서는 첫 행의 값으로 정합니다.
 - 단순 질의의 문장이 하나뿐이면 암묵적 트랜잭션을 열지 않습니다(SQLite의 자동 커밋과 같음).
-- SQL 수준의 `PREPARE`/`EXECUTE`/`DECLARE CURSOR`는 방언의 일입니다(지금은 없음).
+- SQL 수준의 `PREPARE`/`EXECUTE`/`DECLARE CURSOR`는 방언의 일입니다([PostgreSQL 호환](postgres/features.md)). `EXECUTE`의 태그는 실행한 문장의 것으로, 엔진이 알려 주는 그 문장의 텍스트(`Stmt.commandSql()`)를 분류합니다.
 - `Config.reuse_address`(기본 꺼짐)를 켜면 서버가 닫은 연결이 `TIME_WAIT`로 잡고 있는 포트를 바로 다시 씁니다(`SO_REUSEADDR`). Zig 표준 라이브러리가 `SO_REUSEPORT`도 함께 켜서, 같은 포트에 띄운 둘째 서버가 실패하지 않고 클라이언트를 나눠 받으므로 기본으로는 끕니다. 그래서 재시작 직후에는 `address in use`로 잠시 실패할 수 있습니다.
 
 ## xqlite serve

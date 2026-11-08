@@ -181,7 +181,47 @@ fn queries(b: B) Oom!*tree.Select {
     return tree.new(b.a, tree.Select, .{ .with = try tree.new(b.a, tree.With, .{ .recursive = false, .ctes = ctes }), .body = body });
 }
 
-const cases = [_]*const fn (B) Oom!*tree.Select{ divisions, strings, likes, casts, functions, predicates, queries };
+/// DISTINCT ON (desugar.zig): the first row of each x by y descending.
+fn distinctOn(b: B) Oom!*tree.Select {
+    const from = try b.values(&.{
+        &.{ try b.int_("1"), try b.str("a") },
+        &.{ try b.int_("1"), try b.str("b") },
+        &.{ try b.int_("2"), try b.str("c") },
+        &.{ try b.e(.null), try b.str("d") },
+    }, "t", &.{ "x", "y" });
+    const x = try b.col("x");
+    var s = try b.select(&.{ x, try b.col("y") }, &.{from});
+    s.body.core.distinct_on = try b.list(&.{x});
+    s.order_by = try b.a.dupe(tree.SortItem, &.{ .{ .expr = x, .nulls = .last }, .{ .expr = try b.col("y"), .dir = .desc } });
+    return s;
+}
+
+/// GROUP BY ROLLUP (x) with GROUPING(x), ordered by an alias.
+fn groupingSets(b: B) Oom!*tree.Select {
+    const from = try b.values(&.{ &.{try b.int_("1")}, &.{try b.int_("1")}, &.{try b.int_("2")} }, "t", &.{"x"});
+    const x = try b.col("x");
+    const count = try b.e(.{ .func = try tree.new(b.a, tree.Func, .{ .name = .{ .text = "count" }, .star = true }) });
+    var s = try b.select(&.{ x, count, try b.call("grouping", null, &.{x}) }, &.{from});
+    s.body.core.group_by = try b.list(&.{x});
+    s.body.core.grouping_sets = try b.a.dupe([]const u32, &.{ &.{0}, &.{} });
+    s.order_by = try b.a.dupe(tree.SortItem, &.{ .{ .expr = try b.col("c2") }, .{ .expr = try b.col("c0") } });
+    return s;
+}
+
+/// INTERSECT ALL, then FETCH FIRST 2 ROWS WITH TIES of it.
+fn setsAndTies(b: B) Oom!*tree.Select {
+    const l = try b.select(&.{try b.col("x")}, &.{try b.values(&.{ &.{try b.int_("1")}, &.{try b.int_("1")}, &.{try b.int_("2")}, &.{try b.int_("3")}, &.{try b.int_("3")} }, "t", &.{"x"})});
+    const r = try b.select(&.{try b.col("x")}, &.{try b.values(&.{ &.{try b.int_("1")}, &.{try b.int_("1")}, &.{try b.int_("1")}, &.{try b.int_("3")}, &.{try b.int_("3")} }, "u", &.{"x"})});
+    const both = try tree.new(b.a, tree.Body, .{ .compound = .{ .op = .intersect, .all = true, .left = l.body, .right = r.body } });
+    const sub = try tree.new(b.a, tree.Select, .{ .body = both });
+    var s = try b.select(&.{try b.col("c0")}, &.{.{ .source = .{ .subquery = sub }, .alias = .{ .name = .{ .text = "s" } } }});
+    s.order_by = try b.a.dupe(tree.SortItem, &.{.{ .expr = try b.col("c0") }});
+    s.limit = try b.int_("3");
+    s.with_ties = true;
+    return s;
+}
+
+const cases = [_]*const fn (B) Oom!*tree.Select{ divisions, strings, likes, casts, functions, predicates, queries, distinctOn, groupingSets, setsAndTies };
 
 /// Test frontends: the SQL text is the number of a case, whose tree is
 /// lowered (lower.zig), or rendered (render.zig) and compiled by the
@@ -240,6 +280,9 @@ test "ir: lowering and the rendered text mean the same, in every dialect" {
         "3|NULL|1024.0|3.0|a\n",
         "1|0|1|1|0|some|1\n3|1|0|0|1|some|0\nNULL|0|1|NULL|NULL|none|NULL\n",
         "1|3|1|1|5\n2|2|1|1|5\n3|1|1|1|5\n9|9|9|9|9\n",
+        "1|b\n2|c\nNULL|d\n",
+        "1|2|0\n2|1|0\nNULL|3|1\n",
+        "1\n1\n3\n3\n",
     };
     for (0..cases.len) |i| {
         for (std.enums.values(dialect.Dialect)) |d| {

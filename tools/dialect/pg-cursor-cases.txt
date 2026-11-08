@@ -1,0 +1,520 @@
+-- Differential cases of cursors: DECLARE, FETCH, MOVE, CLOSE, WHERE
+-- CURRENT OF and pg_cursors, and of the session statements next to them
+-- ("session:": SET LOCAL, AND CHAIN, PREPARE/EXECUTE/DEALLOCATE, DISCARD,
+-- SET CONSTRAINTS, LOCK TABLE) (xqt dialect-diff pg
+-- tools/dialect/pg-cursor-cases.txt), in the format of pg-cases.txt: each
+-- case starts with a "-- case:" line and runs on an empty database, in
+-- PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`; the rows, column names and error messages (the
+-- "ERROR:" line) must be the same. An error in a transaction block is
+-- its last statement before ROLLBACK (PostgreSQL ignores the commands
+-- after it). The expected output is PostgreSQL 18's.
+
+-- case: cursors: DECLARE needs a transaction block; unknown cursors
+CREATE TABLE t (a int);
+SELECT count(*) FROM pg_cursors;
+DECLARE c CURSOR FOR SELECT a FROM t;
+DECLARE c CURSOR WITHOUT HOLD FOR SELECT a FROM t;
+FETCH c;
+FETCH NEXT FROM c;
+MOVE c;
+CLOSE c;
+
+-- case: cursors: FETCH in each direction of a SCROLL cursor
+CREATE TABLE t (a int, b text);
+INSERT INTO t VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five');
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT a, b FROM t ORDER BY a;
+FETCH c;
+FETCH NEXT c;
+FETCH FROM c;
+FETCH PRIOR IN c;
+FETCH 2 c;
+FETCH FORWARD 1 FROM c;
+FETCH FORWARD c;
+FETCH c;
+FETCH BACKWARD c;
+FETCH BACKWARD 2 c;
+FETCH FIRST c;
+FETCH LAST c;
+FETCH ABSOLUTE 2 c;
+FETCH ABSOLUTE -2 c;
+FETCH ABSOLUTE 0 c;
+FETCH ABSOLUTE 9 c;
+FETCH ABSOLUTE -9 c;
+FETCH RELATIVE 2 c;
+FETCH RELATIVE -1 c;
+FETCH RELATIVE 0 c;
+FETCH 0 c;
+FETCH FORWARD 0 c;
+FETCH -2 c;
+FETCH FORWARD -1 c;
+FETCH BACKWARD -2 c;
+FETCH ALL c;
+FETCH c;
+FETCH BACKWARD ALL c;
+FETCH PRIOR c;
+FETCH FORWARD ALL FROM c;
+FETCH RELATIVE 9 c;
+FETCH RELATIVE -9 c;
+COMMIT;
+
+-- case: cursors: MOVE, then FETCH where it left the cursor
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2), (3), (4), (5), (6);
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT a FROM t ORDER BY a;
+MOVE c;
+FETCH c;
+MOVE 2 c;
+FETCH c;
+MOVE ALL c;
+FETCH BACKWARD c;
+MOVE BACKWARD ALL c;
+FETCH c;
+MOVE LAST c;
+FETCH PRIOR c;
+MOVE ABSOLUTE 3 c;
+FETCH RELATIVE 0 c;
+MOVE RELATIVE -1 c;
+FETCH c;
+MOVE 0 c;
+MOVE FORWARD ALL c;
+MOVE 0 c;
+FETCH 0 c;
+MOVE PRIOR IN c;
+FETCH c;
+CLOSE c;
+COMMIT;
+
+-- case: cursors: the columns and types of the query
+CREATE TABLE t (id int, ok boolean, amount numeric(6,2), at timestamp, j jsonb, tags text[], note text);
+INSERT INTO t VALUES (1, true, 1.5, '2024-01-02 03:04:05', '{"b": 1, "a": [true, null]}', '{x,y}', NULL), (2, false, 20, '2024-12-31 23:59:59.5', '[]', '{}', 'n');
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM t ORDER BY id;
+FETCH ALL c;
+DECLARE d CURSOR FOR SELECT id * 2 AS twice, ok AND true AS both, amount + 1, upper(note), 1.50::numeric(5,1) AS n, NULL AS nothing, 'lit' FROM t ORDER BY id;
+FETCH ALL FROM d;
+DECLARE e CURSOR FOR VALUES (1, 'a'), (2, 'b');
+FETCH 1 e;
+DECLARE f CURSOR FOR TABLE t;
+FETCH f;
+DECLARE g CURSOR FOR WITH w AS (SELECT id FROM t) SELECT id + 10 AS x FROM w ORDER BY x;
+FETCH 2 g;
+DECLARE h CURSOR FOR (SELECT 1 AS one UNION ALL SELECT 2) ORDER BY one DESC;
+FETCH ALL h;
+DECLARE i CURSOR FOR SELECT a FROM generate_series(1, 3) AS s(a);
+FETCH ALL i;
+DECLARE k CURSOR FOR SELECT id FROM t WHERE false;
+FETCH k;
+COMMIT;
+
+-- case: cursors: NO SCROLL and the default
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2), (3);
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH 2 c;
+FETCH PRIOR c;
+FETCH ABSOLUTE 3 c;
+FETCH FIRST c;
+DECLARE n NO SCROLL CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH 2 n;
+FETCH RELATIVE 1 n;
+FETCH ABSOLUTE 2 n;
+ROLLBACK;
+BEGIN;
+DECLARE n NO SCROLL CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH n;
+FETCH PRIOR n;
+ROLLBACK;
+BEGIN;
+DECLARE n NO SCROLL CURSOR FOR SELECT a FROM t ORDER BY a;
+MOVE 2 n;
+FETCH FIRST n;
+ROLLBACK;
+BEGIN;
+DECLARE n NO SCROLL CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH n;
+FETCH RELATIVE 0 n;
+ROLLBACK;
+BEGIN;
+DECLARE n NO SCROLL CURSOR FOR SELECT a FROM t ORDER BY a;
+MOVE BACKWARD ALL n;
+FETCH n;
+MOVE BACKWARD ALL n;
+ROLLBACK;
+
+-- case: cursors: without SCROLL, a plan that cannot go backward
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2), (3);
+BEGIN;
+DECLARE c CURSOR FOR SELECT count(*) FROM t;
+FETCH c;
+FETCH PRIOR c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t GROUP BY a ORDER BY a;
+FETCH c;
+FETCH PRIOR c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT x.a FROM t x JOIN t y ON y.a = x.a ORDER BY 1;
+FETCH c;
+FETCH PRIOR c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a, row_number() OVER (ORDER BY a) FROM t ORDER BY a;
+FETCH c;
+FETCH PRIOR c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t UNION SELECT 9 ORDER BY 1;
+FETCH c;
+FETCH PRIOR c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t WHERE a IN (SELECT a FROM t) ORDER BY a;
+FETCH c;
+FETCH PRIOR c;
+ROLLBACK;
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT count(*) FROM t;
+FETCH c;
+FETCH PRIOR c;
+FETCH LAST c;
+COMMIT;
+
+-- case: cursors: COMMIT and ROLLBACK close cursors without HOLD
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2), (3);
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH c;
+COMMIT;
+FETCH c;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH c;
+ROLLBACK;
+FETCH c;
+START TRANSACTION;
+DECLARE c CURSOR FOR SELECT a FROM t ORDER BY a;
+END;
+CLOSE c;
+
+-- case: cursors: WITH HOLD stays open after COMMIT, where it was
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2), (3);
+BEGIN;
+DECLARE h CURSOR WITH HOLD FOR SELECT a FROM t ORDER BY a;
+DECLARE c CURSOR FOR SELECT a FROM t;
+FETCH h;
+COMMIT;
+FETCH h;
+SELECT name, is_holdable FROM pg_cursors ORDER BY name;
+INSERT INTO t VALUES (4);
+FETCH ALL h;
+FETCH BACKWARD 2 h;
+BEGIN;
+FETCH h;
+ROLLBACK;
+FETCH h;
+CLOSE h;
+FETCH h;
+
+-- case: cursors: WITH HOLD outside a transaction block; a rolled back one
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2);
+DECLARE h SCROLL CURSOR WITH HOLD FOR SELECT a FROM t ORDER BY a;
+FETCH LAST h;
+BEGIN;
+DECLARE g CURSOR WITH HOLD FOR SELECT a FROM t;
+ROLLBACK;
+SELECT name, is_holdable, is_scrollable FROM pg_cursors ORDER BY name;
+FETCH g;
+
+-- case: cursors: CLOSE and CLOSE ALL
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1);
+BEGIN;
+DECLARE a CURSOR FOR SELECT a FROM t;
+DECLARE b CURSOR FOR SELECT a FROM t;
+DECLARE "B" CURSOR FOR SELECT a + 1 FROM t;
+SELECT name FROM pg_cursors ORDER BY name;
+FETCH "B";
+CLOSE b;
+SELECT name FROM pg_cursors ORDER BY name;
+CLOSE ALL;
+SELECT count(*) FROM pg_cursors;
+DECLARE b CURSOR FOR SELECT 1;
+FETCH b;
+CLOSE b;
+CLOSE b;
+ROLLBACK;
+
+-- case: cursors: pg_cursors
+CREATE TABLE t (a int);
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT a FROM t;
+DECLARE n NO SCROLL CURSOR FOR SELECT a FROM t;
+DECLARE h CURSOR WITH HOLD FOR SELECT 'x';
+DECLARE d CURSOR FOR SELECT a FROM t;
+DECLARE g CURSOR FOR SELECT count(*) FROM t;
+SELECT name, statement, is_holdable, is_binary, is_scrollable, creation_time IS NOT NULL AS created FROM pg_cursors ORDER BY name;
+SELECT name FROM pg_catalog.pg_cursors WHERE is_scrollable ORDER BY 1;
+COMMIT;
+
+-- case: cursors: a SAVEPOINT rolled back to drops the cursors declared after it
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2), (3), (4), (5);
+BEGIN;
+DECLARE a CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH a;
+SAVEPOINT s;
+DECLARE x CURSOR FOR SELECT 1;
+FETCH 2 a;
+ROLLBACK TO s;
+FETCH a;
+SELECT name FROM pg_cursors ORDER BY 1;
+SAVEPOINT s2;
+DECLARE y CURSOR FOR SELECT 1;
+RELEASE s2;
+SELECT name FROM pg_cursors ORDER BY 1;
+SAVEPOINT s3;
+DECLARE z CURSOR FOR SELECT 1;
+CLOSE a;
+ROLLBACK TO SAVEPOINT s3;
+SELECT name FROM pg_cursors ORDER BY 1;
+COMMIT;
+
+-- case: cursors: DECLARE errors
+CREATE TABLE t (a int);
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t;
+DECLARE c CURSOR FOR SELECT 1;
+ROLLBACK;
+BEGIN;
+DECLARE c SCROLL NO SCROLL CURSOR FOR SELECT 1;
+ROLLBACK;
+BEGIN;
+DECLARE c INSENSITIVE ASENSITIVE CURSOR FOR SELECT 1;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM nosuch;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR INSERT INTO t VALUES (1);
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR WITH HOLD FOR SELECT a FROM t FOR UPDATE;
+ROLLBACK;
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT a FROM t FOR SHARE;
+ROLLBACK;
+BEGIN;
+DECLARE c INSENSITIVE CURSOR FOR SELECT a FROM t FOR NO KEY UPDATE;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t;
+FETCH 1 FROM nosuch;
+ROLLBACK;
+
+-- case: cursors: ASENSITIVE and INSENSITIVE
+CREATE TABLE t (a int);
+INSERT INTO t VALUES (1), (2);
+BEGIN;
+DECLARE c INSENSITIVE CURSOR FOR SELECT a FROM t ORDER BY a;
+DECLARE d ASENSITIVE SCROLL CURSOR WITHOUT HOLD FOR SELECT a FROM t ORDER BY a;
+INSERT INTO t VALUES (3);
+FETCH ALL c;
+FETCH ALL d;
+COMMIT;
+
+-- case: cursors: UPDATE and DELETE WHERE CURRENT OF
+CREATE TABLE t (a int, b text);
+INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z'), (4, 'w');
+BEGIN;
+DECLARE c CURSOR FOR SELECT a, b FROM t WHERE a > 1;
+FETCH c;
+UPDATE t SET b = b || '!' WHERE CURRENT OF c;
+FETCH c;
+DELETE FROM t WHERE CURRENT OF c;
+FETCH RELATIVE 0 c;
+DECLARE u CURSOR FOR SELECT * FROM t ORDER BY a DESC FOR UPDATE;
+FETCH u;
+UPDATE t AS x SET b = 'last' WHERE CURRENT OF u RETURNING x.a, x.b;
+COMMIT;
+SELECT a, b FROM t ORDER BY a;
+
+-- case: cursors: WHERE CURRENT OF errors
+CREATE TABLE t (a int, b text);
+CREATE TABLE u (a int);
+INSERT INTO t VALUES (1, 'x'), (2, 'y');
+INSERT INTO u VALUES (1);
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t;
+UPDATE t SET b = 'q' WHERE CURRENT OF c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t;
+FETCH ALL c;
+DELETE FROM t WHERE CURRENT OF c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t ORDER BY a;
+FETCH c;
+UPDATE t SET b = 'q' WHERE CURRENT OF c;
+ROLLBACK;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM u;
+FETCH c;
+UPDATE t SET b = 'q' WHERE CURRENT OF c;
+ROLLBACK;
+BEGIN;
+DELETE FROM t WHERE CURRENT OF nosuch;
+ROLLBACK;
+
+-- case: session: SET LOCAL lasts until the transaction ends
+SET application_name = 'base';
+BEGIN;
+SET LOCAL application_name = 'local';
+SHOW application_name;
+SELECT current_setting('application_name');
+END;
+SHOW application_name;
+BEGIN;
+SET application_name = 'session';
+SET LOCAL application_name = 'local';
+END;
+SHOW application_name;
+BEGIN;
+SET LOCAL application_name = 'local';
+SET application_name = 'after';
+END;
+SHOW application_name;
+BEGIN;
+SET application_name = 'rolled';
+ROLLBACK;
+SHOW application_name;
+BEGIN;
+SELECT set_config('application_name', 'cfg', true);
+SHOW application_name;
+ROLLBACK;
+SHOW application_name;
+SET LOCAL application_name = 'outside';
+SHOW application_name;
+SET search_path TO public;
+BEGIN;
+SET LOCAL search_path TO nosuch, public;
+SHOW search_path;
+RESET ALL;
+SHOW search_path;
+ROLLBACK;
+SHOW application_name;
+SHOW search_path;
+
+-- case: session: COMMIT AND CHAIN, ROLLBACK AND CHAIN
+CREATE TABLE t (a int);
+BEGIN;
+INSERT INTO t VALUES (1);
+COMMIT AND CHAIN;
+INSERT INTO t VALUES (2);
+ROLLBACK AND CHAIN;
+INSERT INTO t VALUES (3);
+COMMIT AND NO CHAIN;
+SELECT a FROM t ORDER BY a;
+BEGIN;
+DECLARE c CURSOR FOR SELECT a FROM t;
+COMMIT AND CHAIN;
+FETCH c;
+ROLLBACK;
+COMMIT AND CHAIN;
+ROLLBACK AND CHAIN;
+
+-- case: session: PREPARE, EXECUTE, DEALLOCATE
+CREATE TABLE t (a int, b text);
+PREPARE ins (int, text) AS INSERT INTO t VALUES ($1, $2);
+EXECUTE ins(1, 'one');
+EXECUTE ins (1 + 1, upper('two'));
+EXECUTE ins('3', 'three');
+PREPARE q (int) AS SELECT a, b FROM t WHERE a >= $1 ORDER BY a;
+EXECUTE q(2);
+PREPARE n AS SELECT $1::int + 1 AS x, $2 AS y;
+EXECUTE n(41, 'z');
+PREPARE up AS UPDATE t SET b = b || '!' WHERE a = $1 RETURNING a, b;
+EXECUTE up(1);
+EXECUTE q(0);
+DEALLOCATE q;
+EXECUTE q(0);
+DEALLOCATE PREPARE ins;
+DEALLOCATE ALL;
+EXECUTE n(1, 'a');
+DEALLOCATE nosuch;
+PREPARE e AS SELECT * FROM nosuch;
+PREPARE p1 AS SELECT 1;
+PREPARE p1 AS SELECT 2;
+EXECUTE p1(1);
+
+-- case: session: DISCARD
+CREATE TABLE t (id int GENERATED BY DEFAULT AS IDENTITY, a int);
+INSERT INTO t (a) VALUES (1);
+SELECT lastval();
+CREATE TEMP TABLE tt (x int);
+CREATE TEMP VIEW tv AS SELECT x FROM tt;
+SET search_path = nosuch, public;
+PREPARE p AS SELECT 1 AS one;
+DISCARD PLANS;
+EXECUTE p;
+DISCARD SEQUENCES;
+SELECT lastval();
+DISCARD TEMP;
+SELECT * FROM tt;
+SELECT * FROM t;
+CREATE TEMP TABLE tt (x int);
+DISCARD ALL;
+SHOW search_path;
+EXECUTE p;
+SELECT * FROM tt;
+BEGIN;
+DISCARD ALL;
+ROLLBACK;
+
+-- case: session: SET CONSTRAINTS
+CREATE TABLE parent (id int PRIMARY KEY);
+CREATE TABLE child (pid int REFERENCES parent (id) DEFERRABLE INITIALLY IMMEDIATE);
+BEGIN;
+SET CONSTRAINTS ALL DEFERRED;
+INSERT INTO child VALUES (1);
+INSERT INTO parent VALUES (1);
+COMMIT;
+SELECT pid FROM child;
+BEGIN;
+SET CONSTRAINTS child_pid_fkey DEFERRED;
+INSERT INTO child VALUES (2);
+INSERT INTO parent VALUES (2);
+SET CONSTRAINTS ALL IMMEDIATE;
+COMMIT;
+SELECT pid FROM child ORDER BY pid;
+BEGIN;
+SET CONSTRAINTS nosuch DEFERRED;
+ROLLBACK;
+SET CONSTRAINTS ALL DEFERRED;
+
+-- case: session: LOCK TABLE
+CREATE TABLE t (a int);
+CREATE VIEW v AS SELECT a FROM t;
+BEGIN;
+LOCK t;
+LOCK TABLE t IN ACCESS SHARE MODE;
+LOCK TABLE ONLY t, v IN ROW EXCLUSIVE MODE NOWAIT;
+LOCK t * IN SHARE UPDATE EXCLUSIVE MODE;
+LOCK t IN SHARE ROW EXCLUSIVE MODE;
+LOCK t IN EXCLUSIVE MODE;
+INSERT INTO t VALUES (1);
+COMMIT;
+SELECT a FROM t;
+BEGIN;
+LOCK nosuch;
+ROLLBACK;
+LOCK t;

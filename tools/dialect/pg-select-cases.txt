@@ -1,0 +1,235 @@
+-- Differential cases of PostgreSQL's query syntax (xqt dialect-diff pg
+-- tools/dialect/pg-select-cases.txt), in the format of pg-cases.txt:
+-- DISTINCT ON, GROUPING SETS/ROLLUP/CUBE and GROUPING(), LATERAL,
+-- FETCH ... WITH TIES, INTERSECT ALL/EXCEPT ALL, BETWEEN SYMMETRIC,
+-- OVERLAPS, row IS [NOT] NULL, JOIN ... USING ... AS. Each case runs on an
+-- empty database in PostgreSQL and in `xqlite sql` with `.dialect
+-- postgres`; the rows, column names and error messages must be the same.
+-- The expected output is PostgreSQL 18's (an ORDER BY wherever its order
+-- is not given).
+
+-- case: DISTINCT ON keeps the first row of each group in ORDER BY order
+CREATE TABLE emp (id int, dept text, name text, salary int);
+INSERT INTO emp VALUES (1, 'a', 'ann', 100), (2, 'a', 'bob', 300), (3, 'b', 'cid', 200), (4, 'b', 'dan', 200), (5, NULL, 'eve', 50), (6, 'c', 'fay', NULL);
+SELECT DISTINCT ON (dept) dept, name, salary FROM emp ORDER BY dept, salary DESC, id;
+SELECT DISTINCT ON (dept) * FROM emp ORDER BY dept, salary DESC NULLS LAST, id;
+SELECT DISTINCT ON (dept) name FROM emp ORDER BY dept DESC, id;
+SELECT DISTINCT ON (salary, dept) salary, dept, id FROM emp ORDER BY dept, salary, id DESC;
+SELECT DISTINCT ON (d) dept AS d, name FROM emp ORDER BY d, name DESC;
+SELECT DISTINCT ON (1) dept, name FROM emp ORDER BY 1, 2;
+SELECT DISTINCT ON (lower(name) < 'c') name FROM emp ORDER BY lower(name) < 'c', id;
+
+-- case: DISTINCT ON with LIMIT, OFFSET, aggregates and in a subquery
+CREATE TABLE emp (id int, dept text, name text, salary int);
+INSERT INTO emp VALUES (1, 'a', 'ann', 100), (2, 'a', 'bob', 300), (3, 'b', 'cid', 200), (4, 'b', 'dan', 200), (5, NULL, 'eve', 50), (6, 'c', 'fay', NULL);
+SELECT DISTINCT ON (dept) dept, id FROM emp ORDER BY dept, id LIMIT 2 OFFSET 1;
+SELECT DISTINCT ON (dept) dept, count(*), max(salary) FROM emp GROUP BY dept, salary ORDER BY dept, max(salary) DESC NULLS LAST;
+SELECT count(*) FROM (SELECT DISTINCT ON (dept) * FROM emp ORDER BY dept, id) s;
+SELECT e.name, (SELECT DISTINCT ON (dept) name FROM emp f WHERE f.dept = e.dept ORDER BY dept, salary) AS lowest FROM emp e ORDER BY e.id;
+WITH x AS (SELECT DISTINCT ON (dept) dept, name FROM emp ORDER BY dept, name DESC) SELECT * FROM x ORDER BY name;
+SELECT DISTINCT ON (dept) dept, name FROM emp WHERE salary > 100 ORDER BY dept, name;
+
+-- case: DISTINCT ON must match the start of ORDER BY
+CREATE TABLE emp (id int, dept text, name text, salary int);
+SELECT DISTINCT ON (dept) * FROM emp ORDER BY name, dept;
+SELECT DISTINCT ON (dept, name) * FROM emp ORDER BY dept, id, name;
+SELECT DISTINCT ON (dept, name) dept, name FROM emp ORDER BY name;
+SELECT DISTINCT ON (3) dept, name FROM emp ORDER BY 1;
+
+-- case: views with DISTINCT ON and WITH TIES
+CREATE TABLE emp (id int, dept text, name text, salary int);
+INSERT INTO emp VALUES (1, 'a', 'ann', 100), (2, 'a', 'bob', 300), (3, 'b', 'cid', 200), (4, 'b', 'dan', 200), (5, NULL, 'eve', 50), (6, 'c', 'fay', NULL);
+CREATE VIEW top1 AS SELECT DISTINCT ON (dept) dept, name, salary FROM emp ORDER BY dept, salary DESC NULLS LAST;
+SELECT * FROM top1;
+CREATE VIEW top2 AS SELECT DISTINCT ON (dept) * FROM emp ORDER BY dept, id;
+SELECT * FROM top2;
+CREATE VIEW ties AS SELECT * FROM emp ORDER BY salary DESC NULLS LAST FETCH FIRST 2 ROWS WITH TIES;
+SELECT * FROM ties ORDER BY id;
+SELECT column_name FROM information_schema.columns WHERE table_name = 'top2' ORDER BY ordinal_position;
+
+-- case: FETCH FIRST ... WITH TIES
+CREATE TABLE emp (id int, dept text, name text, salary int);
+INSERT INTO emp VALUES (1, 'a', 'ann', 100), (2, 'a', 'bob', 300), (3, 'b', 'cid', 200), (4, 'b', 'dan', 200), (5, NULL, 'eve', 50), (6, 'c', 'fay', NULL);
+SELECT name, salary FROM emp ORDER BY salary DESC NULLS LAST FETCH FIRST 2 ROWS WITH TIES;
+SELECT name, salary FROM emp ORDER BY salary DESC NULLS LAST FETCH FIRST 3 ROWS WITH TIES;
+SELECT name FROM emp ORDER BY dept FETCH NEXT ROW WITH TIES;
+SELECT id, salary FROM emp ORDER BY salary OFFSET 1 ROWS FETCH FIRST 1 ROW WITH TIES;
+SELECT id, salary FROM emp ORDER BY salary OFFSET 2 FETCH FIRST 1 ROW WITH TIES;
+SELECT * FROM (SELECT dept, count(*) FROM emp GROUP BY dept ORDER BY count(*) DESC FETCH FIRST 1 ROWS WITH TIES) s ORDER BY 1;
+SELECT * FROM emp FETCH FIRST 2 ROWS WITH TIES;
+
+-- case: ROLLUP, CUBE and GROUPING SETS
+CREATE TABLE sales (region text, product text, qty int, price numeric(6,2), sold date, ok boolean);
+INSERT INTO sales VALUES ('east', 'pen', 10, 1.50, '2024-01-01', true), ('east', 'ink', 5, 3.00, '2024-01-02', false), ('west', 'pen', 7, 1.75, '2024-01-01', true), ('west', 'pad', NULL, 2.00, '2024-01-03', NULL), (NULL, 'pen', 1, 1.50, '2024-01-02', true);
+SELECT region, product, sum(qty) FROM sales GROUP BY ROLLUP (region, product) ORDER BY 1, 2;
+SELECT region, product, sum(qty), count(*) FROM sales GROUP BY CUBE (region, product) ORDER BY 1, 2, 3, 4;
+SELECT region, product, sold, sum(price) FROM sales GROUP BY GROUPING SETS ((region), (product), (sold), ()) ORDER BY 1, 2, 3;
+SELECT ok, sold, count(*) FROM sales GROUP BY GROUPING SETS (ok, sold) ORDER BY 1, 2;
+SELECT region, product, count(*) FROM sales GROUP BY region, ROLLUP (product) ORDER BY 1, 2;
+SELECT region, product, count(*) FROM sales GROUP BY ROLLUP ((region, product)) ORDER BY 1, 2;
+SELECT region, product, count(*) FROM sales GROUP BY ROLLUP (region), CUBE (product) ORDER BY 1, 2, 3;
+SELECT region, product, count(*) FROM sales GROUP BY GROUPING SETS (ROLLUP (region), (product, region), ()) ORDER BY 1, 2, 3;
+SELECT region FROM sales GROUP BY ROLLUP (region) ORDER BY 1;
+SELECT product FROM sales WHERE false GROUP BY ROLLUP (product);
+SELECT count(*), sum(qty) FROM sales GROUP BY GROUPING SETS (());
+
+-- case: GROUP BY DISTINCT and duplicate grouping sets
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7);
+SELECT region, product, sum(qty) FROM sales GROUP BY ROLLUP (region), ROLLUP (region, product) ORDER BY 1, 2, 3;
+SELECT region, product, sum(qty) FROM sales GROUP BY DISTINCT ROLLUP (region), ROLLUP (region, product) ORDER BY 1, 2, 3;
+SELECT region, sum(qty) FROM sales GROUP BY GROUPING SETS ((region), (region), ()) ORDER BY 1, 2;
+SELECT region, sum(qty) FROM sales GROUP BY DISTINCT GROUPING SETS ((region), (region), ()) ORDER BY 1, 2;
+SELECT region, product FROM sales GROUP BY ALL region, product ORDER BY 1, 2;
+
+-- case: GROUPING(), HAVING, ORDER BY over the sets, aggregates with DISTINCT and FILTER
+CREATE TABLE sales (region text, product text, qty int, price numeric(6,2));
+INSERT INTO sales VALUES ('east', 'pen', 10, 1.50), ('east', 'ink', 5, 3.00), ('west', 'pen', 7, 1.75), ('west', 'pad', NULL, 2.00), (NULL, 'pen', 1, 1.50);
+SELECT region, product, grouping(region), grouping(product), grouping(region, product), sum(qty) FROM sales GROUP BY CUBE (region, product) ORDER BY 5, 1, 2;
+SELECT region, sum(qty) AS total FROM sales GROUP BY ROLLUP (region) HAVING sum(qty) > 6 ORDER BY total DESC;
+SELECT CASE WHEN grouping(region) = 1 THEN 'all' ELSE region END AS r, count(*) FROM sales GROUP BY ROLLUP (region) ORDER BY grouping(region), region;
+SELECT region, count(DISTINCT product), sum(qty) FILTER (WHERE price < 2), string_agg(product, ',' ORDER BY product) FROM sales GROUP BY ROLLUP (region) ORDER BY region;
+SELECT region, product, sum(qty) FROM sales GROUP BY ROLLUP (region, product) ORDER BY sum(qty) DESC NULLS LAST, 1, 2 LIMIT 3;
+SELECT region, product, qty FROM sales GROUP BY GROUPING SETS ((region, product, qty)) ORDER BY 1, 2;
+SELECT region || '!' AS r, upper(product) AS p, count(*) FROM sales GROUP BY ROLLUP (region, product) ORDER BY 1, 2;
+SELECT region, grouping(region) FROM sales GROUP BY region ORDER BY 1;
+SELECT DISTINCT region FROM sales GROUP BY ROLLUP (region, product) ORDER BY 1;
+
+-- case: GROUPING() errors
+CREATE TABLE sales (region text, product text, qty int);
+SELECT region, grouping(product) FROM sales GROUP BY ROLLUP (region);
+SELECT grouping(region) FROM sales;
+
+-- case: views with grouping sets and INTERSECT ALL
+CREATE TABLE sales (region text, product text, qty int);
+INSERT INTO sales VALUES ('east', 'pen', 10), ('east', 'ink', 5), ('west', 'pen', 7);
+CREATE VIEW r AS SELECT region, product, sum(qty) AS total, grouping(region, product) AS g FROM sales GROUP BY ROLLUP (region, product);
+SELECT * FROM r ORDER BY g, region, product;
+CREATE VIEW common AS SELECT product FROM sales WHERE region = 'east' INTERSECT ALL SELECT product FROM sales;
+SELECT * FROM common ORDER BY 1;
+
+-- case: LATERAL subqueries
+CREATE TABLE dept (id int, name text);
+CREATE TABLE emp (id int, dept int, name text, salary int);
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty');
+INSERT INTO emp VALUES (1, 1, 'ann', 100), (2, 1, 'bob', 300), (3, 1, 'cid', 200), (4, 2, 'dan', 200), (5, 2, 'eve', 50);
+SELECT d.name, e.name, e.salary FROM dept d, LATERAL (SELECT * FROM emp WHERE emp.dept = d.id ORDER BY salary DESC LIMIT 2) e ORDER BY d.id, e.salary DESC;
+SELECT d.name, e.name FROM dept d CROSS JOIN LATERAL (SELECT name FROM emp WHERE emp.dept = d.id ORDER BY salary LIMIT 1) e ORDER BY 1;
+SELECT d.name, e.name FROM dept d JOIN LATERAL (SELECT name FROM emp WHERE emp.dept = d.id ORDER BY salary LIMIT 1) e ON true ORDER BY 1;
+SELECT d.name, e.name FROM dept d LEFT JOIN LATERAL (SELECT name FROM emp WHERE emp.dept = d.id ORDER BY salary LIMIT 1) e ON true ORDER BY 1;
+SELECT d.name, s.n, s.total FROM dept d LEFT JOIN LATERAL (SELECT count(*) AS n, sum(salary) AS total FROM emp WHERE emp.dept = d.id) s ON true ORDER BY 1;
+SELECT d.name, x.doubled FROM dept d, LATERAL (SELECT d.id * 2 AS doubled) x ORDER BY 1;
+SELECT d.name, e.name FROM dept d LEFT JOIN LATERAL (SELECT name, salary FROM emp WHERE emp.dept = d.id) e ON e.salary > 150 ORDER BY 1, 2;
+
+-- case: LATERAL that names several items and other LATERAL subqueries
+CREATE TABLE dept (id int, name text);
+CREATE TABLE emp (id int, dept int, name text, salary int);
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty');
+INSERT INTO emp VALUES (1, 1, 'ann', 100), (2, 1, 'bob', 300), (3, 1, 'cid', 200), (4, 2, 'dan', 200), (5, 2, 'eve', 50);
+SELECT d.name, m.top, o.name FROM dept d, LATERAL (SELECT max(salary) AS top FROM emp WHERE emp.dept = d.id) m, LATERAL (SELECT name FROM emp WHERE emp.dept = d.id AND emp.salary = m.top) o ORDER BY 1;
+SELECT a.name, b.name FROM emp a, LATERAL (SELECT name FROM emp b WHERE b.dept = a.dept AND b.salary > a.salary ORDER BY b.salary LIMIT 1) b ORDER BY a.id;
+SELECT d.name, x.s FROM dept d JOIN emp e ON e.dept = d.id, LATERAL (SELECT d.name || ':' || e.name AS s) x ORDER BY 2;
+SELECT s.k, (SELECT count(*) FROM emp WHERE emp.dept = s.k) FROM (SELECT id AS k FROM dept) s, LATERAL (SELECT s.k + 1 AS k2) t ORDER BY 1;
+SELECT d.id, y.v FROM dept d, LATERAL (SELECT d.id AS v UNION ALL SELECT d.id * 10) y ORDER BY 1, 2;
+
+-- case: LATERAL over tables read by an index, in other queries and with windows
+CREATE TABLE dept (id int, name text);
+CREATE INDEX dept_ix ON dept (id, name);
+CREATE INDEX dept_name ON dept (name);
+CREATE TABLE emp (id int, dept int, name text, salary int);
+CREATE INDEX emp_ix ON emp (dept, salary);
+INSERT INTO dept VALUES (1, 'eng'), (2, 'ops'), (3, 'empty');
+INSERT INTO emp VALUES (1, 1, 'ann', 100), (2, 1, 'bob', 300), (3, 1, 'cid', 200), (4, 2, 'dan', 200), (5, 2, 'eve', 50);
+SELECT d.id, x.v FROM dept d, LATERAL (SELECT d.name || '!' AS v) x WHERE d.id > 0 ORDER BY 1;
+SELECT d.id, x.v FROM dept d, LATERAL (SELECT d.name || d.id AS v) x WHERE d.id = 1 OR d.name = 'ops' ORDER BY 1;
+SELECT d.id, x.v FROM dept d, LATERAL (SELECT max(salary) + d.id AS v FROM emp WHERE emp.dept = d.id) x WHERE d.id > 1 ORDER BY 1;
+SELECT s.k, x.n FROM (SELECT dept AS k, count(*) AS c FROM emp GROUP BY dept) s, LATERAL (SELECT s.k * 100 + s.c AS n) x ORDER BY 1;
+SELECT s.k, x.n FROM (SELECT dept AS k FROM emp ORDER BY dept LIMIT 3) s, LATERAL (SELECT count(*) AS n FROM emp WHERE emp.dept = s.k) x ORDER BY 1, 2;
+SELECT e.name, x.rank FROM emp e, LATERAL (SELECT count(*) + 1 AS rank FROM emp f WHERE f.dept = e.dept AND f.salary > e.salary) x WHERE e.dept = 1 ORDER BY 2, 1;
+SELECT d.id, y.n, z.m FROM dept d, LATERAL (SELECT count(*) AS n FROM emp WHERE dept = d.id) y, LATERAL (SELECT y.n * 2 + d.id AS m) z ORDER BY 1;
+SELECT d.id, (SELECT string_agg(x.name, ',' ORDER BY x.name) FROM LATERAL (SELECT name FROM emp WHERE emp.dept = d.id) x) FROM dept d ORDER BY 1;
+SELECT d.id, w.r FROM dept d, LATERAL (SELECT row_number() OVER (ORDER BY salary) AS r FROM emp WHERE emp.dept = d.id ORDER BY r DESC LIMIT 1) w ORDER BY 1;
+SELECT d.id, x.v, row_number() OVER (ORDER BY x.v DESC) FROM dept d, LATERAL (SELECT d.name || d.id AS v) x ORDER BY 1;
+WITH c AS (SELECT d.id, x.n FROM dept d, LATERAL (SELECT count(*) AS n FROM emp WHERE emp.dept = d.id) x) SELECT * FROM c ORDER BY 1;
+SELECT e.id, (SELECT y.s FROM dept d, LATERAL (SELECT d.name || e.name AS s) y WHERE d.id = e.dept) FROM emp e ORDER BY 1;
+SELECT d.id, sum(x.salary) FROM dept d, LATERAL (SELECT salary FROM emp WHERE emp.dept = d.id ORDER BY salary DESC LIMIT 2) x GROUP BY d.id ORDER BY 1;
+SELECT DISTINCT ON (d.id) d.id, x.name FROM dept d, LATERAL (SELECT name, salary FROM emp WHERE emp.dept = d.id) x ORDER BY d.id, x.salary;
+
+-- case: LATERAL VALUES, column aliases, and items before it that are subqueries, views and CTEs
+CREATE TABLE t (id int, a int, b text);
+INSERT INTO t VALUES (1, 1, 'x'), (2, 1, 'y'), (3, 2, 'z'), (4, NULL, 'w'), (5, 2, 'z');
+SELECT x FROM (SELECT 1 AS a) v, LATERAL (VALUES (a), (a + 1)) s(x) ORDER BY 1;
+SELECT * FROM (SELECT 1 AS a) v, LATERAL (VALUES (a)) s(x);
+SELECT * FROM (SELECT 1 AS a) v, LATERAL (VALUES (a), (a + 1)) s ORDER BY 2;
+SELECT * FROM (SELECT 1 AS a) v, LATERAL (VALUES (a, 'p'), (a + 1, 'q')) s(x) ORDER BY 2;
+SELECT v.id, s.x FROM t v, LATERAL (VALUES (v.a), (v.a + 1)) s(x) WHERE v.id = 1 ORDER BY 2;
+SELECT * FROM (SELECT 1 AS a) v, LATERAL (SELECT a + 1 AS p, a + 2 AS q) s(x, y);
+SELECT * FROM (SELECT 1 AS a) v, LATERAL (SELECT id, b FROM t WHERE t.a = v.a ORDER BY id DESC LIMIT 1) s(x, y);
+SELECT * FROM (SELECT 1 AS a) v, LATERAL (SELECT a UNION ALL SELECT a * 10) s(x) ORDER BY 2;
+SELECT x FROM (SELECT id AS a FROM t ORDER BY id LIMIT 2) v, LATERAL (VALUES (a), (a + 10)) s(x) ORDER BY 1;
+SELECT * FROM (VALUES (1), (2)) v(a), LATERAL (VALUES (a * 10)) s(x) ORDER BY 1;
+SELECT * FROM t v, LATERAL (VALUES (1), (2)) s(x) WHERE v.id = 1 ORDER BY 4;
+CREATE VIEW vv AS SELECT id, a FROM t WHERE id < 3;
+SELECT vv.id, s.x FROM vv, LATERAL (VALUES (vv.a), (vv.id)) s(x) ORDER BY 1, 2;
+WITH c AS (SELECT id, a FROM t WHERE id > 3) SELECT c.id, s.x FROM c, LATERAL (VALUES (c.id * 2)) s(x) ORDER BY 1;
+WITH c AS MATERIALIZED (SELECT id FROM t) SELECT c.id, s.x FROM c, LATERAL (SELECT c.id + 1 AS x) s WHERE c.id < 3 ORDER BY 1;
+SELECT oper, low, high, cnt FROM (SELECT 2.5::float8 AS big, -0.25::float8 AS tiny) AS v, LATERAL (VALUES (10.5::float8, -big, big, 1), (-1.5::float8, tiny, -tiny, 2)) AS sample(oper, low, high, cnt) ORDER BY cnt;
+
+-- case: functions in FROM may name the items before them
+CREATE TABLE t (id int, n int, arr int[], j json);
+INSERT INTO t VALUES (1, 2, '{10,20}', '[1,2]'), (2, 1, '{30}', '[]'), (3, 0, '{}', '[5]');
+SELECT t.id, g FROM t, generate_series(1, t.n) g ORDER BY 1, 2;
+SELECT t.id, g FROM t CROSS JOIN LATERAL generate_series(1, n) AS g ORDER BY 1, 2;
+SELECT t.id, g.x FROM t LEFT JOIN LATERAL generate_series(1, t.n) AS g(x) ON true ORDER BY 1, 2;
+SELECT t.id, u FROM t, unnest(t.arr) u ORDER BY 1, 2;
+SELECT t.id, e.value FROM t, json_array_elements(t.j) e ORDER BY 1, e.value::text;
+
+-- case: INTERSECT ALL and EXCEPT ALL
+CREATE TABLE a (x int, y text);
+CREATE TABLE b (x int, y text);
+INSERT INTO a VALUES (1, 'p'), (1, 'p'), (1, 'p'), (2, 'q'), (NULL, NULL), (NULL, NULL), (3, 'r');
+INSERT INTO b VALUES (1, 'p'), (1, 'p'), (NULL, NULL), (3, 's'), (4, 't');
+SELECT x, y FROM a INTERSECT ALL SELECT x, y FROM b ORDER BY 1, 2;
+SELECT x, y FROM a EXCEPT ALL SELECT x, y FROM b ORDER BY 1, 2;
+SELECT x FROM b EXCEPT ALL SELECT x FROM a ORDER BY 1;
+SELECT x FROM a INTERSECT SELECT x FROM b ORDER BY 1;
+SELECT x FROM a INTERSECT ALL SELECT x FROM b UNION ALL SELECT 9 ORDER BY 1;
+SELECT x FROM a EXCEPT ALL SELECT x FROM b EXCEPT ALL SELECT 1 ORDER BY 1;
+SELECT count(*) FROM (SELECT y FROM a INTERSECT ALL SELECT y FROM b) s;
+VALUES (1), (1), (2) EXCEPT ALL VALUES (1) ORDER BY 1;
+SELECT x FROM a INTERSECT ALL SELECT x, y FROM b;
+
+-- case: BETWEEN SYMMETRIC
+CREATE TABLE t (id int, v int);
+INSERT INTO t VALUES (1, 1), (2, 5), (3, 10), (4, NULL);
+SELECT 5 BETWEEN SYMMETRIC 10 AND 1, 5 NOT BETWEEN SYMMETRIC 10 AND 1, 11 BETWEEN SYMMETRIC 10 AND 1, 0 NOT BETWEEN SYMMETRIC 1 AND 10, 3 BETWEEN ASYMMETRIC 5 AND 1;
+SELECT id FROM t WHERE v BETWEEN SYMMETRIC 6 AND 1 ORDER BY 1;
+SELECT id, v NOT BETWEEN SYMMETRIC 6 AND 1 FROM t ORDER BY 1;
+SELECT 'b' BETWEEN SYMMETRIC 'c' AND 'a', NULL BETWEEN SYMMETRIC 1 AND 2;
+
+-- case: OVERLAPS
+CREATE TABLE p (id int, s date, e date);
+INSERT INTO p VALUES (1, '2024-01-01', '2024-01-10'), (2, '2024-01-10', '2024-01-20'), (3, '2024-01-05', NULL), (4, '2024-02-01', '2024-01-25');
+SELECT (DATE '2024-01-01', DATE '2024-02-01') OVERLAPS (DATE '2024-01-15', DATE '2024-03-01');
+SELECT (DATE '2024-01-01', DATE '2024-02-01') OVERLAPS (DATE '2024-02-01', DATE '2024-03-01') AS touching;
+SELECT (TIMESTAMP '2024-01-01 10:00', INTERVAL '2 hours') OVERLAPS (TIMESTAMP '2024-01-01 11:00', INTERVAL '1 hour');
+SELECT (TIMESTAMP '2024-01-01 10:00', TIMESTAMP '2024-01-01 10:00') OVERLAPS (TIMESTAMP '2024-01-01 10:00', TIMESTAMP '2024-01-01 12:00') AS instant;
+SELECT a.id, b.id, (a.s, a.e) OVERLAPS (b.s, b.e) FROM p a, p b WHERE a.id < b.id ORDER BY 1, 2;
+SELECT (DATE '2024-01-01', NULL::date) OVERLAPS (DATE '2024-01-01', DATE '2024-02-02') AS a, (NULL::date, NULL::date) OVERLAPS (DATE '2024-01-01', DATE '2024-02-02') AS b, (DATE '2024-01-05', NULL::date) OVERLAPS (DATE '2024-01-01', DATE '2024-02-02') AS c;
+SELECT (1, 2, 3) OVERLAPS (2, 3);
+
+-- case: row IS NULL and IS NOT NULL
+CREATE TABLE t (id int, a int, b text);
+INSERT INTO t VALUES (1, 1, 'x'), (2, NULL, 'y'), (3, 2, NULL), (4, NULL, NULL);
+SELECT id, ROW(a, b) IS NULL, ROW(a, b) IS NOT NULL, (a, b) IS NULL, NOT (a, b) IS NOT NULL FROM t ORDER BY id;
+SELECT id FROM t WHERE (a, b) IS NOT NULL ORDER BY 1;
+SELECT ROW(NULL, NULL) IS NULL, ROW(1, NULL) IS NOT NULL, ROW(1, 2) IS NOT NULL;
+
+-- case: JOIN ... USING ... AS
+CREATE TABLE t (id int, b text);
+CREATE TABLE u (id int, c text);
+INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z');
+INSERT INTO u VALUES (1, 'p'), (3, 'q'), (9, 'r');
+SELECT j.id, t.b, u.c FROM t JOIN u USING (id) AS j ORDER BY j.id;
+SELECT j.id, b, c FROM t FULL JOIN u USING (id) AS j WHERE j.id > 1 ORDER BY j.id;
+SELECT j.id FROM t LEFT JOIN u USING (id) AS j ORDER BY 1;

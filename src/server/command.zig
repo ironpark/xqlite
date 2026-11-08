@@ -48,6 +48,16 @@ pub const Verb = enum {
     use,
     declare,
     execute,
+    /// PostgreSQL's cursors: FETCH, MOVE, CLOSE (`CLOSE ALL`: object "ALL").
+    fetch,
+    move,
+    close,
+    /// PostgreSQL's PREPARE, DEALLOCATE (`ALL`), DISCARD (object `ALL`,
+    /// `PLANS`, `SEQUENCES`, `TEMP`), LOCK (object `TABLE`).
+    prepare,
+    deallocate,
+    discard,
+    lock,
     other,
 };
 
@@ -141,8 +151,25 @@ pub fn classify(sql: [:0]const u8) Command {
             break :blk .{ .verb = verb, .object = obj, .as_query = as_query };
         },
         .drop, .alter => .{ .verb = verb, .object = object(&s) },
+        .close => .{ .verb = verb, .object = tagWord(s.word() orelse "", &.{.{ "all", "ALL" }}) },
+        // SET CONSTRAINTS (PostgreSQL's tag names it).
+        .set => .{ .verb = verb, .object = tagWord(s.word() orelse "", &.{.{ "constraints", "CONSTRAINTS" }}) },
+        .deallocate => blk: {
+            var w = s.word() orelse "";
+            if (std.ascii.eqlIgnoreCase(w, "prepare")) w = s.word() orelse "";
+            break :blk .{ .verb = verb, .object = tagWord(w, &.{.{ "all", "ALL" }}) };
+        },
+        .discard => .{ .verb = verb, .object = tagWord(s.word() orelse "", &.{ .{ "all", "ALL" }, .{ "plans", "PLANS" }, .{ "sequences", "SEQUENCES" }, .{ "temp", "TEMP" }, .{ "temporary", "TEMP" } }) },
+        .lock => .{ .verb = verb, .object = "TABLE" },
         else => .{ .verb = verb },
     };
+}
+
+/// The tag's word of word `w`: the second of the pair of `kinds` whose
+/// first is `w` (any case), empty if none is.
+fn tagWord(w: []const u8, kinds: []const [2][]const u8) []const u8 {
+    for (kinds) |k| if (std.ascii.eqlIgnoreCase(w, k[0])) return k[1];
+    return "";
 }
 
 fn object(s: *Scanner) []const u8 {
@@ -292,6 +319,17 @@ test "classify" {
     try T.expect("-- x\nDROP /* y */ TABLE t", .drop, "TABLE");
     try T.expect("CREATE /* TABLE", .create, "");
     try T.expect("frobnicate", .other, "");
+    try T.expect("FETCH FORWARD 2 FROM c", .fetch, "");
+    try T.expect("move all in c", .move, "");
+    try T.expect("CLOSE c", .close, "");
+    try T.expect("CLOSE ALL", .close, "ALL");
+    try T.expect("SET CONSTRAINTS ALL DEFERRED", .set, "CONSTRAINTS");
+    try T.expect("SET search_path = x", .set, "");
+    try T.expect("DEALLOCATE PREPARE ALL", .deallocate, "ALL");
+    try T.expect("deallocate p", .deallocate, "");
+    try T.expect("DISCARD TEMPORARY", .discard, "TEMP");
+    try T.expect("LOCK t IN SHARE MODE", .lock, "TABLE");
+    try T.expect("PREPARE p AS SELECT 1", .prepare, "");
 
     var buf: [32]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);

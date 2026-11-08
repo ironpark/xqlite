@@ -88,6 +88,15 @@ pub fn text(viewer: Dialect, settings: Settings, t: Type, cell: Cell, buf: *[max
             const scale = t.scale orelse return null;
             return fixed(cell, scale, buf);
         },
+        // A double precision or real: PostgreSQL's shortest digits
+        // (`2`, `0.1`, `Infinity`), not SQLite's `2.0`.
+        .float8, .float4 => {
+            if (viewer != .postgres) return null;
+            return switch (cell) {
+                .float => |f| floatText(buf[0..64], f, t.logical == .float4),
+                else => null,
+            };
+        },
         .timestamp_tz => {
             if (viewer != .postgres) return null;
             const z = switch (cell) {
@@ -180,7 +189,8 @@ fn writeClipped(w: *std.Io.Writer, z: []const u8, max: ?usize) std.Io.Writer.Err
 /// PostgreSQL's text of a double (of a real if `real`), with
 /// extra_float_digits 1, its default: the shortest digits that read back
 /// as the value, in fixed notation for a decimal exponent from -4 to 14
-/// (`100`, `0.0001`, `123.5`), else as `1.5e+20`, `1e-05`.
+/// (to 5 of a real) (`100`, `0.0001`, `123.5`), else as `1.5e+20`,
+/// `1e-05` (a real's `1e+06`).
 pub fn floatText(buf: *[64]u8, v: f64, real: bool) []const u8 {
     if (std.math.isNan(v)) return "NaN";
     if (std.math.isInf(v)) return if (v > 0) "Infinity" else "-Infinity";
@@ -202,7 +212,8 @@ pub fn floatText(buf: *[64]u8, v: f64, real: bool) []const u8 {
     const d = digits[0..n];
     var out: std.ArrayList(u8) = .initBuffer(buf);
     if (neg) out.appendAssumeCapacity('-');
-    if (exp >= -4 and exp < 15) {
+    // float8out() writes fixed notation below 1e15, float4out() below 1e6.
+    if (exp >= -4 and exp < @as(i32, if (real) 6 else 15)) {
         if (exp < 0) {
             out.appendSliceAssumeCapacity("0.");
             out.appendNTimesAssumeCapacity('0', @intCast(-exp - 1));
@@ -298,4 +309,7 @@ test floatText {
     try t.expectEqualStrings("1.1", floatText(&buf, 1.1, true));
     try t.expectEqualStrings("0.1", floatText(&buf, @as(f32, 0.1), true));
     try t.expectEqualStrings("3.4028235e+38", floatText(&buf, std.math.floatMax(f32), true));
+    try t.expectEqualStrings("999999", floatText(&buf, 999999, true));
+    try t.expectEqualStrings("1e+06", floatText(&buf, 1e6, true));
+    try t.expectEqualStrings("1.234567e+06", floatText(&buf, 1234567, true));
 }

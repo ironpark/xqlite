@@ -615,6 +615,11 @@ pub const Vdbe = struct {
     /// statement gives it one (Parse.xq_param_types, sql/typing.zig):
     /// n_var entries, .unknown where not known; empty if none is known.
     xq_param_types: []@import("../sql/types.zig").Type = &.{},
+    /// xqlite: the text of the statement this one runs, when it is not
+    /// its own (PostgreSQL's EXECUTE of a prepared statement): what a
+    /// protocol names the command after (engine.commandSql()). Empty
+    /// for its own text. In the Vdbe's memory.
+    xq_command_sql: []const u8 = "",
     /// Parse.xq_exact_numeric of the statement.
     xq_exact_numeric: bool = false,
     /// A query of no result columns (Parse.xq_no_columns): its rows are

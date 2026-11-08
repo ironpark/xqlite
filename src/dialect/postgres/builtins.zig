@@ -9,8 +9,13 @@
 //!    bigint; 0: numeric); gcd() and lcm() of untyped values take an
 //!    integer as a bigint, anything else as a numeric;
 //!  - float8(x), float4(x): the casts written as calls (an integer, a
-//!    numeric, a double, or text read as float8in() and float4in() do); a
-//!    real is kept a double, as the dialect's `::real` keeps one;
+//!    numeric, a double, or text read as float8in() and float4in() do).
+//!    overload.zig calls the casts below in their place; these (their
+//!    qualified names in a schema of before) keep a real a double;
+//!  - the casts to double precision and real, engine functions
+//!    xq_pg_cast_float8(x) and xq_pg_cast_float4(x) (types.castPlan(),
+//!    and the store into a float column), and xq_pg_float_text(x, real),
+//!    float8out() / float4out() (overload.zig's floatText());
 //!  - booleq(a, b), boolne(a, b): `a = b` and `a <> b` of booleans;
 //!  - interval_hash(i): a hash of the interval's key, equal for intervals
 //!    that are equal ('30 days' and '1 mon'). Not PostgreSQL's numbers.
@@ -33,8 +38,8 @@ const det: dfunc.Options = .{ .deterministic = true };
 pub const functions = [_]int.FuncDef{
     dfunc.scalar("gcd", 2, det, dfunc.bind(gcdFunc, .{false})),
     dfunc.scalar("lcm", 2, det, dfunc.bind(gcdFunc, .{true})),
-    dfunc.scalar("float8", 1, det, dfunc.bind(floatFunc, .{false})),
-    dfunc.scalar("float4", 1, det, dfunc.bind(floatFunc, .{true})),
+    dfunc.scalar("float8", 1, det, dfunc.bind(floatFunc, .{ false, false })),
+    dfunc.scalar("float4", 1, det, dfunc.bind(floatFunc, .{ true, false })),
     dfunc.scalar("booleq", 2, det, dfunc.bind(boolCmpFunc, .{true})),
     dfunc.scalar("boolne", 2, det, dfunc.bind(boolCmpFunc, .{false})),
     dfunc.scalar("interval_hash", 1, det, intervalHashFunc),
@@ -43,7 +48,22 @@ pub const functions = [_]int.FuncDef{
 pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_pg_gcd", 3, det, dfunc.bind(gcdFunc, .{false})),
     dfunc.scalar("xq_pg_lcm", 3, det, dfunc.bind(gcdFunc, .{true})),
+    cast_float8,
+    cast_float4,
+    float_text,
 };
+
+/// xq_pg_cast_float8(x), xq_pg_cast_float4(x): `x::double precision` and
+/// `x::real` (types.castPlan(), and the store of a string or a parameter
+/// into a float column): text read as float8in() and float4in() read it,
+/// a number or a numeric's key its double; of a real rounded to single
+/// precision (still a double), with the overflow and underflow errors.
+/// NaN fails: a SQLite value cannot be one.
+pub const cast_float8 = dfunc.scalar("xq_pg_cast_float8", 1, det, dfunc.bind(floatFunc, .{ false, true }));
+pub const cast_float4 = dfunc.scalar("xq_pg_cast_float4", 1, det, dfunc.bind(floatFunc, .{ true, true }));
+/// xq_pg_float_text(x, real): float8out() (float4out() if `real`) of a
+/// number: `10000000000`, `-Infinity`, `1.1` of a real.
+pub const float_text = dfunc.scalar("xq_pg_float_text", 2, det, floatTextFunc);
 
 // ============================================================= gcd, lcm
 
@@ -153,38 +173,91 @@ fn gcdVar(a: std.mem.Allocator, x_in: Dec, y_in: Dec) dec.Error!Dec {
 
 // ============================================================ float casts
 
-fn floatFunc(ctx: *Context, argv: []*Mem, comptime real: bool) void {
+/// A double of a value, as a cast to double precision (real if `real`)
+/// makes it. With `strict` (the casts: xq_pg_cast_float8/4) NaN and
+/// underflow are errors, a real is float4in()'s float of the digits and
+/// a numeric's key is read as its text; without (float8()/float4(), the
+/// old qualified names schemas keep) a real is kept a double.
+fn floatFunc(ctx: *Context, argv: []*Mem, comptime real: bool, comptime strict: bool) void {
     const m = argv[0];
-    const v: f64 = switch (api.valueType(m)) {
+    const type_name = if (real) "real" else "double precision";
+    var arena: std.heap.ArenaAllocator = .init(dfunc.gpa(ctx));
+    defer arena.deinit();
+    const ty = api.valueType(m);
+    var v: f64 = switch (ty) {
         vi.SQLITE_NULL => return api.resultNull(ctx),
         vi.SQLITE_INTEGER, vi.SQLITE_FLOAT => api.valueDouble(m),
-        vi.SQLITE_BLOB => blk: {
-            var arena: std.heap.ArenaAllocator = .init(dfunc.gpa(ctx));
-            defer arena.deinit();
-            const d = decimal_sql.numArg(ctx, arena.allocator(), m) orelse return;
-            break :blk switch (d.kind) {
-                .nan => std.math.nan(f64),
-                .pinf => std.math.inf(f64),
-                .ninf => -std.math.inf(f64),
-                .finite => dec.toFloat(arena.allocator(), d) catch return api.resultErrorState(ctx, .of("22003"), "value out of range: overflow"),
-            };
-        },
-        else => {
-            const raw = dfunc.text(ctx, m) orelse return;
+        else => blk: {
+            if (!strict and ty == vi.SQLITE_BLOB) {
+                const d = decimal_sql.numArg(ctx, arena.allocator(), m) orelse return;
+                break :blk switch (d.kind) {
+                    .nan => std.math.nan(f64),
+                    .pinf => std.math.inf(f64),
+                    .ninf => -std.math.inf(f64),
+                    .finite => dec.toFloat(arena.allocator(), d) catch return api.resultErrorState(ctx, .of("22003"), "value out of range: overflow"),
+                };
+            }
+            // A numeric's key read as its text, as numeric_float8() reads
+            // numeric_out()'s (decimal_sql.zig): its errors name it.
+            const raw = if (ty == vi.SQLITE_BLOB) txt: {
+                const d = decimal_sql.numArg(ctx, arena.allocator(), m) orelse return;
+                break :txt dec.toText(arena.allocator(), d) catch return api.resultErrorNomem(ctx);
+            } else dfunc.text(ctx, m) orelse return;
             var buf: [1024]u8 = undefined;
             switch (floatInput(raw, real, &buf)) {
-                // Kept a double, as the dialect's casts to real keep one.
-                .value => |v| return api.resultDouble(ctx, v),
+                .value => |v| {
+                    // Kept a double, as the dialect's casts to real keep one.
+                    if (!strict) return api.resultDouble(ctx, v);
+                    if (real and !std.math.isNan(v) and !std.math.isInf(v)) {
+                        // float4in() reads the digits as a float, not a
+                        // double rounded again.
+                        const t = std.mem.trim(u8, raw, " \t\r\n\x0b\x0c");
+                        const f = std.fmt.parseFloat(f32, t) catch break :blk v;
+                        if (f == 0 and v != 0) return api.resultErrorState(ctx, .of("22003"), std.fmt.bufPrint(&buf, "\"{s}\" is out of range for type real", .{raw[0..@min(raw.len, 900)]}) catch "value out of range");
+                        return api.resultDouble(ctx, f);
+                    }
+                    if (!real and v == 0 and !zeroText(raw)) return api.resultErrorState(ctx, .of("22003"), std.fmt.bufPrint(&buf, "\"{s}\" is out of range for type double precision", .{raw[0..@min(raw.len, 900)]}) catch "value out of range");
+                    break :blk v;
+                },
                 .failed => |e| return api.resultErrorState(ctx, e.state, e.msg),
             }
         },
     };
+    if (strict and std.math.isNan(v)) return api.resultErrorState(ctx, .of("0A000"), "NaN is not supported for type " ++ type_name);
     if (real) {
-        // Kept a double, as the dialect's casts to real keep one.
         const f: f32 = @floatCast(v);
         if (std.math.isInf(f) and !std.math.isInf(v)) return api.resultErrorState(ctx, .of("22003"), "value out of range: overflow");
+        if (strict) {
+            if (f == 0 and v != 0) return api.resultErrorState(ctx, .of("22003"), "value out of range: underflow");
+            v = f;
+        }
     }
     api.resultDouble(ctx, v);
+}
+
+/// Whether number text `raw` is a zero (`0`, `-0.000`, `0e5`), not a
+/// number too small for a double (strtod()'s underflow, an error).
+fn zeroText(raw: []const u8) bool {
+    for (raw) |ch| switch (ch) {
+        '1'...'9' => return false,
+        'e', 'E' => return true,
+        else => {},
+    };
+    return true;
+}
+
+fn floatTextFunc(ctx: *Context, argv: []*Mem) void {
+    const m = argv[0];
+    switch (api.valueType(m)) {
+        vi.SQLITE_NULL => return api.resultNull(ctx),
+        vi.SQLITE_INTEGER, vi.SQLITE_FLOAT => {
+            var buf: [64]u8 = undefined;
+            const z = @import("../valuetext.zig").floatText(&buf, api.valueDouble(m), api.valueInt64(argv[1]) != 0);
+            api.resultText(ctx, z, .transient);
+        },
+        // Text (a column's value not a number) as it is.
+        else => api.resultValue(ctx, m),
+    }
 }
 
 /// What float8in() (float4in() if `real`) makes of text `raw`: the

@@ -1,0 +1,158 @@
+-- Differential cases of PostgreSQL's functions of double precision,
+-- pseudo-random numbers, statistical aggregates and ordered-set and
+-- hypothetical-set aggregates (xqt dialect-diff pg
+-- tools/dialect/pg-mathstat-cases.txt), in the format of pg-cases.txt:
+-- each case starts with a "-- case:" line and runs on an empty database,
+-- in PostgreSQL (psql, unaligned, with headers) and in `xqlite sql` with
+-- `.dialect postgres`. The expected output is PostgreSQL 18's (the
+-- reference server is an arm64 build: its sums fuse a * b + c, which
+-- src/dialect/stats.zig does too).
+
+-- case: trigonometric functions
+SELECT sin(1), cos(1), tan(1), cot(1), asin(0.5), acos(0.5), atan(1), atan2(1, 2);
+SELECT sin(0), cos(0), sin(-2.5::float8), cos(100), tan(-0.75), asin(1), acos(-1), atan2(-1, -1), atan(-1e300);
+SELECT cot(0), tan(pi() / 2), atan2(0, -1), atan2(-1, 0);
+SELECT acos(2);
+SELECT asin(-1.5);
+
+-- case: trigonometric functions in degrees are exact at the special angles
+SELECT sind(30), cosd(60), tand(45), cotd(45), asind(0.5), acosd(0.5), atand(1), atan2d(1, 1);
+SELECT sind(x), cosd(x), tand(x), cotd(x) FROM (VALUES (-720), (-390), (-180), (-90), (-45), (0), (15), (30), (45), (60), (75), (90), (120), (135), (150), (180), (210), (225), (270), (300), (315), (330), (360), (400.5)) v(x);
+SELECT asind(x), acosd(x), atand(x) FROM (VALUES (-1), (-0.5), (-0.25), (0), (0.25), (0.5), (0.75), (1)) v(x);
+SELECT atan2d(y, x) FROM (VALUES (1, 0), (0, -1), (-1, -1), (2, 3.5)) v(y, x);
+SELECT tand(90), cotd(0), cotd(180), tand(-90), sind(1e300), cosd(-1e18);
+SELECT asind(1.1);
+SELECT acosd(-2);
+
+-- case: hyperbolic functions
+SELECT sinh(1), cosh(1), tanh(1), asinh(1), acosh(2), atanh(0.5);
+SELECT sinh(-0.5), cosh(0), tanh(-20), asinh(-3), acosh(1), atanh(-0.25), sinh(1000), cosh(-1000), atanh(1), atanh(-1);
+SELECT acosh(0.5);
+SELECT atanh(1.5);
+
+-- case: cbrt, degrees, radians, erf, gamma
+SELECT cbrt(27), cbrt(-8), cbrt(2), cbrt(0), cbrt(1e-300), degrees(1), degrees(pi()), radians(180), radians(-45.5);
+SELECT erf(0.5), erf(-1), erf(3), erf(0), erfc(0.3), erfc(-2), erfc(10), erfc(30), erf(1e-10);
+SELECT gamma(5), gamma(0.5), gamma(-1.5), gamma(171), lgamma(10), lgamma(0.5), lgamma(-1.5), lgamma(1e300);
+SELECT gamma(0);
+SELECT gamma(-1);
+SELECT gamma(200);
+SELECT gamma(-200.5);
+SELECT lgamma(0);
+SELECT degrees(1e308);
+SELECT radians(1e-320);
+
+-- case: exp, ln, power and round of doubles
+SELECT exp(1::float8), exp(-3.7::float8), exp(700::float8), exp(-740::float8), ln(3::float8), ln(1e-300::float8), log(2::float8), log10(7::float8);
+SELECT power(2.5::float8, 3.3::float8), power(1.0001::float8, 12345::float8), 2::float8 ^ 0.5::float8, power(-8::float8, 3::float8), power(10::float8, -2::float8);
+SELECT round(2.5::float8), round(-2.5::float8), round(3.5::float8), round(0.5::float8), round(-0.4::float8), round(1e300::float8), round(5), pg_typeof(round(5)), round(7, 1), round(1.25, 1);
+SELECT exp(1000::float8);
+SELECT exp(-1000::float8);
+SELECT round(2.5::float8, 1);
+
+-- case: math of numerics and integers gives double precision
+SELECT sin(1.5), cbrt(64::numeric), degrees(2::int2), sind(30::numeric), erf(0.25::numeric), atan2(1.5, 2::bigint);
+SELECT pg_typeof(sin(1)), pg_typeof(sind(1.5)), pg_typeof(gamma(3)), pg_typeof(atan2(1, 1)), pg_typeof(cbrt(1::numeric));
+
+-- case: setseed and random
+SELECT setseed(0.5);
+SELECT random(), random(), random(1, 100), random(-5, 5), random(1::bigint, 10000000000), random(-9223372036854775807, 9223372036854775807);
+SELECT setseed(-0.25);
+SELECT random(1.5, 3.25), random(0.001, 0.002), random(-100, 100.000), random(1e10, 1e30::numeric), random(7.5, 7.5), random(0, 99999999999999999999.999999);
+SELECT setseed(0);
+SELECT random_normal(), random_normal(10), random_normal(10, 2), random_normal(-5, 0.001);
+SELECT setseed(1);
+SELECT random() FROM generate_series(1, 3);
+SELECT pg_typeof(random(1, 2)), pg_typeof(random(1::bigint, 2)), pg_typeof(random(1.5, 2)), pg_typeof(random()), pg_typeof(random_normal());
+SELECT random(5, 1);
+SELECT random(5.5, 1);
+SELECT random('NaN'::numeric, 1);
+SELECT random(1, 'Infinity'::numeric);
+SELECT setseed(1.5);
+SELECT setseed(-2);
+
+-- case: variance and standard deviation of numerics and integers
+SELECT variance(x), var_pop(x), var_samp(x), stddev(x), stddev_pop(x), stddev_samp(x) FROM (VALUES (1.5), (2.25), (3)) v(x);
+SELECT variance(x), var_pop(x), stddev(x), stddev_pop(x) FROM generate_series(1, 10) x;
+SELECT variance(x::int2), var_pop(x::int4), stddev(x::int8), stddev_pop(x::bigint) FROM (VALUES (1), (2), (2), (7)) v(x);
+SELECT variance(x), stddev(x) FROM (VALUES (1.5), (1.5)) v(x);
+SELECT variance(x), stddev_pop(x), var_pop(x) FROM (VALUES (1e20::numeric), (1), (0.000001)) v(x);
+SELECT variance(x), var_pop(x), stddev(x), stddev_pop(x) FROM (VALUES (42.125)) v(x);
+SELECT variance(x), var_pop(x) FROM (VALUES (1::numeric)) v(x) WHERE false;
+SELECT variance(x), stddev(x) FROM (VALUES (1.0), ('NaN'), (2)) v(x);
+SELECT variance(x), stddev_pop(x) FROM (VALUES (1.0), ('Infinity'), (2)) v(x);
+SELECT variance(x), stddev(x) FROM (VALUES (NULL::numeric), (3), (NULL), (5)) v(x);
+SELECT pg_typeof(variance(1)), pg_typeof(stddev(1.5)), pg_typeof(var_pop(1::float8)), pg_typeof(stddev_samp(1::real));
+
+-- case: variance and standard deviation of doubles
+SELECT variance(x), var_pop(x), stddev(x), stddev_pop(x) FROM (VALUES (1.5::float8), (2.25), (3)) v(x);
+SELECT variance(x), var_pop(x), stddev(x), stddev_pop(x) FROM (VALUES (0.1::float8), (0.2), (0.3), (0.4), (1e10)) v(x);
+SELECT variance(x::real), stddev_pop(x::real) FROM (VALUES (1.5), (2.25), (3.75)) v(x);
+SELECT variance(x), var_pop(x) FROM (VALUES (1.5::float8)) v(x);
+SELECT variance(x) FROM (VALUES (1e308::float8), (-1e308)) v(x);
+
+-- case: correlation, covariance and regression
+SELECT corr(y, x), covar_pop(y, x), covar_samp(y, x), regr_count(y, x), regr_avgx(y, x), regr_avgy(y, x) FROM (VALUES (1, 2.0), (2, 4.1), (3, 5.9), (4, 8.2)) v(x, y);
+SELECT regr_slope(y, x), regr_intercept(y, x), regr_r2(y, x), regr_sxx(y, x), regr_syy(y, x), regr_sxy(y, x) FROM (VALUES (1, 2.0), (2, 4.1), (3, 5.9), (4, 8.2)) v(x, y);
+SELECT corr(y, x), regr_slope(y, x), regr_intercept(y, x), regr_r2(y, x), covar_samp(y, x) FROM (VALUES (0.5::float8, 10.25::float8), (1.75, 3.5), (2.5, -7), (10, 1e3), (-3.25, 0.001)) v(x, y);
+SELECT corr(x, x), regr_r2(x, x), regr_slope(x, x) FROM (VALUES (0.1), (0.1), (0.1)) v(x);
+SELECT corr(y, x), regr_slope(y, x), regr_r2(y, x), regr_intercept(y, x) FROM (VALUES (1, 5), (2, 5), (3, 5)) v(x, y);
+SELECT corr(y, x), covar_pop(y, x), covar_samp(y, x), regr_count(y, x), regr_sxx(y, x) FROM (VALUES (1, 2)) v(x, y);
+SELECT corr(y, x), regr_count(y, x), regr_avgx(y, x) FROM (VALUES (1, 2)) v(x, y) WHERE false;
+SELECT regr_count(y, x), regr_avgx(y, x), regr_avgy(y, x) FROM (VALUES (1, NULL), (NULL, 2), (3, 4), (5, 6)) v(x, y);
+SELECT corr(y, x), covar_pop(y, x), regr_slope(y, x) FROM (VALUES (1e200::float8, 1e200::float8), (-1e200, 1e-200)) v(x, y);
+SELECT covar_pop(y, x) FROM (VALUES (1e308::float8, 1e308::float8), (-1e308, -1e308)) v(x, y);
+SELECT pg_typeof(corr(1, 1)), pg_typeof(regr_count(1, 1)), pg_typeof(covar_pop(1.5, 1)), pg_typeof(regr_slope(1::int2, 1::real));
+
+-- case: any_value and statistical aggregates with FILTER and GROUP BY
+SELECT any_value(x), any_value(y) FROM (VALUES (NULL, 'b'), (2, 'a'), (3, 'c')) v(x, y);
+SELECT any_value(x) FROM (VALUES (NULL::int), (NULL)) v(x);
+SELECT g, variance(x), stddev(x::float8), corr(x, x * x), regr_count(x, x) FILTER (WHERE x > 2) FROM (VALUES (1, 1), (1, 2), (1, 4), (2, 3), (2, 9), (2, 27)) v(g, x) GROUP BY g ORDER BY g;
+SELECT variance(x) FILTER (WHERE x < 4), stddev_pop(x) FILTER (WHERE x > 1), corr(x, x) FILTER (WHERE x <> 2) FROM generate_series(1, 6) x;
+SELECT pg_typeof(any_value(1.5)), pg_typeof(any_value('x'::text)), pg_typeof(any_value(1::int2));
+
+-- case: statistical aggregates as window functions
+SELECT x, variance(x) OVER w, stddev_pop(x::float8) OVER w, corr(x, x * x) OVER w, regr_slope(x * 2, x) OVER w, any_value(x) OVER w FROM generate_series(1, 5) x WINDOW w AS (ORDER BY x) ORDER BY x;
+SELECT x, variance(x) OVER w, var_pop(x::float8) OVER w, covar_samp(x, x * x) OVER w, regr_count(x, x) OVER w FROM generate_series(1, 6) x WINDOW w AS (ORDER BY x ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) ORDER BY x;
+SELECT x, stddev(x) OVER (ORDER BY x ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), corr(x, x % 3) OVER (ORDER BY x ROWS BETWEEN 2 PRECEDING AND CURRENT ROW), any_value(x) OVER (ORDER BY x ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM generate_series(1, 6) x ORDER BY x;
+SELECT x % 2 AS p, x, variance(x) OVER (PARTITION BY x % 2), regr_avgx(x, x) OVER (PARTITION BY x % 2 ORDER BY x) FROM generate_series(1, 6) x ORDER BY p, x;
+
+-- case: percentile_cont, percentile_disc and mode
+SELECT percentile_cont(0.3) WITHIN GROUP (ORDER BY x), percentile_disc(0.3) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (5)) v(x);
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_cont(0) WITHIN GROUP (ORDER BY x), percentile_cont(1) WITHIN GROUP (ORDER BY x), percentile_cont(0.25) WITHIN GROUP (ORDER BY x DESC) FROM generate_series(1, 10) x;
+SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY x), percentile_disc(0) WITHIN GROUP (ORDER BY x), percentile_disc(1) WITHIN GROUP (ORDER BY x), percentile_disc(0.25) WITHIN GROUP (ORDER BY x DESC) FROM generate_series(1, 10) x;
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_disc(0.5) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x) FROM (VALUES (1.25), (NULL), (2.5), (10.125)) v(x);
+SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x DESC) FROM (VALUES ('b'), ('a'), ('c'), ('a'), ('c')) v(x);
+SELECT percentile_disc(0.6) WITHIN GROUP (ORDER BY x NULLS FIRST), percentile_disc(0.1) WITHIN GROUP (ORDER BY x DESC NULLS LAST) FROM (VALUES (3), (NULL), (1), (2)) v(x);
+SELECT percentile_cont(array[0.1, 0.5, NULL, 1]) WITHIN GROUP (ORDER BY x), percentile_disc(array[0, 0.5, 0.9]) WITHIN GROUP (ORDER BY x DESC) FROM generate_series(1, 7) x;
+SELECT percentile_cont('{{0.25,0.75},{0,1}}'::float8[]) WITHIN GROUP (ORDER BY x), percentile_disc('{}'::float8[]) WITHIN GROUP (ORDER BY x) FROM (VALUES (1.5::float8), (4), (10)) v(x);
+SELECT percentile_disc(array[0.5]) WITHIN GROUP (ORDER BY x) FROM (VALUES ('x'), ('y y')) v(x);
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x), percentile_disc(0.5) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x) FROM (VALUES (1)) v(x) WHERE false;
+SELECT percentile_cont(NULL) WITHIN GROUP (ORDER BY x) FROM (VALUES (1)) v(x);
+SELECT g, percentile_cont(0.5) WITHIN GROUP (ORDER BY x), mode() WITHIN GROUP (ORDER BY x) FILTER (WHERE x > 1) FROM (VALUES (1, 1), (1, 3), (1, 3), (2, 2), (2, 4)) v(g, x) GROUP BY g ORDER BY g;
+SELECT pg_typeof(percentile_cont(0.5) WITHIN GROUP (ORDER BY 1)), pg_typeof(percentile_disc(0.5) WITHIN GROUP (ORDER BY 1.5)), pg_typeof(mode() WITHIN GROUP (ORDER BY 'a'::text)), pg_typeof(percentile_cont(array[0.5]) WITHIN GROUP (ORDER BY 1));
+SELECT percentile_cont(1.5) WITHIN GROUP (ORDER BY x) FROM (VALUES (1)) v(x);
+SELECT percentile_disc(-0.1) WITHIN GROUP (ORDER BY x) FROM (VALUES (1)) v(x);
+SELECT percentile_cont(array[0.5, 2]) WITHIN GROUP (ORDER BY x) FROM (VALUES (1)) v(x);
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) OVER () FROM (VALUES (1)) v(x);
+
+-- case: hypothetical-set aggregates
+SELECT rank(2) WITHIN GROUP (ORDER BY x), dense_rank(2) WITHIN GROUP (ORDER BY x), percent_rank(2) WITHIN GROUP (ORDER BY x), cume_dist(2) WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (5)) v(x);
+SELECT rank(3) WITHIN GROUP (ORDER BY x DESC), dense_rank(3) WITHIN GROUP (ORDER BY x DESC), percent_rank(3) WITHIN GROUP (ORDER BY x DESC), cume_dist(3) WITHIN GROUP (ORDER BY x DESC) FROM (VALUES (1), (2), (2), (5), (5), (7)) v(x);
+SELECT rank(NULL) WITHIN GROUP (ORDER BY x), rank(NULL) WITHIN GROUP (ORDER BY x NULLS FIRST), dense_rank(4) WITHIN GROUP (ORDER BY x NULLS FIRST), cume_dist(4) WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (NULL), (4), (NULL), (9)) v(x);
+SELECT rank(2, 'b') WITHIN GROUP (ORDER BY x, y), dense_rank(2, 'b') WITHIN GROUP (ORDER BY x, y DESC), percent_rank(2, 'b') WITHIN GROUP (ORDER BY x DESC, y), cume_dist(2, 'b') WITHIN GROUP (ORDER BY x, y) FROM (VALUES (1, 'a'), (2, 'a'), (2, 'b'), (2, 'c'), (3, 'a')) v(x, y);
+SELECT rank(1.5) WITHIN GROUP (ORDER BY x), rank(5::bigint) WITHIN GROUP (ORDER BY x), dense_rank(2.0) WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (10)) v(x);
+SELECT rank(3) WITHIN GROUP (ORDER BY x), dense_rank(3) WITHIN GROUP (ORDER BY x), percent_rank(3) WITHIN GROUP (ORDER BY x), cume_dist(3) WITHIN GROUP (ORDER BY x) FROM (VALUES (1)) v(x) WHERE false;
+SELECT g, rank(2) WITHIN GROUP (ORDER BY x), percent_rank(2) WITHIN GROUP (ORDER BY x) FILTER (WHERE x <> 1) FROM (VALUES (1, 1), (1, 3), (2, 2), (2, 1), (2, 1)) v(g, x) GROUP BY g ORDER BY g;
+SELECT pg_typeof(rank(1) WITHIN GROUP (ORDER BY 1)), pg_typeof(dense_rank(1) WITHIN GROUP (ORDER BY 1)), pg_typeof(percent_rank(1) WITHIN GROUP (ORDER BY 1)), pg_typeof(cume_dist(1) WITHIN GROUP (ORDER BY 1));
+SELECT rank(1, 2) WITHIN GROUP (ORDER BY 3);
+SELECT mode(1) WITHIN GROUP (ORDER BY 3);
+SELECT percentile_cont(0.5, 0.2) WITHIN GROUP (ORDER BY 3);
+
+-- case: ordered-set aggregates over a table and in a view
+CREATE TABLE t (g int, a numeric(6,2), f float8, s text);
+INSERT INTO t VALUES (1, 1.50, 0.5, 'x'), (1, 2.25, 1.5, 'y'), (1, 2.25, 2.5, 'x'), (2, 10, -1, 'z'), (2, 20.5, 3, 'z'), (2, NULL, NULL, NULL);
+SELECT g, percentile_cont(0.5) WITHIN GROUP (ORDER BY a), percentile_disc(0.5) WITHIN GROUP (ORDER BY a), mode() WITHIN GROUP (ORDER BY s), rank(2) WITHIN GROUP (ORDER BY a), variance(a), stddev(f), corr(f, a) FROM t GROUP BY g ORDER BY g;
+CREATE VIEW v AS SELECT g, percentile_cont(0.25) WITHIN GROUP (ORDER BY f DESC) AS pc, percentile_disc(0.5) WITHIN GROUP (ORDER BY a) AS pd, mode() WITHIN GROUP (ORDER BY s) AS m, dense_rank(2.25, 'x') WITHIN GROUP (ORDER BY a, s) AS dr, var_pop(a) AS vp, regr_slope(f, a) AS rs FROM t GROUP BY g;
+SELECT * FROM v ORDER BY g;
+SELECT pg_typeof(pc), pg_typeof(pd), pg_typeof(m), pg_typeof(dr), pg_typeof(vp), pg_typeof(rs) FROM v LIMIT 1;

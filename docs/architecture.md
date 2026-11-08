@@ -71,6 +71,7 @@ SQL 텍스트 ──▶ dialect.runParser()            연결의 방언(Sqlite3.
 - 문장은 컴파일된 언어(`Vdbe.xq_lang`)를 기억합니다. 그래서 스키마 변경 뒤의 재컴파일도 같은 방언으로 합니다.
 - 엔진이 스스로 파싱하는 텍스트는 언제나 SQLite 텍스트이고 SQLite 프론트엔드로 갑니다. 스키마, nested parse, `OP_SqlExec`, ALTER TABLE 재작성, pragma 가상 테이블, `sqlite_stat1`, 카탈로그 SQL이 여기에 해당합니다.
 - 예외는 `catalog.codeExecDialect()`의 `OP_SqlExec`(p1의 `0x0004`)입니다. 연결의 방언으로 쓴 문장들을 문장이 돌 때 차례로 컴파일·실행합니다(PostgreSQL의 여러 동작의 `ALTER TABLE`, 동작마다 한 문장). 앞 문장이 바꾼 스키마로 다음 문장이 컴파일되고, 세이브포인트 안에서 돌아 하나가 실패하면 모두 되돌립니다. 이 `OP_SqlExec`의 문장은 트랜잭션을 열지 않습니다(안의 `DROP INDEX`가 다른 문장이 읽는 동안 막히는 `OP_Destroy`를 쓸 수 있게). 오류는 SQLSTATE를 지닙니다.
+- `OP_SqlExec`의 p1 `0x0008`은 방언이 짠 단계(`Hooks.run_steps`)입니다. PostgreSQL의 `MERGE`와 데이터 변경 `WITH`가 씁니다([PostgreSQL 내부](postgres/internals.md#6-merge와-데이터-변경-with)). 단계의 문장도 연결의 방언으로 문장이 돌 때 컴파일·실행하고, 바깥 문장의 매개변수를 같은 번호로 받습니다. 세이브포인트 없이 바깥 문장의 문장 트랜잭션 안에서 돌므로, 단계나 바깥 문장이 실패하면 문장 전체가 되돌아갑니다.
 
 ## 빌드에 넣을 방언과 확장
 
@@ -162,6 +163,27 @@ SQLite 방언 프론트엔드는 이 인터페이스로 바로 내립니다. 그
 - 한정 이름은 `lower.functionName()`이 정합니다.
 - 한정 이름은 모든 방언에서 보입니다.
 
+SQLite에 문법이 없는 질의 모양은 lower와 render가 둘 다 먼저 **디슈가**(`src/ir/desugar.zig`)해서 SQLite에 있는 모양의 트리로 바꾼 뒤 씁니다. 그래서 둘이 같은 뜻인 것은 만들 때부터 정해집니다.
+
+| 트리 | 바꾼 모양 |
+| --- | --- |
+| `Core.distinct_on` | `row_number() OVER (PARTITION BY 식 ORDER BY 질의의 ORDER BY)`가 1인 행만 남기는 서브쿼리 |
+| `Select.with_ties` | `rank() OVER (ORDER BY ...) <= n`(OFFSET o가 있으면 `row_number() > o AND rank() <= o + n`) |
+| `Core.grouping_sets` | 집합마다 하나씩 묶은 질의의 `UNION ALL`. 다른 집합의 식은 NULL(집계의 인자는 그대로), `GROUPING()`은 상수 |
+| `INTERSECT ALL`, `EXCEPT ALL` | 각 항의 행에 같은 행끼리의 번호(`row_number() OVER (PARTITION BY 모든 열)`)를 붙인 `INTERSECT`/`EXCEPT` |
+
+- 질의의 열은 서브쿼리의 `xq_c<n>`, `ORDER BY`의 식은 `xq_o<n>`이 되고, 바깥 질의가 열 이름을 되돌립니다.
+- 결과에 `*`가 있으면 lower는 열을 그대로 두고 덧붙인 열을 바깥 `*`에서 숨깁니다(`Core.hidden` → `Select.xq_hidden`, 그 서브쿼리 테이블의 HIDDEN 열). render는 숨김을 쓸 수 없으므로 `*`를 FROM의 테이블과 서브쿼리 열로 풀어 쓰고, 풀 수 없으면 실패합니다.
+
+`FromItem.lateral`(앞 항목을 쓰는 FROM 서브쿼리)은 코어가 실행합니다. lower만 세우는 `SrcItem.fg.xq_lateral` 때문에 SQLite 프론트엔드의 바이트코드는 그대로입니다.
+
+- 이름 해석: LATERAL 서브쿼리는 앞 항목만 보이는 이름 문맥(`NameContext.xq_n_src`)에서 해석합니다. 그 문맥에서 찾은 항목은 `xq_lateral_ref`가 됩니다.
+- 실행: 앞 항목을 쓰면(`is_correlated`) 언제나 co-routine이고, 앞 항목 뒤의 루프에 놓입니다(`whereLoopAddAll()`의 선행 조건). co-routine은 그 루프가 시작할 때마다 `OP_InitCoroutine`으로 처음부터 다시 돕니다.
+- `xq_lateral_ref` 항목은 co-routine 코드가 그 행을 직접 읽으므로 커버링 인덱스 루프와 자동 인덱스를 쓰지 않습니다. 그 항목이 co-routine이면 `whereEnd()`가 LATERAL co-routine의 코드 범위에서도 열 읽기를 레지스터 복사로 바꿉니다.
+- 평탄화: 상관된 LATERAL 서브쿼리는 FROM에 서브쿼리나 함수가 있으면 바깥 질의로 평탄화하지 않습니다(그 서브쿼리가 앞 항목의 루프보다 먼저 코딩되므로). 평탄화되는 항목의 `xq_lateral_ref`는 그 안의 항목에 넘깁니다.
+- lower는 `LATERAL (s) AS x(a, b)`와 `LATERAL (VALUES ...)`를 CTE(`xq_alias`)가 아니라 `SELECT c1 AS a ... FROM (s)`(VALUES는 행마다의 `UNION ALL`)로 내립니다(`Desugar.renamed()`). CTE의 복사본은 앞 항목을 보지 못하기 때문입니다.
+- SQLite 텍스트에는 LATERAL이 없으므로 render는 첫 항목이 아닌 LATERAL 항목에서 실패합니다(첫 항목은 앞 항목이 없어 보통 서브쿼리와 같음).
+
 검증은 두 곳에서 합니다.
 
 - `src/ir/test.zig`: 손으로 만든 트리를 lower와 render 양쪽으로 모든 방언에서 실행해 같은 행이 나오는지 확인합니다.
@@ -230,7 +252,10 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 | `count_create_as` | `CREATE TABLE ... AS SELECT`가 넣은 행을 `changes()`에 셈(PostgreSQL의 명령 태그 `SELECT n`). SQLite 방언의 바이트코드는 그대로입니다. |
 | `check_errors` | 방언이 타입 검사에 붙인 CHECK 제약 이름의 오류 코드([오류 코드](#오류-코드)) |
 | `typing` | 리터럴·연산자·함수의 타입 규칙(`typing.Rules`, [코어의 타입](#코어의-타입)). 이름 해석 뒤에 프론트엔드가 타입을 찍지 않은 식에 적용합니다. 규칙의 `overload`는 타입으로 연산자·함수를 고릅니다(PostgreSQL의 jsonb 연산자, JSON 함수의 인자). 코드 생성은 정수 산술의 폭과 저장 함수(`Rules.store`)만 읽습니다([타입을 읽는 코드 생성](#타입을-읽는-코드-생성)). |
-| `table_function` | 이름이 고정되지 않은 엔진 테이블 값 함수를 찾는 함수. `engine_modules`에 없는 `xq_*` 테이블을 만나면 부르고, 맞으면 모듈을 등록해 돌려줍니다(T-SQL `OPENJSON`은 `WITH` 열 목록을 이름에 담음). |
+| (훅이 아닌 알림) | 코어는 트랜잭션이 끝날 때(`vdbeHalt()`의 커밋, `main.rollbackAll()`) `dialect.transactionEnded()`를, `RELEASE`·`ROLLBACK TO` 뒤에 `dialect.savepointEnded()`를 부릅니다. PostgreSQL 방언의 커서와 `SET`/`SET LOCAL`의 값이 씁니다. 방언 상태가 없으면 아무 일도 하지 않으므로 SQLite 방언의 동작과 바이트코드는 그대로입니다. `OP_AutoCommit`의 P3(PostgreSQL의 `AND CHAIN`: 끝낸 뒤 새 트랜잭션)도 PostgreSQL 방언만 씁니다. |
+| `table_function` | 이름이 고정되지 않은 엔진 테이블 값 함수를 찾는 함수. `engine_modules`에 없는 `xq_*` 테이블을 만나면 부르고, 맞으면 모듈을 등록해 돌려줍니다(T-SQL `OPENJSON`은 `WITH` 열 목록을 이름에 담음, PostgreSQL의 `xq_pg_rows_*`는 열의 이름과 타입을 담음). |
+| `table_function_type` | `table_function`이 등록한 모듈의 열 타입(`resolve.tableColumnType()`). PostgreSQL `MERGE`·데이터 변경 `WITH`가 남긴 행의 열은 원래 열·식의 타입입니다. |
+| `run_steps` | `OP_SqlExec` p1 `0x0008`의 단계를 실행하는 함수(PostgreSQL의 `rows.zig`). |
 
 ### 방언 함수 테이블 (`functions`)
 
@@ -257,13 +282,14 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
 - SQLite 내장 함수 다음에 찾습니다.
 - 내장 함수처럼 `unsafe`가 아니면 `trusted_schema`가 꺼져 있어도 스키마에서 쓸 수 있습니다. 그래서 부작용이 없어야 합니다.
 - 인덱스·CHECK·생성 열에 들어갈 수 있으면 `deterministic`이어야 합니다.
+- 집계는 `x_value`만 두고 `x_inverse` 없이 윈도우 함수가 될 수 있습니다. 시작이 움직이는 프레임은 `EXCLUDE NO OTHERS`처럼 행마다 프레임을 다시 훑어 계산합니다(`sql/window.zig`의 `windowUpdate()`, PostgreSQL이 역함수 없는 집계를 계산하는 방식). SQLite의 함수 중 이런 것은 인덱스로 계산하는 `min()`·`max()`뿐이고 그 둘은 제외하므로 SQLite 방언의 바이트코드는 그대로입니다.
 - 스키마에 들어간 뒤에는 뜻이 파일 형식의 일부입니다. sqlite3용 확장(`src/loadable/`)이 같은 구현을 sqlite3에 등록하고, 식 인덱스는 두 엔진이 번갈아 계산합니다. 그래서 엔진 함수, 방언 함수의 한정 이름, 방언 collation은 뜻을 바꾸지 않고, 바꿀 때는 새 이름을 만듭니다. 목록은 `src/dialect/abi.zig`의 `catalogue`와 그 기록 `abi.txt`이고, 테스트가 둘을 맞춥니다([ABI 규칙](extension.md#abi-규칙)). `xq_ext_version()`(`abi.zig`)은 그 ABI 버전입니다.
 
 지금 있는 엔진 함수는 다음과 같습니다.
 
 | 방언 | 엔진 함수 |
 | --- | --- |
-| 모든 방언 | `xq_like`, `xq_ilike`(`like.zig`), `xq_dec_*`(정확한 십진수와 그 정렬 키, `decimal_sql.zig`), `xq_stddev_*`·`xq_var_*`(MariaDB·MSSQL·Oracle의 분산 집계, `variance.zig`) |
+| 모든 방언 | `xq_like`, `xq_ilike`(`like.zig`), `xq_dec_*`(정확한 십진수와 그 정렬 키, `decimal_sql.zig`), `xq_stddev_*`·`xq_var_*`(MariaDB·MSSQL·Oracle의 분산 집계, `variance.zig`), `xq_float_*`·`xq_corr`·`xq_covar_*`·`xq_regr_*`·`xq_any_value`·`xq_percentile_*`·`xq_mode`·`xq_hypo_*`(PostgreSQL의 통계·순서 집합·가상 집합 집계, `stats.zig`) |
 | PostgreSQL | `xq_pg_*` |
 | MariaDB (의미 노드) | `xq_coerce`, `xq_div`, `xq_xor`, `xq_bitxor`, `xq_cast` |
 | MariaDB (파서가 문법·이름을 바꿔 씀) | `xq_date_add`(`INTERVAL`), `xq_extract`, `xq_timestampdiff`, `xq_bit_length`, `xq_rand`, `xq_uuid` |
@@ -344,7 +370,7 @@ dialect.Frontend.run(p: *Parse, sql: [:0]const u8) (Oom || ParseError)!void
     - 코어가 정하는 것: 단항 `+`와 `COLLATE`는 피연산자, `CASE`는 `THEN`/`ELSE` 값들의 공통 타입, 스칼라 서브쿼리는 첫 열(복합이면 항들의 공통 타입). 공통 타입(`typing.common()`): 같은 타입은 그 타입, 정수끼리는 넓은 쪽, 정확한 수끼리는 큰 스케일의 `numeric`, 실수가 섞이면 `double precision`, 문자열끼리는 길이 없는 문자열, 원소 타입이 같은 배열끼리는 그 배열. NULL 리터럴은 어느 타입과도 맞고, 모르는 값이 하나라도 있거나 공통 타입이 없으면 모름입니다. PostgreSQL은 `numeric` 값마다 스케일이 있으므로(`Rules.value_scale`) 스케일이 다른 둘의 공통 타입은 스케일을 모릅니다.
     - 규칙이 만든 타입은 방언의 철자(`Rules.spell`)로 표에 넣습니다(`Interner.addType()`: (방언, 타입, 철자)). 철자가 타입보다 덜 말할 수 있습니다: PostgreSQL은 연산 결과의 `numeric`에 typmod를 두지 않으므로 `numeric`이라 쓰지만 스케일은 갖고 있어 그 자릿수로 보입니다.
     - 테이블 값 함수의 인자: 타입 계층이 켜진 방언에서는 결과 열보다 먼저 해석합니다(`resolve.zig`, PostgreSQL이 FROM을 select 목록보다 먼저 해석하듯이. SQLite 방언은 SQLite의 순서 그대로). 그래서 함수의 열이 인자의 타입을 따를 수 있습니다: PostgreSQL이 `generate_series()`, `unnest()`, `_pg_expandarray()` ...를 내린 `json_each()`·`generate_series` 가상 테이블의 열(`postgres/srftype.zig`가 `Rules.overload`에서 그 열의 FROM 항목을 `Ctx.columnSource()`로 찾아 매김).
-    - 프론트엔드가 다른 함수로 바꾼 호출의 타입은 `tree.Func.result_type`으로 찍습니다(PostgreSQL `now()`은 `strftime()`이라 텍스트이지만 `timestamp with time zone`, MariaDB `NOW(3)`, SQL Server `GETDATE()`, Oracle `SYSDATE`).
+    - 프론트엔드가 다른 함수로 바꾼 호출의 타입은 `tree.Func.result_type`으로 찍습니다(PostgreSQL `now()`은 `strftime()`이라 텍스트이지만 `timestamp with time zone`, MariaDB `NOW(3)`, SQL Server `GETDATE()`, Oracle `SYSDATE`). 이미 표에 있는 타입은 `tree.Func.result_type_id`로 그 id를 그대로 줍니다(PostgreSQL 커서의 `FETCH`: `DECLARE`가 돌린 문장의 열 타입).
     - PostgreSQL의 공통 타입에서 문자열 상수는 자기 타입이 없습니다(`Rules.unknown_strings`, PostgreSQL의 unknown): `coalesce(j, '{}')`, `CASE ... THEN j ELSE '[]' END`, `UNION`의 열은 다른 값들의 타입이고 모두 문자열이면 text입니다.
     - 공통 타입의 피연산자 중 불리언이 있으면 PostgreSQL처럼 문자열 상수를 불리언으로 읽습니다(`overload.zig`의 `boolCommon()`: 그 자리에서 `xq_pg_bool('yes')`로 바꾸고, 읽지 못하면 컴파일 때 `invalid input syntax for type boolean` 22P02). `IN` 목록, `CASE`의 결과(그리고 불리언 기준식의 `WHEN` 값), `coalesce`/`nullif`/`greatest`/`least`, `ARRAY[...]`이고, `BETWEEN`은 PostgreSQL처럼 두 비교의 쌍입니다. 복합 질의의 열은 항들이 모두 해석된 뒤 `Rules.unify`가 받습니다(`typing.compoundColumns()`, `resolve.zig`): `VALUES`의 행들은 한 번에, `UNION`/`INTERSECT`/`EXCEPT`는 왼쪽부터 쌍으로(`'a' UNION SELECT 'b' UNION SELECT true`의 앞 둘은 text). `INSERT ... VALUES`의 행은 각자 열에 저장되므로 받지 않습니다(`Parse.xq_insert_values`). 스키마의 텍스트에는 `ddltype.zig`가 그 호출을 적고(`wrappers`), 프로브가 읽지 못한 상수는 문장의 오류가 됩니다.
   - 방언의 선택(`Rules.overload`, `Rules.order_collation`): `typeTree()`가 노드마다, 피연산자의 타입을 매긴 뒤 노드 자신의 타입을 매기기 전에 부릅니다(프론트엔드가 타입을 찍은 노드도). 피연산자 타입으로 연산자와 함수를 고르는 자리입니다(PostgreSQL의 `overload.zig`: 산술·비트 연산자를 연산자 표로, `jsonb`의 `||`를 `xq_pg_jsonb_concat()`으로, `->`를 jsonb의 함수로, jsonb 비교에 collation, interval 비교를 키(`xq_pg_iv_key()`)나 BLOB 열의 경계로, JSON을 만드는 함수의 인자를 감쌈). 바꿀 수 있는 것:
@@ -620,6 +646,7 @@ RFC 9562 UUID는 엔진과 상관없는 일반 패키지 `pkg/uuid/`(모듈 이�
 | `src/ir/tree.zig` | 구문 트리 IR과 의미 노드 (아래) |
 | `src/ir/lower.zig` | `Lowerer.init(p, src)`, `statement(stmt)`(DDL 포함), `expr()`, `select()`; DML 기본값·identity, DDL의 카탈로그 기록; `Origins`(내린 식과 트리의 짝) |
 | `src/ir/render.zig` | `render.select(p, src, s)`, `render.expr()`, `render.statement()`(CREATE TABLE/INDEX/VIEW, ALTER TABLE)와 `Renderer`(`column()`, `colConstraint()`, `tableConstraint()`) |
+| `src/ir/desugar.zig` | `Desugar.select()`: lower와 render가 쓰기 전의 DISTINCT ON, WITH TIES, GROUPING SETS, INTERSECT/EXCEPT ALL 풀기; `sameExpr()`, `children()` |
 | `src/ir/coldef.zig` | `sqlite_schema`의 CREATE TABLE 텍스트를 SQLite 토크나이저로 읽은 열 정의(이름, 타입, 제약 절)와 테이블 제약, 그 텍스트의 편집(`apply()`). 열을 제자리에서 바꾸는 ALTER TABLE(PostgreSQL의 `ALTER COLUMN`, `ADD`/`DROP CONSTRAINT`)이 씀 |
 | `src/ir/test.zig`, `fuzz.zig`, `gen.zig` | render ≡ lower 테스트와 퍼저 |
 | `src/catalog/catalog.zig`, `meta.zig`, `sequence.zig`, `schema.zig` | 방언 메타데이터와 메모리의 카탈로그([메모리의 카탈로그](#메모리의-카탈로그)), 시퀀스, 이름 붙은 스키마([스키마](#스키마네임스페이스)) |

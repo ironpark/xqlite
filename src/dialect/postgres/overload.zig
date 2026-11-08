@@ -104,7 +104,7 @@ pub fn overload(c: *Ctx, e: *Expr) Error!bool {
             const b = try boolBetween(c, e);
             return try repr.list(c, e) or b;
         },
-        TK.CAST => try boolCast(c, e) or try repr.cast(c, e),
+        TK.CAST => try textCast(c, e) or try repr.cast(c, e),
         TK.CASE => {
             const b = try boolCase(c, e);
             return try numeric.numericCase(c, e) or b;
@@ -130,6 +130,8 @@ fn concat(c: *Ctx, e: *Expr) Error!bool {
     if (try numeric.numericText(c, l) or try numeric.numericText(c, r)) return true;
     const lb = try boolText(c, l, "xq_pg_bool_text");
     if (try boolText(c, r, "xq_pg_bool_text") or lb) return true;
+    const lf = try floatText(c, l);
+    if (try floatText(c, r) or lf) return true;
     // text || interval: the interval's text.
     if (logical(c, l) == .interval or logical(c, r) == .interval) {
         if (logical(c, l) == .interval) e.left = try interval.ivText(c, l);
@@ -187,6 +189,18 @@ fn arith(c: *Ctx, e: *Expr) Error!bool {
     operands[0] = e.left orelse return false;
     // -1.5: a literal (a number until a numeric's operator reads it).
     if (op == .neg and numeric.numericLiteral(operands[0])) return false;
+    // -x of a double precision or real: x * -1.0, its sign flipped (-0
+    // of 0, float8um()), where SQLite's 0 - x keeps 0.
+    if (op == .neg) switch (logical(c, operands[0])) {
+        .float8, .float4 => |l| {
+            const m = try expr_mod.expr(c.p.arena, TK.FLOAT, "-1.0");
+            m.xq_type = typing.plain(l);
+            e.op = TK.STAR;
+            e.right = m;
+            return true;
+        },
+        else => {},
+    };
     const n: usize = if (op == .neg) 1 else 2;
     if (n == 2) operands[1] = e.right orelse return false;
     const row = try operatorRow(c, e, op, operands[0..n]) orelse return false;
@@ -278,9 +292,24 @@ fn xorCall(c: *Ctx, e: *Expr, items: []int.ExprListItem) Error!bool {
     return changed;
 }
 
+/// The cast that reads a string literal compared with `x` as the type of
+/// `x`, an integer or a float (a numeric's is numeric.numericCompare()).
+fn numberInput(c: *Ctx, x: *Expr) ?[:0]const u8 {
+    const l = logical(c, x);
+    return intCast(l) orelse switch (l) {
+        .float8 => "xq_pg_cast_float8",
+        .float4 => "xq_pg_cast_float4",
+        else => null,
+    };
+}
+
 /// The cast that reads a string as an integer of type `t`.
 pub fn intInput(t: operators.T) ?[]const u8 {
-    return switch (t) {
+    return intCast(t.logical());
+}
+
+fn intCast(l: Logical) ?[:0]const u8 {
+    return switch (l) {
         .int2 => integer.castName(.int2),
         .int4 => integer.castName(.int4),
         .int8 => integer.castName(.int8),
@@ -299,6 +328,18 @@ fn compare(c: *Ctx, e: *Expr) Error!bool {
     if (logical(c, l) == .boolean and try boolLiteral(c, r)) return true;
     if (logical(c, r) == .boolean and try boolLiteral(c, l)) return true;
     if (try uuid.uuidCompare(c, e)) return true;
+    // A number against a string literal: the literal read as the number's
+    // type (int4in(), float8in()), not compared as text (`10 > '7'`).
+    if (numberInput(c, l)) |f| if (r.op == TK.STRING) {
+        try c.readInput(f, r);
+        e.right = try c.call(f, &.{r});
+        return true;
+    };
+    if (numberInput(c, r)) |f| if (l.op == TK.STRING) {
+        try c.readInput(f, l);
+        e.left = try c.call(f, &.{l});
+        return true;
+    };
     if (e.op != TK.IS and e.op != TK.ISNOT and logical(c, l) == .json and logical(c, r) == .json) {
         var buf: [64]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "operator does not exist: json {s} json", .{opText(e.op)}) catch unreachable;
@@ -470,6 +511,14 @@ fn callOf(c: *Ctx, e: *Expr) Error!bool {
     const items = args(e);
     if (std.mem.eql(u8, n, integer.defs.int_xor.name) and items.len == 2) return xorCall(c, e, items);
     if (std.mem.eql(u8, n, "pg_typeof") and items.len == 1) return typeofCall(c, e, items[0].expr.?);
+    // float8(x), float4(x): the casts (a real rounded to single precision).
+    if (items.len == 1) {
+        const cast: ?[]const u8 = if (std.mem.eql(u8, n, "float8")) "xq_pg_cast_float8" else if (std.mem.eql(u8, n, "float4")) "xq_pg_cast_float4" else null;
+        if (cast) |f| {
+            try c.rename(e, f);
+            return true;
+        }
+    }
     // to_char(), gcd(), timezone() ... told the type of an argument.
     if (try kindCall(c, e, n, items)) return true;
     // The operators of jsonb operands.
@@ -487,6 +536,7 @@ fn callOf(c: *Ctx, e: *Expr) Error!bool {
     // A boolean argument of a function of "any" made text: its output.
     if (any_text_functions.has(n)) for (items) |item| {
         if (try boolText(c, item.expr.?, "xq_pg_bool_out")) changed = true;
+        if (try floatText(c, item.expr.?)) changed = true;
     };
     const b = builderArgs(n);
     for (items, 0..) |*item, i| if (b.takes(i)) {
@@ -531,12 +581,23 @@ fn boolText(c: *Ctx, x: *Expr, f: []const u8) Error!bool {
     return true;
 }
 
-/// CAST(b AS TEXT) of a boolean (`b::text`, `b::varchar(5)`: substr() of
-/// that cast): of its text.
-fn boolCast(c: *Ctx, e: *Expr) Error!bool {
+/// CAST(x AS TEXT) of a boolean (`b::text`, `b::varchar(5)`: substr() of
+/// that cast) or of a double precision or real: of its text.
+fn textCast(c: *Ctx, e: *Expr) Error!bool {
     const x = e.left orelse return false;
     if (!e.useUToken() or !std.ascii.eqlIgnoreCase(e.token(), "TEXT")) return false;
-    return boolText(c, x, "xq_pg_bool_text");
+    return try boolText(c, x, "xq_pg_bool_text") or try floatText(c, x);
+}
+
+/// A double precision or real `x` made text (`||`, concat(), ::text):
+/// float8out()'s and float4out()'s text (xq_pg_float_text(x, real)), not
+/// SQLite's (`1e10::float8::text` is `10000000000`, not `10000000000.0`).
+fn floatText(c: *Ctx, x: *Expr) Error!bool {
+    const l = logical(c, x);
+    if (l != .float8 and l != .float4) return false;
+    try numeric.wrapIn(c, x, "xq_pg_float_text", &.{try int32(c, @intFromBool(l == .float4))});
+    x.xq_type = typing.plain(.text);
+    return true;
 }
 
 /// The functions of arguments of any type that write each with its

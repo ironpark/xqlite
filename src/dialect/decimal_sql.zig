@@ -38,6 +38,12 @@
 //!   xq_dec_number(x)          a SQLite number: what an older numeric
 //!                             column (stored as numbers) keeps
 //!   xq_dec_sum(x), xq_dec_avg(x)   aggregates (and window functions)
+//!   xq_dec_var_pop(x), xq_dec_var_samp(x), xq_dec_stddev_pop(x),
+//!   xq_dec_stddev_samp(x)     PostgreSQL's numeric variance and standard
+//!                             deviation (numeric_stddev_internal()): its
+//!                             digits and scale; NULL with no rows (the
+//!                             sample ones with one), NaN if a number is
+//!                             NaN or infinite
 
 const std = @import("std");
 const api = @import("../vdbe/api.zig");
@@ -98,6 +104,10 @@ pub const engine_functions = [_]int.FuncDef{
     dfunc.scalar("xq_dec_number", 1, det, wrap(numberFunc)),
     window("xq_dec_sum", sumStep, sumFinal(.sum, true), sumFinal(.sum, false), sumInverse),
     window("xq_dec_avg", sumStep, sumFinal(.avg, true), sumFinal(.avg, false), sumInverse),
+    varWindow("xq_dec_var_pop", .var_pop),
+    varWindow("xq_dec_var_samp", .var_samp),
+    varWindow("xq_dec_stddev_pop", .stddev_pop),
+    varWindow("xq_dec_stddev_samp", .stddev_samp),
 };
 
 /// The function `name` of `n_arg` arguments of the table.
@@ -162,6 +172,10 @@ const infos = [_]Info{
     .{ .name = "xq_dec_number", .key = false },
     .{ .name = "xq_dec_sum", .pg = "sum", .renamed = true },
     .{ .name = "xq_dec_avg", .pg = "avg", .renamed = true },
+    .{ .name = "xq_dec_var_pop", .pg = "var_pop" },
+    .{ .name = "xq_dec_var_samp", .pg = "var_samp" },
+    .{ .name = "xq_dec_stddev_pop", .pg = "stddev_pop" },
+    .{ .name = "xq_dec_stddev_samp", .pg = "stddev_samp" },
 };
 
 const info_map = blk: {
@@ -716,4 +730,101 @@ fn finish(c: *Call, st: *const SumState, which: Agg) Fail!void {
         break :blk try dec.div(c.a(), s, try dec.fromInt(c.a(), st.n));
     };
     try result(c, r, true);
+}
+
+// ======================================================== var, stddev
+
+/// The state of xq_dec_var_pop() ... : how many numbers, the NaNs and
+/// infinities, the sum and the sum of the squares (keys owned by the
+/// connection's allocator, null for 0) and the largest display scale.
+/// No inverse: a window's moving frame is computed anew (window.zig), as
+/// exactly as PostgreSQL's inverse computes it.
+const VarState = struct {
+    n: i64 = 0,
+    nan: i64 = 0,
+    inf: i64 = 0,
+    max_scale: u32 = 0,
+    sum: ?[*]u8 = null,
+    sum_len: usize = 0,
+    sum2: ?[*]u8 = null,
+    sum2_len: usize = 0,
+
+    fn free(st: *VarState, gpa: Allocator) void {
+        if (st.sum) |k| gpa.free(k[0..st.sum_len]);
+        if (st.sum2) |k| gpa.free(k[0..st.sum2_len]);
+        st.* = .{};
+    }
+};
+
+fn varStep(ctx: *Context, argv: []*Mem) void {
+    var c: Call = .init(ctx);
+    defer c.deinit();
+    varStepImpl(&c, argv[0]) catch |err| report(ctx, err);
+}
+
+fn keyOf(c: *Call, k: ?[*]u8, len: usize) Fail!Dec {
+    const p = k orelse return .zero;
+    return (try dec.decodeKey(c.a(), p[0..len])).dec;
+}
+
+fn varStepImpl(c: *Call, m: *Mem) Fail!void {
+    const x = try value(c, m) orelse return;
+    const st = dfunc.aggState(VarState, c.ctx, true) orelse return error.OutOfMemory;
+    const gpa = dfunc.gpa(c.ctx);
+    st.n += 1;
+    switch (x.kind) {
+        .nan => st.nan += 1,
+        .pinf, .ninf => st.inf += 1,
+        .finite => {
+            const s = if (x.scale_known) x.dscale else x.fracDigits();
+            st.max_scale = @max(st.max_scale, s);
+            const sum = try dec.add(c.a(), try keyOf(c, st.sum, st.sum_len), x);
+            const sum2 = try dec.add(c.a(), try keyOf(c, st.sum2, st.sum2_len), try dec.mul(c.a(), x, x));
+            const k = try dec.key(gpa, sum.withScale(0), false);
+            const k2 = dec.key(gpa, sum2.withScale(0), false) catch |err| {
+                gpa.free(k);
+                return err;
+            };
+            if (st.sum) |old| gpa.free(old[0..st.sum_len]);
+            if (st.sum2) |old| gpa.free(old[0..st.sum2_len]);
+            st.sum = k.ptr;
+            st.sum_len = k.len;
+            st.sum2 = k2.ptr;
+            st.sum2_len = k2.len;
+        },
+    }
+}
+
+const VarKind = enum { var_pop, var_samp, stddev_pop, stddev_samp };
+
+fn varFinal(comptime k: VarKind, comptime final: bool) dfunc.FinalFn {
+    return struct {
+        fn f(ctx: *Context) void {
+            const st = dfunc.aggState(VarState, ctx, false) orelse return api.resultNull(ctx);
+            defer if (final) st.free(dfunc.gpa(ctx));
+            var c: Call = .init(ctx);
+            defer c.deinit();
+            varFinish(&c, st, k) catch |err| report(ctx, err);
+        }
+    }.f;
+}
+
+fn varFinish(c: *Call, st: *const VarState, k: VarKind) Fail!void {
+    const sample = k == .var_samp or k == .stddev_samp;
+    if (st.n == 0 or (sample and st.n <= 1)) return api.resultNull(c.ctx);
+    if (st.nan > 0 or st.inf > 0) return result(c, .nan, true);
+    const sum = (try keyOf(c, st.sum, st.sum_len)).withScale(st.max_scale);
+    const sum2 = (try keyOf(c, st.sum2, st.sum2_len)).withScale(st.max_scale * 2);
+    const r = math.variance(c.a(), st.n, sum, sum2, sample, k == .stddev_pop or k == .stddev_samp) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.DivisionByZero => error.DivisionByZero,
+        else => error.Overflow,
+    };
+    try result(c, r, true);
+}
+
+fn varWindow(name: [:0]const u8, comptime k: VarKind) int.FuncDef {
+    var f = dfunc.aggregate(name, 1, det, varStep, varFinal(k, true));
+    f.x_value = varFinal(k, false);
+    return f;
 }

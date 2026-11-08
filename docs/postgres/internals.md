@@ -31,7 +31,13 @@ flowchart TD
 | `arrays.zig` | 다차원 배열 텍스트 직렬화 및 슬라이스/원소 접근자 처리. |
 | `ddl.zig`, `alter.zig` | DDL의 PostgreSQL 검사와 오류. `alter.zig`는 SQLite에 없는 ALTER TABLE: 여러 동작(동작마다 한 문장으로 차례로 실행, `catalog.codeExecDialect()`), `ALTER COLUMN`, `ADD`/`DROP CONSTRAINT`(`sqlite_schema`의 CREATE TABLE 텍스트를 `ir/coldef.zig`로 고치고 스키마를 다시 읽음, 행 검사는 그 앞, 새 타입의 값 쓰기는 그 뒤), 상수가 아닌 DEFAULT의 `ADD COLUMN`. |
 | `enums.zig` | 열거형: `xq_catalog`의 행(`tbl ''`, `col` 타입 이름, `key 'enum'`, 값은 레이블의 JSON 배열), 열마다의 CHECK, 캐스트 `xq_pg_enum_in()`, `CREATE`/`ALTER`/`DROP TYPE`. |
+| `mathfuncs.zig` | 배정밀도의 삼각·쌍곡·특수 함수(`sind`, `erf`, `gamma` ...)와 그 오류, `round(x)`(짝수 쪽 반올림), PostgreSQL의 PRNG(xoroshiro128**, 세션의 `State.prng`)를 쓰는 `random()`·`random(min, max)`·`random_normal()`·`setseed()`. `exp`·`log`·`pow` 계열과 `erf`·`erfc`는 musl을 옮긴 `../libm.zig`. |
+| `ordered.zig` | 분수 배열의 `percentile_cont(float8[])`·`percentile_disc(float8[])`(`xq_pg_percentile_*_arr`). 통계·순서 집합·가상 집합 집계 자체는 방언 밖의 `../stats.zig`(실수)와 `../decimal_sql.zig`(numeric의 분산)에 있고, 파서가 `WITHIN GROUP`을 집계의 `ORDER BY`로 내립니다. |
+| `commands.zig` | `PREPARE`/`EXECUTE`/`DEALLOCATE`(세션의 문장 텍스트, `EXECUTE`는 인자를 넣어 `frontend.compile()`로 다시 컴파일하고 와이어 서버의 태그를 위해 `Vdbe.xq_command_sql`을 둠), `DISCARD`, `SET CONSTRAINTS`(`PRAGMA defer_foreign_keys`), `LOCK TABLE`(검사만). |
+| `cursor.zig` | 커서: `DECLARE`(실행할 때 질의를 돌려 행을 세션의 메모리에 둠, `xq_pg_cursor_declare()`), `FETCH`(커서의 열을 `json_each(xq_pg_cursor_fetch(...))`의 행 번호 위에서 `xq_pg_cursor_value()`로 읽는 질의, 열마다 질의가 준 타입: `tree.Func.result_type_id`), `MOVE`(`changes()`가 지나간 행 수), `CLOSE`, `WHERE CURRENT OF`(`rowid = xq_pg_cursor_rowid(...)`), `pg_cursors`(`xq_pg_cursors()`). 트랜잭션과 세이브포인트의 끝은 코어가 `dialect.transactionEnded()`·`savepointEnded()`로 알립니다. |
 | `inet.zig` | `inet`·`cidr`의 입력과 PostgreSQL의 출력 텍스트, `xq_pg_inet()`·`xq_pg_cidr()`, `host()`·`masklen()`·`family()`. |
+| `dml.zig` | `MERGE`와 데이터 변경 `WITH`: 문장이 돌 때 실행할 단계(문장들)와, 단계가 남긴 행을 읽는 바깥 질의를 만듭니다([6장](#6-merge와-데이터-변경-with)). |
+| `rows.zig` | 단계의 실행(`Hooks.run_steps`, `OP_SqlExec`의 `0x0008`)과 단계가 남긴 행의 슬롯, 그것을 읽는 테이블 값 함수 `"xq_pg_rows_<hash>:<spec>"(slot)`. |
 
 ---
 
@@ -118,3 +124,23 @@ PostgreSQL 와이어 프로토콜 서버 및 드라이버 연동을 위해 내�
 - `xq_pg_uuid(text)`: 텍스트를 16바이트 UUID BLOB으로 변환.
 - `xq_pg_uuid_text(blob)`: 16바이트 UUID BLOB을 표준 36자 텍스트로 역변환.
 - `xq_pg_interval_add(...)`: timestamptz와 interval 간의 복합 덧셈 연산.
+
+---
+
+## 6. MERGE와 데이터 변경 WITH
+
+SQLite에 없는 두 문장은 문장이 돌 때 차례로 실행하는 **단계**와, 단계가 남긴 행을 읽는 **바깥 질의**로 만듭니다(`dml.zig`).
+
+- 단계는 `OP_SqlExec`(p1 `0x0008`) 하나에 담깁니다. 단계의 문장은 그때 연결의 방언으로 컴파일하고, 바깥 문장의 매개변수(`$1` ...)를 같은 번호로 받습니다(`rows.runSteps()`). 세이브포인트 없이 바깥 문장의 문장 트랜잭션 안에서 돌므로(바깥 문장은 대상 테이블의 데이터베이스에 쓰는 문장으로 컴파일됨), 어느 단계나 바깥 질의가 실패하면 문장 전체가 되돌아갑니다.
+- 단계가 돌려준 행은 연결의 **슬롯**(`State.dml_rows`)에 남습니다. 슬롯 번호는 문장을 컴파일할 때 정하고, 문장이 다시 돌면 비우고, 바깥 질의 뒤에 풉니다. 바깥 질의는 그 행을 테이블 값 함수 `"xq_pg_rows_<hash>:<spec>"(slot)`로 읽습니다. 이름의 spec이 열의 이름과 타입(PostgreSQL 철자와 `Type`)이라 열은 원래 열·식의 타입이고(`Hooks.table_function_type`), 숨은 열 `xq_key`(조인의 몇 번째 행에서 왔는지), `xq_tag`(조인 행이 고른 `WHEN` 절, 바뀐 행의 동작), `xq_action`(`merge_action()`), `xq_target`(대상 행의 rowid)을 가집니다. rowid는 슬롯 안의 순서이고, `rowid = ?`는 그 행만 읽습니다.
+
+`MERGE INTO t USING s ON cond WHEN ...`의 단계는 다음과 같습니다.
+
+1. 조인: `SELECT t.rowid, CASE ... END, s.* FROM t {FULL|RIGHT|} JOIN (SELECT *, true AS xq_m FROM s) AS s ON cond`. `CASE`는 짝(일치, 원본만, 대상만)마다 조건이 맞는 첫 `WHEN` 절의 번호입니다. 원본의 열과 타입은 컴파일할 때 `SELECT * FROM s`를 따로 해석해 압니다.
+2. 같은 대상 행을 바꾸는(`DO NOTHING`이 아닌) 조인 행이 둘이면 21000.
+3. `WHEN` 절마다 그 절을 고른 조인 행에: `UPDATE t SET ... FROM rows AS s WHERE s.xq_tag = k AND t.rowid = s.xq_target`, `DELETE FROM t WHERE rowid IN (...)`, `INSERT INTO t (cols) SELECT values FROM rows AS s WHERE s.xq_tag = k ORDER BY s.rowid`(값의 `DEFAULT`는 그 열을 빼고, `DEFAULT VALUES`는 행마다 한 번). 바뀐 행 수가 문장의 `changes()`입니다.
+4. `RETURNING`이 있으면 각 동작이 바꾼 행의 대상 열(그리고 `old.*`, `new.*`)을 남기고, 조인 순서로 정렬합니다. 바깥 질의는 `SELECT <RETURNING> FROM rows(대상) AS t LEFT JOIN rows(조인) AS s ON s.rowid = t.xq_key`입니다.
+
+데이터 변경 `WITH`의 문장은 앞의 `WITH` 질의(데이터 변경 문장은 그 결과를 읽는 질의로)를 붙여 차례로 돌고, `RETURNING` 대신 대상의 모든 열과 `old.*`, `new.*`를 남깁니다. 그 CTE의 질의는 남긴 행 위의 `RETURNING` 목록입니다.
+
+`RETURNING`의 `old.a`·`new.a`는 파서가 이름 `"\x00old"`·`"\x00new"`(SQL 텍스트에는 쓸 수 없는 이름)로 바꾸고, 코어의 `RETURNING` 해석(`resolve.zig`)이 그 이름을 바꾸기 전·뒤 행의 레지스터로 읽습니다(없는 쪽은 NULL). 단계가 남긴 행에서는 숨은 열 `"old.a"`·`"new.a"`입니다.

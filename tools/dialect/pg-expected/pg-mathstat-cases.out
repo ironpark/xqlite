@@ -1,0 +1,376 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-mathstat-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 4fcf401d3a1d654e trigonometric functions
+sin|cos|tan|cot|asin|acos|atan|atan2
+0.8414709848078965|0.5403023058681398|1.5574077246549023|0.6420926159343306|0.5235987755982989|1.0471975511965979|0.7853981633974483|0.4636476090008061
+(1 row)
+sin|cos|sin|cos|tan|asin|acos|atan2|atan
+0|1|-0.5984721441039564|0.8623188722876839|-0.9315964599440725|1.5707963267948966|3.141592653589793|-2.356194490192345|-1.5707963267948966
+(1 row)
+cot|tan|atan2|atan2
+Infinity|1.633123935319537e+16|3.141592653589793|-1.5707963267948966
+(1 row)
+ERROR:  input is out of range
+ERROR:  input is out of range
+==== case 137c6fe4951241d5 trigonometric functions in degrees are exact at the special angles
+sind|cosd|tand|cotd|asind|acosd|atand|atan2d
+0.5|0.5|1|1|30|60|45|45
+(1 row)
+sind|cosd|tand|cotd
+-0|1|0|-Infinity
+-0.5|0.8660254037844387|-0.5773502691896257|-1.7320508075688774
+-0|-1|0|Infinity
+-1|0|-Infinity|0
+-0.7071067811865475|0.7071067811865475|-1|-1
+0|1|0|Infinity
+0.2588190451025208|0.9659258262890683|0.26794919243112275|3.7320508075688767
+0.5|0.8660254037844387|0.5773502691896257|1.7320508075688774
+0.7071067811865475|0.7071067811865475|1|1
+0.8660254037844387|0.5|1.7320508075688774|0.5773502691896257
+0.9659258262890683|0.2588190451025208|3.7320508075688767|0.26794919243112275
+1|0|Infinity|0
+0.8660254037844387|-0.5|-1.7320508075688774|-0.5773502691896257
+0.7071067811865475|-0.7071067811865475|-1|-1
+0.5|-0.8660254037844387|-0.5773502691896257|-1.7320508075688774
+0|-1|0|-Infinity
+-0.5|-0.8660254037844387|0.5773502691896257|1.7320508075688774
+-0.7071067811865475|-0.7071067811865475|1|1
+-1|0|-Infinity|0
+-0.8660254037844387|0.5|-1.7320508075688774|-0.5773502691896257
+-0.7071067811865475|0.7071067811865475|-1|-1
+-0.5|0.8660254037844387|-0.5773502691896257|-1.7320508075688774
+0|1|0|Infinity
+0.6494480483301837|0.7604059656000308|0.8540806854634668|1.170849566112539
+(24 rows)
+asind|acosd|atand
+-90|180|-45
+-30|120|-26.565051177077986
+-14.477512185929923|104.47751218592992|-14.036243467926479
+0|90|0
+14.477512185929923|75.52248781407008|14.036243467926479
+30|60|26.565051177077986
+48.59037789072914|41.40962210927086|36.86989764584402
+90|0|45
+(8 rows)
+atan2d
+90
+180
+-135
+29.744881296942225
+(4 rows)
+tand|cotd|cotd|tand|sind|cosd
+Infinity|Infinity|-Infinity|-Infinity|0|0.17364817766693036
+(1 row)
+ERROR:  input is out of range
+ERROR:  input is out of range
+==== case ba78eff8143918dc hyperbolic functions
+sinh|cosh|tanh|asinh|acosh|atanh
+1.1752011936438014|1.5430806348152437|0.7615941559557649|0.881373587019543|1.3169578969248166|0.5493061443340548
+(1 row)
+sinh|cosh|tanh|asinh|acosh|atanh|sinh|cosh|atanh|atanh
+-0.5210953054937474|1|-1|-1.8184464592320668|0|-0.25541281188299536|Infinity|Infinity|Infinity|-Infinity
+(1 row)
+ERROR:  input is out of range
+ERROR:  input is out of range
+==== case d924bad10ff04432 cbrt, degrees, radians, erf, gamma
+cbrt|cbrt|cbrt|cbrt|cbrt|degrees|degrees|radians|radians
+3|-2|1.2599210498948732|0|1e-100|57.29577951308232|180|3.141592653589793|-0.7941248096574199
+(1 row)
+erf|erf|erf|erf|erfc|erfc|erfc|erfc|erf
+0.5204998778130465|-0.8427007929497149|0.9999779095030014|0|0.6713732405408726|1.9953222650189528|2.0884875837625446e-45|0|1.1283791670955126e-10
+(1 row)
+gamma|gamma|gamma|gamma|lgamma|lgamma|lgamma|lgamma
+24|1.7724538509055159|2.363271801207354|7.257415615307998e+306|12.80182748008147|0.5723649429247001|0.8600470153764809|6.897755278982137e+302
+(1 row)
+ERROR:  value out of range: overflow
+ERROR:  value out of range: overflow
+ERROR:  value out of range: overflow
+ERROR:  value out of range: underflow
+ERROR:  value out of range: overflow
+ERROR:  value out of range: overflow
+radians
+1.73e-322
+(1 row)
+==== case 9806f3d3841f1c98 exp, ln, power and round of doubles
+exp|exp|exp|exp|ln|ln|log|log10
+2.718281828459045|0.024723526470339388|1.0142320547350045e+304|4.2e-322|1.0986122886681098|-690.7755278982137|0.3010299956639812|0.8450980400142568
+(1 row)
+power|power|?column?|power|power
+20.568471942722457|3.4364476540328197|1.4142135623730951|-512|0.01
+(1 row)
+round|round|round|round|round|round|round|pg_typeof|round|round
+2|-2|4|0|-0|1e+300|5|double precision|7.0|1.3
+(1 row)
+ERROR:  value out of range: overflow
+ERROR:  value out of range: underflow
+ERROR:  function round(double precision, integer) does not exist
+LINE 1: SELECT round(2.5::float8, 1);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+==== case 3cfa17407048016f math of numerics and integers gives double precision
+sin|cbrt|degrees|sind|erf|atan2
+0.9974949866040544|4|114.59155902616465|0.5|0.27632639016823696|0.6435011087932844
+(1 row)
+pg_typeof|pg_typeof|pg_typeof|pg_typeof|pg_typeof
+double precision|double precision|double precision|double precision|double precision
+(1 row)
+==== case e7df0bb38a9cba36 setseed and random
+setseed
+
+(1 row)
+random|random|random|random|random|random
+0.9851677175347999|0.825301858027981|17|-3|2413027467|-6342015374597709836
+(1 row)
+setseed
+
+(1 row)
+random|random|random|random|random|random
+2.92|0.001|85.825|487280647216825900509410053534|7.5|89055247852995426060.404151
+(1 row)
+setseed
+
+(1 row)
+random_normal|random_normal|random_normal|random_normal
+-0.8997026871801717|10.278693955021453|9.442681423090551|-5.000668685522102
+(1 row)
+setseed
+
+(1 row)
+random
+0.3978842227698167
+0.7438732417540841
+0.3875091442400458
+(3 rows)
+pg_typeof|pg_typeof|pg_typeof|pg_typeof|pg_typeof
+integer|bigint|numeric|double precision|double precision
+(1 row)
+ERROR:  lower bound must be less than or equal to upper bound
+ERROR:  lower bound must be less than or equal to upper bound
+ERROR:  lower bound cannot be NaN
+ERROR:  upper bound cannot be infinity
+ERROR:  setseed parameter 1.5 is out of allowed range [-1,1]
+ERROR:  setseed parameter -2 is out of allowed range [-1,1]
+==== case 6a179997de9f6f96 variance and standard deviation of numerics and integers
+variance|var_pop|var_samp|stddev|stddev_pop|stddev_samp
+0.56250000000000000000|0.37500000000000000000|0.56250000000000000000|0.75000000000000000000|0.61237243569579452455|0.75000000000000000000
+(1 row)
+variance|var_pop|stddev|stddev_pop
+9.1666666666666667|8.2500000000000000|3.0276503540974917|2.8722813232690143
+(1 row)
+variance|var_pop|stddev|stddev_pop
+7.3333333333333333|5.5000000000000000|2.7080128015453201|2.3452078799117148
+(1 row)
+variance|stddev
+0|0
+(1 row)
+variance|stddev_pop|var_pop
+3333333333333333333299999966666666666666.999999666667|47140452079103168293.153921644225|2222222222222222222199999977777777777777.999999777778
+(1 row)
+variance|var_pop|stddev|stddev_pop
+|0||0
+(1 row)
+variance|var_pop
+|
+(1 row)
+variance|stddev
+NaN|NaN
+(1 row)
+variance|stddev_pop
+NaN|NaN
+(1 row)
+variance|stddev
+2.0000000000000000|1.4142135623730950
+(1 row)
+pg_typeof|pg_typeof|pg_typeof|pg_typeof
+numeric|numeric|double precision|double precision
+(1 row)
+==== case 616718fe5d2240a5 variance and standard deviation of doubles
+variance|var_pop|stddev|stddev_pop
+0.5625|0.375|0.75|0.6123724356957945
+(1 row)
+variance|var_pop|stddev|stddev_pop
+1.9999999999e+19|1.5999999999199998e+19|4472135954.887775|3999999999.8999996
+(1 row)
+variance|stddev_pop
+1.3125|0.9354143466934853
+(1 row)
+variance|var_pop
+|0
+(1 row)
+ERROR:  value out of range: overflow
+==== case f4360528d6d28129 correlation, covariance and regression
+corr|covar_pop|covar_samp|regr_count|regr_avgx|regr_avgy
+0.9989922980237592|2.55|3.4|4|2.5|5.05
+(1 row)
+regr_slope|regr_intercept|regr_r2|regr_sxx|regr_syy|regr_sxy
+2.04|-0.04999999999999982|0.9979856115107916|5|20.849999999999994|10.2
+(1 row)
+corr|regr_slope|regr_intercept|regr_r2|covar_samp
+0.8883724615203056|81.96658073125167|12.827064318121165|0.7892056303876468|1919.5548625
+(1 row)
+corr|regr_r2|regr_slope
+1|1|1
+(1 row)
+corr|regr_slope|regr_r2|regr_intercept
+|0|1|5
+(1 row)
+corr|covar_pop|covar_samp|regr_count|regr_sxx
+|0||1|0
+(1 row)
+corr|regr_count|regr_avgx
+|0|
+(1 row)
+regr_count|regr_avgx|regr_avgy
+2|4|5
+(1 row)
+ERROR:  value out of range: overflow
+ERROR:  value out of range: overflow
+pg_typeof|pg_typeof|pg_typeof|pg_typeof
+double precision|bigint|double precision|double precision
+(1 row)
+==== case 03eb002d7569cc06 any_value and statistical aggregates with FILTER and GROUP BY
+any_value|any_value
+2|b
+(1 row)
+any_value
+
+(1 row)
+g|variance|stddev|corr|regr_count
+1|2.3333333333333333|1.5275252316519468|0.9897433186107872|1
+2|156.0000000000000000|12.489995996796797|0.9885224678702865|3
+(2 rows)
+variance|stddev_pop|corr
+1.00000000000000000000|1.4142135623730950|1
+(1 row)
+pg_typeof|pg_typeof|pg_typeof
+numeric|text|smallint
+(1 row)
+==== case a991a52763608875 statistical aggregates as window functions
+x|variance|stddev_pop|corr|regr_slope|any_value
+1||0|||1
+2|0.50000000000000000000|0.5|1|2|1
+3|1.00000000000000000000|0.816496580927726|0.989743318610787|2|1
+4|1.6666666666666667|1.118033988749895|0.9843740386976972|2|1
+5|2.5000000000000000|1.4142135623730951|0.9811049102515929|2|1
+(5 rows)
+x|variance|var_pop|covar_samp|regr_count
+1|0.50000000000000000000|0.25|1.5|2
+2|1.00000000000000000000|0.6666666666666666|4|3
+3|1.00000000000000000000|0.6666666666666666|6|3
+4|1.00000000000000000000|0.6666666666666666|8|3
+5|1.00000000000000000000|0.6666666666666666|10|3
+6|0.50000000000000000000|0.25|5.5|2
+(6 rows)
+x|stddev|corr|any_value
+1|||2
+2|0.70710678118654752440|1|3
+3|1.00000000000000000000|-0.49999999999999994|4
+4|1.00000000000000000000|-0.5|5
+5|1.00000000000000000000|1|6
+6|1.00000000000000000000|-0.49999999999999994|
+(6 rows)
+p|x|variance|regr_avgx
+0|2|4.0000000000000000|2
+0|4|4.0000000000000000|3
+0|6|4.0000000000000000|4
+1|1|4.0000000000000000|1
+1|3|4.0000000000000000|2
+1|5|4.0000000000000000|3
+(6 rows)
+==== case c7a04106420f9564 percentile_cont, percentile_disc and mode
+percentile_cont|percentile_disc|mode
+1.9|2|2
+(1 row)
+percentile_cont|percentile_cont|percentile_cont|percentile_cont
+5.5|1|10|7.75
+(1 row)
+percentile_disc|percentile_disc|percentile_disc|percentile_disc
+5|1|10|8
+(1 row)
+percentile_cont|percentile_disc|mode
+2.5|2.5|1.25
+(1 row)
+percentile_disc|mode|mode
+b|a|c
+(1 row)
+percentile_disc|percentile_disc
+2|3
+(1 row)
+percentile_cont|percentile_disc
+{1.6,4,NULL,7}|{7,4,1}
+(1 row)
+percentile_cont|percentile_disc
+{{2.75,7},{1.5,10}}|{}
+(1 row)
+percentile_disc
+{x}
+(1 row)
+percentile_cont|percentile_disc|mode
+||
+(1 row)
+percentile_cont
+
+(1 row)
+g|percentile_cont|mode
+1|3|3
+2|3|2
+(2 rows)
+pg_typeof|pg_typeof|pg_typeof|pg_typeof
+double precision|numeric|text|double precision[]
+(1 row)
+ERROR:  percentile value 1.5 is not between 0 and 1
+ERROR:  percentile value -0.1 is not between 0 and 1
+ERROR:  percentile value 2 is not between 0 and 1
+ERROR:  OVER is not supported for ordered-set aggregate percentile_cont
+LINE 1: SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) OVER (...
+               ^
+==== case c6076fecaab3f4e6 hypothetical-set aggregates
+rank|dense_rank|percent_rank|cume_dist
+2|2|0.25|0.8
+(1 row)
+rank|dense_rank|percent_rank|cume_dist
+4|3|0.5|0.5714285714285714
+(1 row)
+rank|rank|dense_rank|cume_dist
+4|1|3|0.5
+(1 row)
+rank|dense_rank|percent_rank|cume_dist
+3|3|0.4|0.6666666666666666
+(1 row)
+rank|rank|dense_rank
+2|4|2
+(1 row)
+rank|dense_rank|percent_rank|cume_dist
+1|1|0|1
+(1 row)
+g|rank|percent_rank
+1|2|0
+2|3|0
+(2 rows)
+pg_typeof|pg_typeof|pg_typeof|pg_typeof
+bigint|bigint|double precision|double precision
+(1 row)
+ERROR:  function rank(integer, integer, integer) does not exist
+LINE 1: SELECT rank(1, 2) WITHIN GROUP (ORDER BY 3);
+               ^
+HINT:  To use the hypothetical-set aggregate rank, the number of hypothetical direct arguments (here 2) must match the number of ordering columns (here 1).
+ERROR:  function mode(integer, integer) does not exist
+LINE 1: SELECT mode(1) WITHIN GROUP (ORDER BY 3);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+ERROR:  function percentile_cont(numeric, numeric, integer) does not exist
+LINE 1: SELECT percentile_cont(0.5, 0.2) WITHIN GROUP (ORDER BY 3);
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+==== case b7120e31cbb2d7b3 ordered-set aggregates over a table and in a view
+g|percentile_cont|percentile_disc|mode|rank|variance|stddev|corr
+1|2.25|2.25|x|2|0.18750000000000000000|1|0.8660254037844387
+2|15.25|10.00|z|1|55.1250000000000000|2.8284271247461903|1
+(2 rows)
+g|pc|pd|m|dr|vp|rs
+1|2|2.25|x|2|0.12500000000000000000|2
+2|2|10.00|z|1|27.5625000000000000|0.38095238095238093
+(2 rows)
+pg_typeof|pg_typeof|pg_typeof|pg_typeof|pg_typeof|pg_typeof
+double precision|numeric|text|bigint|numeric|double precision
+(1 row)

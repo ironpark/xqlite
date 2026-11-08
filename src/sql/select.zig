@@ -2087,6 +2087,25 @@ fn flattenSubquery(p: *Parse, s: *Select, i_from: usize, is_agg: bool) Oom!bool 
     if (s.win != null or sub.win != null) return false; // (25)
 
     var sub_src = sub.src.?;
+    // xqlite: a LATERAL subquery whose FROM has a subquery or a function
+    // (which may name the terms before it, and would be coded before the
+    // loops of those terms once a term of the outer query).
+    if (subitem.fg.xq_lateral and subitem.fg.is_correlated) {
+        var arm: ?*Select = sub;
+        while (arm) |x| : (arm = x.prior) {
+            if (x.src) |l| for (l.slice()) |*it| if (it.fg.is_subquery or it.fg.is_tab_func) return false;
+        }
+    }
+    // xqlite: a term a LATERAL subquery names passes that on to the terms
+    // it may be flattened into (the subquery's names then name them).
+    if (subitem.fg.xq_lateral_ref) {
+        var arm: ?*Select = sub;
+        while (arm) |x| : (arm = x.prior) {
+            if (x.src) |l| for (l.slice()) |*it| {
+                it.fg.xq_lateral_ref = true;
+            };
+        }
+    }
     if (sub.limit != null and s.limit != null) return false; // (13)
     if (sub.limit != null and sub.limit.?.right != null) return false; // (14)
     if (s.sel_flags.Compound and sub.limit != null) return false; // (15)
@@ -2824,6 +2843,12 @@ pub fn expandSubquery(p: *Parse, from: *SrcItem) Oom!bool {
     };
     t.cols = try columnsFromExprList(p, p.arena, sel.e_list);
     t.n_nv_col = @intCast(t.cols.len);
+    // xqlite: the result columns the IR's lowering hides (tree.Core.hidden).
+    if (sel.xq_hidden > 0) {
+        const n = @min(t.cols.len, sel.xq_hidden);
+        for (t.cols[t.cols.len - n ..]) |*c| c.col_flags.HIDDEN = true;
+        t.tab_flags.HasHidden = true;
+    }
     return p.n_err != 0;
 }
 
@@ -3496,6 +3521,9 @@ fn countOfViewOptimization(p: *Parse, s: *Select) Oom!bool {
 fn fromClauseTermCanBeCoroutine(p: *Parse, tab_list: *SrcList, i_arg: usize, sel_flags: SF) bool {
     var i = i_arg;
     const item = tab_list.at(i);
+    // xqlite: a correlated LATERAL subquery runs again for each row of
+    // the terms before it: a co-routine started in its loop.
+    if (item.fg.xq_lateral and item.fg.is_correlated) return true;
     if (item.fg.is_cte) {
         const use = item.u2.cte_use.?;
         if (use.e_m10d == .yes) return false;
@@ -3889,6 +3917,7 @@ fn selectImpl(p: *Parse, s: *Select, dest: *SelectDest) (Oom || int.ParseError)!
             item.fg.via_coroutine = true;
             subq.reg_result = d.i_sdst;
             aux.endCoroutine(v, subq.reg_return);
+            subq.xq_end = aux.currentAddr(v);
             aux.jumpHere(v, addr_top - 1);
             expr_mod.clearTempRegCache(p);
         } else if (item.fg.is_cte and item.u2.cte_use.?.addr_m9e > 0) {

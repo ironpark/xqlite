@@ -191,15 +191,28 @@ pub fn run(s: *Session, sql: []const u8, sink: anytype) !void {
         if (s.admit(cmd) == .refuse) return s.refuse(sink, cmd);
         var stmt = (it.next() catch return s.fail(sink, at, cmd)) orelse return s.sync(sink);
         defer stmt.finalize();
+        const ran = try s.commandOf(&stmt, cmd);
         // A single statement needs no transaction of its own.
         switch (try s.enter(&stmt, cmd, !onlyTrivia(it.rest), sink)) {
             .run => {},
             .done => continue,
             .failed => return,
         }
-        if (!try s.runOne(&stmt, cmd, sink)) return s.fail(sink, at, cmd);
+        if (!try s.runOne(&stmt, ran, sink)) return s.fail(sink, at, ran);
         s.after(cmd);
     }
+}
+
+/// The command of a compiled statement: that of the statement it runs
+/// when not its own (PostgreSQL's EXECUTE of a prepared statement: its
+/// tag is the statement's, `INSERT 0 1`), else `cmd`.
+fn commandOf(s: *Session, stmt: *const xqlite.Stmt, cmd: command.Command) !command.Command {
+    if (cmd.verb != .execute) return cmd;
+    const z = stmt.commandSql();
+    if (z.ptr == stmt.sql().ptr) return cmd;
+    const t = try s.gpa.dupeSentinel(u8, z, 0);
+    defer s.gpa.free(t);
+    return command.classify(t);
 }
 
 /// Whether a statement may run in the session's state, decided before
@@ -275,7 +288,7 @@ fn enter(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, more: bool, sink
             try s.completeBare(sink, cmd);
             return .done;
         },
-        .commit, .rollback => if (!in_tx and !savepointName(stmt.sql())) {
+        .commit, .rollback => if (!in_tx and !savepointName(stmt.sql()) and !andChain(stmt.sql())) {
             try s.notice(sink, .{
                 .level = .warning,
                 .sqlstate = "25P01".*,
@@ -316,6 +329,19 @@ fn savepointName(sql: []const u8) bool {
     var words = std.mem.tokenizeAny(u8, sql, " \t\r\n;");
     while (words.next()) |w| if (std.ascii.eqlIgnoreCase(w, "to")) return true;
     return false;
+}
+
+/// Whether a COMMIT or ROLLBACK ends in AND CHAIN (PostgreSQL's), which
+/// fails outside a transaction rather than warns.
+fn andChain(sql: []const u8) bool {
+    var words = std.mem.tokenizeAny(u8, sql, " \t\r\n;");
+    var prev: []const u8 = "";
+    var last: []const u8 = "";
+    while (words.next()) |w| {
+        prev = last;
+        last = w;
+    }
+    return std.ascii.eqlIgnoreCase(last, "chain") and !std.ascii.eqlIgnoreCase(prev, "no");
 }
 
 /// Whether nothing but white space and semicolons is left of a script
@@ -372,10 +398,14 @@ fn runOne(s: *Session, stmt: *xqlite.Stmt, cmd: command.Command, sink: anytype) 
 }
 
 /// Whether a statement's rows are its result: a SET has none, though a
-/// dialect may run it as a query (PostgreSQL's set_config()); a query of
-/// no columns (`SELECT;`) has its rows.
+/// dialect may run it as a query (PostgreSQL's set_config()), nor do
+/// PostgreSQL's DECLARE, MOVE and CLOSE; a query of no columns
+/// (`SELECT;`) has its rows.
 fn hasResult(stmt: *const xqlite.Stmt, cmd: command.Command) bool {
-    return (stmt.columnCount() > 0 or stmt.queryOfNoColumns()) and cmd.verb != .set and cmd.verb != .reset;
+    return (stmt.columnCount() > 0 or stmt.queryOfNoColumns()) and switch (cmd.verb) {
+        .set, .reset, .declare, .move, .close, .prepare, .deallocate, .discard, .lock => false,
+        else => true,
+    };
 }
 
 /// Report the connection's last error for the statement at `at` (null:
@@ -621,7 +651,8 @@ pub fn prepare(s: *Session, sql: []const u8, sink: anytype) !?*Prepared {
         },
     };
     errdefer if (p.stmt) |*st| st.finalize();
-    if (p.stmt) |*st| if (hasResult(st, cmd)) try p.describe();
+    if (p.stmt) |*st| p.command = try s.commandOf(st, cmd);
+    if (p.stmt) |*st| if (hasResult(st, p.command)) try p.describe();
     return p;
 }
 

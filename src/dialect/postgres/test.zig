@@ -128,7 +128,7 @@ test "pg: SELECT" {
     try c.expectRows("SELECT 1 UNION ALL SELECT 1", "1\n1\n");
     try c.expectRows("SELECT id FROM dept EXCEPT SELECT dept FROM emp", "3\n");
     try c.expectRows("(SELECT id FROM emp ORDER BY id DESC LIMIT 1) UNION ALL (SELECT id FROM emp ORDER BY id LIMIT 1)", "4\n1\n");
-    try c.expectError("SELECT 1 EXCEPT ALL SELECT 2", "EXCEPT ALL is not supported");
+    try c.expectRows("SELECT 1 UNION ALL SELECT 1 EXCEPT ALL SELECT 1", "1\n");
     // WITH, recursive or not; VALUES and TABLE as queries.
     try c.expectRows("WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 4) SELECT sum(n) FROM r", "10\n");
     try c.expectRows("WITH big AS MATERIALIZED (SELECT * FROM emp WHERE salary >= 80) SELECT count(*) FROM big", "2\n");
@@ -139,7 +139,7 @@ test "pg: SELECT" {
     try c.expectRows("SELECT name, sum(salary) OVER w, row_number() OVER w FROM emp WINDOW w AS (PARTITION BY dept ORDER BY id) ORDER BY id", "ann|100|1\nbob|180|2\ncid|NULL|1\ndan|50|1\n");
     try c.expectRows("SELECT id, sum(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM emp", "1|1\n2|3\n3|5\n4|7\n");
     try c.expectRows("SELECT id, count(*) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) FROM emp WHERE id < 3", "1|1\n2|2\n");
-    try c.expectError("SELECT DISTINCT ON (dept) name FROM emp", "DISTINCT ON is not supported");
+    try c.expectRows("SELECT DISTINCT ON (dept) name FROM emp ORDER BY dept, id", "ann\ncid\ndan\n");
 }
 
 test "pg: result column names" {
@@ -609,7 +609,7 @@ test "pg: INSERT, UPDATE, DELETE, RETURNING, ON CONFLICT" {
     try c.exec("WITH old AS (SELECT 'w1' AS k) DELETE FROM kv WHERE k IN (SELECT k FROM old)");
     try c.expectRows("SELECT k FROM kv", "w2\n");
     try c.expectError("INSERT INTO nosuch VALUES (1)", "relation \"nosuch\" does not exist");
-    try c.expectError("UPDATE kv SET nosuch = 1", "column \"nosuch\" does not exist");
+    try c.expectError("UPDATE kv SET nosuch = 1", "column \"nosuch\" of relation \"kv\" does not exist");
 }
 
 test "pg: transactions and savepoints" {
@@ -623,7 +623,10 @@ test "pg: transactions and savepoints" {
     try c.exec("BEGIN TRANSACTION; INSERT INTO t VALUES (4); SAVEPOINT s; INSERT INTO t VALUES (5); ROLLBACK TO SAVEPOINT s; INSERT INTO t VALUES (6); RELEASE SAVEPOINT s; COMMIT TRANSACTION");
     try c.exec("BEGIN; INSERT INTO t VALUES (7); SAVEPOINT a; INSERT INTO t VALUES (8); RELEASE a; ABORT");
     try c.expectRows("SELECT x FROM t ORDER BY x", "1\n3\n4\n6\n");
-    try c.expectError("COMMIT AND CHAIN", "AND CHAIN is not supported");
+    try c.expectError("COMMIT AND CHAIN", "COMMIT AND CHAIN can only be used in transaction blocks");
+    // AND CHAIN begins the next transaction at once.
+    try c.exec("BEGIN; INSERT INTO t VALUES (9); COMMIT AND CHAIN; INSERT INTO t VALUES (10); ROLLBACK AND CHAIN; INSERT INTO t VALUES (11); COMMIT");
+    try c.expectRows("SELECT x FROM t WHERE x > 8 ORDER BY x", "9\n11\n");
 }
 
 test "pg: uuid is 16 bytes, an older table's text column stays text" {
@@ -2053,4 +2056,163 @@ test "pg: the system relations are in their own catalogs" {
     // Hidden where PostgreSQL hides them (psql's \dt).
     try c.exec("CREATE TABLE t (a int)");
     try c.expectRows("SELECT c.relname FROM pg_class c LEFT JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', '') AND n.nspname <> 'pg_catalog' AND n.nspname !~ '^pg_toast' AND n.nspname <> 'information_schema' AND pg_table_is_visible(c.oid)", "t\n");
+}
+
+test "pg: DISTINCT ON, GROUPING SETS, WITH TIES, INTERSECT ALL and LATERAL" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE e (id int, d int, s int);
+        \\INSERT INTO e VALUES (1, 1, 10), (2, 1, 30), (3, 2, 20), (4, 2, 20), (5, NULL, 5);
+    );
+    try c.expectRows("SELECT DISTINCT ON (d) d, id FROM e ORDER BY d, s DESC, id", "1|2\n2|3\nNULL|5\n");
+    try c.expectRows("SELECT DISTINCT ON (d) * FROM e ORDER BY d, id LIMIT 1 OFFSET 1", "3|2|20\n");
+    try expectErrorState(&c, "SELECT DISTINCT ON (d) * FROM e ORDER BY s, d", "SELECT DISTINCT ON expressions must match initial ORDER BY expressions", "42P10");
+    try c.expectRows("SELECT id FROM e ORDER BY s DESC FETCH FIRST 2 ROWS WITH TIES", "2\n3\n4\n");
+    try expectErrorState(&c, "SELECT id FROM e FETCH FIRST 2 ROWS WITH TIES", "WITH TIES cannot be specified without ORDER BY clause", "42601");
+    try c.expectRows("SELECT d, grouping(d), sum(s) FROM e GROUP BY ROLLUP (d) ORDER BY 2, 1", "1|0|40\n2|0|40\nNULL|0|5\nNULL|1|85\n");
+    try c.expectRows("SELECT s FROM e INTERSECT ALL SELECT 20 UNION ALL SELECT 20 ORDER BY 1", "20\n20\n");
+    try c.expectRows("SELECT s FROM e EXCEPT ALL SELECT 20 ORDER BY 1", "5\n10\n20\n30\n");
+    // LATERAL: the next row of each group, run again for each row of e.
+    // LATERAL VALUES and column aliases over an item that is a subquery.
+    try c.expectRows("SELECT x FROM (SELECT 1 AS a) v, LATERAL (VALUES (a), (a + 1)) s(x)", "1\n2\n");
+    try c.expectRows("SELECT * FROM (VALUES (1), (2)) v(a), LATERAL (SELECT a * 10 AS p, a + 1 AS q) s(x, y) ORDER BY 1", "1|10|2\n2|20|3\n");
+    try c.expectRows("SELECT * FROM (SELECT 1 AS a) v, LATERAL (SELECT a UNION ALL SELECT a * 10) s(x) ORDER BY 2", "1|1\n1|10\n");
+    try c.expectRows("SELECT a.id, b.id FROM e a LEFT JOIN LATERAL (SELECT id FROM e b WHERE b.d = a.d AND b.id > a.id ORDER BY id LIMIT 1) b ON true ORDER BY 1", "1|2\n2|NULL\n3|4\n4|NULL\n5|NULL\n");
+    // In a view: the desugared query; a LATERAL reference has no SQLite text.
+    try c.exec("CREATE VIEW v AS SELECT DISTINCT ON (d) * FROM e ORDER BY d, s");
+    try c.expectRows("SELECT id FROM v", "1\n3\n5\n");
+    try c.expectError("CREATE VIEW w AS SELECT a.id, b.n FROM e a, LATERAL (SELECT a.s + 1 AS n) b", "LATERAL in the query of a view is not supported");
+    // The SQLite dialect reads the view's text.
+    try c.exec("PRAGMA xq_dialect = 'sqlite'");
+    try c.expectRows("SELECT id, d FROM v", "1|1\n3|2\n5|NULL\n");
+}
+
+test "pg: math, statistical, ordered-set and hypothetical-set aggregates" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.expectRows("SELECT sind(30), cosd(60), tand(45), asind(0.5), cbrt(27), pg_typeof(sin(1))", "0.5|0.5|1.0|30.0|3.0|double precision\n");
+    try c.expectError("SELECT acos(2)", "input is out of range");
+    // setseed() gives PostgreSQL's numbers.
+    try c.exec("SELECT setseed(0.5)");
+    try c.expectRows("SELECT random(), random(1, 100)", "0.98516771753479993|17\n");
+    try c.expectRows("SELECT variance(x)::text, stddev_pop(x)::text, var_pop(x::float8) FROM (VALUES (1.5), (2.25), (3)) v(x)", "0.56250000000000000000|0.61237243569579452455|0.375\n");
+    try c.expectRows("SELECT corr(y, x), regr_count(y, x), regr_slope(y, x) FROM (VALUES (1, 2), (2, 4), (3, 6)) v(x, y)", "1.0|3|2.0\n");
+    // A moving frame is computed anew (window.zig): an aggregate without
+    // an inverse.
+    try c.expectRows("SELECT string_agg(v::text, ',' ORDER BY x) FROM (SELECT x, var_samp(x::float8) OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM (VALUES (1), (2), (3), (4)) w(x)) s", "0.5,0.5,0.5\n");
+    try c.expectRows("SELECT percentile_cont(0.3) WITHIN GROUP (ORDER BY x), percentile_disc(0.3) WITHIN GROUP (ORDER BY x DESC), mode() WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (5)) v(x)", "1.9|2|2\n");
+    try c.expectRows("SELECT percentile_cont(array[0.1, 0.5]) WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (5)) v(x)", "{1.3,2}\n");
+    try c.expectRows("SELECT rank(2) WITHIN GROUP (ORDER BY x), dense_rank(2) WITHIN GROUP (ORDER BY x), percent_rank(2) WITHIN GROUP (ORDER BY x), cume_dist(2) WITHIN GROUP (ORDER BY x) FROM (VALUES (1), (2), (2), (5)) v(x)", "2|2|0.25|0.8\n");
+    try c.expectError("SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) OVER () FROM (VALUES (1)) v(x)", "OVER is not supported for ordered-set aggregate percentile_cont");
+    try c.expectError("SELECT percentile_cont(1.5) WITHIN GROUP (ORDER BY x) FROM (VALUES (1)) v(x)", "percentile value 1.5 is not between 0 and 1");
+    // A view keeps SQLite text that computes the same.
+    try c.exec("CREATE TABLE t (a int, f float8)");
+    try c.exec("INSERT INTO t VALUES (1, 0.5), (2, 1.5), (4, 4)");
+    try c.exec("CREATE VIEW v AS SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY f DESC) AS p, rank(2) WITHIN GROUP (ORDER BY a) AS r, stddev(f) AS s FROM t");
+    try c.expectRows("SELECT p, r, s FROM v", "1.5|2|1.8027756377319946\n");
+    try c.expectRows("SELECT count(*) FROM sqlite_schema WHERE sql LIKE '%xq_percentile_cont(%ORDER BY%' AND sql LIKE '%xq_float_stddev_samp(%'", "1\n");
+}
+
+/// The slots of rows of the connection (rows.zig) that are not freed.
+fn liveSlots(c: *Conn) usize {
+    var n: usize = 0;
+    var id: u32 = 1;
+    while (id < 64) : (id += 1) {
+        if (@import("rows.zig").slotCount(c.db, id) != null) n += 1;
+    }
+    return n;
+}
+
+test "pg: MERGE" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t (id int PRIMARY KEY, a int CHECK (a < 100), b text DEFAULT 'b');
+        \\INSERT INTO t VALUES (1, 1, 'x'), (2, 2, 'y'), (3, 3, 'z');
+    );
+    // The changes: MERGE's count (the wire server's `MERGE n`).
+    try c.exec("MERGE INTO t USING (VALUES (1, 10), (4, 40), (5, 50)) AS s(id, a) ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED AND s.id = 4 THEN INSERT (id, a) VALUES (s.id, s.a) WHEN NOT MATCHED BY SOURCE AND t.id = 3 THEN DELETE");
+    try testing.expectEqual(@as(i64, 3), api.changes(c.db));
+    try c.expectRows("SELECT * FROM t ORDER BY id", "1|10|x\n2|2|y\n4|40|b\n");
+    try testing.expectEqual(@as(usize, 0), liveSlots(&c));
+    // Parameters, a statement run twice.
+    var stmt: ?*vi.Vdbe = null;
+    try testing.expectEqual(RC.OK, prepare.prepareV2(c.db, "MERGE INTO t USING (SELECT $1::int AS id, $2::int AS a) s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a = s.a WHEN NOT MATCHED THEN INSERT (id, a) VALUES (s.id, s.a) RETURNING merge_action(), t.id, t.a", &stmt, null));
+    try testing.expectEqual(@as(usize, 2), api.bindParameterCount(stmt.?));
+    for ([_][3]i64{ .{ 2, 20, 2 }, .{ 9, 90, 1 } }) |row| {
+        _ = api.reset(stmt.?);
+        try testing.expectEqual(RC.OK, api.bindInt64(stmt.?, 1, row[0]));
+        try testing.expectEqual(RC.OK, api.bindInt64(stmt.?, 2, row[1]));
+        try testing.expectEqual(RC.ROW, api.step(stmt.?));
+        try testing.expectEqualStrings(if (row[2] == 1) "INSERT" else "UPDATE", api.columnText(stmt.?, 0).?);
+        try testing.expectEqual(row[0], api.columnInt64(stmt.?, 1));
+        try testing.expectEqual(row[1], api.columnInt64(stmt.?, 2));
+        try testing.expectEqual(RC.DONE, api.step(stmt.?));
+        try testing.expectEqual(@as(i64, 1), api.changes(c.db));
+    }
+    _ = api.finalize(stmt.?);
+    try testing.expectEqual(@as(usize, 0), liveSlots(&c));
+    // An error of a later action undoes the earlier ones; in a
+    // transaction, only the statement.
+    try expectErrorState(&c, "MERGE INTO t USING (VALUES (1, 5), (2, 500)) AS s(id, a) ON t.id = s.id WHEN MATCHED AND s.id = 1 THEN UPDATE SET a = s.a WHEN MATCHED THEN UPDATE SET a = s.a", "new row for relation \"t\" violates check constraint \"t_a_check\"\nDETAIL:  Failing row contains (2, 500, y).", "23514");
+    try c.exec("BEGIN; INSERT INTO t (id, a) VALUES (7, 7)");
+    try expectErrorState(&c, "MERGE INTO t USING (VALUES (1), (1)) AS s(id) ON t.id = s.id WHEN MATCHED THEN DELETE", "MERGE command cannot affect row a second time\nHINT:  Ensure that not more than one source row matches any one target row.", "21000");
+    try c.exec("COMMIT");
+    try c.expectRows("SELECT id, a FROM t ORDER BY id", "1|10\n2|20\n4|40\n7|7\n9|90\n");
+    try expectErrorState(&c, "SELECT merge_action()", "MERGE_ACTION() can only be used in the RETURNING list of a MERGE command", "42601");
+    try expectErrorState(&c, "MERGE INTO t USING (SELECT 1 AS id) s ON t.id = s.id WHEN NOT MATCHED BY SOURCE THEN UPDATE SET a = s.id", "invalid reference to FROM-clause entry for table \"s\"\nDETAIL:  There is an entry for table \"s\", but it cannot be referenced from this part of the query.", "42P01");
+    try c.expectError("EXPLAIN MERGE INTO t USING (SELECT 1 AS id) s ON t.id = s.id WHEN MATCHED THEN DELETE", "EXPLAIN of this statement is not supported");
+}
+
+test "pg: data-modifying WITH, ON CONFLICT ON CONSTRAINT, RETURNING old and new" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    try c.exec(
+        \\CREATE TABLE t (id int PRIMARY KEY, a int, CONSTRAINT t_a UNIQUE (a));
+        \\CREATE TABLE log (id int, what text);
+        \\INSERT INTO t VALUES (1, 10), (2, 20), (3, 30);
+    );
+    // The statement's count is its own (`INSERT 0 2`).
+    try c.exec("WITH d AS (DELETE FROM t WHERE id > 1 RETURNING id) INSERT INTO log SELECT id, 'deleted' FROM d");
+    try testing.expectEqual(@as(i64, 2), api.changes(c.db));
+    try c.expectRows("SELECT * FROM log ORDER BY id", "2|deleted\n3|deleted\n");
+    try c.expectRows("WITH u AS (UPDATE t SET a = a + 1 RETURNING old.a AS o, new.a AS n, a) SELECT * FROM u", "10|11|11\n");
+    try testing.expectEqual(@as(usize, 0), liveSlots(&c));
+    try expectErrorState(&c, "WITH d AS (DELETE FROM t) SELECT * FROM d", "WITH query \"d\" does not have a RETURNING clause", "0A000");
+    try expectErrorState(&c, "SELECT * FROM (WITH d AS (DELETE FROM t RETURNING id) SELECT * FROM d) x", "WITH clause containing a data-modifying statement must be at the top level", "0A000");
+    try c.expectRows("INSERT INTO t VALUES (5, 11) ON CONFLICT ON CONSTRAINT t_a DO UPDATE SET id = excluded.id RETURNING old.id, new.id, id", "1|5|5\n");
+    try c.expectRows("INSERT INTO t VALUES (6, 66) ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING RETURNING old.a, new.a", "NULL|66\n");
+    try expectErrorState(&c, "INSERT INTO t VALUES (6, 66) ON CONFLICT ON CONSTRAINT nope DO NOTHING", "constraint \"nope\" for table \"t\" does not exist", "42704");
+    try c.expectRows("DELETE FROM t WHERE id = 6 RETURNING old.a, new.a, a", "66|NULL|66\n");
+    try c.expectError("UPDATE t SET a = 0 RETURNING old.zz", "column old.zz does not exist");
+    try expectErrorState(&c, "UPDATE t SET zz = 0", "column \"zz\" of relation \"t\" does not exist", "42703");
+    // OVERRIDING USER VALUE: the identity's own values.
+    try c.exec("CREATE TABLE g (id int GENERATED ALWAYS AS IDENTITY, v text)");
+    try c.exec("INSERT INTO g OVERRIDING USER VALUE VALUES (10, 'a'); INSERT INTO g OVERRIDING USER VALUE SELECT 20, 'b'");
+    try c.expectRows("SELECT * FROM g ORDER BY id", "1|a\n2|b\n");
+}
+
+test "pg: double precision and real input and text, -0, numbers against string literals" {
+    var c: Conn = undefined;
+    try openPg(&c);
+    defer c.close();
+    // (The rows are column_text()'s; ::text is PostgreSQL's text.)
+    try c.expectRows("SELECT 'Infinity'::float8::text, '-inf'::real::text, 1.1::real::float8::text, 1e10::float8::text, (-(0.0::float8))::text, 1e6::real::text", "Infinity|-Infinity|1.100000023841858|10000000000|-0|1e+06\n");
+    try expectErrorState(&c, "SELECT 'abc'::float8", "invalid input syntax for type double precision: \"abc\"", "22P02");
+    try expectErrorState(&c, "SELECT 1e300::float8::real", "value out of range: overflow", "22003");
+    try expectErrorState(&c, "SELECT 'NaN'::float8", "NaN is not supported for type double precision", "0A000");
+    try c.exec("CREATE TABLE f (a float8, b real)");
+    try c.exec("INSERT INTO f VALUES ('2.5', 1.1::float8), (3, '-Infinity')");
+    try c.expectRows("SELECT a::text, b::float8::text FROM f ORDER BY a", "2.5|1.100000023841858\n3|-Infinity\n");
+    try c.expectError("INSERT INTO f VALUES ('x', 1)", "invalid input syntax for type double precision: \"x\"");
+    // A view keeps the casts' types.
+    try c.exec("CREATE VIEW fv AS SELECT a::real AS r, a::text AS t FROM f");
+    try c.expectRows("SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'fv'::regclass AND attnum > 0 ORDER BY attnum", "real\ntext\n");
+    try c.expectRows("SELECT x FROM (VALUES (5), (10)) v(x) WHERE x > '7'", "10\n");
+    try c.expectRows("SELECT x::text FROM (VALUES (2.50), (1.0), (3)) v(x) ORDER BY x", "1.0\n2.50\n3\n");
 }

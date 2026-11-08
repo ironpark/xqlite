@@ -281,3 +281,21 @@ SELECT pg_get_serial_sequence('author', 'id');
 -- case: format-type
 SELECT format_type(23, -1), format_type(1043, 204), format_type(1700, 655366), format_type(25, NULL);
 SELECT a.attname, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a WHERE a.attrelid = 'book'::regclass AND a.attnum > 0 ORDER BY a.attnum;
+
+-- case: cursors
+BEGIN;
+DECLARE c SCROLL CURSOR FOR SELECT id, title, price FROM book ORDER BY id;
+FETCH 2 FROM c;
+MOVE ALL c;
+FETCH BACKWARD 1 c;
+MOVE BACKWARD ALL IN c;
+FETCH 0 c;
+CLOSE c;
+DECLARE n NO SCROLL CURSOR WITH HOLD FOR SELECT name FROM author ORDER BY id;
+END;
+FETCH ALL n;
+FETCH PRIOR n;
+CLOSE ALL;
+\set FETCH_COUNT 1
+SELECT id FROM book ORDER BY id;
+\unset FETCH_COUNT

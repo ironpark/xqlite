@@ -39,6 +39,8 @@ const uuid = @import("uuid.zig");
 const integer = @import("integer.zig");
 const catalog = @import("../../catalog/catalog.zig");
 const util = @import("../../sql/util.zig");
+const dml = @import("dml.zig");
+const tree = @import("../../ir/tree.zig");
 
 const RC = int.RC;
 
@@ -46,7 +48,7 @@ pub const frontend: dialect.Frontend = .{ .run = run };
 
 pub const run = driver.run(parser, compile, translateError);
 
-fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.CompileError!void {
+pub fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.CompileError!void {
     // ANALYZE [VERBOSE] [[schema.]name], as written (SQLite's takes the
     // same arguments). VERBOSE does nothing; schema public is main and
     // pg_temp temp.
@@ -85,17 +87,43 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.CompileE
         return;
     }
     ps.p = p;
+    // PREPARE, EXECUTE, DEALLOCATE, DISCARD, SET CONSTRAINTS, LOCK.
+    if (try @import("commands.zig").statement(ps)) return;
     // CREATE/DROP SCHEMA, SET, RESET, SHOW.
     const done = try session.statement(ps);
     if (done) return;
-    const stmt = try ps.statement();
-    try ps.regOutputs(stmt);
+    // DECLARE, FETCH, MOVE, CLOSE.
+    if (try @import("cursor.zig").statement(ps)) return;
+    const parsed = try ps.statement();
     // The types of the columns of the tables, for the typing of names
     // resolved (sql/typing.zig, overload.zig).
     catalog.readAll(p.db) catch |err| switch (err) {
         error.OutOfMemory => |e| return e,
         else => {},
     };
+    // MERGE and data-modifying WITH: steps run first, and a query of
+    // what they kept (dml.zig).
+    var plan: dml.Plan = .{};
+    const stmt: tree.Stmt = if (ps.merge) |m| {
+        if (parsed == .explain) {
+            ir.stmt.errorMsgAt(p, sql.ptr, "EXPLAIN of this statement is not supported", .{});
+            return error.Failed;
+        }
+        const q = try dml.merge(ps, m, &plan);
+        try ps.regOutputs(q orelse parsed);
+        try plan.begin(p);
+        if (q) |x| {
+            try jtype.statement(ps, x);
+            var l: lower.Lowerer = .init(p, sql);
+            try l.statement(x);
+            try plan.end(p);
+        }
+        return;
+    } else blk: {
+        if (dml.dmlWith(parsed)) |w| try dml.with(ps, w, &plan);
+        break :blk parsed;
+    };
+    try ps.regOutputs(stmt);
     try jtype.statement(ps, stmt);
     try ddltype.statement(ps, stmt);
     switch (stmt) {
@@ -112,8 +140,14 @@ fn compile(p: *int.Parse, sql: [:0]const u8, ps: *parser.Parser) driver.CompileE
         },
         else => {},
     }
+    if (plan.active()) try plan.begin(p);
     var l: lower.Lowerer = .init(p, sql);
     try l.statement(stmt);
+    // AND CHAIN: P3 of OP_AutoCommit begins the next transaction.
+    if (ps.chain) if (p.vdbe) |v| for (v.ops.items) |*op| {
+        if (op.opcode == .AutoCommit) op.p3 = 1;
+    };
+    if (plan.active()) try plan.end(p);
 }
 
 /// The HINT of a function call no function matches.
@@ -131,6 +165,14 @@ pub fn functionNotExist(a: std.mem.Allocator, name: []const u8, args: []const []
 /// SQLite's messages for common failures in PostgreSQL's words.
 fn translateError(p: *int.Parse) int.Oom!void {
     const m: []const u8 = p.err_msg orelse return;
+    // RETURNING old.x or new.x of no column x (parser.zig's
+    // old_new_markers): PostgreSQL names it unquoted.
+    const resolve = @import("../../sql/resolve.zig");
+    inline for (.{ resolve.returning_old, resolve.returning_new }) |marker| {
+        const q = marker[1..];
+        const head = "no such column: " ++ marker ++ ".";
+        if (std.mem.startsWith(u8, m, head)) return util.rewordError(p, .{ .message = try std.fmt.allocPrint(p.arena, "column " ++ q ++ ".{s} does not exist", .{m[head.len..]}) });
+    }
     const rules = [_]driver.Reword{
         .{ .prefix = "no such table: ", .before = "relation \"", .after = "\" does not exist" },
         .{ .prefix = "no such column: ", .before = "column \"", .after = "\" does not exist" },
@@ -193,6 +235,10 @@ pub const hooks: dialect.Hooks = .{
     .functions = &functions,
     .engine_functions = &engine_functions,
     .engine_modules = &@import("pgcatalog.zig").modules,
+    // MERGE and data-modifying WITH (dml.zig).
+    .table_function = @import("rows.zig").register,
+    .table_function_type = @import("rows.zig").columnType,
+    .run_steps = @import("rows.zig").runSteps,
     .collations = &.{
         .{ .name = "xq_pg_jsonb", .cmp = jfuncs.collate },
         .{ .name = "xq_pg_interval", .cmp = datetime.collateInterval },
@@ -213,10 +259,12 @@ pub const hooks: dialect.Hooks = .{
 const functions = [_]int.FuncDef{
     dfunc.scalar("version", 0, .{}, versionFunc),
 } ++ sequence.functions ++ funcs.functions ++ session.functions ++ jfuncs.functions ++ catalog_funcs.functions ++ array.functions ++ uuid.functions ++ datetime.functions ++ ivinput.functions ++
-    formatting.functions ++ builtins.functions ++ inputinfo.functions ++ dtfuncs.functions ++ regexp.functions ++ inet.functions;
+    formatting.functions ++ builtins.functions ++ inputinfo.functions ++ dtfuncs.functions ++ regexp.functions ++ inet.functions ++
+    @import("mathfuncs.zig").functions ++ @import("cursor.zig").functions ++ @import("commands.zig").functions;
 
 const engine_functions = funcs.engine_functions ++ integer.engine_functions ++ jfuncs.engine_functions ++ catalog_funcs.engine_functions ++ datetime.engine_functions ++ array.engine_functions ++ uuid.engine_functions ++ ivinput.engine_functions ++
-    formatting.engine_functions ++ builtins.engine_functions ++ inputinfo.engine_functions ++ dtfuncs.engine_functions ++ regexp.engine_functions ++ inet.engine_functions ++ @import("enums.zig").engine_functions;
+    formatting.engine_functions ++ builtins.engine_functions ++ inputinfo.engine_functions ++ dtfuncs.engine_functions ++ regexp.engine_functions ++ inet.engine_functions ++ @import("enums.zig").engine_functions ++
+    @import("ordered.zig").engine_functions;
 
 // to_char(), gcd(), pg_input_is_valid(), date_trunc() ...
 const formatting = @import("formatting.zig");
@@ -262,4 +310,8 @@ test {
     _ = @import("inet.zig");
     _ = @import("alter.zig");
     _ = @import("enums.zig");
+    _ = @import("mathfuncs.zig");
+    _ = @import("cursor.zig");
+    _ = @import("commands.zig");
+    _ = @import("rows.zig");
 }

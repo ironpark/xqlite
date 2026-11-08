@@ -611,6 +611,13 @@ pub fn windowUpdate(p: *Parse, list: ?*Window, win: *Window, func: *const FuncDe
             }
         }
     }
+    // xqlite: an aggregate window function without xInverse (but SQLite's
+    // min() and max(), which windowCodeOp() computes with an index: a
+    // dialect's engine function, stats.zig's) computes a frame whose
+    // start moves by scanning it, as with EXCLUDE NO OTHERS.
+    if (func.x_value != null and func.x_inverse == null and !func.func_flags.MINMAX and win.e_exclude == 0 and win.e_start != TK.UNBOUNDED) {
+        win.e_exclude = TK.NO;
+    }
     win.w_func = func;
 }
 

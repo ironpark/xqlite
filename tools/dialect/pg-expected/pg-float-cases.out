@@ -1,0 +1,89 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-float-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 1d4c1209ee4988b3 input of strings
+a|b|c|d|e
+Infinity|-Infinity|1.5|Infinity|2000
+(1 row)
+ERROR:  invalid input syntax for type double precision: "abc"
+LINE 1: SELECT 'abc'::float8;
+               ^
+ERROR:  "1e400" is out of range for type double precision
+LINE 1: SELECT '1e400'::float8;
+               ^
+ERROR:  "1e40" is out of range for type real
+LINE 1: SELECT '1e40'::real;
+               ^
+ERROR:  "1e-50" is out of range for type real
+LINE 1: SELECT '1e-50'::real;
+               ^
+ERROR:  "1e-400" is out of range for type double precision
+LINE 1: SELECT '1e-400'::float8;
+               ^
+ERROR:  "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" is out of range for type real
+ERROR:  "0.000000000000000000000000000000000000000000000000000000000001" is out of range for type real
+a|b|c|d|e
+Infinity|-Infinity|1.25|t|2.5
+(1 row)
+f|r
+2.5|2.5
+-0|-0
+10000000000|1e+10
+(3 rows)
+==== case 59e9ab7b794bf0d7 real is single precision
+a|b|c|d|t
+1.100000023841858|1.100000023841858|16777216|3|real
+(1 row)
+ERROR:  value out of range: overflow
+ERROR:  value out of range: underflow
+id|a|b|bd|at|bt
+1|1.1|1.1|1.100000023841858|1.1|1.1
+2|Infinity|-Infinity|-Infinity|Infinity|-Infinity
+3|1.1|1.1|1.100000023841858|1.1|1.1
+4|2|1e+10|10000000000|2|1e+10
+(4 rows)
+ERROR:  invalid input syntax for type double precision: "abc"
+LINE 1: INSERT INTO fr VALUES (5, 'abc', 1);
+                                  ^
+ERROR:  value out of range: overflow
+a|b|c|d|e
+999999|1e+06|1.234567e+06|123456.7|1.234e-05
+(1 row)
+==== case 5e29180068b39667 text of doubles
+a|b|c|d|e|f|g
+10000000000|2|1e+15|1e-05|0.1|Infinity|0.30000000000000004
+(1 row)
+c|cc|f
+a1.5b|1e+20/0.1|10000000000
+(1 row)
+==== case e583731e4093ade7 unary minus of doubles and Infinity
+a|b|c|d|e|t
+-0|-0|0|-Infinity|-1.5|real
+(1 row)
+a|b|c
+Infinity|t|t
+(1 row)
+==== case a80fa861b62c42b6 a number compared with a string literal
+a|b|c|d|e
+t|t|f|t|t
+(1 row)
+x|gt
+5|f
+10|t
+(2 rows)
+ERROR:  invalid input syntax for type integer: "a"
+LINE 1: SELECT 1 = 'a';
+                   ^
+==== case 32c082e59a210833 numerics of different scales in a compound's column
+x
+1.0
+2.50
+3
+(3 rows)
+x
+2.50
+1.0
+(2 rows)
+x|d
+-1.0|-2.0
+2.50|5.00
+(2 rows)

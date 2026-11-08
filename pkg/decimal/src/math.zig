@@ -1185,3 +1185,101 @@ test "decimal_math: PostgreSQL's digits and scales" {
     try std.testing.expectError(error.Overflow, power(a, numOf(a, "10"), numOf(a, "200000")));
     try std.testing.expectError(error.Overflow, exp(a, numOf(a, "10000.0")));
 }
+
+/// numeric_stddev_internal() of finite sums: the variance (`root`: the
+/// standard deviation) of `n` numbers (> 1 if `sample`, > 0 else) of sum
+/// `sum_x` (its display scale the largest of theirs) and sum of squares
+/// `sum_x2`: (n * sum_x2 - sum_x^2) / (n * (n - 1)) (n * n if not
+/// `sample`) at select_div_scale()'s scale, the root at the same scale;
+/// zero (of scale 0) if the numerator is not positive.
+pub fn variance(a: Allocator, n: i64, sum_x: Dec, sum_x2: Dec, sample: bool, root: bool) (Error || dec.Error)!Dec {
+    const vn = try dec.fromInt(a, n);
+    const s2: u32 = sum_x.dscale * 2;
+    const sq = try dec.mul(a, sum_x, sum_x);
+    const nx2 = try dec.mul(a, vn, sum_x2);
+    var num = try dec.sub(a, nx2, sq);
+    num.dscale = @max(num.fracDigits(), s2);
+    if (num.sign() <= 0) return Dec.zero;
+    const den = try dec.fromInt(a, if (sample) n * (n - 1) else n * n);
+    const rscale = dec.divScale(num, den);
+    const q = try dec.divide(a, num, den, rscale, true);
+    if (!root) return q;
+    const v = strip(try fromDec(a, q));
+    return toDec(a, try sqrtVar(a, v, @intCast(rscale)));
+}
+
+/// random_var(): a random number from finite `rmin` to `rmax` with the
+/// larger of their display scales, PostgreSQL's digits for the same
+/// sequence of `rng.range(lo, hi)` (pg_prng_uint64_range()) values;
+/// error.Invalid if rmin > rmax.
+pub fn random(a: Allocator, rmin: Dec, rmax: Dec, rng: anytype) (Error || dec.Error)!Dec {
+    const vmin = try fromDec(a, rmin);
+    const vmax = try fromDec(a, rmax);
+    const rscale: i32 = @max(vmin.dscale, vmax.dscale);
+    const rlen = strip(try sub(a, vmax, vmin));
+    if (rlen.neg and rlen.digits.len > 0) return error.Invalid;
+    if (rlen.digits.len == 0) {
+        var r = vmin;
+        r.dscale = rscale;
+        return toDec(a, r);
+    }
+    const res_ndigits: i32 = rlen.weight + 1 + @divTrunc(rscale + dec_digits - 1, dec_digits);
+    const n = @divTrunc(rscale + dec_digits - 1, dec_digits) * dec_digits - rscale;
+    var pow10: u64 = 1;
+    for (0..@intCast(n)) |_| pow10 *= 10;
+    var rlen64: u64 = @intCast(rlen.digits[0]);
+    var rlen64_ndigits: i32 = 1;
+    while (rlen64_ndigits < res_ndigits and rlen64_ndigits < 4) {
+        rlen64 *= @as(u64, nbase);
+        if (rlen64_ndigits < rlen.digits.len) rlen64 += @intCast(rlen.digits[@intCast(rlen64_ndigits)]);
+        rlen64_ndigits += 1;
+    }
+    const nb: u64 = @intCast(nbase);
+    const digits = try a.alloc(i32, @intCast(res_ndigits));
+    while (true) {
+        var rand: u64 = if (rlen64_ndigits == res_ndigits and pow10 != 1)
+            rng.range(0, rlen64 / pow10) * pow10
+        else
+            rng.range(0, rlen64);
+        var i: i32 = rlen64_ndigits - 1;
+        while (i >= 0) : (i -= 1) {
+            digits[@intCast(i)] = @intCast(rand % nb);
+            rand /= nb;
+        }
+        var whole = res_ndigits;
+        if (pow10 != 1) whole -= 1;
+        var k: usize = @intCast(rlen64_ndigits);
+        while (@as(i32, @intCast(k)) < whole - 3) {
+            rand = rng.range(0, nb * nb * nb * nb - 1);
+            inline for (0..3) |_| {
+                digits[k] = @intCast(rand % nb);
+                rand /= nb;
+                k += 1;
+            }
+            digits[k] = @intCast(rand);
+            k += 1;
+        }
+        while (@as(i32, @intCast(k)) < whole) {
+            digits[k] = @intCast(rng.range(0, nb - 1));
+            k += 1;
+        }
+        if (@as(i32, @intCast(k)) < res_ndigits) {
+            digits[k] = @intCast(rng.range(0, nb / pow10 - 1) * pow10);
+        }
+        const r: Var = strip(.{ .weight = rlen.weight, .digits = digits, .dscale = rscale });
+        if (cmp(r, rlen) != .gt) {
+            var s = try add(a, r, vmin);
+            s.dscale = rscale;
+            return toDec(a, s);
+        }
+    }
+}
+
+test "variance" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 1.5, 2.25, 3: PostgreSQL's 0.56250000000000000000.
+    const v = try variance(a, 3, numOf(a, "6.75"), numOf(a, "16.3125"), true, false);
+    try std.testing.expectEqualStrings("0.56250000000000000000", try dec.toText(a, v));
+}

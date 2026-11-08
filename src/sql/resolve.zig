@@ -204,7 +204,8 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
     while (nc) |n| {
         cur_nc = n;
         if (n.src_list) |src_list| {
-            for (src_list.slice()) |*item| {
+            const visible = if (n.xq_n_src) |k| src_list.slice()[0..k] else src_list.slice();
+            for (visible) |*item| {
                 const tb = item.s_tab.?;
                 t = tb;
                 if (item.fg.is_nested_from) {
@@ -285,6 +286,7 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
             if (match) |m| {
                 e.i_table = m.i_cursor;
                 e.y = .{ .tab = m.s_tab };
+                if (n.xq_n_src != null) m.fg.xq_lateral_ref = true;
                 if (m.fg.jointype.intersects(.{ .LEFT = true, .LTORJ = true })) e.flags.CanBeNull = true;
                 schema = m.s_tab.?.schema;
             }
@@ -302,7 +304,22 @@ fn lookupName(p: *Parse, zdb_arg: ?[]const u8, tab: ?[]const u8, right: *const E
                     {
                         e.i_table = @intFromBool(op != TK.DELETE);
                         t = tt;
-                    }
+                    } else if (n.nc_flags.UBaseReg and tab != null) if (returningOldNew(tab.?)) |is_new| {
+                        // xqlite: a dialect's OLD and NEW (PostgreSQL's
+                        // RETURNING old.a, new.a): the row before and after
+                        // the change, NULL where there is none.
+                        const site = p.xq_returning_op;
+                        if ((is_new and site == TK.DELETE) or (!is_new and site == TK.INSERT)) {
+                            if (build.columnIndex(tt, col) < 0 and !isRowid(col)) {
+                                util.errorMsg(p, "no such column: {s}.{s}", .{ tab.?[1..], col });
+                                return WRC.Abort;
+                            }
+                            e.op = TK.NULL;
+                            return WRC.Prune;
+                        }
+                        e.i_table = @intFromBool(is_new);
+                        t = tt;
+                    };
                 } else if (op != TK.DELETE and tab != null and ctype.eqlNoCase("new", tab.?)) {
                     e.i_table = 1;
                     t = tt;
@@ -515,11 +532,28 @@ fn typeColumn(p: *Parse, m: *const SrcItem, e: *Expr) Oom!void {
 /// memory, else unknown (see typeColumn()).
 pub fn tableColumnType(p: *Parse, t: *Table, i: usize) Oom!typing.TypeId {
     if (engineColumnType(t, i)) |ty| return typing.intern(p.db, ty[0], ty[1]);
+    if (t.isVirtual() and t.u.vtab.args.len > 0) if (@import("../dialect/dialect.zig").tableFunctionType(p.db, t.u.vtab.args[0], i)) |ty| {
+        return p.db.xq.types.addType(p.db.gpa, ty[0], ty[1], ty[2]);
+    };
     if (!t.isOrdinary() or t.tnum == 0 or i >= t.cols.len) return typing.unknown;
     const meta = catalog.metaCached(t) orelse return typing.unknown;
     const c = meta.column(t.cols[i].name()) orelse return typing.unknown;
     const z = c.decl_type orelse return typing.unknown;
     return typing.intern(p.db, meta.dialect, z);
+}
+
+/// xqlite: the names of the row before and after a change in a RETURNING
+/// list, which a frontend writes for its dialect's OLD and NEW
+/// (PostgreSQL's) and SQL text cannot (a NUL ends it).
+pub const returning_old = "\x00old";
+pub const returning_new = "\x00new";
+
+/// xqlite: whether `tab` names the row after a change (true) or before
+/// it (false) in a RETURNING list (returning_new, returning_old).
+fn returningOldNew(tab: []const u8) ?bool {
+    if (std.mem.eql(u8, tab, returning_new)) return true;
+    if (std.mem.eql(u8, tab, returning_old)) return false;
+    return null;
 }
 
 /// xqlite: the type an engine module gives column `i` of virtual table
@@ -1225,17 +1259,20 @@ fn resolveSelectStepImpl(w: *Walker, s_arg: *Select) Oom!WRC {
 
         // Subqueries of the FROM clause.
         if (outer_nc) |o| o.n_nested_select += 1;
-        for (s.src.?.slice()) |*item| {
+        for (s.src.?.slice(), 0..) |*item, i| {
             if (item.fg.is_subquery and !item.u4.subq.?.select.sel_flags.Resolved) {
                 const n_ref = if (outer_nc) |o| o.n_ref else 0;
                 const saved_context = p.auth_context;
                 if (item.name) |n| p.auth_context = n.ptr;
-                resolveSelectNames(p, item.u4.subq.?.select, outer_nc);
+                // xqlite: a LATERAL subquery sees the terms before it.
+                var lateral: NameContext = .{ .parse = p, .src_list = s.src, .next = outer_nc, .xq_n_src = i };
+                resolveSelectNames(p, item.u4.subq.?.select, if (item.fg.xq_lateral) &lateral else outer_nc);
                 p.auth_context = saved_context;
                 if (p.n_err != 0) return WRC.Abort;
                 // A changed reference count of the outer context means the
                 // subquery is correlated.
                 if (outer_nc) |o| item.fg.is_correlated = o.n_ref > n_ref;
+                if (item.fg.xq_lateral and lateral.n_ref > 0) item.fg.is_correlated = true;
             }
         }
         if (outer_nc) |o| if (o.n_nested_select > 0) {

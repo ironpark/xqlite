@@ -466,7 +466,7 @@ pub fn build(b: *std.Build) void {
     // this list once its recording is made.
     // Each with its case files beside the default one (null).
     const recorded_dialects = [_]struct { []const u8, []const u8, []const ?[]const u8 }{
-        .{ "postgres", "pg", &.{ null, "tools/dialect/pg-array-cases.txt", "tools/dialect/pg-uuid-cases.txt", "tools/dialect/pg-interval-cases.txt", "tools/dialect/pg-jsonb-cases.txt", "tools/dialect/pg-numeric-cases.txt", "tools/dialect/pg-integer-cases.txt", "tools/dialect/pg-syntax-cases.txt", "tools/dialect/pg-format-cases.txt", "tools/dialect/pg-error-cases.txt", "tools/dialect/pg-string-cases.txt", "tools/dialect/pg-numeric-math-cases.txt", "tools/dialect/pg-intervalstyle-cases.txt", "tools/dialect/pg-boolean-cases.txt" } },
+        .{ "postgres", "pg", &.{ null, "tools/dialect/pg-array-cases.txt", "tools/dialect/pg-uuid-cases.txt", "tools/dialect/pg-interval-cases.txt", "tools/dialect/pg-jsonb-cases.txt", "tools/dialect/pg-numeric-cases.txt", "tools/dialect/pg-integer-cases.txt", "tools/dialect/pg-syntax-cases.txt", "tools/dialect/pg-format-cases.txt", "tools/dialect/pg-error-cases.txt", "tools/dialect/pg-string-cases.txt", "tools/dialect/pg-numeric-math-cases.txt", "tools/dialect/pg-intervalstyle-cases.txt", "tools/dialect/pg-boolean-cases.txt", "tools/dialect/pg-select-cases.txt", "tools/dialect/pg-mathstat-cases.txt", "tools/dialect/pg-cursor-cases.txt", "tools/dialect/pg-dml-cases.txt", "tools/dialect/pg-float-cases.txt" } },
     };
     for (recorded_dialects) |rd| {
         const on = for (Config.dialects, buildConfig(b).dialect) |name, built| {

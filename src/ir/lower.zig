@@ -35,6 +35,7 @@ const std = @import("std");
 const ir = @import("ir.zig");
 const tree = @import("tree.zig");
 const render = @import("render.zig");
+const desugar = @import("desugar.zig");
 const int = @import("../sql/sqlite_int.zig");
 const build = @import("../sql/build.zig");
 const expr_mod = @import("../sql/expr.zig");
@@ -291,7 +292,7 @@ pub const Lowerer = struct {
             .unary => |u| if (u.op == .not) typing.boolean else typing.unknown,
             .binary => |b| if (b.op == .@"and" or b.op == .@"or") typing.boolean else typing.unknown,
             .collate => if (x.op == TK.COLLATE and x.left != null) x.left.?.xq_type else typing.unknown,
-            .func => |f| if (f.result_type.len > 0) typing.intern(db, d, f.result_type) else typing.unknown,
+            .func => |f| if (f.result_type_id != typing.unknown) f.result_type_id else if (f.result_type.len > 0) typing.intern(db, d, f.result_type) else typing.unknown,
             .cast => |c| if (c.target_type.len == 0)
                 typing.unknown
             else switch (c.mode) {
@@ -587,6 +588,11 @@ pub const Lowerer = struct {
         const sf: int.SF = if (f.distinct) .{ .Distinct = true } else .{};
         const args = if (f.star) null else try l.exprList(f.args);
         const e = try ir.expr.function(p, args, name_tok, sf);
+        // A qualified name is no text of the statement: an error is at the
+        // name written.
+        if (name.ptr != f.name.text.ptr and e.w.ofst == 0 and f.name.pos < l.src.len) {
+            e.w = .{ .ofst = expr_mod.tokenOffset(p, l.tokAt(f.name.pos, 0)) };
+        }
         if (f.order_by.len > 0) {
             if (try l.sortList(f.order_by, &.{})) |ob| try ir.expr.addFunctionOrderBy(p, e, ob);
         }
@@ -731,7 +737,7 @@ pub const Lowerer = struct {
 
     // =========================================================== SELECT
 
-    pub fn select(l: *Lowerer, s: *const tree.Select) Error!*IrSelect {
+    pub fn select(l: *Lowerer, s_in: *const tree.Select) Error!*IrSelect {
         const p = l.p;
         const saved_src = l.src;
         const saved_target = l.value_target;
@@ -739,7 +745,9 @@ pub const Lowerer = struct {
             l.src = saved_src;
             l.value_target = saved_target;
         }
-        if (s.src) |text| l.src = text;
+        if (s_in.src) |text| l.src = text;
+        var dz: desugar.Desugar = .{ .p = p, .src = l.src, .mode = .lower };
+        const s = try dz.select(s_in);
         l.value_target = null;
         var x = try l.body(s.body);
         // A query takes one WITH: a nested query's is kept in a subquery.
@@ -825,6 +833,7 @@ pub const Lowerer = struct {
         const having = if (c.having) |h| try l.expr(h) else null;
         const sf: int.SF = if (c.distinct) .{ .Distinct = true } else .{};
         const s = try ir.select.new(p, cols, src, where, group, having, null, sf, null);
+        s.xq_hidden = c.hidden;
         if (c.windows.len > 0) {
             var list: ?*int.Window = null;
             for (c.windows) |nw| {
@@ -935,6 +944,9 @@ pub const Lowerer = struct {
             for (item.using) |u| ou.using = try ir.list.idAppend(p, ou.using, try l.nameTok(u));
             const alias: Token = if (item.alias) |a| try l.nameTok(a.name) else .{};
             const alias_cols: []const tree.Name = if (item.alias) |a| a.cols else &.{};
+            if (item.lateral and (item.join == .right or item.join == .full)) {
+                return l.failState(if (item.alias) |a| a.name.pos else 0, .of("42601"), "the combining JOIN type must be INNER or LEFT for a LATERAL reference", .{});
+            }
             switch (item.source) {
                 .table => |q| {
                     if (alias_cols.len > 0) return l.fail(alias_cols[0].pos, "column aliases of a table are not supported", .{});
@@ -946,9 +958,27 @@ pub const Lowerer = struct {
                     l.markName(list, q);
                 },
                 .subquery => |s| {
+                    // LATERAL (s) AS x(a, b): SELECT c1 AS a, c2 AS b FROM
+                    // (s), not a CTE, whose copy would not see the items
+                    // before it. (LATERAL (VALUES ...): its columns named
+                    // column1 ..., not after a column a row names.)
+                    if (item.lateral and (alias_cols.len > 0 or s.body.* == .values)) {
+                        var dz: desugar.Desugar = .{ .p = p, .src = l.src, .mode = .lower };
+                        const renamed = try dz.renamed(s, alias_cols) orelse
+                            return l.failState(if (alias_cols.len > 0) alias_cols[0].pos else 0, .of("0A000"), "column aliases of this LATERAL subquery are not supported", .{});
+                        list = try ir.from.appendTerm(p, list, null, null, alias, try l.select(renamed), &ou);
+                        if (list) |sl| sl.at(sl.len() - 1).fg.xq_lateral = true;
+                        try l.check();
+                        continue;
+                    }
                     var sel = try l.select(s);
                     if (alias_cols.len > 0) sel = try l.renameColumns(sel, alias_cols);
                     list = try ir.from.appendTerm(p, list, null, null, alias, sel, &ou);
+                    // LATERAL: the subquery may name the items before it
+                    // (the core runs it as a co-routine of their rows).
+                    if (item.lateral) if (list) |sl| {
+                        sl.at(sl.len() - 1).fg.xq_lateral = true;
+                    };
                 },
                 .func => |f| {
                     if (alias_cols.len > 0) return l.fail(alias_cols[0].pos, "column aliases of a function are not supported", .{});

@@ -24,6 +24,7 @@ const int = @import("../sql/sqlite_int.zig");
 const ir = @import("ir.zig");
 const tree = @import("tree.zig");
 const lower = @import("lower.zig");
+const desugar = @import("desugar.zig");
 const Quoted = @import("../dialect/dialect.zig").Quoted;
 
 pub const Error = error{ OutOfMemory, Failed };
@@ -515,10 +516,12 @@ pub const Renderer = struct {
 
     // =========================================================== SELECT
 
-    pub fn select(r: *Renderer, s: *const tree.Select) Error!void {
+    pub fn select(r: *Renderer, s_in: *const tree.Select) Error!void {
         const saved = r.src;
         defer r.src = saved;
-        if (s.src) |t| r.src = t;
+        if (s_in.src) |t| r.src = t;
+        var dz: desugar.Desugar = .{ .p = r.p, .src = r.src, .mode = .render };
+        const s = try dz.select(s_in);
         if (s.with) |w| {
             try r.put("WITH ");
             if (w.recursive) try r.put("RECURSIVE ");
@@ -645,6 +648,7 @@ pub const Renderer = struct {
     }
 
     fn core(r: *Renderer, c: *const tree.Core) Error!void {
+        if (c.hidden > 0) return r.fail(c.pos, "hidden result columns have no SQLite text", .{});
         try r.put(if (c.distinct) "SELECT DISTINCT " else "SELECT ");
         try r.targets(c.cols);
         if (c.from.len > 0) {
@@ -722,6 +726,9 @@ pub const Renderer = struct {
                     try r.qname(q);
                 },
                 .subquery => |s| {
+                    // SQLite has no LATERAL: a subquery naming the items
+                    // before it has no text (the first item names none).
+                    if (item.lateral and i > 0) return r.fail(if (item.alias) |al| al.name.pos else 0, "LATERAL in the query of a view is not supported", .{});
                     try r.put("(");
                     if (cols.len > 0) {
                         try r.put("WITH \"xq_alias\"");

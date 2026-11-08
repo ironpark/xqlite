@@ -126,7 +126,10 @@ const other_words = [_][]const u8{
     "skip",       "start",        "stored",    "system",          "tablespace",   "temp",      "temporary", "ties",       "time",        "transaction",
     "trigger",    "type",         "unbounded", "uncommitted",     "unknown",      "unlogged",  "update",    "value",      "values",      "varying",
     "view",       "within",       "without",   "work",            "write",        "zone",      "after",     "before",     "compression", "enum",
-    "expression", "statistics",   "storage",   "valid",           "owner",
+    "expression", "statistics",   "storage",   "valid",           "owner",        "sets",
+    // MERGE
+         "merge",     "matched",    "source",      "target",
+    "old",        "new",
 };
 
 pub const Lexer = sqllex.Lexer(lex);

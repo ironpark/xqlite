@@ -1,0 +1,704 @@
+# xqt dialect-diff pg --record: what PostgreSQL's client printed for each case of pg-select-cases.txt
+# server: PostgreSQL 18.6 on aarch64-unknown-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+==== case 92b521eeb8d174aa DISTINCT ON keeps the first row of each group in ORDER BY order
+dept|name|salary
+a|bob|300
+b|cid|200
+c|fay|
+|eve|50
+(4 rows)
+id|dept|name|salary
+2|a|bob|300
+3|b|cid|200
+6|c|fay|
+5||eve|50
+(4 rows)
+name
+eve
+fay
+cid
+ann
+(4 rows)
+salary|dept|id
+100|a|1
+300|a|2
+200|b|4
+|c|6
+50||5
+(5 rows)
+d|name
+a|bob
+b|dan
+c|fay
+|eve
+(4 rows)
+dept|name
+a|ann
+b|cid
+c|fay
+|eve
+(4 rows)
+name
+cid
+ann
+(2 rows)
+==== case d29522e013826a47 DISTINCT ON with LIMIT, OFFSET, aggregates and in a subquery
+dept|id
+b|3
+c|6
+(2 rows)
+dept|count|max
+a|1|300
+b|2|200
+c|1|
+|1|50
+(4 rows)
+count
+4
+(1 row)
+name|lowest
+ann|ann
+bob|ann
+cid|cid
+dan|cid
+eve|
+fay|fay
+(6 rows)
+dept|name
+a|bob
+b|dan
+|eve
+c|fay
+(4 rows)
+dept|name
+a|bob
+b|cid
+(2 rows)
+==== case 746d59786eef318d DISTINCT ON must match the start of ORDER BY
+ERROR:  SELECT DISTINCT ON expressions must match initial ORDER BY expressions
+LINE 1: SELECT DISTINCT ON (dept) * FROM emp ORDER BY name, dept;
+                            ^
+ERROR:  SELECT DISTINCT ON expressions must match initial ORDER BY expressions
+LINE 1: SELECT DISTINCT ON (dept, name) * FROM emp ORDER BY dept, id...
+                                  ^
+dept|name
+(0 rows)
+ERROR:  DISTINCT ON position 3 is not in select list
+LINE 1: SELECT DISTINCT ON (3) dept, name FROM emp ORDER BY 1;
+                            ^
+==== case 3895d717f2319841 views with DISTINCT ON and WITH TIES
+dept|name|salary
+a|bob|300
+b|cid|200
+c|fay|
+|eve|50
+(4 rows)
+id|dept|name|salary
+1|a|ann|100
+3|b|cid|200
+6|c|fay|
+5||eve|50
+(4 rows)
+id|dept|name|salary
+2|a|bob|300
+3|b|cid|200
+4|b|dan|200
+(3 rows)
+column_name
+id
+dept
+name
+salary
+(4 rows)
+==== case 3738c7dc84883d2f FETCH FIRST ... WITH TIES
+name|salary
+bob|300
+cid|200
+dan|200
+(3 rows)
+name|salary
+bob|300
+cid|200
+dan|200
+(3 rows)
+name
+ann
+bob
+(2 rows)
+id|salary
+1|100
+(1 row)
+id|salary
+3|200
+4|200
+(2 rows)
+dept|count
+a|2
+b|2
+(2 rows)
+ERROR:  WITH TIES cannot be specified without ORDER BY clause
+LINE 1: SELECT * FROM emp FETCH FIRST 2 ROWS WITH TIES;
+                                             ^
+==== case 2cd79c5eee347c96 ROLLUP, CUBE and GROUPING SETS
+region|product|sum
+east|ink|5
+east|pen|10
+east||15
+west|pad|
+west|pen|7
+west||7
+|pen|1
+||1
+||23
+(9 rows)
+region|product|sum|count
+east|ink|5|1
+east|pen|10|1
+east||15|2
+west|pad||1
+west|pen|7|1
+west||7|2
+|ink|5|1
+|pad||1
+|pen|1|1
+|pen|18|3
+||1|1
+||23|5
+(12 rows)
+region|product|sold|sum
+east|||4.50
+west|||3.75
+|ink||3.00
+|pad||2.00
+|pen||4.75
+||2024-01-01|3.25
+||2024-01-02|4.50
+||2024-01-03|2.00
+|||1.50
+|||9.75
+(10 rows)
+ok|sold|count
+f||1
+t||3
+|2024-01-01|2
+|2024-01-02|2
+|2024-01-03|1
+||1
+(6 rows)
+region|product|count
+east|ink|1
+east|pen|1
+east||2
+west|pad|1
+west|pen|1
+west||2
+|pen|1
+||1
+(8 rows)
+region|product|count
+east|ink|1
+east|pen|1
+west|pad|1
+west|pen|1
+|pen|1
+||5
+(6 rows)
+region|product|count
+east|ink|1
+east|pen|1
+east||2
+west|pad|1
+west|pen|1
+west||2
+|ink|1
+|pad|1
+|pen|1
+|pen|3
+||1
+||5
+(12 rows)
+region|product|count
+east|ink|1
+east|pen|1
+east||2
+west|pad|1
+west|pen|1
+west||2
+|pen|1
+||1
+||5
+||5
+(10 rows)
+region
+east
+west
+
+
+(4 rows)
+product
+
+(1 row)
+count|sum
+5|23
+(1 row)
+==== case 9851a70144d3973c GROUP BY DISTINCT and duplicate grouping sets
+region|product|sum
+east|ink|5
+east|ink|5
+east|pen|10
+east|pen|10
+east||15
+east||15
+east||15
+west|pen|7
+west|pen|7
+west||7
+west||7
+west||7
+||22
+(13 rows)
+region|product|sum
+east|ink|5
+east|pen|10
+east||15
+west|pen|7
+west||7
+||22
+(6 rows)
+region|sum
+east|15
+east|15
+west|7
+west|7
+|22
+(5 rows)
+region|sum
+east|15
+west|7
+|22
+(3 rows)
+region|product
+east|ink
+east|pen
+west|pen
+(3 rows)
+==== case 5ad472820d961bf7 GROUPING(), HAVING, ORDER BY over the sets, aggregates with DISTINCT and FILTER
+region|product|grouping|grouping|grouping|sum
+east|ink|0|0|0|5
+east|pen|0|0|0|10
+west|pad|0|0|0|
+west|pen|0|0|0|7
+|pen|0|0|0|1
+east||0|1|1|15
+west||0|1|1|7
+||0|1|1|1
+|ink|1|0|2|5
+|pad|1|0|2|
+|pen|1|0|2|18
+||1|1|3|23
+(12 rows)
+region|total
+|23
+east|15
+west|7
+(3 rows)
+r|count
+east|2
+west|2
+|1
+all|5
+(4 rows)
+region|count|sum|string_agg
+east|2|10|ink,pen
+west|2|7|pad,pen
+|1|1|pen
+|3|18|ink,pad,pen,pen,pen
+(4 rows)
+region|product|sum
+||23
+east||15
+east|pen|10
+(3 rows)
+region|product|qty
+east|ink|5
+east|pen|10
+west|pad|
+west|pen|7
+|pen|1
+(5 rows)
+r|p|count
+east!|INK|1
+east!|PEN|1
+east!||2
+west!|PAD|1
+west!|PEN|1
+west!||2
+|PEN|1
+||1
+||5
+(9 rows)
+region|grouping
+east|0
+west|0
+|0
+(3 rows)
+region
+east
+west
+
+(3 rows)
+==== case 5d678a1aca45531f GROUPING() errors
+ERROR:  arguments to GROUPING must be grouping expressions of the associated query level
+LINE 1: SELECT region, grouping(product) FROM sales GROUP BY ROLLUP ...
+                                ^
+ERROR:  arguments to GROUPING must be grouping expressions of the associated query level
+LINE 1: SELECT grouping(region) FROM sales;
+                        ^
+==== case 720c050c7e1b7b14 views with grouping sets and INTERSECT ALL
+region|product|total|g
+east|ink|5|0
+east|pen|10|0
+west|pen|7|0
+east||15|1
+west||7|1
+||22|3
+(6 rows)
+product
+ink
+pen
+(2 rows)
+==== case 4ad7823db4ebb515 LATERAL subqueries
+name|name|salary
+eng|bob|300
+eng|cid|200
+ops|dan|200
+ops|eve|50
+(4 rows)
+name|name
+eng|ann
+ops|eve
+(2 rows)
+name|name
+eng|ann
+ops|eve
+(2 rows)
+name|name
+empty|
+eng|ann
+ops|eve
+(3 rows)
+name|n|total
+empty|0|
+eng|3|600
+ops|2|250
+(3 rows)
+name|doubled
+empty|6
+eng|2
+ops|4
+(3 rows)
+name|name
+empty|
+eng|bob
+eng|cid
+ops|dan
+(4 rows)
+==== case 09459774c66b73c1 LATERAL that names several items and other LATERAL subqueries
+name|top|name
+eng|300|bob
+ops|200|dan
+(2 rows)
+name|name
+ann|cid
+cid|bob
+eve|dan
+(3 rows)
+name|s
+eng|eng:ann
+eng|eng:bob
+eng|eng:cid
+ops|ops:dan
+ops|ops:eve
+(5 rows)
+k|count
+1|3
+2|2
+3|0
+(3 rows)
+id|v
+1|1
+1|10
+2|2
+2|20
+3|3
+3|30
+(6 rows)
+==== case 00da54bfaaf84d7e LATERAL over tables read by an index, in other queries and with windows
+id|v
+1|eng!
+2|ops!
+3|empty!
+(3 rows)
+id|v
+1|eng1
+2|ops2
+(2 rows)
+id|v
+2|202
+3|
+(2 rows)
+k|n
+1|103
+2|202
+(2 rows)
+k|n
+1|3
+1|3
+1|3
+(3 rows)
+name|rank
+bob|1
+cid|2
+ann|3
+(3 rows)
+id|n|m
+1|3|7
+2|2|6
+3|0|3
+(3 rows)
+id|string_agg
+1|ann,bob,cid
+2|dan,eve
+3|
+(3 rows)
+id|r
+1|3
+2|2
+(2 rows)
+id|v|row_number
+1|eng1|2
+2|ops2|1
+3|empty3|3
+(3 rows)
+id|n
+1|3
+2|2
+3|0
+(3 rows)
+id|s
+1|engann
+2|engbob
+3|engcid
+4|opsdan
+5|opseve
+(5 rows)
+id|sum
+1|500
+2|250
+(2 rows)
+id|name
+1|ann
+2|eve
+(2 rows)
+==== case f25e40292a658952 LATERAL VALUES, column aliases, and items before it that are subqueries, views and CTEs
+x
+1
+2
+(2 rows)
+a|x
+1|1
+(1 row)
+a|column1
+1|1
+1|2
+(2 rows)
+a|x|column2
+1|1|p
+1|2|q
+(2 rows)
+id|x
+1|1
+1|2
+(2 rows)
+a|x|y
+1|2|3
+(1 row)
+a|x|y
+1|2|y
+(1 row)
+a|x
+1|1
+1|10
+(2 rows)
+x
+1
+2
+11
+12
+(4 rows)
+a|x
+1|10
+2|20
+(2 rows)
+id|a|b|x
+1|1|x|1
+1|1|x|2
+(2 rows)
+id|x
+1|1
+1|1
+2|1
+2|2
+(4 rows)
+id|x
+4|8
+5|10
+(2 rows)
+id|x
+1|2
+2|3
+(2 rows)
+oper|low|high|cnt
+10.5|-2.5|2.5|1
+-1.5|-0.25|0.25|2
+(2 rows)
+==== case 3e1101207c3de893 functions in FROM may name the items before them
+id|g
+1|1
+1|2
+2|1
+(3 rows)
+id|g
+1|1
+1|2
+2|1
+(3 rows)
+id|x
+1|1
+1|2
+2|1
+3|
+(4 rows)
+id|u
+1|10
+1|20
+2|30
+(3 rows)
+id|value
+1|1
+1|2
+3|5
+(3 rows)
+==== case b366ca89d1a2c701 INTERSECT ALL and EXCEPT ALL
+x|y
+1|p
+1|p
+|
+(3 rows)
+x|y
+1|p
+2|q
+3|r
+|
+(4 rows)
+x
+4
+(1 row)
+x
+1
+3
+
+(3 rows)
+x
+1
+1
+3
+9
+
+(5 rows)
+x
+2
+
+(2 rows)
+count
+3
+(1 row)
+column1
+1
+2
+(2 rows)
+ERROR:  each INTERSECT query must have the same number of columns
+LINE 1: SELECT x FROM a INTERSECT ALL SELECT x, y FROM b;
+                                             ^
+==== case 401a45b67a3ae2f9 BETWEEN SYMMETRIC
+?column?|?column?|?column?|?column?|?column?
+t|f|f|t|f
+(1 row)
+id
+1
+2
+(2 rows)
+id|?column?
+1|f
+2|f
+3|t
+4|
+(4 rows)
+?column?|?column?
+t|
+(1 row)
+==== case 4b2dab03d75fd579 OVERLAPS
+overlaps
+t
+(1 row)
+touching
+f
+(1 row)
+overlaps
+t
+(1 row)
+instant
+t
+(1 row)
+id|id|overlaps
+1|2|f
+1|3|t
+1|4|f
+2|3|
+2|4|f
+3|4|
+(6 rows)
+a|b|c
+||t
+(1 row)
+ERROR:  wrong number of parameters on left side of OVERLAPS expression
+LINE 1: SELECT (1, 2, 3) OVERLAPS (2, 3);
+               ^
+==== case 8eccf8d82bd1911b row IS NULL and IS NOT NULL
+id|?column?|?column?|?column?|?column?
+1|f|t|f|f
+2|f|f|f|t
+3|f|f|f|t
+4|t|f|t|t
+(4 rows)
+id
+1
+(1 row)
+?column?|?column?|?column?
+t|f|t
+(1 row)
+==== case ad6bf7b2a9d2a088 JOIN ... USING ... AS
+id|b|c
+1|x|p
+3|z|q
+(2 rows)
+id|b|c
+2|y|
+3|z|q
+9||r
+(3 rows)
+id
+1
+2
+3
+(3 rows)

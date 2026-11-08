@@ -1140,7 +1140,30 @@ const Fixer = struct {
             .{ "xq_pg_jsonb_text", T.jsonb }, .{ "xq_pg_uuid_text", T.uuid },   .{ "xq_pg_bool_text", T.boolean },
             .{ "xq_pg_bool_out", T.boolean },
         };
+        // A double precision or real made text (overload.zig's floatText()).
+        if (eql(lname, "xq_pg_float_text") and args.len == 2) return f.asType(args[0], if (eql(args[1].text, "1")) T.float4 else T.float8);
         for (keys) |k| if (eql(lname, k[0]) and args.len >= 1) return f.asType(args[0], k[1]);
+        // The statistical aggregates of doubles (stats.zig's): of
+        // arguments made double precision.
+        const stats = [_]struct { []const u8, []const u8 }{
+            .{ "xq_float_var_pop", "var_pop" },         .{ "xq_float_var_samp", "var_samp" },       .{ "xq_float_stddev_pop", "stddev_pop" },
+            .{ "xq_float_stddev_samp", "stddev_samp" }, .{ "xq_corr", "corr" },                     .{ "xq_covar_pop", "covar_pop" },
+            .{ "xq_covar_samp", "covar_samp" },         .{ "xq_regr_avgx", "regr_avgx" },           .{ "xq_regr_avgy", "regr_avgy" },
+            .{ "xq_regr_count", "regr_count" },         .{ "xq_regr_intercept", "regr_intercept" }, .{ "xq_regr_r2", "regr_r2" },
+            .{ "xq_regr_slope", "regr_slope" },         .{ "xq_regr_sxx", "regr_sxx" },             .{ "xq_regr_sxy", "regr_sxy" },
+            .{ "xq_regr_syy", "regr_syy" },
+        };
+        for (stats) |s| if (eql(lname, s[0]) and args.len >= 1) {
+            for (n.args) |*x| x.* = try f.coerce(x.*, T.float8);
+            n.text = s[1];
+            n.ty = if (eql(s[1], "regr_count")) T.int8 else T.float8;
+            return n;
+        };
+        if (eql(lname, "xq_any_value") and args.len == 1) {
+            n.text = "any_value";
+            n.ty = args[0].ty;
+            return n;
+        }
         // pg_typeof(x) of a type known (overload.zig's typeofCall()).
         if (eql(lname, "xq_pg_typeof_as") and args.len == 2) {
             n.text = "pg_typeof";
@@ -1158,10 +1181,9 @@ const Fixer = struct {
             .{ "xq_pg_date", T.date },                   .{ "xq_pg_timestamp", T.ts },         .{ "xq_pg_timestamptz", T.tstz },
             .{ "xq_pg_time", "time without time zone" }, .{ "xq_pg_interval", T.interval },    .{ "xq_pg_iv", T.interval },
             .{ "xq_pg_uuid", T.uuid },                   .{ "xq_pg_jsonb", T.jsonb },          .{ "xq_pg_json", T.json },
-            .{ "xq_dec_number", T.numeric },
+            .{ "xq_dec_number", T.numeric },             .{ "xq_pg_cast_float8", T.float8 },   .{ "xq_pg_cast_float4", T.float4 },
             // integer.zig's.
-                        .{ integer.castName(.int2), T.int2 }, .{ integer.castName(.int4), T.int4 },
-            .{ integer.castName(.int8), T.int8 },
+            .{ integer.castName(.int2), T.int2 },        .{ integer.castName(.int4), T.int4 }, .{ integer.castName(.int8), T.int8 },
         };
         // An interval's input with its type modifier (ivinput.zig, a
         // cast or DEFAULT of interval(p) / interval year to month ...):

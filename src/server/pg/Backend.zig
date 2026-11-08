@@ -694,11 +694,29 @@ fn describe(b: *Backend, body: *Body) !void {
             if (st.prepared.columns.len == 0) try b.out.empty('n') else try b.rowDescription(st.prepared.columns, null);
         },
         'P' => {
-            const p = b.portals.get(name) orelse return b.extendedError("34000", "portal \"{s}\" does not exist", .{name});
+            const p = b.portals.get(name) orelse return b.describeCursor(name);
             if (p.prepared.columns.len == 0) try b.out.empty('n') else try b.rowDescription(p.prepared.columns, p.binary);
         },
         else => return b.extendedError("08P01", "invalid DESCRIBE message subtype {d}", .{kind}),
     }
+}
+
+/// Describe of a portal that is none of the protocol's: a cursor of
+/// DECLARE, which is a portal in PostgreSQL (psycopg describes its
+/// server-side cursor so): the columns FETCH of it has.
+fn describeCursor(b: *Backend, name: []const u8) !void {
+    var sql: std.ArrayList(u8) = .empty;
+    defer sql.deinit(b.gpa);
+    try sql.appendSlice(b.gpa, "FETCH FORWARD 0 FROM \"");
+    for (name) |ch| {
+        if (ch == '"') try sql.append(b.gpa, '"');
+        try sql.append(b.gpa, ch);
+    }
+    try sql.append(b.gpa, '"');
+    var sink: StartupSink = .{};
+    const prepared = try b.session.prepare(sql.items, &sink) orelse return b.extendedError("34000", "portal \"{s}\" does not exist", .{name});
+    defer prepared.close();
+    if (prepared.columns.len == 0) try b.out.empty('n') else try b.rowDescription(prepared.columns, null);
 }
 
 fn execute(b: *Backend, body: *Body) !void {
@@ -851,6 +869,12 @@ fn commandComplete(b: *Backend, c: Session.Complete) !void {
         .merge => try b.out.print("MERGE {d}", .{c.changes}),
         .truncate => try b.out.print("TRUNCATE TABLE", .{}),
         .execute => try b.out.print("CALL", .{}),
+        // Cursors: the rows fetched, the rows moved over (changes).
+        .declare => try b.out.print("DECLARE CURSOR", .{}),
+        .fetch => try b.out.print("FETCH {d}", .{c.rows}),
+        .move => try b.out.print("MOVE {d}", .{c.changes}),
+        .close => try b.out.print("CLOSE CURSOR{s}", .{if (c.command.object.len > 0) " ALL" else ""}),
+        .lock => try b.out.print("LOCK TABLE", .{}),
         else => try b.out.print("{f}", .{c.command}),
     }
     try b.out.string("");

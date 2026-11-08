@@ -416,11 +416,34 @@ pub fn numericColumn(c: *Ctx, e: *Expr) Error!bool {
                 xs[k] = list.at(@intCast(e.i_column)).expr.?;
                 k += 1;
             }
-            _ = try unifyKeys(c, xs[0..k]);
+            if (!try unifyKeys(c, xs[0..k])) _ = try unifyScales(c, xs[0..k]);
             return false;
         };
     }
     return false;
+}
+
+/// Numbers of different scales in a compound's column (VALUES (2.50),
+/// (1.0)), whose common type has none (Rules.value_scale): keys, so that
+/// each is shown with its own scale (PostgreSQL's 2.50 and 1.0) where a
+/// number would be shown with none (2.5); whether one changed.
+fn unifyScales(c: *Ctx, xs: []const *Expr) Error!bool {
+    var scale: ?u8 = null;
+    var differ = false;
+    for (xs) |x| {
+        if (x.op == TK.NULL or x.op == TK.VARIABLE or !numericPeer(c, x) or numericRepr(c, x) != .number) continue;
+        const t = typing.typeOf(c.p.db, x.xq_type);
+        const s = if (typing.intWidth(t.logical) != null) 0 else t.scale orelse continue;
+        if (scale) |seen| {
+            if (seen != s) differ = true;
+        } else scale = s;
+    }
+    if (!differ) return false;
+    for (xs) |x| {
+        if (x.op == TK.NULL or x.op == TK.VARIABLE or !numericPeer(c, x) or numericRepr(c, x) != .number) continue;
+        try toKey(c, x, "xq_dec");
+    }
+    return true;
 }
 
 /// CAST(x AS REAL/TEXT/INTEGER/NUMERIC) of a numeric: of a key, its
@@ -467,6 +490,28 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
         x.xq_type = typing.plain(.text);
         return true;
     }
+    // percentile_cont() and percentile_disc() of an array of fractions
+    // (ordered.zig).
+    if ((eql(n, "xq_percentile_cont") or eql(n, "xq_percentile_disc")) and items.len == 2 and logical(c, items[0].expr.?) == .array) {
+        const cont = eql(n, "xq_percentile_cont");
+        try c.rename(e, if (cont) "xq_pg_percentile_cont_arr" else "xq_pg_percentile_disc_arr");
+        if (cont) _ = try numericFloat(c, items[1].expr.?);
+        return true;
+    }
+    // random(min, max) of numerics (mathfuncs.zig): exact, with their
+    // scales.
+    if (eql(n, "random") and items.len == 2 and (isNum(c, items[0]) or isNum(c, items[1]))) {
+        for (items) |item| _ = try exactOperand(c, item.expr.?);
+        return true;
+    }
+    // var_pop() ... of doubles: float8_accum()'s (stats.zig).
+    if (float_variance.get(n)) |r| {
+        if (items.len == 1 and typing.isFloat(logical(c, items[0].expr.?))) {
+            try c.rename(e, r);
+            return true;
+        }
+        return false;
+    }
     if (std.mem.startsWith(u8, n, "xq_dec")) return false;
     const renamed: ?[]const u8 = blk: {
         if (items.len == 0) break :blk null;
@@ -509,7 +554,7 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
         try c.rename(e, r);
         return true;
     }
-    if (aware_functions.has(n) or numeric_engine.has(n) or overload.builderArgs(n) != .none) {
+    if (aware_functions.has(n) or stat_aware.has(n) or numeric_engine.has(n) or overload.builderArgs(n) != .none) {
         // coalesce() ... of keys and numbers: all keys.
         if (unify_functions.has(n)) {
             var xs: [32]*Expr = undefined;
@@ -521,11 +566,15 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
         }
         return false;
     }
+    // The casts to double precision and real read a key themselves
+    // (builtins.zig): its infinities, and the error of a NaN or out of
+    // range.
+    if (eql(n, "xq_pg_cast_float8") or eql(n, "xq_pg_cast_float4")) return false;
     // Another function: a key is made a double for one of doubles, text
     // for one of text, else the SQLite number such a function read before
     // numerics were keys (xq_dec_number()).
     var changed = false;
-    const float = float_functions.has(n);
+    const float = (float_functions.has(n) or stat_float.has(n)) and !eql(n, "random");
     const text = text_functions.has(n);
     for (items) |item| {
         const x = item.expr.?;
@@ -545,6 +594,36 @@ pub fn numericCall(c: *Ctx, e: *Expr, n: []const u8, items: []int.ExprListItem) 
     }
     return changed;
 }
+
+/// stats.zig's aggregates and mathfuncs.zig's functions that take
+/// numerics as they are: values kept (the comparisons of the
+/// hypothetical-set aggregates are the frontend's); random(min, max) of
+/// numerics.
+const stat_aware = std.StaticStringMap(void).initComptime(.{
+    .{"xq_any_value"},       .{"xq_percentile_disc"},   .{"xq_mode"},           .{"xq_hypo_rank"},
+    .{"xq_hypo_dense_rank"}, .{"xq_hypo_percent_rank"}, .{"xq_hypo_cume_dist"}, .{"xq_pg_percentile_disc_arr"},
+    .{"random"},
+});
+
+/// stats.zig's aggregates and mathfuncs.zig's functions of doubles a
+/// numeric is converted for.
+const stat_float = std.StaticStringMap(void).initComptime(.{
+    .{"sind"},                 .{"cosd"},               .{"tand"},                      .{"asind"},
+    .{"acosd"},                .{"atand"},              .{"atan2d"},                    .{"cot"},
+    .{"cotd"},                 .{"asinh"},              .{"acosh"},                     .{"atanh"},
+    .{"erf"},                  .{"erfc"},               .{"gamma"},                     .{"lgamma"},
+    .{"random_normal"},        .{"xq_float_var_pop"},   .{"xq_float_var_samp"},         .{"xq_float_stddev_pop"},
+    .{"xq_float_stddev_samp"}, .{"xq_corr"},            .{"xq_covar_pop"},              .{"xq_covar_samp"},
+    .{"xq_regr_avgx"},         .{"xq_regr_avgy"},       .{"xq_regr_count"},             .{"xq_regr_intercept"},
+    .{"xq_regr_r2"},           .{"xq_regr_slope"},      .{"xq_regr_sxx"},               .{"xq_regr_sxy"},
+    .{"xq_regr_syy"},          .{"xq_percentile_cont"}, .{"xq_pg_percentile_cont_arr"},
+});
+
+/// The variance aggregates of numerics and those of doubles.
+const float_variance = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "xq_dec_var_pop", "xq_float_var_pop" },       .{ "xq_dec_var_samp", "xq_float_var_samp" },
+    .{ "xq_dec_stddev_pop", "xq_float_stddev_pop" }, .{ "xq_dec_stddev_samp", "xq_float_stddev_samp" },
+});
 
 /// sqrt() ... of numerics (pkg/decimal/src/math.zig), the engine function and the
 /// arguments.
